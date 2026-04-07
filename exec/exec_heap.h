@@ -1,0 +1,43 @@
+/* ======================================================================== */
+/*  EXEC_HEAP.H — プログラム専用ヒープ (カーネルヒープと完全分離)           */
+/*                                                                          */
+/*  0x500000〜 にFirst-Fit動的アロケータを配置。                            */
+/*  exec_run 開始時に初期化。                                               */
+/*  alloc/freeによる動的な確保・解放・再利用が可能。                         */
+/*  終了/クラッシュ時にresetで全域破棄。                                     */
+/* ======================================================================== */
+
+#ifndef __EXEC_HEAP_H
+#define __EXEC_HEAP_H
+
+#include "types.h"
+
+#include "memmap.h"
+
+#define EXEC_HEAP_BASE    MEM_EXEC_HEAP_BASE
+#define EXEC_HEAP_MAX     (1024UL * 1024UL)  /* 最大1MB */
+#define EXEC_HEAP_DEFAULT (1024UL * 1024UL)  /* デフォルト1MB */
+
+/* ヒープ初期化 (exec_run開始時に呼ぶ)
+ * size: 確保するヒープサイズ (バイト)
+ * 全体を1つの空きブロックとして初期化する */
+void exec_heap_init(u32 size);
+
+/* ヒープからメモリ確保 (4バイトアラインメント)
+ * ファーストフィット方式で空きブロックを検索・分割
+ * 戻り値: ポインタ, NULL=空き不足 */
+void *exec_heap_alloc(u32 size);
+
+/* メモリ解放
+ * ブロックをフリーに戻し、前後のフリーブロックと結合（マージ）する */
+void exec_heap_free(void *ptr);
+
+/* ヒープ全域破棄 (exec_run終了時に呼ぶ)
+ * 全体を1つのフリーブロックに戻す。O(1) */
+void exec_heap_reset(void);
+
+/* 統計 */
+u32 exec_heap_total(void);
+u32 exec_heap_used(void);
+
+#endif /* __EXEC_HEAP_H */

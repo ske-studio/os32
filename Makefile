@@ -1,0 +1,239 @@
+# PC-9801 OS32 Makefile for GCC/NASM
+#
+# Phase 3 改修: モジュール別インクルードパス
+# - カーネル共通: include/ のみ (types.h, io.h, console.h, tvram.h, os32_kapi_shared.h)
+# - 各モジュール: 必要なサブディレクトリのみを -I で指定
+# - 外部プログラム: include/ と programs/ のみ
+
+.DEFAULT_GOAL := all
+
+# Directories
+PROJDIR = .
+
+# Tools
+CC = i386-elf-gcc
+AS = nasm
+LD = i386-elf-ld
+OBJCOPY = i386-elf-objcopy
+
+# === インクルードパス (モジュール別) ===
+# 共通: 全カーネルモジュールが参照する基盤ヘッダ
+INC_COMMON = -I. -Iinclude
+
+# カーネルコア: 自身 + ドライバ + fs + exec + shell + gfx + lib + kapi
+# (kernel.c は全サブシステムの初期化を行うため全モジュールを参照)
+INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi
+
+# ドライバ: 共通 + 自身 + gfx (kcg->gfx依存)
+INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
+
+# GFX: 共通 + 自身 + ドライバ (palette依存) + FS (dump時のファイル出力)
+INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs
+
+# FS: 共通 + 自身 + ドライバ (disk/ide依存)
+INC_FS = $(INC_COMMON) -Ifs -Idrivers
+
+
+# exec: 共通 + exec + kapi + fs + gfx + ドライバ (kbd依存)
+INC_EXEC = $(INC_COMMON) -Iexec -Ikapi -Ifs -Igfx -Idrivers -Ilib -Ikernel
+
+# KAPI: 全モジュール (全APIラッパーのため)
+INC_KAPI = $(INC_COMMON) -Ikapi -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib
+
+# lib: 共通 + 自身 (汎用ライブラリ: カーネル依存なし)
+INC_LIB = $(INC_COMMON) -Ilib
+
+# === コンパイルフラグ ===
+CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon
+LDFLAGS = -m elf_i386 -T os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections
+
+ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
+BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
+
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm gfx/gfx_util.asm
+ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
+
+C_KERNEL = \
+    kernel/kernel.c kernel/idt.c kernel/isr_handlers.c \
+    kernel/paging.c kernel/kmalloc.c kernel/console.c kernel/sys.c kernel/lconsole.c \
+    drivers/kbd.c drivers/serial.c drivers/fm.c \
+    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
+    gfx/gfx_core.c gfx/gfx_draw.c gfx/gfx_surface.c gfx/gfx_sprite.c gfx/gfx_scroll.c gfx/gfx_font.c gfx/palette.c gfx/gfx_dump.c \
+    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/serialfs.c \
+    exec/exec.c exec/exec_heap.c \
+    kapi/kapi_generated.c \
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c
+
+C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
+
+# Programs
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -I/home/hight/opt/cross/i386-elf/include
+PROGRAM_LDFLAGS = -m elf_i386 -T app.ld -nostdlib --nmagic --gc-sections \
+	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
+
+CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o
+
+C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/vz.c programs/crt0_c.c, $(wildcard programs/*.c))
+BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
+
+# === Shell Module ===
+SHELL_SRC = $(wildcard programs/shell/*.c)
+SHELL_OBJ = $(SHELL_SRC:.c=.o)
+
+programs/shell/%.o: programs/shell/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/shell.elf: app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
+	$(LD) -m elf_i386 -T app_sys.ld -nostdlib --nmagic --gc-sections -L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
+
+# === VZ Editor Module ===
+VZ_SRC = $(wildcard programs/vz/*.c)
+VZ_OBJ = $(VZ_SRC:.c=.o)
+
+programs/vz/%.o: programs/vz/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/vz -c $< -o $@
+
+programs/vz.elf: app.ld $(CRT0_OBJ) $(VZ_OBJ) lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(VZ_OBJ) lib/utf8.o -lc -lgcc
+
+# === SKK Module ===
+SKK_SRC = $(wildcard programs/skk/*.c)
+SKK_OBJ = $(SKK_SRC:.c=.o)
+
+programs/skk/%.o: programs/skk/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/skk_test.o: programs/skk_test.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/skk_test.elf: app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
+
+# === Bench Module ===
+BENCH_SRC = $(wildcard programs/bench/*.c)
+BENCH_OBJ = $(BENCH_SRC:.c=.o)
+
+programs/bench/%.o: programs/bench/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/bench.elf: app.ld $(CRT0_OBJ) $(BENCH_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) -lc -lgcc
+
+bench: $(CRT0_OBJ) programs/bench.bin
+
+# === モジュール別コンパイルルール ===
+
+# kernel/ モジュール
+kernel/%.o: kernel/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# drivers/ モジュール
+drivers/%.o: drivers/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_DRIVERS) -c $< -o $@
+
+# gfx/ モジュール
+gfx/%.o: gfx/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_GFX) -c $< -o $@
+
+# fs/ モジュール
+fs/%.o: fs/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_FS) -c $< -o $@
+
+
+# exec/ モジュール
+exec/%.o: exec/%.c kapi/kapi_generated.c
+	$(CC) $(CFLAGS_BASE) $(INC_EXEC) -c $< -o $@
+
+# kapi/ モジュール
+kapi/kapi_generated.c: tools/kapi.json tools/gen_kapi.py
+	python3 tools/gen_kapi.py
+
+kapi/%.o: kapi/%.c kapi/kapi_generated.c
+	$(CC) $(CFLAGS_BASE) $(INC_KAPI) -c $< -o $@
+
+# lib/ モジュール (汎用ライブラリ: カーネル依存なし)
+lib/%.o: lib/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
+
+# === Targets ===
+all: boot kernel.bin os.d88 programs
+
+boot: $(BIN_STANDALONE)
+
+%.bin: %.asm
+	$(AS) -f bin $< -o $@
+
+%.o: %.asm
+	$(AS) -f elf32 $< -o $@
+
+kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ)
+	$(LD) $(LDFLAGS) -o $@ $^
+
+kernel.bin: kernel.elf
+	$(OBJCOPY) -O binary $< $@
+
+os.d88: boot kernel.bin programs lzss_dict unicode_bin
+	@echo "Constructing OS32 image (os.img/os.d88)..."
+	@args="LOADER.BIN=boot/loader_fat.bin KERNEL.BIN=kernel.bin BOOT_HDD.BIN=boot/boot_hdd.bin LOADER_H.BIN=boot/loader_hdd.bin TEST.TXT=programs/test.txt UTF8.TXT=programs/test_utf8.txt SKK.LZS=assets/SKK.LZS UNICODE.BIN=unicode.bin"; \
+	for p in programs/*.bin; do \
+		if [ -f "$$p" ]; then \
+			name=`basename $$p | tr '[:lower:]' '[:upper:]'`; \
+			args="$$args $$name=$$p"; \
+		fi \
+	done; \
+	python3 tools/mkfat12.py -o os.img -b boot/boot_fat.bin -d os.d88 $$args
+	@echo "Copying os.d88 to NP21/W directory..."
+	@cp os.d88 '/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os.d88' 2>/dev/null || echo "Warning: Failed to copy os.d88 to np21w directory."
+
+programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
+
+vz: $(CRT0_OBJ) programs/vz.bin
+
+lzss_dict: 
+	@if [ ! -f tools/lzss_pack ]; then gcc tools/lzss_pack.c -O2 -o tools/lzss_pack; fi
+	@if [ assets/SKK.DIC -nt assets/SKK.LZS ]; then tools/lzss_pack assets/SKK.DIC assets/SKK.LZS; fi
+
+unicode_bin:
+	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
+	@if [ ! -f unicode.bin ]; then ./tools/gen_unicode; fi
+
+skk: $(CRT0_OBJ) programs/skk_test.bin lzss_dict
+
+programs: programs_base vz skk bench
+
+# crt0.asm のアセンブル (外部プログラム用スタートアップ)
+programs/crt0.o: programs/crt0.asm
+	$(AS) -f elf32 $< -o $@
+
+programs/crt0_c.o: programs/crt0_c.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libos32/syscalls.o: programs/libos32/syscalls.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/%.elf: programs/%.c app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/$*.o -lc -lgcc
+
+programs/%.raw: programs/%.elf
+	$(OBJCOPY) -O binary $< $@
+
+programs/%.bin: programs/%.raw programs/%.elf
+	@if [ "$*" = "install" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
+	elif [ "$*" = "bench" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
+	elif [ "$*" = "skk_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
+	elif [ "$*" = "vz" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 524288; \
+	elif [ "$*" = "shell" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
+	else \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
+	fi
+
+clean:
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o unicode.bin tools/gen_unicode
+
+.PHONY: all boot build clean programs

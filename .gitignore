@@ -1,0 +1,27 @@
+# ビルド生成物
+*.o
+*.bin
+*.elf
+*.raw
+*.map
+*.img
+*.d88
+
+# 特定の生成ファイル
+/unicode.bin
+/tools/gen_unicode
+/tools/lzss_pack
+
+# パッケージ/ログ等
+*.log
+*.err
+*~
+*.swp
+
+# Pythonキャッシュ
+__pycache__/
+*.pyc
+
+# OS固有のファイル等
+Thumbs.db
+.DS_Store

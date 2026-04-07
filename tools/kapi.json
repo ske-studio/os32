@@ -1,0 +1,812 @@
+{
+  "version": 18,
+  "data_fields": [
+    { "name": "sbrk_heap_limit", "type": "u32", "comment": "newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる)" }
+  ],
+  "includes": [
+    "gfx.h",
+    "kbd.h",
+    "exec_heap.h",
+    "kmalloc.h",
+    "paging.h",
+    "rtc.h",
+    "exec.h",
+    "fm.h",
+    "np2sysp.h",
+    "ide.h",
+    "path.h",
+    "tvram.h",
+    "vfs.h",
+    "ext2.h",
+    "serial.h",
+    "console.h",
+    "dev.h",
+    "kcg.h",
+    "sys.h",
+    "kprintf.h",
+    "io.h",
+    "lconsole.h"
+  ],
+  "externs": [
+    "extern volatile u32 tick_count;",
+    "extern void kapi_sys_exit(int status);"
+  ],
+  "api": [
+    {
+      "name": "gfx_init",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "gfx_shutdown",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "gfx_present",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "gfx_clear",
+      "ret": "void",
+      "args": [
+        "u8 color"
+      ]
+    },
+    {
+      "name": "gfx_pixel",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u8 color"
+      ]
+    },
+    {
+      "name": "gfx_hline",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "u8 color"
+      ]
+    },
+    {
+      "name": "gfx_vline",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int h",
+        "u8 color"
+      ]
+    },
+    {
+      "name": "gfx_line",
+      "ret": "void",
+      "args": [
+        "int x0",
+        "int y0",
+        "int x1",
+        "int y1",
+        "u8 c"
+      ]
+    },
+    {
+      "name": "gfx_rect",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "int h",
+        "u8 color"
+      ]
+    },
+    {
+      "name": "gfx_fill_rect",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "int h",
+        "u8 c"
+      ]
+    },
+    {
+      "name": "kbd_trygetchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "mem_alloc",
+      "ret": "void *",
+      "args": [
+        "u32 size"
+      ],
+      "target": "exec_heap_alloc"
+    },
+    {
+      "name": "mem_free",
+      "ret": "void",
+      "args": [
+        "void *ptr"
+      ],
+      "target": "exec_heap_free"
+    },
+    {
+      "name": "get_tick",
+      "ret": "u32",
+      "args": [],
+      "body": "return tick_count;"
+    },
+    {
+      "name": "kprintf",
+      "ret": "void",
+      "args": [
+        "u8 attr",
+        "const char *fmt",
+        "..."
+      ],
+      "direct": true,
+      "target": "kprintf"
+    },
+    {
+      "name": "sys_unlink",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ],
+      "target": "vfs_rm"
+    },
+    {
+      "name": "sys_rename",
+      "ret": "int",
+      "args": [
+        "const char *oldpath",
+        "const char *newpath"
+      ],
+      "target": "vfs_rename"
+    },
+    {
+      "name": "sys_mkdir",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ],
+      "target": "vfs_mkdir"
+    },
+    {
+      "name": "sys_ls",
+      "ret": "int",
+      "args": [
+        "const char *path",
+        "void *cb",
+        "void *ctx"
+      ],
+      "body": "return vfs_ls(path, (vfs_dir_cb)cb, ctx);"
+    },
+    {
+      "name": "kmalloc_total",
+      "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "kmalloc_used",
+      "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "kmalloc_free",
+      "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "paging_enabled",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "rtc_read",
+      "ret": "void",
+      "args": [
+        "void *rtc_time"
+      ],
+      "body": "rtc_read((RTC_Time *)rtc_time);"
+    },
+    {
+      "name": "tvram_clear",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "tvram_putchar_at",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "char ch",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "tvram_putkanji_at",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u16 jis",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "tvram_scroll",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "kbd_getchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "kbd_getkey",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "kbd_trygetkey",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "sys_mount",
+      "ret": "int",
+      "args": [
+        "const char *prefix",
+        "const char *dev",
+        "const char *fs"
+      ],
+      "target": "vfs_mount"
+    },
+    {
+      "name": "sys_umount",
+      "ret": "void",
+      "args": [
+        "const char *prefix"
+      ],
+      "target": "vfs_umount"
+    },
+    {
+      "name": "sys_is_mounted",
+      "ret": "int",
+      "args": [
+        "const char *prefix"
+      ],
+      "target": "vfs_is_mounted"
+    },
+    {
+      "name": "sys_chdir",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ],
+      "target": "vfs_chdir"
+    },
+    {
+      "name": "sys_getcwd",
+      "ret": "const char *",
+      "args": [],
+      "target": "vfs_cwd"
+    },
+    {
+      "name": "vfs_devname",
+      "ret": "const char *",
+      "args": [
+        "const char *prefix"
+      ]
+    },
+    {
+      "name": "vfs_sync",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "sys_rmdir",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ],
+      "target": "vfs_rmdir"
+    },
+    {
+      "name": "serial_init",
+      "ret": "void",
+      "args": [
+        "u32 baud"
+      ]
+    },
+    {
+      "name": "serial_puts",
+      "ret": "void",
+      "args": [
+        "const char *s"
+      ]
+    },
+    {
+      "name": "serial_getchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "serial_putchar",
+      "ret": "void",
+      "args": [
+        "u8 ch"
+      ]
+    },
+    {
+      "name": "serial_trygetchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "serial_is_initialized",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "exec_run",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ]
+    },
+    {
+      "name": "dev_count",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "dev_get_info",
+      "ret": "int",
+      "args": [
+        "int idx",
+        "char *name",
+        "int nm",
+        "int *type",
+        "u32 *sects"
+      ],
+      "target": "dev_api_get_info"
+    },
+    {
+      "name": "fm_startup_sound",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "fm_play_mml",
+      "ret": "void",
+      "args": [
+        "const char *mml"
+      ]
+    },
+    {
+      "name": "np2_detect",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "np2_get_version",
+      "ret": "void",
+      "args": [
+        "char *buf",
+        "int size"
+      ]
+    },
+    {
+      "name": "np2_get_cpu",
+      "ret": "void",
+      "args": [
+        "char *buf",
+        "int size"
+      ]
+    },
+    {
+      "name": "np2_get_clock",
+      "ret": "void",
+      "args": [
+        "char *buf",
+        "int size"
+      ]
+    },
+    {
+      "name": "np2_check_hostdrv",
+      "ret": "int",
+      "args": [
+        "char *buf",
+        "int size"
+      ]
+    },
+    {
+      "name": "ide_init",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "ide_drive_present",
+      "ret": "int",
+      "args": [
+        "int drv"
+      ]
+    },
+    {
+      "name": "ide_identify",
+      "ret": "int",
+      "args": [
+        "int drv",
+        "void *info"
+      ],
+      "body": "return ide_identify(drv, (IdeInfo *)info);"
+    },
+    {
+      "name": "ide_read_sector",
+      "ret": "int",
+      "args": [
+        "int drv",
+        "u32 lba",
+        "void *buf"
+      ]
+    },
+    {
+      "name": "path_get_drive",
+      "ret": "const char *",
+      "args": []
+    },
+    {
+      "name": "path_get_cwd",
+      "ret": "const char *",
+      "args": []
+    },
+    {
+      "name": "path_set_drive",
+      "ret": "int",
+      "args": [
+        "const char *d"
+      ]
+    },
+    {
+      "name": "path_set_cwd",
+      "ret": "void",
+      "args": [
+        "const char *p"
+      ]
+    },
+    {
+      "name": "path_parse",
+      "ret": "void",
+      "args": [
+        "const char *input",
+        "void *result"
+      ],
+      "body": "path_parse(input, (ParsedPath *)result);"
+    },
+    {
+      "name": "ext2_format",
+      "ret": "int",
+      "args": [
+        "int drv",
+        "u32 sectors"
+      ]
+    },
+    {
+      "name": "kcg_init",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "kcg_set_scale",
+      "ret": "void",
+      "args": [
+        "int s"
+      ]
+    },
+    {
+      "name": "kcg_draw_ank",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u8 ch",
+        "u8 fg",
+        "u8 bg"
+      ]
+    },
+    {
+      "name": "kcg_draw_kanji",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u16 jis",
+        "u8 fg",
+        "u8 bg"
+      ]
+    },
+    {
+      "name": "kcg_draw_utf8",
+      "ret": "int",
+      "args": [
+        "int x",
+        "int y",
+        "const char *str",
+        "u8 fg",
+        "u8 bg"
+      ]
+    },
+    {
+      "name": "kcg_draw_sjis",
+      "ret": "int",
+      "args": [
+        "int x",
+        "int y",
+        "const char *str",
+        "u8 fg",
+        "u8 bg"
+      ]
+    },
+    {
+      "name": "buz_on",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "buz_off",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "rshell_set_active",
+      "ret": "void",
+      "args": [
+        "int active"
+      ],
+      "body": "rshell_active = active;"
+    },
+    {
+      "name": "ide_write_sector",
+      "ret": "int",
+      "args": [
+        "int drv",
+        "u32 lba",
+        "const void *buf"
+      ]
+    },
+    {
+      "name": "ide_write_sectors",
+      "ret": "int",
+      "args": [
+        "int drv",
+        "u32 lba",
+        "u32 cnt",
+        "const void *buf"
+      ]
+    },
+    {
+      "name": "sys_reboot",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "sys_halt",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "shell_putchar",
+      "ret": "void",
+      "args": [
+        "char ch",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "console_get_cursor_x",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "console_get_cursor_y",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "console_set_cursor",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y"
+      ]
+    },
+    {
+      "name": "sys_open",
+      "ret": "int",
+      "args": [
+        "const char *path",
+        "int mode"
+      ],
+      "target": "vfs_open"
+    },
+    {
+      "name": "sys_close",
+      "ret": "void",
+      "args": [
+        "int fd"
+      ],
+      "target": "vfs_close"
+    },
+    {
+      "name": "sys_read",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "void *buf",
+        "u32 size"
+      ],
+      "target": "vfs_read_fd"
+    },
+    {
+      "name": "sys_write",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "const void *buf",
+        "u32 size"
+      ],
+      "target": "vfs_write_fd"
+    },
+    {
+      "name": "sys_lseek",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "int offset",
+        "int whence"
+      ],
+      "target": "vfs_seek"
+    },
+    {
+      "name": "console_get_size",
+      "ret": "void",
+      "args": [
+        "int *w",
+        "int *h"
+      ]
+    },
+    {
+      "name": "kbd_get_modifiers",
+      "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "sys_get_mem_kb",
+      "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "sys_time",
+      "ret": "os_time_t",
+      "args": []
+    },
+    {
+      "name": "gfx_hardware_scroll",
+      "ret": "void",
+      "args": [
+        "int lines"
+      ]
+    },
+    {
+      "name": "gfx_present_rect",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "int h"
+      ]
+    },
+    {
+      "name": "sys_exit",
+      "ret": "void",
+      "args": [
+        "int status"
+      ],
+      "target": "kapi_sys_exit"
+    },
+    {
+      "name": "sys_isatty",
+      "ret": "int",
+      "args": [
+        "int fd"
+      ],
+      "target": "vfs_isatty"
+    },
+    {
+      "name": "sys_stat",
+      "ret": "int",
+      "args": [
+        "const char *path",
+        "OS32_Stat *buf"
+      ],
+      "target": "vfs_stat"
+    },
+    {
+      "name": "sys_fstat",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "OS32_Stat *buf"
+      ],
+      "target": "vfs_fstat"
+    },
+    {
+      "name": "lcons_clear",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "lcons_putc",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "char ch",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "lcons_putkanji",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u16 jis",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "lcons_fill_rect",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "int h",
+        "char ch",
+        "u8 attr"
+      ]
+    },
+    {
+      "name": "lcons_sync_vram",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "gfx_screenshot",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ]
+    },
+    {
+      "name": "gfx_load_vdp",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ]
+    }
+  ]
+}
