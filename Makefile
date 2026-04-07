@@ -50,7 +50,7 @@ LDFLAGS = -m elf_i386 -T os32.ld -Map=kernel.map -nostdlib --nmagic --gc-section
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
 
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm gfx/gfx_util.asm
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm gfx/gfx_util.asm lib/kstring_asm.asm
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 C_KERNEL = \
@@ -58,7 +58,7 @@ C_KERNEL = \
     kernel/paging.c kernel/kmalloc.c kernel/console.c kernel/sys.c kernel/lconsole.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
-    gfx/gfx_core.c gfx/gfx_draw.c gfx/gfx_surface.c gfx/gfx_sprite.c gfx/gfx_scroll.c gfx/gfx_font.c gfx/palette.c gfx/gfx_dump.c \
+    gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_blt.c gfx/gfx_draw.c gfx/gfx_surface.c gfx/gfx_sprite.c gfx/gfx_scroll.c gfx/gfx_font.c gfx/palette.c gfx/gfx_dump.c \
     fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/serialfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
@@ -67,7 +67,7 @@ C_KERNEL = \
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -I/home/hight/opt/cross/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -I/home/hight/opt/cross/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T app.ld -nostdlib --nmagic --gc-sections \
 	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
 
@@ -109,6 +109,13 @@ programs/skk_test.o: programs/skk_test.c
 programs/skk_test.elf: app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
 
+# === OS32GFX Module ===
+GFX_SRC = $(wildcard programs/libos32gfx/*.c)
+GFX_OBJ = $(GFX_SRC:.c=.o)
+
+programs/libos32gfx/%.o: programs/libos32gfx/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
 # === Bench Module ===
 BENCH_SRC = $(wildcard programs/bench/*.c)
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
@@ -120,6 +127,18 @@ programs/bench.elf: app.ld $(CRT0_OBJ) $(BENCH_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) -lc -lgcc
 
 bench: $(CRT0_OBJ) programs/bench.bin
+
+# === Gfx Demo Module ===
+programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/gfx_demo.o: programs/gfx_demo.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/gfx_demo.elf: app.ld $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ) -lc -lgcc
+
+gfx_demo: $(CRT0_OBJ) programs/gfx_demo.bin
 
 # === モジュール別コンパイルルール ===
 
@@ -199,7 +218,7 @@ unicode_bin:
 
 skk: $(CRT0_OBJ) programs/skk_test.bin lzss_dict
 
-programs: programs_base vz skk bench
+programs: programs_base vz skk bench gfx_demo
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -223,6 +242,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "bench" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
+	elif [ "$*" = "gfx_demo" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "vz" ]; then \
@@ -234,6 +255,6 @@ programs/%.bin: programs/%.raw programs/%.elf
 	fi
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs

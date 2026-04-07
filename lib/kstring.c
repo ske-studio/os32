@@ -7,66 +7,7 @@
 
 #include "kstring.h"
 
-/* ======================================================================== */
-/*  kmemcpy — メモリコピー (前方コピー, overlapは呼び出し側で保証)           */
-/* ======================================================================== */
-void *kmemcpy(void *dst, const void *src, u32 n)
-{
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-    u32 words, rem;
-
-    /* 両方4バイトアライメントなら4バイト単位で転送 */
-    if (((u32)d & 3) == 0 && ((u32)s & 3) == 0) {
-        u32 *d32 = (u32 *)d;
-        const u32 *s32 = (const u32 *)s;
-        words = n >> 2;
-        rem = n & 3;
-        while (words--) {
-            *d32++ = *s32++;
-        }
-        d = (u8 *)d32;
-        s = (const u8 *)s32;
-        while (rem--) {
-            *d++ = *s++;
-        }
-    } else {
-        while (n--) {
-            *d++ = *s++;
-        }
-    }
-    return dst;
-}
-
-/* ======================================================================== */
-/*  kmemset — メモリフィル                                                  */
-/* ======================================================================== */
-void *kmemset(void *dst, int val, u32 n)
-{
-    u8 *d = (u8 *)dst;
-    u8 byte = (u8)(val & 0xFF);
-    u32 words, rem;
-
-    if (((u32)d & 3) == 0 && n >= 4) {
-        u32 fill = (u32)byte | ((u32)byte << 8) |
-                   ((u32)byte << 16) | ((u32)byte << 24);
-        u32 *d32 = (u32 *)d;
-        words = n >> 2;
-        rem = n & 3;
-        while (words--) {
-            *d32++ = fill;
-        }
-        d = (u8 *)d32;
-        while (rem--) {
-            *d++ = byte;
-        }
-    } else {
-        while (n--) {
-            *d++ = byte;
-        }
-    }
-    return dst;
-}
+/* アセンブリ版に移行したため、kmemcpy と kmemset のC言語実装は削除 */
 
 /* ======================================================================== */
 /*  kstrlen — 文字列長                                                      */
@@ -122,15 +63,7 @@ int kstrncmp(const char *a, const char *b, u32 n)
 /*  GCC -ffreestanding は構造体代入や初期化子で暗黙に memcpy/memset を       */
 /*  呼び出すことがある。リンクエラー防止のため標準名でも提供する。           */
 /* ======================================================================== */
-void *memcpy(void *dst, const void *src, u32 n)
-{
-    return kmemcpy(dst, src, n);
-}
 
-void *memset(void *dst, int val, u32 n)
-{
-    return kmemset(dst, val, n);
-}
 
 u32 strlen(const char *s)
 {

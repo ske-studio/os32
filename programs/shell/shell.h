@@ -46,6 +46,8 @@ void shell_register_cmds(const ShellCmd *cmds);
 /* コマンド実行エンジン (main.c) */
 void execute_command(const char *cmd);
 extern const char *cmd_names[];  /* タブ補完用 */
+const ShellCmd *shell_get_cmds(int *count);
+void shell_print_help(const char *cmd_name);
 
 /* メインループ・UI制御 (ui.c) */
 void shell_run(void);
