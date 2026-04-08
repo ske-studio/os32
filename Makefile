@@ -143,6 +143,15 @@ programs/gfx_demo.elf: app.ld $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ)
 
 gfx_demo: $(CRT0_OBJ) programs/gfx_demo.bin
 
+# === Demo1 Benchmark Module ===
+programs/demo1.o: programs/demo1.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/demo1.elf: app.ld $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ) -lc -lgcc
+
+demo1: $(CRT0_OBJ) programs/demo1.bin
+
 # === モジュール別コンパイルルール ===
 
 # kernel/ モジュール
@@ -229,7 +238,7 @@ programs/spr_test.elf: app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
 
 spr_test: $(CRT0_OBJ) programs/spr_test.bin
 
-programs: programs_base vz skk bench gfx_demo spr_test
+programs: programs_base vz skk bench gfx_demo spr_test demo1
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -256,6 +265,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "gfx_demo" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
 	elif [ "$*" = "spr_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
+	elif [ "$*" = "demo1" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
