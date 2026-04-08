@@ -58,7 +58,7 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
                     kprintf_put_hex(args[ai++], attr);
                     break;
                 case 's':
-                    shell_print((const char *)args[ai++], attr);
+                    shell_print_utf8((const char *)args[ai++], attr);
                     break;
                 case 'c':
                     ch_buf[0] = (char)args[ai++];
@@ -75,15 +75,7 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
         } else {
             const char *start = p;
             while (*p && *p != '%') p++;
-            {
-                u32 len = (u32)(p - start);
-                char tmp[80];
-                u32 ti;
-                if (len > 79) len = 79;
-                for (ti = 0; ti < len; ti++) tmp[ti] = start[ti];
-                tmp[len] = '\0';
-                shell_print(tmp, attr);
-            }
+            console_write(start, (u32)(p - start), attr);
             continue;
         }
         p++;
