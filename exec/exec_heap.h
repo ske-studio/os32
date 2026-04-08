@@ -35,6 +35,17 @@ void exec_heap_free(void *ptr);
  * 全体を1つのフリーブロックに戻す。O(1) */
 void exec_heap_reset(void);
 
+/* スナップショット保存 (exec_run 開始前に呼ぶ)
+ * 現在の管理変数を out_used に退避する。
+ * ヒープのメタデータ (BlkHdr) はメモリ上にそのまま残る。 */
+void exec_heap_save_state(u32 *out_used);
+
+/* スナップショット復元 (子プロセス終了後に呼ぶ)
+ * exec_heap_init_at と異なり、ヒープのメタデータを破壊しない。
+ * 管理変数 (base/size/used) だけを元に戻す。
+ * 凍結モデル前提: 親プロセスのヒープ領域は子が書き換えないことを保証。 */
+void exec_heap_restore_state(u32 base, u32 size, u32 used);
+
 /* 統計 */
 u32 exec_heap_total(void);
 u32 exec_heap_used(void);

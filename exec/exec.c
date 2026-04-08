@@ -22,13 +22,16 @@ void exec_init(void) {
 /* スタックを4バイト境界に揃えるためのマスク */
 #define STACK_ALIGN_MASK 3
 
-/* プログラム空間のページ数計算マクロ */
-/* コード+BSS+sbrk (1MB) + ガードA (4KB) + ヒープ + ガードB (4KB) + スタック (128KB) */
-#define EXEC_TOTAL_PAGES(mem_end) \
-    (((mem_end) - MEM_EXEC_LOAD_ADDR) / PAGE_SIZE)
+/* コード領域のページ数 (1MB / 4KB = 256ページ) — pgalloc_mark_used 用 */
+#define EXEC_CODE_PAGES  ((MEM_EXEC_MAX_SIZE + PAGE_SIZE - 1) / PAGE_SIZE)
 
 /* ======================================================================== */
 /*  ExecContext — ネスト階層ごとのコンテキスト保存構造体                     */
+/*                                                                          */
+/*  シェル常駐モデル:                                                       */
+/*    Level 0 (シェル): 0x300000 に常駐。ヒープ/スタック不要 (静的バッファ)  */
+/*    Level 1+ (子):    0x400000 にロード。アイデンティティマッピング。       */
+/*    PD切り替え不要。物理ページ確保不要。                                   */
 /* ======================================================================== */
 typedef struct {
     u32  jmpbuf[6];           /* setjmp/longjmp用バッファ */
@@ -37,12 +40,8 @@ typedef struct {
     u32  sbrk_heap_limit;     /* sbrk上限 */
     u32  exec_heap_base;      /* ヒープベースアドレス */
     u32  exec_heap_size;      /* ヒープサイズ */
-    /* Phase 2: ページディレクトリ切り替え用 */
-    u32 *page_dir;            /* このレベルのPD (NULL=マスターPD) */
-    u8  *pd_raw;              /* PD用kmalloc生ポインタ (解放用) */
-    u8  *pt_raw;              /* PT用kmalloc生ポインタ (解放用) */
-    u32  phys_base;           /* 確保した物理ページ群の先頭 */
-    int  phys_page_count;     /* 確保した物理ページ数 */
+    u32  load_addr;           /* このレベルのロードアドレス */
+    u32  stack_top;           /* このレベルのスタック先頭 */
 } ExecContext;
 
 /* ======================================================================== */
@@ -60,10 +59,25 @@ extern void exec_longjmp(u32 *buf);
 /* ======================================================================== */
 void exec_exit(int status)
 {
+    ExecContext *ctx;
+
     if (exec_nest_level > 0) {
         exec_exit_status = status;
+
+        /* 現在のレベルのクリーンアップ (ガードページ解除 + ヒープリセット) */
+        ctx = &exec_ctx_stack[exec_nest_level];
+        if (ctx->guard_a != 0) {
+            paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
+            paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
+        }
+        if (ctx->exec_heap_base != 0) {
+            exec_heap_reset();
+        }
+
+        /* 親レベルへ復帰 */
         exec_nest_level--;
-        exec_longjmp(exec_ctx_stack[exec_nest_level].jmpbuf);
+        ctx = &exec_ctx_stack[exec_nest_level];
+        exec_longjmp(ctx->jmpbuf);
     }
 }
 
@@ -78,28 +92,31 @@ void __cdecl kapi_sys_exit(int status)
 }
 
 /* ======================================================================== */
-/*  exec_run — 外部プログラムのロードと実行 (ネスト対応 + PD切り替え)       */
+/*  exec_run — 外部プログラムのロードと実行 (シェル常駐モデル)              */
+/*                                                                          */
+/*  Level 0 (シェル): 0x300000 にロード。スタック=0x380000。                 */
+/*  Level 1+  (子)  : 0x400000 にロード。スタック=mem_end。                  */
+/*  PD切り替え不要。メモリは完全に分離されている。                           */
 /* ======================================================================== */
 int exec_run(const char *cmdline)
 {
-    u32 load_base = EXEC_LOAD_ADDR;
-    u32 max_size  = EXEC_MAX_SIZE;
-    /* --- 動的レイアウト計算 --- */
+    /* --- Level に応じたロードアドレスとレイアウトを決定 --- */
+    u32 load_base;
+    u32 max_size;
+    u32 stack_top;
+    u32 guard_a, guard_b;
+    u32 exec_heap_base, exec_heap_size;
+    int is_shell;
+
     u32 mem_end = sys_mem_kb * 1024;
-    u32 stack_top = mem_end;
-    u32 stack_bottom = stack_top - MEM_EXEC_STACK_SIZE;
-    u32 guard_b = stack_bottom - PAGE_SIZE;
-    u32 guard_a = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE;
-    u32 exec_heap_base = guard_a + PAGE_SIZE;
-    u32 exec_heap_size = guard_b - exec_heap_base;
-    u8 *file_buf = (u8 *)load_base;
-    u8 *load_addr = (u8 *)load_base;
+    u8 *file_buf;
+    u8 *load_addr;
     OS32Header *hdr;
     int sz;
     u32 code_off, text_sz, bss_sz, heap_sz, entry_off;
     ExecEntry entry;
     ExecContext *ctx;
-    
+
     char path[VFS_MAX_PATH];
     const char *p = cmdline;
     int i = 0;
@@ -111,23 +128,55 @@ int exec_run(const char *cmdline)
         return EXEC_ERR_NOMEM;
     }
 
-    
+    /* コマンドラインからパスを抽出 */
     while (*p == ' ') p++;
-    while (*p && *p != ' ' && i < sizeof(path) - 1) {
+    while (*p && *p != ' ' && i < (int)sizeof(path) - 1) {
         path[i++] = *p++;
     }
     path[i] = '\0';
 
+    /* ====== Level に応じたメモリレイアウト決定 ====== */
+    is_shell = (exec_nest_level == 0);
+
+    if (is_shell) {
+        /* Level 0 (シェル): 常駐帯域 0x300000-0x37FFFF */
+        load_base = MEM_SHELL_LOAD_ADDR;
+        max_size  = MEM_SHELL_MAX_SIZE;
+        stack_top = MEM_SHELL_STACK_TOP;
+        guard_a   = 0; /* シェルは sbrk/exec_heap 未使用 */
+        guard_b   = MEM_SHELL_GUARD;
+        exec_heap_base = 0;
+        exec_heap_size = 0;
+    } else {
+        /* Level 1+ (子プロセス): 0x400000〜 アイデンティティマッピング */
+        u32 child_stack_bottom;
+        load_base = MEM_EXEC_LOAD_ADDR;
+        max_size  = MEM_EXEC_MAX_SIZE;
+        stack_top = mem_end;
+        child_stack_bottom = stack_top - MEM_EXEC_STACK_SIZE;
+        guard_b   = child_stack_bottom - PAGE_SIZE;
+        guard_a   = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE;
+        exec_heap_base = guard_a + PAGE_SIZE;
+        exec_heap_size = guard_b - exec_heap_base;
+    }
+
+    file_buf  = (u8 *)load_base;
+    load_addr = (u8 *)load_base;
+
+
+    /* ====== ファイル読み込み ====== */
     sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
     if (sz <= 0 && fat12_is_mounted()) {
         sz = fat12_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
     }
+
     if (sz <= 0) {
         if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOT_FOUND);
         return EXEC_ERR_NOT_FOUND;
     }
 
     hdr = (OS32Header *)file_buf;
+
     if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE || hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
         if (exec_nest_level > 0) exec_exit(EXEC_ERR_INVALID);
@@ -141,133 +190,30 @@ int exec_run(const char *cmdline)
     entry_off = hdr->entry_offset;
 
     if (text_sz + bss_sz > max_size) {
+        shell_print("[DBG] NOMEM: text=", 0xE1);
+        shell_print_dec(text_sz, 0xE1);
+        shell_print(" bss=", 0xE1);
+        shell_print_dec(bss_sz, 0xE1);
+        shell_print(" max=", 0xE1);
+        shell_print_dec(max_size, 0xE1);
+        shell_print("\n", 0xE1);
         if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOMEM);
         return EXEC_ERR_NOMEM;
     }
 
-    /* ======== Phase 2: ページディレクトリ切り替え ======== */
+    /* ======== コンテキスト設定 ======== */
     ctx = &exec_ctx_stack[exec_nest_level];
-    ctx->page_dir = (u32 *)0;
-    ctx->pd_raw = (u8 *)0;
-    ctx->pt_raw = (u8 *)0;
-    ctx->phys_base = 0;
-    ctx->phys_page_count = 0;
+    ctx->load_addr = load_base;
+    ctx->stack_top = stack_top;
+    ctx->guard_a = guard_a;
+    ctx->guard_b = guard_b;
+    ctx->exec_heap_base = exec_heap_base;
+    ctx->exec_heap_size = exec_heap_size;
 
-    if (exec_nest_level > 0) {
-        /* Level 1以上: 物理ページを確保し、新しいPDを構築 */
-        int total_pg = (int)EXEC_TOTAL_PAGES(mem_end);
-        u32 phys_base;
-        u32 *phys_pages;
-        int j;
-        u32 *new_pd;
-        u8 *pd_raw_buf;
-        u8 *pt_raw_buf;
-        u32 *new_pt;
-        u32 pdi_start;
-
-        phys_base = pgalloc_alloc_n(total_pg);
-        if (phys_base == 0) {
-            shell_print("Error: no physical pages\n", ATTR_RED);
-            exec_exit(EXEC_ERR_NOMEM);
-            return EXEC_ERR_NOMEM;
-        }
-
-        ctx->phys_base = phys_base;
-        ctx->phys_page_count = total_pg;
-
-        /* 物理ページアドレス配列を一時的に構築 (スタック上) */
-        /* 注意: total_pg は最大 3072 だが実際は数百程度 */
-        /* kmalloc で一時バッファを確保 */
-        phys_pages = (u32 *)kmalloc(total_pg * sizeof(u32));
-        if (!phys_pages) {
-            pgalloc_free_n(phys_base, total_pg);
-            shell_print("Error: kmalloc for phys_pages\n", ATTR_RED);
-            exec_exit(EXEC_ERR_NOMEM);
-            return EXEC_ERR_NOMEM;
-        }
-        for (j = 0; j < total_pg; j++) {
-            phys_pages[j] = phys_base + (u32)j * PAGE_SIZE;
-        }
-
-        /* PD + PT をkmalloc確保 (4096アラインのためパディング付き) */
-        pd_raw_buf = (u8 *)kmalloc(4096 + 4095);
-        pt_raw_buf = (u8 *)kmalloc(4096 + 4095);
-        if (!pd_raw_buf || !pt_raw_buf) {
-            if (pd_raw_buf) kfree(pd_raw_buf);
-            if (pt_raw_buf) kfree(pt_raw_buf);
-            kfree(phys_pages);
-            pgalloc_free_n(phys_base, total_pg);
-            shell_print("Error: kmalloc for PD/PT\n", ATTR_RED);
-            exec_exit(EXEC_ERR_NOMEM);
-            return EXEC_ERR_NOMEM;
-        }
-
-        ctx->pd_raw = pd_raw_buf;
-        ctx->pt_raw = pt_raw_buf;
-
-        {
-            /* 4096バイト境界にアライン (paging.cのalign4096と同じ) */
-            u32 pd_addr = (u32)pd_raw_buf;
-            u32 pt_addr = (u32)pt_raw_buf;
-            pd_addr = (pd_addr + 4095) & ~4095UL;
-            pt_addr = (pt_addr + 4095) & ~4095UL;
-            new_pd = (u32 *)pd_addr;
-            new_pt = (u32 *)pt_addr;
-        }
-
-        /* マスターPDの全エントリをコピー (カーネル空間を共有) */
-        {
-            u32 *master = paging_get_master_pd();
-            for (j = 0; j < PDE_COUNT; j++) {
-                new_pd[j] = master[j];
-            }
-        }
-
-        /* プログラム空間のページテーブルを構築 */
-        pdi_start = MEM_EXEC_LOAD_ADDR >> 22; /* = 1 */
-        for (j = 0; j < PTE_COUNT; j++) {
-            new_pt[j] = PAGE_NOT_PRESENT;
-        }
-        for (j = 0; j < total_pg && j < PTE_COUNT; j++) {
-            u32 virt = MEM_EXEC_LOAD_ADDR + (u32)j * PAGE_SIZE;
-            u32 pti = (virt >> 12) & 0x3FF;
-            new_pt[pti] = (phys_pages[j] & 0xFFFFF000UL) | PAGE_RW;
-        }
-        new_pd[pdi_start] = (u32)new_pt | PAGE_RW;
-
-        kfree(phys_pages);
-
-        ctx->page_dir = new_pd;
-
-        /* CR3をそう新PDに切り替え */
-        paging_switch_pd(new_pd);
-
-        /* ★ ここからfile_buf (0x400000) は新しい物理ページを指す */
-        /* バイナリを再読み込み (親のデータはもう見えない) */
-        sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
-        if (sz <= 0 && fat12_is_mounted()) {
-            sz = fat12_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
-        }
-        if (sz <= 0) {
-            /* PD を元に戻して失敗 */
-            paging_switch_pd(paging_get_master_pd());
-            kfree(ctx->pd_raw);
-            kfree(ctx->pt_raw);
-            pgalloc_free_n(ctx->phys_base, ctx->phys_page_count);
-            exec_exit(EXEC_ERR_NOT_FOUND);
-            return EXEC_ERR_NOT_FOUND;
-        }
-
-        /* ヘッダを再パース */
-        hdr = (OS32Header *)file_buf;
-        code_off  = hdr->header_size;
-        text_sz   = hdr->text_size;
-        bss_sz    = hdr->bss_size;
-        entry_off = hdr->entry_offset;
-    } else {
-        /* Level 0: アイデンティティマッピング。初回起動時にページ範囲を予約 */
-        int total_pg = (int)EXEC_TOTAL_PAGES(mem_end);
-        pgalloc_mark_used(MEM_EXEC_LOAD_ADDR, total_pg);
+    /* コードセクションの配置 + BSS ゼロクリア */
+    if (!is_shell) {
+        /* 子プロセスの物理ページを予約 (アイデンティティマッピング) */
+        pgalloc_mark_used(MEM_EXEC_LOAD_ADDR, EXEC_CODE_PAGES);
     }
 
     {
@@ -275,67 +221,61 @@ int exec_run(const char *cmdline)
         kmemset(load_addr + text_sz, 0, bss_sz);
     }
 
-    /* ヒープ初期化 (動的サイズ) */
-    exec_heap_init_at(exec_heap_base, exec_heap_size);
-    kapi->sbrk_heap_limit = guard_a;  /* sbrk上限 */
 
-    /* ガードページ設定 */
-    paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1);
-    paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1);
+    /* ヒープ・ガードページ設定 (子プロセスのみ) */
+    if (!is_shell) {
+        /* OS32X ヘッダの heap_size 指定があればサイズを制限 */
+        if (heap_sz > 0 && heap_sz < exec_heap_size) {
+            exec_heap_size = heap_sz;
+            ctx->exec_heap_size = exec_heap_size;
+        }
+        exec_heap_init_at(exec_heap_base, exec_heap_size);
+        kapi->sbrk_heap_limit = guard_a;
+        ctx->sbrk_heap_limit = guard_a;
 
-    /* 現在の階層にコンテキストを保存 */
-    ctx->guard_a = guard_a;
-    ctx->guard_b = guard_b;
-    ctx->sbrk_heap_limit = kapi->sbrk_heap_limit;
-    ctx->exec_heap_base = exec_heap_base;
-    ctx->exec_heap_size = exec_heap_size;
+        /* ガードページ設定 */
+        paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1);
+        paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1);
+    }
 
     /* setjmp — 毎回実行 (ネスト対応) */
     if (exec_setjmp(ctx->jmpbuf) != 0) {
         /* ======== longjmp復帰ポイント ======== */
+
         ctx = &exec_ctx_stack[exec_nest_level];
 
-        /* Phase 2: 子プロセスのPDから親のPDに切り替え */
-        if (ctx->page_dir) {
-            /* マスターPDまたは親のPDに戻す */
-            if (exec_nest_level > 0) {
-                ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
-                if (parent->page_dir) {
-                    paging_switch_pd(parent->page_dir);
-                } else {
-                    paging_switch_pd(paging_get_master_pd());
-                }
-            } else {
-                paging_switch_pd(paging_get_master_pd());
-            }
-            /* PD/PT メモリと物理ページを解放 */
-            kfree(ctx->pd_raw);
-            kfree(ctx->pt_raw);
-            pgalloc_free_n(ctx->phys_base, ctx->phys_page_count);
-            ctx->page_dir = (u32 *)0;
+        /* ガードページ解除 (子プロセスのガードのみ) */
+        if (ctx->guard_a != 0) {
+
+            paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
+            paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
         }
 
-        /* ガードページ解除 */
-        paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
-        paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
-        exec_heap_reset();
+        /* 子プロセスのヒープリセット */
+        if (ctx->exec_heap_base != 0) {
+            exec_heap_reset();
+        }
 
-        /* 親が存在する場合、親のヒープ/sbrk状態を復元 */
+        /* 親のヒープ/sbrk状態を復元 */
         if (exec_nest_level > 0) {
             ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
-            exec_heap_init_at(parent->exec_heap_base, parent->exec_heap_size);
-            kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
-            /* 親のガードページも再設定 */
-            paging_set_not_present(parent->guard_a,
-                                   parent->guard_a + PAGE_SIZE - 1);
-            paging_set_not_present(parent->guard_b,
-                                   parent->guard_b + PAGE_SIZE - 1);
+            /* 親が子プロセス (Level 1+) の場合のみ復元 */
+            if (parent->exec_heap_base != 0) {
+
+                exec_heap_init_at(parent->exec_heap_base, parent->exec_heap_size);
+                kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
+                paging_set_not_present(parent->guard_a,
+                                       parent->guard_a + PAGE_SIZE - 1);
+                paging_set_not_present(parent->guard_b,
+                                       parent->guard_b + PAGE_SIZE - 1);
+            }
         }
+
         return exec_exit_status;
     }
 
     entry = (ExecEntry)(load_addr + entry_off);
-    
+
     exec_nest_level++;
 
     {
@@ -348,14 +288,14 @@ int exec_run(const char *cmdline)
         int in_arg = 0;
         u32 new_esp;
         static u32 saved_esp;
-        
+
         stack_top -= (cmd_len + 1);
         stack_top &= ~((u32)STACK_ALIGN_MASK);
         str_area = (char *)stack_top;
-        
+
         stack_top -= sizeof(char *) * OS32_MAX_ARGS;
         argv_area = (char **)stack_top;
-        
+
         s = cmdline;
         d = str_area;
         while (*s) {
@@ -373,9 +313,9 @@ int exec_run(const char *cmdline)
         }
         *d = '\0';
         argv_area[argc] = NULL;
-        
+
         new_esp = stack_top;
-        
+
         __asm__ volatile(
             "mov %%esp, %0\n\t"
             "mov %1, %%esp\n\t"
@@ -389,9 +329,8 @@ int exec_run(const char *cmdline)
             : "r"(new_esp), "g"(argc), "g"(argv_area), "g"(kapi), "r"(entry)
             : "eax", "ecx", "edx", "memory"
         );
-        /* プログラムがsys_exitを使わずreturnした場合、成功として処理 */
         exec_exit(EXEC_SUCCESS);
     }
 
-    return EXEC_SUCCESS; /* 到達しない */
+    return EXEC_SUCCESS;
 }
