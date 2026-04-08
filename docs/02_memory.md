@@ -5,6 +5,7 @@
 ```
 アドレス範囲              サイズ    用途
 ───────────────────────────────────────────────────────
+[ コンベンショナルメモリ ]
 0x00000 - 0x003FF         1KB      割り込みベクタテーブル (IVT)
 0x00400 - 0x005FF         512B     BIOS データ領域
 0x00600 - 0x006FF         256B     BIOSトランポリン パラメータブロック
@@ -13,30 +14,30 @@
 0x08000 - 0x081FF         512B     loader.bin (16ビットローダ)
 0x08200 - 0x08FFF         3.5KB    pm32.bin (32ビットPMエントリ)
 0x09000 - 0x2C7B8         ≈85KB    kernel.bin (CODE + DATA + BSS)
-  ※ビルド時に自動境界チェック (< 0x40000)
-0x40000 - 0x6FFFF         192KB    kmallocヒープ
-0x70000 - 0x8EFFF                  (予約)
-0x8F000                   4KB      カーネルスタックガードページ (Not-Present)
+0x40000 - 0x8EFFF         316KB    kmallocヒープ
+0x8F000 - 0x8FFFF         4KB      カーネルスタックガード (Not-Present)
 0x90000 - 0x9FFFF         64KB     カーネルスタック (ESP=0x9FFFF)
-0xA0000 - 0xA3FFF         16KB     テキストVRAM
-0xA2000 - 0xA3FFF                   テキスト属性VRAM
-0xA8000 - 0xAFFFF         32KB     グラフィックVRAM Plane 0 (青)
-0xB0000 - 0xB7FFF         32KB     グラフィックVRAM Plane 1 (赤)
-0xB8000 - 0xBFFFF         32KB     グラフィックVRAM Plane 2 (緑)
-0xE0000 - 0xE7FFF         32KB     グラフィックVRAM Plane 3 (輝度)
-── 1MB以上 (拡張メモリ) ──
-0x100000 - 0x148BFF       295KB    gfxプール (surf_pool + spr_pool)
-0x200000 - 0x20EFFF       60KB     rshell recv_buf
-0x210000 - 0x217FFF       32KB     rshell fbuf
-0x300000 - 0x31F3FF       128KB    VRAMバックバッファ (4プレーン×32KB)
-0x3F0000 - 0x3F00FF       256B     KernelAPI テーブル (exec.c)
-── 外部プログラム領域 (物理・仮想フラットアイデンティティマッピング) ──
-0x400000 〜                        プログラムロード領域 (CODE, DATA, BSS)
-〜 未マッピング領域 (Guard)        アクセス時にPage Fault発生
-〜 0x57EFFF                        プログラム用スタック領域 (上から下へ伸展)
-0x57F000                           スタック初期ポインタ (ESP=0x57F000)
-0x580000 〜 (動的確保上限まで)     プログラム用ヒープ (sbrk_heap_limit管理下)
-※NP21/W ExMemory=13MB設定時、実質的な物理メモリは安全に使用可能
+0xA0000 - 0xEFFFF                  VRAM (テキスト+グラフィック)
+0xF0000 - 0xFFFFF                  BIOS ROM
+
+[ 1MB以上 (拡張メモリ) - カーネルデータ ]
+0x100000 - 0x148FFF       ~292KB   フォントキャッシュ
+0x149000 - 0x168FFF       128KB    Unicode-JIS変換テーブル
+0x169000 - 0x188FFF       128KB    GFXバックバッファ (32KB×4プレーン)
+0x189000 - 0x189FFF       4KB      KernelAPI テーブル
+0x18A000 - 0x1FFFFF                [予約: カーネル拡張用]
+
+[ カーネル予約 (将来拡張) ]
+0x200000 - 0x3FFFFF       2MB      予約域 (Not-Present)
+
+[ プログラム空間 (動的レイアウト) ]
+0x400000 -                         プログラムロード領域 (.text, .data, .bss) + sbrk
+0x500000 - 0x500FFF       4KB      GUARD A: sbrk上限ガード (Not-Present)
+0x501000 -                         exec_heap (動的確保上限まで)
+mem_end - 132KB           4KB      GUARD B: スタックオーバーフローガード (Not-Present)
+mem_end - 128KB                    プログラムスタック (128KB, 下向き展開)
+
+※ mem_end は NP21/W の搭載メモリ量 (14MB構成なら mem_end=0xE00000)
 ※プログラムの入れ子（ネスト）起動時はプロセスが完全に破棄・「置換」されるため、1つの空間のみ利用します。
 ```
 
