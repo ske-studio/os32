@@ -62,9 +62,10 @@ static void write_packbits(int fd, const u8 *src, int size) {
 
     while (i < size) {
         int max_len = size - i;
+        int run_len;
         if (max_len > 128) max_len = 128;
 
-        int run_len = count_run(src + i, max_len);
+        run_len = count_run(src + i, max_len);
 
         if (run_len > 1) {
             if (out_pos + 2 > 1024) FLUSH();
@@ -123,19 +124,21 @@ static int read_packbits(int fd, u8 *dst, int size) {
             /* RUN データ */
             int run_len = 257 - cmd;
             u8 val;
+            u32 val32;
+            int j;
             if (gfx_api->sys_read(fd, &val, 1) != 1) return -1;
             if (count + run_len > size) run_len = size - count;
             
             /* 32bitアクセスで高速フィル */
-            u32 val32 = val | (val << 8) | (val << 16) | (val << 24);
-            int i = 0;
-            while (i + 4 <= run_len) {
-                *(u32 *)(dst + count + i) = val32;
-                i += 4;
+            val32 = val | (val << 8) | (val << 16) | (val << 24);
+            j = 0;
+            while (j + 4 <= run_len) {
+                *(u32 *)(dst + count + j) = val32;
+                j += 4;
             }
-            while (i < run_len) {
-                dst[count + i] = val;
-                i++;
+            while (j < run_len) {
+                dst[count + j] = val;
+                j++;
             }
             count += run_len;
         }

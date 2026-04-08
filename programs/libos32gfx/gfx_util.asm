@@ -2,6 +2,8 @@ bits 32
 
 global asm_gfx_clear
 global asm_gfx_draw_sprite
+global asm_fill_plane_rect
+global asm_copy_plane_rect
 
 %define GFX_HEIGHT   400
 %define GFX_BPL      80
@@ -497,6 +499,118 @@ asm_kcg_draw_font:
     pop edi
     pop esi
     pop ebx
+    mov esp, ebp
+    pop ebp
+    ret
+
+; -------------------------------------------------------------------------
+; void __cdecl asm_fill_plane_rect(u8 *start, int pitch, int rows,
+;                                  int width_bytes, u8 fill_val);
+;
+; 1プレーンの矩形領域を fill_val で塗りつぶす。
+; start を起点に width_bytes バイト分を fill し、pitch バイト進めて
+; rows 行繰り返す。rep stosd + rep stosb による高速 fill。
+; -------------------------------------------------------------------------
+asm_fill_plane_rect:
+    push ebp
+    mov ebp, esp
+    push edi
+    push esi
+    push ebx
+
+    mov edi, [ebp+8]       ; start
+    mov esi, [ebp+16]      ; rows
+    mov ebx, [ebp+20]      ; width_bytes
+
+    test esi, esi
+    jle .fpr_done
+    test ebx, ebx
+    jle .fpr_done
+
+    ; fill_val を 32bit に展開 (例: 0xFF → 0xFFFFFFFF)
+    movzx eax, byte [ebp+24]
+    mov ah, al
+    mov ecx, eax
+    shl ecx, 16
+    or eax, ecx
+
+    mov edx, [ebp+12]      ; pitch
+
+.fpr_row:
+    push edi
+
+    mov ecx, ebx
+    shr ecx, 2
+    rep stosd
+
+    mov ecx, ebx
+    and ecx, 3
+    rep stosb
+
+    pop edi
+    add edi, edx
+    dec esi
+    jnz .fpr_row
+
+.fpr_done:
+    pop ebx
+    pop esi
+    pop edi
+    pop ebp
+    ret
+
+; -------------------------------------------------------------------------
+; void __cdecl asm_copy_plane_rect(u8 *dst, int dst_pitch,
+;                                  const u8 *src, int src_pitch,
+;                                  int rows, int width_bytes);
+;
+; src から dst へ矩形領域をコピー。
+; rep movsd + rep movsb による高速コピー。
+; dst_pitch と src_pitch が異なる場合もサポート。
+; -------------------------------------------------------------------------
+asm_copy_plane_rect:
+    push ebp
+    mov ebp, esp
+    sub esp, 4              ; ローカル変数: 行カウンタ
+    push edi
+    push esi
+    push ebx
+
+    mov edi, [ebp+8]       ; dst
+    mov esi, [ebp+16]      ; src
+    mov eax, [ebp+24]      ; rows
+    mov ebx, [ebp+28]      ; width_bytes
+
+    mov [ebp-4], eax        ; 行カウンタ保存
+
+    test eax, eax
+    jle .cpr_done
+    test ebx, ebx
+    jle .cpr_done
+
+.cpr_row:
+    push edi
+    push esi
+
+    mov ecx, ebx
+    shr ecx, 2
+    rep movsd
+
+    mov ecx, ebx
+    and ecx, 3
+    rep movsb
+
+    pop esi
+    pop edi
+    add edi, [ebp+12]      ; dst += dst_pitch
+    add esi, [ebp+20]      ; src += src_pitch
+    dec dword [ebp-4]
+    jnz .cpr_row
+
+.cpr_done:
+    pop ebx
+    pop esi
+    pop edi
     mov esp, ebp
     pop ebp
     ret

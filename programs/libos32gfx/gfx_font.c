@@ -116,7 +116,6 @@ static const u8 font8x8[95][8] = {
 /* ======================================================================== */
 void gfx_putchar(int x, int y, char ch, u8 color)
 {
-    int row, col;
     const u8 *glyph;
     int idx;
 
@@ -125,14 +124,8 @@ void gfx_putchar(int x, int y, char ch, u8 color)
 
     glyph = font8x8[idx];
 
-    for (row = 0; row < FONT_H; row++) {
-        u8 bits = glyph[row];
-        for (col = 0; col < FONT_W; col++) {
-            if (bits & (0x80 >> col)) {
-                gfx_pixel(x + col, y + row, color);
-            }
-        }
-    }
+    /* 8dot境界ならASM高速パスへ */
+    gfx_draw_font(x, y, glyph, 1, FONT_H, color);
 }
 
 /* ======================================================================== */
