@@ -7,6 +7,7 @@
 
 #include "std.h"
 #include "../../lib/utf8.h"
+#include "lconsole.h"
 #include <stdlib.h>
 
 /* --- System Modes & Constants --- */
@@ -290,14 +291,7 @@ unsigned int vz_get_size(int fd);
 void vz_load_file(const char* path); /* From main.c */
 int vz_ls(const char *path, void *cb, void *ctx);
 
-/* --- Virtual VRAM Diff Rendering (sys_screen.c) --- */
-/* vram cell format: (attr << 16) | (char_code & 0xFFFF)
- * char_code uses ASCII (0x00-0xFF) or JIS Kanji (0x2121-0x7e7e).
- * Kanji tail uses special char_code 0xFFFF. */
-extern unsigned int logical_vram[25][80];
-extern unsigned int physical_vram[25][80];
-extern unsigned char vram_dirty[25]; /* line dirty flags */
-
+/* --- Screen VRAM (lconsole経由) --- */
 void su_sync_vram(void);
 void su_invalidate_vram(void);
 

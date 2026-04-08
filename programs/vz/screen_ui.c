@@ -169,7 +169,6 @@ void su_prompt(const char* prompt_msg, const char* input_buf, int cursor_pos)
  * ヘルプ（ショートカット一覧）画面の描画
  */
 void su_draw_help(void) {
-    int x, y;
     int box_w = 40;
     int box_h = 20;
     int start_x = (SCREEN_W - box_w) / 2;
@@ -204,17 +203,8 @@ void su_draw_help(void) {
     };
     int line_idx = 0;
 
-    /* 枠と背景の描画 */
-    for (y = 0; y < box_h; y++) {
-        for (x = 0; x < box_w; x++) {
-            unsigned char attr = ATR_STATUS; /* 反転表示でポップアップ感 */
-            char ch = ' ';
-            if (y == 0 || y == box_h - 1) ch = '-';
-            else if (x == 0 || x == box_w - 1) ch = '|';
-            
-            vz_putc(start_x + x, start_y + y, ch, attr);
-        }
-    }
+    /* 枠と背景の描画 (lconsole汎用ボックス) */
+    lcons_draw_box(start_x, start_y, box_w, box_h, ATR_STATUS);
     
     /* テキストの描画 */
     while (lines[line_idx] != NULL && line_idx < box_h - 2) {

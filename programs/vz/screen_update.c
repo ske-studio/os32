@@ -7,16 +7,10 @@
 
 /*
  * ウインドウ全体再描画
+ * 注意: VRAM転送(present)は行わない。呼び出し元(su_redraw_screen)が一括で行う。
  */
 void su_redraw_window(TEXT* w)
 {
-    static TEXT* prev_w = NULL;
-    static char* prev_thom = NULL;
-    static int first_draw = 1;
-    int scrolled = 0;
-    int scroll_lines = 0;
-    int is_scroll_down = 0;
-
     if (!w) return;
 
     /* 行番号を再計算 */
@@ -25,31 +19,19 @@ void su_redraw_window(TEXT* w)
     /* スクロール位置を調整 */
     su_adjust_scroll(w);
 
-    /* 仮想VRAMエンジンが完成したため、OS全体のハードウェアスクロールや全再描画によるチラツキの抑止を廃止 */
-    /* 差分描画(Cell-based diffing)に完全に任せることで、最速のネイティブスクロールを実現する */
-
-    prev_w = w;
-    prev_thom = (char*)w->thom;
-    first_draw = 0;
-
     su_draw_statusbar(w);
     su_draw_text(w);
     su_draw_funcbar();
-
-    if (kapi) {
-        su_sync_vram();
-        kapi->gfx_present();
-    }
 }
 
 /*
  * su_redraw_screen
  * 画面全体の再描画 (マルチウインドウ対応)
+ * 全ウインドウの論理VRAM書き込み後、一度だけ差分同期+present_dirtyを行う。
  */
 void su_redraw_screen(void) {
     if (vz.filer.active) {
         su_redraw_filer();
-        if (kapi) kapi->gfx_present();
     } else if (vz.split_mode == 0) {
         /* シングルウインドウ */
         if (vz.text_list[vz.window_text_idx[0]]) {
@@ -78,8 +60,9 @@ void su_redraw_screen(void) {
         su_draw_help();
     }
     
+    /* 一度だけ差分同期 → 変更された矩形のみVRAMに転送 */
     if (kapi) {
         su_sync_vram();
-        kapi->gfx_present();
+        kapi->gfx_present_dirty();
     }
 }

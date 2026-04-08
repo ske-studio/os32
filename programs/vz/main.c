@@ -41,9 +41,16 @@ int main(int argc, char **argv, KernelAPI *api)
         return 1;
     }
     
-    /* gfxエンジンの初期化 */
-    kapi->gfx_init();
-    kapi->kcg_init();
+    /* gfxエンジンの初期化 (VZ向け最小構成: スプライト不要) */
+    {
+        extern KernelAPI *gfx_api;
+        extern GFX_Framebuffer gfx_fb;
+        gfx_api = api;
+        kapi->gfx_init();
+        kapi->gfx_get_framebuffer(&gfx_fb);
+        kapi->kcg_init();
+        lcons_init();
+    }
 
     macro_init(); /* マクロエンジン初期化 */
 

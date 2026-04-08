@@ -271,7 +271,7 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "vz" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 524288; \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 524288; \
 	elif [ "$*" = "shell" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
 	else \
