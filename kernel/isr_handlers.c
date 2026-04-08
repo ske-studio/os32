@@ -143,20 +143,34 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip)
         tvram_puts_at(row+5, 18, "Not-Present page", 0xC1);
     }
 
-    /* スタックガード検出 (0x8F000-0x8FFFF) */
-    if (fault_addr >= 0x8F000UL && fault_addr <= 0x8FFFFUL) {
-        tvram_puts_at(row+6, 0, " >>> STACK OVERFLOW DETECTED <<<        ", 0x41);
-    }
-    /* NULLポインタ検出 (0x0000-0x0FFF) */
-    else if (fault_addr < 0x1000UL) {
-        tvram_puts_at(row+6, 0, " >>> NULL POINTER ACCESS <<<            ", 0x41);
-    }
-    /* IVT/BIOSデータ書き込み検出 */
-    else if (fault_addr < 0x7000UL && (error_code & 0x02)) {
-        tvram_puts_at(row+6, 0, " >>> IVT/BIOS DATA CORRUPTION <<<       ", 0x41);
-    }
-    else {
-        tvram_puts_at(row+6, 0, "                                        ", 0x41);
+    {
+        extern u32 sys_mem_kb;
+        u32 guard_a = 0x500000UL; /* MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE */
+        u32 guard_b = sys_mem_kb * 1024 - 0x20000UL - 4096; /* mem_end - MEM_EXEC_STACK_SIZE - PAGE_SIZE */
+        
+        /* スタックガード検出 (カーネル) */
+        if (fault_addr >= 0x8F000UL && fault_addr <= 0x8FFFFUL) {
+            tvram_puts_at(row+6, 0, " >>> KERNEL STACK OVERFLOW DETECTED <<< ", 0x41);
+        }
+        /* SBRKオーバーフロー検証 (GUARD A) */
+        else if (fault_addr >= guard_a && fault_addr < guard_a + 4096) {
+            tvram_puts_at(row+6, 0, " >>> SBRK LIMIT OVERFLOW DETECTED <<<   ", 0x41);
+        }
+        /* スタックオーバーフロー検証 (GUARD B) */
+        else if (fault_addr >= guard_b && fault_addr < guard_b + 4096) {
+            tvram_puts_at(row+6, 0, " >>> EXEC STACK OVERFLOW DETECTED <<<   ", 0x41);
+        }
+        /* NULLポインタ検出 (0x0000-0x0FFF) */
+        else if (fault_addr < 0x1000UL) {
+            tvram_puts_at(row+6, 0, " >>> NULL POINTER ACCESS <<<            ", 0x41);
+        }
+        /* IVT/BIOSデータ書き込み検出 */
+        else if (fault_addr < 0x7000UL && (error_code & 0x02)) {
+            tvram_puts_at(row+6, 0, " >>> IVT/BIOS DATA CORRUPTION <<<       ", 0x41);
+        }
+        else {
+            tvram_puts_at(row+6, 0, "                                        ", 0x41);
+        }
     }
 
     tvram_puts_at(row+7, 0, "========================================", 0x41);

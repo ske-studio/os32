@@ -22,13 +22,9 @@
 #include "os32_kapi_shared.h"
 #include "memmap.h"
 
-/* プログラムのロード先アドレス */
+/* プログラムのロード先 (固定) */
 #define EXEC_LOAD_ADDR    MEM_EXEC_LOAD_ADDR
 #define EXEC_MAX_SIZE     MEM_EXEC_MAX_SIZE
-
-/* プログラム専用スタック (カーネルスタックと分離) */
-#define EXEC_STACK_TOP    MEM_EXEC_STACK_TOP
-#define EXEC_STACK_SIZE   MEM_EXEC_STACK_SIZE
 /* ======== API ======== */
 void exec_init(void);
 int exec_run(const char *cmdline);

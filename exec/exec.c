@@ -12,6 +12,7 @@
 
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
+extern u32 sys_mem_kb;
 static KernelAPI *kapi = (KernelAPI *)KAPI_ADDR;
 void exec_init(void) {
 #include "exec_kapi_init.inc"
@@ -52,7 +53,14 @@ int exec_run(const char *cmdline)
 {
     u32 load_base = EXEC_LOAD_ADDR;
     u32 max_size  = EXEC_MAX_SIZE;
-    u32 stack_top = EXEC_STACK_TOP;
+    /* --- 動的レイアウト計算 --- */
+    u32 mem_end = sys_mem_kb * 1024;
+    u32 stack_top = mem_end;
+    u32 stack_bottom = stack_top - MEM_EXEC_STACK_SIZE;
+    u32 guard_b = stack_bottom - PAGE_SIZE;
+    u32 guard_a = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE;
+    u32 exec_heap_base = guard_a + PAGE_SIZE;
+    u32 exec_heap_size = guard_b - exec_heap_base;
     u8 *file_buf = (u8 *)load_base;
     u8 *load_addr = (u8 *)load_base;
     OS32Header *hdr;
@@ -104,11 +112,19 @@ int exec_run(const char *cmdline)
         kmemset(load_addr + text_sz, 0, bss_sz);
     }
 
-    exec_heap_init(heap_sz);
-    kapi->sbrk_heap_limit = EXEC_HEAP_BASE + heap_sz;
+    /* ヒープ初期化 (動的サイズ) */
+    exec_heap_init_at(exec_heap_base, exec_heap_size);
+    kapi->sbrk_heap_limit = guard_a;  /* ★修正: 固定上限 */
+
+    /* ガードページ設定 */
+    paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1);
+    paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1);
 
     if (!is_exec_running) {
         if (exec_setjmp(exec_kernel_jmpbuf) != 0) {
+            /* ガードページ解除 */
+            paging_set_page(guard_a, guard_a, PAGE_RW);
+            paging_set_page(guard_b, guard_b, PAGE_RW);
             exec_heap_reset();
             return exec_exit_status;
         }

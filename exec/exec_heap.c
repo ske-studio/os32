@@ -29,21 +29,18 @@ typedef struct BlkHdr {
 } BlkHdr;
 
 /* ======== ヒープ管理 ======== */
-static u8  *heap_base = (u8 *)EXEC_HEAP_BASE;
+static u8  *heap_base = (u8 *)0;
 static u32  heap_size = 0;
 static u32  heap_used = 0;
 
 /* ======================================================================== */
 /*  初期化                                                                  */
 /* ======================================================================== */
-void exec_heap_init(u32 size)
+void exec_heap_init_at(u32 base, u32 size)
 {
     BlkHdr *first;
 
-    if (size > EXEC_HEAP_MAX) size = EXEC_HEAP_MAX;
-    if (size == 0) size = EXEC_HEAP_DEFAULT;
-
-    heap_base = (u8 *)EXEC_HEAP_BASE;
+    heap_base = (u8 *)base;
     heap_size = size;
     heap_used = 0;
 

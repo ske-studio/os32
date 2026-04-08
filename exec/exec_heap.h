@@ -14,14 +14,13 @@
 
 #include "memmap.h"
 
-#define EXEC_HEAP_BASE    MEM_EXEC_HEAP_BASE
-#define EXEC_HEAP_MAX     (1024UL * 1024UL)  /* 最大1MB */
-#define EXEC_HEAP_DEFAULT (1024UL * 1024UL)  /* デフォルト1MB */
+/* exec_heap のベースアドレスとサイズは exec_run() 内で動的に計算される */
 
 /* ヒープ初期化 (exec_run開始時に呼ぶ)
+ * base: ヒープの開始アドレス
  * size: 確保するヒープサイズ (バイト)
  * 全体を1つの空きブロックとして初期化する */
-void exec_heap_init(u32 size);
+void exec_heap_init_at(u32 base, u32 size);
 
 /* ヒープからメモリ確保 (4バイトアラインメント)
  * ファーストフィット方式で空きブロックを検索・分割

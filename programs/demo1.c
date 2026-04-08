@@ -18,7 +18,7 @@
 
 #define SPRITE_SIZE    16
 #define SPRITES_PER_STEP 4
-#define MAX_SPRITES    64   /* SPR_MAX_16 */
+#define MAX_SPRITES    60   /* 16x16スプライト上限 (プール制約) */
 #define PHASE_TICKS    500  /* 5秒 = 500 ticks (100Hz) */
 #define FPS_THRESHOLD  20
 
@@ -38,7 +38,7 @@ typedef struct {
     int active;
 } Entity;
 
-static Entity ents[MAX_SPRITES];
+static Entity *ents = 0;
 static int ent_count = 0;
 
 /* ======== ログ用 ======== */
@@ -49,7 +49,7 @@ typedef struct {
 } PhaseResult;
 
 #define MAX_PHASES 32
-static PhaseResult results[MAX_PHASES];
+static PhaseResult *results = 0;
 static int result_count = 0;
 
 /* ======== スプライト生成 ======== */
@@ -142,6 +142,11 @@ void main(int argc, char **argv, KernelAPI *api)
     int len;
 
     libos32gfx_init(api);
+
+    /* 配列をヒープに確保 (BSS削減のため) */
+    ents = (Entity *)api->mem_alloc(sizeof(Entity) * MAX_SPRITES);
+    results = (PhaseResult *)api->mem_alloc(sizeof(PhaseResult) * MAX_PHASES);
+    if (!ents || !results) return;
 
     /* 背景描画 */
     gfx_clear(0);
