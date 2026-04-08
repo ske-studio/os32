@@ -212,10 +212,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* ヒープ初期化 */
     tvram_print(24, 2, "HEAP...", TATTR_GREEN);
-    /* kmalloc_init needs to be modified if it uses mem_kb dynamically, 
-       but for now we pass existing KHEAP_SIZE limit, or update it later. */
     kmalloc_init((void *)KHEAP_BASE, KHEAP_SIZE);
-    tvram_print(31, 2, "192K", TATTR_WHITE);
+    tvram_print(31, 2, "316K", TATTR_WHITE);
 
     /* ページング初期化 (メモリ保護有効化) */
     tvram_print(37, 2, "PAGE...", TATTR_GREEN);

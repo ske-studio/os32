@@ -9,21 +9,27 @@
 /*  構造:                                                                   */
 /*    page_directory[1024]  — ページディレクトリ (4KB)                      */
 /*    page_tables[4][1024]  — ページテーブル4枚 = 16MBカバー (16KB)         */
-/*    合計BSS: ~36KB (アライメント用パディング含む)                         */
+/*    合計BSS: ~40KB (アライメント用パディング含む)                         */
 /*                                                                          */
-/*  保護マップ:                                                             */
-/*    0x00000 - 0x00FFF : Read-Only   (IVT + BIOSデータ)                   */
-/*    0x01000 - 0x06FFF : Read-Only   (BIOS周辺)                           */
-/*    0x07000 - 0x07FFF : Read-Write  (BIOSトランポリン)                    */
-/*    0x08000 - 0x08FFF : Read-Only   (loader+pm32, 使用済み)              */
-/*    0x09000 - 0x3FFFF : Read-Write  (カーネル)                           */
-/*    0x40000 - 0x6FFFF : Read-Write  (kmallocヒープ)                      */
-/*    0x70000 - 0x8EFFF : Read-Write  (VRAMバックバッファ)                  */
-/*    0x8F000 - 0x8FFFF : Not-Present (★スタックガードページ)              */
-/*    0x90000 - 0x9FFFF : Read-Write  (スタック)                           */
-/*    0xA0000 - 0xEFFFF : Read-Write  (テキスト/グラフィックVRAM)           */
-/*    0xF0000 - 0xFFFFF : Read-Only   (BIOS ROM)                           */
-/*    0x100000-0xFFFFFF : Read-Write  (拡張メモリ)                         */
+/*  保護マップ (2026-04 再構築, ソースコード準拠):                           */
+/*                                                                          */
+/*  [コンベンショナルメモリ]                                                */
+/*    0x00000 - 0x00FFF : R/W  (IVT + BDA, BIOSトランポリンの書込み有)      */
+/*    0x01000 - 0x05FFF : R/O  (BIOS周辺)                                   */
+/*    0x06000 - 0x07FFF : R/W  (BIOSトランポリン)                           */
+/*    0x08000 - 0x08FFF : R/O  (loader.bin, 使用済み)                       */
+/*    0x09000 - 0x3FFFF : R/W  (カーネル .text+.data+.bss + マージン)       */
+/*    0x40000 - 0x8EFFF : R/W  (kmallocヒープ, 316KB)                       */
+/*    0x8F000 - 0x8FFFF : NP   (★カーネルスタックガード)                    */
+/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, ESP=0x9FFFC)              */
+/*    0xA0000 - 0xEFFFF : R/W  (テキスト/グラフィックVRAM)                  */
+/*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
+/*                                                                          */
+/*  [拡張メモリ]                                                            */
+/*    0x100000 - 0x1FFFFF : R/W  (カーネルデータ: フォント/Unicode/BB/KAPI) */
+/*    0x200000 - 0x3FFFFF : NP   (カーネル予約, 将来拡張用)                 */
+/*    0x400000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
+/*    mem_end  - 0xFFFFFF : NP   (未実装メモリ)                             */
 /* ======================================================================== */
 
 #include "paging.h"
@@ -118,7 +124,8 @@ void paging_init(u32 mem_kb)
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
 
-    /* ====== 外部プログラム保護 (VMMにより不要となったため削除) ====== */
+    /* カーネル予約域: Not-Present (将来拡張用, Phase 3) */
+    paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
 
     /* BIOS ROM: Read-Only */
     paging_set_readonly(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END);
