@@ -189,11 +189,10 @@ static void cmd_cat(int argc, char **argv)
         }
         r = g_api->sys_read(fd, io_buf, 65536);
         g_api->sys_close(fd);
-        if (r < 0) {
+        if (r <= 0) {
             continue;
         }
-        io_buf[r] = 0;
-        g_api->kprintf(ATTR_WHITE, "%s", (const char*)io_buf);
+        g_api->sys_write(1, io_buf, r);
     }
 }
 
@@ -237,10 +236,11 @@ static void cmd_echo(int argc, char **argv)
         }
     } else {
         for (i = 1; i < argc; i++) {
-            g_api->kprintf(ATTR_WHITE, "%s", argv[i]);
-            if (i < argc - 1) g_api->kprintf(ATTR_WHITE, "%s", " ");
+            int l = 0; while (argv[i][l]) l++;
+            g_api->sys_write(1, argv[i], l);
+            if (i < argc - 1) g_api->sys_write(1, " ", 1);
         }
-        g_api->kprintf(ATTR_WHITE, "%s", "\n");
+        g_api->sys_write(1, "\n", 1);
     }
 }
 
