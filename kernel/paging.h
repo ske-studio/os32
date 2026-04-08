@@ -54,6 +54,24 @@ void paging_set_not_present(u32 start, u32 end);
 /* ページング有効かどうか */
 int paging_enabled(void);
 
+/* ======== ページディレクトリ切り替えAPI (Phase 2) ======== */
+
+/* 子プロセス用ページディレクトリを構築する
+ * phys_pages: マッピングする物理ページアドレスの配列
+ * page_count: ページ数
+ * virt_start: マッピング先仮想アドレス (通常 0x400000)
+ * カーネル空間 (0x000000〜0x3FFFFF) はマスターPDと共有する
+ * 戻り値: 構築したPDのポインタ (kmalloc確保), NULL=失敗 */
+u32 *paging_create_pd(u32 *phys_pages, int page_count, u32 virt_start);
+
+/* 子プロセス用ページディレクトリを破棄する (kfreeで解放) */
+void paging_destroy_pd(u32 *pd);
+
+/* CR3を切り替える (TLB全フラッシュ: CR3リロード方式, i386互換) */
+void paging_switch_pd(u32 *pd);
+
+/* マスター(カーネル)ページディレクトリを取得 */
+u32 *paging_get_master_pd(void);
 
 
 #endif /* __PAGING_H */

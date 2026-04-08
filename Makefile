@@ -55,7 +55,7 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 C_KERNEL = \
     kernel/kernel.c kernel/idt.c kernel/isr_handlers.c \
-    kernel/paging.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
+    kernel/paging.c kernel/pgalloc.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \

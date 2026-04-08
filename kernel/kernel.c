@@ -18,6 +18,7 @@
 #include "kmalloc.h"
 #include "palette.h"
 #include "paging.h"
+#include "pgalloc.h"
 #include "exec.h"
 #include "ide.h"
 #include "vfs.h"
@@ -219,6 +220,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(37, 2, "PAGE...", TATTR_GREEN);
     paging_init(mem_kb);
     tvram_print(44, 2, "OK", TATTR_WHITE);
+
+    /* 物理ページフレームアロケータ初期化 (paging_initの後) */
+    pgalloc_init(mem_kb);
 
     /* プログラムローダー初期化 (KernelAPIテーブル構築) */
     tvram_print(48, 2, "EXEC...", TATTR_GREEN);

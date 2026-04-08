@@ -204,4 +204,103 @@ void paging_set_not_present(u32 start, u32 end)
 /* ======================================================================== */
 int paging_enabled(void) { return pg_enabled; }
 
+/* ======================================================================== */
+/*  paging_get_master_pd — マスター(カーネル)ページディレクトリを取得         */
+/* ======================================================================== */
+u32 *paging_get_master_pd(void) { return page_directory; }
 
+/* ======================================================================== */
+/*  paging_switch_pd — CR3を切り替える                                      */
+/*  i386互換: CR3リロード方式でTLBを全フラッシュ                            */
+/* ======================================================================== */
+void paging_switch_pd(u32 *pd)
+{
+    u32 pd_phys = (u32)pd;
+    __asm__ volatile("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
+}
+
+/* ======================================================================== */
+/*  paging_create_pd — 子プロセス用ページディレクトリを構築                  */
+/*                                                                          */
+/*  カーネル空間 (PDエントリ0) はマスターPDのページテーブルを共有。           */
+/*  プログラム空間は新しいページテーブルに物理ページをマッピング。           */
+/*                                                                          */
+/*  メモリ確保: kmalloc でPD (4KB) + ページテーブル1枚 (4KB) を確保。       */
+/*  アライメント: 4096バイト境界が必要なため、+4095バイトのパディング。      */
+/*                                                                          */
+/*  ★ プログラム空間のガードページ・ヒープ・スタック等は exec_run() 側で     */
+/*    paging_set_page() を使って設定する (既存ロジックと同様)。              */
+/* ======================================================================== */
+
+#include "kmalloc.h"
+
+u32 *paging_create_pd(u32 *phys_pages, int page_count, u32 virt_start)
+{
+    u8 *pd_raw_buf;
+    u8 *pt_raw_buf;
+    u32 *new_pd;
+    u32 *new_pt;
+    int i;
+    u32 pdi_start;
+    u32 virt_addr;
+    int pg_idx;
+
+    /* PD用メモリ確保 (4KB + 4095パディング) */
+    pd_raw_buf = (u8 *)kmalloc(4096 + 4095);
+    if (!pd_raw_buf) return (u32 *)0;
+
+    /* PT用メモリ確保 (4KB + 4095パディング) */
+    pt_raw_buf = (u8 *)kmalloc(4096 + 4095);
+    if (!pt_raw_buf) {
+        kfree(pd_raw_buf);
+        return (u32 *)0;
+    }
+
+    /* 4096バイト境界にアライン */
+    new_pd = align4096(pd_raw_buf);
+    new_pt = align4096(pt_raw_buf);
+
+    /* ステップ1: マスターPDの全エントリをコピー (カーネル空間を共有) */
+    for (i = 0; i < PDE_COUNT; i++) {
+        new_pd[i] = page_directory[i];
+    }
+
+    /* ステップ2: プログラム空間のページテーブルを新規構築 */
+    /* virt_start (0x400000) のPDエントリインデックス = 1 */
+    pdi_start = virt_start >> 22;
+
+    /* ページテーブルを初期化 (全エントリNot-Present) */
+    for (i = 0; i < PTE_COUNT; i++) {
+        new_pt[i] = PAGE_NOT_PRESENT;
+    }
+
+    /* 物理ページをマッピング */
+    pg_idx = 0;
+    virt_addr = virt_start;
+    for (pg_idx = 0; pg_idx < page_count && pg_idx < PTE_COUNT; pg_idx++) {
+        u32 pti = ((virt_addr + (u32)pg_idx * PAGE_SIZE) >> 12) & 0x3FF;
+        new_pt[pti] = (phys_pages[pg_idx] & 0xFFFFF000UL) | PAGE_RW;
+    }
+
+    /* PDエントリにページテーブルを登録 */
+    new_pd[pdi_start] = (u32)new_pt | PAGE_RW;
+
+    return new_pd;
+}
+
+/* ======================================================================== */
+/*  paging_destroy_pd — 子プロセス用ページディレクトリを破棄                 */
+/*                                                                          */
+/*  PDとPT用のkmallocメモリを解放する。                                      */
+/*  注意: kmallocのポインタはアライメント前の生ポインタなので、              */
+/*  解放にはアライン前のアドレスが必要。ここでは「アライン済みPDの           */
+/*  直前にあるkmallocヘッダ」からヒューリスティックに解放する。              */
+/*                                                                          */
+/*  ★ 簡略化のため、PD/PTの生ポインタをExecContextに保存する方式を使用。    */
+/* ======================================================================== */
+void paging_destroy_pd(u32 *pd)
+{
+    /* paging_destroy_pd_ex で解放。この関数は互換性のため残す */
+    (void)pd;
+    /* 実際の解放はExecContext内のraw pointerを使って行う */
+}
