@@ -11,8 +11,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS (GCC移植版)
 | [OS32_SPEC.md](OS32_SPEC.md) | カーネル技術仕様書（アーキテクチャ、メモリマップ、デバイスドライバ、ファイルシステム、シェル、ビルドシステム） |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI 仕様書（外部プログラム実行基盤、呼び出し規約、APIレイアウト） |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 開発ガイドライン・ロードマップ |
-| [PM_PIO_TEST.md](PM_PIO_TEST.md) | プロテクトモード IDE PIO 読み込み実証実験記録 |
-| [HDD_BIOS_DEBUG.md](HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
+| [11_GIT_POLICY.md](11_GIT_POLICY.md) | AIとの協調開発における公式Git運用ポリシー（マイクロコミット・ログ規約） |
+| [PM_PIO_TEST.md](logs/PM_PIO_TEST.md) | プロテクトモード IDE PIO 読み込み実証実験記録 |
+| [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
 
 ---
@@ -39,9 +40,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS (GCC移植版)
 | §1 | 概要（アドレス配置、マジックナンバー） |
 | §2 | 呼び出し規約（System V ABI, cdecl等） |
 | §3 | 外部プログラムのビルド手順（main配置ルール） |
-| §4 | KernelAPI 構造体レイアウト |
-| §5 | フォルト復帰機構 |
-| §6 | 実行方式 |
+| §4 | KernelAPI 構造体レイアウト（データフィールド + 95関数） |
+| §4-1 | グラフィックスAPI補足（libos32gfx移行について） |
 
 ---
 

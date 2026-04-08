@@ -75,8 +75,10 @@ ATA PIOモードによるIDE HDD制御。
 | 関数 | 説明 |
 |------|------|
 | `ide_init()` | IDE検出・初期化 |
+| `ide_identify(drv, info)` | ドライブ情報取得 (IdeInfo構造体) |
 | `ide_read_sector(drv, lba, buf)` | 1セクタ読込 |
 | `ide_write_sector(drv, lba, buf)` | 1セクタ書込 |
+| `ide_write_sectors(drv, lba, cnt, buf)` | 複数セクタ連続書込 |
 | `ide_drive_present(drv)` | ドライブ存在チェック |
 
 ---

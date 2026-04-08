@@ -17,7 +17,7 @@ KernelAPIポインタを引数として実行する。
 | ネスト実行 | 非サポート (execve 方式によるプロセスの完全置換。終了時はカーネルに復帰し無名シェルを再起動) |
 | カーネル側規約 | GCC (System V) + `__cdecl` ラッパー |
 | 外部プログラム規約 | System V i386 ABI (スタック渡し) |
-| 現在のAPIバージョン | **18** |
+| 現在のAPIバージョン | **22** |
 | プログラム専用スタック | ESP=0x57F000を終端として下方に展開 |
 | スタック保護 | 未マッピング領域を利用した暗黙のPage Faultガード |
 
@@ -50,5 +50,8 @@ KernelAPIポインタを引数として実行する。
 | shell | `programs/shell/` | システム標準シェル (階層化モジュール構造) |
 | vz | `programs/vz/` | VZ Editor移植版 |
 | skk_test| `programs/skk/` | SKKフロントエンド |
-| test2-4 | `programs/` | APIテスト・システム検証用 |
+| gfx_demo| `programs/gfx_demo.c` | libos32gfx グラフィックスデモ |
+| spr_test| `programs/spr_test.c` | スプライト描画テスト |
+| bench | `programs/bench/` | ベンチマークプログラム |
 | install | `programs/install.c` | HDDインストーラ |
+| test2-4 | `programs/` | APIテスト・システム検証用 |

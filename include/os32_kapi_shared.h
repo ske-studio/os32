@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      21
+#define KAPI_VERSION      22
 
 /* ======================================================================== */
 /*  システム共通制限値 (SSoT)                                                */
@@ -104,6 +104,42 @@ typedef struct {
 /* ======================================================================== */
 /*  共有構造体定義 (外部プログラムで直接使用可能)                              */
 /* ======================================================================== */
+
+/* 矩形 (ダーティレクタングルのX/Wは32の倍数でアライメントされる) */
+typedef struct {
+    int x, y, w, h;
+} GFX_Rect;
+
+/* ハードウェアバックバッファ本体の構造体 (PC-98プレーン構造) */
+typedef struct {
+    int width;      /* 640 */
+    int height;     /* 400 */
+    int pitch;      /* 80 bytes per line */
+    u8 *planes[4];  /* 0:B, 1:R, 2:G, 3:I */
+} GFX_Framebuffer;
+
+/* パレットエントリ (各0-15) */
+typedef struct {
+    u8 r, g, b;
+} GFX_Color;
+
+/* サーフェス — オフスクリーン描画バッファ */
+typedef struct {
+    int w, h;
+    int pitch;          /* バイト/ライン (w+7)/8 */
+    u8 *planes[4];      /* 4プレーン (パックドビット) */
+    int _pool_idx;      /* 静的プール管理用 (-1=外部管理) */
+} GFX_Surface;
+
+/* スプライト — マスク付き事前コンパイル済み (透過描画用) */
+typedef struct {
+    int w, h;
+    int pitch;
+    u8 *planes[4];      /* スプライトデータ */
+    u8 *mask;           /* ANDマスク (透過=0xFF, 不透過=0x00) */
+    u8 *bg_buf;         /* 自動背景退避用バッファ (4プレーン連続) */
+    int _pool_idx;
+} GFX_Sprite;
 
 /* RTC時刻構造体 */
 typedef struct {
