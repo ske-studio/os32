@@ -16,6 +16,7 @@ void gfx_sprite_init(void)
         spr_slots = (SprSlot *)gfx_api->mem_alloc(sizeof(SprSlot) * SPR_POOL_MAX);
         spr_data = (SprDataPool *)gfx_api->mem_alloc(sizeof(SprDataPool));
     }
+    if (!spr_slots || !spr_data) return; /* メモリ不足 — 安全に復帰 */
     for (i = 0; i < SPR_POOL_MAX; i++) {
         spr_slots[i].used = 0;
         spr_slots[i].pool_type = SPR_TYPE_NONE;

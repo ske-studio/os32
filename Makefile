@@ -263,9 +263,9 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "bench" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "gfx_demo" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "spr_test" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "demo1" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
 	elif [ "$*" = "skk_test" ]; then \
