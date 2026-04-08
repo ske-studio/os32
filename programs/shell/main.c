@@ -239,9 +239,17 @@ static void run_cmd_internal(int argc, char **argv) {
         *p = '\0';
 
         rc = g_api->exec_run(cmd_buf);
-        if (rc == EXEC_SUCCESS) { g_api->kprintf(ATTR_GREEN, "%s", "Exited.\n"); return; }
-        else if (rc == EXEC_ERR_FAULT) { g_api->kprintf(ATTR_RED, "%s", "Crashed.\n"); return; }
-        else if (rc != EXEC_ERR_GENERAL) { return; }
+        /* GFXモードのプログラム終了後、テキスト画面に復帰 */
+        g_api->gfx_shutdown();
+        if (rc == EXEC_SUCCESS) {
+            g_api->kprintf(ATTR_GREEN, "%s", "\n");
+            return;
+        } else if (rc == EXEC_ERR_FAULT) {
+            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
+            return;
+        } else if (rc != EXEC_ERR_GENERAL) {
+            return;
+        }
     }
 
     if (argv[0][0] == '.' && argv[0][1] == '/') {
@@ -255,8 +263,9 @@ static void run_cmd_internal(int argc, char **argv) {
         *p = '\0';
 
         rc = g_api->exec_run(cmd_buf);
-        if (rc == EXEC_SUCCESS) g_api->kprintf(ATTR_GREEN, "%s", "Exited.\n");
-        else if (rc == EXEC_ERR_FAULT) g_api->kprintf(ATTR_RED, "%s", "Crashed.\n");
+        g_api->gfx_shutdown();
+        if (rc == EXEC_SUCCESS) g_api->kprintf(ATTR_GREEN, "%s", "\n");
+        else if (rc == EXEC_ERR_FAULT) g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
         else g_api->kprintf(ATTR_RED, "%s", "Not found.\n");
         return;
     }

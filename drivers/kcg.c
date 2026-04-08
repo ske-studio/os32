@@ -41,7 +41,7 @@ static void kcg_wait(void)
 /*  KCG初期化                                                               */
 /* ======================================================================== */
 
-/* キャッシュ用のポインタ定義 (memmap.h: MEM_FONT_CACHE_BASE = 0x200000) */
+/* キャッシュ用のポインタ定義 (memmap.h: MEM_FONT_CACHE_BASE = 0x100000) */
 #include "memmap.h"
 #define KANJI_CACHE_SIZE   (32 * 94 * 94)   /* 282,752 Bytes */
 #define KANJI_FETCHED_SIZE (94 * 94)        /*   8,836 Bytes */

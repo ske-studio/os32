@@ -260,19 +260,22 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
 
 
-    /* 外部シェル起動 (終了したら再起動する無限ループ) */
+    /* 外部シェル起動 — 終了/クラッシュ時のフォールバックとして再起動ループ */
     for (;;) {
+        int rc;
         tvram_print(0, 0, "Loading shell...", TATTR_GRAY);
-        if (exec_run(SYS_SHELL_BIN) < 0) {
-            tvram_print(0, 0, "FATAL: Failed to load shell.bin", TATTR_RED);
+        rc = exec_run(SYS_SHELL_BIN);
+        if (rc < 0 && rc != EXEC_ERR_FAULT) {
+            /* シェルバイナリのロード自体が失敗 — 致命的エラー */
+            tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
             for (;;) asm volatile("hlt");
         }
-        /* シェルが異常終了・一瞬で終了した場合のFDD負荷軽減用ウェイト (約100ms) */
+        /* シェルが終了 (exitコマンド) またはクラッシュ復帰 */
+        /* FDD負荷軽減用ウェイト (約100ms) の後、画面クリアして再起動 */
         {
             u32 wait_end = tick_count + SHELL_RELOAD_DELAY;
             while (tick_count < wait_end) asm volatile("hlt");
         }
-        /* シェルが終了した場合は画面クリアして再起動 */
         tvram_clear();
     }
 
