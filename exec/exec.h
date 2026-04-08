@@ -22,11 +22,17 @@
 #include "os32_kapi_shared.h"
 #include "memmap.h"
 
+/* ネスト実行の最大深度 */
+#define MAX_EXEC_NEST     4
+
 /* プログラムのロード先 (固定) */
 #define EXEC_LOAD_ADDR    MEM_EXEC_LOAD_ADDR
 #define EXEC_MAX_SIZE     MEM_EXEC_MAX_SIZE
 /* ======== API ======== */
 void exec_init(void);
 int exec_run(const char *cmdline);
+
+/* 現在のネスト深度 (0=外部プログラム未実行) */
+extern volatile int exec_nest_level;
 
 #endif /* __EXEC_H */

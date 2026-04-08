@@ -10,7 +10,7 @@
 #include "paging.h"
 
 /* exec フォルト復帰用 (exec.c で定義) */
-extern volatile int is_exec_running;
+extern volatile int exec_nest_level;
 extern void exec_fault_recover(void);
 
 /* テキストVRAM直接アクセス (ベアメタル) */
@@ -94,7 +94,7 @@ void exception_handler(u32 error_code, u32 vector)
     tvram_puts_at(row+4, 0, "========================================", 0x41);
 
     /* exec実行中なら復帰、それ以外はシステム停止 */
-    if (is_exec_running) {
+    if (exec_nest_level > 0) {
         tvram_puts_at(row+5, 0, " >> Returning to shell...               ", 0xA1);
         _enable();
         exec_fault_recover();
@@ -176,7 +176,7 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip)
     tvram_puts_at(row+7, 0, "========================================", 0x41);
 
     /* exec実行中なら復帰、それ以外はシステム停止 */
-    if (is_exec_running) {
+    if (exec_nest_level > 0) {
         tvram_puts_at(row+8, 0, " >> Returning to shell...               ", 0xA1);
         _enable();
         exec_fault_recover();

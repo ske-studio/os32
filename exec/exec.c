@@ -18,24 +18,40 @@ void exec_init(void) {
 #include "exec_kapi_init.inc"
 }
 
-#define MAX_EXEC_NEST 4
-
 /* スタックを4バイト境界に揃えるためのマスク */
 #define STACK_ALIGN_MASK 3
 
-volatile int is_exec_running = 0;
+/* ======================================================================== */
+/*  ExecContext — ネスト階層ごとのコンテキスト保存構造体                     */
+/* ======================================================================== */
+typedef struct {
+    u32  jmpbuf[6];           /* setjmp/longjmp用バッファ */
+    u32  guard_a;             /* sbrkガードページアドレス */
+    u32  guard_b;             /* スタックガードページアドレス */
+    u32  sbrk_heap_limit;     /* sbrk上限 */
+    u32  exec_heap_base;      /* ヒープベースアドレス */
+    u32  exec_heap_size;      /* ヒープサイズ */
+} ExecContext;
+
+/* ======================================================================== */
+/*  グローバル状態                                                          */
+/* ======================================================================== */
+volatile int exec_nest_level = 0;
 volatile int exec_exit_status = EXEC_SUCCESS;
-static u32 exec_kernel_jmpbuf[6];
+static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 
 extern int exec_setjmp(u32 *buf);
 extern void exec_longjmp(u32 *buf);
 
+/* ======================================================================== */
+/*  exec_exit — 現在の実行階層を終了し、親のsetjmp復帰ポイントへ戻る        */
+/* ======================================================================== */
 void exec_exit(int status)
 {
-    if (is_exec_running) {
+    if (exec_nest_level > 0) {
         exec_exit_status = status;
-        is_exec_running = 0;
-        exec_longjmp(exec_kernel_jmpbuf);
+        exec_nest_level--;
+        exec_longjmp(exec_ctx_stack[exec_nest_level].jmpbuf);
     }
 }
 
@@ -49,6 +65,9 @@ void __cdecl kapi_sys_exit(int status)
     exec_exit(status);
 }
 
+/* ======================================================================== */
+/*  exec_run — 外部プログラムのロードと実行 (ネスト対応)                    */
+/* ======================================================================== */
 int exec_run(const char *cmdline)
 {
     u32 load_base = EXEC_LOAD_ADDR;
@@ -67,11 +86,18 @@ int exec_run(const char *cmdline)
     int sz;
     u32 code_off, text_sz, bss_sz, heap_sz, entry_off;
     ExecEntry entry;
+    ExecContext *ctx;
     
     char path[VFS_MAX_PATH];
     const char *p = cmdline;
     int i = 0;
 
+    /* ネスト上限チェック */
+    if (exec_nest_level >= MAX_EXEC_NEST) {
+        shell_print("Error: exec nest limit reached\n", ATTR_RED);
+        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOMEM);
+        return EXEC_ERR_NOMEM;
+    }
 
     
     while (*p == ' ') p++;
@@ -85,14 +111,14 @@ int exec_run(const char *cmdline)
         sz = fat12_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
     }
     if (sz <= 0) {
-        if (is_exec_running) exec_exit(EXEC_ERR_NOT_FOUND);
+        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOT_FOUND);
         return EXEC_ERR_NOT_FOUND;
     }
 
     hdr = (OS32Header *)file_buf;
     if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE || hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
-        if (is_exec_running) exec_exit(EXEC_ERR_INVALID);
+        if (exec_nest_level > 0) exec_exit(EXEC_ERR_INVALID);
         return EXEC_ERR_INVALID;
     }
 
@@ -103,7 +129,7 @@ int exec_run(const char *cmdline)
     entry_off = hdr->entry_offset;
 
     if (text_sz + bss_sz > max_size) {
-        if (is_exec_running) exec_exit(EXEC_ERR_NOMEM);
+        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOMEM);
         return EXEC_ERR_NOMEM;
     }
 
@@ -114,25 +140,46 @@ int exec_run(const char *cmdline)
 
     /* ヒープ初期化 (動的サイズ) */
     exec_heap_init_at(exec_heap_base, exec_heap_size);
-    kapi->sbrk_heap_limit = guard_a;  /* ★修正: 固定上限 */
+    kapi->sbrk_heap_limit = guard_a;  /* sbrk上限 */
 
     /* ガードページ設定 */
     paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1);
     paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1);
 
-    if (!is_exec_running) {
-        if (exec_setjmp(exec_kernel_jmpbuf) != 0) {
-            /* ガードページ解除 */
-            paging_set_page(guard_a, guard_a, PAGE_RW);
-            paging_set_page(guard_b, guard_b, PAGE_RW);
-            exec_heap_reset();
-            return exec_exit_status;
+    /* 現在の階層にコンテキストを保存 */
+    ctx = &exec_ctx_stack[exec_nest_level];
+    ctx->guard_a = guard_a;
+    ctx->guard_b = guard_b;
+    ctx->sbrk_heap_limit = kapi->sbrk_heap_limit;
+    ctx->exec_heap_base = exec_heap_base;
+    ctx->exec_heap_size = exec_heap_size;
+
+    /* setjmp — 毎回実行 (ネスト対応) */
+    if (exec_setjmp(ctx->jmpbuf) != 0) {
+        /* ======== longjmp復帰ポイント ======== */
+        /* 現在の階層のコンテキストからガードページを解除 */
+        ctx = &exec_ctx_stack[exec_nest_level];
+        paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
+        paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
+        exec_heap_reset();
+
+        /* 親が存在する場合、親のヒープ/sbrk状態を復元 */
+        if (exec_nest_level > 0) {
+            ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
+            exec_heap_init_at(parent->exec_heap_base, parent->exec_heap_size);
+            kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
+            /* 親のガードページも再設定 */
+            paging_set_not_present(parent->guard_a,
+                                   parent->guard_a + PAGE_SIZE - 1);
+            paging_set_not_present(parent->guard_b,
+                                   parent->guard_b + PAGE_SIZE - 1);
         }
+        return exec_exit_status;
     }
 
     entry = (ExecEntry)(load_addr + entry_off);
     
-    is_exec_running = 1;
+    exec_nest_level++;
 
     {
         char *str_area;
@@ -185,10 +232,9 @@ int exec_run(const char *cmdline)
             : "r"(new_esp), "g"(argc), "g"(argv_area), "g"(kapi), "r"(entry)
             : "eax", "ecx", "edx", "memory"
         );
-        /* User program shouldn't return directly from call; it should use sys_exit.
-           If it does return, we treat it as success and manually call exec_exit. */
+        /* プログラムがsys_exitを使わずreturnした場合、成功として処理 */
         exec_exit(EXEC_SUCCESS);
     }
 
-    return EXEC_SUCCESS; // Should technically never be reached
+    return EXEC_SUCCESS; /* 到達しない */
 }
