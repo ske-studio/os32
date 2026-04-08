@@ -85,8 +85,18 @@
 
 /* KernelAPIテーブルアドレスは os32_kapi_shared.h で定義 (KAPI_ADDR) */
 
+/* ====================================================================== */
+/*  共有メモリ空間 (IPC用, 0x200000 付近)                                    */
+/*  前後にガードページ (NOT PRESENT) を配置                               */
+/* ====================================================================== */
+#define MEM_SHM_GUARD_LO      0x200000UL  /* 前方ガードページ (4KB) */
+#define MEM_SHM_BASE          0x201000UL  /* 共有メモリ開始 */
+#define MEM_SHM_SIZE          0x040000UL  /* 256KB */
+#define MEM_SHM_END           0x240FFFUL  /* 共有メモリ終端 */
+#define MEM_SHM_GUARD_HI      0x241000UL  /* 後方ガードページ (4KB) */
+
 /* カーネル予約域 (将来拡張用, NOT PRESENTに設定) */
-#define MEM_KERNEL_RESV_START 0x200000UL
+#define MEM_KERNEL_RESV_START 0x242000UL
 #define MEM_KERNEL_RESV_END   0x3FFFFFUL
 
 /* ====================================================================== */

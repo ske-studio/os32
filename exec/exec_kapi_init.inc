@@ -93,9 +93,12 @@ extern void __cdecl wrap_gfx_add_dirty_rect(int x, int y, int w, int h);
 extern void __cdecl wrap_gfx_present_dirty(void);
 extern void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf);
 extern void __cdecl wrap_kcg_read_kanji(u16 jis_code, u8 *buf);
+extern void * __cdecl wrap_sys_shm_alloc(int blocks);
+extern int __cdecl wrap_sys_shm_lock(void *ptr);
+extern int __cdecl wrap_sys_shm_free(void *ptr);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 22;
+kapi->version = 23;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_shutdown = wrap_gfx_shutdown;
@@ -192,4 +195,7 @@ kapi->version = 22;
     kapi->gfx_present_dirty = wrap_gfx_present_dirty;
     kapi->kcg_read_ank = wrap_kcg_read_ank;
     kapi->kcg_read_kanji = wrap_kcg_read_kanji;
+    kapi->sys_shm_alloc = wrap_sys_shm_alloc;
+    kapi->sys_shm_lock = wrap_sys_shm_lock;
+    kapi->sys_shm_free = wrap_sys_shm_free;
     kapi->sbrk_heap_limit = 0;

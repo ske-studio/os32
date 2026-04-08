@@ -22,6 +22,7 @@
 #include "sys.h"
 #include "kprintf.h"
 #include "io.h"
+#include "shm.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -494,5 +495,20 @@ void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf)
 void __cdecl wrap_kcg_read_kanji(u16 jis_code, u8 *buf)
 {
     kcg_read_kanji(jis_code, buf);
+}
+
+void * __cdecl wrap_sys_shm_alloc(int blocks)
+{
+    return shm_alloc(blocks);
+}
+
+int __cdecl wrap_sys_shm_lock(void *ptr)
+{
+    return shm_lock(ptr);
+}
+
+int __cdecl wrap_sys_shm_free(void *ptr)
+{
+    return shm_free(ptr);
 }
 

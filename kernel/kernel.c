@@ -19,6 +19,7 @@
 #include "palette.h"
 #include "paging.h"
 #include "pgalloc.h"
+#include "shm.h"
 #include "exec.h"
 #include "ide.h"
 #include "vfs.h"
@@ -223,6 +224,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
     pgalloc_init(mem_kb);
+
+    /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
+    shm_init();
 
     /* プログラムローダー初期化 (KernelAPIテーブル構築) */
     tvram_print(48, 2, "EXEC...", TATTR_GREEN);

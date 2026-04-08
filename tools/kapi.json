@@ -1,5 +1,5 @@
 {
-  "version": 22,
+  "version": 23,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -29,7 +29,8 @@
     "kcg.h",
     "sys.h",
     "kprintf.h",
-    "io.h"
+    "io.h",
+    "shm.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -722,6 +723,30 @@
         "u16 jis_code",
         "u8 *buf"
       ]
+    },
+    {
+      "name": "sys_shm_alloc",
+      "ret": "void *",
+      "args": [
+        "int blocks"
+      ],
+      "target": "shm_alloc"
+    },
+    {
+      "name": "sys_shm_lock",
+      "ret": "int",
+      "args": [
+        "void *ptr"
+      ],
+      "target": "shm_lock"
+    },
+    {
+      "name": "sys_shm_free",
+      "ret": "int",
+      "args": [
+        "void *ptr"
+      ],
+      "target": "shm_free"
     }
   ]
 }

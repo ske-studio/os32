@@ -100,6 +100,9 @@ typedef struct {
     void (__cdecl *gfx_present_dirty)(void);
     void (__cdecl *kcg_read_ank)(u8 ch, u8 *buf);
     void (__cdecl *kcg_read_kanji)(u16 jis_code, u8 *buf);
+    void * (__cdecl *sys_shm_alloc)(int blocks);
+    int (__cdecl *sys_shm_lock)(void *ptr);
+    int (__cdecl *sys_shm_free)(void *ptr);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
