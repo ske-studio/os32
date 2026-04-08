@@ -76,6 +76,4 @@ typedef struct {
     u8 used_128[SPR_MAX_128];
 } SprDataPool;
 
-#define MEM_GFX_SURF_POOL 0x600000 /* Dummy, let's just use heap allocation in libos32 */
-
 #endif
