@@ -16,6 +16,17 @@ PC-9801シリーズ向け 32ビット ベアメタルOS (GCC移植版)
 | [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
 
+## タスク (開発中の作業ドキュメント)
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/MEMMAP_OVERVIEW.md](tasks/MEMMAP_OVERVIEW.md) | メモリマップ再構築 — 全体概要 |
+| [tasks/MEMMAP_PHASE1.md](tasks/MEMMAP_PHASE1.md) | Phase 1: memmap.h 定数再定義 |
+| [tasks/MEMMAP_PHASE2.md](tasks/MEMMAP_PHASE2.md) | Phase 2: コンベンショナルメモリ修正 |
+| [tasks/MEMMAP_PHASE3.md](tasks/MEMMAP_PHASE3.md) | Phase 3: カーネルデータ再配置 |
+| [tasks/MEMMAP_PHASE4.md](tasks/MEMMAP_PHASE4.md) | Phase 4: プログラム空間再設計 |
+| [tasks/MEMMAP_PHASE5.md](tasks/MEMMAP_PHASE5.md) | Phase 5: 検証+ドキュメント更新 |
+
 ---
 
 ## OS32_SPEC.md 目次
