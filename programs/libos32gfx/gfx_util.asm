@@ -12,6 +12,7 @@ section .text
 ; -------------------------------------------------------------------------
 ; void __cdecl asm_gfx_clear(unsigned char color, unsigned char *bb[4]);
 ; -------------------------------------------------------------------------
+%define GFX_WIDTH 640
 asm_gfx_clear:
     push ebp
     mov ebp, esp
@@ -67,23 +68,19 @@ asm_gfx_clear:
     ret
 
 ; -------------------------------------------------------------------------
-; void __cdecl asm_gfx_draw_sprite(int x, int y, const GFX_Sprite *spr, unsigned char *bb[4]);
+; void __cdecl asm_gfx_draw_sprite_core(int x, int y, int w, int h, int src_pitch, const u8 **planes, const u8 *mask, u8 **bb_array);
 ; -------------------------------------------------------------------------
-; GFX_Sprite struct (36 bytes):
-;   0: w (int)
-;   4: h (int)
-;   8: pitch (int)
-;  12: planes[0] (ptr)
-;  16: planes[1] (ptr)
-;  20: planes[2] (ptr)
-;  24: planes[3] (ptr)
-;  28: mask (ptr)
-;  32: _pool_idx (int)
 
-%define ARG_X    [ebp+8]
-%define ARG_Y    [ebp+12]
-%define ARG_SPR  [ebp+16]
-%define ARG_BB   [ebp+20]
+global asm_gfx_draw_sprite_core
+
+%define ARG_X     [ebp+8]
+%define ARG_Y     [ebp+12]
+%define ARG_W     [ebp+16]
+%define ARG_H     [ebp+20]
+%define ARG_SRCP  [ebp+24]
+%define ARG_PLN   [ebp+28]
+%define ARG_MASK  [ebp+32]
+%define ARG_BB    [ebp+36]
 
 %define L_BB0    [ebp-4]
 %define L_BB1    [ebp-8]
@@ -93,25 +90,24 @@ asm_gfx_clear:
 %define L_SPR1   [ebp-24]
 %define L_SPR2   [ebp-28]
 %define L_SPR3   [ebp-32]
-%define L_MASK   [ebp-36]
-%define L_SRC_P  [ebp-40]  ; src_pitch
-%define L_IY     [ebp-44]  ; iy loop counter
-%define L_BX     [ebp-48]  ; bx loop counter
+%define L_IY     [ebp-36]
+%define L_BX     [ebp-40]
+%define L_DMASK  [ebp-44]
 
-asm_gfx_draw_sprite:
+asm_gfx_draw_sprite_core:
     push ebp
     mov ebp, esp
-    sub esp, 48
+    sub esp, 44
     push ebx
     push esi
     push edi
 
-    ; Null check spr
-    mov esi, ARG_SPR
+    ; Null check mask
+    mov esi, ARG_MASK
     test esi, esi
     jz .end_func
 
-    ; Cache pointers
+    ; Cache BB pointers
     mov eax, ARG_BB
     mov edx, [eax]
     mov dword L_BB0, edx
@@ -122,42 +118,39 @@ asm_gfx_draw_sprite:
     mov edx, [eax+12]
     mov dword L_BB3, edx
 
-    mov edx, [esi+12]
+    ; Cache Plane pointers
+    mov eax, ARG_PLN
+    mov edx, [eax]
     mov dword L_SPR0, edx
-    mov edx, [esi+16]
+    mov edx, [eax+4]
     mov dword L_SPR1, edx
-    mov edx, [esi+20]
+    mov edx, [eax+8]
     mov dword L_SPR2, edx
-    mov edx, [esi+24]
+    mov edx, [eax+12]
     mov dword L_SPR3, edx
-    mov edx, [esi+28]
-    mov dword L_MASK, edx
-
-    mov edx, [esi+8]
-    mov dword L_SRC_P, edx
 
     ; iy = 0
     mov dword L_IY, 0
 .loop_y:
-    ; 終了判定: iy < spr->h
-    mov esi, ARG_SPR
+    ; 終了判定: iy < h
     mov eax, L_IY
-    cmp eax, [esi+4]
+    cmp eax, ARG_H
     jge .end_func
 
     ; dy = y + iy
     mov eax, ARG_Y
     add eax, L_IY
     
-    ; if (dy < 0 || dy >= GFX_HEIGHT) continue
+    ; if (dy < 0) continue
     cmp eax, 0
     jl .next_y
+    ; if (dy >= GFX_HEIGHT) continue
     cmp eax, GFX_HEIGHT
     jge .next_y
 
     ; src_row = iy * src_pitch
     mov eax, L_IY
-    imul eax, L_SRC_P
+    imul eax, ARG_SRCP
     mov ecx, eax  ; ecx = src_row
 
     ; dst_row = dy * GFX_BPL + (x >> 3)
@@ -173,7 +166,7 @@ asm_gfx_draw_sprite:
     mov dword L_BX, 0
 .loop_x:
     mov eax, L_BX
-    cmp eax, L_SRC_P
+    cmp eax, ARG_SRCP
     jge .next_y
 
     ; dx_byte = (x >> 3) + bx
@@ -186,20 +179,84 @@ asm_gfx_draw_sprite:
     cmp edx, GFX_BPL
     jge .next_x
 
-    ; eax = bx
-    mov ebx, ecx  ; src_row
-    add ebx, eax  ; ebx = src_row + bx
-
-    mov edx, edi  ; dst_row
-    add edx, eax  ; edx = dst_row + bx
+    ; ebx = src_row + bx
+    mov ebx, ecx
+    add ebx, eax
 
     ; Load mask byte
-    mov esi, L_MASK
+    mov esi, ARG_MASK
     mov al, [esi + ebx]  ; al = mask byte
+
+    ; ==== Xピクセルクリップ ====
+    mov byte L_DMASK, 0xFF
+
+    ; px_start = x + (bx * 8)
+    mov ecx, L_BX
+    shl ecx, 3
+    add ecx, ARG_X       ; ecx = px_start
+
+    ; -- 左クリップ --
+    mov edx, 0
+    sub edx, ecx
+    cmp edx, 0
+    jle .chk_right
+    cmp edx, 8
+    jge .skip_byte
+    
+    ; L_DMASK の上位 edx ビットを 0 にする
+    push eax
+    mov cl, dl
+    mov al, L_DMASK
+    shr al, cl
+    mov L_DMASK, al
+    pop eax
+    ; ecx を px_start に戻す
+    mov ecx, L_BX
+    shl ecx, 3
+    add ecx, ARG_X
+
+.chk_right:
+    ; -- 右クリップ --
+    mov edx, ecx
+    add edx, 8           ; edx = px_start + 8
+    
+    push eax
+    mov eax, GFX_WIDTH  ; eax = VP_XMAX
+    sub edx, eax
+    pop eax
+    
+    cmp edx, 0
+    jle .apply_mask
+    cmp edx, 8
+    jge .skip_byte
+    
+    ; L_DMASK の下位 edx ビットを 0 にする
+    push eax
+    mov cl, dl
+    mov al, L_DMASK
+    shl al, cl
+    mov L_DMASK, al
+    pop eax
+
+.apply_mask:
+    mov dh, L_DMASK      ; dh = draw_mask
+    test dh, dh
+    jz .skip_byte
+
+    ; al (背景維持マスク) の、ビューポート外(dh=0)のビットを 1 にする
+    mov dl, dh           ; dl = draw_mask
+    not dl               ; dl = not draw_mask
+    or al, dl            ; al のビューポート外ビットが 1 になる
+
+    ; 描画用のレジスタを再構成
+    mov edx, edi
+    add edx, L_BX
 
     ; Plane 0
     mov esi, L_SPR0
     mov cl, [esi + ebx]
+    mov ch, L_DMASK
+    and cl, ch           ; ビューポート外の色データを消す
     mov esi, L_BB0
     mov ah, [esi + edx]
     and ah, al
@@ -209,6 +266,8 @@ asm_gfx_draw_sprite:
     ; Plane 1
     mov esi, L_SPR1
     mov cl, [esi + ebx]
+    mov ch, L_DMASK
+    and cl, ch
     mov esi, L_BB1
     mov ah, [esi + edx]
     and ah, al
@@ -218,6 +277,8 @@ asm_gfx_draw_sprite:
     ; Plane 2
     mov esi, L_SPR2
     mov cl, [esi + ebx]
+    mov ch, L_DMASK
+    and cl, ch
     mov esi, L_BB2
     mov ah, [esi + edx]
     and ah, al
@@ -227,6 +288,8 @@ asm_gfx_draw_sprite:
     ; Plane 3
     mov esi, L_SPR3
     mov cl, [esi + ebx]
+    mov ch, L_DMASK
+    and cl, ch
     mov esi, L_BB3
     mov ah, [esi + edx]
     and ah, al
@@ -235,9 +298,10 @@ asm_gfx_draw_sprite:
 
     ; Restore ecx (src_row)
     mov eax, L_IY
-    imul eax, L_SRC_P
+    imul eax, ARG_SRCP
     mov ecx, eax
 
+.skip_byte:
 .next_x:
     inc dword L_BX
     jmp .loop_x
@@ -253,6 +317,7 @@ asm_gfx_draw_sprite:
     mov esp, ebp
     pop ebp
     ret
+
 
 ; -------------------------------------------------------------------------
 ; void __cdecl asm_kcg_draw_font(int x, int y, const unsigned char *pat, int w_bytes, int h_lines, unsigned char fg, unsigned char *bb[4]);

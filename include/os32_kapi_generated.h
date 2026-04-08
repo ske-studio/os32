@@ -8,13 +8,6 @@ typedef struct {
     void (__cdecl *gfx_init)(void);
     void (__cdecl *gfx_shutdown)(void);
     void (__cdecl *gfx_present)(void);
-    void (__cdecl *gfx_clear)(u8 color);
-    void (__cdecl *gfx_pixel)(int x, int y, u8 color);
-    void (__cdecl *gfx_hline)(int x, int y, int w, u8 color);
-    void (__cdecl *gfx_vline)(int x, int y, int h, u8 color);
-    void (__cdecl *gfx_line)(int x0, int y0, int x1, int y1, u8 c);
-    void (__cdecl *gfx_rect)(int x, int y, int w, int h, u8 color);
-    void (__cdecl *gfx_fill_rect)(int x, int y, int w, int h, u8 c);
     int (__cdecl *kbd_trygetchar)(void);
     void * (__cdecl *mem_alloc)(u32 size);
     void (__cdecl *mem_free)(void *ptr);
@@ -72,10 +65,6 @@ typedef struct {
     int (__cdecl *ext2_format)(int drv, u32 sectors);
     void (__cdecl *kcg_init)(void);
     void (__cdecl *kcg_set_scale)(int s);
-    void (__cdecl *kcg_draw_ank)(int x, int y, u8 ch, u8 fg, u8 bg);
-    void (__cdecl *kcg_draw_kanji)(int x, int y, u16 jis, u8 fg, u8 bg);
-    int (__cdecl *kcg_draw_utf8)(int x, int y, const char *str, u8 fg, u8 bg);
-    int (__cdecl *kcg_draw_sjis)(int x, int y, const char *str, u8 fg, u8 bg);
     void (__cdecl *buz_on)(void);
     void (__cdecl *buz_off)(void);
     void (__cdecl *rshell_set_active)(int active);
@@ -102,13 +91,15 @@ typedef struct {
     int (__cdecl *sys_isatty)(int fd);
     int (__cdecl *sys_stat)(const char *path, OS32_Stat *buf);
     int (__cdecl *sys_fstat)(int fd, OS32_Stat *buf);
-    void (__cdecl *lcons_clear)(void);
-    void (__cdecl *lcons_putc)(int x, int y, char ch, u8 attr);
-    void (__cdecl *lcons_putkanji)(int x, int y, u16 jis, u8 attr);
-    void (__cdecl *lcons_fill_rect)(int x, int y, int w, int h, char ch, u8 attr);
-    void (__cdecl *lcons_sync_vram)(void);
-    int (__cdecl *gfx_screenshot)(const char *path);
-    int (__cdecl *gfx_load_vdp)(const char *path);
+    void (__cdecl *gfx_set_palette)(int idx, u8 r, u8 g, u8 b);
+    void (__cdecl *gfx_get_palette)(int idx, u8 *r, u8 *g, u8 *b);
+    void* (__cdecl *sys_memcpy)(void *dst, const void *src, u32 n);
+    void* (__cdecl *sys_memset)(void *dst, int val, u32 n);
+    void (__cdecl *gfx_get_framebuffer)(void *fb);
+    void (__cdecl *gfx_add_dirty_rect)(int x, int y, int w, int h);
+    void (__cdecl *gfx_present_dirty)(void);
+    void (__cdecl *kcg_read_ank)(u8 ch, u8 *buf);
+    void (__cdecl *kcg_read_kanji)(u16 jis_code, u8 *buf);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

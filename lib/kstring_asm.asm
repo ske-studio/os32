@@ -16,6 +16,7 @@ memcpy:
     mov ebp, esp
     push edi
     push esi
+    cld
     
     mov edi, [ebp+8]    ; dst
     mov esi, [ebp+12]   ; src
@@ -65,6 +66,7 @@ memset:
     push ebp
     mov ebp, esp
     push edi
+    cld
     
     mov edi, [ebp+8]    ; dst
     mov eax, [ebp+12]   ; val

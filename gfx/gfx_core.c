@@ -1,4 +1,5 @@
 #include "gfx_internal.h"
+#include "os32_kapi_shared.h"
 
 /* ======================================================================== */
 /*  バックバッファ (拡張メモリ固定アドレス, 128KB)                          */
@@ -10,18 +11,21 @@ u8 *bb_i = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ * 3);
 
 u8 *bb[4];
 
-/* ======================================================================== */
-/*  ダーティ領域追跡                                                        */
-/* ======================================================================== */
-int dirty_min_y = 0;
-int dirty_max_y = GFX_HEIGHT - 1;
+DirtyRectQueue dirty_queue = {0};
 
-void gfx_dirty_mark(int y0, int y1)
+/* ======================================================================== */
+/*  KAPI: フレームバッファ取得                                              */
+/* ======================================================================== */
+void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
 {
-    if (y0 < 0) y0 = 0;
-    if (y1 >= GFX_HEIGHT) y1 = GFX_HEIGHT - 1;
-    if (y0 < dirty_min_y) dirty_min_y = y0;
-    if (y1 > dirty_max_y) dirty_max_y = y1;
+    if (!fb) return;
+    fb->width = GFX_WIDTH;
+    fb->height = GFX_HEIGHT;
+    fb->pitch = GFX_BPL;
+    fb->planes[0] = bb[0];
+    fb->planes[1] = bb[1];
+    fb->planes[2] = bb[2];
+    fb->planes[3] = bb[3];
 }
 
 /* ======================================================================== */
@@ -34,11 +38,20 @@ void gfx_init(void)
     volatile u8  *tvram_attr = (volatile u8  *)TVRAM_ATTR_BASE;
 
     bb[0] = bb_b; bb[1] = bb_r; bb[2] = bb_g; bb[3] = bb_i;
+    dirty_queue.count = 0;
 
     /* テキストVRAMクリア */
     for (i = 0; i < 2000; i++) {
         tvram_char[i] = 0x0000;
         tvram_attr[i * 2] = 0x00;
+    }
+
+    /* ゼロクリア (バックバッファ) */
+    for (i = 0; i < GFX_PLANE_SZ / 4; i++) {
+        ((u32*)bb_b)[i] = 0;
+        ((u32*)bb_r)[i] = 0;
+        ((u32*)bb_g)[i] = 0;
+        ((u32*)bb_i)[i] = 0;
     }
 
     _out(MODE_FF2_PORT, MFF2_16COLOR);
@@ -52,12 +65,7 @@ void gfx_init(void)
     _out(GDC_DISP_PAGE, 0x00);
     _out(GDC_ACCESS_PAGE, 0x00);
 
-    gfx_set_default_palette();
-
-    gfx_clear(0);
-
-    gfx_surface_init();
-    gfx_sprite_init();
+    palette_init();
     gfx_scroll_init();
 }
 
@@ -65,36 +73,3 @@ void gfx_shutdown(void)
 {
     _out(GDC_GFX_CMD, GDC_CMD_STOP);
 }
-
-
-/* ======================================================================== */
-/*  パレット                                                                */
-/* ======================================================================== */
-void gfx_set_palette(int idx, u8 r, u8 g, u8 b)
-{
-    _out(PAL_IDX_PORT, (unsigned)idx);
-    _out(PAL_G_PORT, (unsigned)g);
-    _out(PAL_R_PORT, (unsigned)r);
-    _out(PAL_B_PORT, (unsigned)b);
-}
-
-void gfx_set_palette_all(const GFX_Color *pal)
-{
-    int i;
-    for (i = 0; i < PALETTE_COUNT; i++) {
-        gfx_set_palette(i, pal[i].r, pal[i].g, pal[i].b);
-    }
-}
-
-void gfx_set_default_palette(void)
-{
-    static const GFX_Color default_pal[PALETTE_COUNT] = {
-        { 0,  0,  0}, { 0,  0,  7}, { 7,  0,  0}, { 7,  0,  7},
-        { 0,  7,  0}, { 0,  7,  7}, { 7,  7,  0}, { 7,  7,  7},
-        { 0,  0,  0}, { 0,  0, 15}, {15,  0,  0}, {15,  0, 15},
-        { 0, 15,  0}, { 0, 15, 15}, {15, 15,  0}, {15, 15, 15}
-    };
-    gfx_set_palette_all(default_pal);
-}
-
-

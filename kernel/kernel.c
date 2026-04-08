@@ -29,7 +29,6 @@
 #include "memmap.h"
 #include "config.h"
 #include "sys.h"
-#include "lconsole.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -67,7 +66,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     sys_mem_kb = mem_kb;
     
     tvram_clear();
-    lcons_init();
 
     tvram_print(0, 0, "PC-9801 OS32 booting...", TATTR_CYAN);
     

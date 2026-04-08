@@ -22,7 +22,6 @@
 #include "sys.h"
 #include "kprintf.h"
 #include "io.h"
-#include "lconsole.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -40,41 +39,6 @@ void __cdecl wrap_gfx_shutdown(void)
 void __cdecl wrap_gfx_present(void)
 {
     gfx_present();
-}
-
-void __cdecl wrap_gfx_clear(u8 color)
-{
-    gfx_clear(color);
-}
-
-void __cdecl wrap_gfx_pixel(int x, int y, u8 color)
-{
-    gfx_pixel(x, y, color);
-}
-
-void __cdecl wrap_gfx_hline(int x, int y, int w, u8 color)
-{
-    gfx_hline(x, y, w, color);
-}
-
-void __cdecl wrap_gfx_vline(int x, int y, int h, u8 color)
-{
-    gfx_vline(x, y, h, color);
-}
-
-void __cdecl wrap_gfx_line(int x0, int y0, int x1, int y1, u8 c)
-{
-    gfx_line(x0, y0, x1, y1, c);
-}
-
-void __cdecl wrap_gfx_rect(int x, int y, int w, int h, u8 color)
-{
-    gfx_rect(x, y, w, h, color);
-}
-
-void __cdecl wrap_gfx_fill_rect(int x, int y, int w, int h, u8 c)
-{
-    gfx_fill_rect(x, y, w, h, c);
 }
 
 int __cdecl wrap_kbd_trygetchar(void)
@@ -357,26 +321,6 @@ void __cdecl wrap_kcg_set_scale(int s)
     kcg_set_scale(s);
 }
 
-void __cdecl wrap_kcg_draw_ank(int x, int y, u8 ch, u8 fg, u8 bg)
-{
-    kcg_draw_ank(x, y, ch, fg, bg);
-}
-
-void __cdecl wrap_kcg_draw_kanji(int x, int y, u16 jis, u8 fg, u8 bg)
-{
-    kcg_draw_kanji(x, y, jis, fg, bg);
-}
-
-int __cdecl wrap_kcg_draw_utf8(int x, int y, const char *str, u8 fg, u8 bg)
-{
-    return kcg_draw_utf8(x, y, str, fg, bg);
-}
-
-int __cdecl wrap_kcg_draw_sjis(int x, int y, const char *str, u8 fg, u8 bg)
-{
-    return kcg_draw_sjis(x, y, str, fg, bg);
-}
-
 void __cdecl wrap_buz_on(void)
 {
     buz_on();
@@ -507,41 +451,6 @@ int __cdecl wrap_sys_fstat(int fd, OS32_Stat *buf)
     return vfs_fstat(fd, buf);
 }
 
-void __cdecl wrap_lcons_clear(void)
-{
-    lcons_clear();
-}
-
-void __cdecl wrap_lcons_putc(int x, int y, char ch, u8 attr)
-{
-    lcons_putc(x, y, ch, attr);
-}
-
-void __cdecl wrap_lcons_putkanji(int x, int y, u16 jis, u8 attr)
-{
-    lcons_putkanji(x, y, jis, attr);
-}
-
-void __cdecl wrap_lcons_fill_rect(int x, int y, int w, int h, char ch, u8 attr)
-{
-    lcons_fill_rect(x, y, w, h, ch, attr);
-}
-
-void __cdecl wrap_lcons_sync_vram(void)
-{
-    lcons_sync_vram();
-}
-
-int __cdecl wrap_gfx_screenshot(const char *path)
-{
-    return gfx_screenshot(path);
-}
-
-int __cdecl wrap_gfx_load_vdp(const char *path)
-{
-    return gfx_load_vdp(path);
-}
-
 void __cdecl wrap_gfx_set_palette(int idx, u8 r, u8 g, u8 b)
 {
     palette_set(idx, r, g, b);
@@ -552,16 +461,6 @@ void __cdecl wrap_gfx_get_palette(int idx, u8 *r, u8 *g, u8 *b)
     palette_get(idx, r, g, b);
 }
 
-void __cdecl wrap_gfx_save_rect(int x, int y, int w, int h, void *buf)
-{
-    gfx_save_rect(x, y, w, h, buf);
-}
-
-void __cdecl wrap_gfx_restore_rect(int x, int y, int w, int h, const void *buf)
-{
-    gfx_restore_rect(x, y, w, h, buf);
-}
-
 void* __cdecl wrap_sys_memcpy(void *dst, const void *src, u32 n)
 {
     return kmemcpy(dst, src, n);
@@ -570,5 +469,30 @@ void* __cdecl wrap_sys_memcpy(void *dst, const void *src, u32 n)
 void* __cdecl wrap_sys_memset(void *dst, int val, u32 n)
 {
     return kmemset(dst, val, n);
+}
+
+void __cdecl wrap_gfx_get_framebuffer(void *fb)
+{
+    gfx_get_framebuffer(fb);
+}
+
+void __cdecl wrap_gfx_add_dirty_rect(int x, int y, int w, int h)
+{
+    gfx_add_dirty_rect(x, y, w, h);
+}
+
+void __cdecl wrap_gfx_present_dirty(void)
+{
+    gfx_present_dirty();
+}
+
+void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf)
+{
+    kcg_read_ank(ch, buf);
+}
+
+void __cdecl wrap_kcg_read_kanji(u16 jis_code, u8 *buf)
+{
+    kcg_read_kanji(jis_code, buf);
 }
 

@@ -50,15 +50,15 @@ LDFLAGS = -m elf_i386 -T os32.ld -Map=kernel.map -nostdlib --nmagic --gc-section
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
 
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm gfx/gfx_util.asm lib/kstring_asm.asm
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm lib/kstring_asm.asm
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 C_KERNEL = \
     kernel/kernel.c kernel/idt.c kernel/isr_handlers.c \
-    kernel/paging.c kernel/kmalloc.c kernel/console.c kernel/sys.c kernel/lconsole.c \
+    kernel/paging.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
-    gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_blt.c gfx/gfx_draw.c gfx/gfx_surface.c gfx/gfx_sprite.c gfx/gfx_scroll.c gfx/gfx_font.c gfx/palette.c gfx/gfx_dump.c \
+    gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
     fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/serialfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
@@ -93,8 +93,8 @@ VZ_OBJ = $(VZ_SRC:.c=.o)
 programs/vz/%.o: programs/vz/%.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/vz -c $< -o $@
 
-programs/vz.elf: app.ld $(CRT0_OBJ) $(VZ_OBJ) lib/utf8.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(VZ_OBJ) lib/utf8.o -lc -lgcc
+programs/vz.elf: app.ld $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ) -lc -lgcc
 
 # === SKK Module ===
 SKK_SRC = $(wildcard programs/skk/*.c)
@@ -111,10 +111,13 @@ programs/skk_test.elf: app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf
 
 # === OS32GFX Module ===
 GFX_SRC = $(wildcard programs/libos32gfx/*.c)
-GFX_OBJ = $(GFX_SRC:.c=.o)
+GFX_OBJ = $(GFX_SRC:.c=.o) programs/libos32gfx/gfx_util.o lib/utf8.o
 
 programs/libos32gfx/%.o: programs/libos32gfx/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libos32gfx/gfx_util.o: programs/libos32gfx/gfx_util.asm
+	$(AS) -f elf32 $< -o $@
 
 # === Bench Module ===
 BENCH_SRC = $(wildcard programs/bench/*.c)
@@ -123,8 +126,8 @@ BENCH_OBJ = $(BENCH_SRC:.c=.o)
 programs/bench/%.o: programs/bench/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/bench.elf: app.ld $(CRT0_OBJ) $(BENCH_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) -lc -lgcc
+programs/bench.elf: app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
 
 bench: $(CRT0_OBJ) programs/bench.bin
 
@@ -218,7 +221,15 @@ unicode_bin:
 
 skk: $(CRT0_OBJ) programs/skk_test.bin lzss_dict
 
-programs: programs_base vz skk bench gfx_demo
+programs/spr_test.o: programs/spr_test.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/spr_test.elf: app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ) -lc -lgcc
+
+spr_test: $(CRT0_OBJ) programs/spr_test.bin
+
+programs: programs_base vz skk bench gfx_demo spr_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -244,6 +255,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "gfx_demo" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
+	elif [ "$*" = "spr_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 262144; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "vz" ]; then \
@@ -258,3 +271,7 @@ clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs
+
+# Add explicit dependencies for OS32X programs on the KAPI header
+programs/%.o: include/os32_kapi_shared.h
+$(shell find programs -name '*.o'): include/os32_kapi_shared.h

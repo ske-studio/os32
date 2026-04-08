@@ -15,15 +15,16 @@ extern u8 *bb_r;
 extern u8 *bb_g;
 extern u8 *bb_i;
 
-extern int dirty_min_y;
-extern int dirty_max_y;
-
 extern int vram_scroll_y;
 
-void gfx_dirty_mark(int y0, int y1);
+#define MAX_DIRTY_RECTS 32
+typedef struct {
+    int count;
+    GFX_Rect rects[MAX_DIRTY_RECTS];
+} DirtyRectQueue;
 
-void gfx_surface_init(void);
-void gfx_sprite_init(void);
+extern DirtyRectQueue dirty_queue;
+
 void gfx_scroll_init(void);
 
 /* ======================================================================== */
@@ -68,29 +69,5 @@ static inline void _memset_d(void *dst, unsigned int val32, unsigned int dwords)
                      : "a"(val32)
                      : "memory");
 }
-
-/* ======================================================================== */
-/*  プール構造体                                                            */
-/* ======================================================================== */
-#define SURF_POOL_MAX  16
-#define SURF_DATA_SIZE 2048
-
-typedef struct {
-    GFX_Surface surf;
-    u8 data[4][SURF_DATA_SIZE];
-    u8 used;
-} SurfSlot;
-
-#define SPR_POOL_MAX  16
-#define SPR_DATA_SIZE 2048
-
-typedef struct {
-    GFX_Sprite spr;
-    u8 data[4][SPR_DATA_SIZE];
-    u8 mask_data[SPR_DATA_SIZE];
-    u8 used;
-} SprSlot;
-
-#define SPR_POOL_ADDR   (MEM_GFX_SURF_POOL + sizeof(SurfSlot) * SURF_POOL_MAX)
 
 #endif /* __GFX_INTERNAL_H */

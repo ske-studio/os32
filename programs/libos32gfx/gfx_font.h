@@ -8,7 +8,8 @@
 #ifndef __GFX_FONT_H
 #define __GFX_FONT_H
 
-#include "gfx.h"
+#include "os32api.h"
+#include "libos32gfx.h"
 
 /* ======== フォント定数 ======== */
 #define FONT_W   8     /* フォント幅 (ピクセル) */

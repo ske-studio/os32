@@ -4,8 +4,7 @@
  */
 
 #include "lconsole.h"
-#include "kcg.h"
-#include "gfx.h"
+#include "libos32gfx.h"
 
 /* 1セル = 32bit: [31:16] 属性, [15:0] 文字コードまたはJIS */
 static unsigned int logical_vram[LCONS_H][LCONS_W];

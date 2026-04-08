@@ -31,32 +31,9 @@
 
 /* ======== データ構造 ======== */
 
-/* 矩形 */
-typedef struct {
-    int x, y, w, h;
-} GFX_Rect;
+#include "os32_kapi_shared.h"
 
-/* パレットエントリ (各0-15) */
-typedef struct {
-    u8 r, g, b;
-} GFX_Color;
-
-/* サーフェス — オフスクリーン描画バッファ (SDL_Surface相当) */
-typedef struct {
-    int w, h;
-    int pitch;          /* バイト/ライン (w+7)/8 */
-    u8 *planes[4];      /* 4プレーン (パックドビット) */
-    int _pool_idx;      /* 静的プール管理用 (-1=外部管理) */
-} GFX_Surface;
-
-/* スプライト — マスク付き事前コンパイル済み (透過描画用) */
-typedef struct {
-    int w, h;
-    int pitch;
-    u8 *planes[4];      /* スプライトデータ */
-    u8 *mask;           /* ANDマスク (透過=0xFF, 不透過=0x00) */
-    int _pool_idx;
-} GFX_Sprite;
+/* 上記のヘッダで GFX_Rect, GFX_Color, GFX_Surface, GFX_Sprite は定義される */  
 
 /* ======== 初期化・終了 ======== */
 void gfx_init(void);       /* 640x400x16初期化 + バックバッファ確保 */

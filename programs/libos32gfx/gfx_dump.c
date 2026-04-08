@@ -2,10 +2,8 @@
 /*  GFX_DUMP.C — VDP形式スクリーンショット保存および読み込み (RAW/PackBits)  */
 /* ======================================================================== */
 
-#include "gfx.h"
-#include "gfx_internal.h"
-#include "palette.h"
-#include "vfs.h"
+#include "libos32gfx.h"
+#include "os32api.h"
 
 /* VDP1 Header Structure (Packed, 256 Bytes) */
 typedef struct {
@@ -60,7 +58,7 @@ static void write_packbits(int fd, const u8 *src, int size) {
     int out_pos = 0;
 
     /* バッファフラッシュ用マクロ */
-#define FLUSH() do { if(out_pos > 0) { vfs_write_fd(fd, out_buf, out_pos); out_pos = 0; } } while(0)
+#define FLUSH() do { if(out_pos > 0) { gfx_api->sys_write(fd, out_buf, out_pos); out_pos = 0; } } while(0)
 
     while (i < size) {
         int max_len = size - i;
@@ -113,19 +111,19 @@ static int read_packbits(int fd, u8 *dst, int size) {
     int count = 0;
     while (count < size) {
         u8 cmd;
-        if (vfs_read_fd(fd, &cmd, 1) != 1) return -1;
+        if (gfx_api->sys_read(fd, &cmd, 1) != 1) return -1;
 
         if (cmd < 128) {
             /* RAW データ */
             int raw_len = cmd + 1;
             if (count + raw_len > size) raw_len = size - count;
-            if (vfs_read_fd(fd, dst + count, raw_len) != raw_len) return -1;
+            if (gfx_api->sys_read(fd, dst + count, raw_len) != raw_len) return -1;
             count += raw_len;
         } else if (cmd > 128) {
             /* RUN データ */
             int run_len = 257 - cmd;
             u8 val;
-            if (vfs_read_fd(fd, &val, 1) != 1) return -1;
+            if (gfx_api->sys_read(fd, &val, 1) != 1) return -1;
             if (count + run_len > size) run_len = size - count;
             
             /* 32bitアクセスで高速フィル */
@@ -153,12 +151,10 @@ static int read_packbits(int fd, u8 *dst, int size) {
 int gfx_screenshot(const char *path) {
     int fd;
     VdpHeader hdr;
-    const PaletteEntry *pal;
     int i;
     u8 *ptr;
-    extern u8 *bb_b, *bb_r, *bb_g, *bb_i;
 
-    fd = vfs_open(path, O_CREAT | O_WRONLY | O_TRUNC);
+    fd = gfx_api->sys_open(path, O_CREAT | O_WRONLY | O_TRUNC);
     if (fd < 0) return -1;
 
     /* ヘッダ初期化: 32bitアクセスでゼロクリア */
@@ -168,28 +164,29 @@ int gfx_screenshot(const char *path) {
     }
 
     hdr.magic[0] = 'V'; hdr.magic[1] = 'D'; hdr.magic[2] = 'P'; hdr.magic[3] = '1';
-    hdr.width = GFX_WIDTH;
-    hdr.height = GFX_HEIGHT;
+    hdr.width = gfx_fb.width;
+    hdr.height = gfx_fb.height;
     hdr.num_planes = 4;
     hdr.data_type = 0x00; /* DUMP */
     hdr.num_frames = 1;
     hdr.compress = 0x01;  /* PackBits RLE */
 
-    pal = palette_get_all();
     for (i = 0; i < 16; i++) {
-        hdr.palette[i * 3 + 0] = pal[i].r;
-        hdr.palette[i * 3 + 1] = pal[i].g;
-        hdr.palette[i * 3 + 2] = pal[i].b;
+        u8 r, g, b;
+        gfx_api->gfx_get_palette(i, &r, &g, &b);
+        hdr.palette[i * 3 + 0] = r;
+        hdr.palette[i * 3 + 1] = g;
+        hdr.palette[i * 3 + 2] = b;
     }
 
-    vfs_write_fd(fd, &hdr, sizeof(VdpHeader));
+    gfx_api->sys_write(fd, &hdr, sizeof(VdpHeader));
 
-    write_packbits(fd, bb_b, GFX_PLANE_SZ);
-    write_packbits(fd, bb_r, GFX_PLANE_SZ);
-    write_packbits(fd, bb_g, GFX_PLANE_SZ);
-    write_packbits(fd, bb_i, GFX_PLANE_SZ);
+    write_packbits(fd, gfx_fb.planes[0], 32000);
+    write_packbits(fd, gfx_fb.planes[1], 32000);
+    write_packbits(fd, gfx_fb.planes[2], 32000);
+    write_packbits(fd, gfx_fb.planes[3], 32000);
 
-    vfs_close(fd);
+    gfx_api->sys_close(fd);
     return 0;
 }
 
@@ -201,59 +198,55 @@ int gfx_load_vdp(const char *path) {
     int fd;
     VdpHeader hdr;
     int i;
-    extern u8 *bb_b, *bb_r, *bb_g, *bb_i;
 
-    fd = vfs_open(path, O_RDONLY);
+    fd = gfx_api->sys_open(path, O_RDONLY);
     if (fd < 0) return -1;
 
-    if (vfs_read_fd(fd, &hdr, sizeof(VdpHeader)) != sizeof(VdpHeader)) {
-        vfs_close(fd);
+    if (gfx_api->sys_read(fd, &hdr, sizeof(VdpHeader)) != sizeof(VdpHeader)) {
+        gfx_api->sys_close(fd);
         return -1;
     }
 
     /* VDP1/VDP2 & DUMP形式であるかチェック */
     if (hdr.magic[0] != 'V' || hdr.magic[1] != 'D' || hdr.magic[2] != 'P') {
-        vfs_close(fd);
+        gfx_api->sys_close(fd);
         return -1;
     }
     
     if (hdr.data_type != 0x00 && hdr.data_type != 0x01) {
         /* DUMP/RAW形式以外は未対応 */
-        vfs_close(fd);
+        gfx_api->sys_close(fd);
         return -1;
     }
 
-    /* パレット適用 */
     for (i = 0; i < 16; i++) {
         u8 r = hdr.palette[i * 3 + 0];
         u8 g = hdr.palette[i * 3 + 1];
         u8 b = hdr.palette[i * 3 + 2];
-        gfx_set_palette(i, r, g, b);
+        gfx_api->gfx_set_palette(i, r, g, b);
     }
 
     if (hdr.compress == 0x01) {
         /* PackBits圧縮 */
-        if (read_packbits(fd, bb_b, GFX_PLANE_SZ) < 0) goto err;
-        if (read_packbits(fd, bb_r, GFX_PLANE_SZ) < 0) goto err;
-        if (read_packbits(fd, bb_g, GFX_PLANE_SZ) < 0) goto err;
-        if (read_packbits(fd, bb_i, GFX_PLANE_SZ) < 0) goto err;
+        if (read_packbits(fd, gfx_fb.planes[0], 32000) < 0) goto err;
+        if (read_packbits(fd, gfx_fb.planes[1], 32000) < 0) goto err;
+        if (read_packbits(fd, gfx_fb.planes[2], 32000) < 0) goto err;
+        if (read_packbits(fd, gfx_fb.planes[3], 32000) < 0) goto err;
     } else {
         /* 非圧縮(RAW) */
-        if (vfs_read_fd(fd, bb_b, GFX_PLANE_SZ) != GFX_PLANE_SZ) goto err;
-        if (vfs_read_fd(fd, bb_r, GFX_PLANE_SZ) != GFX_PLANE_SZ) goto err;
-        if (vfs_read_fd(fd, bb_g, GFX_PLANE_SZ) != GFX_PLANE_SZ) goto err;
-        if (vfs_read_fd(fd, bb_i, GFX_PLANE_SZ) != GFX_PLANE_SZ) goto err;
+        if (gfx_api->sys_read(fd, gfx_fb.planes[0], 32000) != 32000) goto err;
+        if (gfx_api->sys_read(fd, gfx_fb.planes[1], 32000) != 32000) goto err;
+        if (gfx_api->sys_read(fd, gfx_fb.planes[2], 32000) != 32000) goto err;
+        if (gfx_api->sys_read(fd, gfx_fb.planes[3], 32000) != 32000) goto err;
     }
 
-    vfs_close(fd);
+    gfx_api->sys_close(fd);
     
-    /* バックバッファ全体を再描画するようにダーティ指定 */
-    extern void gfx_dirty_mark(int y0, int y1);
-    gfx_dirty_mark(0, GFX_HEIGHT - 1);
+    gfx_api->gfx_add_dirty_rect(0, 0, gfx_fb.width, gfx_fb.height);
     
     return 0;
 
 err:
-    vfs_close(fd);
+    gfx_api->sys_close(fd);
     return -1;
 }

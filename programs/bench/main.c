@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "os32api.h"
+#include "libos32gfx.h"
 
 static KernelAPI *kapi = NULL;
 static int log_fd = -1;
@@ -43,9 +44,9 @@ static void cleanup_gfx(void) {
     wait_ms(3000);
 
     /* GFXプレーンをクリアしてシャットダウン */
-    kapi->gfx_clear(0);
-    kapi->gfx_present();
-    kapi->gfx_shutdown();
+    gfx_clear(0);
+    gfx_present();
+    libos32gfx_shutdown();
 
     /* テキストVRAMを復旧 */
     kapi->tvram_clear();
@@ -82,18 +83,18 @@ static void test_gfx(void) {
     kapi->kprintf(COL_WHITE, "--- Graphics (GFX) Test ---\r\n");
 
     /* GFXサブシステム初期化 (GDC START, パレット, バックバッファクリア) */
-    kapi->gfx_init();
+    libos32gfx_init(kapi);
 
     start = kapi->get_tick();
-    kapi->gfx_clear(0);
+    gfx_clear(0);
     for (i = 0; i < 500; i++) {
-        kapi->gfx_line(i % 640, 0, 639 - (i % 640), 399, (i % 15) + 1);
-        kapi->gfx_fill_rect((i * 7) % 600, (i * 13) % 350, 40, 40, (i % 15) + 1);
+        gfx_line(i % 640, 0, 639 - (i % 640), 399, (i % 15) + 1);
+        gfx_fill_rect((i * 7) % 600, (i * 13) % 350, 40, 40, (i % 15) + 1);
     }
-    kapi->gfx_present();
+    gfx_present();
     
     /* GFX出力のテストとしてスクリーンショットを書き出し */
-    kapi->gfx_screenshot("0:/GFX.VDP");
+    // kapi->gfx_screenshot("0:/GFX.VDP");
     
     end = kapi->get_tick();
 
@@ -109,15 +110,15 @@ static void test_kcg(void) {
     kapi->kprintf(COL_WHITE, "--- KCG Text Rendering Test ---\r\n");
 
     /* KCGテストにもGFX初期化が必要 (バックバッファに描画する) */
-    kapi->gfx_init();
+    libos32gfx_init(kapi);
     kapi->kcg_init();
 
     start = kapi->get_tick();
-    kapi->gfx_clear(0);
+    gfx_clear(0);
     for (y = 0; y < 400; y += 16) {
-        kapi->kcg_draw_utf8(0, y, "OS32 Benchmark KCG Rendering Test - ABC", 7, 0);
+        kcg_draw_utf8(0, y, "OS32 Benchmark KCG Rendering Test - ABC", 7, 0);
     }
-    kapi->gfx_present();
+    gfx_present();
     end = kapi->get_tick();
 
     cleanup_gfx();

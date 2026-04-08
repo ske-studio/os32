@@ -9,7 +9,7 @@
 void su_fill_rect(int start_x, int start_y, int w, int h, char ch, unsigned char attr)
 {
     if (kapi) {
-        kapi->lcons_fill_rect(start_x, start_y, w, h, ch, attr);
+        lcons_fill_rect(start_x, start_y, w, h, ch, attr);
     }
 }
 

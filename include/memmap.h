@@ -42,20 +42,20 @@
 #define MEM_BIOS_ROM_START    0xF0000UL
 #define MEM_BIOS_ROM_END      0xFFFFFUL
 
+/* サーフェス/スプライト管理プール (1MB以上、約2MBの特大区画) */
 /* ====================================================================== */
 /*  グラフィックス関連                                                      */
 /* ====================================================================== */
-/* バックバッファ(128KB) 拡張メモリ */
-#define MEM_GFX_BB_BASE       0x300000UL
-
-/* サーフェス/スプライト管理プール (1MB以上) */
 #define MEM_GFX_SURF_POOL     0x100000UL
 
-/* フォントキャッシュプール (2MB地点, 約280KB) */
-#define MEM_FONT_CACHE_BASE   0x200000UL
+/* フォントキャッシュプール (3MB地点へ移動, 約280KB) */
+#define MEM_FONT_CACHE_BASE   0x300000UL
 
 /* Unicode-JIS変換テーブル (131KB O(1) 配列) */
-#define MEM_UNICODE_TABLE_BASE 0x250000UL
+#define MEM_UNICODE_TABLE_BASE 0x350000UL
+
+/* バックバッファ(128KB) 拡張メモリ */
+#define MEM_GFX_BB_BASE       0x380000UL
 
 /* ====================================================================== */
 /*  外部プログラムロード関連                                                 */

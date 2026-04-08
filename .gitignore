@@ -25,3 +25,14 @@ __pycache__/
 # OS固有のファイル等
 Thumbs.db
 .DS_Store
+
+# 一時スクリプト・デバッグ用ファイル
+fix_*.py
+refactor_*.py
+repack_*.py
+update_*.py
+*.bmp
+screenshot*.png
+demo*_fixed.png
+kernel_objdump.txt
+test_rect.script

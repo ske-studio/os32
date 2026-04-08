@@ -1,7 +1,11 @@
 {
-  "version": 21,
+  "version": 22,
   "data_fields": [
-    { "name": "sbrk_heap_limit", "type": "u32", "comment": "newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる)" }
+    {
+      "name": "sbrk_heap_limit",
+      "type": "u32",
+      "comment": "newlib _sbrk\u7528\u30d2\u30fc\u30d7\u4e0a\u9650\u30a2\u30c9\u30ec\u30b9 (exec_run\u3067\u30bb\u30c3\u30c8\u3055\u308c\u308b)"
+    }
   ],
   "includes": [
     "gfx.h",
@@ -25,8 +29,7 @@
     "kcg.h",
     "sys.h",
     "kprintf.h",
-    "io.h",
-    "lconsole.h"
+    "io.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -47,75 +50,6 @@
       "name": "gfx_present",
       "ret": "void",
       "args": []
-    },
-    {
-      "name": "gfx_clear",
-      "ret": "void",
-      "args": [
-        "u8 color"
-      ]
-    },
-    {
-      "name": "gfx_pixel",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "u8 color"
-      ]
-    },
-    {
-      "name": "gfx_hline",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "u8 color"
-      ]
-    },
-    {
-      "name": "gfx_vline",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int h",
-        "u8 color"
-      ]
-    },
-    {
-      "name": "gfx_line",
-      "ret": "void",
-      "args": [
-        "int x0",
-        "int y0",
-        "int x1",
-        "int y1",
-        "u8 c"
-      ]
-    },
-    {
-      "name": "gfx_rect",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "int h",
-        "u8 color"
-      ]
-    },
-    {
-      "name": "gfx_fill_rect",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "int h",
-        "u8 c"
-      ]
     },
     {
       "name": "kbd_trygetchar",
@@ -516,50 +450,6 @@
       ]
     },
     {
-      "name": "kcg_draw_ank",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "u8 ch",
-        "u8 fg",
-        "u8 bg"
-      ]
-    },
-    {
-      "name": "kcg_draw_kanji",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "u16 jis",
-        "u8 fg",
-        "u8 bg"
-      ]
-    },
-    {
-      "name": "kcg_draw_utf8",
-      "ret": "int",
-      "args": [
-        "int x",
-        "int y",
-        "const char *str",
-        "u8 fg",
-        "u8 bg"
-      ]
-    },
-    {
-      "name": "kcg_draw_sjis",
-      "ret": "int",
-      "args": [
-        "int x",
-        "int y",
-        "const char *str",
-        "u8 fg",
-        "u8 bg"
-      ]
-    },
-    {
       "name": "buz_on",
       "ret": "void",
       "args": []
@@ -754,62 +644,6 @@
       "target": "vfs_fstat"
     },
     {
-      "name": "lcons_clear",
-      "ret": "void",
-      "args": []
-    },
-    {
-      "name": "lcons_putc",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "char ch",
-        "u8 attr"
-      ]
-    },
-    {
-      "name": "lcons_putkanji",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "u16 jis",
-        "u8 attr"
-      ]
-    },
-    {
-      "name": "lcons_fill_rect",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "int h",
-        "char ch",
-        "u8 attr"
-      ]
-    },
-    {
-      "name": "lcons_sync_vram",
-      "ret": "void",
-      "args": []
-    },
-    {
-      "name": "gfx_screenshot",
-      "ret": "int",
-      "args": [
-        "const char *path"
-      ]
-    },
-    {
-      "name": "gfx_load_vdp",
-      "ret": "int",
-      "args": [
-        "const char *path"
-      ]
-    },
-    {
       "name": "gfx_set_palette",
       "ret": "void",
       "args": [
@@ -832,28 +666,6 @@
       "target": "palette_get"
     },
     {
-      "name": "gfx_save_rect",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "int h",
-        "void *buf"
-      ]
-    },
-    {
-      "name": "gfx_restore_rect",
-      "ret": "void",
-      "args": [
-        "int x",
-        "int y",
-        "int w",
-        "int h",
-        "const void *buf"
-      ]
-    },
-    {
       "name": "sys_memcpy",
       "ret": "void*",
       "args": [
@@ -872,6 +684,44 @@
         "u32 n"
       ],
       "target": "kmemset"
+    },
+    {
+      "name": "gfx_get_framebuffer",
+      "ret": "void",
+      "args": [
+        "void *fb"
+      ]
+    },
+    {
+      "name": "gfx_add_dirty_rect",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "int w",
+        "int h"
+      ]
+    },
+    {
+      "name": "gfx_present_dirty",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "kcg_read_ank",
+      "ret": "void",
+      "args": [
+        "u8 ch",
+        "u8 *buf"
+      ]
+    },
+    {
+      "name": "kcg_read_kanji",
+      "ret": "void",
+      "args": [
+        "u16 jis_code",
+        "u8 *buf"
+      ]
     }
   ]
 }
