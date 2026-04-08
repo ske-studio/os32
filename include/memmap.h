@@ -95,13 +95,31 @@
 #define MEM_SHM_END           0x240FFFUL  /* 共有メモリ終端 */
 #define MEM_SHM_GUARD_HI      0x241000UL  /* 後方ガードページ (4KB) */
 
-/* カーネル予約域 (将来拡張用, NOT PRESENTに設定) */
+/* カーネル予約域 (シェル帯域を除き NOT PRESENTに設定) */
 #define MEM_KERNEL_RESV_START 0x242000UL
-#define MEM_KERNEL_RESV_END   0x3FFFFFUL
+#define MEM_KERNEL_RESV_END   0x2FFFFFUL  /* シェル帯域の直前まで */
 
 /* ====================================================================== */
-/*  外部プログラムロード関連                                                 */
-/*  スタック/ヒープは exec_run() にてシステムメモリ量から動的に計算される        */
+/*  シェル常駐帯域 (0x300000-0x37FFFF, 512KB)                              */
+/*  シェルはここに常駐し、子プロセスは一切触れない。PD切り替え不要。         */
+/*                                                                          */
+/*  レイアウト:                                                             */
+/*    0x300000-           .text + .data + .bss (~213KB)                     */
+/*    (〜0x336000)        BSS終端                                           */
+/*    0x376000            ガードページ (Not-Present, 4KB)                   */
+/*    0x377000-0x37FFFF   スタック (36KB, ESP初期値=0x380000)               */
+/* ====================================================================== */
+#define MEM_SHELL_LOAD_ADDR   0x300000UL  /* シェルロードアドレス */
+#define MEM_SHELL_MAX_SIZE    0x036000UL  /* シェルcode+bss最大 (216KB) */
+#define MEM_SHELL_GUARD       0x376000UL  /* シェルスタックガード */
+#define MEM_SHELL_STACK_TOP   0x380000UL  /* シェルスタック先頭 (下向き成長) */
+#define MEM_SHELL_STACK_SIZE  0x009000UL  /* シェルスタックサイズ (36KB) */
+#define MEM_SHELL_BAND_END    0x380000UL  /* シェル帯域終端 */
+
+/* ====================================================================== */
+/*  外部プログラムロード関連 (子プロセス用: 0x400000〜)                      */
+/*  シェル常駐帯域とは完全に分離。アイデンティティマッピング。               */
+/*  スタック/ヒープは exec_run() にてシステムメモリ量から動的に計算される      */
 /* ====================================================================== */
 #define MEM_EXEC_LOAD_ADDR    0x400000UL
 #define MEM_EXEC_MAX_SIZE     (0x100000UL)       /* コード+sbrk 最大1MB */

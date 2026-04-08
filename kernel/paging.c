@@ -124,8 +124,18 @@ void paging_init(u32 mem_kb)
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
 
-    /* カーネル予約域: Not-Present (将来拡張用, Phase 3) */
+    /* カーネル予約域: Not-Present (シェル帯域の直前まで) */
     paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
+
+    /* シェル常駐帯域 (0x300000-0x37FFFF): 既にアイデンティティマッピング済み。
+     * paging_init の最初のループで全ページが R/W PRESENT に設定されており、
+     * ここでは NOT_PRESENT にした予約域のうちシェル帯域だけを復元する必要なし
+     * (MEM_KERNEL_RESV_END=0x2FFFFF でシェル帯域には触れていない)。
+     * シェルのスタックガードページのみ NOT_PRESENT に設定。 */
+    paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
+
+    /* シェル帯域〜プログラム空間の間(0x380000-0x3FFFFF): Not-Present */
+    paging_set_not_present(MEM_SHELL_BAND_END, 0x3FFFFFUL);
 
     /* BIOS ROM: Read-Only */
     paging_set_readonly(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END);
