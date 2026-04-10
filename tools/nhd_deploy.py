@@ -137,8 +137,9 @@ def write_kernel(nhd_path, kernel_bin, loader_bin=None):
 def main():
     if len(sys.argv) < 2:
         print("NHD ext2 Deploy Tool (sudo不要)")
-        print(f"Usage: {sys.argv[0]} {{copy|ls|cat|rm|write-kernel}}")
+        print(f"Usage: {sys.argv[0]} {{copy|copy-all|ls|cat|rm|write-kernel}}")
         print("  copy <src> [dest]        — ext2にファイルコピー")
+        print("  copy-all <dir> [ext]     — dirの全ファイルを一括コピー (既定: *.bin)")
         print("  ls [path]                — ext2ファイル一覧")
         print("  cat <file>               — ext2ファイル表示")
         print("  rm <file>                — ext2ファイル削除")
@@ -160,7 +161,7 @@ def main():
     
     elif cmd == 'copy':
         if len(sys.argv) < 3:
-            print("Usage: copy <src_file> [dest_name]")
+            print("Usage: copy <src_file> [dest_path]")
             return
         src = sys.argv[2]
         dest = sys.argv[3] if len(sys.argv) > 3 else os.path.basename(src)
@@ -170,10 +171,39 @@ def main():
             return
         
         print(f"Copying {src} -> /{dest} ...")
-        # debugfsの write は上書き不可のため、先に削除してから書き込む
         src_abs = os.path.abspath(src)
         run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
         print("Done!")
+
+    elif cmd == 'copy-all':
+        import glob as globmod
+        if len(sys.argv) < 3:
+            print("Usage: copy-all <dir> [extension]")
+            print("  例: copy-all programs/       (*.bin を一括コピー)")
+            print("  例: copy-all programs/ .bin")
+            return
+        src_dir = sys.argv[2]
+        ext = sys.argv[3] if len(sys.argv) > 3 else '.bin'
+        
+        pattern = os.path.join(src_dir, f'*{ext}')
+        files = sorted(globmod.glob(pattern))
+        if not files:
+            print(f"No {ext} files found in {src_dir}")
+            return
+        
+        print(f"=== Batch copy: {len(files)} files from {src_dir} ===")
+        
+        # 全ファイルを1回のdebugfsセッションで処理
+        cmds = []
+        for f in files:
+            dest = os.path.basename(f)
+            src_abs = os.path.abspath(f)
+            cmds.append(f'rm {dest}')
+            cmds.append(f'write {src_abs} {dest}')
+            print(f"  {dest}")
+        
+        run_debugfs(NHD_FILE, cmds, writable=True)
+        print(f"Done! ({len(files)} files deployed)")
     
     elif cmd == 'rm':
         if len(sys.argv) < 3:
@@ -181,6 +211,14 @@ def main():
             return
         print(f"Removing {sys.argv[2]}...")
         run_debugfs(NHD_FILE, f'rm {sys.argv[2]}', writable=True)
+        print("Done!")
+
+    elif cmd == 'mkdir':
+        if len(sys.argv) < 3:
+            print("Usage: mkdir <dir>")
+            return
+        print(f"Creating directory {sys.argv[2]}...")
+        run_debugfs(NHD_FILE, f'mkdir {sys.argv[2]}', writable=True)
         print("Done!")
     
     elif cmd == 'write-kernel':
@@ -200,3 +238,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

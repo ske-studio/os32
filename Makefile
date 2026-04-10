@@ -56,6 +56,7 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 C_KERNEL = \
     kernel/kernel.c kernel/idt.c kernel/isr_handlers.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
+    kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
@@ -108,6 +109,18 @@ programs/skk_test.o: programs/skk_test.c
 
 programs/skk_test.elf: app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
+
+# === FEP Test Module ===
+lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/fep_test.o: programs/fep_test.c lib/fep_engine.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/fep_test.elf: app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
+
+fep_test: $(CRT0_OBJ) programs/fep_test.bin
 
 # === OS32GFX Module ===
 GFX_SRC = $(wildcard programs/libos32gfx/*.c)
@@ -238,7 +251,10 @@ programs/spr_test.elf: app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
 
 spr_test: $(CRT0_OBJ) programs/spr_test.bin
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1
+fep_dic:
+	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
+
+programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -270,6 +286,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
+	elif [ "$*" = "fep_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 524288; \
 	elif [ "$*" = "vz" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 524288; \
 	elif [ "$*" = "shell" ]; then \

@@ -31,6 +31,7 @@
 #include "memmap.h"
 #include "config.h"
 #include "sys.h"
+#include "ime.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -243,6 +244,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             tvram_print(67, 2, "ER", TATTR_RED);
         }
     }
+
+    /* IME (FEP) 初期化 — 辞書は初回使用時に遅延ロード */
+    ime_init();
 
     /* 割り込み有効化 */
     tvram_print(71, 2, "IRQ_EN", TATTR_YELLOW);
