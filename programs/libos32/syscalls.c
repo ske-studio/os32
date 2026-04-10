@@ -132,7 +132,6 @@ void * _sbrk(int incr) {
     
     if (heap_ptr == NULL) {
         heap_ptr = (char *)&_end;
-        /* デバッグコード削除済み */
     }
     
     prev_heap_ptr = heap_ptr;
@@ -140,7 +139,6 @@ void * _sbrk(int incr) {
     /* KAPIテーブルからカーネルがセットしたヒープ上限を取得 */
     if (kapi->sbrk_heap_limit != 0 &&
         heap_ptr + incr >= (char *)kapi->sbrk_heap_limit) {
-        /* デバッグコード削除済み */
         errno = ENOMEM;
         return (void *)-1;
     }

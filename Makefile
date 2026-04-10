@@ -260,10 +260,10 @@ programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test
 programs/crt0.o: programs/crt0.asm
 	$(AS) -f elf32 $< -o $@
 
-programs/crt0_c.o: programs/crt0_c.c
+programs/crt0_c.o: programs/crt0_c.c include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/libos32/syscalls.o: programs/libos32/syscalls.c
+programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/%.elf: programs/%.c app.ld $(CRT0_OBJ)
