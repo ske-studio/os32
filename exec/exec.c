@@ -124,7 +124,6 @@ int exec_run(const char *cmdline)
     /* ネスト上限チェック */
     if (exec_nest_level >= MAX_EXEC_NEST) {
         shell_print("Error: exec nest limit reached\n", ATTR_RED);
-        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOMEM);
         return EXEC_ERR_NOMEM;
     }
 
@@ -171,7 +170,6 @@ int exec_run(const char *cmdline)
     }
 
     if (sz <= 0) {
-        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOT_FOUND);
         return EXEC_ERR_NOT_FOUND;
     }
 
@@ -179,7 +177,6 @@ int exec_run(const char *cmdline)
 
     if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE || hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
-        if (exec_nest_level > 0) exec_exit(EXEC_ERR_INVALID);
         return EXEC_ERR_INVALID;
     }
 
@@ -197,7 +194,6 @@ int exec_run(const char *cmdline)
         shell_print(" max=", 0xE1);
         shell_print_dec(max_size, 0xE1);
         shell_print("\n", 0xE1);
-        if (exec_nest_level > 0) exec_exit(EXEC_ERR_NOMEM);
         return EXEC_ERR_NOMEM;
     }
 
