@@ -52,7 +52,12 @@ static void ext2_to_vfs_cb(const Ext2DirEntry *e, void *ctx)
     ve.name[i] = '\0';
 
     ve.type = (e->file_type == EXT2_FT_DIR) ? VFS_TYPE_DIR : VFS_TYPE_FILE;
-    ve.size = 0; /* ディレクトリ一覧ではサイズ省略 */
+
+    /* ext2ディレクトリエントリにはサイズ情報がないためinodeから取得 */
+    ve.size = 0;
+    if (e->file_type != EXT2_FT_DIR) {
+        ext2_get_size_ino(e->inode, &ve.size);
+    }
 
     lc->user_cb(&ve, lc->user_ctx);
 }
