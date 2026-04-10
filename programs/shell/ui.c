@@ -33,9 +33,13 @@ static void show_prompt(void) {
 
 static void redraw_line(const char *buf, int len, int cursor) {
     int i, cl;
+    char tmp_buf[CMD_BUF_SIZE];
     g_api->console_set_cursor(0, g_api->console_get_cursor_y());
     show_prompt();
-    for (i = 0; i < len; i++) g_api->shell_putchar(buf[i], ATTR_WHITE);
+    /* バッファ内容をNUL終端コピーしてUTF-8対応印字 */
+    for (i = 0; i < len && i < CMD_BUF_SIZE - 1; i++) tmp_buf[i] = buf[i];
+    tmp_buf[i] = '\0';
+    g_api->shell_print_utf8(tmp_buf, ATTR_WHITE);
     cl = prev_draw_len - len;
     for (i = 0; i < cl; i++) g_api->shell_putchar(' ', ATTR_WHITE);
     prev_draw_len = len;
@@ -102,7 +106,7 @@ void shell_run(void) {
         hist_idx = hist_count;
 
         for (;;) {
-            key = g_api->kbd_getkey();
+            key = g_api->ime_getkey();
 
             if ((key & 0xFF) == 0x0D) { g_api->shell_putchar('\n', ATTR_WHITE); break; }
             if ((key & 0xFF) == 0x08) {
@@ -160,15 +164,66 @@ void shell_run(void) {
             }
             last_tab = 0;
             if ((key & 0xFF) == 0x1B) { cmd_len=cmd_pos=cmd_buf[0]=0; redraw_line(cmd_buf, cmd_len, cmd_pos); continue; }
-            if ((key & 0xFF) >= 0x20 && (key & 0xFF) < 0x7F && cmd_len < CMD_BUF_SIZE - 1) {
-                char ch = (char)(key & 0xFF);
-                if (cmd_pos == cmd_len) {
-                    cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
-                    g_api->shell_putchar(ch, ATTR_WHITE); prev_draw_len = cmd_len;
-                } else {
-                    int i; for (i = cmd_len; i > cmd_pos; i--) cmd_buf[i] = cmd_buf[i-1];
-                    cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
-                    redraw_line(cmd_buf, cmd_len, cmd_pos);
+            /* 印字可能文字: ASCII (0x20-0x7E) および IME確定UTF-8バイト (0x80+, scancode=0) */
+            {
+                u8 ascii_byte = (u8)(key & 0xFF);
+                int scancode = (key >> 8) & 0x7F;
+                int is_printable = (ascii_byte >= 0x20 && ascii_byte < 0x7F);
+                int is_ime_byte  = (scancode == 0x00 && ascii_byte >= 0x80);
+                if ((is_printable || is_ime_byte) && cmd_len < CMD_BUF_SIZE - 4) {
+                    if (is_ime_byte) {
+                        /* UTF-8マルチバイト: 蓄積して一括表示 */
+                        char utf8_tmp[5];
+                        int utf8_len = 0;
+                        int expect;
+                        utf8_tmp[utf8_len++] = (char)ascii_byte;
+                        /* UTF-8先頭バイトから期待バイト数を判定 */
+                        if ((ascii_byte & 0xE0) == 0xC0) expect = 2;
+                        else if ((ascii_byte & 0xF0) == 0xE0) expect = 3;
+                        else if ((ascii_byte & 0xF8) == 0xF0) expect = 4;
+                        else expect = 1;
+                        /* 後続バイトを読み取る */
+                        while (utf8_len < expect) {
+                            int nk = g_api->ime_getkey();
+                            u8 nb = (u8)(nk & 0xFF);
+                            if ((nb & 0xC0) != 0x80) break;
+                            utf8_tmp[utf8_len++] = (char)nb;
+                        }
+                        utf8_tmp[utf8_len] = '\0';
+                        /* コマンドバッファに追加 */
+                        if (cmd_len + utf8_len < CMD_BUF_SIZE - 1) {
+                            int bi;
+                            if (cmd_pos == cmd_len) {
+                                for (bi = 0; bi < utf8_len; bi++) {
+                                    cmd_buf[cmd_pos++] = utf8_tmp[bi];
+                                    cmd_len++;
+                                }
+                                cmd_buf[cmd_len] = 0;
+                                g_api->shell_print_utf8(utf8_tmp, ATTR_WHITE);
+                                prev_draw_len = cmd_len;
+                            } else {
+                                int i;
+                                for (i = cmd_len - 1 + utf8_len; i >= cmd_pos + utf8_len; i--)
+                                    cmd_buf[i] = cmd_buf[i - utf8_len];
+                                for (bi = 0; bi < utf8_len; bi++)
+                                    cmd_buf[cmd_pos++] = utf8_tmp[bi];
+                                cmd_len += utf8_len;
+                                cmd_buf[cmd_len] = 0;
+                                redraw_line(cmd_buf, cmd_len, cmd_pos);
+                            }
+                        }
+                    } else {
+                        /* ASCII文字 */
+                        char ch = (char)ascii_byte;
+                        if (cmd_pos == cmd_len) {
+                            cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
+                            g_api->shell_putchar(ch, ATTR_WHITE); prev_draw_len = cmd_len;
+                        } else {
+                            int i; for (i = cmd_len; i > cmd_pos; i--) cmd_buf[i] = cmd_buf[i-1];
+                            cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
+                            redraw_line(cmd_buf, cmd_len, cmd_pos);
+                        }
+                    }
                 }
             }
         }
