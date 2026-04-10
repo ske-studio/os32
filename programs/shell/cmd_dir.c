@@ -111,32 +111,55 @@ static void cmd_ls(int argc, char **argv)
 
 static void cmd_cd(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    g_api->kprintf(0x0E, "%s", "[STUB] cd disabled for refactor\n");
+    int rc;
+    if (argc < 2) {
+        /* 引数なし: カレントディレクトリを表示 */
+        const char *cwd = g_api->sys_getcwd();
+        g_api->kprintf(ATTR_WHITE, "%s\n", cwd ? cwd : "/");
+        return;
+    }
+    rc = g_api->sys_chdir(argv[1]);
+    if (rc != 0) {
+        g_api->kprintf(ATTR_RED, "cd: %s: not found (%d)\n", argv[1], rc);
+    }
 }
-
-
 
 static void cmd_pwd(int argc, char **argv)
 {
+    const char *cwd;
     (void)argc; (void)argv;
-    g_api->kprintf(0x0E, "%s", "[STUB] pwd disabled for refactor\n");
+    cwd = g_api->sys_getcwd();
+    g_api->kprintf(ATTR_WHITE, "%s\n", cwd ? cwd : "/");
 }
-
-
 
 static void cmd_mkdir(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    g_api->kprintf(0x0E, "%s", "[STUB] mkdir disabled for refactor\n");
+    int i, rc;
+    if (argc < 2) {
+        shell_print_help(argv[0]);
+        return;
+    }
+    for (i = 1; i < argc; i++) {
+        rc = g_api->sys_mkdir(argv[i]);
+        if (rc != 0) {
+            g_api->kprintf(ATTR_RED, "mkdir: %s: failed (%d)\n", argv[i], rc);
+        }
+    }
 }
-
-
 
 static void cmd_rmdir(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    g_api->kprintf(0x0E, "%s", "[STUB] rmdir disabled for refactor\n");
+    int i, rc;
+    if (argc < 2) {
+        shell_print_help(argv[0]);
+        return;
+    }
+    for (i = 1; i < argc; i++) {
+        rc = g_api->sys_rmdir(argv[i]);
+        if (rc != 0) {
+            g_api->kprintf(ATTR_RED, "rmdir: %s: failed (%d)\n", argv[i], rc);
+        }
+    }
 }
 
 
