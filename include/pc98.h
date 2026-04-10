@@ -117,9 +117,11 @@
 #define PIT_BIN             0x00    /* バイナリ */
 #define PIT_BCD             0x01    /* BCD */
 
-/* システムクロック定数 (Hz) */
-#define SYSCLK_8MHZ         1996800UL
-#define SYSCLK_10MHZ        2457600UL
+/* システムクロック定数 (Hz)                                                */
+/* PC9800BibleとUNDOCUMENTED io_tcu.mdでMHz系とクロック値の対応が逆転している */
+/* 安全のためMHz系不依存の名前で定義。実行時にポート42h bit5等で判別推奨 */
+#define SYSCLK_1997         1996800UL   /* 1.9968MHz (NP21/Wデフォルト) */
+#define SYSCLK_2458         2457600UL   /* 2.4576MHz */
 
 
 /* ====================================================================== */
@@ -306,9 +308,12 @@
 #define MOUSE_MODE           0x7FDFUL  /* 8255モード/PortC個別 */
 #define MOUSE_INTERVAL       0xBFDBUL  /* 割り込み間隔設定 */
 
-/* マウスデータ ビット (7FD9Hリード) */
+/* マウスデータ ビット (7FD9Hリード) — UNDOCUMENTED io_mouse.md 準拠       */
+/* 注意: PC9800Bibleは D6=RIGHT としているが、UNDOCUMENTEDの実機解析では  */
+/*       D6=MIDDLE(中ボタン), D5=RIGHT（右ボタン）が正しい                  */
 #define MOUSE_LEFT           0x80   /* D7: 左ボタン (0=押下) */
-#define MOUSE_RIGHT          0x40   /* D6: 右ボタン (0=押下) */
+#define MOUSE_MIDDLE         0x40   /* D6: 中ボタン (0=押下) Undocumented */
+#define MOUSE_RIGHT          0x20   /* D5: 右ボタン (0=押下) */
 
 
 #endif /* PC98_H */

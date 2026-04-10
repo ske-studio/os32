@@ -1,5 +1,5 @@
 /* ======================================================================== */
-/*  IDE.H — PC-98 IDE/ATA PIOドライバ                                       */
+/*  IDE.H — PC-98 IDE/ATA PIOドライバ (CHS専用)                              */
 /*                                                                          */
 /*  PC-98のIDE I/Oポートマッピング:                                          */
 /*    0x640: Data (16-bit)        0x642: Features/Error                      */
@@ -10,7 +10,11 @@
 /*                                                                          */
 /*  バンク切替: 0x430/0x432 でプライマリ/セカンダリ選択                      */
 /*                                                                          */
-/*  出典: NP21/W (ideio.c), DOSBox-X (ide.cpp), PC9800Bible §2-9            */
+/*  PC-98ではLBAアドレッシングは使用しない (UNDOCUMENTED io_ide.md)。         */
+/*  本ドライバはCHSモード専用。APIはLBA値で受け取り内部でCHS変換を行う。     */
+/*                                                                          */
+/*  出典: NP21/W (ideio.c), DOSBox-X (ide.cpp), PC9800Bible §2-9,           */
+/*        UNDOCUMENTED 9801/9821 Vol.2 io_ide.md                             */
 /* ======================================================================== */
 
 #ifndef IDE_H
@@ -51,9 +55,8 @@
 #define IDE_CMD_WRITE      0x30   /* WRITE SECTOR(S) */
 #define IDE_CMD_IDENTIFY   0xEC   /* IDENTIFY DEVICE */
 
-/* ドライブ選択/LBA指定 (ATA仕様) */
-#define IDE_DRV_SEL_BASE   0xA0   /* CHSモード: bit5=1, bit7=1 */
-#define IDE_LBA_MODE       0xE0   /* LBAモード: bit5=1, bit6=1(LBA), bit7=1 */
+/* ドライブ選択 — PC-98ではCHS専用 (UNDOCUMENTED: bit6は常に0) */
+#define IDE_DRV_SEL_CHS    0xA0   /* CHSモード: bit5=1, bit6=0, bit7=1 */
 
 #define IDE_TIMEOUT_LOOP   1000000 /* BSY/DRQ待ちループカウント (長い) */
 #define IDE_TIMEOUT_BSY    500000  /* 一般的なBSY等のループカウント */
@@ -91,13 +94,13 @@ int ide_init(void);
 /* ドライブ情報取得 */
 int ide_identify(int drive, IdeInfo *info);
 
-/* セクタ読み込み (LBA) — 512バイト/セクタ */
+/* セクタ読み込み (LBA指定→内部CHS変換) — 512バイト/セクタ */
 int ide_read_sector(int drive, u32 lba, void *buf);
 
 /* 複数セクタ読み込み */
 int ide_read_sectors(int drive, u32 lba, u32 count, void *buf);
 
-/* セクタ書き込み (LBA) */
+/* セクタ書き込み (LBA指定→内部CHS変換) */
 int ide_write_sector(int drive, u32 lba, const void *buf);
 
 /* 複数セクタ書き込み */

@@ -1,7 +1,8 @@
 /* ======================================================================== */
-/*  IDE.C — PC-98 IDE/ATA PIOドライバ実装                                   */
+/*  IDE.C — PC-98 IDE/ATA PIOドライバ実装 (CHS専用)                        */
 /*                                                                          */
-/*  PIOモードによるセクタ読み書き。LBA28 対応。                             */
+/*  PIOモードによるセクタ読み書き。APIはLBA値で受け取り、内部でCHS変換。      */
+/*  PC-98ではLBAアドレッシングは使用しない (UNDOCUMENTED io_ide.md)。   */
 /*  NP21/W + DOSBox-X + FreeBSD/pc98 wdc を参考に実装。                     */
 /* ======================================================================== */
 
@@ -73,10 +74,11 @@ static int ide_wait_ready(void)
     return IDE_ERR_TIMEOUT;
 }
 
-/* ドライブ選択 (0=マスター, 1=スレーブ) */
+/* ドライブ選択 (0=マスター, PC-98ではDriveSelectは常に0) */
 static void ide_select_drive(int drive)
 {
-    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_BASE | ((drive & 1) << 4)));
+    (void)drive;  /* PC-98ではMaster/Slave不使用 (UNDOCUMENTED) */
+    outp(IDE_DRV_HEAD, IDE_DRV_SEL_CHS);
     /* ドライブ選択後、400ns待ち（ダミーリード） */
     {
         int i;
@@ -84,15 +86,34 @@ static void ide_select_drive(int drive)
     }
 }
 
-/* LBAアドレスセット */
-static void ide_set_lba(int drive, u32 lba, u8 count)
+/* CHSアドレスセット (LBA→CHS変換) */
+/* PC-98ではSDHレジスタ bit6=0 (CHSモード), bit4=0 (ドライブ0固定) */
+/* 変換式: sector=(LBA%SPT)+1, head=(LBA/SPT)%HEADS, cyl=(LBA/SPT)/HEADS */
+static void ide_set_chs(int drive, u32 lba, u8 count)
 {
+    u16 cyl;
+    u8 head, sector;
+    u16 heads = drive_info[drive & 1].heads;
+    u16 spt   = drive_info[drive & 1].sectors;
+
+    /* ジオメトリが未取得の場合のフォールバック */
+    if (heads == 0) heads = 8;
+    if (spt == 0)   spt   = 17;
+
+    /* LBA → CHS 変換 */
+    sector = (u8)((lba % spt) + 1);       /* 1ベース */
+    {
+        u32 temp = lba / spt;
+        head = (u8)(temp % heads);
+        cyl  = (u16)(temp / heads);
+    }
+
     outp(IDE_SECT_CNT, (unsigned)count);
-    outp(IDE_SECT_NUM, (unsigned)(lba & 0xFF));
-    outp(IDE_CYL_LO,   (unsigned)((lba >> 8) & 0xFF));
-    outp(IDE_CYL_HI,   (unsigned)((lba >> 16) & 0xFF));
-    /* LBAモード: bit6=1, bit5=1(LBA), bit4=drive, bit3-0=LBA[27:24] */
-    outp(IDE_DRV_HEAD, (unsigned)(IDE_LBA_MODE | ((drive & 1) << 4) | ((lba >> 24) & 0x0F)));
+    outp(IDE_SECT_NUM, (unsigned)sector);
+    outp(IDE_CYL_LO,   (unsigned)(cyl & 0xFF));
+    outp(IDE_CYL_HI,   (unsigned)((cyl >> 8) & 0xFF));
+    /* Drive/Head: CHSモード (0xA0) + head番号 */
+    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F)));
 }
 
 /* ============================================================ */
@@ -215,7 +236,7 @@ int ide_read_sector(int drive, u32 lba, void *buf)
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
 
-    ide_set_lba(drive, lba, 1);
+    ide_set_chs(drive, lba, 1);
 
     outp(IDE_COMMAND, IDE_CMD_READ);
 
@@ -266,7 +287,7 @@ int ide_write_sector(int drive, u32 lba, const void *buf)
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
 
-    ide_set_lba(drive, lba, 1);
+    ide_set_chs(drive, lba, 1);
 
     outp(IDE_COMMAND, IDE_CMD_WRITE);
 

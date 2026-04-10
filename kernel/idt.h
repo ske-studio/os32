@@ -90,7 +90,8 @@ struct idt_ptr {
 #define PIT_CNTR2    0x75  /* カウンタ#2 (RS-232C) */
 #define PIT_MODE     0x77  /* モードレジスタ */
 
-/* PC-9801FA: 8MHz系 システムクロック */
+/* システムクロック: NP21/W動作確認済み                                      */
+/* 注意: PC9800BibleとUNDOCUMENTEDでMHz系との対応が逆転 (値自体は正しい)     */
 #define PIT_CLOCK    1996800UL
 
 /* PITモードバイト: カウンタ#0, LSB/MSB, モード2(レートジェネレータ), バイナリ */

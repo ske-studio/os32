@@ -16,6 +16,15 @@ PC-9801シリーズ向け 32ビット ベアメタルOS (GCC移植版)
 | [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
 
+## ハードウェア技術資料 (外部リファレンス)
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [UNDOCUMENTED 9801/9821 Vol.2](../../../../docs/undocumented/INDEX.md) | **非公開メモリ・I/Oポート資料集 (独自調査基盤、より正確)** |
+| [PC-9800 テクニカルマニュアル](../../../../docs/PC9800Bible/INDEX.md) | PC-9800シリーズ テクニカルデータブック (公式資料ベース) |
+
+> **注意:** PC9800Bible と UNDOCUMENTED の記述が矛盾する場合は、UNDOCUMENTED の方を優先してください。
+
 ## タスク (開発中の作業ドキュメント)
 
 | ドキュメント | 内容 |

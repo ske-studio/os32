@@ -69,10 +69,12 @@
 #define SIG_CS      0x40    /* D6: CS/CTS (負論理) */
 #define SIG_CI      0x80    /* D7: CI/RI (負論理) */
 
-/* ======== システムクロック定数 ======== */
-/* 8MHz系: 1996800Hz, 5MHz系: 2457600Hz */
-#define TIMER_CLK_8MHZ  1996800UL
-#define TIMER_CLK_5MHZ  2457600UL
+/* ======== システムクロック定数 — UNDOCUMENTED io_tcu.md 準拠 ======== */
+/* PC9800BibleとUNDOCUMENTEDでMHz系とクロック値の対応が逆転している。       */
+/* ここでは両方の値を定義し、実行時にポート42h bit5等で判別すべき。          */
+/* 現在のOS32はNP21/W上で1996800Hzとして動作確認済み。                       */
+#define TIMER_CLK_1997  1996800UL   /* 1.9968MHz (NP21/Wデフォルト) */
+#define TIMER_CLK_2458  2457600UL   /* 2.4576MHz */
 
 /* ======== 受信バッファ ======== */
 #define SER_BUF_SIZE    4096

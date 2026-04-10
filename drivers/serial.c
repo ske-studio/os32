@@ -59,9 +59,9 @@ void serial_init(unsigned long baud)
      * PC9800Bible: 0x06=OFF, 0x07=ON だが NP21/Wでは極性逆
      * NP21/W: BSR_BUZ_ON (0x07) = BUZ OFF */
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);
-    /* 8MHz系: 1996800 / 16 / baud */
+    /* NP21/W動作確認済みクロック: 1996800Hz / 16 / baud */
     if (baud == 0) baud = 9600;
-    count = (u16)(TIMER_CLK_8MHZ / 16UL / baud);
+    count = (u16)(TIMER_CLK_1997 / 16UL / baud);
     if (count == 0) count = 1;
 
     /* PIT モード設定: カウンタ#2, LSB+MSB, Mode 3(方形波) */
