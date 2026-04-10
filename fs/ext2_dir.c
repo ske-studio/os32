@@ -278,7 +278,11 @@ int ext2_mkdir(u32 parent_ino, const char *name)
     ret = ext2_read_inode(parent_ino, &parent_inode);
     if (ret == 0) { parent_inode.links_count++; ext2_write_inode(parent_ino, &parent_inode); }
 
-    ext2_gd_info.used_dirs++;
+    {
+        u32 dir_group = ((u32)new_ino - 1) / ext2_sb_info.inodes_per_group;
+        if (dir_group < ext2_num_groups)
+            ext2_gd_table[dir_group].used_dirs++;
+    }
     ext2_sync();
     return EXT2_OK;
 }
@@ -349,7 +353,11 @@ int ext2_rmdir(u32 parent_ino, const char *name)
         ext2_write_inode(parent_ino, &parent_inode);
     }
 
-    ext2_gd_info.used_dirs--;
+    {
+        u32 dir_group = (ino - 1) / ext2_sb_info.inodes_per_group;
+        if (dir_group < ext2_num_groups)
+            ext2_gd_table[dir_group].used_dirs--;
+    }
     ext2_sync();
     return EXT2_OK;
 }

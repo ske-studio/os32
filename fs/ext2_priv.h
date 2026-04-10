@@ -5,11 +5,18 @@
 #include "ide.h"
 #include "vfs.h"
 
+/* マルチグループ対応: 200MBディスクで最大25グループ */
+#define EXT2_MAX_GROUPS  32
+
+/* 1KBブロック時、1グループあたりの最大ブロック数 (ビットマップ1ブロック = 8192ビット) */
+#define EXT2_BLOCKS_PER_GROUP_MAX  8192
+
 /* マウント状態とグローバル情報 */
 extern int ext2_mounted;
 extern int ext2_drive_num;
 extern Ext2Super ext2_sb_info;
-extern Ext2GroupDesc ext2_gd_info;
+extern Ext2GroupDesc ext2_gd_table[EXT2_MAX_GROUPS];
+extern u32 ext2_num_groups;
 extern u32 ext2_base_lba;
 
 /* 共有バッファ */

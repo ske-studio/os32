@@ -5,15 +5,17 @@
 
 int ext2_read_inode(u32 ino, Ext2Inode *inode)
 {
-    u32 index, block_num, offset_in_block;
+    u32 group, index, block_num, offset_in_block;
     int ret, i;
     u8 *src;
 
     if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
     if (ino == 0) return EXT2_ERR_NOTFOUND;
 
+    group = (ino - 1) / ext2_sb_info.inodes_per_group;
     index = (ino - 1) % ext2_sb_info.inodes_per_group;
-    block_num = ext2_gd_info.inode_table + (index * ext2_sb_info.inode_size) / EXT2_BLOCK_SIZE;
+    if (group >= ext2_num_groups) return EXT2_ERR_NOTFOUND;
+    block_num = ext2_gd_table[group].inode_table + (index * ext2_sb_info.inode_size) / EXT2_BLOCK_SIZE;
     offset_in_block = (index * ext2_sb_info.inode_size) % EXT2_BLOCK_SIZE;
 
     ret = ext2_read_block(block_num, ext2_g_blk);
@@ -46,15 +48,17 @@ int ext2_read_inode(u32 ino, Ext2Inode *inode)
 
 int ext2_write_inode(u32 ino, const Ext2Inode *inode)
 {
-    u32 index, block_num, offset_in_block;
+    u32 group, index, block_num, offset_in_block;
     int ret, i;
     u8 *dst;
 
     if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
     if (ino == 0) return EXT2_ERR_NOTFOUND;
 
+    group = (ino - 1) / ext2_sb_info.inodes_per_group;
     index = (ino - 1) % ext2_sb_info.inodes_per_group;
-    block_num = ext2_gd_info.inode_table + (index * ext2_sb_info.inode_size) / EXT2_BLOCK_SIZE;
+    if (group >= ext2_num_groups) return EXT2_ERR_NOTFOUND;
+    block_num = ext2_gd_table[group].inode_table + (index * ext2_sb_info.inode_size) / EXT2_BLOCK_SIZE;
     offset_in_block = (index * ext2_sb_info.inode_size) % EXT2_BLOCK_SIZE;
 
     ret = ext2_read_block(block_num, ext2_g_blk);
@@ -92,26 +96,42 @@ int ext2_write_inode(u32 ino, const Ext2Inode *inode)
 int ext2_alloc_block(void)
 {
     int ret, byte_idx, bit_idx;
-    u32 block_num;
+    u32 g, block_num, max_bits;
 
     if (!ext2_mounted) return -1;
-    if (ext2_gd_info.free_blocks == 0) return -1;
 
-    ret = ext2_read_block(ext2_gd_info.block_bitmap, ext2_g_aux);
-    if (ret != 0) return -1;
+    /* 全グループを走査して空きブロックを探す */
+    for (g = 0; g < ext2_num_groups; g++) {
+        if (ext2_gd_table[g].free_blocks == 0) continue;
 
-    for (byte_idx = 0; byte_idx < EXT2_BLOCK_SIZE; byte_idx++) {
-        if (ext2_g_aux[byte_idx] == 0xFF) continue;
-        for (bit_idx = 0; bit_idx < 8; bit_idx++) {
-            if (!(ext2_g_aux[byte_idx] & (1 << bit_idx))) {
-                block_num = (u32)(byte_idx * 8 + bit_idx) + ext2_sb_info.first_data_block;
-                if (block_num >= ext2_sb_info.total_blocks) return -1;
-                ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
-                ret = ext2_write_block(ext2_gd_info.block_bitmap, ext2_g_aux);
-                if (ret != 0) return -1;
-                ext2_gd_info.free_blocks--;
-                ext2_sb_info.free_blocks_count--;
-                return (int)block_num;
+        ret = ext2_read_block(ext2_gd_table[g].block_bitmap, ext2_g_aux);
+        if (ret != 0) continue;
+
+        /* 最終グループはブロック数が端数になる場合がある */
+        max_bits = ext2_sb_info.blocks_per_group;
+        if (g == ext2_num_groups - 1) {
+            u32 remaining = ext2_sb_info.total_blocks
+                            - ext2_sb_info.first_data_block
+                            - g * ext2_sb_info.blocks_per_group;
+            if (remaining < max_bits) max_bits = remaining;
+        }
+
+        for (byte_idx = 0; (u32)byte_idx < (max_bits + 7) / 8; byte_idx++) {
+            if (ext2_g_aux[byte_idx] == 0xFF) continue;
+            for (bit_idx = 0; bit_idx < 8; bit_idx++) {
+                if ((u32)(byte_idx * 8 + bit_idx) >= max_bits) break;
+                if (!(ext2_g_aux[byte_idx] & (1 << bit_idx))) {
+                    block_num = ext2_sb_info.first_data_block
+                                + g * ext2_sb_info.blocks_per_group
+                                + (u32)(byte_idx * 8 + bit_idx);
+                    if (block_num >= ext2_sb_info.total_blocks) return -1;
+                    ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
+                    ret = ext2_write_block(ext2_gd_table[g].block_bitmap, ext2_g_aux);
+                    if (ret != 0) return -1;
+                    ext2_gd_table[g].free_blocks--;
+                    ext2_sb_info.free_blocks_count--;
+                    return (int)block_num;
+                }
             }
         }
     }
@@ -121,44 +141,57 @@ int ext2_alloc_block(void)
 void ext2_free_block(u32 block_num)
 {
     int ret;
-    u32 bit, byte_idx, bit_idx;
+    u32 group, rel_bit, byte_idx, bit_idx;
 
     if (!ext2_mounted) return;
-    bit = block_num - ext2_sb_info.first_data_block;
-    byte_idx = bit / 8;
-    bit_idx  = bit % 8;
 
-    ret = ext2_read_block(ext2_gd_info.block_bitmap, ext2_g_aux);
+    /* ブロック番号からグループを逆算 */
+    group = (block_num - ext2_sb_info.first_data_block) / ext2_sb_info.blocks_per_group;
+    rel_bit = (block_num - ext2_sb_info.first_data_block) % ext2_sb_info.blocks_per_group;
+    if (group >= ext2_num_groups) return;
+
+    byte_idx = rel_bit / 8;
+    bit_idx  = rel_bit % 8;
+
+    ret = ext2_read_block(ext2_gd_table[group].block_bitmap, ext2_g_aux);
     if (ret != 0) return;
     ext2_g_aux[byte_idx] &= (u8)~(1 << bit_idx);
-    ext2_write_block(ext2_gd_info.block_bitmap, ext2_g_aux);
-    ext2_gd_info.free_blocks++;
+    ext2_write_block(ext2_gd_table[group].block_bitmap, ext2_g_aux);
+    ext2_gd_table[group].free_blocks++;
     ext2_sb_info.free_blocks_count++;
 }
 
 int ext2_alloc_inode(void)
 {
     int ret, byte_idx, bit_idx;
-    u32 ino;
+    u32 g, ino, max_bits;
 
     if (!ext2_mounted) return -1;
-    if (ext2_gd_info.free_inodes == 0) return -1;
 
-    ret = ext2_read_block(ext2_gd_info.inode_bitmap, ext2_g_aux);
-    if (ret != 0) return -1;
+    /* 全グループを走査して空きinodeを探す */
+    for (g = 0; g < ext2_num_groups; g++) {
+        if (ext2_gd_table[g].free_inodes == 0) continue;
 
-    for (byte_idx = 0; byte_idx < EXT2_BLOCK_SIZE; byte_idx++) {
-        if (ext2_g_aux[byte_idx] == 0xFF) continue;
-        for (bit_idx = 0; bit_idx < 8; bit_idx++) {
-            if (!(ext2_g_aux[byte_idx] & (1 << bit_idx))) {
-                ino = (u32)(byte_idx * 8 + bit_idx) + 1;
-                if (ino > ext2_sb_info.total_inodes) return -1;
-                ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
-                ret = ext2_write_block(ext2_gd_info.inode_bitmap, ext2_g_aux);
-                if (ret != 0) return -1;
-                ext2_gd_info.free_inodes--;
-                ext2_sb_info.free_inodes_count--;
-                return (int)ino;
+        ret = ext2_read_block(ext2_gd_table[g].inode_bitmap, ext2_g_aux);
+        if (ret != 0) continue;
+
+        max_bits = ext2_sb_info.inodes_per_group;
+
+        for (byte_idx = 0; (u32)byte_idx < (max_bits + 7) / 8; byte_idx++) {
+            if (ext2_g_aux[byte_idx] == 0xFF) continue;
+            for (bit_idx = 0; bit_idx < 8; bit_idx++) {
+                if ((u32)(byte_idx * 8 + bit_idx) >= max_bits) break;
+                if (!(ext2_g_aux[byte_idx] & (1 << bit_idx))) {
+                    ino = g * ext2_sb_info.inodes_per_group
+                          + (u32)(byte_idx * 8 + bit_idx) + 1;
+                    if (ino > ext2_sb_info.total_inodes) return -1;
+                    ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
+                    ret = ext2_write_block(ext2_gd_table[g].inode_bitmap, ext2_g_aux);
+                    if (ret != 0) return -1;
+                    ext2_gd_table[g].free_inodes--;
+                    ext2_sb_info.free_inodes_count--;
+                    return (int)ino;
+                }
             }
         }
     }
@@ -168,18 +201,23 @@ int ext2_alloc_inode(void)
 void ext2_free_inode(u32 ino)
 {
     int ret;
-    u32 bit, byte_idx, bit_idx;
+    u32 group, rel_bit, byte_idx, bit_idx;
 
     if (!ext2_mounted) return;
-    bit = ino - 1;
-    byte_idx = bit / 8;
-    bit_idx  = bit % 8;
 
-    ret = ext2_read_block(ext2_gd_info.inode_bitmap, ext2_g_aux);
+    /* inode番号からグループを逆算 */
+    group = (ino - 1) / ext2_sb_info.inodes_per_group;
+    rel_bit = (ino - 1) % ext2_sb_info.inodes_per_group;
+    if (group >= ext2_num_groups) return;
+
+    byte_idx = rel_bit / 8;
+    bit_idx  = rel_bit % 8;
+
+    ret = ext2_read_block(ext2_gd_table[group].inode_bitmap, ext2_g_aux);
     if (ret != 0) return;
     ext2_g_aux[byte_idx] &= (u8)~(1 << bit_idx);
-    ext2_write_block(ext2_gd_info.inode_bitmap, ext2_g_aux);
-    ext2_gd_info.free_inodes++;
+    ext2_write_block(ext2_gd_table[group].inode_bitmap, ext2_g_aux);
+    ext2_gd_table[group].free_inodes++;
     ext2_sb_info.free_inodes_count++;
 }
 

@@ -17,7 +17,8 @@
 int ext2_mounted = 0;
 int ext2_drive_num = 0;
 Ext2Super ext2_sb_info;
-Ext2GroupDesc ext2_gd_info;
+Ext2GroupDesc ext2_gd_table[EXT2_MAX_GROUPS];
+u32 ext2_num_groups = 0;
 
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * BSS節約のため2つに統合。バッファの用途は呼び出し元コメント参照。
@@ -120,13 +121,36 @@ int ext2_write_super_raw(void)
 
 int ext2_write_gd_raw(void)
 {
+    /* GDTはブロック2から連続配置。1エントリ32バイト。
+     * 1KBブロックに32エントリ収まる → MAX_GROUPS=32なら1ブロックで足りる */
     int ret;
-    ret = ext2_read_block(2, ext2_g_blk);
-    if (ret != 0) return EXT2_ERR_IO;
-    *(u16 *)&ext2_g_blk[12] = ext2_gd_info.free_blocks;
-    *(u16 *)&ext2_g_blk[14] = ext2_gd_info.free_inodes;
-    *(u16 *)&ext2_g_blk[16] = ext2_gd_info.used_dirs;
-    return ext2_write_block(2, ext2_g_blk);
+    u32 g, gd_block, offset;
+
+    /* GDTが占めるブロック数を計算 (32B × num_groups) */
+    for (g = 0; g < ext2_num_groups; g++) {
+        gd_block = 2 + (g * 32) / EXT2_BLOCK_SIZE;
+        offset = (g * 32) % EXT2_BLOCK_SIZE;
+
+        /* ブロックの先頭エントリの場合のみ読み込み */
+        if (offset == 0) {
+            ret = ext2_read_block(gd_block, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+
+        *(u32 *)&ext2_g_blk[offset + 0]  = ext2_gd_table[g].block_bitmap;
+        *(u32 *)&ext2_g_blk[offset + 4]  = ext2_gd_table[g].inode_bitmap;
+        *(u32 *)&ext2_g_blk[offset + 8]  = ext2_gd_table[g].inode_table;
+        *(u16 *)&ext2_g_blk[offset + 12] = ext2_gd_table[g].free_blocks;
+        *(u16 *)&ext2_g_blk[offset + 14] = ext2_gd_table[g].free_inodes;
+        *(u16 *)&ext2_g_blk[offset + 16] = ext2_gd_table[g].used_dirs;
+
+        /* ブロック末尾のエントリ or 最後のグループの場合に書き込み */
+        if (offset + 32 >= EXT2_BLOCK_SIZE || g == ext2_num_groups - 1) {
+            ret = ext2_write_block(gd_block, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+    }
+    return EXT2_OK;
 }
 
 /* ======================================================================== */
@@ -221,16 +245,34 @@ int ext2_mount(int ide_drive)
     }
     ext2_sb_info.volume_name[16] = '\0';
 
-    /* グループディスクリプタ (ブロック2) — g_blk再利用 */
-    ret = ext2_read_block(2, ext2_g_blk);
-    if (ret != 0) return EXT2_ERR_IO;
+    /* グループ数を計算 */
+    ext2_num_groups = (ext2_sb_info.total_blocks - ext2_sb_info.first_data_block
+                       + ext2_sb_info.blocks_per_group - 1)
+                      / ext2_sb_info.blocks_per_group;
+    if (ext2_num_groups == 0) ext2_num_groups = 1;
+    if (ext2_num_groups > EXT2_MAX_GROUPS) return EXT2_ERR_IO;
 
-    ext2_gd_info.block_bitmap = *(u32 *)&ext2_g_blk[0];
-    ext2_gd_info.inode_bitmap = *(u32 *)&ext2_g_blk[4];
-    ext2_gd_info.inode_table  = *(u32 *)&ext2_g_blk[8];
-    ext2_gd_info.free_blocks  = *(u16 *)&ext2_g_blk[12];
-    ext2_gd_info.free_inodes  = *(u16 *)&ext2_g_blk[14];
-    ext2_gd_info.used_dirs    = *(u16 *)&ext2_g_blk[16];
+    /* グループディスクリプタテーブル全体を読み込み — g_blk再利用 */
+    {
+        u32 g, gd_block, offset;
+        for (g = 0; g < ext2_num_groups; g++) {
+            gd_block = 2 + (g * 32) / EXT2_BLOCK_SIZE;
+            offset = (g * 32) % EXT2_BLOCK_SIZE;
+
+            /* ブロックの先頭エントリの場合のみ読み込み */
+            if (offset == 0) {
+                ret = ext2_read_block(gd_block, ext2_g_blk);
+                if (ret != 0) return EXT2_ERR_IO;
+            }
+
+            ext2_gd_table[g].block_bitmap = *(u32 *)&ext2_g_blk[offset + 0];
+            ext2_gd_table[g].inode_bitmap = *(u32 *)&ext2_g_blk[offset + 4];
+            ext2_gd_table[g].inode_table  = *(u32 *)&ext2_g_blk[offset + 8];
+            ext2_gd_table[g].free_blocks  = *(u16 *)&ext2_g_blk[offset + 12];
+            ext2_gd_table[g].free_inodes  = *(u16 *)&ext2_g_blk[offset + 14];
+            ext2_gd_table[g].used_dirs    = *(u16 *)&ext2_g_blk[offset + 16];
+        }
+    }
 
     ext2_mounted = 1;
     return EXT2_OK;
