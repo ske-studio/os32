@@ -236,7 +236,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* Unicodeテーブルロード */
     tvram_print(60, 2, "UNI...", TATTR_GREEN);
     {
-        int bytes = vfs_read("/UNICODE.BIN", (void *)MEM_UNICODE_TABLE_BASE, 131072);
+        int bytes = vfs_read("/unicode.bin", (void *)MEM_UNICODE_TABLE_BASE, 131072);
         if (bytes == 131072) {
             tvram_print(67, 2, "OK", TATTR_WHITE);
         } else {
