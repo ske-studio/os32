@@ -24,13 +24,15 @@ int ext2_read_file(u32 ino, void *buf, u32 max_size)
         phys = ext2_bmap(&inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
-        if (ret != 0) return EXT2_ERR_IO;
-
         to_copy = remaining;
         if (to_copy > EXT2_BLOCK_SIZE) to_copy = EXT2_BLOCK_SIZE;
 
-        ext2_mem_copy(&dst[total_read], ext2_g_aux, to_copy);
+        /* 宛先バッファに直接読み込み — ext2_g_auxを経由しない。
+         * ext2_bmapが間接ブロック参照でext2_g_auxを使うため、
+         * ここでext2_g_auxに読むとバッファ競合が発生する。 */
+        ret = ext2_read_block(phys, &dst[total_read]);
+        if (ret != 0) return EXT2_ERR_IO;
+
         total_read += to_copy;
         remaining -= to_copy;
     }
@@ -64,13 +66,22 @@ int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
         phys = ext2_bmap(&inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
-        if (ret != 0) return EXT2_ERR_IO;
-
         to_copy = EXT2_BLOCK_SIZE - byte_in_blk;
         if (to_copy > remaining) to_copy = remaining;
 
-        ext2_mem_copy(&dst[total_read], &ext2_g_aux[byte_in_blk], to_copy);
+        if (byte_in_blk == 0 && to_copy == EXT2_BLOCK_SIZE) {
+            /* ブロック全体: 直接宛先に読み込み */
+            ret = ext2_read_block(phys, &dst[total_read]);
+        } else {
+            /* 部分ブロック: ext2_g_blkを中間バッファとして使用
+             * (ext2_g_auxはext2_bmapと競合するため使えない) */
+            ret = ext2_read_block(phys, ext2_g_blk);
+            if (ret == 0) {
+                ext2_mem_copy(&dst[total_read], &ext2_g_blk[byte_in_blk], to_copy);
+            }
+        }
+        if (ret != 0) return EXT2_ERR_IO;
+
         total_read += to_copy;
         remaining -= to_copy;
         byte_in_blk = 0;
