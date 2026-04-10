@@ -73,6 +73,7 @@ typedef struct {
     void (__cdecl *sys_reboot)(void);
     void (__cdecl *sys_halt)(void);
     void (__cdecl *shell_putchar)(char ch, u8 attr);
+    void (__cdecl *shell_print_utf8)(const char *utf8_str, u8 color);
     int (__cdecl *console_get_cursor_x)(void);
     int (__cdecl *console_get_cursor_y)(void);
     void (__cdecl *console_set_cursor)(int x, int y);
@@ -103,6 +104,13 @@ typedef struct {
     void * (__cdecl *sys_shm_alloc)(int blocks);
     int (__cdecl *sys_shm_lock)(void *ptr);
     int (__cdecl *sys_shm_free)(void *ptr);
+    int (__cdecl *ime_getchar)(void);
+    int (__cdecl *ime_trygetchar)(void);
+    void (__cdecl *ime_toggle)(void);
+    int (__cdecl *ime_is_active)(void);
+    void (__cdecl *ime_set_mode)(int mode);
+    int (__cdecl *ime_get_mode)(void);
+    int (__cdecl *ime_getkey)(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

@@ -1,5 +1,5 @@
 {
-  "version": 23,
+  "version": 24,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -30,7 +30,8 @@
     "sys.h",
     "kprintf.h",
     "io.h",
-    "shm.h"
+    "shm.h",
+    "ime.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -506,6 +507,14 @@
       ]
     },
     {
+      "name": "shell_print_utf8",
+      "ret": "void",
+      "args": [
+        "const char *utf8_str",
+        "u8 color"
+      ]
+    },
+    {
       "name": "console_get_cursor_x",
       "ret": "int",
       "args": []
@@ -747,6 +756,43 @@
         "void *ptr"
       ],
       "target": "shm_free"
+    },
+    {
+      "name": "ime_getchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "ime_trygetchar",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "ime_toggle",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "ime_is_active",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "ime_set_mode",
+      "ret": "void",
+      "args": [
+        "int mode"
+      ]
+    },
+    {
+      "name": "ime_get_mode",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "ime_getkey",
+      "ret": "int",
+      "args": []
     }
   ]
 }

@@ -23,6 +23,7 @@
 #include "kprintf.h"
 #include "io.h"
 #include "shm.h"
+#include "ime.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -362,6 +363,11 @@ void __cdecl wrap_shell_putchar(char ch, u8 attr)
     shell_putchar(ch, attr);
 }
 
+void __cdecl wrap_shell_print_utf8(const char *utf8_str, u8 color)
+{
+    shell_print_utf8(utf8_str, color);
+}
+
 int __cdecl wrap_console_get_cursor_x(void)
 {
     return console_get_cursor_x();
@@ -510,5 +516,40 @@ int __cdecl wrap_sys_shm_lock(void *ptr)
 int __cdecl wrap_sys_shm_free(void *ptr)
 {
     return shm_free(ptr);
+}
+
+int __cdecl wrap_ime_getchar(void)
+{
+    return ime_getchar();
+}
+
+int __cdecl wrap_ime_trygetchar(void)
+{
+    return ime_trygetchar();
+}
+
+void __cdecl wrap_ime_toggle(void)
+{
+    ime_toggle();
+}
+
+int __cdecl wrap_ime_is_active(void)
+{
+    return ime_is_active();
+}
+
+void __cdecl wrap_ime_set_mode(int mode)
+{
+    ime_set_mode(mode);
+}
+
+int __cdecl wrap_ime_get_mode(void)
+{
+    return ime_get_mode();
+}
+
+int __cdecl wrap_ime_getkey(void)
+{
+    return ime_getkey();
 }
 
