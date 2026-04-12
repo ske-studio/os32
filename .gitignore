@@ -36,3 +36,10 @@ screenshot*.png
 demo*_fixed.png
 kernel_objdump.txt
 test_rect.script
+
+# テスト用バイナリアセット
+*.vdp
+*.vqd
+*.vqi
+*.VQI
+rance.png
