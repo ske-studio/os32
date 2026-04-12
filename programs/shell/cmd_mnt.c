@@ -30,15 +30,34 @@ static void cmd_sync(int argc, char **argv)
 static void cmd_exec(int argc, char **argv)
 {
     int rc;
+    char cmdline[256];
+    int i, pos;
+
     if (argc < 2) {
         shell_print_help(argv[0]);
         return;
     }
-    rc = g_api->exec_run(argv[1]);
+
+    /* argv[1]以降を結合してcmdline全体を構築 */
+    pos = 0;
+    for (i = 1; i < argc; i++) {
+        int len = 0;
+        const char *s = argv[i];
+        if (i > 1 && pos < (int)sizeof(cmdline) - 1) cmdline[pos++] = ' ';
+        while (*s && pos < (int)sizeof(cmdline) - 1) {
+            cmdline[pos++] = *s++;
+            len++;
+        }
+    }
+    cmdline[pos] = '\0';
+
+    rc = g_api->exec_run(cmdline);
     if (rc == -1) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
     else if (rc == -2) g_api->kprintf(ATTR_RED, "%s", "exec: invalid executable or crashed\n");
+    else if (rc == -3) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
     else g_api->kprintf(ATTR_GREEN, "exec: exited with %d\n", rc);
 }
+
 
 
 
