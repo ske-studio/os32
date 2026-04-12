@@ -48,4 +48,11 @@ void kcg_draw_ank(int x, int y, u8 ch, u8 fg, u8 bg);
 void kcg_draw_kanji(int x, int y, u16 jis_code, u8 fg, u8 bg);
 int kcg_draw_utf8(int x, int y, const char *utf8_str, u8 fg, u8 bg);
 
+/* Raster Palette */
+void gfx_raster_clear(GFX_RasterPalTable *table);
+int  gfx_raster_add(GFX_RasterPalTable *table,
+                     int line, int pal_idx, u8 r, u8 g, u8 b);
+void gfx_present_raster_only(GFX_RasterPalTable *table);
+void gfx_present_with_raster(GFX_RasterPalTable *table);
+
 #endif

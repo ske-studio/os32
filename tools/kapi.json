@@ -718,6 +718,14 @@
       "args": []
     },
     {
+      "name": "gfx_present_raster",
+      "ret": "void",
+      "args": [
+        "void *table"
+      ],
+      "body": "gfx_present_raster((GFX_RasterPalTable *)table);"
+    },
+    {
       "name": "kcg_read_ank",
       "ret": "void",
       "args": [

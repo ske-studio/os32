@@ -1,4 +1,4 @@
-# KernelAPI v22 仕様書
+# KernelAPI v24 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **22** |
-| 合計エントリ数 | **96** (データフィールド1 + 関数ポインタ95) |
+| 現在のバージョン | **24** |
+| 合計エントリ数 | **108** (データフィールド1 + 関数ポインタ107) |
 
 ---
 
@@ -155,19 +155,29 @@ make programs
 | 0x174 | gfx_get_framebuffer | `void(void *fb)` |
 | 0x178 | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
 | 0x17C | gfx_present_dirty | `void(void)` |
-| 0x180 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
-| 0x184 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
+| 0x180 | gfx_present_raster | `void(void *table)` |
+| 0x184 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
+| 0x188 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
 
 ### §4-1 グラフィックスAPI に関する補足
 
-v22では、基本的な描画プリミティブ (`gfx_clear`, `gfx_pixel`, `gfx_hline`, `gfx_vline`, `gfx_line`, `gfx_rect`, `gfx_fill_rect`) は KernelAPI から**廃止**されました。
+v22以降、基本的な描画プリミティブ (`gfx_clear`, `gfx_pixel`, `gfx_hline`, `gfx_vline`, `gfx_line`, `gfx_rect`, `gfx_fill_rect`) は KernelAPI から**廃止**されました。
 
 外部プログラムでグラフィックス描画を行う場合は、以下の２つの方式から選択します:
 
 1. **libos32gfx ライブラリ** (推奨): `programs/libos32gfx/` で提供されるスタティックリンクライブラリ。サーフェス、スプライト、描画プリミティブ、ダーティ矩形管理、フォントレンダリングなど高レベルな描画機能を提供します。
 2. **フレームバッファ直接操作**: `gfx_get_framebuffer()` で取得した `GFX_Framebuffer` 構造体を介して、4プレーンのバックバッファに直接書き込み、`gfx_add_dirty_rect()` + `gfx_present_dirty()` でVRAMに転送します。
 
+### §4-2 ラスタパレット (gfx_present_raster)
+
+v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとにパレットレジスタを書き換えることで、16色パレットの制約を超えた擬似多色表示を実現します。
+
+- **引数**: `GFX_RasterPalTable *table` — ラスタパレットテーブルへのポインタ
+- **構造体**: `GFX_RasterPalEntry` (line, pal_idx, r, g, b) × 最大200エントリ
+- **動作**: dirty rectがあればVRAM転送も行い、なければパレット書き換えのみ
+- **libos32gfx ラッパー**: `gfx_raster_clear()`, `gfx_raster_add()`, `gfx_present_raster_only()`, `gfx_present_with_raster()`
+
 ---
 
-*KernelAPI Specification — Version 22*
-*Last Updated: 2026-04-08*
+*KernelAPI Specification — Version 24*
+*Last Updated: 2026-04-12*

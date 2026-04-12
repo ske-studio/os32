@@ -15,8 +15,42 @@ import os
 import subprocess
 import shutil
 import tempfile
+import time
 
 NHD_FILE = r"/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os32.nhd"
+
+MAX_RETRY = 3
+RETRY_WAIT = 3  # 秒
+
+def ensure_nhd_unlocked(nhd_path):
+    """NHDファイルがロックされていたらNP21/Wをkillしてアンロックする"""
+    try:
+        with open(nhd_path, 'r+b') as f:
+            f.read(1)
+        return True
+    except PermissionError:
+        print("NHDファイルがロックされています。NP21/Wを終了します...",
+              file=sys.stderr)
+        try:
+            subprocess.run(['taskkill.exe', '/F', '/IM', 'np21x64w.exe'],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        try:
+            subprocess.run(['taskkill.exe', '/F', '/IM', 'np21w.exe'],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        time.sleep(RETRY_WAIT)
+        # 再確認
+        try:
+            with open(nhd_path, 'r+b') as f:
+                f.read(1)
+            print("ロック解除確認OK")
+            return True
+        except PermissionError:
+            print("まだロックされています", file=sys.stderr)
+            return False
 
 # NHDヘッダ(512B) + ブート領域(LBA 0-271) = 273セクタ
 # ext2パーティションは install.c の HDD_PARTITION_LBA=272 から開始
@@ -139,6 +173,7 @@ def main():
         print("NHD ext2 Deploy Tool (sudo不要)")
         print(f"Usage: {sys.argv[0]} {{copy|copy-all|ls|cat|rm|write-kernel}}")
         print("  copy <src> [dest]        — ext2にファイルコピー")
+        print("  copy <s1> <s2> ...       — 複数ファイルを一括コピー")
         print("  copy-all <dir> [ext]     — dirの全ファイルを一括コピー (既定: *.bin)")
         print("  ls [path]                — ext2ファイル一覧")
         print("  cat <file>               — ext2ファイル表示")
@@ -147,6 +182,13 @@ def main():
         return
     
     cmd = sys.argv[1]
+    
+    # 書き込み系コマンドの場合、ロック確認
+    write_cmds = {'copy', 'copy-all', 'rm', 'mkdir', 'write-kernel'}
+    if cmd in write_cmds:
+        if not ensure_nhd_unlocked(NHD_FILE):
+            print("Error: NHDファイルのロックを解除できません", file=sys.stderr)
+            sys.exit(1)
     
     if cmd == 'ls':
         path = sys.argv[2] if len(sys.argv) > 2 else '/'
@@ -162,18 +204,59 @@ def main():
     elif cmd == 'copy':
         if len(sys.argv) < 3:
             print("Usage: copy <src_file> [dest_path]")
+            print("       copy <src1> <src2> ...  (複数ファイル一括コピー)")
             return
-        src = sys.argv[2]
-        dest = sys.argv[3] if len(sys.argv) > 3 else os.path.basename(src)
-        
-        if not os.path.isfile(src):
-            print(f"Error: {src} not found")
-            return
-        
-        print(f"Copying {src} -> /{dest} ...")
-        src_abs = os.path.abspath(src)
-        run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
-        print("Done!")
+
+        # 引数が2個 (copy src [dest]) の場合は従来動作
+        # 引数が3個以上で最後がファイルの場合は複数ファイルモード
+        src_files = sys.argv[2:]
+
+        # 単一ファイル + 明示的dest指定のケースを判定
+        # copy src dest (src がファイルで dest がファイルでない場合)
+        if len(src_files) == 2 and os.path.isfile(src_files[0]) and not os.path.isfile(src_files[1]):
+            # 従来の copy src dest モード
+            src = src_files[0]
+            dest = src_files[1]
+            if not os.path.isfile(src):
+                print(f"Error: {src} not found")
+                return
+            print(f"Copying {src} -> /{dest} ...")
+            src_abs = os.path.abspath(src)
+            run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
+            print("Done!")
+        else:
+            # 複数ファイル一括コピーモード: 1回のdebugfsセッションで処理
+            valid_files = []
+            for f in src_files:
+                if os.path.isfile(f):
+                    valid_files.append(f)
+                else:
+                    print(f"Warning: {f} not found, skipping")
+
+            if not valid_files:
+                print("Error: コピーするファイルがありません")
+                return
+
+            if len(valid_files) == 1:
+                # 単一ファイル
+                src = valid_files[0]
+                dest = os.path.basename(src)
+                print(f"Copying {src} -> /{dest} ...")
+                src_abs = os.path.abspath(src)
+                run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
+                print("Done!")
+            else:
+                # 複数ファイルバッチ処理
+                print(f"=== Batch copy: {len(valid_files)} files ===")
+                cmds = []
+                for f in valid_files:
+                    dest = os.path.basename(f)
+                    src_abs = os.path.abspath(f)
+                    cmds.append(f'rm {dest}')
+                    cmds.append(f'write {src_abs} {dest}')
+                    print(f"  {dest}")
+                run_debugfs(NHD_FILE, cmds, writable=True)
+                print(f"Done! ({len(valid_files)} files deployed)")
 
     elif cmd == 'copy-all':
         import glob as globmod

@@ -141,6 +141,22 @@ typedef struct {
     int _pool_idx;
 } GFX_Sprite;
 
+/* ラスタパレットエントリ (1分割 = 2ライン単位) */
+typedef struct {
+    u16 line;           /* 開始ライン (0-398, 2ライン単位推奨) */
+    u8  pal_idx;        /* パレット番号 (0-15) */
+    u8  r, g, b;        /* RGB値 (0-15) */
+    u8  _pad[2];        /* アラインメント用 */
+} GFX_RasterPalEntry;
+
+#define GFX_RASTER_MAX_ENTRIES 200  /* 最大200エントリ (NP21/W: 1024イベント制限) */
+
+/* ラスタパレットテーブル (外部プログラムが構築→カーネルに渡す) */
+typedef struct {
+    int count;                                    /* 有効エントリ数 */
+    GFX_RasterPalEntry entries[GFX_RASTER_MAX_ENTRIES];
+} GFX_RasterPalTable;
+
 /* RTC時刻構造体 */
 typedef struct {
     u8 year, month, day, wday, hour, min, sec;

@@ -132,3 +132,118 @@ void __cdecl gfx_present_rect(int rx, int ry, int rw, int rh)
     gfx_add_dirty_rect(rx, ry, rw, rh);
     gfx_present_dirty();
 }
+
+/* ======================================================================== */
+/*  1ライン分だけVRAM転送 (全dirty rectの該当ラインのみ)                   */
+/* ======================================================================== */
+static void _flush_dirty_line(int line)
+{
+    int i;
+    u8 *vb_base = (u8 *)VRAM_PLANE_B;
+    u8 *vr_base = (u8 *)VRAM_PLANE_R;
+    u8 *vg_base = (u8 *)VRAM_PLANE_G;
+    u8 *vi_base = (u8 *)VRAM_PLANE_I;
+
+    for (i = 0; i < dirty_queue.count; i++) {
+        GFX_Rect *r = &dirty_queue.rects[i];
+        int byte_x, byte_w, words;
+        int physical_y;
+        unsigned long phys_off, base_off;
+
+        /* このdirty rectにこのラインが含まれるかチェック */
+        if (line < r->y || line >= r->y + r->h) continue;
+
+        byte_x = r->x >> 3;
+        byte_w = r->w >> 3;
+        words  = byte_w >> 1;
+        if (words <= 0) continue;
+
+        physical_y = (line + vram_scroll_y) % GFX_HEIGHT;
+        phys_off = (unsigned long)physical_y * GFX_BPL + byte_x;
+        base_off = (unsigned long)line * GFX_BPL + byte_x;
+
+        _memcpy_w(vb_base + phys_off, bb_b + base_off, words);
+        _memcpy_w(vr_base + phys_off, bb_r + base_off, words);
+        _memcpy_w(vg_base + phys_off, bb_g + base_off, words);
+        _memcpy_w(vi_base + phys_off, bb_i + base_off, words);
+    }
+}
+
+/* ======================================================================== */
+/*  KAPI: ラスタパレット付きVRAM転送                                        */
+/*                                                                          */
+/*  VSYNC待機後、ラスタパレットテーブルに従ってパレットI/Oを書き換える。      */
+/*  NP21/Wのrasterdraw機構はCPUクロック値でイベントをラスタラインに            */
+/*  対応付けるため、HBLANK I/Oポーリングではなく固定CPUサイクルの              */
+/*  ディレイで書き込み間隔を制御する。                                        */
+/*                                                                          */
+/*  2ライン ≈ gdc.rasterclock*2 CPUサイクル。                                */
+/*  実機8MHz時: 1ライン ≈ 199サイクル → 2ライン ≈ 398サイクル。              */
+/*  NOPディレイでこれに近い間隔を確保する。                                  */
+/* ======================================================================== */
+
+/* 100エントリ×delay550 → 全400ラインカバー (outb回数半減でフレーム内に収まる)
+ * 200エントリ×delay200=300ライン → 100×550≈400ライン相当 */
+#define RASTER_LINE_DELAY  550
+
+static inline void _raster_delay(void)
+{
+    int i;
+    for (i = 0; i < RASTER_LINE_DELAY; i++) {
+        __asm__ volatile("nop");
+    }
+}
+
+void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
+{
+    int entry_idx, line;
+    int has_dirty;
+
+    if (!table || table->count == 0) return;
+
+    has_dirty = (dirty_queue.count > 0);
+
+    /* VSYNC期間になるまで待つ */
+    while ((_in(0x60) & 0x20) == 0) { }
+
+    /* 割り込み禁止 (全ラスタ期間を通じて安定させる) */
+    __asm__ volatile("cli");
+
+    /* VSYNC終了を待つ → アクティブ表示領域が始まる */
+    while (_in(GDC_STATUS_PORT) & 0x20) { }
+
+    entry_idx = 0;
+
+    if (has_dirty) {
+        /* VRAM転送 + パレット書き換え */
+        for (line = 0; line < GFX_HEIGHT; line++) {
+            _flush_dirty_line(line);
+
+            while (entry_idx < table->count &&
+                   table->entries[entry_idx].line <= (u16)line) {
+                GFX_RasterPalEntry *e = &table->entries[entry_idx];
+                _out(PAL_IDX_PORT, e->pal_idx);
+                _out(PAL_G_PORT, e->g & 0x0F);
+                _out(PAL_R_PORT, e->r & 0x0F);
+                _out(PAL_B_PORT, e->b & 0x0F);
+                entry_idx++;
+            }
+            _raster_delay();
+        }
+    } else {
+        /* パレット書き換えのみ (VRAM転送なし) */
+        for (entry_idx = 0; entry_idx < table->count; entry_idx++) {
+            GFX_RasterPalEntry *e = &table->entries[entry_idx];
+            _out(PAL_IDX_PORT, e->pal_idx);
+            _out(PAL_G_PORT, e->g & 0x0F);
+            _out(PAL_R_PORT, e->r & 0x0F);
+            _out(PAL_B_PORT, e->b & 0x0F);
+            _raster_delay();
+        }
+    }
+
+    /* 割り込み復帰 */
+    __asm__ volatile("sti");
+
+    dirty_queue.count = 0;
+}

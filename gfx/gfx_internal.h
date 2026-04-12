@@ -30,6 +30,7 @@ void gfx_scroll_init(void);
 /* ======================================================================== */
 /*  I/O・メモリ操作インライン                                               */
 /* ======================================================================== */
+#define GDC_STATUS_PORT 0xA0  /* bit5=VSYNC, bit6=HBLANK */
 #define GDC_CMD_PORT    0xA2
 #define GDC_PRM_PORT    0xA0
 #define GDC_CMD_SCROLL  0x70

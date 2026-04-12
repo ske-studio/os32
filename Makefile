@@ -251,10 +251,37 @@ programs/spr_test.elf: app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
 
 spr_test: $(CRT0_OBJ) programs/spr_test.bin
 
+# === VDP Viewer ===
+programs/vdpview.o: programs/vdpview.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/vdpview.elf: app.ld $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ) -lc -lgcc
+
+vdpview: $(CRT0_OBJ) programs/vdpview.bin
+
+# === High-Res VDP Viewer ===
+programs/hrview.o: programs/hrview.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/hrview.elf: app.ld $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ) -lc -lgcc
+
+hrview: $(CRT0_OBJ) programs/hrview.bin
+
+# === Raster Palette Demo ===
+programs/raster.o: programs/raster.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/raster.elf: app.ld $(CRT0_OBJ) programs/raster.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/raster.o $(GFX_OBJ) -lc -lgcc
+
+raster: $(CRT0_OBJ) programs/raster.bin
+
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test
+programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -284,6 +311,10 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "demo1" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
+	elif [ "$*" = "vdpview" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
+	elif [ "$*" = "hrview" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "fep_test" ]; then \
@@ -292,6 +323,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 524288; \
 	elif [ "$*" = "shell" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
+	elif [ "$*" = "raster" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	else \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
 	fi

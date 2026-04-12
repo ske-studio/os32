@@ -99,6 +99,7 @@ typedef struct {
     void (__cdecl *gfx_get_framebuffer)(void *fb);
     void (__cdecl *gfx_add_dirty_rect)(int x, int y, int w, int h);
     void (__cdecl *gfx_present_dirty)(void);
+    void (__cdecl *gfx_present_raster)(void *table);
     void (__cdecl *kcg_read_ank)(u8 ch, u8 *buf);
     void (__cdecl *kcg_read_kanji)(u16 jis_code, u8 *buf);
     void * (__cdecl *sys_shm_alloc)(int blocks);

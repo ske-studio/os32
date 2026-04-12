@@ -51,6 +51,8 @@ int gfx_load_vdp(const char *path);
 void gfx_present(void);
 /* ビューポート矩形転送 (X範囲も限定してVRAM転送量を削減) */
 void gfx_present_rect(int rx, int ry, int rw, int rh);
+/* ラスタパレット付きVRAM転送 (HBLANK同期でパレット書き換え) */
+void gfx_present_raster(GFX_RasterPalTable *table);
 
 /* ======== 描画プリミティブ (バックバッファ対象) ======== */
 void gfx_clear(u8 color);

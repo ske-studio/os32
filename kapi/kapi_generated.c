@@ -493,6 +493,11 @@ void __cdecl wrap_gfx_present_dirty(void)
     gfx_present_dirty();
 }
 
+void __cdecl wrap_gfx_present_raster(void *table)
+{
+    gfx_present_raster((GFX_RasterPalTable *)table);
+}
+
 void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf)
 {
     kcg_read_ank(ch, buf);
