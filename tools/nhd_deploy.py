@@ -1,136 +1,259 @@
 #!/usr/bin/env python3
 """
-nhd_deploy.py — NHDイメージのext2にファイルをコピー (sudo不要)
+nhd_deploy.py — NHDイメージのext2パーティションをmountして操作する
 
-debugfsを使ってext2を直接操作する。
-NHDヘッダ(512B)をスキップしたオフセットでdebugfsを実行。
+/tmp/os32.nhd をループデバイスでマウントし、通常のファイル操作でデプロイする。
+NP21/Wへの反映は deploy コマンドで /tmp/os32.nhd をWindows側にコピーする。
+
+前提:
+  sudoers に以下が設定済み (NOPASSWD):
+    /usr/bin/mount, /usr/bin/umount, /usr/sbin/losetup,
+    /usr/sbin/e2fsck, /usr/sbin/mkfs.ext2, /usr/sbin/mke2fs
 
 使い方:
-  python3 nhd_deploy.py copy <src_file> [dest_name]
-  python3 nhd_deploy.py ls [path]
+  python3 nhd_deploy.py mount              — ext2パーティションをマウント
+  python3 nhd_deploy.py umount             — アンマウント
+  python3 nhd_deploy.py copy <src> [...]   — ファイルをext2にコピー
+  python3 nhd_deploy.py copy-all <dir>     — dirの全.binをコピー
+  python3 nhd_deploy.py ls [path]          — ファイル一覧
+  python3 nhd_deploy.py rm <file>          — ファイル削除
+  python3 nhd_deploy.py deploy             — umount + NHDをNP21/Wにコピー
+  python3 nhd_deploy.py write-kernel <k> [l] — カーネルをブート領域に書き込み
+  python3 nhd_deploy.py format             — ext2を再フォーマット (データ全消去)
+  python3 nhd_deploy.py init               — Windows側NHDを/tmpにコピー+フォーマット+マウント
 """
 
 import sys
 import os
 import subprocess
 import shutil
-import tempfile
-import time
+import glob as globmod
 
-NHD_FILE = r"/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os32.nhd"
+# === パス設定 ===
+NHD_LOCAL = "/tmp/os32.nhd"
+NHD_REMOTE = r"/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os32.nhd"
+MOUNT_POINT = "/tmp/os32"
 
-MAX_RETRY = 3
-RETRY_WAIT = 3  # 秒
+# === ext2パーティション オフセット ===
+# NHDヘッダ(512B) + ブート領域(LBA 0-271) = 273セクタ
+NHD_HEADER_SECTORS = 1
+HDD_PARTITION_LBA = 272
+PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 273
+PARTITION_OFFSET = PARTITION_SKIP * 512  # 139776 バイト
 
-def ensure_nhd_unlocked(nhd_path):
-    """NHDファイルがロックされていたらNP21/Wをkillしてアンロックする"""
-    try:
-        with open(nhd_path, 'r+b') as f:
-            f.read(1)
+
+def is_mounted():
+    """マウント済みかチェック"""
+    result = subprocess.run(
+        ['mountpoint', '-q', MOUNT_POINT],
+        capture_output=True
+    )
+    return result.returncode == 0
+
+
+def get_loop_device():
+    """現在NHD_LOCALに紐づいているループデバイスを返す (なければNone)"""
+    result = subprocess.run(
+        ['losetup', '-j', NHD_LOCAL],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        # "/dev/loop0: ..." のような出力
+        return result.stdout.strip().split(':')[0]
+    return None
+
+
+def do_mount():
+    """ext2パーティションをマウント"""
+    if is_mounted():
+        print("既にマウント済みです: " + MOUNT_POINT)
         return True
-    except PermissionError:
-        print("NHDファイルがロックされています。NP21/Wを終了します...",
+
+    if not os.path.isfile(NHD_LOCAL):
+        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
+        print("  'init' コマンドでWindows側からコピーしてください", file=sys.stderr)
+        return False
+
+    # マウントポイント作成
+    os.makedirs(MOUNT_POINT, exist_ok=True)
+
+    # ループデバイス作成
+    loop_dev = get_loop_device()
+    if not loop_dev:
+        result = subprocess.run(
+            ['sudo', 'losetup', '-f', '--show',
+             '--offset', str(PARTITION_OFFSET), NHD_LOCAL],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print("Error: losetup 失敗: " + result.stderr.strip(),
+                  file=sys.stderr)
+            return False
+        loop_dev = result.stdout.strip()
+
+    # マウント
+    result = subprocess.run(
+        ['sudo', 'mount', '-t', 'ext2', loop_dev, MOUNT_POINT],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("Error: mount 失敗: " + result.stderr.strip(), file=sys.stderr)
+        # ループデバイスを解放
+        subprocess.run(['sudo', 'losetup', '-d', loop_dev],
+                       capture_output=True)
+        return False
+
+
+
+    print("マウント完了: {} -> {}".format(loop_dev, MOUNT_POINT))
+    return True
+
+
+def do_umount():
+    """アンマウント"""
+    if not is_mounted():
+        print("マウントされていません")
+        # ループデバイスが残っていたら解放
+        loop_dev = get_loop_device()
+        if loop_dev:
+            subprocess.run(['sudo', 'losetup', '-d', loop_dev],
+                           capture_output=True)
+            print("ループデバイス {} を解放しました".format(loop_dev))
+        return True
+
+    # sync
+    subprocess.run(['sync'], capture_output=True)
+
+    # アンマウント
+    result = subprocess.run(
+        ['sudo', 'umount', MOUNT_POINT],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("Error: umount 失敗: " + result.stderr.strip(),
               file=sys.stderr)
-        try:
-            subprocess.run(['taskkill.exe', '/F', '/IM', 'np21x64w.exe'],
-                           capture_output=True, timeout=10)
-        except Exception:
-            pass
-        try:
-            subprocess.run(['taskkill.exe', '/F', '/IM', 'np21w.exe'],
-                           capture_output=True, timeout=10)
-        except Exception:
-            pass
-        time.sleep(RETRY_WAIT)
-        # 再確認
-        try:
-            with open(nhd_path, 'r+b') as f:
-                f.read(1)
-            print("ロック解除確認OK")
-            return True
-        except PermissionError:
-            print("まだロックされています", file=sys.stderr)
+        return False
+
+    # ループデバイス解放
+    loop_dev = get_loop_device()
+    if loop_dev:
+        subprocess.run(['sudo', 'losetup', '-d', loop_dev],
+                       capture_output=True)
+
+    print("アンマウント完了")
+    return True
+
+
+def ensure_mounted():
+    """マウントされていなければ自動マウントする"""
+    if is_mounted():
+        return True
+    print("自動マウント中...")
+    return do_mount()
+
+
+def do_copy(src_files):
+    """ファイルをマウント済みext2にコピー (sudo cp)"""
+    if not ensure_mounted():
+        return False
+
+    copied = 0
+    for src in src_files:
+        if not os.path.isfile(src):
+            print("Warning: {} not found, skipping".format(src))
+            continue
+        dest_name = os.path.basename(src)
+        dest_path = os.path.join(MOUNT_POINT, dest_name)
+        result = subprocess.run(
+            ['sudo', 'cp', src, dest_path],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print("Error copying {}: {}".format(dest_name, result.stderr.strip()),
+                  file=sys.stderr)
+            continue
+        size = os.path.getsize(src)
+        print("  {} ({} bytes)".format(dest_name, size))
+        copied += 1
+
+    if copied > 0:
+        subprocess.run(['sync'], capture_output=True)
+        print("Done! ({} files copied)".format(copied))
+    else:
+        print("Error: コピーするファイルがありません", file=sys.stderr)
+        return False
+    return True
+
+
+def do_copy_all(src_dir, ext='.bin'):
+    """ディレクトリ内の全ファイルをコピー"""
+    pattern = os.path.join(src_dir, '*{}'.format(ext))
+    files = sorted(globmod.glob(pattern))
+    if not files:
+        print("No {} files found in {}".format(ext, src_dir))
+        return False
+    print("=== Batch copy: {} files from {} ===".format(len(files), src_dir))
+    return do_copy(files)
+
+
+def do_ls(path='/'):
+    """ファイル一覧"""
+    if not ensure_mounted():
+        return
+    target = os.path.join(MOUNT_POINT, path.lstrip('/'))
+    if not os.path.exists(target):
+        print("Error: {} not found".format(path), file=sys.stderr)
+        return
+    result = subprocess.run(
+        ['ls', '-la', target],
+        capture_output=True, text=True
+    )
+    print(result.stdout)
+
+
+def do_rm(filename):
+    """ファイル削除 (sudo rm)"""
+    if not ensure_mounted():
+        return
+    target = os.path.join(MOUNT_POINT, filename.lstrip('/'))
+    if not os.path.exists(target):
+        print("Error: {} not found".format(filename), file=sys.stderr)
+        return
+    subprocess.run(['sudo', 'rm', target], capture_output=True)
+    subprocess.run(['sync'], capture_output=True)
+    print("Removed: {}".format(filename))
+
+
+def do_deploy():
+    """アンマウント + NHDをNP21/Wにコピー"""
+    # まずアンマウント
+    if is_mounted():
+        if not do_umount():
             return False
 
-# NHDヘッダ(512B) + ブート領域(LBA 0-271) = 273セクタ
-# ext2パーティションは install.c の HDD_PARTITION_LBA=272 から開始
-NHD_HEADER_SECTORS = 1      # NHDファイルヘッダ ("T98HDDIMAGE...")
-HDD_PARTITION_LBA = 272     # ext2パーティション開始LBA (install.c と一致)
-PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # = 273セクタ
-PARTITION_OFFSET = PARTITION_SKIP * 512  # = 139776 バイト
+    if not os.path.isfile(NHD_LOCAL):
+        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
+        return False
 
-def run_debugfs(nhd_path, commands, writable=False):
-    """debugfs をRAWイメージに対して実行する"""
-    # debugfsはオフセットをサポートしないため、一時RAWファイルを作成
-    # ただしシンボリックリンクでは不可なので、直接操作
-    
-    # ext2パーティション部分のみ抽出 (bs=512 skip=PARTITION_SKIP)
-    tmp = tempfile.NamedTemporaryFile(suffix='.raw', delete=False)
-    tmp.close()
-    
+    print("NHDイメージをNP21/Wにコピー中...")
+    print("  {} -> {}".format(NHD_LOCAL, NHD_REMOTE))
+
     try:
-        # 抽出 (NHDヘッダ+ブート領域をスキップ)
-        subprocess.run(
-            ['dd', f'if={nhd_path}', f'of={tmp.name}',
-             'bs=512', f'skip={PARTITION_SKIP}', 'status=none'],
-            check=True
-        )
-        
-        # debugfs実行
-        args = ['debugfs']
-        if writable:
-            args.append('-w')
-        
-        if isinstance(commands, list):
-            # 複数コマンド: stdinに書き込み
-            cmd_str = '\n'.join(commands) + '\n'
-            result = subprocess.run(
-                args + [tmp.name],
-                input=cmd_str, capture_output=True, text=True,
-                timeout=60
-            )
-        else:
-            # 単一コマンド
-            result = subprocess.run(
-                args + ['-R', commands, tmp.name],
-                capture_output=True, text=True,
-                timeout=60
-            )
-        
-        if result.stdout:
-            # "debugfs X.X.X" の行を除去
-            lines = result.stdout.strip().split('\n')
-            for line in lines:
-                if not line.startswith('debugfs '):
-                    print(line)
-        
-        if result.stderr:
-            for line in result.stderr.strip().split('\n'):
-                if 'debugfs' not in line.lower() and 'superblock' not in line.lower():
-                    print(line, file=sys.stderr)
-        
-        # 書き込みモードなら書き戻し
-        if writable:
-            # NHDヘッダ+ブート領域を保存 (パーティション前の全データ)
-            with open(nhd_path, 'rb') as f:
-                pre_partition = f.read(PARTITION_OFFSET)
-            
-            # ヘッダ+ブート領域 + 変更済みext2パーティション
-            with open(nhd_path + '.tmp', 'wb') as f:
-                f.write(pre_partition)
-                with open(tmp.name, 'rb') as raw:
-                    shutil.copyfileobj(raw, f)
-            
-            os.replace(nhd_path + '.tmp', nhd_path)
-    
-    finally:
-        os.unlink(tmp.name)
-    
-    return result.returncode
+        shutil.copy2(NHD_LOCAL, NHD_REMOTE)
+    except PermissionError:
+        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+              file=sys.stderr)
+        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        return False
 
-def write_kernel(nhd_path, kernel_bin, loader_bin=None):
+    size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)
+    print("Done! ({:.1f} MB copied)".format(size_mb))
+    return True
+
+
+def do_write_kernel(kernel_bin, loader_bin=None):
     """NHDのブート領域にloader+kernelを直接書き込む
-    
+
     NHDレイアウト (512B/セクタ):
       NHDヘッダ: 512B (オフセット0)
       LBA 0: IPL (boot_hdd.bin)
@@ -139,171 +262,174 @@ def write_kernel(nhd_path, kernel_bin, loader_bin=None):
       LBA 6+: kernel.bin
       LBA 272+: ext2パーティション
     """
-    NHD_HEADER = 512  # NHDファイルヘッダ
+    NHD_HEADER = 512
     SECTOR = 512
     KERNEL_LBA = 6
     LOADER_LBA = 2
-    
-    kernel_offset = NHD_HEADER + KERNEL_LBA * SECTOR  # 3584
-    loader_offset = NHD_HEADER + LOADER_LBA * SECTOR  # 1536
-    
+
+    kernel_offset = NHD_HEADER + KERNEL_LBA * SECTOR
+    loader_offset = NHD_HEADER + LOADER_LBA * SECTOR
+
     with open(kernel_bin, 'rb') as f:
         kernel_data = f.read()
-    
-    print(f"  kernel.bin: {len(kernel_data)} bytes ({(len(kernel_data)+511)//512} sectors)")
-    
-    with open(nhd_path, 'r+b') as nhd:
-        # loader書き込み (指定がある場合)
+
+    print("  kernel.bin: {} bytes ({} sectors)".format(
+        len(kernel_data), (len(kernel_data) + 511) // 512))
+
+    with open(NHD_LOCAL, 'r+b') as nhd:
+        # loader書き込み
         if loader_bin and os.path.isfile(loader_bin):
             with open(loader_bin, 'rb') as f:
                 loader_data = f.read()
             nhd.seek(loader_offset)
             nhd.write(loader_data)
-            print(f"  loader:     {len(loader_data)} bytes -> LBA {LOADER_LBA}")
-        
+            print("  loader:     {} bytes -> LBA {}".format(
+                len(loader_data), LOADER_LBA))
+
         # kernel書き込み
         nhd.seek(kernel_offset)
         nhd.write(kernel_data)
-        print(f"  kernel:     {len(kernel_data)} bytes -> LBA {KERNEL_LBA}")
-    
+        print("  kernel:     {} bytes -> LBA {}".format(
+            len(kernel_data), KERNEL_LBA))
+
     print("Done!")
+
+
+def do_format():
+    """ext2パーティションを再フォーマット (データ全消去)"""
+    if is_mounted():
+        print("マウント中のためアンマウントします...")
+        if not do_umount():
+            return False
+
+    if not os.path.isfile(NHD_LOCAL):
+        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
+        return False
+
+    # ループデバイス作成
+    result = subprocess.run(
+        ['sudo', 'losetup', '-f', '--show',
+         '--offset', str(PARTITION_OFFSET), NHD_LOCAL],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("Error: losetup 失敗", file=sys.stderr)
+        return False
+    loop_dev = result.stdout.strip()
+
+    print("ext2をフォーマット中... ({})".format(loop_dev))
+    result = subprocess.run(
+        ['sudo', 'mkfs.ext2', '-b', '1024', '-I', '128',
+         '-L', 'OS32_HDD', '-F', loop_dev],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print("Error: mkfs.ext2 失敗: " + result.stderr.strip(),
+              file=sys.stderr)
+    else:
+        print("フォーマット完了!")
+        print(result.stdout)
+
+    # ループデバイス解放
+    subprocess.run(['sudo', 'losetup', '-d', loop_dev], capture_output=True)
+    return result.returncode == 0
+
+
+def do_init():
+    """Windows側NHDを/tmpにコピー + フォーマット + マウント"""
+    if is_mounted():
+        print("既にマウント済みです。先にumountしてください。")
+        return False
+
+    if os.path.isfile(NHD_LOCAL):
+        print("{} は既に存在します。上書きします...".format(NHD_LOCAL))
+
+    if not os.path.isfile(NHD_REMOTE):
+        print("Error: {} が見つかりません".format(NHD_REMOTE),
+              file=sys.stderr)
+        return False
+
+    print("NHDイメージをコピー中...")
+    print("  {} -> {}".format(NHD_REMOTE, NHD_LOCAL))
+
+    try:
+        shutil.copy2(NHD_REMOTE, NHD_LOCAL)
+    except PermissionError:
+        print("Error: NP21/Wがファイルをロックしています",
+              file=sys.stderr)
+        return False
+
+    size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)
+    print("コピー完了! ({:.1f} MB)".format(size_mb))
+
+    # フォーマット
+    print("")
+    if not do_format():
+        return False
+
+    # マウント
+    print("")
+    return do_mount()
+
 
 def main():
     if len(sys.argv) < 2:
-        print("NHD ext2 Deploy Tool (sudo不要)")
-        print(f"Usage: {sys.argv[0]} {{copy|copy-all|ls|cat|rm|write-kernel}}")
-        print("  copy <src> [dest]        — ext2にファイルコピー")
-        print("  copy <s1> <s2> ...       — 複数ファイルを一括コピー")
-        print("  copy-all <dir> [ext]     — dirの全ファイルを一括コピー (既定: *.bin)")
-        print("  ls [path]                — ext2ファイル一覧")
-        print("  cat <file>               — ext2ファイル表示")
-        print("  rm <file>                — ext2ファイル削除")
-        print("  write-kernel <kern> [ldr] — カーネル/ローダーをブート領域に書き込み")
+        print("NHD ext2 Deploy Tool (mount版)")
+        print("")
+        print("使い方: {} <command>".format(sys.argv[0]))
+        print("")
+        print("  mount                  — ext2パーティションをマウント")
+        print("  umount                 — アンマウント")
+        print("  copy <src> [...]       — ファイルをext2にコピー")
+        print("  copy-all <dir> [ext]   — dirの全ファイルを一括コピー")
+        print("  ls [path]              — ファイル一覧")
+        print("  rm <file>              — ファイル削除")
+        print("  deploy                 — umount + NHDをNP21/Wにコピー")
+        print("  write-kernel <k> [ldr] — カーネルをブート領域に書き込み")
+        print("  format                 — ext2を再フォーマット (全消去)")
+        print("  init                   — Windows側NHDをコピー+フォーマット+マウント")
+        print("")
+        print("パス:")
+        print("  NHDローカル:  {}".format(NHD_LOCAL))
+        print("  NHD NP21/W:   {}".format(NHD_REMOTE))
+        print("  マウント:     {}".format(MOUNT_POINT))
         return
-    
+
     cmd = sys.argv[1]
-    
-    # 書き込み系コマンドの場合、ロック確認
-    write_cmds = {'copy', 'copy-all', 'rm', 'mkdir', 'write-kernel'}
-    if cmd in write_cmds:
-        if not ensure_nhd_unlocked(NHD_FILE):
-            print("Error: NHDファイルのロックを解除できません", file=sys.stderr)
-            sys.exit(1)
-    
-    if cmd == 'ls':
-        path = sys.argv[2] if len(sys.argv) > 2 else '/'
-        print(f"=== ext2 ls {path} ===")
-        run_debugfs(NHD_FILE, f'ls -l {path}')
-    
-    elif cmd == 'cat':
-        if len(sys.argv) < 3:
-            print("Usage: cat <file>")
-            return
-        run_debugfs(NHD_FILE, f'cat {sys.argv[2]}')
-    
+
+    if cmd == 'mount':
+        do_mount()
+
+    elif cmd == 'umount':
+        do_umount()
+
     elif cmd == 'copy':
         if len(sys.argv) < 3:
-            print("Usage: copy <src_file> [dest_path]")
-            print("       copy <src1> <src2> ...  (複数ファイル一括コピー)")
+            print("Usage: copy <src_file> [src_file2 ...]")
             return
-
-        # 引数が2個 (copy src [dest]) の場合は従来動作
-        # 引数が3個以上で最後がファイルの場合は複数ファイルモード
-        src_files = sys.argv[2:]
-
-        # 単一ファイル + 明示的dest指定のケースを判定
-        # copy src dest (src がファイルで dest がファイルでない場合)
-        if len(src_files) == 2 and os.path.isfile(src_files[0]) and not os.path.isfile(src_files[1]):
-            # 従来の copy src dest モード
-            src = src_files[0]
-            dest = src_files[1]
-            if not os.path.isfile(src):
-                print(f"Error: {src} not found")
-                return
-            print(f"Copying {src} -> /{dest} ...")
-            src_abs = os.path.abspath(src)
-            run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
-            print("Done!")
-        else:
-            # 複数ファイル一括コピーモード: 1回のdebugfsセッションで処理
-            valid_files = []
-            for f in src_files:
-                if os.path.isfile(f):
-                    valid_files.append(f)
-                else:
-                    print(f"Warning: {f} not found, skipping")
-
-            if not valid_files:
-                print("Error: コピーするファイルがありません")
-                return
-
-            if len(valid_files) == 1:
-                # 単一ファイル
-                src = valid_files[0]
-                dest = os.path.basename(src)
-                print(f"Copying {src} -> /{dest} ...")
-                src_abs = os.path.abspath(src)
-                run_debugfs(NHD_FILE, [f'rm {dest}', f'write {src_abs} {dest}'], writable=True)
-                print("Done!")
-            else:
-                # 複数ファイルバッチ処理
-                print(f"=== Batch copy: {len(valid_files)} files ===")
-                cmds = []
-                for f in valid_files:
-                    dest = os.path.basename(f)
-                    src_abs = os.path.abspath(f)
-                    cmds.append(f'rm {dest}')
-                    cmds.append(f'write {src_abs} {dest}')
-                    print(f"  {dest}")
-                run_debugfs(NHD_FILE, cmds, writable=True)
-                print(f"Done! ({len(valid_files)} files deployed)")
+        do_copy(sys.argv[2:])
 
     elif cmd == 'copy-all':
-        import glob as globmod
         if len(sys.argv) < 3:
             print("Usage: copy-all <dir> [extension]")
-            print("  例: copy-all programs/       (*.bin を一括コピー)")
-            print("  例: copy-all programs/ .bin")
             return
         src_dir = sys.argv[2]
         ext = sys.argv[3] if len(sys.argv) > 3 else '.bin'
-        
-        pattern = os.path.join(src_dir, f'*{ext}')
-        files = sorted(globmod.glob(pattern))
-        if not files:
-            print(f"No {ext} files found in {src_dir}")
-            return
-        
-        print(f"=== Batch copy: {len(files)} files from {src_dir} ===")
-        
-        # 全ファイルを1回のdebugfsセッションで処理
-        cmds = []
-        for f in files:
-            dest = os.path.basename(f)
-            src_abs = os.path.abspath(f)
-            cmds.append(f'rm {dest}')
-            cmds.append(f'write {src_abs} {dest}')
-            print(f"  {dest}")
-        
-        run_debugfs(NHD_FILE, cmds, writable=True)
-        print(f"Done! ({len(files)} files deployed)")
-    
+        do_copy_all(src_dir, ext)
+
+    elif cmd == 'ls':
+        path = sys.argv[2] if len(sys.argv) > 2 else '/'
+        do_ls(path)
+
     elif cmd == 'rm':
         if len(sys.argv) < 3:
             print("Usage: rm <file>")
             return
-        print(f"Removing {sys.argv[2]}...")
-        run_debugfs(NHD_FILE, f'rm {sys.argv[2]}', writable=True)
-        print("Done!")
+        do_rm(sys.argv[2])
 
-    elif cmd == 'mkdir':
-        if len(sys.argv) < 3:
-            print("Usage: mkdir <dir>")
-            return
-        print(f"Creating directory {sys.argv[2]}...")
-        run_debugfs(NHD_FILE, f'mkdir {sys.argv[2]}', writable=True)
-        print("Done!")
-    
+    elif cmd == 'deploy':
+        do_deploy()
+
     elif cmd == 'write-kernel':
         if len(sys.argv) < 3:
             print("Usage: write-kernel <kernel.bin> [loader_hdd.bin]")
@@ -311,14 +437,20 @@ def main():
         kernel = sys.argv[2]
         loader = sys.argv[3] if len(sys.argv) > 3 else None
         if not os.path.isfile(kernel):
-            print(f"Error: {kernel} not found")
+            print("Error: {} not found".format(kernel))
             return
-        print(f"Writing kernel to {NHD_FILE} ...")
-        write_kernel(NHD_FILE, kernel, loader)
-    
+        # write-kernelはマウント不要 (ブート領域への直接書き込み)
+        do_write_kernel(kernel, loader)
+
+    elif cmd == 'format':
+        do_format()
+
+    elif cmd == 'init':
+        do_init()
+
     else:
-        print(f"Unknown command: {cmd}")
+        print("Unknown command: {}".format(cmd))
+
 
 if __name__ == '__main__':
     main()
-
