@@ -48,6 +48,14 @@ void kcg_draw_ank(int x, int y, u8 ch, u8 fg, u8 bg);
 void kcg_draw_kanji(int x, int y, u16 jis_code, u8 fg, u8 bg);
 int kcg_draw_utf8(int x, int y, const char *utf8_str, u8 fg, u8 bg);
 
+/* Circle / Ellipse / Arc */
+void gfx_circle(int cx, int cy, int r, u8 color);
+void gfx_fill_circle(int cx, int cy, int r, u8 color);
+void gfx_ellipse(int cx, int cy, int rx, int ry, u8 color);
+void gfx_fill_ellipse(int cx, int cy, int rx, int ry, u8 color);
+void gfx_arc(int cx, int cy, int r, int start_deg, int end_deg, u8 color);
+void gfx_circle_thick(int cx, int cy, int r, int thickness, u8 color);
+
 /* Raster Palette */
 void gfx_raster_clear(GFX_RasterPalTable *table);
 int  gfx_raster_add(GFX_RasterPalTable *table,
