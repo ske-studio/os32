@@ -897,6 +897,8 @@ def quantize_huebalance(img, num_colors):
         print(f"    {group_names[gid]:6s}: {len(indices):6d} px ({pct:5.1f}%)")
 
     # ---- Step 3: パレットスロット配分 ----
+    MAX_ACHRO_SLOTS = 4  # 無彩色のスロット上限 (過剰配分防止)
+
     num_groups = len(groups)
     if num_groups >= num_colors:
         # グループ数がスロット数以上 → 各グループ1ずつ(上位スロット数分)
@@ -929,6 +931,21 @@ def quantize_huebalance(img, num_colors):
             if remaining > 0:
                 largest = group_ratios[0][0]
                 slots[largest] += remaining
+
+        # 無彩色グループのスロット上限キャップ
+        if 'achro' in slots and slots['achro'] > MAX_ACHRO_SLOTS:
+            excess = slots['achro'] - MAX_ACHRO_SLOTS
+            slots['achro'] = MAX_ACHRO_SLOTS
+            # 超過分を有彩色グループに再配分 (面積比で)
+            chromatic_groups = [g for g in groups if g != 'achro' and g in slots]
+            if chromatic_groups:
+                chroma_total = sum(len(groups[g]) for g in chromatic_groups)
+                for g in chromatic_groups:
+                    extra = max(1, int(excess * len(groups[g]) / chroma_total))
+                    if excess > 0:
+                        give = min(extra, excess)
+                        slots[g] += give
+                        excess -= give
 
     print(f"  スロット配分:")
     for gid, n in slots.items():
@@ -1082,6 +1099,25 @@ def pack_vbz(width, height, palette, color_paths, bg_color_idx=0):
     for color_idx, flags, paths in color_paths:
         for path in paths:
             all_paths.append((color_idx, flags, path))
+
+    # パスをバウンディングボックス面積の降順でソート (painter's algorithm)
+    # 面積が大きいパス→先に描画、小さいディテール→後から上書き
+    def path_bbox_area(entry):
+        xs = []
+        ys = []
+        for cmd_type, cmd_data in entry[2]:
+            if cmd_type in ('moveto', 'lineto') and cmd_data:
+                xs.append(cmd_data[0])
+                ys.append(cmd_data[1])
+            elif cmd_type == 'bezier3' and cmd_data:
+                for pt in cmd_data:
+                    xs.append(pt[0])
+                    ys.append(pt[1])
+        if not xs:
+            return 0
+        return (max(xs) - min(xs)) * (max(ys) - min(ys))
+
+    all_paths.sort(key=path_bbox_area, reverse=True)
 
     num_paths = len(all_paths)
     num_colors = len(palette)
