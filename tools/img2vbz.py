@@ -734,7 +734,7 @@ def split_subpaths(cmds):
 # 色量子化 (画像モード用)
 # ======================================================================
 def quantize_image(img, num_colors):
-    """画像を num_colors 色に減色"""
+    """画像を num_colors 色に減色 (従来のMEDIANCUT方式)"""
     if img.mode == 'RGBA':
         bg = Image.new('RGB', img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
@@ -760,6 +760,255 @@ def quantize_image(img, num_colors):
         palette.append((0, 0, 0))
 
     return quantized, palette
+
+
+# ======================================================================
+# 彩度ブースト前処理
+# ======================================================================
+def saturation_boost(img, factor=1.3):
+    """画像の彩度を強調する。factor=1.0で変化なし、>1.0で彩度UP"""
+    if factor <= 1.0:
+        return img
+    from PIL import ImageEnhance
+    enhancer = ImageEnhance.Color(img)
+    return enhancer.enhance(factor)
+
+
+# ======================================================================
+# 簡易K-means (numpy のみ、scikit-learn不要)
+# ======================================================================
+def kmeans_simple(pixels, k, max_iter=20):
+    """
+    簡易K-meansクラスタリング。
+    pixels: (N, 3) のRGB配列
+    k: クラスタ数
+    戻り値: (centroids, labels)
+      centroids: (k, 3) 代表色
+      labels: (N,) 各ピクセルの所属クラスタ
+    """
+    n = len(pixels)
+    if n == 0:
+        return np.zeros((k, 3), dtype=np.float64), np.zeros(0, dtype=np.int32)
+    if n <= k:
+        centroids = np.zeros((k, 3), dtype=np.float64)
+        centroids[:n] = pixels
+        return centroids, np.arange(n, dtype=np.int32)
+
+    # 初期セントロイド: 均等間隔サンプリング
+    indices = np.linspace(0, n - 1, k, dtype=np.int64)
+    centroids = pixels[indices].astype(np.float64)
+
+    labels = np.zeros(n, dtype=np.int32)
+
+    for iteration in range(max_iter):
+        # 各ピクセルを最近傍セントロイドに割り当て
+        # (N,1,3) - (1,k,3) → (N,k,3) → sum → (N,k)
+        diff = pixels[:, np.newaxis, :].astype(np.float64) - centroids[np.newaxis, :, :]
+        dists = np.sum(diff * diff, axis=2)
+        new_labels = np.argmin(dists, axis=1).astype(np.int32)
+
+        # 収束チェック
+        if np.array_equal(new_labels, labels) and iteration > 0:
+            break
+        labels = new_labels
+
+        # セントロイド更新
+        for c in range(k):
+            mask = (labels == c)
+            if np.any(mask):
+                centroids[c] = np.mean(pixels[mask].astype(np.float64), axis=0)
+
+    return centroids, labels
+
+
+# ======================================================================
+# 色相バランス量子化 (Hue-Balanced Quantization)
+# ======================================================================
+NUM_HUE_SECTORS = 12
+ACHROMATIC_SAT_THRESHOLD = 38  # 0-255 (≈15%)
+MIN_GROUP_RATIO = 0.005  # 全ピクセルの0.5%以上で有効
+
+def quantize_huebalance(img, num_colors):
+    """
+    色相バランス量子化。色相の多様性を基準にパレットスロットを配分し、
+    面積の小さい色相も確実にパレットに含める。
+    """
+    if img.mode == 'RGBA':
+        bg = Image.new('RGB', img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    rgb_array = np.array(img)  # (H, W, 3)
+    h, w = rgb_array.shape[:2]
+    pixels = rgb_array.reshape(-1, 3)  # (N, 3)
+    total_pixels = len(pixels)
+
+    # ---- Step 1: HSV変換 & 色相セクター分類 ----
+    hsv_img = img.convert('HSV')
+    hsv_array = np.array(hsv_img).reshape(-1, 3)  # H:0-255, S:0-255, V:0-255
+
+    hue = hsv_array[:, 0].astype(np.int32)  # 0-255 (Pillow HSV)
+    sat = hsv_array[:, 1]
+    val = hsv_array[:, 2]
+
+    # 無彩色マスク
+    achromatic_mask = sat < ACHROMATIC_SAT_THRESHOLD
+    chromatic_mask = ~achromatic_mask
+
+    # 色相セクター割当 (Pillow H: 0-255 → 0-359°)
+    hue_deg = hue * 360 // 256  # 0-359
+    sector = (hue_deg * NUM_HUE_SECTORS // 360) % NUM_HUE_SECTORS
+
+    sector_names = [
+        "赤", "橙", "黄", "黄緑", "緑", "青緑",
+        "シアン", "青", "青紫", "紫", "赤紫", "ピンク"
+    ]
+
+    # ---- Step 2: 有効色相グループ検出 ----
+    groups = {}  # group_id -> pixel_indices
+    group_names = {}
+
+    # 無彩色グループ
+    achro_indices = np.where(achromatic_mask)[0]
+    if len(achro_indices) > 0:
+        groups['achro'] = achro_indices
+        group_names['achro'] = '無彩色'
+
+    # 有彩色: セクターごとに集計
+    min_pixels = int(total_pixels * MIN_GROUP_RATIO)
+    for s in range(NUM_HUE_SECTORS):
+        s_mask = chromatic_mask & (sector == s)
+        s_indices = np.where(s_mask)[0]
+        if len(s_indices) >= min_pixels:
+            gid = f'hue_{s}'
+            groups[gid] = s_indices
+            group_names[gid] = sector_names[s]
+
+    # 有効グループがなければ全てを1グループとして扱う
+    if not groups:
+        groups['all'] = np.arange(total_pixels)
+        group_names['all'] = '全色'
+
+    print(f"  色相グループ:")
+    for gid, indices in groups.items():
+        pct = 100.0 * len(indices) / total_pixels
+        print(f"    {group_names[gid]:6s}: {len(indices):6d} px ({pct:5.1f}%)")
+
+    # ---- Step 3: パレットスロット配分 ----
+    num_groups = len(groups)
+    if num_groups >= num_colors:
+        # グループ数がスロット数以上 → 各グループ1ずつ(上位スロット数分)
+        sorted_groups = sorted(groups.keys(), key=lambda g: len(groups[g]), reverse=True)
+        sorted_groups = sorted_groups[:num_colors]
+        slots = {g: 1 for g in sorted_groups}
+    else:
+        # 各グループに最低1スロット
+        slots = {g: 1 for g in groups}
+        # 無彩色には最低2スロット (黒と白/灰)
+        if 'achro' in slots and num_colors >= num_groups + 1:
+            slots['achro'] = 2
+
+        remaining = num_colors - sum(slots.values())
+
+        if remaining > 0:
+            # 残りスロットを面積比で追加配分
+            total_in_groups = sum(len(groups[g]) for g in groups)
+            group_ratios = [(g, len(groups[g]) / total_in_groups) for g in groups]
+            group_ratios.sort(key=lambda x: x[1], reverse=True)
+
+            # 面積比に応じて追加スロットを配分
+            for g, ratio in group_ratios:
+                extra = int(remaining * ratio)
+                if extra > 0:
+                    slots[g] += extra
+                    remaining -= extra
+
+            # 端数を最大グループに追加
+            if remaining > 0:
+                largest = group_ratios[0][0]
+                slots[largest] += remaining
+
+    print(f"  スロット配分:")
+    for gid, n in slots.items():
+        print(f"    {group_names[gid]:6s}: {n} スロット")
+
+    # ---- Step 4: グループ内K-means ----
+    palette_rgb = []  # 最終パレット (24bit RGB)
+    pixel_labels = np.zeros(total_pixels, dtype=np.int32)  # 全ピクセルのパレットインデックス
+    palette_offset = 0
+
+    for gid in groups:
+        if gid not in slots:
+            continue
+        k = slots[gid]
+        indices = groups[gid]
+        group_pixels = pixels[indices]  # (M, 3)
+
+        if k == 1:
+            # 1スロットなら平均色
+            centroid = np.mean(group_pixels.astype(np.float64), axis=0)
+            centroids = centroid.reshape(1, 3)
+            local_labels = np.zeros(len(indices), dtype=np.int32)
+        else:
+            centroids, local_labels = kmeans_simple(group_pixels, k)
+
+        # パレットに追加
+        for c in range(len(centroids)):
+            r, g, b = int(round(centroids[c][0])), int(round(centroids[c][1])), int(round(centroids[c][2]))
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            b = max(0, min(255, b))
+            palette_rgb.append((r, g, b))
+
+        # ラベルをグローバルインデックスに変換
+        for i, idx in enumerate(indices):
+            pixel_labels[idx] = palette_offset + local_labels[i]
+
+        palette_offset += k
+
+    # 残りのグループに属さないピクセル (slots から除外されたグループ)
+    # → 最近傍パレットに割り当て
+    unassigned_groups = [g for g in groups if g not in slots]
+    if unassigned_groups:
+        pal_array = np.array(palette_rgb, dtype=np.float64)
+        for gid in unassigned_groups:
+            indices = groups[gid]
+            group_pixels = pixels[indices].astype(np.float64)
+            diff = group_pixels[:, np.newaxis, :] - pal_array[np.newaxis, :, :]
+            dists = np.sum(diff * diff, axis=2)
+            nearest = np.argmin(dists, axis=1)
+            for i, idx in enumerate(indices):
+                pixel_labels[idx] = nearest[i]
+
+    # ---- Step 5: 全ピクセルを最近傍パレットに再マッピング ----
+    # (K-meansのグループ境界付近の精度向上のため)
+    pal_array = np.array(palette_rgb, dtype=np.float64)
+    diff = pixels[:, np.newaxis, :].astype(np.float64) - pal_array[np.newaxis, :, :]
+    dists = np.sum(diff * diff, axis=2)
+    pixel_labels = np.argmin(dists, axis=1).astype(np.int32)
+
+    # パレットをPC-98形式に変換
+    palette_pc98 = []
+    for r, g, b in palette_rgb:
+        palette_pc98.append(rgb24_to_pc98(r, g, b))
+    while len(palette_pc98) < num_colors:
+        palette_pc98.append((0, 0, 0))
+
+    # インデックス画像を生成 (Pillow P mode互換)
+    idx_array_2d = pixel_labels.reshape(h, w)
+
+    # quantized_img を生成 (Pillow Image, mode='P')
+    quantized_img = Image.fromarray(idx_array_2d.astype(np.uint8), mode='P')
+    flat_palette = []
+    for r, g, b in palette_rgb:
+        flat_palette.extend([r, g, b])
+    while len(flat_palette) < 768:
+        flat_palette.extend([0, 0, 0])
+    quantized_img.putpalette(flat_palette)
+
+    return quantized_img, palette_pc98
 
 
 # ======================================================================
@@ -882,7 +1131,8 @@ def pack_vbz(width, height, palette, color_paths, bg_color_idx=0):
 # 画像→VBZ 変換 (Potrace経由)
 # ======================================================================
 def convert_image(input_path, output_path, target_width=640, target_height=400,
-                  num_colors=16, epsilon=2.0):
+                  num_colors=16, epsilon=2.0, quantize_method='huebalance',
+                  sat_boost=1.3):
     """ラスター画像をPotraceでベクタートレースしてVBZに変換"""
     if not HAS_PIL:
         print("Error: 画像モードには Pillow と numpy が必要です")
@@ -904,7 +1154,18 @@ def convert_image(input_path, output_path, target_width=640, target_height=400,
     img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     print(f"  リサイズ: {new_w}x{new_h}")
 
-    quantized, palette = quantize_image(img, num_colors)
+    # 彩度ブースト前処理
+    if sat_boost > 1.0:
+        img = saturation_boost(img, sat_boost)
+        print(f"  彩度ブースト: x{sat_boost:.1f}")
+
+    # 量子化方式選択
+    print(f"  量子化方式: {quantize_method}")
+    if quantize_method == 'huebalance':
+        quantized, palette = quantize_huebalance(img, num_colors)
+    else:
+        quantized, palette = quantize_image(img, num_colors)
+
     print(f"  パレット: {len(palette)}色")
     for i, (r, g, b) in enumerate(palette):
         if r or g or b:
@@ -954,6 +1215,11 @@ def main():
     parser.add_argument('--height', type=int, default=400, help='出力高さ')
     parser.add_argument('--colors', type=int, default=16, help='色数 (画像モード, 2-16)')
     parser.add_argument('--epsilon', type=float, default=2.0, help='簡略化閾値')
+    parser.add_argument('--quantize', choices=['mediancut', 'huebalance'],
+                        default='huebalance',
+                        help='量子化方式 (デフォルト: huebalance)')
+    parser.add_argument('--saturation-boost', type=float, default=1.3,
+                        help='彩度ブースト倍率 (デフォルト: 1.3, 1.0で無効)')
     args = parser.parse_args()
 
     ext = os.path.splitext(args.input)[1].lower()
@@ -972,7 +1238,9 @@ def main():
                       target_width=args.width,
                       target_height=args.height,
                       num_colors=args.colors,
-                      epsilon=args.epsilon)
+                      epsilon=args.epsilon,
+                      quantize_method=args.quantize,
+                      sat_boost=args.saturation_boost)
 
 
 if __name__ == '__main__':
