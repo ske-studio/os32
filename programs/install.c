@@ -309,8 +309,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *api)
         goto end;
     }
 
-    /* ブートディレクトリ作成 */
-    api->sys_mkdir("/hd0"); /* ルートディレクトリの明示的作成アサーション(念のため) */
+    /* ブートディレクトリ作成 (/hd0自体はマウントポイントなのでmkdir不要) */
     api->sys_mkdir("/hd0/boot"); 
     api->kprintf(0x0A, "  Created /boot directory on hd0.\n");
 

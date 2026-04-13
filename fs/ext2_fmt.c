@@ -3,19 +3,17 @@
 /*  ext2_format — ディスクにext2ファイルシステムを作成                       */
 /*                                                                          */
 /*  マルチブロックグループ対応、1KBブロック、128バイトinode。                 */
-/*  mkfs.ext2互換のレイアウトを生成する。                                    */
+/*  SPARSE_SUPER対応: Linux mkfs.ext2/e2fsck互換のレイアウトを生成する。     */
+/*                                                                          */
+/*  スパースグループ規則:                                                    */
+/*    グループ 0, 1, 3^n, 5^n, 7^n にのみSBバックアップ+GDTコピーを配置。  */
+/*    それ以外のグループはビットマップから開始する。                          */
 /*                                                                          */
 /*  各グループのレイアウト:                                                  */
-/*    グループ0:                                                            */
-/*      Block 0: ブートブロック (空)                                        */
-/*      Block 1: スーパーブロック                                           */
-/*      Block 2+: グループディスクリプタテーブル (GDT)                      */
-/*      Block N:  ブロックビットマップ                                      */
-/*      Block N+1: inodeビットマップ                                        */
-/*      Block N+2..: inodeテーブル                                          */
-/*    グループ1+:                                                           */
-/*      Block G*bpg+1: スーパーブロックバックアップ (省略)                  */
-/*      ブロックビットマップ / inodeビットマップ / inodeテーブル            */
+/*    スパースグループ:                                                      */
+/*      SBバックアップ(1) + GDTコピー(N) + bmap(1) + imap(1) + itable       */
+/*    非スパースグループ:                                                    */
+/*      bmap(1) + imap(1) + itable                                          */
 /* ======================================================================== */
 
 /* グループごとのメタデータ情報 */
@@ -29,6 +27,22 @@ typedef struct {
     u32 inodes_in_group;/* このグループのinode数 */
     u32 inode_tbl_blocks;/* inodeテーブルのブロック数 */
 } GroupLayout;
+
+/* SPARSE_SUPER規則: 0, 1, 3^n, 5^n, 7^n のグループにSBバックアップを配置 */
+#define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER  0x0001
+
+static int is_power_of(u32 n, u32 base)
+{
+    u32 v = base;
+    while (v < n) v *= base;
+    return (v == n) ? 1 : 0;
+}
+
+static int is_sparse_group(u32 g)
+{
+    if (g <= 1) return 1;
+    return (is_power_of(g, 3) || is_power_of(g, 5) || is_power_of(g, 7)) ? 1 : 0;
+}
 
 int ext2_format(int ide_drive, u32 total_sectors)
 {
@@ -83,7 +97,7 @@ int ext2_format(int ide_drive, u32 total_sectors)
     *(u32 *)&ext2_g_blk[8]  = 0;                     /* s_r_blocks_count */
     /* s_free_blocks_count は後で計算 (仮値) */
     *(u32 *)&ext2_g_blk[12] = 0;
-    *(u32 *)&ext2_g_blk[16] = inodes_count - 11;     /* s_free_inodes_count */
+    *(u32 *)&ext2_g_blk[16] = inodes_count - 10;     /* s_free_inodes_count (予約inode 1-10) */
     *(u32 *)&ext2_g_blk[20] = 1;                     /* s_first_data_block (1 for 1KB block) */
     *(u32 *)&ext2_g_blk[24] = 0;                     /* s_log_block_size (0 = 1KB) */
     *(u32 *)&ext2_g_blk[28] = 0;                     /* s_log_frag_size */
@@ -106,6 +120,9 @@ int ext2_format(int ide_drive, u32 total_sectors)
     *(u16 *)&ext2_g_blk[82] = 0;                     /* s_def_resgid */
     *(u32 *)&ext2_g_blk[84] = 11;                    /* s_first_ino */
     *(u16 *)&ext2_g_blk[88] = 128;                   /* s_inode_size */
+    *(u16 *)&ext2_g_blk[90] = 0;                     /* s_block_group_nr */
+    *(u32 *)&ext2_g_blk[96] = 0x0002;                 /* s_feature_incompat = FILETYPE */
+    *(u32 *)&ext2_g_blk[100] = EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER;
     /* s_volume_name at offset 120 */
     ext2_g_blk[120] = 'O'; ext2_g_blk[121] = 'S'; ext2_g_blk[122] = '3'; ext2_g_blk[123] = '2';
     ext2_g_blk[124] = '_'; ext2_g_blk[125] = 'H'; ext2_g_blk[126] = 'D'; ext2_g_blk[127] = 'D';
@@ -136,15 +153,15 @@ int ext2_format(int ide_drive, u32 total_sectors)
             gl.inodes_in_group = inodes_per_group;
             gl.inode_tbl_blocks = inode_tbl_blocks_per_group;
 
-            if (g == 0) {
-                /* グループ0: boot(1) + SB(1) + GDT(gdt_blocks) + bmap(1) + imap(1) + itable */
-                gl.block_bitmap = 1 + 1 + gdt_blocks;  /* SB後、GDT後 */
+            if (is_sparse_group(g)) {
+                /* スパースグループ: SB(1) + GDT(gdt_blocks) + bmap + imap + itable */
+                gl.block_bitmap = gl.group_start + 1 + gdt_blocks;
                 gl.inode_bitmap = gl.block_bitmap + 1;
                 gl.inode_table  = gl.inode_bitmap + 1;
                 gl.data_start   = gl.inode_table + gl.inode_tbl_blocks;
                 overhead = gl.data_start - gl.group_start;
             } else {
-                /* グループN: bmap(1) + imap(1) + itable */
+                /* 非スパースグループ: bmap + imap + itable のみ */
                 gl.block_bitmap = gl.group_start;
                 gl.inode_bitmap = gl.block_bitmap + 1;
                 gl.inode_table  = gl.inode_bitmap + 1;
@@ -167,7 +184,7 @@ int ext2_format(int ide_drive, u32 total_sectors)
             /* ルートディレクトリはグループ0のデータブロック1つを使用 */
             if (g == 0) {
                 *(u16 *)&ext2_g_blk[gd_offset + 12] = (u16)(gl.blocks_in_group - overhead - 1);
-                *(u16 *)&ext2_g_blk[gd_offset + 14] = (u16)(gl.inodes_in_group - 11);
+                *(u16 *)&ext2_g_blk[gd_offset + 14] = (u16)(gl.inodes_in_group - 10);
                 *(u16 *)&ext2_g_blk[gd_offset + 16] = 1;  /* used_dirs (root) */
                 total_free_blocks += gl.blocks_in_group - overhead - 1;
             } else {
@@ -192,6 +209,28 @@ int ext2_format(int ide_drive, u32 total_sectors)
         ret = ext2_write_block(1, ext2_g_blk);
         if (ret != 0) goto err;
 
+        /* ===== スパースグループへのSBバックアップ + GDTコピー ===== */
+        for (g = 1; g < num_groups; g++) {
+            u32 gs;
+            if (!is_sparse_group(g)) continue;
+            gs = 1 + g * EXT2_BLOCKS_PER_GROUP_MAX;
+
+            /* SBバックアップ: プライマリSBを読み、s_block_group_nrを変更 */
+            ret = ext2_read_block(1, ext2_g_blk);
+            if (ret != 0) goto err;
+            *(u16 *)&ext2_g_blk[90] = (u16)g;  /* s_block_group_nr = g */
+            ret = ext2_write_block(gs, ext2_g_blk);
+            if (ret != 0) goto err;
+
+            /* GDTコピー: プライマリGDTを各ブロックごとにコピー */
+            for (i = 0; i < gdt_blocks; i++) {
+                ret = ext2_read_block(2 + i, ext2_g_blk);
+                if (ret != 0) goto err;
+                ret = ext2_write_block(gs + 1 + i, ext2_g_blk);
+                if (ret != 0) goto err;
+            }
+        }
+
         /* ===== 各グループのビットマップとinodeテーブルを初期化 ===== */
         for (g = 0; g < num_groups; g++) {
             u32 overhead, bmap_blk, imap_blk, itable_blk;
@@ -203,16 +242,18 @@ int ext2_format(int ide_drive, u32 total_sectors)
                 gl.blocks_in_group = total_blocks - gl.group_start;
             }
 
-            if (g == 0) {
-                bmap_blk  = 1 + 1 + gdt_blocks;
-                imap_blk  = bmap_blk + 1;
+            if (is_sparse_group(g)) {
+                /* スパースグループ: SB + GDT + bmap + imap + itable */
+                bmap_blk   = gl.group_start + 1 + gdt_blocks;
+                imap_blk   = bmap_blk + 1;
                 itable_blk = imap_blk + 1;
                 overhead = (itable_blk + inode_tbl_blocks_per_group) - gl.group_start;
             } else {
+                /* 非スパースグループ: bmap + imap + itable のみ */
                 bmap_blk  = gl.group_start;
                 imap_blk  = bmap_blk + 1;
                 itable_blk = imap_blk + 1;
-                overhead = 1 + 1 + inode_tbl_blocks_per_group; /* bmap + imap + itable */
+                overhead = 1 + 1 + inode_tbl_blocks_per_group;
             }
 
             /* ブロックビットマップ */
