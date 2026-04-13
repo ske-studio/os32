@@ -287,10 +287,19 @@ programs/ekakiuta.elf: app.ld $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ)
 
 ekakiuta: $(CRT0_OBJ) programs/ekakiuta.bin
 
+# === VBZ Vector Viewer ===
+programs/vbzview.o: programs/vbzview.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/vbzview.elf: app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) -lc -lgcc
+
+vbzview: $(CRT0_OBJ) programs/vbzview.bin
+
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta
+programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -335,6 +344,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "raster" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "ekakiuta" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
+	elif [ "$*" = "vbzview" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	else \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
