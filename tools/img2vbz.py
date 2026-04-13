@@ -1181,7 +1181,7 @@ def convert_image(input_path, output_path, target_width=640, target_height=400,
     color_paths = []
     total_paths = 0
 
-    for count, color_idx in reversed(color_counts):
+    for count, color_idx in color_counts:
         if color_idx == bg_color or count < 20:
             continue
         print(f"  色[{color_idx}] Potrace実行中... ({count} px)", end="", flush=True)
