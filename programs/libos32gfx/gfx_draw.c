@@ -164,11 +164,7 @@ void gfx_rect(int x, int y, int w, int h, u8 color)
 
 void gfx_fill_rect(int x, int y, int w, int h, u8 color)
 {
-    int x2, p;
-    int bx1, bx2, count;
-    int row_off;
-    u8 left_mask, right_mask;
-    int same_byte;
+    int x2, r, base;
 
     if (w <= 0 || h <= 0) return;
     if (x < 0) { w += x; x = 0; }
@@ -178,80 +174,14 @@ void gfx_fill_rect(int x, int y, int w, int h, u8 color)
     if (y + h > gfx_fb.height) h = gfx_fb.height - y;
     if (x > x2 || h <= 0) return;
 
-    gfx_api->gfx_add_dirty_rect(x, y, x2 - x + 1, h);
+    gfx_api->gfx_add_dirty_rect(x & ~31, y,
+        ((x2 + 32) & ~31) - (x & ~31), h);
 
-    same_byte = ((x >> 3) == (x2 >> 3));
-
-    /* 左端マスク計算 */
-    left_mask = 0;
-    if (x & 7) {
-        left_mask = (u8)(0xFF >> (x & 7));
-        if (same_byte)
-            left_mask &= (u8)(0xFF << (7 - (x2 & 7)));
-    } else if (same_byte) {
-        left_mask = (u8)(0xFF << (7 - (x2 & 7)));
-    }
-
-    /* 右端マスク計算 (別バイトの場合のみ) */
-    right_mask = 0;
-    if (!same_byte && (x2 & 7) != 7) {
-        right_mask = (u8)(0xFF << (7 - (x2 & 7)));
-    }
-
-    /* 中間フルバイト範囲 */
-    bx1 = (x + 7) & ~7;
-    bx2 = (x2 + 1) & ~7;
-    if (same_byte) { bx1 = bx2 = 0; count = 0; }
-    else { count = (bx2 - bx1) >> 3; }
-
-    row_off = y * gfx_fb.pitch;
-
-    /* プレーンメジャーループ: 各プレーンを独立に処理 */
-    for (p = 0; p < 4; p++) {
-        u8 fill = (color & (1 << p)) ? 0xFF : 0x00;
-        u8 *plane = gfx_fb.planes[p];
-
-        /* 左端列 */
-        if (left_mask) {
-            int off = row_off + (x >> 3);
-            int r;
-            if (fill) {
-                for (r = 0; r < h; r++) {
-                    plane[off] |= left_mask;
-                    off += gfx_fb.pitch;
-                }
-            } else {
-                u8 inv = ~left_mask;
-                for (r = 0; r < h; r++) {
-                    plane[off] &= inv;
-                    off += gfx_fb.pitch;
-                }
-            }
-        }
-
-        /* 中間フルバイト矩形 */
-        if (count > 0) {
-            asm_fill_plane_rect(plane + row_off + (bx1 >> 3),
-                                gfx_fb.pitch, h, count, fill);
-        }
-
-        /* 右端列 */
-        if (right_mask) {
-            int off = row_off + (x2 >> 3);
-            int r;
-            if (fill) {
-                for (r = 0; r < h; r++) {
-                    plane[off] |= right_mask;
-                    off += gfx_fb.pitch;
-                }
-            } else {
-                u8 inv = ~right_mask;
-                for (r = 0; r < h; r++) {
-                    plane[off] &= inv;
-                    off += gfx_fb.pitch;
-                }
-            }
-        }
+    /* asm_gfx_hline を行ごとに呼ぶ */
+    base = y * gfx_fb.pitch;
+    for (r = 0; r < h; r++) {
+        asm_gfx_hline(gfx_fb.planes, base, x, x2, color);
+        base += gfx_fb.pitch;
     }
 }
 

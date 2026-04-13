@@ -6,6 +6,7 @@ extern void __cdecl asm_fill_plane_rect(u8 *start, int pitch, int rows, int widt
 extern void __cdecl asm_copy_plane_rect(u8 *dst, int dst_pitch,
                                         const u8 *src, int src_pitch,
                                         int rows, int width_bytes);
+extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
 
 /* ======================================================================== */
 /*  静的サーフェスプール                                                    */
@@ -183,10 +184,7 @@ void gfx_blit_colorkey(int dx, int dy,
 
 void gfx_surface_fill_rect(GFX_Surface *surf, int x, int y, int w, int h, u8 color)
 {
-    int x2, p;
-    int bx1, bx2, count;
-    int same_byte;
-    u8 left_mask, right_mask;
+    int x2, r, base;
 
     if (!surf) return;
     if (w <= 0 || h <= 0) return;
@@ -197,59 +195,10 @@ void gfx_surface_fill_rect(GFX_Surface *surf, int x, int y, int w, int h, u8 col
     if (y + h > surf->h) h = surf->h - y;
     if (x > x2 || h <= 0) return;
 
-    same_byte = ((x >> 3) == (x2 >> 3));
-
-    /* 左端マスク */
-    left_mask = 0;
-    if (x & 7) {
-        left_mask = (u8)(0xFF >> (x & 7));
-        if (same_byte)
-            left_mask &= (u8)(0xFF << (7 - (x2 & 7)));
-    } else if (same_byte) {
-        left_mask = (u8)(0xFF << (7 - (x2 & 7)));
-    }
-
-    /* 右端マスク */
-    right_mask = 0;
-    if (!same_byte && (x2 & 7) != 7) {
-        right_mask = (u8)(0xFF << (7 - (x2 & 7)));
-    }
-
-    bx1 = (x + 7) & ~7;
-    bx2 = (x2 + 1) & ~7;
-    if (same_byte) { bx1 = bx2 = 0; count = 0; }
-    else { count = (bx2 - bx1) >> 3; }
-
-    for (p = 0; p < 4; p++) {
-        u8 fill = (color & (1 << p)) ? 0xFF : 0x00;
-        u8 *plane = surf->planes[p];
-        int row_off = y * surf->pitch;
-
-        if (left_mask) {
-            int off = row_off + (x >> 3);
-            int r;
-            if (fill) {
-                for (r = 0; r < h; r++) { plane[off] |= left_mask; off += surf->pitch; }
-            } else {
-                u8 inv = ~left_mask;
-                for (r = 0; r < h; r++) { plane[off] &= inv; off += surf->pitch; }
-            }
-        }
-
-        if (count > 0) {
-            asm_fill_plane_rect(plane + row_off + (bx1 >> 3),
-                                surf->pitch, h, count, fill);
-        }
-
-        if (right_mask) {
-            int off = row_off + (x2 >> 3);
-            int r;
-            if (fill) {
-                for (r = 0; r < h; r++) { plane[off] |= right_mask; off += surf->pitch; }
-            } else {
-                u8 inv = ~right_mask;
-                for (r = 0; r < h; r++) { plane[off] &= inv; off += surf->pitch; }
-            }
-        }
+    /* asm_gfx_hline を行ごとに呼ぶ */
+    base = y * surf->pitch;
+    for (r = 0; r < h; r++) {
+        asm_gfx_hline(surf->planes, base, x, x2, color);
+        base += surf->pitch;
     }
 }
