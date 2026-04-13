@@ -17,6 +17,8 @@
 #include "rtc.h"
 #include "kmalloc.h"
 #include "palette.h"
+#include "gfx.h"
+#include "boot_splash.h"
 #include "paging.h"
 #include "pgalloc.h"
 #include "shm.h"
@@ -263,6 +265,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         }
     }
 
+    /* ブートスプラッシュ表示 (カーネル内蔵) */
+    boot_splash();
 
     /* 外部シェル起動 — 終了/クラッシュ時のフォールバックとして再起動ループ */
     for (;;) {
