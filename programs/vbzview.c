@@ -61,6 +61,11 @@ static GFX_EdgeTable *g_et;
 
 static KernelAPI *api;
 
+/* 工程別プロファイリング累計 */
+static u32 g_prof_edge;
+static u32 g_prof_fill;
+static u32 g_prof_total_edges;
+
 /* ---- ビューポート (ズーム/パン) ---- */
 static int g_view_x, g_view_y;  /* ビューポート左上 (VBZ座標) */
 static int g_view_w, g_view_h;  /* ビューポートの幅高 (VBZ座標系) */
@@ -171,9 +176,12 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
     int cur_x = 0, cur_y = 0;
     int start_x = 0, start_y = 0;
     int min_y = 400, max_y = 0;
+    u32 tp;
 
     /* エッジテーブルをクリア */
     gfx_edges_clear(g_et);
+
+    tp = api->get_tick();
 
     /* コマンドをパースしてエッジテーブルを構築 (ビューポート変換適用) */
     for (i = 0; i < num_cmds; i++) {
@@ -234,9 +242,14 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
         }
     }
 
+    g_prof_edge += api->get_tick() - tp;
+    g_prof_total_edges += g_et->num_edges;
+
     /* スキャンラインフィル */
     if (g_et->num_edges > 0) {
+        tp = api->get_tick();
         gfx_scanline_fill(g_et, color, min_y, max_y);
+        g_prof_fill += api->get_tick() - tp;
     }
 }
 
@@ -251,6 +264,9 @@ static void render_paths(const u8 *file_data, int file_size,
     u32 t0, t1;
 
     t0 = api->get_tick();
+    g_prof_edge = 0;
+    g_prof_fill = 0;
+    g_prof_total_edges = 0;
 
     /* 背景クリア */
     gfx_clear(bg_color);
@@ -316,6 +332,12 @@ done_skip:
     t1 = api->get_tick();
     api->kprintf(ATTR_WHITE, "Render: %d paths, %d ticks (%d ms)\n",
                  info->num_paths, t1 - t0, (t1 - t0) * 10);
+    api->kprintf(ATTR_WHITE, "  Edge: %d ticks, Fill: %d ticks, Other: %d ticks\n",
+                 g_prof_edge, g_prof_fill,
+                 (t1 - t0) - g_prof_edge - g_prof_fill);
+    api->kprintf(ATTR_WHITE, "  Total edges: %d (avg %d/path)\n",
+                 g_prof_total_edges,
+                 info->num_paths ? (int)(g_prof_total_edges / info->num_paths) : 0);
 }
 
 /* ======================================================================== */
@@ -395,17 +417,17 @@ void main(int argc, char **argv, KernelAPI *kapi)
     api->kprintf(ATTR_WHITE, "VBZ: %dx%d, %d colors, %d paths\n",
                  info.width, info.height, info.num_colors, info.num_paths);
 
-    /* エッジテーブル確保 */
+    /* GFX初期化 (gfx_apiを設定するため、先に呼ぶ) */
+    libos32gfx_init(api);
+    apply_palette(&info);
+
+    /* エッジテーブル確保 (gfx_api->mem_allocを使用するため、init後) */
     g_et = gfx_edge_table_create(VBZ_MAX_EDGES, VBZ_MAX_INTERSECT);
     if (!g_et) {
         api->mem_free(file_data);
         api->kprintf(ATTR_WHITE, "%s", "Error: edge table alloc failed\n");
         return;
     }
-
-    /* GFX初期化 */
-    libos32gfx_init(api);
-    apply_palette(&info);
 
     /* ビューポート初期化 (1x, 全体表示) */
     g_img_w = info.width;

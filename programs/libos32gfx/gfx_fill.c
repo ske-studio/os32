@@ -134,8 +134,35 @@ void gfx_bezier3_to_edges(GFX_EdgeTable *et,
 }
 
 /* ======================================================================== */
-/*  スキャンラインフィル (even-odd rule)                                    */
+/*  スキャンラインフィル (even-odd rule, DDA最適化)                          */
 /* ======================================================================== */
+
+/* アクティブエッジ (DDA用) — スタックに配置するため構造体を小さく保つ */
+typedef struct {
+    i32 x_fixed;   /* 現在のX座標 (16.16 固定小数点) */
+    i32 dx_fixed;  /* 1スキャンラインあたりのX増分 (16.16 固定小数点) */
+    int y_max;     /* エッジの終了Y座標 (exclusive) */
+} AET_Entry;
+
+/* 最大アクティブエッジ数 (パスあたり平均5エッジなので十分) */
+#define AET_MAX 64
+
+/* エッジのy0でソート (挿入ソート) */
+static void sort_edges_by_y0(GFX_Edge *arr, int n)
+{
+    int i, j;
+    GFX_Edge key;
+
+    for (i = 1; i < n; i++) {
+        key = arr[i];
+        j = i - 1;
+        while (j >= 0 && arr[j].y0 > key.y0) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
+}
 
 /* 交差点ソート (挿入ソート — 交差点数は通常少ない) */
 static void sort_intersections(int *arr, int n)
@@ -156,41 +183,73 @@ static void sort_intersections(int *arr, int n)
 void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
 {
     int y, i;
+    int edge_idx;       /* 次にAETに投入するエッジのインデックス */
+    int aet_count;      /* AET内の有効エントリ数 */
+    AET_Entry aet[AET_MAX];
 
     if (!et || et->num_edges == 0) return;
     if (min_y < 0) min_y = 0;
     if (max_y >= 400) max_y = 399;
 
+    /* エッジをy0でソート (DDA/AET管理の前提) */
+    sort_edges_by_y0(et->edges, et->num_edges);
+
+    edge_idx = 0;
+    aet_count = 0;
+
     for (y = min_y; y <= max_y; y++) {
-        int n_intersect = 0;
+        int n_intersect;
 
-        /* 全エッジとの交差を求める */
-        for (i = 0; i < et->num_edges; i++) {
-            GFX_Edge *e = &et->edges[i];
-            int dy_e, dx_e, ix;
+        /* 1. 新しいエッジをAETに追加 (y0 == y のもの) */
+        while (edge_idx < et->num_edges && et->edges[edge_idx].y0 <= y) {
+            GFX_Edge *e = &et->edges[edge_idx];
+            edge_idx++;
 
-            /* このスキャンラインとエッジが交差するか */
-            if (y < e->y0 || y >= e->y1) continue;
+            /* y >= y1 なら既に期限切れ */
+            if (y >= e->y1) continue;
 
-            /* 交差X座標を求める (整数演算) */
-            dy_e = e->y1 - e->y0;
-            dx_e = e->x1 - e->x0;
-            if (dy_e == 0) continue;
+            if (aet_count < AET_MAX) {
+                int dy = e->y1 - e->y0;
+                int dx = e->x1 - e->x0;
+                AET_Entry *a = &aet[aet_count];
 
-            /* ix = x0 + dx * (y - y0) / dy */
-            ix = e->x0 + (int)((long)dx_e * (y - e->y0) / dy_e);
-
-            if (n_intersect < et->max_intersect) {
-                et->intersect_buf[n_intersect++] = ix;
+                /* 16.16固定小数点でX座標とX増分を計算 (除算はここだけ) */
+                a->x_fixed = (e->x0 << 16) + (i32)((long)dx * (y - e->y0) * 65536L / dy);
+                a->dx_fixed = (i32)((long)dx * 65536L / dy);
+                a->y_max = e->y1;
+                aet_count++;
             }
         }
 
-        if (n_intersect < 2) continue;
+        /* 2. 期限切れエッジをAETから削除 (y >= y_max) */
+        i = 0;
+        while (i < aet_count) {
+            if (y >= aet[i].y_max) {
+                aet[i] = aet[aet_count - 1];
+                aet_count--;
+            } else {
+                i++;
+            }
+        }
 
-        /* ソート */
+        if (aet_count < 2) {
+            /* AETにエッジが1本以下 → 描画なし、X増分だけ更新 */
+            for (i = 0; i < aet_count; i++) {
+                aet[i].x_fixed += aet[i].dx_fixed;
+            }
+            continue;
+        }
+
+        /* 3. 交差X座標を収集 (固定小数点→整数) */
+        n_intersect = 0;
+        for (i = 0; i < aet_count && n_intersect < et->max_intersect; i++) {
+            et->intersect_buf[n_intersect++] = aet[i].x_fixed >> 16;
+        }
+
+        /* 4. ソート */
         sort_intersections(et->intersect_buf, n_intersect);
 
-        /* even-odd rule で塗りつぶし */
+        /* 5. even-odd rule で塗りつぶし */
         for (i = 0; i + 1 < n_intersect; i += 2) {
             int x_start = et->intersect_buf[i];
             int x_end = et->intersect_buf[i + 1];
@@ -200,6 +259,11 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
             if (x_start <= x_end) {
                 gfx_hline(x_start, y, x_end - x_start + 1, color);
             }
+        }
+
+        /* 6. X座標をDDAで更新 (加算のみ!) */
+        for (i = 0; i < aet_count; i++) {
+            aet[i].x_fixed += aet[i].dx_fixed;
         }
     }
 }
