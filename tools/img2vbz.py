@@ -775,6 +775,71 @@ def saturation_boost(img, factor=1.3):
 
 
 # ======================================================================
+# Floyd-Steinberg ディザリング
+# ======================================================================
+def floyd_steinberg_dither(img, palette_pc98):
+    """
+    Floyd-Steinberg 誤差拡散ディザリング。
+    元画像 (RGB) とPC-98パレットを受け取り、ディザリング済みインデックス画像を返す。
+    """
+    if img.mode == 'RGBA':
+        bg = Image.new('RGB', img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3])
+        img = bg
+    elif img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    w, h = img.size
+    # float配列にコピー (誤差加算のため)
+    pixels = np.array(img, dtype=np.float64)  # (H, W, 3)
+
+    # PC-98パレットを24bit RGBに展開
+    pal_rgb = np.array([
+        [r * 255.0 / 15.0, g * 255.0 / 15.0, b * 255.0 / 15.0]
+        for r, g, b in palette_pc98
+    ], dtype=np.float64)  # (K, 3)
+
+    result = np.zeros((h, w), dtype=np.uint8)
+
+    for y in range(h):
+        for x in range(w):
+            old = np.clip(pixels[y, x], 0, 255)
+
+            # 最近傍パレット色を探す
+            diff = pal_rgb - old
+            dists = np.sum(diff * diff, axis=1)
+            best = int(np.argmin(dists))
+            result[y, x] = best
+
+            new_color = pal_rgb[best]
+            err = old - new_color
+
+            # 誤差を隣接ピクセルに拡散
+            if x + 1 < w:
+                pixels[y, x + 1] += err * (7.0 / 16.0)
+            if y + 1 < h:
+                if x - 1 >= 0:
+                    pixels[y + 1, x - 1] += err * (3.0 / 16.0)
+                pixels[y + 1, x] += err * (5.0 / 16.0)
+                if x + 1 < w:
+                    pixels[y + 1, x + 1] += err * (1.0 / 16.0)
+
+    # Pillow P mode画像を生成
+    idx_img = Image.fromarray(result, mode='P')
+    flat_palette = []
+    for r, g, b in palette_pc98:
+        r8 = int(round(r * 255.0 / 15.0))
+        g8 = int(round(g * 255.0 / 15.0))
+        b8 = int(round(b * 255.0 / 15.0))
+        flat_palette.extend([r8, g8, b8])
+    while len(flat_palette) < 768:
+        flat_palette.extend([0, 0, 0])
+    idx_img.putpalette(flat_palette)
+
+    return idx_img
+
+
+# ======================================================================
 # 簡易K-means (numpy のみ、scikit-learn不要)
 # ======================================================================
 def kmeans_simple(pixels, k, max_iter=20):
@@ -1168,7 +1233,7 @@ def pack_vbz(width, height, palette, color_paths, bg_color_idx=0):
 # ======================================================================
 def convert_image(input_path, output_path, target_width=640, target_height=400,
                   num_colors=16, epsilon=2.0, quantize_method='huebalance',
-                  sat_boost=1.3):
+                  sat_boost=1.3, dither=False):
     """ラスター画像をPotraceでベクタートレースしてVBZに変換"""
     if not HAS_PIL:
         print("Error: 画像モードには Pillow と numpy が必要です")
@@ -1206,6 +1271,11 @@ def convert_image(input_path, output_path, target_width=640, target_height=400,
     for i, (r, g, b) in enumerate(palette):
         if r or g or b:
             print(f"    [{i:2d}] R={r:2d} G={g:2d} B={b:2d}")
+
+    # Floyd-Steinbergディザリング (パレット確定後に元画像に対して適用)
+    if dither:
+        print("  ディザリング: Floyd-Steinberg")
+        quantized = floyd_steinberg_dither(img, palette)
 
     idx_array = np.array(quantized)
 
@@ -1256,6 +1326,8 @@ def main():
                         help='量子化方式 (デフォルト: huebalance)')
     parser.add_argument('--saturation-boost', type=float, default=1.3,
                         help='彩度ブースト倍率 (デフォルト: 1.3, 1.0で無効)')
+    parser.add_argument('--dither', action='store_true',
+                        help='Floyd-Steinberg ディザリングを有効化')
     args = parser.parse_args()
 
     ext = os.path.splitext(args.input)[1].lower()
@@ -1276,7 +1348,8 @@ def main():
                       num_colors=args.colors,
                       epsilon=args.epsilon,
                       quantize_method=args.quantize,
-                      sat_boost=args.saturation_boost)
+                      sat_boost=args.saturation_boost,
+                      dither=args.dither)
 
 
 if __name__ == '__main__':
