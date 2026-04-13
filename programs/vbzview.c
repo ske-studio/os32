@@ -417,6 +417,9 @@ static void render_paths(const u8 *file_data, int file_size,
 {
     int offset;
     int path_idx;
+    u32 t0, t1;
+
+    t0 = api->get_tick();
 
     /* 背景クリア */
     gfx_clear(bg_color);
@@ -478,6 +481,10 @@ done_skip:
 
     gfx_present();
     api->gfx_present_dirty();
+
+    t1 = api->get_tick();
+    api->kprintf(ATTR_WHITE, "Render: %d paths, %d ticks (%d ms)\n",
+                 info->num_paths, t1 - t0, (t1 - t0) * 10);
 }
 
 /* ======================================================================== */
