@@ -50,7 +50,7 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 22) |
+| 0x04 | version | APIバージョン (現在: 24) |
 
 ### データフィールド
 
@@ -130,34 +130,45 @@ make programs
 | 0x110 | sys_reboot | `void(void)` |
 | 0x114 | sys_halt | `void(void)` |
 | 0x118 | shell_putchar | `void(char ch, u8 attr)` |
-| 0x11C | console_get_cursor_x | `int(void)` |
-| 0x120 | console_get_cursor_y | `int(void)` |
-| 0x124 | console_set_cursor | `void(int x, int y)` |
-| 0x128 | sys_open | `int(const char *path, int mode)` |
-| 0x12C | sys_close | `void(int fd)` |
-| 0x130 | sys_read | `int(int fd, void *buf, u32 size)` |
-| 0x134 | sys_write | `int(int fd, const void *buf, u32 size)` |
-| 0x138 | sys_lseek | `int(int fd, int offset, int whence)` |
-| 0x13C | console_get_size | `void(int *w, int *h)` |
-| 0x140 | kbd_get_modifiers | `u32(void)` |
-| 0x144 | sys_get_mem_kb | `u32(void)` |
-| 0x148 | sys_time | `os_time_t(void)` |
-| 0x14C | gfx_hardware_scroll | `void(int lines)` |
-| 0x150 | gfx_present_rect | `void(int x, int y, int w, int h)` |
-| 0x154 | sys_exit | `void(int status)` |
-| 0x158 | sys_isatty | `int(int fd)` |
-| 0x15C | sys_stat | `int(const char *path, OS32_Stat *buf)` |
-| 0x160 | sys_fstat | `int(int fd, OS32_Stat *buf)` |
-| 0x164 | gfx_set_palette | `void(int idx, u8 r, u8 g, u8 b)` |
-| 0x168 | gfx_get_palette | `void(int idx, u8 *r, u8 *g, u8 *b)` |
-| 0x16C | sys_memcpy | `void*(void *dst, const void *src, u32 n)` |
-| 0x170 | sys_memset | `void*(void *dst, int val, u32 n)` |
-| 0x174 | gfx_get_framebuffer | `void(void *fb)` |
-| 0x178 | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
-| 0x17C | gfx_present_dirty | `void(void)` |
-| 0x180 | gfx_present_raster | `void(void *table)` |
-| 0x184 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
-| 0x188 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
+| 0x11C | shell_print_utf8 | `void(const char *utf8_str, u8 color)` |
+| 0x120 | console_get_cursor_x | `int(void)` |
+| 0x124 | console_get_cursor_y | `int(void)` |
+| 0x128 | console_set_cursor | `void(int x, int y)` |
+| 0x12C | sys_open | `int(const char *path, int mode)` |
+| 0x130 | sys_close | `void(int fd)` |
+| 0x134 | sys_read | `int(int fd, void *buf, u32 size)` |
+| 0x138 | sys_write | `int(int fd, const void *buf, u32 size)` |
+| 0x13C | sys_lseek | `int(int fd, int offset, int whence)` |
+| 0x140 | console_get_size | `void(int *w, int *h)` |
+| 0x144 | kbd_get_modifiers | `u32(void)` |
+| 0x148 | sys_get_mem_kb | `u32(void)` |
+| 0x14C | sys_time | `os_time_t(void)` |
+| 0x150 | gfx_hardware_scroll | `void(int lines)` |
+| 0x154 | gfx_present_rect | `void(int x, int y, int w, int h)` |
+| 0x158 | sys_exit | `void(int status)` |
+| 0x15C | sys_isatty | `int(int fd)` |
+| 0x160 | sys_stat | `int(const char *path, OS32_Stat *buf)` |
+| 0x164 | sys_fstat | `int(int fd, OS32_Stat *buf)` |
+| 0x168 | gfx_set_palette | `void(int idx, u8 r, u8 g, u8 b)` |
+| 0x16C | gfx_get_palette | `void(int idx, u8 *r, u8 *g, u8 *b)` |
+| 0x170 | sys_memcpy | `void*(void *dst, const void *src, u32 n)` |
+| 0x174 | sys_memset | `void*(void *dst, int val, u32 n)` |
+| 0x178 | gfx_get_framebuffer | `void(void *fb)` |
+| 0x17C | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
+| 0x180 | gfx_present_dirty | `void(void)` |
+| 0x184 | gfx_present_raster | `void(void *table)` |
+| 0x188 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
+| 0x18C | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
+| 0x190 | sys_shm_alloc | `void *(int blocks)` |
+| 0x194 | sys_shm_lock | `int(void *ptr)` |
+| 0x198 | sys_shm_free | `int(void *ptr)` |
+| 0x19C | ime_getchar | `int(void)` |
+| 0x1A0 | ime_trygetchar | `int(void)` |
+| 0x1A4 | ime_toggle | `void(void)` |
+| 0x1A8 | ime_is_active | `int(void)` |
+| 0x1AC | ime_set_mode | `void(int mode)` |
+| 0x1B0 | ime_get_mode | `int(void)` |
+| 0x1B4 | ime_getkey | `int(void)` |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -180,4 +191,4 @@ v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとに
 ---
 
 *KernelAPI Specification — Version 24*
-*Last Updated: 2026-04-12*
+*Last Updated: 2026-04-13*

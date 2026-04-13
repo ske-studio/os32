@@ -25,7 +25,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ファイル | 内容 |
 |---------|------|
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v22 仕様書 — 96エントリテーブル (関数95 + データフィールド1) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v24 仕様書 — 108エントリテーブル (関数107 + データフィールド1) |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 開発ガイドライン — ルール、手順、ロードマップ |
 
 ---
