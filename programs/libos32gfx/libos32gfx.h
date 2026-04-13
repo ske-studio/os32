@@ -71,6 +71,38 @@ void gfx_bezier3_thick(int x0, int y0, int x1, int y1,
                        int x2, int y2, int x3, int y3,
                        int thickness, u8 color);
 
+/* ======================================================================== */
+/*  スキャンラインフィル (even-odd rule)                                    */
+/* ======================================================================== */
+
+/* エッジ (直線セグメント, y0 <= y1 に正規化) */
+typedef struct {
+    int x0, y0, x1, y1;
+} GFX_Edge;
+
+/* エッジテーブル */
+typedef struct {
+    GFX_Edge *edges;
+    int num_edges;
+    int max_edges;
+    int *intersect_buf;
+    int max_intersect;
+} GFX_EdgeTable;
+
+/* エッジテーブル操作 */
+GFX_EdgeTable *gfx_edge_table_create(int max_edges, int max_intersect);
+void gfx_edge_table_free(GFX_EdgeTable *et);
+void gfx_edges_clear(GFX_EdgeTable *et);
+void gfx_edge_add(GFX_EdgeTable *et, int x0, int y0, int x1, int y1);
+
+/* ベジェ曲線 → エッジテーブルへの平坦化 */
+void gfx_bezier3_to_edges(GFX_EdgeTable *et,
+                           int x0, int y0, int x1, int y1,
+                           int x2, int y2, int x3, int y3, int depth);
+
+/* スキャンラインフィル実行 */
+void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y);
+
 /* Raster Palette */
 void gfx_raster_clear(GFX_RasterPalTable *table);
 int  gfx_raster_add(GFX_RasterPalTable *table,
