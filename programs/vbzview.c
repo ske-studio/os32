@@ -44,7 +44,7 @@
 
 /* エッジ (直線セグメント) */
 typedef struct {
-    i16 x0, y0, x1, y1;  /* 始点-終点 (y0 <= y1 になるよう正規化) */
+    int x0, y0, x1, y1;  /* 始点-終点 (y0 <= y1 になるよう正規化) */
 } Edge;
 
 /* パスヘッダ */
@@ -70,9 +70,18 @@ static int g_num_edges;
 static int g_max_edges;
 
 /* 交差点バッファ */
-static i16 g_intersect[VBZ_MAX_INTERSECT];
+static int g_intersect[VBZ_MAX_INTERSECT];
 
 static KernelAPI *api;
+
+/* ---- ビューポート (ズーム/パン) ---- */
+static int g_view_x, g_view_y;  /* ビューポート左上 (VBZ座標) */
+static int g_view_w, g_view_h;  /* ビューポートの幅高 (VBZ座標系) */
+static int g_img_w, g_img_h;    /* 元画像サイズ */
+
+/* VBZ座標 → スクリーン座標変換 */
+#define VX(vx) ((int)((long)((vx) - g_view_x) * 640 / g_view_w))
+#define VY(vy) ((int)((long)((vy) - g_view_y) * 400 / g_view_h))
 
 /* ======================================================================== */
 /*  VBZ ヘッダ解析                                                          */
@@ -133,11 +142,11 @@ static void edge_add(int x0, int y0, int x1, int y1)
 
     /* y0 < y1 になるよう正規化 */
     if (y0 > y1) {
-        e->x0 = (i16)x1; e->y0 = (i16)y1;
-        e->x1 = (i16)x0; e->y1 = (i16)y0;
+        e->x0 = x1; e->y0 = y1;
+        e->x1 = x0; e->y1 = y0;
     } else {
-        e->x0 = (i16)x0; e->y0 = (i16)y0;
-        e->x1 = (i16)x1; e->y1 = (i16)y1;
+        e->x0 = x0; e->y0 = y0;
+        e->x1 = x1; e->y1 = y1;
     }
     g_num_edges++;
 }
@@ -200,10 +209,10 @@ static void flatten_bezier3(int x0, int y0, int x1, int y1,
 /* ======================================================================== */
 
 /* 交差点ソート (挿入ソート — 交差点数は通常少ない) */
-static void sort_intersections(i16 *arr, int n)
+static void sort_intersections(int *arr, int n)
 {
     int i, j;
-    i16 key;
+    int key;
 
     for (i = 1; i < n; i++) {
         key = arr[i];
@@ -245,7 +254,7 @@ static void scanline_fill(u8 color, int min_y, int max_y)
             ix = e->x0 + (int)((long)dx_e * (y - e->y0) / dy_e);
 
             if (n_intersect < VBZ_MAX_INTERSECT) {
-                g_intersect[n_intersect++] = (i16)ix;
+                g_intersect[n_intersect++] = ix;
             }
         }
 
@@ -282,31 +291,32 @@ static void draw_path_outline(const u8 *data, int num_cmds, u8 color)
 
         switch (cmd) {
         case CMD_MOVETO: {
-            i16 x = (i16)(data[0] | (data[1] << 8));
-            i16 y = (i16)(data[2] | (data[3] << 8));
+            i16 rx = (i16)(data[0] | (data[1] << 8));
+            i16 ry = (i16)(data[2] | (data[3] << 8));
             data += 4;
-            cur_x = x; cur_y = y;
-            start_x = x; start_y = y;
+            cur_x = VX(rx); cur_y = VY(ry);
+            start_x = cur_x; start_y = cur_y;
             break;
         }
         case CMD_LINETO: {
-            i16 x = (i16)(data[0] | (data[1] << 8));
-            i16 y = (i16)(data[2] | (data[3] << 8));
+            i16 rx = (i16)(data[0] | (data[1] << 8));
+            i16 ry = (i16)(data[2] | (data[3] << 8));
+            int sx = VX(rx), sy = VY(ry);
             data += 4;
-            gfx_line(cur_x, cur_y, x, y, color);
-            cur_x = x; cur_y = y;
+            gfx_line(cur_x, cur_y, sx, sy, color);
+            cur_x = sx; cur_y = sy;
             break;
         }
         case CMD_BEZIER3: {
-            i16 cx1 = (i16)(data[0] | (data[1] << 8));
-            i16 cy1 = (i16)(data[2] | (data[3] << 8));
-            i16 cx2 = (i16)(data[4] | (data[5] << 8));
-            i16 cy2 = (i16)(data[6] | (data[7] << 8));
-            i16 x   = (i16)(data[8] | (data[9] << 8));
-            i16 y   = (i16)(data[10] | (data[11] << 8));
+            int scx1 = VX((i16)(data[0] | (data[1] << 8)));
+            int scy1 = VY((i16)(data[2] | (data[3] << 8)));
+            int scx2 = VX((i16)(data[4] | (data[5] << 8)));
+            int scy2 = VY((i16)(data[6] | (data[7] << 8)));
+            int sx   = VX((i16)(data[8] | (data[9] << 8)));
+            int sy   = VY((i16)(data[10] | (data[11] << 8)));
             data += 12;
-            gfx_bezier3(cur_x, cur_y, cx1, cy1, cx2, cy2, x, y, color);
-            cur_x = x; cur_y = y;
+            gfx_bezier3(cur_x, cur_y, scx1, scy1, scx2, scy2, sx, sy, color);
+            cur_x = sx; cur_y = sy;
             break;
         }
         case CMD_CLOSEPATH:
@@ -316,7 +326,7 @@ static void draw_path_outline(const u8 *data, int num_cmds, u8 color)
             cur_x = start_x; cur_y = start_y;
             break;
         default:
-            return; /* 不明コマンド → 中断 */
+            return;
         }
     }
 }
@@ -334,52 +344,50 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
     /* エッジテーブルをクリア */
     edges_clear();
 
-    /* コマンドをパースしてエッジテーブルを構築 */
+    /* コマンドをパースしてエッジテーブルを構築 (ビューポート変換適用) */
     for (i = 0; i < num_cmds; i++) {
         u8 cmd = *data++;
 
         switch (cmd) {
         case CMD_MOVETO: {
-            i16 x = (i16)(data[0] | (data[1] << 8));
-            i16 y = (i16)(data[2] | (data[3] << 8));
+            i16 rx = (i16)(data[0] | (data[1] << 8));
+            i16 ry = (i16)(data[2] | (data[3] << 8));
             data += 4;
-            cur_x = x; cur_y = y;
-            start_x = x; start_y = y;
+            cur_x = VX(rx); cur_y = VY(ry);
+            start_x = cur_x; start_y = cur_y;
             break;
         }
         case CMD_LINETO: {
-            i16 x = (i16)(data[0] | (data[1] << 8));
-            i16 y = (i16)(data[2] | (data[3] << 8));
+            i16 rx = (i16)(data[0] | (data[1] << 8));
+            i16 ry = (i16)(data[2] | (data[3] << 8));
+            int sx = VX(rx), sy = VY(ry);
             data += 4;
-            edge_add(cur_x, cur_y, x, y);
-            /* Y範囲更新 */
+            edge_add(cur_x, cur_y, sx, sy);
             if (cur_y < min_y) min_y = cur_y;
             if (cur_y > max_y) max_y = cur_y;
-            if (y < min_y) min_y = y;
-            if (y > max_y) max_y = y;
-            cur_x = x; cur_y = y;
+            if (sy < min_y) min_y = sy;
+            if (sy > max_y) max_y = sy;
+            cur_x = sx; cur_y = sy;
             break;
         }
         case CMD_BEZIER3: {
-            i16 cx1 = (i16)(data[0] | (data[1] << 8));
-            i16 cy1 = (i16)(data[2] | (data[3] << 8));
-            i16 cx2 = (i16)(data[4] | (data[5] << 8));
-            i16 cy2 = (i16)(data[6] | (data[7] << 8));
-            i16 x   = (i16)(data[8] | (data[9] << 8));
-            i16 y   = (i16)(data[10] | (data[11] << 8));
+            int scx1 = VX((i16)(data[0] | (data[1] << 8)));
+            int scy1 = VY((i16)(data[2] | (data[3] << 8)));
+            int scx2 = VX((i16)(data[4] | (data[5] << 8)));
+            int scy2 = VY((i16)(data[6] | (data[7] << 8)));
+            int sx   = VX((i16)(data[8] | (data[9] << 8)));
+            int sy   = VY((i16)(data[10] | (data[11] << 8)));
             data += 12;
-            /* ベジェ→直線セグメントに平坦化してエッジ追加 */
-            flatten_bezier3(cur_x, cur_y, cx1, cy1, cx2, cy2, x, y, 0);
-            /* Y範囲更新 (制御点含む) */
+            flatten_bezier3(cur_x, cur_y, scx1, scy1, scx2, scy2, sx, sy, 0);
             if (cur_y < min_y) min_y = cur_y;
             if (cur_y > max_y) max_y = cur_y;
-            if (cy1 < min_y) min_y = cy1;
-            if (cy1 > max_y) max_y = cy1;
-            if (cy2 < min_y) min_y = cy2;
-            if (cy2 > max_y) max_y = cy2;
-            if (y < min_y) min_y = y;
-            if (y > max_y) max_y = y;
-            cur_x = x; cur_y = y;
+            if (scy1 < min_y) min_y = scy1;
+            if (scy1 > max_y) max_y = scy1;
+            if (scy2 < min_y) min_y = scy2;
+            if (scy2 > max_y) max_y = scy2;
+            if (sy < min_y) min_y = sy;
+            if (sy > max_y) max_y = sy;
+            cur_x = sx; cur_y = sy;
             break;
         }
         case CMD_CLOSEPATH:
@@ -402,48 +410,19 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
 }
 
 /* ======================================================================== */
-/*  VBZ 描画メイン                                                          */
+/*  VBZ 描画 (ファイルデータからレンダリング)                                */
 /* ======================================================================== */
-static int display_vbz(int fd, const VbzInfo *info, int outline_only)
+static void render_paths(const u8 *file_data, int file_size,
+                         const VbzInfo *info, int outline_only, u8 bg_color)
 {
-    u8 *file_data;
-    int file_size;
-    int data_size;
     int offset;
     int path_idx;
 
-    /* ファイル全体を読み込む */
-    /* まずファイルサイズを取得 (seekで末尾に移動) */
-    file_size = api->sys_lseek(fd, 0, 2);  /* SEEK_END */
-    if (file_size <= VBZ_HEADER_SIZE) return -1;
+    /* 背景クリア */
+    gfx_clear(bg_color);
 
-    api->sys_lseek(fd, 0, 0);  /* SEEK_SET */
-
-    file_data = (u8 *)api->mem_alloc(file_size);
-    if (!file_data) {
-        api->kprintf(ATTR_WHITE, "%s", "Error: mem_alloc failed\n");
-        return -1;
-    }
-
-    if (api->sys_read(fd, file_data, file_size) != file_size) {
-        api->mem_free(file_data);
-        return -1;
-    }
-
-    /* エッジテーブル確保 */
-    g_max_edges = VBZ_MAX_EDGES;
-    g_edges = (Edge *)api->mem_alloc(g_max_edges * sizeof(Edge));
-    if (!g_edges) {
-        api->mem_free(file_data);
-        api->kprintf(ATTR_WHITE, "%s", "Error: edge table alloc failed\n");
-        return -1;
-    }
-
-    /* パスデータの開始位置 */
-    data_size = file_size - VBZ_HEADER_SIZE;
     offset = VBZ_HEADER_SIZE;
 
-    /* 全パスを描画 */
     for (path_idx = 0; path_idx < info->num_paths; path_idx++) {
         PathHeader ph;
         const u8 *cmd_data;
@@ -452,16 +431,14 @@ static int display_vbz(int fd, const VbzInfo *info, int outline_only)
 
         if (offset + 4 > file_size) break;
 
-        /* パスヘッダ読み込み */
         ph.color_idx = file_data[offset];
         ph.flags     = file_data[offset + 1];
         ph.num_cmds  = (u16)file_data[offset + 2] | ((u16)file_data[offset + 3] << 8);
         offset += 4;
 
-        /* コマンドデータの位置を記録 */
         cmd_data = file_data + offset;
 
-        /* コマンドデータをスキップしてサイズを計算 */
+        /* コマンドデータをスキップ */
         {
             const u8 *p = cmd_data;
             for (j = 0; j < (int)ph.num_cmds; j++) {
@@ -484,28 +461,23 @@ done_skip:
         /* 描画 */
         if (ph.color_idx < 16) {
             if (outline_only) {
-                /* アウトラインモード: 全パスを線描画 */
                 draw_path_outline(cmd_data, ph.num_cmds, ph.color_idx);
             } else if (ph.flags & FLAG_FILL) {
-                /* 塗りつぶしパス */
                 draw_path_filled(cmd_data, ph.num_cmds, ph.color_idx);
             } else if (ph.flags & FLAG_STROKE) {
-                /* ストロークパス (1px線描画) */
                 draw_path_outline(cmd_data, ph.num_cmds, ph.color_idx);
             }
         }
 
-        /* 16パスごとに画面更新 (進捗表示) */
-        if ((path_idx & 15) == 15) {
+        /* 64パスごとに画面更新 (進捗表示) */
+        if ((path_idx & 63) == 63) {
+            gfx_present();
             api->gfx_present_dirty();
         }
     }
 
-    api->mem_free(g_edges);
-    api->mem_free(file_data);
-
-    (void)data_size;
-    return 0;
+    gfx_present();
+    api->gfx_present_dirty();
 }
 
 /* ======================================================================== */
@@ -516,10 +488,14 @@ void main(int argc, char **argv, KernelAPI *kapi)
     const char *filename = NULL;
     int keep_vram = 0;
     int outline_only = 0;
-    int i, fd, ret;
-    u8 hdr_buf[VBZ_HEADER_SIZE];
+    int i, fd;
     VbzInfo info;
     int ch;
+    u8 *file_data;
+    int file_size;
+    int need_render;
+    int zoom_level;  /* 0=1x, 1=2x, 2=4x, 3=8x */
+    int pan_step;
 
     api = kapi;
 
@@ -535,63 +511,78 @@ void main(int argc, char **argv, KernelAPI *kapi)
     }
 
     if (filename == NULL) {
-        api->kprintf(ATTR_WHITE, "%s", "VBZView v1.0 - Bezier Vector Viewer for OS32\n");
+        api->kprintf(ATTR_WHITE, "%s", "VBZView v2.0 - Bezier Vector Viewer for OS32\n");
         api->kprintf(ATTR_WHITE, "%s", "Usage: vbzview FILE.VBZ [-k] [-o]\n");
         api->kprintf(ATTR_WHITE, "%s", "  -k : keep VRAM on exit\n");
         api->kprintf(ATTR_WHITE, "%s", "  -o : outline only (no fill)\n");
+        api->kprintf(ATTR_WHITE, "%s", "Keys: Z=zoom in, X=zoom out, Arrows=pan, 1=reset, ESC=quit\n");
         return;
     }
 
-    /* ファイルオープン */
+    /* ファイルオープン & 全体読み込み */
     fd = api->sys_open(filename, O_RDONLY);
     if (fd < 0) {
         api->kprintf(ATTR_WHITE, "Error: cannot open %s\n", filename);
         return;
     }
 
-    /* ヘッダ読み込み */
-    if (api->sys_read(fd, hdr_buf, VBZ_HEADER_SIZE) != VBZ_HEADER_SIZE) {
-        api->kprintf(ATTR_WHITE, "%s", "Error: read header failed\n");
+    file_size = api->sys_lseek(fd, 0, 2);
+    if (file_size <= VBZ_HEADER_SIZE) {
+        api->kprintf(ATTR_WHITE, "%s", "Error: file too small\n");
         api->sys_close(fd);
         return;
     }
+    api->sys_lseek(fd, 0, 0);
+
+    file_data = (u8 *)api->mem_alloc(file_size);
+    if (!file_data) {
+        api->kprintf(ATTR_WHITE, "%s", "Error: mem_alloc failed\n");
+        api->sys_close(fd);
+        return;
+    }
+    if (api->sys_read(fd, file_data, file_size) != file_size) {
+        api->mem_free(file_data);
+        api->sys_close(fd);
+        return;
+    }
+    api->sys_close(fd);
 
     /* ヘッダ解析 */
-    if (parse_vbz_header(hdr_buf, &info) < 0) {
+    if (parse_vbz_header(file_data, &info) < 0) {
         api->kprintf(ATTR_WHITE, "%s", "Error: not a VBZ file\n");
-        api->sys_close(fd);
+        api->mem_free(file_data);
         return;
     }
 
     api->kprintf(ATTR_WHITE, "VBZ: %dx%d, %d colors, %d paths\n",
                  info.width, info.height, info.num_colors, info.num_paths);
 
-    /* GFX初期化 */
-    libos32gfx_init(api);
-
-    /* 背景クリア (VBZの背景色を使用) */
-    gfx_clear(info.flags);  /* flags にBGカラーインデックスを格納 */
-
-    /* パレット設定 */
-    apply_palette(&info);
-
-    /* 描画 (ファイル先頭に戻す) */
-    api->sys_lseek(fd, 0, 0);
-    ret = display_vbz(fd, &info, outline_only);
-    api->sys_close(fd);
-
-    if (ret < 0) {
-        libos32gfx_shutdown();
-        api->tvram_clear();
-        api->kprintf(ATTR_WHITE, "%s", "Error: render failed\n");
+    /* エッジテーブル確保 */
+    g_max_edges = VBZ_MAX_EDGES;
+    g_edges = (Edge *)api->mem_alloc(g_max_edges * sizeof(Edge));
+    if (!g_edges) {
+        api->mem_free(file_data);
+        api->kprintf(ATTR_WHITE, "%s", "Error: edge table alloc failed\n");
         return;
     }
 
-    /* VRAM転送 */
-    gfx_present();
-    api->gfx_present_dirty();
+    /* GFX初期化 */
+    libos32gfx_init(api);
+    apply_palette(&info);
 
-    /* キーバッファをフラッシュ (HTTP API経由の残留文字を排出) */
+    /* ビューポート初期化 (1x, 全体表示) */
+    g_img_w = info.width;
+    g_img_h = info.height;
+    g_view_x = 0;
+    g_view_y = 0;
+    g_view_w = g_img_w;
+    g_view_h = g_img_h;
+    zoom_level = 0;
+
+    /* 初回描画 */
+    render_paths(file_data, file_size, &info, outline_only, info.flags);
+
+    /* キーバッファをフラッシュ */
     {
         int flush_count;
         for (flush_count = 0; flush_count < 32; flush_count++) {
@@ -599,13 +590,80 @@ void main(int argc, char **argv, KernelAPI *kapi)
         }
     }
 
-    /* ESCキーで終了 (それ以外のキーは無視) */
+    /* ======== インタラクティブ ズーム/パン ループ ======== */
     for (;;) {
         ch = api->kbd_getchar();
-        if (ch == 0x1B) break;  /* ESC */
+        need_render = 0;
+        pan_step = g_view_w / 4;
+        if (pan_step < 8) pan_step = 8;
+
+        if (ch == 0x1B) {
+            break;  /* ESC: 終了 */
+
+        } else if (ch == 'z' || ch == 'Z' || ch == '+') {
+            /* ズームイン */
+            if (zoom_level < 4) {
+                int cx = g_view_x + g_view_w / 2;
+                int cy = g_view_y + g_view_h / 2;
+                zoom_level++;
+                g_view_w = g_img_w >> zoom_level;
+                g_view_h = g_img_h >> zoom_level;
+                if (g_view_w < 16) g_view_w = 16;
+                if (g_view_h < 16) g_view_h = 16;
+                g_view_x = cx - g_view_w / 2;
+                g_view_y = cy - g_view_h / 2;
+                need_render = 1;
+            }
+
+        } else if (ch == 'x' || ch == 'X' || ch == '-') {
+            /* ズームアウト */
+            if (zoom_level > 0) {
+                int cx = g_view_x + g_view_w / 2;
+                int cy = g_view_y + g_view_h / 2;
+                zoom_level--;
+                g_view_w = g_img_w >> zoom_level;
+                g_view_h = g_img_h >> zoom_level;
+                g_view_x = cx - g_view_w / 2;
+                g_view_y = cy - g_view_h / 2;
+                need_render = 1;
+            }
+
+        } else if (ch == '1') {
+            /* リセット (1x) */
+            zoom_level = 0;
+            g_view_x = 0;
+            g_view_y = 0;
+            g_view_w = g_img_w;
+            g_view_h = g_img_h;
+            need_render = 1;
+
+        } else if (ch == 0x1C) {
+            /* 右矢印 */
+            g_view_x += pan_step;
+            need_render = 1;
+        } else if (ch == 0x1D) {
+            /* 左矢印 */
+            g_view_x -= pan_step;
+            need_render = 1;
+        } else if (ch == 0x1E) {
+            /* 上矢印 */
+            g_view_y -= pan_step;
+            need_render = 1;
+        } else if (ch == 0x1F) {
+            /* 下矢印 */
+            g_view_y += pan_step;
+            need_render = 1;
+        }
+
+        if (need_render) {
+            render_paths(file_data, file_size, &info, outline_only, info.flags);
+        }
     }
 
     /* 後片付け */
+    api->mem_free(g_edges);
+    api->mem_free(file_data);
+
     if (!keep_vram) {
         gfx_clear(0);
         gfx_present();
