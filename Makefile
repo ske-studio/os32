@@ -340,10 +340,42 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
 	fi
 
+# === NHD デプロイ ===
+# NHDイメージのパス
+NHD_DEPLOY = python3 tools/nhd_deploy.py
+
+# deploy: カーネル+プログラム+データをNHDに書き込み → NP21/Wにコピー
+deploy: kernel.bin programs unicode_bin
+	@echo "=== NHD Deploy ==="
+	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
+	$(NHD_DEPLOY) copy-all programs/
+	$(NHD_DEPLOY) copy unicode.bin
+	$(NHD_DEPLOY) deploy
+
+# dp-<name>: 個別プログラムのビルド → NHDコピー → NP21/Wデプロイ
+# 使い方: make dp-ekakiuta, make dp-shell, make dp-vz 等
+# ※ カーネル変更時は make deploy (全体) を使うこと
+dp-%: programs/%.bin
+	@echo "=== Deploy: $*.bin ==="
+	$(NHD_DEPLOY) copy programs/$*.bin
+	$(NHD_DEPLOY) deploy
+
+# nhd-mount: NHDのext2パーティションをマウント
+nhd-mount:
+	$(NHD_DEPLOY) mount
+
+# nhd-umount: NHDのext2パーティションをアンマウント
+nhd-umount:
+	$(NHD_DEPLOY) umount
+
+# nhd-init: 初回セットアップ (Windows側NHDコピー + フォーマット + マウント)
+nhd-init:
+	$(NHD_DEPLOY) init
+
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o unicode.bin tools/gen_unicode
 
-.PHONY: all boot build clean programs
+.PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 
 # Add explicit dependencies for OS32X programs on the KAPI header
 programs/%.o: include/os32_kapi_shared.h

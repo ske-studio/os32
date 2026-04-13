@@ -36,29 +36,29 @@
 #define HEAD_R      105     /* 頭の半径 (大きめ) */
 
 /* 目 (中央でピッタリ接する: offset == radius) */
-#define EYE_R       28
-#define EYE_Y       (HEAD_CY - 24)
+#define EYE_R       36
+#define EYE_Y       (HEAD_CY - 40)
 #define LEYE_CX     (HEAD_CX - EYE_R)
 #define REYE_CX     (HEAD_CX + EYE_R)
 
 /* 目玉 */
-#define PUPIL_R     5
+#define PUPIL_R     8
 #define LPUPIL_X    (HEAD_CX - 16)
 #define RPUPIL_X    (HEAD_CX + 16)
-#define PUPIL_Y     (EYE_Y - 16)
+#define PUPIL_Y     (EYE_Y)
 
 /* 白い顔面 (楕円) — 大きく丸く */
-#define WFACE_CY    (HEAD_CY + 10)
+#define WFACE_CY    (HEAD_CY + 20)
 #define WFACE_RX    72
 #define WFACE_RY    80
 
 /* 鼻 */
 #define NOSE_CY     (EYE_Y + EYE_R)  /* 目の真下 */
-#define NOSE_R      7
+#define NOSE_R      12
 
 /* 鼻下の線 (根) */
 #define MLINE_TOP   (NOSE_CY + NOSE_R + 1)
-#define MLINE_BOT   (NOSE_CY + NOSE_R + 10)
+#define MLINE_BOT   (NOSE_CY + NOSE_R + 25)
 
 /* 口 — 大きな笑顔 */
 #define MOUTH_CY    MLINE_BOT
@@ -79,10 +79,10 @@
 #define HAND_CY     (BODY_TOP + BODY_H / 2 + 5)
 
 /* 足 — 大きく (楕円形の靴) */
-#define FOOT_RX     35
+#define FOOT_RX     46
 #define FOOT_RY     20
-#define LFOOT_CX    (HEAD_CX - 30)
-#define RFOOT_CX    (HEAD_CX + 30)
+#define LFOOT_CX    (HEAD_CX - 46)
+#define RFOOT_CX    (HEAD_CX + 46)
 #define FOOT_TOP    BODY_BOT
 
 /* ポケット — 大きめ */
@@ -122,7 +122,7 @@
 #define COL_TEXT    14
 #define COL_HITEXT  15
 
-#define NUM_STEPS   10
+#define NUM_STEPS   11
 
 /* ======================================================================== */
 /*  描画補助                                                                */
@@ -239,22 +239,22 @@ static int wait_key(void)
 
 static void setup_palette(void)
 {
-    api->gfx_set_palette(COL_BG,      0,  0,  0);
-    api->gfx_set_palette(COL_WHITE,   15, 15, 15);
-    api->gfx_set_palette(COL_BLUE,     0,  8, 15);
-    api->gfx_set_palette(COL_RED,     15,  2,  2);
-    api->gfx_set_palette(COL_YELLOW,  15, 14,  0);
-    api->gfx_set_palette(COL_LTBLUE,   4, 12, 15);
-    api->gfx_set_palette(COL_DKBLUE,   0,  4, 10);
-    api->gfx_set_palette(COL_LINE,     2,  2,  2);
-    api->gfx_set_palette(COL_DKRED,   10,  0,  0);
-    api->gfx_set_palette(COL_SKIN,    15, 10,  7);
-    api->gfx_set_palette(COL_COLLAR,  15,  0,  0);
-    api->gfx_set_palette(COL_BROWN,    8,  5,  2);
-    api->gfx_set_palette(COL_GRAY,     8,  8,  8);
-    api->gfx_set_palette(COL_LTGREEN,  0, 15,  4);
-    api->gfx_set_palette(COL_TEXT,    10, 15, 10);
-    api->gfx_set_palette(COL_HITEXT,  15, 15,  8);
+    api->gfx_set_palette(COL_BG,     15, 14, 11);   /* クリーム色 */
+    api->gfx_set_palette(COL_WHITE,  15, 15, 15);
+    api->gfx_set_palette(COL_BLUE,    0,  8, 15);
+    api->gfx_set_palette(COL_RED,    15,  2,  2);
+    api->gfx_set_palette(COL_YELLOW, 15, 14,  0);
+    api->gfx_set_palette(COL_LTBLUE,  4, 12, 15);
+    api->gfx_set_palette(COL_DKBLUE,  0,  4, 10);
+    api->gfx_set_palette(COL_LINE,    2,  2,  2);
+    api->gfx_set_palette(COL_DKRED,  10,  0,  0);
+    api->gfx_set_palette(COL_SKIN,   15, 10,  7);
+    api->gfx_set_palette(COL_COLLAR, 15,  0,  0);
+    api->gfx_set_palette(COL_BROWN,   8,  5,  2);
+    api->gfx_set_palette(COL_GRAY,    6,  6,  6);
+    api->gfx_set_palette(COL_LTGREEN, 0, 15,  4);
+    api->gfx_set_palette(COL_TEXT,    0,  3,  8);   /* ダークブルー (明背景用) */
+    api->gfx_set_palette(COL_HITEXT,  2,  6,  2);   /* ダークグリーン */
 }
 
 /* ======================================================================== */
@@ -284,7 +284,7 @@ static int step_eyes(void)
     gfx_fill_circle(RPUPIL_X, PUPIL_Y, PUPIL_R, COL_LINE);
     gfx_fill_circle(RPUPIL_X + 2, PUPIL_Y - 2, 2, COL_WHITE);
     /* 中央の仕切り線 */
-    gfx_vline(HEAD_CX, EYE_Y - EYE_R, EYE_R * 2, COL_LINE);
+    /*gfx_vline(HEAD_CX, EYE_Y - EYE_R, (NOSE_CY - NOSE_R) - (EYE_Y - EYE_R), COL_LINE);*/
     api->gfx_present_dirty();
     return 0;
 }
@@ -373,12 +373,6 @@ static int step_feet(void)
     int ret;
     show_lyric("♪ お池が2つできました");
     /* 左足 (下半分の楕円) */
-    {
-        int deg;
-        for (deg = 180; deg <= 360; deg++) {
-            gfx_arc(LFOOT_CX, FOOT_TOP, FOOT_RX, deg, deg + 1, COL_LINE);
-        }
-    }
     gfx_ellipse(LFOOT_CX, FOOT_TOP, FOOT_RX, FOOT_RY, COL_LINE);
     gfx_hline(LFOOT_CX - FOOT_RX, FOOT_TOP, FOOT_RX * 2, COL_LINE);
     api->gfx_present_dirty();
@@ -487,7 +481,6 @@ static int step_complete(void)
     gfx_fill_circle(REYE_CX, EYE_Y, EYE_R - 2, COL_WHITE);
     gfx_circle(LEYE_CX, EYE_Y, EYE_R, COL_LINE);
     gfx_circle(REYE_CX, EYE_Y, EYE_R, COL_LINE);
-    gfx_vline(HEAD_CX, EYE_Y - EYE_R, EYE_R * 2, COL_LINE);
 
     /* 目玉 */
     gfx_fill_circle(LPUPIL_X, PUPIL_Y, PUPIL_R, COL_LINE);
@@ -556,7 +549,70 @@ static int step_complete(void)
     return 0;
 }
 
-/* ======================================================================== */
+/* Step 11: ベジェ曲線デモ — 吹き出し + デコレーション */
+static int step_bezier_demo(void)
+{
+    show_lyric("♪ ベジェ曲線デモ");
+
+    /* === 吹き出し (3次ベジェで角丸四角) === */
+    {
+        int bx = 470, by = 40;  /* 吹き出しの左上 */
+        int bw = 150, bh = 50;  /* 幅、高さ */
+        int cr = 12;            /* 角丸半径 */
+
+        /* 背景を白で塗りつぶし */
+        gfx_fill_rect(bx + 1, by + 1, bw - 1, bh - 1, COL_WHITE);
+
+        /* 上辺 (左角丸 → 直線 → 右角丸) */
+        gfx_bezier3(bx, by + cr,  bx, by,  bx + cr, by,  bx + cr, by, COL_LINE);
+        gfx_hline(bx + cr, by, bw - cr * 2, COL_LINE);
+        gfx_bezier3(bx + bw - cr, by,  bx + bw, by,  bx + bw, by + cr,  bx + bw, by + cr, COL_LINE);
+
+        /* 右辺 */
+        gfx_vline(bx + bw, by + cr, bh - cr * 2, COL_LINE);
+
+        /* 下辺 (右角丸 → 直線 → 左角丸) */
+        gfx_bezier3(bx + bw, by + bh - cr,  bx + bw, by + bh,  bx + bw - cr, by + bh,  bx + bw - cr, by + bh, COL_LINE);
+        gfx_hline(bx + cr, by + bh, bw - cr * 2, COL_LINE);
+        gfx_bezier3(bx + cr, by + bh,  bx, by + bh,  bx, by + bh - cr,  bx, by + bh - cr, COL_LINE);
+
+        /* 左辺 */
+        gfx_vline(bx, by + cr, bh - cr * 2, COL_LINE);
+
+        /* 吹き出しの尻尾 (ベジェで曲線的に指す) */
+        gfx_bezier3(bx + 20, by + bh,
+                    bx + 10, by + bh + 20,
+                    bx - 10, by + bh + 15,
+                    HEAD_CX + HEAD_R - 20, HEAD_CY - HEAD_R + 10,
+                    COL_LINE);
+
+        /* 吹き出し内のテキスト */
+        kcg_draw_utf8(bx + 16, by + 8, "ぼくドラえもん!", COL_BLUE, COL_WHITE);
+        kcg_draw_utf8(bx + 8, by + 28, "ベジェ曲線テスト", COL_LINE, COL_WHITE);
+    }
+    api->gfx_present_dirty();
+
+    /* === ハートマーク (2次ベジェ) === */
+    {
+        int hx = 80, hy = 100;  /* ハート下端 */
+        /* 左側 */
+        gfx_bezier2(hx, hy,  hx - 30, hy - 40,  hx, hy - 55, COL_RED);
+        gfx_bezier2(hx, hy - 55,  hx + 15, hy - 65,  hx + 25, hy - 45, COL_RED);
+        /* 右側 */
+        gfx_bezier2(hx, hy,  hx + 30, hy - 40,  hx, hy - 55, COL_RED);
+        gfx_bezier2(hx, hy - 55,  hx - 15, hy - 65,  hx - 25, hy - 45, COL_RED);
+    }
+    api->gfx_present_dirty();
+
+    /* === 波線デコレーション (太線3次ベジェ) === */
+    gfx_bezier3_thick(30, 370,  180, 340,  460, 390,  610, 355,  3, COL_BLUE);
+    gfx_bezier3_thick(30, 378,  180, 348,  460, 398,  610, 363,  2, COL_LTBLUE);
+    api->gfx_present_dirty();
+
+    return 0;
+}
+
+
 /*  メインプログラム                                                        */
 /* ======================================================================== */
 
@@ -594,6 +650,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
     steps[7] = step_mouth;
     steps[8] = step_whiskers;
     steps[9] = step_complete;
+    steps[10] = step_bezier_demo;
 
     if (wait_key() < 0) goto done;
 
