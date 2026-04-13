@@ -4,6 +4,8 @@ global asm_gfx_clear
 global asm_gfx_draw_sprite
 global asm_fill_plane_rect
 global asm_copy_plane_rect
+global asm_gfx_hline
+global asm_gfx_line
 
 %define GFX_HEIGHT   400
 %define GFX_BPL      80
@@ -611,6 +613,570 @@ asm_copy_plane_rect:
     pop ebx
     pop esi
     pop edi
+    mov esp, ebp
+    pop ebp
+    ret
+
+; -------------------------------------------------------------------------
+; void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+;
+; バックバッファ上に水平線を描画する。
+; planes: 4プレーンのポインタ配列
+; base:   y * pitch (呼び出し側で事前計算)
+; x:      左端X座標 (クリップ済み)
+; x2:     右端X座標 (クリップ済み, x <= x2)
+; color:  パレット番号 (0-15)
+;
+; バックバッファはメインRAM上にあるため、rep stosd (32bit) が有効。
+; -------------------------------------------------------------------------
+
+%define HL_PLANES [ebp+8]
+%define HL_BASE   [ebp+12]
+%define HL_X      [ebp+16]
+%define HL_X2     [ebp+20]
+%define HL_COLOR  [ebp+24]
+
+asm_gfx_hline:
+    push ebp
+    mov ebp, esp
+    sub esp, 32
+    push ebx
+    push esi
+    push edi
+
+    ; ローカル変数:
+    ;   [ebp-4]  = plane0 + base
+    ;   [ebp-8]  = plane1 + base
+    ;   [ebp-12] = plane2 + base
+    ;   [ebp-16] = plane3 + base
+    ;   [ebp-20] = bx1 (中間開始X, バイト境界)
+    ;   [ebp-24] = bx2 (中間終了X, バイト境界)
+
+    ; 4プレーンの base ポインタをキャッシュ
+    mov esi, HL_PLANES
+    mov eax, HL_BASE
+    mov edx, [esi]
+    add edx, eax
+    mov [ebp-4], edx
+    mov edx, [esi+4]
+    add edx, eax
+    mov [ebp-8], edx
+    mov edx, [esi+8]
+    add edx, eax
+    mov [ebp-12], edx
+    mov edx, [esi+12]
+    add edx, eax
+    mov [ebp-16], edx
+
+    mov eax, HL_X
+    mov edx, HL_X2
+
+    ; ---- 同一バイト内チェック ----
+    mov ecx, eax
+    shr ecx, 3
+    mov ebx, edx
+    shr ebx, 3
+    cmp ecx, ebx
+    jne .hl_multi_byte
+
+    ; 同一バイト: mask = (0xFF >> (x&7)) & (0xFF << (7-(x2&7)))
+    push edx              ; x2 を保存
+
+    mov ecx, eax
+    and ecx, 7
+    mov bl, 0xFF
+    shr bl, cl
+
+    pop edx
+    mov ecx, edx
+    and ecx, 7
+    mov cl, 7
+    sub cl, dl
+    and cl, 7
+    mov bh, 0xFF
+    shl bh, cl
+    and bl, bh            ; bl = mask
+
+    ; バイトオフセット
+    mov eax, HL_X
+    shr eax, 3
+
+    mov cl, HL_COLOR
+
+    ; Plane 0
+    mov edi, [ebp-4]
+    test cl, 1
+    jz .hl_same_c0
+    or [edi + eax], bl
+    jmp .hl_same_p1
+.hl_same_c0:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_same_p1:
+    mov edi, [ebp-8]
+    test cl, 2
+    jz .hl_same_c1
+    or [edi + eax], bl
+    jmp .hl_same_p2
+.hl_same_c1:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_same_p2:
+    mov edi, [ebp-12]
+    test cl, 4
+    jz .hl_same_c2
+    or [edi + eax], bl
+    jmp .hl_same_p3
+.hl_same_c2:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_same_p3:
+    mov edi, [ebp-16]
+    test cl, 8
+    jz .hl_same_c3
+    or [edi + eax], bl
+    jmp .hl_done
+.hl_same_c3:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+    jmp .hl_done
+
+.hl_multi_byte:
+    ; ---- 左端パーシャルバイト ----
+    mov eax, HL_X
+    test eax, 7
+    jz .hl_no_left
+
+    mov ecx, eax
+    and ecx, 7
+    mov bl, 0xFF
+    shr bl, cl            ; left_mask
+
+    mov eax, HL_X
+    shr eax, 3            ; byte offset
+
+    mov cl, HL_COLOR
+
+    mov edi, [ebp-4]
+    test cl, 1
+    jz .hl_left_c0
+    or [edi + eax], bl
+    jmp .hl_left_d1
+.hl_left_c0:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_left_d1:
+    mov edi, [ebp-8]
+    test cl, 2
+    jz .hl_left_c1
+    or [edi + eax], bl
+    jmp .hl_left_d2
+.hl_left_c1:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_left_d2:
+    mov edi, [ebp-12]
+    test cl, 4
+    jz .hl_left_c2
+    or [edi + eax], bl
+    jmp .hl_left_d3
+.hl_left_c2:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_left_d3:
+    mov edi, [ebp-16]
+    test cl, 8
+    jz .hl_left_c3
+    or [edi + eax], bl
+    jmp .hl_left_done
+.hl_left_c3:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_left_done:
+    ; bx1 = (x | 7) + 1
+    mov eax, HL_X
+    or eax, 7
+    inc eax
+    mov [ebp-20], eax
+    jmp .hl_right
+
+.hl_no_left:
+    mov eax, HL_X
+    mov [ebp-20], eax
+
+.hl_right:
+    ; ---- 右端パーシャルバイト ----
+    mov edx, HL_X2
+    mov eax, edx
+    and eax, 7
+    cmp eax, 7
+    je .hl_no_right
+
+    mov ecx, 7
+    sub ecx, eax
+    mov bl, 0xFF
+    shl bl, cl            ; right_mask
+
+    mov eax, edx
+    shr eax, 3            ; byte offset
+
+    mov cl, HL_COLOR
+
+    mov edi, [ebp-4]
+    test cl, 1
+    jz .hl_right_c0
+    or [edi + eax], bl
+    jmp .hl_right_d1
+.hl_right_c0:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_right_d1:
+    mov edi, [ebp-8]
+    test cl, 2
+    jz .hl_right_c1
+    or [edi + eax], bl
+    jmp .hl_right_d2
+.hl_right_c1:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_right_d2:
+    mov edi, [ebp-12]
+    test cl, 4
+    jz .hl_right_c2
+    or [edi + eax], bl
+    jmp .hl_right_d3
+.hl_right_c2:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_right_d3:
+    mov edi, [ebp-16]
+    test cl, 8
+    jz .hl_right_c3
+    or [edi + eax], bl
+    jmp .hl_right_done
+.hl_right_c3:
+    mov bh, bl
+    not bh
+    and [edi + eax], bh
+.hl_right_done:
+    ; bx2 = x2 & ~7
+    mov eax, HL_X2
+    and eax, ~7
+    mov [ebp-24], eax
+    jmp .hl_middle
+
+.hl_no_right:
+    ; bx2 = x2 + 1
+    mov eax, HL_X2
+    inc eax
+    mov [ebp-24], eax
+
+.hl_middle:
+    ; ---- 中間フルバイト: rep stosd + rep stosb ----
+    mov eax, [ebp-20]     ; bx1
+    mov edx, [ebp-24]     ; bx2
+    cmp eax, edx
+    jge .hl_done
+
+    ; start_byte = bx1 >> 3, count = (bx2 - bx1) >> 3
+    mov ebx, eax
+    shr ebx, 3            ; start_byte
+    mov ecx, edx
+    sub ecx, eax
+    shr ecx, 3            ; count (bytes)
+    test ecx, ecx
+    jle .hl_done
+
+    ; count をスタックに保存
+    push ecx              ; [esp] = count
+
+    mov dl, HL_COLOR
+
+    ; --- Plane 0 ---
+    xor eax, eax
+    test dl, 1
+    jz .hl_mid_p0
+    not eax
+.hl_mid_p0:
+    mov edi, [ebp-4]
+    add edi, ebx
+    mov ecx, [esp]
+    push edi
+    push ecx
+    shr ecx, 2
+    rep stosd
+    pop ecx
+    and ecx, 3
+    rep stosb
+    pop edi
+
+    ; --- Plane 1 ---
+    xor eax, eax
+    test dl, 2
+    jz .hl_mid_p1
+    not eax
+.hl_mid_p1:
+    mov edi, [ebp-8]
+    add edi, ebx
+    mov ecx, [esp]
+    push edi
+    push ecx
+    shr ecx, 2
+    rep stosd
+    pop ecx
+    and ecx, 3
+    rep stosb
+    pop edi
+
+    ; --- Plane 2 ---
+    xor eax, eax
+    test dl, 4
+    jz .hl_mid_p2
+    not eax
+.hl_mid_p2:
+    mov edi, [ebp-12]
+    add edi, ebx
+    mov ecx, [esp]
+    push edi
+    push ecx
+    shr ecx, 2
+    rep stosd
+    pop ecx
+    and ecx, 3
+    rep stosb
+    pop edi
+
+    ; --- Plane 3 ---
+    xor eax, eax
+    test dl, 8
+    jz .hl_mid_p3
+    not eax
+.hl_mid_p3:
+    mov edi, [ebp-16]
+    add edi, ebx
+    mov ecx, [esp]
+    push ecx
+    shr ecx, 2
+    rep stosd
+    pop ecx
+    and ecx, 3
+    rep stosb
+
+    pop ecx               ; count を片付け
+
+.hl_done:
+    pop edi
+    pop esi
+    pop ebx
+    mov esp, ebp
+    pop ebp
+    ret
+
+; -------------------------------------------------------------------------
+; void __cdecl asm_gfx_line(u8 **planes, int pitch,
+;                           int x0, int y0, int x1, int y1, u8 color);
+;
+; Bresenhamアルゴリズムによる直線描画。
+; pixel描画をインラインで実行し、関数呼び出しオーバーヘッドを排除。
+; 境界チェックはループ内で行う (クリッピングは呼び出し側非依存)。
+;
+; バックバッファはメインRAM上のプレーナー形式。
+; -------------------------------------------------------------------------
+
+%define LN_PLANES [ebp+8]
+%define LN_PITCH  [ebp+12]
+%define LN_X0     [ebp+16]
+%define LN_Y0     [ebp+20]
+%define LN_X1     [ebp+24]
+%define LN_Y1     [ebp+28]
+%define LN_COLOR  [ebp+32]
+
+asm_gfx_line:
+    push ebp
+    mov ebp, esp
+    sub esp, 48
+    push ebx
+    push esi
+    push edi
+
+    ; ローカル変数:
+    ;   [ebp-4]  = plane0
+    ;   [ebp-8]  = plane1
+    ;   [ebp-12] = plane2
+    ;   [ebp-16] = plane3
+    ;   [ebp-20] = dx (abs)
+    ;   [ebp-24] = dy (abs)
+    ;   [ebp-28] = sx (+1 or -1)
+    ;   [ebp-32] = sy (+1 or -1)
+    ;   [ebp-36] = err
+    ;   [ebp-40] = x1 (終点)
+    ;   [ebp-44] = y1 (終点)
+
+    ; プレーンポインタをキャッシュ
+    mov esi, LN_PLANES
+    mov eax, [esi]
+    mov [ebp-4], eax
+    mov eax, [esi+4]
+    mov [ebp-8], eax
+    mov eax, [esi+8]
+    mov [ebp-12], eax
+    mov eax, [esi+12]
+    mov [ebp-16], eax
+
+    ; dx = abs(x1 - x0), sx = sign
+    mov eax, LN_X1
+    sub eax, LN_X0
+    mov dword [ebp-28], 1
+    cmp eax, 0
+    jge .ln_dx_pos
+    neg eax
+    mov dword [ebp-28], -1
+.ln_dx_pos:
+    mov [ebp-20], eax
+
+    ; dy = abs(y1 - y0), sy = sign
+    mov eax, LN_Y1
+    sub eax, LN_Y0
+    mov dword [ebp-32], 1
+    cmp eax, 0
+    jge .ln_dy_pos
+    neg eax
+    mov dword [ebp-32], -1
+.ln_dy_pos:
+    mov [ebp-24], eax
+
+    ; err = dx - dy
+    mov eax, [ebp-20]
+    sub eax, [ebp-24]
+    mov [ebp-36], eax
+
+    ; 終点を保存
+    mov eax, LN_X1
+    mov [ebp-40], eax
+    mov eax, LN_Y1
+    mov [ebp-44], eax
+
+    ; 現在の座標をレジスタに (esi = x, ebx = y)
+    mov esi, LN_X0
+    mov ebx, LN_Y0
+
+.ln_loop:
+    ; ---- インライン pixel 描画 ----
+    ; 境界チェック
+    cmp esi, 0
+    jl .ln_skip_pixel
+    cmp esi, 640
+    jge .ln_skip_pixel
+    cmp ebx, 0
+    jl .ln_skip_pixel
+    cmp ebx, GFX_HEIGHT
+    jge .ln_skip_pixel
+
+    ; offset = y * pitch + (x >> 3)
+    mov eax, ebx
+    imul eax, dword LN_PITCH
+    mov edi, esi
+    shr edi, 3
+    add edi, eax           ; edi = offset
+
+    ; bit = 0x80 >> (x & 7)
+    mov ecx, esi
+    and ecx, 7
+    mov ah, 0x80
+    shr ah, cl             ; ah = bit mask
+
+    mov al, LN_COLOR
+
+    ; Plane 0
+    mov ecx, [ebp-4]
+    test al, 1
+    jz .ln_px_c0
+    or [ecx + edi], ah
+    jmp .ln_px_d1
+.ln_px_c0:
+    mov dl, ah
+    not dl
+    and [ecx + edi], dl
+.ln_px_d1:
+    ; Plane 1
+    mov ecx, [ebp-8]
+    test al, 2
+    jz .ln_px_c1
+    or [ecx + edi], ah
+    jmp .ln_px_d2
+.ln_px_c1:
+    mov dl, ah
+    not dl
+    and [ecx + edi], dl
+.ln_px_d2:
+    ; Plane 2
+    mov ecx, [ebp-12]
+    test al, 4
+    jz .ln_px_c2
+    or [ecx + edi], ah
+    jmp .ln_px_d3
+.ln_px_c2:
+    mov dl, ah
+    not dl
+    and [ecx + edi], dl
+.ln_px_d3:
+    ; Plane 3
+    mov ecx, [ebp-16]
+    test al, 8
+    jz .ln_px_c3
+    or [ecx + edi], ah
+    jmp .ln_skip_pixel
+.ln_px_c3:
+    mov dl, ah
+    not dl
+    and [ecx + edi], dl
+
+.ln_skip_pixel:
+    ; ---- 終点判定 ----
+    cmp esi, [ebp-40]
+    jne .ln_step
+    cmp ebx, [ebp-44]
+    je .ln_end
+
+.ln_step:
+    ; e2 = err * 2
+    mov eax, [ebp-36]
+    lea eax, [eax + eax]  ; e2
+
+    ; if (e2 > -dy) { err -= dy; x += sx; }
+    mov ecx, [ebp-24]
+    neg ecx                ; -dy
+    cmp eax, ecx
+    jle .ln_no_xstep
+    mov ecx, [ebp-24]
+    sub dword [ebp-36], ecx
+    add esi, [ebp-28]
+.ln_no_xstep:
+
+    ; if (e2 < dx) { err += dx; y += sy; }
+    cmp eax, [ebp-20]
+    jge .ln_no_ystep
+    mov ecx, [ebp-20]
+    add [ebp-36], ecx
+    add ebx, [ebp-32]
+.ln_no_ystep:
+    jmp .ln_loop
+
+.ln_end:
+    pop edi
+    pop esi
+    pop ebx
     mov esp, ebp
     pop ebp
     ret

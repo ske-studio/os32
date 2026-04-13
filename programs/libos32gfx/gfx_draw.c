@@ -8,6 +8,8 @@
 
 extern void __cdecl asm_gfx_clear(u8 color, u8 **bb_array);
 extern void __cdecl asm_fill_plane_rect(u8 *start, int pitch, int rows, int width_bytes, u8 fill_val);
+extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+extern void __cdecl asm_gfx_line(u8 **planes, int pitch, int x0, int y0, int x1, int y1, u8 color);
 
 void gfx_clear(u8 color)
 {
@@ -89,9 +91,7 @@ u8 gfx_get_pixel(int x, int y)
 
 void gfx_hline(int x, int y, int w, u8 color)
 {
-    int x2, p;
-    int bx1, bx2;
-    int base;
+    int x2;
 
     if (y < 0 || y >= gfx_fb.height || w <= 0) return;
     if (x < 0) { w -= (0 - x); x = 0; }
@@ -100,60 +100,7 @@ void gfx_hline(int x, int y, int w, u8 color)
     if (x > x2) return;
 
     gfx_api->gfx_add_dirty_rect(x & ~31, y, ((x2 + 32) & ~31) - (x & ~31), 1);
-    base = y * gfx_fb.pitch;
-
-    /* 同一バイト内に収まる場合 */
-    if ((x >> 3) == (x2 >> 3)) {
-        u8 mask = (u8)((0xFF >> (x & 7)) & (0xFF << (7 - (x2 & 7))));
-        for (p = 0; p < 4; p++) {
-            if (color & (1 << p))
-                gfx_fb.planes[p][base + (x >> 3)] |= mask;
-            else
-                gfx_fb.planes[p][base + (x >> 3)] &= ~mask;
-        }
-        return;
-    }
-
-    /* 左端パーシャルバイト */
-    if (x & 7) {
-        u8 mask = (u8)(0xFF >> (x & 7));
-        int off = base + (x >> 3);
-        for (p = 0; p < 4; p++) {
-            if (color & (1 << p))
-                gfx_fb.planes[p][off] |= mask;
-            else
-                gfx_fb.planes[p][off] &= ~mask;
-        }
-        bx1 = (x | 7) + 1;
-    } else {
-        bx1 = x;
-    }
-
-    /* 右端パーシャルバイト */
-    if ((x2 & 7) != 7) {
-        u8 mask = (u8)(0xFF << (7 - (x2 & 7)));
-        int off = base + (x2 >> 3);
-        for (p = 0; p < 4; p++) {
-            if (color & (1 << p))
-                gfx_fb.planes[p][off] |= mask;
-            else
-                gfx_fb.planes[p][off] &= ~mask;
-        }
-        bx2 = x2 & ~7;
-    } else {
-        bx2 = x2 + 1;
-    }
-
-    /* 中間フルバイト: asm_fill_plane_rect (rows=1) */
-    if (bx1 < bx2) {
-        int start_byte = base + (bx1 >> 3);
-        int count = (bx2 - bx1) >> 3;
-        for (p = 0; p < 4; p++) {
-            u8 fill = (color & (1 << p)) ? 0xFF : 0x00;
-            asm_fill_plane_rect(gfx_fb.planes[p] + start_byte,
-                                gfx_fb.pitch, 1, count, fill);
-        }
-    }
+    asm_gfx_hline(gfx_fb.planes, y * gfx_fb.pitch, x, x2, color);
 }
 
 void gfx_vline(int x, int y, int h, u8 color)
@@ -187,21 +134,24 @@ void gfx_vline(int x, int y, int h, u8 color)
 
 void gfx_line(int x0, int y0, int x1, int y1, u8 color)
 {
-    int dx, dy, sx, sy, err, e2;
+    /* dirty_rect をバウンディングボックスで1回だけ登録 */
+    int minx, miny, maxx, maxy;
+    minx = (x0 < x1) ? x0 : x1;
+    maxx = (x0 > x1) ? x0 : x1;
+    miny = (y0 < y1) ? y0 : y1;
+    maxy = (y0 > y1) ? y0 : y1;
 
-    dx = x1 - x0; if (dx < 0) dx = -dx;
-    dy = y1 - y0; if (dy < 0) dy = -dy;
-    sx = (x0 < x1) ? 1 : -1;
-    sy = (y0 < y1) ? 1 : -1;
-    err = dx - dy;
-
-    for (;;) {
-        gfx_pixel(x0, y0, color);
-        if (x0 == x1 && y0 == y1) break;
-        e2 = err * 2;
-        if (e2 > -dy) { err -= dy; x0 += sx; }
-        if (e2 <  dx) { err += dx; y0 += sy; }
+    /* 画面外の場合は dirty_rect のクリップのみ */
+    if (minx < 0) minx = 0;
+    if (miny < 0) miny = 0;
+    if (maxx >= gfx_fb.width) maxx = gfx_fb.width - 1;
+    if (maxy >= gfx_fb.height) maxy = gfx_fb.height - 1;
+    if (minx <= maxx && miny <= maxy) {
+        gfx_api->gfx_add_dirty_rect(minx & ~31, miny,
+            ((maxx + 32) & ~31) - (minx & ~31), maxy - miny + 1);
     }
+
+    asm_gfx_line(gfx_fb.planes, gfx_fb.pitch, x0, y0, x1, y1, color);
 }
 
 void gfx_rect(int x, int y, int w, int h, u8 color)
