@@ -278,19 +278,10 @@ programs/raster.elf: app.ld $(CRT0_OBJ) programs/raster.o $(GFX_OBJ)
 
 raster: $(CRT0_OBJ) programs/raster.bin
 
-# === Boot Logo ===
-programs/bootlogo.o: programs/bootlogo.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
-
-programs/bootlogo.elf: app.ld $(CRT0_OBJ) programs/bootlogo.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/bootlogo.o $(GFX_OBJ) -lc -lgcc
-
-bootlogo: $(CRT0_OBJ) programs/bootlogo.bin
-
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster bootlogo
+programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -333,8 +324,6 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "shell" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
 	elif [ "$*" = "raster" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
-	elif [ "$*" = "bootlogo" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	else \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
