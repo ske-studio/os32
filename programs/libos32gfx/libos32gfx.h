@@ -56,6 +56,21 @@ void gfx_fill_ellipse(int cx, int cy, int rx, int ry, u8 color);
 void gfx_arc(int cx, int cy, int r, int start_deg, int end_deg, u8 color);
 void gfx_circle_thick(int cx, int cy, int r, int thickness, u8 color);
 
+/* 整数sin/cos LUT (512分割, 15bit固定小数点) */
+i32 gfx_isin(int angle);          /* angle: 0〜511, 戻り値: -32767〜+32767 */
+i32 gfx_icos(int angle);
+int gfx_deg_to_idx(int deg);      /* 度数(0〜359) → LUTインデックス(0〜511) */
+#define GFX_SIN_SCALE  32767      /* sin/cosの1.0に相当する値 */
+
+/* ベジェ曲線 (de Casteljau, 整数演算のみ) */
+void gfx_bezier2(int x0, int y0, int x1, int y1,
+                 int x2, int y2, u8 color);
+void gfx_bezier3(int x0, int y0, int x1, int y1,
+                 int x2, int y2, int x3, int y3, u8 color);
+void gfx_bezier3_thick(int x0, int y0, int x1, int y1,
+                       int x2, int y2, int x3, int y3,
+                       int thickness, u8 color);
+
 /* Raster Palette */
 void gfx_raster_clear(GFX_RasterPalTable *table);
 int  gfx_raster_add(GFX_RasterPalTable *table,
