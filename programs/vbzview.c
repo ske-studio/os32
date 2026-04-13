@@ -37,15 +37,7 @@
 #define FLAG_FILL     0x01
 #define FLAG_STROKE   0x02
 
-/* ベジェ平坦化の最大深度 */
-#define FLATTEN_MAX_DEPTH 10
-
 /* ---- データ構造 ---- */
-
-/* エッジ (直線セグメント) */
-typedef struct {
-    int x0, y0, x1, y1;  /* 始点-終点 (y0 <= y1 になるよう正規化) */
-} Edge;
 
 /* パスヘッダ */
 typedef struct {
@@ -61,16 +53,11 @@ typedef struct {
     u16 num_paths;
     u8  num_colors;
     u8  flags;
-    u8  palette[48];  /* 16色 × RGB 各4bit */
+    u8  palette[48];
 } VbzInfo;
 
-/* エッジテーブル (グローバル、動的確保) */
-static Edge *g_edges;
-static int g_num_edges;
-static int g_max_edges;
-
-/* 交差点バッファ */
-static int g_intersect[VBZ_MAX_INTERSECT];
+/* エッジテーブル (動的確保, libos32gfx API) */
+static GFX_EdgeTable *g_et;
 
 static KernelAPI *api;
 
@@ -118,162 +105,6 @@ static void apply_palette(const VbzInfo *info)
         u8 g = info->palette[i * 3 + 1];
         u8 b = info->palette[i * 3 + 2];
         api->gfx_set_palette(i, r, g, b);
-    }
-}
-
-/* ======================================================================== */
-/*  エッジテーブル操作                                                      */
-/* ======================================================================== */
-static void edges_clear(void)
-{
-    g_num_edges = 0;
-}
-
-static void edge_add(int x0, int y0, int x1, int y1)
-{
-    Edge *e;
-
-    /* 水平線は無視 (スキャンラインフィルでは不要) */
-    if (y0 == y1) return;
-
-    if (g_num_edges >= g_max_edges) return;
-
-    e = &g_edges[g_num_edges];
-
-    /* y0 < y1 になるよう正規化 */
-    if (y0 > y1) {
-        e->x0 = x1; e->y0 = y1;
-        e->x1 = x0; e->y1 = y0;
-    } else {
-        e->x0 = x0; e->y0 = y0;
-        e->x1 = x1; e->y1 = y1;
-    }
-    g_num_edges++;
-}
-
-/* ======================================================================== */
-/*  3次ベジェ曲線の平坦化 (エッジテーブルに直線セグメントを追加)            */
-/* ======================================================================== */
-static void flatten_bezier3(int x0, int y0, int x1, int y1,
-                            int x2, int y2, int x3, int y3, int depth)
-{
-    int mx01, my01, mx12, my12, mx23, my23;
-    int mx012, my012, mx123, my123;
-    int mx, my;
-
-    /* 平坦性テスト (簡易版: 制御点と直線の距離) */
-    if (depth >= FLATTEN_MAX_DEPTH) {
-        edge_add(x0, y0, x3, y3);
-        return;
-    }
-
-    {
-        long dx = (long)(x3 - x0);
-        long dy = (long)(y3 - y0);
-        long len2 = dx * dx + dy * dy;
-        long cross1, cross2;
-
-        if (len2 == 0) {
-            long d1 = (long)(x1 - x0) * (x1 - x0) + (long)(y1 - y0) * (y1 - y0);
-            long d2 = (long)(x2 - x0) * (x2 - x0) + (long)(y2 - y0) * (y2 - y0);
-            if (d1 <= 4 && d2 <= 4) {
-                edge_add(x0, y0, x3, y3);
-                return;
-            }
-        } else {
-            cross1 = dx * (long)(y1 - y0) - dy * (long)(x1 - x0);
-            cross2 = dx * (long)(y2 - y0) - dy * (long)(x2 - x0);
-            if (cross1 * cross1 <= len2 && cross2 * cross2 <= len2) {
-                edge_add(x0, y0, x3, y3);
-                return;
-            }
-        }
-    }
-
-    /* de Casteljau 中点分割 */
-    mx01 = (x0 + x1) / 2;   my01 = (y0 + y1) / 2;
-    mx12 = (x1 + x2) / 2;   my12 = (y1 + y2) / 2;
-    mx23 = (x2 + x3) / 2;   my23 = (y2 + y3) / 2;
-
-    mx012 = (mx01 + mx12) / 2;  my012 = (my01 + my12) / 2;
-    mx123 = (mx12 + mx23) / 2;  my123 = (my12 + my23) / 2;
-
-    mx = (mx012 + mx123) / 2;   my = (my012 + my123) / 2;
-
-    flatten_bezier3(x0, y0, mx01, my01, mx012, my012, mx, my, depth + 1);
-    flatten_bezier3(mx, my, mx123, my123, mx23, my23, x3, y3, depth + 1);
-}
-
-/* ======================================================================== */
-/*  スキャンラインフィル (even-odd rule)                                    */
-/* ======================================================================== */
-
-/* 交差点ソート (挿入ソート — 交差点数は通常少ない) */
-static void sort_intersections(int *arr, int n)
-{
-    int i, j;
-    int key;
-
-    for (i = 1; i < n; i++) {
-        key = arr[i];
-        j = i - 1;
-        while (j >= 0 && arr[j] > key) {
-            arr[j + 1] = arr[j];
-            j--;
-        }
-        arr[j + 1] = key;
-    }
-}
-
-static void scanline_fill(u8 color, int min_y, int max_y)
-{
-    int y, i;
-
-    if (min_y < 0) min_y = 0;
-    if (max_y >= 400) max_y = 399;
-
-    for (y = min_y; y <= max_y; y++) {
-        int n_intersect = 0;
-
-        /* 全エッジとの交差を求める */
-        for (i = 0; i < g_num_edges; i++) {
-            Edge *e = &g_edges[i];
-            int dy_e, dx_e;
-            int ix;
-
-            /* このスキャンラインとエッジが交差するか */
-            if (y < e->y0 || y >= e->y1) continue;
-
-            /* 交差X座標を求める (整数演算) */
-            dy_e = e->y1 - e->y0;
-            dx_e = e->x1 - e->x0;
-
-            if (dy_e == 0) continue;
-
-            /* ix = x0 + dx * (y - y0) / dy */
-            ix = e->x0 + (int)((long)dx_e * (y - e->y0) / dy_e);
-
-            if (n_intersect < VBZ_MAX_INTERSECT) {
-                g_intersect[n_intersect++] = ix;
-            }
-        }
-
-        if (n_intersect < 2) continue;
-
-        /* ソート */
-        sort_intersections(g_intersect, n_intersect);
-
-        /* even-odd rule で塗りつぶし */
-        for (i = 0; i + 1 < n_intersect; i += 2) {
-            int x_start = g_intersect[i];
-            int x_end = g_intersect[i + 1];
-
-            if (x_start < 0) x_start = 0;
-            if (x_end >= 640) x_end = 639;
-            if (x_start <= x_end) {
-                gfx_hline(x_start, y, x_end - x_start + 1, color);
-            }
-        }
     }
 }
 
@@ -342,7 +173,7 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
     int min_y = 400, max_y = 0;
 
     /* エッジテーブルをクリア */
-    edges_clear();
+    gfx_edges_clear(g_et);
 
     /* コマンドをパースしてエッジテーブルを構築 (ビューポート変換適用) */
     for (i = 0; i < num_cmds; i++) {
@@ -362,7 +193,7 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
             i16 ry = (i16)(data[2] | (data[3] << 8));
             int sx = VX(rx), sy = VY(ry);
             data += 4;
-            edge_add(cur_x, cur_y, sx, sy);
+            gfx_edge_add(g_et, cur_x, cur_y, sx, sy);
             if (cur_y < min_y) min_y = cur_y;
             if (cur_y > max_y) max_y = cur_y;
             if (sy < min_y) min_y = sy;
@@ -378,7 +209,7 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
             int sx   = VX((i16)(data[8] | (data[9] << 8)));
             int sy   = VY((i16)(data[10] | (data[11] << 8)));
             data += 12;
-            flatten_bezier3(cur_x, cur_y, scx1, scy1, scx2, scy2, sx, sy, 0);
+            gfx_bezier3_to_edges(g_et, cur_x, cur_y, scx1, scy1, scx2, scy2, sx, sy, 0);
             if (cur_y < min_y) min_y = cur_y;
             if (cur_y > max_y) max_y = cur_y;
             if (scy1 < min_y) min_y = scy1;
@@ -392,7 +223,7 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
         }
         case CMD_CLOSEPATH:
             if (cur_x != start_x || cur_y != start_y) {
-                edge_add(cur_x, cur_y, start_x, start_y);
+                gfx_edge_add(g_et, cur_x, cur_y, start_x, start_y);
                 if (start_y < min_y) min_y = start_y;
                 if (start_y > max_y) max_y = start_y;
             }
@@ -404,8 +235,8 @@ static void draw_path_filled(const u8 *data, int num_cmds, u8 color)
     }
 
     /* スキャンラインフィル */
-    if (g_num_edges > 0) {
-        scanline_fill(color, min_y, max_y);
+    if (g_et->num_edges > 0) {
+        gfx_scanline_fill(g_et, color, min_y, max_y);
     }
 }
 
@@ -565,9 +396,8 @@ void main(int argc, char **argv, KernelAPI *kapi)
                  info.width, info.height, info.num_colors, info.num_paths);
 
     /* エッジテーブル確保 */
-    g_max_edges = VBZ_MAX_EDGES;
-    g_edges = (Edge *)api->mem_alloc(g_max_edges * sizeof(Edge));
-    if (!g_edges) {
+    g_et = gfx_edge_table_create(VBZ_MAX_EDGES, VBZ_MAX_INTERSECT);
+    if (!g_et) {
         api->mem_free(file_data);
         api->kprintf(ATTR_WHITE, "%s", "Error: edge table alloc failed\n");
         return;
@@ -668,7 +498,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
     }
 
     /* 後片付け */
-    api->mem_free(g_edges);
+    gfx_edge_table_free(g_et);
     api->mem_free(file_data);
 
     if (!keep_vram) {
