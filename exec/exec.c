@@ -169,6 +169,33 @@ int exec_run(const char *cmdline)
         sz = fat12_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
     }
 
+    /* フォールバック: パスにスラッシュがない場合、標準ディレクトリを順に検索 */
+    if (sz <= 0) {
+        int has_slash = 0;
+        int pi;
+        for (pi = 0; path[pi]; pi++) {
+            if (path[pi] == '/') { has_slash = 1; break; }
+        }
+        if (!has_slash) {
+            static const char *search_dirs[] = {
+                "/bin/", "/sbin/", "/usr/bin/", (const char *)0
+            };
+            int di;
+            for (di = 0; search_dirs[di]; di++) {
+                char try_path[VFS_MAX_PATH];
+                int tp = 0, dp = 0;
+                while (search_dirs[di][dp] && tp < VFS_MAX_PATH - 2)
+                    try_path[tp++] = search_dirs[di][dp++];
+                dp = 0;
+                while (path[dp] && tp < VFS_MAX_PATH - 1)
+                    try_path[tp++] = path[dp++];
+                try_path[tp] = '\0';
+                sz = vfs_read(try_path, file_buf, max_size + OS32X_HDR_V1_SIZE);
+                if (sz > 0) break;
+            }
+        }
+    }
+
     if (sz <= 0) {
         return EXEC_ERR_NOT_FOUND;
     }

@@ -355,20 +355,41 @@ programs/%.bin: programs/%.raw programs/%.elf
 # NHDイメージのパス
 NHD_DEPLOY = python3 tools/nhd_deploy.py
 
+# ファイル分類
+SBIN_PROGRAMS = programs/install.bin programs/mem.bin programs/crash.bin programs/bench.bin
+USR_BIN_PROGRAMS = programs/vz.bin programs/gfx_demo.bin programs/demo1.bin \
+	programs/ekakiuta.bin programs/vbzview.bin programs/hrview.bin programs/vdpview.bin \
+	programs/spr_test.bin programs/raster.bin programs/skk_test.bin programs/fep_test.bin
+# /bin: 上記以外の全 .bin (shell除く)
+BIN_PROGRAMS = $(filter-out programs/shell.bin $(SBIN_PROGRAMS) $(USR_BIN_PROGRAMS), $(wildcard programs/*.bin))
+
 # deploy: カーネル+プログラム+データをNHDに書き込み → NP21/Wにコピー
 deploy: kernel.bin programs unicode_bin
 	@echo "=== NHD Deploy ==="
+	$(NHD_DEPLOY) setup-dirs
 	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
-	$(NHD_DEPLOY) copy-all programs/
-	$(NHD_DEPLOY) copy unicode.bin
+	$(NHD_DEPLOY) copy --dest / --rename shell programs/shell.bin
+	$(NHD_DEPLOY) copy --dest /bin $(BIN_PROGRAMS)
+	$(NHD_DEPLOY) copy --dest /sbin $(SBIN_PROGRAMS)
+	$(NHD_DEPLOY) copy --dest /usr/bin $(USR_BIN_PROGRAMS)
+	$(NHD_DEPLOY) copy --dest /data unicode.bin
 	$(NHD_DEPLOY) deploy
 
 # dp-<name>: 個別プログラムのビルド → NHDコピー → NP21/Wデプロイ
 # 使い方: make dp-ekakiuta, make dp-shell, make dp-vz 等
 # ※ カーネル変更時は make deploy (全体) を使うこと
+# ファイルの配置先を自動判定
 dp-%: programs/%.bin
 	@echo "=== Deploy: $*.bin ==="
-	$(NHD_DEPLOY) copy programs/$*.bin
+	@if [ "$*" = "shell" ]; then \
+		$(NHD_DEPLOY) copy --dest / --rename shell programs/$*.bin; \
+	elif echo "$(SBIN_PROGRAMS)" | grep -q "programs/$*.bin"; then \
+		$(NHD_DEPLOY) copy --dest /sbin programs/$*.bin; \
+	elif echo "$(USR_BIN_PROGRAMS)" | grep -q "programs/$*.bin"; then \
+		$(NHD_DEPLOY) copy --dest /usr/bin programs/$*.bin; \
+	else \
+		$(NHD_DEPLOY) copy --dest /bin programs/$*.bin; \
+	fi
 	$(NHD_DEPLOY) deploy
 
 # nhd-mount: NHDのext2パーティションをマウント

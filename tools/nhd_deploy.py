@@ -152,18 +152,51 @@ def ensure_mounted():
     return do_mount()
 
 
-def do_copy(src_files):
-    """ファイルをマウント済みext2にコピー (sudo cp)"""
+# === ディレクトリ構造定義 ===
+SYS_DIRS = ['bin', 'sbin', 'usr', 'usr/bin', 'data', 'etc',
+            'home', 'home/user', 'tmp']
+
+
+def do_mkdirs():
+    """ext2上にシステムディレクトリを作成"""
     if not ensure_mounted():
         return False
+    for d in SYS_DIRS:
+        target = os.path.join(MOUNT_POINT, d)
+        if not os.path.exists(target):
+            subprocess.run(['sudo', 'mkdir', '-p', target],
+                           capture_output=True)
+            print("  mkdir /{}".format(d))
+    subprocess.run(['sync'], capture_output=True)
+    print("Done! (system directories created)")
+    return True
+
+
+def do_copy(src_files, dest_dir='/', rename=None):
+    """ファイルをマウント済みext2にコピー (sudo cp)
+
+    dest_dir: コピー先ディレクトリ (例: '/bin', '/usr/bin')
+    rename:   ファイル名を変更 (単一ファイルのみ有効)
+    """
+    if not ensure_mounted():
+        return False
+
+    # コピー先ディレクトリの確保
+    dest_base = os.path.join(MOUNT_POINT, dest_dir.lstrip('/'))
+    if not os.path.exists(dest_base):
+        subprocess.run(['sudo', 'mkdir', '-p', dest_base],
+                       capture_output=True)
 
     copied = 0
     for src in src_files:
         if not os.path.isfile(src):
             print("Warning: {} not found, skipping".format(src))
             continue
-        dest_name = os.path.basename(src)
-        dest_path = os.path.join(MOUNT_POINT, dest_name)
+        if rename and len(src_files) == 1:
+            dest_name = rename
+        else:
+            dest_name = os.path.basename(src)
+        dest_path = os.path.join(dest_base, dest_name)
         result = subprocess.run(
             ['sudo', 'cp', src, dest_path],
             capture_output=True, text=True
@@ -173,7 +206,8 @@ def do_copy(src_files):
                   file=sys.stderr)
             continue
         size = os.path.getsize(src)
-        print("  {} ({} bytes)".format(dest_name, size))
+        disp_dir = dest_dir if dest_dir.endswith('/') else dest_dir + '/'
+        print("  {}{} ({} bytes)".format(disp_dir, dest_name, size))
         copied += 1
 
     if copied > 0:
@@ -185,15 +219,16 @@ def do_copy(src_files):
     return True
 
 
-def do_copy_all(src_dir, ext='.bin'):
+def do_copy_all(src_dir, ext='.bin', dest_dir='/'):
     """ディレクトリ内の全ファイルをコピー"""
     pattern = os.path.join(src_dir, '*{}'.format(ext))
     files = sorted(globmod.glob(pattern))
     if not files:
         print("No {} files found in {}".format(ext, src_dir))
         return False
-    print("=== Batch copy: {} files from {} ===".format(len(files), src_dir))
-    return do_copy(files)
+    print("=== Batch copy: {} files from {} to {} ===".format(
+        len(files), src_dir, dest_dir))
+    return do_copy(files, dest_dir=dest_dir)
 
 
 def do_ls(path='/'):
@@ -380,8 +415,9 @@ def main():
         print("")
         print("  mount                  — ext2パーティションをマウント")
         print("  umount                 — アンマウント")
-        print("  copy <src> [...]       — ファイルをext2にコピー")
-        print("  copy-all <dir> [ext]   — dirの全ファイルを一括コピー")
+        print("  copy [--dest DIR] [--rename NAME] <src> [...] — ファイルをext2にコピー")
+        print("  copy-all [--dest DIR] <dir> [ext]   — dirの全ファイルを一括コピー")
+        print("  setup-dirs             — システムディレクトリを作成")
         print("  ls [path]              — ファイル一覧")
         print("  rm <file>              — ファイル削除")
         print("  deploy                 — umount + NHDをNP21/Wにコピー")
@@ -403,19 +439,48 @@ def main():
     elif cmd == 'umount':
         do_umount()
 
+    elif cmd == 'setup-dirs':
+        do_mkdirs()
+
     elif cmd == 'copy':
-        if len(sys.argv) < 3:
-            print("Usage: copy <src_file> [src_file2 ...]")
+        # --dest DIR と --rename NAME オプションをパース
+        dest_dir = '/'
+        rename = None
+        src_files = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == '--dest' and i + 1 < len(sys.argv):
+                dest_dir = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == '--rename' and i + 1 < len(sys.argv):
+                rename = sys.argv[i + 1]
+                i += 2
+            else:
+                src_files.append(sys.argv[i])
+                i += 1
+        if not src_files:
+            print("Usage: copy [--dest DIR] [--rename NAME] <src_file> [...]")
             return
-        do_copy(sys.argv[2:])
+        do_copy(src_files, dest_dir=dest_dir, rename=rename)
 
     elif cmd == 'copy-all':
-        if len(sys.argv) < 3:
-            print("Usage: copy-all <dir> [extension]")
+        # --dest DIR オプションをパース
+        dest_dir = '/'
+        args = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == '--dest' and i + 1 < len(sys.argv):
+                dest_dir = sys.argv[i + 1]
+                i += 2
+            else:
+                args.append(sys.argv[i])
+                i += 1
+        if not args:
+            print("Usage: copy-all [--dest DIR] <dir> [extension]")
             return
-        src_dir = sys.argv[2]
-        ext = sys.argv[3] if len(sys.argv) > 3 else '.bin'
-        do_copy_all(src_dir, ext)
+        src_dir = args[0]
+        ext = args[1] if len(args) > 1 else '.bin'
+        do_copy_all(src_dir, ext, dest_dir=dest_dir)
 
     elif cmd == 'ls':
         path = sys.argv[2] if len(sys.argv) > 2 else '/'

@@ -10,7 +10,8 @@
 /* ====================================================================== */
 /*  スタートアップ設定                                                       */
 /* ====================================================================== */
-#define SYS_SHELL_BIN         "/shell.bin"     /* システムシェル */
+#define SYS_SHELL_BIN         "/shell"         /* システムシェル */
 #define SYS_AUTOEXEC_BIN      "/autoexec.bin"  /* 自動実行スクリプト */
+#define SYS_UNICODE_BIN       "/data/unicode.bin"  /* Unicodeテーブル */
 
 #endif /* CONFIG_H */
