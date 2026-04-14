@@ -38,7 +38,7 @@ programs/*.c    → gcc -m32                 → programs/*.o
 ### §8-3 ディレクトリ構造
 
 ```
-os32_gcc/
+os32/
 ├── boot/           ブートローダー (16bit/32bit ASM)
 ├── kernel/         カーネルコア・メモリ等・割り込みルーチン群
 ├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, kcg, np2sysp 等)

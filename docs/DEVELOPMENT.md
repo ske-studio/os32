@@ -20,6 +20,13 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **VFS / FAT12 実装**: FAT12のVFSマウントおよびOS32X実行基盤の安定化。
 - **カーネルとシェルの完全分離**: カーネル内に残存していたシェル機能を完全に切り離し、独立したプログラム `shell.bin` として実装・稼働。
 - **メモリマップ全面再構築 (Phase 1-5)**: メモリ不足・配置不整合や sbrk_heap_limit バグを解消するためのレイアウト再編。プログラム空間の動的確保 (exec_heap) およびスタック・境界のガードページ保護 (GUARD A/B) 導入。
+- **FDリダイレクト・パイプ基盤**: カーネル側に `fd_redirect.c` / `pipe_buffer.c` を実装し、シェルから `>`, `>>`, `<`, `|` 演算子をサポート。
+- **環境変数システム**: `env`/`set`/`export`/`unset` コマンド、`$VAR` 展開、`.profile` 自動読み込み。
+- **PATH探索・コマンド実行**: `PATH` 環境変数による複数ディレクトリ探索、コマンド名のみでの外部プログラム実行。
+- **フィルタコマンド群**: grep, wc, head, tail, tee を外部プログラムとして実装。stdin/ファイル両対応でパイプ連携可能。
+- **VBZベクタグラフィックスパイプライン**: Python側 `img2vbz.py` (potraceベースベクタ化) とPC-98側 `vbzview.bin` (整数演算スキャンラインフィル) によるベクタ画像表示。
+- **ラスタパレット効果**: VSYNC+HBLANK同期による走査線単位パレット書き換え。KernelAPI `gfx_present_raster` と libos32gfx ラッパー。
+- **libos32gfx拡張**: ベジェ曲線、円/丸弧描画、整数sin/cos LUT、BMPsave機能、NASM高速ユーティリティ。
 
 ---
 
@@ -111,4 +118,4 @@ GCC環境においても既存コードとの互換性のため `-std=gnu89` を
 
 ---
 
-*OS32 Development Guidelines — Updated: 2026-04-01*
+*OS32 Development Guidelines — Updated: 2026-04-14*

@@ -1,4 +1,4 @@
-# KernelAPI v24 仕様書
+# KernelAPI v25 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **24** |
-| 合計エントリ数 | **108** (データフィールド1 + 関数ポインタ107) |
+| 現在のバージョン | **25** |
+| 合計エントリ数 | **118** (データフィールド1 + 関数ポインタ117) |
 
 ---
 
@@ -50,7 +50,7 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 24) |
+| 0x04 | version | APIバージョン (現在: 25) |
 
 ### データフィールド
 
@@ -169,6 +169,16 @@ make programs
 | 0x1AC | ime_set_mode | `void(int mode)` |
 | 0x1B0 | ime_get_mode | `int(void)` |
 | 0x1B4 | ime_getkey | `int(void)` |
+| 0x1B8 | sys_redirect_fd | `int(int fd, const char *path, int mode)` |
+| 0x1BC | sys_reset_redirect | `void(int fd)` |
+| 0x1C0 | sys_is_redirected | `int(int fd)` |
+| 0x1C4 | sys_pipe_alloc | `int(void)` |
+| 0x1C8 | sys_pipe_free | `void(int id)` |
+| 0x1CC | sys_pipe_get_buf | `u8 *(int id)` |
+| 0x1D0 | sys_pipe_get_len | `u32(int id)` |
+| 0x1D4 | sys_pipe_clear | `void(int id)` |
+| 0x1D8 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
+| 0x1DC | sys_redirect_get_buf_len | `u32(int fd)` |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -188,7 +198,34 @@ v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとに
 - **動作**: dirty rectがあればVRAM転送も行い、なければパレット書き換えのみ
 - **libos32gfx ラッパー**: `gfx_raster_clear()`, `gfx_raster_add()`, `gfx_present_raster_only()`, `gfx_present_with_raster()`
 
+### §4-3 FDリダイレクト・パイプAPI
+
+v25で追加。外部プログラム（シェル）がFD単位の入出力リダイレクトとパイプラインを構築するためのAPI群。
+
+**FDリダイレクト**:
+- `sys_redirect_fd(fd, path, mode)` — 指定FDの出力先をファイルにリダイレクト
+- `sys_reset_redirect(fd)` — リダイレクトを解除しコンソールに復帰
+- `sys_is_redirected(fd)` — FDがリダイレクト中か判定
+- `sys_redirect_fd_buf(fd, buf, size, len)` — FDの出力先をメモリバッファにリダイレクト
+- `sys_redirect_get_buf_len(fd)` — バッファリダイレクト時の書き込み済みバイト数取得
+
+**パイプバッファ**:
+- `sys_pipe_alloc()` — パイプバッファを1個確保 (IDを返す)
+- `sys_pipe_free(id)` — パイプバッファを解放
+- `sys_pipe_get_buf(id)` — パイプバッファのデータポインタ取得
+- `sys_pipe_get_len(id)` — パイプバッファの書き込み済みバイト数取得
+- `sys_pipe_clear(id)` — パイプバッファをクリア
+
+**典型的なパイプ実行フロー** (`cmd1 | cmd2`):
+1. `sys_pipe_alloc()` でパイプ確保
+2. `sys_redirect_fd_buf(1, pipe_buf, size, 0)` でcmd1のstdoutをパイプに接続
+3. cmd1を実行
+4. `sys_reset_redirect(1)` でstdout復帰
+5. `sys_redirect_fd_buf(0, pipe_buf, len, len)` でcmd2のstdinをパイプに接続
+6. cmd2を実行
+7. `sys_reset_redirect(0)` → `sys_pipe_free(id)` でクリーンアップ
+
 ---
 
-*KernelAPI Specification — Version 24*
-*Last Updated: 2026-04-13*
+*KernelAPI Specification — Version 25*
+*Last Updated: 2026-04-14*

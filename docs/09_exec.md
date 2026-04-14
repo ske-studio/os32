@@ -17,7 +17,7 @@ KernelAPIポインタを引数として実行する。
 | ネスト実行 | 非サポート (execve 方式によるプロセスの完全置換。終了時はカーネルに復帰し無名シェルを再起動) |
 | カーネル側規約 | GCC (System V) + `__cdecl` ラッパー |
 | 外部プログラム規約 | System V i386 ABI (スタック渡し) |
-| 現在のAPIバージョン | **24** |
+| 現在のAPIバージョン | **25** |
 | プログラム専用スタック | 動的配置 (128KB, メモリ終端付近から下方に展開) |
 | スタック保護 | GUARD B (Not-Present) ガードページによる保護 |
 
@@ -57,8 +57,14 @@ KernelAPIポインタを引数として実行する。
 | raster | `programs/raster.c` | ラスタパレット効果デモ |
 | hrview | `programs/hrview.c` | 高解像度画像ビューア |
 | vdpview | `programs/vdpview.c` | VDP画像ビューア |
+| vbzview | `programs/vbzview.c` | VBZベクタ画像ビューア |
 | ekakiuta| `programs/ekakiuta.c` | えかきうたアニメーション |
 | bench | `programs/bench/` | ベンチマークプログラム |
 | install | `programs/install.c` | HDDインストーラ |
+| grep | `programs/grep.c` | 行フィルタ (部分文字列マッチ、ファイル/stdin両対応) |
+| wc | `programs/wc.c` | 行/単語/バイトカウント (-l/-w/-c) |
+| head | `programs/head.c` | 先頭N行表示 (デフォルト10行) |
+| tail | `programs/tail.c` | 末尾N行表示 (デフォルト10行) |
+| tee | `programs/tee.c` | stdinをstdout+ファイルに分岐出力 |
 | libc_test| `programs/libc_test.c` | newlib libc動作テスト |
 | test2-4 | `programs/` | APIテスト・システム検証用 |

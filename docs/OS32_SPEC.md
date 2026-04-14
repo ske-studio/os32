@@ -25,10 +25,10 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ファイル | 内容 |
 |---------|------|
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v24 仕様書 — 108エントリテーブル (関数107 + データフィールド1) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v25 仕様書 — 118エントリテーブル (関数117 + データフィールド1) |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 開発ガイドライン — ルール、手順、ロードマップ |
 
 ---
 
-*OS32 Technical Specification — Version 8.0*
-*Last Updated: 2026-04-08*
+*OS32 Technical Specification — Version 8.1*
+*Last Updated: 2026-04-14*

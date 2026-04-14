@@ -81,4 +81,28 @@ ATA PIOモードによるIDE HDD制御。
 | `ide_write_sectors(drv, lba, cnt, buf)` | 複数セクタ連続書込 |
 | `ide_drive_present(drv)` | ドライブ存在チェック |
 
+### §6-4 FDリダイレクト (fd_redirect.c / fd_redirect.h)
+
+VFSのファイルディスクリプタ (FD 0=stdin, 1=stdout) に対して、出力先をファイルまたはメモリバッファに切り替える機構。シェルのリダイレクト (`>`, `>>`, `<`) およびパイプ (`|`) を実現する基盤。
+
+| 関数 | 説明 |
+|------|------|
+| `fd_redirect_to_file(fd, path, mode)` | FDの入出力先をファイルにリダイレクト |
+| `fd_redirect_to_buffer(fd, buf, size, len)` | FDの入出力先をメモリバッファにリダイレクト |
+| `fd_redirect_reset(fd)` | リダイレクトを解除しコンソールに復帰 |
+| `fd_is_redirected(fd)` | FDがリダイレクト中か判定 |
+| `fd_redirect_get_buf_len(fd)` | バッファリダイレクト時の書き込み済みバイト数取得 |
+
+### §6-5 パイプバッファ (pipe_buffer.c / pipe_buffer.h)
+
+コマンド間のデータ受け渡しに使用するカーネル管理のメモリバッファプール。最大同時確保数は `MAX_PIPES` (4)、各バッファサイズは `PIPE_BUF_SIZE` (64KB)。
+
+| 関数 | 説明 |
+|------|------|
+| `pipe_alloc()` | パイプバッファを1個確保 (IDを返す) |
+| `pipe_free(id)` | パイプバッファを解放 |
+| `pipe_get_buf(id)` | パイプバッファのデータポインタ取得 |
+| `pipe_get_len(id)` | 書き込み済みバイト数取得 |
+| `pipe_clear(id)` | パイプバッファをクリア |
+
 ---
