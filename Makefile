@@ -373,7 +373,7 @@ programs/%.bin: programs/%.raw programs/%.elf
 NHD_DEPLOY = python3 tools/nhd_deploy.py
 
 # ファイル分類
-SBIN_PROGRAMS = programs/install.bin programs/mem.bin programs/crash.bin programs/bench.bin
+SBIN_PROGRAMS = programs/install.bin programs/crash.bin programs/bench.bin
 USR_BIN_PROGRAMS = programs/vz.bin programs/gfx_demo.bin programs/demo1.bin \
 	programs/ekakiuta.bin programs/vbzview.bin programs/hrview.bin programs/vdpview.bin \
 	programs/spr_test.bin programs/raster.bin programs/skk_test.bin programs/fep_test.bin

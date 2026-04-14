@@ -55,14 +55,35 @@ static void cmd_ver(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->kprintf(ATTR_GREEN, "%s", "PC-9801 OS32 v0.7 (External Shell Modular)\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  CPU: Intel 386+ (Protected Mode + Paging)\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  PIC: 8259A x2 (remapped to INT 20h+)\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  PIT: 8254 @ 100Hz\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  KBD: uPD8251A (IRQ1)\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  SER: uPD8251A RS-232C (IRQ4)\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  SND: YM2203 (OPN) FM3+SSG3\n");
+    g_api->kprintf(ATTR_CYAN, "%s", "  GFX: 640x400x16 CPU direct\n");
+    g_api->kprintf(ATTR_WHITE, "  API: v%u\n", g_api->version);
 }
+
+static const char *wday_names[] = {
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+};
 
 static void cmd_date(int argc, char **argv)
 {
     RTC_Time_Ext t;
+    const char *w;
     (void)argc; (void)argv;
     g_api->rtc_read(&t);
-    g_api->kprintf(ATTR_WHITE, "20%02d-%02d-%02d %02d:%02d:%02d\n", t.year, t.month, t.day, t.hour, t.min, t.sec);
+    w = (t.wday < 7) ? wday_names[t.wday] : "???";
+    g_api->kprintf(ATTR_WHITE, "20%u%u-%u%u-%u%u %u%u:%u%u:%u%u (%s)\n",
+                   (u32)(t.year / 10), (u32)(t.year % 10),
+                   (u32)(t.month / 10), (u32)(t.month % 10),
+                   (u32)(t.day / 10), (u32)(t.day % 10),
+                   (u32)(t.hour / 10), (u32)(t.hour % 10),
+                   (u32)(t.min / 10), (u32)(t.min % 10),
+                   (u32)(t.sec / 10), (u32)(t.sec % 10),
+                   w);
 }
 
 static void cmd_beep(int argc, char **argv)

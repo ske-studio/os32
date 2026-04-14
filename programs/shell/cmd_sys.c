@@ -22,10 +22,19 @@ static void cmd_mem(int argc, char **argv)
     u32 pmem_kb;
     (void)argc; (void)argv;
     pmem_kb = g_api->sys_get_mem_kb();
-    g_api->kprintf(ATTR_CYAN, "Memory Info:\n  Physical: %u KB (%u MB)\n  Paging:   %s\n  Heap Tot: %u B, Used: %u B, Free: %u B\n",
-                  pmem_kb, pmem_kb / 1024,
-                  g_api->paging_enabled() ? "ENABLED" : "DISABLED",
-                  g_api->kmalloc_total(), g_api->kmalloc_used(), g_api->kmalloc_free());
+    g_api->kprintf(ATTR_CYAN, "%s", "Memory Info:\n");
+    g_api->kprintf(ATTR_WHITE, "  Physical : %u KB (%u MB)\n", pmem_kb, pmem_kb / 1024);
+    g_api->kprintf(ATTR_WHITE, "  Paging   : %s\n",
+                   g_api->paging_enabled() ? "ENABLED" : "DISABLED");
+    g_api->kprintf(ATTR_WHITE, "  Heap Tot : %u B, Used: %u B, Free: %u B\n",
+                   g_api->kmalloc_total(), g_api->kmalloc_used(), g_api->kmalloc_free());
+    g_api->kprintf(ATTR_CYAN, "%s", "Memory Map:\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x00000 - 0x9FFFF  Conventional (640KB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0xA0000 - 0xA3FFF  Text VRAM\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x09000 -          Kernel\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x40000 - 0x6FFFF  Kernel Heap (192KB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x90000 - 0x9FFFC  Stack (64KB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x8F000            Guard page (stack overflow trap)\n");
 }
 
 static void cmd_reboot(int argc, char **argv)
