@@ -24,6 +24,8 @@
 #include "io.h"
 #include "shm.h"
 #include "ime.h"
+#include "fd_redirect.h"
+#include "pipe_buffer.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -556,5 +558,55 @@ int __cdecl wrap_ime_get_mode(void)
 int __cdecl wrap_ime_getkey(void)
 {
     return ime_getkey();
+}
+
+int __cdecl wrap_sys_redirect_fd(int fd, const char *path, int mode)
+{
+    return fd_redirect_to_file(fd, path, mode);
+}
+
+void __cdecl wrap_sys_reset_redirect(int fd)
+{
+    fd_redirect_reset(fd);
+}
+
+int __cdecl wrap_sys_is_redirected(int fd)
+{
+    return fd_is_redirected(fd);
+}
+
+int __cdecl wrap_sys_pipe_alloc(void)
+{
+    return pipe_alloc();
+}
+
+void __cdecl wrap_sys_pipe_free(int id)
+{
+    pipe_free(id);
+}
+
+u8 * __cdecl wrap_sys_pipe_get_buf(int id)
+{
+    return pipe_get_buf(id);
+}
+
+u32 __cdecl wrap_sys_pipe_get_len(int id)
+{
+    return pipe_get_len(id);
+}
+
+void __cdecl wrap_sys_pipe_clear(int id)
+{
+    pipe_clear(id);
+}
+
+int __cdecl wrap_sys_redirect_fd_buf(int fd, u8 *buf, u32 size, u32 len)
+{
+    return fd_redirect_to_buffer(fd, buf, size, len);
+}
+
+u32 __cdecl wrap_sys_redirect_get_buf_len(int fd)
+{
+    return fd_redirect_get_buf_len(fd);
 }
 

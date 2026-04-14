@@ -112,6 +112,16 @@ typedef struct {
     void (__cdecl *ime_set_mode)(int mode);
     int (__cdecl *ime_get_mode)(void);
     int (__cdecl *ime_getkey)(void);
+    int (__cdecl *sys_redirect_fd)(int fd, const char *path, int mode);
+    void (__cdecl *sys_reset_redirect)(int fd);
+    int (__cdecl *sys_is_redirected)(int fd);
+    int (__cdecl *sys_pipe_alloc)(void);
+    void (__cdecl *sys_pipe_free)(int id);
+    u8 * (__cdecl *sys_pipe_get_buf)(int id);
+    u32 (__cdecl *sys_pipe_get_len)(int id);
+    void (__cdecl *sys_pipe_clear)(int id);
+    int (__cdecl *sys_redirect_fd_buf)(int fd, u8 *buf, u32 size, u32 len);
+    u32 (__cdecl *sys_redirect_get_buf_len)(int fd);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

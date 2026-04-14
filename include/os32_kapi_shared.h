@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      24
+#define KAPI_VERSION      25
 
 /* ======================================================================== */
 /*  システム共通制限値 (SSoT)                                                */
@@ -249,6 +249,14 @@ typedef struct {
 #define SEEK_SET    0
 #define SEEK_CUR    1
 #define SEEK_END    2
+
+/* FDリダイレクトモード (sys_redirect_fd()用) */
+#define FD_REDIR_READ      0   /* 読み込み (stdin用) */
+#define FD_REDIR_WRITE     1   /* 書き込み・上書き */
+#define FD_REDIR_APPEND    2   /* 書き込み・追記 */
+
+/* パイプバッファの容量 */
+#define PIPE_BUF_SIZE   (64 * 1024)
 
 /* 自動生成された APIテーブルを、全ての構造体が定義された後でインクルード */
 #include "os32_kapi_generated.h"

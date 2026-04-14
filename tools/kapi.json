@@ -1,5 +1,5 @@
 {
-  "version": 24,
+  "version": 25,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -31,7 +31,9 @@
     "kprintf.h",
     "io.h",
     "shm.h",
-    "ime.h"
+    "ime.h",
+    "fd_redirect.h",
+    "pipe_buffer.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -801,6 +803,89 @@
       "name": "ime_getkey",
       "ret": "int",
       "args": []
+    },
+    {
+      "name": "sys_redirect_fd",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "const char *path",
+        "int mode"
+      ],
+      "target": "fd_redirect_to_file"
+    },
+    {
+      "name": "sys_reset_redirect",
+      "ret": "void",
+      "args": [
+        "int fd"
+      ],
+      "target": "fd_redirect_reset"
+    },
+    {
+      "name": "sys_is_redirected",
+      "ret": "int",
+      "args": [
+        "int fd"
+      ],
+      "target": "fd_is_redirected"
+    },
+    {
+      "name": "sys_pipe_alloc",
+      "ret": "int",
+      "args": [],
+      "target": "pipe_alloc"
+    },
+    {
+      "name": "sys_pipe_free",
+      "ret": "void",
+      "args": [
+        "int id"
+      ],
+      "target": "pipe_free"
+    },
+    {
+      "name": "sys_pipe_get_buf",
+      "ret": "u8 *",
+      "args": [
+        "int id"
+      ],
+      "target": "pipe_get_buf"
+    },
+    {
+      "name": "sys_pipe_get_len",
+      "ret": "u32",
+      "args": [
+        "int id"
+      ],
+      "target": "pipe_get_len"
+    },
+    {
+      "name": "sys_pipe_clear",
+      "ret": "void",
+      "args": [
+        "int id"
+      ],
+      "target": "pipe_clear"
+    },
+    {
+      "name": "sys_redirect_fd_buf",
+      "ret": "int",
+      "args": [
+        "int fd",
+        "u8 *buf",
+        "u32 size",
+        "u32 len"
+      ],
+      "target": "fd_redirect_to_buffer"
+    },
+    {
+      "name": "sys_redirect_get_buf_len",
+      "ret": "u32",
+      "args": [
+        "int fd"
+      ],
+      "target": "fd_redirect_get_buf_len"
     }
   ]
 }
