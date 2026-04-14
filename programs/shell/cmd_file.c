@@ -1,5 +1,6 @@
 #include "cmd_fs_shared.h"
 #include "shell.h"
+#include <stdio.h>
 
 static const char* skip_space(const char *s) {
     while (*s == ' ') s++;
@@ -34,16 +35,32 @@ static void vfs_ls_cb(const DirEntry_Ext *entry, void *ctx)
     
     if (use_long) {
         if (entry->type == 2) { /* DIR */
-            g_api->kprintf(ATTR_CYAN, "d      <DIR> %s\n", entry->name);
+            if (g_api->sys_isatty(1)) {
+                g_api->kprintf(ATTR_CYAN, "d      <DIR> %s\n", entry->name);
+            } else {
+                printf("d      <DIR> %s\n", entry->name);
+            }
         } else {
             format_size(entry->size, size_buf, 10);
-            g_api->kprintf(ATTR_WHITE, "- %s %s\n", size_buf, entry->name);
+            if (g_api->sys_isatty(1)) {
+                g_api->kprintf(ATTR_WHITE, "- %s %s\n", size_buf, entry->name);
+            } else {
+                printf("- %s %s\n", size_buf, entry->name);
+            }
         }
     } else {
         if (entry->type == 2) {
-            g_api->kprintf(ATTR_CYAN, "%s/  ", entry->name);
+            if (g_api->sys_isatty(1)) {
+                g_api->kprintf(ATTR_CYAN, "%s/  ", entry->name);
+            } else {
+                printf("%s/  ", entry->name);
+            }
         } else {
-            g_api->kprintf(ATTR_WHITE, "%s  ", entry->name);
+            if (g_api->sys_isatty(1)) {
+                g_api->kprintf(ATTR_WHITE, "%s  ", entry->name);
+            } else {
+                printf("%s  ", entry->name);
+            }
         }
     }
 }
@@ -203,45 +220,14 @@ static void cmd_cat2(int argc, char **argv)
 
 static void cmd_echo(int argc, char **argv)
 {
-    int i, redir = 0;
-    const char *outfile = 0;
-    
+    int i;
     for (i = 1; i < argc; i++) {
-        if (argv[i][0] == '>' && argv[i][1] == '\0') {
-            redir = i;
-            if (i + 1 < argc) outfile = argv[i+1];
-            break;
-        } else if (argv[i][0] == '>' && argv[i][1] != '\0') {
-            redir = i;
-            outfile = &argv[i][1];
-            break;
-        }
+        int l = 0;
+        while (argv[i][l]) l++;
+        g_api->sys_write(1, argv[i], l);
+        if (i < argc - 1) g_api->sys_write(1, " ", 1);
     }
-    
-    if (redir) {
-        char t[PATH_MAX_LEN]; int tpos = 0;
-        if (!outfile) { g_api->kprintf(ATTR_RED, "%s", "echo: missing redirect target\n"); return; }
-        for (i = 1; i < redir; i++) {
-            const char* s = argv[i];
-            while (*s && tpos < PATH_MAX_LEN - 3) t[tpos++] = *s++;
-            if (i < redir - 1 && tpos < PATH_MAX_LEN - 3) t[tpos++] = ' ';
-        }
-        t[tpos++] = '\n'; t[tpos] = '\0';
-        {
-            int fd = g_api->sys_open(outfile, 1 | 0x0100 | 0x0200);
-            if (fd >= 0) {
-                g_api->sys_write(fd, t, tpos);
-                g_api->sys_close(fd);
-            }
-        }
-    } else {
-        for (i = 1; i < argc; i++) {
-            int l = 0; while (argv[i][l]) l++;
-            g_api->sys_write(1, argv[i], l);
-            if (i < argc - 1) g_api->sys_write(1, " ", 1);
-        }
-        g_api->sys_write(1, "\n", 1);
-    }
+    g_api->sys_write(1, "\n", 1);
 }
 
 static const ShellCmd file_cmds[] = {

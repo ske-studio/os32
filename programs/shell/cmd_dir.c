@@ -1,5 +1,6 @@
 #include "cmd_fs_shared.h"
 #include "shell.h"
+#include <stdio.h>
 
 static const char* skip_space(const char *s) {
     while (*s == ' ') s++;
@@ -58,19 +59,27 @@ struct ls_opts {
 static void vfs_ls_cb(const DirEntry_Ext *entry, void *ctx)
 {
     struct ls_opts *opts = (struct ls_opts *)ctx;
+    int is_tty = g_api->sys_isatty(1);
     if (entry->name[0] == '.' && (entry->name[1]=='\0' || (entry->name[1]=='.' && entry->name[2]=='\0'))) return;
 
     if (opts->format_long) {
         char size_buf[16];
         if (entry->type == 2) {
-            g_api->kprintf(ATTR_CYAN, "  <DIR>    DIR   %s\n", entry->name);
+            if (is_tty) g_api->kprintf(ATTR_CYAN, "  <DIR>    DIR   %s\n", entry->name);
+            else printf("  <DIR>    DIR   %s\n", entry->name);
         } else {
             format_size(entry->size, size_buf, 10);
-            g_api->kprintf(ATTR_WHITE, "  %s B  FILE  %s\n", size_buf, entry->name);
+            if (is_tty) g_api->kprintf(ATTR_WHITE, "  %s B  FILE  %s\n", size_buf, entry->name);
+            else printf("  %s B  FILE  %s\n", size_buf, entry->name);
         }
     } else {
-        if (entry->type == 2) g_api->kprintf(ATTR_CYAN, "%s/  ", entry->name);
-        else g_api->kprintf(ATTR_WHITE, "%s  ", entry->name);
+        if (entry->type == 2) {
+            if (is_tty) g_api->kprintf(ATTR_CYAN, "%s/  ", entry->name);
+            else printf("%s/\n", entry->name);
+        } else {
+            if (is_tty) g_api->kprintf(ATTR_WHITE, "%s  ", entry->name);
+            else printf("%s\n", entry->name);
+        }
     }
 }
 
@@ -79,6 +88,7 @@ static void cmd_ls(int argc, char **argv)
     struct ls_opts opts;
     int i;
     int path_idx_start = 1;
+    int is_tty = g_api->sys_isatty(1);
 
     opts.format_long = 0;
 
@@ -88,20 +98,29 @@ static void cmd_ls(int argc, char **argv)
     }
 
     if (path_idx_start >= argc) {
-        if (opts.format_long) g_api->kprintf(ATTR_WHITE, "%s", "  SIZE     TYPE  NAME\n");
+        if (opts.format_long) {
+            if (is_tty) g_api->kprintf(ATTR_WHITE, "%s", "  SIZE     TYPE  NAME\n");
+            else printf("%s", "  SIZE     TYPE  NAME\n");
+        }
         g_api->sys_ls(".", vfs_ls_cb, &opts);
-        if (!opts.format_long) g_api->kprintf(ATTR_WHITE, "%s", "\n");
+        if (!opts.format_long) printf("\n");
     } else {
         for (i = path_idx_start; i < argc; i++) {
             if (is_dir(argv[i])) {
-                if (argc - path_idx_start > 1) g_api->kprintf(ATTR_CYAN, "\n%s:\n", argv[i]);
-                if (opts.format_long) g_api->kprintf(ATTR_WHITE, "%s", "  SIZE     TYPE  NAME\n");
+                if (argc - path_idx_start > 1) {
+                    if (is_tty) g_api->kprintf(ATTR_CYAN, "\n%s:\n", argv[i]);
+                    else printf("\n%s:\n", argv[i]);
+                }
+                if (opts.format_long) {
+                    if (is_tty) g_api->kprintf(ATTR_WHITE, "%s", "  SIZE     TYPE  NAME\n");
+                    else printf("%s", "  SIZE     TYPE  NAME\n");
+                }
                 g_api->sys_ls(argv[i], vfs_ls_cb, &opts);
-                if (!opts.format_long) g_api->kprintf(ATTR_WHITE, "%s", "\n");
+                if (!opts.format_long) printf("\n");
             } else {
-                if (opts.format_long) g_api->kprintf(ATTR_WHITE, "  ????     FILE  %s\n", argv[i]);
-                else g_api->kprintf(ATTR_WHITE, "%s  ", argv[i]);
-                if (!opts.format_long && i == argc - 1) g_api->kprintf(ATTR_WHITE, "%s", "\n");
+                if (opts.format_long) printf("  ????     FILE  %s\n", argv[i]);
+                else printf("%s  ", argv[i]);
+                if (!opts.format_long && i == argc - 1) printf("\n");
             }
         }
     }
@@ -131,7 +150,7 @@ static void cmd_pwd(int argc, char **argv)
     const char *cwd;
     (void)argc; (void)argv;
     cwd = g_api->sys_getcwd();
-    g_api->kprintf(ATTR_WHITE, "%s\n", cwd ? cwd : "/");
+    printf("%s\n", cwd ? cwd : "/");
 }
 
 static void cmd_mkdir(int argc, char **argv)
