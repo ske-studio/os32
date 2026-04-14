@@ -112,15 +112,17 @@ static void cmd_ls(int argc, char **argv)
 static void cmd_cd(int argc, char **argv)
 {
     int rc;
+    const char *target;
     if (argc < 2) {
-        /* 引数なし: カレントディレクトリを表示 */
-        const char *cwd = g_api->sys_getcwd();
-        g_api->kprintf(ATTR_WHITE, "%s\n", cwd ? cwd : "/");
-        return;
+        /* 引数なし: ホームディレクトリに移動 */
+        target = env_get("HOME");
+        if (!target) target = "/";
+    } else {
+        target = argv[1];
     }
-    rc = g_api->sys_chdir(argv[1]);
+    rc = g_api->sys_chdir(target);
     if (rc != 0) {
-        g_api->kprintf(ATTR_RED, "cd: %s: not found (%d)\n", argv[1], rc);
+        g_api->kprintf(ATTR_RED, "cd: %s: not found (%d)\n", target, rc);
     }
 }
 
