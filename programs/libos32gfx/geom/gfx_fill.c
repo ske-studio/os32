@@ -14,6 +14,9 @@
 /* ベジェ平坦化の最大深度 */
 #define FLATTEN_MAX_DEPTH 10
 
+/* Phase 4b: scanline_fill からasm_gfx_hline を直接呼び出す (dirty rect省略版) */
+extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+
 /* ======================================================================== */
 /*  エッジテーブル操作                                                      */
 /* ======================================================================== */
@@ -185,17 +188,40 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
     int y, i;
     int edge_idx;       /* 次にAETに投入するエッジのインデックス */
     int aet_count;      /* AET内の有効エントリ数 */
+    int base;           /* y * pitch (事前計算) */
     AET_Entry aet[AET_MAX];
 
     if (!et || et->num_edges == 0) return;
     if (min_y < 0) min_y = 0;
     if (max_y >= 400) max_y = 399;
 
+    /* Phase 4a: dirty rect をバウンディングボックスで1回だけ事前登録 */
+    /* (インナーループでの gfx_add_dirty_rect 呼び出しを排除) */
+    {
+        int gmin_x = 640, gmax_x = 0;
+        for (i = 0; i < et->num_edges; i++) {
+            int ex0 = et->edges[i].x0;
+            int ex1 = et->edges[i].x1;
+            if (ex0 < gmin_x) gmin_x = ex0;
+            if (ex1 < gmin_x) gmin_x = ex1;
+            if (ex0 > gmax_x) gmax_x = ex0;
+            if (ex1 > gmax_x) gmax_x = ex1;
+        }
+        if (gmin_x < 0) gmin_x = 0;
+        if (gmax_x >= 640) gmax_x = 639;
+        if (gmin_x <= gmax_x) {
+            gfx_api->gfx_add_dirty_rect(gmin_x & ~31, min_y,
+                ((gmax_x + 32) & ~31) - (gmin_x & ~31),
+                max_y - min_y + 1);
+        }
+    }
+
     /* エッジをy0でソート (DDA/AET管理の前提) */
     sort_edges_by_y0(et->edges, et->num_edges);
 
     edge_idx = 0;
     aet_count = 0;
+    base = min_y * gfx_fb.pitch;
 
     for (y = min_y; y <= max_y; y++) {
         int n_intersect;
@@ -237,6 +263,7 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
             for (i = 0; i < aet_count; i++) {
                 aet[i].x_fixed += aet[i].dx_fixed;
             }
+            base += gfx_fb.pitch;
             continue;
         }
 
@@ -246,10 +273,18 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
             et->intersect_buf[n_intersect++] = aet[i].x_fixed >> 16;
         }
 
-        /* 4. ソート */
-        sort_intersections(et->intersect_buf, n_intersect);
+        /* 4. ソート (Phase 4c: 交差点2個の場合はスワップのみ) */
+        if (n_intersect > 2) {
+            sort_intersections(et->intersect_buf, n_intersect);
+        } else if (n_intersect == 2 &&
+                   et->intersect_buf[0] > et->intersect_buf[1]) {
+            int tmp = et->intersect_buf[0];
+            et->intersect_buf[0] = et->intersect_buf[1];
+            et->intersect_buf[1] = tmp;
+        }
 
         /* 5. even-odd rule で塗りつぶし */
+        /* Phase 4b: asm_gfx_hline を直接呼び出し (dirty rectは事前登録済み) */
         for (i = 0; i + 1 < n_intersect; i += 2) {
             int x_start = et->intersect_buf[i];
             int x_end = et->intersect_buf[i + 1];
@@ -257,7 +292,7 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
             if (x_start < 0) x_start = 0;
             if (x_end >= 640) x_end = 639;
             if (x_start <= x_end) {
-                gfx_hline(x_start, y, x_end - x_start + 1, color);
+                asm_gfx_hline(gfx_fb.planes, base, x_start, x_end, color);
             }
         }
 
@@ -265,5 +300,6 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
         for (i = 0; i < aet_count; i++) {
             aet[i].x_fixed += aet[i].dx_fixed;
         }
+        base += gfx_fb.pitch;
     }
 }

@@ -64,6 +64,7 @@ static KernelAPI *api;
 /* 工程別プロファイリング累計 */
 static u32 g_prof_edge;
 static u32 g_prof_fill;
+static u32 g_prof_present;
 static u32 g_prof_total_edges;
 
 /* ---- ビューポート (ズーム/パン) ---- */
@@ -266,6 +267,7 @@ static void render_paths(const u8 *file_data, int file_size,
     t0 = api->get_tick();
     g_prof_edge = 0;
     g_prof_fill = 0;
+    g_prof_present = 0;
     g_prof_total_edges = 0;
 
     /* 背景クリア */
@@ -321,20 +323,26 @@ done_skip:
 
         /* 64パスごとに画面更新 (進捗表示) */
         if ((path_idx & 63) == 63) {
+            u32 tp_pr = api->get_tick();
             gfx_present();
             api->gfx_present_dirty();
+            g_prof_present += api->get_tick() - tp_pr;
         }
     }
 
-    gfx_present();
-    api->gfx_present_dirty();
+    {
+        u32 tp_pr = api->get_tick();
+        gfx_present();
+        api->gfx_present_dirty();
+        g_prof_present += api->get_tick() - tp_pr;
+    }
 
     t1 = api->get_tick();
     api->kprintf(ATTR_WHITE, "Render: %d paths, %d ticks (%d ms)\n",
                  info->num_paths, t1 - t0, (t1 - t0) * 10);
-    api->kprintf(ATTR_WHITE, "  Edge: %d ticks, Fill: %d ticks, Other: %d ticks\n",
-                 g_prof_edge, g_prof_fill,
-                 (t1 - t0) - g_prof_edge - g_prof_fill);
+    api->kprintf(ATTR_WHITE, "  Edge: %d, Fill: %d, Present: %d, Other: %d\n",
+                 g_prof_edge, g_prof_fill, g_prof_present,
+                 (t1 - t0) - g_prof_edge - g_prof_fill - g_prof_present);
     api->kprintf(ATTR_WHITE, "  Total edges: %d (avg %d/path)\n",
                  g_prof_total_edges,
                  info->num_paths ? (int)(g_prof_total_edges / info->num_paths) : 0);

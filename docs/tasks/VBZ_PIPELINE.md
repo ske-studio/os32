@@ -59,60 +59,48 @@ Edge構造体・交差点バッファが `i16` のままで、ズーム時にオ
 
 ---
 
-## Phase 4: gfx_draw.c 調査・最適化 → 未着手
+## Phase 4: scanline_fill 最適化 → ✅ 完了
 
-### 目的
-スキャンラインフィルの最大ボトルネックは `gfx_hline()` 呼び出し。
-現在のC実装を調査し、ASM最適化の価値を判断する。
+### 問題
+`gfx_scanline_fill()` のホットパスで、毎走査線 `gfx_hline()` 経由で
+`gfx_add_dirty_rect()` KAPI間接呼び出しが約14万回発生し、オーバーヘッドが支配的だった。
 
-### タスク
-- [ ] `gfx_draw.c` の `gfx_hline()` 実装を精査
-  - 4プレーン×バイトマスク処理のループ構造
-  - 先頭/末尾バイトのビットマスク処理
-  - 中間バイトの一括書き込み方式
-- [ ] プロファイリング: 7000パス画像の描画時間計測
-- [ ] ASM化 `asm_gfx_hline()` の実装判断
-  - `rep stosd` による中間バイト高速fill
-  - 先頭/末尾ビットマスクのレジスタ操作
-  - `gfx_util.asm` に追加
-
-### 期待効果
-- 描画速度2〜4倍改善の可能性 (7000パス画像の再レンダリング高速化)
-- ズーム/パン操作のレスポンス向上
+### 実施内容
+- [x] **dirty rect 一括登録化**: バウンディングボックスで `gfx_add_dirty_rect()` を1回だけ事前登録
+  - KAPI間接呼び出し: 14万回 → 最大7000回
+- [x] **`asm_gfx_hline()` 直接呼び出し**: `gfx_hline()` のC関数ラッパーをバイパス
+  - Y境界チェック、dirty rect登録、関数呼び出しオーバーヘッドを削除
+  - `y * pitch` の乗算もループ外で事前計算し加算で更新
+- [x] **交差点ソート省略**: n==2 の場合 (99%のケース) はスワップのみ
+- [x] **プロファイリング拡張**: Edge/Fill/Present/Other の4分割出力
 
 ---
 
-## Phase 5: libos32gfx 分離 → 未着手
+## Phase 5: libos32gfx 分離 → ✅ 完了 (Phase 5-D で達成)
 
-### 目的
-vbzview.c にインライン化されている汎用グラフィクス処理を
-libos32gfx に移動し、他プログラムからも再利用可能にする。
+### 概要
+vbzview.c にインライン化されていたスキャンラインフィルエンジンを
+`programs/libos32gfx/geom/gfx_fill.c` に移動済み。
 
-### 前提
-Phase 4 (gfx_draw.c 調査) 完了後に実施。hline の最適化方針が
-スキャンラインフィルのAPIデザインに影響するため。
-
-### タスク
-- [ ] `gfx_fill.c` (新規) にスキャンラインフィルを移動
-  - Edge構造体
-  - `gfx_edges_init()` / `gfx_edges_clear()` / `gfx_edge_add()`
-  - `gfx_scanline_fill()`
-  - `gfx_sort_intersections()` (内部関数)
-- [ ] `gfx_bezier.c` にベジェ平坦化→エッジ変換を追加
-  - コールバック方式: `gfx_line` か `edge_add` かを切替可能に
-  - 既存の `gfx_bezier3()` (描画) と `flatten_bezier3()` (エッジ) を統合
-- [ ] `libos32gfx.h` にAPI宣言追加
-- [ ] `vbzview.c` をライブラリ呼び出しにリファクタリング
-- [ ] Makefile 更新
+### 完了済み API
+- [x] `GFX_EdgeTable` 構造体 + `gfx_edge_table_create()` / `gfx_edge_table_free()`
+- [x] `gfx_edges_clear()` / `gfx_edge_add()`
+- [x] `gfx_bezier3_to_edges()` (de Casteljau 平坦化)
+- [x] `gfx_scanline_fill()` (DDA + AET, even-odd rule)
+- [x] `libos32gfx.h` にAPI宣言追加済み
+- [x] `vbzview.c` はライブラリAPIのみ使用
 
 ---
 
-## Phase 6: 変換ツール追加改善 → 未着手
+## Phase 6: 変換ツール追加改善
 
-### タスク候補
+### 完了済み
+- [x] **Floyd-Steinbergディザリング** (`--dither`)
+- [x] **`--crop` オプション**: 入力画像の領域切り出し
+- [x] **`-t` (turdsize) オプション**: ノイズ除去
+
+### 未着手タスク
 - [ ] 無彩色グループへの過剰配分防止 (犬画像で無彩色11スロット問題)
   - 各グループの上限キャップ (例: num_colors/2)
   - 無彩色の明度ヒストグラムに基づく適正スロット数算出
-- [ ] `--dither` オプション: 誤差拡散ディザリングで主観的色数を増加
-- [ ] `--crop` オプション: 入力画像の領域切り出し (部分変換)
 - [ ] パス簡略化の改善: `--epsilon` と Potrace `-t` パラメータの自動調整
