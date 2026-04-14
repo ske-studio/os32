@@ -470,16 +470,6 @@ void __cdecl wrap_gfx_get_palette(int idx, u8 *r, u8 *g, u8 *b)
     palette_get(idx, r, g, b);
 }
 
-void* __cdecl wrap_sys_memcpy(void *dst, const void *src, u32 n)
-{
-    return kmemcpy(dst, src, n);
-}
-
-void* __cdecl wrap_sys_memset(void *dst, int val, u32 n)
-{
-    return kmemset(dst, val, n);
-}
-
 void __cdecl wrap_gfx_get_framebuffer(void *fb)
 {
     gfx_get_framebuffer(fb);

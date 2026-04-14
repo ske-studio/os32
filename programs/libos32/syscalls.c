@@ -148,22 +148,5 @@ void * _sbrk(int incr) {
 }
 void * sbrk(int incr) ALIAS(_sbrk);
 
-/*
- * ==== 最適化メモリ関数の libc 優先フック ====
- * 外部プログラム (newlib) が memcpy や memset を呼んだ際、
- * libc.a の遅い実装ではなく、カーネルのKAPI（アセンブリ実装）に強制的に向ける。
- */
-void *memcpy(void *dst, const void *src, u32 n) {
-    if (!kapi) return dst; /* 初期化前はスキップ (CRT0内部等で呼ばれた場合) */
-    return kapi->sys_memcpy(dst, src, n);
-}
-
-void *memset(void *dst, int val, u32 n) {
-    if (!kapi) {
-        /* CRT0 内部等での初期化用に簡易フォールバック */
-        char *d = (char *)dst;
-        while (n--) *d++ = val;
-        return dst;
-    }
-    return kapi->sys_memset(dst, val, n);
-}
+/* memcpy/memset は newlib (libc.a) の実装をそのまま使用する。
+ * 全外部プログラムは -lc でリンクされるため、カーネルへの迂回は不要。 */

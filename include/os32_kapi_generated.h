@@ -94,8 +94,6 @@ typedef struct {
     int (__cdecl *sys_fstat)(int fd, OS32_Stat *buf);
     void (__cdecl *gfx_set_palette)(int idx, u8 r, u8 g, u8 b);
     void (__cdecl *gfx_get_palette)(int idx, u8 *r, u8 *g, u8 *b);
-    void* (__cdecl *sys_memcpy)(void *dst, const void *src, u32 n);
-    void* (__cdecl *sys_memset)(void *dst, int val, u32 n);
     void (__cdecl *gfx_get_framebuffer)(void *fb);
     void (__cdecl *gfx_add_dirty_rect)(int x, int y, int w, int h);
     void (__cdecl *gfx_present_dirty)(void);

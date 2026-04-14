@@ -678,26 +678,7 @@
       "target": "palette_get"
     },
     {
-      "name": "sys_memcpy",
-      "ret": "void*",
-      "args": [
-        "void *dst",
-        "const void *src",
-        "u32 n"
-      ],
-      "target": "kmemcpy"
-    },
-    {
-      "name": "sys_memset",
-      "ret": "void*",
-      "args": [
-        "void *dst",
-        "int val",
-        "u32 n"
-      ],
-      "target": "kmemset"
-    },
-    {
+
       "name": "gfx_get_framebuffer",
       "ret": "void",
       "args": [
