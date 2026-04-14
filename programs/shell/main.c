@@ -364,12 +364,132 @@ static void run_cmd_internal(int argc, char **argv) {
 }
 
 /* ======================================================================== */
-/*  コマンド実行エンジン                                                    */
+/*  リダイレクト演算子の解析・適用                                           */
+/*                                                                          */
+/*  argv配列からリダイレクト演算子を検出し、カーネルFDリダイレクトを設定。    */
+/*  検出した演算子とそのオペランドをargvから除去して残りのargcを返す。        */
+/*                                                                          */
+/*  対応構文:                                                               */
+/*    cmd > file     stdout を file に上書き                                */
+/*    cmd >> file    stdout を file に追記                                  */
+/*    cmd < file     stdin を file から読み込み                             */
+/*    cmd 2> file    stderr を file に書き込み                              */
+/*    cmd > file 2>&1   stdout+stderr を file に                           */
 /* ======================================================================== */
-void execute_command(const char *cmd)
+static int apply_redirects(int argc, char **argv)
+{
+    int i, out_idx;
+    int new_argc = 0;
+    char *new_argv[MAX_ARGS];
+
+    for (i = 0; i < argc; i++) {
+        /* ">>" 追記リダイレクト */
+        if (argv[i][0] == '>' && argv[i][1] == '>') {
+            const char *target;
+            if (argv[i][2] != '\0') {
+                /* ">>file" (スペースなし) */
+                target = &argv[i][2];
+            } else if (i + 1 < argc) {
+                /* ">> file" */
+                target = argv[++i];
+            } else {
+                g_api->kprintf(ATTR_RED, "%s", "syntax error: missing redirect target\n");
+                return -1;
+            }
+            if (g_api->sys_redirect_fd(1, target, FD_REDIR_APPEND) < 0) {
+                g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
+                return -1;
+            }
+            continue;
+        }
+
+        /* ">" 出力リダイレクト (上書き) */
+        if (argv[i][0] == '>' && argv[i][1] != '>') {
+            const char *target;
+            if (argv[i][1] != '\0') {
+                target = &argv[i][1];
+            } else if (i + 1 < argc) {
+                target = argv[++i];
+            } else {
+                g_api->kprintf(ATTR_RED, "%s", "syntax error: missing redirect target\n");
+                return -1;
+            }
+            if (g_api->sys_redirect_fd(1, target, FD_REDIR_WRITE) < 0) {
+                g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
+                return -1;
+            }
+            continue;
+        }
+
+        /* "<" 入力リダイレクト */
+        if (argv[i][0] == '<') {
+            const char *target;
+            if (argv[i][1] != '\0') {
+                target = &argv[i][1];
+            } else if (i + 1 < argc) {
+                target = argv[++i];
+            } else {
+                g_api->kprintf(ATTR_RED, "%s", "syntax error: missing redirect target\n");
+                return -1;
+            }
+            if (g_api->sys_redirect_fd(0, target, FD_REDIR_READ) < 0) {
+                g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
+                return -1;
+            }
+            continue;
+        }
+
+        /* "2>" stderr リダイレクト */
+        if (argv[i][0] == '2' && argv[i][1] == '>') {
+            const char *target;
+            /* "2>&1" — stderr を stdout と同じ先に */
+            if (argv[i][2] == '&' && argv[i][3] == '1') {
+                /* stdout がリダイレクト済みなら stderr も同じファイルに */
+                /* 簡易実装: 2>&1 は無視 (stdout と stderr は同じコンソール) */
+                continue;
+            }
+            if (argv[i][2] != '\0') {
+                target = &argv[i][2];
+            } else if (i + 1 < argc) {
+                target = argv[++i];
+            } else {
+                g_api->kprintf(ATTR_RED, "%s", "syntax error: missing redirect target\n");
+                return -1;
+            }
+            if (g_api->sys_redirect_fd(2, target, FD_REDIR_WRITE) < 0) {
+                g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
+                return -1;
+            }
+            continue;
+        }
+
+        /* 通常の引数 — 保持 */
+        new_argv[new_argc++] = argv[i];
+    }
+
+    /* リダイレクト演算子を除去した argv を再構築 */
+    for (out_idx = 0; out_idx < new_argc; out_idx++) {
+        argv[out_idx] = new_argv[out_idx];
+    }
+    argv[new_argc] = (char *)0;
+
+    return new_argc;
+}
+
+/* リダイレクト状態のリセット */
+static void reset_all_redirects(void)
+{
+    g_api->sys_reset_redirect(0);
+    g_api->sys_reset_redirect(1);
+    g_api->sys_reset_redirect(2);
+}
+
+/* ======================================================================== */
+/*  コマンド実行エンジン (単一コマンド)                                       */
+/* ======================================================================== */
+static void execute_single(const char *cmd)
 {
     char tmp_buf[CMD_BUF_SIZE];
-    char expanded_buf[CMD_BUF_SIZE];
     char *argv[MAX_ARGS];
     char *allocated_strings[MAX_ARGS];
     int alloc_count = 0;
@@ -379,10 +499,7 @@ void execute_command(const char *cmd)
 
     if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
 
-    /* $VAR / ~ 展開 */
-    env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
-    src = expanded_buf;
-
+    src = cmd;
     p = tmp_buf;
     while (*src) { *p++ = *src++; }
     *p = '\0';
@@ -390,10 +507,135 @@ void execute_command(const char *cmd)
     parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS, allocated_strings, &alloc_count);
     
     if (argc > 0) {
-        run_cmd_internal(argc, argv);
+        /* リダイレクト演算子の解析・適用 */
+        argc = apply_redirects(argc, argv);
+        if (argc > 0) {
+            run_cmd_internal(argc, argv);
+        }
     }
     
     for (j = 0; j < alloc_count; j++) {
         g_api->mem_free(allocated_strings[j]);
+    }
+}
+
+/* ======================================================================== */
+/*  パイプライン実行エンジン                                                 */
+/*                                                                          */
+/*  "cmd1 | cmd2 | cmd3" をシーケンシャルに実行:                              */
+/*    1. cmd1 の stdout → パイプバッファA に蓄積                             */
+/*    2. cmd2 の stdin ← バッファA, stdout → パイプバッファB に蓄積          */
+/*    3. cmd3 の stdin ← バッファB, stdout → コンソール                      */
+/* ======================================================================== */
+#define MAX_PIPE_STAGES 8
+
+static int split_pipeline(const char *cmd, char segments[][CMD_BUF_SIZE], int max_stages)
+{
+    int count = 0;
+    int pos = 0;
+    const char *p = cmd;
+
+    while (*p && count < max_stages) {
+        /* 先頭の空白をスキップ */
+        while (*p == ' ') p++;
+        pos = 0;
+        while (*p && *p != '|') {
+            if (pos < CMD_BUF_SIZE - 1) {
+                segments[count][pos++] = *p;
+            }
+            p++;
+        }
+        /* 末尾の空白をトリム */
+        while (pos > 0 && segments[count][pos - 1] == ' ') pos--;
+        segments[count][pos] = '\0';
+        if (pos > 0) count++;
+        if (*p == '|') p++;
+    }
+    return count;
+}
+
+/* ======================================================================== */
+/*  公開API: execute_command                                                 */
+/* ======================================================================== */
+void execute_command(const char *cmd)
+{
+    char expanded_buf[CMD_BUF_SIZE];
+    const char *src;
+    int has_pipe = 0;
+
+    if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
+
+    /* $VAR / ~ 展開 */
+    env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
+    src = expanded_buf;
+
+    /* パイプの有無を判定 */
+    {
+        const char *c = src;
+        while (*c) { if (*c == '|') { has_pipe = 1; break; } c++; }
+    }
+
+    if (!has_pipe) {
+        /* パイプなし: 単一コマンド実行 */
+        execute_single(src);
+        reset_all_redirects();
+        return;
+    }
+
+    /* パイプあり: パイプライン実行 */
+    {
+        static char segments[MAX_PIPE_STAGES][CMD_BUF_SIZE];
+        int stage_count;
+        int i;
+        int cur_buf, prev_buf;
+
+        stage_count = split_pipeline(src, segments, MAX_PIPE_STAGES);
+        if (stage_count <= 1) {
+            /* パイプ演算子があるが結果的に1段だけ */
+            execute_single(segments[0]);
+            reset_all_redirects();
+            return;
+        }
+
+        /* バッファID: 交互使用 (0, 1, 0, 1, ...) */
+        prev_buf = -1;
+        {
+            u32 saved_len = 0;
+            for (i = 0; i < stage_count; i++) {
+                int is_first = (i == 0);
+                int is_last = (i == stage_count - 1);
+
+                /* stdin のリダイレクト (最初以外) */
+                if (!is_first && prev_buf >= 0) {
+                    u8 *buf = g_api->sys_pipe_get_buf(prev_buf);
+                    g_api->sys_redirect_fd_buf(0, buf, PIPE_BUF_SIZE, saved_len);
+                }
+
+                /* stdout のリダイレクト (最後以外) */
+                if (!is_last) {
+                    cur_buf = (i % 2 == 0) ? 0 : 1;
+                    {
+                        u8 *buf = g_api->sys_pipe_get_buf(cur_buf);
+                        g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0);
+                    }
+                }
+
+                /* コマンド実行 */
+                execute_single(segments[i]);
+
+                /* stdout バッファに書き込まれたデータ長を保存 (リセット前に取得) */
+                if (!is_last) {
+                    saved_len = g_api->sys_redirect_get_buf_len(1);
+                }
+
+                /* リダイレクト解除 */
+                reset_all_redirects();
+
+                /* 前段のバッファIDを記録 */
+                if (!is_last) {
+                    prev_buf = cur_buf;
+                }
+            }
+        }
     }
 }
