@@ -1096,7 +1096,7 @@ def quantize_huebalance(img, num_colors):
 # ======================================================================
 # Potrace 画像トレース (画像モード用)
 # ======================================================================
-def potrace_trace(binary_mask, width, height):
+def potrace_trace(binary_mask, width, height, turdsize=2):
     """2値マスクをPotraceでベクタートレースしパスリストを返す"""
     pbm_path = tempfile.mktemp(suffix='.pbm')
     svg_path = pbm_path + '.svg'
@@ -1118,6 +1118,7 @@ def potrace_trace(binary_mask, width, height):
         result = subprocess.run(
             [POTRACE_BIN, '-b', 'svg', '--flat',
              '-r', '72', '-u', '1',
+             '-t', str(turdsize),
              pbm_path, '-o', svg_path],
             capture_output=True, timeout=30)
 
@@ -1233,7 +1234,7 @@ def pack_vbz(width, height, palette, color_paths, bg_color_idx=0):
 # ======================================================================
 def convert_image(input_path, output_path, target_width=640, target_height=400,
                   num_colors=16, epsilon=2.0, quantize_method='huebalance',
-                  sat_boost=1.3, dither=False):
+                  sat_boost=1.3, dither=False, crop_rect=None, turdsize=2):
     """ラスター画像をPotraceでベクタートレースしてVBZに変換"""
     if not HAS_PIL:
         print("Error: 画像モードには Pillow と numpy が必要です")
@@ -1247,6 +1248,12 @@ def convert_image(input_path, output_path, target_width=640, target_height=400,
     print(f"入力: {input_path} (画像モード)")
     img = Image.open(input_path)
     print(f"  元サイズ: {img.size[0]}x{img.size[1]}, モード: {img.mode}")
+
+    # クロップ (リサイズ前に適用)
+    if crop_rect:
+        cx, cy, cw, ch = crop_rect
+        img = img.crop((cx, cy, cx + cw, cy + ch))
+        print(f"  クロップ: ({cx},{cy}) {cw}x{ch}")
 
     orig_w, orig_h = img.size
     scale = min(target_width / orig_w, target_height / orig_h)
@@ -1292,7 +1299,7 @@ def convert_image(input_path, output_path, target_width=640, target_height=400,
             continue
         print(f"  色[{color_idx}] Potrace実行中... ({count} px)", end="", flush=True)
         mask = (idx_array == color_idx).astype(np.uint8)
-        paths = potrace_trace(mask, new_w, new_h)
+        paths = potrace_trace(mask, new_w, new_h, turdsize=turdsize)
         if paths:
             color_paths.append((color_idx, FLAG_FILL, paths))
             total_paths += len(paths)
@@ -1321,6 +1328,8 @@ def main():
     parser.add_argument('--height', type=int, default=400, help='出力高さ')
     parser.add_argument('--colors', type=int, default=16, help='色数 (画像モード, 2-16)')
     parser.add_argument('--epsilon', type=float, default=2.0, help='簡略化閾値')
+    parser.add_argument('-t', '--turdsize', type=int, default=2,
+                        help='Potraceノイズ除去閾値 (デフォルト: 2, 大きいほど小パス除去)')
     parser.add_argument('--quantize', choices=['mediancut', 'huebalance'],
                         default='huebalance',
                         help='量子化方式 (デフォルト: huebalance)')
@@ -1328,7 +1337,21 @@ def main():
                         help='彩度ブースト倍率 (デフォルト: 1.3, 1.0で無効)')
     parser.add_argument('--dither', action='store_true',
                         help='Floyd-Steinberg ディザリングを有効化')
+    parser.add_argument('--crop', type=str, default=None,
+                        help='入力画像のクロップ領域 (X,Y,W,H)')
     args = parser.parse_args()
+
+    # --crop 引数のパース
+    crop_rect = None
+    if args.crop:
+        try:
+            parts = [int(x) for x in args.crop.split(',')]
+            if len(parts) != 4:
+                raise ValueError
+            crop_rect = tuple(parts)
+        except ValueError:
+            print("Error: --crop は X,Y,W,H 形式 (例: --crop 100,50,400,300)")
+            sys.exit(1)
 
     ext = os.path.splitext(args.input)[1].lower()
 
@@ -1349,7 +1372,9 @@ def main():
                       epsilon=args.epsilon,
                       quantize_method=args.quantize,
                       sat_boost=args.saturation_boost,
-                      dither=args.dither)
+                      dither=args.dither,
+                      crop_rect=crop_rect,
+                      turdsize=args.turdsize)
 
 
 if __name__ == '__main__':
