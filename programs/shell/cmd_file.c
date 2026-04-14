@@ -115,9 +115,91 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
     return 0;
 }
 
+/* 再帰コピー: エントリ収集方式 */
+#define MAX_COPY_ENTRIES 64
+#define MAX_COPY_DEPTH   8
+
+struct copy_entry {
+    char name[32];
+    int  is_dir;   /* 1=ディレクトリ, 0=ファイル */
+};
+
+/* 収集用バッファ (スタック節約のため static) */
+static struct copy_entry g_copy_entries[MAX_COPY_ENTRIES];
+static int g_copy_count;
+
+/* sys_ls コールバック: エントリを収集するだけ */
+static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
+{
+    int nlen;
+    (void)ctx;
+
+    /* . と .. をスキップ */
+    if (entry->name[0] == '.' &&
+        (entry->name[1] == '\0' || (entry->name[1] == '.' && entry->name[2] == '\0')))
+        return;
+
+    if (g_copy_count >= MAX_COPY_ENTRIES) return;
+
+    nlen = strlen(entry->name);
+    if (nlen >= 31) nlen = 31;
+    memcpy(g_copy_entries[g_copy_count].name, entry->name, nlen);
+    g_copy_entries[g_copy_count].name[nlen] = '\0';
+    g_copy_entries[g_copy_count].is_dir = (entry->type == 2) ? 1 : 0;
+    g_copy_count++;
+}
+
+/* ディレクトリの再帰コピー (collect-then-copy) */
+static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
+{
+    /* ローカルにコピーしてから再帰 (static バッファを再帰で上書き対策) */
+    struct copy_entry local_entries[MAX_COPY_ENTRIES];
+    int local_count, i;
+
+    if (depth >= MAX_COPY_DEPTH) {
+        g_api->kprintf(ATTR_RED, "cp: max depth exceeded: %s\n", src);
+        return;
+    }
+
+    /* 宛先ディレクトリを作成 */
+    g_api->sys_mkdir(dst);
+
+    /* エントリを全て収集 (static バッファに) */
+    g_copy_count = 0;
+    g_api->sys_ls(src, collect_entries_cb, (void *)0);
+
+    /* ローカルにコピー (再帰で g_copy_entries が上書きされるため) */
+    local_count = g_copy_count;
+    for (i = 0; i < local_count; i++) {
+        local_entries[i] = g_copy_entries[i];
+    }
+
+    /* 収集後にコピーを実行 */
+    for (i = 0; i < local_count; i++) {
+        char src_path[PATH_MAX_LEN];
+        char dst_path[PATH_MAX_LEN];
+
+        join_path(src_path, src, local_entries[i].name);
+        join_path(dst_path, dst, local_entries[i].name);
+
+        if (local_entries[i].is_dir) {
+            do_copy_recursive_impl(src_path, dst_path, depth + 1);
+        } else {
+            do_copy_file("cp", src_path, dst_path);
+        }
+    }
+}
+
+static void do_copy_recursive(const char *src, const char *dst)
+{
+    do_copy_recursive_impl(src, dst, 0);
+}
+
 static void cmd_cp(int argc, char **argv)
 {
     int i, is_dest_dir;
+    int opt_recursive = 0;
+    int file_start = 1;
     const char *dst;
     
     if (argc < 3) {
@@ -125,27 +207,58 @@ static void cmd_cp(int argc, char **argv)
         return;
     }
     
+    /* オプション解析 */
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            int j;
+            for (j = 1; argv[i][j]; j++) {
+                if (argv[i][j] == 'r' || argv[i][j] == 'R')
+                    opt_recursive = 1;
+            }
+            file_start = i + 1;
+        } else {
+            break;
+        }
+    }
+    
+    if (argc - file_start < 2) {
+        shell_print_help(argv[0]);
+        return;
+    }
+    
     dst = argv[argc - 1];
     is_dest_dir = is_dir(dst);
     
-    if (argc > 3 && !is_dest_dir) {
+    if (argc - file_start > 2 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "cp: multiple files must be copied into a directory\n");
         return;
     }
     
-    for (i = 1; i < argc - 1; i++) {
+    for (i = file_start; i < argc - 1; i++) {
         const char *src = argv[i];
-        if (is_dir(src)) {
-            g_api->kprintf(ATTR_RED, "%s", "cp: recursively copying directories is not yet supported in glob refractor\n");
-            continue;
-        }
+        if (argv[i][0] == '-') continue; /* オプションをスキップ */
         
-        if (is_dest_dir) {
-            char dpath[PATH_MAX_LEN];
-            join_path(dpath, dst, get_basename(src));
-            do_copy_file("cp", src, dpath);
+        if (is_dir(src)) {
+            if (!opt_recursive) {
+                g_api->kprintf(ATTR_RED, "cp: -r not specified; omitting directory '%s'\n", src);
+                continue;
+            }
+            /* 再帰コピー */
+            if (is_dest_dir) {
+                char dpath[PATH_MAX_LEN];
+                join_path(dpath, dst, get_basename(src));
+                do_copy_recursive(src, dpath);
+            } else {
+                do_copy_recursive(src, dst);
+            }
         } else {
-            do_copy_file("cp", src, dst);
+            if (is_dest_dir) {
+                char dpath[PATH_MAX_LEN];
+                join_path(dpath, dst, get_basename(src));
+                do_copy_file("cp", src, dpath);
+            } else {
+                do_copy_file("cp", src, dst);
+            }
         }
     }
 }
@@ -193,11 +306,60 @@ static void cmd_rm(int argc, char **argv)
         }
     }
 }
+/* バッファを行番号付きで出力 */
+static void cat_with_linenum(const u8 *data, int len)
+{
+    int line_num = 1;
+    int i, start;
+    char num_buf[12];
+    int nlen, j;
+
+    start = 0;
+    for (i = 0; i <= len; i++) {
+        if (i == len || data[i] == '\n') {
+            /* 行番号を出力 */
+            nlen = 0;
+            {
+                int n = line_num;
+                char tmp[12];
+                int ti = 0;
+                if (n == 0) tmp[ti++] = '0';
+                while (n > 0) { tmp[ti++] = '0' + (n % 10); n /= 10; }
+                /* 6桁右寄せ */
+                for (j = 0; j < 6 - ti; j++) num_buf[nlen++] = ' ';
+                while (ti > 0) num_buf[nlen++] = tmp[--ti];
+            }
+            num_buf[nlen++] = ' ';
+            num_buf[nlen++] = ' ';
+            g_api->sys_write(1, num_buf, nlen);
+
+            /* 行の内容を出力 */
+            if (i > start) {
+                g_api->sys_write(1, &data[start], i - start);
+            }
+            g_api->sys_write(1, "\n", 1);
+            start = i + 1;
+            line_num++;
+        }
+    }
+}
 
 static void cmd_cat(int argc, char **argv)
 {
     int i;
-    for (i = 1; i < argc; i++) {
+    int show_linenum = 0;
+    int file_start = 1;
+
+    /* オプション解析 */
+    if (argc > 1 && argv[1][0] == '-') {
+        int j;
+        for (j = 1; argv[1][j]; j++) {
+            if (argv[1][j] == 'n') show_linenum = 1;
+        }
+        file_start = 2;
+    }
+
+    for (i = file_start; i < argc; i++) {
         int fd = g_api->sys_open(argv[i], 0);
         int r;
         if (fd < 0) {
@@ -209,7 +371,11 @@ static void cmd_cat(int argc, char **argv)
         if (r <= 0) {
             continue;
         }
-        g_api->sys_write(1, io_buf, r);
+        if (show_linenum) {
+            cat_with_linenum(io_buf, r);
+        } else {
+            g_api->sys_write(1, io_buf, r);
+        }
     }
 }
 
@@ -231,11 +397,11 @@ static void cmd_echo(int argc, char **argv)
 }
 
 static const ShellCmd file_cmds[] = {
-    { "cp",   cmd_cp,   "SRC DST / SRC... DIR", "Copy files" },
+    { "cp",   cmd_cp,   "[-r] SRC DST / SRC... DIR", "Copy files" },
     { "mv",   cmd_mv,   "SRC DST / SRC... DIR", "Move files" },
     { "rm",   cmd_rm,   "FILE...",              "Remove files" },
-    { "cat",  cmd_cat,  "FILE...",              "Print file contents" },
-    { "cat2", cmd_cat2, "FILE...",              "Alias for cat" },
+    { "cat",  cmd_cat,  "[-n] FILE...",         "Print file contents" },
+    { "cat2", cmd_cat2, "[-n] FILE...",         "Alias for cat" },
     { "echo", cmd_echo, "[args...] [> FILE]",   "Print or redirect text" },
     { (const char *)0, 0, 0, 0 }
 };

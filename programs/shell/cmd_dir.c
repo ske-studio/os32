@@ -54,13 +54,20 @@ static void join_path(char *dst_path, const char *dir_path, const char *name)
 
 struct ls_opts {
     int format_long;
+    int show_all;
 };
 
 static void vfs_ls_cb(const DirEntry_Ext *entry, void *ctx)
 {
     struct ls_opts *opts = (struct ls_opts *)ctx;
     int is_tty = g_api->sys_isatty(1);
-    if (entry->name[0] == '.' && (entry->name[1]=='\0' || (entry->name[1]=='.' && entry->name[2]=='\0'))) return;
+
+    /* -a がなければ . と .. をスキップ */
+    if (!opts->show_all) {
+        if (entry->name[0] == '.' &&
+            (entry->name[1]=='\0' || (entry->name[1]=='.' && entry->name[2]=='\0')))
+            return;
+    }
 
     if (opts->format_long) {
         char size_buf[16];
@@ -91,10 +98,20 @@ static void cmd_ls(int argc, char **argv)
     int is_tty = g_api->sys_isatty(1);
 
     opts.format_long = 0;
+    opts.show_all = 0;
 
-    if (argc > 1 && argv[1][0] == '-') {
-        if (argv[1][1] == 'l') opts.format_long = 1;
-        path_idx_start = 2;
+    /* オプション解析: -l, -a, -la, -al 等に対応 */
+    for (i = 1; i < argc; i++) {
+        if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            int j;
+            for (j = 1; argv[i][j]; j++) {
+                if (argv[i][j] == 'l') opts.format_long = 1;
+                else if (argv[i][j] == 'a') opts.show_all = 1;
+            }
+            path_idx_start = i + 1;
+        } else {
+            break;
+        }
     }
 
     if (path_idx_start >= argc) {
@@ -186,7 +203,7 @@ static void cmd_rmdir(int argc, char **argv)
 
 
 static const ShellCmd dir_cmds[] = {
-    { "ls",    cmd_ls,    "[-l] [path...]", "List directory contents" },
+    { "ls",    cmd_ls,    "[-la] [path...]", "List directory contents" },
     { "cd",    cmd_cd,    "path",           "Change working directory" },
     { "pwd",   cmd_pwd,   "",               "Print working directory" },
     { "mkdir", cmd_mkdir, "dir...",         "Create directories" },

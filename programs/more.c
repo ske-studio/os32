@@ -4,7 +4,9 @@
 /*  Usage: more [FILE]                                                       */
 /*         cmd | more                                                        */
 /*                                                                          */
-/*  スペース: 次ページ  Enter: 次の1行  q: 終了                             */
+/*  キー操作:                                                                */
+/*    スペース: 次ページ    Enter: 次の1行    b: 前ページ                    */
+/*    /: 検索 (前方)        n: 次の検索結果   q/ESC: 終了                    */
 /* ======================================================================== */
 #include "os32api.h"
 #include <string.h>
@@ -20,16 +22,22 @@ static char buf[65536];
 static const char *lines[MAX_LINES];
 static int line_count = 0;
 
+/* 検索パターン */
+static char search_pattern[64];
+static int search_active = 0;
+
+/* コンソールサイズ */
+static int con_w, con_h, page_lines;
+
 /* バッファを行に分割 */
 static void split_lines(char *data, int len)
 {
     int i;
-    char *p = data;
 
     line_count = 0;
     if (len <= 0) return;
 
-    lines[line_count++] = p;
+    lines[line_count++] = data;
 
     for (i = 0; i < len && line_count < MAX_LINES; i++) {
         if (data[i] == '\n') {
@@ -69,29 +77,106 @@ static void show_prompt(int current_line, int total_lines)
     } else {
         pct = 100;
     }
-    api->kprintf(ATTR_MAGENTA, "--More-- (%d%%)", pct);
+    if (search_active) {
+        api->kprintf(ATTR_MAGENTA, "--More-- (%d%%) [/%s]", pct, search_pattern);
+    } else {
+        api->kprintf(ATTR_MAGENTA, "--More-- (%d%%)", pct);
+    }
 }
 
 /* ステータス行をクリア */
 static void clear_prompt(void)
 {
     api->sys_write(1, "\r", 1);
-    api->sys_write(1, "                    ", 20);
+    api->sys_write(1, "                                                ", 48);
     api->sys_write(1, "\r", 1);
 }
 
-/* キー入力待ち (stdinではなくKAPIの直接キーボードアクセス) */
+/* キー入力待ち */
 static int wait_key(void)
 {
     return api->kbd_getchar();
 }
 
+/* 画面をクリアして指定位置から1ページ表示 */
+static void display_page(int start_line)
+{
+    int i;
+    api->tvram_clear();
+    for (i = 0; i < page_lines && (start_line + i) < line_count; i++) {
+        print_line(lines[start_line + i], con_w);
+    }
+}
+
+/* 簡易部分文字列検索 */
+static int str_find(const char *haystack, const char *needle)
+{
+    int hlen, nlen, i, j;
+    if (!needle[0]) return 0;
+    hlen = strlen(haystack);
+    nlen = strlen(needle);
+    if (nlen > hlen) return 0;
+    for (i = 0; i <= hlen - nlen; i++) {
+        int ok = 1;
+        for (j = 0; j < nlen; j++) {
+            if (haystack[i + j] != needle[j]) { ok = 0; break; }
+        }
+        if (ok) return 1;
+    }
+    return 0;
+}
+
+/* 検索: 指定行以降でパターンにマッチする行を探す */
+static int find_next(int from_line, const char *pattern)
+{
+    int i;
+    for (i = from_line; i < line_count; i++) {
+        if (str_find(lines[i], pattern)) return i;
+    }
+    return -1; /* 見つからない */
+}
+
+/* 検索プロンプトを表示してパターンを入力 */
+static void read_search_pattern(void)
+{
+    int pos = 0;
+    int ch;
+
+    api->kprintf(ATTR_MAGENTA, "%s", "/");
+
+    while (pos < 62) {
+        ch = wait_key();
+        if (ch == '\r' || ch == '\n') break;
+        if (ch == 0x1B) {
+            /* ESCでキャンセル */
+            search_pattern[0] = '\0';
+            clear_prompt();
+            return;
+        }
+        if (ch == 0x08 || ch == 0x7F) {
+            /* バックスペース */
+            if (pos > 0) {
+                pos--;
+                api->sys_write(1, "\b \b", 3);
+            }
+            continue;
+        }
+        if (ch >= 0x20 && ch < 0x7F) {
+            char c = (char)ch;
+            search_pattern[pos++] = c;
+            api->sys_write(1, &c, 1);
+        }
+    }
+    search_pattern[pos] = '\0';
+    search_active = (pos > 0);
+    clear_prompt();
+}
+
 int main(int argc, char **argv, KernelAPI *kapi)
 {
     int sz = 0;
-    int con_w, con_h;
-    int page_lines;
     int current_line;
+    int ch;
 
     api = kapi;
 
@@ -137,74 +222,77 @@ int main(int argc, char **argv, KernelAPI *kapi)
         return 0;
     }
 
-    /* ページ表示ループ */
+    /* 初期化 */
+    search_pattern[0] = '\0';
+    search_active = 0;
+
+    /* 最初のページを表示 */
     current_line = 0;
+    display_page(current_line);
+    current_line = page_lines;
+    if (current_line > line_count) current_line = line_count;
 
+    /* メインループ */
     while (current_line < line_count) {
-        int i;
-        int lines_to_show;
-        int ch;
-
-        /* 1ページ分の行を表示 */
-        if (current_line == 0) {
-            lines_to_show = page_lines;
-        } else {
-            lines_to_show = page_lines;
-        }
-
-        for (i = 0; i < lines_to_show && current_line < line_count; i++) {
-            print_line(lines[current_line], con_w);
-            current_line++;
-        }
-
-        /* 最終行まで表示済みなら終了 */
-        if (current_line >= line_count) break;
-
         /* --More-- プロンプト表示 */
         show_prompt(current_line, line_count);
 
         /* キー入力待ち */
         ch = wait_key();
-
-        /* プロンプトクリア */
         clear_prompt();
 
         if (ch == 'q' || ch == 'Q' || ch == 0x1B) {
             /* q または ESC で終了 */
             break;
+        } else if (ch == ' ') {
+            /* スペース: 次ページ */
+            display_page(current_line);
+            current_line += page_lines;
+            if (current_line > line_count) current_line = line_count;
         } else if (ch == '\r' || ch == '\n') {
             /* Enter: 1行進む */
-            /* 次のループで1行だけ表示するため lines_to_show を調整 */
-            /* → 実際にはループ先頭で page_lines 分表示するので、
-               ここでは1行だけ表示して再プロンプト */
-            if (current_line < line_count) {
-                print_line(lines[current_line], con_w);
-                current_line++;
-                /* まだ残りがあればプロンプトを再表示 (ループに戻る) */
-                if (current_line < line_count) {
-                    show_prompt(current_line, line_count);
-                    goto wait_again;
+            print_line(lines[current_line], con_w);
+            current_line++;
+        } else if (ch == 'b' || ch == 'B') {
+            /* b: 前ページ */
+            current_line -= page_lines * 2;
+            if (current_line < 0) current_line = 0;
+            display_page(current_line);
+            current_line += page_lines;
+            if (current_line > line_count) current_line = line_count;
+        } else if (ch == '/') {
+            /* /: 検索パターン入力 */
+            read_search_pattern();
+            if (search_active) {
+                int found = find_next(current_line, search_pattern);
+                if (found >= 0) {
+                    current_line = found;
+                    display_page(current_line);
+                    current_line += page_lines;
+                    if (current_line > line_count) current_line = line_count;
+                } else {
+                    api->kprintf(ATTR_RED, "%s", "Pattern not found");
+                    ch = wait_key();
+                    clear_prompt();
                 }
             }
-            continue;
-        }
-        /* スペースや他のキー: 次ページ */
-        continue;
-
-wait_again:
-        ch = wait_key();
-        clear_prompt();
-        if (ch == 'q' || ch == 'Q' || ch == 0x1B) break;
-        if (ch == '\r' || ch == '\n') {
-            /* Enter: もう1行進む → ループ先頭に戻る代わりにここで処理 */
-            if (current_line < line_count) {
-                print_line(lines[current_line], con_w);
-                current_line++;
-                if (current_line < line_count) goto wait_again;
+        } else if (ch == 'n' || ch == 'N') {
+            /* n: 次の検索結果 */
+            if (search_active) {
+                int found = find_next(current_line, search_pattern);
+                if (found >= 0) {
+                    current_line = found;
+                    display_page(current_line);
+                    current_line += page_lines;
+                    if (current_line > line_count) current_line = line_count;
+                } else {
+                    api->kprintf(ATTR_RED, "%s", "Pattern not found");
+                    ch = wait_key();
+                    clear_prompt();
+                }
             }
-            continue;
         }
-        /* スペース等: 次ページへ (ループ先頭に戻る) */
+        /* その他のキーは無視 */
     }
 
     return 0;
