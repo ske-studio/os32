@@ -59,5 +59,16 @@ void shell_cmd_dir_init(void);
 void shell_cmd_mnt_init(void);
 void shell_cmd_sys_init(void);
 void shell_rshell_init(void);
+void shell_cmd_env_init(void);
+
+/* 環境変数 (cmd_env.c) */
+void env_init(void);
+const char *env_get(const char *name);
+void env_set(const char *name, const char *value);
+void env_unset(const char *name);
+int  env_expand(const char *src, char *dst, int max);
+
+/* PATH検索 (main.c) */
+const char *shell_get_path(void);
 
 #endif /* SHELL_H */

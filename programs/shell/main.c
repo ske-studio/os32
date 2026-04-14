@@ -18,6 +18,9 @@ int main(int argc, char **argv, KernelAPI *api)
 {
     g_api = api;
 
+    /* 環境変数の初期化 (コマンド登録より先に) */
+    env_init();
+
     /* 各モジュールのコマンド登録 */
     shell_cmd_base_init();
     shell_cmd_file_init();
@@ -25,6 +28,7 @@ int main(int argc, char **argv, KernelAPI *api)
     shell_cmd_mnt_init();
     shell_cmd_sys_init();
     shell_rshell_init();
+    shell_cmd_env_init();
 
     /* メインループ開始 (ui.c) */
     shell_run();
@@ -204,14 +208,68 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
     *argc_out = argc;
 }
 
+/* ======================================================================== */
+/*  PATH管理                                                                */
+/* ======================================================================== */
+static char g_path[512] = "/bin:/sbin:/usr/bin";
+
+const char *shell_get_path(void)
+{
+    const char *p = env_get("PATH");
+    if (p) return p;
+    return g_path; /* フォールバック */
+}
+
+/* .bin拡張子が付いているかチェック */
+static int has_bin_ext(const char *s)
+{
+    int len = 0;
+    while (s[len]) len++;
+    if (len < 4) return 0;
+    return (s[len-4] == '.' && s[len-3] == 'b' &&
+            s[len-2] == 'i' && s[len-1] == 'n');
+}
+
+/* パスにスラッシュが含まれるかチェック */
+static int has_slash(const char *s)
+{
+    while (*s) { if (*s == '/') return 1; s++; }
+    return 0;
+}
+
+/* cmdline (コマンド名+引数) を構築して exec_run を試行 */
+static int try_exec(const char *bin_path, int argc, char **argv)
+{
+    char cmd_buf[512];
+    char *p = cmd_buf;
+    int i;
+    const char *s;
+
+    /* バイナリパスをコピー */
+    s = bin_path;
+    while (*s && p < cmd_buf + 500) *p++ = *s++;
+
+    /* 引数を追加 */
+    for (i = 1; i < argc; i++) {
+        *p++ = ' ';
+        s = argv[i];
+        while (*s && p < cmd_buf + 510) *p++ = *s++;
+    }
+    *p = '\0';
+
+    return g_api->exec_run(cmd_buf);
+}
+
 static void run_cmd_internal(int argc, char **argv) {
-    int j;
-    
+    int j, rc;
+    char name_buf[PATH_MAX_LEN];
+
     if (argc > 1 && (str_eq(argv[1], "-h") || str_eq(argv[1], "--help") || str_eq(argv[1], "/?"))) {
         shell_print_help(argv[0]);
         return;
     }
 
+    /* 1. 内部コマンドの検索 */
     for (j = 0; j < g_cmd_count; j++) {
         if (str_eq(argv[0], g_cmds[j].name)) {
             g_cmds[j].handler(argc, argv);
@@ -219,55 +277,87 @@ static void run_cmd_internal(int argc, char **argv) {
         }
     }
 
+    /* 2. 外部コマンドの検索・実行 */
     {
-        char tb[PATH_MAX_LEN]; char cmd_buf[512];
-        int ti=0; char *ap = argv[0]; int rc;
-        char *p; int i;
-        while (*ap && ti < PATH_MAX_LEN - 8) tb[ti++] = *ap++;
-        tb[ti] = '\0';
-        if (ti < 4 || tb[ti-4]!='.' || tb[ti-3]!='b') {
-            tb[ti++]='.'; tb[ti++]='b'; tb[ti++]='i'; tb[ti++]='n'; tb[ti]='\0';
-        }
-        
-        p = cmd_buf;
-        for (i = 0; tb[i] && p < cmd_buf + 510; i++) *p++ = tb[i];
-        for (i = 1; i < argc; i++) {
-            *p++ = ' ';
-            char *arg = argv[i];
-            while (*arg && p < cmd_buf + 510) *p++ = *arg++;
-        }
-        *p = '\0';
-
-        rc = g_api->exec_run(cmd_buf);
-        /* GFXモードのプログラム終了後、テキスト画面に復帰 */
-        g_api->gfx_shutdown();
-        if (rc == EXEC_SUCCESS) {
-            g_api->kprintf(ATTR_GREEN, "%s", "\n");
-            return;
-        } else if (rc == EXEC_ERR_FAULT) {
-            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-            return;
-        } else if (rc != EXEC_ERR_GENERAL) {
-            return;
+        /* コマンド名に.bin拡張子を付加 */
+        int ni = 0;
+        const char *ap = argv[0];
+        while (*ap && ni < PATH_MAX_LEN - 8) name_buf[ni++] = *ap++;
+        name_buf[ni] = '\0';
+        if (!has_bin_ext(name_buf)) {
+            name_buf[ni++] = '.';
+            name_buf[ni++] = 'b';
+            name_buf[ni++] = 'i';
+            name_buf[ni++] = 'n';
+            name_buf[ni] = '\0';
         }
     }
 
-    if (argv[0][0] == '.' && argv[0][1] == '/') {
-        char cmd_buf[512]; char *p = cmd_buf; int i; int rc;
-        for (i = 0; argv[0][i] && p < cmd_buf + 510; i++) *p++ = argv[0][i];
-        for (i = 1; i < argc; i++) {
-            *p++ = ' ';
-            char *arg = argv[i];
-            while (*arg && p < cmd_buf + 510) *p++ = *arg++;
-        }
-        *p = '\0';
-
-        rc = g_api->exec_run(cmd_buf);
+    /* 2a. パスにスラッシュが含まれる場合 → 直接実行 */
+    if (has_slash(argv[0])) {
+        rc = try_exec(name_buf, argc, argv);
         g_api->gfx_shutdown();
-        if (rc == EXEC_SUCCESS) g_api->kprintf(ATTR_GREEN, "%s", "\n");
-        else if (rc == EXEC_ERR_FAULT) g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-        else g_api->kprintf(ATTR_RED, "%s", "Not found.\n");
+        if (rc == EXEC_SUCCESS) {
+            g_api->kprintf(ATTR_GREEN, "%s", "\n");
+        } else if (rc == EXEC_ERR_FAULT) {
+            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
+        } else if (rc == EXEC_ERR_NOT_FOUND) {
+            g_api->kprintf(ATTR_RED, "%s: not found\n", argv[0]);
+        }
         return;
+    }
+
+    /* 2b. カレントディレクトリで試行 */
+    rc = try_exec(name_buf, argc, argv);
+    if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
+        g_api->gfx_shutdown();
+        if (rc == EXEC_SUCCESS) {
+            g_api->kprintf(ATTR_GREEN, "%s", "\n");
+        } else if (rc == EXEC_ERR_FAULT) {
+            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
+        }
+        return;
+    }
+
+    /* 2c. PATH内の各ディレクトリで試行 */
+    {
+        const char *path_str = shell_get_path();
+        const char *p = path_str;
+
+        while (*p) {
+            char dir_buf[PATH_MAX_LEN];
+            char full_path[PATH_MAX_LEN];
+            int di = 0, fi = 0, ni2 = 0;
+
+            /* ':' で区切られたディレクトリを取得 */
+            while (*p && *p != ':' && di < PATH_MAX_LEN - 2)
+                dir_buf[di++] = *p++;
+            dir_buf[di] = '\0';
+            if (*p == ':') p++;
+            if (di == 0) continue;
+
+            /* フルパス構築: dir + '/' + name_buf */
+            fi = 0;
+            ni2 = 0;
+            while (fi < PATH_MAX_LEN - 2 && dir_buf[fi])
+                full_path[fi] = dir_buf[fi], fi++;
+            if (fi > 0 && full_path[fi - 1] != '/')
+                full_path[fi++] = '/';
+            while (fi < PATH_MAX_LEN - 1 && name_buf[ni2])
+                full_path[fi++] = name_buf[ni2++];
+            full_path[fi] = '\0';
+
+            rc = try_exec(full_path, argc, argv);
+            if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
+                g_api->gfx_shutdown();
+                if (rc == EXEC_SUCCESS) {
+                    g_api->kprintf(ATTR_GREEN, "%s", "\n");
+                } else if (rc == EXEC_ERR_FAULT) {
+                    g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
+                }
+                return;
+            }
+        }
     }
 
     g_api->kprintf(ATTR_RED, "%s: command not found\n", argv[0]);
@@ -279,15 +369,22 @@ static void run_cmd_internal(int argc, char **argv) {
 void execute_command(const char *cmd)
 {
     char tmp_buf[CMD_BUF_SIZE];
+    char expanded_buf[CMD_BUF_SIZE];
     char *argv[MAX_ARGS];
     char *allocated_strings[MAX_ARGS];
     int alloc_count = 0;
     int argc = 0, j;
-    char *p = tmp_buf;
+    char *p;
+    const char *src;
 
     if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
 
-    while (*cmd) { *p++ = *cmd++; }
+    /* $VAR / ~ 展開 */
+    env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
+    src = expanded_buf;
+
+    p = tmp_buf;
+    while (*src) { *p++ = *src++; }
     *p = '\0';
 
     parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS, allocated_strings, &alloc_count);
