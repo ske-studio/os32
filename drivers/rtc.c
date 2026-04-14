@@ -1,12 +1,27 @@
 /* ======================================================================== */
 /*  RTC.C — µPD4990A カレンダ時計ドライバ                                   */
 /*                                                                          */
-/*  シリアルビットバンギングで48ビットBCD時刻データを読み出す                 */
-/*  データ形式 (LSBファースト, 各4ビット):                                   */
+/*  PC-98内蔵RTC (µPD4990A) をI/Oポート直接制御で操作                        */
+/*                                                                          */
+/*  ■ ポート0x20 ビットレイアウト (PC9800Bible §4-3):                       */
+/*    D7 D6 D5  D4  D3  D2 D1 D0                                           */
+/*     x  x  DI CLK STB C2 C1 C0                                           */
+/*                                                                          */
+/*  ■ ファンクションモード (C2 C1 C0):                                      */
+/*    000 = レジスタホールド     (DATA OUT = 1Hz)                            */
+/*    001 = レジスタシフト       (DATA OUT = シフトレジスタLSB) ★読み出し用 */
+/*    010 = タイムセット/カウンタホールド                                    */
+/*    011 = タイムリード         (DATA OUT = 0.5Hz) ★カウンタ→SR転送       */
+/*                                                                          */
+/*  ■ 読み出し手順:                                                         */
+/*    1. タイムリード (011) → カウンタの現在値をシフトレジスタにコピー       */
+/*    2. レジスタシフト (001) → DATA OUTからシフトレジスタ内容を読み出し     */
+/*    3. 48ビット (12ニブル) を CLK パルスで1ビットずつ読み出す              */
+/*                                                                          */
+/*  ■ データ形式 (LSBファースト, 各4ビット):                                */
 /*    1秒, 10秒, 1分, 10分, 1時, 10時, 1日, 10日, 曜日, 月, 1年, 10年       */
 /*                                                                          */
-/*  出典: PC9800Bible §2-4                                                  */
-/*  参照: FreeBSD sys/pc98/cbus/pcrtc.c                                     */
+/*  出典: PC9800Bible §2-4, §4-3                                           */
 /* ======================================================================== */
 
 #include "rtc.h"
@@ -17,68 +32,65 @@
 extern volatile u32 tick_count;
 
 /* ======== I/Oウェイト ======== */
-/* io_wait()×2回で約1.2µsの遅延 */
+/* io_wait()×2回で約1.2µsの遅延 (µPD4990A最小CLKパルス幅: 0.9µs) */
 static void rtc_wait(void)
 {
     io_wait();
     io_wait();
 }
 
-/* ======== コマンド送信 ======== */
-/* µPD4990AにシリアルコマンドC0-C3を送信 */
-/* C0→C1→C2→C3の順にDIラインからシフトイン */
-static void rtc_send_cmd(u8 cmd)
+/* ======== コマンド設定 (パラレル方式) ======== */
+/*                                                                          */
+/* PC-98のµPD4990AはC0-C2をポート0x20のbit0-2に直接書き込むパラレル方式。    */
+/* STBの立ち上がり (0→1) でコマンドがラッチされる。                         */
+/*                                                                          */
+/* 手順:                                                                    */
+/*   1. C2C1C0 + STB=0 を出力 (コマンドビット準備)                          */
+/*   2. C2C1C0 + STB=1 を出力 (ストローブ → コマンドラッチ)                 */
+/*   3. STB=0 に戻す                                                        */
+static void rtc_set_mode(u8 mode)
 {
-    int i;
-
-    /* STB=0で開始 */
-    outp(RTC_SET, 0x00);
+    /* STB=0, CLK=0, DI=0, C2C1C0=mode */
+    outp(RTC_SET, mode & 0x07);
     rtc_wait();
 
-    /* コマンドビット C0→C3 の順にシフトイン */
-    for (i = 0; i < 4; i++) {
-        u8 di = (cmd & (1 << i)) ? RTC_DI : 0;
-
-        /* CLK=0, DI設定 */
-        outp(RTC_SET, di);
-        rtc_wait();
-
-        /* CLK=1 (立ち上がりでデータラッチ) */
-        outp(RTC_SET, di | RTC_CLK);
-        rtc_wait();
-    }
-
-    /* CLK=0に戻す */
-    outp(RTC_SET, 0x00);
+    /* STBパルス (0→1でモードセット) */
+    outp(RTC_SET, (mode & 0x07) | RTC_STB);
     rtc_wait();
 
-    /* STBパルス (コマンドラッチ) */
-    outp(RTC_SET, RTC_STB);
-    rtc_wait();
-    outp(RTC_SET, 0x00);
+    /* STB=0に戻す */
+    outp(RTC_SET, mode & 0x07);
     rtc_wait();
 }
 
 /* ======== データ読み出し (48ビット) ======== */
-/* µPD4990Aのシフトレジスタから48ビットを読み出す */
-/* LSBファーストで各4ビット×12ニブル */
+/*                                                                          */
+/* レジスタシフトモード (C2C1C0=001) に設定済みの状態で呼ぶこと。            */
+/* DATA OUTはシフトレジスタのLSBが出力される。                              */
+/* CLKパルス毎にシフトレジスタが1ビット右シフトされ、次のビットが現れる。    */
+/*                                                                          */
+/* ポート0x33 bit0 (CDAT) = µPD4990A DATA OUT                               */
 static void rtc_read_48bits(u8 *nibbles)
 {
     int i;
+    u8 bit;
 
-    for (i = 0; i < RTC_READ_BITS; i++) {
-        u8 bit;
+    /* 最初のビット (bit0) は既に DATA OUT に出ている */
+    bit = (u8)(inp(RTC_READ) & 0x01);
+    nibbles[0] = bit;
 
-        /* CLK=1 */
-        outp(RTC_SET, RTC_CLK);
+    /* 残り47ビットを CLK パルスでシフトしながら読む */
+    for (i = 1; i < RTC_READ_BITS; i++) {
+        /* CLK=1 (レジスタシフトモードのC0=1をキープ) */
+        outp(RTC_SET, RTC_MODE_SHIFT | RTC_CLK);
         rtc_wait();
 
-        /* データ読み出し (bit0 = DO) */
+        /* CLK=0 (立ち下がりで次のビットがDATA OUTに現れる) */
+        outp(RTC_SET, RTC_MODE_SHIFT);
+        rtc_wait();
+
+        /* データ読み出し */
         bit = (u8)(inp(RTC_READ) & 0x01);
-
-        /* CLK=0 */
-        outp(RTC_SET, 0x00);
-        rtc_wait();
 
         /* ニブル配列に格納 */
         if ((i & 3) == 0) {
@@ -95,25 +107,27 @@ static void rtc_read_48bits(u8 *nibbles)
 
 void rtc_init(void)
 {
-    /* タイムリードモードに設定 */
-    rtc_send_cmd(RTC_CMD_TIMEREAD);
+    /* レジスタホールドモードに設定 (初期状態) */
+    rtc_set_mode(RTC_MODE_HOLD);
 }
 
 void rtc_read(RTC_Time *t)
 {
     u8 nib[12];   /* 12ニブル (48ビット) */
 
-    /* レジスタホールド (読み出し中に値が変わらないようにする) */
-    rtc_send_cmd(RTC_CMD_HOLD);
+    /* 1. タイムリード: カウンタの現在値をシフトレジスタにコピー */
+    rtc_set_mode(RTC_MODE_TIMEREAD);
+    rtc_wait();
 
-    /* タイムリード */
-    rtc_send_cmd(RTC_CMD_TIMEREAD);
+    /* 2. レジスタシフトモード: DATA OUTをシフトレジスタLSBにする */
+    rtc_set_mode(RTC_MODE_SHIFT);
+    rtc_wait();
 
-    /* 48ビット読み出し */
+    /* 3. 48ビット読み出し */
     rtc_read_48bits(nib);
 
-    /* レジスタシフト (通常カウント再開) */
-    rtc_send_cmd(RTC_CMD_SHIFT);
+    /* 4. レジスタホールドに戻す (通常カウント再開) */
+    rtc_set_mode(RTC_MODE_HOLD);
 
     /*
      * ニブル配置 (LSBファースト):

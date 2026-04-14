@@ -2,10 +2,12 @@
 /*  RTC.H — µPD4990A カレンダ時計ドライバ                                   */
 /*                                                                          */
 /*  PC-9801内蔵RTC (µPD4990A) をI/Oポート直接制御で操作                      */
-/*  シリアルビットバンギングで48ビットBCD時刻データを読み書き                 */
 /*                                                                          */
-/*  出典: PC9800Bible §2-4                                                  */
-/*  参照: FreeBSD sys/pc98/cbus/pcrtc.c                                     */
+/*  ■ ポート0x20 ビットレイアウト (PC9800Bible §4-3):                       */
+/*    D7 D6 D5  D4  D3  D2 D1 D0                                           */
+/*     x  x  DI CLK STB C2 C1 C0                                           */
+/*                                                                          */
+/*  出典: PC9800Bible §2-4, §4-3                                           */
 /* ======================================================================== */
 
 #ifndef __RTC_H
@@ -15,24 +17,23 @@
 
 /* ======== I/Oポート定義 ======== */
 #define RTC_SET    0x20    /* コマンド/データ書込みポート */
-#define RTC_READ   0x33    /* データ読み出しポート (bit0 = DO) */
+#define RTC_READ   0x33    /* ポートB読み出し (bit0 = CDAT = DATA OUT) */
 
-/* ======== ポート0x20 ビット配置 ======== */
-/*   bit5: DI  (Data Input)   */
-/*   bit4: CLK (Clock)        */
-/*   bit3: STB (Strobe)       */
-/*   bit2-0: C2-C0 (Command)  */
-/* FreeBSD互換定義 (PC98.h)   */
+/* ======== ポート0x20 ビット配置 (PC9800Bible §4-3) ======== */
+/*   bit5: DI  (Data Input — シフトレジスタへのデータ入力)  */
+/*   bit4: CLK (Clock — シフトクロック)                     */
+/*   bit3: STB (Strobe — 0→1でモードセット/コマンドラッチ)  */
+/*   bit2-0: C2-C0 (ファンクションモード選択)               */
 #define RTC_DI     0x20    /* bit5: データ入力 */
 #define RTC_CLK    0x10    /* bit4: クロック */
 #define RTC_STB    0x08    /* bit3: ストローブ */
 
-/* ======== シリアルコマンド (C3-C0) ======== */
-/* C0→C1→C2→C3の順にシフトイン */
-#define RTC_CMD_HOLD       0x00   /* 0000: レジスタホールド */
-#define RTC_CMD_SHIFT      0x01   /* 0001: レジスタシフト */
-#define RTC_CMD_TIMESET    0x02   /* 0010: タイムセット */
-#define RTC_CMD_TIMEREAD   0x03   /* 0011: タイムリード */
+/* ======== ファンクションモード (C2 C1 C0) ======== */
+/* ポート0x20のbit0-2に直接書き込む                  */
+#define RTC_MODE_HOLD       0x00   /* 000: レジスタホールド (DATA OUT=1Hz) */
+#define RTC_MODE_SHIFT      0x01   /* 001: レジスタシフト (DATA OUT=SR LSB) */
+#define RTC_MODE_TIMESET    0x02   /* 010: タイムセット/カウンタホールド */
+#define RTC_MODE_TIMEREAD   0x03   /* 011: タイムリード (DATA OUT=0.5Hz) */
 
 #define RTC_READ_BITS      48     /* RTCから読み出すビット数 */
 
@@ -49,7 +50,7 @@ typedef struct {
 
 /* ======== API ======== */
 
-/* RTC初期化 (タイムリードモードに設定) */
+/* RTC初期化 (レジスタホールドモードに設定) */
 void rtc_init(void);
 
 /* 現在日時を読み出す */
