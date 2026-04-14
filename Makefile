@@ -123,12 +123,24 @@ programs/fep_test.elf: app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_pro
 fep_test: $(CRT0_OBJ) programs/fep_test.bin
 
 # === OS32GFX Module ===
-GFX_SRC = $(wildcard programs/libos32gfx/*.c)
+GFX_SRC = $(wildcard programs/libos32gfx/*.c) \
+          $(wildcard programs/libos32gfx/draw/*.c) \
+          $(wildcard programs/libos32gfx/text/*.c) \
+          $(wildcard programs/libos32gfx/geom/*.c)
 ASM_GFX_SRC = $(wildcard programs/libos32gfx/asm/*.asm)
 ASM_GFX_OBJ = $(ASM_GFX_SRC:.asm=.o)
 GFX_OBJ = $(GFX_SRC:.c=.o) $(ASM_GFX_OBJ) lib/utf8.o
 
 programs/libos32gfx/%.o: programs/libos32gfx/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libos32gfx/draw/%.o: programs/libos32gfx/draw/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libos32gfx/text/%.o: programs/libos32gfx/text/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libos32gfx/geom/%.o: programs/libos32gfx/geom/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/libos32gfx/asm/%.o: programs/libos32gfx/asm/%.asm programs/libos32gfx/asm/gfx_const.inc
@@ -407,7 +419,7 @@ nhd-init:
 	$(NHD_DEPLOY) init
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 

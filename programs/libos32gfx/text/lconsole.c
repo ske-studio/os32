@@ -8,7 +8,7 @@
 
 #include "lconsole.h"
 #include "libos32gfx.h"
-#include "../../lib/utf8.h"
+#include "lib/utf8.h"
 
 /* 1セル = 32bit: [31:16] 属性, [15:0] 文字コードまたはJIS */
 static unsigned int logical_vram[LCONS_H][LCONS_W];
