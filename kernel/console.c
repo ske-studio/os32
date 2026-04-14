@@ -129,7 +129,7 @@ void shell_print_dec(u32 val, u8 color)
     int i = 10;
     buf[11] = '\0';
     if (val == 0) {
-        shell_putchar('0', color);
+        shell_print("0", color);
         return;
     }
     while (val > 0 && i >= 0) {
