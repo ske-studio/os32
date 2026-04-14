@@ -76,13 +76,9 @@ static void cmd_date(int argc, char **argv)
     (void)argc; (void)argv;
     g_api->rtc_read(&t);
     w = (t.wday < 7) ? wday_names[t.wday] : "???";
-    g_api->kprintf(ATTR_WHITE, "20%u%u-%u%u-%u%u %u%u:%u%u:%u%u (%s)\n",
-                   (u32)(t.year / 10), (u32)(t.year % 10),
-                   (u32)(t.month / 10), (u32)(t.month % 10),
-                   (u32)(t.day / 10), (u32)(t.day % 10),
-                   (u32)(t.hour / 10), (u32)(t.hour % 10),
-                   (u32)(t.min / 10), (u32)(t.min % 10),
-                   (u32)(t.sec / 10), (u32)(t.sec % 10),
+    g_api->kprintf(ATTR_WHITE, "20%02u-%02u-%02u %02u:%02u:%02u (%s)\n",
+                   (u32)t.year, (u32)t.month, (u32)t.day,
+                   (u32)t.hour, (u32)t.min, (u32)t.sec,
                    w);
 }
 
