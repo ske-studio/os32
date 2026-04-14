@@ -104,16 +104,16 @@
 /*  シェルはここに常駐し、子プロセスは一切触れない。PD切り替え不要。         */
 /*                                                                          */
 /*  レイアウト:                                                             */
-/*    0x300000-           .text + .data + .bss (~213KB)                     */
-/*    (〜0x336000)        BSS終端                                           */
-/*    0x376000            ガードページ (Not-Present, 4KB)                   */
-/*    0x377000-0x37FFFF   スタック (36KB, ESP初期値=0x380000)               */
+/*    0x300000-           .text + .data + .bss (~256KB)                     */
+/*    (〜0x340000)        BSS終端                                           */
+/*    0x370000            ガードページ (Not-Present, 4KB)                   */
+/*    0x371000-0x37FFFF   スタック (60KB, ESP初期値=0x380000)               */
 /* ====================================================================== */
 #define MEM_SHELL_LOAD_ADDR   0x300000UL  /* シェルロードアドレス */
-#define MEM_SHELL_MAX_SIZE    0x036000UL  /* シェルcode+bss最大 (216KB) */
-#define MEM_SHELL_GUARD       0x376000UL  /* シェルスタックガード */
+#define MEM_SHELL_MAX_SIZE    0x070000UL  /* シェルcode+bss最大 (448KB) */
+#define MEM_SHELL_GUARD       0x370000UL  /* シェルスタックガード */
 #define MEM_SHELL_STACK_TOP   0x380000UL  /* シェルスタック先頭 (下向き成長) */
-#define MEM_SHELL_STACK_SIZE  0x009000UL  /* シェルスタックサイズ (36KB) */
+#define MEM_SHELL_STACK_SIZE  0x00F000UL  /* シェルスタックサイズ (60KB) */
 #define MEM_SHELL_BAND_END    0x380000UL  /* シェル帯域終端 */
 
 /* ====================================================================== */
