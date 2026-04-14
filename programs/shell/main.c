@@ -2,6 +2,7 @@
 /*  MAIN.C — OS32 外部シェル エントリ・コマンドルーターロジック         */
 /* ======================================================================== */
 #include "shell.h"
+#include "libos32/help.h"
 
 KernelAPI *g_api;
 
@@ -61,17 +62,10 @@ const ShellCmd *shell_get_cmds(int *count)
 
 void shell_print_help(const char *cmd_name)
 {
-    int i;
-    for (i = 0; i < g_cmd_count; i++) {
-        if (str_eq(cmd_name, g_cmds[i].name)) {
-            g_api->kprintf(ATTR_YELLOW, "Usage: %s %s\n", g_cmds[i].name, g_cmds[i].usage ? g_cmds[i].usage : "");
-            if (g_cmds[i].description) {
-                g_api->kprintf(ATTR_WHITE, "  %s\n", g_cmds[i].description);
-            }
-            return;
-        }
+    /* manページを参照 */
+    if (os32_help_show(cmd_name) != 0) {
+        g_api->kprintf(ATTR_RED, "No manual entry for %s\n", cmd_name);
     }
-    g_api->kprintf(ATTR_RED, "%s: no help available\n", cmd_name);
 }
 
 /* ======================================================================== */

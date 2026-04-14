@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "libos32/help.h"
 
 /* ======================================================================== */
 /*  基本コマンドモジュール (cmd_base.c)                                     */
@@ -10,7 +11,11 @@ static void cmd_help(int argc, char **argv)
     const ShellCmd *cmds;
     
     if (argc > 1) {
-        shell_print_help(argv[1]);
+        /* manページを参照 */
+        if (os32_help_show(argv[1]) != 0) {
+            g_api->kprintf(ATTR_RED, "No manual entry for %s\n", argv[1]);
+            g_api->kprintf(ATTR_WHITE, "%s", "  Use 'help' to list available commands.\n");
+        }
         return;
     }
 
@@ -18,17 +23,20 @@ static void cmd_help(int argc, char **argv)
     cmds = shell_get_cmds(&count);
     
     for (i = 0; i < count; i++) {
-        if (cmds[i].description) {
-            char pad[12];
-            int len = str_len(cmds[i].name);
-            int p = 0;
-            while (len < 10 && p < 11) { pad[p++] = ' '; len++; }
-            pad[p] = '\0';
-            g_api->kprintf(ATTR_WHITE, "  %s%s- %s\n", cmds[i].name, pad, cmds[i].description);
+        char pad[12];
+        int len = str_len(cmds[i].name);
+        int p = 0;
+        while (len < 10 && p < 11) { pad[p++] = ' '; len++; }
+        pad[p] = '\0';
+        g_api->kprintf(ATTR_WHITE, "  %s%s", cmds[i].name, pad);
+        /* manページ有無チェック */
+        if (os32_help_exists(cmds[i].name)) {
+            g_api->kprintf(ATTR_GREEN, "%s", "[man]\n");
         } else {
-            g_api->kprintf(ATTR_WHITE, "  %s\n", cmds[i].name);
+            g_api->kprintf(ATTR_WHITE, "%s", "\n");
         }
     }
+    g_api->kprintf(ATTR_WHITE, "%s", "\n  Use 'help <cmd>' or 'man <cmd>' for details.\n");
 }
 
 static void cmd_clear(int argc, char **argv)
