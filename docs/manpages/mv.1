@@ -1,0 +1,23 @@
+# mv
+
+ファイルを移動・名前変更する
+
+## SYNOPSIS
+
+`mv SRC DST`
+`mv SRC... DIR`
+
+## DESCRIPTION
+
+ファイルを移動または名前変更する。
+宛先がディレクトリの場合、そのディレクトリ内に移動する。
+内部的にはコピー + 削除で実装されている。
+
+## EXAMPLES
+
+- `mv old.txt new.txt` — ファイル名変更
+- `mv *.txt /tmp/` — 複数ファイルをディレクトリに移動
+
+## SEE ALSO
+
+cp, rm

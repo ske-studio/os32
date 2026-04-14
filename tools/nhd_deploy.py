@@ -153,7 +153,7 @@ def ensure_mounted():
 
 
 # === ディレクトリ構造定義 ===
-SYS_DIRS = ['bin', 'sbin', 'usr', 'usr/bin', 'data', 'etc',
+SYS_DIRS = ['bin', 'sbin', 'usr', 'usr/bin', 'usr/man', 'data', 'etc',
             'home', 'home/user', 'tmp']
 
 

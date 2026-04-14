@@ -72,7 +72,7 @@ PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprogr
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
 
-CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o
+CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 
 C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/vz.c programs/crt0_c.c, $(wildcard programs/*.c))
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
@@ -319,7 +319,10 @@ programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hr
 programs/crt0.o: programs/crt0.asm
 	$(AS) -f elf32 $< -o $@
 
-programs/crt0_c.o: programs/crt0_c.c include/os32_kapi_shared.h
+programs/libos32/help.o: programs/libos32/help.c programs/libos32/help.h include/os32_kapi_shared.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/crt0_c.o: programs/crt0_c.c programs/libos32/help.h include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_shared.h
@@ -387,6 +390,9 @@ deploy: kernel.bin programs unicode_bin
 	$(NHD_DEPLOY) copy --dest /sbin $(SBIN_PROGRAMS)
 	$(NHD_DEPLOY) copy --dest /usr/bin $(USR_BIN_PROGRAMS)
 	$(NHD_DEPLOY) copy --dest /data unicode.bin
+	@if [ -d docs/manpages ] && ls docs/manpages/*.1 1>/dev/null 2>&1; then \
+		$(NHD_DEPLOY) copy --dest /usr/man $(shell ls docs/manpages/*.1 2>/dev/null); \
+	fi
 	$(NHD_DEPLOY) deploy
 
 # dp-<name>: 個別プログラムのビルド → NHDコピー → NP21/Wデプロイ
@@ -419,7 +425,7 @@ nhd-init:
 	$(NHD_DEPLOY) init
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 

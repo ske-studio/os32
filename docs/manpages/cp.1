@@ -1,0 +1,23 @@
+# cp
+
+ファイルをコピーする
+
+## SYNOPSIS
+
+`cp SRC DST`
+`cp SRC... DIR`
+
+## DESCRIPTION
+
+ファイルをコピーする。
+宛先がディレクトリの場合、元ファイル名でそのディレクトリ内にコピーする。
+複数ファイルを指定する場合、最後の引数はディレクトリでなければならない。
+
+## EXAMPLES
+
+- `cp file.txt backup.txt` — ファイルをコピー
+- `cp *.txt /tmp/` — 複数ファイルをディレクトリにコピー
+
+## SEE ALSO
+
+mv, rm

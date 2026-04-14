@@ -1,0 +1,25 @@
+# mount
+
+ファイルシステムをマウントする
+
+## SYNOPSIS
+
+`mount PREFIX DEVICE FS_TYPE`
+
+## DESCRIPTION
+
+指定されたデバイスのファイルシステムを指定のプレフィックスにマウントする。
+
+## OPTIONS
+
+- `PREFIX` — マウントポイント (例: `/mnt`)
+- `DEVICE` — デバイス名 (例: `hd0`, `fd0`)
+- `FS_TYPE` — ファイルシステム種別 (`ext2`, `fat12`, `serialfs`)
+
+## EXAMPLES
+
+- `mount /mnt hd0 ext2` — HDDのext2をマウント
+
+## SEE ALSO
+
+umount

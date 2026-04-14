@@ -1,0 +1,23 @@
+# grep
+
+パターンにマッチする行を検索・表示する
+
+## SYNOPSIS
+
+`grep PATTERN [FILE...]`
+
+## DESCRIPTION
+
+指定されたファイル (またはパイプ入力) から、
+PATTERN を含む行を検索して表示する。
+複数ファイル指定時はファイル名も表示する。
+
+## EXAMPLES
+
+- `grep error log.txt` — log.txt から "error" を含む行を表示
+- `cat log.txt | grep warning` — パイプ経由で検索
+- `grep TODO *.c` — 複数ファイルから検索
+
+## SEE ALSO
+
+head, tail, wc, cat

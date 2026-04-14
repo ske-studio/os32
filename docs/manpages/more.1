@@ -1,0 +1,32 @@
+# more
+
+テキストをページ単位で表示するページャー
+
+## SYNOPSIS
+
+`more [FILE]`
+`cmd | more`
+
+## DESCRIPTION
+
+テキストを画面サイズに合わせて1ページずつ表示する。
+ファイル引数を指定するか、パイプからの入力を受け取る。
+
+画面下部に `--More-- (XX%)` プロンプトが表示され、
+キー入力で表示を制御する。
+
+## KEY BINDINGS
+
+- `Space` — 次のページを表示
+- `Enter` — 次の1行を表示
+- `q` / `ESC` — 終了
+
+## EXAMPLES
+
+- `more readme.txt` — ファイルをページ表示
+- `man cat | more` — manページをページ表示
+- `ls -l /bin | more` — コマンド出力をページ表示
+
+## SEE ALSO
+
+man, cat, head, tail
