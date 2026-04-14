@@ -6,6 +6,7 @@
 /* ======================================================================== */
 
 #include "vfs.h"
+#include "fd_redirect.h"
 #include "os32_kapi_shared.h" /* O_RDONLY, SEEK_SET 等 */
 #include "console.h"
 #include "kbd.h"
@@ -122,10 +123,17 @@ int vfs_read_fd(int fd, void *buf, u32 size)
     VfsFile *f;
 
     if (fd == 0) {
-        u8 *p = (u8 *)buf;
-        u32 i;
-        for (i = 0; i < size; i++) p[i] = (u8)kbd_getchar();
-        return size;
+        /* リダイレクト中ならリダイレクト先から読む */
+        if (fd_is_redirected(0)) {
+            return fd_redirect_read(0, buf, size);
+        }
+        /* デフォルト: キーボードから1文字ずつ読む */
+        {
+            u8 *p = (u8 *)buf;
+            u32 i;
+            for (i = 0; i < size; i++) p[i] = (u8)kbd_getchar();
+            return size;
+        }
     }
     if (fd == 1 || fd == 2) return VFS_ERR_INVAL;
 
@@ -156,6 +164,11 @@ int vfs_write_fd(int fd, const void *buf, u32 size)
     VfsFile *f;
 
     if (fd == 1 || fd == 2) {
+        /* リダイレクト中ならリダイレクト先へ書く */
+        if (fd_is_redirected(fd)) {
+            return fd_redirect_write(fd, buf, size);
+        }
+        /* デフォルト: コンソール出力 */
         console_write((const char *)buf, size, ATTR_WHITE);
         return size;
     }
@@ -221,6 +234,8 @@ u32 vfs_get_size(int fd)
 int vfs_isatty(int fd)
 {
     if (fd == 0 || fd == 1 || fd == 2) {
+        /* リダイレクト中はTTYではない */
+        if (fd_is_redirected(fd)) return 0;
         return 1;
     }
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;

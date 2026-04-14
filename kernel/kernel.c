@@ -34,6 +34,8 @@
 #include "config.h"
 #include "sys.h"
 #include "ime.h"
+#include "fd_redirect.h"
+#include "pipe_buffer.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -230,6 +232,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
+
+    /* FDリダイレクト初期化 (プログラムローダーより前に) */
+    fd_redirect_init();
+
+    /* パイプバッファ初期化 */
+    pipe_buffer_init();
 
     /* プログラムローダー初期化 (KernelAPIテーブル構築) */
     tvram_print(48, 2, "EXEC...", TATTR_GREEN);
