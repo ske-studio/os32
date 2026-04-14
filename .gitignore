@@ -43,3 +43,18 @@ test_rect.script
 *.vqi
 *.VQI
 rance.png
+
+# ルートのビルド成果物 (boot/ 配下は追跡対象)
+/boot.bin
+/boot_fat.bin
+/boot_hdd.bin
+/loader.bin
+/loader_hdd.bin
+/cat
+
+# ワークエリア・テスト用ディレクトリ
+/mount/
+/sample/
+/tasks/
+/tests/
+/shared.vqd

@@ -45,7 +45,7 @@ INC_LIB = $(INC_COMMON) -Ilib
 
 # === コンパイルフラグ ===
 CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon
-LDFLAGS = -m elf_i386 -T os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections
+LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections
 
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
@@ -69,7 +69,7 @@ C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
 PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -I/home/hight/opt/cross/i386-elf/include
-PROGRAM_LDFLAGS = -m elf_i386 -T app.ld -nostdlib --nmagic --gc-sections \
+PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
 
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o
@@ -84,8 +84,8 @@ SHELL_OBJ = $(SHELL_SRC:.c=.o)
 programs/shell/%.o: programs/shell/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/shell.elf: app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
-	$(LD) -m elf_i386 -T app_sys.ld -nostdlib --nmagic --gc-sections -L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
+programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
+	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
 
 # === VZ Editor Module ===
 VZ_SRC = $(wildcard programs/vz/*.c)
@@ -94,7 +94,7 @@ VZ_OBJ = $(VZ_SRC:.c=.o)
 programs/vz/%.o: programs/vz/%.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/vz -c $< -o $@
 
-programs/vz.elf: app.ld $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ)
+programs/vz.elf: build/app.ld $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ) -lc -lgcc
 
 # === SKK Module ===
@@ -107,7 +107,7 @@ programs/skk/%.o: programs/skk/%.c
 programs/skk_test.o: programs/skk_test.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/skk_test.elf: app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
+programs/skk_test.elf: build/app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
 
 # === FEP Test Module ===
@@ -117,7 +117,7 @@ lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
 programs/fep_test.o: programs/fep_test.c lib/fep_engine.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/fep_test.elf: app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o
+programs/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
 
 fep_test: $(CRT0_OBJ) programs/fep_test.bin
@@ -153,7 +153,7 @@ BENCH_OBJ = $(BENCH_SRC:.c=.o)
 programs/bench/%.o: programs/bench/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/bench.elf: app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
+programs/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
 
 bench: $(CRT0_OBJ) programs/bench.bin
@@ -165,7 +165,7 @@ programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 programs/gfx_demo.o: programs/gfx_demo.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/gfx_demo.elf: app.ld $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ)
+programs/gfx_demo.elf: build/app.ld $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ) -lc -lgcc
 
 gfx_demo: $(CRT0_OBJ) programs/gfx_demo.bin
@@ -174,7 +174,7 @@ gfx_demo: $(CRT0_OBJ) programs/gfx_demo.bin
 programs/demo1.o: programs/demo1.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/demo1.elf: app.ld $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ)
+programs/demo1.elf: build/app.ld $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ) -lc -lgcc
 
 demo1: $(CRT0_OBJ) programs/demo1.bin
@@ -260,7 +260,7 @@ skk: $(CRT0_OBJ) programs/skk_test.bin lzss_dict
 programs/spr_test.o: programs/spr_test.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/spr_test.elf: app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
+programs/spr_test.elf: build/app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ) -lc -lgcc
 
 spr_test: $(CRT0_OBJ) programs/spr_test.bin
@@ -269,7 +269,7 @@ spr_test: $(CRT0_OBJ) programs/spr_test.bin
 programs/vdpview.o: programs/vdpview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/vdpview.elf: app.ld $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ)
+programs/vdpview.elf: build/app.ld $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ) -lc -lgcc
 
 vdpview: $(CRT0_OBJ) programs/vdpview.bin
@@ -278,7 +278,7 @@ vdpview: $(CRT0_OBJ) programs/vdpview.bin
 programs/hrview.o: programs/hrview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/hrview.elf: app.ld $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ)
+programs/hrview.elf: build/app.ld $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ) -lc -lgcc
 
 hrview: $(CRT0_OBJ) programs/hrview.bin
@@ -287,7 +287,7 @@ hrview: $(CRT0_OBJ) programs/hrview.bin
 programs/raster.o: programs/raster.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/raster.elf: app.ld $(CRT0_OBJ) programs/raster.o $(GFX_OBJ)
+programs/raster.elf: build/app.ld $(CRT0_OBJ) programs/raster.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/raster.o $(GFX_OBJ) -lc -lgcc
 
 raster: $(CRT0_OBJ) programs/raster.bin
@@ -296,7 +296,7 @@ raster: $(CRT0_OBJ) programs/raster.bin
 programs/ekakiuta.o: programs/ekakiuta.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/ekakiuta.elf: app.ld $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ)
+programs/ekakiuta.elf: build/app.ld $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ) -lc -lgcc
 
 ekakiuta: $(CRT0_OBJ) programs/ekakiuta.bin
@@ -305,7 +305,7 @@ ekakiuta: $(CRT0_OBJ) programs/ekakiuta.bin
 programs/vbzview.o: programs/vbzview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/vbzview.elf: app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ)
+programs/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) -lc -lgcc
 
 vbzview: $(CRT0_OBJ) programs/vbzview.bin
@@ -325,7 +325,7 @@ programs/crt0_c.o: programs/crt0_c.c include/os32_kapi_shared.h
 programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/%.elf: programs/%.c app.ld $(CRT0_OBJ)
+programs/%.elf: programs/%.c build/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/$*.o -lc -lgcc
 
