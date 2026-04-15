@@ -22,6 +22,7 @@ import os
 import struct
 import time
 import glob
+import yaml
 
 # === 設定 ===
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -332,24 +333,50 @@ def main():
             sys.exit(1)
         print(f"  {os.path.basename(f)}: {os.path.getsize(f)} bytes")
     
-    # プログラムファイルを収集
-    prog_dir = os.path.join(PROJ_DIR, 'programs')
-    file_list = []  # (name, data)
-    
-    for p in sorted(glob.glob(os.path.join(prog_dir, '*.bin'))):
-        basename = os.path.basename(p).lower()
-        with open(p, 'rb') as pf:
-            file_list.append((basename, pf.read()))
-        print(f"  {basename}: {os.path.getsize(p)} bytes")
-    
-    # テスト・辞書ファイル
-    for extra in ['programs/test.txt', 'programs/test_utf8.txt', 'assets/SKK.LZS']:
-        epath = os.path.join(PROJ_DIR, extra)
-        if os.path.exists(epath):
-            ename = os.path.basename(epath).lower()
-            with open(epath, 'rb') as ef:
-                file_list.append((ename, ef.read()))
-            print(f"  {ename}: {os.path.getsize(epath)} bytes")
+    # deploy.yaml からファイルリストを収集
+    deploy_yaml = os.path.join(PROJ_DIR, 'tools', 'deploy.yaml')
+    if not os.path.isfile(deploy_yaml):
+        print(f"エラー: {deploy_yaml} が見つかりません")
+        sys.exit(1)
+
+    with open(deploy_yaml, 'r', encoding='utf-8') as yf:
+        cfg = yaml.safe_load(yf)
+
+    file_list = []  # (guest_name, data)
+    fs_files = cfg.get('filesystem', {}).get('files', [])
+
+    for entry in fs_files:
+        host_pattern = entry['host']
+        guest = entry['guest']
+        entry_type = entry.get('type', 'file')
+        exclude = entry.get('exclude', [])
+
+        if entry_type == 'glob':
+            pattern = os.path.join(PROJ_DIR, host_pattern)
+            for p in sorted(glob.glob(pattern)):
+                basename = os.path.basename(p)
+                if basename in exclude:
+                    continue
+                if not os.path.isfile(p):
+                    continue
+                # ゲストパスからファイル名を生成
+                if guest.endswith('/'):
+                    gname = (guest + basename).lstrip('/').lower()
+                else:
+                    gname = guest.lstrip('/').lower()
+                with open(p, 'rb') as pf:
+                    file_list.append((gname, pf.read()))
+                print(f"  {gname}: {os.path.getsize(p)} bytes")
+        else:
+            fpath = os.path.join(PROJ_DIR, host_pattern)
+            if os.path.isfile(fpath):
+                # ゲストパスからファイル名を生成
+                gname = guest.lstrip('/').lower()
+                with open(fpath, 'rb') as pf:
+                    file_list.append((gname, pf.read()))
+                print(f"  {gname}: {os.path.getsize(fpath)} bytes")
+            else:
+                print(f"  Warning: {host_pattern} not found, skipping")
     
     print(f"\n合計 {len(file_list)} ファイル")
     
