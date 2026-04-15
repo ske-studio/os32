@@ -20,6 +20,11 @@
 #define MAX_CMDS 128
 #define PATH_MAX_LEN OS32_MAX_PATH
 
+/* スクリプトエンジン定数 */
+#define SCRIPT_MAX_LINES  256   /* スクリプト最大行数 */
+#define SCRIPT_MAX_LINE   256   /* 1行の最大長 */
+#define SCRIPT_MAX_DEPTH  4     /* source ネスト上限 */
+
 /* コマンドハンドラ関数の型 */
 typedef void (*CmdHandler)(int argc, char **argv);
 
@@ -60,6 +65,7 @@ void shell_cmd_mnt_init(void);
 void shell_cmd_sys_init(void);
 void shell_rshell_init(void);
 void shell_cmd_env_init(void);
+void shell_cmd_script_init(void);
 
 /* 環境変数 (cmd_env.c) */
 void env_init(void);
@@ -70,5 +76,8 @@ int  env_expand(const char *src, char *dst, int max);
 
 /* PATH検索 (main.c) */
 const char *shell_get_path(void);
+
+/* スクリプトエンジン (cmd_script.c) */
+int script_source_file(const char *path);
 
 #endif /* SHELL_H */

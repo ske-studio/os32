@@ -30,6 +30,7 @@ int main(int argc, char **argv, KernelAPI *api)
     shell_cmd_sys_init();
     shell_rshell_init();
     shell_cmd_env_init();
+    shell_cmd_script_init();
 
     /* メインループ開始 (ui.c) */
     shell_run();
@@ -263,6 +264,20 @@ static void run_cmd_internal(int argc, char **argv) {
         return;
     }
 
+    /* 0. .bat/.sh 拡張子 → 暗黙的に source として実行 */
+    {
+        int len = 0;
+        const char *s = argv[0];
+        while (s[len]) len++;
+        if ((len >= 4 && s[len-4]=='.' && s[len-3]=='b' &&
+             s[len-2]=='a' && s[len-1]=='t') ||
+            (len >= 3 && s[len-3]=='.' && s[len-2]=='s' &&
+             s[len-1]=='h')) {
+            script_source_file(argv[0]);
+            return;
+        }
+    }
+
     /* 1. 内部コマンドの検索 */
     for (j = 0; j < g_cmd_count; j++) {
         if (str_eq(argv[0], g_cmds[j].name)) {
@@ -483,9 +498,9 @@ static void reset_all_redirects(void)
 /* ======================================================================== */
 static void execute_single(const char *cmd)
 {
-    char tmp_buf[CMD_BUF_SIZE];
-    char *argv[MAX_ARGS];
-    char *allocated_strings[MAX_ARGS];
+    static char tmp_buf[CMD_BUF_SIZE];
+    static char *argv[MAX_ARGS];
+    static char *allocated_strings[MAX_ARGS];
     int alloc_count = 0;
     int argc = 0, j;
     char *p;
@@ -553,7 +568,7 @@ static int split_pipeline(const char *cmd, char segments[][CMD_BUF_SIZE], int ma
 /* ======================================================================== */
 void execute_command(const char *cmd)
 {
-    char expanded_buf[CMD_BUF_SIZE];
+    static char expanded_buf[CMD_BUF_SIZE];
     const char *src;
     int has_pipe = 0;
 
