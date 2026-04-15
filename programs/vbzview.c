@@ -16,6 +16,10 @@
 /*    -o : アウトラインのみ (塗りつぶしなし)                                */
 /* ======================================================================== */
 
+/* ---- デバッグシリアル (リリース時はこの行をコメントアウト) ---- */
+#define OS32_DBG_SERIAL
+#include "libos32/dbgserial.h"
+
 #include <stdio.h>
 #include <string.h>
 #include "os32api.h"
@@ -367,6 +371,9 @@ void main(int argc, char **argv, KernelAPI *kapi)
 
     api = kapi;
 
+    /* デバッグシリアル初期化 */
+    dbg_init(api);
+
     /* 引数解析 */
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-k") == 0) {
@@ -388,8 +395,10 @@ void main(int argc, char **argv, KernelAPI *kapi)
     }
 
     /* ファイルオープン & 全体読み込み */
+    DBGF("[vbzview] open: %s", filename);
     fd = api->sys_open(filename, O_RDONLY);
     if (fd < 0) {
+        DBG("[vbzview] ERROR: sys_open failed");
         api->kprintf(ATTR_WHITE, "Error: cannot open %s\n", filename);
         return;
     }
@@ -417,13 +426,33 @@ void main(int argc, char **argv, KernelAPI *kapi)
 
     /* ヘッダ解析 */
     if (parse_vbz_header(file_data, &info) < 0) {
+        DBG("[vbzview] ERROR: invalid VBZ header");
         api->kprintf(ATTR_WHITE, "%s", "Error: not a VBZ file\n");
         api->mem_free(file_data);
         return;
     }
 
+    DBGF("[vbzview] VBZ: %dx%d, colors=%d, paths=%d, file_size=%d",
+         (int)info.width, (int)info.height,
+         (int)info.num_colors, (int)info.num_paths, file_size);
     api->kprintf(ATTR_WHITE, "VBZ: %dx%d, %d colors, %d paths\n",
                  info.width, info.height, info.num_colors, info.num_paths);
+
+    /* ---- メモリダンプテスト ---- */
+    DBG("[vbzview] === memdump test ===");
+    /* テスト1: KAPIテーブル先頭 (0x189000付近, PRESENT) */
+    DBGF("[vbzview] KAPI table at %p", (void *)api);
+    DBG_DUMPN(api, 64);
+    /* テスト2: VBZファイルヘッダ (ユーザ空間, PRESENT) */
+    DBG("[vbzview] VBZ file header:");
+    DBG_DUMPN(file_data, 128);
+    /* テスト3: ガードページ (BLOCKED: blacklist) */
+    DBG("[vbzview] guard page test (should be BLOCKED):");
+    DBG_DUMP(0x8F000);
+    /* テスト4: 未実装メモリ (BLOCKED: NOT PRESENT) */
+    DBG("[vbzview] unmapped memory test (should be BLOCKED):");
+    DBG_DUMP(0xF00000);
+    DBG("[vbzview] === memdump test done ===");
 
     /* GFX初期化 (gfx_apiを設定するため、先に呼ぶ) */
     libos32gfx_init(api);
@@ -447,7 +476,9 @@ void main(int argc, char **argv, KernelAPI *kapi)
     zoom_level = 0;
 
     /* 初回描画 */
+    DBG("[vbzview] render start (initial)");
     render_paths(file_data, file_size, &info, outline_only, info.flags);
+    DBG("[vbzview] render done");
 
     /* キーバッファをフラッシュ */
     {
@@ -469,6 +500,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
 
         } else if (ch == 'z' || ch == 'Z' || ch == '+') {
             /* ズームイン */
+            DBG("[vbzview] zoom in");
             if (zoom_level < 4) {
                 int cx = g_view_x + g_view_w / 2;
                 int cy = g_view_y + g_view_h / 2;
@@ -484,6 +516,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
 
         } else if (ch == 'x' || ch == 'X' || ch == '-') {
             /* ズームアウト */
+            DBG("[vbzview] zoom out");
             if (zoom_level > 0) {
                 int cx = g_view_x + g_view_w / 2;
                 int cy = g_view_y + g_view_h / 2;
@@ -523,6 +556,8 @@ void main(int argc, char **argv, KernelAPI *kapi)
         }
 
         if (need_render) {
+            DBGF("[vbzview] re-render: view=(%d,%d) %dx%d zoom=%d",
+                 g_view_x, g_view_y, g_view_w, g_view_h, zoom_level);
             render_paths(file_data, file_size, &info, outline_only, info.flags);
         }
     }
@@ -537,6 +572,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
         api->gfx_present_dirty();
     }
 
+    DBG("[vbzview] exit");
     libos32gfx_shutdown();
     api->tvram_clear();
 }
