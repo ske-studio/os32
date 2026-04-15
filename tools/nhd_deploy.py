@@ -559,6 +559,166 @@ def do_sync(tag_filter=None):
     return True
 
 
+def resolve_guest_path(host_file):
+    """deploy.yaml からホストファイルに対応するゲストパスを解決する
+
+    Returns: ゲストパス文字列 (見つからなければ None)
+    """
+    cfg = load_deploy_yaml()
+    if cfg is None:
+        return None
+
+    basename = os.path.basename(host_file)
+    fs = cfg.get('filesystem', {})
+    files = fs.get('files', [])
+
+    for entry in files:
+        entry_type = entry.get('type', 'file')
+        exclude = entry.get('exclude', [])
+        guest = entry['guest']
+
+        if entry_type == 'glob':
+            # glob パターンにマッチするか確認
+            import fnmatch
+            host_pattern = entry['host']
+            pattern_basename = os.path.basename(host_pattern)
+            if fnmatch.fnmatch(basename, pattern_basename):
+                if basename in exclude:
+                    continue
+                if guest.endswith('/'):
+                    return guest + basename
+                else:
+                    return guest
+        else:
+            # 完全一致
+            if os.path.basename(entry['host']) == basename:
+                return guest
+
+    return None
+
+
+def do_push(local_path, remote_name=None, resolve=False):
+    """シリアル経由ホットデプロイ (再起動不要)
+
+    名前付きパイプ経由で rshell の upload コマンドを使い、
+    実行中の OS32 にファイルを転送する。
+
+    Args:
+        local_path: ホスト側ファイルパス
+        remote_name: ゲスト側ファイル名 (Noneならbasenameを使用)
+        resolve: Trueなら deploy.yaml からゲストパスを自動解決
+    """
+    PIPE_NAME = 'np21w_com1'
+
+    if not os.path.isfile(local_path):
+        print("Error: {} が見つかりません".format(local_path), file=sys.stderr)
+        return False
+
+    # ゲストパス解決
+    if resolve:
+        guest_path = resolve_guest_path(local_path)
+        if guest_path:
+            remote_name = guest_path.lstrip('/')
+            print("deploy.yaml から解決: {} -> /{}".format(
+                os.path.basename(local_path), remote_name))
+        else:
+            print("Warning: deploy.yaml にマッチなし、ファイル名をそのまま使用")
+            remote_name = os.path.basename(local_path)
+    elif remote_name is None:
+        remote_name = os.path.basename(local_path)
+
+    with open(local_path, 'rb') as f:
+        data = f.read()
+
+    size = len(data)
+    size_hex = format(size, 'x')
+    hex_data = data.hex()
+
+    print("Push: {} ({} bytes) -> /{}".format(
+        os.path.basename(local_path), size, remote_name))
+
+    cmd_str = " upload {} {}".format(remote_name, size_hex)
+    cmd_bytes = cmd_str.encode('ascii') + b'\n'
+    hex_bytes_data = hex_data.encode('ascii')
+
+    # 全送信データを一時ファイルに保存
+    all_data = cmd_bytes + hex_bytes_data
+    tmp_path = '/mnt/c/WATCOM/tmp_upload.bin'
+    win_tmp_path = 'C:\\WATCOM\\tmp_upload.bin'
+
+    with open(tmp_path, 'wb') as f:
+        f.write(all_data)
+
+    cmd_len = len(cmd_bytes)
+
+    # PowerShellスクリプト: 名前付きパイプ経由で送信
+    ps = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try {{ "
+        "  $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', "
+        "'{pipe}', [System.IO.Pipes.PipeDirection]::InOut); "
+        "  $pipe.Connect(5000); "
+        "  $data = [System.IO.File]::ReadAllBytes('{tmp}'); "
+        "  $pipe.Write($data, 0, {cmd_len}); "
+        "  $pipe.Flush(); "
+        "  Start-Sleep -Milliseconds 500; "
+        "  for ($i = {cmd_len}; $i -lt $data.Length; $i += 64) {{ "
+        "    $end = [Math]::Min($i + 64, $data.Length); "
+        "    $len = $end - $i; "
+        "    $pipe.Write($data, $i, $len); "
+        "    if (($i % 1024) -eq 0) {{ $pipe.Flush(); Start-Sleep -Milliseconds 2; }} "
+        "  }}; "
+        "  $pipe.Flush(); "
+        "  $buf = New-Object byte[] 1; "
+        "  $sb = New-Object System.Text.StringBuilder; "
+        "  $timeout = [DateTime]::Now.AddSeconds(8); "
+        "  while ([DateTime]::Now -lt $timeout) {{ "
+        "    if ($pipe.Read($buf, 0, 1) -gt 0) {{ "
+        "      if ($buf[0] -eq 4) {{ break; }} "
+        "      [void]$sb.Append([char]$buf[0]); "
+        "      $timeout = [DateTime]::Now.AddSeconds(3); "
+        "    }} "
+        "  }}; "
+        "  Write-Host $sb.ToString(); "
+        "  $pipe.Close(); "
+        "}} catch {{ "
+        "  Write-Host ('ERROR: ' + $_); "
+        "}}"
+    ).format(pipe=PIPE_NAME, tmp=win_tmp_path, cmd_len=cmd_len)
+
+    print("転送中...")
+    try:
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-Command', ps],
+            capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        print("Error: タイムアウト (60秒)", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("Error: powershell.exe が見つかりません", file=sys.stderr)
+        return False
+
+    # 一時ファイル削除
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+
+    output = result.stdout.strip()
+    if output:
+        print(output)
+
+    if 'OK' in output:
+        print("Push 成功: /{} ({} bytes)".format(remote_name, size))
+        return True
+    else:
+        print("Push 失敗の可能性があります")
+        if result.stderr:
+            print("stderr: {}".format(result.stderr.strip()))
+        return False
+
+
 def main():
     if len(sys.argv) < 2:
         print("NHD ext2 Deploy Tool (mount版)")
@@ -566,6 +726,7 @@ def main():
         print("使い方: {} <command>".format(sys.argv[0]))
         print("")
         print("  sync [--tag TAG]       — deploy.yaml に基づくフルデプロイ")
+        print("  push [--resolve] <file> [guest] — シリアル経由ホットデプロイ (再起動不要)")
         print("  mount                  — ext2パーティションをマウント")
         print("  umount                 — アンマウント")
         print("  copy [--dest DIR] [--rename NAME] <src> [...] — ファイルをext2にコピー")
@@ -678,6 +839,25 @@ def main():
             else:
                 i += 1
         do_sync(tag_filter=tag_filter)
+
+    elif cmd == 'push':
+        # --resolve オプションをパース
+        resolve = False
+        args = []
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == '--resolve':
+                resolve = True
+                i += 1
+            else:
+                args.append(sys.argv[i])
+                i += 1
+        if not args:
+            print("Usage: push [--resolve] <local_file> [guest_name]")
+            return
+        local_file = args[0]
+        guest_name = args[1] if len(args) > 1 else None
+        do_push(local_file, remote_name=guest_name, resolve=resolve)
 
     else:
         print("Unknown command: {}".format(cmd))
