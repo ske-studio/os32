@@ -1,14 +1,16 @@
 /* ======================================================================== */
 /*  PIPE_BUFFER.C -- パイプバッファ管理                                       */
 /*                                                                          */
-/*  シングルタスクOS向けの静的パイプバッファ。                                */
-/*  kmalloc の代わりに静的配列を使用 (カーネルBSS内に配置)。                  */
+/*  シングルタスクOS向けのパイプバッファ。                                    */
+/*  kmalloc で動的確保し、使用後に kfree で解放する。                          */
+/*  静的配列を廃止し BSS を 128KB 削減。                                      */
 /* ======================================================================== */
 
 #include "pipe_buffer.h"
+#include "kmalloc.h"
 
-/* 静的パイプバッファ (BSS領域、kentry.asmでゼロクリア済み) */
-static u8 pipe_data[PIPE_BUF_COUNT][PIPE_BUF_SIZE];
+/* パイプバッファ管理構造 (ポインタ + メタデータのみ。BSS = 数十バイト) */
+static u8 *pipe_ptr[PIPE_BUF_COUNT];
 static u32 pipe_len[PIPE_BUF_COUNT];
 static int pipe_used[PIPE_BUF_COUNT];
 
@@ -16,6 +18,7 @@ void pipe_buffer_init(void)
 {
     int i;
     for (i = 0; i < PIPE_BUF_COUNT; i++) {
+        pipe_ptr[i] = (u8 *)0;
         pipe_used[i] = 0;
         pipe_len[i] = 0;
     }
@@ -26,6 +29,11 @@ int pipe_alloc(void)
     int i;
     for (i = 0; i < PIPE_BUF_COUNT; i++) {
         if (!pipe_used[i]) {
+            /* 使用時に kmalloc で動的確保 */
+            pipe_ptr[i] = (u8 *)kmalloc(PIPE_BUF_SIZE);
+            if (!pipe_ptr[i]) {
+                return -1;  /* メモリ不足 */
+            }
             pipe_used[i] = 1;
             pipe_len[i] = 0;
             return i;
@@ -37,6 +45,10 @@ int pipe_alloc(void)
 void pipe_free(int id)
 {
     if (id >= 0 && id < PIPE_BUF_COUNT) {
+        if (pipe_ptr[id]) {
+            kfree(pipe_ptr[id]);
+            pipe_ptr[id] = (u8 *)0;
+        }
         pipe_used[id] = 0;
         pipe_len[id] = 0;
     }
@@ -44,15 +56,15 @@ void pipe_free(int id)
 
 u8 *pipe_get_buf(int id)
 {
-    if (id >= 0 && id < PIPE_BUF_COUNT) {
-        return pipe_data[id];
+    if (id >= 0 && id < PIPE_BUF_COUNT && pipe_ptr[id]) {
+        return pipe_ptr[id];
     }
     return (u8 *)0;
 }
 
 u32 pipe_get_capacity(int id)
 {
-    if (id >= 0 && id < PIPE_BUF_COUNT) {
+    if (id >= 0 && id < PIPE_BUF_COUNT && pipe_ptr[id]) {
         return PIPE_BUF_SIZE;
     }
     return 0;

@@ -31,7 +31,7 @@ INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
 INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs
 
 # FS: 共通 + 自身 + ドライバ (disk/ide依存)
-INC_FS = $(INC_COMMON) -Ifs -Idrivers
+INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel
 
 
 # exec: 共通 + exec + kapi + fs + gfx + ドライバ (kbd依存)
@@ -73,6 +73,7 @@ PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
 
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
+DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/vz.c programs/crt0_c.c, $(wildcard programs/*.c))
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
@@ -333,7 +334,7 @@ mdview: $(CRT0_OBJ) programs/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
+programs: $(DBG_OBJ) programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -348,10 +349,7 @@ programs/crt0_c.o: programs/crt0_c.c programs/libos32/help.h include/os32_kapi_s
 programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-# === デバッグシリアルライブラリ (libos32/dbgserial) ===
-# 使い方: デバッグ対象のプログラムのリンク行に $(DBG_OBJ) を追加
-# リリース時は $(DBG_OBJ) をリンクから外すだけでゼロコスト
-DBG_OBJ = programs/libos32/dbgserial.o
+# $(DBG_OBJ) は上部の変数定義セクションで定義済み
 
 programs/libos32/dbgserial.o: programs/libos32/dbgserial.c programs/libos32/dbgserial.h include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
