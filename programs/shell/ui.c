@@ -348,36 +348,33 @@ void shell_run(void) {
     g_api->kprintf(ATTR_CYAN, "%s", " OS32 External Shell Started\n");
     g_api->kprintf(ATTR_CYAN, "%s", "================================\n");
 
-    /* .profile の読み込み */
+    /* === スタートアップスクリプト === */
+    /* 1. /etc/profile — システム全体の初期化 (旧autoexec.binの後継) */
+    {
+        int sfd = g_api->sys_open("/etc/profile", KAPI_O_RDONLY);
+        if (sfd >= 0) {
+            g_api->sys_close(sfd);
+            script_source_file("/etc/profile");
+        }
+    }
+
+    /* 2. $HOME/.profile — ユーザー個人の設定 */
     {
         const char *home = env_get("HOME");
         if (home) {
             char profile_path[PATH_MAX_LEN];
-            char profile_buf[2048];
-            int pi = 0, sz;
+            int pi = 0;
             const char *h = home;
             while (*h && pi < PATH_MAX_LEN - 12) profile_path[pi++] = *h++;
             if (pi > 0 && profile_path[pi - 1] != '/') profile_path[pi++] = '/';
             { const char *pn = ".profile"; while (*pn) profile_path[pi++] = *pn++; }
             profile_path[pi] = '\0';
 
-            sz = g_api->sys_read(profile_path, profile_buf, (int)sizeof(profile_buf) - 1);
-            if (sz > 0) {
-                int li = 0;
-                char line[CMD_BUF_SIZE];
-                int bi;
-                profile_buf[sz] = '\0';
-                for (bi = 0; bi <= sz; bi++) {
-                    if (profile_buf[bi] == '\n' || profile_buf[bi] == '\0') {
-                        line[li] = '\0';
-                        /* コメント行・空行をスキップ */
-                        if (li > 0 && line[0] != '#') {
-                            execute_command(line);
-                        }
-                        li = 0;
-                    } else if (li < CMD_BUF_SIZE - 1) {
-                        line[li++] = profile_buf[bi];
-                    }
+            {
+                int ufd = g_api->sys_open(profile_path, KAPI_O_RDONLY);
+                if (ufd >= 0) {
+                    g_api->sys_close(ufd);
+                    script_source_file(profile_path);
                 }
             }
         }
