@@ -27,7 +27,9 @@
 #include "vfs.h"
 #include "fat12.h"
 #include "ext2.h"
+#ifdef CONFIG_SERIALFS
 #include "serialfs.h"
+#endif
 #include "tvram.h"
 #include "pc98.h"
 #include "memmap.h"
@@ -126,7 +128,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     path_init();
     fat12_init();
     ext2_init();
+#ifdef CONFIG_SERIALFS
     serialfs_init();
+#endif
     path_set_device_validator(dev_find_validator);
     tvram_print(64, 1, "OK", TATTR_WHITE);
 
@@ -262,16 +266,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(71, 2, "IRQ_EN", TATTR_YELLOW);
     _enable();
 
-    /* autoexec: HDDマウント成功時に実行 */
-    {
-        char probe[4];
-        int sz = vfs_read(SYS_AUTOEXEC_BIN, probe, 4);
-        if (sz > 0) {
-            tvram_print(0, 5, "autoexec.bin...", TATTR_GREEN);
-            exec_run(SYS_AUTOEXEC_BIN);
-            tvram_print(15, 5, "done", TATTR_WHITE);
-        }
-    }
+    /* autoexec: シェルスクリプト(/etc/autoexec.bat)に移行済み。
+     * シェル起動後に ui.c から script_source_file() で実行される。 */
 
     /* ブートスプラッシュ表示 (カーネル内蔵) */
     boot_splash();

@@ -11,7 +11,12 @@
 /*  スタートアップ設定                                                       */
 /* ====================================================================== */
 #define SYS_SHELL_BIN         "/shell"         /* システムシェル */
-#define SYS_AUTOEXEC_BIN      "/autoexec.bin"  /* 自動実行スクリプト */
+#define SYS_PROFILE_SYS       "/etc/profile"       /* システムプロファイル */
 #define SYS_UNICODE_BIN       "/data/unicode.bin"  /* Unicodeテーブル */
+
+/* ====================================================================== */
+/*  オプション機能                                                           */
+/* ====================================================================== */
+/* #define CONFIG_SERIALFS */   /* SerialFS (RS-232C経由FS) を有効にする */
 
 #endif /* CONFIG_H */

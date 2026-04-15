@@ -2,6 +2,10 @@
 /*  SERIALFS.C — シリアル・リモートファイルシステム実装                     */
 /* ======================================================================== */
 
+#include "config.h"
+
+#ifdef CONFIG_SERIALFS
+
 #include "serialfs.h"
 #include "../drivers/serial.h"
 #include "../lib/lzss.h"
@@ -514,3 +518,5 @@ void serialfs_init(void)
 {
     vfs_register_fs(&g_serialfs_ops);
 }
+
+#endif /* CONFIG_SERIALFS */
