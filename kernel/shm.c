@@ -165,3 +165,27 @@ int shm_free(void *ptr)
 
     return 0;
 }
+
+/* ======================================================================== */
+/*  shm_cleanup_all — 全ブロックを強制解放 (プログラム終了時の安全網)        */
+/*  プログラムがshm_free()を呼び忘れても、exec_exit()で自動回収する。        */
+/* ======================================================================== */
+void shm_cleanup_all(void)
+{
+    int i;
+    u32 addr;
+    u32 blk_start;
+
+    for (i = 0; i < SHM_BLOCK_COUNT; i++) {
+        if (shm_state[i] != SHM_FREE) {
+            /* ページ属性をR/Wに戻す */
+            blk_start = block_to_addr(i);
+            for (addr = blk_start; addr < blk_start + SHM_BLOCK_SIZE;
+                 addr += PAGE_SIZE) {
+                paging_set_page(addr, addr, PAGE_RW);
+            }
+            shm_state[i] = SHM_FREE;
+        }
+        shm_block_span[i] = 0;
+    }
+}

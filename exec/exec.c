@@ -10,6 +10,9 @@
 #include "paging.h"
 #include "pgalloc.h"
 #include "fat12.h"
+#include "fd_redirect.h"
+#include "pipe_buffer.h"
+#include "shm.h"
 
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
@@ -73,6 +76,35 @@ void exec_exit(int status)
         if (ctx->exec_heap_base != 0) {
             exec_heap_reset();
         }
+
+        /* ============================================================ */
+        /*  リソース自動クリーンアップ (プログラム終了時の安全網)        */
+        /*  プログラムがclose/reset忘れてもカーネルが回収する            */
+        /* ============================================================ */
+
+        /* (1) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ) */
+        fd_redirect_reset(0);
+        fd_redirect_reset(1);
+        fd_redirect_reset(2);
+
+        /* (2) FD自動クローズ (FD 3以上の全オープンファイル) */
+        {
+            int fd;
+            for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+                vfs_close(fd);
+            }
+        }
+
+        /* (3) パイプバッファ自動解放 (全バッファを解放) */
+        {
+            int pi;
+            for (pi = 0; pi < PIPE_BUF_COUNT; pi++) {
+                pipe_free(pi);
+            }
+        }
+
+        /* (4) 共有メモリ自動解放 (全ブロックの使用中フラグを解除) */
+        shm_cleanup_all();
 
         /* 親レベルへ復帰 */
         exec_nest_level--;

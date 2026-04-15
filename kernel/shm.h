@@ -40,4 +40,7 @@ int shm_lock(void *ptr);
  * 戻り値: 0=成功, -1=不正なポインタ */
 int shm_free(void *ptr);
 
+/* 全ブロックを強制解放 (プログラム終了時のクリーンアップ用) */
+void shm_cleanup_all(void);
+
 #endif /* __SHM_H */
