@@ -1,0 +1,75 @@
+# ============================================================================
+#  OS32 デプロイ定義ファイル (deploy.yaml)
+#
+#  nhd_deploy.py sync  — この定義に基づき NHD を一括構築 (フルデプロイ)
+#  nhd_deploy.py push  — この定義を参照しシリアル経由で転送 (ホットデプロイ)
+#
+#  host: ホスト側パス (プロジェクトルートからの相対パス)
+#  guest: ゲスト側 ext2 配置パス
+#  type: file (デフォルト) / glob
+#  tags: フィルタ用タグ (任意, --tag オプション用)
+# ============================================================================
+
+# ブート領域 (ext2外、NHD直接書き込み)
+boot:
+  kernel: kernel.bin
+  loader: boot/loader_hdd.bin
+
+# ext2 ファイルシステム
+filesystem:
+  # ゲスト側ディレクトリ構造 (自動作成)
+  directories:
+    - /bin
+    - /sbin
+    - /usr
+    - /usr/bin
+    - /usr/man
+    - /data
+    - /etc
+    - /home
+    - /home/user
+    - /tmp
+
+  # ファイルデプロイ定義
+  files:
+    # --- カーネルデータ ---
+    - host: unicode.bin
+      guest: /unicode.bin
+      tags: [core]
+
+    # --- シェル (特別扱い: /shell としてもデプロイ) ---
+    - host: programs/shell.bin
+      guest: /shell.bin
+      tags: [core]
+
+    # --- 外部プログラム → /bin/ ---
+    - host: "programs/*.bin"
+      guest: /bin/
+      type: glob
+      exclude:
+        - shell.bin
+      tags: [programs]
+
+    # --- マニュアルページ → /usr/man/ ---
+    - host: "docs/manpages/*.1"
+      guest: /usr/man/
+      type: glob
+      tags: [docs]
+
+    # --- SKK辞書 ---
+    - host: assets/SKK.LZS
+      guest: /data/skk.lzs
+      tags: [data]
+
+    # --- テスト用ファイル ---
+    - host: programs/test.txt
+      guest: /home/user/test.txt
+      tags: [test]
+
+    - host: programs/test_utf8.txt
+      guest: /home/user/test_utf8.txt
+      tags: [test]
+
+    - host: programs/test_script.bat
+      guest: /home/user/test_script.bat
+      tags: [test]
