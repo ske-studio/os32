@@ -27,6 +27,8 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **VBZベクタグラフィックスパイプライン**: Python側 `img2vbz.py` (potraceベースベクタ化) とPC-98側 `vbzview.bin` (整数演算スキャンラインフィル) によるベクタ画像表示。
 - **ラスタパレット効果**: VSYNC+HBLANK同期による走査線単位パレット書き換え。KernelAPI `gfx_present_raster` と libos32gfx ラッパー。
 - **libos32gfx拡張**: ベジェ曲線、円/丸弧描画、整数sin/cos LUT、BMPsave機能、NASM高速ユーティリティ。
+- **シェルスクリプトエンジン**: `source`/`if`/`goto`/`return`/`ask` コマンドによるバッチスクリプト実行。`/etc/profile` による起動時自動設定。
+- **リソース自動クリーンアップ**: `exec_exit()` でプログラム終了時にFD・パイプ・共有メモリを自動回収。
 
 ---
 
@@ -56,15 +58,22 @@ GCC環境においても既存コードとの互換性のため `-std=gnu89` を
 
 | 範囲 | 用途 | 注意 |
 |------|------|------|
-| 0x00000-0x006FF | BIOS/IVT | 書き換え禁止 |
-| 0x09000- | カーネルコード | 0x90000-0x9FFFCはカーネルスタック |
+| 0x00000-0x00FFF | IVT + BDA | BIOSトランポリン書込有りのためR/W |
+| 0x01000-0x05FFF | BIOS周辺 | R/O |
+| 0x09000-0x3FFFF | カーネルコード | .text+.data+.bss, 0x90000-0x9FFFCはカーネルスタック |
 | 0x40000-0x8EFFF | カーネルヒープ | `kmalloc` 用 (316KB) |
+| 0x8F000-0x8FFFF | カーネルスタックガード | Not-Present |
+| 0x100000-0x1FFFFF | カーネルデータ | フォント/Unicode/GFX BB/KAPI |
 | 0x189000 | KernelAPIテーブル | 固定アドレス |
+| 0x200000-0x241FFF | 共有メモリ | IPC用 256KB + 前後ガードページ |
+| 0x242000-0x2FFFFF | カーネル予約 | Not-Present (将来拡張用) |
+| 0x300000-0x37FFFF | シェル常駐帯域 | shell.bin専用 (512KB, ガードページ付き) |
+| 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
 | 0x400000- | 外部プログラム | コードロード領域 (.text, .data, .bss) |
-| 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, メモリ量に応じて動的計算) |
-| 動的〜 | プログラムスタック | プログラム用スタック (128KB, メモリ終端付近に配置) |
+| 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, 動的計算) |
+| 動的〜 | プログラムスタック | 128KB, メモリ終端付近に配置 |
 
-ガードページ (Not-Present) がそれぞれの境界 (SBRK上限, スタック上限, カーネルスタック上限) に配置されます。
+ガードページ (Not-Present) が各境界 (sbrk上限, スタック上限, カーネルスタック上限, シェルスタック上限, 共有メモリ前後) に配置されます。
 
 - **DMA 64KB境界**: FDD等のDMAバッファは64KB境界をまたいではならない。`disk.c` ではBSS配置により回避。
 
@@ -74,7 +83,7 @@ GCC環境においても既存コードとの互換性のため `-std=gnu89` を
 2. `make all` または `make include/os32_kapi_generated.h` などを実行して、APIメタデータを自動生成。
 3. 必要に応じて、`kapi/` ディレクトリ内にラッパー (例: `kapi_sys.c`) を実装。
 4. プログラム・カーネル側から新しいKAPIを利用する。
-5. `$KAPI_VERSION` は `kapi.json` 内で管理されるため、自動インクリメント（要手動合わせ）を行う。
+5. `KAPI_VERSION` は `include/os32_kapi_shared.h` で定義されている。バージョン変更時は手動で更新する。
 
 ---
 
@@ -118,4 +127,4 @@ GCC環境においても既存コードとの互換性のため `-std=gnu89` を
 
 ---
 
-*OS32 Development Guidelines — Updated: 2026-04-14*
+*OS32 Development Guidelines — Updated: 2026-04-15*

@@ -47,7 +47,7 @@ KernelAPIポインタを引数として実行する。
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
-| shell | `programs/shell/` | システム標準シェル (階層化モジュール構造) |
+| shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン内蔵) |
 | vz | `programs/vz/` | VZ Editor移植版 |
 | skk_test| `programs/skk/` | SKKフロントエンド |
 | fep_test| `programs/fep_test.c` | FEP (日本語入力) テスト |
@@ -66,5 +66,14 @@ KernelAPIポインタを引数として実行する。
 | head | `programs/head.c` | 先頭N行表示 (デフォルト10行) |
 | tail | `programs/tail.c` | 末尾N行表示 (デフォルト10行) |
 | tee | `programs/tee.c` | stdinをstdout+ファイルに分岐出力 |
+| man | `programs/man.c` | マニュアルページビューア |
+| more | `programs/more.c` | ページャ (ページ送り/検索/逆スクロール) |
+| mdview | `programs/mdview.c` | Markdown簡易ビューア |
+| hello | `programs/hello.c` | Hello World テスト |
+| args | `programs/args.c` | コマンドライン引数表示テスト |
+| crash | `programs/crash.c` | 意図的例外発生テスト |
+| nop | `programs/nop.c` | 何もしないプログラム |
+| restest | `programs/restest.c` | リソーステスト |
+| stat_t | `programs/stat_t.c` | stat API テスト |
 | libc_test| `programs/libc_test.c` | newlib libc動作テスト |
 | test2-4 | `programs/` | APIテスト・システム検証用 |

@@ -17,7 +17,7 @@
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
 | 現在のバージョン | **25** |
-| 合計エントリ数 | **118** (データフィールド1 + 関数ポインタ117) |
+| 合計エントリ数 | **117** (データフィールド1 + 関数ポインタ116) |
 
 ---
 
@@ -151,34 +151,33 @@ make programs
 | 0x164 | sys_fstat | `int(int fd, OS32_Stat *buf)` |
 | 0x168 | gfx_set_palette | `void(int idx, u8 r, u8 g, u8 b)` |
 | 0x16C | gfx_get_palette | `void(int idx, u8 *r, u8 *g, u8 *b)` |
-| 0x170 | sys_memcpy | `void*(void *dst, const void *src, u32 n)` |
-| 0x174 | sys_memset | `void*(void *dst, int val, u32 n)` |
-| 0x178 | gfx_get_framebuffer | `void(void *fb)` |
-| 0x17C | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
-| 0x180 | gfx_present_dirty | `void(void)` |
-| 0x184 | gfx_present_raster | `void(void *table)` |
-| 0x188 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
-| 0x18C | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
-| 0x190 | sys_shm_alloc | `void *(int blocks)` |
-| 0x194 | sys_shm_lock | `int(void *ptr)` |
-| 0x198 | sys_shm_free | `int(void *ptr)` |
-| 0x19C | ime_getchar | `int(void)` |
-| 0x1A0 | ime_trygetchar | `int(void)` |
-| 0x1A4 | ime_toggle | `void(void)` |
-| 0x1A8 | ime_is_active | `int(void)` |
-| 0x1AC | ime_set_mode | `void(int mode)` |
-| 0x1B0 | ime_get_mode | `int(void)` |
-| 0x1B4 | ime_getkey | `int(void)` |
-| 0x1B8 | sys_redirect_fd | `int(int fd, const char *path, int mode)` |
-| 0x1BC | sys_reset_redirect | `void(int fd)` |
-| 0x1C0 | sys_is_redirected | `int(int fd)` |
-| 0x1C4 | sys_pipe_alloc | `int(void)` |
-| 0x1C8 | sys_pipe_free | `void(int id)` |
-| 0x1CC | sys_pipe_get_buf | `u8 *(int id)` |
-| 0x1D0 | sys_pipe_get_len | `u32(int id)` |
-| 0x1D4 | sys_pipe_clear | `void(int id)` |
-| 0x1D8 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
-| 0x1DC | sys_redirect_get_buf_len | `u32(int fd)` |
+| 0x170 | gfx_get_framebuffer | `void(void *fb)` |
+| 0x174 | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
+| 0x178 | gfx_present_dirty | `void(void)` |
+| 0x17C | gfx_present_raster | `void(void *table)` |
+| 0x180 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
+| 0x184 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
+| 0x188 | sys_shm_alloc | `void *(int blocks)` |
+| 0x18C | sys_shm_lock | `int(void *ptr)` |
+| 0x190 | sys_shm_free | `int(void *ptr)` |
+| 0x194 | ime_getchar | `int(void)` |
+| 0x198 | ime_trygetchar | `int(void)` |
+| 0x19C | ime_toggle | `void(void)` |
+| 0x1A0 | ime_is_active | `int(void)` |
+| 0x1A4 | ime_set_mode | `void(int mode)` |
+| 0x1A8 | ime_get_mode | `int(void)` |
+| 0x1AC | ime_getkey | `int(void)` |
+| 0x1B0 | sys_redirect_fd | `int(int fd, const char *path, int mode)` |
+| 0x1B4 | sys_reset_redirect | `void(int fd)` |
+| 0x1B8 | sys_is_redirected | `int(int fd)` |
+| 0x1BC | sys_pipe_alloc | `int(void)` |
+| 0x1C0 | sys_pipe_free | `void(int id)` |
+| 0x1C4 | sys_pipe_get_buf | `u8 *(int id)` |
+| 0x1C8 | sys_pipe_get_len | `u32(int id)` |
+| 0x1CC | sys_pipe_clear | `void(int id)` |
+| 0x1D0 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
+| 0x1D4 | sys_redirect_get_buf_len | `u32(int fd)` |
+| 0x1D8 | paging_is_present | `int(u32 addr)` |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -228,4 +227,4 @@ v25で追加。外部プログラム（シェル）がFD単位の入出力リダ
 ---
 
 *KernelAPI Specification — Version 25*
-*Last Updated: 2026-04-14*
+*Last Updated: 2026-04-15*

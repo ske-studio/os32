@@ -34,19 +34,23 @@ loader.asm (16bit リアルモード) — 第2段階
   ↓
 pm32.asm (32bit プロテクトモード)
   ├── DS/ES/SS = 0x10 (データセグメント)
-  ├── ESP = 0x9FFFF (スタック)
+  ├── ESP = 0x9FFFC (スタック)
   └── call _kernel_main
   ↓
 kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
   ├── tvram_clear()
   ├── idt_init() → pic_init() → pit_init(100Hz)
   ├── kbd_init()
-  ├── fdc_init() 
+  ├── fdc_init()
   ├── dev_init() → path_init() → FS初期化 (fat12/ext2/serialfs)
   ├── ide_init() → auto mount (ルート・サブマウント)
-  ├── kmalloc_init() / paging_init() / exec_init()
-  ├── exec_run("autoexec.bin") (存在する場合)
-  └── exec_run("shell.bin") (外部シェルの起動、無限ループ)
+  ├── kmalloc_init() / paging_init() / shm_init()
+  ├── fd_redirect_init() / pipe_buffer_init()
+  ├── exec_init() (KernelAPIテーブル構築)
+  ├── Unicodeテーブルロード / ime_init()
+  ├── boot_splash() (ブートスプラッシュ)
+  └── exec_run("shell.bin") (シェル起動、終了/クラッシュ時自動再起動)
+      └── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
 ```
 
 ---
