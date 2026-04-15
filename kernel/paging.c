@@ -215,6 +215,21 @@ void paging_set_not_present(u32 start, u32 end)
 int paging_enabled(void) { return pg_enabled; }
 
 /* ======================================================================== */
+/*  paging_is_present — 指定アドレスのページがPresentかどうか                */
+/*                                                                          */
+/*  メモリダンプの安全チェック用。ページング無効時は常に1を返す。            */
+/* ======================================================================== */
+int paging_is_present(u32 virt_addr)
+{
+    u32 pdi, pti;
+    if (!pg_enabled) return 1;
+    pdi = virt_addr >> 22;
+    if (pdi >= PAGING_PT_COUNT) return 0; /* 16MB超: マッピング範囲外 */
+    pti = (virt_addr >> 12) & 0x3FF;
+    return (page_tables[pdi][pti] & PTE_PRESENT) ? 1 : 0;
+}
+
+/* ======================================================================== */
 /*  paging_get_master_pd — マスター(カーネル)ページディレクトリを取得         */
 /* ======================================================================== */
 u32 *paging_get_master_pd(void) { return page_directory; }

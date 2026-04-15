@@ -54,6 +54,9 @@ void paging_set_not_present(u32 start, u32 end);
 /* ページング有効かどうか */
 int paging_enabled(void);
 
+/* 指定アドレスのページがPresentかどうか (メモリダンプ安全チェック用) */
+int paging_is_present(u32 virt_addr);
+
 /* ======== ページディレクトリ切り替えAPI (Phase 2) ======== */
 
 /* 子プロセス用ページディレクトリを構築する

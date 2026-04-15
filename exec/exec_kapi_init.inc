@@ -113,6 +113,7 @@ extern u32 __cdecl wrap_sys_pipe_get_len(int id);
 extern void __cdecl wrap_sys_pipe_clear(int id);
 extern int __cdecl wrap_sys_redirect_fd_buf(int fd, u8 *buf, u32 size, u32 len);
 extern u32 __cdecl wrap_sys_redirect_get_buf_len(int fd);
+extern int __cdecl wrap_paging_is_present(u32 addr);
 
 kapi->magic = 0x4B415049UL;
 kapi->version = 25;
@@ -232,4 +233,5 @@ kapi->version = 25;
     kapi->sys_pipe_clear = wrap_sys_pipe_clear;
     kapi->sys_redirect_fd_buf = wrap_sys_redirect_fd_buf;
     kapi->sys_redirect_get_buf_len = wrap_sys_redirect_get_buf_len;
+    kapi->paging_is_present = wrap_paging_is_present;
     kapi->sbrk_heap_limit = 0;

@@ -867,6 +867,13 @@
         "int fd"
       ],
       "target": "fd_redirect_get_buf_len"
+    },
+    {
+      "name": "paging_is_present",
+      "ret": "int",
+      "args": [
+        "u32 addr"
+      ]
     }
   ]
 }

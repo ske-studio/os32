@@ -600,3 +600,8 @@ u32 __cdecl wrap_sys_redirect_get_buf_len(int fd)
     return fd_redirect_get_buf_len(fd);
 }
 
+int __cdecl wrap_paging_is_present(u32 addr)
+{
+    return paging_is_present(addr);
+}
+

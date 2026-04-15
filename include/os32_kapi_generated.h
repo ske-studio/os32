@@ -120,6 +120,7 @@ typedef struct {
     void (__cdecl *sys_pipe_clear)(int id);
     int (__cdecl *sys_redirect_fd_buf)(int fd, u8 *buf, u32 size, u32 len);
     u32 (__cdecl *sys_redirect_get_buf_len)(int fd);
+    int (__cdecl *paging_is_present)(u32 addr);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
