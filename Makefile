@@ -305,15 +305,35 @@ ekakiuta: $(CRT0_OBJ) programs/ekakiuta.bin
 programs/vbzview.o: programs/vbzview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) -lc -lgcc
+programs/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/vbzview.o $(GFX_OBJ) -lc -lgcc
 
 vbzview: $(CRT0_OBJ) programs/vbzview.bin
+
+# === libmd (Markdownパーサーライブラリ) ===
+programs/libmd/md_parse.o: programs/libmd/md_parse.c programs/libmd/libmd.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -c $< -o $@
+
+# === libfiler (GFXファイラーライブラリ) ===
+programs/libfiler/filer_core.o: programs/libfiler/filer_core.c programs/libfiler/libfiler.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+
+# === mdview (GFX Markdownビューア) ===
+FILER_OBJ = programs/libfiler/filer_core.o
+MDLIB_OBJ = programs/libmd/md_parse.o
+
+programs/mdview.o: programs/mdview.c programs/libmd/libmd.h programs/libfiler/libfiler.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
+
+programs/mdview.elf: build/app.ld $(CRT0_OBJ) programs/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
+
+mdview: $(CRT0_OBJ) programs/mdview.bin
 
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview
+programs: programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -326,6 +346,14 @@ programs/crt0_c.o: programs/crt0_c.c programs/libos32/help.h include/os32_kapi_s
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_shared.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+# === デバッグシリアルライブラリ (libos32/dbgserial) ===
+# 使い方: デバッグ対象のプログラムのリンク行に $(DBG_OBJ) を追加
+# リリース時は $(DBG_OBJ) をリンクから外すだけでゼロコスト
+DBG_OBJ = programs/libos32/dbgserial.o
+
+programs/libos32/dbgserial.o: programs/libos32/dbgserial.c programs/libos32/dbgserial.h include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/%.elf: programs/%.c build/app.ld $(CRT0_OBJ)
@@ -364,6 +392,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "vbzview" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
+	elif [ "$*" = "mdview" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
 	else \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
 	fi
@@ -373,10 +403,11 @@ programs/%.bin: programs/%.raw programs/%.elf
 NHD_DEPLOY = python3 tools/nhd_deploy.py
 
 # ファイル分類
-SBIN_PROGRAMS = programs/install.bin programs/crash.bin programs/bench.bin
+SBIN_PROGRAMS = programs/install.bin programs/crash.bin programs/bench.bin programs/restest.bin
 USR_BIN_PROGRAMS = programs/vz.bin programs/gfx_demo.bin programs/demo1.bin \
 	programs/ekakiuta.bin programs/vbzview.bin programs/hrview.bin programs/vdpview.bin \
-	programs/spr_test.bin programs/raster.bin programs/skk_test.bin programs/fep_test.bin
+	programs/spr_test.bin programs/raster.bin programs/skk_test.bin programs/fep_test.bin \
+	programs/mdview.bin
 # /bin: 上記以外の全 .bin (shell除く)
 BIN_PROGRAMS = $(filter-out programs/shell.bin $(SBIN_PROGRAMS) $(USR_BIN_PROGRAMS), $(wildcard programs/*.bin))
 
@@ -425,7 +456,7 @@ nhd-init:
 	$(NHD_DEPLOY) init
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 
