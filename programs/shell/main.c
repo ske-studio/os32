@@ -251,14 +251,13 @@ const char *shell_get_path(void)
     return g_path; /* フォールバック */
 }
 
-/* .bin拡張子が付いているかチェック */
-static int has_bin_ext(const char *s)
+/* 文字列の末尾が指定の拡張子と一致するかチェック */
+static int has_ext(const char *s, const char *ext)
 {
-    int len = 0;
-    while (s[len]) len++;
-    if (len < 4) return 0;
-    return (s[len-4] == '.' && s[len-3] == 'b' &&
-            s[len-2] == 'i' && s[len-1] == 'n');
+    int slen = strlen(s);
+    int elen = strlen(ext);
+    if (slen < elen) return 0;
+    return strcmp(s + slen - elen, ext) == 0;
 }
 
 /* パスにスラッシュが含まれるかチェック */
@@ -301,17 +300,9 @@ static void run_cmd_internal(int argc, char **argv) {
     }
 
     /* 0. .bat/.sh 拡張子 → 暗黙的に source として実行 */
-    {
-        int len = 0;
-        const char *s = argv[0];
-        while (s[len]) len++;
-        if ((len >= 4 && s[len-4]=='.' && s[len-3]=='b' &&
-             s[len-2]=='a' && s[len-1]=='t') ||
-            (len >= 3 && s[len-3]=='.' && s[len-2]=='s' &&
-             s[len-1]=='h')) {
-            script_source_file(argv[0]);
-            return;
-        }
+    if (has_ext(argv[0], ".bat") || has_ext(argv[0], ".sh")) {
+        script_source_file(argv[0]);
+        return;
     }
 
     /* 1. 内部コマンドの検索 */
@@ -325,16 +316,10 @@ static void run_cmd_internal(int argc, char **argv) {
     /* 2. 外部コマンドの検索・実行 */
     {
         /* コマンド名に.bin拡張子を付加 */
-        int ni = 0;
-        const char *ap = argv[0];
-        while (*ap && ni < PATH_MAX_LEN - 8) name_buf[ni++] = *ap++;
-        name_buf[ni] = '\0';
-        if (!has_bin_ext(name_buf)) {
-            name_buf[ni++] = '.';
-            name_buf[ni++] = 'b';
-            name_buf[ni++] = 'i';
-            name_buf[ni++] = 'n';
-            name_buf[ni] = '\0';
+        strncpy(name_buf, argv[0], PATH_MAX_LEN - 5);
+        name_buf[PATH_MAX_LEN - 5] = '\0';
+        if (!has_ext(name_buf, ".bin")) {
+            strcat(name_buf, ".bin");
         }
     }
 
