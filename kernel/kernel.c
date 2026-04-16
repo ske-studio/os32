@@ -34,6 +34,7 @@
 #include "pc98.h"
 #include "memmap.h"
 #include "config.h"
+#include "kstring.h"
 #include "sys.h"
 #include "ime.h"
 #include "fd_redirect.h"
@@ -206,7 +207,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             /* 注意: ext2はシングルトン — ルートがext2なら他デバイスでext2は試みない */
             {
                 int mounted = 0;
-                int root_is_ext2 = (root_fs[0] == 'e'); /* "ext2" */
+                int root_is_ext2 = (kstrcmp(root_fs, "ext2") == 0);
                 if (!root_is_ext2) {
                     if (vfs_mount(mnt, dname, "ext2") == VFS_OK) mounted = 1;
                 }
@@ -252,8 +253,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* Unicodeテーブルロード */
     tvram_print(60, 2, "UNI...", TATTR_GREEN);
     {
-        int bytes = vfs_read(SYS_UNICODE_BIN, (void *)MEM_UNICODE_TABLE_BASE, 131072);
-        if (bytes == 131072) {
+        int bytes = vfs_read(SYS_UNICODE_BIN, (void *)MEM_UNICODE_TABLE_BASE, MEM_UNICODE_TABLE_SIZE);
+        if (bytes == (int)MEM_UNICODE_TABLE_SIZE) {
             tvram_print(67, 2, "OK", TATTR_WHITE);
         } else {
             tvram_print(67, 2, "ER", TATTR_RED);

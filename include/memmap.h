@@ -79,6 +79,7 @@
 
 /* Unicode-JIS変換テーブル (128KB, utf8.c / kernel.c) */
 #define MEM_UNICODE_TABLE_BASE 0x149000UL
+#define MEM_UNICODE_TABLE_SIZE (MEM_GFX_BB_BASE - MEM_UNICODE_TABLE_BASE) /* 128KB */
 
 /* GFXバックバッファ (128KB = 32000B × 4プレーン, gfx_core.c) */
 #define MEM_GFX_BB_BASE       0x169000UL
