@@ -34,12 +34,12 @@ filesystem:
   files:
     # --- カーネルデータ ---
     - host: unicode.bin
-      guest: /unicode.bin
+      guest: /sys/unicode.bin
       tags: [core]
 
     # --- シェル (カーネルは /shell をロードする: config.h SYS_SHELL_BIN) ---
     - host: programs/shell.bin
-      guest: /shell
+      guest: /sys/shell.bin
       tags: [core]
 
     # --- 外部プログラム → /bin/ ---
