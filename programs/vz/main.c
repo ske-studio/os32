@@ -4,6 +4,7 @@
  */
 
 #include "vz.h"
+#include <string.h>
 
 /* グローバルKernelAPIポインタ */
 KernelAPI* kapi;
@@ -17,7 +18,7 @@ int vz_prompt_input(const char* prompt, char* buf, int buf_size);
 /* 通知メッセージ表示ヘルパー */
 void set_notification(const char* msg) {
     int i;
-    for (i = 0; msg[i] != '\0' && i < 63; i++) {
+    for (i = 0; msg[i] != '\0' && i < (int)sizeof(vz.notification) - 1; i++) {
         vz.notification[i] = msg[i];
     }
     vz.notification[i] = '\0';
@@ -96,11 +97,7 @@ void vz_load_file(const char* path)
     }
 
     /* TEXT構造体をゼロ初期化 */
-    {
-        unsigned char *p = (unsigned char *)t;
-        int j;
-        for (j = 0; j < (int)sizeof(TEXT); j++) p[j] = 0;
-    }
+    memset(t, 0, sizeof(TEXT));
 
     te_init_buffer(t);
 
@@ -211,9 +208,7 @@ static void vz_run_loop(void)
             return;
         }
         {
-            unsigned char *p = (unsigned char *)t;
-            int j;
-            for (j = 0; j < (int)sizeof(TEXT); j++) p[j] = 0;
+            memset(t, 0, sizeof(TEXT));
         }
         te_init_buffer(t);
         if (!t->ttop) {
