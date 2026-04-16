@@ -109,6 +109,35 @@ static void cmd_np2(int argc, char **argv)
     }
 }
 
+static void cmd_time(int argc, char **argv)
+{
+    u32 start, end, elapsed_ms;
+    char cmd_buf[512];
+    int i, bp;
+
+    if (argc < 2) {
+        g_api->kprintf(ATTR_RED, "%s", "Usage: time COMMAND [ARGS...]\n");
+        return;
+    }
+
+    /* argv[1..] からコマンドライン文字列を再構築 */
+    bp = 0;
+    for (i = 1; i < argc && bp < 510; i++) {
+        const char *s = argv[i];
+        if (i > 1 && bp < 510) cmd_buf[bp++] = ' ';
+        while (*s && bp < 510) cmd_buf[bp++] = *s++;
+    }
+    cmd_buf[bp] = '\0';
+
+    start = g_api->get_tick();
+    execute_command(cmd_buf);
+    end = g_api->get_tick();
+
+    elapsed_ms = (end - start) * 10; /* 1ティック = 10ms */
+    g_api->kprintf(ATTR_CYAN, "\nreal  %u.%03us\n",
+                   elapsed_ms / 1000, elapsed_ms % 1000);
+}
+
 /* 登録用テーブル */
 static const ShellCmd base_cmds[] = {
     { "help",   cmd_help,   "[cmd]", "Show help" },
@@ -122,6 +151,7 @@ static const ShellCmd base_cmds[] = {
     { "beep",   cmd_beep,   "",      "Play startup beep" },
     { "uptime", cmd_uptime, "",      "Show sys uptime" },
     { "np2",    cmd_np2,    "",      "Detect NP21/W emulator" },
+    { "time",   cmd_time,   "CMD",   "Measure command time" },
     { (const char *)0, 0, 0, 0 }
 };
 
@@ -129,3 +159,4 @@ void shell_cmd_base_init(void)
 {
     shell_register_cmds(base_cmds);
 }
+

@@ -1,0 +1,25 @@
+# time
+
+コマンドの実行時間を計測する
+
+## SYNOPSIS
+
+`time COMMAND [ARGS...]`
+
+## DESCRIPTION
+
+指定したコマンドを実行し、その実行にかかった時間を表示する。
+シェル内蔵コマンドとして実装されており、内部コマンドと外部コマンドの
+両方を計測できる。
+
+時間はPIT 100Hz (10ms精度) のティックカウントで計測される。
+
+## EXAMPLES
+
+- `time find / -name config` — findコマンドの実行時間を計測
+- `time sort large.txt` — ソートの実行時間を計測
+- `time cat file | wc` — パイプラインの実行時間を計測
+
+## SEE ALSO
+
+tick, uptime
