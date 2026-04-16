@@ -1,63 +1,122 @@
-# OS32 — PC-9801 32ビット ベアメタルOS 開発環境
+# OS32 — PC-9801 32ビット ベアメタルOS
 
-## 概要
+**OS32** は、NEC PC-9801 / 9821シリーズ向けに開発された、32ビットプロテクトモードで動作するベアメタルOSです。
 
-**OS32**は、NEC PC-9801 / 9821シリーズ向けに開発されている、32ビットプロテクトモードで動作するベアメタルOSです。
-GCC (i386-elf) のクロスコンパイラおよび NASM を用い、WSL (Ubuntu等) 環境上で開発できるように構築されています。
-システムは D88 形式または IMG 形式のディスクイメージとしてビルドされ、NP21/W 等のエミュレータ（または実機）で動作させることができます。
+GCC (i386-elf) クロスコンパイラおよび NASM を用い、WSL (Ubuntu等) 環境上で開発されています。
+NP21/W エミュレータまたは実機（未確認）で動作します。
 
-## 主な機能と特徴
+## 主な機能
 
-* **アーキテクチャ**: i386互換、32ビットプロテクトモード (フラットモデル)
-* **開発言語と規格**: C89 (GNU89) 準拠、および x86 アセンブリ (NASM)
-* **呼び出し規約**: System V i386 ABI (`__cdecl` 併用)
-* **ファイルシステム**: 仮想ファイルシステム (VFS) を基盤とし、FAT12、ext2、serialfs をサポート。
-* **マルチタスク / プロセス管理**: 独自のプロセス置換型 (execve方式) ローダーによる外部プログラム (OS32X) の実行。独立したヒープ空間と KernelAPI テーブルを提供。
-* **グラフィックスと文字描画**: GDC 等の描画支援ハードウェアを使用せず、VRAM (0xA8000) への直接書き込みによるCPU直接描画を採用（ハードウェアの互換性問題回避のため）。
+### カーネル
 
-## ディレクトリ構成 (`src/os32/`)
+- **i386 プロテクトモード** (フラットモデル + ページング)
+- **IDT/PIC** 完全制御 (IRQ再マッピング, ISR ハンドラ)
+- **ページング** + ガードページ による安全なメモリ管理
+- **kmalloc** カーネルメモリアロケータ
+- **KernelAPI v26** — 118エントリの関数テーブルによる外部プログラムインタフェース
+- プログラム終了時の**リソース自動回収** (FD, リダイレクト, パイプ, 共有メモリ)
+
+### ファイルシステム
+
+- **VFS** (仮想ファイルシステム) 基盤
+- **ext2** 読み書き対応
+- **FAT12** 読み込み対応 (フロッピーディスク)
+- パイプ・リダイレクト (`|`, `>`, `>>`, `<`, `2>`)
+
+### デバイスドライバ
+
+| ドライバ | 対象ハードウェア |
+|---------|----------------|
+| KBD | uPD8251A キーボード (IRQ1) |
+| IDE | IDE HDD (NHD イメージ) |
+| FDC | uPD765A フロッピーディスク (fd0) |
+| Serial | uPD8251A RS-232C (IRQ4) |
+| FM | YM2203 (OPN) FM3+SSG3 |
+| RTC | uPD4990A リアルタイムクロック |
+| KCG | JIS第1/2水準漢字ROM |
+
+### シェル
+
+- **外部プログラム方式** の高機能シェル
+- Tab補完、コマンド履歴、環境変数、`$VAR` 展開、`~` 展開
+- ワイルドカード (`*.txt`)、引用符 (`"..."`, `'...'`)
+- **スクリプトエンジン** (`.bat` / `.sh` 実行、`if`/`else`/`for`/`while`/`goto`)
+- `/etc/profile` による起動時自動設定
+
+### コマンド一覧
+
+#### ファイル操作
+`ls` `cat` `cp` `mv` `rm` `mkdir` `rmdir` `touch` `head` `tail` `more` `grep` `wc` `tee` `hexdump` `find` `sort` `diff` `du`
+
+#### システム
+`ver` `date` `uptime` `tick` `time` `sleep` `cal` `mem` `env` `echo` `beep` `clear` `reboot` `np2`
+
+#### ストレージ
+`mount` `umount` `sync` `format` `ide` `dev`
+
+#### ネットワーク・転送
+`send` `recv` `serial` `upload` `rshell`
+
+#### エディタ・ビューア
+`edit` (VZ Editor インスパイア) `man` `mdview` (Markdown ビューア)
+
+#### グラフィックス
+`gfx_demo` `vbzview` `hrview` `vdpview` `spr_test` `raster` `ekakiuta` `demo1`
+
+#### サウンド
+`sndctl` `play`
+
+### グラフィックス
+
+- **640×400 16色** CPU直接描画 (ハードウェアアクセラレータ不使用)
+- `libos32gfx` ユーザーライブラリ (点・直線・矩形・円・テキスト描画)
+- ダーティレクタングル管理による効率的なVRAM転送
+- サーフェス・スプライト・VBZベクタ形式対応
+- ラスタパレットアニメーション
+
+## クイックスタート
+
+[INSTALL.md](INSTALL.md) を参照してください。
+
+## ディレクトリ構成
 
 ```text
 src/os32/
 ├── boot/       — ブートローダー (16bit/32bit ASM)
-├── kernel/     — カーネルコア (メイン・IDT・ページング・メモリ割り当て)
-├── drivers/    — デバイスドライバ (KBD, IDE, FDC, Serial, RTC, KCG等)
-├── fs/         — ファイルシステム実装 (VFS, ext2, FAT12, serialfs)
-├── gfx/        — グラフィックス処理 (VRAMバックバッファ操作)
-├── exec/       — プログラムローダー・ヒープ管理
-├── kapi/       — KernelAPI ラッパー (自動生成コード含む)
-├── include/    — 共通ヘッダ群 (定数・共有構造体)
-├── lib/        — 共通ライブラリ関数 (UTF-8, Path処理等)
-├── programs/   — ユーザースペースプログラム (シェル、ベンチマーク、各種ツール)
-├── tools/      — ビルド用ツールスクリプト群 (kapi.json含む)
-└── docs/       — 各種仕様書・開発ドキュメント群
+├── kernel/     — カーネルコア (IDT/PIC/ページング/kmalloc/コンソール)
+├── drivers/    — デバイスドライバ (KBD/IDE/FDC/Serial/FM/RTC/KCG)
+├── gfx/        — グラフィックス (CPU直接描画)
+├── fs/         — ファイルシステム (VFS/ext2/FAT12/serialfs)
+├── exec/       — プログラムローダー (OS32X)
+├── kapi/       — KernelAPIラッパー (自動生成)
+├── lib/        — ユーティリティ (UTF-8/パス/kprintf/LZSS)
+├── include/    — 共通ヘッダ
+├── programs/   — 外部プログラム (シェル/エディタ/ツール)
+├── tools/      — ビルドツール・スクリプト
+└── docs/       — 仕様書・開発ドキュメント
 ```
 
-## ビルド方法
+## ドキュメント
 
-WSL/Linux環境にて、`i686-elf-gcc` (または `i386-elf-gcc`) および `nasm`, `make`, `python3` 等のツールチェインが必要です。
+- [ドキュメント索引](docs/INDEX.md)
+- [KernelAPI 仕様書](docs/KAPI_SPEC.md)
+- [開発ガイドライン](docs/DEVELOPMENT.md)
+- [リリースロードマップ](docs/ROADMAP.md)
+- [Git ポリシー](docs/GIT_POLICY.md)
 
-カーネル、外部プログラム、そしてブート可能なディスクイメージ（D88等）を一括構築するには、ディレクトリ内で以下のコマンドを実行します。
+## ビルド
 
 ```bash
-cd /mnt/c/WATCOM/src/os32
-make all
+cd src/os32
+make all        # カーネル + 全プログラム + D88イメージ
+make clean      # クリーン
+make deploy     # NHDイメージへのデプロイ
 ```
 
-ビルド成果物をクリーンアップする場合は以下を実行します。
+必要なツールチェイン: `i386-elf-gcc`, `nasm`, `make`, `python3`
 
-```bash
-make clean
-```
+## ライセンス
 
-※ カーネル機能や KAPI を追加・変更した際は、必ず `make all` で再構築し、ビルドエラーがないか確認してください。
+[MIT License](LICENSE)
 
-## 詳細なドキュメント
-
-より詳細な仕様や開発方針については、`docs/` ディレクトリを参照してください。
-
-* [ドキュメント索引 (`docs/INDEX.md`)](docs/INDEX.md)
-* [システム概要・カーネル技術仕様書 (`docs/OS32_SPEC.md`)](docs/OS32_SPEC.md)
-* [KernelAPIの仕様 (`docs/KAPI_SPEC.md`)](docs/KAPI_SPEC.md)
-* [開発ガイドライン (`docs/DEVELOPMENT.md`)](docs/DEVELOPMENT.md)
-* [AI協調開発における Git ポリシー (`docs/11_GIT_POLICY.md`)](docs/11_GIT_POLICY.md)
+Copyright (c) 2025-2026 すけさん
