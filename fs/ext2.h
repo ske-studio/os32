@@ -1,8 +1,8 @@
 /* ======================================================================== */
 /*  EXT2.H — ext2ファイルシステムドライバ (読み書き対応)                      */
 /*                                                                          */
-/*  Linux kernel 2.4 (Plamo Linux) ext2実装を参考にしたフルスペック版。      */
-/*  1KBブロック, 512Bセクタ, 単一ブロックグループ前提。                      */
+/*  マルチインスタンス対応: 全関数が Ext2Ctx* を第1引数に取る。              */
+/*  1KBブロック, 512Bセクタ対応。複数同時マウント可能。                      */
 /* ======================================================================== */
 
 #ifndef EXT2_H
@@ -127,47 +127,24 @@ typedef struct {
 #define EXT2_ERR_NOTEMPTY -8
 #define EXT2_ERR_ISDIR   -9
 
-/* ---- マウント/アンマウント ---- */
-int ext2_mount(int ide_drive);
-void ext2_unmount(void);
-int ext2_is_mounted(void);
-const Ext2Super *ext2_get_super(void);
+/* 前方宣言: Ext2Ctx (ext2_ctx.h で定義) */
+struct Ext2Ctx_tag;
+typedef struct Ext2Ctx_tag Ext2Ctx;
 
-/* ---- iノード ---- */
-int ext2_read_inode(u32 ino, Ext2Inode *inode);
-int ext2_write_inode(u32 ino, const Ext2Inode *inode);
-
-/* ---- ディレクトリ ---- */
+/* ---- ディレクトリコールバック ---- */
 typedef void (*ext2_dir_callback)(const Ext2DirEntry *entry, void *ctx);
-int ext2_list_dir(u32 dir_ino, ext2_dir_callback cb, void *ctx);
-int ext2_find_entry(u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type);
-int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type);
-int ext2_delete_entry(u32 dir_ino, const char *name);
 
-/* ---- ファイル操作 ---- */
-int ext2_read_file(u32 ino, void *buf, u32 max_size);
-int ext2_create(u32 dir_ino, const char *name, const void *data, u32 size);
-int ext2_write(u32 ino, const void *data, u32 size);
-int ext2_unlink(u32 dir_ino, const char *name);
-
-/* ---- ディレクトリ操作 ---- */
-int ext2_mkdir(u32 parent_ino, const char *name);
-int ext2_rmdir(u32 parent_ino, const char *name);
-
-/* ---- パス検索 ---- */
-int ext2_lookup(const char *path, u32 *out_ino);
-
-/* ---- ブロック管理 ---- */
-int ext2_alloc_block(void);
-void ext2_free_block(u32 block_num);
-int ext2_alloc_inode(void);
-void ext2_free_inode(u32 ino);
-
-/* ---- フォーマット ---- */
-int ext2_format(int ide_drive, u32 total_sectors);
+/* ---- マウント/アンマウント ---- */
+int ext2_mount(Ext2Ctx *ctx, int ide_drive);
+void ext2_unmount(Ext2Ctx *ctx);
+int ext2_is_mounted_ctx(Ext2Ctx *ctx);
+const Ext2Super *ext2_get_super_ctx(Ext2Ctx *ctx);
 
 /* ---- 同期 ---- */
-int ext2_sync(void);
+int ext2_sync(Ext2Ctx *ctx);
+
+/* ---- フォーマット (コンテキスト不要: 一時CTXを内部で使用) ---- */
+int ext2_format(int ide_drive, u32 total_sectors);
 
 /* ---- VFS登録 ---- */
 void ext2_init(void);

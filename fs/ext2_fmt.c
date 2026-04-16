@@ -5,6 +5,10 @@
 /*  マルチブロックグループ対応、1KBブロック、128バイトinode。                 */
 /*  SPARSE_SUPER対応: Linux mkfs.ext2/e2fsck互換のレイアウトを生成する。     */
 /*                                                                          */
+/*  マルチインスタンス対応:                                                  */
+/*    フォーマットは一時的なExt2Ctxを使用 (既存マウントとは独立)。           */
+/*    呼び出し側でExt2Ctxをスタック上に確保するか、kmalloc/kfreeする。       */
+/*                                                                          */
 /*  スパースグループ規則:                                                    */
 /*    グループ 0, 1, 3^n, 5^n, 7^n にのみSBバックアップ+GDTコピーを配置。  */
 /*    それ以外のグループはビットマップから開始する。                          */
@@ -51,24 +55,23 @@ int ext2_format(int ide_drive, u32 total_sectors)
     u32 gdt_blocks;
     u32 g, i;
     int ret;
-    int saved_drive;
     GroupLayout gl;
-
-    /* 既にマウント中なら先にアンマウント */
-    if (ext2_mounted) ext2_unmount();
+    Ext2Ctx fmt_ctx;  /* フォーマット用一時コンテキスト */
 
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
 
-    saved_drive = ext2_drive_num;
-    ext2_drive_num = ide_drive;
+    /* 一時コンテキストを初期化 */
+    ext2_mem_zero(&fmt_ctx, sizeof(fmt_ctx));
+    fmt_ctx.drive_num = ide_drive;
+    fmt_ctx.base_lba = 0; /* フォーマット時はパーティション先頭から */
 
     total_blocks = total_sectors / 2;  /* 512B→1KB */
-    if (total_blocks < 64) { ext2_drive_num = saved_drive; return EXT2_ERR_NOSPC; }
+    if (total_blocks < 64) return EXT2_ERR_NOSPC;
 
     /* グループ数を計算 (1KBブロック時、1グループ最大8192ブロック) */
     num_groups = (total_blocks - 1 + EXT2_BLOCKS_PER_GROUP_MAX - 1) / EXT2_BLOCKS_PER_GROUP_MAX;
     if (num_groups == 0) num_groups = 1;
-    if (num_groups > EXT2_MAX_GROUPS) { ext2_drive_num = saved_drive; return EXT2_ERR_NOSPC; }
+    if (num_groups > EXT2_MAX_GROUPS) return EXT2_ERR_NOSPC;
 
     /* inodeの数: ブロック4個あたり1 inode (mkfs.ext2のデフォルトに近い) */
     inodes_count = total_blocks / 4;
@@ -87,8 +90,8 @@ int ext2_format(int ide_drive, u32 total_sectors)
 
     /* ===== Block 0: ブートブロック (ゼロクリア) ===== */
     ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
-    ret = ext2_write_block(0, ext2_g_blk);
-    if (ret != 0) goto err;
+    ret = ext2_write_block(&fmt_ctx, 0, ext2_g_blk);
+    if (ret != 0) return EXT2_ERR_IO;
 
     /* ===== Block 1: スーパーブロック ===== */
     ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
@@ -127,13 +130,12 @@ int ext2_format(int ide_drive, u32 total_sectors)
     ext2_g_blk[120] = 'O'; ext2_g_blk[121] = 'S'; ext2_g_blk[122] = '3'; ext2_g_blk[123] = '2';
     ext2_g_blk[124] = '_'; ext2_g_blk[125] = 'H'; ext2_g_blk[126] = 'D'; ext2_g_blk[127] = 'D';
 
-    ret = ext2_write_block(1, ext2_g_blk);
-    if (ret != 0) goto err;
+    ret = ext2_write_block(&fmt_ctx, 1, ext2_g_blk);
+    if (ret != 0) return EXT2_ERR_IO;
 
     /* ===== GDT + 各グループのメタデータ初期化 ===== */
     {
         u32 total_free_blocks = 0;
-        u32 total_overhead = 0;
 
         /* まずGDTブロックをゼロクリアして書き込み準備 */
         ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
@@ -169,8 +171,6 @@ int ext2_format(int ide_drive, u32 total_sectors)
                 overhead = gl.data_start - gl.group_start;
             }
 
-            total_overhead += overhead;
-
             /* GDTブロックの該当オフセットに書き込み */
             if (gd_offset == 0 && g > 0) {
                 /* 新しいGDTブロックの先頭 → 前ブロックを書き込み済み → ゼロクリア */
@@ -197,17 +197,17 @@ int ext2_format(int ide_drive, u32 total_sectors)
             /* GDTブロック末尾 or 最後のグループ → 書き込み */
             if (gd_offset + 32 >= EXT2_BLOCK_SIZE || g == num_groups - 1) {
                 u32 gd_block = 2 + (g * 32) / EXT2_BLOCK_SIZE;
-                ret = ext2_write_block(gd_block, ext2_g_blk);
-                if (ret != 0) goto err;
+                ret = ext2_write_block(&fmt_ctx, gd_block, ext2_g_blk);
+                if (ret != 0) return EXT2_ERR_IO;
             }
         }
 
         /* スーパーブロックのfree_blocks_countを更新 */
-        ret = ext2_read_block(1, ext2_g_blk);
-        if (ret != 0) goto err;
+        ret = ext2_read_block(&fmt_ctx, 1, ext2_g_blk);
+        if (ret != 0) return EXT2_ERR_IO;
         *(u32 *)&ext2_g_blk[12] = total_free_blocks;
-        ret = ext2_write_block(1, ext2_g_blk);
-        if (ret != 0) goto err;
+        ret = ext2_write_block(&fmt_ctx, 1, ext2_g_blk);
+        if (ret != 0) return EXT2_ERR_IO;
 
         /* ===== スパースグループへのSBバックアップ + GDTコピー ===== */
         for (g = 1; g < num_groups; g++) {
@@ -216,18 +216,18 @@ int ext2_format(int ide_drive, u32 total_sectors)
             gs = 1 + g * EXT2_BLOCKS_PER_GROUP_MAX;
 
             /* SBバックアップ: プライマリSBを読み、s_block_group_nrを変更 */
-            ret = ext2_read_block(1, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_read_block(&fmt_ctx, 1, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
             *(u16 *)&ext2_g_blk[90] = (u16)g;  /* s_block_group_nr = g */
-            ret = ext2_write_block(gs, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_write_block(&fmt_ctx, gs, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
 
             /* GDTコピー: プライマリGDTを各ブロックごとにコピー */
             for (i = 0; i < gdt_blocks; i++) {
-                ret = ext2_read_block(2 + i, ext2_g_blk);
-                if (ret != 0) goto err;
-                ret = ext2_write_block(gs + 1 + i, ext2_g_blk);
-                if (ret != 0) goto err;
+                ret = ext2_read_block(&fmt_ctx, 2 + i, ext2_g_blk);
+                if (ret != 0) return EXT2_ERR_IO;
+                ret = ext2_write_block(&fmt_ctx, gs + 1 + i, ext2_g_blk);
+                if (ret != 0) return EXT2_ERR_IO;
             }
         }
 
@@ -271,8 +271,8 @@ int ext2_format(int ide_drive, u32 total_sectors)
             for (i = gl.blocks_in_group; i < EXT2_BLOCKS_PER_GROUP_MAX; i++) {
                 ext2_g_blk[i / 8] |= (u8)(1 << (i % 8));
             }
-            ret = ext2_write_block(bmap_blk, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_write_block(&fmt_ctx, bmap_blk, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
 
             /* inodeビットマップ */
             ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
@@ -287,14 +287,14 @@ int ext2_format(int ide_drive, u32 total_sectors)
             for (i = inodes_per_group; i < EXT2_BLOCKS_PER_GROUP_MAX; i++) {
                 ext2_g_blk[i / 8] |= (u8)(1 << (i % 8));
             }
-            ret = ext2_write_block(imap_blk, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_write_block(&fmt_ctx, imap_blk, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
 
             /* inodeテーブル (ゼロクリア) */
             ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
             for (i = 0; i < inode_tbl_blocks_per_group; i++) {
-                ret = ext2_write_block(itable_blk + i, ext2_g_blk);
-                if (ret != 0) goto err;
+                ret = ext2_write_block(&fmt_ctx, itable_blk + i, ext2_g_blk);
+                if (ret != 0) return EXT2_ERR_IO;
             }
         }
 
@@ -307,8 +307,8 @@ int ext2_format(int ide_drive, u32 total_sectors)
             ino_offset = (1 * 128) % EXT2_BLOCK_SIZE;
             root_data_blk = itable_g0 + inode_tbl_blocks_per_group; /* オーバーヘッド直後 */
 
-            ret = ext2_read_block(ino_block, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_read_block(&fmt_ctx, ino_block, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
 
             *(u16 *)&ext2_g_blk[ino_offset + 0] = (u16)(EXT2_S_IFDIR | 0755);
             *(u16 *)&ext2_g_blk[ino_offset + 2] = 0;
@@ -323,8 +323,8 @@ int ext2_format(int ide_drive, u32 total_sectors)
             *(u32 *)&ext2_g_blk[ino_offset + 28] = 2;    /* blocks (512B単位) */
             *(u32 *)&ext2_g_blk[ino_offset + 40] = root_data_blk; /* block[0] */
 
-            ret = ext2_write_block(ino_block, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_write_block(&fmt_ctx, ino_block, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
 
             /* ルートディレクトリデータブロック */
             ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
@@ -339,15 +339,10 @@ int ext2_format(int ide_drive, u32 total_sectors)
             ext2_g_blk[19] = EXT2_FT_DIR;
             ext2_g_blk[20] = '.'; ext2_g_blk[21] = '.';
 
-            ret = ext2_write_block(root_data_blk, ext2_g_blk);
-            if (ret != 0) goto err;
+            ret = ext2_write_block(&fmt_ctx, root_data_blk, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
         }
     }
 
-    ext2_drive_num = saved_drive;
     return EXT2_OK;
-
-err:
-    ext2_drive_num = saved_drive;
-    return EXT2_ERR_IO;
 }

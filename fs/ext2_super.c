@@ -1,62 +1,49 @@
 /* ======================================================================== */
-/*  EXT2.C — ext2ファイルシステムドライバ (読み書き対応)                      */
+/*  EXT2_SUPER.C — ext2ファイルシステムドライバ (読み書き対応)                */
 /*                                                                          */
-/*  Linux kernel 2.4 (Plamo Linux) ext2実装を参考にしたフルスペック版。      */
-/*  IDEドライバ経由でHDD上のext2構造を読み書きする。                         */
+/*  マルチインスタンス対応: 全関数が Ext2Ctx* を受け取り、                   */
+/*  グローバル状態ではなくコンテキスト経由でインスタンスを識別する。          */
 /*                                                                          */
 /*  ブロック→セクタ変換:                                                    */
 /*    1 ext2ブロック (1024B) = 2 IDEセクタ (512B)                           */
 /*    ext2ブロックN → IDEセクタ (N*2)                                      */
-/*                                                                          */
-/*  参照: fs/ext2/balloc.c, ialloc.c, dir.c, namei.c, inode.c              */
 /* ======================================================================== */
 
 #include "ext2_priv.h"
 
-/* マウント状態 */
-int ext2_mounted = 0;
-int ext2_drive_num = 0;
-Ext2Super ext2_sb_info;
-Ext2GroupDesc ext2_gd_table[EXT2_MAX_GROUPS];
-u32 ext2_num_groups = 0;
-
 /* 共有静的バッファ (スタックオーバーフロー防止)
- * BSS節約のため2つに統合。バッファの用途は呼び出し元コメント参照。
+ * シングルタスクOSのため全インスタンスで共有可能。
  * ext2_g_blk: inode/super/GD読み書き用
  * ext2_g_aux: ディレクトリ走査/ビットマップ/間接ブロック/データ用 */
 u8 ext2_g_blk[EXT2_BLOCK_SIZE];
 u8 ext2_g_aux[EXT2_BLOCK_SIZE];
 
-/* PC-98パーティションテーブル仕様: シリンダ0はIPL/パーティション情報用に予約。
- * ext2パーティションは通常シリンダ1から開始されますが、BTNPART等の情報を元に動的に計算します。 */
-u32 ext2_base_lba = 272; /* 初期値: シリンダ2から開始 (8H*17S*2cyl) */
-
 /* ======================================================================== */
 /*  ブロック読み書き基盤                                                     */
 /* ======================================================================== */
 
-int ext2_read_block(u32 block_num, void *buf)
+int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
 {
-    u32 sector = ext2_base_lba + block_num * 2;
+    u32 sector = ctx->base_lba + block_num * 2;
     u8 *dst = (u8 *)buf;
     int ret;
 
     /* セクタ0 → buf[0..511] */
-    ret = ide_read_sector(ext2_drive_num, sector, dst);
+    ret = ide_read_sector(ctx->drive_num, sector, dst);
     if (ret != 0) return ret;
 
     /* セクタ1 → buf[512..1023] */
-    ret = ide_read_sector(ext2_drive_num, sector + 1, dst + 512);
+    ret = ide_read_sector(ctx->drive_num, sector + 1, dst + 512);
     return ret;
 }
 
-int ext2_write_block(u32 block_num, const void *buf)
+int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 {
-    u32 sector = ext2_base_lba + block_num * 2;
+    u32 sector = ctx->base_lba + block_num * 2;
     int ret;
-    ret = ide_write_sector(ext2_drive_num, sector, buf);
+    ret = ide_write_sector(ctx->drive_num, sector, buf);
     if (ret != 0) return ret;
-    ret = ide_write_sector(ext2_drive_num, sector + 1, (const u8 *)buf + 512);
+    ret = ide_write_sector(ctx->drive_num, sector + 1, (const u8 *)buf + 512);
     return ret;
 }
 
@@ -109,17 +96,17 @@ u32 ext2_current_time(void)
 /*  スーパーブロック / グループディスクリプタ 書き戻し                       */
 /* ======================================================================== */
 
-int ext2_write_super_raw(void)
+int ext2_write_super_raw(Ext2Ctx *ctx)
 {
     int ret;
-    ret = ext2_read_block(1, ext2_g_blk);
+    ret = ext2_read_block(ctx, 1, ext2_g_blk);
     if (ret != 0) return EXT2_ERR_IO;
-    *(u32 *)&ext2_g_blk[12] = ext2_sb_info.free_blocks_count;
-    *(u32 *)&ext2_g_blk[16] = ext2_sb_info.free_inodes_count;
-    return ext2_write_block(1, ext2_g_blk);
+    *(u32 *)&ext2_g_blk[12] = ctx->sb_info.free_blocks_count;
+    *(u32 *)&ext2_g_blk[16] = ctx->sb_info.free_inodes_count;
+    return ext2_write_block(ctx, 1, ext2_g_blk);
 }
 
-int ext2_write_gd_raw(void)
+int ext2_write_gd_raw(Ext2Ctx *ctx)
 {
     /* GDTはブロック2から連続配置。1エントリ32バイト。
      * 1KBブロックに32エントリ収まる → MAX_GROUPS=32なら1ブロックで足りる */
@@ -127,26 +114,26 @@ int ext2_write_gd_raw(void)
     u32 g, gd_block, offset;
 
     /* GDTが占めるブロック数を計算 (32B × num_groups) */
-    for (g = 0; g < ext2_num_groups; g++) {
+    for (g = 0; g < ctx->num_groups; g++) {
         gd_block = 2 + (g * 32) / EXT2_BLOCK_SIZE;
         offset = (g * 32) % EXT2_BLOCK_SIZE;
 
         /* ブロックの先頭エントリの場合のみ読み込み */
         if (offset == 0) {
-            ret = ext2_read_block(gd_block, ext2_g_blk);
+            ret = ext2_read_block(ctx, gd_block, ext2_g_blk);
             if (ret != 0) return EXT2_ERR_IO;
         }
 
-        *(u32 *)&ext2_g_blk[offset + 0]  = ext2_gd_table[g].block_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 4]  = ext2_gd_table[g].inode_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 8]  = ext2_gd_table[g].inode_table;
-        *(u16 *)&ext2_g_blk[offset + 12] = ext2_gd_table[g].free_blocks;
-        *(u16 *)&ext2_g_blk[offset + 14] = ext2_gd_table[g].free_inodes;
-        *(u16 *)&ext2_g_blk[offset + 16] = ext2_gd_table[g].used_dirs;
+        *(u32 *)&ext2_g_blk[offset + 0]  = ctx->gd_table[g].block_bitmap;
+        *(u32 *)&ext2_g_blk[offset + 4]  = ctx->gd_table[g].inode_bitmap;
+        *(u32 *)&ext2_g_blk[offset + 8]  = ctx->gd_table[g].inode_table;
+        *(u16 *)&ext2_g_blk[offset + 12] = ctx->gd_table[g].free_blocks;
+        *(u16 *)&ext2_g_blk[offset + 14] = ctx->gd_table[g].free_inodes;
+        *(u16 *)&ext2_g_blk[offset + 16] = ctx->gd_table[g].used_dirs;
 
         /* ブロック末尾のエントリ or 最後のグループの場合に書き込み */
-        if (offset + 32 >= EXT2_BLOCK_SIZE || g == ext2_num_groups - 1) {
-            ret = ext2_write_block(gd_block, ext2_g_blk);
+        if (offset + 32 >= EXT2_BLOCK_SIZE || g == ctx->num_groups - 1) {
+            ret = ext2_write_block(ctx, gd_block, ext2_g_blk);
             if (ret != 0) return EXT2_ERR_IO;
         }
     }
@@ -198,26 +185,26 @@ static u32 ext2_find_partition(int ide_drive)
 /*  マウント / アンマウント                                                  */
 /* ======================================================================== */
 
-int ext2_mount(int ide_drive)
+int ext2_mount(Ext2Ctx *ctx, int ide_drive)
 {
     int ret, i;
 
-    if (ext2_mounted) ext2_unmount();
+    if (ctx->mounted) ext2_unmount(ctx);
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
-    ext2_drive_num = ide_drive;
+    ctx->drive_num = ide_drive;
 
     /* パーティションテーブルを解析してbase_lbaを設定 */
-    ext2_base_lba = ext2_find_partition(ide_drive);
+    ctx->base_lba = ext2_find_partition(ide_drive);
 
     /* スーパーブロック読み込み: ローカルバッファに読んでからg_blkへコピー */
     {
         u8 sb_sect[512];
         int j;
-        ret = ide_read_sector(ext2_drive_num, ext2_base_lba + 2, sb_sect);
+        ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 2, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
         for (j = 0; j < 512; j++) ext2_g_blk[j] = sb_sect[j];
         
-        ret = ide_read_sector(ext2_drive_num, ext2_base_lba + 3, sb_sect);
+        ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 3, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
         for (j = 0; j < 512; j++) ext2_g_blk[512 + j] = sb_sect[j];
     }
@@ -227,77 +214,77 @@ int ext2_mount(int ide_drive)
         if (magic != EXT2_SUPER_MAGIC) return EXT2_ERR_MAGIC;
     }
 
-    ext2_sb_info.total_inodes     = *(u32 *)&ext2_g_blk[0];
-    ext2_sb_info.total_blocks     = *(u32 *)&ext2_g_blk[4];
-    ext2_sb_info.free_blocks_count = *(u32 *)&ext2_g_blk[12];
-    ext2_sb_info.free_inodes_count = *(u32 *)&ext2_g_blk[16];
-    ext2_sb_info.first_data_block = *(u32 *)&ext2_g_blk[20];
-    ext2_sb_info.block_size       = 1024U << (*(u32 *)&ext2_g_blk[24]);
-    ext2_sb_info.blocks_per_group = *(u32 *)&ext2_g_blk[32];
-    ext2_sb_info.inodes_per_group = *(u32 *)&ext2_g_blk[40];
-    ext2_sb_info.magic            = *(u16 *)&ext2_g_blk[56];
-    ext2_sb_info.first_ino        = *(u32 *)&ext2_g_blk[84];
-    ext2_sb_info.inode_size       = *(u16 *)&ext2_g_blk[88];
-    if (ext2_sb_info.inode_size == 0) ext2_sb_info.inode_size = 128;
+    ctx->sb_info.total_inodes     = *(u32 *)&ext2_g_blk[0];
+    ctx->sb_info.total_blocks     = *(u32 *)&ext2_g_blk[4];
+    ctx->sb_info.free_blocks_count = *(u32 *)&ext2_g_blk[12];
+    ctx->sb_info.free_inodes_count = *(u32 *)&ext2_g_blk[16];
+    ctx->sb_info.first_data_block = *(u32 *)&ext2_g_blk[20];
+    ctx->sb_info.block_size       = 1024U << (*(u32 *)&ext2_g_blk[24]);
+    ctx->sb_info.blocks_per_group = *(u32 *)&ext2_g_blk[32];
+    ctx->sb_info.inodes_per_group = *(u32 *)&ext2_g_blk[40];
+    ctx->sb_info.magic            = *(u16 *)&ext2_g_blk[56];
+    ctx->sb_info.first_ino        = *(u32 *)&ext2_g_blk[84];
+    ctx->sb_info.inode_size       = *(u16 *)&ext2_g_blk[88];
+    if (ctx->sb_info.inode_size == 0) ctx->sb_info.inode_size = 128;
 
     for (i = 0; i < 16; i++) {
-        ext2_sb_info.volume_name[i] = (char)ext2_g_blk[120 + i];
+        ctx->sb_info.volume_name[i] = (char)ext2_g_blk[120 + i];
     }
-    ext2_sb_info.volume_name[16] = '\0';
+    ctx->sb_info.volume_name[16] = '\0';
 
     /* グループ数を計算 */
-    ext2_num_groups = (ext2_sb_info.total_blocks - ext2_sb_info.first_data_block
-                       + ext2_sb_info.blocks_per_group - 1)
-                      / ext2_sb_info.blocks_per_group;
-    if (ext2_num_groups == 0) ext2_num_groups = 1;
-    if (ext2_num_groups > EXT2_MAX_GROUPS) return EXT2_ERR_IO;
+    ctx->num_groups = (ctx->sb_info.total_blocks - ctx->sb_info.first_data_block
+                       + ctx->sb_info.blocks_per_group - 1)
+                      / ctx->sb_info.blocks_per_group;
+    if (ctx->num_groups == 0) ctx->num_groups = 1;
+    if (ctx->num_groups > EXT2_MAX_GROUPS) return EXT2_ERR_IO;
 
     /* グループディスクリプタテーブル全体を読み込み — g_blk再利用 */
     {
         u32 g, gd_block, offset;
-        for (g = 0; g < ext2_num_groups; g++) {
+        for (g = 0; g < ctx->num_groups; g++) {
             gd_block = 2 + (g * 32) / EXT2_BLOCK_SIZE;
             offset = (g * 32) % EXT2_BLOCK_SIZE;
 
             /* ブロックの先頭エントリの場合のみ読み込み */
             if (offset == 0) {
-                ret = ext2_read_block(gd_block, ext2_g_blk);
+                ret = ext2_read_block(ctx, gd_block, ext2_g_blk);
                 if (ret != 0) return EXT2_ERR_IO;
             }
 
-            ext2_gd_table[g].block_bitmap = *(u32 *)&ext2_g_blk[offset + 0];
-            ext2_gd_table[g].inode_bitmap = *(u32 *)&ext2_g_blk[offset + 4];
-            ext2_gd_table[g].inode_table  = *(u32 *)&ext2_g_blk[offset + 8];
-            ext2_gd_table[g].free_blocks  = *(u16 *)&ext2_g_blk[offset + 12];
-            ext2_gd_table[g].free_inodes  = *(u16 *)&ext2_g_blk[offset + 14];
-            ext2_gd_table[g].used_dirs    = *(u16 *)&ext2_g_blk[offset + 16];
+            ctx->gd_table[g].block_bitmap = *(u32 *)&ext2_g_blk[offset + 0];
+            ctx->gd_table[g].inode_bitmap = *(u32 *)&ext2_g_blk[offset + 4];
+            ctx->gd_table[g].inode_table  = *(u32 *)&ext2_g_blk[offset + 8];
+            ctx->gd_table[g].free_blocks  = *(u16 *)&ext2_g_blk[offset + 12];
+            ctx->gd_table[g].free_inodes  = *(u16 *)&ext2_g_blk[offset + 14];
+            ctx->gd_table[g].used_dirs    = *(u16 *)&ext2_g_blk[offset + 16];
         }
     }
 
-    ext2_mounted = 1;
+    ctx->mounted = 1;
     return EXT2_OK;
 }
 
-void ext2_unmount(void)
+void ext2_unmount(Ext2Ctx *ctx)
 {
-    if (ext2_mounted) ext2_sync();
-    ext2_mounted = 0;
+    if (ctx->mounted) ext2_sync(ctx);
+    ctx->mounted = 0;
 }
 
-int ext2_is_mounted(void) { return ext2_mounted; }
+int ext2_is_mounted_ctx(Ext2Ctx *ctx) { return ctx->mounted; }
 
-const Ext2Super *ext2_get_super(void)
+const Ext2Super *ext2_get_super_ctx(Ext2Ctx *ctx)
 {
-    return ext2_mounted ? &ext2_sb_info : (const Ext2Super *)0;
+    return ctx->mounted ? &ctx->sb_info : (const Ext2Super *)0;
 }
 
-int ext2_sync(void)
+int ext2_sync(Ext2Ctx *ctx)
 {
     int ret;
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
-    ret = ext2_write_super_raw();
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_write_super_raw(ctx);
     if (ret != 0) return ret;
-    return ext2_write_gd_raw();
+    return ext2_write_gd_raw(ctx);
 }
 
 /* ======================================================================== */

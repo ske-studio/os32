@@ -3,16 +3,16 @@
 /*  ファイル読み込み — g_aux使用                                            */
 /* ======================================================================== */
 
-int ext2_read_file(u32 ino, void *buf, u32 max_size)
+int ext2_read_file(Ext2Ctx *ctx, u32 ino, void *buf, u32 max_size)
 {
     Ext2Inode inode;
     int ret;
     u32 bi, remaining, to_copy, total_read, phys;
     u8 *dst;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
 
     remaining = inode.size;
@@ -21,7 +21,7 @@ int ext2_read_file(u32 ino, void *buf, u32 max_size)
     dst = (u8 *)buf;
 
     for (bi = 0; remaining > 0; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) break;
 
         to_copy = remaining;
@@ -30,7 +30,7 @@ int ext2_read_file(u32 ino, void *buf, u32 max_size)
         /* 宛先バッファに直接読み込み — ext2_g_auxを経由しない。
          * ext2_bmapが間接ブロック参照でext2_g_auxを使うため、
          * ここでext2_g_auxに読むとバッファ競合が発生する。 */
-        ret = ext2_read_block(phys, &dst[total_read]);
+        ret = ext2_read_block(ctx, phys, &dst[total_read]);
         if (ret != 0) return EXT2_ERR_IO;
 
         total_read += to_copy;
@@ -39,7 +39,7 @@ int ext2_read_file(u32 ino, void *buf, u32 max_size)
     return (int)total_read;
 }
 
-int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
+int ext2_read_stream(Ext2Ctx *ctx, u32 ino, void *buf, u32 size, u32 offset)
 {
     Ext2Inode inode;
     int ret;
@@ -47,9 +47,9 @@ int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
     u32 byte_in_blk;
     u8 *dst;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
 
     if (offset >= inode.size) return 0;
@@ -63,7 +63,7 @@ int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
     byte_in_blk = offset % EXT2_BLOCK_SIZE;
 
     for (; remaining > 0; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) break;
 
         to_copy = EXT2_BLOCK_SIZE - byte_in_blk;
@@ -71,11 +71,11 @@ int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
 
         if (byte_in_blk == 0 && to_copy == EXT2_BLOCK_SIZE) {
             /* ブロック全体: 直接宛先に読み込み */
-            ret = ext2_read_block(phys, &dst[total_read]);
+            ret = ext2_read_block(ctx, phys, &dst[total_read]);
         } else {
             /* 部分ブロック: ext2_g_blkを中間バッファとして使用
              * (ext2_g_auxはext2_bmapと競合するため使えない) */
-            ret = ext2_read_block(phys, ext2_g_blk);
+            ret = ext2_read_block(ctx, phys, ext2_g_blk);
             if (ret == 0) {
                 ext2_mem_copy(&dst[total_read], &ext2_g_blk[byte_in_blk], to_copy);
             }
@@ -93,7 +93,7 @@ int ext2_read_stream(u32 ino, void *buf, u32 size, u32 offset)
 /*  ファイル作成 / 書き込み / 削除                                          */
 /* ======================================================================== */
 
-int ext2_create(u32 dir_ino, const char *name, const void *data, u32 size)
+int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u32 size)
 {
     int new_ino;
     Ext2Inode inode;
@@ -101,11 +101,11 @@ int ext2_create(u32 dir_ino, const char *name, const void *data, u32 size)
     const u8 *src;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    { u32 tmp; if (ext2_find_entry(dir_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
+    { u32 tmp; if (ext2_find_entry(ctx, dir_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
 
-    new_ino = ext2_alloc_inode();
+    new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
 
     now = ext2_current_time();
@@ -120,48 +120,48 @@ int ext2_create(u32 dir_ino, const char *name, const void *data, u32 size)
     remaining = size;
 
     for (bi = 0; bi < blocks_needed; bi++) {
-        int blk = ext2_alloc_block();
-        if (blk < 0) { ext2_free_all_blocks(&inode); ext2_free_inode((u32)new_ino); return EXT2_ERR_NOSPC; }
+        int blk = ext2_alloc_block(ctx);
+        if (blk < 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
 
-        ret = ext2_bmap_set(&inode, bi, (u32)blk);
-        if (ret != 0) { ext2_free_block((u32)blk); ext2_free_all_blocks(&inode); ext2_free_inode((u32)new_ino); return ret; }
+        ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
+        if (ret != 0) { ext2_free_block(ctx, (u32)blk); ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         to_write = remaining;
         if (to_write > EXT2_BLOCK_SIZE) to_write = EXT2_BLOCK_SIZE;
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
-        ret = ext2_write_block((u32)blk, ext2_g_aux);
-        if (ret != 0) { ext2_free_all_blocks(&inode); ext2_free_inode((u32)new_ino); return EXT2_ERR_IO; }
+        ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
+        if (ret != 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
 
         inode.blocks += 2;
         remaining -= to_write;
     }
 
-    ret = ext2_write_inode((u32)new_ino, &inode);
+    ret = ext2_write_inode(ctx, (u32)new_ino, &inode);
     if (ret != 0) return ret;
 
-    ret = ext2_add_entry(dir_ino, name, (u32)new_ino, EXT2_FT_REG_FILE);
-    if (ret != 0) { ext2_free_all_blocks(&inode); ext2_free_inode((u32)new_ino); return ret; }
+    ret = ext2_add_entry(ctx, dir_ino, name, (u32)new_ino, EXT2_FT_REG_FILE);
+    if (ret != 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
 
-    ext2_sync();
+    ext2_sync(ctx);
     return EXT2_OK;
 }
 
-int ext2_write(u32 ino, const void *data, u32 size)
+int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
 {
     Ext2Inode inode;
     u32 blocks_needed, bi, remaining, to_write, now;
     const u8 *src;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
     if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) return EXT2_ERR_ISDIR;
 
-    ext2_free_all_blocks(&inode);
+    ext2_free_all_blocks(ctx, &inode);
 
     now = ext2_current_time();
     inode.size = size;
@@ -172,31 +172,31 @@ int ext2_write(u32 ino, const void *data, u32 size)
     remaining = size;
 
     for (bi = 0; bi < blocks_needed; bi++) {
-        int blk = ext2_alloc_block();
-        if (blk < 0) { ext2_free_all_blocks(&inode); ext2_write_inode(ino, &inode); return EXT2_ERR_NOSPC; }
+        int blk = ext2_alloc_block(ctx);
+        if (blk < 0) { ext2_free_all_blocks(ctx, &inode); ext2_write_inode(ctx, ino, &inode); return EXT2_ERR_NOSPC; }
 
-        ret = ext2_bmap_set(&inode, bi, (u32)blk);
-        if (ret != 0) { ext2_free_block((u32)blk); return ret; }
+        ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
+        if (ret != 0) { ext2_free_block(ctx, (u32)blk); return ret; }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         to_write = remaining;
         if (to_write > EXT2_BLOCK_SIZE) to_write = EXT2_BLOCK_SIZE;
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
-        ret = ext2_write_block((u32)blk, ext2_g_aux);
+        ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         inode.blocks += 2;
         remaining -= to_write;
     }
 
-    ret = ext2_write_inode(ino, &inode);
+    ret = ext2_write_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
-    ext2_sync();
+    ext2_sync(ctx);
     return EXT2_OK;
 }
 
-int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
+int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offset)
 {
     Ext2Inode inode;
     int ret;
@@ -204,9 +204,9 @@ int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
     u32 byte_in_blk, now;
     const u8 *src;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
 
     now = ext2_current_time();
@@ -219,12 +219,12 @@ int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
     byte_in_blk = offset % EXT2_BLOCK_SIZE;
 
     for (; remaining > 0; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) {
-            int new_blk = ext2_alloc_block();
+            int new_blk = ext2_alloc_block(ctx);
             if (new_blk < 0) break;
-            ret = ext2_bmap_set(&inode, bi, (u32)new_blk);
-            if (ret != 0) { ext2_free_block((u32)new_blk); break; }
+            ret = ext2_bmap_set(ctx, &inode, bi, (u32)new_blk);
+            if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); break; }
             inode.blocks += 2;
             phys = (u32)new_blk;
             if (byte_in_blk > 0 || remaining < EXT2_BLOCK_SIZE) {
@@ -232,7 +232,7 @@ int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
             }
         } else {
             if (byte_in_blk > 0 || remaining < EXT2_BLOCK_SIZE) {
-                ret = ext2_read_block(phys, ext2_g_aux);
+                ret = ext2_read_block(ctx, phys, ext2_g_aux);
                 if (ret != 0) break;
             }
         }
@@ -242,7 +242,7 @@ int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
 
         ext2_mem_copy(&ext2_g_aux[byte_in_blk], &src[size - remaining], to_write);
 
-        ret = ext2_write_block(phys, ext2_g_aux);
+        ret = ext2_write_block(ctx, phys, ext2_g_aux);
         if (ret != 0) break;
 
         remaining -= to_write;
@@ -253,53 +253,53 @@ int ext2_write_stream(u32 ino, const void *buf, u32 size, u32 offset)
         }
     }
     
-    ext2_write_inode(ino, &inode);
-    ext2_sync();
+    ext2_write_inode(ctx, ino, &inode);
+    ext2_sync(ctx);
     return (int)(size - remaining);
 }
 
-int ext2_get_size_ino(u32 ino, u32 *size)
+int ext2_get_size_ino(Ext2Ctx *ctx, u32 ino, u32 *size)
 {
     Ext2Inode inode;
     int ret;
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
-    ret = ext2_read_inode(ino, &inode);
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
     if (size) *size = inode.size;
     return EXT2_OK;
 }
 
-int ext2_unlink(u32 dir_ino, const char *name)
+int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
 {
     u32 ino;
     u8 ftype;
     Ext2Inode inode;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_find_entry(dir_ino, name, &ino, &ftype);
+    ret = ext2_find_entry(ctx, dir_ino, name, &ino, &ftype);
     if (ret != 0) return ret;
     if (ftype == EXT2_FT_DIR) return EXT2_ERR_ISDIR;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
 
-    ret = ext2_delete_entry(dir_ino, name);
+    ret = ext2_delete_entry(ctx, dir_ino, name);
     if (ret != 0) return ret;
 
     inode.links_count--;
     if (inode.links_count == 0) {
-        ext2_free_all_blocks(&inode);
+        ext2_free_all_blocks(ctx, &inode);
         inode.dtime = ext2_current_time();
-        ext2_write_inode(ino, &inode);
-        ext2_free_inode(ino);
+        ext2_write_inode(ctx, ino, &inode);
+        ext2_free_inode(ctx, ino);
     } else {
         inode.ctime = ext2_current_time();
-        ext2_write_inode(ino, &inode);
+        ext2_write_inode(ctx, ino, &inode);
     }
 
-    ext2_sync();
+    ext2_sync(ctx);
     return EXT2_OK;
 }
 

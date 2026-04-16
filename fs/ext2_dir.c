@@ -3,23 +3,23 @@
 /*  ディレクトリ操作 — g_aux使用                                            */
 /* ======================================================================== */
 
-int ext2_list_dir(u32 dir_ino, ext2_dir_callback cb, void *ctx)
+int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ctx)
 {
     Ext2Inode inode;
     int ret;
     u32 bi, pos, phys;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_read_inode(dir_ino, &inode);
+    ret = ext2_read_inode(ctx, dir_ino, &inode);
     if (ret != 0) return ret;
     if (!(inode.mode & EXT2_S_IFDIR)) return EXT2_ERR_NOTDIR;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
+        ret = ext2_read_block(ctx, phys, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         pos = 0;
@@ -42,7 +42,7 @@ int ext2_list_dir(u32 dir_ino, ext2_dir_callback cb, void *ctx)
                     entry.name[j] = (char)ext2_g_aux[pos + 8 + j];
                 }
                 entry.name[j] = '\0';
-                cb(&entry, ctx);
+                cb(&entry, user_ctx);
             }
             pos += de_reclen;
         }
@@ -50,23 +50,23 @@ int ext2_list_dir(u32 dir_ino, ext2_dir_callback cb, void *ctx)
     return EXT2_OK;
 }
 
-int ext2_find_entry(u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type)
+int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type)
 {
     Ext2Inode inode;
     int ret, name_len;
     u32 bi, pos, phys;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     name_len = ext2_str_len(name);
 
-    ret = ext2_read_inode(dir_ino, &inode);
+    ret = ext2_read_inode(ctx, dir_ino, &inode);
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
+        ret = ext2_read_block(ctx, phys, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         pos = 0;
@@ -91,7 +91,7 @@ int ext2_find_entry(u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type)
     return EXT2_ERR_NOTFOUND;
 }
 
-int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type)
+int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file_type)
 {
     Ext2Inode dir_inode;
     int ret, name_len;
@@ -99,19 +99,19 @@ int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type)
     u16 new_rec_len;
     u32 now;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
     name_len = ext2_str_len(name);
     new_rec_len = (u16)((8 + name_len + 3) & ~3);
 
-    ret = ext2_read_inode(dir_ino, &dir_inode);
+    ret = ext2_read_inode(ctx, dir_ino, &dir_inode);
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(&dir_inode, bi);
+        phys = ext2_bmap(ctx, &dir_inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
+        ret = ext2_read_block(ctx, phys, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         pos = 0;
@@ -140,11 +140,11 @@ int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type)
                     ext2_g_aux[pos + 7] = file_type;
                     ext2_mem_copy(&ext2_g_aux[pos + 8], name, (u32)name_len);
                 }
-                ret = ext2_write_block(phys, ext2_g_aux);
+                ret = ext2_write_block(ctx, phys, ext2_g_aux);
                 if (ret != 0) return EXT2_ERR_IO;
                 now = ext2_current_time();
                 dir_inode.mtime = now;
-                ext2_write_inode(dir_ino, &dir_inode);
+                ext2_write_inode(ctx, dir_ino, &dir_inode);
                 return EXT2_OK;
             }
             pos += de_reclen;
@@ -153,11 +153,11 @@ int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type)
 
     /* 新ブロック割り当て */
     {
-        int new_blk = ext2_alloc_block();
+        int new_blk = ext2_alloc_block(ctx);
         if (new_blk < 0) return EXT2_ERR_NOSPC;
 
-        ret = ext2_bmap_set(&dir_inode, bi, (u32)new_blk);
-        if (ret != 0) { ext2_free_block((u32)new_blk); return ret; }
+        ret = ext2_bmap_set(ctx, &dir_inode, bi, (u32)new_blk);
+        if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); return ret; }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         *(u32 *)&ext2_g_aux[0]     = ino;
@@ -166,35 +166,35 @@ int ext2_add_entry(u32 dir_ino, const char *name, u32 ino, u8 file_type)
         ext2_g_aux[7] = file_type;
         ext2_mem_copy(&ext2_g_aux[8], name, (u32)name_len);
 
-        ret = ext2_write_block((u32)new_blk, ext2_g_aux);
+        ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         now = ext2_current_time();
         dir_inode.size += EXT2_BLOCK_SIZE;
         dir_inode.blocks += 2;
         dir_inode.mtime = now;
-        ext2_write_inode(dir_ino, &dir_inode);
+        ext2_write_inode(ctx, dir_ino, &dir_inode);
     }
     return EXT2_OK;
 }
 
-int ext2_delete_entry(u32 dir_ino, const char *name)
+int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name)
 {
     Ext2Inode dir_inode;
     int ret, name_len;
     u32 bi, pos, prev_pos, phys;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     name_len = ext2_str_len(name);
 
-    ret = ext2_read_inode(dir_ino, &dir_inode);
+    ret = ext2_read_inode(ctx, dir_ino, &dir_inode);
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(&dir_inode, bi);
+        phys = ext2_bmap(ctx, &dir_inode, bi);
         if (phys == 0) break;
 
-        ret = ext2_read_block(phys, ext2_g_aux);
+        ret = ext2_read_block(ctx, phys, ext2_g_aux);
         if (ret != 0) return EXT2_ERR_IO;
 
         pos = 0; prev_pos = 0;
@@ -213,10 +213,10 @@ int ext2_delete_entry(u32 dir_ino, const char *name)
                         u16 prev_reclen = *(u16 *)&ext2_g_aux[prev_pos + 4];
                         *(u16 *)&ext2_g_aux[prev_pos + 4] = prev_reclen + de_reclen;
                     }
-                    ret = ext2_write_block(phys, ext2_g_aux);
+                    ret = ext2_write_block(ctx, phys, ext2_g_aux);
                     if (ret != 0) return EXT2_ERR_IO;
                     dir_inode.mtime = ext2_current_time();
-                    ext2_write_inode(dir_ino, &dir_inode);
+                    ext2_write_inode(ctx, dir_ino, &dir_inode);
                     return EXT2_OK;
                 }
             }
@@ -231,20 +231,20 @@ int ext2_delete_entry(u32 dir_ino, const char *name)
 /*  mkdir / rmdir                                                            */
 /* ======================================================================== */
 
-int ext2_mkdir(u32 parent_ino, const char *name)
+int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 {
     int new_ino, new_blk;
     Ext2Inode inode, parent_inode;
     u32 now, pos;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
-    { u32 tmp; if (ext2_find_entry(parent_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    { u32 tmp; if (ext2_find_entry(ctx, parent_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
 
-    new_ino = ext2_alloc_inode();
+    new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
-    new_blk = ext2_alloc_block();
-    if (new_blk < 0) { ext2_free_inode((u32)new_ino); return EXT2_ERR_NOSPC; }
+    new_blk = ext2_alloc_block(ctx);
+    if (new_blk < 0) { ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
 
     now = ext2_current_time();
     ext2_mem_zero(&inode, sizeof(inode));
@@ -268,38 +268,38 @@ int ext2_mkdir(u32 parent_ino, const char *name)
     ext2_g_aux[pos + 6] = 2; ext2_g_aux[pos + 7] = EXT2_FT_DIR;
     ext2_g_aux[pos + 8] = '.'; ext2_g_aux[pos + 9] = '.';
 
-    ret = ext2_write_block((u32)new_blk, ext2_g_aux);
-    if (ret != 0) { ext2_free_block((u32)new_blk); ext2_free_inode((u32)new_ino); return EXT2_ERR_IO; }
+    ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
+    if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
 
-    ext2_write_inode((u32)new_ino, &inode);
-    ret = ext2_add_entry(parent_ino, name, (u32)new_ino, EXT2_FT_DIR);
+    ext2_write_inode(ctx, (u32)new_ino, &inode);
+    ret = ext2_add_entry(ctx, parent_ino, name, (u32)new_ino, EXT2_FT_DIR);
     if (ret != 0) return ret;
 
-    ret = ext2_read_inode(parent_ino, &parent_inode);
-    if (ret == 0) { parent_inode.links_count++; ext2_write_inode(parent_ino, &parent_inode); }
+    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
+    if (ret == 0) { parent_inode.links_count++; ext2_write_inode(ctx, parent_ino, &parent_inode); }
 
     {
-        u32 dir_group = ((u32)new_ino - 1) / ext2_sb_info.inodes_per_group;
-        if (dir_group < ext2_num_groups)
-            ext2_gd_table[dir_group].used_dirs++;
+        u32 dir_group = ((u32)new_ino - 1) / ctx->sb_info.inodes_per_group;
+        if (dir_group < ctx->num_groups)
+            ctx->gd_table[dir_group].used_dirs++;
     }
-    ext2_sync();
+    ext2_sync(ctx);
     return EXT2_OK;
 }
 
-static int ext2_is_dir_empty(u32 dir_ino)
+static int ext2_is_dir_empty(Ext2Ctx *ctx, u32 dir_ino)
 {
     Ext2Inode inode;
     int ret;
     u32 bi, pos, phys;
 
-    ret = ext2_read_inode(dir_ino, &inode);
+    ret = ext2_read_inode(ctx, dir_ino, &inode);
     if (ret != 0) return 0;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(&inode, bi);
+        phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) break;
-        ret = ext2_read_block(phys, ext2_g_aux);
+        ret = ext2_read_block(ctx, phys, ext2_g_aux);
         if (ret != 0) return 0;
 
         pos = 0;
@@ -320,45 +320,45 @@ static int ext2_is_dir_empty(u32 dir_ino)
     return 1;
 }
 
-int ext2_rmdir(u32 parent_ino, const char *name)
+int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 {
     u32 ino;
     u8 ftype;
     Ext2Inode inode, parent_inode;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    ret = ext2_find_entry(parent_ino, name, &ino, &ftype);
+    ret = ext2_find_entry(ctx, parent_ino, name, &ino, &ftype);
     if (ret != 0) return ret;
     if (ftype != EXT2_FT_DIR) return EXT2_ERR_NOTDIR;
-    if (!ext2_is_dir_empty(ino)) return EXT2_ERR_NOTEMPTY;
+    if (!ext2_is_dir_empty(ctx, ino)) return EXT2_ERR_NOTEMPTY;
 
-    ret = ext2_read_inode(ino, &inode);
+    ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
 
-    ret = ext2_delete_entry(parent_ino, name);
+    ret = ext2_delete_entry(ctx, parent_ino, name);
     if (ret != 0) return ret;
 
-    ext2_free_all_blocks(&inode);
+    ext2_free_all_blocks(ctx, &inode);
     inode.links_count = 0;
     inode.dtime = ext2_current_time();
-    ext2_write_inode(ino, &inode);
-    ext2_free_inode(ino);
+    ext2_write_inode(ctx, ino, &inode);
+    ext2_free_inode(ctx, ino);
 
-    ret = ext2_read_inode(parent_ino, &parent_inode);
+    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
     if (ret == 0) {
         if (parent_inode.links_count > 0) parent_inode.links_count--;
         parent_inode.mtime = ext2_current_time();
-        ext2_write_inode(parent_ino, &parent_inode);
+        ext2_write_inode(ctx, parent_ino, &parent_inode);
     }
 
     {
-        u32 dir_group = (ino - 1) / ext2_sb_info.inodes_per_group;
-        if (dir_group < ext2_num_groups)
-            ext2_gd_table[dir_group].used_dirs--;
+        u32 dir_group = (ino - 1) / ctx->sb_info.inodes_per_group;
+        if (dir_group < ctx->num_groups)
+            ctx->gd_table[dir_group].used_dirs--;
     }
-    ext2_sync();
+    ext2_sync(ctx);
     return EXT2_OK;
 }
 
@@ -366,7 +366,7 @@ int ext2_rmdir(u32 parent_ino, const char *name)
 /*  パス検索                                                                */
 /* ======================================================================== */
 
-int ext2_lookup(const char *path, u32 *out_ino)
+int ext2_lookup(Ext2Ctx *ctx, const char *path, u32 *out_ino)
 {
     u32 current_ino = EXT2_ROOT_INO;
     char component[EXT2_NAME_LEN + 1];
@@ -375,7 +375,7 @@ int ext2_lookup(const char *path, u32 *out_ino)
     u8 found_type;
     int ret;
 
-    if (!ext2_mounted) return EXT2_ERR_NOMOUNT;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     if (!path || path[0] == '\0') { *out_ino = EXT2_ROOT_INO; return EXT2_OK; }
 
     i = 0;
@@ -389,7 +389,7 @@ int ext2_lookup(const char *path, u32 *out_ino)
         component[ci] = '\0';
         if (ci == 0) { if (path[i] == '/') { i++; continue; } break; }
 
-        ret = ext2_find_entry(current_ino, component, &found_ino, &found_type);
+        ret = ext2_find_entry(ctx, current_ino, component, &found_ino, &found_type);
         if (ret != 0) return EXT2_ERR_NOTFOUND;
         current_ino = found_ino;
         if (path[i] == '/') i++;
