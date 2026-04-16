@@ -1,0 +1,149 @@
+# ============================================================================
+#  OS32 パッケージ定義 (package_defs.yaml)
+#
+#  mkpkg.py が読み込み、各パッケージの .PKG ファイルを生成する。
+#
+#  各パッケージ:
+#    type: package (通常) / boot (ブートセクタ直接書込み)
+#    version: パッケージバージョン (整数)
+#    lzss: true/false (LZSS圧縮の有無)
+#    files: ファイルリスト (host: ビルドパス, guest: インストール先パス)
+# ============================================================================
+
+# --- ブートパッケージ (特殊: ブートセクタ直接書込み) ---
+boot:
+  type: boot
+  version: 1
+  lzss: false
+  files:
+    - host: boot/boot_hdd.bin
+      guest: /boot/boot_hdd.bin
+    - host: boot/loader_hdd.bin
+      guest: /boot/loader_hdd.bin
+    - host: kernel.bin
+      guest: /boot/kernel.bin
+
+# --- 最小パッケージ ---
+minimal:
+  type: package
+  version: 1
+  lzss: true
+  files:
+    - host: programs/shell.bin
+      guest: /sys/shell.bin
+    - host: unicode.bin
+      guest: /sys/unicode.bin
+    - host: programs/more.bin
+      guest: /bin/more
+    - host: programs/grep.bin
+      guest: /bin/grep
+    - host: programs/find.bin
+      guest: /bin/find
+    - host: programs/sort.bin
+      guest: /bin/sort
+    - host: programs/head.bin
+      guest: /bin/head
+    - host: programs/tail.bin
+      guest: /bin/tail
+    - host: programs/wc.bin
+      guest: /bin/wc
+    - host: programs/tee.bin
+      guest: /bin/tee
+    - host: programs/touch.bin
+      guest: /bin/touch
+    - host: programs/hexdump.bin
+      guest: /bin/hexdump
+    - host: programs/sleep.bin
+      guest: /bin/sleep
+    - host: programs/lzss.bin
+      guest: /bin/lzss
+    - host: programs/sndctl.bin
+      guest: /bin/sndctl
+
+# --- 標準パッケージ (差分) ---
+normal:
+  type: package
+  version: 1
+  lzss: true
+  files:
+    - host: programs/edit.bin
+      guest: /usr/bin/edit
+    - host: programs/man.bin
+      guest: /bin/man
+    - host: programs/diff.bin
+      guest: /bin/diff
+    - host: programs/du.bin
+      guest: /bin/du
+    - host: programs/cal.bin
+      guest: /bin/cal
+    - host: "docs/manpages/*.1"
+      guest: /usr/man/
+
+# --- フルパッケージ (差分) ---
+full:
+  type: package
+  version: 1
+  lzss: true
+  files:
+    - host: programs/gfx_demo.bin
+      guest: /usr/bin/gfx_demo
+    - host: programs/demo1.bin
+      guest: /usr/bin/demo1
+    - host: programs/ekakiuta.bin
+      guest: /usr/bin/ekakiuta
+    - host: programs/vbzview.bin
+      guest: /usr/bin/vbzview
+    - host: programs/vdpview.bin
+      guest: /usr/bin/vdpview
+    - host: programs/raster.bin
+      guest: /usr/bin/raster
+    - host: programs/spr_test.bin
+      guest: /usr/bin/spr_test
+    - host: programs/hrview.bin
+      guest: /usr/bin/hrview
+    - host: programs/mdview.bin
+      guest: /usr/bin/mdview
+    - host: programs/sndtest.bin
+      guest: /usr/bin/sndtest
+
+# --- デバッグパッケージ ---
+debug:
+  type: package
+  version: 1
+  lzss: true
+  files:
+    - host: programs/hello.bin
+      guest: /bin/hello
+    - host: programs/crash.bin
+      guest: /sbin/crash
+    - host: programs/bench.bin
+      guest: /sbin/bench
+    - host: programs/restest.bin
+      guest: /sbin/restest
+    - host: programs/libc_test.bin
+      guest: /bin/libc_test
+    - host: programs/test2.bin
+      guest: /bin/test2
+    - host: programs/test3.bin
+      guest: /bin/test3
+    - host: programs/test4.bin
+      guest: /bin/test4
+    - host: programs/stat_t.bin
+      guest: /bin/stat_t
+    - host: programs/args.bin
+      guest: /bin/args
+    - host: programs/nop.bin
+      guest: /bin/nop
+    - host: programs/fep_test.bin
+      guest: /usr/bin/fep_test
+
+# --- 追加データパッケージ ---
+append:
+  type: package
+  version: 1
+  lzss: true
+  files:
+    - host: assets/SKK.LZS
+      guest: /data/skk.lzs
+    - host: "assets/images/*.vbz"
+      guest: /data/images/
