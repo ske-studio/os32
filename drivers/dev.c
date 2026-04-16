@@ -9,6 +9,7 @@
 #include "dev.h"
 #include "disk.h"
 #include "ide.h"
+#include "atapi.h"
 
 /* ======== デバイステーブル ======== */
 static Device *dev_table[MAX_DEVICES];
@@ -137,6 +138,36 @@ void dev_register_hdd(int drive)
             dev_register(&hd1_dev);
         }
     }
+}
+
+/* ======================================================================== */
+/*  CD-ROM ドライバ (ATAPI)                                                  */
+/* ======================================================================== */
+
+static int cd0_read(Device *self, int lba, int count, void *buf)
+{
+    (void)self;
+    return atapi_read_sectors((u32)lba, (u32)count, buf);
+}
+
+static Device cd0_dev = {
+    "cd0",
+    DEV_BLOCK,
+    ATAPI_SECTOR_SIZE,      /* セクタサイズ 2048 */
+    0,                      /* 総セクタ数 (初期化時に設定) */
+    cd0_read,
+    0,                      /* blk_write = NULL (読み取り専用) */
+    0, 0, 0, 0
+};
+
+/* CD-ROMを登録するユーティリティ */
+void dev_register_cdrom(void)
+{
+    AtapiCapacity cap;
+    if (atapi_read_capacity(&cap) == ATAPI_OK) {
+        cd0_dev.total_sects = cap.total_sectors;
+    }
+    dev_register(&cd0_dev);
 }
 
 /* ======================================================================== */

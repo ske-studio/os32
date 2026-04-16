@@ -40,7 +40,7 @@ struct _Device {
 };
 
 /* ======== 定数 ======== */
-#define MAX_DEVICES  8
+#define MAX_DEVICES  10
 
 /* ======== API ======== */
 
@@ -52,6 +52,9 @@ int dev_register(Device *dev);
 
 /* HDDデバイスの登録 (ユーティリティ) */
 void dev_register_hdd(int drive);
+
+/* CD-ROMデバイスの登録 (ATAPIドライバ検出済みの場合) */
+void dev_register_cdrom(void);
 
 /* デバイス検索 (名前で) */
 Device *dev_find(const char *name);
