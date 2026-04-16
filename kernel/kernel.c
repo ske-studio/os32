@@ -156,6 +156,11 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         }
     }
 
+    /* ヒープ初期化 (VFSマウントでkmalloc使用のため、マウント前に必要) */
+    tvram_print(24, 2, "HEAP...", TATTR_GREEN);
+    kmalloc_init((void *)KHEAP_BASE, KHEAP_SIZE);
+    tvram_print(31, 2, "316K", TATTR_WHITE);
+
     /* 自動マウント処理 */
     tvram_print(14, 3, "MOUNT...", TATTR_GREEN);
     {
@@ -226,10 +231,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     rtc_init();
     tvram_print(32, 3, "OK", TATTR_WHITE);
 
-    /* ヒープ初期化 */
-    tvram_print(24, 2, "HEAP...", TATTR_GREEN);
-    kmalloc_init((void *)KHEAP_BASE, KHEAP_SIZE);
-    tvram_print(31, 2, "316K", TATTR_WHITE);
 
     /* ページング初期化 (メモリ保護有効化) */
     tvram_print(37, 2, "PAGE...", TATTR_GREEN);
