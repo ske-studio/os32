@@ -6,6 +6,10 @@
 *.map
 *.img
 *.d88
+*.iso
+
+# パッケージビルド出力
+/packages/
 
 # 特定の生成ファイル
 /unicode.bin
