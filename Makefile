@@ -75,7 +75,7 @@ PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
 
-C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c, $(wildcard programs/*.c))
+C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c programs/lzss.c, $(wildcard programs/*.c))
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
 
 # === Shell Module ===
@@ -122,6 +122,19 @@ programs/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engi
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
 
 fep_test: $(CRT0_OBJ) programs/fep_test.bin
+
+# === LZSS Command ===
+# lib/lzss.c を外部プログラム用に再コンパイル
+lib/lzss_prog.o: lib/lzss.c lib/lzss.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/lzss.o: programs/lzss.c
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/lzss.elf: build/app.ld $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o -lc -lgcc
+
+lzss_cmd: $(CRT0_OBJ) programs/lzss.bin
 
 # === OS32GFX Module ===
 GFX_SRC = $(wildcard programs/libos32gfx/*.c) \
@@ -338,7 +351,7 @@ mdview: $(CRT0_OBJ) programs/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
