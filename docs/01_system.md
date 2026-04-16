@@ -49,7 +49,7 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
   ├── exec_init() (KernelAPIテーブル構築)
   ├── Unicodeテーブルロード / ime_init()
   ├── boot_splash() (ブートスプラッシュ)
-  └── exec_run("shell.bin") (シェル起動、終了/クラッシュ時自動再起動)
+  └── exec_run(SYS_SHELL_BIN="/shell") (シェル起動、終了/クラッシュ時自動再起動)
       └── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
 ```
 

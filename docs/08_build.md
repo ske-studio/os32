@@ -74,3 +74,17 @@ python3 tools/install_hdd.py /tmp/test_new.nhd
 python3 tools/write_ipl.py kernel.bin --sector 6
 ```
 **注意**: 対象サイズが指定領域に収まるか注意深く確認してください（例: LBA 272のext2スーパーブロックを破壊しないこと）。
+
+#### `tools/nhd_deploy.py`
+NHD HDDイメージの管理をホスト側で一元化するデプロイメントツール。`deploy.yaml` に基づき、カーネル・ローダー・全ファイルを一括デプロイする。
+
+```bash
+python3 tools/nhd_deploy.py init   # NP21/WからNHDをコピーし初期化
+python3 tools/nhd_deploy.py sync   # deploy.yaml に基づくフルデプロイ
+python3 tools/nhd_deploy.py deploy # NHDイメージをNP21/Wにコピー
+python3 tools/nhd_deploy.py copy programs/shell.bin  # 個別ファイルのデプロイ
+```
+- `tools/deploy.yaml` でデプロイ対象・ゲストパス・タグを定義
+- ext2ファイルシステムへの書き込みはLinux loopデバイス経由
+- `config.h` の `SYS_*` 定数と `deploy.yaml` のパスは必ず整合させること
+
