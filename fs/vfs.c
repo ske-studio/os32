@@ -56,11 +56,15 @@ void vfs_resolve_path(const char *input, char *output, int out_size)
     if (input[0] == '/') {
         kstrncpy(tmp, input, VFS_MAX_PATH);
     } else {
-        o = 0;
-        for (i = 0; cwd[i] && o < VFS_MAX_PATH - 2; i++) tmp[o++] = cwd[i];
-        if (o > 0 && tmp[o - 1] != '/') tmp[o++] = '/';
-        for (i = 0; input[i] && o < VFS_MAX_PATH - 1; i++) tmp[o++] = input[i];
-        tmp[o] = '\0';
+        /* cwd + "/" + input を安全に結合 */
+        kstrncpy(tmp, cwd, VFS_MAX_PATH);
+        {
+            int len = (int)kstrlen(tmp);
+            if (len > 0 && tmp[len - 1] != '/') {
+                kstrncat(tmp, "/", VFS_MAX_PATH);
+            }
+        }
+        kstrncat(tmp, input, VFS_MAX_PATH);
     }
 
     p = 0;

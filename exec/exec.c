@@ -206,6 +206,7 @@ int exec_run(const char *cmdline)
     }
 
     /* フォールバック: パスにスラッシュがない場合、標準ディレクトリを順に検索 */
+    /* 注意: SYS_DEFAULT_PATH (config.h) と整合させること */
     if (sz <= 0) {
         int has_slash = 0;
         int pi;
@@ -219,13 +220,8 @@ int exec_run(const char *cmdline)
             int di;
             for (di = 0; search_dirs[di]; di++) {
                 char try_path[VFS_MAX_PATH];
-                int tp = 0, dp = 0;
-                while (search_dirs[di][dp] && tp < VFS_MAX_PATH - 2)
-                    try_path[tp++] = search_dirs[di][dp++];
-                dp = 0;
-                while (path[dp] && tp < VFS_MAX_PATH - 1)
-                    try_path[tp++] = path[dp++];
-                try_path[tp] = '\0';
+                kstrncpy(try_path, search_dirs[di], VFS_MAX_PATH);
+                kstrncat(try_path, path, VFS_MAX_PATH);
                 sz = vfs_read(try_path, file_buf, max_size + OS32X_HDR_V1_SIZE);
                 if (sz > 0) break;
             }

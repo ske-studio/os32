@@ -2,6 +2,7 @@
 /*  MAIN.C — OS32 外部シェル エントリ・コマンドルーターロジック         */
 /* ======================================================================== */
 #include "shell.h"
+#include "config.h"
 #include "libos32/help.h"
 
 KernelAPI *g_api;
@@ -242,7 +243,7 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
 /* ======================================================================== */
 /*  PATH管理                                                                */
 /* ======================================================================== */
-static char g_path[512] = "/bin:/sbin:/usr/bin";
+static char g_path[512] = SYS_DEFAULT_PATH;
 
 const char *shell_get_path(void)
 {
@@ -268,26 +269,72 @@ static int has_slash(const char *s)
 }
 
 /* cmdline (コマンド名+引数) を構築して exec_run を試行 */
+#define TRY_EXEC_BUF_SIZE  512
+#define TRY_EXEC_MARGIN    12  /* パス末尾 + スペース + NUL の余裕 */
+
 static int try_exec(const char *bin_path, int argc, char **argv)
 {
-    char cmd_buf[512];
+    char cmd_buf[TRY_EXEC_BUF_SIZE];
     char *p = cmd_buf;
+    char *limit_path = cmd_buf + TRY_EXEC_BUF_SIZE - TRY_EXEC_MARGIN;
+    char *limit_args = cmd_buf + TRY_EXEC_BUF_SIZE - 2;
     int i;
     const char *s;
 
     /* バイナリパスをコピー */
     s = bin_path;
-    while (*s && p < cmd_buf + 500) *p++ = *s++;
+    while (*s && p < limit_path) *p++ = *s++;
 
     /* 引数を追加 */
     for (i = 1; i < argc; i++) {
+        if (p >= limit_args) break;
         *p++ = ' ';
         s = argv[i];
-        while (*s && p < cmd_buf + 510) *p++ = *s++;
+        while (*s && p < limit_args) *p++ = *s++;
     }
     *p = '\0';
 
     return g_api->exec_run(cmd_buf);
+}
+
+/* ======================================================================== */
+/*  try_exec_from_path — PATH環境変数を走査してコマンドを検索・実行           */
+/*                                                                          */
+/*  shell_get_path() から取得したコロン区切りPATHの各ディレクトリについて     */
+/*  dir + "/" + name_buf のフルパスを構築し try_exec を試行する。             */
+/* ======================================================================== */
+static int try_exec_from_path(const char *name_buf, int argc, char **argv)
+{
+    const char *path_str = shell_get_path();
+    const char *p = path_str;
+
+    while (*p) {
+        char dir_buf[PATH_MAX_LEN];
+        char full_path[PATH_MAX_LEN];
+        int di = 0;
+        int rc;
+
+        /* ':' で区切られたディレクトリを取得 */
+        while (*p && *p != ':' && di < PATH_MAX_LEN - 2)
+            dir_buf[di++] = *p++;
+        dir_buf[di] = '\0';
+        if (*p == ':') p++;
+        if (di == 0) continue;
+
+        /* フルパス構築: dir + '/' + name_buf */
+        strncpy(full_path, dir_buf, PATH_MAX_LEN - 1);
+        full_path[PATH_MAX_LEN - 1] = '\0';
+        if (di > 0 && dir_buf[di - 1] != '/') {
+            strncat(full_path, "/", PATH_MAX_LEN - strlen(full_path) - 1);
+        }
+        strncat(full_path, name_buf, PATH_MAX_LEN - strlen(full_path) - 1);
+
+        rc = try_exec(full_path, argc, argv);
+        if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
+            return rc;
+        }
+    }
+    return EXEC_ERR_NOT_FOUND;
 }
 
 static void run_cmd_internal(int argc, char **argv) {
@@ -315,7 +362,7 @@ static void run_cmd_internal(int argc, char **argv) {
 
     /* 2. 外部コマンドの検索・実行 */
     {
-        /* コマンド名に.bin拡張子を付加 */
+        /* コマンド名に.bin拡張子を付加 (".bin\0" = 5文字分を予約) */
         strncpy(name_buf, argv[0], PATH_MAX_LEN - 5);
         name_buf[PATH_MAX_LEN - 5] = '\0';
         if (!has_ext(name_buf, ".bin")) {
@@ -350,44 +397,15 @@ static void run_cmd_internal(int argc, char **argv) {
     }
 
     /* 2c. PATH内の各ディレクトリで試行 */
-    {
-        const char *path_str = shell_get_path();
-        const char *p = path_str;
-
-        while (*p) {
-            char dir_buf[PATH_MAX_LEN];
-            char full_path[PATH_MAX_LEN];
-            int di = 0, fi = 0, ni2 = 0;
-
-            /* ':' で区切られたディレクトリを取得 */
-            while (*p && *p != ':' && di < PATH_MAX_LEN - 2)
-                dir_buf[di++] = *p++;
-            dir_buf[di] = '\0';
-            if (*p == ':') p++;
-            if (di == 0) continue;
-
-            /* フルパス構築: dir + '/' + name_buf */
-            fi = 0;
-            ni2 = 0;
-            while (fi < PATH_MAX_LEN - 2 && dir_buf[fi])
-                full_path[fi] = dir_buf[fi], fi++;
-            if (fi > 0 && full_path[fi - 1] != '/')
-                full_path[fi++] = '/';
-            while (fi < PATH_MAX_LEN - 1 && name_buf[ni2])
-                full_path[fi++] = name_buf[ni2++];
-            full_path[fi] = '\0';
-
-            rc = try_exec(full_path, argc, argv);
-            if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-                g_api->gfx_shutdown();
-                if (rc == EXEC_SUCCESS) {
-                    g_api->kprintf(ATTR_GREEN, "%s", "\n");
-                } else if (rc == EXEC_ERR_FAULT) {
-                    g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-                }
-                return;
-            }
+    rc = try_exec_from_path(name_buf, argc, argv);
+    if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
+        g_api->gfx_shutdown();
+        if (rc == EXEC_SUCCESS) {
+            g_api->kprintf(ATTR_GREEN, "%s", "\n");
+        } else if (rc == EXEC_ERR_FAULT) {
+            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
         }
+        return;
     }
 
     g_api->kprintf(ATTR_RED, "%s: command not found\n", argv[0]);

@@ -21,6 +21,7 @@ char *kstrcpy(char *dst, const char *src);
 int   kstrcmp(const char *a, const char *b);
 int   kstrncmp(const char *a, const char *b, u32 n);
 char *kstrcat(char *dst, const char *src);
+char *kstrncat(char *dst, const char *src, u32 n);
 
 /* ======== libc互換シンボル ======== */
 /* GCC -ffreestanding でも構造体コピー等で memcpy/memset を暗黙に呼ぶ場合がある。 */

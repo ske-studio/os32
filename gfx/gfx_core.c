@@ -41,7 +41,7 @@ void gfx_init(void)
     dirty_queue.count = 0;
 
     /* テキストVRAMクリア */
-    for (i = 0; i < 2000; i++) {
+    for (i = 0; i < TVRAM_COLS * TVRAM_ROWS; i++) {
         tvram_char[i] = 0x0000;
         tvram_attr[i * 2] = 0x00;
     }

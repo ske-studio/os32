@@ -80,12 +80,15 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     tvram_print(0, 0, "PC-9801 OS32 booting...", TATTR_CYAN);
     
-    /* 簡易itoa (mb表示用) */
-    tmp[0] = ' '; tmp[1] = '('; 
-    tmp[2] = '0' + (mb / 10) % 10;
-    tmp[3] = '0' + (mb % 10);
-    tmp[4] = 'M'; tmp[5] = 'B'; tmp[6] = ')'; tmp[7] = '\0';
-    if(tmp[2] == '0') tmp[2] = ' '; /* leading zero suppression */
+    /* メモリ量表示 (例: " (16MB)") */
+    {
+        int d10 = (mb / 10) % 10;
+        int d1  = mb % 10;
+        tmp[0] = ' '; tmp[1] = '(';
+        tmp[2] = d10 ? ('0' + d10) : ' '; /* 先行ゼロ抑制 */
+        tmp[3] = '0' + d1;
+        tmp[4] = 'M'; tmp[5] = 'B'; tmp[6] = ')'; tmp[7] = '\0';
+    }
     tvram_print(24, 0, tmp, TATTR_CYAN);
 
     /* IDT/PIC/PIT 初期化 */
