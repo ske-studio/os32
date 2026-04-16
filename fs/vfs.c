@@ -3,6 +3,9 @@
 /*                                                                          */
 /*  各FSドライバ(ext2, fat12)への呼び出しを仲介し、                          */
 /*  パス文字列ベースの統一APIを提供する。                                    */
+/*                                                                          */
+/*  マルチインスタンス対応: MountPointがfs_ctxを保持し、                     */
+/*  各ディスパッチ関数がFSドライバにコンテキストを渡す。                     */
 /* ======================================================================== */
 
 #include "vfs.h"
@@ -126,6 +129,7 @@ typedef struct {
     int in_use;
     char prefix[VFS_MAX_PATH];
     VfsOps *ops;
+    void *fs_ctx;           /* FSドライバ固有のインスタンスコンテキスト */
     int dev_type;
     int dev_id;
     char dev_name[VFS_MAX_DEVNAME];
@@ -166,11 +170,14 @@ static MountPoint *vfs_find_mount(const char *path, const char **out_relpath)
     return (MountPoint *)0;
 }
 
-VfsOps *vfs_route(const char *path, char *rel_out, int max_rel)
+VfsOps *vfs_route(const char *path, char *rel_out, int max_rel, void **ctx_out)
 {
     const char *rel_ptr;
     MountPoint *mnt = vfs_find_mount(path, &rel_ptr);
-    if (!mnt) return (VfsOps *)0;
+    if (!mnt) {
+        if (ctx_out) *ctx_out = (void *)0;
+        return (VfsOps *)0;
+    }
 
     if (*rel_ptr == '\0') {
         kstrncpy(rel_out, "/", (u32)max_rel);
@@ -182,6 +189,7 @@ VfsOps *vfs_route(const char *path, char *rel_out, int max_rel)
             kstrncpy(rel_out, rel_ptr, (u32)max_rel);
         }
     }
+    if (ctx_out) *ctx_out = mnt->fs_ctx;
     return mnt->ops;
 }
 
@@ -215,6 +223,7 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
 {
     int dev_type, dev_id, rc, i, slot;
     VfsOps *ops = (VfsOps *)0;
+    void *fs_ctx;
 
     rc = vfs_dev_parse(dev_name, &dev_type, &dev_id);
     if (rc != VFS_OK) return VFS_ERR_INVAL;
@@ -227,21 +236,22 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     }
     if (!ops) return VFS_ERR_INVAL;
 
-    rc = ops->mount(dev_id);
-    if (rc != 0) return rc;
+    fs_ctx = ops->mount(dev_id);
+    if (!fs_ctx) return VFS_ERR_IO;
 
     slot = -1;
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (!mounts[i].in_use) { slot = i; break; }
     }
     if (slot < 0) {
-        ops->umount();
+        ops->umount(fs_ctx);
         return VFS_ERR_NOSPC;
     }
 
     mounts[slot].in_use = 1;
     kstrncpy(mounts[slot].prefix, prefix, VFS_MAX_PATH);
     mounts[slot].ops = ops;
+    mounts[slot].fs_ctx = fs_ctx;
     mounts[slot].dev_type = dev_type;
     mounts[slot].dev_id = dev_id;
     kstrncpy(mounts[slot].dev_name, dev_name, VFS_MAX_DEVNAME);
@@ -255,8 +265,9 @@ void vfs_umount(const char *prefix)
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) {
-            mounts[i].ops->umount();
+            mounts[i].ops->umount(mounts[i].fs_ctx);
             mounts[i].in_use = 0;
+            mounts[i].fs_ctx = (void *)0;
             break;
         }
     }
@@ -266,7 +277,8 @@ int vfs_is_mounted(const char *prefix)
 {
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
-        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) return mounts[i].ops->is_mounted();
+        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0)
+            return mounts[i].ops->is_mounted(mounts[i].fs_ctx);
     }
     return 0;
 }
@@ -292,83 +304,89 @@ const char *vfs_devname(const char *prefix)
 int vfs_ls(const char *path, vfs_dir_cb cb, void *ctx)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->list_dir) return VFS_ERR_NOMOUNT;
-    return ops->list_dir(rel_path, cb, ctx);
+    return ops->list_dir(fs_ctx, rel_path, cb, ctx);
 }
 
 int vfs_read(const char *path, void *buf, u32 max_size)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->read_file) return VFS_ERR_NOMOUNT;
-    return ops->read_file(rel_path, buf, max_size);
+    return ops->read_file(fs_ctx, rel_path, buf, max_size);
 }
 
 int vfs_write(const char *path, const void *data, u32 size)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->write_file) return VFS_ERR_NOMOUNT;
-    return ops->write_file(rel_path, data, size);
+    return ops->write_file(fs_ctx, rel_path, data, size);
 }
 
 int vfs_rm(const char *path)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->unlink) return VFS_ERR_NOMOUNT;
-    return ops->unlink(rel_path);
+    return ops->unlink(fs_ctx, rel_path);
 }
 
 int vfs_rename(const char *oldpath, const char *newpath)
 {
     char old_abs[VFS_MAX_PATH], old_rel[VFS_MAX_PATH];
     char new_abs[VFS_MAX_PATH], new_rel[VFS_MAX_PATH];
+    void *old_ctx, *new_ctx;
     VfsOps *old_ops, *new_ops;
 
     vfs_resolve_path(oldpath, old_abs, VFS_MAX_PATH);
     vfs_resolve_path(newpath, new_abs, VFS_MAX_PATH);
 
-    old_ops = vfs_route(old_abs, old_rel, VFS_MAX_PATH);
-    new_ops = vfs_route(new_abs, new_rel, VFS_MAX_PATH);
+    old_ops = vfs_route(old_abs, old_rel, VFS_MAX_PATH, &old_ctx);
+    new_ops = vfs_route(new_abs, new_rel, VFS_MAX_PATH, &new_ctx);
 
     if (!old_ops || !new_ops) return VFS_ERR_NOMOUNT;
 
-    /* アプローチ2: 異なるファイルシステム(例: /host から /hd0)などへの移動はVFS層では許容しない
-     * (上層のシェル側で cp + rm へフォールバックさせるため INVAL を返す) */
-    if (old_ops != new_ops) return VFS_ERR_INVAL;
+    /* 異なるファイルシステム間の移動は許容しない */
+    if (old_ops != new_ops || old_ctx != new_ctx) return VFS_ERR_INVAL;
 
     if (!old_ops->rename) return VFS_ERR_INVAL;
-    return old_ops->rename(old_rel, new_rel);
+    return old_ops->rename(old_ctx, old_rel, new_rel);
 }
 
 int vfs_mkdir(const char *path)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->mkdir) return VFS_ERR_NOMOUNT;
-    return ops->mkdir(rel_path);
+    return ops->mkdir(fs_ctx, rel_path);
 }
 
 int vfs_rmdir(const char *path)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops || !ops->rmdir) return VFS_ERR_NOMOUNT;
-    return ops->rmdir(rel_path);
+    return ops->rmdir(fs_ctx, rel_path);
 }
 
 int vfs_sync(void)
@@ -376,7 +394,7 @@ int vfs_sync(void)
     int i, rc = VFS_OK, cur_rc;
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (mounts[i].in_use && mounts[i].ops->sync) {
-            cur_rc = mounts[i].ops->sync();
+            cur_rc = mounts[i].ops->sync(mounts[i].fs_ctx);
             if (cur_rc != VFS_OK) rc = cur_rc;
         }
     }
@@ -385,29 +403,30 @@ int vfs_sync(void)
 
 u32 vfs_total_blocks(void) {
     MountPoint *mnt = vfs_find_mount("/", (const char **)0);
-    return (mnt && mnt->ops->total_blocks) ? mnt->ops->total_blocks() : 0;
+    return (mnt && mnt->ops->total_blocks) ? mnt->ops->total_blocks(mnt->fs_ctx) : 0;
 }
 u32 vfs_free_blocks(void) {
     MountPoint *mnt = vfs_find_mount("/", (const char **)0);
-    return (mnt && mnt->ops->free_blocks) ? mnt->ops->free_blocks() : 0;
+    return (mnt && mnt->ops->free_blocks) ? mnt->ops->free_blocks(mnt->fs_ctx) : 0;
 }
 u32 vfs_block_size(void) {
     MountPoint *mnt = vfs_find_mount("/", (const char **)0);
-    return (mnt && mnt->ops->block_size) ? mnt->ops->block_size() : 0;
+    return (mnt && mnt->ops->block_size) ? mnt->ops->block_size(mnt->fs_ctx) : 0;
 }
 
 int vfs_stat(const char *path, OS32_Stat *buf)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
     VfsOps *ops;
     
     if (!buf) return VFS_ERR_INVAL;
 
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     
     if (!ops || !ops->stat) return VFS_ERR_NOMOUNT;
-    return ops->stat(rel_path, buf);
+    return ops->stat(fs_ctx, rel_path, buf);
 }
 
 /* end of vfs.c */

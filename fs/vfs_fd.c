@@ -15,9 +15,6 @@
 #define ATTR_WHITE   TATTR_WHITE
 #endif
 
-/* vfs.c の内部ルーターを参照 */
-extern VfsOps *vfs_route(const char *path, char *rel_out, int max_rel);
-
 /* ======== 内部ユーティリティ ======== */
 
 static int str_len(const char *s)
@@ -45,6 +42,7 @@ typedef struct {
     u32 size;
     int mode;
     VfsOps *ops;
+    void *fs_ctx;       /* FSドライバ固有のインスタンスコンテキスト */
 } VfsFile;
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
@@ -55,10 +53,11 @@ int vfs_open(const char *path, int mode)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     u32 file_size = 0;
     int rc;
+    void *fs_ctx;
     VfsOps *ops;
 
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
 
     /* 空きスロットを探す (FD0, 1, 2 は標準入出力用に予約) */
@@ -73,7 +72,7 @@ int vfs_open(const char *path, int mode)
     /* サイズ取得・存在確認 */
     rc = -1;
     if (ops->get_file_size) {
-        rc = ops->get_file_size(resolved, &file_size);
+        rc = ops->get_file_size(fs_ctx, resolved, &file_size);
     } else {
         /* get_file_size非対応の場合、安全のためエラー */
         return VFS_ERR_INVAL;
@@ -84,7 +83,7 @@ int vfs_open(const char *path, int mode)
         if (mode & O_CREAT) {
             /* 作成処理 (サイズ0の空ファイルを作成してからサイズ取得等) */
             /* 今回は簡易的に0バイトでwriteして作らせる */
-            rc = ops->write_file(rel_path, "", 0);
+            rc = ops->write_file(fs_ctx, rel_path, "", 0);
             if (rc != VFS_OK) return rc;
             file_size = 0;
         } else {
@@ -94,7 +93,7 @@ int vfs_open(const char *path, int mode)
         if (mode & O_TRUNC) {
             if (mode & O_WRONLY || mode & O_RDWR) {
                 /* 切り詰め：空ファイルで上書き */
-                ops->write_file(rel_path, "", 0);
+                ops->write_file(fs_ctx, rel_path, "", 0);
                 file_size = 0;
             }
         }
@@ -106,6 +105,7 @@ int vfs_open(const char *path, int mode)
     open_files[fd].size = file_size;
     open_files[fd].mode = mode;
     open_files[fd].ops = ops;
+    open_files[fd].fs_ctx = fs_ctx;
 
     return fd;
 }
@@ -114,6 +114,7 @@ void vfs_close(int fd)
 {
     if (fd >= 0 && fd < VFS_MAX_OPEN_FILES) {
         open_files[fd].in_use = 0;
+        open_files[fd].fs_ctx = (void *)0;
     }
 }
 
@@ -148,7 +149,7 @@ int vfs_read_fd(int fd, void *buf, u32 size)
     }
 
     if (f->ops->read_stream) {
-        rc = f->ops->read_stream(f->path, buf, size, f->offset);
+        rc = f->ops->read_stream(f->fs_ctx, f->path, buf, size, f->offset);
         if (rc > 0) {
             f->offset += rc;
             return rc;
@@ -180,7 +181,7 @@ int vfs_write_fd(int fd, const void *buf, u32 size)
     if ((f->mode & 3) == O_RDONLY) return VFS_ERR_INVAL; /* 読み込み専用 */
 
     if (f->ops->write_stream) {
-        rc = f->ops->write_stream(f->path, buf, size, f->offset);
+        rc = f->ops->write_stream(f->fs_ctx, f->path, buf, size, f->offset);
         if (rc > 0) {
             f->offset += rc;
             if (f->offset > f->size) {
@@ -270,7 +271,7 @@ int vfs_fstat(int fd, OS32_Stat *buf)
         return VFS_ERR_NOMOUNT;
     }
     
-    return open_files[fd].ops->stat(open_files[fd].path, buf);
+    return open_files[fd].ops->stat(open_files[fd].fs_ctx, open_files[fd].path, buf);
 }
 
 /* レガシー shell_print 互換ラッパー (Phase 2) */

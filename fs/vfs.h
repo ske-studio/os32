@@ -3,6 +3,9 @@
 /*                                                                          */
 /*  ext2/fat12等を透過的に扱うための共通インターフェース。                    */
 /*  Linuxライクなコマンド体系 (ls, cat, rm, mkdir等) を実現する。            */
+/*                                                                          */
+/*  マルチインスタンス対応: 各FSドライバは mount() でコンテキストを返し、    */
+/*  以降の全操作は void *ctx 経由でインスタンスを識別する。                  */
 /* ======================================================================== */
 
 #ifndef VFS_H
@@ -45,41 +48,47 @@ typedef struct {
 /* ディレクトリ列挙コールバック */
 typedef void (*vfs_dir_cb)(const VfsDirEntry *entry, void *ctx);
 
-/* FS操作テーブル (各FSドライバが実装) */
+/* FS操作テーブル (各FSドライバが実装)
+ *
+ * マルチインスタンス対応:
+ *   mount()  → void* を返す (FSドライバ固有のコンテキスト)
+ *   以降の全関数 → void *ctx を第1引数で受け取る
+ *   umount() → コンテキストを解放する
+ */
 typedef struct {
     const char *name;                /* "ext2", "fat12" */
 
     /* マウント/アンマウント */
-    int  (*mount)(int dev_id);
-    void (*umount)(void);
-    int  (*is_mounted)(void);
+    void *(*mount)(int dev_id);      /* 成功: コンテキストptr, 失敗: NULL */
+    void (*umount)(void *ctx);
+    int  (*is_mounted)(void *ctx);
 
     /* ディレクトリ操作 (パス文字列ベース) */
-    int  (*list_dir)(const char *path, vfs_dir_cb cb, void *ctx);
-    int  (*mkdir)(const char *path);
-    int  (*rmdir)(const char *path);
+    int  (*list_dir)(void *ctx, const char *path, vfs_dir_cb cb, void *user_ctx);
+    int  (*mkdir)(void *ctx, const char *path);
+    int  (*rmdir)(void *ctx, const char *path);
 
     /* ファイル操作 (パス文字列ベース) */
-    int  (*read_file)(const char *path, void *buf, u32 max_size);
-    int  (*write_file)(const char *path, const void *data, u32 size);
-    int  (*unlink)(const char *path);
-    int  (*rename)(const char *oldpath, const char *newpath);
+    int  (*read_file)(void *ctx, const char *path, void *buf, u32 max_size);
+    int  (*write_file)(void *ctx, const char *path, const void *data, u32 size);
+    int  (*unlink)(void *ctx, const char *path);
+    int  (*rename)(void *ctx, const char *oldpath, const char *newpath);
 
     /* ストリーム操作 (シーク・部分読み書き対応用) */
-    int  (*get_file_size)(const char *path, u32 *size);
-    int  (*read_stream)(const char *path, void *buf, u32 size, u32 offset);
-    int  (*write_stream)(const char *path, const void *buf, u32 size, u32 offset);
+    int  (*get_file_size)(void *ctx, const char *path, u32 *size);
+    int  (*read_stream)(void *ctx, const char *path, void *buf, u32 size, u32 offset);
+    int  (*write_stream)(void *ctx, const char *path, const void *buf, u32 size, u32 offset);
 
     /* メタデータ */
-    int  (*sync)(void);
+    int  (*sync)(void *ctx);
 
     /* ファイルシステム情報 */
-    u32  (*total_blocks)(void);
-    u32  (*free_blocks)(void);
-    u32  (*block_size)(void);
+    u32  (*total_blocks)(void *ctx);
+    u32  (*free_blocks)(void *ctx);
+    u32  (*block_size)(void *ctx);
 
     /* 追加: ファイル属性・状態 */
-    int  (*stat)(const char *path, OS32_Stat *buf);
+    int  (*stat)(void *ctx, const char *path, OS32_Stat *buf);
 } VfsOps;
 
 /* ---- VFS API ---- */
@@ -134,11 +143,10 @@ const char *vfs_cwd(void);
 int vfs_chdir(const char *path);
 
 /* パスの正規化 (相対→絶対) */
-/* パスの正規化 (相対→絶対) */
 void vfs_resolve_path(const char *input, char *output, int out_size);
 
 /* 内部ルーターの公開 (vfs_fd.c向け) */
-VfsOps *vfs_route(const char *path, char *rel_out, int max_rel);
+VfsOps *vfs_route(const char *path, char *rel_out, int max_rel, void **ctx_out);
 
 /* レガシー互換ラッパー */
 void vfs_sys_compat_shell_print(const char *s, u8 attr);
