@@ -57,5 +57,4 @@
 
 ---
 
-*OS32 Technical Specification — Version 4.3*  
-*Last Updated: 2026-04-15*
+*Last Updated: 2026-04-16*
