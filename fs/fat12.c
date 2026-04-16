@@ -8,6 +8,7 @@
 #include "fat12.h"
 #include "disk.h"
 #include "vfs.h"
+#include "kstring.h"
 #include "os_time.h"
 
 /* ======== 内部状態 ======== */
@@ -21,20 +22,7 @@ static int fat_buf_sectors;
 static u8 sect_buf[1024];
 
 /* ======== ユーティリティ ======== */
-static void fat_memcpy(void *dst, const void *src, int n)
-{
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-    int i;
-    for (i = 0; i < n; i++) d[i] = s[i];
-}
-
-static void fat_memset(void *dst, u8 v, int n)
-{
-    u8 *d = (u8 *)dst;
-    int i;
-    for (i = 0; i < n; i++) d[i] = v;
-}
+/* メモリ操作は kstring.h (kmemcpy, kmemset) に統一 */
 
 static int fat_toupper(int c)
 {
@@ -105,7 +93,7 @@ static void name_to_83(const char *input, char *out83)
     int i, j;
     const char *dot;
 
-    fat_memset(out83, ' ', FAT12_NAME_LEN);
+    kmemset(out83, ' ', FAT12_NAME_LEN);
 
     /* ドットの位置を探す */
     dot = 0;
@@ -325,7 +313,7 @@ static FAT12_DirEntry *fat12_find(const char *name, int *out_sector, int *out_in
             if (dir[i].attr == FAT_ATTR_LFN) continue;
 
             if (name_match_83(&dir[i], name83)) {
-                fat_memcpy(&found, &dir[i], sizeof(found));
+                kmemcpy(&found, &dir[i], sizeof(found));
                 if (out_sector) *out_sector = s;
                 if (out_index) *out_index = i;
                 return &found;
@@ -367,7 +355,7 @@ int fat12_read(const char *name, void *buf, int maxsz)
             chunk = finfo.bytes_per_sector;
             if (chunk > remaining) chunk = remaining;
 
-            fat_memcpy(dst, sect_buf, chunk);
+            kmemcpy(dst, sect_buf, (u32)chunk);
             dst += chunk;
             bytes_read += chunk;
             remaining -= chunk;
@@ -427,7 +415,7 @@ int fat12_read_stream(const char *name, void *buf, u32 size, u32 offset)
             chunk = finfo.bytes_per_sector - offset_in_cluster;
             if (chunk > remaining) chunk = remaining;
 
-            fat_memcpy(dst, &sect_buf[offset_in_cluster], chunk);
+            kmemcpy(dst, &sect_buf[offset_in_cluster], (u32)chunk);
             dst += chunk;
             bytes_read += chunk;
             remaining -= chunk;
@@ -537,11 +525,11 @@ int fat12_write(const char *name, const void *buf, int sz)
             chunk = finfo.bytes_per_sector;
             if (chunk > remaining) {
                 /* 最終セクタはゼロクリアしてからコピー */
-                fat_memset(sect_buf, 0, finfo.bytes_per_sector);
-                fat_memcpy(sect_buf, src, remaining);
+                kmemset(sect_buf, 0, (u32)finfo.bytes_per_sector);
+                kmemcpy(sect_buf, src, (u32)remaining);
                 chunk = remaining;
             } else {
-                fat_memcpy(sect_buf, src, chunk);
+                kmemcpy(sect_buf, src, (u32)chunk);
             }
             if (disk_write_lba(finfo.drive_num,(int)(lba + s), 1, sect_buf) != 0)
                 return -1;
@@ -560,8 +548,8 @@ int fat12_write(const char *name, const void *buf, int sz)
         return -1;
 
     dir = (FAT12_DirEntry *)sect_buf;
-    fat_memset(&dir[dir_index], 0, 32);
-    fat_memcpy(dir[dir_index].name, name83, 11);
+    kmemset(&dir[dir_index], 0, 32);
+    kmemcpy(dir[dir_index].name, name83, 11);
     dir[dir_index].attr = FAT_ATTR_ARCHIVE;
     dir[dir_index].start_cluster = (first_cluster >= 0) ? (u16)first_cluster : 0;
     dir[dir_index].file_size = (u32)sz;
@@ -716,13 +704,10 @@ static int fat12_vfs_stat(const char *path, OS32_Stat *buf)
     const char *fname = fat12_basename(path);
     FAT12_DirEntry *ent;
     u16 mode = 0;
-    int i;
-    u8 *p;
     
     if (!buf) return VFS_ERR_INVAL;
 
-    p = (u8 *)buf;
-    for (i = 0; i < sizeof(OS32_Stat); i++) p[i] = 0;
+    kmemset(buf, 0, sizeof(OS32_Stat));
 
     /* ROOT ディレクトリの場合 */
     if (!fname[0] || (fname[0] == '.' && fname[1] == '\0')) {
