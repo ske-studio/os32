@@ -10,7 +10,8 @@
 /* ====================================================================== */
 /*  スタートアップ設定                                                       */
 /* ====================================================================== */
-#define SYS_SHELL_BIN         "/shell"         /* システムシェル */
+#define SYS_SHELL_BIN         "/sys/shell.bin"     /* システムシェル (HDD) */
+#define SYS_SHELL_BIN_FDD     "/shell.bin"         /* フォールバック (FDD) */
 #define SYS_PROFILE_SYS       "/etc/profile"       /* システムプロファイル */
 #define SYS_UNICODE_BIN       "/data/unicode.bin"  /* Unicodeテーブル */
 

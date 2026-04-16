@@ -31,6 +31,12 @@ static int fat_toupper(int c)
     return c;
 }
 
+static int fat_tolower(int c)
+{
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    return c;
+}
+
 /* ======================================================================== */
 /*  12bit FATエントリ操作                                                   */
 /* ======================================================================== */
@@ -118,23 +124,23 @@ static void name_to_83(const char *input, char *out83)
     }
 }
 
-/* 8.3形式を人間可読の "NAME.EXT" 形式に変換 */
+/* 8.3形式を人間可読の "name.ext" 形式に変換 (小文字で出力) */
 static void name_from_83(const FAT12_DirEntry *ent, char *out, int maxlen)
 {
     int i, j;
 
     j = 0;
-    /* ファイル名 (末尾スペースを除去) */
+    /* ファイル名 (末尾スペースを除去、小文字化) */
     for (i = 0; i < 8 && j < maxlen - 1; i++) {
         if (ent->name[i] == ' ') break;
-        out[j++] = ent->name[i];
+        out[j++] = (char)fat_tolower((u8)ent->name[i]);
     }
-    /* 拡張子 (あれば) */
+    /* 拡張子 (あれば、小文字化) */
     if (ent->ext[0] != ' ') {
         out[j++] = '.';
         for (i = 0; i < 3 && j < maxlen - 1; i++) {
             if (ent->ext[i] == ' ') break;
-            out[j++] = ent->ext[i];
+            out[j++] = (char)fat_tolower((u8)ent->ext[i]);
         }
     }
     out[j] = '\0';
