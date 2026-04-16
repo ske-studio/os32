@@ -9,6 +9,7 @@
 #include "disk.h"
 #include "vfs.h"
 #include "kstring.h"
+#include "kmalloc.h"
 #include "os_time.h"
 
 /* ======== 内部状態 ======== */
@@ -599,6 +600,8 @@ int fat12_delete(const char *name)
 }
 
 /* ======== FAT12 VFSラッパー ======== */
+/* マルチインスタンス対応: mount()でFAT12_Infoをkmalloc確保しコンテキストとする。 */
+/* 内部関数は引き続き静的finfo/fat_bufを使用 (フロッピーは物理的にシングル)。    */
 
 /* パスからファイル名部分を抽出 (FAT12はルート直下のみ) */
 static const char *fat12_basename(const char *path)
@@ -613,14 +616,27 @@ static const char *fat12_basename(const char *path)
     return last;
 }
 
-static int fat12_vfs_mount(int dev_id)
+static void *fat12_vfs_mount(int dev_id)
 {
-    return fat12_mount(dev_id);
+    FAT12_Info *fi;
+    if (fat12_mount(dev_id) != 0) return (void *)0;
+    /* コンテキストとしてfinfo のコピーをkmalloc確保 */
+    fi = (FAT12_Info *)kmalloc(sizeof(FAT12_Info));
+    if (!fi) { fat12_unmount(); return (void *)0; }
+    kmemcpy(fi, &finfo, sizeof(FAT12_Info));
+    return (void *)fi;
 }
 
-static void fat12_vfs_umount(void)
+static void fat12_vfs_umount(void *ctx)
 {
     fat12_unmount();
+    if (ctx) kfree(ctx);
+}
+
+static int fat12_vfs_is_mounted(void *ctx)
+{
+    (void)ctx;
+    return fat12_is_mounted();
 }
 
 /* fat12_list用コールバック変換コンテキスト */
@@ -629,6 +645,8 @@ typedef struct {
     void       *user_ctx;
 } Fat12ListCtx;
 
+/* 注意: fat12_list()がコールバックにコンテキストを渡せないため、
+ * 暫定でstaticを使用。シングルタスクOSなので問題なし。 */
 static Fat12ListCtx fat12_list_ctx;
 
 /* fat12_list用コールバック: FAT12 print_fn → VfsDirEntry変換 */
@@ -643,55 +661,66 @@ static void fat12_to_vfs_cb(const char *name, u32 size, u8 attr)
     fat12_list_ctx.user_cb(&ve, fat12_list_ctx.user_ctx);
 }
 
-static int fat12_vfs_list(const char *path, vfs_dir_cb cb, void *ctx)
+static int fat12_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user_ctx)
 {
     int rc;
+    (void)ctx;
     (void)path;  /* FAT12はルートディレクトリのみ */
     fat12_list_ctx.user_cb = cb;
-    fat12_list_ctx.user_ctx = ctx;
+    fat12_list_ctx.user_ctx = user_ctx;
     rc = fat12_list(fat12_to_vfs_cb);
     return (rc >= 0) ? VFS_OK : VFS_ERR_IO;
 }
 
-static int fat12_vfs_read(const char *path, void *buf, u32 max_size)
+static int fat12_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
+    (void)ctx;
+    fname = fat12_basename(path);
     if (!fname[0]) return VFS_ERR_NOTFOUND;
     return fat12_read(fname, buf, (int)max_size);
 }
 
-static int fat12_vfs_write(const char *path, const void *data, u32 size)
+static int fat12_vfs_write(void *ctx, const char *path, const void *data, u32 size)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
+    (void)ctx;
+    fname = fat12_basename(path);
     if (!fname[0]) return VFS_ERR_INVAL;
     return fat12_write(fname, data, (int)size);
 }
 
-static int fat12_vfs_unlink(const char *path)
+static int fat12_vfs_unlink(void *ctx, const char *path)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
+    (void)ctx;
+    fname = fat12_basename(path);
     if (!fname[0]) return VFS_ERR_INVAL;
     return fat12_delete(fname);
 }
 
-static int fat12_vfs_read_stream(const char *path, void *buf, u32 size, u32 offset)
+static int fat12_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size, u32 offset)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
+    (void)ctx;
+    fname = fat12_basename(path);
     if (!fname[0]) return VFS_ERR_NOTFOUND;
     return fat12_read_stream(fname, buf, size, offset);
 }
 
-static int fat12_vfs_write_stream(const char *path, const void *data, u32 size, u32 offset)
+static int fat12_vfs_write_stream(void *ctx, const char *path, const void *buf, u32 size, u32 offset)
 {
     /* FAT12でのシーク書き込みは未実装 (主に読出し専用として使われるため) */
-    (void)path; (void)data; (void)size; (void)offset;
+    (void)ctx; (void)path; (void)buf; (void)size; (void)offset;
     return VFS_ERR_INVAL;
 }
 
-static int fat12_vfs_get_size(const char *path, u32 *size)
+static int fat12_vfs_get_size(void *ctx, const char *path, u32 *size)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
     FAT12_DirEntry *ent;
+    (void)ctx;
+    fname = fat12_basename(path);
     if (!fname[0]) return VFS_ERR_NOTFOUND;
     ent = fat12_find(fname, 0, 0);
     if (!ent) return VFS_ERR_NOTFOUND;
@@ -699,11 +728,13 @@ static int fat12_vfs_get_size(const char *path, u32 *size)
     return VFS_OK;
 }
 
-static int fat12_vfs_stat(const char *path, OS32_Stat *buf)
+static int fat12_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
-    const char *fname = fat12_basename(path);
+    const char *fname;
     FAT12_DirEntry *ent;
     u16 mode = 0;
+    (void)ctx;
+    fname = fat12_basename(path);
     
     if (!buf) return VFS_ERR_INVAL;
 
@@ -749,42 +780,45 @@ static int fat12_vfs_stat(const char *path, OS32_Stat *buf)
 }
 
 /* FAT12はフラットFS: サブディレクトリ作成/削除は非対応 */
-static int fat12_vfs_mkdir(const char *path)
+static int fat12_vfs_mkdir(void *ctx, const char *path)
 {
-    (void)path;
+    (void)ctx; (void)path;
     return VFS_ERR_INVAL;
 }
 
-static int fat12_vfs_rmdir(const char *path)
+static int fat12_vfs_rmdir(void *ctx, const char *path)
 {
-    (void)path;
+    (void)ctx; (void)path;
     return VFS_ERR_INVAL;
 }
 
 /* FAT12は書き込み時に即フラッシュ済み */
-static int fat12_vfs_sync(void) { return 0; }
+static int fat12_vfs_sync(void *ctx) { (void)ctx; return 0; }
 
-static u32 fat12_vfs_total_blocks(void)
+static u32 fat12_vfs_total_blocks(void *ctx)
 {
     const FAT12_Info *fi = fat12_get_info();
+    (void)ctx;
     return (u32)fi->total_data_clusters;
 }
 
-static u32 fat12_vfs_free_blocks(void)
+static u32 fat12_vfs_free_blocks(void *ctx)
 {
+    (void)ctx;
     /* FAT12には空きクラスタ数のカウンタがないので0を返す */
     return 0;
 }
 
-static u32 fat12_vfs_block_size(void)
+static u32 fat12_vfs_block_size(void *ctx)
 {
     const FAT12_Info *fi = fat12_get_info();
+    (void)ctx;
     return (u32)fi->sectors_per_cluster * fi->bytes_per_sector;
 }
 
 static VfsOps fat12_ops = {
     "fat12",
-    fat12_vfs_mount, fat12_vfs_umount, fat12_is_mounted,
+    fat12_vfs_mount, fat12_vfs_umount, fat12_vfs_is_mounted,
     fat12_vfs_list, fat12_vfs_mkdir, fat12_vfs_rmdir,
     fat12_vfs_read, fat12_vfs_write, fat12_vfs_unlink,
     (void *)0, /* rename */

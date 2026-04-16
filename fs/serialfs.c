@@ -108,26 +108,30 @@ static int sfs_rpc_resp(u8 *err, u32 *len)
 }
 
 /* ---- VFS実装 ---- */
+/* SerialFSは永続的にシングルインスタンス (物理シリアルポート1本)。        */
+/* void *ctx 引数は受け取るが常に無視する。                                */
 
-static int sfs_mount(int dev_id)
+static void *sfs_mount(int dev_id)
 {
     (void)dev_id;
-    if (!serial_is_initialized()) return VFS_ERR_IO;
+    if (!serial_is_initialized()) return (void *)0;
     s_mounted = 1;
-    return VFS_OK;
+    return (void *)1;  /* 非NULLのダミーポインタ */
 }
 
-static void sfs_umount(void)
+static void sfs_umount(void *ctx)
 {
+    (void)ctx;
     s_mounted = 0;
 }
 
-static int sfs_is_mounted(void)
+static int sfs_is_mounted(void *ctx)
 {
+    (void)ctx;
     return s_mounted;
 }
 
-static int sfs_read_file(const char *path, void *buf, u32 max_size)
+static int sfs_read_file(void *ctx, const char *path, void *buf, u32 max_size)
 {
     int path_len;
     u8 err;
@@ -136,6 +140,7 @@ static int sfs_read_file(const char *path, void *buf, u32 max_size)
     int ch, rd = 0;
     u16 rx_crc;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     path_len = 0;
     while (path[path_len]) path_len++;
@@ -177,7 +182,7 @@ static int sfs_read_file(const char *path, void *buf, u32 max_size)
     return rd;
 }
 
-static int sfs_write_file(const char *path, const void *data, u32 size)
+static int sfs_write_file(void *ctx, const char *path, const void *data, u32 size)
 {
     int path_len, data_len, i;
     u8 err;
@@ -185,6 +190,7 @@ static int sfs_write_file(const char *path, const void *data, u32 size)
     u8 csum = 0;
     const u8 *p = (const u8 *)data;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     path_len = 0;
     while (path[path_len] && path_len < 255) path_len++;
@@ -212,7 +218,7 @@ static int sfs_write_file(const char *path, const void *data, u32 size)
     return err == SF_ERR_OK ? (int)size : VFS_ERR_IO;
 }
 
-static int sfs_list_dir(const char *path, vfs_dir_cb cb, void *ctx)
+static int sfs_list_dir(void *ctx, const char *path, vfs_dir_cb cb, void *user_ctx)
 {
     int path_len;
     u8 err;
@@ -222,6 +228,7 @@ static int sfs_list_dir(const char *path, vfs_dir_cb cb, void *ctx)
     VfsDirEntry ent;
     u8 *cbuf;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     path_len = 0;
     while (path[path_len]) path_len++;
@@ -278,7 +285,7 @@ static int sfs_list_dir(const char *path, vfs_dir_cb cb, void *ctx)
         ent.type = e_type;
         ent.size = e_size;
 
-        if (cb) cb(&ent, ctx);
+        if (cb) cb(&ent, user_ctx);
     }
 
     kfree(cbuf);
@@ -300,11 +307,11 @@ static int sfs_simple_cmd(u8 cmd, const char *path)
     return VFS_OK;
 }
 
-static int sfs_mkdir(const char *path) { return sfs_simple_cmd(SF_CMD_MKDIR, path); }
-static int sfs_rmdir(const char *path) { return sfs_simple_cmd(SF_CMD_RMDIR, path); }
-static int sfs_unlink(const char *path) { return sfs_simple_cmd(SF_CMD_UNLINK, path); }
+static int sfs_mkdir(void *ctx, const char *path) { (void)ctx; return sfs_simple_cmd(SF_CMD_MKDIR, path); }
+static int sfs_rmdir(void *ctx, const char *path) { (void)ctx; return sfs_simple_cmd(SF_CMD_RMDIR, path); }
+static int sfs_unlink(void *ctx, const char *path) { (void)ctx; return sfs_simple_cmd(SF_CMD_UNLINK, path); }
 
-static int sfs_rename(const char *oldpath, const char *newpath)
+static int sfs_rename(void *ctx, const char *oldpath, const char *newpath)
 {
     int old_len = 0, new_len = 0;
     u32 data_len;
@@ -313,6 +320,7 @@ static int sfs_rename(const char *oldpath, const char *newpath)
     u32 rx_len;
     int i;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     while (oldpath[old_len]) old_len++;
     while (newpath[new_len]) new_len++;
@@ -337,7 +345,7 @@ static int sfs_rename(const char *oldpath, const char *newpath)
 }
 
 
-static int sfs_get_file_size(const char *path, u32 *size)
+static int sfs_get_file_size(void *ctx, const char *path, u32 *size)
 {
     int path_len = 0;
     u8 err;
@@ -347,6 +355,7 @@ static int sfs_get_file_size(const char *path, u32 *size)
     u16 rx_crc;
     u8 size_buf[4];
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     while (path[path_len]) path_len++;
 
@@ -387,7 +396,7 @@ static int sfs_get_file_size(const char *path, u32 *size)
     return VFS_OK;
 }
 
-static int sfs_read_stream(const char *path, void *buf, u32 size, u32 offset)
+static int sfs_read_stream(void *ctx, const char *path, void *buf, u32 size, u32 offset)
 {
     int path_len = 0;
     u32 data_len;
@@ -398,6 +407,7 @@ static int sfs_read_stream(const char *path, void *buf, u32 size, u32 offset)
     u8 *pbuf = (u8 *)buf;
     u16 rx_crc;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     while (path[path_len] && path_len < 255) path_len++;
 
@@ -452,7 +462,7 @@ static int sfs_read_stream(const char *path, void *buf, u32 size, u32 offset)
     return rd;
 }
 
-static int sfs_write_stream(const char *path, const void *data, u32 size, u32 offset)
+static int sfs_write_stream(void *ctx, const char *path, const void *data, u32 size, u32 offset)
 {
     int path_len = 0;
     u32 data_len;
@@ -462,6 +472,7 @@ static int sfs_write_stream(const char *path, const void *data, u32 size, u32 of
     int i;
     const u8 *p = (const u8 *)data;
 
+    (void)ctx;
     if (!s_mounted) return VFS_ERR_NOMOUNT;
     while (path[path_len] && path_len < 255) path_len++;
 
@@ -511,7 +522,8 @@ VfsOps g_serialfs_ops = {
     0, /* sync */
     0, /* total_blocks */
     0, /* free_blocks */
-    0  /* block_size */
+    0, /* block_size */
+    0  /* stat */
 };
 
 void serialfs_init(void)
