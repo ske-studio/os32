@@ -8,6 +8,7 @@
 #include "vfs.h"
 #include "fat12.h"
 #include "os32_kapi_shared.h" /* O_RDONLY, SEEK_SET 等 */
+#include "kstring.h"
 #include "console.h"
 #include "kbd.h"
 
@@ -16,26 +17,7 @@
 #endif
 
 /* ======== 内部ユーティリティ ======== */
-
-static int str_eq2(const char *a, const char *b)
-{
-    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
-    return *a == *b;
-}
-
-static int str_len(const char *s)
-{
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-static void str_cpy(char *dst, const char *src, int max)
-{
-    int i;
-    for (i = 0; i < max - 1 && src[i]; i++) dst[i] = src[i];
-    dst[i] = '\0';
-}
+/* 文字列関数は kstring.h (kstrcmp, kstrlen, kstrncpy) に統一 */
 
 /* ======== カレントディレクトリ ======== */
 
@@ -47,12 +29,12 @@ int vfs_chdir(const char *path)
 {
     char resolved[VFS_MAX_PATH];
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
-    str_cpy(cwd, resolved, VFS_MAX_PATH);
+    kstrncpy(cwd, resolved, VFS_MAX_PATH);
     /* 末尾に / を保証 */
     {
-        int len = str_len(cwd);
+        int len = (int)kstrlen(cwd);
         if (len > 0 && cwd[len - 1] != '/') {
-            if (len < 254) { cwd[len] = '/'; cwd[len + 1] = '\0'; }
+            if (len < VFS_MAX_PATH - 2) { cwd[len] = '/'; cwd[len + 1] = '\0'; }
         }
     }
     return VFS_OK;
@@ -67,12 +49,12 @@ void vfs_resolve_path(const char *input, char *output, int out_size)
     int i, p, o;
 
     if (!input || !input[0]) {
-        str_cpy(output, cwd, out_size);
+        kstrncpy(output, cwd, (u32)out_size);
         return;
     }
 
     if (input[0] == '/') {
-        str_cpy(tmp, input, VFS_MAX_PATH);
+        kstrncpy(tmp, input, VFS_MAX_PATH);
     } else {
         o = 0;
         for (i = 0; cwd[i] && o < VFS_MAX_PATH - 2; i++) tmp[o++] = cwd[i];
@@ -132,8 +114,9 @@ void vfs_register_fs(VfsOps *ops)
 
 /* ======== VFSグローバル状態 ======== */
 
-#define VFS_DEV_HD  0
-#define VFS_DEV_FD  1
+#define VFS_DEV_HD     0
+#define VFS_DEV_FD     1
+#define VFS_DEV_SERIAL 2
 
 typedef struct {
     int in_use;
@@ -157,7 +140,7 @@ static MountPoint *vfs_find_mount(const char *path, const char **out_relpath)
     for (i = 0; i < VFS_MAX_FS; i++) {
         if (!mounts[i].in_use) continue;
         
-        match_len = str_len(mounts[i].prefix);
+        match_len = (int)kstrlen(mounts[i].prefix);
         if (match_len == 1 && mounts[i].prefix[0] == '/') {
             if (best_len < 1) { best_len = 1; best_idx = i; }
         } else {
@@ -186,13 +169,13 @@ VfsOps *vfs_route(const char *path, char *rel_out, int max_rel)
     if (!mnt) return (VfsOps *)0;
 
     if (*rel_ptr == '\0') {
-        str_cpy(rel_out, "/", max_rel);
+        kstrncpy(rel_out, "/", (u32)max_rel);
     } else {
         if (*rel_ptr != '/') {
             rel_out[0] = '/';
-            str_cpy(rel_out + 1, rel_ptr, max_rel - 1);
+            kstrncpy(rel_out + 1, rel_ptr, (u32)(max_rel - 1));
         } else {
-            str_cpy(rel_out, rel_ptr, max_rel);
+            kstrncpy(rel_out, rel_ptr, (u32)max_rel);
         }
     }
     return mnt->ops;
@@ -215,7 +198,7 @@ int vfs_dev_parse(const char *name, int *dev_type, int *dev_id)
     }
     /* "COM1" etc */
     if (name[0] == 'C' && name[1] == 'O' && name[2] == 'M') {
-        *dev_type = 2; /* VFS_DEV_SERIAL = 2 */
+        *dev_type = VFS_DEV_SERIAL;
         *dev_id = 1;
         return VFS_OK;
     }
@@ -233,7 +216,7 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     if (rc != VFS_OK) return VFS_ERR_INVAL;
 
     for (i = 0; i < num_fs; i++) {
-        if (str_eq2(fstype, fs_registry[i]->name)) {
+        if (kstrcmp(fstype, fs_registry[i]->name) == 0) {
             ops = fs_registry[i];
             break;
         }
@@ -253,13 +236,13 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     }
 
     mounts[slot].in_use = 1;
-    str_cpy(mounts[slot].prefix, prefix, VFS_MAX_PATH);
+    kstrncpy(mounts[slot].prefix, prefix, VFS_MAX_PATH);
     mounts[slot].ops = ops;
     mounts[slot].dev_type = dev_type;
     mounts[slot].dev_id = dev_id;
-    str_cpy(mounts[slot].dev_name, dev_name, VFS_MAX_DEVNAME);
+    kstrncpy(mounts[slot].dev_name, dev_name, VFS_MAX_DEVNAME);
 
-    str_cpy(cwd, "/", VFS_MAX_PATH);
+    kstrncpy(cwd, "/", VFS_MAX_PATH);
     return VFS_OK;
 }
 
@@ -267,7 +250,7 @@ void vfs_umount(const char *prefix)
 {
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
-        if (mounts[i].in_use && str_eq2(mounts[i].prefix, prefix)) {
+        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) {
             mounts[i].ops->umount();
             mounts[i].in_use = 0;
             break;
@@ -279,7 +262,7 @@ int vfs_is_mounted(const char *prefix)
 {
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
-        if (mounts[i].in_use && str_eq2(mounts[i].prefix, prefix)) return mounts[i].ops->is_mounted();
+        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) return mounts[i].ops->is_mounted();
     }
     return 0;
 }
@@ -288,7 +271,7 @@ const char *vfs_fstype(const char *prefix)
 {
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
-        if (mounts[i].in_use && str_eq2(mounts[i].prefix, prefix)) return mounts[i].ops->name;
+        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) return mounts[i].ops->name;
     }
     return "";
 }
@@ -297,7 +280,7 @@ const char *vfs_devname(const char *prefix)
 {
     int i;
     for (i = 0; i < VFS_MAX_FS; i++) {
-        if (mounts[i].in_use && str_eq2(mounts[i].prefix, prefix)) return mounts[i].dev_name;
+        if (mounts[i].in_use && kstrcmp(mounts[i].prefix, prefix) == 0) return mounts[i].dev_name;
     }
     return "";
 }
