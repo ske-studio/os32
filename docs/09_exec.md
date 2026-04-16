@@ -48,7 +48,7 @@ KernelAPIポインタを引数として実行する。
 | プログラム | ソース | 説明 |
 |---------|---------|------|
 | shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン内蔵) |
-| vz | `programs/vz/` | VZ Editor移植版 |
+| edit | `programs/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
 | skk_test| `programs/skk/` | SKKフロントエンド |
 | fep_test| `programs/fep_test.c` | FEP (日本語入力) テスト |
 | gfx_demo| `programs/gfx_demo.c` | libos32gfx グラフィックスデモ |

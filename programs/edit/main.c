@@ -1,5 +1,6 @@
 /*
- * main.c - OS32 VZ Editor メインエントリ
+ * main.c - OS32 Edit メインエントリ
+ * VZ Editor にインスパイアされたテキストエディタ (AI を使用して移植)
  * C89 compatible
  */
 
@@ -27,7 +28,7 @@ void set_notification(const char* msg) {
 
 /*
  * main
- * OS32 VZ Editor のエントリポイント
+ * OS32 Edit のエントリポイント
  */
 int main(int argc, char **argv, KernelAPI *api)
 {

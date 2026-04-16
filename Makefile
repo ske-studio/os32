@@ -75,7 +75,7 @@ PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
 
-C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/vz.c programs/crt0_c.c, $(wildcard programs/*.c))
+C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c, $(wildcard programs/*.c))
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
 
 # === Shell Module ===
@@ -88,15 +88,15 @@ programs/shell/%.o: programs/shell/%.c
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
 	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
 
-# === VZ Editor Module ===
-VZ_SRC = $(wildcard programs/vz/*.c)
-VZ_OBJ = $(VZ_SRC:.c=.o)
+# === Edit (VZ-inspired Editor) Module ===
+EDIT_SRC = $(wildcard programs/edit/*.c)
+EDIT_OBJ = $(EDIT_SRC:.c=.o)
 
-programs/vz/%.o: programs/vz/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/vz -c $< -o $@
+programs/edit/%.o: programs/edit/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/edit -c $< -o $@
 
-programs/vz.elf: build/app.ld $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(VZ_OBJ) $(GFX_OBJ) -lc -lgcc
+programs/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
 
 # === SKK Module ===
 SKK_SRC = $(wildcard programs/skk/*.c)
@@ -246,7 +246,7 @@ os.d88: boot kernel.bin programs lzss_dict unicode_bin
 
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-vz: $(CRT0_OBJ) programs/vz.bin
+edit: $(CRT0_OBJ) programs/edit.bin
 
 lzss_dict: 
 	@if [ ! -f tools/lzss_pack ]; then gcc tools/lzss_pack.c -O2 -o tools/lzss_pack; fi
@@ -338,7 +338,7 @@ mdview: $(CRT0_OBJ) programs/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base vz skk bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -384,7 +384,7 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "fep_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 524288; \
-	elif [ "$*" = "vz" ]; then \
+	elif [ "$*" = "edit" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 524288; \
 	elif [ "$*" = "shell" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
@@ -406,9 +406,9 @@ NHD_DEPLOY = python3 tools/nhd_deploy.py
 
 # ファイル分類
 SBIN_PROGRAMS = programs/install.bin programs/crash.bin programs/bench.bin programs/restest.bin
-USR_BIN_PROGRAMS = programs/vz.bin programs/gfx_demo.bin programs/demo1.bin \
+USR_BIN_PROGRAMS = programs/edit.bin programs/gfx_demo.bin programs/demo1.bin \
 	programs/ekakiuta.bin programs/vbzview.bin programs/hrview.bin programs/vdpview.bin \
-	programs/spr_test.bin programs/raster.bin programs/skk_test.bin programs/fep_test.bin \
+	programs/spr_test.bin programs/raster.bin programs/fep_test.bin \
 	programs/mdview.bin
 # /bin: 上記以外の全 .bin (shell除く)
 BIN_PROGRAMS = $(filter-out programs/shell.bin $(SBIN_PROGRAMS) $(USR_BIN_PROGRAMS), $(wildcard programs/*.bin))
@@ -426,10 +426,13 @@ deploy: kernel.bin programs unicode_bin
 	@if [ -d docs/manpages ] && ls docs/manpages/*.1 1>/dev/null 2>&1; then \
 		$(NHD_DEPLOY) copy --dest /usr/man $(shell ls docs/manpages/*.1 2>/dev/null); \
 	fi
+	@if [ -f assets/profile ]; then \
+		$(NHD_DEPLOY) copy --dest /etc --rename profile assets/profile; \
+	fi
 	$(NHD_DEPLOY) deploy
 
 # dp-<name>: 個別プログラムのビルド → NHDコピー → NP21/Wデプロイ
-# 使い方: make dp-ekakiuta, make dp-shell, make dp-vz 等
+# 使い方: make dp-ekakiuta, make dp-shell, make dp-edit 等
 # ※ カーネル変更時は make deploy (全体) を使うこと
 # ファイルの配置先を自動判定
 dp-%: programs/%.bin
@@ -458,7 +461,7 @@ nhd-init:
 	$(NHD_DEPLOY) init
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 

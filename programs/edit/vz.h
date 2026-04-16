@@ -23,7 +23,8 @@
 #define MASKSZ 32
 #define MARKCNT 4
 
-#define VZ_VERSION "1.6"
+#define EDIT_VERSION "1.6"
+#define EDIT_BANNER  "OS32 Edit - VZ Editor inspired, AI-assisted port"
 
 /* --- Data Structures --- */
 

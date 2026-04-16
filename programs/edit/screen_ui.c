@@ -175,7 +175,7 @@ void su_draw_help(void) {
     int start_y = (SCREEN_H - box_h) / 2;
     
     const char* lines[] = {
-        " --- VZ Editor Help --- ",
+        " --- OS32 Edit Help --- ",
         "",
         " [Cursor Movement]",
         "  Arrow Keys : Move",
