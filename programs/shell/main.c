@@ -139,18 +139,50 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
     *alloc_count = 0;
 
     while (*p && argc < max_args) {
-        char *start;
+        char *start, *out;
         int has_star = 0;
+        char quote = 0;
 
         while (*p == ' ') p++;
         if (!*p) break;
         start = p;
-        
-        while (*p && *p != ' ') {
-            if (*p == '*') has_star = 1;
-            p++;
+        out = p;   /* インプレースでクォート除去 (out <= p 常に成立) */
+
+        while (*p) {
+            if (quote) {
+                /* クォート内 */
+                if (*p == quote) {
+                    /* クォート終了 — クォート文字自体は出力しない */
+                    quote = 0;
+                    p++;
+                } else if (*p == '\\' && quote == '"' && *(p + 1)) {
+                    /* ダブルクォート内のバックスラッシュエスケープ */
+                    p++;
+                    *out++ = *p++;
+                } else {
+                    /* シングルクォート内は全てリテラル */
+                    *out++ = *p++;
+                }
+            } else {
+                /* クォート外 */
+                if (*p == ' ') break;
+                if (*p == '"' || *p == '\'') {
+                    /* クォート開始 — クォート文字自体は出力しない */
+                    quote = *p++;
+                } else if (*p == '\\' && *(p + 1)) {
+                    /* バックスラッシュエスケープ */
+                    p++;
+                    *out++ = *p++;
+                } else {
+                    /* クォート外の * のみ glob 対象 */
+                    if (*p == '*') has_star = 1;
+                    *out++ = *p++;
+                }
+            }
         }
-        if (*p) { *p = '\0'; p++; }
+        /* p は空白か文字列末尾を指している */
+        if (*p == ' ') p++;
+        *out = '\0';
 
         if (has_star) {
             char *last_slash = (char *)0;
@@ -170,16 +202,20 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
                 for (i = 0; i < dirlen && i < PATH_MAX_LEN - 1; i++) dir_path[i] = start[i];
                 dir_path[i] = '\0';
                 
-                int patlen = 0;
-                char *pat_ptr = last_slash + 1;
-                while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                pattern[patlen] = '\0';
+                {
+                    int patlen = 0;
+                    char *pat_ptr = last_slash + 1;
+                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
+                    pattern[patlen] = '\0';
+                }
             } else {
                 dir_path[0] = '.'; dir_path[1] = '\0';
-                int patlen = 0;
-                char *pat_ptr = start;
-                while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                pattern[patlen] = '\0';
+                {
+                    int patlen = 0;
+                    char *pat_ptr = start;
+                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
+                    pattern[patlen] = '\0';
+                }
             }
 
             ctx.argv = argv;

@@ -390,7 +390,9 @@ static void cmd_echo(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         int l = 0;
         while (argv[i][l]) l++;
-        g_api->sys_write(1, argv[i], l);
+        if (l > 0) {
+            g_api->sys_write(1, argv[i], l);
+        }
         if (i < argc - 1) g_api->sys_write(1, " ", 1);
     }
     g_api->sys_write(1, "\n", 1);

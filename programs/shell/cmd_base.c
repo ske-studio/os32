@@ -63,6 +63,7 @@ static void cmd_ver(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "  SND: YM2203 (OPN) FM3+SSG3\n");
     g_api->kprintf(ATTR_CYAN, "%s", "  GFX: 640x400x16 CPU direct\n");
     g_api->kprintf(ATTR_WHITE, "  API: v%u\n", g_api->version);
+    g_api->kprintf(ATTR_WHITE, "  Build: %s %s\n", __DATE__, __TIME__);
 }
 
 static const char *wday_names[] = {

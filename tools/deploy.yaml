@@ -37,9 +37,9 @@ filesystem:
       guest: /unicode.bin
       tags: [core]
 
-    # --- シェル (特別扱い: /shell としてもデプロイ) ---
+    # --- シェル (カーネルは /shell をロードする: config.h SYS_SHELL_BIN) ---
     - host: programs/shell.bin
-      guest: /shell.bin
+      guest: /shell
       tags: [core]
 
     # --- 外部プログラム → /bin/ ---
