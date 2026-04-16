@@ -124,6 +124,7 @@ void vfs_register_fs(VfsOps *ops)
 #define VFS_DEV_HD     0
 #define VFS_DEV_FD     1
 #define VFS_DEV_SERIAL 2
+#define VFS_DEV_CD     3
 
 typedef struct {
     int in_use;
@@ -212,6 +213,12 @@ int vfs_dev_parse(const char *name, int *dev_type, int *dev_id)
     if (name[0] == 'C' && name[1] == 'O' && name[2] == 'M') {
         *dev_type = VFS_DEV_SERIAL;
         *dev_id = 1;
+        return VFS_OK;
+    }
+    /* "cd0" - "cd3" */
+    if (name[0] == 'c' && name[1] == 'd' && name[2] >= '0' && name[2] <= '3') {
+        *dev_type = VFS_DEV_CD;
+        *dev_id = name[2] - '0';
         return VFS_OK;
     }
     return VFS_ERR_INVAL;

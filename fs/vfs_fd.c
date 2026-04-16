@@ -72,7 +72,7 @@ int vfs_open(const char *path, int mode)
     /* サイズ取得・存在確認 */
     rc = -1;
     if (ops->get_file_size) {
-        rc = ops->get_file_size(fs_ctx, resolved, &file_size);
+        rc = ops->get_file_size(fs_ctx, rel_path, &file_size);
     } else {
         /* get_file_size非対応の場合、安全のためエラー */
         return VFS_ERR_INVAL;

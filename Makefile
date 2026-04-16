@@ -58,9 +58,9 @@ C_KERNEL = \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
-    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
+    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
-    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/serialfs.c \
+    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/serialfs.c fs/iso9660.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
     lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c
@@ -75,7 +75,7 @@ PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
 
-C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c programs/lzss.c, $(wildcard programs/*.c))
+C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c programs/lzss.c programs/cdinst.c, $(wildcard programs/*.c))
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
 
 # === Shell Module ===
@@ -135,6 +135,18 @@ programs/lzss.elf: build/app.ld $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o -lc -lgcc
 
 lzss_cmd: $(CRT0_OBJ) programs/lzss.bin
+
+# === CD Installer (cdinst) ===
+programs/libos32/pkg.o: programs/libos32/pkg.c programs/libos32/pkg.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/cdinst.o: programs/cdinst.c programs/libos32/pkg.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/cdinst.elf: build/app.ld $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o -lc -lgcc
+
+cdinst: $(CRT0_OBJ) programs/cdinst.bin
 
 # === OS32GFX Module ===
 GFX_SRC = $(wildcard programs/libos32gfx/*.c) \
@@ -351,7 +363,7 @@ mdview: $(CRT0_OBJ) programs/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd cdinst
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -381,6 +393,8 @@ programs/%.raw: programs/%.elf
 programs/%.bin: programs/%.raw programs/%.elf
 	@if [ "$*" = "install" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
+	elif [ "$*" = "cdinst" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
 	elif [ "$*" = "bench" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "gfx_demo" ]; then \
@@ -473,10 +487,18 @@ nhd-umount:
 nhd-init:
 	$(NHD_DEPLOY) init
 
+# === パッケージ / ISO生成 ===
+packages: programs
+	python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base .
+
+iso: packages
+	genisoimage -o os32.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
+
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f packages/*.PKG os32.iso
 
-.PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
+.PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init packages iso
 
 # Add explicit dependencies for OS32X programs on the KAPI header
 programs/%.o: include/os32_kapi_shared.h

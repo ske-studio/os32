@@ -24,9 +24,11 @@
 #include "shm.h"
 #include "exec.h"
 #include "ide.h"
+#include "atapi.h"
 #include "vfs.h"
 #include "fat12.h"
 #include "ext2.h"
+#include "iso9660.h"
 #ifdef CONFIG_SERIALFS
 #include "serialfs.h"
 #endif
@@ -133,6 +135,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     path_init();
     fat12_init();
     ext2_init();
+    vfs_register_fs(&iso9660_ops);
 #ifdef CONFIG_SERIALFS
     serialfs_init();
 #endif
@@ -153,6 +156,15 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             if (ide_drive_present(1)) dev_register_hdd(1);
         } else {
             tvram_print(5, 3, "no drive", TATTR_CYAN);
+        }
+    }
+
+    /* ATAPI CD-ROM 検出 */
+    {
+        int cd = atapi_init();
+        if (cd > 0) {
+            tvram_print(14, 3, "CD", TATTR_WHITE);
+            dev_register_cdrom();
         }
     }
 
@@ -209,14 +221,22 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             for (j = 0; dname[j] && j < VFS_MNTPATH_MAX - 4; j++) {
                 mnt[1 + j] = dname[j];
             }
-            mnt[1 + j] = '/'; mnt[2 + j] = '\0';
+            mnt[1 + j] = '\0';
 
             /* フォールバックしながらマウント試行 */
             {
                 int mounted = 0;
-                if (vfs_mount(mnt, dname, "ext2") == VFS_OK) mounted = 1;
-                if (!mounted) {
-                    vfs_mount(mnt, dname, "fat12"); /* 失敗しても無視 */
+                /* CDデバイスにはiso9660のみ試行 */
+                if (dname[0] == 'c' && dname[1] == 'd') {
+                    if (vfs_mount(mnt, dname, "iso9660") == VFS_OK) mounted = 1;
+                } else {
+                    if (vfs_mount(mnt, dname, "ext2") == VFS_OK) mounted = 1;
+                    if (!mounted) {
+                        if (vfs_mount(mnt, dname, "iso9660") == VFS_OK) mounted = 1;
+                    }
+                    if (!mounted) {
+                        vfs_mount(mnt, dname, "fat12");
+                    }
                 }
             }
         }
@@ -282,6 +302,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         int rc;
         tvram_print(0, 0, "Loading shell...", TATTR_GRAY);
         rc = exec_run(SYS_SHELL_BIN);
+        if (rc < 0 && rc != EXEC_ERR_FAULT) {
+            /* HDDパスで見つからない場合、FDDフォールバック */
+            rc = exec_run(SYS_SHELL_BIN_FDD);
+        }
         if (rc < 0 && rc != EXEC_ERR_FAULT) {
             /* シェルバイナリのロード自体が失敗 — 致命的エラー */
             tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
