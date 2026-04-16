@@ -9,9 +9,18 @@ static u8 xfer_buf[65536];
 
 static void cmd_serial(int argc, char **argv)
 {
+    int ret;
     (void)argc; (void)argv;
     g_api->serial_init(38400);
     g_api->kprintf(ATTR_GREEN, "%s", "RS-232C initialized (38400bps)\n");
+
+    /* serialfs 自動マウント (/host にマウント) */
+    ret = g_api->sys_mount("/host", "COM1", "serialfs");
+    if (ret == 0) {
+        g_api->kprintf(ATTR_GREEN, "%s", "SerialFS mounted on /host\n");
+    } else {
+        g_api->kprintf(ATTR_YELLOW, "SerialFS mount skipped (%d)\n", ret);
+    }
 }
 
 static void cmd_terminal(int argc, char **argv)
@@ -215,14 +224,89 @@ static void cmd_upload(int argc, char **argv)
     }
 }
 
+/* host: プレフィックスを /host/ パスに変換するヘルパ */
+static int resolve_host_path(const char *arg, char *out, int max)
+{
+    const char *p;
+    int i;
+    /* "host:" で始まるか判定 */
+    if (arg[0] != 'h' || arg[1] != 'o' || arg[2] != 's' ||
+        arg[3] != 't' || arg[4] != ':') return 0;
+
+    p = arg + 5;  /* "host:" の後ろ */
+    out[0] = '/'; out[1] = 'h'; out[2] = 'o'; out[3] = 's'; out[4] = 't';
+    i = 5;
+    if (*p != '/') { out[i++] = '/'; }  /* / を補完 */
+    while (*p && i < max - 1) { out[i++] = *p++; }
+    out[i] = '\0';
+    return 1;
+}
+
 static void cmd_recv(int argc, char **argv)
 {
     char fname[13];
     u32 fsize, received;
     u8 checksum, calc_sum;
     int i, ch, timeout, kch;
-    (void)argc; (void)argv;
 
+    /* SerialFS モード: recv host:/path [localpath] */
+    if (argc >= 2 && resolve_host_path(argv[1], (char *)xfer_buf, 256)) {
+        char *host_path = (char *)xfer_buf;
+        const char *local_path;
+        int fd_in, fd_out, sz;
+        u32 t0, t1, elapsed;
+
+        /* ローカルパスの決定 */
+        if (argc >= 3) {
+            local_path = argv[2];
+        } else {
+            /* ファイル名のみ抽出 */
+            const char *p = host_path;
+            const char *last_slash = host_path;
+            while (*p) { if (*p == '/') last_slash = p + 1; p++; }
+            local_path = last_slash;
+        }
+
+        g_api->kprintf(ATTR_CYAN, "Downloading: %s -> %s\n", host_path, local_path);
+        t0 = g_api->get_tick();
+
+        fd_in = g_api->sys_open(host_path, 0); /* O_RDONLY */
+        if (fd_in < 0) {
+            g_api->kprintf(ATTR_RED, "recv: %s not found\n", host_path);
+            return;
+        }
+        /* xfer_bufの先頭256バイトをパスに使ったので、256以降をデータバッファに */
+        sz = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));
+        g_api->sys_close(fd_in);
+        if (sz < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "recv: read failed\n");
+            return;
+        }
+
+        fd_out = g_api->sys_open(local_path, 1 | 0x0100 | 0x0200);
+        if (fd_out < 0) {
+            g_api->kprintf(ATTR_RED, "recv: cannot create %s\n", local_path);
+            return;
+        }
+        if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)sz) != sz) {
+            g_api->kprintf(ATTR_RED, "%s", "recv: write failed\n");
+            g_api->sys_close(fd_out);
+            return;
+        }
+        g_api->sys_close(fd_out);
+
+        t1 = g_api->get_tick();
+        elapsed = t1 - t0;
+        if (elapsed == 0) elapsed = 1;
+        g_api->kprintf(ATTR_GREEN, "Received %d bytes", sz);
+        g_api->kprintf(ATTR_GREEN, " (%u.%02us, ",
+                       elapsed / 100, elapsed % 100);
+        g_api->kprintf(ATTR_GREEN, "%u B/s)\n",
+                       (u32)sz * 100 / elapsed);
+        return;
+    }
+
+    /* レガシーモード: send_file.py互換 */
     if (!g_api->serial_is_initialized()) {
         g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized.\n");
         return;
@@ -319,21 +403,76 @@ static void cmd_recv(int argc, char **argv)
         }
     }
 
-    if (1) {
-        {
-            int fd = g_api->sys_open(fname, 1 | 0x0100 | 0x0200);
-            if (fd >= 0) {
-                if (g_api->sys_write(fd, xfer_buf, (u32)fsize) == (u32)fsize) {
-                    g_api->kprintf(ATTR_GREEN, "  Saved: %s\n", fname);
-                } else {
-                    g_api->kprintf(ATTR_RED, "%s", "  Error: failed to save\n");
-                }
-                g_api->sys_close(fd);
+    {
+        int fd = g_api->sys_open(fname, 1 | 0x0100 | 0x0200);
+        if (fd >= 0) {
+            if (g_api->sys_write(fd, xfer_buf, (u32)fsize) == (u32)fsize) {
+                g_api->kprintf(ATTR_GREEN, "  Saved: %s\n", fname);
             } else {
-                g_api->kprintf(ATTR_RED, "%s", "  Error: failed to save (open)\n");
+                g_api->kprintf(ATTR_RED, "%s", "  Error: failed to save\n");
             }
+            g_api->sys_close(fd);
+        } else {
+            g_api->kprintf(ATTR_RED, "%s", "  Error: failed to save (open)\n");
         }
-    } else g_api->kprintf(ATTR_RED, "%s", "  Error: no fs mounted\n");
+    }
+}
+
+static void cmd_push(int argc, char **argv)
+{
+    char host_path[256];
+    const char *local_path;
+    int fd_in, fd_out, sz;
+    u32 t0, t1, elapsed;
+
+    if (argc < 3) {
+        shell_print_help(argv[0]);
+        return;
+    }
+
+    local_path = argv[1];
+
+    /* 宛先が host: プレフィックスか確認 */
+    if (!resolve_host_path(argv[2], host_path, 256)) {
+        g_api->kprintf(ATTR_RED, "%s", "push: destination must be host:path\n");
+        return;
+    }
+
+    g_api->kprintf(ATTR_CYAN, "Uploading: %s -> %s\n", local_path, host_path);
+    t0 = g_api->get_tick();
+
+    fd_in = g_api->sys_open(local_path, 0);
+    if (fd_in < 0) {
+        g_api->kprintf(ATTR_RED, "push: %s not found\n", local_path);
+        return;
+    }
+    sz = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));
+    g_api->sys_close(fd_in);
+    if (sz < 0) {
+        g_api->kprintf(ATTR_RED, "%s", "push: read failed\n");
+        return;
+    }
+
+    fd_out = g_api->sys_open(host_path, 1 | 0x0100 | 0x0200);
+    if (fd_out < 0) {
+        g_api->kprintf(ATTR_RED, "push: cannot create %s\n", host_path);
+        return;
+    }
+    if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)sz) != sz) {
+        g_api->kprintf(ATTR_RED, "%s", "push: write failed\n");
+        g_api->sys_close(fd_out);
+        return;
+    }
+    g_api->sys_close(fd_out);
+
+    t1 = g_api->get_tick();
+    elapsed = t1 - t0;
+    if (elapsed == 0) elapsed = 1;
+    g_api->kprintf(ATTR_GREEN, "Sent %d bytes", sz);
+    g_api->kprintf(ATTR_GREEN, " (%u.%02us, ",
+                   elapsed / 100, elapsed % 100);
+    g_api->kprintf(ATTR_GREEN, "%u B/s)\n",
+                   (u32)sz * 100 / elapsed);
 }
 
 static void cmd_tvdump(int argc, char **argv)
@@ -366,12 +505,13 @@ static void cmd_tvdump(int argc, char **argv)
 
 /* 登録用テーブル */
 static const ShellCmd rshell_cmds[] = {
-    { "serial",   cmd_serial,   "",              "Initialize RS-232C (38400bps)" },
+    { "serial",   cmd_serial,   "",              "Init RS-232C + mount SerialFS" },
     { "terminal", cmd_terminal, "",              "Enter serial terminal mode" },
     { "rshell",   cmd_rshell,   "",              "Start remote shell host" },
     { "send",     cmd_send,     "TEXT...",       "Send text via serial" },
     { "upload",   cmd_upload,   "FILE HEXSIZE",  "Upload file via serial" },
-    { "recv",     cmd_recv,     "",              "Receive file via serial" },
+    { "recv",     cmd_recv,     "[host:PATH [LOCAL]]", "Receive file (SerialFS or legacy)" },
+    { "push",     cmd_push,     "LOCAL host:PATH",     "Upload file to host via SerialFS" },
     { "tvdump",   cmd_tvdump,   "",              "Dump Text VRAM over serial" },
     { (const char *)0, 0, 0, 0 }
 };
