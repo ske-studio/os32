@@ -1,4 +1,5 @@
 #include "ext2_priv.h"
+#include "kstring.h"
 
 /* ======== ext2 VFSラッパー ======== */
 
@@ -16,7 +17,7 @@ static void ext2_split_path(const char *path, char *dir_path, const char **filen
         dir_path[0] = '/'; dir_path[1] = '\0';
         *filename = (path[0] == '/') ? path + 1 : path;
     } else {
-        for (i = 0; i < last_slash && i < 255; i++) dir_path[i] = path[i];
+        for (i = 0; i < last_slash && i < VFS_MAX_PATH - 1; i++) dir_path[i] = path[i];
         dir_path[i] = '\0';
         *filename = path + last_slash + 1;
     }
@@ -48,7 +49,7 @@ static void ext2_to_vfs_cb(const Ext2DirEntry *e, void *ctx)
 
     if (!e->inode) return;
 
-    for (i = 0; i < e->name_len && i < 255; i++) ve.name[i] = e->name[i];
+    for (i = 0; i < e->name_len && i < VFS_MAX_PATH - 1; i++) ve.name[i] = e->name[i];
     ve.name[i] = '\0';
 
     ve.type = (e->file_type == EXT2_FT_DIR) ? VFS_TYPE_DIR : VFS_TYPE_FILE;
@@ -90,7 +91,7 @@ static int ext2_vfs_write(const char *path, const void *data, u32 size)
     u8 ftype;
     int rc;
     /* パスからディレクトリ部分とファイル名を分離 */
-    char dir_path[256];
+    char dir_path[VFS_MAX_PATH];
     const char *fname;
 
     ext2_split_path(path, dir_path, &fname);
@@ -111,7 +112,7 @@ static int ext2_vfs_write(const char *path, const void *data, u32 size)
 
 static int ext2_vfs_unlink(const char *path)
 {
-    char dir_path[256];
+    char dir_path[VFS_MAX_PATH];
     const char *fname;
     u32 dir_ino;
     int rc;
@@ -125,7 +126,7 @@ static int ext2_vfs_unlink(const char *path)
 
 static int ext2_vfs_mkdir(const char *path)
 {
-    char dir_path[256];
+    char dir_path[VFS_MAX_PATH];
     const char *dname;
     u32 parent_ino;
     int rc;
@@ -139,7 +140,7 @@ static int ext2_vfs_mkdir(const char *path)
 
 static int ext2_vfs_rmdir(const char *path)
 {
-    char dir_path[256];
+    char dir_path[VFS_MAX_PATH];
     const char *dname;
     u32 parent_ino;
     int rc;
@@ -180,8 +181,6 @@ static int ext2_vfs_stat(const char *path, OS32_Stat *buf)
     u32 ino;
     Ext2Inode inode;
     int rc;
-    int i;
-    u8 *p;
     
     if (!buf) return VFS_ERR_INVAL;
 
@@ -191,8 +190,7 @@ static int ext2_vfs_stat(const char *path, OS32_Stat *buf)
     rc = ext2_read_inode(ino, &inode);
     if (rc != 0) return VFS_ERR_IO;
 
-    p = (u8 *)buf;
-    for (i = 0; i < sizeof(OS32_Stat); i++) p[i] = 0;
+    kmemset(buf, 0, sizeof(OS32_Stat));
 
     buf->st_dev = 0;
     buf->st_ino = ino;
