@@ -49,8 +49,8 @@ KernelAPIポインタを引数として実行する。
 |---------|---------|------|
 | shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン内蔵) |
 | edit | `programs/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
-| skk_test| `programs/skk/` | SKKフロントエンド |
-| fep_test| `programs/fep_test.c` | FEP (日本語入力) テスト |
+| skk_test| `programs/skk/` | SKKフロントエンド (廃止予定) |
+| fep_test| `programs/fep_test.c` | FEP (日本語入力) テスト (ベータ) |
 | gfx_demo| `programs/gfx_demo.c` | libos32gfx グラフィックスデモ |
 | spr_test| `programs/spr_test.c` | スプライト描画テスト |
 | demo1 | `programs/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
@@ -69,6 +69,14 @@ KernelAPIポインタを引数として実行する。
 | man | `programs/man.c` | マニュアルページビューア |
 | more | `programs/more.c` | ページャ (ページ送り/検索/逆スクロール) |
 | mdview | `programs/mdview.c` | Markdown簡易ビューア |
+| sleep | `programs/sleep.c` | 指定秒数のウェイト (PIT 100Hz) |
+| touch | `programs/touch.c` | 空ファイル作成 |
+| hexdump | `programs/hexdump.c` | 16進+ASCIIダンプ表示 (-nオプション) |
+| find | `programs/find.c` | ファイル名検索 (再帰走査、-name部分一致) |
+| sort | `programs/sort.c` | 行ソート (シェルソート、-r/-nオプション) |
+| du | `programs/du.c` | ディスク使用量表示 (再帰合算、-sサマリー) |
+| cal | `programs/cal.c` | カレンダー表示 (ツェラーの公式、RTC連携) |
+| diff | `programs/diff.c` | 簡易2ファイル比較 (行単位逐次比較) |
 | hello | `programs/hello.c` | Hello World テスト |
 | args | `programs/args.c` | コマンドライン引数表示テスト |
 | crash | `programs/crash.c` | 意図的例外発生テスト |

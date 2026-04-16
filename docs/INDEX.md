@@ -30,6 +30,15 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
 
+## プロジェクトルート
+
+| ファイル | 内容 |
+|---------|------|
+| [LICENSE](../LICENSE) | MIT License (著作者: すけさん) |
+| [README.md](../README.md) | プロジェクト概要・機能一覧・クイックスタート |
+| [INSTALL.md](../INSTALL.md) | インストール・ビルド手順 |
+| [CHANGELOG.md](../CHANGELOG.md) | リリース変更履歴 |
+
 ## KAPI_SPEC.md 目次
 
 | 節 | 内容 |
