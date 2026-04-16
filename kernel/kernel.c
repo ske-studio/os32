@@ -38,6 +38,7 @@
 #include "ime.h"
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
+#include "snd_engine.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -261,6 +262,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* IME (FEP) 初期化 — 辞書は初回使用時に遅延ロード */
     ime_init();
+
+    /* サウンドエンジン初期化 */
+    snd_init();
 
     /* 割り込み有効化 */
     tvram_print(71, 2, "IRQ_EN", TATTR_YELLOW);

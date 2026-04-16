@@ -1,5 +1,5 @@
 {
-  "version": 25,
+  "version": 26,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -33,7 +33,8 @@
     "shm.h",
     "ime.h",
     "fd_redirect.h",
-    "pipe_buffer.h"
+    "pipe_buffer.h",
+    "snd_engine.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -873,6 +874,53 @@
       "ret": "int",
       "args": [
         "u32 addr"
+      ]
+    },
+    {
+      "name": "snd_bgm_play",
+      "ret": "void",
+      "args": [
+        "const char *mml"
+      ]
+    },
+    {
+      "name": "snd_bgm_stop",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "snd_bgm_is_playing",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "snd_se_play",
+      "ret": "void",
+      "args": [
+        "int se_id"
+      ]
+    },
+    {
+      "name": "snd_se_play_raw",
+      "ret": "void",
+      "args": [
+        "int note",
+        "int duration_ticks",
+        "int tone"
+      ]
+    },
+    {
+      "name": "snd_set_master",
+      "ret": "void",
+      "args": [
+        "int enable"
+      ]
+    },
+    {
+      "name": "snd_bgm_set_persist",
+      "ret": "void",
+      "args": [
+        "int persist"
       ]
     }
   ]

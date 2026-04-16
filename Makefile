@@ -56,7 +56,7 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 C_KERNEL = \
     kernel/kernel.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
-    kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c \
+    kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
@@ -311,6 +311,10 @@ programs/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) $(D
 
 vbzview: $(CRT0_OBJ) programs/vbzview.bin
 
+# === libos32snd (サウンドライブラリ) ===
+programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libos32snd/libos32snd.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32snd -c $< -o $@
+
 # === libmd (Markdownパーサーライブラリ) ===
 programs/libmd/md_parse.o: programs/libmd/md_parse.c programs/libmd/libmd.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -c $< -o $@
@@ -454,7 +458,7 @@ nhd-init:
 	$(NHD_DEPLOY) init
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/vz/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init
 

@@ -26,6 +26,7 @@
 #include "ime.h"
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
+#include "snd_engine.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -603,5 +604,40 @@ u32 __cdecl wrap_sys_redirect_get_buf_len(int fd)
 int __cdecl wrap_paging_is_present(u32 addr)
 {
     return paging_is_present(addr);
+}
+
+void __cdecl wrap_snd_bgm_play(const char *mml)
+{
+    snd_bgm_play(mml);
+}
+
+void __cdecl wrap_snd_bgm_stop(void)
+{
+    snd_bgm_stop();
+}
+
+int __cdecl wrap_snd_bgm_is_playing(void)
+{
+    return snd_bgm_is_playing();
+}
+
+void __cdecl wrap_snd_se_play(int se_id)
+{
+    snd_se_play(se_id);
+}
+
+void __cdecl wrap_snd_se_play_raw(int note, int duration_ticks, int tone)
+{
+    snd_se_play_raw(note, duration_ticks, tone);
+}
+
+void __cdecl wrap_snd_set_master(int enable)
+{
+    snd_set_master(enable);
+}
+
+void __cdecl wrap_snd_bgm_set_persist(int persist)
+{
+    snd_bgm_set_persist(persist);
 }
 

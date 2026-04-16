@@ -121,6 +121,13 @@ typedef struct {
     int (__cdecl *sys_redirect_fd_buf)(int fd, u8 *buf, u32 size, u32 len);
     u32 (__cdecl *sys_redirect_get_buf_len)(int fd);
     int (__cdecl *paging_is_present)(u32 addr);
+    void (__cdecl *snd_bgm_play)(const char *mml);
+    void (__cdecl *snd_bgm_stop)(void);
+    int (__cdecl *snd_bgm_is_playing)(void);
+    void (__cdecl *snd_se_play)(int se_id);
+    void (__cdecl *snd_se_play_raw)(int note, int duration_ticks, int tone);
+    void (__cdecl *snd_set_master)(int enable);
+    void (__cdecl *snd_bgm_set_persist)(int persist);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

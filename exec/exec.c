@@ -13,6 +13,7 @@
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "shm.h"
+#include "snd_engine.h"
 
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
@@ -105,6 +106,9 @@ void exec_exit(int status)
 
         /* (4) 共有メモリ自動解放 (全ブロックの使用中フラグを解除) */
         shm_cleanup_all();
+
+        /* (5) サウンドエンジンクリーンアップ (bgm_persistでなければBGM停止) */
+        snd_cleanup();
 
         /* 親レベルへ復帰 */
         exec_nest_level--;
@@ -340,7 +344,6 @@ int exec_run(const char *cmdline)
         int cmd_len = kstrlen(cmdline);
         const char *s = cmdline;
         char *d;
-        int in_arg = 0;
         u32 new_esp;
         static u32 saved_esp;
 
@@ -354,19 +357,38 @@ int exec_run(const char *cmdline)
         s = cmdline;
         d = str_area;
         while (*s) {
-            if (*s == ' ') {
-                *d++ = '\0';
-                in_arg = 0;
-            } else {
-                if (!in_arg) {
-                    if (argc < OS32_MAX_ARGS - 1) argv_area[argc++] = d;
-                    in_arg = 1;
+            char quote;
+
+            /* 引数間の空白をスキップ */
+            while (*s == ' ') s++;
+            if (!*s) break;
+
+            /* 新しい引数を開始 */
+            if (argc < OS32_MAX_ARGS - 1) argv_area[argc++] = d;
+
+            /* クォート対応トークナイザ */
+            while (*s && *s != ' ') {
+                if (*s == '"' || *s == '\'') {
+                    /* クォート開始 — 対応する閉じクォートまで取り込む */
+                    quote = *s++;
+                    while (*s && *s != quote) {
+                        if (*s == '\\' && quote == '"' && *(s + 1)) {
+                            /* ダブルクォート内のバックスラッシュエスケープ */
+                            s++;
+                        }
+                        *d++ = *s++;
+                    }
+                    if (*s == quote) s++;  /* 閉じクォートをスキップ */
+                } else if (*s == '\\' && *(s + 1)) {
+                    /* バックスラッシュエスケープ */
+                    s++;
+                    *d++ = *s++;
+                } else {
+                    *d++ = *s++;
                 }
-                *d++ = *s;
             }
-            s++;
+            *d++ = '\0';
         }
-        *d = '\0';
         argv_area[argc] = NULL;
 
         new_esp = stack_top;
