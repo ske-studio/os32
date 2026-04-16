@@ -31,7 +31,7 @@ INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
 INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs
 
 # FS: 共通 + 自身 + ドライバ (disk/ide依存)
-INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel
+INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
 
 
 # exec: 共通 + exec + kapi + fs + gfx + ドライバ (kbd依存)
