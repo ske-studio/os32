@@ -212,13 +212,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             mnt[1 + j] = '/'; mnt[2 + j] = '\0';
 
             /* フォールバックしながらマウント試行 */
-            /* 注意: ext2はシングルトン — ルートがext2なら他デバイスでext2は試みない */
             {
                 int mounted = 0;
-                int root_is_ext2 = (kstrcmp(root_fs, "ext2") == 0);
-                if (!root_is_ext2) {
-                    if (vfs_mount(mnt, dname, "ext2") == VFS_OK) mounted = 1;
-                }
+                if (vfs_mount(mnt, dname, "ext2") == VFS_OK) mounted = 1;
                 if (!mounted) {
                     vfs_mount(mnt, dname, "fat12"); /* 失敗しても無視 */
                 }
