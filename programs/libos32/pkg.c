@@ -219,13 +219,42 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
     fd = api->sys_open(path, KAPI_O_RDONLY);
     if (fd < 0) return PKG_ERR_IO;
 
-    /* データ部先頭までシーク (pkg_parseで計算済みのオフセットを使用) */
+    if (!(info->header.flags & PKG_FLAG_LZSS)) {
+        /* 無圧縮ストリーミング展開 (メモリ節約) */
+        u8 tbuf[4096];
+        api->sys_lseek(fd, (int)info->data_offset, SEEK_SET);
+
+        for (i = 0; i < info->entry_count; i++) {
+            const PkgEntry *ent = &info->entries[i];
+            int wfd;
+            u32 remains = ent->size;
+
+            if (ent->type != PKG_TYPE_FILE) continue;
+
+            ensure_parent_dirs(api, ent->path);
+            wfd = api->sys_open(ent->path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+
+            while (remains > 0) {
+                int req = (remains > sizeof(tbuf)) ? sizeof(tbuf) : remains;
+                int r = api->sys_read(fd, tbuf, req);
+                if (r <= 0) break;
+                if (wfd >= 0) api->sys_write(wfd, tbuf, r);
+                remains -= r;
+            }
+            if (wfd >= 0) api->sys_close(wfd);
+        }
+        api->sys_close(fd);
+        return PKG_OK;
+    }
+
+    /* LZSS解凍 (全体をメモリにロード) */
     data_offset = info->data_offset;
     api->sys_lseek(fd, (int)data_offset, SEEK_SET);
 
     /* 圧縮データ読み込み用バッファ確保 */
     comp_buf = (u8 *)api->mem_alloc(comp_size);
     if (!comp_buf) {
+        api->kprintf(0x41, " [dbg: req %lu bytes] ", comp_size);
         api->sys_close(fd);
         return PKG_ERR_NOMEM;
     }
@@ -238,22 +267,17 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
         return PKG_ERR_IO;
     }
 
-    /* LZSS解凍 or 無圧縮コピー */
-    if (info->header.flags & PKG_FLAG_LZSS) {
-        data_buf = (u8 *)api->mem_alloc(orig_size);
-        if (!data_buf) {
-            api->mem_free(comp_buf);
-            return PKG_ERR_NOMEM;
-        }
-        decoded = lzss_decode_local(comp_buf, comp_size, data_buf, orig_size);
+    /* LZSS解凍 */
+    data_buf = (u8 *)api->mem_alloc(orig_size);
+    if (!data_buf) {
         api->mem_free(comp_buf);
-        if (decoded <= 0) {
-            api->mem_free(data_buf);
-            return PKG_ERR_CORRUPT;
-        }
-    } else {
-        data_buf = comp_buf;
-        decoded = (int)comp_size;
+        return PKG_ERR_NOMEM;
+    }
+    decoded = lzss_decode_local(comp_buf, comp_size, data_buf, orig_size);
+    api->mem_free(comp_buf);
+    if (decoded <= 0) {
+        api->mem_free(data_buf);
+        return PKG_ERR_CORRUPT;
     }
 
     /* ファイル書き出し */
