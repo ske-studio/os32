@@ -284,6 +284,50 @@ int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block
         return ext2_write_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_aux) == 0
                ? EXT2_OK : EXT2_ERR_IO;
     }
+
+    file_block -= EXT2_ADDR_PER_BLOCK;
+    if (file_block < EXT2_ADDR_PER_BLOCK * EXT2_ADDR_PER_BLOCK) {
+        u32 ind1_idx = file_block / EXT2_ADDR_PER_BLOCK;
+        u32 ind2_idx = file_block % EXT2_ADDR_PER_BLOCK;
+        u32 ind1_block;
+
+        if (inode->block[EXT2_DIND_BLOCK] == 0) {
+            int dind_blk = ext2_alloc_block(ctx);
+            if (dind_blk < 0) return EXT2_ERR_NOSPC;
+            inode->block[EXT2_DIND_BLOCK] = (u32)dind_blk;
+            inode->blocks += 2;
+            ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
+            ret = ext2_write_block(ctx, (u32)dind_blk, ext2_g_aux);
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+
+        ret = ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_aux);
+        if (ret != 0) return EXT2_ERR_IO;
+
+        ind1_block = *(u32 *)&ext2_g_aux[ind1_idx * 4];
+        if (ind1_block == 0) {
+            int ind_blk = ext2_alloc_block(ctx);
+            if (ind_blk < 0) return EXT2_ERR_NOSPC;
+            ind1_block = (u32)ind_blk;
+
+            /* ext2_alloc_block internally overwrites ext2_g_aux, so we must reload DIND */
+            ret = ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_aux);
+            if (ret != 0) return EXT2_ERR_IO;
+
+            *(u32 *)&ext2_g_aux[ind1_idx * 4] = ind1_block;
+            ret = ext2_write_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_aux);
+            if (ret != 0) return EXT2_ERR_IO;
+
+            inode->blocks += 2;
+            ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);
+        } else {
+            ret = ext2_read_block(ctx, ind1_block, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+
+        *(u32 *)&ext2_g_blk[ind2_idx * 4] = phys_block;
+        return ext2_write_block(ctx, ind1_block, ext2_g_blk) == 0 ? EXT2_OK : EXT2_ERR_IO;
+    }
     return EXT2_ERR_NOSPC;
 }
 
