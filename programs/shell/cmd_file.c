@@ -96,21 +96,29 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
         g_api->kprintf(ATTR_RED, "%s: %s not found\n", cmd_name, src);
         return -1;
     }
-    sz = g_api->sys_read(fd_in, io_buf, 65536);
-    g_api->sys_close(fd_in);
-
-    if (sz < 0) return -1;
 
     fd_out = g_api->sys_open(dst, 1 | 0x0100 | 0x0200); /* O_WRONLY|O_CREAT|O_TRUNC */
     if (fd_out < 0) {
         g_api->kprintf(ATTR_RED, "%s: open failed %s\n", cmd_name, dst);
+        g_api->sys_close(fd_in);
         return -1;
     }
-    if (g_api->sys_write(fd_out, io_buf, sz) != sz) {
-        g_api->kprintf(ATTR_RED, "%s: write failed %s\n", cmd_name, dst);
-        g_api->sys_close(fd_out);
-        return -1;
+
+    while (1) {
+        sz = g_api->sys_read(fd_in, io_buf, 65536);
+        if (sz < 0) {
+            g_api->kprintf(ATTR_RED, "%s: read failed %s\n", cmd_name, src);
+            break;
+        }
+        if (sz == 0) break; /* EOF */
+
+        if (g_api->sys_write(fd_out, io_buf, sz) != sz) {
+            g_api->kprintf(ATTR_RED, "%s: write failed %s\n", cmd_name, dst);
+            break;
+        }
     }
+
+    g_api->sys_close(fd_in);
     g_api->sys_close(fd_out);
     return 0;
 }
@@ -307,9 +315,8 @@ static void cmd_rm(int argc, char **argv)
     }
 }
 /* バッファを行番号付きで出力 */
-static void cat_with_linenum(const u8 *data, int len)
+static void cat_with_linenum(const u8 *data, int len, int *line_num)
 {
-    int line_num = 1;
     int i, start;
     char num_buf[12];
     int nlen, j;
@@ -320,7 +327,7 @@ static void cat_with_linenum(const u8 *data, int len)
             /* 行番号を出力 */
             nlen = 0;
             {
-                int n = line_num;
+                int n = *line_num;
                 char tmp[12];
                 int ti = 0;
                 if (n == 0) tmp[ti++] = '0';
@@ -339,7 +346,7 @@ static void cat_with_linenum(const u8 *data, int len)
             }
             g_api->sys_write(1, "\n", 1);
             start = i + 1;
-            line_num++;
+            (*line_num)++;
         }
     }
 }
@@ -366,16 +373,21 @@ static void cmd_cat(int argc, char **argv)
             g_api->kprintf(ATTR_RED, "cat: %s not found (err %d)\n", argv[i], fd);
             continue;
         }
-        r = g_api->sys_read(fd, io_buf, 65536);
+        
+        {
+            int line_num = 1;
+            while (1) {
+                r = g_api->sys_read(fd, io_buf, 65536);
+                if (r <= 0) break;
+                
+                if (show_linenum) {
+                    cat_with_linenum(io_buf, r, &line_num);
+                } else {
+                    g_api->sys_write(1, io_buf, r);
+                }
+            }
+        }
         g_api->sys_close(fd);
-        if (r <= 0) {
-            continue;
-        }
-        if (show_linenum) {
-            cat_with_linenum(io_buf, r);
-        } else {
-            g_api->sys_write(1, io_buf, r);
-        }
     }
 }
 
