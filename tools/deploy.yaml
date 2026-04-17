@@ -19,6 +19,7 @@ boot:
 filesystem:
   # ゲスト側ディレクトリ構造 (自動作成)
   directories:
+    - /sys
     - /bin
     - /sbin
     - /usr

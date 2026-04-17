@@ -256,15 +256,26 @@ kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ)
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
+# FDD最小ブートイメージ (os.d88)
+# HDDインストール用ブートFD。必須コマンドのみ含む。
+FDD_MIN_CMDS = more grep find sort head tail wc tee touch hexdump sleep lzss diff du cal man sndctl
 os.d88: boot kernel.bin programs lzss_dict unicode_bin
-	@echo "Constructing OS32 image (os.img/os.d88)..."
-	@args="LOADER.BIN=boot/loader_fat.bin KERNEL.BIN=kernel.bin BOOT_HDD.BIN=boot/boot_hdd.bin LOADER_H.BIN=boot/loader_hdd.bin TEST.TXT=programs/test.txt UTF8.TXT=programs/test_utf8.txt SKK.LZS=assets/SKK.LZS UNICODE.BIN=unicode.bin"; \
-	for p in programs/*.bin; do \
-		if [ -f "$$p" ]; then \
-			name=`basename $$p | tr '[:lower:]' '[:upper:]'`; \
-			args="$$args $$name=$$p"; \
+	@echo "=== Building OS32 minimal FDD image (os.d88) ==="
+	@args="--tree"; \
+	args="$$args /kernel.bin=kernel.bin"; \
+	args="$$args /sys/shell.bin=programs/shell.bin"; \
+	args="$$args /sys/unicode.bin=unicode.bin"; \
+	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
+	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
+	for cmd in $(FDD_MIN_CMDS); do \
+		if [ -f "programs/$$cmd.bin" ]; then \
+			args="$$args /bin/$$cmd.bin=programs/$$cmd.bin"; \
 		fi \
 	done; \
+	args="$$args /bin/edit.bin=programs/edit.bin"; \
+	args="$$args /sbin/install.bin=programs/install.bin"; \
+	args="$$args /sbin/cdinst.bin=programs/cdinst.bin"; \
+	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
 	python3 tools/mkfat12.py -o os.img -b boot/boot_fat.bin -d os.d88 $$args
 	@echo "Copying os.d88 to NP21/W directory..."
 	@cp os.d88 '/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os.d88' 2>/dev/null || echo "Warning: Failed to copy os.d88 to np21w directory."
@@ -445,11 +456,11 @@ deploy: kernel.bin programs unicode_bin
 	@echo "=== NHD Deploy ==="
 	$(NHD_DEPLOY) setup-dirs
 	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
-	$(NHD_DEPLOY) copy --dest / --rename shell programs/shell.bin
+	$(NHD_DEPLOY) copy --dest / --rename shell.bin programs/shell.bin
 	$(NHD_DEPLOY) copy --dest /bin $(BIN_PROGRAMS)
 	$(NHD_DEPLOY) copy --dest /sbin $(SBIN_PROGRAMS)
 	$(NHD_DEPLOY) copy --dest /usr/bin $(USR_BIN_PROGRAMS)
-	$(NHD_DEPLOY) copy --dest /data unicode.bin
+	$(NHD_DEPLOY) copy --dest /sys unicode.bin
 	@if [ -d docs/manpages ] && ls docs/manpages/*.1 1>/dev/null 2>&1; then \
 		$(NHD_DEPLOY) copy --dest /usr/man $(shell ls docs/manpages/*.1 2>/dev/null); \
 	fi
@@ -496,7 +507,7 @@ iso: packages
 
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
-	rm -f packages/*.PKG os32.iso
+	rm -f packages/*.PKG os32.iso os_fdd.img os_fdd.d88
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init packages iso
 
