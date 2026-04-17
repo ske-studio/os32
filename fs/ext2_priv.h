@@ -28,6 +28,7 @@ int ext2_str_len(const char *s);
 int ext2_str_ncmp(const char *a, const char *b, int n);
 int ext2_write_super_raw(Ext2Ctx *ctx);
 int ext2_write_gd_raw(Ext2Ctx *ctx);
+u32 ext2_find_partition(int ide_drive);
 
 /* -- ext2_inode.c -- */
 int ext2_read_inode(Ext2Ctx *ctx, u32 ino, Ext2Inode *inode);

@@ -63,7 +63,7 @@ int ext2_format(int ide_drive, u32 total_sectors)
     /* 一時コンテキストを初期化 */
     ext2_mem_zero(&fmt_ctx, sizeof(fmt_ctx));
     fmt_ctx.drive_num = ide_drive;
-    fmt_ctx.base_lba = 0; /* フォーマット時はパーティション先頭から */
+    fmt_ctx.base_lba = ext2_find_partition(ide_drive);
 
     total_blocks = total_sectors / 2;  /* 512B→1KB */
     if (total_blocks < 64) return EXT2_ERR_NOSPC;

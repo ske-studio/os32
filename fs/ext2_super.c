@@ -144,7 +144,7 @@ int ext2_write_gd_raw(Ext2Ctx *ctx)
 /*  パーティションテーブル解析                                               */
 /* ======================================================================== */
 
-static u32 ext2_find_partition(int ide_drive)
+u32 ext2_find_partition(int ide_drive)
 {
     u8 pt_sect[512];
     int ret, i;
