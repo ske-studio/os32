@@ -140,11 +140,11 @@ lzss_cmd: $(CRT0_OBJ) programs/lzss.bin
 programs/libos32/pkg.o: programs/libos32/pkg.c programs/libos32/pkg.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/cdinst.o: programs/cdinst.c programs/libos32/pkg.h
+programs/cdinst.o: programs/cdinst.c programs/libos32/pkg.h programs/libos32/dbgserial.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/cdinst.elf: build/app.ld $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o -lc -lgcc
+programs/cdinst.elf: build/app.ld $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o $(DBG_OBJ) -lc -lgcc
 
 cdinst: $(CRT0_OBJ) programs/cdinst.bin
 
