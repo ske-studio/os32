@@ -59,6 +59,10 @@ minimal:
       guest: /bin/lzss.bin
     - host: programs/sndctl.bin
       guest: /bin/sndctl.bin
+    - host: programs/install.bin
+      guest: /sbin/install.bin
+    - host: programs/cdinst.bin
+      guest: /sbin/cdinst.bin
 
 # --- 標準パッケージ (差分) ---
 normal:
@@ -145,5 +149,7 @@ append:
   files:
     - host: assets/SKK.LZS
       guest: /data/skk.lzs
+    - host: assets/fep.dic
+      guest: /sys/fep.dic
     - host: "assets/images/*.vbz"
       guest: /data/images/

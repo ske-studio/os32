@@ -43,12 +43,80 @@ filesystem:
       guest: /sys/shell.bin
       tags: [core]
 
-    # --- 外部プログラム → /bin/ ---
+    # --- システム管理プログラム → /sbin/ ---
+    - host: programs/install.bin
+      guest: /sbin/
+      tags: [programs]
+    - host: programs/crash.bin
+      guest: /sbin/
+      tags: [programs]
+    - host: programs/bench.bin
+      guest: /sbin/
+      tags: [programs]
+    - host: programs/restest.bin
+      guest: /sbin/
+      tags: [programs]
+    - host: programs/cdinst.bin
+      guest: /sbin/
+      tags: [programs]
+
+    # --- ユーザー・デモプログラム → /usr/bin/ ---
+    - host: programs/edit.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/gfx_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/demo1.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/ekakiuta.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/vbzview.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/hrview.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/vdpview.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/spr_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/raster.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/fep_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/mdview.bin
+      guest: /usr/bin/
+      tags: [programs]
+
+    # --- 一般プログラム → /bin/ ---
     - host: "programs/*.bin"
       guest: /bin/
       type: glob
       exclude:
         - shell.bin
+        - install.bin
+        - cdinst.bin
+        - crash.bin
+        - bench.bin
+        - restest.bin
+        - edit.bin
+        - gfx_demo.bin
+        - demo1.bin
+        - ekakiuta.bin
+        - vbzview.bin
+        - hrview.bin
+        - vdpview.bin
+        - spr_test.bin
+        - raster.bin
+        - fep_test.bin
+        - mdview.bin
       tags: [programs]
 
     # --- マニュアルページ → /usr/man/ ---
@@ -60,6 +128,11 @@ filesystem:
     # --- SKK辞書 ---
     - host: assets/SKK.LZS
       guest: /data/skk.lzs
+      tags: [data]
+
+    # --- FEP辞書 ---
+    - host: assets/fep.dic
+      guest: /sys/fep.dic
       tags: [data]
 
     # --- テスト用ファイル ---
