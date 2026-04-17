@@ -175,6 +175,21 @@ int pkg_parse(KernelAPI *api, const char *path, PkgInfo *info)
     }
 
     api->sys_close(fd);
+
+    /* データ部オフセットを計算して保存 */
+    {
+        u32 doff = PKG_HEADER_SIZE;
+        int ei;
+        for (ei = 0; ei < info->entry_count; ei++) {
+            int plen = 0;
+            const char *pp = info->entries[ei].path;
+            while (*pp++) plen++;
+            doff += 1 + plen + 5;
+        }
+        doff += 1; /* 終端マーカー */
+        info->data_offset = doff;
+    }
+
     return PKG_OK;
 }
 
@@ -204,18 +219,8 @@ int pkg_extract(KernelAPI *api, const char *path, const PkgInfo *info)
     fd = api->sys_open(path, KAPI_O_RDONLY);
     if (fd < 0) return PKG_ERR_IO;
 
-    /* ヘッダ + ファイルテーブルをスキップ */
-    /* データ部のオフセットを計算 */
-    data_offset = PKG_HEADER_SIZE;
-    for (i = 0; i < info->entry_count; i++) {
-        int plen = 0;
-        const char *p = info->entries[i].path;
-        while (*p++) plen++;
-        data_offset += 1 + plen + 5; /* path_len + path + size + type */
-    }
-    data_offset += 1; /* 終端マーカー */
-
-    /* データ部先頭までシーク */
+    /* データ部先頭までシーク (pkg_parseで計算済みのオフセットを使用) */
+    data_offset = info->data_offset;
     api->sys_lseek(fd, (int)data_offset, SEEK_SET);
 
     /* 圧縮データ読み込み用バッファ確保 */

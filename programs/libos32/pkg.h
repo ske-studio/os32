@@ -51,6 +51,7 @@ typedef struct {
 typedef struct {
     PkgHeader header;
     int       entry_count;
+    u32       data_offset;   /* PKGファイル内のデータ部オフセット */
     PkgEntry  entries[PKG_MAX_ENTRIES];
 } PkgInfo;
 
