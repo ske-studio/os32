@@ -251,6 +251,96 @@ const FAT12_Info *fat12_get_info(void)
 /*  ディレクトリ操作                                                        */
 /* ======================================================================== */
 
+/* 前方宣言 */
+static FAT12_DirEntry *fat12_find(const char *name, int *out_sector, int *out_index);
+
+/* セクタバッファ2 (サブディレクトリ走査時はsect_bufと排他で使うため別途確保) */
+static u8 subdir_buf[1024];
+
+/* サブディレクトリのクラスタチェーンを走査し、name83に一致するエントリを探す */
+static FAT12_DirEntry *find_in_cluster_chain(u16 dir_cluster, const char *name83,
+                                              FAT12_DirEntry *out_entry)
+{
+    int entries_per_sector;
+    u16 cluster;
+
+    entries_per_sector = finfo.bytes_per_sector / 32;
+    cluster = dir_cluster;
+
+    while (cluster >= 2 && cluster < FAT12_EOC) {
+        u32 lba = cluster_to_lba(cluster);
+        int s, i;
+
+        for (s = 0; s < finfo.sectors_per_cluster; s++) {
+            FAT12_DirEntry *dir;
+
+            if (disk_read_lba(finfo.drive_num, (int)(lba + s), 1, subdir_buf) != 0)
+                return 0;
+
+            dir = (FAT12_DirEntry *)subdir_buf;
+
+            for (i = 0; i < entries_per_sector; i++) {
+                if ((u8)dir[i].name[0] == 0x00) return 0;
+                if ((u8)dir[i].name[0] == 0xE5) continue;
+                if (dir[i].attr == FAT_ATTR_LFN) continue;
+
+                if (name_match_83(&dir[i], name83)) {
+                    kmemcpy(out_entry, &dir[i], sizeof(*out_entry));
+                    return out_entry;
+                }
+            }
+        }
+
+        cluster = fat12_get_entry(cluster);
+    }
+    return 0;
+}
+
+/* サブディレクトリのクラスタチェーンを走査し、コールバック呼び出し */
+static int list_cluster_chain(u16 dir_cluster,
+                               void (*print_fn)(const char *, u32, u8))
+{
+    int entries_per_sector;
+    u16 cluster;
+    int count = 0;
+
+    entries_per_sector = finfo.bytes_per_sector / 32;
+    cluster = dir_cluster;
+
+    while (cluster >= 2 && cluster < FAT12_EOC) {
+        u32 lba = cluster_to_lba(cluster);
+        int s, i;
+
+        for (s = 0; s < finfo.sectors_per_cluster; s++) {
+            FAT12_DirEntry *dir;
+
+            if (disk_read_lba(finfo.drive_num, (int)(lba + s), 1, subdir_buf) != 0)
+                return -1;
+
+            dir = (FAT12_DirEntry *)subdir_buf;
+
+            for (i = 0; i < entries_per_sector; i++) {
+                char fname[13];
+
+                if ((u8)dir[i].name[0] == 0x00) return count;
+                if ((u8)dir[i].name[0] == 0xE5) continue;
+                if (dir[i].attr == FAT_ATTR_LFN) continue;
+                if (dir[i].attr & FAT_ATTR_VOLUME) continue;
+
+                name_from_83(&dir[i], fname, sizeof(fname));
+
+                if (print_fn)
+                    print_fn(fname, dir[i].file_size, dir[i].attr);
+
+                count++;
+            }
+        }
+
+        cluster = fat12_get_entry(cluster);
+    }
+    return count;
+}
+
 /* ルートディレクトリの全エントリを走査してコールバック呼び出し */
 int fat12_list(void (*print_fn)(const char *, u32, u8))
 {
@@ -293,7 +383,140 @@ int fat12_list(void (*print_fn)(const char *, u32, u8))
     return count;
 }
 
-/* ルートディレクトリからファイル名で検索 */
+/* 指定ディレクトリ（パス指定）のエントリを列挙
+ * path が "/" または空文字ならルートディレクトリ
+ * それ以外はサブディレクトリを辿る */
+static int fat12_list_dir(const char *path,
+                          void (*print_fn)(const char *, u32, u8))
+{
+    const char *p;
+    u16 dir_cluster;
+    char component[13];
+    char name83[11];
+    FAT12_DirEntry ent;
+    int ci;
+
+    if (!finfo.mounted) return -1;
+
+    /* パスの先頭 '/' をスキップ */
+    p = path;
+    while (*p == '/') p++;
+
+    /* ルートディレクトリの場合 */
+    if (*p == '\0') return fat12_list(print_fn);
+
+    /* パスコンポーネントを順に辿る */
+    dir_cluster = 0; /* 0 = ルートディレクトリ (特殊扱い) */
+
+    while (*p) {
+        FAT12_DirEntry *result;
+        /* 次のコンポーネントを取得 */
+        ci = 0;
+        while (*p && *p != '/' && ci < 12) {
+            component[ci++] = *p++;
+        }
+        component[ci] = '\0';
+        while (*p == '/') p++;
+
+        name_to_83(component, name83);
+
+        if (dir_cluster == 0) {
+            /* ルートディレクトリから検索 */
+            result = fat12_find(component, 0, 0);
+        } else {
+            /* サブディレクトリから検索 */
+            result = find_in_cluster_chain(dir_cluster, name83, &ent);
+        }
+
+        if (!result) return -1;
+        if (!(result->attr & FAT_ATTR_DIRECTORY)) return -1;
+
+        dir_cluster = result->start_cluster;
+    }
+
+    /* dir_clusterのディレクトリを列挙 */
+    return list_cluster_chain(dir_cluster, print_fn);
+}
+
+/* パス対応のファイル検索: パスを分解してサブディレクトリを辿る
+ * 例: "/sys/shell.bin" → ルートでSYS dir検索 → そのdir内でSHELL.BIN検索 */
+static FAT12_DirEntry *fat12_find_path(const char *path)
+{
+    const char *p;
+    u16 dir_cluster;
+    char component[13];
+    char name83[11];
+    static FAT12_DirEntry found;
+    FAT12_DirEntry *result;
+    int ci;
+    int num_parts = 0;
+    const char *scan;
+    const char *last_part_start;
+
+    if (!finfo.mounted) return 0;
+
+    /* パスの先頭 '/' をスキップ */
+    p = path;
+    while (*p == '/') p++;
+    if (*p == '\0') return 0;
+
+    /* パスコンポーネント数をカウントし、最後のコンポーネント位置を記録 */
+    scan = p;
+    last_part_start = p;
+    while (*scan) {
+        last_part_start = scan;
+        num_parts++;
+        while (*scan && *scan != '/') scan++;
+        while (*scan == '/') scan++;
+    }
+
+    if (num_parts == 0) return 0;
+
+    /* 最後のコンポーネント以外はディレクトリとして辿る */
+    dir_cluster = 0; /* ルートから開始 */
+    scan = p;
+
+    while (scan < last_part_start) {
+        ci = 0;
+        while (*scan && *scan != '/' && ci < 12) {
+            component[ci++] = *scan++;
+        }
+        component[ci] = '\0';
+        while (*scan == '/') scan++;
+
+        name_to_83(component, name83);
+
+        if (dir_cluster == 0) {
+            result = fat12_find(component, 0, 0);
+        } else {
+            result = find_in_cluster_chain(dir_cluster, name83, &found);
+        }
+
+        if (!result) return 0;
+        if (!(result->attr & FAT_ATTR_DIRECTORY)) return 0;
+
+        dir_cluster = result->start_cluster;
+    }
+
+    /* 最後のコンポーネント (ファイルまたはディレクトリ) を検索 */
+    ci = 0;
+    scan = last_part_start;
+    while (*scan && *scan != '/' && ci < 12) {
+        component[ci++] = *scan++;
+    }
+    component[ci] = '\0';
+
+    name_to_83(component, name83);
+
+    if (dir_cluster == 0) {
+        return fat12_find(component, 0, 0);
+    } else {
+        result = find_in_cluster_chain(dir_cluster, name83, &found);
+        return result;
+    }
+}
+
+/* ルートディレクトリからファイル名で検索 (レガシー: ルート直下のみ) */
 static FAT12_DirEntry *fat12_find(const char *name, int *out_sector, int *out_index)
 {
     char name83[11];
@@ -671,20 +894,49 @@ static int fat12_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user
 {
     int rc;
     (void)ctx;
-    (void)path;  /* FAT12はルートディレクトリのみ */
     fat12_list_ctx.user_cb = cb;
     fat12_list_ctx.user_ctx = user_ctx;
-    rc = fat12_list(fat12_to_vfs_cb);
+    rc = fat12_list_dir(path, fat12_to_vfs_cb);
     return (rc >= 0) ? VFS_OK : VFS_ERR_IO;
 }
 
 static int fat12_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
 {
-    const char *fname;
+    FAT12_DirEntry *ent;
     (void)ctx;
-    fname = fat12_basename(path);
-    if (!fname[0]) return VFS_ERR_NOTFOUND;
-    return fat12_read(fname, buf, (int)max_size);
+    /* パス対応検索: サブディレクトリを辿る */
+    ent = fat12_find_path(path);
+    if (!ent) {
+        /* フォールバック: ルート直下のbasenameで検索 (レガシー互換) */
+        const char *fname = fat12_basename(path);
+        if (!fname[0]) return VFS_ERR_NOTFOUND;
+        return fat12_read(fname, buf, (int)max_size);
+    }
+    /* fat12_find_path で見つかったエントリからクラスタチェーンを読む */
+    {
+        u16 cluster = ent->start_cluster;
+        int bytes_read = 0;
+        int remaining = (int)ent->file_size;
+        int chunk;
+        u8 *dst = (u8 *)buf;
+        if (remaining > (int)max_size) remaining = (int)max_size;
+        while (remaining > 0 && cluster >= 2 && cluster < FAT12_EOC) {
+            u32 lba = cluster_to_lba(cluster);
+            int s;
+            for (s = 0; s < finfo.sectors_per_cluster && remaining > 0; s++) {
+                if (disk_read_lba(finfo.drive_num, (int)(lba + s), 1, sect_buf) != 0)
+                    return bytes_read > 0 ? bytes_read : -1;
+                chunk = finfo.bytes_per_sector;
+                if (chunk > remaining) chunk = remaining;
+                kmemcpy(dst, sect_buf, (u32)chunk);
+                dst += chunk;
+                bytes_read += chunk;
+                remaining -= chunk;
+            }
+            cluster = fat12_get_entry(cluster);
+        }
+        return bytes_read;
+    }
 }
 
 static int fat12_vfs_write(void *ctx, const char *path, const void *data, u32 size)
@@ -707,11 +959,58 @@ static int fat12_vfs_unlink(void *ctx, const char *path)
 
 static int fat12_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size, u32 offset)
 {
-    const char *fname;
+    FAT12_DirEntry *ent;
     (void)ctx;
-    fname = fat12_basename(path);
-    if (!fname[0]) return VFS_ERR_NOTFOUND;
-    return fat12_read_stream(fname, buf, size, offset);
+    /* パス対応でエントリを検索 */
+    ent = fat12_find_path(path);
+    if (!ent) {
+        /* フォールバック: ルート直下のbasenameで検索 */
+        const char *fname = fat12_basename(path);
+        if (!fname[0]) return VFS_ERR_NOTFOUND;
+        return fat12_read_stream(fname, buf, size, offset);
+    }
+    /* ストリーム読み込み (fat12_find_pathで見つかったエントリを使用) */
+    {
+        u16 cluster = ent->start_cluster;
+        int bytes_read = 0;
+        int remaining, chunk;
+        u32 cluster_size, skip_clusters, byte_in_cluster;
+        u8 *dst;
+        if (offset >= ent->file_size) return 0;
+        dst = (u8 *)buf;
+        remaining = (int)ent->file_size - offset;
+        if (remaining > (int)size) remaining = (int)size;
+        cluster_size = finfo.bytes_per_sector * finfo.sectors_per_cluster;
+        skip_clusters = offset / cluster_size;
+        byte_in_cluster = offset % cluster_size;
+        while (skip_clusters > 0 && cluster >= 2 && cluster < FAT12_EOC) {
+            cluster = fat12_get_entry(cluster);
+            skip_clusters--;
+        }
+        while (remaining > 0 && cluster >= 2 && cluster < FAT12_EOC) {
+            u32 lba = cluster_to_lba(cluster);
+            int s;
+            u32 offset_in_cluster = byte_in_cluster;
+            for (s = 0; s < finfo.sectors_per_cluster && remaining > 0; s++) {
+                if (offset_in_cluster >= finfo.bytes_per_sector) {
+                    offset_in_cluster -= finfo.bytes_per_sector;
+                    continue;
+                }
+                if (disk_read_lba(finfo.drive_num, (int)(lba + s), 1, sect_buf) != 0)
+                    return bytes_read > 0 ? bytes_read : VFS_ERR_IO;
+                chunk = finfo.bytes_per_sector - offset_in_cluster;
+                if (chunk > remaining) chunk = remaining;
+                kmemcpy(dst, &sect_buf[offset_in_cluster], (u32)chunk);
+                dst += chunk;
+                bytes_read += chunk;
+                remaining -= chunk;
+                offset_in_cluster = 0;
+            }
+            cluster = fat12_get_entry(cluster);
+            byte_in_cluster = 0;
+        }
+        return bytes_read;
+    }
 }
 
 static int fat12_vfs_write_stream(void *ctx, const char *path, const void *buf, u32 size, u32 offset)
@@ -723,12 +1022,14 @@ static int fat12_vfs_write_stream(void *ctx, const char *path, const void *buf, 
 
 static int fat12_vfs_get_size(void *ctx, const char *path, u32 *size)
 {
-    const char *fname;
     FAT12_DirEntry *ent;
     (void)ctx;
-    fname = fat12_basename(path);
-    if (!fname[0]) return VFS_ERR_NOTFOUND;
-    ent = fat12_find(fname, 0, 0);
+    ent = fat12_find_path(path);
+    if (!ent) {
+        const char *fname = fat12_basename(path);
+        if (!fname[0]) return VFS_ERR_NOTFOUND;
+        ent = fat12_find(fname, 0, 0);
+    }
     if (!ent) return VFS_ERR_NOTFOUND;
     if (size) *size = ent->file_size;
     return VFS_OK;
@@ -740,11 +1041,14 @@ static int fat12_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
     FAT12_DirEntry *ent;
     u16 mode = 0;
     (void)ctx;
-    fname = fat12_basename(path);
     
     if (!buf) return VFS_ERR_INVAL;
 
     kmemset(buf, 0, sizeof(OS32_Stat));
+
+    /* パスの先頭/をスキップしてルート判定 */
+    fname = path;
+    while (*fname == '/') fname++;
 
     /* ROOT ディレクトリの場合 */
     if (!fname[0] || (fname[0] == '.' && fname[1] == '\0')) {
@@ -756,7 +1060,13 @@ static int fat12_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
         return VFS_OK;
     }
 
-    ent = fat12_find(fname, 0, 0);
+    /* パス対応検索 */
+    ent = fat12_find_path(path);
+    if (!ent) {
+        /* フォールバック: ルート直下のbasenameで検索 */
+        const char *bname = fat12_basename(path);
+        if (bname[0]) ent = fat12_find(bname, 0, 0);
+    }
     if (!ent) return VFS_ERR_NOTFOUND;
 
     buf->st_dev = 0;
