@@ -15,9 +15,15 @@ FAT12レイアウト:
   セクタ 5-10:   ルートディレクトリ (192エントリ × 32B = 6144B = 6セクタ)
   セクタ 11〜:   データ領域 (クラスタ2から開始)
 
-使用例:
+使用例 (レガシー: ルート直下配置):
   python3 mkfat12.py -o os_raw.img -b boot_fat.bin \\
-      LOADER.BIN=loader.bin KERNEL.BIN=kernel.bin SHELL.BIN=shell.bin
+      LOADER.BIN=loader.bin KERNEL.BIN=kernel.bin
+
+使用例 (ツリーモード: サブディレクトリ対応):
+  python3 mkfat12.py -o os_raw.img -b boot_fat.bin --tree \\
+      /kernel.bin=kernel.bin \\
+      /sys/shell.bin=programs/shell.bin \\
+      /bin/grep.bin=programs/grep.bin
 """
 
 import sys
@@ -50,6 +56,9 @@ FAT12_FREE = 0x000
 FAT12_EOC  = 0xFFF
 FAT12_MEDIA = 0xFF0 | MEDIA_TYPE  # メディアバイト
 
+# ディレクトリエントリあたりのバイト数
+DIR_ENTRY_SIZE = 32
+
 
 def make_bpb():
     """BPB (BIOS Parameter Block) を生成 (オフセット0x00〜0x23, 36バイト)"""
@@ -75,22 +84,6 @@ def make_bpb():
     struct.pack_into('<I', bpb, 0x1C, HIDDEN_SECTORS)
     struct.pack_into('<I', bpb, 0x20, 0)  # total_sectors_32 (16bitで足りるので0)
     return bytes(bpb)
-
-
-def make_fat():
-    """FAT12テーブルを初期化 (2セクタ = 2048バイト)"""
-    fat = bytearray(FAT_SIZE * BYTES_PER_SECTOR)
-    # エントリ0: メディアバイト (0xFFE for 0xFE media)
-    # エントリ1: EOC (0xFFF)
-    # FAT12: 3バイトで2エントリ
-    # entry0 = 0xFFE, entry1 = 0xFFF
-    # byte0 = low8(entry0) = 0xFE
-    # byte1 = high4(entry0) | low4(entry1)<<4 = 0xFF
-    # byte2 = high8(entry1) = 0xFF
-    fat[0] = MEDIA_TYPE   # 0xFE
-    fat[1] = 0xFF
-    fat[2] = 0xFF
-    return bytes(fat)
 
 
 def fat12_get(fat_data, cluster):
@@ -131,121 +124,334 @@ def name_to_83(name):
     return (base + ext).encode('ascii')
 
 
-def make_dir_entry(name83, attr, cluster, size):
+def make_dir_entry(name83, attr, cluster, size, date=0x5A21, time=0x0000):
     """32バイトのディレクトリエントリを生成"""
     entry = bytearray(32)
     entry[0:11] = name83
     entry[0x0B] = attr
-    # 時刻・日付は固定値 (2025-01-01 00:00:00)
-    struct.pack_into('<H', entry, 0x16, 0x0000)  # time
-    struct.pack_into('<H', entry, 0x18, 0x5A21)  # date
+    # 時刻・日付
+    struct.pack_into('<H', entry, 0x16, time)
+    struct.pack_into('<H', entry, 0x18, date)
     struct.pack_into('<H', entry, 0x1A, cluster & 0xFFFF)
     struct.pack_into('<I', entry, 0x1C, size)
     return bytes(entry)
 
 
-def create_fat12_image(boot_bin=None, files=None):
-    """FAT12フロッピーイメージを生成"""
-    # 全体をゼロで初期化
-    image = bytearray(TOTAL_SECTORS * BYTES_PER_SECTOR)
-    
-    # FAT初期化
-    fat = bytearray(make_fat())
-    
-    # ルートディレクトリ
-    root_dir = bytearray(ROOT_DIR_SECTORS * BYTES_PER_SECTOR)
-    
-    # ファイルを配置
-    next_cluster = 2  # 最初のデータクラスタ
-    dir_index = 0
-    
-    if files:
-        for fat_name, local_path in files:
-            if not os.path.exists(local_path):
-                print(f"  警告: {local_path} が見つかりません。スキップ。")
+class Fat12Builder:
+    """FAT12イメージビルダー (サブディレクトリ対応)"""
+
+    def __init__(self):
+        self.image = bytearray(TOTAL_SECTORS * BYTES_PER_SECTOR)
+        self.fat = bytearray(FAT_SIZE * BYTES_PER_SECTOR)
+        self.root_dir = bytearray(ROOT_DIR_SECTORS * BYTES_PER_SECTOR)
+        self.next_cluster = 2
+        self.root_dir_index = 0
+        # サブディレクトリのクラスタ → (dir_data bytearray, entry_index int)
+        self.subdir_info = {}
+
+        # FAT初期化
+        self.fat[0] = MEDIA_TYPE  # 0xFE
+        self.fat[1] = 0xFF
+        self.fat[2] = 0xFF
+
+    def _alloc_cluster(self):
+        """次の空きクラスタを割り当て"""
+        if self.next_cluster >= TOTAL_DATA_CLUSTERS + 2:
+            raise RuntimeError("ディスク容量不足")
+        c = self.next_cluster
+        self.next_cluster += 1
+        return c
+
+    def _cluster_to_offset(self, cluster):
+        """クラスタ番号→イメージ内オフセット"""
+        sector_lba = DATA_START + (cluster - 2) * SECTORS_PER_CLUSTER
+        return sector_lba * BYTES_PER_SECTOR
+
+    def _write_file_data(self, data):
+        """ファイルデータをクラスタチェーンに書き込み、最初のクラスタ番号を返す"""
+        if len(data) == 0:
+            return 0
+
+        file_size = len(data)
+        cluster_bytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER
+        clusters_needed = max(1, (file_size + cluster_bytes - 1) // cluster_bytes)
+
+        first_cluster = self._alloc_cluster()
+        prev_cluster = first_cluster
+        remaining = file_size
+        offset = 0
+
+        for i in range(clusters_needed):
+            if i == 0:
+                cluster = first_cluster
+            else:
+                cluster = self._alloc_cluster()
+                fat12_set(self.fat, prev_cluster, cluster)
+
+            # データ書き込み
+            img_offset = self._cluster_to_offset(cluster)
+            chunk = min(remaining, cluster_bytes)
+            self.image[img_offset:img_offset + chunk] = data[offset:offset + chunk]
+            offset += chunk
+            remaining -= chunk
+
+            fat12_set(self.fat, cluster, FAT12_EOC)
+            prev_cluster = cluster
+
+        return first_cluster
+
+    def _add_root_entry(self, name83, attr, cluster, size):
+        """ルートディレクトリにエントリを追加"""
+        if self.root_dir_index >= ROOT_ENTRY_COUNT:
+            raise RuntimeError("ルートディレクトリエントリ不足")
+        entry = make_dir_entry(name83, attr, cluster, size)
+        idx = self.root_dir_index * DIR_ENTRY_SIZE
+        self.root_dir[idx:idx + DIR_ENTRY_SIZE] = entry
+        self.root_dir_index += 1
+
+    def _add_subdir_entry(self, parent_cluster, name83, attr, cluster, size):
+        """サブディレクトリにエントリを追加 (クラスタ拡張対応)"""
+        info = self.subdir_info[parent_cluster]
+        dir_data = info['data']
+        entry_idx = info['index']
+
+        cluster_bytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER
+        max_entries = len(dir_data) // DIR_ENTRY_SIZE
+
+        # 現在のデータ領域が足りない場合はクラスタを追加
+        if entry_idx >= max_entries:
+            new_cluster = self._alloc_cluster()
+            fat12_set(self.fat, new_cluster, FAT12_EOC)
+
+            # 既存の最後のクラスタからチェーンを繋ぐ
+            last_cluster = info.get('last_cluster', parent_cluster)
+            fat12_set(self.fat, last_cluster, new_cluster)
+            info['last_cluster'] = new_cluster
+
+            # データ領域を拡張
+            new_data = bytearray(cluster_bytes)
+            dir_data.extend(new_data)
+            info['data'] = dir_data
+
+            # 新しいクラスタ領域をイメージに初期化書き込み
+            new_offset = self._cluster_to_offset(new_cluster)
+            self.image[new_offset:new_offset + cluster_bytes] = new_data
+
+            # 拡張後の最大エントリ数を再計算
+            max_entries = len(dir_data) // DIR_ENTRY_SIZE
+
+        entry = make_dir_entry(name83, attr, cluster, size)
+        idx = entry_idx * DIR_ENTRY_SIZE
+        dir_data[idx:idx + DIR_ENTRY_SIZE] = entry
+        info['index'] = entry_idx + 1
+
+        # イメージに書き戻し (全クラスタ分)
+        # 最初のクラスタ
+        img_offset = self._cluster_to_offset(parent_cluster)
+        write_len = min(cluster_bytes, len(dir_data))
+        self.image[img_offset:img_offset + write_len] = dir_data[:write_len]
+
+        # 追加クラスタ群の書き戻し
+        remaining = len(dir_data) - cluster_bytes
+        chain_cluster = fat12_get(self.fat, parent_cluster)
+        data_offset = cluster_bytes
+        while remaining > 0 and chain_cluster >= 2 and chain_cluster < FAT12_EOC:
+            c_offset = self._cluster_to_offset(chain_cluster)
+            write_len = min(cluster_bytes, remaining)
+            self.image[c_offset:c_offset + write_len] = dir_data[data_offset:data_offset + write_len]
+            data_offset += write_len
+            remaining -= write_len
+            chain_cluster = fat12_get(self.fat, chain_cluster)
+
+    def _ensure_directory(self, dir_path, parent_cluster=None):
+        """
+        ディレクトリを確保 (存在しなければ作成)。
+        dir_path: 正規化されたパス (例: "/sys", "/bin")
+        parent_cluster: 親ディレクトリのクラスタ (None=ルート)
+        戻り値: ディレクトリのクラスタ番号 (0 = ルートディレクトリ)
+        """
+        if dir_path == '/' or dir_path == '':
+            return 0  # ルートディレクトリ
+
+        # パス分解
+        parts = [p for p in dir_path.split('/') if p]
+        current_cluster = 0  # ルートから開始
+
+        for i, part in enumerate(parts):
+            part_path = '/' + '/'.join(parts[:i+1])
+            name83 = name_to_83(part)
+
+            # 既に作成済みか確認
+            existing = self._find_dir_in_parent(current_cluster, name83)
+            if existing is not None:
+                current_cluster = existing
                 continue
-            
-            with open(local_path, 'rb') as f:
-                data = f.read()
-            
-            file_size = len(data)
-            clusters_needed = max(1, (file_size + BYTES_PER_SECTOR * SECTORS_PER_CLUSTER - 1) //
-                                  (BYTES_PER_SECTOR * SECTORS_PER_CLUSTER))
-            
-            if next_cluster + clusters_needed > TOTAL_DATA_CLUSTERS + 2:
-                print(f"  エラー: ディスク容量不足 ({fat_name})")
-                sys.exit(1)
-            
-            # ディレクトリエントリ作成
-            name83 = name_to_83(fat_name)
-            entry = make_dir_entry(name83, 0x20, next_cluster, file_size)
-            root_dir[dir_index * 32:(dir_index + 1) * 32] = entry
-            dir_index += 1
-            
-            # データ書き込み + FATチェーン設定
-            first_cluster = next_cluster
-            remaining = file_size
-            offset = 0
-            
-            for i in range(clusters_needed):
-                cluster = next_cluster
-                # データをクラスタに書き込み
-                sector_lba = DATA_START + (cluster - 2) * SECTORS_PER_CLUSTER
-                chunk = min(remaining, BYTES_PER_SECTOR * SECTORS_PER_CLUSTER)
-                img_offset = sector_lba * BYTES_PER_SECTOR
-                image[img_offset:img_offset + chunk] = data[offset:offset + chunk]
-                offset += chunk
-                remaining -= chunk
-                
-                # FATエントリ設定
-                if i < clusters_needed - 1:
-                    fat12_set(fat, cluster, cluster + 1)
-                else:
-                    fat12_set(fat, cluster, FAT12_EOC)
-                
-                next_cluster += 1
-            
-            print(f"  {fat_name:12s} -> クラスタ {first_cluster}-{next_cluster-1} "
-                  f"({file_size} bytes, {clusters_needed} clusters)")
-    
-    # ブートセクタ構築
-    boot_sector = bytearray(BYTES_PER_SECTOR)
-    bpb = make_bpb()
-    
-    if boot_bin and os.path.exists(boot_bin):
-        # ブートコードを読み込み
-        with open(boot_bin, 'rb') as f:
-            boot_code = f.read()
-        if len(boot_code) > BYTES_PER_SECTOR:
-            boot_code = boot_code[:BYTES_PER_SECTOR]
-        boot_sector[:len(boot_code)] = boot_code
-        # BPBを上書き (オフセット 0x03〜0x23)
-        # ただしジャンプ命令(0x00-0x02)はブートコード側を使用
-        boot_sector[0x03:0x24] = bpb[0x03:0x24]
-    else:
-        # BPBのみ書き込み (ブートコードなし)
-        boot_sector[:len(bpb)] = bpb
-        # ブートシグネチャ
-        boot_sector[BYTES_PER_SECTOR - 2] = 0x55
-        boot_sector[BYTES_PER_SECTOR - 1] = 0xAA
-    
-    # イメージに書き込み
-    # セクタ0: ブートセクタ
-    image[0:BYTES_PER_SECTOR] = boot_sector
-    
-    # FAT1 (セクタ1-2)
-    fat_offset = FAT_START * BYTES_PER_SECTOR
-    image[fat_offset:fat_offset + len(fat)] = fat
-    
-    # FAT2 (セクタ3-4) — FAT1のコピー
-    fat2_offset = (FAT_START + FAT_SIZE) * BYTES_PER_SECTOR
-    image[fat2_offset:fat2_offset + len(fat)] = fat
-    
-    # ルートディレクトリ (セクタ5-10)
-    root_offset = ROOT_DIR_START * BYTES_PER_SECTOR
-    image[root_offset:root_offset + len(root_dir)] = root_dir
-    
-    return bytes(image)
+
+            # 新規ディレクトリ作成
+            dir_cluster = self._alloc_cluster()
+            fat12_set(self.fat, dir_cluster, FAT12_EOC)
+
+            # ディレクトリデータ領域初期化
+            cluster_bytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER
+            dir_data = bytearray(cluster_bytes)
+
+            # '.' エントリ (自分自身)
+            dot_entry = make_dir_entry(b'.          ', 0x10, dir_cluster, 0)
+            dir_data[0:32] = dot_entry
+
+            # '..' エントリ (親)
+            dotdot_entry = make_dir_entry(b'..         ', 0x10, current_cluster, 0)
+            dir_data[32:64] = dotdot_entry
+
+            # サブディレクトリ情報を登録
+            self.subdir_info[dir_cluster] = {
+                'data': dir_data,
+                'index': 2,  # '.' と '..' の次
+            }
+
+            # イメージにディレクトリデータを書き込み
+            img_offset = self._cluster_to_offset(dir_cluster)
+            self.image[img_offset:img_offset + cluster_bytes] = dir_data
+
+            # 親ディレクトリにエントリを追加
+            if current_cluster == 0:
+                self._add_root_entry(name83, 0x10, dir_cluster, 0)
+            else:
+                self._add_subdir_entry(current_cluster, name83, 0x10, dir_cluster, 0)
+
+            print(f"  [DIR] {part_path}/ -> cluster {dir_cluster}")
+            current_cluster = dir_cluster
+
+        return current_cluster
+
+    def _find_dir_in_parent(self, parent_cluster, name83):
+        """親ディレクトリ内からname83に一致するディレクトリを探す"""
+        if parent_cluster == 0:
+            # ルートディレクトリを検索
+            for i in range(self.root_dir_index):
+                idx = i * DIR_ENTRY_SIZE
+                entry_name = bytes(self.root_dir[idx:idx + 11])
+                entry_attr = self.root_dir[idx + 0x0B]
+                if entry_name == name83 and (entry_attr & 0x10):
+                    cluster = struct.unpack_from('<H', self.root_dir, idx + 0x1A)[0]
+                    return cluster
+        else:
+            # サブディレクトリを検索
+            if parent_cluster in self.subdir_info:
+                info = self.subdir_info[parent_cluster]
+                dir_data = info['data']
+                for i in range(info['index']):
+                    idx = i * DIR_ENTRY_SIZE
+                    entry_name = bytes(dir_data[idx:idx + 11])
+                    entry_attr = dir_data[idx + 0x0B]
+                    if entry_name == name83 and (entry_attr & 0x10):
+                        cluster = struct.unpack_from('<H', dir_data, idx + 0x1A)[0]
+                        return cluster
+        return None
+
+    def add_file_tree(self, guest_path, local_path):
+        """ゲストパス指定でファイルを追加 (サブディレクトリ自動作成)"""
+        if not os.path.exists(local_path):
+            print(f"  警告: {local_path} が見つかりません。スキップ。")
+            return
+
+        with open(local_path, 'rb') as f:
+            data = f.read()
+
+        # パスを正規化
+        guest_path = guest_path.replace('\\', '/')
+        if not guest_path.startswith('/'):
+            guest_path = '/' + guest_path
+
+        # ディレクトリ部分とファイル名を分離
+        parts = guest_path.rsplit('/', 1)
+        if len(parts) == 2 and parts[0]:
+            dir_path = parts[0]
+            file_name = parts[1]
+        else:
+            dir_path = '/'
+            file_name = parts[-1]
+
+        # ディレクトリを確保
+        dir_cluster = self._ensure_directory(dir_path)
+
+        # ファイルデータ書き込み
+        first_cluster = self._write_file_data(data)
+
+        # ディレクトリエントリ追加
+        name83 = name_to_83(file_name)
+        if dir_cluster == 0:
+            self._add_root_entry(name83, 0x20, first_cluster, len(data))
+        else:
+            self._add_subdir_entry(dir_cluster, name83, 0x20, first_cluster, len(data))
+
+        cluster_end = self.next_cluster - 1
+        clusters_used = cluster_end - first_cluster + 1 if first_cluster > 0 else 0
+        print(f"  {guest_path:40s} -> cls {first_cluster}-{cluster_end} "
+              f"({len(data)} bytes, {clusters_used} clusters)")
+
+    def add_file_flat(self, fat_name, local_path):
+        """レガシーモード: ルートディレクトリ直下にファイルを追加"""
+        if not os.path.exists(local_path):
+            print(f"  警告: {local_path} が見つかりません。スキップ。")
+            return
+
+        with open(local_path, 'rb') as f:
+            data = f.read()
+
+        first_cluster = self._write_file_data(data)
+        name83 = name_to_83(fat_name)
+        self._add_root_entry(name83, 0x20, first_cluster, len(data))
+
+        cluster_end = self.next_cluster - 1
+        clusters_used = cluster_end - first_cluster + 1 if first_cluster > 0 else 0
+        print(f"  {fat_name:12s} -> クラスタ {first_cluster}-{cluster_end} "
+              f"({len(data)} bytes, {clusters_used} clusters)")
+
+    def build(self, boot_bin=None):
+        """イメージを完成させる"""
+        # ブートセクタ構築
+        boot_sector = bytearray(BYTES_PER_SECTOR)
+        bpb = make_bpb()
+
+        if boot_bin and os.path.exists(boot_bin):
+            with open(boot_bin, 'rb') as f:
+                boot_code = f.read()
+            if len(boot_code) > BYTES_PER_SECTOR:
+                boot_code = boot_code[:BYTES_PER_SECTOR]
+            boot_sector[:len(boot_code)] = boot_code
+            # BPBを上書き (ジャンプ命令はブートコード側を使用)
+            boot_sector[0x03:0x24] = bpb[0x03:0x24]
+        else:
+            boot_sector[:len(bpb)] = bpb
+            boot_sector[BYTES_PER_SECTOR - 2] = 0x55
+            boot_sector[BYTES_PER_SECTOR - 1] = 0xAA
+
+        # イメージに書き込み
+        self.image[0:BYTES_PER_SECTOR] = boot_sector
+
+        # FAT1
+        fat_offset = FAT_START * BYTES_PER_SECTOR
+        self.image[fat_offset:fat_offset + len(self.fat)] = self.fat
+
+        # FAT2 (コピー)
+        fat2_offset = (FAT_START + FAT_SIZE) * BYTES_PER_SECTOR
+        self.image[fat2_offset:fat2_offset + len(self.fat)] = self.fat
+
+        # ルートディレクトリ
+        root_offset = ROOT_DIR_START * BYTES_PER_SECTOR
+        self.image[root_offset:root_offset + len(self.root_dir)] = self.root_dir
+
+        return bytes(self.image)
+
+    def print_usage(self):
+        """使用状況を表示"""
+        used = self.next_cluster - 2
+        total = TOTAL_DATA_CLUSTERS
+        cluster_bytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER
+        print(f"\n  クラスタ使用: {used}/{total} "
+              f"({used * cluster_bytes // 1024}KB / {total * cluster_bytes // 1024}KB, "
+              f"残り {(total - used) * cluster_bytes // 1024}KB)")
 
 
 def print_info():
@@ -273,41 +479,50 @@ def main():
     parser.add_argument('-b', '--boot', help='ブートセクタバイナリ (省略時はBPBのみ)')
     parser.add_argument('-d', '--d88', help='D88出力ファイル (mkd88.py連携)')
     parser.add_argument('-i', '--info', action='store_true', help='FAT12パラメータ表示')
+    parser.add_argument('--tree', action='store_true',
+                       help='ツリーモード: /guest/path=host_path 形式でサブディレクトリ対応')
     parser.add_argument('files', nargs='*',
-                       help='追加ファイル (FAT名=ローカルパス 形式)')
-    
+                       help='追加ファイル (レガシー: FAT名=ローカルパス / ツリー: /guest/path=host_path)')
+
     args = parser.parse_args()
-    
+
     if args.info:
         print_info()
         return
-    
+
     print("=== PC-98 2HD FAT12イメージ作成 ===")
     print_info()
     print()
-    
+
+    builder = Fat12Builder()
+
     # ファイルリスト解析
-    file_list = []
     for spec in args.files:
         if '=' in spec:
-            fat_name, local_path = spec.split('=', 1)
+            left, local_path = spec.split('=', 1)
         else:
-            fat_name = os.path.basename(spec).upper()
+            left = os.path.basename(spec).upper()
             local_path = spec
-        file_list.append((fat_name, local_path))
-    
-    print(f"ブートセクタ: {args.boot or '(BPBのみ)'}")
-    print(f"ファイル数:   {len(file_list)}")
-    print()
-    
+
+        if args.tree:
+            # ツリーモード: left はゲストパス (例: /sys/shell.bin)
+            builder.add_file_tree(left, local_path)
+        else:
+            # レガシーモード: left はFAT名 (例: SHELL.BIN)
+            builder.add_file_flat(left, local_path)
+
+    builder.print_usage()
+
+    print(f"\nブートセクタ: {args.boot or '(BPBのみ)'}")
+
     # イメージ生成
-    image = create_fat12_image(boot_bin=args.boot, files=file_list)
-    
+    image = builder.build(boot_bin=args.boot)
+
     # 書き出し
     with open(args.output, 'wb') as f:
         f.write(image)
     print(f"\n出力: {args.output} ({len(image)} bytes)")
-    
+
     # D88変換
     if args.d88:
         mkd88_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mkd88.py')
