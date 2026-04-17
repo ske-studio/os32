@@ -249,7 +249,7 @@ lib/%.o: lib/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
 
 # === Targets ===
-all: boot kernel.bin images/os32_boot.d88 programs
+all: boot kernel.bin images/os32_boot.d88 programs iso
 
 boot: $(BIN_STANDALONE)
 
@@ -488,7 +488,7 @@ iso: packages
 
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
-	rm -f packages/*.PKG os32.iso os_fdd.img os_fdd.d88
+	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init packages iso
