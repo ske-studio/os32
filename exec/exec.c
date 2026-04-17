@@ -284,6 +284,13 @@ int exec_run(const char *cmdline)
             exec_heap_size = heap_sz;
             ctx->exec_heap_size = exec_heap_size;
         }
+        shell_print("[EXEC] base=", 0x0E);
+        shell_print_dec(exec_heap_base, 0x0E);
+        shell_print(" size=", 0x0E);
+        shell_print_dec(exec_heap_size, 0x0E);
+        shell_print(" req=", 0x0E);
+        shell_print_dec(heap_sz, 0x0E);
+        shell_print("\n", 0x0E);
         exec_heap_init_at(exec_heap_base, exec_heap_size);
         kapi->sbrk_heap_limit = guard_a;
         ctx->sbrk_heap_limit = guard_a;
