@@ -1,5 +1,7 @@
 # OS32 — PC-9801 32ビット ベアメタルOS
 
+![OS32 Demo Screen](docs/images/demo_0532.png)
+
 **OS32** は、NEC PC-9801 / 9821シリーズ向けに開発された、32ビットプロテクトモードで動作するベアメタルOSです。
 
 GCC (i386-elf) クロスコンパイラおよび NASM を用い、WSL (Ubuntu等) 環境上で開発されています。
