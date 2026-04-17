@@ -414,9 +414,9 @@ programs/%.raw: programs/%.elf
 
 programs/%.bin: programs/%.raw programs/%.elf
 	@if [ "$*" = "install" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 8388608; \
 	elif [ "$*" = "cdinst" ]; then \
-		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 8388608; \
 	elif [ "$*" = "bench" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "gfx_demo" ]; then \
