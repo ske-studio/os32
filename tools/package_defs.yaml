@@ -27,7 +27,8 @@ boot:
 minimal:
   type: package
   version: 1
-  lzss: true
+  # lzss: true
+  lzss: false
   files:
     - host: programs/shell.bin
       guest: /sys/shell.bin
@@ -68,7 +69,8 @@ minimal:
 normal:
   type: package
   version: 1
-  lzss: true
+  # lzss: true
+  lzss: false
   files:
     - host: programs/edit.bin
       guest: /usr/bin/edit.bin
@@ -89,7 +91,8 @@ normal:
 full:
   type: package
   version: 1
-  lzss: true
+  # lzss: true
+  lzss: false
   files:
     - host: programs/gfx_demo.bin
       guest: /usr/bin/gfx_demo.bin
@@ -116,7 +119,8 @@ full:
 debug:
   type: package
   version: 1
-  lzss: true
+  # lzss: true
+  lzss: false
   files:
     - host: programs/hello.bin
       guest: /bin/hello.bin
@@ -147,9 +151,12 @@ debug:
 append:
   type: package
   version: 1
-  lzss: true
+  # lzss: true
+  lzss: false
   files:
     - host: assets/SKK.LZS
       guest: /data/skk.lzs
     - host: "assets/images/*.vbz"
+      guest: /data/images/
+    - host: "assets/images/*.vdp"
       guest: /data/images/
