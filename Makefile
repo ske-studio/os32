@@ -7,6 +7,15 @@
 
 .DEFAULT_GOAL := all
 
+# 環境変数を .env ファイルから読み込み (存在する場合)
+-include .env
+
+# 環境変数 (デプロイ先)
+NP21W_DIR ?= /tmp/np21w
+
+# クロスコンパイラパス
+CROSS_DIR ?= /usr/local/cross
+
 # Directories
 PROJDIR = .
 
@@ -68,9 +77,9 @@ C_KERNEL = \
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -I/home/hight/opt/cross/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
-	-L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0
+	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
@@ -86,7 +95,7 @@ programs/shell/%.o: programs/shell/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
-	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L/home/hight/opt/cross/i386-elf/lib -L/home/hight/opt/cross/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
+	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
 
 # === Edit (VZ-inspired Editor) Module ===
 EDIT_SRC = $(wildcard programs/edit/*.c)
@@ -240,7 +249,7 @@ lib/%.o: lib/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
 
 # === Targets ===
-all: boot kernel.bin os.d88 programs
+all: boot kernel.bin images/os32_boot.d88 programs
 
 boot: $(BIN_STANDALONE)
 
@@ -256,12 +265,14 @@ kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ)
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
-# FDD最小ブートイメージ (os.d88)
+# FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
 FDD_MIN_CMDS = more grep find sort head tail wc tee touch hexdump sleep lzss diff du cal man sndctl
-os.d88: boot kernel.bin programs lzss_dict unicode_bin
-	@echo "=== Building OS32 minimal FDD image (os.d88) ==="
+images/os32_boot.d88: boot kernel.bin programs lzss_dict unicode_bin
+	@mkdir -p images
+	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="
 	@args="--tree"; \
+	args="$$args /LOADER.BIN=boot/loader_fat.bin"; \
 	args="$$args /kernel.bin=kernel.bin"; \
 	args="$$args /sys/shell.bin=programs/shell.bin"; \
 	args="$$args /sys/unicode.bin=unicode.bin"; \
@@ -276,9 +287,9 @@ os.d88: boot kernel.bin programs lzss_dict unicode_bin
 	args="$$args /sbin/install.bin=programs/install.bin"; \
 	args="$$args /sbin/cdinst.bin=programs/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
-	python3 tools/mkfat12.py -o os.img -b boot/boot_fat.bin -d os.d88 $$args
-	@echo "Copying os.d88 to NP21/W directory..."
-	@cp os.d88 '/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os.d88' 2>/dev/null || echo "Warning: Failed to copy os.d88 to np21w directory."
+	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 $$args
+	@echo "Copying os32_boot.d88 to NP21/W directory..."
+	@cp images/os32_boot.d88 '$(NP21W_DIR)/os32_boot.d88' 2>/dev/null || echo "Warning: Failed to copy os32_boot.d88 to np21w directory."
 
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
@@ -440,51 +451,20 @@ programs/%.bin: programs/%.raw programs/%.elf
 
 # === NHD デプロイ ===
 # NHDイメージのパス
-NHD_DEPLOY = python3 tools/nhd_deploy.py
-
-# ファイル分類
-SBIN_PROGRAMS = programs/install.bin programs/crash.bin programs/bench.bin programs/restest.bin
-USR_BIN_PROGRAMS = programs/edit.bin programs/gfx_demo.bin programs/demo1.bin \
-	programs/ekakiuta.bin programs/vbzview.bin programs/hrview.bin programs/vdpview.bin \
-	programs/spr_test.bin programs/raster.bin programs/fep_test.bin \
-	programs/mdview.bin
-# /bin: 上記以外の全 .bin (shell除く)
-BIN_PROGRAMS = $(filter-out programs/shell.bin $(SBIN_PROGRAMS) $(USR_BIN_PROGRAMS), $(wildcard programs/*.bin))
+NHD_DEPLOY = env NP21W_DIR='$(NP21W_DIR)' python3 tools/nhd_deploy.py
 
 # deploy: カーネル+プログラム+データをNHDに書き込み → NP21/Wにコピー
+# tools/deploy.yaml の定義に従って一括同期を行う
 deploy: kernel.bin programs unicode_bin
-	@echo "=== NHD Deploy ==="
-	$(NHD_DEPLOY) setup-dirs
-	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
-	$(NHD_DEPLOY) copy --dest / --rename shell.bin programs/shell.bin
-	$(NHD_DEPLOY) copy --dest /bin $(BIN_PROGRAMS)
-	$(NHD_DEPLOY) copy --dest /sbin $(SBIN_PROGRAMS)
-	$(NHD_DEPLOY) copy --dest /usr/bin $(USR_BIN_PROGRAMS)
-	$(NHD_DEPLOY) copy --dest /sys unicode.bin
-	@if [ -d docs/manpages ] && ls docs/manpages/*.1 1>/dev/null 2>&1; then \
-		$(NHD_DEPLOY) copy --dest /usr/man $(shell ls docs/manpages/*.1 2>/dev/null); \
-	fi
-	@if [ -f assets/profile ]; then \
-		$(NHD_DEPLOY) copy --dest /etc --rename profile assets/profile; \
-	fi
+	@echo "=== NHD Deploy (using deploy.yaml) ==="
+	$(NHD_DEPLOY) sync
 	$(NHD_DEPLOY) deploy
 
-# dp-<name>: 個別プログラムのビルド → NHDコピー → NP21/Wデプロイ
-# 使い方: make dp-ekakiuta, make dp-shell, make dp-edit 等
-# ※ カーネル変更時は make deploy (全体) を使うこと
-# ファイルの配置先を自動判定
+# dp-<name>: 個別プログラムのビルド → シリアル経由でのホットデプロイ(再起動不要)
+# NHDイメージへの書き込みを行わず、実行中のOS32へファイルを転送する
 dp-%: programs/%.bin
-	@echo "=== Deploy: $*.bin ==="
-	@if [ "$*" = "shell" ]; then \
-		$(NHD_DEPLOY) copy --dest / --rename shell programs/$*.bin; \
-	elif echo "$(SBIN_PROGRAMS)" | grep -q "programs/$*.bin"; then \
-		$(NHD_DEPLOY) copy --dest /sbin programs/$*.bin; \
-	elif echo "$(USR_BIN_PROGRAMS)" | grep -q "programs/$*.bin"; then \
-		$(NHD_DEPLOY) copy --dest /usr/bin programs/$*.bin; \
-	else \
-		$(NHD_DEPLOY) copy --dest /bin programs/$*.bin; \
-	fi
-	$(NHD_DEPLOY) deploy
+	@echo "=== Hot Deploy (Serial Push): $*.bin ==="
+	$(NHD_DEPLOY) push programs/$*.bin --resolve
 
 # nhd-mount: NHDのext2パーティションをマウント
 nhd-mount:
@@ -503,11 +483,13 @@ packages: programs
 	python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base .
 
 iso: packages
-	genisoimage -o os32.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
+	@mkdir -p images
+	genisoimage -o images/os32_install.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
 
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 	rm -f packages/*.PKG os32.iso os_fdd.img os_fdd.d88
+	rm -rf images
 
 .PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init packages iso
 
