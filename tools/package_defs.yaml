@@ -34,31 +34,31 @@ minimal:
     - host: unicode.bin
       guest: /sys/unicode.bin
     - host: programs/more.bin
-      guest: /bin/more
+      guest: /bin/more.bin
     - host: programs/grep.bin
-      guest: /bin/grep
+      guest: /bin/grep.bin
     - host: programs/find.bin
-      guest: /bin/find
+      guest: /bin/find.bin
     - host: programs/sort.bin
-      guest: /bin/sort
+      guest: /bin/sort.bin
     - host: programs/head.bin
-      guest: /bin/head
+      guest: /bin/head.bin
     - host: programs/tail.bin
-      guest: /bin/tail
+      guest: /bin/tail.bin
     - host: programs/wc.bin
-      guest: /bin/wc
+      guest: /bin/wc.bin
     - host: programs/tee.bin
-      guest: /bin/tee
+      guest: /bin/tee.bin
     - host: programs/touch.bin
-      guest: /bin/touch
+      guest: /bin/touch.bin
     - host: programs/hexdump.bin
-      guest: /bin/hexdump
+      guest: /bin/hexdump.bin
     - host: programs/sleep.bin
-      guest: /bin/sleep
+      guest: /bin/sleep.bin
     - host: programs/lzss.bin
-      guest: /bin/lzss
+      guest: /bin/lzss.bin
     - host: programs/sndctl.bin
-      guest: /bin/sndctl
+      guest: /bin/sndctl.bin
 
 # --- 標準パッケージ (差分) ---
 normal:
@@ -67,15 +67,15 @@ normal:
   lzss: true
   files:
     - host: programs/edit.bin
-      guest: /usr/bin/edit
+      guest: /usr/bin/edit.bin
     - host: programs/man.bin
-      guest: /bin/man
+      guest: /bin/man.bin
     - host: programs/diff.bin
-      guest: /bin/diff
+      guest: /bin/diff.bin
     - host: programs/du.bin
-      guest: /bin/du
+      guest: /bin/du.bin
     - host: programs/cal.bin
-      guest: /bin/cal
+      guest: /bin/cal.bin
     - host: "docs/manpages/*.1"
       guest: /usr/man/
 
@@ -86,25 +86,25 @@ full:
   lzss: true
   files:
     - host: programs/gfx_demo.bin
-      guest: /usr/bin/gfx_demo
+      guest: /usr/bin/gfx_demo.bin
     - host: programs/demo1.bin
-      guest: /usr/bin/demo1
+      guest: /usr/bin/demo1.bin
     - host: programs/ekakiuta.bin
-      guest: /usr/bin/ekakiuta
+      guest: /usr/bin/ekakiuta.bin
     - host: programs/vbzview.bin
-      guest: /usr/bin/vbzview
+      guest: /usr/bin/vbzview.bin
     - host: programs/vdpview.bin
-      guest: /usr/bin/vdpview
+      guest: /usr/bin/vdpview.bin
     - host: programs/raster.bin
-      guest: /usr/bin/raster
+      guest: /usr/bin/raster.bin
     - host: programs/spr_test.bin
-      guest: /usr/bin/spr_test
+      guest: /usr/bin/spr_test.bin
     - host: programs/hrview.bin
-      guest: /usr/bin/hrview
+      guest: /usr/bin/hrview.bin
     - host: programs/mdview.bin
-      guest: /usr/bin/mdview
+      guest: /usr/bin/mdview.bin
     - host: programs/sndtest.bin
-      guest: /usr/bin/sndtest
+      guest: /usr/bin/sndtest.bin
 
 # --- デバッグパッケージ ---
 debug:
@@ -113,29 +113,29 @@ debug:
   lzss: true
   files:
     - host: programs/hello.bin
-      guest: /bin/hello
+      guest: /bin/hello.bin
     - host: programs/crash.bin
-      guest: /sbin/crash
+      guest: /sbin/crash.bin
     - host: programs/bench.bin
-      guest: /sbin/bench
+      guest: /sbin/bench.bin
     - host: programs/restest.bin
-      guest: /sbin/restest
+      guest: /sbin/restest.bin
     - host: programs/libc_test.bin
-      guest: /bin/libc_test
+      guest: /bin/libc_test.bin
     - host: programs/test2.bin
-      guest: /bin/test2
+      guest: /bin/test2.bin
     - host: programs/test3.bin
-      guest: /bin/test3
+      guest: /bin/test3.bin
     - host: programs/test4.bin
-      guest: /bin/test4
+      guest: /bin/test4.bin
     - host: programs/stat_t.bin
-      guest: /bin/stat_t
+      guest: /bin/stat_t.bin
     - host: programs/args.bin
-      guest: /bin/args
+      guest: /bin/args.bin
     - host: programs/nop.bin
-      guest: /bin/nop
+      guest: /bin/nop.bin
     - host: programs/fep_test.bin
-      guest: /usr/bin/fep_test
+      guest: /usr/bin/fep_test.bin
 
 # --- 追加データパッケージ ---
 append:
