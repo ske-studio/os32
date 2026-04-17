@@ -33,7 +33,8 @@ import yaml
 
 # === パス設定 ===
 NHD_LOCAL = "/tmp/os32.nhd"
-NHD_REMOTE = r"/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os32.nhd"
+NP21W_DIR = os.environ.get('NP21W_DIR', r"/tmp/np21w")
+NHD_REMOTE = os.path.join(NP21W_DIR, "os32.nhd")
 MOUNT_POINT = "/tmp/os32"
 
 # プロジェクトルート (tools/ の親ディレクトリ)
@@ -643,8 +644,16 @@ def do_push(local_path, remote_name=None, resolve=False):
 
     # 全送信データを一時ファイルに保存
     all_data = cmd_bytes + hex_bytes_data
-    tmp_path = '/mnt/c/WATCOM/tmp_upload.bin'
-    win_tmp_path = 'C:\\WATCOM\\tmp_upload.bin'
+    tmp_path = os.path.join(PROJ_DIR, 'tmp_upload.bin')
+    
+    # WSLパスをWindowsパスに変換 (PowerShell用)
+    try:
+        import subprocess
+        result = subprocess.run(['wslpath', '-w', tmp_path], capture_output=True, text=True, check=True)
+        win_tmp_path = result.stdout.strip().replace('\\', '\\\\')
+    except Exception:
+        # WSL環境外などでのフォールバック
+        win_tmp_path = tmp_path.replace('/', '\\\\')
 
     with open(tmp_path, 'wb') as f:
         f.write(all_data)

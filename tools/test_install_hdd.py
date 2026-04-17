@@ -25,7 +25,8 @@ import glob
 
 # === 設定 ===
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NHD_PATH = '/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/test.nhd'
+NP21W_DIR = os.environ.get('NP21W_DIR', r'/tmp/np21w')
+NHD_PATH = os.path.join(NP21W_DIR, 'test.nhd')
 
 SECTOR_SIZE = 512
 EXT2_BLOCK_SIZE = 1024

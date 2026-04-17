@@ -62,3 +62,6 @@ rance.png
 /tasks/
 /tests/
 /shared.vqd
+
+# 環境変数ファイル
+.env

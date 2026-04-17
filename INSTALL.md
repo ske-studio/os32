@@ -54,8 +54,8 @@ make all
 |---------|------|
 | `kernel.bin` | OS32カーネルバイナリ |
 | `programs/*.bin` | 外部プログラム (OS32X形式) |
-| `os.d88` | FDDブート用D88ディスクイメージ |
-| `os.img` | FDDブート用RAWイメージ |
+| `images/os32_boot.d88` | FDDブート用D88ディスクイメージ |
+| `images/os32_boot.img` | FDDブート用RAWイメージ |
 
 ## 4. NP21/Wでの起動 (NHDイメージ)
 
@@ -89,8 +89,8 @@ A:> man grep          # grepのマニュアルを表示
 
 ## 5. FDDブート (D88イメージ)
 
-1. `make all` で生成された `os.d88` を使用
-2. NP21/Wの **FDD1** に `os.d88` をセット
+1. `make all` で生成された `images/os32_boot.d88` を使用
+2. NP21/Wの **FDD1** に `images/os32_boot.d88` をセット
 3. FDDからブート
 
 ※ FDDイメージは容量制約 (1,232KB) のため、

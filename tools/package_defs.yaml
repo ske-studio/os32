@@ -82,6 +82,8 @@ normal:
       guest: /bin/cal.bin
     - host: "docs/manpages/*.1"
       guest: /usr/man/
+    - host: assets/fep.dic
+      guest: /sys/fep.dic
 
 # --- フルパッケージ (差分) ---
 full:
@@ -149,7 +151,5 @@ append:
   files:
     - host: assets/SKK.LZS
       guest: /data/skk.lzs
-    - host: assets/fep.dic
-      guest: /sys/fep.dic
     - host: "assets/images/*.vbz"
       guest: /data/images/

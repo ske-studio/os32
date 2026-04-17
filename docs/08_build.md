@@ -3,7 +3,7 @@
 ### §8-1 ビルド手順
 
 ```bash
-# 全体ビルド (カーネルおよびプログラム, 統合環境イメージ os.d88/os.img を生成)
+# 全体ビルド (カーネルおよびプログラム, 統合環境イメージ images/os32_boot.d88 等を生成)
 make all
 
 # パッケージ生成 + ISOイメージ生成 (CDインストーラ用)
@@ -27,7 +27,7 @@ kernel.elf      →  objcopy (-O binary)     → kernel.bin
                                               ↓
 boot_fat.bin + loader_fat.bin + kernel.bin    → raw image
                                               ↓
-mkfat12.py                                    →  os.d88 または os.img
+mkfat12.py                                    →  images/os32_boot.d88 または .img
 
 外部プログラム (crt0.asm および libos32 連携):
 programs/*.c    → gcc -m32                 → programs/*.o
@@ -100,3 +100,33 @@ python3 tools/mkpkg.py -o packages/ -c packages.conf
 - `make packages` ターゲットで自動実行
 - `make iso` で `genisoimage` を使用しISOイメージを生成
 
+### §8-5 開発環境の構築 (クロスコンパイラ)
+
+OS32 の外部プログラムをビルドするためには、標準Cライブラリ (`newlib` - `libc.a`) と GCCライブラリ (`libgcc.a`) を含んだ `i386-elf` クロスコンパイラ環境が必要です。
+
+#### Ubuntu / Debian系での簡易構築
+もっとも手軽な方法は、ディストリビューション標準のパッケージを使用することです。
+```bash
+sudo apt update
+sudo apt install gcc-i686-elf binutils-i686-elf
+```
+※ ディストリビューションによってはパッケージとして用意されていない場合があります。その場合はソースからビルドします。
+
+#### ソースからの構築 (推奨手順)
+特定のバージョン（例: GCC 13.2.0）を利用したい場合や、確実なCライブラリ環境を構築する場合は、以下の手順でクロスツールチェーンを構築します。
+1. `binutils` を取得し `--target=i386-elf --disable-nls --with-sysroot` 等でビルド・インストール
+2. `gcc` を取得し `--target=i386-elf --disable-nls --enable-languages=c --without-headers` でビルド (libgccの生成)
+3. `newlib` を取得し `--target=i386-elf` でビルド・インストール
+4. 再度 `gcc` を `--with-newlib` などを含めて完全ビルド・インストール
+
+#### Makefile へのパス設定
+環境が構築できたら、OS32のソースツリー最上位の `.env` ファイルに以下のようにクロスコンパイラのインストールパスを設定してください。
+```env
+# インストールしたクロスコンパイラの親ディレクトリを指定
+CROSS_DIR=/home/user/opt/cross
+```
+OS32の `Makefile` は、ここで指定された `$CROSS_DIR/i386-elf/include` や `$CROSS_DIR/i386-elf/lib` を参照してビルドを行います。
+
+> [!NOTE]
+> **コンパイラのバージョンについて**
+> PC-98ターゲットでは新しいコンパイラの最適化やABI変更による非互換リスク（およびバグ）のほうが大きいため、一度安定動作したGCCバージョンで**完全に固定化**して開発を継続するのがセオリーです。OS32では当面GCC 13.x系の利用を推奨しています。

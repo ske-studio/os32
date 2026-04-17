@@ -12,7 +12,8 @@
 
 set -e
 
-NHD_FILE="/mnt/c/Users/hight/OneDrive/ドキュメント/np21w/os32.nhd"
+NP21W_DIR="${NP21W_DIR:-/tmp/np21w}"
+NHD_FILE="$NP21W_DIR/os32.nhd"
 TMP_RAW="/tmp/os32_ext2.raw"
 TMP_HDR="/tmp/os32_nhd_header.bin"
 

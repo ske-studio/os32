@@ -15,7 +15,8 @@ import subprocess
 import time
 import re
 
-NP21W_DIR = r'C:\Users\hight\OneDrive\ドキュメント\np21w'
+# Windowsパス形式での指定が必要
+NP21W_DIR = os.environ.get('WIN_NP21W_DIR', r'C:\np21w')
 NP21W_EXE = os.path.join(NP21W_DIR, 'np21x64w.exe')
 NP21W_INI = os.path.join(NP21W_DIR, 'np21x64w.ini')
 

@@ -1,1 +1,1 @@
-start "" "C:\Users\hight\OneDrive\ドキュメント\np21w\np21x64w.exe" "C:\Users\hight\OneDrive\ドキュメント\np21w\os.d88"
+start "" "C:\np21w\np21x64w.exe" "C:\np21w\os32_boot.d88"
