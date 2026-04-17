@@ -3,12 +3,12 @@
 ### §1-1 アーキテクチャ
 
 OS32は、PC-9801シリーズ上で動作する32ビットプロテクトモードOSである。  
-GCC および NASM を用いてクロスコンパイルし、D88フロッピーディスクイメージとしてNP21/Wエミュレータ上で実行する。
+GCC および NASM を用いてクロスコンパイルし、D88フロッピーディスクイメージまたはNHD HDDイメージとしてNP21/Wエミュレータ上で実行する。
 
 | 項目 | 仕様 |
 |------|------|
 | ターゲットCPU | i386互換 (32ビットプロテクトモード) |
-| ブートメディア | PC-98 2HD 1MBフロッピー (D88形式) |
+| ブートメディア | PC-98 2HD FDD (D88) / IDE HDD (NHD) |
 | コンパイラ | GCC (i686-elf) / NASM |
 | メモリモデル | フラットモデル (32ビット) |
 | 動作環境 | NP21/W (Neko Project 21/W x64) |
@@ -86,7 +86,7 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
 
 #### デバイスドライバ (drivers/)
 *   **依存先:** `include/`, `kernel/` (kprintf/kmalloc)
-*   **役割:** ハードウェア（KBD, FDC, IDE, RTC, Serial, KCG）の直接制御。
+*   **役割:** ハードウェア（KBD, FDC, IDE, ATAPI, RTC, Serial, KCG）の直接制御。
 *   **特記事項:** `kcg.c` は `gfx/` の描画機能を利用せず、自前でピクセル描画（またはバックバッファ操作）を行う。
 
 #### カーネルコア (kernel/)
@@ -94,8 +94,8 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
 *   **役割:** `idt.c`/`isr_handlers.c` (中断処理), `paging.c` (メモリ管理), `kmalloc.c`, `console.c`
 
 #### ファイルシステム (fs/)
-*   **依存先:** `include/`, `drivers/disk.h`, `kernel/`
-*   **役割:** VFS（仮想ファイルシステム）による抽象化と、FAT12/ext2/serialfsの実装。
+*   **依存先:** `include/`, `drivers/disk.h`, `drivers/atapi.h`, `kernel/`
+*   **役割:** VFS（仮想ファイルシステム）による抽象化と、FAT12/ext2/ISO9660/SerialFSの実装。
 
 #### グラフィックス (gfx/)
 *   **依存先:** `include/`, `drivers/kcg.h`, `kernel/`

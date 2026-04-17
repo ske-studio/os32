@@ -81,8 +81,8 @@ src/os32/
 ├── boot/             — ブートローダ (NASM)
 ├── kernel/           — カーネルコア (メイン処理、ページング、IDT)
 ├── exec/             — プログラムローダー / KernelAPI
-├── fs/               — ファイルシステム (VFS, ext2, fat12, serialfs)
-├── drivers/          — 各種ドライバ (IDE, FDC, KBD, Serial, KCG, NP2SysPなど)
+├── fs/               — ファイルシステム (VFS, ext2, fat12, iso9660, serialfs)
+├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Serial, KCG, NP2SysPなど)
 ├── gfx/              — グラフィックス (CPU描画用バックバッファ層)
 ├── kapi/             — KernelAPI ラッパー実装 (自動生成分含む)
 ├── lib/              — 汎用ライブラリ (UTF-8, Path, kprintf等)
@@ -96,4 +96,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-16*
+*Last Updated: 2026-04-17*
