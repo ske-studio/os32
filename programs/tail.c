@@ -3,6 +3,9 @@
 /*                                                                          */
 /*  Usage: tail [-n N] [FILE...]                                             */
 /*  stdin からも読み取り可能 (パイプ対応)                                     */
+/*                                                                          */
+/*  ファイル対象: ストリームループで全データを読み切り、末尾N行を出力。       */
+/*  stdin対象: 1回読み (パイプバッファは最大64KBなので1回で十分)。            */
 /* ======================================================================== */
 #include "os32api.h"
 #include <string.h>
@@ -11,6 +14,14 @@
 
 static KernelAPI *api;
 
+/* 読み取りバッファサイズ (ファイルストリーム用チャンク) */
+#define TAIL_READ_SIZE 4096
+/* 蓄積バッファサイズ */
+#define TAIL_BUF_SIZE  65536
+
+/* ------------------------------------------------------------------ */
+/*  バッファ内容から末尾 N 行を出力                                     */
+/* ------------------------------------------------------------------ */
 static void tail_buffer(const char *buf, int len, int max_lines)
 {
     int i, total_lines = 0;
@@ -35,26 +46,42 @@ static void tail_buffer(const char *buf, int len, int max_lines)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/*  ファイル対象の tail (ストリームループで64KB超にも対応)               */
+/* ------------------------------------------------------------------ */
 static void tail_file(const char *path, int max_lines)
 {
-    static char buf[65536];
-    int fd, sz;
+    static char buf[TAIL_BUF_SIZE];
+    int fd, sz, total = 0;
 
     fd = api->sys_open(path, KAPI_O_RDONLY);
     if (fd < 0) {
         printf("tail: %s: No such file\n", path);
         return;
     }
-    sz = api->sys_read(fd, buf, sizeof(buf));
+
+    /* ストリームループでバッファに蓄積 */
+    while (total < TAIL_BUF_SIZE) {
+        int chunk;
+        chunk = TAIL_BUF_SIZE - total;
+        if (chunk > TAIL_READ_SIZE) chunk = TAIL_READ_SIZE;
+        sz = api->sys_read(fd, buf + total, chunk);
+        if (sz <= 0) break;
+        total += sz;
+    }
     api->sys_close(fd);
-    if (sz > 0) tail_buffer(buf, sz, max_lines);
+
+    if (total > 0) tail_buffer(buf, total, max_lines);
 }
 
+/* ------------------------------------------------------------------ */
+/*  stdin 対象の tail (1回読み — パイプバッファ方式に適合)               */
+/* ------------------------------------------------------------------ */
 static void tail_stdin(int max_lines)
 {
-    static char buf[65536];
+    static char buf[TAIL_BUF_SIZE];
     int sz;
-    sz = api->sys_read(0, buf, sizeof(buf));
+    sz = api->sys_read(0, buf, TAIL_BUF_SIZE);
     if (sz > 0) tail_buffer(buf, sz, max_lines);
 }
 
