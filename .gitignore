@@ -1,3 +1,6 @@
+#AI Agents
+.agents
+
 # ビルド生成物
 *.o
 *.bin
