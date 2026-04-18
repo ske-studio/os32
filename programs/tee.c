@@ -4,8 +4,8 @@
 /*  Usage: tee FILE                                                          */
 /*  stdin を stdout と FILE の両方に書き出す                                  */
 /*                                                                          */
-/*  バッファサイズを4096に縮小し、コンソール入力時のブロック問題を緩和。      */
-/*  ファイルを先にオープンしてからデータを読み取り、確実にクローズする。      */
+/*  ストリームループで EOF/エラーまで読み取りを繰り返し、ブロックごとに       */
+/*  stdout とファイルへリアルタイムに書き出す。パイプライン対応。             */
 /* ======================================================================== */
 #include "os32api.h"
 #include <string.h>
@@ -34,9 +34,8 @@ int main(int argc, char **argv, KernelAPI *kapi)
         return 1;
     }
 
-    /* stdin から読み取り */
-    sz = api->sys_read(0, buf, TEE_BUF_SIZE);
-    if (sz > 0) {
+    /* stdin からストリームループで読み取り (EOF/エラーまで繰り返す) */
+    while ((sz = api->sys_read(0, buf, TEE_BUF_SIZE)) > 0) {
         /* stdout に書き出し */
         api->sys_write(1, buf, sz);
         /* ファイルにも書き出し */

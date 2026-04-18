@@ -4,8 +4,8 @@
 /*  Usage: tail [-n N] [FILE...]                                             */
 /*  stdin からも読み取り可能 (パイプ対応)                                     */
 /*                                                                          */
-/*  ファイル対象: ストリームループで全データを読み切り、末尾N行を出力。       */
-/*  stdin対象: 1回読み (パイプバッファは最大64KBなので1回で十分)。            */
+/*  ファイル・stdin 共にストリームループで EOF まで全データを蓄積し、          */
+/*  末尾N行を出力する。64KB超のファイルにも対応。                             */
 /* ======================================================================== */
 #include "os32api.h"
 #include <string.h>
@@ -75,14 +75,23 @@ static void tail_file(const char *path, int max_lines)
 }
 
 /* ------------------------------------------------------------------ */
-/*  stdin 対象の tail (1回読み — パイプバッファ方式に適合)               */
+/*  stdin 対象の tail (ストリームループで EOF まで蓄積)                  */
 /* ------------------------------------------------------------------ */
 static void tail_stdin(int max_lines)
 {
     static char buf[TAIL_BUF_SIZE];
-    int sz;
-    sz = api->sys_read(0, buf, TAIL_BUF_SIZE);
-    if (sz > 0) tail_buffer(buf, sz, max_lines);
+    int sz, total = 0;
+
+    /* ストリームループで蓄積 (tail_file と同様) */
+    while (total < TAIL_BUF_SIZE) {
+        int chunk;
+        chunk = TAIL_BUF_SIZE - total;
+        if (chunk > TAIL_READ_SIZE) chunk = TAIL_READ_SIZE;
+        sz = api->sys_read(0, buf + total, chunk);
+        if (sz <= 0) break;
+        total += sz;
+    }
+    if (total > 0) tail_buffer(buf, total, max_lines);
 }
 
 int main(int argc, char **argv, KernelAPI *kapi)
