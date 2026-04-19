@@ -1,56 +1,5 @@
 #include "cmd_fs_shared.h"
-#include "shell.h"
 #include <stdio.h>
-
-static const char* skip_space(const char *s) {
-    while (*s == ' ') s++;
-    return s;
-}
-
-static int is_dir(const char *path)
-{
-    int rc = g_api->sys_ls(path, (void*)dummy_ls_cb, 0);
-    return (rc == 0);
-}
-
-static void append_basename(char *dst_path, const char *src_path)
-{
-    char temp[256];
-    int i = 0, j = 0;
-    const char *base = get_basename(src_path);
-
-    while (dst_path[i] && i < 254) { temp[i] = dst_path[i]; i++; }
-    if (i > 0 && temp[i-1] != '/' && i < 254) temp[i++] = '/';
-    while (base[j] && i < 255) temp[i++] = base[j++];
-    temp[i] = '\0';
-
-    for (i = 0; temp[i]; i++) dst_path[i] = temp[i];
-    dst_path[i] = '\0';
-}
-
-
-
-static int parse_two_args(const char *cmd, int skip, char *arg1, char *arg2)
-{
-    const char *p = skip_space(cmd + skip);
-    int i = 0;
-    while (*p && *p != ' ' && i < 255) arg1[i++] = *p++;
-    arg1[i] = '\0';
-    p = skip_space(p);
-    i = 0;
-    while (*p && *p != ' ' && i < 255) arg2[i++] = *p++;
-    arg2[i] = '\0';
-    return (arg1[0] && arg2[0]);
-}
-
-static void join_path(char *dst_path, const char *dir_path, const char *name)
-{
-    int i = 0, j = 0;
-    while (dir_path[i] && i < 254) { dst_path[i] = dir_path[i]; i++; }
-    if (i > 0 && dst_path[i-1] != '/' && i < 254) dst_path[i++] = '/';
-    while (name[j] && i < 255) dst_path[i++] = name[j++];
-    dst_path[i] = '\0';
-}
 
 struct ls_opts {
     int format_long;
@@ -123,7 +72,7 @@ static void cmd_ls(int argc, char **argv)
         if (!opts.format_long) printf("\n");
     } else {
         for (i = path_idx_start; i < argc; i++) {
-            if (is_dir(argv[i])) {
+            if (fs_is_dir(argv[i])) {
                 if (argc - path_idx_start > 1) {
                     if (is_tty) g_api->kprintf(ATTR_CYAN, "\n%s:\n", argv[i]);
                     else printf("\n%s:\n", argv[i]);
