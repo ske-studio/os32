@@ -649,6 +649,25 @@ void execute_command(const char *cmd)
         prev_buf = -1;
         {
             u32 saved_len = 0;
+            /* パイプバッファを事前確保 (最大2つ: 交互使用) */
+            int alloc_buf[2];
+            int num_alloc = (stage_count > 2) ? 2 : 1;
+            int ai;
+            for (ai = 0; ai < num_alloc; ai++) {
+                alloc_buf[ai] = g_api->sys_pipe_alloc();
+                if (alloc_buf[ai] < 0) {
+                    g_api->kprintf(ATTR_RED, "%s", "pipe: buffer alloc failed\n");
+                    /* 確保済みを解放 */
+                    {
+                        int aj;
+                        for (aj = 0; aj < ai; aj++) {
+                            g_api->sys_pipe_free(alloc_buf[aj]);
+                        }
+                    }
+                    return;
+                }
+            }
+
             for (i = 0; i < stage_count; i++) {
                 int is_first = (i == 0);
                 int is_last = (i == stage_count - 1);
@@ -661,7 +680,7 @@ void execute_command(const char *cmd)
 
                 /* stdout のリダイレクト (最後以外) */
                 if (!is_last) {
-                    cur_buf = (i % 2 == 0) ? 0 : 1;
+                    cur_buf = alloc_buf[i % num_alloc];
                     {
                         u8 *buf = g_api->sys_pipe_get_buf(cur_buf);
                         g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0);
@@ -683,6 +702,11 @@ void execute_command(const char *cmd)
                 if (!is_last) {
                     prev_buf = cur_buf;
                 }
+            }
+
+            /* パイプバッファを解放 */
+            for (ai = 0; ai < num_alloc; ai++) {
+                g_api->sys_pipe_free(alloc_buf[ai]);
             }
         }
     }
