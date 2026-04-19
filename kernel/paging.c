@@ -95,10 +95,10 @@ void paging_init(u32 mem_kb)
         for (j = 0; j < PTE_COUNT; j++) {
             phys = (u32)(i * PTE_COUNT + j) * PAGE_SIZE;
             if (phys < max_mem_bytes || phys < MEM_1MB) {
-                // コンベンショナルメモリ(0-1MB)またはプローブ範囲内
+                /* コンベンショナルメモリ(0-1MB)またはプローブ範囲内 */
                 page_tables[i][j] = phys | PAGE_RW;
             } else {
-                // 未実装領域
+                /* 未実装領域 */
                 page_tables[i][j] = PAGE_NOT_PRESENT;
             }
         }

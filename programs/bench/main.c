@@ -94,7 +94,7 @@ static void test_gfx(void) {
     gfx_present();
     
     /* GFX出力のテストとしてスクリーンショットを書き出し */
-    // kapi->gfx_screenshot("0:/GFX.VDP");
+    /* kapi->gfx_screenshot("0:/GFX.VDP"); */
     
     end = kapi->get_tick();
 

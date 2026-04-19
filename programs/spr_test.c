@@ -152,7 +152,7 @@ void main(int argc, char **argv, KernelAPI *api) {
     gfx_present();
 
     /* 320x320のビューポートを設定する (以後の描画はこの中でクリップされる) */
-    // api->gfx_set_viewport((640 - 320) / 2, (400 - 320) / 2, 320, 320);
+    /* api->gfx_set_viewport((640 - 320) / 2, (400 - 320) / 2, 320, 320); */
 
     /* それぞれの初期位置の背景を退避してから、初回のスプライトを描画 */
     for (i = 0; i < NUM_NODES; i++) gfx_save_rect(nodes[i].x, nodes[i].y, nodes[i].spr->w, nodes[i].spr->h, nodes[i].spr->bg_buf);
