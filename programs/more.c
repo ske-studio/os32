@@ -92,10 +92,16 @@ static void clear_prompt(void)
     api->sys_write(1, "\r", 1);
 }
 
-/* キー入力待ち */
+/* キー入力待ち (rshellタイムアウト回避: kbd_trygetchar ベース) */
 static int wait_key(void)
 {
-    return api->kbd_getchar();
+    int ch;
+    for (;;) {
+        ch = api->kbd_trygetchar();
+        if (ch >= 0) return ch;
+        /* CPU をアイドルにして次の割り込みを待つ */
+        __asm__ volatile("hlt");
+    }
 }
 
 /* 画面をクリアして指定位置から1ページ表示 */
@@ -193,7 +199,12 @@ int main(int argc, char **argv, KernelAPI *kapi)
             printf("more: %s: No such file\n", argv[1]);
             return 1;
         }
-        sz = api->sys_read(fd, buf, sizeof(buf) - 1);
+        /* ループで読み切り */
+        while (sz < (int)(sizeof(buf) - 1)) {
+            int r = api->sys_read(fd, buf + sz, sizeof(buf) - 1 - sz);
+            if (r <= 0) break;
+            sz += r;
+        }
         api->sys_close(fd);
     } else {
         /* stdin から読み込み (パイプ入力) */
@@ -202,7 +213,12 @@ int main(int argc, char **argv, KernelAPI *kapi)
             printf("       cmd | more\n");
             return 1;
         }
-        sz = api->sys_read(0, buf, sizeof(buf) - 1);
+        /* ループで読み切り */
+        while (sz < (int)(sizeof(buf) - 1)) {
+            int r = api->sys_read(0, buf + sz, sizeof(buf) - 1 - sz);
+            if (r <= 0) break;
+            sz += r;
+        }
     }
 
     if (sz <= 0) return 0;
@@ -294,6 +310,14 @@ int main(int argc, char **argv, KernelAPI *kapi)
         }
         /* その他のキーは無視 */
     }
+
+    /* ファイル末尾: (END) を表示して q を待つ */
+    api->kprintf(ATTR_MAGENTA, "%s", "(END)");
+    while (1) {
+        ch = wait_key();
+        if (ch == 'q' || ch == 'Q' || ch == 0x1B) break;
+    }
+    clear_prompt();
 
     return 0;
 }
