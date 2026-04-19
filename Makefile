@@ -267,7 +267,7 @@ kernel.bin: kernel.elf
 
 # FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
-FDD_MIN_CMDS = more grep find sort head tail wc tee touch hexdump sleep lzss diff du cal man sndctl
+FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep lzss diff du cal man sndctl
 images/os32_boot.d88: boot kernel.bin programs lzss_dict unicode_bin
 	@mkdir -p images
 	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="

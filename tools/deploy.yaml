@@ -144,6 +144,10 @@ filesystem:
       guest: /home/user/test_utf8.txt
       tags: [test]
 
+    - host: programs/test_pager.txt
+      guest: /home/user/test_pager.txt
+      tags: [test]
+
     - host: programs/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
