@@ -68,3 +68,6 @@ rance.png
 
 # 環境変数ファイル
 .env
+
+# 個人的な設計思想ドキュメント（非公開）
+docs/DESIGN_PHILOSOPHY.md

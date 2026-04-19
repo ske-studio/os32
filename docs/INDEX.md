@@ -23,9 +23,11 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ファイル | 内容 |
 |---------|------|
+| [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
+| [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v26 仕様書 — 118エントリテーブル (関数117 + データフィールド1) |
-| [DEVELOPMENT.md](DEVELOPMENT.md) | 開発ガイドライン — コーディングルール、リファクタリング制約、ロードマップ |
-| [GIT_POLICY.md](GIT_POLICY.md) | AIとの協調開発における公式Git運用ポリシー |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
+| [GIT_POLICY.md](GIT_POLICY.md) | ~~Gitポリシー~~ → POLICY_DEV.md §5 に統合済み |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
@@ -96,4 +98,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-17*
+*Last Updated: 2026-04-18*
