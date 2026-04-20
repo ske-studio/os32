@@ -51,37 +51,8 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 /*  ヘルパー                                                                */
 /* ======================================================================== */
 
-void ext2_mem_copy(void *dst, const void *src, u32 len)
-{
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-    u32 i;
-    for (i = 0; i < len; i++) d[i] = s[i];
-}
-
-void ext2_mem_zero(void *dst, u32 len)
-{
-    u8 *d = (u8 *)dst;
-    u32 i;
-    for (i = 0; i < len; i++) d[i] = 0;
-}
-
-int ext2_str_len(const char *s)
-{
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
-
-int ext2_str_ncmp(const char *a, const char *b, int n)
-{
-    int i;
-    for (i = 0; i < n; i++) {
-        if (a[i] != b[i]) return (int)(u8)a[i] - (int)(u8)b[i];
-        if (a[i] == 0) return 0;
-    }
-    return 0;
-}
+/* ext2_mem_copy / ext2_mem_zero / ext2_str_len / ext2_str_ncmp は
+ * ext2_priv.h のマクロで kstring 関数 (ASM最適化済み) に転送済み */
 
 /* ======================================================================== */
 /*  タイムスタンプ                                                           */
@@ -199,14 +170,13 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     /* スーパーブロック読み込み: ローカルバッファに読んでからg_blkへコピー */
     {
         u8 sb_sect[512];
-        int j;
         ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 2, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
-        for (j = 0; j < 512; j++) ext2_g_blk[j] = sb_sect[j];
+        kmemcpy(ext2_g_blk, sb_sect, 512);
         
         ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 3, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
-        for (j = 0; j < 512; j++) ext2_g_blk[512 + j] = sb_sect[j];
+        kmemcpy(ext2_g_blk + 512, sb_sect, 512);
     }
 
     {

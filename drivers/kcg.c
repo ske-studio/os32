@@ -27,6 +27,7 @@
 #include "io.h"
 #include "utf8.h"
 #include "pc98.h"
+#include "kstring.h"
 
 /* スケール係数 (デフォルト=1, 最大4) */
 int kcg_scale = 1;
@@ -60,9 +61,9 @@ void kcg_init(void)
     kcg_wait();
     kcg_scale = 1;
 
-    /* キャッシュフラグの初期化 (ゼロクリア) */
-    for (i = 0; i < KANJI_FETCHED_SIZE; i++) kanji_fetched[i] = 0;
-    for (i = 0; i < 256; i++) ank_fetched[i] = 0;
+    /* キャッシュフラグの初期化 — kmemset (rep stosd) で高速化 */
+    kmemset(kanji_fetched, 0, KANJI_FETCHED_SIZE);
+    kmemset(ank_fetched, 0, 256);
 }
 
 /* ======================================================================== */

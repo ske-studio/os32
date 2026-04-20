@@ -5,6 +5,13 @@
 #include "ext2_ctx.h"
 #include "ide.h"
 #include "vfs.h"
+#include "kstring.h"
+
+/* ext2独自ヘルパーを廃止し、ASM最適化済みのkstring関数に転送 */
+#define ext2_mem_copy(d,s,n)  kmemcpy((d),(s),(n))
+#define ext2_mem_zero(d,n)    kmemset((d),0,(n))
+#define ext2_str_len(s)       ((int)kstrlen(s))
+#define ext2_str_ncmp(a,b,n)  kstrncmp((a),(b),(u32)(n))
 
 /* 1KBブロック時、1グループあたりの最大ブロック数 (ビットマップ1ブロック = 8192ビット) */
 #define EXT2_BLOCKS_PER_GROUP_MAX  8192
@@ -22,10 +29,8 @@ extern u8 ext2_g_aux[EXT2_BLOCK_SIZE];
 int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf);
 int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf);
 u32 ext2_current_time(void);
-void ext2_mem_copy(void *dst, const void *src, u32 len);
-void ext2_mem_zero(void *dst, u32 len);
-int ext2_str_len(const char *s);
-int ext2_str_ncmp(const char *a, const char *b, int n);
+/* ext2_mem_copy/ext2_mem_zero/ext2_str_len/ext2_str_ncmp は
+ * ext2_priv.h 先頭のマクロで kstring 関数に転送済み */
 int ext2_write_super_raw(Ext2Ctx *ctx);
 int ext2_write_gd_raw(Ext2Ctx *ctx);
 u32 ext2_find_partition(int ide_drive);
