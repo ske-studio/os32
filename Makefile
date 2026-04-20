@@ -37,7 +37,7 @@ INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi
 INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
 
 # GFX: 共通 + 自身 + ドライバ (palette依存) + FS (dump時のファイル出力)
-INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs
+INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs -Ilib
 
 # FS: 共通 + 自身 + ドライバ (disk/ide依存)
 INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib

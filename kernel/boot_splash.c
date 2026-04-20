@@ -15,6 +15,7 @@
 #include "types.h"
 #include "os32_kapi_shared.h"
 #include "io.h"
+#include "kstring.h"
 
 /* ======== 外部参照 ======== */
 extern volatile u32 tick_count;
@@ -48,15 +49,13 @@ static u8 s_grad_b[GRAD_STEPS];
 /*  バックバッファ描画プリミティブ (カーネル用)                               */
 /* ======================================================================== */
 
-/* バックバッファ全面を指定色で塗る */
+/* バックバッファ全面を指定色で塗る — kmemset (rep stosd) で高速化 */
 static void bb_clear(u8 color)
 {
-    int p, i;
+    int p;
     for (p = 0; p < 4; p++) {
         u8 val = (color & (1 << p)) ? 0xFF : 0x00;
-        u8 *plane = bb[p];
-        for (i = 0; i < GFX_PLANE_SZ / 4; i++)
-            ((u32 *)plane)[i] = val ? 0xFFFFFFFF : 0x00000000;
+        kmemset(bb[p], val, GFX_PLANE_SZ);
     }
 }
 

@@ -1,5 +1,6 @@
 #include "gfx_internal.h"
 #include "os32_kapi_shared.h"
+#include "kstring.h"
 
 /* ======================================================================== */
 /*  バックバッファ (拡張メモリ固定アドレス, 128KB)                          */
@@ -46,13 +47,11 @@ void gfx_init(void)
         tvram_attr[i * 2] = 0x00;
     }
 
-    /* ゼロクリア (バックバッファ) */
-    for (i = 0; i < GFX_PLANE_SZ / 4; i++) {
-        ((u32*)bb_b)[i] = 0;
-        ((u32*)bb_r)[i] = 0;
-        ((u32*)bb_g)[i] = 0;
-        ((u32*)bb_i)[i] = 0;
-    }
+    /* ゼロクリア (バックバッファ) — kmemset (rep stosd) で高速化 */
+    kmemset(bb_b, 0, GFX_PLANE_SZ);
+    kmemset(bb_r, 0, GFX_PLANE_SZ);
+    kmemset(bb_g, 0, GFX_PLANE_SZ);
+    kmemset(bb_i, 0, GFX_PLANE_SZ);
 
     _out(MODE_FF2_PORT, MFF2_16COLOR);
 

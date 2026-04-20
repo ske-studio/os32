@@ -10,6 +10,7 @@
 
 #include "fdc.h"
 #include "io.h"
+#include "kstring.h"
 
 /* ST0ビットマスク */
 #define ST0_SEEK_END    0x20    /* Seek End ビット */
@@ -29,13 +30,6 @@ static u8 dma_buffer[FDC_SECTOR_SIZE];
 /* ======================================================================== */
 /*  内部ユーティリティ                                                      */
 /* ======================================================================== */
-
-/* 簡易メモリコピー */
-static void fdc_memcpy(u8 *dst, const u8 *src, int n)
-{
-    int i;
-    for (i = 0; i < n; i++) dst[i] = src[i];
-}
 
 /* 短い遅延 (I/Oポート読み出しで数µs) */
 static void fdc_delay(void)
@@ -318,7 +312,7 @@ int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
         /* 6. エラーチェック: ST0のbit6-7が00なら成功 */
         if ((results[0] & ST0_IC_MASK) == 0) {
             /* DMAバッファからユーザーバッファにコピー */
-            fdc_memcpy((u8 *)buf, dma_buffer, FDC_SECTOR_SIZE);
+            kmemcpy((u8 *)buf, dma_buffer, FDC_SECTOR_SIZE);
             return 0;
         }
     }
@@ -336,7 +330,7 @@ int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
     u32 phys = (u32)dma_buffer;
 
     /* ユーザーバッファからDMAバッファにコピー */
-    fdc_memcpy(dma_buffer, (const u8 *)buf, FDC_SECTOR_SIZE);
+    kmemcpy(dma_buffer, (const u8 *)buf, FDC_SECTOR_SIZE);
 
     for (retry = 0; retry < 3; retry++) {
         /* 1. シーク */
