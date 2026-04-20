@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "config.h"
 
 /* ======================================================================== */
 /*  シェルメインループ・UI（履歴・補完）                                     */
@@ -381,7 +382,7 @@ void shell_run(void) {
     }
 
     /* 初期化時に自動シリアル＆rshell開始 */
-    g_api->serial_init(38400);
+    g_api->serial_init(SYS_SERIAL_BAUD);
     execute_command("rshell");
 
     for (;;) {

@@ -52,9 +52,9 @@ static void cmd_exec(int argc, char **argv)
     cmdline[pos] = '\0';
 
     rc = g_api->exec_run(cmdline);
-    if (rc == -1) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
-    else if (rc == -2) g_api->kprintf(ATTR_RED, "%s", "exec: invalid executable or crashed\n");
-    else if (rc == -3) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
+    if (rc == EXEC_ERR_GENERAL) g_api->kprintf(ATTR_RED, "%s", "exec: general error\n");
+    else if (rc == EXEC_ERR_FAULT) g_api->kprintf(ATTR_RED, "%s", "exec: invalid executable or crashed\n");
+    else if (rc == EXEC_ERR_NOT_FOUND) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
     else g_api->kprintf(ATTR_GREEN, "exec: exited with %d\n", rc);
 }
 

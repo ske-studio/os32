@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "config.h"
 
 /* ======================================================================== */
 /*  シリアル・リモート連携モジュール (rshell.c)                             */
@@ -11,8 +12,8 @@ static void cmd_serial(int argc, char **argv)
 {
     int ret;
     (void)argc; (void)argv;
-    g_api->serial_init(38400);
-    g_api->kprintf(ATTR_GREEN, "%s", "RS-232C initialized (38400bps)\n");
+    g_api->serial_init(SYS_SERIAL_BAUD);
+    g_api->kprintf(ATTR_GREEN, "RS-232C initialized (%ubps)\n", (u32)SYS_SERIAL_BAUD);
 
     /* serialfs 自動マウント (/host にマウント) */
     ret = g_api->sys_mount("/host", "COM1", "serialfs");

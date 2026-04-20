@@ -2,6 +2,7 @@
 /*  CMD_ENV.C — OS32 シェル 環境変数管理モジュール                           */
 /* ======================================================================== */
 #include "shell.h"
+#include "config.h"
 
 /* ======================================================================== */
 /*  環境変数テーブル                                                         */
@@ -25,21 +26,18 @@ static EnvVar env_vars[MAX_ENV_VARS];
 
 static int env_find(const char *name)
 {
-    int i, j;
+    int i;
     for (i = 0; i < MAX_ENV_VARS; i++) {
         if (!env_vars[i].used) continue;
-        j = 0;
-        while (name[j] && env_vars[i].name[j] && name[j] == env_vars[i].name[j]) j++;
-        if (name[j] == '\0' && env_vars[i].name[j] == '\0') return i;
+        if (strcmp(name, env_vars[i].name) == 0) return i;
     }
     return -1;
 }
 
 static void str_copy(char *dst, const char *src, int max)
 {
-    int i;
-    for (i = 0; i < max - 1 && src[i]; i++) dst[i] = src[i];
-    dst[i] = '\0';
+    strncpy(dst, src, max - 1);
+    dst[max - 1] = '\0';
 }
 
 /* ======================================================================== */
@@ -51,9 +49,9 @@ void env_init(void)
     int i;
     for (i = 0; i < MAX_ENV_VARS; i++) env_vars[i].used = 0;
 
-    env_set("PATH",  "/bin:/sbin:/usr/bin");
-    env_set("HOME",  "/home/user");
-    env_set("SHELL", "/shell");
+    env_set("PATH",  SYS_DEFAULT_PATH);
+    env_set("HOME",  SYS_DEFAULT_HOME);
+    env_set("SHELL", SYS_DEFAULT_SHELL);
     env_set("USER",  "user");
 }
 

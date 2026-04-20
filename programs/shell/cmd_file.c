@@ -19,7 +19,7 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
     }
 
     while (1) {
-        sz = g_api->sys_read(fd_in, io_buf, 65536);
+        sz = g_api->sys_read(fd_in, io_buf, sizeof(io_buf));
         if (sz < 0) {
             g_api->kprintf(ATTR_RED, "%s: read failed %s\n", cmd_name, src);
             break;
@@ -291,7 +291,7 @@ static void cmd_cat(int argc, char **argv)
         {
             int line_num = 1;
             while (1) {
-                r = g_api->sys_read(fd, io_buf, 65536);
+                r = g_api->sys_read(fd, io_buf, sizeof(io_buf));
                 if (r <= 0) break;
                 
                 if (show_linenum) {
@@ -314,8 +314,7 @@ static void cmd_echo(int argc, char **argv)
 {
     int i;
     for (i = 1; i < argc; i++) {
-        int l = 0;
-        while (argv[i][l]) l++;
+        int l = strlen(argv[i]);
         if (l > 0) {
             g_api->sys_write(1, argv[i], l);
         }

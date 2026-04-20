@@ -55,17 +55,15 @@ const char *get_basename(const char *path)
 /* ======================================================================== */
 void fs_append_basename(char *dst_path, const char *src_path)
 {
-    char temp[256];
-    int i = 0, j = 0;
-    const char *base = get_basename(src_path);
+    int dlen;
+    const char *base;
 
-    while (dst_path[i] && i < 254) { temp[i] = dst_path[i]; i++; }
-    if (i > 0 && temp[i-1] != '/' && i < 254) temp[i++] = '/';
-    while (base[j] && i < 255) temp[i++] = base[j++];
-    temp[i] = '\0';
-
-    for (i = 0; temp[i]; i++) dst_path[i] = temp[i];
-    dst_path[i] = '\0';
+    base = get_basename(src_path);
+    dlen = strlen(dst_path);
+    if (dlen > 0 && dst_path[dlen - 1] != '/' && dlen < PATH_MAX_LEN - 1) {
+        strncat(dst_path, "/", PATH_MAX_LEN - dlen - 1);
+    }
+    strncat(dst_path, base, PATH_MAX_LEN - strlen(dst_path) - 1);
 }
 
 /* ======================================================================== */
@@ -73,11 +71,16 @@ void fs_append_basename(char *dst_path, const char *src_path)
 /* ======================================================================== */
 void fs_join_path(char *dst_path, const char *dir_path, const char *name)
 {
-    int i = 0, j = 0;
-    while (dir_path[i] && i < 254) { dst_path[i] = dir_path[i]; i++; }
-    if (i > 0 && dst_path[i-1] != '/' && i < 254) dst_path[i++] = '/';
-    while (name[j] && i < 255) dst_path[i++] = name[j++];
-    dst_path[i] = '\0';
+    int dlen;
+
+    strncpy(dst_path, dir_path, PATH_MAX_LEN - 1);
+    dst_path[PATH_MAX_LEN - 1] = '\0';
+    dlen = strlen(dst_path);
+    if (dlen > 0 && dst_path[dlen - 1] != '/' && dlen < PATH_MAX_LEN - 1) {
+        dst_path[dlen] = '/';
+        dst_path[dlen + 1] = '\0';
+    }
+    strncat(dst_path, name, PATH_MAX_LEN - strlen(dst_path) - 1);
 }
 
 /* ======================================================================== */
