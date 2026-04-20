@@ -132,7 +132,7 @@ static int copy_file(const char *src, const char *dst) {
 }
 
 static int read_file_to_buf(const char *path, int max_size) {
-    int fd = g_api->sys_open(path, 0);
+    int fd = g_api->sys_open(path, KAPI_O_RDONLY);
     int len;
     if (fd < 0) return fd;
     len = g_api->sys_read(fd, file_buf, max_size);

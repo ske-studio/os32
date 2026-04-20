@@ -96,7 +96,7 @@ void main(int argc, char **argv, KernelAPI *api)
         int wr, rd;
 
         api->kprintf(WHITE, "%s", "  file_write: ");
-        int t_fd=api->sys_open("/api_test.txt", 1|0x100|0x200); if(t_fd>=0){ wr=api->sys_write(t_fd, test_data, 11); api->sys_close(t_fd); } else wr=-1;
+        int t_fd=api->sys_open("/api_test.txt", KAPI_O_WRONLY|KAPI_O_CREAT|KAPI_O_TRUNC); if(t_fd>=0){ wr=api->sys_write(t_fd, test_data, 11); api->sys_close(t_fd); } else wr=-1;
         if (wr == 0) {
             api->kprintf(GREEN, "%s", "OK\n");
         } else {
@@ -107,7 +107,7 @@ void main(int argc, char **argv, KernelAPI *api)
         }
 
         api->kprintf(WHITE, "%s", "  file_read:  ");
-        int r_fd=api->sys_open("/api_test.txt", 0); if(r_fd>=0){ rd=api->sys_read(r_fd, read_buf, 63); api->sys_close(r_fd); } else rd=-1;
+        int r_fd=api->sys_open("/api_test.txt", KAPI_O_RDONLY); if(r_fd>=0){ rd=api->sys_read(r_fd, read_buf, 63); api->sys_close(r_fd); } else rd=-1;
         if (rd == 11 && my_memcmp(read_buf, test_data, 11) == 0) {
             read_buf[rd] = 0;
             api->kprintf(GREEN, "%s", read_buf);

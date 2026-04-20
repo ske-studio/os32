@@ -60,7 +60,7 @@ int skk_init(const char *dict_path, KernelAPI *api) {
 
     skk_api = api;
 
-    fd = skk_api->sys_open((char*)dict_path, 0);
+    fd = skk_api->sys_open((char*)dict_path, KAPI_O_RDONLY);
     if (fd < 0) {
         skk_api->kprintf(0x41, "%s", "SKK: Failed to open dict\r\n");
         return -1;

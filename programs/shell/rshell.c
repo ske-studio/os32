@@ -208,7 +208,7 @@ static void cmd_upload(int argc, char **argv)
     }
 
     {
-        int fd = g_api->sys_open(fname, 1 | 0x0100 | 0x0200); /* O_WRONLY|O_CREAT|O_TRUNC */
+        int fd = g_api->sys_open(fname, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd >= 0) {
             if (g_api->sys_write(fd, xfer_buf, (u32)size) == (u32)size) {
                 g_api->kprintf(ATTR_GREEN, "Uploaded %u bytes\n", size);
@@ -271,7 +271,7 @@ static void cmd_recv(int argc, char **argv)
         g_api->kprintf(ATTR_CYAN, "Downloading: %s -> %s\n", host_path, local_path);
         t0 = g_api->get_tick();
 
-        fd_in = g_api->sys_open(host_path, 0); /* O_RDONLY */
+        fd_in = g_api->sys_open(host_path, KAPI_O_RDONLY);
         if (fd_in < 0) {
             g_api->kprintf(ATTR_RED, "recv: %s not found\n", host_path);
             return;
@@ -284,7 +284,7 @@ static void cmd_recv(int argc, char **argv)
             return;
         }
 
-        fd_out = g_api->sys_open(local_path, 1 | 0x0100 | 0x0200);
+        fd_out = g_api->sys_open(local_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd_out < 0) {
             g_api->kprintf(ATTR_RED, "recv: cannot create %s\n", local_path);
             return;
@@ -405,7 +405,7 @@ static void cmd_recv(int argc, char **argv)
     }
 
     {
-        int fd = g_api->sys_open(fname, 1 | 0x0100 | 0x0200);
+        int fd = g_api->sys_open(fname, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd >= 0) {
             if (g_api->sys_write(fd, xfer_buf, (u32)fsize) == (u32)fsize) {
                 g_api->kprintf(ATTR_GREEN, "  Saved: %s\n", fname);
@@ -442,7 +442,7 @@ static void cmd_push(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "Uploading: %s -> %s\n", local_path, host_path);
     t0 = g_api->get_tick();
 
-    fd_in = g_api->sys_open(local_path, 0);
+    fd_in = g_api->sys_open(local_path, KAPI_O_RDONLY);
     if (fd_in < 0) {
         g_api->kprintf(ATTR_RED, "push: %s not found\n", local_path);
         return;
@@ -454,7 +454,7 @@ static void cmd_push(int argc, char **argv)
         return;
     }
 
-    fd_out = g_api->sys_open(host_path, 1 | 0x0100 | 0x0200);
+    fd_out = g_api->sys_open(host_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd_out < 0) {
         g_api->kprintf(ATTR_RED, "push: cannot create %s\n", host_path);
         return;

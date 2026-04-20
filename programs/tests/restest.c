@@ -39,9 +39,9 @@ static void test_fd_leak(void)
     printf("=== Test 1: FD Leak ===\n");
     printf("Opening 3 files without closing...\n");
 
-    fd1 = api->sys_open("/shell", 0);  /* O_RDONLY */
-    fd2 = api->sys_open("/shell", 0);
-    fd3 = api->sys_open("/shell", 0);
+    fd1 = api->sys_open("/shell", KAPI_O_RDONLY);  /* O_RDONLY */
+    fd2 = api->sys_open("/shell", KAPI_O_RDONLY);
+    fd3 = api->sys_open("/shell", KAPI_O_RDONLY);
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 
@@ -118,9 +118,9 @@ static void verify_fd(void)
     printf("=== Verify: FD Cleanup ===\n");
     printf("Trying to open 3 files (should succeed if cleanup worked)...\n");
 
-    fd1 = api->sys_open("/shell", 0);
-    fd2 = api->sys_open("/shell", 0);
-    fd3 = api->sys_open("/shell", 0);
+    fd1 = api->sys_open("/shell", KAPI_O_RDONLY);
+    fd2 = api->sys_open("/shell", KAPI_O_RDONLY);
+    fd3 = api->sys_open("/shell", KAPI_O_RDONLY);
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 

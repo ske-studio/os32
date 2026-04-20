@@ -57,7 +57,7 @@ int main(int argc, char **argv, KernelAPI *api)
     output_path = (argc >= 4) ? argv[3] : (const char *)0;
 
     /* 入力ファイル読み込み */
-    fd = api->sys_open(input_path, 0);
+    fd = api->sys_open(input_path, KAPI_O_RDONLY);
     if (fd < 0) {
         api->kprintf(0xE1 | 0x40, "lzss: %s not found\n", input_path);
         return 1;
@@ -93,7 +93,7 @@ int main(int argc, char **argv, KernelAPI *api)
         dst_buf[6] = (u8)((sz >> 16) & 0xFF);
         dst_buf[7] = (u8)((sz >> 24) & 0xFF);
 
-        fd = api->sys_open(output_path, 1 | 0x0100 | 0x0200);
+        fd = api->sys_open(output_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd < 0) {
             api->kprintf(0xE1 | 0x40, "lzss: cannot create %s\n", output_path);
             return 1;
@@ -143,7 +143,7 @@ int main(int argc, char **argv, KernelAPI *api)
             return 1;
         }
 
-        fd = api->sys_open(output_path, 1 | 0x0100 | 0x0200);
+        fd = api->sys_open(output_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd < 0) {
             api->kprintf(0xE1 | 0x40, "lzss: cannot create %s\n", output_path);
             return 1;

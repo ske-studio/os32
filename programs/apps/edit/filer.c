@@ -17,7 +17,7 @@ static void filer_ls_cb(const DirEntry_Ext* entry, void* ctx) {
         }
         e->name[i] = '\0';
         e->size = entry->size;
-        e->is_dir = (entry->type == 2);
+        e->is_dir = (entry->type == OS32_FILE_TYPE_DIR);
         vz.filer.entry_count++;
     }
 }

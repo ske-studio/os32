@@ -20,7 +20,7 @@ static void vfs_ls_cb(const DirEntry_Ext *entry, void *ctx)
 
     if (opts->format_long) {
         char size_buf[16];
-        if (entry->type == 2) {
+        if (entry->type == OS32_FILE_TYPE_DIR) {
             if (is_tty) g_api->kprintf(ATTR_CYAN, "  <DIR>    DIR   %s\n", entry->name);
             else printf("  <DIR>    DIR   %s\n", entry->name);
         } else {
@@ -29,7 +29,7 @@ static void vfs_ls_cb(const DirEntry_Ext *entry, void *ctx)
             else printf("  %s B  FILE  %s\n", size_buf, entry->name);
         }
     } else {
-        if (entry->type == 2) {
+        if (entry->type == OS32_FILE_TYPE_DIR) {
             if (is_tty) g_api->kprintf(ATTR_CYAN, "%s/  ", entry->name);
             else printf("%s/\n", entry->name);
         } else {

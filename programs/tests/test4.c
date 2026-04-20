@@ -29,7 +29,7 @@ void main(int argc, char **argv, KernelAPI *api)
 
     /* file_write テスト */
     api->kprintf(0xA1, "[write /v4test/hello.txt]\n");
-    int t_fd=api->sys_open("/v4test/hello.txt", 1|0x100|0x200); if(t_fd>=0){ rc=api->sys_write(t_fd, "Hello v4!", 9); api->sys_close(t_fd); } else rc=-1;
+    int t_fd=api->sys_open("/v4test/hello.txt", KAPI_O_WRONLY|KAPI_O_CREAT|KAPI_O_TRUNC); if(t_fd>=0){ rc=api->sys_write(t_fd, "Hello v4!", 9); api->sys_close(t_fd); } else rc=-1;
     api->kprintf(0xE1, "  result: %d\n", rc);
 
     /* file_ls テスト */
@@ -38,7 +38,7 @@ void main(int argc, char **argv, KernelAPI *api)
 
     /* file_read テスト */
     api->kprintf(0xA1, "[read /v4test/hello.txt]\n");
-    int r_fd=api->sys_open("/v4test/hello.txt", 0); if(r_fd>=0){ rc=api->sys_read(r_fd, buf, 63); api->sys_close(r_fd); } else rc=-1;
+    int r_fd=api->sys_open("/v4test/hello.txt", KAPI_O_RDONLY); if(r_fd>=0){ rc=api->sys_read(r_fd, buf, 63); api->sys_close(r_fd); } else rc=-1;
     if (rc > 0) {
         buf[rc] = '\0';
         api->kprintf(0xE1, "  content: \"%s\" (%d bytes)\n", buf, rc);
@@ -54,7 +54,7 @@ void main(int argc, char **argv, KernelAPI *api)
 
 static void __cdecl ls_callback(const DirEntry_Ext *e, void *ctx)
 {
-    if (e->type == 2)
+    if (e->type == OS32_FILE_TYPE_DIR)
         g_api->kprintf(0xC1, "  <DIR> %s\n", e->name);
     else
         g_api->kprintf(0xE1, "        %s (%u bytes)\n", e->name, e->size);

@@ -5,13 +5,13 @@ static u8 io_buf[65536];
 
 static int do_copy_file(const char *cmd_name, const char *src, const char *dst) {
     int fd_in, fd_out, sz;
-    fd_in = g_api->sys_open(src, 0); /* O_RDONLY */
+    fd_in = g_api->sys_open(src, KAPI_O_RDONLY);
     if (fd_in < 0) {
         g_api->kprintf(ATTR_RED, "%s: %s not found\n", cmd_name, src);
         return -1;
     }
 
-    fd_out = g_api->sys_open(dst, 1 | 0x0100 | 0x0200); /* O_WRONLY|O_CREAT|O_TRUNC */
+    fd_out = g_api->sys_open(dst, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd_out < 0) {
         g_api->kprintf(ATTR_RED, "%s: open failed %s\n", cmd_name, dst);
         g_api->sys_close(fd_in);
@@ -67,7 +67,7 @@ static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
     if (nlen >= 31) nlen = 31;
     memcpy(g_copy_entries[g_copy_count].name, entry->name, nlen);
     g_copy_entries[g_copy_count].name[nlen] = '\0';
-    g_copy_entries[g_copy_count].is_dir = (entry->type == 2) ? 1 : 0;
+    g_copy_entries[g_copy_count].is_dir = (entry->type == OS32_FILE_TYPE_DIR) ? 1 : 0;
     g_copy_count++;
 }
 
@@ -281,7 +281,7 @@ static void cmd_cat(int argc, char **argv)
     }
 
     for (i = file_start; i < argc; i++) {
-        int fd = g_api->sys_open(argv[i], 0);
+        int fd = g_api->sys_open(argv[i], KAPI_O_RDONLY);
         int r;
         if (fd < 0) {
             g_api->kprintf(ATTR_RED, "cat: %s not found (err %d)\n", argv[i], fd);
