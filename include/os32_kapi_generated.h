@@ -128,6 +128,13 @@ typedef struct {
     void (__cdecl *snd_se_play_raw)(int note, int duration_ticks, int tone);
     void (__cdecl *snd_set_master)(int enable);
     void (__cdecl *snd_bgm_set_persist)(int persist);
+    int (__cdecl *kbd_is_pressed)(int scancode);
+    void (__cdecl *fm_note_on)(int ch, int note);
+    void (__cdecl *fm_note_off)(int ch);
+    void (__cdecl *fm_set_tone_num)(int ch, int tone_num);
+    void (__cdecl *ssg_tone)(int ch, u16 period);
+    void (__cdecl *ssg_volume)(int ch, u8 vol);
+    void (__cdecl *ssg_all_off)(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

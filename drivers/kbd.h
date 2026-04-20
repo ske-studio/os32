@@ -90,6 +90,7 @@ int  kbd_trygetchar(void);  /* ノンブロッキング: -1=なし, >=0 ASCII */
 int  kbd_trygetkey(void);   /* ノンブロッキング: -1=なし, >=0 キーコードデータ(u16) */
 int  kbd_has_key(void);     /* バッファにキーがあるか */
 u32  kbd_get_modifiers(void);/* 修飾キー状態取得 */
+int  kbd_is_pressed(int scancode); /* スキャンコード押下状態 (1=押下中) */
 
 /* シフトキー状態 */
 extern volatile u8 kbd_shift_state;

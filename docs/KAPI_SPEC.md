@@ -1,4 +1,4 @@
-# KernelAPI v26 仕様書
+# KernelAPI v27 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **26** |
-| 合計エントリ数 | **118** (データフィールド1 + 関数ポインタ117) |
+| 現在のバージョン | **27** |
+| 合計エントリ数 | **124** (データフィールド1 + 関数ポインタ123) |
 
 ---
 
@@ -178,6 +178,20 @@ make programs
 | 0x1D0 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
 | 0x1D4 | sys_redirect_get_buf_len | `u32(int fd)` |
 | 0x1D8 | paging_is_present | `int(u32 addr)` |
+| 0x1DC | snd_bgm_play | `void(const char *mml)` |
+| 0x1E0 | snd_bgm_stop | `void(void)` |
+| 0x1E4 | snd_bgm_is_playing | `int(void)` |
+| 0x1E8 | snd_se_play | `void(int se_id)` |
+| 0x1EC | snd_se_play_raw | `void(int note, int duration_ticks, int tone)` |
+| 0x1F0 | snd_set_master | `void(int enable)` |
+| 0x1F4 | snd_bgm_set_persist | `void(int persist)` |
+| 0x1F8 | kbd_is_pressed | `int(int scancode)` |
+| 0x1FC | fm_note_on | `void(int ch, int note)` |
+| 0x200 | fm_note_off | `void(int ch)` |
+| 0x204 | fm_set_tone_num | `void(int ch, int tone_num)` |
+| 0x208 | ssg_tone | `void(int ch, u16 period)` |
+| 0x20C | ssg_volume | `void(int ch, u8 vol)` |
+| 0x210 | ssg_all_off | `void(void)` |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -207,6 +221,26 @@ v26で追加。指定アドレスのページテーブルエントリが存在�
 
 - `paging_is_present(addr)` — 指定アドレスが有効にマッピングされているか判定 (1=有効, 0=Not-Present)
 - **用途**: メモリダンプツール等がガードページや未マッピング領域への不正アクセスを事前に回避するために使用
+
+### §4-5 キー押下状態ポーリングAPI
+
+v27で追加。指定スキャンコードのキーが現在押下中かをリアルタイムに問い合わせる。
+ゲームエンジン (libpyxel) のフレーム単位入力に使用。
+
+- `kbd_is_pressed(scancode)` — 指定スキャンコードのキーが押されていれば1、離されていれば0
+- IRQハンドラで128キー分のビットマップを常時更新しているため、イベントキューを消費しない
+
+### §4-6 FM/SSG個別チャンネル制御API
+
+v27で追加。FM音源(YM2203)の3チャンネルおよびSSG(PSG)の3チャンネルを個別に制御する低レベルAPI。
+ゲームエンジンのサウンドシーケンサ実装に使用。
+
+- `fm_note_on(ch, note)` — FMチャンネル(0-2)でノート発音
+- `fm_note_off(ch)` — FMチャンネル消音
+- `fm_set_tone_num(ch, tone_num)` — FMチャンネルのプリセット音色設定
+- `ssg_tone(ch, period)` — SSGチャンネル(0-2)のトーン周期設定
+- `ssg_volume(ch, vol)` — SSGチャンネルの音量設定(0-15)
+- `ssg_all_off()` — SSG全チャンネル消音
 
 **FDリダイレクト**:
 - `sys_redirect_fd(fd, path, mode)` — 指定FDの出力先をファイルにリダイレクト

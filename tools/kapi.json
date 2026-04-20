@@ -1,5 +1,5 @@
 {
-  "version": 26,
+  "version": 27,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -922,6 +922,58 @@
       "args": [
         "int persist"
       ]
+    },
+    {
+      "name": "kbd_is_pressed",
+      "ret": "int",
+      "args": [
+        "int scancode"
+      ]
+    },
+    {
+      "name": "fm_note_on",
+      "ret": "void",
+      "args": [
+        "int ch",
+        "int note"
+      ]
+    },
+    {
+      "name": "fm_note_off",
+      "ret": "void",
+      "args": [
+        "int ch"
+      ]
+    },
+    {
+      "name": "fm_set_tone_num",
+      "ret": "void",
+      "args": [
+        "int ch",
+        "int tone_num"
+      ]
+    },
+    {
+      "name": "ssg_tone",
+      "ret": "void",
+      "args": [
+        "int ch",
+        "u16 period"
+      ]
+    },
+    {
+      "name": "ssg_volume",
+      "ret": "void",
+      "args": [
+        "int ch",
+        "u8 vol"
+      ],
+      "body": "ssg_volume(ch, (uchar)vol);"
+    },
+    {
+      "name": "ssg_all_off",
+      "ret": "void",
+      "args": []
     }
   ]
 }

@@ -26,6 +26,10 @@ extern int rshell_active;
 /* ======== シフトキー状態 ======== */
 volatile u8 kbd_shift_state = 0;
 
+/* ======== キー押下状態ビットマップ (128キー分) ======== */
+/* ビット1 = 押下中, ビット0 = 離されている */
+static volatile u8 kbd_key_pressed[16]; /* 128bit = 16bytes */
+
 /* ======== リングバッファ (u16: 上位=スキャンコード, 下位=ASCII) ======== */
 static volatile u16 kbd_buf[KBD_BUF_SIZE];
 static volatile int kbd_head = 0;
@@ -107,6 +111,13 @@ void kbd_irq_handler(void)
     is_break = scancode & SCANCODE_BREAK;
     keycode  = scancode & SCANCODE_KEY;
 
+    /* キー押下状態ビットマップの更新 (全キー対象) */
+    if (is_break) {
+        kbd_key_pressed[keycode >> 3] &= ~(1 << (keycode & 7));
+    } else {
+        kbd_key_pressed[keycode >> 3] |=  (1 << (keycode & 7));
+    }
+
     /* シフトキー状態の更新 */
     if (keycode == KEY_SHIFT) {
         if (is_break) kbd_shift_state &= ~SHIFT_SHIFT;
@@ -132,7 +143,7 @@ void kbd_irq_handler(void)
         return;
     }
 
-    /* ブレイク(キー離し)は無視 */
+    /* ブレイク(キー離し)はリングバッファには入れない */
     if (is_break) return;
 
     /* スキャンコード → ASCII変換 */
@@ -195,6 +206,12 @@ void kbd_init(void)
     kbd_tail = 0;
     kbd_count = 0;
     kbd_shift_state = 0;
+
+    /* キー状態ビットマップクリア */
+    {
+        int i;
+        for (i = 0; i < 16; i++) kbd_key_pressed[i] = 0;
+    }
 
     /* キーボードIRQを有効化 */
     irq_enable(KBD_IRQ);
@@ -315,4 +332,11 @@ int kbd_trygetkey(void)
 u32 kbd_get_modifiers(void)
 {
     return (u32)kbd_shift_state;
+}
+
+/* 指定スキャンコードのキーが現在押されているかを返す (1=押下中, 0=離されている) */
+int kbd_is_pressed(int scancode)
+{
+    if (scancode < 0 || scancode > 127) return 0;
+    return (kbd_key_pressed[scancode >> 3] >> (scancode & 7)) & 1;
 }

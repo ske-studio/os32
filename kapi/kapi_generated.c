@@ -641,3 +641,38 @@ void __cdecl wrap_snd_bgm_set_persist(int persist)
     snd_bgm_set_persist(persist);
 }
 
+int __cdecl wrap_kbd_is_pressed(int scancode)
+{
+    return kbd_is_pressed(scancode);
+}
+
+void __cdecl wrap_fm_note_on(int ch, int note)
+{
+    fm_note_on(ch, note);
+}
+
+void __cdecl wrap_fm_note_off(int ch)
+{
+    fm_note_off(ch);
+}
+
+void __cdecl wrap_fm_set_tone_num(int ch, int tone_num)
+{
+    fm_set_tone_num(ch, tone_num);
+}
+
+void __cdecl wrap_ssg_tone(int ch, u16 period)
+{
+    ssg_tone(ch, period);
+}
+
+void __cdecl wrap_ssg_volume(int ch, u8 vol)
+{
+    ssg_volume(ch, (uchar)vol);
+}
+
+void __cdecl wrap_ssg_all_off(void)
+{
+    ssg_all_off();
+}
+
