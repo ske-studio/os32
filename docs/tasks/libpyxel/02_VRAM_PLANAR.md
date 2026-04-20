@@ -33,19 +33,29 @@ for plane in [B, R, G, I]:
 
 **1ピクセル設定に4プレーン×2操作 (read-modify-write) = 最低8回のメモリアクセス。**
 
-### 1-3. OS32のバックバッファ構造 (既存実装)
+### 1-3. OS32のバックバッファ構造 (KAPI経由)
 
-OS32 GFXサブシステムは拡張メモリ上にVRAMと同構造のバックバッファを持つ:
+OS32 GFXサブシステムは拡張メモリ上にVRAMと同構造のバックバッファを持つ。
+外部プログラムからは **KAPI `gfx_get_framebuffer()`** でバックバッファの
+4プレーンポインタを取得し、描画後に `gfx_add_dirty_rect()` +
+`gfx_present_dirty()` でVRAMに転送する。
 
 ```c
-/* gfx_core.c */
-u8 *bb_b = (u8 *)MEM_GFX_BB_BASE;                   /* プレーン0 */
-u8 *bb_r = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ);  /* プレーン1 */
-u8 *bb_g = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ*2); /* プレーン2 */
-u8 *bb_i = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ*3); /* プレーン3 */
+/* KAPI経由でのバックバッファ取得 */
+GFX_Framebuffer fb;
+api->gfx_get_framebuffer(&fb);
+/* fb.plane_b, fb.plane_r, fb.plane_g, fb.plane_i が各プレーンポインタ */
+/* fb.pitch = 80 (640/8), fb.width = 640, fb.height = 400 */
 ```
 
-描画 → バックバッファ(プレーナー) → `gfx_present()` で VRAM へ `rep movsw` 転送。
+> **強制ルール**: libpyxel を含む全ての外部プログラムは **KAPI経由でのみ**
+> バックバッファにアクセスする。VRAMアドレス (0xA8000等) への直接
+> 書き込みは **禁止**。描画フローは必ず以下のいずれかを経由する:
+>
+> 1. **libos32gfx** の描画プリミティブ (推奨)
+> 2. **GFX_Framebuffer** 経由でのプレーン直接操作 + dirty rect管理
+>
+> VRAM転送はカーネル側が一括管理する。
 
 ## 2. Pyxelとの根本的な違い
 
@@ -83,18 +93,34 @@ PC-9801: 1バイト = 8ピクセル分の1ビット (× 4プレーン)
 - **利点**: 変換オーバーヘッドなし。既存の `gfx_pixel()` / `gfx_fill_rect()` をそのまま利用。
 - **欠点**: Pyxelの `blt` (スプライト転送) の実装が複雑。パックトデータからの変換は何処かで必要。
 
-### 方式C: ハイブリッド方式 (推奨)
+### 方式C: ハイブリッド方式 (KAPI経由バックバッファ描画 — 採用)
 
 ```text
 [リソース変換ツール] → [プレーナー形式のバイナリ .os32res に事前変換]
-[ゲームロジック] → [プレーナーBBに直接描画] → [VRAM転送]
-                    └─ blt/bltm はプレーナーデータから直接転送
+[ゲームロジック] → [KAPIバックバッファに描画] → [gfx_present_dirty でVRAM転送]
+                    └─ blt/bltm はプレーナーデータからバックバッファへ転送
 ```
 
 - イメージバンク・タイルマップは **ホスト側でプレーナー形式に事前変換**。
-- ランタイムではプレーナー→プレーナーの `rep movsw` コピーのみ。変換コストゼロ。
-- `pyxel_pset()` 等のプリミティブは既存の `gfx_pixel()` をラップ。
+- ランタイムではプレーナー→プレーナーのコピーのみ。変換コストゼロ。
+- `pyxel_pset()` 等のプリミティブは **libos32gfx** の描画関数をラップ。
 - `pyxel_blt()` はプレーナーデータ同士のマスク付きコピーで高速。
+- **全ての描画は KAPI バックバッファを経由する。VRAM直接アクセスは行わない。**
+
+**libpyxel の描画フロー:**
+
+```text
+pyxel_cls/pset/line/rect/circ/tri/fill/blt/bltm/text
+    │
+    ▼
+libos32gfx (gfx_pixel, gfx_fill_rect, ...)
+    │                                   │
+    ▼                                   ▼
+GFX_Framebuffer プレーン書き込み    gfx_add_dirty_rect()
+    │
+    ▼
+gfx_present_dirty()  →  VRAM転送 (カーネル側)
+```
 
 ## 4. リソースのプレーナー事前変換 (方式C詳細)
 

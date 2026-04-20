@@ -12,6 +12,7 @@ OS32上でPyxel互換のゲームエンジンを構築するための技術資�
 | 04 | [API_MAPPING.md](04_API_MAPPING.md) | Pyxel API → OS32 C API マッピング仕様 |
 | 05 | [ROADMAP.md](05_ROADMAP.md) | 実装ロードマップ (フェーズ計画) |
 | 06 | [IMPLEMENTATION_DETAILS.md](06_IMPLEMENTATION_DETAILS.md) | libpyxel APIリファレンスとモジュール・ディレクトリ構成 |
+| 07 | [BENCH_RESULTS.md](07_BENCH_RESULTS.md) | Phase 0 スケーリング性能ベンチマーク結果と最適描画方式の選定 |
 
 ## 基本方針
 

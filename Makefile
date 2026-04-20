@@ -86,7 +86,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -197,6 +197,27 @@ programs/tests/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
 
 bench: $(CRT0_OBJ) programs/tests/bench.bin
+
+# === Bench Scale2x Module (libpyxel Phase 0) ===
+BENCH_S2X_SRC = programs/tests/bench_scale2x/main.c
+BENCH_S2X_OBJ = $(BENCH_S2X_SRC:.c=.o)
+
+programs/tests/bench_scale2x/%.o: programs/tests/bench_scale2x/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/tests/bench_scale2x.elf: build/app.ld $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ) -lc -lgcc
+
+bench_scale2x: $(CRT0_OBJ) programs/tests/bench_scale2x.bin
+
+# === Pyxel Infrastructure Test ===
+programs/tests/pyxel_test.o: programs/tests/pyxel_test.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/tests/pyxel_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/pyxel_test.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/pyxel_test.o $(GFX_OBJ) -lc -lgcc
+
+pyxel_test: $(CRT0_OBJ) programs/tests/pyxel_test.bin
 
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
@@ -392,7 +413,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd cdinst
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -468,6 +489,10 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "mdview" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
+	elif [ "$*" = "tests/bench_scale2x" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
+	elif [ "$*" = "tests/pyxel_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 27 --heap 2097152; \
 	else \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
 	fi
@@ -510,7 +535,7 @@ iso: packages
 	genisoimage -o images/os32_install.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 

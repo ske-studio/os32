@@ -94,6 +94,12 @@ filesystem:
     - host: programs/apps/mdview.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/bench_scale2x.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/pyxel_test.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"
