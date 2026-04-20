@@ -84,7 +84,12 @@ PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
 
-C_BASE_PROGRAMS = $(filter-out programs/skk_test.c programs/edit.c programs/crt0_c.c programs/lzss.c programs/cdinst.c, $(wildcard programs/*.c))
+C_CMDS    = $(wildcard programs/cmds/*.c)
+C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c, $(wildcard programs/tests/*.c))
+C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
+
+C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
 
 # === Shell Module ===
@@ -98,13 +103,13 @@ programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
 	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
 
 # === Edit (VZ-inspired Editor) Module ===
-EDIT_SRC = $(wildcard programs/edit/*.c)
+EDIT_SRC = $(wildcard programs/apps/edit/*.c)
 EDIT_OBJ = $(EDIT_SRC:.c=.o)
 
-programs/edit/%.o: programs/edit/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/edit -c $< -o $@
+programs/apps/edit/%.o: programs/apps/edit/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/edit -c $< -o $@
 
-programs/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
+programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
 
 # === SKK Module ===
@@ -114,48 +119,48 @@ SKK_OBJ = $(SKK_SRC:.c=.o)
 programs/skk/%.o: programs/skk/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/skk_test.o: programs/skk_test.c
+programs/tests/skk_test.o: programs/tests/skk_test.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/skk_test.elf: build/app.ld $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
+programs/tests/skk_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
 
 # === FEP Test Module ===
 lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/fep_test.o: programs/fep_test.c lib/fep_engine.h
+programs/tests/fep_test.o: programs/tests/fep_test.c lib/fep_engine.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
+programs/tests/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
 
-fep_test: $(CRT0_OBJ) programs/fep_test.bin
+fep_test: $(CRT0_OBJ) programs/tests/fep_test.bin
 
 # === LZSS Command ===
 # lib/lzss.c を外部プログラム用に再コンパイル
 lib/lzss_prog.o: lib/lzss.c lib/lzss.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/lzss.o: programs/lzss.c
+programs/system/lzss.o: programs/system/lzss.c
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/lzss.elf: build/app.ld $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/lzss.o lib/lzss_prog.o -lc -lgcc
+programs/system/lzss.elf: build/app.ld $(CRT0_OBJ) programs/system/lzss.o lib/lzss_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/lzss.o lib/lzss_prog.o -lc -lgcc
 
-lzss_cmd: $(CRT0_OBJ) programs/lzss.bin
+lzss_cmd: $(CRT0_OBJ) programs/system/lzss.bin
 
 # === CD Installer (cdinst) ===
 programs/libos32/pkg.o: programs/libos32/pkg.c programs/libos32/pkg.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/cdinst.o: programs/cdinst.c programs/libos32/pkg.h programs/libos32/dbgserial.h
+programs/system/cdinst.o: programs/system/cdinst.c programs/libos32/pkg.h programs/libos32/dbgserial.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/cdinst.elf: build/app.ld $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cdinst.o programs/libos32/pkg.o $(DBG_OBJ) -lc -lgcc
+programs/system/cdinst.elf: build/app.ld $(CRT0_OBJ) programs/system/cdinst.o programs/libos32/pkg.o $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/cdinst.o programs/libos32/pkg.o $(DBG_OBJ) -lc -lgcc
 
-cdinst: $(CRT0_OBJ) programs/cdinst.bin
+cdinst: $(CRT0_OBJ) programs/system/cdinst.bin
 
 # === OS32GFX Module ===
 GFX_SRC = $(wildcard programs/libos32gfx/*.c) \
@@ -182,37 +187,37 @@ programs/libos32gfx/asm/%.o: programs/libos32gfx/asm/%.asm programs/libos32gfx/a
 	$(AS) -f elf32 -Iprograms/libos32gfx/asm/ $< -o $@
 
 # === Bench Module ===
-BENCH_SRC = $(wildcard programs/bench/*.c)
+BENCH_SRC = $(wildcard programs/tests/bench/*.c)
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 
-programs/bench/%.o: programs/bench/%.c
+programs/tests/bench/%.o: programs/tests/bench/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
+programs/tests/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
 
-bench: $(CRT0_OBJ) programs/bench.bin
+bench: $(CRT0_OBJ) programs/tests/bench.bin
 
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/gfx_demo.o: programs/gfx_demo.c
+programs/apps/gfx_demo.o: programs/apps/gfx_demo.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/gfx_demo.elf: build/app.ld $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/gfx_demo.o $(GFX_OBJ) -lc -lgcc
+programs/apps/gfx_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/gfx_demo.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/gfx_demo.o $(GFX_OBJ) -lc -lgcc
 
-gfx_demo: $(CRT0_OBJ) programs/gfx_demo.bin
+gfx_demo: $(CRT0_OBJ) programs/apps/gfx_demo.bin
 
 # === Demo1 Benchmark Module ===
-programs/demo1.o: programs/demo1.c
+programs/apps/demo1.o: programs/apps/demo1.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/demo1.elf: build/app.ld $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/demo1.o $(GFX_OBJ) -lc -lgcc
+programs/apps/demo1.elf: build/app.ld $(CRT0_OBJ) programs/apps/demo1.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/demo1.o $(GFX_OBJ) -lc -lgcc
 
-demo1: $(CRT0_OBJ) programs/demo1.bin
+demo1: $(CRT0_OBJ) programs/apps/demo1.bin
 
 # === モジュール別コンパイルルール ===
 
@@ -278,14 +283,16 @@ images/os32_boot.d88: boot kernel.bin programs lzss_dict unicode_bin
 	args="$$args /sys/unicode.bin=unicode.bin"; \
 	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
 	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
-	for cmd in $(FDD_MIN_CMDS); do \
-		if [ -f "programs/$$cmd.bin" ]; then \
-			args="$$args /bin/$$cmd.bin=programs/$$cmd.bin"; \
-		fi \
+	for cmd in $$(echo $(FDD_MIN_CMDS)); do \
+		if [ -f "programs/cmds/$$cmd.bin" ]; then \
+			args="$$args /bin/$$cmd.bin=programs/cmds/$$cmd.bin"; \
+		elif [ -f "programs/system/$$cmd.bin" ]; then \
+			args="$$args /bin/$$cmd.bin=programs/system/$$cmd.bin"; \
+		fi; \
 	done; \
-	args="$$args /bin/edit.bin=programs/edit.bin"; \
-	args="$$args /sbin/install.bin=programs/install.bin"; \
-	args="$$args /sbin/cdinst.bin=programs/cdinst.bin"; \
+	args="$$args /bin/edit.bin=programs/apps/edit.bin"; \
+	args="$$args /sbin/install.bin=programs/system/install.bin"; \
+	args="$$args /sbin/cdinst.bin=programs/system/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
 	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 $$args
 	@echo "Copying os32_boot.d88 to NP21/W directory..."
@@ -293,7 +300,7 @@ images/os32_boot.d88: boot kernel.bin programs lzss_dict unicode_bin
 
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-edit: $(CRT0_OBJ) programs/edit.bin
+edit: $(CRT0_OBJ) programs/apps/edit.bin
 
 lzss_dict: 
 	@if [ ! -f tools/lzss_pack ]; then gcc tools/lzss_pack.c -O2 -o tools/lzss_pack; fi
@@ -303,60 +310,60 @@ unicode_bin:
 	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
 	@if [ ! -f unicode.bin ]; then ./tools/gen_unicode; fi
 
-skk: $(CRT0_OBJ) programs/skk_test.bin lzss_dict
+skk: $(CRT0_OBJ) programs/tests/skk_test.bin lzss_dict
 
-programs/spr_test.o: programs/spr_test.c
+programs/apps/spr_test.o: programs/apps/spr_test.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/spr_test.elf: build/app.ld $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/spr_test.o $(GFX_OBJ) -lc -lgcc
+programs/apps/spr_test.elf: build/app.ld $(CRT0_OBJ) programs/apps/spr_test.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/spr_test.o $(GFX_OBJ) -lc -lgcc
 
-spr_test: $(CRT0_OBJ) programs/spr_test.bin
+spr_test: $(CRT0_OBJ) programs/apps/spr_test.bin
 
 # === VDP Viewer ===
-programs/vdpview.o: programs/vdpview.c
+programs/apps/vdpview.o: programs/apps/vdpview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/vdpview.elf: build/app.ld $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/vdpview.o $(GFX_OBJ) -lc -lgcc
+programs/apps/vdpview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vdpview.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/vdpview.o $(GFX_OBJ) -lc -lgcc
 
-vdpview: $(CRT0_OBJ) programs/vdpview.bin
+vdpview: $(CRT0_OBJ) programs/apps/vdpview.bin
 
 # === High-Res VDP Viewer ===
-programs/hrview.o: programs/hrview.c
+programs/apps/hrview.o: programs/apps/hrview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/hrview.elf: build/app.ld $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/hrview.o $(GFX_OBJ) -lc -lgcc
+programs/apps/hrview.elf: build/app.ld $(CRT0_OBJ) programs/apps/hrview.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/hrview.o $(GFX_OBJ) -lc -lgcc
 
-hrview: $(CRT0_OBJ) programs/hrview.bin
+hrview: $(CRT0_OBJ) programs/apps/hrview.bin
 
 # === Raster Palette Demo ===
-programs/raster.o: programs/raster.c
+programs/apps/raster.o: programs/apps/raster.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/raster.elf: build/app.ld $(CRT0_OBJ) programs/raster.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/raster.o $(GFX_OBJ) -lc -lgcc
+programs/apps/raster.elf: build/app.ld $(CRT0_OBJ) programs/apps/raster.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/raster.o $(GFX_OBJ) -lc -lgcc
 
-raster: $(CRT0_OBJ) programs/raster.bin
+raster: $(CRT0_OBJ) programs/apps/raster.bin
 
 # === Ekakiuta (絵描き歌) ===
-programs/ekakiuta.o: programs/ekakiuta.c
+programs/apps/ekakiuta.o: programs/apps/ekakiuta.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/ekakiuta.elf: build/app.ld $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/ekakiuta.o $(GFX_OBJ) -lc -lgcc
+programs/apps/ekakiuta.elf: build/app.ld $(CRT0_OBJ) programs/apps/ekakiuta.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ekakiuta.o $(GFX_OBJ) -lc -lgcc
 
-ekakiuta: $(CRT0_OBJ) programs/ekakiuta.bin
+ekakiuta: $(CRT0_OBJ) programs/apps/ekakiuta.bin
 
 # === VBZ Vector Viewer ===
-programs/vbzview.o: programs/vbzview.c
+programs/apps/vbzview.o: programs/apps/vbzview.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/vbzview.o $(GFX_OBJ) $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/vbzview.o $(GFX_OBJ) -lc -lgcc
+programs/apps/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vbzview.o $(GFX_OBJ) $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/apps/vbzview.o $(GFX_OBJ) -lc -lgcc
 
-vbzview: $(CRT0_OBJ) programs/vbzview.bin
+vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 
 # === libos32snd (サウンドライブラリ) ===
 programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libos32snd/libos32snd.h
@@ -374,13 +381,13 @@ programs/libfiler/filer_core.o: programs/libfiler/filer_core.c programs/libfiler
 FILER_OBJ = programs/libfiler/filer_core.o
 MDLIB_OBJ = programs/libmd/md_parse.o
 
-programs/mdview.o: programs/mdview.c programs/libmd/libmd.h programs/libfiler/libfiler.h
+programs/apps/mdview.o: programs/apps/mdview.c programs/libmd/libmd.h programs/libfiler/libfiler.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
 
-programs/mdview.elf: build/app.ld $(CRT0_OBJ) programs/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
+programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
 
-mdview: $(CRT0_OBJ) programs/mdview.bin
+mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
@@ -405,9 +412,25 @@ programs/libos32/syscalls.o: programs/libos32/syscalls.c include/os32_kapi_share
 programs/libos32/dbgserial.o: programs/libos32/dbgserial.c programs/libos32/dbgserial.h include/os32_kapi_shared.h
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/%.elf: programs/%.c build/app.ld $(CRT0_OBJ)
-	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/$*.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/$*.o -lc -lgcc
+programs/cmds/%.elf: programs/cmds/%.c build/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/cmds/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cmds/$*.o -lc -lgcc
+
+programs/apps/%.elf: programs/apps/%.c build/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/apps/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/$*.o -lc -lgcc
+
+programs/tests/%.elf: programs/tests/%.c build/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/tests/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/$*.o -lc -lgcc
+
+programs/tests/bench/%.elf: programs/tests/bench/%.c build/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/tests/bench/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/bench/$*.o -lc -lgcc
+
+programs/system/%.elf: programs/system/%.c build/app.ld $(CRT0_OBJ)
+	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/system/$*.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/$*.o -lc -lgcc
 
 programs/%.raw: programs/%.elf
 	$(OBJCOPY) -O binary $< $@
@@ -487,7 +510,7 @@ iso: packages
 	genisoimage -o images/os32_install.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/*.o programs/*.elf programs/*.raw programs/*.bin programs/crt0.o programs/shell/*.o programs/edit/*.o programs/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 

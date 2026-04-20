@@ -44,59 +44,59 @@ filesystem:
       tags: [core]
 
     # --- システム管理プログラム → /sbin/ ---
-    - host: programs/install.bin
+    - host: programs/system/install.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/crash.bin
+    - host: programs/tests/crash.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/bench.bin
+    - host: programs/tests/bench.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/restest.bin
+    - host: programs/tests/restest.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/cdinst.bin
+    - host: programs/system/cdinst.bin
       guest: /sbin/
       tags: [programs]
 
     # --- ユーザー・デモプログラム → /usr/bin/ ---
-    - host: programs/edit.bin
+    - host: programs/apps/edit.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/gfx_demo.bin
+    - host: programs/apps/gfx_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/demo1.bin
+    - host: programs/apps/demo1.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/ekakiuta.bin
+    - host: programs/apps/ekakiuta.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/vbzview.bin
+    - host: programs/apps/vbzview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/hrview.bin
+    - host: programs/apps/hrview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/vdpview.bin
+    - host: programs/apps/vdpview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/spr_test.bin
+    - host: programs/apps/spr_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/raster.bin
+    - host: programs/apps/raster.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/fep_test.bin
+    - host: programs/tests/fep_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/mdview.bin
+    - host: programs/apps/mdview.bin
       guest: /usr/bin/
       tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
-    - host: "programs/*.bin"
+    - host: "programs/cmds/*.bin"
       guest: /bin/
       type: glob
       exclude:
@@ -136,18 +136,18 @@ filesystem:
       tags: [data]
 
     # --- テスト用ファイル ---
-    - host: programs/test.txt
+    - host: programs/tests/data/test.txt
       guest: /home/user/test.txt
       tags: [test]
 
-    - host: programs/test_utf8.txt
+    - host: programs/tests/data/test_utf8.txt
       guest: /home/user/test_utf8.txt
       tags: [test]
 
-    - host: programs/test_pager.txt
+    - host: programs/tests/data/test_pager.txt
       guest: /home/user/test_pager.txt
       tags: [test]
 
-    - host: programs/test_script.bat
+    - host: programs/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
