@@ -1,393 +1,506 @@
 /* ======================================================================== */
-/*  PYXEL_TEST — libpyxel インフラ動作検証デモ                              */
+/*  PYXEL_TEST — libpyxel Phase 2 包括テスト                                */
 /*                                                                          */
-/*  Pyxel互換の描画基盤 (パレット, 2倍座標, プリミティブ, ポーリング入力,    */
-/*  ゲームループ, dirty rect転送) が正しく動作するか視覚的に確認する。       */
+/*  libpyxel の全APIを視覚的に検証するデモプログラム。                       */
+/*  複数のテスト画面を用意し、キーで切り替えて確認する。                     */
+/*                                                                          */
+/*  テスト画面:                                                              */
+/*    1: プリミティブ描画 (rect, rectb, circ, circb, tri, trib, line)       */
+/*    2: 入力テスト (btn, btnp, btnr の動作確認)                            */
+/*    3: パレットスワップ (pyxel_pal / pyxel_pal_reset)                     */
+/*    4: カメラ・クリッピング (pyxel_camera / pyxel_clip)                   */
 /*                                                                          */
 /*  操作:                                                                   */
-/*    矢印キー: カーソル移動 (Pyxel座標系 256x192)                          */
-/*    Zキー:    描画色切替                                                  */
-/*    Xキー:    16色パレット表示トグル                                      */
-/*    SPACE:    SE再生テスト                                                 */
-/*    ESCキー:  終了                                                        */
+/*    1-4:    テスト画面切替                                                */
+/*    矢印:  カーソル移動 / カメラ移動                                      */
+/*    Z:     アクション (色切替 / パレットスワップ)                          */
+/*    X:     サブ機能トグル                                                  */
+/*    SPACE: SE再生テスト                                                    */
+/*    ESC:   終了                                                           */
 /* ======================================================================== */
 
 #include <stdio.h>
 #include <string.h>
-#include "os32api.h"
+#include "pyxel.h"
 #include "libos32gfx.h"
 
 static KernelAPI *kapi = NULL;
 
 /* ======================================================================== */
-/*  Pyxel互換定数 (04_API_MAPPING.md §2, §3 準拠)                          */
+/*  共通状態                                                                 */
 /* ======================================================================== */
 
-/* 画面サイズ (06_IMPLEMENTATION_DETAILS.md §2-1) */
-#define PX_WIDTH     256
-#define PX_HEIGHT    192
-#define PX_SCALE     2
-#define PX_DISP_W    (PX_WIDTH * PX_SCALE)     /* 512 */
-#define PX_DISP_H    (PX_HEIGHT * PX_SCALE)    /* 384 */
+static int test_page = 0;          /* 現在のテスト画面 (0-3) */
+static int cursor_x, cursor_y;    /* カーソル位置 */
+static u8  draw_color = 10;
 
-/* UI領域 (03_SCALING.md §1) */
-#define UI_X         512
-#define UI_Y         0
-#define UI_W         128
-#define UI_H         384
-#define STATUS_Y     384
-#define STATUS_H     16
-
-/* キースキャンコード (04_API_MAPPING.md §2) */
-#define KEY_ESCAPE   0x00
-#define KEY_UP       0x3A
-#define KEY_DOWN     0x3D
-#define KEY_LEFT     0x3B
-#define KEY_RIGHT    0x3C
-#define KEY_SPACE    0x34
-#define KEY_Z        0x2A
-#define KEY_X        0x2B
-
-/* Pyxel 16色パレット → PC-98 4bit RGB (04_API_MAPPING.md §3-1) */
-/* pc98_val = (pyxel_val * 15 + 127) / 255 */
-static const u8 pyxel_palette[16][3] = {
-    { 0,  0,  0},    /* 0  黒 */
-    { 3,  3,  6},    /* 1  紺 */
-    { 7,  2,  7},    /* 2  紫 */
-    { 1,  9,  9},    /* 3  青緑 */
-    { 8,  4,  5},    /* 4  茶 */
-    { 3,  5,  9},    /* 5  暗青 */
-    {10, 11, 15},    /* 6  薄青 */
-    {14, 14, 14},    /* 7  白 */
-    {12,  1,  6},    /* 8  赤 */
-    {12,  8,  4},    /* 9  橙 */
-    {14, 11,  5},    /* 10 黄 */
-    { 7, 12, 10},    /* 11 薄緑 */
-    { 7,  9, 13},    /* 12 シアン */
-    {10, 10, 10},    /* 13 灰 */
-    {15,  9,  9},    /* 14 ピンク */
-    {14, 12, 10}     /* 15 肌色 */
-};
-
-/* ======================================================================== */
-/*  Pyxelエミュレーション関数群                                              */
-/* ======================================================================== */
-
-/* Pyxelパレットを設定 */
-static void px_set_palette(void)
+/* UI領域テキスト描画ヘルパー */
+static int ui_line;
+static void ui_reset(void) { ui_line = 4; }
+static void ui_text(const char *s, u8 col)
 {
-    int i;
-    for (i = 0; i < 16; i++) {
-        kapi->gfx_set_palette(i,
-            pyxel_palette[i][0],
-            pyxel_palette[i][1],
-            pyxel_palette[i][2]);
-    }
+    kcg_draw_utf8(PYXEL_UI_X + 4, ui_line, s, col, 0);
+    ui_line += 16;
 }
-
-/* Pyxel座標 → PC-98実座標変換 pset */
-static void px_pset(int x, int y, u8 col)
+static void ui_text_f(u8 col, const char *fmt, int val)
 {
-    if (x < 0 || x >= PX_WIDTH || y < 0 || y >= PX_HEIGHT) return;
-    gfx_fill_rect(x * PX_SCALE, y * PX_SCALE, PX_SCALE, PX_SCALE, col);
-}
-
-/* Pyxel座標系の矩形 (塗りつぶし) */
-static void px_rect(int x, int y, int w, int h, u8 col)
-{
-    gfx_fill_rect(x * PX_SCALE, y * PX_SCALE,
-                  w * PX_SCALE, h * PX_SCALE, col);
-}
-
-/* Pyxel座標系の矩形 (枠のみ) */
-static void px_rectb(int x, int y, int w, int h, u8 col)
-{
-    gfx_rect(x * PX_SCALE, y * PX_SCALE,
-             w * PX_SCALE, h * PX_SCALE, col);
-}
-
-/* Pyxel座標系の線 */
-static void px_line(int x0, int y0, int x1, int y1, u8 col)
-{
-    gfx_line(x0 * PX_SCALE, y0 * PX_SCALE,
-             x1 * PX_SCALE, y1 * PX_SCALE, col);
-}
-
-/* Pyxel座標系の円 (塗りつぶし) */
-static void px_circ(int cx, int cy, int r, u8 col)
-{
-    gfx_fill_circle(cx * PX_SCALE, cy * PX_SCALE, r * PX_SCALE, col);
-}
-
-/* Pyxel座標系の円 (枠のみ) */
-static void px_circb(int cx, int cy, int r, u8 col)
-{
-    gfx_circle(cx * PX_SCALE, cy * PX_SCALE, r * PX_SCALE, col);
-}
-
-/* ゲーム領域クリア */
-static void px_cls(u8 col)
-{
-    gfx_fill_rect(0, 0, PX_DISP_W, PX_DISP_H, col);
+    char buf[48];
+    sprintf(buf, fmt, val);
+    ui_text(buf, col);
 }
 
 /* ======================================================================== */
-/*  ゲーム状態                                                              */
+/*  テスト1: プリミティブ描画                                                */
 /* ======================================================================== */
 
-static int cursor_x = PX_WIDTH / 2;
-static int cursor_y = PX_HEIGHT / 2;
-static u8  draw_color = 10;  /* 黄色 */
-static int show_palette = 0;
-static int frame_count = 0;
-static int fps = 0;
-static int fps_frames = 0;
-static u32 fps_tick = 0;
-
-/* 描画軌跡バッファ: 簡易的なピクセルトレイル */
-#define TRAIL_MAX 64
-static int trail_x[TRAIL_MAX];
-static int trail_y[TRAIL_MAX];
-static u8  trail_col[TRAIL_MAX];
-static int trail_count = 0;
-static int trail_head = 0;
-
-/* ======================================================================== */
-/*  update() — ゲームロジック更新                                            */
-/* ======================================================================== */
-static void game_update(void)
+static void test1_update(void)
 {
     int speed = 2;
+    if (pyxel_btn(PYXEL_KEY_UP)    && cursor_y > 0)        cursor_y -= speed;
+    if (pyxel_btn(PYXEL_KEY_DOWN)  && cursor_y < PYXEL_HEIGHT - 1) cursor_y += speed;
+    if (pyxel_btn(PYXEL_KEY_LEFT)  && cursor_x > 0)        cursor_x -= speed;
+    if (pyxel_btn(PYXEL_KEY_RIGHT) && cursor_x < PYXEL_WIDTH - 1)  cursor_x += speed;
 
-    /* 矢印キーでカーソル移動 (ポーリング方式: kbd_is_pressed) */
-    if (kapi->kbd_is_pressed(KEY_UP)    && cursor_y > 0)
-        cursor_y -= speed;
-    if (kapi->kbd_is_pressed(KEY_DOWN)  && cursor_y < PX_HEIGHT - 1)
-        cursor_y += speed;
-    if (kapi->kbd_is_pressed(KEY_LEFT)  && cursor_x > 0)
-        cursor_x -= speed;
-    if (kapi->kbd_is_pressed(KEY_RIGHT) && cursor_x < PX_WIDTH - 1)
-        cursor_x += speed;
+    if (pyxel_btnp(PYXEL_KEY_Z, 0, 0)) {
+        draw_color = (draw_color + 1) % 16;
+        if (draw_color == 0) draw_color = 1;
+    }
+}
 
-    /* Zキー: 描画色切替 (フレーム差分で1回だけ) */
-    if (kapi->kbd_is_pressed(KEY_Z)) {
-        if (frame_count % 10 == 0) {
-            draw_color = (draw_color + 1) % 16;
-            if (draw_color == 0) draw_color = 1; /* 色0は背景色なので飛ばす */
+static void test1_draw(void)
+{
+    int i;
+
+    pyxel_cls(0);
+
+    /* グリッド */
+    for (i = 0; i < PYXEL_WIDTH; i += 32)
+        pyxel_line(i, 0, i, PYXEL_HEIGHT - 1, 1);
+    for (i = 0; i < PYXEL_HEIGHT; i += 32)
+        pyxel_line(0, i, PYXEL_WIDTH - 1, i, 1);
+
+    /* 塗りつぶし矩形 */
+    pyxel_rect(8, 8, 28, 18, 8);
+    pyxel_text(10, 30, "rect", 7);
+
+    /* 枠矩形 */
+    pyxel_rectb(48, 8, 28, 18, 10);
+    pyxel_text(50, 30, "rectb", 7);
+
+    /* 塗り円 */
+    pyxel_circ(110, 20, 14, 11);
+    pyxel_text(98, 38, "circ", 7);
+
+    /* 枠円 */
+    pyxel_circb(155, 20, 14, 6);
+    pyxel_text(143, 38, "circb", 7);
+
+    /* 塗り三角形 */
+    pyxel_tri(200, 8, 230, 35, 185, 30, 14);
+    pyxel_text(195, 38, "tri", 7);
+
+    /* 枠三角形 */
+    pyxel_trib(240, 8, 255, 35, 225, 30, 9);
+    pyxel_text(230, 38, "trib", 7);
+
+    /* 線 */
+    pyxel_line(8, 56, 120, 80, 3);
+    pyxel_line(8, 80, 120, 56, 12);
+    pyxel_text(8, 84, "line", 7);
+
+    /* テキスト表示テスト */
+    pyxel_text(8, 100, "pyxel_text test!", 7);
+    pyxel_text(8, 116, "ABCDEFGHIJ 0123", 6);
+
+    /* pset でドット描画 (小さい星型) */
+    for (i = 0; i < 16; i++) {
+        pyxel_pset(140 + i * 4, 60, (u8)(i % 16));
+    }
+    pyxel_text(140, 68, "pset 16 colors", 7);
+
+    /* カーソル */
+    pyxel_rect(cursor_x - 1, cursor_y - 1, 3, 3, draw_color);
+
+    /* UI */
+    ui_reset();
+    ui_text("TEST 1", 7);
+    ui_text("Primitives", 10);
+    ui_line += 8;
+    ui_text_f(6, "FPS: %d", pyxel_fps);
+    ui_text_f(13, "X:%d Y:%d", cursor_x);
+    ui_text_f(draw_color, "COL: %d", draw_color);
+    ui_line += 8;
+    ui_text("Arrow:Move", 7);
+    ui_text("Z:Color", 7);
+    ui_text("1-4:Page", 7);
+    ui_text("ESC:Quit", 7);
+}
+
+/* ======================================================================== */
+/*  テスト2: 入力テスト (btn / btnp / btnr)                                  */
+/* ======================================================================== */
+
+static int btnp_count = 0;
+static int btnr_count = 0;
+static int btn_held = 0;
+static int last_btnp_key = -1;
+static int last_btnr_key = -1;
+static int repeat_count = 0;
+
+static void test2_update(void)
+{
+    /* btnp テスト (Zキー: 即時トリガー) */
+    if (pyxel_btnp(PYXEL_KEY_Z, 0, 0)) {
+        btnp_count++;
+        last_btnp_key = PYXEL_KEY_Z;
+    }
+    /* btnp リピートテスト (Xキー: 15フレームhold, 5フレームrepeat) */
+    if (pyxel_btnp(PYXEL_KEY_X, 15, 5)) {
+        repeat_count++;
+    }
+    /* btnr テスト (SPACEキー: リリース検出) */
+    if (pyxel_btnr(PYXEL_KEY_SPACE)) {
+        btnr_count++;
+        last_btnr_key = PYXEL_KEY_SPACE;
+    }
+    /* btn テスト (上キー: 押下中カウント) */
+    if (pyxel_btn(PYXEL_KEY_UP)) {
+        btn_held++;
+    }
+    /* 矢印キーでカーソル移動 */
+    if (pyxel_btn(PYXEL_KEY_LEFT)  && cursor_x > 0)        cursor_x -= 2;
+    if (pyxel_btn(PYXEL_KEY_RIGHT) && cursor_x < PYXEL_WIDTH - 1)  cursor_x += 2;
+    if (pyxel_btn(PYXEL_KEY_DOWN)  && cursor_y < PYXEL_HEIGHT - 1) cursor_y += 2;
+    if (pyxel_btn(PYXEL_KEY_UP)    && cursor_y > 0)        cursor_y -= 2;
+}
+
+static void test2_draw(void)
+{
+    int y;
+    char buf[64];
+
+    pyxel_cls(0);
+
+    y = 8;
+    pyxel_text(8, y, "=== INPUT TEST ===", 7);
+    y += 20;
+
+    /* btn 状態表示 */
+    sprintf(buf, "btn(UP) held: %d frames", btn_held);
+    pyxel_text(8, y, buf, pyxel_btn(PYXEL_KEY_UP) ? 10 : 13);
+    y += 14;
+
+    /* btnp 状態表示 */
+    sprintf(buf, "btnp(Z) count: %d", btnp_count);
+    pyxel_text(8, y, buf, pyxel_btnp(PYXEL_KEY_Z, 0, 0) ? 10 : 6);
+    y += 14;
+
+    /* btnp リピート */
+    sprintf(buf, "btnp(X,15,5) rpt: %d", repeat_count);
+    pyxel_text(8, y, buf, pyxel_btn(PYXEL_KEY_X) ? 14 : 6);
+    y += 14;
+
+    /* btnr 状態表示 */
+    sprintf(buf, "btnr(SPC) count: %d", btnr_count);
+    pyxel_text(8, y, buf, 12);
+    y += 20;
+
+    /* 現在のキー状態をビジュアル表示 */
+    pyxel_text(8, y, "Key state:", 7);
+    y += 14;
+
+    /* 矢印キー表示 */
+    pyxel_rectb(48, y, 12, 12, 13);
+    pyxel_rectb(32, y + 14, 12, 12, 13);
+    pyxel_rectb(48, y + 14, 12, 12, 13);
+    pyxel_rectb(64, y + 14, 12, 12, 13);
+
+    if (pyxel_btn(PYXEL_KEY_UP))    pyxel_rect(49, y + 1, 10, 10, 10);
+    if (pyxel_btn(PYXEL_KEY_LEFT))  pyxel_rect(33, y + 15, 10, 10, 10);
+    if (pyxel_btn(PYXEL_KEY_DOWN))  pyxel_rect(49, y + 15, 10, 10, 10);
+    if (pyxel_btn(PYXEL_KEY_RIGHT)) pyxel_rect(65, y + 15, 10, 10, 10);
+
+    /* Z/X/SPACE */
+    pyxel_rectb(100, y, 14, 12, 13);
+    pyxel_rectb(118, y, 14, 12, 13);
+    pyxel_rectb(100, y + 14, 32, 12, 13);
+    pyxel_text(103, y + 2, "Z", 7);
+    pyxel_text(121, y + 2, "X", 7);
+    pyxel_text(104, y + 16, "SPC", 7);
+
+    if (pyxel_btn(PYXEL_KEY_Z))     pyxel_rect(101, y + 1, 12, 10, 8);
+    if (pyxel_btn(PYXEL_KEY_X))     pyxel_rect(119, y + 1, 12, 10, 8);
+    if (pyxel_btn(PYXEL_KEY_SPACE)) pyxel_rect(101, y + 15, 30, 10, 8);
+
+    /* カーソル */
+    pyxel_circ(cursor_x, cursor_y, 3, draw_color);
+
+    /* UI */
+    ui_reset();
+    ui_text("TEST 2", 7);
+    ui_text("Input", 10);
+    ui_line += 8;
+    ui_text_f(6, "FPS: %d", pyxel_fps);
+    ui_line += 8;
+    ui_text("Z:btnp", 7);
+    ui_text("X:repeat", 7);
+    ui_text("SPC:btnr", 7);
+    ui_text("UP:held", 7);
+}
+
+/* ======================================================================== */
+/*  テスト3: パレットスワップ                                                */
+/* ======================================================================== */
+
+static int pal_swapped = 0;
+
+static void test3_update(void)
+{
+    if (pyxel_btnp(PYXEL_KEY_Z, 0, 0)) {
+        pal_swapped = !pal_swapped;
+        if (pal_swapped) {
+            /* 赤(8) ↔ 青緑(3), 黄(10) ↔ ピンク(14) */
+            pyxel_pal(8, 3);
+            pyxel_pal(3, 8);
+            pyxel_pal(10, 14);
+            pyxel_pal(14, 10);
+        } else {
+            pyxel_pal_reset();
+        }
+    }
+}
+
+static void test3_draw(void)
+{
+    int i, px, py;
+
+    pyxel_cls(0);
+
+    pyxel_text(8, 8, "=== PALETTE SWAP ===", 7);
+    pyxel_text(8, 26, pal_swapped ? "SWAPPED (Z to reset)" : "DEFAULT (Z to swap)", 7);
+
+    /* 16色パレット表示 */
+    for (i = 0; i < 16; i++) {
+        px = 16 + (i % 8) * 28;
+        py = 50 + (i / 8) * 36;
+        pyxel_rect(px, py, 24, 24, i);
+        pyxel_rectb(px, py, 24, 24, 7);
+    }
+
+    /* カラーバリエーション矩形 */
+    pyxel_rect(16,  130, 50, 20, 8);    /* 赤 (スワップ対象) */
+    pyxel_text(20, 132, "RED=8", 7);
+
+    pyxel_rect(80,  130, 50, 20, 3);    /* 青緑 (スワップ対象) */
+    pyxel_text(84, 132, "GRN=3", 7);
+
+    pyxel_rect(144, 130, 50, 20, 10);   /* 黄 (スワップ対象) */
+    pyxel_text(148, 132, "YLW=10", 7);
+
+    pyxel_rect(16,  160, 50, 20, 14);   /* ピンク (スワップ対象) */
+    pyxel_text(20, 162, "PNK=14", 7);
+
+    /* UI */
+    ui_reset();
+    ui_text("TEST 3", 7);
+    ui_text("Palette", 10);
+    ui_line += 8;
+    ui_text_f(6, "FPS: %d", pyxel_fps);
+    ui_line += 8;
+    ui_text(pal_swapped ? "SWAPPED" : "DEFAULT", pal_swapped ? 8 : 11);
+    ui_text("Z:Toggle", 7);
+}
+
+/* ======================================================================== */
+/*  テスト4: カメラ・クリッピング                                            */
+/* ======================================================================== */
+
+static int cam_x = 0, cam_y = 0;
+static int clip_on = 0;
+
+static void test4_update(void)
+{
+    /* 矢印キーでカメラ移動 */
+    if (pyxel_btn(PYXEL_KEY_UP))    cam_y -= 2;
+    if (pyxel_btn(PYXEL_KEY_DOWN))  cam_y += 2;
+    if (pyxel_btn(PYXEL_KEY_LEFT))  cam_x -= 2;
+    if (pyxel_btn(PYXEL_KEY_RIGHT)) cam_x += 2;
+
+    /* Zキーでクリッピング切替 */
+    if (pyxel_btnp(PYXEL_KEY_Z, 0, 0)) {
+        clip_on = !clip_on;
+        if (clip_on) {
+            pyxel_clip(64, 48, 128, 96);
+        } else {
+            pyxel_clip_reset();
         }
     }
 
-    /* Xキー: パレット表示トグル */
-    if (kapi->kbd_is_pressed(KEY_X)) {
-        if (frame_count % 15 == 0) {
-            show_palette = !show_palette;
-        }
+    /* Xキーでカメラリセット */
+    if (pyxel_btnp(PYXEL_KEY_X, 0, 0)) {
+        cam_x = 0;
+        cam_y = 0;
+    }
+
+    pyxel_camera(cam_x, cam_y);
+}
+
+static void test4_draw(void)
+{
+    int i;
+    char buf[48];
+
+    pyxel_cls(0);
+
+    /* グリッド (カメラ移動で動く) */
+    for (i = 0; i < 512; i += 32) {
+        pyxel_line(i, 0, i, 384, 1);
+    }
+    for (i = 0; i < 384; i += 32) {
+        pyxel_line(0, i, 512, i, 1);
+    }
+
+    /* 固定位置のオブジェクト (カメラの影響を受ける) */
+    pyxel_rect(40, 40, 30, 20, 8);
+    pyxel_text(42, 44, "A", 7);
+
+    pyxel_circ(128, 96, 20, 11);
+    pyxel_text(120, 92, "B", 7);
+
+    pyxel_tri(200, 50, 230, 90, 180, 80, 9);
+    pyxel_text(198, 68, "C", 7);
+
+    pyxel_rectb(60, 100, 60, 40, 6);
+    pyxel_text(62, 104, "D", 7);
+
+    /* クリッピング領域の可視化 (カメラリセットして描画) */
+    pyxel_camera(0, 0);
+    if (clip_on) {
+        pyxel_rectb(64, 48, 128, 96, 14);
+        pyxel_text(66, 50, "CLIP", 14);
+    }
+
+    /* カメラ情報テキスト */
+    sprintf(buf, "CAM:(%d,%d)", cam_x, cam_y);
+    pyxel_text(4, 4, buf, 7);
+
+    /* カメラを元に戻す */
+    pyxel_camera(cam_x, cam_y);
+
+    /* UI */
+    pyxel_camera(0, 0); /* UI描画はカメラなし */
+    ui_reset();
+    ui_text("TEST 4", 7);
+    ui_text("Camera", 10);
+    ui_line += 8;
+    ui_text_f(6, "FPS: %d", pyxel_fps);
+    ui_text_f(13, "CX:%d", cam_x);
+    ui_text_f(13, "CY:%d", cam_y);
+    ui_text(clip_on ? "CLIP:ON" : "CLIP:OFF", clip_on ? 14 : 13);
+    ui_line += 8;
+    ui_text("Arrow:Cam", 7);
+    ui_text("Z:Clip", 7);
+    ui_text("X:Reset", 7);
+    pyxel_camera(cam_x, cam_y); /* カメラを戻す */
+}
+
+/* ======================================================================== */
+/*  メインのupdate/draw — テスト画面をディスパッチ                           */
+/* ======================================================================== */
+
+static void update(void)
+{
+    /* Xキーでページ送り (pyxel_btnpエッジ検出) */
+    if (pyxel_btnp(PYXEL_KEY_X, 0, 0)) {
+        test_page = (test_page + 1) % 4;
+        pyxel_pal_reset();
+        pyxel_camera(0, 0);
+        pyxel_clip_reset();
+        cam_x = 0;
+        cam_y = 0;
+        clip_on = 0;
+        pal_swapped = 0;
     }
 
     /* SPACE: SE再生 */
-    if (kapi->kbd_is_pressed(KEY_SPACE)) {
-        if (frame_count % 30 == 0) {
-            kapi->snd_se_play_raw(36, 5, 1); /* C3, 50ms, 矩形波 */
-        }
+    if (pyxel_btnp(PYXEL_KEY_SPACE, 0, 0) && test_page != 1) {
+        if (kapi) kapi->snd_se_play_raw(36, 5, 1);
     }
 
-    /* 軌跡を記録 */
-    trail_x[trail_head] = cursor_x;
-    trail_y[trail_head] = cursor_y;
-    trail_col[trail_head] = draw_color;
-    trail_head = (trail_head + 1) % TRAIL_MAX;
-    if (trail_count < TRAIL_MAX) trail_count++;
-
-    frame_count++;
+    /* テスト画面ごとのupdate */
+    switch (test_page) {
+    case 0: test1_update(); break;
+    case 1: test2_update(); break;
+    case 2: test3_update(); break;
+    case 3: test4_update(); break;
+    }
 }
 
-/* ======================================================================== */
-/*  draw() — 描画処理                                                       */
-/* ======================================================================== */
-static void game_draw(void)
+static void draw(void)
 {
-    int i, idx;
-    char buf[48];
+    int i;
 
-    /* ゲーム領域クリア */
-    px_cls(0);
+    /* === UI領域のクリア (テスト画面描画の前に行う) === */
+    gfx_fill_rect(PYXEL_UI_X, PYXEL_UI_Y, PYXEL_UI_W, PYXEL_UI_H, 0);
 
-    /* --- デモ描画: プリミティブのショーケース --- */
-
-    /* 格子線 (暗色) */
-    for (i = 0; i < PX_WIDTH; i += 32) {
-        px_line(i, 0, i, PX_HEIGHT - 1, 1);
-    }
-    for (i = 0; i < PX_HEIGHT; i += 32) {
-        px_line(0, i, PX_WIDTH - 1, i, 1);
+    /* テスト画面ごとのdraw (ゲーム領域 + UI領域テキスト) */
+    switch (test_page) {
+    case 0: test1_draw(); break;
+    case 1: test2_draw(); break;
+    case 2: test3_draw(); break;
+    case 3: test4_draw(); break;
     }
 
-    /* 塗り矩形 */
-    px_rect(10, 10, 30, 20, 8);   /* 赤 */
-    px_rect(50, 10, 30, 20, 3);   /* 青緑 */
+    /* === UI領域の共通部分 === */
 
-    /* 枠矩形 */
-    px_rectb(100, 10, 30, 20, 10); /* 黄 */
-    px_rectb(140, 10, 30, 20, 14); /* ピンク */
-
-    /* 塗り円 */
-    px_circ(40, 80, 15, 11);      /* 薄緑 */
-    px_circ(100, 80, 20, 9);      /* 橙 */
-
-    /* 枠円 */
-    px_circb(170, 80, 12, 6);     /* 薄青 */
-    px_circb(220, 80, 18, 12);    /* シアン */
-
-    /* 斜め線 */
-    px_line(0, 0, PX_WIDTH - 1, PX_HEIGHT - 1, 7);
-    px_line(PX_WIDTH - 1, 0, 0, PX_HEIGHT - 1, 13);
-
-    /* 16色パレット表示 (Xキーでトグル) */
-    if (show_palette) {
-        int px, py;
-        for (i = 0; i < 16; i++) {
-            px = 80 + (i % 8) * 12;
-            py = 120 + (i / 8) * 12;
-            px_rect(px, py, 10, 10, (u8)i);
-            px_rectb(px, py, 10, 10, 7);
-        }
-    }
-
-    /* 移動軌跡の描画 */
-    for (i = 0; i < trail_count; i++) {
-        idx = (trail_head - trail_count + i + TRAIL_MAX) % TRAIL_MAX;
-        /* 古いほど暗く */
-        if (i > trail_count - 10) {
-            px_pset(trail_x[idx], trail_y[idx], trail_col[idx]);
-        } else {
-            px_pset(trail_x[idx], trail_y[idx], 1); /* 暗い色 */
-        }
-    }
-
-    /* カーソル (十字マーク) */
-    px_pset(cursor_x, cursor_y, draw_color);
-    if (cursor_x > 0)            px_pset(cursor_x - 1, cursor_y, draw_color);
-    if (cursor_x < PX_WIDTH - 1) px_pset(cursor_x + 1, cursor_y, draw_color);
-    if (cursor_y > 0)            px_pset(cursor_x, cursor_y - 1, draw_color);
-    if (cursor_y < PX_HEIGHT - 1)px_pset(cursor_x, cursor_y + 1, draw_color);
-
-    /* ゲーム領域はdirtyとして登録 */
-    kapi->gfx_add_dirty_rect(0, 0, PX_DISP_W, PX_DISP_H);
-
-    /* --- UI領域 (右側 128px) --- */
-    gfx_fill_rect(UI_X, UI_Y, UI_W, UI_H, 0);
-
-    /* タイトル */
-    kcg_draw_utf8(UI_X + 4, 4, "PYXEL TEST", 7, 0);
-
-    /* FPS表示 */
-    sprintf(buf, "FPS: %d", fps);
-    kcg_draw_utf8(UI_X + 4, 24, buf, 10, 0);
-
-    /* カーソル座標 */
-    sprintf(buf, "X:%3d Y:%3d", cursor_x, cursor_y);
-    kcg_draw_utf8(UI_X + 4, 44, buf, 6, 0);
-
-    /* 描画色表示 */
-    sprintf(buf, "COL: %d", draw_color);
-    kcg_draw_utf8(UI_X + 4, 64, buf, draw_color, 0);
-    gfx_fill_rect(UI_X + 90, 64, 16, 16, draw_color);
-
-    /* フレームカウント */
-    sprintf(buf, "F:%d", frame_count);
-    kcg_draw_utf8(UI_X + 4, 84, buf, 13, 0);
-
-    /* 操作ガイド */
-    kcg_draw_utf8(UI_X + 4, 120, "Arrow:Move", 7, 0);
-    kcg_draw_utf8(UI_X + 4, 136, "Z:Color", 7, 0);
-    kcg_draw_utf8(UI_X + 4, 152, "X:Palette", 7, 0);
-    kcg_draw_utf8(UI_X + 4, 168, "SPC:SE", 7, 0);
-    kcg_draw_utf8(UI_X + 4, 184, "ESC:Quit", 7, 0);
-
-    /* 16色パレットバー */
+    /* 16色パレットバー (UI領域下部) */
     for (i = 0; i < 16; i++) {
-        gfx_fill_rect(UI_X + 4 + i * 7, 220, 6, 12, (u8)i);
+        gfx_fill_rect(PYXEL_UI_X + 4 + i * 7, 340, 6, 12, (u8)i);
     }
 
-    kapi->gfx_add_dirty_rect(UI_X, UI_Y, UI_W, UI_H);
+    /* ページインジケーター */
+    for (i = 0; i < 4; i++) {
+        gfx_fill_rect(PYXEL_UI_X + 20 + i * 24, 360, 18, 14,
+                       (u8)(i == test_page ? 10 : 1));
+        {
+            char num[2];
+            num[0] = '1' + i;
+            num[1] = '\0';
+            kcg_draw_utf8(PYXEL_UI_X + 25 + i * 24, 362, num,
+                          (u8)(i == test_page ? 0 : 7), (u8)(i == test_page ? 10 : 1));
+        }
+    }
 
-    /* --- ステータスバー (下部 16px) --- */
-    gfx_fill_rect(0, STATUS_Y, 640, STATUS_H, 0);
-    kcg_draw_utf8(4, STATUS_Y + 2,
-                  "libpyxel Infrastructure Test - Phase 0 Verification",
-                  13, 0);
-    kapi->gfx_add_dirty_rect(0, STATUS_Y, 640, STATUS_H);
+    kapi->gfx_add_dirty_rect(PYXEL_UI_X, PYXEL_UI_Y, PYXEL_UI_W, PYXEL_UI_H);
+
+    /* === ステータスバー === */
+    gfx_fill_rect(0, PYXEL_STATUS_Y, 640, PYXEL_STATUS_H, 0);
+    {
+        char status[64];
+        sprintf(status, "libpyxel Phase 2 Test [Page %d/4]  F:%d",
+                test_page + 1, pyxel_frame_count);
+        kcg_draw_utf8(4, PYXEL_STATUS_Y + 2, status, 13, 0);
+    }
+    kapi->gfx_add_dirty_rect(0, PYXEL_STATUS_Y, 640, PYXEL_STATUS_H);
 }
 
 /* ======================================================================== */
-/*  メインエントリ — Pyxel互換ゲームループ                                  */
-/*  04_API_MAPPING.md §5 のゲームループ構造を模擬                           */
+/*  main                                                                     */
 /* ======================================================================== */
 
 int main(int argc, char *argv[], KernelAPI *api)
 {
-    u32 last_tick;
+    (void)argc; (void)argv;
 
     if (!api) return -1;
     kapi = api;
 
-    kapi->kprintf(ATTR_WHITE, "Starting pyxel_test...\r\n");
+    cursor_x = PYXEL_WIDTH / 2;
+    cursor_y = PYXEL_HEIGHT / 2;
 
-    /* GFX初期化 */
-    libos32gfx_init(kapi);
-    kapi->kcg_init();
-    kcg_set_scale(1);
-
-    /* Pyxel 16色パレット設定 (04_API_MAPPING.md §3) */
-    px_set_palette();
-
-    /* 画面クリア + 全画面転送 */
-    gfx_clear(0);
-    gfx_present();
-
-    /* FPS計測初期化 */
-    fps_tick = kapi->get_tick();
-    last_tick = fps_tick;
-
-    /* ゲームループ (04_API_MAPPING.md §5 準拠) */
-    while (1) {
-        /* ESCキーで終了 */
-        if (kapi->kbd_is_pressed(KEY_ESCAPE)) break;
-
-        /* ユーザーのupdate関数呼び出し */
-        game_update();
-
-        /* ユーザーのdraw関数呼び出し */
-        game_draw();
-
-        /* フレームカウンタ更新 */
-        fps_frames++;
-
-        /* VRAM転送 (dirty rectのみ) */
-        kapi->gfx_present_dirty();
-
-        /* FPS計測 (1秒ごと) */
-        if (kapi->get_tick() - fps_tick >= 100) {
-            fps = fps_frames;
-            fps_frames = 0;
-            fps_tick = kapi->get_tick();
-        }
-
-        /* フレームレート制御 (VSYNC同期) */
-        while (kapi->get_tick() == last_tick) {
-            kapi->sys_halt();
-        }
-        last_tick = kapi->get_tick();
-    }
-
-    /* クリーンアップ */
-    gfx_clear(0);
-    gfx_present();
-    libos32gfx_shutdown();
-    kapi->tvram_clear();
-
-    kapi->kprintf(ATTR_GREEN, "pyxel_test finished. Frames: %d\r\n",
-                  frame_count);
+    pyxel_init(PYXEL_WIDTH, PYXEL_HEIGHT, api);
+    pyxel_run(update, draw);
+    pyxel_quit();
 
     return 0;
 }
