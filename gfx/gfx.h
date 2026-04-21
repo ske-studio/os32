@@ -17,6 +17,10 @@
 #define GFX_WPL      40     /* words (16bit) per line */
 #define GFX_PLANE_SZ 32000  /* 80 * 400 = 32000 bytes/plane */
 
+/* 200ラインモード用定数 */
+#define GFX_HEIGHT_200   200
+#define GFX_PLANE_SZ_200 16000  /* 80 * 200 = 16000 bytes/plane */
+
 /* ======== VRAMプレーンアドレス (PC9800Bible §2-7) ======== */
 #define VRAM_PLANE_B  0xA8000UL   /* 青 / Plane 0 */
 #define VRAM_PLANE_R  0xB0000UL   /* 赤 / Plane 1 */
@@ -37,7 +41,9 @@
 
 /* ======== 初期化・終了 ======== */
 void gfx_init(void);       /* 640x400x16初期化 + バックバッファ確保 */
+void gfx_init_200(void);   /* 640x200x16初期化 (縦はHWが2倍表示) */
 void gfx_shutdown(void);   /* テキスト復帰 */
+int  gfx_get_height(void); /* 現在のGFX高さ (200 or 400) を返す */
 
 /* ======== ハードウェアスクロール ======== */
 void gfx_hardware_scroll(int lines);
@@ -53,6 +59,8 @@ void gfx_present(void);
 void gfx_present_rect(int rx, int ry, int rw, int rh);
 /* ラスタパレット付きVRAM転送 (HBLANK同期でパレット書き換え) */
 void gfx_present_raster(GFX_RasterPalTable *table);
+/* VSYNC待ちなしVRAM転送 (自前フレームレート制御用) */
+void gfx_present_nosync(void);
 
 /* ======== 描画プリミティブ (バックバッファ対象) ======== */
 void gfx_clear(u8 color);

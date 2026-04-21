@@ -16,8 +16,9 @@ extern u8 *bb_g;
 extern u8 *bb_i;
 
 extern int vram_scroll_y;
+extern int gfx_current_height;  /* 200 or 400 (gfx_init / gfx_init_200 で設定) */
 
-#define MAX_DIRTY_RECTS 32
+#define MAX_DIRTY_RECTS 64
 typedef struct {
     int count;
     GFX_Rect rects[MAX_DIRTY_RECTS];

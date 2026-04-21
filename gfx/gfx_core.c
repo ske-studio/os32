@@ -10,6 +10,8 @@ u8 *bb_r = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ);
 u8 *bb_g = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ * 2);
 u8 *bb_i = (u8 *)(MEM_GFX_BB_BASE + GFX_PLANE_SZ * 3);
 
+int gfx_current_height = GFX_HEIGHT;  /* 200 or 400 */
+
 u8 *bb[4];
 
 DirtyRectQueue dirty_queue = {0};
@@ -21,7 +23,7 @@ void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
 {
     if (!fb) return;
     fb->width = GFX_WIDTH;
-    fb->height = GFX_HEIGHT;
+    fb->height = gfx_current_height;
     fb->pitch = GFX_BPL;
     fb->planes[0] = bb[0];
     fb->planes[1] = bb[1];
@@ -29,10 +31,16 @@ void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
     fb->planes[3] = bb[3];
 }
 
+int gfx_get_height(void)
+{
+    return gfx_current_height;
+}
+
 /* ======================================================================== */
 /*  初期化・終了                                                            */
 /* ======================================================================== */
-void gfx_init(void)
+/* 共通初期化処理 (テキストVRAMクリア + バックバッファゼロクリア) */
+static void _gfx_common_init(int plane_sz)
 {
     int i;
     volatile u16 *tvram_char = (volatile u16 *)TVRAM_CHAR_BASE;
@@ -48,13 +56,21 @@ void gfx_init(void)
     }
 
     /* ゼロクリア (バックバッファ) — kmemset (rep stosd) で高速化 */
-    kmemset(bb_b, 0, GFX_PLANE_SZ);
-    kmemset(bb_r, 0, GFX_PLANE_SZ);
-    kmemset(bb_g, 0, GFX_PLANE_SZ);
-    kmemset(bb_i, 0, GFX_PLANE_SZ);
+    kmemset(bb_b, 0, plane_sz);
+    kmemset(bb_r, 0, plane_sz);
+    kmemset(bb_g, 0, plane_sz);
+    kmemset(bb_i, 0, plane_sz);
 
     _out(MODE_FF2_PORT, MFF2_16COLOR);
+}
 
+void gfx_init(void)
+{
+    gfx_current_height = GFX_HEIGHT;  /* 400ラインモード */
+
+    _gfx_common_init(GFX_PLANE_SZ);
+
+    /* GDC CSRFORM: L/R=0 (400ライン) */
     _out(GDC_GFX_CMD, GDC_GFX_400LINE);
     _out(GDC_GFX_PARAM, 0x00);
     _out(MODE_FF1_PORT, MFF1_HIRES);
@@ -68,7 +84,28 @@ void gfx_init(void)
     gfx_scroll_init();
 }
 
+void gfx_init_200(void)
+{
+    gfx_current_height = GFX_HEIGHT_200;  /* 200ラインモード */
+
+    _gfx_common_init(GFX_PLANE_SZ_200);
+
+    /* GDC CSRFORM: L/R=1 (各ライン2倍表示 → 200ライン) */
+    _out(GDC_GFX_CMD, GDC_GFX_400LINE);
+    _out(GDC_GFX_PARAM, 0x01);
+    _out(MODE_FF1_PORT, MFF1_200LINE);
+
+    _out(GDC_GFX_CMD, GDC_CMD_START);
+
+    _out(GDC_DISP_PAGE, 0x00);
+    _out(GDC_ACCESS_PAGE, 0x00);
+
+    palette_init();
+    gfx_scroll_init();
+}
+
 void gfx_shutdown(void)
 {
+    gfx_current_height = GFX_HEIGHT;
     _out(GDC_GFX_CMD, GDC_CMD_STOP);
 }

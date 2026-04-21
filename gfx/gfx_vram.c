@@ -14,6 +14,12 @@ void __cdecl gfx_add_dirty_rect(int x, int y, int w, int h)
     int i;
     GFX_Rect *r;
 
+    /* マージ判定用のギャップ閾値 (px)。
+     * この距離以内の矩形は統合する (32pxアライメントに合わせる) */
+    int gap = 32;
+
+    int new_x, new_y, new_r, new_b;
+
     if (w <= 0 || h <= 0) return;
 
     /* 32ピクセル境界 (4バイト) にアライメント:
@@ -32,14 +38,49 @@ void __cdecl gfx_add_dirty_rect(int x, int y, int w, int h)
         y = 0;
     }
     if (aligned_x + aligned_w > GFX_WIDTH) aligned_w = GFX_WIDTH - aligned_x;
-    if (y + h > GFX_HEIGHT) h = GFX_HEIGHT - y;
+    if (y + h > gfx_current_height) h = gfx_current_height - y;
 
     if (aligned_w <= 0 || h <= 0) return;
 
-    /* キューがいっぱいの場合は、最も広い領域にマージするなど単純化（全画面フルフラッシュフォールバック） */
+    /* --- マージ判定 --- */
+    new_x = aligned_x;
+    new_y = y;
+    new_r = aligned_x + aligned_w;
+    new_b = y + h;
+
+    for (i = 0; i < dirty_queue.count; i++) {
+        int ex, ey, er, eb;
+
+        r = &dirty_queue.rects[i];
+        ex = r->x;
+        ey = r->y;
+        er = ex + r->w;
+        eb = ey + r->h;
+
+        /* 完全包含チェック: 新rectが既存rectに包含されるなら何もしない */
+        if (new_x >= ex && new_y >= ey && new_r <= er && new_b <= eb) {
+            return;
+        }
+
+        /* オーバーラップ or 隣接(gap px以内)なら統合 */
+        if (new_x <= er + gap && new_r >= ex - gap &&
+            new_y <= eb + gap && new_b >= ey - gap) {
+            /* バウンディングボックスに統合 */
+            if (new_x < ex) r->x = new_x; else new_x = ex;
+            if (new_y < ey) r->y = new_y; else new_y = ey;
+            if (new_r > er) er = new_r;
+            if (new_b > eb) eb = new_b;
+            r->w = er - r->x;
+            r->h = eb - r->y;
+            return;
+        }
+    }
+
+    /* マージ対象なし → 新規追加 */
+
+    /* キューがいっぱいの場合はバウンディングボックスに圧縮 */
     if (dirty_queue.count >= MAX_DIRTY_RECTS) {
-        /* キューを圧縮 (0番目に全体を囲むBounding Boxを作成) */
-        int min_x = GFX_WIDTH, min_y = GFX_HEIGHT, max_x = 0, max_y = 0;
+        int min_x = GFX_WIDTH, min_y = gfx_current_height, max_x = 0, max_y = 0;
         for (i = 0; i < dirty_queue.count; i++) {
             if (dirty_queue.rects[i].x < min_x) min_x = dirty_queue.rects[i].x;
             if (dirty_queue.rects[i].y < min_y) min_y = dirty_queue.rects[i].y;
@@ -54,10 +95,10 @@ void __cdecl gfx_add_dirty_rect(int x, int y, int w, int h)
     }
 
     r = &dirty_queue.rects[dirty_queue.count++];
-    r->x = aligned_x;
-    r->y = y;
-    r->w = aligned_w;
-    r->h = h;
+    r->x = new_x;
+    r->y = new_y;
+    r->w = new_r - new_x;
+    r->h = new_b - new_y;
 }
 
 /* ======================================================================== */
@@ -81,7 +122,7 @@ static void _flush_dirty_queue(void)
 
         if (words <= 0) continue;
 
-        physical_y = (r->y + vram_scroll_y) % GFX_HEIGHT;
+        physical_y = (r->y + vram_scroll_y) % gfx_current_height;
         phys_off = (unsigned long)physical_y * GFX_BPL + byte_x;
         base_off = (unsigned long)r->y * GFX_BPL + byte_x;
 
@@ -94,7 +135,7 @@ static void _flush_dirty_queue(void)
             base_off += GFX_BPL;
             phys_off += GFX_BPL;
             physical_y++;
-            if (physical_y >= GFX_HEIGHT) {
+            if (physical_y >= gfx_current_height) {
                 physical_y = 0;
                 phys_off = byte_x;
             }
@@ -115,6 +156,19 @@ void __cdecl gfx_present_dirty(void)
     /* HINT/NOTE: 古いプログラムはI/O 0x60 を監視する */
     while ((_in(0x60) & 0x20) == 0) { }
     
+    _flush_dirty_queue();
+}
+
+/* ======================================================================== */
+/*  KAPI: VSYNC待ちなしでダーティ領域を即座にVRAM転送する                  */
+/*                                                                          */
+/*  pyxel_run 等、自前のフレームレート制御を持つプログラム向け。             */
+/*  VSYNC同期しないため軽微なティアリングが発生しうるが、                    */
+/*  VSYNC待ちの最大16.7ms遅延を完全に排除できる。                           */
+/* ======================================================================== */
+void __cdecl gfx_present_nosync(void)
+{
+    if (dirty_queue.count == 0) return;
     _flush_dirty_queue();
 }
 
@@ -158,7 +212,7 @@ static void _flush_dirty_line(int line)
         words  = byte_w >> 1;
         if (words <= 0) continue;
 
-        physical_y = (line + vram_scroll_y) % GFX_HEIGHT;
+        physical_y = (line + vram_scroll_y) % gfx_current_height;
         phys_off = (unsigned long)physical_y * GFX_BPL + byte_x;
         base_off = (unsigned long)line * GFX_BPL + byte_x;
 
@@ -216,7 +270,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
 
     if (has_dirty) {
         /* VRAM転送 + パレット書き換え */
-        for (line = 0; line < GFX_HEIGHT; line++) {
+        for (line = 0; line < gfx_current_height; line++) {
             _flush_dirty_line(line);
 
             while (entry_idx < table->count &&

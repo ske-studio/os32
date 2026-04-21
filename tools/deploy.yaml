@@ -100,6 +100,12 @@ filesystem:
     - host: programs/tests/pyxel_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/gfx200_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/gfx_demo200.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"

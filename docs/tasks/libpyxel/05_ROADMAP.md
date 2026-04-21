@@ -69,11 +69,11 @@ Phase 5: デモアプリ・最適化             ← 統合テスト
 - `programs/libpyxel/pyxel_gfx.c`
 
 **実装内容**:
-1. `pyxel_init(256, 192)`: GFX初期化 + Pyxel公式16色パレット設定(PC-98 4bit減色)
+1. `pyxel_init(256, 192)`: GFX初期化 + Pyxelカスタム16色パレット設定 (初期値はPyxelデフォルト、アプリから変更可能)
 2. `pyxel_run(update, draw)`: メインループ (VSYNC同期)
 3. `pyxel_cls(col)`: ゲーム領域クリア
-4. `pyxel_pset(x,y,col)`: 点描画 (2倍座標変換)
-5. `pyxel_line` / `pyxel_rect` / `pyxel_rectb`: 描画プリミティブ
+4. `pyxel_pset(x,y,col)`: 点描画 (libos32gfx のスケーリング描画APIをラップ)
+5. `pyxel_line` / `pyxel_rect` / `pyxel_rectb`: 描画プリミティブ (libos32gfxのスケーリングAPIをラップ)
    - `pyxel_rect` = **塗りつぶし矩形**、`pyxel_rectb` = **枠のみ矩形**
 6. `pyxel_circ` / `pyxel_circb` / `pyxel_tri` / `pyxel_trib`: 図形プリミティブ
 7. `pyxel_camera(x,y)` / `pyxel_clip(x,y,w,h)`: 描画制御
@@ -92,15 +92,21 @@ Phase 5: デモアプリ・最適化             ← 統合テスト
 
 **目的**: `pyxel_blt` / `pyxel_bltm` を実装し、リソースデータからの描画を可能にする。
 
+> **方針**: libos32gfx の `GFX_Surface` / `GFX_Sprite` システムを利用する。
+> `.os32res` のイメージバンクを `GFX_Surface` として保持し、
+> `pyxel_blt` は libos32gfx のスプライトブリットに座標変換を加えて実行する。
+> 独自のスプライト管理は行わない。
+
 **成果物**:
 - `programs/libpyxel/pyxel_res.c` (リソースローダー)
 - `pyxel_gfx.c` に `pyxel_blt` / `pyxel_bltm` / `pyxel_fill` 追加
 
 **実装内容**:
-1. `pyxel_load(path)`: `.os32res` ファイルを読み込み、内部メモリに展開
+1. `pyxel_load(path)`: `.os32res` ファイルを読み込み、`GFX_Surface` としてメモリ展開
 2. `pyxel_blt(x,y,img,u,v,w,h,colkey)`:
-   - イメージバンク(プレーナー形式)の矩形領域をゲーム領域に転送
-   - `colkey >= 0` の場合、マスク処理で透過描画
+   - イメージバンク (`GFX_Surface`) の矩形領域からスプライトを生成し描画
+   - `colkey >= 0` の場合、`gfx_create_sprite` の透過色として使用
+   - libos32gfx のスケーリング描画APIを利用
 3. `pyxel_bltm(x,y,tm,u,v,w,h,colkey)`:
    - タイルマップの指定領域を描画
    - 各タイル(8×8)をイメージバンクから切り出して配置
@@ -110,7 +116,7 @@ Phase 5: デモアプリ・最適化             ← 統合テスト
 - `sample.pyxres` から変換したデータでスプライト/タイル表示
 - 透過色が正しく機能するか
 
-**依存**: Phase 1 (変換ツール) + Phase 2 (描画基盤)
+**依存**: Phase 1 (変換ツール) + Phase 2 (描画基盤) + libos32gfx スプライトシステム
 
 ---
 

@@ -8,6 +8,9 @@
 #include "libos32gfx.h"
 #include "os32api.h"
 
+/* gfx_fill_circle \u3067 dirty rect \u767b\u9332\u3092\u56de\u907f\u3057\u3066\u76f4\u63a5\u547c\u3073\u51fa\u3059 */
+extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+
 /* ======================================================================== */
 /*  円の輪郭 (Midpoint Circle Algorithm)                                    */
 /* ======================================================================== */
@@ -23,15 +26,19 @@ void gfx_circle(int cx, int cy, int r, u8 color)
         return;
     }
 
+    /* dirty rect をバウンディングボックスで1回だけ登録 */
+    gfx_api->gfx_add_dirty_rect(cx - r, cy - r, r * 2 + 1, r * 2 + 1);
+
     while (x <= y) {
-        gfx_pixel(cx + x, cy + y, color);
-        gfx_pixel(cx - x, cy + y, color);
-        gfx_pixel(cx + x, cy - y, color);
-        gfx_pixel(cx - x, cy - y, color);
-        gfx_pixel(cx + y, cy + x, color);
-        gfx_pixel(cx - y, cy + x, color);
-        gfx_pixel(cx + y, cy - x, color);
-        gfx_pixel(cx - y, cy - x, color);
+        /* dirty rect 登録なし版で描画 */
+        gfx_pixel_nodirty(cx + x, cy + y, color);
+        gfx_pixel_nodirty(cx - x, cy + y, color);
+        gfx_pixel_nodirty(cx + x, cy - y, color);
+        gfx_pixel_nodirty(cx - x, cy - y, color);
+        gfx_pixel_nodirty(cx + y, cy + x, color);
+        gfx_pixel_nodirty(cx - y, cy + x, color);
+        gfx_pixel_nodirty(cx + y, cy - x, color);
+        gfx_pixel_nodirty(cx - y, cy - x, color);
 
         if (d < 0) {
             d += 2 * x + 3;
@@ -53,18 +60,67 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
     int x = 0;
     int y = r;
     int d = 1 - r;
+    int base;
 
     if (r <= 0) {
         if (r == 0) gfx_pixel(cx, cy, color);
         return;
     }
 
+    /* dirty rect をバウンディングボックスで1回だけ登録 */
+    gfx_api->gfx_add_dirty_rect(cx - r, cy - r, r * 2 + 1, r * 2 + 1);
+
+    /* 内部では asm_gfx_hline を直接呼び、dirty rect の個別登録を回避 */
     while (x <= y) {
-        /* 各走査線を水平線で塗る */
-        gfx_hline(cx - x, cy + y, x * 2 + 1, color);
-        gfx_hline(cx - x, cy - y, x * 2 + 1, color);
-        gfx_hline(cx - y, cy + x, y * 2 + 1, color);
-        gfx_hline(cx - y, cy - x, y * 2 + 1, color);
+        int lx, rx2, ly, hy;
+
+        /* cy + y */
+        ly = cy + y;
+        if (ly >= 0 && ly < gfx_fb.height) {
+            lx = cx - x; rx2 = cx + x;
+            if (lx < 0) lx = 0;
+            if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
+            if (lx <= rx2) {
+                base = ly * gfx_fb.pitch;
+                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+            }
+        }
+
+        /* cy - y */
+        hy = cy - y;
+        if (hy >= 0 && hy < gfx_fb.height && hy != ly) {
+            lx = cx - x; rx2 = cx + x;
+            if (lx < 0) lx = 0;
+            if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
+            if (lx <= rx2) {
+                base = hy * gfx_fb.pitch;
+                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+            }
+        }
+
+        /* cy + x */
+        ly = cy + x;
+        if (ly >= 0 && ly < gfx_fb.height) {
+            lx = cx - y; rx2 = cx + y;
+            if (lx < 0) lx = 0;
+            if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
+            if (lx <= rx2) {
+                base = ly * gfx_fb.pitch;
+                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+            }
+        }
+
+        /* cy - x */
+        hy = cy - x;
+        if (hy >= 0 && hy < gfx_fb.height && hy != ly) {
+            lx = cx - y; rx2 = cx + y;
+            if (lx < 0) lx = 0;
+            if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
+            if (lx <= rx2) {
+                base = hy * gfx_fb.pitch;
+                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+            }
+        }
 
         if (d < 0) {
             d += 2 * x + 3;

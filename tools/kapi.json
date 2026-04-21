@@ -47,6 +47,11 @@
       "args": []
     },
     {
+      "name": "gfx_init_200",
+      "ret": "void",
+      "args": []
+    },
+    {
       "name": "gfx_shutdown",
       "ret": "void",
       "args": []
@@ -698,6 +703,11 @@
     },
     {
       "name": "gfx_present_dirty",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "gfx_present_nosync",
       "ret": "void",
       "args": []
     },

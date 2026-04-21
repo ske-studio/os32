@@ -70,6 +70,27 @@ void gfx_pixel(int x, int y, u8 color)
     gfx_api->gfx_add_dirty_rect(x, y, 1, 1);
 }
 
+/* dirty rect 登録なしのピクセル描画 (バッチ描画の内部用)。
+ * 呼出し元がバウンディングボックスで一括登録する前提。 */
+void gfx_pixel_nodirty(int x, int y, u8 color)
+{
+    int offset;
+    u8 bit;
+    int p;
+
+    if (x < 0 || x >= gfx_fb.width || y < 0 || y >= gfx_fb.height) return;
+
+    offset = y * gfx_fb.pitch + (x >> 3);
+    bit = 0x80 >> (x & 7);
+
+    for (p = 0; p < 4; p++) {
+        if (color & (1 << p))
+            gfx_fb.planes[p][offset] |= bit;
+        else
+            gfx_fb.planes[p][offset] &= ~bit;
+    }
+}
+
 u8 gfx_get_pixel(int x, int y)
 {
     int offset;
@@ -156,6 +177,21 @@ void gfx_line(int x0, int y0, int x1, int y1, u8 color)
 
 void gfx_rect(int x, int y, int w, int h, u8 color)
 {
+    /* dirty rect を全体で1つだけ登録してから描画する (4辺個別登録を回避) */
+    int x2 = x + w - 1;
+    int y2 = y + h - 1;
+    int dx, dy2;
+
+    if (w <= 0 || h <= 0) return;
+
+    dx = (x < 0) ? 0 : x;
+    dy2 = (y2 >= gfx_fb.height) ? gfx_fb.height - 1 : y2;
+    if (x2 >= gfx_fb.width) x2 = gfx_fb.width - 1;
+    if (dx <= x2 && y >= 0 && y <= dy2) {
+        gfx_api->gfx_add_dirty_rect(dx & ~31, (y < 0) ? 0 : y,
+            ((x2 + 32) & ~31) - (dx & ~31), dy2 - ((y < 0) ? 0 : y) + 1);
+    }
+
     gfx_hline(x, y, w, color);
     gfx_hline(x, y + h - 1, w, color);
     gfx_vline(x, y, h, color);

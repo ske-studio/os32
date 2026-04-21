@@ -50,6 +50,8 @@ int kcg_draw_utf8(int x, int y, const char *utf8_str, u8 fg, u8 bg);
 
 /* Circle / Ellipse / Arc */
 void gfx_circle(int cx, int cy, int r, u8 color);
+/* dirty rect 登録なしのピクセル描画 (バッチ描画用内部関数) */
+void gfx_pixel_nodirty(int x, int y, u8 color);
 void gfx_fill_circle(int cx, int cy, int r, u8 color);
 void gfx_ellipse(int cx, int cy, int rx, int ry, u8 color);
 void gfx_fill_ellipse(int cx, int cy, int rx, int ry, u8 color);

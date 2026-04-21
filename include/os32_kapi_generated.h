@@ -6,6 +6,7 @@ typedef struct {
     u32 magic;
     u32 version;
     void (__cdecl *gfx_init)(void);
+    void (__cdecl *gfx_init_200)(void);
     void (__cdecl *gfx_shutdown)(void);
     void (__cdecl *gfx_present)(void);
     int (__cdecl *kbd_trygetchar)(void);
@@ -97,6 +98,7 @@ typedef struct {
     void (__cdecl *gfx_get_framebuffer)(void *fb);
     void (__cdecl *gfx_add_dirty_rect)(int x, int y, int w, int h);
     void (__cdecl *gfx_present_dirty)(void);
+    void (__cdecl *gfx_present_nosync)(void);
     void (__cdecl *gfx_present_raster)(void *table);
     void (__cdecl *kcg_read_ank)(u8 ch, u8 *buf);
     void (__cdecl *kcg_read_kanji)(u16 jis_code, u8 *buf);

@@ -36,6 +36,11 @@ void __cdecl wrap_gfx_init(void)
     gfx_init();
 }
 
+void __cdecl wrap_gfx_init_200(void)
+{
+    gfx_init_200();
+}
+
 void __cdecl wrap_gfx_shutdown(void)
 {
     gfx_shutdown();
@@ -484,6 +489,11 @@ void __cdecl wrap_gfx_add_dirty_rect(int x, int y, int w, int h)
 void __cdecl wrap_gfx_present_dirty(void)
 {
     gfx_present_dirty();
+}
+
+void __cdecl wrap_gfx_present_nosync(void)
+{
+    gfx_present_nosync();
 }
 
 void __cdecl wrap_gfx_present_raster(void *table)

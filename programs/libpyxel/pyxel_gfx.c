@@ -19,12 +19,12 @@
 static int _px(int x) { return (x - _pyxel.cam_x) * PYXEL_SCALE; }
 static int _py(int y) { return (y - _pyxel.cam_y) * PYXEL_SCALE; }
 
-/* dirty rect 登録 (実座標) */
+/* dirty rect 登録 — libos32gfx の描画プリミティブが
+ * 内部で gfx_add_dirty_rect() を呼ぶため、libpyxel 側では
+ * 二重登録を避けて何もしない (dirty_rect_optimization.md 参照) */
 static void _dirty(int rx, int ry, int rw, int rh)
 {
-    if (_pyxel.kapi) {
-        _pyxel.kapi->gfx_add_dirty_rect(rx, ry, rw, rh);
-    }
+    (void)rx; (void)ry; (void)rw; (void)rh;
 }
 
 /* ======================================================================== */

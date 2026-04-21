@@ -2,6 +2,15 @@
 
 本ドキュメントでは、OS32環境でPyxel互換のC APIを提供する「libpyxel」について、必要な関数プロトタイプ、定数群、およびソースファイルのディレクトリ構造を取りまとめる。
 
+> **アーキテクチャ方針**: libpyxel は **libos32gfx 上に構築されるラッパーレイヤー** である。
+> 独自の描画実装（Bresenham等）は持たず、すべて libos32gfx のプリミティブ・スプライト・サーフェス機能に委譲する。
+> 2倍座標変換 (256×192 → 512×384) は libos32gfx 側にスケーリング描画APIとして実装し、
+> libpyxel はそれをラップして Pyxel 互換 API を提供する。
+> libpyxel の責務は以下に限定される:
+> - Pyxel 互換 C API の提供（`pyxel_circ`, `pyxel_blt` 等）
+> - ゲームループ管理（`pyxel_run` での update/draw/present サイクル）
+> - リソース管理（`.os32res` のロードと Pyxel バンク管理）
+
 ## 1. ディレクトリ構造とソースファイル一覧
 
 libpyxel本体、変換ツール、および関連アプリのディレクトリ構成は以下の通りとする。
@@ -45,7 +54,7 @@ Pyxel準拠の定数をC89で表現する。
 #define PYXEL_WIDTH  256
 #define PYXEL_HEIGHT 192
 
-/* 内部カラーパレット数 */
+/* 内部カラーパレット数 (カスタム可能、初期値はPyxelデフォルト) */
 #define PYXEL_COLORS 16
 
 /* 表示倍率 */

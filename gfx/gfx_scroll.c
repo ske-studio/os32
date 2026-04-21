@@ -17,17 +17,25 @@ void gfx_scroll_init(void)
 void gfx_hardware_scroll(int lines)
 {
     int sad1, sl1, sad2, sl2;
+    int line_mul;
     u8 params[8];
     int i;
 
     vram_scroll_y += lines;
-    while (vram_scroll_y < 0) vram_scroll_y += GFX_HEIGHT;
-    vram_scroll_y %= GFX_HEIGHT;
+    while (vram_scroll_y < 0) vram_scroll_y += gfx_current_height;
+    vram_scroll_y %= gfx_current_height;
+
+    /*
+     * GDC SCROLL の SL は「物理表示ライン数」で指定する。
+     * 200ラインモード (CSRFORM L/R=1) では各VRAMラインが2倍表示されるため、
+     * VRAM行数に倍率 (400/gfx_current_height) を掛ける。
+     */
+    line_mul = GFX_HEIGHT / gfx_current_height;  /* 1(400line) or 2(200line) */
 
     sad1 = vram_scroll_y * GFX_WPL;
-    sl1  = GFX_HEIGHT - vram_scroll_y;
+    sl1  = (gfx_current_height - vram_scroll_y) * line_mul;
     sad2 = 0;
-    sl2  = vram_scroll_y;
+    sl2  = vram_scroll_y * line_mul;
 
     params[0] = sad1 & 0xFF;
     params[1] = (sad1 >> 8) & 0xFF;
