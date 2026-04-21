@@ -77,7 +77,7 @@ C_KERNEL = \
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libpyxel -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
@@ -198,6 +198,13 @@ programs/tests/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
 
 bench: $(CRT0_OBJ) programs/tests/bench.bin
 
+# === libpyxel Module (Pyxel互換ゲームエンジン) ===
+PYXEL_SRC = $(wildcard programs/libpyxel/*.c)
+PYXEL_OBJ = $(PYXEL_SRC:.c=.o)
+
+programs/libpyxel/%.o: programs/libpyxel/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
 # === Bench Scale2x Module (libpyxel Phase 0) ===
 BENCH_S2X_SRC = programs/tests/bench_scale2x/main.c
 BENCH_S2X_OBJ = $(BENCH_S2X_SRC:.c=.o)
@@ -214,8 +221,8 @@ bench_scale2x: $(CRT0_OBJ) programs/tests/bench_scale2x.bin
 programs/tests/pyxel_test.o: programs/tests/pyxel_test.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/tests/pyxel_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/pyxel_test.o $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/pyxel_test.o $(GFX_OBJ) -lc -lgcc
+programs/tests/pyxel_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/pyxel_test.o $(PYXEL_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/pyxel_test.o $(PYXEL_OBJ) $(GFX_OBJ) -lc -lgcc
 
 pyxel_test: $(CRT0_OBJ) programs/tests/pyxel_test.bin
 
@@ -535,7 +542,7 @@ iso: packages
 	genisoimage -o images/os32_install.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libpyxel/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 
