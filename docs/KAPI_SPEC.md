@@ -202,6 +202,10 @@ v22以降、基本的な描画プリミティブ (`gfx_clear`, `gfx_pixel`, `gfx
 1. **libos32gfx ライブラリ** (推奨): `programs/libos32gfx/` で提供されるスタティックリンクライブラリ。サーフェス、スプライト、描画プリミティブ、ダーティ矩形管理、フォントレンダリングなど高レベルな描画機能を提供します。
 2. **フレームバッファ直接操作**: `gfx_get_framebuffer()` で取得した `GFX_Framebuffer` 構造体を介して、4プレーンのバックバッファに直接書き込み、`gfx_add_dirty_rect()` + `gfx_present_dirty()` でVRAMに転送します。
 
+**ページフリッピング (200ラインモード)**:
+`gfx_init_200()` を使用すると、ページフリッピングが自動的に有効になります。
+`gfx_present_dirty()` / `gfx_present_nosync()` は非表示ページにVRAM転送後、ポートA4H/A6Hでページを切り替えます。VSYNC待ちは不要となり、ティアリングが発生しません。外部プログラム側のコード変更は不要です。
+
 ### §4-2 ラスタパレット (gfx_present_raster)
 
 v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとにパレットレジスタを書き換えることで、16色パレットの制約を超えた擬似多色表示を実現します。
@@ -209,6 +213,9 @@ v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとに
 - **引数**: `GFX_RasterPalTable *table` — ラスタパレットテーブルへのポインタ
 - **構造体**: `GFX_RasterPalEntry` (line, pal_idx, r, g, b) × 最大200エントリ
 - **動作**: dirty rectがあればVRAM転送も行い、なければパレット書き換えのみ
+- **ページフリップとの排他**: 200ラインモード (`gfx_init_200()`) ではフリップが自動有効になるため、
+  ラスタパレット操作はスキップされ `gfx_present_dirty()` にフォールバックします。
+  ラスタパレットを使用する場合は 400ラインモード (`gfx_init()`) を使用してください。
 - **libos32gfx ラッパー**: `gfx_raster_clear()`, `gfx_raster_add()`, `gfx_present_raster_only()`, `gfx_present_with_raster()`
 
 ### §4-3 FDリダイレクト・パイプAPI
@@ -267,4 +274,4 @@ v27で追加。FM音源(YM2203)の3チャンネルおよびSSG(PSG)の3チャン
 
 ---
 
-*Last Updated: 2026-04-16*
+*Last Updated: 2026-04-21*
