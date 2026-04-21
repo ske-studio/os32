@@ -33,7 +33,24 @@ import yaml
 
 # === パス設定 ===
 NHD_LOCAL = "/tmp/os32.nhd"
-NP21W_DIR = os.environ.get('NP21W_DIR', r"/tmp/np21w")
+
+# NP21W_DIR: 環境変数 → .env → .env.sample → デフォルト の順で解決
+def _resolve_np21w_dir():
+    """NP21W_DIRを.envから解決する"""
+    if os.environ.get('NP21W_DIR'):
+        return os.environ['NP21W_DIR']
+    proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for env_file in ['.env', '.env.sample']:
+        env_path = os.path.join(proj_dir, env_file)
+        if os.path.isfile(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('NP21W_DIR='):
+                        return line.split('=', 1)[1].strip()
+    return "/tmp/np21w"
+
+NP21W_DIR = _resolve_np21w_dir()
 NHD_REMOTE = os.path.join(NP21W_DIR, "os32.nhd")
 MOUNT_POINT = "/tmp/os32"
 
