@@ -71,7 +71,6 @@ static void _gfx_common_init(int plane_sz)
 void gfx_init(void)
 {
     gfx_current_height = GFX_HEIGHT;  /* 400ラインモード */
-    gfx_flip_enabled = 0;  /* 400ラインモードではフリップ無効 */
     gfx_display_page = 0;
     prev_dirty.count = 0;
 
@@ -84,8 +83,23 @@ void gfx_init(void)
 
     _out(GDC_GFX_CMD, GDC_CMD_START);
 
-    _out(GDC_DISP_PAGE, 0x00);
+    /* ページフリッピング有効化: 両ページのVRAMをゼロクリア */
     _out(GDC_ACCESS_PAGE, 0x00);
+    kmemset((u8 *)VRAM_PLANE_B, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_R, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_G, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_I, 0, GFX_PLANE_SZ);
+
+    _out(GDC_ACCESS_PAGE, 0x01);
+    kmemset((u8 *)VRAM_PLANE_B, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_R, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_G, 0, GFX_PLANE_SZ);
+    kmemset((u8 *)VRAM_PLANE_I, 0, GFX_PLANE_SZ);
+
+    /* ページ0を表示、ページ1に描画 */
+    _out(GDC_DISP_PAGE, 0x00);
+    _out(GDC_ACCESS_PAGE, 0x01);
+    gfx_flip_enabled = 1;
 
     palette_init();
     gfx_scroll_init();

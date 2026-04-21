@@ -297,11 +297,30 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
 
     if (!table || table->count == 0) return;
 
-    /* フリップモードではラスタパレット非対応:
-     * 走査中のパレットI/O操作は表示ページを前提とするため、
-     * dirty転送のみ行いパレット書き換えはスキップする */
+    /* フリップモード: VRAM転送はフリップ経由、パレット書き換えのみVSYNC同期 */
     if (gfx_flip_enabled) {
-        gfx_present_dirty();
+        /* まずフリップ転送でVRAMを更新 */
+        if (dirty_queue.count > 0 || prev_dirty.count > 0) {
+            DirtyRectQueue snapshot;
+            snapshot = dirty_queue;
+            _merge_prev_dirty();
+            _flush_dirty_queue();
+            prev_dirty = snapshot;
+            _flip_page();
+        }
+        /* VSYNC待ち → パレット書き換えのみ */
+        while ((_in(0x60) & 0x20) == 0) { }
+        __asm__ volatile("cli");
+        while (_in(GDC_STATUS_PORT) & 0x20) { }
+        for (entry_idx = 0; entry_idx < table->count; entry_idx++) {
+            GFX_RasterPalEntry *e = &table->entries[entry_idx];
+            _out(PAL_IDX_PORT, e->pal_idx);
+            _out(PAL_G_PORT, e->g & 0x0F);
+            _out(PAL_R_PORT, e->r & 0x0F);
+            _out(PAL_B_PORT, e->b & 0x0F);
+            _raster_delay();
+        }
+        __asm__ volatile("sti");
         return;
     }
 

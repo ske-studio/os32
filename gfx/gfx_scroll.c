@@ -34,10 +34,11 @@ void gfx_hardware_scroll(int lines)
     line_mul = GFX_HEIGHT / gfx_current_height;  /* 1(400line) or 2(200line) */
 
     /* ページフリッピング時: 表示ページのVRAMオフセットを加算
-     * ページ0: オフセット0, ページ1: オフセット GFX_PLANE_SZ_200/2 ワード */
+     * 1ページ分 = gfx_current_height * GFX_BPL / 2 ワード
+     * 200line: 200*80/2 = 8000w, 400line: 400*80/2 = 16000w */
     sad_base = 0;
     if (gfx_flip_enabled) {
-        sad_base = gfx_display_page * (GFX_PLANE_SZ_200 / 2);
+        sad_base = gfx_display_page * (gfx_current_height * GFX_BPL / 2);
     }
 
     sad1 = sad_base + vram_scroll_y * GFX_WPL;
