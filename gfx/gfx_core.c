@@ -15,6 +15,10 @@ int gfx_current_height = GFX_HEIGHT;  /* 200 or 400 */
 u8 *bb[4];
 
 DirtyRectQueue dirty_queue = {0};
+DirtyRectQueue prev_dirty = {0};   /* 前フレームdirty (ステイルページ対策) */
+
+int gfx_flip_enabled = 0;
+int gfx_display_page = 0;
 
 /* ======================================================================== */
 /*  KAPI: フレームバッファ取得                                              */
@@ -67,6 +71,9 @@ static void _gfx_common_init(int plane_sz)
 void gfx_init(void)
 {
     gfx_current_height = GFX_HEIGHT;  /* 400ラインモード */
+    gfx_flip_enabled = 0;  /* 400ラインモードではフリップ無効 */
+    gfx_display_page = 0;
+    prev_dirty.count = 0;
 
     _gfx_common_init(GFX_PLANE_SZ);
 
@@ -97,8 +104,25 @@ void gfx_init_200(void)
 
     _out(GDC_GFX_CMD, GDC_CMD_START);
 
-    _out(GDC_DISP_PAGE, 0x00);
+    /* ページフリッピング有効化: 両ページのVRAMをゼロクリア */
     _out(GDC_ACCESS_PAGE, 0x00);
+    kmemset((u8 *)VRAM_PLANE_B, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_R, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_G, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_I, 0, GFX_PLANE_SZ_200);
+
+    _out(GDC_ACCESS_PAGE, 0x01);
+    kmemset((u8 *)VRAM_PLANE_B, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_R, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_G, 0, GFX_PLANE_SZ_200);
+    kmemset((u8 *)VRAM_PLANE_I, 0, GFX_PLANE_SZ_200);
+
+    /* ページ0を表示、ページ1に描画 */
+    _out(GDC_DISP_PAGE, 0x00);
+    _out(GDC_ACCESS_PAGE, 0x01);
+    gfx_flip_enabled = 1;
+    gfx_display_page = 0;
+    prev_dirty.count = 0;
 
     palette_init();
     gfx_scroll_init();
@@ -106,6 +130,13 @@ void gfx_init_200(void)
 
 void gfx_shutdown(void)
 {
+    /* フリップモード解除: ページ0に復帰 */
+    if (gfx_flip_enabled) {
+        _out(GDC_DISP_PAGE, 0x00);
+        _out(GDC_ACCESS_PAGE, 0x00);
+        gfx_flip_enabled = 0;
+        gfx_display_page = 0;
+    }
     gfx_current_height = GFX_HEIGHT;
     _out(GDC_GFX_CMD, GDC_CMD_STOP);
 }

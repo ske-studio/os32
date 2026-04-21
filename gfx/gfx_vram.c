@@ -3,6 +3,8 @@
 #include "cpu_calibrate.h"
 
 static void _flush_dirty_queue(void);
+static void _merge_prev_dirty(void);
+static void _flip_page(void);
 
 /* ======================================================================== */
 /*  KAPI: ダーティレクタングルの追加 (OS管理)                              */
@@ -146,31 +148,72 @@ static void _flush_dirty_queue(void)
 }
 
 /* ======================================================================== */
+/*  ステイルページ対策: 前フレームのdirty rectを現フレームにマージ            */
+/* ======================================================================== */
+static void _merge_prev_dirty(void)
+{
+    int i;
+    for (i = 0; i < prev_dirty.count; i++) {
+        GFX_Rect *r = &prev_dirty.rects[i];
+        gfx_add_dirty_rect(r->x, r->y, r->w, r->h);
+    }
+}
+
+/* ======================================================================== */
+/*  ページ切替: 表示ページと描画ページを入れ替える (~3µs)              */
+/* ======================================================================== */
+static void _flip_page(void)
+{
+    gfx_display_page ^= 1;
+    _out(GDC_DISP_PAGE, gfx_display_page);
+    _out(GDC_ACCESS_PAGE, gfx_display_page ^ 1);
+}
+
+/* ======================================================================== */
 /*  KAPI: 強制でダーティ領域をVSYNC同期転送する                           */
+/*                                                                          */
+/*  フリップモード時: VSYNC待ちなしで非表示ページに転送→ページ切替。       */
+/*  従来モード時: VSYNC待ち→転送 (従来動作維持)。                    */
 /* ======================================================================== */
 void __cdecl gfx_present_dirty(void)
 {
-    if (dirty_queue.count == 0) return;
-
-    /* VSYNC期間になるまで待つ (CRTC I/O 0x60 bit5) 
-     * ※エミュレータ・実機互換のため単純なポーリングループ */
-    /* HINT/NOTE: 古いプログラムはI/O 0x60 を監視する */
-    while ((_in(0x60) & 0x20) == 0) { }
-    
-    _flush_dirty_queue();
+    if (gfx_flip_enabled) {
+        DirtyRectQueue snapshot;
+        if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        /* 今フレームのオリジナルdirtyを保存 (マージ前) */
+        snapshot = dirty_queue;
+        _merge_prev_dirty();
+        _flush_dirty_queue();
+        prev_dirty = snapshot;
+        _flip_page();
+    } else {
+        if (dirty_queue.count == 0) return;
+        /* VSYNC期間になるまで待つ */
+        while ((_in(0x60) & 0x20) == 0) { }
+        _flush_dirty_queue();
+    }
 }
 
 /* ======================================================================== */
 /*  KAPI: VSYNC待ちなしでダーティ領域を即座にVRAM転送する                  */
 /*                                                                          */
-/*  pyxel_run 等、自前のフレームレート制御を持つプログラム向け。             */
-/*  VSYNC同期しないため軽微なティアリングが発生しうるが、                    */
-/*  VSYNC待ちの最大16.7ms遅延を完全に排除できる。                           */
+/*  フリップモード時: gfx_present_dirty()と同じ動作 (元々VSYNC不要)。    */
+/*  従来モード時: VSYNC待ちなしで即座に転送 (従来動作維持)。           */
 /* ======================================================================== */
 void __cdecl gfx_present_nosync(void)
 {
-    if (dirty_queue.count == 0) return;
-    _flush_dirty_queue();
+    if (gfx_flip_enabled) {
+        DirtyRectQueue snapshot;
+        if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        snapshot = dirty_queue;
+        _merge_prev_dirty();
+        _flush_dirty_queue();
+        prev_dirty = snapshot;
+        _flip_page();
+    } else {
+        if (dirty_queue.count == 0) return;
+        _flush_dirty_queue();
+    }
 }
 
 /* ======================================================================== */
@@ -253,6 +296,14 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     int has_dirty;
 
     if (!table || table->count == 0) return;
+
+    /* フリップモードではラスタパレット非対応:
+     * 走査中のパレットI/O操作は表示ページを前提とするため、
+     * dirty転送のみ行いパレット書き換えはスキップする */
+    if (gfx_flip_enabled) {
+        gfx_present_dirty();
+        return;
+    }
 
     has_dirty = (dirty_queue.count > 0);
 

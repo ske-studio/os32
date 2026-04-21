@@ -18,6 +18,7 @@ void gfx_hardware_scroll(int lines)
 {
     int sad1, sl1, sad2, sl2;
     int line_mul;
+    int sad_base;
     u8 params[8];
     int i;
 
@@ -32,9 +33,16 @@ void gfx_hardware_scroll(int lines)
      */
     line_mul = GFX_HEIGHT / gfx_current_height;  /* 1(400line) or 2(200line) */
 
-    sad1 = vram_scroll_y * GFX_WPL;
+    /* ページフリッピング時: 表示ページのVRAMオフセットを加算
+     * ページ0: オフセット0, ページ1: オフセット GFX_PLANE_SZ_200/2 ワード */
+    sad_base = 0;
+    if (gfx_flip_enabled) {
+        sad_base = gfx_display_page * (GFX_PLANE_SZ_200 / 2);
+    }
+
+    sad1 = sad_base + vram_scroll_y * GFX_WPL;
     sl1  = (gfx_current_height - vram_scroll_y) * line_mul;
-    sad2 = 0;
+    sad2 = sad_base;
     sl2  = vram_scroll_y * line_mul;
 
     params[0] = sad1 & 0xFF;

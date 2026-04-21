@@ -18,6 +18,10 @@ extern u8 *bb_i;
 extern int vram_scroll_y;
 extern int gfx_current_height;  /* 200 or 400 (gfx_init / gfx_init_200 で設定) */
 
+/* ページフリッピング状態 (200ラインモード専用) */
+extern int gfx_flip_enabled;     /* 0=無効(400line), 1=有効(200line) */
+extern int gfx_display_page;     /* 現在表示中のページ (0 or 1) */
+
 #define MAX_DIRTY_RECTS 64
 typedef struct {
     int count;
@@ -25,6 +29,7 @@ typedef struct {
 } DirtyRectQueue;
 
 extern DirtyRectQueue dirty_queue;
+extern DirtyRectQueue prev_dirty;  /* 前フレームdirty (ステイルページ対策) */
 
 void gfx_scroll_init(void);
 
