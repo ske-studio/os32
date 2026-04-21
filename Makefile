@@ -37,7 +37,7 @@ INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi
 INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
 
 # GFX: 共通 + 自身 + ドライバ (palette依存) + FS (dump時のファイル出力)
-INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs -Ilib
+INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs -Ilib -Ikernel
 
 # FS: 共通 + 自身 + ドライバ (disk/ide依存)
 INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
@@ -63,7 +63,7 @@ ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm lib/kstring
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 C_KERNEL = \
-    kernel/kernel.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c \
+    kernel/kernel.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \

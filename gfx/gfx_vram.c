@@ -1,5 +1,6 @@
 #include "gfx_internal.h"
 #include "os32_kapi_shared.h"
+#include "cpu_calibrate.h"
 
 static void _flush_dirty_queue(void);
 
@@ -236,16 +237,14 @@ static void _flush_dirty_line(int line)
 /*  NOPディレイでこれに近い間隔を確保する。                                  */
 /* ======================================================================== */
 
-/* 100エントリ×delay550 → 全400ラインカバー (outb回数半減でフレーム内に収まる)
- * 200エントリ×delay200=300ライン → 100×550≈400ライン相当 */
-#define RASTER_LINE_DELAY  550
+/* ラスタパレット書き換え間ディレイ
+ * NP21/W 実測: 約120µs で全400ラインカバー (100エントリ × 4ライン間隔)。
+ * cpu_delay_us() により CPU 速度に自動適応する。 */
+#define RASTER_LINE_US  120
 
 static inline void _raster_delay(void)
 {
-    int i;
-    for (i = 0; i < RASTER_LINE_DELAY; i++) {
-        __asm__ volatile("nop");
-    }
+    cpu_delay_us(RASTER_LINE_US);
 }
 
 void __cdecl gfx_present_raster(GFX_RasterPalTable *table)

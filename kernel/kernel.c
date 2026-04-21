@@ -19,6 +19,7 @@
 #include "palette.h"
 #include "gfx.h"
 #include "boot_splash.h"
+#include "cpu_calibrate.h"
 #include "paging.h"
 #include "pgalloc.h"
 #include "shm.h"
@@ -109,6 +110,24 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* タイマとカスケード有効化 */
     irq_enable(0);
     irq_enable(ICU_SLAVEID);
+
+    /* CPU速度キャリブレーション (PITベース) */
+    tvram_print(0, 2, "CPU...", TATTR_GREEN);
+    _enable();  /* タイマー割り込み許可 (キャリブレーションに必要) */
+    cpu_calibrate();
+    {
+        u32 lpt = cpu_loops_per_tick();
+        int k = (int)(lpt / 1000);
+        char cpubuf[12];
+        int pos = 0;
+        /* 簡易数値→文字列変換 (0-999K) */
+        if (k >= 100) { cpubuf[pos++] = '0' + (k / 100) % 10; }
+        if (k >= 10)  { cpubuf[pos++] = '0' + (k / 10) % 10; }
+        cpubuf[pos++] = '0' + k % 10;
+        cpubuf[pos++] = 'K';
+        cpubuf[pos] = '\0';
+        tvram_print(6, 2, cpubuf, TATTR_WHITE);
+    }
 
     /* キーボード初期化 */
     tvram_print(36, 1, "KBD...", TATTR_GREEN);
