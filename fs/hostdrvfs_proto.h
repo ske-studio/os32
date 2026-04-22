@@ -109,9 +109,11 @@ typedef signed short       s16;
 #define NP2_FileBasicInformation             4
 #define NP2_FileStandardInformation          5
 #define NP2_FileNameInformation              9
+#define NP2_FileRenameInformation           10
 #define NP2_FileDispositionInformation      13
 #define NP2_FilePositionInformation         14
 #define NP2_FileAllInformation              18
+#define NP2_FileAllocationInformation       19
 #define NP2_FileEndOfFileInformation        20
 
 /* FS_INFORMATION_CLASS */
@@ -338,6 +340,30 @@ typedef struct {
     u8  DeletePending;
     u8  Directory;
 } __attribute__((packed)) Np2FileStandardInfo;
+
+/* FILE_END_OF_FILE_INFORMATION (pack(4)) */
+typedef struct {
+    u64 EndOfFile;
+} __attribute__((packed)) Np2FileEndOfFileInfo;
+
+/* FILE_ALLOCATION_INFORMATION (pack(8)) */
+typedef struct {
+    u64 AllocationSize;
+} __attribute__((packed)) Np2FileAllocationInfo;
+
+/* FILE_DISPOSITION_INFORMATION (pack(8)) */
+typedef struct {
+    u8 DeleteFileOnClose;
+} __attribute__((packed)) Np2FileDispositionInfo;
+
+/* FILE_RENAME_INFORMATION (pack(8)) */
+typedef struct {
+    u8  ReplaceIfExists;
+    u8  _pad[3];         /* pack(8) align */
+    u32 RootDirectory;
+    u32 FileNameLength;  /* バイト数 */
+    u16 FileName[260];
+} __attribute__((packed)) Np2FileRenameInfo;
 
 /* IO_SECURITY_CONTEXT (CREATE時にポインタとして渡す) */
 typedef struct {

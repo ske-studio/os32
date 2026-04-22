@@ -312,3 +312,28 @@ Phase 1 (CREATE/列挙) および Phase 2 (READ) の動作が完全に成功し�
    - `volatile` 追加とセッション保持方式への移行により、エミュレータとの通信同期が確立し、`cat /host/test.txt` によるファイルの読み出しが正常に動作することが確認できました。
 
 これにより、OS32とホストマシン (Windows) 間のファイル共有(読み取り)が安定して利用可能になりました。
+
+---
+
+## 完了報告と発見事項 (Phase 3: 書き込み系操作の実装)
+
+**ステータス**: ✅ **実装完了 (検証待ち)**
+
+Phase 1/2 の安定した読み取り基盤の上に、ファイルの書き込みやディレクトリ操作等の変更系操作 (Phase 3) を実装しました。
+
+### 実装した機能
+1. **WRITE IRP (`NP2_IRP_MJ_WRITE`)**:
+   - チャンク単位でのファイル書き込み `hostdrv_write()` を実装。
+2. **SET_INFORMATION IRP (`NP2_IRP_MJ_SET_INFORMATION`)**:
+   - 以下の操作をエミュレータ側へ伝えるための `hostdrv_set_info()` を実装。
+     - **ファイル削除 (`unlink`, `rmdir`)**: `NP2_FileDispositionInformation` で `DeleteFileOnClose` フラグを設定。
+     - **ファイル名変更 (`rename`)**: `NP2_FileRenameInformation` で移動先パスを指定。
+     - **ファイルサイズ切り詰め (EOF設定)**: `NP2_FileEndOfFileInformation` を使用。
+3. **VFSスタブの置き換え**:
+   - `hdrv_write_file`, `hdrv_mkdir`, `hdrv_rmdir`, `hdrv_unlink`, `hdrv_rename`, `hdrv_write_stream` のスタブ関数を実際の実装で置き換えました。
+
+### 構造体レイアウトへの配慮
+- `hostdrvntdef.h` の定義をもとに、`Np2FileRenameInformation` などの構造体を `hostdrvfs_proto.h` に追加しました。
+- GCCの `__attribute__((packed))` とアラインメントに注意し、Windows API 側の `pack(8)` 相当となるようにパディングを調整しました。
+
+**次のステップ**: 実機(エミュレータ)で書き込み、ディレクトリ作成、削除、リネームが正しく動作するかどうかの統合テストを行います。

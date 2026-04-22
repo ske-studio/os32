@@ -114,12 +114,12 @@ static void hostdrv_hypercall(void)
  */
 static void session_begin(void)
 {
-    kmemset(&g_invoke, 0, sizeof(g_invoke));
-    kmemset(&g_stack, 0, sizeof(g_stack));
-    kmemset(&g_fobj, 0, sizeof(g_fobj));
-    kmemset(&g_fsctx, 0, sizeof(g_fsctx));
-    kmemset(&g_secctx, 0, sizeof(g_secctx));
-    kmemset(&g_iostatus, 0, sizeof(g_iostatus));
+    kmemset((void*)&g_invoke, 0, sizeof(g_invoke));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_fobj, 0, sizeof(g_fobj));
+    kmemset((void*)&g_fsctx, 0, sizeof(g_fsctx));
+    kmemset((void*)&g_secctx, 0, sizeof(g_secctx));
+    kmemset((void*)&g_iostatus, 0, sizeof(g_iostatus));
     kmemset(g_sop, 0, sizeof(g_sop));
 
     /* InvokeInfo 固定フィールド */
@@ -157,7 +157,7 @@ static void session_set_path(const char *path)
         ntpath[1] = '\0';
     }
 
-    words = kutf8_to_utf16le(ntpath, g_namebuf, HOSTDRV_NAME_BUF_WORDS);
+    words = kutf8_to_utf16le(ntpath, (u16*)g_namebuf, HOSTDRV_NAME_BUF_WORDS);
     /* UNICODE_STRING: Length はNULL終端を含まないバイト数 */
     g_fobj.FileName.Length = (u16)((words - 1) * 2);
     g_fobj.FileName.MaximumLength = (u16)(words * 2);
@@ -174,7 +174,7 @@ static void session_set_path(const char *path)
 static void setup_create(const char *path, u32 disposition,
                          u32 options_flags, u32 desired_access)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_CREATE;
     g_stack.fileObject = (u32)&g_fobj;  /* 再設定必須 */
     /* options: 上位8bit = disposition, 下位24bit = options */
@@ -183,7 +183,7 @@ static void setup_create(const char *path, u32 disposition,
     g_stack.parameters.create.shareAccess = 0x07; /* 全共有 */
 
     /* SecurityContext: エミュレータは +8 から DesiredAccess を読む */
-    kmemset(&g_secctx, 0, sizeof(g_secctx));
+    kmemset((void*)&g_secctx, 0, sizeof(g_secctx));
     g_secctx.DesiredAccess = desired_access;
     g_stack.parameters.create.securityContext = (u32)&g_secctx;
 
@@ -198,7 +198,7 @@ static void setup_create(const char *path, u32 disposition,
 /* g_stack を全クリアして READ 用に再設定 */
 static void setup_read(u32 length, u64 offset)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_READ;
     g_stack.fileObject = (u32)&g_fobj;  /* ★ 再設定必須 */
     g_stack.parameters.read.length = length;
@@ -208,10 +208,38 @@ static void setup_read(u32 length, u64 offset)
     g_iostatus.Information = 0;
 }
 
+/* g_stack を全クリアして WRITE 用に再設定 */
+static void setup_write(u32 length, u64 offset)
+{
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
+    g_stack.majorFunction = NP2_IRP_MJ_WRITE;
+    g_stack.fileObject = (u32)&g_fobj;
+    g_stack.parameters.write.length = length;
+    g_stack.parameters.write.byteOffset = offset;
+
+    g_invoke.inBufferAddr = (u32)g_databuf;
+    g_iostatus.Status = NP2_STATUS_SENTINEL;
+    g_iostatus.Information = 0;
+}
+
+/* g_stack を全クリアして SET_INFORMATION 用に再設定 */
+static void setup_set_info(u32 info_class, u32 buf_len)
+{
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
+    g_stack.majorFunction = NP2_IRP_MJ_SET_INFORMATION;
+    g_stack.fileObject = (u32)&g_fobj;
+    g_stack.parameters.setFile.Length = buf_len;
+    g_stack.parameters.setFile.FileInformationClass = info_class;
+
+    g_invoke.inBufferAddr = (u32)g_databuf;
+    g_iostatus.Status = NP2_STATUS_SENTINEL;
+    g_iostatus.Information = 0;
+}
+
 /* g_stack を全クリアして QUERY_INFORMATION 用に再設定 */
 static void setup_query_info(u32 info_class, u32 buf_len)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_QUERY_INFORMATION;
     g_stack.fileObject = (u32)&g_fobj;
     g_stack.parameters.queryFile.Length = buf_len;
@@ -225,7 +253,7 @@ static void setup_query_info(u32 info_class, u32 buf_len)
 /* g_stack を全クリアして DIRECTORY_CONTROL 用に再設定 */
 static void setup_query_dir(int first)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_DIRECTORY_CONTROL;
     g_stack.minorFunction = NP2_IRP_MN_QUERY_DIRECTORY;
     g_stack.flags = NP2_SL_RETURN_SINGLE_ENTRY;
@@ -247,7 +275,7 @@ static void setup_query_dir(int first)
 /* g_stack を全クリアして CLEANUP 用に再設定 */
 static void setup_cleanup(void)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_CLEANUP;
     g_stack.fileObject = (u32)&g_fobj;
     g_iostatus.Status = NP2_STATUS_SENTINEL;
@@ -257,7 +285,7 @@ static void setup_cleanup(void)
 /* g_stack を全クリアして CLOSE 用に再設定 */
 static void setup_close(void)
 {
-    kmemset(&g_stack, 0, sizeof(g_stack));
+    kmemset((void*)&g_stack, 0, sizeof(g_stack));
     g_stack.majorFunction = NP2_IRP_MJ_CLOSE;
     g_stack.fileObject = (u32)&g_fobj;
     g_iostatus.Status = NP2_STATUS_SENTINEL;
@@ -322,12 +350,62 @@ static int hostdrv_read(void *buf, u32 size, u64 offset)
         }
         if (g_iostatus.Information == 0) break;
 
-        kmemcpy((u8 *)buf + total, g_databuf, g_iostatus.Information);
+        kmemcpy((void*)buf + total, (const void*)g_databuf, g_iostatus.Information);
         total += g_iostatus.Information;
 
         if (g_iostatus.Information < chunk) break;
     }
     return (int)total;
+}
+
+/* IRP_MJ_WRITE: ファイル書き込み (チャンク分割) */
+static int hostdrv_write(const void *buf, u32 size, u64 offset)
+{
+    u32 chunk;
+    u32 total = 0;
+
+    while (total < size) {
+        chunk = size - total;
+        if (chunk > HOSTDRV_DATA_BUF_SIZE)
+            chunk = HOSTDRV_DATA_BUF_SIZE;
+
+        setup_write(chunk, offset + total);
+        kmemcpy((void*)g_databuf, (const u8 *)buf + total, chunk);
+
+        hostdrv_hypercall();
+
+        if (g_iostatus.Status == NP2_STATUS_SENTINEL) {
+            if (total > 0) break;
+            return -1;
+        }
+        if (g_iostatus.Status != NP2_STATUS_SUCCESS) {
+            if (total > 0) break;
+            return -1;
+        }
+        if (g_iostatus.Information == 0) break;
+
+        total += g_iostatus.Information;
+        if (g_iostatus.Information < chunk) break;
+    }
+    return (int)total;
+}
+
+/* IRP_MJ_SET_INFORMATION */
+static int hostdrv_set_info(u32 info_class, const void *data, u32 len)
+{
+    setup_set_info(info_class, len);
+    kmemset((void*)g_databuf, 0, HOSTDRV_DATA_BUF_SIZE);
+    if (data && len <= HOSTDRV_DATA_BUF_SIZE) {
+        kmemcpy((void*)g_databuf, data, len);
+    }
+
+    hostdrv_hypercall();
+
+    if (g_iostatus.Status == NP2_STATUS_SENTINEL) return -1;
+    if (g_iostatus.Status != NP2_STATUS_SUCCESS) {
+        return -1;
+    }
+    return 0;
 }
 
 /* IRP_MJ_QUERY_INFORMATION
@@ -336,7 +414,7 @@ static int hostdrv_read(void *buf, u32 size, u64 offset)
 static int hostdrv_query_info(u32 info_class, u32 buf_len)
 {
     setup_query_info(info_class, buf_len);
-    kmemset(g_databuf, 0, buf_len);
+    kmemset((void*)g_databuf, 0, buf_len);
 
     hostdrv_hypercall();
 
@@ -354,7 +432,7 @@ static int hostdrv_query_info(u32 info_class, u32 buf_len)
 static int hostdrv_query_dir(int first)
 {
     setup_query_dir(first);
-    kmemset(g_databuf, 0, HOSTDRV_DATA_BUF_SIZE);
+    kmemset((void*)g_databuf, 0, HOSTDRV_DATA_BUF_SIZE);
 
     hostdrv_hypercall();
 
@@ -450,8 +528,7 @@ static int hdrv_list_dir(void *ctx, const char *path,
 
             /* ファイル名をUTF-8に変換 */
             {
-                const u16 *fname_ptr = info->FileName;
-                namelen = kutf16le_to_utf8(fname_ptr,
+                namelen = kutf16le_to_utf8((const u16 *)info->FileName,
                                            info->FileNameLength,
                                            namebuf, sizeof(namebuf));
             }
@@ -596,28 +673,141 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
 }
 
 /* ===================================================================== */
-/*  未実装のスタブ (Phase 2で実装)                                        */
+/*  VFS書き込み・変更系実装 (Phase 3)                                     */
 /* ===================================================================== */
 static int hdrv_write_file(void *ctx, const char *path,
                            const void *data, u32 size)
-{ (void)ctx; (void)path; (void)data; (void)size; return VFS_ERR_IO; }
+{
+    int rc;
+    int bytes;
+    Np2FileEndOfFileInfo eof_info;
+    (void)ctx;
+
+    session_begin();
+    rc = hostdrv_create(path, NP2_FILE_OVERWRITE_IF,
+                        NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
+    if (rc < 0) return VFS_ERR_IO;
+
+    bytes = hostdrv_write(data, size, 0);
+
+    /* EOF を設定して切り詰める (OVERWRITE_IFなので本来不要かもしれないが念のため) */
+    eof_info.EndOfFile = (u64)((bytes >= 0) ? bytes : 0);
+    hostdrv_set_info(NP2_FileEndOfFileInformation, &eof_info, sizeof(eof_info));
+
+    hostdrv_cleanup_close();
+
+    return bytes;
+}
 
 static int hdrv_mkdir(void *ctx, const char *path)
-{ (void)ctx; (void)path; return VFS_ERR_IO; }
+{
+    int rc;
+    (void)ctx;
+
+    session_begin();
+    rc = hostdrv_create(path, NP2_FILE_CREATE,
+                        NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
+    if (rc < 0) return VFS_ERR_IO;
+
+    hostdrv_cleanup_close();
+
+    return VFS_OK;
+}
 
 static int hdrv_rmdir(void *ctx, const char *path)
-{ (void)ctx; (void)path; return VFS_ERR_IO; }
+{
+    int rc;
+    Np2FileDispositionInfo disp;
+    (void)ctx;
+
+    session_begin();
+    rc = hostdrv_create(path, NP2_FILE_OPEN,
+                        NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_DELETE);
+    if (rc < 0) return VFS_ERR_NOTFOUND;
+
+    disp.DeleteFileOnClose = 1;
+    rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
+
+    hostdrv_cleanup_close();
+
+    return (rc == 0) ? VFS_OK : VFS_ERR_IO;
+}
 
 static int hdrv_unlink(void *ctx, const char *path)
-{ (void)ctx; (void)path; return VFS_ERR_IO; }
+{
+    int rc;
+    Np2FileDispositionInfo disp;
+    (void)ctx;
 
-static int hdrv_rename(void *ctx, const char *old, const char *new_path)
-{ (void)ctx; (void)old; (void)new_path; return VFS_ERR_IO; }
+    session_begin();
+    rc = hostdrv_create(path, NP2_FILE_OPEN,
+                        NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_DELETE);
+    if (rc < 0) return VFS_ERR_NOTFOUND;
+
+    disp.DeleteFileOnClose = 1;
+    rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
+
+    hostdrv_cleanup_close();
+
+    return (rc == 0) ? VFS_OK : VFS_ERR_IO;
+}
+
+static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
+{
+    int rc;
+    Np2FileRenameInfo rename_info;
+    char ntpath[260];
+    int i, words;
+    (void)ctx;
+
+    session_begin();
+    rc = hostdrv_create(old_path, NP2_FILE_OPEN,
+                        NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_DELETE);
+    if (rc < 0) return VFS_ERR_NOTFOUND;
+
+    kstrncpy(ntpath, new_path, sizeof(ntpath));
+    for (i = 0; ntpath[i]; i++) {
+        if (ntpath[i] == '/') ntpath[i] = '\\';
+    }
+
+    kmemset(&rename_info, 0, sizeof(rename_info));
+    rename_info.ReplaceIfExists = 1;
+    rename_info.RootDirectory = 0;
+    words = kutf8_to_utf16le(ntpath, (u16*)rename_info.FileName, 260);
+    rename_info.FileNameLength = (u32)((words - 1) * 2);
+
+    rc = hostdrv_set_info(NP2_FileRenameInformation, &rename_info,
+                          sizeof(rename_info) - 520 + rename_info.FileNameLength);
+
+    hostdrv_cleanup_close();
+
+    return (rc == 0) ? VFS_OK : VFS_ERR_IO;
+}
 
 static int hdrv_write_stream(void *ctx, const char *path,
                              const void *buf, u32 size, u32 offset)
-{ (void)ctx; (void)path; (void)buf; (void)size; (void)offset;
-  return VFS_ERR_IO; }
+{
+    int rc;
+    int bytes;
+    (void)ctx;
+
+    session_begin();
+    rc = hostdrv_create(path, NP2_FILE_OPEN_IF,
+                        NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
+                        NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
+    if (rc < 0) return VFS_ERR_IO;
+
+    bytes = hostdrv_write(buf, size, (u64)offset);
+
+    hostdrv_cleanup_close();
+
+    return bytes;
+}
 
 static int hdrv_sync(void *ctx)
 { (void)ctx; return VFS_OK; }
