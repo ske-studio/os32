@@ -384,6 +384,15 @@ programs/apps/hrview.elf: build/app.ld $(CRT0_OBJ) programs/apps/hrview.o $(GFX_
 
 hrview: $(CRT0_OBJ) programs/apps/hrview.bin
 
+# === Filer (TVRAMファイラ) ===
+programs/apps/filer.o: programs/apps/filer.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/apps/filer.elf: build/app.ld $(CRT0_OBJ) programs/apps/filer.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/filer.o -lc -lgcc
+
+filer: $(CRT0_OBJ) programs/apps/filer.bin
+
 # === Raster Palette Demo ===
 programs/apps/raster.o: programs/apps/raster.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -438,7 +447,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview hrview filer raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -498,6 +507,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
 	elif [ "$*" = "hrview" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
+	elif [ "$*" = "filer" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 262144; \
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "fep_test" ]; then \

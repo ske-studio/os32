@@ -82,6 +82,9 @@ filesystem:
     - host: programs/apps/hrview.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/apps/filer.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/apps/vdpview.bin
       guest: /usr/bin/
       tags: [programs]
