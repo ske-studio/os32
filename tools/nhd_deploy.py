@@ -577,6 +577,72 @@ def do_sync(tag_filter=None):
     return True
 
 
+def do_sync_from_hostdrv():
+    """HostDrvディレクトリ (C:\\os32) の内容をNHDのext2パーティションに同期
+
+    deploy.yaml を参照せず、HostDrvディレクトリの全ファイルを再帰的にコピーする。
+    これにより HostDrv が唯一のソースとなり、管理漏れを防止する。
+    """
+    hostdrv_dir = os.environ.get('HOSTDRV_DIR', '/mnt/c/os32')
+
+    if not os.path.isdir(hostdrv_dir):
+        print("Error: HostDrvディレクトリが見つかりません: {}".format(hostdrv_dir),
+              file=sys.stderr)
+        return False
+
+    if not ensure_mounted():
+        return False
+
+    print("\n" + "=" * 55)
+    print("  HostDrv -> NHD ext2 同期")
+    print("  {} -> {}".format(hostdrv_dir, MOUNT_POINT))
+    print("=" * 55)
+
+    total_copied = 0
+    total_size = 0
+
+    for dirpath, dirnames, filenames in os.walk(hostdrv_dir):
+        # HostDrvルートからの相対パス
+        rel_dir = os.path.relpath(dirpath, hostdrv_dir)
+        if rel_dir == '.':
+            rel_dir = ''
+
+        # NHD側のディレクトリを確保
+        dest_dir = os.path.join(MOUNT_POINT, rel_dir)
+        if not os.path.exists(dest_dir):
+            subprocess.run(['sudo', 'mkdir', '-p', dest_dir],
+                           capture_output=True)
+
+        for fname in sorted(filenames):
+            src_path = os.path.join(dirpath, fname)
+            if rel_dir:
+                guest_path = '/' + rel_dir + '/' + fname
+            else:
+                guest_path = '/' + fname
+            dest_path = os.path.join(dest_dir, fname)
+
+            result = subprocess.run(
+                ['sudo', 'cp', src_path, dest_path],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                print("  Error: {} -> {}: {}".format(
+                    fname, guest_path, result.stderr.strip()))
+                continue
+
+            size = os.path.getsize(src_path)
+            total_size += size
+            total_copied += 1
+            print("  {} ({} bytes)".format(guest_path, size))
+
+    subprocess.run(['sync'], capture_output=True)
+
+    print("\n" + "=" * 55)
+    print("  完了! {} ファイル ({:,} bytes)".format(total_copied, total_size))
+    print("=" * 55)
+    return True
+
+
 def resolve_guest_path(host_file):
     """deploy.yaml からホストファイルに対応するゲストパスを解決する
 
@@ -865,6 +931,9 @@ def main():
             else:
                 i += 1
         do_sync(tag_filter=tag_filter)
+
+    elif cmd == 'sync-from-hostdrv':
+        do_sync_from_hostdrv()
 
     elif cmd == 'push':
         # --resolve オプションをパース

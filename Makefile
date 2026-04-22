@@ -548,9 +548,11 @@ deploy: kernel.bin programs unicode_bin
 	@echo "=== HostDrv Deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 
-# deploy-kernel: カーネルのみNHDブート領域に書き込み (NP21/W再起動が必要)
+# deploy-kernel: カーネルのみNHDブート領域に書き込み + HostDrvからext2同期 (NP21/W再起動が必要)
+# C:\os32 (HostDrv) の内容をNHDのext2パーティションにも反映する
 deploy-kernel: kernel.bin
 	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
+	$(NHD_DEPLOY) sync-from-hostdrv
 	$(NHD_DEPLOY) deploy
 
 # deploy-nhd: 旧方式NHDフルデプロイ (カーネル+全ファイル)
