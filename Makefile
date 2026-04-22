@@ -526,13 +526,24 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7; \
 	fi
 
-# === NHD デプロイ ===
-# NHDイメージのパス
+# === デプロイ ===
+HOSTDRV_DIR ?= /mnt/c/os32
 NHD_DEPLOY = env NP21W_DIR='$(NP21W_DIR)' python3 tools/nhd_deploy.py
+HOSTDRV_DEPLOY = env HOSTDRV_DIR='$(HOSTDRV_DIR)' python3 tools/hostdrv_deploy.py
 
-# deploy: カーネル+プログラム+データをNHDに書き込み → NP21/Wにコピー
-# tools/deploy.yaml の定義に従って一括同期を行う
+# deploy: HostDrv方式 — ビルド成果物をC:\os32にコピー (sudo不要, 再起動不要)
+# ゲストOSは /host 経由で直接アクセス可能
 deploy: kernel.bin programs unicode_bin
+	@echo "=== HostDrv Deploy ==="
+	$(HOSTDRV_DEPLOY) sync
+
+# deploy-kernel: カーネルのみNHDブート領域に書き込み (NP21/W再起動が必要)
+deploy-kernel: kernel.bin
+	$(NHD_DEPLOY) write-kernel kernel.bin boot/loader_hdd.bin
+	$(NHD_DEPLOY) deploy
+
+# deploy-nhd: 旧方式NHDフルデプロイ (カーネル+全ファイル)
+deploy-nhd: kernel.bin programs unicode_bin
 	@echo "=== NHD Deploy (using deploy.yaml) ==="
 	$(NHD_DEPLOY) sync
 	$(NHD_DEPLOY) deploy
@@ -568,7 +579,7 @@ clean:
 	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 
-.PHONY: all boot build clean programs deploy nhd-mount nhd-umount nhd-init packages iso
+.PHONY: all boot build clean programs deploy deploy-kernel deploy-nhd nhd-mount nhd-umount nhd-init packages iso
 
 # Add explicit dependencies for OS32X programs on the KAPI header
 programs/%.o: include/os32_kapi_shared.h

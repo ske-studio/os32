@@ -59,6 +59,9 @@ filesystem:
     - host: programs/system/cdinst.bin
       guest: /sbin/
       tags: [programs]
+    - host: programs/system/hsync.bin
+      guest: /sbin/
+      tags: [programs]
 
     # --- ユーザー・デモプログラム → /usr/bin/ ---
     - host: programs/apps/edit.bin
