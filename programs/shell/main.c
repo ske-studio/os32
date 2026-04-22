@@ -32,6 +32,7 @@ int main(int argc, char **argv, KernelAPI *api)
     shell_rshell_init();
     shell_cmd_env_init();
     shell_cmd_script_init();
+    shell_cmd_filer_init();
 
     /* メインループ開始 (ui.c) */
     shell_run();
@@ -577,25 +578,25 @@ static void execute_single(const char *cmd)
 /* ======================================================================== */
 #define MAX_PIPE_STAGES 8
 
-static int split_pipeline(const char *cmd, char segments[][CMD_BUF_SIZE], int max_stages)
+static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_stages)
 {
     int count = 0;
     int pos = 0;
     const char *p = cmd;
+    char *seg;
 
     while (*p && count < max_stages) {
-        /* 先頭の空白をスキップ */
+        seg = seg_buf + count * seg_size;
         while (*p == ' ') p++;
         pos = 0;
         while (*p && *p != '|') {
-            if (pos < CMD_BUF_SIZE - 1) {
-                segments[count][pos++] = *p;
+            if (pos < seg_size - 1) {
+                seg[pos++] = *p;
             }
             p++;
         }
-        /* 末尾の空白をトリム */
-        while (pos > 0 && segments[count][pos - 1] == ' ') pos--;
-        segments[count][pos] = '\0';
+        while (pos > 0 && seg[pos - 1] == ' ') pos--;
+        seg[pos] = '\0';
         if (pos > 0) count++;
         if (*p == '|') p++;
     }
@@ -632,16 +633,23 @@ void execute_command(const char *cmd)
 
     /* パイプあり: パイプライン実行 */
     {
-        static char segments[MAX_PIPE_STAGES][CMD_BUF_SIZE];
+        char *seg_buf;
         int stage_count;
         int i;
         int cur_buf, prev_buf;
 
-        stage_count = split_pipeline(src, segments, MAX_PIPE_STAGES);
+        /* セグメントバッファを動的確保 */
+        seg_buf = (char *)g_api->mem_alloc(MAX_PIPE_STAGES * CMD_BUF_SIZE);
+        if (!seg_buf) {
+            g_api->kprintf(ATTR_RED, "%s", "pipe: out of memory\n");
+            return;
+        }
+
+        stage_count = split_pipeline(src, seg_buf, CMD_BUF_SIZE, MAX_PIPE_STAGES);
         if (stage_count <= 1) {
-            /* パイプ演算子があるが結果的に1段だけ */
-            execute_single(segments[0]);
+            execute_single(seg_buf);
             reset_all_redirects();
+            g_api->mem_free(seg_buf);
             return;
         }
 
@@ -664,6 +672,7 @@ void execute_command(const char *cmd)
                             g_api->sys_pipe_free(alloc_buf[aj]);
                         }
                     }
+                    g_api->mem_free(seg_buf);
                     return;
                 }
             }
@@ -688,7 +697,7 @@ void execute_command(const char *cmd)
                 }
 
                 /* コマンド実行 */
-                execute_single(segments[i]);
+                execute_single(seg_buf + i * CMD_BUF_SIZE);
 
                 /* stdout バッファに書き込まれたデータ長を保存 (リセット前に取得) */
                 if (!is_last) {
@@ -709,5 +718,6 @@ void execute_command(const char *cmd)
                 g_api->sys_pipe_free(alloc_buf[ai]);
             }
         }
+        g_api->mem_free(seg_buf);
     }
 }

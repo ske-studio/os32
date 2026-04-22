@@ -10,8 +10,8 @@
 /*  スクリプト実行コンテキスト                                               */
 /* ======================================================================== */
 
-/* 静的バッファ — mem_alloc は使わない (安全性優先) */
-static char script_lines[SCRIPT_MAX_LINES][SCRIPT_MAX_LINE];
+/* スクリプト行配列 — 動的確保 (使用時のみメモリ消費) */
+static char (*script_lines)[SCRIPT_MAX_LINE] = NULL;
 static int  script_line_count;
 static int  script_current_line;
 static int  script_abort_flag;
@@ -63,22 +63,44 @@ static int classify_line(const char *line)
 /* ======================================================================== */
 static int script_load(const char *path)
 {
-    static char raw_buf[SCRIPT_MAX_LINES * SCRIPT_MAX_LINE];
+    int raw_buf_size = SCRIPT_MAX_LINES * SCRIPT_MAX_LINE;
+    char *raw_buf;
     int fd, sz;
     int bi, li;
     int in_block_comment = 0;
     int cls;
     char line_tmp[SCRIPT_MAX_LINE];
 
+    /* raw_buf を動的確保 */
+    raw_buf = (char *)g_api->mem_alloc(raw_buf_size);
+    if (!raw_buf) {
+        g_api->kprintf(ATTR_RED, "%s", "source: out of memory (raw)\n");
+        return -1;
+    }
+
+    /* script_lines を動的確保 */
+    script_lines = (void *)g_api->mem_alloc(SCRIPT_MAX_LINES * SCRIPT_MAX_LINE);
+    if (!script_lines) {
+        g_api->mem_free(raw_buf);
+        g_api->kprintf(ATTR_RED, "%s", "source: out of memory (lines)\n");
+        return -1;
+    }
+
     fd = g_api->sys_open(path, KAPI_O_RDONLY);
     if (fd < 0) {
         g_api->kprintf(ATTR_RED, "source: cannot open %s\n", path);
+        g_api->mem_free(raw_buf);
+        g_api->mem_free(script_lines);
+        script_lines = NULL;
         return -1;
     }
-    sz = g_api->sys_read(fd, raw_buf, (int)sizeof(raw_buf) - 1);
+    sz = g_api->sys_read(fd, raw_buf, raw_buf_size - 1);
     g_api->sys_close(fd);
     if (sz <= 0) {
         g_api->kprintf(ATTR_RED, "source: cannot read %s\n", path);
+        g_api->mem_free(raw_buf);
+        g_api->mem_free(script_lines);
+        script_lines = NULL;
         return -1;
     }
     raw_buf[sz] = '\0';
@@ -132,6 +154,7 @@ static int script_load(const char *path)
         }
     }
 
+    g_api->mem_free(raw_buf);
     return 0;
 }
 
@@ -177,6 +200,7 @@ static void script_exec(void)
 /* ======================================================================== */
 int script_source_file(const char *path)
 {
+    char (*saved_lines)[SCRIPT_MAX_LINE];
     int saved_line_count;
     int saved_current_line;
     int saved_abort_flag;
@@ -190,9 +214,11 @@ int script_source_file(const char *path)
     }
 
     /* 現在のコンテキストを退避 (ネスト対応) */
+    saved_lines = script_lines;
     saved_line_count = script_line_count;
     saved_current_line = script_current_line;
     saved_abort_flag = script_abort_flag;
+    script_lines = NULL;
 
     g_script_depth++;
 
@@ -202,7 +228,13 @@ int script_source_file(const char *path)
         script_exec();
     }
 
+    /* 現在のスクリプト行を解放 */
+    if (script_lines) {
+        g_api->mem_free(script_lines);
+    }
+
     /* コンテキスト復元 */
+    script_lines = saved_lines;
     script_line_count = saved_line_count;
     script_current_line = saved_current_line;
     script_abort_flag = saved_abort_flag;
