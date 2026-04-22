@@ -13,11 +13,13 @@ void gfx_present(void);
 /* Primitives */
 void gfx_clear(u8 color);
 void gfx_pixel(int x, int y, u8 color);
+u8   gfx_get_pixel(int x, int y);
 void gfx_hline(int x, int y, int w, u8 color);
 void gfx_vline(int x, int y, int h, u8 color);
 void gfx_line(int x0, int y0, int x1, int y1, u8 color);
 void gfx_rect(int x, int y, int w, int h, u8 color);
 void gfx_fill_rect(int x, int y, int w, int h, u8 color);
+void gfx_fill_tri(int x0, int y0, int x1, int y1, int x2, int y2, u8 color);
 
 /* Blitting & Cache */
 void __cdecl gfx_save_rect(int x, int y, int w, int h, void *buf);

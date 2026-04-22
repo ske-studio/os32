@@ -181,18 +181,22 @@ mask[y][x_byte] = 透過でないピクセルのビットが1のバイト列
 
 ## 5. `.os32res` バイナリフォーマット (プレーナー対応版)
 
+> **注意**: 全ての多バイト値は **リトルエンディアン** で格納される。
+> 空のエントリ (全ピクセル=0のイメージバンク、ノート数=0のサウンド等) は
+> スキップされ、ヘッダのカウントフィールドには実エントリ数のみが記録される。
+
 ```text
 オフセット  サイズ  内容
 0x0000      4       マジック "PX32"
-0x0004      4       バージョン (1)
-0x0008      2       イメージバンク数 (0-3)
-0x000A      2       タイルマップ数 (0-8)
-0x000C      2       サウンド数 (0-64)
-0x000E      2       ミュージック数 (0-8)
-0x0010      4       イメージセクションオフセット
-0x0014      4       タイルマップセクションオフセット
-0x0018      4       サウンドセクションオフセット
-0x001C      4       ミュージックセクションオフセット
+0x0004      4       バージョン (1) [u32LE]
+0x0008      2       イメージバンク数 (0-3) [u16LE]
+0x000A      2       タイルマップ数 (0-8) [u16LE]
+0x000C      2       サウンド数 (0-64) [u16LE]
+0x000E      2       ミュージック数 (0-8) [u16LE]
+0x0010      4       イメージセクションオフセット [u32LE]
+0x0014      4       タイルマップセクションオフセット [u32LE]
+0x0018      4       サウンドセクションオフセット [u32LE]
+0x001C      4       ミュージックセクションオフセット [u32LE]
 
 [イメージセクション]
   各バンク:
@@ -205,15 +209,15 @@ mask[y][x_byte] = 透過でないピクセルのビットが1のバイト列
 [タイルマップセクション]
   各マップ:
     imgsrc: 1 byte (参照バンク番号)
-    padding: 1 byte
-    width: 2 bytes (タイル幅、通常256)
-    height: 2 bytes (タイル高、通常256)
-    data: width × height bytes (タイルインデックス)
+    padding: 1 byte (0x00)
+    width: 2 bytes (タイル幅) [u16LE]
+    height: 2 bytes (タイル高) [u16LE]
+    data: width × height × 2 bytes (tx_u8, ty_u8 ペア)
 
 [サウンドセクション]
   各サウンド: 可変長データ
-    speed: 2 bytes (u16)
-    note_count: 2 bytes (u16)
+    speed: 2 bytes [u16LE]
+    note_count: 2 bytes [u16LE]
     notes[note_count]: note_count bytes (i8, -1=休符)
     tones[note_count]: note_count bytes (u8)
     volumes[note_count]: note_count bytes (u8)
@@ -221,10 +225,10 @@ mask[y][x_byte] = 透過でないピクセルのビットが1のバイト列
 
 [ミュージックセクション]
   各ミュージック:
-    channel_count: 2 bytes
+    channel_count: 2 bytes [u16LE]
     各チャンネル:
-      seq_count: 2 bytes
-      seq[]: seq_count × 2 bytes (サウンド番号、u16)
+      seq_count: 2 bytes [u16LE]
+      seq[]: seq_count × 2 bytes (サウンド番号) [u16LE]
 ```
 
 > **注意 (サウンド構造について)**: Pyxel公式ではサウンドのノート配列に

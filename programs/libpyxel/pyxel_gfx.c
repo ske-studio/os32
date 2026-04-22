@@ -61,9 +61,8 @@ void pyxel_pset(int x, int y, int col)
 
 int pyxel_pget(int x, int y)
 {
-    /* バックバッファから読み出し (TODO: 実装) */
-    (void)x; (void)y;
-    return 0;
+    if (x < 0 || x >= _pyxel.width || y < 0 || y >= _pyxel.height) return 0;
+    return (int)gfx_get_pixel(_px(x), _py(y));
 }
 
 /* ======================================================================== */
@@ -148,75 +147,12 @@ void pyxel_circb(int x, int y, int r, int col)
 /*  pyxel_tri / pyxel_trib — 三角形                                          */
 /* ======================================================================== */
 
-/* 塗りつぶし三角形: 水平スキャンライン方式 */
+/* 塗りつぶし三角形: libos32gfx の gfx_fill_tri に委譲 */
 void pyxel_tri(int x1, int y1, int x2, int y2,
                int x3, int y3, int col)
 {
-    int rx1, ry1, rx2, ry2, rx3, ry3;
-    int tmp, y, min_y, max_y;
-    int ax, ay, bx, by, cx, cy;
-    int sa, sb, sx, ex;
-    int min_x, max_x, dirty_w, dirty_h;
     u8 c = PYXEL_COL(col);
-
-    rx1 = _px(x1); ry1 = _py(y1);
-    rx2 = _px(x2); ry2 = _py(y2);
-    rx3 = _px(x3); ry3 = _py(y3);
-
-    /* 頂点をY座標でソート (ry1 <= ry2 <= ry3) */
-    if (ry1 > ry2) { tmp=rx1; rx1=rx2; rx2=tmp; tmp=ry1; ry1=ry2; ry2=tmp; }
-    if (ry2 > ry3) { tmp=rx2; rx2=rx3; rx3=tmp; tmp=ry2; ry2=ry3; ry3=tmp; }
-    if (ry1 > ry2) { tmp=rx1; rx1=rx2; rx2=tmp; tmp=ry1; ry1=ry2; ry2=tmp; }
-
-    min_y = ry1;
-    max_y = ry3;
-    if (min_y == max_y) {
-        /* 縮退三角形 (水平線) */
-        min_x = PYXEL_MIN(rx1, PYXEL_MIN(rx2, rx3));
-        max_x = PYXEL_MAX(rx1, PYXEL_MAX(rx2, rx3));
-        gfx_hline(min_x, min_y, max_x - min_x + 1, c);
-        _dirty(min_x, min_y, max_x - min_x + 1, 1);
-        return;
-    }
-
-    /* 上半分 (ry1 → ry2) */
-    ax = rx1; ay = ry1;
-    bx = rx2; by = ry2;
-    cx = rx3; cy = ry3;
-
-    for (y = ay; y <= cy; y++) {
-        /* エッジ a→c の x座標 (常に使用) */
-        sa = ax + (cx - ax) * (y - ay) / (cy - ay);
-
-        if (y < by) {
-            /* 上半分: エッジ a→b */
-            if (by == ay) {
-                sb = bx;
-            } else {
-                sb = ax + (bx - ax) * (y - ay) / (by - ay);
-            }
-        } else {
-            /* 下半分: エッジ b→c */
-            if (cy == by) {
-                sb = bx;
-            } else {
-                sb = bx + (cx - bx) * (y - by) / (cy - by);
-            }
-        }
-
-        sx = PYXEL_MIN(sa, sb);
-        ex = PYXEL_MAX(sa, sb);
-        if (ex >= sx) {
-            gfx_hline(sx, y, ex - sx + 1, c);
-        }
-    }
-
-    /* dirty rect: 三角形全体のバウンディングボックス */
-    min_x = PYXEL_MIN(rx1, PYXEL_MIN(rx2, rx3));
-    max_x = PYXEL_MAX(rx1, PYXEL_MAX(rx2, rx3));
-    dirty_w = max_x - min_x + 1;
-    dirty_h = max_y - min_y + 1;
-    _dirty(min_x, min_y, dirty_w, dirty_h);
+    gfx_fill_tri(_px(x1), _py(y1), _px(x2), _py(y2), _px(x3), _py(y3), c);
 }
 
 /* 枠三角形: 3本の線で描画 */

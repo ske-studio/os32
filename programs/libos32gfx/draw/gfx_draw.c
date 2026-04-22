@@ -222,6 +222,73 @@ void gfx_fill_rect(int x, int y, int w, int h, u8 color)
 }
 
 /* ======================================================================== */
+/*  塗りつぶし三角形 (スキャンライン方式)                                   */
+/*                                                                          */
+/*  頂点をY座標でソートし、上半分・下半分に分けて水平線で塗る。             */
+/*  dirty rect はバウンディングボックスで1回登録。                          */
+/* ======================================================================== */
+
+void gfx_fill_tri(int x0, int y0, int x1, int y1, int x2, int y2, u8 color)
+{
+    int tmp, y, sa, sb, sx, ex;
+    int ax, ay, bx, by, cx, cy;
+    int min_x, max_x, min_y, max_y;
+
+    /* 頂点をY座標でソート (y0 <= y1 <= y2) */
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+    if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+
+    min_y = y0;
+    max_y = y2;
+
+    if (min_y == max_y) {
+        /* 縮退三角形 (水平線) */
+        min_x = x0; if (x1 < min_x) min_x = x1; if (x2 < min_x) min_x = x2;
+        max_x = x0; if (x1 > max_x) max_x = x1; if (x2 > max_x) max_x = x2;
+        gfx_hline(min_x, min_y, max_x - min_x + 1, color);
+        return;
+    }
+
+    /* dirty rect: バウンディングボックスで1回登録 */
+    min_x = x0; if (x1 < min_x) min_x = x1; if (x2 < min_x) min_x = x2;
+    max_x = x0; if (x1 > max_x) max_x = x1; if (x2 > max_x) max_x = x2;
+    gfx_api->gfx_add_dirty_rect(min_x, min_y,
+                                 max_x - min_x + 1, max_y - min_y + 1);
+
+    ax = x0; ay = y0;
+    bx = x1; by = y1;
+    cx = x2; cy = y2;
+
+    for (y = ay; y <= cy; y++) {
+        /* エッジ a→c の x座標 (常に使用) */
+        sa = ax + (cx - ax) * (y - ay) / (cy - ay);
+
+        if (y < by) {
+            /* 上半分: エッジ a→b */
+            if (by == ay) {
+                sb = bx;
+            } else {
+                sb = ax + (bx - ax) * (y - ay) / (by - ay);
+            }
+        } else {
+            /* 下半分: エッジ b→c */
+            if (cy == by) {
+                sb = bx;
+            } else {
+                sb = bx + (cx - bx) * (y - by) / (cy - by);
+            }
+        }
+
+        sx = (sa < sb) ? sa : sb;
+        ex = (sa > sb) ? sa : sb;
+        if (ex >= sx) {
+            gfx_hline(sx, y, ex - sx + 1, color);
+        }
+    }
+}
+
+/* ======================================================================== */
 /*  フォントラスタライザ (単色・透過)                                       */
 /* ======================================================================== */
 extern void __cdecl asm_kcg_draw_font(int x, int y, const u8 *pat, int w_bytes, int h_lines, u8 fg, u8 **bb_array);
