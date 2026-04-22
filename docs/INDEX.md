@@ -25,9 +25,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---------|------|
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v26 仕様書 — 118エントリテーブル (関数117 + データフィールド1) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v28 仕様書 — 142エントリテーブル (関数140 + データフィールド2) |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
-| [GIT_POLICY.md](GIT_POLICY.md) | ~~Gitポリシー~~ → POLICY_DEV.md §5 に統合済み |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
@@ -48,11 +47,16 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | §1 | 概要（アドレス配置、マジックナンバー） |
 | §2 | 呼び出し規約（System V ABI, cdecl等） |
 | §3 | 外部プログラムのビルド手順（main配置ルール） |
-| §4 | KernelAPI 構造体レイアウト（データフィールド + 117関数） |
+| §4 | KernelAPI 構造体レイアウト（関数140 + データ2） |
 | §4-1 | グラフィクスAPI補足（libos32gfx移行について） |
 | §4-2 | ラスタパレット (gfx_present_raster) |
 | §4-3 | FDリダイレクト・パイプAPI |
 | §4-4 | ページング問い合わせAPI |
+| §4-5 | キー押下状態ポーリングAPI |
+| §4-6 | FM/SSG個別チャンネル制御API |
+| §4-7 | マウスAPI |
+| §4-8 | TVRAM読取・反転API |
+| §4-9 | マウスカーソル制御API |
 
 ## ハードウェア技術資料 (外部リファレンス)
 
@@ -83,14 +87,22 @@ src/os32/
 ├── boot/             — ブートローダ (NASM)
 ├── kernel/           — カーネルコア (メイン処理、ページング、IDT)
 ├── exec/             — プログラムローダー / KernelAPI
-├── fs/               — ファイルシステム (VFS, ext2, fat12, iso9660, serialfs)
-├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Serial, KCG, NP2SysPなど)
+├── fs/               — ファイルシステム (VFS, ext2, fat12, iso9660, hostdrvfs)
+├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Mouse, Serial, KCG, NP2SysPなど)
 ├── gfx/              — グラフィックス (CPU描画用バックバッファ層)
 ├── kapi/             — KernelAPI ラッパー実装 (自動生成分含む)
-├── lib/              — 汎用ライブラリ (UTF-8, Path, kprintf等)
+├── lib/              — 汎用ライブラリ (UTF-8, UTF-16, Path, kprintf等)
 ├── include/          — 共通ヘッダ群
-├── programs/         — 外部プログラム (外部シェル、ライブラリ、各種コマンド群)
-├── tests/            — テストスクリプト
+├── programs/         — 外部プログラム
+│   ├── shell/        — システム標準シェル (モジュール構造)
+│   ├── apps/         — アプリケーション (edit, filer, vdpview, mdview等)
+│   ├── cmds/         — コマンドラインツール (grep, less, sort等)
+│   ├── system/       — システムユーティリティ (hsync, install, cdinst等)
+│   ├── tests/        — テスト・デモプログラム
+│   ├── libos32/      — newlib-nano ブリッジ
+│   ├── libos32gfx/   — グラフィックスライブラリ
+│   ├── libos32snd/   — サウンドライブラリ
+│   └── libpyxel/     — Pyxel互換ゲームエンジン
 ├── tools/            — ホスト側ツール (Pythonスクリプト、KAPI自動生成用JSON)
 ├── Makefile          — 自動ビルドスクリプト
 └── docs/             — 仕様書ドキュメント群 (本ファイル含む)
@@ -98,4 +110,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-18*
+*Last Updated: 2026-04-23*

@@ -129,14 +129,44 @@ CD-ROM上のISO 9660 Level 1ファイルシステムを読み取り専用でVFS�
 | `iso9660_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `iso9660_stat(ctx, path, st)` | ファイル情報取得 |
 
-### §6-7 SerialFS (serialfs.c / serialfs.h)
+### §6-7 SerialFS (serialfs.c / serialfs.h) — 廃止予定
 
-RS-232C経由でホストPCのファイルシステムにアクセスする仮想ファイルシステム。ホスト側のPythonスクリプト (`serial_host.py`) と連携し、ファイル読み出し・ディレクトリ一覧を提供する。マウントポイントは `/host`。
+> ⚠️ **廃止予定**: HostDrvFS (§6-8) の導入により、SerialFS の役割は代替されました。現在は `CONFIG_SERIALFS` コンパイルスイッチで有効/無効を切り替え可能ですが、将来のバージョンで削除予定です。
+
+RS-232C経由でホストPCのファイルシステムにアクセスする仮想ファイルシステム。ホスト側のPythonスクリプト (`serial_host.py`) と連携し、ファイル読み出し・ディレクトリ一覧を提供する。
 
 | 項目 | 値 |
 |------|-----|
 | プロトコル | RS-232C (38400bps) |
-| マウントポイント | `/host` (自動マウント) |
+| マウントポイント | `/serial` (手動マウント) |
 | 書き込み | 非対応 |
+| ビルド制御 | `CONFIG_SERIALFS` (`include/config.h`) |
+
+### §6-8 HostDrvFS (hostdrvfs.c / hostdrvfs.h)
+
+NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) のファイルシステムにゲストOSから直接アクセスする仮想ファイルシステム。セッションベースのhypercall I/Oモデルで動作する。
+
+| 項目 | 値 |
+|------|-----|
+| 通信方式 | NP21/W HostDrv hypercall (共有メモリ + I/Oポート) |
+| マウントポイント | `/host` (カーネル自動マウント) |
+| 対応操作 | READ, LIST (ディレクトリ一覧) |
+| 書き込み | 非対応 |
+| セッション管理 | CREATE → READ/LIST → CLOSE のIRPシーケンス |
+| 同期要件 | 通信バッファは `volatile` 宣言必須 (GCC最適化対策) |
+
+**VFS操作**:
+
+| 関数 | 説明 |
+|------|------|
+| `hostdrvfs_init()` | HostDrv検出・自動マウント |
+| `hostdrvfs_read_file(ctx, path, buf, max)` | ファイル読み込み |
+| `hostdrvfs_read_stream(ctx, path, buf, sz, off)` | オフセット付き部分読み込み |
+| `hostdrvfs_list_dir(ctx, path, cb, user)` | ディレクトリ一覧 (コールバック) |
+| `hostdrvfs_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
+| `hostdrvfs_stat(ctx, path, st)` | ファイル情報取得 |
+
+**用途**: `hsync` コマンドによる `/host` → `/` へのファイル同期 (HostDrvデプロイワークフロー) の基盤。
 
 ---
+

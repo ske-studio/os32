@@ -1,4 +1,4 @@
-# KernelAPI v27 仕様書
+# KernelAPI v28 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **27** |
-| 合計エントリ数 | **124** (データフィールド1 + 関数ポインタ123) |
+| 現在のバージョン | **28** |
+| 合計エントリ数 | **142** (関数ポインタ140 + データフィールド2) |
 
 ---
 
@@ -50,19 +50,14 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 26) |
+| 0x04 | version | APIバージョン (現在: 28) |
 
-### データフィールド
-
-| Offset | フィールド | 型 | 説明 |
-|--------|-----------|------|------|
-| 0x08 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-
-### API関数 (自動生成)
+### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
 | Offset | フィールド | プロトタイプ |
 |--------|-----------|------|
-| 0x0C | gfx_init | `void(void)` |
+| 0x08 | gfx_init | `void(void)` |
+| 0x0C | gfx_init_200 | `void(void)` |
 | 0x10 | gfx_shutdown | `void(void)` |
 | 0x14 | gfx_present | `void(void)` |
 | 0x18 | kbd_trygetchar | `int(void)` |
@@ -154,44 +149,59 @@ make programs
 | 0x170 | gfx_get_framebuffer | `void(void *fb)` |
 | 0x174 | gfx_add_dirty_rect | `void(int x, int y, int w, int h)` |
 | 0x178 | gfx_present_dirty | `void(void)` |
-| 0x17C | gfx_present_raster | `void(void *table)` |
-| 0x180 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
-| 0x184 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
-| 0x188 | sys_shm_alloc | `void *(int blocks)` |
-| 0x18C | sys_shm_lock | `int(void *ptr)` |
-| 0x190 | sys_shm_free | `int(void *ptr)` |
-| 0x194 | ime_getchar | `int(void)` |
-| 0x198 | ime_trygetchar | `int(void)` |
-| 0x19C | ime_toggle | `void(void)` |
-| 0x1A0 | ime_is_active | `int(void)` |
-| 0x1A4 | ime_set_mode | `void(int mode)` |
-| 0x1A8 | ime_get_mode | `int(void)` |
-| 0x1AC | ime_getkey | `int(void)` |
-| 0x1B0 | sys_redirect_fd | `int(int fd, const char *path, int mode)` |
-| 0x1B4 | sys_reset_redirect | `void(int fd)` |
-| 0x1B8 | sys_is_redirected | `int(int fd)` |
-| 0x1BC | sys_pipe_alloc | `int(void)` |
-| 0x1C0 | sys_pipe_free | `void(int id)` |
-| 0x1C4 | sys_pipe_get_buf | `u8 *(int id)` |
-| 0x1C8 | sys_pipe_get_len | `u32(int id)` |
-| 0x1CC | sys_pipe_clear | `void(int id)` |
-| 0x1D0 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
-| 0x1D4 | sys_redirect_get_buf_len | `u32(int fd)` |
-| 0x1D8 | paging_is_present | `int(u32 addr)` |
-| 0x1DC | snd_bgm_play | `void(const char *mml)` |
-| 0x1E0 | snd_bgm_stop | `void(void)` |
-| 0x1E4 | snd_bgm_is_playing | `int(void)` |
-| 0x1E8 | snd_se_play | `void(int se_id)` |
-| 0x1EC | snd_se_play_raw | `void(int note, int duration_ticks, int tone)` |
-| 0x1F0 | snd_set_master | `void(int enable)` |
-| 0x1F4 | snd_bgm_set_persist | `void(int persist)` |
-| 0x1F8 | kbd_is_pressed | `int(int scancode)` |
-| 0x1FC | fm_note_on | `void(int ch, int note)` |
-| 0x200 | fm_note_off | `void(int ch)` |
-| 0x204 | fm_set_tone_num | `void(int ch, int tone_num)` |
-| 0x208 | ssg_tone | `void(int ch, u16 period)` |
-| 0x20C | ssg_volume | `void(int ch, u8 vol)` |
-| 0x210 | ssg_all_off | `void(void)` |
+| 0x17C | gfx_present_nosync | `void(void)` |
+| 0x180 | gfx_present_raster | `void(void *table)` |
+| 0x184 | kcg_read_ank | `void(u8 ch, u8 *buf)` |
+| 0x188 | kcg_read_kanji | `void(u16 jis_code, u8 *buf)` |
+| 0x18C | sys_shm_alloc | `void *(int blocks)` |
+| 0x190 | sys_shm_lock | `int(void *ptr)` |
+| 0x194 | sys_shm_free | `int(void *ptr)` |
+| 0x198 | ime_getchar | `int(void)` |
+| 0x19C | ime_trygetchar | `int(void)` |
+| 0x1A0 | ime_toggle | `void(void)` |
+| 0x1A4 | ime_is_active | `int(void)` |
+| 0x1A8 | ime_set_mode | `void(int mode)` |
+| 0x1AC | ime_get_mode | `int(void)` |
+| 0x1B0 | ime_getkey | `int(void)` |
+| 0x1B4 | sys_redirect_fd | `int(int fd, const char *path, int mode)` |
+| 0x1B8 | sys_reset_redirect | `void(int fd)` |
+| 0x1BC | sys_is_redirected | `int(int fd)` |
+| 0x1C0 | sys_pipe_alloc | `int(void)` |
+| 0x1C4 | sys_pipe_free | `void(int id)` |
+| 0x1C8 | sys_pipe_get_buf | `u8 *(int id)` |
+| 0x1CC | sys_pipe_get_len | `u32(int id)` |
+| 0x1D0 | sys_pipe_clear | `void(int id)` |
+| 0x1D4 | sys_redirect_fd_buf | `int(int fd, u8 *buf, u32 size, u32 len)` |
+| 0x1D8 | sys_redirect_get_buf_len | `u32(int fd)` |
+| 0x1DC | paging_is_present | `int(u32 addr)` |
+| 0x1E0 | snd_bgm_play | `void(const char *mml)` |
+| 0x1E4 | snd_bgm_stop | `void(void)` |
+| 0x1E8 | snd_bgm_is_playing | `int(void)` |
+| 0x1EC | snd_se_play | `void(int se_id)` |
+| 0x1F0 | snd_se_play_raw | `void(int note, int duration_ticks, int tone)` |
+| 0x1F4 | snd_set_master | `void(int enable)` |
+| 0x1F8 | snd_bgm_set_persist | `void(int persist)` |
+| 0x1FC | kbd_is_pressed | `int(int scancode)` |
+| 0x200 | fm_note_on | `void(int ch, int note)` |
+| 0x204 | fm_note_off | `void(int ch)` |
+| 0x208 | fm_set_tone_num | `void(int ch, int tone_num)` |
+| 0x20C | ssg_tone | `void(int ch, u16 period)` |
+| 0x210 | ssg_volume | `void(int ch, u8 vol)` |
+| 0x214 | ssg_all_off | `void(void)` |
+| 0x218 | mouse_poll | `void(void *info)` |
+| 0x21C | mouse_available | `int(void)` |
+| 0x220 | mouse_set_bounds | `void(i16 x_min, i16 y_min, i16 x_max, i16 y_max)` |
+| 0x224 | tvram_readchar_at | `void(int x, int y, u16 *code, u8 *attr)` |
+| 0x228 | tvram_reverse_cell | `int(int x, int y)` |
+| 0x22C | mouse_cursor_set_mode | `void(int mode)` |
+| 0x230 | mouse_cursor_show | `void(void)` |
+| 0x234 | mouse_cursor_hide | `void(void)` |
+
+### データフィールド (構造体末尾)
+
+| Offset | フィールド | 型 | 説明 |
+|--------|-----------|------|------|
+| 0x238 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -201,6 +211,13 @@ v22以降、基本的な描画プリミティブ (`gfx_clear`, `gfx_pixel`, `gfx
 
 1. **libos32gfx ライブラリ** (推奨): `programs/libos32gfx/` で提供されるスタティックリンクライブラリ。サーフェス、スプライト、描画プリミティブ、ダーティ矩形管理、フォントレンダリングなど高レベルな描画機能を提供します。
 2. **フレームバッファ直接操作**: `gfx_get_framebuffer()` で取得した `GFX_Framebuffer` 構造体を介して、4プレーンのバックバッファに直接書き込み、`gfx_add_dirty_rect()` + `gfx_present_dirty()` でVRAMに転送します。
+
+**描画モード**:
+
+| モード | 解像度 | 初期化 | ページフリップ |
+|--------|--------|--------|---------------|
+| 400ラインモード | 640×400 | `gfx_init()` | 自動有効 |
+| 200ラインモード | 640×200 | `gfx_init_200()` | 自動有効 |
 
 **ページフリッピング**:
 `gfx_init()` / `gfx_init_200()` いずれでもページフリッピングが自動的に有効になります。
@@ -220,6 +237,29 @@ v24で追加。VSYNC後のアクティブ表示期間中に、走査線ごとに
 ### §4-3 FDリダイレクト・パイプAPI
 
 v25で追加。外部プログラム（シェル）がFD単位の入出力リダイレクトとパイプラインを構築するためのAPI群。
+
+**FDリダイレクト**:
+- `sys_redirect_fd(fd, path, mode)` — 指定FDの出力先をファイルにリダイレクト
+- `sys_reset_redirect(fd)` — リダイレクトを解除しコンソールに復帰
+- `sys_is_redirected(fd)` — FDがリダイレクト中か判定
+- `sys_redirect_fd_buf(fd, buf, size, len)` — FDの出力先をメモリバッファにリダイレクト
+- `sys_redirect_get_buf_len(fd)` — バッファリダイレクト時の書き込み済みバイト数取得
+
+**パイプバッファ**:
+- `sys_pipe_alloc()` — パイプバッファを1個確保 (IDを返す)
+- `sys_pipe_free(id)` — パイプバッファを解放
+- `sys_pipe_get_buf(id)` — パイプバッファのデータポインタ取得
+- `sys_pipe_get_len(id)` — パイプバッファの書き込み済みバイト数取得
+- `sys_pipe_clear(id)` — パイプバッファをクリア
+
+**典型的なパイプ実行フロー** (`cmd1 | cmd2`):
+1. `sys_pipe_alloc()` でパイプ確保
+2. `sys_redirect_fd_buf(1, pipe_buf, size, 0)` でcmd1のstdoutをパイプに接続
+3. cmd1を実行
+4. `sys_reset_redirect(1)` でstdout復帰
+5. `sys_redirect_fd_buf(0, pipe_buf, len, len)` でcmd2のstdinをパイプに接続
+6. cmd2を実行
+7. `sys_reset_redirect(0)` → `sys_pipe_free(id)` でクリーンアップ
 
 ### §4-4 ページング問い合わせAPI
 
@@ -248,29 +288,38 @@ v27で追加。FM音源(YM2203)の3チャンネルおよびSSG(PSG)の3チャン
 - `ssg_volume(ch, vol)` — SSGチャンネルの音量設定(0-15)
 - `ssg_all_off()` — SSG全チャンネル消音
 
-**FDリダイレクト**:
-- `sys_redirect_fd(fd, path, mode)` — 指定FDの出力先をファイルにリダイレクト
-- `sys_reset_redirect(fd)` — リダイレクトを解除しコンソールに復帰
-- `sys_is_redirected(fd)` — FDがリダイレクト中か判定
-- `sys_redirect_fd_buf(fd, buf, size, len)` — FDの出力先をメモリバッファにリダイレクト
-- `sys_redirect_get_buf_len(fd)` — バッファリダイレクト時の書き込み済みバイト数取得
+### §4-7 マウスAPI
 
-**パイプバッファ**:
-- `sys_pipe_alloc()` — パイプバッファを1個確保 (IDを返す)
-- `sys_pipe_free(id)` — パイプバッファを解放
-- `sys_pipe_get_buf(id)` — パイプバッファのデータポインタ取得
-- `sys_pipe_get_len(id)` — パイプバッファの書き込み済みバイト数取得
-- `sys_pipe_clear(id)` — パイプバッファをクリア
+v28で追加。PC-98バスマウスおよびNP21/Wシームレスマウスに対応するポーリングベースのマウスAPI。
 
-**典型的なパイプ実行フロー** (`cmd1 | cmd2`):
-1. `sys_pipe_alloc()` でパイプ確保
-2. `sys_redirect_fd_buf(1, pipe_buf, size, 0)` でcmd1のstdoutをパイプに接続
-3. cmd1を実行
-4. `sys_reset_redirect(1)` でstdout復帰
-5. `sys_redirect_fd_buf(0, pipe_buf, len, len)` でcmd2のstdinをパイプに接続
-6. cmd2を実行
-7. `sys_reset_redirect(0)` → `sys_pipe_free(id)` でクリーンアップ
+- `mouse_poll(info)` — `MouseInfo` 構造体に現在の座標・差分・ボタン状態を取得
+- `mouse_available()` — マウスが使用可能か判定 (1=バスマウス, 2=シームレス, 0=なし)
+- `mouse_set_bounds(x_min, y_min, x_max, y_max)` — マウス座標のクランプ範囲を設定
+
+**MouseInfo 構造体**:
+- `x`, `y` — 現在の画面座標
+- `dx`, `dy` — 前回poll以降の差分
+- `buttons` — ボタンビットマスク (`MOUSE_BTN_LEFT`=0x01, `MOUSE_BTN_RIGHT`=0x02, `MOUSE_BTN_MIDDLE`=0x04)
+- `mode` — 動作モード (0=なし, 1=バス, 2=シームレス)
+
+### §4-8 TVRAM読取・反転API
+
+v28で追加。テキストVRAMの読み取りと属性操作を行う。マウスカーソル (テキストモード) の実装に使用。
+
+- `tvram_readchar_at(x, y, *code, *attr)` — TVRAM 1セルの文字コード＋属性を読み取る
+- `tvram_reverse_cell(x, y)` — 属性反転トグル (PC-98属性ビット2 (0x04) のXOR)。漢字2セル自動対応。戻り値=セル幅 (ANK=1, 漢字=2)
+
+### §4-9 マウスカーソル制御API
+
+v28で追加。カーネル管理のマウスカーソル表示を制御する。アプリケーションはカーソル描画を自前で行う必要がなくなる。
+
+- `mouse_cursor_set_mode(mode)` — カーソルモード設定
+  - `MOUSE_CURSOR_NONE` (0): カーソル非表示 (生ポーリング専用)
+  - `MOUSE_CURSOR_TEXT` (1): TVRAM属性反転カーソル
+  - `MOUSE_CURSOR_GFX` (2): GFXスプライトカーソル (将来用)
+- `mouse_cursor_show()` — カーソル表示
+- `mouse_cursor_hide()` — カーソル非表示 (画面更新前にhide→更新→showのパターンで使用)
 
 ---
 
-*Last Updated: 2026-04-21*
+*Last Updated: 2026-04-23*

@@ -34,6 +34,15 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **libos32gfx拡張**: ベジェ曲線、円/丸弧描画、整数sin/cos LUT、BMPsave機能、NASM高速ユーティリティ。
 - **シェルスクリプトエンジン**: `source`/`if`/`goto`/`return`/`ask` コマンドによるバッチスクリプト実行。`/etc/profile` による起動時自動設定。
 - **リソース自動クリーンアップ**: `exec_exit()` でプログラム終了時にFD・パイプ・共有メモリを自動回収。
+- **HostDrvFS**: NP21/W HostDrv hypercall経由のホストファイルシステムアクセス。セッションベースI/O、volatile同期。`hsync` コマンドによるホスト→ゲスト同期。
+- **マウスドライバ**: PC-98バスマウス + NP21/Wシームレスマウス対応。カーネル管理マウスカーソル (TVRAM属性反転方式)。
+- **ページフリッピング (400/200ラインモード)**: GDCの表示/アクセスページ分離による完全ティアリングフリー描画。2フレームdirty rect追跡。
+- **CPU速度キャリブレーション**: PITベースのCPU速度測定 (`cpu_calibrate`) と速度非依存タイマー (`cpu_delay_us`)。
+- **CUIファイラ**: TVRAMベースのCUIファイラ (シェル内蔵コマンド + 外部プログラム)。拡張子関連付け。
+- **libpyxel**: Pyxel互換ゲームエンジン。libos32gfxベースの2x座標スケーリング、スプライトレンダリング。
+- **libos32snd**: FM/SSGサウンドライブラリ。BGMシーケンサ、SE再生。
+- **UTF-16LE変換**: HostDrvFS通信用のUTF-8/UTF-16LE相互変換ライブラリ (kutf16)。
+- **HostDrvデプロイワークフロー**: `hostdrv_deploy.py` + `deploy.yaml` によるsudo不要の高速デプロイ。
 
 ---
 

@@ -174,4 +174,36 @@ IDEセカンダリバンクに接続されたATAPI CD-ROMデバイスをPIOモ�
 | `atapi_read_capacity(cap)` | メディア容量取得 (AtapiCapacity構造体) |
 | `atapi_read_sectors(lba, count, buf)` | セクタ読み出し (2048B/セクタ, LBA指定) |
 
+### §5-7 マウス (mouse.c / mouse.h / mouse_bus.c / mouse_seamless.c)
+
+PC-98バスマウスおよびNP21/Wシームレスマウスに対応するポーリングベースのマウスドライバ。
+カーネル初期化時に自動検出し、利用可能なモードを選択する。
+
+| 項目 | 仕様 |
+|------|------|
+| バスマウスI/O | 0x7FD9 (データ), IRQ13 |
+| シームレスマウス | NP21/W拡張 (NP2SysP経由) |
+| 座標系 | 画面座標 (0,0)-(639,399) |
+| ボタン | 左/右/中 (3ボタン) |
+| ポーリング方式 | `mouse_poll()` でフレーム単位取得 |
+
+**API**:
+
+| 関数 | 説明 |
+|------|------|
+| `mouse_init()` | マウス検出・初期化 (シームレス優先、フォールバックでバスマウス) |
+| `mouse_poll(info)` | 現在の座標・差分・ボタン状態を `MouseInfo` に取得 |
+| `mouse_available()` | マウスの利用可能状態 (0=なし, 1=バス, 2=シームレス) |
+| `mouse_set_bounds(x_min, y_min, x_max, y_max)` | 座標クランプ範囲設定 |
+
+**マウスカーソル (カーネル管理)**:
+
+| 関数 | 説明 |
+|------|------|
+| `mouse_cursor_set_mode(mode)` | カーソルモード設定 (NONE/TEXT/GFX) |
+| `mouse_cursor_show()` | カーソル表示 |
+| `mouse_cursor_hide()` | カーソル非表示 (画面更新時のhide/showパターン) |
+
+TEXTモードではTVRAM属性反転 (ビット2 XOR) によるカーソル表示を行う。漢字2セル境界を自動検出し、左半分から反転する。
+
 ---

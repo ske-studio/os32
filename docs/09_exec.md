@@ -3,7 +3,7 @@
 OS32Xバイナリ形式の実行ファイルをext2から0x400000にロードし、
 KernelAPIポインタを引数として実行する。
 
-詳細は **[KAPI_SPEC.md](../KAPI_SPEC.md)** を参照。
+詳細は **[KAPI_SPEC.md](KAPI_SPEC.md)** を参照。
 
 | 項目 | 値 |
 |------|------|
@@ -17,7 +17,7 @@ KernelAPIポインタを引数として実行する。
 | ネスト実行 | 最大4段 (MAX_EXEC_NEST)。Level 0=シェル常駐、Level 1+=子プロセス置換 |
 | カーネル側規約 | GCC (System V) + `__cdecl` ラッパー |
 | 外部プログラム規約 | System V i386 ABI (スタック渡し) |
-| 現在のAPIバージョン | **26** |
+| 現在のAPIバージョン | **28** |
 | プログラム専用スタック | 動的配置 (128KB, メモリ終端付近から下方に展開) |
 | スタック保護 | GUARD B (Not-Present) ガードページによる保護 |
 
@@ -34,8 +34,6 @@ KernelAPIポインタを引数として実行する。
 > exec program.bin  # 明示的exec
 ```
 
-### 主な外部化済みプログラム
-
 ### 実行ステータスコード (`exec_status_t`)
 
 `exec_run` 関数は実行結果として、`exec_status_t` 列挙型の値を返します (定義: `os32_kapi_shared.h`)。
@@ -50,43 +48,90 @@ KernelAPIポインタを引数として実行する。
 | `EXEC_ERR_NOMEM` | `-4` | メモリサイズ超過、ページング領域確保失敗等のメモリ不足 |
 | `EXEC_ERR_INVALID` | `-5` | ヘッダマジック不一致やバージョン非互換等の不正なバイナリ |
 
+### 主な外部化済みプログラム
+
+**シェル**:
+
 | プログラム | ソース | 説明 |
 |---------|---------|------|
-| shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン内蔵) |
-| edit | `programs/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
-| skk_test| `programs/skk/` | SKKフロントエンド (廃止予定) |
-| fep_test| `programs/fep_test.c` | FEP (日本語入力) テスト (ベータ) |
-| gfx_demo| `programs/gfx_demo.c` | libos32gfx グラフィックスデモ |
-| spr_test| `programs/spr_test.c` | スプライト描画テスト |
-| demo1 | `programs/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
-| raster | `programs/raster.c` | ラスタパレット効果デモ |
-| hrview | `programs/hrview.c` | 高解像度画像ビューア |
-| vdpview | `programs/vdpview.c` | VDP画像ビューア |
-| vbzview | `programs/vbzview.c` | VBZベクタ画像ビューア |
-| ekakiuta| `programs/ekakiuta.c` | えかきうたアニメーション |
-| bench | `programs/bench/` | ベンチマークプログラム |
-| install | `programs/install.c` | HDDインストーラ |
-| grep | `programs/grep.c` | 行フィルタ (部分文字列マッチ、ファイル/stdin両対応) |
-| wc | `programs/wc.c` | 行/単語/バイトカウント (-l/-w/-c) |
-| head | `programs/head.c` | 先頭N行表示 (デフォルト10行) |
-| tail | `programs/tail.c` | 末尾N行表示 (デフォルト10行) |
-| tee | `programs/tee.c` | stdinをstdout+ファイルに分岐出力 |
-| man | `programs/man.c` | マニュアルページビューア |
-| more | `programs/more.c` | ページャ (ページ送り/検索/逆スクロール) |
-| mdview | `programs/mdview.c` | Markdown簡易ビューア |
-| sleep | `programs/sleep.c` | 指定秒数のウェイト (PIT 100Hz) |
-| touch | `programs/touch.c` | 空ファイル作成 |
-| hexdump | `programs/hexdump.c` | 16進+ASCIIダンプ表示 (-nオプション) |
-| find | `programs/find.c` | ファイル名検索 (再帰走査、-name部分一致) |
-| sort | `programs/sort.c` | 行ソート (シェルソート、-r/-nオプション) |
-| du | `programs/du.c` | ディスク使用量表示 (再帰合算、-sサマリー) |
-| cal | `programs/cal.c` | カレンダー表示 (ツェラーの公式、RTC連携) |
-| diff | `programs/diff.c` | 簡易2ファイル比較 (行単位逐次比較) |
-| hello | `programs/hello.c` | Hello World テスト |
-| args | `programs/args.c` | コマンドライン引数表示テスト |
-| crash | `programs/crash.c` | 意図的例外発生テスト |
-| nop | `programs/nop.c` | 何もしないプログラム |
-| restest | `programs/restest.c` | リソーステスト |
-| stat_t | `programs/stat_t.c` | stat API テスト |
-| libc_test| `programs/libc_test.c` | newlib libc動作テスト |
-| test2-4 | `programs/` | APIテスト・システム検証用 |
+| shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン・ファイラ内蔵) |
+
+**アプリケーション** (`programs/apps/`):
+
+| プログラム | ソース | 説明 |
+|---------|---------|------|
+| edit | `apps/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
+| filer | `apps/filer.c` | CUIファイラ (外部プログラム版、シェル内蔵版もあり) |
+| mdview | `apps/mdview.c` | Markdown簡易ビューア |
+| vdpview | `apps/vdpview.c` | VDP/高解像度画像ビューア (旧hrviewを統合) |
+| vbzview | `apps/vbzview.c` | VBZベクタ画像ビューア |
+| demo1 | `apps/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
+| ekakiuta| `apps/ekakiuta.c` | えかきうたアニメーション |
+| gfx_demo| `apps/gfx_demo.c` | libos32gfx グラフィックスデモ |
+| raster | `apps/raster.c` | ラスタパレット効果デモ |
+| spr_test| `apps/spr_test.c` | スプライト描画テスト |
+
+**コマンドラインツール** (`programs/cmds/`):
+
+| プログラム | ソース | 説明 |
+|---------|---------|------|
+| grep | `cmds/grep.c` | 行フィルタ (部分文字列マッチ、ファイル/stdin両対応) |
+| less | `cmds/less.c` | ページャ (上下スクロール、検索) |
+| more | `cmds/more.c` | ページャ (ページ送り/検索/逆スクロール) |
+| man | `cmds/man.c` | マニュアルページビューア |
+| wc | `cmds/wc.c` | 行/単語/バイトカウント (-l/-w/-c) |
+| head | `cmds/head.c` | 先頭N行表示 (デフォルト10行) |
+| tail | `cmds/tail.c` | 末尾N行表示 (デフォルト10行) |
+| tee | `cmds/tee.c` | stdinをstdout+ファイルに分岐出力 |
+| sort | `cmds/sort.c` | 行ソート (シェルソート、-r/-nオプション) |
+| find | `cmds/find.c` | ファイル名検索 (再帰走査、-name部分一致) |
+| diff | `cmds/diff.c` | 簡易2ファイル比較 (行単位逐次比較) |
+| du | `cmds/du.c` | ディスク使用量表示 (再帰合算、-sサマリー) |
+| cal | `cmds/cal.c` | カレンダー表示 (ツェラーの公式、RTC連携) |
+| hexdump | `cmds/hexdump.c` | 16進+ASCIIダンプ表示 (-nオプション) |
+| sleep | `cmds/sleep.c` | 指定秒数のウェイト (PIT 100Hz) |
+| touch | `cmds/touch.c` | 空ファイル作成 |
+
+**システムユーティリティ** (`programs/system/`):
+
+| プログラム | ソース | 説明 |
+|---------|---------|------|
+| hsync | `system/hsync.c` | HostDrv同期 (/host → / にファイル同期) |
+| install | `system/install.c` | HDDインストーラ |
+| cdinst | `system/cdinst.c` | CDインストーラ (ISO→ext2展開) |
+| lzss | `system/lzss.c` | LZSS圧縮・展開ツール |
+| sndctl | `system/sndctl.c` | サウンド制御ユーティリティ |
+| sndtest | `system/sndtest.c` | FM音源テスト |
+| sndtest2| `system/sndtest2.c` | SSG音源テスト |
+
+**テスト・デモ** (`programs/tests/`):
+
+| プログラム | ソース | 説明 |
+|---------|---------|------|
+| bench | `tests/bench/` | ベンチマークプログラム |
+| bench_scale2x | `tests/bench_scale2x/` | Scale2x ベンチマーク |
+| pyxel_test | `tests/pyxel_test.c` | libpyxel エンジンテスト |
+| mouse_test | `tests/mouse_test.c` | マウスドライバテスト |
+| flip400_test | `tests/flip400_test.c` | 400ラインページフリップテスト |
+| gfx200_test | `tests/gfx200_test.c` | 200ラインGFXテスト |
+| gfx_demo200 | `tests/gfx_demo200.c` | 200ライングラフィックスデモ |
+| fep_test| `tests/fep_test.c` | FEP (日本語入力) テスト |
+| hello | `tests/hello.c` | Hello World テスト |
+| args | `tests/args.c` | コマンドライン引数表示テスト |
+| crash | `tests/crash.c` | 意図的例外発生テスト |
+| nop | `tests/nop.c` | 何もしないプログラム |
+| restest | `tests/restest.c` | リソーステスト |
+| stat_t | `tests/stat_t.c` | stat API テスト |
+| libc_test| `tests/libc_test.c` | newlib libc動作テスト |
+| test2-4 | `tests/` | APIテスト・システム検証用 |
+
+**ライブラリ**:
+
+| ライブラリ | ソース | 説明 |
+|---------|---------|------|
+| libos32 | `programs/libos32/` | newlib-nano ブリッジ (syscalls.c) |
+| libos32gfx | `programs/libos32gfx/` | グラフィックス描画ライブラリ |
+| libos32snd | `programs/libos32snd/` | サウンドライブラリ (BGM/SE) |
+| libpyxel | `programs/libpyxel/` | Pyxel互換ゲームエンジン |
+| libfiler | `programs/libfiler/` | ファイラ共通ライブラリ |
+| libmd | `programs/libmd/` | Markdown パーサーライブラリ |
