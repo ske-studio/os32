@@ -16,12 +16,13 @@
 /* ------------------------------------------------------------------------ */
 
 #define CMD_BUF_SIZE 4096
+#define HIST_LINE_MAX 512
 #define MAX_ARGS OS32_MAX_ARGS
 #define MAX_CMDS 128
 #define PATH_MAX_LEN OS32_MAX_PATH
 
 /* スクリプトエンジン定数 */
-#define SCRIPT_MAX_LINES  256   /* スクリプト最大行数 */
+#define SCRIPT_MAX_LINES  128   /* スクリプト最大行数 */
 #define SCRIPT_MAX_LINE   256   /* 1行の最大長 */
 #define SCRIPT_MAX_DEPTH  4     /* source ネスト上限 */
 
@@ -56,6 +57,8 @@ void shell_print_help(const char *cmd_name);
 
 /* メインループ・UI制御 (ui.c) */
 void shell_run(void);
+void hist_save(void);
+void hist_load(void);
 
 /* 各モジュールの初期化関数 (コマンド登録用) */
 void shell_cmd_base_init(void);
@@ -66,6 +69,7 @@ void shell_cmd_sys_init(void);
 void shell_rshell_init(void);
 void shell_cmd_env_init(void);
 void shell_cmd_script_init(void);
+void shell_cmd_filer_init(void);
 
 /* 環境変数 (cmd_env.c) */
 void env_init(void);

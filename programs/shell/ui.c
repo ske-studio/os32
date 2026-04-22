@@ -7,9 +7,10 @@
 
 #define HIST_SIZE    16
 
-static char hist_buf[HIST_SIZE][CMD_BUF_SIZE];
+static char hist_buf[HIST_SIZE][HIST_LINE_MAX];
 static int  hist_count = 0;
 static int  hist_idx   = 0;
+static int  hist_dirty = 0;
 static int  prev_draw_len = 0;
 
 static void hist_add(const char *s) {
@@ -19,10 +20,11 @@ static void hist_add(const char *s) {
     i = hist_count % HIST_SIZE;
     {
         int j;
-        for (j = 0; s[j] && j < CMD_BUF_SIZE - 1; j++) hist_buf[i][j] = s[j];
+        for (j = 0; s[j] && j < HIST_LINE_MAX - 1; j++) hist_buf[i][j] = s[j];
         hist_buf[i][j] = 0;
     }
     hist_count++;
+    hist_dirty = 1;
 }
 
 static void show_prompt(void) {
@@ -341,6 +343,102 @@ static int tab_complete(char *buf, int pos, int show_candidates) {
     return pos;
 }
 
+/* ======================================================================== */
+/*  履歴ファイルパス構築ヘルパ                                               */
+/* ======================================================================== */
+static int hist_build_path(char *path, int max)
+{
+    const char *home = env_get("HOME");
+    int pi = 0;
+    const char *h;
+    const char *fn;
+
+    if (!home) return -1;
+    h = home;
+    while (*h && pi < max - 12) path[pi++] = *h++;
+    if (pi > 0 && path[pi - 1] != '/') path[pi++] = '/';
+    fn = ".history";
+    while (*fn) path[pi++] = *fn++;
+    path[pi] = '\0';
+    return 0;
+}
+
+/* ======================================================================== */
+/*  履歴ファイル保存                                                         */
+/* ======================================================================== */
+void hist_save(void)
+{
+    char path[PATH_MAX_LEN];
+    int fd, i, start, end;
+
+    if (!hist_dirty) return;
+    if (hist_build_path(path, PATH_MAX_LEN) < 0) return;
+
+    fd = g_api->sys_open(path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+    if (fd < 0) return;
+
+    start = (hist_count > HIST_SIZE) ? hist_count - HIST_SIZE : 0;
+    end = hist_count;
+    for (i = start; i < end; i++) {
+        int idx = i % HIST_SIZE;
+        int len = 0;
+        while (hist_buf[idx][len]) len++;
+        if (len > 0) {
+            g_api->sys_write(fd, hist_buf[idx], len);
+            g_api->sys_write(fd, "\n", 1);
+        }
+    }
+    g_api->sys_close(fd);
+    hist_dirty = 0;
+}
+
+/* ======================================================================== */
+/*  履歴ファイル読み込み                                                     */
+/* ======================================================================== */
+void hist_load(void)
+{
+    char path[PATH_MAX_LEN];
+    char *buf;
+    int fd, sz, bi, li;
+
+    if (hist_build_path(path, PATH_MAX_LEN) < 0) return;
+
+    fd = g_api->sys_open(path, KAPI_O_RDONLY);
+    if (fd < 0) return;
+
+    buf = (char *)g_api->mem_alloc(HIST_SIZE * HIST_LINE_MAX);
+    if (!buf) { g_api->sys_close(fd); return; }
+
+    sz = g_api->sys_read(fd, buf, HIST_SIZE * HIST_LINE_MAX - 1);
+    g_api->sys_close(fd);
+    if (sz <= 0) { g_api->mem_free(buf); return; }
+    buf[sz] = '\0';
+
+    hist_count = 0;
+    li = 0;
+    for (bi = 0; bi <= sz; bi++) {
+        if (bi == sz || buf[bi] == '\n' || buf[bi] == '\r') {
+            if (li > 0) {
+                int idx = hist_count % HIST_SIZE;
+                int j;
+                int src_start = bi - li;
+                if (li >= HIST_LINE_MAX) li = HIST_LINE_MAX - 1;
+                for (j = 0; j < li; j++)
+                    hist_buf[idx][j] = buf[src_start + j];
+                hist_buf[idx][li] = '\0';
+                hist_count++;
+            }
+            li = 0;
+            if (bi < sz && buf[bi] == '\r' &&
+                bi + 1 < sz && buf[bi + 1] == '\n') bi++;
+        } else {
+            li++;
+        }
+    }
+    g_api->mem_free(buf);
+    hist_dirty = 0;
+}
+
 void shell_run(void) {
     char cmd_buf[CMD_BUF_SIZE];
     int cmd_pos, cmd_len, key, last_tab = 0;
@@ -380,6 +478,9 @@ void shell_run(void) {
             }
         }
     }
+
+    /* 履歴ファイル読み込み */
+    hist_load();
 
     /* 初期化時に自動シリアル＆rshell開始 */
     g_api->serial_init(SYS_SERIAL_BAUD);
@@ -515,5 +616,6 @@ void shell_run(void) {
         cmd_buf[cmd_len] = 0;
         if (cmd_len > 0) hist_add(cmd_buf);
         execute_command(cmd_buf);
+        if (hist_dirty) hist_save();
     }
 }
