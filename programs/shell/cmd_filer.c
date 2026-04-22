@@ -36,6 +36,12 @@
 #define FL_MAX_NAME_LEN     64
 #define FL_MAX_PATH_LEN     256
 
+/* ファイルタイプ関連付け */
+#define FL_FILETYPES_PATH   "/etc/filetypes"
+#define FL_FILETYPES_MAXSZ  8192   /* 設定ファイル最大サイズ */
+#define FL_MAX_ASSOC        128    /* 最大関連付け数 */
+#define FL_POPUP_TICKS      200    /* ポップアップ表示時間 (約2秒) */
+
 /* TVRAM属性値 */
 #define FL_ATTR_HEADER      0xA1  /* 水色 */
 #define FL_ATTR_SEPARATOR   0x21  /* 暗い青 */
@@ -80,12 +86,115 @@ typedef struct {
     char cwd[FL_MAX_PATH_LEN];
 } FL_State;
 
+/* ファイルタイプ関連付けエントリ (ポインタはft_bufの中を指す) */
+typedef struct {
+    const char *ext;    /* ".txt" 等 (ドット付き) */
+    const char *cmd;    /* "/usr/bin/edit.bin" 等 */
+} FL_Assoc;
+
 /* ======================================================================== */
 /*  静的変数                                                                */
 /* ======================================================================== */
 
 static FL_State fl_state;
 static int fl_running;
+
+/* ファイルタイプ関連付け (動的確保) */
+static char *ft_buf = NULL;       /* 設定ファイル読み込みバッファ */
+static FL_Assoc *ft_table = NULL; /* 関連付けテーブル */
+static int ft_count = 0;          /* 有効エントリ数 */
+
+/* ======================================================================== */
+/*  ファイルタイプ関連付け読み込み                                           */
+/* ======================================================================== */
+
+/* /etc/filetypes を読み込んでインプレース解析する */
+static void ft_load(void)
+{
+    int fd, sz, i, line_start, got_eq;
+    char *p;
+
+    ft_count = 0;
+
+    fd = g_api->sys_open(FL_FILETYPES_PATH, O_RDONLY);
+    if (fd < 0) return;
+
+    ft_buf = (char *)g_api->mem_alloc(FL_FILETYPES_MAXSZ);
+    if (!ft_buf) { g_api->sys_close(fd); return; }
+
+    sz = g_api->sys_read(fd, ft_buf, FL_FILETYPES_MAXSZ - 1);
+    g_api->sys_close(fd);
+    if (sz <= 0) { g_api->mem_free(ft_buf); ft_buf = NULL; return; }
+    ft_buf[sz] = '\0';
+
+    ft_table = (FL_Assoc *)g_api->mem_alloc(sizeof(FL_Assoc) * FL_MAX_ASSOC);
+    if (!ft_table) { g_api->mem_free(ft_buf); ft_buf = NULL; return; }
+
+    /* インプレース解析: '\n' と '=' を '\0' に置換してポインタを設定 */
+    line_start = 0;
+    for (i = 0; i <= sz; i++) {
+        if (ft_buf[i] == '\n' || ft_buf[i] == '\0') {
+            ft_buf[i] = '\0';
+            p = &ft_buf[line_start];
+
+            /* 空行・コメント行をスキップ */
+            if (*p != '\0' && *p != '#' && ft_count < FL_MAX_ASSOC) {
+                /* '=' を探す */
+                got_eq = 0;
+                {
+                    char *q = p;
+                    while (*q) {
+                        if (*q == '=') {
+                            *q = '\0';
+                            ft_table[ft_count].ext = p;
+                            ft_table[ft_count].cmd = q + 1;
+                            /* cmd が空でなければ登録 */
+                            if (*(q + 1) != '\0') {
+                                ft_count++;
+                            }
+                            got_eq = 1;
+                            break;
+                        }
+                        q++;
+                    }
+                }
+                (void)got_eq;
+            }
+            line_start = i + 1;
+        }
+    }
+}
+
+/* ファイルタイプテーブルを解放する */
+static void ft_free(void)
+{
+    if (ft_table) { g_api->mem_free(ft_table); ft_table = NULL; }
+    if (ft_buf) { g_api->mem_free(ft_buf); ft_buf = NULL; }
+    ft_count = 0;
+}
+
+/* ファイル名の拡張子から対応プログラムを検索。見つからなければNULL */
+static const char *ft_find(const char *filename)
+{
+    int i, len, elen;
+    const char *dot = NULL;
+    const char *p;
+
+    /* 最後の '.' を探す */
+    p = filename;
+    while (*p) { if (*p == '.') dot = p; p++; }
+    if (!dot) return NULL;
+
+    len = (int)(p - dot); /* 拡張子の長さ (ドット含む) */
+
+    for (i = 0; i < ft_count; i++) {
+        elen = strlen(ft_table[i].ext);
+        if (elen == len && strncmp(dot, ft_table[i].ext, len) == 0) {
+            return ft_table[i].cmd;
+        }
+    }
+    return NULL;
+}
 
 /* ======================================================================== */
 /*  パスユーティリティ                                                      */
@@ -516,6 +625,31 @@ static void fl_action_parent(void)
     fl_scan_dir();
 }
 
+/* プログラムを実行して復帰する共通処理 */
+static void fl_exec_program(const char *cmdline)
+{
+    g_api->tvram_clear();
+    g_api->exec_run(cmdline);
+    g_api->gfx_shutdown();
+    fl_scan_dir();
+}
+
+/* フッタ行にポップアップメッセージを一時表示 */
+static void fl_popup_message(const char *msg, u8 attr)
+{
+    u32 start;
+    fl_clear_line(FL_FOOTER_Y, attr);
+    fl_draw_str(2, FL_FOOTER_Y, msg, FL_SCREEN_COLS - 4, attr);
+    start = g_api->get_tick();
+    while ((g_api->get_tick() - start) < FL_POPUP_TICKS) {
+        if (g_api->kbd_trygetkey() >= 0) break;
+        g_api->sys_halt();
+    }
+    /* キーバッファをフラッシュ */
+    while (g_api->kbd_trygetkey() >= 0)
+        ;
+}
+
 static void fl_action_enter(void)
 {
     FL_Entry *e;
@@ -534,20 +668,33 @@ static void fl_action_enter(void)
             fl_scan_dir();
         }
     } else if (e->is_exe) {
-        /* ============================================================ */
-        /*  プログラム実行 — シェル内蔵のため exec_run 後に復帰可能     */
-        /*                                                              */
-        /*  シェル (Level 0, 0x300000) → exec_run → 子プロセス          */
-        /*  (Level 1, 0x400000) → 子プロセス終了 → ここに戻る           */
-        /* ============================================================ */
+        /* .bin ファイル → 直接実行 */
         char fullpath[FL_MAX_PATH_LEN];
         fl_path_join(fullpath, FL_MAX_PATH_LEN, fl_state.cwd, e->name);
-        g_api->tvram_clear();
-        g_api->exec_run(fullpath);
-        /* GFXモードで動作したプログラムの後片付け */
-        g_api->gfx_shutdown();
-        /* ファイラ画面を再構築 (ディレクトリは維持) */
-        fl_scan_dir();
+        fl_exec_program(fullpath);
+    } else {
+        /* ファイルタイプ関連付けで開く */
+        const char *prog = ft_find(e->name);
+        if (prog) {
+            /* "prog filepath" のコマンドラインを構築 */
+            char cmdline[FL_MAX_PATH_LEN * 2];
+            char fullpath[FL_MAX_PATH_LEN];
+            int ci = 0;
+            const char *s;
+
+            fl_path_join(fullpath, FL_MAX_PATH_LEN, fl_state.cwd, e->name);
+
+            s = prog;
+            while (*s && ci < (int)sizeof(cmdline) - 2) cmdline[ci++] = *s++;
+            cmdline[ci++] = ' ';
+            s = fullpath;
+            while (*s && ci < (int)sizeof(cmdline) - 1) cmdline[ci++] = *s++;
+            cmdline[ci] = '\0';
+
+            fl_exec_program(cmdline);
+        } else {
+            fl_popup_message("No program associated with this file type", 0x41);
+        }
     }
 }
 
@@ -560,6 +707,7 @@ static void fl_init(const char *start_dir)
     memset(&fl_state, 0, sizeof(fl_state));
     strncpy(fl_state.cwd, start_dir, FL_MAX_PATH_LEN - 1);
     fl_state.cwd[FL_MAX_PATH_LEN - 1] = '\0';
+    ft_load();
     fl_scan_dir();
 }
 
@@ -648,6 +796,7 @@ static void cmd_filer(int argc, char **argv)
 
     fl_init(start_dir);
     fl_loop();
+    ft_free();
     g_api->tvram_clear();
 }
 

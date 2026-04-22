@@ -143,6 +143,11 @@ filesystem:
       type: glob
       tags: [docs]
 
+    # --- ファイルタイプ関連付け ---
+    - host: assets/filetypes
+      guest: /etc/filetypes
+      tags: [core]
+
     # --- SKK辞書 ---
     - host: assets/SKK.LZS
       guest: /data/skk.lzs
