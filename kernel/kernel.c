@@ -33,6 +33,7 @@
 #ifdef CONFIG_SERIALFS
 #include "serialfs.h"
 #endif
+#include "hostdrvfs.h"
 #include "tvram.h"
 #include "pc98.h"
 #include "memmap.h"
@@ -158,6 +159,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 #ifdef CONFIG_SERIALFS
     serialfs_init();
 #endif
+    hostdrvfs_init();
     path_set_device_validator(dev_find_validator);
     tvram_print(64, 1, "OK", TATTR_WHITE);
 
@@ -258,6 +260,18 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                     }
                 }
             }
+        }
+
+        /* 3. HostDrv(NT) 自動マウント (/host) */
+        if (hostdrvfs_detect()) {
+            int hrc = vfs_mount("/host", "hostdrv", "hostdrv");
+            if (hrc == VFS_OK) {
+                tvram_print(32, 3, "HDRV OK", TATTR_WHITE);
+            } else {
+                tvram_print(32, 3, "HDRV NG", TATTR_RED);
+            }
+        } else {
+            tvram_print(32, 3, "HDRV --", TATTR_CYAN);
         }
     }
 

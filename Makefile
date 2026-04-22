@@ -69,10 +69,10 @@ C_KERNEL = \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
-    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/serialfs.c fs/iso9660.c \
+    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/serialfs.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c lib/kutf16.c
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 

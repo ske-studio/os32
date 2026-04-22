@@ -121,10 +121,11 @@ void vfs_register_fs(VfsOps *ops)
 
 /* ======== VFSグローバル状態 ======== */
 
-#define VFS_DEV_HD     0
-#define VFS_DEV_FD     1
-#define VFS_DEV_SERIAL 2
-#define VFS_DEV_CD     3
+#define VFS_DEV_HD      0
+#define VFS_DEV_FD      1
+#define VFS_DEV_SERIAL  2
+#define VFS_DEV_CD      3
+#define VFS_DEV_HOSTDRV 4
 
 typedef struct {
     int in_use;
@@ -219,6 +220,13 @@ int vfs_dev_parse(const char *name, int *dev_type, int *dev_id)
     if (name[0] == 'c' && name[1] == 'd' && name[2] >= '0' && name[2] <= '3') {
         *dev_type = VFS_DEV_CD;
         *dev_id = name[2] - '0';
+        return VFS_OK;
+    }
+    /* "hostdrv" — 仮想デバイス (HostDrvFS) */
+    if (name[0] == 'h' && name[1] == 'o' && name[2] == 's' && name[3] == 't' &&
+        name[4] == 'd' && name[5] == 'r' && name[6] == 'v' && name[7] == '\0') {
+        *dev_type = VFS_DEV_HOSTDRV;
+        *dev_id = 0;
         return VFS_OK;
     }
     return VFS_ERR_INVAL;
