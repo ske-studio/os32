@@ -1,0 +1,34 @@
+# hsync
+
+HostDrv同期コマンド
+
+## SYNOPSIS
+
+`hsync [-f] [dir]`
+
+## DESCRIPTION
+
+/host (HostDrvマウントポイント) の内容を ext2 ルート (/) に同期する。
+ファイルサイズが異なるもののみコピーし、同一サイズはスキップする。
+
+NP21/W HostDrv 機能を利用した開発デプロイ用コマンド。
+ホスト側で `hostdrv_deploy.py sync` を実行した後、
+ゲスト側で `hsync` を実行してファイルを ext2 に反映する。
+
+## OPTIONS
+
+- `-f`, `--force` — サイズ比較をスキップし全ファイルを上書きコピー
+- `dir` — 同期対象ディレクトリ (例: `bin`, `sys`, `usr/bin`)
+
+## EXAMPLES
+
+```
+hsync           /host 配下全体を / に同期
+hsync bin       /host/bin/ → /bin/ のみ同期
+hsync -f        強制上書き
+hsync -f sys    /host/sys/ を強制同期
+```
+
+## SEE ALSO
+
+install, ls, ver

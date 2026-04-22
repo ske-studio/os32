@@ -101,15 +101,50 @@ make all
 3. 必要に応じて `kapi/` にラッパーを実装
 4. **`make clean` → `make all` で全プログラムを再ビルド**
 
+### デプロイ方式
+
+#### HostDrv方式 (推奨 — プログラム変更時)
+
+NP21/W の HostDrv 機能を利用し、ビルド成果物を `C:\os32` (WSL: `/mnt/c/os32`) に配置する。
+ゲスト OS32 は `/host` マウントポイント経由でアクセスし、`hsync` コマンドで ext2 に同期する。
+
+```bash
+/* HostDrvデプロイ (sudo不要) */
+make deploy                              /* = hostdrv_deploy.py sync */
+
+/* ゲスト側で同期 */
+hsync                                    /* /host → / 全同期 */
+hsync bin                                /* /host/bin/ → /bin/ のみ */
+hsync -f                                 /* 強制上書き */
+```
+
+**メリット**: sudo不要、NP21/W再起動不要（カーネル未変更時）
+
+#### NHDブート領域書き込み (カーネル変更時)
+
+カーネル変更時は NHD ブート領域への直接書き込みが必要。NP21/W の再起動も必要。
+
+```bash
+make deploy-kernel                       /* NHDブート領域書き込み + NP21/Wへコピー */
+```
+
+#### NHDフルデプロイ (レガシー)
+
+従来の NHD ext2 マウント方式。HostDrv が使えない環境向け。
+
+```bash
+make deploy-nhd                          /* nhd_deploy.py sync + deploy */
+```
+
 ### デプロイパスの整合性
 
 `deploy.yaml` のゲストパスと `config.h` の `SYS_*` 定数は**必ず一致**させること。
 
 | ビルド成果物 | ゲストパス | 設定元 |
 |-------------|-----------|--------|
-| `programs/shell.bin` | `/shell` | `config.h: SYS_SHELL_BIN` |
+| `programs/shell.bin` | `/sys/shell.bin` | `config.h: SYS_SHELL_BIN` |
 | `kernel.bin` | (NHDブート領域) | `deploy.yaml: boot.kernel` |
-| `unicode.bin` | `/unicode.bin` | `config.h: SYS_UNICODE_BIN` |
+| `unicode.bin` | `/sys/unicode.bin` | `config.h: SYS_UNICODE_BIN` |
 
 不一致はサイレントに古いバイナリが使われ続ける致命的な問題を引き起こす。
 
@@ -174,12 +209,13 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 ### 基本的な検証フロー
 
 1. `make all` でビルドエラーがないことを確認
-2. NHD にデプロイ (`nhd_deploy.py sync` → `nhd_deploy.py deploy`)
-3. NP21/W を再起動
-4. `ver` コマンドでビルドタイムスタンプを確認
-5. 変更対象の機能を手動テスト
+2. HostDrv にデプロイ (`hostdrv_deploy.py sync`)
+3. カーネル変更時は NHD に書き込み (`nhd_deploy.py write-kernel` + `deploy`) + NP21/W 再起動
+4. ゲスト側で `hsync` を実行 (HostDrv → ext2 同期)
+5. `ver` コマンドでビルドタイムスタンプを確認
+6. 変更対象の機能を手動テスト
 
-自動化ワークフロー (`/build-os32`, `/full-build`) を活用すること。
+自動化ワークフロー (`/build-os32`, `/full-build`, `/deploy-program`) を活用すること。
 
 ### シリアルコンソール経由のリモートテスト
 
