@@ -1,7 +1,20 @@
 #include "cmd_fs_shared.h"
 #include <stdio.h>
 
-static u8 io_buf[65536];
+#define IO_BUF_SIZE 65536
+static u8 *io_buf = NULL;
+
+static int ensure_io_buf(void)
+{
+    if (io_buf) return 0;
+    io_buf = (u8 *)g_api->mem_alloc(IO_BUF_SIZE);
+    return io_buf ? 0 : -1;
+}
+
+static void release_io_buf(void)
+{
+    if (io_buf) { g_api->mem_free(io_buf); io_buf = NULL; }
+}
 
 static int do_copy_file(const char *cmd_name, const char *src, const char *dst) {
     int fd_in, fd_out, sz;
@@ -19,7 +32,7 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
     }
 
     while (1) {
-        sz = g_api->sys_read(fd_in, io_buf, sizeof(io_buf));
+        sz = g_api->sys_read(fd_in, io_buf, IO_BUF_SIZE);
         if (sz < 0) {
             g_api->kprintf(ATTR_RED, "%s: read failed %s\n", cmd_name, src);
             break;
@@ -128,6 +141,10 @@ static void cmd_cp(int argc, char **argv)
         shell_print_help(argv[0]);
         return;
     }
+    if (ensure_io_buf() < 0) {
+        g_api->kprintf(ATTR_RED, "%s", "cp: out of memory\n");
+        return;
+    }
     
     /* オプション解析 */
     for (i = 1; i < argc; i++) {
@@ -183,6 +200,7 @@ static void cmd_cp(int argc, char **argv)
             }
         }
     }
+    release_io_buf();
 }
 
 static void cmd_mv(int argc, char **argv)
@@ -192,6 +210,10 @@ static void cmd_mv(int argc, char **argv)
     
     if (argc < 3) {
         shell_print_help(argv[0]);
+        return;
+    }
+    if (ensure_io_buf() < 0) {
+        g_api->kprintf(ATTR_RED, "%s", "mv: out of memory\n");
         return;
     }
     
@@ -214,6 +236,7 @@ static void cmd_mv(int argc, char **argv)
             if (do_copy_file("mv", src, dst) == 0) g_api->sys_unlink(src);
         }
     }
+    release_io_buf();
 }
 
 static void cmd_rm(int argc, char **argv)
@@ -281,17 +304,24 @@ static void cmd_cat(int argc, char **argv)
     }
 
     for (i = file_start; i < argc; i++) {
-        int fd = g_api->sys_open(argv[i], KAPI_O_RDONLY);
+        int fd;
         int r;
+
+        fd = g_api->sys_open(argv[i], KAPI_O_RDONLY);
         if (fd < 0) {
             g_api->kprintf(ATTR_RED, "cat: %s not found (err %d)\n", argv[i], fd);
+            continue;
+        }
+        if (ensure_io_buf() < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "cat: out of memory\n");
+            g_api->sys_close(fd);
             continue;
         }
         
         {
             int line_num = 1;
             while (1) {
-                r = g_api->sys_read(fd, io_buf, sizeof(io_buf));
+                r = g_api->sys_read(fd, io_buf, IO_BUF_SIZE);
                 if (r <= 0) break;
                 
                 if (show_linenum) {
@@ -302,6 +332,7 @@ static void cmd_cat(int argc, char **argv)
             }
         }
         g_api->sys_close(fd);
+        release_io_buf();
     }
 }
 

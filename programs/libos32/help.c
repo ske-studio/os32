@@ -18,8 +18,7 @@
 /* crt0_c.c で定義されるグローバルKAPIポインタ */
 extern KernelAPI *kapi;
 
-/* ヘルプバッファ (man ファイル読み込み用) */
-static char help_buf[32768];
+#define HELP_BUF_SIZE 32768
 
 /* ------------------------------------------------------------------------ */
 /*  ユーティリティ: コマンド名抽出                                          */
@@ -254,6 +253,7 @@ int os32_help_show(const char *name)
 {
     char cmd_name[64];
     char man_path[OS32_MAX_PATH];
+    char *help_buf;
     int fd, sz;
     int is_tty;
     int in_code;
@@ -268,11 +268,15 @@ int os32_help_show(const char *name)
     fd = kapi->sys_open(man_path, KAPI_O_RDONLY);
     if (fd < 0) return -1;
 
+    /* バッファを動的確保 */
+    help_buf = (char *)kapi->mem_alloc(HELP_BUF_SIZE);
+    if (!help_buf) { kapi->sys_close(fd); return -1; }
+
     /* 読み込み */
-    sz = kapi->sys_read(fd, help_buf, sizeof(help_buf) - 1);
+    sz = kapi->sys_read(fd, help_buf, HELP_BUF_SIZE - 1);
     kapi->sys_close(fd);
 
-    if (sz <= 0) return -1;
+    if (sz <= 0) { kapi->mem_free(help_buf); return -1; }
     help_buf[sz] = '\0';
 
     /* 端末チェック */
@@ -305,6 +309,7 @@ int os32_help_show(const char *name)
     /* 末尾に空行 */
     kapi->sys_write(1, "\n", 1);
 
+    kapi->mem_free(help_buf);
     return 0;
 }
 
