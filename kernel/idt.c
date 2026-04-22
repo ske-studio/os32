@@ -34,6 +34,7 @@ extern void irq_stub_1(void);     /* IRQ1: キーボード (INT 0x21) */
 extern void irq_stub_4(void);     /* IRQ4: RS-232C (INT 0x24) */
 extern void irq_stub_7(void);     /* IRQ7: スプリアス (INT 0x27) */
 extern void irq_stub_11(void);    /* IRQ11: FDD (INT 0x2B) */
+extern void irq_stub_13(void);    /* IRQ13: マウス (INT 0x2D) */
 
 /* デフォルトハンドラ */
 extern void isr_stub_default(void);
@@ -76,6 +77,7 @@ void idt_init(void)
     idt_set_gate(0x24, irq_stub_4, IDT_ATTR_INT_GATE32);  /* IRQ4: RS-232C */
     idt_set_gate(0x27, irq_stub_7, IDT_ATTR_INT_GATE32);  /* IRQ7: スプリアス対策 */
     idt_set_gate(0x2B, irq_stub_11, IDT_ATTR_INT_GATE32); /* IRQ11: FDD */
+    idt_set_gate(0x2D, irq_stub_13, IDT_ATTR_INT_GATE32); /* IRQ13: マウス */
 
     /* IDTRをロード */
     idtp.limit = sizeof(idt) - 1;

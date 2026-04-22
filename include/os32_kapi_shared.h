@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      27
+#define KAPI_VERSION      28
 
 /* ======================================================================== */
 /*  システム共通制限値 (SSoT)                                                */
@@ -156,6 +156,26 @@ typedef struct {
     int count;                                    /* 有効エントリ数 */
     GFX_RasterPalEntry entries[GFX_RASTER_MAX_ENTRIES];
 } GFX_RasterPalTable;
+
+/* マウス情報構造体 (mouse_poll 用) */
+typedef struct {
+    i16  x;          /* 現在のX座標 (画面座標) */
+    i16  y;          /* 現在のY座標 (画面座標) */
+    i16  dx;         /* X差分 (前回poll以降) */
+    i16  dy;         /* Y差分 (前回poll以降) */
+    u8   buttons;    /* ボタンビットマスク (MOUSE_BTN_xxx) */
+    u8   mode;       /* 0=なし, 1=バス, 2=シームレス */
+} MouseInfo;
+
+/* マウスボタンビットマスク */
+#define MOUSE_BTN_LEFT   0x01
+#define MOUSE_BTN_RIGHT  0x02
+#define MOUSE_BTN_MIDDLE 0x04
+
+/* マウスカーソル表示モード */
+#define MOUSE_CURSOR_NONE  0  /* カーソル非表示 (生ポーリング専用) */
+#define MOUSE_CURSOR_TEXT  1  /* TVRAM属性反転カーソル */
+#define MOUSE_CURSOR_GFX   2  /* GFXスプライトカーソル (将来用) */
 
 /* RTC時刻構造体 */
 typedef struct {

@@ -44,6 +44,7 @@
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "snd_engine.h"
+#include "mouse.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -134,6 +135,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(36, 1, "KBD...", TATTR_GREEN);
     kbd_init();
     tvram_print(42, 1, "OK", TATTR_WHITE);
+
+    /* マウスドライバ初期化 (NP21/W検出→モード自動選択) */
+    mouse_init();
 
     /* FDC初期化 (I/Oポート直接制御) */
     tvram_print(48, 1, "FDC...", TATTR_GREEN);

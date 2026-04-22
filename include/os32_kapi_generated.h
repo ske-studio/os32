@@ -137,6 +137,14 @@ typedef struct {
     void (__cdecl *ssg_tone)(int ch, u16 period);
     void (__cdecl *ssg_volume)(int ch, u8 vol);
     void (__cdecl *ssg_all_off)(void);
+    void (__cdecl *mouse_poll)(void *info);
+    int (__cdecl *mouse_available)(void);
+    void (__cdecl *mouse_set_bounds)(i16 x_min, i16 y_min, i16 x_max, i16 y_max);
+    void (__cdecl *tvram_readchar_at)(int x, int y, u16 *code, u8 *attr);
+    int (__cdecl *tvram_reverse_cell)(int x, int y);
+    void (__cdecl *mouse_cursor_set_mode)(int mode);
+    void (__cdecl *mouse_cursor_show)(void);
+    void (__cdecl *mouse_cursor_hide)(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

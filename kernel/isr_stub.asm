@@ -24,6 +24,7 @@ extern kbd_irq_handler
 extern serial_irq_handler
 extern tick_count
 extern fdc_irq_handler
+extern mouse_irq_handler
 
 section .text
 
@@ -215,3 +216,21 @@ irq_stub_11:
         popad
         iretd
 
+;; ============================================================
+;; IRQ13: マウス割り込み (INT 0x2D) — スレーブPIC IR5
+;; ============================================================
+global irq_stub_13
+irq_stub_13:
+        pushad
+
+        ;; Cハンドラを呼び出し
+        call    mouse_irq_handler
+
+        ;; スレーブPICにEOI送出 (PC-98: ポート 0x08)
+        mov     al, OCW2_EOI
+        out     PIC2_CMD, al
+        ;; マスタPICにもEOI送出 (カスケード)
+        out     PIC1_CMD, al
+
+        popad
+        iretd

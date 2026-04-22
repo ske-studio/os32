@@ -27,6 +27,7 @@
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "snd_engine.h"
+#include "mouse.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -684,5 +685,45 @@ void __cdecl wrap_ssg_volume(int ch, u8 vol)
 void __cdecl wrap_ssg_all_off(void)
 {
     ssg_all_off();
+}
+
+void __cdecl wrap_mouse_poll(void *info)
+{
+    mouse_poll((MouseState *)info);
+}
+
+int __cdecl wrap_mouse_available(void)
+{
+    return mouse_available();
+}
+
+void __cdecl wrap_mouse_set_bounds(i16 x_min, i16 y_min, i16 x_max, i16 y_max)
+{
+    mouse_set_bounds(x_min, y_min, x_max, y_max);
+}
+
+void __cdecl wrap_tvram_readchar_at(int x, int y, u16 *code, u8 *attr)
+{
+    tvram_readchar_at(x, y, code, attr);
+}
+
+int __cdecl wrap_tvram_reverse_cell(int x, int y)
+{
+    return tvram_reverse_cell(x, y);
+}
+
+void __cdecl wrap_mouse_cursor_set_mode(int mode)
+{
+    mouse_cursor_set_mode(mode);
+}
+
+void __cdecl wrap_mouse_cursor_show(void)
+{
+    mouse_cursor_show();
+}
+
+void __cdecl wrap_mouse_cursor_hide(void)
+{
+    mouse_cursor_hide();
 }
 

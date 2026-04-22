@@ -1,5 +1,5 @@
 {
-  "version": 27,
+  "version": 28,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -34,7 +34,8 @@
     "ime.h",
     "fd_redirect.h",
     "pipe_buffer.h",
-    "snd_engine.h"
+    "snd_engine.h",
+    "mouse.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -982,6 +983,64 @@
     },
     {
       "name": "ssg_all_off",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "mouse_poll",
+      "ret": "void",
+      "args": [
+        "void *info"
+      ],
+      "body": "mouse_poll((MouseState *)info);"
+    },
+    {
+      "name": "mouse_available",
+      "ret": "int",
+      "args": []
+    },
+    {
+      "name": "mouse_set_bounds",
+      "ret": "void",
+      "args": [
+        "i16 x_min",
+        "i16 y_min",
+        "i16 x_max",
+        "i16 y_max"
+      ]
+    },
+    {
+      "name": "tvram_readchar_at",
+      "ret": "void",
+      "args": [
+        "int x",
+        "int y",
+        "u16 *code",
+        "u8 *attr"
+      ]
+    },
+    {
+      "name": "tvram_reverse_cell",
+      "ret": "int",
+      "args": [
+        "int x",
+        "int y"
+      ]
+    },
+    {
+      "name": "mouse_cursor_set_mode",
+      "ret": "void",
+      "args": [
+        "int mode"
+      ]
+    },
+    {
+      "name": "mouse_cursor_show",
+      "ret": "void",
+      "args": []
+    },
+    {
+      "name": "mouse_cursor_hide",
       "ret": "void",
       "args": []
     }
