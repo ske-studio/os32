@@ -52,6 +52,52 @@ void tvram_putchar_at(int x, int y, char ch, u8 color)
     *(volatile u8 *)(TVRAM_ATTR + offset) = color;
 }
 
+/* TVRAM 1セル読み取り (文字コード + 属性) */
+void tvram_readchar_at(int x, int y, u16 *code, u8 *attr)
+{
+    u32 offset = (u32)y * TVRAM_BPR + (u32)x * 2;
+    if (code) *code = *(volatile u16 *)(TVRAM_TEXT + offset);
+    if (attr) *attr = *(volatile u8 *)(TVRAM_ATTR + offset);
+}
+
+/* TVRAM 反転トグル (漢字対応)
+ * 指定位置の属性反転ビット(0x04)をXORでトグルする。
+ * 漢字右半分の場合は左半分に自動調整し、2セル同時反転。
+ * 戻り値: 反転したセル数 (1=ANK, 2=漢字) */
+int tvram_reverse_cell(int x, int y)
+{
+    u16 code;
+    u8 attr;
+    int width, i, rx;
+
+    if (x < 0 || x >= TVRAM_COLS || y < 0 || y >= TVRAM_ROWS) return 0;
+
+    rx = x;
+
+    /* 漢字判定: 右半分 (bit7セット) なら左半分に揃える */
+    code = *(volatile u16 *)(TVRAM_TEXT + (u32)y * TVRAM_BPR + (u32)rx * 2);
+    if ((code >> 8) != 0 && (code & 0x80)) {
+        if (rx > 0) rx--;
+    }
+
+    /* 左半分の文字コードで幅を判定 */
+    code = *(volatile u16 *)(TVRAM_TEXT + (u32)y * TVRAM_BPR + (u32)rx * 2);
+    if ((code >> 8) != 0 && !(code & 0x80) && rx < TVRAM_COLS - 1) {
+        width = 2;  /* 漢字 */
+    } else {
+        width = 1;  /* ANK */
+    }
+
+    /* 反転ビットをトグル */
+    for (i = 0; i < width; i++) {
+        u32 offset = (u32)y * TVRAM_BPR + (u32)(rx + i) * 2;
+        volatile u8 *p = (volatile u8 *)(TVRAM_ATTR + offset);
+        *p ^= 0x04;
+    }
+
+    return width;
+}
+
 void tvram_scroll(void)
 {
     volatile u16 *text = (volatile u16 *)TVRAM_TEXT;
