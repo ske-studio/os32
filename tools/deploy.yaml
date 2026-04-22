@@ -79,9 +79,6 @@ filesystem:
     - host: programs/apps/vbzview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/hrview.bin
-      guest: /usr/bin/
-      tags: [programs]
     - host: programs/apps/filer.bin
       guest: /usr/bin/
       tags: [programs]
@@ -112,6 +109,9 @@ filesystem:
     - host: programs/tests/gfx_demo200.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/mouse_test.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"
@@ -129,7 +129,6 @@ filesystem:
         - demo1.bin
         - ekakiuta.bin
         - vbzview.bin
-        - hrview.bin
         - vdpview.bin
         - spr_test.bin
         - raster.bin
