@@ -87,7 +87,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/rotate_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -296,6 +296,15 @@ programs/tests/demo_tile.elf: build/app.ld $(CRT0_OBJ) programs/tests/demo_tile.
 
 demo_tile: $(CRT0_OBJ) programs/tests/demo_tile.bin
 
+# === Tilemap Benchmark ===
+programs/tests/tile_bench.o: programs/tests/tile_bench.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/tests/tile_bench.elf: build/app.ld $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ) -lc -lgcc
+
+tile_bench: $(CRT0_OBJ) programs/tests/tile_bench.bin
+
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -493,7 +502,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile rotate_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -580,6 +589,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "tests/blit_test2" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "tests/demo_tile" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 28 --heap 524288; \
+	elif [ "$*" = "tests/tile_bench" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 28 --heap 524288; \
 	elif [ "$*" = "tests/rotate_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \

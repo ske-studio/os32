@@ -118,6 +118,9 @@ filesystem:
     - host: programs/tests/demo_tile.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/tile_bench.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/rotate_test.bin
       guest: /usr/bin/
       tags: [programs]
