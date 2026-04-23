@@ -778,6 +778,12 @@ void tilemap_compose_scroll(void)
                 drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
             }
         }
+
+        /* 上層BG: 露出列のみ再描画 (保持領域はBBシフトで移動済み) */
+        if (has_upper_bg) {
+            redraw_upper_bgs_partial(start_col, start_col + cols_exposed,
+                                     0, TILEMAP_ROWS);
+        }
     }
 
     /* 垂直差分 */
@@ -814,11 +820,12 @@ void tilemap_compose_scroll(void)
                 drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
             }
         }
-    }
 
-    /* 上層BG再描画 (露出列/行のみ) */
-    if (has_upper_bg && (dx_total != 0 || dy_total != 0)) {
-        redraw_upper_bgs_partial(0, TILEMAP_COLS, 0, TILEMAP_ROWS);
+        /* 上層BG: 露出行のみ再描画 (保持領域はBBシフトで移動済み) */
+        if (has_upper_bg) {
+            redraw_upper_bgs_partial(0, TILEMAP_COLS,
+                                     start_row, start_row + rows_exposed);
+        }
     }
 
     /* 通常の dirty タイルも処理 */
