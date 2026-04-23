@@ -8,6 +8,11 @@ extern void __cdecl asm_copy_plane_rect(u8 *dst, int dst_pitch,
                                         int rows, int width_bytes);
 extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
 
+extern void __cdecl asm_blit_transparent_core(
+    u8 **dst_planes, int doff, int dst_pitch,
+    const u8 **src_planes, int soff, int src_pitch,
+    int width_bytes, int lines);
+
 /* ======================================================================== */
 /*  静的サーフェスプール                                                    */
 /* ======================================================================== */
@@ -205,7 +210,7 @@ void gfx_blit_transparent(int dx, int dy,
         int sh_clip = sh;
         int dx_clip = dx;
         int sx_clip = sx;
-        int r, i;
+        int doff, soff;
 
         /* Y軸クリップ */
         if (dy_clip < 0) { sy_clip -= dy_clip; sh_clip += dy_clip; dy_clip = 0; }
@@ -223,86 +228,12 @@ void gfx_blit_transparent(int dx, int dy,
         if (dx_clip + wb * 8 > gfx_fb.width) wb = (gfx_fb.width - dx_clip) >> 3;
         if (wb <= 0) return;
 
-        for (r = 0; r < sh_clip; r++) {
-            int doff = (dy_clip + r) * gfx_fb.pitch + (dx_clip >> 3);
-            int soff = (sy_clip + r) * src->pitch + (sx_clip >> 3);
-            
-            i = 0;
-            /* 32bit (4 bytes) processing */
-            for (; i <= wb - 4; i += 4) {
-                u32 *s0 = (u32*)&src->planes[0][soff + i];
-                u32 *s1 = (u32*)&src->planes[1][soff + i];
-                u32 *s2 = (u32*)&src->planes[2][soff + i];
-                u32 *s3 = (u32*)&src->planes[3][soff + i];
-                u32 mask = *s0 | *s1 | *s2 | *s3;
+        doff = dy_clip * gfx_fb.pitch + (dx_clip >> 3);
+        soff = sy_clip * src->pitch + (sx_clip >> 3);
 
-                if (mask == 0x00000000) continue;
-
-                u32 *d0 = (u32*)&gfx_fb.planes[0][doff + i];
-                u32 *d1 = (u32*)&gfx_fb.planes[1][doff + i];
-                u32 *d2 = (u32*)&gfx_fb.planes[2][doff + i];
-                u32 *d3 = (u32*)&gfx_fb.planes[3][doff + i];
-
-                if (mask == 0xFFFFFFFF) {
-                    *d0 = *s0; *d1 = *s1; *d2 = *s2; *d3 = *s3;
-                } else {
-                    u32 keep = ~mask;
-                    *d0 = (*d0 & keep) | *s0;
-                    *d1 = (*d1 & keep) | *s1;
-                    *d2 = (*d2 & keep) | *s2;
-                    *d3 = (*d3 & keep) | *s3;
-                }
-            }
-
-            /* 16bit (2 bytes) processing */
-            for (; i <= wb - 2; i += 2) {
-                u16 *s0 = (u16*)&src->planes[0][soff + i];
-                u16 *s1 = (u16*)&src->planes[1][soff + i];
-                u16 *s2 = (u16*)&src->planes[2][soff + i];
-                u16 *s3 = (u16*)&src->planes[3][soff + i];
-                u16 mask = *s0 | *s1 | *s2 | *s3;
-
-                if (mask == 0x0000) continue;
-
-                u16 *d0 = (u16*)&gfx_fb.planes[0][doff + i];
-                u16 *d1 = (u16*)&gfx_fb.planes[1][doff + i];
-                u16 *d2 = (u16*)&gfx_fb.planes[2][doff + i];
-                u16 *d3 = (u16*)&gfx_fb.planes[3][doff + i];
-
-                if (mask == 0xFFFF) {
-                    *d0 = *s0; *d1 = *s1; *d2 = *s2; *d3 = *s3;
-                } else {
-                    u16 keep = ~mask;
-                    *d0 = (*d0 & keep) | *s0;
-                    *d1 = (*d1 & keep) | *s1;
-                    *d2 = (*d2 & keep) | *s2;
-                    *d3 = (*d3 & keep) | *s3;
-                }
-            }
-
-            /* 8bit (1 byte) processing */
-            for (; i < wb; i++) {
-                u8 mask = src->planes[0][soff + i]
-                        | src->planes[1][soff + i]
-                        | src->planes[2][soff + i]
-                        | src->planes[3][soff + i];
-
-                if (mask == 0x00) continue;
-
-                if (mask == 0xFF) {
-                    for (p = 0; p < 4; p++) {
-                        gfx_fb.planes[p][doff + i] = src->planes[p][soff + i];
-                    }
-                } else {
-                    u8 keep = ~mask;
-                    for (p = 0; p < 4; p++) {
-                        gfx_fb.planes[p][doff + i] =
-                            (gfx_fb.planes[p][doff + i] & keep)
-                            | src->planes[p][soff + i];
-                    }
-                }
-            }
-        }
+        asm_blit_transparent_core(gfx_fb.planes, doff, gfx_fb.pitch,
+                                  (const u8 **)src->planes, soff, src->pitch,
+                                  wb, sh_clip);
         gfx_api->gfx_add_dirty_rect(dx_clip, dy_clip, wb * 8, sh_clip);
         return;
     }
