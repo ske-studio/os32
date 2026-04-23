@@ -1,6 +1,25 @@
 #include <string.h>
 #include "tilemap_internal.h"
 
+/* ======================================================================== */
+/*  ASMルーチン宣言                                                         */
+/* ======================================================================== */
+
+extern void __cdecl asm_tile_pair_opaque(
+    u8 **bb_planes, int dst_off, int bb_pitch,
+    const u8 *tile_l, const u8 *tile_r, int tile_psz);
+
+extern void __cdecl asm_tile_row_masked(
+    u8 **bb_planes, int doff,
+    const u8 *tile_row, int tile_psz,
+    u8 *cov_row);
+
+extern const u8 _asm_byte_reverse_lut[256];
+
+/* ======================================================================== */
+/*  ユーティリティ                                                          */
+/* ======================================================================== */
+
 /* TileDef から一時的な GFX_Surface を作成 */
 static void tile_to_surface(GFX_Surface *s, const TileDef *t)
 {
@@ -14,7 +33,7 @@ static void tile_to_surface(GFX_Surface *s, const TileDef *t)
     s->_pool_idx = -1;  /* プール外 */
 }
 
-/* H/Vフリップ済みタイルデータを一時バッファに生成 */
+/* H/Vフリップ済みタイルデータを一時バッファに生成 (LUT使用) */
 static void tile_to_surface_flipped(GFX_Surface *s, const TileDef *t,
                                     int hflip, int vflip,
                                     u8 flip_buf[4][TILE_PLANE_SZ])
@@ -27,17 +46,9 @@ static void tile_to_surface_flipped(GFX_Surface *s, const TileDef *t,
             u8 b1 = t->planes[p][src_row * TILE_PITCH + 1];
 
             if (hflip) {
-                /* 16ビット全体のビットリバース */
-                /* byte0 の bit7..0 → byte1 の bit0..7 (逆順) */
-                /* byte1 の bit7..0 → byte0 の bit0..7 (逆順) */
-                u8 r0 = 0, r1 = 0;
-                int bit;
-                for (bit = 0; bit < 8; bit++) {
-                    if (b0 & (1 << bit)) r1 |= (0x80 >> bit);
-                    if (b1 & (1 << bit)) r0 |= (0x80 >> bit);
-                }
-                flip_buf[p][row * TILE_PITCH]     = r0;
-                flip_buf[p][row * TILE_PITCH + 1] = r1;
+                /* LUTで即座にビットリバース + バイト交換 */
+                flip_buf[p][row * TILE_PITCH]     = _asm_byte_reverse_lut[b1];
+                flip_buf[p][row * TILE_PITCH + 1] = _asm_byte_reverse_lut[b0];
             } else {
                 flip_buf[p][row * TILE_PITCH]     = b0;
                 flip_buf[p][row * TILE_PITCH + 1] = b1;
@@ -120,6 +131,10 @@ static void prepare_tile_surface(GFX_Surface *surf, const TileDef *tile,
     }
 }
 
+/* ======================================================================== */
+/*  Back-to-Front 合成                                                      */
+/* ======================================================================== */
+
 void tilemap_compose_btf(void)
 {
     int row, col, bg;
@@ -171,7 +186,6 @@ void tilemap_compose_btf(void)
 
                 prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
 
-                /* 最背面(BG0) または 不透明タイルなら上書きblit (高速パス) */
                 if (tile->opacity == TILE_OPAQUE) {
                     gfx_blit(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
                 } else {
@@ -183,79 +197,23 @@ void tilemap_compose_btf(void)
 }
 
 /* ======================================================================== */
-/*  Front-to-Back 合成 (カバレッジマスク方式)                               */
+/*  Front-to-Back 合成 (カバレッジマスク方式 + ASM最適化)                    */
 /* ======================================================================== */
 
-/*
- * カバレッジマスク: 各タイルセル(16x16px)のピクセルが「既に描画済みか」を
- * ビットマップで管理する。
- *
- * 1タイル = 16行 × 16ピクセル = 16行 × 2バイト = 32バイト/タイル
- * 全セル = 24×24 × 32 = 18,432 バイト ≈ 18KB
- */
-
 #define COV_TILE_SZ  TILE_PLANE_SZ  /* 32 bytes */
-
-/* カバレッジマスクをクリア */
-static void cov_clear(u8 *cov_mask, u8 *cov_full)
-{
-    memset(cov_mask, 0, TILEMAP_ROWS * TILEMAP_COLS * COV_TILE_SZ);
-    memset(cov_full, 0, TILEMAP_ROWS * TILEMAP_COLS);
-}
-
-/* タイルの1行をカバレッジ付きでBBに直接書き込む */
-static void draw_tile_row_masked(
-    u8 *bb_planes[4], int bb_pitch,
-    const TileDef *tile, int row,
-    int dx, int dy_row,
-    u8 *cov_row /* 2バイト: このタイル行のカバレッジ */)
-{
-    int p;
-    int doff = dy_row * bb_pitch + (dx >> 3);
-    u8 uncovered0 = ~cov_row[0];
-    u8 uncovered1 = ~cov_row[1];
-    u8 any_bit;
-
-    if (uncovered0 == 0 && uncovered1 == 0) return; /* 既に全て埋まっている */
-
-    for (p = 0; p < 4; p++) {
-        u8 src0 = tile->planes[p][row * TILE_PITCH];
-        u8 src1 = tile->planes[p][row * TILE_PITCH + 1];
-
-        /* src のうち uncovered な部分だけ BB に OR する
-         * 既存のBB値は先行レイヤーで書き込み済み → クリアせずOR */
-        bb_planes[p][doff]     = (bb_planes[p][doff]     & cov_row[0]) | (src0 & uncovered0);
-        bb_planes[p][doff + 1] = (bb_planes[p][doff + 1] & cov_row[1]) | (src1 & uncovered1);
-    }
-
-    /* カバレッジを更新: 色0でないビットを「描画済み」としてマーク */
-    any_bit = 0;
-    for (p = 0; p < 4; p++) {
-        any_bit |= tile->planes[p][row * TILE_PITCH];
-    }
-    cov_row[0] |= (any_bit & uncovered0);
-
-    any_bit = 0;
-    for (p = 0; p < 4; p++) {
-        any_bit |= tile->planes[p][row * TILE_PITCH + 1];
-    }
-    cov_row[1] |= (any_bit & uncovered1);
-}
 
 void tilemap_compose_ftb(void)
 {
     int row, col, bg, r;
-    u8 *cov_mask; /* [TILEMAP_ROWS * TILEMAP_COLS][COV_TILE_SZ] */
+    u8 *cov_mask;
     u8 cov_full[TILEMAP_ROWS][TILEMAP_COLS];
     u8 cell_dirty[TILEMAP_ROWS][TILEMAP_COLS];
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
-    /* カバレッジマスクをヒープ確保 */
     cov_mask = (u8 *)_tilemap.kapi->mem_alloc(
         TILEMAP_ROWS * TILEMAP_COLS * COV_TILE_SZ);
     if (!cov_mask) {
-        /* メモリ不足時はBtFにフォールバック */
         tilemap_compose_btf();
         return;
     }
@@ -273,7 +231,8 @@ void tilemap_compose_ftb(void)
         }
     }
 
-    cov_clear(cov_mask, (u8 *)cov_full);
+    memset(cov_mask, 0, TILEMAP_ROWS * TILEMAP_COLS * COV_TILE_SZ);
+    memset(cov_full, 0, sizeof(cov_full));
 
     /* BG3(最前面) → BG0(最背面) の順で描画 */
     for (bg = BG_COUNT - 1; bg >= 0; bg--) {
@@ -288,15 +247,12 @@ void tilemap_compose_ftb(void)
                 u8 *cell_cov;
 
                 if (!cell_dirty[row][col]) continue;
-
-                /* L1高速パス: タイルセルが完全カバー済みならスキップ */
                 if (cov_full[row][col]) continue;
 
                 attr = _tilemap.bg_planes[bg].map[row][col];
                 tile_id = TILEMAP_ID(attr);
                 tile = &_tilemap.tiles[tile_id];
 
-                /* L0高速パス: 透明タイルはスキップ */
                 if (tile->opacity == TILE_TRANSPARENT) continue;
 
                 dx = _tilemap.origin_x + col * TILE_W;
@@ -318,12 +274,13 @@ void tilemap_compose_ftb(void)
                     cov_full[row][col] = 1;
                     memset(cell_cov, 0xFF, COV_TILE_SZ);
                 } else {
-                    /* カバレッジマスク付き描画 */
+                    /* カバレッジマスク付き描画 (ASMルーチン使用) */
                     for (r = 0; r < TILE_H; r++) {
-                        draw_tile_row_masked(
-                            gfx_fb.planes, gfx_fb.pitch,
-                            tile, r,
-                            dx, dy + r,
+                        int doff = (dy + r) * gfx_fb.pitch + (dx >> 3);
+                        asm_tile_row_masked(
+                            gfx_fb.planes, doff,
+                            &tile->planes[0][r * TILE_PITCH],
+                            TILE_PLANE_SZ,
                             cell_cov + r * TILE_PITCH);
                     }
                     /* 全ビットが立ったか確認 */
@@ -346,7 +303,7 @@ void tilemap_compose_ftb(void)
 }
 
 /* ======================================================================== */
-/*  2タイル同時 32bit 転送                                                  */
+/*  2タイル同時 32bit 転送 (ASM使用)                                        */
 /* ======================================================================== */
 
 void tilemap_compose_btf_fast(void)
@@ -356,7 +313,6 @@ void tilemap_compose_btf_fast(void)
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
-    /* 1. ダーティセルの検出とクリア */
     for (row = 0; row < TILEMAP_ROWS; row++) {
         for (col = 0; col < TILEMAP_COLS; col++) {
             cell_dirty[row][col] = 0;
@@ -369,13 +325,12 @@ void tilemap_compose_btf_fast(void)
         }
     }
 
-    /* 2. BG0→BG3の順で描画 (2タイルペア単位でDWORD転送) */
     for (bg = 0; bg < BG_COUNT; bg++) {
         if (!_tilemap.bg_planes[bg].visible) continue;
 
         for (row = 0; row < TILEMAP_ROWS; row++) {
             for (col = 0; col < TILEMAP_COLS; col += 2) {
-                int dx, dy, p, tr;
+                int dx, dy;
                 int tile_id_l, tile_id_r;
                 TileDef *tile_l, *tile_r;
                 int dirty_l, dirty_r;
@@ -398,21 +353,15 @@ void tilemap_compose_btf_fast(void)
                 dx = _tilemap.origin_x + col * TILE_W;
                 dy = _tilemap.origin_y + row * TILE_H;
 
-                /* 両方OPAQUEなら32bitペア転送 */
+                /* 両方OPAQUEなら ASM 32bitペア転送 */
                 if (tile_l->opacity == TILE_OPAQUE &&
                     tile_r->opacity == TILE_OPAQUE &&
                     col + 1 < TILEMAP_COLS) {
-                    for (p = 0; p < 4; p++) {
-                        u8 *dst = gfx_fb.planes[p] + dy * gfx_fb.pitch + (dx >> 3);
-                        for (tr = 0; tr < TILE_H; tr++) {
-                            u32 val =
-                                ((u32)tile_l->planes[p][tr * TILE_PITCH]     << 24) |
-                                ((u32)tile_l->planes[p][tr * TILE_PITCH + 1] << 16) |
-                                ((u32)tile_r->planes[p][tr * TILE_PITCH]     <<  8) |
-                                ((u32)tile_r->planes[p][tr * TILE_PITCH + 1]);
-                            *(u32 *)(dst + tr * gfx_fb.pitch) = val;
-                        }
-                    }
+                    int dst_off = dy * gfx_fb.pitch + (dx >> 3);
+                    asm_tile_pair_opaque(
+                        gfx_fb.planes, dst_off, gfx_fb.pitch,
+                        tile_l->planes[0], tile_r->planes[0],
+                        TILE_PLANE_SZ);
                     _tilemap.kapi->gfx_add_dirty_rect(dx, dy, TILE_W * 2, TILE_H);
                 } else {
                     /* 個別描画フォールバック */

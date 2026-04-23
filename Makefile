@@ -211,10 +211,15 @@ programs/libpyxel/%.o: programs/libpyxel/%.c
 
 # === libtilemap Module (タイルマップエンジン) ===
 TILEMAP_SRC = $(wildcard programs/libtilemap/*.c)
-TILEMAP_OBJ = $(TILEMAP_SRC:.c=.o)
+TILEMAP_ASM_SRC = $(wildcard programs/libtilemap/*.asm)
+TILEMAP_ASM_OBJ = $(TILEMAP_ASM_SRC:.asm=.o)
+TILEMAP_OBJ = $(TILEMAP_SRC:.c=.o) $(TILEMAP_ASM_OBJ)
 
 programs/libtilemap/%.o: programs/libtilemap/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/libtilemap/%.o: programs/libtilemap/%.asm
+	$(AS) -f elf32 $< -o $@
 
 # === Bench Scale2x Module (libpyxel Phase 0) ===
 BENCH_S2X_SRC = programs/tests/bench_scale2x/main.c
