@@ -269,41 +269,54 @@ Phase 4/5 完了後に着手。
 
 ## 4. 実装スケジュール
 
-| Phase | 内容 | 難易度 | 優先度 | 推定効果 |
-|-------|------|--------|--------|---------|
-| Phase 4 | BB シフト NASM化 | 中 | 高 | BBシフト 5× 削減 |
-| Phase 5 | タイルブリット NASM化 | 高 | 最高 | タイル描画 3× 削減 |
-| Phase 5.5 | upper BG + dirty rect 精密化 | 中 | 高 | VRAM転送量 大幅削減 |
-| Phase 6 | 斜めスクロール | 低 | 中 | コーナー重複排除 |
+| Phase | 内容 | 難易度 | 状態 | 実測結果 |
+|-------|------|--------|------|---------|
+| Phase 4 | BB シフト NASM化 | 中 | ✅ 完了 | V-diff 109→82ms (-25%) |
+| Phase 5 | タイルブリット NASM化 | 高 | 未着手 | — |
+| Phase 5.5 | upper BG + dirty rect 精密化 | 中 | ✅ 完了 | dirty rect 全面→列単位 |
+| Phase 6 | 斜めスクロール | 低 | 未着手 | — |
 
-**目標**: Phase 4 + 5 + 5.5 完了で **H-diff ≈ 20〜33ms/frame (30fps 達成)** を見込む。
+**現状**: Phase 4 + 5.5 完了で H-diff 86ms, V-diff 82ms。
+Phase 5 (タイルブリット NASM 化) が残りの主要ボトルネック。
 
 ---
 
-## 5. テスト方法
+## 5. ベンチマーク結果
 
-`tile_bench v` および `tile_bench s` で計測:
+`tile_bench v` (Scroll x10, 2-Layer Mixed):
 
 ```
 [Scroll] x10
-btf (full redraw)         365 ticks (3650 ms)
-compose_scroll H-diff      77 ticks ( 770 ms)  ← Phase 4+5+5.5 後: 目標 20〜33 ticks
-compose_scroll V-diff      ?? ticks             ← 計測後に記入
+btf (full redraw)         365 ticks (3650 ms)     ← ベースライン
+compose_scroll H-diff      86 ticks ( 860 ms)     ← Phase 4+5.5 完了
+compose_scroll V-diff      82 ticks ( 820 ms)     ← Phase 4+5.5 完了
 ```
+
+### 推移
+
+| 時点 | H-diff | V-diff |
+|------|--------|--------|
+| Phase 3 (C版) | 77ms | 109ms |
+| Phase 4 (NASM BB シフト) | 85ms | 82ms |
+| Phase 4 + 5.5 (dirty rect 精密化) | 86ms | 82ms |
+
+> H-diff がC版より微増しているのは、BBシフト高速化よりも `draw_column_btf` +
+> `redraw_upper_bgs` のタイル描画コストが支配的なため。Phase 5 で改善予定。
 
 ---
 
 ## 6. 注意事項
 
-- V-diff 実装にはデバッグ用 `kprintf` が残存 (`tilemap_compose.c` L745-748, L763, L769)
-  → Phase 4 着手前に除去すること
-- `tilemap_compose_scroll()` 末尾の `gfx_add_dirty_rect(384×384)` (L818-820) は
-  Phase 5.5 で精密化するまでは安全側として残す
+- ~~V-diff デバッグ用 `kprintf` が残存~~ → Phase 4 で除去済み ✅
+- ~~`gfx_add_dirty_rect(384×384)` 全面登録~~ → Phase 5.5 で `flush_drawn_dirty` に統一 ✅
+- `redraw_upper_bgs_partial` は現在まだ全面範囲 (0,COLS, 0,ROWS) で呼び出し中
+  → 露出列/行のみに絞る最適化は Phase 5 完了後に実施
 
 ---
 
 ## 7. 参考
 
-- [asm_tilemap.asm](../../programs/libtilemap/asm_tilemap.asm) — 既存 NASM ルーチン (348行)
-- [tilemap_compose.c](../../programs/libtilemap/tilemap_compose.c) — 差分スクロール実装 (838行)
+- [asm_tilemap.asm](../../programs/libtilemap/asm_tilemap.asm) — NASM ルーチン (730行)
+- [tilemap_compose.c](../../programs/libtilemap/tilemap_compose.c) — 差分スクロール実装
 - [04_SCROLL_OPT.md](04_SCROLL_OPT.md) — Phase 1〜3 実装記録
+
