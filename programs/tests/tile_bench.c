@@ -415,22 +415,22 @@ void main(int argc, char **argv, KernelAPI *api)
 
     if (run_full) {
         /* --- 全面描画ベンチマーク --- */
-        bench_full_draw("1-Layer Opaque", setup_scenario_a, 10);
-        bench_full_draw("2-Layer Mixed",  setup_scenario_b, 10);
-        bench_full_draw("4-Layer Heavy",  setup_scenario_c, 5);
+        bench_full_draw("1-Layer Opaque", setup_scenario_a, 5);
+        bench_full_draw("2-Layer Mixed",  setup_scenario_b, 5);
+        bench_full_draw("4-Layer Heavy",  setup_scenario_c, 3);
 
         /* --- 差分更新ベンチマーク --- */
-        bench_delta_update("2-Layer Mixed", setup_scenario_b, 100);
+        bench_delta_update("2-Layer Mixed", setup_scenario_b, 30);
     }
 
     if (run_flip) {
         /* --- フリップベンチマーク --- */
-        bench_flip(10);
+        bench_flip(3);
     }
 
     if (run_scroll) {
         /* --- スクロールベンチマーク --- */
-        bench_scroll(50);
+        bench_scroll(10);
     }
 
     /* クリーンアップ */
