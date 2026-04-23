@@ -30,9 +30,7 @@
 #include "fat12.h"
 #include "ext2.h"
 #include "iso9660.h"
-#ifdef CONFIG_SERIALFS
-#include "serialfs.h"
-#endif
+
 #include "hostdrvfs.h"
 #include "tvram.h"
 #include "pc98.h"
@@ -160,9 +158,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     fat12_init();
     ext2_init();
     vfs_register_fs(&iso9660_ops);
-#ifdef CONFIG_SERIALFS
-    serialfs_init();
-#endif
+
     hostdrvfs_init();
     path_set_device_validator(dev_find_validator);
     tvram_print(64, 1, "OK", TATTR_WHITE);

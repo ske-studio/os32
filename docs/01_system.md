@@ -42,7 +42,7 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
   ├── idt_init() → pic_init() → pit_init(100Hz)
   ├── kbd_init()
   ├── fdc_init()
-  ├── dev_init() → path_init() → FS初期化 (fat12/ext2/serialfs)
+  ├── dev_init() → path_init() → FS初期化 (fat12/ext2)
   ├── ide_init() → auto mount (ルート・サブマウント)
   ├── kmalloc_init() / paging_init() / shm_init()
   ├── fd_redirect_init() / pipe_buffer_init()
@@ -95,7 +95,7 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
 
 #### ファイルシステム (fs/)
 *   **依存先:** `include/`, `drivers/disk.h`, `drivers/atapi.h`, `kernel/`
-*   **役割:** VFS（仮想ファイルシステム）による抽象化と、FAT12/ext2/ISO9660/SerialFSの実装。
+*   **役割:** VFS（仮想ファイルシステム）による抽象化と、FAT12/ext2/ISO9660/HostDrvFSの実装。
 
 #### グラフィックス (gfx/)
 *   **依存先:** `include/`, `drivers/kcg.h`, `kernel/`

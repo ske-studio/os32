@@ -46,7 +46,7 @@ os32/
 ├── kernel/         カーネルコア・メモリ等・割り込みルーチン群
 ├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, atapi, kcg, np2sysp 等)
 ├── gfx/            グラフィック描画機能
-├── fs/             ファイルシステム (vfs, ext2, fat12, iso9660, serialfs 等)
+├── fs/             ファイルシステム (vfs, ext2, fat12, iso9660, hostdrv 等)
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
 ├── lib/            汎用ライブラリ (utf8, path 等)

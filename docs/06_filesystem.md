@@ -3,7 +3,7 @@
 ### §6-1 VFS (仮想ファイルシステム) レイヤー
 
 vfs.h/vfs.cが提供する統一的なファイル操作API。  
-各FSドライバ(ext2, fat12, iso9660, serialfs等)をVfsOps関数ポインタテーブルで抽象化し、
+各FSドライバ(ext2, fat12, iso9660, hostdrv等)をVfsOps関数ポインタテーブルで抽象化し、
 Linuxライクなコマンド体系を実現する。動的マウントに対応し、最大同時マウント数は `VFS_MAX_FS` (8) となる。
 各FSドライバはマルチインスタンス方式 (mount時にctxをkmallocし、umount時にkfree) で複数デバイスの同時マウントをサポートする。
 
@@ -129,20 +129,7 @@ CD-ROM上のISO 9660 Level 1ファイルシステムを読み取り専用でVFS�
 | `iso9660_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `iso9660_stat(ctx, path, st)` | ファイル情報取得 |
 
-### §6-7 SerialFS (serialfs.c / serialfs.h) — 廃止予定
-
-> ⚠️ **廃止予定**: HostDrvFS (§6-8) の導入により、SerialFS の役割は代替されました。現在は `CONFIG_SERIALFS` コンパイルスイッチで有効/無効を切り替え可能ですが、将来のバージョンで削除予定です。
-
-RS-232C経由でホストPCのファイルシステムにアクセスする仮想ファイルシステム。ホスト側のPythonスクリプト (`serial_host.py`) と連携し、ファイル読み出し・ディレクトリ一覧を提供する。
-
-| 項目 | 値 |
-|------|-----|
-| プロトコル | RS-232C (38400bps) |
-| マウントポイント | `/serial` (手動マウント) |
-| 書き込み | 非対応 |
-| ビルド制御 | `CONFIG_SERIALFS` (`include/config.h`) |
-
-### §6-8 HostDrvFS (hostdrvfs.c / hostdrvfs.h)
+### §6-7 HostDrvFS (hostdrvfs.c / hostdrvfs.h)
 
 NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) のファイルシステムにゲストOSから直接アクセスする仮想ファイルシステム。セッションベースのhypercall I/Oモデルで動作する。
 

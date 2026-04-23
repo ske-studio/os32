@@ -121,7 +121,7 @@
 | 作業 | カテゴリ | 備考 |
 |------|---------|------|
 | ~~パラレルポートファイル転送~~ ❌ | ~~ドライバ~~ | ノーマルモード=データ線出力専用+BUSY 1bit入力のみ。NP21/W非対応。中止 |
-| ~~SerialFS有効化 + ファイル転送コマンド~~ ✅ | ドライバ/シェル | `serial` → 自動mount /host。`recv host:`/`push`/`cp /host/` |
+| ~~SerialFS有効化 + ファイル転送コマンド~~ ✅→廃止 | ドライバ/シェル | HostDrvFS に代替され v1.x で削除 |
 | ~~LZSS圧縮/展開コマンド~~ ✅ | コマンド | `lzss c/d/t` — エンコーダ+コマンド (5.5KB) |
 | ~~fd1 (2台目FDD) 対応~~ ✅ | ドライバ | 調査の結果、FDC/disk/VFS全層で既に対応済み。`mount /fd1 fd1 fat12` |
 | ~~FAT12書き込み対応~~ ✅ | FS | 調査の結果、fat12_write/delete/flush_fat/alloc_cluster全て実装済み |
