@@ -115,6 +115,9 @@ filesystem:
     - host: programs/tests/blit_test2.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/demo_tile.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"
