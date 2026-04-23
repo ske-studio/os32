@@ -547,15 +547,16 @@ static void draw_row_btf(int screen_row, int map_row)
     }
 }
 
-/* 上層BG (bg >= 1) の非透明タイルを全列再描画 */
-static void redraw_upper_bgs(void)
+/* 上層BG (bg >= 1) の非透明タイルを指定範囲のみ再描画 */
+static void redraw_upper_bgs_partial(int col_start, int col_end,
+                                     int row_start, int row_end)
 {
     int row, col, bg;
     GFX_Surface tmp_surf;
     u8 flip_buf[4][TILE_PLANE_SZ];
 
-    for (row = 0; row < TILEMAP_ROWS; row++) {
-        for (col = 0; col < TILEMAP_COLS; col++) {
+    for (row = row_start; row < row_end; row++) {
+        for (col = col_start; col < col_end; col++) {
             for (bg = 1; bg < BG_COUNT; bg++) {
                 int tile_id;
                 u16 attr;
@@ -660,6 +661,7 @@ void tilemap_compose_scroll(void)
     }
 
     /* ---- 差分スクロール処理 (水平 + 垂直) ---- */
+    drawn_tracking_reset();
     gfx_dirty_suppress = 1;
 
     /* 水平差分 */
@@ -686,6 +688,18 @@ void tilemap_compose_scroll(void)
             for (c = start_col; c < start_col + cols_exposed; c++) {
                 int map_col = (first_map_col + c) % TILEMAP_COLS;
                 draw_column_btf(c, map_col);
+            }
+        }
+
+        /* BBシフト: 保持領域の全列をダーティマーク (VRAM同期用) */
+        {
+            int c2;
+            int kept_start = (dx_total > 0) ? 0 : cols_exposed;
+            int kept_end = (dx_total > 0) ? TILEMAP_COLS - cols_exposed
+                                          : TILEMAP_COLS;
+            for (c2 = kept_start; c2 < kept_end; c2++) {
+                drawn_tracking_mark(c2, 0);
+                drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
             }
         }
     }
@@ -715,11 +729,20 @@ void tilemap_compose_scroll(void)
                 draw_row_btf(r, map_row);
             }
         }
+
+        /* BBシフト: 保持行をダーティマーク (VRAM同期用) */
+        {
+            int c2;
+            for (c2 = 0; c2 < TILEMAP_COLS; c2++) {
+                drawn_tracking_mark(c2, 0);
+                drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
+            }
+        }
     }
 
-    /* 上層BG再描画 (シフトで位置ずれを補正) */
+    /* 上層BG再描画 (露出列/行のみ) */
     if (has_upper_bg && (dx_total != 0 || dy_total != 0)) {
-        redraw_upper_bgs();
+        redraw_upper_bgs_partial(0, TILEMAP_COLS, 0, TILEMAP_ROWS);
     }
 
     /* 通常の dirty タイルも処理 */
@@ -754,6 +777,7 @@ void tilemap_compose_scroll(void)
                     } else {
                         gfx_blit_transparent(ddx, ddy, &tmp_surf, NULL);
                     }
+                    drawn_tracking_mark(col, row);
                 }
             }
         }
@@ -761,10 +785,8 @@ void tilemap_compose_scroll(void)
 
     gfx_dirty_suppress = 0;
 
-    /* dirty rect 登録 (全面 — BBシフト済みのためVRAM全面転送が必要) */
-    _tilemap.kapi->gfx_add_dirty_rect(
-        _tilemap.origin_x, _tilemap.origin_y,
-        TILEMAP_COLS * TILE_W, TILEMAP_ROWS * TILE_H);
+    /* 描画された列/行範囲のみ dirty rect を登録 */
+    flush_drawn_dirty();
 
     /* prev_scroll 更新 */
     for (bg = 0; bg < BG_COUNT; bg++) {
