@@ -182,6 +182,152 @@ void gfx_blit_colorkey(int dx, int dy,
     }
 }
 
+void gfx_blit_transparent(int dx, int dy,
+                          const GFX_Surface *src, const GFX_Rect *src_rect)
+{
+    int sx, sy, sw, sh;
+    int p;
+
+    if (!src) return;
+
+    if (src_rect) {
+        sx = src_rect->x; sy = src_rect->y;
+        sw = src_rect->w; sh = src_rect->h;
+    } else {
+        sx = 0; sy = 0; sw = src->w; sh = src->h;
+    }
+
+    /* バイト境界揃い時の高速パス */
+    if ((sx & 7) == 0 && (dx & 7) == 0 && (sw & 7) == 0) {
+        int wb = sw >> 3;
+        int dy_clip = dy;
+        int sy_clip = sy;
+        int sh_clip = sh;
+        int dx_clip = dx;
+        int sx_clip = sx;
+        int r, i;
+
+        /* Y軸クリップ */
+        if (dy_clip < 0) { sy_clip -= dy_clip; sh_clip += dy_clip; dy_clip = 0; }
+        if (dy_clip + sh_clip > gfx_fb.height) sh_clip = gfx_fb.height - dy_clip;
+        if (sh_clip <= 0) return;
+
+        /* X軸クリップ (バイト単位) */
+        if (dx_clip < 0) {
+            int skip_bytes = (-dx_clip) >> 3;
+            dx_clip += skip_bytes * 8;
+            sx_clip += skip_bytes * 8;
+            wb -= skip_bytes;
+        }
+        if (wb <= 0) return;
+        if (dx_clip + wb * 8 > gfx_fb.width) wb = (gfx_fb.width - dx_clip) >> 3;
+        if (wb <= 0) return;
+
+        for (r = 0; r < sh_clip; r++) {
+            int doff = (dy_clip + r) * gfx_fb.pitch + (dx_clip >> 3);
+            int soff = (sy_clip + r) * src->pitch + (sx_clip >> 3);
+            
+            i = 0;
+            /* 32bit (4 bytes) processing */
+            for (; i <= wb - 4; i += 4) {
+                u32 *s0 = (u32*)&src->planes[0][soff + i];
+                u32 *s1 = (u32*)&src->planes[1][soff + i];
+                u32 *s2 = (u32*)&src->planes[2][soff + i];
+                u32 *s3 = (u32*)&src->planes[3][soff + i];
+                u32 mask = *s0 | *s1 | *s2 | *s3;
+
+                if (mask == 0x00000000) continue;
+
+                u32 *d0 = (u32*)&gfx_fb.planes[0][doff + i];
+                u32 *d1 = (u32*)&gfx_fb.planes[1][doff + i];
+                u32 *d2 = (u32*)&gfx_fb.planes[2][doff + i];
+                u32 *d3 = (u32*)&gfx_fb.planes[3][doff + i];
+
+                if (mask == 0xFFFFFFFF) {
+                    *d0 = *s0; *d1 = *s1; *d2 = *s2; *d3 = *s3;
+                } else {
+                    u32 keep = ~mask;
+                    *d0 = (*d0 & keep) | *s0;
+                    *d1 = (*d1 & keep) | *s1;
+                    *d2 = (*d2 & keep) | *s2;
+                    *d3 = (*d3 & keep) | *s3;
+                }
+            }
+
+            /* 16bit (2 bytes) processing */
+            for (; i <= wb - 2; i += 2) {
+                u16 *s0 = (u16*)&src->planes[0][soff + i];
+                u16 *s1 = (u16*)&src->planes[1][soff + i];
+                u16 *s2 = (u16*)&src->planes[2][soff + i];
+                u16 *s3 = (u16*)&src->planes[3][soff + i];
+                u16 mask = *s0 | *s1 | *s2 | *s3;
+
+                if (mask == 0x0000) continue;
+
+                u16 *d0 = (u16*)&gfx_fb.planes[0][doff + i];
+                u16 *d1 = (u16*)&gfx_fb.planes[1][doff + i];
+                u16 *d2 = (u16*)&gfx_fb.planes[2][doff + i];
+                u16 *d3 = (u16*)&gfx_fb.planes[3][doff + i];
+
+                if (mask == 0xFFFF) {
+                    *d0 = *s0; *d1 = *s1; *d2 = *s2; *d3 = *s3;
+                } else {
+                    u16 keep = ~mask;
+                    *d0 = (*d0 & keep) | *s0;
+                    *d1 = (*d1 & keep) | *s1;
+                    *d2 = (*d2 & keep) | *s2;
+                    *d3 = (*d3 & keep) | *s3;
+                }
+            }
+
+            /* 8bit (1 byte) processing */
+            for (; i < wb; i++) {
+                u8 mask = src->planes[0][soff + i]
+                        | src->planes[1][soff + i]
+                        | src->planes[2][soff + i]
+                        | src->planes[3][soff + i];
+
+                if (mask == 0x00) continue;
+
+                if (mask == 0xFF) {
+                    for (p = 0; p < 4; p++) {
+                        gfx_fb.planes[p][doff + i] = src->planes[p][soff + i];
+                    }
+                } else {
+                    u8 keep = ~mask;
+                    for (p = 0; p < 4; p++) {
+                        gfx_fb.planes[p][doff + i] =
+                            (gfx_fb.planes[p][doff + i] & keep)
+                            | src->planes[p][soff + i];
+                    }
+                }
+            }
+        }
+        gfx_api->gfx_add_dirty_rect(dx_clip, dy_clip, wb * 8, sh_clip);
+        return;
+    }
+
+    /* 非境界揃い: ピクセル単位フォールバック */
+    {
+        int ix, iy;
+        for (iy = 0; iy < sh; iy++) {
+            for (ix = 0; ix < sw; ix++) {
+                int soff = (sy + iy) * src->pitch + ((sx + ix) >> 3);
+                u8 sbit = 0x80 >> ((sx + ix) & 7);
+                u8 color = 0;
+
+                for (p = 0; p < 4; p++) {
+                    if (src->planes[p][soff] & sbit)
+                        color |= (1 << p);
+                }
+                if (color != 0) {
+                    gfx_pixel(dx + ix, dy + iy, color);
+                }
+            }
+        }
+    }
+}
+
 void gfx_surface_fill_rect(GFX_Surface *surf, int x, int y, int w, int h, u8 color)
 {
     int x2, r, base;

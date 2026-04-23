@@ -32,6 +32,9 @@ void gfx_free_surface(GFX_Surface *surf);
 void gfx_surface_clear(GFX_Surface *surf, u8 color);
 void gfx_surface_pixel(GFX_Surface *surf, int x, int y, u8 color);
 void gfx_surface_fill_rect(GFX_Surface *surf, int x, int y, int w, int h, u8 color);
+void gfx_blit(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect);
+void gfx_blit_colorkey(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect, u8 colorkey);
+void gfx_blit_transparent(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect);
 
 /* Sprite */
 void gfx_sprite_init(void);
