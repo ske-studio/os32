@@ -87,7 +87,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -247,6 +247,15 @@ programs/tests/gfx_demo200.elf: build/app.ld $(CRT0_OBJ) programs/tests/gfx_demo
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/gfx_demo200.o $(GFX_OBJ) -lc -lgcc
 
 gfx_demo200: $(CRT0_OBJ) programs/tests/gfx_demo200.bin
+
+# === Blit Transparent Test ===
+programs/tests/blit_test.o: programs/tests/blit_test.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/tests/blit_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/blit_test.o $(GFX_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/blit_test.o $(GFX_OBJ) -lc -lgcc
+
+blit_test: $(CRT0_OBJ) programs/tests/blit_test.bin
 
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
@@ -445,7 +454,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -527,6 +536,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 27 --heap 2097152; \
 	elif [ "$*" = "tests/gfx_demo200" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 27 --heap 2097152; \
+	elif [ "$*" = "tests/blit_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
 	elif [ "$*" = "tests/mouse_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 28; \
 	else \
