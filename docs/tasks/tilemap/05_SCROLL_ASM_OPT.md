@@ -272,12 +272,12 @@ Phase 4/5 完了後に着手。
 | Phase | 内容 | 難易度 | 状態 | 実測結果 |
 |-------|------|--------|------|---------|
 | Phase 4 | BB シフト NASM化 | 中 | ✅ 完了 | V-diff 109→82ms (-25%) |
-| Phase 5 | タイルブリット NASM化 | 高 | 未着手 | — |
+| Phase 5 | タイルブリット NASM化 | 高 | ✅ 完了 | H-diff 86→79ms, V-diff 82→75ms |
 | Phase 5.5 | upper BG + dirty rect 精密化 | 中 | ✅ 完了 | dirty rect 全面→列単位 |
 | Phase 6 | 斜めスクロール | 低 | 未着手 | — |
 
-**現状**: Phase 4 + 5.5 完了で H-diff 86ms, V-diff 82ms。
-Phase 5 (タイルブリット NASM 化) が残りの主要ボトルネック。
+**現状**: Phase 4 + 5 + 5.5 完了で H-diff 79ms, V-diff 75ms。
+C版ベースラインから V-diff -31% 改善。H-diff はほぼ同等。
 
 ---
 
@@ -288,8 +288,8 @@ Phase 5 (タイルブリット NASM 化) が残りの主要ボトルネック。
 ```
 [Scroll] x10
 btf (full redraw)         365 ticks (3650 ms)     ← ベースライン
-compose_scroll H-diff      86 ticks ( 860 ms)     ← Phase 4+5.5 完了
-compose_scroll V-diff      82 ticks ( 820 ms)     ← Phase 4+5.5 完了
+compose_scroll H-diff      79 ticks ( 790 ms)     ← Phase 4+5+5.5 完了
+compose_scroll V-diff      75 ticks ( 750 ms)     ← Phase 4+5+5.5 完了
 ```
 
 ### 推移
@@ -299,9 +299,10 @@ compose_scroll V-diff      82 ticks ( 820 ms)     ← Phase 4+5.5 完了
 | Phase 3 (C版) | 77ms | 109ms |
 | Phase 4 (NASM BB シフト) | 85ms | 82ms |
 | Phase 4 + 5.5 (dirty rect 精密化) | 86ms | 82ms |
+| **Phase 4 + 5 + 5.5 (NASM blit)** | **79ms** | **75ms** |
 
-> H-diff がC版より微増しているのは、BBシフト高速化よりも `draw_column_btf` +
-> `redraw_upper_bgs` のタイル描画コストが支配的なため。Phase 5 で改善予定。
+> BG0不透明+フリップなしの典型パターンでは gfx_blit を完全バイパス。
+> 上層BGの `redraw_upper_bgs_partial` が残りの主要コスト。
 
 ---
 
@@ -310,7 +311,7 @@ compose_scroll V-diff      82 ticks ( 820 ms)     ← Phase 4+5.5 完了
 - ~~V-diff デバッグ用 `kprintf` が残存~~ → Phase 4 で除去済み ✅
 - ~~`gfx_add_dirty_rect(384×384)` 全面登録~~ → Phase 5.5 で `flush_drawn_dirty` に統一 ✅
 - `redraw_upper_bgs_partial` は現在まだ全面範囲 (0,COLS, 0,ROWS) で呼び出し中
-  → 露出列/行のみに絞る最適化は Phase 5 完了後に実施
+  → 露出列/行のみに絞る最適化は将来対応
 
 ---
 
