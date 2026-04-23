@@ -4,8 +4,10 @@
 ; libtilemap の描画ホットパスを NASM で最適化。
 ;
 ; 1. asm_tile_pair_opaque  : 2タイルDWORD同時転送 (btf_fast用)
-; 2. asm_tile_row_masked   : カバレッジマスク付き1行描画 (FtB用)
+; 2. asm_tile_pair_masked  : カバレッジマスク付き1行描画 (FtB用)
 ; 3. asm_byte_reverse_lut  : 256バイトLUT (H-flip用)
+; 4. asm_bb_shift_horiz    : BB水平バイトシフト (rep movsd)
+; 5. asm_bb_shift_vert     : BB垂直ラインシフト (rep movsd)
 ; =========================================================================
 
 bits 32
@@ -13,6 +15,8 @@ bits 32
 global asm_tile_pair_opaque
 global asm_tile_pair_masked
 global _asm_byte_reverse_lut
+global asm_bb_shift_horiz
+global asm_bb_shift_vert
 
 section .data
 
@@ -343,5 +347,389 @@ asm_tile_pair_masked:
     mov esp, ebp
     pop ebp
     ret
+
+
+; =========================================================================
+; void __cdecl asm_bb_shift_horiz(
+;     u8 *planes[4],  [ebp+8]   4プレーンポインタ配列
+;     int pitch,      [ebp+12]  BBピッチ (80)
+;     int origin_y,   [ebp+16]  タイル領域開始Y
+;     int tile_h,     [ebp+20]  タイル領域高さ (384)
+;     int base_byte,  [ebp+24]  水平開始オフセット
+;     int tile_bytes, [ebp+28]  水平幅バイト数 (48)
+;     int shift_bytes [ebp+32]  シフト量 (正=左シフト, 負=右シフト)
+; );
+;
+; インクリメンタルポインタ方式: line += pitch で行を進める (imul 排除)。
+; =========================================================================
+asm_bb_shift_horiz:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push esi
+    push edi
+    sub esp, 16
+    ; [ebp-16] = abs_shift
+    ; [ebp-20] = copy_size
+    ; [ebp-24] = plane_idx
+    ; [ebp-28] = line_ptr (現在行ポインタ)
+
+    ; abs_shift = |shift_bytes|
+    mov eax, [ebp+32]
+    cdq
+    xor eax, edx
+    sub eax, edx
+    mov [ebp-16], eax
+
+    ; copy_size = tile_bytes - abs_shift
+    mov ecx, [ebp+28]
+    sub ecx, eax
+    jle .hshift_done
+    mov [ebp-20], ecx
+
+    cmp dword [ebp+32], 0
+    jg .hshift_left
+    jmp .hshift_right
+
+; ---- 左シフト (shift_bytes > 0) ----
+.hshift_left:
+    mov dword [ebp-24], 0
+.hl_plane:
+    cmp dword [ebp-24], 4
+    jge .hshift_done
+
+    ; line_ptr = planes[p] + origin_y * pitch + base_byte
+    mov eax, [ebp+8]
+    mov edx, [ebp-24]
+    mov eax, [eax + edx*4]
+    mov ecx, [ebp+16]
+    imul ecx, [ebp+12]
+    add eax, ecx
+    add eax, [ebp+24]
+    mov [ebp-28], eax       ; line_ptr
+
+    mov ebx, [ebp+20]       ; ebx = tile_h (カウンタ)
+.hl_row:
+    test ebx, ebx
+    jz .hl_plane_next
+
+    mov edi, [ebp-28]       ; edi = line (dest)
+    mov esi, edi
+    add esi, [ebp-16]       ; esi = line + abs_shift (src)
+
+    cld
+    mov ecx, [ebp-20]
+    mov edx, ecx
+    shr ecx, 2
+    rep movsd
+    mov ecx, edx
+    and ecx, 3
+    rep movsb
+
+    ; ゼロクリア abs_shift バイト
+    xor eax, eax
+    mov ecx, [ebp-16]
+    mov edx, ecx
+    shr ecx, 2
+    rep stosd
+    mov ecx, edx
+    and ecx, 3
+    rep stosb
+
+    ; line_ptr += pitch
+    mov eax, [ebp+12]
+    add [ebp-28], eax
+    dec ebx
+    jmp .hl_row
+
+.hl_plane_next:
+    inc dword [ebp-24]
+    jmp .hl_plane
+
+; ---- 右シフト (shift_bytes < 0) ----
+.hshift_right:
+    mov dword [ebp-24], 0
+.hr_plane:
+    cmp dword [ebp-24], 4
+    jge .hshift_done
+
+    mov eax, [ebp+8]
+    mov edx, [ebp-24]
+    mov eax, [eax + edx*4]
+    mov ecx, [ebp+16]
+    imul ecx, [ebp+12]
+    add eax, ecx
+    add eax, [ebp+24]
+    mov [ebp-28], eax
+
+    mov ebx, [ebp+20]
+.hr_row:
+    test ebx, ebx
+    jz .hr_plane_next
+
+    mov eax, [ebp-28]       ; eax = line
+
+    ; 後ろ向きコピー: src=line[0..copy_size-1] → dst=line[abs_shift..abs_shift+copy_size-1]
+    mov ecx, [ebp-20]       ; copy_size
+    mov edx, ecx
+    and edx, 3              ; trailing bytes
+
+    std
+
+    test edx, edx
+    jz .hr_no_trail
+    ; esi = line + copy_size - 1, edi = line + abs_shift + copy_size - 1
+    lea esi, [eax + ecx - 1]
+    mov edi, eax
+    add edi, [ebp-16]
+    add edi, ecx
+    dec edi
+    mov ecx, edx
+    rep movsb
+    sub esi, 3
+    sub edi, 3
+    jmp .hr_do_dwords
+.hr_no_trail:
+    lea esi, [eax + ecx - 4]
+    mov edi, eax
+    add edi, [ebp-16]
+    add edi, [ebp-20]
+    sub edi, 4
+.hr_do_dwords:
+    mov ecx, [ebp-20]
+    shr ecx, 2
+    rep movsd
+
+    cld
+
+    ; 先頭 abs_shift バイトをゼロクリア
+    mov edi, [ebp-28]
+    xor eax, eax
+    mov ecx, [ebp-16]
+    mov edx, ecx
+    shr ecx, 2
+    rep stosd
+    mov ecx, edx
+    and ecx, 3
+    rep stosb
+
+    ; line_ptr += pitch
+    mov eax, [ebp+12]
+    add [ebp-28], eax
+    dec ebx
+    jmp .hr_row
+
+.hr_plane_next:
+    inc dword [ebp-24]
+    jmp .hr_plane
+
+.hshift_done:
+    add esp, 16
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+
+
+; =========================================================================
+; void __cdecl asm_bb_shift_vert(
+;     u8 *planes[4],  [ebp+8]
+;     int pitch,      [ebp+12]
+;     int origin_y,   [ebp+16]
+;     int tile_h,     [ebp+20]
+;     int base_byte,  [ebp+24]
+;     int tile_bytes, [ebp+28]  (48 = 12 DWORD)
+;     int shift_lines [ebp+32]  (正=上シフト, 負=下シフト)
+; );
+;
+; インクリメンタルポインタ方式: dst += pitch, src += pitch で行を進める。
+; =========================================================================
+asm_bb_shift_vert:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push esi
+    push edi
+    sub esp, 20
+    ; [ebp-16] = abs_shift
+    ; [ebp-20] = plane_idx
+    ; [ebp-24] = dword_count
+    ; [ebp-28] = dst_ptr
+    ; [ebp-32] = src_ptr
+
+    ; abs_shift = |shift_lines|
+    mov eax, [ebp+32]
+    cdq
+    xor eax, edx
+    sub eax, edx
+    mov [ebp-16], eax
+
+    cmp eax, [ebp+20]
+    jge .vshift_done
+
+    mov eax, [ebp+28]
+    shr eax, 2
+    mov [ebp-24], eax       ; dword_count
+
+    cmp dword [ebp+32], 0
+    jg .vshift_up
+    jmp .vshift_down
+
+; ---- 上シフト (shift_lines > 0) ----
+.vshift_up:
+    mov dword [ebp-20], 0
+.vu_plane:
+    cmp dword [ebp-20], 4
+    jge .vshift_done
+
+    ; area_base = planes[p] + origin_y * pitch + base_byte
+    mov eax, [ebp+8]
+    mov edx, [ebp-20]
+    mov eax, [eax + edx*4]
+    mov ecx, [ebp+16]
+    imul ecx, [ebp+12]
+    add eax, ecx
+    add eax, [ebp+24]       ; eax = area_base
+
+    ; dst = area_base (row 0)
+    mov [ebp-28], eax
+    ; src = area_base + shift_lines * pitch
+    mov ecx, [ebp-16]
+    imul ecx, [ebp+12]
+    add eax, ecx
+    mov [ebp-32], eax
+
+    ; コピー copy_rows = tile_h - abs_shift
+    mov ebx, [ebp+20]
+    sub ebx, [ebp-16]
+.vu_copy:
+    test ebx, ebx
+    jz .vu_zero
+
+    mov edi, [ebp-28]
+    mov esi, [ebp-32]
+    cld
+    mov ecx, [ebp-24]
+    rep movsd
+    mov ecx, [ebp+28]
+    and ecx, 3
+    rep movsb
+
+    mov eax, [ebp+12]
+    add [ebp-28], eax
+    add [ebp-32], eax
+    dec ebx
+    jmp .vu_copy
+
+.vu_zero:
+    ; ゼロクリア abs_shift 行
+    mov ebx, [ebp-16]
+.vu_zero_row:
+    test ebx, ebx
+    jz .vu_plane_next
+
+    mov edi, [ebp-28]
+    xor eax, eax
+    mov ecx, [ebp-24]
+    rep stosd
+    mov ecx, [ebp+28]
+    and ecx, 3
+    rep stosb
+
+    mov eax, [ebp+12]
+    add [ebp-28], eax
+    dec ebx
+    jmp .vu_zero_row
+
+.vu_plane_next:
+    inc dword [ebp-20]
+    jmp .vu_plane
+
+; ---- 下シフト (shift_lines < 0): 逆順コピー ----
+.vshift_down:
+    mov dword [ebp-20], 0
+.vd_plane:
+    cmp dword [ebp-20], 4
+    jge .vshift_done
+
+    mov eax, [ebp+8]
+    mov edx, [ebp-20]
+    mov eax, [eax + edx*4]
+    mov ecx, [ebp+16]
+    imul ecx, [ebp+12]
+    add eax, ecx
+    add eax, [ebp+24]       ; eax = area_base
+
+    ; dst = area_base + (tile_h - 1) * pitch
+    mov ecx, [ebp+20]
+    dec ecx
+    imul ecx, [ebp+12]
+    lea edx, [eax + ecx]
+    mov [ebp-28], edx       ; dst = 最終行
+
+    ; src = dst - abs_shift * pitch
+    mov ecx, [ebp-16]
+    imul ecx, [ebp+12]
+    sub edx, ecx
+    mov [ebp-32], edx       ; src = dst - shift*pitch
+
+    ; コピー copy_rows = tile_h - abs_shift (逆順)
+    mov ebx, [ebp+20]
+    sub ebx, [ebp-16]
+.vd_copy:
+    test ebx, ebx
+    jz .vd_zero
+
+    mov edi, [ebp-28]
+    mov esi, [ebp-32]
+    cld
+    mov ecx, [ebp-24]
+    rep movsd
+    mov ecx, [ebp+28]
+    and ecx, 3
+    rep movsb
+
+    ; dst -= pitch, src -= pitch
+    mov eax, [ebp+12]
+    sub [ebp-28], eax
+    sub [ebp-32], eax
+    dec ebx
+    jmp .vd_copy
+
+.vd_zero:
+    ; ゼロクリア abs_shift 行 (先頭行から — dst は既に正しい位置)
+    ; ebp-28 は abs_shift-1 行を指している
+    mov ebx, [ebp-16]
+.vd_zero_row:
+    test ebx, ebx
+    jz .vd_plane_next
+
+    mov edi, [ebp-28]
+    xor eax, eax
+    mov ecx, [ebp-24]
+    rep stosd
+    mov ecx, [ebp+28]
+    and ecx, 3
+    rep stosb
+
+    mov eax, [ebp+12]
+    sub [ebp-28], eax
+    dec ebx
+    jmp .vd_zero_row
+
+.vd_plane_next:
+    inc dword [ebp-20]
+    jmp .vd_plane
+
+.vshift_done:
+    add esp, 20
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+
+
 
 

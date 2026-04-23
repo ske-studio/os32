@@ -16,6 +16,14 @@ extern void __cdecl asm_tile_pair_masked(
 
 extern const u8 _asm_byte_reverse_lut[256];
 
+extern void __cdecl asm_bb_shift_horiz(
+    u8 **planes, int pitch, int origin_y, int tile_h,
+    int base_byte, int tile_bytes, int shift_bytes);
+
+extern void __cdecl asm_bb_shift_vert(
+    u8 **planes, int pitch, int origin_y, int tile_h,
+    int base_byte, int tile_bytes, int shift_lines);
+
 /* ======================================================================== */
 /*  静的バッファ (BSS — heap確保を排除)                                     */
 /* ======================================================================== */
@@ -435,83 +443,28 @@ void tilemap_compose_btf_fast(void)
 /*  スクロールが 8px 非境界の場合や大ジャンプ時は全面再描画にフォールバック。 */
 /* ======================================================================== */
 
-/* BB のタイル領域を水平バイトシフト (4プレーン全行) */
+/* BB のタイル領域を水平バイトシフト (NASM 高速化版) */
 static void bb_shift_horiz(int shift_bytes)
 {
-    int p, row;
     int base_byte = _tilemap.origin_x >> 3;
     int tile_bytes = (TILEMAP_COLS * TILE_W) >> 3;  /* 48 */
     int tile_h = TILEMAP_ROWS * TILE_H;             /* 384 */
-    int abs_shift = (shift_bytes < 0) ? -shift_bytes : shift_bytes;
 
-    if (abs_shift >= tile_bytes) return;  /* 全面シフト=意味なし */
-
-    for (p = 0; p < 4; p++) {
-        u8 *plane = gfx_fb.planes[p];
-        for (row = 0; row < tile_h; row++) {
-            u8 *line = plane + (_tilemap.origin_y + row) * gfx_fb.pitch
-                       + base_byte;
-            if (shift_bytes > 0) {
-                /* 左シフト: 内容が左へずれる (カメラ右移動) */
-                memmove(line, line + shift_bytes,
-                        tile_bytes - shift_bytes);
-                memset(line + tile_bytes - shift_bytes, 0, shift_bytes);
-            } else {
-                /* 右シフト: 内容が右へずれる (カメラ左移動) */
-                memmove(line + abs_shift, line,
-                        tile_bytes - abs_shift);
-                memset(line, 0, abs_shift);
-            }
-        }
-    }
+    asm_bb_shift_horiz(
+        gfx_fb.planes, gfx_fb.pitch, _tilemap.origin_y,
+        tile_h, base_byte, tile_bytes, shift_bytes);
 }
 
-/* BB のタイル領域を垂直ラインシフト (4プレーン全列) */
+/* BB のタイル領域を垂直ラインシフト (NASM 高速化版) */
 static void bb_shift_vert(int shift_lines)
 {
-    int p, row;
     int base_byte = _tilemap.origin_x >> 3;
     int tile_bytes = (TILEMAP_COLS * TILE_W) >> 3;  /* 48 */
     int tile_h = TILEMAP_ROWS * TILE_H;             /* 384 */
-    int abs_shift = (shift_lines < 0) ? -shift_lines : shift_lines;
-    u8 *plane;
-    u8 *dst;
-    u8 *src;
 
-    if (abs_shift >= tile_h) return;
-
-    for (p = 0; p < 4; p++) {
-        plane = gfx_fb.planes[p];
-        if (shift_lines > 0) {
-            /* 上シフト: 内容が上へずれる (カメラ下移動) */
-            for (row = 0; row < tile_h - shift_lines; row++) {
-                dst = plane + (_tilemap.origin_y + row) * gfx_fb.pitch
-                       + base_byte;
-                src = plane + (_tilemap.origin_y + row + shift_lines)
-                       * gfx_fb.pitch + base_byte;
-                memcpy(dst, src, tile_bytes);
-            }
-            for (row = tile_h - shift_lines; row < tile_h; row++) {
-                dst = plane + (_tilemap.origin_y + row) * gfx_fb.pitch
-                       + base_byte;
-                memset(dst, 0, tile_bytes);
-            }
-        } else {
-            /* 下シフト: 内容が下へずれる (カメラ上移動) */
-            for (row = tile_h - 1; row >= abs_shift; row--) {
-                dst = plane + (_tilemap.origin_y + row) * gfx_fb.pitch
-                       + base_byte;
-                src = plane + (_tilemap.origin_y + row - abs_shift)
-                       * gfx_fb.pitch + base_byte;
-                memcpy(dst, src, tile_bytes);
-            }
-            for (row = 0; row < abs_shift; row++) {
-                dst = plane + (_tilemap.origin_y + row) * gfx_fb.pitch
-                       + base_byte;
-                memset(dst, 0, tile_bytes);
-            }
-        }
-    }
+    asm_bb_shift_vert(
+        gfx_fb.planes, gfx_fb.pitch, _tilemap.origin_y,
+        tile_h, base_byte, tile_bytes, shift_lines);
 }
 
 /* 指定列のタイルを全BG分描画 (BtF順)
@@ -742,10 +695,7 @@ void tilemap_compose_scroll(void)
         int abs_lines = (dy_total < 0) ? -dy_total : dy_total;
         int rows_exposed, start_row, r;
 
-        _tilemap.kapi->kprintf(0xE1, "V: dy=%d p0=%lx pitch=%d\r\n",
-                               dy_total, (u32)gfx_fb.planes[0], gfx_fb.pitch);
         bb_shift_vert(dy_total);
-        _tilemap.kapi->kprintf(0xE1, "V: shift done\r\n");
 
         rows_exposed = (abs_lines + TILE_H - 1) / TILE_H;
         if (rows_exposed < 1) rows_exposed = 1;
@@ -760,13 +710,10 @@ void tilemap_compose_scroll(void)
         {
             i16 sy = _tilemap.bg_planes[0].scroll_y;
             int first_map_row = (sy / TILE_H) % TILEMAP_ROWS;
-            _tilemap.kapi->kprintf(0xE1, "V: draw r=%d mr=%d\r\n",
-                                   start_row, (first_map_row + start_row) % TILEMAP_ROWS);
             for (r = start_row; r < start_row + rows_exposed; r++) {
                 int map_row = (first_map_row + r) % TILEMAP_ROWS;
                 draw_row_btf(r, map_row);
             }
-            _tilemap.kapi->kprintf(0xE1, "V: draw done\r\n");
         }
     }
 

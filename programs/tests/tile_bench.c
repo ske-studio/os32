@@ -392,7 +392,29 @@ static void bench_scroll(int iterations)
     }
     end = kapi->get_tick();
     t_scroll = end - start;
-    print_result("compose_scroll (diff)", t_scroll);
+    print_result("compose_scroll H-diff", t_scroll);
+    if (iterations > 0) {
+        kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
+                      (t_scroll * 10) / (u32)iterations);
+    }
+
+    /* --- 垂直差分スクロール --- */
+    setup_scenario_b();
+    tilemap_scroll(0, 0, 0);
+    tilemap_scroll_sync();
+    force_all_dirty();
+    tilemap_compose_btf();
+    tilemap_present();
+
+    start = kapi->get_tick();
+    for (i = 0; i < iterations; i++) {
+        tilemap_scroll(0, 0, (i * 16) % (TILEMAP_ROWS * TILE_H));
+        tilemap_compose_scroll();
+        tilemap_present();
+    }
+    end = kapi->get_tick();
+    t_scroll = end - start;
+    print_result("compose_scroll V-diff", t_scroll);
     if (iterations > 0) {
         kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
                       (t_scroll * 10) / (u32)iterations);
@@ -411,9 +433,13 @@ void main(int argc, char **argv, KernelAPI *api)
 
     kapi = api;
 
-    /* 引数解析: "scroll" → フリップ+スクロールのみ */
+    /* 引数解析: "s" → フリップ+スクロール, "v" → スクロールのみ */
     if (argc >= 2) {
-        if (argv[1][0] == 's') {
+        if (argv[1][0] == 'v') {
+            run_full = 0;
+            run_flip = 0;
+            run_scroll = 1;
+        } else if (argv[1][0] == 's') {
             run_full = 0;
             run_flip = 1;
             run_scroll = 1;
