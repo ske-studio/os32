@@ -380,7 +380,26 @@ static void bench_scroll(int iterations)
 
 void main(int argc, char **argv, KernelAPI *api)
 {
+    int run_full = 1;
+    int run_flip = 0;
+    int run_scroll = 0;
+
     kapi = api;
+
+    /* 引数解析: "scroll" → フリップ+スクロールのみ */
+    if (argc >= 2) {
+        if (argv[1][0] == 's') {
+            run_full = 0;
+            run_flip = 1;
+            run_scroll = 1;
+        } else if (argv[1][0] == 'f') {
+            run_full = 0;
+            run_flip = 1;
+        }
+    } else {
+        run_flip = 1;
+        run_scroll = 1;
+    }
 
     api->kprintf(ATTR_WHITE, "=== Tilemap Benchmark ===\r\n");
 
@@ -394,19 +413,25 @@ void main(int argc, char **argv, KernelAPI *api)
     tilemap_define(2, tile_partial);
     tilemap_define(3, tile_transparent);
 
-    /* --- 全面描画ベンチマーク --- */
-    bench_full_draw("1-Layer Opaque", setup_scenario_a, 10);
-    bench_full_draw("2-Layer Mixed",  setup_scenario_b, 10);
-    bench_full_draw("4-Layer Heavy",  setup_scenario_c, 5);
+    if (run_full) {
+        /* --- 全面描画ベンチマーク --- */
+        bench_full_draw("1-Layer Opaque", setup_scenario_a, 10);
+        bench_full_draw("2-Layer Mixed",  setup_scenario_b, 10);
+        bench_full_draw("4-Layer Heavy",  setup_scenario_c, 5);
 
-    /* --- 差分更新ベンチマーク --- */
-    bench_delta_update("2-Layer Mixed", setup_scenario_b, 100);
+        /* --- 差分更新ベンチマーク --- */
+        bench_delta_update("2-Layer Mixed", setup_scenario_b, 100);
+    }
 
-    /* --- フリップベンチマーク --- */
-    bench_flip(10);
+    if (run_flip) {
+        /* --- フリップベンチマーク --- */
+        bench_flip(10);
+    }
 
-    /* --- スクロールベンチマーク --- */
-    bench_scroll(50);
+    if (run_scroll) {
+        /* --- スクロールベンチマーク --- */
+        bench_scroll(50);
+    }
 
     /* クリーンアップ */
     gfx_clear(0);
@@ -416,3 +441,4 @@ void main(int argc, char **argv, KernelAPI *api)
     api->kprintf(ATTR_GREEN, "\r\nDone. Press any key.\r\n");
     api->kbd_getchar();
 }
+

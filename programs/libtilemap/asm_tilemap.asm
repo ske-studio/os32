@@ -11,7 +11,7 @@
 bits 32
 
 global asm_tile_pair_opaque
-global asm_tile_row_masked
+global asm_tile_pair_masked
 global _asm_byte_reverse_lut
 
 section .data
@@ -158,161 +158,190 @@ asm_tile_pair_opaque:
 
 
 ; =========================================================================
-; void __cdecl asm_tile_row_masked(
-;     u8 **bb_planes,      [ebp+8]   BBプレーンポインタ配列
-;     int  doff,           [ebp+12]  行オフセット (dy_row * pitch + dx/8)
-;     const u8 *tile_row,  [ebp+16]  タイルデータ行先頭 (planes[0][row*2])
-;     int  tile_psz,       [ebp+20]  TILE_PLANE_SZ (32) — 次プレーンへのストライド
-;     u8  *cov_row);       [ebp+24]  カバレッジ行 (2バイト)
+; void __cdecl asm_tile_pair_masked(
+;     u8 **bb_planes,     [ebp+8]
+;     int  dst_off,       [ebp+12]  初期バイトオフセット
+;     int  bb_pitch,      [ebp+16]  BBピッチ (80)
+;     const u8 *tile_l,   [ebp+20]  左タイル planes[0] 先頭
+;     const u8 *tile_r,   [ebp+24]  右タイル planes[0] 先頭
+;     int  tile_psz,      [ebp+28]  TILE_PLANE_SZ (32)
+;     u8  *cov_pair);     [ebp+32]  カバレッジ 4bytes/row × 16行 = 64bytes
 ;
-; カバレッジマスク付き1行 (16px = 2bytes × 4planes) のBB書き込み。
-; cov_row[0..1] のビットが0の位置のみソースを書き込む。
-; 処理後 cov_row を更新 (描画されたピクセルを追加マーク)。
+; 2タイルペア (32px = 4bytes/row) のカバレッジマスク付きDWORD転送。
+; 行ごとに4プレーンをアンロール処理する。
+;
+; 各行の処理:
+;   cov32 = cov_pair[row*4]
+;   uncov32 = ~cov32
+;   any32 = 0
+;   4プレーンそれぞれ:
+;     src32 = pack(tile_l, tile_r)  ← DWORD
+;     any32 |= src32
+;     dst32 = (dst32 & cov32) | (src32 & uncov32)
+;   cov_pair[row*4] |= any32
 ; =========================================================================
-asm_tile_row_masked:
+asm_tile_pair_masked:
     push ebp
     mov ebp, esp
-    sub esp, 24             ; ローカル変数 24バイト確保
+    sub esp, 20             ; ローカル変数
     push ebx
     push esi
     push edi
 
-    ; ---- ローカル変数レイアウト ----
-    ; [ebp-4]  = uncov0
-    ; [ebp-8]  = uncov1
-    ; [ebp-12] = cov0
-    ; [ebp-16] = cov1
-    ; [ebp-20] = any0
-    ; [ebp-24] = any1
+    ; ローカル変数レイアウト:
+    ; [ebp-4]  = cov32
+    ; [ebp-8]  = uncov32
+    ; [ebp-12] = any32
+    ; [ebp-16] = current_dst_off
+    ; [ebp-20] = row counter
 
-    ; ---- カバレッジ読み込み + early-out ----
-    mov edi, [ebp+24]       ; cov_row
-    movzx eax, byte [edi]   ; cov0
-    movzx edx, byte [edi+1] ; cov1
+    mov eax, [ebp+12]
+    mov [ebp-16], eax       ; current_dst_off = dst_off
+    mov dword [ebp-20], 0   ; row = 0
 
-    cmp al, 0xFF
-    jne .m_not_full
-    cmp dl, 0xFF
-    je .m_done
-.m_not_full:
+.pm_row_loop:
+    cmp dword [ebp-20], 16
+    jge .pm_done
 
-    ; uncov = ~cov をローカルに保存
-    mov cl, al
-    not cl
-    mov [ebp-4], cl         ; uncov0
-    mov cl, dl
-    not cl
-    mov [ebp-8], cl         ; uncov1
-    mov [ebp-12], al        ; cov0
-    mov [ebp-16], dl        ; cov1
-    mov byte [ebp-20], 0    ; any0 = 0
-    mov byte [ebp-24], 0    ; any1 = 0
+    ; cov32 をロード
+    mov edi, [ebp+32]       ; cov_pair
+    mov eax, [ebp-20]       ; row
+    mov ecx, [edi + eax*4]  ; cov32 = cov_pair[row*4]
+    mov [ebp-4], ecx        ; save cov32
 
-    mov esi, [ebp+16]       ; tile_row (plane 0 行先頭)
+    ; early-out: 完全カバー済み
+    cmp ecx, 0xFFFFFFFF
+    je .pm_row_next
 
-    ; === Plane 0 ===
-    mov eax, [ebp+8]        ; bb_planes
-    mov edi, [eax]          ; bb_planes[0]
-    add edi, [ebp+12]       ; + doff
+    not ecx
+    mov [ebp-8], ecx        ; uncov32 = ~cov32
+    mov dword [ebp-12], 0   ; any32 = 0
 
-    movzx ecx, byte [esi]   ; src byte0
-    or [ebp-20], cl          ; any0 |= src
-    and cl, [ebp-4]          ; src & uncov0
-    mov dl, [edi]            ; dst byte0
-    and dl, [ebp-12]         ; dst & cov0
-    or dl, cl
-    mov [edi], dl
+    ; タイルデータポインタ計算: tile + row * 2
+    mov eax, [ebp-20]
+    shl eax, 1              ; row * 2
+    mov esi, [ebp+20]
+    add esi, eax            ; esi = tile_l + row*2
+    mov ebx, [ebp+24]
+    add ebx, eax            ; ebx = tile_r + row*2
 
-    movzx ecx, byte [esi+1] ; src byte1
-    or [ebp-24], cl
-    and cl, [ebp-8]
-    mov dl, [edi+1]
-    and dl, [ebp-16]
-    or dl, cl
-    mov [edi+1], dl
-
-    ; === Plane 1 ===
-    mov ebx, [ebp+20]       ; tile_psz (stride to next plane)
-    add esi, ebx
-    mov eax, [ebp+8]
-    mov edi, [eax+4]
-    add edi, [ebp+12]
-
-    movzx ecx, byte [esi]
-    or [ebp-20], cl
-    and cl, [ebp-4]
-    mov dl, [edi]
-    and dl, [ebp-12]
-    or dl, cl
-    mov [edi], dl
-
+    ; ===== Plane 0 =====
+    ; src32 パック
+    movzx eax, byte [esi]
+    shl eax, 24
     movzx ecx, byte [esi+1]
-    or [ebp-24], cl
-    and cl, [ebp-8]
-    mov dl, [edi+1]
-    and dl, [ebp-16]
-    or dl, cl
-    mov [edi+1], dl
+    shl ecx, 16
+    or eax, ecx
+    movzx ecx, byte [ebx]
+    shl ecx, 8
+    or eax, ecx
+    movzx ecx, byte [ebx+1]
+    or eax, ecx
+    ; eax = src32
+    or [ebp-12], eax        ; any32 |= src32
+    mov ecx, [ebp-8]
+    and eax, ecx            ; src32 & uncov32
+    mov edi, [ebp+8]        ; bb_planes
+    mov edx, [edi]          ; bb_planes[0]
+    add edx, [ebp-16]       ; + dst_off
+    mov ecx, [edx]          ; dst32
+    and ecx, [ebp-4]        ; dst32 & cov32
+    or ecx, eax
+    mov [edx], ecx
 
-    ; === Plane 2 ===
-    add esi, ebx
-    mov eax, [ebp+8]
-    mov edi, [eax+8]
-    add edi, [ebp+12]
-
-    movzx ecx, byte [esi]
-    or [ebp-20], cl
-    and cl, [ebp-4]
-    mov dl, [edi]
-    and dl, [ebp-12]
-    or dl, cl
-    mov [edi], dl
-
+    ; ===== Plane 1 =====
+    mov eax, [ebp+28]       ; tile_psz
+    add esi, eax
+    add ebx, eax
+    movzx eax, byte [esi]
+    shl eax, 24
     movzx ecx, byte [esi+1]
-    or [ebp-24], cl
-    and cl, [ebp-8]
-    mov dl, [edi+1]
-    and dl, [ebp-16]
-    or dl, cl
-    mov [edi+1], dl
+    shl ecx, 16
+    or eax, ecx
+    movzx ecx, byte [ebx]
+    shl ecx, 8
+    or eax, ecx
+    movzx ecx, byte [ebx+1]
+    or eax, ecx
+    or [ebp-12], eax
+    mov ecx, [ebp-8]
+    and eax, ecx
+    mov edi, [ebp+8]
+    mov edx, [edi+4]        ; bb_planes[1]
+    add edx, [ebp-16]
+    mov ecx, [edx]
+    and ecx, [ebp-4]
+    or ecx, eax
+    mov [edx], ecx
 
-    ; === Plane 3 ===
-    add esi, ebx
-    mov eax, [ebp+8]
-    mov edi, [eax+12]
-    add edi, [ebp+12]
-
-    movzx ecx, byte [esi]
-    or [ebp-20], cl
-    and cl, [ebp-4]
-    mov dl, [edi]
-    and dl, [ebp-12]
-    or dl, cl
-    mov [edi], dl
-
+    ; ===== Plane 2 =====
+    mov eax, [ebp+28]
+    add esi, eax
+    add ebx, eax
+    movzx eax, byte [esi]
+    shl eax, 24
     movzx ecx, byte [esi+1]
-    or [ebp-24], cl
-    and cl, [ebp-8]
-    mov dl, [edi+1]
-    and dl, [ebp-16]
-    or dl, cl
-    mov [edi+1], dl
+    shl ecx, 16
+    or eax, ecx
+    movzx ecx, byte [ebx]
+    shl ecx, 8
+    or eax, ecx
+    movzx ecx, byte [ebx+1]
+    or eax, ecx
+    or [ebp-12], eax
+    mov ecx, [ebp-8]
+    and eax, ecx
+    mov edi, [ebp+8]
+    mov edx, [edi+8]        ; bb_planes[2]
+    add edx, [ebp-16]
+    mov ecx, [edx]
+    and ecx, [ebp-4]
+    or ecx, eax
+    mov [edx], ecx
 
-    ; === カバレッジ更新 ===
-    mov edi, [ebp+24]       ; cov_row
-    mov al, [ebp-20]        ; any0
-    and al, [ebp-4]         ; any0 & uncov0
-    or [edi], al            ; cov_row[0] |= ...
+    ; ===== Plane 3 =====
+    mov eax, [ebp+28]
+    add esi, eax
+    add ebx, eax
+    movzx eax, byte [esi]
+    shl eax, 24
+    movzx ecx, byte [esi+1]
+    shl ecx, 16
+    or eax, ecx
+    movzx ecx, byte [ebx]
+    shl ecx, 8
+    or eax, ecx
+    movzx ecx, byte [ebx+1]
+    or eax, ecx
+    or [ebp-12], eax
+    mov ecx, [ebp-8]
+    and eax, ecx
+    mov edi, [ebp+8]
+    mov edx, [edi+12]       ; bb_planes[3]
+    add edx, [ebp-16]
+    mov ecx, [edx]
+    and ecx, [ebp-4]
+    or ecx, eax
+    mov [edx], ecx
 
-    mov al, [ebp-24]        ; any1
-    and al, [ebp-8]         ; any1 & uncov1
-    or [edi+1], al          ; cov_row[1] |= ...
+    ; ===== カバレッジ更新 =====
+    mov edi, [ebp+32]       ; cov_pair
+    mov eax, [ebp-20]       ; row
+    mov ecx, [ebp-12]       ; any32
+    or [edi + eax*4], ecx   ; cov_pair[row] |= any32
 
-.m_done:
+.pm_row_next:
+    mov eax, [ebp+16]       ; bb_pitch
+    add [ebp-16], eax       ; current_dst_off += bb_pitch
+    inc dword [ebp-20]      ; row++
+    jmp .pm_row_loop
+
+.pm_done:
     pop edi
     pop esi
     pop ebx
-    mov esp, ebp            ; ローカル変数を確実に解放
+    mov esp, ebp
     pop ebp
     ret
+
 
