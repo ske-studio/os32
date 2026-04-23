@@ -9,14 +9,38 @@
 static SprSlot *spr_slots = 0;
 static SprDataPool *spr_data = 0;
 
-void gfx_sprite_init(void)
+/* スプライトプールの遅延初期化 (初回 gfx_create_sprite 時に確保) */
+static int _spr_ensure_init(void)
 {
     int i;
-    if (!spr_slots) {
-        spr_slots = (SprSlot *)gfx_api->mem_alloc(sizeof(SprSlot) * SPR_POOL_MAX);
-        spr_data = (SprDataPool *)gfx_api->mem_alloc(sizeof(SprDataPool));
+    if (spr_slots) return 1; /* 初期化済み */
+
+    spr_slots = (SprSlot *)gfx_api->mem_alloc(sizeof(SprSlot) * SPR_POOL_MAX);
+    spr_data = (SprDataPool *)gfx_api->mem_alloc(sizeof(SprDataPool));
+    if (!spr_slots || !spr_data) {
+        spr_slots = 0;
+        spr_data = 0;
+        return 0; /* メモリ不足 */
     }
-    if (!spr_slots || !spr_data) return; /* メモリ不足 — 安全に復帰 */
+
+    for (i = 0; i < SPR_POOL_MAX; i++) {
+        spr_slots[i].used = 0;
+        spr_slots[i].pool_type = SPR_TYPE_NONE;
+    }
+    for (i = 0; i < SPR_MAX_16; i++) spr_data->used_16[i] = 0;
+    for (i = 0; i < SPR_MAX_32; i++) spr_data->used_32[i] = 0;
+    for (i = 0; i < SPR_MAX_64; i++) spr_data->used_64[i] = 0;
+    for (i = 0; i < SPR_MAX_128; i++) spr_data->used_128[i] = 0;
+    return 1;
+}
+
+void gfx_sprite_init(void)
+{
+    /* 遅延初期化: ここでは何もしない。
+     * プールは gfx_create_sprite 初回呼び出し時に確保される。
+     * 既に確保済みの場合はスロットをリセットする。 */
+    int i;
+    if (!spr_slots) return;
     for (i = 0; i < SPR_POOL_MAX; i++) {
         spr_slots[i].used = 0;
         spr_slots[i].pool_type = SPR_TYPE_NONE;
@@ -36,6 +60,7 @@ GFX_Sprite *gfx_create_sprite(const GFX_Surface *src, u8 trans_color)
     u8 *data_base = 0;
 
     if (!src) return 0;
+    if (!_spr_ensure_init()) return 0; /* 遅延初期化 */
 
     src_pitch = src->pitch;
     pitch = (src->w + 7) / 8 + 1;
