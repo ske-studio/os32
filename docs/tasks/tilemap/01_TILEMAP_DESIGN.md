@@ -372,36 +372,36 @@ BGプレーン単位の切替はできないため、本エンジンでは対象
 
 ## 10. 実装フェーズ
 
-### Phase 1: 基本合成
+### Phase 1: 基本合成 ✅ 完了
 
-- [ ] `libtilemap` ディレクトリ作成、ヘッダ・ソースの雛形
-- [ ] `TileDef` タイル定義、不透明度自動計算
-- [ ] `BGPlane` タイルマップ管理、ダーティフラグ
-- [ ] `tilemap_compose_btf()` Back-to-Front合成 (gfx_blit + gfx_blit_colorkey)
-- [ ] `tilemap_present()` dirty rect VRAM転送
-- [ ] Makefile統合 (`--heap 256K`)
-- [ ] `demo_tile.c` 基本デモ (静的4プレーン表示)
+- [x] `libtilemap` ディレクトリ作成、ヘッダ・ソースの雛形
+- [x] `TileDef` タイル定義、不透明度自動計算
+- [x] `BGPlane` タイルマップ管理、ダーティフラグ
+- [x] `tilemap_compose_btf()` Back-to-Front合成 (gfx_blit + gfx_blit_transparent)
+- [x] `tilemap_present()` dirty rect VRAM転送
+- [x] Makefile統合 (heap 512KB)
+- [x] `demo_tile.c` 基本デモ (4プレーン表示 + WASDキャラクター移動)
 
-### Phase 2: Front-to-Back + 最適化
+### Phase 2: Front-to-Back + 最適化 ✅ 完了
 
-- [ ] `tilemap_compose_ftb()` Front-to-Back合成 (カバレッジマスク)
-- [ ] BB直接書き込み (gfx_get_framebuffer経由)
-- [ ] 2タイル同時32bit転送
-- [ ] ダーティタイル追跡による差分合成
+- [x] `tilemap_compose_ftb()` Front-to-Back合成 (カバレッジマスク)
+- [x] BB直接書き込み (gfx_get_framebuffer経由、FtB内で使用)
+- [x] 2タイル同時32bit転送 (`tilemap_compose_btf_fast()`)
+- [x] ダーティタイル追跡による差分合成 (tilemap_compose_btf内で実装済み)
 
-### Phase 3: スクロール + 拡張
+### Phase 3: スクロール + 拡張 ✅ 完了
 
-- [ ] ピクセル単位スムーズスクロール (src_rect クリッピング)
-- [ ] HWスクロール連携 (全プレーン同方向時)
-- [ ] 水平/垂直反転属性
-- [ ] タイルセットファイルフォーマットとローダー
+- [x] ピクセル単位スムーズスクロール (`tilemap_scroll()` + `calc_tile_draw()`)
+- [x] HWスクロール連携 (`tilemap_scroll_hw()` → `gfx_hardware_scroll`)
+- [x] 水平/垂直反転属性 (`TILEMAP_ATTR()` マクロ + `tile_to_surface_flipped()`)
+- [x] タイルセットファイルフォーマットとローダー (`tilemap_load()` — 4bpp packed 128bytes/tile)
 
 ---
 
 ## 11. 前提条件
 
-`gfx_blit_colorkey()` の高速化が Phase 1 の性能に直結する。
-詳細は [02_BLIT_COLORKEY_OPT.md](02_BLIT_COLORKEY_OPT.md) を参照。
+`gfx_blit_transparent()` (NASM最適化済み `asm_blit_transparent_core`) により
+透過合成の高速化は完了済み。詳細は [02_BLIT_COLORKEY_OPT.md](02_BLIT_COLORKEY_OPT.md) を参照。
 
 ---
 

@@ -36,6 +36,16 @@ void gfx_blit(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect);
 void gfx_blit_colorkey(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect, u8 colorkey);
 void gfx_blit_transparent(int dx, int dy, const GFX_Surface *src, const GFX_Rect *src_rect);
 
+/* Rotation */
+void gfx_blit_rotated(int dx, int dy,
+                       const GFX_Surface *src,
+                       int angle);
+void gfx_blit_affine(int dx, int dy,
+                      const GFX_Surface *src,
+                      int angle,
+                      int scale,
+                      u8 colorkey);
+
 /* Sprite */
 void gfx_sprite_init(void);
 GFX_Sprite *gfx_create_sprite(const GFX_Surface *src, u8 trans_color);

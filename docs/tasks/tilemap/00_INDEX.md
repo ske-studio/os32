@@ -8,6 +8,7 @@ SFC風4プレーンBGタイルマップ合成エンジンの設計・実装ド�
 |-----|---------|------|
 | 01 | [TILEMAP_DESIGN.md](01_TILEMAP_DESIGN.md) | タイルマップエンジン設計仕様 |
 | 02 | [BLIT_COLORKEY_OPT.md](02_BLIT_COLORKEY_OPT.md) | gfx_blit_colorkey 高速化リファクタリング |
+| 03 | [ROTATE_BLIT.md](03_ROTATE_BLIT.md) | 回転ブリット (gfx_blit_rotated) 設計仕様 |
 
 ## コンセプト
 

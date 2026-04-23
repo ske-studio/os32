@@ -105,8 +105,37 @@ void tilemap_define(int id, const u8 *data_4bpp)
 
 int tilemap_load(const char *path, int start_id)
 {
-    /* Phase 3 で実装 */
-    return -1;
+    int fd, file_sz, tile_count, i;
+    u8 buf[128]; /* 1タイル分の4bppデータ */
+    int bytes_read;
+
+    if (!_tilemap.kapi || !path || start_id < 0) return -1;
+
+    fd = _tilemap.kapi->sys_open(path, O_RDONLY);
+    if (fd < 0) return -1;
+
+    /* ファイルサイズを取得: sys_lseek(SEEK_END) は新しい位置を返す */
+    file_sz = _tilemap.kapi->sys_lseek(fd, 0, SEEK_END);
+    _tilemap.kapi->sys_lseek(fd, 0, SEEK_SET);
+
+    if (file_sz <= 0) {
+        _tilemap.kapi->sys_close(fd);
+        return -1;
+    }
+
+    tile_count = file_sz / 128;
+    if (start_id + tile_count > MAX_TILES) {
+        tile_count = MAX_TILES - start_id;
+    }
+
+    for (i = 0; i < tile_count; i++) {
+        bytes_read = _tilemap.kapi->sys_read(fd, buf, 128);
+        if (bytes_read < 128) break;
+        tilemap_define(start_id + i, buf);
+    }
+
+    _tilemap.kapi->sys_close(fd);
+    return i;
 }
 
 void tilemap_set_origin(int ox, int oy)
@@ -118,5 +147,10 @@ void tilemap_set_origin(int ox, int oy)
 
 void tilemap_set_palette(const u8 pal[16][3])
 {
-    /* Phase 3 で実装 */
+    int i;
+    if (!_tilemap.kapi || !pal) return;
+
+    for (i = 0; i < 16; i++) {
+        _tilemap.kapi->gfx_set_palette(i, pal[i][0], pal[i][1], pal[i][2]);
+    }
 }
