@@ -2,6 +2,7 @@
 
 KernelAPI *gfx_api;
 GFX_Framebuffer gfx_fb;
+int gfx_dirty_suppress;
 
 void libos32gfx_init(KernelAPI *api)
 {

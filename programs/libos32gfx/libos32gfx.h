@@ -5,6 +5,7 @@
 
 extern KernelAPI *gfx_api;
 extern GFX_Framebuffer gfx_fb;
+extern int gfx_dirty_suppress;  /* 非0のとき gfx_blit 等の dirty rect 登録を抑制 */
 
 void libos32gfx_init(KernelAPI *api);
 void libos32gfx_shutdown(void);

@@ -130,7 +130,8 @@ void gfx_blit(int dx, int dy,
             u8 *d = gfx_fb.planes[p] + dy_clip * gfx_fb.pitch + (dx >> 3);
             asm_copy_plane_rect(d, gfx_fb.pitch, s, src->pitch, sh_clip, wb);
         }
-        gfx_api->gfx_add_dirty_rect(dx, dy_clip, sw, sh_clip);
+        if (!gfx_dirty_suppress)
+            gfx_api->gfx_add_dirty_rect(dx, dy_clip, sw, sh_clip);
         return;
     }
 
@@ -234,7 +235,8 @@ void gfx_blit_transparent(int dx, int dy,
         asm_blit_transparent_core(gfx_fb.planes, doff, gfx_fb.pitch,
                                   (const u8 **)src->planes, soff, src->pitch,
                                   wb, sh_clip);
-        gfx_api->gfx_add_dirty_rect(dx_clip, dy_clip, wb * 8, sh_clip);
+        if (!gfx_dirty_suppress)
+            gfx_api->gfx_add_dirty_rect(dx_clip, dy_clip, wb * 8, sh_clip);
         return;
     }
 
