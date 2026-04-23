@@ -24,6 +24,14 @@ extern void __cdecl asm_bb_shift_vert(
     u8 **planes, int pitch, int origin_y, int tile_h,
     int base_byte, int tile_bytes, int shift_lines);
 
+extern void __cdecl asm_draw_column_tiles(
+    u8 **bb_planes, int bb_pitch, int dst_byte_x, int dst_y_start,
+    const u8 **tile_ptrs, int tile_psz, int tile_count);
+
+extern void __cdecl asm_draw_row_tiles(
+    u8 **bb_planes, int bb_pitch, int dst_byte_x_start, int dst_y,
+    const u8 **tile_ptrs, int tile_psz, int tile_count);
+
 /* ======================================================================== */
 /*  静的バッファ (BSS — heap確保を排除)                                     */
 /* ======================================================================== */
@@ -476,33 +484,68 @@ static void draw_column_btf(int screen_col, int map_col)
     int row, bg;
     GFX_Surface tmp_surf;
     u8 flip_buf[4][TILE_PLANE_SZ];
+    int can_fast = 1;
 
-    for (row = 0; row < TILEMAP_ROWS; row++) {
-        for (bg = 0; bg < BG_COUNT; bg++) {
-            int tile_id;
-            u16 attr;
-            TileDef *tile;
-            int dx, dy;
-
-            if (!_tilemap.bg_planes[bg].visible) continue;
-
-            attr = _tilemap.bg_planes[bg].map[row][map_col];
-            tile_id = TILEMAP_ID(attr);
-            tile = &_tilemap.tiles[tile_id];
-
-            if (tile->opacity == TILE_TRANSPARENT) continue;
-
-            dx = _tilemap.origin_x + screen_col * TILE_W;
-            dy = _tilemap.origin_y + row * TILE_H;
-
-            prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-            if (tile->opacity == TILE_OPAQUE) {
-                gfx_blit(dx, dy, &tmp_surf, NULL);
-            } else {
-                gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
+    /* BG0 不透明+フリップなし判定 — 全行が条件を満たせば NASM パス */
+    if (_tilemap.bg_planes[0].visible) {
+        for (row = 0; row < TILEMAP_ROWS; row++) {
+            u16 a = _tilemap.bg_planes[0].map[row][map_col];
+            TileDef *t = &_tilemap.tiles[TILEMAP_ID(a)];
+            if (t->opacity != TILE_OPAQUE || TILEMAP_HFLIP(a) ||
+                TILEMAP_VFLIP(a)) {
+                can_fast = 0;
+                break;
             }
+        }
+    } else {
+        can_fast = 0;
+    }
+
+    if (can_fast) {
+        /* NASM ストリーム描画 (BG0 不透明・フリップなし) */
+        const u8 *ptrs[TILEMAP_ROWS];
+        int dx, dy;
+        for (row = 0; row < TILEMAP_ROWS; row++) {
+            int tid = TILEMAP_ID(
+                _tilemap.bg_planes[0].map[row][map_col]);
+            ptrs[row] = _tilemap.tiles[tid].planes[0];
+        }
+        dx = _tilemap.origin_x + screen_col * TILE_W;
+        dy = _tilemap.origin_y;
+        asm_draw_column_tiles(
+            gfx_fb.planes, gfx_fb.pitch, dx >> 3, dy,
+            ptrs, TILE_PLANE_SZ, TILEMAP_ROWS);
+        for (row = 0; row < TILEMAP_ROWS; row++)
             drawn_tracking_mark(screen_col, row);
+    } else {
+        /* 従来パス: gfx_blit 呼び出し */
+        for (row = 0; row < TILEMAP_ROWS; row++) {
+            for (bg = 0; bg < BG_COUNT; bg++) {
+                int tile_id;
+                u16 attr;
+                TileDef *tile;
+                int dx, dy;
+
+                if (!_tilemap.bg_planes[bg].visible) continue;
+
+                attr = _tilemap.bg_planes[bg].map[row][map_col];
+                tile_id = TILEMAP_ID(attr);
+                tile = &_tilemap.tiles[tile_id];
+
+                if (tile->opacity == TILE_TRANSPARENT) continue;
+
+                dx = _tilemap.origin_x + screen_col * TILE_W;
+                dy = _tilemap.origin_y + row * TILE_H;
+
+                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
+
+                if (tile->opacity == TILE_OPAQUE) {
+                    gfx_blit(dx, dy, &tmp_surf, NULL);
+                } else {
+                    gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
+                }
+                drawn_tracking_mark(screen_col, row);
+            }
         }
     }
 }
@@ -516,33 +559,66 @@ static void draw_row_btf(int screen_row, int map_row)
     int col, bg;
     GFX_Surface tmp_surf;
     u8 flip_buf[4][TILE_PLANE_SZ];
+    int can_fast = 1;
 
-    for (col = 0; col < TILEMAP_COLS; col++) {
-        for (bg = 0; bg < BG_COUNT; bg++) {
-            int tile_id;
-            u16 attr;
-            TileDef *tile;
-            int dx, dy;
-
-            if (!_tilemap.bg_planes[bg].visible) continue;
-
-            attr = _tilemap.bg_planes[bg].map[map_row][col];
-            tile_id = TILEMAP_ID(attr);
-            tile = &_tilemap.tiles[tile_id];
-
-            if (tile->opacity == TILE_TRANSPARENT) continue;
-
-            dx = _tilemap.origin_x + col * TILE_W;
-            dy = _tilemap.origin_y + screen_row * TILE_H;
-
-            prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-            if (tile->opacity == TILE_OPAQUE) {
-                gfx_blit(dx, dy, &tmp_surf, NULL);
-            } else {
-                gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
+    /* BG0 不透明+フリップなし判定 */
+    if (_tilemap.bg_planes[0].visible) {
+        for (col = 0; col < TILEMAP_COLS; col++) {
+            u16 a = _tilemap.bg_planes[0].map[map_row][col];
+            TileDef *t = &_tilemap.tiles[TILEMAP_ID(a)];
+            if (t->opacity != TILE_OPAQUE || TILEMAP_HFLIP(a) ||
+                TILEMAP_VFLIP(a)) {
+                can_fast = 0;
+                break;
             }
+        }
+    } else {
+        can_fast = 0;
+    }
+
+    if (can_fast) {
+        const u8 *ptrs[TILEMAP_COLS];
+        int dx, dy;
+        for (col = 0; col < TILEMAP_COLS; col++) {
+            int tid = TILEMAP_ID(
+                _tilemap.bg_planes[0].map[map_row][col]);
+            ptrs[col] = _tilemap.tiles[tid].planes[0];
+        }
+        dx = _tilemap.origin_x;
+        dy = _tilemap.origin_y + screen_row * TILE_H;
+        asm_draw_row_tiles(
+            gfx_fb.planes, gfx_fb.pitch, dx >> 3, dy,
+            ptrs, TILE_PLANE_SZ, TILEMAP_COLS);
+        for (col = 0; col < TILEMAP_COLS; col++)
             drawn_tracking_mark(col, screen_row);
+    } else {
+        for (col = 0; col < TILEMAP_COLS; col++) {
+            for (bg = 0; bg < BG_COUNT; bg++) {
+                int tile_id;
+                u16 attr;
+                TileDef *tile;
+                int dx, dy;
+
+                if (!_tilemap.bg_planes[bg].visible) continue;
+
+                attr = _tilemap.bg_planes[bg].map[map_row][col];
+                tile_id = TILEMAP_ID(attr);
+                tile = &_tilemap.tiles[tile_id];
+
+                if (tile->opacity == TILE_TRANSPARENT) continue;
+
+                dx = _tilemap.origin_x + col * TILE_W;
+                dy = _tilemap.origin_y + screen_row * TILE_H;
+
+                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
+
+                if (tile->opacity == TILE_OPAQUE) {
+                    gfx_blit(dx, dy, &tmp_surf, NULL);
+                } else {
+                    gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
+                }
+                drawn_tracking_mark(col, screen_row);
+            }
         }
     }
 }

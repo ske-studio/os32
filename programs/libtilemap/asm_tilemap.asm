@@ -350,6 +350,193 @@ asm_tile_pair_masked:
 
 
 ; =========================================================================
+; void __cdecl asm_draw_column_tiles(
+;     u8 **bb_planes,       [ebp+8]   BB プレーンポインタ配列 (4要素)
+;     int  bb_pitch,        [ebp+12]  BBピッチ (80)
+;     int  dst_byte_x,      [ebp+16]  描画先Xバイトオフセット
+;     int  dst_y_start,     [ebp+20]  描画先Y開始行 (ピクセル)
+;     const u8 **tile_ptrs, [ebp+24]  タイルデータポインタ配列 (tile_count個)
+;     int  tile_psz,        [ebp+28]  TILE_PLANE_SZ (32)
+;     int  tile_count       [ebp+32]  タイル数 (≤24)
+; );
+;
+; 1列分の不透明タイルを BB に直接ストリーム描画する。
+; 各タイルは 16行×2バイト/行×4プレーン。
+; タイル間で dst ポインタを 16*pitch 進めるインクリメンタル方式。
+; =========================================================================
+global asm_draw_column_tiles
+asm_draw_column_tiles:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push esi
+    push edi
+
+    ; tile_count チェック
+    mov eax, [ebp+32]
+    test eax, eax
+    jle .dct_done
+
+    ; プレーンループ (4プレーン)
+    xor ecx, ecx           ; ecx = plane_idx (0-3)
+.dct_plane:
+    cmp ecx, 4
+    jge .dct_done
+
+    ; dst_base = bb_planes[plane_idx] + dst_y_start * bb_pitch + dst_byte_x
+    mov eax, [ebp+8]
+    mov edx, [eax + ecx*4]     ; bb_planes[plane_idx]
+    mov eax, [ebp+20]          ; dst_y_start
+    imul eax, [ebp+12]         ; * bb_pitch
+    add eax, [ebp+16]          ; + dst_byte_x
+    add edx, eax               ; edx = dst_base
+    push edx                   ; [esp] = dst_ptr (タイル先頭)
+
+    ; plane_offset = plane_idx * tile_psz
+    mov eax, ecx
+    imul eax, [ebp+28]
+    push eax                   ; [esp] = plane_offset
+
+    push ecx                   ; [esp] = plane_idx 退避
+
+    ; タイルループ
+    mov ebx, [ebp+24]          ; tile_ptrs 配列先頭
+    xor ecx, ecx               ; tile_idx = 0
+.dct_tile:
+    cmp ecx, [ebp+32]          ; < tile_count ?
+    jge .dct_next_plane
+
+    ; esi = tile_ptrs[tile_idx] + plane_offset
+    mov esi, [ebx + ecx*4]     ; tile_ptrs[tile_idx]
+    add esi, [esp+4]           ; + plane_offset
+
+    ; edi = dst_ptr
+    mov edi, [esp+8]           ; dst_ptr
+
+    push ecx                   ; tile_idx 退避
+
+    ; 16行ループ: 各行 WORD (2バイト) をコピー
+    mov ecx, 16
+.dct_row:
+    mov ax, [esi]              ; タイル行データ (2バイト)
+    mov [edi], ax              ; BB に書き込み
+    add esi, 2                 ; タイルデータ次行
+    add edi, [ebp+12]          ; dst += bb_pitch
+    dec ecx
+    jnz .dct_row
+
+    ; dst_ptr を次のタイル位置に更新 (edi は既に 16行分進んだ)
+    mov [esp+12], edi          ; dst_ptr = edi (次タイル先頭)
+
+    pop ecx                    ; tile_idx 復帰
+    inc ecx
+    jmp .dct_tile
+
+.dct_next_plane:
+    pop ecx                    ; plane_idx 復帰
+    add esp, 8                 ; plane_offset, dst_ptr 破棄
+    inc ecx
+    jmp .dct_plane
+
+.dct_done:
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+
+
+; =========================================================================
+; void __cdecl asm_draw_row_tiles(
+;     u8 **bb_planes,       [ebp+8]   BB プレーンポインタ配列 (4要素)
+;     int  bb_pitch,        [ebp+12]  BBピッチ (80)
+;     int  dst_byte_x_start,[ebp+16]  描画先X開始バイトオフセット
+;     int  dst_y,           [ebp+20]  描画先Y行 (ピクセル)
+;     const u8 **tile_ptrs, [ebp+24]  タイルデータポインタ配列 (tile_count個)
+;     int  tile_psz,        [ebp+28]  TILE_PLANE_SZ (32)
+;     int  tile_count       [ebp+32]  タイル数 (≤24)
+; );
+;
+; 1行分の不透明タイルを BB に直接ストリーム描画する。
+; 各タイルは同じ Y 位置、X は 2バイト (16px) ずつ進む。
+; =========================================================================
+global asm_draw_row_tiles
+asm_draw_row_tiles:
+    push ebp
+    mov ebp, esp
+    push ebx
+    push esi
+    push edi
+
+    mov eax, [ebp+32]
+    test eax, eax
+    jle .drt_done
+
+    ; プレーンループ (4プレーン)
+    xor ecx, ecx
+.drt_plane:
+    cmp ecx, 4
+    jge .drt_done
+
+    ; row_base = bb_planes[plane_idx] + dst_y * bb_pitch + dst_byte_x_start
+    mov eax, [ebp+8]
+    mov edx, [eax + ecx*4]
+    mov eax, [ebp+20]
+    imul eax, [ebp+12]
+    add eax, [ebp+16]
+    add edx, eax               ; edx = row_base
+
+    ; plane_offset = plane_idx * tile_psz
+    mov eax, ecx
+    imul eax, [ebp+28]
+    push eax                   ; [esp] = plane_offset
+    push ecx                   ; [esp] = plane_idx 退避
+
+    ; タイルループ
+    mov ebx, [ebp+24]
+    xor ecx, ecx
+    mov edi, edx               ; edi = 現在タイルの BB 開始位置
+.drt_tile:
+    cmp ecx, [ebp+32]
+    jge .drt_next_plane
+
+    mov esi, [ebx + ecx*4]     ; tile_ptrs[tile_idx]
+    add esi, [esp+4]           ; + plane_offset
+
+    push ecx                   ; tile_idx 退避
+    push edi                   ; dst_col_base 退避
+
+    ; 16行ループ
+    mov ecx, 16
+.drt_row:
+    mov ax, [esi]
+    mov [edi], ax
+    add esi, 2
+    add edi, [ebp+12]          ; dst += bb_pitch
+    dec ecx
+    jnz .drt_row
+
+    pop edi                    ; dst_col_base 復帰
+    add edi, 2                 ; 次のタイル列 (+2 bytes = +16px)
+    pop ecx                    ; tile_idx 復帰
+    inc ecx
+    jmp .drt_tile
+
+.drt_next_plane:
+    pop ecx                    ; plane_idx 復帰
+    add esp, 4                 ; plane_offset 破棄
+    inc ecx
+    jmp .drt_plane
+
+.drt_done:
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+
+
+; =========================================================================
 ; void __cdecl asm_bb_shift_horiz(
 ;     u8 *planes[4],  [ebp+8]   4プレーンポインタ配列
 ;     int pitch,      [ebp+12]  BBピッチ (80)
