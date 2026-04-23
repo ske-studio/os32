@@ -109,6 +109,12 @@ filesystem:
     - host: programs/tests/mouse_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/blit_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/blit_test2.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"

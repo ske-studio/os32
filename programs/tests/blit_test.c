@@ -151,9 +151,12 @@ static void run_benchmark(int size, int pattern)
     u8 *buf;
     u32 start, end;
     int i;
-    int iterations = 1000;
+    int iterations;
     u32 t_old, t_new;
-    char msg[80];
+    int ratio_x10;
+
+    /* 旧関数はピクセル単位なので大タイルは反復回数を減らす */
+    iterations = (size <= 16) ? 1000 : 200;
 
     buf = (size == 16) ? buf_16 : buf_32;
     setup_surface(&surf, buf, size, pattern);
@@ -178,12 +181,12 @@ static void run_benchmark(int size, int pattern)
     end = kapi->get_tick();
     t_new = end - start;
 
-    sprintf(msg, "old=%lu new=%lu", t_old, t_new);
-    kapi->kprintf(ATTR_CYAN, "%s", msg);
+    kapi->kprintf(ATTR_CYAN, "old=%lu new=%lu", t_old, t_new);
 
-    if (t_new < t_old) {
-        kapi->kprintf(ATTR_GREEN, " (%.1dx faster)\r\n",
-                      t_old > 0 ? (int)((t_old * 10) / (t_new > 0 ? t_new : 1)) : 0);
+    if (t_new > 0 && t_new < t_old) {
+        ratio_x10 = (int)((t_old * 10) / t_new);
+        kapi->kprintf(ATTR_GREEN, " (%d.%dx faster)\r\n",
+                      ratio_x10 / 10, ratio_x10 % 10);
     } else {
         kapi->kprintf(ATTR_YELLOW, " (no speedup)\r\n");
     }
