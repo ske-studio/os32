@@ -172,100 +172,58 @@ asm_tile_pair_opaque:
 asm_tile_row_masked:
     push ebp
     mov ebp, esp
+    sub esp, 24             ; ローカル変数 24バイト確保
     push ebx
     push esi
     push edi
 
+    ; ---- ローカル変数レイアウト ----
+    ; [ebp-4]  = uncov0
+    ; [ebp-8]  = uncov1
+    ; [ebp-12] = cov0
+    ; [ebp-16] = cov1
+    ; [ebp-20] = any0
+    ; [ebp-24] = any1
+
+    ; ---- カバレッジ読み込み + early-out ----
     mov edi, [ebp+24]       ; cov_row
     movzx eax, byte [edi]   ; cov0
     movzx edx, byte [edi+1] ; cov1
 
-    ; early-out: 全カバー済み
     cmp al, 0xFF
-    jne .not_full
+    jne .m_not_full
     cmp dl, 0xFF
-    je .done_masked
-.not_full:
+    je .m_done
+.m_not_full:
 
-    ; uncovered = ~cov
+    ; uncov = ~cov をローカルに保存
     mov cl, al
-    not cl                  ; uncov0 = cl
-    mov ch, dl
-    not ch                  ; uncov1 = ch
-
-    ; any0 = any1 = 0 (全プレーンのORを蓄積)
-    xor ebx, ebx            ; bl = any0, bh = any1
-
-    mov esi, [ebp+16]       ; tile_row (プレーン0の行先頭)
-    mov edi, [ebp+8]        ; bb_planes
-
-    ; === プレーン0 ===
-    mov edx, [edi]           ; bb_planes[0]
-    add edx, [ebp+12]       ; + doff
-
-    movzx eax, byte [esi]    ; src0
-    or bl, al                ; any0 |= src0
-    and al, cl               ; src0 & uncov0
-    mov ah, [edx]            ; dst0
-    push ecx
-    mov cl, [ebp-4]          ; cov0 を復帰... → 面倒なので別手法
-    pop ecx
-    ; dst = (dst & cov) | (src & uncov)
-    ; → dst &= cov → dst |= (src & uncov)
-    push eax
-    mov al, [edx]
-    push ecx
-    mov cl, [ebp+24]         ; 直接参照は面倒
-    pop ecx
-    ; --- レジスタ不足のため手法変更: スタックに退避 ---
-    pop eax
-
-    ; ---- レジスタ配分を再設計 ----
-    ; esi = tile_row
-    ; edi = cov_row
-    ; スタックローカルに bb_planes, doff, uncov を置く
-
-    ; 簡潔な方式に切り替え: 4プレーンアンロールループ
-    jmp .restart
-
-.restart:
-    ; スタックフレームを再構成
-    mov edi, [ebp+24]       ; cov_row
-    movzx eax, byte [edi]   ; cov0
-    movzx edx, byte [edi+1] ; cov1
-
-    ; uncov0 / uncov1 を計算してスタックに
-    mov cl, al
-    not cl                  ; uncov0
-    mov ch, dl
-    not ch                  ; uncov1
-    ; [ebp-4] = uncov0, [ebp-8] = uncov1, [ebp-12]=cov0, [ebp-16]=cov1
-    sub esp, 20
+    not cl
     mov [ebp-4], cl         ; uncov0
-    mov [ebp-8], ch         ; uncov1
+    mov cl, dl
+    not cl
+    mov [ebp-8], cl         ; uncov1
     mov [ebp-12], al        ; cov0
     mov [ebp-16], dl        ; cov1
-    mov byte [ebp-20], 0    ; any0
-    mov byte [ebp-24], 0    ; any1
-    sub esp, 4              ; any0/any1 用に余分確保済み(上で20確保)
+    mov byte [ebp-20], 0    ; any0 = 0
+    mov byte [ebp-24], 0    ; any1 = 0
 
-    mov esi, [ebp+16]       ; tile_row
+    mov esi, [ebp+16]       ; tile_row (plane 0 行先頭)
+
+    ; === Plane 0 ===
     mov eax, [ebp+8]        ; bb_planes
-
-    ; 4プレーン展開
-    ; --- Plane 0 ---
-    mov edi, [eax]           ; bb_planes[0]
+    mov edi, [eax]          ; bb_planes[0]
     add edi, [ebp+12]       ; + doff
 
-    movzx ecx, byte [esi]   ; src0_byte0
-    or [ebp-20], cl          ; any0 |= src0
-    and cl, [ebp-4]          ; src0 & uncov0
+    movzx ecx, byte [esi]   ; src byte0
+    or [ebp-20], cl          ; any0 |= src
+    and cl, [ebp-4]          ; src & uncov0
     mov dl, [edi]            ; dst byte0
     and dl, [ebp-12]         ; dst & cov0
-    or dl, cl                ; | (src & uncov)
+    or dl, cl
     mov [edi], dl
 
-    movzx ecx, byte [esi+1] ; src0_byte1
+    movzx ecx, byte [esi+1] ; src byte1
     or [ebp-24], cl
     and cl, [ebp-8]
     mov dl, [edi+1]
@@ -273,11 +231,11 @@ asm_tile_row_masked:
     or dl, cl
     mov [edi+1], dl
 
-    ; --- Plane 1 ---
-    mov ebx, [ebp+20]       ; tile_psz
-    add esi, ebx            ; tile_row += stride → plane 1
+    ; === Plane 1 ===
+    mov ebx, [ebp+20]       ; tile_psz (stride to next plane)
+    add esi, ebx
     mov eax, [ebp+8]
-    mov edi, [eax+4]         ; bb_planes[1]
+    mov edi, [eax+4]
     add edi, [ebp+12]
 
     movzx ecx, byte [esi]
@@ -296,7 +254,7 @@ asm_tile_row_masked:
     or dl, cl
     mov [edi+1], dl
 
-    ; --- Plane 2 ---
+    ; === Plane 2 ===
     add esi, ebx
     mov eax, [ebp+8]
     mov edi, [eax+8]
@@ -318,7 +276,7 @@ asm_tile_row_masked:
     or dl, cl
     mov [edi+1], dl
 
-    ; --- Plane 3 ---
+    ; === Plane 3 ===
     add esi, ebx
     mov eax, [ebp+8]
     mov edi, [eax+12]
@@ -340,21 +298,21 @@ asm_tile_row_masked:
     or dl, cl
     mov [edi+1], dl
 
-    ; --- カバレッジ更新 ---
-    mov edi, [ebp+24]        ; cov_row
-    mov al, [ebp-20]         ; any0
-    and al, [ebp-4]          ; any0 & uncov0
-    or [edi], al             ; cov_row[0] |= (any0 & uncov0)
+    ; === カバレッジ更新 ===
+    mov edi, [ebp+24]       ; cov_row
+    mov al, [ebp-20]        ; any0
+    and al, [ebp-4]         ; any0 & uncov0
+    or [edi], al            ; cov_row[0] |= ...
 
-    mov al, [ebp-24]         ; any1
-    and al, [ebp-8]          ; any1 & uncov1
-    or [edi+1], al           ; cov_row[1] |= (any1 & uncov1)
+    mov al, [ebp-24]        ; any1
+    and al, [ebp-8]         ; any1 & uncov1
+    or [edi+1], al          ; cov_row[1] |= ...
 
-    add esp, 20              ; ローカル変数解放
-
-.done_masked:
+.m_done:
     pop edi
     pop esi
     pop ebx
+    mov esp, ebp            ; ローカル変数を確実に解放
     pop ebp
     ret
+
