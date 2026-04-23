@@ -29,6 +29,47 @@ static u8 s_cov_mask[TILEMAP_ROWS][COV_PAIRS][COV_PAIR_BYTES];
 static u8 s_cov_full[TILEMAP_ROWS][COV_PAIRS];
 static u8 s_cell_dirty[TILEMAP_ROWS][TILEMAP_COLS];
 
+/* 描画済み列/行の追跡 (列単位ダーティレクト用) */
+static u8 s_col_drawn[TILEMAP_COLS];
+static int s_drawn_row_min;
+static int s_drawn_row_max;
+
+static void drawn_tracking_reset(void)
+{
+    memset(s_col_drawn, 0, sizeof(s_col_drawn));
+    s_drawn_row_min = TILEMAP_ROWS;
+    s_drawn_row_max = -1;
+}
+
+static void drawn_tracking_mark(int col, int row)
+{
+    s_col_drawn[col] = 1;
+    if (row < s_drawn_row_min) s_drawn_row_min = row;
+    if (row > s_drawn_row_max) s_drawn_row_max = row;
+}
+
+/* 追跡結果から最小限の dirty rect を登録 */
+static void flush_drawn_dirty(void)
+{
+    int c, start;
+    int dy, dh;
+
+    if (s_drawn_row_max < 0) return;
+
+    dy = _tilemap.origin_y + s_drawn_row_min * TILE_H;
+    dh = (s_drawn_row_max - s_drawn_row_min + 1) * TILE_H;
+
+    c = 0;
+    while (c < TILEMAP_COLS) {
+        if (!s_col_drawn[c]) { c++; continue; }
+        start = c;
+        while (c < TILEMAP_COLS && s_col_drawn[c]) c++;
+        _tilemap.kapi->gfx_add_dirty_rect(
+            _tilemap.origin_x + start * TILE_W,
+            dy, (c - start) * TILE_W, dh);
+    }
+}
+
 /* ======================================================================== */
 /*  ユーティリティ                                                          */
 /* ======================================================================== */
@@ -186,13 +227,13 @@ static void detect_dirty(void)
 void tilemap_compose_btf(void)
 {
     int row, col, bg;
-    int any_drawn = 0;
     GFX_Surface tmp_surf;
     u8 flip_buf[4][TILE_PLANE_SZ];
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
     detect_dirty();
+    drawn_tracking_reset();
 
     gfx_dirty_suppress = 1;
 
@@ -229,19 +270,15 @@ void tilemap_compose_btf(void)
                 } else {
                     gfx_blit_transparent(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
                 }
-                any_drawn = 1;
+                drawn_tracking_mark(col, row);
             }
         }
     }
 
     gfx_dirty_suppress = 0;
 
-    /* dirty rect を1回だけ登録 */
-    if (any_drawn) {
-        _tilemap.kapi->gfx_add_dirty_rect(
-            _tilemap.origin_x, _tilemap.origin_y,
-            TILEMAP_COLS * TILE_W, TILEMAP_ROWS * TILE_H);
-    }
+    /* 描画された列/行範囲のみ dirty rect を登録 */
+    flush_drawn_dirty();
 }
 
 /* ======================================================================== */
@@ -251,11 +288,11 @@ void tilemap_compose_btf(void)
 void tilemap_compose_ftb(void)
 {
     int row, col, bg;
-    int any_drawn = 0;
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
     detect_dirty();
+    drawn_tracking_reset();
 
     memset(s_cov_mask, 0, sizeof(s_cov_mask));
     memset(s_cov_full, 0, sizeof(s_cov_full));
@@ -310,17 +347,14 @@ void tilemap_compose_ftb(void)
                     if (check_cov_full_64(cov_pair))
                         s_cov_full[row][pair] = 1;
                 }
-                any_drawn = 1;
+                drawn_tracking_mark(col, row);
+                drawn_tracking_mark(col + 1, row);
             }
         }
     }
 
-    /* dirty rect を1回だけ登録 */
-    if (any_drawn) {
-        _tilemap.kapi->gfx_add_dirty_rect(
-            _tilemap.origin_x, _tilemap.origin_y,
-            TILEMAP_COLS * TILE_W, TILEMAP_ROWS * TILE_H);
-    }
+    /* 描画された列/行範囲のみ dirty rect を登録 */
+    flush_drawn_dirty();
 }
 
 /* ======================================================================== */
@@ -330,11 +364,11 @@ void tilemap_compose_ftb(void)
 void tilemap_compose_btf_fast(void)
 {
     int row, col, bg;
-    int any_drawn = 0;
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
     detect_dirty();
+    drawn_tracking_reset();
 
     for (bg = 0; bg < BG_COUNT; bg++) {
         if (!_tilemap.bg_planes[bg].visible) continue;
@@ -383,17 +417,14 @@ void tilemap_compose_btf_fast(void)
                                 dx + TILE_W, dy, &tmp, NULL);
                     }
                 }
-                any_drawn = 1;
+                drawn_tracking_mark(col, row);
+                drawn_tracking_mark(col + 1, row);
             }
         }
     }
 
-    /* dirty rect を1回だけ登録 */
-    if (any_drawn) {
-        _tilemap.kapi->gfx_add_dirty_rect(
-            _tilemap.origin_x, _tilemap.origin_y,
-            TILEMAP_COLS * TILE_W, TILEMAP_ROWS * TILE_H);
-    }
+    /* 描画された列/行範囲のみ dirty rect を登録 */
+    flush_drawn_dirty();
 }
 
 /* ======================================================================== */
@@ -687,8 +718,8 @@ void tilemap_compose_scroll(void)
 void tilemap_present(void)
 {
     if (_tilemap.kapi) {
-        _tilemap.kapi->gfx_present_rect(
-            _tilemap.origin_x, _tilemap.origin_y,
-            TILEMAP_COLS * TILE_W, TILEMAP_ROWS * TILE_H);
+        /* compose で登録済みの dirty rect のみを VRAM 転送する。
+         * gfx_present_rect は全面 dirty rect を再登録してしまうため使わない。 */
+        _tilemap.kapi->gfx_present_dirty();
     }
 }
