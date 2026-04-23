@@ -98,10 +98,13 @@ SHELL_SRC = $(wildcard programs/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
 programs/shell/%.o: programs/shell/%.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
 
-programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ)
-	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) -lc -lgcc
+# filer_draw は shell が参照するため SHELL_OBJ に含める
+FILER_DRAW_OBJ = programs/libfiler/filer_draw.o
+
+programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ) -lc -lgcc
 
 # === Edit (VZ-inspired Editor) Module ===
 EDIT_SRC = $(wildcard programs/apps/edit/*.c)
@@ -413,19 +416,25 @@ vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libos32snd/libos32snd.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32snd -c $< -o $@
 
-# === libmd (Markdownパーサーライブラリ) ===
+# === libmd (Markdownパーサー + レンダラーライブラリ) ===
 programs/libmd/md_parse.o: programs/libmd/md_parse.c programs/libmd/libmd.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -c $< -o $@
 
-# === libfiler (GFXファイラーライブラリ) ===
+programs/libmd/md_render.o: programs/libmd/md_render.c programs/libmd/md_render.h programs/libmd/libmd.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
+
+# === libfiler (GFXファイラーライブラリ + TVRAM描画) ===
 programs/libfiler/filer_core.o: programs/libfiler/filer_core.c programs/libfiler/libfiler.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+
+programs/libfiler/filer_draw.o: programs/libfiler/filer_draw.c programs/libfiler/filer_draw.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
 
 # === mdview (GFX Markdownビューア) ===
 FILER_OBJ = programs/libfiler/filer_core.o
-MDLIB_OBJ = programs/libmd/md_parse.o
+MDLIB_OBJ = programs/libmd/md_parse.o programs/libmd/md_render.o
 
-programs/apps/mdview.o: programs/apps/mdview.c programs/libmd/libmd.h programs/libfiler/libfiler.h
+programs/apps/mdview.o: programs/apps/mdview.c programs/libmd/libmd.h programs/libmd/md_render.h programs/libfiler/libfiler.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
 
 programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
@@ -494,7 +503,6 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 1048576; \
 	elif [ "$*" = "vdpview" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 19 --heap 2097152; \
-
 	elif [ "$*" = "skk_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 13 --heap 524288; \
 	elif [ "$*" = "fep_test" ]; then \
