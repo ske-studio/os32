@@ -71,6 +71,7 @@ void tilemap_scroll(int bg, int sx, int sy);
 void tilemap_compose_btf(void);       /* Back-to-Front (汎用) */
 void tilemap_compose_btf_fast(void);  /* Back-to-Front (2タイルDWORD転送) */
 void tilemap_compose_ftb(void);       /* Front-to-Back (カバレッジマスク) */
+void tilemap_compose_scroll(void);    /* 差分スクロール (BBシフト+端列描画) */
 
 /* ===== 表示 ===== */
 /* dirty rectのみVRAM転送 (gfx_present_dirty呼び出し) */

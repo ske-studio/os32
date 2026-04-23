@@ -53,19 +53,14 @@ void tilemap_set_visible(int bg, int visible)
 
 void tilemap_scroll(int bg, int sx, int sy)
 {
-    int row, col;
     if (!_tilemap.bg_planes || bg < 0 || bg >= BG_COUNT) return;
 
     if (_tilemap.bg_planes[bg].scroll_x != sx ||
         _tilemap.bg_planes[bg].scroll_y != sy) {
         _tilemap.bg_planes[bg].scroll_x = sx;
         _tilemap.bg_planes[bg].scroll_y = sy;
-        /* スクロール変更時は全タイルをダーティに */
-        for (row = 0; row < TILEMAP_ROWS; row++) {
-            for (col = 0; col < TILEMAP_COLS; col++) {
-                _tilemap.bg_planes[bg].dirty[row][col] = 1;
-            }
-        }
+        /* compose側でBBシフト+端列dirty化を行うためフラグのみセット */
+        _tilemap.scroll_changed = 1;
     }
 }
 

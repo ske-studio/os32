@@ -349,11 +349,12 @@ static void bench_flip(int iterations)
 /* スクロール性能ベンチマーク */
 static void bench_scroll(int iterations)
 {
-    u32 start, end, ticks;
+    u32 start, end, t_btf, t_scroll;
     int i;
 
-    kapi->kprintf(ATTR_CYAN, "\r\n[Scroll] BtF x%d\r\n", iterations);
+    kapi->kprintf(ATTR_CYAN, "\r\n[Scroll] x%d\r\n", iterations);
 
+    /* --- 従来 btf (全面再描画) --- */
     setup_scenario_b();
     force_all_dirty();
     tilemap_compose_btf();
@@ -361,16 +362,40 @@ static void bench_scroll(int iterations)
 
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        tilemap_scroll(0, i % (TILEMAP_COLS * TILE_W), 0);
+        /* 16px単位 (1タイル幅) でスクロール — 8px境界保証 */
+        tilemap_scroll(0, (i * 16) % (TILEMAP_COLS * TILE_W), 0);
+        /* scroll() がもう全dirty化しないので手動で全dirty化 */
+        force_all_dirty();
         tilemap_compose_btf();
         tilemap_present();
     }
     end = kapi->get_tick();
-    ticks = end - start;
-    print_result("scroll + btf + present", ticks);
+    t_btf = end - start;
+    print_result("btf (full redraw)", t_btf);
     if (iterations > 0) {
         kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
-                      (ticks * 10) / (u32)iterations);
+                      (t_btf * 10) / (u32)iterations);
+    }
+
+    /* --- 差分スクロール --- */
+    setup_scenario_b();
+    force_all_dirty();
+    tilemap_compose_btf();
+    tilemap_present();
+
+    start = kapi->get_tick();
+    for (i = 0; i < iterations; i++) {
+        /* 16px単位 (1タイル幅) でスクロール — 8px境界保証 */
+        tilemap_scroll(0, (i * 16) % (TILEMAP_COLS * TILE_W), 0);
+        tilemap_compose_scroll();
+        tilemap_present();
+    }
+    end = kapi->get_tick();
+    t_scroll = end - start;
+    print_result("compose_scroll (diff)", t_scroll);
+    if (iterations > 0) {
+        kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
+                      (t_scroll * 10) / (u32)iterations);
     }
 }
 
