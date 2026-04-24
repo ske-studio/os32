@@ -71,7 +71,7 @@ static const char *exception_names[] = {
     "#PF Page Fault",          /* 14 */
 };
 
-void exception_handler(u32 error_code, u32 vector)
+void exception_handler(u32 error_code, u32 vector, u32 fault_eip)
 {
     const char *name;
     int row = 16;
@@ -91,16 +91,18 @@ void exception_handler(u32 error_code, u32 vector)
     tvram_put_hex32(row+2, 15, vector, 0xE1);
     tvram_puts_at(row+3, 0, " Error Code: 0x", 0xE1);
     tvram_put_hex32(row+3, 15, error_code, 0xE1);
-    tvram_puts_at(row+4, 0, "========================================", 0x41);
+    tvram_puts_at(row+4, 0, " Fault EIP:  0x", 0xE1);
+    tvram_put_hex32(row+4, 15, fault_eip, 0xE1);
+    tvram_puts_at(row+5, 0, "========================================", 0x41);
 
     /* exec実行中なら復帰、それ以外はシステム停止 */
     if (exec_nest_level > 0) {
-        tvram_puts_at(row+5, 0, " >> Returning to shell...               ", 0xA1);
+        tvram_puts_at(row+6, 0, " >> Returning to shell...               ", 0xA1);
         _enable();
         exec_fault_recover();
     }
 
-    tvram_puts_at(row+5, 0, " System halted.", 0x41);
+    tvram_puts_at(row+6, 0, " System halted.", 0x41);
     for (;;) { /* hlt */ }
 }
 
@@ -115,7 +117,11 @@ void exception_handler(u32 error_code, u32 vector)
 /* ======================================================================== */
 void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip)
 {
-    int row = 14;
+    int row = console_get_cursor_y();
+    if (row > 14) {
+        tvram_scroll();
+        row = 14;
+    }
 
     _disable();
 

@@ -26,6 +26,10 @@
 #define SQL_COPY_BUF_SIZE 1024
 static char sql_copy_buf[SQL_COPY_BUF_SIZE];
 
+/* パス文字列コピー用バッファ (外部プログラム空間からの読み取り問題回避) */
+#define PATH_COPY_BUF_SIZE 256
+static char path_copy_buf[PATH_COPY_BUF_SIZE];
+
 /* ======== DB接続スロット ======== */
 typedef struct {
     int in_use;               /* 1=使用中, 0=空き */
@@ -190,7 +194,11 @@ int __cdecl kapi_db_open(const char *path)
     }
     if (i >= DB_MAX_CONNECTIONS) return -1;
 
-    rc = sqlite3_open(path, &db_slots[i].db);
+    /* パス文字列をカーネルバッファにコピー (外部プログラム空間からの読み取り問題回避) */
+    kstrncpy(path_copy_buf, path, PATH_COPY_BUF_SIZE - 1);
+    path_copy_buf[PATH_COPY_BUF_SIZE - 1] = '\0';
+
+    rc = sqlite3_open(path_copy_buf, &db_slots[i].db);
     if (rc != SQLITE_OK) {
         if (db_slots[i].db) {
             sqlite3_close(db_slots[i].db);

@@ -14,6 +14,7 @@
 boot:
   kernel: kernel.bin
   loader: boot/loader_hdd.bin
+  sqlite: sqlite.bin
 
 # ext2 ファイルシステム
 filesystem:
@@ -133,6 +134,9 @@ filesystem:
       tags: [programs]
     - host: programs/tests/db_test.bin
       guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/e2test.bin
+      guest: /sbin/
       tags: [programs]
 
     # --- 一般プログラム → /bin/ ---

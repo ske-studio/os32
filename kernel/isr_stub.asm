@@ -68,12 +68,14 @@ isr_common:
 
         ;; Cハンドラに引数を渡す
         ;; スタック上: [PUSHAD(32)] [vector(4)] [error_code(4)] [EIP(4)] [CS(4)]
-        mov     eax, [esp + 32]         ;; vector
+        mov     eax, [esp + 32 + 4 + 4] ;; EIP (フォールト時の戻りアドレス)
         push    eax
-        mov     eax, [esp + 32 + 4 + 4] ;; error_code
+        mov     eax, [esp + 32 + 4]     ;; vector
+        push    eax
+        mov     eax, [esp + 32 + 4 + 4 + 8] ;; error_code
         push    eax
         call    exception_handler
-        add     esp, 8
+        add     esp, 12
 
         popad
         add     esp, 8          ;; error_code + vector をスキップ

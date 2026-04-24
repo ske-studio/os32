@@ -14,9 +14,11 @@
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * シングルタスクOSのため全インスタンスで共有可能。
  * ext2_g_blk: inode/super/GD読み書き用
- * ext2_g_aux: ディレクトリ走査/ビットマップ/間接ブロック/データ用 */
+ * ext2_g_aux: ディレクトリ走査/ビットマップ/間接ブロック用
+ * ext2_g_dat: ext2_write_stream のデータ読み書き専用 (ext2_g_aux と競合回避) */
 u8 ext2_g_blk[EXT2_BLOCK_SIZE];
 u8 ext2_g_aux[EXT2_BLOCK_SIZE];
+u8 ext2_g_dat[EXT2_BLOCK_SIZE];
 
 /* ======================================================================== */
 /*  ブロック読み書き基盤                                                     */
@@ -119,7 +121,7 @@ u32 ext2_find_partition(int ide_drive)
 {
     u8 pt_sect[512];
     int ret, i;
-    u32 lba = 272; /* デフォルトフォールバック */
+    u32 lba = 1088; /* デフォルトフォールバック (シリンダ8) */
     IdeInfo info;
 
     if (ide_get_info(ide_drive, &info) != IDE_OK) return lba;
@@ -148,7 +150,7 @@ u32 ext2_find_partition(int ide_drive)
     }
 
     /* 念のためLBAが0ならフォールバック */
-    if (lba == 0) lba = 272;
+    if (lba == 0) lba = 1088;
     return lba;
 }
 

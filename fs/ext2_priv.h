@@ -20,6 +20,7 @@
  * 注意: 将来マルチタスク化する場合はインスタンスごとに分離が必要 */
 extern u8 ext2_g_blk[EXT2_BLOCK_SIZE];
 extern u8 ext2_g_aux[EXT2_BLOCK_SIZE];
+extern u8 ext2_g_dat[EXT2_BLOCK_SIZE]; /* ext2_write_stream データ読み書き専用 */
 
 /* ======================================================================== */
 /* 内部関数プロトタイプ (全関数が Ext2Ctx* を第1引数に取る)                  */

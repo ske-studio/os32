@@ -74,6 +74,7 @@ static int dev_find_validator(const char *name)
  * ============================================================ */
 extern u32 sys_mem_kb;
 
+
 void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 {
     char tmp[16];
@@ -321,49 +322,20 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* サウンドエンジン初期化 */
     snd_init();
 
-    /* SQLite 拡張域バイナリをロード → エンジン初期化 */
+    /* SQLite エンジン初期化 (ブートローダーが 0x18A000 にロード済み、
+     * kentry.asm が .sqlite_bss をゼロクリア済み) */
     tvram_print(0, 4, "SQLite...", TATTR_GREEN);
     {
-        extern u32 __sqlite_start;      /* リンカスクリプトから */
-        extern u32 __sqlite_data_end;   /* .sqlite_data 終端 */
-        extern u32 __sqlite_end;        /* .sqlite_bss 終端 */
-        u32 load_addr = (u32)&__sqlite_start;
-        u32 bss_addr  = (u32)&__sqlite_data_end;
-        u32 end_addr  = (u32)&__sqlite_end;
-        int sq_bytes;
-
-        kprintf(0x07, "[SQ] addr=%x bss=%x end=%x\n",
-                load_addr, bss_addr, end_addr);
-
-        sq_bytes = vfs_read(SYS_SQLITE_BIN,
-                            (void *)load_addr,
-                            472 * 1024);
-
-        kprintf(0x07, "[SQ] vfs_read=%d\n", sq_bytes);
-
-        if (sq_bytes > 0) {
-            /* .sqlite_bss をゼロクリア */
-            u32 bss_size = end_addr - bss_addr;
-            kprintf(0x07, "[SQ] memset %x sz=%d\n", bss_addr, bss_size);
-            memset((void *)bss_addr, 0, bss_size);
-            kprintf(0x07, "[SQ] memset OK\n");
-
-            {
-                int sq_rc;
-                kprintf(0x07, "[SQ] init...\n");
-                sq_rc = os32_sqlite_init();
-                kprintf(0x07, "[SQ] init rc=%d\n", sq_rc);
-                if (sq_rc == 0) {
-                    tvram_print(9, 4, "OK", TATTR_WHITE);
+        int sq_rc;
+        sq_rc = os32_sqlite_init();
+        kprintf(0x07, "[SQ] init rc=%d\n", sq_rc);
+        if (sq_rc == 0) {
+            tvram_print(9, 4, "OK", TATTR_WHITE);
 #ifdef SQLITE_BOOT_TEST
-                    os32_sqlite_test();
+            os32_sqlite_test();
 #endif
-                } else {
-                    tvram_print(9, 4, "ER", TATTR_RED);
-                }
-            }
         } else {
-            tvram_print(9, 4, "--", TATTR_CYAN);
+            tvram_print(9, 4, "ER", TATTR_RED);
         }
     }
 
@@ -376,6 +348,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* ブートスプラッシュ表示 (カーネル内蔵) */
     boot_splash();
+
 
     /* 外部シェル起動 — 終了/クラッシュ時のフォールバックとして再起動ループ */
     for (;;) {

@@ -25,8 +25,10 @@
 
 cpu 386
 
-KERNEL_LBA  EQU     6           ;; カーネル開始LBA
-LOAD_COUNT  EQU     400         ;; ロードセクタ数 (200KB)
+KERNEL_LBA      EQU     6       ;; カーネル開始LBA
+KERNEL_COUNT    EQU     200     ;; カーネルセクタ数 (100KB)
+SQLITE_LBA      EQU     206     ;; SQLite開始LBA (KERNEL_LBA + KERNEL_COUNT)
+SQLITE_COUNT    EQU     800     ;; SQLiteセクタ数 (400KB)
 
 section .text
         org 8000h
@@ -139,10 +141,10 @@ srst_ok:
         mov     esi, msg_loading
         call    pm_print
 
-        ;; === カーネルロード (CHS PIO) ===
+        ;; === Phase 1: カーネルロード (0x9000, CHS PIO) ===
         mov     edi, 00009000h       ;; カーネルロード先 (リニアアドレス)
         mov     eax, KERNEL_LBA      ;; 開始LBA
-        mov     ecx, LOAD_COUNT      ;; セクタ数
+        mov     ecx, KERNEL_COUNT    ;; セクタ数
 
 load_kernel:
         call    pm_read_sector       ;; EAX保存, EDI += 512
@@ -150,8 +152,23 @@ load_kernel:
         dec     ecx
         jnz     load_kernel
 
-        ;; ロード完了メッセージ (行2)
+        ;; === Phase 2: SQLite拡張域ロード (0x18A000, CHS PIO) ===
         mov     edi, 0A0000h + 320
+        mov     esi, msg_sqlite
+        call    pm_print
+
+        mov     edi, 0018A000h       ;; SQLiteロード先 (拡張メモリ)
+        mov     eax, SQLITE_LBA      ;; 開始LBA
+        mov     ecx, SQLITE_COUNT    ;; セクタ数
+
+load_sqlite:
+        call    pm_read_sector
+        inc     eax
+        dec     ecx
+        jnz     load_sqlite
+
+        ;; ロード完了メッセージ (行3)
+        mov     edi, 0A0000h + 480
         mov     esi, msg_booting
         call    pm_print
 
@@ -431,6 +448,7 @@ param_spt:      db      0
 msg_title:      db      'OS32 HDD Loader v2', 0
 msg_loading:    db      'Loading kernel (PIO)...', 0
 msg_booting:    db      'Kernel loaded. Booting...', 0
+msg_sqlite:     db      'Loading SQLite...', 0
 msg_ide_err:    db      'IDE Timeout!', 0
 msg_read_err:   db      'Read Error!', 0
 

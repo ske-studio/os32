@@ -1,4 +1,5 @@
 #include "ext2_priv.h"
+#include "kprintf.h"
 
 /*  ファイル読み込み — g_aux使用                                            */
 /* ======================================================================== */
@@ -218,32 +219,55 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
     bi = offset / EXT2_BLOCK_SIZE;
     byte_in_blk = offset % EXT2_BLOCK_SIZE;
 
+    /* データ読み書きには ext2_g_dat を使用する。
+     * ext2_g_aux は ext2_bmap / ext2_alloc_block / ext2_bmap_set が
+     * 間接ブロックテーブルやビットマップの読み書きに使うため、
+     * 同じバッファをデータに使うとバッファ競合が発生する。 */
     for (; remaining > 0; bi++) {
         phys = ext2_bmap(ctx, &inode, bi);
         if (phys == 0) {
             int new_blk = ext2_alloc_block(ctx);
-            if (new_blk < 0) break;
+            if (new_blk < 0) {
+                kprintf(0x0C, "[E2W] alloc FAIL bi=%d rem=%d\n",
+                        (int)bi, (int)remaining);
+                break;
+            }
             ret = ext2_bmap_set(ctx, &inode, bi, (u32)new_blk);
-            if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); break; }
+            if (ret != 0) {
+                kprintf(0x0C, "[E2W] bmap_set FAIL bi=%d ret=%d\n",
+                        (int)bi, ret);
+                ext2_free_block(ctx, (u32)new_blk);
+                break;
+            }
             inode.blocks += 2;
             phys = (u32)new_blk;
+            /* 部分ブロック書き込み: 新規ブロックをゼロ初期化 */
             if (byte_in_blk > 0 || remaining < EXT2_BLOCK_SIZE) {
-                ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
+                ext2_mem_zero(ext2_g_dat, EXT2_BLOCK_SIZE);
             }
         } else {
+            /* 既存ブロックの部分書き込み: 既存データを読み込み保持 */
             if (byte_in_blk > 0 || remaining < EXT2_BLOCK_SIZE) {
-                ret = ext2_read_block(ctx, phys, ext2_g_aux);
-                if (ret != 0) break;
+                ret = ext2_read_block(ctx, phys, ext2_g_dat);
+                if (ret != 0) {
+                    kprintf(0x0C, "[E2W] rblk FAIL bi=%d phys=%d\n",
+                            (int)bi, (int)phys);
+                    break;
+                }
             }
         }
 
         to_write = EXT2_BLOCK_SIZE - byte_in_blk;
         if (to_write > remaining) to_write = remaining;
 
-        ext2_mem_copy(&ext2_g_aux[byte_in_blk], &src[size - remaining], to_write);
+        ext2_mem_copy(&ext2_g_dat[byte_in_blk], &src[size - remaining], to_write);
 
-        ret = ext2_write_block(ctx, phys, ext2_g_aux);
-        if (ret != 0) break;
+        ret = ext2_write_block(ctx, phys, ext2_g_dat);
+        if (ret != 0) {
+            kprintf(0x0C, "[E2W] wblk FAIL bi=%d phys=%d\n",
+                    (int)bi, (int)phys);
+            break;
+        }
 
         remaining -= to_write;
         byte_in_blk = 0;
@@ -252,7 +276,13 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
             inode.size = offset + size - remaining;
         }
     }
-    
+
+    /* 防御ログ: 書き込み不完全の場合は警告 */
+    if (remaining > 0) {
+        kprintf(0x0C, "[E2W] INCOMPLETE ino=%d rem=%d/%d off=%d\n",
+                (int)ino, (int)remaining, (int)size, (int)offset);
+    }
+
     ext2_write_inode(ctx, ino, &inode);
     ext2_sync(ctx);
     return (int)(size - remaining);

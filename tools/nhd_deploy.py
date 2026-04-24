@@ -60,11 +60,12 @@ DEPLOY_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'deploy.yaml')
 
 # === ext2パーティション オフセット ===
-# NHDヘッダ(512B) + ブート領域(LBA 0-271) = 273セクタ
+# NHDヘッダ(512B) + ブート領域(LBA 0-1087) = 1089セクタ
+# シリンダ境界整列: 8H x 17SPT = 136sec/cyl, シリンダ8 = LBA 1088
 NHD_HEADER_SECTORS = 1
-HDD_PARTITION_LBA = 272
-PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 273
-PARTITION_OFFSET = PARTITION_SKIP * 512  # 139776 バイト
+HDD_PARTITION_LBA = 1088
+PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 1089
+PARTITION_OFFSET = PARTITION_SKIP * 512  # 557568 バイト
 
 
 def is_mounted():
@@ -311,8 +312,8 @@ def do_deploy():
     return True
 
 
-def do_write_kernel(kernel_bin, loader_bin=None):
-    """NHDのブート領域にloader+kernelを直接書き込む
+def do_write_kernel(kernel_bin, loader_bin=None, sqlite_bin=None):
+    """NHDのブート領域にloader+kernel+sqliteを直接書き込む
 
     NHDレイアウト (512B/セクタ):
       NHDヘッダ: 512B (オフセット0)
@@ -320,15 +321,18 @@ def do_write_kernel(kernel_bin, loader_bin=None):
       LBA 1: パーティションテーブル
       LBA 2-5: loader_hdd.bin (最大4セクタ = 2048B)
       LBA 6+: kernel.bin
-      LBA 272+: ext2パーティション
+      LBA 206+: sqlite.bin
+      LBA 1088+: ext2パーティション
     """
     NHD_HEADER = 512
     SECTOR = 512
     KERNEL_LBA = 6
     LOADER_LBA = 2
+    SQLITE_LBA = 206
 
     kernel_offset = NHD_HEADER + KERNEL_LBA * SECTOR
     loader_offset = NHD_HEADER + LOADER_LBA * SECTOR
+    sqlite_offset = NHD_HEADER + SQLITE_LBA * SECTOR
 
     with open(kernel_bin, 'rb') as f:
         kernel_data = f.read()
@@ -351,6 +355,22 @@ def do_write_kernel(kernel_bin, loader_bin=None):
         nhd.write(kernel_data)
         print("  kernel:     {} bytes -> LBA {}".format(
             len(kernel_data), KERNEL_LBA))
+
+        # sqlite書き込み
+        if sqlite_bin and os.path.isfile(sqlite_bin):
+            with open(sqlite_bin, 'rb') as f:
+                sqlite_data = f.read()
+            # パーティション境界チェック
+            sqlite_end_lba = SQLITE_LBA + (len(sqlite_data) + 511) // 512
+            if sqlite_end_lba > HDD_PARTITION_LBA:
+                print("  WARNING: sqlite.bin (LBA {}-{}) がパーティション (LBA {}) を超過!".format(
+                    SQLITE_LBA, sqlite_end_lba - 1, HDD_PARTITION_LBA))
+                return
+            nhd.seek(sqlite_offset)
+            nhd.write(sqlite_data)
+            print("  sqlite:     {} bytes -> LBA {} ({} sectors)".format(
+                len(sqlite_data), SQLITE_LBA,
+                (len(sqlite_data) + 511) // 512))
 
     print("Done!")
 
@@ -395,8 +415,45 @@ def do_format():
     return result.returncode == 0
 
 
+def update_partition_table(nhd_path):
+    """パーティションテーブル(LBA 1)のCHS開始位置を更新する
+
+    PC-98パーティションテーブルエントリ (32バイト):
+      offset 0: bootable flag (0x80=active)
+      offset 1: system type (0xE2=OS32)
+      offset 6: start sector
+      offset 7: start head
+      offset 8-9: start cylinder (little-endian)
+
+    ジオメトリ: 8 heads, 17 sectors/track
+    """
+    NHD_HEADER = 512
+    PT_OFFSET = NHD_HEADER + 512  # LBA 1
+
+    # シリンダ番号を計算 (HDD_PARTITION_LBA / (heads * spt))
+    heads = 8
+    spt = 17
+    start_cyl = HDD_PARTITION_LBA // (heads * spt)
+
+    with open(nhd_path, 'r+b') as f:
+        f.seek(PT_OFFSET)
+        pt = bytearray(f.read(512))
+
+        # Entry 0のCHS開始位置を更新
+        pt[6] = 0                                    # start sector = 0
+        pt[7] = 0                                    # start head = 0
+        pt[8] = start_cyl & 0xFF                     # start cylinder low
+        pt[9] = (start_cyl >> 8) & 0xFF              # start cylinder high
+
+        f.seek(PT_OFFSET)
+        f.write(pt)
+
+    print("パーティションテーブル更新: 開始シリンダ={} (LBA {})".format(
+        start_cyl, HDD_PARTITION_LBA))
+
+
 def do_init():
-    """Windows側NHDを/tmpにコピー + フォーマット + マウント"""
+    """Windows側NHDを/tmpにコピー + パーティション更新 + フォーマット + マウント"""
     if is_mounted():
         print("既にマウント済みです。先にumountしてください。")
         return False
@@ -421,6 +478,10 @@ def do_init():
 
     size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)
     print("コピー完了! ({:.1f} MB)".format(size_mb))
+
+    # パーティションテーブル更新 (CHS開始位置をシリンダ8に)
+    print("")
+    update_partition_table(NHD_LOCAL)
 
     # フォーマット
     print("")
@@ -500,11 +561,13 @@ def do_sync(tag_filter=None):
         boot = cfg.get('boot', {})
         kernel_path = os.path.join(PROJ_DIR, boot.get('kernel', 'kernel.bin'))
         loader_path = os.path.join(PROJ_DIR, boot.get('loader', ''))
+        sqlite_path = os.path.join(PROJ_DIR, boot.get('sqlite', 'sqlite.bin'))
 
         if os.path.isfile(kernel_path):
             loader_arg = loader_path if os.path.isfile(loader_path) else None
-            print("\n[boot] カーネル+ローダー書き込み")
-            do_write_kernel(kernel_path, loader_arg)
+            sqlite_arg = sqlite_path if os.path.isfile(sqlite_path) else None
+            print("\n[boot] カーネル+ローダー+SQLite書き込み")
+            do_write_kernel(kernel_path, loader_arg, sqlite_arg)
         else:
             print("Warning: カーネル {} が見つかりません".format(kernel_path))
 
@@ -904,15 +967,16 @@ def main():
 
     elif cmd == 'write-kernel':
         if len(sys.argv) < 3:
-            print("Usage: write-kernel <kernel.bin> [loader_hdd.bin]")
+            print("Usage: write-kernel <kernel.bin> [loader_hdd.bin] [sqlite.bin]")
             return
         kernel = sys.argv[2]
         loader = sys.argv[3] if len(sys.argv) > 3 else None
+        sqlite = sys.argv[4] if len(sys.argv) > 4 else None
         if not os.path.isfile(kernel):
             print("Error: {} not found".format(kernel))
             return
         # write-kernelはマウント不要 (ブート領域への直接書き込み)
-        do_write_kernel(kernel, loader)
+        do_write_kernel(kernel, loader, sqlite)
 
     elif cmd == 'format':
         do_format()
