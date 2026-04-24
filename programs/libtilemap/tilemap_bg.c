@@ -69,3 +69,14 @@ void tilemap_scroll_hw(int lines)
     if (!_tilemap.kapi) return;
     _tilemap.kapi->gfx_hardware_scroll(lines);
 }
+
+void tilemap_scroll_sync(void)
+{
+    int bg;
+    if (!_tilemap.bg_planes) return;
+    for (bg = 0; bg < BG_COUNT; bg++) {
+        _tilemap.prev_scroll_x[bg] = _tilemap.bg_planes[bg].scroll_x;
+        _tilemap.prev_scroll_y[bg] = _tilemap.bg_planes[bg].scroll_y;
+    }
+    _tilemap.scroll_changed = 0;
+}

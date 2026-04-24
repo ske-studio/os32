@@ -70,60 +70,32 @@ PC-98のVRAMバス帯域制限 (16bit bus @ 8MHz相当) により、
 
 ---
 
-## 3. バグ調査記録 — V-diff Triple Fault
+## 3. バグ調査記録 — V-diff Triple Fault (解決済み)
 
-### 3.1 現象
+### 3.1 根本原因
 
-- `tile_bench v` (垂直差分スクロールのみ実行) でトリプルフォルトが発生
-- H-diff は正常に 77 ticks で完了
-- V-diff の1フレーム目から `p0=0, pitch=16` と `gfx_fb` が破壊されている
+`make clean` 漏れによる **構造体サイズの ABI 不整合** が原因。
 
-### 3.2 デバッグ出力 (シリアルコンソール)
+具体的には `GFX_Framebuffer` のレイアウト変更後、`libtilemap.a` だけ再ビルドされず、
+古い `gfx_fb` オフセットを参照したためポインタが破壊された。
+`make clean && make all` で解消。
 
-```
-[Scroll] x10
-btf (full redraw)         365 ticks (3650 ms)
-avg: 365 ms/frame
-compose_scroll H-diff      77 ticks (770 ms)
-avg: 77 ms/frame
-V: dy=16 p0=0 pitch=16
-V: shift done
-V: draw r=23 mr=0
-V: draw done
-V: dy=16 p0=0 pitch=32
-...
-(以降 pitch が 16ずつ増加し続け、やがてアクセス違反でクラッシュ)
-```
+### 3.2 デバッグ経緯
 
-### 3.3 仮説
+| 症状 | 観察値 |
+|------|--------|
+| `p0` | 0 (NULLポインタ) |
+| `pitch` | 毎フレーム +16 ずつ累積 |
+| クラッシュ位置 | `bb_shift_vert` 内の `memcpy` |
 
-`gfx_fb` グローバル変数 (`GFX_Framebuffer`) が、
-V-diffループ実行中に上書きされている。
+### 3.3 副次修正
 
-症状:
-- `p0 = 0` (NULLポインタ)
-- `pitch` が 16 ずつ累積増加 → 毎フレーム加算されている
+差分更新時のVRAM同期漏れを防ぐため、露出タイルの各描画関数に
+`drawn_tracking_mark()` を追加:
 
-**有力仮説**:
-スタックのローカル変数 or BB内部の書き込み範囲外 → `gfx_fb` へのオーバーライト。
-
-### 3.4 試みた対策
-
-| 対策 | 結果 |
-|------|------|
-| prev_scroll同期 (`tilemap_scroll_sync()` 追加) | 改善なし |
-| ベンチの V-diff 単独テスト (`tile_bench v` 引数追加) | クラッシュ再現確認 |
-| `bb_shift_vert` のforループ内変数宣言をC89準拠に修正 | 改善なし |
-| デバッグkprintf (bb_shift_vert前後) | `V: shift done` まで正常 |
-| デバッグkprintf (bench setup) | DBG0〜5 が表示されない → ループ内で破壊 |
-
-### 3.5 次のアクション
-
-- [ ] `bb_shift_vert` 内部の書き込み範囲計算を検証
-  - `_tilemap.origin_y`, `gfx_fb.pitch`, `base_byte`, `tile_bytes` の実値ログ
-  - `(origin_y + row + shift_lines) * pitch + base_byte` がBB範囲内か確認
-- [ ] `gfx_fb` アドレスと `bb_shift_vert` の書き込み先アドレスの重複を確認
-- [ ] H-diff終了時点の `gfx_fb` の正常性を確認 (DBGポイント追加)
+- `draw_column_btf()` → `drawn_tracking_mark(screen_col, row)`
+- `draw_row_btf()` → `drawn_tracking_mark(col, screen_row)`
+- `redraw_upper_bgs()` → `drawn_tracking_mark(col, row)`
 
 ---
 
@@ -155,12 +127,14 @@ V-diffループ実行中に上書きされている。
 |------|-------|----------|
 | btf (full redraw) | 365 ticks | 365ms |
 | compose_scroll H-diff | 77 ticks | **77ms** |
-| compose_scroll V-diff | 未計測 (クラッシュ) | — |
+| compose_scroll V-diff | 計測予定 | — |
 
 ---
 
 ## 5. 今後の最適化候補
 
-- **Phase 4**: NASM による `bb_shift_vert` 高速化 (rep movsd)
-- **Phase 5**: `draw_row_btf` の NASM タイルブリット最適化
-- **Phase 6**: H-diff と V-diff の同時処理 (斜めスクロール)
+詳細は [05_SCROLL_ASM_OPT.md](05_SCROLL_ASM_OPT.md) を参照。
+
+- **Phase 4**: NASM による `bb_shift_horiz` / `bb_shift_vert` 高速化 (`rep movsd`)
+- **Phase 5**: `draw_column_btf` / `draw_row_btf` のタイルブリット NASM 化
+- **Phase 6**: H-diff + V-diff 同時処理 (斜めスクロール対応)
