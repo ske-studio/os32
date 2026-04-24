@@ -355,7 +355,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                 kprintf(0x07, "[SQ] init rc=%d\n", sq_rc);
                 if (sq_rc == 0) {
                     tvram_print(9, 4, "OK", TATTR_WHITE);
+#ifdef SQLITE_BOOT_TEST
                     os32_sqlite_test();
+#endif
                 } else {
                     tvram_print(9, 4, "ER", TATTR_RED);
                 }
