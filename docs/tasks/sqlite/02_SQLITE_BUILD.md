@@ -66,9 +66,7 @@ SQLITE_OMIT_FLAGS = \
     -DSQLITE_OMIT_TCL_VARIABLE \
     -DSQLITE_OMIT_COMPLETE \
     -DSQLITE_OMIT_DECLTYPE \
-    -DSQLITE_OMIT_JSON \
-    -DSQLITE_OMIT_CTE \
-    -DSQLITE_OMIT_WINDOWFUNC
+    -DSQLITE_OMIT_JSON
 ```
 
 | マクロ | 削除される機能 | 削減効果 |
@@ -86,7 +84,25 @@ SQLITE_OMIT_FLAGS = \
 | `OMIT_EXPLAIN` | EXPLAIN 文 | 中 |
 | `OMIT_JSON` | JSON 関数群 (json.c) | 大 (177KB ソース) |
 | `OMIT_CTE` | WITH 句 (再帰 CTE) | 中 |
-| `OMIT_WINDOWFUNC` | ウィンドウ関数 (window.c) | 大 (107KB ソース) |
+| `OMIT_WINDOWFUNC` | ウィンドウ関数 (window.c) | 大 |
+| `OMIT_ALTERTABLE` | ALTER TABLE | 中 |
+| `OMIT_ANALYZE` | ANALYZE | 小 |
+| `OMIT_ATTACH` | ATTACH DATABASE | 小 |
+| `OMIT_AUTOINCREMENT` | AUTOINCREMENT | 小 |
+| `OMIT_CAST` | CAST 式 | 小 |
+| `OMIT_FOREIGN_KEY` | 外部キー制約 | 中 |
+| `OMIT_GET_TABLE` | sqlite3_get_table | 小 |
+| `OMIT_INTEGRITY_CHECK` | PRAGMA integrity_check | 小 |
+| `OMIT_LOCALTIME` | localtime 変換 | 小 |
+| `OMIT_LOOKASIDE` | Lookaside アロケータ | 小 |
+| `OMIT_REINDEX` | REINDEX | 小 |
+| `OMIT_SCHEMA_PRAGMAS` | PRAGMA table_info 等 | 小 |
+| `OMIT_SCHEMA_VERSION_PRAGMAS` | PRAGMA schema_version | 小 |
+| `OMIT_UTF16` | UTF-16 サポート | 中 |
+| `OMIT_XFER_OPT` | INSERT...SELECT 最適化 | 小 |
+
+> **注意**: `OMIT_CTE` と `OMIT_WINDOWFUNC` は公式amalgamationではパーサー不整合で使用不可。
+> OMITマクロ付きでソースからamalgamationを再生成することで対応済み。
 
 ### 2-3. 保持する機能
 
@@ -183,11 +199,16 @@ sed -i 's|^\([ \t]*\)//\(.*\)$|\1/*\2 */|' sqlite3.c
 
 ## 4. 推定バイナリサイズ
 
-| 構成 | .text 推定 | .bss 推定 |
-|------|-----------|-----------|
-| フル版 (参考) | ~500KB | ~50KB |
-| OMIT 適用済み | **150-250KB** | ~20KB |
-| MEMSYS5 プール | — | **200KB** (固定配置) |
+| 構成 | 最適化 | .text | .data | .bss |
+|------|--------|-------|-------|------|
+| 公式amalgamation + 基本OMIT | `-O2` | 617KB | 4.3KB | 864B |
+| OMIT付きamalgamation再生成 + 全OMIT | `-O2` | 527KB | 3.7KB | 789B |
+| **OMIT付きamalgamation + 全OMIT** | **`-Os`** | **360KB** | 3.7KB | 789B |
+| MEMSYS5 プール | — | — | — | **200KB** (固定配置) |
+
+> **`-Os` (サイズ最適化) が必須**。`-O2` 比で 30% 削減。
+> `.text` 360KB はカーネル拡張域 `0x18A000-0x1FFFFF` (472KB) に収まる。
+> リンカの `--gc-sections` で未使用コード削除時はさらに縮小の余地あり。
 
 ---
 
