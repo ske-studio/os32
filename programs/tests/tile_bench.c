@@ -8,13 +8,14 @@
  *   4. H/Vフリップ付き描画: btf のフリップあり/なし比較
  *   5. スクロール (全タイルdirty化): btf でのスクロール更新コスト
  *
- * 結果はシリアルコンソール (kprintf) に表形式で出力する。
+ * 結果は stdout (printf) に表形式で出力する。
  * get_tick() の 1 tick = 10ms。
  */
 
 #include "os32api.h"
 #include "libtilemap.h"
 #include <string.h>
+#include <stdio.h>
 
 static KernelAPI *kapi;
 
@@ -75,7 +76,7 @@ static const u8 tile_transparent[128] = {0};
 static void print_result(const char *label, u32 ticks)
 {
     u32 ms = ticks * 10;
-    kapi->kprintf(ATTR_WHITE, "  %-28s %4lu ticks (%lu ms)\r\n", label, ticks, ms);
+    printf("  %-28s %4lu ticks (%lu ms)\n", label, ticks, ms);
 }
 
 /* ====================================================================== */
@@ -151,7 +152,7 @@ static void bench_full_draw(const char *scenario_name,
     u32 start, end;
     int i;
 
-    kapi->kprintf(ATTR_CYAN, "\r\n[%s] Full Draw x%d\r\n", scenario_name, iterations);
+    printf("\n[%s] Full Draw x%d\n", scenario_name, iterations);
 
     /* --- btf --- */
     setup_fn();
@@ -202,8 +203,7 @@ static void bench_delta_update(const char *scenario_name,
     u32 start, end;
     int i, x;
 
-    kapi->kprintf(ATTR_CYAN, "\r\n[%s] Delta (1-tile move) x%d\r\n",
-                  scenario_name, iterations);
+    printf("\n[%s] Delta (1-tile move) x%d\n", scenario_name, iterations);
 
     /* --- btf --- */
     setup_fn();
@@ -273,7 +273,7 @@ static void bench_flip(int iterations)
     u32 start, end;
     int i;
 
-    kapi->kprintf(ATTR_CYAN, "\r\n[Flip] Full Draw x%d\r\n", iterations);
+    printf("\n[Flip] Full Draw x%d\n", iterations);
 
     /* フリップなし */
     tilemap_fill(0, 1);
@@ -338,7 +338,7 @@ static void bench_scroll(int iterations)
     u32 start, end, t_btf, t_scroll;
     int i;
 
-    kapi->kprintf(ATTR_CYAN, "\r\n[Scroll] x%d\r\n", iterations);
+    printf("\n[Scroll] x%d\n", iterations);
 
     /* --- 従来 btf (全面再描画) --- */
     setup_scenario_b();
@@ -359,7 +359,7 @@ static void bench_scroll(int iterations)
     t_btf = end - start;
     print_result("btf (full redraw)", t_btf);
     if (iterations > 0) {
-        kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
+        printf("  avg: %lu ms/frame\n",
                       (t_btf * 10) / (u32)iterations);
     }
 
@@ -380,7 +380,7 @@ static void bench_scroll(int iterations)
     t_scroll = end - start;
     print_result("compose_scroll H-diff", t_scroll);
     if (iterations > 0) {
-        kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
+        printf("  avg: %lu ms/frame\n",
                       (t_scroll * 10) / (u32)iterations);
     }
 
@@ -402,7 +402,7 @@ static void bench_scroll(int iterations)
     t_scroll = end - start;
     print_result("compose_scroll V-diff", t_scroll);
     if (iterations > 0) {
-        kapi->kprintf(ATTR_WHITE, "  avg: %lu ms/frame\r\n",
+        printf("  avg: %lu ms/frame\n",
                       (t_scroll * 10) / (u32)iterations);
     }
 }
@@ -438,7 +438,7 @@ void main(int argc, char **argv, KernelAPI *api)
         run_scroll = 1;
     }
 
-    api->kprintf(ATTR_WHITE, "=== Tilemap Benchmark ===\r\n");
+    printf("=== Tilemap Benchmark ===\n");
 
     tilemap_init(api);
     gfx_clear(0);
@@ -475,7 +475,7 @@ void main(int argc, char **argv, KernelAPI *api)
     gfx_present();
     tilemap_shutdown();
 
-    api->kprintf(ATTR_GREEN, "\r\nDone. Press any key.\r\n");
+    printf("\nDone. Press any key.\n");
     api->kbd_getchar();
 }
 
