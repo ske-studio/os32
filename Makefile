@@ -54,7 +54,8 @@ INC_LIB = $(INC_COMMON) -Ilib
 
 # === コンパイルフラグ ===
 CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon
-LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections
+LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections \
+	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
@@ -73,7 +74,7 @@ C_KERNEL = \
     fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c lib/kutf16.c
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
@@ -376,7 +377,7 @@ boot: $(BIN_STANDALONE)
 	$(AS) -f elf32 $< -o $@
 
 kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ)
-	$(LD) $(LDFLAGS) -o $@ $^
+	$(LD) $(LDFLAGS) -o $@ $^ -lgcc
 
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary $< $@

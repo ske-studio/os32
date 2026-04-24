@@ -124,6 +124,9 @@ filesystem:
     - host: programs/tests/rotate_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/klibc_test.bin
+      guest: /usr/bin/
+      tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"
