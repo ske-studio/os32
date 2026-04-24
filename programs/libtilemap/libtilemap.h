@@ -74,6 +74,7 @@ void tilemap_compose_ftb(void);       /* Front-to-Back (カバレッジマスク
 void tilemap_compose_scroll(void);    /* 差分スクロール (BBシフト+端列描画) */
 
 /* ===== 表示 ===== */
+void tilemap_force_redraw(void);  /* 全タイルを強制ダーティ化 */
 /* dirty rectのみVRAM転送 (gfx_present_dirty呼び出し) */
 void tilemap_present(void);
 
@@ -84,6 +85,7 @@ void tilemap_set_origin(int ox, int oy);
 /* ===== HWスクロール ===== */
 /* 全プレーン同方向スクロール (GDC SCROLLコマンド経由) */
 void tilemap_scroll_hw(int lines);
+void tilemap_scroll_sync(void);
 
 /* ===== パレット ===== */
 void tilemap_set_palette(const u8 pal[16][3]);

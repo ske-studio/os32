@@ -69,21 +69,7 @@ static const u8 tile_transparent[128] = {0};
 /*  計測ヘルパー                                                          */
 /* ====================================================================== */
 
-/* 全BGの全タイルを強制ダーティにする */
-static void force_all_dirty(void)
-{
-    int bg, row, col;
-    for (bg = 0; bg < BG_COUNT; bg++) {
-        for (row = 0; row < TILEMAP_ROWS; row++) {
-            for (col = 0; col < TILEMAP_COLS; col++) {
-                /* 値を一旦変えて戻す → dirty化 */
-                u16 v = tilemap_get(bg, col, row);
-                tilemap_set(bg, col, row, v ^ 0x3FF);
-                tilemap_set(bg, col, row, v);
-            }
-        }
-    }
-}
+
 
 /* 計測結果1行を表示 */
 static void print_result(const char *label, u32 ticks)
@@ -169,10 +155,10 @@ static void bench_full_draw(const char *scenario_name,
 
     /* --- btf --- */
     setup_fn();
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -182,10 +168,10 @@ static void bench_full_draw(const char *scenario_name,
 
     /* --- btf_fast --- */
     setup_fn();
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf_fast();
         tilemap_present();
     }
@@ -195,10 +181,10 @@ static void bench_full_draw(const char *scenario_name,
 
     /* --- ftb --- */
     setup_fn();
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_ftb();
         tilemap_present();
     }
@@ -223,7 +209,7 @@ static void bench_delta_update(const char *scenario_name,
     setup_fn();
     tilemap_set_visible(2, 1);
     tilemap_fill(2, 0);
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_btf();
     tilemap_present();
 
@@ -243,7 +229,7 @@ static void bench_delta_update(const char *scenario_name,
     setup_fn();
     tilemap_set_visible(2, 1);
     tilemap_fill(2, 0);
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_btf_fast();
     tilemap_present();
 
@@ -263,7 +249,7 @@ static void bench_delta_update(const char *scenario_name,
     setup_fn();
     tilemap_set_visible(2, 1);
     tilemap_fill(2, 0);
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_ftb();
     tilemap_present();
 
@@ -295,10 +281,10 @@ static void bench_flip(int iterations)
     tilemap_set_visible(1, 0);
     tilemap_set_visible(2, 0);
     tilemap_set_visible(3, 0);
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -308,10 +294,10 @@ static void bench_flip(int iterations)
 
     /* 全タイル H-flip */
     tilemap_fill(0, TILEMAP_ATTR(1, 1, 0));
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -321,10 +307,10 @@ static void bench_flip(int iterations)
 
     /* 全タイル V-flip */
     tilemap_fill(0, TILEMAP_ATTR(1, 0, 1));
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -334,10 +320,10 @@ static void bench_flip(int iterations)
 
     /* 全タイル HV-flip */
     tilemap_fill(0, TILEMAP_ATTR(1, 1, 1));
-    force_all_dirty();
+    tilemap_force_redraw();
     start = kapi->get_tick();
     for (i = 0; i < iterations; i++) {
-        if (i > 0) force_all_dirty();
+        if (i > 0) tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -356,7 +342,7 @@ static void bench_scroll(int iterations)
 
     /* --- 従来 btf (全面再描画) --- */
     setup_scenario_b();
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_btf();
     tilemap_present();
 
@@ -365,7 +351,7 @@ static void bench_scroll(int iterations)
         /* 16px単位 (1タイル幅) でスクロール — 8px境界保証 */
         tilemap_scroll(0, (i * 16) % (TILEMAP_COLS * TILE_W), 0);
         /* scroll() がもう全dirty化しないので手動で全dirty化 */
-        force_all_dirty();
+        tilemap_force_redraw();
         tilemap_compose_btf();
         tilemap_present();
     }
@@ -379,7 +365,7 @@ static void bench_scroll(int iterations)
 
     /* --- 差分スクロール --- */
     setup_scenario_b();
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_btf();
     tilemap_present();
 
@@ -402,7 +388,7 @@ static void bench_scroll(int iterations)
     setup_scenario_b();
     tilemap_scroll(0, 0, 0);
     tilemap_scroll_sync();
-    force_all_dirty();
+    tilemap_force_redraw();
     tilemap_compose_btf();
     tilemap_present();
 

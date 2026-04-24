@@ -41,6 +41,10 @@ extern void __cdecl asm_draw_row_tiles(
 #define COV_PAIRS       (TILEMAP_COLS / 2)  /* 12 */
 #define COV_PAIR_BYTES  (4 * TILE_H)        /* 64 */
 
+/* スクロール差分の大ジャンプ閾値 (画面幅/高さの半分) */
+#define SCROLL_JUMP_THRESHOLD_X  ((TILEMAP_COLS * TILE_W) / 2)  /* 192px */
+#define SCROLL_JUMP_THRESHOLD_Y  ((TILEMAP_ROWS * TILE_H) / 2)  /* 192px */
+
 static u8 s_cov_mask[TILEMAP_ROWS][COV_PAIRS][COV_PAIR_BYTES];
 static u8 s_cov_full[TILEMAP_ROWS][COV_PAIRS];
 static u8 s_cell_dirty[TILEMAP_ROWS][TILEMAP_COLS];
@@ -237,14 +241,100 @@ static void detect_dirty(void)
 }
 
 /* ======================================================================== */
+/*  共通タイル描画ヘルパー                                                  */
+/* ======================================================================== */
+
+/*
+ * 1タイルを BtF 方式で全BG分描画する共通ヘルパー。
+ *
+ * screen_col, screen_row: BB上の描画位置 (座標計算 + drawn_tracking に使用)
+ * map_col, map_row:       タイルマップ上のインデックス (map[][] の参照に使用)
+ * bg_start:               走査開始BG (0=全BG、1=上層BGのみ)
+ * use_scroll:             1=calc_tile_draw使用 (スクロール+クリッピング対応)
+ */
+static void draw_one_tile_btf(int screen_col, int screen_row,
+                               int map_col, int map_row,
+                               int bg_start, int use_scroll)
+{
+    int bg;
+    GFX_Surface tmp_surf;
+    u8 flip_buf[4][TILE_PLANE_SZ];
+
+    for (bg = bg_start; bg < BG_COUNT; bg++) {
+        int tile_id;
+        u16 attr;
+        TileDef *tile;
+        int dx, dy;
+
+        if (!_tilemap.bg_planes[bg].visible) continue;
+
+        attr = _tilemap.bg_planes[bg].map[map_row][map_col];
+        tile_id = TILEMAP_ID(attr);
+        tile = &_tilemap.tiles[tile_id];
+
+        if (tile->opacity == TILE_TRANSPARENT) continue;
+
+        if (use_scroll) {
+            int use_sr;
+            GFX_Rect sr;
+            if (!calc_tile_draw(map_col, map_row,
+                                _tilemap.bg_planes[bg].scroll_x,
+                                _tilemap.bg_planes[bg].scroll_y,
+                                _tilemap.origin_x, _tilemap.origin_y,
+                                &dx, &dy, &sr, &use_sr))
+                continue;
+            prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
+            if (tile->opacity == TILE_OPAQUE) {
+                gfx_blit(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
+            } else {
+                gfx_blit_transparent(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
+            }
+        } else {
+            dx = _tilemap.origin_x + screen_col * TILE_W;
+            dy = _tilemap.origin_y + screen_row * TILE_H;
+            prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
+            if (tile->opacity == TILE_OPAQUE) {
+                gfx_blit(dx, dy, &tmp_surf, NULL);
+            } else {
+                gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
+            }
+        }
+        drawn_tracking_mark(screen_col, screen_row);
+    }
+}
+
+/*
+ * BG0 の指定列または行が NASM 高速パス条件を満たすか判定。
+ * axis: 0=列方向 (map[i][fixed_idx] を走査), 1=行方向 (map[fixed_idx][i] を走査)
+ * fixed_idx: 固定される列 or 行インデックス
+ * count: 走査する要素数
+ */
+static int check_can_fast(int axis, int fixed_idx, int count)
+{
+    int i;
+    if (!_tilemap.bg_planes[0].visible) return 0;
+    for (i = 0; i < count; i++) {
+        u16 a;
+        TileDef *t;
+        if (axis == 0)
+            a = _tilemap.bg_planes[0].map[i][fixed_idx];
+        else
+            a = _tilemap.bg_planes[0].map[fixed_idx][i];
+        t = &_tilemap.tiles[TILEMAP_ID(a)];
+        if (t->opacity != TILE_OPAQUE || TILEMAP_HFLIP(a) ||
+            TILEMAP_VFLIP(a))
+            return 0;
+    }
+    return 1;
+}
+
+/* ======================================================================== */
 /*  Back-to-Front 合成                                                      */
 /* ======================================================================== */
 
 void tilemap_compose_btf(void)
 {
-    int row, col, bg;
-    GFX_Surface tmp_surf;
-    u8 flip_buf[4][TILE_PLANE_SZ];
+    int row, col;
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
@@ -256,38 +346,7 @@ void tilemap_compose_btf(void)
     for (row = 0; row < TILEMAP_ROWS; row++) {
         for (col = 0; col < TILEMAP_COLS; col++) {
             if (!s_cell_dirty[row][col]) continue;
-
-            for (bg = 0; bg < BG_COUNT; bg++) {
-                int tile_id;
-                u16 attr;
-                TileDef *tile;
-                int dx, dy, use_sr;
-                GFX_Rect sr;
-
-                if (!_tilemap.bg_planes[bg].visible) continue;
-
-                attr = _tilemap.bg_planes[bg].map[row][col];
-                tile_id = TILEMAP_ID(attr);
-                tile = &_tilemap.tiles[tile_id];
-
-                if (tile->opacity == TILE_TRANSPARENT) continue;
-
-                if (!calc_tile_draw(col, row,
-                                    _tilemap.bg_planes[bg].scroll_x,
-                                    _tilemap.bg_planes[bg].scroll_y,
-                                    _tilemap.origin_x, _tilemap.origin_y,
-                                    &dx, &dy, &sr, &use_sr))
-                    continue;
-
-                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-                if (tile->opacity == TILE_OPAQUE) {
-                    gfx_blit(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
-                } else {
-                    gfx_blit_transparent(dx, dy, &tmp_surf, use_sr ? &sr : NULL);
-                }
-                drawn_tracking_mark(col, row);
-            }
+            draw_one_tile_btf(col, row, col, row, 0, 1);
         }
     }
 
@@ -481,27 +540,9 @@ static void bb_shift_vert(int shift_lines)
  */
 static void draw_column_btf(int screen_col, int map_col)
 {
-    int row, bg;
-    GFX_Surface tmp_surf;
-    u8 flip_buf[4][TILE_PLANE_SZ];
-    int can_fast = 1;
+    int row;
 
-    /* BG0 不透明+フリップなし判定 — 全行が条件を満たせば NASM パス */
-    if (_tilemap.bg_planes[0].visible) {
-        for (row = 0; row < TILEMAP_ROWS; row++) {
-            u16 a = _tilemap.bg_planes[0].map[row][map_col];
-            TileDef *t = &_tilemap.tiles[TILEMAP_ID(a)];
-            if (t->opacity != TILE_OPAQUE || TILEMAP_HFLIP(a) ||
-                TILEMAP_VFLIP(a)) {
-                can_fast = 0;
-                break;
-            }
-        }
-    } else {
-        can_fast = 0;
-    }
-
-    if (can_fast) {
+    if (check_can_fast(0, map_col, TILEMAP_ROWS)) {
         /* NASM ストリーム描画 (BG0 不透明・フリップなし) */
         const u8 *ptrs[TILEMAP_ROWS];
         int dx, dy;
@@ -518,34 +559,9 @@ static void draw_column_btf(int screen_col, int map_col)
         for (row = 0; row < TILEMAP_ROWS; row++)
             drawn_tracking_mark(screen_col, row);
     } else {
-        /* 従来パス: gfx_blit 呼び出し */
+        /* 従来パス: 共通ヘルパーで描画 */
         for (row = 0; row < TILEMAP_ROWS; row++) {
-            for (bg = 0; bg < BG_COUNT; bg++) {
-                int tile_id;
-                u16 attr;
-                TileDef *tile;
-                int dx, dy;
-
-                if (!_tilemap.bg_planes[bg].visible) continue;
-
-                attr = _tilemap.bg_planes[bg].map[row][map_col];
-                tile_id = TILEMAP_ID(attr);
-                tile = &_tilemap.tiles[tile_id];
-
-                if (tile->opacity == TILE_TRANSPARENT) continue;
-
-                dx = _tilemap.origin_x + screen_col * TILE_W;
-                dy = _tilemap.origin_y + row * TILE_H;
-
-                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-                if (tile->opacity == TILE_OPAQUE) {
-                    gfx_blit(dx, dy, &tmp_surf, NULL);
-                } else {
-                    gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
-                }
-                drawn_tracking_mark(screen_col, row);
-            }
+            draw_one_tile_btf(screen_col, row, map_col, row, 0, 0);
         }
     }
 }
@@ -556,27 +572,9 @@ static void draw_column_btf(int screen_col, int map_col)
  */
 static void draw_row_btf(int screen_row, int map_row)
 {
-    int col, bg;
-    GFX_Surface tmp_surf;
-    u8 flip_buf[4][TILE_PLANE_SZ];
-    int can_fast = 1;
+    int col;
 
-    /* BG0 不透明+フリップなし判定 */
-    if (_tilemap.bg_planes[0].visible) {
-        for (col = 0; col < TILEMAP_COLS; col++) {
-            u16 a = _tilemap.bg_planes[0].map[map_row][col];
-            TileDef *t = &_tilemap.tiles[TILEMAP_ID(a)];
-            if (t->opacity != TILE_OPAQUE || TILEMAP_HFLIP(a) ||
-                TILEMAP_VFLIP(a)) {
-                can_fast = 0;
-                break;
-            }
-        }
-    } else {
-        can_fast = 0;
-    }
-
-    if (can_fast) {
+    if (check_can_fast(1, map_row, TILEMAP_COLS)) {
         const u8 *ptrs[TILEMAP_COLS];
         int dx, dy;
         for (col = 0; col < TILEMAP_COLS; col++) {
@@ -592,33 +590,9 @@ static void draw_row_btf(int screen_row, int map_row)
         for (col = 0; col < TILEMAP_COLS; col++)
             drawn_tracking_mark(col, screen_row);
     } else {
+        /* 従来パス: 共通ヘルパーで描画 */
         for (col = 0; col < TILEMAP_COLS; col++) {
-            for (bg = 0; bg < BG_COUNT; bg++) {
-                int tile_id;
-                u16 attr;
-                TileDef *tile;
-                int dx, dy;
-
-                if (!_tilemap.bg_planes[bg].visible) continue;
-
-                attr = _tilemap.bg_planes[bg].map[map_row][col];
-                tile_id = TILEMAP_ID(attr);
-                tile = &_tilemap.tiles[tile_id];
-
-                if (tile->opacity == TILE_TRANSPARENT) continue;
-
-                dx = _tilemap.origin_x + col * TILE_W;
-                dy = _tilemap.origin_y + screen_row * TILE_H;
-
-                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-                if (tile->opacity == TILE_OPAQUE) {
-                    gfx_blit(dx, dy, &tmp_surf, NULL);
-                } else {
-                    gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
-                }
-                drawn_tracking_mark(col, screen_row);
-            }
+            draw_one_tile_btf(col, screen_row, col, map_row, 0, 0);
         }
     }
 }
@@ -627,46 +601,19 @@ static void draw_row_btf(int screen_row, int map_row)
 static void redraw_upper_bgs_partial(int col_start, int col_end,
                                      int row_start, int row_end)
 {
-    int row, col, bg;
-    GFX_Surface tmp_surf;
-    u8 flip_buf[4][TILE_PLANE_SZ];
-
+    int row, col;
     for (row = row_start; row < row_end; row++) {
         for (col = col_start; col < col_end; col++) {
-            for (bg = 1; bg < BG_COUNT; bg++) {
-                int tile_id;
-                u16 attr;
-                TileDef *tile;
-                int dx, dy;
-
-                if (!_tilemap.bg_planes[bg].visible) continue;
-
-                attr = _tilemap.bg_planes[bg].map[row][col];
-                tile_id = TILEMAP_ID(attr);
-                tile = &_tilemap.tiles[tile_id];
-
-                if (tile->opacity == TILE_TRANSPARENT) continue;
-
-                dx = _tilemap.origin_x + col * TILE_W;
-                dy = _tilemap.origin_y + row * TILE_H;
-
-                prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-
-                if (tile->opacity == TILE_OPAQUE) {
-                    gfx_blit(dx, dy, &tmp_surf, NULL);
-                } else {
-                    gfx_blit_transparent(dx, dy, &tmp_surf, NULL);
-                }
-                drawn_tracking_mark(col, row);
-            }
+            draw_one_tile_btf(col, row, col, row, 1, 0);
         }
     }
 }
 
-/* 全タイルを強制ダーティ化 (内部フォールバック用) */
-static void force_all_dirty_internal(void)
+/* 全タイルを強制ダーティ化 (公開API) */
+void tilemap_force_redraw(void)
 {
     int bg, row, col;
+    if (!_tilemap.bg_planes) return;
     for (bg = 0; bg < BG_COUNT; bg++) {
         for (row = 0; row < TILEMAP_ROWS; row++) {
             for (col = 0; col < TILEMAP_COLS; col++) {
@@ -676,13 +623,177 @@ static void force_all_dirty_internal(void)
     }
 }
 
-void tilemap_compose_scroll(void)
+/* ======================================================================== */
+/*  差分スクロール — サブ関数                                               */
+/* ======================================================================== */
+
+/* スクロール差分計算 + フォールバック判定。
+ * 戻り値: 1=全面再描画が必要 (フォールバック), 0=差分処理可能 */
+static int scroll_calc_delta(int *out_dx, int *out_dy, int *out_has_upper)
 {
     int bg;
-    int dx_total = 0;
-    int dy_total = 0;
-    int need_full_redraw = 0;
-    int has_upper_bg = 0;
+    int need_full = 0;
+
+    *out_dx = _tilemap.bg_planes[0].scroll_x - _tilemap.prev_scroll_x[0];
+    *out_dy = _tilemap.bg_planes[0].scroll_y - _tilemap.prev_scroll_y[0];
+    *out_has_upper = 0;
+
+    /* 上層BG のスクロール変化チェック */
+    for (bg = 1; bg < BG_COUNT; bg++) {
+        if (_tilemap.bg_planes[bg].scroll_x != _tilemap.prev_scroll_x[bg] ||
+            _tilemap.bg_planes[bg].scroll_y != _tilemap.prev_scroll_y[bg]) {
+            need_full = 1;
+        }
+        if (_tilemap.bg_planes[bg].visible) {
+            *out_has_upper = 1;
+        }
+    }
+
+    /* 8px 境界チェック */
+    if ((*out_dx & 7) != 0 || (*out_dy & 7) != 0) {
+        need_full = 1;
+    }
+
+    /* 大ジャンプ判定 */
+    {
+        int abs_dx = (*out_dx < 0) ? -*out_dx : *out_dx;
+        int abs_dy = (*out_dy < 0) ? -*out_dy : *out_dy;
+        if (abs_dx >= SCROLL_JUMP_THRESHOLD_X ||
+            abs_dy >= SCROLL_JUMP_THRESHOLD_Y) {
+            need_full = 1;
+        }
+    }
+
+    return need_full;
+}
+
+/* 水平差分処理 (BBシフト + 露出列描画 + 上層BG再描画) */
+static void scroll_apply_horiz(int dx_total, int has_upper_bg)
+{
+    int shift_bytes = dx_total >> 3;
+    int abs_bytes = (shift_bytes < 0) ? -shift_bytes : shift_bytes;
+    int cols_exposed, start_col, c;
+
+    bb_shift_horiz(shift_bytes);
+
+    cols_exposed = (abs_bytes * 8 + TILE_W - 1) / TILE_W;
+    if (cols_exposed < 1) cols_exposed = 1;
+    if (cols_exposed > TILEMAP_COLS) cols_exposed = TILEMAP_COLS;
+
+    if (dx_total > 0) {
+        start_col = TILEMAP_COLS - cols_exposed;
+    } else {
+        start_col = 0;
+    }
+
+    /* 露出列の BG0 描画 */
+    {
+        i16 sx = _tilemap.bg_planes[0].scroll_x;
+        int first_map_col = (sx / TILE_W) % TILEMAP_COLS;
+        for (c = start_col; c < start_col + cols_exposed; c++) {
+            int map_col = (first_map_col + c) % TILEMAP_COLS;
+            draw_column_btf(c, map_col);
+        }
+    }
+
+    /* BBシフトで内容は保持されるが VRAM 上の位置がずれるため、
+     * flush_drawn_dirty が正しい行範囲を包含するよう行端をマークする。
+     * (drawn_tracking は列+行min/max で dirty rect を計算するため、
+     *  行端をマークすれば全行がカバーされる) */
+    {
+        int c2;
+        int kept_start = (dx_total > 0) ? 0 : cols_exposed;
+        int kept_end = (dx_total > 0) ? TILEMAP_COLS - cols_exposed
+                                      : TILEMAP_COLS;
+        for (c2 = kept_start; c2 < kept_end; c2++) {
+            drawn_tracking_mark(c2, 0);
+            drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
+        }
+    }
+
+    /* 上層BG: 露出列のみ再描画 (保持領域はBBシフトで移動済み) */
+    if (has_upper_bg) {
+        redraw_upper_bgs_partial(start_col, start_col + cols_exposed,
+                                 0, TILEMAP_ROWS);
+    }
+}
+
+/* 垂直差分処理 (BBシフト + 露出行描画 + 上層BG再描画) */
+static void scroll_apply_vert(int dy_total, int has_upper_bg)
+{
+    int abs_lines = (dy_total < 0) ? -dy_total : dy_total;
+    int rows_exposed, start_row, r;
+
+    bb_shift_vert(dy_total);
+
+    rows_exposed = (abs_lines + TILE_H - 1) / TILE_H;
+    if (rows_exposed < 1) rows_exposed = 1;
+    if (rows_exposed > TILEMAP_ROWS) rows_exposed = TILEMAP_ROWS;
+
+    if (dy_total > 0) {
+        start_row = TILEMAP_ROWS - rows_exposed;
+    } else {
+        start_row = 0;
+    }
+
+    /* 露出行の BG0 描画 */
+    {
+        i16 sy = _tilemap.bg_planes[0].scroll_y;
+        int first_map_row = (sy / TILE_H) % TILEMAP_ROWS;
+        for (r = start_row; r < start_row + rows_exposed; r++) {
+            int map_row = (first_map_row + r) % TILEMAP_ROWS;
+            draw_row_btf(r, map_row);
+        }
+    }
+
+    /* BBシフト保持領域: 行端マークで全行を dirty rect に含める
+     * (理由は scroll_apply_horiz のコメント参照) */
+    {
+        int c2;
+        for (c2 = 0; c2 < TILEMAP_COLS; c2++) {
+            drawn_tracking_mark(c2, 0);
+            drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
+        }
+    }
+
+    /* 上層BG: 露出行のみ再描画 (保持領域はBBシフトで移動済み) */
+    if (has_upper_bg) {
+        redraw_upper_bgs_partial(0, TILEMAP_COLS,
+                                 start_row, start_row + rows_exposed);
+    }
+}
+
+/* 通常の dirty タイルを処理 (スクロール以外の変更分) */
+static void scroll_process_dirty(void)
+{
+    int row, col;
+    detect_dirty();
+    for (row = 0; row < TILEMAP_ROWS; row++) {
+        for (col = 0; col < TILEMAP_COLS; col++) {
+            if (!s_cell_dirty[row][col]) continue;
+            draw_one_tile_btf(col, row, col, row, 0, 0);
+        }
+    }
+}
+
+/* prev_scroll を現在値に更新 */
+static void scroll_update_prev(void)
+{
+    int bg;
+    for (bg = 0; bg < BG_COUNT; bg++) {
+        _tilemap.prev_scroll_x[bg] = _tilemap.bg_planes[bg].scroll_x;
+        _tilemap.prev_scroll_y[bg] = _tilemap.bg_planes[bg].scroll_y;
+    }
+    _tilemap.scroll_changed = 0;
+}
+
+/* ======================================================================== */
+/*  差分スクロール合成 (メインエントリ)                                     */
+/* ======================================================================== */
+
+void tilemap_compose_scroll(void)
+{
+    int dx_total, dy_total, has_upper;
 
     if (!_tilemap.kapi || !_tilemap.bg_planes) return;
 
@@ -692,191 +803,27 @@ void tilemap_compose_scroll(void)
         return;
     }
 
-    /* BG0 の水平・垂直スクロール差分を計算 */
-    for (bg = 0; bg < BG_COUNT; bg++) {
-        if (bg == 0) {
-            dx_total = _tilemap.bg_planes[0].scroll_x
-                     - _tilemap.prev_scroll_x[0];
-            dy_total = _tilemap.bg_planes[0].scroll_y
-                     - _tilemap.prev_scroll_y[0];
-        } else if (_tilemap.bg_planes[bg].scroll_x !=
-                   _tilemap.prev_scroll_x[bg] ||
-                   _tilemap.bg_planes[bg].scroll_y !=
-                   _tilemap.prev_scroll_y[bg]) {
-            need_full_redraw = 1;
-        }
-        if (bg >= 1 && _tilemap.bg_planes[bg].visible) {
-            has_upper_bg = 1;
-        }
-    }
-
-    /* 8px境界チェック */
-    if ((dx_total & 7) != 0 || (dy_total & 7) != 0) {
-        need_full_redraw = 1;
-    }
-
-    /* 大ジャンプ (水平・垂直とも半分以上) はフォールバック */
-    {
-        int abs_dx = (dx_total < 0) ? -dx_total : dx_total;
-        int abs_dy = (dy_total < 0) ? -dy_total : dy_total;
-        if (abs_dx >= (TILEMAP_COLS * TILE_W) / 2 ||
-            abs_dy >= (TILEMAP_ROWS * TILE_H) / 2) {
-            need_full_redraw = 1;
-        }
-    }
-
-    if (need_full_redraw) {
-        force_all_dirty_internal();
-        for (bg = 0; bg < BG_COUNT; bg++) {
-            _tilemap.prev_scroll_x[bg] = _tilemap.bg_planes[bg].scroll_x;
-            _tilemap.prev_scroll_y[bg] = _tilemap.bg_planes[bg].scroll_y;
-        }
-        _tilemap.scroll_changed = 0;
+    /* 差分計算 + フォールバック判定 */
+    if (scroll_calc_delta(&dx_total, &dy_total, &has_upper)) {
+        /* フォールバック: 全面再描画 */
+        tilemap_force_redraw();
+        scroll_update_prev();
         tilemap_compose_btf();
         return;
     }
 
-    /* ---- 差分スクロール処理 (水平 + 垂直) ---- */
+    /* ---- 差分スクロール処理 ---- */
     drawn_tracking_reset();
     gfx_dirty_suppress = 1;
 
-    /* 水平差分 */
-    if (dx_total != 0) {
-        int shift_bytes = dx_total >> 3;
-        int abs_bytes = (shift_bytes < 0) ? -shift_bytes : shift_bytes;
-        int cols_exposed, start_col, c;
+    if (dx_total != 0) scroll_apply_horiz(dx_total, has_upper);
+    if (dy_total != 0) scroll_apply_vert(dy_total, has_upper);
 
-        bb_shift_horiz(shift_bytes);
-
-        cols_exposed = (abs_bytes * 8 + TILE_W - 1) / TILE_W;
-        if (cols_exposed < 1) cols_exposed = 1;
-        if (cols_exposed > TILEMAP_COLS) cols_exposed = TILEMAP_COLS;
-
-        if (dx_total > 0) {
-            start_col = TILEMAP_COLS - cols_exposed;
-        } else {
-            start_col = 0;
-        }
-
-        {
-            i16 sx = _tilemap.bg_planes[0].scroll_x;
-            int first_map_col = (sx / TILE_W) % TILEMAP_COLS;
-            for (c = start_col; c < start_col + cols_exposed; c++) {
-                int map_col = (first_map_col + c) % TILEMAP_COLS;
-                draw_column_btf(c, map_col);
-            }
-        }
-
-        /* BBシフト: 保持領域の全列をダーティマーク (VRAM同期用) */
-        {
-            int c2;
-            int kept_start = (dx_total > 0) ? 0 : cols_exposed;
-            int kept_end = (dx_total > 0) ? TILEMAP_COLS - cols_exposed
-                                          : TILEMAP_COLS;
-            for (c2 = kept_start; c2 < kept_end; c2++) {
-                drawn_tracking_mark(c2, 0);
-                drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
-            }
-        }
-
-        /* 上層BG: 露出列のみ再描画 (保持領域はBBシフトで移動済み) */
-        if (has_upper_bg) {
-            redraw_upper_bgs_partial(start_col, start_col + cols_exposed,
-                                     0, TILEMAP_ROWS);
-        }
-    }
-
-    /* 垂直差分 */
-    if (dy_total != 0) {
-        int abs_lines = (dy_total < 0) ? -dy_total : dy_total;
-        int rows_exposed, start_row, r;
-
-        bb_shift_vert(dy_total);
-
-        rows_exposed = (abs_lines + TILE_H - 1) / TILE_H;
-        if (rows_exposed < 1) rows_exposed = 1;
-        if (rows_exposed > TILEMAP_ROWS) rows_exposed = TILEMAP_ROWS;
-
-        if (dy_total > 0) {
-            start_row = TILEMAP_ROWS - rows_exposed;
-        } else {
-            start_row = 0;
-        }
-
-        {
-            i16 sy = _tilemap.bg_planes[0].scroll_y;
-            int first_map_row = (sy / TILE_H) % TILEMAP_ROWS;
-            for (r = start_row; r < start_row + rows_exposed; r++) {
-                int map_row = (first_map_row + r) % TILEMAP_ROWS;
-                draw_row_btf(r, map_row);
-            }
-        }
-
-        /* BBシフト: 保持行をダーティマーク (VRAM同期用) */
-        {
-            int c2;
-            for (c2 = 0; c2 < TILEMAP_COLS; c2++) {
-                drawn_tracking_mark(c2, 0);
-                drawn_tracking_mark(c2, TILEMAP_ROWS - 1);
-            }
-        }
-
-        /* 上層BG: 露出行のみ再描画 (保持領域はBBシフトで移動済み) */
-        if (has_upper_bg) {
-            redraw_upper_bgs_partial(0, TILEMAP_COLS,
-                                     start_row, start_row + rows_exposed);
-        }
-    }
-
-    /* 通常の dirty タイルも処理 */
-    detect_dirty();
-    {
-        int row, col;
-        GFX_Surface tmp_surf;
-        u8 flip_buf[4][TILE_PLANE_SZ];
-
-        for (row = 0; row < TILEMAP_ROWS; row++) {
-            for (col = 0; col < TILEMAP_COLS; col++) {
-                int bg2;
-                if (!s_cell_dirty[row][col]) continue;
-                for (bg2 = 0; bg2 < BG_COUNT; bg2++) {
-                    int tile_id;
-                    u16 attr;
-                    TileDef *tile;
-                    int ddx, ddy;
-
-                    if (!_tilemap.bg_planes[bg2].visible) continue;
-                    attr = _tilemap.bg_planes[bg2].map[row][col];
-                    tile_id = TILEMAP_ID(attr);
-                    tile = &_tilemap.tiles[tile_id];
-                    if (tile->opacity == TILE_TRANSPARENT) continue;
-
-                    ddx = _tilemap.origin_x + col * TILE_W;
-                    ddy = _tilemap.origin_y + row * TILE_H;
-
-                    prepare_tile_surface(&tmp_surf, tile, attr, flip_buf);
-                    if (tile->opacity == TILE_OPAQUE) {
-                        gfx_blit(ddx, ddy, &tmp_surf, NULL);
-                    } else {
-                        gfx_blit_transparent(ddx, ddy, &tmp_surf, NULL);
-                    }
-                    drawn_tracking_mark(col, row);
-                }
-            }
-        }
-    }
+    scroll_process_dirty();
 
     gfx_dirty_suppress = 0;
-
-    /* 描画された列/行範囲のみ dirty rect を登録 */
     flush_drawn_dirty();
-
-    /* prev_scroll 更新 */
-    for (bg = 0; bg < BG_COUNT; bg++) {
-        _tilemap.prev_scroll_x[bg] = _tilemap.bg_planes[bg].scroll_x;
-        _tilemap.prev_scroll_y[bg] = _tilemap.bg_planes[bg].scroll_y;
-    }
-    _tilemap.scroll_changed = 0;
+    scroll_update_prev();
 }
 
 void tilemap_present(void)
