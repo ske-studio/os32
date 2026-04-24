@@ -11,6 +11,7 @@
 /* ======================================================================== */
 
 #include "kmalloc.h"
+#include "kstring.h"
 
 /* ======== ブロックヘッダ ======== */
 #define BLK_MAGIC_USED  0xA110CA7EUL  /* "ALLOCATE" */
@@ -156,8 +157,62 @@ void kfree(void *ptr)
 }
 
 /* ======================================================================== */
+/*  kmalloc_block_size — 確保済みブロックのデータ部サイズを取得               */
+/*  テスト・krealloc用。ptr が無効な場合は 0 を返す。                         */
+/* ======================================================================== */
+u32 kmalloc_block_size(void *ptr)
+{
+    BlkHdr *blk;
+    if (ptr == (void *)0) return 0;
+    blk = (BlkHdr *)((u8 *)ptr - BLK_HDR_SIZE);
+    if (blk->magic != BLK_MAGIC_USED) return 0;
+    return blk->size;
+}
+
+/* ======================================================================== */
+/*  krealloc — メモリ再確保                                                  */
+/*  新しいブロックを確保し、既存データをコピーして旧ブロックを解放する。       */
+/*  ptr==NULL の場合は kmalloc(new_size) と同等。                             */
+/*  new_size==0 の場合は kfree(ptr) と同等で NULL を返す。                    */
+/* ======================================================================== */
+void *krealloc(void *ptr, u32 new_size)
+{
+    void *new_ptr;
+    u32 old_size;
+    u32 copy_size;
+
+    if (ptr == (void *)0) return kmalloc(new_size);
+    if (new_size == 0) { kfree(ptr); return (void *)0; }
+
+    old_size = kmalloc_block_size(ptr);
+    if (old_size == 0) return (void *)0; /* 無効なポインタ */
+
+    /* 既に十分なサイズがある場合はそのまま返す */
+    if (old_size >= new_size) return ptr;
+
+    new_ptr = kmalloc(new_size);
+    if (new_ptr == (void *)0) return (void *)0;
+
+    copy_size = (old_size < new_size) ? old_size : new_size;
+    kmemcpy(new_ptr, ptr, copy_size);
+    kfree(ptr);
+
+    return new_ptr;
+}
+
+/* ======================================================================== */
 /*  ヒープ情報                                                              */
 /* ======================================================================== */
 u32 kmalloc_total(void) { return heap_sz; }
 u32 kmalloc_used(void)  { return heap_used; }
 u32 kmalloc_free(void)  { return heap_sz - heap_used; }
+
+/* ======================================================================== */
+/*  libc互換ラッパー                                                         */
+/*  カーネル空間でのみリンクされる。SQLite等の外部コードが暗黙に使用する       */
+/*  malloc/free/realloc を kmalloc ベースで提供する。                         */
+/*  外部プログラムの newlib-nano malloc とは完全に独立。                      */
+/* ======================================================================== */
+void *malloc(u32 size)               { return kmalloc(size); }
+void  free(void *ptr)                { kfree(ptr); }
+void *realloc(void *ptr, u32 size)   { return krealloc(ptr, size); }
