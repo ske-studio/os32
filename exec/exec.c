@@ -14,6 +14,7 @@
 #include "pipe_buffer.h"
 #include "shm.h"
 #include "snd_engine.h"
+#include "kapi_db.h"
 
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
@@ -109,6 +110,9 @@ void exec_exit(int status)
 
         /* (5) サウンドエンジンクリーンアップ (bgm_persistでなければBGM停止) */
         snd_cleanup();
+
+        /* (6) SQLite DB リソースクリーンアップ (未closeのDB接続を解放) */
+        db_cleanup_all();
 
         /* 親レベルへ復帰 */
         exec_nest_level--;
