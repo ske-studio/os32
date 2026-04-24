@@ -38,6 +38,10 @@ filesystem:
       guest: /sys/unicode.bin
       tags: [core]
 
+    - host: sqlite.bin
+      guest: /sys/sqlite.bin
+      tags: [core]
+
     # --- シェル (カーネルは /shell をロードする: config.h SYS_SHELL_BIN) ---
     - host: programs/shell.bin
       guest: /sys/shell.bin

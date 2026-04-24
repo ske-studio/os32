@@ -31,7 +31,7 @@ INC_COMMON = -I. -Iinclude
 
 # カーネルコア: 自身 + ドライバ + fs + exec + shell + gfx + lib + kapi
 # (kernel.c は全サブシステムの初期化を行うため全モジュールを参照)
-INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi
+INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi -Ilib/sqlite3
 
 # ドライバ: 共通 + 自身 + gfx (kcg->gfx依存)
 INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
@@ -47,15 +47,20 @@ INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
 INC_EXEC = $(INC_COMMON) -Iexec -Ikapi -Ifs -Igfx -Idrivers -Ilib -Ikernel
 
 # KAPI: 全モジュール (全APIラッパーのため)
-INC_KAPI = $(INC_COMMON) -Ikapi -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib
+INC_KAPI = $(INC_COMMON) -Ikapi -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ilib/sqlite3
 
 # lib: 共通 + 自身 (汎用ライブラリ: カーネル依存なし)
 INC_LIB = $(INC_COMMON) -Ilib
 
 # === コンパイルフラグ ===
 CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon
+# SQLite専用フラグ: -Os (サイズ最適化必須) + -Wno-long-long (int64リテラル)
+CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w
 LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections \
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
+
+# SQLite: カーネルFS/ドライバ + SQLiteヘッダ (VFS実装用)
+INC_SQLITE = $(INC_COMMON) -Ilib/sqlite3 -Ifs -Idrivers -Ilib -Ikernel
 
 ASM_STANDALONE = boot/boot_fat.asm boot/loader_fat.asm boot/boot_hdd.asm boot/loader_hdd.asm
 BIN_STANDALONE = $(ASM_STANDALONE:.asm=.bin)
@@ -75,6 +80,10 @@ C_KERNEL = \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c \
     lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
+
+# SQLite関連 (カーネル拡張域 0x18A000 に配置)
+C_SQLITE = lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_test.c
+C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
@@ -365,8 +374,18 @@ kapi/%.o: kapi/%.c kapi/kapi_generated.c
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
 
+# SQLite (カーネル拡張域配置 — -Os必須)
+lib/sqlite3/sqlite3.o: lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_config.h
+	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
+lib/sqlite3/os32_sqlite_vfs.o: lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_vfs.h lib/sqlite3/os32_sqlite_config.h
+	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
+lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_sqlite_vfs.h lib/sqlite3/os32_sqlite_config.h
+	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
 # === Targets ===
-all: boot kernel.bin images/os32_boot.d88 programs iso
+all: boot kernel.bin sqlite.bin images/os32_boot.d88 programs iso
 
 boot: $(BIN_STANDALONE)
 
@@ -376,11 +395,24 @@ boot: $(BIN_STANDALONE)
 %.o: %.asm
 	$(AS) -f elf32 $< -o $@
 
-kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ)
+kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ)
 	$(LD) $(LDFLAGS) -o $@ $^ -lgcc
 
 kernel.bin: kernel.elf
-	$(OBJCOPY) -O binary $< $@
+	$(OBJCOPY) -O binary \
+		--remove-section=.sqlite_text \
+		--remove-section=.sqlite_rodata \
+		--remove-section=.sqlite_data \
+		--remove-section=.sqlite_bss \
+		$< $@
+
+# SQLite 拡張域バイナリ (0x18A000 にロードされる)
+sqlite.bin: kernel.elf
+	$(OBJCOPY) -O binary \
+		--only-section=.sqlite_text \
+		--only-section=.sqlite_rodata \
+		--only-section=.sqlite_data \
+		$< $@
 
 # FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
@@ -653,6 +685,7 @@ iso: packages
 
 clean:
 	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libpyxel/*.o programs/libtilemap/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f lib/sqlite3/sqlite3.o lib/sqlite3/os32_sqlite_vfs.o sqlite.bin
 	rm -f packages/*.PKG images/os32_install.iso os32_boot.img os32_boot.d88
 	rm -rf images
 
