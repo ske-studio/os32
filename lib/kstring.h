@@ -26,8 +26,16 @@ char *kstrncat(char *dst, const char *src, u32 n);
 /* ======== libc互換シンボル ======== */
 /* GCC -ffreestanding でも構造体コピー等で memcpy/memset を暗黙に呼ぶ場合がある。 */
 /* リンクエラー防止のため、標準名のシンボルも提供する。                           */
+/* SQLite等の外部コードが暗黙に使用する libc 標準関数もここで提供。               */
 void *memcpy(void *dst, const void *src, u32 n);
 void *memset(void *dst, int val, u32 n);
 u32   strlen(const char *s);
+int   strcmp(const char *a, const char *b);
+int   strncmp(const char *a, const char *b, u32 n);
+int   memcmp(const void *a, const void *b, u32 n);
+void *memmove(void *dst, const void *src, u32 n);
+char *strchr(const char *s, int c);
+u32   strcspn(const char *s, const char *reject);
+u32   strspn(const char *s, const char *accept);
 
 #endif /* __KSTRING_H */

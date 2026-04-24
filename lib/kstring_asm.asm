@@ -8,9 +8,12 @@ global memset
 global kstrlen
 global strlen
 global kstrcmp
+global strcmp
 global kstrncmp
+global strncmp
 global kstrcpy
 global kstrncpy
+global memcmp
 
 ; ========================================================================
 ; void *kmemcpy(void *dst, const void *src, u32 n)
@@ -152,6 +155,7 @@ strlen:
 ; NUL終端の扱いが必要なため repe cmpsb 単体では不十分。
 ; 1バイトずつ比較するループを使用 (NUL チェック込み)。
 ; ========================================================================
+strcmp:
 kstrcmp:
     push ebp
     mov ebp, esp
@@ -190,6 +194,7 @@ kstrcmp:
 ;
 ; 最大nバイトまで比較。n==0 なら常に 0 を返す。
 ; ========================================================================
+strncmp:
 kstrncmp:
     push ebp
     mov ebp, esp
@@ -319,5 +324,61 @@ kstrncpy:
     pop ebx
     pop esi
     pop edi
+    pop ebp
+    ret
+
+; ========================================================================
+; int memcmp(const void *a, const void *b, u32 n)
+;
+; 2つのメモリ領域をnバイト比較。等しければ0、a<bなら負、a>bなら正。
+; ========================================================================
+memcmp:
+    push ebp
+    mov ebp, esp
+    push esi
+    push edi
+    cld
+
+    mov esi, [ebp+8]    ; a
+    mov edi, [ebp+12]   ; b
+    mov ecx, [ebp+16]   ; n
+
+    test ecx, ecx
+    jz .mc_equal        ; n==0: 常に等しい
+
+    ; DWORD単位で高速比較
+    mov edx, ecx
+    shr ecx, 2
+    jz .mc_bytes
+    repe cmpsd
+    jne .mc_diff_dword
+
+.mc_bytes:
+    mov ecx, edx
+    and ecx, 3
+    jz .mc_equal
+    repe cmpsb
+    jne .mc_diff_byte
+
+.mc_equal:
+    xor eax, eax
+    jmp .mc_done
+
+.mc_diff_dword:
+    ; 差異がDWORD内にあるので、4バイト戻してバイト単位で再比較
+    sub esi, 4
+    sub edi, 4
+    mov ecx, 4
+    repe cmpsb
+    ; フォールスルー
+
+.mc_diff_byte:
+    movzx eax, byte [esi-1]
+    movzx ecx, byte [edi-1]
+    sub eax, ecx
+
+.mc_done:
+    pop edi
+    pop esi
     pop ebp
     ret

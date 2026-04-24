@@ -43,3 +43,73 @@ char *kstrncat(char *dst, const char *src, u32 n)
     dst[dlen + i] = '\0';
     return dst;
 }
+
+/* ======================================================================== */
+/*  memmove — 重複領域対応メモリコピー                                       */
+/*  src と dst が重なっていても正しく動作する。                               */
+/* ======================================================================== */
+void *memmove(void *dst, const void *src, u32 n)
+{
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+
+    if (d == s || n == 0) return dst;
+
+    if (d < s) {
+        /* 前方コピー (memcpy と同じ) */
+        while (n--) *d++ = *s++;
+    } else {
+        /* 後方コピー (重複時に安全) */
+        d += n;
+        s += n;
+        while (n--) *--d = *--s;
+    }
+    return dst;
+}
+
+/* ======================================================================== */
+/*  strchr — 文字列中の文字検索                                              */
+/*  NUL終端文字自体も検索対象 (c=='\0' のとき末尾のNULを返す)                */
+/* ======================================================================== */
+char *strchr(const char *s, int c)
+{
+    char ch = (char)c;
+    while (*s) {
+        if (*s == ch) return (char *)s;
+        s++;
+    }
+    return (ch == '\0') ? (char *)s : (char *)0;
+}
+
+/* ======================================================================== */
+/*  strcspn — reject に含まれない先頭からの連続長を返す                      */
+/* ======================================================================== */
+u32 strcspn(const char *s, const char *reject)
+{
+    const char *p;
+    const char *r;
+    for (p = s; *p; p++) {
+        for (r = reject; *r; r++) {
+            if (*p == *r) return (u32)(p - s);
+        }
+    }
+    return (u32)(p - s);
+}
+
+/* ======================================================================== */
+/*  strspn — accept に含まれる先頭からの連続長を返す                         */
+/* ======================================================================== */
+u32 strspn(const char *s, const char *accept)
+{
+    const char *p;
+    const char *a;
+    int found;
+    for (p = s; *p; p++) {
+        found = 0;
+        for (a = accept; *a; a++) {
+            if (*p == *a) { found = 1; break; }
+        }
+        if (!found) return (u32)(p - s);
+    }
+    return (u32)(p - s);
+}
