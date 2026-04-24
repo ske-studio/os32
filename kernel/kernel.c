@@ -43,6 +43,7 @@
 #include "pipe_buffer.h"
 #include "snd_engine.h"
 #include "mouse.h"
+#include "os32_sqlite_vfs.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -319,6 +320,50 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* サウンドエンジン初期化 */
     snd_init();
+
+    /* SQLite 拡張域バイナリをロード → エンジン初期化 */
+    tvram_print(0, 4, "SQLite...", TATTR_GREEN);
+    {
+        extern u32 __sqlite_start;      /* リンカスクリプトから */
+        extern u32 __sqlite_data_end;   /* .sqlite_data 終端 */
+        extern u32 __sqlite_end;        /* .sqlite_bss 終端 */
+        u32 load_addr = (u32)&__sqlite_start;
+        u32 bss_addr  = (u32)&__sqlite_data_end;
+        u32 end_addr  = (u32)&__sqlite_end;
+        int sq_bytes;
+
+        kprintf(0x07, "[SQ] addr=%x bss=%x end=%x\n",
+                load_addr, bss_addr, end_addr);
+
+        sq_bytes = vfs_read(SYS_SQLITE_BIN,
+                            (void *)load_addr,
+                            472 * 1024);
+
+        kprintf(0x07, "[SQ] vfs_read=%d\n", sq_bytes);
+
+        if (sq_bytes > 0) {
+            /* .sqlite_bss をゼロクリア */
+            u32 bss_size = end_addr - bss_addr;
+            kprintf(0x07, "[SQ] memset %x sz=%d\n", bss_addr, bss_size);
+            memset((void *)bss_addr, 0, bss_size);
+            kprintf(0x07, "[SQ] memset OK\n");
+
+            {
+                int sq_rc;
+                kprintf(0x07, "[SQ] init...\n");
+                sq_rc = os32_sqlite_init();
+                kprintf(0x07, "[SQ] init rc=%d\n", sq_rc);
+                if (sq_rc == 0) {
+                    tvram_print(9, 4, "OK", TATTR_WHITE);
+                    os32_sqlite_test();
+                } else {
+                    tvram_print(9, 4, "ER", TATTR_RED);
+                }
+            }
+        } else {
+            tvram_print(9, 4, "--", TATTR_CYAN);
+        }
+    }
 
     /* 割り込み有効化 */
     tvram_print(71, 2, "IRQ_EN", TATTR_YELLOW);
