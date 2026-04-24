@@ -37,7 +37,43 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      28
+#define KAPI_VERSION      29
+
+/* ======================================================================== */
+/*  SQLite DB API 共有定数・構造体                                           */
+/* ======================================================================== */
+
+/* DB 最大接続数 */
+#define DB_MAX_CONNECTIONS    4
+
+/* DB結果ステータス */
+#define DB_STATUS_DONE     0    /* クエリ完了 (行なし or 最終行到達) */
+#define DB_STATUS_ROW      1    /* 行データあり (db_step で次を取得) */
+#define DB_STATUS_ERROR   (-1)  /* エラー発生 */
+
+/* DB カラム型 */
+#define DB_TYPE_INT        1
+#define DB_TYPE_FLOAT      2
+#define DB_TYPE_TEXT       3
+#define DB_TYPE_BLOB       4
+#define DB_TYPE_NULL       5
+
+/* IPC 共有メモリブロックサイズ (DB結果用) */
+#define DB_SHM_BLOCK_SIZE  (16 * 1024)
+
+/* DB_ResultHeader — db_exec/db_step 結果の先頭に配置 */
+typedef struct {
+    i32 status;         /* DB_STATUS_xxx */
+    i32 column_count;   /* 列数 (0 = 結果セットなし) */
+    i32 error_offset;   /* エラーメッセージのオフセット (0 = エラーなし) */
+} DB_ResultHeader;
+
+/* DB_ColumnInfo — 各カラムの型・サイズ・データ位置 */
+typedef struct {
+    i32 type;           /* DB_TYPE_xxx */
+    i32 length;         /* データサイズ (バイト) */
+    i32 data_offset;    /* 共有メモリ先頭からのデータ位置 */
+} DB_ColumnInfo;
 
 /* ======================================================================== */
 /*  システム共通制限値 (SSoT)                                                */

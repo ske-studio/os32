@@ -1,5 +1,5 @@
 {
-  "version": 28,
+  "version": 29,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -35,7 +35,8 @@
     "fd_redirect.h",
     "pipe_buffer.h",
     "snd_engine.h",
-    "mouse.h"
+    "mouse.h",
+    "kapi_db.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1043,6 +1044,48 @@
       "name": "mouse_cursor_hide",
       "ret": "void",
       "args": []
+    },
+    {
+      "name": "db_open",
+      "ret": "int",
+      "args": ["const char *path"],
+      "target": "kapi_db_open"
+    },
+    {
+      "name": "db_close",
+      "ret": "int",
+      "args": ["int handle"],
+      "target": "kapi_db_close"
+    },
+    {
+      "name": "db_exec",
+      "ret": "int",
+      "args": ["int handle", "const char *sql"],
+      "target": "kapi_db_exec"
+    },
+    {
+      "name": "db_prepare",
+      "ret": "int",
+      "args": ["int handle", "const char *sql"],
+      "target": "kapi_db_prepare"
+    },
+    {
+      "name": "db_step",
+      "ret": "int",
+      "args": ["int handle"],
+      "target": "kapi_db_step"
+    },
+    {
+      "name": "db_column_int",
+      "ret": "int",
+      "args": ["int handle", "int col"],
+      "target": "kapi_db_column_int"
+    },
+    {
+      "name": "db_column_text",
+      "ret": "const char *",
+      "args": ["int handle", "int col"],
+      "target": "kapi_db_column_text"
     }
   ]
 }

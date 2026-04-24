@@ -28,6 +28,7 @@
 #include "pipe_buffer.h"
 #include "snd_engine.h"
 #include "mouse.h"
+#include "kapi_db.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -725,5 +726,40 @@ void __cdecl wrap_mouse_cursor_show(void)
 void __cdecl wrap_mouse_cursor_hide(void)
 {
     mouse_cursor_hide();
+}
+
+int __cdecl wrap_db_open(const char *path)
+{
+    return kapi_db_open(path);
+}
+
+int __cdecl wrap_db_close(int handle)
+{
+    return kapi_db_close(handle);
+}
+
+int __cdecl wrap_db_exec(int handle, const char *sql)
+{
+    return kapi_db_exec(handle, sql);
+}
+
+int __cdecl wrap_db_prepare(int handle, const char *sql)
+{
+    return kapi_db_prepare(handle, sql);
+}
+
+int __cdecl wrap_db_step(int handle)
+{
+    return kapi_db_step(handle);
+}
+
+int __cdecl wrap_db_column_int(int handle, int col)
+{
+    return kapi_db_column_int(handle, col);
+}
+
+const char * __cdecl wrap_db_column_text(int handle, int col)
+{
+    return kapi_db_column_text(handle, col);
 }
 

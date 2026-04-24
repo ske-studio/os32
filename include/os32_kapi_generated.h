@@ -145,6 +145,13 @@ typedef struct {
     void (__cdecl *mouse_cursor_set_mode)(int mode);
     void (__cdecl *mouse_cursor_show)(void);
     void (__cdecl *mouse_cursor_hide)(void);
+    int (__cdecl *db_open)(const char *path);
+    int (__cdecl *db_close)(int handle);
+    int (__cdecl *db_exec)(int handle, const char *sql);
+    int (__cdecl *db_prepare)(int handle, const char *sql);
+    int (__cdecl *db_step)(int handle);
+    int (__cdecl *db_column_int)(int handle, int col);
+    const char * (__cdecl *db_column_text)(int handle, int col);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
