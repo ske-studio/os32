@@ -6,7 +6,7 @@
 |-------|------|------|
 | Phase 0 | 事前準備 (amalgamation生成, OMIT検証, コンパイル確認) | ✅ 完了 |
 | Phase 1 | カーネル統合基盤 (分離配置, VFS, メモリDB動作確認) | ✅ 完了 |
-| Phase 2 | KAPI + IPC レイヤー (kapi_db, libos32db, db_test) | 🔲 次 |
+| Phase 2 | KAPI + IPC レイヤー (kapi_db, libos32db, db_test) | 🔧 ビルド完了・テスト待ち |
 | Phase 3 | 堅牢化 (exec_exit連携, fsync, エッジケース) | 🔲 未着手 |
 
 ---
@@ -93,7 +93,7 @@
 1. `vfs_read("/sys/sqlite.bin", 0x18A000, 472KB)` — バイナリロード
 2. `.sqlite_bss` ゼロクリア (`__sqlite_data_end` ～ `__sqlite_end`)
 3. `os32_sqlite_init()` — `sqlite3_config(MEMSYS5)` + `sqlite3_initialize()`
-4. `os32_sqlite_test()` — メモリDB CRUD テスト
+4. `os32_sqlite_test()` — メモリDB CRUD テスト (SQLITE_BOOT_TEST 時のみ)
 
 ### 1.5 動作確認テスト ✅
 
@@ -134,17 +134,15 @@
 
 ---
 
-## Phase 2: KAPI + IPC レイヤー 🔲 次
+## Phase 2: KAPI + IPC レイヤー 🔧 ビルド完了・テスト待ち
 
-### 2.0 事前作業: テストコードの整理
+### 2.0 事前作業: テストコードの整理 ✅
 
-- [ ] `os32_sqlite_test()` をブート時実行から除外 (条件付きに変更)
-- [ ] ファイル DB テスト (ext2 上の永続 DB) の実施
+- [x] `os32_sqlite_test()` をブート時実行から除外 (`#ifdef SQLITE_BOOT_TEST` ガード)
 
-### 2.1 kapi_db.c 実装
+### 2.1 kapi_db.c 実装 ✅
 
-外部プログラムは KAPI 関数テーブル経由で SQLite を操作する。
-カーネル内に DB 接続スロット (最大4個) を管理。
+`kapi/kapi_db.c` — DB接続スロット管理 + KAPI ラッパー:
 
 ```
 外部プログラム                カーネル
@@ -162,33 +160,85 @@ db_close(0)            ───→  kapi_db_close()
 | 関数名 | プロトタイプ | 説明 |
 |--------|-------------|------|
 | `db_open` | `int(const char *path)` | DB オープン → ハンドル (-1=失敗) |
-| `db_close` | `void(int handle)` | DB + ステートメント クローズ |
+| `db_close` | `int(int handle)` | DB + ステートメント クローズ |
 | `db_exec` | `int(int handle, const char *sql)` | 結果不要の SQL 実行 |
-| `db_prepare` | `int(int handle, const char *sql)` | プリペアドステートメント作成 |
-| `db_step` | `int(int handle)` | ステートメント実行 (ROW/DONE) |
+| `db_prepare` | `int(int handle, const char *sql)` | クエリ準備 + 最初の行取得 |
+| `db_step` | `int(int handle)` | 次の行を取得 (ROW/DONE) |
 | `db_column_int` | `int(int handle, int col)` | カラム値取得 (整数) |
 | `db_column_text` | `const char *(int handle, int col)` | カラム値取得 (文字列) |
 
-### 2.2 kapi.json 更新
+**共有メモリ IPC プロトコル:**
+
+`db_prepare()` / `db_step()` 呼び出し後、`MEM_SHM_BASE` (0x201000) に以下の構造で結果が書き込まれる:
+
+```
++0x0000  DB_ResultHeader (12 bytes)
+         status / column_count / error_offset
++0x000C  DB_ColumnInfo[0..N] (各12 bytes)
+         type / length / data_offset
++0x????  データ領域
+         INT: 4バイト, TEXT: NUL終端文字列, etc.
+```
+
+### 2.2 kapi.json 更新 ✅
 
 - `version`: 28 → 29
 - `includes` に `"kapi_db.h"` を追加
 - `api` に DB 関連 7 関数を追加
-- `make clean` → `make all` で全プログラム再ビルド
 
-### 2.3 libos32db (ユーザー空間ライブラリ)
+### 2.3 os32_kapi_shared.h 更新 ✅
 
-`programs/libos32db/libos32db.h` — `api->db_open()` 等を呼ぶシンラッパー。
+- `KAPI_VERSION` を 29 に更新
+- DB API 共有定数 (`DB_STATUS_*`, `DB_TYPE_*`, `DB_MAX_CONNECTIONS`, `DB_SHM_BLOCK_SIZE`) を追加
+- `DB_ResultHeader` / `DB_ColumnInfo` 構造体を追加
 
-### 2.4 db_test.c (テストプログラム)
+### 2.4 exec_exit() 統合 ✅
 
-KAPI 経由で `CREATE TABLE` / `INSERT` / `SELECT` の一連の動作を確認。
+`exec/exec.c` の `exec_exit()` クリーンアップシーケンスに `db_cleanup_all()` を追加:
+
+```
+(1) FD リダイレクト解除
+(2) 全オープン FD クローズ
+(3) パイプバッファ解放
+(4) 共有メモリ解放
+(5) サウンドエンジンクリーンアップ
+(6) ★ SQLite DB リソースクリーンアップ  ← Phase 2 で追加
+```
+
+### 2.5 libos32db (ユーザー空間ライブラリ) ✅
+
+`programs/libos32db/`:
+- `libos32db.h` — 外部プログラム向け API ヘッダ
+- `libos32db.c` — KAPI 呼び出し + 共有メモリ直接参照
+
+### 2.6 db_test.c (テストプログラム) ✅
+
+`programs/tests/db_test.c` — 3つのテストケース:
+
+| テスト | 内容 |
+|--------|------|
+| Test 1: Memory DB CRUD | `:memory:` で CREATE/INSERT×3/SELECT/close |
+| Test 2: Multiple Connections | 2つの独立したメモリDB同時接続 |
+| Test 3: Error Handling | 不正テーブル/不正SQL/不正ハンドル |
+
+### 2.7 ビルド結果 ✅
+
+| 成果物 | サイズ | 状態 |
+|--------|--------|------|
+| `kernel.bin` | 97KB | ✅ ビルド成功 (kapi_db.c リンク含む) |
+| `sqlite.bin` | 373KB | ✅ 変更なし |
+| `programs/tests/db_test.bin` | 6KB (api>=29) | ✅ ビルド成功 |
+
+### 2.8 残作業
+
+- [ ] **NP21/W 再起動 → hsync → `db_test` 実行で動作検証**
+- [ ] ファイル DB テスト (`/db/test.db`) の実施 (Phase 3 に移行可)
 
 ---
 
 ## Phase 3: 堅牢化 🔲 未着手
 
-- [ ] `exec_exit()` クリーンアップ統合 (`db_cleanup_all()`)
+- [x] `exec_exit()` クリーンアップ統合 (`db_cleanup_all()`) — Phase 2 で実装済み
 - [ ] fsync 実装確認 (INSERT → 電源断 → 再起動 → SELECT)
 - [ ] エッジケーステスト (NOMEM, 二重close, 不正パス)
 - [ ] deploy.yaml 更新 (`/db/` ディレクトリ作成)
@@ -223,11 +273,11 @@ KAPI 経由で `CREATE TABLE` / `INSERT` / `SELECT` の一連の動作を確認�
 | `lib/sqlite3/os32_sqlite_vfs.h` | VFS ヘッダ | 1 ✅ |
 | `lib/sqlite3/os32_sqlite_test.c` | カーネル内テスト | 1 ✅ |
 | `build/os32.ld` | リンカスクリプト (SQLite分離配置) | 1 ✅ |
-| `kapi/kapi_db.c` | KAPI ラッパー | 2 🔲 |
-| `kapi/kapi_db.h` | KAPI DB ヘッダ | 2 🔲 |
-| `programs/libos32db/libos32db.h` | ユーザー空間ライブラリ | 2 🔲 |
-| `programs/libos32db/libos32db.c` | ユーザー空間ライブラリ | 2 🔲 |
-| `programs/tests/db_test.c` | KAPI経由テストプログラム | 2 🔲 |
+| `kapi/kapi_db.h` | KAPI DB ヘッダ | 2 ✅ |
+| `kapi/kapi_db.c` | KAPI ラッパー (DB接続スロット管理) | 2 ✅ |
+| `programs/libos32db/libos32db.h` | ユーザー空間ライブラリ ヘッダ | 2 ✅ |
+| `programs/libos32db/libos32db.c` | ユーザー空間ライブラリ 実装 | 2 ✅ |
+| `programs/tests/db_test.c` | KAPI経由テストプログラム | 2 ✅ |
 
 ---
 
@@ -237,9 +287,9 @@ KAPI 経由で `CREATE TABLE` / `INSERT` / `SELECT` の一連の動作を確認�
 |-------|------|------|
 | Phase 0: 事前準備 | ✅ 完了 | — |
 | Phase 1: カーネル統合基盤 | ✅ 完了 (2セッション) | — |
-| Phase 2: KAPI + IPC | 3-5日 | 3-5日 |
-| Phase 3: 堅牢化 | 2-3日 | 5-8日 |
-| **合計** | | **5-8日** |
+| Phase 2: KAPI + IPC | ✅ ビルド完了 (1セッション) | — |
+| Phase 3: 堅牢化 | 2-3日 | 2-3日 |
+| **合計** | | **2-3日** |
 
 ---
 
@@ -247,7 +297,7 @@ KAPI 経由で `CREATE TABLE` / `INSERT` / `SELECT` の一連の動作を確認�
 
 ### 中優先度
 
-- [ ] **`db_exec_bind()` — プリペアドステートメント + バインド変数**
+- [ ] **`db_read_blob()` — 巨大BLOB分割読み込み**
 - [ ] **ext2 truncate 実装** (`VACUUM`, `journal_mode=TRUNCATE`)
 - [ ] **kprintf va_args 問題の調査** (`.sqlite_text` からの呼び出し)
 
@@ -259,4 +309,4 @@ KAPI 経由で `CREATE TABLE` / `INSERT` / `SELECT` の一連の動作を確認�
 
 ---
 
-*Implementation Phases — 2026-04-24 Phase 1 完了, Phase 2 設計確定*
+*Implementation Phases — 2026-04-24 Phase 2 ビルド完了, テスト待ち*
