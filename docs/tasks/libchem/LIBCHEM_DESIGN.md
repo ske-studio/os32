@@ -343,24 +343,26 @@ PC-98 の限られたメモリ環境でも十分に収まるサイズ。
 
 ### Phase 1: コアエンジン
 
-- [ ] `libos32chem.h` ヘッダ作成 (型定義, 定数, 全API宣言)
-- [ ] `chem_core.c` 実装 (init/shutdown, DBキャッシュ, オブジェクト配列)
-- [ ] `chem_react.c` 実装 (反応ルール検索, アクション適用)
-- [ ] `chem_update.c` 実装 (温度更新, 状態遷移)
-- [ ] Makefile 統合 (`LIBCHEM_OBJ`, リンク順序)
-- [ ] ビルド確認
+- [x] `libos32chem.h` ヘッダ作成 (型定義, 定数, 全API宣言)
+- [x] `chem_core.c` 実装 (init/shutdown, DBキャッシュ, オブジェクト配列)
+- [x] `chem_react.c` 実装 (反応ルール検索, アクション適用)
+- [x] `chem_update.c` 実装 (温度更新, 状態遷移)
+- [x] `chem_query.c` 実装 (nearby検索, 範囲攻撃, カウント)
+- [x] Makefile 統合 (`LIBCHEM_OBJ`, リンク順序)
+- [x] `chem_test.c` テストプログラム (8テスト)
+- [x] ビルド確認 (警告なし, 13.6KB)
 
 ### Phase 2: マスターデータ + テスト
 
-- [ ] `tools/chem_db_init.py` 実装 (サンプルルール投入)
-- [ ] `chem_test.c` 実装 (ルールキャッシュ, 反応テスト, 温度遷移テスト)
-- [ ] deploy.yaml にDB/テスト登録
-- [ ] NP21/W実機テスト
+- [x] `tools/chem_db_init.py` 実装 (13反応ルール, 5状態遷移, 10テンプレート)
+- [x] `chem_test.c` 拡充 (Test 9-11: DBキャッシュ, 反応テスト, 温度遷移テスト)
+- [x] deploy.yaml にDB (`/db/chem.db`) / テスト (`chem_test.bin`) 登録
+- [x] NP21/W実機テスト (71/71 全テストパス)
 
 ### Phase 3: 高度な機能
 
-- [ ] `chem_query.c` 実装 (nearby検索, コールバック)
-- [ ] `chem_apply_area()` 実装 (範囲攻撃/爆発)
+- [x] `chem_query.c` 実装 (nearby検索, コールバック) — Phase 1で先行実装
+- [x] `chem_apply_area()` 実装 (範囲攻撃/爆発) — Phase 1で先行実装
 - [ ] 伝播制御 (SPREAD アクションの再帰深度制限)
 - [ ] デモプログラム (ビジュアル付き化学エンジンデモ)
 
