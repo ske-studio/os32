@@ -8,8 +8,8 @@
 
 #include "libos32db.h"
 
-/* 共有メモリベースアドレス (カーネル側と一致) */
-#define DB_SHM_PTR   ((u8 *)0x201000)
+/* 共有メモリベースアドレス (memmap.h MEM_SHM_BASE と一致させること) */
+#define DB_SHM_PTR   ((u8 *)0x381000)
 
 /* API テーブルへのポインタ (crt0_c.c で定義される) */
 extern KernelAPI *kapi;
@@ -46,6 +46,11 @@ int db_query(db_handle_t h, const char *sql)
 int db_step(db_handle_t h)
 {
     return api->db_step(h);
+}
+
+int db_finalize(db_handle_t h)
+{
+    return api->db_finalize(h);
 }
 
 /* ======================================================================== */
@@ -100,6 +105,17 @@ int db_column_bytes(int col)
     return (int)info->length;
 }
 
+const void *db_column_blob(int col)
+{
+    DB_ResultHeader *hdr = (DB_ResultHeader *)DB_SHM_PTR;
+    DB_ColumnInfo *info;
+    if (col < 0 || col >= (int)hdr->column_count) return (const void *)0;
+    info = (DB_ColumnInfo *)(DB_SHM_PTR + sizeof(DB_ResultHeader)
+                             + (u32)col * sizeof(DB_ColumnInfo));
+    if (info->data_offset == 0) return (const void *)0;
+    return (const void *)(DB_SHM_PTR + info->data_offset);
+}
+
 /* ======================================================================== */
 /*  エラー情報                                                               */
 /* ======================================================================== */
@@ -109,4 +125,14 @@ const char *db_errmsg(void)
     DB_ResultHeader *hdr = (DB_ResultHeader *)DB_SHM_PTR;
     if (hdr->error_offset == 0) return "no error";
     return (const char *)(DB_SHM_PTR + hdr->error_offset);
+}
+
+const char *db_last_error(db_handle_t h)
+{
+    return api->db_last_error(h);
+}
+
+u32 db_mem_used(void)
+{
+    return api->db_mem_used();
 }
