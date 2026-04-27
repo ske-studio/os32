@@ -14,6 +14,7 @@
 #include "sqlite3.h"
 #include "kstring.h"
 #include "kprintf.h"
+#include "os32_sqlite_vfs.h"
 #include "memmap.h"
 
 /* kapi_db.c はリンカスクリプトで EXCLUDE_FILE に含まれていないため、
@@ -207,6 +208,9 @@ int __cdecl kapi_db_open(const char *path)
         return -1;
     }
 
+    /* ジャーナルモード設定 (ファイルDB のクラッシュリカバリ用) */
+    sqlite3_exec(db_slots[i].db, "PRAGMA journal_mode=DELETE", 0, 0, 0);
+
     db_slots[i].in_use = 1;
     db_slots[i].active_stmt = (sqlite3_stmt *)0;
     return i;
@@ -233,6 +237,7 @@ int __cdecl kapi_db_exec(int handle, const char *sql)
 {
     DbSlot *slot = slot_get(handle);
     DB_ResultHeader *hdr = (DB_ResultHeader *)DB_SHM_PTR;
+    sqlite3_stmt *stmt = (sqlite3_stmt *)0;
     int rc;
 
     if (!slot) {
@@ -250,9 +255,22 @@ int __cdecl kapi_db_exec(int handle, const char *sql)
     kstrncpy(sql_copy_buf, sql, SQL_COPY_BUF_SIZE - 1);
     sql_copy_buf[SQL_COPY_BUF_SIZE - 1] = '\0';
 
-    rc = sqlite3_exec(slot->db, sql_copy_buf, 0, 0, 0);
 
-    if (rc != SQLITE_OK) {
+
+    /* prepare */
+    rc = sqlite3_prepare_v2(slot->db, sql_copy_buf, -1, &stmt, 0);
+    if (rc != SQLITE_OK || !stmt) {
+        kprintf(0x04, "[DB] prepare fail rc=%d\n", rc);
+        shm_write_error(slot);
+        return -1;
+    }
+
+    /* step */
+    rc = sqlite3_step(stmt);
+
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         shm_write_error(slot);
         return -1;
     }
@@ -370,11 +388,30 @@ const char * __cdecl kapi_db_column_text(int handle, int col)
     return (const char *)(DB_SHM_PTR + info->data_offset);
 }
 
+/* ステートメント手動 finalize — 結果セット途中放棄時に使用 */
+/* db_step(DONE) 時は自動 finalize されるため、通常は不要 */
+/* 戻り値: 0=成功, -1=失敗 */
+int __cdecl kapi_db_finalize(int handle)
+{
+    DbSlot *slot = slot_get(handle);
+    if (!slot) return -1;
+    if (slot->active_stmt) {
+        sqlite3_finalize(slot->active_stmt);
+        slot->active_stmt = (sqlite3_stmt *)0;
+    }
+    return 0;
+}
+
 const char * __cdecl kapi_db_last_error(int handle)
 {
     DbSlot *slot = slot_get(handle);
     if (!slot || !slot->db) return "invalid handle";
     return sqlite3_errmsg(slot->db);
+}
+
+u32 __cdecl kapi_db_mem_used(void)
+{
+    return (u32)sqlite3_memory_used();
 }
 
 /* ======================================================================== */

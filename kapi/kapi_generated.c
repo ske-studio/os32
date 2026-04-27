@@ -763,3 +763,18 @@ const char * __cdecl wrap_db_column_text(int handle, int col)
     return kapi_db_column_text(handle, col);
 }
 
+int __cdecl wrap_db_finalize(int handle)
+{
+    return kapi_db_finalize(handle);
+}
+
+const char * __cdecl wrap_db_last_error(int handle)
+{
+    return kapi_db_last_error(handle);
+}
+
+u32 __cdecl wrap_db_mem_used(void)
+{
+    return kapi_db_mem_used();
+}
+

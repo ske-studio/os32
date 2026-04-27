@@ -3,6 +3,9 @@
 /*                                                                          */
 /*  外部プログラムが KAPI テーブル経由で呼ぶ DB 操作関数のプロトタイプ。       */
 /*  カーネル内に DB 接続スロット (最大 DB_MAX_CONNECTIONS) を管理する。        */
+/*                                                                          */
+/*  制約:                                                                   */
+/*    - SQL 文字列は最大 1024 バイト (SQL_COPY_BUF_SIZE)。超過分は切り捨て。 */
 /* ======================================================================== */
 
 #ifndef KAPI_DB_H
@@ -37,8 +40,17 @@ int __cdecl kapi_db_column_int(int handle, int col);
 /* カラム値取得 (文字列) — 共有メモリのデータ領域へのポインタを返す */
 const char * __cdecl kapi_db_column_text(int handle, int col);
 
-/* 直前のエラーメッセージ取得 — 共有メモリにコピーして返す */
+/* ステートメント手動 finalize — 結果セット途中放棄時に使用 */
+/* db_step(DONE) 時は自動 finalize されるため、通常は不要 */
+/* 戻り値: 0=成功, -1=失敗 */
+int __cdecl kapi_db_finalize(int handle);
+
+/* 直前のエラーメッセージ取得 — sqlite3_errmsg() を直接返す */
 const char * __cdecl kapi_db_last_error(int handle);
+
+/* MEMSYS5 メモリ使用量取得 (デバッグ・モニタリング用) */
+/* 戻り値: sqlite3_memory_used() の値 (バイト単位) */
+u32 __cdecl kapi_db_mem_used(void);
 
 /* プログラム終了時のリソースクリーンアップ (exec_exit から呼ばれる) */
 void db_cleanup_all(void);

@@ -145,9 +145,12 @@ extern int __cdecl wrap_db_prepare(int handle, const char *sql);
 extern int __cdecl wrap_db_step(int handle);
 extern int __cdecl wrap_db_column_int(int handle, int col);
 extern const char * __cdecl wrap_db_column_text(int handle, int col);
+extern int __cdecl wrap_db_finalize(int handle);
+extern const char * __cdecl wrap_db_last_error(int handle);
+extern u32 __cdecl wrap_db_mem_used(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 29;
+kapi->version = 31;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -296,4 +299,7 @@ kapi->version = 29;
     kapi->db_step = wrap_db_step;
     kapi->db_column_int = wrap_db_column_int;
     kapi->db_column_text = wrap_db_column_text;
+    kapi->db_finalize = wrap_db_finalize;
+    kapi->db_last_error = wrap_db_last_error;
+    kapi->db_mem_used = wrap_db_mem_used;
     kapi->sbrk_heap_limit = 0;

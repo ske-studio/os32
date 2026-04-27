@@ -1,5 +1,5 @@
 {
-  "version": 29,
+  "version": 31,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1086,6 +1086,24 @@
       "ret": "const char *",
       "args": ["int handle", "int col"],
       "target": "kapi_db_column_text"
+    },
+    {
+      "name": "db_finalize",
+      "ret": "int",
+      "args": ["int handle"],
+      "target": "kapi_db_finalize"
+    },
+    {
+      "name": "db_last_error",
+      "ret": "const char *",
+      "args": ["int handle"],
+      "target": "kapi_db_last_error"
+    },
+    {
+      "name": "db_mem_used",
+      "ret": "u32",
+      "args": [],
+      "target": "kapi_db_mem_used"
     }
   ]
 }
