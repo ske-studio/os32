@@ -134,6 +134,9 @@ filesystem:
     - host: programs/tests/db_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/math_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
