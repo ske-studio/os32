@@ -318,10 +318,10 @@ if (dist_sq < radii * radii) { /* 衝突 */ }
 
 ### Phase 4: 既存ライブラリ統合
 
-- [ ] `libos32gfx/draw/gfx_rotate.c` の数値計算を libos32math に移行
-- [ ] `libpyxel` での利用検証
-- [ ] `libos32snd` での利用検証 (FM音源エンベロープ等)
-- [ ] ドキュメント更新 (05_drivers.md, INDEX.md)
+- [x] `libos32gfx/draw/gfx_rotate.c` の数値計算を libos32math に移行
+- [x] `libpyxel` での利用検証 (現時点で数学関数未使用、インクルードパス設定済み)
+- [x] `libos32snd` での利用検証 (現時点で数学関数未使用、インクルードパス設定済み)
+- [x] ドキュメント更新 (05_drivers.md §5-8追加, INDEX.md 既存)
 
 ---
 
