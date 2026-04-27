@@ -103,11 +103,11 @@ memset:
     ; DWORD単位の書き込み
     push ecx
     shr ecx, 2
-    jz .do_bytes_recover
+    jz .ms_pop_recover      ; ECX>>2==0 でも pop ecx を必ず通過させる
     rep stosd
-    pop ecx
 
-.do_bytes_recover:
+.ms_pop_recover:
+    pop ecx                 ; push ecx と対になる pop (常に実行)
     and ecx, 3
     jz .done
 
