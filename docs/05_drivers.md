@@ -146,7 +146,7 @@ CPU直接描画＋バックバッファ方式。カーネル層 (`gfx/`) はバ�
 | `gfx_kcg.c` | KCGフォント読み出し (ANK/漢字) |
 | `gfx_circle.c` | 円/楕円/円弧/太線円の描画 |
 | `gfx_bezier.c` | ベジェ曲線 (2次/3次/太線、de Casteljau整数演算) |
-| `gfx_math.c` | 整数sin/cos LUT (512分割、15bit固定小数点) |
+| `gfx_math.c` | 整数sin/cos 互換ラッパー (実体は libos32math/trig.c) |
 | `gfx_raster.c` | ラスタパレット管理 (clear, add, present) |
 | `gfx_dump.c` | VRAM＋パレットのBMPダンプ出力 |
 | `gfx_util.asm` | NASM高速ユーティリティ (memcpy/memset最適化等) |
@@ -205,5 +205,38 @@ PC-98バスマウスおよびNP21/Wシームレスマウスに対応するポー
 | `mouse_cursor_hide()` | カーソル非表示 (画面更新時のhide/showパターン) |
 
 TEXTモードではTVRAM属性反転 (ビット2 XOR) によるカーソル表示を行う。漢字2セル境界を自動検出し、左半分から反転する。
+
+---
+
+### §5-8 整数数学ライブラリ (libos32math)
+
+FPU非依存の整数数学ライブラリ。KernelAPIへの依存なし。純粋C89整数演算のみで構成され、外部プログラムライブラリ群の最も基底に位置する。
+
+| モジュール | 説明 |
+|------------|------|
+| `fix16.c` | Q16.16固定小数点四則演算 (64bit中間値でオーバーフロー防止) |
+| `trig.c` | sin/cos LUT (512エントリ, 15bit精度, 値域 -32767～+32767) |
+| `sqrt.c` | 整数平方根 (ニュートン法) + 高速距離近似 (α-max-plus-β-min) |
+| `atan2.c` | CORDIC方式整数atan2 (8回反復, シフト+加算のみ) |
+| `recip.c` | 逆数LUT 257エントリ (b=1～256の高速除算) |
+| `random.c` | xorshift32擬似乱数 (周期 2^32-1) |
+| `vec2.c` | 2Dベクトル演算 (Q16.16ベース, 12関数) |
+| `lerp.c` | 線形補間 + 7種イージング関数 |
+
+**依存関係**:
+
+```
+libos32math  (依存なし — 最も基底のライブラリ)
+     ↑
+     ├── libos32gfx   (math + KAPI)
+     ├── libos32snd   (math + KAPI)
+     ├── libtilemap   (math + gfx)
+     ├── libpyxel     (math + gfx)
+     └── ゲーム本体    (math + 任意のlib)
+```
+
+**リソース使用量**: 合計約4KB (コード~1.6KB + LUTデータ~2.3KB)。
+
+詳細は [LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) を参照。
 
 ---
