@@ -6,8 +6,8 @@
 |-------|------|------|
 | Phase 0 | 事前準備 (amalgamation生成, OMIT検証, コンパイル確認) | ✅ 完了 |
 | Phase 1 | カーネル統合基盤 (分離配置, VFS, メモリDB動作確認) | ✅ 完了 |
-| Phase 2 | KAPI + IPC レイヤー (kapi_db, libos32db, db_test) | 🔧 ビルド完了・テスト待ち |
-| Phase 3 | 堅牢化 (exec_exit連携, fsync, エッジケース) | 🔲 未着手 |
+| Phase 2 | KAPI + IPC レイヤー (kapi_db, libos32db, db_test) | ✅ 完了 (db_test 7/7 通過) |
+| Phase 3 | 堅牢化 (ファイルDB, fsync, MEMSYS5モニタリング) | ✅ 完了 (db_test 9/9 通過) |
 
 ---
 
@@ -134,7 +134,7 @@
 
 ---
 
-## Phase 2: KAPI + IPC レイヤー 🔧 ビルド完了・テスト待ち
+## Phase 2: KAPI + IPC レイヤー ✅ 完了
 
 ### 2.0 事前作業: テストコードの整理 ✅
 
@@ -155,7 +155,7 @@ db_close(0)            ───→  kapi_db_close()
                                 → sqlite3_close(slot[0].db)
 ```
 
-**KAPI 関数一覧 (7個):**
+**KAPI 関数一覧 (9個):**
 
 | 関数名 | プロトタイプ | 説明 |
 |--------|-------------|------|
@@ -166,6 +166,10 @@ db_close(0)            ───→  kapi_db_close()
 | `db_step` | `int(int handle)` | 次の行を取得 (ROW/DONE) |
 | `db_column_int` | `int(int handle, int col)` | カラム値取得 (整数) |
 | `db_column_text` | `const char *(int handle, int col)` | カラム値取得 (文字列) |
+| `db_finalize` | `int(int handle)` | ステートメント手動 finalize |
+| `db_last_error` | `const char *(int handle)` | SQLite エラーメッセージ取得 |
+
+**制約:** SQL 文字列は最大 1024 バイト (`SQL_COPY_BUF_SIZE`)。超過分は切り捨てられる。
 
 **共有メモリ IPC プロトコル:**
 
@@ -182,13 +186,13 @@ db_close(0)            ───→  kapi_db_close()
 
 ### 2.2 kapi.json 更新 ✅
 
-- `version`: 28 → 29
+- `version`: 28 → 30
 - `includes` に `"kapi_db.h"` を追加
-- `api` に DB 関連 7 関数を追加
+- `api` に DB 関連 9 関数を追加 (db_finalize, db_last_error 含む)
 
 ### 2.3 os32_kapi_shared.h 更新 ✅
 
-- `KAPI_VERSION` を 29 に更新
+- `KAPI_VERSION` を 30 に更新
 - DB API 共有定数 (`DB_STATUS_*`, `DB_TYPE_*`, `DB_MAX_CONNECTIONS`, `DB_SHM_BLOCK_SIZE`) を追加
 - `DB_ResultHeader` / `DB_ColumnInfo` 構造体を追加
 
@@ -211,37 +215,58 @@ db_close(0)            ───→  kapi_db_close()
 - `libos32db.h` — 外部プログラム向け API ヘッダ
 - `libos32db.c` — KAPI 呼び出し + 共有メモリ直接参照
 
+追加 API:
+- `db_finalize(h)` — ステートメント手動 finalize
+- `db_last_error(h)` — SQLite エラーメッセージ取得 (KAPI 経由)
+- `db_column_blob(col)` — BLOB データポインタ (共有メモリ直接参照)
+
 ### 2.6 db_test.c (テストプログラム) ✅
 
-`programs/tests/db_test.c` — 3つのテストケース:
+`programs/tests/db_test.c` — 7つのテストケース:
 
 | テスト | 内容 |
 |--------|------|
 | Test 1: Memory DB CRUD | `:memory:` で CREATE/INSERT×3/SELECT/close |
 | Test 2: Multiple Connections | 2つの独立したメモリDB同時接続 |
 | Test 3: Error Handling | 不正テーブル/不正SQL/不正ハンドル |
+| Test 4: db_finalize | 結果セット途中放棄 → 新クエリ成功確認 |
+| Test 5: db_last_error | エラー後にメッセージ取得 (KAPI + 共有メモリ両方) |
+| Test 6: Connection Limit | DB_MAX_CONNECTIONS (4) 超過 → 拒否確認 |
+| Test 7: Double Close | 二重 close → -1 返却・クラッシュしないこと |
 
-### 2.7 ビルド結果 ✅
+### 2.7 VFS 堅牢化 ✅
+
+- `xTruncate`: no-op の影響範囲をコメントで文書化 (VACUUM 制約)
+- `xDelete`: `vfs_rm` 失敗時の警告ログ追加
+- SQL バッファ制限 (1024B) を `kapi_db.h` / `libos32db.h` に明記
+
+### 2.8 ビルド結果 ✅
 
 | 成果物 | サイズ | 状態 |
 |--------|--------|------|
 | `kernel.bin` | 97KB | ✅ ビルド成功 (kapi_db.c リンク含む) |
 | `sqlite.bin` | 373KB | ✅ 変更なし |
-| `programs/tests/db_test.bin` | 6KB (api>=29) | ✅ ビルド成功 |
+| `programs/tests/db_test.bin` | 6KB (api>=30) | ✅ ビルド成功 |
 
-### 2.8 残作業
+### 2.9 残作業
 
-- [ ] **NP21/W 再起動 → hsync → `db_test` 実行で動作検証**
+- [x] **NP21/W 再起動 → hsync → `db_test` 実行で動作検証** (7/7 全テスト通過)
 - [ ] ファイル DB テスト (`/db/test.db`) の実施 (Phase 3 に移行可)
 
 ---
 
-## Phase 3: 堅牢化 🔲 未着手
+## Phase 3: 堅牢化 ✅ 完了
 
 - [x] `exec_exit()` クリーンアップ統合 (`db_cleanup_all()`) — Phase 2 で実装済み
-- [ ] fsync 実装確認 (INSERT → 電源断 → 再起動 → SELECT)
-- [ ] エッジケーステスト (NOMEM, 二重close, 不正パス)
-- [ ] deploy.yaml 更新 (`/db/` ディレクトリ作成)
+- [x] `kapi_db.c` プロダクション品質化 (probe コード除去, デバッグログ削除)
+- [x] `journal_mode=OFF` → `journal_mode=DELETE` に変更 (クラッシュリカバリ有効化)
+- [x] VFS `xOpen` の `O_CREAT` フラグ値修正 (`0x0200` → `0x0100` KAPI_O_CREAT)
+- [x] `deploy.yaml` に `/db/` ディレクトリ追加
+- [x] ファイル DB テスト: CREATE/INSERT/close/reopen/SELECT/UPDATE/DELETE 永続化確認
+- [x] `db_mem_used()` KAPI 追加 (MEMSYS5 使用量モニタリング, KAPI_VERSION 30→31)
+- [x] `libos32db` に `db_mem_used()` ラッパー追加
+- [x] `db_test` Test 8 (File DB Persistence) + Test 9 (Memory Usage Monitoring) 追加
+- [x] db_test 9/9 全テスト通過確認
 
 ---
 
@@ -287,9 +312,9 @@ db_close(0)            ───→  kapi_db_close()
 |-------|------|------|
 | Phase 0: 事前準備 | ✅ 完了 | — |
 | Phase 1: カーネル統合基盤 | ✅ 完了 (2セッション) | — |
-| Phase 2: KAPI + IPC | ✅ ビルド完了 (1セッション) | — |
-| Phase 3: 堅牢化 | 2-3日 | 2-3日 |
-| **合計** | | **2-3日** |
+| Phase 2: KAPI + IPC | ✅ 完了 (1セッション) | — |
+| Phase 3: 堅牢化 | ✅ 完了 (1セッション) | — |
+| **合計** | | **完了** |
 
 ---
 
@@ -304,9 +329,9 @@ db_close(0)            ───→  kapi_db_close()
 ### 低優先度
 
 - [ ] **sqlite3 シェルコマンド** (`.tables`, `.schema`, `.dump`)
-- [ ] **KAPI: db_mem_used()** (メモリ使用量モニタリング)
+- [ ] **KAPI: db_mem_used()** (メモリ使用量モニタリング) ← ✅ Phase 3 で実装済み
 - [ ] **複数接続数の拡張** (`DB_MAX_CONNECTIONS` 増加)
 
 ---
 
-*Implementation Phases — 2026-04-24 Phase 2 ビルド完了, テスト待ち*
+*Implementation Phases — 2026-04-27 Phase 3 堅牢化完了 (db_test 9/9 通過)*

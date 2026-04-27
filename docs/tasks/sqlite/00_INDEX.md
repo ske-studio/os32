@@ -12,6 +12,7 @@ OS32 カーネルへの SQLite 3.53.0 統合プロジェクトの設計・実装
 | 04 | [KAPI_IPC.md](04_KAPI_IPC.md) | KernelAPI 拡張 + 共有メモリ IPC プロトコル |
 | 05 | [CLEANUP_SAFETY.md](05_CLEANUP_SAFETY.md) | リソースクリーンアップ・異常系対策・fsync |
 | 06 | [PHASES.md](06_PHASES.md) | 実装フェーズ計画・TODO |
+| 07 | [OBSTACLES.md](07_OBSTACLES.md) | 導入障害レポート (全11障害の記録・教訓) |
 
 ## 設計方針
 
