@@ -94,9 +94,7 @@ filesystem:
     - host: programs/apps/raster.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/fep_test.bin
-      guest: /usr/bin/
-      tags: [programs]
+
     - host: programs/apps/mdview.bin
       guest: /usr/bin/
       tags: [programs]
@@ -182,9 +180,9 @@ filesystem:
       guest: /data/skk.lzs
       tags: [data]
 
-    # --- FEP辞書 ---
-    - host: assets/fep.dic
-      guest: /sys/fep.dic
+    # --- FEP辞書 (SQLite DB) ---
+    - host: assets/fep.db
+      guest: /db/fep.db
       tags: [data]
 
     # --- テスト用ファイル ---

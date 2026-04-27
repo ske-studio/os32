@@ -139,17 +139,6 @@ programs/tests/skk_test.o: programs/tests/skk_test.c
 programs/tests/skk_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
 
-# === FEP Test Module ===
-lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
-	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
-
-programs/tests/fep_test.o: programs/tests/fep_test.c lib/fep_engine.h
-	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
-
-programs/tests/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
-
-fep_test: $(CRT0_OBJ) programs/tests/fep_test.bin
 
 # === LZSS Command ===
 # lib/lzss.c を外部プログラム用に再コンパイル
@@ -581,9 +570,9 @@ programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLI
 mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
 fep_dic:
-	@if [ ! -f assets/fep.dic ]; then python3 tools/fep_compiler.py -i assets/ipadic -o assets/fep.dic; fi
+	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 fep_test vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
