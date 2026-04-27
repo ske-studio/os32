@@ -61,21 +61,37 @@ ISR_ERR   13                   ;; #GP 一般保護例外
 
 ;; ============================================================
 ;; 例外共通ハンドラ
-;; スタック: [EIP] [CS] [EFLAGS] [error_code] [vector]
+;; pushad後のスタック (低→高):
+;;   [PUSHAD(32)] [vector(4)] [error_code(4)] [EIP(4)] [CS(4)] [EFLAGS(4)]
+;;
+;; exception_handler(u32 error_code, u32 vector, u32 fault_eip, u32 *regs)
 ;; ============================================================
 isr_common:
-        pushad                  ;; 全汎用レジスタ保存
+        pushad                  ;; 全汎用レジスタ保存 (32B)
+                                ;; ESP = base とする
+                                ;; base+0..31: PUSHAD
+                                ;; base+32: vector
+                                ;; base+36: error_code
+                                ;; base+40: fault EIP
 
-        ;; Cハンドラに引数を渡す
-        ;; スタック上: [PUSHAD(32)] [vector(4)] [error_code(4)] [EIP(4)] [CS(4)]
-        mov     eax, [esp + 32 + 4 + 4] ;; EIP (フォールト時の戻りアドレス)
-        push    eax
-        mov     eax, [esp + 32 + 4]     ;; vector
-        push    eax
-        mov     eax, [esp + 32 + 4 + 4 + 8] ;; error_code
-        push    eax
+        ;; 引数4: regs (PUSHAD配列先頭)
+        mov     eax, esp
+        push    eax             ;; ESP=base-4
+
+        ;; 引数3: fault_eip
+        mov     eax, [esp + 4 + 32 + 4 + 4] ;; base-4+44 = base+40 ✓
+        push    eax             ;; ESP=base-8
+
+        ;; 引数2: vector
+        mov     eax, [esp + 8 + 32]          ;; base-8+40 = base+32 ✓
+        push    eax             ;; ESP=base-12
+
+        ;; 引数1: error_code
+        mov     eax, [esp + 12 + 32 + 4]     ;; base-12+48 = base+36 ✓
+        push    eax             ;; ESP=base-16
+
         call    exception_handler
-        add     esp, 12
+        add     esp, 16
 
         popad
         add     esp, 8          ;; error_code + vector をスキップ
@@ -87,27 +103,35 @@ isr_common:
 ;; CPUが自動pushするエラーコードに加え、
 ;; CR2 (障害アドレス) をCハンドラに渡す。
 ;;
-;; スタック: [EFLAGS] [CS] [EIP] [error_code(CPU自動)]
+;; CPU自動push後のスタック (ESP低位→高位):
+;;   [error_code] [EIP] [CS] [EFLAGS]
+;;
+;; page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs)
+;; regs[0]=EDI, [1]=ESI, [2]=EBP, [3]=ESP_orig, [4]=EBX, [5]=EDX, [6]=ECX, [7]=EAX
 ;; ============================================================
 global isr_stub_14
 isr_stub_14:
         cli
-        pushad                  ;; 全汎用レジスタ保存
+        pushad                  ;; 全汎用レジスタ保存 (32B)
 
-        ;; フォルト時EIP取得 (PUSHAD=32B + error_code_CPU=4B の上)
-        mov     eax, [esp + 36] ;; EIP (CPUが自動pushした戻りアドレス)
+        ;; PUSHAD配列のポインタ (引数4: regs)
+        mov     eax, esp
+        push    eax             ;; 引数4: regs (PUSHAD配列先頭)
+
+        ;; フォルト時EIP取得 (PUSHAD=32B + push×1=4B + error_code=4B の上)
+        mov     eax, [esp + 40] ;; EIP
         push    eax             ;; 引数3: fault_eip
 
         ;; CR2 (障害アドレス) 取得
         mov     eax, cr2
         push    eax             ;; 引数2: fault_addr (CR2)
 
-        ;; エラーコード取得 (PUSHAD=32B + push×2=8B の上)
-        mov     eax, [esp + 40] ;; error_code (CPU push済み)
+        ;; エラーコード取得 (PUSHAD=32B + push×3=12B の上)
+        mov     eax, [esp + 44] ;; error_code
         push    eax             ;; 引数1: error_code
 
         call    page_fault_handler
-        add     esp, 12
+        add     esp, 16
 
         popad
         add     esp, 4          ;; error_code をスキップ
