@@ -10,6 +10,7 @@
 
 #include "libos32gfx.h"
 #include "libgfx_internal.h"
+#include "libos32math.h"
 #include "os32api.h"
 
 /* ソースサーフェスの4プレーンから1ピクセルを読み取る */
@@ -30,7 +31,7 @@ static u8 _read_pixel(const GFX_Surface *s, int x, int y)
 /*                                                                          */
 /*  dx, dy : 描画先の中心座標（回転中心がこの位置に来る）                   */
 /*  src    : 回転元の GFX_Surface                                           */
-/*  angle  : 角度 0-511 (512分割, gfx_isin互換)                            */
+/*  angle  : 角度 0-511 (512分割, isin互換)                               */
 /*  scale  : 拡大率 8.8固定小数点 (256=等倍, 128=半分, 512=2倍)            */
 /*  colorkey : 透過色 (この色のピクセルは描画しない)                        */
 /* ======================================================================== */
@@ -56,8 +57,8 @@ void gfx_blit_affine(int dx, int dy,
     if (!src || scale == 0) return;
 
     /* 1. セットアップ: sin/cos LUT (15bit精度) を 8.8fp の増分に変換 */
-    cos_v = (i32)gfx_icos(angle);
-    sin_v = (i32)gfx_isin(angle);
+    cos_v = (i32)icos(angle);
+    sin_v = (i32)isin(angle);
 
     cx = src->w / 2;
     cy = src->h / 2;
