@@ -60,12 +60,13 @@ DEPLOY_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'deploy.yaml')
 
 # === ext2パーティション オフセット ===
-# NHDヘッダ(512B) + ブート領域(LBA 0-1087) = 1089セクタ
-# シリンダ境界整列: 8H x 17SPT = 136sec/cyl, シリンダ8 = LBA 1088
+# NHDヘッダ(512B) + ブート領域(LBA 0-1631) = 1633セクタ
+# シリンダ境界整列: 8H x 17SPT = 136sec/cyl, シリンダ12 = LBA 1632
+# (-O0 SQLiteバイナリが最大LBA 1406まで使用するため拡張)
 NHD_HEADER_SECTORS = 1
-HDD_PARTITION_LBA = 1088
-PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 1089
-PARTITION_OFFSET = PARTITION_SKIP * 512  # 557568 バイト
+HDD_PARTITION_LBA = 1632
+PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 1633
+PARTITION_OFFSET = PARTITION_SKIP * 512  # 835584 バイト
 
 
 def is_mounted():
@@ -322,7 +323,7 @@ def do_write_kernel(kernel_bin, loader_bin=None, sqlite_bin=None):
       LBA 2-5: loader_hdd.bin (最大4セクタ = 2048B)
       LBA 6+: kernel.bin
       LBA 206+: sqlite.bin
-      LBA 1088+: ext2パーティション
+      LBA 1632+: ext2パーティション
     """
     NHD_HEADER = 512
     SECTOR = 512
