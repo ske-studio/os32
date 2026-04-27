@@ -8,6 +8,7 @@
 | Phase 1 | カーネル統合基盤 (分離配置, VFS, メモリDB動作確認) | ✅ 完了 |
 | Phase 2 | KAPI + IPC レイヤー (kapi_db, libos32db, db_test) | ✅ 完了 (db_test 7/7 通過) |
 | Phase 3 | 堅牢化 (ファイルDB, fsync, MEMSYS5モニタリング) | ✅ 完了 (db_test 9/9 通過) |
+| Phase 4 | FEP辞書SQLite移行 (独自バイナリ→SQLite, 学習辞書) | ✅ 完了 |
 
 ---
 
@@ -270,6 +271,83 @@ db_close(0)            ───→  kapi_db_close()
 
 ---
 
+## Phase 4: FEP 辞書 SQLite 移行 ✅ 完了
+
+独自バイナリ形式 (`.dic`) の FEP 辞書を SQLite エンジンに全面移行。
+
+### 4.1 辞書バックエンドの再設計 ✅
+
+- [x] `kernel/ime_dict.c` を SQLite API 直接呼び出しに全面書き換え (約360行→200行)
+- [x] `kernel/ime.h` の `IME_Dict` 構造体を SQLite ハンドル保持の軽量構成に変更
+- [x] 辞書パスを `/sys/fep.dic` → `/db/fep.db` に変更
+- [x] DB オープンモードを `SQLITE_OPEN_READWRITE` に設定 (学習辞書書き込みのため)
+
+### 4.2 検索ロジック ✅
+
+- [x] UTF-8 文字数に基づく動的クエリ切替: 2文字以下=完全一致、3文字以上=前方一致
+- [x] 前方一致クエリに完全一致ボーナス (`CASE WHEN yomi = ?1 THEN cost - 500`)
+- [x] ユーザー辞書 (`dict_user`) とシステム辞書 (`dict`) の `UNION ALL` 検索
+- [x] ユーザー辞書エントリは `(-10000 - freq)` のコストで常にシステム辞書より優先
+
+### 4.3 ユーザー学習辞書 ✅
+
+- [x] `dict_user` テーブル自動作成 (`CREATE TABLE IF NOT EXISTS`)
+- [x] 候補確定時に `ime_dict_learn()` で UPSERT (`ON CONFLICT DO UPDATE`)
+- [x] `commit_candidate()` に学習呼び出し1行追加
+- [x] プリペアドステートメント3本体制: `exact_stmt` / `prefix_stmt` / `learn_stmt`
+
+### 4.4 辞書コンパイラ (`tools/fep_to_sqlite.py`) ✅
+
+- [x] IPADIC CSV → SQLite DB 変換ツール (S/M/L バリアント対応)
+- [x] 対数スケールコスト正規化 (線形→対数で高頻度語/低頻度語の差を拡大)
+- [x] 重複排除 (`GROUP BY yomi, kanji` + `MIN(cost)`)
+- [x] 常用漢字ブースト (`assets/joyo_kanji.txt` 2,136字, 全常用漢字=コスト60%減)
+- [x] 圧縮率ヒューリスティクス (読み文字数 vs 漢字文字数, 高圧縮語=40%減)
+- [x] カタカナ/ひらがなそのまま表記の降格 (コスト+800)
+- [x] ページサイズ 1024B (OS32 カーネル VFS と一致)
+
+### 4.5 候補順改善の効果 ✅
+
+```
+改善前: ひがし → 干菓子(709), 乾菓子(709), 東(722)
+改善後: ひがし → 東(288),  乾菓子(909), 干菓子(909)  ← 完全一致+圧縮率ブースト
+
+改善前: にし  → 二死(652), 西(721)
+改善後: にし  → 西(288),   二死(852)  ← 常用漢字+圧縮率ブースト
+
+学習: 一度「漢字」を選択 → 次回から「かんじ」→「漢字」が最上位
+```
+
+### 4.6 デプロイ構成 ✅
+
+```yaml
+# deploy.yaml
+- host: assets/fep.db
+  guest: /db/fep.db
+  tags: [data]
+```
+
+| 項目 | 値 |
+|------|----|
+| 辞書サイズ (Mバリアント) | 5.5MB (97,514 entries) |
+| 旧辞書サイズ | 9.2MB (157,126 entries, 重複あり) |
+| 削減率 | 40% 削減 |
+
+### 4.7 成果物
+
+| ファイル | 説明 |
+|---------|------|
+| `kernel/ime_dict.c` | SQLite API 直接呼び出し + 学習 UPSERT |
+| `kernel/ime.h` | `IME_Dict` 構造体 (`learn_stmt` 追加) |
+| `kernel/ime.c` | `commit_candidate()` に学習呼び出し追加 |
+| `tools/fep_to_sqlite.py` | 辞書コンパイラ (IPADIC → SQLite DB) |
+| `tools/analyze_dict.py` | 辞書品質分析スクリプト |
+| `tools/check_candidates.py` | 候補順確認スクリプト |
+| `assets/joyo_kanji.txt` | 常用漢字 2,136 字リスト |
+| `assets/fep.db` | 生成済み辞書 DB (Mバリアント) |
+
+---
+
 ## メモリマップ (SQLite 関連)
 
 ```
@@ -303,6 +381,11 @@ db_close(0)            ───→  kapi_db_close()
 | `programs/libos32db/libos32db.h` | ユーザー空間ライブラリ ヘッダ | 2 ✅ |
 | `programs/libos32db/libos32db.c` | ユーザー空間ライブラリ 実装 | 2 ✅ |
 | `programs/tests/db_test.c` | KAPI経由テストプログラム | 2 ✅ |
+| `kernel/ime_dict.c` | FEP辞書 SQLite バックエンド | 4 ✅ |
+| `kernel/ime.h` | IME_Dict 構造体 (learn_stmt 追加) | 4 ✅ |
+| `kernel/ime.c` | commit_candidate 学習呼び出し | 4 ✅ |
+| `tools/fep_to_sqlite.py` | 辞書コンパイラ | 4 ✅ |
+| `assets/joyo_kanji.txt` | 常用漢字リスト | 4 ✅ |
 
 ---
 
@@ -314,24 +397,33 @@ db_close(0)            ───→  kapi_db_close()
 | Phase 1: カーネル統合基盤 | ✅ 完了 (2セッション) | — |
 | Phase 2: KAPI + IPC | ✅ 完了 (1セッション) | — |
 | Phase 3: 堅牢化 | ✅ 完了 (1セッション) | — |
-| **合計** | | **完了** |
+| Phase 4: FEP辞書移行 | ✅ 完了 (1セッション) | — |
+| **合計** | | **全Phase完了** |
 
 ---
 
 ## 将来拡張候補
+
+### 高優先度 (FEP 関連)
+
+- [ ] **辞書データの品質向上** — IPADIC以外の頻度データ (例: Wiktionary頻度表) を取り込み、コスト計算の精度向上
+- [ ] **学習辞書の永続化検証** — NP21/W再起動後も dict_user テーブルのデータが保持されることの継続的なテスト
+- [ ] **PRAGMA 最適化** — `synchronous=OFF` / `journal_mode=MEMORY` でIME確定時のラグ削減
 
 ### 中優先度
 
 - [ ] **`db_read_blob()` — 巨大BLOB分割読み込み**
 - [ ] **ext2 truncate 実装** (`VACUUM`, `journal_mode=TRUNCATE`)
 - [ ] **kprintf va_args 問題の調査** (`.sqlite_text` からの呼び出し)
+- [ ] **ユーザー辞書管理コマンド** — シェルから dict_user の閲覧・削除・エクスポート
 
 ### 低優先度
 
 - [ ] **sqlite3 シェルコマンド** (`.tables`, `.schema`, `.dump`)
-- [ ] **KAPI: db_mem_used()** (メモリ使用量モニタリング) ← ✅ Phase 3 で実装済み
+- [x] ~~**KAPI: db_mem_used()** (メモリ使用量モニタリング)~~ ← Phase 3 で実装済み
 - [ ] **複数接続数の拡張** (`DB_MAX_CONNECTIONS` 増加)
+- [ ] **辞書の動的切り替え** — S/M/L バリアントをシェルから切り替え
 
 ---
 
-*Implementation Phases — 2026-04-27 Phase 3 堅牢化完了 (db_test 9/9 通過)*
+*Implementation Phases — 2026-04-27 Phase 4 FEP辞書SQLite移行完了*
