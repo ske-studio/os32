@@ -19,15 +19,18 @@
 /*    0x06000 - 0x07FFF : R/W  (BIOSトランポリン)                           */
 /*    0x08000 - 0x08FFF : R/O  (loader.bin, 使用済み)                       */
 /*    0x09000 - 0x3FFFF : R/W  (カーネル .text+.data+.bss + マージン)       */
-/*    0x40000 - 0x8EFFF : R/W  (kmallocヒープ, 316KB)                       */
+/*    0x40000 - 0x8EFFF : R/W  (kmallocヒープ, 320KB)                       */
 /*    0x8F000 - 0x8FFFF : NP   (★カーネルスタックガード)                    */
-/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, ESP=0x9FFFC)              */
+/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, 64KB, ESP=0x9FFFC)        */
 /*    0xA0000 - 0xEFFFF : R/W  (テキスト/グラフィックVRAM)                  */
 /*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
 /*                                                                          */
 /*  [拡張メモリ]                                                            */
-/*    0x100000 - 0x1FFFFF : R/W  (カーネルデータ: フォント/Unicode/BB/KAPI) */
-/*    0x200000 - 0x3FFFFF : NP   (カーネル予約, 将来拡張用)                 */
+/*    0x100000 - 0x23FFFF : R/W  (カーネルデータ+SQLite拡張域)           */
+/*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
+/*    0x300000 - 0x37FFFF : R/W  (シェル常駐帯域, ガード付き)             */
+/*    0x380000 - 0x3C1FFF : R/W  (共有メモリ, ガード付き)                 */
+/*    0x3C2000 - 0x3FFFFF : NP   (SHM後方予約)                             */
 /*    0x400000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
 /*    mem_end  - 0xFFFFFF : NP   (未実装メモリ)                             */
 /* ======================================================================== */
@@ -134,8 +137,26 @@ void paging_init(u32 mem_kb)
      * シェルのスタックガードページのみ NOT_PRESENT に設定。 */
     paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
 
-    /* シェル帯域〜プログラム空間の間(0x380000-0x3FFFFF): Not-Present */
-    paging_set_not_present(MEM_SHELL_BAND_END, 0x3FFFFFUL);
+    /* SHM後方予約域 (0x3C2000-0x3FFFFF): Not-Present */
+    paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END);
+
+    /* SQLite拡張域 + 代替スタック (0x18A000-0x21FFFF): 強制R/W
+     * ブートローダーが sqlite.bin をここにロード済み。
+     * 代替スタック (0x200000-0x21FFFF, 128KB) も含めて
+     * メモリプローブ結果に関係なく R/W を保証する。 */
+    {
+        u32 sq_addr;
+        extern u32 __sqlite_start;
+        u32 sq_start = (u32)&__sqlite_start & ~(PAGE_SIZE - 1);
+        u32 sq_end   = (MEM_SQLITE_STACK_TOP + PAGE_SIZE) & ~(PAGE_SIZE - 1);
+        for (sq_addr = sq_start; sq_addr < sq_end; sq_addr += PAGE_SIZE) {
+            u32 pdi = sq_addr >> 22;
+            u32 pti = (sq_addr >> 12) & 0x3FF;
+            if (pdi < PAGING_PT_COUNT) {
+                page_tables[pdi][pti] = sq_addr | PAGE_RW;
+            }
+        }
+    }
 
     /* BIOS ROM: Read-Only */
     paging_set_readonly(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END);
