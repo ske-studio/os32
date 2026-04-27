@@ -18,9 +18,30 @@
 #include "kstring.h"
 #include "kprintf.h"
 
-/* ======== MEMSYS5 固定プール (100KB) ======== */
+/* ======== MEMSYS5 固定プール (100KB) + canary ======== */
 #define SQLITE_MEMSYS5_SIZE  (100 * 1024)
+#define CANARY_VALUE 0xDEADBEEFUL
+static u32 canary_before[4] = {
+    CANARY_VALUE, CANARY_VALUE, CANARY_VALUE, CANARY_VALUE
+};
 static char sqlite_mem_pool[SQLITE_MEMSYS5_SIZE];
+static u32 canary_after[4] = {
+    CANARY_VALUE, CANARY_VALUE, CANARY_VALUE, CANARY_VALUE
+};
+
+/* MEMSYS5 プールの canary 検証
+ * 戻り値: 0=正常, -1=前方破壊, -2=後方破壊 */
+int memsys5_check_canary(void)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        if (canary_before[i] != CANARY_VALUE) return -1;
+    }
+    for (i = 0; i < 4; i++) {
+        if (canary_after[i] != CANARY_VALUE) return -2;
+    }
+    return 0;
+}
 
 /* ======== OMIT_ATTACH スタブ ======== */
 /* sqlite3DbIsNamed は OMIT_ATTACH で定義除去されるが、             */
@@ -84,6 +105,9 @@ static int os32Truncate(sqlite3_file *pFile, sqlite3_int64 size)
 {
     (void)pFile; (void)size;
     /* ext2 truncate 未実装 — no-op */
+    /* 影響: VACUUM はファイルサイズを縮小できない。 */
+    /*       journal_mode=DELETE ではジャーナル truncate が発生するが、 */
+    /*       no-op でも DELETE モードのコミットフローに実害なし。 */
     return SQLITE_OK;
 }
 
@@ -159,9 +183,9 @@ static int os32VfsOpen(sqlite3_vfs *pVfs, const char *zName,
     /* 一時ファイル (zName==NULL) はメモリストアで処理されるはず */
     if (zName == (const char *)0) return SQLITE_CANTOPEN;
 
-    if (flags & SQLITE_OPEN_CREATE)   oflags |= 0x0200; /* O_CREAT */
-    if (flags & SQLITE_OPEN_READWRITE) oflags |= 0x0002; /* O_RDWR */
-    else                               oflags |= 0x0000; /* O_RDONLY */
+    if (flags & SQLITE_OPEN_CREATE)   oflags |= 0x0100; /* KAPI_O_CREAT */
+    if (flags & SQLITE_OPEN_READWRITE) oflags |= 0x0002; /* KAPI_O_RDWR */
+    else                               oflags |= 0x0000; /* KAPI_O_RDONLY */
 
     p->fd = vfs_open(zName, oflags);
     if (p->fd < 0) return SQLITE_CANTOPEN;
@@ -173,8 +197,15 @@ static int os32VfsOpen(sqlite3_vfs *pVfs, const char *zName,
 
 static int os32VfsDelete(sqlite3_vfs *pVfs, const char *zPath, int dirSync)
 {
+    int rc;
     (void)pVfs; (void)dirSync;
-    vfs_rm(zPath);
+    rc = vfs_rm(zPath);
+    /* SQLite 仕様: ファイルが存在しない場合も SQLITE_OK を返す */
+    /* (ジャーナル削除時にファイルが既にないケースがある) */
+    if (rc < 0) {
+        /* 注意: .sqlite_text からの kprintf は PAGE FAULT を引き起こす */
+        /* (既知の制約: 06_PHASES.md §1.6 参照) */
+    }
     return SQLITE_OK;
 }
 
@@ -294,14 +325,37 @@ int os32_sqlite_init(void)
 {
     int rc;
 
+    kprintf(0x07, "[SQT] init: pool=%x size=%x\n",
+            (unsigned)sqlite_mem_pool, SQLITE_MEMSYS5_SIZE);
+
     /* MEMSYS5 固定プール設定 */
     rc = sqlite3_config(SQLITE_CONFIG_HEAP,
                         sqlite_mem_pool,
                         SQLITE_MEMSYS5_SIZE,
                         64);  /* 最小アロケーション粒度 */
+
+    kprintf(0x07, "[SQT] sqlite3_config rc=%d\n", rc);
     if (rc != SQLITE_OK) return rc;
 
     /* SQLite 初期化 (内部で sqlite3_os_init が呼ばれる) */
     rc = sqlite3_initialize();
+
+    kprintf(0x07, "[SQT] sqlite3_initialize rc=%d\n", rc);
     return rc;
+}
+
+/* ======================================================================== */
+/*  os32_sqlite_dump_vfs — VFS メソッドテーブルのアドレスダンプ (デバッグ用)   */
+/* ======================================================================== */
+void os32_sqlite_dump_vfs(void)
+{
+    kprintf(0x07, "[VFS] io_methods=%x\n", (unsigned)&os32_io_methods);
+    kprintf(0x07, "[VFS] xClose=%x xRead=%x xWrite=%x\n",
+            (unsigned)os32_io_methods.xClose,
+            (unsigned)os32_io_methods.xRead,
+            (unsigned)os32_io_methods.xWrite);
+    kprintf(0x07, "[VFS] xTruncate=%x xSync=%x xFileSize=%x\n",
+            (unsigned)os32_io_methods.xTruncate,
+            (unsigned)os32_io_methods.xSync,
+            (unsigned)os32_io_methods.xFileSize);
 }

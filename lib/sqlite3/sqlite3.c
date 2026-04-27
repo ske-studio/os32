@@ -76587,15 +76587,71 @@ static int newDatabase(BtShared *pBt){
   int rc;
 
   assert( sqlite3_mutex_held(pBt->mutex) );
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] pBt=%x nPage=%d\n", (unsigned)(long)pBt, (int)pBt->nPage);
+  }
+#endif
+
   if( pBt->nPage>0 ){
     return SQLITE_OK;
   }
   pP1 = pBt->pPage1;
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] pP1=%x\n", (unsigned)(long)pP1);
+    if( pP1 ){
+      kprintf(0x07, "[NDB] aData=%x pDbPage=%x\n",
+              (unsigned)(long)pP1->aData, (unsigned)(long)pP1->pDbPage);
+    }
+  }
+#endif
+
+
   assert( pP1!=0 );
   data = pP1->aData;
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    u32 _ndb_esp;
+    __asm__ volatile("mov %%esp, %0" : "=r"(_ndb_esp));
+    kprintf(0x07, "[NDB] pre-PagerWrite esp=%x data=%x pDbPg=%x\n",
+            _ndb_esp, (unsigned)(long)data, (unsigned)(long)pP1->pDbPage);
+  }
+#endif
+
   rc = sqlite3PagerWrite(pP1->pDbPage);
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] post-PagerWrite rc=%d\n", rc);
+  }
+#endif
+
   if( rc ) return rc;
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] pre-memcpy zMagicHdr\n");
+  }
+#endif
+
   memcpy(data, zMagicHeader, sizeof(zMagicHeader));
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] post-memcpy, writing fields\n");
+  }
+#endif
+
   assert( sizeof(zMagicHeader)==16 );
   data[16] = (u8)((pBt->pageSize>>8)&0xff);
   data[17] = (u8)((pBt->pageSize>>16)&0xff);
@@ -76606,8 +76662,32 @@ static int newDatabase(BtShared *pBt){
   data[21] = 64;
   data[22] = 32;
   data[23] = 32;
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] pre-memset\n");
+  }
+#endif
+
   memset(&data[24], 0, 100-24);
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] pre-zeroPage\n");
+  }
+#endif
+
   zeroPage(pP1, PTF_INTKEY|PTF_LEAF|PTF_LEAFDATA );
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[NDB] post-zeroPage OK\n");
+  }
+#endif
+
   pBt->btsFlags |= BTS_PAGESIZE_FIXED;
 #ifndef SQLITE_OMIT_AUTOVACUUM
   assert( pBt->autoVacuum==1 || pBt->autoVacuum==0 );
@@ -76678,6 +76758,14 @@ static SQLITE_NOINLINE int btreeBeginTrans(
   Pager *pPager = pBt->pPager;
   int rc = SQLITE_OK;
 
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[BT] ENTER btreeBeginTrans wr=%d inTrans=%d pBt=%x\n",
+            wrflag, (int)p->inTrans, (unsigned int)(long)pBt);
+  }
+#endif
+
   sqlite3BtreeEnter(p);
   btreeIntegrity(p);
 
@@ -76686,9 +76774,22 @@ static SQLITE_NOINLINE int btreeBeginTrans(
   ** is requested, this is a no-op.
   */
   if( p->inTrans==TRANS_WRITE || (p->inTrans==TRANS_READ && !wrflag) ){
+#ifdef OS32_SQLITE_TRACE
+    {
+      extern void kprintf(unsigned char attr, const char *fmt, ...);
+      kprintf(0x07, "[BT] skip (already in trans %d)\n", (int)p->inTrans);
+    }
+#endif
     goto trans_begun;
   }
   assert( pBt->inTransaction==TRANS_WRITE || IfNotOmitAV(pBt->bDoTruncate)==0 );
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    kprintf(0x07, "[BT] past assert, flags check...\n");
+  }
+#endif
 
   if( (p->db->flags & SQLITE_ResetDatabase)
    && sqlite3PagerIsreadonly(pPager)==0
@@ -76788,9 +76889,35 @@ static SQLITE_NOINLINE int btreeBeginTrans(
       if( (pBt->btsFlags & BTS_READ_ONLY)!=0 ){
         rc = SQLITE_READONLY;
       }else{
+#ifdef OS32_SQLITE_TRACE
+        {
+          extern void kprintf(unsigned char attr, const char *fmt, ...);
+          u32 _bt_esp;
+          __asm__ volatile("mov %%esp, %0" : "=r"(_bt_esp));
+          kprintf(0x07, "[BT] pre-PagerBegin esp=%x wrflag=%d\n", _bt_esp, wrflag);
+        }
+#endif
         rc = sqlite3PagerBegin(pPager, wrflag>1, sqlite3TempInMemory(p->db));
+#ifdef OS32_SQLITE_TRACE
+        {
+          extern void kprintf(unsigned char attr, const char *fmt, ...);
+          kprintf(0x07, "[BT] post-PagerBegin rc=%d\n", rc);
+        }
+#endif
         if( rc==SQLITE_OK ){
+#ifdef OS32_SQLITE_TRACE
+          {
+            extern void kprintf(unsigned char attr, const char *fmt, ...);
+            kprintf(0x07, "[BT] pre-newDatabase\n");
+          }
+#endif
           rc = newDatabase(pBt);
+#ifdef OS32_SQLITE_TRACE
+          {
+            extern void kprintf(unsigned char attr, const char *fmt, ...);
+            kprintf(0x07, "[BT] post-newDatabase rc=%d\n", rc);
+          }
+#endif
         }else if( rc==SQLITE_BUSY_SNAPSHOT && pBt->inTransaction==TRANS_NONE ){
           /* if there was no transaction opened when this function was
           ** called and SQLITE_BUSY_SNAPSHOT is returned, change the error
@@ -97333,6 +97460,17 @@ SQLITE_PRIVATE int sqlite3VdbeExec(
   }
   sqlite3EndBenignMalloc();
 #endif
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    int _k;
+    kprintf(0x07, "[VDBE] START nOp=%d aOp=%x\n", p->nOp, (unsigned int)(long)aOp);
+    for (_k = 0; _k < p->nOp && _k < 40; _k++) {
+      kprintf(0x07, "[VDBE]  [%d] op=%d p1=%d p2=%d p3=%d\n",
+              _k, aOp[_k].opcode, aOp[_k].p1, aOp[_k].p2, aOp[_k].p3);
+    }
+  }
+#endif
   for(pOp=&aOp[p->pc]; 1; pOp++){
     /* Errors are detected by individual opcodes, with an immediate
     ** jumps to abort_due_to_error. */
@@ -97340,6 +97478,24 @@ SQLITE_PRIVATE int sqlite3VdbeExec(
 
     assert( pOp>=aOp && pOp<&aOp[p->nOp]);
     nVmStep++;
+
+#ifdef OS32_SQLITE_TRACE
+    {
+      extern void kprintf(unsigned char attr, const char *fmt, ...);
+      extern int memsys5_check_canary(void);
+      u32 _esp;
+      int _canary = memsys5_check_canary();
+      __asm__ volatile("mov %%esp, %0" : "=r"(_esp));
+      if (_canary != 0) {
+        kprintf(0x02, "[VDBE] CANARY BROKEN=%d op=%d pc=%d\n",
+                _canary, pOp->opcode, (int)(pOp - aOp));
+      }
+      kprintf(0x07, "[VDBE] op=%d pc=%d p1=%d p2=%d p3=%d esp=%x aOp=%x pOp=%x\n",
+              pOp->opcode, (int)(pOp - aOp),
+              pOp->p1, pOp->p2, pOp->p3, _esp,
+              (unsigned int)(long)aOp, (unsigned int)(long)pOp);
+    }
+#endif
 
 #if defined(VDBE_PROFILE)
     pOp->nExec++;
@@ -100508,6 +100664,16 @@ case OP_Transaction: {
   Btree *pBt;
   Db *pDb;
   int iMeta = 0;
+
+#ifdef OS32_SQLITE_TRACE
+  {
+    extern void kprintf(unsigned char attr, const char *fmt, ...);
+    u32 _t_esp;
+    __asm__ volatile("mov %%esp, %0" : "=r"(_t_esp));
+    kprintf(0x07, "[VDBE] ENTER OP_Transaction esp=%x p1=%d p2=%d\n",
+            _t_esp, pOp->p1, pOp->p2);
+  }
+#endif
 
   assert( p->bIsReader );
   assert( p->readOnly==0 || pOp->p2==0 );

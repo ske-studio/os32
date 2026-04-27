@@ -12,4 +12,11 @@ int os32_sqlite_init(void);
 /* 戻り値: 0=全テスト成功, -1=失敗あり */
 int os32_sqlite_test(void);
 
+/* MEMSYS5 プール canary 検証 (デバッグ用) */
+/* 戻り値: 0=正常, -1=前方破壊, -2=後方破壊 */
+int memsys5_check_canary(void);
+
+/* VFS メソッドテーブルアドレスダンプ (デバッグ用) */
+void os32_sqlite_dump_vfs(void);
+
 #endif /* OS32_SQLITE_VFS_H */

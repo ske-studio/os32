@@ -44,6 +44,7 @@
 #include "snd_engine.h"
 #include "mouse.h"
 #include "os32_sqlite_vfs.h"
+#include "kapi_db.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -100,6 +101,8 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(0, 1, "IDT...", TATTR_GREEN);
     idt_init();
     tvram_print(6, 1, "OK  ", TATTR_WHITE);
+
+
 
     tvram_print(12, 1, "PIC...", TATTR_GREEN);
     pic_init();
@@ -194,7 +197,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* ヒープ初期化 (VFSマウントでkmalloc使用のため、マウント前に必要) */
     tvram_print(24, 2, "HEAP...", TATTR_GREEN);
     kmalloc_init((void *)KHEAP_BASE, KHEAP_SIZE);
-    tvram_print(31, 2, "316K", TATTR_WHITE);
+    tvram_print(31, 2, "320K", TATTR_WHITE);
 
     /* 自動マウント処理 */
     tvram_print(14, 3, "MOUNT...", TATTR_GREEN);
@@ -288,6 +291,17 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     paging_init(mem_kb);
     tvram_print(44, 2, "OK", TATTR_WHITE);
 
+    /* FPU 初期化 (paging_init の後で CR0 に対して設定)
+     * CR0.EM=0 (ネイティブFPU使用), CR0.TS=0 (タスクスイッチ不要)
+     * SQLite が double 演算を使用するため必須 */
+    {
+        u32 cr0_val;
+        __asm__ volatile("mov %%cr0, %0" : "=r"(cr0_val));
+        cr0_val &= ~((u32)0x0C);  /* EM(bit2) と TS(bit3) をクリア */
+        __asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");
+        __asm__ volatile("fninit");
+    }
+
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
     pgalloc_init(mem_kb);
 
@@ -307,8 +321,11 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* Unicodeテーブルロード */
     tvram_print(60, 2, "UNI...", TATTR_GREEN);
+    kprintf(0x07, "[BOOT] UNI load: dst=%x size=%x\n",
+            (unsigned)MEM_UNICODE_TABLE_BASE, (unsigned)MEM_UNICODE_TABLE_SIZE);
     {
         int bytes = vfs_read(SYS_UNICODE_BIN, (void *)MEM_UNICODE_TABLE_BASE, MEM_UNICODE_TABLE_SIZE);
+        kprintf(0x07, "[BOOT] UNI load: bytes=%d\n", bytes);
         if (bytes == (int)MEM_UNICODE_TABLE_SIZE) {
             tvram_print(67, 2, "OK", TATTR_WHITE);
         } else {
@@ -317,10 +334,21 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
 
     /* IME (FEP) 初期化 — 辞書は初回使用時に遅延ロード */
+    tvram_print(0, 4, "IME..", TATTR_GREEN);
+    kprintf(0x07, "[BOOT] ime_init...\n");
     ime_init();
+    tvram_print(5, 4, "OK ", TATTR_WHITE);
+    kprintf(0x07, "[BOOT] ime_init OK\n");
 
     /* サウンドエンジン初期化 */
+    tvram_print(9, 4, "SND..", TATTR_GREEN);
+    kprintf(0x07, "[BOOT] snd_init...\n");
     snd_init();
+    tvram_print(14, 4, "OK ", TATTR_WHITE);
+    kprintf(0x07, "[BOOT] snd_init OK\n");
+
+    tvram_print(18, 4, "SQ..", TATTR_GREEN);
+    kprintf(0x07, "[BOOT] sqlite_init...\n");
 
     /* SQLite エンジン初期化 (ブートローダーが 0x18A000 にロード済み、
      * kentry.asm が .sqlite_bss をゼロクリア済み) */
@@ -331,9 +359,15 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         kprintf(0x07, "[SQ] init rc=%d\n", sq_rc);
         if (sq_rc == 0) {
             tvram_print(9, 4, "OK", TATTR_WHITE);
-#ifdef SQLITE_BOOT_TEST
-            os32_sqlite_test();
-#endif
+            /* 代替スタック(128KB)でSQLiteテスト実行 */
+            {
+                extern int os32_sqlite_test(void);
+                extern int sqlite_call_on_alt_stack(
+                    int (*func)(void), u32 stack_top);
+                int trc = sqlite_call_on_alt_stack(
+                    os32_sqlite_test, MEM_SQLITE_STACK_TOP);
+                kprintf(0x07, "[SQ] kernel test rc=%d\n", trc);
+            }
         } else {
             tvram_print(9, 4, "ER", TATTR_RED);
         }
