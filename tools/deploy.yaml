@@ -167,6 +167,9 @@ filesystem:
     - host: programs/tests/text_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/econ_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -231,6 +234,11 @@ filesystem:
     # --- テキスト管理 テストデータ (SQLite DB) ---
     - host: assets/text.db
       guest: /db/text.db
+      tags: [data]
+
+    # --- 経済エンジン マスターデータ (SQLite DB) ---
+    - host: assets/econ.db
+      guest: /db/econ.db
       tags: [data]
 
     # --- テスト用ファイル ---
