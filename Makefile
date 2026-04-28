@@ -88,7 +88,7 @@ C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libpyxel -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libpyxel -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
@@ -97,7 +97,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/econ_test.c programs/tests/ai_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -532,6 +532,22 @@ programs/tests/ai_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/ai_test.o $(
 
 ai_test: $(CRT0_OBJ) programs/tests/ai_test.bin
 
+# === libos32battle Module (ターンバトル解決エンジンライブラリ) ===
+LIBBATTLE_SRC = $(wildcard programs/libos32battle/*.c)
+LIBBATTLE_OBJ = $(LIBBATTLE_SRC:.c=.o)
+
+programs/libos32battle/%.o: programs/libos32battle/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
+
+# === Battle Test (libos32battle テスト) ===
+programs/tests/btl_test.o: programs/tests/btl_test.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
+
+programs/tests/btl_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/btl_test.o $(LIBBATTLE_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/btl_test.o $(LIBBATTLE_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ) -lc -lgcc
+
+btl_test: $(CRT0_OBJ) programs/tests/btl_test.bin
+
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -752,7 +768,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test econ_test ai_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test econ_test ai_test btl_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -872,6 +888,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
 	elif [ "$*" = "tests/ai_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
+	elif [ "$*" = "tests/btl_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
 	elif [ "$*" = "tests/e2test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
 	elif [ "$*" = "tests/sqlite_standalone/sqlite_standalone" ]; then \
@@ -931,7 +949,7 @@ iso: packages
 	genisoimage -o images/os32_install.iso -V "OS32_INSTALL" -input-charset utf-8 -R packages/
 
 clean:
-	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32math/*.o programs/libos32chem/*.o programs/libos32map/*.o programs/libos32input/*.o programs/libos32asset/*.o programs/libos32text/*.o programs/libos32econ/*.o programs/libos32ai/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libpyxel/*.o programs/libtilemap/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
+	rm -f boot/*.bin $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) kernel.elf kernel.bin os.img os.d88 os_install.img os_install.d88 os_fat.img os_fat.d88 os_raw.img programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin programs/crt0.o programs/shell/*.o programs/apps/edit/*.o programs/tests/bench/*.o programs/libos32math/*.o programs/libos32chem/*.o programs/libos32map/*.o programs/libos32input/*.o programs/libos32asset/*.o programs/libos32text/*.o programs/libos32econ/*.o programs/libos32ai/*.o programs/libos32battle/*.o programs/libos32gfx/*.o programs/libos32gfx/asm/*.o programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o programs/libpyxel/*.o programs/libtilemap/*.o programs/libos32/*.o programs/libmd/*.o programs/libfiler/*.o programs/libos32snd/*.o unicode.bin tools/gen_unicode
 	rm -f lib/sqlite3/sqlite3.o lib/sqlite3/os32_sqlite_vfs.o lib/sqlite3/os32_sqlite_test.o sqlite.bin
 	rm -f kapi/kapi_db.o programs/libos32db/*.o programs/tests/db_test.o programs/tests/db_test.elf programs/tests/db_test.raw programs/tests/db_test.bin
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin

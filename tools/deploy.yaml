@@ -173,6 +173,9 @@ filesystem:
     - host: programs/tests/ai_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/btl_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -247,6 +250,11 @@ filesystem:
     # --- AI意思決定エンジン プロファイルデータ (SQLite DB) ---
     - host: assets/ai.db
       guest: /db/ai.db
+      tags: [data]
+
+    # --- バトルエンジン マスターデータ (SQLite DB) ---
+    - host: assets/battle.db
+      guest: /db/battle.db
       tags: [data]
 
     # --- テスト用ファイル ---
