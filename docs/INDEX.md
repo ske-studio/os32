@@ -82,6 +82,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
 | [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
+| [tasks/libchem/LIBCHEM_DESIGN.md](tasks/libchem/LIBCHEM_DESIGN.md) | libos32chem — 化学エンジンライブラリ設計書 |
+| [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
+| [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 
 ## ソースツリー概要
 
@@ -106,7 +109,12 @@ src/os32/
 │   ├── libos32math/  — 整数数学ライブラリ (固定小数点, LUT, ベクトル)
 │   ├── libos32gfx/   — グラフィックスライブラリ
 │   ├── libos32snd/   — サウンドライブラリ
-│   └── libpyxel/     — Pyxel互換ゲームエンジン
+│   ├── libos32chem/  — 化学エンジンライブラリ (SQLite連携)
+│   ├── libos32map/   — マップ管理ライブラリ (SQLite連携)
+│   ├── libos32input/ — 入力抽象化ライブラリ (アクションバインディング)
+│   ├── libos32db/    — SQLiteデータベースアクセスライブラリ
+│   ├── libtilemap/   — タイルマップ描画エンジン
+│   └── libpyxel/     — Pyxel互換ゲームエンジン (廃止方向・参考実装)
 ├── tools/            — ホスト側ツール (Pythonスクリプト、KAPI自動生成用JSON)
 ├── Makefile          — 自動ビルドスクリプト
 └── docs/             — 仕様書ドキュメント群 (本ファイル含む)
@@ -114,4 +122,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-27*
+*Last Updated: 2026-04-28*

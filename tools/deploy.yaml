@@ -149,6 +149,12 @@ filesystem:
     - host: programs/tests/map_demo.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/input_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/asset_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
