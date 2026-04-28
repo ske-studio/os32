@@ -17,21 +17,8 @@
 #define DISK_SECT_SZ   FDC_SECTOR_SIZE
 #define DISK_TOTAL_SEC FDC_TOTAL_SECTORS
 
-/* ======== ディスクAPI ======== */
-
-/* セクタ読み込み
- *   drv:   ドライブ番号(0=fd0, 1=fd1)
- *   cyl:   シリンダ番号 (0-76)
- *   head:  ヘッド番号 (0-1)
- *   sect:  セクタ番号 (1-8)
- *   count: 読み込みセクタ数
- *   buf:   データバッファ
- * 戻り値: 0=成功, それ以外=エラー
- */
-int disk_read(int drv, int cyl, int head, int sect, int count, void *buf);
-
-/* セクタ書き込み */
-int disk_write(int drv, int cyl, int head, int sect, int count, const void *buf);
+/* CHS版 disk_read_chs / disk_write_chs は disk.c 内部のstaticに移行済み。
+ * 外部からは LBA版のみ使用すること。 */
 
 /* LBA→CHS変換 */
 void disk_lba_to_chs(int lba, int *cyl, int *head, int *sect);

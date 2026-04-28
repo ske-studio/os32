@@ -28,7 +28,7 @@ int disk_chs_to_lba(int cyl, int head, int sect)
 /*  セクタ読込 (FDCドライバ経由)                                            */
 /* ======================================================================== */
 
-int disk_read(int drv, int cyl, int head, int sect, int count, void *buf)
+static int disk_read_chs(int drv, int cyl, int head, int sect, int count, void *buf)
 {
     int i, ret;
     u8 *p = (u8 *)buf;
@@ -56,7 +56,7 @@ int disk_read(int drv, int cyl, int head, int sect, int count, void *buf)
 /*  セクタ書込 (FDCドライバ経由)                                            */
 /* ======================================================================== */
 
-int disk_write(int drv, int cyl, int head, int sect, int count, const void *buf)
+static int disk_write_chs(int drv, int cyl, int head, int sect, int count, const void *buf)
 {
     int i, ret;
     const u8 *p = (const u8 *)buf;
@@ -88,12 +88,12 @@ int disk_read_lba(int drv, int lba, int count, void *buf)
 {
     int cyl, head, sect;
     disk_lba_to_chs(lba, &cyl, &head, &sect);
-    return disk_read(drv, cyl, head, sect, count, buf);
+    return disk_read_chs(drv, cyl, head, sect, count, buf);
 }
 
 int disk_write_lba(int drv, int lba, int count, const void *buf)
 {
     int cyl, head, sect;
     disk_lba_to_chs(lba, &cyl, &head, &sect);
-    return disk_write(drv, cyl, head, sect, count, buf);
+    return disk_write_chs(drv, cyl, head, sect, count, buf);
 }
