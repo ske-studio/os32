@@ -40,7 +40,11 @@ INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
 INC_GFX = $(INC_COMMON) -Igfx -Idrivers -Ifs -Ilib -Ikernel
 
 # FS: 共通 + 自身 + ドライバ (disk/ide依存)
-INC_FS = $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
+INC_FS = $(INC_COMMON) -Ifs -Ifs/fatfs -Idrivers -Ikernel -Ilib
+
+# FatFS: fs/fatfs/ ディレクトリ内のソースを独自の string.h スタブで解決
+# -Ifs/fatfs を先頭に指定して <string.h> → fs/fatfs/string.h へ誘導
+INC_FATFS = -Ifs/fatfs $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
 
 
 # exec: 共通 + exec + kapi + fs + gfx + ドライバ (kbd依存)
@@ -76,7 +80,8 @@ C_KERNEL = \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
-    fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
+    fs/fat12.c fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
+    fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c kapi/kapi_db.c \
     lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
@@ -660,6 +665,13 @@ gfx/%.o: gfx/%.c
 # fs/ モジュール
 fs/%.o: fs/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_FS) -c $< -o $@
+
+# fs/fatfs/ モジュール (FatFs公式ソース — string.hスタブ付き)
+fs/fatfs/ff.o: fs/fatfs/ff.c fs/fatfs/ffconf.h fs/fatfs/string.h
+	$(CC) $(CFLAGS_BASE) $(INC_FATFS) -c $< -o $@
+
+fs/fatfs/diskio.o: fs/fatfs/diskio.c fs/fatfs/ff.h fs/fatfs/diskio.h
+	$(CC) $(CFLAGS_BASE) $(INC_FATFS) -c $< -o $@
 
 
 # exec/ モジュール

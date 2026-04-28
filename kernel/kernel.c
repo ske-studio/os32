@@ -31,6 +31,9 @@
 #include "ext2.h"
 #include "iso9660.h"
 
+/* FatFs VFSドライバ (fs/fatfs_vfs.c) */
+extern void fatfs_init(void);
+
 #include "hostdrvfs.h"
 #include "tvram.h"
 #include "pc98.h"
@@ -162,6 +165,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     path_init();
     fat12_init();
     ext2_init();
+    fatfs_init();
     vfs_register_fs(&iso9660_ops);
 
     hostdrvfs_init();
@@ -261,7 +265,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                         if (vfs_mount(mnt, dname, "iso9660") == VFS_OK) mounted = 1;
                     }
                     if (!mounted) {
-                        vfs_mount(mnt, dname, "fat12");
+                        if (vfs_mount(mnt, dname, "fat12") == VFS_OK) mounted = 1;
+                    }
+                    if (!mounted) {
+                        vfs_mount(mnt, dname, "fat");
                     }
                 }
             }
