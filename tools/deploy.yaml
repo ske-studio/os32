@@ -195,6 +195,11 @@ filesystem:
       guest: /usr/bin/sqlite_standalone.bin
       tags: [programs]
 
+    # --- LZ4 圧縮/展開コマンド → /bin/ ---
+    - host: programs/system/lz4.bin
+      guest: /bin/lz4.bin
+      tags: [programs]
+
     # --- 一般プログラム → /bin/ ---
     - host: "programs/cmds/*.bin"
       guest: /bin/

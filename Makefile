@@ -79,7 +79,7 @@ C_KERNEL = \
     fs/fat12.c fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c kapi/kapi_db.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
 
 # SQLite関連 (カーネル拡張域 0x18A000 に配置)
 C_SQLITE = lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_test.c
@@ -98,7 +98,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
 C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c, $(wildcard programs/tests/*.c))
-C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
+C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
@@ -152,6 +152,19 @@ programs/system/lzss.elf: build/app.ld $(CRT0_OBJ) programs/system/lzss.o lib/lz
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/lzss.o lib/lzss_prog.o -lc -lgcc
 
 lzss_cmd: $(CRT0_OBJ) programs/system/lzss.bin
+
+# === LZ4 Command ===
+# lib/lz4.c を外部プログラム用に再コンパイル
+lib/lz4_prog.o: lib/lz4.c lib/lz4.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/system/lz4.o: programs/system/lz4.c
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/system/lz4.elf: build/app.ld $(CRT0_OBJ) programs/system/lz4.o lib/lz4_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/lz4.o lib/lz4_prog.o -lc -lgcc
+
+lz4_cmd: $(CRT0_OBJ) programs/system/lz4.bin
 
 # === CD Installer (cdinst) ===
 programs/libos32/pkg.o: programs/libos32/pkg.c programs/libos32/pkg.h
