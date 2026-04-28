@@ -26,8 +26,8 @@
 cpu 386
 
 KERNEL_LBA      EQU     6       ;; カーネル開始LBA
-KERNEL_COUNT    EQU     200     ;; カーネルセクタ数 (100KB)
-SQLITE_LBA      EQU     206     ;; SQLite開始LBA (KERNEL_LBA + KERNEL_COUNT)
+KERNEL_COUNT    EQU     256     ;; カーネルセクタ数 (128KB)
+SQLITE_LBA      EQU     262     ;; SQLite開始LBA (KERNEL_LBA + KERNEL_COUNT)
 SQLITE_COUNT    EQU     1200    ;; SQLiteセクタ数 (600KB, -O0対応)
 
 section .text

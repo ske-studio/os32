@@ -322,14 +322,14 @@ def do_write_kernel(kernel_bin, loader_bin=None, sqlite_bin=None):
       LBA 1: パーティションテーブル
       LBA 2-5: loader_hdd.bin (最大4セクタ = 2048B)
       LBA 6+: kernel.bin
-      LBA 206+: sqlite.bin
+      LBA 262+: sqlite.bin
       LBA 1632+: ext2パーティション
     """
     NHD_HEADER = 512
     SECTOR = 512
     KERNEL_LBA = 6
     LOADER_LBA = 2
-    SQLITE_LBA = 206
+    SQLITE_LBA = 262
 
     kernel_offset = NHD_HEADER + KERNEL_LBA * SECTOR
     loader_offset = NHD_HEADER + LOADER_LBA * SECTOR
