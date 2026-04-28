@@ -170,6 +170,9 @@ filesystem:
     - host: programs/tests/econ_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/ai_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -239,6 +242,11 @@ filesystem:
     # --- 経済エンジン マスターデータ (SQLite DB) ---
     - host: assets/econ.db
       guest: /db/econ.db
+      tags: [data]
+
+    # --- AI意思決定エンジン プロファイルデータ (SQLite DB) ---
+    - host: assets/ai.db
+      guest: /db/ai.db
       tags: [data]
 
     # --- テスト用ファイル ---
