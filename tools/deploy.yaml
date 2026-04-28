@@ -164,6 +164,9 @@ filesystem:
     - host: programs/tests/ecs_demo.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/text_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -223,6 +226,11 @@ filesystem:
     # --- マップ管理 マスターデータ (SQLite DB) ---
     - host: assets/map.db
       guest: /db/map.db
+      tags: [data]
+
+    # --- テキスト管理 テストデータ (SQLite DB) ---
+    - host: assets/text.db
+      guest: /db/text.db
       tags: [data]
 
     # --- テスト用ファイル ---
