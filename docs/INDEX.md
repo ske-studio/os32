@@ -74,11 +74,14 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [PM_PIO_TEST.md](logs/PM_PIO_TEST.md) | プロテクトモード IDE PIO 読み込み実証実験記録 |
 | [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
 
-## タスク (進行中)
+## タスク
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/fep/](tasks/fep/) | FEP (日本語入力) 実装タスク |
+| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP (日本語入力) — 実装状態スナップショット |
+| [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
+| [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
+| [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
 
 ## ソースツリー概要
 
@@ -100,6 +103,7 @@ src/os32/
 │   ├── system/       — システムユーティリティ (hsync, install, cdinst等)
 │   ├── tests/        — テスト・デモプログラム
 │   ├── libos32/      — newlib-nano ブリッジ
+│   ├── libos32math/  — 整数数学ライブラリ (固定小数点, LUT, ベクトル)
 │   ├── libos32gfx/   — グラフィックスライブラリ
 │   ├── libos32snd/   — サウンドライブラリ
 │   └── libpyxel/     — Pyxel互換ゲームエンジン
@@ -110,4 +114,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-23*
+*Last Updated: 2026-04-27*

@@ -137,6 +137,18 @@ filesystem:
     - host: programs/tests/math_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/chem_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/chem_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/map_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/map_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -186,6 +198,16 @@ filesystem:
     # --- FEP辞書 (SQLite DB) ---
     - host: assets/fep.db
       guest: /db/fep.db
+      tags: [data]
+
+    # --- 化学エンジン マスターデータ (SQLite DB) ---
+    - host: assets/chem.db
+      guest: /db/chem.db
+      tags: [data]
+
+    # --- マップ管理 マスターデータ (SQLite DB) ---
+    - host: assets/map.db
+      guest: /db/map.db
       tags: [data]
 
     # --- テスト用ファイル ---

@@ -84,8 +84,8 @@ normal:
       guest: /bin/cal.bin
     - host: "docs/manpages/*.1"
       guest: /usr/man/
-    - host: assets/fep.dic
-      guest: /sys/fep.dic
+    - host: assets/fep.db
+      guest: /db/fep.db
 
 # --- フルパッケージ (差分) ---
 full:
@@ -144,8 +144,6 @@ debug:
       guest: /bin/args.bin
     - host: programs/nop.bin
       guest: /bin/nop.bin
-    - host: programs/fep_test.bin
-      guest: /usr/bin/fep_test.bin
 
 # --- 追加データパッケージ ---
 append:
