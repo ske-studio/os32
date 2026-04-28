@@ -179,6 +179,9 @@ filesystem:
     - host: programs/tests/board_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/evt_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
@@ -263,6 +266,11 @@ filesystem:
     # --- ボードエンジン マスターデータ (SQLite DB) ---
     - host: assets/board.db
       guest: /db/board.db
+      tags: [data]
+
+    # --- イベントスケジューラ マスターデータ (SQLite DB) ---
+    - host: assets/events.db
+      guest: /db/events.db
       tags: [data]
 
     # --- テスト用ファイル ---

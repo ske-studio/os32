@@ -88,7 +88,7 @@ C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
 # Programs
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libpyxel -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libpyxel -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
@@ -97,7 +97,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -564,6 +564,22 @@ programs/tests/board_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/board_tes
 
 board_test: $(CRT0_OBJ) programs/tests/board_test.bin
 
+# === libos32event Module (イベントスケジューラライブラリ) ===
+LIBEVENT_SRC = $(wildcard programs/libos32event/*.c)
+LIBEVENT_OBJ = $(LIBEVENT_SRC:.c=.o)
+
+programs/libos32event/%.o: programs/libos32event/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
+
+# === Event Test (libos32event テスト) ===
+programs/tests/evt_test.o: programs/tests/evt_test.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
+
+programs/tests/evt_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/evt_test.o $(LIBEVENT_OBJ) $(LIBAI_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/evt_test.o $(LIBEVENT_OBJ) $(LIBAI_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ) -lc -lgcc
+
+evt_test: $(CRT0_OBJ) programs/tests/evt_test.bin
+
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -784,7 +800,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test econ_test ai_test btl_test board_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test econ_test ai_test btl_test board_test evt_test
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -905,6 +921,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 	elif [ "$*" = "tests/ai_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
 	elif [ "$*" = "tests/btl_test" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
+	elif [ "$*" = "tests/evt_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
 	elif [ "$*" = "tests/e2test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
