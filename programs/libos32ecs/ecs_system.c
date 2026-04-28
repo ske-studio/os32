@@ -150,20 +150,41 @@ void sys_health(void)
 }
 
 /* ====================================================================== */
-/*  sys_chem_sync — ChemObject ↔ Entity 座標同期 (スタブ)                 */
+/*  sys_chem_sync — ChemObject ↔ Entity 座標同期                          */
 /*                                                                          */
-/*  libos32chem との実際の連携は Phase 3 で実装する。                       */
-/*  ここではフレームワークのみ。                                            */
+/*  libos32chem とは弱結合 (コールバック方式) で連携する。                   */
+/*  ゲーム側が ecs_set_chem_adapter() でアダプタ関数を設定する。            */
 /* ====================================================================== */
+
+/* Chem アダプタ: libos32chem に依存しないためのコールバック */
+static ecs_chem_adapter_fn g_chem_adapter;
+
+void ecs_set_chem_adapter(ecs_chem_adapter_fn fn)
+{
+    g_chem_adapter = fn;
+}
 
 void sys_chem_sync(void)
 {
-    /* Phase 3: libos32chem 連携時に実装
-     *
-     * 処理内容:
-     *   1. COMP_TRANSFORM | COMP_CHEM を持つ Entity を走査
-     *   2. chem_id が有効なら、chem_get() で ChemObject を取得
-     *   3. ECS側の座標を ChemObject に反映 (ECSが主)
-     *   4. ChemObject の状態変化 (temperature, hp) を ECS側に反映
-     */
+    int i;
+    u32 mask = COMP_TRANSFORM | COMP_CHEM;
+    EcsEntity *ents = ecs__get_entities();
+
+    if (!g_chem_adapter) return;
+
+    for (i = 0; i < ECS_MAX_ENTITIES; i++) {
+        CompChem *cc;
+        CompTransform *t;
+
+        if (ents[i].alive != ECS_ALIVE) continue;
+        if ((ents[i].comp_mask & mask) != mask) continue;
+
+        cc = ecs_get_chem((ecs_entity_t)i);
+        if (cc->chem_id < 0) continue;
+
+        t = ecs_get_transform((ecs_entity_t)i);
+
+        /* アダプタに同期処理を委譲 */
+        g_chem_adapter((ecs_entity_t)i, cc->chem_id, t);
+    }
 }

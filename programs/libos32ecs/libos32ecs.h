@@ -156,6 +156,12 @@ typedef void (*ecs_system_fn)(void);
 typedef void (*ecs_lifecycle_cb)(ecs_entity_t e);
 typedef void (*ecs_timer_cb)(ecs_entity_t e, u8 callback_id);
 
+/* Chem アダプタ: libos32chem に依存しないための間接呼出し
+ * ゲーム側がこの関数内で chem_get() による座標同期を行う
+ * e: ECS Entity ID, chem_id: ChemObject ID, t: Transform (読み書き可) */
+typedef void (*ecs_chem_adapter_fn)(ecs_entity_t e, i16 chem_id,
+                                   CompTransform *t);
+
 /* ====================================================================== */
 /*  7. API — システム管理 (ecs_core.c)                                     */
 /* ====================================================================== */
@@ -289,8 +295,11 @@ void sys_timer(void);
 /* HP=0 の Entity に破棄予約 */
 void sys_health(void);
 
-/* ChemObject ↔ Entity 座標同期 (Phase 3 で実装) */
+/* ChemObject ↔ Entity 座標同期 (アダプタ方式) */
 void sys_chem_sync(void);
+
+/* Chem アダプタの設定 (sys_chem_sync 内で呼ばれる) */
+void ecs_set_chem_adapter(ecs_chem_adapter_fn fn);
 
 /* ====================================================================== */
 /*  14. デバッグ                                                           */

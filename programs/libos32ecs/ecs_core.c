@@ -276,7 +276,53 @@ ecs_timer_cb ecs__get_timer_cb(void)
 /*  デバッグ                                                               */
 /* ====================================================================== */
 
+extern KernelAPI *kapi;
+
 void ecs_debug_dump(void)
 {
-    /* Phase 2 以降で kprintf 出力を実装 */
+    int i, count = 0;
+
+    if (!kapi) return;
+
+    kapi->kprintf(ATTR_CYAN, "[ECS] active=%d / %d, systems=%d\n",
+                  g_active_count, ECS_MAX_ENTITIES, g_num_systems);
+
+    for (i = 0; i < ECS_MAX_ENTITIES; i++) {
+        if (g_entities[i].alive == ECS_DEAD) continue;
+
+        kapi->kprintf(ATTR_WHITE,
+            "  e[%d] alive=%d gen=%d mask=0x%04lx",
+            i, g_entities[i].alive,
+            (int)g_entities[i].gen,
+            (unsigned long)g_entities[i].comp_mask);
+
+        /* Transform座標を表示 (保有している場合) */
+        if (g_entities[i].comp_mask & COMP_TRANSFORM) {
+            CompTransform *t = ecs_get_transform((ecs_entity_t)i);
+            kapi->kprintf(ATTR_WHITE, " pos=(%d,%d)",
+                          (int)t->tile_x, (int)t->tile_y);
+        }
+
+        /* HP表示 (保有している場合) */
+        if (g_entities[i].comp_mask & COMP_HEALTH) {
+            CompHealth *hp = ecs_get_health((ecs_entity_t)i);
+            kapi->kprintf(ATTR_WHITE, " hp=%d/%d",
+                          (int)hp->hp, (int)hp->max_hp);
+        }
+
+        /* タグ表示 */
+        if (g_entities[i].comp_mask & COMP_TAG) {
+            CompTag *tag = ecs_get_tag((ecs_entity_t)i);
+            kapi->kprintf(ATTR_WHITE, " tag=%d",
+                          (int)tag->tag);
+        }
+
+        kapi->kprintf(ATTR_WHITE, "\n");
+        count++;
+        if (count >= 32) {
+            kapi->kprintf(ATTR_YELLOW, "  ... (%d more)\n",
+                          g_active_count - count);
+            break;
+        }
+    }
 }

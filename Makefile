@@ -97,7 +97,7 @@ DBG_OBJ  = programs/libos32/dbgserial.o
 
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -475,6 +475,15 @@ programs/tests/ecs_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/ecs_test.o 
 
 ecs_test: $(CRT0_OBJ) programs/tests/ecs_test.bin
 
+# === ECS Demo (libos32ecs + libos32chem 統合デモ) ===
+programs/tests/ecs_demo.o: programs/tests/ecs_demo.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
+
+programs/tests/ecs_demo.elf: build/app.ld $(CRT0_OBJ) programs/tests/ecs_demo.o $(LIBECS_OBJ) $(LIBCHEM_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/ecs_demo.o $(LIBECS_OBJ) $(LIBCHEM_OBJ) $(LIBOS32DB_OBJ) $(LIBMATH_OBJ) -lc -lgcc
+
+ecs_demo: $(CRT0_OBJ) programs/tests/ecs_demo.bin
+
 # === Gfx Demo Module ===
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -695,7 +704,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo
 
 # crt0.asm のアセンブル (外部プログラム用スタートアップ)
 programs/crt0.o: programs/crt0.asm
@@ -807,6 +816,8 @@ programs/%.bin: programs/%.raw programs/%.elf
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 524288; \
 	elif [ "$*" = "tests/ecs_test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29; \
+	elif [ "$*" = "tests/ecs_demo" ]; then \
+		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 29 --heap 262144; \
 	elif [ "$*" = "tests/e2test" ]; then \
 		python3 tools/mkos32x.py $< $@ --elf programs/$*.elf --api 7 --heap 1048576; \
 	elif [ "$*" = "tests/sqlite_standalone/sqlite_standalone" ]; then \
