@@ -1,5 +1,6 @@
 #include <string.h>
 #include "tilemap_internal.h"
+#include "libos32asset.h"
 
 TilemapState _tilemap;
 
@@ -135,6 +136,38 @@ int tilemap_load(const char *path, int start_id)
     }
 
     _tilemap.kapi->sys_close(fd);
+    return i;
+}
+
+/* asset経由タイルセットロード (キャッシュ対応)
+ * 戻り値: ロードしたタイル数、失敗時 -1
+ * アセットハンドルは呼び出し側で管理 (解放はasset_release)
+ */
+int tilemap_load_asset(asset_handle_t h, int start_id)
+{
+    const u8 *raw;
+    u32 file_sz;
+    int tile_count, i;
+
+    if (!_tilemap.kapi || start_id < 0) return -1;
+    if (h < 0) return -1;
+
+    /* アセットがREADYか確認 */
+    if (asset_state(h) != ASSET_STATE_READY) return -1;
+
+    raw = (const u8 *)asset_data(h);
+    file_sz = asset_size(h);
+    if (!raw || file_sz == 0) return -1;
+
+    tile_count = (int)(file_sz / 128);
+    if (start_id + tile_count > MAX_TILES) {
+        tile_count = MAX_TILES - start_id;
+    }
+
+    for (i = 0; i < tile_count; i++) {
+        tilemap_define(start_id + i, raw + i * 128);
+    }
+
     return i;
 }
 

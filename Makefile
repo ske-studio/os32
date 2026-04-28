@@ -297,8 +297,8 @@ rotate_test: $(CRT0_OBJ) programs/tests/rotate_test.bin
 programs/tests/demo_tile.o: programs/tests/demo_tile.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/tests/demo_tile.elf: build/app.ld $(CRT0_OBJ) programs/tests/demo_tile.o $(TILEMAP_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/demo_tile.o $(TILEMAP_OBJ) $(GFX_OBJ) -lc -lgcc
+programs/tests/demo_tile.elf: build/app.ld $(CRT0_OBJ) programs/tests/demo_tile.o $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/demo_tile.o $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ) -lc -lgcc
 
 demo_tile: $(CRT0_OBJ) programs/tests/demo_tile.bin
 
@@ -306,8 +306,8 @@ demo_tile: $(CRT0_OBJ) programs/tests/demo_tile.bin
 programs/tests/tile_bench.o: programs/tests/tile_bench.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/tests/tile_bench.elf: build/app.ld $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ) -lc -lgcc
+programs/tests/tile_bench.elf: build/app.ld $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/tile_bench.o $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ) -lc -lgcc
 
 tile_bench: $(CRT0_OBJ) programs/tests/tile_bench.bin
 
@@ -413,8 +413,8 @@ map_test: $(CRT0_OBJ) programs/tests/map_test.bin
 programs/tests/map_demo.o: programs/tests/map_demo.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32db -c $< -o $@
 
-programs/tests/map_demo.elf: build/app.ld $(CRT0_OBJ) programs/tests/map_demo.o $(LIBMAP_OBJ) $(LIBOS32DB_OBJ) $(TILEMAP_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/map_demo.o $(LIBMAP_OBJ) $(LIBOS32DB_OBJ) $(TILEMAP_OBJ) $(GFX_OBJ) -lc -lgcc
+programs/tests/map_demo.elf: build/app.ld $(CRT0_OBJ) programs/tests/map_demo.o $(LIBMAP_OBJ) $(LIBOS32DB_OBJ) $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/map_demo.o $(LIBMAP_OBJ) $(LIBOS32DB_OBJ) $(TILEMAP_OBJ) $(GFX_OBJ) $(LIBASSET_OBJ) -lc -lgcc
 
 map_demo: $(CRT0_OBJ) programs/tests/map_demo.bin
 

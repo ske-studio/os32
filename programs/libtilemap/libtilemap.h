@@ -3,6 +3,7 @@
 
 #include "os32api.h"
 #include "libos32gfx.h"
+#include "libos32asset.h"
 
 /* 定数 */
 #define TILE_W          16
@@ -59,6 +60,12 @@ void tilemap_shutdown(void);
 void tilemap_define(int id, const u8 *data_4bpp);
 /* ファイルからタイルセット一括ロード (4bpp packed, 128bytes/tile) */
 int  tilemap_load(const char *path, int start_id);
+/* アセットハンドル経由でタイルセットロード (キャッシュ対応)
+ * h: asset_load() で取得したハンドル (ASSET_STATE_READY であること)
+ * start_id: 開始タイルID
+ * 戻り値: ロードしたタイル数、失敗時 -1
+ */
+int  tilemap_load_asset(asset_handle_t h, int start_id);
 
 /* ===== BGプレーン操作 ===== */
 void tilemap_set(int bg, int col, int row, u16 tile_attr);
