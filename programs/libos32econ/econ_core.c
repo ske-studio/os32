@@ -579,6 +579,9 @@ int econ_init(const char *db_path)
     generate_decay_lut();
     generate_distance_lut();
 
+    /* 不動産サブシステム初期化 (オプショナル) */
+    econ_estate_init();
+
     return 0;
 }
 
@@ -596,6 +599,9 @@ void econ_shutdown(void)
     g_diplomacy_count = 0;
     g_merchant_count = 0;
     g_recipe_count = 0;
+    g_estate_count = 0;
+    g_estate_level_count = 0;
+    g_estate_type_count = 0;
     g_price_policy = (econ_price_policy_fn)0;
     g_restock_policy = (econ_restock_policy_fn)0;
     g_trade_policy = (econ_trade_policy_fn)0;
@@ -621,6 +627,14 @@ void econ_reset(void)
     if (g_econ_db >= 0) {
         g_stock_count = 0;
         load_stocks();
+    }
+
+    /* 不動産の上納金をリセット */
+    {
+        int i;
+        for (i = 0; i < g_estate_count; i++) {
+            g_estates[i].tax = 0;
+        }
     }
 }
 

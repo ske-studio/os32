@@ -116,4 +116,21 @@ void econ__log_trade(u16 market_id, u16 item_id,
 /* 需給カーブ LUT から倍率を参照 (0-255 → 50-200% のような倍率) */
 u16 econ__curve_lookup(u8 curve_type, u8 index);
 
+/* ====================================================================== */
+/*  不動産 (estate) サブシステム — 内部変数                                */
+/* ====================================================================== */
+
+extern EconEstate          g_estates[ECON_ESTATE_MAX];
+extern int                 g_estate_count;
+extern EconEstateLevelDef  g_estate_levels[ECON_ESTATE_LV_MAX];
+extern int                 g_estate_level_count;
+extern EconEstateTypeDef   g_estate_types[ECON_ESTATE_TYPE_MAX];
+extern int                 g_estate_type_count;
+
+/* estate_id から g_estates インデックスを取得 (-1=見つからない) */
+int econ__find_estate(u16 estate_id);
+
+/* stage に接続する交易ルートの本数を数える (PORT種別ボーナス用) */
+int econ__count_routes_for_stage(u8 stage);
+
 #endif /* ECON_INTERNAL_H */

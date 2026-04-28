@@ -53,6 +53,12 @@
 #define ECON_MAX_RECIPES     32
 #define ECON_MAX_RECIPE_MAT   8
 
+#define ECON_ESTATE_MAX      32   /* 同時管理不動産上限 */
+#define ECON_ESTATE_LV_MAX    8   /* 最大レベル */
+#define ECON_ESTATE_TYPE_MAX  8   /* 不動産種別上限 */
+#define ECON_OWNER_NONE    0xFF
+#define ECON_SHARE_FULL     100   /* 単独統治時の収入分配率 */
+
 /* リフレーション間隔 (ターン数) */
 #define ECON_REFL_INTERVAL  360
 
@@ -156,6 +162,54 @@ typedef struct {
     u8   mat_qtys[ECON_MAX_RECIPE_MAT];  /* 素材必要数 */
     u8   _pad[ECON_MAX_RECIPE_MAT];      /* アライメント用 */
 } EconRecipe;
+
+/* 不動産種別 */
+#define ESTATE_TYPE_VILLAGE  0   /* 村 */
+#define ESTATE_TYPE_PORT     1   /* 港 */
+#define ESTATE_TYPE_FORT     2   /* 砦 */
+#define ESTATE_TYPE_MINE     3   /* 鉱山 */
+
+/* 不動産フラグ */
+#define ESTATE_FLAG_BLOCKED  0x01  /* 封鎖 */
+#define ESTATE_FLAG_LOOTED   0x02  /* 略奪中 */
+
+/* 不動産 (EconEstate) — RAMキャッシュ */
+typedef struct {
+    u16  id;
+    u8   owner;           /* オーナーID (0xFF=無主) */
+    u8   level;           /* 1〜ECON_ESTATE_LV_MAX */
+    u8   type;            /* ESTATE_TYPE_* */
+    u8   flags;           /* 封鎖/略奪中等 */
+    u8   co_owner;        /* 共同統治オーナーID (0xFF=なし) */
+    u8   share_pct;       /* 主オーナー収入分配率% (100=単独) */
+    u32  base_value;      /* 基本価値 */
+    u32  value;           /* 現在価値 (base_value * レベル倍率) */
+    u32  tax;             /* 蓄積上納金 */
+    u8   monster_id;      /* 支配モンスターID (0=なし) */
+    u8   stage;           /* 所属ステージ */
+    u16  _pad2;
+} EconEstate;              /* 24B * 32 = 768B */
+
+/* レベルテーブル (RAMキャッシュ) */
+typedef struct {
+    u8   level;
+    u8   income_mul;      /* 収入倍率% (100=等倍) */
+    u8   value_mul;       /* 価値倍率% */
+    u8   _pad;
+    u32  invest_cost_div; /* 投資費用の除数 */
+} EconEstateLevelDef;      /* 8B * 8 = 64B */
+
+/* 不動産種別定義 (RAMキャッシュ) */
+/* 種別ごとの特殊収入ボーナスを定義する */
+#define ESTATE_BONUS_NONE    0  /* 固定ボーナスのみ */
+#define ESTATE_BONUS_TRADE   1  /* 交易ルート数連動 (港) */
+#define ESTATE_BONUS_MINERAL 2  /* 鉱物ボーナス (鉱山) */
+typedef struct {
+    u8   type;            /* ESTATE_TYPE_* */
+    u8   bonus_pct;       /* 基本ボーナス% (0=ボーナスなし) */
+    u8   bonus_mode;      /* ESTATE_BONUS_* */
+    u8   bonus_per_route; /* TRADEモード: ルート1本当たりの追加% */
+} EconEstateTypeDef;       /* 4B * 8 = 32B */
 
 /* ====================================================================== */
 /*  5. ポリシー関数型 (差し替え可能な計算ロジック)                          */
@@ -286,5 +340,52 @@ int  econ_item_count(void);
 int  econ_market_count(void);
 int  econ_active_market_count(void);
 void econ_debug_dump(u16 market_id);
+
+/* ====================================================================== */
+/*  19. API — 不動産 (estate)                                              */
+/* ====================================================================== */
+
+/* 初期化 (econ_init 内部から自動呼出し) */
+int  econ_estate_init(void);
+
+/* 統治操作 */
+int  econ_estate_claim(u16 id, u8 owner);
+void econ_estate_release(u16 id);
+void econ_estate_set_monster(u16 id, u8 monster_id);
+void econ_estate_clear_monster(u16 id);
+
+/* 投資 */
+int  econ_estate_invest(u16 id, u32 *wallet);
+void econ_estate_damage(u16 id);
+u32  econ_estate_invest_cost(u16 id);
+
+/* 収入管理 */
+void econ_estate_accumulate(void);
+u32  econ_estate_collect(u8 owner);
+u32  econ_estate_collect_one(u16 id);
+u32  econ_estate_income(u16 id);
+
+/* 資産計算 */
+u32  econ_estate_total_value(u8 owner);
+int  econ_estate_count(u8 owner);
+int  econ_estate_list(u8 owner, u16 *out, int max);
+
+/* クエリ */
+const EconEstate *econ_estate_get(u16 id);
+int  econ_estate_total(void);
+u8   econ_estate_level(u16 id);
+u32  econ_estate_value(u16 id);
+void econ_estate_set_flag(u16 id, u8 flag);
+void econ_estate_clear_flag(u16 id, u8 flag);
+int  econ_estate_has_flag(u16 id, u8 flag);
+
+/* 種別ボーナス */
+u32  econ_estate_type_bonus(u16 id);
+const EconEstateTypeDef *econ_estate_type_def(u8 type);
+
+/* 共同統治 */
+int  econ_estate_set_co_owner(u16 id, u8 co_owner, u8 share_pct);
+void econ_estate_clear_co_owner(u16 id);
+u32  econ_estate_collect_co(u8 co_owner);
 
 #endif /* LIBOS32ECON_H */

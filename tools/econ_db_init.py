@@ -130,6 +130,32 @@ CREATE TABLE IF NOT EXISTS recipe_materials (
     quantity    INTEGER NOT NULL,
     PRIMARY KEY (recipe_id, item_id)
 );
+
+/* 不動産マスタ */
+CREATE TABLE IF NOT EXISTS estates (
+    id          INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    type        INTEGER NOT NULL DEFAULT 0,
+    stage       INTEGER NOT NULL DEFAULT 1,
+    base_value  INTEGER NOT NULL
+);
+
+/* レベル別パラメータ */
+CREATE TABLE IF NOT EXISTS estate_levels (
+    level       INTEGER PRIMARY KEY,
+    income_mul  INTEGER NOT NULL DEFAULT 100,
+    value_mul   INTEGER NOT NULL DEFAULT 100,
+    invest_div  INTEGER NOT NULL DEFAULT 256
+);
+
+/* 不動産種別定義 */
+CREATE TABLE IF NOT EXISTS estate_types (
+    type            INTEGER PRIMARY KEY,
+    name            TEXT NOT NULL,
+    bonus_pct       INTEGER NOT NULL DEFAULT 0,
+    bonus_mode      INTEGER NOT NULL DEFAULT 0,
+    bonus_per_route INTEGER NOT NULL DEFAULT 0
+);
 """
 
 def insert_test_data(conn):
@@ -248,6 +274,52 @@ def insert_test_data(conn):
     ]
     c.executemany("INSERT INTO merchants VALUES (?,?,?,?,?,?,?)", merchants_data)
 
+    # === 不動産 (4件) ===
+    estates = [
+        # (id, name, type, stage, base_value)
+        (1, 'Greenhill Village',   0, 1, 6400),   # 村 (base_value/640=10)
+        (2, 'Harbor Town',         1, 1, 12800),   # 港 (base_value/640=20)
+        (3, 'Iron Fortress',       2, 2, 19200),   # 砦 (base_value/640=30)
+        (4, 'Gold Mine',           3, 2, 32000),   # 鉱山 (base_value/640=50)
+    ]
+    c.executemany(
+        "INSERT INTO estates (id, name, type, stage, base_value) "
+        "VALUES (?,?,?,?,?)",
+        estates
+    )
+
+    # === レベルテーブル (8段階) ===
+    estate_levels = [
+        # (level, income_mul%, value_mul%, invest_div)
+        (1,  100, 100, 256),   # Lv1: 等倍
+        (2,  120, 130, 128),   # Lv2: 収入1.2倍, 価値1.3倍
+        (3,  150, 170,  64),   # Lv3: 収入1.5倍, 価値1.7倍
+        (4,  180, 210,  32),   # Lv4: 収入1.8倍, 価値2.1倍
+        (5,  210, 250,  16),   # Lv5: 収入2.1倍, 価値2.5倍
+        (6,  240, 250,   8),   # Lv6: 収入2.4倍, 価値2.5倍
+        (7,  250, 250,   4),   # Lv7: 収入2.5倍, 価値2.5倍
+        (8,  250, 250,   2),   # Lv8: 収入2.5倍, 価値2.5倍 (最大)
+    ]
+    c.executemany(
+        "INSERT INTO estate_levels (level, income_mul, value_mul, invest_div) "
+        "VALUES (?,?,?,?)",
+        estate_levels
+    )
+
+    # === 不動産種別定義 (4種) ===
+    estate_types = [
+        # (type, name, bonus_pct, bonus_mode, bonus_per_route)
+        (0, 'Village',  0,  0,  0),   # 村: ボーナスなし
+        (1, 'Port',     10, 1, 10),   # 港: 基本+10%, ルート1本ごと+10%
+        (2, 'Fort',     20, 0,  0),   # 砦: 固定+20%
+        (3, 'Mine',     50, 2,  0),   # 鉱山: 固定+50%
+    ]
+    c.executemany(
+        "INSERT INTO estate_types (type, name, bonus_pct, bonus_mode, bonus_per_route) "
+        "VALUES (?,?,?,?,?)",
+        estate_types
+    )
+
     conn.commit()
 
 def main():
@@ -286,6 +358,12 @@ def main():
     print(f"  Curve pts:  {c.fetchone()[0]}")
     c.execute("SELECT COUNT(*) FROM merchants")
     print(f"  Merchants:  {c.fetchone()[0]}")
+    c.execute("SELECT COUNT(*) FROM estates")
+    print(f"  Estates:    {c.fetchone()[0]}")
+    c.execute("SELECT COUNT(*) FROM estate_levels")
+    print(f"  Est.Levels: {c.fetchone()[0]}")
+    c.execute("SELECT COUNT(*) FROM estate_types")
+    print(f"  Est.Types:  {c.fetchone()[0]}")
 
     conn.close()
     print("Done!")

@@ -12,6 +12,8 @@
 /*  テスト8: 輸送コスト・取引利益                                            */
 /*  テスト9: NPC商人取引                                                    */
 /*  テスト10: クエリ・分析                                                   */
+/*  テスト12: 不動産(estate)サブシステム                                     */
+/*  テスト13: 種別ボーナス・共同統治                                          */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -181,6 +183,48 @@ static int setup_test_db(void)
     db_exec(db, "INSERT INTO curve_points VALUES(0,0,0)");
     db_exec(db, "INSERT INTO curve_points VALUES(0,32,128)");
     db_exec(db, "INSERT INTO curve_points VALUES(0,63,255)");
+
+    /* 不動産テーブル */
+    rc = db_exec(db,
+        "CREATE TABLE estates("
+        "id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+        "type INTEGER NOT NULL DEFAULT 0, "
+        "stage INTEGER NOT NULL DEFAULT 1, "
+        "base_value INTEGER NOT NULL)");
+    if (rc < 0) { db_close(db); return -1; }
+
+    rc = db_exec(db,
+        "CREATE TABLE estate_levels("
+        "level INTEGER PRIMARY KEY, "
+        "income_mul INTEGER NOT NULL DEFAULT 100, "
+        "value_mul INTEGER NOT NULL DEFAULT 100, "
+        "invest_div INTEGER NOT NULL DEFAULT 256)");
+    if (rc < 0) { db_close(db); return -1; }
+
+    /* 不動産データ */
+    db_exec(db, "INSERT INTO estates VALUES(1,'Village',0,1,6400)");
+    db_exec(db, "INSERT INTO estates VALUES(2,'Harbor',1,1,12800)");
+    db_exec(db, "INSERT INTO estates VALUES(3,'Fortress',2,2,19200)");
+
+    /* レベルテーブル */
+    db_exec(db, "INSERT INTO estate_levels VALUES(1,100,100,256)");
+    db_exec(db, "INSERT INTO estate_levels VALUES(2,120,130,128)");
+    db_exec(db, "INSERT INTO estate_levels VALUES(3,150,170,64)");
+    db_exec(db, "INSERT INTO estate_levels VALUES(4,180,210,32)");
+
+    /* 不動産種別定義 */
+    rc = db_exec(db,
+        "CREATE TABLE estate_types("
+        "type INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+        "bonus_pct INTEGER NOT NULL DEFAULT 0, "
+        "bonus_mode INTEGER NOT NULL DEFAULT 0, "
+        "bonus_per_route INTEGER NOT NULL DEFAULT 0)");
+    if (rc < 0) { db_close(db); return -1; }
+
+    /* type0=村:ボーナスなし, type1=港:基本10%+ルート連動, type2=砦:固定20% */
+    db_exec(db, "INSERT INTO estate_types VALUES(0,'Village',0,0,0)");
+    db_exec(db, "INSERT INTO estate_types VALUES(1,'Port',10,1,10)");
+    db_exec(db, "INSERT INTO estate_types VALUES(2,'Fort',20,0,0)");
 
     db_close(db);
     return 0;
@@ -531,6 +575,289 @@ static void test_debug(void)
 }
 
 /* ====================================================================== */
+/*  テスト12: 不動産(estate)サブシステム                                     */
+/* ====================================================================== */
+static void test_estate(void)
+{
+    const EconEstate *e;
+    u32 wallet;
+    u32 income;
+    u32 total;
+    int rc;
+    int cnt;
+    u16 list_buf[8];
+
+    header("Test 12: Estate Subsystem");
+
+    /* --- 12a: 初期状態確認 --- */
+    cnt = econ_estate_total();
+    check("estate_total > 0", cnt > 0);
+    api->kprintf(ATTR_WHITE, "  estates loaded: %d\n", cnt);
+
+    e = econ_estate_get(1);
+    check("estate_get(1) != NULL", e != (void *)0);
+    if (e) {
+        check_eq("estate 1 owner", (int)e->owner, ECON_OWNER_NONE);
+        check_eq("estate 1 level", (int)e->level, 1);
+        check_eq("estate 1 type", (int)e->type, ESTATE_TYPE_VILLAGE);
+        check_eq("estate 1 base_value", (int)e->base_value, 6400);
+        /* Lv1: value_mul=100 → value=6400 */
+        check_eq("estate 1 value", (int)e->value, 6400);
+    }
+
+    /* --- 12b: 統治操作 --- */
+    rc = econ_estate_claim(1, 0);  /* プレイヤー0が村を取得 */
+    check_eq("claim village", rc, 0);
+    rc = econ_estate_claim(2, 0);  /* プレイヤー0が港を取得 */
+    check_eq("claim harbor", rc, 0);
+    rc = econ_estate_claim(3, 1);  /* プレイヤー1が砦を取得 */
+    check_eq("claim fortress", rc, 0);
+
+    cnt = econ_estate_count(0);
+    check_eq("player0 count", cnt, 2);
+    cnt = econ_estate_count(1);
+    check_eq("player1 count", cnt, 1);
+
+    /* リスト取得 */
+    cnt = econ_estate_list(0, list_buf, 8);
+    check_eq("player0 list count", cnt, 2);
+
+    /* --- 12c: 収入計算 --- */
+    /* Village: base_value=6400, /640=10, *income_mul(100)/100=10 */
+    income = econ_estate_income(1);
+    check_eq("village income", (int)income, 10);
+
+    /* Harbor: base_value=12800, /640=20, *100/100=20
+     * 種別ボーナス: PORT bonus_pct=10, bonus_mode=TRADE
+     * stage=1 のルート数: from_id=1 or to_id=1 → 1本 (Capital↔Port)
+     * bonus = 10 + 1*10 = 20%
+     * income = 20 * (100+20)/100 = 24 */
+    income = econ_estate_income(2);
+    check_eq("harbor income w/bonus", (int)income, 24);
+
+    /* 無主の不動産は収入なしを確認: id=99 (存在しない) */
+    income = econ_estate_income(99);
+    check_eq("nonexistent income", (int)income, 0);
+
+    /* --- 12d: 収入蓄積・回収 --- */
+    econ_estate_accumulate();
+    e = econ_estate_get(1);
+    check("tax accumulated", e && e->tax > 0);
+    api->kprintf(ATTR_WHITE, "  village tax after 1 turn: %lu\n",
+                 e ? (unsigned long)e->tax : 0);
+
+    /* もう3ターン蓄積 */
+    econ_estate_accumulate();
+    econ_estate_accumulate();
+    econ_estate_accumulate();
+
+    /* オーナー0の全上納金回収 */
+    total = econ_estate_collect(0);
+    check("collect > 0", total > 0);
+    api->kprintf(ATTR_WHITE, "  collected from player0: %lu\n",
+                 (unsigned long)total);
+
+    /* 回収後tax=0 */
+    e = econ_estate_get(1);
+    check("tax cleared after collect", e && e->tax == 0);
+
+    /* --- 12e: 投資 (レベルアップ) --- */
+    wallet = 100000;
+    rc = econ_estate_invest(1, &wallet);
+    check_eq("invest village", rc, 0);
+    check_eq("village level after invest", (int)econ_estate_level(1), 2);
+    check("wallet decreased", wallet < 100000);
+    api->kprintf(ATTR_WHITE, "  wallet after invest: %lu\n",
+                 (unsigned long)wallet);
+
+    /* Lv2: value_mul=130 → value=6400*130/100=8320 */
+    {
+        u32 val = econ_estate_value(1);
+        check_eq("village value at Lv2", (int)val, 8320);
+    }
+
+    /* Lv2 収入: 10 * 120 / 100 = 12 */
+    income = econ_estate_income(1);
+    check_eq("village income at Lv2", (int)income, 12);
+
+    /* --- 12f: ダメージ (レベルダウン) --- */
+    econ_estate_damage(1);
+    check_eq("village level after damage", (int)econ_estate_level(1), 1);
+
+    /* Lv1でのダメージ → レベル1未満には下がらない */
+    econ_estate_damage(1);
+    check_eq("village level min 1", (int)econ_estate_level(1), 1);
+
+    /* --- 12g: モンスター支配 --- */
+    econ_estate_set_monster(2, 5);
+    income = econ_estate_income(2);
+    check_eq("monster: no income", (int)income, 0);
+
+    econ_estate_clear_monster(2);
+    income = econ_estate_income(2);
+    check("monster cleared: income restored", income > 0);
+
+    /* --- 12h: フラグ操作 --- */
+    econ_estate_set_flag(1, ESTATE_FLAG_BLOCKED);
+    check_eq("flag blocked set", econ_estate_has_flag(1, ESTATE_FLAG_BLOCKED), 1);
+    income = econ_estate_income(1);
+    check_eq("blocked: no income", (int)income, 0);
+
+    econ_estate_clear_flag(1, ESTATE_FLAG_BLOCKED);
+    check_eq("flag blocked cleared", econ_estate_has_flag(1, ESTATE_FLAG_BLOCKED), 0);
+    income = econ_estate_income(1);
+    check("unblocked: income restored", income > 0);
+
+    /* --- 12i: 資産合計 --- */
+    total = econ_estate_total_value(0);
+    check("total_value > 0", total > 0);
+    api->kprintf(ATTR_WHITE, "  player0 total value: %lu\n",
+                 (unsigned long)total);
+
+    /* --- 12j: 放棄 --- */
+    econ_estate_release(1);
+    e = econ_estate_get(1);
+    check("released: owner=NONE", e && e->owner == ECON_OWNER_NONE);
+    cnt = econ_estate_count(0);
+    check_eq("player0 count after release", cnt, 1);
+
+    /* --- 12k: collect_one --- */
+    econ_estate_accumulate();  /* harborに1ターン分蓄積 */
+    {
+        u32 one = econ_estate_collect_one(2);
+        check("collect_one > 0", one > 0);
+        api->kprintf(ATTR_WHITE, "  collect_one harbor: %lu\n",
+                     (unsigned long)one);
+    }
+
+    /* --- 12l: 資金不足テスト --- */
+    {
+        u32 poor = 0;
+        rc = econ_estate_invest(2, &poor);
+        check_eq("invest: no money", rc, -2);
+    }
+}
+
+/* ====================================================================== */
+/*  テスト13: 種別ボーナス・共同統治                                          */
+/* ====================================================================== */
+static void test_estate_phase2(void)
+{
+    u32 income;
+    u32 bonus;
+    u32 total_owner;
+    u32 total_co;
+    int rc;
+    const EconEstateTypeDef *td;
+
+    header("Test 13: Type Bonus + Co-ownership");
+
+    /* --- 13a: 種別定義テーブル確認 --- */
+    td = econ_estate_type_def(ESTATE_TYPE_VILLAGE);
+    check("village type def", td != (void *)0);
+    if (td) {
+        check_eq("village bonus_pct", (int)td->bonus_pct, 0);
+    }
+
+    td = econ_estate_type_def(ESTATE_TYPE_PORT);
+    check("port type def", td != (void *)0);
+    if (td) {
+        check_eq("port bonus_pct", (int)td->bonus_pct, 10);
+        check_eq("port bonus_mode", (int)td->bonus_mode, ESTATE_BONUS_TRADE);
+        check_eq("port bonus_per_route", (int)td->bonus_per_route, 10);
+    }
+
+    td = econ_estate_type_def(ESTATE_TYPE_FORT);
+    check("fort type def", td != (void *)0);
+    if (td) {
+        check_eq("fort bonus_pct", (int)td->bonus_pct, 20);
+    }
+
+    /* --- 13b: 種別ボーナス計算 --- */
+    /* Village (id=1): type=VILLAGE, bonus=0 */
+    econ_estate_claim(1, 0);
+    bonus = econ_estate_type_bonus(1);
+    check_eq("village type_bonus", (int)bonus, 0);
+
+    /* Harbor (id=2): type=PORT, stage=1
+     * ルート: (1,2,5,...) → stage=1に1本接続
+     * bonus = 10 + 1*10 = 20% */
+    bonus = econ_estate_type_bonus(2);
+    check_eq("harbor type_bonus", (int)bonus, 20);
+
+    /* Fortress (id=3): type=FORT, bonus=20% (固定) */
+    econ_estate_claim(3, 0);
+    bonus = econ_estate_type_bonus(3);
+    check_eq("fortress type_bonus", (int)bonus, 20);
+
+    /* Fortress収入: base=19200/640=30, *100/100=30, *(100+20)/100=36 */
+    income = econ_estate_income(3);
+    check_eq("fortress income w/bonus", (int)income, 36);
+
+    /* --- 13c: 共同統治設定 --- */
+    /* player0が港(id=2)を共同統治、co_owner=2, share=60% (主40%) */
+    rc = econ_estate_set_co_owner(2, 2, 60);
+    check_eq("set_co_owner", rc, 0);
+    {
+        const EconEstate *e2 = econ_estate_get(2);
+        check("co_owner set", e2 && e2->co_owner == 2);
+        check("share_pct set", e2 && e2->share_pct == 60);
+    }
+
+    /* 無効なshare_pct */
+    rc = econ_estate_set_co_owner(2, 3, 0);
+    check_eq("co_owner: share=0 rejected", rc, -2);
+    rc = econ_estate_set_co_owner(2, 3, 100);
+    check_eq("co_owner: share=100 rejected", rc, -2);
+
+    /* --- 13d: 共同統治収入分配 --- */
+    /* harbor taxをクリアしてから蓄積 */
+    econ_estate_collect(0);  /* 残りの前回分をクリア */
+    econ_estate_collect_co(2);
+    econ_estate_accumulate();
+    econ_estate_accumulate();
+
+    /* harbor income=24/turn, 2ターン → tax=48 */
+    /* player0 collect: 48 * 60 / 100 = 28 (remainder=20) */
+    total_owner = econ_estate_collect(0);
+    api->kprintf(ATTR_WHITE, "  co-own: owner share = %lu\n",
+                 (unsigned long)total_owner);
+    /* 砦(id=3)の分も含まれる: 36*2=72 (share=100%) + harbor owner分 */
+    check("owner got partial", total_owner > 0);
+
+    /* co_owner(player2)が残りを回収 */
+    total_co = econ_estate_collect_co(2);
+    api->kprintf(ATTR_WHITE, "  co-own: co_owner share = %lu\n",
+                 (unsigned long)total_co);
+    check("co_owner got share", total_co > 0);
+
+    /* 回収後はtax=0 */
+    {
+        const EconEstate *e2 = econ_estate_get(2);
+        check("harbor tax cleared", e2 && e2->tax == 0);
+    }
+
+    /* --- 13e: 共同統治解除 --- */
+    econ_estate_clear_co_owner(2);
+    {
+        const EconEstate *e2 = econ_estate_get(2);
+        check("co_owner cleared",
+              e2 && e2->co_owner == ECON_OWNER_NONE);
+        check("share restored to 100",
+              e2 && e2->share_pct == ECON_SHARE_FULL);
+    }
+
+    /* 単独統治に戻ったらcollectは全額 */
+    econ_estate_accumulate();
+    total_owner = econ_estate_collect(0);
+    check("solo: full collect", total_owner > 0);
+    {
+        const EconEstate *e2 = econ_estate_get(2);
+        check("solo: tax=0", e2 && e2->tax == 0);
+    }
+}
+
+/* ====================================================================== */
 /*  エントリポイント                                                       */
 /* ====================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
@@ -556,6 +883,8 @@ int main(int argc, char **argv, KernelAPI *k)
         test_merchant();
         test_query();
         test_debug();
+        test_estate();
+        test_estate_phase2();
         econ_shutdown();
     }
 
