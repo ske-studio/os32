@@ -21,7 +21,7 @@
 static IME_State g_ime;
 
 /* 辞書ファイルのパス */
-#define IME_DICT_PATH  "/sys/fep.dic"
+#define IME_DICT_PATH  "/db/fep.db"
 
 /* ======================================================================== */
 /*  プリエディット表示 (TVRAM 25行目 = y=24)                                 */
@@ -175,6 +175,11 @@ static void commit_candidate(void)
         g_ime.commit_len = len;
         g_ime.commit_pos = 0;
         g_ime.commit_buf[g_ime.commit_len] = '\0';
+
+        /* 学習: ユーザーが選択した候補を記録 */
+        ime_dict_learn(&g_ime.dict,
+                       g_ime.results[g_ime.candidate_idx].yomi,
+                       g_ime.results[g_ime.candidate_idx].kanji);
     }
 
     /* 最長一致: 変換対象部分だけ消費し、残りをバッファ先頭に移動 */

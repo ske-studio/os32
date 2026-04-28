@@ -19,54 +19,11 @@
 #define IME_MODE_KATAKANA  2    /* カタカナ入力 */
 
 /* ======================================================================== */
-/*  辞書バイナリ構造体 (.dic フォーマット)                                    */
+/*  辞書検索結果                                                             */
 /* ======================================================================== */
-
-#define IME_DICT_MAGIC      0x54434944UL  /* "DICT" LE */
-#define IME_DICT_VERSION    2
 
 /* 検索結果の最大数 */
 #define IME_MAX_RESULTS     32
-
-/* データブロックバッファサイズ (最大ブロック 48.6KB + 余裕) */
-#define IME_BLOCK_BUF_SIZE  51200
-
-/* ブロックキャッシュサイズ (16KB FIFO) */
-#define IME_CACHE_SIZE      16384
-#define IME_CACHE_HDR_SIZE  12
-
-/* ファイルヘッダ (16B) */
-typedef struct {
-    u32 magic;
-    u32 version;
-    u32 total_words;
-    u32 l1_count;
-} IME_DictHeader;
-
-/* Level-1 インデックスエントリ (12B) */
-typedef struct {
-    u8  key_char[4];    /* 先頭1文字 (UTF-8, ゼロパディング) */
-    u32 l2_offset;      /* Level-2 開始位置 (ファイル絶対オフセット) */
-    u32 l2_count;       /* Level-2 エントリ数 */
-} IME_L1Entry;
-
-/* Level-2 インデックスエントリ (12B) */
-typedef struct {
-    u8  key_chars[8];   /* 先頭2文字 (UTF-8, ゼロパディング) */
-    u32 data_offset;    /* データブロック開始位置 */
-} IME_L2Entry;
-
-/* キャッシュエントリヘッダ (12B) */
-typedef struct {
-    u8  l2_key[8];      /* Level-2 キー (照合用) */
-    u32 block_size;     /* データブロックサイズ */
-} IME_CacheHdr;
-
-/* WordMeta32 ビットフィールド操作マクロ */
-#define WMETA_YOMI_LEN(m)   ((m) & 0x1F)
-#define WMETA_KANJI_LEN(m)  (((m) >> 5) & 0x1F)
-#define WMETA_POS_ID(m)     (((m) >> 10) & 0x7FF)
-#define WMETA_COST(m)       (((m) >> 21) & 0x7FF)
 
 /* 検索結果エントリ */
 typedef struct {
@@ -77,19 +34,14 @@ typedef struct {
 } IME_Result;
 
 /* ======================================================================== */
-/*  辞書コンテキスト                                                         */
+/*  辞書コンテキスト (SQLite ベース)                                         */
 /* ======================================================================== */
 
 typedef struct {
-    IME_DictHeader header;
-    IME_L1Entry   *l1_index;        /* メモリ常駐 Level-1 */
-    IME_L2Entry   *l2_index;        /* メモリ常駐 Level-2 */
-    u32            l2_total;         /* Level-2 総エントリ数 */
-    char           dict_path[128];
-    u8            *block_buf;        /* データブロック読み込みバッファ */
-    u32            block_buf_size;
-    u8            *cache_buf;        /* 16KB FIFOブロックキャッシュ */
-    u32            cache_used;       /* キャッシュ使用済みバイト数 */
+    void *db;            /* sqlite3* (前方宣言回避のため void*) */
+    void *exact_stmt;    /* sqlite3_stmt* (完全一致検索) */
+    void *prefix_stmt;   /* sqlite3_stmt* (前方一致検索) */
+    void *learn_stmt;    /* sqlite3_stmt* (学習UPSERT) */
 } IME_Dict;
 
 /* ======================================================================== */
@@ -123,6 +75,7 @@ typedef struct {
     IME_Dict    dict;
     int         dict_loaded;    /* 辞書ロード済みフラグ */
 } IME_State;
+
 
 /* ======================================================================== */
 /*  公開API                                                                  */
@@ -169,5 +122,6 @@ void ime_hira_to_kata(char *utf8_str);
 int  ime_dict_open(IME_Dict *dict, const char *path);
 int  ime_dict_search(IME_Dict *dict, const char *yomi,
                      IME_Result *results, int max_results);
+void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji);
 
 #endif /* __IME_H */
