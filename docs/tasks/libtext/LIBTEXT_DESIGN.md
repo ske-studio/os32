@@ -370,20 +370,20 @@ if (text_get_state(0) != TEXT_STATE_IDLE) {
 
 ### Phase 1: コアエンジン
 
-- [ ] `libos32text.h` ヘッダ作成 (型定義, 定数, 全API宣言)
-- [ ] `text_core.c` 実装 (init/shutdown, DB取得, スロット管理)
-- [ ] `text_update.c` 実装 (タイプライター進行, ページ制御)
-- [ ] `text_var.c` 実装 (変数テーブル, 展開処理)
-- [ ] Makefile 統合 (`LIBTEXT_OBJ`, リンク順序)
-- [ ] `tools/text_db_init.py` テストデータ生成
-- [ ] `text_test.c` テストプログラム (GFX不要)
-- [ ] ビルド・NP21/W実機テスト
+- [x] `libos32text.h` ヘッダ作成 (型定義, 定数, 全API宣言)
+- [x] `text_core.c` 実装 (init/shutdown, DB取得, スロット管理)
+- [x] `text_update.c` 実装 (タイプライター進行, ページ制御)
+- [x] `text_var.c` 実装 (変数テーブル, 展開処理)
+- [x] Makefile 統合 (`LIBTEXT_OBJ`, リンク順序)
+- [x] `tools/text_db_init.py` テストデータ生成
+- [x] `text_test.c` テストプログラム (GFX不要)
+- [x] ビルド・NP21/W実機テスト
 
 ### Phase 2: グループ会話 + デモ
 
-- [ ] `text_load_group()` / `text_next_message()` 実装
-- [ ] `text_demo.c` ビジュアルデモ (メッセージウィンドウ描画)
-- [ ] NP21/W実機テスト
+- [x] `text_load_group()` / `text_next_message()` 実装
+- [x] `text_demo.c` ビジュアルデモ (メッセージウィンドウ描画)
+- [x] NP21/W実機テスト
 
 ### Phase 3: ECS連携 + ゲーム統合 *(保留)*
 

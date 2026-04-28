@@ -167,6 +167,9 @@ filesystem:
     - host: programs/tests/text_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/text_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/econ_test.bin
       guest: /usr/bin/
       tags: [programs]
@@ -180,6 +183,9 @@ filesystem:
       guest: /usr/bin/
       tags: [programs]
     - host: programs/tests/evt_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/inv_test.bin
       guest: /usr/bin/
       tags: [programs]
     - host: programs/tests/e2test.bin
@@ -271,6 +277,11 @@ filesystem:
     # --- イベントスケジューラ マスターデータ (SQLite DB) ---
     - host: assets/events.db
       guest: /db/events.db
+      tags: [data]
+
+    # --- インベントリエンジン マスターデータ (SQLite DB) ---
+    - host: assets/items.db
+      guest: /db/items.db
       tags: [data]
 
     # --- テスト用ファイル ---
