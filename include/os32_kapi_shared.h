@@ -44,7 +44,7 @@ typedef signed long    i32;
 /* ======================================================================== */
 
 /* DB 最大接続数 */
-#define DB_MAX_CONNECTIONS    4
+#define DB_MAX_CONNECTIONS    8
 
 /* DB結果ステータス */
 #define DB_STATUS_DONE     0    /* クエリ完了 (行なし or 最終行到達) */

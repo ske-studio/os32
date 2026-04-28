@@ -17,7 +17,7 @@ NEC PC-9801 向け 32bit OS (OS32) に SQLite 3.53.0 を組み込む。
 | スレッド安全性 | 無効 (SQLITE_THREADSAFE=0) |
 | メモリ管理 | MEMSYS5 固定プール (カーネル予約域) |
 | ジャーナルモード | DELETE (デフォルト) |
-| DB 接続上限 | 2 (システム 1 + アプリ 1) |
+| DB 接続上限 | 8 (`DB_MAX_CONNECTIONS`) |
 | ターゲット FS | ext2 (メイン) + HostDrvFS |
 
 ---
@@ -131,7 +131,7 @@ DB クエリ結果のやり取りに 1 ブロック (16KB) を使用する。
 ### 4-1. 接続スロット
 
 ```c
-#define DB_MAX_CONNECTIONS  2  /* システム用 1 + アプリ用 1 */
+#define DB_MAX_CONNECTIONS  8
 
 typedef struct {
     int in_use;

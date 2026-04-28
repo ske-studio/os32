@@ -232,7 +232,7 @@ db_close(0)            ───→  kapi_db_close()
 | Test 3: Error Handling | 不正テーブル/不正SQL/不正ハンドル |
 | Test 4: db_finalize | 結果セット途中放棄 → 新クエリ成功確認 |
 | Test 5: db_last_error | エラー後にメッセージ取得 (KAPI + 共有メモリ両方) |
-| Test 6: Connection Limit | DB_MAX_CONNECTIONS (4) 超過 → 拒否確認 |
+| Test 6: Connection Limit | DB_MAX_CONNECTIONS (8) 超過 → 拒否確認 |
 | Test 7: Double Close | 二重 close → -1 返却・クラッシュしないこと |
 
 ### 2.7 VFS 堅牢化 ✅
@@ -421,7 +421,7 @@ db_close(0)            ───→  kapi_db_close()
 
 - [ ] **sqlite3 シェルコマンド** (`.tables`, `.schema`, `.dump`)
 - [x] ~~**KAPI: db_mem_used()** (メモリ使用量モニタリング)~~ ← Phase 3 で実装済み
-- [ ] **複数接続数の拡張** (`DB_MAX_CONNECTIONS` 増加)
+- [x] ~~**複数接続数の拡張** (`DB_MAX_CONNECTIONS` 4→8 に増加)~~
 - [ ] **辞書の動的切り替え** — S/M/L バリアントをシェルから切り替え
 
 ---
