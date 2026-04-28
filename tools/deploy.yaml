@@ -158,6 +158,12 @@ filesystem:
     - host: programs/tests/asset_demo.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/ecs_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/ecs_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
