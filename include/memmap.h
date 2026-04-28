@@ -19,7 +19,8 @@
 /*      0x149000-0x168FFF Unicode-JIS変換テーブル (128KB)                    */
 /*      0x169000-0x188FFF GFXバックバッファ (128KB, 4プレーン)               */
 /*      0x189000-0x189FFF KernelAPIテーブル (4KB)                            */
-/*      0x18A000-0x23FFFF SQLite拡張域 (728KB, -O0用)                       */
+/*      0x18A000-0x21FFFF SQLite拡張域 (code+BSS+MEMSYS5, ~600KB)           */
+/*      0x220000-0x23FFFF SQLite代替スタック (128KB)                         */
 /*                                                                          */
 /*    [カーネル予約 0x240000-0x2FFFFF]                                       */
 /*      NOT PRESENT                                                          */
@@ -95,14 +96,14 @@
 /* KernelAPIテーブルアドレスは os32_kapi_shared.h で定義 (KAPI_ADDR) */
 
 /* ====================================================================== */
-/*  SQLite用代替スタック (0x200000-0x21FFFF, 128KB)                          */
+/*  SQLite用代替スタック (0x220000-0x23FFFF, 128KB)                          */
 /*  SQLite B-tree操作はカーネルスタック(64KB)を超過するため、                 */
-/*  拡張メモリ上の未使用R/W領域に代替スタックを配置する。                     */
-/*  __sqlite_end(0x1FE580)以降の空きを利用。                                 */
+/*  拡張メモリ上の代替スタックに切り替えて実行する。                          */
+/*  MEMSYS5 プール拡張のため 0x200000→0x220000 に移動済み (2026-04)。        */
 /* ====================================================================== */
-#define MEM_SQLITE_STACK_BASE  0x200000UL  /* 代替スタック下端 */
+#define MEM_SQLITE_STACK_BASE  0x220000UL  /* 代替スタック下端 */
 #define MEM_SQLITE_STACK_SIZE  0x020000UL  /* 128KB */
-#define MEM_SQLITE_STACK_TOP   0x21FFF0UL  /* ESP初期値 (16バイトアライン) */
+#define MEM_SQLITE_STACK_TOP   0x23FFF0UL  /* ESP初期値 (16バイトアライン) */
 
 /* ====================================================================== */
 /*  カーネル予約域 (NOT PRESENT)                                             */

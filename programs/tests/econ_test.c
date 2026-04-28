@@ -629,11 +629,11 @@ static void test_estate(void)
 
     /* Harbor: base_value=12800, /640=20, *100/100=20
      * 種別ボーナス: PORT bonus_pct=10, bonus_mode=TRADE
-     * stage=1 のルート数: from_id=1 or to_id=1 → 1本 (Capital↔Port)
-     * bonus = 10 + 1*10 = 20%
-     * income = 20 * (100+20)/100 = 24 */
+     * stage=1 のルート数: (1,2) + (1,3) = 2本
+     * bonus = 10 + 2*10 = 30%
+     * income = 20 * (100+30)/100 = 26 */
     income = econ_estate_income(2);
-    check_eq("harbor income w/bonus", (int)income, 24);
+    check_eq("harbor income w/bonus", (int)income, 26);
 
     /* 無主の不動産は収入なしを確認: id=99 (存在しない) */
     income = econ_estate_income(99);
@@ -780,10 +780,10 @@ static void test_estate_phase2(void)
     check_eq("village type_bonus", (int)bonus, 0);
 
     /* Harbor (id=2): type=PORT, stage=1
-     * ルート: (1,2,5,...) → stage=1に1本接続
-     * bonus = 10 + 1*10 = 20% */
+     * ルート: (1,2) + (1,3) → stage=1に2本接続
+     * bonus = 10 + 2*10 = 30% */
     bonus = econ_estate_type_bonus(2);
-    check_eq("harbor type_bonus", (int)bonus, 20);
+    check_eq("harbor type_bonus", (int)bonus, 30);
 
     /* Fortress (id=3): type=FORT, bonus=20% (固定) */
     econ_estate_claim(3, 0);
