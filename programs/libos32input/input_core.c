@@ -11,8 +11,8 @@
 /*  内部グローバル状態                                                      */
 /* ====================================================================== */
 
-/* KernelAPIポインタ */
-static KernelAPI *g_api;
+/* KernelAPIポインタ (input_config.c からも参照されるため非static) */
+KernelAPI *g_api;
 
 /* アクション状態配列 */
 InputActionState g_inp_actions[INPUT_MAX_ACTIONS];
@@ -23,6 +23,9 @@ int          g_inp_num_bindings;
 
 /* マウスキャッシュ */
 static InputMouseCache g_mouse_cache;
+
+/* コンテキスト保存スロット (P2) */
+InputContext g_inp_ctx_slots[INPUT_CTX_MAX];
 
 /* ====================================================================== */
 /*  内部関数: マウスのレイジーポーリング                                     */
@@ -63,6 +66,7 @@ int input_init(KernelAPI *api)
     g_inp_num_bindings = 0;
 
     memset(&g_mouse_cache, 0, sizeof(g_mouse_cache));
+    memset(g_inp_ctx_slots, 0, sizeof(g_inp_ctx_slots));
 
     return 0;
 }
@@ -75,6 +79,10 @@ void input_update(void)
 {
     int i;
     fix16_t raw;
+    u32 cur_mod;
+
+    /* 現在の修飾キー状態を1回だけ取得 */
+    cur_mod = g_api->kbd_get_modifiers();
 
     /* 1. prev_value <- value をシフト, value リセット */
     for (i = 0; i < INPUT_MAX_ACTIONS; i++) {
@@ -89,6 +97,16 @@ void input_update(void)
     for (i = 0; i < g_inp_num_bindings; i++) {
         InputBinding *b = &g_inp_bindings[i];
         int aid = b->action_id;
+
+        /* 修飾キーマスクの確認 (P2)
+         * modifier_mask が非0の場合、要求される修飾キーが
+         * 全て押されていなければこのバインディングをスキップ
+         */
+        if (b->modifier_mask != 0) {
+            if ((cur_mod & b->modifier_mask) != b->modifier_mask) {
+                continue;
+            }
+        }
 
         raw = 0;
 
@@ -137,6 +155,7 @@ void input_shutdown(void)
     memset(g_inp_bindings, 0, sizeof(g_inp_bindings));
     g_inp_num_bindings = 0;
     memset(&g_mouse_cache, 0, sizeof(g_mouse_cache));
+    memset(g_inp_ctx_slots, 0, sizeof(g_inp_ctx_slots));
     g_api = NULL;
 }
 

@@ -522,10 +522,10 @@ libos32chem (~5.5KB), libos32map (~16KB) と比較しても最小クラス。
 
 ### Phase 2: 高度な機能
 
-- [ ] コンテキスト切替 (save_context / load_context)
-- [ ] 複合キー (修飾キーマスク対応)
-- [ ] マウス座標・差分取得のユーティリティ
-- [ ] キーコンフィグのファイル保存・読み込み
+- [x] コンテキスト切替 (save_context / load_context) — `input_ctx.c`
+- [x] 複合キー (修飾キーマスク対応) — `InputBinding.modifier_mask` + `input_bind_ex()`
+- [x] マウス座標・差分取得のユーティリティ (P1で実装済み)
+- [x] キーコンフィグのファイル保存・読み込み — `input_config.c`
 
 ### Phase 3: GUIシェル・ゲームパッド
 

@@ -1,8 +1,13 @@
 /* ======================================================================== */
-/*  INPUT_TEST.C — libos32input テストプログラム                              */
+/*  INPUT_TEST.C — libos32input テストプログラム (Phase 1 + Phase 2)          */
 /*                                                                          */
 /*  キーボード/マウスのバインディングを登録し、                               */
 /*  入力状態をCUIでリアルタイム表示する。ESCで終了。                          */
+/*                                                                          */
+/*  Phase 2 テスト:                                                          */
+/*    - コンテキスト切替 (save_context / load_context)                       */
+/*    - 複合キー (Ctrl+S / Ctrl+L バインディング)                           */
+/*    - キーコンフィグ保存・読み込み                                          */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -16,13 +21,22 @@
 #define ACT_CONFIRM     4
 #define ACT_CANCEL      5
 #define ACT_MENU        6
+#define ACT_SAVE        7   /* Ctrl+S — P2 */
+#define ACT_LOAD        8   /* Ctrl+L — P2 */
 
-static const char *act_names[] = {
-    "UP   ", "DOWN ", "LEFT ", "RIGHT",
-    "OK   ", "ESC  ", "MENU "
-};
 
 static KernelAPI *api;
+static int pass_count;
+static int fail_count;
+
+#define TEST(msg, cond) do { \
+    if (cond) { \
+        pass_count++; \
+    } else { \
+        api->kprintf(ATTR_RED, "FAIL: %s\n", msg); \
+        fail_count++; \
+    } \
+} while(0)
 
 static void setup_bindings(void)
 {
@@ -42,63 +56,183 @@ static void setup_bindings(void)
 
     /* メニュー = F1 */
     input_bind(ACT_MENU, INP_DEV_KEYBOARD, 0x62, FIX16_ONE);
+
+    /* P2: 複合キーバインディング */
+    input_bind_ex(ACT_SAVE, INP_DEV_KEYBOARD, 0x1F, FIX16_ONE, INP_MOD_CTRL);
+    input_bind_ex(ACT_LOAD, INP_DEV_KEYBOARD, 0x25, FIX16_ONE, INP_MOD_CTRL);
 }
 
-int main(int argc, char **argv, KernelAPI *_api)
+/* ====================================================================== */
+/*  P2 自動テスト (API呼び出しの結果検証)                                    */
+/* ====================================================================== */
+
+static void run_unit_tests(void)
 {
-    int i;
-    i16 mx, my;
+    int ret;
 
-    api = _api;
-    (void)argc; (void)argv;
+    api->kprintf(ATTR_CYAN, "\n--- Phase 2 unit tests ---\n");
 
-    api->kprintf(ATTR_WHITE, "=== libos32input test ===\n");
-    api->kprintf(ATTR_CYAN,  "Arrow/Space/Esc/F1/MouseL/MouseR\n");
-    api->kprintf(ATTR_CYAN,  "Press ESC to quit.\n\n");
+    /* --- コンテキスト切替テスト --- */
+    api->kprintf(ATTR_WHITE, "[ctx] save_context / load_context ...\n");
 
     input_init(api);
     setup_bindings();
 
-    for (;;) {
-        input_update();
+    /* 現在のバインディング数を確認 (setup_bindings: 11個) */
+    {
+        extern int g_inp_num_bindings;
+        TEST("ctx: bindings after setup == 11",
+             g_inp_num_bindings == 11);
 
-        /* ESC (ACT_CANCEL) のトリガーで終了 */
-        if (input_triggered(ACT_CANCEL)) {
-            break;
-        }
+        /* スロット0に保存 */
+        ret = input_save_context(0);
+        TEST("ctx: save_context(0) == 0", ret == 0);
 
-        /* 各アクションの状態を表示 */
-        for (i = 0; i <= ACT_MENU; i++) {
-            if (input_triggered(i)) {
-                api->kprintf(ATTR_GREEN, "[TRIG] %s\n", act_names[i]);
-            }
-            if (input_released(i)) {
-                api->kprintf(ATTR_YELLOW, "[REL]  %s\n", act_names[i]);
-            }
-            /* リピート判定テスト (hold=30, repeat=10) */
-            if (input_held(i, 30, 10) && !input_triggered(i)) {
-                api->kprintf(ATTR_MAGENTA, "[RPT]  %s\n", act_names[i]);
-            }
-        }
+        /* 全バインディング解除 */
+        input_unbind_all();
+        TEST("ctx: unbind_all -> 0 bindings",
+             g_inp_num_bindings == 0);
 
-        /* マウス座標表示 (ボタン押下時のみ) */
-        if (input_mouse_btn(MOUSE_BTN_LEFT) ||
-            input_mouse_btn(MOUSE_BTN_RIGHT)) {
-            input_get_mouse(&mx, &my);
-            api->kprintf(ATTR_WHITE, "Mouse: (%d, %d)\n",
-                         (int)mx, (int)my);
-        }
+        /* スロット0から復元 */
+        ret = input_load_context(0);
+        TEST("ctx: load_context(0) == 0", ret == 0);
+        TEST("ctx: after load bindings == 11",
+             g_inp_num_bindings == 11);
 
-        /* 少し待つ (約16ms ≒ 60fps) */
-        {
-            u32 start = api->get_tick();
-            while (api->get_tick() - start < 16) {
-                /* busy wait */
-            }
-        }
+        /* 範囲外のスロット */
+        ret = input_save_context(-1);
+        TEST("ctx: save_context(-1) == -1", ret == -1);
+        ret = input_save_context(INPUT_CTX_MAX);
+        TEST("ctx: save_context(max) == -1", ret == -1);
+
+        /* 未保存スロットからのload */
+        ret = input_load_context(3);
+        TEST("ctx: load_context(unused=3) == -1", ret == -1);
+    }
+
+    /* --- 別コンテキストの切替テスト --- */
+    api->kprintf(ATTR_WHITE, "[ctx] context switching ...\n");
+    {
+        extern int g_inp_num_bindings;
+
+        /* スロット1にメニュー用バインディングを保存 */
+        input_unbind_all();
+        input_bind(ACT_CONFIRM, INP_DEV_KEYBOARD, 0x34, FIX16_ONE);
+        input_bind(ACT_CANCEL,  INP_DEV_KEYBOARD, 0x00, FIX16_ONE);
+        TEST("ctx: menu bindings == 2", g_inp_num_bindings == 2);
+
+        ret = input_save_context(1);
+        TEST("ctx: save_context(1) == 0", ret == 0);
+
+        /* スロット0 (ゲーム用) に戻す */
+        ret = input_load_context(0);
+        TEST("ctx: restored game bindings == 11",
+             g_inp_num_bindings == 11);
+
+        /* スロット1 (メニュー用) に切替 */
+        ret = input_load_context(1);
+        TEST("ctx: restored menu bindings == 2",
+             g_inp_num_bindings == 2);
+    }
+
+    /* --- 複合キー (modifier_mask) テスト --- */
+    api->kprintf(ATTR_WHITE, "[mod] modifier_mask ...\n");
+    {
+        extern InputBinding g_inp_bindings[];
+        extern int g_inp_num_bindings;
+
+        input_unbind_all();
+
+        /* Ctrl+S のバインディング */
+        ret = input_bind_ex(ACT_SAVE, INP_DEV_KEYBOARD, 0x1F,
+                            FIX16_ONE, INP_MOD_CTRL);
+        TEST("mod: bind_ex(Ctrl+S) == 0", ret == 0);
+        TEST("mod: binding[0].modifier_mask == INP_MOD_CTRL",
+             g_inp_bindings[0].modifier_mask == INP_MOD_CTRL);
+
+        /* 修飾キーなしの通常バインディング */
+        ret = input_bind(ACT_CONFIRM, INP_DEV_KEYBOARD, 0x34, FIX16_ONE);
+        TEST("mod: bind(Space) == 0", ret == 0);
+        TEST("mod: binding[1].modifier_mask == 0",
+             g_inp_bindings[1].modifier_mask == 0);
+    }
+
+    /* --- キーコンフィグ保存・読み込みテスト --- */
+    api->kprintf(ATTR_WHITE, "[cfg] save_config / load_config ...\n");
+    {
+        extern int g_inp_num_bindings;
+        int loaded;
+
+        /* テスト用バインディングを設定 */
+        input_unbind_all();
+        input_bind(ACT_CONFIRM, INP_DEV_KEYBOARD, 0x34, FIX16_ONE);
+        input_bind(ACT_CANCEL,  INP_DEV_KEYBOARD, 0x00, FIX16_ONE);
+        input_bind_ex(ACT_SAVE, INP_DEV_KEYBOARD, 0x1F,
+                      FIX16_ONE, INP_MOD_CTRL);
+        TEST("cfg: 3 bindings before save", g_inp_num_bindings == 3);
+
+        /* 保存 */
+        ret = input_save_config("/tmp/test_input.cfg");
+        TEST("cfg: save_config == 0", ret == 0);
+
+        /* 全解除してから読み込み */
+        input_unbind_all();
+        TEST("cfg: 0 bindings after unbind_all",
+             g_inp_num_bindings == 0);
+
+        loaded = input_load_config("/tmp/test_input.cfg");
+        TEST("cfg: load_config == 3", loaded == 3);
+        TEST("cfg: bindings restored == 3",
+             g_inp_num_bindings == 3);
+
+        /* 不正なファイルの読み込み */
+        loaded = input_load_config("/tmp/nonexistent_file.cfg");
+        TEST("cfg: load_config(nonexistent) == -1", loaded == -1);
+
+        /* NULLパスのテスト */
+        ret = input_save_config(NULL);
+        TEST("cfg: save_config(NULL) == -1", ret == -1);
+        loaded = input_load_config(NULL);
+        TEST("cfg: load_config(NULL) == -1", loaded == -1);
+    }
+
+    /* --- 修飾キー定数の整合性テスト --- */
+    api->kprintf(ATTR_WHITE, "[const] modifier constants ...\n");
+    {
+        TEST("const: INP_MOD_SHIFT == 0x01", INP_MOD_SHIFT == 0x01);
+        TEST("const: INP_MOD_CAPS  == 0x02", INP_MOD_CAPS  == 0x02);
+        TEST("const: INP_MOD_KANA  == 0x04", INP_MOD_KANA  == 0x04);
+        TEST("const: INP_MOD_GRPH  == 0x08", INP_MOD_GRPH  == 0x08);
+        TEST("const: INP_MOD_CTRL  == 0x10", INP_MOD_CTRL  == 0x10);
     }
 
     input_shutdown();
-    api->kprintf(ATTR_WHITE, "\nDone.\n");
-    return 0;
+
+    /* --- 結果サマリ --- */
+    api->kprintf(ATTR_WHITE, "\n");
+    if (fail_count == 0) {
+        api->kprintf(ATTR_GREEN, "ALL %d tests PASSED\n", pass_count);
+    } else {
+        api->kprintf(ATTR_RED, "%d PASSED, %d FAILED (total %d)\n",
+                     pass_count, fail_count, pass_count + fail_count);
+    }
+}
+
+/* ====================================================================== */
+/*  メイン                                                                   */
+/* ====================================================================== */
+
+int main(int argc, char **argv, KernelAPI *_api)
+{
+    api = _api;
+    (void)argc; (void)argv;
+
+    api->kprintf(ATTR_WHITE, "=== libos32input test (P1+P2) ===\n");
+
+    pass_count = 0;
+    fail_count = 0;
+
+    run_unit_tests();
+
+    return fail_count > 0 ? 1 : 0;
 }
