@@ -80,7 +80,7 @@ static void test_db_load(void)
     check("board_init(board.db)", rc == 0);
 
     /* マス数確認 */
-    check_eq("mass_count=12", board_mass_count(), 12);
+    check_eq("mass_count=18", board_mass_count(), 18);
 
     /* マス0 (スタート) */
     m = board_get_mass(0);
@@ -141,7 +141,7 @@ static void test_connections(void)
     {
         u16 goals[4];
         int n = board_find_by_type(3, goals, 4);
-        check_eq("type=3(goal) count=2", n, 2);
+        check_eq("type=3(goal) count=3", n, 3);
     }
 
     board_shutdown();
@@ -437,7 +437,7 @@ static void test_reset(void)
           !board_is_area_unlocked(1));
 
     /* マスデータは保持されている */
-    check_eq("mass_count still 12", board_mass_count(), 12);
+    check_eq("mass_count still 18", board_mass_count(), 18);
 
     board_shutdown();
 }
@@ -467,7 +467,7 @@ static void test_dynamic(void)
 
     new_id = board_add_mass(&new_mass);
     check_eq("add mass id=100", new_id, 100);
-    check_eq("mass_count=13", board_mass_count(), 13);
+    check_eq("mass_count=19", board_mass_count(), 19);
 
     m = board_get_mass(100);
     check("new mass exists", m != (const BoardMass *)0);
@@ -521,6 +521,80 @@ static void test_dynamic(void)
 }
 
 /* ====================================================================== */
+/*  テスト13: コスト付き経路探索 (Dijkstra)                                */
+/* ====================================================================== */
+
+static void test_cost_path(void)
+{
+    int cost;
+    u16 path[16];
+    int plen;
+
+    header("Test 13: Cost Path (Dijkstra)");
+
+    board_init("/host/assets/board.db");
+
+    /* 自分自身 → コスト0 */
+    cost = board_distance_cost(20, 20);
+    check_eq("cost(20,20) = 0", cost, 0);
+
+    /* 安い経路: 20→21(cost1)→22(cost1)→25(cost1) = 3 */
+    /* 高い経路: 20→23(cost5)→24(cost5)→25(cost1) = 11 */
+    /* Dijkstra は安い方を選択 */
+    cost = board_distance_cost(20, 25);
+    check_eq("cost(20,25) = 3", cost, 3);
+
+    /* BFS距離は両方同じ3ホップ */
+    {
+        int hops = board_distance(20, 25);
+        check_eq("hops(20,25) = 3", hops, 3);
+    }
+
+    /* 経路取得: 安い方 20→21→22→25 */
+    plen = board_find_path(20, 25, path, 16);
+    check_eq("path len = 3", plen, 3);
+    if (plen >= 3) {
+        check_eq("path[0]=21", (int)path[0], 21);
+        check_eq("path[1]=22", (int)path[1], 22);
+        check_eq("path[2]=25", (int)path[2], 25);
+    }
+
+    /* 逆方向: 25→22(cost1)→21(cost1)→20(cost1) = 3 */
+    cost = board_distance_cost(25, 20);
+    check_eq("cost(25,20) = 3", cost, 3);
+
+    /* 安い経路を封鎖 → 高い経路に迂回 */
+    board_set_flag(21, BOARD_FLAG_BLOCKED);
+    cost = board_distance_cost(20, 25);
+    /* 20→23(cost5)→24(cost5)→25(cost1) = 11 */
+    check_eq("cost blocked = 11", cost, 11);
+
+    /* 封鎖解除 */
+    board_clear_flag(21, BOARD_FLAG_BLOCKED);
+
+    /* 接続のないマス間 → -1 */
+    cost = board_distance_cost(0, 20);
+    check_eq("cost(0,20) = -1", cost, -1);
+
+    /* find_path: 到達不能 → -1 */
+    plen = board_find_path(0, 20, path, 16);
+    check_eq("path unreachable = -1", plen, -1);
+
+    /* find_path: 自分自身 → 0 */
+    plen = board_find_path(20, 20, path, 16);
+    check_eq("path self = 0", plen, 0);
+
+    /* コスト付きの隣接マス */
+    cost = board_distance_cost(20, 21);
+    check_eq("cost(20,21) = 1", cost, 1);
+
+    cost = board_distance_cost(20, 23);
+    check_eq("cost(20,23) = 5", cost, 5);
+
+    board_shutdown();
+}
+
+/* ====================================================================== */
 /*  エントリポイント                                                       */
 /* ====================================================================== */
 
@@ -546,6 +620,7 @@ int main(int argc, char **argv, KernelAPI *k)
     test_areas();
     test_reset();
     test_dynamic();
+    test_cost_path();
 
     api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n",
                  g_passed, g_total);

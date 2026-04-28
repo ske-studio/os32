@@ -141,6 +141,18 @@ int  board_peek_path(u16 from, u8 dir, u16 *out, int max);
 /* 2マス間の最短距離 (-1=到達不能) — BFS実装 */
 int  board_distance(u16 from, u16 to);
 
+/* 2マス間のコスト付き最短距離 (-1=到達不能) — Dijkstra法
+ * 各マスの cost フィールドを考慮する (cost=0 は通行コスト1として扱う)
+ */
+int  board_distance_cost(u16 from, u16 to);
+
+/* コスト付き最短経路を取得 (-1=到達不能) — Dijkstra法
+ * from → to の最短経路をマスID列として out に格納する
+ * (from自身は含まず、toは含む)
+ * 戻り値: 経路のマス数 (-1=到達不能)
+ */
+int  board_find_path(u16 from, u16 to, u16 *out, int max);
+
 /* ====================================================================== */
 /*  7. API — 区画管理 (board_area.c)                                       */
 /* ====================================================================== */
