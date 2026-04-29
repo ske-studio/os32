@@ -251,7 +251,11 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     }
     if (!ops) return VFS_ERR_INVAL;
 
-    fs_ctx = ops->mount(dev_id);
+    /* dev_typeをdev_idの上位バイトにエンコード
+     * FatFS等のマルチデバイス対応FSが HD/FD を区別するために使用。
+     * 既存FSドライバ (fat12, ext2) は dev_id & 0xFF のみ参照するので互換。
+     * 形式: (dev_type << 8) | (dev_id & 0xFF) */
+    fs_ctx = ops->mount((dev_type << 8) | (dev_id & 0xFF));
     if (!fs_ctx) return VFS_ERR_IO;
 
     slot = -1;
