@@ -5,16 +5,16 @@
 # FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
 FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep diff du cal man sndctl
-images/os32_boot.d88: boot kernel.bin programs unicode_bin
+images/os32_boot.d88: boot vmkernel.lz4 programs unicode_bin
 	@mkdir -p images
 	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="
 	@args="--tree"; \
-	args="$$args /LOADER.BIN=boot/loader_fat.bin"; \
-	args="$$args /kernel.bin=kernel.bin"; \
+	args="$$args /LOADER.BIN=boot/loader_fat_new.bin"; \
+	args="$$args /VMKRNL.LZ4=vmkernel.lz4"; \
 	args="$$args /sys/shell.bin=programs/shell.bin"; \
 	args="$$args /sys/unicode.bin=unicode.bin"; \
 	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
-	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
+	args="$$args /sys/loader_h.bin=boot/loader_hdd_new.bin"; \
 	for cmd in $$(echo $(FDD_MIN_CMDS)); do \
 		if [ -f "programs/cmds/$$cmd.bin" ]; then \
 			args="$$args /bin/$$cmd.bin=programs/cmds/$$cmd.bin"; \

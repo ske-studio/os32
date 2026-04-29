@@ -11,15 +11,15 @@
 # ============================================================================
 
 # ブート領域 (ext2外、NHD直接書き込み)
+# ローダーのみrawセクタ書き込み。カーネルはext2経由。
 boot:
-  kernel: kernel.bin
-  loader: boot/loader_hdd.bin
-  sqlite: sqlite.bin
+  loader: boot/loader_hdd_new.bin
 
 # ext2 ファイルシステム
 filesystem:
   # ゲスト側ディレクトリ構造 (自動作成)
   directories:
+    - /boot       # vmkernel.lz4 配置先
     - /sys
     - /bin
     - /sbin
@@ -35,13 +35,14 @@ filesystem:
 
   # ファイルデプロイ定義
   files:
+    # --- カーネルイメージ (LZ4圧縮) ---
+    - host: vmkernel.lz4
+      guest: /boot/vmkernel.lz4
+      tags: [core]
+
     # --- カーネルデータ ---
     - host: unicode.bin
       guest: /sys/unicode.bin
-      tags: [core]
-
-    - host: sqlite.bin
-      guest: /sys/sqlite.bin
       tags: [core]
 
     # --- シェル (カーネルは /shell をロードする: config.h SYS_SHELL_BIN) ---

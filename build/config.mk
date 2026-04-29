@@ -51,9 +51,9 @@ INC_LIB = $(INC_COMMON) -Ilib
 INC_SQLITE = $(INC_COMMON) -Ilib/sqlite3 -Ifs -Idrivers -Ilib -Ikernel
 
 # === コンパイルフラグ ===
-CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon
+CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon -D__KERNEL_BUILD__
 # SQLite専用フラグ: -Os (サイズ最適化, -O0のスタック肥大化回避) + -Wno-long-long (int64リテラル)
-CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w -DNDEBUG
+CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w -DNDEBUG -D__KERNEL_BUILD__
 LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections \
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 

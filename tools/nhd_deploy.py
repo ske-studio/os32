@@ -376,6 +376,39 @@ def do_write_kernel(kernel_bin, loader_bin=None, sqlite_bin=None):
     print("Done!")
 
 
+def do_write_boot(loader_bin):
+    """NHDのブート領域にローダーのみを書き込む (新方式)
+
+    カーネル/SQLiteはext2のvmkernel.lz4として配置されるため、
+    rawセクタ書き込みはローダー (LBA 2-17) のみ。
+    """
+    NHD_HEADER = 512
+    SECTOR = 512
+    LOADER_LBA = 2
+    MAX_LOADER_SECTORS = 16  # 8KB
+
+    loader_offset = NHD_HEADER + LOADER_LBA * SECTOR
+
+    with open(loader_bin, 'rb') as f:
+        loader_data = f.read()
+
+    if len(loader_data) > MAX_LOADER_SECTORS * SECTOR:
+        print("Error: ローダーが{}Bを超過 ({} bytes)".format(
+            MAX_LOADER_SECTORS * SECTOR, len(loader_data)))
+        return
+
+    # 8KBにパディング
+    loader_data = loader_data.ljust(MAX_LOADER_SECTORS * SECTOR, b'\x00')
+
+    with open(NHD_LOCAL, 'r+b') as nhd:
+        nhd.seek(loader_offset)
+        nhd.write(loader_data)
+
+    print("  loader: {} bytes -> LBA {}-{}".format(
+        len(loader_data), LOADER_LBA, LOADER_LBA + MAX_LOADER_SECTORS - 1))
+    print("Done!")
+
+
 def do_format():
     """ext2パーティションを再フォーマット (データ全消去)"""
     if is_mounted():
@@ -557,20 +590,16 @@ def do_sync(tag_filter=None):
         print("  タグフィルタ: {}".format(tag_filter))
     print("=" * 55)
 
-    # === Phase 1: ブート領域 ===
+    # === Phase 1: ブート領域 (ローダーのみrawセクタ書き込み) ===
     if not tag_filter:
         boot = cfg.get('boot', {})
-        kernel_path = os.path.join(PROJ_DIR, boot.get('kernel', 'kernel.bin'))
         loader_path = os.path.join(PROJ_DIR, boot.get('loader', ''))
-        sqlite_path = os.path.join(PROJ_DIR, boot.get('sqlite', 'sqlite.bin'))
 
-        if os.path.isfile(kernel_path):
-            loader_arg = loader_path if os.path.isfile(loader_path) else None
-            sqlite_arg = sqlite_path if os.path.isfile(sqlite_path) else None
-            print("\n[boot] カーネル+ローダー+SQLite書き込み")
-            do_write_kernel(kernel_path, loader_arg, sqlite_arg)
+        if loader_path and os.path.isfile(loader_path):
+            print("\n[boot] ローダー書き込み")
+            do_write_boot(loader_path)
         else:
-            print("Warning: カーネル {} が見つかりません".format(kernel_path))
+            print("Warning: ローダー {} が見つかりません".format(loader_path))
 
     # === Phase 2: ext2 マウント + ディレクトリ作成 ===
     fs = cfg.get('filesystem', {})
@@ -976,8 +1005,17 @@ def main():
         if not os.path.isfile(kernel):
             print("Error: {} not found".format(kernel))
             return
-        # write-kernelはマウント不要 (ブート領域への直接書き込み)
         do_write_kernel(kernel, loader, sqlite)
+
+    elif cmd == 'write-boot':
+        if len(sys.argv) < 3:
+            print("Usage: write-boot <loader.bin>")
+            return
+        loader = sys.argv[2]
+        if not os.path.isfile(loader):
+            print("Error: {} not found".format(loader))
+            return
+        do_write_boot(loader)
 
     elif cmd == 'format':
         do_format()

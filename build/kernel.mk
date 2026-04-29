@@ -93,7 +93,7 @@ kernel.bin: kernel.elf
 		--remove-section=.sqlite_bss \
 		$< $@
 
-# SQLite 拡張域バイナリ (0x18A000 にロードされる)
+# SQLite 拡張域バイナリ (0x200000 にロードされる)
 sqlite.bin: kernel.elf
 	$(OBJCOPY) -O binary \
 		--only-section=.sqlite_text \
@@ -101,11 +101,18 @@ sqlite.bin: kernel.elf
 		--only-section=.sqlite_data \
 		$< $@
 
+# === VK32 圧縮カーネルイメージ ===
+vmkernel.lz4: kernel.bin sqlite.bin
+	python3 tools/mkvmkernel.py \
+		--kernel kernel.bin --kernel-addr 0x100000 \
+		--sqlite sqlite.bin --sqlite-addr 0x200000 \
+		-o vmkernel.lz4
+
 # === カーネル単独ターゲット ===
-kernel: kernel.bin sqlite.bin
+kernel: kernel.bin sqlite.bin vmkernel.lz4
 
 # === カーネルクリーン ===
 clean-kernel:
-	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) kernel.elf kernel.bin sqlite.bin kernel.map
+	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) kernel.elf kernel.bin sqlite.bin vmkernel.lz4 kernel.map
 
 .PHONY: kernel clean-kernel
