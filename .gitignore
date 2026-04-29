@@ -29,6 +29,9 @@
 __pycache__/
 *.pyc
 
+# Rust/Cargo ビルド成果物
+**/target/
+
 # OS固有のファイル等
 Thumbs.db
 .DS_Store
