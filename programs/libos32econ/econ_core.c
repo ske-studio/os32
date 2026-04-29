@@ -56,20 +56,12 @@ econ_price_callback    g_price_cb;
 
 int econ__find_market(u16 market_id)
 {
-    int i;
-    for (i = 0; i < g_market_count; i++) {
-        if (g_markets[i].id == market_id) return i;
-    }
-    return -1;
+    return DB_FIND_BY_FIELD(g_markets, g_market_count, id, market_id);
 }
 
 int econ__find_item(u16 item_id)
 {
-    int i;
-    for (i = 0; i < g_item_count; i++) {
-        if (g_items[i].id == item_id) return i;
-    }
-    return -1;
+    return DB_FIND_BY_FIELD(g_items, g_item_count, id, item_id);
 }
 
 int econ__find_stock(u16 market_id, u16 item_id)
@@ -124,20 +116,12 @@ int econ__find_diplomacy(u8 nation_a, u8 nation_b)
 
 int econ__find_merchant(u16 merchant_id)
 {
-    int i;
-    for (i = 0; i < g_merchant_count; i++) {
-        if (g_merchants[i].id == merchant_id) return i;
-    }
-    return -1;
+    return DB_FIND_BY_FIELD(g_merchants, g_merchant_count, id, merchant_id);
 }
 
 int econ__find_recipe(u16 recipe_id)
 {
-    int i;
-    for (i = 0; i < g_recipe_count; i++) {
-        if (g_recipes[i].id == recipe_id) return i;
-    }
-    return -1;
+    return DB_FIND_BY_FIELD(g_recipes, g_recipe_count, id, recipe_id);
 }
 
 /* ====================================================================== */
@@ -184,32 +168,23 @@ u16 econ__curve_lookup(u8 curve_type, u8 index)
 
 static int load_items(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE(g_econ_db,
         "SELECT id, base_price, category, rarity, weight, "
         "curve_type, season_amp, diplo_weight, elasticity, flags "
-        "FROM items ORDER BY id");
-    if (rc < 0) return -1;
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_ITEMS) {
-        g_items[count].id          = (u16)db_column_int(0);
-        g_items[count].base_price  = (u16)db_column_int(1);
-        g_items[count].category    = (u8)db_column_int(2);
-        g_items[count].rarity      = (u8)db_column_int(3);
-        g_items[count].weight      = (u8)db_column_int(4);
-        g_items[count].curve_type  = (u8)db_column_int(5);
-        g_items[count].season_amp  = (u8)db_column_int(6);
-        g_items[count].diplo_weight = (u8)db_column_int(7);
-        g_items[count].elasticity  = (u8)db_column_int(8);
-        g_items[count].flags       = (u8)db_column_int(9);
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_item_count = count;
-    return count;
+        "FROM items ORDER BY id",
+        g_items, ECON_MAX_ITEMS, g_item_count,
+        {
+            row->id          = (u16)db_column_int(0);
+            row->base_price  = (u16)db_column_int(1);
+            row->category    = (u8)db_column_int(2);
+            row->rarity      = (u8)db_column_int(3);
+            row->weight      = (u8)db_column_int(4);
+            row->curve_type  = (u8)db_column_int(5);
+            row->season_amp  = (u8)db_column_int(6);
+            row->diplo_weight = (u8)db_column_int(7);
+            row->elasticity  = (u8)db_column_int(8);
+            row->flags       = (u8)db_column_int(9);
+        });
 }
 
 /* ====================================================================== */
@@ -218,28 +193,19 @@ static int load_items(void)
 
 static int load_markets(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE(g_econ_db,
         "SELECT id, nation_id, tax_rate, wealth, pop "
-        "FROM markets ORDER BY id");
-    if (rc < 0) return -1;
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_MARKETS) {
-        g_markets[count].id        = (u16)db_column_int(0);
-        g_markets[count].nation_id = (u8)db_column_int(1);
-        g_markets[count].tax_rate  = (u8)db_column_int(2);
-        g_markets[count].wealth    = (u16)db_column_int(3);
-        g_markets[count].pop       = (u16)db_column_int(4);
-        g_markets[count].active    = 0;  /* 明示的にアクティベートが必要 */
-        g_markets[count]._pad      = 0;
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_market_count = count;
-    return count;
+        "FROM markets ORDER BY id",
+        g_markets, ECON_MAX_MARKETS, g_market_count,
+        {
+            row->id        = (u16)db_column_int(0);
+            row->nation_id = (u8)db_column_int(1);
+            row->tax_rate  = (u8)db_column_int(2);
+            row->wealth    = (u16)db_column_int(3);
+            row->pop       = (u16)db_column_int(4);
+            row->active    = 0;
+            row->_pad      = 0;
+        });
 }
 
 /* ====================================================================== */
@@ -248,29 +214,20 @@ static int load_markets(void)
 
 static int load_stocks(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE(g_econ_db,
         "SELECT market_id, item_id, stock, max_stock, "
         "demand, restock_rate "
-        "FROM market_items ORDER BY market_id, item_id");
-    if (rc < 0) return -1;
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_STOCKS) {
-        g_stocks[count].market_id   = (u8)db_column_int(0);
-        g_stocks[count].item_id     = (u16)db_column_int(1);
-        g_stocks[count].stock       = (i16)db_column_int(2);
-        g_stocks[count].max_stock   = (u16)db_column_int(3);
-        g_stocks[count].demand      = (u16)db_column_int(4);
-        g_stocks[count].restock_rate = (u8)db_column_int(5);
-        g_stocks[count].price_mod   = 100;  /* 初期倍率: 100% */
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_stock_count = count;
-    return count;
+        "FROM market_items ORDER BY market_id, item_id",
+        g_stocks, ECON_MAX_STOCKS, g_stock_count,
+        {
+            row->market_id   = (u8)db_column_int(0);
+            row->item_id     = (u16)db_column_int(1);
+            row->stock       = (i16)db_column_int(2);
+            row->max_stock   = (u16)db_column_int(3);
+            row->demand      = (u16)db_column_int(4);
+            row->restock_rate = (u8)db_column_int(5);
+            row->price_mod   = 100;
+        });
 }
 
 /* ====================================================================== */
@@ -279,27 +236,18 @@ static int load_stocks(void)
 
 static int load_routes(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE_OPT(g_econ_db,
         "SELECT from_id, to_id, distance, risk, tariff, flags "
-        "FROM trade_routes");
-    if (rc < 0) return -1;
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_ROUTES) {
-        g_routes[count].from_id  = (u8)db_column_int(0);
-        g_routes[count].to_id    = (u8)db_column_int(1);
-        g_routes[count].distance = (u8)db_column_int(2);
-        g_routes[count].risk     = (u8)db_column_int(3);
-        g_routes[count].tariff   = (u8)db_column_int(4);
-        g_routes[count].flags    = (u8)db_column_int(5);
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_route_count = count;
-    return count;
+        "FROM trade_routes",
+        g_routes, ECON_MAX_ROUTES, g_route_count,
+        {
+            row->from_id  = (u8)db_column_int(0);
+            row->to_id    = (u8)db_column_int(1);
+            row->distance = (u8)db_column_int(2);
+            row->risk     = (u8)db_column_int(3);
+            row->tariff   = (u8)db_column_int(4);
+            row->flags    = (u8)db_column_int(5);
+        });
 }
 
 /* ====================================================================== */
@@ -308,26 +256,17 @@ static int load_routes(void)
 
 static int load_currencies(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE_OPT(g_econ_db,
         "SELECT id, nation_id, supply, base_value "
-        "FROM currencies ORDER BY id");
-    if (rc < 0) return -1;
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_CURRENCIES) {
-        g_currencies[count].id         = (u8)db_column_int(0);
-        g_currencies[count].nation_id  = (u8)db_column_int(1);
-        g_currencies[count].supply     = (u16)db_column_int(2);
-        g_currencies[count].base_value = (u16)db_column_int(3);
-        g_currencies[count]._pad       = 0;
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_currency_count = count;
-    return count;
+        "FROM currencies ORDER BY id",
+        g_currencies, ECON_MAX_CURRENCIES, g_currency_count,
+        {
+            row->id         = (u8)db_column_int(0);
+            row->nation_id  = (u8)db_column_int(1);
+            row->supply     = (u16)db_column_int(2);
+            row->base_value = (u16)db_column_int(3);
+            row->_pad       = 0;
+        });
 }
 
 /* ====================================================================== */
@@ -367,28 +306,19 @@ static int load_diplomacy(void)
 
 static int load_merchants(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_econ_db,
+    return DB_LOAD_TABLE_OPT(g_econ_db,
         "SELECT id, market_id, buy_margin, sell_margin, "
         "specialty, mood "
-        "FROM merchants ORDER BY id");
-    if (rc < 0) return 0; /* テーブルがなくてもエラーにしない */
-
-    while (rc == DB_STATUS_ROW && count < ECON_MAX_MERCHANTS) {
-        g_merchants[count].id          = (u16)db_column_int(0);
-        g_merchants[count].market_id   = (u16)db_column_int(1);
-        g_merchants[count].buy_margin  = (u8)db_column_int(2);
-        g_merchants[count].sell_margin = (u8)db_column_int(3);
-        g_merchants[count].specialty   = (u8)db_column_int(4);
-        g_merchants[count].mood        = (u8)db_column_int(5);
-        count++;
-        rc = db_step(g_econ_db);
-    }
-
-    g_merchant_count = count;
-    return count;
+        "FROM merchants ORDER BY id",
+        g_merchants, ECON_MAX_MERCHANTS, g_merchant_count,
+        {
+            row->id          = (u16)db_column_int(0);
+            row->market_id   = (u16)db_column_int(1);
+            row->buy_margin  = (u8)db_column_int(2);
+            row->sell_margin = (u8)db_column_int(3);
+            row->specialty   = (u8)db_column_int(4);
+            row->mood        = (u8)db_column_int(5);
+        });
 }
 
 /* ====================================================================== */

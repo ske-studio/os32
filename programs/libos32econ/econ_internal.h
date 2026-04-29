@@ -10,6 +10,7 @@
 
 #include "libos32econ.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 
 /* ====================================================================== */
 /*  外部参照: KernelAPI                                                    */
