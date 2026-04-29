@@ -6,6 +6,7 @@
 
 #include "libos32event.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 #include <string.h>
 
 /* ====================================================================== */
@@ -58,7 +59,6 @@ int evt_init(const char *db_path)
 
     if (db_path != NULL) {
         db_handle_t h;
-        int rc;
 
         h = db_open(db_path);
         if (h < 0) {
@@ -67,34 +67,24 @@ int evt_init(const char *db_path)
         g_db_slot = h;
 
         /* events テーブルから全行をロード */
-        rc = db_query(h,
+        DB_LOAD_TABLE(h,
             "SELECT id, type, weight, min_turn, cooldown,"
             " period, duration, grp, chain_id, chain_chance, scope"
-            " FROM events ORDER BY id");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                EvtDef *def;
-                u16 id;
-
-                id = (u16)db_column_int(0);
-                if (g_evt_def_count >= EVT_MAX_DEFS) break;
-
-                def = &g_evt_defs[g_evt_def_count];
-                def->id           = id;
-                def->type         = (u8)db_column_int(1);
-                def->weight       = (u8)db_column_int(2);
-                def->min_turn     = (u16)db_column_int(3);
-                def->cooldown     = (u16)db_column_int(4);
-                def->period       = (u16)db_column_int(5);
-                def->duration     = (u8)db_column_int(6);
-                def->group        = (u8)db_column_int(7);
-                def->chain_id     = (u16)db_column_int(8);
-                def->chain_chance = (u8)db_column_int(9);
-                def->scope        = (u8)db_column_int(10);
-
-                g_evt_def_count++;
-            } while (db_step(h) == DB_STATUS_ROW);
-        }
+            " FROM events ORDER BY id",
+            g_evt_defs, EVT_MAX_DEFS, g_evt_def_count,
+            {
+                row->id           = (u16)db_column_int(0);
+                row->type         = (u8)db_column_int(1);
+                row->weight       = (u8)db_column_int(2);
+                row->min_turn     = (u16)db_column_int(3);
+                row->cooldown     = (u16)db_column_int(4);
+                row->period       = (u16)db_column_int(5);
+                row->duration     = (u8)db_column_int(6);
+                row->group        = (u8)db_column_int(7);
+                row->chain_id     = (u16)db_column_int(8);
+                row->chain_chance = (u8)db_column_int(9);
+                row->scope        = (u8)db_column_int(10);
+            });
     }
 
     g_initialized = 1;
