@@ -243,8 +243,8 @@ programs/%.raw: programs/%.elf
 
 # OS32Xヘッダ付加 (app.conf からAPI版/ヒープサイズを読み取る)
 programs/%.bin: programs/%.raw programs/%.elf
-	@_api=$$(awk '/^$* / { print $$2 }' build/app.conf); \
-	_heap=$$(awk '/^$* / { print $$3 }' build/app.conf); \
+	@_api=$$(awk '$$1 == "$*" { print $$2 }' build/app.conf); \
+	_heap=$$(awk '$$1 == "$*" { print $$3 }' build/app.conf); \
 	_api=$${_api:-7}; \
 	_heap=$${_heap:-0}; \
 	if [ "$$_heap" != "0" ]; then \
@@ -261,19 +261,57 @@ unicode_bin:
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
+# ============================================================================
+#  Rust プログラム ビルドルール
+# ============================================================================
+RUST_PROGRAMS_DIR = programs/rust
+RUST_TARGET_JSON  = i686-os32-none
+RUST_TARGET_DIR   = $(RUST_PROGRAMS_DIR)/target/$(RUST_TARGET_JSON)/release
+
+# ---------------------------------------------------------------------------
+#  DEFINE_RUST_PROGRAM — Rustプログラム定義テンプレート
+#  $(1) = Rustクレート名 (Cargoワークスペースメンバー名)
+#  $(2) = 出力先ディレクトリ (例: programs/tests)
+#  $(3) = 追加リンクOBJ (例: $(GFX_OBJ))
+# ---------------------------------------------------------------------------
+define DEFINE_RUST_PROGRAM
+$(RUST_TARGET_DIR)/lib$(1).a: FORCE
+	cd $(RUST_PROGRAMS_DIR) && cargo build --release -p $(1)
+
+$(2)/$(1).elf: build/app.ld $$(CRT0_OBJ) $(RUST_TARGET_DIR)/lib$(1).a $(3)
+	$$(LD) $$(PROGRAM_LDFLAGS) --allow-multiple-definition \
+		-o $$@ $$(CRT0_OBJ) $(3) \
+		$(RUST_TARGET_DIR)/lib$(1).a \
+		-lc -lgcc
+
+$(1)_rust: $$(CRT0_OBJ) $(2)/$(1).bin
+
+.PHONY: $(1)_rust
+endef
+
+# --- Rustプログラム登録 ---
+$(eval $(call DEFINE_RUST_PROGRAM,hello_gfx,programs/tests,$$(GFX_OBJ)))
+
+# Rustクリーン
+clean-rust:
+	cd $(RUST_PROGRAMS_DIR) && cargo clean 2>/dev/null || true
+
+FORCE:
+.PHONY: clean-rust FORCE
+
 # === プログラム集約ターゲット ===
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
 $(shell find programs -name '*.o'): include/os32_kapi_shared.h
 
 # === プログラムクリーン ===
-clean-programs:
+clean-programs: clean-rust
 	rm -f programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin
 	rm -f programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin
 	rm -f programs/apps/edit/*.o
