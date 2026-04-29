@@ -25,7 +25,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---------|------|
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v28 仕様書 — 142エントリテーブル (関数140 + データフィールド2) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v31 仕様書 — 153エントリテーブル (ヘッダ2 + 関数150 + データフィールド1) |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
@@ -122,4 +122,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-28*
+*Last Updated: 2026-04-29*

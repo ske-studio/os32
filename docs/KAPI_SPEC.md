@@ -1,4 +1,4 @@
-# KernelAPI v28 仕様書
+# KernelAPI v31 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -10,14 +10,14 @@
 |------|------|
 | バイナリ形式 | OS32X (40バイトヘッダ + フラットバイナリ) |
 | ヘッダマジック | 0x4F533332 ('OS32') |
-| KAPIテーブルアドレス | 0x189000 |
+| KAPIテーブルアドレス | 動的算出 (KHEAP_BASE + KHEAP_SIZE) |
 | KAPIマジック | 0x4B415049 ('KAPI') |
 | プログラムロード先 | 0x400000 |
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **28** |
-| 合計エントリ数 | **142** (関数ポインタ140 + データフィールド2) |
+| 現在のバージョン | **31** |
+| 合計エントリ数 | **153** (ヘッダ2 + 関数ポインタ150 + データフィールド1) |
 
 ---
 
@@ -50,7 +50,7 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 28) |
+| 0x04 | version | APIバージョン (現在: 31) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -197,11 +197,26 @@ make programs
 | 0x230 | mouse_cursor_show | `void(void)` |
 | 0x234 | mouse_cursor_hide | `void(void)` |
 
+### DB API (v29-v31)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x238 | db_open | `int(const char *path)` |
+| 0x23C | db_close | `int(int handle)` |
+| 0x240 | db_exec | `int(int handle, const char *sql)` |
+| 0x244 | db_prepare | `int(int handle, const char *sql)` |
+| 0x248 | db_step | `int(int handle)` |
+| 0x24C | db_column_int | `int(int handle, int col)` |
+| 0x250 | db_column_text | `const char *(int handle, int col)` |
+| 0x254 | db_finalize | `int(int handle)` |
+| 0x258 | db_last_error | `const char *(int handle)` |
+| 0x25C | db_mem_used | `u32(void)` |
+
 ### データフィールド (構造体末尾)
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x238 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x260 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
 
 ### §4-1 グラフィックスAPI に関する補足
 
@@ -322,4 +337,4 @@ v28で追加。カーネル管理のマウスカーソル表示を制御する�
 
 ---
 
-*Last Updated: 2026-04-23*
+*Last Updated: 2026-04-29*

@@ -6,50 +6,47 @@
 アドレス範囲              サイズ    用途                                    属性
 ─────────────────────────────────────────────────────────────────────────────
 [ コンベンショナルメモリ (0x00000 - 0xFFFFF) ]
-0x00000 - 0x00FFF         4KB      IVT + BDA + BIOSトランポリン パラメータ   R/W
-0x01000 - 0x05FFF         20KB     BIOS 周辺データ領域                      R/O
-0x06000 - 0x07FFF         8KB      BIOSトランポリン + IPL (ブートセクタ)      R/W
-0x08000 - 0x08FFF         4KB      loader.bin + pm32.bin (使用済み)           R/O
-0x09000 - 0x3FFFF         ≈220KB   kernel.bin (.text + .data + .bss + マージン) R/W
-0x40000 - 0x8EFFF         316KB    kmalloc ヒープ (KHEAP_BASE, KHEAP_SIZE)   R/W
+0x00000 - 0x00FFF         4KB      NP (NULLポインタ検出, ブート後)           NP
+0x01000 - 0x49FFF         ~292KB   フォントキャッシュ (kcg.c, ブート後配置)   R/W
+0x4A000 - 0x69FFF         128KB    Unicode-JIS変換テーブル (utf8.c)          R/W
+0x6A000 - 0x89FFF         128KB    GFXバックバッファ (32KB × 4プレーン)      R/W
+0x8A000 - 0x8EFFF         20KB     空き (将来用)                            R/W
 0x8F000 - 0x8FFFF         4KB      ★ カーネルスタックガード                  NP
 0x90000 - 0x9FFFF         64KB     カーネルスタック (ESP初期値=0x9FFFC)       R/W
 0xA0000 - 0xEFFFF         320KB    VRAM (テキスト + グラフィック)             R/W
 0xF0000 - 0xFFFFF         64KB     BIOS ROM                                  R/O
 
-[ カーネルデータ (0x100000 - 0x1FFFFF) ]
-0x100000 - 0x148FFF       ~292KB   フォントキャッシュ (kcg.c)                R/W
-0x149000 - 0x168FFF       128KB    Unicode-JIS変換テーブル (utf8.c)          R/W
-0x169000 - 0x188FFF       128KB    GFXバックバッファ (32KB × 4プレーン)      R/W
-0x189000 - 0x189FFF       4KB      KernelAPIテーブル (KAPI_ADDR)             R/W
-0x18A000 - 0x1FFFFF       ~476KB   [予約: カーネル拡張用]                    R/W
+[ カーネル帯域 (0x100000 - 0x1FFFFF, 1MB) — 動的レイアウト ]
+0x100000 - __bss_end      ~200KB   カーネルバイナリ (.text + .data + .bss)    R/W
+KHEAP_BASE - +320KB       320KB    カーネルヒープ (kmalloc, __bss_endから動的算出) R/W
+KAPI_ADDR                 4KB      KernelAPIテーブル (ヒープ末尾直後)         R/W
++4KB                      4KB      ★ SHM前方ガードページ                     NP
++4KB - +260KB             256KB    共有メモリ (IPC用, MEM_SHM_BASE)          R/W
++256KB                    4KB      ★ SHM後方ガードページ                     NP
+残り - 0x1FFFFF                    予約 (NP)                                 NP
 
-[ 共有メモリ (0x200000 - 0x241FFF) ]
-0x200000 - 0x200FFF       4KB      ★ 前方ガードページ (MEM_SHM_GUARD_LO)     NP
-0x201000 - 0x240FFF       256KB    共有メモリ (IPC用, MEM_SHM_BASE)          R/W
-0x241000 - 0x241FFF       4KB      ★ 後方ガードページ (MEM_SHM_GUARD_HI)     NP
+[ SQLite帯域 (0x200000 - 0x2FFFFF, 1MB) ]
+0x200000 - __sqlite_end   ~579KB   SQLite code+BSS                          R/W
+__sqlite_end(align) -     128KB    SQLite代替スタック                        R/W
+残り - 0x2FFFFF                    カーネル予約域 (NP)                       NP
 
-[ カーネル予約 (0x242000 - 0x2FFFFF) ]
-0x242000 - 0x2FFFFF       ~760KB   予約域 (MEM_KERNEL_RESV)                  NP
-
-[ シェル常駐帯域 (0x300000 - 0x37FFFF) ]
-0x300000 - 0x374FFF       ~468KB   shell.bin (.text + .data + .bss)           R/W
+[ シェル常駐帯域 (0x300000 - 0x3FFFFF, 1MB) ]
+0x300000 - +468KB(max)    ~113KB   shell.bin (.text + .data + .bss)           R/W
 0x375000 - 0x375FFF       4KB      ★ シェルスタックガード                    NP
 0x376000 - 0x37FFFF       40KB     シェルスタック (ESP初期値=0x380000)        R/W
-
-[ 帯域間ギャップ (0x380000 - 0x3FFFFF) ]
-0x380000 - 0x3FFFFF       512KB    未使用 (シェル帯域〜プログラム空間)         NP
+0x380000 - 0x3FFFFF       512KB    帯域間ギャップ (NP)                       NP
 
 [ プログラム空間 (0x400000 - mem_end) — 動的レイアウト ]
 0x400000 - 0x4FFFFF       1MB      .text + .data + .bss + sbrk (最大1MB)      R/W
 0x500000 - 0x500FFF       4KB      ★ GUARD A: sbrk上限ガード                 NP
 0x501000 - ...                     exec_heap (動的確保上限まで)               R/W
-  ...    - (mem_end-132KB)         ↓
-(mem_end-132KB) - (-128KB) 4KB     ★ GUARD B: スタックovrflowガード           NP
-(mem_end-128KB) - mem_end  128KB   プログラムスタック (下向き展開)            R/W
+  ...    - (mem_end-260KB)         ↓
+(mem_end-260KB) - (-256KB) 4KB     ★ GUARD B: スタックovrflowガード           NP
+(mem_end-256KB) - mem_end  256KB   プログラムスタック (下向き展開)            R/W
 
   ※ 属性: R/W=読み書き可能, R/O=読み取り専用, NP=Not-Present(★はガードページ)
   ※ mem_end は搭載メモリ量 (14MB構成なら mem_end=0xE00000)
+  ※ カーネル帯域内のKAPI/SHMアドレスは __bss_end を基点に動的算出される
   ※ プログラムの入れ子（ネスト）起動時はプロセスが完全に破棄・「置換」される
     ため、プログラム空間は1つのみ利用します。
 ```

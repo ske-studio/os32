@@ -23,7 +23,7 @@ C_KERNEL = \
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
-# === SQLite関連 (カーネル拡張域 0x18A000 に配置) ===
+# === SQLite関連 (カーネル拡張域 0x200000 に配置) ===
 C_SQLITE = lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_test.c
 C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
 

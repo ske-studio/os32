@@ -9,48 +9,78 @@ GCC および NASM を用いてクロスコンパイルし、D88フロッピー�
 |------|------|
 | ターゲットCPU | i386互換 (32ビットプロテクトモード) |
 | ブートメディア | PC-98 2HD FDD (D88) / IDE HDD (NHD) |
-| コンパイラ | GCC (i686-elf) / NASM |
+| コンパイラ | GCC (i386-elf) / NASM |
 | メモリモデル | フラットモデル (32ビット) |
 | 動作環境 | NP21/W (Neko Project 21/W x64) |
 
 ### §1-2 ブートシーケンス
+
+#### HDD ブート (プライマリ)
+
+```
+電源ON
+  ↓
+BIOS POST → HDD セクタ0 から IPL 読込 (1FC0:0000)
+  ↓
+boot_hdd.asm (16bit リアルモード) — IPL (512B)
+  ├── テキストVRAMにブートメッセージ表示
+  ├── INT 1Bh × 16回: LBA 2-17 → 0x8000 (8KB, ローダー)
+  ├── ジオメトリ情報をレジスタに設定 (AL=DA/UA, AH=heads, BL=SPT)
+  └── far jmp 0000:8000h
+  ↓
+loader_hdd.asm (16bit → 32bit) — 第2段階ローダー (ELF + C)
+  ├── A20ゲート有効化 (ポート0xF2)
+  ├── GDT設定 + CR0.PE=1 → プロテクトモード遷移
+  ├── ESP = 0x9FFFC
+  ├── BSS ゼロクリア
+  └── call boot_main
+  ↓
+boot_main.c (32bit プロテクトモード) — Cメインロジック
+  ├── PC-98パーティションテーブル (LBA 1) からext2パーティション特定
+  ├── ext2 ミニドライバで /boot/vmkernel.lz4 を 0x10000 に読み込み
+  ├── VK32ヘッダ検証 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000)
+  └── return 0 (ASMに復帰)
+  ↓
+loader_hdd.asm (32bit PM 復帰)
+  ├── メモリプロービング (1MB-16MB, 512KB刻み)
+  └── far jmp 0x08:0x100000 (kernel_main へジャンプ)
+  ↓
+kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
+  ├── tvram_clear()
+  ├── idt_init() → pic_init() → pit_init(100Hz)
+  ├── cpu_calibrate() (PITベースCPU速度測定)
+  ├── kbd_init() / mouse_init()
+  ├── fdc_init()
+  ├── dev_init() → path_init() → FS初期化 (fat12/ext2/fatfs/iso9660/hostdrv)
+  ├── ide_init() → auto mount (ルート・サブマウント・HostDrv)
+  ├── kmalloc_init() → paging_init() → paging_reclaim_conventional()
+  ├── FPU初期化 → pgalloc_init() → shm_init()
+  ├── fd_redirect_init() / pipe_buffer_init()
+  ├── exec_init() (KernelAPIテーブル構築)
+  ├── Unicodeテーブルロード / ime_init()
+  ├── snd_init() / os32_sqlite_init()
+  ├── boot_splash() (ブートスプラッシュ)
+  └── exec_run(SYS_SHELL_BIN="/sys/shell.bin") (シェル起動、終了/クラッシュ時自動再起動)
+      └── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
+```
+
+#### FDD ブート (セカンダリ)
 
 ```
 電源ON
   ↓
 BIOS POST → FDD1からIPL読込 (C0/H0/S1 → 0000:7C00h)
   ↓
-boot.asm (16bit リアルモード) — IPL (第1段階)
+boot_fat.asm (16bit リアルモード) — IPL (1024B)
   ├── テキストVRAMにブートメッセージ表示
-  ├── INT 1Bh × 4回: C0-C1 → 0x8000-0xFBFF (31セクタ)
+  ├── INT 1Bh: ローダーセクタ読み込み → 0x8000
   └── far jmp 0000:8000h
   ↓
-loader.asm (16bit リアルモード) — 第2段階
-  ├── INT 1Bh ループ: C2-C15 → 0x10000-0x47FFF (DMA境界対応)
-  ├── A20ゲート有効化 (ポート0xF2)
-  ├── GDT設定 (コード/データ/フラット)
-  ├── CR0.PE = 1 → プロテクトモード遷移
-  └── far jmp 0x08:pm32_entry
-  ↓
-pm32.asm (32bit プロテクトモード)
-  ├── DS/ES/SS = 0x10 (データセグメント)
-  ├── ESP = 0x9FFFC (スタック)
-  └── call _kernel_main
-  ↓
-kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
-  ├── tvram_clear()
-  ├── idt_init() → pic_init() → pit_init(100Hz)
-  ├── kbd_init()
-  ├── fdc_init()
-  ├── dev_init() → path_init() → FS初期化 (fat12/ext2)
-  ├── ide_init() → auto mount (ルート・サブマウント)
-  ├── kmalloc_init() / paging_init() / shm_init()
-  ├── fd_redirect_init() / pipe_buffer_init()
-  ├── exec_init() (KernelAPIテーブル構築)
-  ├── Unicodeテーブルロード / ime_init()
-  ├── boot_splash() (ブートスプラッシュ)
-  └── exec_run(SYS_SHELL_BIN="/shell") (シェル起動、終了/クラッシュ時自動再起動)
-      └── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
+loader_fat.asm (16bit → 32bit) — 第2段階
+  ├── INT 1Bh ループでカーネル読み込み (DMA境界対応)
+  ├── A20ゲート有効化 / GDT設定 / PM遷移
+  ├── メモリプロービング
+  └── far jmp 0x08:0x100000 (kernel_main へジャンプ)
 ```
 
 ---

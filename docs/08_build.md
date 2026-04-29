@@ -18,22 +18,33 @@ make clean
 ### §8-2 ビルドパイプライン
 
 ```
-boot/*.asm      →  nasm (-f bin)           →  boot/*.bin
-kernel/*.asm    →  nasm (-f elf32)         →  kernel/*.o
+=== カーネルビルド ===
+boot/*.asm      →  nasm (-f bin / -f elf32)  →  boot/*.bin / boot/*.o
+kernel/*.asm    →  nasm (-f elf32)           →  kernel/*.o
 */*.c           →  gcc (-m32 -ffreestanding) →  */*.o
-                                              ↓
-*.o + kernel/*.o → ld (-T os32.ld)         → kernel.elf
-kernel.elf      →  objcopy (-O binary)     → kernel.bin
-                                              ↓
-boot_fat.bin + loader_fat.bin + kernel.bin    → raw image
-                                              ↓
-mkfat12.py                                    →  images/os32_boot.d88 または .img
+                                               ↓
+*.o + kernel/*.o → ld (-T os32.ld)           → kernel.elf (0x100000〜 + SQLite 0x200000〜)
+kernel.elf      →  objcopy (-O binary)       → kernel.bin (カーネル本体)
+                →  objcopy (--only-section)  → sqlite.bin (SQLite拡張域)
+                                               ↓
+kernel.bin + sqlite.bin → mkvmkernel.py      → vmkernel.lz4 (LZ4圧縮カーネルイメージ)
 
-外部プログラム (crt0.asm および libos32 連携):
-programs/*.c    → gcc -m32                 → programs/*.o
-                → ld -T app.ld             → programs/*.elf (newlib-nano -lc -lgcc リンク)
-                → objcopy                  → programs/*.raw
-                → mkos32x.py               → programs/*.bin
+=== HDD デプロイ ===
+boot_hdd.asm    →  nasm (-f bin)             →  boot_hdd.bin (512B IPL, LBA 0)
+loader_hdd.asm + boot_main.c + ext2_mini.c + lz4_mini.c
+                →  nasm + gcc + ld (-T loader.ld) → loader_hdd.bin (8KB, LBA 2-17)
+vmkernel.lz4   →  ext2 FS 内 /boot/vmkernel.lz4 に配置
+
+=== FDD デプロイ ===
+boot_fat.asm + loader_fat.asm + kernel.bin   → raw image
+                                             ↓
+mkfat12.py                                  →  images/os32_boot.d88 または .img
+
+=== 外部プログラム ===
+programs/*.c    → gcc -m32                   → programs/*.o
+                → ld -T app.ld               → programs/*.elf (newlib-nano -lc -lgcc リンク)
+                → objcopy                    → programs/*.raw
+                → mkos32x.py                 → programs/*.bin
 ```
 
 インクルードパスは `Makefile` で細かく制御されており、基本的にソースファイルから他のヘッダディレクトリは `-I` によって自動解決できるため `#include "file.h"` で問題なく参照可能。

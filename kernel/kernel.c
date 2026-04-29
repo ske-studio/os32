@@ -362,7 +362,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(18, 4, "SQ..", TATTR_GREEN);
     kprintf(0x07, "[BOOT] sqlite_init...\n");
 
-    /* SQLite エンジン初期化 (ブートローダーが 0x18A000 にロード済み、
+    /* SQLite エンジン初期化 (ブートローダーが 0x200000 にロード済み、
      * kentry.asm が .sqlite_bss をゼロクリア済み) */
     tvram_print(0, 4, "SQLite...", TATTR_GREEN);
     {
