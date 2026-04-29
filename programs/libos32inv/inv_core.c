@@ -7,6 +7,7 @@
 
 #include "libos32inv.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 
 extern KernelAPI *kapi;
 #define api kapi
@@ -77,7 +78,7 @@ static int load_items(void)
         g_masters[count].set_id         = (u8)db_column_int(12);
         g_masters[count].max_durability = (u8)db_column_int(13);
 
-        /* 名前コピー (最备23文字 + NUL) */
+        /* 名前コピー (最傇23文字 + NUL) */
         nm = db_column_text(11);
         for (i = 0; i < 23 && nm && nm[i]; i++) {
             g_masters[count].name[i] = nm[i];
@@ -98,31 +99,22 @@ static int load_items(void)
 
 static int load_recipes(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_inv_db,
+    return DB_LOAD_TABLE_OPT(g_inv_db,
         "SELECT id, result_id, mat_a, mat_b, "
         "COALESCE(mat_a_count,1), COALESCE(mat_b_count,1), "
         "COALESCE(result_count,1) "
-        "FROM recipes ORDER BY id");
-    if (rc < 0) return 0;  /* テーブルがなくてもOK */
-
-    while (rc == DB_STATUS_ROW && count < INV_RECIPE_MAX) {
-        g_recipes[count].id           = (u16)db_column_int(0);
-        g_recipes[count].result_id    = (u16)db_column_int(1);
-        g_recipes[count].mat_a        = (u16)db_column_int(2);
-        g_recipes[count].mat_b        = (u16)db_column_int(3);
-        g_recipes[count].mat_a_count  = (u8)db_column_int(4);
-        g_recipes[count].mat_b_count  = (u8)db_column_int(5);
-        g_recipes[count].result_count = (u8)db_column_int(6);
-        g_recipes[count]._pad         = 0;
-        count++;
-        rc = db_step(g_inv_db);
-    }
-
-    g_recipe_count = count;
-    return count;
+        "FROM recipes ORDER BY id",
+        g_recipes, INV_RECIPE_MAX, g_recipe_count,
+        {
+            row->id           = (u16)db_column_int(0);
+            row->result_id    = (u16)db_column_int(1);
+            row->mat_a        = (u16)db_column_int(2);
+            row->mat_b        = (u16)db_column_int(3);
+            row->mat_a_count  = (u8)db_column_int(4);
+            row->mat_b_count  = (u8)db_column_int(5);
+            row->result_count = (u8)db_column_int(6);
+            row->_pad         = 0;
+        });
 }
 
 /* ====================================================================== */
@@ -131,27 +123,18 @@ static int load_recipes(void)
 
 static int load_set_bonuses(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_inv_db,
+    return DB_LOAD_TABLE_OPT(g_inv_db,
         "SELECT set_id, piece_count, stat_type, bonus "
-        "FROM set_bonus ORDER BY set_id, piece_count");
-    if (rc < 0) return 0;  /* テーブルがなくてもOK */
-
-    while (rc == DB_STATUS_ROW && count < INV_SET_BONUS_MAX) {
-        g_set_bonuses[count].set_id      = (u8)db_column_int(0);
-        g_set_bonuses[count].piece_count = (u8)db_column_int(1);
-        g_set_bonuses[count].stat_type   = (u8)db_column_int(2);
-        g_set_bonuses[count]._pad        = 0;
-        g_set_bonuses[count].bonus       = (i16)db_column_int(3);
-        g_set_bonuses[count]._pad2       = 0;
-        count++;
-        rc = db_step(g_inv_db);
-    }
-
-    g_set_bonus_count = count;
-    return count;
+        "FROM set_bonus ORDER BY set_id, piece_count",
+        g_set_bonuses, INV_SET_BONUS_MAX, g_set_bonus_count,
+        {
+            row->set_id      = (u8)db_column_int(0);
+            row->piece_count = (u8)db_column_int(1);
+            row->stat_type   = (u8)db_column_int(2);
+            row->_pad        = 0;
+            row->bonus       = (i16)db_column_int(3);
+            row->_pad2       = 0;
+        });
 }
 
 /* ====================================================================== */
@@ -211,11 +194,9 @@ void inv_shutdown(void)
 
 const InvItemDef *inv_get_def(u16 item_id)
 {
-    int i;
-    for (i = 0; i < g_master_count; i++) {
-        if (g_masters[i].id == item_id) return &g_masters[i];
-    }
-    return (const InvItemDef *)0;
+    int i = DB_FIND_BY_FIELD(g_masters, g_master_count, id, item_id);
+    if (i < 0) return (const InvItemDef *)0;
+    return &g_masters[i];
 }
 
 int inv_master_count(void)
