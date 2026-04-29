@@ -57,7 +57,11 @@ rance.png
 /boot_hdd.bin
 /loader.bin
 /loader_hdd.bin
+/vmkernel.lz4
 /cat
+
+# 一時調査ファイル
+*.html
 
 # ワークエリア・テスト用ディレクトリ
 /mount/
