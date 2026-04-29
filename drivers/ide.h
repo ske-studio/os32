@@ -86,6 +86,7 @@ typedef struct {
     char serial[21];     /* シリアル番号 */
     char firmware[9];    /* ファームウェアリビジョン */
     int  lba_supported;  /* LBAサポート有無 */
+    u16  phys_sector_size; /* 物理セクタサイズ (SASI=256, IDE=512) */
 } IdeInfo;
 
 /* IDE初期化 (ドライブ検出) */

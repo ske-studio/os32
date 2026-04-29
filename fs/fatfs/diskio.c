@@ -36,6 +36,26 @@ static DSTATUS hdd_status = STA_NOINIT;
 static int fdd_drive = 0;
 /* HDDドライブ番号 (OS32側: 通常0) */
 static int hdd_drive = 0;
+/* HDDパーティションオフセット (LBA, IDE物理セクタ単位) — PC-98パーティション対応 */
+static u32 hdd_part_offset = 0;
+/* HDD論理セクタサイズ (PC-98 DOSでは1024、通常は512) */
+static u16 hdd_sector_size = 512;
+/* HDD IDE物理セクタサイズ (SASI HDI=256, IDE=512)
+ * NP21/WはSASI形式HDIをIDE経由で提供するが、内部LBAは256B単位。
+ * IDE転送は常に512Bだが、連続セクタでオーバーラップが発生するため
+ * 256B時はLBAを2刻みで進める必要がある。 */
+static u16 hdd_ide_phys_size = 512;
+
+/* ドライブ番号設定 API (fatfs_vfs.c から呼ばれる)
+ * ドライブ変更時はstatusとオフセットをリセットし、f_mountでの再初期化を促す */
+void diskio_set_fdd_drive(int drv) { fdd_drive = drv; fdd_status = STA_NOINIT; }
+void diskio_set_hdd_drive(int drv) {
+    hdd_drive = drv; hdd_status = STA_NOINIT;
+    hdd_part_offset = 0; hdd_sector_size = 512; hdd_ide_phys_size = 512;
+}
+void diskio_set_hdd_partition(u32 offset) { hdd_part_offset = offset; hdd_status = STA_NOINIT; }
+void diskio_set_hdd_sector_size(u16 sz) { hdd_sector_size = sz; }
+void diskio_set_hdd_ide_phys_size(u16 sz) { hdd_ide_phys_size = sz; }
 
 
 /* ======================================================================== */
@@ -101,9 +121,28 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 
     case DRV_HDD:
         if (hdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* IDE: ide_read_sectors() で複数セクタ一括読み込み */
-        rc = ide_read_sectors(hdd_drive, (u32)sector, (u32)count, buff);
-        if (rc != 0) return RES_ERROR;
+        if (hdd_ide_phys_size == 256) {
+            /* SASI 256Bセクタ: NP21/WのIDE LBAは256B単位だが転送は512B。
+             * 連続LBAでは256Bずつしか進まずオーバーラップするため、
+             * LBAを2刻みで進めて非重複の512Bを取得する。 */
+            u32 sasi_lba = (u32)sector * (hdd_sector_size / 256)
+                         + hdd_part_offset;
+            u32 total_256 = (u32)count * (hdd_sector_size / 256);
+            u32 ide_reads = total_256 / 2;  /* 512B = 2×256B */
+            u32 j;
+            for (j = 0; j < ide_reads; j++) {
+                rc = ide_read_sector(hdd_drive, sasi_lba + j * 2,
+                                     buff + j * 512);
+                if (rc != 0) return RES_ERROR;
+            }
+        } else {
+            /* 通常IDE 512Bセクタ */
+            u32 phys_sector = (u32)sector * (hdd_sector_size / 512)
+                            + hdd_part_offset;
+            u32 phys_count  = (u32)count  * (hdd_sector_size / 512);
+            rc = ide_read_sectors(hdd_drive, phys_sector, phys_count, buff);
+            if (rc != 0) return RES_ERROR;
+        }
         return RES_OK;
     }
     return RES_PARERR;
@@ -134,9 +173,26 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 
     case DRV_HDD:
         if (hdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* IDE: ide_write_sectors() で複数セクタ一括書き込み */
-        rc = ide_write_sectors(hdd_drive, (u32)sector, (u32)count, buff);
-        if (rc != 0) return RES_ERROR;
+        if (hdd_ide_phys_size == 256) {
+            /* SASI 256Bセクタ: LBA 2刻み書き込み */
+            u32 sasi_lba = (u32)sector * (hdd_sector_size / 256)
+                         + hdd_part_offset;
+            u32 total_256 = (u32)count * (hdd_sector_size / 256);
+            u32 ide_writes = total_256 / 2;
+            u32 j;
+            for (j = 0; j < ide_writes; j++) {
+                rc = ide_write_sector(hdd_drive, sasi_lba + j * 2,
+                                      buff + j * 512);
+                if (rc != 0) return RES_ERROR;
+            }
+        } else {
+            /* 通常IDE 512Bセクタ */
+            u32 phys_sector = (u32)sector * (hdd_sector_size / 512)
+                            + hdd_part_offset;
+            u32 phys_count  = (u32)count  * (hdd_sector_size / 512);
+            rc = ide_write_sectors(hdd_drive, phys_sector, phys_count, buff);
+            if (rc != 0) return RES_ERROR;
+        }
         return RES_OK;
     }
     return RES_PARERR;
@@ -179,10 +235,12 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
             return RES_OK;
         case GET_SECTOR_COUNT:
             if (ide_get_info(hdd_drive, &ide_info) != 0) return RES_ERROR;
-            *(LBA_t *)buff = (LBA_t)ide_info.total_sectors;
+            /* パーティションオフセット分を差し引き、論理セクタ単位に変換 */
+            *(LBA_t *)buff = (LBA_t)((ide_info.total_sectors - hdd_part_offset)
+                                     / (hdd_sector_size / hdd_ide_phys_size));
             return RES_OK;
         case GET_SECTOR_SIZE:
-            *(WORD *)buff = 512;
+            *(WORD *)buff = (WORD)hdd_sector_size;
             return RES_OK;
         case GET_BLOCK_SIZE:
             *(DWORD *)buff = 1;

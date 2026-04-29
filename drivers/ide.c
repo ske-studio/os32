@@ -9,10 +9,17 @@
 #include "ide.h"
 #include "io.h"
 #include "pc98.h"
+#include "kprintf.h"
 
-/* ドライブ検出フラグ */
-static int drive_present[2] = { 0, 0 };
-static IdeInfo drive_info[2];
+/* ドライブ検出フラグ (4ドライブ対応)
+ * drive 0 = バンク0 Master (NP21/W IDE #0)
+ * drive 1 = バンク0 Slave  (NP21/W IDE #1)
+ * drive 2 = バンク1 Master (NP21/W IDE #2)
+ * drive 3 = バンク1 Slave  (NP21/W IDE #3)
+ */
+#define IDE_MAX_DRIVES 4
+static int drive_present[IDE_MAX_DRIVES] = { 0, 0, 0, 0 };
+static IdeInfo drive_info[IDE_MAX_DRIVES];
 
 /* ---- 内部ヘルパー ---- */
 
@@ -74,11 +81,15 @@ static int ide_wait_ready(void)
     return IDE_ERR_TIMEOUT;
 }
 
-/* ドライブ選択 (0=マスター, PC-98ではDriveSelectは常に0) */
+/* ドライブ選択 (Master/Slave)
+ * PC-98では IDE_DRV_HEAD の bit4 で Master(0)/Slave(1) を選択する。
+ * またI/Oバンク (0 or 1) も同時に切り替える。 */
 static void ide_select_drive(int drive)
 {
-    (void)drive;  /* PC-98ではMaster/Slave不使用 (UNDOCUMENTED) */
-    outp(IDE_DRV_HEAD, IDE_DRV_SEL_CHS);
+    int bank = drive / 2;        /* 0 or 1 */
+    int slave = drive % 2;       /* 0=Master, 1=Slave */
+    ide_select_bank(bank);
+    outp(IDE_DRV_HEAD, IDE_DRV_SEL_CHS | (slave ? 0x10 : 0x00));
     /* ドライブ選択後、400ns待ち（ダミーリード） */
     {
         int i;
@@ -93,8 +104,8 @@ static void ide_set_chs(int drive, u32 lba, u8 count)
 {
     u16 cyl;
     u8 head, sector;
-    u16 heads = drive_info[drive & 1].heads;
-    u16 spt   = drive_info[drive & 1].sectors;
+    u16 heads = drive_info[drive & 3].heads;
+    u16 spt   = drive_info[drive & 3].sectors;
 
     /* ジオメトリが未取得の場合のフォールバック */
     if (heads == 0) heads = 8;
@@ -112,8 +123,8 @@ static void ide_set_chs(int drive, u32 lba, u8 count)
     outp(IDE_SECT_NUM, (unsigned)sector);
     outp(IDE_CYL_LO,   (unsigned)(cyl & 0xFF));
     outp(IDE_CYL_HI,   (unsigned)((cyl >> 8) & 0xFF));
-    /* Drive/Head: CHSモード (0xA0) + head番号 */
-    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F)));
+    /* Drive/Head: CHSモード (0xA0) + head番号 + Slaveビット */
+    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F) | ((drive % 2) ? 0x10 : 0x00)));
 }
 
 /* ============================================================ */
@@ -123,6 +134,7 @@ static void ide_set_chs(int drive, u32 lba, u8 count)
 int ide_init(void)
 {
     int found = 0;
+    int bank, drv;
 
     /* PC-98スレーブPICでIRQ9をマスク。
        IRQ9 = スレーブPIC bit1。未処理IRQによるシステム破壊を防止。 */
@@ -131,21 +143,38 @@ int ide_init(void)
         outp(PIC_SLAVE_DATA, mask | 0x02);  /* bit1 = IRQ9をマスク */
     }
 
-    /* 割り込み無効 (nIEN=1) — ポーリングモード */
-    outp(IDE_DEV_CTRL, IDE_NIEN);
+    /* 全バンクの全ドライブをスキャン */
+    for (bank = 0; bank < 2; bank++) {
+        u8 probe;
 
-    /* マスタードライブ検出 */
-    ide_select_drive(0);
-    if (ide_wait_bsy() == IDE_OK) {
-        u8 st = (u8)inp(IDE_STATUS);
-        if (st != 0xFF && st != 0x00) {
-            drive_present[0] = 1;
-            found++;
-            ide_identify(0, &drive_info[0]);
+        ide_select_bank(bank);
+
+        /* フローティングバス検出: 存在しないバンクでは全ビット1 (0xFF)
+         * が返る → 即スキップ
+         * 注: 0x00 はスレーブドライブ選択前の正常値なのでスキップしない */
+        probe = (u8)inp(IDE_ALT_STATUS);
+        kprintf(0x07, "[ide] bank%d probe=0x%02x\n", bank, probe);
+        if (probe == 0xFF) continue;
+
+        /* 割り込み無効 (nIEN=1) — ポーリングモード */
+        outp(IDE_DEV_CTRL, IDE_NIEN);
+
+        for (drv = 0; drv < 2; drv++) {
+            int idx = bank * 2 + drv; /* 0-3 */
+            int ret;
+
+            /* IDENTIFYコマンドで直接検出。ステータスだけでは
+             * スレーブドライブを見逃す場合がある */
+            ret = ide_identify(idx, &drive_info[idx]);
+            kprintf(0x07, "[ide] drive%d identify=%d\n", idx, ret);
+            if (ret == IDE_OK) {
+                drive_present[idx] = 1;
+                found++;
+            }
         }
     }
 
-    /* マスタードライブを再選択（後続アクセスのため） */
+    /* バンク0のマスタードライブを再選択（後続アクセスのため） */
     ide_select_drive(0);
 
     return found;
@@ -156,7 +185,7 @@ int ide_identify(int drive, IdeInfo *info)
     u16 buf[256];
     int i, ret;
 
-    ide_select_drive(drive & 1);
+    ide_select_drive(drive & 3);
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
 
@@ -190,8 +219,20 @@ int ide_identify(int drive, IdeInfo *info)
     /* LBA総セクタ数 (word 60-61) */
     info->total_sectors = (u32)buf[60] | ((u32)buf[61] << 16);
 
-    /* サイズ(MB) = セクタ数 * 512 / 1048576 */
-    info->size_mb = info->total_sectors / 2048;
+    /* SASI標準ジオメトリ判定 (NP21/W sasihdd[]テーブルと一致)
+     * SPT=33, Heads∈{4,6,8} → SASI 256B/セクタ形式 (HDI)
+     * NP21/WはSASI形式HDIをIDE経由で提供するが、
+     * 内部LBAは256Bセクタ単位のまま */
+    if (info->sectors == 33 &&
+        (info->heads == 4 || info->heads == 6 || info->heads == 8)) {
+        info->phys_sector_size = 256;
+    } else {
+        info->phys_sector_size = 512;
+    }
+
+    /* サイズ(MB) = 総セクタ数 * 物理セクタサイズ / 1048576 */
+    info->size_mb = (info->total_sectors * info->phys_sector_size)
+                    / (1024 * 1024);
 
     /* モデル名 (word 27-46): ATA文字列はバイトスワップ */
     for (i = 0; i < 20; i++) {
@@ -231,8 +272,9 @@ int ide_read_sector(int drive, u32 lba, void *buf)
 {
     int ret;
 
-    if (!drive_present[drive & 1]) return IDE_ERR_NO_DRIVE;
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
 
+    ide_select_drive(drive);
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
 
@@ -282,8 +324,9 @@ int ide_write_sector(int drive, u32 lba, const void *buf)
     const u16 *data = (const u16 *)buf;
     int i;
 
-    if (!drive_present[drive & 1]) return IDE_ERR_NO_DRIVE;
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
 
+    ide_select_drive(drive);
     ret = ide_wait_bsy();
     if (ret != IDE_OK) return ret;
 
@@ -326,16 +369,16 @@ int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf)
 
 int ide_drive_present(int drive)
 {
-    return drive_present[drive & 1];
+    return drive_present[drive & 3];
 }
 
 int ide_get_info(int drive, IdeInfo *info)
 {
-    if (!drive_present[drive & 1]) return IDE_ERR_NO_DRIVE;
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
     if (info) {
         int i;
         u8 *dst = (u8 *)info;
-        u8 *src = (u8 *)&drive_info[drive & 1];
+        u8 *src = (u8 *)&drive_info[drive & 3];
         for (i = 0; i < sizeof(IdeInfo); i++) {
             dst[i] = src[i];
         }
