@@ -1,0 +1,111 @@
+# ============================================================================
+#  kernel.mk — カーネル + SQLite ビルドルール
+# ============================================================================
+
+# === カーネル ASM ソース ===
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm
+ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
+
+# === カーネル C ソース ===
+C_KERNEL = \
+    kernel/kernel.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c \
+    kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
+    kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
+    drivers/kbd.c drivers/serial.c drivers/fm.c \
+    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
+    drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
+    gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
+    fs/fat12.c fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
+    fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
+    exec/exec.c exec/exec_heap.c \
+    kapi/kapi_generated.c kapi/kapi_db.c \
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
+
+C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
+
+# === SQLite関連 (カーネル拡張域 0x18A000 に配置) ===
+C_SQLITE = lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_test.c
+C_SQLITE_OBJ = $(C_SQLITE:.c=.o)
+
+# === モジュール別コンパイルルール ===
+
+# kernel/ モジュール
+kernel/%.o: kernel/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# drivers/ モジュール
+# mouse.c は idt.h (IRQ制御) を参照するため INC_KERNEL でビルド
+drivers/mouse.o: drivers/mouse.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+drivers/%.o: drivers/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_DRIVERS) -c $< -o $@
+
+# gfx/ モジュール
+gfx/%.o: gfx/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_GFX) -c $< -o $@
+
+# fs/ モジュール
+fs/%.o: fs/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_FS) -c $< -o $@
+
+# fs/fatfs/ モジュール (FatFs公式ソース — string.hスタブ付き)
+fs/fatfs/ff.o: fs/fatfs/ff.c fs/fatfs/ffconf.h fs/fatfs/string.h
+	$(CC) $(CFLAGS_BASE) $(INC_FATFS) -c $< -o $@
+
+fs/fatfs/diskio.o: fs/fatfs/diskio.c fs/fatfs/ff.h fs/fatfs/diskio.h
+	$(CC) $(CFLAGS_BASE) $(INC_FATFS) -c $< -o $@
+
+# exec/ モジュール
+exec/%.o: exec/%.c kapi/kapi_generated.c
+	$(CC) $(CFLAGS_BASE) $(INC_EXEC) -c $< -o $@
+
+# kapi/ モジュール
+kapi/kapi_generated.c: tools/kapi.json tools/gen_kapi.py
+	python3 tools/gen_kapi.py
+
+kapi/%.o: kapi/%.c kapi/kapi_generated.c
+	$(CC) $(CFLAGS_BASE) $(INC_KAPI) -c $< -o $@
+
+# lib/ モジュール (汎用ライブラリ: カーネル依存なし)
+lib/%.o: lib/%.c
+	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
+
+# SQLite (カーネル拡張域配置 — -Os必須)
+lib/sqlite3/sqlite3.o: lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_config.h
+	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
+lib/sqlite3/os32_sqlite_vfs.o: lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sqlite_vfs.h lib/sqlite3/os32_sqlite_config.h
+	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
+lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_sqlite_vfs.h lib/sqlite3/os32_sqlite_config.h
+	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+
+# === カーネルリンク ===
+kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ)
+	$(LD) $(LDFLAGS) -o $@ $^ -lgcc
+
+kernel.bin: kernel.elf
+	$(OBJCOPY) -O binary \
+		--remove-section=.sqlite_text \
+		--remove-section=.sqlite_rodata \
+		--remove-section=.sqlite_data \
+		--remove-section=.sqlite_bss \
+		$< $@
+
+# SQLite 拡張域バイナリ (0x18A000 にロードされる)
+sqlite.bin: kernel.elf
+	$(OBJCOPY) -O binary \
+		--only-section=.sqlite_text \
+		--only-section=.sqlite_rodata \
+		--only-section=.sqlite_data \
+		$< $@
+
+# === カーネル単独ターゲット ===
+kernel: kernel.bin sqlite.bin
+
+# === カーネルクリーン ===
+clean-kernel:
+	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) kernel.elf kernel.bin sqlite.bin kernel.map
+
+.PHONY: kernel clean-kernel
