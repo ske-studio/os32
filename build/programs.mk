@@ -297,6 +297,7 @@ endef
 # --- Rustプログラム登録 ---
 $(eval $(call DEFINE_RUST_PROGRAM,hello_gfx,programs/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,alloc_demo,programs/tests,))
+$(eval $(call DEFINE_RUST_PROGRAM,math_test_rs,programs/tests,))
 
 # Rustクリーン
 clean-rust:

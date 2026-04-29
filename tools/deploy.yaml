@@ -192,6 +192,9 @@ filesystem:
     - host: programs/tests/alloc_demo.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/math_test_rs.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
