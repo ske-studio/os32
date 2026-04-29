@@ -29,12 +29,14 @@ static void cmd_mem(int argc, char **argv)
     g_api->kprintf(ATTR_WHITE, "  Heap Tot : %u B, Used: %u B, Free: %u B\n",
                    g_api->kmalloc_total(), g_api->kmalloc_used(), g_api->kmalloc_free());
     g_api->kprintf(ATTR_CYAN, "%s", "Memory Map:\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x00000 - 0x9FFFF  Conventional (640KB)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0xA0000 - 0xA3FFF  Text VRAM\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x09000 -          Kernel\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x40000 - 0x6FFFF  Kernel Heap (192KB)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x90000 - 0x9FFFC  Stack (64KB)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x8F000            Guard page (stack overflow trap)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x00000 - 0x00FFF  NP (NULL guard)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x01000 - 0x8EFFF  Font/Unicode/GFX\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x90000 - 0x9FFFF  Kernel Stack (64KB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0xA0000 - 0xEFFFF  VRAM\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x100000-0x1FFFFF  Kernel Band (1MB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x200000-0x2FFFFF  SQLite Band (1MB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x300000-0x3FFFFF  Shell Band (1MB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x400000-          Program Space\n");
 }
 
 static void cmd_reboot(int argc, char **argv)

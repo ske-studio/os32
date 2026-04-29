@@ -387,13 +387,14 @@ void text__fire_done(int slot, u16 msg_id)
 
 void text_debug_dump(int slot)
 {
+    extern KernelAPI *kapi;
     KernelAPI *api;
     TextSlot *s;
 
     if (!slot_valid(slot))
         return;
 
-    api = (KernelAPI *)KAPI_ADDR;
+    api = kapi;
     s = &text_slots[slot];
 
     api->kprintf(ATTR_WHITE, "[TEXT] Slot %d: active=%d state=%d page=%d/%d\n",
