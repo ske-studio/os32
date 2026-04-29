@@ -7,6 +7,7 @@
 
 #include "libos32ai.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 #include "libos32math.h"
 #include <string.h>
 #include <stdio.h>
@@ -48,29 +49,32 @@ int ai_init(const char *db_path)
         g_db_slot = h;
 
         /* profiles テーブルから全行をロード */
-        rc = db_query(h,
-            "SELECT id, p0_miss, p1_noise, p2, p3, p4, p5, p6, p7,"
-            " p8, p9, p10, p11, p12, p13, p14, p15"
-            " FROM profiles ORDER BY id");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                u8 pid;
-                int i;
-                AiProfile *prof;
+        {
+            int _rc;
+            _rc = db_query(h,
+                "SELECT id, p0_miss, p1_noise, p2, p3, p4, p5, p6, p7,"
+                " p8, p9, p10, p11, p12, p13, p14, p15"
+                " FROM profiles ORDER BY id");
+            if (_rc == DB_STATUS_ROW) {
+                do {
+                    u8 pid;
+                    int i;
+                    AiProfile *prof;
 
-                pid = (u8)db_column_int(0);
-                if (pid >= AI_MAX_PROFILES) continue;
+                    pid = (u8)db_column_int(0);
+                    if (pid >= AI_MAX_PROFILES) continue;
 
-                prof = &g_profiles[pid];
-                for (i = 0; i < AI_PARAM_MAX; i++) {
-                    prof->params[i] = (u8)db_column_int(1 + i);
-                }
-                prof->param_count = AI_PARAM_MAX;
+                    prof = &g_profiles[pid];
+                    for (i = 0; i < AI_PARAM_MAX; i++) {
+                        prof->params[i] = (u8)db_column_int(1 + i);
+                    }
+                    prof->param_count = AI_PARAM_MAX;
 
-                if (pid >= g_profile_count) {
-                    g_profile_count = pid + 1;
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
+                    if (pid >= g_profile_count) {
+                        g_profile_count = pid + 1;
+                    }
+                } while (db_step(h) == DB_STATUS_ROW);
+            }
         }
     }
 
