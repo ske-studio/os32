@@ -6,6 +6,7 @@
 
 #include "libos32board.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 #include <string.h>
 
 /* ====================================================================== */
@@ -33,11 +34,7 @@ void       board_set_area_cnt(int n)   { g_area_count = n; }
 /* マスIDからインデックスを検索 (-1=未発見) */
 int board_find_index(u16 id)
 {
-    int i;
-    for (i = 0; i < g_mass_count; i++) {
-        if (g_masses[i].id == id) return i;
-    }
-    return -1;
+    return DB_FIND_BY_FIELD(g_masses, g_mass_count, id, id);
 }
 
 /* ====================================================================== */
@@ -78,27 +75,22 @@ int board_init(const char *db_path)
         g_db_slot = h;
 
         /* マスデータをロード */
-        rc = db_query(h,
+        DB_LOAD_TABLE(h,
             "SELECT id, type, area, param, cost, flags, x, y"
-            " FROM masses ORDER BY id");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                if (g_mass_count < BOARD_MAX_MASSES) {
-                    BoardMass *m = &g_masses[g_mass_count];
-                    m->id    = (u16)db_column_int(0);
-                    m->type  = (u8)db_column_int(1);
-                    m->area  = (u8)db_column_int(2);
-                    m->param = (u16)db_column_int(3);
-                    m->cost  = (u8)db_column_int(4);
-                    m->flags = (u8)db_column_int(5);
-                    m->x     = (i16)db_column_int(6);
-                    m->y     = (i16)db_column_int(7);
-                    m->connect_count = 0;
-                    m->trap_owner = 0xFF;
-                    g_mass_count++;
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
-        }
+            " FROM masses ORDER BY id",
+            g_masses, BOARD_MAX_MASSES, g_mass_count,
+            {
+                row->id    = (u16)db_column_int(0);
+                row->type  = (u8)db_column_int(1);
+                row->area  = (u8)db_column_int(2);
+                row->param = (u16)db_column_int(3);
+                row->cost  = (u8)db_column_int(4);
+                row->flags = (u8)db_column_int(5);
+                row->x     = (i16)db_column_int(6);
+                row->y     = (i16)db_column_int(7);
+                row->connect_count = 0;
+                row->trap_owner = 0xFF;
+            });
 
         /* 接続データをロード */
         rc = db_query(h,
@@ -129,22 +121,17 @@ int board_init(const char *db_path)
         }
 
         /* 区画データをロード */
-        rc = db_query(h,
+        DB_LOAD_TABLE_OPT(h,
             "SELECT id, unlock_type, unlock_param"
-            " FROM areas ORDER BY id");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                if (g_area_count < BOARD_MAX_AREAS) {
-                    BoardArea *a = &g_areas[g_area_count];
-                    a->id = (u8)db_column_int(0);
-                    a->unlock_type  = (u8)db_column_int(1);
-                    a->unlock_param = (u8)db_column_int(2);
-                    /* unlock_type=0 は初期解放 */
-                    a->unlocked = (a->unlock_type == 0) ? 1 : 0;
-                    g_area_count++;
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
-        }
+            " FROM areas ORDER BY id",
+            g_areas, BOARD_MAX_AREAS, g_area_count,
+            {
+                row->id = (u8)db_column_int(0);
+                row->unlock_type  = (u8)db_column_int(1);
+                row->unlock_param = (u8)db_column_int(2);
+                /* unlock_type=0 は初期解放 */
+                row->unlocked = (row->unlock_type == 0) ? 1 : 0;
+            });
     }
 
     g_initialized = 1;
