@@ -11,26 +11,21 @@
 /*    page_tables[4][1024]  — ページテーブル4枚 = 16MBカバー (16KB)         */
 /*    合計BSS: ~40KB (アライメント用パディング含む)                         */
 /*                                                                          */
-/*  保護マップ (2026-04 再構築, ソースコード準拠):                           */
+/*  保護マップ (ブートアーキテクチャ改善後):                               */
 /*                                                                          */
 /*  [コンベンショナルメモリ]                                                */
-/*    0x00000 - 0x00FFF : R/W  (IVT + BDA, BIOSトランポリンの書込み有)      */
-/*    0x01000 - 0x05FFF : R/O  (BIOS周辺)                                   */
-/*    0x06000 - 0x07FFF : R/W  (BIOSトランポリン)                           */
-/*    0x08000 - 0x08FFF : R/O  (loader.bin, 使用済み)                       */
-/*    0x09000 - 0x3FFFF : R/W  (カーネル .text+.data+.bss + マージン)       */
-/*    0x40000 - 0x8EFFF : R/W  (kmallocヒープ, 320KB)                       */
-/*    0x8F000 - 0x8FFFF : NP   (★カーネルスタックガード)                    */
-/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, 64KB, ESP=0x9FFFC)        */
+/*    0x00000 - 0x00FFF : NP   (NULLポインタ検出, paging_reclaim後)          */
+/*    0x01000 - 0x8EFFF : R/W  (フォント/Unicode/GFX, ブート後に再利用)      */
+/*    0x8F000 - 0x8FFFF : NP   (カーネルスタックガード)                    */
+/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, 64KB)                    */
 /*    0xA0000 - 0xEFFFF : R/W  (テキスト/グラフィックVRAM)                  */
 /*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
 /*                                                                          */
 /*  [拡張メモリ]                                                            */
-/*    0x100000 - 0x23FFFF : R/W  (カーネルデータ+SQLite拡張域)           */
+/*    0x100000 - 0x1FFFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
+/*    0x200000 - 0x23FFFF : R/W  (SQLite帯域: code+BSS+代替スタック)      */
 /*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
-/*    0x300000 - 0x37FFFF : R/W  (シェル常駐帯域, ガード付き)             */
-/*    0x380000 - 0x3C1FFF : R/W  (共有メモリ, ガード付き)                 */
-/*    0x3C2000 - 0x3FFFFF : NP   (SHM後方予約)                             */
+/*    0x300000 - 0x3FFFFF : R/W  (シェル常駐帯域, ガード付き)             */
 /*    0x400000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
 /*    mem_end  - 0xFFFFFF : NP   (未実装メモリ)                             */
 /* ======================================================================== */
@@ -113,37 +108,24 @@ void paging_init(u32 mem_kb)
      *  保護属性の設定
      * ======================================================== */
 
-    /* IVT/BIOSデータ領域: Read-Only
-     * ページ0 (0x0-0xFFF) にBIOSトランポリン パラメータブロック(0x600)が
-     * あり、FDD I/O時に書き込みが発生するためR/Wのまま維持する。
-     * ページ6 (0x6000-0x6FFF) もトランポリン隣接のためR/Wに。 */
-    paging_set_readonly(MEM_IVT_PROT_START, MEM_IVT_PROT_END);
-
-    /* BIOSトランポリン: Read-Write (0x07000 - 0x07FFF) — そのまま */
-
-    /* loader.bin + pm32.bin (使用済み): Read-Only */
-    paging_set_readonly(MEM_LOADER_START, MEM_LOADER_END);
-
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
 
-    /* カーネル予約域: Not-Present (シェル帯域の直前まで) */
-    paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
-
-    /* シェル常駐帯域 (0x300000-0x37FFFF): 既にアイデンティティマッピング済み。
-     * paging_init の最初のループで全ページが R/W PRESENT に設定されており、
-     * ここでは NOT_PRESENT にした予約域のうちシェル帯域だけを復元する必要なし
-     * (MEM_KERNEL_RESV_END=0x2FFFFF でシェル帯域には触れていない)。
-     * シェルのスタックガードページのみ NOT_PRESENT に設定。 */
-    paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
-
-    /* SHM後方予約域 (0x3C2000-0x3FFFFF): Not-Present */
+    /* カーネル帯域内SHM後方予約: Not-Present */
     paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END);
 
-    /* SQLite拡張域 + 代替スタック (0x18A000-0x21FFFF): 強制R/W
-     * ブートローダーが sqlite.bin をここにロード済み。
-     * 代替スタック (0x200000-0x21FFFF, 128KB) も含めて
-     * メモリプローブ結果に関係なく R/W を保証する。 */
+    /* カーネル予約域 (SQLite帯域後 〜 シェル帯域前): Not-Present */
+    paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
+
+    /* シェルスタックガード: Not-Present */
+    paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
+
+    /* シェル帯域後方 (0x380000-0x3FFFFF): Not-Present */
+    paging_set_not_present(0x380000UL, MEM_SHELL_BAND_END);
+
+    /* SQLite帯域 + 代替スタック (0x200000〜): 強制R/W
+     * ブートローダーが sqlite.bin を 0x200000 にロード済み。
+     * 代替スタックも含めメモリプローブ結果に関係なく R/W を保証する。 */
     {
         u32 sq_addr;
         extern u32 __sqlite_start;
@@ -174,6 +156,30 @@ void paging_init(u32 mem_kb)
     }
 
     pg_enabled = 1;
+}
+
+/* ======================================================================== */
+/*  paging_reclaim_conventional — ブート後のコンベンショナルメモリ属性変更    */
+/*  ページ0: NOT PRESENT (NULLポインタ検出)                                 */
+/*  0x1000-0x8EFFF: R/W (旧R/O/ローダー領域を解放)                          */
+/* ======================================================================== */
+void paging_reclaim_conventional(void)
+{
+    u32 addr;
+
+    /* ページ0: NOT PRESENT (NULLポインタ検出) */
+    paging_set_not_present(0x0, MEM_NULL_GUARD_END);
+
+    /* 0x1000-0x8EFFF: R/W (フォント/Unicode/GFX用) */
+    for (addr = MEM_CONV_RECLAIM_START; addr <= MEM_CONV_RECLAIM_END; addr += PAGE_SIZE) {
+        u32 pdi = addr >> 22;
+        u32 pti = (addr >> 12) & 0x3FF;
+        if (pdi < PAGING_PT_COUNT) {
+            page_tables[pdi][pti] = addr | PAGE_RW;
+        }
+    }
+
+    if (pg_enabled) tlb_flush_all();
 }
 
 /* ======================================================================== */

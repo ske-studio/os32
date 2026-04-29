@@ -19,8 +19,9 @@
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
 extern u32 sys_mem_kb;
-static KernelAPI *kapi = (KernelAPI *)KAPI_ADDR;
+static KernelAPI *kapi;
 void exec_init(void) {
+    kapi = (KernelAPI *)KAPI_ADDR;
 #include "exec_kapi_init.inc"
 }
 
@@ -281,21 +282,31 @@ int exec_run(const char *cmdline)
     }
 
 
-    /* ヒープ・ガードページ設定 (子プロセスのみ) */
-    if (!is_shell) {
+    /* ヒープ・ガードページ設定 */
+    if (is_shell) {
+        /* シェルも BSS 終端からスタックガードの直前までをヒープとして使用可能にする */
+        exec_heap_base = (u32)load_addr + text_sz + bss_sz;
+        exec_heap_base = (exec_heap_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (guard_b > exec_heap_base) {
+            exec_heap_size = guard_b - exec_heap_base;
+        } else {
+            exec_heap_size = 0;
+        }
+        ctx->exec_heap_base = exec_heap_base;
+        ctx->exec_heap_size = exec_heap_size;
+        kapi->sbrk_heap_limit = guard_b;
+    }
+
+    if (exec_heap_size > 0) {
         /* OS32X ヘッダの heap_size 指定があればサイズを制限 */
         if (heap_sz > 0 && heap_sz < exec_heap_size) {
             exec_heap_size = heap_sz;
             ctx->exec_heap_size = exec_heap_size;
         }
-        shell_print("[EXEC] base=", 0x0E);
-        shell_print_dec(exec_heap_base, 0x0E);
-        shell_print(" size=", 0x0E);
-        shell_print_dec(exec_heap_size, 0x0E);
-        shell_print(" req=", 0x0E);
-        shell_print_dec(heap_sz, 0x0E);
-        shell_print("\n", 0x0E);
         exec_heap_init_at(exec_heap_base, exec_heap_size);
+    }
+
+    if (!is_shell) {
         kapi->sbrk_heap_limit = guard_a;
         ctx->sbrk_heap_limit = guard_a;
 

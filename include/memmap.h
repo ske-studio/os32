@@ -4,69 +4,73 @@
 /*  カーネル・ページング・プログラムローダーが参照する物理/仮想アドレスを     */
 /*  一元管理する。変更時はpaging.c, kernel.c, exec.hとの整合性を確認。       */
 /*                                                                          */
-/*  メモリレイアウト概要 (2026-04 再構築):                                   */
+/*  メモリレイアウト概要 (2026-04 ブートアーキテクチャ改善):                  */
 /*                                                                          */
 /*    [コンベンショナルメモリ 0x00000-0xFFFFF]                               */
-/*      0x09000-          カーネルバイナリ (.text+.data+.bss)                */
-/*      0x40000-0x8EFFF   カーネルヒープ (kmalloc, 320KB)                    */
-/*      0x8F000-0x8FFFF   スタックガード (NOT PRESENT)                       */
-/*      0x90000-0x9FFFF   カーネルスタック (64KB)                            */
-/*      0xA0000-0xEFFFF   VRAM (テキスト+グラフィック)                       */
-/*      0xF0000-0xFFFFF   BIOS ROM (R/O)                                    */
+/*      0x00000-0x00FFF  NOT PRESENT (NULLポインタ検出)                      */
+/*      0x01000-0x49FFF  フォントキャッシュ (292KB) ※ブート後に配置          */
+/*      0x4A000-0x69FFF  Unicode-JIS変換テーブル (128KB) ※ブート後に配置     */
+/*      0x6A000-0x89FFF  GFXバックバッファ (128KB) ※ブート後に配置          */
+/*      0x8A000-0x8EFFF  空き (20KB, 将来用)                                 */
+/*      0x8F000-0x8FFFF  カーネルスタックガード (NOT PRESENT)                 */
+/*      0x90000-0x9FFFF  カーネルスタック (64KB)                              */
+/*      0xA0000-0xEFFFF  VRAM (テキスト+グラフィック)                         */
+/*      0xF0000-0xFFFFF  BIOS ROM (R/O)                                      */
 /*                                                                          */
-/*    [カーネルデータ 0x100000-0x23FFFF]                                     */
-/*      0x100000-0x148FFF フォントキャッシュ (~292KB)                        */
-/*      0x149000-0x168FFF Unicode-JIS変換テーブル (128KB)                    */
-/*      0x169000-0x188FFF GFXバックバッファ (128KB, 4プレーン)               */
-/*      0x189000-0x189FFF KernelAPIテーブル (4KB)                            */
-/*      0x18A000-0x21FFFF SQLite拡張域 (code+BSS+MEMSYS5, ~600KB)           */
-/*      0x220000-0x23FFFF SQLite代替スタック (128KB)                         */
+/*    [カーネル帯域 0x100000-0x1FFFFF, 1MB]                                  */
+/*      0x100000          カーネルバイナリ (.text+.data+.bss, ~200KB)         */
+/*      __bss_end (align) カーネルヒープ (320KB)                             */
+/*      +320KB            KAPIテーブル (4KB)                                  */
+/*      +4KB              SHM前方ガード (NP, 4KB)                            */
+/*      +4KB              共有メモリ本体 (256KB)                              */
+/*      +256KB            SHM後方ガード (NP, 4KB)                            */
+/*      残り              空き/予約                                           */
 /*                                                                          */
-/*    [カーネル予約 0x240000-0x2FFFFF]                                       */
-/*      NOT PRESENT                                                          */
+/*    [SQLite帯域 0x200000-0x2FFFFF, 1MB]                                    */
+/*      0x200000          SQLite code+BSS (~579KB)                            */
+/*      +code末尾         SQLite代替スタック (128KB)                          */
+/*      残り              空き/予約                                           */
 /*                                                                          */
-/*    [シェル常駐 0x300000-0x37FFFF]                                         */
+/*    [シェル常駐 0x300000-0x3FFFFF, 1MB]                                    */
+/*      0x300000          シェル .text+.data+.bss (~113KB)                    */
+/*      ガード            スタックガード (NP)                                 */
+/*      ~0x3FFFFF         スタック (下向き成長)                               */
 /*                                                                          */
-/*    [共有メモリ 0x380000-0x3C1FFF]                                         */
-/*      0x380000          SHM前方ガード (NOT PRESENT)                        */
-/*      0x381000-0x3C0FFF 共有メモリ (256KB)                                 */
-/*      0x3C1000          SHM後方ガード (NOT PRESENT)                        */
-/*      0x3C2000-0x3FFFFF 予約 (NOT PRESENT)                                 */
-/*                                                                          */
-/*    [プログラム空間 0x400000-メモリ上限]                                   */
-/*      0x400000-0x4FFFFF .text, .data, .bss, sbrk (最大1MB)                 */
-/*      0x500000-0x500FFF ★ GUARD A (sbrk上限ガード / NOT PRESENT)          */
-/*      0x501000-         exec_heap (動的確保上限まで)                       */
-/*      mem_end - 260KB   ★ GUARD B (スタックオーバーフロー保護 / NOT PRESENT)*/
-/*      mem_end - 256KB   プログラムスタック (256KB, 下向き成長)             */
+/*    [プログラム空間 0x400000-メモリ上限]  ※旧アドレス維持                  */
+/*      0x400000          外部プログラム (最大1MB)                            */
+/*      ガード            sbrk/スタックガードページ                          */
+/*      ~mem_end          プログラムスタック (256KB)                          */
 /* ======================================================================== */
 
 #ifndef MEMMAP_H
 #define MEMMAP_H
 
+#include "types.h"
+
 /* ====================================================================== */
 /*  カーネル配置                                                            */
 /* ====================================================================== */
 #define MEM_1MB               0x100000UL  /* 1MB */
-#define KERNEL_LOAD_ADDR      0x9000UL    /* カーネルロードアドレス */
+#define KERNEL_LOAD_ADDR      0x100000UL  /* カーネルロードアドレス (1MB) */
 
 /* ====================================================================== */
 /*  カーネルヒープ (kmalloc)                                                */
+/*  __bss_end から動的算出 (4KBアライン)                                    */
 /* ====================================================================== */
-/* BSS終端(~0x27260)→0x40000開始                                            */
-#define KHEAP_BASE            0x40000UL   /* カーネルヒープ開始 */
-#define KHEAP_SIZE            0x50000UL   /* カーネルヒープサイズ (320KB) */
+extern u32 __bss_end;
+#define KHEAP_BASE            ((((u32)&__bss_end) + 0xFFF) & ~0xFFFUL)
+#define KHEAP_SIZE            0x050000UL  /* カーネルヒープサイズ (320KB) */
 
 /* ====================================================================== */
 /*  ページング保護範囲                                                      */
 /* ====================================================================== */
 
-/* IVT/BIOSデータ領域: Read-Only */
-/* ページ0 (0x0-0xFFF) はBIOSトランポリン用にR/W維持 */
+/* IVT/BIOSデータ領域: Read-Only (ブート後に再利用されるまで) */
+/* ページ0 (0x0-0xFFF) はブート後に NOT PRESENT (NULLポインタ検出) */
 #define MEM_IVT_PROT_START    0x01000UL
 #define MEM_IVT_PROT_END      0x05FFFUL
 
-/* loader.bin (使用済み): Read-Only */
+/* loader.bin (使用済み): Read-Only → ブート後に再利用 */
 #define MEM_LOADER_START      0x08000UL
 #define MEM_LOADER_END        0x08FFFUL
 
@@ -79,54 +83,65 @@
 #define MEM_BIOS_ROM_END      0xFFFFFUL
 
 /* ====================================================================== */
-/*  カーネルデータ域 (0x100000 - 0x1FFFFF)                                  */
-/*  フォントキャッシュ → Unicode → バックバッファ → KAPI の順に先頭詰め   */
+/*  コンベンショナルメモリ再利用域 (ブート後に配置)                          */
+/*  Step 04 で最終アドレスに更新される。暫定的にカーネル帯域後方にも配置。   */
 /* ====================================================================== */
+#define MEM_CONV_RECLAIM_START  0x01000UL
+#define MEM_CONV_RECLAIM_END    0x8EFFFUL
 
-/* フォントキャッシュ (~292KB, kcg.c) */
-#define MEM_FONT_CACHE_BASE   0x100000UL
+/* NULLポインタ検出ガード */
+#define MEM_NULL_GUARD_END      0x00FFFUL
 
-/* Unicode-JIS変換テーブル (128KB, utf8.c / kernel.c) */
-#define MEM_UNICODE_TABLE_BASE 0x149000UL
-#define MEM_UNICODE_TABLE_SIZE (MEM_GFX_BB_BASE - MEM_UNICODE_TABLE_BASE) /* 128KB */
+/* フォントキャッシュ (コンベンショナル, ~292KB) */
+#define MEM_FONT_CACHE_BASE     0x01000UL
 
-/* GFXバックバッファ (128KB = 32000B × 4プレーン, gfx_core.c) */
-#define MEM_GFX_BB_BASE       0x169000UL
+/* Unicode-JIS変換テーブル (コンベンショナル, 128KB) */
+#define MEM_UNICODE_TABLE_BASE  0x4A000UL
+#define MEM_UNICODE_TABLE_SIZE  0x20000UL  /* 128KB */
+
+/* GFXバックバッファ (コンベンショナル, 128KB = 32000B × 4プレーン) */
+#define MEM_GFX_BB_BASE         0x6A000UL
 
 /* KernelAPIテーブルアドレスは os32_kapi_shared.h で定義 (KAPI_ADDR) */
 
 /* ====================================================================== */
-/*  SQLite用代替スタック (0x220000-0x23FFFF, 128KB)                          */
-/*  SQLite B-tree操作はカーネルスタック(64KB)を超過するため、                 */
-/*  拡張メモリ上の代替スタックに切り替えて実行する。                          */
-/*  MEMSYS5 プール拡張のため 0x200000→0x220000 に移動済み (2026-04)。        */
+/*  カーネル帯域内の動的配置 (0x100000-0x1FFFFF)                             */
+/*  KAPI + SHM はヒープの直後に動的配置される                               */
 /* ====================================================================== */
-#define MEM_SQLITE_STACK_BASE  0x220000UL  /* 代替スタック下端 */
-#define MEM_SQLITE_STACK_SIZE  0x020000UL  /* 128KB */
-#define MEM_SQLITE_STACK_TOP   0x23FFF0UL  /* ESP初期値 (16バイトアライン) */
 
-/* ====================================================================== */
-/*  カーネル予約域 (NOT PRESENT)                                             */
-/* ====================================================================== */
-#define MEM_KERNEL_RESV_START 0x240000UL
-#define MEM_KERNEL_RESV_END   0x2FFFFFUL  /* シェル帯域の直前まで */
+/* KAPIテーブル: KHEAP末尾直後 */
+#define MEM_KAPI_OFFSET       (KHEAP_SIZE)  /* ヒープ末尾からのオフセット */
+#define MEM_KAPI_SIZE         0x1000UL      /* 4KB */
 
-/* ====================================================================== */
-/*  共有メモリ空間 (IPC用, シェル帯域後方 0x380000 付近)                     */
-/*  前後にガードページ (NOT PRESENT) を配置                               */
-/* ====================================================================== */
-#define MEM_SHM_GUARD_LO      0x380000UL  /* 前方ガードページ (4KB) */
-#define MEM_SHM_BASE          0x381000UL  /* 共有メモリ開始 */
+/* 共有メモリ: KAPIテーブルの直後 */
+#define MEM_SHM_GUARD_LO      (KHEAP_BASE + KHEAP_SIZE + MEM_KAPI_SIZE)
+#define MEM_SHM_BASE          (MEM_SHM_GUARD_LO + 0x1000UL)
 #define MEM_SHM_SIZE          0x040000UL  /* 256KB */
-#define MEM_SHM_END           0x3C0FFFUL  /* 共有メモリ終端 */
-#define MEM_SHM_GUARD_HI      0x3C1000UL  /* 後方ガードページ (4KB) */
+#define MEM_SHM_END           (MEM_SHM_BASE + MEM_SHM_SIZE - 1)
+#define MEM_SHM_GUARD_HI      (MEM_SHM_BASE + MEM_SHM_SIZE)
 
-/* SHM後方予約域 (NOT PRESENT) */
-#define MEM_SHM_RESV_START    0x3C2000UL
-#define MEM_SHM_RESV_END      0x3FFFFFUL  /* プログラム空間の直前まで */
+/* カーネル帯域終端 */
+#define MEM_KERNEL_BAND_END   0x1FFFFFUL
+
+/* SHM後方予約域 (NOT PRESENT): SHMガード後 〜 カーネル帯域終端 */
+#define MEM_SHM_RESV_START    (MEM_SHM_GUARD_HI + 0x1000UL)
+#define MEM_SHM_RESV_END      MEM_KERNEL_BAND_END
 
 /* ====================================================================== */
-/*  シェル常駐帯域 (0x300000-0x37FFFF, 512KB)                              */
+/*  SQLite帯域 (0x200000-0x2FFFFF, 1MB)                                     */
+/*  SQLite code+BSS + 代替スタック (128KB)                                  */
+/* ====================================================================== */
+extern u32 __sqlite_end;
+#define MEM_SQLITE_STACK_BASE  ((((u32)&__sqlite_end) + 0xFFF) & ~0xFFFUL)
+#define MEM_SQLITE_STACK_SIZE  0x020000UL  /* 128KB */
+#define MEM_SQLITE_STACK_TOP   (MEM_SQLITE_STACK_BASE + MEM_SQLITE_STACK_SIZE - 16)
+
+/* SQLite帯域後の予約: NOT PRESENT */
+#define MEM_KERNEL_RESV_START  ((MEM_SQLITE_STACK_BASE + MEM_SQLITE_STACK_SIZE + 0xFFF) & ~0xFFFUL)
+#define MEM_KERNEL_RESV_END    0x2FFFFFUL  /* シェル帯域の直前まで */
+
+/* ====================================================================== */
+/*  シェル常駐帯域 (0x300000-0x3FFFFF, 1MB)                                 */
 /*  シェルはここに常駐し、子プロセスは一切触れない。PD切り替え不要。         */
 /*                                                                          */
 /*  レイアウト:                                                             */
@@ -140,7 +155,7 @@
 #define MEM_SHELL_GUARD       0x375000UL  /* シェルスタックガード */
 #define MEM_SHELL_STACK_TOP   0x380000UL  /* シェルスタック先頭 (下向き成長) */
 #define MEM_SHELL_STACK_SIZE  0x00A000UL  /* シェルスタックサイズ (40KB) */
-#define MEM_SHELL_BAND_END    0x380000UL  /* シェル帯域終端 */
+#define MEM_SHELL_BAND_END    0x3FFFFFUL  /* シェル帯域終端 */
 
 /* ====================================================================== */
 /*  外部プログラムロード関連 (子プロセス用: 0x400000〜)                      */

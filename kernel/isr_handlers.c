@@ -113,7 +113,7 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
         u32 sq_e = (u32)&__sqlite_end;
         if (fault_eip >= sq_s && fault_eip < sq_e) {
             tvram_puts_at(row+3, 17, "[sqlite]", 0xA1);
-        } else if (fault_eip >= 0x9000 && fault_eip < 0x40000) {
+        } else if (fault_eip >= KERNEL_LOAD_ADDR && fault_eip < 0x200000) {
             tvram_puts_at(row+3, 17, "[.text]", 0xA1);
         } else {
             tvram_puts_at(row+3, 17, "[OUT OF CODE!]", 0xC1);
@@ -149,7 +149,7 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
         for (frame = 0; frame < 8 && tr < 20; frame++) {
             u32 ret_addr;
             u32 prev_ebp;
-            if (ebp < 0x9000 || ebp >= 0xF00000) break;
+            if (ebp < 0x90000 || ebp >= 0xF00000) break;
             if (!paging_is_present(ebp) ||
                 !paging_is_present(ebp + 4)) break;
             prev_ebp = *(u32 *)ebp;
@@ -241,7 +241,7 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         u32 sq_e = (u32)&__sqlite_end;
         if (fault_eip >= sq_s && fault_eip < sq_e) {
             tvram_puts_at(row+2, 18, "[.sqlite_text]", 0xA1);
-        } else if (fault_eip >= 0x9000 && fault_eip < 0x40000) {
+        } else if (fault_eip >= KERNEL_LOAD_ADDR && fault_eip < 0x200000) {
             tvram_puts_at(row+2, 18, "[.text]", 0xA1);
         } else {
             tvram_puts_at(row+2, 18, "[OUT OF CODE!]", 0xC1);
@@ -291,7 +291,7 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
             u32 ret_addr;
             u32 prev_ebp;
             /* EBPが有効なアドレスか安全チェック */
-            if (ebp < 0x9000 || ebp >= 0xF00000) break;
+            if (ebp < 0x90000 || ebp >= 0xF00000) break;
             if (!paging_is_present(ebp) ||
                 !paging_is_present(ebp + 4)) break;
             prev_ebp = *(u32 *)ebp;

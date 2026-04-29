@@ -1,7 +1,7 @@
 /* ============================================================
  * kernel.c — PC-9801 32ビットOS カーネル
  * プロテクトモードで動作、テキストVRAMに直接書き込む
- * リニアアドレス 0x9000 に配置される
+ * リニアアドレス 0x100000 (1MB) に配置される
  *
  * Phase 2+: IDT/PIC/PIT + キーボード + ミニシェル
  * ============================================================ */
@@ -299,6 +299,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(37, 2, "PAGE...", TATTR_GREEN);
     paging_init(mem_kb);
     tvram_print(44, 2, "OK", TATTR_WHITE);
+
+    /* コンベンショナルメモリ再利用 (ブート後のローダー領域等を解放) */
+    paging_reclaim_conventional();
 
     /* FPU 初期化 (paging_init の後で CR0 に対して設定)
      * CR0.EM=0 (ネイティブFPU使用), CR0.TS=0 (タスクスイッチ不要)
