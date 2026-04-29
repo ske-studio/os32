@@ -99,7 +99,6 @@ KernelAPIポインタを引数として実行する。
 | hsync | `system/hsync.c` | HostDrv同期 (/host → / にファイル同期) |
 | install | `system/install.c` | HDDインストーラ |
 | cdinst | `system/cdinst.c` | CDインストーラ (ISO→ext2展開) |
-| lzss | `system/lzss.c` | LZSS圧縮・展開ツール |
 | sndctl | `system/sndctl.c` | サウンド制御ユーティリティ |
 | sndtest | `system/sndtest.c` | FM音源テスト |
 | sndtest2| `system/sndtest2.c` | SSG音源テスト |
@@ -110,7 +109,6 @@ KernelAPIポインタを引数として実行する。
 |---------|---------|------|
 | bench | `tests/bench/` | ベンチマークプログラム |
 | bench_scale2x | `tests/bench_scale2x/` | Scale2x ベンチマーク |
-| pyxel_test | `tests/pyxel_test.c` | libpyxel エンジンテスト |
 | mouse_test | `tests/mouse_test.c` | マウスドライバテスト |
 | flip400_test | `tests/flip400_test.c` | 400ラインページフリップテスト |
 | gfx200_test | `tests/gfx200_test.c` | 200ラインGFXテスト |
@@ -132,6 +130,5 @@ KernelAPIポインタを引数として実行する。
 | libos32 | `programs/libos32/` | newlib-nano ブリッジ (syscalls.c) |
 | libos32gfx | `programs/libos32gfx/` | グラフィックス描画ライブラリ |
 | libos32snd | `programs/libos32snd/` | サウンドライブラリ (BGM/SE) |
-| libpyxel | `programs/libpyxel/` | Pyxel互換ゲームエンジン |
 | libfiler | `programs/libfiler/` | ファイラ共通ライブラリ |
 | libmd | `programs/libmd/` | Markdown パーサーライブラリ |

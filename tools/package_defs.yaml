@@ -56,8 +56,6 @@ minimal:
       guest: /bin/hexdump.bin
     - host: programs/sleep.bin
       guest: /bin/sleep.bin
-    - host: programs/lzss.bin
-      guest: /bin/lzss.bin
     - host: programs/sndctl.bin
       guest: /bin/sndctl.bin
     - host: programs/install.bin
@@ -152,8 +150,6 @@ append:
   # lzss: true
   lzss: false
   files:
-    - host: assets/SKK.LZS
-      guest: /data/skk.lzs
     - host: "assets/images/*.vbz"
       guest: /data/images/
     - host: "assets/images/*.vdp"

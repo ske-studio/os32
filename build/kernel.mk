@@ -19,7 +19,7 @@ C_KERNEL = \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c kapi/kapi_db.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/lzss.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
+    lib/path.c lib/utf8.c lib/kprintf.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 

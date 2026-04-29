@@ -101,9 +101,6 @@ filesystem:
     - host: programs/tests/bench_scale2x.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/pyxel_test.bin
-      guest: /usr/bin/
-      tags: [programs]
     - host: programs/tests/gfx200_test.bin
       guest: /usr/bin/
       tags: [programs]
@@ -234,10 +231,6 @@ filesystem:
       guest: /etc/filetypes
       tags: [core]
 
-    # --- SKK辞書 ---
-    - host: assets/SKK.LZS
-      guest: /data/skk.lzs
-      tags: [data]
 
     # --- FEP辞書 (SQLite DB) ---
     - host: assets/fep.db

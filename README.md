@@ -100,7 +100,7 @@ src/os32/
 ├── fs/         — ファイルシステム (VFS/ext2/FAT12/serialfs)
 ├── exec/       — プログラムローダー (OS32X)
 ├── kapi/       — KernelAPIラッパー (自動生成)
-├── lib/        — ユーティリティ (UTF-8/パス/kprintf/LZSS)
+├── lib/        — ユーティリティ (UTF-8/パス/kprintf/LZ4)
 ├── include/    — 共通ヘッダ
 ├── programs/   — 外部プログラム (シェル/エディタ/ツール)
 ├── tools/      — ビルドツール・スクリプト

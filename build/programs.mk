@@ -5,8 +5,8 @@
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/skk_test.c programs/tests/fep_test.c programs/tests/pyxel_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c, $(wildcard programs/tests/*.c))
-C_SYSTEM  = $(filter-out programs/system/lzss.c programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
+C_TESTS   = $(filter-out programs/tests/fep_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c, $(wildcard programs/tests/*.c))
+C_SYSTEM  = $(filter-out programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) programs/shell.bin
@@ -47,30 +47,7 @@ programs/apps/edit/%.o: programs/apps/edit/%.c
 programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
 
-# === SKK Module ===
-SKK_SRC = $(wildcard programs/skk/*.c)
-SKK_OBJ = $(SKK_SRC:.c=.o)
-
-programs/skk/%.o: programs/skk/%.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
-
-programs/tests/skk_test.o: programs/tests/skk_test.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
-
-programs/tests/skk_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/skk_test.o $(SKK_OBJ) lib/utf8.o -lc -lgcc
-
-# === LZSS Command ===
-lib/lzss_prog.o: lib/lzss.c lib/lzss.h
-	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
-
-programs/system/lzss.o: programs/system/lzss.c
-	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
-
-programs/system/lzss.elf: build/app.ld $(CRT0_OBJ) programs/system/lzss.o lib/lzss_prog.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/system/lzss.o lib/lzss_prog.o -lc -lgcc
-
-lzss_cmd: $(CRT0_OBJ) programs/system/lzss.bin
+# (SKK Module / LZSS Command は廃止済み)
 
 # === LZ4 Command ===
 lib/lz4_prog.o: lib/lz4.c lib/lz4.h
@@ -139,7 +116,7 @@ $(1): $$(CRT0_OBJ) programs/tests/$(1).bin
 endef
 
 # --- テストプログラム登録 ---
-$(eval $(call DEFINE_TEST,pyxel_test,$$(PYXEL_OBJ) $$(GFX_OBJ),))
+
 $(eval $(call DEFINE_TEST,gfx200_test,$$(GFX_OBJ),))
 $(eval $(call DEFINE_TEST,gfx_demo200,$$(GFX_OBJ),))
 $(eval $(call DEFINE_TEST,blit_test,$$(GFX_OBJ),))
@@ -277,10 +254,6 @@ programs/%.bin: programs/%.raw programs/%.elf
 	fi
 
 # === ヘルパーツール ===
-lzss_dict:
-	@if [ ! -f tools/lzss_pack ]; then gcc tools/lzss_pack.c -O2 -o tools/lzss_pack; fi
-	@if [ assets/SKK.DIC -nt assets/SKK.LZS ]; then tools/lzss_pack assets/SKK.DIC assets/SKK.LZS; fi
-
 unicode_bin:
 	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
 	@if [ ! -f unicode.bin ]; then ./tools/gen_unicode; fi
@@ -288,14 +261,12 @@ unicode_bin:
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
-skk: $(CRT0_OBJ) programs/tests/skk_test.bin lzss_dict
-
 # === プログラム集約ターゲット ===
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview lzss_cmd cdinst bench_scale2x pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
@@ -312,18 +283,18 @@ clean-programs:
 	rm -f programs/system/*.o programs/system/*.elf programs/system/*.raw programs/system/*.bin
 	rm -f programs/crt0.o programs/crt0_c.o
 	rm -f programs/shell/*.o
-	rm -f programs/skk/*.o
+
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
-	rm -f lib/lzss_prog.o lib/lz4_prog.o
+	rm -f lib/lz4_prog.o
 	rm -f unicode.bin tools/gen_unicode
 
-.PHONY: programs programs_base edit lzss_cmd lz4_cmd cdinst bench bench_scale2x
-.PHONY: pyxel_test gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
+.PHONY: programs programs_base edit lz4_cmd cdinst bench bench_scale2x
+.PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
 .PHONY: chem_test chem_demo map_test map_demo input_test
 .PHONY: asset_test asset_demo ecs_test ecs_demo text_test text_demo
 .PHONY: econ_test ai_test btl_test board_test evt_test inv_test
 .PHONY: gfx_demo demo1 spr_test vdpview raster ekakiuta vbzview mdview
-.PHONY: lzss_dict unicode_bin fep_dic skk
+.PHONY: unicode_bin fep_dic
 .PHONY: clean-programs

@@ -124,10 +124,6 @@ LIBEVENT_OBJ = $(libos32event_OBJ)
 $(eval $(call DEFINE_LIB,libos32inv,-Iprograms/libos32db,))
 LIBINV_OBJ = $(libos32inv_OBJ)
 
-# libpyxel — Pyxel互換ゲームエンジン
-$(eval $(call DEFINE_LIB,libpyxel,,))
-PYXEL_OBJ = $(libpyxel_OBJ)
-
 # libtilemap — タイルマップエンジン (ASMソース含む)
 TILEMAP_SRC = $(wildcard programs/libtilemap/*.c)
 TILEMAP_ASM_SRC = $(wildcard programs/libtilemap/*.asm)
@@ -183,7 +179,7 @@ clean-libs:
 	rm -f programs/libos32ecs/*.o
 	rm -f programs/libos32gfx/*.o programs/libos32gfx/asm/*.o
 	rm -f programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o
-	rm -f programs/libpyxel/*.o programs/libtilemap/*.o
+	rm -f programs/libtilemap/*.o
 	rm -f programs/libos32db/*.o programs/libos32snd/*.o
 	rm -f programs/libmd/*.o programs/libfiler/*.o
 
