@@ -81,11 +81,39 @@ GCC 環境においても `-std=gnu89` を維持する。
 
 ## §4. ビルドとデプロイ
 
+### Makefile 構成
+
+Makefile は `build/` ディレクトリに分割された `.mk` ファイルで構成されている:
+
+| ファイル | 内容 |
+|---------|------|
+| `Makefile` | ルート (include + 主要ターゲット) |
+| `build/config.mk` | ツールチェーン、フラグ、パス定義 |
+| `build/kernel.mk` | カーネル + SQLite ビルドルール |
+| `build/libs.mk` | 全ユーザー空間ライブラリ (テンプレートマクロ) |
+| `build/programs.mk` | 外部プログラムビルドルール |
+| `build/boot.mk` | ブートローダー |
+| `build/deploy.mk` | デプロイターゲット |
+| `build/image.mk` | D88/ISO イメージ生成 |
+| `build/app.conf` | OS32Xヘッダ設定 (APIバージョン/ヒープサイズ) |
+
 ### 基本ルール
 
 ```bash
-/* 通常ビルド */
+/* 全体ビルド */
 make all
+
+/* 部分ビルド */
+make kernel              /* カーネル + SQLite のみ */
+make libs                /* 全ライブラリのみ */
+make programs            /* 全外部プログラムのみ */
+make econ_test           /* 個別プログラム */
+
+/* クリーン (全体 / モジュール別) */
+make clean
+make clean-kernel
+make clean-libs
+make clean-programs
 
 /* クリーンビルド (KernelAPI構造体変更時は必須) */
 make clean
@@ -100,6 +128,12 @@ make all
 2. `make all` で API メタデータを自動生成
 3. 必要に応じて `kapi/` にラッパーを実装
 4. **`make clean` → `make all` で全プログラムを再ビルド**
+
+### 新規プログラム追加手順
+
+1. `build/programs.mk` にソース定義とリンクルールを追加（テンプレートマクロ `DEFINE_TEST` / `DEFINE_GFX_APP` を活用）
+2. `build/app.conf` に APIバージョンとヒープサイズを追加
+3. `tools/deploy.yaml` にデプロイ先パスを追加
 
 ### デプロイ方式
 
