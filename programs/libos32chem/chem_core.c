@@ -7,6 +7,7 @@
 
 #include "libos32chem.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 
 /* KernelAPI ポインタ (crt0_c.c で定義) */
 extern KernelAPI *kapi;
@@ -60,62 +61,40 @@ extern void *memset(void *, int, unsigned int);
 /* 反応ルールをDBからRAMキャッシュに読み込む */
 static int load_reactions(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_db,
+    return DB_LOAD_TABLE(g_db,
         "SELECT elem_a, elem_b, action, target, "
         "spawn_elem, temp_delta, hp_delta, priority "
-        "FROM reactions ORDER BY priority DESC");
-    if (rc < 0) {
-        return -1;
-    }
-
-    while (rc == DB_STATUS_ROW && count < CHEM_MAX_REACTIONS) {
-        g_reactions[count].elem_a     = (u32)db_column_int(0);
-        g_reactions[count].elem_b     = (u32)db_column_int(1);
-        g_reactions[count].action     = (u8)db_column_int(2);
-        g_reactions[count].target     = (u8)db_column_int(3);
-        g_reactions[count].spawn_elem = (u16)db_column_int(4);
-        g_reactions[count].temp_delta = (i16)db_column_int(5);
-        g_reactions[count].hp_delta   = (i16)db_column_int(6);
-        g_reactions[count].priority   = (u8)db_column_int(7);
-        g_reactions[count]._pad       = 0;
-        count++;
-        rc = db_step(g_db);
-    }
-
-    g_reaction_count = count;
-    return count;
+        "FROM reactions ORDER BY priority DESC",
+        g_reactions, CHEM_MAX_REACTIONS, g_reaction_count,
+        {
+            row->elem_a     = (u32)db_column_int(0);
+            row->elem_b     = (u32)db_column_int(1);
+            row->action     = (u8)db_column_int(2);
+            row->target     = (u8)db_column_int(3);
+            row->spawn_elem = (u16)db_column_int(4);
+            row->temp_delta = (i16)db_column_int(5);
+            row->hp_delta   = (i16)db_column_int(6);
+            row->priority   = (u8)db_column_int(7);
+            row->_pad       = 0;
+        });
 }
 
 /* 状態遷移ルールをDBからRAMキャッシュに読み込む */
 static int load_phases(void)
 {
-    int rc;
-    int count = 0;
-
-    rc = db_query(g_db,
+    return DB_LOAD_TABLE(g_db,
         "SELECT elem_from, temp_min, temp_max, "
         "elem_to, spawn_elem "
-        "FROM phase_transitions");
-    if (rc < 0) {
-        return -1;
-    }
-
-    while (rc == DB_STATUS_ROW && count < CHEM_MAX_PHASES) {
-        g_phases[count].elem_from   = (u32)db_column_int(0);
-        g_phases[count].temp_min    = (i16)db_column_int(1);
-        g_phases[count].temp_max    = (i16)db_column_int(2);
-        g_phases[count].elem_to     = (u32)db_column_int(3);
-        g_phases[count].spawn_elem  = (u16)db_column_int(4);
-        g_phases[count]._pad        = 0;
-        count++;
-        rc = db_step(g_db);
-    }
-
-    g_phase_count = count;
-    return count;
+        "FROM phase_transitions",
+        g_phases, CHEM_MAX_PHASES, g_phase_count,
+        {
+            row->elem_from   = (u32)db_column_int(0);
+            row->temp_min    = (i16)db_column_int(1);
+            row->temp_max    = (i16)db_column_int(2);
+            row->elem_to     = (u32)db_column_int(3);
+            row->spawn_elem  = (u16)db_column_int(4);
+            row->_pad        = 0;
+        });
 }
 
 /* ====================================================================== */
@@ -220,40 +199,14 @@ int chem_spawn(u16 type_id, i16 x, i16 y)
         /* snprintf の代わりに kprintf + 固定SQL を使用 */
         /* type_id は u16 なので最大5桁 */
         char sql[128];
-        int len;
         char *p;
-        u16 tid;
 
         /* "SELECT elements, temperature, hp FROM object_types WHERE id=" + 数値 */
         p = sql;
-        {
-            const char *prefix =
-                "SELECT elements, temperature, hp "
-                "FROM object_types WHERE id=";
-            while (*prefix) { *p++ = *prefix++; }
-        }
-
-        /* u16を文字列に変換 (最大5桁) */
-        tid = type_id;
-        {
-            char digits[6];
-            int di = 0;
-            if (tid == 0) {
-                digits[di++] = '0';
-            } else {
-                while (tid > 0) {
-                    digits[di++] = '0' + (char)(tid % 10);
-                    tid /= 10;
-                }
-            }
-            /* 逆順コピー */
-            while (di > 0) {
-                *p++ = digits[--di];
-            }
-        }
-        *p = '\0';
-        len = (int)(p - sql);
-        (void)len;
+        db_sql_append(&p,
+            "SELECT elements, temperature, hp "
+            "FROM object_types WHERE id=");
+        db_sql_append_int(&p, (int)type_id);
 
         rc = db_query(g_db, sql);
         if (rc == DB_STATUS_ROW) {
