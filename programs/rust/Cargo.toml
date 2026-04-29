@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "os32api",
     "hello_gfx",
 ]
 resolver = "2"
