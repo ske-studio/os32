@@ -7,6 +7,7 @@
 
 #include "libos32map.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 
 /* KernelAPI ポインタ (crt0_c.c で定義) */
 extern KernelAPI *kapi;
@@ -78,40 +79,7 @@ map_event_callback map__get_event_cb(void) { return g_event_cb; }
 u16   *map__get_step_count(void)        { return &g_step_count; }
 db_handle_t map__get_db(void)           { return g_db; }
 
-/* ====================================================================== */
-/*  ヘルパー: u16 → 文字列変換 (SQL組み立て用)                             */
-/* ====================================================================== */
 
-static char *u16_to_str(char *buf, u16 val)
-{
-    char digits[6];
-    int di = 0;
-    char *p = buf;
-
-    if (val == 0) {
-        *p++ = '0';
-    } else {
-        while (val > 0) {
-            digits[di++] = '0' + (char)(val % 10);
-            val /= 10;
-        }
-        while (di > 0) {
-            *p++ = digits[--di];
-        }
-    }
-    *p = '\0';
-    return p;
-}
-
-/* ヘルパー: 文字列コピー (NUL終端付き) */
-static char *str_append(char *dst, const char *src)
-{
-    while (*src) {
-        *dst++ = *src++;
-    }
-    *dst = '\0';
-    return dst;
-}
 
 /* ====================================================================== */
 /*  DBキャッシュ読み込み                                                    */
@@ -120,37 +88,26 @@ static char *str_append(char *dst, const char *src)
 /* タイルプロパティをDBからRAMキャッシュに読み込む */
 static int load_tile_props(u8 tileset_id)
 {
-    int rc;
-    int count = 0;
     char sql[128];
     char *p;
 
     p = sql;
-    p = str_append(p,
+    db_sql_append(&p,
         "SELECT tile_id, passable, flags, "
         "chem_elem, chem_temp, damage "
         "FROM tile_props WHERE tileset_id=");
-    p = u16_to_str(p, (u16)tileset_id);
+    db_sql_append_int(&p, (int)tileset_id);
 
-    rc = db_query(g_db, sql);
-    if (rc < 0) {
-        /* テーブルがない場合は0件で正常終了 */
-        return 0;
-    }
-
-    while (rc == DB_STATUS_ROW && count < MAP_MAX_TILE_PROPS) {
-        g_tile_props[count].tile_id         = (u16)db_column_int(0);
-        g_tile_props[count].passable        = (u8)db_column_int(1);
-        g_tile_props[count].flags           = (u8)db_column_int(2);
-        g_tile_props[count].chem_elements   = (u32)db_column_int(3);
-        g_tile_props[count].chem_temperature = (i16)db_column_int(4);
-        g_tile_props[count].damage          = (u16)db_column_int(5);
-        count++;
-        rc = db_step(g_db);
-    }
-
-    g_tile_prop_count = count;
-    return count;
+    return DB_LOAD_TABLE_OPT(g_db, sql,
+        g_tile_props, MAP_MAX_TILE_PROPS, g_tile_prop_count,
+        {
+            row->tile_id         = (u16)db_column_int(0);
+            row->passable        = (u8)db_column_int(1);
+            row->flags           = (u8)db_column_int(2);
+            row->chem_elements   = (u32)db_column_int(3);
+            row->chem_temperature = (i16)db_column_int(4);
+            row->damage          = (u16)db_column_int(5);
+        });
 }
 
 /* マップイベントをDBからRAMキャッシュに読み込む */
@@ -164,10 +121,10 @@ static int load_events(u16 map_id)
     int slen, i;
 
     p = sql;
-    p = str_append(p,
+    db_sql_append(&p,
         "SELECT id, map_id, x, y, trigger, type, param, script "
         "FROM map_events WHERE map_id=");
-    p = u16_to_str(p, map_id);
+    db_sql_append_int(&p, (int)map_id);
 
     rc = db_query(g_db, sql);
     if (rc < 0) {
@@ -205,72 +162,52 @@ static int load_events(u16 map_id)
 /* ワープ定義をDBからRAMキャッシュに読み込む */
 static int load_warps(u16 map_id)
 {
-    int rc;
-    int count = 0;
     char sql[128];
     char *p;
 
     p = sql;
-    p = str_append(p,
+    db_sql_append(&p,
         "SELECT id, src_map, src_x, src_y, "
         "dst_map, dst_x, dst_y, direction "
         "FROM warps WHERE src_map=");
-    p = u16_to_str(p, map_id);
+    db_sql_append_int(&p, (int)map_id);
 
-    rc = db_query(g_db, sql);
-    if (rc < 0) {
-        return 0;
-    }
-
-    while (rc == DB_STATUS_ROW && count < MAP_MAX_WARPS) {
-        g_warps[count].id        = (u16)db_column_int(0);
-        g_warps[count].src_map   = (u16)db_column_int(1);
-        g_warps[count].src_x     = (i16)db_column_int(2);
-        g_warps[count].src_y     = (i16)db_column_int(3);
-        g_warps[count].dst_map   = (u16)db_column_int(4);
-        g_warps[count].dst_x     = (i16)db_column_int(5);
-        g_warps[count].dst_y     = (i16)db_column_int(6);
-        g_warps[count].direction = (u8)db_column_int(7);
-        g_warps[count]._pad      = 0;
-        count++;
-        rc = db_step(g_db);
-    }
-
-    g_warp_count = count;
-    return count;
+    return DB_LOAD_TABLE_OPT(g_db, sql,
+        g_warps, MAP_MAX_WARPS, g_warp_count,
+        {
+            row->id        = (u16)db_column_int(0);
+            row->src_map   = (u16)db_column_int(1);
+            row->src_x     = (i16)db_column_int(2);
+            row->src_y     = (i16)db_column_int(3);
+            row->dst_map   = (u16)db_column_int(4);
+            row->dst_x     = (i16)db_column_int(5);
+            row->dst_y     = (i16)db_column_int(6);
+            row->direction = (u8)db_column_int(7);
+            row->_pad      = 0;
+        });
 }
 
 /* エンカウント設定をDBからRAMキャッシュに読み込む */
 static int load_encounters(u16 map_id)
 {
-    int rc;
-    int count = 0;
     char sql[128];
     char *p;
 
     p = sql;
-    p = str_append(p,
+    db_sql_append(&p,
         "SELECT map_id, enemy_id, rate, min_steps "
         "FROM encounters WHERE map_id=");
-    p = u16_to_str(p, map_id);
+    db_sql_append_int(&p, (int)map_id);
 
-    rc = db_query(g_db, sql);
-    if (rc < 0) {
-        return 0;
-    }
-
-    while (rc == DB_STATUS_ROW && count < MAP_MAX_ENCOUNTERS) {
-        g_encounters[count].map_id    = (u16)db_column_int(0);
-        g_encounters[count].enemy_id  = (u16)db_column_int(1);
-        g_encounters[count].rate      = (u8)db_column_int(2);
-        g_encounters[count]._pad      = 0;
-        g_encounters[count].min_steps = (u16)db_column_int(3);
-        count++;
-        rc = db_step(g_db);
-    }
-
-    g_encounter_count = count;
-    return count;
+    return DB_LOAD_TABLE_OPT(g_db, sql,
+        g_encounters, MAP_MAX_ENCOUNTERS, g_encounter_count,
+        {
+            row->map_id    = (u16)db_column_int(0);
+            row->enemy_id  = (u16)db_column_int(1);
+            row->rate      = (u8)db_column_int(2);
+            row->_pad      = 0;
+            row->min_steps = (u16)db_column_int(3);
+        });
 }
 
 /* ====================================================================== */
@@ -372,10 +309,10 @@ int map_load(u16 map_id)
 
     /* --- マップ定義読み込み --- */
     p = sql;
-    p = str_append(p,
+    db_sql_append(&p,
         "SELECT id, name, width, height, layer_count, "
         "tileset_id, bgm_id FROM maps WHERE id=");
-    p = u16_to_str(p, map_id);
+    db_sql_append_int(&p, (int)map_id);
 
     rc = db_query(g_db, sql);
     if (rc != DB_STATUS_ROW) {
@@ -428,11 +365,11 @@ int map_load(u16 map_id)
         int blob_size;
 
         p = sql;
-        p = str_append(p,
+        db_sql_append(&p,
             "SELECT tile_data FROM map_tiles WHERE map_id=");
-        p = u16_to_str(p, map_id);
-        p = str_append(p, " AND layer=");
-        p = u16_to_str(p, (u16)layer);
+        db_sql_append_int(&p, (int)map_id);
+        db_sql_append(&p, " AND layer=");
+        db_sql_append_int(&p, layer);
 
         rc = db_query(g_db, sql);
         if (rc == DB_STATUS_ROW) {
