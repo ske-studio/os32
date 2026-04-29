@@ -2,6 +2,7 @@
 members = [
     "os32api",
     "hello_gfx",
+    "alloc_demo",
 ]
 resolver = "2"
 
