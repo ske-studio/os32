@@ -18,6 +18,7 @@
 #include "kmalloc.h"
 #include "palette.h"
 #include "gfx.h"
+#include "kcg.h"
 #include "boot_splash.h"
 #include "cpu_calibrate.h"
 #include "paging.h"
@@ -302,6 +303,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* コンベンショナルメモリ再利用 (ブート後のローダー領域等を解放) */
     paging_reclaim_conventional();
+
+    /* KCGフォントキャッシュ初期化
+     * コンベンショナルメモリ (0x01000〜) にキャッシュを配置しているため、
+     * paging_reclaim 後にフラグをゼロクリアする必要がある。
+     * これがないとBIOSデータの残骸がキャッシュ済みと誤認される。 */
+    kcg_init();
 
     /* FPU 初期化 (paging_init の後で CR0 に対して設定)
      * CR0.EM=0 (ネイティブFPU使用), CR0.TS=0 (タスクスイッチ不要)
