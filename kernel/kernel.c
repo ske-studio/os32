@@ -176,14 +176,16 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     palette_init();
 
 
-    /* IDE/HDD 初期化と登録 */
+    /* IDE/HDD 初期化と登録 (4ドライブ: IDE#0-#3) */
     tvram_print(0, 3, "IDE...", TATTR_GREEN);
     {
         int n = ide_init();
         if (n > 0) {
+            int d;
             tvram_print(5, 3, "OK", TATTR_WHITE);
-            if (ide_drive_present(0)) dev_register_hdd(0);
-            if (ide_drive_present(1)) dev_register_hdd(1);
+            for (d = 0; d < 4; d++) {
+                if (ide_drive_present(d)) dev_register_hdd(d);
+            }
         } else {
             tvram_print(5, 3, "no drive", TATTR_CYAN);
         }

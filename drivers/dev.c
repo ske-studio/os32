@@ -105,6 +105,30 @@ static int hd1_write(Device *self, int lba, int count, const void *buf)
     return ide_write_sectors(1, lba, count, buf);
 }
 
+static int hd2_read(Device *self, int lba, int count, void *buf)
+{
+    (void)self;
+    return ide_read_sectors(2, lba, count, buf);
+}
+
+static int hd2_write(Device *self, int lba, int count, const void *buf)
+{
+    (void)self;
+    return ide_write_sectors(2, lba, count, buf);
+}
+
+static int hd3_read(Device *self, int lba, int count, void *buf)
+{
+    (void)self;
+    return ide_read_sectors(3, lba, count, buf);
+}
+
+static int hd3_write(Device *self, int lba, int count, const void *buf)
+{
+    (void)self;
+    return ide_write_sectors(3, lba, count, buf);
+}
+
 static Device hd0_dev = {
     "hd0",
     DEV_BLOCK,
@@ -125,18 +149,36 @@ static Device hd1_dev = {
     0, 0, 0, 0
 };
 
-/* HDDを登録するユーティリティ */
+static Device hd2_dev = {
+    "hd2",
+    DEV_BLOCK,
+    512,
+    0,
+    hd2_read,
+    hd2_write,
+    0, 0, 0, 0
+};
+
+static Device hd3_dev = {
+    "hd3",
+    DEV_BLOCK,
+    512,
+    0,
+    hd3_read,
+    hd3_write,
+    0, 0, 0, 0
+};
+
+/* HDDを登録するユーティリティ (4ドライブ対応) */
+static Device *hd_devs[4] = { &hd0_dev, &hd1_dev, &hd2_dev, &hd3_dev };
+
 void dev_register_hdd(int drive)
 {
     IdeInfo info;
+    if (drive < 0 || drive > 3) return;
     if (ide_get_info(drive, &info) == IDE_OK) {
-        if (drive == 0) {
-            hd0_dev.total_sects = info.total_sectors;
-            dev_register(&hd0_dev);
-        } else if (drive == 1) {
-            hd1_dev.total_sects = info.total_sectors;
-            dev_register(&hd1_dev);
-        }
+        hd_devs[drive]->total_sects = info.total_sectors;
+        dev_register(hd_devs[drive]);
     }
 }
 
