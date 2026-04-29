@@ -7,6 +7,7 @@
 
 #include "libos32battle.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 #include "libos32math.h"
 #include <string.h>
 
@@ -70,60 +71,53 @@ int btl_init(const char *db_path)
         g_db_slot = h;
 
         /* コマンドマトリクスをロード */
-        rc = db_query(h,
-            "SELECT atk_cmd, def_cmd, result_type"
-            " FROM command_matrix ORDER BY atk_cmd, def_cmd");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                u8 ac, dc, rt;
-                ac = (u8)db_column_int(0);
-                dc = (u8)db_column_int(1);
-                rt = (u8)db_column_int(2);
+        {
+            int _rc;
+            _rc = db_query(h,
+                "SELECT atk_cmd, def_cmd, result_type"
+                " FROM command_matrix ORDER BY atk_cmd, def_cmd");
+            if (_rc == DB_STATUS_ROW) {
+                do {
+                    u8 ac, dc, rt;
+                    ac = (u8)db_column_int(0);
+                    dc = (u8)db_column_int(1);
+                    rt = (u8)db_column_int(2);
 
-                if (ac < BTL_CMD_MAX && dc < BTL_CMD_MAX) {
-                    g_matrix.matrix[ac][dc] = rt;
-                    if (ac + 1 > g_matrix.atk_count) {
-                        g_matrix.atk_count = ac + 1;
+                    if (ac < BTL_CMD_MAX && dc < BTL_CMD_MAX) {
+                        g_matrix.matrix[ac][dc] = rt;
+                        if (ac + 1 > g_matrix.atk_count) {
+                            g_matrix.atk_count = ac + 1;
+                        }
+                        if (dc + 1 > g_matrix.def_count) {
+                            g_matrix.def_count = dc + 1;
+                        }
                     }
-                    if (dc + 1 > g_matrix.def_count) {
-                        g_matrix.def_count = dc + 1;
-                    }
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
+                } while (db_step(h) == DB_STATUS_ROW);
+            }
         }
 
         /* 属性相性テーブルをロード */
-        rc = db_query(h,
+        DB_LOAD_TABLE_OPT(h,
             "SELECT elem_atk, elem_def, multiplier"
-            " FROM element_chart");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                if (g_element_count < BTL_ELEM_PAIRS_MAX) {
-                    BtlElementEntry *e = &g_elements[g_element_count];
-                    e->elem_atk   = (u32)db_column_int(0);
-                    e->elem_def   = (u32)db_column_int(1);
-                    e->multiplier = (i16)db_column_int(2);
-                    g_element_count++;
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
-        }
+            " FROM element_chart",
+            g_elements, BTL_ELEM_PAIRS_MAX, g_element_count,
+            {
+                row->elem_atk   = (u32)db_column_int(0);
+                row->elem_def   = (u32)db_column_int(1);
+                row->multiplier = (i16)db_column_int(2);
+            });
 
         /* 状態異常定義をロード */
-        rc = db_query(h,
+        DB_LOAD_TABLE_OPT(h,
             "SELECT bit_flag, duration, tick_damage, prevents_action"
-            " FROM status_effects ORDER BY id");
-        if (rc == DB_STATUS_ROW) {
-            do {
-                if (g_status_def_count < BTL_STATUS_DEF_MAX) {
-                    BtlStatusDef *sd = &g_status_defs[g_status_def_count];
-                    sd->bit_flag = (u32)db_column_int(0);
-                    sd->duration = (u8)db_column_int(1);
-                    sd->tick_damage = (i16)db_column_int(2);
-                    sd->prevents_action = (u8)db_column_int(3);
-                    g_status_def_count++;
-                }
-            } while (db_step(h) == DB_STATUS_ROW);
-        }
+            " FROM status_effects ORDER BY id",
+            g_status_defs, BTL_STATUS_DEF_MAX, g_status_def_count,
+            {
+                row->bit_flag = (u32)db_column_int(0);
+                row->duration = (u8)db_column_int(1);
+                row->tick_damage = (i16)db_column_int(2);
+                row->prevents_action = (u8)db_column_int(3);
+            });
     }
 
     g_initialized = 1;
