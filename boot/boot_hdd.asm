@@ -29,7 +29,8 @@ section .text
 boot_entry:
         jmp     SHORT boot_main
         nop
-        db      'OS32', 0
+        nop
+        db      'IPL1'
 
         ;; --- ジオメトリパッチ領域 (offset 8-10) ---
 geo_heads:  db  8               ;; ヘッド数
@@ -63,9 +64,9 @@ boot_init:
         mov     es, ax
         mov     di, 8000h           ;; ES:BP 用バッファポインタ
 
-        ;; LBA 2 から 4セクタをロード
+        ;; LBA 2 から 16セクタ (8KB) をロード
         mov     ax, 2               ;; 開始LBA
-        mov     cx, 4               ;; セクタ数
+        mov     cx, 16              ;; セクタ数
 
 load_loop:
         push    ax
@@ -145,4 +146,10 @@ pr_done:
 msg_boot    db  'OS32 HDD Boot', 0
 msg_err     db  'Disk Error', 0
 
-        times   512 - ($ - $$) db 0
+        ;; 256バイト目のシグネチャ (PC-98 BIOS対策)
+        times   254 - ($ - $$) db 0
+        db      055h, 0AAh
+
+        ;; 512バイト目のシグネチャ
+        times   510 - ($ - $$) db 0
+        db      055h, 0AAh
