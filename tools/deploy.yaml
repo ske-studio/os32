@@ -13,7 +13,7 @@
 # ブート領域 (ext2外、NHD直接書き込み)
 # ローダーのみrawセクタ書き込み。カーネルはext2経由。
 boot:
-  loader: boot/loader_hdd_new.bin
+  loader: boot/loader_hdd.bin
 
 # ext2 ファイルシステム
 filesystem:

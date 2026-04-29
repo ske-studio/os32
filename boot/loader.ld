@@ -13,7 +13,7 @@ SECTIONS
     . = 0x8000;
 
     .text : {
-        boot/loader_hdd_new.o(.text)
+        boot/loader_hdd.o(.text)
         *(.text)
         *(.text.*)
     }

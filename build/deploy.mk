@@ -11,7 +11,7 @@ deploy: vmkernel.lz4 programs unicode_bin
 # deploy-kernel: ローダーをNHDブート領域に書き込み + vmkernel.lz4をext2に配置
 #   + HostDrvからext2同期 (NP21/W再起動が必要)
 deploy-kernel: vmkernel.lz4
-	$(NHD_DEPLOY) write-boot boot/loader_hdd_new.bin
+	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 	$(NHD_DEPLOY) sync-from-hostdrv
 	$(NHD_DEPLOY) deploy
 

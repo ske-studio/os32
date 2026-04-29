@@ -14,7 +14,7 @@ images/os32_boot.d88: boot vmkernel.lz4 programs unicode_bin
 	args="$$args /sys/shell.bin=programs/shell.bin"; \
 	args="$$args /sys/unicode.bin=unicode.bin"; \
 	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
-	args="$$args /sys/loader_h.bin=boot/loader_hdd_new.bin"; \
+	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
 	for cmd in $$(echo $(FDD_MIN_CMDS)); do \
 		if [ -f "programs/cmds/$$cmd.bin" ]; then \
 			args="$$args /bin/$$cmd.bin=programs/cmds/$$cmd.bin"; \

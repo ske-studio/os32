@@ -1,48 +1,52 @@
 ;; ============================================================
-;; loader_hdd.asm — OS32 HDD 第2ステージローダー (PM PIO版)
+;; loader_hdd_new.asm — OS32 HDD 新ローダー (ext2 + LZ4)
 ;;
 ;; boot_hdd.asm (IPL) により 0000:8000 にロードされ実行開始。
-;;
-;; 設計方針:
-;;   - 16bitコードを最小限にし、可能な限り早くPMに遷移
-;;   - PM移行後、IDE CHS PIOでカーネル全セクタをロード
-;;   - PM_PIO_TEST.md の実証結果に基づく実装
+;; PM移行後、Cのboot_main()を呼び出してext2からvmkernel.lz4を
+;; 読み込み→LZ4展開し、カーネルにジャンプする。
 ;;
 ;; 入力 (IPLからレジスタ渡し):
 ;;   AL = DA/UA, AH = ヘッド数, BL = セクタ/トラック
 ;;
 ;; メモリマップ:
-;;   0x8000-0x87FF  ローダー自身 (2048B)
-;;   0x9000-        カーネルロード先
+;;   0x7F00-0x7F0F  パラメータ受け渡し (16bit→32bit)
+;;   0x8000-0x9FFF  ローダー自身 (8KB)
+;;   0x10000-       vmkernel.lz4 一時読み込み先
+;;   0x100000       カーネル展開先
+;;   0x200000       SQLite展開先
 ;;   0x9FFFC        PM スタック頂上
-;;   0xA0000        TVRAM
-;;
-;; PM PIO 制約事項 (テスト実証済み):
-;;   - LBAモードは NP21/W 非対応 → 常に CHS (0xA0)
-;;   - CHSセクタ番号は1ベース → sector = LBA%SPT + 1
-;;   - PM移行後の IDE SRST は必須
 ;; ============================================================
 
 cpu 386
 
-KERNEL_LBA      EQU     6       ;; カーネル開始LBA
-KERNEL_COUNT    EQU     256     ;; カーネルセクタ数 (128KB)
-SQLITE_LBA      EQU     262     ;; SQLite開始LBA (KERNEL_LBA + KERNEL_COUNT)
-SQLITE_COUNT    EQU     1200    ;; SQLiteセクタ数 (600KB, -O0対応)
+;; 16bit→32bit パラメータ受け渡し用の固定アドレス
+;; (ELFシンボル参照を16bitコードで回避するため)
+PARAM_AREA      EQU     7F00h
+PARAM_DA_OFF    EQU     0       ;; 7F00h
+PARAM_HEADS_OFF EQU     1       ;; 7F01h
+PARAM_SPT_OFF   EQU     2       ;; 7F02h
+PARAM_CYL_OFF   EQU     4       ;; 7F04h
+PARAM_HEAD_OFF  EQU     6       ;; 7F06h
+PARAM_SEC_OFF   EQU     7       ;; 7F07h
+PARAM_BUF_SEG   EQU     8       ;; 7F08h
+PARAM_BUF_OFF_16 EQU    10      ;; 7F0Ah
+PARAM_RET_EIP   EQU     12      ;; 7F0Ch
 
 section .text
-        org 8000h
 
 ;; ============================================================
-;; 16bit エントリ — 最小限のセットアップ後すぐにPM遷移
+;; 16bit エントリ (リアルモード)
+;; -f elf32 のデフォルトは bits 32 なので明示的に bits 16 が必要
 ;; ============================================================
+bits 16
 
+global loader_entry
 loader_entry:
-        ;; IPLからのジオメトリ情報を保存
-        ;; DS は不定のため CS プレフィックスを使用 (CS=0000)
-        mov     [cs:param_da], al
-        mov     [cs:param_heads], ah
-        mov     [cs:param_spt], bl
+        ;; IPLからのジオメトリ情報を固定アドレスに保存
+        ;; (CS=0, DS未初期化なので cs: オーバーライド使用)
+        mov     [cs:PARAM_AREA + PARAM_DA_OFF], al
+        mov     [cs:PARAM_AREA + PARAM_HEADS_OFF], ah
+        mov     [cs:PARAM_AREA + PARAM_SPT_OFF], bl
 
         ;; セグメント初期化
         xor     ax, ax
@@ -59,24 +63,114 @@ loader_entry:
         xor     al, al
         out     50h, al
 
-        ;; GDT ロード
+        ;; GDT ロード (インラインGDT — ELFシンボル参照を回避)
+        ;; CS=0なのでGDTの線形アドレス = GDTのオフセットアドレス
+        ;; gdtr16 は 0x8000 以降のどこかに配置されるが、
+        ;; ここでは即値で計算して書き込む
         xor     eax, eax
         mov     ax, cs
-        shl     eax, 4
-        add     eax, gdt
-        mov     dword [gdtr_base], eax
-        lgdt    [gdtr]
+        shl     eax, 4              ;; CS ベースアドレス (= 0)
+        add     eax, dword gdt16    ;; GDTの線形アドレス
+        mov     [dword gdtr16_base], eax
+        lgdt    [dword gdtr16]
 
         ;; PM 遷移
         mov     eax, cr0
         or      al, 1
         mov     cr0, eax
 
-        ;; 32bit PM へ far jmp
+        ;; 32bit PM へ far jmp (手動エンコード)
         db      066h
         db      0EAh
         dd      pm_entry
         dw      0008h
+
+;; --- 16bitセクション内のインラインGDT ---
+;; (bits 16 セクションに配置。リンカ配置アドレスは dword 参照で解決)
+gdt16:
+        dq      0
+        ;; セレクタ 0x08: コード (base=0, limit=4GB, 32bit, Ring 0)
+        dw      0FFFFh
+        dw      0
+        db      0
+        db      09Ah
+        db      0CFh
+        db      0
+        ;; セレクタ 0x10: データ (base=0, limit=4GB, 32bit, Ring 0)
+        dw      0FFFFh
+        dw      0
+        db      0
+        db      092h
+        db      0CFh
+        db      0
+        ;; セレクタ 0x18: コード (base=0, limit=64KB, 16bit, Ring 0)
+        dw      0FFFFh
+        dw      0
+        db      0
+        db      09Ah
+        db      0
+        db      0
+        ;; セレクタ 0x20: データ (base=0, limit=64KB, 16bit, Ring 0)
+        dw      0FFFFh
+        dw      0
+        db      0
+        db      092h
+        db      0
+        db      0
+gdt16_end:
+gdtr16:         dw      gdt16_end - gdt16 - 1
+gdtr16_base:    dd      0
+
+;; --- BIOS トランポリン (16bit PM -> RM -> BIOS -> PM) ---
+pm16_trampoline:
+        ;; 16bitデータセグメント (0x20)
+        mov     ax, 20h
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        mov     ss, ax
+        
+        ;; PEビットクリア
+        mov     eax, cr0
+        and     eax, ~1
+        mov     cr0, eax
+        
+        ;; リアルモードへ far jmp
+        jmp     0:rm_trampoline
+
+rm_trampoline:
+        ;; リアルモード (CS=0)
+        xor     ax, ax
+        mov     ds, ax
+        mov     ss, ax
+        sti
+        
+        ;; BIOSパラメータセット
+        mov     al, [PARAM_AREA + PARAM_DA_OFF]
+        mov     bx, 512
+        mov     cx, [PARAM_AREA + PARAM_CYL_OFF]
+        mov     dh, [PARAM_AREA + PARAM_HEAD_OFF]
+        mov     dl, [PARAM_AREA + PARAM_SEC_OFF]
+        mov     es, [PARAM_AREA + PARAM_BUF_SEG]
+        mov     bp, [PARAM_AREA + PARAM_BUF_OFF_16]
+        
+        mov     ah, 06h
+        int     1Bh
+        
+        cli
+        
+        ;; PEビットセット
+        mov     eax, cr0
+        or      eax, 1
+        mov     cr0, eax
+        
+        ;; 32bit PM へ far jmp
+        db      066h
+        db      0EAh
+        dd      pm32_return_trampoline
+        dw      0008h
+
 
 ;; ============================================================
 ;; 32bit PM コード
@@ -93,88 +187,85 @@ pm_entry:
         mov     ss, ax
         mov     esp, 0009FFFCh
 
-        ;; 起動メッセージ (行0)
+        ;; 固定アドレスからパラメータを読み出してELFシンボルに保存
+        mov     al, [PARAM_AREA + PARAM_DA_OFF]
+        mov     [param_da], al
+        mov     al, [PARAM_AREA + PARAM_HEADS_OFF]
+        mov     [param_heads], al
+        mov     al, [PARAM_AREA + PARAM_SPT_OFF]
+        mov     [param_spt], al
+
+        ;; 起動メッセージ
         mov     edi, 0A0000h
         mov     esi, msg_title
         call    pm_print
 
-        ;; === IDE コントローラ初期化 ===
+        ;; (IDE コントローラ初期化はBIOSに任せるため削除)
 
-        ;; バンクセレクト (IDE Bank 0)
-        mov     dx, 0432h
-        mov     al, 0
-        out     dx, al
+        ;; === BSS ゼロクリア (C言語の未初期化変数用) ===
+        extern  __bss_start
+        extern  __bss_end
+        mov     edi, __bss_start
+        mov     ecx, __bss_end
+        sub     ecx, edi
+        shr     ecx, 2           ;; バイト→DWORD
+        xor     eax, eax
+        rep     stosd
 
-        ;; IDE ソフトリセット (SRST)
-        ;; PM_PIO_TEST.md §4.2: BIOSの残留状態をクリアするため必須
-        mov     dx, 074Ch
-        mov     al, 06h             ;; SRST=1, nIEN=1
-        out     dx, al
-
-        mov     ecx, 10000h
-srst_hold:
-        dec     ecx
-        jnz     srst_hold
-
-        mov     dx, 074Ch
-        mov     al, 02h             ;; SRST=0, nIEN=1
-        out     dx, al
-
-        ;; BSY クリア待ち (SRST後)
-        mov     ecx, 200000h
-srst_bsy:
-        mov     dx, 64Eh
-        in      al, dx
-        test    al, 80h
-        jz      srst_ok
-        dec     ecx
-        jnz     srst_bsy
-        ;; タイムアウト
-        mov     edi, 0A0000h + 160
-        mov     esi, msg_ide_err
-        call    pm_print
-        jmp     pm_halt
-
-srst_ok:
-        ;; ロード開始メッセージ (行1)
-        mov     edi, 0A0000h + 160
-        mov     esi, msg_loading
-        call    pm_print
-
-        ;; === Phase 1: カーネルロード (0x9000, CHS PIO) ===
-        mov     edi, 00009000h       ;; カーネルロード先 (リニアアドレス)
-        mov     eax, KERNEL_LBA      ;; 開始LBA
-        mov     ecx, KERNEL_COUNT    ;; セクタ数
-
-load_kernel:
-        call    pm_read_sector       ;; EAX保存, EDI += 512
-        inc     eax
-        dec     ecx
-        jnz     load_kernel
-
-        ;; === Phase 2: SQLite拡張域ロード (0x18A000, CHS PIO) ===
+        ;; デバッグ: BSS OK
         mov     edi, 0A0000h + 320
-        mov     esi, msg_sqlite
+        mov     esi, msg_dbg05
         call    pm_print
 
-        mov     edi, 0018A000h       ;; SQLiteロード先 (拡張メモリ)
-        mov     eax, SQLITE_LBA      ;; 開始LBA
-        mov     ecx, SQLITE_COUNT    ;; セクタ数
+        ;; パラメータを再設定 (BSS ゼロクリアで上書きされた場合)
+        mov     al, [PARAM_AREA + PARAM_DA_OFF]
+        mov     [param_da], al
+        mov     al, [PARAM_AREA + PARAM_HEADS_OFF]
+        mov     [param_heads], al
+        mov     al, [PARAM_AREA + PARAM_SPT_OFF]
+        mov     [param_spt], al
 
-load_sqlite:
-        call    pm_read_sector
-        inc     eax
-        dec     ecx
-        jnz     load_sqlite
 
-        ;; ロード完了メッセージ (行3)
+        ;; デバッグ: Cメイン呼び出し前
         mov     edi, 0A0000h + 480
-        mov     esi, msg_booting
+        mov     esi, msg_dbg1
         call    pm_print
+
+        ;; === C メイン呼び出し ===
+        extern  boot_main
+        call    boot_main
+
+        ;; デバッグ: boot_main戻り値をTVRAMに表示
+        ;; EAXの値を16進1桁で表示 (0=成功, FD/FE/FF=エラー)
+        push    eax
+        mov     edi, 0A0000h + 640
+        mov     esi, msg_dbg2
+        call    pm_print
+        ;; 戻り値の下位ニブルを16進文字で表示
+        pop     eax
+        push    eax
+        and     al, 0Fh
+        add     al, '0'
+        cmp     al, '9'
+        jbe     .hex_ok
+        add     al, 7            ;; 'A'-'9'-1
+.hex_ok:
+        mov     ah, 0
+        mov     [edi], ax
+        push    edi
+        add     edi, 2000h
+        mov     byte [edi], 0E1h
+        pop     edi
+
+        pop     eax
+
+        ;; エラー時 (EAX != 0) は停止
+        or      eax, eax
+        jnz     pm_halt
 
         ;; === メモリプロービング (1MB以上, 512KB刻み, 16MB上限) ===
-        mov     esi, 00100000h       ;; 1MB
-        mov     ecx, 1024            ;; 初期値 1024KB
+        mov     esi, 00100000h
+        mov     ecx, 1024        ;; 初期値 1024KB
 
 probe_loop:
         mov     eax, [esi]
@@ -192,182 +283,113 @@ probe_loop:
 
 probe_done:
         ;; === カーネルへジャンプ ===
-        ;; kernel_main(uint32_t mem_kb, uint32_t boot_drive) — cdecl
+        ;; kernel_main(u32 mem_kb, u32 boot_drive) — cdecl
         movzx   eax, byte [param_da]
-        push    eax                  ;; 第2引数: boot_drive
-        push    ecx                  ;; 第1引数: mem_kb
-        push    dword 0              ;; ダミーリターンアドレス
+        push    eax              ;; 第2引数: boot_drive
+        push    ecx              ;; 第1引数: mem_kb
+        push    dword 0          ;; ダミーリターンアドレス
+
+        ;; カーネルにジャンプ
+        mov     edi, 0A0000h + 800
+        mov     esi, msg_booting
+        call    pm_print
 
         db      0EAh
-        dd      00009000h
-        dw      0008h
+        dd      00100000h        ;; kentry (1MB)
+        dw      0008h            ;; CS セレクタ
 
 
 ;; ============================================================
-;; pm_read_sector — CHS PIO 1セクタ読み込み (32bit PM)
-;;
-;; 入力:  EAX = LBA, EDI = バッファアドレス
+;; boot_read_sector_asm — cdecl ラッパー
+;;   void boot_read_sector_asm(u32 lba, u8 *buf);
+;; ============================================================
+
+global boot_read_sector_asm
+boot_read_sector_asm:
+        push    ebp
+        mov     ebp, esp
+        push    edi
+        mov     eax, [ebp+8]     ;; lba
+        mov     edi, [ebp+12]    ;; buf
+        call    pm_read_sector
+        pop     edi
+        pop     ebp
+        ret
+
+
+;; ============================================================
+;; boot_print_asm — cdecl ラッパー
+;;   void boot_print_asm(u32 tvram_addr, const char *msg);
+;; ============================================================
+
+global boot_print_asm
+boot_print_asm:
+        push    ebp
+        mov     ebp, esp
+        push    edi
+        push    esi
+        mov     edi, [ebp+8]     ;; tvram_addr
+        mov     esi, [ebp+12]    ;; msg
+        call    pm_print
+        pop     esi
+        pop     edi
+        pop     ebp
+        ret
+
+
+pm32_return_trampoline:
+        ;; 32bitデータセグメントに戻す
+        mov     ax, 10h
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        mov     ss, ax
+        
+        ;; 保存した EIP に戻る
+        jmp     [PARAM_AREA + PARAM_RET_EIP]
+
+;; ============================================================
+;; pm_read_sector — BIOS トランポリンを使った1セクタ読み込み
+;; 入力:  EAX = LBA, EDI = バッファアドレス (物理アドレス, 1MB未満)
 ;; 出力:  EDI += 512
-;; 保存:  EAX, EBX, ECX, EDX, EBP
-;;
-;; CHS変換:
-;;   sector = (LBA % SPT) + 1      (1ベース)
-;;   head   = (LBA / SPT) % heads
-;;   cyl    = (LBA / SPT) / heads
+;; 保存:  全レジスタ (EDI以外)
 ;; ============================================================
 
 pm_read_sector:
-        push    eax
-        push    ebx
-        push    ecx
-        push    edx
-        push    ebp
-
-        mov     ebp, eax             ;; LBA 退避
-
-        ;; BSY クリア待ち
-        call    pm_wait_bsy
-
-        ;; LBA → CHS 変換
-        mov     eax, ebp
+        pushad
+        
+        ;; バッファアドレス変換 (EDI -> ES:BP)
+        mov     ebx, edi
+        shr     ebx, 4
+        mov     [PARAM_AREA + PARAM_BUF_SEG], bx
+        mov     ebx, edi
+        and     ebx, 0Fh
+        mov     [PARAM_AREA + PARAM_BUF_OFF_16], bx
+        
+        ;; LBA (EAX) -> CHS 変換
         xor     edx, edx
         movzx   ebx, byte [param_spt]
-        div     ebx                  ;; EAX = LBA/SPT, EDX = remainder
-        inc     dl                   ;; DL = sector (1ベース)
-        mov     cl, dl               ;; CL = sector
-
+        div     ebx
+        ;; EAX = Cyl*Head, DL = sector (0ベース)
+        mov     [PARAM_AREA + PARAM_SEC_OFF], dl
+        
         xor     edx, edx
         movzx   ebx, byte [param_heads]
-        div     ebx                  ;; EAX = cylinder, DL = head
-        mov     ch, dl               ;; CH = head
-        ;; EAX = cylinder
-
-        ;; --- IDE レジスタ出力 ---
-
-        ;; Sector Count (0x644) = 1
-        push    eax
-        mov     dx, 644h
-        mov     al, 1
-        out     dx, al
-
-        ;; Sector Number (0x646)
-        mov     dx, 646h
-        mov     al, cl
-        out     dx, al
-
-        ;; Cylinder Low (0x648)
-        pop     eax
-        push    eax
-        mov     dx, 648h
-        out     dx, al
-
-        ;; Cylinder High (0x64A)
-        mov     dx, 64Ah
-        mov     al, ah
-        out     dx, al
-
-        ;; Drive/Head (0x64C) — CHS mode = 0xA0
-        mov     dx, 64Ch
-        mov     al, ch
-        and     al, 0Fh
-        or      al, 0A0h
-        out     dx, al
-        pop     eax                  ;; スタッククリーン
-
-        ;; 400ns ウェイト (Alternate Status 空読み)
-        mov     dx, 64Eh
-        in      al, dx
-        in      al, dx
-        in      al, dx
-        in      al, dx
-
-        ;; READ SECTORS コマンド (0x20)
-        mov     al, 20h
-        out     dx, al
-
-        ;; DRQ 待ち
-        call    pm_wait_drq
-
-        ;; データ読み込み (256 words = 512 bytes)
-        mov     ecx, 256
-        mov     dx, 640h
-pio_read:
-        in      ax, dx
-        mov     [edi], ax
-        add     edi, 2
-        dec     ecx
-        jnz     pio_read
-
-        ;; IRQ クリア (ステータス空読み) + BSY 待ち
-        mov     dx, 64Eh
-        in      al, dx
-        call    pm_wait_bsy
-
-        pop     ebp
-        pop     edx
-        pop     ecx
-        pop     ebx
-        pop     eax
-        ret
-
-
-;; ============================================================
-;; pm_wait_bsy — BSY=0 待ち (タイムアウト → エラー停止)
-;; ============================================================
-
-pm_wait_bsy:
-        push    ecx
-        push    edx
-        mov     ecx, 100000h
-wbsy_loop:
-        mov     dx, 64Eh
-        in      al, dx
-        test    al, 80h
-        jz      wbsy_ok
-        dec     ecx
-        jnz     wbsy_loop
-        mov     edi, 0A0000h + 160
-        mov     esi, msg_ide_err
-        call    pm_print
-        jmp     pm_halt
-wbsy_ok:
-        pop     edx
-        pop     ecx
-        ret
-
-
-;; ============================================================
-;; pm_wait_drq — DRQ=1 待ち (エラーチェック付き)
-;; ============================================================
-
-pm_wait_drq:
-        push    ecx
-        push    edx
-        mov     ecx, 100000h
-wdrq_loop:
-        mov     dx, 64Eh
-        in      al, dx
-        test    al, 80h             ;; BSY?
-        jnz     wdrq_cont
-        test    al, 21h             ;; ERR | DF?
-        jnz     wdrq_err
-        test    al, 08h             ;; DRQ?
-        jnz     wdrq_ok
-wdrq_cont:
-        dec     ecx
-        jnz     wdrq_loop
-        mov     edi, 0A0000h + 160
-        mov     esi, msg_ide_err
-        call    pm_print
-        jmp     pm_halt
-wdrq_err:
-        mov     edi, 0A0000h + 160
-        mov     esi, msg_read_err
-        call    pm_print
-        jmp     pm_halt
-wdrq_ok:
-        pop     edx
-        pop     ecx
+        div     ebx
+        ;; EAX = Cylinder, DL = head
+        mov     [PARAM_AREA + PARAM_CYL_OFF], ax
+        mov     [PARAM_AREA + PARAM_HEAD_OFF], dl
+        
+        ;; 戻り先アドレスを保存
+        mov     dword [PARAM_AREA + PARAM_RET_EIP], .return_here
+        
+        ;; 16bit PMトランポリンへジャンプ
+        jmp     0018h:pm16_trampoline
+        
+.return_here:
+        popad
+        add     edi, 512
         ret
 
 
@@ -405,36 +427,13 @@ pm_halt:
 
 
 ;; ============================================================
-;; GDT
+;; パラメータ保存領域 (32bitコードから使用)
+;; C コードから extern 参照される
 ;; ============================================================
 
-gdt:
-        dq      0                    ;; ヌルディスクリプタ
-
-        ;; セレクタ 0x08: コード (base=0, limit=4GB, 32bit, Ring 0)
-        dw      0FFFFh
-        dw      0
-        db      0
-        db      09Ah
-        db      0CFh
-        db      0
-
-        ;; セレクタ 0x10: データ (base=0, limit=4GB, 32bit, Ring 0)
-        dw      0FFFFh
-        dw      0
-        db      0
-        db      092h
-        db      0CFh
-        db      0
-gdt_end:
-
-gdtr:           dw      gdt_end - gdt - 1
-gdtr_base:      dd      0
-
-
-;; ============================================================
-;; パラメータ保存領域 (IPLからレジスタ渡しで受け取った値)
-;; ============================================================
+global param_da
+global param_heads
+global param_spt
 
 param_da:       db      0
 param_heads:    db      0
@@ -445,11 +444,11 @@ param_spt:      db      0
 ;; メッセージ
 ;; ============================================================
 
-msg_title:      db      'OS32 HDD Loader v2', 0
-msg_loading:    db      'Loading kernel (PIO)...', 0
-msg_booting:    db      'Kernel loaded. Booting...', 0
-msg_sqlite:     db      'Loading SQLite...', 0
+msg_title:      db      'OS32 HDD Loader v3 (ext2+LZ4)', 0
 msg_ide_err:    db      'IDE Timeout!', 0
 msg_read_err:   db      'Read Error!', 0
-
-        times   2048 - ($ - $$) db 0
+msg_booting:    db      'Booting kernel...', 0
+msg_dbg0:       db      '[0]IDE OK', 0
+msg_dbg05:      db      '[0.5]BSS CLR', 0
+msg_dbg1:       db      '[1]CALL MAIN', 0
+msg_dbg2:       db      '[2]MAIN RET', 0
