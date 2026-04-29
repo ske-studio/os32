@@ -1,8 +1,10 @@
 [workspace]
 members = [
     "os32api",
+    "os32_math",
     "hello_gfx",
     "alloc_demo",
+    "math_test_rs",
 ]
 resolver = "2"
 
