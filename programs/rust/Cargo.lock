@@ -17,5 +17,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "math_test_rs"
+version = "0.1.0"
+dependencies = [
+ "os32_math",
+ "os32api",
+]
+
+[[package]]
+name = "os32_math"
+version = "0.1.0"
+
+[[package]]
 name = "os32api"
 version = "0.1.0"
