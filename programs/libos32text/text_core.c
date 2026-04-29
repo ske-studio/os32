@@ -7,6 +7,7 @@
 
 #include "libos32text.h"
 #include "libos32db.h"
+#include "libos32db_util.h"
 #include "os32api.h"
 
 /* ====================================================================== */
@@ -133,32 +134,11 @@ int text_load(int slot, u16 msg_id)
     if (text_db < 0)
         return TEXT_ERR_DB;
 
-    /* SQL組み立て — snprintf 不使用 (C89 + 簡易実装) */
+    /* SQL組み立て */
     {
-        /* "SELECT text, speaker, speed FROM messages WHERE id=NNNNN" */
-        int id_val = (int)msg_id;
-        int pos = 0;
-        const char *prefix = "SELECT text, speaker, speed FROM messages WHERE id=";
-
-        while (*prefix)
-            sql[pos++] = *prefix++;
-
-        /* 数値変換 */
-        {
-            char tmp[8];
-            int ti = 0;
-            if (id_val == 0) {
-                tmp[ti++] = '0';
-            } else {
-                while (id_val > 0) {
-                    tmp[ti++] = '0' + (id_val % 10);
-                    id_val /= 10;
-                }
-            }
-            while (ti > 0)
-                sql[pos++] = tmp[--ti];
-        }
-        sql[pos] = '\0';
+        char *p = sql;
+        db_sql_append(&p, "SELECT text, speaker, speed FROM messages WHERE id=");
+        db_sql_append_int(&p, (int)msg_id);
     }
 
     rc = db_query(text_db, sql);
@@ -230,32 +210,10 @@ int text_load_group(int slot, u16 group_id)
 
     /* グループ内の最初のメッセージIDを取得 */
     {
-        int pos = 0;
-        int gid = (int)group_id;
-        const char *prefix =
-            "SELECT id FROM messages WHERE group_id=";
-        while (*prefix)
-            sql[pos++] = *prefix++;
-        {
-            char tmp[8];
-            int ti = 0;
-            if (gid == 0) {
-                tmp[ti++] = '0';
-            } else {
-                while (gid > 0) {
-                    tmp[ti++] = '0' + (gid % 10);
-                    gid /= 10;
-                }
-            }
-            while (ti > 0)
-                sql[pos++] = tmp[--ti];
-        }
-        {
-            const char *suffix = " ORDER BY seq ASC LIMIT 1";
-            while (*suffix)
-                sql[pos++] = *suffix++;
-        }
-        sql[pos] = '\0';
+        char *p = sql;
+        db_sql_append(&p, "SELECT id FROM messages WHERE group_id=");
+        db_sql_append_int(&p, (int)group_id);
+        db_sql_append(&p, " ORDER BY seq ASC LIMIT 1");
     }
 
     rc = db_query(text_db, sql);
@@ -296,40 +254,12 @@ int text_next_message(int slot)
 
     /* 次のseqのメッセージを検索 */
     {
-        int pos = 0;
-        int gid = (int)s->group_id;
-        int seq = (int)(s->group_seq + 1);
-        const char *p1 = "SELECT id FROM messages WHERE group_id=";
-        const char *p2 = " AND seq=";
-        const char *p3 = " LIMIT 1";
-
-        while (*p1)
-            sql[pos++] = *p1++;
-
-        /* group_id */
-        {
-            char tmp[8];
-            int ti = 0;
-            if (gid == 0) { tmp[ti++] = '0'; }
-            else { while (gid > 0) { tmp[ti++] = '0' + (gid % 10); gid /= 10; } }
-            while (ti > 0) sql[pos++] = tmp[--ti];
-        }
-
-        while (*p2)
-            sql[pos++] = *p2++;
-
-        /* seq */
-        {
-            char tmp[8];
-            int ti = 0;
-            if (seq == 0) { tmp[ti++] = '0'; }
-            else { while (seq > 0) { tmp[ti++] = '0' + (seq % 10); seq /= 10; } }
-            while (ti > 0) sql[pos++] = tmp[--ti];
-        }
-
-        while (*p3)
-            sql[pos++] = *p3++;
-        sql[pos] = '\0';
+        char *p = sql;
+        db_sql_append(&p, "SELECT id FROM messages WHERE group_id=");
+        db_sql_append_int(&p, (int)s->group_id);
+        db_sql_append(&p, " AND seq=");
+        db_sql_append_int(&p, (int)(s->group_seq + 1));
+        db_sql_append(&p, " LIMIT 1");
     }
 
     rc = db_query(text_db, sql);
