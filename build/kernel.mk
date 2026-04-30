@@ -8,7 +8,7 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
 C_KERNEL = \
-    kernel/kernel.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c \
+    kernel/kernel.c kernel/gdt.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
@@ -19,7 +19,7 @@ C_KERNEL = \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c kapi/kapi_db.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/lz4.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
+    lib/path.c lib/utf8.c lib/kprintf.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
@@ -71,6 +71,14 @@ kapi/%.o: kapi/%.c kapi/kapi_generated.c
 lib/%.o: lib/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_LIB) -c $< -o $@
 
+# === Rust LZ4デコーダ (lib/os32_lz4/) ===
+# C版 (lib/lz4.c) をRust実装に置き換え。境界チェック付きの安全な展開を保証。
+RUST_LZ4_DIR = lib/os32_lz4
+RUST_LZ4_LIB = $(RUST_LZ4_DIR)/target/i686-os32-none/release/libos32_lz4.a
+
+$(RUST_LZ4_LIB): $(RUST_LZ4_DIR)/src/lib.rs $(RUST_LZ4_DIR)/Cargo.toml
+	cd $(RUST_LZ4_DIR) && cargo build --release
+
 # SQLite (カーネル拡張域配置 — -Os必須)
 lib/sqlite3/sqlite3.o: lib/sqlite3/sqlite3.c lib/sqlite3/os32_sqlite_config.h
 	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
@@ -82,8 +90,8 @@ lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_
 	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
 
 # === カーネルリンク ===
-kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ)
-	$(LD) $(LDFLAGS) -o $@ $^ -lgcc
+kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
+	$(LD) $(LDFLAGS) -o $@ $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB) -lgcc
 
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary \
@@ -114,5 +122,6 @@ kernel: kernel.bin sqlite.bin vmkernel.lz4
 # === カーネルクリーン ===
 clean-kernel:
 	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) kernel.elf kernel.bin sqlite.bin vmkernel.lz4 kernel.map
+	cd $(RUST_LZ4_DIR) && cargo clean 2>/dev/null || true
 
 .PHONY: kernel clean-kernel
