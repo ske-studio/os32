@@ -58,7 +58,7 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-s
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 # === 外部プログラム用フラグ ===
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
