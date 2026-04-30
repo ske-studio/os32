@@ -88,6 +88,10 @@ LIBMAP_OBJ = $(libos32map_OBJ)
 $(eval $(call DEFINE_LIB,libos32input,,))
 LIBINPUT_OBJ = $(libos32input_OBJ)
 
+# libos32ui — microUI (rxi) OS32移植版
+$(eval $(call DEFINE_LIB,libos32ui,,))
+LIBUI_OBJ = $(libos32ui_OBJ)
+
 # libos32asset — アセット管理
 $(eval $(call DEFINE_LIB,libos32asset,,))
 LIBASSET_OBJ = $(libos32asset_OBJ)
@@ -176,7 +180,7 @@ clean-libs:
 	rm -f programs/libos32input/*.o programs/libos32asset/*.o programs/libos32text/*.o
 	rm -f programs/libos32econ/*.o programs/libos32ai/*.o programs/libos32battle/*.o
 	rm -f programs/libos32inv/*.o programs/libos32board/*.o programs/libos32event/*.o
-	rm -f programs/libos32ecs/*.o
+	rm -f programs/libos32ecs/*.o programs/libos32ui/*.o
 	rm -f programs/libos32gfx/*.o programs/libos32gfx/asm/*.o
 	rm -f programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o
 	rm -f programs/libtilemap/*.o
