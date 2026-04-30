@@ -189,6 +189,15 @@ programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLI
 
 mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
+# ui_demo — microUI デモ
+programs/ui_demo/ui_demo.o: programs/ui_demo/ui_demo.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+programs/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
+
+ui_demo: $(CRT0_OBJ) programs/ui_demo/ui_demo.bin
+
 # libos32gfx/ui.o (gfx_demo が参照)
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
@@ -298,6 +307,7 @@ endef
 $(eval $(call DEFINE_RUST_PROGRAM,hello_gfx,programs/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,alloc_demo,programs/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,math_test_rs,programs/tests,))
+$(eval $(call DEFINE_RUST_PROGRAM,font_test,programs/tests,$$(GFX_OBJ)))
 
 # Rustクリーン
 clean-rust:
@@ -311,7 +321,7 @@ programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
