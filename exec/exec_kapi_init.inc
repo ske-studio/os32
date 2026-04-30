@@ -148,9 +148,10 @@ extern const char * __cdecl wrap_db_column_text(int handle, int col);
 extern int __cdecl wrap_db_finalize(int handle);
 extern const char * __cdecl wrap_db_last_error(int handle);
 extern u32 __cdecl wrap_db_mem_used(void);
+extern int __cdecl wrap_kcg_load_font(const char *path);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 31;
+kapi->version = 32;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -302,4 +303,5 @@ kapi->version = 31;
     kapi->db_finalize = wrap_db_finalize;
     kapi->db_last_error = wrap_db_last_error;
     kapi->db_mem_used = wrap_db_mem_used;
+    kapi->kcg_load_font = wrap_kcg_load_font;
     kapi->sbrk_heap_limit = 0;

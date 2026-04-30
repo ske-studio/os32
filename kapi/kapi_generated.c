@@ -778,3 +778,8 @@ u32 __cdecl wrap_db_mem_used(void)
     return kapi_db_mem_used();
 }
 
+int __cdecl wrap_kcg_load_font(const char *path)
+{
+    return kcg_load_font(path);
+}
+
