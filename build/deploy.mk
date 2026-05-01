@@ -8,12 +8,17 @@ deploy: vmkernel.lz4 programs unicode_bin
 	@echo "=== HostDrv Deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 
-# deploy-kernel: ローダーをNHDブート領域に書き込み + vmkernel.lz4をext2に配置
-#   + HostDrvからext2同期 (NP21/W再起動が必要)
+# deploy-kernel: vmkernel.lz4をext2に配置 (NP21/W再起動が必要)
+#   ブートローダー自体の変更時は deploy-boot を先に実行すること
 deploy-kernel: vmkernel.lz4
-	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 	$(NHD_DEPLOY) sync-from-hostdrv
 	$(NHD_DEPLOY) deploy
+
+# deploy-boot: ブートローダーのみNHDブート領域に書き込み
+#   ローダー (boot/loader_hdd.bin) を変更した場合のみ実行
+deploy-boot: boot/loader_hdd.bin
+	@echo "=== Boot Loader Deploy ==="
+	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 
 # deploy-nhd: NHDフルデプロイ (ローダー+全ファイル)
 deploy-nhd: vmkernel.lz4 programs unicode_bin
@@ -38,4 +43,4 @@ nhd-umount:
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-nhd nhd-mount nhd-umount nhd-init
+.PHONY: deploy deploy-kernel deploy-boot deploy-nhd nhd-mount nhd-umount nhd-init
