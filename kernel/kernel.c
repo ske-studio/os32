@@ -424,6 +424,18 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* autoexec: シェルスクリプト(/etc/autoexec.bat)に移行済み。
      * シェル起動後に ui.c から script_source_file() で実行される。 */
 
+    /* V86モード動作検証テスト */
+    tvram_print(0, 5, "V86 TEST...", TATTR_GREEN);
+    {
+        extern int v86_test(void);
+        int v86_rc = v86_test();
+        if (v86_rc == 0) {
+            tvram_print(11, 5, "OK", TATTR_WHITE);
+        } else {
+            tvram_print(11, 5, "FAIL", TATTR_RED);
+        }
+    }
+
     /* ブートスプラッシュ表示 (カーネル内蔵) */
     boot_splash();
 
