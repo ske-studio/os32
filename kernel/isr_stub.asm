@@ -252,7 +252,14 @@ isr_stub_default:
 ;; ============================================================
 global irq_stub_0
 irq_stub_0:
+        push    ds
+        push    es
         pushad
+
+        ;; ★ V86モードからの割り込み時、CPUがDS/ESを0にクリアするため復元
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
 
         ;; tick_count をインクリメント
         inc     dword [tick_count]
@@ -265,6 +272,8 @@ irq_stub_0:
         out     PIC1_CMD, al
 
         popad
+        pop     es
+        pop     ds
         iretd
 
 ;; ============================================================
@@ -272,7 +281,14 @@ irq_stub_0:
 ;; ============================================================
 global irq_stub_1
 irq_stub_1:
+        push    ds
+        push    es
         pushad
+
+        ;; ★ DS/ES復元 (V86モード対策)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
 
         ;; Cハンドラを呼び出し
         call    kbd_irq_handler
@@ -282,6 +298,8 @@ irq_stub_1:
         out     PIC1_CMD, al
 
         popad
+        pop     es
+        pop     ds
         iretd
 
 ;; ============================================================
@@ -289,7 +307,14 @@ irq_stub_1:
 ;; ============================================================
 global irq_stub_4
 irq_stub_4:
+        push    ds
+        push    es
         pushad
+
+        ;; ★ DS/ES復元 (V86モード対策)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
 
         ;; Cハンドラを呼び出し
         call    serial_irq_handler
@@ -299,6 +324,8 @@ irq_stub_4:
         out     PIC1_CMD, al
 
         popad
+        pop     es
+        pop     ds
         iretd
 
 ;; ============================================================
@@ -331,7 +358,14 @@ irq_stub_7:
 ;; ============================================================
 global irq_stub_11
 irq_stub_11:
+        push    ds
+        push    es
         pushad
+
+        ;; ★ DS/ES復元 (V86モード対策)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
 
         ;; Cハンドラを呼び出し
         call    fdc_irq_handler
@@ -343,6 +377,8 @@ irq_stub_11:
         out     PIC1_CMD, al
 
         popad
+        pop     es
+        pop     ds
         iretd
 
 ;; ============================================================
@@ -350,7 +386,14 @@ irq_stub_11:
 ;; ============================================================
 global irq_stub_13
 irq_stub_13:
+        push    ds
+        push    es
         pushad
+
+        ;; ★ DS/ES復元 (V86モード対策)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
 
         ;; Cハンドラを呼び出し
         call    mouse_irq_handler
@@ -362,4 +405,6 @@ irq_stub_13:
         out     PIC1_CMD, al
 
         popad
+        pop     es
+        pop     ds
         iretd

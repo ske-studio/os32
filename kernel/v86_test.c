@@ -1,18 +1,25 @@
 /* ======================================================================== */
-/*  V86_TEST.C - V86モード動作検証テスト                                    */
+/*  V86_TEST.C - V86モード動作検証テスト (Phase 1 完成版)                   */
 /*                                                                          */
-/*  Phase 0/1 検証用。コンベンショナルメモリの空き領域に小さなテスト         */
-/*  プログラムを配置し、V86モードで実行する。                               */
+/*  テスト内容:                                                            */
+/*    Test 1: HELLO.COM (TVRAM直接書き込み + INT 20h 終了)                  */
+/*    Test 2: HELLO_BIOS.COM (INT 18h BIOS呼び出し + INT 29h 文字出力)     */
 /*                                                                          */
-/*  テストプログラムはテキストVRAMに文字列を書き込んでからHLTする。          */
-/*  #GPハンドラがHLTを検知するとV86モードを終了する。                        */
+/*  COMローダーの仕様:                                                     */
+/*    - COMファイルはセグメント先頭+0x100にロード (DOSと同じ)              */
+/*    - 0x000-0x0FF は PSP (Program Segment Prefix) 領域                   */
+/*    - PSP先頭に INT 20h (CD 20) を配置 (DOS互換)                         */
+/*    - CS:IP = seg:0x0100 でエントリ                                      */
 /* ======================================================================== */
 
 #include "v86.h"
+#include "v86_mem.h"
 #include "tss.h"
 #include "paging.h"
 #include "memmap.h"
 #include "kstring.h"
+#include "v86_pic.h"
+#include "v86_pit.h"
 #include "io.h"
 
 /* exec_setjmp / exec_longjmp (setjmp.asm) */
@@ -25,152 +32,139 @@ static u32 v86_test_jmpbuf[6];
 /* V86終了要求フラグ (v86.cから参照) */
 volatile int v86_exit_request = 0;
 
-/* V86テスト用カーネルスタック (4KB、上位メモリに配置) */
-/* カーネルヒープから確保するのではなく、静的確保して安全性を保証 */
-static u8 v86_kstack[4096] __attribute__((aligned(16)));
+/* V86テスト用カーネルスタック (16KB)
+ * V86 #GPハンドラ内でタイマ割り込みがネストするため、
+ * 十分なサイズが必要 */
+static u8 v86_kstack[16384] __attribute__((aligned(16)));
 
 /* ====================================================================== */
-/*  V86テストプログラム (16bit リアルモード機械語)                          */
-/*                                                                          */
-/*  このバイト列は V86モードで実行される。                                  */
-/*  テキストVRAM (0xA0000) に "V86 OK!" を書き込み、HLTする。              */
-/*                                                                          */
-/*  セグメント:オフセット形式:                                             */
-/*    CS = 0x8A00, IP = 0x0000 → リニア 0x8A000                            */
-/*    (コンベンショナルメモリの空き領域 0x8A000-0x8EFFF を使用)             */
-/*                                                                          */
-/*  等価アセンブリ:                                                        */
-/*    mov  ax, 0xA000                                                      */
-/*    mov  es, ax           ; ES = テキストVRAMセグメント                  */
-/*    mov  word [es:0x0000], 0x56  ; 'V'                                   */
-/*    mov  word [es:0x0002], 0x38  ; '8'                                   */
-/*    mov  word [es:0x0004], 0x36  ; '6'                                   */
-/*    mov  word [es:0x0006], 0x20  ; ' '                                   */
-/*    mov  word [es:0x0008], 0x4F  ; 'O'                                   */
-/*    mov  word [es:0x000A], 0x4B  ; 'K'                                   */
-/*    mov  word [es:0x000C], 0x21  ; '!'                                   */
-/*    ; テキスト属性 (0xA2000) に白色を設定                                 */
-/*    mov  ax, 0xA200                                                      */
-/*    mov  es, ax                                                          */
-/*    mov  word [es:0x0000], 0xE1  ; (7回)                                 */
-/*    hlt                                                                  */
+/*  HELLO.COM 埋め込みバイナリ (tests/hello_v86.asm から生成)              */
+/*  TVRAM直接書き込み + INT 20h 終了                                       */
 /* ====================================================================== */
-static const u8 v86_test_program[] = {
-    /* mov ax, 0xA000 */
-    0xB8, 0x00, 0xA0,
-    /* mov es, ax */
-    0x8E, 0xC0,
-    /* mov word [es:0x0000], 'V' (0x56) */
-    0x26, 0xC7, 0x06, 0x00, 0x00, 0x56, 0x00,
-    /* mov word [es:0x0002], '8' (0x38) */
-    0x26, 0xC7, 0x06, 0x02, 0x00, 0x38, 0x00,
-    /* mov word [es:0x0004], '6' (0x36) */
-    0x26, 0xC7, 0x06, 0x04, 0x00, 0x36, 0x00,
-    /* mov word [es:0x0006], ' ' (0x20) */
-    0x26, 0xC7, 0x06, 0x06, 0x00, 0x20, 0x00,
-    /* mov word [es:0x0008], 'O' (0x4F) */
-    0x26, 0xC7, 0x06, 0x08, 0x00, 0x4F, 0x00,
-    /* mov word [es:0x000A], 'K' (0x4B) */
-    0x26, 0xC7, 0x06, 0x0A, 0x00, 0x4B, 0x00,
-    /* mov word [es:0x000C], '!' (0x21) */
-    0x26, 0xC7, 0x06, 0x0C, 0x00, 0x21, 0x00,
-
-    /* mov ax, 0xA200 (テキスト属性VRAM) */
-    0xB8, 0x00, 0xA2,
-    /* mov es, ax */
-    0x8E, 0xC0,
-    /* mov word [es:0x0000], 0xE1 (白/青) ×7 */
-    0x26, 0xC7, 0x06, 0x00, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x02, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x04, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x06, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x08, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x0A, 0x00, 0xE1, 0x00,
-    0x26, 0xC7, 0x06, 0x0C, 0x00, 0xE1, 0x00,
-
-    /* HLT — #GPがトラップしてV86終了 */
-    0xF4
+static const u8 hello_com[] = {
+    0xb8, 0x00, 0xa0, 0x8e, 0xc0, 0x26, 0xc7, 0x06, 0x00, 0x00, 0x48, 0x00,
+    0x26, 0xc7, 0x06, 0x02, 0x00, 0x45, 0x00, 0x26, 0xc7, 0x06, 0x04, 0x00,
+    0x4c, 0x00, 0x26, 0xc7, 0x06, 0x06, 0x00, 0x4c, 0x00, 0x26, 0xc7, 0x06,
+    0x08, 0x00, 0x4f, 0x00, 0x26, 0xc7, 0x06, 0x0a, 0x00, 0x20, 0x00, 0x26,
+    0xc7, 0x06, 0x0c, 0x00, 0x56, 0x00, 0x26, 0xc7, 0x06, 0x0e, 0x00, 0x38,
+    0x00, 0x26, 0xc7, 0x06, 0x10, 0x00, 0x36, 0x00, 0x26, 0xc7, 0x06, 0x12,
+    0x00, 0x21, 0x00, 0xb8, 0x00, 0xa2, 0x8e, 0xc0, 0xb9, 0x0a, 0x00, 0x31,
+    0xff, 0x26, 0xc7, 0x05, 0xe1, 0x00, 0x83, 0xc7, 0x02, 0xe2, 0xf6, 0xcd,
+    0x20
 };
+#define HELLO_COM_SIZE  97
 
 /* ====================================================================== */
-/*  v86_test — V86モード動作検証                                           */
-/*                                                                          */
-/*  テキストVRAMの左上に "V86 OK!" と表示されれば成功。                      */
-/*  戻り値: 0=成功, -1=失敗                                                */
+/*  HELLO_BIOS.COM 埋め込みバイナリ (tests/hello_bios.asm から生成)        */
+/*  INT 18h AH=16h (VRAMクリア) + AH=13h (カーソル設定)                   */
+/*  + INT 29h (1文字出力) + INT 1Ch (カレンダ) + PIC I/O + INT 20h        */
 /* ====================================================================== */
-int v86_test(void)
+static const u8 hello_bios_com[] = {
+    0xb4, 0x16, 0xcd, 0x18, 0xb4, 0x13, 0x31, 0xd2, 0xcd, 0x18, 0xbe, 0x7a,
+    0x01, 0xe8, 0x47, 0x00, 0xb4, 0x00, 0x1e, 0x07, 0x8d, 0x1e, 0xab, 0x01,
+    0xcd, 0x1c, 0xbe, 0x88, 0x01, 0xe8, 0x37, 0x00, 0xa0, 0xab, 0x01, 0xe8,
+    0x3b, 0x00, 0xb0, 0x2f, 0xcd, 0x29, 0xa0, 0xac, 0x01, 0xe8, 0x31, 0x00,
+    0xb0, 0x0d, 0xcd, 0x29, 0xb0, 0x0a, 0xcd, 0x29, 0xbe, 0x8f, 0x01, 0xe8,
+    0x19, 0x00, 0xe4, 0x02, 0xe8, 0x1e, 0x00, 0xb0, 0x0d, 0xcd, 0x29, 0xb0,
+    0x0a, 0xcd, 0x29, 0xb0, 0x20, 0xe6, 0x00, 0xbe, 0x99, 0x01, 0xe8, 0x02,
+    0x00, 0xcd, 0x20, 0xac, 0x08, 0xc0, 0x74, 0x04, 0xcd, 0x29, 0xeb, 0xf7,
+    0xc3, 0x50, 0xc0, 0xe8, 0x04, 0xe8, 0x07, 0x00, 0x58, 0x24, 0x0f, 0xe8,
+    0x01, 0x00, 0xc3, 0x04, 0x30, 0x3c, 0x39, 0x76, 0x02, 0x04, 0x07, 0xcd,
+    0x29, 0xc3, 0x48, 0x45, 0x4c, 0x4c, 0x4f, 0x20, 0x42, 0x49, 0x4f, 0x53,
+    0x21, 0x0d, 0x0a, 0x00, 0x44, 0x61, 0x74, 0x65, 0x3a, 0x20, 0x00, 0x50,
+    0x49, 0x43, 0x20, 0x49, 0x4d, 0x52, 0x3a, 0x20, 0x00, 0x56, 0x38, 0x36,
+    0x20, 0x50, 0x68, 0x61, 0x73, 0x65, 0x20, 0x32, 0x20, 0x4f, 0x4b, 0x21,
+    0x0d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+#define HELLO_BIOS_COM_SIZE  177
+
+/* ====================================================================== */
+/*  COM ローダー定数                                                       */
+/* ====================================================================== */
+#define COM_LOAD_BASE   0x8A000UL   /* PSP + COMのベースアドレス */
+#define COM_SEG         0x8A00      /* COMセグメント */
+#define COM_ENTRY       0x0100      /* COMエントリオフセット (PSP直後) */
+#define COM_STACK_SEG   0x8D00      /* スタックセグメント */
+#define COM_STACK_OFF   0x1FFE      /* スタックオフセット */
+
+/* V86アクセスに必要なページフラグ */
+#define V86_PAGE_FLAGS (PAGE_RW | PTE_USER)
+
+/* ====================================================================== */
+/*  v86_run_com — COMバイナリをV86モードで実行                             */
+/*                                                                          */
+/*  data: COMバイナリデータ                                                */
+/*  size: バイト数                                                          */
+/*  戻り値: 0=成功                                                         */
+/* ====================================================================== */
+static int v86_run_com(const u8 *data, u32 size)
 {
     struct v86_context ctx;
     u32 saved_esp0;
-    u8 *test_code_addr;
     u32 addr;
+    u8 *psp;
+    u8 *code;
 
-    /* V86モードはCPL=3で動作するため、ユーザアクセス可能フラグが必須 */
-    #define V86_PAGE_FLAGS (PAGE_RW | PTE_USER)
-
-    /* テストプログラムをコンベンショナルメモリの空き領域にコピー */
-    /* 0x8A000-0x8EFFF は memmap.h で「空き (20KB, 将来用)」とされている */
-    test_code_addr = (u8 *)0x8A000UL;
-
-    /* テストコード領域 (0x8A000) を V86アクセス可能に設定 */
+    /* ページテーブル設定 (必要な領域のみ PTE_USER 追加) */
     paging_set_page(0x8A000UL, 0x8A000UL, V86_PAGE_FLAGS);
-
-    /* V86スタック領域 (0x8B000-0x8EFFF) を V86アクセス可能に設定 */
     for (addr = 0x8B000UL; addr <= 0x8E000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, V86_PAGE_FLAGS);
     }
-
-    /* テキストVRAM (0xA0000-0xA3FFF) を V86アクセス可能に設定 */
     for (addr = 0xA0000UL; addr < 0xA4000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, V86_PAGE_FLAGS);
     }
-
-    /* ★ 重要: PDEにもPTE_USERが必要 (x86はPDEとPTE両方でU/Sチェック) */
-    /* テストコード・スタック・VRAMは全てPDE[0] (0x00000-0x3FFFFF) 内 */
     paging_pde_set_flags(0x00000UL, PTE_USER);
 
-    /* テストプログラムをコピー */
-    kmemcpy(test_code_addr, v86_test_program, sizeof(v86_test_program));
+    /* PIC仮想化初期化 */
+    v86_pic_init();
 
-    /* V86コンテキスト設定 */
-    /* CS:IP = 0x8A00:0x0000 → リニア 0x8A000 */
-    ctx.eip    = 0x0000;
-    ctx.cs     = 0x8A00;
-    ctx.eflags = EFLAGS_VM | EFLAGS_IF;  /* VM=1, IF=1, IOPL=0 */
-    /* スタック: SS:SP = 0x8B00:0xFFFE → リニア 0x8BFFE + 0xFFFE = 0x9AFFE */
-    /* 注意: 0x8F000はカーネルスタックガードなので避ける */
-    /* SS=0x8B00, SP=0x3FFE → リニア 0x8B000 + 0x3FFE = 0x8EFFE (安全) */
-    ctx.esp    = 0x3FFE;
-    ctx.ss     = 0x8B00;
-    ctx.es     = 0x0000;
-    ctx.ds     = 0x0000;
+    /* PIT仮想化初期化 */
+    v86_pit_init();
+
+    /* PSP構築 */
+    psp = (u8 *)COM_LOAD_BASE;
+    kmemset(psp, 0, 256);
+    psp[0] = 0xCD;  /* INT */
+    psp[1] = 0x20;  /* 20h */
+
+    /* COMバイナリをPSP直後 (offset 0x100) にコピー */
+    code = (u8 *)(COM_LOAD_BASE + COM_ENTRY);
+    kmemcpy(code, data, size);
+
+    /* V86コンテキスト設定 (COM形式) */
+    ctx.eip    = COM_ENTRY;
+    ctx.cs     = COM_SEG;
+    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
+    ctx.esp    = COM_STACK_OFF;
+    ctx.ss     = COM_STACK_SEG;
+    ctx.es     = COM_SEG;
+    ctx.ds     = COM_SEG;
     ctx.fs     = 0x0000;
     ctx.gs     = 0x0000;
 
-    /* TSS ESP0 を V86用カーネルスタックに切り替え */
-    /* (V86で#GPが発生するとCPUがこのスタックを使う) */
-    saved_esp0 = 0x9FFF0UL;  /* 元のカーネルスタックトップ */
+    /* TSS ESP0 切り替え */
+    saved_esp0 = 0x9FFF0UL;
     tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
 
-    /* V86終了用のsetjmpポイントを設定 */
+    /* V86モード遷移 */
     v86_active = 1;
     v86_exit_request = 0;
 
     if (exec_setjmp(v86_test_jmpbuf) == 0) {
-        /* 最初の呼び出し: V86モードに遷移 */
         v86_enter(&ctx);
-        /* ここには戻らない (V86モードに遷移する) */
     }
-    /* longjmpで戻ってきた場合: V86テスト終了 */
+    /* longjmpで復帰 */
 
-    /* V86モード終了 */
+    /* 後始末 */
     v86_active = 0;
     v86_exit_request = 0;
-
-    /* TSS ESP0 を元に戻す */
+    v86_pending_irq = 0;
     tss_set_esp0(saved_esp0);
 
-    /* ページ属性を元に戻す (PTE_USERを除去) */
+    /* 画面リストア (DOSが変更した可能性のあるハードウェア状態を復帰) */
+    v86_restore_screen();
+
+    /* ページ属性復元 */
     paging_set_page(0x8A000UL, 0x8A000UL, PAGE_RW);
     for (addr = 0x8B000UL; addr <= 0x8E000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, PAGE_RW);
@@ -184,25 +178,33 @@ int v86_test(void)
 }
 
 /* ====================================================================== */
-/*  v86_test_exit — V86モードからの脱出                                    */
+/*  v86_test — V86モード動作検証                                           */
 /*                                                                          */
-/*  isr_stub.asm の .v86_exit パスから呼ばれる。                            */
-/*  セグメントレジスタは呼び出し元で復元済み。                              */
+/*  Test 1: HELLO.COM (TVRAM直接書き込み + INT 20h)                        */
+/*  Test 2: HELLO_BIOS.COM (INT 18h + INT 29h)                            */
+/*                                                                          */
+/*  戻り値: 0=全テスト成功                                                 */
+/* ====================================================================== */
+int v86_test(void)
+{
+    int rc;
+
+    /* Test 1: TVRAM直接書き込み + INT 20h */
+    rc = v86_run_com(hello_com, HELLO_COM_SIZE);
+    if (rc != 0) return -1;
+
+    /* Test 2: BIOS INT 18h + INT 29h */
+    rc = v86_run_com(hello_bios_com, HELLO_BIOS_COM_SIZE);
+    if (rc != 0) return -2;
+
+    return 0;
+}
+
+/* ====================================================================== */
+/*  v86_test_exit — V86モードからの脱出                                    */
 /* ====================================================================== */
 void v86_test_exit(void)
 {
-    /* デバッグ: この関数が呼ばれたことをVRAMに表示 */
-    volatile u16 *tvram = (volatile u16 *)0xA0000UL;
-    volatile u8  *tattr = (volatile u8  *)0xA2000UL;
-    tvram[160] = 'E';  /* 行2の位置に 'E' */
-    tattr[320] = 0xE1;
-    tvram[161] = 'X';
-    tattr[322] = 0xE1;
-    tvram[162] = 'I';
-    tattr[324] = 0xE1;
-    tvram[163] = 'T';
-    tattr[326] = 0xE1;
-
-    __asm__ volatile("sti");  /* ISRスタブのCLIを解除 */
+    __asm__ volatile("sti");
     exec_longjmp(v86_test_jmpbuf);
 }

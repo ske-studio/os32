@@ -58,4 +58,13 @@ int v86_gp_handler(u32 *regs);
 /* V86モードが有効かどうか */
 extern volatile int v86_active;
 
+/* V86タスクの仮想IFフラグ (v86.cで定義) */
+extern u32 v86_virtual_if;
+
+/* 保留中の仮想IRQビットマスク (v86.cで定義) */
+extern u32 v86_pending_irq;
+
+/* V86タスクに仮想割り込みを保留する (IRQハンドラから呼ぶ) */
+void v86_set_pending_irq(int irq_no);
+
 #endif /* V86_H */

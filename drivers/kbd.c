@@ -106,6 +106,16 @@ void kbd_irq_handler(void)
     u8 ascii;
     int is_break;
 
+    /* V86モード中: キー入力をDOSにリフレクトする (OS32バッファには入れない) */
+    {
+        extern volatile int v86_active;
+        extern void v86_set_pending_irq(int irq_no);
+        if (v86_active) {
+            v86_set_pending_irq(1);
+            return;
+        }
+    }
+
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
     is_break = scancode & SCANCODE_BREAK;

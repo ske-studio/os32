@@ -349,9 +349,18 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 /* ======================================================================== */
 extern void snd_tick(void);  /* kernel/snd_engine.c */
 
+/* V86割り込みリフレクト用 (v86.h) */
+extern volatile int v86_active;
+extern void v86_set_pending_irq(int irq_no);
+
 void timer_handler(void)
 {
     snd_tick();
+
+    /* V86モード中: IRQ0 (INT 08h) をV86タスクにリフレクト予約 */
+    if (v86_active) {
+        v86_set_pending_irq(0);
+    }
 }
 
 /* ======================================================================== */
@@ -364,3 +373,4 @@ void fdc_irq_handler(void)
 {
     fdc_irq_fired = 1;
 }
+

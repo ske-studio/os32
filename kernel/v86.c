@@ -9,31 +9,30 @@
 /* ======================================================================== */
 
 #include "v86.h"
+#include "v86_mem.h"
+#include "v86_bios.h"
+#include "v86_pic.h"
+#include "v86_pit.h"
 #include "io.h"
 
 /* V86モードの有効フラグ */
 volatile int v86_active = 0;
 
 /* V86タスクの仮想IFフラグ (CLI/STIで操作される) */
-static u32 v86_virtual_if = EFLAGS_IF;
+u32 v86_virtual_if = EFLAGS_IF;
+
+/* 保留中の仮想IRQビットマスク */
+u32 v86_pending_irq = 0;
 
 /* V86終了要求フラグ (v86_test.cから設定される) */
 extern volatile int v86_exit_request;
 
 /* ====================================================================== */
-/*  V86アドレス → リニアアドレス変換                                      */
-/*  seg:off → (seg << 4) + off                                            */
+/*  V86アドレス → カーネル用リニアアドレス変換                             */
+/*  v86_mem.h の v86_phys_addr() を使用する。                              */
+/*  バッキングRAM (0x300000) にマッピングされた領域を正しく変換する。      */
 /* ====================================================================== */
-static u8 *v86_linear(u32 seg, u32 off)
-{
-    /* V86空間は物理0x300000にマッピングされているが、
-     * ページングにより仮想0x00000-0xFFFFFとしてアクセスされる。
-     * カーネル (Ring0) からは物理アドレス経由でアクセスする必要がある。
-     *
-     * TODO: Phase 1でページング設定後に適切なアドレス変換を実装。
-     * Phase 0では仮に直接計算する (テスト用)。 */
-    return (u8 *)((seg << 4) + off);
-}
+#define v86_linear(seg, off)  v86_phys_addr((seg), (off))
 
 /* ====================================================================== */
 /*  V86スタック操作ヘルパー                                                */
@@ -82,21 +81,84 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xCD: {
         u8 intno = ip[1];
-        u32 *ivt = (u32 *)v86_linear(0, 0);
-        u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
-        u16 handler_seg = (u16)(ivt[intno] >> 16);
 
-        /* V86スタックにフラグ/CS/IPをpush (リアルモードINTと同じ) */
-        v86_push16(regs, (u16)(regs[V86_REG_EFLAGS] & 0xFFFF));
-        v86_push16(regs, (u16)regs[V86_REG_CS]);
-        v86_push16(regs, (u16)(regs[V86_REG_EIP] + 2));
+        /* ============================================================ */
+        /*  DOS終了割り込みの特殊処理                                   */
+        /*  INT 20h (Terminate Program) → V86終了                      */
+        /*  INT 21h AH=4Ch (Exit Process) → V86終了                    */
+        /* ============================================================ */
+        if (intno == 0x20) {
+            /* INT 20h: DOS Terminate — V86モード終了 */
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            return 1;
+        }
+        if (intno == 0x21 &&
+            ((regs[V86_REG_EAX] >> 8) & 0xFF) == 0x4C) {
+            /* INT 21h AH=4Ch: Exit Process — V86モード終了 */
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            return 1;
+        }
 
-        /* IVTのハンドラに転送 */
-        regs[V86_REG_CS] = handler_seg;
-        regs[V86_REG_EIP] = handler_off;
+        /* ============================================================ */
+        /*  PC-98 BIOS割り込みのエミュレーション                               */
+        /*  INT 18h (Text/KB/GFX BIOS) → v86_bios_int18()              */
+        /*  INT 29h (DOS 1文字高速出力) → v86_bios_int29()              */
+        /* ============================================================ */
+        if (intno == 0x18) {
+            int rc = v86_bios_int18(regs);
+            if (rc >= 0) {
+                /* 処理済み: EIPを進めてV86に戻る */
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                if (rc == 1) return 1;  /* V86終了要求 */
+                break;
+            }
+            /* rc == -1: 未実装 — IVT転送にフォールスルー */
+        }
+        if (intno == 0x29) {
+            v86_bios_int29(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            break;
+        }
+        if (intno == 0x1C) {
+            int rc = v86_bios_int1c(regs);
+            if (rc >= 0) {
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                break;
+            }
+            /* rc == -1: IVT転送にフォールスルー */
+        }
 
-        /* 仮想IFをクリア (INTはIF=0にする) */
-        v86_virtual_if = 0;
+        /* INT 11h (機器構成取得) */
+        if (intno == 0x11) {
+            v86_bios_int11(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            break;
+        }
+        /* INT 12h (メモリサイズ取得) */
+        if (intno == 0x12) {
+            v86_bios_int12(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            break;
+        }
+
+        /* 通常のINT: IVT参照してV86内ハンドラに転送 */
+        {
+            u32 *ivt = (u32 *)v86_linear(0, 0);
+            u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
+            u16 handler_seg = (u16)(ivt[intno] >> 16);
+
+            /* V86スタックにフラグ/CS/IPをpush (リアルモードINTと同じ) */
+            v86_push16(regs, (u16)(regs[V86_REG_EFLAGS] & 0xFFFF));
+            v86_push16(regs, (u16)regs[V86_REG_CS]);
+            v86_push16(regs, (u16)(regs[V86_REG_EIP] + 2));
+
+            /* IVTのハンドラに転送 */
+            regs[V86_REG_CS] = handler_seg;
+            regs[V86_REG_EIP] = handler_off;
+
+            /* 仮想IFをクリア (INTはIF=0にする) */
+            v86_virtual_if = 0;
+        }
         break;
     }
 
@@ -174,7 +236,15 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE4: {
         u8 port = ip[1];
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
+        u8 val;
+        /* PIC仮想化 */
+        if (v86_pic_io(port, &val, 0)) {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
+        } else if (v86_pit_io(port, &val, 0)) {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
+        } else {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
@@ -184,7 +254,18 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE6: {
         u8 port = ip[1];
-        outp(port, (u8)(regs[V86_REG_EAX] & 0xFF));
+        u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
+        /* リセットポート検知 */
+        if (v86_pic_is_reboot(port, val)) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            return 1;  /* V86終了 */
+        }
+        /* PIC仮想化 → PIT仮想化 → 実ハードウェア */
+        if (!v86_pic_io(port, &val, 1)) {
+            if (!v86_pit_io(port, &val, 1)) {
+                outp(port, val);
+            }
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
@@ -194,7 +275,14 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEC: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
+        u8 val;
+        if (v86_pic_io(port, &val, 0)) {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
+        } else if (v86_pit_io(port, &val, 0)) {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
+        } else {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
@@ -204,7 +292,16 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEE: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        outp(port, (u8)(regs[V86_REG_EAX] & 0xFF));
+        u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
+        if (v86_pic_is_reboot(port, val)) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            return 1;
+        }
+        if (!v86_pic_io(port, &val, 1)) {
+            if (!v86_pit_io(port, &val, 1)) {
+                outp(port, val);
+            }
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
@@ -278,4 +375,24 @@ int v86_gp_handler(u32 *regs)
     }
     } /* switch */
     return 0;
+}
+
+/* ====================================================================== */
+/*  v86_inject_irq — V86タスクに仮想割り込みをインジェクトする              */
+/*                                                                          */
+/*  IRQハンドラ (isr_stub.asm) からV86モード中に呼ばれる。                  */
+/*  V86のスタックフレームを書き換え、IVT経由でV86内ハンドラに転送する。     */
+/*                                                                          */
+/*  regs: V86スタックフレーム (isr_stub.asm のPUSHAD + CPUフレーム)         */
+/*        ただしIRQ用はV86_REG_*とオフセットが異なる場合がある。            */
+/*        ここではtimer/kbd共通の簡易方式を使う。                           */
+/*                                                                          */
+/*  intno: リフレクト先のINT番号 (08h=タイマ, 09h=キーボード)              */
+/*                                                                          */
+/*  ★注意: この関数は直接regs[]を操作せず、IVTアドレスとフラグだけを        */
+/*  書き換える軽量な実装。irq_stub側でV86スタック操作を行う。               */
+/* ====================================================================== */
+void v86_set_pending_irq(int irq_no)
+{
+    v86_pending_irq |= (1U << irq_no);
 }
