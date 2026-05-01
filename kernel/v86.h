@@ -51,8 +51,9 @@ struct v86_context {
 /* V86モードへ遷移 (アセンブリ、v86_entry.asm) */
 extern void v86_enter(const struct v86_context *ctx);
 
-/* V86 #GPハンドラ (isr_stub.asmから呼ばれる) */
-void v86_gp_handler(u32 *regs);
+/* V86 #GPハンドラ (isr_stub.asmから呼ばれる)
+ * 戻り値: 0=V86続行, 1=V86終了要求 */
+int v86_gp_handler(u32 *regs);
 
 /* V86モードが有効かどうか */
 extern volatile int v86_active;

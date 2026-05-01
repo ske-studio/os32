@@ -17,6 +17,9 @@ volatile int v86_active = 0;
 /* V86タスクの仮想IFフラグ (CLI/STIで操作される) */
 static u32 v86_virtual_if = EFLAGS_IF;
 
+/* V86終了要求フラグ (v86_test.cから設定される) */
+extern volatile int v86_exit_request;
+
 /* ====================================================================== */
 /*  V86アドレス → リニアアドレス変換                                      */
 /*  seg:off → (seg << 4) + off                                            */
@@ -62,7 +65,7 @@ static u16 v86_pop16(u32 *regs)
 /*  isr_stub.asm から呼ばれる。regs配列を操作して次の命令に進める。         */
 /*  regs[] の内容は v86.h の V86_REG_* を参照。                            */
 /* ====================================================================== */
-void v86_gp_handler(u32 *regs)
+int v86_gp_handler(u32 *regs)
 {
     u8 *ip;
     u8 opcode;
@@ -156,11 +159,14 @@ void v86_gp_handler(u32 *regs)
     }
 
     /* ================================================================ */
-    /*  HLT (0xF4) — 停止 (次の割り込みまで待機)                       */
+    /*  HLT (0xF4) — V86テスト中はV86モードを終了する                   */
     /* ================================================================ */
     case 0xF4:
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
-        /* TODO: タイマ割り込みまで待機 (Phase 2) */
+        if (v86_exit_request || v86_active) {
+            /* V86終了要求: 戻り値 1 で isr_stub.asm が復帰処理を行う */
+            return 1;
+        }
         break;
 
     /* ================================================================ */
@@ -271,4 +277,5 @@ void v86_gp_handler(u32 *regs)
         }
     }
     } /* switch */
+    return 0;
 }
