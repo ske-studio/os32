@@ -264,6 +264,29 @@ int paging_is_present(u32 virt_addr)
 u32 *paging_get_master_pd(void) { return page_directory; }
 
 /* ======================================================================== */
+/*  paging_pde_set_flags — PDEにフラグビットを追加                           */
+/*  V86モードではPDEにもPTE_USERが必要                                      */
+/* ======================================================================== */
+void paging_pde_set_flags(u32 virt_addr, u32 flags)
+{
+    u32 pdi = virt_addr >> 22;
+    if (pdi >= PAGING_PT_COUNT) return;
+    page_directory[pdi] |= flags;
+    if (pg_enabled) tlb_flush_all();
+}
+
+/* ======================================================================== */
+/*  paging_pde_clear_flags — PDEからフラグビットを除去                       */
+/* ======================================================================== */
+void paging_pde_clear_flags(u32 virt_addr, u32 flags)
+{
+    u32 pdi = virt_addr >> 22;
+    if (pdi >= PAGING_PT_COUNT) return;
+    page_directory[pdi] &= ~flags;
+    if (pg_enabled) tlb_flush_all();
+}
+
+/* ======================================================================== */
 /*  paging_switch_pd — CR3を切り替える                                      */
 /*  i386互換: CR3リロード方式でTLBを全フラッシュ                            */
 /* ======================================================================== */

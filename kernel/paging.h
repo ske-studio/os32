@@ -79,5 +79,11 @@ void paging_switch_pd(u32 *pd);
 /* マスター(カーネル)ページディレクトリを取得 */
 u32 *paging_get_master_pd(void);
 
+/* PDEにフラグビットを追加する (V86モードのPTE_USER等) */
+void paging_pde_set_flags(u32 virt_addr, u32 flags);
+
+/* PDEからフラグビットを除去する */
+void paging_pde_clear_flags(u32 virt_addr, u32 flags);
+
 
 #endif /* __PAGING_H */
