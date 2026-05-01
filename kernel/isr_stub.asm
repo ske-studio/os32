@@ -97,22 +97,45 @@ isr_stub_13:
         ;; ============================================================
         pushad                  ;; 汎用レジスタ保存 (32B)
 
-        ;; v86_gp_handler(u32 *regs)
-        ;; regs[0]=EDI .. regs[7]=EAX (PUSHAD)
-        ;; regs[8]=error_code
-        ;; regs[9]=EIP, regs[10]=CS, regs[11]=EFLAGS
-        ;; regs[12]=ESP, regs[13]=SS
-        ;; regs[14]=ES, regs[15]=DS, regs[16]=FS, regs[17]=GS
+        ;; ★ V86→Ring0遷移時にCPUがDS/ES/FS/GSを0にクリアするため、
+        ;; Cハンドラ呼び出し前にカーネルデータセグメントを復元する。
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+
+        ;; v86_gp_handler(u32 *regs) → 戻り値: 0=続行, 非0=V86終了
         mov     eax, esp
         push    eax
         call    v86_gp_handler
         add     esp, 4
 
-        ;; v86_gp_handler はレジスタ配列を書き換えて戻る
+        ;; 戻り値チェック: 非0ならV86モードを完全終了
+        test    eax, eax
+        jnz     .v86_exit
+
+        ;; 通常: v86_gp_handler がレジスタ配列を書き換えて戻った
         ;; (次に実行するV86命令のEIP等が更新済み)
         popad
         add     esp, 4          ;; error_code をスキップ
         iretd                   ;; V86モードに復帰 (CPUがセグメントも自動復帰)
+
+.v86_exit:
+        ;; V86モード完全終了
+        ;; ISRスタック上のPUSHAD+CPUフレームを全て破棄し、
+        ;; カーネルモードに復帰する。
+        ;; セグメントレジスタをカーネル用に復元。
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        mov     ss, ax
+
+        ;; v86_return_esp にsetjmpで保存したESPが入っている
+        ;; exec_longjmp(v86_test_jmpbuf) を呼ぶ
+        extern  v86_test_exit
+        call    v86_test_exit
+        ;; ここには戻らない
 
 ;; ============================================================
 ;; 例外共通ハンドラ (V86以外)
@@ -158,8 +181,11 @@ isr_common:
 ;; CPUが自動pushするエラーコードに加え、
 ;; CR2 (障害アドレス) をCハンドラに渡す。
 ;;
+;; V86モードからの#PFも検出する (スタックフレームが異なるため)。
+;;
 ;; CPU自動push後のスタック (ESP低位→高位):
-;;   [error_code] [EIP] [CS] [EFLAGS]
+;;   通常: [error_code] [EIP] [CS] [EFLAGS]
+;;   V86:  [error_code] [EIP] [CS] [EFLAGS] [ESP] [SS] [ES] [DS] [FS] [GS]
 ;;
 ;; page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs)
 ;; regs[0]=EDI, [1]=ESI, [2]=EBP, [3]=ESP_orig, [4]=EBX, [5]=EDX, [6]=ECX, [7]=EAX
@@ -167,6 +193,12 @@ isr_common:
 global isr_stub_14
 isr_stub_14:
         cli
+        ;; V86モード判定: EFLAGS.VM (bit 17) をチェック
+        ;; [ESP+0]=error_code, [ESP+4]=EIP, [ESP+8]=CS, [ESP+12]=EFLAGS
+        test    dword [esp + 12], 0x020000
+        jnz     .v86_pf
+
+        ;; 通常の#PF処理
         pushad                  ;; 全汎用レジスタ保存 (32B)
 
         ;; PUSHAD配列のポインタ (引数4: regs)
@@ -188,6 +220,22 @@ isr_stub_14:
         call    page_fault_handler
         add     esp, 16
 
+        popad
+        add     esp, 4          ;; error_code をスキップ
+        iretd
+
+.v86_pf:
+        ;; V86モードからの#PF: V86 #GPハンドラと同じ方式で処理
+        ;; (PTE_USER修正後はここに来ないはずだが、安全のため)
+        pushad
+        ;; ★ DS/ES復元 (V86→Ring0遷移でCPUが0にクリアするため)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+        mov     eax, esp
+        push    eax
+        call    v86_gp_handler
+        add     esp, 4
         popad
         add     esp, 4          ;; error_code をスキップ
         iretd
