@@ -13,6 +13,7 @@
 #include "v86_bios.h"
 #include "v86_pic.h"
 #include "v86_pit.h"
+#include "v86_disk.h"
 #include "io.h"
 
 /* V86モードの有効フラグ */
@@ -139,6 +140,16 @@ int v86_gp_handler(u32 *regs)
             v86_bios_int12(regs);
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
             break;
+        }
+
+        /* INT 1Bh (ディスクBIOS) */
+        if (intno == 0x1B) {
+            int rc = v86_bios_int1b(regs);
+            if (rc >= 0) {
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                break;
+            }
+            /* rc == -1: IVT転送にフォールスルー */
         }
 
         /* 通常のINT: IVT参照してV86内ハンドラに転送 */

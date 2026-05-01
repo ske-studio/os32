@@ -20,7 +20,11 @@
 #include "kstring.h"
 #include "v86_pic.h"
 #include "v86_pit.h"
+#include "v86_disk.h"
 #include "io.h"
+#include "vfs.h"
+#include "kmalloc.h"
+#include "kprintf.h"
 
 /* exec_setjmp / exec_longjmp (setjmp.asm) */
 extern int exec_setjmp(u32 *buf);
@@ -208,3 +212,121 @@ void v86_test_exit(void)
     __asm__ volatile("sti");
     exec_longjmp(v86_test_jmpbuf);
 }
+
+/* ====================================================================== */
+/*  v86_boot_freedos — FreeDOS(98) FDDイメージからブート                   */
+/*                                                                          */
+/*  path: FDDイメージファイルパス (例: "/host/fd98_2hd.img")              */
+/*                                                                          */
+/*  処理:                                                                  */
+/*    1. VFS経由でFDDイメージをメモリにロード                              */
+/*    2. IPL (先頭1024バイト) をV86メモリ 0x1FC0:0000 にコピー             */
+/*    3. INT 1Bh をFDDイメージからサーブするよう設定                       */
+/*    4. V86モードでIPLを実行                                              */
+/*                                                                          */
+/*  PC-98 FDD IPL ロードアドレス: 0x1FC00 (seg 0x1FC0, off 0x0000)        */
+/* ====================================================================== */
+#define IPL_SEG      0x1FC0
+#define IPL_LINEAR   0x1FC00UL
+#define IPL_SIZE     1024
+
+int v86_boot_freedos(const char *path)
+{
+    struct v86_context ctx;
+    u32 saved_esp0;
+    int fd;
+    u32 fsize;
+    u8 *img_buf;
+    u8 *ipl_dst;
+
+    /* 1. FDDイメージをVFS経由でロード */
+    fd = vfs_open(path, 0);
+    if (fd < 0) {
+        kprintf(0xE1, "[V86] FDD image not found: %s\n", path);
+        return -1;
+    }
+
+    fsize = vfs_get_size(fd);
+    if (fsize == 0 || fsize > V86_FDD_IMAGE_SIZE) {
+        kprintf(0xE1, "[V86] Invalid image size: %u\n", fsize);
+        vfs_close(fd);
+        return -2;
+    }
+
+    img_buf = (u8 *)kmalloc(fsize);
+    if (!img_buf) {
+        kprintf(0xE1, "[V86] kmalloc failed for FDD image\n");
+        vfs_close(fd);
+        return -3;
+    }
+
+    {
+        int rd = vfs_read_fd(fd, img_buf, fsize);
+        if (rd < 0 || (u32)rd != fsize) {
+            kprintf(0xE1, "[V86] Image read error: %d\n", rd);
+            kfree(img_buf);
+            vfs_close(fd);
+            return -4;
+        }
+    }
+    vfs_close(fd);
+
+    kprintf(0xA1, "[V86] FDD image loaded: %u bytes\n", fsize);
+
+    /* 2. V86メモリ空間を構築 */
+    v86_mem_setup();
+
+    /* 3. PIC/PIT/ディスク仮想化初期化 */
+    v86_pic_init();
+    v86_pit_init();
+    v86_disk_set_image(img_buf, fsize);
+
+    /* 4. IPLをV86メモリにコピー (0x1FC00) */
+    ipl_dst = v86_phys_addr(IPL_SEG, 0);
+    kmemcpy(ipl_dst, img_buf, IPL_SIZE);
+
+    /* 5. V86コンテキスト: IPLエントリ */
+    ctx.eip    = 0x0000;
+    ctx.cs     = IPL_SEG;
+    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
+    ctx.esp    = 0xFFFE;    /* スタック: 0x0000:FFFE */
+    ctx.ss     = 0x0000;
+    ctx.es     = IPL_SEG;
+    ctx.ds     = IPL_SEG;
+    ctx.fs     = 0x0000;
+    ctx.gs     = 0x0000;
+
+    /* TSS ESP0 切り替え */
+    saved_esp0 = 0x9FFF0UL;
+    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
+
+    /* V86モード遷移 */
+    v86_active = 1;
+    v86_exit_request = 0;
+
+    kprintf(0xA1, "[V86] Booting FreeDOS(98) IPL...\n");
+
+    if (exec_setjmp(v86_test_jmpbuf) == 0) {
+        v86_enter(&ctx);
+    }
+
+    /* V86終了後の後始末 */
+    v86_active = 0;
+    v86_exit_request = 0;
+    v86_pending_irq = 0;
+    tss_set_esp0(saved_esp0);
+
+    /* ディスクイメージ解放 */
+    v86_disk_clear();
+    kfree(img_buf);
+
+    /* メモリ空間復元 */
+    v86_mem_teardown();
+
+    /* 画面リストア */
+    v86_restore_screen();
+
+    kprintf(0xA1, "[V86] FreeDOS(98) session ended.\n");
+    return 0;
+}
+
