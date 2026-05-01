@@ -25,6 +25,7 @@ extern serial_irq_handler
 extern tick_count
 extern fdc_irq_handler
 extern mouse_irq_handler
+extern v86_gp_handler
 
 section .text
 
@@ -56,11 +57,65 @@ isr_stub_%1:
 ISR_NOERR 0                    ;; #DE ゼロ除算
 ISR_NOERR 6                    ;; #UD 未定義命令
 ISR_ERR   8                    ;; #DF ダブルフォルト
-ISR_ERR   13                   ;; #GP 一般保護例外
 ;; #PF は専用スタブを使用 (下記 pf_stub)
 
 ;; ============================================================
-;; 例外共通ハンドラ
+;; #GP (例外13) 専用スタブ — V86モード判定付き
+;;
+;; V86モードからの#GPではCPUが自動的にセグメントレジスタを
+;; スタックにpushするため、スタックフレームが異なる:
+;;
+;; 通常: [error_code] [EIP] [CS] [EFLAGS]
+;; V86:  [error_code] [EIP] [CS] [EFLAGS] [ESP] [SS] [ES] [DS] [FS] [GS]
+;;
+;; EFLAGSのVMビット (bit 17) で判定する。
+;; ============================================================
+global isr_stub_13
+isr_stub_13:
+        cli
+        ;; CPUが自動pushしたエラーコードの上にEIP, CS, EFLAGSがある
+        ;; [ESP+0] = error_code
+        ;; [ESP+4] = EIP
+        ;; [ESP+8] = CS
+        ;; [ESP+12] = EFLAGS
+        test    dword [esp + 12], 0x020000   ;; EFLAGS.VM (bit 17) をテスト
+        jnz     .v86_gp                      ;; V86モードなら専用パスへ
+
+        ;; 通常の#GP処理 (従来と同じ)
+        push    13
+        jmp     isr_common
+
+.v86_gp:
+        ;; ============================================================
+        ;; V86モードからの#GP
+        ;;
+        ;; CPUが自動pushしたスタックフレーム (ESP低位→高位):
+        ;;   [error_code(4)] [EIP(4)] [CS(4)] [EFLAGS(4)]
+        ;;   [ESP(4)] [SS(4)] [ES(4)] [DS(4)] [FS(4)] [GS(4)]
+        ;;
+        ;; PUSHADで汎用レジスタも保存してからCハンドラに渡す。
+        ;; ============================================================
+        pushad                  ;; 汎用レジスタ保存 (32B)
+
+        ;; v86_gp_handler(u32 *regs)
+        ;; regs[0]=EDI .. regs[7]=EAX (PUSHAD)
+        ;; regs[8]=error_code
+        ;; regs[9]=EIP, regs[10]=CS, regs[11]=EFLAGS
+        ;; regs[12]=ESP, regs[13]=SS
+        ;; regs[14]=ES, regs[15]=DS, regs[16]=FS, regs[17]=GS
+        mov     eax, esp
+        push    eax
+        call    v86_gp_handler
+        add     esp, 4
+
+        ;; v86_gp_handler はレジスタ配列を書き換えて戻る
+        ;; (次に実行するV86命令のEIP等が更新済み)
+        popad
+        add     esp, 4          ;; error_code をスキップ
+        iretd                   ;; V86モードに復帰 (CPUがセグメントも自動復帰)
+
+;; ============================================================
+;; 例外共通ハンドラ (V86以外)
 ;; pushad後のスタック (低→高):
 ;;   [PUSHAD(32)] [vector(4)] [error_code(4)] [EIP(4)] [CS(4)] [EFLAGS(4)]
 ;;
