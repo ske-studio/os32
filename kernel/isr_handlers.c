@@ -15,6 +15,7 @@ extern volatile int exec_nest_level;
 extern void exec_fault_recover(void);
 
 #include "serial.h"
+#include "tvram.h"
 
 /* シリアルポートにもログを出力するためのヘルパー */
 static void sputs(const char *str)
@@ -37,9 +38,9 @@ static void sput_hex32(u32 val)
     serial_puts_polled(buf);
 }
 
-/* テキストVRAM直接アクセス (ベアメタル) */
-#define TVRAM_CHAR  ((volatile u16 *)0xA0000UL)
-#define TVRAM_ATTR  ((volatile u16 *)0xA2000UL)
+/* テキストVRAM直接アクセス (ベアメタル) — tvram.h のマクロを使用 */
+#define TVRAM_CHAR  ((volatile u16 *)TVRAM_BASE)
+#define TVRAM_ATRP  ((volatile u16 *)TVRAM_ATTR)
 
 /* ------------------------------------------------------------------------ */
 /*  tvram_puts_at — テキストVRAMに文字列を直接書き込み                     */
@@ -49,7 +50,7 @@ static void tvram_puts_at(int row, int col, const char *str, u8 attr)
     int pos = row * 80 + col;
     while (*str) {
         TVRAM_CHAR[pos] = (u16)(u8)*str;
-        TVRAM_ATTR[pos] = (u16)attr;
+        TVRAM_ATRP[pos] = (u16)attr;
         str++;
         pos++;
     }
@@ -69,6 +70,113 @@ static void tvram_put_hex32(int row, int col, u32 val, u8 attr)
     }
     buf[8] = '\0';
     tvram_puts_at(row, col, buf, attr);
+}
+
+/* ====================================================================== */
+/*  例外ダンプ共通ヘルパー (exception_handler / page_fault_handler 共用) */
+/* ====================================================================== */
+
+/* レジスタダンプ (PUSHAD保存順序: EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX) */
+static void exc_dump_regs(int row, u32 *regs)
+{
+    tvram_puts_at(row, 0, " EAX=", 0xC1);
+    tvram_put_hex32(row, 5, regs[7], 0xC1);
+    tvram_puts_at(row, 14, " EBX=", 0xC1);
+    tvram_put_hex32(row, 19, regs[4], 0xC1);
+    tvram_puts_at(row, 28, " ECX=", 0xC1);
+    tvram_put_hex32(row, 33, regs[6], 0xC1);
+
+    tvram_puts_at(row+1, 0, " EDX=", 0xC1);
+    tvram_put_hex32(row+1, 5, regs[5], 0xC1);
+    tvram_puts_at(row+1, 14, " ESI=", 0xC1);
+    tvram_put_hex32(row+1, 19, regs[1], 0xC1);
+    tvram_puts_at(row+1, 28, " EDI=", 0xC1);
+    tvram_put_hex32(row+1, 33, regs[0], 0xC1);
+
+    tvram_puts_at(row+2, 0, " EBP=", 0xC1);
+    tvram_put_hex32(row+2, 5, regs[2], 0xC1);
+    tvram_puts_at(row+2, 14, " ESP=", 0xC1);
+    tvram_put_hex32(row+2, 19, regs[3], 0xC1);
+}
+
+/* レジスタダンプ (シリアル出力付き) */
+static void exc_dump_regs_serial(int row, u32 *regs)
+{
+    exc_dump_regs(row, regs);
+    sputs("EAX="); sput_hex32(regs[7]);
+    sputs(" EBX="); sput_hex32(regs[4]);
+    sputs(" ECX="); sput_hex32(regs[6]); sputs("\n");
+    sputs("EDX="); sput_hex32(regs[5]);
+    sputs(" ESI="); sput_hex32(regs[1]);
+    sputs(" EDI="); sput_hex32(regs[0]); sputs("\n");
+    sputs("EBP="); sput_hex32(regs[2]);
+    sputs(" ESP="); sput_hex32(regs[3]); sputs("\n");
+}
+
+/* EBPチェーンによるスタックトレース (最大8フレーム) */
+static void exc_dump_stack_trace(int row, u32 *regs, int max_row, int serial)
+{
+    u32 ebp = regs[2];
+    int frame;
+    int tr = row + 1;
+
+    tvram_puts_at(row, 0, "---- Stack Trace ----", 0xE1);
+    if (serial) sputs("---- Stack Trace ----\n");
+
+    for (frame = 0; frame < 8 && tr < max_row; frame++) {
+        u32 ret_addr;
+        u32 prev_ebp;
+        if (ebp < 0x90000 || ebp >= 0xF00000) break;
+        if (!paging_is_present(ebp) ||
+            !paging_is_present(ebp + 4)) break;
+        prev_ebp = *(u32 *)ebp;
+        ret_addr = *(u32 *)(ebp + 4);
+        tvram_puts_at(tr, 0, " #", 0xA1);
+        tvram_put_hex32(tr, 2, (u32)frame, 0xA1);
+        tvram_puts_at(tr, 10, " ret=", 0xA1);
+        tvram_put_hex32(tr, 15, ret_addr, 0xA1);
+        tvram_puts_at(tr, 26, " ebp=", 0xA1);
+        tvram_put_hex32(tr, 31, prev_ebp, 0xA1);
+        if (serial) {
+            sputs("#"); sput_hex32((u32)frame);
+            sputs(" ret="); sput_hex32(ret_addr);
+            sputs(" ebp="); sput_hex32(prev_ebp); sputs("\n");
+        }
+        tr++;
+        ebp = prev_ebp;
+    }
+}
+
+/* ESPからのスタックダンプ */
+static void exc_dump_stack(int row, u32 *regs, int max_row, int serial)
+{
+    u32 esp = regs[3];
+    int wi;
+    int dr = row;
+
+    tvram_puts_at(dr, 0, "---- Stack Dump (ESP) ----", 0xE1);
+    if (serial) sputs("---- Stack Dump (ESP) ----\n");
+    dr++;
+
+    for (wi = 0; wi < 8 && dr < max_row; wi += 2) {
+        u32 addr0 = esp + (u32)wi * 4;
+        u32 addr1 = esp + (u32)(wi + 1) * 4;
+        if (paging_is_present(addr0)) {
+            tvram_put_hex32(dr, 0, addr0, 0x07);
+            tvram_puts_at(dr, 9, ":", 0x07);
+            tvram_put_hex32(dr, 10, *(u32 *)addr0, 0xE1);
+            if (serial) { sput_hex32(addr0); sputs(":"); sput_hex32(*(u32 *)addr0); }
+        }
+        if (paging_is_present(addr1)) {
+            tvram_puts_at(dr, 19, " ", 0x07);
+            tvram_put_hex32(dr, 20, addr1, 0x07);
+            tvram_puts_at(dr, 29, ":", 0x07);
+            tvram_put_hex32(dr, 30, *(u32 *)addr1, 0xE1);
+            if (serial) { sputs("  "); sput_hex32(addr1); sputs(":"); sput_hex32(*(u32 *)addr1); }
+        }
+        if (serial) sputs("\n");
+        dr++;
+    }
 }
 
 /* ======================================================================== */
@@ -143,75 +251,14 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
         }
     }
 
-    /* レジスタダンプ (PUSHADの保存順序: EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX) */
-    tvram_puts_at(row+4, 0, " EAX=", 0xC1);
-    tvram_put_hex32(row+4, 5, regs[7], 0xC1);
-    tvram_puts_at(row+4, 14, " EBX=", 0xC1);
-    tvram_put_hex32(row+4, 19, regs[4], 0xC1);
-    tvram_puts_at(row+4, 28, " ECX=", 0xC1);
-    tvram_put_hex32(row+4, 33, regs[6], 0xC1);
+    /* レジスタダンプ */
+    exc_dump_regs(row+4, regs);
 
-    tvram_puts_at(row+5, 0, " EDX=", 0xC1);
-    tvram_put_hex32(row+5, 5, regs[5], 0xC1);
-    tvram_puts_at(row+5, 14, " ESI=", 0xC1);
-    tvram_put_hex32(row+5, 19, regs[1], 0xC1);
-    tvram_puts_at(row+5, 28, " EDI=", 0xC1);
-    tvram_put_hex32(row+5, 33, regs[0], 0xC1);
+    /* スタックトレース */
+    exc_dump_stack_trace(row+7, regs, 20, 0);
 
-    tvram_puts_at(row+6, 0, " EBP=", 0xC1);
-    tvram_put_hex32(row+6, 5, regs[2], 0xC1);
-    tvram_puts_at(row+6, 14, " ESP=", 0xC1);
-    tvram_put_hex32(row+6, 19, regs[3], 0xC1);
-
-    /* EBPチェーンによるスタックトレース (最大8フレーム) */
-    tvram_puts_at(row+7, 0, "---- Stack Trace ----", 0xE1);
-    {
-        u32 ebp = regs[2];
-        int frame;
-        int tr = row + 8;
-        for (frame = 0; frame < 8 && tr < 20; frame++) {
-            u32 ret_addr;
-            u32 prev_ebp;
-            if (ebp < 0x90000 || ebp >= 0xF00000) break;
-            if (!paging_is_present(ebp) ||
-                !paging_is_present(ebp + 4)) break;
-            prev_ebp = *(u32 *)ebp;
-            ret_addr = *(u32 *)(ebp + 4);
-            tvram_puts_at(tr, 0, " #", 0xA1);
-            tvram_put_hex32(tr, 2, (u32)frame, 0xA1);
-            tvram_puts_at(tr, 10, " ret=0x", 0xA1);
-            tvram_put_hex32(tr, 17, ret_addr, 0xA1);
-            tvram_puts_at(tr, 26, " ebp=0x", 0xA1);
-            tvram_put_hex32(tr, 33, prev_ebp, 0xA1);
-            tr++;
-            ebp = prev_ebp;
-        }
-    }
-
-    /* ESPからのスタックダンプ */
-    {
-        int dr = 20;
-        u32 esp = regs[3];
-        int wi;
-        tvram_puts_at(dr, 0, "---- Stack Dump (ESP) ----", 0xE1);
-        dr++;
-        for (wi = 0; wi < 8 && dr < 25; wi += 2) {
-            u32 addr0 = esp + (u32)wi * 4;
-            u32 addr1 = esp + (u32)(wi + 1) * 4;
-            if (paging_is_present(addr0)) {
-                tvram_put_hex32(dr, 0, addr0, 0x07);
-                tvram_puts_at(dr, 9, ":", 0x07);
-                tvram_put_hex32(dr, 10, *(u32 *)addr0, 0xE1);
-            }
-            if (paging_is_present(addr1)) {
-                tvram_puts_at(dr, 19, " ", 0x07);
-                tvram_put_hex32(dr, 20, addr1, 0x07);
-                tvram_puts_at(dr, 29, ":", 0x07);
-                tvram_put_hex32(dr, 30, *(u32 *)addr1, 0xE1);
-            }
-            dr++;
-        }
-    }
+    /* スタックダンプ */
+    exc_dump_stack(20, regs, 25, 0);
 
     /* exec実行中なら復帰、それ以外はシステム停止 */
     if (exec_nest_level > 0) {
@@ -299,101 +346,14 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         sputs("Not-Present\n");
     }
 
-    /* レジスタダンプ (PUSHADの保存順序: EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX) */
-    tvram_puts_at(row+4, 0, " EAX=", 0xC1);
-    tvram_put_hex32(row+4, 5, regs[7], 0xC1);
-    sputs("EAX="); sput_hex32(regs[7]);
-    
-    tvram_puts_at(row+4, 14, " EBX=", 0xC1);
-    tvram_put_hex32(row+4, 19, regs[4], 0xC1);
-    sputs(" EBX="); sput_hex32(regs[4]);
-    
-    tvram_puts_at(row+4, 28, " ECX=", 0xC1);
-    tvram_put_hex32(row+4, 33, regs[6], 0xC1);
-    sputs(" ECX="); sput_hex32(regs[6]); sputs("\n");
+    /* レジスタダンプ */
+    exc_dump_regs_serial(row+4, regs);
 
-    tvram_puts_at(row+5, 0, " EDX=", 0xC1);
-    tvram_put_hex32(row+5, 5, regs[5], 0xC1);
-    sputs("EDX="); sput_hex32(regs[5]);
-    
-    tvram_puts_at(row+5, 14, " ESI=", 0xC1);
-    tvram_put_hex32(row+5, 19, regs[1], 0xC1);
-    sputs(" ESI="); sput_hex32(regs[1]);
-    
-    tvram_puts_at(row+5, 28, " EDI=", 0xC1);
-    tvram_put_hex32(row+5, 33, regs[0], 0xC1);
-    sputs(" EDI="); sput_hex32(regs[0]); sputs("\n");
+    /* スタックトレース */
+    exc_dump_stack_trace(row+7, regs, 24, 1);
 
-    tvram_puts_at(row+6, 0, " EBP=", 0xC1);
-    tvram_put_hex32(row+6, 5, regs[2], 0xC1);
-    sputs("EBP="); sput_hex32(regs[2]);
-    
-    tvram_puts_at(row+6, 14, " ESP=", 0xC1);
-    tvram_put_hex32(row+6, 19, regs[3], 0xC1);
-    sputs(" ESP="); sput_hex32(regs[3]); sputs("\n");
-
-    /* EBPチェーンによるスタックトレース (最大8フレーム) */
-    tvram_puts_at(row+7, 0, "---- Stack Trace ----", 0xE1);
-    sputs("---- Stack Trace ----\n");
-    {
-        u32 ebp = regs[2]; /* 保存された EBP */
-        int frame;
-        int tr = row + 8;
-        for (frame = 0; frame < 8 && tr < 24; frame++) {
-            u32 ret_addr;
-            u32 prev_ebp;
-            /* EBPが有効なアドレスか安全チェック */
-            if (ebp < 0x90000 || ebp >= 0xF00000) break;
-            if (!paging_is_present(ebp) ||
-                !paging_is_present(ebp + 4)) break;
-            prev_ebp = *(u32 *)ebp;
-            ret_addr = *(u32 *)(ebp + 4);
-            tvram_puts_at(tr, 0, " #", 0xA1);
-            tvram_put_hex32(tr, 2, (u32)frame, 0xA1);
-            tvram_puts_at(tr, 10, " ret=", 0xA1);
-            tvram_put_hex32(tr, 15, ret_addr, 0xA1);
-            tvram_puts_at(tr, 26, " ebp=", 0xA1);
-            tvram_put_hex32(tr, 31, prev_ebp, 0xA1);
-            
-            sputs("#"); sput_hex32((u32)frame);
-            sputs(" ret="); sput_hex32(ret_addr);
-            sputs(" ebp="); sput_hex32(prev_ebp); sputs("\n");
-            
-            tr++;
-            ebp = prev_ebp;
-        }
-    }
-
-    /* スタック先頭付近のメモリダンプ (16ワード) */
-    {
-        int dr = row + 15;
-        u32 esp = regs[3];
-        int wi;
-        tvram_puts_at(dr, 0, "---- Stack Dump (ESP) ----", 0xE1);
-        sputs("---- Stack Dump (ESP) ----\n");
-        dr++;
-        for (wi = 0; wi < 8 && dr < 21; wi += 2) {
-            u32 addr0 = esp + (u32)wi * 4;
-            u32 addr1 = esp + (u32)(wi + 1) * 4;
-            if (paging_is_present(addr0)) {
-                tvram_put_hex32(dr, 0, addr0, 0x07);
-                tvram_puts_at(dr, 9, ":", 0x07);
-                tvram_put_hex32(dr, 10, *(u32 *)addr0, 0xE1);
-                
-                sput_hex32(addr0); sputs(":"); sput_hex32(*(u32 *)addr0);
-            }
-            if (paging_is_present(addr1)) {
-                tvram_puts_at(dr, 19, " ", 0x07);
-                tvram_put_hex32(dr, 20, addr1, 0x07);
-                tvram_puts_at(dr, 29, ":", 0x07);
-                tvram_put_hex32(dr, 30, *(u32 *)addr1, 0xE1);
-                
-                sputs("  "); sput_hex32(addr1); sputs(":"); sput_hex32(*(u32 *)addr1);
-            }
-            sputs("\n");
-            dr++;
-        }
-    }
+    /* スタックダンプ */
+    exc_dump_stack(row+15, regs, 21, 1);
 
     /* exec実行中なら復帰、それ以外はシステム停止 */
     if (exec_nest_level > 0) {
