@@ -62,8 +62,10 @@ static const struct bda_entry bda_defaults[] = {
 };
 
 /* IVTダミーハンドラ (IRET命令のみ) — バッキングRAM内に配置 */
-/* 配置先: 0x600 (BDA直後、DOSフリーエリアの先頭) */
-#define IVT_HANDLER_BASE   0x0600
+/* 配置先: 0x500 (BDA直後、IPL/DOSフリーエリア (0x600) の手前) 
+ * 注意: 以前は0x600に配置していたが、IPLが0x0060:0x0000 (リニア0x600) に
+ * ロードされるためIPLコードで上書きされてしまっていた。 */
+#define IVT_HANDLER_BASE   0x0500
 
 /* ======================================================================== */
 /*  v86_mem_setup — V86メモリ空間を構築                                     */
@@ -87,9 +89,19 @@ void v86_mem_setup(void)
 
     /* ================================================================== */
     /*  1. バッキングRAMをゼロクリア (640KB)                               */
+    /*  ※ シェル帯域 (0x300000-0x3FFFFF) にはガードページ(NOT PRESENT)が  */
+    /*  含まれるため、ゼロクリア前に全ページをPRESENT+RWに変更する。       */
     /* ================================================================== */
+    {
+        u32 pa;
+        for (pa = V86_BACKING_PHYS; pa < V86_BACKING_PHYS + V86_BACKING_SIZE; pa += PAGE_SIZE) {
+            paging_set_page(pa, pa, PAGE_RW);
+        }
+    }
     backing = (u8 *)V86_BACKING_PHYS;
     kmemset(backing, 0, V86_BACKING_SIZE);
+
+
 
     /* ================================================================== */
     /*  2. IVT構築                                                        */
@@ -119,8 +131,10 @@ void v86_mem_setup(void)
         backing[bda_defaults[i].offset] = bda_defaults[i].value;
     }
 
-    /* メモリサイズ: 640KB (0000:0413h = WORD, 単位KB) */
-    /* INT 12h がこの値を返す */
+    /* メモリサイズ: 640KB (0000:0413h = WORD, 単位KB)
+     * PC-98の公式BDAにはこのフィールドは存在しない (PC/ATの慣習)。
+     * PC-98の正式なメモリサイズは BDA 0501h bit2-0 で管理される。
+     * ただし FreeDOS(98) が INT 12h 経由で参照するため設定する。 */
     backing[0x0413] = (640) & 0xFF;
     backing[0x0414] = (640 >> 8) & 0xFF;
 
@@ -128,6 +142,19 @@ void v86_mem_setup(void)
     /* 055Ch bit 0 = 1MB FDD UNIT#0 接続 */
     backing[0x055C] = 0x01;
     backing[0x055D] = 0x00;
+
+    /* キーボードバッファ初期化 (NP21/W bios09.c 準拠)
+     * 0x0524 = HEAD (WORD) = 0x0502
+     * 0x0526 = TAIL (WORD) = 0x0502
+     * 0x0528 = COUNT (BYTE) = 0 */
+    backing[0x0524] = 0x02; backing[0x0525] = 0x05;
+    backing[0x0526] = 0x02; backing[0x0527] = 0x05;
+    backing[0x0528] = 0x00;
+
+    /* ブートデバイス情報 (0000:0584h): CPU_TYPE/DA/UA */
+    /* FreeDOS IPL は BDA[0x584] をINT 1BhのALレジスタ (DA/UA) として使用する */
+    /* 0x90 = 1MB FDD UNIT#0 (DA=0x90, UA=0x00) */
+    backing[0x0584] = 0x90;
 
     /* BIOS_FLAG (0000:0501h):
      *   bit 7   = 0 (5/10MHzクロック)
@@ -138,6 +165,70 @@ void v86_mem_setup(void)
      *   bit 2-0 = 100b (640KB) */
     backing[0x0501] = 0x24;
 
+    /* CRT_STS_FLAG (0000:053Ch):
+     *   bit 4 = 1 (16色モード)
+     *   bit 1 = 1 (GRCG搭載)
+     *   bit 0 = 0 (CRT接続あり)
+     * FreeDOS(98) int29dc.c がこのフラグを参照して画面出力処理を分岐する */
+    backing[0x053C] = 0x12;
+
+    /* BIOS_FLAG5 (0000:0458h):
+     *   bit 7 = 0 (非NESAアーキテクチャ)
+     *   bit 0 = 0 (WAIT機能なし)
+     * FreeDOS(98) init_oem が参照 */
+    backing[0x0458] = 0x00;
+
+    /* SCSI HD接続状態 (0000:0482h):
+     *   0x00 = SCSI HDDなし
+     * FreeDOS(98) dsk_init が参照 */
+    backing[0x0482] = 0x00;
+
+    /* SASI/IDE HDD接続情報 (0000:055Dh):
+     *   0x00 = SASI/IDE HDDなし
+     * FreeDOS(98) dsk_init が参照 */
+    backing[0x055D] = 0x00;
+
+    /* ブートパーティション スクラッチパッド (0000:03FEh):
+     *   FreeDOS(98) dsk_init が参照 */
+    backing[0x03FE] = 0x00;
+    backing[0x03FF] = 0x00;
+
+    /* SCSI パラメータテーブル (0000:0460-047Fh):
+     *   ゼロクリア済み (バッキングRAM全体がゼロクリア)
+     *   FreeDOS(98) int29dc.c がタイマ関連として参照する場合あり */
+
+    /* コンベンショナルメモリサイズ (0000:05AEh):
+     *   0xA0 = 640KB (0xA0 * 4 = 640)
+     *   PC-98の正式なメモリサイズフィールド */
+    backing[0x05AE] = 0xA0;
+
+    /* TVRAM メモリスイッチ (0xA000:3FE2-3FF7) の初期化
+     * FreeDOS(98) init_crt が 0xA000:3FE2-3FF7 を読み取り、
+     * セグメント 0x0060 の作業領域にコピーする。
+     * 値が全て0だとコンソール出力 (_int29_main) が異常動作する。
+     *
+     * MEMSW1 (3FE2): bit6=25行, bit3=RS232C割り込み
+     * MEMSW2 (3FE4): 各種設定
+     * MEMSW3 (3FE6): bit7=ディップスイッチ=ON (拡張メモリ), bit2-0=CRT周波数
+     * MEMSW4 (3FE8): 予約
+     * MEMSW5 (3FEA): 予約
+     * MEMSW6 (3FEC): 予約
+     *
+     * 注意: PC-98のTVRAMメモリスイッチは WORD単位 (偶数アドレスに1バイト) */
+    {
+        volatile u16 *tvram16 = (volatile u16 *)0xA0000UL;
+        /* MEMSW1: 0x48 = bit6(25行モード) | bit3(RS232C) */
+        tvram16[0x3FE2 / 2] = 0x48;
+        /* MEMSW2: 0x01 = 10MHzクロック系 */
+        tvram16[0x3FE4 / 2] = 0x01;
+        /* MEMSW3: 0x04 = bit2(31kHz CRT) */
+        tvram16[0x3FE6 / 2] = 0x04;
+        /* MEMSW4-6: 0 */
+        tvram16[0x3FE8 / 2] = 0x00;
+        tvram16[0x3FEA / 2] = 0x00;
+        tvram16[0x3FEC / 2] = 0x00;
+    }
+
     /* ================================================================== */
     /*  4. ページテーブル設定                                              */
     /*                                                                      */
@@ -146,10 +237,51 @@ void v86_mem_setup(void)
     /* ================================================================== */
 
     /* 仮想 0x00000-0x8EFFF → 物理 0x300000-0x38EFFF (バッキングRAM, R/W) */
-    /* 注意: 0x8F000以降はカーネルスタック領域のためリマップしない */
     for (virt = 0x00000; virt < V86_REMAP_END; virt += PAGE_SIZE) {
         phys = V86_BACKING_PHYS + virt;
         paging_set_page(virt, phys, PTE_PRESENT | PTE_RW | PTE_USER);
+    }
+
+    /* 仮想 0x8F000-0x9FFFF → 物理 0x38F000-0x39FFFF (バッキングRAM) にリマップ */
+    /* カーネルスタック (0x90000-0x9FFFF) をV86タスクから分離する。             */
+    /*                                                                          */
+    /* 手順:                                                                    */
+    /*   1. 物理 0x8F000-0x9FFFF の内容を物理 0x38F000-0x39FFFF にコピー       */
+    /*      (この時点では両方アイデンティティマッピング済み)                    */
+    /*   2. 仮想 0x8F000-0x9FFFF を物理 0x38F000-0x39FFFF にリマップ           */
+    /*      → カーネル (Ring 0) はコピーされたスタックデータを継続使用         */
+    /*      → V86 (Ring 3) は物理スタックではなくバッキングRAMにアクセス       */
+    /*                                                                          */
+    /* teardown時はリマップを維持しPTE_USERのみ除去する (方法C)。               */
+    /* 物理 0x38F000-0x39FFFF はシェル帯域の未使用領域のため安全。              */
+    /*                                                                          */
+    /* 割り込み安全性: コピーとリマップの間にスタック変更が入らないようCLI保護。 */
+    {
+        u32 eflags;
+        __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
+        __asm__ volatile("cli");
+
+        /* コピー元 0x8F000 はスタックガードページ (NOT PRESENT) のため、
+         * コピー前にアイデンティティマッピングで一時的にPRESENTにする */
+        for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
+            paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
+        }
+
+        /* スタック内容をバッキングRAMにコピー (68KB: 0x11000) */
+        kmemcpy((u8 *)(V86_BACKING_PHYS + 0x8F000UL),
+                (u8 *)0x8F000UL,
+                0x11000UL);
+
+        /* リマップ: 仮想 0x8F000-0x9FFFF → 物理 0x38F000-0x39FFFF */
+        for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
+            paging_set_page(addr, V86_BACKING_PHYS + addr,
+                            PTE_PRESENT | PTE_RW | PTE_USER);
+        }
+
+        /* 割り込み復元 */
+        if (eflags & 0x200) {
+            __asm__ volatile("sti");
+        }
     }
 
     /* 仮想 0xA0000-0xA3FFF → 物理 0xA0000 (TVRAM, R/W) */
@@ -167,9 +299,9 @@ void v86_mem_setup(void)
         paging_set_page(addr, addr, PTE_PRESENT | PTE_RW | PTE_USER);
     }
 
-    /* 仮想 0xC0000-0xDFFFF → NOT PRESENT (トラップ) */
+    /* 仮想 0xC0000-0xDFFFF → 物理 0xC0000 (拡張ROM BIOS, R/O) */
     for (addr = 0xC0000; addr < 0xE0000; addr += PAGE_SIZE) {
-        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
+        paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
     }
 
     /* 仮想 0xE0000-0xE7FFF → 物理 0xE0000 (GVRAM Plane3, R/W) */
@@ -177,9 +309,9 @@ void v86_mem_setup(void)
         paging_set_page(addr, addr, PTE_PRESENT | PTE_RW | PTE_USER);
     }
 
-    /* 仮想 0xE8000-0xEFFFF → NOT PRESENT (バンクメモリ, トラップ) */
+    /* 仮想 0xE8000-0xEFFFF → 物理 0xE8000 (拡張ROM/バンクメモリ, R/O) */
     for (addr = 0xE8000; addr < 0xF0000; addr += PAGE_SIZE) {
-        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
+        paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
     }
 
     /* 仮想 0xF0000-0xFFFFF → 物理 0xF0000 (BIOS ROM, R/O) */
@@ -193,9 +325,10 @@ void v86_mem_setup(void)
     /* ================================================================== */
     /*  5. I/Oビットマップ設定                                            */
     /*                                                                      */
-    /*  implementation_plan.md §4 に基づく。                               */
     /*  デフォルトは全トラップ (tss_init で設定済み)。                      */
-    /*  許可ポートのみビットを0にする。                                    */
+    /*  安全なポートのみパススルー許可。                                    */
+    /*  PIC (00h,02h,08h,0Ah) / PIT (71h,73h,75h,77h) /                   */
+    /*  FDC (BE/CC/CA) は仮想化のためトラップのまま。                      */
     /* ================================================================== */
 
     /* キーボード 8251 */
@@ -210,7 +343,7 @@ void v86_mem_setup(void)
     tss_iomap_allow(0x68);
     tss_iomap_allow(0x6A);
 
-    /* CRTC (70h-7Ah 偶数) */
+    /* CRTC (70h-7Ah 偶数) — 注意: PIT (71h,73h,75h,77h) はトラップ維持 */
     tss_iomap_allow(0x70);
     tss_iomap_allow(0x72);
     tss_iomap_allow(0x74);
@@ -224,14 +357,14 @@ void v86_mem_setup(void)
 
     /* グラフィックGDC + パレット (A0h-AEh 偶数) */
     tss_iomap_allow(0xA0);
-    tss_iomap_allow(0xA1);  /* KCGコード第2バイト */
+    tss_iomap_allow(0xA1);
     tss_iomap_allow(0xA2);
-    tss_iomap_allow(0xA3);  /* KCGコード第1バイト */
+    tss_iomap_allow(0xA3);
     tss_iomap_allow(0xA4);
-    tss_iomap_allow(0xA5);  /* KCGパターン読出し位置 */
+    tss_iomap_allow(0xA5);
     tss_iomap_allow(0xA6);
     tss_iomap_allow(0xA8);
-    tss_iomap_allow(0xA9);  /* KCGパターンR/W */
+    tss_iomap_allow(0xA9);
     tss_iomap_allow(0xAA);
     tss_iomap_allow(0xAC);
     tss_iomap_allow(0xAE);
@@ -244,6 +377,11 @@ void v86_mem_setup(void)
     tss_iomap_allow(0x018A);
     tss_iomap_allow(0x018C);
     tss_iomap_allow(0x018E);
+
+    /* カレンダBIOS用ポート (20h) */
+    tss_iomap_allow(0x20);
+
+    /* シリアルポート (30h-35h) はOS32が使用するためトラップのまま */
 }
 
 /* ======================================================================== */
@@ -259,6 +397,13 @@ void v86_mem_teardown(void)
     /* (カーネルページングの初期状態: アイデンティティマッピング) */
     for (addr = 0x00000; addr < V86_REMAP_END; addr += PAGE_SIZE) {
         paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
+    }
+
+    /* 仮想 0x8F000-0x9FFFF: リマップは維持、PTE_USER のみ除去 (方法C)      */
+    /* 物理 0x38F000-0x39FFFF にコピーしたスタックデータをそのまま使い続ける。*/
+    /* アイデンティティマッピングには戻さない (逆コピー不可のため)。         */
+    for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
+        paging_set_page(addr, V86_BACKING_PHYS + addr, PTE_PRESENT | PTE_RW);
     }
 
     /* CGウィンドウをR/Wに戻す */
@@ -292,6 +437,18 @@ void v86_mem_teardown(void)
 
     /* NULL保護ページを復元 */
     paging_set_page(0x00000, 0, PAGE_NOT_PRESENT);
+
+    /* シェル帯域ガードページを復元                                        */
+    /* ※ 0x38F000-0x39FFFF はカーネルスタックのリマップ先として使用中の     */
+    /*   ためNOT PRESENTにしない。0x380000-0x38EFFF と 0x3A0000 以降のみ。 */
+    paging_set_page(MEM_SHELL_GUARD, 0, PAGE_NOT_PRESENT);
+    for (addr = 0x380000UL; addr < 0x38F000UL; addr += PAGE_SIZE) {
+        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
+    }
+    /* 0x38F000-0x39FFFF はスキップ (カーネルスタック用) */
+    for (addr = 0x3A0000UL; addr <= MEM_SHELL_BAND_END; addr += PAGE_SIZE) {
+        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
+    }
 }
 
 /* ======================================================================== */
@@ -302,14 +459,17 @@ void v86_mem_teardown(void)
 /*                                                                          */
 /*  0x00000-0x9FFFF → 物理 0x300000 + offset  (バッキングRAM)             */
 /*  0xA0000-0xFFFFF → 物理 = 仮想  (実機ハードウェア)                     */
+/*                                                                          */
+/*  ※ 方法Cリマップ対応: 0x8F000-0x9FFFF もバッキングRAM (0x38F000+) に   */
+/*    リマップされているため、0xA0000 未満を全てバッキングRAM経由にする。   */
 /* ======================================================================== */
 u8 *v86_phys_addr(u32 seg, u32 off)
 {
     u32 linear = (seg << 4) + off;
     linear &= 0xFFFFF;  /* 1MB境界でラップ */
 
-    /* バッキングRAMが有効で、リマップ範囲内の場合のみオフセット変換 */
-    if (v86_backing_enabled && linear < V86_REMAP_END) {
+    /* バッキングRAMが有効で、コンベンショナルメモリ (0-9FFFF) はバッキングRAM */
+    if (v86_backing_enabled && linear < 0xA0000UL) {
         return (u8 *)(V86_BACKING_PHYS + linear);
     }
     return (u8 *)linear;

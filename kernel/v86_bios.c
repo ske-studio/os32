@@ -23,6 +23,17 @@
 #include "v86_mem.h"
 #include "io.h"
 #include "rtc.h"
+#include "kbd.h"
+
+extern void serial_puts(const char *s);
+static void serial_hex8(u8 val) {
+    char buf[3];
+    const char *hex = "0123456789ABCDEF";
+    buf[0] = hex[val >> 4];
+    buf[1] = hex[val & 0xF];
+    buf[2] = '\0';
+    serial_puts(buf);
+}
 
 /* ====================================================================== */
 /*  テキストVRAMアドレス定数 (ノーマルモード)                               */
@@ -38,6 +49,27 @@ static u16 v86_cursor_x = 0;
 static u16 v86_cursor_y = 0;
 
 /* ====================================================================== */
+/*  ヘルパー: TVRAM 1行スクロールアップ                                    */
+/* ====================================================================== */
+static void tvram_scroll_up(void)
+{
+    volatile u16 *char_area = (volatile u16 *)TVRAM_CHAR_BASE;
+    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR_BASE;
+    int i;
+
+    /* 行1〜24 を 行0〜23 にコピー */
+    for (i = 0; i < TVRAM_COLS * (TVRAM_ROWS - 1); i++) {
+        char_area[i] = char_area[i + TVRAM_COLS];
+        attr_area[i] = attr_area[i + TVRAM_COLS];
+    }
+    /* 最下行をクリア */
+    for (i = TVRAM_COLS * (TVRAM_ROWS - 1); i < TVRAM_COLS * TVRAM_ROWS; i++) {
+        char_area[i] = 0x0020;  /* スペース */
+        attr_area[i] = 0x00E1;  /* 白色 */
+    }
+}
+
+/* ====================================================================== */
 /*  ヘルパー: TVRAMに1文字書き込み (カーソル位置)                          */
 /* ====================================================================== */
 static void tvram_putchar(u8 ch, u8 attr)
@@ -51,7 +83,7 @@ static void tvram_putchar(u8 ch, u8 attr)
         v86_cursor_y++;
     }
     if (v86_cursor_y >= TVRAM_ROWS) {
-        /* スクロールは未実装 — 最下行で折り返す */
+        tvram_scroll_up();
         v86_cursor_y = TVRAM_ROWS - 1;
     }
 
@@ -98,6 +130,79 @@ int v86_bios_int18(u32 *regs)
     u8 ah = (u8)((regs[V86_REG_EAX] >> 8) & 0xFF);
 
     switch (ah) {
+    /* ================================================================ */
+    /*  AH=00h: キーボード入力 (ブロッキング)                           */
+    /*  キーがあればバッファから取得して返す。                           */
+    /*  キーがなければ STI + HLT でIRQ到着を待ってから、               */
+    /*  INT命令を再実行させる (return -2 → EIP加算スキップ)。          */
+    /*  GPハンドラはIF=0で動作するため、明示的にSTIしないと             */
+    /*  キーボードIRQ (IRQ1) が配信されない。                           */
+    /* ================================================================ */
+    case 0x00: {
+        int key = kbd_trygetkey();
+        if (key >= 0) {
+            /* キーデータ: 上位=スキャンコード, 下位=ASCII */
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL)
+                               | ((u32)key & 0xFFFF);
+        } else {
+            /* バッファ空: INT再実行 (DOSはBDAバッファを直接ポーリング) */
+            return -2;
+        }
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=01h: キーバッファ状態の取得 (ノンブロッキング)               */
+    /*  出力: BH=01h (データあり) / BH=00h (バッファ空)                 */
+    /*         AX=先頭キーデータ (BH=01の場合、消費しない=peek)         */
+    /* ================================================================ */
+    case 0x01: {
+        int key = kbd_peekkey(); /* peek: 消費しない */
+        if (key >= 0) {
+            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL)
+                               | ((u32)key & 0xFFFF);
+            regs[V86_REG_EBX] = (regs[V86_REG_EBX] & 0xFFFF00FFUL)
+                               | 0x0100;
+        } else {
+            regs[V86_REG_EBX] = (regs[V86_REG_EBX] & 0xFFFF00FFUL);
+        }
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=02h: シフトキー状態の検査                                    */
+    /*  出力: AL = シフト状態 (OS32 kbd_shift_state)                     */
+    /* ================================================================ */
+    case 0x02:
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
+                           | (u32)kbd_shift_state;
+        break;
+
+    /* ================================================================ */
+    /*  AH=03h: キーボードインターフェースの初期化                      */
+    /*  キーバッファをクリアしてインターフェースをリセットする           */
+    /* ================================================================ */
+    case 0x03:
+        /* ack のみ (V86では物理キーボードハードウェアは操作しない) */
+        break;
+
+    /* ================================================================ */
+    /*  AH=04h: キー入力状態の取得                                      */
+    /*  入力: AL = キーコードグループ番号                               */
+    /*  出力: AH = 0 (どのキーも押されていない)                        */
+    /* ================================================================ */
+    case 0x04:
+        regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
+        break;
+
+    /* ================================================================ */
+    /*  AH=05h: キーバッファからのキーコードの取得 (ノンブロッキング)   */
+    /*  出力: BX=0000h (データ無効=バッファ空)                         */
+    /* ================================================================ */
+    case 0x05:
+        regs[V86_REG_EBX] = regs[V86_REG_EBX] & 0xFFFF0000UL;
+        break;
+
     /* ================================================================ */
     /*  AH=0Ah: テキスト画面モードの設定                                */
     /*  入力: AL = モードコード                                        */
@@ -189,11 +294,142 @@ int v86_bios_int18(u32 *regs)
         break;
 
     /* ================================================================ */
+    /*  AH=0Eh: ファンクションキーライン表示制御                        */
+    /*  入力: AL = 1(表示), 0(非表示)                                  */
+    /*  Phase 2: ack のみ (OS32はファンクションキーラインを持たない)    */
+    /* ================================================================ */
+    case 0x0E:
+        break;
+
+    /* ================================================================ */
+    /*  AH=14h: テキストVRAMに1文字書き込み                             */
+    /*  入力: DH = 行, DL = 桁, AL = 文字コード                       */
+    /*  PC-98 CRT BIOSの基本的な文字出力関数                           */
+    /* ================================================================ */
+    case 0x14: {
+        u8 row = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+        u8 col = (u8)(regs[V86_REG_EDX] & 0xFF);
+        u8 ch = (u8)(regs[V86_REG_EAX] & 0xFF);
+        u32 offset;
+        volatile u16 *char_ptr;
+        volatile u16 *attr_ptr;
+
+        if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
+        if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
+        offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
+        char_ptr = (volatile u16 *)(TVRAM_CHAR_BASE + offset);
+        attr_ptr = (volatile u16 *)(TVRAM_ATTR_BASE + offset);
+        *char_ptr = (u16)ch;
+        *attr_ptr = 0x00E1;
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=15h: テキストVRAMから1文字読み出し                           */
+    /*  入力: DH = 行, DL = 桁                                        */
+    /*  出力: AL = 文字コード                                          */
+    /* ================================================================ */
+    case 0x15: {
+        u8 row = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+        u8 col = (u8)(regs[V86_REG_EDX] & 0xFF);
+        u32 offset;
+        volatile u16 *char_ptr;
+
+        if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
+        if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
+        offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
+        char_ptr = (volatile u16 *)(TVRAM_CHAR_BASE + offset);
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
+                           | ((u16)*char_ptr & 0xFF);
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=17h: アトリビュート設定                                      */
+    /*  入力: DH = 行, DL = 桁, AL = アトリビュート                    */
+    /*  FreeDOS(98) int29dc.c がカラー設定時に使用                     */
+    /* ================================================================ */
+    case 0x17: {
+        u8 row = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+        u8 col = (u8)(regs[V86_REG_EDX] & 0xFF);
+        u8 attr = (u8)(regs[V86_REG_EAX] & 0xFF);
+        u32 offset;
+        volatile u8 *attr_ptr;
+
+        if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
+        if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
+        offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
+        attr_ptr = (volatile u8 *)(TVRAM_ATTR_BASE + offset);
+        *attr_ptr = attr;
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=1Ah: テキスト画面行スクロールアップ                          */
+    /*  入力: DH = スクロール行数                                      */
+    /*  FreeDOS(98) コンソール出力で使用                               */
+    /* ================================================================ */
+    case 0x1A: {
+        u8 lines = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+        int l;
+        if (lines == 0) lines = 1;
+        if (lines > TVRAM_ROWS) lines = TVRAM_ROWS;
+        for (l = 0; l < (int)lines; l++) {
+            tvram_scroll_up();
+        }
+        break;
+    }
+
+    /* ================================================================ */
+    /*  AH=1Bh: テキスト画面行スクロールダウン                          */
+    /*  Phase 2: 暫定NOP (必要に応じて実装)                            */
+    /* ================================================================ */
+    case 0x1B:
+        break;
+
+    /* ================================================================ */
+    /*  AH=40h: グラフィック画面表示開始                                 */
+    /*  AH=41h: グラフィック画面表示停止                                 */
+    /*  Phase 2: 実ハードウェアに転送                                   */
+    /* ================================================================ */
+    case 0x40:
+        outp(0xA2, 0x0D);
+        break;
+    case 0x41:
+        outp(0xA2, 0x0C);
+        break;
+
+    /* ================================================================ */
+    /*  AH=42h: パレット設定                                            */
+    /*  AH=43h: パレット取得                                            */
+    /*  Phase 2: ack のみ                                              */
+    /* ================================================================ */
+    case 0x42:
+    case 0x43:
+        break;
+
+    /* ================================================================ */
+    /*  AH=18h/19h: MS-DOS内部使用 (PC9800Bible一覧表に無い機能)        */
+    /*  IO.SYSがブート時に呼び出す。ack応答でV86を安全に続行させる。    */
+    /* ================================================================ */
+    case 0x18:
+    case 0x19:
+        break;
+
+    /* ================================================================ */
     /*  未実装の機能: IVTのダミーIRETハンドラに任せる                    */
     /*  戻り値 -1 で「未処理」を返し、呼び出し元がIVT転送する           */
     /* ================================================================ */
-    default:
+    default: {
+        static int unhandled_count = 0;
+        if (unhandled_count < 10) {
+            serial_puts("\r\n[V86 BIOS] Unhandled INT 18h AH=");
+            serial_hex8(ah);
+            serial_puts("\r\n");
+            unhandled_count++;
+        }
         return -1;
+    }
     }
 
     return 0;
@@ -216,6 +452,7 @@ int v86_bios_int29(u32 *regs)
     case '\n':  /* LF — 次の行に */
         v86_cursor_y++;
         if (v86_cursor_y >= TVRAM_ROWS) {
+            tvram_scroll_up();
             v86_cursor_y = TVRAM_ROWS - 1;
         }
         break;
@@ -258,9 +495,8 @@ int v86_bios_int1c(u32 *regs)
         /* 日時読み出し: ES:BX に6バイトのBCDデータを書き込む */
         RTC_Time t;
         u8 *dst;
-        u32 es_val = regs[V86_REG_ES];
-        u32 bx_val = regs[V86_REG_EBX] & 0xFFFF;
-        u32 linear;
+        u16 es_val = (u16)(regs[V86_REG_ES] & 0xFFFF);
+        u16 bx_val = (u16)(regs[V86_REG_EBX] & 0xFFFF);
         u8 bcd_year, bcd_day10, bcd_day1;
         u8 bcd_hour10, bcd_hour1, bcd_min10, bcd_min1, bcd_sec10;
 
@@ -276,9 +512,9 @@ int v86_bios_int1c(u32 *regs)
         bcd_min1   = (u8)(t.min % 10);
         bcd_sec10  = (u8)(t.sec / 10);
 
-        /* V86リニアアドレス計算 */
-        linear = (es_val << 4) + bx_val;
-        dst = (u8 *)linear;
+        /* V86リニアアドレス → カーネル用リニアアドレス変換
+         * バッキングRAMにリマップされた領域を正しく変換する */
+        dst = v86_phys_addr(es_val, bx_val);
 
         dst[0] = bcd_year;
         dst[1] = t.month;

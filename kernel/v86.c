@@ -16,6 +16,93 @@
 #include "v86_disk.h"
 #include "io.h"
 
+/* タイムアウトベースの V86 実行制限 (tick_count は 100Hz) */
+extern volatile u32 tick_count;
+#define V86_TIMEOUT_TICKS  0     /* 0=タイムアウト無効 */
+u32 v86_start_tick = 0;
+
+/* デバッグリングバッファ (最近のGPイベント記録) */
+#define V86_TRACE_SIZE 128
+struct v86_trace_entry {
+    u16 cs;
+    u16 ip;
+    u8  opcode;
+    u8  intno;       /* INT命令の場合 */
+    u8  ah;          /* INT命令の場合のAH値 */
+    u8  al;
+};
+static struct v86_trace_entry v86_trace[V86_TRACE_SIZE];
+static u32 v86_trace_idx = 0;
+
+/* タイムアウト時の実CS:EIP (HLT注入前の本来のアドレス) */
+u32 v86_timeout_cs = 0;
+u32 v86_timeout_ip = 0;
+
+struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx)
+{
+    extern u32 v86_gp_count;
+    *count = v86_gp_count;
+    *idx = v86_trace_idx;
+    return v86_trace;
+}
+
+void v86_trace_reset(void)
+{
+    v86_trace_idx = 0;
+}
+
+static void tvram_hex(u32 val, int digits, int row, int *col) {
+    volatile u16 *tvram = (volatile u16 *)0xA0000UL;
+    volatile u16 *tattr = (volatile u16 *)0xA2000UL;
+    const char *hex = "0123456789ABCDEF";
+    int i;
+    for (i = digits - 1; i >= 0; i--) {
+        int pos = row * 80 + *col;
+        tvram[pos] = hex[(val >> (i * 4)) & 0xF];
+        tattr[pos] = 0x41;
+        (*col)++;
+    }
+}
+
+static void tvram_puts(const char *str, int row, int *col) {
+    volatile u16 *tvram = (volatile u16 *)0xA0000UL;
+    volatile u16 *tattr = (volatile u16 *)0xA2000UL;
+    while (*str) {
+        int pos = row * 80 + *col;
+        tvram[pos] = *str;
+        tattr[pos] = 0x41;
+        (*col)++;
+        str++;
+    }
+}
+
+extern u32 v86_gp_count;
+static void dump_v86_trace_tvram(void) {
+    int i, n;
+    int row = 0;
+    int col = 0;
+    
+    tvram_puts("--- V86 GP TRACE DUMP ---", row, &col);
+    row++;
+
+    n = (v86_gp_count < V86_TRACE_SIZE) ? v86_gp_count : V86_TRACE_SIZE;
+    if (n > 23) n = 23; /* 最大23行表示 */
+    
+    for (i = 0; i < n; i++) {
+        int idx = (v86_trace_idx + V86_TRACE_SIZE - n + i) % V86_TRACE_SIZE;
+        struct v86_trace_entry *e = &v86_trace[idx];
+        col = 0;
+        tvram_puts("CS:", row, &col); tvram_hex(e->cs, 4, row, &col);
+        tvram_puts(" IP:", row, &col); tvram_hex(e->ip, 4, row, &col);
+        tvram_puts(" OP:", row, &col); tvram_hex(e->opcode, 2, row, &col);
+        if (e->opcode == 0xCD) {
+            tvram_puts(" INT:", row, &col); tvram_hex(e->intno, 2, row, &col);
+            tvram_puts(" AX:", row, &col); tvram_hex((e->ah << 8) | e->al, 4, row, &col);
+        }
+        row++;
+    }
+}
+
 /* V86モードの有効フラグ */
 volatile int v86_active = 0;
 
@@ -24,6 +111,55 @@ u32 v86_virtual_if = EFLAGS_IF;
 
 /* 保留中の仮想IRQビットマスク */
 u32 v86_pending_irq = 0;
+
+/* デバッグ: V86 INT呼び出し統計 */
+u32 v86_int_count = 0;     /* 総INT呼び出し回数 */
+u32 v86_last_int = 0;      /* 最後に処理されたINT番号 */
+u32 v86_last_cs = 0;       /* 最後のINT発行時のCS */
+u32 v86_last_ip = 0;       /* 最後のINT発行時のIP */
+u32 v86_gp_count = 0;      /* GPハンドラ呼び出し総数 */
+
+/* I/Oポートアクセス統計 (V86終了後にダンプ用) */
+#define V86_IO_STAT_SIZE 16
+struct v86_io_stat {
+    u16 port;
+    u32 count;
+};
+static struct v86_io_stat v86_io_stats[V86_IO_STAT_SIZE];
+static u32 v86_io_stat_count = 0;
+
+static void v86_io_stat_record(u16 port)
+{
+    u32 i;
+    for (i = 0; i < v86_io_stat_count; i++) {
+        if (v86_io_stats[i].port == port) {
+            v86_io_stats[i].count++;
+            return;
+        }
+    }
+    if (v86_io_stat_count < V86_IO_STAT_SIZE) {
+        v86_io_stats[v86_io_stat_count].port = port;
+        v86_io_stats[v86_io_stat_count].count = 1;
+        v86_io_stat_count++;
+    }
+}
+
+void v86_dump_io_stats(void)
+{
+    extern void kprintf(u8 attr, const char *fmt, ...);
+    u32 i;
+    kprintf(0xA1, "[V86] I/O port access stats (%d unique ports):\n", (int)v86_io_stat_count);
+    for (i = 0; i < v86_io_stat_count; i++) {
+        kprintf(0x07, "  port %xh: %d accesses\n",
+                (unsigned)v86_io_stats[i].port,
+                (int)v86_io_stats[i].count);
+    }
+}
+
+void v86_reset_io_stats(void)
+{
+    v86_io_stat_count = 0;
+}
 
 /* V86終了要求フラグ (v86_test.cから設定される) */
 extern volatile int v86_exit_request;
@@ -60,6 +196,56 @@ static u16 v86_pop16(u32 *regs)
 }
 
 /* ====================================================================== */
+/*  16ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
+/*                                                                          */
+/*  PIC/PITは8ビットポートデバイスのため、16ビットアクセスは                 */
+/*  port と port+1 への連続8ビットアクセスに分解して仮想化を適用する。       */
+/* ====================================================================== */
+
+/* 16ビットI/O入力: PIC/PIT仮想化チェック付き */
+static u16 v86_inw_checked(u16 port)
+{
+    u8 lo, hi;
+    /* 下位バイト (port) */
+    if (!v86_pic_io(port, &lo, 0)) {
+        if (!v86_pit_io(port, &lo, 0)) {
+            lo = inp(port);
+        }
+    }
+    /* 上位バイト (port+1) */
+    if (!v86_pic_io((u16)(port + 1), &hi, 0)) {
+        if (!v86_pit_io((u16)(port + 1), &hi, 0)) {
+            hi = inp((u16)(port + 1));
+        }
+    }
+    return (u16)lo | ((u16)hi << 8);
+}
+
+/* 16ビットI/O出力: PIC/PIT仮想化+リブート検知付き
+ * 戻り値: 1=リブート検知(V86終了要求), 0=通常 */
+static int v86_outw_checked(u16 port, u16 val)
+{
+    u8 lo = (u8)(val & 0xFF);
+    u8 hi = (u8)((val >> 8) & 0xFF);
+    /* リブート検知 (F0hポート) */
+    if (v86_pic_is_reboot(port, lo)) return 1;
+    if (v86_pic_is_reboot((u16)(port + 1), hi)) return 1;
+    /* 下位バイト (port) */
+    if (!v86_pic_io(port, &lo, 1)) {
+        if (!v86_pit_io(port, &lo, 1)) {
+            outp(port, lo);
+        }
+    }
+    /* 上位バイト (port+1) */
+    if (!v86_pic_io((u16)(port + 1), &hi, 1)) {
+        if (!v86_pit_io((u16)(port + 1), &hi, 1)) {
+            outp((u16)(port + 1), hi);
+        }
+    }
+    return 0;
+}
+
+/* ====================================================================== */
 /*  v86_gp_handler — V86モード #GP ハンドラ                                */
 /*                                                                          */
 /*  isr_stub.asm から呼ばれる。regs配列を操作して次の命令に進める。         */
@@ -70,9 +256,52 @@ int v86_gp_handler(u32 *regs)
     u8 *ip;
     u8 opcode;
 
+    /* GPハンドラ呼び出しカウント (デバッグ) */
+    v86_gp_count++;
+
+    /* BIOS ROM領域 (0xF000:xxxx以降) でのGP: V86強制終了
+     * IPLエラー後のJMP FAR 0xFFFF:0x0000 (リセットベクタ) で
+     * BIOS ROM内コードが実行され無限GPループになるのを防止 */
+    if (regs[V86_REG_CS] >= 0xF000) {
+        v86_last_cs = regs[V86_REG_CS];
+        v86_last_ip = regs[V86_REG_EIP];
+        return 1;
+    }
+
+    /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
+    if (V86_TIMEOUT_TICKS &&
+        ((tick_count - v86_start_tick) > V86_TIMEOUT_TICKS ||
+         v86_gp_count > 5000000)) {
+        ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
+        v86_last_int = *ip;
+        v86_last_cs = regs[V86_REG_CS];
+        v86_last_ip = regs[V86_REG_EIP];
+        /* タイムアウト位置を記録 (IRQ0経由で既にセット済みの場合はそちらを優先) */
+        if (v86_timeout_cs == 0 && v86_timeout_ip == 0) {
+            v86_timeout_cs = regs[V86_REG_CS];
+            v86_timeout_ip = regs[V86_REG_EIP];
+        }
+        return 1;  /* V86タイムアウト終了 → ログダンプが実行される */
+    }
+
     /* フォルト位置の命令を取得 */
     ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
     opcode = *ip;
+
+    {
+        struct v86_trace_entry *e = &v86_trace[v86_trace_idx];
+        e->cs = regs[V86_REG_CS];
+        e->ip = regs[V86_REG_EIP];
+        e->opcode = opcode;
+        if (opcode == 0xCD) {
+            e->intno = ip[1];
+            e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
+            e->al = regs[V86_REG_EAX] & 0xFF;
+        } else {
+            e->intno = 0; e->ah = 0; e->al = 0;
+        }
+        v86_trace_idx = (v86_trace_idx + 1) % V86_TRACE_SIZE;
+    }
 
     switch (opcode) {
 
@@ -83,6 +312,13 @@ int v86_gp_handler(u32 *regs)
     case 0xCD: {
         u8 intno = ip[1];
 
+        /* デバッグ統計 */
+        v86_int_count++;
+        v86_last_int = intno;
+        v86_last_cs = regs[V86_REG_CS];
+        v86_last_ip = regs[V86_REG_EIP];
+
+        /* タイムアウトチェックはGPハンドラ冒頭で実施済み */
         /* ============================================================ */
         /*  DOS終了割り込みの特殊処理                                   */
         /*  INT 20h (Terminate Program) → V86終了                      */
@@ -107,6 +343,10 @@ int v86_gp_handler(u32 *regs)
         /* ============================================================ */
         if (intno == 0x18) {
             int rc = v86_bios_int18(regs);
+            if (rc == -2) {
+                /* EIP加算なし: INT命令を再実行 (キー入力待ち) */
+                break;
+            }
             if (rc >= 0) {
                 /* 処理済み: EIPを進めてV86に戻る */
                 regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
@@ -236,10 +476,11 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xF4:
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
-        if (v86_exit_request || v86_active) {
+        if (v86_exit_request) {
             /* V86終了要求: 戻り値 1 で isr_stub.asm が復帰処理を行う */
             return 1;
         }
+        /* HLTは無視 (NOP扱い) — 次の命令に進む */
         break;
 
     /* ================================================================ */
@@ -248,6 +489,7 @@ int v86_gp_handler(u32 *regs)
     case 0xE4: {
         u8 port = ip[1];
         u8 val;
+        v86_io_stat_record(port);
         /* PIC仮想化 */
         if (v86_pic_io(port, &val, 0)) {
             regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
@@ -266,6 +508,7 @@ int v86_gp_handler(u32 *regs)
     case 0xE6: {
         u8 port = ip[1];
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
+        v86_io_stat_record(port);
         /* リセットポート検知 */
         if (v86_pic_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
@@ -287,6 +530,7 @@ int v86_gp_handler(u32 *regs)
     case 0xEC: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         u8 val;
+        v86_io_stat_record(port);
         if (v86_pic_io(port, &val, 0)) {
             regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
         } else if (v86_pit_io(port, &val, 0)) {
@@ -304,6 +548,7 @@ int v86_gp_handler(u32 *regs)
     case 0xEE: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
+        v86_io_stat_record(port);
         if (v86_pic_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
             return 1;
@@ -319,40 +564,54 @@ int v86_gp_handler(u32 *regs)
 
     /* ================================================================ */
     /*  IN AX, imm8 (0xE5 pp) — 16bit I/O入力 (即値)                   */
+    /*  PIC/PIT仮想化チェック付き                                       */
     /* ================================================================ */
     case 0xE5: {
-        u8 port = ip[1];
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | inpw(port);
+        u16 port = (u16)ip[1];
+        v86_io_stat_record(port);
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
 
     /* ================================================================ */
     /*  OUT imm8, AX (0xE7 pp) — 16bit I/O出力 (即値)                  */
+    /*  PIC/PIT仮想化+リブート検知付き                                  */
     /* ================================================================ */
     case 0xE7: {
-        u8 port = ip[1];
-        outpw(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
+        u16 port = (u16)ip[1];
+        v86_io_stat_record(port);
+        if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            return 1;  /* V86終了 (リブート検知) */
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
 
     /* ================================================================ */
     /*  IN AX, DX (0xED) — 16bit I/O入力 (DXで指定)                    */
+    /*  PIC/PIT仮想化チェック付き                                       */
     /* ================================================================ */
     case 0xED: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | inpw(port);
+        v86_io_stat_record(port);
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
 
     /* ================================================================ */
     /*  OUT DX, AX (0xEF) — 16bit I/O出力 (DXで指定)                   */
+    /*  PIC/PIT仮想化+リブート検知付き                                  */
     /* ================================================================ */
     case 0xEF: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        outpw(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
+        v86_io_stat_record(port);
+        if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            return 1;  /* V86終了 (リブート検知) */
+        }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
@@ -361,30 +620,133 @@ int v86_gp_handler(u32 *regs)
     /*  未対応命令 — デバッグ用に停止                                   */
     /* ================================================================ */
     default: {
-        /* テキストVRAMにエラー情報を表示 */
-        volatile u16 *tvram = (volatile u16 *)0xA0000UL;
-        volatile u16 *tattr = (volatile u16 *)0xA2000UL;
-        static const char msg[] = "V86 #GP: unknown opcode 0x";
-        static const char hex[] = "0123456789ABCDEF";
-        int i;
-        int pos = 0;
-        for (i = 0; msg[i]; i++) {
-            tvram[pos] = (u16)(u8)msg[i];
-            tattr[pos] = 0x41;
-            pos++;
-        }
-        tvram[pos] = (u16)(u8)hex[(opcode >> 4) & 0xF];
-        tattr[pos] = 0x41;
-        pos++;
-        tvram[pos] = (u16)(u8)hex[opcode & 0xF];
-        tattr[pos] = 0x41;
+        /* 未対応オペコード: デバッグ情報を記録してV86を終了する */
+        v86_last_int = opcode;
+        v86_last_cs = regs[V86_REG_CS];
+        v86_last_ip = regs[V86_REG_EIP];
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
 
-        /* 停止 */
-        for (;;) {
-            __asm__ volatile ("hlt");
+        /* シリアルログに出力 */
+        {
+            extern void serial_puts(const char *s);
+            static const char hex[] = "0123456789ABCDEF";
+            char buf[64];
+            int p = 0;
+            const char *prefix = "\r\n[V86] Unknown opcode 0x";
+            int pi;
+            for (pi = 0; prefix[pi]; pi++) buf[p++] = prefix[pi];
+            buf[p++] = hex[(opcode >> 4) & 0xF];
+            buf[p++] = hex[opcode & 0xF];
+            buf[p++] = ' ';
+            buf[p++] = 'a';
+            buf[p++] = 't';
+            buf[p++] = ' ';
+            buf[p++] = hex[(v86_last_cs >> 12) & 0xF];
+            buf[p++] = hex[(v86_last_cs >> 8) & 0xF];
+            buf[p++] = hex[(v86_last_cs >> 4) & 0xF];
+            buf[p++] = hex[v86_last_cs & 0xF];
+            buf[p++] = ':';
+            buf[p++] = hex[(v86_last_ip >> 12) & 0xF];
+            buf[p++] = hex[(v86_last_ip >> 8) & 0xF];
+            buf[p++] = hex[(v86_last_ip >> 4) & 0xF];
+            buf[p++] = hex[v86_last_ip & 0xF];
+            buf[p++] = '\r';
+            buf[p++] = '\n';
+            buf[p] = '\0';
+            serial_puts(buf);
         }
+        return 1;  /* V86終了 */
     }
     } /* switch */
+
+    /* 保留中の割り込みがあれば注入する */
+    {
+        extern u32 v86_irq0_gp_skip_ivt;
+        extern u32 v86_irq0_gp_skip_isr;
+    if (v86_virtual_if && v86_pending_irq) {
+        if (v86_pending_irq & (1U << 0)) { /* IRQ0: タイマー (INT 08h) */
+            u8 isr;
+            extern u8 v86_pic_get_isr(int idx);
+            extern void v86_pic_set_isr(int idx, u8 val);
+
+            isr = v86_pic_get_isr(0);
+
+            /* 処理中 (再帰) なら保留を維持 — IMRチェックは行わない */
+            if (!(isr & 1)) {
+                u32 *ivt = (u32 *)v86_linear(0, 0);
+                u8 intno = 0x08;
+                u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
+                u16 handler_seg = (u16)(ivt[intno] >> 16);
+                int is_dummy = (ivt[intno] == ((u32)0x0050 << 16 | 0x0000));
+
+                {
+                    extern u32 v86_irq0_inject_count;
+                    v86_irq0_inject_count++;
+                    if (is_dummy) v86_irq0_gp_skip_ivt++;
+                }
+
+                v86_pending_irq &= ~(1U << 0);
+
+                /* ISR bit0 をセット: 実ハンドラの場合のみ
+                 * ダミーIVTの場合はISRセットしない — IRETで即座に戻り
+                 * EOIが発行されずISRが残るとその後の全注入がブロックされる */
+                if (!is_dummy) {
+                    v86_pic_set_isr(0, isr | 1);
+                }
+
+                /* 現在のEFLAGS(IF付)、CS、EIPをスタックに積む */
+                v86_push16(regs, (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF));
+                v86_push16(regs, (u16)regs[V86_REG_CS]);
+                v86_push16(regs, (u16)(regs[V86_REG_EIP] & 0xFFFF));
+
+                /* ハンドラにジャンプし、仮想IFをクリア */
+                regs[V86_REG_CS] = handler_seg;
+                regs[V86_REG_EIP] = handler_off;
+                v86_virtual_if = 0;
+            } else {
+                v86_irq0_gp_skip_isr++;
+            }
+        }
+        /* IRQ1: キーボード (INT 09h) */
+        else if (v86_pending_irq & (1U << 1)) {
+            u8 isr;
+            extern u8 v86_pic_get_isr(int idx);
+            extern void v86_pic_set_isr(int idx, u8 val);
+
+            isr = v86_pic_get_isr(0);
+
+            /* タイマ処理中 (bit0) or KB処理中 (bit1) なら保留を維持 */
+            if (!(isr & 3)) {
+                u32 *ivt = (u32 *)v86_linear(0, 0);
+                u8 intno = 0x09;
+                u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
+                u16 handler_seg = (u16)(ivt[intno] >> 16);
+
+                /* ダミーIVT (初期値 0x0050:0x0000) のままなら保留を維持してスキップ */
+                if (ivt[intno] == ((u32)0x0050 << 16 | 0x0000)) {
+                    /* 保留ビットは維持 */
+                } else {
+                    v86_pending_irq &= ~(1U << 1);
+
+                    /* ISR bit1 をセット (処理中マーク) */
+                    v86_pic_set_isr(0, isr | 2);
+
+                    /* 現在のEFLAGS(IF付)、CS、EIPをスタックに積む */
+                    v86_push16(regs, (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF));
+                    v86_push16(regs, (u16)regs[V86_REG_CS]);
+                    v86_push16(regs, (u16)(regs[V86_REG_EIP] & 0xFFFF));
+
+                    /* ハンドラにジャンプし、仮想IFをクリア */
+                    regs[V86_REG_CS] = handler_seg;
+                    regs[V86_REG_EIP] = handler_off;
+                    v86_virtual_if = 0;
+                }
+            }
+        }
+    }
+
+    } /* extern block */
+
     return 0;
 }
 
@@ -407,3 +769,191 @@ void v86_set_pending_irq(int irq_no)
 {
     v86_pending_irq |= (1U << irq_no);
 }
+
+/* ====================================================================== */
+/*  v86_inject_timer_irq — タイマ割り込み(IRQ0)直接注入                  */
+/*                                                                        */
+/*  timer_handlerから呼ばれ、V86タスクが実行中であればハードウェア割り込み  */
+/*  のスタックフレームを直接書き換えてINT 08hハンドラへジャンプさせる。      */
+/* ====================================================================== */
+
+/* hardware IRQ0 stack offsets (from irq_stub_0) */
+#define HWIRQ_REG_EIP    10
+#define HWIRQ_REG_CS     11
+#define HWIRQ_REG_EFLAGS 12
+#define HWIRQ_REG_ESP    13
+#define HWIRQ_REG_SS     14
+
+/* IRQ0注入デバッグカウンタ */
+u32 v86_irq0_call_count = 0;    /* v86_inject_timer_irq 呼び出し回数 */
+u32 v86_irq0_nonvm_count = 0;   /* 非V86モードでスキップ */
+u32 v86_irq0_noif_count = 0;    /* IF=0 で保留 */
+u32 v86_irq0_isr_count = 0;     /* ISR処理中で保留 */
+u32 v86_irq0_ivt_count = 0;     /* IVTダミーで保留 */
+u32 v86_irq0_gp_inject_count = 0; /* GPハンドラ保留注入で実際に注入 */
+u32 v86_irq0_gp_skip_if = 0;    /* GPハンドラ保留注入: IF=0でスキップ */
+u32 v86_irq0_gp_skip_isr = 0;   /* GPハンドラ保留注入: ISR処理中でスキップ */
+u32 v86_irq0_gp_skip_ivt = 0;   /* GPハンドラ保留注入: IVTダミーでスキップ */
+
+void v86_inject_timer_irq(u32 *regs)
+{
+    v86_irq0_call_count++;
+
+    /* V86モードからの割り込みか確認 */
+    if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM) == 0) {
+        v86_irq0_nonvm_count++;
+        return;
+    }
+
+    /* ================================================================ */
+    /*  タイムアウト検出: GPハンドラが呼ばれない状況でも確実にV86終了   */
+    /*                                                                  */
+    /*  V86ゲストが通常命令(MOV/CMP/JMP等)だけのループに入った場合、   */
+    /*  GPは発生せずGPハンドラ内のタイムアウトは実行されない。          */
+    /*  IRQ0は100Hzで必ず発火するため、ここでタイムアウトを検出する。  */
+    /*                                                                  */
+    /*  方式: ゲストのCS:EIPを強制的にHLT命令(0x0050:0x0001)に設定。  */
+    /*  次のIRETDでV86に戻るとHLTが実行され、GPハンドラが呼ばれて     */
+    /*  v86_exit_requestにより安全にV86を終了する。                    */
+    /* ================================================================ */
+    if (V86_TIMEOUT_TICKS &&
+        ((tick_count - v86_start_tick) > V86_TIMEOUT_TICKS ||
+         v86_gp_count > 5000000)) {
+        /* タイムアウト時の実CS:EIP (HLT注入前の位置) を記録 */
+        v86_timeout_cs = regs[HWIRQ_REG_CS];
+        v86_timeout_ip = regs[HWIRQ_REG_EIP];
+        v86_last_cs = regs[HWIRQ_REG_CS];
+        v86_last_ip = regs[HWIRQ_REG_EIP];
+
+        /* HLT命令をバッキングRAMの0x501に配置 (0x0050:0x0001) */
+        {
+            u8 *hlt_ptr = v86_linear(0x0050, 0x0001);
+            *hlt_ptr = 0xF4;  /* HLT */
+        }
+
+        /* V86終了要求フラグをセット */
+        v86_exit_request = 1;
+
+        /* ゲストのCS:EIPを強制的にHLT命令に書き換え */
+        regs[HWIRQ_REG_CS] = 0x0050;
+        regs[HWIRQ_REG_EIP] = 0x0001;
+        return;
+    }
+
+    if (v86_virtual_if) {
+        u8 isr = 0;
+        int is_dummy_ivt = 0;
+
+        /* 仮想PICの状態を読み出す */
+        extern u8 v86_pic_get_isr(int idx);
+        extern void v86_pic_set_isr(int idx, u8 val);
+
+        isr = v86_pic_get_isr(0);
+
+        /* ISRで処理中なら保留する */
+        if (isr & 1) {
+            v86_irq0_isr_count++;
+            v86_set_pending_irq(0);
+            return;
+        }
+
+        /* IVTの状態を確認 (ダミーかどうか記録するが、ブロックはしない) */
+        {
+            u32 *ivt = (u32 *)v86_linear(0, 0);
+            if (ivt[0x08] == ((u32)0x0050 << 16 | 0x0000)) {
+                is_dummy_ivt = 1;
+                v86_irq0_ivt_count++;
+            }
+        }
+
+        /* ISRにビットを立てる: 実ハンドラの場合のみ (EOI待ち)
+         * ダミーIVTの場合はISRセットしない — IRETで即座に戻るため
+         * ISRが残るとその後の全注入がブロックされてしまう */
+        if (!is_dummy_ivt) {
+            v86_pic_set_isr(0, isr | 1);
+        }
+
+        {
+            u32 *ivt = (u32 *)v86_linear(0, 0);
+            u8 intno = 0x08;
+            u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
+            u16 handler_seg = (u16)(ivt[intno] >> 16);
+            u16 *sp;
+
+            extern u32 v86_irq0_inject_count;
+            v86_irq0_inject_count++;
+
+            /* 仮想IFクリア */
+            v86_virtual_if = 0;
+            v86_pending_irq &= ~(1U << 0);
+
+            /* Push EFLAGS, CS, EIP to guest stack */
+            regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+            sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+            *sp = (u16)((regs[HWIRQ_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF);
+
+            regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+            sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+            *sp = (u16)regs[HWIRQ_REG_CS];
+
+            regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+            sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+            *sp = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
+
+            /* Set new CS:EIP in host stack frame to jump to handler upon iretd */
+            regs[HWIRQ_REG_CS] = handler_seg;
+            regs[HWIRQ_REG_EIP] = handler_off;
+        }
+    } else {
+        /* Defer interrupt if IF=0 */
+        v86_irq0_noif_count++;
+        v86_set_pending_irq(0);
+    }
+
+    /* ================================================================ */
+    /*  保留中のIRQ1 (キーボード, INT 09h) の注入                       */
+    /*  タイマ注入が行われた場合はIF=0になるため、次の機会に回す。      */
+    /*  タイマが注入されなかった場合、同じIRQ0のタイミングで注入する。  */
+    /* ================================================================ */
+    if (v86_virtual_if && (v86_pending_irq & (1U << 1))) {
+        if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM)) {
+            u8 imr2, isr2;
+            extern u8 v86_pic_get_imr(int idx);
+            extern u8 v86_pic_get_isr(int idx);
+            extern void v86_pic_set_isr(int idx, u8 val);
+
+            imr2 = v86_pic_get_imr(0);
+            isr2 = v86_pic_get_isr(0);
+
+            /* マスクされていない且つ、優先度の高いIRQ(bit0)が処理中でない */
+            if (!(imr2 & 2) && !(isr2 & 3)) {
+                u32 *ivt = (u32 *)v86_linear(0, 0);
+                u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
+                u16 handler_seg = (u16)(ivt[0x09] >> 16);
+                u16 *sp;
+
+                v86_pending_irq &= ~(1U << 1);
+                v86_pic_set_isr(0, isr2 | 2);
+
+                v86_virtual_if = 0;
+
+                /* Push EFLAGS, CS, EIP to guest stack */
+                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+                *sp = (u16)((regs[HWIRQ_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF);
+
+                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+                *sp = (u16)regs[HWIRQ_REG_CS];
+
+                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+                *sp = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
+
+                regs[HWIRQ_REG_CS] = handler_seg;
+                regs[HWIRQ_REG_EIP] = handler_off;
+            }
+        }
+    }
+}
+

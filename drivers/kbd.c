@@ -106,18 +106,18 @@ void kbd_irq_handler(void)
     u8 ascii;
     int is_break;
 
-    /* V86モード中: キー入力をDOSにリフレクトする (OS32バッファには入れない) */
-    {
-        extern volatile int v86_active;
-        extern void v86_set_pending_irq(int irq_no);
-        if (v86_active) {
-            v86_set_pending_irq(1);
-            return;
-        }
-    }
+    /* V86モード中: OS32バッファにキーを入れる
+     * INT 18h AH=00h のエミュレーションで kbd_trygetkey() を
+     * 使用するため、物理ポートからスキャンコードを読み取って
+     * OS32のキーバッファに格納する。
+     * ゲストINT 09hへの仮想IRQ注入は行わない (BIOSレベルで
+     * エミュレーションしているため不要。注入するとINT 18h
+     * AH=00hのEIP replayが破壊される)。 */
+    /* v86_activeの場合もそのまま処理を続行 */
 
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
+
     is_break = scancode & SCANCODE_BREAK;
     keycode  = scancode & SCANCODE_KEY;
 
@@ -181,6 +181,33 @@ void kbd_irq_handler(void)
         kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
         kbd_count++;
     }
+
+    /* V86モード中: BDAキーボードバッファにもキーを書き込む
+     * DOSはINT 18h AH=00h を呼ばず、BDA 0x0528 (KB_COUNT) を
+     * 直接ポーリングしてキー入力を待っている。
+     * NP21/W bios09.c のキーバッファ書き込みロジック準拠。
+     * BDA: 0x0502-0x0521 = バッファ (16エントリ × 2バイト)
+     *       0x0524 = HEAD (WORD), 0x0526 = TAIL (WORD)
+     *       0x0528 = COUNT (BYTE, max 0x10) */
+    {
+        extern volatile int v86_active;
+        if (v86_active) {
+            extern u8 *v86_phys_addr(u32 seg, u32 off);
+            u8 *bda = v86_phys_addr(0, 0);
+            u8 count = bda[0x0528];
+            if (count < 0x10) {
+                u16 tail = *(u16 *)&bda[0x0526];
+                /* キーデータを tail 位置に書き込み */
+                bda[tail]     = ascii;       /* 下位: ASCII */
+                bda[tail + 1] = keycode;     /* 上位: スキャンコード */
+                /* tail を進める (0x0502〜0x0521 のリング) */
+                tail += 2;
+                if (tail >= 0x0522) tail = 0x0502;
+                *(u16 *)&bda[0x0526] = tail;
+                bda[0x0528] = count + 1;
+            }
+        }
+    }
 }
 
 /* ======================================================================== */
@@ -234,6 +261,13 @@ void kbd_init(void)
 int kbd_has_key(void)
 {
     return kbd_count > 0;
+}
+
+/* バッファ先頭のキーデータを消費せずに返す (peek)。なければ-1 */
+int kbd_peekkey(void)
+{
+    if (kbd_count == 0) return -1;
+    return (int)kbd_buf[kbd_head];
 }
 
 int kbd_trygetchar(void)
