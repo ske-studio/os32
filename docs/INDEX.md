@@ -91,7 +91,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 ```
 src/os32/
 ├── boot/             — ブートローダ (NASM)
-├── kernel/           — カーネルコア (メイン処理、ページング、IDT)
+├── kernel/           — カーネルコア (メイン処理、ページング、IDT、V86)
 ├── exec/             — プログラムローダー / KernelAPI
 ├── fs/               — ファイルシステム (VFS, ext2, fat12, iso9660, hostdrvfs)
 ├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Mouse, Serial, KCG, NP2SysPなど)
@@ -122,4 +122,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-04-29*
+*Last Updated: 2026-05-03*

@@ -10,6 +10,8 @@ OS32上でDOSアプリケーションをV86モードで実行するサブシス�
 | [v86_poc_report.md](v86_poc_report.md) | Phase 0 完了レポート — PoC + カーネル統合 |
 | [v86_phase1_2_report.md](v86_phase1_2_report.md) | Phase 1 & 2 中間レポート — メモリ空間, BIOS実装とバグ対応録 |
 | [phase2_3_research.md](phase2_3_research.md) | Phase 2残り / Phase 3 技術調査レポート — INT 1Bh, タイマ, KB, PIT, 画面リストア |
+| [phase2_freedos_boot.md](phase2_freedos_boot.md) | Phase 2 FreeDOS(98) ブート進捗 — IPL到達/ハング原因/デバッグ戦略 |
+| [fdkernel_build.md](fdkernel_build.md) | FreeDOS(98) カーネル ビルド手順書 — WSL+OpenWatcomハイブリッド環境 |
 
 ## 関連ドキュメント
 

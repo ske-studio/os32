@@ -113,14 +113,18 @@ def pipe_reader_thread():
                 raise
                 
             if avail > 0:
-                hr, data = win32file.ReadFile(pipe_handle, 1)
+                hr, data = win32file.ReadFile(pipe_handle, avail)
             else:
                 time.sleep(0.01)
                 continue
                 
             if not data: continue
-            b = data[0]
-            rx_queue.put(b)
+            
+            with open(r"C:\os32\os32_serial_log.txt", "ab") as f:
+                f.write(data)
+                
+            for b in data:
+                rx_queue.put(b)
                 
         except pywintypes.error as e:
             if e.winerror == 109: pipe_handle = None

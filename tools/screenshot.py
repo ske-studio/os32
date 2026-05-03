@@ -28,7 +28,7 @@ def find_np21w_window():
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value
-            if 'Neko Project' in title or 'np21' in title.lower():
+            if 'Neko Project' in title or 'np21' in title.lower() or 'ia32_panic' in title.lower():
                 if user32.IsWindowVisible(hwnd):
                     found.append((hwnd, title))
         return True

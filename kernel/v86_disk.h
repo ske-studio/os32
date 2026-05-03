@@ -33,4 +33,11 @@ void v86_disk_clear(void);
  * 戻り値: 0=処理済み(V86続行), -1=未実装ファンクション */
 int v86_bios_int1b(u32 *regs);
 
+/* デバッグ: INT 1Bh呼び出しログをkprintfでダンプ
+ * V86セッション終了後に呼び出すこと */
+void v86_disk_dump_log(void);
+
+/* デバッグ: INT 1Bhログカウンタをリセット */
+void v86_disk_reset_log(void);
+
 #endif /* V86_DISK_H */

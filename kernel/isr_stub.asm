@@ -81,6 +81,12 @@ isr_stub_13:
         test    dword [esp + 12], 0x020000   ;; EFLAGS.VM (bit 17) をテスト
         jnz     .v86_gp                      ;; V86モードなら専用パスへ
 
+        ;; ★デバッグ: Ring0での#GPはESPを表示して停止
+        push    esp
+        extern  print_debug_gp
+        call    print_debug_gp
+        add     esp, 4
+
         ;; 通常の#GP処理 (従来と同じ)
         push    13
         jmp     isr_common
@@ -225,17 +231,33 @@ isr_stub_14:
         iretd
 
 .v86_pf:
-        ;; V86モードからの#PF: V86 #GPハンドラと同じ方式で処理
-        ;; (PTE_USER修正後はここに来ないはずだが、安全のため)
-        pushad
+        ;; V86モードからの#PF: 通常の#PFハンドラに渡す
+        pushad                  ;; 全汎用レジスタ保存 (32B)
+
         ;; ★ DS/ES復元 (V86→Ring0遷移でCPUが0にクリアするため)
         mov     ax, 0x10
         mov     ds, ax
         mov     es, ax
+
+        ;; PUSHAD配列のポインタ (引数4: regs)
         mov     eax, esp
-        push    eax
-        call    v86_gp_handler
-        add     esp, 4
+        push    eax             ;; 引数4: regs (PUSHAD配列先頭)
+
+        ;; フォルト時EIP取得 (PUSHAD=32B + push×1=4B + error_code=4B の上)
+        mov     eax, [esp + 40] ;; EIP
+        push    eax             ;; 引数3: fault_eip
+
+        ;; CR2 (障害アドレス) 取得
+        mov     eax, cr2
+        push    eax             ;; 引数2: fault_addr (CR2)
+
+        ;; エラーコード取得 (PUSHAD=32B + push×3=12B の上)
+        mov     eax, [esp + 44] ;; error_code
+        push    eax             ;; 引数1: error_code
+
+        call    page_fault_handler
+        add     esp, 16
+
         popad
         add     esp, 4          ;; error_code をスキップ
         iretd
@@ -264,8 +286,11 @@ irq_stub_0:
         ;; tick_count をインクリメント
         inc     dword [tick_count]
 
-        ;; Cハンドラを呼び出し
+        ;; 引数1: regs (ESP)
+        mov     eax, esp
+        push    eax
         call    timer_handler
+        add     esp, 4
 
         ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
         mov     al, OCW2_EOI

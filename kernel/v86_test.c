@@ -23,8 +23,43 @@
 #include "v86_disk.h"
 #include "io.h"
 #include "vfs.h"
-#include "kmalloc.h"
+#include "paging.h"
 #include "kprintf.h"
+
+extern void serial_puts(const char *s);
+extern void serial_putchar(char c);
+u32 v86_irq0_inject_count = 0;
+
+static void serial_hex8(u8 val) {
+    const char *hex = "0123456789ABCDEF";
+    serial_putchar(hex[val >> 4]);
+    serial_putchar(hex[val & 0xF]);
+}
+static void serial_hex16(u16 val) {
+    serial_hex8((u8)(val >> 8));
+    serial_hex8((u8)(val & 0xFF));
+}
+static void serial_hex32(u32 val) {
+    serial_hex16((u16)(val >> 16));
+    serial_hex16((u16)(val & 0xFFFF));
+}
+
+/* V86ディスクログエントリ (v86_disk.cと同一レイアウト) */
+struct v86_disk_log_entry {
+    u8  func;
+    u8  daua;
+    u8  cylinder;
+    u8  sector_len;
+    u8  head;
+    u8  sector;
+    u16 xfer_bytes;
+    u16 es;
+    u16 bp;
+    i32 result_offset;
+    u8  status;
+    u8  pad;
+};
+extern struct v86_disk_log_entry *v86_disk_get_log(u32 *count, u32 *idx);
 
 /* exec_setjmp / exec_longjmp (setjmp.asm) */
 extern int exec_setjmp(u32 *buf);
@@ -154,8 +189,15 @@ static int v86_run_com(const u8 *data, u32 size)
     v86_active = 1;
     v86_exit_request = 0;
 
+    /* タイムアウト開始tick設定 */
+    {
+        extern u32 v86_start_tick;
+        extern volatile u32 tick_count;
+        v86_start_tick = tick_count;
+    }
+
     if (exec_setjmp(v86_test_jmpbuf) == 0) {
-        v86_enter(&ctx);
+        kprintf(0x07, "ESP0 is %x\n", kernel_tss.esp0); io_wait(); v86_enter(&ctx);
     }
     /* longjmpで復帰 */
 
@@ -234,56 +276,61 @@ int v86_boot_freedos(const char *path)
 {
     struct v86_context ctx;
     u32 saved_esp0;
-    int fd;
-    u32 fsize;
     u8 *img_buf;
     u8 *ipl_dst;
+    int rd;
 
-    /* 1. FDDイメージをVFS経由でロード */
-    fd = vfs_open(path, 0);
-    if (fd < 0) {
-        kprintf(0xE1, "[V86] FDD image not found: %s\n", path);
+    /* FDDイメージ配置先: 0x500000 (プログラム空間上位)
+     * カーネルブートシーケンス中 (シェル・外部プログラム起動前) のみ安全。
+     * 0x500000 + 0x134000(1.2MB) = 0x634000, 16MBメモリでは安全な範囲。 */
+#define V86_FDD_IMG_ADDR  0x500000UL
+    img_buf = (u8 *)V86_FDD_IMG_ADDR;
+
+    /* 0x500000〜0x634000 を確実に PRESENT+RW にマッピング */
+    {
+        u32 pa;
+        for (pa = V86_FDD_IMG_ADDR; pa < V86_FDD_IMG_ADDR + V86_FDD_IMAGE_SIZE; pa += 0x1000) {
+            paging_set_page(pa, pa, PAGE_RW);
+        }
+    }
+
+    /* VFS パスベースreadでFDDイメージを一括読み込み */
+    rd = vfs_read(path, img_buf, V86_FDD_IMAGE_SIZE);
+    if (rd <= 0) {
+        kprintf(0xE1, "[V86] FDD image read failed: %s (rc=%d)\n", path, rd);
         return -1;
     }
 
-    fsize = vfs_get_size(fd);
-    if (fsize == 0 || fsize > V86_FDD_IMAGE_SIZE) {
-        kprintf(0xE1, "[V86] Invalid image size: %u\n", fsize);
-        vfs_close(fd);
-        return -2;
-    }
-
-    img_buf = (u8 *)kmalloc(fsize);
-    if (!img_buf) {
-        kprintf(0xE1, "[V86] kmalloc failed for FDD image\n");
-        vfs_close(fd);
-        return -3;
-    }
-
-    {
-        int rd = vfs_read_fd(fd, img_buf, fsize);
-        if (rd < 0 || (u32)rd != fsize) {
-            kprintf(0xE1, "[V86] Image read error: %d\n", rd);
-            kfree(img_buf);
-            vfs_close(fd);
-            return -4;
-        }
-    }
-    vfs_close(fd);
-
-    kprintf(0xA1, "[V86] FDD image loaded: %u bytes\n", fsize);
+    kprintf(0xA1, "[V86] FDD image loaded: %d bytes at 0x%x\n", rd, (unsigned)V86_FDD_IMG_ADDR);
 
     /* 2. V86メモリ空間を構築 */
     v86_mem_setup();
 
-    /* 3. PIC/PIT/ディスク仮想化初期化 */
-    v86_pic_init();
-    v86_pit_init();
-    v86_disk_set_image(img_buf, fsize);
+    /* FDIヘッダ判定 */
+    {
+        u32 img_offset = 0;
+        u32 img_data_size = rd;
 
-    /* 4. IPLをV86メモリにコピー (0x1FC00) */
-    ipl_dst = v86_phys_addr(IPL_SEG, 0);
-    kmemcpy(ipl_dst, img_buf, IPL_SIZE);
+        /* FDIヘッダサイズを0x08位置から取得してチェック */
+        if (rd > 0x1000) {
+            u32 hdr_size = *(u32 *)(img_buf + 8);
+            if (hdr_size == 0x1000 || hdr_size == 0x2000) {
+                img_offset = hdr_size;
+                img_data_size = rd - hdr_size;
+                kprintf(0xA1, "[V86] FDI format detected. Header size: 0x%x\n", img_offset);
+            }
+        }
+
+        /* 3. PIC/PIT/ディスク仮想化初期化 */
+        v86_pic_init();
+        v86_pit_init();
+        v86_disk_set_image(img_buf + img_offset, img_data_size);
+
+        /* 4. IPLをV86メモリにコピー (0x1FC00) */
+        ipl_dst = v86_phys_addr(IPL_SEG, 0);
+        kmemcpy(ipl_dst, img_buf + img_offset, IPL_SIZE);
+    }
+
 
     /* 5. V86コンテキスト: IPLエントリ */
     ctx.eip    = 0x0000;
@@ -304,10 +351,50 @@ int v86_boot_freedos(const char *path)
     v86_active = 1;
     v86_exit_request = 0;
 
+    /* デバッグカウンタリセット */
+    {
+        extern u32 v86_int_count, v86_gp_count;
+        extern u32 v86_start_tick;
+        extern u32 v86_timeout_cs, v86_timeout_ip;
+        extern volatile u32 tick_count;
+        extern void v86_trace_reset(void);
+        extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
+        extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
+        extern u32 v86_irq0_ivt_count;
+        extern u32 v86_irq0_gp_inject_count;
+        extern u32 v86_irq0_gp_skip_if, v86_irq0_gp_skip_isr;
+        extern u32 v86_irq0_gp_skip_ivt;
+        v86_int_count = 0;
+        v86_gp_count = 0;
+        v86_irq0_inject_count = 0;
+        v86_irq0_call_count = 0;
+        v86_irq0_nonvm_count = 0;
+        v86_irq0_noif_count = 0;
+        v86_irq0_isr_count = 0;
+        v86_irq0_ivt_count = 0;
+        v86_irq0_gp_inject_count = 0;
+        v86_irq0_gp_skip_if = 0;
+        v86_irq0_gp_skip_isr = 0;
+        v86_irq0_gp_skip_ivt = 0;
+        v86_start_tick = tick_count;
+        v86_timeout_cs = 0;
+        v86_timeout_ip = 0;
+        v86_trace_reset();
+    }
+
     kprintf(0xA1, "[V86] Booting FreeDOS(98) IPL...\n");
 
+    /* INT 1Bh デバッグログをリセット */
+    v86_disk_reset_log();
+
+    /* I/O統計リセット */
+    {
+        extern void v86_reset_io_stats(void);
+        v86_reset_io_stats();
+    }
+
     if (exec_setjmp(v86_test_jmpbuf) == 0) {
-        v86_enter(&ctx);
+        kprintf(0x07, "ESP0 is %x\n", kernel_tss.esp0); io_wait(); v86_enter(&ctx);
     }
 
     /* V86終了後の後始末 */
@@ -316,15 +403,362 @@ int v86_boot_freedos(const char *path)
     v86_pending_irq = 0;
     tss_set_esp0(saved_esp0);
 
-    /* ディスクイメージ解放 */
+    /* V86統計情報をシリアル経由で出力 */
+    {
+        extern u32 v86_int_count, v86_gp_count;
+        extern u32 v86_last_int, v86_last_cs, v86_last_ip;
+        extern u32 v86_timeout_cs, v86_timeout_ip;
+        serial_puts("\r\n[V86 END] ints=");
+        serial_hex32(v86_int_count);
+        serial_puts(" gp=");
+        serial_hex32(v86_gp_count);
+        serial_puts(" last=0x");
+        serial_hex8((u8)v86_last_int);
+        serial_puts(" at ");
+        serial_hex16((u16)v86_last_cs);
+        serial_puts(":");
+        serial_hex16((u16)v86_last_ip);
+        serial_puts("\r\n");
+
+        /* タイムアウト位置の実CS:EIPとオペコードダンプ (常に出力) */
+        {
+            u8 *timeout_addr;
+            int di;
+            serial_puts("[V86 TIMEOUT] real CS:IP=");
+            serial_hex16((u16)v86_timeout_cs);
+            serial_puts(":");
+            serial_hex16((u16)v86_timeout_ip);
+            if (v86_timeout_cs || v86_timeout_ip) {
+                serial_puts(" opcodes=");
+                timeout_addr = v86_phys_addr(v86_timeout_cs, v86_timeout_ip);
+                for (di = 0; di < 16; di++) {
+                    serial_hex8(timeout_addr[di]);
+                    serial_puts(" ");
+                }
+            }
+            serial_puts("\r\n");
+        }
+    }
+
+    /* メモリ領域ダンプ: kernel entry / temp buffers */
+    {
+        u8 *p;
+        int di;
+        /* 0060:0000 = カーネルエントリポイント (物理 0x600) */
+        serial_puts("[MEM] 0060:0000=");
+        p = v86_phys_addr(0x0060, 0x0000);
+        for (di = 0; di < 32; di++) { serial_hex8(p[di]); serial_puts(" "); }
+        serial_puts("\r\n");
+        /* 1E00:0000 = 初期一時バッファ (物理 0x1E000) */
+        serial_puts("[MEM] 1E00:0000=");
+        p = v86_phys_addr(0x1E00, 0x0000);
+        for (di = 0; di < 32; di++) { serial_hex8(p[di]); serial_puts(" "); }
+        serial_puts("\r\n");
+        /* 1994:0000 = 実際の一時バッファ (物理 0x19940) */
+        serial_puts("[MEM] 1994:0000=");
+        p = v86_phys_addr(0x1994, 0x0000);
+        for (di = 0; di < 32; di++) { serial_hex8(p[di]); serial_puts(" "); }
+        serial_puts("\r\n");
+    }
+
+    /* INT 1Bh デバッグログをシリアル出力 */
+    {
+        u32 n, i, start;
+        u32 total_count, log_idx;
+        struct v86_disk_log_entry *log = v86_disk_get_log(&total_count, &log_idx);
+
+        n = (total_count < 64) ? total_count : 64;
+        serial_puts("[V86 DISK] total calls=");
+        serial_hex32(total_count);
+        serial_puts(" showing last ");
+        serial_hex8((u8)n);
+        serial_puts("\r\n");
+
+        if (n > 0) {
+            start = (total_count <= 64) ? 0 : log_idx;
+            for (i = 0; i < n; i++) {
+                u32 idx = (start + i) % 64;
+                struct v86_disk_log_entry *e = &log[idx];
+                serial_puts("  AH=");
+                serial_hex8(e->func);
+                serial_puts(" C=");
+                serial_hex8(e->cylinder);
+                serial_puts(" H=");
+                serial_hex8(e->head);
+                serial_puts(" S=");
+                serial_hex8(e->sector);
+                serial_puts(" BX=");
+                serial_hex16(e->xfer_bytes);
+                serial_puts(" ES:BP=");
+                serial_hex16(e->es);
+                serial_puts(":");
+                serial_hex16(e->bp);
+                serial_puts(" st=");
+                serial_hex8(e->status);
+                serial_puts("\r\n");
+            }
+        }
+    }
+
+    /* I/O統計ダンプ */
+    {
+        extern void v86_dump_io_stats(void);
+        v86_dump_io_stats();
+    }
+
+    /* 仮想PIC最終状態をシリアルに出力 */
+    {
+        extern u8 v86_pic_get_imr(int idx);
+        extern u8 v86_pic_get_isr(int idx);
+        extern u32 v86_pic_get_eoi_count(int idx);
+        serial_puts("[V86 PIC] M.IMR=");
+        serial_hex8(v86_pic_get_imr(0));
+        serial_puts(" M.ISR=");
+        serial_hex8(v86_pic_get_isr(0));
+        serial_puts(" S.IMR=");
+        serial_hex8(v86_pic_get_imr(1));
+        serial_puts(" S.ISR=");
+        serial_hex8(v86_pic_get_isr(1));
+        serial_puts(" irq0=");
+        serial_hex32(v86_irq0_inject_count);
+        serial_puts(" eoi0=");
+        serial_hex32(v86_pic_get_eoi_count(0));
+        serial_puts(" eoi1=");
+        serial_hex32(v86_pic_get_eoi_count(1));
+        serial_puts("\r\n");
+    }
+
+    /* IRQ0注入デバッグカウンタ出力 */
+    {
+        extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
+        extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
+        extern u32 v86_irq0_ivt_count;
+        extern u32 v86_irq0_gp_inject_count;
+        extern u32 v86_irq0_gp_skip_if, v86_irq0_gp_skip_isr;
+        extern u32 v86_irq0_gp_skip_ivt;
+        serial_puts("[V86 IRQ0] call=");
+        serial_hex32(v86_irq0_call_count);
+        serial_puts(" nonvm=");
+        serial_hex32(v86_irq0_nonvm_count);
+        serial_puts(" noif=");
+        serial_hex32(v86_irq0_noif_count);
+        serial_puts(" isr=");
+        serial_hex32(v86_irq0_isr_count);
+        serial_puts(" ivt=");
+        serial_hex32(v86_irq0_ivt_count);
+        serial_puts("\r\n");
+        serial_puts("[V86 IRQ0 GP] inject=");
+        serial_hex32(v86_irq0_gp_inject_count);
+        serial_puts(" skip_isr=");
+        serial_hex32(v86_irq0_gp_skip_isr);
+        serial_puts(" skip_ivt=");
+        serial_hex32(v86_irq0_gp_skip_ivt);
+        serial_puts("\r\n");
+    }
+
+    /* ディスクイメージ参照解除 */
     v86_disk_clear();
-    kfree(img_buf);
 
     /* メモリ空間復元 */
     v86_mem_teardown();
 
     /* 画面リストア */
     v86_restore_screen();
+
+    /* V86統計+ディスクログを /host/v86_disklog.txt に書き出し */
+    {
+        extern u32 v86_int_count, v86_gp_count;
+        extern u32 v86_last_int, v86_last_cs, v86_last_ip;
+        /* 大きめバッファを使って一括書き出し */
+        static char fbuf[4096];
+        int fp = 0;
+        u32 total_count, log_idx_v;
+        struct v86_disk_log_entry *dlog;
+        u32 n, i, start;
+        const char *hx = "0123456789ABCDEF";
+
+        /* ヘッダ行 */
+        {
+            const char *h = "[V86] ints=";
+            int hi;
+            u32 v;
+            char tb[12];
+            int tp;
+            for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
+            v = v86_int_count; tp = 0;
+            if (v == 0) fbuf[fp++] = '0';
+            else { while(v>0){tb[tp++]='0'+(v%10);v/=10;} while(tp>0)fbuf[fp++]=tb[--tp]; }
+            fbuf[fp++] = ' ';
+            h = "gp=";
+            for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
+            v = v86_gp_count; tp = 0;
+            if (v == 0) fbuf[fp++] = '0';
+            else { while(v>0){tb[tp++]='0'+(v%10);v/=10;} while(tp>0)fbuf[fp++]=tb[--tp]; }
+            fbuf[fp++] = ' ';
+            h = "last=";
+            for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
+            fbuf[fp++] = hx[(v86_last_int>>4)&0xF];
+            fbuf[fp++] = hx[v86_last_int&0xF];
+            fbuf[fp++] = ' ';
+            fbuf[fp++] = hx[(v86_last_cs>>12)&0xF];
+            fbuf[fp++] = hx[(v86_last_cs>>8)&0xF];
+            fbuf[fp++] = hx[(v86_last_cs>>4)&0xF];
+            fbuf[fp++] = hx[v86_last_cs&0xF];
+            fbuf[fp++] = ':';
+            fbuf[fp++] = hx[(v86_last_ip>>12)&0xF];
+            fbuf[fp++] = hx[(v86_last_ip>>8)&0xF];
+            fbuf[fp++] = hx[(v86_last_ip>>4)&0xF];
+            fbuf[fp++] = hx[v86_last_ip&0xF];
+            fbuf[fp++] = '\n';
+        }
+
+        fbuf[fp++] = 'I'; fbuf[fp++] = 'n'; fbuf[fp++] = 'j'; fbuf[fp++] = ':';
+        fbuf[fp++] = hx[(v86_irq0_inject_count>>12)&0xF]; fbuf[fp++] = hx[(v86_irq0_inject_count>>8)&0xF];
+        fbuf[fp++] = hx[(v86_irq0_inject_count>>4)&0xF]; fbuf[fp++] = hx[v86_irq0_inject_count&0xF];
+        fbuf[fp++] = '\n';
+
+        /* IRQ0デバッグカウンタをファイルに書き出し */
+        {
+            extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
+            extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
+            extern u32 v86_irq0_ivt_count;
+            extern u32 v86_irq0_gp_inject_count;
+            extern u32 v86_irq0_gp_skip_isr, v86_irq0_gp_skip_ivt;
+            extern u8 v86_pic_get_imr(int idx);
+            extern u8 v86_pic_get_isr(int idx);
+            extern u32 v86_pic_get_eoi_count(int idx);
+            /* IRQ0直接注入カウンタ */
+            { const char *s = "IRQ0:call="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_call_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>24)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_call_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>16)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_call_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_call_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_call_count&0xF];
+            { const char *s = " nonvm="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_nonvm_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>24)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_nonvm_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>16)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_nonvm_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_nonvm_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_nonvm_count&0xF];
+            { const char *s = " noif="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_noif_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>24)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_noif_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>16)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_noif_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_noif_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_noif_count&0xF];
+            { const char *s = " isr="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_isr_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>24)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_isr_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>16)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_isr_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_isr_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_isr_count&0xF];
+            { const char *s = " ivt="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_ivt_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>24)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_ivt_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>16)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_ivt_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_ivt_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_ivt_count&0xF];
+            fbuf[fp++] = '\n';
+            /* GP保留注入カウンタ */
+            { const char *s = "GP:skip_isr="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_gp_skip_isr&0xF];
+            { const char *s = " skip_ivt="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>8)&0xF];
+            fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_gp_skip_ivt&0xF];
+            fbuf[fp++] = '\n';
+            /* PIC状態 */
+            { const char *s = "PIC:M.IMR="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[v86_pic_get_imr(0)>>4]; fbuf[fp++]=hx[v86_pic_get_imr(0)&0xF];
+            { const char *s = " M.ISR="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[v86_pic_get_isr(0)>>4]; fbuf[fp++]=hx[v86_pic_get_isr(0)&0xF];
+            { const char *s = " eoi0="; int si; for(si=0;s[si];si++)fbuf[fp++]=s[si]; }
+            fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>12)&0xF]; fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>8)&0xF];
+            fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>4)&0xF]; fbuf[fp++]=hx[v86_pic_get_eoi_count(0)&0xF];
+            fbuf[fp++] = '\n';
+        }
+
+        /* タイムアウト位置の実CS:EIPとオペコードダンプ */
+        {
+            extern u32 v86_timeout_cs, v86_timeout_ip;
+            if (v86_timeout_cs || v86_timeout_ip) {
+                u8 *taddr;
+                int di;
+                const char *tp2 = "TOUT:";
+                for (di = 0; tp2[di]; di++) fbuf[fp++] = tp2[di];
+                fbuf[fp++] = hx[(v86_timeout_cs>>12)&0xF]; fbuf[fp++] = hx[(v86_timeout_cs>>8)&0xF];
+                fbuf[fp++] = hx[(v86_timeout_cs>>4)&0xF]; fbuf[fp++] = hx[v86_timeout_cs&0xF];
+                fbuf[fp++] = ':';
+                fbuf[fp++] = hx[(v86_timeout_ip>>12)&0xF]; fbuf[fp++] = hx[(v86_timeout_ip>>8)&0xF];
+                fbuf[fp++] = hx[(v86_timeout_ip>>4)&0xF]; fbuf[fp++] = hx[v86_timeout_ip&0xF];
+                fbuf[fp++] = ' ';
+                taddr = v86_phys_addr(v86_timeout_cs, v86_timeout_ip);
+                for (di = 0; di < 32 && fp < 3800; di++) {
+                    fbuf[fp++] = hx[taddr[di]>>4];
+                    fbuf[fp++] = hx[taddr[di]&0xF];
+                    fbuf[fp++] = ' ';
+                }
+                fbuf[fp++] = '\n';
+            }
+        }
+        /* ディスクログ */
+        dlog = (struct v86_disk_log_entry *)v86_disk_get_log(&total_count, &log_idx_v);
+        n = (total_count < 64) ? total_count : 64;
+        start = (total_count <= 64) ? 0 : log_idx_v;
+        for (i = 0; i < n && fp < 3900; i++) {
+            u32 ix = (start + i) % 64;
+            struct v86_disk_log_entry *e = (struct v86_disk_log_entry *)&dlog[ix];
+            fbuf[fp++] = hx[e->func>>4]; fbuf[fp++] = hx[e->func&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = 'C'; fbuf[fp++] = hx[e->cylinder>>4]; fbuf[fp++] = hx[e->cylinder&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = 'H'; fbuf[fp++] = hx[e->head>>4]; fbuf[fp++] = hx[e->head&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = 'S'; fbuf[fp++] = hx[e->sector>>4]; fbuf[fp++] = hx[e->sector&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = 'N'; fbuf[fp++] = hx[e->sector_len>>4]; fbuf[fp++] = hx[e->sector_len&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = hx[(e->xfer_bytes>>12)&0xF]; fbuf[fp++] = hx[(e->xfer_bytes>>8)&0xF];
+            fbuf[fp++] = hx[(e->xfer_bytes>>4)&0xF]; fbuf[fp++] = hx[e->xfer_bytes&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = hx[(e->es>>12)&0xF]; fbuf[fp++] = hx[(e->es>>8)&0xF];
+            fbuf[fp++] = hx[(e->es>>4)&0xF]; fbuf[fp++] = hx[e->es&0xF]; fbuf[fp++] = ':';
+            fbuf[fp++] = hx[(e->bp>>12)&0xF]; fbuf[fp++] = hx[(e->bp>>8)&0xF];
+            fbuf[fp++] = hx[(e->bp>>4)&0xF]; fbuf[fp++] = hx[e->bp&0xF]; fbuf[fp++] = ' ';
+            fbuf[fp++] = hx[e->status>>4]; fbuf[fp++] = hx[e->status&0xF];
+            fbuf[fp++] = '\n';
+            fbuf[fp++] = '\n';
+        }
+
+        fbuf[fp] = '\0';
+        vfs_write("/host/v86_fdos_log.txt", fbuf, (u32)fp);
+    }
+
+    /* V86 GPトレース(直近128件)を /host/v86_gptrace.txt に書き出し */
+    {
+        struct v86_trace_entry {
+            u16 cs; u16 ip; u8 opcode; u8 intno; u8 ah; u8 al;
+        };
+        extern struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx);
+        static char tbuf[8192];
+        int tp = 0;
+        u32 total, tidx;
+        struct v86_trace_entry *tlog;
+        u32 tn, ti, tstart;
+        const char *hx = "0123456789ABCDEF";
+
+        tlog = v86_get_trace(&total, &tidx);
+        tn = (total < 128) ? total : 128;
+        tstart = (total <= 128) ? 0 : tidx;
+        for (ti = 0; ti < tn && tp < 7900; ti++) {
+            u32 tix = (tstart + ti) % 128;
+            struct v86_trace_entry *te = &tlog[tix];
+            tbuf[tp++] = hx[te->cs>>12]; tbuf[tp++] = hx[(te->cs>>8)&0xF];
+            tbuf[tp++] = hx[(te->cs>>4)&0xF]; tbuf[tp++] = hx[te->cs&0xF];
+            tbuf[tp++] = ':';
+            tbuf[tp++] = hx[te->ip>>12]; tbuf[tp++] = hx[(te->ip>>8)&0xF];
+            tbuf[tp++] = hx[(te->ip>>4)&0xF]; tbuf[tp++] = hx[te->ip&0xF];
+            tbuf[tp++] = ' ';
+            tbuf[tp++] = hx[te->opcode>>4]; tbuf[tp++] = hx[te->opcode&0xF];
+            tbuf[tp++] = ' ';
+            tbuf[tp++] = hx[te->intno>>4]; tbuf[tp++] = hx[te->intno&0xF];
+            tbuf[tp++] = ' ';
+            tbuf[tp++] = hx[te->ah>>4]; tbuf[tp++] = hx[te->ah&0xF];
+            tbuf[tp++] = hx[te->al>>4]; tbuf[tp++] = hx[te->al&0xF];
+            tbuf[tp++] = '\n';
+        }
+        tbuf[tp] = '\0';
+        vfs_write("/host/v86_gptrace.txt", tbuf, (u32)tp);
+    }
 
     kprintf(0xA1, "[V86] FreeDOS(98) session ended.\n");
     return 0;

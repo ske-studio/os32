@@ -14,6 +14,29 @@
 extern volatile int exec_nest_level;
 extern void exec_fault_recover(void);
 
+#include "serial.h"
+
+/* シリアルポートにもログを出力するためのヘルパー */
+static void sputs(const char *str)
+{
+    serial_puts_polled(str);
+}
+
+static void sput_hex32(u32 val)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[11];
+    int i;
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (i = 7; i >= 0; i--) {
+        buf[i+2] = hex[val & 0xF];
+        val >>= 4;
+    }
+    buf[10] = '\0';
+    serial_puts_polled(buf);
+}
+
 /* テキストVRAM直接アクセス (ベアメタル) */
 #define TVRAM_CHAR  ((volatile u16 *)0xA0000UL)
 #define TVRAM_ATTR  ((volatile u16 *)0xA2000UL)
@@ -227,12 +250,19 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
     }
 
     tvram_puts_at(row,   0, "==== PAGE FAULT (#PF) ====", 0x41);
+    sputs("\n\n==== PAGE FAULT (#PF) ====\n");
+    
     tvram_puts_at(row+1, 0, " Addr: 0x", 0xE1);
     tvram_put_hex32(row+1, 9, fault_addr, 0xE1);
+    sputs("Addr: "); sput_hex32(fault_addr);
+    
     tvram_puts_at(row+1, 18, " ErrC: 0x", 0xE1);
     tvram_put_hex32(row+1, 27, error_code, 0xE1);
+    sputs(" ErrC: "); sput_hex32(error_code); sputs("\n");
+    
     tvram_puts_at(row+2, 0, " EIP:  0x", 0xE1);
     tvram_put_hex32(row+2, 9, fault_eip, 0xE1);
+    sputs("EIP:  "); sput_hex32(fault_eip);
 
     /* EIPがコードセクション内かチェック */
     {
@@ -241,48 +271,70 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         u32 sq_e = (u32)&__sqlite_end;
         if (fault_eip >= sq_s && fault_eip < sq_e) {
             tvram_puts_at(row+2, 18, "[.sqlite_text]", 0xA1);
+            sputs(" [.sqlite_text]\n");
         } else if (fault_eip >= KERNEL_LOAD_ADDR && fault_eip < 0x200000) {
             tvram_puts_at(row+2, 18, "[.text]", 0xA1);
+            sputs(" [.text]\n");
         } else {
             tvram_puts_at(row+2, 18, "[OUT OF CODE!]", 0xC1);
+            sputs(" [OUT OF CODE!]\n");
         }
     }
 
     /* 原因 */
     tvram_puts_at(row+3, 0, " Cause: ", 0xE1);
+    sputs("Cause: ");
     if (error_code & 0x02) {
         tvram_puts_at(row+3, 8, "WRITE ", 0xC1);
+        sputs("WRITE ");
     } else {
         tvram_puts_at(row+3, 8, "READ  ", 0xC1);
+        sputs("READ  ");
     }
     if (error_code & 0x01) {
         tvram_puts_at(row+3, 14, "R/O page", 0xC1);
+        sputs("R/O page\n");
     } else {
         tvram_puts_at(row+3, 14, "Not-Present", 0xC1);
+        sputs("Not-Present\n");
     }
 
     /* レジスタダンプ (PUSHADの保存順序: EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX) */
     tvram_puts_at(row+4, 0, " EAX=", 0xC1);
     tvram_put_hex32(row+4, 5, regs[7], 0xC1);
+    sputs("EAX="); sput_hex32(regs[7]);
+    
     tvram_puts_at(row+4, 14, " EBX=", 0xC1);
     tvram_put_hex32(row+4, 19, regs[4], 0xC1);
+    sputs(" EBX="); sput_hex32(regs[4]);
+    
     tvram_puts_at(row+4, 28, " ECX=", 0xC1);
     tvram_put_hex32(row+4, 33, regs[6], 0xC1);
+    sputs(" ECX="); sput_hex32(regs[6]); sputs("\n");
 
     tvram_puts_at(row+5, 0, " EDX=", 0xC1);
     tvram_put_hex32(row+5, 5, regs[5], 0xC1);
+    sputs("EDX="); sput_hex32(regs[5]);
+    
     tvram_puts_at(row+5, 14, " ESI=", 0xC1);
     tvram_put_hex32(row+5, 19, regs[1], 0xC1);
+    sputs(" ESI="); sput_hex32(regs[1]);
+    
     tvram_puts_at(row+5, 28, " EDI=", 0xC1);
     tvram_put_hex32(row+5, 33, regs[0], 0xC1);
+    sputs(" EDI="); sput_hex32(regs[0]); sputs("\n");
 
     tvram_puts_at(row+6, 0, " EBP=", 0xC1);
     tvram_put_hex32(row+6, 5, regs[2], 0xC1);
+    sputs("EBP="); sput_hex32(regs[2]);
+    
     tvram_puts_at(row+6, 14, " ESP=", 0xC1);
     tvram_put_hex32(row+6, 19, regs[3], 0xC1);
+    sputs(" ESP="); sput_hex32(regs[3]); sputs("\n");
 
     /* EBPチェーンによるスタックトレース (最大8フレーム) */
     tvram_puts_at(row+7, 0, "---- Stack Trace ----", 0xE1);
+    sputs("---- Stack Trace ----\n");
     {
         u32 ebp = regs[2]; /* 保存された EBP */
         int frame;
@@ -298,10 +350,15 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
             ret_addr = *(u32 *)(ebp + 4);
             tvram_puts_at(tr, 0, " #", 0xA1);
             tvram_put_hex32(tr, 2, (u32)frame, 0xA1);
-            tvram_puts_at(tr, 10, " ret=0x", 0xA1);
-            tvram_put_hex32(tr, 17, ret_addr, 0xA1);
-            tvram_puts_at(tr, 26, " ebp=0x", 0xA1);
-            tvram_put_hex32(tr, 33, prev_ebp, 0xA1);
+            tvram_puts_at(tr, 10, " ret=", 0xA1);
+            tvram_put_hex32(tr, 15, ret_addr, 0xA1);
+            tvram_puts_at(tr, 26, " ebp=", 0xA1);
+            tvram_put_hex32(tr, 31, prev_ebp, 0xA1);
+            
+            sputs("#"); sput_hex32((u32)frame);
+            sputs(" ret="); sput_hex32(ret_addr);
+            sputs(" ebp="); sput_hex32(prev_ebp); sputs("\n");
+            
             tr++;
             ebp = prev_ebp;
         }
@@ -313,6 +370,7 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         u32 esp = regs[3];
         int wi;
         tvram_puts_at(dr, 0, "---- Stack Dump (ESP) ----", 0xE1);
+        sputs("---- Stack Dump (ESP) ----\n");
         dr++;
         for (wi = 0; wi < 8 && dr < 21; wi += 2) {
             u32 addr0 = esp + (u32)wi * 4;
@@ -321,13 +379,18 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
                 tvram_put_hex32(dr, 0, addr0, 0x07);
                 tvram_puts_at(dr, 9, ":", 0x07);
                 tvram_put_hex32(dr, 10, *(u32 *)addr0, 0xE1);
+                
+                sput_hex32(addr0); sputs(":"); sput_hex32(*(u32 *)addr0);
             }
             if (paging_is_present(addr1)) {
                 tvram_puts_at(dr, 19, " ", 0x07);
                 tvram_put_hex32(dr, 20, addr1, 0x07);
                 tvram_puts_at(dr, 29, ":", 0x07);
                 tvram_put_hex32(dr, 30, *(u32 *)addr1, 0xE1);
+                
+                sputs("  "); sput_hex32(addr1); sputs(":"); sput_hex32(*(u32 *)addr1);
             }
+            sputs("\n");
             dr++;
         }
     }
@@ -353,13 +416,15 @@ extern void snd_tick(void);  /* kernel/snd_engine.c */
 extern volatile int v86_active;
 extern void v86_set_pending_irq(int irq_no);
 
-void timer_handler(void)
+extern void v86_inject_timer_irq(u32 *regs);
+
+void timer_handler(u32 *regs)
 {
     snd_tick();
 
     /* V86モード中: IRQ0 (INT 08h) をV86タスクにリフレクト予約 */
     if (v86_active) {
-        v86_set_pending_irq(0);
+        v86_inject_timer_irq(regs);
     }
 }
 

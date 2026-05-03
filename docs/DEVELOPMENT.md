@@ -43,6 +43,7 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **libos32snd**: FM/SSGサウンドライブラリ。BGMシーケンサ、SE再生。
 - **UTF-16LE変換**: HostDrvFS通信用のUTF-8/UTF-16LE相互変換ライブラリ (kutf16)。
 - **HostDrvデプロイワークフロー**: `hostdrv_deploy.py` + `deploy.yaml` によるsudo不要の高速デプロイ。
+- **V86サブシステム (VDOS)**: Virtual-8086モードによるリアルモードDOS実行環境。GP#ハンドラ、バッキングRAMページリマップ、仮想PIC/PIT、INT 18h/1Bh/1Ch BIOS仮想化、IRQ0/1注入。FreeDOS(98) IPL→カーネルロードまで成功。
 
 ---
 
@@ -89,9 +90,10 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 | 0xF0000-0xFFFFF | BIOS ROM | Read-Only |
 | 0x100000-0x1FFFFF | カーネル帯域 (1MB) | code+heap+KAPI+SHM (動的レイアウト) |
 | 0x200000-0x2FFFFF | SQLite帯域 (1MB) | code+BSS+代替スタック(128KB) |
-| 0x300000-0x3FFFFF | シェル常駐帯域 (1MB) | shell.bin専用, ガードページ付き |
+| 0x300000-0x3FFFFF | シェル常駐帯域 / V86バッキングRAM (1MB) | V86起動時: 0x300000-0x39FFFFがバッキングRAM |
 | 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
 | 0x400000- | 外部プログラム | コードロード領域 (最大1MB) |
+| 0x500000-0x634000 | FDDイメージバッファ | V86起動時のみ使用 (1.2MB) |
 | 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, 動的計算) |
 | 動的〜 | プログラムスタック | 256KB, メモリ終端付近に配置 |
 
@@ -134,14 +136,85 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ---
 
-## 8. 未着手・将来課題
+## 8. V86サブシステム (VDOS)
+
+Virtual-8086モードを利用してリアルモードDOS (FreeDOS(98)) をOS32上で実行するサブシステム。
+
+### アーキテクチャ概要
+
+```
+[FreeDOS(98) — V86タスク]
+  ├── CLI/STI/INT/IRET/PUSHF/POPF → GP# → v86.c (GPハンドラ)
+  ├── IN/OUT → GP# → v86_pic_io / v86_pit_io (仮想化)
+  ├── INT 18h → v86_bios.c (テキスト画面/キーボード BIOS)
+  ├── INT 1Bh → v86_disk.c (ディスク BIOS)
+  ├── INT 1Ch → v86_bios.c (カレンダ BIOS)
+  └── IRQ0/1 → v86_inject_timer_irq / v86_set_pending_irq (注入)
+```
+
+### V86メモリマップ
+
+| 仮想アドレス | 実物理アドレス | 用途 |
+|-------------|--------------|------|
+| 0x00000-0x9FFFF | 0x300000-0x39FFFF | バッキングRAM (IVT/BDA/コードデータ) |
+| 0xA0000-0xEFFFF | 0xA0000-0xEFFFF | VRAM (アイデンティティマップ) |
+| 0xF0000-0xFFFFF | 0xF0000-0xFFFFF | BIOS ROM (アイデンティティマップ) |
+| 0x500000-0x634000 | 0x500000-0x634000 | FDDイメージバッファ (カーネル空間) |
+
+- **バッキングRAM**: `v86_mem_setup()` でページテーブルを書き換え、仮想0x00000-0x9FFFFを物理0x300000+にリマップ
+- **`v86_phys_addr(seg, off)`**: V86セグメント:オフセットをカーネル用リニアアドレスに変換。0xA0000未満は全てバッキングRAM経由
+
+### 仮想PIC (8259A)
+
+`v86_pic.c` で PC-98 の PIC (マスタ 0x00/0x02, スレーブ 0x08/0x0A) を仮想化。
+
+- **ICWシーケンス管理**: ICW1受信→ICW2/3/4をスキップ→シーケンス完了後のデータポート書き込みのみIMRに反映
+- **EOI処理**: 非特殊EOI (0x20) で ISR の最高優先度ビットをクリア、特殊EOI (0x60+n) で指定ビットをクリア
+- **OCW3**: ISR/IRR 読み出しモード切り替え
+- **初期IMR**: 0xFF (全マスク)。FreeDOS が PIC 初期化シーケンスで更新
+
+### IRQ注入フロー
+
+```
+[物理IRQ0 (タイマ 100Hz)]
+  └── isr_stub.asm → timer_handler → v86_inject_timer_irq()
+        ├── v86_virtual_if = 0 → v86_set_pending_irq(0) [保留]
+        ├── ISR bit0 = 1 → 保留 [再帰防止]
+        ├── IVT[0x08] = 初期値 → 保留 [未初期化保護]
+        └── → V86スタック書換え → IVT[0x08]ハンドラへジャンプ
+
+[保留IRQ — GPハンドラ末尾]
+  └── v86_virtual_if = 1 かつ v86_pending_irq ≠ 0
+        ├── ISR 再帰チェック
+        ├── IVT ダミーチェック (0x0060:0x0000 = 初期値)
+        └── → V86レジスタ書換え → ハンドラへジャンプ
+```
+
+> **IMRチェックは行わない**: IVTダミーチェックで未初期化保護を担い、ゲストIMR設定に依存しない設計。
+
+### ソースファイル構成
+
+| ファイル | 行数目安 | 内容 |
+|---------|---------|------|
+| `kernel/v86.c` | ~920行 | GP#ハンドラ、IRQ注入、I/Oエミュレーション |
+| `kernel/v86_entry.asm` | ~100行 | V86モード遷移/復帰 (IRETD) |
+| `kernel/v86_mem.c` | ~530行 | ページテーブル構築、IVT/BDA初期化、v86_phys_addr |
+| `kernel/v86_bios.c` | ~540行 | INT 18h (テキスト/キーボード)、INT 1Ch (カレンダ) |
+| `kernel/v86_disk.c` | ~230行 | INT 1Bh (ディスク読み書き) |
+| `kernel/v86_pic.c` | ~230行 | 仮想PIC (ICWシーケンス管理含む) |
+| `kernel/v86_pit.c` | ~120行 | 仮想PIT (カウンタ読み出し) |
+| `kernel/v86_test.c` | ~660行 | テストエントリ、FreeDOSブートエントリ |
+
+---
+
+## 9. 未着手・将来課題
 
 - **ライブラリのコールバック化**: `lib/path.c` が `dev_find` (ドライバ層) に依存している問題を、関数ポインタの登録制にリファクタリングして疎結合にする。
 - **タイムアウトループのタイマーベース移行**: `ide.c`などで使われている `IDE_TIMEOUT_LOOP` 等のビジーループを、CPUクロック非依存のタイマー待ち(`kdelay_us` 又は `kdelay_ms`)へ置換する。
 
 ---
 
-## 9. `exec_run` のリファクタリング制約
+## 10. `exec_run` のリファクタリング制約
 
 `exec_run()` は約280行の大きな関数だが、以下の理由により**関数分割は行わない**方針とする。
 
@@ -162,7 +235,7 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ---
 
-## 10. 文字列ユーティリティ
+## 11. 文字列ユーティリティ
 
 > コーディング規約の全体は [POLICY_DEV.md §2](POLICY_DEV.md) を参照。
 
@@ -188,4 +261,4 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ---
 
-*OS32 Technical Guide — Updated: 2026-04-29*
+*OS32 Technical Guide — Updated: 2026-05-03*

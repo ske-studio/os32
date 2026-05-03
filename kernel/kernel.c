@@ -435,8 +435,111 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             tvram_print(11, 5, "FAIL", TATTR_RED);
         }
     }
+    
+    /* FreeDOS(98) FDDイメージブートテスト */
+    {
+        extern int v86_boot_freedos(const char *path);
+        extern u32 v86_int_count, v86_last_int, v86_last_cs, v86_last_ip;
+        extern u32 v86_gp_count;
+        int fdos_rc;
+        
+        tvram_print(0, 6, "FDOS BOOT...", TATTR_GREEN);
+        fdos_rc = v86_boot_freedos("/dos5_1.fdi");
+        if (fdos_rc == 0) {
+            tvram_print(12, 6, "OK", TATTR_WHITE);
+        } else {
+            char ebuf[8];
+            ebuf[0] = 'E';
+            ebuf[1] = '0' + ((-fdos_rc) % 10);
+            ebuf[2] = '\0';
+            tvram_print(12, 6, ebuf, TATTR_RED);
+        }
+        
+        /* ログ書き出し */
+        {
+            char logbuf[128];
+            int lp = 0;
+            char hex2[] = "0123456789ABCDEF";
 
-    /* ブートスプラッシュ表示 (カーネル内蔵) */
+            /* "[V86] rc=X ints=NNNN last=INT XXh at XXXX:XXXX\n" を構築 */
+            {
+                const char *prefix = "[V86] rc=";
+                int pi;
+                for (pi = 0; prefix[pi]; pi++) logbuf[lp++] = prefix[pi];
+            }
+            logbuf[lp++] = fdos_rc >= 0 ? ('0' + fdos_rc) : '-';
+            if (fdos_rc < 0) logbuf[lp++] = '0' + ((-fdos_rc) % 10);
+
+            {
+                const char *s2 = " ints=";
+                int s2i;
+                u32 n = v86_int_count;
+                char tmp2[12];
+                int tp2 = 0;
+                for (s2i = 0; s2[s2i]; s2i++) logbuf[lp++] = s2[s2i];
+                if (n == 0) { logbuf[lp++] = '0'; }
+                else {
+                    while (n > 0) { tmp2[tp2++] = '0' + (n % 10); n /= 10; }
+                    while (tp2 > 0) logbuf[lp++] = tmp2[--tp2];
+                }
+            }
+
+            {
+                const char *s3 = " last=INT ";
+                int s3i;
+                for (s3i = 0; s3[s3i]; s3i++) logbuf[lp++] = s3[s3i];
+            }
+            logbuf[lp++] = hex2[(v86_last_int >> 4) & 0xF];
+            logbuf[lp++] = hex2[v86_last_int & 0xF];
+            {
+                const char *s4 = "h at ";
+                int s4i;
+                for (s4i = 0; s4[s4i]; s4i++) logbuf[lp++] = s4[s4i];
+            }
+            logbuf[lp++] = hex2[(v86_last_cs >> 12) & 0xF];
+            logbuf[lp++] = hex2[(v86_last_cs >> 8) & 0xF];
+            logbuf[lp++] = hex2[(v86_last_cs >> 4) & 0xF];
+            logbuf[lp++] = hex2[v86_last_cs & 0xF];
+            logbuf[lp++] = ':';
+            logbuf[lp++] = hex2[(v86_last_ip >> 12) & 0xF];
+            logbuf[lp++] = hex2[(v86_last_ip >> 8) & 0xF];
+            logbuf[lp++] = hex2[(v86_last_ip >> 4) & 0xF];
+            logbuf[lp++] = hex2[v86_last_ip & 0xF];
+            /* gp_count を追加 */
+            {
+                const char *s5 = " gp=";
+                int s5i;
+                u32 n2 = v86_gp_count;
+                char tmp3[12];
+                int tp3 = 0;
+                for (s5i = 0; s5[s5i]; s5i++) logbuf[lp++] = s5[s5i];
+                if (n2 == 0) { logbuf[lp++] = '0'; }
+                else {
+                    while (n2 > 0) { tmp3[tp3++] = '0' + (n2 % 10); n2 /= 10; }
+                    while (tp3 > 0) logbuf[lp++] = tmp3[--tp3];
+                }
+            }
+            /* IRQ0カウンタを追加 */
+            {
+                extern u32 v86_irq0_inject_count;
+                const char *s6 = " irq=";
+                int s6i;
+                u32 n3 = v86_irq0_inject_count;
+                char tmp4[12];
+                int tp4 = 0;
+                for (s6i = 0; s6[s6i]; s6i++) logbuf[lp++] = s6[s6i];
+                if (n3 == 0) { logbuf[lp++] = '0'; }
+                else {
+                    while (n3 > 0) { tmp4[tp4++] = '0' + (n3 % 10); n3 /= 10; }
+                    while (tp4 > 0) logbuf[lp++] = tmp4[--tp4];
+                }
+            }
+            logbuf[lp++] = '\n';
+            logbuf[lp] = '\0';
+
+            vfs_write("/host/v86_log.txt", logbuf, (u32)lp);
+        }
+    }
     boot_splash();
 
 

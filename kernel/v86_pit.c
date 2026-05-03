@@ -30,7 +30,11 @@ struct pit_counter {
 
 static struct pit_counter counters[3];
 
-/* PC-98デフォルト: 100Hz (クロック÷100 = 19968 = 0x4E00) */
+/* PC-98デフォルト: 100Hz
+ * UNDOCUMENTED io_tcu.md:
+ *   5M/10MHz系 (BDA 0501h bit7=0) → 入力クロック 1.9968MHz → 0x4E00
+ *   8MHz系     (BDA 0501h bit7=1) → 入力クロック 2.4576MHz → 0x6000
+ * NP21/Wは5M/10MHz系相当 (BDA 0501h=0x24, bit7=0) のため 0x4E00 を使用 */
 #define DEFAULT_RELOAD  0x4E00
 
 /* ====================================================================== */

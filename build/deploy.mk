@@ -11,6 +11,8 @@ deploy: vmkernel.lz4 programs unicode_bin
 # deploy-kernel: vmkernel.lz4をext2に配置 (NP21/W再起動が必要)
 #   ブートローダー自体の変更時は deploy-boot を先に実行すること
 deploy-kernel: vmkernel.lz4
+	@echo "=== Sync to HostDrv before NHD deploy ==="
+	$(HOSTDRV_DEPLOY) sync
 	$(NHD_DEPLOY) sync-from-hostdrv
 	$(NHD_DEPLOY) deploy
 

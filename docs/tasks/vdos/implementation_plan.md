@@ -12,8 +12,7 @@ DOSコマンドプロンプトを提供する。`exit` でOS32シェルに復帰
 |-------|------|------|
 | Phase 0 | TSS + V86基盤 + カーネル統合テスト | ✅ 完了 |
 | Phase 1 | V86メモリ空間 + 最小COMファイル実行 | ✅ 完了 |
-| Phase 2 | FreeDOS(98) + コマンドプロンプト | 🔄 進行中 |
-| Phase 2 | FreeDOS(98) + コマンドプロンプト | 未着手 |
+| Phase 2 | FreeDOS(98) + コマンドプロンプト | 🔄 進行中 (IPL通過→カーネルハング→デバッグ環境構築完了) |
 | Phase 3 | VZ Editor 動作 | 未着手 |
 
 ### Phase 0 完了事項
@@ -238,17 +237,28 @@ OS32のV86モニタが検知し `longjmp` でOS32シェルに復帰する。
 
 ### Phase 2: FreeDOS(98) ブート — 進行中
 
-1. FreeDOS(98) KERNEL.SYS ローダー (VFS経由読み込み)
-2. INT 1Bh ディスクBIOS → VFS ブリッジ
-3. INT 08h タイマ割り込みリフレクト (100Hz)
+1. ✅ FreeDOS(98) KERNEL.SYS ローダー (VFS経由 FDDイメージ読み込み)
+2. ✅ INT 1Bh ディスクBIOS → VFS ブリッジ (AH=01h/03h/04h/05h/06h/07h/46h/56h/84h)
+3. ✅ INT 08h タイマ割り込みリフレクト (100Hz, ISR/IMRガード付き)
 4. INT 09h キーボード割り込みリフレクト
-5. ✅ PIC仮想化 (EOI/IMR/IRR エミュレーション)
-6. PIT仮想化 (Counter#0 モード設定・読み出し)
+5. ✅ PIC仮想化 (EOI/IMR/IRR/ISR エミュレーション)
+6. ✅ PIT仮想化 (Counter#0/1/2 モード設定・読み出し)
 7. ✅ INT 1Ch カレンダBIOS (日時取得)
-8. INT 11h (機器構成取得) / INT 12h (メモリサイズ)
+8. ✅ INT 11h (機器構成取得) / INT 12h (メモリサイズ)
 9. ✅ `OUT F0h` リブート検知 → DOS→OS32復帰
-10. GRCG OFF + パレットリセット + 画面リストア
-11. **検証**: FreeDOS(98) プロンプト起動、`dir`/`type`/`exit` 動作
+10. ✅ GRCG OFF + パレットリセット + 画面リストア
+11. ✅ fdkernel ソースビルド環境構築 (OpenWatcom + WSLハイブリッド)
+12. ✅ BDA/メモリスイッチ追加初期化 (0x0458/0x0482/0x055D/0x03FE/0x05AE + TVRAM MEMSW)
+13. ✅ INT 18h BIOS拡充 (AH=0Eh/14h/15h/17h/1Ah/1Bh/40h/41h/42h/43h)
+14. ✅ V86タイムアウトベース制御 (10秒)
+15. 🔄 カーネル初期化ハング箇所特定 → デバッグ中
+16. **検証**: FreeDOS(98) プロンプト起動、`dir`/`type`/`exit` 動作
+
+> [!NOTE]
+> **Phase 2 現在地**: IPL正常動作 → kernel.sys正常ロード → カーネル初期化実行中。
+> タイムアウトをカウントベースからtick_countベース(10秒)に変更し、
+> BDA追加初期化 + INT 18h BIOS拡充を実施。テスト待ち。
+> 詳細: [freedos98_boot_debug_report.md](freedos98_boot_debug_report.md)
 
 ### Phase 3: VZ Editor 動作 — 2〜3週間
 
@@ -291,12 +301,24 @@ VZ Editor はPC-98用の定番CUIテキストエディタ。動作要件:
 | [v86.h](file:///mnt/c/WATCOM/src/os32/kernel/v86.h) | V86コンテキスト定義 |
 | [v86_mem.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_mem.c) | V86メモリ構築、BDA/IVT初期化 |
 | [v86_bios.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_bios.c) | BIOS割り込みエミュレータ (INT 18h, 29h, 1Ch等) |
+| [v86_disk.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_disk.c) | INT 1Bh ディスクBIOS (FDD 2HD) |
+| [v86_disk.h](file:///mnt/c/WATCOM/src/os32/kernel/v86_disk.h) | ディスクBIOSヘッダ |
 | [v86_pic.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_pic.c) | V86向けPIC仮想化ロジック |
+| [v86_pit.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_pit.c) | PIT仮想化 (Counter#0/1/2) |
 | [v86_test.c](file:///mnt/c/WATCOM/src/os32/kernel/v86_test.c) | カーネル統合V86テスト |
 | [v86_entry.asm](file:///mnt/c/WATCOM/src/os32/kernel/v86_entry.asm) | IRET によるV86モード遷移 |
 | [isr_stub.asm](file:///mnt/c/WATCOM/src/os32/kernel/isr_stub.asm) | #GP/#PFスタブ (V86 DS/ES復元含む)、全IRQスタブDS/ES対応 |
 | [tss.c](file:///mnt/c/WATCOM/src/os32/kernel/tss.c) | TSS構造体・I/Oビットマップ |
 | [paging.c](file:///mnt/c/WATCOM/src/os32/kernel/paging.c) | PDE/PTEフラグ操作 |
+
+### FreeDOS(98) ビルド環境
+
+| ファイル | 説明 |
+|----------|------|
+| [build98.sh](file:///mnt/c/WATCOM/src/os32/tools/fdkernel/nec98/build98.sh) | ハイブリッドビルドスクリプト (WSL+cmd.exe) |
+| [fdkernel_build.md](fdkernel_build.md) | ビルド手順書 |
+| `tools/fdkernel/nec98/bin/kernel.sys` | カスタムビルド版カーネル (DEBUG) |
+| `tools/freedos98/fd98_2hd.img` | FreeDOS(98) 2HD FDDイメージ (1.2MB) |
 
 ### PoC / テスト
 

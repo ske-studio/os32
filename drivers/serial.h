@@ -83,6 +83,8 @@
 void serial_init(unsigned long baud);
 void serial_putchar(char c);
 void serial_puts(const char *str);
+void serial_puts_polled(const char *str);
+void serial_put_hex32_polled(u32 val);
 int  serial_getchar(void);     /* ブロッキング */
 int  serial_trygetchar(void);  /* ノンブロッキング: -1=なし */
 int  serial_has_data(void);    /* 受信バッファにデータがあるか */

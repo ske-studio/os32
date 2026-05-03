@@ -8,7 +8,7 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
 C_KERNEL = \
-    kernel/kernel.c kernel/gdt.c kernel/tss.c kernel/v86.c kernel/v86_mem.c kernel/v86_bios.c kernel/v86_pic.c kernel/v86_pit.c kernel/v86_disk.c kernel/v86_test.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c \
+    kernel/kernel.c kernel/gdt.c kernel/tss.c kernel/v86.c kernel/v86_mem.c kernel/v86_bios.c kernel/v86_pic.c kernel/v86_pit.c kernel/v86_disk.c kernel/v86_test.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c kernel/debug_gp.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \

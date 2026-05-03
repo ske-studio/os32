@@ -24,11 +24,17 @@
 /*  仮想PICレジスタ                                                        */
 /* ====================================================================== */
 static struct {
-    u8 imr;     /* IMR (Interrupt Mask Register) */
-    u8 isr;     /* ISR (In-Service Register) */
-    u8 irr;     /* IRR (Interrupt Request Register) */
-    u8 read_isr; /* OCW3で「次のINはISRを返す」フラグ */
+    u8 imr;       /* IMR (Interrupt Mask Register) */
+    u8 isr;       /* ISR (In-Service Register) */
+    u8 irr;       /* IRR (Interrupt Request Register) */
+    u8 read_isr;  /* OCW3で「次のINはISRを返す」フラグ */
+    u8 icw_state; /* ICWシーケンス状態: 0=通常, 1=ICW2待ち, 2=ICW3待ち, 3=ICW4待ち */
+    u8 icw4_needed; /* ICW1 bit0: ICW4が必要か */
 } vpic[2];  /* [0]=マスタ, [1]=スレーブ */
+
+/* EOIデバッグカウンタ */
+static u32 v86_eoi_count[2] = {0, 0};    /* 非特殊EOI回数 */
+static u32 v86_seoi_count[2] = {0, 0};   /* 特殊EOI回数 */
 
 /* PICポートアドレス */
 #define MPIC_CMD   0x00   /* マスタ コマンドポート */
@@ -46,11 +52,15 @@ void v86_pic_init(void)
 {
     int i;
     for (i = 0; i < 2; i++) {
-        vpic[i].imr = 0xFF;      /* 全マスク (DOS初期値) */
+        vpic[i].imr = 0xFF;      /* 全マスク: FreeDOSのPIC初期化(OUT 02h)で更新される */
         vpic[i].isr = 0x00;
         vpic[i].irr = 0x00;
         vpic[i].read_isr = 0;
+        vpic[i].icw_state = 0;
+        vpic[i].icw4_needed = 0;
     }
+    v86_eoi_count[0] = v86_eoi_count[1] = 0;
+    v86_seoi_count[0] = v86_seoi_count[1] = 0;
 }
 
 /* ====================================================================== */
@@ -63,15 +73,34 @@ void v86_pic_init(void)
 /* ====================================================================== */
 static void pic_write_cmd(int idx, u8 val)
 {
+    /* ICW1 判定: bit4=1 → 初期化シーケンス開始 */
+    if (val & 0x10) {
+        vpic[idx].icw_state = 1;  /* 次のデータポート書き込みは ICW2 */
+        vpic[idx].icw4_needed = (val & 0x01) ? 1 : 0;  /* bit0 = ICW4必要 */
+        vpic[idx].isr = 0x00;     /* ISRクリア */
+        vpic[idx].irr = 0x00;     /* IRRクリア */
+        vpic[idx].read_isr = 0;
+        return;
+    }
+
     /* OCW2 判定: bit5=1, bit4-3=00 → EOIコマンド */
     if ((val & 0x18) == 0x00 && (val & 0x20)) {
-        /* 非特殊EOI (0x20): ISRの最上位ビットをクリア */
-        if (vpic[idx].isr) {
-            int bit;
-            for (bit = 0; bit < 8; bit++) {
-                if (vpic[idx].isr & (1 << bit)) {
-                    vpic[idx].isr &= ~(1 << bit);
-                    break;
+        if (val & 0x40) {
+            /* 特殊EOI (0x60+n): ISR bit n を直接クリア
+             * PC9800Bible §1-4: OCW2 R=0,S=1,E=1 → 指定レベルEOI */
+            int level = val & 0x07;
+            vpic[idx].isr &= ~(1 << level);
+            v86_seoi_count[idx]++;
+        } else {
+            /* 非特殊EOI (0x20): ISRの最高優先度ビットをクリア */
+            if (vpic[idx].isr) {
+                int bit;
+                for (bit = 0; bit < 8; bit++) {
+                    if (vpic[idx].isr & (1 << bit)) {
+                        vpic[idx].isr &= ~(1 << bit);
+                        v86_eoi_count[idx]++;
+                        break;
+                    }
                 }
             }
         }
@@ -87,8 +116,35 @@ static void pic_write_cmd(int idx, u8 val)
         return;
     }
 
-    /* ICW1 (bit4=1): 初期化シーケンス開始 — ackのみ */
     /* その他のコマンド: 無視 */
+}
+
+/* ====================================================================== */
+/*  pic_write_data — PICデータポート (02h/0Ah) への書き込み処理            */
+/*                                                                          */
+/*  ICWシーケンス中はICW2/3/4として処理し、IMRとして扱わない。             */
+/*  ICWシーケンス完了後はIMRとして設定。                                   */
+/* ====================================================================== */
+static void pic_write_data(int idx, u8 val)
+{
+    switch (vpic[idx].icw_state) {
+    case 1:  /* ICW2: ベクタベース (無視 — V86ではベクタ固定) */
+        vpic[idx].icw_state = 2;
+        break;
+    case 2:  /* ICW3: カスケード接続 (無視) */
+        if (vpic[idx].icw4_needed) {
+            vpic[idx].icw_state = 3;
+        } else {
+            vpic[idx].icw_state = 0;  /* ICWシーケンス完了 */
+        }
+        break;
+    case 3:  /* ICW4: 動作モード (無視) */
+        vpic[idx].icw_state = 0;  /* ICWシーケンス完了 */
+        break;
+    default: /* ICWシーケンス外 → IMR設定 */
+        vpic[idx].imr = val;
+        break;
+    }
 }
 
 /* ====================================================================== */
@@ -122,7 +178,7 @@ int v86_pic_io(u16 port, u8 *val, int is_write)
     /* ---- マスタPIC データ/IMRポート (0x02) ---- */
     case MPIC_DATA:
         if (is_write) {
-            vpic[0].imr = *val;
+            pic_write_data(0, *val);
         } else {
             *val = vpic[0].imr;
         }
@@ -140,7 +196,7 @@ int v86_pic_io(u16 port, u8 *val, int is_write)
     /* ---- スレーブPIC データ/IMRポート (0x0A) ---- */
     case SPIC_DATA:
         if (is_write) {
-            vpic[1].imr = *val;
+            pic_write_data(1, *val);
         } else {
             *val = vpic[1].imr;
         }
@@ -161,4 +217,27 @@ int v86_pic_is_reboot(u16 port, u8 val)
 {
     (void)val;
     return (port == RESET_PORT) ? 1 : 0;
+}
+
+/* ====================================================================== */
+/*  仮想PICの状態への直接アクセス (タイマ割り込み注入等で使用)               */
+/* ====================================================================== */
+u8 v86_pic_get_imr(int idx)
+{
+    return vpic[idx & 1].imr;
+}
+
+u8 v86_pic_get_isr(int idx)
+{
+    return vpic[idx & 1].isr;
+}
+
+void v86_pic_set_isr(int idx, u8 val)
+{
+    vpic[idx & 1].isr = val;
+}
+
+u32 v86_pic_get_eoi_count(int idx)
+{
+    return v86_eoi_count[idx & 1] + v86_seoi_count[idx & 1];
 }
