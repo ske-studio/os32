@@ -14,6 +14,7 @@
 #include "v86_pit.h"
 #include "v86_disk.h"
 #include "v86_debug.h"
+#include "v86_bda.h"
 #include "tss.h"
 #include "paging.h"
 #include "memmap.h"
@@ -162,18 +163,7 @@ void v86_session_on_tick(void)
 /* ====================================================================== */
 static void v86_reset_counters(void)
 {
-    extern u32 v86_int_count, v86_gp_count;
-    extern u32 v86_start_tick;
-    extern u32 v86_timeout_cs, v86_timeout_ip;
     extern volatile u32 tick_count;
-    extern void v86_trace_reset(void);
-    extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
-    extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
-    extern u32 v86_irq0_ivt_count;
-    extern u32 v86_irq0_gp_inject_count;
-    extern u32 v86_irq0_gp_skip_if, v86_irq0_gp_skip_isr;
-    extern u32 v86_irq0_gp_skip_ivt;
-    extern void v86_reset_io_stats(void);
 
     v86_int_count = 0;
     v86_gp_count = 0;

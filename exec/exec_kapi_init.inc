@@ -149,6 +149,8 @@ extern int __cdecl wrap_db_finalize(int handle);
 extern const char * __cdecl wrap_db_last_error(int handle);
 extern u32 __cdecl wrap_db_mem_used(void);
 extern int __cdecl wrap_kcg_load_font(const char *path);
+extern int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdline);
+extern int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline);
 
 kapi->magic = 0x4B415049UL;
 kapi->version = 32;
@@ -304,4 +306,6 @@ kapi->version = 32;
     kapi->db_last_error = wrap_db_last_error;
     kapi->db_mem_used = wrap_db_mem_used;
     kapi->kcg_load_font = wrap_kcg_load_font;
+    kapi->sys_v86_boot_freedos = wrap_sys_v86_boot_freedos;
+    kapi->sys_v86_boot_physical = wrap_sys_v86_boot_physical;
     kapi->sbrk_heap_limit = 0;

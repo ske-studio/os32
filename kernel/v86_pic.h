@@ -21,4 +21,11 @@ int v86_pic_io(u16 port, u8 *val, int is_write);
  * 戻り値: 1=リブート検知(V86終了要求), 0=それ以外 */
 int v86_pic_is_reboot(u16 port, u8 val);
 
+/* 仮想PICの状態への直接アクセス (タイマ/キーボード割り込み注入等で使用)
+ * idx: 0=マスタPIC, 1=スレーブPIC */
+u8  v86_pic_get_imr(int idx);
+u8  v86_pic_get_isr(int idx);
+void v86_pic_set_isr(int idx, u8 val);
+u32 v86_pic_get_eoi_count(int idx);
+
 #endif /* V86_PIC_H */

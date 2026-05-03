@@ -412,11 +412,8 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 /* ======================================================================== */
 extern void snd_tick(void);  /* kernel/snd_engine.c */
 
-/* V86割り込みリフレクト用 (v86.h) */
-extern volatile int v86_active;
-extern void v86_set_pending_irq(int irq_no);
-
-extern void v86_inject_timer_irq(u32 *regs);
+/* V86割り込みリフレクト用 */
+#include "v86.h"
 
 void timer_handler(u32 *regs)
 {

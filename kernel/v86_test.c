@@ -135,7 +135,6 @@ static int v86_run_com(const u8 *data, u32 size)
     v86_exit_request = 0;
 
     {
-        extern u32 v86_start_tick;
         extern volatile u32 tick_count;
         v86_start_tick = tick_count;
     }

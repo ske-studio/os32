@@ -67,4 +67,61 @@ extern u32 v86_pending_irq;
 /* V86タスクに仮想割り込みを保留する (IRQハンドラから呼ぶ) */
 void v86_set_pending_irq(int irq_no);
 
+/* タイマ割り込み (IRQ0) 注入 (isr_handlers.c timer_handler から呼ばれる) */
+void v86_inject_timer_irq(u32 *regs);
+
+/* ====================================================================== */
+/*  デバッグ統計カウンタ (v86.c で定義)                                     */
+/* ====================================================================== */
+extern u32 v86_int_count;       /* 総INT呼び出し回数 */
+extern u32 v86_gp_count;        /* GPハンドラ呼び出し総数 */
+extern u32 v86_last_int;        /* 最後に処理されたINT番号 */
+extern u32 v86_last_cs;         /* 最後のINT発行時のCS */
+extern u32 v86_last_ip;         /* 最後のINT発行時のIP */
+extern u32 v86_start_tick;      /* V86開始時のtick_count */
+extern u32 v86_timeout_cs;      /* タイムアウト時のCS */
+extern u32 v86_timeout_ip;      /* タイムアウト時のIP */
+
+/* IRQ0注入デバッグカウンタ (v86.c で定義) */
+extern u32 v86_irq0_call_count;
+extern u32 v86_irq0_nonvm_count;
+extern u32 v86_irq0_noif_count;
+extern u32 v86_irq0_isr_count;
+extern u32 v86_irq0_ivt_count;
+extern u32 v86_irq0_gp_inject_count;
+extern u32 v86_irq0_gp_skip_if;
+extern u32 v86_irq0_gp_skip_isr;
+extern u32 v86_irq0_gp_skip_ivt;
+
+/* ====================================================================== */
+/*  ユーティリティ (v86.c で定義)                                           */
+/* ====================================================================== */
+
+/* GPトレースリセット */
+void v86_trace_reset(void);
+
+/* I/Oポートアクセス統計のダンプ / リセット */
+void v86_dump_io_stats(void);
+void v86_reset_io_stats(void);
+
+/* GPトレースバッファ取得 */
+struct v86_trace_entry {
+    u16 cs;
+    u16 ip;
+    u8  opcode;
+    u8  intno;
+    u8  ah;
+    u8  al;
+};
+struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx);
+
+/* ====================================================================== */
+/*  ダミーIVT判定マクロ                                                    */
+/*  IVTエントリが初期値 (0x0050:0x0000 = IRET) のままかを判定する           */
+/* ====================================================================== */
+#define V86_DUMMY_IVT_SEG   0x0050
+#define V86_DUMMY_IVT_OFF   0x0000
+#define V86_IS_DUMMY_IVT(ivt_entry) \
+    ((ivt_entry) == ((u32)V86_DUMMY_IVT_SEG << 16 | V86_DUMMY_IVT_OFF))
+
 #endif /* V86_H */

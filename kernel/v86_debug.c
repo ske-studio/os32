@@ -46,19 +46,7 @@ static void dbg_hex32(u32 val)
 /* ====================================================================== */
 static void v86_debug_dump_serial(void)
 {
-    extern u32 v86_int_count, v86_gp_count;
-    extern u32 v86_last_int, v86_last_cs, v86_last_ip;
-    extern u32 v86_timeout_cs, v86_timeout_ip;
-    extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
-    extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
-    extern u32 v86_irq0_ivt_count;
-    extern u32 v86_irq0_gp_inject_count;
-    extern u32 v86_irq0_gp_skip_if, v86_irq0_gp_skip_isr;
-    extern u32 v86_irq0_gp_skip_ivt;
-    extern u8 v86_pic_get_imr(int idx);
-    extern u8 v86_pic_get_isr(int idx);
-    extern u32 v86_pic_get_eoi_count(int idx);
-    extern void v86_dump_io_stats(void);
+    extern volatile u32 tick_count;
 
     /* V86 END 統計 */
     serial_puts("\r\n[V86 END] ints=");
@@ -183,17 +171,7 @@ static void v86_debug_dump_serial(void)
 /* ====================================================================== */
 static void v86_debug_write_fdos_log(void)
 {
-    extern u32 v86_int_count, v86_gp_count;
-    extern u32 v86_last_int, v86_last_cs, v86_last_ip;
-    extern u32 v86_timeout_cs, v86_timeout_ip;
-    extern u32 v86_irq0_call_count, v86_irq0_nonvm_count;
-    extern u32 v86_irq0_noif_count, v86_irq0_isr_count;
-    extern u32 v86_irq0_ivt_count;
-    extern u32 v86_irq0_gp_inject_count;
-    extern u32 v86_irq0_gp_skip_isr, v86_irq0_gp_skip_ivt;
-    extern u8 v86_pic_get_imr(int idx);
-    extern u8 v86_pic_get_isr(int idx);
-    extern u32 v86_pic_get_eoi_count(int idx);
+    extern volatile u32 tick_count;
 
     static char fbuf[4096];
     int fp = 0;
@@ -343,11 +321,7 @@ static void v86_debug_write_fdos_log(void)
 /* ====================================================================== */
 static void v86_debug_write_gptrace(void)
 {
-    struct v86_trace_entry {
-        u16 cs; u16 ip; u8 opcode; u8 intno; u8 ah; u8 al;
-    };
-    extern struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx);
-
+    /* v86_trace_entry はv86.hで定義済み */
     static char tbuf[8192];
     int tp = 0;
     u32 total, tidx;

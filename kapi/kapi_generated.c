@@ -32,6 +32,8 @@
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
+extern int v86_boot_freedos(const char *path, const char *cmdline);
+extern int v86_boot_physical_fdd(int drv, const char *cmdline);
 
 void __cdecl wrap_gfx_init(void)
 {
@@ -781,5 +783,15 @@ u32 __cdecl wrap_db_mem_used(void)
 int __cdecl wrap_kcg_load_font(const char *path)
 {
     return kcg_load_font(path);
+}
+
+int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdline)
+{
+    return v86_boot_freedos(path, cmdline);
+}
+
+int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline)
+{
+    return v86_boot_physical_fdd(drv, cmdline);
 }
 

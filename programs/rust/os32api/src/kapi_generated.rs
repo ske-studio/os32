@@ -160,6 +160,8 @@ pub struct KernelAPI {
     /* idx 150 */ pub db_last_error: unsafe extern "C" fn(handle: i32) -> *const u8,
     /* idx 151 */ pub db_mem_used: unsafe extern "C" fn() -> u32,
     /* idx 152 */ pub kcg_load_font: unsafe extern "C" fn(path: *const u8) -> i32,
+    /* idx 153 */ pub sys_v86_boot_freedos: unsafe extern "C" fn(path: *const u8, cmdline: *const u8) -> i32,
+    /* idx 154 */ pub sys_v86_boot_physical: unsafe extern "C" fn(drv: i32, cmdline: *const u8) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 }
 

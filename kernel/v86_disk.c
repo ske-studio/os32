@@ -51,6 +51,18 @@ static struct v86_disk_log_entry disk_log[V86_DISK_LOG_SIZE];
 static u32 disk_log_idx = 0;
 static u32 disk_log_count = 0;
 
+/* ディスクログコミット + エラーリターンマクロ
+ * 各エラーパスで重複していた「log記録 + regs更新 + return 0」パターンを集約 */
+#define DISK_ERROR_RETURN(entry, st, res_off, r) do { \
+    (entry)->status = (st); \
+    (entry)->result_offset = (res_off); \
+    disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE; \
+    disk_log_count++; \
+    (r)[V86_REG_EAX] = ((r)[V86_REG_EAX] & 0xFFFF00FFUL) | ((u32)(st) << 8); \
+    (r)[V86_REG_EFLAGS] |= 1; \
+    return 0; \
+} while (0)
+
 /* ====================================================================== */
 /*  v86_disk_set_file — FDDイメージファイルを設定                         */
 /* ====================================================================== */
@@ -112,14 +124,8 @@ int v86_bios_int1b(u32 *regs)
     if ((daua & 0xF0) == 0x90) {
         /* 1MB FDD */
     } else {
-        /* 未サポートデバイス: ステータス 0x40 = DA/UAが不適当
-         * (PC9800Bible §2-9 ステータス一覧表) */
-        log_entry->status = 0x40;
-        disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-        disk_log_count++;
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0x4000UL;
-        regs[V86_REG_EFLAGS] |= 1;
-        return 0;
+        /* 未サポートデバイス: ステータス 0x40 = DA/UAが不適当 */
+        DISK_ERROR_RETURN(log_entry, 0x40, -1, regs);
     }
 
     /* ================================================================ */
@@ -217,13 +223,7 @@ int v86_bios_int1b(u32 *regs)
                  * IO.SYSはBDA[0x0564+6]のN値を参照してCHを決定するため、
                  * IPLリード成功時にN=3が記録されていれば正しいCH=3で読む。 */
                 if (sector_len != 3) {
-                    log_entry->status = 0xC0;
-                    log_entry->result_offset = -2; /* CH不一致マーカー */
-                    disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-                    disk_log_count++;
-                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xC000UL;
-                    regs[V86_REG_EFLAGS] |= 1;
-                    return 0;
+                    DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
                 }
 
                 /* PC-98 INT 1Bh: DL(セクタ番号)は常に1ベース → 0ベースに変換 */
@@ -231,13 +231,7 @@ int v86_bios_int1b(u32 *regs)
 
                 /* イメージ未設定チェック (ファイルモードのみ) */
                 if (!fdd_use_physical && fdd_fd < 0) {
-                    log_entry->status = 0xE0;
-                    log_entry->result_offset = -1;
-                    disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-                    disk_log_count++;
-                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xE000UL;
-                    regs[V86_REG_EFLAGS] |= 1;
-                    return 0;
+                    DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
                 }
 
                 /* CHS → バイトオフセット変換
@@ -245,13 +239,7 @@ int v86_bios_int1b(u32 *regs)
                  * CHパラメータはオフセット計算に影響しない。
                  * IO.SYSがCH=0でもセクタ番号は物理セクタ単位で指定する。 */
                 if (cylinder >= V86_FDD_CYLINDERS || head_dh >= V86_FDD_HEADS) {
-                    log_entry->status = 0xC0;
-                    log_entry->result_offset = -1;
-                    disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-                    disk_log_count++;
-                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xC000UL;
-                    regs[V86_REG_EFLAGS] |= 1;
-                    return 0;
+                    DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
                 }
 
                 byte_offset = ((u32)cylinder * V86_FDD_HEADS + (u32)head_dh)

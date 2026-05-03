@@ -22,6 +22,7 @@
 /* ======================================================================== */
 
 #include "v86_mem.h"
+#include "v86_bda.h"
 #include "paging.h"
 #include "tss.h"
 #include "kstring.h"
@@ -131,76 +132,47 @@ void v86_mem_setup(void)
         backing[bda_defaults[i].offset] = bda_defaults[i].value;
     }
 
-    /* メモリサイズ: 640KB (0000:0413h = WORD, 単位KB)
-     * PC-98の公式BDAにはこのフィールドは存在しない (PC/ATの慣習)。
-     * PC-98の正式なメモリサイズは BDA 0501h bit2-0 で管理される。
-     * ただし FreeDOS(98) が INT 12h 経由で参照するため設定する。 */
-    backing[0x0413] = (640) & 0xFF;
-    backing[0x0414] = (640 >> 8) & 0xFF;
+    /* MEM_SIZE (0000:0413-0414h): コンベンショナルメモリサイズ (KB) */
+    backing[BDA_MEM_SIZE]     = (640) & 0xFF;
+    backing[BDA_MEM_SIZE + 1] = (640 >> 8) & 0xFF;
 
     /* DISK_EQUIP (0000:055C-055Dh): ディスク接続状態 */
-    /* 055Ch bit 0 = 1MB FDD UNIT#0 接続 */
-    backing[0x055C] = 0x01;
-    backing[0x055D] = 0x00;
+    backing[BDA_DISK_EQUIP]     = 0x01;
+    backing[BDA_DISK_EQUIP + 1] = 0x00;
 
-    /* キーボードバッファ初期化 (NP21/W bios09.c 準拠)
-     * 0x0524 = HEAD (WORD) = 0x0502
-     * 0x0526 = TAIL (WORD) = 0x0502
-     * 0x0528 = COUNT (BYTE) = 0 */
-    backing[0x0524] = 0x02; backing[0x0525] = 0x05;
-    backing[0x0526] = 0x02; backing[0x0527] = 0x05;
-    backing[0x0528] = 0x00;
+    /* キーボードバッファ初期化 (NP21/W bios09.c 準拠) */
+    backing[BDA_KB_HEAD]     = (u8)(BDA_KB_BUF_START & 0xFF);
+    backing[BDA_KB_HEAD + 1] = (u8)(BDA_KB_BUF_START >> 8);
+    backing[BDA_KB_TAIL]     = (u8)(BDA_KB_BUF_START & 0xFF);
+    backing[BDA_KB_TAIL + 1] = (u8)(BDA_KB_BUF_START >> 8);
+    backing[BDA_KB_COUNT]    = 0x00;
 
-    /* ブートデバイス情報 (0000:0584h): CPU_TYPE/DA/UA */
-    /* FreeDOS IPL は BDA[0x584] をINT 1BhのALレジスタ (DA/UA) として使用する */
-    /* 0x90 = 1MB FDD UNIT#0 (DA=0x90, UA=0x00) */
-    backing[0x0584] = 0x90;
+    /* ブートデバイス情報: 0x90 = 1MB FDD UNIT#0 */
+    backing[BDA_BOOT_DEV] = 0x90;
 
     /* BIOS_FLAG (0000:0501h):
-     *   bit 7   = 0 (5/10MHzクロック)
-     *   bit 6   = 0 (i386系CPU)
-     *   bit 5   = 1 (PC-9801無印以外)
-     *   bit 4   = 0 (その他)
-     *   bit 3   = 0 (ノーマルモード)
-     *   bit 2-0 = 100b (640KB) */
-    backing[0x0501] = 0x24;
+     *   bit 5=1(PC-9801無印以外), bit 2=1(640KB) → 0x24 */
+    backing[BDA_BIOS_FLAG] = 0x24;
 
     /* CRT_STS_FLAG (0000:053Ch):
-     *   bit 4 = 1 (16色モード)
-     *   bit 1 = 1 (GRCG搭載)
-     *   bit 0 = 0 (CRT接続あり)
-     * FreeDOS(98) int29dc.c がこのフラグを参照して画面出力処理を分岐する */
-    backing[0x053C] = 0x12;
+     *   bit 4=1(16色), bit 1=1(GRCG搭載) → 0x12 */
+    backing[BDA_CRT_STS] = 0x12;
 
-    /* BIOS_FLAG5 (0000:0458h):
-     *   bit 7 = 0 (非NESAアーキテクチャ)
-     *   bit 0 = 0 (WAIT機能なし)
-     * FreeDOS(98) init_oem が参照 */
-    backing[0x0458] = 0x00;
+    /* BIOS_FLAG5 (0000:0458h): 0x00 (非NESA, WAITなし) */
+    backing[BDA_BIOS_FLAG5] = 0x00;
 
-    /* SCSI HD接続状態 (0000:0482h):
-     *   0x00 = SCSI HDDなし
-     * FreeDOS(98) dsk_init が参照 */
-    backing[0x0482] = 0x00;
+    /* SCSI HD接続状態: 0x00 = HDDなし */
+    backing[BDA_SCSI_HD] = 0x00;
 
-    /* SASI/IDE HDD接続情報 (0000:055Dh):
-     *   0x00 = SASI/IDE HDDなし
-     * FreeDOS(98) dsk_init が参照 */
-    backing[0x055D] = 0x00;
+    /* SASI/IDE HDD接続情報: 0x00 = HDDなし */
+    backing[BDA_SASI_IDE] = 0x00;
 
-    /* ブートパーティション スクラッチパッド (0000:03FEh):
-     *   FreeDOS(98) dsk_init が参照 */
-    backing[0x03FE] = 0x00;
-    backing[0x03FF] = 0x00;
+    /* ブートパーティション スクラッチパッド */
+    backing[BDA_BOOT_PART]     = 0x00;
+    backing[BDA_BOOT_PART + 1] = 0x00;
 
-    /* SCSI パラメータテーブル (0000:0460-047Fh):
-     *   ゼロクリア済み (バッキングRAM全体がゼロクリア)
-     *   FreeDOS(98) int29dc.c がタイマ関連として参照する場合あり */
-
-    /* コンベンショナルメモリサイズ (0000:05AEh):
-     *   0xA0 = 640KB (0xA0 * 4 = 640)
-     *   PC-98の正式なメモリサイズフィールド */
-    backing[0x05AE] = 0xA0;
+    /* コンベンショナルメモリサイズ (0000:05AEh): 0xA0 = 640KB */
+    backing[BDA_CONV_MEM] = 0xA0;
 
     /* TVRAM メモリスイッチ (0xA000:3FE2-3FF7) の初期化
      * FreeDOS(98) init_crt が 0xA000:3FE2-3FF7 を読み取り、
