@@ -14,6 +14,7 @@
 #include "v86_pic.h"
 #include "v86_pit.h"
 #include "v86_disk.h"
+#include "v86_session.h"
 #include "io.h"
 
 /* タイムアウトベースの V86 実行制限 (tick_count は 100Hz) */
@@ -161,8 +162,7 @@ void v86_reset_io_stats(void)
     v86_io_stat_count = 0;
 }
 
-/* V86終了要求フラグ (v86_test.cから設定される) */
-extern volatile int v86_exit_request;
+/* V86終了要求フラグ (v86_session.h で宣言済み) */
 
 /* ====================================================================== */
 /*  V86アドレス → カーネル用リニアアドレス変換                             */
@@ -265,6 +265,7 @@ int v86_gp_handler(u32 *regs)
     if (regs[V86_REG_CS] >= 0xF000) {
         v86_last_cs = regs[V86_REG_CS];
         v86_last_ip = regs[V86_REG_EIP];
+        v86_request_exit(V86_EXIT_BIOS_ROM);
         return 1;
     }
 
@@ -281,7 +282,8 @@ int v86_gp_handler(u32 *regs)
             v86_timeout_cs = regs[V86_REG_CS];
             v86_timeout_ip = regs[V86_REG_EIP];
         }
-        return 1;  /* V86タイムアウト終了 → ログダンプが実行される */
+        v86_request_exit(V86_EXIT_TIMEOUT);
+        return 1;  /* V86タイムアウト終了 */
     }
 
     /* フォルト位置の命令を取得 */
@@ -327,12 +329,14 @@ int v86_gp_handler(u32 *regs)
         if (intno == 0x20) {
             /* INT 20h: DOS Terminate — V86モード終了 */
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            v86_request_exit(V86_EXIT_DOS_TERM);
             return 1;
         }
         if (intno == 0x21 &&
             ((regs[V86_REG_EAX] >> 8) & 0xFF) == 0x4C) {
             /* INT 21h AH=4Ch: Exit Process — V86モード終了 */
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            v86_request_exit(V86_EXIT_DOS_TERM);
             return 1;
         }
 
@@ -509,10 +513,17 @@ int v86_gp_handler(u32 *regs)
         u8 port = ip[1];
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
         v86_io_stat_record(port);
+        /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
+        if (port == 0xFE) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            v86_request_exit(V86_EXIT_TRAP_PORT);
+            return 1;
+        }
         /* リセットポート検知 */
         if (v86_pic_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
-            return 1;  /* V86終了 */
+            v86_request_exit(V86_EXIT_REBOOT);
+            return 1;
         }
         /* PIC仮想化 → PIT仮想化 → 実ハードウェア */
         if (!v86_pic_io(port, &val, 1)) {
@@ -549,8 +560,15 @@ int v86_gp_handler(u32 *regs)
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
         v86_io_stat_record(port);
+        /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
+        if (port == 0xFE) {
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            v86_request_exit(V86_EXIT_TRAP_PORT);
+            return 1;
+        }
         if (v86_pic_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            v86_request_exit(V86_EXIT_REBOOT);
             return 1;
         }
         if (!v86_pic_io(port, &val, 1)) {
@@ -655,7 +673,8 @@ int v86_gp_handler(u32 *regs)
             buf[p] = '\0';
             serial_puts(buf);
         }
-        return 1;  /* V86終了 */
+        v86_request_exit(V86_EXIT_UNKNOWN_OP);
+        return 1;
     }
     } /* switch */
 
@@ -804,6 +823,14 @@ void v86_inject_timer_irq(u32 *regs)
         v86_irq0_nonvm_count++;
         return;
     }
+
+    /* ================================================================ */
+    /*  Auto-Typer (自動キー入力)                                       */
+    /*  VDOS起動時に指定されたコマンド文字列をBDAキーボードバッファに   */
+    /*  徐々に流し込む                                                  */
+    /* ================================================================ */
+    /* Auto-Typer + 強制脱出ホットキー (v86_session.c に委譲) */
+    v86_session_on_tick();
 
     /* ================================================================ */
     /*  タイムアウト検出: GPハンドラが呼ばれない状況でも確実にV86終了   */

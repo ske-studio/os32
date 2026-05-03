@@ -27,8 +27,11 @@
 #include "kstring.h"
 #include "io.h"
 
-/* FDDイメージデータ (外部から設定される) */
-static const u8 *fdd_image = 0;
+#include "vfs.h"
+
+/* FDDイメージファイル (外部から設定される) */
+static int fdd_fd = -1;
+static u32 fdd_image_offset = 0;
 static u32 fdd_image_size = 0;
 
 /* ====================================================================== */
@@ -38,31 +41,19 @@ static u32 fdd_image_size = 0;
 /*  グローバルバッファに記録し、V86セッション終了後にダンプする方式。       */
 /* ====================================================================== */
 #define V86_DISK_LOG_SIZE 64
-struct v86_disk_log_entry {
-    u8  func;           /* AH (ファンクションコード) */
-    u8  daua;           /* AL (DA/UA) */
-    u8  cylinder;       /* CL (シリンダ番号, 0-76) */
-    u8  sector_len;     /* CH (セクタ長コード, 3=1024B) */
-    u8  head;           /* DH (ヘッド番号, 0-1) */
-    u8  sector;         /* DL (セクタ番号, 1ベース) */
-    u16 xfer_bytes;     /* BX (転送バイト数) */
-    u16 es;             /* ES */
-    u16 bp;             /* BP */
-    i32 result_offset;  /* chs_to_offset の結果 (-1=エラー) */
-    u8  status;         /* 応答 AH (0=成功, それ以外=エラー) */
-    u8  pad;
-};
+/* struct v86_disk_log_entry は v86_disk.h で定義済み */
 static struct v86_disk_log_entry disk_log[V86_DISK_LOG_SIZE];
 static u32 disk_log_idx = 0;
 static u32 disk_log_count = 0;
 
 /* ====================================================================== */
-/*  v86_disk_set_image — FDDイメージを設定                                 */
+/*  v86_disk_set_file — FDDイメージファイルを設定                         */
 /* ====================================================================== */
-void v86_disk_set_image(const u8 *data, u32 size)
+void v86_disk_set_file(int fd, u32 data_offset, u32 data_size)
 {
-    fdd_image = data;
-    fdd_image_size = size;
+    fdd_fd = fd;
+    fdd_image_offset = data_offset;
+    fdd_image_size = data_size;
 }
 
 /* ====================================================================== */
@@ -70,38 +61,9 @@ void v86_disk_set_image(const u8 *data, u32 size)
 /* ====================================================================== */
 void v86_disk_clear(void)
 {
-    fdd_image = 0;
+    fdd_fd = -1;
+    fdd_image_offset = 0;
     fdd_image_size = 0;
-}
-
-/* ====================================================================== */
-/*  CHS → イメージオフセット変換                                           */
-/*                                                                          */
-/*  PC-98 FDD の INT 1Bh レジスタ規約 (PC9800Bible §2-9-3):               */
-/*    CL = シリンダ番号 (0-76)                                              */
-/*    DH = ヘッド番号 (0, 1)                                                */
-/*    DL = セクタ番号 (1ベース, BIOS規約)                                   */
-/*  呼び出し元でDLを0ベースに変換してから渡すこと。                         */
-/*                                                                          */
-/*  LBA = C × (Heads × SPT) + H × SPT + (DL-1)                            */
-/*  オフセット = LBA × BPS                                                 */
-/* ====================================================================== */
-static i32 chs_to_offset(u8 cylinder, u8 head, u8 sector_dl)
-{
-    u32 lba;
-    u32 offset;
-
-    /* 範囲チェック */
-    if (cylinder >= V86_FDD_CYLINDERS) return -1;
-    if (head >= V86_FDD_HEADS) return -1;
-    if (sector_dl >= (V86_FDD_SPT)) return -1;
-
-    lba = (u32)cylinder * (V86_FDD_HEADS * V86_FDD_SPT) + (u32)head * V86_FDD_SPT + (u32)sector_dl;
-    offset = lba * V86_FDD_BPS;
-
-    if (offset >= fdd_image_size) return -1;
-
-    return (i32)offset;
 }
 
 /* ====================================================================== */
@@ -249,7 +211,7 @@ int v86_bios_int1b(u32 *regs)
                 if (sector_dl > 0) sector_dl--;
 
                 /* イメージ未設定チェック */
-                if (!fdd_image) {
+                if (fdd_fd < 0) {
                     log_entry->status = 0xE0;
                     log_entry->result_offset = -1;
                     disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
@@ -297,13 +259,16 @@ int v86_bios_int1b(u32 *regs)
 
             /* セクタ単位で転送 (複数セクタ対応) */
             remaining = (u32)xfer_bytes;
+            if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
+                vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0); /* SEEK_SET=0 */
+            }
             while (remaining > 0 && img_offset >= 0 && (u32)img_offset < fdd_image_size) {
                 chunk = remaining;
                 if (chunk > V86_FDD_BPS) chunk = V86_FDD_BPS;
                 if ((u32)img_offset + chunk > fdd_image_size) {
                     chunk = fdd_image_size - (u32)img_offset;
                 }
-                kmemcpy(dst, fdd_image + img_offset, chunk);
+                vfs_read_fd(fdd_fd, dst, chunk);
                 dst += chunk;
                 img_offset += (i32)chunk;
                 remaining -= chunk;
