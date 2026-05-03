@@ -94,7 +94,6 @@ void v86_request_exit(enum v86_exit_reason reason)
 /* ====================================================================== */
 void v86_session_on_tick(void)
 {
-    extern u32 v86_irq0_call_count;
 
     /* ============================================================ */
     /*  強制脱出ホットキー検知 (F12)                                */
@@ -186,12 +185,77 @@ static void v86_reset_counters(void)
 }
 
 /* ====================================================================== */
+/*  v86_session_run_core — V86実行コア (共通ランタイム)                     */
+/*                                                                          */
+/*  V86メモリ空間・PIC/PIT・ディスク仮想化の初期化後に呼ばれ、             */
+/*  V86コンテキストのセットアップ → 実行 → 後始末 を一括で行う。           */
+/* ====================================================================== */
+static void v86_session_run_core(void)
+{
+    struct v86_context ctx;
+    u32 saved_esp0;
+
+    /* V86コンテキスト: IPLエントリ */
+    ctx.eip    = 0x0000;
+    ctx.cs     = IPL_SEG;
+    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
+    ctx.esp    = 0xFFFE;
+    ctx.ss     = 0x0000;
+    ctx.es     = IPL_SEG;
+    ctx.ds     = IPL_SEG;
+    ctx.fs     = 0x0000;
+    ctx.gs     = 0x0000;
+
+    /* TSS ESP0 切り替え */
+    saved_esp0 = 0x9FFF0UL;
+    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
+
+    /* V86モード遷移準備 */
+    v86_active = 1;
+    v86_exit_request = 0;
+    current_session.exit_reason = V86_EXIT_NONE;
+
+    /* デバッグカウンタリセット */
+    v86_reset_counters();
+
+    /* ジャンプバッファをアクティブに設定 */
+    v86_current_jmpbuf = v86_session_jmpbuf;
+
+    if (exec_setjmp(v86_session_jmpbuf) == 0) {
+        v86_enter(&ctx);
+    }
+
+    /* ============================================================ */
+    /*  V86終了後の後始末                                           */
+    /* ============================================================ */
+    v86_current_jmpbuf = 0;
+    v86_active = 0;
+    v86_exit_request = 0;
+    v86_pending_irq = 0;
+    tss_set_esp0(saved_esp0);
+
+    /* デバッグダンプ (有効時のみ) */
+    v86_debug_dump_session();
+
+    /* リソース解放 */
+    v86_disk_clear();
+
+    /* メモリ空間復元 */
+    v86_mem_teardown();
+
+    /* 画面リストア */
+    v86_restore_screen();
+
+    /* 終了メッセージ */
+    kprintf(0xA1, "[V86] Session ended: %s\n",
+            v86_exit_reason_str(current_session.exit_reason));
+}
+
+/* ====================================================================== */
 /*  v86_boot_freedos - FreeDOS(98) FDDイメージからブート                   */
 /* ====================================================================== */
 int v86_boot_freedos(const char *path, const char *cmdline)
 {
-    struct v86_context ctx;
-    u32 saved_esp0;
     int fd;
     u8 *ipl_dst;
 
@@ -238,71 +302,14 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     vfs_seek(fd, current_session.img_offset, 0);
     vfs_read_fd(fd, ipl_dst, IPL_SIZE);
 
-    /* V86コンテキスト: IPLエントリ */
-    ctx.eip    = 0x0000;
-    ctx.cs     = IPL_SEG;
-    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
-    ctx.esp    = 0xFFFE;
-    ctx.ss     = 0x0000;
-    ctx.es     = IPL_SEG;
-    ctx.ds     = IPL_SEG;
-    ctx.fs     = 0x0000;
-    ctx.gs     = 0x0000;
-
-    /* TSS ESP0 切り替え */
-    saved_esp0 = 0x9FFF0UL;
-    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
-
-    /* V86モード遷移準備 */
-    v86_active = 1;
-    v86_exit_request = 0;
-    current_session.exit_reason = V86_EXIT_NONE;
-
-    /* デバッグカウンタリセット */
-    v86_reset_counters();
-
     kprintf(0xA1, "[V86] Booting FreeDOS(98) IPL...\n");
 
-    /* ジャンプバッファをアクティブに設定 */
-    {
-        extern u32 *v86_current_jmpbuf;
-        v86_current_jmpbuf = v86_session_jmpbuf;
-    }
+    /* V86実行コア */
+    v86_session_run_core();
 
-    if (exec_setjmp(v86_session_jmpbuf) == 0) {
-        v86_enter(&ctx);
-    }
-
-    /* ============================================================ */
-    /*  V86終了後の後始末                                           */
-    /* ============================================================ */
-    {
-        extern u32 *v86_current_jmpbuf;
-        v86_current_jmpbuf = 0;
-    }
-
-    v86_active = 0;
-    v86_exit_request = 0;
-    v86_pending_irq = 0;
-    tss_set_esp0(saved_esp0);
-
-    /* デバッグダンプ (有効時のみ) */
-    v86_debug_dump_session();
-
-    /* リソース解放 */
-    v86_disk_clear();
+    /* ファイルリソース解放 */
     vfs_close(fd);
     current_session.fd = -1;
-
-    /* メモリ空間復元 */
-    v86_mem_teardown();
-
-    /* 画面リストア */
-    v86_restore_screen();
-
-    /* 終了メッセージ */
-    kprintf(0xA1, "[V86] Session ended: %s\n",
-            v86_exit_reason_str(current_session.exit_reason));
 
     return 0;
 }
@@ -315,8 +322,6 @@ int v86_boot_freedos(const char *path, const char *cmdline)
 /* ====================================================================== */
 int v86_boot_physical_fdd(int drv, const char *cmdline)
 {
-    struct v86_context ctx;
-    u32 saved_esp0;
     u8 *ipl_dst;
 
     /* セッション初期化 */
@@ -345,67 +350,10 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
         return -1;
     }
 
-    /* V86コンテキスト: IPLエントリ */
-    ctx.eip    = 0x0000;
-    ctx.cs     = IPL_SEG;
-    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
-    ctx.esp    = 0xFFFE;
-    ctx.ss     = 0x0000;
-    ctx.es     = IPL_SEG;
-    ctx.ds     = IPL_SEG;
-    ctx.fs     = 0x0000;
-    ctx.gs     = 0x0000;
-
-    /* TSS ESP0 切り替え */
-    saved_esp0 = 0x9FFF0UL;
-    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
-
-    /* V86モード遷移準備 */
-    v86_active = 1;
-    v86_exit_request = 0;
-    current_session.exit_reason = V86_EXIT_NONE;
-
-    /* デバッグカウンタリセット */
-    v86_reset_counters();
-
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
 
-    /* ジャンプバッファをアクティブに設定 */
-    {
-        extern u32 *v86_current_jmpbuf;
-        v86_current_jmpbuf = v86_session_jmpbuf;
-    }
-
-    if (exec_setjmp(v86_session_jmpbuf) == 0) {
-        v86_enter(&ctx);
-    }
-
-    /* V86終了後の後始末 */
-    {
-        extern u32 *v86_current_jmpbuf;
-        v86_current_jmpbuf = 0;
-    }
-
-    v86_active = 0;
-    v86_exit_request = 0;
-    v86_pending_irq = 0;
-    tss_set_esp0(saved_esp0);
-
-    /* デバッグダンプ */
-    v86_debug_dump_session();
-
-    /* リソース解放 */
-    v86_disk_clear();
-
-    /* メモリ空間復元 */
-    v86_mem_teardown();
-
-    /* 画面リストア */
-    v86_restore_screen();
-
-    /* 終了メッセージ */
-    kprintf(0xA1, "[V86] Session ended: %s\n",
-            v86_exit_reason_str(current_session.exit_reason));
+    /* V86実行コア */
+    v86_session_run_core();
 
     return 0;
 }
