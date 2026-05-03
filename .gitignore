@@ -80,3 +80,9 @@ rance.png
 docs/DESIGN_PHILOSOPHY.md
 v86_test.lst
 tools/freedos98/
+tools/fdkernel/
+kernel.asm
+kernel.txt
+os32_server_out.txt
+os32_server_err.txt
+screen.png
