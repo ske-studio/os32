@@ -25,6 +25,7 @@
 #include "v86.h"
 #include "v86_mem.h"
 #include "kstring.h"
+#include "kprintf.h"
 #include "io.h"
 
 #include "vfs.h"
@@ -248,13 +249,7 @@ int v86_bios_int1b(u32 *regs)
 
                 /* 範囲チェック (SPT境界外もここでキャッチされる) */
                 if (byte_offset >= fdd_image_size) {
-                    log_entry->status = 0xC0;
-                    log_entry->result_offset = (i32)byte_offset;
-                    disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-                    disk_log_count++;
-                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xC000UL;
-                    regs[V86_REG_EFLAGS] |= 1;
-                    return 0;
+                    DISK_ERROR_RETURN(log_entry, 0xC0, (i32)byte_offset, regs);
                 }
 
                 log_entry->result_offset = (i32)byte_offset;
@@ -277,13 +272,7 @@ int v86_bios_int1b(u32 *regs)
                     if (fdc_read_sector(fdd_phys_drv, cur_cyl, cur_head,
                                         cur_sect + 1, dst) != 0) {
                         /* FDCリードエラー */
-                        log_entry->status = 0xD0;
-                        log_entry->result_offset = (i32)img_offset;
-                        disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
-                        disk_log_count++;
-                        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xD000UL;
-                        regs[V86_REG_EFLAGS] |= 1;
-                        return 0;
+                        DISK_ERROR_RETURN(log_entry, 0xD0, (i32)img_offset, regs);
                     }
                     dst += chunk;
                     remaining -= chunk;
@@ -450,7 +439,6 @@ int v86_bios_int1b(u32 *regs)
 /* ====================================================================== */
 void v86_disk_dump_log(void)
 {
-    extern void kprintf(u8 attr, const char *fmt, ...);
     u32 n;
     u32 i;
     u32 start;
