@@ -22,6 +22,7 @@
 #include "kprintf.h"
 #include "io.h"
 #include "kbd.h"
+#include "fdc.h"
 
 extern void serial_puts(const char *s);
 
@@ -302,6 +303,109 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     v86_disk_clear();
     vfs_close(fd);
     current_session.fd = -1;
+
+    /* メモリ空間復元 */
+    v86_mem_teardown();
+
+    /* 画面リストア */
+    v86_restore_screen();
+
+    /* 終了メッセージ */
+    kprintf(0xA1, "[V86] Session ended: %s\n",
+            v86_exit_reason_str(current_session.exit_reason));
+
+    return 0;
+}
+
+/* ====================================================================== */
+/*  v86_boot_physical_fdd - 実FDDからV86セッションを起動                   */
+/*                                                                          */
+/*  NP21/Wにマウント中のFDDから直接IPLを読み、FreeDOSを起動する。         */
+/*  ファイルオープン不要。fdc_read_sector() でセクタを直接読む。           */
+/* ====================================================================== */
+int v86_boot_physical_fdd(int drv, const char *cmdline)
+{
+    struct v86_context ctx;
+    u32 saved_esp0;
+    u8 *ipl_dst;
+
+    /* セッション初期化 */
+    kmemset(&current_session, 0, sizeof(current_session));
+    current_session.auto_cmd = cmdline;
+    current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
+    current_session.fd = -1;
+    current_session.img_data_size = V86_FDD_IMAGE_SIZE;
+
+    /* V86メモリ空間を構築 */
+    v86_mem_setup();
+
+    /* PIC/PIT初期化 */
+    v86_pic_init();
+    v86_pit_init();
+
+    /* 実FDDモードを設定 */
+    v86_disk_set_physical(drv);
+
+    /* IPLを実FDCから読み込み (シリンダ0, ヘッド0, セクタ1) */
+    ipl_dst = v86_phys_addr(IPL_SEG, 0);
+    if (fdc_read_sector(drv, 0, 0, 1, ipl_dst) != 0) {
+        kprintf(0xE1, "[V86] FDC read IPL failed (drv=%d)\n", drv);
+        v86_disk_clear();
+        v86_mem_teardown();
+        return -1;
+    }
+
+    /* V86コンテキスト: IPLエントリ */
+    ctx.eip    = 0x0000;
+    ctx.cs     = IPL_SEG;
+    ctx.eflags = EFLAGS_VM | EFLAGS_IF;
+    ctx.esp    = 0xFFFE;
+    ctx.ss     = 0x0000;
+    ctx.es     = IPL_SEG;
+    ctx.ds     = IPL_SEG;
+    ctx.fs     = 0x0000;
+    ctx.gs     = 0x0000;
+
+    /* TSS ESP0 切り替え */
+    saved_esp0 = 0x9FFF0UL;
+    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
+
+    /* V86モード遷移準備 */
+    v86_active = 1;
+    v86_exit_request = 0;
+    current_session.exit_reason = V86_EXIT_NONE;
+
+    /* デバッグカウンタリセット */
+    v86_reset_counters();
+
+    kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
+
+    /* ジャンプバッファをアクティブに設定 */
+    {
+        extern u32 *v86_current_jmpbuf;
+        v86_current_jmpbuf = v86_session_jmpbuf;
+    }
+
+    if (exec_setjmp(v86_session_jmpbuf) == 0) {
+        v86_enter(&ctx);
+    }
+
+    /* V86終了後の後始末 */
+    {
+        extern u32 *v86_current_jmpbuf;
+        v86_current_jmpbuf = 0;
+    }
+
+    v86_active = 0;
+    v86_exit_request = 0;
+    v86_pending_irq = 0;
+    tss_set_esp0(saved_esp0);
+
+    /* デバッグダンプ */
+    v86_debug_dump_session();
+
+    /* リソース解放 */
+    v86_disk_clear();
 
     /* メモリ空間復元 */
     v86_mem_teardown();

@@ -40,7 +40,9 @@
   ],
   "externs": [
     "extern volatile u32 tick_count;",
-    "extern void kapi_sys_exit(int status);"
+    "extern void kapi_sys_exit(int status);",
+    "extern int v86_boot_freedos(const char *path, const char *cmdline);",
+    "extern int v86_boot_physical_fdd(int drv, const char *cmdline);"
   ],
   "api": [
     {
@@ -1109,6 +1111,18 @@
       "name": "kcg_load_font",
       "ret": "int",
       "args": ["const char *path"]
+    },
+    {
+      "name": "sys_v86_boot_freedos",
+      "ret": "int",
+      "args": ["const char *path", "const char *cmdline"],
+      "target": "v86_boot_freedos"
+    },
+    {
+      "name": "sys_v86_boot_physical",
+      "ret": "int",
+      "args": ["int drv", "const char *cmdline"],
+      "target": "v86_boot_physical_fdd"
     }
   ]
 }

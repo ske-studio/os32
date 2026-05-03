@@ -65,6 +65,10 @@ typedef struct {
 /* FreeDOSイメージからV86セッションを起動する */
 int  v86_boot_freedos(const char *path, const char *cmdline);
 
+/* NP21/Wにマウント中の実FDDからV86セッションを起動する
+ * drv: 物理ドライブ番号 (通常0) */
+int  v86_boot_physical_fdd(int drv, const char *cmdline);
+
 /* IRQ0 (100Hz) ごとに呼ばれるコールバック
  * Auto-Typer処理と強制脱出ホットキー検知を行う */
 void v86_session_on_tick(void);

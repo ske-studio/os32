@@ -28,11 +28,16 @@
 #include "io.h"
 
 #include "vfs.h"
+#include "fdc.h"
 
 /* FDDイメージファイル (外部から設定される) */
 static int fdd_fd = -1;
 static u32 fdd_image_offset = 0;
 static u32 fdd_image_size = 0;
+
+/* 実FDDモード */
+static int fdd_use_physical = 0;
+static int fdd_phys_drv = 0;
 
 /* ====================================================================== */
 /*  デバッグ用 INT 1Bh 呼び出しログ (リングバッファ)                        */
@@ -57,6 +62,18 @@ void v86_disk_set_file(int fd, u32 data_offset, u32 data_size)
 }
 
 /* ====================================================================== */
+/*  v86_disk_set_physical — 実FDDモードを有効化                           */
+/* ====================================================================== */
+void v86_disk_set_physical(int drv)
+{
+    fdd_use_physical = 1;
+    fdd_phys_drv = drv;
+    fdd_fd = -1;
+    fdd_image_offset = 0;
+    fdd_image_size = V86_FDD_IMAGE_SIZE;
+}
+
+/* ====================================================================== */
 /*  v86_disk_clear — FDDイメージをクリア                                   */
 /* ====================================================================== */
 void v86_disk_clear(void)
@@ -64,6 +81,8 @@ void v86_disk_clear(void)
     fdd_fd = -1;
     fdd_image_offset = 0;
     fdd_image_size = 0;
+    fdd_use_physical = 0;
+    fdd_phys_drv = 0;
 }
 
 /* ====================================================================== */
@@ -210,8 +229,8 @@ int v86_bios_int1b(u32 *regs)
                 /* PC-98 INT 1Bh: DL(セクタ番号)は常に1ベース → 0ベースに変換 */
                 if (sector_dl > 0) sector_dl--;
 
-                /* イメージ未設定チェック */
-                if (fdd_fd < 0) {
+                /* イメージ未設定チェック (ファイルモードのみ) */
+                if (!fdd_use_physical && fdd_fd < 0) {
                     log_entry->status = 0xE0;
                     log_entry->result_offset = -1;
                     disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
@@ -259,19 +278,55 @@ int v86_bios_int1b(u32 *regs)
 
             /* セクタ単位で転送 (複数セクタ対応) */
             remaining = (u32)xfer_bytes;
-            if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
-                vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0); /* SEEK_SET=0 */
-            }
-            while (remaining > 0 && img_offset >= 0 && (u32)img_offset < fdd_image_size) {
-                chunk = remaining;
-                if (chunk > V86_FDD_BPS) chunk = V86_FDD_BPS;
-                if ((u32)img_offset + chunk > fdd_image_size) {
-                    chunk = fdd_image_size - (u32)img_offset;
+            if (fdd_use_physical) {
+                /* 実FDDモード: fdc_read_sector()で1セクタずつ読む */
+                u8 cur_sect = sector_dl;  /* 0ベース */
+                u8 cur_head = head_dh;
+                u8 cur_cyl = cylinder;
+                while (remaining > 0) {
+                    chunk = V86_FDD_BPS;
+                    if (chunk > remaining) chunk = remaining;
+                    if (fdc_read_sector(fdd_phys_drv, cur_cyl, cur_head,
+                                        cur_sect + 1, dst) != 0) {
+                        /* FDCリードエラー */
+                        log_entry->status = 0xD0;
+                        log_entry->result_offset = (i32)img_offset;
+                        disk_log_idx = (disk_log_idx + 1) % V86_DISK_LOG_SIZE;
+                        disk_log_count++;
+                        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xD000UL;
+                        regs[V86_REG_EFLAGS] |= 1;
+                        return 0;
+                    }
+                    dst += chunk;
+                    remaining -= chunk;
+                    img_offset += (i32)chunk;
+                    /* 次セクタに進む */
+                    cur_sect++;
+                    if (cur_sect >= V86_FDD_SPT) {
+                        cur_sect = 0;
+                        cur_head++;
+                        if (cur_head >= V86_FDD_HEADS) {
+                            cur_head = 0;
+                            cur_cyl++;
+                        }
+                    }
                 }
-                vfs_read_fd(fdd_fd, dst, chunk);
-                dst += chunk;
-                img_offset += (i32)chunk;
-                remaining -= chunk;
+            } else {
+                /* ファイルモード: VFS seek+read */
+                if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
+                    vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0);
+                }
+                while (remaining > 0 && img_offset >= 0 && (u32)img_offset < fdd_image_size) {
+                    chunk = remaining;
+                    if (chunk > V86_FDD_BPS) chunk = V86_FDD_BPS;
+                    if ((u32)img_offset + chunk > fdd_image_size) {
+                        chunk = fdd_image_size - (u32)img_offset;
+                    }
+                    vfs_read_fd(fdd_fd, dst, chunk);
+                    dst += chunk;
+                    img_offset += (i32)chunk;
+                    remaining -= chunk;
+                }
             }
 
             /* 成功 */
@@ -303,9 +358,30 @@ int v86_bios_int1b(u32 *regs)
         /*  Phase 2: 読み取り専用 — ライトプロテクトエラー応答          */
         /* ============================================================ */
         case 0x05:
-            log_entry->status = 0x70;
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0x7000UL;
-            regs[V86_REG_EFLAGS] |= 1;
+            if (fdd_use_physical) {
+                /* 実FDDモード: fdc_write_sector()で書き込み */
+                u8 wr_cyl = (u8)(regs[V86_REG_ECX] & 0xFF);
+                u8 wr_head = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+                u8 wr_sect = (u8)(regs[V86_REG_EDX] & 0xFF); /* 1ベース */
+                u16 wr_es = (u16)(regs[V86_REG_ES] & 0xFFFF);
+                u16 wr_bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
+                u8 *wr_src = v86_phys_addr(wr_es, wr_bp);
+                if (fdc_write_sector(fdd_phys_drv, wr_cyl, wr_head,
+                                     wr_sect, wr_src) != 0) {
+                    log_entry->status = 0xD0;
+                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xD000UL;
+                    regs[V86_REG_EFLAGS] |= 1;
+                } else {
+                    log_entry->status = 0x00;
+                    regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
+                    regs[V86_REG_EFLAGS] &= ~1UL;
+                }
+            } else {
+                /* ファイルモード: ライトプロテクトエラー */
+                log_entry->status = 0x70;
+                regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0x7000UL;
+                regs[V86_REG_EFLAGS] |= 1;
+            }
             break;
 
         /* ============================================================ */

@@ -29,6 +29,10 @@ void v86_disk_set_file(int fd, u32 data_offset, u32 data_size);
 /* FDDイメージをクリア */
 void v86_disk_clear(void);
 
+/* 実FDDモードを有効化 (NP21/Wにマウント中のFDDから直接読む)
+ * drv: 物理ドライブ番号 (通常0) */
+void v86_disk_set_physical(int drv);
+
 /* INT 1Bh (ディスクBIOS) を処理する。
  * regs: V86スタックフレーム内レジスタ配列
  * 戻り値: 0=処理済み(V86続行), -1=未実装ファンクション */
