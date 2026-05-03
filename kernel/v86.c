@@ -15,6 +15,7 @@
 #include "v86_pit.h"
 #include "v86_disk.h"
 #include "v86_session.h"
+#include "tvram.h"
 #include "io.h"
 #include "kprintf.h"
 
@@ -46,8 +47,8 @@ void v86_trace_reset(void)
 }
 
 static void tvram_hex(u32 val, int digits, int row, int *col) {
-    volatile u16 *tvram = (volatile u16 *)0xA0000UL;
-    volatile u16 *tattr = (volatile u16 *)0xA2000UL;
+    volatile u16 *tvram = (volatile u16 *)TVRAM_BASE;
+    volatile u16 *tattr = (volatile u16 *)TVRAM_ATTR;
     const char *hex = "0123456789ABCDEF";
     int i;
     for (i = digits - 1; i >= 0; i--) {
@@ -59,8 +60,8 @@ static void tvram_hex(u32 val, int digits, int row, int *col) {
 }
 
 static void tvram_puts(const char *str, int row, int *col) {
-    volatile u16 *tvram = (volatile u16 *)0xA0000UL;
-    volatile u16 *tattr = (volatile u16 *)0xA2000UL;
+    volatile u16 *tvram = (volatile u16 *)TVRAM_BASE;
+    volatile u16 *tattr = (volatile u16 *)TVRAM_ATTR;
     while (*str) {
         int pos = row * 80 + *col;
         tvram[pos] = *str;
@@ -71,7 +72,7 @@ static void tvram_puts(const char *str, int row, int *col) {
 }
 
 /* v86_gp_count は v86.h で extern 宣言済み */
-static void dump_v86_trace_tvram(void) {
+static void __attribute__((unused)) dump_v86_trace_tvram(void) {
     int i, n;
     int row = 0;
     int col = 0;
@@ -188,6 +189,43 @@ static u16 v86_pop16(u32 *regs)
 }
 
 /* ====================================================================== */
+/*  GPハンドラ版 IRQ注入ヘルパー                                          */
+/*  V86_REG_* インデックスを使用し、v86_push16 でスタック操作する             */
+/* ====================================================================== */
+static void v86_gp_inject_irq(u32 *regs, u16 handler_seg, u16 handler_off)
+{
+    v86_push16(regs, (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF));
+    v86_push16(regs, (u16)regs[V86_REG_CS]);
+    v86_push16(regs, (u16)(regs[V86_REG_EIP] & 0xFFFF));
+    regs[V86_REG_CS] = handler_seg;
+    regs[V86_REG_EIP] = handler_off;
+    v86_virtual_if = 0;
+}
+
+/* ====================================================================== */
+/*  8ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
+/* ====================================================================== */
+
+/* 8ビットI/O入力: PIC/PIT仮想化チェック付き */
+static u8 v86_in8_checked(u16 port)
+{
+    u8 val;
+    if (v86_pic_io(port, &val, 0)) return val;
+    if (v86_pit_io(port, &val, 0)) return val;
+    return inp(port);
+}
+
+/* 8ビットI/O出力: PIC/PIT仮想化チェック付き */
+static void v86_out8_checked(u16 port, u8 val)
+{
+    if (!v86_pic_io(port, &val, 1)) {
+        if (!v86_pit_io(port, &val, 1)) {
+            outp(port, val);
+        }
+    }
+}
+
+/* ====================================================================== */
 /*  16ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
 /*                                                                          */
 /*  PIC/PITは8ビットポートデバイスのため、16ビットアクセスは                 */
@@ -197,19 +235,8 @@ static u16 v86_pop16(u32 *regs)
 /* 16ビットI/O入力: PIC/PIT仮想化チェック付き */
 static u16 v86_inw_checked(u16 port)
 {
-    u8 lo, hi;
-    /* 下位バイト (port) */
-    if (!v86_pic_io(port, &lo, 0)) {
-        if (!v86_pit_io(port, &lo, 0)) {
-            lo = inp(port);
-        }
-    }
-    /* 上位バイト (port+1) */
-    if (!v86_pic_io((u16)(port + 1), &hi, 0)) {
-        if (!v86_pit_io((u16)(port + 1), &hi, 0)) {
-            hi = inp((u16)(port + 1));
-        }
-    }
+    u8 lo = v86_in8_checked(port);
+    u8 hi = v86_in8_checked((u16)(port + 1));
     return (u16)lo | ((u16)hi << 8);
 }
 
@@ -222,18 +249,8 @@ static int v86_outw_checked(u16 port, u16 val)
     /* リブート検知 (F0hポート) */
     if (v86_pic_is_reboot(port, lo)) return 1;
     if (v86_pic_is_reboot((u16)(port + 1), hi)) return 1;
-    /* 下位バイト (port) */
-    if (!v86_pic_io(port, &lo, 1)) {
-        if (!v86_pit_io(port, &lo, 1)) {
-            outp(port, lo);
-        }
-    }
-    /* 上位バイト (port+1) */
-    if (!v86_pic_io((u16)(port + 1), &hi, 1)) {
-        if (!v86_pit_io((u16)(port + 1), &hi, 1)) {
-            outp((u16)(port + 1), hi);
-        }
-    }
+    v86_out8_checked(port, lo);
+    v86_out8_checked((u16)(port + 1), hi);
     return 0;
 }
 
@@ -484,16 +501,9 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE4: {
         u8 port = ip[1];
-        u8 val;
         v86_io_stat_record(port);
-        /* PIC仮想化 */
-        if (v86_pic_io(port, &val, 0)) {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
-        } else if (v86_pit_io(port, &val, 0)) {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
-        } else {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
-        }
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
+                           | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
@@ -517,12 +527,7 @@ int v86_gp_handler(u32 *regs)
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
         }
-        /* PIC仮想化 → PIT仮想化 → 実ハードウェア */
-        if (!v86_pic_io(port, &val, 1)) {
-            if (!v86_pit_io(port, &val, 1)) {
-                outp(port, val);
-            }
-        }
+        v86_out8_checked(port, val);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
         break;
     }
@@ -532,15 +537,9 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEC: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        u8 val;
         v86_io_stat_record(port);
-        if (v86_pic_io(port, &val, 0)) {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
-        } else if (v86_pit_io(port, &val, 0)) {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | val;
-        } else {
-            regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL) | inp(port);
-        }
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
+                           | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
@@ -563,11 +562,7 @@ int v86_gp_handler(u32 *regs)
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
         }
-        if (!v86_pic_io(port, &val, 1)) {
-            if (!v86_pit_io(port, &val, 1)) {
-                outp(port, val);
-            }
-        }
+        v86_out8_checked(port, val);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
         break;
     }
@@ -695,12 +690,7 @@ int v86_gp_handler(u32 *regs)
                 }
 
                 /* ゲストスタックにフレームをpushしてハンドラに転送 */
-                v86_push16(regs, (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF));
-                v86_push16(regs, (u16)regs[V86_REG_CS]);
-                v86_push16(regs, (u16)(regs[V86_REG_EIP] & 0xFFFF));
-                regs[V86_REG_CS] = handler_seg;
-                regs[V86_REG_EIP] = handler_off;
-                v86_virtual_if = 0;
+                v86_gp_inject_irq(regs, handler_seg, handler_off);
             } else {
                 v86_irq0_gp_skip_isr++;
             }
@@ -721,12 +711,7 @@ int v86_gp_handler(u32 *regs)
                     v86_pic_set_isr(0, isr | 2);
 
                     /* ゲストスタックにフレームをpushしてハンドラに転送 */
-                    v86_push16(regs, (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF));
-                    v86_push16(regs, (u16)regs[V86_REG_CS]);
-                    v86_push16(regs, (u16)(regs[V86_REG_EIP] & 0xFFFF));
-                    regs[V86_REG_CS] = handler_seg;
-                    regs[V86_REG_EIP] = handler_off;
-                    v86_virtual_if = 0;
+                    v86_gp_inject_irq(regs, handler_seg, handler_off);
                 }
             }
         }
@@ -768,6 +753,30 @@ void v86_set_pending_irq(int irq_no)
 #define HWIRQ_REG_EFLAGS 12
 #define HWIRQ_REG_ESP    13
 #define HWIRQ_REG_SS     14
+
+/* ====================================================================== */
+/*  HW版 IRQ注入ヘルパー                                                   */
+/*  HWIRQ_REG_* インデックスを使用し、直接スタック操作する                    */
+/* ====================================================================== */
+static void v86_hw_inject_irq(u32 *regs, u16 handler_seg, u16 handler_off)
+{
+    u16 *sp;
+
+    regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+    sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+    *sp = (u16)((regs[HWIRQ_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF);
+
+    regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+    sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+    *sp = (u16)regs[HWIRQ_REG_CS];
+
+    regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
+    sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
+    *sp = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
+
+    regs[HWIRQ_REG_CS] = handler_seg;
+    regs[HWIRQ_REG_EIP] = handler_off;
+}
 
 /* IRQ0注入デバッグカウンタ */
 u32 v86_irq0_call_count = 0;    /* v86_inject_timer_irq 呼び出し回数 */
@@ -870,22 +879,8 @@ void v86_inject_timer_irq(u32 *regs)
         v86_virtual_if = 0;
         v86_pending_irq &= ~(1U << 0);
 
-        /* ゲストスタックにフレームをpush (EFLAGS, CS, EIP) */
-        regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-        sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-        *sp = (u16)((regs[HWIRQ_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF);
-
-        regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-        sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-        *sp = (u16)regs[HWIRQ_REG_CS];
-
-        regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-        sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-        *sp = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
-
-        /* ハンドラにジャンプ */
-        regs[HWIRQ_REG_CS] = handler_seg;
-        regs[HWIRQ_REG_EIP] = handler_off;
+        /* ゲストスタックにフレームをpushしてハンドラに転送 */
+        v86_hw_inject_irq(regs, handler_seg, handler_off);
     } else {
         /* Defer interrupt if IF=0 */
         v86_irq0_noif_count++;
@@ -913,21 +908,8 @@ void v86_inject_timer_irq(u32 *regs)
                 v86_pic_set_isr(0, isr2 | 2);
                 v86_virtual_if = 0;
 
-                /* ゲストスタックにフレームをpush (EFLAGS, CS, EIP) */
-                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-                *sp = (u16)((regs[HWIRQ_REG_EFLAGS] & 0xFFFF) | EFLAGS_IF);
-
-                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-                *sp = (u16)regs[HWIRQ_REG_CS];
-
-                regs[HWIRQ_REG_ESP] = (regs[HWIRQ_REG_ESP] - 2) & 0xFFFF;
-                sp = (u16 *)v86_linear(regs[HWIRQ_REG_SS], regs[HWIRQ_REG_ESP]);
-                *sp = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
-
-                regs[HWIRQ_REG_CS] = handler_seg;
-                regs[HWIRQ_REG_EIP] = handler_off;
+                /* ゲストスタックにフレームをpushしてハンドラに転送 */
+                v86_hw_inject_irq(regs, handler_seg, handler_off);
             }
         }
     }

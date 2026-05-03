@@ -104,6 +104,9 @@ void v86_trace_reset(void);
 void v86_dump_io_stats(void);
 void v86_reset_io_stats(void);
 
+/* V86終了時のlongjmpターゲット (v86_test.c で定義) */
+extern u32 *v86_current_jmpbuf;
+
 /* GPトレースバッファ取得 */
 struct v86_trace_entry {
     u16 cs;

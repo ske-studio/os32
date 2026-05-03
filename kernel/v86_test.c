@@ -28,9 +28,6 @@ extern void exec_longjmp(u32 *buf);
 /* V86テスト用setjmpバッファ */
 static u32 v86_test_jmpbuf[6];
 
-/* v86_test_exitがルーティングに使うジャンプバッファポインタ (このファイルで定義) */
-extern u32 *v86_current_jmpbuf;
-
 /* V86テスト用カーネルスタック (16KB) */
 static u8 v86_test_kstack[16384] __attribute__((aligned(16)));
 
