@@ -17,4 +17,9 @@ extern int v86_debug_enabled;
  * シリアル出力 + ファイル書き出しを一括実行する */
 void v86_debug_dump_session(void);
 
+/* シリアルポートへの16進数出力ヘルパー (v86_debug.c で定義) */
+void v86_dbg_hex8(u8 val);
+void v86_dbg_hex16(u16 val);
+void v86_dbg_hex32(u32 val);
+
 #endif /* V86_DEBUG_H */

@@ -21,28 +21,15 @@
 #include "v86_bios.h"
 #include "v86.h"
 #include "v86_mem.h"
+#include "v86_debug.h"
+#include "tvram.h"
 #include "io.h"
 #include "rtc.h"
 #include "kbd.h"
 
 extern void serial_puts(const char *s);
-static void serial_hex8(u8 val) {
-    char buf[3];
-    const char *hex = "0123456789ABCDEF";
-    buf[0] = hex[val >> 4];
-    buf[1] = hex[val & 0xF];
-    buf[2] = '\0';
-    serial_puts(buf);
-}
 
-/* ====================================================================== */
-/*  テキストVRAMアドレス定数 (ノーマルモード)                               */
-/* ====================================================================== */
-#define TVRAM_CHAR_BASE   0xA0000UL   /* 文字エリア先頭 */
-#define TVRAM_ATTR_BASE   0xA2000UL   /* アトリビュートエリア先頭 */
-#define TVRAM_COLS        80          /* 1行の桁数 */
-#define TVRAM_ROWS        25          /* 行数 */
-#define TVRAM_LINE_BYTES  160         /* 1行のバイト数 (80桁 × 2バイト) */
+#define TVRAM_LINE_BYTES  (TVRAM_COLS * 2)  /* 1行のバイト数 (80桁 x 2バイト) */
 
 /* 仮想カーソル位置 (V86 BIOS内で管理) */
 static u16 v86_cursor_x = 0;
@@ -53,8 +40,8 @@ static u16 v86_cursor_y = 0;
 /* ====================================================================== */
 static void tvram_scroll_up(void)
 {
-    volatile u16 *char_area = (volatile u16 *)TVRAM_CHAR_BASE;
-    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR_BASE;
+    volatile u16 *char_area = (volatile u16 *)TVRAM_BASE;
+    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR;
     int i;
 
     /* 行1〜24 を 行0〜23 にコピー */
@@ -90,11 +77,11 @@ static void tvram_putchar(u8 ch, u8 attr)
     offset = v86_cursor_y * TVRAM_LINE_BYTES + v86_cursor_x * 2;
 
     /* 文字エリア: JISコード(下位=文字, 上位=0x00 for ANK) */
-    char_ptr = (volatile u16 *)(TVRAM_CHAR_BASE + offset);
+    char_ptr = (volatile u16 *)(TVRAM_BASE + offset);
     *char_ptr = (u16)ch;
 
     /* アトリビュートエリア: 偶数アドレスのみ */
-    attr_ptr = (volatile u8 *)(TVRAM_ATTR_BASE + offset);
+    attr_ptr = (volatile u8 *)(TVRAM_ATTR + offset);
     *attr_ptr = attr;
 
     v86_cursor_x++;
@@ -105,8 +92,8 @@ static void tvram_putchar(u8 ch, u8 attr)
 /* ====================================================================== */
 static void tvram_clear_all(void)
 {
-    volatile u16 *char_area = (volatile u16 *)TVRAM_CHAR_BASE;
-    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR_BASE;
+    volatile u16 *char_area = (volatile u16 *)TVRAM_BASE;
+    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR;
     int i;
     int total = TVRAM_COLS * TVRAM_ROWS;
 
@@ -317,8 +304,8 @@ int v86_bios_int18(u32 *regs)
         if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
         if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
         offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
-        char_ptr = (volatile u16 *)(TVRAM_CHAR_BASE + offset);
-        attr_ptr = (volatile u16 *)(TVRAM_ATTR_BASE + offset);
+        char_ptr = (volatile u16 *)(TVRAM_BASE + offset);
+        attr_ptr = (volatile u16 *)(TVRAM_ATTR + offset);
         *char_ptr = (u16)ch;
         *attr_ptr = 0x00E1;
         break;
@@ -338,7 +325,7 @@ int v86_bios_int18(u32 *regs)
         if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
         if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
         offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
-        char_ptr = (volatile u16 *)(TVRAM_CHAR_BASE + offset);
+        char_ptr = (volatile u16 *)(TVRAM_BASE + offset);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | ((u16)*char_ptr & 0xFF);
         break;
@@ -359,7 +346,7 @@ int v86_bios_int18(u32 *regs)
         if (col >= TVRAM_COLS) col = TVRAM_COLS - 1;
         if (row >= TVRAM_ROWS) row = TVRAM_ROWS - 1;
         offset = (u32)row * TVRAM_LINE_BYTES + (u32)col * 2;
-        attr_ptr = (volatile u8 *)(TVRAM_ATTR_BASE + offset);
+        attr_ptr = (volatile u8 *)(TVRAM_ATTR + offset);
         *attr_ptr = attr;
         break;
     }
@@ -424,7 +411,7 @@ int v86_bios_int18(u32 *regs)
         static int unhandled_count = 0;
         if (unhandled_count < 10) {
             serial_puts("\r\n[V86 BIOS] Unhandled INT 18h AH=");
-            serial_hex8(ah);
+            v86_dbg_hex8(ah);
             serial_puts("\r\n");
             unhandled_count++;
         }

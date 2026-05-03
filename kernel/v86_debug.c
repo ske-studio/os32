@@ -22,23 +22,23 @@ int v86_debug_enabled = 0;
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
-static void dbg_hex8(u8 val)
+void v86_dbg_hex8(u8 val)
 {
     const char *hex = "0123456789ABCDEF";
     serial_putchar(hex[val >> 4]);
     serial_putchar(hex[val & 0xF]);
 }
 
-static void dbg_hex16(u16 val)
+void v86_dbg_hex16(u16 val)
 {
-    dbg_hex8((u8)(val >> 8));
-    dbg_hex8((u8)(val & 0xFF));
+    v86_dbg_hex8((u8)(val >> 8));
+    v86_dbg_hex8((u8)(val & 0xFF));
 }
 
-static void dbg_hex32(u32 val)
+void v86_dbg_hex32(u32 val)
 {
-    dbg_hex16((u16)(val >> 16));
-    dbg_hex16((u16)(val & 0xFFFF));
+    v86_dbg_hex16((u16)(val >> 16));
+    v86_dbg_hex16((u16)(val & 0xFFFF));
 }
 
 /* ====================================================================== */
@@ -50,15 +50,15 @@ static void v86_debug_dump_serial(void)
 
     /* V86 END 統計 */
     serial_puts("\r\n[V86 END] ints=");
-    dbg_hex32(v86_int_count);
+    v86_dbg_hex32(v86_int_count);
     serial_puts(" gp=");
-    dbg_hex32(v86_gp_count);
+    v86_dbg_hex32(v86_gp_count);
     serial_puts(" last=0x");
-    dbg_hex8((u8)v86_last_int);
+    v86_dbg_hex8((u8)v86_last_int);
     serial_puts(" at ");
-    dbg_hex16((u16)v86_last_cs);
+    v86_dbg_hex16((u16)v86_last_cs);
     serial_puts(":");
-    dbg_hex16((u16)v86_last_ip);
+    v86_dbg_hex16((u16)v86_last_ip);
     serial_puts("\r\n");
 
     /* タイムアウト位置 */
@@ -66,14 +66,14 @@ static void v86_debug_dump_serial(void)
         u8 *timeout_addr;
         int di;
         serial_puts("[V86 TIMEOUT] real CS:IP=");
-        dbg_hex16((u16)v86_timeout_cs);
+        v86_dbg_hex16((u16)v86_timeout_cs);
         serial_puts(":");
-        dbg_hex16((u16)v86_timeout_ip);
+        v86_dbg_hex16((u16)v86_timeout_ip);
         if (v86_timeout_cs || v86_timeout_ip) {
             serial_puts(" opcodes=");
             timeout_addr = v86_phys_addr(v86_timeout_cs, v86_timeout_ip);
             for (di = 0; di < 16; di++) {
-                dbg_hex8(timeout_addr[di]);
+                v86_dbg_hex8(timeout_addr[di]);
                 serial_puts(" ");
             }
         }
@@ -86,11 +86,11 @@ static void v86_debug_dump_serial(void)
         int di;
         serial_puts("[MEM] 0060:0000=");
         p = v86_phys_addr(0x0060, 0x0000);
-        for (di = 0; di < 32; di++) { dbg_hex8(p[di]); serial_puts(" "); }
+        for (di = 0; di < 32; di++) { v86_dbg_hex8(p[di]); serial_puts(" "); }
         serial_puts("\r\n");
         serial_puts("[MEM] 1E00:0000=");
         p = v86_phys_addr(0x1E00, 0x0000);
-        for (di = 0; di < 32; di++) { dbg_hex8(p[di]); serial_puts(" "); }
+        for (di = 0; di < 32; di++) { v86_dbg_hex8(p[di]); serial_puts(" "); }
         serial_puts("\r\n");
     }
 
@@ -102,9 +102,9 @@ static void v86_debug_dump_serial(void)
 
         n = (total_count < 64) ? total_count : 64;
         serial_puts("[V86 DISK] total calls=");
-        dbg_hex32(total_count);
+        v86_dbg_hex32(total_count);
         serial_puts(" showing last ");
-        dbg_hex8((u8)n);
+        v86_dbg_hex8((u8)n);
         serial_puts("\r\n");
 
         if (n > 0) {
@@ -112,14 +112,14 @@ static void v86_debug_dump_serial(void)
             for (i = 0; i < n; i++) {
                 u32 idx = (start + i) % 64;
                 struct v86_disk_log_entry *e = &log[idx];
-                serial_puts("  AH="); dbg_hex8(e->func);
-                serial_puts(" C="); dbg_hex8(e->cylinder);
-                serial_puts(" H="); dbg_hex8(e->head);
-                serial_puts(" S="); dbg_hex8(e->sector);
-                serial_puts(" BX="); dbg_hex16(e->xfer_bytes);
-                serial_puts(" ES:BP="); dbg_hex16(e->es);
-                serial_puts(":"); dbg_hex16(e->bp);
-                serial_puts(" st="); dbg_hex8(e->status);
+                serial_puts("  AH="); v86_dbg_hex8(e->func);
+                serial_puts(" C="); v86_dbg_hex8(e->cylinder);
+                serial_puts(" H="); v86_dbg_hex8(e->head);
+                serial_puts(" S="); v86_dbg_hex8(e->sector);
+                serial_puts(" BX="); v86_dbg_hex16(e->xfer_bytes);
+                serial_puts(" ES:BP="); v86_dbg_hex16(e->es);
+                serial_puts(":"); v86_dbg_hex16(e->bp);
+                serial_puts(" st="); v86_dbg_hex8(e->status);
                 serial_puts("\r\n");
             }
         }
@@ -130,40 +130,90 @@ static void v86_debug_dump_serial(void)
 
     /* PIC最終状態 */
     serial_puts("[V86 PIC] M.IMR=");
-    dbg_hex8(v86_pic_get_imr(0));
+    v86_dbg_hex8(v86_pic_get_imr(0));
     serial_puts(" M.ISR=");
-    dbg_hex8(v86_pic_get_isr(0));
+    v86_dbg_hex8(v86_pic_get_isr(0));
     serial_puts(" S.IMR=");
-    dbg_hex8(v86_pic_get_imr(1));
+    v86_dbg_hex8(v86_pic_get_imr(1));
     serial_puts(" S.ISR=");
-    dbg_hex8(v86_pic_get_isr(1));
+    v86_dbg_hex8(v86_pic_get_isr(1));
     serial_puts(" irq0=");
-    dbg_hex32(v86_irq0_inject_count);
+    v86_dbg_hex32(v86_irq0_inject_count);
     serial_puts(" eoi0=");
-    dbg_hex32(v86_pic_get_eoi_count(0));
+    v86_dbg_hex32(v86_pic_get_eoi_count(0));
     serial_puts(" eoi1=");
-    dbg_hex32(v86_pic_get_eoi_count(1));
+    v86_dbg_hex32(v86_pic_get_eoi_count(1));
     serial_puts("\r\n");
 
     /* IRQ0注入カウンタ */
     serial_puts("[V86 IRQ0] call=");
-    dbg_hex32(v86_irq0_call_count);
+    v86_dbg_hex32(v86_irq0_call_count);
     serial_puts(" nonvm=");
-    dbg_hex32(v86_irq0_nonvm_count);
+    v86_dbg_hex32(v86_irq0_nonvm_count);
     serial_puts(" noif=");
-    dbg_hex32(v86_irq0_noif_count);
+    v86_dbg_hex32(v86_irq0_noif_count);
     serial_puts(" isr=");
-    dbg_hex32(v86_irq0_isr_count);
+    v86_dbg_hex32(v86_irq0_isr_count);
     serial_puts(" ivt=");
-    dbg_hex32(v86_irq0_ivt_count);
+    v86_dbg_hex32(v86_irq0_ivt_count);
     serial_puts("\r\n");
     serial_puts("[V86 IRQ0 GP] inject=");
-    dbg_hex32(v86_irq0_gp_inject_count);
+    v86_dbg_hex32(v86_irq0_gp_inject_count);
     serial_puts(" skip_isr=");
-    dbg_hex32(v86_irq0_gp_skip_isr);
+    v86_dbg_hex32(v86_irq0_gp_skip_isr);
     serial_puts(" skip_ivt=");
-    dbg_hex32(v86_irq0_gp_skip_ivt);
+    v86_dbg_hex32(v86_irq0_gp_skip_ivt);
     serial_puts("\r\n");
+}
+
+/* ====================================================================== */
+/*  ファイル書き出し用バッファ追記ヘルパー                                  */
+/* ====================================================================== */
+static char fbuf[4096];
+static int fbuf_pos;
+
+static void fbuf_str(const char *s)
+{
+    while (*s && fbuf_pos < (int)sizeof(fbuf) - 1)
+        fbuf[fbuf_pos++] = *s++;
+}
+
+static void fbuf_hex8(u8 val)
+{
+    const char *hx = "0123456789ABCDEF";
+    if (fbuf_pos < (int)sizeof(fbuf) - 2) {
+        fbuf[fbuf_pos++] = hx[val >> 4];
+        fbuf[fbuf_pos++] = hx[val & 0xF];
+    }
+}
+
+static void fbuf_hex16(u16 val)
+{
+    fbuf_hex8((u8)(val >> 8));
+    fbuf_hex8((u8)(val & 0xFF));
+}
+
+static void fbuf_hex32(u32 val)
+{
+    fbuf_hex16((u16)(val >> 16));
+    fbuf_hex16((u16)(val & 0xFFFF));
+}
+
+static void fbuf_dec(u32 val)
+{
+    char tb[12];
+    int tp = 0;
+    if (val == 0) {
+        if (fbuf_pos < (int)sizeof(fbuf) - 1)
+            fbuf[fbuf_pos++] = '0';
+        return;
+    }
+    while (val > 0) {
+        tb[tp++] = '0' + (val % 10);
+        val /= 10;
+    }
+    while (tp > 0 && fbuf_pos < (int)sizeof(fbuf) - 1)
+        fbuf[fbuf_pos++] = tb[--tp];
 }
 
 /* ====================================================================== */
@@ -171,150 +221,79 @@ static void v86_debug_dump_serial(void)
 /* ====================================================================== */
 static void v86_debug_write_fdos_log(void)
 {
-    extern volatile u32 tick_count;
-
-    static char fbuf[4096];
-    int fp = 0;
     u32 total_count, log_idx_v;
     struct v86_disk_log_entry *dlog;
     u32 n, i, start;
-    const char *hx = "0123456789ABCDEF";
+
+    fbuf_pos = 0;
 
     /* ヘッダ行 */
-    {
-        const char *h = "[V86] ints=";
-        int hi;
-        u32 v;
-        char tb[12];
-        int tp;
-        for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
-        v = v86_int_count; tp = 0;
-        if (v == 0) fbuf[fp++] = '0';
-        else { while(v>0){tb[tp++]='0'+(v%10);v/=10;} while(tp>0)fbuf[fp++]=tb[--tp]; }
-        fbuf[fp++] = ' ';
-        h = "gp=";
-        for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
-        v = v86_gp_count; tp = 0;
-        if (v == 0) fbuf[fp++] = '0';
-        else { while(v>0){tb[tp++]='0'+(v%10);v/=10;} while(tp>0)fbuf[fp++]=tb[--tp]; }
-        fbuf[fp++] = ' ';
-        h = "last=";
-        for (hi = 0; h[hi]; hi++) fbuf[fp++] = h[hi];
-        fbuf[fp++] = hx[(v86_last_int>>4)&0xF];
-        fbuf[fp++] = hx[v86_last_int&0xF];
-        fbuf[fp++] = ' ';
-        fbuf[fp++] = hx[(v86_last_cs>>12)&0xF];
-        fbuf[fp++] = hx[(v86_last_cs>>8)&0xF];
-        fbuf[fp++] = hx[(v86_last_cs>>4)&0xF];
-        fbuf[fp++] = hx[v86_last_cs&0xF];
-        fbuf[fp++] = ':';
-        fbuf[fp++] = hx[(v86_last_ip>>12)&0xF];
-        fbuf[fp++] = hx[(v86_last_ip>>8)&0xF];
-        fbuf[fp++] = hx[(v86_last_ip>>4)&0xF];
-        fbuf[fp++] = hx[v86_last_ip&0xF];
-        fbuf[fp++] = '\n';
-    }
+    fbuf_str("[V86] ints="); fbuf_dec(v86_int_count);
+    fbuf_str(" gp="); fbuf_dec(v86_gp_count);
+    fbuf_str(" last="); fbuf_hex8((u8)v86_last_int);
+    fbuf_str(" "); fbuf_hex16((u16)v86_last_cs);
+    fbuf_str(":"); fbuf_hex16((u16)v86_last_ip);
+    fbuf_str("\n");
 
-    fbuf[fp++] = 'I'; fbuf[fp++] = 'n'; fbuf[fp++] = 'j'; fbuf[fp++] = ':';
-    fbuf[fp++] = hx[(v86_irq0_inject_count>>12)&0xF];
-    fbuf[fp++] = hx[(v86_irq0_inject_count>>8)&0xF];
-    fbuf[fp++] = hx[(v86_irq0_inject_count>>4)&0xF];
-    fbuf[fp++] = hx[v86_irq0_inject_count&0xF];
-    fbuf[fp++] = '\n';
+    /* IRQ0注入カウンタ */
+    fbuf_str("Inj:"); fbuf_hex16((u16)v86_irq0_inject_count);
+    fbuf_str("\n");
 
-    /* IRQ0カウンタ */
-    {
-        const char *s;
-        int si;
-        s = "IRQ0:call="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_call_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>24)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_call_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>16)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_call_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_call_count>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_call_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_call_count&0xF];
-        s = " nonvm="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_nonvm_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>24)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_nonvm_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>16)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_nonvm_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_nonvm_count>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_nonvm_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_nonvm_count&0xF];
-        s = " noif="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_noif_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>24)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_noif_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>16)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_noif_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_noif_count>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_noif_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_noif_count&0xF];
-        s = " isr="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_isr_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>24)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_isr_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>16)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_isr_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_isr_count>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_isr_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_isr_count&0xF];
-        s = " ivt="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_ivt_count>>28)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>24)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_ivt_count>>20)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>16)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_ivt_count>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_ivt_count>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_ivt_count>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_ivt_count&0xF];
-        fbuf[fp++] = '\n';
-        s = "GP:skip_isr="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_gp_skip_isr>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_gp_skip_isr&0xF];
-        s = " skip_ivt="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>12)&0xF]; fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>8)&0xF];
-        fbuf[fp++]=hx[(v86_irq0_gp_skip_ivt>>4)&0xF]; fbuf[fp++]=hx[v86_irq0_gp_skip_ivt&0xF];
-        fbuf[fp++] = '\n';
-        s = "PIC:M.IMR="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[v86_pic_get_imr(0)>>4]; fbuf[fp++]=hx[v86_pic_get_imr(0)&0xF];
-        s = " M.ISR="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[v86_pic_get_isr(0)>>4]; fbuf[fp++]=hx[v86_pic_get_isr(0)&0xF];
-        s = " eoi0="; for(si=0;s[si];si++)fbuf[fp++]=s[si];
-        fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>12)&0xF]; fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>8)&0xF];
-        fbuf[fp++]=hx[(v86_pic_get_eoi_count(0)>>4)&0xF]; fbuf[fp++]=hx[v86_pic_get_eoi_count(0)&0xF];
-        fbuf[fp++] = '\n';
-    }
+    fbuf_str("IRQ0:call="); fbuf_hex32(v86_irq0_call_count);
+    fbuf_str(" nonvm="); fbuf_hex32(v86_irq0_nonvm_count);
+    fbuf_str(" noif="); fbuf_hex32(v86_irq0_noif_count);
+    fbuf_str(" isr="); fbuf_hex32(v86_irq0_isr_count);
+    fbuf_str(" ivt="); fbuf_hex32(v86_irq0_ivt_count);
+    fbuf_str("\n");
+
+    fbuf_str("GP:skip_isr="); fbuf_hex16((u16)v86_irq0_gp_skip_isr);
+    fbuf_str(" skip_ivt="); fbuf_hex16((u16)v86_irq0_gp_skip_ivt);
+    fbuf_str("\n");
+
+    fbuf_str("PIC:M.IMR="); fbuf_hex8(v86_pic_get_imr(0));
+    fbuf_str(" M.ISR="); fbuf_hex8(v86_pic_get_isr(0));
+    fbuf_str(" eoi0="); fbuf_hex16((u16)v86_pic_get_eoi_count(0));
+    fbuf_str("\n");
 
     /* タイムアウト位置 */
     if (v86_timeout_cs || v86_timeout_ip) {
         u8 *taddr;
         int di;
-        const char *tp2 = "TOUT:";
-        for (di = 0; tp2[di]; di++) fbuf[fp++] = tp2[di];
-        fbuf[fp++] = hx[(v86_timeout_cs>>12)&0xF]; fbuf[fp++] = hx[(v86_timeout_cs>>8)&0xF];
-        fbuf[fp++] = hx[(v86_timeout_cs>>4)&0xF]; fbuf[fp++] = hx[v86_timeout_cs&0xF];
-        fbuf[fp++] = ':';
-        fbuf[fp++] = hx[(v86_timeout_ip>>12)&0xF]; fbuf[fp++] = hx[(v86_timeout_ip>>8)&0xF];
-        fbuf[fp++] = hx[(v86_timeout_ip>>4)&0xF]; fbuf[fp++] = hx[v86_timeout_ip&0xF];
-        fbuf[fp++] = ' ';
+        fbuf_str("TOUT:"); fbuf_hex16((u16)v86_timeout_cs);
+        fbuf_str(":"); fbuf_hex16((u16)v86_timeout_ip);
+        fbuf_str(" ");
         taddr = v86_phys_addr(v86_timeout_cs, v86_timeout_ip);
-        for (di = 0; di < 32 && fp < 3800; di++) {
-            fbuf[fp++] = hx[taddr[di]>>4];
-            fbuf[fp++] = hx[taddr[di]&0xF];
-            fbuf[fp++] = ' ';
+        for (di = 0; di < 32 && fbuf_pos < 3800; di++) {
+            fbuf_hex8(taddr[di]);
+            fbuf_str(" ");
         }
-        fbuf[fp++] = '\n';
+        fbuf_str("\n");
     }
 
     /* ディスクログ */
-    dlog = (struct v86_disk_log_entry *)v86_disk_get_log(&total_count, &log_idx_v);
+    dlog = v86_disk_get_log(&total_count, &log_idx_v);
     n = (total_count < 64) ? total_count : 64;
     start = (total_count <= 64) ? 0 : log_idx_v;
-    for (i = 0; i < n && fp < 3900; i++) {
+    for (i = 0; i < n && fbuf_pos < 3900; i++) {
         u32 ix = (start + i) % 64;
-        struct v86_disk_log_entry *e = (struct v86_disk_log_entry *)&dlog[ix];
-        fbuf[fp++] = hx[e->func>>4]; fbuf[fp++] = hx[e->func&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = 'C'; fbuf[fp++] = hx[e->cylinder>>4]; fbuf[fp++] = hx[e->cylinder&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = 'H'; fbuf[fp++] = hx[e->head>>4]; fbuf[fp++] = hx[e->head&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = 'S'; fbuf[fp++] = hx[e->sector>>4]; fbuf[fp++] = hx[e->sector&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = 'N'; fbuf[fp++] = hx[e->sector_len>>4]; fbuf[fp++] = hx[e->sector_len&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = hx[(e->xfer_bytes>>12)&0xF]; fbuf[fp++] = hx[(e->xfer_bytes>>8)&0xF];
-        fbuf[fp++] = hx[(e->xfer_bytes>>4)&0xF]; fbuf[fp++] = hx[e->xfer_bytes&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = hx[(e->es>>12)&0xF]; fbuf[fp++] = hx[(e->es>>8)&0xF];
-        fbuf[fp++] = hx[(e->es>>4)&0xF]; fbuf[fp++] = hx[e->es&0xF]; fbuf[fp++] = ':';
-        fbuf[fp++] = hx[(e->bp>>12)&0xF]; fbuf[fp++] = hx[(e->bp>>8)&0xF];
-        fbuf[fp++] = hx[(e->bp>>4)&0xF]; fbuf[fp++] = hx[e->bp&0xF]; fbuf[fp++] = ' ';
-        fbuf[fp++] = hx[e->status>>4]; fbuf[fp++] = hx[e->status&0xF];
-        fbuf[fp++] = '\n'; fbuf[fp++] = '\n';
+        struct v86_disk_log_entry *e = &dlog[ix];
+        fbuf_hex8(e->func); fbuf_str(" ");
+        fbuf_str("C"); fbuf_hex8(e->cylinder); fbuf_str(" ");
+        fbuf_str("H"); fbuf_hex8(e->head); fbuf_str(" ");
+        fbuf_str("S"); fbuf_hex8(e->sector); fbuf_str(" ");
+        fbuf_str("N"); fbuf_hex8(e->sector_len); fbuf_str(" ");
+        fbuf_hex16(e->xfer_bytes); fbuf_str(" ");
+        fbuf_hex16(e->es); fbuf_str(":");
+        fbuf_hex16(e->bp); fbuf_str(" ");
+        fbuf_hex8(e->status);
+        fbuf_str("\n");
     }
 
-    fbuf[fp] = '\0';
-    vfs_write("/host/v86_fdos_log.txt", fbuf, (u32)fp);
+    fbuf[fbuf_pos] = '\0';
+    vfs_write("/host/v86_fdos_log.txt", fbuf, (u32)fbuf_pos);
 }
+
+
 
 /* ====================================================================== */
 /*  ファイル書き出し: v86_gptrace.txt                                      */
