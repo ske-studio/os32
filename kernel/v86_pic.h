@@ -28,4 +28,8 @@ u8  v86_pic_get_isr(int idx);
 void v86_pic_set_isr(int idx, u8 val);
 u32 v86_pic_get_eoi_count(int idx);
 
+/* §4 IRR 更新 API: v86_set_pending_irq から呼び、OCW3リードに対応する */
+void v86_pic_set_irr(int idx, u8 val);
+u8   v86_pic_get_irr(int idx);
+
 #endif /* V86_PIC_H */

@@ -241,3 +241,17 @@ u32 v86_pic_get_eoi_count(int idx)
 {
     return v86_eoi_count[idx & 1] + v86_seoi_count[idx & 1];
 }
+
+/* ====================================================================== */
+/*  §4 IRR 直接アクセス (v86_set_pending_irq から呼ばれる)                  */
+/*  ゲストが OCW3=0x0A で IRR を読んだとき正しいビットが返るようにする。      */
+/* ====================================================================== */
+void v86_pic_set_irr(int idx, u8 val)
+{
+    vpic[idx & 1].irr = val;
+}
+
+u8 v86_pic_get_irr(int idx)
+{
+    return vpic[idx & 1].irr;
+}

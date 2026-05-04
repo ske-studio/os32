@@ -872,6 +872,8 @@ v86_gp_end:
                 if (!is_dummy) {
                     v86_pic_set_isr(0, isr | 1);
                 }
+                /* §4 IRR bit0 クリア: ISRに移譲したのでIRRから落とす */
+                v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)1);
 
                 /* ゲストスタックにフレームをpushしてハンドラに転送 */
                 v86_gp_inject_irq(regs, handler_seg, handler_off);
@@ -905,7 +907,11 @@ v86_gp_end:
 /* ====================================================================== */
 void v86_set_pending_irq(int irq_no)
 {
+    u8 irr;
     v86_pending_irq |= (1U << irq_no);
+    /* §4 IRR 更新: ゲストの OCW3=0x0A 読み出しで正しい値が返るようにする */
+    irr = v86_pic_get_irr(0);
+    v86_pic_set_irr(0, irr | (u8)(1 << irq_no));
 }
 
 /* ====================================================================== */
