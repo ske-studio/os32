@@ -264,6 +264,10 @@ int v86_gp_handler(u32 *regs)
 {
     u8 *ip;
     u8 opcode;
+    int prefix_len;   /* プレフィックスバイト数 (§2 対応) */
+    int is_opsz32;    /* 0x66 プレフィックスあり */
+    int is_rep;       /* 0xF3 REP/REPE */
+    int is_repne;     /* 0xF2 REPNE */
 
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
@@ -277,6 +281,8 @@ int v86_gp_handler(u32 *regs)
         v86_request_exit(V86_EXIT_BIOS_ROM);
         return 1;
     }
+
+    /* (ホットキー脱出はkbd_irq_handlerから直接longjmpで処理) */
 
     /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
     if (V86_TIMEOUT_TICKS &&
@@ -297,8 +303,33 @@ int v86_gp_handler(u32 *regs)
 
     /* フォルト位置の命令を取得 */
     ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
-    opcode = *ip;
 
+    /* ================================================================== */
+    /*  命令プレフィックスループ (§2 対応)                                      */
+    /* ================================================================== */
+    prefix_len = 0;
+    is_opsz32  = 0;
+    is_rep     = 0;
+    is_repne   = 0;
+    {
+        int cont = 1;
+        while (cont) {
+            switch (*ip) {
+            case 0x66: is_opsz32 = 1; ip++; prefix_len++; break;
+            case 0x67:               ip++; prefix_len++; break;
+            case 0x26: case 0x2E: case 0x36: case 0x3E:
+            case 0x64: case 0x65:    ip++; prefix_len++; break;
+            case 0xF0:               ip++; prefix_len++; break;  /* LOCK 読み飛ばす */
+            case 0x9B:               ip++; prefix_len++; break;  /* FWAIT: NOP扱い */
+            case 0xF3: is_rep    = 1; ip++; prefix_len++; break;
+            case 0xF2: is_repne  = 1; ip++; prefix_len++; break;
+            default: cont = 0; break;
+            }
+        }
+    }
+    opcode = *ip;  /* プレフィックス後のプライマリオペコード */
+
+    /* トレース: 元の EIP 位置を記録 */
     {
         struct v86_trace_entry *e = &v86_trace[v86_trace_idx];
         e->cs = regs[V86_REG_CS];
@@ -309,10 +340,125 @@ int v86_gp_handler(u32 *regs)
             e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
             e->al = regs[V86_REG_EAX] & 0xFF;
         } else {
-            e->intno = 0; e->ah = 0; e->al = 0;
+            e->intno = (u8)prefix_len; e->ah = 0; e->al = 0;
         }
         v86_trace_idx = (v86_trace_idx + 1) % V86_TRACE_SIZE;
     }
+
+    /* ================================================================== */
+    /*  INSB/INSW (0x6C/0x6D) — 文字列I/O入力 + REP対応                */
+    /*                                                                    */
+    /*  INSB: [ES:DI] ← IN(DX), DI += 1 (DF=0), ECX-- (REP時)        */
+    /*  INSW: [ES:DI] ← INW(DX), DI += 2 (DF=0)                        */
+    /* ================================================================== */
+    if (opcode == 0x6C || opcode == 0x6D) {
+        u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
+        u16 di   = (u16)(regs[V86_REG_EDI] & 0xFFFF);
+        u16 es   = (u16)(regs[V86_REG_ES]  & 0xFFFF);
+        u32 ecx  = is_rep ? (regs[V86_REG_ECX] & 0xFFFF) : 1;
+        int width = (opcode == 0x6D) ? 2 : 1;  /* INSW=2, INSB=1 */
+        int df = (regs[V86_REG_EFLAGS] & (1U << 10)) ? 1 : 0;
+        u32 count;
+
+        if (ecx == 0) ecx = 1;  /* REPなしの時は1回 */
+
+        for (count = 0; count < ecx; count++) {
+            u8 *dst = v86_linear(es, di);
+            if (width == 1) {
+                *dst = v86_in8_checked(port);
+                di = (u16)(di + (df ? -1 : 1));
+            } else {
+                u16 val = v86_inw_checked(port);
+                *dst     = (u8)(val & 0xFF);
+                *(dst+1) = (u8)(val >> 8);
+                di = (u16)(di + (df ? -2 : 2));
+            }
+        }
+        regs[V86_REG_EDI] = (regs[V86_REG_EDI] & 0xFFFF0000UL) | di;
+        if (is_rep) regs[V86_REG_ECX] = (regs[V86_REG_ECX] & 0xFFFF0000UL); /* ECX=0 */
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)(prefix_len + 1)) & 0xFFFF;
+        goto v86_gp_end;
+    }
+
+    /* ================================================================== */
+    /*  OUTSB/OUTSW (0x6E/0x6F) — 文字列I/O出力 + REP対応               */
+    /*                                                                    */
+    /*  OUTSB: OUT(DX) ← [DS:SI], SI += 1 (DF=0), ECX-- (REP時)       */
+    /*  OUTSW: OUT(DX) ← [DS:SI]の16bit値                             */
+    /* ================================================================== */
+    if (opcode == 0x6E || opcode == 0x6F) {
+        u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
+        u16 si   = (u16)(regs[V86_REG_ESI] & 0xFFFF);
+        u16 ds   = (u16)(regs[V86_REG_DS]  & 0xFFFF);
+        u32 ecx  = is_rep ? (regs[V86_REG_ECX] & 0xFFFF) : 1;
+        int width = (opcode == 0x6F) ? 2 : 1;
+        int df = (regs[V86_REG_EFLAGS] & (1U << 10)) ? 1 : 0;
+        u32 count;
+
+        if (ecx == 0) ecx = 1;
+
+        for (count = 0; count < ecx; count++) {
+            u8 *src = v86_linear(ds, si);
+            if (width == 1) {
+                v86_out8_checked(port, *src);
+                si = (u16)(si + (df ? -1 : 1));
+            } else {
+                u16 val = (u16)(*src) | ((u16)(*(src+1)) << 8);
+                if (v86_outw_checked(port, val)) {
+                    regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)(prefix_len + 1)) & 0xFFFF;
+                    return 1;  /* リブート検知 */
+                }
+                si = (u16)(si + (df ? -2 : 2));
+            }
+        }
+        regs[V86_REG_ESI] = (regs[V86_REG_ESI] & 0xFFFF0000UL) | si;
+        if (is_rep) regs[V86_REG_ECX] = (regs[V86_REG_ECX] & 0xFFFF0000UL);
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)(prefix_len + 1)) & 0xFFFF;
+        goto v86_gp_end;
+    }
+
+    /* ================================================================== */
+    /*  0x66 プレフィックス付き PUSHFD/POPFD 対応                           */
+    /*                                                                    */
+    /*  0x66 + 0x9C = PUSHFD (32bit EFLAGS push)                          */
+    /*  0x66 + 0x9D = POPFD  (32bit EFLAGS pop)                           */
+    /* ================================================================== */
+    if (is_opsz32 && opcode == 0x9C) {
+        /* PUSHFD: 32bit EFLAGSをプッシュ */
+        u32 flags = (regs[V86_REG_EFLAGS] & 0xFFFF0000UL)
+                  | (v86_virtual_if ? EFLAGS_IF : 0)
+                  | (regs[V86_REG_EFLAGS] & 0x7FD5UL);
+        /* 32bit push: ESP -= 4 */
+        regs[V86_REG_ESP] = (regs[V86_REG_ESP] - 4) & 0xFFFF;
+        {
+            u32 *sp32 = (u32 *)v86_linear(regs[V86_REG_SS], regs[V86_REG_ESP]);
+            *sp32 = flags;
+        }
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)(prefix_len + 1)) & 0xFFFF;
+        goto v86_gp_end;
+    }
+    if (is_opsz32 && opcode == 0x9D) {
+        /* POPFD: 32bit EFLAGSをポップ */
+        u32 flags;
+        u32 *sp32 = (u32 *)v86_linear(regs[V86_REG_SS], regs[V86_REG_ESP]);
+        flags = *sp32;
+        regs[V86_REG_ESP] = (regs[V86_REG_ESP] + 4) & 0xFFFF;
+        v86_virtual_if = (flags & EFLAGS_IF) ? EFLAGS_IF : 0;
+        regs[V86_REG_EFLAGS] = (regs[V86_REG_EFLAGS] & 0xFFFF0000UL)
+                              | (flags & 0x7FD5UL);
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)(prefix_len + 1)) & 0xFFFF;
+        goto v86_gp_end;
+    }
+
+    /* ================================================================== */
+    /*  0x66 + IN/OUT: 32bit I/O — 16bit I/Oにダウングレードして処理       */
+    /* ================================================================== */
+    if (is_opsz32) {
+        /* 0x66 + 0xE4/E5/E6/E7/EC/ED/EE/EF は各 caseの prefix_len 計算で受ける */
+        /* is_opsz32 フラグは保持したまま下の switchに落ちる */
+        (void)is_opsz32;  /* 不使用警告抑制: 0x66+IN/OUTは16bitバイト列と同じ幅で処理する */
+    }
+    (void)is_repne;  /* 現時点では REPNE 対応を必要とする命令なし */
 
     switch (opcode) {
 
@@ -337,14 +483,14 @@ int v86_gp_handler(u32 *regs)
         /* ============================================================ */
         if (intno == 0x20) {
             /* INT 20h: DOS Terminate — V86モード終了 */
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_DOS_TERM);
             return 1;
         }
         if (intno == 0x21 &&
             ((regs[V86_REG_EAX] >> 8) & 0xFF) == 0x4C) {
             /* INT 21h AH=4Ch: Exit Process — V86モード終了 */
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_DOS_TERM);
             return 1;
         }
@@ -362,7 +508,7 @@ int v86_gp_handler(u32 *regs)
             }
             if (rc >= 0) {
                 /* 処理済み: EIPを進めてV86に戻る */
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
                 if (rc == 1) return 1;  /* V86終了要求 */
                 break;
             }
@@ -370,13 +516,13 @@ int v86_gp_handler(u32 *regs)
         }
         if (intno == 0x29) {
             v86_bios_int29(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             break;
         }
         if (intno == 0x1C) {
             int rc = v86_bios_int1c(regs);
             if (rc >= 0) {
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
                 break;
             }
             /* rc == -1: IVT転送にフォールスルー */
@@ -385,13 +531,13 @@ int v86_gp_handler(u32 *regs)
         /* INT 11h (機器構成取得) */
         if (intno == 0x11) {
             v86_bios_int11(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             break;
         }
         /* INT 12h (メモリサイズ取得) */
         if (intno == 0x12) {
             v86_bios_int12(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             break;
         }
 
@@ -399,7 +545,7 @@ int v86_gp_handler(u32 *regs)
         if (intno == 0x1B) {
             int rc = v86_bios_int1b(regs);
             if (rc >= 0) {
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
                 break;
             }
             /* rc == -1: IVT転送にフォールスルー */
@@ -414,7 +560,7 @@ int v86_gp_handler(u32 *regs)
             /* V86スタックにフラグ/CS/IPをpush (リアルモードINTと同じ) */
             v86_push16(regs, (u16)(regs[V86_REG_EFLAGS] & 0xFFFF));
             v86_push16(regs, (u16)regs[V86_REG_CS]);
-            v86_push16(regs, (u16)(regs[V86_REG_EIP] + 2));
+            v86_push16(regs, (u16)(regs[V86_REG_EIP] + (u32)prefix_len + 2));
 
             /* IVTのハンドラに転送 */
             regs[V86_REG_CS] = handler_seg;
@@ -431,7 +577,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xFA:
         v86_virtual_if = 0;
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
 
     /* ================================================================ */
@@ -439,7 +585,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xFB:
         v86_virtual_if = EFLAGS_IF;
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
 
     /* ================================================================ */
@@ -448,7 +594,7 @@ int v86_gp_handler(u32 *regs)
     case 0x9C: {
         u16 flags = (u16)((regs[V86_REG_EFLAGS] & 0xFFFF) | v86_virtual_if);
         v86_push16(regs, flags);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -462,7 +608,7 @@ int v86_gp_handler(u32 *regs)
         /* EFLAGS下位16bit更新 (VM,IOPL等は変更しない) */
         regs[V86_REG_EFLAGS] = (regs[V86_REG_EFLAGS] & 0xFFFF0000UL)
                               | (flags & 0x7FD5UL);  /* 安全なビットのみ */
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -488,7 +634,7 @@ int v86_gp_handler(u32 *regs)
     /*  HLT (0xF4) — V86テスト中はV86モードを終了する                   */
     /* ================================================================ */
     case 0xF4:
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         if (v86_exit_request) {
             /* V86終了要求: 戻り値 1 で isr_stub.asm が復帰処理を行う */
             return 1;
@@ -504,7 +650,7 @@ int v86_gp_handler(u32 *regs)
         v86_io_stat_record(port);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
     }
 
@@ -517,18 +663,18 @@ int v86_gp_handler(u32 *regs)
         v86_io_stat_record(port);
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_TRAP_PORT);
             return 1;
         }
         /* リセットポート検知 */
         if (v86_pic_is_reboot(port, val)) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
         }
         v86_out8_checked(port, val);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
     }
 
@@ -540,7 +686,7 @@ int v86_gp_handler(u32 *regs)
         v86_io_stat_record(port);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -553,17 +699,17 @@ int v86_gp_handler(u32 *regs)
         v86_io_stat_record(port);
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             v86_request_exit(V86_EXIT_TRAP_PORT);
             return 1;
         }
         if (v86_pic_is_reboot(port, val)) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
         }
         v86_out8_checked(port, val);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -575,7 +721,7 @@ int v86_gp_handler(u32 *regs)
         u16 port = (u16)ip[1];
         v86_io_stat_record(port);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
     }
 
@@ -587,10 +733,10 @@ int v86_gp_handler(u32 *regs)
         u16 port = (u16)ip[1];
         v86_io_stat_record(port);
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
         }
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 2) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
     }
 
@@ -602,7 +748,7 @@ int v86_gp_handler(u32 *regs)
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         v86_io_stat_record(port);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -614,10 +760,10 @@ int v86_gp_handler(u32 *regs)
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         v86_io_stat_record(port);
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
         }
-        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + 1) & 0xFFFF;
+        regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
 
@@ -665,6 +811,7 @@ int v86_gp_handler(u32 *regs)
     }
     } /* switch */
 
+v86_gp_end:
     /* 保留中の割り込みがあれば注入する */
     if (v86_virtual_if && v86_pending_irq) {
         if (v86_pending_irq & (1U << 0)) { /* IRQ0: タイマー (INT 08h) */
@@ -847,7 +994,6 @@ void v86_inject_timer_irq(u32 *regs)
         u32 *ivt;
         int is_dummy_ivt;
         u16 handler_off, handler_seg;
-        u16 *sp;
 
         /* ISRで処理中なら保留する */
         if (isr & 1) {
@@ -902,7 +1048,6 @@ void v86_inject_timer_irq(u32 *regs)
                 u32 *ivt = (u32 *)v86_linear(0, 0);
                 u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
                 u16 handler_seg = (u16)(ivt[0x09] >> 16);
-                u16 *sp;
 
                 v86_pending_irq &= ~(1U << 1);
                 v86_pic_set_isr(0, isr2 | 2);
