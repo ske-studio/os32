@@ -237,6 +237,6 @@ libos32math  (依存なし — 最も基底のライブラリ)
 
 **リソース使用量**: 合計約4KB (コード~1.6KB + LUTデータ~2.3KB)。
 
-詳細は [LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) を参照。
+詳細は [LIBMATH_DESIGN.md](tasks/libs/libmath/LIBMATH_DESIGN.md) を参照。
 
 ---
