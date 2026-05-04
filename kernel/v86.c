@@ -557,6 +557,41 @@ int v86_gp_handler(u32 *regs)
             u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
             u16 handler_seg = (u16)(ivt[intno] >> 16);
 
+            /* ============================================================ */
+            /*  §3 IVTダミー検出: 0x0050:0x0000 (ダミーIRET)の場合は       */
+            /*  ゲストに CF=1 + AH=0x86 (機能未サポート) を返す。           */
+            /*  ゲストが「成功」と誤認するのを防ぐ。                        */
+            /*                                                              */
+            /*  ダミーIVTの判定: V86_IS_DUMMY_IVT() マクロを使用            */
+            /*  (seg=0x0050, off=0x0000 の固定パターン)                     */
+            /* ============================================================ */
+            if (V86_IS_DUMMY_IVT(ivt[intno])) {
+                /* CF=1, AH=0x86 (機能未サポート) でゲストに即復帰 */
+                regs[V86_REG_EFLAGS] |= 1;   /* CF=1 */
+                regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL)
+                                  | (0x86UL << 8);
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+                /* シリアルログ (最初の10件のみ) */
+                {
+                    static int dummy_ivt_count = 0;
+                    if (dummy_ivt_count < 10) {
+                        extern void serial_puts(const char *s);
+                        static const char hex[] = "0123456789ABCDEF";
+                        char buf[32];
+                        int p = 0;
+                        const char *msg = "\r\n[V86] dummy IVT INT 0x";
+                        int mi;
+                        for (mi = 0; msg[mi]; mi++) buf[p++] = msg[mi];
+                        buf[p++] = hex[(intno >> 4) & 0xF];
+                        buf[p++] = hex[intno & 0xF];
+                        buf[p++] = '\r'; buf[p++] = '\n'; buf[p] = '\0';
+                        serial_puts(buf);
+                        dummy_ivt_count++;
+                    }
+                }
+                break;
+            }
+
             /* V86スタックにフラグ/CS/IPをpush (リアルモードINTと同じ) */
             v86_push16(regs, (u16)(regs[V86_REG_EFLAGS] & 0xFFFF));
             v86_push16(regs, (u16)regs[V86_REG_CS]);
@@ -842,26 +877,10 @@ v86_gp_end:
                 v86_irq0_gp_skip_isr++;
             }
         }
-        /* IRQ1: キーボード (INT 09h) */
-        else if (v86_pending_irq & (1U << 1)) {
-            u8 isr = v86_pic_get_isr(0);
-
-            /* タイマ処理中 (bit0) or KB処理中 (bit1) なら保留を維持 */
-            if (!(isr & 3)) {
-                u32 *ivt = (u32 *)v86_linear(0, 0);
-                u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
-                u16 handler_seg = (u16)(ivt[0x09] >> 16);
-
-                /* ダミーIVT のままなら保留を維持してスキップ */
-                if (!V86_IS_DUMMY_IVT(ivt[0x09])) {
-                    v86_pending_irq &= ~(1U << 1);
-                    v86_pic_set_isr(0, isr | 2);
-
-                    /* ゲストスタックにフレームをpushしてハンドラに転送 */
-                    v86_gp_inject_irq(regs, handler_seg, handler_off);
-                }
-            }
-        }
+        /* §1.3 A案: IRQ1 (キーボード) は BDA直書き運用に振り切り。
+         * kbd.c と v86_session.c の Auto-Typer が BDA に直接書くため、
+         * 仮想 IRQ1 注入は不要 (v86_set_pending_irq(1) を呼ぶ経路が無い)。
+         * デッドコードとして削除済み。 */
     }
 
     return 0;
@@ -938,11 +957,27 @@ u32 v86_irq0_gp_skip_ivt = 0;   /* GPハンドラ保留注入: IVTダミーで�
 
 void v86_inject_timer_irq(u32 *regs)
 {
+    u32 irq_divisor;
     v86_irq0_call_count++;
 
     /* V86モードからの割り込みか確認 */
     if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM) == 0) {
         v86_irq0_nonvm_count++;
+        return;
+    }
+
+    /* ================================================================ */
+    /*  §5 PITタイマレート反映 (分周比チェック)                          */
+    /*                                                                  */
+    /*  ゲストが Counter#0 の reload_value を OS32ベースレート(0x4E00=100Hz) */
+    /*  より大きい値に変更した場合、低い頻度で IRQ0 を注入する。   */
+    /*  divisor=1: 毎100Hzティック注入 (OS32デフォルト)               */
+    /*  divisor=2: 2ティックに1回 = 50Hz                                */
+    /* ================================================================ */
+    irq_divisor = v86_pit_get_irq_divisor();
+    if (irq_divisor > 1 && (v86_irq0_call_count % irq_divisor) != 0) {
+        /* 分周スキップ: Auto-Typerとセッションtick処理は行う */
+        v86_session_on_tick();
         return;
     }
 
@@ -1032,31 +1067,8 @@ void v86_inject_timer_irq(u32 *regs)
         v86_irq0_noif_count++;
         v86_set_pending_irq(0);
     }
-
-    /* ================================================================ */
-    /*  保留中のIRQ1 (キーボード, INT 09h) の注入                       */
-    /*  タイマ注入が行われた場合はIF=0になるため、次の機会に回す。      */
-    /*  タイマが注入されなかった場合、同じIRQ0のタイミングで注入する。  */
-    /* ================================================================ */
-    if (v86_virtual_if && (v86_pending_irq & (1U << 1))) {
-        if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM)) {
-            u8 imr2 = v86_pic_get_imr(0);
-            u8 isr2 = v86_pic_get_isr(0);
-
-            /* マスクされていない且つ、優先度の高いIRQ(bit0)が処理中でない */
-            if (!(imr2 & 2) && !(isr2 & 3)) {
-                u32 *ivt = (u32 *)v86_linear(0, 0);
-                u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
-                u16 handler_seg = (u16)(ivt[0x09] >> 16);
-
-                v86_pending_irq &= ~(1U << 1);
-                v86_pic_set_isr(0, isr2 | 2);
-                v86_virtual_if = 0;
-
-                /* ゲストスタックにフレームをpushしてハンドラに転送 */
-                v86_hw_inject_irq(regs, handler_seg, handler_off);
-            }
-        }
-    }
+    /* §1.3 A案: IRQ1 (キーボード, INT 09h) の HW注入を廃止。
+     * BDA 直書き運用に統一したため、ここでの IRQ1 注入は不要。
+     * v86_set_pending_irq(1) を呼ぶ経路が存在しないためデッドコードだった。 */
 }
 

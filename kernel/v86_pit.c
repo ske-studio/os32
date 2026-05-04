@@ -205,3 +205,26 @@ int v86_pit_io(u16 port, u8 *val, int is_write)
     }
     return 1;
 }
+
+/* ====================================================================== */
+/*  v86_pit_get_irq_divisor — IRQ0 注入分周比を計算                        */
+/*                                                                          */
+/*  OS32 はベースレート 100Hz (reload=0x4E00) で動作する。                  */
+/*  ゲストが Counter#0 を別の値に設定した場合:                              */
+/*    divisor = guest_reload / DEFAULT_RELOAD (切り上げ, 最小1)             */
+/*                                                                          */
+/*  例:                                                                     */
+/*    reload=0x4E00 (デフォルト) → divisor=1 (毎tick = 100Hz)             */
+/*    reload=0x9C00 (50Hz)      → divisor=2 (2tick毎 = 50Hz)              */
+/*    reload=0x0100 (速い)      → divisor=1 (早めても100Hz以上は無意味)    */
+/* ====================================================================== */
+u32 v86_pit_get_irq_divisor(void)
+{
+    u32 rv = (u32)counters[0].reload_value;
+    u32 div;
+    if (rv == 0) rv = 0x10000UL;  /* 0 は 65536 を意味する */
+    /* divisor = rv / DEFAULT_RELOAD (最小1) */
+    div = rv / DEFAULT_RELOAD;
+    if (div == 0) div = 1;
+    return div;
+}
