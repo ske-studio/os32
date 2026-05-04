@@ -49,6 +49,9 @@ static u32 v86_session_jmpbuf[6];
 /* V86テスト用カーネルスタック (16KB) */
 static u8 v86_kstack[16384] __attribute__((aligned(16)));
 
+/* TSS ESP0保存 (static — longjmp後にスタック上のローカル変数が壊れるため) */
+static u32 v86_saved_esp0;
+
 /* ====================================================================== */
 /*  IPL 定数                                                               */
 /* ====================================================================== */
@@ -96,21 +99,21 @@ void v86_session_on_tick(void)
 {
 
     /* ============================================================ */
-    /*  強制脱出ホットキー検知 (Ctrl+GRPH+DEL)                     */
+    /*  強制脱出ホットキー検知                                      */
+    /*  方法1: Ctrl+GRPH+DEL (PC-98の GRPH = PC/AT の Alt)         */
+    /*  方法2: STOP キー (PC-98固有キー、DOSでは未使用)             */
+    /*  kbd_is_pressed() は物理キー押下状態を直接参照するため、     */
+    /*  DOS側がキーバッファを消費しても影響を受けない。             */
     /* ============================================================ */
-    {
-        int key = kbd_peekkey();
-        if (key >= 0) {
-            u8 scan = (u8)((key >> 8) & 0xFF);
-            /* DELキー + Ctrl + GRPH(Alt) が同時に押されているか */
-            if (scan == V86_HOTKEY_SCANCODE
-                && (kbd_shift_state & (SHIFT_CTRL | SHIFT_GRPH))
-                   == (SHIFT_CTRL | SHIFT_GRPH)) {
-                kbd_trygetkey(); /* バッファから消費 */
-                v86_request_exit(V86_EXIT_HOTKEY);
-                return;
-            }
-        }
+    if (kbd_is_pressed(KEY_DEL)
+        && (kbd_shift_state & (SHIFT_CTRL | SHIFT_GRPH))
+           == (SHIFT_CTRL | SHIFT_GRPH)) {
+        v86_request_exit(V86_EXIT_HOTKEY);
+        return;
+    }
+    if (kbd_is_pressed(KEY_STOP)) {
+        v86_request_exit(V86_EXIT_HOTKEY);
+        return;
     }
 
     /* ============================================================ */
@@ -138,7 +141,10 @@ void v86_session_on_tick(void)
         u8 count = bda[BDA_KB_COUNT];
 
         if (count < 0x10) {
-            u16 head = *(u16 *)&bda[BDA_KB_HEAD];
+            /* §1.2 修正: 生産側は TAIL を進める (kbd.c の物理キー経路と同規約)
+             * BDA 規約: HEAD=取出ポインタ (DOS が進める), TAIL=入力ポインタ (生産側が進める)
+             * NP21/W bios09.c 準拠 */
+            u16 tail = *(u16 *)&bda[BDA_KB_TAIL];
             char c = current_session.auto_cmd[current_session.auto_cmd_idx++];
             u8 scancode = 0;
 
@@ -147,11 +153,11 @@ void v86_session_on_tick(void)
                 scancode = 0x1C; /* Enter key */
             }
 
-            bda[head] = c;
-            bda[head + 1] = scancode;
-            head += 2;
-            if (head >= BDA_KB_BUF_END) head = BDA_KB_BUF_START;
-            *(u16 *)&bda[BDA_KB_HEAD] = head;
+            bda[tail] = c;
+            bda[tail + 1] = scancode;
+            tail += 2;
+            if (tail >= BDA_KB_BUF_END) tail = BDA_KB_BUF_START;
+            *(u16 *)&bda[BDA_KB_TAIL] = tail;
             bda[BDA_KB_COUNT] = count + 1;
         }
     }
@@ -196,7 +202,6 @@ static void v86_reset_counters(void)
 static void v86_session_run_core(void)
 {
     struct v86_context ctx;
-    u32 saved_esp0;
 
     /* V86コンテキスト: IPLエントリ */
     ctx.eip    = 0x0000;
@@ -209,8 +214,8 @@ static void v86_session_run_core(void)
     ctx.fs     = 0x0000;
     ctx.gs     = 0x0000;
 
-    /* TSS ESP0 切り替え */
-    saved_esp0 = 0x9FFF0UL;
+    /* TSS ESP0 切り替え (static変数に保存 — longjmp後にスタックが壊れるため) */
+    v86_saved_esp0 = 0x9FFF0UL;
     tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
 
     /* V86モード遷移準備 */
@@ -230,21 +235,48 @@ static void v86_session_run_core(void)
 
     /* ============================================================ */
     /*  V86終了後の後始末                                           */
+    /*                                                              */
+    /*  ★重要: longjmpでカーネルスタック(0x9Fxxx)に戻った時点では  */
+    /*  ページテーブルがまだV86バッキングRAMを指しており、           */
+    /*  スタック内容はDOSに上書きされて壊れている。                 */
+    /*  ローカル変数もスタックも使えないため:                       */
+    /*  1. 一時的にv86_kstackにスタックを切り替え                   */
+    /*  2. v86_mem_teardown()でページテーブル復元                   */
+    /*  3. カーネルスタックの実体が復活してから通常のスタックに復帰 */
     /* ============================================================ */
+    _disable();
+
+    /* 一時スタックに切り替え → teardown → 元のスタックに戻す */
+    {
+        u32 tmp_stack = (u32)&v86_kstack[sizeof(v86_kstack) - 64];
+        __asm__ volatile (
+            "mov %%esp, %%esi\n\t"   /* 現在のESPを保存 */
+            "mov %%ebp, %%edi\n\t"   /* 現在のEBPを保存 */
+            "mov %0, %%esp\n\t"      /* 一時スタックに切り替え */
+            "call v86_mem_teardown\n\t" /* ページテーブル復元 */
+            "mov %%esi, %%esp\n\t"   /* ESPを元に戻す (実体が復活) */
+            "mov %%edi, %%ebp\n\t"   /* EBPも復元 */
+            : : "r"(tmp_stack)
+            : "esi", "edi", "eax", "ecx", "edx", "memory"
+        );
+    }
+
+    /* TSS ESP0 復元 (static変数から読む) */
+    tss_set_esp0(v86_saved_esp0);
+
+    /* V86状態フラグクリア */
     v86_current_jmpbuf = 0;
     v86_active = 0;
     v86_exit_request = 0;
     v86_pending_irq = 0;
-    tss_set_esp0(saved_esp0);
+
+    _enable();
 
     /* デバッグダンプ (有効時のみ) */
     v86_debug_dump_session();
 
     /* リソース解放 */
     v86_disk_clear();
-
-    /* メモリ空間復元 */
-    v86_mem_teardown();
 
     /* 画面リストア */
     v86_restore_screen();

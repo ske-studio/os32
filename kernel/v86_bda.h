@@ -13,8 +13,8 @@
 /* ====================================================================== */
 #define BDA_KB_BUF_START  0x0502   /* バッファ先頭 (16エントリ x 2バイト) */
 #define BDA_KB_BUF_END    0x0522   /* バッファ末尾 */
-#define BDA_KB_HEAD       0x0524   /* 入力ポインタ (WORD) */
-#define BDA_KB_TAIL       0x0526   /* 取出ポインタ (WORD) */
+#define BDA_KB_HEAD       0x0524   /* 取出ポインタ (消費側: DOS が進める, WORD) */
+#define BDA_KB_TAIL       0x0526   /* 入力ポインタ (生産側: kbd/auto-typerが進める, WORD) */
 #define BDA_KB_COUNT      0x0528   /* バッファ内キー数 (BYTE) */
 
 /* ====================================================================== */

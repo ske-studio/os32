@@ -16,6 +16,7 @@
 #include "kbd.h"
 #include "io.h"
 #include "serial.h"
+#include "v86_bda.h"
 
 /* 外部: irq_enable (idt.c で定義) */
 extern void irq_enable(unsigned int irq);
@@ -153,6 +154,36 @@ void kbd_irq_handler(void)
         return;
     }
 
+    /* V86モード中: 強制脱出ホットキー検知 (make時のみ)
+     * IRQハンドラ内から直接 v86_test_exit() を呼び、
+     * exec_longjmp() でセッションのsetjmpポイントに復帰する。
+     * longjmp前にPIC EOIを送信する必要がある。
+     * 方法1: STOP キー (PC-98固有、DOSでは未使用)
+     * 方法2: Ctrl+GRPH+DEL */
+    if (!is_break) {
+        extern volatile int v86_active;
+        if (v86_active) {
+            int hotkey = 0;
+            if (keycode == KEY_STOP) {
+                hotkey = 1;
+            } else if (keycode == KEY_DEL
+                       && (kbd_shift_state & (SHIFT_CTRL | SHIFT_GRPH))
+                          == (SHIFT_CTRL | SHIFT_GRPH)) {
+                hotkey = 1;
+            }
+            if (hotkey) {
+                extern void v86_request_exit(int reason);
+                extern void v86_test_exit(void);
+                v86_request_exit(7); /* V86_EXIT_HOTKEY = 7 */
+                /* PIC EOI送出 (longjmpでIRQスタブに戻らないため) */
+                outp(0x00, 0x20);
+                /* 直接longjmpで脱出 */
+                v86_test_exit();
+                /* ここには戻らない */
+            }
+        }
+    }
+
     /* ブレイク(キー離し)はリングバッファには入れない */
     if (is_break) return;
 
@@ -186,25 +217,26 @@ void kbd_irq_handler(void)
      * DOSはINT 18h AH=00h を呼ばず、BDA 0x0528 (KB_COUNT) を
      * 直接ポーリングしてキー入力を待っている。
      * NP21/W bios09.c のキーバッファ書き込みロジック準拠。
-     * BDA: 0x0502-0x0521 = バッファ (16エントリ × 2バイト)
-     *       0x0524 = HEAD (WORD), 0x0526 = TAIL (WORD)
-     *       0x0528 = COUNT (BYTE, max 0x10) */
+     * BDA規約 (§1.2徤消確認済み):
+     *   HEAD (0x0524) = 取出ポインタ (DOS が進める)
+     *   TAIL (0x0526) = 入力ポインタ (生産側: kbd/auto-typer が進める)
+     *   COUNT (0x0528) = バッファ内キー数 (max 0x10) */
     {
         extern volatile int v86_active;
         if (v86_active) {
             extern u8 *v86_phys_addr(u32 seg, u32 off);
             u8 *bda = v86_phys_addr(0, 0);
-            u8 count = bda[0x0528];
+            u8 count = bda[BDA_KB_COUNT];
             if (count < 0x10) {
-                u16 tail = *(u16 *)&bda[0x0526];
-                /* キーデータを tail 位置に書き込み */
+                u16 tail = *(u16 *)&bda[BDA_KB_TAIL];
+                /* キーデータを tail 位置に書き込み (TAIL=生産側の入力ポインタ) */
                 bda[tail]     = ascii;       /* 下位: ASCII */
                 bda[tail + 1] = keycode;     /* 上位: スキャンコード */
-                /* tail を進める (0x0502〜0x0521 のリング) */
+                /* tail を進める (BDA_KB_BUF_START〜BDA_KB_BUF_END のリング) */
                 tail += 2;
-                if (tail >= 0x0522) tail = 0x0502;
-                *(u16 *)&bda[0x0526] = tail;
-                bda[0x0528] = count + 1;
+                if (tail >= BDA_KB_BUF_END) tail = BDA_KB_BUF_START;
+                *(u16 *)&bda[BDA_KB_TAIL] = tail;
+                bda[BDA_KB_COUNT] = count + 1;
             }
         }
     }

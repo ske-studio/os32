@@ -38,6 +38,10 @@ kernel/%.o: kernel/%.c
 drivers/mouse.o: drivers/mouse.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
+# kbd.c は v86_bda.h (kernel/ 配下) を参照するため INC_KERNEL でビルド
+drivers/kbd.o: drivers/kbd.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
 drivers/%.o: drivers/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_DRIVERS) -c $< -o $@
 
