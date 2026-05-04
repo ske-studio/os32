@@ -371,11 +371,28 @@ void v86_mem_teardown(void)
         paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
     }
 
-    /* 仮想 0x8F000-0x9FFFF: リマップは維持、PTE_USER のみ除去 (方法C)      */
-    /* 物理 0x38F000-0x39FFFF にコピーしたスタックデータをそのまま使い続ける。*/
-    /* アイデンティティマッピングには戻さない (逆コピー不可のため)。         */
-    for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
-        paging_set_page(addr, V86_BACKING_PHYS + addr, PTE_PRESENT | PTE_RW);
+    /* 仮想 0x8F000-0x9FFFF: バッキングRAMから物理ページに内容を書き戻し、   */
+    /* アイデンティティマッピングに復元する。                                 */
+    /* 「方法C」(リマップ維持)ではDOSが書き込むとカーネルスタックが壊れ、    */
+    /* longjmpで復帰後にPFが発生するため、完全に復元する必要がある。          */
+    {
+        u32 eflags;
+        __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
+        __asm__ volatile("cli");
+
+        /* バッキングRAMの内容を元の物理ページに書き戻す */
+        kmemcpy((u8 *)0x8F000UL,
+                (u8 *)(V86_BACKING_PHYS + 0x8F000UL),
+                0x11000UL);
+
+        /* アイデンティティマッピングに復元 */
+        for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
+            paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
+        }
+
+        if (eflags & 0x200) {
+            __asm__ volatile("sti");
+        }
     }
 
     /* CGウィンドウをR/Wに戻す */
@@ -410,15 +427,10 @@ void v86_mem_teardown(void)
     /* NULL保護ページを復元 */
     paging_set_page(0x00000, 0, PAGE_NOT_PRESENT);
 
-    /* シェル帯域ガードページを復元                                        */
-    /* ※ 0x38F000-0x39FFFF はカーネルスタックのリマップ先として使用中の     */
-    /*   ためNOT PRESENTにしない。0x380000-0x38EFFF と 0x3A0000 以降のみ。 */
+    /* シェル帯域ガードページを復元 (アイデンティティマッピングに復元済みの   */
+    /* ため、0x38F000-0x39FFFFもNOT PRESENTにできる)                         */
     paging_set_page(MEM_SHELL_GUARD, 0, PAGE_NOT_PRESENT);
-    for (addr = 0x380000UL; addr < 0x38F000UL; addr += PAGE_SIZE) {
-        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
-    }
-    /* 0x38F000-0x39FFFF はスキップ (カーネルスタック用) */
-    for (addr = 0x3A0000UL; addr <= MEM_SHELL_BAND_END; addr += PAGE_SIZE) {
+    for (addr = 0x380000UL; addr <= MEM_SHELL_BAND_END; addr += PAGE_SIZE) {
         paging_set_page(addr, 0, PAGE_NOT_PRESENT);
     }
 }

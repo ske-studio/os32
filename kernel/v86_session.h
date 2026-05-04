@@ -21,7 +21,7 @@ enum v86_exit_reason {
     V86_EXIT_BIOS_ROM,     /* CS >= 0xF000 (リセットベクタ到達) */
     V86_EXIT_TIMEOUT,      /* タイムアウト */
     V86_EXIT_UNKNOWN_OP,   /* 未対応オペコード */
-    V86_EXIT_HOTKEY        /* 強制脱出キー (F12) */
+    V86_EXIT_HOTKEY        /* 強制脱出キー (Ctrl+GRPH+DEL / STOP) */
 };
 
 /* ====================================================================== */
