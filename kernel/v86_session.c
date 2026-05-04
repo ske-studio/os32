@@ -96,13 +96,16 @@ void v86_session_on_tick(void)
 {
 
     /* ============================================================ */
-    /*  強制脱出ホットキー検知 (F12)                                */
+    /*  強制脱出ホットキー検知 (Ctrl+GRPH+DEL)                     */
     /* ============================================================ */
     {
         int key = kbd_peekkey();
         if (key >= 0) {
             u8 scan = (u8)((key >> 8) & 0xFF);
-            if (scan == PC98_SCANCODE_F12) {
+            /* DELキー + Ctrl + GRPH(Alt) が同時に押されているか */
+            if (scan == V86_HOTKEY_SCANCODE
+                && (kbd_shift_state & (SHIFT_CTRL | SHIFT_GRPH))
+                   == (SHIFT_CTRL | SHIFT_GRPH)) {
                 kbd_trygetkey(); /* バッファから消費 */
                 v86_request_exit(V86_EXIT_HOTKEY);
                 return;
