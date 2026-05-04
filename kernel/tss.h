@@ -58,6 +58,9 @@ extern struct tss_entry kernel_tss;
 /* TSS の ESP0 を更新 (V86タスク切替時等) */
 void tss_set_esp0(u32 esp0);
 
+/* TSS の現在の ESP0 を取得 (V86開始前に保存するため) */
+u32 tss_get_esp0(void);
+
 /* I/Oビットマップのポート許可/拒否 */
 void tss_iomap_allow(u16 port);     /* ビット=0: 直接アクセス許可 */
 void tss_iomap_deny(u16 port);      /* ビット=1: トラップ (#GP) */

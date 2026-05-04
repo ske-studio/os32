@@ -214,6 +214,9 @@ static void v86_session_run_core(void)
 {
     struct v86_context ctx;
 
+    /* §1.7 TVRAM 退避 (V86開始前に OS32 テキスト画面を保存) */
+    v86_tvram_save();
+
     /* V86コンテキスト: IPLエントリ */
     ctx.eip    = 0x0000;
     ctx.cs     = IPL_SEG;
@@ -225,8 +228,9 @@ static void v86_session_run_core(void)
     ctx.fs     = 0x0000;
     ctx.gs     = 0x0000;
 
-    /* TSS ESP0 切り替え (static変数に保存 — longjmp後にスタックが壊れるため) */
-    v86_saved_esp0 = 0x9FFF0UL;
+    /* TSS ESP0 切り替え (§1.5: static変数に実値を保存 — longjmp後スタックが壊れるため)
+     * ハードコード 0x9FFF0UL 廃止 → tss_get_esp0() で現在値を取得して保存 */
+    v86_saved_esp0 = tss_get_esp0();
     tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
 
     /* ================================================================ */
@@ -303,6 +307,9 @@ static void v86_session_run_core(void)
 
     /* 画面リストア */
     v86_restore_screen();
+
+    /* §1.7 TVRAM 復元 (DOS が描いた文字を消去して OS32 画面を戻す) */
+    v86_tvram_restore();
 
     /* ================================================================ */
     /*  §7.4 FM音源・ EGC 状態復元                                    */
