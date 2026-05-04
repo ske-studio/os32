@@ -348,6 +348,12 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     int fd;
     u8 *ipl_dst;
 
+    /* §1.4 再入禁止ガード: V86セッションが既にアクティブなら即座に返る */
+    if (v86_active) {
+        kprintf(0xE1, "[V86] ERROR: v86_boot_freedos called while already active\n");
+        return -2;
+    }
+
     /* セッション初期化 */
     kmemset(&current_session, 0, sizeof(current_session));
     current_session.auto_cmd = cmdline;
@@ -412,6 +418,12 @@ int v86_boot_freedos(const char *path, const char *cmdline)
 int v86_boot_physical_fdd(int drv, const char *cmdline)
 {
     u8 *ipl_dst;
+
+    /* §1.4 再入禁止ガード */
+    if (v86_active) {
+        kprintf(0xE1, "[V86] ERROR: v86_boot_physical_fdd called while already active\n");
+        return -2;
+    }
 
     /* セッション初期化 */
     kmemset(&current_session, 0, sizeof(current_session));
