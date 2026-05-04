@@ -63,6 +63,12 @@ void v86_disk_reset_log(void);
 /* デバッグ: ログバッファへのアクセサ */
 struct v86_disk_log_entry *v86_disk_get_log(u32 *count, u32 *idx);
 
+/* 内部状態アクセサ (v86_fdc.c の FORMAT TRACK 実装用) */
+int v86_disk_is_physical(void);
+int v86_disk_get_phys_drv(void);
+int v86_disk_get_fd(void);
+u32 v86_disk_get_offset(void);
+
 #endif /* V86_DISK_H */
 
 

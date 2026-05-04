@@ -151,9 +151,10 @@ extern u32 __cdecl wrap_db_mem_used(void);
 extern int __cdecl wrap_kcg_load_font(const char *path);
 extern int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdline);
 extern int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline);
+extern int __cdecl wrap_sys_v86_boot_physical_ex(int drv, int media, const char *cmdline);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 32;
+kapi->version = 33;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -308,4 +309,5 @@ kapi->version = 32;
     kapi->kcg_load_font = wrap_kcg_load_font;
     kapi->sys_v86_boot_freedos = wrap_sys_v86_boot_freedos;
     kapi->sys_v86_boot_physical = wrap_sys_v86_boot_physical;
+    kapi->sys_v86_boot_physical_ex = wrap_sys_v86_boot_physical_ex;
     kapi->sbrk_heap_limit = 0;

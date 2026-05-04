@@ -8,14 +8,14 @@ ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
 C_KERNEL = \
-    kernel/kernel.c kernel/gdt.c kernel/tss.c kernel/v86.c kernel/v86_mem.c kernel/v86_bios.c kernel/v86_pic.c kernel/v86_pit.c kernel/v86_disk.c kernel/v86_test.c kernel/v86_session.c kernel/v86_debug.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c kernel/debug_gp.c \
+    kernel/kernel.c kernel/gdt.c kernel/tss.c kernel/v86.c kernel/v86_mem.c kernel/v86_bios.c kernel/v86_pic.c kernel/v86_pit.c kernel/v86_fdc.c kernel/v86_dma.c kernel/v86_disk.c kernel/v86_test.c kernel/v86_session.c kernel/v86_debug.c kernel/boot_splash.c kernel/idt.c kernel/isr_handlers.c kernel/cpu_calibrate.c kernel/debug_gp.c \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
-    fs/fat12.c fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
+    fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
     kapi/kapi_generated.c kapi/kapi_db.c \

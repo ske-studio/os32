@@ -13,6 +13,8 @@
 #include "v86_pic.h"
 #include "v86_pit.h"
 #include "v86_disk.h"
+#include "v86_fdc.h"
+#include "v86_dma.h"
 #include "v86_session.h"
 #include "tvram.h"
 #include "io.h"
@@ -208,21 +210,27 @@ static void v86_gp_inject_irq(u32 *regs, u16 handler_seg, u16 handler_off)
 /*  8ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
 /* ====================================================================== */
 
-/* 8ビットI/O入力: PIC/PIT仮想化チェック付き */
+/* 8ビットI/O入力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static u8 v86_in8_checked(u16 port)
 {
     u8 val;
     if (v86_pic_io(port, &val, 0)) return val;
     if (v86_pit_io(port, &val, 0)) return val;
+    if (v86_fdc_io(port, &val, 0)) return val;
+    if (v86_dma_io(port, &val, 0)) return val;
     return inp(port);
 }
 
-/* 8ビットI/O出力: PIC/PIT仮想化チェック付き */
+/* 8ビットI/O出力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static void v86_out8_checked(u16 port, u8 val)
 {
     if (!v86_pic_io(port, &val, 1)) {
         if (!v86_pit_io(port, &val, 1)) {
-            outp(port, val);
+            if (!v86_fdc_io(port, &val, 1)) {
+                if (!v86_dma_io(port, &val, 1)) {
+                    outp(port, val);
+                }
+            }
         }
     }
 }

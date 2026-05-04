@@ -124,6 +124,29 @@ const struct fdc_geom *v86_disk_get_geom(void)
 }
 
 /* ====================================================================== */
+/*  内部状態アクセサ (v86_fdc.c の FORMAT TRACK 実装用)                    */
+/* ====================================================================== */
+int v86_disk_is_physical(void)
+{
+    return fdd_use_physical;
+}
+
+int v86_disk_get_phys_drv(void)
+{
+    return fdd_phys_drv;
+}
+
+int v86_disk_get_fd(void)
+{
+    return fdd_fd;
+}
+
+u32 v86_disk_get_offset(void)
+{
+    return fdd_image_offset;
+}
+
+/* ====================================================================== */
 /*  v86_bios_int1b — INT 1Bh ディスクBIOS ハンドラ                         */
 /* ====================================================================== */
 int v86_bios_int1b(u32 *regs)

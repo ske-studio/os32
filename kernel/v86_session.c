@@ -12,6 +12,8 @@
 #include "v86_bios.h"
 #include "v86_pic.h"
 #include "v86_pit.h"
+#include "v86_fdc.h"
+#include "v86_dma.h"
 #include "v86_disk.h"
 #include "v86_debug.h"
 #include "v86_bda.h"
@@ -368,7 +370,17 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     current_session.fd = fd;
     current_session.img_data_size = vfs_get_size(fd);
 
+    /* V86メモリ空間を構築 (バッキングRAM PTE_USER マッピング + IOPM設定) */
+    v86_mem_setup();
+
+    /* PIC/PIT/FDC/DMA仮想化初期化 */
+    v86_pic_init();
+    v86_pit_init();
+    v86_fdc_virt_init();
+    v86_dma_init();
+
     /* ==================================================================
+
      * イメージ形式判定とジオメトリ解析
      *
      * 対応形式:
@@ -612,9 +624,11 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
-    /* PIC/PIT初期化 */
+    /* PIC/PIT/FDC/DMA初期化 */
     v86_pic_init();
     v86_pit_init();
+    v86_fdc_virt_init();
+    v86_dma_init();
 
     /* 実FDDモードを設定 (デフォルト 2HD) */
     v86_disk_set_physical(drv, FDC_MEDIA_2HD_1232);
@@ -690,9 +704,11 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
-    /* PIC/PIT初期化 */
+    /* PIC/PIT/FDC/DMA初期化 */
     v86_pic_init();
     v86_pit_init();
+    v86_fdc_virt_init();
+    v86_dma_init();
 
     /* 実FDDモードを設定 (指定メディア) */
     v86_disk_set_physical(drv, fdc_media);
