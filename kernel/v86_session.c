@@ -389,8 +389,25 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     /* PIC/PIT/ディスク仮想化初期化 */
     v86_pic_init();
     v86_pit_init();
-    v86_disk_set_file(fd, current_session.img_offset,
-                      current_session.img_data_size);
+    /* ジオメトリ推定: データサイズで判定 */
+    {
+        fdc_media_t media;
+        u32 dsz = current_session.img_data_size;
+        if (dsz == 1261568UL) {
+            media = FDC_MEDIA_2HD_1232;       /* 77×2×8×1024 */
+        } else if (dsz == 655360UL) {
+            media = FDC_MEDIA_2DD_640;        /* 80×2×8×512  */
+        } else if (dsz == 737280UL) {
+            media = FDC_MEDIA_2DD_720;        /* 80×2×9×512  */
+        } else {
+            /* サイズ不明の場合は2HDとして扱う (フォールバック) */
+            kprintf(0xA1, "[V86] Unknown FDI size: %u bytes, assuming 2HD\n",
+                    (unsigned)dsz);
+            media = FDC_MEDIA_2HD_1232;
+        }
+        v86_disk_set_file(fd, current_session.img_offset,
+                          current_session.img_data_size, media);
+    }
 
     /* IPLをV86メモリにコピー */
     ipl_dst = v86_phys_addr(IPL_SEG, 0);
@@ -418,6 +435,8 @@ int v86_boot_freedos(const char *path, const char *cmdline)
 int v86_boot_physical_fdd(int drv, const char *cmdline)
 {
     u8 *ipl_dst;
+    int retry;
+    int ipl_rc = -1;
 
     /* §1.4 再入禁止ガード */
     if (v86_active) {
@@ -432,6 +451,18 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     current_session.fd = -1;
     current_session.img_data_size = V86_FDD_IMAGE_SIZE;
 
+    /* Phase 1A: FDCを再初期化 (ブート時に失敗していたケースの救済)
+     * メディア挿入後にユーザーが vdos を起動するため、毎回
+     * reset + specify + recalibrate を再実行する必要がある。 */
+    {
+        int init_rc = fdc_init();
+        if (init_rc != 0) {
+            kprintf(0xE1, "[V86] fdc_init failed (rc=%d). Insert FDD media and retry.\n",
+                    init_rc);
+            return -1;
+        }
+    }
+
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
@@ -439,19 +470,107 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     v86_pic_init();
     v86_pit_init();
 
-    /* 実FDDモードを設定 */
-    v86_disk_set_physical(drv);
+    /* 実FDDモードを設定 (デフォルト 2HD) */
+    v86_disk_set_physical(drv, FDC_MEDIA_2HD_1232);
 
-    /* IPLを実FDCから読み込み (シリンダ0, ヘッド0, セクタ1) */
+    /* Phase 1B: IPLを実FDCから読み込み (3回リトライ + 各リトライ前に再recalibrate) */
     ipl_dst = v86_phys_addr(IPL_SEG, 0);
-    if (fdc_read_sector(drv, 0, 0, 1, ipl_dst) != 0) {
-        kprintf(0xE1, "[V86] FDC read IPL failed (drv=%d)\n", drv);
+    for (retry = 0; retry < 3; retry++) {
+        ipl_rc = fdc_read_sector(drv, 0, 0, 1, ipl_dst);
+        if (ipl_rc == 0) break;
+        kprintf(0xA1, "[V86] IPL read retry %d/3 (rc=%d)\n", retry + 1, ipl_rc);
+        /* 失敗時: FDCを再初期化して次のリトライに備える */
+        if (fdc_init() != 0) {
+            break; /* 再初期化も失敗なら諦める */
+        }
+    }
+    if (ipl_rc != 0) {
+        kprintf(0xE1, "[V86] FDC read IPL failed after 3 retries (drv=%d)\n", drv);
         v86_disk_clear();
         v86_mem_teardown();
         return -1;
     }
 
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
+
+    /* V86実行コア */
+    v86_session_run_core();
+
+    return 0;
+}
+
+/* ====================================================================== */
+/*  v86_boot_physical_fdd_ex - 実FDDからV86セッションを起動 (メディア指定版) */
+/*                                                                          */
+/*  media: 0=2HD(1.2MB), 1=2DD(640KB), 2=2DD(720KB)                       */
+/*  kapi.json の sys_v86_boot_physical_ex から呼び出される。               */
+/* ====================================================================== */
+int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
+{
+    fdc_media_t fdc_media;
+    u8 *ipl_dst;
+    int retry;
+    int ipl_rc = -1;
+    const struct fdc_geom *g;
+
+    /* §1.4 再入禁止ガード */
+    if (v86_active) {
+        kprintf(0xE1, "[V86] ERROR: v86_boot_physical_fdd_ex called while already active\n");
+        return -2;
+    }
+
+    /* メディア種別を enum に変換 */
+    switch (media) {
+    case 1:  fdc_media = FDC_MEDIA_2DD_640;  break;
+    case 2:  fdc_media = FDC_MEDIA_2DD_720;  break;
+    default: fdc_media = FDC_MEDIA_2HD_1232; break;
+    }
+
+    /* セッション初期化 */
+    kmemset(&current_session, 0, sizeof(current_session));
+    current_session.auto_cmd = cmdline;
+    current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
+    current_session.fd = -1;
+
+    /* FDC再初期化 */
+    {
+        int init_rc = fdc_init();
+        if (init_rc != 0) {
+            kprintf(0xE1, "[V86] fdc_init failed (rc=%d).\n", init_rc);
+            return -1;
+        }
+    }
+
+    /* V86メモリ空間を構築 */
+    v86_mem_setup();
+
+    /* PIC/PIT初期化 */
+    v86_pic_init();
+    v86_pit_init();
+
+    /* 実FDDモードを設定 (指定メディア) */
+    v86_disk_set_physical(drv, fdc_media);
+    g = v86_disk_get_geom();
+    current_session.img_data_size = (u32)g->cyls * g->heads
+                                     * g->spt * g->bps;
+
+    /* IPL読み込み (3回リトライ) */
+    ipl_dst = v86_phys_addr(IPL_SEG, 0);
+    for (retry = 0; retry < 3; retry++) {
+        ipl_rc = fdc_read_sector_geom(drv, 0, 0, 1, g, ipl_dst);
+        if (ipl_rc == 0) break;
+        kprintf(0xA1, "[V86] IPL read retry %d/3 (rc=%d)\n", retry + 1, ipl_rc);
+        if (fdc_init() != 0) break;
+    }
+    if (ipl_rc != 0) {
+        kprintf(0xE1, "[V86] FDC read IPL failed after 3 retries (drv=%d)\n", drv);
+        v86_disk_clear();
+        v86_mem_teardown();
+        return -1;
+    }
+
+    kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d, media=%d)...\n",
+            drv, media);
 
     /* V86実行コア */
     v86_session_run_core();
