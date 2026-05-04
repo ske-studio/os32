@@ -2,7 +2,7 @@
 /*  V86_DISK.C — V86 ディスクBIOS (INT 1Bh) 仮想化                         */
 /*                                                                          */
 /*  PC-98 INT 1Bh ディスクBIOSのエミュレーション。                           */
-/*  メモリ上に保持したFDDイメージからセクタを読み出す。                      */
+/*  メモリ上に保持したFDDイメージまたは実FDDからセクタを読み書きする。        */
 /*                                                                          */
 /*  PC-98 2HD FDD ジオメトリ:                                              */
 /*    77シリンダ × 2ヘッド × 8セクタ/トラック × 1024バイト/セクタ           */
@@ -332,34 +332,121 @@ int v86_bios_int1b(u32 *regs)
 
         /* ============================================================ */
         /*  機能 05h: セクタ書き込み (WRITE DATA)                       */
-        /*  Phase 2: 読み取り専用 — ライトプロテクトエラー応答          */
+        /*  READ (01h/06h) と対称な完全実装。                          */
+        /*  ファイルモード: vfs_seek + vfs_write_fd                    */
+        /*  実FDDモード:   fdc_write_sector (複数セクタ対応)           */
         /* ============================================================ */
-        case 0x05:
+        case 0x05: {
+            u16 wr_xfer = (u16)(regs[V86_REG_EBX] & 0xFFFF);
+            u8 wr_cyl = (u8)(regs[V86_REG_ECX] & 0xFF);
+            u8 wr_seclen = (u8)((regs[V86_REG_ECX] >> 8) & 0xFF);
+            u8 wr_head = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
+            u8 wr_sect = (u8)(regs[V86_REG_EDX] & 0xFF);
+            u16 wr_es = (u16)(regs[V86_REG_ES] & 0xFFFF);
+            u16 wr_bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
+            u8 *wr_buf;
+            i32 wr_off;
+            u32 wr_rem, wr_chunk;
+
+            /* CH バリデーション (READと同一) */
+            if (wr_seclen != 3) {
+                DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
+            }
+
+            /* DL: 1ベース → 0ベース */
+            if (wr_sect > 0) wr_sect--;
+
+            /* イメージ未設定チェック */
+            if (!fdd_use_physical && fdd_fd < 0) {
+                DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
+            }
+
+            /* CHS範囲チェック */
+            if (wr_cyl >= V86_FDD_CYLINDERS || wr_head >= V86_FDD_HEADS) {
+                DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
+            }
+
+            /* CHS → バイトオフセット */
+            {
+                u32 boff = ((u32)wr_cyl * V86_FDD_HEADS + (u32)wr_head)
+                           * (V86_FDD_SPT * V86_FDD_BPS)
+                           + (u32)wr_sect * V86_FDD_BPS;
+                if (boff >= fdd_image_size) {
+                    DISK_ERROR_RETURN(log_entry, 0xC0, (i32)boff, regs);
+                }
+                log_entry->result_offset = (i32)boff;
+                wr_off = (i32)boff;
+            }
+
+            /* 転送元バッファ */
+            wr_buf = v86_phys_addr(wr_es, wr_bp);
+
+            /* セクタ単位で書き込み (複数セクタ対応) */
+            wr_rem = (u32)wr_xfer;
             if (fdd_use_physical) {
-                /* 実FDDモード: fdc_write_sector()で書き込み */
-                u8 wr_cyl = (u8)(regs[V86_REG_ECX] & 0xFF);
-                u8 wr_head = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
-                u8 wr_sect = (u8)(regs[V86_REG_EDX] & 0xFF); /* 1ベース */
-                u16 wr_es = (u16)(regs[V86_REG_ES] & 0xFFFF);
-                u16 wr_bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
-                u8 *wr_src = v86_phys_addr(wr_es, wr_bp);
-                if (fdc_write_sector(fdd_phys_drv, wr_cyl, wr_head,
-                                     wr_sect, wr_src) != 0) {
-                    log_entry->status = 0xD0;
-                    regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0xD000UL;
-                    regs[V86_REG_EFLAGS] |= 1;
-                } else {
-                    log_entry->status = 0x00;
-                    regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
-                    regs[V86_REG_EFLAGS] &= ~1UL;
+                /* 実FDDモード: fdc_write_sector() ループ */
+                u8 wc_s = wr_sect;
+                u8 wc_h = wr_head;
+                u8 wc_c = wr_cyl;
+                while (wr_rem > 0) {
+                    wr_chunk = V86_FDD_BPS;
+                    if (wr_chunk > wr_rem) wr_chunk = wr_rem;
+                    if (fdc_write_sector(fdd_phys_drv, wc_c, wc_h,
+                                         wc_s + 1, wr_buf) != 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xD0, wr_off, regs);
+                    }
+                    wr_buf += wr_chunk;
+                    wr_rem -= wr_chunk;
+                    wr_off += (i32)wr_chunk;
+                    wc_s++;
+                    if (wc_s >= V86_FDD_SPT) {
+                        wc_s = 0;
+                        wc_h++;
+                        if (wc_h >= V86_FDD_HEADS) {
+                            wc_h = 0;
+                            wc_c++;
+                        }
+                    }
                 }
             } else {
-                /* ファイルモード: ライトプロテクトエラー */
-                log_entry->status = 0x70;
-                regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL) | 0x7000UL;
-                regs[V86_REG_EFLAGS] |= 1;
+                /* ファイルモード: vfs_seek + vfs_write_fd */
+                if (wr_off >= 0 && (u32)wr_off < fdd_image_size) {
+                    vfs_seek(fdd_fd, fdd_image_offset + (u32)wr_off, 0);
+                }
+                while (wr_rem > 0 && wr_off >= 0
+                       && (u32)wr_off < fdd_image_size) {
+                    wr_chunk = wr_rem;
+                    if (wr_chunk > V86_FDD_BPS) wr_chunk = V86_FDD_BPS;
+                    if ((u32)wr_off + wr_chunk > fdd_image_size) {
+                        wr_chunk = fdd_image_size - (u32)wr_off;
+                    }
+                    vfs_write_fd(fdd_fd, wr_buf, wr_chunk);
+                    wr_buf += wr_chunk;
+                    wr_off += (i32)wr_chunk;
+                    wr_rem -= wr_chunk;
+                }
+            }
+
+            /* 成功 */
+            log_entry->status = 0x00;
+            regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
+            regs[V86_REG_EFLAGS] &= ~1UL;
+
+            /* BDA FDC結果バッファ更新 (READと同一) */
+            {
+                u8 us = 0;
+                u8 *rp = v86_phys_addr(0x0000, 0x0564 + us * 8);
+                rp[0] = us;
+                rp[1] = 0x00;
+                rp[2] = 0x00;
+                rp[3] = wr_cyl;
+                rp[4] = wr_head;
+                rp[5] = (u8)(regs[V86_REG_EDX] & 0xFF);
+                rp[6] = wr_seclen;
+                rp[7] = wr_cyl;
             }
             break;
+        }
 
         /* ============================================================ */
         /*  機能 07h: リキャリブレート / ベリファイ — 常に成功           */
