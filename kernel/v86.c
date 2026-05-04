@@ -4,8 +4,7 @@
 /*  V86モードで特権命令が実行されると#GPが発生する。                        */
 /*  このハンドラでV86命令をデコードし、エミュレーションを行う。             */
 /*                                                                          */
-/*  Phase 0: 基本命令デコーダ (INT/CLI/STI/PUSHF/POPF/HLT/IRET)           */
-/*  後のフェーズでRust (os32_v86) に移行予定。                              */
+/*  実装命令: INT/CLI/STI/PUSHF/POPF/HLT/IRET/INSB/OUTSB/0x66 prefix   */
 /* ======================================================================== */
 
 #include "v86.h"
@@ -19,9 +18,12 @@
 #include "io.h"
 #include "kprintf.h"
 
-/* タイムアウトベースの V86 実行制限 (tick_count は 100Hz) */
-extern volatile u32 tick_count;
-#define V86_TIMEOUT_TICKS  0     /* 0=タイムアウト無効 */
+/* §8.4 タイムアウト: 6000 tick = 60秒 (100Hz 基準)
+ * ゲストが通常命令ループに入ったままバックしない場合、
+ * HLTを注入して GPハンドラ経由で安全に V86 を終了する。
+ * 0 を設定すると無効 (deadline なし) */
+extern volatile u32 tick_count;   /* isr_stub.asm で100Hzインクリメント */
+#define V86_TIMEOUT_TICKS  6000
 u32 v86_start_tick = 0;
 
 /* デバッグリングバッファ (最近のGPイベント記録)
