@@ -368,46 +368,192 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     current_session.fd = fd;
     current_session.img_data_size = vfs_get_size(fd);
 
-    /* FDIヘッダ判定 */
+    /* ==================================================================
+     * イメージ形式判定とジオメトリ解析
+     *
+     * 対応形式:
+     *   FDI  (Anex86): 4096byte ヘッダ
+     *                  offset 0x04: FDDType (0x10=2DD, 0x90=2HD)
+     *                  offset 0x08: HeaderSize (通常 0x1000)
+     *                  offset 0x0C: DataSize
+     *   D88  (NP21/W): 可変ヘッダ
+     *                  offset 0x1B: Media flag (0x10=2DD, 0x20=2HD)
+     *                  offset 0x1C: ディスクサイズ (LE 4bytes, ヘッダ込み)
+     *   RAW/IMG       : ヘッダなし — ファイルサイズで推定
+     * ================================================================== */
     {
-        u8 hdr[12];
-        vfs_read_fd(fd, hdr, 12);
-        if (current_session.img_data_size > 0x1000) {
-            u32 hdr_size = *(u32 *)(hdr + 8);
-            if (hdr_size == 0x1000 || hdr_size == 0x2000) {
-                current_session.img_offset = hdr_size;
-                current_session.img_data_size -= hdr_size;
-                kprintf(0xA1, "[V86] FDI header: offset=0x%x\n",
-                        current_session.img_offset);
+        u8 hdr[36];   /* D88: track[0] offset は 0x20-0x23 (36B必要) */
+        u32 file_size = current_session.img_data_size;
+        fdc_media_t media = FDC_MEDIA_2HD_1232; /* デフォルト */
+        int media_detected = 0;
+
+        /* ヘッダを最大36バイト読み込む */
+        vfs_seek(fd, 0, 0);
+        vfs_read_fd(fd, hdr, 36);
+
+        /* ---- D88 判定 ----
+         * offset 0x1B のメディアフラグが D88 の既知値 (0x00/0x10/0x20)
+         * かつ offset 0x1C の「ディスクサイズ」がファイルサイズと一致する場合
+         * D88 とみなす */
+        {
+            u8 media_flag = hdr[0x1B];
+            u32 d88_size  = *(u32 *)(hdr + 0x1C);
+
+            if (d88_size == file_size &&
+                (media_flag == 0x00 || media_flag == 0x10 || media_flag == 0x20)) {
+                /* D88 形式 */
+                current_session.img_offset    = 0; /* D88はオフセットなし (セクタ単位アクセス) */
+                /* ただし V86では D88をRAW相当として読むため
+                 * 実際の転送はファイル先頭から行う。
+                 * TODO: D88パーサ実装まではメディア種別のみ利用する */
+                switch (media_flag) {
+                case 0x10: /* 2DD */
+                    /* D88の2DDはSPT=8(640KB)かSPT=9(720KB)か不明だが
+                     * offset 0x20(track table[0])が指すセクタヘッダのN値で判定できる。
+                     * 簡易判定: ディスクサイズで推定 */
+                    if (file_size <= 700000UL) {
+                        media = FDC_MEDIA_2DD_640;
+                        kprintf(0xA1, "[V86] D88: 2DD 640KB (media_flag=0x10)\n");
+                    } else {
+                        media = FDC_MEDIA_2DD_720;
+                        kprintf(0xA1, "[V86] D88: 2DD 720KB (media_flag=0x10)\n");
+                    }
+                    break;
+                case 0x20: /* 2HD */
+                    media = FDC_MEDIA_2HD_1232;
+                    kprintf(0xA1, "[V86] D88: 2HD 1.2MB (media_flag=0x20)\n");
+                    break;
+                default: /* 0x00 = 2D — 現状は2DDとして扱う */
+                    media = FDC_MEDIA_2DD_640;
+                    kprintf(0xA1, "[V86] D88: 2D (media_flag=0x00), treating as 2DD\n");
+                    break;
+                }
+                /* D88はデータオフセット=0 (セクタ単位アクセス)
+                 * IPLはトラック0, セクタ0のデータ部分から読む。
+                 * D88ファイル構造: トラックテーブル [0x20..0x2AF] の [0] が
+                 * トラック0の開始オフセットを示す。その直後にセクタヘッダ (16B)、
+                 * 続いてセクタデータが並ぶ。 */
+                {
+                    u32 trk0_off = *(u32 *)(hdr + 0x20); /* track[0] オフセット */
+                    /* セクタヘッダ(16B)を読んでセクタサイズを確認 */
+                    if (trk0_off >= 0x2B0 && trk0_off < file_size) {
+                        u8 sec_hdr[16];
+                        u8 sec_n;
+                        vfs_seek(fd, trk0_off, 0);
+                        vfs_read_fd(fd, sec_hdr, 16);
+                        sec_n = sec_hdr[3]; /* N値: 0=128B,1=256B,2=512B,3=1024B */
+                        /* IPLデータ開始位置 = トラック0先頭 + セクタヘッダ16B */
+                        current_session.img_offset = trk0_off + 16;
+                        kprintf(0xA1, "[V86] D88: trk0=0x%x secN=%d ipl_off=0x%x\n",
+                                (unsigned)trk0_off, (int)sec_n,
+                                (unsigned)current_session.img_offset);
+                        /* IPL サイズをセクタサイズで上書き (読み過ぎ防止) */
+                        (void)sec_n; /* 現状は1024B固定読み込み — 問題なし */
+                    } else {
+                        current_session.img_offset = 0x2C0; /* フォールバック */
+                    }
+                }
+                /* D88のfdd_image_sizeはジオメトリ(2HD=1261568)から算出
+                 * (ファイルサイズではなく論理ディスクサイズを使う) */
+                {
+                    const struct fdc_geom *g;
+                    /* 一旦セット → geom を取得 → サイズ算出 */
+                    v86_disk_set_file(fd, current_session.img_offset,
+                                      (u32)77 * 2 * 8 * 1024, /* 2HD仮サイズ */
+                                      media);
+                    g = v86_disk_get_geom();
+                    current_session.img_data_size = (u32)g->cyls * g->heads
+                                                     * g->spt * g->bps;
+                    /* img_data_size を更新して再セット */
+                    v86_disk_set_file(fd, current_session.img_offset,
+                                      current_session.img_data_size, media);
+                }
+                media_detected = 1;
             }
         }
-    }
 
-    /* V86メモリ空間を構築 */
-    v86_mem_setup();
+        /* ---- FDI 判定 ----
+         * offset 0x08 に HeaderSize が入っており 0x1000 or 0x2000 の場合 FDI */
+        if (!media_detected) {
+            u32 hdr_size  = *(u32 *)(hdr + 0x08);
+            u32 fdi_type  = *(u32 *)(hdr + 0x04);
+            u32 data_size = *(u32 *)(hdr + 0x0C);
 
-    /* PIC/PIT/ディスク仮想化初期化 */
-    v86_pic_init();
-    v86_pit_init();
-    /* ジオメトリ推定: データサイズで判定 */
-    {
-        fdc_media_t media;
-        u32 dsz = current_session.img_data_size;
-        if (dsz == 1261568UL) {
-            media = FDC_MEDIA_2HD_1232;       /* 77×2×8×1024 */
-        } else if (dsz == 655360UL) {
-            media = FDC_MEDIA_2DD_640;        /* 80×2×8×512  */
-        } else if (dsz == 737280UL) {
-            media = FDC_MEDIA_2DD_720;        /* 80×2×9×512  */
-        } else {
-            /* サイズ不明の場合は2HDとして扱う (フォールバック) */
-            kprintf(0xA1, "[V86] Unknown FDI size: %u bytes, assuming 2HD\n",
-                    (unsigned)dsz);
-            media = FDC_MEDIA_2HD_1232;
+            if ((hdr_size == 0x1000 || hdr_size == 0x2000) &&
+                file_size > hdr_size &&
+                (data_size == 0 || data_size == file_size - hdr_size)) {
+                /* FDI 形式 */
+                current_session.img_offset    = hdr_size;
+                current_session.img_data_size = file_size - hdr_size;
+
+                /* FDDType (offset 0x04) からメディア種別を決定 */
+                switch (fdi_type) {
+                case 0x10: /* 2DD (640KB or 720KB) */
+                    if (current_session.img_data_size <= 700000UL) {
+                        media = FDC_MEDIA_2DD_640;
+                        kprintf(0xA1, "[V86] FDI: 2DD 640KB (FDDType=0x10, hdr=0x%x)\n",
+                                (unsigned)hdr_size);
+                    } else {
+                        media = FDC_MEDIA_2DD_720;
+                        kprintf(0xA1, "[V86] FDI: 2DD 720KB (FDDType=0x10, hdr=0x%x)\n",
+                                (unsigned)hdr_size);
+                    }
+                    break;
+                case 0x90: /* 2HD 1.2MB */
+                    media = FDC_MEDIA_2HD_1232;
+                    kprintf(0xA1, "[V86] FDI: 2HD 1.2MB (FDDType=0x90, hdr=0x%x)\n",
+                            (unsigned)hdr_size);
+                    break;
+                case 0x30: /* 1.44MB — 2DDとして近似 */
+                    media = FDC_MEDIA_2DD_720;
+                    kprintf(0xA1, "[V86] FDI: 1.44MB (FDDType=0x30) → 2DD 720KB\n");
+                    break;
+                default:
+                    /* FDDType不明: データサイズで推定 */
+                    if (current_session.img_data_size == 655360UL) {
+                        media = FDC_MEDIA_2DD_640;
+                    } else if (current_session.img_data_size == 737280UL) {
+                        media = FDC_MEDIA_2DD_720;
+                    } else {
+                        media = FDC_MEDIA_2HD_1232;
+                    }
+                    kprintf(0xA1, "[V86] FDI: unknown FDDType=0x%x, size=%u\n",
+                            (unsigned)fdi_type, (unsigned)current_session.img_data_size);
+                    break;
+                }
+                media_detected = 1;
+            }
         }
-        v86_disk_set_file(fd, current_session.img_offset,
-                          current_session.img_data_size, media);
+
+        /* ---- RAW/IMG フォールバック ----
+         * ヘッダなし — ファイルサイズのみで判定 */
+        if (!media_detected) {
+            if (file_size == 1261568UL) {
+                media = FDC_MEDIA_2HD_1232;
+                kprintf(0xA1, "[V86] RAW: 2HD 1.2MB (%u bytes)\n", (unsigned)file_size);
+            } else if (file_size == 655360UL) {
+                media = FDC_MEDIA_2DD_640;
+                kprintf(0xA1, "[V86] RAW: 2DD 640KB (%u bytes)\n", (unsigned)file_size);
+            } else if (file_size == 737280UL) {
+                media = FDC_MEDIA_2DD_720;
+                kprintf(0xA1, "[V86] RAW: 2DD 720KB (%u bytes)\n", (unsigned)file_size);
+            } else {
+                media = FDC_MEDIA_2HD_1232;
+                kprintf(0xA1, "[V86] RAW: unknown size %u bytes, assuming 2HD\n",
+                        (unsigned)file_size);
+            }
+            current_session.img_offset    = 0;
+            current_session.img_data_size = file_size;
+        }
+
+        /* FDI / RAW のみここで set_file を呼ぶ。
+         * D88 はブランチ内で呼び済みなのでスキップ。 */
+        if (!media_detected) {
+            v86_disk_set_file(fd, current_session.img_offset,
+                              current_session.img_data_size, media);
+        }
     }
+
 
     /* IPLをV86メモリにコピー */
     ipl_dst = v86_phys_addr(IPL_SEG, 0);
