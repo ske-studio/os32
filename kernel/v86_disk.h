@@ -9,29 +9,26 @@
 #define V86_DISK_H
 
 #include "types.h"
+#include "fdc.h"  /* fdc_media_t, struct fdc_geom */
 
-/* PC-98 2HD FDD ジオメトリ */
-#define V86_FDD_CYLINDERS   77
-#define V86_FDD_HEADS       2
-#define V86_FDD_SPT         8       /* セクタ/トラック */
-#define V86_FDD_BPS         1024    /* バイト/セクタ */
-#define V86_FDD_TOTAL_SEC   (V86_FDD_CYLINDERS * V86_FDD_HEADS * V86_FDD_SPT)
-#define V86_FDD_IMAGE_SIZE  (V86_FDD_TOTAL_SEC * V86_FDD_BPS)
-
-/* DA/UA: 1MB FDD UNIT#0 */
-#define V86_FDD_DAUA        0x90
+/* PC-98 2HD FDD イメージサイズ (互換用) */
+#define V86_FDD_IMAGE_SIZE  (77 * 2 * 8 * 1024)
 
 /* FDDイメージファイル(FD)をセット (fd: VFSのファイルディスクリプタ、
- * data_offset: イメージデータ開始位置、size: バイト数)
+ * data_offset: イメージデータ開始位置、size: バイト数、media: メディア種別)
  * 呼び出し後、V86からのINT 1Bhでこのファイルからセクタが読み出される。 */
-void v86_disk_set_file(int fd, u32 data_offset, u32 data_size);
+void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
+                       fdc_media_t media);
 
 /* FDDイメージをクリア */
 void v86_disk_clear(void);
 
 /* 実FDDモードを有効化 (NP21/Wにマウント中のFDDから直接読む)
- * drv: 物理ドライブ番号 (通常0) */
-void v86_disk_set_physical(int drv);
+ * drv: 物理ドライブ番号 (通常0), media: メディア種別 */
+void v86_disk_set_physical(int drv, fdc_media_t media);
+
+/* 現在マウント中のジオメトリを返す */
+const struct fdc_geom *v86_disk_get_geom(void);
 
 /* INT 1Bh (ディスクBIOS) を処理する。
  * regs: V86スタックフレーム内レジスタ配列
@@ -67,3 +64,5 @@ void v86_disk_reset_log(void);
 struct v86_disk_log_entry *v86_disk_get_log(u32 *count, u32 *idx);
 
 #endif /* V86_DISK_H */
+
+

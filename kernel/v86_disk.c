@@ -41,6 +41,9 @@ static u32 fdd_image_size = 0;
 static int fdd_use_physical = 0;
 static int fdd_phys_drv = 0;
 
+/* 現在マウント中のジオメトリポインタ (デフォルト = 2HD) */
+static const struct fdc_geom *fdd_geom = &fdc_geom_2hd;
+
 /* ====================================================================== */
 /*  デバッグ用 INT 1Bh 呼び出しログ (リングバッファ)                        */
 /*  V86終了後に v86_disk_dump_log() でダンプする。                          */
@@ -68,23 +71,35 @@ static u32 disk_log_count = 0;
 /* ====================================================================== */
 /*  v86_disk_set_file — FDDイメージファイルを設定                         */
 /* ====================================================================== */
-void v86_disk_set_file(int fd, u32 data_offset, u32 data_size)
+void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
+                       fdc_media_t media)
 {
     fdd_fd = fd;
     fdd_image_offset = data_offset;
     fdd_image_size = data_size;
+    switch (media) {
+    case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
+    case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
+    default:                fdd_geom = &fdc_geom_2hd;      break;
+    }
 }
 
 /* ====================================================================== */
 /*  v86_disk_set_physical — 実FDDモードを有効化                           */
 /* ====================================================================== */
-void v86_disk_set_physical(int drv)
+void v86_disk_set_physical(int drv, fdc_media_t media)
 {
     fdd_use_physical = 1;
     fdd_phys_drv = drv;
     fdd_fd = -1;
     fdd_image_offset = 0;
-    fdd_image_size = V86_FDD_IMAGE_SIZE;
+    switch (media) {
+    case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
+    case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
+    default:                fdd_geom = &fdc_geom_2hd;      break;
+    }
+    fdd_image_size = (u32)fdd_geom->cyls * fdd_geom->heads
+                     * fdd_geom->spt * fdd_geom->bps;
 }
 
 /* ====================================================================== */
@@ -97,6 +112,15 @@ void v86_disk_clear(void)
     fdd_image_size = 0;
     fdd_use_physical = 0;
     fdd_phys_drv = 0;
+    fdd_geom = &fdc_geom_2hd;  /* デフォルトに戻す */
+}
+
+/* ====================================================================== */
+/*  v86_disk_get_geom — 現在マウント中のジオメトリを返す                   */
+/* ====================================================================== */
+const struct fdc_geom *v86_disk_get_geom(void)
+{
+    return fdd_geom;
 }
 
 /* ====================================================================== */
@@ -122,12 +146,13 @@ int v86_bios_int1b(u32 *regs)
     log_entry->result_offset = -99;  /* 未計算マーカー */
     log_entry->status = 0xFF;        /* 未完了マーカー */
 
-    /* DA/UAチェック: 1MB FDD UNIT#0 のみサポート */
-    if ((daua & 0xF0) == 0x90) {
-        /* 1MB FDD */
-    } else {
-        /* 未サポートデバイス: ステータス 0x40 = DA/UAが不適当 */
-        DISK_ERROR_RETURN(log_entry, 0x40, -1, regs);
+    /* DA/UAチェック: 現在マウント中のメディアの DA/UA 上位ニブルと一致するか確認 */
+    {
+        const struct fdc_geom *g = v86_disk_get_geom();
+        if ((daua & 0xF0) != (u8)g->daua_high) {
+            /* 未サポートデバイス: ステータス 0x40 = DA/UAが不適当 */
+            DISK_ERROR_RETURN(log_entry, 0x40, -1, regs);
+        }
     }
 
     /* ================================================================ */
@@ -233,42 +258,41 @@ int v86_bios_int1b(u32 *regs)
             {
                 u32 byte_offset;
 
-                /* セクタ長コード (CH) バリデーション — NP21/W fdd_read_xdf()準拠
-                 * FDCは物理セクタIDのN値(=3, 1024B)と要求N値を照合する。
-                 * CH != 3 → セクタ未検出エラー(0xC0)を返す。
-                 * IO.SYSはBDA[0x0564+6]のN値を参照してCHを決定するため、
-                 * IPLリード成功時にN=3が記録されていれば正しいCH=3で読む。 */
-                if (sector_len != 3) {
-                    DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
+                /* セクタ長コード (CH) バリデーション — 動的ジオメトリ参照
+                 * FDCは物理セクタIDのN値と要求N値を照合する。
+                 * CH != g->sec_n → セクタ未検出エラー(0xC0)を返す。 */
+                {
+                    const struct fdc_geom *g = v86_disk_get_geom();
+                    if (sector_len != g->sec_n) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
+                    }
+
+                    /* PC-98 INT 1Bh: DL(セクタ番号)は常に1ベース → 0ベースに変換 */
+                    if (sector_dl > 0) sector_dl--;
+
+                    /* イメージ未設定チェック (ファイルモードのみ) */
+                    if (!fdd_use_physical && fdd_fd < 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
+                    }
+
+                    /* CHS範囲チェック */
+                    if (cylinder >= g->cyls || head_dh >= g->heads) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
+                    }
+
+                    /* CHS → バイトオフセット変換 */
+                    byte_offset = ((u32)cylinder * g->heads + (u32)head_dh)
+                                  * ((u32)g->spt * g->bps)
+                                  + (u32)sector_dl * g->bps;
+
+                    /* 範囲チェック (SPT境界外もここでキャッチされる) */
+                    if (byte_offset >= fdd_image_size) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)byte_offset, regs);
+                    }
+
+                    log_entry->result_offset = (i32)byte_offset;
+                    img_offset = (i32)byte_offset;
                 }
-
-                /* PC-98 INT 1Bh: DL(セクタ番号)は常に1ベース → 0ベースに変換 */
-                if (sector_dl > 0) sector_dl--;
-
-                /* イメージ未設定チェック (ファイルモードのみ) */
-                if (!fdd_use_physical && fdd_fd < 0) {
-                    DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
-                }
-
-                /* CHS → バイトオフセット変換
-                 * セクタ番号(DL)は常に物理セクタ番号(1024B単位)として解釈。
-                 * CHパラメータはオフセット計算に影響しない。
-                 * IO.SYSがCH=0でもセクタ番号は物理セクタ単位で指定する。 */
-                if (cylinder >= V86_FDD_CYLINDERS || head_dh >= V86_FDD_HEADS) {
-                    DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
-                }
-
-                byte_offset = ((u32)cylinder * V86_FDD_HEADS + (u32)head_dh)
-                              * (V86_FDD_SPT * V86_FDD_BPS)
-                              + (u32)sector_dl * V86_FDD_BPS;
-
-                /* 範囲チェック (SPT境界外もここでキャッチされる) */
-                if (byte_offset >= fdd_image_size) {
-                    DISK_ERROR_RETURN(log_entry, 0xC0, (i32)byte_offset, regs);
-                }
-
-                log_entry->result_offset = (i32)byte_offset;
-                img_offset = (i32)byte_offset;
             }
 
             /* 転送先バッファのリニアアドレス */
@@ -277,15 +301,16 @@ int v86_bios_int1b(u32 *regs)
             /* セクタ単位で転送 (複数セクタ対応) */
             remaining = (u32)xfer_bytes;
             if (fdd_use_physical) {
-                /* 実FDDモード: fdc_read_sector()で1セクタずつ読む */
+                /* 実FDDモード: fdc_read_sector_geom()で1セクタずつ読む */
+                const struct fdc_geom *g = v86_disk_get_geom();
                 u8 cur_sect = sector_dl;  /* 0ベース */
                 u8 cur_head = head_dh;
                 u8 cur_cyl = cylinder;
                 while (remaining > 0) {
-                    chunk = V86_FDD_BPS;
+                    chunk = (u32)g->bps;
                     if (chunk > remaining) chunk = remaining;
-                    if (fdc_read_sector(fdd_phys_drv, cur_cyl, cur_head,
-                                        cur_sect + 1, dst) != 0) {
+                    if (fdc_read_sector_geom(fdd_phys_drv, cur_cyl, cur_head,
+                                             cur_sect + 1, g, dst) != 0) {
                         /* FDCリードエラー */
                         DISK_ERROR_RETURN(log_entry, 0xD0, (i32)img_offset, regs);
                     }
@@ -294,10 +319,10 @@ int v86_bios_int1b(u32 *regs)
                     img_offset += (i32)chunk;
                     /* 次セクタに進む */
                     cur_sect++;
-                    if (cur_sect >= V86_FDD_SPT) {
+                    if (cur_sect >= g->spt) {
                         cur_sect = 0;
                         cur_head++;
-                        if (cur_head >= V86_FDD_HEADS) {
+                        if (cur_head >= g->heads) {
                             cur_head = 0;
                             cur_cyl++;
                         }
@@ -305,12 +330,13 @@ int v86_bios_int1b(u32 *regs)
                 }
             } else {
                 /* ファイルモード: VFS seek+read */
+                const struct fdc_geom *g = v86_disk_get_geom();
                 if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
                     vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0);
                 }
                 while (remaining > 0 && img_offset >= 0 && (u32)img_offset < fdd_image_size) {
                     chunk = remaining;
-                    if (chunk > V86_FDD_BPS) chunk = V86_FDD_BPS;
+                    if (chunk > (u32)g->bps) chunk = (u32)g->bps;
                     if ((u32)img_offset + chunk > fdd_image_size) {
                         chunk = fdd_image_size - (u32)img_offset;
                     }
@@ -364,33 +390,36 @@ int v86_bios_int1b(u32 *regs)
             u32 wr_rem, wr_chunk;
 
             /* CH バリデーション (READと同一) */
-            if (wr_seclen != 3) {
-                DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
-            }
-
-            /* DL: 1ベース → 0ベース */
-            if (wr_sect > 0) wr_sect--;
-
-            /* イメージ未設定チェック */
-            if (!fdd_use_physical && fdd_fd < 0) {
-                DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
-            }
-
-            /* CHS範囲チェック */
-            if (wr_cyl >= V86_FDD_CYLINDERS || wr_head >= V86_FDD_HEADS) {
-                DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
-            }
-
-            /* CHS → バイトオフセット */
             {
-                u32 boff = ((u32)wr_cyl * V86_FDD_HEADS + (u32)wr_head)
-                           * (V86_FDD_SPT * V86_FDD_BPS)
-                           + (u32)wr_sect * V86_FDD_BPS;
-                if (boff >= fdd_image_size) {
-                    DISK_ERROR_RETURN(log_entry, 0xC0, (i32)boff, regs);
+                const struct fdc_geom *g = v86_disk_get_geom();
+                if (wr_seclen != g->sec_n) {
+                    DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
                 }
-                log_entry->result_offset = (i32)boff;
-                wr_off = (i32)boff;
+
+                /* DL: 1ベース → 0ベース */
+                if (wr_sect > 0) wr_sect--;
+
+                /* イメージ未設定チェック */
+                if (!fdd_use_physical && fdd_fd < 0) {
+                    DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
+                }
+
+                /* CHS範囲チェック */
+                if (wr_cyl >= g->cyls || wr_head >= g->heads) {
+                    DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
+                }
+
+                /* CHS → バイトオフセット */
+                {
+                    u32 boff = ((u32)wr_cyl * g->heads + (u32)wr_head)
+                               * ((u32)g->spt * g->bps)
+                               + (u32)wr_sect * g->bps;
+                    if (boff >= fdd_image_size) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)boff, regs);
+                    }
+                    log_entry->result_offset = (i32)boff;
+                    wr_off = (i32)boff;
+                }
             }
 
             /* 転送元バッファ */
@@ -399,25 +428,26 @@ int v86_bios_int1b(u32 *regs)
             /* セクタ単位で書き込み (複数セクタ対応) */
             wr_rem = (u32)wr_xfer;
             if (fdd_use_physical) {
-                /* 実FDDモード: fdc_write_sector() ループ */
+                /* 実FDDモード: fdc_write_sector_geom() ループ */
+                const struct fdc_geom *g = v86_disk_get_geom();
                 u8 wc_s = wr_sect;
                 u8 wc_h = wr_head;
                 u8 wc_c = wr_cyl;
                 while (wr_rem > 0) {
-                    wr_chunk = V86_FDD_BPS;
+                    wr_chunk = (u32)g->bps;
                     if (wr_chunk > wr_rem) wr_chunk = wr_rem;
-                    if (fdc_write_sector(fdd_phys_drv, wc_c, wc_h,
-                                         wc_s + 1, wr_buf) != 0) {
+                    if (fdc_write_sector_geom(fdd_phys_drv, wc_c, wc_h,
+                                              wc_s + 1, g, wr_buf) != 0) {
                         DISK_ERROR_RETURN(log_entry, 0xD0, wr_off, regs);
                     }
                     wr_buf += wr_chunk;
                     wr_rem -= wr_chunk;
                     wr_off += (i32)wr_chunk;
                     wc_s++;
-                    if (wc_s >= V86_FDD_SPT) {
+                    if (wc_s >= g->spt) {
                         wc_s = 0;
                         wc_h++;
-                        if (wc_h >= V86_FDD_HEADS) {
+                        if (wc_h >= g->heads) {
                             wc_h = 0;
                             wc_c++;
                         }
@@ -425,13 +455,14 @@ int v86_bios_int1b(u32 *regs)
                 }
             } else {
                 /* ファイルモード: vfs_seek + vfs_write_fd */
+                const struct fdc_geom *g = v86_disk_get_geom();
                 if (wr_off >= 0 && (u32)wr_off < fdd_image_size) {
                     vfs_seek(fdd_fd, fdd_image_offset + (u32)wr_off, 0);
                 }
                 while (wr_rem > 0 && wr_off >= 0
                        && (u32)wr_off < fdd_image_size) {
                     wr_chunk = wr_rem;
-                    if (wr_chunk > V86_FDD_BPS) wr_chunk = V86_FDD_BPS;
+                    if (wr_chunk > (u32)g->bps) wr_chunk = (u32)g->bps;
                     if ((u32)wr_off + wr_chunk > fdd_image_size) {
                         wr_chunk = fdd_image_size - (u32)wr_off;
                     }
@@ -493,10 +524,11 @@ int v86_bios_int1b(u32 *regs)
         /* ============================================================ */
         case 0x0A: {
             u8 cylinder_cl = (u8)(regs[V86_REG_ECX] & 0xFF);
+            const struct fdc_geom *g = v86_disk_get_geom();
 
-            /* 物理セクタIDを返す (2HD 1024Bフォーマット固定) */
+            /* 物理セクタIDを返す (現在メディアのN値を使用) */
             regs[V86_REG_ECX] = (u32)cylinder_cl          /* CL = C */
-                              | (3UL << 8);                /* CH = N = 3 (1024B) */
+                              | ((u32)g->sec_n << 8);      /* CH = N */
             regs[V86_REG_EDX] = (regs[V86_REG_EDX] & 0xFFFF0000UL)
                               | (0UL << 8)                 /* DH = H = 0 */
                               | 1UL;                       /* DL = R = 1 (先頭セクタ) */
