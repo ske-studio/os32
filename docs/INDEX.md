@@ -27,6 +27,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v31 仕様書 — 153エントリテーブル (ヘッダ2 + 関数150 + データフィールド1) |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
+| [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) | ブートアーキテクチャ — VK32フォーマット、メモリマップ、HDD/FDDローダー、デプロイ |
+| [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) | SQLite カーネル統合 — アーキテクチャ、ビルド設定、VFS、IPC、障害サマリ |
+| [CROSS_COMPILER_REBUILD.md](CROSS_COMPILER_REBUILD.md) | i386-elf クロスコンパイラ soft-float 再構築手順 (見送り・参照資料) |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
@@ -74,17 +77,28 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [PM_PIO_TEST.md](logs/PM_PIO_TEST.md) | プロテクトモード IDE PIO 読み込み実証実験記録 |
 | [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
 
-## タスク
+## タスク・設計書
+
+### アクティブ開発
 
 | ドキュメント | 内容 |
 |-------------|------|
+| [tasks/vdos/INDEX.md](tasks/vdos/INDEX.md) | **VDOS** — V86 FreeDOS(98) サブシステム (アクティブ開発中) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP (日本語入力) — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-| [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
-| [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
-| [tasks/libchem/LIBCHEM_DESIGN.md](tasks/libchem/LIBCHEM_DESIGN.md) | libos32chem — 化学エンジンライブラリ設計書 |
-| [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
-| [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
+
+### ユーザー空間ライブラリ設計書
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/libs/INDEX.md](tasks/libs/INDEX.md) | **ライブラリ設計書索引** — 全13ライブラリの設計書一覧 |
+
+### アーカイブ (完了済み実装の元ドキュメント)
+
+| ドキュメント | 集約先 |
+|-------------|-------|
+| [tasks/_archived/boot_reform/](tasks/_archived/boot_reform/) | → [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) |
+| [tasks/_archived/sqlite/](tasks/_archived/sqlite/) | → [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) |
 
 ## ソースツリー概要
 
@@ -122,4 +136,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-05-03*
+*Last Updated: 2026-05-04*
