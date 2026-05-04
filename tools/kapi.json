@@ -1,5 +1,5 @@
 {
-  "version": 32,
+  "version": 33,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -42,7 +42,8 @@
     "extern volatile u32 tick_count;",
     "extern void kapi_sys_exit(int status);",
     "extern int v86_boot_freedos(const char *path, const char *cmdline);",
-    "extern int v86_boot_physical_fdd(int drv, const char *cmdline);"
+    "extern int v86_boot_physical_fdd(int drv, const char *cmdline);",
+    "extern int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline);"
   ],
   "api": [
     {
@@ -1123,6 +1124,12 @@
       "ret": "int",
       "args": ["int drv", "const char *cmdline"],
       "target": "v86_boot_physical_fdd"
+    },
+    {
+      "name": "sys_v86_boot_physical_ex",
+      "ret": "int",
+      "args": ["int drv", "int media", "const char *cmdline"],
+      "target": "v86_boot_physical_fdd_ex"
     }
   ]
 }
