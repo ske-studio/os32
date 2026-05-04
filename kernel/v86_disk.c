@@ -30,6 +30,7 @@
 
 #include "vfs.h"
 #include "fdc.h"
+#include "os32_kapi_shared.h"  /* OS32_Stat, OS_S_IWUSR (§6 ライトプロテクト) */
 
 /* FDDイメージファイル (外部から設定される) */
 static int fdd_fd = -1;
@@ -177,6 +178,20 @@ int v86_bios_int1b(u32 *regs)
             /* 拡張センス (AH=0x84): 1MB/640KB互換ドライブ */
             if ((regs[V86_REG_EAX] & 0x8F40) == 0x8400) {
                 ret_ah |= 0x08;
+            }
+
+            /* ================================================================ */
+            /*  §6 ライトプロテクト反映: AH bit4 = ライトプロテクト中          */
+            /*  ファイルモード: vfs_fstat で書き込み権限を確認                  */
+            /*  実FDDモード: 常に書き込み可能 (FDCが実際のWP状態を管理)         */
+            /* ================================================================ */
+            if (!fdd_use_physical && fdd_fd >= 0) {
+                OS32_Stat st;
+                if (vfs_fstat(fdd_fd, &st) == 0) {
+                    if (!(st.st_mode & OS_S_IWUSR)) {
+                        ret_ah |= 0x10;  /* bit4: ライトプロテクト中 */
+                    }
+                }
             }
 
             regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL)
