@@ -24,4 +24,9 @@ u8 *v86_phys_addr(u32 seg, u32 off);
 /* DOS→OS32復帰時の画面リストア (GRCG/EGC OFF、パレット/GDCリセット) */
 void v86_restore_screen(void);
 
+/* §1.7 TVRAM (0xA0000-0xA1FFF, 8KB) 退避・復元
+ * v86_mem_setup 前に save、v86_restore_screen 後に restore を呼ぶ */
+void v86_tvram_save(void);
+void v86_tvram_restore(void);
+
 #endif /* V86_MEM_H */

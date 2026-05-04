@@ -525,3 +525,44 @@ void v86_restore_screen(void)
     /* 7. グラフィック画面表示停止 (GDC STOP) */
     outp(0xA2, 0x0C);
 }
+
+/* ======================================================================== */
+/*  v86_tvram_save / v86_tvram_restore — TVRAM 退避・復元 (§1.7)            */
+/*                                                                          */
+/*  PC-98 TVRAM: 物理 0xA0000-0xA1FFF (8KB)                                */
+/*    0xA0000-0xA0FFF: テキストコード (2KB, 80桁×25行×2byte)               */
+/*    0xA2000-0xA3FFF: テキスト属性  (2KB, 同)                             */
+/*  ページテーブルは V86_BACKING_PHYS+0xA0000 にリマップされているため、     */
+/*  V86開始前後では物理アドレスへの直接書き込みが必要。                       */
+/*                                                                          */
+/*  方針: v86_mem_setup 前は実物理 0xA0000 にアクセスできる。              */
+/*  V86 バッキングRAMは 0x300000 から始まるので物理 0xA0000 は別。          */
+/* ======================================================================== */
+#define TVRAM_PHYS_BASE  0xA0000UL
+#define TVRAM_SIZE       0x02000UL  /* テキストコード 4KB + 属性 4KB = 合計 8KB で安全マージン */
+
+/* 退避バッファ (static — スタックに置くには大きすぎる) */
+static u8 tvram_save_buf[TVRAM_SIZE];
+static int tvram_saved = 0;
+
+void v86_tvram_save(void)
+{
+    u8 *tvram = (u8 *)TVRAM_PHYS_BASE;
+    u32 i;
+    for (i = 0; i < TVRAM_SIZE; i++) {
+        tvram_save_buf[i] = tvram[i];
+    }
+    tvram_saved = 1;
+}
+
+void v86_tvram_restore(void)
+{
+    u8 *tvram;
+    u32 i;
+    if (!tvram_saved) return;
+    tvram = (u8 *)TVRAM_PHYS_BASE;
+    for (i = 0; i < TVRAM_SIZE; i++) {
+        tvram[i] = tvram_save_buf[i];
+    }
+    tvram_saved = 0;
+}
