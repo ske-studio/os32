@@ -81,21 +81,24 @@ static int is_cmd_port(u16 port)
 /* ====================================================================== */
 static u16 estimate_counter(struct pit_counter *c)
 {
-    u32 elapsed;
-    u32 ticks_in_period;
     u32 rv;
+    u32 elapsed_ticks;
+    u32 elapsed_pit;
+    u32 progress;
 
     rv = (u32)c->reload_value;
     if (rv == 0) rv = 0x10000UL;  /* 0 は 65536 を意味する */
 
-    elapsed = tick_count - c->last_tick;
-    /* 1 tick = 1リロードサイクル (100Hz) なので、カウンタ値はサイクル内位置 */
-    /* 精密な推定は不可能なため、サイクル中間値を返す */
-    ticks_in_period = elapsed % 2;
-    if (ticks_in_period == 0)
-        return (u16)(rv / 2);
-    else
-        return (u16)(rv / 4);
+    elapsed_ticks = tick_count - c->last_tick;
+
+    /* OS32 の 1 tick = 10ms = PIT の DEFAULT_RELOAD (0x4E00=19968) カウント分。
+     * elapsed_ticks * DEFAULT_RELOAD が経過した PIT カウント数。
+     * これを reload_value の周期で剰余をとり、サイクル内の進行位置を得る。
+     * mode 2/3: カウンタは rv → 0 へダウンカウントし、0 で rv にリロード。 */
+    elapsed_pit = elapsed_ticks * (u32)DEFAULT_RELOAD;
+    progress = elapsed_pit % rv;
+
+    return (u16)(rv - progress);
 }
 
 /* ====================================================================== */

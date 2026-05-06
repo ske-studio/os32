@@ -89,6 +89,11 @@
 #define FDC_TOTAL_SECTORS (FDC_CYLINDERS * FDC_HEADS * FDC_SPT)  /* 1232 */
 #define FDC_TIMEOUT_LOOP 10000  /* BSY等待ちのためのループカウンタ上限 */
 
+/* IRQ11 待ちタイムアウト (tick 単位, 1 tick = 10ms)
+ * 実FDCの正常動作時間: seek ~120ms + transfer ~100ms = ~220ms
+ * 200ms (20 tick) に設定。NP21/W で IRQ 未到達時の過度な遅延を抑制する。 */
+#define FDC_IRQ_TIMEOUT_TICKS  20
+
 /* ======================================================================== */
 /*  メディア種別 (FDI/実FDDのジオメトリ選択に使用)                          */
 /* ======================================================================== */

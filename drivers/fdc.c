@@ -201,7 +201,7 @@ static int fdc_reset(void)
     outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
 
     /* リセット完了IRQ待ち */
-    if (fdc_wait_irq(300) != 0) {
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) {
         /* タイムアウト: エミュレータによってはIRQが来ない場合あり */
         /* Sense Interruptで続行を試みる */
     }
@@ -235,7 +235,7 @@ static int fdc_recalibrate(int drv)
     if (fdc_send_byte((u8)drv) != 0) return -1;
 
     /* 完了IRQ待ち (最大3秒) */
-    if (fdc_wait_irq(300) != 0) return -2;
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
 
     /* Sense Interrupt */
     if (fdc_sense_interrupt(&st0, &cyl) != 0) return -3;
@@ -262,7 +262,7 @@ static int fdc_seek(int drv, int cyl, int head)
     if (fdc_send_byte((u8)cyl) != 0) return -1;
 
     /* 完了IRQ待ち */
-    if (fdc_wait_irq(300) != 0) return -2;
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
 
     /* Sense Interrupt */
     if (fdc_sense_interrupt(&st0, &result_cyl) != 0) return -3;
@@ -310,7 +310,7 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
         if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち (データ転送完了) */
-        if (fdc_wait_irq(300) != 0) continue;
+        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し (7バイト) */
         n = fdc_read_results(results, 7);
@@ -361,7 +361,7 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち */
-        if (fdc_wait_irq(300) != 0) continue;
+        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し */
         n = fdc_read_results(results, 7);
