@@ -90,10 +90,10 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 | 0xF0000-0xFFFFF | BIOS ROM | Read-Only |
 | 0x100000-0x1FFFFF | カーネル帯域 (1MB) | code+heap+KAPI+SHM (動的レイアウト) |
 | 0x200000-0x2FFFFF | SQLite帯域 (1MB) | code+BSS+代替スタック(128KB) |
-| 0x300000-0x3FFFFF | シェル常駐帯域 / V86バッキングRAM (1MB) | V86起動時: 0x300000-0x39FFFFがバッキングRAM |
+| 0x300000-0x3FFFFF | シェル常駐帯域 (1MB) | ガードページ・帯域間ギャップ含む |
 | 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
 | 0x400000- | 外部プログラム | コードロード領域 (最大1MB) |
-| 0x500000-0x634000 | FDDイメージバッファ | V86起動時のみ使用 (1.2MB) |
+| pgalloc動的 | V86バッキングRAM (640KB) | v86_mem_setup() で pgalloc_alloc_n(160) により確保 |
 | 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, 動的計算) |
 | 動的〜 | プログラムスタック | 256KB, メモリ終端付近に配置 |
 
@@ -156,13 +156,12 @@ Virtual-8086モードを利用してリアルモードDOS (FreeDOS(98)) をOS32�
 
 | 仮想アドレス | 実物理アドレス | 用途 |
 |-------------|--------------|------|
-| 0x00000-0x9FFFF | 0x300000-0x39FFFF | バッキングRAM (IVT/BDA/コードデータ) |
+| 0x00000-0x9FFFF | pgalloc動的 (0x400000+) | バッキングRAM (IVT/BDA/コードデータ) |
 | 0xA0000-0xEFFFF | 0xA0000-0xEFFFF | VRAM (アイデンティティマップ) |
 | 0xF0000-0xFFFFF | 0xF0000-0xFFFFF | BIOS ROM (アイデンティティマップ) |
-| 0x500000-0x634000 | 0x500000-0x634000 | FDDイメージバッファ (カーネル空間) |
 
-- **バッキングRAM**: `v86_mem_setup()` でページテーブルを書き換え、仮想0x00000-0x9FFFFを物理0x300000+にリマップ
-- **`v86_phys_addr(seg, off)`**: V86セグメント:オフセットをカーネル用リニアアドレスに変換。0xA0000未満は全てバッキングRAM経由
+- **バッキングRAM**: `v86_mem_setup()` で `pgalloc_alloc_n(160)` により連続640KB (160ページ) をプログラム空間 (0x400000+) から動的確保。シェル帯域 (0x300000) とは物理的に分離されており、退避・復元は不要
+- **`v86_phys_addr(seg, off)`**: V86セグメント:オフセットをカーネル用リニアアドレスに変換。0xA0000未満は全てバッキングRAM (`v86_backing_phys + linear`) 経由
 
 ### 仮想PIC (8259A)
 
@@ -261,4 +260,4 @@ Virtual-8086モードを利用してリアルモードDOS (FreeDOS(98)) をOS32�
 
 ---
 
-*OS32 Technical Guide — Updated: 2026-05-03*
+*OS32 Technical Guide — Updated: 2026-05-06*
