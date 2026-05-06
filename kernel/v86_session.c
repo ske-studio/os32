@@ -304,6 +304,9 @@ static void v86_session_run_core(void)
     /* デバッグダンプ (有効時のみ) */
     v86_debug_dump_session();
 
+    /* ディスクI/Oログをダンプ (デバッグ用) */
+    v86_disk_dump_log();
+
     /* リソース解放 */
     v86_disk_clear();
 
@@ -398,6 +401,7 @@ int v86_boot_freedos(const char *path, const char *cmdline)
         u32 file_size = current_session.img_data_size;
         fdc_media_t media = FDC_MEDIA_2HD_1232; /* デフォルト */
         int media_detected = 0;
+        int d88_detected = 0;
 
         /* ヘッダを最大36バイト読み込む */
         vfs_seek(fd, 0, 0);
@@ -481,6 +485,7 @@ int v86_boot_freedos(const char *path, const char *cmdline)
                                       current_session.img_data_size, media);
                 }
                 media_detected = 1;
+                d88_detected = 1;
             }
         }
 
@@ -558,9 +563,9 @@ int v86_boot_freedos(const char *path, const char *cmdline)
             current_session.img_data_size = file_size;
         }
 
-        /* FDI / RAW のみここで set_file を呼ぶ。
+        /* FDI / RAW の場合ここで set_file を呼ぶ。
          * D88 はブランチ内で呼び済みなのでスキップ。 */
-        if (!media_detected) {
+        if (!d88_detected) {
             v86_disk_set_file(fd, current_session.img_offset,
                               current_session.img_data_size, media);
         }
