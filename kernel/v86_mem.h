@@ -7,9 +7,12 @@
 
 #include "types.h"
 
-/* V86バッキングRAM物理ベースアドレス */
-#define V86_BACKING_PHYS   0x300000UL
+/* V86バッキングRAM: pgalloc から動的確保される連続 640KB                     */
+/* v86_backing_phys は v86_mem_setup() で設定され、teardown() でリセットされる */
+extern u32 v86_backing_phys;
+
 #define V86_BACKING_SIZE   0x0A0000UL   /* 640KB */
+#define V86_BACKING_PAGES  (V86_BACKING_SIZE / 0x1000UL) /* 160ページ */
 #define V86_REMAP_END      0x08F000UL   /* リマップ範囲上限 (カーネルスタック手前) */
 
 /* V86メモリ空間を構築 (ページテーブル + IVT + BDA + I/Oビットマップ) */

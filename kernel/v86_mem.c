@@ -1,11 +1,12 @@
 /* ======================================================================== */
-/*  V86_MEM.C — V86 メモリ空間構築 (Phase 1)                                */
+/*  V86_MEM.C — V86 メモリ空間構築                                          */
 /*                                                                          */
 /*  V86タスク用のページテーブル設定、IVT・BDA初期構築、                      */
 /*  I/Oビットマップ設定を行う。                                             */
 /*                                                                          */
-/*  メモリレイアウト (implementation_plan.md §3):                           */
-/*    仮想 0x00000-0x9FFFF  → 物理 0x300000-0x39FFFF  (バッキングRAM)      */
+/*  メモリレイアウト:                                                        */
+/*    仮想 0x00000-0x9FFFF  → 物理 backing+0 〜 backing+0x9FFFF            */
+/*                             (バッキングRAM: pgallocで動的確保)            */
 /*    仮想 0xA0000-0xA3FFF  → 物理 0xA0000  (TVRAM)                        */
 /*    仮想 0xA4000-0xA7FFF  → 物理 0xA4000  (CGウィンドウ, R/O)            */
 /*    仮想 0xA8000-0xBFFFF  → 物理 0xA8000  (GVRAM Plane0-2)              */
@@ -14,11 +15,9 @@
 /*    仮想 0xE8000-0xEFFFF  → NOT PRESENT                                  */
 /*    仮想 0xF0000-0xFFFFF  → 物理 0xF0000  (BIOS ROM, R/O)               */
 /*                                                                          */
-/*  注意: シェル帯域 (0x300000-0x3FFFFF) をバッキングRAMとして転用する。     */
-/*  V86モード中はシェルは待機中のため、シェルのメモリ内容は                  */
-/*  V86開始前に退避し、V86終了後に復元する必要がある。                       */
-/*  → Phase 1 では v86_test から呼ばれるため、シェルは未使用。              */
-/*    Phase 2 以降でシェルからの呼び出しに対応する。                        */
+/*  バッキングRAMは pgalloc_alloc_n() でプログラム空間 (0x400000+) から      */
+/*  連続160ページ (640KB) を動的に確保する。シェル帯域 (0x300000-0x37FFFF)  */
+/*  とは物理的に分離されており、退避・復元は不要。                           */
 /* ======================================================================== */
 
 #include "v86_mem.h"
@@ -28,12 +27,18 @@
 #include "kstring.h"
 #include "memmap.h"
 #include "io.h"
+#include "kprintf.h"
+#include "pgalloc.h"
 
 /* v86_mem.h で定義済みの定数を使用:
- *   V86_BACKING_PHYS  0x300000UL
- *   V86_BACKING_SIZE  0x0A0000UL
- *   V86_REMAP_END     0x08F000UL
+ *   v86_backing_phys   (動的: pgalloc_alloc_n で確保)
+ *   V86_BACKING_SIZE   0x0A0000UL
+ *   V86_BACKING_PAGES  160
+ *   V86_REMAP_END      0x08F000UL
  */
+
+/* バッキングRAM物理ベースアドレス (pgallocで動的確保、初期値0) */
+u32 v86_backing_phys = 0;
 
 /* バッキングRAM有効フラグ (デフォルト=0: アイデンティティマッピング) */
 static int v86_backing_enabled = 0;
@@ -85,21 +90,31 @@ void v86_mem_setup(void)
     u32 *ivt;
     u16 handler_seg, handler_off;
 
+    /* バッキングRAMを pgalloc から動的確保 (連続 160ページ = 640KB) */
+    v86_backing_phys = pgalloc_alloc_n(V86_BACKING_PAGES);
+    if (v86_backing_phys == 0) {
+        kprintf(0xE1, "[V86] ERROR: pgalloc_alloc_n(%d) failed\n",
+                V86_BACKING_PAGES);
+        return;
+    }
+
     /* バッキングRAM有効フラグをセット */
     v86_backing_enabled = 1;
 
     /* ================================================================== */
     /*  1. バッキングRAMをゼロクリア (640KB)                               */
-    /*  ※ シェル帯域 (0x300000-0x3FFFFF) にはガードページ(NOT PRESENT)が  */
-    /*  含まれるため、ゼロクリア前に全ページをPRESENT+RWに変更する。       */
-    /* ================================================================== */
+    /*  pgalloc 確保ページは元から PRESENT+RW のためページ属性変更不要。   */
+    /* pgalloc 確保ページをアイデンティティマッピング (PRESENT+RW) に設定     */
+    /* exec_run のガードページ等で NOT PRESENT になっている場合があるため必須   */
     {
         u32 pa;
-        for (pa = V86_BACKING_PHYS; pa < V86_BACKING_PHYS + V86_BACKING_SIZE; pa += PAGE_SIZE) {
-            paging_set_page(pa, pa, PAGE_RW);
+        for (pa = v86_backing_phys;
+             pa < v86_backing_phys + V86_BACKING_SIZE;
+             pa += PAGE_SIZE) {
+            paging_set_page(pa, pa, PTE_PRESENT | PTE_RW);
         }
     }
-    backing = (u8 *)V86_BACKING_PHYS;
+    backing = (u8 *)v86_backing_phys;
     kmemset(backing, 0, V86_BACKING_SIZE);
 
 
@@ -208,9 +223,9 @@ void v86_mem_setup(void)
     /*  V86モード (CPL=3) では PTE_USER が必須。                           */
     /* ================================================================== */
 
-    /* 仮想 0x00000-0x8EFFF → 物理 0x300000-0x38EFFF (バッキングRAM, R/W) */
+    /* 仮想 0x00000-0x8EFFF → 物理 backing+0 〜 backing+0x8EFFF (バッキングRAM, R/W) */
     for (virt = 0x00000; virt < V86_REMAP_END; virt += PAGE_SIZE) {
-        phys = V86_BACKING_PHYS + virt;
+        phys = v86_backing_phys + virt;
         paging_set_page(virt, phys, PTE_PRESENT | PTE_RW | PTE_USER);
     }
 
@@ -240,13 +255,13 @@ void v86_mem_setup(void)
         }
 
         /* スタック内容をバッキングRAMにコピー (68KB: 0x11000) */
-        kmemcpy((u8 *)(V86_BACKING_PHYS + 0x8F000UL),
+        kmemcpy((u8 *)(v86_backing_phys + 0x8F000UL),
                 (u8 *)0x8F000UL,
                 0x11000UL);
 
-        /* リマップ: 仮想 0x8F000-0x9FFFF → 物理 0x38F000-0x39FFFF */
+        /* リマップ: 仮想 0x8F000-0x9FFFF → 物理 backing+0x8F000 〜 */
         for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
-            paging_set_page(addr, V86_BACKING_PHYS + addr,
+            paging_set_page(addr, v86_backing_phys + addr,
                             PTE_PRESENT | PTE_RW | PTE_USER);
         }
 
@@ -373,22 +388,38 @@ void v86_mem_teardown(void)
 
     /* 仮想 0x8F000-0x9FFFF: バッキングRAMから物理ページに内容を書き戻し、   */
     /* アイデンティティマッピングに復元する。                                 */
-    /* 「方法C」(リマップ維持)ではDOSが書き込むとカーネルスタックが壊れ、    */
-    /* longjmpで復帰後にPFが発生するため、完全に復元する必要がある。          */
+    /*                                                                        */
+    /* ★順序が重要: 先に remap → 後に kmemcpy                               */
+    /*                                                                        */
+    /* setup 時に VA 0x8F000 → PA 0x38F000 にリマップされている。           */
+    /* この状態で kmemcpy(VA 0x8F000, VA 0x38F000, ...) を行うと、            */
+    /* 両方とも PA 0x38F000 を指すため no-op になり、PA 0x8F000 が             */
+    /* 更新されない。longjmp 復帰後に ESP が VA 0x9Fxxx を指すが、            */
+    /* PA 0x9Fxxx は v86_mem_setup 以前の古いデータのままで #PF になる。      */
+    /*                                                                        */
+    /* 修正: 先に identity remap (VA 0x8F000 → PA 0x8F000) してから          */
+    /* kmemcpy(VA 0x8F000, VA 0x38F000, ...) を行う。                         */
+    /* これで src=PA 0x38F000, dst=PA 0x8F000 となり正しくコピーされる。     */
+    /*                                                                        */
+    /* スタック安全性: この関数は v86_session_run_core() の inline asm で     */
+    /* v86_kstack 上で呼ばれるため、0x8F000-0x9FFFF のリマップ変更は          */
+    /* 現在のスタックに影響しない。                                           */
     {
         u32 eflags;
         __asm__ volatile("pushfl; popl %0" : "=r"(eflags));
         __asm__ volatile("cli");
 
-        /* バッキングRAMの内容を元の物理ページに書き戻す */
-        kmemcpy((u8 *)0x8F000UL,
-                (u8 *)(V86_BACKING_PHYS + 0x8F000UL),
-                0x11000UL);
-
-        /* アイデンティティマッピングに復元 */
+        /* 1. 先にアイデンティティマッピングに復元                            */
+        /*    VA 0x8F000 → PA 0x8F000 に戻す                                */
         for (addr = 0x8F000; addr < 0xA0000; addr += PAGE_SIZE) {
             paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
         }
+
+        /* 2. バッキングRAM (backing+0x8F000) の内容を                        */
+        /*    元の物理ページ (VA=PA 0x8F000) に書き戻す                       */
+        kmemcpy((u8 *)0x8F000UL,
+                (u8 *)(v86_backing_phys + 0x8F000UL),
+                0x11000UL);
 
         if (eflags & 0x200) {
             __asm__ volatile("sti");
@@ -427,11 +458,10 @@ void v86_mem_teardown(void)
     /* NULL保護ページを復元 */
     paging_set_page(0x00000, 0, PAGE_NOT_PRESENT);
 
-    /* シェル帯域ガードページを復元 (アイデンティティマッピングに復元済みの   */
-    /* ため、0x38F000-0x39FFFFもNOT PRESENTにできる)                         */
-    paging_set_page(MEM_SHELL_GUARD, 0, PAGE_NOT_PRESENT);
-    for (addr = 0x380000UL; addr <= MEM_SHELL_BAND_END; addr += PAGE_SIZE) {
-        paging_set_page(addr, 0, PAGE_NOT_PRESENT);
+    /* バッキングRAM解放 (pgalloc にページを返却) */
+    if (v86_backing_phys != 0) {
+        pgalloc_free_n(v86_backing_phys, V86_BACKING_PAGES);
+        v86_backing_phys = 0;
     }
 }
 
@@ -441,11 +471,11 @@ void v86_mem_teardown(void)
 /*  V86の seg:off (リニア = seg<<4 + off) を、カーネル (Ring0) から          */
 /*  アクセスできる物理アドレスに変換する。                                  */
 /*                                                                          */
-/*  0x00000-0x9FFFF → 物理 0x300000 + offset  (バッキングRAM)             */
+/*  0x00000-0x9FFFF → 物理 backing + offset  (バッキングRAM)              */
 /*  0xA0000-0xFFFFF → 物理 = 仮想  (実機ハードウェア)                     */
 /*                                                                          */
-/*  ※ 方法Cリマップ対応: 0x8F000-0x9FFFF もバッキングRAM (0x38F000+) に   */
-/*    リマップされているため、0xA0000 未満を全てバッキングRAM経由にする。   */
+/*  ※ 方法Cリマップ対応: 0x8F000-0x9FFFF もバッキングRAMにリマップ       */
+/*    されているため、0xA0000 未満を全てバッキングRAM経由にする。           */
 /* ======================================================================== */
 u8 *v86_phys_addr(u32 seg, u32 off)
 {
@@ -454,7 +484,7 @@ u8 *v86_phys_addr(u32 seg, u32 off)
 
     /* バッキングRAMが有効で、コンベンショナルメモリ (0-9FFFF) はバッキングRAM */
     if (v86_backing_enabled && linear < 0xA0000UL) {
-        return (u8 *)(V86_BACKING_PHYS + linear);
+        return (u8 *)(v86_backing_phys + linear);
     }
     return (u8 *)linear;
 }
@@ -532,11 +562,9 @@ void v86_restore_screen(void)
 /*  PC-98 TVRAM: 物理 0xA0000-0xA1FFF (8KB)                                */
 /*    0xA0000-0xA0FFF: テキストコード (2KB, 80桁×25行×2byte)               */
 /*    0xA2000-0xA3FFF: テキスト属性  (2KB, 同)                             */
-/*  ページテーブルは V86_BACKING_PHYS+0xA0000 にリマップされているため、     */
 /*  V86開始前後では物理アドレスへの直接書き込みが必要。                       */
-/*                                                                          */
-/*  方針: v86_mem_setup 前は実物理 0xA0000 にアクセスできる。              */
-/*  V86 バッキングRAMは 0x300000 から始まるので物理 0xA0000 は別。          */
+/*  V86 バッキングRAMは 0xA0000 より上 (pgalloc管理域) にあるため、          */
+/*  物理 0xA0000 への TVRAM アクセスはバッキングRAMと衝突しない。           */
 /* ======================================================================== */
 #define TVRAM_PHYS_BASE  0xA0000UL
 #define TVRAM_SIZE       0x02000UL  /* テキストコード 4KB + 属性 4KB = 合計 8KB で安全マージン */
