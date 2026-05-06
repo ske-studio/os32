@@ -35,11 +35,12 @@ shell/vdos.c
   → kapi->sys_v86_boot_freedos / sys_v86_boot_physical
     → v86_boot_freedos / v86_boot_physical_fdd  [v86_session.c]
        1. V86Session 構造体を初期化 (Auto-Typer 文字列を保持)
-       2. (file モード時) FDI ヘッダ判定して IPL を読む
+       2. (file モード時) D88/FDI/RAW ヘッダ判定して IPL を読む
        3. v86_mem_setup()       [v86_mem.c]   ページテーブル・IVT・BDA・iomap
        4. v86_pic_init()                       仮想 PIC リセット
        5. v86_pit_init()                       仮想 PIT リセット
        6. v86_disk_set_file/_physical          ディスクバックエンドを設定
+          ※ D88は判定ブランチ内で呼ぶ。FDI/RAWは判定後に呼ぶ (d88_detected フラグで分岐)
        7. IPL を 0x1FC0:0x0000 にコピー
        8. v86_session_run_core():              [v86_session.c]
             - struct v86_context 作成 (eip=0, cs=0x1FC0, vm=1, if=1)
@@ -380,7 +381,8 @@ v86_session_run_core 後始末
 2. **EFLAGS.VM は IRETD でしか落とせない**。Ring0 内で `popfl` しても VM は無視される。だから longjmp 経路で完全脱出している。
 3. **TSS の I/O ビットマップは Ring3 の I/O のみ参照される**。V86 (CPL=3 互換) では IOPL を見ずに iomap を見る。`v86_mem_setup` の `tss_iomap_allow` は V86 中のみ有効で、終了時 `tss_iomap_deny_all` で全閉に戻している。Ring3 の通常ユーザプログラムは IOPL=0 なので全 I/O が #GP になる前提。
 4. **バッキング RAM 物理アドレスは pgalloc 動的確保**: V86 起動のたび `pgalloc_alloc_n(160)` で確保され、終了時に `pgalloc_free_n()` で解放される。シェル帯域 (0x300000-0x37FFFF) とは物理的に分離されており、衝突は発生しない。
-5. **IPL アドレス 0x1FC0:0x0000 = 0x1FC00**: バッキング RAM 内なので物理は 0x301FC00。`vfs_read_fd(fd, ipl_dst, IPL_SIZE)` で書き込むときに `ipl_dst` は `v86_phys_addr` 経由で物理アドレスに変換済 (= 0x301FC00)。ここを直接 0x1FC00 に書くとシェル帯域でないアドレスを叩いて #PF。
+5. **IPL アドレス 0x1FC0:0x0000 = 0x1FC00**: バッキング RAM 内なので物理は `v86_backing_phys + 0x1FC00`。`vfs_read_fd(fd, ipl_dst, IPL_SIZE)` で書き込むときに `ipl_dst` は `v86_phys_addr` 経由で物理アドレスに変換済。
+6. **FDI/RAW での `v86_disk_set_file` 呼び忘れ**: `v86_boot_freedos()` でメディア形式判定後に `v86_disk_set_file()` を呼ぶ際、D88ブランチは内部で呼び済みのため外側では呼ばない。FDI/RAW は判定後に外側で呼ぶ必要がある。条件分岐には `d88_detected` フラグを使うこと (`media_detected` を使うと FDI で呼ばれない)。2026-05-06 修正済。
 
 ---
 
@@ -397,6 +399,9 @@ A. `v86_irq0_call_count` は 100Hz でカウントされるはず。`v86_irq0_in
 
 **Q. ディスク READ が 0xC0 を返す**  
 A. CH (`sector_len`) が 3 以外。ゲストが BDA 0x0564+6 (N 値) を CH に渡す。前のセッションで BDA がクリアされて 0 になっている可能性。FORMAT 後に N=3 を書き戻す処理が無いのも一因。
+
+**Q. ディスク READ が 0xE0 を返す (全セクタ)**  
+A. `fdd_fd < 0` — `v86_disk_set_file()` が呼ばれていない。FDI 形式ではメディア判定で `media_detected = 1` になるが、`v86_disk_set_file` の呼び出し条件を `!media_detected` にすると FDI で呼ばれない。`d88_detected` フラグで分岐すること (2026-05-06 修正済)。
 
 **Q. V86 終了後にシェルが暴走する**  
 A. ✅ **解決済**: `v86_backing_phys` を `pgalloc_alloc_n(160)` で動的確保するように変更し、シェル帯域との衝突を根本解決 (2026-05-06)。
