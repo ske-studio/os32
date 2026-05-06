@@ -15,17 +15,20 @@
 #include "v86_disk.h"
 #include "v86_fdc.h"
 #include "v86_dma.h"
+#include "v86_vsync.h"
 #include "v86_session.h"
 #include "tvram.h"
 #include "io.h"
 #include "kprintf.h"
 
-/* §8.4 タイムアウト: 6000 tick = 60秒 (100Hz 基準)
+/* §8.4 タイムアウト (セッション変数)
  * ゲストが通常命令ループに入ったままバックしない場合、
  * HLTを注入して GPハンドラ経由で安全に V86 を終了する。
- * 0 を設定すると無効 (deadline なし) */
+ * v86_timeout_ticks = 0 で無効 (deadline なし)。
+ * デフォルト値は v86_session.c で設定される。
+ * ネイティブモード (ゲーム等) では 0 に設定してタイムアウトを無効化する。 */
 extern volatile u32 tick_count;   /* isr_stub.asm で100Hzインクリメント */
-#define V86_TIMEOUT_TICKS  6000
+u32 v86_timeout_ticks = 6000;     /* デフォルト: 6000 tick = 60秒 */
 u32 v86_start_tick = 0;
 
 /* デバッグリングバッファ (最近のGPイベント記録)
@@ -104,6 +107,9 @@ static void __attribute__((unused)) dump_v86_trace_tvram(void) {
 
 /* V86モードの有効フラグ */
 volatile int v86_active = 0;
+
+/* ネイティブモードフラグ (DOS終了検知を無効化) */
+int v86_native_mode = 0;
 
 /* V86タスクの仮想IFフラグ (CLI/STIで操作される) */
 u32 v86_virtual_if = EFLAGS_IF;
@@ -218,6 +224,7 @@ static u8 v86_in8_checked(u16 port)
     if (v86_pit_io(port, &val, 0)) return val;
     if (v86_fdc_io(port, &val, 0)) return val;
     if (v86_dma_io(port, &val, 0)) return val;
+    if (v86_vsync_io(port, &val, 0)) return val;
     return inp(port);
 }
 
@@ -228,7 +235,9 @@ static void v86_out8_checked(u16 port, u8 val)
         if (!v86_pit_io(port, &val, 1)) {
             if (!v86_fdc_io(port, &val, 1)) {
                 if (!v86_dma_io(port, &val, 1)) {
-                    outp(port, val);
+                    if (!v86_vsync_io(port, &val, 1)) {
+                        outp(port, val);
+                    }
                 }
             }
         }
@@ -295,9 +304,9 @@ int v86_gp_handler(u32 *regs)
     /* (ホットキー脱出はkbd_irq_handlerから直接longjmpで処理) */
 
     /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
-    if (V86_TIMEOUT_TICKS &&
-        ((tick_count - v86_start_tick) > V86_TIMEOUT_TICKS ||
-         v86_gp_count > 5000000)) {
+    if (v86_timeout_ticks &&
+        ((tick_count - v86_start_tick) > v86_timeout_ticks ||
+         v86_gp_count > 500000)) {
         ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
         v86_last_int = *ip;
         v86_last_cs = regs[V86_REG_CS];
@@ -491,13 +500,13 @@ int v86_gp_handler(u32 *regs)
         /*  INT 20h (Terminate Program) → V86終了                      */
         /*  INT 21h AH=4Ch (Exit Process) → V86終了                    */
         /* ============================================================ */
-        if (intno == 0x20) {
+        if (intno == 0x20 && !v86_native_mode) {
             /* INT 20h: DOS Terminate — V86モード終了 */
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_DOS_TERM);
             return 1;
         }
-        if (intno == 0x21 &&
+        if (intno == 0x21 && !v86_native_mode &&
             ((regs[V86_REG_EAX] >> 8) & 0xFF) == 0x4C) {
             /* INT 21h AH=4Ch: Exit Process — V86モード終了 */
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
@@ -1002,6 +1011,9 @@ void v86_inject_timer_irq(u32 *regs)
     /*  VDOS起動時に指定されたコマンド文字列をBDAキーボードバッファに   */
     /*  徐々に流し込む                                                  */
     /* ================================================================ */
+    /* VSYNC (INT 0Ah) 注入 — タイマIRQに同期して処理 */
+    v86_inject_vsync_irq(regs);
+
     /* Auto-Typer + 強制脱出ホットキー (v86_session.c に委譲) */
     v86_session_on_tick();
 
@@ -1016,9 +1028,9 @@ void v86_inject_timer_irq(u32 *regs)
     /*  次のIRETDでV86に戻るとHLTが実行され、GPハンドラが呼ばれて     */
     /*  v86_exit_requestにより安全にV86を終了する。                    */
     /* ================================================================ */
-    if (V86_TIMEOUT_TICKS &&
-        ((tick_count - v86_start_tick) > V86_TIMEOUT_TICKS ||
-         v86_gp_count > 5000000)) {
+    if (v86_timeout_ticks &&
+        ((tick_count - v86_start_tick) > v86_timeout_ticks ||
+         v86_gp_count > 500000)) {
         /* タイムアウト時の実CS:EIP (HLT注入前の位置) を記録 */
         v86_timeout_cs = regs[HWIRQ_REG_CS];
         v86_timeout_ip = regs[HWIRQ_REG_EIP];

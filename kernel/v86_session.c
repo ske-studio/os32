@@ -26,6 +26,7 @@
 #include "io.h"
 #include "kbd.h"
 #include "fdc.h"
+#include "v86_vsync.h"
 
 extern void serial_puts(const char *s);
 
@@ -585,6 +586,246 @@ int v86_boot_freedos(const char *path, const char *cmdline)
     /* ファイルリソース解放 */
     vfs_close(fd);
     current_session.fd = -1;
+
+    return 0;
+}
+
+/* ====================================================================== */
+/*  v86_boot_native - ネイティブPC-98ソフトのFDDイメージからブート          */
+/*                                                                          */
+/*  v86_boot_freedos と同じイメージ判定ロジックを使用するが:                */
+/*    - タイムアウト無効 (ゲーム等の長時間実行対応)                         */
+/*    - DOS終了検知 (INT 20h/21h) 無効化                                   */
+/*    - Auto-Typer なし                                                    */
+/*    - 脱出は Ctrl+GRPH+DEL / STOP キーのみ                               */
+/* ====================================================================== */
+int v86_boot_native(const char *path)
+{
+    extern u32 v86_timeout_ticks;
+    extern int v86_native_mode;
+    int fd;
+    u8 *ipl_dst;
+
+    /* §1.4 再入禁止ガード */
+    if (v86_active) {
+        kprintf(0xE1, "[V86] ERROR: v86_boot_native called while already active\n");
+        return -2;
+    }
+
+    /* セッション初期化 (Auto-Typerなし) */
+    kmemset(&current_session, 0, sizeof(current_session));
+    current_session.auto_cmd = 0;
+
+    /* ネイティブモード設定: デバッグ用に10秒タイムアウト付き */
+    v86_timeout_ticks = 1000;  /* DEBUG: 10秒タイムアウト */
+    v86_native_mode = 1;
+
+    /* イメージファイルオープン */
+    fd = vfs_open(path, 0);
+    if (fd < 0) {
+        kprintf(0xE1, "[V86] FDD image open failed: %s (rc=%d)\n", path, fd);
+        v86_timeout_ticks = 6000;
+        v86_native_mode = 0;
+        return -1;
+    }
+    current_session.fd = fd;
+    current_session.img_data_size = vfs_get_size(fd);
+
+    /* V86メモリ空間を構築 */
+    v86_mem_setup();
+
+    /* PIC/PIT/FDC/DMA仮想化初期化 */
+    v86_pic_init();
+    v86_pit_init();
+    v86_fdc_virt_init();
+    v86_dma_init();
+
+    /* ==================================================================
+     * イメージ形式判定とジオメトリ解析
+     * (v86_boot_freedos と同一ロジック)
+     * ================================================================== */
+    {
+        u8 hdr[36];
+        u32 file_size = current_session.img_data_size;
+        fdc_media_t media = FDC_MEDIA_2HD_1232;
+        int media_detected = 0;
+        int d88_detected = 0;
+
+        vfs_seek(fd, 0, 0);
+        vfs_read_fd(fd, hdr, 36);
+
+        /* ---- D88 判定 ---- */
+        {
+            u8 media_flag = hdr[0x1B];
+            u32 d88_size  = *(u32 *)(hdr + 0x1C);
+
+            if (d88_size == file_size &&
+                (media_flag == 0x00 || media_flag == 0x10 || media_flag == 0x20)) {
+                current_session.img_offset = 0;
+                switch (media_flag) {
+                case 0x10:
+                    if (file_size <= 700000UL) {
+                        media = FDC_MEDIA_2DD_640;
+                        kprintf(0xA1, "[V86] D88: 2DD 640KB\n");
+                    } else {
+                        media = FDC_MEDIA_2DD_720;
+                        kprintf(0xA1, "[V86] D88: 2DD 720KB\n");
+                    }
+                    break;
+                case 0x20:
+                    media = FDC_MEDIA_2HD_1232;
+                    kprintf(0xA1, "[V86] D88: 2HD 1.2MB\n");
+                    break;
+                case 0x00:
+                    media = FDC_MEDIA_2D_256;
+                    kprintf(0xA1, "[V86] D88: 2D (media_flag=0x00)\n");
+                    break;
+                default:
+                    media = FDC_MEDIA_2DD_640;
+                    kprintf(0xA1, "[V86] D88: unknown media 0x%x\n",
+                            (unsigned)media_flag);
+                    break;
+                }
+                /* D88専用ディスクバックエンドを設定 */
+                v86_disk_set_d88(fd, file_size, media);
+                {
+                    u32 trk0_off = *(u32 *)(hdr + 0x20);
+                    if (trk0_off >= 0x2B0 && trk0_off < file_size) {
+                        /* トラック0先頭セクタのデータ部 = IPL */
+                        current_session.img_offset = trk0_off + 16;
+                        kprintf(0xA1, "[V86] D88: trk0=0x%x ipl_off=0x%x\n",
+                                (unsigned)trk0_off,
+                                (unsigned)current_session.img_offset);
+                    } else {
+                        current_session.img_offset = 0x2C0;
+                    }
+                }
+                media_detected = 1;
+                d88_detected = 1;
+            }
+        }
+
+        /* ---- FDI 判定 ---- */
+        if (!media_detected) {
+            u32 hdr_size  = *(u32 *)(hdr + 0x08);
+            u32 fdi_type  = *(u32 *)(hdr + 0x04);
+            u32 data_size = *(u32 *)(hdr + 0x0C);
+
+            if ((hdr_size == 0x1000 || hdr_size == 0x2000) &&
+                file_size > hdr_size &&
+                (data_size == 0 || data_size == file_size - hdr_size)) {
+                current_session.img_offset    = hdr_size;
+                current_session.img_data_size = file_size - hdr_size;
+
+                switch (fdi_type) {
+                case 0x10:
+                    if (current_session.img_data_size <= 700000UL) {
+                        media = FDC_MEDIA_2DD_640;
+                    } else {
+                        media = FDC_MEDIA_2DD_720;
+                    }
+                    break;
+                case 0x90:
+                    media = FDC_MEDIA_2HD_1232;
+                    break;
+                default:
+                    if (current_session.img_data_size == 655360UL) {
+                        media = FDC_MEDIA_2DD_640;
+                    } else if (current_session.img_data_size == 737280UL) {
+                        media = FDC_MEDIA_2DD_720;
+                    } else {
+                        media = FDC_MEDIA_2HD_1232;
+                    }
+                    break;
+                }
+                media_detected = 1;
+            }
+        }
+
+        /* ---- RAW/IMG フォールバック ---- */
+        if (!media_detected) {
+            if (file_size == 1261568UL) {
+                media = FDC_MEDIA_2HD_1232;
+            } else if (file_size == 655360UL) {
+                media = FDC_MEDIA_2DD_640;
+            } else if (file_size == 737280UL) {
+                media = FDC_MEDIA_2DD_720;
+            } else {
+                media = FDC_MEDIA_2HD_1232;
+            }
+            current_session.img_offset    = 0;
+            current_session.img_data_size = file_size;
+        }
+
+        if (!d88_detected) {
+            v86_disk_set_file(fd, current_session.img_offset,
+                              current_session.img_data_size, media);
+        }
+    }
+
+    /* IPLをV86メモリにコピー
+     * D88モードの場合、img_offsetはトラック0セクタ1のデータ部を指す。
+     * サイズは実際のセクタサイズ (BPS) を使用する。 */
+    {
+        const struct fdc_geom *g = v86_disk_get_geom();
+        u32 ipl_size = g ? (u32)g->bps : IPL_SIZE;
+        ipl_dst = v86_phys_addr(IPL_SEG, 0);
+        vfs_seek(fd, current_session.img_offset, 0);
+        vfs_read_fd(fd, ipl_dst, ipl_size);
+        kprintf(0xA1, "[V86] IPL loaded: %u bytes at %04X:0000 "
+                "(N=%d, SPT=%d, BPS=%u)\n",
+                (unsigned)ipl_size, IPL_SEG,
+                g ? g->sec_n : -1, g ? g->spt : -1,
+                (unsigned)(g ? g->bps : 0));
+    }
+
+    kprintf(0xA1, "[V86] Booting native PC-98 software (no timeout)...\n");
+
+    /* ネイティブモード: 画面表示を強制有効化
+     * OS32カーネルが画面を無効化している可能性があるため、
+     * ゲスト実行前にDISP ENABLE / GDC START / 16色モードを設定する */
+    outp(0x68, 0x0F);  /* DISP ENABLE = 画面表示可 */
+    outp(0xA2, 0x0D);  /* グラフィックGDC START */
+    outp(0x6A, 0x01);  /* 16色モード */
+    outp(0x68, 0x08);  /* 400ラインモード (高解像度) */
+
+    /* VSYNC仮想化を初期化 */
+    v86_vsync_init();
+
+    /* V86実行コア */
+    v86_session_run_core();
+
+    /* DEBUG: トレースダンプ */
+    {
+        struct v86_trace_entry *trace;
+        u32 count, idx;
+        int j, n;
+        trace = v86_get_trace(&count, &idx);
+        kprintf(0xA1, "[V86-DIAG] GP count=%u, VSYNC arm=%u inject=%u\n",
+                count, v86_vsync_arm_count, v86_vsync_inject_count);
+        kprintf(0xA1, "[V86-DIAG] timeout CS:IP=%04X:%04X\n",
+                (unsigned)v86_timeout_cs, (unsigned)v86_timeout_ip);
+        n = (int)(count < 16 ? count : 16);
+        kprintf(0xA1, "[V86-DIAG] Last %d GP entries:\n", n);
+        for (j = 0; j < n; j++) {
+            int ti = (int)((idx - 1 - (u32)j) % 128);
+            kprintf(0xA1, "  [-%d] %04X:%04X op=%02X int=%02X AH=%02X\n",
+                    j,
+                    (unsigned)trace[ti].cs, (unsigned)trace[ti].ip,
+                    (unsigned)trace[ti].opcode,
+                    (unsigned)trace[ti].intno,
+                    (unsigned)trace[ti].ah);
+        }
+    }
+
+    /* リソース解放 */
+    v86_vsync_cleanup();
+    vfs_close(fd);
+    current_session.fd = -1;
+
+    /* ネイティブモード設定を復元 */
+    v86_timeout_ticks = 6000;
+    v86_native_mode = 0;
 
     return 0;
 }

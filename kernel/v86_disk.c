@@ -37,6 +37,11 @@ static int fdd_fd = -1;
 static u32 fdd_image_offset = 0;
 static u32 fdd_image_size = 0;
 
+/* D88モード: トラックテーブルを保持 */
+static int fdd_is_d88 = 0;
+#define D88_MAX_TRACKS 164
+static u32 fdd_d88_track_table[D88_MAX_TRACKS];  /* 各トラックのファイルオフセット */
+
 /* 実FDDモード */
 static int fdd_use_physical = 0;
 static int fdd_phys_drv = 0;
@@ -77,11 +82,131 @@ void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
     fdd_fd = fd;
     fdd_image_offset = data_offset;
     fdd_image_size = data_size;
+    fdd_is_d88 = 0;  /* RAW/FDIモード */
     switch (media) {
     case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
     case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
+    case FDC_MEDIA_2D_256:  fdd_geom = &fdc_geom_2d_256;  break;
     default:                fdd_geom = &fdc_geom_2hd;      break;
     }
+}
+
+/* ====================================================================== */
+/*  v86_disk_set_d88 — D88形式ディスクイメージを設定                       */
+/*                                                                          */
+/*  D88形式はRAWフラットではなく、各セクタに16バイトヘッダが付く。           */
+/*  トラックテーブル (ファイルオフセット0x20-0x2AF) をキャッシュし、         */
+/*  CHS→オフセット変換時にセクタヘッダを検索する。                          */
+/* ====================================================================== */
+void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media)
+{
+    int i;
+    u8 tbl[D88_MAX_TRACKS * 4];  /* 164 x 4 = 656 bytes */
+
+    fdd_fd = fd;
+    fdd_image_offset = 0;  /* D88ではトラックテーブル経由でアクセス */
+    fdd_image_size = file_size;
+    fdd_is_d88 = 1;
+
+    switch (media) {
+    case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
+    case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
+    case FDC_MEDIA_2D_256:  fdd_geom = &fdc_geom_2d_256;  break;
+    default:                fdd_geom = &fdc_geom_2hd;      break;
+    }
+
+    /* トラックテーブル読み出し (ファイルオフセット 0x20 から 164 x 4 bytes) */
+    vfs_seek(fd, 0x20, 0);
+    vfs_read_fd(fd, tbl, D88_MAX_TRACKS * 4);
+    for (i = 0; i < D88_MAX_TRACKS; i++) {
+        fdd_d88_track_table[i] = *(u32 *)(tbl + i * 4);
+    }
+
+    /* トラック0のセクタヘッダから実際のジオメトリを自動検出
+     * D88のmedia_flagは信頼性が低い場合があるため、
+     * セクタヘッダのN値とSPTから正確なジオメトリを決定する */
+    if (fdd_d88_track_table[0] != 0 && fdd_d88_track_table[0] < file_size) {
+        u8 sec0[16];
+        u8 actual_n;
+        u16 actual_spt;
+
+        vfs_seek(fd, fdd_d88_track_table[0], 0);
+        vfs_read_fd(fd, sec0, 16);
+        actual_n   = sec0[3];       /* N: セクタ長コード */
+        actual_spt = *(u16 *)(sec0 + 4);  /* SPT */
+
+        /* N値からメディア種別を再判定 */
+        if (actual_n == 1 && actual_spt == 16) {
+            /* 2D: 256 bytes/sector, 16 sectors/track */
+            fdd_geom = &fdc_geom_2d_256;
+        } else if (actual_n == 2 && actual_spt == 8) {
+            /* 2DD 640KB: 512 bytes/sector, 8 sectors/track */
+            fdd_geom = &fdc_geom_2dd_640;
+        } else if (actual_n == 2 && actual_spt == 9) {
+            /* 2DD 720KB: 512 bytes/sector, 9 sectors/track */
+            fdd_geom = &fdc_geom_2dd_720;
+        } else if (actual_n == 3 && actual_spt == 8) {
+            /* 2HD: 1024 bytes/sector, 8 sectors/track */
+            fdd_geom = &fdc_geom_2hd;
+        }
+        /* その他: media引数で設定済みのジオメトリを使う */
+    }
+}
+
+/* ====================================================================== */
+/*  d88_seek_sector — D88形式でCHSに対応するセクタデータのオフセットを検索  */
+/*                                                                          */
+/*  トラックテーブルからトラック先頭を求め、セクタヘッダのR(セクタID)を     */
+/*  走査して一致するセクタのデータ部オフセットを返す。                       */
+/*                                                                          */
+/*  D88はトラックごとに異なるセクタサイズ/SPTを持てる（混合フォーマット）。 */
+/*  例: Track 0 = N=1 (256B), SPT=16 (IPL用)                               */
+/*      Track 1+ = N=3 (1024B), SPT=5 (ゲームデータ)                       */
+/*                                                                          */
+/*  out_data_len: [OUT] 見つかったセクタの実データ長 (NULL可)               */
+/*  out_spt:      [OUT] トラック内のセクタ数 (NULL可)                       */
+/*  戻り値: データ部のファイルオフセット。見つからない場合は 0。             */
+/* ====================================================================== */
+static u32 d88_seek_sector(u8 cyl, u8 head, u8 sect_r,
+                           u32 *out_data_len, u16 *out_spt)
+{
+    u32 track_idx;
+    u32 trk_off;
+    u8 sec_hdr[16];
+    u32 pos;
+    int i;
+    int spt;
+
+    track_idx = (u32)cyl * 2 + (u32)head;
+    if (track_idx >= D88_MAX_TRACKS) return 0;
+
+    trk_off = fdd_d88_track_table[track_idx];
+    if (trk_off == 0 || trk_off >= fdd_image_size) return 0;
+
+    /* トラック先頭のセクタヘッダを読んでSPTを取得 */
+    vfs_seek(fdd_fd, trk_off, 0);
+    vfs_read_fd(fdd_fd, sec_hdr, 16);
+    spt = *(u16 *)(sec_hdr + 4);  /* セクタヘッダ offset 4: このトラックのセクタ数 */
+    if (spt <= 0 || spt > 64) spt = 8;  /* 安全ガード */
+
+    if (out_spt) *out_spt = (u16)spt;
+
+    /* セクタを走査して R = sect_r を探す */
+    pos = trk_off;
+    for (i = 0; i < spt; i++) {
+        u32 data_len;
+        vfs_seek(fdd_fd, pos, 0);
+        vfs_read_fd(fdd_fd, sec_hdr, 16);
+        data_len = *(u16 *)(sec_hdr + 14);  /* offset 0x0E: 実データサイズ */
+        if (data_len == 0) data_len = (u32)(128 << sec_hdr[3]);  /* Nから計算 */
+
+        if (sec_hdr[2] == sect_r) {  /* sec_hdr[2] = R (セクタID) */
+            if (out_data_len) *out_data_len = data_len;
+            return pos + 16;  /* データ部の先頭 = ヘッダ直後 */
+        }
+        pos += 16 + data_len;  /* 次のセクタへ */
+    }
+    return 0;  /* 見つからなかった */
 }
 
 /* ====================================================================== */
@@ -93,9 +218,11 @@ void v86_disk_set_physical(int drv, fdc_media_t media)
     fdd_phys_drv = drv;
     fdd_fd = -1;
     fdd_image_offset = 0;
+    fdd_is_d88 = 0;
     switch (media) {
     case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
     case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
+    case FDC_MEDIA_2D_256:  fdd_geom = &fdc_geom_2d_256;  break;
     default:                fdd_geom = &fdc_geom_2hd;      break;
     }
     fdd_image_size = (u32)fdd_geom->cyls * fdd_geom->heads
@@ -112,6 +239,7 @@ void v86_disk_clear(void)
     fdd_image_size = 0;
     fdd_use_physical = 0;
     fdd_phys_drv = 0;
+    fdd_is_d88 = 0;
     fdd_geom = &fdc_geom_2hd;  /* デフォルトに戻す */
 }
 
@@ -168,6 +296,23 @@ int v86_bios_int1b(u32 *regs)
     log_entry->bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
     log_entry->result_offset = -99;  /* 未計算マーカー */
     log_entry->status = 0xFF;        /* 未完了マーカー */
+
+    /* 計装: 最初の64回のINT 1Bh呼び出しをシリアルに出力 */
+    {
+        static u32 _int1b_trace_n = 0;
+        if (_int1b_trace_n < 64) {
+            kprintf(0xA1, "[1B] AH=%02X C=%u H=%u R=%u N=%u BX=%u ES:BP=%04X:%04X\n",
+                    (unsigned)func,
+                    (unsigned)log_entry->cylinder,
+                    (unsigned)log_entry->head,
+                    (unsigned)log_entry->sector,
+                    (unsigned)log_entry->sector_len,
+                    (unsigned)log_entry->xfer_bytes,
+                    (unsigned)log_entry->es,
+                    (unsigned)log_entry->bp);
+            _int1b_trace_n++;
+        }
+    }
 
     /* DA/UAチェック: 現在マウント中のメディアの DA/UA 上位ニブルと一致するか確認 */
     {
@@ -278,15 +423,24 @@ int v86_bios_int1b(u32 *regs)
             i32 img_offset;
             u32 remaining;
             u32 chunk;
+            /* NP2kai互換: READ完了後のBDA結果バッファに最終C/H/Rを反映
+             * ゲストIPLはBDA 0x0564 のR値から次のアクセス位置を決定する */
+            u8 final_cyl;
+            u8 final_head;
+            u8 final_sect_r;
             {
                 u32 byte_offset;
 
                 /* セクタ長コード (CH) バリデーション — 動的ジオメトリ参照
                  * FDCは物理セクタIDのN値と要求N値を照合する。
-                 * CH != g->sec_n → セクタ未検出エラー(0xC0)を返す。 */
+                 * D88モード: セクタヘッダに実N値が格納されているため、
+                 *   ゲスト要求CHとジオメトリN値の不一致を許容する。
+                 *   Ys等の古いゲームはBIOSの返す結果バッファN値に
+                 *   依存せず独自のCH値で要求する場合がある。
+                 * RAW/FDIモード: CH != g->sec_n → セクタ未検出エラー(0xC0) */
                 {
                     const struct fdc_geom *g = v86_disk_get_geom();
-                    if (sector_len != g->sec_n) {
+                    if (!fdd_is_d88 && sector_len != g->sec_n) {
                         DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
                     }
 
@@ -323,6 +477,9 @@ int v86_bios_int1b(u32 *regs)
 
             /* セクタ単位で転送 (複数セクタ対応) */
             remaining = (u32)xfer_bytes;
+            final_cyl = cylinder;
+            final_head = head_dh;
+            final_sect_r = sector_dl + 1; /* 1ベースに戻す */
             if (fdd_use_physical) {
                 /* 実FDDモード: fdc_read_sector_geom()で1セクタずつ読む */
                 const struct fdc_geom *g = v86_disk_get_geom();
@@ -351,8 +508,50 @@ int v86_bios_int1b(u32 *regs)
                         }
                     }
                 }
+                final_cyl = cur_cyl;
+                final_head = cur_head;
+                final_sect_r = cur_sect + 1; /* 1ベース */
+            } else if (fdd_is_d88) {
+                /* D88モード: セクタヘッダ経由でアクセス
+                 * D88はトラックごとに異なるセクタサイズ/SPTを持てる
+                 * (混合フォーマット)。d88_seek_sector が返す実データ長と
+                 * SPTを使用し、固定ジオメトリへの依存を排除する。 */
+                u8 cur_sect_r = sector_dl + 1;  /* D88のRは1ベース */
+                u8 cur_head = head_dh;
+                u8 cur_cyl = cylinder;
+                while (remaining > 0) {
+                    u32 sec_data_len = 0;
+                    u16 trk_spt = 0;
+                    u32 data_off = d88_seek_sector(cur_cyl, cur_head,
+                                                   cur_sect_r,
+                                                   &sec_data_len, &trk_spt);
+                    if (data_off == 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)cur_sect_r, regs);
+                    }
+                    /* セクタの実データ長を使用 (トラックごとに異なる) */
+                    chunk = sec_data_len;
+                    if (chunk > remaining) chunk = remaining;
+                    vfs_seek(fdd_fd, data_off, 0);
+                    vfs_read_fd(fdd_fd, dst, chunk);
+                    dst += chunk;
+                    remaining -= chunk;
+                    img_offset += (i32)chunk;
+                    /* 次セクタに進む (トラック実SPTで折り返し) */
+                    cur_sect_r++;
+                    if (trk_spt > 0 && cur_sect_r > (u8)trk_spt) {
+                        cur_sect_r = 1;
+                        cur_head++;
+                        if (cur_head >= 2) {
+                            cur_head = 0;
+                            cur_cyl++;
+                        }
+                    }
+                }
+                final_cyl = cur_cyl;
+                final_head = cur_head;
+                final_sect_r = cur_sect_r; /* D88: 既に1ベース */
             } else {
-                /* ファイルモード: VFS seek+read */
+                /* RAW/FDI ファイルモード: VFS seek+read */
                 const struct fdc_geom *g = v86_disk_get_geom();
                 if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
                     vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0);
@@ -385,11 +584,11 @@ int v86_bios_int1b(u32 *regs)
                 result_ptr[0] = us;            /* ST0: US | HD<<2 */
                 result_ptr[1] = 0x00;          /* ST1: 正常 */
                 result_ptr[2] = 0x00;          /* ST2: 正常 */
-                result_ptr[3] = cylinder;      /* C: シリンダ */
-                result_ptr[4] = head_dh;       /* H: ヘッド */
-                result_ptr[5] = (u8)(regs[V86_REG_EDX] & 0xFF); /* R: セクタ番号 */
+                result_ptr[3] = final_cyl;     /* C: 最終シリンダ */
+                result_ptr[4] = final_head;    /* H: 最終ヘッド */
+                result_ptr[5] = final_sect_r;  /* R: 次に読むべきセクタ (1ベース) */
                 result_ptr[6] = sector_len;    /* N: セクタ長コード */
-                result_ptr[7] = cylinder;      /* NCN: 現在シリンダ */
+                result_ptr[7] = final_cyl;     /* NCN: 現在シリンダ */
             }
             break;
         }
@@ -411,6 +610,7 @@ int v86_bios_int1b(u32 *regs)
             u8 *wr_buf;
             i32 wr_off;
             u32 wr_rem, wr_chunk;
+            u8 wfinal_cyl, wfinal_head, wfinal_sect_r;
 
             /* CH バリデーション (READと同一) */
             {
@@ -450,6 +650,9 @@ int v86_bios_int1b(u32 *regs)
 
             /* セクタ単位で書き込み (複数セクタ対応) */
             wr_rem = (u32)wr_xfer;
+            wfinal_cyl = wr_cyl;
+            wfinal_head = wr_head;
+            wfinal_sect_r = wr_sect + 1;
             if (fdd_use_physical) {
                 /* 実FDDモード: fdc_write_sector_geom() ループ */
                 const struct fdc_geom *g = v86_disk_get_geom();
@@ -476,8 +679,44 @@ int v86_bios_int1b(u32 *regs)
                         }
                     }
                 }
+                wfinal_cyl = wc_c;
+                wfinal_head = wc_h;
+                wfinal_sect_r = wc_s + 1;
+            } else if (fdd_is_d88) {
+                /* D88モード: セクタヘッダ経由でアクセス (混合フォーマット対応) */
+                u8 wc_r = wr_sect + 1;  /* D88のRは1ベース */
+                u8 wc_h = wr_head;
+                u8 wc_c = wr_cyl;
+                while (wr_rem > 0) {
+                    u32 sec_data_len = 0;
+                    u16 trk_spt = 0;
+                    u32 data_off = d88_seek_sector(wc_c, wc_h, wc_r,
+                                                   &sec_data_len, &trk_spt);
+                    if (data_off == 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)wc_r, regs);
+                    }
+                    wr_chunk = sec_data_len;
+                    if (wr_chunk > wr_rem) wr_chunk = wr_rem;
+                    vfs_seek(fdd_fd, data_off, 0);
+                    vfs_write_fd(fdd_fd, wr_buf, wr_chunk);
+                    wr_buf += wr_chunk;
+                    wr_rem -= wr_chunk;
+                    wr_off += (i32)wr_chunk;
+                    wc_r++;
+                    if (trk_spt > 0 && wc_r > (u8)trk_spt) {
+                        wc_r = 1;
+                        wc_h++;
+                        if (wc_h >= 2) {
+                            wc_h = 0;
+                            wc_c++;
+                        }
+                    }
+                }
+                wfinal_cyl = wc_c;
+                wfinal_head = wc_h;
+                wfinal_sect_r = wc_r;
             } else {
-                /* ファイルモード: vfs_seek + vfs_write_fd */
+                /* RAW/FDI ファイルモード: vfs_seek + vfs_write_fd */
                 const struct fdc_geom *g = v86_disk_get_geom();
                 if (wr_off >= 0 && (u32)wr_off < fdd_image_size) {
                     vfs_seek(fdd_fd, fdd_image_offset + (u32)wr_off, 0);
@@ -508,11 +747,11 @@ int v86_bios_int1b(u32 *regs)
                 rp[0] = us;
                 rp[1] = 0x00;
                 rp[2] = 0x00;
-                rp[3] = wr_cyl;
-                rp[4] = wr_head;
-                rp[5] = (u8)(regs[V86_REG_EDX] & 0xFF);
+                rp[3] = wfinal_cyl;
+                rp[4] = wfinal_head;
+                rp[5] = wfinal_sect_r;
                 rp[6] = wr_seclen;
-                rp[7] = wr_cyl;
+                rp[7] = wfinal_cyl;
             }
             break;
         }
@@ -521,6 +760,17 @@ int v86_bios_int1b(u32 *regs)
         /*  機能 07h: リキャリブレート / ベリファイ — 常に成功           */
         /* ============================================================ */
         case 0x07:
+            log_entry->status = 0x00;
+            regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
+            regs[V86_REG_EFLAGS] &= ~1UL;
+            break;
+
+        /* ============================================================ */
+        /*  機能 00h: ドライブ状態チェック / リセット                    */
+        /*  AH=00h/10h/20h 等 — 常に成功応答を返す                     */
+        /*  Ys等のゲームがディスクアクセス前にドライブ状態を確認する    */
+        /* ============================================================ */
+        case 0x00:
             log_entry->status = 0x00;
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
@@ -612,11 +862,12 @@ void v86_disk_dump_log(void)
     for (i = 0; i < n; i++) {
         u32 idx = (start + i) % V86_DISK_LOG_SIZE;
         struct v86_disk_log_entry *e = &disk_log[idx];
-        kprintf(0x07, "  [%d] AH=%x AL=%x C=%d H=%d S=%d BX=%x ES:BP=%x:%x off=%d st=%x\n",
+        kprintf(0x07, "  [%d] AH=%x AL=%x C=%d CH=%d H=%d S=%d BX=%x ES:BP=%x:%x off=%d st=%x\n",
                 (int)i,
                 (unsigned)e->func,
                 (unsigned)e->daua,
                 (int)e->cylinder,
+                (int)e->sector_len,
                 (int)e->head,
                 (int)e->sector,
                 (unsigned)e->xfer_bytes,

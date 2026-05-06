@@ -125,7 +125,7 @@ static int v86_run_com(const u8 *data, u32 size)
     ctx.fs     = 0x0000;
     ctx.gs     = 0x0000;
 
-    saved_esp0 = 0x9FFF0UL;
+    saved_esp0 = tss_get_esp0();
     tss_set_esp0((u32)&v86_test_kstack[sizeof(v86_test_kstack) - 16]);
 
     v86_active = 1;

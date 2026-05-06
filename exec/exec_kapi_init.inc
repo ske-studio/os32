@@ -152,6 +152,7 @@ extern int __cdecl wrap_kcg_load_font(const char *path);
 extern int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdline);
 extern int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline);
 extern int __cdecl wrap_sys_v86_boot_physical_ex(int drv, int media, const char *cmdline);
+extern int __cdecl wrap_sys_v86_boot_native(const char *path);
 
 kapi->magic = 0x4B415049UL;
 kapi->version = 33;
@@ -310,4 +311,5 @@ kapi->version = 33;
     kapi->sys_v86_boot_freedos = wrap_sys_v86_boot_freedos;
     kapi->sys_v86_boot_physical = wrap_sys_v86_boot_physical;
     kapi->sys_v86_boot_physical_ex = wrap_sys_v86_boot_physical_ex;
+    kapi->sys_v86_boot_native = wrap_sys_v86_boot_native;
     kapi->sbrk_heap_limit = 0;

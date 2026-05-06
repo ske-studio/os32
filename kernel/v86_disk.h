@@ -20,6 +20,11 @@
 void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
                        fdc_media_t media);
 
+/* D88形式ディスクイメージをセット (トラックテーブルをキャッシュ)
+ * D88はRAWフラットではなくセクタヘッダ付き形式。CHS→オフセット変換を
+ * トラックテーブル+セクタヘッダ走査で行う。 */
+void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media);
+
 /* FDDイメージをクリア */
 void v86_disk_clear(void);
 

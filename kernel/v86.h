@@ -79,6 +79,8 @@ extern u32 v86_last_int;        /* 最後に処理されたINT番号 */
 extern u32 v86_last_cs;         /* 最後のINT発行時のCS */
 extern u32 v86_last_ip;         /* 最後のINT発行時のIP */
 extern u32 v86_start_tick;      /* V86開始時のtick_count */
+extern u32 v86_timeout_ticks;   /* タイムアウト (0=無効, デフォルト6000=60秒) */
+extern int v86_native_mode;     /* ネイティブモード (DOS終了検知無効化) */
 extern u32 v86_timeout_cs;      /* タイムアウト時のCS */
 extern u32 v86_timeout_ip;      /* タイムアウト時のIP */
 

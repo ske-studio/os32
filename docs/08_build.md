@@ -71,32 +71,26 @@ os32/
 
 ### §8-4 ホスト側イメージ生成ツール
 
-#### `tools/install_hdd.py`
-ホスト側で直接 NHD HDDイメージ を構築する Python スクリプトです。カーネルやブートセクタ、ext2ファイルシステムを一括で書き込みます。
+#### `tools/hostdrv_deploy.py`
+NP21/W の HostDrv 共有ディレクトリ (`C:\os32`) にビルド成果物を配置するデプロイスクリプト。
+sudo不要。ゲストOS は `/host` マウントポイント経由で直接アクセスし、`hsync` で ext2 に同期する。
 
 ```bash
-python3 tools/install_hdd.py /tmp/test_new.nhd
+python3 tools/hostdrv_deploy.py sync              # deploy.yaml に基づく全ファイルデプロイ
+python3 tools/hostdrv_deploy.py sync --tag programs  # プログラムのみ
+python3 tools/hostdrv_deploy.py diff              # ビルド成果物との差分表示
 ```
-- NHDヘッダ・ジオメトリの自動生成
-- IPL、パーテーションテーブル、第2ステージローダー(LBA 2-5)、カーネル(LBA 6-) の自動バイナリ配置
-- シリンダ2からの ext2 ファイルシステム構築と、`programs/*.bin` 等のファイル収集・書き込み
-
-#### `tools/write_ipl.py`
-既存NHDイメージの特定LBAにバイナリを上書きするセクタ単位の書き込みツールです。カーネル部だけの高速な書き換えに使用します。
-
-```bash
-python3 tools/write_ipl.py kernel.bin --sector 6
-```
-**注意**: 対象サイズが指定領域に収まるか注意深く確認してください（例: LBA 272のext2スーパーブロックを破壊しないこと）。
+- プログラム変更時は NP21/W 再起動不要
+- `filecmp` で差分チェックし、変更のないファイルはスキップ
 
 #### `tools/nhd_deploy.py`
-NHD HDDイメージの管理をホスト側で一元化するデプロイメントツール。`deploy.yaml` に基づき、カーネル・ローダー・全ファイルを一括デプロイする。
+NHD HDDイメージの管理をホスト側で一元化するデプロイメントツール。`deploy.yaml` に基づき、ローダー・全ファイルを一括デプロイする。
 
 ```bash
 python3 tools/nhd_deploy.py init   # NP21/WからNHDをコピーし初期化
 python3 tools/nhd_deploy.py sync   # deploy.yaml に基づくフルデプロイ
 python3 tools/nhd_deploy.py deploy # NHDイメージをNP21/Wにコピー
-python3 tools/nhd_deploy.py copy programs/shell.bin  # 個別ファイルのデプロイ
+python3 tools/nhd_deploy.py sync-from-hostdrv  # HostDrvの内容をNHDにミラーリング
 ```
 - `tools/deploy.yaml` でデプロイ対象・ゲストパス・タグを定義
 - ext2ファイルシステムへの書き込みはLinux loopデバイス経由

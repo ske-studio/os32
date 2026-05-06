@@ -313,67 +313,6 @@ def do_deploy():
     return True
 
 
-def do_write_kernel(kernel_bin, loader_bin=None, sqlite_bin=None):
-    """NHDのブート領域にloader+kernel+sqliteを直接書き込む
-
-    NHDレイアウト (512B/セクタ):
-      NHDヘッダ: 512B (オフセット0)
-      LBA 0: IPL (boot_hdd.bin)
-      LBA 1: パーティションテーブル
-      LBA 2-5: loader_hdd.bin (最大4セクタ = 2048B)
-      LBA 6+: kernel.bin
-      LBA 262+: sqlite.bin
-      LBA 1632+: ext2パーティション
-    """
-    NHD_HEADER = 512
-    SECTOR = 512
-    KERNEL_LBA = 6
-    LOADER_LBA = 2
-    SQLITE_LBA = 262
-
-    kernel_offset = NHD_HEADER + KERNEL_LBA * SECTOR
-    loader_offset = NHD_HEADER + LOADER_LBA * SECTOR
-    sqlite_offset = NHD_HEADER + SQLITE_LBA * SECTOR
-
-    with open(kernel_bin, 'rb') as f:
-        kernel_data = f.read()
-
-    print("  kernel.bin: {} bytes ({} sectors)".format(
-        len(kernel_data), (len(kernel_data) + 511) // 512))
-
-    with open(NHD_LOCAL, 'r+b') as nhd:
-        # loader書き込み
-        if loader_bin and os.path.isfile(loader_bin):
-            with open(loader_bin, 'rb') as f:
-                loader_data = f.read()
-            nhd.seek(loader_offset)
-            nhd.write(loader_data)
-            print("  loader:     {} bytes -> LBA {}".format(
-                len(loader_data), LOADER_LBA))
-
-        # kernel書き込み
-        nhd.seek(kernel_offset)
-        nhd.write(kernel_data)
-        print("  kernel:     {} bytes -> LBA {}".format(
-            len(kernel_data), KERNEL_LBA))
-
-        # sqlite書き込み
-        if sqlite_bin and os.path.isfile(sqlite_bin):
-            with open(sqlite_bin, 'rb') as f:
-                sqlite_data = f.read()
-            # パーティション境界チェック
-            sqlite_end_lba = SQLITE_LBA + (len(sqlite_data) + 511) // 512
-            if sqlite_end_lba > HDD_PARTITION_LBA:
-                print("  WARNING: sqlite.bin (LBA {}-{}) がパーティション (LBA {}) を超過!".format(
-                    SQLITE_LBA, sqlite_end_lba - 1, HDD_PARTITION_LBA))
-                return
-            nhd.seek(sqlite_offset)
-            nhd.write(sqlite_data)
-            print("  sqlite:     {} bytes -> LBA {} ({} sectors)".format(
-                len(sqlite_data), SQLITE_LBA,
-                (len(sqlite_data) + 511) // 512))
-
-    print("Done!")
 
 
 def do_write_boot(loader_bin):
@@ -920,7 +859,7 @@ def main():
         print("  ls [path]              — ファイル一覧")
         print("  rm <file>              — ファイル削除")
         print("  deploy                 — umount + NHDをNP21/Wにコピー")
-        print("  write-kernel <k> [ldr] — カーネルをブート領域に書き込み")
+        print("  write-boot <loader>    — ローダーをブート領域に書き込み")
         print("  format                 — ext2を再フォーマット (全消去)")
         print("  init                   — Windows側NHDをコピー+フォーマット+マウント")
         print("")
@@ -995,17 +934,6 @@ def main():
     elif cmd == 'deploy':
         do_deploy()
 
-    elif cmd == 'write-kernel':
-        if len(sys.argv) < 3:
-            print("Usage: write-kernel <kernel.bin> [loader_hdd.bin] [sqlite.bin]")
-            return
-        kernel = sys.argv[2]
-        loader = sys.argv[3] if len(sys.argv) > 3 else None
-        sqlite = sys.argv[4] if len(sys.argv) > 4 else None
-        if not os.path.isfile(kernel):
-            print("Error: {} not found".format(kernel))
-            return
-        do_write_kernel(kernel, loader, sqlite)
 
     elif cmd == 'write-boot':
         if len(sys.argv) < 3:

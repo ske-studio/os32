@@ -100,7 +100,8 @@
 typedef enum {
     FDC_MEDIA_2HD_1232 = 0,  /* 1.2MB (PC-98標準, 77×2×8×1024) */
     FDC_MEDIA_2DD_640  = 1,  /* 640KB (80×2×8×512) */
-    FDC_MEDIA_2DD_720  = 2   /* 720KB (80×2×9×512) */
+    FDC_MEDIA_2DD_720  = 2,  /* 720KB (80×2×9×512) */
+    FDC_MEDIA_2D_256   = 3   /* 2D (77×2×16×256) — 古いPC-98ゲーム用 */
 } fdc_media_t;
 
 /* メディアジオメトリ構造体 */
@@ -118,6 +119,7 @@ struct fdc_geom {
 extern const struct fdc_geom fdc_geom_2hd;
 extern const struct fdc_geom fdc_geom_2dd_640;
 extern const struct fdc_geom fdc_geom_2dd_720;
+extern const struct fdc_geom fdc_geom_2d_256;
 
 /* ======================================================================== */
 /*  FDCドライバAPI                                                          */

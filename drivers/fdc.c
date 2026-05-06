@@ -436,4 +436,7 @@ const struct fdc_geom fdc_geom_2dd_640 = {
 const struct fdc_geom fdc_geom_2dd_720 = {
     80, 2, 9, 2, 512, 0x2A, 0x10
 };
+const struct fdc_geom fdc_geom_2d_256 = {
+    77, 2, 16, 1, 256, 0x0E, 0x90  /* GAP3=0x0E: MFM 256B/sec, DAUA=0x90 */
+};
 

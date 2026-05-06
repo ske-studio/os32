@@ -162,14 +162,6 @@ hsync -f                                 /* 強制上書き */
 make deploy-kernel                       /* NHDブート領域書き込み + NP21/Wへコピー */
 ```
 
-#### NHDフルデプロイ (レガシー)
-
-従来の NHD ext2 マウント方式。HostDrv が使えない環境向け。
-
-```bash
-make deploy-nhd                          /* nhd_deploy.py sync + deploy */
-```
-
 ### デプロイパスの整合性
 
 `deploy.yaml` のゲストパスと `config.h` の `SYS_*` 定数は**必ず一致**させること。
@@ -244,12 +236,12 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 
 1. `make all` でビルドエラーがないことを確認
 2. HostDrv にデプロイ (`hostdrv_deploy.py sync`)
-3. カーネル変更時は NHD に書き込み (`nhd_deploy.py write-kernel` + `deploy`) + NP21/W 再起動
+3. カーネル変更時は NHD に書き込み (`make deploy-kernel`) + NP21/W 再起動
 4. ゲスト側で `hsync` を実行 (HostDrv → ext2 同期)
 5. `ver` コマンドでビルドタイムスタンプを確認
 6. 変更対象の機能を手動テスト
 
-自動化ワークフロー (`/build-os32`, `/full-build`, `/deploy-program`) を活用すること。
+自動化ワークフロー (`/build-os32`, `/deploy-program`) を活用すること。
 
 ### シリアルコンソール経由のリモートテスト
 

@@ -42,6 +42,7 @@
     "extern volatile u32 tick_count;",
     "extern void kapi_sys_exit(int status);",
     "extern int v86_boot_freedos(const char *path, const char *cmdline);",
+    "extern int v86_boot_native(const char *path);",
     "extern int v86_boot_physical_fdd(int drv, const char *cmdline);",
     "extern int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline);"
   ],
@@ -1130,6 +1131,12 @@
       "ret": "int",
       "args": ["int drv", "int media", "const char *cmdline"],
       "target": "v86_boot_physical_fdd_ex"
+    },
+    {
+      "name": "sys_v86_boot_native",
+      "ret": "int",
+      "args": ["const char *path"],
+      "target": "v86_boot_native"
     }
   ]
 }

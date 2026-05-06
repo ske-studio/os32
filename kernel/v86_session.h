@@ -63,6 +63,11 @@ typedef struct {
 /* FreeDOSイメージからV86セッションを起動する */
 int  v86_boot_freedos(const char *path, const char *cmdline);
 
+/* ネイティブPC-98ソフトのFDDイメージからV86セッションを起動する
+ * DOSの終了検知 (INT 20h/21h) を無効化し、タイムアウトも無効。
+ * 脱出は Ctrl+GRPH+DEL ホットキーのみ。 */
+int  v86_boot_native(const char *path);
+
 /* NP21/Wにマウント中の実FDDからV86セッションを起動する
  * drv: 物理ドライブ番号 (通常0) */
 int  v86_boot_physical_fdd(int drv, const char *cmdline);

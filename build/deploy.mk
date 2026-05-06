@@ -22,12 +22,6 @@ deploy-boot: boot/loader_hdd.bin
 	@echo "=== Boot Loader Deploy ==="
 	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 
-# deploy-nhd: NHDフルデプロイ (ローダー+全ファイル)
-deploy-nhd: vmkernel.lz4 programs unicode_bin
-	@echo "=== NHD Deploy (using deploy.yaml) ==="
-	$(NHD_DEPLOY) sync
-	$(NHD_DEPLOY) deploy
-
 # dp-<name>: 個別プログラムのビルド → シリアル経由でのホットデプロイ(再起動不要)
 dp-%: programs/%.bin
 	@echo "=== Hot Deploy (Serial Push): $*.bin ==="
@@ -45,4 +39,5 @@ nhd-umount:
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-boot deploy-nhd nhd-mount nhd-umount nhd-init
+.PHONY: deploy deploy-kernel deploy-boot nhd-mount nhd-umount nhd-init
+
