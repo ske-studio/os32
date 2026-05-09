@@ -95,6 +95,7 @@ int  kbd_is_pressed(int scancode); /* スキャンコード押下状態 (1=押�
 
 /* シフトキー状態 */
 extern volatile u8 kbd_shift_state;
+extern volatile u8 kbd_key_pressed[16]; /* 128bit キー押下状態ビットマップ */
 #define SHIFT_SHIFT  0x01
 #define SHIFT_CAPS   0x02
 #define SHIFT_KANA   0x04

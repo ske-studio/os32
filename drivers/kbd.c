@@ -29,7 +29,7 @@ volatile u8 kbd_shift_state = 0;
 
 /* ======== キー押下状態ビットマップ (128キー分) ======== */
 /* ビット1 = 押下中, ビット0 = 離されている */
-static volatile u8 kbd_key_pressed[16]; /* 128bit = 16bytes */
+volatile u8 kbd_key_pressed[16]; /* 128bit = 16bytes */
 
 /* ======== リングバッファ (u16: 上位=スキャンコード, 下位=ASCII) ======== */
 static volatile u16 kbd_buf[KBD_BUF_SIZE];
@@ -107,17 +107,23 @@ void kbd_irq_handler(void)
     u8 ascii;
     int is_break;
 
-    /* V86モード中: OS32バッファにキーを入れる
-     * INT 18h AH=00h のエミュレーションで kbd_trygetkey() を
-     * 使用するため、物理ポートからスキャンコードを読み取って
-     * OS32のキーバッファに格納する。
-     * ゲストINT 09hへの仮想IRQ注入は行わない (BIOSレベルで
-     * エミュレーションしているため不要。注入するとINT 18h
-     * AH=00hのEIP replayが破壊される)。 */
-    /* v86_activeの場合もそのまま処理を続行 */
+    /* V86モード中: OS32バッファとV86スキャンコードバッファの両方に格納。
+     * V86スキャンコードバッファはゲストのINT 09hハンドラが
+     * ポート0x41を読む時に使用される。
+     * また、v86_kbd_enqueue()がIRQ1をペンディングさせ、
+     * GPハンドラでゲストのIVT INT 09hに注入される。 */
 
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
+
+    /* V86中: ゲスト用バッファにenqueue + IRQ1ペンディング */
+    {
+        extern volatile int v86_active;
+        if (v86_active) {
+            extern void v86_kbd_enqueue(u8 sc);
+            v86_kbd_enqueue(scancode);
+        }
+    }
 
     is_break = scancode & SCANCODE_BREAK;
     keycode  = scancode & SCANCODE_KEY;
@@ -127,6 +133,17 @@ void kbd_irq_handler(void)
         kbd_key_pressed[keycode >> 3] &= ~(1 << (keycode & 7));
     } else {
         kbd_key_pressed[keycode >> 3] |=  (1 << (keycode & 7));
+    }
+
+    /* V86中: BDAキー押下状態テーブル (0000:052Ah) も同期更新
+     * Ysはこのテーブルをメモリ直接ポーリングでキー入力を検出する */
+    {
+        extern volatile int v86_active;
+        if (v86_active) {
+            extern u8 *v86_phys_addr(u32 seg, u32 off);
+            u8 *bda = v86_phys_addr(0, 0);
+            bda[BDA_KB_KEY_STS + (keycode >> 3)] = kbd_key_pressed[keycode >> 3];
+        }
     }
 
     /* シフトキー状態の更新 */

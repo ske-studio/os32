@@ -91,18 +91,68 @@ static int v86_run_com(const u8 *data, u32 size)
     u8 *psp;
     u8 *code;
 
-    /* ページテーブル設定 */
+    /* ================================================================== */
+    /*  ページテーブル設定                                                */
+    /*                                                                      */
+    /*  COMバイナリ実行に必要な最小限の領域 + IRQ安全対策:                 */
+    /*    0x00000-0x00FFF : IVT + BDA + ダミーIRETハンドラ (R/W, USER)     */
+    /*    0x8A000-0x8E000 : COM ロード/スタック領域 (R/W, USER)            */
+    /*    0xA0000-0xA3FFF : TVRAM (R/W, USER)                              */
+    /*    0xF0000-0xFFFFF : BIOS ROM (R/O, USER) — IRQ0 IVT安全帯        */
+    /* ================================================================== */
+
+    /* IVT/BDA ページ (0x00000): IVT読み取り + ダミーIRETハンドラに必要 */
+    paging_set_page(0x00000UL, 0x00000UL, V86_PAGE_FLAGS);
+
+    /* COMロード・スタック領域 */
     paging_set_page(0x8A000UL, 0x8A000UL, V86_PAGE_FLAGS);
     for (addr = 0x8B000UL; addr <= 0x8E000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, V86_PAGE_FLAGS);
     }
+
+    /* TVRAM */
     for (addr = 0xA0000UL; addr < 0xA4000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, V86_PAGE_FLAGS);
     }
+
+    /* BIOS ROM (0xF0000-0xFFFFF): R/O + PTE_USER
+     * タイマーIRQ0がIVT[0x08]経由でBIOS ROMハンドラにジャンプした場合の
+     * #PFを防ぐ安全帯。ダミーIVT設定があれば通常は到達しないが念のため。 */
+    for (addr = 0xF0000UL; addr <= 0xFF000UL; addr += 0x1000UL) {
+        paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);
+    }
+
     paging_pde_set_flags(0x00000UL, PTE_USER);
 
     v86_pic_init();
     v86_pit_init();
+
+    /* ================================================================== */
+    /*  IVT[0x08] ダミーベクタ設定                                        */
+    /*                                                                      */
+    /*  低クロック環境ではCOM実行中にIRQ0(タイマー)が発火する。             */
+    /*  v86_inject_timer_irq() は IVT[0x08] を読んでゲストCSEIPを          */
+    /*  そのハンドラに書き換える。IVTが未初期化だとBIOS ROM内の            */
+    /*  アドレスに飛び、PTE_USER不足で#PFになる。                          */
+    /*                                                                      */
+    /*  v86_mem.c と同じ方式: IVT領域内(0x3F0)にIRET(0xCF)を配置し、      */
+    /*  IVT[0x08] をそこに向ける。                                        */
+    /* ================================================================== */
+    {
+        u32 *ivt = (u32 *)0x00000UL;
+        u8  *iret_ptr = (u8 *)0x3F0UL;
+        u16 dummy_seg = 0x003F;
+        u16 dummy_off = 0x0000;
+        u32 dummy_vec = ((u32)dummy_seg << 16) | dummy_off;
+
+        /* ダミーIRETハンドラ配置 */
+        *iret_ptr = 0xCF;  /* IRET */
+
+        /* IRQ0 タイマー (INT 08h) */
+        ivt[0x08] = dummy_vec;
+        /* IRQ1 キーボード (INT 09h) — 念のため */
+        ivt[0x09] = dummy_vec;
+    }
 
     /* PSP構築 */
     psp = (u8 *)COM_LOAD_BASE;
@@ -149,7 +199,13 @@ static int v86_run_com(const u8 *data, u32 size)
 
     v86_restore_screen();
 
-    /* ページ属性復元 */
+    /* ================================================================== */
+    /*  ページ属性復元                                                    */
+    /* ================================================================== */
+
+    /* IVTページ復元 (NULLポインタガードは paging_init で設定済み) */
+    paging_set_page(0x00000UL, 0x00000UL, PAGE_RW);
+
     paging_set_page(0x8A000UL, 0x8A000UL, PAGE_RW);
     for (addr = 0x8B000UL; addr <= 0x8E000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, PAGE_RW);
@@ -157,6 +213,12 @@ static int v86_run_com(const u8 *data, u32 size)
     for (addr = 0xA0000UL; addr < 0xA4000UL; addr += 0x1000UL) {
         paging_set_page(addr, addr, PAGE_RW);
     }
+
+    /* BIOS ROM復元 (PTE_USER除去) */
+    for (addr = 0xF0000UL; addr <= 0xFF000UL; addr += 0x1000UL) {
+        paging_set_page(addr, addr, PTE_PRESENT);
+    }
+
     paging_pde_clear_flags(0x00000UL, PTE_USER);
 
     return 0;

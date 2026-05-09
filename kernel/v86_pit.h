@@ -26,4 +26,7 @@ int v86_pit_io(u16 port, u8 *val, int is_write);
  * 戻り値: 1 = 毎tick注入 (100Hz), 2 = 2tickに1回 (50Hz), ... */
 u32 v86_pit_get_irq_divisor(void);
 
+/* Counter#0 のリロード値を返す (デバッグダンプ用) */
+u16 v86_pit_get_counter0_reload(void);
+
 #endif /* V86_PIT_H */

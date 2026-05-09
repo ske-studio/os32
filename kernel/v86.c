@@ -53,6 +53,28 @@ void v86_trace_reset(void)
     v86_trace_idx = 0;
 }
 
+/* ====================================================================== */
+/*  V86 キーボード仮想化 — スキャンコードバッファ                          */
+/*  kbd_irq_handler が物理ポート 0x41 から読んだスキャンコードをここに      */
+/*  バッファリングする。ゲストの INT 09h ハンドラがポート 0x41 を           */
+/*  IN命令で読む時に、このバッファからデータを返す。                       */
+/* ====================================================================== */
+volatile u8  v86_kbd_buf[V86_KBD_BUF_SIZE];
+volatile int v86_kbd_buf_head = 0;
+volatile int v86_kbd_buf_tail = 0;
+volatile int v86_kbd_buf_count = 0;
+
+void v86_kbd_enqueue(u8 scancode)
+{
+    if (v86_kbd_buf_count < V86_KBD_BUF_SIZE) {
+        v86_kbd_buf[v86_kbd_buf_tail] = scancode;
+        v86_kbd_buf_tail = (v86_kbd_buf_tail + 1) % V86_KBD_BUF_SIZE;
+        v86_kbd_buf_count++;
+    }
+    /* IRQ1 をペンディング → GPハンドラでゲストのIVT INT 09hに注入 */
+    v86_set_pending_irq(1);
+}
+
 static void tvram_hex(u32 val, int digits, int row, int *col) {
     volatile u16 *tvram = (volatile u16 *)TVRAM_BASE;
     volatile u16 *tattr = (volatile u16 *)TVRAM_ATTR;
@@ -130,8 +152,8 @@ struct v86_io_stat {
     u16 port;
     u32 count;
 };
-static struct v86_io_stat v86_io_stats[V86_IO_STAT_SIZE];
-static u32 v86_io_stat_count = 0;
+struct v86_io_stat v86_io_stats[V86_IO_STAT_SIZE];
+u32 v86_io_stat_count = 0;
 
 static void v86_io_stat_record(u16 port)
 {
@@ -216,10 +238,44 @@ static void v86_gp_inject_irq(u32 *regs, u16 handler_seg, u16 handler_off)
 /*  8ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
 /* ====================================================================== */
 
+/* カーネル保護ポート判定 — HostDrv(0x7EC/0x7EE)とシリアル(0x30-0x35,0x75,0x77)
+ * をV86ゲストからのアクセスから保護する。
+ * HostDrv: ゲストが書き込むとセッション状態が壊れ、ファイルI/Oが失敗する。
+ * シリアル: ゲストが書き込むと通信設定が壊れ、V86終了後にrshellが応答しない。 */
+static int v86_port_is_protected(u16 port)
+{
+    /* HostDrv I/Oポート */
+    if (port == 0x7EC || port == 0x7EE) return 1;
+    /* RS-232C (μPD8251A) */
+    if (port == 0x30 || port == 0x32 || port == 0x33 || port == 0x35) return 1;
+    /* RS-232C ボーレート (PIT #2) */
+    if (port == 0x75 || port == 0x77) return 1;
+    return 0;
+}
+
 /* 8ビットI/O入力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static u8 v86_in8_checked(u16 port)
 {
     u8 val;
+    if (v86_port_is_protected(port)) return 0xFF;
+
+    /* キーボード 8251A 仮想化
+     * 0x41: データポート — v86_kbd_buf からスキャンコードを返す
+     * 0x43: ステータスポート — RxRDY (bit1) でデータ有無を返す */
+    if (port == 0x41) {
+        if (v86_kbd_buf_count > 0) {
+            val = v86_kbd_buf[v86_kbd_buf_head];
+            v86_kbd_buf_head = (v86_kbd_buf_head + 1) % V86_KBD_BUF_SIZE;
+            v86_kbd_buf_count--;
+            return val;
+        }
+        return 0xFF; /* バッファ空: ダミー値 */
+    }
+    if (port == 0x43) {
+        /* bit1 (RxRDY) = データあり */
+        return (v86_kbd_buf_count > 0) ? 0x02 : 0x00;
+    }
+
     if (v86_pic_io(port, &val, 0)) return val;
     if (v86_pit_io(port, &val, 0)) return val;
     if (v86_fdc_io(port, &val, 0)) return val;
@@ -231,6 +287,10 @@ static u8 v86_in8_checked(u16 port)
 /* 8ビットI/O出力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static void v86_out8_checked(u16 port, u8 val)
 {
+    if (v86_port_is_protected(port)) return;
+    /* キーボード 8251A: ゲストからの書き込みは無視
+     * OS32がキーボードハードウェアを管理している */
+    if (port == 0x41 || port == 0x43) return;
     if (!v86_pic_io(port, &val, 1)) {
         if (!v86_pit_io(port, &val, 1)) {
             if (!v86_fdc_io(port, &val, 1)) {
@@ -291,6 +351,28 @@ int v86_gp_handler(u32 *regs)
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
 
+    /* IRQ受信窓の開放: GP頻度が高くIF=0時間が長くなりがちなため、
+     * 入口で1度だけSTI/CLIを叩いて保留IRQを排出する。
+     * (HLTは行わない — IRQ無し時の不要待ちを避けるため) */
+    _enable();   /* STI — 保留IRQを即配送 */
+    _disable();  /* CLI — GP本体処理は割り込み禁止で実行 */
+
+    /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
+    if (v86_timeout_ticks &&
+        ((tick_count - v86_start_tick) > v86_timeout_ticks ||
+         v86_gp_count > 500000)) {
+        ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
+        v86_last_int = *ip;
+        v86_last_cs = regs[V86_REG_CS];
+        v86_last_ip = regs[V86_REG_EIP];
+        if (v86_timeout_cs == 0 && v86_timeout_ip == 0) {
+            v86_timeout_cs = regs[V86_REG_CS];
+            v86_timeout_ip = regs[V86_REG_EIP];
+        }
+        v86_request_exit(V86_EXIT_TIMEOUT);
+        return 1;
+    }
+
     /* BIOS ROM領域 (0xF000:xxxx以降) でのGP: V86強制終了
      * IPLエラー後のJMP FAR 0xFFFF:0x0000 (リセットベクタ) で
      * BIOS ROM内コードが実行され無限GPループになるのを防止 */
@@ -302,23 +384,6 @@ int v86_gp_handler(u32 *regs)
     }
 
     /* (ホットキー脱出はkbd_irq_handlerから直接longjmpで処理) */
-
-    /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
-    if (v86_timeout_ticks &&
-        ((tick_count - v86_start_tick) > v86_timeout_ticks ||
-         v86_gp_count > 500000)) {
-        ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
-        v86_last_int = *ip;
-        v86_last_cs = regs[V86_REG_CS];
-        v86_last_ip = regs[V86_REG_EIP];
-        /* タイムアウト位置を記録 (IRQ0経由で既にセット済みの場合はそちらを優先) */
-        if (v86_timeout_cs == 0 && v86_timeout_ip == 0) {
-            v86_timeout_cs = regs[V86_REG_CS];
-            v86_timeout_ip = regs[V86_REG_EIP];
-        }
-        v86_request_exit(V86_EXIT_TIMEOUT);
-        return 1;  /* V86タイムアウト終了 */
-    }
 
     /* フォルト位置の命令を取得 */
     ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
@@ -354,6 +419,7 @@ int v86_gp_handler(u32 *regs)
         e->cs = regs[V86_REG_CS];
         e->ip = regs[V86_REG_EIP];
         e->opcode = opcode;
+        e->cx = (u16)(regs[V86_REG_ECX] & 0xFFFF);
         if (opcode == 0xCD) {
             e->intno = ip[1];
             e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
@@ -898,10 +964,31 @@ v86_gp_end:
                 v86_irq0_gp_skip_isr++;
             }
         }
-        /* §1.3 A案: IRQ1 (キーボード) は BDA直書き運用に振り切り。
-         * kbd.c と v86_session.c の Auto-Typer が BDA に直接書くため、
-         * 仮想 IRQ1 注入は不要 (v86_set_pending_irq(1) を呼ぶ経路が無い)。
-         * デッドコードとして削除済み。 */
+        /* §1.3 IRQ1 (キーボード): IVTのINT 09hに仮想注入
+         * ゲーム(Ys等)はIVTのINT 09hハンドラを自前で設定し、
+         * ポート0x41からスキャンコードを直接読む。
+         * kbd.cがv86_kbd_enqueue()でスキャンコードをバッファリング済み。
+         * ゲストのINT 09hハンドラがポート0x41を読む時、
+         * GPトラップでバッファからデータを返す。 */
+        if (v86_pending_irq & (1U << 1)) { /* IRQ1: キーボード (INT 09h) */
+            u8 isr = v86_pic_get_isr(0);
+
+            if (!(isr & 2)) { /* ISR bit1 が未処理なら注入 */
+                u32 *ivt = (u32 *)v86_linear(0, 0);
+                u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
+                u16 handler_seg = (u16)(ivt[0x09] >> 16);
+                int is_dummy = V86_IS_DUMMY_IVT(ivt[0x09]);
+
+                v86_pending_irq &= ~(1U << 1);
+
+                if (!is_dummy) {
+                    v86_pic_set_isr(0, isr | 2);
+                }
+                v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)2);
+
+                v86_gp_inject_irq(regs, handler_seg, handler_off);
+            }
+        }
     }
 
     return 0;
@@ -992,33 +1079,7 @@ void v86_inject_timer_irq(u32 *regs)
     }
 
     /* ================================================================ */
-    /*  §5 PITタイマレート反映 (分周比チェック)                          */
-    /*                                                                  */
-    /*  ゲストが Counter#0 の reload_value を OS32ベースレート(0x4E00=100Hz) */
-    /*  より大きい値に変更した場合、低い頻度で IRQ0 を注入する。   */
-    /*  divisor=1: 毎100Hzティック注入 (OS32デフォルト)               */
-    /*  divisor=2: 2ティックに1回 = 50Hz                                */
-    /* ================================================================ */
-    irq_divisor = v86_pit_get_irq_divisor();
-    if (irq_divisor > 1 && (v86_irq0_call_count % irq_divisor) != 0) {
-        /* 分周スキップ: Auto-Typerとセッションtick処理は行う */
-        v86_session_on_tick();
-        return;
-    }
-
-    /* ================================================================ */
-    /*  Auto-Typer (自動キー入力)                                       */
-    /*  VDOS起動時に指定されたコマンド文字列をBDAキーボードバッファに   */
-    /*  徐々に流し込む                                                  */
-    /* ================================================================ */
-    /* VSYNC (INT 0Ah) 注入 — タイマIRQに同期して処理 */
-    v86_inject_vsync_irq(regs);
-
-    /* Auto-Typer + 強制脱出ホットキー (v86_session.c に委譲) */
-    v86_session_on_tick();
-
-    /* ================================================================ */
-    /*  タイムアウト検出: GPハンドラが呼ばれない状況でも確実にV86終了   */
+    /*  タイムアウト検出 (最優先 — 分周スキップより前に実行)            */
     /*                                                                  */
     /*  V86ゲストが通常命令(MOV/CMP/JMP等)だけのループに入った場合、   */
     /*  GPは発生せずGPハンドラ内のタイムアウトは実行されない。          */
@@ -1027,6 +1088,10 @@ void v86_inject_timer_irq(u32 *regs)
     /*  方式: ゲストのCS:EIPを強制的にHLT命令(0x0050:0x0001)に設定。  */
     /*  次のIRETDでV86に戻るとHLTが実行され、GPハンドラが呼ばれて     */
     /*  v86_exit_requestにより安全にV86を終了する。                    */
+    /*                                                                  */
+    /*  ★重要: ゲストがPIT分周比を変更すると分周スキップが発動し、    */
+    /*  後方のコードに到達しない。タイムアウトは常に実行されなければ   */
+    /*  ならないため、分周チェックより前に配置する。                    */
     /* ================================================================ */
     if (v86_timeout_ticks &&
         ((tick_count - v86_start_tick) > v86_timeout_ticks ||
@@ -1052,17 +1117,58 @@ void v86_inject_timer_irq(u32 *regs)
         return;
     }
 
+    /* ================================================================ */
+    /*  §5 PITタイマレート反映 (分周比チェック)                          */
+    /*                                                                  */
+    /*  ゲストが Counter#0 の reload_value を OS32ベースレート(0x4E00=100Hz) */
+    /*  より大きい値に変更した場合、低い頻度で IRQ0 を注入する。   */
+    /*  divisor=1: 毎100Hzティック注入 (OS32デフォルト)               */
+    /*  divisor=2: 2ティックに1回 = 50Hz                                */
+    /* ================================================================ */
+    irq_divisor = v86_pit_get_irq_divisor();
+    if (irq_divisor > 1 && (v86_irq0_call_count % irq_divisor) != 0) {
+        /* 分周スキップ: Auto-Typerとセッションtick処理は行う */
+        v86_session_on_tick();
+        return;
+    }
+
+    /* ================================================================ */
+    /*  Auto-Typer (自動キー入力)                                       */
+    /*  VDOS起動時に指定されたコマンド文字列をBDAキーボードバッファに   */
+    /*  徐々に流し込む                                                  */
+    /* ================================================================ */
+    /* VSYNC (INT 0Ah) 注入 — タイマIRQに同期して処理 */
+    v86_inject_vsync_irq(regs);
+
+    /* Auto-Typer + 強制脱出ホットキー (v86_session.c に委譲) */
+    v86_session_on_tick();
+
+
     if (v86_virtual_if) {
         u8 isr = v86_pic_get_isr(0);
         u32 *ivt;
         int is_dummy_ivt;
         u16 handler_off, handler_seg;
 
-        /* ISRで処理中なら保留する */
+        /* ISRで処理中なら保留する
+         * フェールセーフ: ゲストがEOIを送らない場合(ダミーIVTハンドラ等)、
+         * ISRが残り続けて全IRQ0注入がブロックされる。
+         * 100tick (1秒) 経過してもEOIが来なければISRを自動クリアする。 */
         if (isr & 1) {
-            v86_irq0_isr_count++;
-            v86_set_pending_irq(0);
-            return;
+            static u32 isr_stuck_start = 0;
+            if (isr_stuck_start == 0) {
+                isr_stuck_start = v86_irq0_call_count;
+            }
+            if ((v86_irq0_call_count - isr_stuck_start) > 100) {
+                /* ISR強制クリア */
+                v86_pic_set_isr(0, isr & ~(u8)1);
+                isr_stuck_start = 0;
+                /* フォールスルーして注入を試みる */
+            } else {
+                v86_irq0_isr_count++;
+                v86_set_pending_irq(0);
+                return;
+            }
         }
 
         /* IVTの状態を確認 (ダミーかどうか記録するが、ブロックはしない) */

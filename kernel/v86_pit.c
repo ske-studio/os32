@@ -140,6 +140,10 @@ int v86_pit_io(u16 port, u8 *val, int is_write)
                 c->read_phase = 0;
                 c->latched = 0;
             }
+            /* Counter 1 (ビープ音) のコマンドはハードウェアにもパススルー */
+            if (sc == 1) {
+                outp(port, *val);
+            }
         }
         return 1;
     }
@@ -171,6 +175,10 @@ int v86_pit_io(u16 port, u8 *val, int is_write)
                 c->last_tick = tick_count;
             }
             break;
+        }
+        /* Counter 1 (ビープ音) はハードウェアにもパススルー */
+        if (cnum == 1) {
+            outp(port, *val);
         }
     } else {
         /* カウンタからの読み出し */
@@ -230,4 +238,13 @@ u32 v86_pit_get_irq_divisor(void)
     div = rv / DEFAULT_RELOAD;
     if (div == 0) div = 1;
     return div;
+}
+
+/* ====================================================================== */
+/*  v86_pit_get_counter0_reload — Counter#0 のリロード値を返す             */
+/*  デバッグログ用。ゲストが設定した値をそのまま返す。                    */
+/* ====================================================================== */
+u16 v86_pit_get_counter0_reload(void)
+{
+    return counters[0].reload_value;
 }

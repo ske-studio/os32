@@ -15,9 +15,7 @@
 
 /* disk.h は CHS版 disk_read/disk_write を宣言しており、
  * FatFSの diskio.h の disk_read/disk_write と名前が衝突する。
- * LBA関数のみ forward宣言して回避。 */
-extern int disk_read_lba(int drv, int lba, int count, void *buf);
-extern int disk_write_lba(int drv, int lba, int count, const void *buf);
+ * FDD は fdc_read_sector/fdc_write_sector を直接使用する。 */
 
 #include "ide.h"
 #include "rtc.h"
@@ -111,10 +109,14 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: disk_read_lba() は1セクタずつ読む */
+        /* FDD: fdc_read_sector (CHS ネイティブ) を直接使用 */
         for (i = 0; i < count; i++) {
-            rc = disk_read_lba(fdd_drive, (int)(sector + i), 1,
-                               buff + i * FDC_SECTOR_SIZE);
+            int lba = (int)(sector + i);
+            int sect = (lba % FDC_SPT) + 1;
+            int head = (lba / FDC_SPT) % FDC_HEADS;
+            int cyl  = lba / (FDC_SPT * FDC_HEADS);
+            rc = fdc_read_sector(fdd_drive, cyl, head, sect,
+                                 buff + i * FDC_SECTOR_SIZE);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;
@@ -163,10 +165,14 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: disk_write_lba() は1セクタずつ書く */
+        /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用 */
         for (i = 0; i < count; i++) {
-            rc = disk_write_lba(fdd_drive, (int)(sector + i), 1,
-                                buff + i * FDC_SECTOR_SIZE);
+            int lba = (int)(sector + i);
+            int sect = (lba % FDC_SPT) + 1;
+            int head = (lba / FDC_SPT) % FDC_HEADS;
+            int cyl  = lba / (FDC_SPT * FDC_HEADS);
+            rc = fdc_write_sector(fdd_drive, cyl, head, sect,
+                                  buff + i * FDC_SECTOR_SIZE);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;

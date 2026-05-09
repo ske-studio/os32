@@ -374,13 +374,39 @@ extern void snd_tick(void);  /* kernel/snd_engine.c */
 
 /* V86割り込みリフレクト用 */
 #include "v86.h"
+#include "v86_session.h"
 
 void timer_handler(u32 *regs)
 {
-    snd_tick();
+    /* V86モード中はOS32のsnd_tickをスキップ
+     * (ゲストがFM音源を直接制御するため、競合を防止) */
+    if (!v86_active) {
+        snd_tick();
+    }
 
     /* V86モード中: IRQ0 (INT 08h) をV86タスクにリフレクト予約 */
     if (v86_active) {
+        /* ★ V86タイムアウト強制終了
+         * timer_handler内で直接longjmpする。
+         * v86_test_exit経由ではなく直接exec_longjmpを呼ぶことで、
+         * STIやNULLチェック等の中間処理をスキップする。 */
+        {
+            extern u32 v86_timeout_ticks, v86_start_tick;
+            extern volatile u32 tick_count;
+            extern u32 *v86_current_jmpbuf;
+            extern void exec_longjmp(u32 *buf);
+            if (v86_timeout_ticks &&
+                (tick_count - v86_start_tick) > v86_timeout_ticks &&
+                v86_current_jmpbuf) {
+                v86_request_exit(V86_EXIT_TIMEOUT);
+                /* PIC EOI送信 (longjmpでIRQスタブに戻らないため) */
+                outp(0x00, 0x20);
+                /* 割り込み有効化 (IRQコンテキストから脱出するため) */
+                _enable();
+                exec_longjmp(v86_current_jmpbuf);
+                /* ここには戻らない */
+            }
+        }
         v86_inject_timer_irq(regs);
     }
 }

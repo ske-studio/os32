@@ -16,6 +16,8 @@
 #define BDA_KB_HEAD       0x0524   /* 取出ポインタ (消費側: DOS が進める, WORD) */
 #define BDA_KB_TAIL       0x0526   /* 入力ポインタ (生産側: kbd/auto-typerが進める, WORD) */
 #define BDA_KB_COUNT      0x0528   /* バッファ内キー数 (BYTE) */
+#define BDA_KB_KEY_STS    0x052A   /* キー押下状態テーブル (16バイト, 128ビット) */
+                                   /* bit=1: 押下中。INT 09hで更新、INT 18h AH=04hで参照 */
 
 /* ====================================================================== */
 /*  メモリ・システム情報                                                    */

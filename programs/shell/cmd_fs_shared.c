@@ -32,7 +32,8 @@ void fs_dummy_ls_cb(const DirEntry_Ext *entry, void *ctx)
 /* ======================================================================== */
 int fs_is_dir(const char *path)
 {
-    int rc = g_api->sys_ls(path, (void *)fs_dummy_ls_cb, 0);
+    int found = 0;
+    int rc = g_api->sys_ls(path, (void *)fs_dummy_ls_cb, &found);
     return (rc == 0);
 }
 

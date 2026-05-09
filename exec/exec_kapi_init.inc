@@ -153,9 +153,15 @@ extern int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdli
 extern int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline);
 extern int __cdecl wrap_sys_v86_boot_physical_ex(int drv, int media, const char *cmdline);
 extern int __cdecl wrap_sys_v86_boot_native(const char *path);
+extern void __cdecl wrap_sys_v86_set_debug(int enabled);
+extern void __cdecl wrap_sys_get_build_info(char *buf, int size);
+extern int __cdecl wrap_loop_attach(const char *path, int slot);
+extern void __cdecl wrap_loop_detach(int slot);
+extern int __cdecl wrap_loop_status(int slot, u32 *total, int *bps);
+extern int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 33;
+kapi->version = 35;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -312,4 +318,10 @@ kapi->version = 33;
     kapi->sys_v86_boot_physical = wrap_sys_v86_boot_physical;
     kapi->sys_v86_boot_physical_ex = wrap_sys_v86_boot_physical_ex;
     kapi->sys_v86_boot_native = wrap_sys_v86_boot_native;
+    kapi->sys_v86_set_debug = wrap_sys_v86_set_debug;
+    kapi->sys_get_build_info = wrap_sys_get_build_info;
+    kapi->loop_attach = wrap_loop_attach;
+    kapi->loop_detach = wrap_loop_detach;
+    kapi->loop_status = wrap_loop_status;
+    kapi->dev_blk_read = wrap_dev_blk_read;
     kapi->sbrk_heap_limit = 0;

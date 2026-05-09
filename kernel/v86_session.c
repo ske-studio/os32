@@ -50,7 +50,7 @@ static V86Session current_session;
 static u32 v86_session_jmpbuf[6];
 
 /* V86テスト用カーネルスタック (16KB) */
-static u8 v86_kstack[16384] __attribute__((aligned(16)));
+static u8 v86_kstack[65536] __attribute__((aligned(16)));
 
 /* TSS ESP0保存 (static — longjmp後にスタック上のローカル変数が壊れるため) */
 static u32 v86_saved_esp0;
@@ -259,6 +259,120 @@ static void v86_session_run_core(void)
     /* ジャンプバッファをアクティブに設定 */
     v86_current_jmpbuf = v86_session_jmpbuf;
 
+    /* ================================================================ */
+    /*  §7.5 V86 enter前にFM音源 (OPN) を完全リセット                   */
+    /*                                                                  */
+    /*  OS32のサウンドエンジンが残したレジスタ状態をクリアする。          */
+    /*  Ys等のゲームはSSGレジスタ#0への書き込み→読み戻しでFM検出を     */
+    /*  行うため、ミキサーやタイマー制御レジスタに不整合があると         */
+    /*  検出が失敗し、サウンドが初期化されない。                         */
+    /* ================================================================ */
+    {
+        int i;
+        /* SSGレジスタクリア (00h-0Dh) */
+        for (i = 0; i <= 0x0D; i++) {
+            outp(0x188, (u8)i);
+            io_wait(); io_wait(); io_wait();
+            io_wait(); io_wait(); io_wait();
+            outp(0x18A, 0);
+            io_wait(); io_wait(); io_wait(); io_wait();
+            io_wait(); io_wait(); io_wait(); io_wait();
+            io_wait(); io_wait(); io_wait(); io_wait();
+            io_wait(); io_wait(); io_wait(); io_wait();
+        }
+        /* SSGミキサー: I/Oポート方向を入力に設定 (D7=1, D6=0)
+         * BIOSデフォルト値を模倣。ゲームのジョイスティック検出に影響。
+         * Tone/Noise全OFF (bit0-5=1) */
+        outp(0x188, 0x07);
+        io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait();
+        outp(0x18A, 0xBF);
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+        /* FM全チャンネル Key-OFF */
+        outp(0x188, 0x28);
+        io_wait(); io_wait(); io_wait();
+        outp(0x18A, 0x00);
+        io_wait(); io_wait(); io_wait(); io_wait();
+        outp(0x188, 0x28);
+        io_wait(); io_wait(); io_wait();
+        outp(0x18A, 0x01);
+        io_wait(); io_wait(); io_wait(); io_wait();
+        outp(0x188, 0x28);
+        io_wait(); io_wait(); io_wait();
+        outp(0x18A, 0x02);
+        io_wait(); io_wait(); io_wait(); io_wait();
+        /* タイマー停止 + フラグリセット */
+        outp(0x188, 0x27);
+        io_wait(); io_wait(); io_wait();
+        outp(0x18A, 0x30);  /* RSETA+RSETB=1, 他=0 → フラグクリア+タイマー停止 */
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+        io_wait(); io_wait(); io_wait(); io_wait();
+    }
+
+    /* ================================================================ */
+    /*  §7.6 メモリスイッチ SW4 (0xA3FEE) の初期化                      */
+    /*                                                                  */
+    /*  PC-9800Bible §1-6: SW4 bit3 = サウンドボード有無                */
+    /*  V86ではBIOS POSTをスキップするため、メモリスイッチが             */
+    /*  未初期化(=0)の場合がある。ゲームがこのフラグを参照して           */
+    /*  FM音楽の有効/無効を判定するため、明示的に設定する。              */
+    /*                                                                  */
+    /*  メモリスイッチ書き込み手順:                                      */
+    /*    1. I/O 68H に 0DH を出力 (書き込み許可)                       */
+    /*    2. メモリに書き込み                                            */
+    /*    3. I/O 68H に 0CH を出力 (書き込み禁止)                       */
+    /* ================================================================ */
+    {
+        volatile u8 *sw4 = (volatile u8 *)0xA3FEE;
+        u8 val = *sw4;
+        kprintf(0x0A, "[V86] MemSW4(A3FEE)=0x%02X", (unsigned)val);
+        if (!(val & 0x08)) {
+            /* bit3=0: サウンドボードなし → 1に設定 */
+            outp(0x68, 0x0D);  /* メモリスイッチ書き込み許可 */
+            *sw4 = val | 0x08;
+            outp(0x68, 0x0C);  /* メモリスイッチ書き込み禁止 */
+            kprintf(0x0A, " -> 0x%02X (SndBoard ON)\n",
+                    (unsigned)*sw4);
+        } else {
+            kprintf(0x0A, " (SndBoard already ON)\n");
+        }
+    }
+
+    /* ================================================================ */
+    /*  §7.7 サウンドBIOS ROM (CC000h) の確認                           */
+    /*                                                                  */
+    /*  PC-9800Bible §1-6: SW4 bit3=1 のとき CC000-CFFFF に             */
+    /*  サウンドBIOS ROMが存在する。ゲームがこの領域を参照して           */
+    /*  FM音楽初期化の可否を判定している可能性がある。                   */
+    /* ================================================================ */
+    {
+        volatile u8 *snd_rom = (volatile u8 *)0xCC000;
+        int si;
+        kprintf(0x0A, "[V86] SndBIOS(CC000)=");
+        for (si = 0; si < 16; si++)
+            kprintf(0x0A, "%02X", (unsigned)snd_rom[si]);
+        kprintf(0x0A, "\n");
+    }
+
+    /* ★ デバッグ: V86 enter前にPIC IMRとtick_countを確認
+     * IRQ0がマスクされている場合はアンマスクする。 */
+    {
+        extern volatile u32 tick_count;
+        u8 imr = inp(0x02);
+        kprintf(0x0A, "[V86] PRE-ENTER: IMR=0x%02X tick=%u\n",
+                (unsigned)imr, (unsigned)tick_count);
+        if (imr & 0x01) {
+            /* IRQ0がマスクされている! アンマスクする */
+            kprintf(0xE1, "[V86] WARNING: IRQ0 masked! Unmasking...\n");
+            outp(0x02, imr & ~0x01);
+        }
+    }
+
     if (exec_setjmp(v86_session_jmpbuf) == 0) {
         v86_enter(&ctx);
     }
@@ -283,6 +397,7 @@ static void v86_session_run_core(void)
             "mov %%esp, %%esi\n\t"   /* 現在のESPを保存 */
             "mov %%ebp, %%edi\n\t"   /* 現在のEBPを保存 */
             "mov %0, %%esp\n\t"      /* 一時スタックに切り替え */
+            "call v86_debug_dump_memory_pre\n\t" /* teardown前にメモリダンプ */
             "call v86_mem_teardown\n\t" /* ページテーブル復元 */
             "mov %%esi, %%esp\n\t"   /* ESPを元に戻す (実体が復活) */
             "mov %%edi, %%ebp\n\t"   /* EBPも復元 */
@@ -301,6 +416,12 @@ static void v86_session_run_core(void)
     v86_pending_irq = 0;
 
     _enable();
+
+    /* シリアルポート再初期化 (V86ゲストが設定を壊した場合の安全策) */
+    {
+        extern void serial_init(unsigned long baud);
+        serial_init(9600);
+    }
 
     /* デバッグダンプ (有効時のみ) */
     v86_debug_dump_session();
@@ -580,6 +701,9 @@ int v86_boot_freedos(const char *path, const char *cmdline)
 
     kprintf(0xA1, "[V86] Booting FreeDOS(98) IPL...\n");
 
+    /* デバッグヘッダ即時書き込み */
+    v86_debug_write_header("FreeDOS", path, cmdline);
+
     /* V86実行コア */
     v86_session_run_core();
 
@@ -616,8 +740,8 @@ int v86_boot_native(const char *path)
     kmemset(&current_session, 0, sizeof(current_session));
     current_session.auto_cmd = 0;
 
-    /* ネイティブモード設定: デバッグ用に10秒タイムアウト付き */
-    v86_timeout_ticks = 1000;  /* DEBUG: 10秒タイムアウト */
+    /* ネイティブモード設定: タイムアウト無効 (ゲーム等の長時間実行対応) */
+    v86_timeout_ticks = 0;  /* 無効: 脱出は Ctrl+GRPH+DEL のみ */
     v86_native_mode = 1;
 
     /* イメージファイルオープン */
@@ -792,31 +916,13 @@ int v86_boot_native(const char *path)
     /* VSYNC仮想化を初期化 */
     v86_vsync_init();
 
+    /* デバッグヘッダ即時書き込み */
+    v86_debug_write_header("Native", path, (void *)0);
+
     /* V86実行コア */
     v86_session_run_core();
 
-    /* DEBUG: トレースダンプ */
-    {
-        struct v86_trace_entry *trace;
-        u32 count, idx;
-        int j, n;
-        trace = v86_get_trace(&count, &idx);
-        kprintf(0xA1, "[V86-DIAG] GP count=%u, VSYNC arm=%u inject=%u\n",
-                count, v86_vsync_arm_count, v86_vsync_inject_count);
-        kprintf(0xA1, "[V86-DIAG] timeout CS:IP=%04X:%04X\n",
-                (unsigned)v86_timeout_cs, (unsigned)v86_timeout_ip);
-        n = (int)(count < 16 ? count : 16);
-        kprintf(0xA1, "[V86-DIAG] Last %d GP entries:\n", n);
-        for (j = 0; j < n; j++) {
-            int ti = (int)((idx - 1 - (u32)j) % 128);
-            kprintf(0xA1, "  [-%d] %04X:%04X op=%02X int=%02X AH=%02X\n",
-                    j,
-                    (unsigned)trace[ti].cs, (unsigned)trace[ti].ip,
-                    (unsigned)trace[ti].opcode,
-                    (unsigned)trace[ti].intno,
-                    (unsigned)trace[ti].ah);
-        }
-    }
+    /* デバッグダンプは v86_debug.c の v86_debug_dump_session() で統合処理 */
 
     /* リソース解放 */
     v86_vsync_cleanup();
@@ -899,6 +1005,9 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
 
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
 
+    /* デバッグヘッダ即時書き込み */
+    v86_debug_write_header("PhysicalFDD", "(physical)", cmdline);
+
     /* V86実行コア */
     v86_session_run_core();
 
@@ -979,6 +1088,9 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
 
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d, media=%d)...\n",
             drv, media);
+
+    /* デバッグヘッダ即時書き込み */
+    v86_debug_write_header("PhysicalFDD_EX", "(physical)", cmdline);
 
     /* V86実行コア */
     v86_session_run_core();

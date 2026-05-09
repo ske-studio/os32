@@ -30,6 +30,7 @@
 
 #include "vfs.h"
 #include "fdc.h"
+#include "loop_dev.h"  /* CHS コア API (Phase 1 統合) */
 #include "os32_kapi_shared.h"  /* OS32_Stat, OS_S_IWUSR (§6 ライトプロテクト) */
 
 /* FDDイメージファイル (外部から設定される) */
@@ -37,10 +38,19 @@ static int fdd_fd = -1;
 static u32 fdd_image_offset = 0;
 static u32 fdd_image_size = 0;
 
-/* D88モード: トラックテーブルを保持 */
+/* D88モード: loop_dev スロットで管理 */
 static int fdd_is_d88 = 0;
-#define D88_MAX_TRACKS 164
-static u32 fdd_d88_track_table[D88_MAX_TRACKS];  /* 各トラックのファイルオフセット */
+static int v86_loop_slot = -1;  /* v86 が使用中の loop_dev スロット */
+
+/* D88モード用の動的ジオメトリ (v86_disk_get_geom() 互換) */
+static struct fdc_geom d88_dyn_geom;
+
+/* NP21/W準拠: FDCトラックレジスタ (SEEKコマンドで設定されるシリンダ位置)
+ * D88モードではREADのCLではなくこの値でトラックテーブルを参照する。
+ * 実FDCと同様、SEEKは物理ヘッド位置を設定し、READは論理C/H/R/Nで
+ * セクタを検索する。Ys等のゲームはSEEK位置とREADのCL値を意図的に
+ * 異ならせることでコピープロテクションを実現している。 */
+static u8 fdc_treg = 0;
 
 /* 実FDDモード */
 static int fdd_use_physical = 0;
@@ -94,120 +104,65 @@ void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
 /* ====================================================================== */
 /*  v86_disk_set_d88 — D88形式ディスクイメージを設定                       */
 /*                                                                          */
-/*  D88形式はRAWフラットではなく、各セクタに16バイトヘッダが付く。           */
-/*  トラックテーブル (ファイルオフセット0x20-0x2AF) をキャッシュし、         */
-/*  CHS→オフセット変換時にセクタヘッダを検索する。                          */
+/*  loop_dev_attach_fd でフォーマット自動判別 + アタッチし、                */
+/*  ジオメトリを loop_dev から取得して fdd_geom に反映する。                */
 /* ====================================================================== */
 void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media)
 {
-    int i;
-    u8 tbl[D88_MAX_TRACKS * 4];  /* 164 x 4 = 656 bytes */
+    int slot;
+    u8 cyls, heads, spt;
+    u16 bps;
+    u32 total;
+
+    (void)media;
+    (void)file_size;
 
     fdd_fd = fd;
-    fdd_image_offset = 0;  /* D88ではトラックテーブル経由でアクセス */
+    fdd_image_offset = 0;
     fdd_image_size = file_size;
+
+    /* 空きスロットを探して loop_dev にアタッチ */
+    for (slot = 0; slot < 4; slot++) {
+        if (loop_dev_attach_fd(fd, slot) == 0) {
+            v86_loop_slot = slot;
+            break;
+        }
+    }
+    if (v86_loop_slot < 0) {
+        kprintf(0x0C, "[V86 D88] no free loop slot\n");
+        return;
+    }
+
     fdd_is_d88 = 1;
 
-    switch (media) {
-    case FDC_MEDIA_2DD_640: fdd_geom = &fdc_geom_2dd_640; break;
-    case FDC_MEDIA_2DD_720: fdd_geom = &fdc_geom_2dd_720; break;
-    case FDC_MEDIA_2D_256:  fdd_geom = &fdc_geom_2d_256;  break;
-    default:                fdd_geom = &fdc_geom_2hd;      break;
+    /* loop_dev からジオメトリを取得 */
+    loop_dev_get_geometry(v86_loop_slot, &cyls, &heads, &spt, &bps, &total);
+
+    /* 動的ジオメトリ構築 (v86_disk_get_geom() 互換) */
+    d88_dyn_geom.cyls  = cyls;
+    d88_dyn_geom.heads = heads;
+    d88_dyn_geom.spt   = spt;
+    d88_dyn_geom.bps   = bps;
+    d88_dyn_geom.sec_n = 0;    /* sec_n は loop_dev から直接取得できないため算出 */
+    {
+        u16 tmp = bps;
+        u8 n = 0;
+        while (tmp > 128 && n < 8) { tmp >>= 1; n++; }
+        d88_dyn_geom.sec_n = n;
     }
+    d88_dyn_geom.gap3 = 0x74;  /* デフォルト */
+    d88_dyn_geom.daua_high = 0x90;  /* 2HD デフォルト */
 
-    /* トラックテーブル読み出し (ファイルオフセット 0x20 から 164 x 4 bytes) */
-    vfs_seek(fd, 0x20, 0);
-    vfs_read_fd(fd, tbl, D88_MAX_TRACKS * 4);
-    for (i = 0; i < D88_MAX_TRACKS; i++) {
-        fdd_d88_track_table[i] = *(u32 *)(tbl + i * 4);
-    }
+    fdd_geom = &d88_dyn_geom;
 
-    /* トラック0のセクタヘッダから実際のジオメトリを自動検出
-     * D88のmedia_flagは信頼性が低い場合があるため、
-     * セクタヘッダのN値とSPTから正確なジオメトリを決定する */
-    if (fdd_d88_track_table[0] != 0 && fdd_d88_track_table[0] < file_size) {
-        u8 sec0[16];
-        u8 actual_n;
-        u16 actual_spt;
-
-        vfs_seek(fd, fdd_d88_track_table[0], 0);
-        vfs_read_fd(fd, sec0, 16);
-        actual_n   = sec0[3];       /* N: セクタ長コード */
-        actual_spt = *(u16 *)(sec0 + 4);  /* SPT */
-
-        /* N値からメディア種別を再判定 */
-        if (actual_n == 1 && actual_spt == 16) {
-            /* 2D: 256 bytes/sector, 16 sectors/track */
-            fdd_geom = &fdc_geom_2d_256;
-        } else if (actual_n == 2 && actual_spt == 8) {
-            /* 2DD 640KB: 512 bytes/sector, 8 sectors/track */
-            fdd_geom = &fdc_geom_2dd_640;
-        } else if (actual_n == 2 && actual_spt == 9) {
-            /* 2DD 720KB: 512 bytes/sector, 9 sectors/track */
-            fdd_geom = &fdc_geom_2dd_720;
-        } else if (actual_n == 3 && actual_spt == 8) {
-            /* 2HD: 1024 bytes/sector, 8 sectors/track */
-            fdd_geom = &fdc_geom_2hd;
-        }
-        /* その他: media引数で設定済みのジオメトリを使う */
-    }
+    kprintf(0x0A,
+        "[V86 D88] slot=%d C=%d H=%d SPT=%d BPS=%d\n",
+        v86_loop_slot,
+        (int)cyls, (int)heads, (int)spt, (int)bps);
 }
 
-/* ====================================================================== */
-/*  d88_seek_sector — D88形式でCHSに対応するセクタデータのオフセットを検索  */
-/*                                                                          */
-/*  トラックテーブルからトラック先頭を求め、セクタヘッダのR(セクタID)を     */
-/*  走査して一致するセクタのデータ部オフセットを返す。                       */
-/*                                                                          */
-/*  D88はトラックごとに異なるセクタサイズ/SPTを持てる（混合フォーマット）。 */
-/*  例: Track 0 = N=1 (256B), SPT=16 (IPL用)                               */
-/*      Track 1+ = N=3 (1024B), SPT=5 (ゲームデータ)                       */
-/*                                                                          */
-/*  out_data_len: [OUT] 見つかったセクタの実データ長 (NULL可)               */
-/*  out_spt:      [OUT] トラック内のセクタ数 (NULL可)                       */
-/*  戻り値: データ部のファイルオフセット。見つからない場合は 0。             */
-/* ====================================================================== */
-static u32 d88_seek_sector(u8 cyl, u8 head, u8 sect_r,
-                           u32 *out_data_len, u16 *out_spt)
-{
-    u32 track_idx;
-    u32 trk_off;
-    u8 sec_hdr[16];
-    u32 pos;
-    int i;
-    int spt;
-
-    track_idx = (u32)cyl * 2 + (u32)head;
-    if (track_idx >= D88_MAX_TRACKS) return 0;
-
-    trk_off = fdd_d88_track_table[track_idx];
-    if (trk_off == 0 || trk_off >= fdd_image_size) return 0;
-
-    /* トラック先頭のセクタヘッダを読んでSPTを取得 */
-    vfs_seek(fdd_fd, trk_off, 0);
-    vfs_read_fd(fdd_fd, sec_hdr, 16);
-    spt = *(u16 *)(sec_hdr + 4);  /* セクタヘッダ offset 4: このトラックのセクタ数 */
-    if (spt <= 0 || spt > 64) spt = 8;  /* 安全ガード */
-
-    if (out_spt) *out_spt = (u16)spt;
-
-    /* セクタを走査して R = sect_r を探す */
-    pos = trk_off;
-    for (i = 0; i < spt; i++) {
-        u32 data_len;
-        vfs_seek(fdd_fd, pos, 0);
-        vfs_read_fd(fdd_fd, sec_hdr, 16);
-        data_len = *(u16 *)(sec_hdr + 14);  /* offset 0x0E: 実データサイズ */
-        if (data_len == 0) data_len = (u32)(128 << sec_hdr[3]);  /* Nから計算 */
-
-        if (sec_hdr[2] == sect_r) {  /* sec_hdr[2] = R (セクタID) */
-            if (out_data_len) *out_data_len = data_len;
-            return pos + 16;  /* データ部の先頭 = ヘッダ直後 */
-        }
-        pos += 16 + data_len;  /* 次のセクタへ */
-    }
-    return 0;  /* 見つからなかった */
-}
+/* d88_seek_sector は loop_dev_seek_d88 に統合済み (Phase 1)
+ * v86_loop_slot 経由で loop_dev.c の CHS コア API を呼び出す */
 
 /* ====================================================================== */
 /*  v86_disk_set_physical — 実FDDモードを有効化                           */
@@ -234,6 +189,11 @@ void v86_disk_set_physical(int drv, fdc_media_t media)
 /* ====================================================================== */
 void v86_disk_clear(void)
 {
+    /* loop_dev スロットをデタッチ */
+    if (v86_loop_slot >= 0) {
+        loop_dev_detach(v86_loop_slot);
+        v86_loop_slot = -1;
+    }
     fdd_fd = -1;
     fdd_image_offset = 0;
     fdd_image_size = 0;
@@ -283,6 +243,22 @@ int v86_bios_int1b(u32 *regs)
     u8 daua = (u8)(regs[V86_REG_EAX] & 0xFF);
     struct v86_disk_log_entry *log_entry;
 
+    /* ★ デバッグ: INT 1Bh呼び出しをシリアルログに出力 */
+    {
+        extern int v86_debug_enabled;
+        if (v86_debug_enabled) {
+            kprintf(0x0A, "[V86] INT 1Bh AH=%02X AL=%02X CL=%02X CH=%02X DH=%02X DL=%02X BX=%04X ES=%04X BP=%04X\n",
+                    (unsigned)func, (unsigned)daua,
+                    (unsigned)(regs[V86_REG_ECX] & 0xFF),
+                    (unsigned)((regs[V86_REG_ECX] >> 8) & 0xFF),
+                    (unsigned)((regs[V86_REG_EDX] >> 8) & 0xFF),
+                    (unsigned)(regs[V86_REG_EDX] & 0xFF),
+                    (unsigned)(regs[V86_REG_EBX] & 0xFFFF),
+                    (unsigned)(regs[V86_REG_ES] & 0xFFFF),
+                    (unsigned)(regs[V86_REG_EBP] & 0xFFFF));
+        }
+    }
+
     /* デバッグ: リングバッファにパラメータを記録 */
     log_entry = &disk_log[disk_log_idx];
     log_entry->func = func;
@@ -296,23 +272,6 @@ int v86_bios_int1b(u32 *regs)
     log_entry->bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
     log_entry->result_offset = -99;  /* 未計算マーカー */
     log_entry->status = 0xFF;        /* 未完了マーカー */
-
-    /* 計装: 最初の64回のINT 1Bh呼び出しをシリアルに出力 */
-    {
-        static u32 _int1b_trace_n = 0;
-        if (_int1b_trace_n < 64) {
-            kprintf(0xA1, "[1B] AH=%02X C=%u H=%u R=%u N=%u BX=%u ES:BP=%04X:%04X\n",
-                    (unsigned)func,
-                    (unsigned)log_entry->cylinder,
-                    (unsigned)log_entry->head,
-                    (unsigned)log_entry->sector,
-                    (unsigned)log_entry->sector_len,
-                    (unsigned)log_entry->xfer_bytes,
-                    (unsigned)log_entry->es,
-                    (unsigned)log_entry->bp);
-            _int1b_trace_n++;
-        }
-    }
 
     /* DA/UAチェック: 現在マウント中のメディアの DA/UA 上位ニブルと一致するか確認 */
     {
@@ -343,6 +302,21 @@ int v86_bios_int1b(u32 *regs)
         /* ============================================================ */
         /*  機能 03h: ドライブ初期化 (Initialize)                       */
         /* ============================================================ */
+        /* ============================================================ */
+        /*  機能 00h: シーク/リセット (NP21/W bios1b.c 準拠)              */
+        /*  AH bit4 (0x10) が立っている場合はシーク実行。                 */
+        /*  常に成功を返す。                                              */
+        /* ============================================================ */
+        case 0x00:
+            /* NP21/W bios1b.c 準拠: SEEK フラグ (bit4) があればトラックレジスタ更新 */
+            if (func & 0x10) {
+                fdc_treg = (u8)(regs[V86_REG_ECX] & 0xFF);  /* CL = シリンダ */
+            }
+            regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
+            regs[V86_REG_EFLAGS] &= ~1UL;
+            log_entry->status = 0x00;
+            break;
+
         case 0x03:
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
@@ -428,6 +402,16 @@ int v86_bios_int1b(u32 *regs)
             u8 final_cyl;
             u8 final_head;
             u8 final_sect_r;
+            /* NP21/W bios1b.c 準拠: DA/UA bit2 でヘッド反転 (XOR)
+             * fdc.hd (トラック選択用) = (DH ^ (AL>>2)) & 1
+             * fdc.H  (セクタ検索用) = DH (raw、変更しない)
+             * D88モード: track_idx = fdc_treg*2 + fdc_hd */
+            u8 fdc_hd = (head_dh ^ (daua >> 2)) & 1;
+
+            /* NP21/W bios1b.c 準拠: AH bit4 (SEEK flag) → auto-seek */
+            if (func & 0x10) {
+                fdc_treg = cylinder;  /* SEEKフラグ付きREAD: トラックレジスタ更新 */
+            }
             {
                 u32 byte_offset;
 
@@ -452,19 +436,29 @@ int v86_bios_int1b(u32 *regs)
                         DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
                     }
 
-                    /* CHS範囲チェック */
-                    if (cylinder >= g->cyls || head_dh >= g->heads) {
-                        DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
+                    /* CHS範囲チェック
+                     * D88モード: 混合フォーマット/2-in-1ではジオメトリが
+                     * 信頼できないため、d88_seek_sector_unit内の
+                     * トラックテーブル検証に任せてここではスキップする */
+                    if (!fdd_is_d88) {
+                        if (cylinder >= g->cyls || head_dh >= g->heads) {
+                            DISK_ERROR_RETURN(log_entry, 0xC0, -1, regs);
+                        }
                     }
 
-                    /* CHS → バイトオフセット変換 */
-                    byte_offset = ((u32)cylinder * g->heads + (u32)head_dh)
-                                  * ((u32)g->spt * g->bps)
-                                  + (u32)sector_dl * g->bps;
+                    /* CHS → バイトオフセット変換 (RAW/FDIモード用)
+                     * D88モードでは d88_seek_sector_unit がオフセットを返すため不要 */
+                    if (!fdd_is_d88) {
+                        byte_offset = ((u32)cylinder * g->heads + (u32)head_dh)
+                                      * ((u32)g->spt * g->bps)
+                                      + (u32)sector_dl * g->bps;
 
-                    /* 範囲チェック (SPT境界外もここでキャッチされる) */
-                    if (byte_offset >= fdd_image_size) {
-                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)byte_offset, regs);
+                        /* 範囲チェック (SPT境界外もここでキャッチされる) */
+                        if (byte_offset >= fdd_image_size) {
+                            DISK_ERROR_RETURN(log_entry, 0xC0, (i32)byte_offset, regs);
+                        }
+                    } else {
+                        byte_offset = 0; /* D88: ダミー (ログ用のみ) */
                     }
 
                     log_entry->result_offset = (i32)byte_offset;
@@ -512,19 +506,24 @@ int v86_bios_int1b(u32 *regs)
                 final_head = cur_head;
                 final_sect_r = cur_sect + 1; /* 1ベース */
             } else if (fdd_is_d88) {
-                /* D88モード: セクタヘッダ経由でアクセス
-                 * D88はトラックごとに異なるセクタサイズ/SPTを持てる
-                 * (混合フォーマット)。d88_seek_sector が返す実データ長と
-                 * SPTを使用し、固定ジオメトリへの依存を排除する。 */
+                /* D88モード: µPD765A FDCエミュレーション
+                 * トラック選択: fdc_treg + fdc_hd (SEEK物理位置)
+                 * セクタID照合: cylinder(CL) + head_dh(DH) + R(DL)
+                 * Ys等のコピープロテクションでは SEEK位置とコマンドCHが
+                 * 意図的に異なる (例: SEEK cyl=1 → READ C=0, H=1) */
                 u8 cur_sect_r = sector_dl + 1;  /* D88のRは1ベース */
-                u8 cur_head = head_dh;
-                u8 cur_cyl = cylinder;
+                u8 cur_trk_head = fdc_hd;       /* トラック選択用 (物理) */
+                u8 cur_trk_cyl = fdc_treg;      /* トラック選択用 (物理) */
+                u8 cur_id_c = cylinder;          /* セクタID照合用 (コマンドCL) */
+                u8 cur_id_h = head_dh;           /* セクタID照合用 (コマンドDH) */
                 while (remaining > 0) {
                     u32 sec_data_len = 0;
                     u16 trk_spt = 0;
-                    u32 data_off = d88_seek_sector(cur_cyl, cur_head,
-                                                   cur_sect_r,
-                                                   &sec_data_len, &trk_spt);
+                    u32 data_off = loop_dev_seek_d88(
+                        v86_loop_slot,
+                        cur_trk_cyl, cur_trk_head,
+                        cur_id_c, cur_id_h, cur_sect_r,
+                        &sec_data_len, &trk_spt);
                     if (data_off == 0) {
                         DISK_ERROR_RETURN(log_entry, 0xC0, (i32)cur_sect_r, regs);
                     }
@@ -540,15 +539,17 @@ int v86_bios_int1b(u32 *regs)
                     cur_sect_r++;
                     if (trk_spt > 0 && cur_sect_r > (u8)trk_spt) {
                         cur_sect_r = 1;
-                        cur_head++;
-                        if (cur_head >= 2) {
-                            cur_head = 0;
-                            cur_cyl++;
+                        cur_trk_head++;
+                        cur_id_h++;
+                        if (cur_trk_head >= 2) {
+                            cur_trk_head = 0;
+                            cur_trk_cyl++;
+                            cur_id_c++;
                         }
                     }
                 }
-                final_cyl = cur_cyl;
-                final_head = cur_head;
+                final_cyl = cur_trk_cyl;
+                final_head = cur_trk_head;
                 final_sect_r = cur_sect_r; /* D88: 既に1ベース */
             } else {
                 /* RAW/FDI ファイルモード: VFS seek+read */
@@ -573,6 +574,81 @@ int v86_bios_int1b(u32 *regs)
             log_entry->status = 0x00;
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
+
+            /* ★ デバッグ: ディスクREAD後のメモリスナップショット */
+            {
+                extern int v86_debug_enabled;
+                static u8 prev_fm_flag = 0;
+                if (v86_debug_enabled && disk_log_count < 100) {
+                    u8 *fm_flag = v86_phys_addr(0x0060, 0x0530);
+                    u8 *fntbl   = v86_phys_addr(0x0060, 0x056E);
+                    u8 *disk_eq = v86_phys_addr(0x0000, 0x055C);
+                    u8 *drv_ua  = v86_phys_addr(0x0060, 0x0531);
+                    u16 *ivt08  = (u16 *)v86_phys_addr(0x0000, 0x0020);
+                    u16 ivt08_off = ivt08[0];
+                    u16 ivt08_seg = ivt08[1];
+                    int si;
+                    kprintf(0x0A, "[S#%u] DE=%02X UA=%02X 0530=%02X FN=",
+                            (unsigned)disk_log_count,
+                            (unsigned)disk_eq[0],
+                            (unsigned)drv_ua[0],
+                            (unsigned)fm_flag[0]);
+                    for (si = 0; si < 6; si++)
+                        kprintf(0x0A, "%c",
+                                (fntbl[si] >= 0x20 && fntbl[si] < 0x7F)
+                                ? fntbl[si] : '.');
+                    kprintf(0x0A, "/");
+                    for (si = 6; si < 12; si++)
+                        kprintf(0x0A, "%c",
+                                (fntbl[si] >= 0x20 && fntbl[si] < 0x7F)
+                                ? fntbl[si] : '.');
+                    kprintf(0x0A, " IV8=%04X:%04X",
+                            (unsigned)ivt08_seg,
+                            (unsigned)ivt08_off);
+                    /* タイマーハンドラがフック済みなら作業領域をダンプ */
+                    if (ivt08_seg != 0x003F && ivt08_seg != 0x0050) {
+                        u8 *wk = v86_phys_addr(ivt08_seg, 0x03C0);
+                        kprintf(0x0A, " WK=");
+                        for (si = 0; si < 8; si++)
+                            kprintf(0x0A, "%02X", (unsigned)wk[si]);
+                    }
+                    kprintf(0x0A, "\n");
+                    /* 0530が0→非0に変わった直後: 0060:0528-053F(24バイト)ダンプ */
+                    if (prev_fm_flag == 0 && fm_flag[0] != 0) {
+                        u8 *area = v86_phys_addr(0x0060, 0x0528);
+                        kprintf(0x0A, "[FM] 0528=");
+                        for (si = 0; si < 24; si++)
+                            kprintf(0x0A, "%02X", (unsigned)area[si]);
+                        kprintf(0x0A, "\n");
+                        /* 1500:0000 にロードされるファイルテーブルからDKMUS検索 */
+                        {
+                            u8 *ft = v86_phys_addr(0x1500, 0x0000);
+                            int fi;
+                            kprintf(0x0A, "[FT] 1500:0000=");
+                            for (fi = 0; fi < 64; fi++)
+                                kprintf(0x0A, "%02X", (unsigned)ft[fi]);
+                            kprintf(0x0A, "\n");
+                            /* 0060:0000 から DKMUS1 (44 4B 4D 55 53 31) を検索 */
+                            {
+                                u8 *seg0060 = v86_phys_addr(0x0060, 0x0000);
+                                int found = 0;
+                                for (fi = 0; fi < 0x1F00 - 6; fi++) {
+                                    if (seg0060[fi]   == 0x44 &&
+                                        seg0060[fi+1] == 0x4B &&
+                                        seg0060[fi+2] == 0x4D &&
+                                        seg0060[fi+3] == 0x55 &&
+                                        seg0060[fi+4] == 0x53) {
+                                        kprintf(0x0A, "[DK] DKMUS at 0060:%04X\n", fi);
+                                        found = 1;
+                                    }
+                                }
+                                if (!found) kprintf(0x0A, "[DK] DKMUS not found in 0060\n");
+                            }
+                        }
+                    }
+                    prev_fm_flag = fm_flag[0];
+                }
+            }
 
             /* BDA FDC結果バッファ更新 (0000:0564 + us*8)
              * NP21/W biosfd_resultout() と同等。
@@ -605,12 +681,22 @@ int v86_bios_int1b(u32 *regs)
             u8 wr_seclen = (u8)((regs[V86_REG_ECX] >> 8) & 0xFF);
             u8 wr_head = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);
             u8 wr_sect = (u8)(regs[V86_REG_EDX] & 0xFF);
+
             u16 wr_es = (u16)(regs[V86_REG_ES] & 0xFFFF);
             u16 wr_bp = (u16)(regs[V86_REG_EBP] & 0xFFFF);
             u8 *wr_buf;
             i32 wr_off;
             u32 wr_rem, wr_chunk;
             u8 wfinal_cyl, wfinal_head, wfinal_sect_r;
+
+            /* NP21/W bios1b.c 準拠: DA/UA bit2 でヘッド反転 (XOR)
+             * トラック選択にのみ使用、raw DHはそのまま維持 */
+            u8 wr_fdc_hd = (wr_head ^ (daua >> 2)) & 1;
+
+            /* AH bit4 (SEEK flag) → auto-seek */
+            if (func & 0x10) {
+                fdc_treg = wr_cyl;
+            }
 
             /* CH バリデーション (READと同一) */
             {
@@ -683,15 +769,20 @@ int v86_bios_int1b(u32 *regs)
                 wfinal_head = wc_h;
                 wfinal_sect_r = wc_s + 1;
             } else if (fdd_is_d88) {
-                /* D88モード: セクタヘッダ経由でアクセス (混合フォーマット対応) */
+                /* D88モード: WRITE (READ と同一のFDCエミュレーション) */
                 u8 wc_r = wr_sect + 1;  /* D88のRは1ベース */
-                u8 wc_h = wr_head;
-                u8 wc_c = wr_cyl;
+                u8 wc_trk_h = wr_fdc_hd;  /* トラック選択用 */
+                u8 wc_trk_c = fdc_treg;   /* トラック選択用 */
+                u8 wc_id_c = wr_cyl;      /* セクタID照合用 (コマンドCL) */
+                u8 wc_id_h = wr_head;     /* セクタID照合用 (コマンドDH) */
                 while (wr_rem > 0) {
                     u32 sec_data_len = 0;
                     u16 trk_spt = 0;
-                    u32 data_off = d88_seek_sector(wc_c, wc_h, wc_r,
-                                                   &sec_data_len, &trk_spt);
+                    u32 data_off = loop_dev_seek_d88(
+                        v86_loop_slot,
+                        wc_trk_c, wc_trk_h,
+                        wc_id_c, wc_id_h, wc_r,
+                        &sec_data_len, &trk_spt);
                     if (data_off == 0) {
                         DISK_ERROR_RETURN(log_entry, 0xC0, (i32)wc_r, regs);
                     }
@@ -705,15 +796,17 @@ int v86_bios_int1b(u32 *regs)
                     wc_r++;
                     if (trk_spt > 0 && wc_r > (u8)trk_spt) {
                         wc_r = 1;
-                        wc_h++;
-                        if (wc_h >= 2) {
-                            wc_h = 0;
-                            wc_c++;
+                        wc_trk_h++;
+                        wc_id_h++;
+                        if (wc_trk_h >= 2) {
+                            wc_trk_h = 0;
+                            wc_trk_c++;
+                            wc_id_c++;
                         }
                     }
                 }
-                wfinal_cyl = wc_c;
-                wfinal_head = wc_h;
+                wfinal_cyl = wc_trk_c;
+                wfinal_head = wc_trk_h;
                 wfinal_sect_r = wc_r;
             } else {
                 /* RAW/FDI ファイルモード: vfs_seek + vfs_write_fd */
@@ -765,16 +858,8 @@ int v86_bios_int1b(u32 *regs)
             regs[V86_REG_EFLAGS] &= ~1UL;
             break;
 
-        /* ============================================================ */
-        /*  機能 00h: ドライブ状態チェック / リセット                    */
-        /*  AH=00h/10h/20h 等 — 常に成功応答を返す                     */
-        /*  Ys等のゲームがディスクアクセス前にドライブ状態を確認する    */
-        /* ============================================================ */
-        case 0x00:
-            log_entry->status = 0x00;
-            regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
-            regs[V86_REG_EFLAGS] &= ~1UL;
-            break;
+
+
 
         /* ============================================================ */
         /*  機能 02h: 診断読み出し — READと同じ扱い                    */

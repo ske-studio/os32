@@ -67,11 +67,20 @@ static const struct bda_entry bda_defaults[] = {
     { 0x0501, 0x00 },   /* BIOS_FLAG5: bit7=10MHz系, bit2-0=RAM 640KB */
 };
 
-/* IVTダミーハンドラ (IRET命令のみ) — バッキングRAM内に配置 */
-/* 配置先: 0x500 (BDA直後、IPL/DOSフリーエリア (0x600) の手前) 
- * 注意: 以前は0x600に配置していたが、IPLが0x0060:0x0000 (リニア0x600) に
- * ロードされるためIPLコードで上書きされてしまっていた。 */
-#define IVT_HANDLER_BASE   0x0500
+/* IVTダミーハンドラ (IRET命令のみ) — IVT領域内に配置
+ *
+ * 歴史:
+ *   0x600: IPLが0x0060:0x0000 (リニア0x600)にロードされ上書きされた
+ *   0x500: Ys IPLが OR BYTE [0x500], 0x20 でBDAフラグを書き込み、
+ *          IRET(0xCF) が OUT(0xEF) に破壊された
+ *
+ * 現在: IVTの未使用ベクタ領域内に配置。
+ * 0x3F0 = INT FCh のオフセット下位バイトにIRET(0xCF)を書き込み、
+ * 全ダミーベクタを 0x003F:0x0000 (リニア 0x3F0) に向ける。
+ * IVT自体はゲストが明示的に上書きしない限り安全。
+ * INT FCh-FFh のベクタは壊れるが、ダミーIRETエントリとして使われる
+ * だけなので問題ない。 */
+#define IVT_HANDLER_BASE   0x03F0
 
 /* ======================================================================== */
 /*  v86_mem_setup — V86メモリ空間を構築                                     */
@@ -123,13 +132,10 @@ void v86_mem_setup(void)
     /*  2. IVT構築                                                        */
     /*                                                                      */
     /*  0x0000:0x0000 - 0x0000:0x03FF に 256個のベクタ。                   */
-    /*  全てのベクタを 0x0060:0x0000 のダミーIRETハンドラに向ける。        */
-    /*  ダミーハンドラは 0x600 にCF命令(IRET)1バイトを配置。               */
+    /*  全てのベクタを IVT_HANDLER_BASE のダミーIRETハンドラに向ける。     */
+    /*  ダミーハンドラは IVT内にCF命令(IRET)1バイトを配置。                */
     /*  PC-98 リアルモードのIVTフォーマット: [offset:16, segment:16]       */
     /* ================================================================== */
-
-    /* ダミーIRETハンドラを配置 (物理 0x300600 = 仮想 0x600) */
-    backing[IVT_HANDLER_BASE] = 0xCF;  /* IRET */
 
     /* IVT: バッキングRAMの先頭 (物理 0x300000 = 仮想 0x0000) */
     ivt = (u32 *)backing;
@@ -139,6 +145,12 @@ void v86_mem_setup(void)
         /* seg:off 形式で格納 (リトルエンディアン: [off_lo, off_hi, seg_lo, seg_hi]) */
         ivt[i] = ((u32)handler_seg << 16) | handler_off;
     }
+
+    /* ダミーIRETハンドラを配置 (IVT構築後に上書き)
+     * IVT最終エントリ(INT FCh)の先頭バイトにIRETを書き込む。
+     * INT FCh-FFh のベクタデータは壊れるが、これらのベクタも
+     * ダミーハンドラを指しているため問題ない。 */
+    backing[IVT_HANDLER_BASE] = 0xCF;  /* IRET */
 
     /* ================================================================== */
     /*  3. BDA初期値設定                                                   */
@@ -151,8 +163,11 @@ void v86_mem_setup(void)
     backing[BDA_MEM_SIZE]     = (640) & 0xFF;
     backing[BDA_MEM_SIZE + 1] = (640 >> 8) & 0xFF;
 
-    /* DISK_EQUIP (0000:055C-055Dh): ディスク接続状態 */
-    backing[BDA_DISK_EQUIP]     = 0x01;
+    /* DISK_EQUIP (0000:055C-055Dh): ディスク接続状態
+     * bit0=1MB FDD UNIT#0, bit1=1MB FDD UNIT#1
+     * NP21/WネイティブでFDD1のみの構成ではbit1=0。
+     * ゲームは1ドライブ構成でBEPMUデータをFM音源経由で再生する。 */
+    backing[BDA_DISK_EQUIP]     = 0x01;  /* UNIT#0 のみ接続 */
     backing[BDA_DISK_EQUIP + 1] = 0x00;
 
     /* キーボードバッファ初期化 (NP21/W bios09.c 準拠) */
@@ -318,14 +333,18 @@ void v86_mem_setup(void)
     /*  FDC (BE/CC/CA) は仮想化のためトラップのまま。                      */
     /* ================================================================== */
 
-    /* キーボード 8251 */
-    tss_iomap_allow(0x41);
-    tss_iomap_allow(0x43);
+    /* キーボード 8251 — トラップして仮想化
+     * ゲストのINT 09hハンドラがポート0x41を読む時、
+     * v86_kbd_bufからスキャンコードを供給する。
+     * tss_iomap_allow(0x41); — トラップ維持
+     * tss_iomap_allow(0x43); — トラップ維持 */
 
-    /* テキストGDC + モードFF1 (60h-6Ah 偶数) */
-    tss_iomap_allow(0x60);
+    /* テキストGDC + モードFF1 (60h-6Ah 偶数)
+     * 0x60: ステータス読み出し (bit5=VSYNC) → トラップして仮想化
+     * 0x64: VSYNC割り込みトリガ → トラップして仮想化 */
+    /* tss_iomap_allow(0x60); — VSYNCポーリング仮想化のためトラップ維持 */
     tss_iomap_allow(0x62);
-    tss_iomap_allow(0x64);
+    /* tss_iomap_allow(0x64); — VSYNC割り込みアーム仮想化のためトラップ維持 */
     tss_iomap_allow(0x66);
     tss_iomap_allow(0x68);
     tss_iomap_allow(0x6A);
@@ -342,8 +361,9 @@ void v86_mem_setup(void)
     tss_iomap_allow(0x7C);
     tss_iomap_allow(0x7E);
 
-    /* グラフィックGDC + パレット (A0h-AEh 偶数) */
-    tss_iomap_allow(0xA0);
+    /* グラフィックGDC + パレット (A0h-AEh 偶数)
+     * 0xA0: ステータス読み出し (bit5=VSYNC) → トラップして仮想化 */
+    /* tss_iomap_allow(0xA0); — VSYNCポーリング仮想化のためトラップ維持 */
     tss_iomap_allow(0xA1);
     tss_iomap_allow(0xA2);
     tss_iomap_allow(0xA3);
@@ -359,7 +379,7 @@ void v86_mem_setup(void)
     /* EGC (04A0h-04AEh 偶数) */
     tss_iomap_allow_range(0x04A0, 0x04AE);
 
-    /* FM音源 (188h-18Eh 偶数) */
+    /* FM音源 (188h-18Eh 偶数) — 直接パススルー */
     tss_iomap_allow(0x0188);
     tss_iomap_allow(0x018A);
     tss_iomap_allow(0x018C);
@@ -368,7 +388,144 @@ void v86_mem_setup(void)
     /* カレンダBIOS用ポート (20h) */
     tss_iomap_allow(0x20);
 
-    /* シリアルポート (30h-35h) はOS32が使用するためトラップのまま */
+    /* ビープON/OFFポート (37h) — Ys等がBEEP音源BGMで使用 */
+    tss_iomap_allow(0x37);
+
+    /* ウェイト用ダミーI/Oポート (5Fh) — 直接パススルー
+     * PC-9800Bible §2-13: FM音源レジスタアクセス間のウェイトとして
+     * OUT 5Fh を20回以上繰り返すのが標準手順。
+     * トラップ状態だとGPフォルトのオーバーヘッドが大きすぎて
+     * 音楽再生のリアルタイム性が失われる。 */
+    tss_iomap_allow(0x5F);
+
+    /* ================================================================== */
+    /*  6. 画面初期化 (NP21/W pccore_reset + bios0x18_16 準拠)             */
+    /*                                                                      */
+    /*  V86ゲスト起動前にGVRAM/TVRAMをクリアし、GDCとパレットを             */
+    /*  デフォルト状態に戻す。ネイティブゲーム(Ys等)はGDC初期化を           */
+    /*  自前で行わず、BIOSが設定済みであることを前提とするため必須。         */
+    /* ================================================================== */
+    {
+        volatile u8 *gvram_b = (volatile u8 *)0xA8000UL;
+        volatile u8 *gvram_e = (volatile u8 *)0xE0000UL;
+        volatile u16 *tvram  = (volatile u16 *)0xA0000UL;
+        int i;
+
+        /* GVRAM全面クリア (Plane B/R/G: 0xA8000-0xBFFFF, Plane E: 0xE0000-0xE7FFF) */
+        kmemset((u8 *)gvram_b, 0, 0x18000);  /* 96KB: B+R+G */
+        kmemset((u8 *)gvram_e, 0, 0x08000);  /* 32KB: E */
+
+        /* TVRAMクリア (0xA0000-0xA1FFF: 文字コード, 0xA2000-0xA3FFF: アトリビュート)
+         * WORD単位でアクセス (PC-98 TVRAMはWORDアドレッシング) */
+        for (i = 0; i < 0x2000; i++) {
+            tvram[i] = 0x0000;          /* 文字コード: 空白 */
+        }
+        for (i = 0x1000; i < 0x2000; i++) {
+            tvram[i] = 0x00E1;          /* アトリビュート: 白文字、表示ON */
+        }
+
+        /* GRCG OFF (ポート 0x7C に 0 を出力) */
+        outp(0x7C, 0x00);
+
+        /* アナログパレット初期化 (PC-98 デフォルト16色)
+         * ポート: 0xA8=パレット番号, 0xAA=G, 0xAC=R, 0xAE=B (各4bit) */
+        {
+            /* NP21/W bios0x18_16 のデフォルトパレット (PC-98標準) */
+            static const u8 def_pal[16][3] = {
+                /* G,   R,   B */
+                { 0x0, 0x0, 0x0 },  /* 0: 黒 */
+                { 0x0, 0x0, 0x7 },  /* 1: 青 */
+                { 0x0, 0x7, 0x0 },  /* 2: 赤 */
+                { 0x0, 0x7, 0x7 },  /* 3: マゼンタ */
+                { 0x7, 0x0, 0x0 },  /* 4: 緑 */
+                { 0x7, 0x0, 0x7 },  /* 5: シアン */
+                { 0x7, 0x7, 0x0 },  /* 6: 黄 */
+                { 0x7, 0x7, 0x7 },  /* 7: 白 */
+                { 0x4, 0x4, 0x4 },  /* 8: 灰 */
+                { 0x0, 0x0, 0xF },  /* 9: 明青 */
+                { 0x0, 0xF, 0x0 },  /* A: 明赤 */
+                { 0x0, 0xF, 0xF },  /* B: 明マゼンタ */
+                { 0xF, 0x0, 0x0 },  /* C: 明緑 */
+                { 0xF, 0x0, 0xF },  /* D: 明シアン */
+                { 0xF, 0xF, 0x0 },  /* E: 明黄 */
+                { 0xF, 0xF, 0xF },  /* F: 明白 */
+            };
+            for (i = 0; i < 16; i++) {
+                outp(0xA8, (u8)i);         /* パレット番号 */
+                outp(0xAA, def_pal[i][0]);  /* G */
+                outp(0xAC, def_pal[i][1]);  /* R */
+                outp(0xAE, def_pal[i][2]);  /* B */
+            }
+        }
+
+        /* テキスト画面表示OFF → ゲストが自前で設定する
+         * GDCコマンドSTOP1: ポート0x62に0x0Dを出力 (テキスト表示停止) */
+        outp(0x62, 0x0D);
+
+        /* グラフィック画面表示ON:
+         * GDCコマンドSTART: ポート0xA2に0x0Dを出力 (グラフィック表示開始) */
+        outp(0xA2, 0x0D);
+
+        /* グラフィックGDC SCROLL コマンド (0x70): 表示開始アドレス初期化
+         * GDC I/O: コマンド→0xA2, パラメータ→0xA0
+         * SAD1=0x0000 (VRAM先頭), SL=0 (全画面1分割)
+         * NP21/W gdc.c リセット: ZeroMemory(gdc.s.para + GDC_SCROLL, 4)
+         * デフォルト 2.5MHz GDC: IM=0 */
+        outp(0xA2, 0x70);       /* SCROLL コマンド, RA=0 */
+        outp(0xA0, 0x00);       /* SAD1 下位バイト = 0x00 */
+        outp(0xA0, 0x00);       /* SAD1 上位バイト = 0x00 */
+        outp(0xA0, 0x00);       /* SL1 下位バイト = 0x00 */
+        outp(0xA0, 0x00);       /* SL1 上位 + IM=0 (2.5MHz デフォルト) */
+
+        /* グラフィックGDC PITCH コマンド (0x47): VRAM横幅
+         * NP21/W デフォルト: gdc.s.para[GDC_PITCH] = 40
+         * 2.5MHzモード: 40ワード (0x28) — 200ラインゲームの標準値 */
+        outp(0xA2, 0x47);       /* PITCH コマンド */
+        outp(0xA0, 0x28);       /* 40ワード (2.5MHz デフォルト) */
+
+        /* グラフィックGDC CSRFORM (0x4B): L/R=1 (200ラインモード)
+         * 200ラインモードでは各VRAMラインを2倍表示する。
+         * L/R=1 → 2倍表示。L/R=0 → 1倍表示(400ライン)。
+         * OS32のgfx_init()がL/R=0に設定しているため、ここで戻す。
+         * NP21/W: gdc.s.para[GDC_CSRFORM] = 1 (200ラインモード) */
+        outp(0xA2, 0x4B);       /* CSRFORM コマンド */
+        outp(0xA0, 0x01);       /* L/R = 1 (200ラインモード, 各ライン2倍表示) */
+
+        /* モードフリップフロップ1 (0x68): 200ラインモード
+         * MFF1 GRP Mode = 0x09: 奇数ラスタ非表示
+         *   → CRT400ライン + グラフィック200ラインの組み合わせ
+         * OS32のgfx_init()が0x08(400ライン)に設定しているため戻す */
+        outp(0x68, 0x09);       /* 200ラインモード (奇数ラスタ非表示) */
+
+        /* テキストGDC SCROLL 初期化 (全画面表示)
+         * GDC I/O: コマンド→0x62, パラメータ→0x60 */
+        outp(0x62, 0x70);       /* SCROLL コマンド, RA=0 */
+        outp(0x60, 0x00);       /* SAD1 下位 = 0 */
+        outp(0x60, 0x00);       /* SAD1 上位 = 0 */
+        outp(0x60, 0x00);       /* SL1 下位 = 0 */
+        outp(0x60, 0x00);       /* SL1 上位 = 0 */
+
+        /* テキストGDC PITCH */
+        outp(0x62, 0x47);       /* PITCH コマンド */
+        outp(0x60, 0x50);       /* 80ワード */
+
+        /* グラフィックGDC START: 表示開始 */
+        outp(0xA2, 0x0D);       /* START コマンド */
+
+        /* ページフリッピング解除: ページ0に復帰
+         * OS32のgfx_init()がページ1を描画ページにしている場合がある */
+        outp(0xA4, 0x00);       /* 表示ページ = 0 */
+        outp(0xA6, 0x00);       /* 描画ページ = 0 */
+
+        /* モードフリップフロップ2 (0x6A): 16色モード + GDCクロック初期化
+         * NP21/W gdc.c: gdc.clock = 0 (2.5MHz デフォルト) */
+        outp(0x6A, 0x07);       /* 拡張モード変更可 */
+        outp(0x6A, 0x04);       /* GRCG互換モード */
+        outp(0x6A, 0x06);       /* 拡張モード変更不可 */
+        outp(0x6A, 0x01);       /* 16色モード */
+        outp(0x6A, 0x82);       /* GDC CLOCK-1 = 2.5MHz */
+        outp(0x6A, 0x84);       /* GDC CLOCK-2 = 2.5MHz */
+    }
 }
 
 /* ======================================================================== */

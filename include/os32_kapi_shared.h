@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      33   /* sys_v86_boot_physical_ex 追加 (2DD対応) */
+#define KAPI_VERSION      36   /* loop_attach/detach/status (旧d88_*) リネーム */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

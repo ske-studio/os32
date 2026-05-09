@@ -67,6 +67,30 @@ void v86_vsync_cleanup(void)
 /* ====================================================================== */
 int v86_vsync_io(u16 port, u8 *val, int is_write)
 {
+    /* I/O 0x60: GDCテキストステータスレジスタ (READ)
+     * I/O 0xA0: GDCグラフィックステータスレジスタ (READ)
+     * 両方とも bit5 (D5) = VSYNC信号。多くのゲームがこのビットをポーリングして
+     * VSYNC待ちを行う。V86のGP例外オーバーヘッドにより実ハードウェアの
+     * VSYNCタイミングを見逃すため、GPカウントベースで仮想化する。
+     * 参照: PC9800Bible 2-6 テキスト 表2-22 / グラフィック */
+    if ((port == 0x60 || port == 0xA0) && !is_write) {
+        u8 hw_val = inp(port);  /* 実ハードウェアのGDCステータス */
+        /* ネイティブモード: VSYNCビットをGPカウントベースでトグル
+         * 実機VSYNC = 56.4Hz, V86のGP ≈ 数千〜数万回/フレーム
+         * 約200GP周期でトグル → 十分なVSYNC検出機会を提供 */
+        if (v86_native_mode) {
+            static u32 vsync_gp_counter = 0;
+            vsync_gp_counter++;
+            if ((vsync_gp_counter / 200) & 1) {
+                hw_val |= 0x20;   /* bit5 = 1: VSYNC期間 */
+            } else {
+                hw_val &= ~0x20;  /* bit5 = 0: 表示期間 */
+            }
+        }
+        *val = hw_val;
+        return 1;
+    }
+
     if (port != 0x64) return 0;  /* 非対象 */
 
     if (is_write) {

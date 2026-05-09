@@ -127,6 +127,18 @@ static void ide_set_chs(int drive, u32 lba, u8 count)
     outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F) | ((drive % 2) ? 0x10 : 0x00)));
 }
 
+/* CHS レジスタ直接設定 (LBA→CHS 変換なし) */
+static void ide_set_chs_direct(int drive, u16 cyl, u8 head, u8 sect,
+                               u8 count)
+{
+    outp(IDE_SECT_CNT, (unsigned)count);
+    outp(IDE_SECT_NUM, (unsigned)sect);
+    outp(IDE_CYL_LO,   (unsigned)(cyl & 0xFF));
+    outp(IDE_CYL_HI,   (unsigned)((cyl >> 8) & 0xFF));
+    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F)
+                                  | ((drive % 2) ? 0x10 : 0x00)));
+}
+
 /* ============================================================ */
 /*  公開API                                                      */
 /* ============================================================ */
@@ -364,6 +376,78 @@ int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf)
         int ret = ide_write_sector(drive, lba + i, p + i * 512);
         if (ret != IDE_OK) return ret;
     }
+    return IDE_OK;
+}
+
+/* ============================================================ */
+/*  CHS ネイティブ API (Phase 2)                                 */
+/*  LBA→CHS 変換を省略し、CHS を直接レジスタに設定する。       */
+/* ============================================================ */
+
+int ide_read_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
+                        void *buf)
+{
+    int ret;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+
+    ide_select_drive(drive);
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    ide_set_chs_direct(drive, cyl, head, sect, 1);
+
+    outp(IDE_COMMAND, IDE_CMD_READ);
+
+    ret = ide_wait_drq();
+    if (ret != IDE_OK) return ret;
+
+    {
+        u16 *dst = (u16 *)buf;
+        int w;
+        for (w = 0; w < 256; w++) {
+            dst[w] = (u16)inpw(IDE_DATA);
+        }
+    }
+
+    { u8 st = (u8)inp(IDE_STATUS); (void)st; }
+    ide_wait_bsy();
+
+    return IDE_OK;
+}
+
+int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
+                         const void *buf)
+{
+    int ret;
+    const u16 *data = (const u16 *)buf;
+    int i;
+
+    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
+
+    ide_select_drive(drive);
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    ide_set_chs_direct(drive, cyl, head, sect, 1);
+
+    outp(IDE_COMMAND, IDE_CMD_WRITE);
+
+    ret = ide_wait_drq();
+    if (ret != IDE_OK) return ret;
+
+    for (i = 0; i < 256; i++) {
+        outpw(IDE_DATA, (unsigned)data[i]);
+    }
+
+    ret = ide_wait_bsy();
+    if (ret != IDE_OK) return ret;
+
+    {
+        u8 st = (u8)inp(IDE_STATUS);
+        if (st & IDE_ST_ERR) return IDE_ERR_IO;
+    }
+
     return IDE_OK;
 }
 

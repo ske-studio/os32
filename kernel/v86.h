@@ -67,6 +67,20 @@ extern u32 v86_pending_irq;
 /* V86タスクに仮想割り込みを保留する (IRQハンドラから呼ぶ) */
 void v86_set_pending_irq(int irq_no);
 
+/* ====================================================================== */
+/*  V86 キーボード仮想化 — スキャンコードバッファ                          */
+/*  kbd_irq_handler で読み取ったスキャンコードを保持し、ゲストの            */
+/*  INT 09h ハンドラがポート 0x41 を読む時に返す。                         */
+/* ====================================================================== */
+#define V86_KBD_BUF_SIZE 16
+extern volatile u8  v86_kbd_buf[V86_KBD_BUF_SIZE];
+extern volatile int v86_kbd_buf_head;
+extern volatile int v86_kbd_buf_tail;
+extern volatile int v86_kbd_buf_count;
+
+/* kbd.c から呼ばれる: スキャンコードをバッファに追加しIRQ1をペンディング */
+void v86_kbd_enqueue(u8 scancode);
+
 /* タイマ割り込み (IRQ0) 注入 (isr_handlers.c timer_handler から呼ばれる) */
 void v86_inject_timer_irq(u32 *regs);
 
@@ -117,14 +131,15 @@ struct v86_trace_entry {
     u8  intno;
     u8  ah;
     u8  al;
+    u16 cx;     /* ECX下位16bit — シーンID等のデバッグ用 */
 };
 struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx);
 
 /* ====================================================================== */
 /*  ダミーIVT判定マクロ                                                    */
-/*  IVTエントリが初期値 (0x0050:0x0000 = IRET) のままかを判定する           */
+/*  IVTエントリが初期値 (0x003F:0x0000 = IRET) のままかを判定する           */
 /* ====================================================================== */
-#define V86_DUMMY_IVT_SEG   0x0050
+#define V86_DUMMY_IVT_SEG   0x003F
 #define V86_DUMMY_IVT_OFF   0x0000
 #define V86_IS_DUMMY_IVT(ivt_entry) \
     ((ivt_entry) == ((u32)V86_DUMMY_IVT_SEG << 16 | V86_DUMMY_IVT_OFF))

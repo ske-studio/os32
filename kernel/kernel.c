@@ -49,6 +49,7 @@ extern void fatfs_init(void);
 #include "mouse.h"
 #include "os32_sqlite_vfs.h"
 #include "kapi_db.h"
+#include "loop_dev.h"
 
 #define SHELL_RELOAD_DELAY 10
 
@@ -169,6 +170,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* デバイス・パスシステム初期化 */
     tvram_print(58, 1, "DEV...", TATTR_GREEN);
     dev_init();
+    loop_dev_init();  /* lo0..lo3 ループバックデバイス登録 */
     path_init();
 
     ext2_init();

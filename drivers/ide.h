@@ -107,6 +107,11 @@ int ide_write_sector(int drive, u32 lba, const void *buf);
 /* 複数セクタ書き込み */
 int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf);
 
+/* CHS ネイティブ 1セクタ読み書き (Phase 2: LBA→CHS 変換不要) */
+int ide_read_sector_chs(int drive, u16 cyl, u8 head, u8 sect, void *buf);
+int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
+                         const void *buf);
+
 /* ドライブ存在チェック */
 int ide_drive_present(int drive);
 

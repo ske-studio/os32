@@ -8,6 +8,7 @@ int main(int argc, char **argv)
     const char *cmdline = NULL;
     int use_2dd = 0;  /* 1=2DD(640KB), 2=2DD(720KB) */
     int native_mode = 0;  /* 1=ネイティブPC-98ソフトモード */
+    int debug_mode = 0;   /* 1=デバッグログ出力 */
     int rc;
     int i;
 
@@ -18,8 +19,10 @@ int main(int argc, char **argv)
             printf("       %s -2dd         (boot from physical FDD as 2DD 640KB)\n", argv[0]);
             printf("       %s path.fdi     (boot FreeDOS from image)\n", argv[0]);
             printf("       %s -native Ys.D88 (boot native PC-98 software)\n", argv[0]);
+            printf("       %s -d -native Ys.D88 (with debug log)\n", argv[0]);
             printf("Options:\n");
             printf("  -native   Native PC-98 mode (no DOS, no timeout)\n");
+            printf("  -d        Enable debug logging to /host/debug/\n");
             printf("  -2dd      Physical FDD as 2DD 640KB\n");
             printf("  -2dd-9    Physical FDD as 2DD 720KB\n");
             printf("  -h        Show this help\n");
@@ -38,6 +41,10 @@ int main(int argc, char **argv)
             use_2dd = 2;
             continue;
         }
+        if (strcmp(argv[i], "-d") == 0) {
+            debug_mode = 1;
+            continue;
+        }
         if (img_path == NULL) {
             img_path = argv[i];
         } else if (cmdline == NULL) {
@@ -46,6 +53,12 @@ int main(int argc, char **argv)
     }
 
     extern KernelAPI *kapi;
+
+    /* デバッグモード設定 */
+    if (debug_mode) {
+        kapi->sys_v86_set_debug(1);
+        printf("[DEBUG] V86 debug logging enabled\n");
+    }
 
     /* ネイティブモード: ディスクイメージ必須 */
     if (native_mode) {
@@ -84,6 +97,12 @@ int main(int argc, char **argv)
     if (rc < 0) {
         printf("VDOS failed to start (rc=%d)\n", rc);
         return 1;
+    }
+
+    /* デバッグモード終了 */
+    if (debug_mode) {
+        kapi->sys_v86_set_debug(0);
+        printf("[DEBUG] Debug log saved to /host/debug/\n");
     }
 
     printf("VDOS exited normally.\n");
