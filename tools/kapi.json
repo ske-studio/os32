@@ -1,5 +1,5 @@
 {
-  "version": 37,
+  "version": 39,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -42,8 +42,9 @@
   "externs": [
     "extern volatile u32 tick_count;",
     "extern void kapi_sys_exit(int status);",
-    "extern int v86_boot_freedos(const char *path, const char *cmdline);",
-    "extern int v86_boot_native(const char *path);",
+
+    "extern int v86_boot_native(const char *path, const char *cmdline);",
+    "extern int v86_boot_image_kapi(const char *path, const char *cmdline);",
     "extern int v86_boot_physical_fdd(int drv, const char *cmdline);",
     "extern int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline);",
     "extern void kapi_sys_get_build_info(char *buf, int size);"
@@ -1098,12 +1099,7 @@
       "ret": "int",
       "args": ["const char *path"]
     },
-    {
-      "name": "sys_v86_boot_freedos",
-      "ret": "int",
-      "args": ["const char *path", "const char *cmdline"],
-      "target": "v86_boot_freedos"
-    },
+
     {
       "name": "sys_v86_boot_physical",
       "ret": "int",
@@ -1119,7 +1115,7 @@
     {
       "name": "sys_v86_boot_native",
       "ret": "int",
-      "args": ["const char *path"],
+      "args": ["const char *path", "const char *cmdline"],
       "target": "v86_boot_native"
     },
     {
@@ -1163,6 +1159,12 @@
       "ret": "int",
       "args": ["const char *dev_name", "u32 lba", "int count", "const void *buf"],
       "body": "{ Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }"
+    },
+    {
+      "name": "sys_v86_boot_image",
+      "ret": "int",
+      "args": ["const char *path", "const char *cmdline"],
+      "target": "v86_boot_image_kapi"
     }
   ]
 }

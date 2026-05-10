@@ -158,23 +158,23 @@ pub struct KernelAPI {
     /* idx 148 */ pub db_last_error: unsafe extern "C" fn(handle: i32) -> *const u8,
     /* idx 149 */ pub db_mem_used: unsafe extern "C" fn() -> u32,
     /* idx 150 */ pub kcg_load_font: unsafe extern "C" fn(path: *const u8) -> i32,
-    /* idx 151 */ pub sys_v86_boot_freedos: unsafe extern "C" fn(path: *const u8, cmdline: *const u8) -> i32,
-    /* idx 152 */ pub sys_v86_boot_physical: unsafe extern "C" fn(drv: i32, cmdline: *const u8) -> i32,
-    /* idx 153 */ pub sys_v86_boot_physical_ex: unsafe extern "C" fn(drv: i32, media: i32, cmdline: *const u8) -> i32,
-    /* idx 154 */ pub sys_v86_boot_native: unsafe extern "C" fn(path: *const u8) -> i32,
-    /* idx 155 */ pub sys_v86_set_debug: unsafe extern "C" fn(enabled: i32),
-    /* idx 156 */ pub sys_get_build_info: unsafe extern "C" fn(buf: *mut u8, size: i32),
-    /* idx 157 */ pub loop_attach: unsafe extern "C" fn(path: *const u8, slot: i32) -> i32,
-    /* idx 158 */ pub loop_detach: unsafe extern "C" fn(slot: i32),
-    /* idx 159 */ pub loop_status: unsafe extern "C" fn(slot: i32, total: *mut u32, bps: *mut i32) -> i32,
-    /* idx 160 */ pub dev_blk_read: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *mut u8) -> i32,
-    /* idx 161 */ pub dev_blk_write: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *const u8) -> i32,
+    /* idx 151 */ pub sys_v86_boot_physical: unsafe extern "C" fn(drv: i32, cmdline: *const u8) -> i32,
+    /* idx 152 */ pub sys_v86_boot_physical_ex: unsafe extern "C" fn(drv: i32, media: i32, cmdline: *const u8) -> i32,
+    /* idx 153 */ pub sys_v86_boot_native: unsafe extern "C" fn(path: *const u8, cmdline: *const u8) -> i32,
+    /* idx 154 */ pub sys_v86_set_debug: unsafe extern "C" fn(enabled: i32),
+    /* idx 155 */ pub sys_get_build_info: unsafe extern "C" fn(buf: *mut u8, size: i32),
+    /* idx 156 */ pub loop_attach: unsafe extern "C" fn(path: *const u8, slot: i32) -> i32,
+    /* idx 157 */ pub loop_detach: unsafe extern "C" fn(slot: i32),
+    /* idx 158 */ pub loop_status: unsafe extern "C" fn(slot: i32, total: *mut u32, bps: *mut i32) -> i32,
+    /* idx 159 */ pub dev_blk_read: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *mut u8) -> i32,
+    /* idx 160 */ pub dev_blk_write: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *const u8) -> i32,
+    /* idx 161 */ pub sys_v86_boot_image: unsafe extern "C" fn(path: *const u8, cmdline: *const u8) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 37;
+pub const KAPI_VERSION: u32 = 39;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

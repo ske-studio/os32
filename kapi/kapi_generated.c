@@ -33,8 +33,8 @@
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
-extern int v86_boot_freedos(const char *path, const char *cmdline);
-extern int v86_boot_native(const char *path);
+extern int v86_boot_native(const char *path, const char *cmdline);
+extern int v86_boot_image_kapi(const char *path, const char *cmdline);
 extern int v86_boot_physical_fdd(int drv, const char *cmdline);
 extern int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline);
 extern void kapi_sys_get_build_info(char *buf, int size);
@@ -779,11 +779,6 @@ int __cdecl wrap_kcg_load_font(const char *path)
     return kcg_load_font(path);
 }
 
-int __cdecl wrap_sys_v86_boot_freedos(const char *path, const char *cmdline)
-{
-    return v86_boot_freedos(path, cmdline);
-}
-
 int __cdecl wrap_sys_v86_boot_physical(int drv, const char *cmdline)
 {
     return v86_boot_physical_fdd(drv, cmdline);
@@ -794,9 +789,9 @@ int __cdecl wrap_sys_v86_boot_physical_ex(int drv, int media, const char *cmdlin
     return v86_boot_physical_fdd_ex(drv, media, cmdline);
 }
 
-int __cdecl wrap_sys_v86_boot_native(const char *path)
+int __cdecl wrap_sys_v86_boot_native(const char *path, const char *cmdline)
 {
-    return v86_boot_native(path);
+    return v86_boot_native(path, cmdline);
 }
 
 void __cdecl wrap_sys_v86_set_debug(int enabled)
@@ -832,5 +827,10 @@ int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *bu
 int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)
 {
     { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }
+}
+
+int __cdecl wrap_sys_v86_boot_image(const char *path, const char *cmdline)
+{
+    return v86_boot_image_kapi(path, cmdline);
 }
 

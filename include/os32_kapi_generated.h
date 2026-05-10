@@ -154,10 +154,9 @@ typedef struct {
     const char * (__cdecl *db_last_error)(int handle);
     u32 (__cdecl *db_mem_used)(void);
     int (__cdecl *kcg_load_font)(const char *path);
-    int (__cdecl *sys_v86_boot_freedos)(const char *path, const char *cmdline);
     int (__cdecl *sys_v86_boot_physical)(int drv, const char *cmdline);
     int (__cdecl *sys_v86_boot_physical_ex)(int drv, int media, const char *cmdline);
-    int (__cdecl *sys_v86_boot_native)(const char *path);
+    int (__cdecl *sys_v86_boot_native)(const char *path, const char *cmdline);
     void (__cdecl *sys_v86_set_debug)(int enabled);
     void (__cdecl *sys_get_build_info)(char *buf, int size);
     int (__cdecl *loop_attach)(const char *path, int slot);
@@ -165,6 +164,7 @@ typedef struct {
     int (__cdecl *loop_status)(int slot, u32 *total, int *bps);
     int (__cdecl *dev_blk_read)(const char *dev_name, u32 lba, int count, void *buf);
     int (__cdecl *dev_blk_write)(const char *dev_name, u32 lba, int count, const void *buf);
+    int (__cdecl *sys_v86_boot_image)(const char *path, const char *cmdline);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
