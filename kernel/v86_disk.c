@@ -110,7 +110,8 @@ void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
 void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media)
 {
     int slot;
-    u8 cyls, heads, spt;
+    u16 cyls;
+    u8 heads, spt;
     u16 bps;
     u32 total;
 
@@ -123,7 +124,7 @@ void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media)
 
     /* 空きスロットを探して loop_dev にアタッチ */
     for (slot = 0; slot < 4; slot++) {
-        if (loop_dev_attach_fd(fd, slot) == 0) {
+        if (loop_dev_attach_fd(fd, slot, LOOP_FMT_D88) == 0) {
             v86_loop_slot = slot;
             break;
         }
@@ -232,6 +233,100 @@ int v86_disk_get_fd(void)
 u32 v86_disk_get_offset(void)
 {
     return fdd_image_offset;
+}
+
+/* ====================================================================== */
+/*  新 API (Phase B: loop_dev ブリッジ)                                    */
+/* ====================================================================== */
+
+void v86_disk_attach_loop(int slot)
+{
+    v86_loop_slot = slot;
+    fdd_is_d88 = (loop_dev_get_format(slot) == LOOP_FMT_D88) ? 1 : 0;
+    fdd_fd = loop_dev_get_fd(slot);
+    fdd_use_physical = 0;
+    fdd_phys_drv = 0;
+
+    /* loop_dev からジオメトリ取得して互換フィールドを更新 */
+    if (fdd_is_d88) {
+        u16 cyls;
+        u8 heads, spt;
+        u16 bps;
+
+        loop_dev_get_geometry(v86_loop_slot, &cyls, &heads, &spt, &bps, NULL);
+        d88_dyn_geom.cyls  = (u8)cyls;
+        d88_dyn_geom.heads = heads;
+        d88_dyn_geom.spt   = spt;
+        d88_dyn_geom.bps   = bps;
+        d88_dyn_geom.sec_n = loop_dev_get_sec_n(slot);
+        d88_dyn_geom.gap3  = 0x74;
+        d88_dyn_geom.daua_high = (u8)loop_dev_get_media(slot);
+        fdd_geom = &d88_dyn_geom;
+    } else {
+        u16 cyls;
+        u8 heads, spt;
+        u16 bps;
+        u32 total;
+
+        loop_dev_get_geometry(v86_loop_slot, &cyls, &heads, &spt, &bps, &total);
+        fdd_image_offset = 0;  /* loop_dev が管理 */
+        fdd_image_size = total * (u32)bps;
+
+        /* 静的ジオメトリテーブルから最適なものを選択 */
+        if (bps == 1024)
+            fdd_geom = &fdc_geom_2hd;
+        else if (spt == 9)
+            fdd_geom = &fdc_geom_2dd_720;
+        else if (bps == 512)
+            fdd_geom = &fdc_geom_2dd_640;
+        else
+            fdd_geom = &fdc_geom_2hd;
+    }
+}
+
+int v86_disk_get_loop_slot(void)
+{
+    return v86_loop_slot;
+}
+
+int v86_disk_get_geometry(u16 *cyls, u8 *heads, u8 *spt,
+                          u16 *bps, u8 *sec_n, u8 *daua_high)
+{
+    if (v86_loop_slot >= 0) {
+        /* loop_dev 経由 */
+        loop_dev_get_geometry(v86_loop_slot, cyls, heads, spt, bps, NULL);
+        if (sec_n)
+            *sec_n = loop_dev_get_sec_n(v86_loop_slot);
+        if (daua_high)
+            *daua_high = (u8)loop_dev_get_media(v86_loop_slot);
+        return 0;
+    }
+    if (fdd_use_physical && fdd_geom) {
+        /* 実FDD */
+        if (cyls)      *cyls = (u16)fdd_geom->cyls;
+        if (heads)     *heads = fdd_geom->heads;
+        if (spt)       *spt = fdd_geom->spt;
+        if (bps)       *bps = fdd_geom->bps;
+        if (sec_n)     *sec_n = fdd_geom->sec_n;
+        if (daua_high) *daua_high = fdd_geom->daua_high;
+        return 0;
+    }
+    return -1;  /* 未設定 */
+}
+
+int v86_disk_is_loop(void)
+{
+    return (v86_loop_slot >= 0) ? 1 : 0;
+}
+
+int v86_disk_is_phys(void)
+{
+    return fdd_use_physical;
+}
+
+int v86_disk_get_phys_drv_num(void)
+{
+    return fdd_phys_drv;
 }
 
 /* ====================================================================== */

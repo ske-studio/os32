@@ -165,7 +165,7 @@ static int write_partition_table(IdeInfoTemp *info)
     pt[16] = 'O'; pt[17] = 'S'; pt[18] = '3'; pt[19] = '2';
     for (i = 20; i < 32; i++) pt[i] = ' ';
 
-    if (g_api->ide_write_sectors(IDE_DRIVE, 1, 1, pt) != 0) return -1;
+    if (g_api->dev_blk_write("hd0", 1, 1, pt) != 0) return -1;
     g_api->kprintf(0x0A, "  Written Partition Table (LBA 1, end cyl=%u)\n", end_cyl);
     return 0;
 }
@@ -310,7 +310,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *api)
     file_buf[8] = (u8)info.heads;
     file_buf[9] = (u8)info.sectors;
     file_buf[510] = 0x55; file_buf[511] = 0xAA;
-    if (api->ide_write_sectors(IDE_DRIVE, 0, 1, file_buf) != 0) goto ioerr;
+    if (api->dev_blk_write("hd0", 0, 1, file_buf) != 0) goto ioerr;
     api->kprintf(0x0A, "  Written IPL (LBA 0, patched geom %d/%d)\n", info.heads, info.sectors);
 
     /* Partition Table → LBA 1 */
@@ -320,14 +320,14 @@ void __cdecl main(int argc, char **argv, KernelAPI *api)
     ret = read_file_to_buf("/sys/loader_h.bin", FILE_BUF_SIZE);
     if (ret <= 0) { api->kprintf(0x4F, "%s", "Error: Missing /sys/loader_h.bin\n"); goto end; }
     loader_sects = (ret + 511) / 512;
-    if (api->ide_write_sectors(IDE_DRIVE, 2, loader_sects, file_buf) != 0) goto ioerr;
+    if (api->dev_blk_write("hd0", 2, loader_sects, file_buf) != 0) goto ioerr;
     api->kprintf(0x0A, "  Written LOADER (LBA 2, %d bytes)\n", ret);
 
     /* kernel.bin → LBA 6+ */
     ret = read_file_to_buf("/kernel.bin", FILE_BUF_SIZE);
     if (ret <= 0) { api->kprintf(0x4F, "%s", "Error: Missing /kernel.bin\n"); goto end; }
     kernel_sects = (ret + 511) / 512;
-    if (api->ide_write_sectors(IDE_DRIVE, 6, kernel_sects, file_buf) != 0) goto ioerr;
+    if (api->dev_blk_write("hd0", 6, kernel_sects, file_buf) != 0) goto ioerr;
     api->kprintf(0x0A, "  Written KERNEL (LBA 6, %d bytes)\n", ret);
 
     /* === Phase 2: ext2フォーマット === */

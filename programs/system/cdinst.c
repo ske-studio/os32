@@ -130,7 +130,12 @@ static int write_partition_table(int ide_drv, u32 total_sectors)
     pt[16] = 'O'; pt[17] = 'S'; pt[18] = '3'; pt[19] = '2';
     for (i = 20; i < 32; i++) pt[i] = ' ';
 
-    return api->ide_write_sector(ide_drv, 1, pt);
+    {
+        char dname[8];
+        dname[0] = 'h'; dname[1] = 'd';
+        dname[2] = '0' + (char)ide_drv; dname[3] = '\0';
+        return api->dev_blk_write(dname, 1, 1, pt);
+    }
 }
 
 /* ======================================================================== */
@@ -215,7 +220,12 @@ static int install_boot_sectors(int ide_drv, u32 total_sectors)
                 ipl[510] = 0x55;
                 ipl[511] = 0xAA;
 
-                ret = api->ide_write_sector(ide_drv, 0, ipl);
+                {
+                    char dname[8];
+                    dname[0] = 'h'; dname[1] = 'd';
+                    dname[2] = '0' + (char)ide_drv; dname[3] = '\0';
+                    ret = api->dev_blk_write(dname, 0, 1, ipl);
+                }
                 if (ret != 0) {
                     api->kprintf(COL_RED, " IPL write err=%d\n", ret);
                     api->mem_free(data_buf);
@@ -226,7 +236,12 @@ static int install_boot_sectors(int ide_drv, u32 total_sectors)
             else if (str_endswith(ent->path, "loader_hdd.bin")) {
                 /* ローダ → LBA 2+ */
                 nsects = (fsize + 511) / 512;
-                ret = api->ide_write_sectors(ide_drv, 2, nsects, fdata);
+                {
+                    char dname[8];
+                    dname[0] = 'h'; dname[1] = 'd';
+                    dname[2] = '0' + (char)ide_drv; dname[3] = '\0';
+                    ret = api->dev_blk_write(dname, 2, nsects, fdata);
+                }
                 if (ret != 0) {
                     api->kprintf(COL_RED, " Loader write err=%d\n", ret);
                     api->mem_free(data_buf);
@@ -237,7 +252,12 @@ static int install_boot_sectors(int ide_drv, u32 total_sectors)
             else if (str_endswith(ent->path, "kernel.bin")) {
                 /* カーネル → LBA 6+ */
                 nsects = (fsize + 511) / 512;
-                ret = api->ide_write_sectors(ide_drv, 6, nsects, fdata);
+                {
+                    char dname[8];
+                    dname[0] = 'h'; dname[1] = 'd';
+                    dname[2] = '0' + (char)ide_drv; dname[3] = '\0';
+                    ret = api->dev_blk_write(dname, 6, nsects, fdata);
+                }
                 if (ret != 0) {
                     api->kprintf(COL_RED, " Kernel write err=%d\n", ret);
                     api->mem_free(data_buf);

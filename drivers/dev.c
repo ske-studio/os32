@@ -66,6 +66,7 @@ static int fdd1_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
 static Device fdd0_dev = {
     "fd0",
     DEV_BLOCK,
+    DEV_BUS_FDC, 0,         /* bus_type=FDC, bus_id=0 */
     DISK_SECT_SZ,           /* sect_size */
     DISK_TOTAL_SEC,         /* total_sects */
     0,                      /* blk_read (LBA) = NULL — CHS デバイス */
@@ -83,6 +84,7 @@ static Device fdd0_dev = {
 static Device fdd1_dev = {
     "fd1",
     DEV_BLOCK,
+    DEV_BUS_FDC, 1,         /* bus_type=FDC, bus_id=1 */
     DISK_SECT_SZ,
     DISK_TOTAL_SEC,
     0, 0,                   /* blk_read/write (LBA) = NULL */
@@ -154,28 +156,28 @@ static int hd3_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
 }
 
 static Device hd0_dev = {
-    "hd0", DEV_BLOCK, 512, 0,
+    "hd0", DEV_BLOCK, DEV_BUS_IDE, 0, 512, 0,
     0, 0, 0, 0, 0, 0,      /* blk_read/write(LBA)=NULL, chr, ioctl, priv */
     hd0_read_chs, hd0_write_chs,
     0, 0, 0                 /* cyls/heads/spt: dev_register_hdd で設定 */
 };
 
 static Device hd1_dev = {
-    "hd1", DEV_BLOCK, 512, 0,
+    "hd1", DEV_BLOCK, DEV_BUS_IDE, 1, 512, 0,
     0, 0, 0, 0, 0, 0,
     hd1_read_chs, hd1_write_chs,
     0, 0, 0
 };
 
 static Device hd2_dev = {
-    "hd2", DEV_BLOCK, 512, 0,
+    "hd2", DEV_BLOCK, DEV_BUS_IDE, 2, 512, 0,
     0, 0, 0, 0, 0, 0,
     hd2_read_chs, hd2_write_chs,
     0, 0, 0
 };
 
 static Device hd3_dev = {
-    "hd3", DEV_BLOCK, 512, 0,
+    "hd3", DEV_BLOCK, DEV_BUS_IDE, 3, 512, 0,
     0, 0, 0, 0, 0, 0,
     hd3_read_chs, hd3_write_chs,
     0, 0, 0
@@ -209,6 +211,7 @@ static int cd0_read(Device *self, int lba, int count, void *buf)
 
 static Device cd0_dev = {
     "cd0", DEV_BLOCK,
+    DEV_BUS_ATAPI, 0,       /* bus_type=ATAPI, bus_id=0 */
     ATAPI_SECTOR_SIZE,      /* sect_size 2048 */
     0,                      /* total_sects (初期化時に設定) */
     cd0_read,               /* blk_read (LBA ネイティブ) */
@@ -226,6 +229,12 @@ void dev_register_cdrom(void)
         cd0_dev.total_sects = cap.total_sectors;
     }
     dev_register(&cd0_dev);
+}
+
+/* SCSIデバイスの登録 (将来用スタブ — WD33C93ドライバ完成後に実装予定) */
+void dev_register_scsi(int scsi_id)
+{
+    (void)scsi_id;
 }
 
 /* ======================================================================== */

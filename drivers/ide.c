@@ -1,8 +1,8 @@
 /* ======================================================================== */
 /*  IDE.C — PC-98 IDE/ATA PIOドライバ実装 (CHS専用)                        */
 /*                                                                          */
-/*  PIOモードによるセクタ読み書き。APIはLBA値で受け取り、内部でCHS変換。      */
-/*  PC-98ではLBAアドレッシングは使用しない (UNDOCUMENTED io_ide.md)。   */
+/*  PIOモードによるセクタ読み書き。APIはCHS値を直接受け取る。                  */
+/*  LBAアクセスは dev.c の dev_blk_read_lba ラッパーがCHSに変換する。        */
 /*  NP21/W + DOSBox-X + FreeBSD/pc98 wdc を参考に実装。                     */
 /* ======================================================================== */
 
@@ -97,35 +97,6 @@ static void ide_select_drive(int drive)
     }
 }
 
-/* CHSアドレスセット (LBA→CHS変換) */
-/* PC-98ではSDHレジスタ bit6=0 (CHSモード), bit4=0 (ドライブ0固定) */
-/* 変換式: sector=(LBA%SPT)+1, head=(LBA/SPT)%HEADS, cyl=(LBA/SPT)/HEADS */
-static void ide_set_chs(int drive, u32 lba, u8 count)
-{
-    u16 cyl;
-    u8 head, sector;
-    u16 heads = drive_info[drive & 3].heads;
-    u16 spt   = drive_info[drive & 3].sectors;
-
-    /* ジオメトリが未取得の場合のフォールバック */
-    if (heads == 0) heads = 8;
-    if (spt == 0)   spt   = 17;
-
-    /* LBA → CHS 変換 */
-    sector = (u8)((lba % spt) + 1);       /* 1ベース */
-    {
-        u32 temp = lba / spt;
-        head = (u8)(temp % heads);
-        cyl  = (u16)(temp / heads);
-    }
-
-    outp(IDE_SECT_CNT, (unsigned)count);
-    outp(IDE_SECT_NUM, (unsigned)sector);
-    outp(IDE_CYL_LO,   (unsigned)(cyl & 0xFF));
-    outp(IDE_CYL_HI,   (unsigned)((cyl >> 8) & 0xFF));
-    /* Drive/Head: CHSモード (0xA0) + head番号 + Slaveビット */
-    outp(IDE_DRV_HEAD, (unsigned)(IDE_DRV_SEL_CHS | (head & 0x0F) | ((drive % 2) ? 0x10 : 0x00)));
-}
 
 /* CHS レジスタ直接設定 (LBA→CHS 変換なし) */
 static void ide_set_chs_direct(int drive, u16 cyl, u8 head, u8 sect,
@@ -280,104 +251,6 @@ int ide_identify(int drive, IdeInfo *info)
     return IDE_OK;
 }
 
-int ide_read_sector(int drive, u32 lba, void *buf)
-{
-    int ret;
-
-    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
-
-    ide_select_drive(drive);
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    ide_set_chs(drive, lba, 1);
-
-    outp(IDE_COMMAND, IDE_CMD_READ);
-
-    ret = ide_wait_drq();
-    if (ret != IDE_OK) return ret;
-
-    /* 256ワード = 512バイト読み出し (個別inpwループ) */
-    {
-        u16 *dst = (u16 *)buf;
-        int w;
-        for (w = 0; w < 256; w++) {
-            dst[w] = (u16)inpw(IDE_DATA);
-        }
-    }
-
-    /* データ読み出し後: Statusレジスタを読んでIRQクリア */
-    {
-        u8 st = (u8)inp(IDE_STATUS);
-        (void)st;
-    }
-
-    /* 転送完了待ち */
-    ide_wait_bsy();
-
-    return IDE_OK;
-}
-
-int ide_read_sectors(int drive, u32 lba, u32 count, void *buf)
-{
-    u32 i;
-    u8 *p = (u8 *)buf;
-
-    for (i = 0; i < count; i++) {
-        int ret = ide_read_sector(drive, lba + i, p + i * 512);
-        if (ret != IDE_OK) return ret;
-    }
-    return IDE_OK;
-}
-
-int ide_write_sector(int drive, u32 lba, const void *buf)
-{
-    int ret;
-    const u16 *data = (const u16 *)buf;
-    int i;
-
-    if (!drive_present[drive & 3]) return IDE_ERR_NO_DRIVE;
-
-    ide_select_drive(drive);
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    ide_set_chs(drive, lba, 1);
-
-    outp(IDE_COMMAND, IDE_CMD_WRITE);
-
-    ret = ide_wait_drq();
-    if (ret != IDE_OK) return ret;
-
-    /* 256ワード = 512バイト書き込み */
-    for (i = 0; i < 256; i++) {
-        outpw(IDE_DATA, (unsigned)data[i]);
-    }
-
-    /* 書き込み完了待ち */
-    ret = ide_wait_bsy();
-    if (ret != IDE_OK) return ret;
-
-    /* エラーチェック */
-    {
-        u8 st = (u8)inp(IDE_STATUS);
-        if (st & IDE_ST_ERR) return IDE_ERR_IO;
-    }
-
-    return IDE_OK;
-}
-
-int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf)
-{
-    u32 i;
-    const u8 *p = (const u8 *)buf;
-
-    for (i = 0; i < count; i++) {
-        int ret = ide_write_sector(drive, lba + i, p + i * 512);
-        if (ret != IDE_OK) return ret;
-    }
-    return IDE_OK;
-}
 
 /* ============================================================ */
 /*  CHS ネイティブ API (Phase 2)                                 */

@@ -3,6 +3,10 @@
 /*                                                                          */
 /*  FDDイメージをメモリ上に保持し、INT 1Bh のセクタ読み書きを                */
 /*  イメージデータからサーブする。                                           */
+/*                                                                          */
+/*  Phase B: loop_dev の薄いブリッジとして再設計。                           */
+/*  新 API は loop_dev 経由でジオメトリ/I/Oを取得する。                      */
+/*  旧 API は互換ラッパーとして残し、Phase B-4 完了後に削除予定。            */
 /* ======================================================================== */
 
 #ifndef V86_DISK_H
@@ -14,26 +18,54 @@
 /* PC-98 2HD FDD イメージサイズ (互換用) */
 #define V86_FDD_IMAGE_SIZE  (77 * 2 * 8 * 1024)
 
-/* FDDイメージファイル(FD)をセット (fd: VFSのファイルディスクリプタ、
- * data_offset: イメージデータ開始位置、size: バイト数、media: メディア種別)
- * 呼び出し後、V86からのINT 1Bhでこのファイルからセクタが読み出される。 */
+/* ====================================================================== */
+/*  新 API (Phase B: loop_dev ブリッジ)                                    */
+/* ====================================================================== */
+
+/* loop_dev スロットをアタッチ */
+void v86_disk_attach_loop(int slot);
+
+/* 実FDDモード (据え置き) */
+void v86_disk_set_physical(int drv, fdc_media_t media);
+
+/* クリア (loop_dev detach + 状態リセット) */
+void v86_disk_clear(void);
+
+/* loop_dev スロット番号取得 (-1=未設定) */
+int  v86_disk_get_loop_slot(void);
+
+/* ジオメトリ取得 (loop_dev 経由) */
+int  v86_disk_get_geometry(u16 *cyls, u8 *heads, u8 *spt,
+                           u16 *bps, u8 *sec_n, u8 *daua_high);
+
+/* モード判定 */
+int  v86_disk_is_loop(void);     /* 1=loop_dev 経由 */
+int  v86_disk_is_phys(void);     /* 1=物理FDD */
+int  v86_disk_get_phys_drv_num(void);  /* 物理ドライブ番号 */
+
+/* ====================================================================== */
+/*  旧 API (互換ラッパー — Phase B-4 完了後に削除予定)                     */
+/* ====================================================================== */
+
+/* FDDイメージファイル(FD)をセット */
 void v86_disk_set_file(int fd, u32 data_offset, u32 data_size,
                        fdc_media_t media);
 
-/* D88形式ディスクイメージをセット (トラックテーブルをキャッシュ)
- * D88はRAWフラットではなくセクタヘッダ付き形式。CHS→オフセット変換を
- * トラックテーブル+セクタヘッダ走査で行う。 */
+/* D88形式ディスクイメージをセット */
 void v86_disk_set_d88(int fd, u32 file_size, fdc_media_t media);
 
-/* FDDイメージをクリア */
-void v86_disk_clear(void);
-
-/* 実FDDモードを有効化 (NP21/Wにマウント中のFDDから直接読む)
- * drv: 物理ドライブ番号 (通常0), media: メディア種別 */
-void v86_disk_set_physical(int drv, fdc_media_t media);
-
-/* 現在マウント中のジオメトリを返す */
+/* 現在マウント中のジオメトリを返す (旧API) */
 const struct fdc_geom *v86_disk_get_geom(void);
+
+/* 内部状態アクセサ (旧API — v86_fdc.c の FORMAT TRACK 実装用) */
+int v86_disk_is_physical(void);
+int v86_disk_get_phys_drv(void);
+int v86_disk_get_fd(void);
+u32 v86_disk_get_offset(void);
+
+/* ====================================================================== */
+/*  INT 1Bh ハンドラ                                                       */
+/* ====================================================================== */
 
 /* INT 1Bh (ディスクBIOS) を処理する。
  * regs: V86スタックフレーム内レジスタ配列
@@ -58,8 +90,7 @@ struct v86_disk_log_entry {
     u8  pad;
 };
 
-/* デバッグ: INT 1Bh呼び出しログをkprintfでダンプ
- * V86セッション終了後に呼び出すこと */
+/* デバッグ: INT 1Bh呼び出しログをkprintfでダンプ */
 void v86_disk_dump_log(void);
 
 /* デバッグ: INT 1Bhログカウンタをリセット */
@@ -68,12 +99,4 @@ void v86_disk_reset_log(void);
 /* デバッグ: ログバッファへのアクセサ */
 struct v86_disk_log_entry *v86_disk_get_log(u32 *count, u32 *idx);
 
-/* 内部状態アクセサ (v86_fdc.c の FORMAT TRACK 実装用) */
-int v86_disk_is_physical(void);
-int v86_disk_get_phys_drv(void);
-int v86_disk_get_fd(void);
-u32 v86_disk_get_offset(void);
-
 #endif /* V86_DISK_H */
-
-

@@ -1,5 +1,5 @@
 {
-  "version": 35,
+  "version": 37,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -406,13 +406,13 @@
       "body": "return ide_identify(drv, (IdeInfo *)info);"
     },
     {
-      "name": "ide_read_sector",
+      "name": "ide_get_info",
       "ret": "int",
       "args": [
         "int drv",
-        "u32 lba",
-        "void *buf"
-      ]
+        "void *info"
+      ],
+      "body": "return ide_get_info(drv, (IdeInfo *)info);"
     },
     {
       "name": "path_get_drive",
@@ -485,25 +485,7 @@
       ],
       "body": "rshell_active = active;"
     },
-    {
-      "name": "ide_write_sector",
-      "ret": "int",
-      "args": [
-        "int drv",
-        "u32 lba",
-        "const void *buf"
-      ]
-    },
-    {
-      "name": "ide_write_sectors",
-      "ret": "int",
-      "args": [
-        "int drv",
-        "u32 lba",
-        "u32 cnt",
-        "const void *buf"
-      ]
-    },
+
     {
       "name": "sys_reboot",
       "ret": "void",
@@ -1174,7 +1156,13 @@
       "name": "dev_blk_read",
       "ret": "int",
       "args": ["const char *dev_name", "u32 lba", "int count", "void *buf"],
-      "body": "{ Device *d = dev_find(dev_name); if (!d || !d->blk_read) return -1; return d->blk_read(d, (int)lba, count, buf); }"
+      "body": "{ Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }"
+    },
+    {
+      "name": "dev_blk_write",
+      "ret": "int",
+      "args": ["const char *dev_name", "u32 lba", "int count", "const void *buf"],
+      "body": "{ Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }"
     }
   ]
 }

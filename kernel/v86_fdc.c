@@ -36,6 +36,7 @@
 #include "v86_disk.h"
 #include "v86_mem.h"
 #include "fdc.h"
+#include "loop_dev.h"  /* loop_dev_read_chs / write_chs */
 #include "io.h"
 #include "kstring.h"   /* kmemset */
 #include "vfs.h"       /* vfs_seek / vfs_write_fd (FORMAT実装用) */
@@ -162,17 +163,18 @@ static void fdc_execute_rw(void)
     u8 hd_reg = vfdc.cmd_buf[3];
     u8 sect   = vfdc.cmd_buf[4]; /* 1始まり */
     u8 sec_n  = vfdc.cmd_buf[5];
-    const struct fdc_geom *g = v86_disk_get_geom();
+    u16 g_cyls; u8 g_heads, g_spt, g_sec_n, g_daua; u16 g_bps;
     int is_write;
     u32 xfer_bytes;
     u8 *buf;
     u8 sect0;
-    u32 byte_offset;
+
+    v86_disk_get_geometry(&g_cyls, &g_heads, &g_spt, &g_bps, &g_sec_n, &g_daua);
 
     is_write = ((vfdc.cmd & 0x1F) == 0x05) ? 1 : 0;
 
     /* セクタ長コードチェック */
-    if (sec_n != g->sec_n) {
+    if (sec_n != g_sec_n) {
         fdc_set_result_error(0x04, 0x00); /* ST1 bit2=0x04: No Data */
         vfdc.result_total = 7;
         return;
@@ -187,7 +189,7 @@ static void fdc_execute_rw(void)
     sect0 = sect - 1; /* 1始まり → 0ベース */
 
     /* CHS範囲チェック */
-    if (cyl >= g->cyls || (hd_reg & 1) >= g->heads || sect0 >= g->spt) {
+    if (cyl >= g_cyls || (hd_reg & 1) >= g_heads || sect0 >= g_spt) {
         fdc_set_result_error(0x04, 0x00);
         vfdc.result_total = 7;
         return;
@@ -200,58 +202,49 @@ static void fdc_execute_rw(void)
         vfdc.result_total = 7;
         return;
     }
-    if (xfer_bytes > (u32)g->bps) {
-        xfer_bytes = (u32)g->bps;
+    if (xfer_bytes > (u32)g_bps) {
+        xfer_bytes = (u32)g_bps;
     }
 
-    /* CHS → バイトオフセット */
-    byte_offset = ((u32)cyl * g->heads + (u32)(hd_reg & 1))
-                  * ((u32)g->spt * g->bps)
-                  + (u32)sect0 * g->bps;
-
     /* 実FDDモード */
-    if (v86_disk_is_physical()) {
+    if (v86_disk_is_phys()) {
         if (is_write) {
-            if (fdc_write_sector_geom(v86_disk_get_phys_drv(),
+            if (fdc_write_sector_geom(v86_disk_get_phys_drv_num(),
                                       cyl, hd_reg & 1, (int)sect,
-                                      g, buf) != 0) {
+                                      v86_disk_get_geom(), buf) != 0) {
                 fdc_set_result_error(0x20, 0x00);
                 vfdc.result_total = 7;
                 return;
             }
         } else {
-            if (fdc_read_sector_geom(v86_disk_get_phys_drv(),
+            if (fdc_read_sector_geom(v86_disk_get_phys_drv_num(),
                                      cyl, hd_reg & 1, (int)sect,
-                                     g, buf) != 0) {
+                                     v86_disk_get_geom(), buf) != 0) {
                 fdc_set_result_error(0x20, 0x00);
                 vfdc.result_total = 7;
                 return;
             }
         }
     } else {
-        /* ファイルモード: VFS直接アクセス */
-        int fd      = v86_disk_get_fd();
-        u32 img_off = v86_disk_get_offset();
-        u32 img_sz;
-
-        if (fd < 0) {
+        /* loop_dev 経由: CHS アクセス */
+        int slot = v86_disk_get_loop_slot();
+        if (slot < 0) {
             fdc_set_result_error(0xE0, 0x00);
             vfdc.result_total = 7;
             return;
         }
-        /* イメージサイズ境界チェック */
-        img_sz = (u32)g->cyls * g->heads * g->spt * g->bps;
-        if (byte_offset + xfer_bytes > img_sz) {
-            fdc_set_result_error(0xC0, 0x00);
-            vfdc.result_total = 7;
-            return;
-        }
-
-        vfs_seek(fd, img_off + byte_offset, 0);
         if (is_write) {
-            vfs_write_fd(fd, buf, xfer_bytes);
+            if (loop_dev_write_chs(slot, (u16)cyl, hd_reg & 1, sect, buf) != 0) {
+                fdc_set_result_error(0xC0, 0x00);
+                vfdc.result_total = 7;
+                return;
+            }
         } else {
-            vfs_read_fd(fd, buf, xfer_bytes);
+            if (loop_dev_read_chs(slot, (u16)cyl, hd_reg & 1, sect, buf) != 0) {
+                fdc_set_result_error(0xC0, 0x00);
+                vfdc.result_total = 7;
+                return;
+            }
         }
     }
 
@@ -273,11 +266,12 @@ static void fdc_execute_rw(void)
 /* ====================================================================== */
 static void fdc_execute_read_id(void)
 {
-    const struct fdc_geom *g = v86_disk_get_geom();
+    u16 g_cyls; u8 g_heads, g_spt, g_sec_n, g_daua; u16 g_bps;
     u8 hd_reg = vfdc.cmd_buf[1];
 
+    v86_disk_get_geometry(&g_cyls, &g_heads, &g_spt, &g_bps, &g_sec_n, &g_daua);
     vfdc.st0 = (u8)((hd_reg & 0x04U) | (vfdc.drv & 0x03U));
-    fdc_set_result_ok(vfdc.pcn, hd_reg & 1, 1, g->sec_n);
+    fdc_set_result_ok(vfdc.pcn, hd_reg & 1, 1, g_sec_n);
     vfdc.result_total = 7;
 }
 
@@ -307,13 +301,14 @@ static void fdc_execute_format(void)
     u8 sec_n  = vfdc.cmd_buf[2];
     u8 sc     = vfdc.cmd_buf[3]; /* トラック当たりセクタ数 */
     u8 fill   = vfdc.cmd_buf[5]; /* フィルパターン (通常 0xE5) */
-    const struct fdc_geom *g = v86_disk_get_geom();
+    u16 g_cyls; u8 g_heads, g_spt, g_sec_n, g_daua; u16 g_bps;
     u8 *id_buf;                  /* DMAバッファ: CHRN × SC */
     u32 dma_bytes;
     int i;
     /* セクタフィルバッファ (スタックに1セクタ分確保するのは大きすぎるため静的) */
     static u8 fmt_sector[1024];  /* 最大セクタサイズ 1024バイト */
 
+    v86_disk_get_geometry(&g_cyls, &g_heads, &g_spt, &g_bps, &g_sec_n, &g_daua);
     /* IDフィールドの長さ: 4バイト × SC */
     id_buf = v86_dma_get_transfer(&dma_bytes);
 
@@ -325,7 +320,7 @@ static void fdc_execute_format(void)
     }
 
     /* フィルバッファを準備 */
-    kmemset(fmt_sector, (int)fill, (u32)g->bps);
+    kmemset(fmt_sector, (int)fill, (u32)g_bps);
 
     /* 各IDフィールドに対してセクタを書き込む */
     for (i = 0; i < (int)sc; i++) {
@@ -333,8 +328,6 @@ static void fdc_execute_format(void)
         u8 id_h = id_buf[i * 4 + 1]; /* H */
         u8 id_r = id_buf[i * 4 + 2]; /* R (1始まり) */
         u8 id_n = id_buf[i * 4 + 3]; /* N */
-        u32 regs[16];
-        int j;
 
         /* セクタ長コードチェック */
         if (id_n != sec_n) {
@@ -343,68 +336,35 @@ static void fdc_execute_format(void)
             return;
         }
 
-        /* v86_bios_int1b() WRITE DATA (AH=0x05) を呼ぶ */
-        for (j = 0; j < 16; j++) regs[j] = 0;
-
-        /* AH=0x05 (WRITE DATA) + フラグ 0x70 (SEEK+Retry+MFM), AL=DA/UA */
-        regs[V86_REG_EAX] = ((u32)0x75 << 8) | (u32)g->daua_high;
-        /* BX = 転送バイト数 */
-        regs[V86_REG_EBX] = (u32)g->bps;
-        /* CH=セクタ長コード, CL=シリンダ */
-        regs[V86_REG_ECX] = ((u32)id_n << 8) | id_c;
-        /* DH=ヘッド, DL=セクタ (1始まり) */
-        regs[V86_REG_EDX] = ((u32)id_h << 8) | id_r;
-        /* ES:BP → fmt_sector バッファのV86リニアアドレス
-         * fmt_sector は BSS 領域にあり、カーネル物理アドレスはバッキングRAM範囲外。
-         * ここでは v86_phys_addr() の逆変換のかわりに fmt_sector をそのまま渡せる
-         * よう、一時的に v86_mem から実アドレスを用いる。
-         * 実装簡略化: fmt_sector のリニアアドレスを seg:off に分解 */
-        {
-            u32 la = (u32)fmt_sector;
-            regs[V86_REG_ES]  = (u32)(la >> 4) & 0xFFFF;
-            regs[V86_REG_EBP] = (u32)(la & 0x0F);
+        /* セクタ番号 0 は無効 */
+        if (id_r == 0) {
+            fdc_set_result_error(0x04, 0x00);
+            vfdc.result_total = 7;
+            return;
         }
 
-        /* v86_bios_int1b は v86_phys_addr(ES, BP) でバッファを解決する。
-         * ES:BP がバッキングRAM範囲外の場合 NULL が返るためエラーになる。
-         * 代わりに v86_disk の低レベル書き込みを直接呼ぶ: */
-        {
-            u32 byte_offset;
-            u8 sect0;
-
-            if (id_r == 0) {
-                /* セクタ番号 0 は無効 */
-                fdc_set_result_error(0x04, 0x00);
+        /* 実FDDモード */
+        if (v86_disk_is_phys()) {
+            if (fdc_write_sector_geom(v86_disk_get_phys_drv_num(),
+                                      id_c, id_h, (int)id_r,
+                                      v86_disk_get_geom(), fmt_sector) != 0) {
+                fdc_set_result_error(0x50, 0x00);
                 vfdc.result_total = 7;
                 return;
             }
-            sect0 = id_r - 1; /* 0ベースに変換 */
-
-            /* CHS → バイトオフセット */
-            byte_offset = ((u32)id_c * g->heads + (u32)id_h)
-                          * ((u32)g->spt * g->bps)
-                          + (u32)sect0 * g->bps;
-
-            /* 実FDDモード */
-            if (v86_disk_is_physical()) {
-                if (fdc_write_sector_geom(v86_disk_get_phys_drv(),
-                                          id_c, id_h, (int)id_r,
-                                          g, fmt_sector) != 0) {
-                    fdc_set_result_error(0x50, 0x00);
-                    vfdc.result_total = 7;
-                    return;
-                }
-            } else {
-                /* ファイルモード: VFSで直接書き込み */
-                int fd = v86_disk_get_fd();
-                u32 img_off = v86_disk_get_offset();
-                if (fd < 0) {
-                    fdc_set_result_error(0xE0, 0x00);
-                    vfdc.result_total = 7;
-                    return;
-                }
-                vfs_seek(fd, img_off + byte_offset, 0);
-                vfs_write_fd(fd, fmt_sector, (u32)g->bps);
+        } else {
+            /* loop_dev 経由: CHS 書き込み */
+            int slot = v86_disk_get_loop_slot();
+            if (slot < 0) {
+                fdc_set_result_error(0xE0, 0x00);
+                vfdc.result_total = 7;
+                return;
+            }
+            if (loop_dev_write_chs(slot, (u16)id_c, id_h, id_r,
+                                   fmt_sector) != 0) {
+                fdc_set_result_error(0xC0, 0x00);
+                vfdc.result_total = 7;
+                return;
             }
         }
     } /* for each sector */

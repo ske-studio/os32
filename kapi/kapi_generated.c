@@ -294,9 +294,9 @@ int __cdecl wrap_ide_identify(int drv, void *info)
     return ide_identify(drv, (IdeInfo *)info);
 }
 
-int __cdecl wrap_ide_read_sector(int drv, u32 lba, void *buf)
+int __cdecl wrap_ide_get_info(int drv, void *info)
 {
-    return ide_read_sector(drv, lba, buf);
+    return ide_get_info(drv, (IdeInfo *)info);
 }
 
 const char * __cdecl wrap_path_get_drive(void)
@@ -352,16 +352,6 @@ void __cdecl wrap_buz_off(void)
 void __cdecl wrap_rshell_set_active(int active)
 {
     rshell_active = active;
-}
-
-int __cdecl wrap_ide_write_sector(int drv, u32 lba, const void *buf)
-{
-    return ide_write_sector(drv, lba, buf);
-}
-
-int __cdecl wrap_ide_write_sectors(int drv, u32 lba, u32 cnt, const void *buf)
-{
-    return ide_write_sectors(drv, lba, cnt, buf);
 }
 
 void __cdecl wrap_sys_reboot(void)
@@ -836,6 +826,11 @@ int __cdecl wrap_loop_status(int slot, u32 *total, int *bps)
 
 int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf)
 {
-    Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf);
+    { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }
+}
+
+int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)
+{
+    { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }
 }
 

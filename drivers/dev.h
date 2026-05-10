@@ -21,11 +21,23 @@ typedef enum {
     DEV_BLOCK       /* ブロックデバイス (fdd, hdd) */
 } DevType;
 
+/* ======== バスタイプ (デバイスが接続されているバスを識別) ======== */
+typedef enum {
+    DEV_BUS_NONE,       /* 不明/未設定 */
+    DEV_BUS_FDC,        /* uPD765A FDC (FDD) */
+    DEV_BUS_IDE,        /* ATA/IDE PIO */
+    DEV_BUS_SCSI,       /* WD33C93 SCSI (将来) */
+    DEV_BUS_ATAPI,      /* ATAPI CD-ROM (IDEセカンダリ) */
+    DEV_BUS_LOOP        /* ループバックデバイス (仮想) */
+} DevBusType;
+
 /* ======== デバイス構造体 ======== */
 typedef struct _Device Device;
 struct _Device {
     const char *name;        /* デバイス名 ("fdd0", "con", "serial") */
     DevType     type;        /* DEV_CHAR or DEV_BLOCK */
+    DevBusType  bus_type;    /* バスタイプ (IDE/FDC/SCSI/ATAPI/LOOP) */
+    u8          bus_id;      /* バス上のID (IDE:0-3, SCSI:0-6, FDC:0-1) */
     int         sect_size;   /* セクタサイズ (ブロックデバイスのみ) */
     u32         total_sects; /* 総セクタ数 (ブロックデバイスのみ) */
 
@@ -67,6 +79,9 @@ int dev_register(Device *dev);
 
 /* HDDデバイスの登録 (ユーティリティ) */
 void dev_register_hdd(int drive);
+
+/* SCSIデバイスの登録 (将来用スタブ — WD33C93ドライバ完成後に実装) */
+void dev_register_scsi(int scsi_id);
 
 /* CD-ROMデバイスの登録 (ATAPIドライバ検出済みの場合) */
 void dev_register_cdrom(void);

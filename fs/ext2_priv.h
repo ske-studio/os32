@@ -3,7 +3,7 @@
 
 #include "ext2.h"
 #include "ext2_ctx.h"
-#include "ide.h"
+#include "dev.h"
 #include "vfs.h"
 #include "kstring.h"
 

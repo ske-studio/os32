@@ -57,7 +57,7 @@ typedef struct {
     void (__cdecl *ide_init)(void);
     int (__cdecl *ide_drive_present)(int drv);
     int (__cdecl *ide_identify)(int drv, void *info);
-    int (__cdecl *ide_read_sector)(int drv, u32 lba, void *buf);
+    int (__cdecl *ide_get_info)(int drv, void *info);
     const char * (__cdecl *path_get_drive)(void);
     const char * (__cdecl *path_get_cwd)(void);
     int (__cdecl *path_set_drive)(const char *d);
@@ -69,8 +69,6 @@ typedef struct {
     void (__cdecl *buz_on)(void);
     void (__cdecl *buz_off)(void);
     void (__cdecl *rshell_set_active)(int active);
-    int (__cdecl *ide_write_sector)(int drv, u32 lba, const void *buf);
-    int (__cdecl *ide_write_sectors)(int drv, u32 lba, u32 cnt, const void *buf);
     void (__cdecl *sys_reboot)(void);
     void (__cdecl *sys_halt)(void);
     void (__cdecl *shell_putchar)(char ch, u8 attr);
@@ -166,6 +164,7 @@ typedef struct {
     void (__cdecl *loop_detach)(int slot);
     int (__cdecl *loop_status)(int slot, u32 *total, int *bps);
     int (__cdecl *dev_blk_read)(const char *dev_name, u32 lba, int count, void *buf);
+    int (__cdecl *dev_blk_write)(const char *dev_name, u32 lba, int count, const void *buf);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
