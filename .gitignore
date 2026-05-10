@@ -87,3 +87,16 @@ os32_server_out.txt
 os32_server_err.txt
 screen.png
 .claude/
+CLAUDE.md
+
+# バックアップファイル
+*.bak
+
+# アーカイブ内バイナリ (Git肥大化防止)
+tools/_archive/**/*.obj
+tools/_archive/**/*.lib
+tools/_archive/**/*.sys
+tools/_archive/**/*.exe
+tools/_archive/**/*.com
+tools/_archive/**/*.bin
+tools/_archive/**/*.lst
