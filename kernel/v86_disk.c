@@ -447,9 +447,9 @@ int v86_bios_int1b(u32 *regs)
             /*  ファイルモード: vfs_fstat で書き込み権限を確認                  */
             /*  実FDDモード: 常に書き込み可能 (FDCが実際のWP状態を管理)         */
             /* ================================================================ */
-            if (!fdd_use_physical && fdd_fd >= 0) {
+            if (v86_disk_is_loop() && loop_dev_get_fd(v86_loop_slot) >= 0) {
                 OS32_Stat st;
-                if (vfs_fstat(fdd_fd, &st) == 0) {
+                if (vfs_fstat(loop_dev_get_fd(v86_loop_slot), &st) == 0) {
                     if (!(st.st_mode & OS_S_IWUSR)) {
                         ret_ah |= 0x10;  /* bit4: ライトプロテクト中 */
                     }
@@ -527,7 +527,7 @@ int v86_bios_int1b(u32 *regs)
                     if (sector_dl > 0) sector_dl--;
 
                     /* イメージ未設定チェック (ファイルモードのみ) */
-                    if (!fdd_use_physical && fdd_fd < 0) {
+                    if (v86_disk_is_loop() && v86_loop_slot < 0) {
                         DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
                     }
 
@@ -569,7 +569,7 @@ int v86_bios_int1b(u32 *regs)
             final_cyl = cylinder;
             final_head = head_dh;
             final_sect_r = sector_dl + 1; /* 1ベースに戻す */
-            if (fdd_use_physical) {
+            if (v86_disk_is_phys()) {
                 /* 実FDDモード: fdc_read_sector_geom()で1セクタずつ読む */
                 const struct fdc_geom *g = v86_disk_get_geom();
                 u8 cur_sect = sector_dl;  /* 0ベース */
@@ -625,8 +625,8 @@ int v86_bios_int1b(u32 *regs)
                     /* セクタの実データ長を使用 (トラックごとに異なる) */
                     chunk = sec_data_len;
                     if (chunk > remaining) chunk = remaining;
-                    vfs_seek(fdd_fd, data_off, 0);
-                    vfs_read_fd(fdd_fd, dst, chunk);
+                    vfs_seek(loop_dev_get_fd(v86_loop_slot), data_off, 0);
+                    vfs_read_fd(loop_dev_get_fd(v86_loop_slot), dst, chunk);
                     dst += chunk;
                     remaining -= chunk;
                     img_offset += (i32)chunk;
@@ -647,22 +647,37 @@ int v86_bios_int1b(u32 *regs)
                 final_head = cur_trk_head;
                 final_sect_r = cur_sect_r; /* D88: 既に1ベース */
             } else {
-                /* RAW/FDI ファイルモード: VFS seek+read */
-                const struct fdc_geom *g = v86_disk_get_geom();
-                if (img_offset >= 0 && (u32)img_offset < fdd_image_size) {
-                    vfs_seek(fdd_fd, fdd_image_offset + (u32)img_offset, 0);
-                }
-                while (remaining > 0 && img_offset >= 0 && (u32)img_offset < fdd_image_size) {
-                    chunk = remaining;
-                    if (chunk > (u32)g->bps) chunk = (u32)g->bps;
-                    if ((u32)img_offset + chunk > fdd_image_size) {
-                        chunk = fdd_image_size - (u32)img_offset;
+                /* RAW/FDI: loop_dev_read_chs で1セクタずつ読む */
+                u16 g_cyls; u8 g_heads, g_spt, g_sec_n, g_daua; u16 g_bps;
+                u8 cur_sect = sector_dl;  /* 0ベース */
+                u8 cur_head = head_dh;
+                u16 cur_cyl = (u16)cylinder;
+
+                v86_disk_get_geometry(&g_cyls, &g_heads, &g_spt, &g_bps, &g_sec_n, &g_daua);
+                while (remaining > 0) {
+                    chunk = (u32)g_bps;
+                    if (chunk > remaining) chunk = remaining;
+                    if (loop_dev_read_chs(v86_loop_slot, cur_cyl, cur_head,
+                                          cur_sect + 1, dst) != 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, (i32)img_offset, regs);
                     }
-                    vfs_read_fd(fdd_fd, dst, chunk);
                     dst += chunk;
-                    img_offset += (i32)chunk;
                     remaining -= chunk;
+                    img_offset += (i32)chunk;
+                    /* 次セクタに進む */
+                    cur_sect++;
+                    if (cur_sect >= g_spt) {
+                        cur_sect = 0;
+                        cur_head++;
+                        if (cur_head >= g_heads) {
+                            cur_head = 0;
+                            cur_cyl++;
+                        }
+                    }
                 }
+                final_cyl = (u8)cur_cyl;
+                final_head = cur_head;
+                final_sect_r = cur_sect + 1;
             }
 
             /* 成功 */
@@ -804,7 +819,7 @@ int v86_bios_int1b(u32 *regs)
                 if (wr_sect > 0) wr_sect--;
 
                 /* イメージ未設定チェック */
-                if (!fdd_use_physical && fdd_fd < 0) {
+                if (v86_disk_is_loop() && v86_loop_slot < 0) {
                     DISK_ERROR_RETURN(log_entry, 0xE0, -1, regs);
                 }
 
@@ -834,7 +849,7 @@ int v86_bios_int1b(u32 *regs)
             wfinal_cyl = wr_cyl;
             wfinal_head = wr_head;
             wfinal_sect_r = wr_sect + 1;
-            if (fdd_use_physical) {
+            if (v86_disk_is_phys()) {
                 /* 実FDDモード: fdc_write_sector_geom() ループ */
                 const struct fdc_geom *g = v86_disk_get_geom();
                 u8 wc_s = wr_sect;
@@ -883,8 +898,8 @@ int v86_bios_int1b(u32 *regs)
                     }
                     wr_chunk = sec_data_len;
                     if (wr_chunk > wr_rem) wr_chunk = wr_rem;
-                    vfs_seek(fdd_fd, data_off, 0);
-                    vfs_write_fd(fdd_fd, wr_buf, wr_chunk);
+                    vfs_seek(loop_dev_get_fd(v86_loop_slot), data_off, 0);
+                    vfs_write_fd(loop_dev_get_fd(v86_loop_slot), wr_buf, wr_chunk);
                     wr_buf += wr_chunk;
                     wr_rem -= wr_chunk;
                     wr_off += (i32)wr_chunk;
@@ -904,23 +919,37 @@ int v86_bios_int1b(u32 *regs)
                 wfinal_head = wc_trk_h;
                 wfinal_sect_r = wc_r;
             } else {
-                /* RAW/FDI ファイルモード: vfs_seek + vfs_write_fd */
-                const struct fdc_geom *g = v86_disk_get_geom();
-                if (wr_off >= 0 && (u32)wr_off < fdd_image_size) {
-                    vfs_seek(fdd_fd, fdd_image_offset + (u32)wr_off, 0);
-                }
-                while (wr_rem > 0 && wr_off >= 0
-                       && (u32)wr_off < fdd_image_size) {
-                    wr_chunk = wr_rem;
-                    if (wr_chunk > (u32)g->bps) wr_chunk = (u32)g->bps;
-                    if ((u32)wr_off + wr_chunk > fdd_image_size) {
-                        wr_chunk = fdd_image_size - (u32)wr_off;
+                /* RAW/FDI: loop_dev_write_chs で1セクタずつ書く */
+                u16 g_cyls; u8 g_heads, g_spt, g_sec_n, g_daua; u16 g_bps;
+                u8 wc_s = wr_sect;  /* 0ベース */
+                u8 wc_h = wr_head;
+                u16 wc_c = (u16)wr_cyl;
+
+                v86_disk_get_geometry(&g_cyls, &g_heads, &g_spt, &g_bps, &g_sec_n, &g_daua);
+                while (wr_rem > 0) {
+                    wr_chunk = (u32)g_bps;
+                    if (wr_chunk > wr_rem) wr_chunk = wr_rem;
+                    if (loop_dev_write_chs(v86_loop_slot, wc_c, wc_h,
+                                           wc_s + 1, wr_buf) != 0) {
+                        DISK_ERROR_RETURN(log_entry, 0xC0, wr_off, regs);
                     }
-                    vfs_write_fd(fdd_fd, wr_buf, wr_chunk);
                     wr_buf += wr_chunk;
-                    wr_off += (i32)wr_chunk;
                     wr_rem -= wr_chunk;
+                    wr_off += (i32)wr_chunk;
+                    /* 次セクタに進む */
+                    wc_s++;
+                    if (wc_s >= g_spt) {
+                        wc_s = 0;
+                        wc_h++;
+                        if (wc_h >= g_heads) {
+                            wc_h = 0;
+                            wc_c++;
+                        }
+                    }
                 }
+                wfinal_cyl = (u8)wc_c;
+                wfinal_head = wc_h;
+                wfinal_sect_r = wc_s + 1;
             }
 
             /* 成功 */

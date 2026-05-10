@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  V86_SESSION.H - V86 セッションマネージャ                                */
 /*                                                                          */
-/*  V86 (VDOS) セッションのライフサイクル管理を行う。                       */
+/*  V86 セッションのライフサイクル管理を行う。                              */
 /*  イメージ読み込み、V86コンテキスト構築、Auto-Typer、終了処理を統括する。 */
 /* ======================================================================== */
 
@@ -60,15 +60,14 @@ typedef struct {
 /*  公開API                                                                */
 /* ====================================================================== */
 
-/* FreeDOSイメージからV86セッションを起動する */
-int  v86_boot_freedos(const char *path, const char *cmdline);
+/* ディスクイメージからV86セッションを起動する (統合ブート関数) */
+int  v86_boot_image_kapi(const char *path, const char *cmdline);
 
 /* ネイティブPC-98ソフトのFDDイメージからV86セッションを起動する
- * DOSの終了検知 (INT 20h/21h) を無効化し、タイムアウトも無効。
  * 脱出は Ctrl+GRPH+DEL ホットキーのみ。 */
-int  v86_boot_native(const char *path);
+int  v86_boot_native(const char *path, const char *cmdline);
 
-/* NP21/Wにマウント中の実FDDからV86セッションを起動する
+/* 実FDDからV86セッションを起動する (ネイティブモード)
  * drv: 物理ドライブ番号 (通常0) */
 int  v86_boot_physical_fdd(int drv, const char *cmdline);
 

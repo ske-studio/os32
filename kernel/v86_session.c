@@ -1,9 +1,8 @@
 /* ======================================================================== */
 /*  V86_SESSION.C - V86 セッションマネージャ                                */
 /*                                                                          */
-/*  V86 (VDOS) セッションのライフサイクル管理を行う。                       */
-/*  v86_test.c から v86_boot_freedos() を分離し、Auto-Typer、               */
-/*  強制脱出ホットキー、終了理由管理を統合する。                            */
+/*  V86 セッションのライフサイクル管理を行う。                              */
+/*  Auto-Typer、強制脱出ホットキー、終了理由管理を統合する。                */
 /* ======================================================================== */
 
 #include "v86_session.h"
@@ -27,6 +26,7 @@
 #include "kbd.h"
 #include "fdc.h"
 #include "v86_vsync.h"
+#include "loop_dev.h"   /* loop_dev_attach / read_chs */
 
 extern void serial_puts(const char *s);
 
@@ -468,292 +468,93 @@ static void v86_session_run_core(void)
 }
 
 /* ====================================================================== */
-/*  v86_boot_freedos - FreeDOS(98) FDDイメージからブート                   */
+/*  C-1: v86_open_image_to_loop — イメージを loop_dev にアタッチ           */
+/*  フォーマット判定は loop_dev_attach_fd に丸投げ。                        */
+/*  戻り値: 0=成功, -1=open失敗, -2=attach失敗, -3=IPL読み失敗             */
 /* ====================================================================== */
-int v86_boot_freedos(const char *path, const char *cmdline)
+static int v86_open_image_to_loop(const char *path, int *out_slot)
 {
-    int fd;
-    u8 *ipl_dst;
+    int fd, slot, ret;
+    const char *ext;
 
-    /* §1.4 再入禁止ガード: V86セッションが既にアクティブなら即座に返る */
+    fd = vfs_open(path, 0);
+    if (fd < 0) return -1;
+
+    /* 拡張子からフォーマット指定 */
+    ext = path;
+    {
+        const char *p = path;
+        while (*p) {
+            if (*p == '.') ext = p;
+            p++;
+        }
+    }
+
+    /* 空きスロットを探してアタッチ */
+    for (slot = 0; slot < 4; slot++) {
+        int fmt = LOOP_FMT_NONE;
+        if (kstrcmp(ext, ".d88") == 0 || kstrcmp(ext, ".D88") == 0)
+            fmt = LOOP_FMT_D88;
+        else if (kstrcmp(ext, ".fdi") == 0 || kstrcmp(ext, ".FDI") == 0)
+            fmt = LOOP_FMT_FDI;
+        else if (kstrcmp(ext, ".hdi") == 0 || kstrcmp(ext, ".HDI") == 0)
+            fmt = LOOP_FMT_HDI;
+        else
+            fmt = LOOP_FMT_RAW;
+        ret = loop_dev_attach_fd(fd, slot, fmt);
+        if (ret == 0) break;
+    }
+    if (ret != 0) {
+        vfs_close(fd);
+        return -2;
+    }
+
+    /* v86_disk にアタッチ */
+    v86_disk_attach_loop(slot);
+    *out_slot = slot;
+
+    current_session.fd = fd;
+    current_session.img_data_size = vfs_get_size(fd);
+
+    return 0;
+}
+
+/* ====================================================================== */
+/*  C-2: v86_boot_image — 統合ブート関数 (常にネイティブモード)            */
+/* ====================================================================== */
+static int v86_boot_image(const char *path, const char *cmdline)
+{
+    extern u32 v86_timeout_ticks;
+    extern int v86_native_mode;
+    int slot;
+    u8 *ipl_dst;
+    u8 ipl_buf[1024];
+
+    /* 再入禁止ガード */
     if (v86_active) {
-        kprintf(0xE1, "[V86] ERROR: v86_boot_freedos called while already active\n");
+        kprintf(0xE1, "[V86] ERROR: v86_boot_image called while already active\n");
         return -2;
     }
 
     /* セッション初期化 */
     kmemset(&current_session, 0, sizeof(current_session));
     current_session.auto_cmd = cmdline;
-    current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
+    current_session.auto_delay_remaining = cmdline ? V86_AUTO_TYPE_DELAY : 0;
 
-    /* イメージファイルオープン */
-    fd = vfs_open(path, 0);
-    if (fd < 0) {
-        kprintf(0xE1, "[V86] FDD image open failed: %s (rc=%d)\n", path, fd);
-        return -1;
-    }
-    current_session.fd = fd;
-    current_session.img_data_size = vfs_get_size(fd);
-
-    /* V86メモリ空間を構築 (バッキングRAM PTE_USER マッピング + IOPM設定) */
-    v86_mem_setup();
-
-    /* PIC/PIT/FDC/DMA仮想化初期化 */
-    v86_pic_init();
-    v86_pit_init();
-    v86_fdc_virt_init();
-    v86_dma_init();
-
-    /* ==================================================================
-
-     * イメージ形式判定とジオメトリ解析
-     *
-     * 対応形式:
-     *   FDI  (Anex86): 4096byte ヘッダ
-     *                  offset 0x04: FDDType (0x10=2DD, 0x90=2HD)
-     *                  offset 0x08: HeaderSize (通常 0x1000)
-     *                  offset 0x0C: DataSize
-     *   D88  (NP21/W): 可変ヘッダ
-     *                  offset 0x1B: Media flag (0x10=2DD, 0x20=2HD)
-     *                  offset 0x1C: ディスクサイズ (LE 4bytes, ヘッダ込み)
-     *   RAW/IMG       : ヘッダなし — ファイルサイズで推定
-     * ================================================================== */
-    {
-        u8 hdr[36];   /* D88: track[0] offset は 0x20-0x23 (36B必要) */
-        u32 file_size = current_session.img_data_size;
-        fdc_media_t media = FDC_MEDIA_2HD_1232; /* デフォルト */
-        int media_detected = 0;
-        int d88_detected = 0;
-
-        /* ヘッダを最大36バイト読み込む */
-        vfs_seek(fd, 0, 0);
-        vfs_read_fd(fd, hdr, 36);
-
-        /* ---- D88 判定 ----
-         * offset 0x1B のメディアフラグが D88 の既知値 (0x00/0x10/0x20)
-         * かつ offset 0x1C の「ディスクサイズ」がファイルサイズと一致する場合
-         * D88 とみなす */
-        {
-            u8 media_flag = hdr[0x1B];
-            u32 d88_size  = *(u32 *)(hdr + 0x1C);
-
-            if (d88_size == file_size &&
-                (media_flag == 0x00 || media_flag == 0x10 || media_flag == 0x20)) {
-                /* D88 形式 */
-                current_session.img_offset    = 0; /* D88はオフセットなし (セクタ単位アクセス) */
-                /* ただし V86では D88をRAW相当として読むため
-                 * 実際の転送はファイル先頭から行う。
-                 * TODO: D88パーサ実装まではメディア種別のみ利用する */
-                switch (media_flag) {
-                case 0x10: /* 2DD */
-                    /* D88の2DDはSPT=8(640KB)かSPT=9(720KB)か不明だが
-                     * offset 0x20(track table[0])が指すセクタヘッダのN値で判定できる。
-                     * 簡易判定: ディスクサイズで推定 */
-                    if (file_size <= 700000UL) {
-                        media = FDC_MEDIA_2DD_640;
-                        kprintf(0xA1, "[V86] D88: 2DD 640KB (media_flag=0x10)\n");
-                    } else {
-                        media = FDC_MEDIA_2DD_720;
-                        kprintf(0xA1, "[V86] D88: 2DD 720KB (media_flag=0x10)\n");
-                    }
-                    break;
-                case 0x20: /* 2HD */
-                    media = FDC_MEDIA_2HD_1232;
-                    kprintf(0xA1, "[V86] D88: 2HD 1.2MB (media_flag=0x20)\n");
-                    break;
-                default: /* 0x00 = 2D — 現状は2DDとして扱う */
-                    media = FDC_MEDIA_2DD_640;
-                    kprintf(0xA1, "[V86] D88: 2D (media_flag=0x00), treating as 2DD\n");
-                    break;
-                }
-                /* D88はデータオフセット=0 (セクタ単位アクセス)
-                 * IPLはトラック0, セクタ0のデータ部分から読む。
-                 * D88ファイル構造: トラックテーブル [0x20..0x2AF] の [0] が
-                 * トラック0の開始オフセットを示す。その直後にセクタヘッダ (16B)、
-                 * 続いてセクタデータが並ぶ。 */
-                {
-                    u32 trk0_off = *(u32 *)(hdr + 0x20); /* track[0] オフセット */
-                    /* セクタヘッダ(16B)を読んでセクタサイズを確認 */
-                    if (trk0_off >= 0x2B0 && trk0_off < file_size) {
-                        u8 sec_hdr[16];
-                        u8 sec_n;
-                        vfs_seek(fd, trk0_off, 0);
-                        vfs_read_fd(fd, sec_hdr, 16);
-                        sec_n = sec_hdr[3]; /* N値: 0=128B,1=256B,2=512B,3=1024B */
-                        /* IPLデータ開始位置 = トラック0先頭 + セクタヘッダ16B */
-                        current_session.img_offset = trk0_off + 16;
-                        kprintf(0xA1, "[V86] D88: trk0=0x%x secN=%d ipl_off=0x%x\n",
-                                (unsigned)trk0_off, (int)sec_n,
-                                (unsigned)current_session.img_offset);
-                        /* IPL サイズをセクタサイズで上書き (読み過ぎ防止) */
-                        (void)sec_n; /* 現状は1024B固定読み込み — 問題なし */
-                    } else {
-                        current_session.img_offset = 0x2C0; /* フォールバック */
-                    }
-                }
-                /* D88のfdd_image_sizeはジオメトリ(2HD=1261568)から算出
-                 * (ファイルサイズではなく論理ディスクサイズを使う) */
-                {
-                    const struct fdc_geom *g;
-                    /* 一旦セット → geom を取得 → サイズ算出 */
-                    v86_disk_set_file(fd, current_session.img_offset,
-                                      (u32)77 * 2 * 8 * 1024, /* 2HD仮サイズ */
-                                      media);
-                    g = v86_disk_get_geom();
-                    current_session.img_data_size = (u32)g->cyls * g->heads
-                                                     * g->spt * g->bps;
-                    /* img_data_size を更新して再セット */
-                    v86_disk_set_file(fd, current_session.img_offset,
-                                      current_session.img_data_size, media);
-                }
-                media_detected = 1;
-                d88_detected = 1;
-            }
-        }
-
-        /* ---- FDI 判定 ----
-         * offset 0x08 に HeaderSize が入っており 0x1000 or 0x2000 の場合 FDI */
-        if (!media_detected) {
-            u32 hdr_size  = *(u32 *)(hdr + 0x08);
-            u32 fdi_type  = *(u32 *)(hdr + 0x04);
-            u32 data_size = *(u32 *)(hdr + 0x0C);
-
-            if ((hdr_size == 0x1000 || hdr_size == 0x2000) &&
-                file_size > hdr_size &&
-                (data_size == 0 || data_size == file_size - hdr_size)) {
-                /* FDI 形式 */
-                current_session.img_offset    = hdr_size;
-                current_session.img_data_size = file_size - hdr_size;
-
-                /* FDDType (offset 0x04) からメディア種別を決定 */
-                switch (fdi_type) {
-                case 0x10: /* 2DD (640KB or 720KB) */
-                    if (current_session.img_data_size <= 700000UL) {
-                        media = FDC_MEDIA_2DD_640;
-                        kprintf(0xA1, "[V86] FDI: 2DD 640KB (FDDType=0x10, hdr=0x%x)\n",
-                                (unsigned)hdr_size);
-                    } else {
-                        media = FDC_MEDIA_2DD_720;
-                        kprintf(0xA1, "[V86] FDI: 2DD 720KB (FDDType=0x10, hdr=0x%x)\n",
-                                (unsigned)hdr_size);
-                    }
-                    break;
-                case 0x90: /* 2HD 1.2MB */
-                    media = FDC_MEDIA_2HD_1232;
-                    kprintf(0xA1, "[V86] FDI: 2HD 1.2MB (FDDType=0x90, hdr=0x%x)\n",
-                            (unsigned)hdr_size);
-                    break;
-                case 0x30: /* 1.44MB — 2DDとして近似 */
-                    media = FDC_MEDIA_2DD_720;
-                    kprintf(0xA1, "[V86] FDI: 1.44MB (FDDType=0x30) → 2DD 720KB\n");
-                    break;
-                default:
-                    /* FDDType不明: データサイズで推定 */
-                    if (current_session.img_data_size == 655360UL) {
-                        media = FDC_MEDIA_2DD_640;
-                    } else if (current_session.img_data_size == 737280UL) {
-                        media = FDC_MEDIA_2DD_720;
-                    } else {
-                        media = FDC_MEDIA_2HD_1232;
-                    }
-                    kprintf(0xA1, "[V86] FDI: unknown FDDType=0x%x, size=%u\n",
-                            (unsigned)fdi_type, (unsigned)current_session.img_data_size);
-                    break;
-                }
-                media_detected = 1;
-            }
-        }
-
-        /* ---- RAW/IMG フォールバック ----
-         * ヘッダなし — ファイルサイズのみで判定 */
-        if (!media_detected) {
-            if (file_size == 1261568UL) {
-                media = FDC_MEDIA_2HD_1232;
-                kprintf(0xA1, "[V86] RAW: 2HD 1.2MB (%u bytes)\n", (unsigned)file_size);
-            } else if (file_size == 655360UL) {
-                media = FDC_MEDIA_2DD_640;
-                kprintf(0xA1, "[V86] RAW: 2DD 640KB (%u bytes)\n", (unsigned)file_size);
-            } else if (file_size == 737280UL) {
-                media = FDC_MEDIA_2DD_720;
-                kprintf(0xA1, "[V86] RAW: 2DD 720KB (%u bytes)\n", (unsigned)file_size);
-            } else {
-                media = FDC_MEDIA_2HD_1232;
-                kprintf(0xA1, "[V86] RAW: unknown size %u bytes, assuming 2HD\n",
-                        (unsigned)file_size);
-            }
-            current_session.img_offset    = 0;
-            current_session.img_data_size = file_size;
-        }
-
-        /* FDI / RAW の場合ここで set_file を呼ぶ。
-         * D88 はブランチ内で呼び済みなのでスキップ。 */
-        if (!d88_detected) {
-            v86_disk_set_file(fd, current_session.img_offset,
-                              current_session.img_data_size, media);
-        }
-    }
-
-
-    /* IPLをV86メモリにコピー */
-    ipl_dst = v86_phys_addr(IPL_SEG, 0);
-    vfs_seek(fd, current_session.img_offset, 0);
-    vfs_read_fd(fd, ipl_dst, IPL_SIZE);
-
-    kprintf(0xA1, "[V86] Booting FreeDOS(98) IPL...\n");
-
-    /* デバッグヘッダ即時書き込み */
-    v86_debug_write_header("FreeDOS", path, cmdline);
-
-    /* V86実行コア */
-    v86_session_run_core();
-
-    /* ファイルリソース解放 */
-    vfs_close(fd);
-    current_session.fd = -1;
-
-    return 0;
-}
-
-/* ====================================================================== */
-/*  v86_boot_native - ネイティブPC-98ソフトのFDDイメージからブート          */
-/*                                                                          */
-/*  v86_boot_freedos と同じイメージ判定ロジックを使用するが:                */
-/*    - タイムアウト無効 (ゲーム等の長時間実行対応)                         */
-/*    - DOS終了検知 (INT 20h/21h) 無効化                                   */
-/*    - Auto-Typer なし                                                    */
-/*    - 脱出は Ctrl+GRPH+DEL / STOP キーのみ                               */
-/* ====================================================================== */
-int v86_boot_native(const char *path)
-{
-    extern u32 v86_timeout_ticks;
-    extern int v86_native_mode;
-    int fd;
-    u8 *ipl_dst;
-
-    /* §1.4 再入禁止ガード */
-    if (v86_active) {
-        kprintf(0xE1, "[V86] ERROR: v86_boot_native called while already active\n");
-        return -2;
-    }
-
-    /* セッション初期化 (Auto-Typerなし) */
-    kmemset(&current_session, 0, sizeof(current_session));
-    current_session.auto_cmd = 0;
-
-    /* ネイティブモード設定: タイムアウト無効 (ゲーム等の長時間実行対応) */
-    v86_timeout_ticks = 0;  /* 無効: 脱出は Ctrl+GRPH+DEL のみ */
+    /* ネイティブモード設定 */
+    v86_timeout_ticks = 0;
     v86_native_mode = 1;
 
-    /* イメージファイルオープン */
-    fd = vfs_open(path, 0);
-    if (fd < 0) {
-        kprintf(0xE1, "[V86] FDD image open failed: %s (rc=%d)\n", path, fd);
-        v86_timeout_ticks = 6000;
-        v86_native_mode = 0;
-        return -1;
+    /* イメージを loop_dev にアタッチ */
+    {
+        int rc = v86_open_image_to_loop(path, &slot);
+        if (rc != 0) {
+            kprintf(0xE1, "[V86] Image open failed: %s (rc=%d)\n", path, rc);
+            v86_timeout_ticks = 6000;
+            v86_native_mode = 0;
+            return -1;
+        }
     }
-    current_session.fd = fd;
-    current_session.img_data_size = vfs_get_size(fd);
 
     /* V86メモリ空間を構築 */
     v86_mem_setup();
@@ -764,182 +565,77 @@ int v86_boot_native(const char *path)
     v86_fdc_virt_init();
     v86_dma_init();
 
-    /* ==================================================================
-     * イメージ形式判定とジオメトリ解析
-     * (v86_boot_freedos と同一ロジック)
-     * ================================================================== */
+    /* IPL: track0/head0/sect1 を読んで V86 メモリにコピー */
     {
-        u8 hdr[36];
-        u32 file_size = current_session.img_data_size;
-        fdc_media_t media = FDC_MEDIA_2HD_1232;
-        int media_detected = 0;
-        int d88_detected = 0;
+        u16 bps;
+        u32 ipl_size;
+        loop_dev_get_geometry(slot, NULL, NULL, NULL, &bps, NULL);
+        ipl_size = (u32)bps;
+        if (ipl_size > sizeof(ipl_buf)) ipl_size = sizeof(ipl_buf);
 
-        vfs_seek(fd, 0, 0);
-        vfs_read_fd(fd, hdr, 36);
-
-        /* ---- D88 判定 ---- */
-        {
-            u8 media_flag = hdr[0x1B];
-            u32 d88_size  = *(u32 *)(hdr + 0x1C);
-
-            if (d88_size == file_size &&
-                (media_flag == 0x00 || media_flag == 0x10 || media_flag == 0x20)) {
-                current_session.img_offset = 0;
-                switch (media_flag) {
-                case 0x10:
-                    if (file_size <= 700000UL) {
-                        media = FDC_MEDIA_2DD_640;
-                        kprintf(0xA1, "[V86] D88: 2DD 640KB\n");
-                    } else {
-                        media = FDC_MEDIA_2DD_720;
-                        kprintf(0xA1, "[V86] D88: 2DD 720KB\n");
-                    }
-                    break;
-                case 0x20:
-                    media = FDC_MEDIA_2HD_1232;
-                    kprintf(0xA1, "[V86] D88: 2HD 1.2MB\n");
-                    break;
-                case 0x00:
-                    media = FDC_MEDIA_2D_256;
-                    kprintf(0xA1, "[V86] D88: 2D (media_flag=0x00)\n");
-                    break;
-                default:
-                    media = FDC_MEDIA_2DD_640;
-                    kprintf(0xA1, "[V86] D88: unknown media 0x%x\n",
-                            (unsigned)media_flag);
-                    break;
-                }
-                /* D88専用ディスクバックエンドを設定 */
-                v86_disk_set_d88(fd, file_size, media);
-                {
-                    u32 trk0_off = *(u32 *)(hdr + 0x20);
-                    if (trk0_off >= 0x2B0 && trk0_off < file_size) {
-                        /* トラック0先頭セクタのデータ部 = IPL */
-                        current_session.img_offset = trk0_off + 16;
-                        kprintf(0xA1, "[V86] D88: trk0=0x%x ipl_off=0x%x\n",
-                                (unsigned)trk0_off,
-                                (unsigned)current_session.img_offset);
-                    } else {
-                        current_session.img_offset = 0x2C0;
-                    }
-                }
-                media_detected = 1;
-                d88_detected = 1;
-            }
+        if (loop_dev_read_chs(slot, 0, 0, 1, ipl_buf) != 0) {
+            kprintf(0xE1, "[V86] IPL read failed\n");
+            v86_disk_clear();
+            vfs_close(current_session.fd);
+            v86_timeout_ticks = 6000;
+            v86_native_mode = 0;
+            return -1;
         }
-
-        /* ---- FDI 判定 ---- */
-        if (!media_detected) {
-            u32 hdr_size  = *(u32 *)(hdr + 0x08);
-            u32 fdi_type  = *(u32 *)(hdr + 0x04);
-            u32 data_size = *(u32 *)(hdr + 0x0C);
-
-            if ((hdr_size == 0x1000 || hdr_size == 0x2000) &&
-                file_size > hdr_size &&
-                (data_size == 0 || data_size == file_size - hdr_size)) {
-                current_session.img_offset    = hdr_size;
-                current_session.img_data_size = file_size - hdr_size;
-
-                switch (fdi_type) {
-                case 0x10:
-                    if (current_session.img_data_size <= 700000UL) {
-                        media = FDC_MEDIA_2DD_640;
-                    } else {
-                        media = FDC_MEDIA_2DD_720;
-                    }
-                    break;
-                case 0x90:
-                    media = FDC_MEDIA_2HD_1232;
-                    break;
-                default:
-                    if (current_session.img_data_size == 655360UL) {
-                        media = FDC_MEDIA_2DD_640;
-                    } else if (current_session.img_data_size == 737280UL) {
-                        media = FDC_MEDIA_2DD_720;
-                    } else {
-                        media = FDC_MEDIA_2HD_1232;
-                    }
-                    break;
-                }
-                media_detected = 1;
-            }
-        }
-
-        /* ---- RAW/IMG フォールバック ---- */
-        if (!media_detected) {
-            if (file_size == 1261568UL) {
-                media = FDC_MEDIA_2HD_1232;
-            } else if (file_size == 655360UL) {
-                media = FDC_MEDIA_2DD_640;
-            } else if (file_size == 737280UL) {
-                media = FDC_MEDIA_2DD_720;
-            } else {
-                media = FDC_MEDIA_2HD_1232;
-            }
-            current_session.img_offset    = 0;
-            current_session.img_data_size = file_size;
-        }
-
-        if (!d88_detected) {
-            v86_disk_set_file(fd, current_session.img_offset,
-                              current_session.img_data_size, media);
-        }
-    }
-
-    /* IPLをV86メモリにコピー
-     * D88モードの場合、img_offsetはトラック0セクタ1のデータ部を指す。
-     * サイズは実際のセクタサイズ (BPS) を使用する。 */
-    {
-        const struct fdc_geom *g = v86_disk_get_geom();
-        u32 ipl_size = g ? (u32)g->bps : IPL_SIZE;
         ipl_dst = v86_phys_addr(IPL_SEG, 0);
-        vfs_seek(fd, current_session.img_offset, 0);
-        vfs_read_fd(fd, ipl_dst, ipl_size);
-        kprintf(0xA1, "[V86] IPL loaded: %u bytes at %04X:0000 "
-                "(N=%d, SPT=%d, BPS=%u)\n",
-                (unsigned)ipl_size, IPL_SEG,
-                g ? g->sec_n : -1, g ? g->spt : -1,
-                (unsigned)(g ? g->bps : 0));
+        kmemcpy(ipl_dst, ipl_buf, ipl_size);
+        kprintf(0xA1, "[V86] IPL loaded: %u bytes at %04X:0000\n",
+                (unsigned)ipl_size, IPL_SEG);
     }
 
-    kprintf(0xA1, "[V86] Booting native PC-98 software (no timeout)...\n");
-
-    /* ネイティブモード: 画面表示を強制有効化
-     * OS32カーネルが画面を無効化している可能性があるため、
-     * ゲスト実行前にDISP ENABLE / GDC START / 16色モードを設定する */
-    outp(0x68, 0x0F);  /* DISP ENABLE = 画面表示可 */
-    outp(0xA2, 0x0D);  /* グラフィックGDC START */
-    outp(0x6A, 0x01);  /* 16色モード */
-    outp(0x68, 0x08);  /* 400ラインモード (高解像度) */
+    /* ネイティブモード: 画面表示を強制有効化 */
+    outp(0x68, 0x0F);
+    outp(0xA2, 0x0D);
+    outp(0x6A, 0x01);
+    outp(0x68, 0x08);
 
     /* VSYNC仮想化を初期化 */
     v86_vsync_init();
 
-    /* デバッグヘッダ即時書き込み */
-    v86_debug_write_header("Native", path, (void *)0);
+    /* デバッグヘッダ */
+    v86_debug_write_header("Native", path, cmdline);
+
+    kprintf(0xA1, "[V86] Booting: %s\n", path);
 
     /* V86実行コア */
     v86_session_run_core();
 
-    /* デバッグダンプは v86_debug.c の v86_debug_dump_session() で統合処理 */
-
     /* リソース解放 */
     v86_vsync_cleanup();
-    vfs_close(fd);
+    v86_disk_clear();
+    vfs_close(current_session.fd);
     current_session.fd = -1;
 
-    /* ネイティブモード設定を復元 */
     v86_timeout_ticks = 6000;
     v86_native_mode = 0;
 
     return 0;
 }
 
+/* KAPI ラッパー (Phase C-3 用) */
+int v86_boot_image_kapi(const char *path, const char *cmdline)
+{
+    return v86_boot_image(path, cmdline);
+}
+
+
+
 /* ====================================================================== */
-/*  v86_boot_physical_fdd - 実FDDからV86セッションを起動                   */
+/*  v86_boot_native - 互換ラッパー (v86_boot_image に委譲)                 */
+/* ====================================================================== */
+int v86_boot_native(const char *path, const char *cmdline)
+{
+    return v86_boot_image(path, cmdline);
+}
+
+/* ====================================================================== */
+/*  v86_boot_physical_fdd - 実FDDからV86セッションを起動 (ネイティブモード)   */
 /*                                                                          */
-/*  NP21/Wにマウント中のFDDから直接IPLを読み、FreeDOSを起動する。         */
+/*  NP21/Wにマウント中のFDDから直接IPLを読み、V86で起動する。              */
 /*  ファイルオープン不要。fdc_read_sector() でセクタを直接読む。           */
 /* ====================================================================== */
 int v86_boot_physical_fdd(int drv, const char *cmdline)
@@ -960,6 +656,14 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
     current_session.fd = -1;
     current_session.img_data_size = V86_FDD_IMAGE_SIZE;
+
+    /* ネイティブモード設定 (DOSモード廃止に伴い、全ブートパスを統一) */
+    {
+        extern u32 v86_timeout_ticks;
+        extern int v86_native_mode;
+        v86_timeout_ticks = 0;
+        v86_native_mode = 1;
+    }
 
     /* Phase 1A: FDCを再初期化 (ブート時に失敗していたケースの救済)
      * メディア挿入後にユーザーが vdos を起動するため、毎回
@@ -1046,6 +750,14 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
     current_session.auto_cmd = cmdline;
     current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
     current_session.fd = -1;
+
+    /* ネイティブモード設定 (DOSモード廃止に伴い、全ブートパスを統一) */
+    {
+        extern u32 v86_timeout_ticks;
+        extern int v86_native_mode;
+        v86_timeout_ticks = 0;
+        v86_native_mode = 1;
+    }
 
     /* FDC再初期化 */
     {
