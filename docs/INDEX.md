@@ -25,7 +25,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---------|------|
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v31 仕様書 — 153エントリテーブル (ヘッダ2 + 関数150 + データフィールド1) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v38 仕様書 — 概要・呼び出し規約・変更履歴 |
+| [KAPI_TABLE.md](KAPI_TABLE.md) | KernelAPI v38 関数テーブル — 全162エントリ |
+| [KAPI_NOTES.md](KAPI_NOTES.md) | KernelAPI v38 補足ノート — 機能グループ別詳細説明 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
 | [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) | ブートアーキテクチャ — VK32フォーマット、メモリマップ、HDD/FDDローダー、デプロイ |
 | [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) | SQLite カーネル統合 — アーキテクチャ、ビルド設定、VFS、IPC、障害サマリ |
@@ -43,23 +45,13 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [INSTALL.md](../INSTALL.md) | インストール・ビルド手順 |
 | [CHANGELOG.md](../CHANGELOG.md) | リリース変更履歴 |
 
-## KAPI_SPEC.md 目次
+## KAPI 仕様書 構成
 
-| 節 | 内容 |
+| ファイル | 内容 |
 |----|------|
-| §1 | 概要（アドレス配置、マジックナンバー） |
-| §2 | 呼び出し規約（System V ABI, cdecl等） |
-| §3 | 外部プログラムのビルド手順（main配置ルール） |
-| §4 | KernelAPI 構造体レイアウト（関数140 + データ2） |
-| §4-1 | グラフィクスAPI補足（libos32gfx移行について） |
-| §4-2 | ラスタパレット (gfx_present_raster) |
-| §4-3 | FDリダイレクト・パイプAPI |
-| §4-4 | ページング問い合わせAPI |
-| §4-5 | キー押下状態ポーリングAPI |
-| §4-6 | FM/SSG個別チャンネル制御API |
-| §4-7 | マウスAPI |
-| §4-8 | TVRAM読取・反転API |
-| §4-9 | マウスカーソル制御API |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | §1 概要、§2 呼び出し規約、§3 ビルド手順、§4 ヘッダ、§5 変更履歴 |
+| [KAPI_TABLE.md](KAPI_TABLE.md) | 全162 API関数のオフセット・プロトタイプ (機能グループ別) |
+| [KAPI_NOTES.md](KAPI_NOTES.md) | §5-1〜§5-12 機能グループ別補足ノート (GFX/パイプ/マウス/V86/DB/Loop等) |
 
 ## ハードウェア技術資料 (外部リファレンス)
 
@@ -83,7 +75,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/vdos/INDEX.md](tasks/vdos/INDEX.md) | **VDOS** — V86 FreeDOS(98) サブシステム (アクティブ開発中) |
+| [tasks/v86_integration/README.md](tasks/v86_integration/README.md) | **V86統合** — V86サブシステム統合リファクタリング |
+| [tasks/v86/INDEX.md](tasks/v86/INDEX.md) | **V86** — V86サブシステム 設計・実装ドキュメント (旧VDOS) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP (日本語入力) — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
 
@@ -136,4 +129,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-05-04*
+*Last Updated: 2026-05-11*
