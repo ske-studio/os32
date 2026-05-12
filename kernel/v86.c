@@ -17,6 +17,8 @@
 #include "v86_dma.h"
 #include "v86_vsync.h"
 #include "v86_session.h"
+#include "v86_debug.h"
+#include "v86_event.h"
 #include "tvram.h"
 #include "io.h"
 #include "kprintf.h"
@@ -32,10 +34,70 @@ u32 v86_timeout_ticks = 6000;     /* デフォルト: 6000 tick = 60秒 */
 u32 v86_start_tick = 0;
 
 /* デバッグリングバッファ (最近のGPイベント記録)
- * struct v86_trace_entry は v86.h で定義 */
-#define V86_TRACE_SIZE 128
+ * struct v86_trace_entry / V86_TRACE_SIZE は v86.h で定義
+ * T1.2: 128件→1024件、tickフィールド追加、INT/CSフィルタ対応 */
 static struct v86_trace_entry v86_trace[V86_TRACE_SIZE];
 static u32 v86_trace_idx = 0;
+
+/* T1.2 フィルタ状態 (-1=全件記録) */
+int v86_trace_filter_int = -1;
+u16 v86_trace_filter_cs_min = 0;
+u16 v86_trace_filter_cs_max = 0;
+
+void v86_trace_set_int_filter(int int_no)
+{
+    v86_trace_filter_int = int_no;
+}
+
+void v86_trace_set_cs_range(u16 lo, u16 hi)
+{
+    v86_trace_filter_cs_min = lo;
+    v86_trace_filter_cs_max = hi;
+}
+
+/* T3.5: 条件付きトレース開始トリガー
+ * トリガー条件が成立するまでトレースを抑制する。
+ * kind=0: トリガー無効 (常にトレース ON)
+ * kind=1: 特定 INT 発行でトリガー (arg1=INT番号)
+ * kind=2: 特定 CS:IP 到達でトリガー (arg1=CS, arg2=IP)
+ * kind=3: 指定 tick 到達でトリガー (arg1=tick値) */
+int  v86_trace_trigger_kind = 0;   /* 0=無効 */
+u32  v86_trace_trigger_arg1 = 0;
+u32  v86_trace_trigger_arg2 = 0;
+int  v86_trace_triggered = 1;      /* 1=トレース許可 (デフォルト) */
+
+void v86_trace_trigger_set(int kind, u32 arg1, u32 arg2)
+{
+    v86_trace_trigger_kind = kind;
+    v86_trace_trigger_arg1 = arg1;
+    v86_trace_trigger_arg2 = arg2;
+    v86_trace_triggered = (kind == 0) ? 1 : 0;
+}
+
+static void v86_trace_trigger_check(u8 opcode, u8 intno,
+                                    u16 cs, u16 ip_val)
+{
+    if (v86_trace_triggered) return;
+
+    switch (v86_trace_trigger_kind) {
+    case 1:  /* INT 番号トリガー */
+        if (opcode == 0xCD && intno == (u8)v86_trace_trigger_arg1) {
+            v86_trace_triggered = 1;
+        }
+        break;
+    case 2:  /* CS:IP トリガー */
+        if (cs == (u16)v86_trace_trigger_arg1 &&
+            ip_val == (u16)v86_trace_trigger_arg2) {
+            v86_trace_triggered = 1;
+        }
+        break;
+    case 3:  /* tick トリガー */
+        if (tick_count >= v86_trace_trigger_arg1) {
+            v86_trace_triggered = 1;
+        }
+        break;
+    }
+}
 
 /* タイムアウト時の実CS:EIP (HLT注入前の本来のアドレス) */
 u32 v86_timeout_cs = 0;
@@ -146,27 +208,62 @@ u32 v86_last_cs = 0;       /* 最後のINT発行時のCS */
 u32 v86_last_ip = 0;       /* 最後のINT発行時のIP */
 u32 v86_gp_count = 0;      /* GPハンドラ呼び出し総数 */
 
-/* I/Oポートアクセス統計 (V86終了後にダンプ用) */
-#define V86_IO_STAT_SIZE 16
+/* INT AH ヒストグラム (u8 飽和カウンタ [64][256] = 16KB)
+ * INT 00h-3Fh × AH値 の呼び出し頻度を集計する。
+ * v86_debug_enabled == 1 のときのみ記録。
+ * PC-98 BIOS/DOS で使われるINT (08h-1Bh, 20h-29h等) を全カバー。 */
+#define V86_AH_HIST_INTS 64
+u8 v86_int_ah_hist[V86_AH_HIST_INTS][256];
+u32 v86_int_ah_saturated = 0;  /* 飽和 (=255到達) 回数 */
+
+static void v86_ah_hist_record(u8 intno, u8 ah)
+{
+    if (intno >= V86_AH_HIST_INTS) return;  /* 範囲外は無視 */
+    if (v86_int_ah_hist[intno][ah] < 255) {
+        v86_int_ah_hist[intno][ah]++;
+    } else {
+        v86_int_ah_saturated++;
+    }
+}
+
+/* I/Oポートアクセス統計 (T2.2 拡張: R/W分離 + 分類タグ + 64エントリ) */
+#define V86_IO_STAT_SIZE 64
+
+/* 分類コード */
+#define V86_IO_CLASS_UNKNOWN     0  /* 未分類 */
+#define V86_IO_CLASS_PASSTHROUGH 1  /* 実HW直送 */
+#define V86_IO_CLASS_VIRT        2  /* カーネル仮想化 */
+#define V86_IO_CLASS_PROTECTED   3  /* 保護 (アクセス拒否) */
+#define V86_IO_CLASS_FALLTHROUGH 4  /* 未分類で実HW直送 (要分析) */
+
 struct v86_io_stat {
     u16 port;
-    u32 count;
+    u32 read_count;
+    u32 write_count;
+    u8  classification;
 };
 struct v86_io_stat v86_io_stats[V86_IO_STAT_SIZE];
 u32 v86_io_stat_count = 0;
 
-static void v86_io_stat_record(u16 port)
+/* T2.2: direction: 0=read, 1=write */
+static void v86_io_stat_record(u16 port, int dir, u8 cls)
 {
     u32 i;
     for (i = 0; i < v86_io_stat_count; i++) {
         if (v86_io_stats[i].port == port) {
-            v86_io_stats[i].count++;
+            if (dir) v86_io_stats[i].write_count++;
+            else     v86_io_stats[i].read_count++;
+            /* 分類を上書き (より具体的な分類を優先) */
+            if (cls > v86_io_stats[i].classification)
+                v86_io_stats[i].classification = cls;
             return;
         }
     }
     if (v86_io_stat_count < V86_IO_STAT_SIZE) {
         v86_io_stats[v86_io_stat_count].port = port;
-        v86_io_stats[v86_io_stat_count].count = 1;
+        v86_io_stats[v86_io_stat_count].read_count = dir ? 0 : 1;
+        v86_io_stats[v86_io_stat_count].write_count = dir ? 1 : 0;
+        v86_io_stats[v86_io_stat_count].classification = cls;
         v86_io_stat_count++;
     }
 }
@@ -174,11 +271,17 @@ static void v86_io_stat_record(u16 port)
 void v86_dump_io_stats(void)
 {
     u32 i;
+    static const char *cls_names[] = {
+        "unk", "pass", "virt", "prot", "fall"
+    };
     kprintf(0xA1, "[V86] I/O port access stats (%d unique ports):\n", (int)v86_io_stat_count);
     for (i = 0; i < v86_io_stat_count; i++) {
-        kprintf(0x07, "  port %xh: %d accesses\n",
+        u8 c = v86_io_stats[i].classification;
+        kprintf(0x07, "  port %xh: R=%d W=%d  %s\n",
                 (unsigned)v86_io_stats[i].port,
-                (int)v86_io_stats[i].count);
+                (int)v86_io_stats[i].read_count,
+                (int)v86_io_stats[i].write_count,
+                (c < 5) ? cls_names[c] : "???");
     }
 }
 
@@ -413,21 +516,68 @@ int v86_gp_handler(u32 *regs)
     }
     opcode = *ip;  /* プレフィックス後のプライマリオペコード */
 
-    /* トレース: 元の EIP 位置を記録 */
+    /* トレース: 元の EIP 位置を記録 (T1.2: フィルタ + tick付き) */
     {
-        struct v86_trace_entry *e = &v86_trace[v86_trace_idx];
-        e->cs = regs[V86_REG_CS];
-        e->ip = regs[V86_REG_EIP];
-        e->opcode = opcode;
-        e->cx = (u16)(regs[V86_REG_ECX] & 0xFFFF);
-        if (opcode == 0xCD) {
-            e->intno = ip[1];
-            e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
-            e->al = regs[V86_REG_EAX] & 0xFF;
-        } else {
-            e->intno = (u8)prefix_len; e->ah = 0; e->al = 0;
+        u8 trace_intno;
+        u16 trace_cs;
+        int do_trace;
+
+        trace_intno = (opcode == 0xCD) ? ip[1] : 0;
+        trace_cs = (u16)regs[V86_REG_CS];
+
+        /* T3.5: トリガー条件チェック (未成立ならトレース OFF) */
+        v86_trace_trigger_check(opcode, trace_intno,
+                                trace_cs, (u16)regs[V86_REG_EIP]);
+
+        /* T1.2 フィルタチェック */
+        do_trace = v86_trace_triggered;  /* T3.5: トリガー未成立→0 */
+        if (v86_trace_filter_int >= 0 && opcode == 0xCD &&
+            trace_intno != (u8)v86_trace_filter_int) {
+            do_trace = 0;
         }
-        v86_trace_idx = (v86_trace_idx + 1) % V86_TRACE_SIZE;
+        if (v86_trace_filter_cs_min &&
+            (trace_cs < v86_trace_filter_cs_min ||
+             trace_cs > v86_trace_filter_cs_max)) {
+            do_trace = 0;
+        }
+
+        if (do_trace) {
+            struct v86_trace_entry *e = &v86_trace[v86_trace_idx];
+            e->tick = tick_count;
+            e->cs = trace_cs;
+            e->ip = regs[V86_REG_EIP];
+            e->opcode = opcode;
+            e->cx = (u16)(regs[V86_REG_ECX] & 0xFFFF);
+            e->reserved = 0;
+            if (opcode == 0xCD) {
+                e->intno = trace_intno;
+                e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
+                e->al = regs[V86_REG_EAX] & 0xFF;
+            } else {
+                e->intno = (u8)prefix_len;
+                e->ah = 0;
+                e->al = 0;
+            }
+            v86_trace_idx = (v86_trace_idx + 1) % V86_TRACE_SIZE;
+        }
+    }
+
+    /* T1.1: イベントログに記録 */
+    {
+        u8 ev_kind = (opcode == 0xCD) ? V86_EV_INT : V86_EV_GP;
+        u8 ev_intno = (opcode == 0xCD) ? ip[1] : opcode;
+        u8 ev_ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
+        u8 ev_al = regs[V86_REG_EAX] & 0xFF;
+        v86_event_record(ev_kind,
+                         (u16)regs[V86_REG_CS],
+                         (u16)regs[V86_REG_EIP],
+                         ev_intno, ev_ah, ev_al,
+                         (u16)(regs[V86_REG_ECX] & 0xFFFF));
+
+        /* AH ヒストグラム: INT 命令時のみ記録 */
+        if (opcode == 0xCD && v86_debug_enabled) {
+            v86_ah_hist_record(ev_intno, ev_ah);
+        }
     }
 
     /* ================================================================== */
@@ -559,6 +709,15 @@ int v86_gp_handler(u32 *regs)
         v86_last_int = intno;
         v86_last_cs = regs[V86_REG_CS];
         v86_last_ip = regs[V86_REG_EIP];
+
+        /* T1.3: INT 21h 初回検出で BDA pre_dos スナップショット */
+        if (intno == 0x21) {
+            static int bda_pre_dos_done = 0;
+            if (!bda_pre_dos_done) {
+                v86_debug_dump_bda_named("pre_dos");
+                bda_pre_dos_done = 1;
+            }
+        }
 
         /* タイムアウトチェックはGPハンドラ冒頭で実施済み */
         /* ============================================================ */
@@ -767,7 +926,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE4: {
         u8 port = ip[1];
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
@@ -780,7 +939,7 @@ int v86_gp_handler(u32 *regs)
     case 0xE6: {
         u8 port = ip[1];
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
@@ -803,7 +962,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEC: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
@@ -816,7 +975,7 @@ int v86_gp_handler(u32 *regs)
     case 0xEE: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
@@ -839,7 +998,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE5: {
         u16 port = (u16)ip[1];
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
@@ -851,7 +1010,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE7: {
         u16 port = (u16)ip[1];
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
@@ -866,7 +1025,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xED: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
@@ -878,12 +1037,45 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEF: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port);
+        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
         }
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
+        break;
+    }
+
+    /* ================================================================ */
+    /*  CALL FAR ptr16:16 (0x9A oo oo ss ss) — T1.4 ROM CALL トラッカー */
+    /*  リアルモードの CALL FAR をエミュレート:                         */
+    /*    push CS, push IP+5 → CS:IP = target_seg:target_off           */
+    /*  CS >= F000h の場合は ROM CALL として記録する                     */
+    /* ================================================================ */
+    case 0x9A: {
+        u16 target_off = *(u16 *)(ip + 1);
+        u16 target_seg = *(u16 *)(ip + 3);
+        u16 ret_ip = (u16)((regs[V86_REG_EIP] + (u32)prefix_len + 5) & 0xFFFF);
+
+        /* push CS (復帰セグメント) */
+        v86_push16(regs, (u16)regs[V86_REG_CS]);
+        /* push IP+5 (復帰オフセット) */
+        v86_push16(regs, ret_ip);
+
+        /* ROM 領域への CALL を記録 */
+        if (target_seg >= 0xF000) {
+            v86_debug_rom_call_record(
+                tick_count,
+                (u16)regs[V86_REG_CS],
+                (u16)regs[V86_REG_EIP],
+                target_seg, target_off,
+                (u16)(regs[V86_REG_EAX] & 0xFFFF),
+                (u16)(regs[V86_REG_EBX] & 0xFFFF));
+        }
+
+        /* CS:IP をターゲットに設定 */
+        regs[V86_REG_CS]  = target_seg;
+        regs[V86_REG_EIP] = target_off;
         break;
     }
 

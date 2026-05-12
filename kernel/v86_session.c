@@ -15,6 +15,7 @@
 #include "v86_dma.h"
 #include "v86_disk.h"
 #include "v86_debug.h"
+#include "v86_event.h"
 #include "v86_bda.h"
 #include "tss.h"
 #include "paging.h"
@@ -49,8 +50,11 @@ u32 v86_irq0_inject_count = 0;
 static V86Session current_session;
 static u32 v86_session_jmpbuf[6];
 
-/* V86テスト用カーネルスタック (16KB) */
-static u8 v86_kstack[65536] __attribute__((aligned(16)));
+/* T1.3: asm ブロックから参照される BDA exit タグ文字列 */
+const char v86_bda_exit_tag[] = "exit";
+
+/* V86カーネルスタック (32KB, v86_test.cと共用) */
+u8 v86_kstack[32768] __attribute__((aligned(16)));
 
 /* TSS ESP0保存 (static — longjmp後にスタック上のローカル変数が壊れるため) */
 static u32 v86_saved_esp0;
@@ -99,6 +103,20 @@ void v86_request_exit(enum v86_exit_reason reason)
     if (current_session.exit_reason == V86_EXIT_NONE) {
         current_session.exit_reason = reason;
     }
+
+    /* T1.1: クリティカルイベントを記録 (即時flush) */
+    {
+        u8 ev_kind;
+        switch (reason) {
+        case V86_EXIT_TIMEOUT:    ev_kind = V86_EV_TIMEOUT;    break;
+        case V86_EXIT_UNKNOWN_OP: ev_kind = V86_EV_UNKNOWN_OP; break;
+        default:                  ev_kind = V86_EV_EXIT;       break;
+        }
+        v86_event_record(ev_kind,
+                         (u16)v86_last_cs, (u16)v86_last_ip,
+                         (u8)reason, 0, 0, 0);
+    }
+
     v86_exit_request = 1;
 }
 
@@ -111,6 +129,8 @@ void v86_request_exit(enum v86_exit_reason reason)
 /* ====================================================================== */
 void v86_session_on_tick(void)
 {
+    /* T1.1: イベントログ定期 flush (30 tick = 300ms) */
+    v86_event_tick_check();
 
     /* ============================================================ */
     /*  強制脱出ホットキー検知                                      */
@@ -397,6 +417,10 @@ static void v86_session_run_core(void)
             "mov %%esp, %%esi\n\t"   /* 現在のESPを保存 */
             "mov %%ebp, %%edi\n\t"   /* 現在のEBPを保存 */
             "mov %0, %%esp\n\t"      /* 一時スタックに切り替え */
+            "call v86_debug_snapshot_memsw_exit\n\t" /* T2.1: MEMSW exitスナップショット */
+            "push $v86_bda_exit_tag\n\t"  /* T1.3: BDA exitスナップショット */
+            "call v86_debug_dump_bda_named\n\t"
+            "add $4, %%esp\n\t"
             "call v86_debug_dump_memory_pre\n\t" /* teardown前にメモリダンプ */
             "call v86_mem_teardown\n\t" /* ページテーブル復元 */
             "mov %%esi, %%esp\n\t"   /* ESPを元に戻す (実体が復活) */
@@ -559,6 +583,15 @@ static int v86_boot_image(const char *path, const char *cmdline)
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
+    /* T2.1: MEMSW 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
+
+    /* T1.3: BDA init スナップショット */
+    v86_debug_dump_bda_named("init");
+
+    /* T2.3: IVT 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
+
     /* PIC/PIT/FDC/DMA仮想化初期化 */
     v86_pic_init();
     v86_pit_init();
@@ -585,6 +618,9 @@ static int v86_boot_image(const char *path, const char *cmdline)
         kmemcpy(ipl_dst, ipl_buf, ipl_size);
         kprintf(0xA1, "[V86] IPL loaded: %u bytes at %04X:0000\n",
                 (unsigned)ipl_size, IPL_SEG);
+
+        /* T1.3: BDA post_ipl スナップショット */
+        v86_debug_dump_bda_named("post_ipl");
     }
 
     /* ネイティブモード: 画面表示を強制有効化 */
@@ -680,6 +716,15 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
+    /* T2.1: MEMSW 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
+
+    /* T1.3: BDA init スナップショット */
+    v86_debug_dump_bda_named("init");
+
+    /* T2.3: IVT 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
+
     /* PIC/PIT/FDC/DMA初期化 */
     v86_pic_init();
     v86_pit_init();
@@ -708,6 +753,9 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     }
 
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
+
+    /* T1.3: BDA post_ipl スナップショット */
+    v86_debug_dump_bda_named("post_ipl");
 
     /* デバッグヘッダ即時書き込み */
     v86_debug_write_header("PhysicalFDD", "(physical)", cmdline);
@@ -771,6 +819,15 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
     /* V86メモリ空間を構築 */
     v86_mem_setup();
 
+    /* T2.1: MEMSW 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
+
+    /* T1.3: BDA init スナップショット */
+    v86_debug_dump_bda_named("init");
+
+    /* T2.3: IVT 初期スナップショット */
+    if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
+
     /* PIC/PIT/FDC/DMA初期化 */
     v86_pic_init();
     v86_pit_init();
@@ -800,6 +857,9 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
 
     kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d, media=%d)...\n",
             drv, media);
+
+    /* T1.3: BDA post_ipl スナップショット */
+    v86_debug_dump_bda_named("post_ipl");
 
     /* デバッグヘッダ即時書き込み */
     v86_debug_write_header("PhysicalFDD_EX", "(physical)", cmdline);

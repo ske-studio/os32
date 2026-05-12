@@ -77,6 +77,25 @@ void paging_init(u32 mem_kb)
     u32 pd_phys;
     u32 max_mem_bytes = mem_kb * 1024; /* プローブされた実メモリ上限 */
 
+    /* ================================================================== */
+    /*  安全チェック: SHM帯域がカーネル帯域 (0x1FFFFF) を超えていないか    */
+    /*  BSS肥大化でSHMがSQLite帯域 (0x200000+) に侵入するとPage Faultが   */
+    /*  発生する (shm_init のガードページがSQLiteコードを踏み潰す)          */
+    /* ================================================================== */
+    if (MEM_SHM_GUARD_HI + 0x1000UL > 0x200000UL) {
+        /* ページング前なのでTVRAMに直接書き込み */
+        volatile u16 *tv = (volatile u16 *)0xA0000UL;
+        volatile u16 *ta = (volatile u16 *)0xA2000UL;
+        const char *msg = "FATAL: SHM exceeds kernel band!";
+        int p = 160; /* 行2, 列0 */
+        while (*msg) {
+            tv[p] = (u16)(u8)*msg;
+            ta[p] = 0x41;
+            msg++; p++;
+        }
+        for (;;) { /* halt */ }
+    }
+
     /* アライン済みポインタを取得 */
     page_directory = align4096(pd_raw);
     for (i = 0; i < PAGING_PT_COUNT; i++) {

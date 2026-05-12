@@ -123,17 +123,33 @@ void v86_reset_io_stats(void);
 /* V86終了時のlongjmpターゲット (v86_test.c で定義) */
 extern u32 *v86_current_jmpbuf;
 
-/* GPトレースバッファ取得 */
+/* ====================================================================== */
+/*  GPトレースバッファ (T1.2 拡張版)                                       */
+/*  128件→1024件、tick フィールド追加 (16B/エントリ)                       */
+/* ====================================================================== */
+#define V86_TRACE_SIZE 256
+
 struct v86_trace_entry {
+    u32 tick;       /* tick_count スナップ — 時系列復元用 */
     u16 cs;
     u16 ip;
     u8  opcode;
     u8  intno;
     u8  ah;
     u8  al;
-    u16 cx;     /* ECX下位16bit — シーンID等のデバッグ用 */
+    u16 cx;         /* ECX下位16bit — シーンID等のデバッグ用 */
+    u16 reserved;   /* 16B アライメント用 */
 };
 struct v86_trace_entry *v86_get_trace(u32 *count, u32 *idx);
+
+/* GPトレースフィルタ (T1.2)
+ * v86_trace_filter_int: -1=全件記録, 0-255=指定INT番号のみ
+ * v86_trace_filter_cs_min/max: 0=無効, 非0=CS範囲フィルタ */
+extern int v86_trace_filter_int;
+extern u16 v86_trace_filter_cs_min;
+extern u16 v86_trace_filter_cs_max;
+void v86_trace_set_int_filter(int int_no);
+void v86_trace_set_cs_range(u16 lo, u16 hi);
 
 /* ====================================================================== */
 /*  ダミーIVT判定マクロ                                                    */

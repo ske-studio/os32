@@ -856,7 +856,7 @@ static void write_section_dma(void)
 /*  INT AH ヒストグラム表示                                                */
 /*  使用頻度の高い INT 番号を検出し、AH 値別にカウントを表示する          */
 /* ====================================================================== */
-extern u8 v86_int_ah_hist[256][256];
+extern u8 v86_int_ah_hist[64][256];
 extern u32 v86_int_ah_saturated;
 
 static void write_section_ah_hist(void)
@@ -871,7 +871,7 @@ static void write_section_ah_hist(void)
     wb_nl();
 
     /* 各 INT 番号について合計を計算し、非ゼロのもの表示 */
-    for (intno = 0; intno < 256; intno++) {
+    for (intno = 0; intno < 64; intno++) {
         total = 0;
         for (ah = 0; ah < 256; ah++) {
             total += v86_int_ah_hist[intno][ah];

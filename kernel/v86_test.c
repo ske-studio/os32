@@ -28,8 +28,8 @@ extern void exec_longjmp(u32 *buf);
 /* V86テスト用setjmpバッファ */
 static u32 v86_test_jmpbuf[6];
 
-/* V86テスト用カーネルスタック (16KB) */
-static u8 v86_test_kstack[16384] __attribute__((aligned(16)));
+/* V86カーネルスタック (v86_session.c で定義、共用) */
+extern u8 v86_kstack[32768];
 
 /* ====================================================================== */
 /*  HELLO.COM 埋め込みバイナリ (tests/hello_v86.asm から生成)              */
@@ -176,7 +176,7 @@ static int v86_run_com(const u8 *data, u32 size)
     ctx.gs     = 0x0000;
 
     saved_esp0 = tss_get_esp0();
-    tss_set_esp0((u32)&v86_test_kstack[sizeof(v86_test_kstack) - 16]);
+    tss_set_esp0((u32)&v86_kstack[sizeof(v86_kstack) - 16]);
 
     v86_active = 1;
     v86_exit_request = 0;
@@ -260,4 +260,3 @@ void v86_test_exit(void)
     /* フォールバック: jmpbufが未設定の場合はハング (安全のため) */
     for (;;) { __asm__ volatile("hlt"); }
 }
-
