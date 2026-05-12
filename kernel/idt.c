@@ -27,6 +27,7 @@ extern void isr_stub_6(void);     /* #UD 未定義命令 */
 extern void isr_stub_8(void);     /* #DF ダブルフォルト */
 extern void isr_stub_13(void);    /* #GP 一般保護例外 */
 extern void isr_stub_14(void);    /* #PF ページフォルト */
+extern void isr_stub_1(void);     /* #DB デバッグ例外 (T3.4/T2.4) */
 
 /* IRQハンドラ */
 extern void irq_stub_0(void);     /* IRQ0: タイマ (INT 0x20) */
@@ -66,6 +67,7 @@ void idt_init(void)
 
     /* CPU例外ハンドラ */
     idt_set_gate(0,  isr_stub_0,  IDT_ATTR_INT_GATE32);   /* #DE ゼロ除算 */
+    idt_set_gate(1,  isr_stub_1,  IDT_ATTR_INT_GATE32);   /* #DB デバッグ (T3.4/T2.4) */
     idt_set_gate(6,  isr_stub_6,  IDT_ATTR_INT_GATE32);   /* #UD 未定義命令 */
     idt_set_gate(8,  isr_stub_8,  IDT_ATTR_INT_GATE32);   /* #DF ダブルフォルト */
     idt_set_gate(13, isr_stub_13, IDT_ATTR_INT_GATE32);   /* #GP 一般保護例外 */

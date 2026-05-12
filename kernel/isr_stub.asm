@@ -26,6 +26,7 @@ extern tick_count
 extern fdc_irq_handler
 extern mouse_irq_handler
 extern v86_gp_handler
+extern v86_db_dispatch
 
 section .text
 
@@ -55,9 +56,74 @@ isr_stub_%1:
 
 ;; 例外スタブ生成
 ISR_NOERR 0                    ;; #DE ゼロ除算
+;; #DB (例外1) は専用スタブを使用 (下記 db_stub)
 ISR_NOERR 6                    ;; #UD 未定義命令
 ISR_ERR   8                    ;; #DF ダブルフォルト
 ;; #PF は専用スタブを使用 (下記 pf_stub)
+
+;; ============================================================
+;; #DB (例外1) 専用スタブ — V86 シングルステップ/ウォッチポイント
+;;
+;; TF (Trap Flag) による1命令シングルステップ (#DB) を処理する。
+;; V86モードからの場合は v86_db_dispatch() に転送する。
+;; 通常モードからの場合は isr_common に転送する。
+;;
+;; #DB はエラーコードなし。
+;; スタック: [EIP] [CS] [EFLAGS] (V86: +[ESP][SS][ES][DS][FS][GS])
+;; ============================================================
+global isr_stub_1
+isr_stub_1:
+        cli
+        ;; V86モード判定: EFLAGS.VM (bit 17)
+        ;; [ESP+0]=EIP, [ESP+4]=CS, [ESP+8]=EFLAGS
+        test    dword [esp + 8], 0x020000
+        jnz     .v86_db
+
+        ;; 通常の #DB 処理 → isr_common
+        push    0               ;; ダミーエラーコード
+        push    1               ;; 例外番号
+        jmp     isr_common
+
+.v86_db:
+        ;; V86モードからの #DB
+        ;; CPUスタックフレーム (エラーコードなし):
+        ;;   [EIP(4)] [CS(4)] [EFLAGS(4)] [ESP(4)] [SS(4)] [ES(4)] [DS(4)] [FS(4)] [GS(4)]
+        ;;
+        ;; v86_gp_handler と同じレジスタ配列を作る:
+        ;; ダミーエラーコードを挿入してから PUSHAD
+        push    0               ;; ダミーエラーコード (GPフレームと互換)
+        pushad                  ;; 汎用レジスタ保存 (32B)
+
+        ;; DS/ES復元 (V86→Ring0遷移でCPUが0にクリア)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+
+        ;; v86_db_dispatch(u32 *regs) → 戻り値: 0=続行, 非0=V86終了
+        mov     eax, esp
+        push    eax
+        call    v86_db_dispatch
+        add     esp, 4
+
+        ;; 戻り値チェック: 非0ならV86モードを完全終了
+        test    eax, eax
+        jnz     .v86_db_exit
+
+        ;; 通常復帰: V86に戻る
+        popad
+        add     esp, 4          ;; ダミーエラーコードをスキップ
+        iretd                   ;; V86モードに復帰
+
+.v86_db_exit:
+        ;; V86モード完全終了 (isr_stub_13 の .v86_exit と同じ)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        mov     ss, ax
+        extern  v86_test_exit
+        call    v86_test_exit
 
 ;; ============================================================
 ;; #GP (例外13) 専用スタブ — V86モード判定付き

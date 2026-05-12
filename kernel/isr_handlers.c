@@ -422,3 +422,34 @@ void fdc_irq_handler(void)
     fdc_irq_fired = 1;
 }
 
+/* ======================================================================== */
+/*  v86_db_dispatch — V86 #DB ディスパッチャ (T3.4 / T2.4)                  */
+/*                                                                          */
+/*  isr_stub.asm の isr_stub_1 (V86パス) から呼ばれる。                      */
+/*  ウォッチポイント (#PF後のTFシングルステップ復帰) を最優先で処理し、      */
+/*  次にシングルステップモードを処理する。                                    */
+/*                                                                          */
+/*  regs[] は V86_REG_* インデックスでアクセスする                           */
+/*  (isr_stub_13 の V86 パスと同じレイアウト)。                              */
+/*  戻り値: 0=V86続行, 1=V86終了                                            */
+/* ======================================================================== */
+#include "v86_watch.h"
+#include "v86_sstep.h"
+
+int v86_db_dispatch(u32 *regs)
+{
+    /* T2.4: ウォッチポイント復帰 (PTE NOT_PRESENT 再設定) */
+    if (v86_watch_check_db(regs)) {
+        return 0;  /* ウォッチポイント復帰完了 — V86 続行 */
+    }
+
+    /* T3.4: シングルステップ処理 */
+    if (v86_singlestep_enabled) {
+        return v86_db_handler(regs);
+    }
+
+    /* 想定外の #DB — TF をクリアして無視 */
+    regs[V86_REG_EFLAGS] &= ~(1U << 8);
+    return 0;
+}
+

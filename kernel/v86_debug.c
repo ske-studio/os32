@@ -7,12 +7,14 @@
 /* ======================================================================== */
 
 #include "v86_debug.h"
+#include "v86_event.h"
 #include "v86.h"
 #include "v86_mem.h"
 #include "v86_disk.h"
 #include "v86_session.h"
 #include "v86_pic.h"
 #include "v86_pit.h"
+#include "v86_dma.h"
 #include "v86_vsync.h"
 #include "vfs.h"
 #include "kprintf.h"
@@ -28,9 +30,9 @@ int v86_debug_serial_enabled = 1;
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
 
-/* I/O統計 (v86.c) */
+/* I/O統計 (v86.c, T2.2 拡張) */
 extern u32 v86_io_stat_count;
-extern struct v86_io_stat { u16 port; u32 count; } v86_io_stats[];
+extern struct v86_io_stat { u16 port; u32 read_count; u32 write_count; u8 classification; } v86_io_stats[];
 
 /* tick_count (isr_stub.asm) */
 extern volatile u32 tick_count;
@@ -227,6 +229,9 @@ void v86_debug_write_header(const char *boot_mode,
     wb_str(v86_native_mode ? "Yes" : "No"); wb_nl();
     wb_nl();
     wb_flush();
+
+    /* T1.1: イベントログファイルをオープン */
+    v86_event_init();
 }
 
 /* [EXIT] + [GP HANDLER] + [IRQ0] */
@@ -315,24 +320,33 @@ static void write_section_hw(void)
     wb_flush();
 }
 
-/* [I/O PORT ACCESS LOG] */
+/* [I/O PORT ACCESS LOG] (T2.2 拡張: R/W分離 + 分類タグ) */
 static void write_section_io(void)
 {
     u32 i;
+    static const char *cls_tags[] = {
+        "unk ", "pass", "virt", "prot", "fall"
+    };
+
     wb_reset();
     wb_separator();
     wb_str("I/O PORT ACCESS LOG\n");
     wb_separator();
     wb_nl();
-    wb_str("  Port   Count\n");
-    wb_str("  ----   -----\n");
-    for (i = 0; i < v86_io_stat_count && i < 16; i++) {
+    wb_str("  Port   R-Cnt    W-Cnt    Class\n");
+    wb_str("  ----   ------   ------   -----\n");
+    for (i = 0; i < v86_io_stat_count && i < 64; i++) {
+        u8 c = v86_io_stats[i].classification;
         wb_str("  ");
         wb_hex16(v86_io_stats[i].port);
         wb_str("h  ");
-        wb_dec(v86_io_stats[i].count);
+        wb_dec(v86_io_stats[i].read_count);
+        wb_pad(9, 0);
+        wb_dec(v86_io_stats[i].write_count);
+        wb_pad(9, 0);
+        wb_str((c < 5) ? cls_tags[c] : "???");
         wb_nl();
-        if (wpos > WBUF_SIZE - 64) wb_flush();
+        if (wpos > WBUF_SIZE - 80) wb_flush();
     }
     wb_nl();
     wb_flush();
@@ -383,7 +397,7 @@ static void write_section_disk(void)
     wb_flush();
 }
 
-/* [GP TRACE] */
+/* [GP TRACE] (T1.2 拡張: 1024件 + tick付き + フィルタ状態) */
 static void write_section_gptrace(void)
 {
     u32 total, tidx, tn, ti, tstart;
@@ -391,31 +405,507 @@ static void write_section_gptrace(void)
 
     wb_reset();
     wb_separator();
-    wb_str("GP TRACE (last 128 entries)\n");
+    wb_str("GP TRACE (last "); wb_dec(V86_TRACE_SIZE); wb_str(" entries)\n");
     wb_separator();
     wb_nl();
 
-    tlog = v86_get_trace(&total, &tidx);
-    tn = (total < 128) ? total : 128;
-    tstart = (total <= 128) ? 0 : tidx;
+    /* フィルタ状態を表示 */
+    wb_str("  Filter INT    : ");
+    if (v86_trace_filter_int < 0) {
+        wb_str("ALL");
+    } else {
+        wb_str("0x"); wb_hex8((u8)v86_trace_filter_int);
+    }
+    wb_nl();
+    wb_str("  Filter CS     : ");
+    if (v86_trace_filter_cs_min == 0) {
+        wb_str("ALL");
+    } else {
+        wb_hex16(v86_trace_filter_cs_min);
+        wb_str("-");
+        wb_hex16(v86_trace_filter_cs_max);
+    }
+    wb_nl();
+    wb_nl();
 
-    wb_str("  #     CS:IP       Op  INT#  AX    CX\n");
-    wb_str("  ----  ----------  --  ----  ----  ----\n");
+    tlog = v86_get_trace(&total, &tidx);
+    tn = (total < V86_TRACE_SIZE) ? total : V86_TRACE_SIZE;
+    tstart = (total <= V86_TRACE_SIZE) ? 0 : tidx;
+
+    wb_str("  #     Tick      CS:IP       Op  INT#  AX    CX\n");
+    wb_str("  ----  --------  ----------  --  ----  ----  ----\n");
 
     for (ti = 0; ti < tn; ti++) {
-        u32 tix = (tstart + ti) % 128;
+        u32 tix = (tstart + ti) % V86_TRACE_SIZE;
         struct v86_trace_entry *te = &tlog[tix];
         wb_str("  ");
         if (ti < 1000) { if (ti < 100) { if (ti < 10) wb_ch('0'); wb_ch('0'); } }
         wb_dec(ti + 1); wb_str("  ");
+        wb_hex32(te->tick); wb_str("  ");
         wb_hex16(te->cs); wb_ch(':'); wb_hex16(te->ip); wb_str("  ");
         wb_hex8(te->opcode); wb_str("  ");
         wb_hex8(te->intno); wb_str("    ");
         wb_hex8(te->ah); wb_hex8(te->al); wb_str("  ");
         wb_hex16(te->cx);
         wb_nl();
+        if (wpos > WBUF_SIZE - 100) wb_flush();
+    }
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  [MEMSW] メモリスイッチ スナップショット (T2.1)                         */
+/*  TVRAM 0xA3FE2-0xA3FF7 (22バイト) を init/exit の2回採取し差分表示     */
+/* ====================================================================== */
+#define MEMSW_BASE     0xA3FE2U  /* リニアアドレス */
+#define MEMSW_SIZE     22        /* バイト数 */
+
+static u8 memsw_init[MEMSW_SIZE];
+static u8 memsw_exit[MEMSW_SIZE];
+static int memsw_init_captured = 0;
+
+/* MEMSW フィールド名テーブル (偶数アドレスのみ意味あり) */
+static const char *memsw_field_names[] = {
+    "MEMSW1", "MEMSW2", "MEMSW3", "MEMSW4",
+    "MEMSW5", "MEMSW6", "EXT0", "EXT1",
+    "EXT2", "EXT3", "EXT4"
+};
+
+/* 呼出タイミング: v86_mem_setup() 直後 */
+void v86_debug_snapshot_memsw_init(void)
+{
+    int i;
+    volatile u8 *p = (volatile u8 *)MEMSW_BASE;
+    for (i = 0; i < MEMSW_SIZE; i++) {
+        memsw_init[i] = p[i];
+    }
+    memsw_init_captured = 1;
+}
+
+/* 呼出タイミング: V86終了直前 */
+void v86_debug_snapshot_memsw_exit(void)
+{
+    int i;
+    volatile u8 *p = (volatile u8 *)MEMSW_BASE;
+    for (i = 0; i < MEMSW_SIZE; i++) {
+        memsw_exit[i] = p[i];
+    }
+}
+
+static void write_section_memsw(void)
+{
+    int i, has_diff;
+
+    wb_reset();
+    wb_separator();
+    wb_str("MEMSW (Memory Switch 0xA3FE2-0xA3FF7)\n");
+    wb_separator();
+    wb_nl();
+
+    if (!memsw_init_captured) {
+        wb_str("  (not captured)\n\n");
+        wb_flush();
+        return;
+    }
+
+    /* init スナップショット */
+    wb_str("[MEMSW @init]\n");
+    for (i = 0; i < MEMSW_SIZE; i += 2) {
+        u16 addr = (u16)(0x3FE2 + i);
+        wb_str("  "); wb_hex16(addr); wb_str(": ");
+        wb_hex8(memsw_init[i]);
+        if (i + 1 < MEMSW_SIZE) {
+            wb_ch(' '); wb_hex8(memsw_init[i + 1]);
+        }
+        wb_str(" (");
+        wb_str(memsw_field_names[i / 2]);
+        wb_str(")\n");
+    }
+    wb_nl();
+
+    /* exit スナップショット */
+    wb_str("[MEMSW @exit]\n");
+    for (i = 0; i < MEMSW_SIZE; i += 2) {
+        u16 addr = (u16)(0x3FE2 + i);
+        wb_str("  "); wb_hex16(addr); wb_str(": ");
+        wb_hex8(memsw_exit[i]);
+        if (i + 1 < MEMSW_SIZE) {
+            wb_ch(' '); wb_hex8(memsw_exit[i + 1]);
+        }
+        wb_str(" (");
+        wb_str(memsw_field_names[i / 2]);
+        wb_str(")\n");
+    }
+    wb_nl();
+
+    /* diff */
+    wb_str("[MEMSW diff]\n");
+    has_diff = 0;
+    for (i = 0; i < MEMSW_SIZE; i++) {
+        if (memsw_init[i] != memsw_exit[i]) {
+            u16 addr = (u16)(0x3FE2 + i);
+            wb_str("  "); wb_hex16(addr); wb_str(": ");
+            wb_hex8(memsw_init[i]); wb_str(" -> ");
+            wb_hex8(memsw_exit[i]); wb_nl();
+            has_diff = 1;
+        }
+    }
+    if (!has_diff) {
+        wb_str("  no changes\n");
+    }
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  [IVT DIFF] IVT 差分検出 (T2.3)                                        */
+/*  v86_mem_setup() 直後のIVTスナップショットと終了時のIVTを比較し、       */
+/*  ゲストがフックしたベクタを特定する。                                   */
+/* ====================================================================== */
+#define IVT_ENTRY_COUNT 256  /* INT 00h-FFh */
+
+static u32 ivt_snapshot[IVT_ENTRY_COUNT];
+static int ivt_snapshot_captured = 0;
+
+void v86_debug_snapshot_ivt_init(void)
+{
+    u32 *ivt;
+    int i;
+    ivt = (u32 *)v86_phys_addr(0, 0);
+    if (!paging_is_present((u32)ivt)) return;
+    for (i = 0; i < IVT_ENTRY_COUNT; i++) {
+        ivt_snapshot[i] = ivt[i];
+    }
+    ivt_snapshot_captured = 1;
+}
+
+static void write_section_ivt_diff(void)
+{
+    u32 *ivt;
+    int i, diff_count;
+
+    wb_reset();
+    wb_separator();
+    wb_str("IVT DIFF (INT 00h-FFh)\n");
+    wb_separator();
+    wb_nl();
+
+    if (!ivt_snapshot_captured) {
+        wb_str("  (not captured)\n\n");
+        wb_flush();
+        return;
+    }
+
+    ivt = (u32 *)v86_phys_addr(0, 0);
+    if (!paging_is_present((u32)ivt)) {
+        wb_str("  (page not present - teardown済)\n\n");
+        wb_flush();
+        return;
+    }
+
+    diff_count = 0;
+    for (i = 0; i < IVT_ENTRY_COUNT; i++) {
+        u32 old_val = ivt_snapshot[i];
+        u32 new_val = ivt[i];
+        if (old_val != new_val) {
+            u16 old_seg = (u16)(old_val >> 16);
+            u16 old_off = (u16)(old_val & 0xFFFF);
+            u16 new_seg = (u16)(new_val >> 16);
+            u16 new_off = (u16)(new_val & 0xFFFF);
+
+            wb_str("  INT ");
+            wb_hex8((u8)i);
+            wb_str("h: ");
+            wb_hex16(old_seg); wb_ch(':'); wb_hex16(old_off);
+
+            /* 旧値がダミーIVTかどうか */
+            if (V86_IS_DUMMY_IVT(old_val)) {
+                wb_str(" (dummy)");
+            }
+
+            wb_str(" -> ");
+            wb_hex16(new_seg); wb_ch(':'); wb_hex16(new_off);
+
+            /* 新値がダミーIVTかどうか */
+            if (V86_IS_DUMMY_IVT(new_val)) {
+                wb_str(" (dummy)");
+            }
+
+            wb_nl();
+            diff_count++;
+            if (wpos > WBUF_SIZE - 80) wb_flush();
+        }
+    }
+
+    if (diff_count == 0) {
+        wb_str("  no changes\n");
+    } else {
+        wb_str("  --- ");
+        wb_dec((u32)diff_count);
+        wb_str(" vectors changed ---\n");
+    }
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  T1.4: BIOS ROM FAR CALL トラッカー                                     */
+/*  CS >= F000h への CALL FAR を記録するリングバッファ (32件)              */
+/* ====================================================================== */
+#define V86_ROM_CALL_SIZE 32
+
+struct v86_rom_call_entry {
+    u32 tick;
+    u16 caller_cs, caller_ip;
+    u16 target_cs, target_ip;
+    u16 ax_at_call;
+    u16 bx_at_call;
+};  /* 16B */
+
+static struct v86_rom_call_entry rom_calls[V86_ROM_CALL_SIZE];
+static u32 rom_call_idx = 0;
+static u32 rom_call_count = 0;
+
+void v86_debug_rom_call_record(u32 tick, u16 caller_cs, u16 caller_ip,
+                               u16 target_cs, u16 target_ip,
+                               u16 ax, u16 bx)
+{
+    struct v86_rom_call_entry *e = &rom_calls[rom_call_idx % V86_ROM_CALL_SIZE];
+    e->tick = tick;
+    e->caller_cs = caller_cs;
+    e->caller_ip = caller_ip;
+    e->target_cs = target_cs;
+    e->target_ip = target_ip;
+    e->ax_at_call = ax;
+    e->bx_at_call = bx;
+    rom_call_idx++;
+    rom_call_count++;
+
+    /* T1.1: クリティカルイベントとしてイベントログに記録 (即時flush) */
+    v86_event_record(V86_EV_ROM_CALL,
+                     caller_cs, caller_ip,
+                     (u8)(target_cs >> 8), (u8)(target_ip >> 8),
+                     (u8)(target_ip & 0xFF),
+                     (u16)(ax & 0xFFFF));
+}
+
+static void write_section_rom_calls(void)
+{
+    u32 i, start, count;
+
+    wb_reset();
+    wb_separator();
+    wb_str("ROM CALL TRACE (CALL FAR to CS>=F000h)\n");
+    wb_separator();
+    wb_nl();
+
+    if (rom_call_count == 0) {
+        wb_str("  (none)\n\n");
+        wb_flush();
+        return;
+    }
+
+    count = rom_call_count;
+    if (count > V86_ROM_CALL_SIZE) {
+        wb_str("  (overflow: ");
+        wb_dec(count - V86_ROM_CALL_SIZE);
+        wb_str(" entries lost)\n");
+        count = V86_ROM_CALL_SIZE;
+    }
+
+    /* リングバッファの開始位置 */
+    start = (rom_call_idx >= V86_ROM_CALL_SIZE)
+            ? (rom_call_idx % V86_ROM_CALL_SIZE) : 0;
+
+    wb_str("  #    Tick      Caller       Target       AX    BX\n");
+    wb_str("  ---  --------  -----------  -----------  ----  ----\n");
+
+    for (i = 0; i < count; i++) {
+        struct v86_rom_call_entry *e;
+        u32 idx = (start + i) % V86_ROM_CALL_SIZE;
+        e = &rom_calls[idx];
+
+        wb_str("  ");
+        wb_dec(i + 1);
+        wb_pad(5, 0);
+        wb_hex32(e->tick);
+        wb_str("  ");
+        wb_hex16(e->caller_cs); wb_ch(':'); wb_hex16(e->caller_ip);
+        wb_str("  ");
+        wb_hex16(e->target_cs); wb_ch(':'); wb_hex16(e->target_ip);
+
+        /* リセットベクタ判定 */
+        if (e->target_cs >= 0xF000 && e->target_ip == 0x0000) {
+            wb_str(" [RESET?]");
+        }
+
+        wb_str("  ");
+        wb_hex16(e->ax_at_call);
+        wb_str("  ");
+        wb_hex16(e->bx_at_call);
+        wb_nl();
+        if (wpos > WBUF_SIZE - 100) wb_flush();
+    }
+
+    wb_str("  --- ");
+    wb_dec(rom_call_count);
+    wb_str(" total ROM calls ---\n");
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  T3.2: PIC EOI シーケンス検証ログ                                       */
+/* ====================================================================== */
+/* v86_pic.c のログバッファを参照 */
+extern u32 v86_eoi_log_count;
+extern u32 v86_eoi_orphan_count;
+
+struct v86_eoi_entry_ext {
+    u32 tick;
+    u8  which;
+    u8  cleared_bit;
+    u8  isr_before;
+    u8  isr_after;
+};
+
+static void write_section_eoi(void)
+{
+    wb_reset();
+    wb_separator();
+    wb_str("PIC EOI SEQUENCE LOG\n");
+    wb_separator();
+    wb_nl();
+
+    wb_str("  Total EOI: ");
+    wb_dec(v86_eoi_log_count);
+    wb_nl();
+
+    wb_str("  Orphan EOI (ISR=0): ");
+    wb_dec(v86_eoi_orphan_count);
+    if (v86_eoi_orphan_count > 0) {
+        wb_str("  *** WARNING ***");
+    }
+    wb_nl();
+
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  T3.3: DMA 転送ログ                                                     */
+/* ====================================================================== */
+static void write_section_dma(void)
+{
+    u32 i, start, count;
+
+    wb_reset();
+    wb_separator();
+    wb_str("DMA TRANSFER LOG (ch2)\n");
+    wb_separator();
+    wb_nl();
+
+    if (v86_dma_log_count == 0) {
+        wb_str("  (none)\n\n");
+        wb_flush();
+        return;
+    }
+
+    count = v86_dma_log_count;
+    if (count > V86_DMA_LOG_SIZE) {
+        wb_str("  (overflow: ");
+        wb_dec(count - V86_DMA_LOG_SIZE);
+        wb_str(" entries lost)\n");
+        count = V86_DMA_LOG_SIZE;
+    }
+
+    start = (v86_dma_log_idx >= V86_DMA_LOG_SIZE)
+            ? (v86_dma_log_idx % V86_DMA_LOG_SIZE) : 0;
+
+    wb_str("  #    Tick      Addr     Count  Mode\n");
+    wb_str("  ---  --------  -------  -----  ----\n");
+
+    for (i = 0; i < count; i++) {
+        struct v86_dma_entry *e;
+        u32 idx = (start + i) % V86_DMA_LOG_SIZE;
+        e = &v86_dma_log[idx];
+
+        wb_str("  ");
+        wb_dec(i + 1);
+        wb_pad(5, 0);
+        wb_hex32(e->tick);
+        wb_str("  ");
+        wb_hex32(e->phys_addr);
+        wb_str("  ");
+        wb_dec((u32)e->count + 1);
+        wb_pad(7, 0);
+        wb_hex8(e->mode);
+        wb_nl();
         if (wpos > WBUF_SIZE - 80) wb_flush();
     }
+
+    wb_str("  --- ");
+    wb_dec(v86_dma_log_count);
+    wb_str(" total DMA transfers ---\n");
+    wb_nl();
+    wb_flush();
+}
+
+/* ====================================================================== */
+/*  INT AH ヒストグラム表示                                                */
+/*  使用頻度の高い INT 番号を検出し、AH 値別にカウントを表示する          */
+/* ====================================================================== */
+extern u8 v86_int_ah_hist[256][256];
+extern u32 v86_int_ah_saturated;
+
+static void write_section_ah_hist(void)
+{
+    int intno, ah;
+    u32 total;
+
+    wb_reset();
+    wb_separator();
+    wb_str("INT AH HISTOGRAM\n");
+    wb_separator();
+    wb_nl();
+
+    /* 各 INT 番号について合計を計算し、非ゼロのもの表示 */
+    for (intno = 0; intno < 256; intno++) {
+        total = 0;
+        for (ah = 0; ah < 256; ah++) {
+            total += v86_int_ah_hist[intno][ah];
+        }
+        if (total == 0) continue;
+
+        wb_str("  INT ");
+        wb_hex8((u8)intno);
+        wb_str("h (total: ");
+        wb_dec(total);
+        wb_str(")\n");
+
+        for (ah = 0; ah < 256; ah++) {
+            u8 cnt = v86_int_ah_hist[intno][ah];
+            if (cnt == 0) continue;
+            wb_str("    AH=");
+            wb_hex8((u8)ah);
+            wb_str("h: ");
+            wb_dec((u32)cnt);
+            if (cnt >= 255) {
+                wb_str(" [SATURATED]");
+            }
+            wb_nl();
+            if (wpos > WBUF_SIZE - 80) wb_flush();
+        }
+        wb_nl();
+    }
+
+    if (v86_int_ah_saturated > 0) {
+        wb_str("  *** ");
+        wb_dec(v86_int_ah_saturated);
+        wb_str(" saturations (count capped at 255) ***\n");
+    }
+
     wb_nl();
     wb_flush();
 }
@@ -469,7 +959,7 @@ static void write_section_mem_and_end(void)
                 u16 off = (u16)(ivt[di] & 0xFFFF);
                 wb_str("  INT "); wb_hex8((u8)di); wb_str("h: ");
                 wb_hex16(seg); wb_ch(':'); wb_hex16(off);
-                if (seg == 0x0050 && off == 0x0000) wb_str(" (dummy)");
+                if (V86_IS_DUMMY_IVT(ivt[di])) wb_str(" (dummy)");
                 wb_nl();
                 if (wpos > WBUF_SIZE - 80) wb_flush();
             }
@@ -519,6 +1009,9 @@ void v86_debug_dump_session(void)
 
     kprintf(0x0A, "[V86_DBG] dump_session: log_fd=%d\n", log_fd);
 
+    /* T1.1: イベントログをフラッシュしてクローズ */
+    v86_event_close();
+
     /* ファイルログ出力 */
     if (log_fd >= 0) {
         kprintf(0x0A, "[V86_DBG] writing sections...\n");
@@ -527,6 +1020,12 @@ void v86_debug_dump_session(void)
         write_section_io();
         write_section_disk();
         write_section_gptrace();
+        write_section_memsw();
+        write_section_ivt_diff();
+        write_section_rom_calls();
+        write_section_eoi();
+        write_section_dma();
+        write_section_ah_hist();
         write_section_mem_and_end();
         log_close();
         kprintf(0x0A, "[V86_DBG] Log written: %s\n", log_path);
@@ -752,7 +1251,7 @@ void v86_debug_dump_memory_pre(void)
             u16 off = (u16)(ivt[di] & 0xFFFF);
             wb_str("  INT "); wb_hex8((u8)di); wb_str("h: ");
             wb_hex16(seg); wb_ch(':'); wb_hex16(off);
-            if (seg == 0x0050 && off == 0x0000) wb_str(" (dummy)");
+            if (V86_IS_DUMMY_IVT(ivt[di])) wb_str(" (dummy)");
             wb_nl();
             if (wpos > WBUF_SIZE - 80) wb_flush();
         }
@@ -833,6 +1332,49 @@ void v86_debug_dump_memory_pre(void)
 
     wb_nl();
     wb_flush();
+}
+
+/* ====================================================================== */
+/*  T1.3: BDA スナップショット多段化                                       */
+/*  init / post_ipl / pre_dos / exit の4段で BDA 512B を                    */
+/*  /host/debug/v86_bda_{tag}.bin に raw バイナリとして保存する。           */
+/* ====================================================================== */
+#define BDA_SNAP_SIZE 512  /* 0x0400-0x05FF */
+
+void v86_debug_dump_bda_named(const char *tag)
+{
+    char path[64];
+    int fd;
+    u8 *bda;
+    int klen, tlen;
+
+    if (!v86_debug_enabled) return;
+
+    /* パス生成: /host/debug/v86_bda_{tag}.bin */
+    kstrncpy(path, "/host/debug/v86_bda_", sizeof(path));
+    klen = kstrlen(path);
+    tlen = kstrlen(tag);
+    if (klen + tlen + 5 < (int)sizeof(path)) {
+        kstrncpy(path + klen, tag, sizeof(path) - klen);
+        kstrncpy(path + klen + tlen, ".bin", sizeof(path) - klen - tlen);
+    }
+
+    /* BDA アドレス取得 — バッキングRAM経由 */
+    bda = v86_phys_addr(0x0000, 0x0400);
+    if (!paging_is_present((u32)bda)) {
+        kprintf(0x0E, "[V86_DBG] BDA snapshot '%s': page not present\n", tag);
+        return;
+    }
+
+    /* ディレクトリ確保 + ファイル書き出し */
+    vfs_mkdir("/host/debug");
+    fd = vfs_open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0) {
+        kprintf(0x0E, "[V86_DBG] BDA snapshot '%s': open failed\n", tag);
+        return;
+    }
+    vfs_write_fd(fd, bda, BDA_SNAP_SIZE);
+    vfs_close(fd);
 }
 
 /* ====================================================================== */
