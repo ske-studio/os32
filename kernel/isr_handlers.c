@@ -305,35 +305,6 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
             return;  /* ウォッチポイント処理済み — V86 に復帰 */
         }
 
-        /* ============================================================ */
-        /*  A20ラップアラウンド処理                                      */
-        /*                                                                */
-        /*  リアルモードでは A20=0 の場合、linear 0xFFFFF を超える        */
-        /*  アドレスは 0x00000 にラップアラウンドする。                    */
-        /*  例: FD80:AF06 = 0xFD800+0xAF06 = 0x108706                    */
-        /*      → ラップ → 0x08706                                      */
-        /*                                                                */
-        /*  V86モードではA20が有効なため、CPUは linear 0x108706 に        */
-        /*  アクセスしようとし、カーネルコード領域 (Supervisor only) に   */
-        /*  ヒットして Protection violation (#PF) が発生する。            */
-        /*                                                                */
-        /*  対処: CS を 20ビット空間に収まるように調整する。               */
-        /*  CS_new = CS - 0x1000 (64KB分セグメントを下げる)               */
-        /*  これにより linear = (CS-0x1000)<<4 + IP = 元のlinear - 0x10000 */
-        /*  → 0x100000 以下に収まり、正常にアクセスできる。              */
-        /* ============================================================ */
-        if (fault_addr >= 0x100000 && fault_addr < 0x110000) {
-            u16 old_cs = (u16)(regs[10] & 0xFFFF);
-            u16 new_cs = old_cs - 0x1000;
-
-            kprintf(0xA1, "[V86] A20 wrap: CS %x->%x IP=%x addr=%x\n",
-                    (unsigned)old_cs, (unsigned)new_cs,
-                    (unsigned)(regs[9] & 0xFFFF),
-                    (unsigned)fault_addr);
-
-            regs[10] = (regs[10] & 0xFFFF0000UL) | new_cs;
-            return;  /* 修正されたCS:IPでV86に復帰 */
-        }
 
         /* ウォッチポイント以外の V86 #PF → V86 セッションを終了 */
         kprintf(0xE1, "[V86] #PF: addr=%x err=%x CS:IP=%x:%x\n",

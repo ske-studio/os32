@@ -12,7 +12,8 @@
 ;;   0x7F00-0x7F0F  パラメータ受け渡し (16bit→32bit)
 ;;   0x8000-0x9FFF  ローダー自身 (8KB)
 ;;   0x10000-       vmkernel.lz4 一時読み込み先
-;;   0x100000       カーネル展開先
+;;   0x100000-0x10FFFF V86 A20ラップアラウンド予約域
+;;   0x110000       カーネル展開先
 ;;   0x200000       SQLite展開先
 ;;   0x9FFFC        PM スタック頂上
 ;; ============================================================
@@ -264,8 +265,8 @@ pm_entry:
         jnz     pm_halt
 
         ;; === メモリプロービング (1MB以上, 512KB刻み, 16MB上限) ===
-        mov     esi, 00100000h
-        mov     ecx, 1024        ;; 初期値 1024KB
+        mov     esi, 00110000h
+        mov     ecx, 1088        ;; 初期値 1088KB (1MB+64KB)
 
 probe_loop:
         mov     eax, [esi]
@@ -295,7 +296,7 @@ probe_done:
         call    pm_print
 
         db      0EAh
-        dd      00100000h        ;; kentry (1MB)
+        dd      00110000h        ;; kentry (1MB+64KB)
         dw      0008h            ;; CS セレクタ
 
 

@@ -126,7 +126,7 @@ sqlite.bin: kernel.elf
 # === VK32 圧縮カーネルイメージ ===
 vmkernel.lz4: kernel.bin sqlite.bin
 	python3 tools/mkvmkernel.py \
-		--kernel kernel.bin --kernel-addr 0x100000 \
+		--kernel kernel.bin --kernel-addr 0x110000 \
 		--sqlite sqlite.bin --sqlite-addr 0x200000 \
 		-o vmkernel.lz4
 
