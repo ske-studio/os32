@@ -17,6 +17,7 @@
 #include "v86_debug.h"
 #include "v86_event.h"
 #include "v86_bda.h"
+#include "v86_iocore.h"
 #include "tss.h"
 #include "paging.h"
 #include "memmap.h"
@@ -91,8 +92,17 @@ const char *v86_exit_reason_str(enum v86_exit_reason reason)
     case V86_EXIT_TIMEOUT:    return "timeout";
     case V86_EXIT_UNKNOWN_OP: return "unknown opcode";
     case V86_EXIT_HOTKEY:     return "hotkey (F12)";
+    case V86_EXIT_PAGE_FAULT: return "page fault (#PF)";
     }
     return "unknown";
+}
+
+/* ====================================================================== */
+/*  v86_debug_get_exit_reason - 終了理由コードを返す (デバッグログ用)       */
+/* ====================================================================== */
+int v86_debug_get_exit_reason(void)
+{
+    return (int)current_session.exit_reason;
 }
 
 /* ====================================================================== */
@@ -225,6 +235,12 @@ static void v86_reset_counters(void)
     v86_trace_reset();
     v86_disk_reset_log();
     v86_reset_io_stats();
+
+    /* #PF 診断情報リセット */
+    {
+        extern int v86_pf_recorded;
+        v86_pf_recorded = 0;
+    }
 }
 
 /* ====================================================================== */
@@ -351,16 +367,19 @@ static void v86_session_run_core(void)
         volatile u8 *sw4 = (volatile u8 *)0xA3FEE;
         u8 val = *sw4;
         kprintf(0x0A, "[V86] MemSW4(A3FEE)=0x%02X", (unsigned)val);
-        if (!(val & 0x08)) {
-            /* bit3=0: サウンドボードなし → 1に設定 */
-            outp(0x68, 0x0D);  /* メモリスイッチ書き込み許可 */
-            *sw4 = val | 0x08;
-            outp(0x68, 0x0C);  /* メモリスイッチ書き込み禁止 */
-            kprintf(0x0A, " -> 0x%02X (SndBoard ON)\n",
-                    (unsigned)*sw4);
-        } else {
-            kprintf(0x0A, " (SndBoard already ON)\n");
-        }
+        /* §7.6 DOS5 IO.SYS 互換性:
+         * SW4 bit3=1 (サウンドボードあり) に設定すると、IO.SYS は
+         * CC000h-CFFFF のサウンドBIOS ROM の存在を検証する。
+         * NP21/W上ではこの領域にROMが存在しない (全て0xFF) ため、
+         * 「基本BIOS.ROMが見つかりません」エラーで停止する。
+         *
+         * 対策: DOS ブート時は SW4 bit3=0 のままにする。
+         * Ys等のゲームは BIOS SW4 を参照せず FM 音源ポートに直接
+         * アクセスして検出するため、bit3=0 でも問題ない。
+         *
+         * 将来 CC000h にダミー ROM を配置した場合は bit3=1 に復活させる。 */
+        kprintf(0x0A, " (SndBoard OFF for DOS compat)\n");
+        (void)val;
     }
 
     /* ================================================================ */
@@ -565,8 +584,11 @@ static int v86_boot_image(const char *path, const char *cmdline)
     current_session.auto_cmd = cmdline;
     current_session.auto_delay_remaining = cmdline ? V86_AUTO_TYPE_DELAY : 0;
 
-    /* ネイティブモード設定 */
-    v86_timeout_ticks = 0;
+    /* ネイティブモード設定
+     * デバッグモード時はGPなし無限ループ検出のため10秒タイムアウトを設定。
+     * v86_inject_timer_irq() の冒頭でtick_countと比較して自動脱出する。
+     * 非デバッグ時はユーザーがホットキーで手動脱出する想定。 */
+    v86_timeout_ticks = v86_debug_enabled ? 1000 : 0;
     v86_native_mode = 1;
 
     /* イメージを loop_dev にアタッチ */
@@ -597,6 +619,9 @@ static int v86_boot_image(const char *path, const char *cmdline)
     v86_pit_init();
     v86_fdc_virt_init();
     v86_dma_init();
+
+    /* I/Oディスパッチテーブル初期化 (NP21/W iocore準拠) */
+    v86_iocore_init();
 
     /* IPL: track0/head0/sect1 を読んで V86 メモリにコピー */
     {
@@ -731,6 +756,9 @@ int v86_boot_physical_fdd(int drv, const char *cmdline)
     v86_fdc_virt_init();
     v86_dma_init();
 
+    /* I/Oディスパッチテーブル初期化 (NP21/W iocore準拠) */
+    v86_iocore_init();
+
     /* 実FDDモードを設定 (デフォルト 2HD) */
     v86_disk_set_physical(drv, FDC_MEDIA_2HD_1232);
 
@@ -833,6 +861,9 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
     v86_pit_init();
     v86_fdc_virt_init();
     v86_dma_init();
+
+    /* I/Oディスパッチテーブル初期化 (NP21/W iocore準拠) */
+    v86_iocore_init();
 
     /* 実FDDモードを設定 (指定メディア) */
     v86_disk_set_physical(drv, fdc_media);

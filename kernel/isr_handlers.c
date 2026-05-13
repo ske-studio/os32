@@ -10,6 +10,11 @@
 #include "paging.h"
 #include "memmap.h"
 
+/* V86 ウォッチポイント (#PF ディスパッチ) */
+#include "v86.h"
+#include "v86_watch.h"
+#include "v86_session.h"
+
 /* exec フォルト復帰用 (exec.c で定義) */
 extern volatile int exec_nest_level;
 extern void exec_fault_recover(void);
@@ -284,6 +289,80 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 {
     int row = 0;  /* 画面最上部から表示 (最大限の情報量) */
 
+    /* ================================================================ */
+    /*  V86モードからの #PF: ウォッチポイント + 安全終了パス             */
+    /*                                                                  */
+    /*  T2.4: PTE NOT_PRESENT 方式ウォッチポイント                      */
+    /*  ウォッチ対象ページへのアクセス → #PF → v86_watch_check_pf()     */
+    /*  → PTE復帰 + TF=1 セット → 1命令後に #DB → PTE再保護           */
+    /*                                                                  */
+    /*  ウォッチポイント以外の V86 #PF:                                 */
+    /*  未マッピング領域へのアクセス等 → V86 を安全に終了               */
+    /* ================================================================ */
+    if (v86_active) {
+        /* T2.4: ウォッチポイントチェック */
+        if (v86_watch_check_pf(fault_addr, regs)) {
+            return;  /* ウォッチポイント処理済み — V86 に復帰 */
+        }
+
+        /* ============================================================ */
+        /*  A20ラップアラウンド処理                                      */
+        /*                                                                */
+        /*  リアルモードでは A20=0 の場合、linear 0xFFFFF を超える        */
+        /*  アドレスは 0x00000 にラップアラウンドする。                    */
+        /*  例: FD80:AF06 = 0xFD800+0xAF06 = 0x108706                    */
+        /*      → ラップ → 0x08706                                      */
+        /*                                                                */
+        /*  V86モードではA20が有効なため、CPUは linear 0x108706 に        */
+        /*  アクセスしようとし、カーネルコード領域 (Supervisor only) に   */
+        /*  ヒットして Protection violation (#PF) が発生する。            */
+        /*                                                                */
+        /*  対処: CS を 20ビット空間に収まるように調整する。               */
+        /*  CS_new = CS - 0x1000 (64KB分セグメントを下げる)               */
+        /*  これにより linear = (CS-0x1000)<<4 + IP = 元のlinear - 0x10000 */
+        /*  → 0x100000 以下に収まり、正常にアクセスできる。              */
+        /* ============================================================ */
+        if (fault_addr >= 0x100000 && fault_addr < 0x110000) {
+            u16 old_cs = (u16)(regs[10] & 0xFFFF);
+            u16 new_cs = old_cs - 0x1000;
+
+            kprintf(0xA1, "[V86] A20 wrap: CS %x->%x IP=%x addr=%x\n",
+                    (unsigned)old_cs, (unsigned)new_cs,
+                    (unsigned)(regs[9] & 0xFFFF),
+                    (unsigned)fault_addr);
+
+            regs[10] = (regs[10] & 0xFFFF0000UL) | new_cs;
+            return;  /* 修正されたCS:IPでV86に復帰 */
+        }
+
+        /* ウォッチポイント以外の V86 #PF → V86 セッションを終了 */
+        kprintf(0xE1, "[V86] #PF: addr=%x err=%x CS:IP=%x:%x\n",
+                (unsigned)fault_addr, (unsigned)error_code,
+                (unsigned)(regs[10] & 0xFFFF),  /* CS */
+                (unsigned)(regs[9]  & 0xFFFF)); /* EIP */
+
+        /* 診断情報をグローバル変数に保存 (デバッグログ用) */
+        {
+            extern u32 v86_pf_cr2;
+            extern u32 v86_pf_error_code;
+            extern u16 v86_pf_cs;
+            extern u16 v86_pf_ip;
+            extern int v86_pf_recorded;
+            v86_pf_cr2 = fault_addr;
+            v86_pf_error_code = error_code;
+            v86_pf_cs = (u16)(regs[10] & 0xFFFF);
+            v86_pf_ip = (u16)(regs[9]  & 0xFFFF);
+            v86_pf_recorded = 1;
+        }
+
+        v86_request_exit(V86_EXIT_PAGE_FAULT);
+        {
+            extern void v86_test_exit(void);
+            v86_test_exit();
+        }
+        /* ここには到達しない (longjmp で復帰) */
+    }
+
     _disable();
 
     /* 画面上部をクリア (15行のみ — row 15以降のテスト出力を保持) */
@@ -367,51 +446,6 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 }
 
 /* ======================================================================== */
-/*  timer_handler — タイマ割り込みハンドラ (IRQ0)                           */
-/*  tick_countのインクリメントはASMスタブで行う                             */
-/* ======================================================================== */
-extern void snd_tick(void);  /* kernel/snd_engine.c */
-
-/* V86割り込みリフレクト用 */
-#include "v86.h"
-#include "v86_session.h"
-
-void timer_handler(u32 *regs)
-{
-    /* V86モード中はOS32のsnd_tickをスキップ
-     * (ゲストがFM音源を直接制御するため、競合を防止) */
-    if (!v86_active) {
-        snd_tick();
-    }
-
-    /* V86モード中: IRQ0 (INT 08h) をV86タスクにリフレクト予約 */
-    if (v86_active) {
-        /* ★ V86タイムアウト強制終了
-         * timer_handler内で直接longjmpする。
-         * v86_test_exit経由ではなく直接exec_longjmpを呼ぶことで、
-         * STIやNULLチェック等の中間処理をスキップする。 */
-        {
-            extern u32 v86_timeout_ticks, v86_start_tick;
-            extern volatile u32 tick_count;
-            extern u32 *v86_current_jmpbuf;
-            extern void exec_longjmp(u32 *buf);
-            if (v86_timeout_ticks &&
-                (tick_count - v86_start_tick) > v86_timeout_ticks &&
-                v86_current_jmpbuf) {
-                v86_request_exit(V86_EXIT_TIMEOUT);
-                /* PIC EOI送信 (longjmpでIRQスタブに戻らないため) */
-                outp(0x00, 0x20);
-                /* 割り込み有効化 (IRQコンテキストから脱出するため) */
-                _enable();
-                exec_longjmp(v86_current_jmpbuf);
-                /* ここには戻らない */
-            }
-        }
-        v86_inject_timer_irq(regs);
-    }
-}
-
-/* ======================================================================== */
 /*  fdc_irq_handler — FDD割り込みハンドラ (IRQ11)                          */
 /*  µPD765Aコマンド完了時に呼ばれ、完了フラグをセットする                   */
 /* ======================================================================== */
@@ -420,36 +454,5 @@ extern volatile u32 fdc_irq_fired;  /* fdc.c で定義 */
 void fdc_irq_handler(void)
 {
     fdc_irq_fired = 1;
-}
-
-/* ======================================================================== */
-/*  v86_db_dispatch — V86 #DB ディスパッチャ (T3.4 / T2.4)                  */
-/*                                                                          */
-/*  isr_stub.asm の isr_stub_1 (V86パス) から呼ばれる。                      */
-/*  ウォッチポイント (#PF後のTFシングルステップ復帰) を最優先で処理し、      */
-/*  次にシングルステップモードを処理する。                                    */
-/*                                                                          */
-/*  regs[] は V86_REG_* インデックスでアクセスする                           */
-/*  (isr_stub_13 の V86 パスと同じレイアウト)。                              */
-/*  戻り値: 0=V86続行, 1=V86終了                                            */
-/* ======================================================================== */
-#include "v86_watch.h"
-#include "v86_sstep.h"
-
-int v86_db_dispatch(u32 *regs)
-{
-    /* T2.4: ウォッチポイント復帰 (PTE NOT_PRESENT 再設定) */
-    if (v86_watch_check_db(regs)) {
-        return 0;  /* ウォッチポイント復帰完了 — V86 続行 */
-    }
-
-    /* T3.4: シングルステップ処理 */
-    if (v86_singlestep_enabled) {
-        return v86_db_handler(regs);
-    }
-
-    /* 想定外の #DB — TF をクリアして無視 */
-    regs[V86_REG_EFLAGS] &= ~(1U << 8);
-    return 0;
 }
 

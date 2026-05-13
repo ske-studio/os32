@@ -18,10 +18,11 @@ enum v86_exit_reason {
     V86_EXIT_TRAP_PORT,    /* ポート0xFEトラップ (VDOSQUIT.COM) */
     V86_EXIT_DOS_TERM,     /* INT 20h / INT 21h AH=4Ch */
     V86_EXIT_REBOOT,       /* F0hポートリブート検知 */
-    V86_EXIT_BIOS_ROM,     /* CS >= 0xF000 (リセットベクタ到達) */
+    V86_EXIT_BIOS_ROM,     /* リセットベクタ到達 (FFFF:0000) */
     V86_EXIT_TIMEOUT,      /* タイムアウト */
     V86_EXIT_UNKNOWN_OP,   /* 未対応オペコード */
-    V86_EXIT_HOTKEY        /* 強制脱出キー (Ctrl+GRPH+DEL / STOP) */
+    V86_EXIT_HOTKEY,       /* 強制脱出キー (Ctrl+GRPH+DEL / STOP) */
+    V86_EXIT_PAGE_FAULT    /* V86モード中の #PF (メモリアクセス違反) */
 };
 
 /* ====================================================================== */

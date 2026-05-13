@@ -62,6 +62,23 @@ ISR_ERR   8                    ;; #DF ダブルフォルト
 ;; #PF は専用スタブを使用 (下記 pf_stub)
 
 ;; ============================================================
+;; V86モード終了 共通サブルーチン
+;;
+;; #DB (isr_stub_1) と #GP (isr_stub_13) の V86 exit パスが
+;; 同一コードのため共通化。
+;; ============================================================
+v86_exit_common:
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        mov     ss, ax
+        extern  v86_test_exit
+        call    v86_test_exit
+        ;; ここには戻らない
+
+;; ============================================================
 ;; #DB (例外1) 専用スタブ — V86 シングルステップ/ウォッチポイント
 ;;
 ;; TF (Trap Flag) による1命令シングルステップ (#DB) を処理する。
@@ -107,23 +124,12 @@ isr_stub_1:
 
         ;; 戻り値チェック: 非0ならV86モードを完全終了
         test    eax, eax
-        jnz     .v86_db_exit
+        jnz     v86_exit_common
 
         ;; 通常復帰: V86に戻る
         popad
         add     esp, 4          ;; ダミーエラーコードをスキップ
         iretd                   ;; V86モードに復帰
-
-.v86_db_exit:
-        ;; V86モード完全終了 (isr_stub_13 の .v86_exit と同じ)
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-        mov     fs, ax
-        mov     gs, ax
-        mov     ss, ax
-        extern  v86_test_exit
-        call    v86_test_exit
 
 ;; ============================================================
 ;; #GP (例外13) 専用スタブ — V86モード判定付き
@@ -148,6 +154,10 @@ isr_stub_13:
         jnz     .v86_gp                      ;; V86モードなら専用パスへ
 
         ;; ★デバッグ: Ring0での#GPはESPを表示して停止
+        ;; V86→Ring0遷移後のGP再発生ではDS/ES=0のため要復元
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
         push    esp
         extern  print_debug_gp
         call    print_debug_gp
@@ -183,31 +193,13 @@ isr_stub_13:
 
         ;; 戻り値チェック: 非0ならV86モードを完全終了
         test    eax, eax
-        jnz     .v86_exit
+        jnz     v86_exit_common
 
         ;; 通常: v86_gp_handler がレジスタ配列を書き換えて戻った
         ;; (次に実行するV86命令のEIP等が更新済み)
         popad
         add     esp, 4          ;; error_code をスキップ
         iretd                   ;; V86モードに復帰 (CPUがセグメントも自動復帰)
-
-.v86_exit:
-        ;; V86モード完全終了
-        ;; ISRスタック上のPUSHAD+CPUフレームを全て破棄し、
-        ;; カーネルモードに復帰する。
-        ;; セグメントレジスタをカーネル用に復元。
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-        mov     fs, ax
-        mov     gs, ax
-        mov     ss, ax
-
-        ;; v86_return_esp にsetjmpで保存したESPが入っている
-        ;; exec_longjmp(v86_test_jmpbuf) を呼ぶ
-        extern  v86_test_exit
-        call    v86_test_exit
-        ;; ここには戻らない
 
 ;; ============================================================
 ;; 例外共通ハンドラ (V86以外)
@@ -253,7 +245,8 @@ isr_common:
 ;; CPUが自動pushするエラーコードに加え、
 ;; CR2 (障害アドレス) をCハンドラに渡す。
 ;;
-;; V86モードからの#PFも検出する (スタックフレームが異なるため)。
+;; V86モードからの#PFも検出する。
+;; V86パスでは DS/ES 復元を追加するが、call先は同じ。
 ;;
 ;; CPU自動push後のスタック (ESP低位→高位):
 ;;   通常: [error_code] [EIP] [CS] [EFLAGS]
@@ -272,32 +265,10 @@ isr_stub_14:
 
         ;; 通常の#PF処理
         pushad                  ;; 全汎用レジスタ保存 (32B)
-
-        ;; PUSHAD配列のポインタ (引数4: regs)
-        mov     eax, esp
-        push    eax             ;; 引数4: regs (PUSHAD配列先頭)
-
-        ;; フォルト時EIP取得 (PUSHAD=32B + push×1=4B + error_code=4B の上)
-        mov     eax, [esp + 40] ;; EIP
-        push    eax             ;; 引数3: fault_eip
-
-        ;; CR2 (障害アドレス) 取得
-        mov     eax, cr2
-        push    eax             ;; 引数2: fault_addr (CR2)
-
-        ;; エラーコード取得 (PUSHAD=32B + push×3=12B の上)
-        mov     eax, [esp + 44] ;; error_code
-        push    eax             ;; 引数1: error_code
-
-        call    page_fault_handler
-        add     esp, 16
-
-        popad
-        add     esp, 4          ;; error_code をスキップ
-        iretd
+        jmp     .pf_common
 
 .v86_pf:
-        ;; V86モードからの#PF: 通常の#PFハンドラに渡す
+        ;; V86モードからの#PF: DS/ES復元が必要
         pushad                  ;; 全汎用レジスタ保存 (32B)
 
         ;; ★ DS/ES復元 (V86→Ring0遷移でCPUが0にクリアするため)
@@ -305,6 +276,7 @@ isr_stub_14:
         mov     ds, ax
         mov     es, ax
 
+.pf_common:
         ;; PUSHAD配列のポインタ (引数4: regs)
         mov     eax, esp
         push    eax             ;; 引数4: regs (PUSHAD配列先頭)
@@ -336,7 +308,56 @@ isr_stub_default:
         iretd
 
 ;; ============================================================
+;; IRQスタブ マクロ — DS/ES復元 + Cハンドラ呼び出し + EOI送出
+;;
+;; %1: IRQ名 (グローバルシンボル用)
+;; %2: Cハンドラ名 (extern)
+;; %3: 引数の有無 (0=引数なし, 1=regs(ESP)を引数で渡す)
+;; %4: マスタのみか (0=マスタのみEOI, 1=スレーブ+マスタEOI)
+;; ============================================================
+%macro IRQ_STUB 4
+global irq_stub_%1
+irq_stub_%1:
+        push    ds
+        push    es
+        pushad
+
+        ;; ★ DS/ES復元 (V86モード対策)
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+
+%if %3
+        ;; 引数1: regs (ESP)
+        mov     eax, esp
+        push    eax
+        call    %2
+        add     esp, 4
+%else
+        call    %2
+%endif
+
+%if %4
+        ;; スレーブPICにEOI送出 (PC-98: ポート 0x08)
+        mov     al, OCW2_EOI
+        out     PIC2_CMD, al
+        ;; マスタPICにもEOI送出 (カスケード)
+        out     PIC1_CMD, al
+%else
+        ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
+        mov     al, OCW2_EOI
+        out     PIC1_CMD, al
+%endif
+
+        popad
+        pop     es
+        pop     ds
+        iretd
+%endmacro
+
+;; ============================================================
 ;; IRQ0: タイマ割り込み (INT 0x20)
+;; ※ tick_count インクリメントはマクロ外で行うため個別定義
 ;; ============================================================
 global irq_stub_0
 irq_stub_0:
@@ -368,60 +389,19 @@ irq_stub_0:
         iretd
 
 ;; ============================================================
-;; IRQ1: キーボード割り込み (INT 0x21)
+;; IRQ1: キーボード割り込み (INT 0x21) — マスタPIC
 ;; ============================================================
-global irq_stub_1
-irq_stub_1:
-        push    ds
-        push    es
-        pushad
-
-        ;; ★ DS/ES復元 (V86モード対策)
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-
-        ;; Cハンドラを呼び出し
-        call    kbd_irq_handler
-
-        ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
-        mov     al, OCW2_EOI
-        out     PIC1_CMD, al
-
-        popad
-        pop     es
-        pop     ds
-        iretd
+IRQ_STUB 1, kbd_irq_handler, 0, 0
 
 ;; ============================================================
-;; IRQ4: RS-232C 割り込み (INT 0x24)
+;; IRQ4: RS-232C 割り込み (INT 0x24) — マスタPIC
 ;; ============================================================
-global irq_stub_4
-irq_stub_4:
-        push    ds
-        push    es
-        pushad
-
-        ;; ★ DS/ES復元 (V86モード対策)
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-
-        ;; Cハンドラを呼び出し
-        call    serial_irq_handler
-
-        ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
-        mov     al, OCW2_EOI
-        out     PIC1_CMD, al
-
-        popad
-        pop     es
-        pop     ds
-        iretd
+IRQ_STUB 4, serial_irq_handler, 0, 0
 
 ;; ============================================================
 ;; IRQ7: スプリアス対策 (INT 0x27)
 ;; PC-98ではIR7がスレーブカスケードだが、スプリアスは起こりうる
+;; ※ ISR読み出しが必要なため個別定義
 ;; ============================================================
 global irq_stub_7
 irq_stub_7:
@@ -445,57 +425,11 @@ irq_stub_7:
         iretd
 
 ;; ============================================================
-;; IRQ11: FDD割り込み (INT 0x2B) — スレーブPIC IR11
+;; IRQ11: FDD割り込み (INT 0x2B) — スレーブPIC
 ;; ============================================================
-global irq_stub_11
-irq_stub_11:
-        push    ds
-        push    es
-        pushad
-
-        ;; ★ DS/ES復元 (V86モード対策)
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-
-        ;; Cハンドラを呼び出し
-        call    fdc_irq_handler
-
-        ;; スレーブPICにEOI送出 (PC-98: ポート 0x08)
-        mov     al, OCW2_EOI
-        out     PIC2_CMD, al
-        ;; マスタPICにもEOI送出 (カスケード)
-        out     PIC1_CMD, al
-
-        popad
-        pop     es
-        pop     ds
-        iretd
+IRQ_STUB 11, fdc_irq_handler, 0, 1
 
 ;; ============================================================
-;; IRQ13: マウス割り込み (INT 0x2D) — スレーブPIC IR5
+;; IRQ13: マウス割り込み (INT 0x2D) — スレーブPIC
 ;; ============================================================
-global irq_stub_13
-irq_stub_13:
-        push    ds
-        push    es
-        pushad
-
-        ;; ★ DS/ES復元 (V86モード対策)
-        mov     ax, 0x10
-        mov     ds, ax
-        mov     es, ax
-
-        ;; Cハンドラを呼び出し
-        call    mouse_irq_handler
-
-        ;; スレーブPICにEOI送出 (PC-98: ポート 0x08)
-        mov     al, OCW2_EOI
-        out     PIC2_CMD, al
-        ;; マスタPICにもEOI送出 (カスケード)
-        out     PIC1_CMD, al
-
-        popad
-        pop     es
-        pop     ds
-        iretd
+IRQ_STUB 13, mouse_irq_handler, 0, 1

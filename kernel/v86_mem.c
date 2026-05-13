@@ -43,29 +43,10 @@ u32 v86_backing_phys = 0;
 /* バッキングRAM有効フラグ (デフォルト=0: アイデンティティマッピング) */
 static int v86_backing_enabled = 0;
 
-/* ======================================================================== */
-/*  BDA (BIOS Data Area) 初期値                                             */
-/*                                                                          */
-/*  出典: UNDOCUMENTED memsys.md                                            */
-/*  FreeDOS(98) 起動に最低限必要なシステム共通域の値。                      */
-/* ======================================================================== */
-struct bda_entry {
-    u16 offset;
-    u8  value;
-};
+/* 旧 bda_defaults[] テーブルは NP21/W方式のBDA初期化に移行したため削除。
+ * BDA初期値は v86_mem_setup() 内で NP21/W bios_reinitbyswitch() 準拠で
+ * 直接 backing[] に書き込む。 */
 
-static const struct bda_entry bda_defaults[] = {
-    { 0x0400, 0x00 },   /* BIOS_FLAG2: 機種フラグ */
-    { 0x0401, 0x00 },   /* EXPMMSZ: 拡張メモリサイズ (未使用) */
-    { 0x0480, 0x00 },   /* CPU_FLAG: bit3=V33A=0 */
-    { 0x0484, 0x03 },   /* CPU_TYPE: i386以上 */
-    { 0x0495, 0x00 },   /* GRAPH_CHG: GRCG OFF */
-    { 0x0496, 0x00 },   /* GRAPH_TAL[0]: タイルレジスタ0 */
-    { 0x0497, 0x00 },   /* GRAPH_TAL[1]: タイルレジスタ1 */
-    { 0x0498, 0x00 },   /* GRAPH_TAL[2]: タイルレジスタ2 */
-    { 0x0499, 0x00 },   /* GRAPH_TAL[3]: タイルレジスタ3 */
-    { 0x0501, 0x00 },   /* BIOS_FLAG5: bit7=10MHz系, bit2-0=RAM 640KB */
-};
 
 /* IVTダミーハンドラ (IRET命令のみ) — IVT領域内に配置
  *
@@ -129,107 +110,267 @@ void v86_mem_setup(void)
 
 
     /* ================================================================== */
-    /*  2. IVT構築                                                        */
+    /*  2. IVT構築 (ハイブリッド方式)                                       */
     /*                                                                      */
     /*  0x0000:0x0000 - 0x0000:0x03FF に 256個のベクタ。                   */
-    /*  全てのベクタを IVT_HANDLER_BASE のダミーIRETハンドラに向ける。     */
-    /*  ダミーハンドラは IVT内にCF命令(IRET)1バイトを配置。                */
-    /*  PC-98 リアルモードのIVTフォーマット: [offset:16, segment:16]       */
+    /*                                                                      */
+    /*  BIOS ROM が物理アドレスに存在する場合:                              */
+    /*    NP21/W の bios_vectorset() と同様に、BIOS ROM内のベクタテーブル   */
+    /*    (FD80:0000 + BIOS_TABLE) からINT 00h-1Fh のエントリを読み取る。  */
+    /*    これにより、INT 18h (CRT/KBD), INT 1Ch (カレンダ) 等が            */
+    /*    BIOS ROM内の実ハンドラにV86モードで直接ジャンプする。             */
+    /*    ROM内コードのI/O命令は#GP経由で仮想化ディスパッチャが処理。      */
+    /*                                                                      */
+    /*  BIOS ROM が存在しない場合:                                          */
+    /*    ダミーIRETハンドラにフォールバック (従来動作)。                    */
+    /*                                                                      */
+    /*  例外: INT 1Bh (ディスクBIOS) はHLEスタブを維持する。               */
+    /*    ディスクI/Oは loop_dev 経由が必須であり、ROM内のFDCアクセス      */
+    /*    では動作しない (D88/FDIイメージは実FDCに存在しない)。            */
     /* ================================================================== */
 
-    /* IVT: バッキングRAMの先頭 (物理 0x300000 = 仮想 0x0000) */
+    /* IVT: バッキングRAMの先頭 (物理 backing+0 = 仮想 0x0000) */
     ivt = (u32 *)backing;
     handler_seg = (IVT_HANDLER_BASE >> 4);
     handler_off = (IVT_HANDLER_BASE & 0x0F);
     for (i = 0; i < 256; i++) {
-        /* seg:off 形式で格納 (リトルエンディアン: [off_lo, off_hi, seg_lo, seg_hi]) */
         ivt[i] = ((u32)handler_seg << 16) | handler_off;
     }
 
-    /* ダミーIRETハンドラを配置 (IVT構築後に上書き)
-     * IVT最終エントリ(INT FCh)の先頭バイトにIRETを書き込む。
-     * INT FCh-FFh のベクタデータは壊れるが、これらのベクタも
-     * ダミーハンドラを指しているため問題ない。 */
+    /* ダミーIRETハンドラを配置 */
     backing[IVT_HANDLER_BASE] = 0xCF;  /* IRET */
 
     /* ================================================================== */
-    /*  3. BDA初期値設定                                                   */
+    /*  2b. BIOS ROM からIVTを設定 (ハイブリッド方式)                       */
+    /*                                                                      */
+    /*  NP21/W の BIOS ROM レイアウト:                                      */
+    /*    物理 0xFD800 = セグメント FD80:0000 にBIOSコードが配置            */
+    /*    BIOS_TABLE (オフセット 0x0100) にINT 00h-1Fh 用のオフセット表    */
+    /*    各エントリは2バイト (WORD): BIOS_SEG 内のオフセット値             */
+    /*    IVT[n] = BIOS_SEG:table[n] に設定                                */
+    /*                                                                      */
+    /*  BIOS ROM 存在判定:                                                  */
+    /*    物理 0xE8DD8 付近のNECシグネチャ文字列 "Copyright" を確認         */
+    /*    (NP21/W bios.c の neccheck[] 参照)                                */
     /* ================================================================== */
-    for (i = 0; i < (int)(sizeof(bda_defaults) / sizeof(bda_defaults[0])); i++) {
-        backing[bda_defaults[i].offset] = bda_defaults[i].value;
+#define BIOS_ROM_BASE   0xFD800UL     /* BIOS ROMコードベース (物理) */
+#define BIOS_SEG        0xFD80U       /* BIOS ROMセグメント */
+#define BIOS_TABLE_OFF  0x0100U       /* ベクタテーブルオフセット */
+#define BIOS_SIG_ADDR   0xE8DD8UL     /* NEC BIOSシグネチャ位置 */
+    {
+        volatile u8 *bios_sig = (volatile u8 *)BIOS_SIG_ADDR;
+        int bios_rom_present;
+
+        /* BIOS ROM存在チェック: "Copy" の4バイトを確認 */
+        bios_rom_present = (bios_sig[0] == 'C' && bios_sig[1] == 'o' &&
+                            bios_sig[2] == 'p' && bios_sig[3] == 'y');
+
+        if (bios_rom_present) {
+            /* BIOS ROMのベクタテーブルからINT 00h-1Fh のIVTを設定 */
+            volatile u16 *bios_table =
+                (volatile u16 *)(BIOS_ROM_BASE + BIOS_TABLE_OFF);
+
+            kprintf(0xA1, "[V86] BIOS ROM detected, setting IVT from ROM\n");
+
+            for (i = 0; i < 0x20; i++) {
+                u16 off = bios_table[i];
+                ivt[i] = ((u32)BIOS_SEG << 16) | off;
+            }
+
+            /* INT 1Eh: N88-BASIC エントリ (0xE8000000) — NP21/W互換 */
+            ivt[0x1E] = 0xE8000000UL;
+        } else {
+            kprintf(0xE1, "[V86] BIOS ROM not found, using dummy IVT\n");
+        }
     }
 
-    /* MEM_SIZE (0000:0413-0414h): コンベンショナルメモリサイズ (KB) */
-    backing[BDA_MEM_SIZE]     = (640) & 0xFF;
-    backing[BDA_MEM_SIZE + 1] = (640 >> 8) & 0xFF;
+    /* ================================================================== */
+    /*  2c. INT 1Bh HLE スタブ配置 (ディスクBIOS)                           */
+    /*                                                                      */
+    /*  INT 1Bh はHLEを維持する。ROM内のFDCアクセスルーチンは               */
+    /*  実FDCを制御するコードであり、D88/FDIディスクイメージには            */
+    /*  対応できない。loop_dev 経由の v86_bios_int1b() が必須。             */
+    /*                                                                      */
+    /*  DOS/IO.SYS が PUSHF+CLI+CALL FAR [IVT[1Bh]] でBIOSを呼ぶ          */
+    /*  場合にもGPハンドラに入るよう、スタブ (INT 1Bh + IRET) を設定。     */
+    /*                                                                      */
+    /*  配置先: 0x3C0 (IVT[0xF0] のベクタ領域内)                           */
+    /* ================================================================== */
+#define BIOS_STUB_BASE     0x03C0
+#define BIOS_STUB_SEG      0x003C
+#define BIOS_STUB_OFF      0x0000
+    /* INT 1Bh スタブ (offset +0) */
+    backing[BIOS_STUB_BASE + 0] = 0xCD; /* INT */
+    backing[BIOS_STUB_BASE + 1] = 0x1B; /* 1Bh */
+    backing[BIOS_STUB_BASE + 2] = 0xCF; /* IRET */
 
-    /* DISK_EQUIP (0000:055C-055Dh): ディスク接続状態
-     * bit0=1MB FDD UNIT#0, bit1=1MB FDD UNIT#1
-     * NP21/WネイティブでFDD1のみの構成ではbit1=0。
-     * ゲームは1ドライブ構成でBEPMUデータをFM音源経由で再生する。 */
-    backing[BDA_DISK_EQUIP]     = 0x01;  /* UNIT#0 のみ接続 */
-    backing[BDA_DISK_EQUIP + 1] = 0x00;
+    /* IVT[0x1B] = HLEスタブ (003C:0000) — 常にHLEを使う */
+    ivt[0x1B] = ((u32)BIOS_STUB_SEG << 16) | BIOS_STUB_OFF;
 
-    /* キーボードバッファ初期化 (NP21/W bios09.c 準拠) */
+    /* ================================================================== */
+    /*  3. BDA初期値設定 (NP21/W bios_reinitbyswitch 準拠)                  */
+    /*                                                                      */
+    /*  NP21/W の biosmem.h + bios.c を参考に、全てのブートクリティカルな   */
+    /*  BDAフィールドを初期化する。                                         */
+    /*                                                                      */
+    /*  計算ロジック:                                                        */
+    /*    PRXCRT/PRXDUPD/BIOS_FLAG1 はメモリスイッチ (TVRAM 0xA3FE2-) と   */
+    /*    ハードウェア状態から NP21/W と同じアルゴリズムで計算する。         */
+    /* ================================================================== */
+
+    /* --- メモリスイッチ初期化 (BDA計算前に設定する必要あり) --- */
+    {
+        volatile u16 *tvram16 = (volatile u16 *)0xA0000UL;
+        /* MEMSW1: 0x48 = bit6(25行モード) | bit3(RS232C) */
+        tvram16[0x3FE2 / 2] = 0x48;
+        /* MEMSW2: 0x05 = 10MHzクロック系 + bit2(RS-232C 9600bps) */
+        tvram16[0x3FE4 / 2] = 0x05;
+        /* MEMSW3: 0x04 = bit2(31kHz CRT) */
+        tvram16[0x3FE6 / 2] = 0x04;
+        /* MEMSW4: 0x00 */
+        tvram16[0x3FE8 / 2] = 0x00;
+        /* MEMSW5: 0x10 = bit7-4=ブート (0001=1MB FDD)
+         *   NP21/W: boot = mem[MEMB_MSW5] & 0xF0
+         *   0x10 = 1MB FDD, 0x20 = 640KB FDD */
+        tvram16[0x3FEA / 2] = 0x10;
+        /* MEMSW6: 0x00 */
+        tvram16[0x3FEC / 2] = 0x00;
+    }
+
+    /* --- CPU / システムタイプ --- */
+    /* MEMB_SYS_TYPE (0x0480): CPUタイプ (NP21/W: 0x03 = i386以上) */
+    backing[BDA_CPU_FLAG] = 0x03;
+    /* CPU_TYPE (0x0484): レガシー互換 */
+    backing[BDA_CPU_TYPE] = 0x03;
+    /* BIOS_FLAG3 (0x0481): 0x00 (PC-9801-119未搭載) */
+    backing[BDA_BIOS_FLAG3] = 0x00;
+    /* DISK_EQUIPS (0x0482): 0x00 (SCSI HDDなし) */
+    backing[BDA_DISK_EQUIPS] = 0x00;
+
+    /* --- BIOS_FLAG0 (0x0500): 初期化済みフラグ + FDD種別 ---
+     * NP21/W: mem[MEMB_BIOS_FLAG0] = 0x01;
+     *         boot != 0x20 → |= 0x02 (1MB FDD)
+     * OS32: 1MB FDD前提 → 0x03 */
+    backing[BDA_BIOS_FLAG0] = 0x03;
+
+    /* --- BIOS_FLAG1 (0x0501): クロック/CPU/メモリ ---
+     * NP21/W 計算ロジック:
+     *   biosflag = 0x20 (PC-9801無印以外)
+     *   8MHz → |= 0x80
+     *   MEMSW3 下位3bit → |= (mem[0xA3FEA] & 7)
+     *   V30モード → |= 0x40 */
+    {
+        volatile u16 *tvram16 = (volatile u16 *)0xA0000UL;
+        u8 memsw3 = (u8)(tvram16[0x3FEA / 2] & 0xFF);
+        u8 biosflag = 0x20;   /* bit5=1: PC-9801無印以外 */
+        biosflag |= 0x80;     /* bit7=1: 8MHz系以上 */
+        biosflag |= memsw3 & 7; /* bit2-0: CRT周波数 */
+        backing[BDA_BIOS_FLAG] = biosflag;
+    }
+
+    /* --- 拡張メモリサイズ (0x0401) ---
+     * NP21/W: extmem = min(pccore.extmem, 14); mem[MEMB_EXPMMSZ] = extmem<<3
+     * OS32: 拡張メモリ未提供 → 0 */
+    backing[BDA_EXPMMSZ] = 0x00;
+
+    /* --- PRXCRT (0x054C): CRT制御状態 ---
+     * NP21/W 計算ロジック:
+     *   prxcrt = 0x08                              (bit3=常時1)
+     *   dipsw1-1 off → |= 0x40                    (25行モード)
+     *   アナログ表示 → |= 0x04                    (16色)
+     *   dipsw1-8 off → |= 0x01
+     *   GRCG搭載 → |= 0x02
+     * OS32ターゲット: NP21/W PC-9821 (GRCG+EGC+アナログ+25行) */
+    {
+        volatile u16 *tvram16 = (volatile u16 *)0xA0000UL;
+        u8 memsw1 = (u8)(tvram16[0x3FE2 / 2] & 0xFF);
+        u8 prxcrt = 0x08;           /* bit3=1: 常時ON */
+        if (memsw1 & 0x40) {
+            prxcrt |= 0x40;         /* bit6=1: 25行モード */
+        }
+        prxcrt |= 0x04;             /* bit2=1: アナログ16色 */
+        prxcrt |= 0x01;             /* bit0=1: dipsw1-8 */
+        prxcrt |= 0x02;             /* bit1=1: GRCG搭載 */
+        backing[BDA_PRXCRT] = prxcrt;
+    }
+
+    /* --- PRXDUPD (0x054D): 表示更新状態 ---
+     * NP21/W 計算ロジック:
+     *   prxdupd = 0x18                             (bit4,3=1)
+     *   GRCG chip >= 3 → |= 0x40                  (EGC搭載)
+     *   dipsw2-8 off → |= 0x20
+     * OS32: PC-9821 (EGC搭載) */
+    backing[BDA_PRXDUPD] = 0x78;  /* 0x18 | 0x40(EGC) | 0x20(dipsw2-8) */
+
+    /* --- CRT関連 --- */
+    backing[BDA_CRT_RASTER] = 0x0F;   /* CRTラスタ (NP21/W固定値) */
+    backing[BDA_CRT_STS]    = 0x12;   /* bit4=16色, bit1=GRCG */
+    backing[BDA_CRT_CNT]    = 0x00;   /* CRTカウンタ初期値 */
+    backing[BDA_CRT_BIOS]   = 0x84;   /* bit7=31kHz, bit2=PC-9821 */
+
+    /* CRT VRAMアドレスとラスタ (WORD) */
+    backing[BDA_CRT_W_VRAMADR]     = 0x00;
+    backing[BDA_CRT_W_VRAMADR + 1] = 0x00;
+    backing[BDA_CRT_W_RASTER]      = 0x00;
+    backing[BDA_CRT_W_RASTER + 1]  = 0x00;
+    /* PRXGLS (WORD) */
+    backing[BDA_PRXGLS]     = 0x00;
+    backing[BDA_PRXGLS + 1] = 0x00;
+
+    /* --- キーボード --- */
     backing[BDA_KB_HEAD]     = (u8)(BDA_KB_BUF_START & 0xFF);
     backing[BDA_KB_HEAD + 1] = (u8)(BDA_KB_BUF_START >> 8);
     backing[BDA_KB_TAIL]     = (u8)(BDA_KB_BUF_START & 0xFF);
     backing[BDA_KB_TAIL + 1] = (u8)(BDA_KB_BUF_START >> 8);
     backing[BDA_KB_COUNT]    = 0x00;
+    backing[BDA_KB_RETRY]    = 0x00;
+    backing[BDA_SHIFT_STS]   = 0x00;
 
-    /* ブートデバイス情報: 0x90 = 1MB FDD UNIT#0 */
-    backing[BDA_BOOT_DEV] = 0x90;
+    /* --- メモリサイズ --- */
+    backing[BDA_MEM_SIZE]     = (640) & 0xFF;
+    backing[BDA_MEM_SIZE + 1] = (640 >> 8) & 0xFF;
+    backing[BDA_CONV_MEM]     = 0xA0;   /* 640KB (0xA0 * 4KB) */
 
-    /* BIOS_FLAG (0000:0501h):
-     *   bit 5=1(PC-9801無印以外), bit 2=1(640KB) → 0x24 */
-    backing[BDA_BIOS_FLAG] = 0x24;
+    /* --- ディスク関連 --- */
+    backing[BDA_DISK_EQUIP]     = 0x01;  /* UNIT#0 のみ接続 */
+    backing[BDA_DISK_EQUIP + 1] = 0x00;
+    backing[BDA_SASI_IDE]       = 0x00;  /* HDDなし */
+    backing[BDA_DISK_INTL]      = 0x00;
+    backing[BDA_DISK_INTH]      = 0x00;
+    backing[BDA_BOOT_DEV]       = 0x90;  /* 1MB FDD UNIT#0 */
 
-    /* CRT_STS_FLAG (0000:053Ch):
-     *   bit 4=1(16色), bit 1=1(GRCG搭載) → 0x12 */
-    backing[BDA_CRT_STS] = 0x12;
+    /* --- FDDモード/パラメータポインタ ---
+     * NP21/W: F2HD_MODE=0xFF, F2DD_MODE=0xFF
+     *         F2DD_POINTER=0xFD801AD7 (BIOS ROM内)
+     *         F2HD_POINTER=0xFD801AAF (BIOS ROM内)
+     * これらはINT 1BhのFDDパラメータ参照に使われる可能性がある */
+    backing[BDA_F2HD_MODE] = 0xFF;
+    backing[BDA_F2DD_MODE] = 0xFF;
+    /* F2DD_POINTER (DWORD, リトルエンディアン) */
+    backing[BDA_F2DD_POINTER + 0] = 0xD7;
+    backing[BDA_F2DD_POINTER + 1] = 0x1A;
+    backing[BDA_F2DD_POINTER + 2] = 0x80;
+    backing[BDA_F2DD_POINTER + 3] = 0xFD;
+    /* F2HD_POINTER (DWORD, リトルエンディアン) */
+    backing[BDA_F2HD_POINTER + 0] = 0xAF;
+    backing[BDA_F2HD_POINTER + 1] = 0x1A;
+    backing[BDA_F2HD_POINTER + 2] = 0x80;
+    backing[BDA_F2HD_POINTER + 3] = 0xFD;
 
-    /* BIOS_FLAG5 (0000:0458h): 0x00 (非NESA, WAITなし) */
-    backing[BDA_BIOS_FLAG5] = 0x00;
-
-    /* SCSI HD接続状態: 0x00 = HDDなし */
-    backing[BDA_SCSI_HD] = 0x00;
-
-    /* SASI/IDE HDD接続情報: 0x00 = HDDなし */
-    backing[BDA_SASI_IDE] = 0x00;
-
-    /* ブートパーティション スクラッチパッド */
+    /* --- その他 NP21/W固定値 --- */
+    backing[BDA_BIOS_FLAG5]  = 0x00;  /* 非NESA, WAITなし */
+    backing[BDA_WAIT_FLAG]   = 0x80;  /* bit7=1: OUT 5Fh wait有効 */
+    backing[BDA_PC9821_FLAG] = 0x40;  /* bit6=1: PC-9821 */
+    backing[BDA_RS_S_FLAG]   = 0x00;  /* RS-232Cフラグ */
+    /* GRCG関連 */
+    backing[BDA_GRCG]     = 0x00;     /* GRCG OFF */
+    backing[BDA_TILE_REG]     = 0x00; /* タイルレジスタ0 */
+    backing[BDA_TILE_REG + 1] = 0x00; /* タイルレジスタ1 */
+    backing[BDA_TILE_REG + 2] = 0x00; /* タイルレジスタ2 */
+    backing[BDA_TILE_REG + 3] = 0x00; /* タイルレジスタ3 */
+    /* ブートパーティション */
     backing[BDA_BOOT_PART]     = 0x00;
     backing[BDA_BOOT_PART + 1] = 0x00;
-
-    /* コンベンショナルメモリサイズ (0000:05AEh): 0xA0 = 640KB */
-    backing[BDA_CONV_MEM] = 0xA0;
-
-    /* TVRAM メモリスイッチ (0xA000:3FE2-3FF7) の初期化
-     * FreeDOS(98) init_crt が 0xA000:3FE2-3FF7 を読み取り、
-     * セグメント 0x0060 の作業領域にコピーする。
-     * 値が全て0だとコンソール出力 (_int29_main) が異常動作する。
-     *
-     * MEMSW1 (3FE2): bit6=25行, bit3=RS232C割り込み
-     * MEMSW2 (3FE4): 各種設定
-     * MEMSW3 (3FE6): bit7=ディップスイッチ=ON (拡張メモリ), bit2-0=CRT周波数
-     * MEMSW4 (3FE8): 予約
-     * MEMSW5 (3FEA): 予約
-     * MEMSW6 (3FEC): 予約
-     *
-     * 注意: PC-98のTVRAMメモリスイッチは WORD単位 (偶数アドレスに1バイト) */
-    {
-        volatile u16 *tvram16 = (volatile u16 *)0xA0000UL;
-        /* MEMSW1: 0x48 = bit6(25行モード) | bit3(RS232C) */
-        tvram16[0x3FE2 / 2] = 0x48;
-        /* MEMSW2: 0x01 = 10MHzクロック系 */
-        tvram16[0x3FE4 / 2] = 0x01;
-        /* MEMSW3: 0x04 = bit2(31kHz CRT) */
-        tvram16[0x3FE6 / 2] = 0x04;
-        /* MEMSW4-6: 0 */
-        tvram16[0x3FE8 / 2] = 0x00;
-        tvram16[0x3FEA / 2] = 0x00;
-        tvram16[0x3FEC / 2] = 0x00;
-    }
 
     /* ================================================================== */
     /*  4. ページテーブル設定                                              */
@@ -320,6 +461,20 @@ void v86_mem_setup(void)
     for (addr = 0xF0000; addr <= 0xFF000; addr += PAGE_SIZE) {
         paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
     }
+
+    /* ================================================================== */
+    /*  A20ラップアラウンド (HMA領域)                                      */
+    /*                                                                      */
+    /*  リアルモードでは linear 0xFFFFF を超えるアドレスが 0x00000 に       */
+    /*  ラップアラウンドするが、V86モードではA20ラインが有効なため          */
+    /*  ラップが発生しない。                                                */
+    /*                                                                      */
+    /*  0x100000-0x10FFFF はカーネルコード領域 (KERNEL_LOAD_ADDR) と       */
+    /*  重なるため、ページテーブルでのリマップは不可。                      */
+    /*  代わりに page_fault_handler (isr_handlers.c) で V86モードからの    */
+    /*  0x100000+ へのアクセスを検出し、CS:IP を 20ビットマスクして         */
+    /*  ラップアラウンドを実現する。                                        */
+    /* ================================================================== */
 
     /* PDE[0] (0x00000-0x3FFFFF) に PTE_USER を設定 */
     paging_pde_set_flags(0x00000, PTE_USER);

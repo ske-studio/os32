@@ -30,4 +30,20 @@ int v86_dma_io(u16 port, u8 *val, int is_write);
  * out_bytes: 転送バイト数 */
 u8 *v86_dma_get_transfer(u32 *out_bytes);
 
+/* T3.3: DMA 転送ログ */
+#define V86_DMA_LOG_SIZE 32
+
+struct v86_dma_entry {
+    u32 tick;
+    u8  ch;        /* DMA チャネル (2=FDC) */
+    u8  mode;      /* モードレジスタ */
+    u32 phys_addr; /* 24bit DMA アドレス */
+    u16 count;     /* ワードカウント */
+    u8  trigger;   /* 1=FDC READ, 2=FDC WRITE, 3=HDD */
+};
+
+extern struct v86_dma_entry v86_dma_log[];
+extern u32 v86_dma_log_idx;
+extern u32 v86_dma_log_count;
+
 #endif /* V86_DMA_H */

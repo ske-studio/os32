@@ -36,6 +36,41 @@ static struct {
 static u32 v86_eoi_count[2] = {0, 0};    /* 非特殊EOI回数 */
 static u32 v86_seoi_count[2] = {0, 0};   /* 特殊EOI回数 */
 
+/* T3.2: PIC EOI シーケンス検証ログ */
+extern volatile u32 tick_count;
+
+#define V86_EOI_LOG_SIZE 64
+
+struct v86_eoi_entry {
+    u32 tick;
+    u8  which;       /* 0=master, 1=slave */
+    u8  cleared_bit; /* 0-7=クリアしたIRQビット, 0xFF=orphan */
+    u8  isr_before;
+    u8  isr_after;
+};
+
+static struct v86_eoi_entry eoi_log[V86_EOI_LOG_SIZE];
+static u32 eoi_log_idx = 0;
+u32 v86_eoi_log_count = 0;
+u32 v86_eoi_orphan_count = 0;
+
+static void eoi_log_record(int which, int cleared_bit,
+                           u8 isr_before, u8 isr_after)
+{
+    struct v86_eoi_entry *e = &eoi_log[eoi_log_idx % V86_EOI_LOG_SIZE];
+    e->tick = tick_count;
+    e->which = (u8)which;
+    e->cleared_bit = (cleared_bit < 0) ? 0xFF : (u8)cleared_bit;
+    e->isr_before = isr_before;
+    e->isr_after = isr_after;
+    eoi_log_idx++;
+    v86_eoi_log_count++;
+
+    if (cleared_bit < 0) {
+        v86_eoi_orphan_count++;
+    }
+}
+
 /* PICポートアドレス */
 #define MPIC_CMD   0x00   /* マスタ コマンドポート */
 #define MPIC_DATA  0x02   /* マスタ データ/IMRポート */
@@ -85,24 +120,32 @@ static void pic_write_cmd(int idx, u8 val)
 
     /* OCW2 判定: bit5=1, bit4-3=00 → EOIコマンド */
     if ((val & 0x18) == 0x00 && (val & 0x20)) {
+        u8 isr_before = vpic[idx].isr;  /* T3.2: EOI前のISR */
+
         if (val & 0x40) {
             /* 特殊EOI (0x60+n): ISR bit n を直接クリア
              * PC9800Bible §1-4: OCW2 R=0,S=1,E=1 → 指定レベルEOI */
             int level = val & 0x07;
             vpic[idx].isr &= ~(1 << level);
             v86_seoi_count[idx]++;
+            /* T3.2: 特殊EOIログ */
+            eoi_log_record(idx, level, isr_before, vpic[idx].isr);
         } else {
             /* 非特殊EOI (0x20): ISRの最高優先度ビットをクリア */
+            int cleared = -1;
             if (vpic[idx].isr) {
                 int bit;
                 for (bit = 0; bit < 8; bit++) {
                     if (vpic[idx].isr & (1 << bit)) {
                         vpic[idx].isr &= ~(1 << bit);
                         v86_eoi_count[idx]++;
+                        cleared = bit;
                         break;
                     }
                 }
             }
+            /* T3.2: 非特殊EOIログ (orphan含む) */
+            eoi_log_record(idx, cleared, isr_before, vpic[idx].isr);
         }
         return;
     }

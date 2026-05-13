@@ -26,6 +26,13 @@
 int v86_debug_enabled = 0;
 int v86_debug_serial_enabled = 1;
 
+/* V86 #PF 発生時の診断情報 (page_fault_handler でセット) */
+u32 v86_pf_cr2 = 0;
+u32 v86_pf_error_code = 0;
+u16 v86_pf_cs = 0;
+u16 v86_pf_ip = 0;
+int v86_pf_recorded = 0;
+
 /* シリアルヘルパー */
 extern void serial_puts(const char *s);
 extern void serial_putchar(char c);
@@ -36,6 +43,8 @@ extern struct v86_io_stat { u16 port; u32 read_count; u32 write_count; u8 classi
 
 /* tick_count (isr_stub.asm) */
 extern volatile u32 tick_count;
+
+
 
 /* ====================================================================== */
 /*  ログファイルパス管理                                                    */
@@ -238,13 +247,33 @@ void v86_debug_write_header(const char *boot_mode,
 static void write_section_exit(void)
 {
     u32 duration = tick_count - v86_start_tick;
+    /* セッション終了理由を current_session から取得 */
+    int reason_code = v86_debug_get_exit_reason();
 
     wb_reset();
     wb_str("[EXIT]\n");
     wb_str("  Reason        : ");
-    wb_str(v86_exit_reason_str(V86_EXIT_NONE)); /* プレースホルダ — 下で上書き */
-    /* 実際の終了理由は v86_session.c から取れないため、統計から推定 */
+    wb_str(v86_exit_reason_str((enum v86_exit_reason)reason_code));
     wb_nl();
+
+    /* #PF 終了時の詳細情報 */
+    if (reason_code == V86_EXIT_PAGE_FAULT && v86_pf_recorded) {
+        wb_str("  #PF Addr (CR2): 0x"); wb_hex32(v86_pf_cr2); wb_nl();
+        wb_str("  #PF Error Code: 0x"); wb_hex32(v86_pf_error_code);
+        wb_str("  (");
+        if (v86_pf_error_code & 0x02) wb_str("WRITE");
+        else                         wb_str("READ");
+        if (v86_pf_error_code & 0x01) wb_str(", Protection");
+        else                         wb_str(", Not-Present");
+        if (v86_pf_error_code & 0x04) wb_str(", User");
+        wb_str(")"); wb_nl();
+        wb_str("  #PF at CS:IP  : ");
+        wb_hex16(v86_pf_cs); wb_ch(':'); wb_hex16(v86_pf_ip);
+        wb_str("  (linear 0x");
+        wb_hex32(((u32)v86_pf_cs << 4) + (u32)v86_pf_ip);
+        wb_str(")"); wb_nl();
+    }
+
     wb_str("  Duration      : "); wb_dec(duration);
     wb_str(" ticks ("); wb_dec(duration / 100);
     wb_str("."); wb_dec((duration % 100) / 10); wb_str("s)"); wb_nl();
@@ -1328,6 +1357,79 @@ void v86_debug_dump_memory_pre(void)
             wb_str("N/A");
         }
         wb_str("  actual=100Hz\n");
+    }
+
+    /* GP TRACE 最終エントリの CS:IP 周辺コードダンプ
+     * ハング地点 (例: 0665:1992) の実コードを可視化する。
+     * teardown前なのでバッキングRAMから安全にアクセスできる。 */
+    {
+        u32 trace_total, trace_idx;
+        struct v86_trace_entry *tlog;
+
+        tlog = v86_get_trace(&trace_total, &trace_idx);
+        if (trace_total > 0) {
+            u32 last_idx;
+            struct v86_trace_entry *last;
+            u16 cs, ip_val;
+            u32 seg_base;
+            u16 dump_start;
+            u8 *code_p;
+
+            last_idx = (trace_idx + V86_TRACE_SIZE - 1) % V86_TRACE_SIZE;
+            last = &tlog[last_idx];
+            cs = last->cs;
+            ip_val = last->ip;
+            seg_base = (u32)cs << 4;
+            dump_start = (ip_val > 32) ? (ip_val - 32) : 0;
+            code_p = v86_phys_addr(cs, dump_start);
+
+            wb_str("[GP TRACE LAST CS:IP] ");
+            wb_hex16(cs); wb_ch(':'); wb_hex16(ip_val);
+            wb_str(" (linear 0x"); wb_hex32(seg_base + ip_val); wb_str(")\n");
+            wb_str("  Dump: "); wb_hex16(cs); wb_ch(':');
+            wb_hex16(dump_start); wb_str(" - ");
+            wb_hex16(cs); wb_ch(':'); wb_hex16((u16)(dump_start + 255));
+            wb_str(" (256 bytes)\n");
+
+            for (di = 0; di < 256; di++) {
+                if ((di % 16) == 0) {
+                    wb_str("  ");
+                    wb_hex16((u16)(dump_start + di));
+                    wb_str(": ");
+                }
+                wb_hex8(code_p[di]); wb_ch(' ');
+                if ((di % 16) == 15) wb_nl();
+                if (wpos > WBUF_SIZE - 80) wb_flush();
+            }
+            wb_nl();
+
+            /* タイムアウト時のCS:IPも異なる場合は追加ダンプ */
+            if (v86_timeout_cs != 0 &&
+                (v86_timeout_cs != cs || v86_timeout_ip != ip_val)) {
+                u16 to_cs = (u16)v86_timeout_cs;
+                u16 to_ip = (u16)v86_timeout_ip;
+                u16 to_start = (to_ip > 32) ? (to_ip - 32) : 0;
+                u8 *to_p = v86_phys_addr(to_cs, to_start);
+
+                wb_str("[TIMEOUT CS:IP] ");
+                wb_hex16(to_cs); wb_ch(':'); wb_hex16(to_ip);
+                wb_str(" (linear 0x");
+                wb_hex32(((u32)to_cs << 4) + to_ip);
+                wb_str(")\n");
+
+                for (di = 0; di < 256; di++) {
+                    if ((di % 16) == 0) {
+                        wb_str("  ");
+                        wb_hex16((u16)(to_start + di));
+                        wb_str(": ");
+                    }
+                    wb_hex8(to_p[di]); wb_ch(' ');
+                    if ((di % 16) == 15) wb_nl();
+                    if (wpos > WBUF_SIZE - 80) wb_flush();
+                }
+                wb_nl();
+            }
+        }
     }
 
     wb_nl();

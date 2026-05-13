@@ -16,6 +16,7 @@
 #include "v86_fdc.h"
 #include "v86_dma.h"
 #include "v86_vsync.h"
+#include "v86_iocore.h"
 #include "v86_session.h"
 #include "v86_debug.h"
 #include "v86_event.h"
@@ -338,102 +339,30 @@ static void v86_gp_inject_irq(u32 *regs, u16 handler_seg, u16 handler_off)
 }
 
 /* ====================================================================== */
-/*  8ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
+/*  I/Oヘルパー: v86_iocore テーブルディスパッチ経由                        */
+/*                                                                          */
+/*  旧 if/else チェーン方式から NP21/W iocore 準拠のテーブルディスパッチに   */
+/*  移行。各デバイスハンドラは v86_iocore_init() で登録される。             */
+/*  詳細は v86_iocore.c を参照。                                           */
 /* ====================================================================== */
-
-/* カーネル保護ポート判定 — HostDrv(0x7EC/0x7EE)とシリアル(0x30-0x35,0x75,0x77)
- * をV86ゲストからのアクセスから保護する。
- * HostDrv: ゲストが書き込むとセッション状態が壊れ、ファイルI/Oが失敗する。
- * シリアル: ゲストが書き込むと通信設定が壊れ、V86終了後にrshellが応答しない。 */
-static int v86_port_is_protected(u16 port)
-{
-    /* HostDrv I/Oポート */
-    if (port == 0x7EC || port == 0x7EE) return 1;
-    /* RS-232C (μPD8251A) */
-    if (port == 0x30 || port == 0x32 || port == 0x33 || port == 0x35) return 1;
-    /* RS-232C ボーレート (PIT #2) */
-    if (port == 0x75 || port == 0x77) return 1;
-    return 0;
-}
-
-/* 8ビットI/O入力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static u8 v86_in8_checked(u16 port)
 {
-    u8 val;
-    if (v86_port_is_protected(port)) return 0xFF;
-
-    /* キーボード 8251A 仮想化
-     * 0x41: データポート — v86_kbd_buf からスキャンコードを返す
-     * 0x43: ステータスポート — RxRDY (bit1) でデータ有無を返す */
-    if (port == 0x41) {
-        if (v86_kbd_buf_count > 0) {
-            val = v86_kbd_buf[v86_kbd_buf_head];
-            v86_kbd_buf_head = (v86_kbd_buf_head + 1) % V86_KBD_BUF_SIZE;
-            v86_kbd_buf_count--;
-            return val;
-        }
-        return 0xFF; /* バッファ空: ダミー値 */
-    }
-    if (port == 0x43) {
-        /* bit1 (RxRDY) = データあり */
-        return (v86_kbd_buf_count > 0) ? 0x02 : 0x00;
-    }
-
-    if (v86_pic_io(port, &val, 0)) return val;
-    if (v86_pit_io(port, &val, 0)) return val;
-    if (v86_fdc_io(port, &val, 0)) return val;
-    if (v86_dma_io(port, &val, 0)) return val;
-    if (v86_vsync_io(port, &val, 0)) return val;
-    return inp(port);
+    return v86_iocore_inp8(port);
 }
 
-/* 8ビットI/O出力: PIC/PIT/FDC/DMA仮想化チェック付き */
 static void v86_out8_checked(u16 port, u8 val)
 {
-    if (v86_port_is_protected(port)) return;
-    /* キーボード 8251A: ゲストからの書き込みは無視
-     * OS32がキーボードハードウェアを管理している */
-    if (port == 0x41 || port == 0x43) return;
-    if (!v86_pic_io(port, &val, 1)) {
-        if (!v86_pit_io(port, &val, 1)) {
-            if (!v86_fdc_io(port, &val, 1)) {
-                if (!v86_dma_io(port, &val, 1)) {
-                    if (!v86_vsync_io(port, &val, 1)) {
-                        outp(port, val);
-                    }
-                }
-            }
-        }
-    }
+    v86_iocore_out8(port, val);
 }
 
-/* ====================================================================== */
-/*  16ビットI/O ヘルパー: PIC/PIT仮想化チェック付き                         */
-/*                                                                          */
-/*  PIC/PITは8ビットポートデバイスのため、16ビットアクセスは                 */
-/*  port と port+1 への連続8ビットアクセスに分解して仮想化を適用する。       */
-/* ====================================================================== */
-
-/* 16ビットI/O入力: PIC/PIT仮想化チェック付き */
-static u16 v86_inw_checked(u16 port)
+static u16 v86_inw_checked(u16 port, u16 cur_ax)
 {
-    u8 lo = v86_in8_checked(port);
-    u8 hi = v86_in8_checked((u16)(port + 1));
-    return (u16)lo | ((u16)hi << 8);
+    return v86_iocore_inp16(port, cur_ax);
 }
 
-/* 16ビットI/O出力: PIC/PIT仮想化+リブート検知付き
- * 戻り値: 1=リブート検知(V86終了要求), 0=通常 */
 static int v86_outw_checked(u16 port, u16 val)
 {
-    u8 lo = (u8)(val & 0xFF);
-    u8 hi = (u8)((val >> 8) & 0xFF);
-    /* リブート検知 (F0hポート) */
-    if (v86_pic_is_reboot(port, lo)) return 1;
-    if (v86_pic_is_reboot((u16)(port + 1), hi)) return 1;
-    v86_out8_checked(port, lo);
-    v86_out8_checked((u16)(port + 1), hi);
-    return 0;
+    return v86_iocore_out16(port, val);
 }
 
 /* ====================================================================== */
@@ -476,10 +405,12 @@ int v86_gp_handler(u32 *regs)
         return 1;
     }
 
-    /* BIOS ROM領域 (0xF000:xxxx以降) でのGP: V86強制終了
-     * IPLエラー後のJMP FAR 0xFFFF:0x0000 (リセットベクタ) で
-     * BIOS ROM内コードが実行され無限GPループになるのを防止 */
-    if (regs[V86_REG_CS] >= 0xF000) {
+    /* BIOS ROM領域: リセットベクタ (FFFF:0000) のみ強制終了。
+     * それ以外はROM内ルーチンの通常実行として許可する。
+     * ハイブリッド方式: ROM内のI/O命令は#GP経由で仮想化される。
+     * IPLエラー後のJMP FAR 0xFFFF:0x0000 やシステムリセットを検出。 */
+    if (regs[V86_REG_CS] == 0xFFFF &&
+        (regs[V86_REG_EIP] & 0xFFFF) == 0x0000) {
         v86_last_cs = regs[V86_REG_CS];
         v86_last_ip = regs[V86_REG_EIP];
         v86_request_exit(V86_EXIT_BIOS_ROM);
@@ -603,7 +534,7 @@ int v86_gp_handler(u32 *regs)
                 *dst = v86_in8_checked(port);
                 di = (u16)(di + (df ? -1 : 1));
             } else {
-                u16 val = v86_inw_checked(port);
+                u16 val = v86_inw_checked(port, 0);
                 *dst     = (u8)(val & 0xFF);
                 *(dst+1) = (u8)(val >> 8);
                 di = (u16)(di + (df ? -2 : 2));
@@ -740,60 +671,35 @@ int v86_gp_handler(u32 *regs)
         }
 
         /* ============================================================ */
-        /*  PC-98 BIOS割り込みのエミュレーション                               */
-        /*  INT 18h (Text/KB/GFX BIOS) → v86_bios_int18()              */
-        /*  INT 29h (DOS 1文字高速出力) → v86_bios_int29()              */
+        /*  PC-98 BIOS割り込みのエミュレーション (ハイブリッド方式)              */
+        /*                                                                      */
+        /*  ホットパス (HLE維持):                                               */
+        /*    INT 1Bh (ディスクBIOS) → v86_bios_int1b() — loop_dev経由         */
+        /*    INT 29h (DOS 1文字高速出力) → v86_bios_int29()                   */
+        /*                                                                      */
+        /*  コールドパス (BIOS ROM実行に委譲):                                   */
+        /*    INT 18h, 1Ch, 11h, 12h 等 → IVT転送 → ROM内ハンドラ実行        */
+        /*    ROM内のI/O命令は#GP経由で仮想化ディスパッチャが処理する           */
         /* ============================================================ */
-        if (intno == 0x18) {
-            int rc = v86_bios_int18(regs);
-            if (rc == -2) {
-                /* EIP加算なし: INT命令を再実行 (キー入力待ち) */
-                break;
-            }
-            if (rc >= 0) {
-                /* 処理済み: EIPを進めてV86に戻る */
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-                if (rc == 1) return 1;  /* V86終了要求 */
-                break;
-            }
-            /* rc == -1: 未実装 — IVT転送にフォールスルー */
-        }
+
+        /* INT 29h (DOS高速1文字出力): HLE維持 (頻度が高く速度が重要) */
         if (intno == 0x29) {
             v86_bios_int29(regs);
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             break;
         }
-        if (intno == 0x1C) {
-            int rc = v86_bios_int1c(regs);
-            if (rc >= 0) {
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-                break;
-            }
-            /* rc == -1: IVT転送にフォールスルー */
-        }
 
-        /* INT 11h (機器構成取得) */
-        if (intno == 0x11) {
-            v86_bios_int11(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
-        /* INT 12h (メモリサイズ取得) */
-        if (intno == 0x12) {
-            v86_bios_int12(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
-
-        /* INT 1Bh (ディスクBIOS) */
+        /* INT 1Bh (ディスクBIOS): HLE維持 (loop_dev経由のディスクI/O必須) */
         if (intno == 0x1B) {
             int rc = v86_bios_int1b(regs);
-            if (rc >= 0) {
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-                break;
-            }
-            /* rc == -1: IVT転送にフォールスルー */
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+            (void)rc;
+            break;
         }
+
+        /* INT 18h, 1Ch, 11h, 12h 等: IVT転送 → BIOS ROM内ハンドラ実行
+         * ROM内コードがCLI/STI/IN/OUTを実行すると#GPが発生し、
+         * 既存の仮想化ディスパッチャが処理する。 */
 
         /* 通常のINT: IVT参照してV86内ハンドラに転送 */
         {
@@ -914,11 +820,16 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xF4:
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
-        if (v86_exit_request) {
-            /* V86終了要求: 戻り値 1 で isr_stub.asm が復帰処理を行う */
+        /* デバッグモードまたは終了要求時: HLTでV86を終了する。
+         * IO.SYSがエラーでHLT+JMPループに入った場合、NOP扱いにすると
+         * 永久ループになる。デバッグモードでは即座に終了して診断する。 */
+        if (v86_exit_request || v86_debug_enabled) {
+            if (!v86_exit_request) {
+                v86_request_exit(V86_EXIT_TIMEOUT);
+            }
             return 1;
         }
-        /* HLTは無視 (NOP扱い) — 次の命令に進む */
+        /* 非デバッグ時: HLTは無視 (NOP扱い) — 次の命令に進む */
         break;
 
     /* ================================================================ */
@@ -947,7 +858,7 @@ int v86_gp_handler(u32 *regs)
             return 1;
         }
         /* リセットポート検知 */
-        if (v86_pic_is_reboot(port, val)) {
+        if (v86_iocore_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
@@ -982,7 +893,7 @@ int v86_gp_handler(u32 *regs)
             v86_request_exit(V86_EXIT_TRAP_PORT);
             return 1;
         }
-        if (v86_pic_is_reboot(port, val)) {
+        if (v86_iocore_is_reboot(port, val)) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             v86_request_exit(V86_EXIT_REBOOT);
             return 1;
@@ -999,7 +910,7 @@ int v86_gp_handler(u32 *regs)
     case 0xE5: {
         u16 port = (u16)ip[1];
         v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
     }
@@ -1026,7 +937,7 @@ int v86_gp_handler(u32 *regs)
     case 0xED: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
-        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port);
+        regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
     }
@@ -1294,9 +1205,11 @@ void v86_inject_timer_irq(u32 *regs)
         v86_last_cs = regs[HWIRQ_REG_CS];
         v86_last_ip = regs[HWIRQ_REG_EIP];
 
-        /* HLT命令をバッキングRAMの0x501に配置 (0x0050:0x0001) */
+        /* HLT命令をBIOSスタブ領域の直後 0x03C9 に配置
+         * (003C:0009 = リニア 0x3C9)
+         * ※ 旧配置先 0x0501 は BDA (BIOS_FLAG) と重複していたため移動 */
         {
-            u8 *hlt_ptr = v86_linear(0x0050, 0x0001);
+            u8 *hlt_ptr = v86_linear(0x003C, 0x0009);
             *hlt_ptr = 0xF4;  /* HLT */
         }
 
@@ -1304,8 +1217,8 @@ void v86_inject_timer_irq(u32 *regs)
         v86_exit_request = 1;
 
         /* ゲストのCS:EIPを強制的にHLT命令に書き換え */
-        regs[HWIRQ_REG_CS] = 0x0050;
-        regs[HWIRQ_REG_EIP] = 0x0001;
+        regs[HWIRQ_REG_CS] = 0x003C;
+        regs[HWIRQ_REG_EIP] = 0x0009;
         return;
     }
 

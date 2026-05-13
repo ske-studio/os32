@@ -154,11 +154,14 @@ int v86_dma_io(u16 port, u8 *val, int is_write)
 /*  V86バッキングRAM (0x300000 ベース) へのアドレス変換は                   */
 /*  v86_phys_addr() で行う。bank=0 の場合のみ対応 (V86は1MB以内)。         */
 /* ====================================================================== */
+extern volatile u32 tick_count;  /* T3.3: DMA ログ用 */
+
 u8 *v86_dma_get_transfer(u32 *out_bytes)
 {
     u32 linear;
     u16 seg;
     u16 off;
+    u8 *result;
 
     /* カウント+1 がバイト数 (DMA は count-1 を格納する慣例) */
     *out_bytes = (u32)vdma.count + 1;
@@ -171,5 +174,26 @@ u8 *v86_dma_get_transfer(u32 *out_bytes)
     seg = (u16)(linear >> 4);
     off = (u16)(linear & 0x0F);
 
-    return v86_phys_addr(seg, off);
+    result = v86_phys_addr(seg, off);
+
+    /* T3.3: DMA 転送ログを記録 */
+    {
+        struct v86_dma_entry *e = &v86_dma_log[v86_dma_log_idx % V86_DMA_LOG_SIZE];
+        e->tick = tick_count;
+        e->ch = 2;  /* 現在はch2のみ */
+        e->mode = vdma.mode;
+        e->phys_addr = linear;
+        e->count = vdma.count;
+        e->trigger = 1;  /* FDC READ (デフォルト) */
+        v86_dma_log_idx++;
+        v86_dma_log_count++;
+    }
+
+    return result;
 }
+
+/* ====================================================================== */
+
+struct v86_dma_entry v86_dma_log[V86_DMA_LOG_SIZE];
+u32 v86_dma_log_idx = 0;
+u32 v86_dma_log_count = 0;

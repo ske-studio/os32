@@ -30,4 +30,9 @@ void v86_singlestep_set(int enabled, u32 max_count);
  * 戻り値: 0=V86続行, 1=V86終了 */
 int v86_db_handler(u32 *regs);
 
+/* V86 #DB ディスパッチャ (ウォッチポイント + シングルステップ統合)
+ * isr_stub.asm の isr_stub_1 から呼ばれる
+ * 戻り値: 0=V86続行, 1=V86終了 */
+int v86_db_dispatch(u32 *regs);
+
 #endif /* V86_SSTEP_H */
