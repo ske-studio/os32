@@ -275,8 +275,8 @@ pm_entry32:
         call    pm_print32
 
         ;; === メモリプロービング ===
-        mov     esi, 00110000h
-        mov     ecx, 1088
+        mov     esi, 00100000h
+        mov     ecx, 1024
 
 .probe_loop:
         mov     eax, [esi]
@@ -300,7 +300,7 @@ pm_entry32:
         push    dword 0         ;; ダミーリターンアドレス
 
         db      0EAh
-        dd      00110000h
+        dd      00100000h
         dw      0008h
 
 .bad_magic:

@@ -463,24 +463,18 @@ void v86_mem_setup(void)
     }
 
     /* ================================================================== */
-    /*  4b. A20ラップアラウンド (HMA領域)                                  */
+    /*  A20ラップアラウンド (HMA領域)                                      */
     /*                                                                      */
-    /*  リアルモードでは A20ゲート無効時、linear 0xFFFFF を超える            */
-    /*  アドレスが 0x00000 にラップアラウンドする。                          */
-    /*  例: FD80:AF06 = 0xFD800+0xAF06 = 0x108706 → wrap → 0x08706      */
+    /*  リアルモードでは linear 0xFFFFF を超えるアドレスが 0x00000 に       */
+    /*  ラップアラウンドするが、V86モードではA20ラインが有効なため          */
+    /*  ラップが発生しない。                                                */
     /*                                                                      */
-    /*  V86モードではA20ラインが有効なためラップが発生しない。               */
-    /*  ページテーブルで 仮想 0x100000-0x10FFFF をバッキングRAM先頭         */
-    /*  (物理 0x00000-0x0FFFF 相当) にマッピングすることで、                 */
-    /*  ソフトウェア的にA20ラップを再現する。                               */
-    /*                                                                      */
-    /*  カーネルは 0x110000 にリロケート済みのため、この領域との              */
-    /*  衝突は発生しない。                                                   */
+    /*  0x100000-0x10FFFF はカーネルコード領域 (KERNEL_LOAD_ADDR) と       */
+    /*  重なるため、ページテーブルでのリマップは不可。                      */
+    /*  代わりに page_fault_handler (isr_handlers.c) で V86モードからの    */
+    /*  0x100000+ へのアクセスを検出し、CS:IP を 20ビットマスクして         */
+    /*  ラップアラウンドを実現する。                                        */
     /* ================================================================== */
-    for (addr = 0x100000; addr < 0x110000; addr += PAGE_SIZE) {
-        u32 wrap_phys = v86_backing_phys + (addr - 0x100000);
-        paging_set_page(addr, wrap_phys, PTE_PRESENT | PTE_RW | PTE_USER);
-    }
 
     /* PDE[0] (0x00000-0x3FFFFF) に PTE_USER を設定 */
     paging_pde_set_flags(0x00000, PTE_USER);
@@ -762,11 +756,6 @@ void v86_mem_teardown(void)
     /* BIOS ROMを元に戻す */
     for (addr = 0xF0000; addr <= 0xFF000; addr += PAGE_SIZE) {
         paging_set_page(addr, addr, PTE_PRESENT);
-    }
-
-    /* A20ラップアラウンド復元: 0x100000-0x10FFFF をアイデンティティマッピングに戻す */
-    for (addr = 0x100000; addr < 0x110000; addr += PAGE_SIZE) {
-        paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
     }
 
     /* PDE[0] から PTE_USER を除去 */
