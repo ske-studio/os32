@@ -472,10 +472,16 @@ static void fdc_execute_command(void)
         /* リザルトなし: SENSE INTERRUPT で読み出す */
         break;
 
-    /* SENSE INTERRUPT STATUS (0x08): ST0 + PCN を返す */
+    /* SENSE INTERRUPT STATUS (0x08): ST0 + PCN を返す
+     * FDCリセット後は irq_after_seek=4 (4ドライブ分) がセットされ、
+     * BIOSはSENSE INTERRUPTを4回発行して各ドライブのST0を読む。
+     * 各回でドライブ番号 (US=3→0 の降順) 付きST0を返す。 */
     case 0x08:
-        if (vfdc.irq_after_seek) {
-            vfdc.irq_after_seek = 0;
+        if (vfdc.irq_after_seek > 0) {
+            u8 polling_us = (u8)(vfdc.irq_after_seek - 1);
+            vfdc.irq_after_seek--;
+            /* ST0: IC=11 (Polling) | US=ドライブ番号 */
+            vfdc.st0 = 0xC0U | (polling_us & 0x03U);
         } else {
             /* 無効 SENSE INTERRUPT: ST0=0x80 (Invalid Command) */
             vfdc.st0 = 0x80U;
@@ -694,32 +700,31 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
 /* ====================================================================== */
 void v86_fdc_sync_rw(u8 cyl, u8 head, u8 sect_r, u8 sec_n)
 {
-    /* リザルトバッファ設定 (NP21/W fdcsend_success7 と同一) */
-    vfdc.result_buf[0] = (vfdc.hd << 2) | vfdc.drv;  /* ST0: HD|US */
-    vfdc.result_buf[1] = 0x00;                        /* ST1: 正常 */
-    vfdc.result_buf[2] = 0x00;                        /* ST2: 正常 */
-    vfdc.result_buf[3] = cyl;                          /* C */
-    vfdc.result_buf[4] = head;                         /* H */
-    vfdc.result_buf[5] = sect_r;                       /* R */
-    vfdc.result_buf[6] = sec_n;                        /* N */
-    vfdc.result_idx   = 0;
-    vfdc.result_total = 7;
+    /* HLE統合方式:
+     * INT 1Bh HLE ではBIOS ROMハンドラ自体を迂回するため、
+     * FDCリザルトを読み出す消費者がいない。
+     * RESULT状態のまま放置すると、BIOS ROMがFDCポートを触った際に
+     * MSR=0xD0 (DIO=1) が返り、コマンド書き込み不可と判断されてハングする。
+     *
+     * 解決: HLE完了後はFDCをIDLE (MSR=0x80, RQM only) に設定し、
+     * PCN/st0だけ同期する。これにより後続のBIOS ROMコードが
+     * FDCポートを触ってもIDLE状態が返り、正常にコマンド発行できる。 */
 
-    /* FDCステートを RESULT (BUFSEND) に設定
-     * NP21/W: fdc.status &= 0x0f; fdc.status |= (1 << us);
-     *         fdc.status |= RQM | CB | DIO;
-     * → MSR = 0xD1 (ドライブ0の場合) */
-    vfdc.phase = FDC_PHASE_RESULT;
-    vfdc.status &= 0x0FU;
-    vfdc.status |= (u8)(1U << vfdc.drv);
-    vfdc.status |= VFDC_MSR_RQM | VFDC_MSR_BUSY | VFDC_MSR_DIO;
-
-    /* PCN更新 */
+    /* ST0/PCN を同期 (SENSE INTERRUPTで返す用) */
+    vfdc.st0 = (u8)((head << 2) | (vfdc.drv & 0x03U)) | 0x20U; /* SE=1 */
     vfdc.pcn = cyl;
     vfdc.hd  = head;
 
-    /* IRQ11 (2HD FDD割り込み) をペンディング
-     * NP21/W: fdc_interrupt() → 512clk後に pic_setirq(0x0b) */
+    /* SEEK完了扱い: 次のSENSE INTERRUPTでST0+PCNを返す */
+    vfdc.irq_after_seek = 1;
+
+    /* FDCステートを IDLE に設定 (BIOS ROMがポートを触っても安全) */
+    vfdc.phase  = FDC_PHASE_IDLE;
+    vfdc.status = VFDC_MSR_RQM;  /* 0x80: RQM only */
+    vfdc.result_idx   = 0;
+    vfdc.result_total = 0;
+
+    /* IRQ11 (2HD FDD割り込み) をペンディング */
     v86_set_pending_irq(11);
 }
 
