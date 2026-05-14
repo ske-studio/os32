@@ -43,35 +43,6 @@ u32 v86_backing_phys = 0;
 /* バッキングRAM有効フラグ (デフォルト=0: アイデンティティマッピング) */
 static int v86_backing_enabled = 0;
 
-/* ======================================================================== */
-/*  V86専用ページテーブル (PDE[0]用コピー)                                   */
-/*                                                                          */
-/*  PDE[0] は 0x00000-0x3FFFFF (4MB) をカバーする。この範囲には:            */
-/*    - V86バッキングRAM (0x00000-0x9FFFF)                                  */
-/*    - VRAM/ROM (0xA0000-0xFFFFF)                                          */
-/*    - カーネルコード (0x100000-0x1FFFFF) ← A20ラップの対象                */
-/*  が含まれる。                                                             */
-/*                                                                          */
-/*  マスターPT[0] の全エントリをコピーした上で、HMA領域 (PTE[0x100-0x10F])  */
-/*  をバッキングRAMの先頭にマッピングすることで、A20 OFFのラップアラウンド   */
-/*  をページングレベルで実現する。                                           */
-/*                                                                          */
-/*  カーネルコード (PTE[0x110-0x1FF]) はマスターPTからコピーされるため       */
-/*  Ring 0 で実行される #GP/#PF ハンドラは正常にアクセスできる。            */
-/* ======================================================================== */
-static u8 v86_pt0_raw[4096 + 4095];  /* 4KB PT + アライメントパディング */
-static u32 *v86_pt0 = (u32 *)0;      /* アライン済みポインタ */
-static u32 v86_pde0_saved = 0;       /* 元の PDE[0] 値 (復元用) */
-static int v86_a20_state = 0;        /* 0=OFF(ラップ), 1=ON */
-
-/* 4096バイト境界に切り上げ (paging.c の align4096 と同等) */
-static u32 *v86_align4096(void *p)
-{
-    u32 a = (u32)p;
-    a = (a + 4095) & ~4095UL;
-    return (u32 *)a;
-}
-
 /* 旧 bda_defaults[] テーブルは NP21/W方式のBDA初期化に移行したため削除。
  * BDA初期値は v86_mem_setup() 内で NP21/W bios_reinitbyswitch() 準拠で
  * 直接 backing[] に書き込む。 */
@@ -492,50 +463,21 @@ void v86_mem_setup(void)
     }
 
     /* ================================================================== */
-    /*  A20ラップアラウンド — V86専用ページテーブル方式                      */
+    /*  A20ラップアラウンド (HMA領域)                                      */
     /*                                                                      */
-    /*  リアルモードでは A20=OFF の場合 linear 0xFFFFF を超えるアドレスが   */
-    /*  0x00000 にラップアラウンドする。V86モードではA20が常に有効なため     */
+    /*  リアルモードでは linear 0xFFFFF を超えるアドレスが 0x00000 に       */
+    /*  ラップアラウンドするが、V86モードではA20ラインが有効なため          */
     /*  ラップが発生しない。                                                */
     /*                                                                      */
-    /*  解決: PDE[0]用のPTをコピーし、HMA部分 (PTE[0x100-0x10F]) を         */
-    /*  バッキングRAMの先頭にマッピングする。カーネルコード                 */
-    /*  (PTE[0x110-0x1FF]) はコピーから継承されるため、Ring 0での             */
-    /*  #GP/#PFハンドラ実行には影響しない。                                 */
-    /*                                                                      */
-    /*  NP21/W HAXM の i386hax_vm_sethmemory() と同等のアプローチ。         */
+    /*  0x100000-0x10FFFF はカーネルコード領域 (KERNEL_LOAD_ADDR) と       */
+    /*  重なるため、ページテーブルでのリマップは不可。                      */
+    /*  代わりに page_fault_handler (isr_handlers.c) で V86モードからの    */
+    /*  0x100000+ へのアクセスを検出し、CS:IP を 20ビットマスクして         */
+    /*  ラップアラウンドを実現する。                                        */
     /* ================================================================== */
-    {
-        u32 *master_pt0 = paging_get_pt0();
-        int pi;
 
-        /* V86専用PTをアライン */
-        v86_pt0 = v86_align4096(v86_pt0_raw);
-
-        /* マスターPT[0] の全エントリをコピー */
-        for (pi = 0; pi < PTE_COUNT; pi++) {
-            v86_pt0[pi] = master_pt0[pi];
-        }
-
-        /* HMA領域 (PTE[0x100-0x10F]) をバッキングRAMの先頭にマッピング
-         * → A20 OFF のラップアラウンドを実現
-         * 仮想 0x100000+i*4096 → 物理 backing+i*4096 */
-        for (pi = 0; pi < 16; pi++) {
-            v86_pt0[0x100 + pi] =
-                (v86_backing_phys + (u32)pi * PAGE_SIZE)
-                | PTE_PRESENT | PTE_RW | PTE_USER;
-        }
-
-        /* A20初期状態: OFF (ラップ有効) */
-        v86_a20_state = 0;
-
-        /* PDE[0] の元の値を退避 */
-        v86_pde0_saved = paging_get_pde(0);
-
-        /* PDE[0] を V86専用PTに差し替え + PTE_USER を付与 */
-        paging_set_pde(0,
-            (u32)v86_pt0 | PTE_PRESENT | PTE_RW | PTE_USER);
-    }
+    /* PDE[0] (0x00000-0x3FFFFF) に PTE_USER を設定 */
+    paging_pde_set_flags(0x00000, PTE_USER);
 
     /* ================================================================== */
     /*  5. I/Oビットマップ設定                                            */
@@ -816,15 +758,8 @@ void v86_mem_teardown(void)
         paging_set_page(addr, addr, PTE_PRESENT);
     }
 
-    /* PDE[0] をマスターPTに復元 (V86専用PTから元に戻す) */
-    if (v86_pde0_saved != 0) {
-        paging_set_pde(0, v86_pde0_saved);
-        v86_pde0_saved = 0;
-    } else {
-        /* フォールバック: PTE_USER のみ除去 */
-        paging_pde_clear_flags(0x00000, PTE_USER);
-    }
-    v86_a20_state = 0;
+    /* PDE[0] から PTE_USER を除去 */
+    paging_pde_clear_flags(0x00000, PTE_USER);
 
     /* I/Oビットマップを全トラップに戻す */
     tss_iomap_deny_all();
@@ -840,55 +775,6 @@ void v86_mem_teardown(void)
         pgalloc_free_n(v86_backing_phys, V86_BACKING_PAGES);
         v86_backing_phys = 0;
     }
-}
-
-/* ======================================================================== */
-/*  v86_a20_set — A20ライン状態を変更 (ページテーブル更新)                   */
-/*                                                                          */
-/*  NP21/W cpuio.c の CPU_A20EN() + haxcore.c の i386hax_vm_sethmemory()    */
-/*  に相当する処理。V86専用PT[0] のHMAエントリ (PTE[0x100-0x10F]) を         */
-/*  書き換えることでA20のON/OFFをエミュレートする。                          */
-/*                                                                          */
-/*  enable=0 (A20 OFF): 0x100000-0x10FFFF → backing+0x00000 (ラップ)       */
-/*  enable=1 (A20 ON):  Phase 1 では未サポート → ラップを維持              */
-/* ======================================================================== */
-void v86_a20_set(int enable)
-{
-    int pi;
-
-    if (!v86_pt0) return;  /* V86未初期化 */
-
-    if (enable) {
-        /* Phase 1: A20 ON は未サポート (バッキングRAMが640KBしかない)
-         * HMA用の物理RAMが無いためラップを維持する。
-         * Phase 2 でバッキングRAMを拡張後に対応予定。 */
-        kprintf(0xA1, "[V86] A20 ON requested (not yet supported, keeping wrap)\n");
-    } else {
-        /* A20 OFF: HMAをバッキングRAMの先頭にマッピング (ラップ) */
-        for (pi = 0; pi < 16; pi++) {
-            v86_pt0[0x100 + pi] =
-                (v86_backing_phys + (u32)pi * PAGE_SIZE)
-                | PTE_PRESENT | PTE_RW | PTE_USER;
-        }
-    }
-
-    v86_a20_state = enable;
-
-    /* TLBフラッシュ (CR3リロード方式) */
-    {
-        u32 cr3_val;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
-        __asm__ volatile("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
-    }
-}
-
-/* ======================================================================== */
-/*  v86_a20_get — A20ライン状態を取得                                       */
-/*  戻り値: 0=OFF(ラップ有効), 1=ON                                         */
-/* ======================================================================== */
-int v86_a20_get(void)
-{
-    return v86_a20_state;
 }
 
 /* ======================================================================== */

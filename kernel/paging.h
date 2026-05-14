@@ -85,14 +85,5 @@ void paging_pde_set_flags(u32 virt_addr, u32 flags);
 /* PDEからフラグビットを除去する */
 void paging_pde_clear_flags(u32 virt_addr, u32 flags);
 
-/* PDE[0]のページテーブルポインタを取得 (V86 A20エミュレーション用) */
-u32 *paging_get_pt0(void);
-
-/* PDEエントリを直接設定する (V86 PT差し替え用) */
-void paging_set_pde(u32 pdi, u32 value);
-
-/* PDEエントリを取得する */
-u32 paging_get_pde(u32 pdi);
-
 
 #endif /* __PAGING_H */

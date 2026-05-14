@@ -16,7 +16,6 @@
 #include "v86_fdc.h"
 #include "v86_dma.h"
 #include "v86_vsync.h"
-#include "v86_mem.h"
 #include "io.h"
 
 /* ====================================================================== */
@@ -204,32 +203,6 @@ static void reset_port_out(u16 port, u8 val)
 }
 
 /* ====================================================================== */
-/*  A20ゲート iocore バインド (PC-98 ポート 0xF2)                          */
-/*                                                                          */
-/*  NP21/W cpuio.c の cpuio_of2 / cpuio_if2 に相当:                       */
-/*    OUT 0xF2: A20有効化 (CPU_A20EN(TRUE))                                */
-/*    IN  0xF2: A20状態読み取り (0xFF - (ADRSMASK >> 20 & 1))               */
-/*                                                                          */
-/*  ポート 0xF0 (OUT=CPUリセット) では A20 が無効化される (NP21/W 互換)       */
-/* ====================================================================== */
-static void a20_gate_out(u16 port, u8 val)
-{
-    (void)port;
-    (void)val;
-    /* OUT 0xF2 = A20有効化 (NP21/W: CPU_A20EN(TRUE)) */
-    v86_a20_set(1);
-}
-
-static u8 a20_gate_inp(u16 port)
-{
-    (void)port;
-    /* NP21/W: ret = 0xFF - (CPU_ADRSMASK >> 20 & 1)
-     * A20 ON  (mask=0xFFFFFFFF) → bit20=1 → 0xFF - 1 = 0xFE
-     * A20 OFF (mask=0x000FFFFF) → bit20=0 → 0xFF - 0 = 0xFF */
-    return v86_a20_get() ? 0xFE : 0xFF;
-}
-
-/* ====================================================================== */
 /*  PIT iocore バインド                                                    */
 /* ====================================================================== */
 static u8 pit_counter_inp(u16 port)
@@ -369,13 +342,8 @@ void v86_iocore_init(void)
     v86_io_out[0x08] = pic_slave_cmd_out;
     v86_io_inp[0x0A] = pic_slave_data_inp;
     v86_io_out[0x0A] = pic_slave_data_out;
-    /* リセットポート: 0xF0 (OUT のみ) — A20無効化も含む */
+    /* リセットポート: 0xF0 (OUT のみ) */
     v86_io_out[0xF0] = reset_port_out;
-
-    /* ---- 4b. A20ゲート (0xF2) ---- */
-    /* NP21/W cpuio.c: OUT 0xF2 = A20有効化, IN 0xF2 = A20状態読み取り */
-    v86_io_out[0xF2] = a20_gate_out;
-    v86_io_inp[0xF2] = a20_gate_inp;
 
     /* ---- 5. PIT 8253A ---- */
     /* Counter#0: 0x71, Counter#1: 0x73 */
