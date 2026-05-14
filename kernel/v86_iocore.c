@@ -16,6 +16,7 @@
 #include "v86_fdc.h"
 #include "v86_dma.h"
 #include "v86_vsync.h"
+#include "v86_mem.h"
 #include "io.h"
 
 /* ====================================================================== */
@@ -203,6 +204,24 @@ static void reset_port_out(u16 port, u8 val)
 }
 
 /* ====================================================================== */
+/*  A20ゲート (PC-98 ポート 0xF2)                                        */
+/*  NP21/W cpuio.c cpuio_of2/cpuio_if2 相当                               */
+/*    OUT 0xF2: A20有効化                                                  */
+/*    IN  0xF2: A20状態読み取り (0xFE=ON, 0xFF=OFF)                       */
+/* ====================================================================== */
+static void a20_gate_out(u16 port, u8 val)
+{
+    (void)port; (void)val;
+    v86_a20_set(1);
+}
+
+static u8 a20_gate_inp(u16 port)
+{
+    (void)port;
+    return v86_a20_get() ? 0xFE : 0xFF;
+}
+
+/* ====================================================================== */
 /*  PIT iocore バインド                                                    */
 /* ====================================================================== */
 static u8 pit_counter_inp(u16 port)
@@ -344,6 +363,9 @@ void v86_iocore_init(void)
     v86_io_out[0x0A] = pic_slave_data_out;
     /* リセットポート: 0xF0 (OUT のみ) */
     v86_io_out[0xF0] = reset_port_out;
+    /* A20ゲート: 0xF2 (NP21/W cpuio.c 互換) */
+    v86_io_out[0xF2] = a20_gate_out;
+    v86_io_inp[0xF2] = a20_gate_inp;
 
     /* ---- 5. PIT 8253A ---- */
     /* Counter#0: 0x71, Counter#1: 0x73 */
