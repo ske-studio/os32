@@ -43,9 +43,6 @@ u32 v86_backing_phys = 0;
 /* バッキングRAM有効フラグ (デフォルト=0: アイデンティティマッピング) */
 static int v86_backing_enabled = 0;
 
-/* A20ライン状態 (0=OFF:ラップ有効, 1=ON) */
-static int v86_a20_state = 0;
-
 /* 旧 bda_defaults[] テーブルは NP21/W方式のBDA初期化に移行したため削除。
  * BDA初期値は v86_mem_setup() 内で NP21/W bios_reinitbyswitch() 準拠で
  * 直接 backing[] に書き込む。 */
@@ -466,28 +463,18 @@ void v86_mem_setup(void)
     }
 
     /* ================================================================== */
-    /*  A20ラップアラウンド — paging_set_page 直接方式                      */
+    /*  A20ラップアラウンド (HMA領域)                                      */
     /*                                                                      */
-    /*  V86モードではA20が常に有効なため、BIOS ROMコード(FD80:xxxx)       */
-    /*  がリニア 0x100000+ にアクセスしてしまう。                            */
-    /*  既存の paging_set_page() で HMA帯 (0x100000-0x10FFFF) を         */
-    /*  バッキングRAMの先頭にリマップし、A20 OFFのラップを実現する。     */
+    /*  リアルモードでは linear 0xFFFFF を超えるアドレスが 0x00000 に       */
+    /*  ラップアラウンドするが、V86モードではA20ラインが有効なため          */
+    /*  ラップが発生しない。                                                */
     /*                                                                      */
-    /*  注意: これはマスターPTを直接書き換えるため、V86セッション中        */
-    /*  のみ有効。teardownで復元必須。                                     */
-    /*  カーネルコードは 0x100000-0x10FFFF の16ページのみ上書きされ    */
-    /*  るが、Ring 0 の ISRエントリポイントはそれより上位アドレス      */
-    /*  にあるため影響なし。                                                 */
+    /*  0x100000-0x10FFFF はカーネルコード領域 (KERNEL_LOAD_ADDR) と       */
+    /*  重なるため、ページテーブルでのリマップは不可。                      */
+    /*  代わりに page_fault_handler (isr_handlers.c) で V86モードからの    */
+    /*  0x100000+ へのアクセスを検出し、CS:IP を 20ビットマスクして         */
+    /*  ラップアラウンドを実現する。                                        */
     /* ================================================================== */
-    {
-        int pi;
-        for (pi = 0; pi < 16; pi++) {
-            u32 virt = 0x100000 + (u32)pi * PAGE_SIZE;
-            u32 phys = v86_backing_phys + (u32)pi * PAGE_SIZE;
-            paging_set_page(virt, phys, PTE_PRESENT | PTE_RW | PTE_USER);
-        }
-        v86_a20_state = 0;
-    }
 
     /* PDE[0] (0x00000-0x3FFFFF) に PTE_USER を設定 */
     paging_pde_set_flags(0x00000, PTE_USER);
@@ -771,16 +758,6 @@ void v86_mem_teardown(void)
         paging_set_page(addr, addr, PTE_PRESENT);
     }
 
-    /* HMA帯 (0x100000-0x10FFFF) をカーネルコードに復元 (アイデンティティマップ) */
-    {
-        int pi;
-        for (pi = 0; pi < 16; pi++) {
-            u32 virt = 0x100000 + (u32)pi * PAGE_SIZE;
-            paging_set_page(virt, virt, PTE_PRESENT | PTE_RW);
-        }
-        v86_a20_state = 0;
-    }
-
     /* PDE[0] から PTE_USER を除去 */
     paging_pde_clear_flags(0x00000, PTE_USER);
 
@@ -798,40 +775,6 @@ void v86_mem_teardown(void)
         pgalloc_free_n(v86_backing_phys, V86_BACKING_PAGES);
         v86_backing_phys = 0;
     }
-}
-
-/* ======================================================================== */
-/*  v86_a20_set — A20ライン状態を変更 (PTEリマップ方式)                      */
-/*                                                                          */
-/*  enable=0 (A20 OFF): 0x100000-0x10FFFF → backing+0x00000 (ラップ)       */
-/*  enable=1 (A20 ON):  Phase 1 では未サポート → ラップを維持              */
-/* ======================================================================== */
-void v86_a20_set(int enable)
-{
-    int pi;
-
-    if (v86_backing_phys == 0) return;  /* V86未初期化 */
-
-    if (enable) {
-        /* Phase 1: A20 ON は未サポート。ラップを維持。 */
-        kprintf(0xA1, "[V86] A20 ON requested (not yet supported)\n");
-    } else {
-        /* A20 OFF: HMAをバッキングRAMの先頭にリマップ (ラップ) */
-        for (pi = 0; pi < 16; pi++) {
-            u32 virt = 0x100000 + (u32)pi * PAGE_SIZE;
-            u32 phys = v86_backing_phys + (u32)pi * PAGE_SIZE;
-            paging_set_page(virt, phys, PTE_PRESENT | PTE_RW | PTE_USER);
-        }
-    }
-    v86_a20_state = enable;
-}
-
-/* ======================================================================== */
-/*  v86_a20_get — A20ライン状態を取得 (0=OFF, 1=ON)                         */
-/* ======================================================================== */
-int v86_a20_get(void)
-{
-    return v86_a20_state;
 }
 
 /* ======================================================================== */

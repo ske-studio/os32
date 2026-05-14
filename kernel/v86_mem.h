@@ -32,8 +32,4 @@ void v86_restore_screen(void);
 void v86_tvram_save(void);
 void v86_tvram_restore(void);
 
-/* A20ラインエミュレーション (paging_set_page でHMA帯をリマップ) */
-void v86_a20_set(int enable);
-int  v86_a20_get(void);
-
 #endif /* V86_MEM_H */
