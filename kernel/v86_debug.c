@@ -378,6 +378,30 @@ static void write_section_hw(void)
             }
         }
         wb_nl();
+
+        /* FDCデバッグカウンタ */
+        {
+            extern u32 fdc_sense_count;
+            extern u8  fdc_last_sense_st0;
+            extern u8  fdc_last_sense_ias;
+            extern u32 fdc_sync_rw_count;
+            extern u32 fdc_fifo_read_ok;
+            extern u32 fdc_fifo_read_idle;
+            extern u32 fdc_fifo_read_nodata;
+            extern u8  fdc_last_read_ridx;
+            extern u8  fdc_last_read_rtot;
+
+            wb_str("  SENSE INT count: "); wb_dec(fdc_sense_count); wb_nl();
+            wb_str("  Last SENSE st0 : 0x"); wb_hex8(fdc_last_sense_st0); wb_nl();
+            wb_str("  Last SENSE ias : "); wb_dec((u32)fdc_last_sense_ias); wb_nl();
+            wb_str("  sync_rw count  : "); wb_dec(fdc_sync_rw_count); wb_nl();
+            wb_str("  FIFO read OK   : "); wb_dec(fdc_fifo_read_ok); wb_nl();
+            wb_str("  FIFO read idle : "); wb_dec(fdc_fifo_read_idle); wb_nl();
+            wb_str("  FIFO read nodat: "); wb_dec(fdc_fifo_read_nodata); wb_nl();
+            wb_str("  Last ridx/rtot : "); wb_dec((u32)fdc_last_read_ridx);
+            wb_str("/"); wb_dec((u32)fdc_last_read_rtot); wb_nl();
+        }
+        wb_nl();
     }
 
     wb_flush();
@@ -1186,22 +1210,25 @@ void v86_debug_dump_memory_pre(void)
     }
     wb_nl();
 
-    /* FDCポーリングルーチン: A20ラップで FD80:0280 → 0x0A80
-     * GP TRACEの FD80:02EC 等のコードを特定するためのダンプ */
-    p = v86_phys_addr(0x0000, 0x0A80);
-    if (paging_is_present((u32)p)) {
-        wb_str("[0000:0A80] (FDC polling routine, A20 wrap of FD80:0280, 128 bytes)\n");
-        for (di = 0; di < 128; di++) {
+    /* BIOS ROM FDCルーチン: 物理アドレス 0xFD800 + offset
+     * GP TRACEの FD80:0169, FD80:0286, FD80:02EC 等のコードを逆アセンブルするためのダンプ
+     * BIOS ROMは物理メモリに直接マップされている (V86バッキングRAMではない) */
+    p = (u8 *)0xFD800UL;  /* BIOS ROM物理ベース */
+    if (paging_is_present((u32)p + 0x0100)) {
+        wb_str("[FD80:0100] (BIOS ROM FDC routines, 512 bytes, phys=0xFD900)\n");
+        for (di = 0; di < 512; di++) {
             if ((di % 16) == 0) {
                 wb_str("  ");
-                wb_hex16((u16)(0x0A80 + di));
+                wb_hex16((u16)(0x0100 + di));
                 wb_str(": ");
             }
-            wb_hex8(p[di]); wb_ch(' ');
+            wb_hex8(p[0x0100 + di]); wb_ch(' ');
             if ((di % 16) == 15) wb_nl();
             if (wpos > WBUF_SIZE - 80) wb_flush();
         }
         wb_nl();
+    } else {
+        wb_str("[FD80:0100] BIOS ROM page not present\n");
     }
 
     /* 第2ステージ: 0x0160:0x0000-0x02FF — エントリ+CLI周辺 */

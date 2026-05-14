@@ -42,6 +42,17 @@
 #include "kstring.h"   /* kmemset */
 #include "vfs.h"       /* vfs_seek / vfs_write_fd (FORMAT実装用) */
 
+/* デバッグカウンタ (GPハンドラ内kprintf禁止のためカウンタで記録) */
+u32 fdc_sense_count;
+u8  fdc_last_sense_st0;
+u8  fdc_last_sense_ias;
+u32 fdc_sync_rw_count;
+u32 fdc_fifo_read_ok;      /* FIFO読み成功 (RESULT状態でデータ返却) */
+u32 fdc_fifo_read_idle;    /* FIFO読み: IDLE状態で0xFF返却 */
+u32 fdc_fifo_read_nodata;  /* FIFO読み: idx>=totalで0xFF返却 */
+u8  fdc_last_read_ridx;    /* 最後FIFO読み時のresult_idx */
+u8  fdc_last_read_rtot;    /* 最後FIFO読み時のresult_total */
+
 /* ====================================================================== */
 /*  FDC フェーズ定数                                                       */
 /* ====================================================================== */
@@ -488,7 +499,15 @@ static void fdc_execute_command(void)
         }
         vfdc.result_buf[0] = vfdc.st0;
         vfdc.result_buf[1] = vfdc.pcn;
-        vfdc.result_total  = 2;
+        /* uPD765A仕様: ST0=0x80 (Invalid) のときはST0のみ (1バイト)。
+         * 正常時はST0+PCNの2バイト。BIOSはST0=0x80なら即exitし
+         * PCNを読まないため、result_total=2だとRESULT状態が残留して
+         * 次のSENSE INTERRUPTで残留PCNがST0として誤解釈される。 */
+        vfdc.result_total = (vfdc.st0 == 0x80U) ? 1 : 2;
+        /* デバッグ: SENSE INT実行をカウンタに記録 (GPハンドラ内kprintf禁止) */
+        fdc_sense_count++;
+        fdc_last_sense_st0 = vfdc.st0;
+        fdc_last_sense_ias = (u8)vfdc.irq_after_seek;
         break;
 
     /* READ ID (0x0A) */
@@ -637,10 +656,13 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
         } else {
             /* ゲストがリザルトを読み出す
              * NP21/W fdc_dataread() FDCEVENT_BUFSEND 準拠 */
+            fdc_last_read_ridx = vfdc.result_idx;
+            fdc_last_read_rtot = vfdc.result_total;
             if ((vfdc.status & (VFDC_MSR_RQM | VFDC_MSR_DIO))
                 == (VFDC_MSR_RQM | VFDC_MSR_DIO)) {
                 if (vfdc.result_idx < vfdc.result_total) {
                     *val = vfdc.result_buf[vfdc.result_idx++];
+                    fdc_fifo_read_ok++;
                     if (vfdc.result_idx >= vfdc.result_total) {
                         /* 全リザルト返却完了 → IDLE
                          * NP21/W fdc_dataread(): ドライブビジービットもクリア
@@ -650,9 +672,11 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
                     }
                 } else {
                     *val = 0xFF;
+                    fdc_fifo_read_nodata++;
                 }
             } else {
                 *val = 0xFF;
+                fdc_fifo_read_idle++;
             }
         }
         return 1;
@@ -725,6 +749,7 @@ void v86_fdc_sync_rw(u8 cyl, u8 head, u8 sect_r, u8 sec_n)
     vfdc.result_total = 0;
 
     /* IRQ11 (2HD FDD割り込み) をペンディング */
+    fdc_sync_rw_count++;
     v86_set_pending_irq(11);
 }
 
