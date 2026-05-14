@@ -38,6 +38,7 @@
 #include "fdc.h"
 #include "loop_dev.h"  /* loop_dev_read_chs / write_chs */
 #include "io.h"
+#include "kprintf.h"
 #include "kstring.h"   /* kmemset */
 #include "vfs.h"       /* vfs_seek / vfs_write_fd (FORMAT実装用) */
 
@@ -85,6 +86,7 @@ static const struct fdc_cmd_info fdc_cmd_table[] = {
 /* ====================================================================== */
 static struct {
     u8  phase;           /* FDC_PHASE_* */
+    u8  status;          /* MSR直書き (NP21/W fdc.status 互換) */
     u8  cmd;             /* 現在のコマンドコード (下位5bit) */
     u8  cmd_buf[9];      /* コマンドパラメータバッファ (コマンドバイト含む) */
     u8  cmd_idx;         /* 受信済みバイト数 (コマンドバイト含む) */
@@ -99,6 +101,40 @@ static struct {
     u8  ctrl;            /* CTRL レジスタ (0x94) の最後の書き込み値 */
     int irq_after_seek;  /* RECALIBRATE/SEEK後に SENSE INTERRUPT が必要 */
 } vfdc;
+
+/* ====================================================================== */
+/*  MSRデバッグ: 最新32回のMSRリード値を記録するリングバッファ            */
+/*  V86 #GPハンドラ内からシリアルI/Oを行うと再帰ハングするため、          */
+/*  メモリ上に記録しdiagダンプ時に出力する方式。                          */
+/* ====================================================================== */
+#define FDC_MSR_LOG_SIZE 32
+static struct {
+    u8  status;
+    u8  phase;
+} fdc_msr_log[FDC_MSR_LOG_SIZE];
+static u32 fdc_msr_log_idx = 0;
+static u32 fdc_msr_log_total = 0;
+
+/* v86_fdc_get_msr_log — diagダンプ用: MSRログを返す */
+void v86_fdc_get_msr_log(u8 *out_status, u8 *out_phase,
+                          u32 *out_total, u32 *out_idx)
+{
+    u32 i;
+    for (i = 0; i < FDC_MSR_LOG_SIZE; i++) {
+        out_status[i] = fdc_msr_log[i].status;
+        out_phase[i]  = fdc_msr_log[i].phase;
+    }
+    *out_total = fdc_msr_log_total;
+    *out_idx   = fdc_msr_log_idx;
+}
+
+/* v86_fdc_get_status — 現在のFDC状態を返す */
+void v86_fdc_get_state(u8 *out_status, u8 *out_phase, u8 *out_drv)
+{
+    *out_status = vfdc.status;
+    *out_phase  = vfdc.phase;
+    *out_drv    = vfdc.drv;
+}
 
 /* ====================================================================== */
 /*  ヘルパー: コマンドテーブル検索                                         */
@@ -476,11 +512,16 @@ static void fdc_execute_command(void)
         break;
     }
 
-    /* リザルトがあれば RESULT フェーズへ、なければ IDLE に戻る */
+    /* リザルトがあれば RESULT フェーズへ、なければ IDLE に戻る
+     * NP21/W準拠: status も同期更新する */
     if (vfdc.result_total > 0) {
         vfdc.phase = FDC_PHASE_RESULT;
+        vfdc.status &= 0x0FU;
+        vfdc.status |= (u8)(1U << vfdc.drv);
+        vfdc.status |= VFDC_MSR_RQM | VFDC_MSR_BUSY | VFDC_MSR_DIO;
     } else {
         vfdc.phase = FDC_PHASE_IDLE;
+        vfdc.status = VFDC_MSR_RQM;
     }
 }
 
@@ -491,6 +532,7 @@ void v86_fdc_virt_init(void)
 {
     int i;
     vfdc.phase        = FDC_PHASE_IDLE;
+    vfdc.status       = VFDC_MSR_RQM;  /* 初期状態: RQM=1 */
     vfdc.cmd          = 0;
     vfdc.cmd_idx      = 0;
     vfdc.cmd_total    = 0;
@@ -522,28 +564,13 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
     /* ---------------------------------------------------------------- */
     case 0x90:
         if (!is_write) {
-            u8 msr = 0;
-            switch (vfdc.phase) {
-            case FDC_PHASE_IDLE:
-                msr = VFDC_MSR_RQM; /* RQM=1, DIO=0 (CPU→FDC方向) */
-                break;
-            case FDC_PHASE_COMMAND:
-                /* コマンドパラメータ受信中: RQM=1, BUSY=1 */
-                msr = VFDC_MSR_RQM | VFDC_MSR_BUSY;
-                break;
-            case FDC_PHASE_EXECUTE:
-                /* データ転送中: RQM=0, BUSY=1 */
-                msr = VFDC_MSR_BUSY;
-                break;
-            case FDC_PHASE_RESULT:
-                /* リザルト読み出し中: RQM=1, DIO=1, BUSY=1 */
-                msr = VFDC_MSR_RQM | VFDC_MSR_DIO | VFDC_MSR_BUSY;
-                break;
-            default:
-                msr = VFDC_MSR_RQM;
-                break;
-            }
-            *val = msr;
+            /* NP21/W fdc_i90() 準拠: vfdc.status をそのまま返す */
+            *val = vfdc.status;
+            /* MSRリード値をリングバッファに記録 (diagダンプ用) */
+            fdc_msr_log[fdc_msr_log_idx].status = vfdc.status;
+            fdc_msr_log[fdc_msr_log_idx].phase  = vfdc.phase;
+            fdc_msr_log_idx = (fdc_msr_log_idx + 1) % FDC_MSR_LOG_SIZE;
+            fdc_msr_log_total++;
         }
         return 1;
 
@@ -580,6 +607,7 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
                     fdc_execute_command();
                 } else {
                     vfdc.phase = FDC_PHASE_COMMAND;
+                    vfdc.status = VFDC_MSR_RQM | VFDC_MSR_BUSY;
                 }
                 break;
             }
@@ -601,15 +629,23 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
                 break;
             }
         } else {
-            /* ゲストがリザルトを読み出す */
-            if (vfdc.phase == FDC_PHASE_RESULT && vfdc.result_idx < vfdc.result_total) {
-                *val = vfdc.result_buf[vfdc.result_idx++];
-                if (vfdc.result_idx >= vfdc.result_total) {
-                    /* 全リザルト返却完了 → IDLEに戻る */
-                    vfdc.phase = FDC_PHASE_IDLE;
+            /* ゲストがリザルトを読み出す
+             * NP21/W fdc_dataread() FDCEVENT_BUFSEND 準拠 */
+            if ((vfdc.status & (VFDC_MSR_RQM | VFDC_MSR_DIO))
+                == (VFDC_MSR_RQM | VFDC_MSR_DIO)) {
+                if (vfdc.result_idx < vfdc.result_total) {
+                    *val = vfdc.result_buf[vfdc.result_idx++];
+                    if (vfdc.result_idx >= vfdc.result_total) {
+                        /* 全リザルト返却完了 → IDLE
+                         * NP21/W fdc_dataread(): ドライブビジービットもクリア
+                         * status &= ~(1 << us); status &= ~(DIO|CB); status |= RQM; */
+                        vfdc.phase = FDC_PHASE_IDLE;
+                        vfdc.status = VFDC_MSR_RQM; /* 0x80: RQM only, 全ビットクリア */
+                    }
+                } else {
+                    *val = 0xFF;
                 }
             } else {
-                /* データなし */
                 *val = 0xFF;
             }
         }
@@ -646,4 +682,70 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
     default:
         return 0;
     }
+}
+
+/* ====================================================================== */
+/*  v86_fdc_sync_rw — INT 1Bh READ/WRITE HLE後のFDC同期                   */
+/*                                                                          */
+/*  NP21/W fdcsend_success7() 準拠。                                         */
+/*  FDCを BUFSEND (MSR=RQM|DIO|CB + ドライブビジー) に設定し、          */
+/*  リザルト7バイトをバッファに格納。ゲストが0x92ポートで読み取ると      */
+/*  自動でIDLEに遷移。IRQ11もペンディングする。                         */
+/* ====================================================================== */
+void v86_fdc_sync_rw(u8 cyl, u8 head, u8 sect_r, u8 sec_n)
+{
+    /* リザルトバッファ設定 (NP21/W fdcsend_success7 と同一) */
+    vfdc.result_buf[0] = (vfdc.hd << 2) | vfdc.drv;  /* ST0: HD|US */
+    vfdc.result_buf[1] = 0x00;                        /* ST1: 正常 */
+    vfdc.result_buf[2] = 0x00;                        /* ST2: 正常 */
+    vfdc.result_buf[3] = cyl;                          /* C */
+    vfdc.result_buf[4] = head;                         /* H */
+    vfdc.result_buf[5] = sect_r;                       /* R */
+    vfdc.result_buf[6] = sec_n;                        /* N */
+    vfdc.result_idx   = 0;
+    vfdc.result_total = 7;
+
+    /* FDCステートを RESULT (BUFSEND) に設定
+     * NP21/W: fdc.status &= 0x0f; fdc.status |= (1 << us);
+     *         fdc.status |= RQM | CB | DIO;
+     * → MSR = 0xD1 (ドライブ0の場合) */
+    vfdc.phase = FDC_PHASE_RESULT;
+    vfdc.status &= 0x0FU;
+    vfdc.status |= (u8)(1U << vfdc.drv);
+    vfdc.status |= VFDC_MSR_RQM | VFDC_MSR_BUSY | VFDC_MSR_DIO;
+
+    /* PCN更新 */
+    vfdc.pcn = cyl;
+    vfdc.hd  = head;
+
+    /* IRQ11 (2HD FDD割り込み) をペンディング
+     * NP21/W: fdc_interrupt() → 512clk後に pic_setirq(0x0b) */
+    v86_set_pending_irq(11);
+}
+
+/* ====================================================================== */
+/*  v86_fdc_sync_seek — INT 1Bh SEEK/RECALIBRATE HLE後のFDC同期            */
+/*                                                                          */
+/*  NP21/W bios_fdresult(FDCBIOS_SEEKSUCCESS) 準拠。                       */
+/*  SEEKはリザルトフェーズを持たず、SENSE INTERRUPTでST0(SE)+PCNを返す。   */
+/*  NP21/W: fdc.stat[us] |= SE; fdc_interrupt();                            */
+/*          fdc.event = NEUTRAL; fdc.status = RQM;                          */
+/* ====================================================================== */
+void v86_fdc_sync_seek(u8 cyl)
+{
+    /* SEEK完了: SENSE INTERRUPTで返すST0にSEビットをセット */
+    vfdc.st0 = 0x20U | (vfdc.hd << 2) | vfdc.drv;  /* SE=1, HD, US */
+    vfdc.pcn = cyl;
+    vfdc.irq_after_seek = 1;
+
+    /* FDCステートを IDLE (NEUTRAL) に設定
+     * NP21/W: fdc.event = FDCEVENT_NEUTRAL; fdc.status = FDCSTAT_RQM;
+     * SEEKはRESULTフェーズがないので MSR=0x80 (RQM only) */
+    vfdc.phase  = FDC_PHASE_IDLE;
+    vfdc.status = VFDC_MSR_RQM;
+    vfdc.result_idx   = 0;
+    vfdc.result_total = 0;
+
+    /* IRQ11 ペンディング */
+    v86_set_pending_irq(11);
 }

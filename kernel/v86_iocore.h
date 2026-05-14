@@ -65,4 +65,8 @@ int  v86_iocore_out16(u16 port, u16 val);
 /* リブート検知 (F0hポート) — 16bit OUTで使用 */
 int  v86_iocore_is_reboot(u16 port, u8 val);
 
+/* I/Oポート分類判定 (統計記録用)
+ * 戻り値: 2=VIRT, 3=PROTECTED, 4=FALLTHROUGH */
+u8   v86_iocore_classify(u16 port, int is_write);
+
 #endif /* V86_IOCORE_H */

@@ -15,6 +15,7 @@
 #include "v86_pic.h"
 #include "v86_pit.h"
 #include "v86_dma.h"
+#include "v86_fdc.h"
 #include "v86_vsync.h"
 #include "vfs.h"
 #include "kprintf.h"
@@ -346,6 +347,39 @@ static void write_section_hw(void)
     wb_str("[PIT (8253A)]\n");
     wb_str("  IRQ divisor    : "); wb_dec(v86_pit_get_irq_divisor()); wb_nl();
     wb_nl();
+
+    /* FDC MSRリードログ */
+    {
+        u8 msr_s[32], msr_p[32];
+        u32 msr_total, msr_idx;
+        u8 cur_status, cur_phase, cur_drv;
+        u32 mi, mn, mstart;
+
+        v86_fdc_get_state(&cur_status, &cur_phase, &cur_drv);
+        wb_str("[FDC (uPD765A)]\n");
+        wb_str("  Current status : 0x"); wb_hex8(cur_status); wb_nl();
+        wb_str("  Current phase  : "); wb_dec((u32)cur_phase); wb_nl();
+        wb_str("  Current drive  : "); wb_dec((u32)cur_drv); wb_nl();
+        wb_nl();
+
+        v86_fdc_get_msr_log(msr_s, msr_p, &msr_total, &msr_idx);
+        wb_str("  MSR read log (last 32, total=");
+        wb_dec(msr_total); wb_str("):\n");
+        if (msr_total > 0) {
+            mn = (msr_total < 32) ? msr_total : 32;
+            mstart = (msr_total <= 32) ? 0 : msr_idx;
+            for (mi = 0; mi < mn; mi++) {
+                u32 midx = (mstart + mi) % 32;
+                wb_str("    #"); wb_dec(mi);
+                wb_str(": status=0x"); wb_hex8(msr_s[midx]);
+                wb_str(" phase="); wb_dec((u32)msr_p[midx]);
+                wb_nl();
+                if (wpos > WBUF_SIZE - 60) wb_flush();
+            }
+        }
+        wb_nl();
+    }
+
     wb_flush();
 }
 
@@ -461,8 +495,8 @@ static void write_section_gptrace(void)
     tn = (total < V86_TRACE_SIZE) ? total : V86_TRACE_SIZE;
     tstart = (total <= V86_TRACE_SIZE) ? 0 : tidx;
 
-    wb_str("  #     Tick      CS:IP       Op  INT#  AX    CX\n");
-    wb_str("  ----  --------  ----------  --  ----  ----  ----\n");
+    wb_str("  #     Tick      CS:IP       Op  INT#  AX    CX    DX\n");
+    wb_str("  ----  --------  ----------  --  ----  ----  ----  ----\n");
 
     for (ti = 0; ti < tn; ti++) {
         u32 tix = (tstart + ti) % V86_TRACE_SIZE;
@@ -475,7 +509,8 @@ static void write_section_gptrace(void)
         wb_hex8(te->opcode); wb_str("  ");
         wb_hex8(te->intno); wb_str("    ");
         wb_hex8(te->ah); wb_hex8(te->al); wb_str("  ");
-        wb_hex16(te->cx);
+        wb_hex16(te->cx); wb_str("  ");
+        wb_hex16(te->reserved);
         wb_nl();
         if (wpos > WBUF_SIZE - 100) wb_flush();
     }
@@ -1150,6 +1185,24 @@ void v86_debug_dump_memory_pre(void)
         if (wpos > WBUF_SIZE - 80) wb_flush();
     }
     wb_nl();
+
+    /* FDCポーリングルーチン: A20ラップで FD80:0280 → 0x0A80
+     * GP TRACEの FD80:02EC 等のコードを特定するためのダンプ */
+    p = v86_phys_addr(0x0000, 0x0A80);
+    if (paging_is_present((u32)p)) {
+        wb_str("[0000:0A80] (FDC polling routine, A20 wrap of FD80:0280, 128 bytes)\n");
+        for (di = 0; di < 128; di++) {
+            if ((di % 16) == 0) {
+                wb_str("  ");
+                wb_hex16((u16)(0x0A80 + di));
+                wb_str(": ");
+            }
+            wb_hex8(p[di]); wb_ch(' ');
+            if ((di % 16) == 15) wb_nl();
+            if (wpos > WBUF_SIZE - 80) wb_flush();
+        }
+        wb_nl();
+    }
 
     /* 第2ステージ: 0x0160:0x0000-0x02FF — エントリ+CLI周辺 */
     p = v86_phys_addr(0x0160, 0x0000);

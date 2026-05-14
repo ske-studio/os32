@@ -479,7 +479,13 @@ int v86_gp_handler(u32 *regs)
             e->ip = regs[V86_REG_EIP];
             e->opcode = opcode;
             e->cx = (u16)(regs[V86_REG_ECX] & 0xFFFF);
-            e->reserved = 0;
+            /* I/O命令(EC/EE=IN/OUT DX)のときDX値を記録、それ以外は0 */
+            if (opcode == 0xEC || opcode == 0xEE ||
+                opcode == 0xED || opcode == 0xEF) {
+                e->reserved = (u16)(regs[V86_REG_EDX] & 0xFFFF);
+            } else {
+                e->reserved = 0;
+            }
             if (opcode == 0xCD) {
                 e->intno = trace_intno;
                 e->ah = (regs[V86_REG_EAX] >> 8) & 0xFF;
@@ -837,7 +843,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE4: {
         u8 port = ip[1];
-        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 0, v86_iocore_classify(port, 0));
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
@@ -850,7 +856,7 @@ int v86_gp_handler(u32 *regs)
     case 0xE6: {
         u8 port = ip[1];
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
-        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 1, v86_iocore_classify(port, 1));
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
@@ -873,7 +879,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEC: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 0, v86_iocore_classify(port, 0));
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFFFF00UL)
                            | v86_in8_checked(port);
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
@@ -886,7 +892,7 @@ int v86_gp_handler(u32 *regs)
     case 0xEE: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
         u8 val = (u8)(regs[V86_REG_EAX] & 0xFF);
-        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 1, v86_iocore_classify(port, 1));
         /* ゲストからの自発的なV86終了要求 (脱出トラップ) */
         if (port == 0xFE) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
@@ -909,7 +915,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE5: {
         u16 port = (u16)ip[1];
-        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 0, v86_iocore_classify(port, 0));
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
         break;
@@ -921,7 +927,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xE7: {
         u16 port = (u16)ip[1];
-        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 1, v86_iocore_classify(port, 1));
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
@@ -936,7 +942,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xED: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port, 0, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 0, v86_iocore_classify(port, 0));
         regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF0000UL) | v86_inw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF));
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
         break;
@@ -948,7 +954,7 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xEF: {
         u16 port = (u16)(regs[V86_REG_EDX] & 0xFFFF);
-        v86_io_stat_record(port, 1, V86_IO_CLASS_FALLTHROUGH);
+        v86_io_stat_record(port, 1, v86_iocore_classify(port, 1));
         if (v86_outw_checked(port, (u16)(regs[V86_REG_EAX] & 0xFFFF))) {
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
             return 1;  /* V86終了 (リブート検知) */
@@ -1092,6 +1098,45 @@ v86_gp_end:
                 v86_gp_inject_irq(regs, handler_seg, handler_off);
             }
         }
+        /* スレーブPIC IRQ注入 (IRQ 8-15)
+         * PC-98: スレーブPICベクタ = IRQ + 0x08
+         *   IRQ8=INT 10h, IRQ9=INT 11h, IRQ10=INT 12h,
+         *   IRQ11=INT 13h (2HD FDD), IRQ12=INT 14h (FM音源),
+         *   IRQ13=INT 15h (マウス) */
+        {
+            int irq;
+            for (irq = 8; irq < 16; irq++) {
+                if (v86_pending_irq & (1U << irq)) {
+                    u8 isr_slave = v86_pic_get_isr(1);
+                    u8 isr_master = v86_pic_get_isr(0);
+                    int slave_bit = irq - 8;
+                    int int_no = irq + 0x08; /* PC-98: スレーブベース=0x10, IRQ8=INT 10h */
+
+                    /* スレーブISR未処理 + マスタIRQ7(カスケード)未処理なら注入 */
+                    if (!(isr_slave & (1 << slave_bit)) && !(isr_master & (1 << 7))) {
+                        u32 *ivt = (u32 *)v86_linear(0, 0);
+                        u16 handler_off = (u16)(ivt[int_no] & 0xFFFF);
+                        u16 handler_seg = (u16)(ivt[int_no] >> 16);
+                        int is_dummy = V86_IS_DUMMY_IVT(ivt[int_no]);
+
+                        v86_pending_irq &= ~(1U << irq);
+
+                        if (!is_dummy) {
+                            /* スレーブISRにビットをセット */
+                            v86_pic_set_isr(1, isr_slave | (u8)(1 << slave_bit));
+                            /* マスタIRQ7 (カスケード) ISRもセット */
+                            v86_pic_set_isr(0, isr_master | (u8)(1 << 7));
+                        }
+                        /* IRRクリア */
+                        v86_pic_set_irr(1, v86_pic_get_irr(1) & ~(u8)(1 << slave_bit));
+                        v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)(1 << 2));
+
+                        v86_gp_inject_irq(regs, handler_seg, handler_off);
+                        break; /* 1回の#GPでは1つのIRQのみ注入 */
+                    }
+                }
+            }
+        }
     }
 
     return 0;
@@ -1116,9 +1161,20 @@ void v86_set_pending_irq(int irq_no)
 {
     u8 irr;
     v86_pending_irq |= (1U << irq_no);
-    /* §4 IRR 更新: ゲストの OCW3=0x0A 読み出しで正しい値が返るようにする */
-    irr = v86_pic_get_irr(0);
-    v86_pic_set_irr(0, irr | (u8)(1 << irq_no));
+
+    if (irq_no < 8) {
+        /* マスタPIC (IRQ 0-7): IRRのビットをセット */
+        irr = v86_pic_get_irr(0);
+        v86_pic_set_irr(0, irr | (u8)(1 << irq_no));
+    } else {
+        /* スレーブPIC (IRQ 8-15):
+         * 1. スレーブPICのIRRにビットをセット
+         * 2. マスタPICのIRQ2 (カスケードライン) もセット */
+        irr = v86_pic_get_irr(1);
+        v86_pic_set_irr(1, irr | (u8)(1 << (irq_no - 8)));
+        irr = v86_pic_get_irr(0);
+        v86_pic_set_irr(0, irr | (u8)(1 << 2)); /* IRQ2 = カスケード */
+    }
 }
 
 /* ====================================================================== */

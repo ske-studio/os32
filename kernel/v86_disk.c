@@ -24,6 +24,7 @@
 #include "v86_disk.h"
 #include "v86.h"
 #include "v86_mem.h"
+#include "v86_fdc.h"
 #include "kstring.h"
 #include "kprintf.h"
 #include "io.h"
@@ -410,6 +411,17 @@ int v86_bios_int1b(u32 *regs)
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
             log_entry->status = 0x00;
+            /* FDCステートマシン同期: SEEK完了後
+             * NP21/W: fdc.stat[us]|=SE; fdc_interrupt();
+             *         event=NEUTRAL; status=RQM */
+            v86_fdc_sync_seek(
+                (u8)(regs[V86_REG_ECX] & 0xFF));
+            /* DISK_INTフラグセット (NP21/W bios1b.c 準拠)
+             * BDA 0x055E (2HD) のドライブビットをセット */
+            {
+                u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+                *disk_int |= (u8)(0x01 << (regs[V86_REG_EAX] & 0x03));
+            }
             break;
 
         case 0x03:
@@ -776,6 +788,15 @@ int v86_bios_int1b(u32 *regs)
                 result_ptr[6] = sector_len;    /* N: セクタ長コード */
                 result_ptr[7] = final_cyl;     /* NCN: 現在シリンダ */
             }
+
+            /* ★ FDCステートマシン同期 (NP21/W fdcsend_success7 準拠) */
+            v86_fdc_sync_rw(
+                final_cyl, final_head, final_sect_r, sector_len);
+            /* DISK_INTフラグセット */
+            {
+                u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+                *disk_int |= (u8)(0x01 << (regs[V86_REG_EAX] & 0x03));
+            }
             break;
         }
 
@@ -970,6 +991,15 @@ int v86_bios_int1b(u32 *regs)
                 rp[6] = wr_seclen;
                 rp[7] = wfinal_cyl;
             }
+
+            /* ★ FDCステートマシン同期: WRITE完了 (NP21/W fdcsend_success7 準拠) */
+            v86_fdc_sync_rw(
+                wfinal_cyl, wfinal_head, wfinal_sect_r, wr_seclen);
+            /* DISK_INTフラグセット */
+            {
+                u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+                *disk_int |= (u8)(0x01 << (regs[V86_REG_EAX] & 0x03));
+            }
             break;
         }
 
@@ -980,6 +1010,14 @@ int v86_bios_int1b(u32 *regs)
             log_entry->status = 0x00;
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
+            /* FDCステートマシン同期: RECALIBRATE完了後
+             * NP21/W: SEEKと同じ処理 (NEUTRAL + IRQ11) */
+            v86_fdc_sync_seek(0);
+            /* DISK_INTフラグセット */
+            {
+                u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+                *disk_int |= (u8)(0x01 << (regs[V86_REG_EAX] & 0x03));
+            }
             break;
 
 

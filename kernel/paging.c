@@ -22,7 +22,8 @@
 /*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
 /*                                                                          */
 /*  [拡張メモリ]                                                            */
-/*    0x100000 - 0x1FFFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
+/*    0x100000 - 0x10FFFF : R/W  (V86 A20ラップ領域, V86実行中のみリマップ)  */
+/*    0x110000 - 0x1FFFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
 /*    0x200000 - 0x23FFFF : R/W  (SQLite帯域: code+BSS+代替スタック)      */
 /*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
 /*    0x300000 - 0x3FFFFF : R/W  (シェル常駐帯域, ガード付き)             */

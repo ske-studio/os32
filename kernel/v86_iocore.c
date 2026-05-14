@@ -509,3 +509,30 @@ int v86_iocore_is_reboot(u16 port, u8 val)
     (void)val;
     return (port == 0xF0) ? 1 : 0;
 }
+
+/* ====================================================================== */
+/*  v86_iocore_classify — I/Oポートの分類判定                              */
+/*                                                                          */
+/*  iocoreテーブルの登録状況から分類を返す:                                */
+/*    0 = FALLTHROUGH (デフォルトハンドラ = 実HW直送)                      */
+/*    2 = VIRT        (デバイス固有ハンドラが登録済み)                     */
+/*    3 = PROTECTED   (ブロックハンドラが登録済み)                         */
+/*                                                                          */
+/*  v86.c の v86_io_stat_record() から呼ばれる。                           */
+/* ====================================================================== */
+u8 v86_iocore_classify(u16 port, int is_write)
+{
+    u8 idx = port & 0xFF;
+    if (is_write) {
+        if (v86_io_out[idx] == v86_io_blocked_out)
+            return 3; /* PROTECTED */
+        if (v86_io_out[idx] != v86_io_default_out)
+            return 2; /* VIRT */
+    } else {
+        if (v86_io_inp[idx] == v86_io_blocked_inp)
+            return 3; /* PROTECTED */
+        if (v86_io_inp[idx] != v86_io_default_inp)
+            return 2; /* VIRT */
+    }
+    return 4; /* FALLTHROUGH */
+}
