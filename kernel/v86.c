@@ -766,6 +766,29 @@ int v86_gp_handler(u32 *regs)
             u16 handler_off = (u16)(ivt[intno] & 0xFFFF);
             u16 handler_seg = (u16)(ivt[intno] >> 16);
 
+            /* ユーザー領域 INT (40h-7Fh) のトレース: INT 73h 原因追跡
+             * GPハンドラ内なので出力は行わず、静的変数に記録のみ */
+            if (intno >= 0x40 && intno <= 0x7F) {
+                static u8  v86_user_int_no;
+                static u16 v86_user_int_cs;
+                static u16 v86_user_int_ip;
+                static u16 v86_user_int_ivt_seg;
+                static u16 v86_user_int_ivt_off;
+                static int v86_user_int_count;
+                v86_user_int_no = intno;
+                v86_user_int_cs = (u16)(regs[V86_REG_CS] & 0xFFFF);
+                v86_user_int_ip = (u16)(regs[V86_REG_EIP] & 0xFFFF);
+                v86_user_int_ivt_seg = handler_seg;
+                v86_user_int_ivt_off = handler_off;
+                v86_user_int_count++;
+                (void)v86_user_int_no;
+                (void)v86_user_int_cs;
+                (void)v86_user_int_ip;
+                (void)v86_user_int_ivt_seg;
+                (void)v86_user_int_ivt_off;
+                (void)v86_user_int_count;
+            }
+
             /* ============================================================ */
             /*  §3 IVTダミー検出: 0x0050:0x0000 (ダミーIRET)の場合は       */
             /*  ゲストに CF=1 + AH=0x86 (機能未サポート) を返す。           */
