@@ -622,14 +622,19 @@ static void v86_session_run_core(void)
                 serial_puts_polled("\n");
             }
 
-            /* IPL ブートコード (オフセット 0x3E から 16バイト) */
+            /* IPL ブートコード (0x3E-0x16F, 304バイト) フルダンプ */
             {
                 volatile u8 *ipl = (volatile u8 *)0x1FC3EUL;
                 int bi;
-                serial_puts_polled("[V86-DIAG] IPL@1FC3E: ");
-                for (bi = 0; bi < 16; bi++) {
+                for (bi = 0; bi < 304; bi++) {
+                    if ((bi % 32) == 0) {
+                        serial_puts_polled("[V86-DIAG] IPL@");
+                        serial_put_hex32_polled(0x3E + bi);
+                        serial_puts_polled(": ");
+                    }
                     serial_put_hex32_polled((u32)ipl[bi]);
                     serial_puts_polled(" ");
+                    if ((bi % 32) == 31) serial_puts_polled("\n");
                 }
                 serial_puts_polled("\n");
             }
