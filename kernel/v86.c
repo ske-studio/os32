@@ -893,6 +893,22 @@ int v86_gp_handler(u32 *regs)
             }
             return 1;
         }
+        /* HLT + 保留IRQ0 + ROMハンドラ → 軽量INT 08h HLE
+         * ROM INT 08h ハンドラへの直接注入はトリプルフォルトを引き起こすため、
+         * BDA タイマーカウンタ (0040:006C) を直接インクリメントして
+         * IRQ0 を消費する。IO.SYS のタイマー待ちデッドロックを解消。 */
+        if (v86_pending_irq & (1U << 0)) {
+            u32 *ivt = (u32 *)v86_linear(0, 0);
+            u16 h_seg = (u16)(ivt[0x08] >> 16);
+            if (h_seg >= 0xF000U || V86_IS_DUMMY_IVT(ivt[0x08])) {
+                /* BDA タイマーカウンタ (0040:006C) をインクリメント */
+                volatile u32 *timer = (volatile u32 *)v86_linear(0x0040, 0x006C);
+                (*timer)++;
+                /* IRQ0 を消費 */
+                v86_pending_irq &= ~(1U << 0);
+                v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)1);
+            }
+        }
         /* 非デバッグ時: HLTは無視 (NOP扱い) — 次の命令に進む */
         break;
 
@@ -1110,7 +1126,7 @@ v86_gp_end:
                 u16 handler_off = (u16)(ivt[0x08] & 0xFFFF);
                 u16 handler_seg = (u16)(ivt[0x08] >> 16);
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x08]);
-                /* §13 ROM行きIVTインターセプト (Layer 1): BIOS ROMハンドラをスキップ */
+                /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                 if (handler_seg >= 0xF000U) is_dummy = 1;
 
                 v86_irq0_inject_count++;
@@ -1147,7 +1163,7 @@ v86_gp_end:
                 u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
                 u16 handler_seg = (u16)(ivt[0x09] >> 16);
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x09]);
-                /* §13 ROM行きIVTインターセプト (Layer 1) */
+                /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                 if (handler_seg >= 0xF000U) is_dummy = 1;
 
                 v86_pending_irq &= ~(1U << 1);
@@ -1180,7 +1196,7 @@ v86_gp_end:
                         u16 handler_off = (u16)(ivt[int_no] & 0xFFFF);
                         u16 handler_seg = (u16)(ivt[int_no] >> 16);
                         int is_dummy = V86_IS_DUMMY_IVT(ivt[int_no]);
-                        /* §13 ROM行きIVTインターセプト (Layer 1) */
+                        /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                         if (handler_seg >= 0xF000U) is_dummy = 1;
 
                         v86_pending_irq &= ~(1U << irq);
