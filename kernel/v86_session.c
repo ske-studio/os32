@@ -251,7 +251,12 @@ static void v86_reset_counters(void)
 /* ====================================================================== */
 static void v86_session_run_core(void)
 {
-    struct v86_context ctx;
+    /* §BUG-CTX D-1: ctx をスタックから BSS に移動
+     * D-3 (kprintf 無効化) ではトリプルフォルトが解消しなかった。
+     * EBP=0xEF0600 (ブートローダー設定のスタック) 付近の ctx が
+     * 何らかの原因で破壊されるため、BSS に退避して回避する。
+     * V86 は同時1セッション限定なので再入問題なし。 */
+    static struct v86_context ctx;
 
     /* §1.7 TVRAM 退避 (V86開始前に OS32 テキスト画面を保存) */
     v86_tvram_save();
