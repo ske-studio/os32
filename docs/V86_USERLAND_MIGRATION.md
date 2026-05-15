@@ -201,7 +201,7 @@ V86_EV_USER_EXIT  — Ctrl+Alt+Esc などホットキーによる脱出要求
 | Phase | 内容 | KAPI 変更 | 備考 |
 |-------|------|-----------|------|
 | **Phase 0** (本ドキュメント) | 思想・現状診断・ロードマップの確立 | なし | 本ドキュメントの作成と V86_STATUS.md への §BUG-CTX 追記 |
-| **Phase 1** | §BUG-CTX の根本原因調査 (別タスク) | なし | スタック破壊原因の特定。ユーザー化前提を整える |
+| **Phase 1** | BIOS ROM 実行排除 (方法 C) + コード整理 | なし | V86_STATUS.md §13 参照。§BUG-CTX の根本原因特定済み |
 | **Phase 2** | v86 イベント駆動 API 追加 (§5.1) | KAPI 拡張 (旧 API 並存) | カーネル/ユーザー境界線の新設。`KAPI_VERSION` インクリメント |
 | **Phase 3** | BIOS HLE の段階的ユーザー化 | KAPI 追加なし (イベント API 経由) | INT 1Bh → 18h → 1Ch → 29h → 11h → 12h の順を想定 |
 | **Phase 4** | セッション管理のユーザー化 | KAPI 追加なし | v86_session.c の Auto-Typer・終了処理を `programs/v86d/` へ |
