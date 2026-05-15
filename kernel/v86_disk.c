@@ -343,6 +343,9 @@ int v86_bios_int1b(u32 *regs)
     {
         extern int v86_debug_enabled;
         if (v86_debug_enabled) {
+            extern u32 v86_backing_phys;
+            u8 *bda_boot = v86_phys_addr(0x0000, 0x0584);
+            u8 *bda_direct = (u8 *)(v86_backing_phys + 0x584);
             kprintf(0x0A, "[V86] INT 1Bh AH=%02X AL=%02X CL=%02X CH=%02X DH=%02X DL=%02X BX=%04X ES=%04X BP=%04X\n",
                     (unsigned)func, (unsigned)daua,
                     (unsigned)(regs[V86_REG_ECX] & 0xFF),
@@ -352,6 +355,14 @@ int v86_bios_int1b(u32 *regs)
                     (unsigned)(regs[V86_REG_EBX] & 0xFFFF),
                     (unsigned)(regs[V86_REG_ES] & 0xFFFF),
                     (unsigned)(regs[V86_REG_EBP] & 0xFFFF));
+            kprintf(0x0A, "[V86] BDA phys=%02X virt=%02X backing=%X SS:SP=%04X:%04X DS=%04X AX=%04X\n",
+                    (unsigned)*bda_direct,
+                    (unsigned)*bda_boot,
+                    (unsigned)v86_backing_phys,
+                    (unsigned)(regs[V86_REG_SS] & 0xFFFF),
+                    (unsigned)(regs[V86_REG_ESP] & 0xFFFF),
+                    (unsigned)(regs[V86_REG_DS] & 0xFFFF),
+                    (unsigned)(regs[V86_REG_EAX] & 0xFFFF));
         }
     }
 
@@ -369,11 +380,20 @@ int v86_bios_int1b(u32 *regs)
     log_entry->result_offset = -99;  /* 未計算マーカー */
     log_entry->status = 0xFF;        /* 未完了マーカー */
 
-    /* DA/UAチェック: 現在マウント中のメディアの DA/UA 上位ニブルと一致するか確認 */
+    /* DA/UAチェック: ユニット番号 (下位2ビット) のみ検証
+     *
+     * PC-98 INT 1Bh の AL は DA/UA (Device Address / Unit Address) を指定する。
+     *   上位ニブル: DA (0x90=2HD/1MB, 0x30=2DD/640KB, 0x10=320KB 等)
+     *   下位2ビット: UA (ユニット番号 0-3)
+     *
+     * DOS 5 IPL は初期段階で AL=0x00 (DA=0x00) でディスク読み出しを行う場合がある。
+     * FDI イメージが 2HD (daua_high=0x90) として登録されていても、IPL は DA=0x00 で
+     * アクセスする。V86 仮想環境ではドライブが1台のみのため、UA が UNIT#0 であれば
+     * DA の不一致を許容する。 */
     {
-        const struct fdc_geom *g = v86_disk_get_geom();
-        if ((daua & 0xF0) != (u8)g->daua_high) {
-            /* 未サポートデバイス: ステータス 0x40 = DA/UAが不適当 */
+        u8 ua = daua & 0x03;
+        if (ua != 0) {
+            /* UNIT#0 以外は未サポート */
             DISK_ERROR_RETURN(log_entry, 0x40, -1, regs);
         }
     }
@@ -528,11 +548,24 @@ int v86_bios_int1b(u32 *regs)
                  *   ゲスト要求CHとジオメトリN値の不一致を許容する。
                  *   Ys等の古いゲームはBIOSの返す結果バッファN値に
                  *   依存せず独自のCH値で要求する場合がある。
-                 * RAW/FDIモード: CH != g->sec_n → セクタ未検出エラー(0xC0) */
+                 * RAW/FDIモード: CH != g->sec_n の場合、実メディアのN値を使用
+                 *   DOS 5 IPLはCH=2(512B)でハードコードされたREADを行い、
+                 *   SENSE/READ IDの結果で後続のCH値を修正する。
+                 *   V86環境ではCH不一致でも実メディアのセクタ長で読み出し、
+                 *   BXの転送バイト数で制限する。 */
                 {
                     const struct fdc_geom *g = v86_disk_get_geom();
+                    /* 要求セクタ長 (バイト) の計算
+                     * CH が実メディアの N と一致する場合は g->bps をそのまま使用。
+                     * 不一致の場合 (DOS 5 IPL が CH=2 で要求するケース) は
+                     * 要求 CH から req_bps を計算し、セクタ番号をそのまま使う。
+                     * FDI はフラットファイルなのでバイト単位でシーク可能。 */
+                    u16 req_bps;
                     if (!fdd_is_d88 && sector_len != g->sec_n) {
-                        DISK_ERROR_RETURN(log_entry, 0xC0, -2, regs);
+                        req_bps = (u16)(128U << sector_len);
+                        sector_len = g->sec_n; /* 結果バッファ用に実N値を記録 */
+                    } else {
+                        req_bps = g->bps;
                     }
 
                     /* PC-98 INT 1Bh: DL(セクタ番号)は常に1ベース → 0ベースに変換 */
@@ -554,11 +587,13 @@ int v86_bios_int1b(u32 *regs)
                     }
 
                     /* CHS → バイトオフセット変換 (RAW/FDIモード用)
-                     * D88モードでは d88_seek_sector_unit がオフセットを返すため不要 */
+                     * トラックオフセットは物理ジオメトリ (g->spt * g->bps) で計算、
+                     * トラック内セクタオフセットは req_bps (要求セクタ長) で計算。
+                     * CH不一致でもバイト精度で正しい位置から読み出せる。 */
                     if (!fdd_is_d88) {
                         byte_offset = ((u32)cylinder * g->heads + (u32)head_dh)
                                       * ((u32)g->spt * g->bps)
-                                      + (u32)sector_dl * g->bps;
+                                      + (u32)sector_dl * req_bps;
 
                         /* 範囲チェック (SPT境界外もここでキャッチされる) */
                         if (byte_offset >= fdd_image_size) {

@@ -30,6 +30,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [KAPI_NOTES.md](KAPI_NOTES.md) | KernelAPI v38 補足ノート — 機能グループ別詳細説明 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
 | [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) | ブートアーキテクチャ — VK32フォーマット、メモリマップ、HDD/FDDローダー、デプロイ |
+| [V86_USERLAND_MIGRATION.md](V86_USERLAND_MIGRATION.md) | V86 ユーザー空間化 移行プラン — カーネル/ユーザー切り分け思想・段階的移行ロードマップ |
 | [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) | SQLite カーネル統合 — アーキテクチャ、ビルド設定、VFS、IPC、障害サマリ |
 | [CROSS_COMPILER_REBUILD.md](CROSS_COMPILER_REBUILD.md) | i386-elf クロスコンパイラ soft-float 再構築手順 (見送り・参照資料) |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |

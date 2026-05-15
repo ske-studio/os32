@@ -383,16 +383,39 @@ int v86_gp_handler(u32 *regs)
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
 
+    /* ★ 最初の#GP呼び出し: V86エントリ直後のレジスタ状態をダンプ */
+    if (v86_gp_count == 1 && v86_debug_enabled) {
+        u8 *first_ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
+        kprintf(0x0A, "[V86] 1st GP: CS:IP=%04X:%04X DS=%04X SS:SP=%04X:%04X op=%02X %02X\n",
+                (unsigned)(regs[V86_REG_CS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_EIP] & 0xFFFF),
+                (unsigned)(regs[V86_REG_DS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_SS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_ESP] & 0xFFFF),
+                (unsigned)first_ip[0], (unsigned)first_ip[1]);
+    }
+
     /* IRQ受信窓の開放: GP頻度が高くIF=0時間が長くなりがちなため、
      * 入口で1度だけSTI/CLIを叩いて保留IRQを排出する。
      * (HLTは行わない — IRQ無し時の不要待ちを避けるため) */
     _enable();   /* STI — 保留IRQを即配送 */
     _disable();  /* CLI — GP本体処理は割り込み禁止で実行 */
 
+    /* ★ ISR からのタイムアウト要求を即座に拾う
+     * (ISRではフラグのみセット、ここでv86_request_exitを安全に呼ぶ) */
+    if (v86_exit_request) {
+        if (v86_timeout_cs == 0 && v86_timeout_ip == 0) {
+            v86_timeout_cs = regs[V86_REG_CS];
+            v86_timeout_ip = regs[V86_REG_EIP];
+        }
+        v86_request_exit(V86_EXIT_TIMEOUT);
+        return 1;
+    }
+
     /* タイムアウトチェック: V86_TIMEOUT_TICKS=0 なら無効 */
     if (v86_timeout_ticks &&
         ((tick_count - v86_start_tick) > v86_timeout_ticks ||
-         v86_gp_count > 500000)) {
+         v86_gp_count > 5000000)) {
         ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
         v86_last_int = *ip;
         v86_last_cs = regs[V86_REG_CS];
@@ -401,6 +424,11 @@ int v86_gp_handler(u32 *regs)
             v86_timeout_cs = regs[V86_REG_CS];
             v86_timeout_ip = regs[V86_REG_EIP];
         }
+        kprintf(0x0A, "[V86] TIMEOUT CS:IP=%04X:%04X op=%02X %02X GP#=%u\n",
+                (unsigned)(regs[V86_REG_CS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_EIP] & 0xFFFF),
+                (unsigned)ip[0], (unsigned)ip[1],
+                (unsigned)v86_gp_count);
         v86_request_exit(V86_EXIT_TIMEOUT);
         return 1;
     }
@@ -1230,6 +1258,17 @@ void v86_inject_timer_irq(u32 *regs)
 {
     u32 irq_divisor;
     v86_irq0_call_count++;
+
+    /* ★ タイムアウト検出 (最優先 — VM判定より前)
+     * GPハンドラ内の STI/CLI 窓で IRQ0 が発火した場合、
+     * EFLAGS.VM=0 のため後続の VM 判定で return される。
+     * ここでフラグだけセットすれば、次の #GP で確実に終了する。
+     * ※ ISRコンテキストからは v86_request_exit() を呼ばない
+     *   (v86_event_record がメモリ操作しトリプルフォルトの原因) */
+    if (v86_timeout_ticks &&
+        (tick_count - v86_start_tick) > v86_timeout_ticks) {
+        v86_exit_request = 1;
+    }
 
     /* V86モードからの割り込みか確認 */
     if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM) == 0) {

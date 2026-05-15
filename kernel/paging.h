@@ -45,6 +45,9 @@ void paging_init(u32 mem_kb);
 /* 指定ページの属性を変更 */
 void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
 
+/* 連続ページの属性を一括変更 (TLBフラッシュは最後に1回のみ) */
+void paging_set_page_range(u32 virt_start, u32 phys_start, int count, u32 flags);
+
 /* 指定範囲の全ページを Read-Only に */
 void paging_set_readonly(u32 start, u32 end);
 

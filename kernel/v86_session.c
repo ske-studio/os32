@@ -412,9 +412,90 @@ static void v86_session_run_core(void)
         }
     }
 
+    /* debug: V86 enter PDE/PTE check via CR3 */
+    {
+        u32 cr3_val, pde0, pte0, pte_ipl;
+        u32 *pd, *pt;
+        u32 ipl_va, ipl_pti;
+        u32 idt_base;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
+        pd = (u32 *)cr3_val;
+        pde0 = pd[0];
+        pt = (u32 *)(pde0 & 0xFFFFF000UL);
+        pte0 = pt[0];
+        /* IPL_SEG (0x1FC0) のリニアアドレス = 0x1FC00 */
+        ipl_va = 0x1FC00UL;
+        ipl_pti = (ipl_va >> 12) & 0x3FF;
+        pte_ipl = pt[ipl_pti];
+        kprintf(0xA1, "[V86] CR3=%X PDE0=%X(%s%s%s)\n",
+                cr3_val, pde0,
+                (pde0 & 1) ? "P" : "-",
+                (pde0 & 2) ? "W" : "R",
+                (pde0 & 4) ? "U" : "S");
+        kprintf(0xA1, "[V86] PTE[0]=%X(%s%s%s) PTE[IPL:%X]=%X(%s%s%s)\n",
+                pte0,
+                (pte0 & 1) ? "P" : "-",
+                (pte0 & 2) ? "W" : "R",
+                (pte0 & 4) ? "U" : "S",
+                ipl_pti,
+                pte_ipl,
+                (pte_ipl & 1) ? "P" : "-",
+                (pte_ipl & 2) ? "W" : "R",
+                (pte_ipl & 4) ? "U" : "S");
+        /* IDT ページの PTE */
+        __asm__ volatile ("sidt %0" : "=m"(idt_base));
+        {
+            u32 idt_addr = *(u32 *)((u8 *)&idt_base + 2);
+            u32 idt_pti = (idt_addr >> 12) & 0x3FF;
+            u32 idt_pdi = idt_addr >> 22;
+            u32 pte_idt = 0;
+            if (idt_pdi < 4) {
+                u32 *pt_idt = (u32 *)(pd[idt_pdi] & 0xFFFFF000UL);
+                pte_idt = pt_idt[idt_pti];
+            }
+            kprintf(0xA1, "[V86] IDT@%X PTE=%X ESP0=%X\n",
+                    idt_addr, pte_idt, tss_get_esp0());
+        }
+    }
+
+    /* V86 enter 直前に TLB を明示的にフラッシュ
+     * paging_set_page() が各呼び出しでフラッシュするが、
+     * v86_session_run_core() の kprintf 等がTLBを再ポピュレートする可能性あり */
+    {
+        u32 cr3_val;
+        __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
+        __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
+    }
+
     if (exec_setjmp(v86_session_jmpbuf) == 0) {
+#if 0  /* §BUG-CTX ホットフィックス無効化: 初回設定(L260)のみでテスト */
+        /* ★ ホットフィックス: ctx がスタック破壊で壊れる問題 (§BUG-CTX)
+         *
+         * v86_session_run_core() のローカル変数 ctx (アドレス ~0xEFF6xx) が
+         * L260 での初期化後、L470 に到達するまでの間にスタック上で破壊される。
+         * 観測: ctx.eip = 0x0014 (本来 0x0000)。
+         *
+         * 原因未特定のため、v86_enter() 直前で ctx 全体を再設定する。
+         * 根本原因が判明したらこのブロックを除去すること。
+         */
+        if (ctx.eip != 0x0000) {
+            kprintf(0xE1, "[V86] WARNING: ctx corrupted! eip=%X (expected 0)\n",
+                    (unsigned)ctx.eip);
+        }
+        ctx.eip    = 0x0000;
+        ctx.cs     = IPL_SEG;
+        ctx.eflags = EFLAGS_VM | EFLAGS_IF;
+        ctx.esp    = 0xFFFE;
+        ctx.ss     = 0x0000;
+        ctx.es     = IPL_SEG;
+        ctx.ds     = IPL_SEG;
+        ctx.fs     = 0x0000;
+        ctx.gs     = 0x0000;
+#endif
         v86_enter(&ctx);
     }
+
+
 
     /* ============================================================ */
     /*  V86終了後の後始末                                           */
@@ -508,6 +589,23 @@ static void v86_session_run_core(void)
     /* 終了メッセージ */
     kprintf(0xA1, "[V86] Session ended: %s\n",
             v86_exit_reason_str(current_session.exit_reason));
+    /* タイムアウト終了時は停止位置を表示 */
+    if (current_session.exit_reason == V86_EXIT_TIMEOUT) {
+        kprintf(0xA1, "[V86] TIMEOUT at CS:IP=%04X:%04X GP#=%u\n",
+                (unsigned)(v86_timeout_cs & 0xFFFF),
+                (unsigned)(v86_timeout_ip & 0xFFFF),
+                (unsigned)v86_gp_count);
+    }
+    /* #PF 終了時は診断情報を表示 */
+    if (current_session.exit_reason == V86_EXIT_PAGE_FAULT) {
+        extern u32 v86_pf_cr2;
+        extern u32 v86_pf_error_code;
+        extern u16 v86_pf_cs;
+        extern u16 v86_pf_ip;
+        kprintf(0xE1, "[V86] #PF cr2=%x err=%x CS:IP=%x:%x\n",
+                (unsigned)v86_pf_cr2, (unsigned)v86_pf_error_code,
+                (unsigned)v86_pf_cs, (unsigned)v86_pf_ip);
+    }
 }
 
 /* ====================================================================== */
@@ -585,10 +683,10 @@ static int v86_boot_image(const char *path, const char *cmdline)
     current_session.auto_delay_remaining = cmdline ? V86_AUTO_TYPE_DELAY : 0;
 
     /* ネイティブモード設定
-     * デバッグモード時はGPなし無限ループ検出のため10秒タイムアウトを設定。
+     * デバッグモード時はGPなし無限ループ検出のため60秒タイムアウトを設定。
      * v86_inject_timer_irq() の冒頭でtick_countと比較して自動脱出する。
      * 非デバッグ時はユーザーがホットキーで手動脱出する想定。 */
-    v86_timeout_ticks = v86_debug_enabled ? 1000 : 0;
+    v86_timeout_ticks = v86_debug_enabled ? 2000 : 0;
     v86_native_mode = 1;
 
     /* イメージを loop_dev にアタッチ */
@@ -694,104 +792,15 @@ int v86_boot_native(const char *path, const char *cmdline)
 }
 
 /* ====================================================================== */
-/*  v86_boot_physical_fdd - 実FDDからV86セッションを起動 (ネイティブモード)   */
+/*  v86_boot_physical_fdd - 実FDDからV86セッションを起動 (2HD固定ラッパー)   */
 /*                                                                          */
-/*  NP21/Wにマウント中のFDDから直接IPLを読み、V86で起動する。              */
-/*  ファイルオープン不要。fdc_read_sector() でセクタを直接読む。           */
+/*  media=0 (2HD 1232KB) で v86_boot_physical_fdd_ex() に委譲する。         */
+/*  既存 KAPI (sys_v86_boot_physical) との後方互換性を維持する。            */
 /* ====================================================================== */
 int v86_boot_physical_fdd(int drv, const char *cmdline)
 {
-    u8 *ipl_dst;
-    int retry;
-    int ipl_rc = -1;
-
-    /* §1.4 再入禁止ガード */
-    if (v86_active) {
-        kprintf(0xE1, "[V86] ERROR: v86_boot_physical_fdd called while already active\n");
-        return -2;
-    }
-
-    /* セッション初期化 */
-    kmemset(&current_session, 0, sizeof(current_session));
-    current_session.auto_cmd = cmdline;
-    current_session.auto_delay_remaining = V86_AUTO_TYPE_DELAY;
-    current_session.fd = -1;
-    current_session.img_data_size = V86_FDD_IMAGE_SIZE;
-
-    /* ネイティブモード設定 (DOSモード廃止に伴い、全ブートパスを統一) */
-    {
-        extern u32 v86_timeout_ticks;
-        extern int v86_native_mode;
-        v86_timeout_ticks = 0;
-        v86_native_mode = 1;
-    }
-
-    /* Phase 1A: FDCを再初期化 (ブート時に失敗していたケースの救済)
-     * メディア挿入後にユーザーが vdos を起動するため、毎回
-     * reset + specify + recalibrate を再実行する必要がある。 */
-    {
-        int init_rc = fdc_init();
-        if (init_rc != 0) {
-            kprintf(0xE1, "[V86] fdc_init failed (rc=%d). Insert FDD media and retry.\n",
-                    init_rc);
-            return -1;
-        }
-    }
-
-    /* V86メモリ空間を構築 */
-    v86_mem_setup();
-
-    /* T2.1: MEMSW 初期スナップショット */
-    if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
-
-    /* T1.3: BDA init スナップショット */
-    v86_debug_dump_bda_named("init");
-
-    /* T2.3: IVT 初期スナップショット */
-    if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
-
-    /* PIC/PIT/FDC/DMA初期化 */
-    v86_pic_init();
-    v86_pit_init();
-    v86_fdc_virt_init();
-    v86_dma_init();
-
-    /* I/Oディスパッチテーブル初期化 (NP21/W iocore準拠) */
-    v86_iocore_init();
-
-    /* 実FDDモードを設定 (デフォルト 2HD) */
-    v86_disk_set_physical(drv, FDC_MEDIA_2HD_1232);
-
-    /* Phase 1B: IPLを実FDCから読み込み (3回リトライ + 各リトライ前に再recalibrate) */
-    ipl_dst = v86_phys_addr(IPL_SEG, 0);
-    for (retry = 0; retry < 3; retry++) {
-        ipl_rc = fdc_read_sector(drv, 0, 0, 1, ipl_dst);
-        if (ipl_rc == 0) break;
-        kprintf(0xA1, "[V86] IPL read retry %d/3 (rc=%d)\n", retry + 1, ipl_rc);
-        /* 失敗時: FDCを再初期化して次のリトライに備える */
-        if (fdc_init() != 0) {
-            break; /* 再初期化も失敗なら諦める */
-        }
-    }
-    if (ipl_rc != 0) {
-        kprintf(0xE1, "[V86] FDC read IPL failed after 3 retries (drv=%d)\n", drv);
-        v86_disk_clear();
-        v86_mem_teardown();
-        return -1;
-    }
-
-    kprintf(0xA1, "[V86] Booting from physical FDD (drv=%d)...\n", drv);
-
-    /* T1.3: BDA post_ipl スナップショット */
-    v86_debug_dump_bda_named("post_ipl");
-
-    /* デバッグヘッダ即時書き込み */
-    v86_debug_write_header("PhysicalFDD", "(physical)", cmdline);
-
-    /* V86実行コア */
-    v86_session_run_core();
-
-    return 0;
+    /* media=0 → 2HD (1232KB) デフォルト */
+    return v86_boot_physical_fdd_ex(drv, 0, cmdline);
 }
 
 /* ====================================================================== */

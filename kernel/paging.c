@@ -221,6 +221,28 @@ void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
 }
 
 /* ======================================================================== */
+/*  paging_set_page_range — 連続ページの属性を一括変更 (TLBフラッシュ1回)   */
+/*                                                                          */
+/*  virt_start: 仮想アドレス開始 (ページ境界)                               */
+/*  phys_start: 物理アドレス開始 (ページ境界)                               */
+/*  count:      ページ数                                                     */
+/*  flags:      ページ属性                                                   */
+/* ======================================================================== */
+void paging_set_page_range(u32 virt_start, u32 phys_start, int count, u32 flags)
+{
+    int i;
+    for (i = 0; i < count; i++) {
+        u32 va = virt_start + (u32)i * PAGE_SIZE;
+        u32 pa = phys_start + (u32)i * PAGE_SIZE;
+        u32 pdi = va >> 22;
+        u32 pti = (va >> 12) & 0x3FF;
+        if (pdi >= PAGING_PT_COUNT) break;
+        page_tables[pdi][pti] = (pa & 0xFFFFF000UL) | flags;
+    }
+    if (pg_enabled) tlb_flush_all();
+}
+
+/* ======================================================================== */
 /*  paging_set_readonly — 範囲内の全ページをRead-Onlyに                     */
 /* ======================================================================== */
 void paging_set_readonly(u32 start, u32 end)

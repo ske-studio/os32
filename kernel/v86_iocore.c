@@ -204,15 +204,28 @@ static void reset_port_out(u16 port, u8 val)
 }
 
 /* ====================================================================== */
-/*  A20ゲート (PC-98 ポート 0xF2)                                        */
-/*  NP21/W cpuio.c cpuio_of2/cpuio_if2 相当                               */
-/*    OUT 0xF2: A20有効化                                                  */
+/*  A20ゲート (PC-98 ポート 0xF2 / 0xF6)                                   */
+/*  NP21/W cpuio.c cpuio_of2/cpuio_if2/cpuio_of6 相当                      */
+/*                                                                          */
+/*    OUT 0xF2: A20 ON  (cpuio_of2)                                        */
+/*    OUT 0xF6: A20 OFF (cpuio_of6)                                        */
 /*    IN  0xF2: A20状態読み取り (0xFE=ON, 0xFF=OFF)                       */
+/*                                                                          */
+/*  重要: 実A20ゲート (NP21/Wハードウェア) は絶対に変更しない。            */
+/*  実A20ゲートを変更すると、ページテーブルウォークの物理アドレスに         */
+/*  A20マスクが適用され、ページング全体が破壊される。                      */
+/*  A20状態はソフトウェアのみで管理し、PTEリマップで対応する。             */
 /* ====================================================================== */
-static void a20_gate_out(u16 port, u8 val)
+static void a20_gate_on_out(u16 port, u8 val)
 {
     (void)port; (void)val;
     v86_a20_set(1);
+}
+
+static void a20_gate_off_out(u16 port, u8 val)
+{
+    (void)port; (void)val;
+    v86_a20_set(0);
 }
 
 static u8 a20_gate_inp(u16 port)
@@ -236,17 +249,7 @@ static void pit_counter_out(u16 port, u8 val)
     v86_pit_io(port, &val, 1);
 }
 
-static u8 pit_cmd_inp(u16 port)
-{
-    u8 val;
-    v86_pit_io(port, &val, 0);
-    return val;
-}
 
-static void pit_cmd_out(u16 port, u8 val)
-{
-    v86_pit_io(port, &val, 1);
-}
 
 /* ====================================================================== */
 /*  FDC iocore バインド                                                    */
@@ -299,13 +302,7 @@ static void vsync_out(u16 port, u8 val)
     }
 }
 
-/* GDCテキスト/グラフィック ステータス (0x60, 0xA0): VSYNC仮想化 */
-static u8 gdc_status_inp(u16 port)
-{
-    u8 val;
-    if (v86_vsync_io(port, &val, 0)) return val;
-    return inp(port);
-}
+
 
 /* ====================================================================== */
 /*  v86_iocore_init — テーブル初期化 + 全デバイスバインド                   */
@@ -363,9 +360,11 @@ void v86_iocore_init(void)
     v86_io_out[0x0A] = pic_slave_data_out;
     /* リセットポート: 0xF0 (OUT のみ) */
     v86_io_out[0xF0] = reset_port_out;
-    /* A20ゲート: 0xF2 (NP21/W cpuio.c 互換) */
-    v86_io_out[0xF2] = a20_gate_out;
+    /* A20ゲート: 0xF2 (ON), 0xF6 (OFF) — NP21/W cpuio.c 互換
+     * 実A20ゲートには絶対に触れない (ページング破壊防止) */
+    v86_io_out[0xF2] = a20_gate_on_out;
     v86_io_inp[0xF2] = a20_gate_inp;
+    v86_io_out[0xF6] = a20_gate_off_out;
 
     /* ---- 5. PIT 8253A ---- */
     /* Counter#0: 0x71, Counter#1: 0x73 */
@@ -407,9 +406,9 @@ void v86_iocore_init(void)
     v86_io_inp[0x64] = vsync_inp;
     v86_io_out[0x64] = vsync_out;
     /* 0x60: GDCテキストステータス, 0xA0: GDCグラフィックステータス
-     * VSYNC仮想化のために inp をフック */
-    v86_io_inp[0x60] = gdc_status_inp;
-    v86_io_inp[0xA0] = gdc_status_inp;
+     * VSYNC仮想化のために inp をフック (vsync_inp と同一実装のため共用) */
+    v86_io_inp[0x60] = vsync_inp;
+    v86_io_inp[0xA0] = vsync_inp;
 }
 
 /* ====================================================================== */

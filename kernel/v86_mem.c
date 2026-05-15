@@ -5,18 +5,19 @@
 /*  I/Oビットマップ設定を行う。                                             */
 /*                                                                          */
 /*  メモリレイアウト:                                                        */
-/*    仮想 0x00000-0x9FFFF  → 物理 backing+0 〜 backing+0x9FFFF            */
-/*                             (バッキングRAM: pgallocで動的確保)            */
+/*    バッキングRAM: 1MB (256ページ) を pgalloc で動的確保                   */
+/*    仮想 0x00000-0x8EFFF  → 物理 backing+0 〜 backing+0x8EFFF            */
+/*    仮想 0x8F000-0x9FFFF  → 物理 backing+0x8F000 (カーネルスタック分離)   */
 /*    仮想 0xA0000-0xA3FFF  → 物理 0xA0000  (TVRAM)                        */
-/*    仮想 0xA4000-0xA7FFF  → 物理 0xA4000  (CGウィンドウ, R/O)            */
+/*    仮想 0xA4000-0xA7FFF  → 物理 backing+0xA4000 (CGウィンドウ代替)       */
 /*    仮想 0xA8000-0xBFFFF  → 物理 0xA8000  (GVRAM Plane0-2)              */
-/*    仮想 0xC0000-0xDFFFF  → NOT PRESENT                                  */
+/*    仮想 0xC0000-0xDFFFF  → 物理 0xC0000  (拡張ROM/バッキングRAM)         */
 /*    仮想 0xE0000-0xE7FFF  → 物理 0xE0000  (GVRAM Plane3)                */
-/*    仮想 0xE8000-0xEFFFF  → NOT PRESENT                                  */
+/*    仮想 0xE8000-0xEFFFF  → 物理 0xE8000  (拡張ROM/バンクメモリ)          */
 /*    仮想 0xF0000-0xFFFFF  → 物理 0xF0000  (BIOS ROM, R/O)               */
 /*                                                                          */
 /*  バッキングRAMは pgalloc_alloc_n() でプログラム空間 (0x400000+) から      */
-/*  連続160ページ (640KB) を動的に確保する。シェル帯域 (0x300000-0x37FFFF)  */
+/*  連続256ページ (1MB) を動的に確保する。シェル帯域 (0x300000-0x37FFFF)    */
 /*  とは物理的に分離されており、退避・復元は不要。                           */
 /* ======================================================================== */
 
@@ -32,30 +33,50 @@
 
 /* v86_mem.h で定義済みの定数を使用:
  *   v86_backing_phys   (動的: pgalloc_alloc_n で確保)
- *   V86_BACKING_SIZE   0x0A0000UL
- *   V86_BACKING_PAGES  160
+ *   V86_BACKING_SIZE   0x100000UL (1MB)
+ *   V86_BACKING_PAGES  256
  *   V86_REMAP_END      0x08F000UL
  */
 
 /* バッキングRAM物理ベースアドレス (pgallocで動的確保、初期値0) */
 u32 v86_backing_phys = 0;
 
+/* HMA専用バッキングRAM物理ベースアドレス (pgallocで動的確保、初期値0) */
+u32 v86_hma_phys = 0;
+
 /* バッキングRAM有効フラグ (デフォルト=0: アイデンティティマッピング) */
 static int v86_backing_enabled = 0;
 
 /* ======================================================================== */
-/*  A20ライン状態管理                                                      */
+/*  A20ライン状態管理 (PTEリマップ方式)                                    */
 /*                                                                          */
-/*  A20 OFF (state=0): 0x100000+ へのアクセスは CS-リワインドでラップ     */
-/*                     (isr_handlers.c #PF ハンドラ)                         */
-/*  A20 ON  (state=1): 0x100000+ へのアクセスはそのまま実行              */
-/*                     (Phase 2: HMA拡張後に対応予定)                     */
+/*  A20 OFF (state=0): VA 0x100000 → PA v86_backing_phys (先頭64KBエイリアス) */
+/*  A20 ON  (state=1): VA 0x100000 → PA v86_hma_phys (HMA専用バッキング)    */
 /*                                                                          */
-/*  注: PTEリマップは不可。0x100000 にカーネルの ISR スタブが配置         */
-/*  されており、リマップすると V86 中の割り込みでトリプルフォルト     */
-/*  が発生する。                                                           */
+/*  切替は v86_a20_set() → paging_set_page_range() で16ページ書換          */
+/*  + TLBフラッシュ。ポート 0xF2 ハンドラから呼ばれる。                    */
 /* ======================================================================== */
 static int v86_a20_state = 0;
+
+/* デフォルト16色パレット (G,R,B 各4bit) — setup / restore で共用 */
+static const u8 default_palette[16][3] = {
+    { 0,  0,  0}, /* 0: 黒 */
+    { 0,  0,  7}, /* 1: 青 */
+    { 0,  7,  0}, /* 2: 赤 */
+    { 0,  7,  7}, /* 3: マゼンタ */
+    { 7,  0,  0}, /* 4: 緑 */
+    { 7,  0,  7}, /* 5: シアン */
+    { 7,  7,  0}, /* 6: 黄 */
+    { 7,  7,  7}, /* 7: 白 */
+    { 4,  4,  4}, /* 8: 暗灰 */
+    { 0,  0, 15}, /* 9: 明青 */
+    { 0, 15,  0}, /*10: 明赤 */
+    { 0, 15, 15}, /*11: 明マゼンタ */
+    {15,  0,  0}, /*12: 明緑 */
+    {15,  0, 15}, /*13: 明シアン */
+    {15, 15,  0}, /*14: 明黄 */
+    {15, 15, 15}, /*15: 明白 */
+};
 
 /* 旧 bda_defaults[] テーブルは NP21/W方式のBDA初期化に移行したため削除。
  * BDA初期値は v86_mem_setup() 内で NP21/W bios_reinitbyswitch() 準拠で
@@ -94,7 +115,7 @@ void v86_mem_setup(void)
     u32 *ivt;
     u16 handler_seg, handler_off;
 
-    /* バッキングRAMを pgalloc から動的確保 (連続 160ページ = 640KB) */
+    /* バッキングRAMを pgalloc から動的確保 (連続 256ページ = 1MB) */
     v86_backing_phys = pgalloc_alloc_n(V86_BACKING_PAGES);
     if (v86_backing_phys == 0) {
         kprintf(0xE1, "[V86] ERROR: pgalloc_alloc_n(%d) failed\n",
@@ -106,9 +127,8 @@ void v86_mem_setup(void)
     v86_backing_enabled = 1;
 
     /* ================================================================== */
-    /*  1. バッキングRAMをゼロクリア (640KB)                               */
-    /*  pgalloc 確保ページは元から PRESENT+RW のためページ属性変更不要。   */
-    /* pgalloc 確保ページをアイデンティティマッピング (PRESENT+RW) に設定     */
+    /*  1. バッキングRAMをゼロクリア (1MB)                                */
+    /*  pgalloc 確保ページをアイデンティティマッピング (PRESENT+RW) に設定     */
     /* exec_run のガードページ等で NOT PRESENT になっている場合があるため必須   */
     {
         u32 pa;
@@ -446,9 +466,15 @@ void v86_mem_setup(void)
         paging_set_page(addr, addr, PTE_PRESENT | PTE_RW | PTE_USER);
     }
 
-    /* 仮想 0xA4000-0xA7FFF → 物理 0xA4000 (CGウィンドウ, R/O) */
+    /* 仮想 0xA4000-0xA7FFF → バッキングRAM (CG ウィンドウ代替)
+     * 物理 CG VRAM に直接マップすると、DOS IPL がこの領域を
+     * スタック (SS=0xA779 → linear 0xA7790) として使用した際、
+     * CG VRAM への書き込みは RAM として機能しないため読み戻し時に
+     * ゴミデータとなり暴走 → トリプルフォルトを引き起こす。
+     * バッキングRAM にリマップすることで通常の RAM として動作させる。 */
     for (addr = 0xA4000; addr < 0xA8000; addr += PAGE_SIZE) {
-        paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
+        paging_set_page(addr, v86_backing_phys + addr,
+                        PTE_PRESENT | PTE_RW | PTE_USER);
     }
 
     /* 仮想 0xA8000-0xBFFFF → 物理 0xA8000 (GVRAM Plane0-2, R/W) */
@@ -488,27 +514,46 @@ void v86_mem_setup(void)
     paging_pde_set_flags(0x00000, PTE_USER);
 
     /* ================================================================== */
+    /*  NP21/W エミュレータ対策: カーネルページに PTE_USER を追加           */
+    /*                                                                      */
+    /*  x86 仕様では V86 例外配信はスーパーバイザとして行われるため、       */
+    /*  PTE の USER ビットは不要。しかし NP21/W は PDE USER=1 の場合に     */
+    /*  PTE の USER も要求する可能性がある。                                */
+    /*                                                                      */
+    /*  対象: ISR ハンドラコード、IDT、TSS、カーネルスタック (v86_kstack)   */
+    /*  範囲: 0x110000-0x16FFFF (カーネル .text/.rodata/.data/.bss)         */
+    /* ================================================================== */
+    for (addr = 0x110000; addr < 0x170000; addr += PAGE_SIZE) {
+        paging_set_page(addr, addr, PTE_PRESENT | PTE_RW | PTE_USER);
+    }
+
+    /* ================================================================== */
     /*  A20ラップアラウンド: PTEリマップ方式                                */
     /*                                                                      */
     /*  V86モードでセグメントが0xFD80等の場合、IP+オフセットで              */
     /*  リニアアドレスが 0x100000 を超える。リアルモードではA20=0で         */
     /*  ラップするが、V86モード(プロテクトモード)ではラップしない。         */
     /*                                                                      */
-    /*  NP21/Wの CPUエミュレータは PTE の U/S ビットチェックが不完全な       */
-    /*  ため、#PF ベースの CS リワインドが効かず、0x100000+ の物理メモリを  */
-    /*  V86が直接実行してしまう。                                           */
-    /*                                                                      */
-    /*  対策: カーネルを 0x110000 にスライドし、空いた 0x100000-0x10FFFF    */
-    /*  を バッキングRAM の 0x00000-0x0FFFF にPTEリマップする。             */
-    /*  これによりA20ラップをページテーブルレベルで安全に実現する。          */
-    /* [DEBUG] A20リマップ一時無効 — トリプルフォルト原因切り分け */
-#if 0
-    for (addr = 0x100000; addr < 0x110000; addr += PAGE_SIZE) {
-        u32 wrap_phys = v86_backing_phys + (addr - 0x100000);
-        paging_set_page(addr, wrap_phys,
-                        PTE_PRESENT | PTE_RW | PTE_USER);
+    /*  対策: VA 0x100000-0x10FFFF を PTE リマップでバッキングRAMに          */
+    /*  エイリアス。A20 OFF 時は backing+0 に、A20 ON 時は HMA専用          */
+    /*  バッキングに切替える。書き込みは即座に反映される。                  */
+    /* ================================================================== */
+
+    /* HMA専用 64KB を pgalloc から確保 */
+    v86_hma_phys = pgalloc_alloc_n(V86_HMA_PAGES);
+    if (v86_hma_phys == 0) {
+        kprintf(0xE1, "[V86] ERROR: HMA pgalloc failed\n");
+        return;
     }
-#endif
+    kmemset((u8 *)v86_hma_phys, 0, V86_HMA_SIZE);
+
+    /* 初期状態 = A20 OFF → VA 0x100000 を backing_phys+0 にエイリアス */
+    paging_set_page_range(V86_HMA_VA, v86_backing_phys, V86_HMA_PAGES,
+                          PTE_PRESENT | PTE_RW | PTE_USER);
+    v86_a20_state = 0;
+    kprintf(0xA1, "[V86] A20 OFF: VA 0x100000 -> PA %x (backing)\n",
+            (unsigned)v86_backing_phys);
+    kprintf(0xA1, "[V86] A20 setup done, starting IOMAP\n");
 
     /* ================================================================== */
     /*  5. I/Oビットマップ設定                                            */
@@ -525,6 +570,11 @@ void v86_mem_setup(void)
      * tss_iomap_allow(0x41); — トラップ維持
      * tss_iomap_allow(0x43); — トラップ維持 */
 
+    /* ★★ デバッグ: 全ポートトラップモード ★★
+     * IO.SYS 内の I/O ポーリングループを #GP 経由で捕捉し、
+     * タイムアウト検出を確実にするため、全 tss_iomap_allow を無効化。
+     * 正常動作確認後にコメントを外して復元すること。 */
+#if 1  /* 通常モード: 安全なポートはパススルー */
     /* テキストGDC + モードFF1 (60h-6Ah 偶数)
      * 0x60: ステータス読み出し (bit5=VSYNC) → トラップして仮想化
      * 0x64: VSYNC割り込みトリガ → トラップして仮想化 */
@@ -583,6 +633,7 @@ void v86_mem_setup(void)
      * トラップ状態だとGPフォルトのオーバーヘッドが大きすぎて
      * 音楽再生のリアルタイム性が失われる。 */
     tss_iomap_allow(0x5F);
+#endif /* デバッグ: 全ポートトラップ */
 
     /* ================================================================== */
     /*  6. 画面初期化 (NP21/W pccore_reset + bios0x18_16 準拠)             */
@@ -591,6 +642,7 @@ void v86_mem_setup(void)
     /*  デフォルト状態に戻す。ネイティブゲーム(Ys等)はGDC初期化を           */
     /*  自前で行わず、BIOSが設定済みであることを前提とするため必須。         */
     /* ================================================================== */
+    kprintf(0xA1, "[V86] IOMAP done, starting screen init\n");
     {
         volatile u8 *gvram_b = (volatile u8 *)0xA8000UL;
         volatile u8 *gvram_e = (volatile u8 *)0xE0000UL;
@@ -598,59 +650,37 @@ void v86_mem_setup(void)
         int i;
 
         /* GVRAM全面クリア (Plane B/R/G: 0xA8000-0xBFFFF, Plane E: 0xE0000-0xE7FFF) */
-        kmemset((u8 *)gvram_b, 0, 0x18000);  /* 96KB: B+R+G */
+        kprintf(0xA1, "[V86] GVRAM-B clear...\n");
+        kmemset((u8 *)gvram_b, 0, 0x18000);  /* 96KB: B+R/G */
+        kprintf(0xA1, "[V86] GVRAM-E clear...\n");
         kmemset((u8 *)gvram_e, 0, 0x08000);  /* 32KB: E */
+        kprintf(0xA1, "[V86] TVRAM clear...\n");
 
         /* TVRAMクリア (0xA0000-0xA1FFF: 文字コード, 0xA2000-0xA3FFF: アトリビュート)
          * WORD単位でアクセス (PC-98 TVRAMはWORDアドレッシング) */
-        for (i = 0; i < 0x2000; i++) {
+        for (i = 0; i < 0x1000; i++) {
             tvram[i] = 0x0000;          /* 文字コード: 空白 */
         }
         for (i = 0x1000; i < 0x2000; i++) {
             tvram[i] = 0x00E1;          /* アトリビュート: 白文字、表示ON */
         }
+        kprintf(0xA1, "[V86] screen init done\n");
 
         /* GRCG OFF (ポート 0x7C に 0 を出力) */
         outp(0x7C, 0x00);
 
         /* アナログパレット初期化 (PC-98 デフォルト16色)
          * ポート: 0xA8=パレット番号, 0xAA=G, 0xAC=R, 0xAE=B (各4bit) */
-        {
-            /* NP21/W bios0x18_16 のデフォルトパレット (PC-98標準) */
-            static const u8 def_pal[16][3] = {
-                /* G,   R,   B */
-                { 0x0, 0x0, 0x0 },  /* 0: 黒 */
-                { 0x0, 0x0, 0x7 },  /* 1: 青 */
-                { 0x0, 0x7, 0x0 },  /* 2: 赤 */
-                { 0x0, 0x7, 0x7 },  /* 3: マゼンタ */
-                { 0x7, 0x0, 0x0 },  /* 4: 緑 */
-                { 0x7, 0x0, 0x7 },  /* 5: シアン */
-                { 0x7, 0x7, 0x0 },  /* 6: 黄 */
-                { 0x7, 0x7, 0x7 },  /* 7: 白 */
-                { 0x4, 0x4, 0x4 },  /* 8: 灰 */
-                { 0x0, 0x0, 0xF },  /* 9: 明青 */
-                { 0x0, 0xF, 0x0 },  /* A: 明赤 */
-                { 0x0, 0xF, 0xF },  /* B: 明マゼンタ */
-                { 0xF, 0x0, 0x0 },  /* C: 明緑 */
-                { 0xF, 0x0, 0xF },  /* D: 明シアン */
-                { 0xF, 0xF, 0x0 },  /* E: 明黄 */
-                { 0xF, 0xF, 0xF },  /* F: 明白 */
-            };
-            for (i = 0; i < 16; i++) {
-                outp(0xA8, (u8)i);         /* パレット番号 */
-                outp(0xAA, def_pal[i][0]);  /* G */
-                outp(0xAC, def_pal[i][1]);  /* R */
-                outp(0xAE, def_pal[i][2]);  /* B */
-            }
+        for (i = 0; i < 16; i++) {
+            outp(0xA8, (u8)i);                  /* パレット番号 */
+            outp(0xAA, default_palette[i][0]);   /* G */
+            outp(0xAC, default_palette[i][1]);   /* R */
+            outp(0xAE, default_palette[i][2]);   /* B */
         }
 
         /* テキスト画面表示OFF → ゲストが自前で設定する
          * GDCコマンドSTOP1: ポート0x62に0x0Dを出力 (テキスト表示停止) */
         outp(0x62, 0x0D);
-
-        /* グラフィック画面表示ON:
-         * GDCコマンドSTART: ポート0xA2に0x0Dを出力 (グラフィック表示開始) */
-        outp(0xA2, 0x0D);
 
         /* グラフィックGDC SCROLL コマンド (0x70): 表示開始アドレス初期化
          * GDC I/O: コマンド→0xA2, パラメータ→0xA0
@@ -789,12 +819,16 @@ void v86_mem_teardown(void)
         paging_set_page(addr, addr, PTE_PRESENT);
     }
 
-    /* [DEBUG] A20リマップ一時無効 */
-#if 0
-    for (addr = 0x100000; addr < 0x110000; addr += PAGE_SIZE) {
-        paging_set_page(addr, addr, PTE_PRESENT | PTE_RW);
+    /* A20ラップ領域を元に戻す (アイデンティティマッピング, 一括設定) */
+    paging_set_page_range(V86_HMA_VA, V86_HMA_VA, V86_HMA_PAGES,
+                          PTE_PRESENT | PTE_RW);
+
+    /* HMA バッキング解放 */
+    if (v86_hma_phys != 0) {
+        pgalloc_free_n(v86_hma_phys, V86_HMA_PAGES);
+        v86_hma_phys = 0;
     }
-#endif
+    v86_a20_state = 0;
 
     /* PDE[0] から PTE_USER を除去 */
     paging_pde_clear_flags(0x00000, PTE_USER);
@@ -816,20 +850,26 @@ void v86_mem_teardown(void)
 }
 
 /* ======================================================================== */
-/*  v86_a20_set — A20ライン状態を変更                                        */
+/*  v86_a20_set — A20ライン状態を変更 (PTEリマップ方式)                       */
 /*                                                                          */
-/*  状態トラッキングのみ。実際のラップアラウンドは isr_handlers.c の        */
-/*  CS-リワインド #PF ハンドラが v86_a20_get() を参照して処理する。         */
-/*                                                                          */
-/*  enable=0: A20 OFF (ラップ有効、デフォルト)                              */
-/*  enable=1: A20 ON  (Phase 1 では未サポート、ログのみ)                    */
+/*  A20 OFF: VA 0x100000 → PA v86_backing_phys (先頭64KBエイリアス)           */
+/*  A20 ON : VA 0x100000 → PA v86_hma_phys (HMA専用バッキング)              */
+/*  ポート 0xF2 ハンドラ (v86_iocore.c) から呼ばれる。                     */
 /* ======================================================================== */
 void v86_a20_set(int enable)
 {
-    if (enable && !v86_a20_state) {
-        kprintf(0xA1, "[V86] A20 ON (not yet supported, keeping wrap)\n");
+    u32 target_phys;
+    if (enable == v86_a20_state) return;
+    if (v86_hma_phys == 0 || v86_backing_phys == 0) {
+        kprintf(0xE1, "[V86] A20: hma/backing not ready\n");
+        return;
     }
+    target_phys = enable ? v86_hma_phys : v86_backing_phys;
+    paging_set_page_range(V86_HMA_VA, target_phys, V86_HMA_PAGES,
+                          PTE_PRESENT | PTE_RW | PTE_USER);
     v86_a20_state = enable;
+    kprintf(0xA1, "[V86] A20 %s (VA 0x100000 -> PA %x)\n",
+            enable ? "ON" : "OFF", (unsigned)target_phys);
 }
 
 /* ======================================================================== */
@@ -846,16 +886,19 @@ int v86_a20_get(void)
 /*  V86の seg:off (リニア = seg<<4 + off) を、カーネル (Ring0) から          */
 /*  アクセスできる物理アドレスに変換する。                                  */
 /*                                                                          */
-/*  0x00000-0x9FFFF → 物理 backing + offset  (バッキングRAM)              */
-/*  0xA0000-0xFFFFF → 物理 = 仮想  (実機ハードウェア)                     */
-/*                                                                          */
-/*  ※ 方法Cリマップ対応: 0x8F000-0x9FFFF もバッキングRAMにリマップ       */
-/*    されているため、0xA0000 未満を全てバッキングRAM経由にする。           */
+/*  0x100000-0x10FFFF (A20 ON): HMA専用バッキング経由                    */
+/*  0x00000-0x9FFFF: バッキングRAM経由                                      */
+/*  0xA0000-0xFFFFF: 実機ハードウェア直接                                 */
 /* ======================================================================== */
 u8 *v86_phys_addr(u32 seg, u32 off)
 {
     u32 linear = (seg << 4) + off;
-    linear &= 0xFFFFF;  /* 1MB境界でラップ */
+
+    /* A20 ON 時の HMA 領域アクセス: HMA専用バッキングに変換 */
+    if (linear >= 0x100000UL && linear < 0x110000UL && v86_a20_state) {
+        return (u8 *)(v86_hma_phys + (linear - 0x100000UL));
+    }
+    linear &= 0xFFFFFUL;  /* 1MB境界でラップ */
 
     /* バッキングRAMが有効で、コンベンショナルメモリ (0-9FFFF) はバッキングRAM */
     if (v86_backing_enabled && linear < 0xA0000UL) {
@@ -878,25 +921,6 @@ u8 *v86_phys_addr(u32 seg, u32 off)
 /*  6. テキスト画面表示開始                                                 */
 /* ======================================================================== */
 
-/* デフォルト16色パレット (G,R,B 各4bit) */
-static const u8 default_palette[16][3] = {
-    { 0,  0,  0}, /* 0: 黒 */
-    { 0,  0,  7}, /* 1: 青 */
-    { 0,  7,  0}, /* 2: 赤 */
-    { 0,  7,  7}, /* 3: マゼンタ */
-    { 7,  0,  0}, /* 4: 緑 */
-    { 7,  0,  7}, /* 5: シアン */
-    { 7,  7,  0}, /* 6: 黄 */
-    { 7,  7,  7}, /* 7: 白 */
-    { 4,  4,  4}, /* 8: 暗灰 */
-    { 0,  0, 15}, /* 9: 明青 */
-    { 0, 15,  0}, /*10: 明赤 */
-    { 0, 15, 15}, /*11: 明マゼンタ */
-    {15,  0,  0}, /*12: 明緑 */
-    {15,  0, 15}, /*13: 明シアン */
-    {15, 15,  0}, /*14: 明黄 */
-    {15, 15, 15}, /*15: 明白 */
-};
 
 void v86_restore_screen(void)
 {

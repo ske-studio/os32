@@ -49,6 +49,13 @@ isr_stub_%1:
 global isr_stub_%1
 isr_stub_%1:
         cli
+%if %1 == 8
+        ;; ★ DF到達マーカー: TVRAM[0]='D', [1]='F' (SS:でアクセス — DS=0のため)
+        mov     word [ss:0xA0000], 'D'
+        mov     word [ss:0xA2000], 0xE1
+        mov     word [ss:0xA0002], 'F'
+        mov     word [ss:0xA2002], 0xE1
+%endif
         ;; エラーコードはCPUが自動push済み
         push    %1              ;; 例外番号
         jmp     isr_common
@@ -216,6 +223,12 @@ isr_common:
                                 ;; base+36: error_code
                                 ;; base+40: fault EIP
 
+        ;; ★ DS/ES復元 (V86→Ring0遷移でCPUが0にクリアする場合への対策)
+        ;; 通常モードからの例外でも 0x10 を再ロードしても無害。
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+
         ;; 引数4: regs (PUSHAD配列先頭)
         mov     eax, esp
         push    eax             ;; ESP=base-4
@@ -258,6 +271,11 @@ isr_common:
 global isr_stub_14
 isr_stub_14:
         cli
+        ;; ★ PF到達マーカー: TVRAM[4]='1', [5]='4' (SS:でアクセス — DS=0のため)
+        mov     word [ss:0xA0008], '1'
+        mov     word [ss:0xA2008], 0xC1
+        mov     word [ss:0xA000A], '4'
+        mov     word [ss:0xA200A], 0xC1
         ;; V86モード判定: EFLAGS.VM (bit 17) をチェック
         ;; [ESP+0]=error_code, [ESP+4]=EIP, [ESP+8]=CS, [ESP+12]=EFLAGS
         test    dword [esp + 12], 0x020000

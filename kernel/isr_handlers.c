@@ -289,6 +289,18 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 {
     int row = 0;  /* 画面最上部から表示 (最大限の情報量) */
 
+    /* デバッグマーカー: ハンドラ到達確認 (TVRAM直接書き込み) */
+    {
+        volatile u16 *tc = (volatile u16 *)0xA0000UL;
+        volatile u16 *ta = (volatile u16 *)0xA2000UL;
+        tc[0] = 'P'; ta[0] = 0xE1;
+        tc[1] = 'F'; ta[1] = 0xE1;
+        tc[2] = '!'; ta[2] = 0xE1;
+        tc[3] = (u16)('0' + ((fault_addr >> 8) & 0xF)); ta[3] = 0xC1;
+        tc[4] = (u16)('0' + ((fault_addr >> 4) & 0xF)); ta[4] = 0xC1;
+        tc[5] = (u16)('0' + (fault_addr & 0xF));        ta[5] = 0xC1;
+    }
+
     /* ================================================================ */
     /*  V86モードからの #PF: ウォッチポイント + 安全終了パス             */
     /*                                                                  */
@@ -322,17 +334,34 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         /*  これにより linear = (CS-0x1000)<<4 + IP = 元のlinear - 0x10000 */
         /*  → 0x100000 以下に収まり、正常にアクセスできる。              */
         /* ============================================================ */
-        if (fault_addr >= 0x100000 && fault_addr < 0x110000) {
-            u16 old_cs = (u16)(regs[10] & 0xFFFF);
-            u16 new_cs = old_cs - 0x1000;
+        if (fault_addr >= 0x100000UL && fault_addr < 0x110000UL) {
+            /* PTEリマップ方式では HMA #PF は発生しないはず。
+             * 発生した場合はバグ → V86セッション終了 */
+            kprintf(0xE1, "[V86] BUG: HMA #PF should not occur. "
+                          "addr=%x err=%x CS:IP=%x:%x\n",
+                    (unsigned)fault_addr, (unsigned)error_code,
+                    (unsigned)(regs[10] & 0xFFFF),
+                    (unsigned)(regs[9]  & 0xFFFF));
 
-            kprintf(0xA1, "[V86] A20 wrap: CS %x->%x IP=%x addr=%x\n",
-                    (unsigned)old_cs, (unsigned)new_cs,
-                    (unsigned)(regs[9] & 0xFFFF),
-                    (unsigned)fault_addr);
+            /* 診断情報を保存 */
+            {
+                extern u32 v86_pf_cr2;
+                extern u32 v86_pf_error_code;
+                extern u16 v86_pf_cs;
+                extern u16 v86_pf_ip;
+                extern int v86_pf_recorded;
+                v86_pf_cr2 = fault_addr;
+                v86_pf_error_code = error_code;
+                v86_pf_cs = (u16)(regs[10] & 0xFFFF);
+                v86_pf_ip = (u16)(regs[9]  & 0xFFFF);
+                v86_pf_recorded = 1;
+            }
 
-            regs[10] = (regs[10] & 0xFFFF0000UL) | new_cs;
-            return;  /* 修正されたCS:IPでV86に復帰 */
+            v86_request_exit(V86_EXIT_PAGE_FAULT);
+            {
+                extern void v86_test_exit(void);
+                v86_test_exit();
+            }
         }
 
         /* ウォッチポイント以外の V86 #PF → V86 セッションを終了 */

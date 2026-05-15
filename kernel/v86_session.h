@@ -72,6 +72,11 @@ int  v86_boot_native(const char *path, const char *cmdline);
  * drv: 物理ドライブ番号 (通常0) */
 int  v86_boot_physical_fdd(int drv, const char *cmdline);
 
+/* 実FDDからV86セッションを起動する (メディア指定版)
+ * drv: 物理ドライブ番号 (通常0)
+ * media: 0=2HD(1232KB), 1=2DD(640KB), 2=2DD(720KB) */
+int  v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline);
+
 /* IRQ0 (100Hz) ごとに呼ばれるコールバック
  * Auto-Typer処理と強制脱出ホットキー検知を行う */
 void v86_session_on_tick(void);

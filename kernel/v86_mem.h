@@ -7,12 +7,21 @@
 
 #include "types.h"
 
-/* V86バッキングRAM: pgalloc から動的確保される連続 640KB                     */
+/* V86バッキングRAM: pgalloc から動的確保される連続 1MB                       */
 /* v86_backing_phys は v86_mem_setup() で設定され、teardown() でリセットされる */
+/* 0x00000-0xFFFFF の全 1MB をバッキングRAMとして確保し、                      */
+/* VRAM/BIOS ROM 領域は物理アドレスに直接マッピングするが、                   */
+/* IO.SYS 等がスタック/データを 640KB 以上に配置するケースに対応する。        */
 extern u32 v86_backing_phys;
 
-#define V86_BACKING_SIZE   0x0A0000UL   /* 640KB */
-#define V86_BACKING_PAGES  (V86_BACKING_SIZE / 0x1000UL) /* 160ページ */
+/* HMA専用バッキングRAM (pgallocで動的確保) */
+extern u32 v86_hma_phys;
+#define V86_HMA_PAGES  16
+#define V86_HMA_SIZE   0x10000UL
+#define V86_HMA_VA     0x100000UL
+
+#define V86_BACKING_SIZE   0x100000UL   /* 1MB */
+#define V86_BACKING_PAGES  (V86_BACKING_SIZE / 0x1000UL) /* 256ページ */
 #define V86_REMAP_END      0x08F000UL   /* リマップ範囲上限 (カーネルスタック手前) */
 
 /* V86メモリ空間を構築 (ページテーブル + IVT + BDA + I/Oビットマップ) */
@@ -32,7 +41,7 @@ void v86_restore_screen(void);
 void v86_tvram_save(void);
 void v86_tvram_restore(void);
 
-/* A20ライン状態管理 (CS-リワインド方式、PTE操作なし) */
+/* A20ライン状態管理 (PTEリマップ方式) */
 void v86_a20_set(int enable);
 int  v86_a20_get(void);
 
