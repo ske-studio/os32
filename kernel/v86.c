@@ -1173,14 +1173,14 @@ v86_gp_end:
                 /* ISR bit0 をセット: 実ハンドラの場合のみ
                  * ダミーIVTの場合はISRセットしない — IRETで即座に戻り
                  * EOIが発行されずISRが残るとその後の全注入がブロックされる */
-                if (!is_dummy) {
-                    v86_pic_set_isr(0, isr | 1);
-                }
                 /* §4 IRR bit0 クリア: ISRに移譲したのでIRRから落とす */
                 v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)1);
 
-                /* ゲストスタックにフレームをpushしてハンドラに転送 */
-                v86_gp_inject_irq(regs, handler_seg, handler_off);
+                if (!is_dummy) {
+                    v86_pic_set_isr(0, isr | 1);
+                    /* ゲストスタックにフレームをpushしてハンドラに転送 */
+                    v86_gp_inject_irq(regs, handler_seg, handler_off);
+                }
             } else {
                 v86_irq0_gp_skip_isr++;
             }
@@ -1204,12 +1204,12 @@ v86_gp_end:
 
                 v86_pending_irq &= ~(1U << 1);
 
-                if (!is_dummy) {
-                    v86_pic_set_isr(0, isr | 2);
-                }
                 v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)2);
 
-                v86_gp_inject_irq(regs, handler_seg, handler_off);
+                if (!is_dummy) {
+                    v86_pic_set_isr(0, isr | 2);
+                    v86_gp_inject_irq(regs, handler_seg, handler_off);
+                }
             }
         }
         /* スレーブPIC IRQ注入 (IRQ 8-15)
@@ -1237,17 +1237,17 @@ v86_gp_end:
 
                         v86_pending_irq &= ~(1U << irq);
 
+                        /* IRRクリア */
+                        v86_pic_set_irr(1, v86_pic_get_irr(1) & ~(u8)(1 << slave_bit));
+                        v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)(1 << 2));
+
                         if (!is_dummy) {
                             /* スレーブISRにビットをセット */
                             v86_pic_set_isr(1, isr_slave | (u8)(1 << slave_bit));
                             /* マスタIRQ7 (カスケード) ISRもセット */
                             v86_pic_set_isr(0, isr_master | (u8)(1 << 7));
+                            v86_gp_inject_irq(regs, handler_seg, handler_off);
                         }
-                        /* IRRクリア */
-                        v86_pic_set_irr(1, v86_pic_get_irr(1) & ~(u8)(1 << slave_bit));
-                        v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)(1 << 2));
-
-                        v86_gp_inject_irq(regs, handler_seg, handler_off);
                         break; /* 1回の#GPでは1つのIRQのみ注入 */
                     }
                 }
