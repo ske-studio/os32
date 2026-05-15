@@ -498,10 +498,16 @@ BIOS は `RQM=1, DIO=適切方向, CB=0` を確認してから次のコマンド
 
 ### 12.1 症状
 
-`kernel/v86_session.c:254` で確保されたローカル変数 `struct v86_context ctx` (観測スタックアドレス: 約 0xEFF6xx) が、L260 で `ctx.eip = 0x0000` に初期化された後、L495 の `v86_enter(&ctx)` に到達するまでの間にスタック上で破壊される。
+`kernel/v86_session.c:254` で確保されたローカル変数 `struct v86_context ctx` が、L260 で `ctx.eip = 0x0000` に初期化された後、L495 の `v86_enter(&ctx)` に到達するまでの間にスタック上で破壊される。
+
+**GCCビルドでの ctx 配置** (objdump 解析済み):
+- スタックフレーム: `sub $0x4c, %esp` (76バイト)
+- ctx は `EBP-0x3C` 〜 `EBP-0x1C` に配置 (36バイト = 9 × u32)
+- カーネルスタック: `0x90000-0x9FFFF` (64KB, memmap.h)
+- ※ 旧観測アドレス `~0xEFF6xx` は OpenWatcom 時代の値。GCC ビルドでは異なる
 
 **観測値**: `ctx.eip = 0x0014` (本来 0x0000)。
-- 0x0014 = 20。`struct v86_context` のオフセット 20 は `es` フィールドの位置。
+- 0x0014 = 20。`struct v86_context` 的なオフセット 20 は `es` フィールドの位置。
 - 破壊位置の特定にも、化けた値の出処にも、まだ手がかりが揃っていない。
 
 ### 12.2 発生条件
