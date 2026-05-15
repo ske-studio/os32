@@ -727,7 +727,31 @@ int v86_gp_handler(u32 *regs)
         if (intno == 0x1B) {
             int rc = v86_bios_int1b(regs);
             regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            (void)rc;
+            /* INT 1Bh 結果ログ (最初の10件のみ) */
+            {
+                static int int1b_log_count = 0;
+                if (int1b_log_count < 10) {
+                    extern void serial_puts(const char *s);
+                    static const char hex[] = "0123456789ABCDEF";
+                    char buf[64];
+                    int p = 0;
+                    u8 ah_out = (u8)((regs[V86_REG_EAX] >> 8) & 0xFF);
+                    u8 cf = (regs[V86_REG_EFLAGS] & 1) ? 1 : 0;
+                    const char *msg = "\r\n[V86] INT1B done AH=";
+                    int mi;
+                    for (mi = 0; msg[mi]; mi++) buf[p++] = msg[mi];
+                    buf[p++] = hex[(ah_out >> 4) & 0xF];
+                    buf[p++] = hex[ah_out & 0xF];
+                    buf[p++] = ' '; buf[p++] = 'C'; buf[p++] = 'F'; buf[p++] = '=';
+                    buf[p++] = '0' + cf;
+                    buf[p++] = ' '; buf[p++] = 'r'; buf[p++] = 'c'; buf[p++] = '=';
+                    buf[p++] = (rc < 0) ? '-' : '+';
+                    buf[p++] = '0' + ((rc < 0 ? -rc : rc) % 10);
+                    buf[p++] = '\r'; buf[p++] = '\n'; buf[p] = '\0';
+                    serial_puts(buf);
+                    int1b_log_count++;
+                }
+            }
             break;
         }
 

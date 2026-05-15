@@ -735,14 +735,52 @@ static void v86_session_run_core(void)
     /* 終了メッセージ */
     kprintf(0xA1, "[V86] Session ended: %s\n",
             v86_exit_reason_str(current_session.exit_reason));
-    /* タイムアウト終了時は停止位置を表示 */
+
+    /* シリアルにも出力 (kprintfは画面リストアで消えるため) */
+    {
+        extern void serial_puts(const char *s);
+        extern void serial_put_hex32_polled(u32 v);
+
+        serial_puts("\r\n[V86-END] reason=");
+        serial_puts(v86_exit_reason_str(current_session.exit_reason));
+        serial_puts(" gp_count=");
+        serial_put_hex32_polled(v86_gp_count);
+        serial_puts("\r\n");
+
+        /* タイムアウト終了時は停止位置を表示 */
+        if (current_session.exit_reason == V86_EXIT_TIMEOUT) {
+            serial_puts("[V86-END] TIMEOUT CS:IP=");
+            serial_put_hex32_polled(v86_timeout_cs);
+            serial_puts(":");
+            serial_put_hex32_polled(v86_timeout_ip);
+            serial_puts("\r\n");
+        }
+        /* #PF 終了時は診断情報を表示 */
+        if (current_session.exit_reason == V86_EXIT_PAGE_FAULT) {
+            extern u32 v86_pf_cr2;
+            extern u32 v86_pf_error_code;
+            extern u16 v86_pf_cs;
+            extern u16 v86_pf_ip;
+            serial_puts("[V86-END] #PF cr2=");
+            serial_put_hex32_polled(v86_pf_cr2);
+            serial_puts(" err=");
+            serial_put_hex32_polled(v86_pf_error_code);
+            serial_puts(" CS:IP=");
+            serial_put_hex32_polled(v86_pf_cs);
+            serial_puts(":");
+            serial_put_hex32_polled(v86_pf_ip);
+            serial_puts("\r\n");
+        }
+    }
+
+    /* タイムアウト終了時は停止位置をkprintf表示 */
     if (current_session.exit_reason == V86_EXIT_TIMEOUT) {
         kprintf(0xA1, "[V86] TIMEOUT at CS:IP=%04X:%04X GP#=%u\n",
                 (unsigned)(v86_timeout_cs & 0xFFFF),
                 (unsigned)(v86_timeout_ip & 0xFFFF),
                 (unsigned)v86_gp_count);
     }
-    /* #PF 終了時は診断情報を表示 */
+    /* #PF 終了時は診断情報をkprintf表示 */
     if (current_session.exit_reason == V86_EXIT_PAGE_FAULT) {
         extern u32 v86_pf_cr2;
         extern u32 v86_pf_error_code;
