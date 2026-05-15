@@ -755,33 +755,10 @@ int v86_gp_handler(u32 *regs)
             break;
         }
 
-        /* ============================================================ */
-        /*  §13 BIOS HLE: INT 18h/1Ch/11h/12h                          */
-        /*                                                              */
-        /*  これらの HLE 関数は v86_bios.c に実装済み。                  */
-        /*  BIOS ROM への IVT 転送を行わず、ここで直接 HLE 処理する。   */
-        /*  (方法 C: BIOS ROM 実行排除 — V86_STATUS.md §13 参照)        */
-        /* ============================================================ */
-        if (intno == 0x18) {
-            v86_bios_int18(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
-        if (intno == 0x1C) {
-            v86_bios_int1c(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
-        if (intno == 0x11) {
-            v86_bios_int11(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
-        if (intno == 0x12) {
-            v86_bios_int12(regs);
-            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-            break;
-        }
+        /* INT 18h/1Ch/11h/12h: BIOS ROM に委譲 (NP21/W ハイブリッド方式)
+         * ROM 内のハンドラが直接実行される。
+         * ROM 内の I/O 命令は GP で捕捉・仮想化される。 */
+
 
         /* 通常のINT: IVT参照してV86内ハンドラに転送 */
         {

@@ -870,7 +870,7 @@ static int v86_boot_image(const char *path, const char *cmdline)
      * デバッグモード時はGPなし無限ループ検出のため60秒タイムアウトを設定。
      * v86_inject_timer_irq() の冒頭でtick_countと比較して自動脱出する。
      * 非デバッグ時はユーザーがホットキーで手動脱出する想定。 */
-    v86_timeout_ticks = v86_debug_enabled ? 2000 : 0;
+    v86_timeout_ticks = v86_debug_enabled ? 12000 : 0;  /* 120秒 (100Hz) */
     v86_native_mode = 1;
 
     /* イメージを loop_dev にアタッチ */
