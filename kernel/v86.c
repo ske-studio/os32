@@ -383,23 +383,35 @@ int v86_gp_handler(u32 *regs)
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
 
-    /* ★ 最初の#GP呼び出し: V86エントリ直後のレジスタ状態をダンプ */
-    if (v86_gp_count == 1 && v86_debug_enabled) {
-        u8 *first_ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
-        kprintf(0x0A, "[V86] 1st GP: CS:IP=%04X:%04X DS=%04X SS:SP=%04X:%04X op=%02X %02X\n",
-                (unsigned)(regs[V86_REG_CS] & 0xFFFF),
-                (unsigned)(regs[V86_REG_EIP] & 0xFFFF),
-                (unsigned)(regs[V86_REG_DS] & 0xFFFF),
-                (unsigned)(regs[V86_REG_SS] & 0xFFFF),
-                (unsigned)(regs[V86_REG_ESP] & 0xFFFF),
-                (unsigned)first_ip[0], (unsigned)first_ip[1]);
+    /* ★ トリプルフォルト調査: 最初の10回の#GPをシリアル出力 */
+    if (v86_gp_count <= 10) {
+        u8 *first_ip = (u8 *)v86_phys_addr(regs[V86_REG_CS], regs[V86_REG_EIP]);
+        extern void serial_puts_polled(const char *s);
+        extern void serial_put_hex32_polled(u32 val);
+        serial_puts_polled("[V86-GP#");
+        serial_put_hex32_polled(v86_gp_count);
+        serial_puts_polled("] CS:IP=");
+        serial_put_hex32_polled(regs[V86_REG_CS] & 0xFFFF);
+        serial_puts_polled(":");
+        serial_put_hex32_polled(regs[V86_REG_EIP] & 0xFFFF);
+        serial_puts_polled(" op=");
+        serial_put_hex32_polled((u32)first_ip[0]);
+        serial_puts_polled(" ");
+        serial_put_hex32_polled((u32)first_ip[1]);
+        serial_puts_polled(" SS:SP=");
+        serial_put_hex32_polled(regs[V86_REG_SS] & 0xFFFF);
+        serial_puts_polled(":");
+        serial_put_hex32_polled(regs[V86_REG_ESP] & 0xFFFF);
+        serial_puts_polled("\n");
     }
 
     /* IRQ受信窓の開放: GP頻度が高くIF=0時間が長くなりがちなため、
      * 入口で1度だけSTI/CLIを叩いて保留IRQを排出する。
-     * (HLTは行わない — IRQ無し時の不要待ちを避けるため) */
-    _enable();   /* STI — 保留IRQを即配送 */
-    _disable();  /* CLI — GP本体処理は割り込み禁止で実行 */
+     * (HLTは行わない — IRQ無し時の不要待ちを避けるため)
+     *
+     * ★ トリプルフォルト調査: IRQ介入が原因か検証のため一時無効化 */
+    /*_enable();*/   /* STI — 保留IRQを即配送 */
+    /*_disable();*/  /* CLI — GP本体処理は割り込み禁止で実行 */
 
     /* ★ ISR からのタイムアウト要求を即座に拾う
      * (ISRではフラグのみセット、ここでv86_request_exitを安全に呼ぶ) */

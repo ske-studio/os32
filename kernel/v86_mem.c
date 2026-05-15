@@ -518,7 +518,8 @@ void v86_mem_setup(void)
     /*                                                                      */
     /*  x86 仕様では V86 例外配信はスーパーバイザとして行われるため、       */
     /*  PTE の USER ビットは不要。しかし NP21/W は PDE USER=1 の場合に     */
-    /*  PTE の USER も要求する可能性がある。                                */
+    /*  PTE の USER も要求する (エミュレータの仕様)。                      */
+    /*  USER を除去するとIDT読み取りで #PF → #DF → トリプルフォルト。    */
     /*                                                                      */
     /*  対象: ISR ハンドラコード、IDT、TSS、カーネルスタック (v86_kstack)   */
     /*  範囲: 0x110000-0x16FFFF (カーネル .text/.rodata/.data/.bss)         */

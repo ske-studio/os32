@@ -289,6 +289,23 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
 {
     int row = 0;  /* 画面最上部から表示 (最大限の情報量) */
 
+    /* ★ トリプルフォルト調査: V86 #PF シリアルトレース (TVRAMより先に出力) */
+    if (v86_active) {
+        extern void serial_puts_polled(const char *s);
+        extern void serial_put_hex32_polled(u32 val);
+        serial_puts_polled("[V86-PF] addr=");
+        serial_put_hex32_polled(fault_addr);
+        serial_puts_polled(" err=");
+        serial_put_hex32_polled(error_code);
+        serial_puts_polled(" eip=");
+        serial_put_hex32_polled(fault_eip);
+        serial_puts_polled(" CS=");
+        serial_put_hex32_polled(regs[10] & 0xFFFF);
+        serial_puts_polled(" IP=");
+        serial_put_hex32_polled(regs[9] & 0xFFFF);
+        serial_puts_polled("\n");
+    }
+
     /* デバッグマーカー: ハンドラ到達確認 (TVRAM直接書き込み) */
     {
         volatile u16 *tc = (volatile u16 *)0xA0000UL;

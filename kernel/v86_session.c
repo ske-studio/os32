@@ -362,7 +362,7 @@ static void v86_session_run_core(void)
     /*  ISR スタック消費と合成して ctx 領域に到達する仮説を検証。         */
     /*  Phase 1 調査完了後にこのブロックを削除または条件付きで復活する。  */
     /* ================================================================ */
-#if 0  /* §BUG-CTX D-3: デバッグ kprintf 無効化 */
+#if 0  /* §BUG-CTX D-3: デバッグコード整理でコメントアウト */
     {
         volatile u8 *sw4 = (volatile u8 *)0xA3FEE;
         u8 val = *sw4;
@@ -389,7 +389,7 @@ static void v86_session_run_core(void)
         }
     }
 
-#if 0  /* §BUG-CTX D-3: デバッグ kprintf 無効化 */
+#if 0  /* §BUG-CTX D-3: デバッグコード整理でコメントアウト */
     {
         extern volatile u32 tick_count;
         u8 imr = inp(0x02);
@@ -453,22 +453,10 @@ static void v86_session_run_core(void)
         __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
         __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
     }
-
+    kprintf(0x0A,"[V86] TEST");
     if (exec_setjmp(v86_session_jmpbuf) == 0) {
-#if 0  /* §BUG-CTX ホットフィックス無効化: 初回設定(L260)のみでテスト */
-        /* ★ ホットフィックス: ctx がスタック破壊で壊れる問題 (§BUG-CTX)
-         *
-         * v86_session_run_core() のローカル変数 ctx (アドレス ~0xEFF6xx) が
-         * L260 での初期化後、L470 に到達するまでの間にスタック上で破壊される。
-         * 観測: ctx.eip = 0x0014 (本来 0x0000)。
-         *
-         * 原因未特定のため、v86_enter() 直前で ctx 全体を再設定する。
-         * 根本原因が判明したらこのブロックを除去すること。
-         */
-        if (ctx.eip != 0x0000) {
-            kprintf(0xE1, "[V86] WARNING: ctx corrupted! eip=%X (expected 0)\n",
-                    (unsigned)ctx.eip);
-        }
+        /* ★ ホットフィックス: ctx を v86_enter 直前で再設定 (§BUG-CTX)
+         * ctx が static でも破壊される可能性があるため、確実に正しい値で enter */
         ctx.eip    = 0x0000;
         ctx.cs     = IPL_SEG;
         ctx.eflags = EFLAGS_VM | EFLAGS_IF;
@@ -478,7 +466,174 @@ static void v86_session_run_core(void)
         ctx.ds     = IPL_SEG;
         ctx.fs     = 0x0000;
         ctx.gs     = 0x0000;
+
+        /* §BUG-CTX 診断: v86_enter 直前の ctx ダンプ — デバッグ整理でコメントアウト */
+#if 0
+        serial_puts_polled("[V86] ctx FINAL: ");
+        serial_put_hex32_polled((u32)&ctx);
+        serial_puts_polled(" eip=");
+        serial_put_hex32_polled(ctx.eip);
+        serial_puts_polled(" cs=");
+        serial_put_hex32_polled(ctx.cs);
+        serial_puts_polled(" fl=");
+        serial_put_hex32_polled(ctx.eflags);
+        serial_puts_polled(" esp=");
+        serial_put_hex32_polled(ctx.esp);
+        serial_puts_polled(" ss=");
+        serial_put_hex32_polled(ctx.ss);
+        serial_puts_polled(" es=");
+        serial_put_hex32_polled(ctx.es);
+        serial_puts_polled(" ds=");
+        serial_put_hex32_polled(ctx.ds);
+        serial_puts_polled("\n");
 #endif
+
+        /* ★ 診断: v86_enter 直前のアドレス検証 */
+        {
+            u32 cr3_val, *pd, *pt;
+            u32 esp0_addr = tss_get_esp0();
+            u32 kstack_addr = (u32)&v86_kstack[0];
+            u32 ctx_addr = (u32)&ctx;
+            u32 idt_buf[2];
+            u32 idt_addr, idt_limit;
+
+            serial_puts_polled("[V86-DIAG] ESP0=");
+            serial_put_hex32_polled(esp0_addr);
+            serial_puts_polled(" kstack=");
+            serial_put_hex32_polled(kstack_addr);
+            serial_puts_polled("-");
+            serial_put_hex32_polled(kstack_addr + sizeof(v86_kstack));
+            serial_puts_polled("\n");
+
+            serial_puts_polled("[V86-DIAG] ctx=");
+            serial_put_hex32_polled(ctx_addr);
+            serial_puts_polled(" IPL@");
+            serial_put_hex32_polled(0x1FC00);
+            serial_puts_polled("\n");
+
+            /* SIDT: 6バイト構造 (limit:2B + base:4B)
+             * u32[2] で受けると:
+             *   buf[0] = limit(16) | base_lo(16)
+             *   buf[1] = base_hi(16) | (余剰16) */
+            __asm__ volatile ("sidt %0" : "=m"(idt_buf));
+            idt_limit = idt_buf[0] & 0xFFFF;
+            idt_addr = (idt_buf[0] >> 16) | (idt_buf[1] << 16);
+            serial_puts_polled("[V86-DIAG] IDT base=");
+            serial_put_hex32_polled(idt_addr);
+            serial_puts_polled(" limit=");
+            serial_put_hex32_polled(idt_limit);
+            serial_puts_polled("\n");
+
+            /* IDT[13] (#GP) エントリの内容をダンプ */
+            {
+                u32 *idt = (u32 *)idt_addr;
+                u32 lo = idt[13 * 2];      /* オフセット下位16 + セレクタ */
+                u32 hi = idt[13 * 2 + 1];  /* フラグ + オフセット上位16 */
+                u32 handler = (lo & 0xFFFF) | (hi & 0xFFFF0000UL);
+                u16 sel = (u16)(lo >> 16);
+                u8 flags = (u8)(hi >> 8);
+                serial_puts_polled("[V86-DIAG] IDT[13] handler=");
+                serial_put_hex32_polled(handler);
+                serial_puts_polled(" sel=");
+                serial_put_hex32_polled((u32)sel);
+                serial_puts_polled(" flags=");
+                serial_put_hex32_polled((u32)flags);
+                serial_puts_polled(flags & 0x80 ? " PRESENT" : " NOT-PRESENT!");
+                serial_puts_polled("\n");
+            }
+
+            /* PTE検証: ESP0, IPL(0x1FC00), IDT, Page0(0x000), CR2地点(0x4F8) */
+            __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3_val));
+            pd = (u32 *)cr3_val;
+            {
+                u32 addrs[5];
+                const char *names[5];
+                int ai;
+                addrs[0] = esp0_addr;  names[0] = "ESP0";
+                addrs[1] = 0x1FC00;    names[1] = "IPL ";
+                addrs[2] = idt_addr;   names[2] = "IDT ";
+                addrs[3] = 0x00000;    names[3] = "PG0 ";
+                addrs[4] = 0x004F8;    names[4] = "BDA ";
+                for (ai = 0; ai < 5; ai++) {
+                    u32 pdi = addrs[ai] >> 22;
+                    u32 pti = (addrs[ai] >> 12) & 0x3FF;
+                    u32 pde = pd[pdi];
+                    u32 pte = 0;
+                    if (pde & 1) {
+                        pt = (u32 *)(pde & 0xFFFFF000UL);
+                        pte = pt[pti];
+                    }
+                    serial_puts_polled("[V86-DIAG] ");
+                    serial_puts_polled(names[ai]);
+                    serial_puts_polled(" PDE=");
+                    serial_put_hex32_polled(pde);
+                    serial_puts_polled(" PTE=");
+                    serial_put_hex32_polled(pte);
+                    serial_puts_polled(pte & 1 ? " P" : " -");
+                    serial_puts_polled(pte & 2 ? "W" : "R");
+                    serial_puts_polled(pte & 4 ? "U" : "S");
+                    serial_puts_polled("\n");
+                }
+            }
+
+            /* IPLコード先頭 16バイトダンプ */
+            {
+                volatile u8 *ipl = (volatile u8 *)0x1FC00UL;
+                int bi;
+                serial_puts_polled("[V86-DIAG] IPL@1FC00: ");
+                for (bi = 0; bi < 16; bi++) {
+                    serial_put_hex32_polled((u32)ipl[bi]);
+                    serial_puts_polled(" ");
+                }
+                serial_puts_polled("\n");
+            }
+
+            /* IVT先頭 8エントリダンプ (INT 00h-07h) */
+            {
+                volatile u32 *ivt = (volatile u32 *)0x00000UL;
+                serial_puts_polled("[V86-DIAG] IVT[00-07]: ");
+                {
+                    int vi;
+                    for (vi = 0; vi < 8; vi++) {
+                        serial_put_hex32_polled(ivt[vi]);
+                        serial_puts_polled(" ");
+                    }
+                }
+                serial_puts_polled("\n");
+                /* IVT[08h] (IRQ0タイマ) と IVT[1Bh] (ディスクBIOS) */
+                serial_puts_polled("[V86-DIAG] IVT[08]=");
+                serial_put_hex32_polled(ivt[0x08]);
+                serial_puts_polled(" IVT[18]=");
+                serial_put_hex32_polled(ivt[0x18]);
+                serial_puts_polled(" IVT[1B]=");
+                serial_put_hex32_polled(ivt[0x1B]);
+                serial_puts_polled("\n");
+            }
+
+            /* BIOS ROM (FD80:0000) 先頭 32バイトダンプ */
+            {
+                volatile u8 *rom = (volatile u8 *)0xFD800UL;
+                int bi;
+                serial_puts_polled("[V86-DIAG] ROM@FD800: ");
+                for (bi = 0; bi < 32; bi++) {
+                    serial_put_hex32_polled((u32)rom[bi]);
+                    serial_puts_polled(" ");
+                }
+                serial_puts_polled("\n");
+            }
+
+            /* IPL ブートコード (オフセット 0x3E から 16バイト) */
+            {
+                volatile u8 *ipl = (volatile u8 *)0x1FC3EUL;
+                int bi;
+                serial_puts_polled("[V86-DIAG] IPL@1FC3E: ");
+                for (bi = 0; bi < 16; bi++) {
+                    serial_put_hex32_polled((u32)ipl[bi]);
+                    serial_puts_polled(" ");
+                }
+                serial_puts_polled("\n");
+            }
+        }
         v86_enter(&ctx);
     }
 
@@ -504,11 +659,10 @@ static void v86_session_run_core(void)
             "mov %%esp, %%esi\n\t"   /* 現在のESPを保存 */
             "mov %%ebp, %%edi\n\t"   /* 現在のEBPを保存 */
             "mov %0, %%esp\n\t"      /* 一時スタックに切り替え */
-            "call v86_debug_snapshot_memsw_exit\n\t" /* T2.1: MEMSW exitスナップショット */
-            "push $v86_bda_exit_tag\n\t"  /* T1.3: BDA exitスナップショット */
-            "call v86_debug_dump_bda_named\n\t"
-            "add $4, %%esp\n\t"
-            "call v86_debug_dump_memory_pre\n\t" /* teardown前にメモリダンプ */
+            /* デバッグ整理: teardown前デバッグ呼び出しをNOP化 */
+            "nop\n\t"
+            "nop\n\t"
+            "nop\n\t"
             "call v86_mem_teardown\n\t" /* ページテーブル復元 */
             "mov %%esi, %%esp\n\t"   /* ESPを元に戻す (実体が復活) */
             "mov %%edi, %%ebp\n\t"   /* EBPも復元 */
@@ -538,7 +692,7 @@ static void v86_session_run_core(void)
     v86_debug_dump_session();
 
     /* ディスクI/Oログをダンプ (デバッグ用) */
-    v86_disk_dump_log();
+    if (v86_debug_enabled) v86_disk_dump_log();
 
     /* リソース解放 */
     v86_disk_clear();
@@ -694,7 +848,7 @@ static int v86_boot_image(const char *path, const char *cmdline)
     if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
 
     /* T1.3: BDA init スナップショット */
-    v86_debug_dump_bda_named("init");
+    if (v86_debug_enabled) v86_debug_dump_bda_named("init");
 
     /* T2.3: IVT 初期スナップショット */
     if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
@@ -730,7 +884,7 @@ static int v86_boot_image(const char *path, const char *cmdline)
                 (unsigned)ipl_size, IPL_SEG);
 
         /* T1.3: BDA post_ipl スナップショット */
-        v86_debug_dump_bda_named("post_ipl");
+        if (v86_debug_enabled) v86_debug_dump_bda_named("post_ipl");
     }
 
     /* ネイティブモード: 画面表示を強制有効化 */
@@ -847,7 +1001,7 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
     if (v86_debug_enabled) v86_debug_snapshot_memsw_init();
 
     /* T1.3: BDA init スナップショット */
-    v86_debug_dump_bda_named("init");
+    if (v86_debug_enabled) v86_debug_dump_bda_named("init");
 
     /* T2.3: IVT 初期スナップショット */
     if (v86_debug_enabled) v86_debug_snapshot_ivt_init();
@@ -886,7 +1040,7 @@ int v86_boot_physical_fdd_ex(int drv, int media, const char *cmdline)
             drv, media);
 
     /* T1.3: BDA post_ipl スナップショット */
-    v86_debug_dump_bda_named("post_ipl");
+    if (v86_debug_enabled) v86_debug_dump_bda_named("post_ipl");
 
     /* デバッグヘッダ即時書き込み */
     v86_debug_write_header("PhysicalFDD_EX", "(physical)", cmdline);
