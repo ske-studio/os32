@@ -383,35 +383,23 @@ int v86_gp_handler(u32 *regs)
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
 
-    /* ★ トリプルフォルト調査: 最初の10回の#GPをシリアル出力 */
-    if (v86_gp_count <= 10) {
-        u8 *first_ip = (u8 *)v86_phys_addr(regs[V86_REG_CS], regs[V86_REG_EIP]);
-        extern void serial_puts_polled(const char *s);
-        extern void serial_put_hex32_polled(u32 val);
-        serial_puts_polled("[V86-GP#");
-        serial_put_hex32_polled(v86_gp_count);
-        serial_puts_polled("] CS:IP=");
-        serial_put_hex32_polled(regs[V86_REG_CS] & 0xFFFF);
-        serial_puts_polled(":");
-        serial_put_hex32_polled(regs[V86_REG_EIP] & 0xFFFF);
-        serial_puts_polled(" op=");
-        serial_put_hex32_polled((u32)first_ip[0]);
-        serial_puts_polled(" ");
-        serial_put_hex32_polled((u32)first_ip[1]);
-        serial_puts_polled(" SS:SP=");
-        serial_put_hex32_polled(regs[V86_REG_SS] & 0xFFFF);
-        serial_puts_polled(":");
-        serial_put_hex32_polled(regs[V86_REG_ESP] & 0xFFFF);
-        serial_puts_polled("\n");
+    /* ★ 最初の#GP呼び出し: V86エントリ直後のレジスタ状態をダンプ */
+    if (v86_gp_count == 1 && v86_debug_enabled) {
+        u8 *first_ip = v86_linear(regs[V86_REG_CS], regs[V86_REG_EIP]);
+        kprintf(0x0A, "[V86] 1st GP: CS:IP=%04X:%04X DS=%04X SS:SP=%04X:%04X op=%02X %02X\n",
+                (unsigned)(regs[V86_REG_CS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_EIP] & 0xFFFF),
+                (unsigned)(regs[V86_REG_DS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_SS] & 0xFFFF),
+                (unsigned)(regs[V86_REG_ESP] & 0xFFFF),
+                (unsigned)first_ip[0], (unsigned)first_ip[1]);
     }
 
     /* IRQ受信窓の開放: GP頻度が高くIF=0時間が長くなりがちなため、
      * 入口で1度だけSTI/CLIを叩いて保留IRQを排出する。
-     * (HLTは行わない — IRQ無し時の不要待ちを避けるため)
-     *
-     * ★ トリプルフォルト調査: IRQ介入が原因か検証のため一時無効化 */
-    /*_enable();*/   /* STI — 保留IRQを即配送 */
-    /*_disable();*/  /* CLI — GP本体処理は割り込み禁止で実行 */
+     * (HLTは行わない — IRQ無し時の不要待ちを避けるため) */
+    _enable();   /* STI — 保留IRQを即配送 */
+    _disable();  /* CLI — GP本体処理は割り込み禁止で実行 */
 
     /* ★ ISR からのタイムアウト要求を即座に拾う
      * (ISRではフラグのみセット、ここでv86_request_exitを安全に呼ぶ) */
@@ -743,9 +731,33 @@ int v86_gp_handler(u32 *regs)
             break;
         }
 
-        /* INT 18h, 1Ch, 11h, 12h 等: IVT転送 → BIOS ROM内ハンドラ実行
-         * ROM内コードがCLI/STI/IN/OUTを実行すると#GPが発生し、
-         * 既存の仮想化ディスパッチャが処理する。 */
+        /* ============================================================ */
+        /*  §13 BIOS HLE: INT 18h/1Ch/11h/12h                          */
+        /*                                                              */
+        /*  これらの HLE 関数は v86_bios.c に実装済み。                  */
+        /*  BIOS ROM への IVT 転送を行わず、ここで直接 HLE 処理する。   */
+        /*  (方法 C: BIOS ROM 実行排除 — V86_STATUS.md §13 参照)        */
+        /* ============================================================ */
+        if (intno == 0x18) {
+            v86_bios_int18(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+            break;
+        }
+        if (intno == 0x1C) {
+            v86_bios_int1c(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+            break;
+        }
+        if (intno == 0x11) {
+            v86_bios_int11(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+            break;
+        }
+        if (intno == 0x12) {
+            v86_bios_int12(regs);
+            regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+            break;
+        }
 
         /* 通常のINT: IVT参照してV86内ハンドラに転送 */
         {
@@ -783,6 +795,40 @@ int v86_gp_handler(u32 *regs)
                         buf[p++] = '\r'; buf[p++] = '\n'; buf[p] = '\0';
                         serial_puts(buf);
                         dummy_ivt_count++;
+                    }
+                }
+                break;
+            }
+
+            /* ============================================================ */
+            /*  §13 ROM行きIVTインターセプト (Layer 1)                       */
+            /*                                                              */
+            /*  IVTハンドラが BIOS ROM 領域 (seg >= 0xF000) を指す場合、     */
+            /*  IVT 転送を阻止して CF=1/AH=0x86 で即復帰する。              */
+            /*  BIOS ROM コードの V86 直接実行はトリプルフォルトを引き起こす  */
+            /*  ため、全て HLE で処理するか未サポート応答を返す。            */
+            /* ============================================================ */
+            if (handler_seg >= 0xF000U) {
+                regs[V86_REG_EFLAGS] |= 1;   /* CF=1 */
+                regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL)
+                                  | (0x86UL << 8);
+                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
+                /* シリアルログ (最初の20件のみ) */
+                {
+                    static int rom_blocked_count = 0;
+                    if (rom_blocked_count < 20) {
+                        extern void serial_puts(const char *s);
+                        static const char hex[] = "0123456789ABCDEF";
+                        char buf[40];
+                        int p = 0;
+                        const char *msg = "\r\n[V86] ROM-blocked INT 0x";
+                        int mi;
+                        for (mi = 0; msg[mi]; mi++) buf[p++] = msg[mi];
+                        buf[p++] = hex[(intno >> 4) & 0xF];
+                        buf[p++] = hex[intno & 0xF];
+                        buf[p++] = '\r'; buf[p++] = '\n'; buf[p] = '\0';
+                        serial_puts(buf);
+                        rom_blocked_count++;
                     }
                 }
                 break;
@@ -1092,6 +1138,8 @@ v86_gp_end:
                 u16 handler_off = (u16)(ivt[0x08] & 0xFFFF);
                 u16 handler_seg = (u16)(ivt[0x08] >> 16);
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x08]);
+                /* §13 ROM行きIVTインターセプト (Layer 1): BIOS ROMハンドラをスキップ */
+                if (handler_seg >= 0xF000U) is_dummy = 1;
 
                 v86_irq0_inject_count++;
                 if (is_dummy) v86_irq0_gp_skip_ivt++;
@@ -1127,6 +1175,8 @@ v86_gp_end:
                 u16 handler_off = (u16)(ivt[0x09] & 0xFFFF);
                 u16 handler_seg = (u16)(ivt[0x09] >> 16);
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x09]);
+                /* §13 ROM行きIVTインターセプト (Layer 1) */
+                if (handler_seg >= 0xF000U) is_dummy = 1;
 
                 v86_pending_irq &= ~(1U << 1);
 
@@ -1158,6 +1208,8 @@ v86_gp_end:
                         u16 handler_off = (u16)(ivt[int_no] & 0xFFFF);
                         u16 handler_seg = (u16)(ivt[int_no] >> 16);
                         int is_dummy = V86_IS_DUMMY_IVT(ivt[int_no]);
+                        /* §13 ROM行きIVTインターセプト (Layer 1) */
+                        if (handler_seg >= 0xF000U) is_dummy = 1;
 
                         v86_pending_irq &= ~(1U << irq);
 
@@ -1400,14 +1452,22 @@ void v86_inject_timer_irq(u32 *regs)
         handler_off = (u16)(ivt[0x08] & 0xFFFF);
         handler_seg = (u16)(ivt[0x08] >> 16);
 
+        /* §13 ROM行きIVTインターセプト (Layer 1): BIOS ROMハンドラはスキップ */
+        if (handler_seg >= 0xF000U) {
+            is_dummy_ivt = 1;
+        }
+
         v86_irq0_inject_count++;
 
         /* 仮想IFクリア */
         v86_virtual_if = 0;
         v86_pending_irq &= ~(1U << 0);
 
-        /* ゲストスタックにフレームをpushしてハンドラに転送 */
-        v86_hw_inject_irq(regs, handler_seg, handler_off);
+        /* ゲストスタックにフレームをpushしてハンドラに転送
+         * ダミー/ROM行きIVTの場合はスキップ (注入せずIRQを消化) */
+        if (!is_dummy_ivt) {
+            v86_hw_inject_irq(regs, handler_seg, handler_off);
+        }
     } else {
         /* Defer interrupt if IF=0 */
         v86_irq0_noif_count++;

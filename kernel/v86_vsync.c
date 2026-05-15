@@ -186,6 +186,9 @@ void v86_inject_vsync_irq(u32 *regs)
     /* ダミーIVT (IRET) ならスキップ */
     if (V86_IS_DUMMY_IVT(ivt[0x0A])) return;
 
+    /* §13 ROM行きIVTインターセプト (Layer 1) */
+    if (handler_seg >= 0xF000U) return;
+
     /* ISRにビットを立てる (EOI待ち) */
     v86_pic_set_isr(0, isr | 0x04);
 

@@ -497,9 +497,14 @@ void v86_mem_setup(void)
         paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
     }
 
-    /* 仮想 0xF0000-0xFFFFF → 物理 0xF0000 (BIOS ROM, R/O) */
+    /* 仮想 0xF0000-0xFFFFF → 物理 0xF0000 (BIOS ROM)
+     * §13 方法C Layer 2: PTE_USER を除去し V86 から実行不可にする。
+     * Layer 1 (GPハンドラでのROM行きIVTインターセプト) が主防御。
+     * PTE_USER なしはセーフガード — 万一 Layer 1 を抜けた場合に
+     * #PF で捕捉できる。R/O は BIOS ROM データ読み出しが必要な
+     * ケースに備えて維持 (ただし V86 Ring3 からはアクセス不可)。 */
     for (addr = 0xF0000; addr <= 0xFF000; addr += PAGE_SIZE) {
-        paging_set_page(addr, addr, PTE_PRESENT | PTE_USER);  /* R/O */
+        paging_set_page(addr, addr, PTE_PRESENT);  /* Supervisor only */
     }
 
     /* ================================================================== */
