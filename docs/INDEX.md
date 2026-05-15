@@ -63,6 +63,17 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 > **注意:** PC9800Bible と UNDOCUMENTED の記述が矛盾する場合は、UNDOCUMENTED の方を優先してください。
 
+## 参考ソースコード (DOS/BIOS リファレンス)
+
+V86 サブシステムの DOS 互換性実装で参照するソースコード:
+
+| ソース | パス | 内容 |
+|--------|------|------|
+| **NP21/W** | [`src/np21w-src-main/`](../../../../src/np21w-src-main/) | PC-9801 エミュレータ。BIOS ROM、I/O ポートエミュレーション |
+| **MS-DOS 4.0** | [`src/MS-DOS/v4.0/`](../../../../src/MS-DOS/v4.0/) | Microsoft 公式 MS-DOS 4.0 ソース。IO.SYS/MSDOS.SYS 初期化 |
+| **FreeDOS(98) カーネル** | [`src/fdkernel/`](../../../../src/fdkernel/) | FreeDOS PC-98 対応。NEC98.txt に固有変更点 |
+| **FreeDOS(98) COMMAND.COM** | [`src/freecom_dbcs2/`](../../../../src/freecom_dbcs2/) | DBCS 対応コマンドインタプリタ |
+
 ## ログ (歴史的記録)
 
 | ドキュメント | 内容 |
