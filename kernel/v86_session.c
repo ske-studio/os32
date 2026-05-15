@@ -351,44 +351,21 @@ static void v86_session_run_core(void)
     }
 
     /* ================================================================ */
-    /*  §7.6 メモリスイッチ SW4 (0xA3FEE) の初期化                      */
+    /*  §BUG-CTX 調査 D-3: 以下のデバッグ kprintf を無効化               */
     /*                                                                  */
-    /*  PC-9800Bible §1-6: SW4 bit3 = サウンドボード有無                */
-    /*  V86ではBIOS POSTをスキップするため、メモリスイッチが             */
-    /*  未初期化(=0)の場合がある。ゲームがこのフラグを参照して           */
-    /*  FM音楽の有効/無効を判定するため、明示的に設定する。              */
-    /*                                                                  */
-    /*  メモリスイッチ書き込み手順:                                      */
-    /*    1. I/O 68H に 0DH を出力 (書き込み許可)                       */
-    /*    2. メモリに書き込み                                            */
-    /*    3. I/O 68H に 0CH を出力 (書き込み禁止)                       */
+    /*  kprintf チェーン実行中 (ESP が深い位置) に IRQ0 が入り、          */
+    /*  ISR スタック消費と合成して ctx 領域に到達する仮説を検証。         */
+    /*  Phase 1 調査完了後にこのブロックを削除または条件付きで復活する。  */
     /* ================================================================ */
+#if 0  /* §BUG-CTX D-3: デバッグ kprintf 無効化 */
     {
         volatile u8 *sw4 = (volatile u8 *)0xA3FEE;
         u8 val = *sw4;
         kprintf(0x0A, "[V86] MemSW4(A3FEE)=0x%02X", (unsigned)val);
-        /* §7.6 DOS5 IO.SYS 互換性:
-         * SW4 bit3=1 (サウンドボードあり) に設定すると、IO.SYS は
-         * CC000h-CFFFF のサウンドBIOS ROM の存在を検証する。
-         * NP21/W上ではこの領域にROMが存在しない (全て0xFF) ため、
-         * 「基本BIOS.ROMが見つかりません」エラーで停止する。
-         *
-         * 対策: DOS ブート時は SW4 bit3=0 のままにする。
-         * Ys等のゲームは BIOS SW4 を参照せず FM 音源ポートに直接
-         * アクセスして検出するため、bit3=0 でも問題ない。
-         *
-         * 将来 CC000h にダミー ROM を配置した場合は bit3=1 に復活させる。 */
         kprintf(0x0A, " (SndBoard OFF for DOS compat)\n");
         (void)val;
     }
 
-    /* ================================================================ */
-    /*  §7.7 サウンドBIOS ROM (CC000h) の確認                           */
-    /*                                                                  */
-    /*  PC-9800Bible §1-6: SW4 bit3=1 のとき CC000-CFFFF に             */
-    /*  サウンドBIOS ROMが存在する。ゲームがこの領域を参照して           */
-    /*  FM音楽初期化の可否を判定している可能性がある。                   */
-    /* ================================================================ */
     {
         volatile u8 *snd_rom = (volatile u8 *)0xCC000;
         int si;
@@ -397,22 +374,28 @@ static void v86_session_run_core(void)
             kprintf(0x0A, "%02X", (unsigned)snd_rom[si]);
         kprintf(0x0A, "\n");
     }
+#endif /* §BUG-CTX D-3 */
 
-    /* ★ デバッグ: V86 enter前にPIC IMRとtick_countを確認
-     * IRQ0がマスクされている場合はアンマスクする。 */
+    /* IRQ0 アンマスク (機能コード — kprintf を除去して残す) */
+    {
+        u8 imr = inp(0x02);
+        if (imr & 0x01) {
+            outp(0x02, imr & ~0x01);
+        }
+    }
+
+#if 0  /* §BUG-CTX D-3: デバッグ kprintf 無効化 */
     {
         extern volatile u32 tick_count;
         u8 imr = inp(0x02);
         kprintf(0x0A, "[V86] PRE-ENTER: IMR=0x%02X tick=%u\n",
                 (unsigned)imr, (unsigned)tick_count);
         if (imr & 0x01) {
-            /* IRQ0がマスクされている! アンマスクする */
             kprintf(0xE1, "[V86] WARNING: IRQ0 masked! Unmasking...\n");
             outp(0x02, imr & ~0x01);
         }
     }
 
-    /* debug: V86 enter PDE/PTE check via CR3 */
     {
         u32 cr3_val, pde0, pte0, pte_ipl;
         u32 *pd, *pt;
@@ -423,7 +406,6 @@ static void v86_session_run_core(void)
         pde0 = pd[0];
         pt = (u32 *)(pde0 & 0xFFFFF000UL);
         pte0 = pt[0];
-        /* IPL_SEG (0x1FC0) のリニアアドレス = 0x1FC00 */
         ipl_va = 0x1FC00UL;
         ipl_pti = (ipl_va >> 12) & 0x3FF;
         pte_ipl = pt[ipl_pti];
@@ -442,7 +424,6 @@ static void v86_session_run_core(void)
                 (pte_ipl & 1) ? "P" : "-",
                 (pte_ipl & 2) ? "W" : "R",
                 (pte_ipl & 4) ? "U" : "S");
-        /* IDT ページの PTE */
         __asm__ volatile ("sidt %0" : "=m"(idt_base));
         {
             u32 idt_addr = *(u32 *)((u8 *)&idt_base + 2);
@@ -457,6 +438,7 @@ static void v86_session_run_core(void)
                     idt_addr, pte_idt, tss_get_esp0());
         }
     }
+#endif /* §BUG-CTX D-3 */
 
     /* V86 enter 直前に TLB を明示的にフラッシュ
      * paging_set_page() が各呼び出しでフラッシュするが、
