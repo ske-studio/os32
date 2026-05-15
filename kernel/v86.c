@@ -824,39 +824,10 @@ int v86_gp_handler(u32 *regs)
                 break;
             }
 
-            /* ============================================================ */
-            /*  §13 ROM行きIVTインターセプト (Layer 1)                       */
-            /*                                                              */
-            /*  IVTハンドラが BIOS ROM 領域 (seg >= 0xF000) を指す場合、     */
-            /*  IVT 転送を阻止して CF=1/AH=0x86 で即復帰する。              */
-            /*  BIOS ROM コードの V86 直接実行はトリプルフォルトを引き起こす  */
-            /*  ため、全て HLE で処理するか未サポート応答を返す。            */
-            /* ============================================================ */
-            if (handler_seg >= 0xF000U) {
-                regs[V86_REG_EFLAGS] |= 1;   /* CF=1 */
-                regs[V86_REG_EAX] = (regs[V86_REG_EAX] & 0xFFFF00FFUL)
-                                  | (0x86UL << 8);
-                regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 2) & 0xFFFF;
-                /* シリアルログ (最初の20件のみ) */
-                {
-                    static int rom_blocked_count = 0;
-                    if (rom_blocked_count < 20) {
-                        extern void serial_puts(const char *s);
-                        static const char hex[] = "0123456789ABCDEF";
-                        char buf[40];
-                        int p = 0;
-                        const char *msg = "\r\n[V86] ROM-blocked INT 0x";
-                        int mi;
-                        for (mi = 0; msg[mi]; mi++) buf[p++] = msg[mi];
-                        buf[p++] = hex[(intno >> 4) & 0xF];
-                        buf[p++] = hex[intno & 0xF];
-                        buf[p++] = '\r'; buf[p++] = '\n'; buf[p] = '\0';
-                        serial_puts(buf);
-                        rom_blocked_count++;
-                    }
-                }
-                break;
-            }
+            /* NP21/W ハイブリッド方式: ROM 行き IVT 転送を許可。
+             * BIOS ROM コードは V86 で直接実行される。
+             * ROM 内の IN/OUT/CLI/STI は GP で捕捉される。 */
+
 
             /* V86スタックにフラグ/CS/IPをpush (リアルモードINTと同じ) */
             v86_push16(regs, (u16)(regs[V86_REG_EFLAGS] & 0xFFFF));
