@@ -384,22 +384,37 @@ void v86_iocore_init(void)
         v86_io_out[i] = fdc_out;
     }
 
-    /* ---- 7. DMA 8237A ch2 ---- */
-    /* 0x09: ch2アドレス, 0x0B: ch2ワードカウント,
-     * 0x15: マスク, 0x17: モード, 0x19: FF_CLR,
-     * 0x23: ch2バンク */
-    v86_io_inp[0x09] = dma_inp;
-    v86_io_out[0x09] = dma_out;
-    v86_io_inp[0x0B] = dma_inp;
-    v86_io_out[0x0B] = dma_out;
-    v86_io_inp[0x15] = dma_inp;
-    v86_io_out[0x15] = dma_out;
-    v86_io_inp[0x17] = dma_inp;
-    v86_io_out[0x17] = dma_out;
-    v86_io_inp[0x19] = dma_inp;
-    v86_io_out[0x19] = dma_out;
-    v86_io_inp[0x23] = dma_inp;
-    v86_io_out[0x23] = dma_out;
+    /* ---- 7. DMA 8237A 全4チャネル ---- */
+    /* NP21/W io/dmac.c 準拠: 全チャネルのアドレス/カウント/制御/バンクを仮想化。
+     * BIOS ROM初期化が実DMAに触れるとOS32のDMA設定が破壊されるため必須。 */
+    /* ch0: 0x01(addr), 0x03(count) */
+    v86_io_inp[0x01] = dma_inp;  v86_io_out[0x01] = dma_out;
+    v86_io_inp[0x03] = dma_inp;  v86_io_out[0x03] = dma_out;
+    /* ch1: 0x05(addr), 0x07(count) */
+    v86_io_inp[0x05] = dma_inp;  v86_io_out[0x05] = dma_out;
+    v86_io_inp[0x07] = dma_inp;  v86_io_out[0x07] = dma_out;
+    /* ch2: 0x09(addr), 0x0B(count) — 既存 */
+    v86_io_inp[0x09] = dma_inp;  v86_io_out[0x09] = dma_out;
+    v86_io_inp[0x0B] = dma_inp;  v86_io_out[0x0B] = dma_out;
+    /* ch3: 0x0D(addr), 0x0F(count) */
+    v86_io_inp[0x0D] = dma_inp;  v86_io_out[0x0D] = dma_out;
+    v86_io_inp[0x0F] = dma_inp;  v86_io_out[0x0F] = dma_out;
+    /* 制御: 0x11(SWリクエスト), 0x13(ステータス/コマンド) */
+    v86_io_inp[0x11] = dma_inp;  v86_io_out[0x11] = dma_out;
+    v86_io_inp[0x13] = dma_inp;  v86_io_out[0x13] = dma_out;
+    /* 制御: 0x15(シングルマスク), 0x17(モード), 0x19(FF CLR) — 既存 */
+    v86_io_inp[0x15] = dma_inp;  v86_io_out[0x15] = dma_out;
+    v86_io_inp[0x17] = dma_inp;  v86_io_out[0x17] = dma_out;
+    v86_io_inp[0x19] = dma_inp;  v86_io_out[0x19] = dma_out;
+    /* 制御: 0x1B(マスタクリア), 0x1D(全マスクリセット), 0x1F(全マスク) */
+    v86_io_out[0x1B] = dma_out;
+    v86_io_out[0x1D] = dma_out;
+    v86_io_inp[0x1F] = dma_inp;  v86_io_out[0x1F] = dma_out;
+    /* バンク: 0x21(ch1), 0x23(ch2), 0x25(ch3), 0x27(ch0) */
+    v86_io_inp[0x21] = dma_inp;  v86_io_out[0x21] = dma_out;
+    v86_io_inp[0x23] = dma_inp;  v86_io_out[0x23] = dma_out;
+    v86_io_inp[0x25] = dma_inp;  v86_io_out[0x25] = dma_out;
+    v86_io_inp[0x27] = dma_inp;  v86_io_out[0x27] = dma_out;
 
     /* ---- 8. VSYNC / GDCステータス ---- */
     /* 0x64: VSYNC割り込みトリガ */

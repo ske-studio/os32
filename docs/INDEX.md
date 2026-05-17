@@ -74,6 +74,9 @@ V86 サブシステムの DOS 互換性実装で参照するソースコード:
 | **FreeDOS(98) カーネル** | [`src/fdkernel/`](../../../../src/fdkernel/) | FreeDOS PC-98 対応。NEC98.txt に固有変更点 |
 | **FreeDOS(98) COMMAND.COM** | [`src/freecom_dbcs2/`](../../../../src/freecom_dbcs2/) | DBCS 対応コマンドインタプリタ |
 
+> 📖 各ソースのディレクトリ構造・モジュール概要・逆引きトピックマップは
+> [リファレンスソース概要索引](../../../../docs/reference_sources/INDEX.md) を参照。
+
 ## ログ (歴史的記録)
 
 | ドキュメント | 内容 |

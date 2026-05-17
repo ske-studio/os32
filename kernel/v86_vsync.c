@@ -189,6 +189,9 @@ void v86_inject_vsync_irq(u32 *regs)
     /* §13 ROM行きIVTインターセプト (Layer 1) */
     if (handler_seg >= 0xF000U) return;
 
+    /* Layer 2: IO.SYSデフォルト「不正な割り込み」ハンドラ検出 */
+    if (v86_is_dos_default_handler(handler_seg, handler_off)) return;
+
     /* ISRにビットを立てる (EOI待ち) */
     v86_pic_set_isr(0, isr | 0x04);
 

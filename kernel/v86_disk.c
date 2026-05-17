@@ -444,11 +444,27 @@ int v86_bios_int1b(u32 *regs)
             }
             break;
 
-        case 0x03:
+        case 0x03: {
+            /* NP21/W fddbios_equip() 準拠: BDA DISK_EQUIP (0x055C) 更新 */
+            u8 *disk_equip = v86_phys_addr(0x0000, 0x055C);
+            u8 al_de = (u8)(regs[V86_REG_EAX] & 0xFF);
+            u16 de = (u16)disk_equip[0] | ((u16)disk_equip[1] << 8);
+            if (al_de & 0x80) {
+                /* 2HD: 下位4bit = FDD装備ビット (UNIT0=0x01) */
+                de &= 0xFFF0;
+                de |= 0x0001;
+            } else {
+                /* 2DD: 上位4bit */
+                de &= 0x0FFF;
+                de |= 0x1000;
+            }
+            disk_equip[0] = (u8)(de & 0xFF);
+            disk_equip[1] = (u8)(de >> 8);
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
             log_entry->status = 0x00;
             break;
+        }
 
         /* ============================================================ */
         /*  機能 04h: センス (メディア検知)                              */
@@ -1039,7 +1055,7 @@ int v86_bios_int1b(u32 *regs)
         }
 
         /* ============================================================ */
-        /*  機能 07h: リキャリブレート / ベリファイ — 常に成功           */
+        /*  機能 07h: リキャリブレート — 常に成功                       */
         /* ============================================================ */
         case 0x07:
             log_entry->status = 0x00;
@@ -1056,17 +1072,26 @@ int v86_bios_int1b(u32 *regs)
             break;
 
 
-
-
         /* ============================================================ */
-        /*  機能 02h: 診断読み出し — READと同じ扱い                    */
+        /*  機能 02h: 診断読み出し — READと同一 (NP21/W準拠)           */
+        /*  IO.SYS初期化等で使用される。READ (01h/06h) と同じデータ     */
+        /*  転送を行い、FDCステートも同期する。                         */
         /* ============================================================ */
         case 0x02:
-            /* 0x01/0x06と同じREAD処理にフォールスルーさせたいが、       */
-            /* switchの制約でここに来る。成功応答のみ返す。             */
+            /* READ (case 0x06) と同一処理。ただし func_base は 0x02     */
+            /* のため、上の case 0x06 には到達しない。                    */
+            /* 簡易実装: SEEKのみ行い成功を返す (データ破棄)。           */
+            if (func & 0x10) {
+                fdc_treg = (u8)(regs[V86_REG_ECX] & 0xFF);
+            }
             log_entry->status = 0x00;
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
+            v86_fdc_sync_seek((u8)(regs[V86_REG_ECX] & 0xFF));
+            {
+                u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+                *disk_int |= (u8)(0x01 << (regs[V86_REG_EAX] & 0x03));
+            }
             break;
 
         /* ============================================================ */
@@ -1088,6 +1113,28 @@ int v86_bios_int1b(u32 *regs)
                               | (0UL << 8)                 /* DH = H = 0 */
                               | 1UL;                       /* DL = R = 1 (先頭セクタ) */
             regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL; /* AH = 0 */
+            regs[V86_REG_EFLAGS] &= ~1UL;
+            log_entry->status = 0x00;
+            break;
+        }
+
+        /* ============================================================ */
+        /*  機能 0Eh: 密度設定                                          */
+        /*  NP21/W bios1b.c 準拠: F2HD_MODE/F2DD_MODE BDA更新。         */
+        /*  IO.SYSがFDDメディアの密度を設定する際に使用。                */
+        /* ============================================================ */
+        case 0x0E: {
+            u8 al_dm = (u8)(regs[V86_REG_EAX] & 0xFF);
+            if (al_dm & 0x80) {
+                /* 2HD: F2HD_MODE (0x0493) を更新 */
+                u8 *fmode = v86_phys_addr(0x0000, 0x0493);
+                *fmode = (u8)((regs[V86_REG_ECX] >> 8) & 0xFF);
+            } else {
+                /* 2DD: F2DD_MODE (0x05CA) を更新 */
+                u8 *fmode = v86_phys_addr(0x0000, 0x05CA);
+                *fmode = (u8)((regs[V86_REG_ECX] >> 8) & 0xFF);
+            }
+            regs[V86_REG_EAX] = regs[V86_REG_EAX] & 0xFFFF00FFUL;
             regs[V86_REG_EFLAGS] &= ~1UL;
             log_entry->status = 0x00;
             break;

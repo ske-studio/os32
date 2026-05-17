@@ -110,6 +110,7 @@ static struct {
     u8  drv;             /* 現在ドライブ番号 (0-3) */
     u8  hd;              /* 現在ヘッド番号 (0-1) */
     u8  ctrl;            /* CTRL レジスタ (0x94) の最後の書き込み値 */
+    u8  ctrl_be;         /* 0xBE: FDD切替レジスタ (chgreg) bit0: 0=2DD,1=2HD */
     int irq_after_seek;  /* RECALIBRATE/SEEK後に SENSE INTERRUPT が必要 */
 } vfdc;
 
@@ -302,6 +303,17 @@ static void fdc_execute_rw(void)
         fdc_set_result_ok(cyl, hd_reg & 1, next_sect, sec_n);
     }
     vfdc.result_total = 7;
+
+    /* ポートレベルREAD/WRITE完了: IRQ11 (1M FDD) をペンディング
+     * FreeDOS等の自前FDCドライバはIRQ11で BDA 0x055E の
+     * DISK_INTフラグがセットされるのを待つ。
+     * INT 1Bh HLEパスでは sync_rw() がIRQなしで同期するが、
+     * ポート直接操作パスではIRQ通知が必須。 */
+    v86_set_pending_irq(11);
+    {
+        u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+        *disk_int |= (u8)(0x01 << (vfdc.drv & 0x03));
+    }
 }
 
 
@@ -320,6 +332,13 @@ static void fdc_execute_read_id(void)
     vfdc.st0 = (u8)((hd_reg & 0x04U) | (vfdc.drv & 0x03U));
     fdc_set_result_ok(vfdc.pcn, hd_reg & 1, 1, g_sec_n);
     vfdc.result_total = 7;
+
+    /* READ ID完了: IRQ11ペンディング + BDA DISK_INTフラグセット */
+    v86_set_pending_irq(11);
+    {
+        u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+        *disk_int |= (u8)(0x01 << (vfdc.drv & 0x03));
+    }
 }
 
 /* ====================================================================== */
@@ -420,6 +439,13 @@ static void fdc_execute_format(void)
     vfdc.st0 = (u8)((hd_reg & 0x04U) | (vfdc.drv & 0x03U));
     fdc_set_result_ok(vfdc.pcn, hd_reg & 1, 1, sec_n);
     vfdc.result_total = 7;
+
+    /* FORMAT完了: IRQ11ペンディング + BDA DISK_INTフラグセット */
+    v86_set_pending_irq(11);
+    {
+        u8 *disk_int = v86_phys_addr(0x0000, 0x055E);
+        *disk_int |= (u8)(0x01 << (vfdc.drv & 0x03));
+    }
 }
 
 /* ====================================================================== */
@@ -480,19 +506,32 @@ static void fdc_execute_command(void)
         vfdc.drv = vfdc.cmd_buf[1] & 0x03U;
         vfdc.st0 = (u8)(vfdc.drv & 0x03U) | 0x20U; /* SE=1 (Seek End) */
         vfdc.irq_after_seek = 1;
-        /* リザルトなし: SENSE INTERRUPT で読み出す */
+        /* RECALIBRATE完了: IRQ11ペンディング */
+        v86_set_pending_irq(11);
         break;
 
     /* SENSE INTERRUPT STATUS (0x08): ST0 + PCN を返す
-     * FDCリセット後は irq_after_seek=4 (4ドライブ分) がセットされ、
-     * BIOSはSENSE INTERRUPTを4回発行して各ドライブのST0を読む。
-     * 各回でドライブ番号 (US=3→0 の降順) 付きST0を返す。 */
+     *
+     * FDCリセット後: irq_after_seek=4 (4ドライブ分)。
+     *   各回で IC=11 (ポーリング) + US=ドライブ番号 の ST0 を返す。
+     *
+     * SEEK/RW HLE完了後: irq_after_seek=1。
+     *   sync_rw/sync_seek で既に st0=0x20 (SE) が設定済みなので
+     *   そのまま返す。IC=11 ではなく IC=00 (正常) + SE=1。
+     *   BIOS ROM は ST0 の IC ビットで正常終了を判定するため、
+     *   IC=11 (ポーリング) を返すと「未知のイベント」として
+     *   エラーハンドラに分岐する。 */
     case 0x08:
         if (vfdc.irq_after_seek > 0) {
-            u8 polling_us = (u8)(vfdc.irq_after_seek - 1);
-            vfdc.irq_after_seek--;
-            /* ST0: IC=11 (Polling) | US=ドライブ番号 */
-            vfdc.st0 = 0xC0U | (polling_us & 0x03U);
+            if (vfdc.st0 & 0x20U) {
+                /* SE=1: SEEK/RW 完了後 — 既設定の st0 を返す */
+                vfdc.irq_after_seek--;
+            } else {
+                /* SE=0: FDCリセット後のポーリング応答 */
+                u8 polling_us = (u8)(vfdc.irq_after_seek - 1);
+                vfdc.irq_after_seek--;
+                vfdc.st0 = 0xC0U | (polling_us & 0x03U);
+            }
         } else {
             /* 無効 SENSE INTERRUPT: ST0=0x80 (Invalid Command) */
             vfdc.st0 = 0x80U;
@@ -527,6 +566,8 @@ static void fdc_execute_command(void)
         vfdc.pcn = vfdc.cmd_buf[2];
         vfdc.st0 = (u8)((vfdc.hd << 2) | vfdc.drv) | 0x20U; /* SE=1 */
         vfdc.irq_after_seek = 1;
+        /* SEEK完了: IRQ11ペンディング */
+        v86_set_pending_irq(11);
         /* リザルトなし */
         break;
 
@@ -568,6 +609,7 @@ void v86_fdc_virt_init(void)
     vfdc.drv          = 0;
     vfdc.hd           = 0;
     vfdc.ctrl         = 0;
+    vfdc.ctrl_be      = 0x01; /* デフォルト: 2HD (NP21/W fdc.chgreg=1) */
     vfdc.irq_after_seek = 0;
     for (i = 0; i < 9; i++) vfdc.cmd_buf[i] = 0;
     for (i = 0; i < 7; i++) vfdc.result_buf[i] = 0;
@@ -709,6 +751,20 @@ int v86_fdc_io(u16 port, u8 *val, int is_write)
         }
         return 1;
 
+    /* ---------------------------------------------------------------- */
+    /*  0xBE: FDD切替レジスタ (chgreg)                                  */
+    /*  NP21/W io/fdc.c fdc_oBE(): fdc.chgreg = val                    */
+    /*  bit0: 0=2DD, 1=2HD (デフォルト=1)                               */
+    /*  IO.SYSが密度切替時に書き込む。実HWに触れてはならない。          */
+    /* ---------------------------------------------------------------- */
+    case 0xBE:
+        if (is_write) {
+            vfdc.ctrl_be = *val;  /* 仮想レジスタに保存 */
+        } else {
+            *val = vfdc.ctrl_be;
+        }
+        return 1;
+
     default:
         return 0;
     }
@@ -748,9 +804,12 @@ void v86_fdc_sync_rw(u8 cyl, u8 head, u8 sect_r, u8 sec_n)
     vfdc.result_idx   = 0;
     vfdc.result_total = 0;
 
-    /* IRQ11 (2HD FDD割り込み) をペンディング */
+    /* 注: HLE方式ではBIOS ROMのFDCハンドラをバイパスするため、
+     * IRQ 11 (1M FDD) をペンディングしてはならない。
+     * IRQの受け手がおらず、BIOS ROMが「不正な割り込み」エラーを表示する。
+     * FDCポートレベル仮想化 (FORMAT.COM等) では fdc_execute_rw() 内で
+     * 別途 IRQ をペンディングする。 */
     fdc_sync_rw_count++;
-    v86_set_pending_irq(11);
 }
 
 /* ====================================================================== */
@@ -776,6 +835,5 @@ void v86_fdc_sync_seek(u8 cyl)
     vfdc.result_idx   = 0;
     vfdc.result_total = 0;
 
-    /* IRQ11 ペンディング */
-    v86_set_pending_irq(11);
+    /* 注: HLE方式ではIRQ 11をペンディングしない (sync_rw同様の理由) */
 }

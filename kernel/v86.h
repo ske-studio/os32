@@ -160,4 +160,41 @@ void v86_trace_set_cs_range(u16 lo, u16 hi);
 #define V86_IS_DUMMY_IVT(ivt_entry) \
     ((ivt_entry) == ((u32)V86_DUMMY_IVT_SEG << 16 | V86_DUMMY_IVT_OFF))
 
+/* IO.SYS デフォルト「不正な割り込み」ハンドラのバイトパターン検出 */
+int v86_is_dos_default_handler(u16 seg, u16 off);
+
+/* ====================================================================== */
+/*  フリーズ検出 (B-1)                                                     */
+/*                                                                          */
+/*  IRQ0ハンドラ内でゲストCS:IPを監視し、同一位置に                         */
+/*  V86_FREEZE_THRESHOLD tick以上停滞した場合に周辺メモリと                 */
+/*  レジスタをスナップショットする。ISRコンテキストでは kprintf を           */
+/*  呼べないため、静的バッファに記録しV86終了後にダンプする。               */
+/* ====================================================================== */
+#define V86_FREEZE_THRESHOLD  100  /* 100 tick (= 1秒 @100Hz) */
+#define V86_FREEZE_MEMDUMP_SIZE 32 /* CS:IP周辺ダンプサイズ (バイト) */
+#define V86_FREEZE_STACK_SIZE   16 /* スタックトップダンプ (バイト) */
+
+struct v86_freeze_info {
+    int      detected;              /* フリーズ検出済みフラグ */
+    u16      cs;                    /* フリーズ時 CS */
+    u16      ip;                    /* フリーズ時 IP */
+    u32      stuck_ticks;           /* 停滞 tick 数 */
+    u32      eax, ebx, ecx, edx;   /* レジスタスナップショット */
+    u32      esi, edi, ebp, esp;
+    u16      ds, es, ss;
+    u32      eflags;
+    u8       code_dump[V86_FREEZE_MEMDUMP_SIZE]; /* CS:IP-8 ~ CS:IP+23 */
+    u8       stack_dump[V86_FREEZE_STACK_SIZE];   /* SS:SP ~ SS:SP+15 */
+    u32      bda_timer;             /* BDA 0040:006C */
+    u8       bda_disk_int;          /* BDA 0000:055E */
+    u8       bda_motor_timeout;     /* BDA 0040:0040 */
+    u8       bda_motor_status;      /* BDA 0040:003F */
+};
+
+extern struct v86_freeze_info v86_freeze;
+
+/* V86終了後に呼ぶ: フリーズ情報をシリアル/コンソールにダンプ */
+void v86_freeze_dump(void);
+
 #endif /* V86_H */

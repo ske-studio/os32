@@ -236,6 +236,12 @@ static void v86_reset_counters(void)
     v86_disk_reset_log();
     v86_reset_io_stats();
 
+    /* フリーズ検出リセット (B-1) */
+    {
+        extern struct v86_freeze_info v86_freeze;
+        kmemset((u8 *)&v86_freeze, 0, sizeof(v86_freeze));
+    }
+
     /* #PF 診断情報リセット */
     {
         extern int v86_pf_recorded;
@@ -659,6 +665,11 @@ static void v86_session_run_core(void)
 
     /* 一時スタックに切り替え → teardown → 元のスタックに戻す */
     {
+        /* ゲストメモリスナップショットを teardown 前に取得 */
+        extern void v86_debug_snapshot_guest(void);
+        v86_debug_snapshot_guest();
+    }
+    {
         u32 tmp_stack = (u32)&v86_kstack[sizeof(v86_kstack) - 64];
         __asm__ volatile (
             "mov %%esp, %%esi\n\t"   /* 現在のESPを保存 */
@@ -698,6 +709,9 @@ static void v86_session_run_core(void)
 
     /* ディスクI/Oログをダンプ (デバッグ用) */
     if (v86_debug_enabled) v86_disk_dump_log();
+
+    /* フリーズ検出結果をダンプ (B-1) */
+    v86_freeze_dump();
 
     /* リソース解放 */
     v86_disk_clear();
@@ -867,10 +881,9 @@ static int v86_boot_image(const char *path, const char *cmdline)
     current_session.auto_delay_remaining = cmdline ? V86_AUTO_TYPE_DELAY : 0;
 
     /* ネイティブモード設定
-     * デバッグモード時はGPなし無限ループ検出のため60秒タイムアウトを設定。
-     * v86_inject_timer_irq() の冒頭でtick_countと比較して自動脱出する。
-     * 非デバッグ時はユーザーがホットキーで手動脱出する想定。 */
-    v86_timeout_ticks = v86_debug_enabled ? 12000 : 0;  /* 120秒 (100Hz) */
+     * F12キー(STOP)によるホットキー脱出を利用するため、タイムアウトは無制限。
+     * GPトレース・diagダンプはホットキー終了時に自動出力される。 */
+    v86_timeout_ticks = 0;  /* 無制限: F12で手動脱出 */
     v86_native_mode = 1;
 
     /* イメージを loop_dev にアタッチ */

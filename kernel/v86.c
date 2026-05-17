@@ -117,6 +117,30 @@ void v86_trace_reset(void)
 }
 
 /* ====================================================================== */
+/*  v86_is_dos_default_handler — IO.SYSデフォルト割り込みハンドラ検出       */
+/*                                                                          */
+/*  IO.SYS (NEC MS-DOS 5.0) は未使用IVTベクタに「不正な割り込み」表示       */
+/*  ハンドラを設定する。このハンドラは CD xx 命令のオペランドバイトを       */
+/*  スタック戻りアドレスの [CS:IP-1] から読み取って番号を表示するため、     */
+/*  V86の v86_gp_inject_irq でハードウェアIRQとして注入すると、             */
+/*  戻りアドレス前の無関係なバイトが表示され「不正な割り込み73H」等に       */
+/*  なってシステムがハングする。                                             */
+/*                                                                          */
+/*  ハンドラのシグネチャ: FA 8C C8 8E D8 8B F4                              */
+/*    CLI; MOV AX,CS; MOV DS,AX; MOV SI,SP                                 */
+/* ====================================================================== */
+int v86_is_dos_default_handler(u16 seg, u16 off)
+{
+    u8 *p = v86_phys_addr(seg, off);
+    /* FA=CLI, 8CC8=MOV AX,CS, 8ED8=MOV DS,AX, 8BF4=MOV SI,SP */
+    if (p[0] == 0xFA && p[1] == 0x8C && p[2] == 0xC8 &&
+        p[3] == 0x8E && p[4] == 0xD8 && p[5] == 0x8B && p[6] == 0xF4) {
+        return 1;
+    }
+    return 0;
+}
+
+/* ====================================================================== */
 /*  V86 キーボード仮想化 — スキャンコードバッファ                          */
 /*  kbd_irq_handler が物理ポート 0x41 から読んだスキャンコードをここに      */
 /*  バッファリングする。ゲストの INT 09h ハンドラがポート 0x41 を           */
@@ -907,26 +931,43 @@ int v86_gp_handler(u32 *regs)
     /* ================================================================ */
     case 0xF4:
         regs[V86_REG_EIP] = (regs[V86_REG_EIP] + (u32)prefix_len + 1) & 0xFFFF;
-        /* デバッグモードまたは終了要求時: HLTでV86を終了する。
-         * IO.SYSがエラーでHLT+JMPループに入った場合、NOP扱いにすると
-         * 永久ループになる。デバッグモードでは即座に終了して診断する。 */
-        if (v86_exit_request || v86_debug_enabled) {
-            if (!v86_exit_request) {
-                v86_request_exit(V86_EXIT_TIMEOUT);
-            }
+        /* 終了要求時のみHLTでV86を終了する。
+         * F12ホットキーやタイムアウトで v86_exit_request がセットされる。
+         * デバッグモードでもHLTはNOP扱い — FreeDOS初期化中にBIOS ROMが
+         * HLTを実行するため、即終了すると起動が阻害される。 */
+        if (v86_exit_request) {
+            v86_request_exit(V86_EXIT_TIMEOUT);
             return 1;
         }
         /* HLT + 保留IRQ0 + ROMハンドラ → 軽量INT 08h HLE
          * ROM INT 08h ハンドラへの直接注入はトリプルフォルトを引き起こすため、
          * BDA タイマーカウンタ (0040:006C) を直接インクリメントして
-         * IRQ0 を消費する。IO.SYS のタイマー待ちデッドロックを解消。 */
+         * IRQ0 を消費する。IO.SYS のタイマー待ちデッドロックを解消。
+         *
+         * NP21/W bios0x08() 準拠: タイマカウンタ更新 + モータタイムアウト管理。
+         * BDA 0040:0040 (MOTOR_COUNT) が0以外ならデクリメントし、
+         * 0になったらモーターOFF (BDA DISK_MOTOR_OFF) を行う。 */
         if (v86_pending_irq & (1U << 0)) {
             u32 *ivt = (u32 *)v86_linear(0, 0);
             u16 h_seg = (u16)(ivt[0x08] >> 16);
             if (h_seg >= 0xF000U || V86_IS_DUMMY_IVT(ivt[0x08])) {
-                /* BDA タイマーカウンタ (0040:006C) をインクリメント */
                 volatile u32 *timer = (volatile u32 *)v86_linear(0x0040, 0x006C);
+                volatile u8 *motor_count = (volatile u8 *)v86_linear(0x0040, 0x0040);
+
+                /* BDA タイマーカウンタ (0040:006C) をインクリメント */
                 (*timer)++;
+
+                /* モータタイムアウト管理 (NP21/W bios0x08 準拠)
+                 * MOTOR_COUNT > 0 ならデクリメント。0到達でモータOFF。 */
+                if (*motor_count > 0) {
+                    (*motor_count)--;
+                    if (*motor_count == 0) {
+                        /* モーターOFF: BDA MOTOR_STATUS (0040:003F) クリア */
+                        volatile u8 *motor_stat = (volatile u8 *)v86_linear(0x0040, 0x003F);
+                        *motor_stat = 0;
+                    }
+                }
+
                 /* IRQ0 を消費 */
                 v86_pending_irq &= ~(1U << 0);
                 v86_pic_set_irr(0, v86_pic_get_irr(0) & ~(u8)1);
@@ -1151,6 +1192,9 @@ v86_gp_end:
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x08]);
                 /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                 if (handler_seg >= 0xF000U) is_dummy = 1;
+                /* Layer 2: IO.SYSデフォルト「不正な割り込み」ハンドラ検出 */
+                if (!is_dummy && v86_is_dos_default_handler(handler_seg, handler_off))
+                    is_dummy = 1;
 
                 v86_irq0_inject_count++;
                 if (is_dummy) v86_irq0_gp_skip_ivt++;
@@ -1188,6 +1232,9 @@ v86_gp_end:
                 int is_dummy = V86_IS_DUMMY_IVT(ivt[0x09]);
                 /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                 if (handler_seg >= 0xF000U) is_dummy = 1;
+                /* Layer 2: IO.SYSデフォルト「不正な割り込み」ハンドラ検出 */
+                if (!is_dummy && v86_is_dos_default_handler(handler_seg, handler_off))
+                    is_dummy = 1;
 
                 v86_pending_irq &= ~(1U << 1);
 
@@ -1221,6 +1268,9 @@ v86_gp_end:
                         int is_dummy = V86_IS_DUMMY_IVT(ivt[int_no]);
                         /* Layer 1.5: ROM行きIVTハンドラへの注入をスキップ */
                         if (handler_seg >= 0xF000U) is_dummy = 1;
+                        /* Layer 2: IO.SYSデフォルト「不正な割り込み」ハンドラ検出 */
+                        if (!is_dummy && v86_is_dos_default_handler(handler_seg, handler_off))
+                            is_dummy = 1;
 
                         v86_pending_irq &= ~(1U << irq);
 
@@ -1329,6 +1379,61 @@ u32 v86_irq0_gp_skip_if = 0;    /* GPハンドラ保留注入: IF=0でスキッ�
 u32 v86_irq0_gp_skip_isr = 0;   /* GPハンドラ保留注入: ISR処理中でスキップ */
 u32 v86_irq0_gp_skip_ivt = 0;   /* GPハンドラ保留注入: IVTダミーでスキップ */
 
+/* ====================================================================== */
+/*  フリーズ検出 (B-1) — グローバル変数 + ダンプ関数                       */
+/* ====================================================================== */
+struct v86_freeze_info v86_freeze;
+static u16 freeze_prev_cs = 0;
+static u32 freeze_prev_gp_count = 0;
+static u32 freeze_stuck_count = 0;
+
+void v86_freeze_dump(void)
+{
+    int i;
+    u32 linear;
+    if (!v86_freeze.detected) {
+        kprintf(0x07, "[V86-FREEZE] No freeze detected\n");
+        return;
+    }
+    kprintf(0xE1, "\n=== V86 FREEZE DETECTED ===");
+    kprintf(0xE1, " CS:IP=%04X:%04X  stuck %u ticks ===\n",
+            (unsigned)v86_freeze.cs, (unsigned)v86_freeze.ip,
+            (unsigned)v86_freeze.stuck_ticks);
+
+    linear = (u32)v86_freeze.cs * 16 + (u32)v86_freeze.ip;
+    kprintf(0x0A, "  Linear=0x%05X  EFLAGS=%08X\n",
+            (unsigned)linear, (unsigned)v86_freeze.eflags);
+    kprintf(0x0A, "  SS:SP=%04X:%04X  DS=%04X  ES=%04X\n",
+            (unsigned)v86_freeze.ss, (unsigned)v86_freeze.esp,
+            (unsigned)v86_freeze.ds, (unsigned)v86_freeze.es);
+
+    /* コードダンプ (CS:IP-8 ~ CS:IP+23) */
+    kprintf(0x0A, "  Code (CS:IP-8..+23):\n    ");
+    for (i = 0; i < V86_FREEZE_MEMDUMP_SIZE; i++) {
+        if (i == 8) kprintf(0x0E, "[");
+        kprintf((i == 8) ? 0x0E : 0x0A, "%02X",
+                (unsigned)v86_freeze.code_dump[i]);
+        if (i == 8) kprintf(0x0E, "]");
+        if (i < V86_FREEZE_MEMDUMP_SIZE - 1) kprintf(0x0A, " ");
+    }
+    kprintf(0x0A, "\n");
+
+    /* スタックダンプ */
+    kprintf(0x0A, "  Stack (SS:SP..+15):\n    ");
+    for (i = 0; i < V86_FREEZE_STACK_SIZE; i++) {
+        kprintf(0x0A, "%02X ", (unsigned)v86_freeze.stack_dump[i]);
+    }
+    kprintf(0x0A, "\n");
+
+    /* BDA情報 */
+    kprintf(0x0A, "  BDA: timer=%08X disk_int=%02X motor_to=%02X motor_st=%02X\n",
+            (unsigned)v86_freeze.bda_timer,
+            (unsigned)v86_freeze.bda_disk_int,
+            (unsigned)v86_freeze.bda_motor_timeout,
+            (unsigned)v86_freeze.bda_motor_status);
+    kprintf(0xE1, "=== END FREEZE INFO ===\n\n");
+}
+
 void v86_inject_timer_irq(u32 *regs)
 {
     u32 irq_divisor;
@@ -1349,6 +1454,94 @@ void v86_inject_timer_irq(u32 *regs)
     if ((regs[HWIRQ_REG_EFLAGS] & EFLAGS_VM) == 0) {
         v86_irq0_nonvm_count++;
         return;
+    }
+
+    /* ================================================================ */
+    /*  フリーズ検出 (B-1): GP未発生 + IF=0 の長期間停滞を検出            */
+    /*                                                                  */
+    /*  FreeDOS の CLI ポーリングループでは命令ポインタは変化するが        */
+    /*  特権命令 (#GP) は発生しない。そのため「GP カウンタが一定期間       */
+    /*  変化しない」かつ「仮想IF=0」の場合にフリーズと判定する。          */
+    /*                                                                  */
+    /*  ISRコンテキストのため kprintf は使えない。                       */
+    /*  検出時は v86_freeze 構造体にスナップショットを記録し、            */
+    /*  V86終了後に v86_freeze_dump() で出力する。                       */
+    /* ================================================================ */
+    {
+        u16 cur_cs = (u16)(regs[HWIRQ_REG_CS] & 0xFFFF);
+        u16 cur_ip = (u16)(regs[HWIRQ_REG_EIP] & 0xFFFF);
+
+        /* GP停滞検出: gp_count が変化しなければカウントアップ */
+        if (v86_gp_count == freeze_prev_gp_count && !v86_virtual_if) {
+            /* freeze_prev_gp_count を GP カウンタ保存に使用 */
+            freeze_stuck_count++;
+        } else {
+            freeze_stuck_count = 0;
+        }
+        freeze_prev_gp_count = v86_gp_count;
+        freeze_prev_cs = cur_cs;
+
+        if (freeze_stuck_count >= V86_FREEZE_THRESHOLD &&
+            !v86_freeze.detected) {
+            /* フリーズ検出! スナップショットを記録 */
+            u32 linear_base;
+            u8 *code_ptr;
+            u8 *stack_ptr;
+            int i;
+
+            v86_freeze.detected = 1;
+            v86_freeze.cs = cur_cs;
+            v86_freeze.ip = cur_ip;
+            v86_freeze.stuck_ticks = freeze_stuck_count;
+            v86_freeze.eflags = regs[HWIRQ_REG_EFLAGS];
+            v86_freeze.esp = regs[HWIRQ_REG_ESP] & 0xFFFF;
+            v86_freeze.ss = (u16)(regs[HWIRQ_REG_SS] & 0xFFFF);
+
+            /* DS/ES はIRQ0スタックに無いので 0 (不明) とする */
+            v86_freeze.ds = 0;
+            v86_freeze.es = 0;
+            v86_freeze.eax = 0;
+            v86_freeze.ebx = 0;
+            v86_freeze.ecx = 0;
+            v86_freeze.edx = 0;
+            v86_freeze.esi = 0;
+            v86_freeze.edi = 0;
+            v86_freeze.ebp = 0;
+
+            /* CS:IP-8 から32バイトのコードダンプ */
+            linear_base = (u32)cur_cs * 16 + (u32)cur_ip;
+            if (linear_base >= 8) {
+                code_ptr = (u8 *)(v86_backing_phys + linear_base - 8);
+            } else {
+                code_ptr = (u8 *)(v86_backing_phys + linear_base);
+            }
+            /* バッキングRAM外 (ROM等) の場合は直接アドレス */
+            if (linear_base >= 0xF0000UL) {
+                if (linear_base >= 8)
+                    code_ptr = (u8 *)(linear_base - 8);
+                else
+                    code_ptr = (u8 *)linear_base;
+            }
+            for (i = 0; i < V86_FREEZE_MEMDUMP_SIZE; i++) {
+                v86_freeze.code_dump[i] = code_ptr[i];
+            }
+
+            /* SS:SP から16バイトのスタックダンプ */
+            stack_ptr = (u8 *)v86_linear(
+                v86_freeze.ss, v86_freeze.esp);
+            for (i = 0; i < V86_FREEZE_STACK_SIZE; i++) {
+                v86_freeze.stack_dump[i] = stack_ptr[i];
+            }
+
+            /* BDA情報 */
+            {
+                volatile u32 *timer = (volatile u32 *)v86_linear(0x0040, 0x006C);
+                v86_freeze.bda_timer = *timer;
+            }
+            v86_freeze.bda_disk_int = *(u8 *)v86_linear(0x0000, 0x055E);
+            v86_freeze.bda_motor_timeout = *(u8 *)v86_linear(0x0040, 0x0040);
+            v86_freeze.bda_motor_status = *(u8 *)v86_linear(0x0040, 0x003F);
+        }
     }
 
     /* ================================================================ */
@@ -1463,7 +1656,11 @@ void v86_inject_timer_irq(u32 *regs)
         handler_off = (u16)(ivt[0x08] & 0xFFFF);
         handler_seg = (u16)(ivt[0x08] >> 16);
 
-        /* §13 ROM行きIVTインターセプト (Layer 1): BIOS ROMハンドラはスキップ */
+        /* §13 ROM行きIVTインターセプト (Layer 1): BIOS ROMハンドラはスキップ
+         * PC-98 BIOS ROMの INT 08h はセグメント >= 0xE800 に配置。
+         * FreeDOS(98)がInit_clk_driverで書き換えたハンドラも
+         * 同セグメント (FD80:等) にあるためスキップされるが、
+         * IF=0パスの強制注入がBDAタイマ更新を補完する。 */
         if (handler_seg >= 0xF000U) {
             is_dummy_ivt = 1;
         }
@@ -1478,11 +1675,119 @@ void v86_inject_timer_irq(u32 *regs)
          * ダミー/ROM行きIVTの場合はスキップ (注入せずIRQを消化) */
         if (!is_dummy_ivt) {
             v86_hw_inject_irq(regs, handler_seg, handler_off);
+        } else {
+            /* A案: ROM INT 08h スキップ時、INT 1Ch を直接注入。
+             * BIOS ROM の INT 08h は BDA タイマ更新 + INT 1Ch 呼出を行うが、
+             * ROM コードの直接実行はスタック破壊を引き起こす。
+             * BDA タイマは IF=0 パスで直接更新されるため、ここでは
+             * INT 1Ch (FreeDOS タイマーフック) のみを注入して
+             * モータタイムアウトやDOS内部タイマを動作させる。 */
+            u16 int1c_seg = (u16)(ivt[0x1C] >> 16);
+            u16 int1c_off = (u16)(ivt[0x1C] & 0xFFFF);
+            if (!V86_IS_DUMMY_IVT(ivt[0x1C]) && v86_gp_count >= 500) {
+                v86_hw_inject_irq(regs, int1c_seg, int1c_off);
+            }
         }
     } else {
-        /* Defer interrupt if IF=0 */
+        /* Defer interrupt if IF=0
+         *
+         * FreeDOS等のカーネルは CLI 状態のまま BDA タイマカウンタ
+         * (0040:006C) やDISK_INTフラグ (0000:055E) をポーリングする。
+         * IRQ0/IRQ11 の注入は IF=0 では不可能なため、BDA を直接更新して
+         * ゲストのポーリングループを解消する。HLT パスでも同様の処理が
+         * 実装済み (case 0xF4)。
+         *
+         * さらに、FreeDOSの Init_clk_driver が設定した INT 08h ハンドラが
+         * 実ハンドラ（非ROM/非ダミー）であれば、CLI状態でも強制注入する。
+         * FreeDOSの INT 08h ハンドラは INT 1Ch 呼び出し、ディスクモータ
+         * タイムアウト管理等の重要処理を含み、これらが実行されないと
+         * カーネル初期化が完了しない。 */
         v86_irq0_noif_count++;
-        v86_set_pending_irq(0);
+
+        /* CLI 状態が長時間 (100tick = 1秒) 継続している場合、
+         * 仮想IFを強制的にセットする。
+         * FreeDOS の DOS カーネルは INT 21h 内部の C関数で
+         * CLI 状態のまま長時間の処理 (FATテーブル走査等) を行い、
+         * その間 IRQ を受けられなくなる。
+         * 強制的に IF=1 にすることで、次のIRQ0 tickで通常注入パスに入り、
+         * ゲストの INT 08h ハンドラが実行される。
+         * INT 08h ハンドラ内の IRET は元の CLI 状態には戻さないため、
+         * 以降は正常に IRQ が注入される。 */
+        if (v86_irq0_noif_count >= 100) {
+            v86_virtual_if = EFLAGS_IF;
+        }
+
+        /* BDA タイマーカウンタ (0040:006C) を直接インクリメント */
+        {
+            volatile u32 *timer = (volatile u32 *)v86_linear(0x0040, 0x006C);
+            (*timer)++;
+        }
+
+        /* ROM INT 08h のモータタイムアウト処理をシミュレート:
+         * BDA 0040:0040 (motor timeout) をデクリメントし、
+         * 0になったらモータステータス (0040:003F) をクリアして
+         * FDCモータ停止を通知する。
+         * この処理が無いと FreeDOS の InitDisk 後の CLI ポーリングで
+         * FDC関連のタイムアウトが永久に解消されない。 */
+        {
+            volatile u8 *motor_timeout = (volatile u8 *)v86_linear(0x0040, 0x0040);
+            if (*motor_timeout > 0) {
+                (*motor_timeout)--;
+                if (*motor_timeout == 0) {
+                    /* モータ停止: ステータスの上位4ビット (モータON) をクリア */
+                    volatile u8 *motor_status = (volatile u8 *)v86_linear(0x0040, 0x003F);
+                    *motor_status &= 0x0F;
+                }
+            }
+        }
+
+        /* ペンディング中の IRQ11 があれば BDA DISK_INT (0000:055E) を直接セット */
+        if (v86_pending_irq & (1U << 11)) {
+            u8 *disk_int = (u8 *)v86_linear(0x0000, 0x055E);
+            *disk_int |= 0x01;  /* ドライブ#0 の完了フラグ */
+            v86_pending_irq &= ~(1U << 11);
+            v86_pic_set_irr(1, v86_pic_get_irr(1) & ~(u8)(1 << 3)); /* IRQ11 = slave bit3 */
+        }
+
+        /* CLI状態でもINT 08hハンドラを強制注入 (B-2)
+         * ゲストスタックにフレームをpushしてハンドラに転送する。
+         * 仮想IFはセットせず、CLIのままハンドラを実行させる。
+         * ハンドラ内の IRET がスタック上の旧flagsを復帰する際、
+         * IF=0 のまま戻る。
+         *
+         * ★ ROM INT 08h (seg >= F000h) もスキップしない。
+         * ROM ハンドラは BDA タイマ更新 → INT 1Ch → IRET を行い、
+         * FreeDOS Init_clk_driver が書き換えるまでの間も
+         * タイマカウンタとモータタイムアウトを正しく進める。
+         * これが無いと FreeDOS のCLIポーリングループが解消されない。 */
+        {
+            u32 *ivt = (u32 *)v86_linear(0, 0);
+            u16 handler_seg = (u16)(ivt[0x08] >> 16);
+            u16 handler_off = (u16)(ivt[0x08] & 0xFFFF);
+            int is_dummy = V86_IS_DUMMY_IVT(ivt[0x08]);
+
+            /* ROM ハンドラ (seg >= F000h) は強制注入しない。
+             * PC-98 BIOS ROM のINT 08hハンドラ (FD80:AF06等) への
+             * 強制注入はスタック破壊でクラッシュする。
+             * 代わりに INT 1Ch を直接注入する (A案)。 */
+            if (handler_seg >= 0xF000U) is_dummy = 1;
+            if (!is_dummy && !v86_is_dos_default_handler(handler_seg, handler_off)) {
+                /* FreeDOS 実ハンドラ: 強制注入 */
+                v86_hw_inject_irq(regs, handler_seg, handler_off);
+                v86_irq0_inject_count++;
+            } else if (is_dummy && !V86_IS_DUMMY_IVT(ivt[0x08])) {
+                /* A案: ROM INT 08h スキップ時、INT 1Ch を直接注入。
+                 * FreeDOS は INT 08h を書き換えないが INT 1Ch をフックする。
+                 * BDAタイマは前段で直接更新済み。ここでは INT 1Ch だけを
+                 * 実行させてFreeDOSのタイマー管理を動作させる。 */
+                u16 int1c_seg = (u16)(ivt[0x1C] >> 16);
+                u16 int1c_off = (u16)(ivt[0x1C] & 0xFFFF);
+                if (!V86_IS_DUMMY_IVT(ivt[0x1C]) && v86_gp_count >= 500) {
+                    v86_hw_inject_irq(regs, int1c_seg, int1c_off);
+                    v86_irq0_inject_count++;
+                }
+            }
+        }
     }
     /* §1.3 A案: IRQ1 (キーボード, INT 09h) の HW注入を廃止。
      * BDA 直書き運用に統一したため、ここでの IRQ1 注入は不要。

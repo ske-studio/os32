@@ -27,7 +27,8 @@ static struct {
     u8 imr;       /* IMR (Interrupt Mask Register) */
     u8 isr;       /* ISR (In-Service Register) */
     u8 irr;       /* IRR (Interrupt Request Register) */
-    u8 read_isr;  /* OCW3で「次のINはISRを返す」フラグ */
+    u8 ocw3;      /* OCW3: bit0=RIS, bit1=RR, bit5=SMM, bit6=ESMM */
+    u8 pry;       /* 優先度ローテーション (0-7) NP21/W picp->pry */
     u8 icw_state; /* ICWシーケンス状態: 0=通常, 1=ICW2待ち, 2=ICW3待ち, 3=ICW4待ち */
     u8 icw4_needed; /* ICW1 bit0: ICW4が必要か */
 } vpic[2];  /* [0]=マスタ, [1]=スレーブ */
@@ -90,7 +91,8 @@ void v86_pic_init(void)
         vpic[i].imr = 0xFF;      /* 全マスク: FreeDOSのPIC初期化(OUT 02h)で更新される */
         vpic[i].isr = 0x00;
         vpic[i].irr = 0x00;
-        vpic[i].read_isr = 0;
+        vpic[i].ocw3 = 0;
+        vpic[i].pry = 0;
         vpic[i].icw_state = 0;
         vpic[i].icw4_needed = 0;
     }
@@ -112,50 +114,70 @@ static void pic_write_cmd(int idx, u8 val)
     if (val & 0x10) {
         vpic[idx].icw_state = 1;  /* 次のデータポート書き込みは ICW2 */
         vpic[idx].icw4_needed = (val & 0x01) ? 1 : 0;  /* bit0 = ICW4必要 */
+        vpic[idx].imr = 0x00;     /* NP21/W: ICW1でIMRクリア */
         vpic[idx].isr = 0x00;     /* ISRクリア */
         vpic[idx].irr = 0x00;     /* IRRクリア */
-        vpic[idx].read_isr = 0;
+        vpic[idx].ocw3 = 0;
+        vpic[idx].pry = 0;
         return;
     }
 
     /* OCW2 判定: bit5=1, bit4-3=00 → EOIコマンド */
     if ((val & 0x18) == 0x00 && (val & 0x20)) {
-        u8 isr_before = vpic[idx].isr;  /* T3.2: EOI前のISR */
+        u8 isr_before = vpic[idx].isr;
+        u8 level;
 
         if (val & 0x40) {
-            /* 特殊EOI (0x60+n): ISR bit n を直接クリア
-             * PC9800Bible §1-4: OCW2 R=0,S=1,E=1 → 指定レベルEOI */
-            int level = val & 0x07;
-            vpic[idx].isr &= ~(1 << level);
-            v86_seoi_count[idx]++;
-            /* T3.2: 特殊EOIログ */
-            eoi_log_record(idx, level, isr_before, vpic[idx].isr);
+            /* 特殊EOI (SL=1): 指定レベルEOI
+             * NP21/W: level = dat & PIC_OCW2_L */
+            level = val & 0x07;
         } else {
-            /* 非特殊EOI (0x20): ISRの最高優先度ビットをクリア */
-            int cleared = -1;
-            if (vpic[idx].isr) {
-                int bit;
-                for (bit = 0; bit < 8; bit++) {
-                    if (vpic[idx].isr & (1 << bit)) {
-                        vpic[idx].isr &= ~(1 << bit);
-                        v86_eoi_count[idx]++;
-                        cleared = bit;
-                        break;
-                    }
-                }
+            /* 非特殊EOI (SL=0): 最高優先度のISRビットを検索
+             * NP21/W: pryから開始してISRが立っているビットを探す */
+            if (!vpic[idx].isr) {
+                eoi_log_record(idx, -1, isr_before, vpic[idx].isr);
+                return;
             }
-            /* T3.2: 非特殊EOIログ (orphan含む) */
-            eoi_log_record(idx, cleared, isr_before, vpic[idx].isr);
+            level = vpic[idx].pry;
+            while (!(vpic[idx].isr & (1 << level))) {
+                level = (level + 1) & 7;
+            }
         }
+
+        /* ローテーション: Rビットが立っている場合、pryを更新
+         * NP21/W: if (dat & PIC_OCW2_R) picp->pry = (level+1) & 7 */
+        if (val & 0x80) {
+            vpic[idx].pry = (level + 1) & 7;
+        }
+
+        /* EOI: ISRビットクリア */
+        if (val & 0x20) {
+            vpic[idx].isr &= ~(1 << level);
+            if (val & 0x40) {
+                v86_seoi_count[idx]++;
+            } else {
+                v86_eoi_count[idx]++;
+            }
+        }
+
+        eoi_log_record(idx, (int)level, isr_before, vpic[idx].isr);
         return;
     }
 
-    /* OCW3 判定: bit4=0, bit3=1 */
+    /* OCW3 判定: bit4=0, bit3=1
+     * NP21/W pic_o00(): ocw3フィールドに保存。
+     * RRビットが0ならRISは変更しない。ESMMが0ならSMMは変更しない。 */
     if ((val & 0x18) == 0x08) {
-        if (val & 0x02) {
-            /* bit1=1: 読み出しレジスタ選択 */
-            vpic[idx].read_isr = (val & 0x01) ? 1 : 0;
+        u8 ocw3 = vpic[idx].ocw3;
+        if (!(val & 0x02)) {
+            /* RR=0: RISビットは変更しない */
+            val = (val & ~0x01) | (ocw3 & 0x01);
         }
+        if (!(val & 0x40)) {
+            /* ESMM=0: SMMビットは変更しない */
+            val = (val & ~0x20) | (ocw3 & 0x20);
+        }
+        vpic[idx].ocw3 = val;
         return;
     }
 
@@ -195,7 +217,8 @@ static void pic_write_data(int idx, u8 val)
 /* ====================================================================== */
 static u8 pic_read_cmd(int idx)
 {
-    if (vpic[idx].read_isr) {
+    /* NP21/W pic_i00(): ocw3 の RIS ビット (bit0) で ISR/IRR を切り替え */
+    if (vpic[idx].ocw3 & 0x01) {
         return vpic[idx].isr;
     }
     return vpic[idx].irr;

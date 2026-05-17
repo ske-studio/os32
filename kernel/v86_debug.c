@@ -45,6 +45,82 @@ extern struct v86_io_stat { u16 port; u32 read_count; u32 write_count; u8 classi
 /* tick_count (isr_stub.asm) */
 extern volatile u32 tick_count;
 
+/* ゲストメモリスナップショット (v86_mem_teardown 前に取得) */
+static int  guest_snapshot_valid = 0;
+static u32  gs_timer;
+static u8   gs_motor;
+static u8   gs_diskint;
+static u8   gs_diskequip[2];
+static u8   gs_boot_flag;
+static u8   gs_indos;
+static u8   gs_crit_err;
+static u8   gs_sda[32];
+static u16  gs_ivt[6][2]; /* [0]=08h [1]=1Bh [2]=1Ch [3]=21h [4]=2Ah [5]=2Fh */
+
+/* v86_mem_teardown の前に呼ぶこと */
+void v86_debug_snapshot_guest(void)
+{
+    /* IVT オフセットテーブル: INT番号 * 4 */
+    static const u16 ivt_offsets[6] = {
+        0x0020,  /* INT 08h */
+        0x006C,  /* INT 1Bh */
+        0x0070,  /* INT 1Ch */
+        0x0084,  /* INT 21h */
+        0x00A8,  /* INT 2Ah */
+        0x00BC   /* INT 2Fh */
+    };
+    u8 *p;
+    int i;
+
+    if (v86_backing_phys == 0) {
+        guest_snapshot_valid = 0;
+        return;
+    }
+
+    /* BDA タイマーカウンタ (0040:006C) */
+    p = v86_phys_addr(0x0040, 0x006C);
+    gs_timer = (u32)p[0] | ((u32)p[1] << 8)
+             | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+
+    /* BDA モータタイムアウト (0040:0040) */
+    gs_motor = *v86_phys_addr(0x0040, 0x0040);
+
+    /* BDA DISK_INT (0000:055E) */
+    gs_diskint = *v86_phys_addr(0x0000, 0x055E);
+
+    /* BDA DISK_EQUIP (0000:055C) */
+    p = v86_phys_addr(0x0000, 0x055C);
+    gs_diskequip[0] = p[0];
+    gs_diskequip[1] = p[1];
+
+    /* BDA ブートフラグ (0000:0584) */
+    gs_boot_flag = *v86_phys_addr(0x0000, 0x0584);
+
+    /* InDOS フラグ (0060:0320) */
+    gs_indos = *v86_phys_addr(0x0060, 0x0320);
+
+    /* CriticalError フラグ (0060:0321) */
+    gs_crit_err = *v86_phys_addr(0x0060, 0x0321);
+
+    /* SDA 先頭32バイト (0060:0000) */
+    p = v86_phys_addr(0x0060, 0x0000);
+    for (i = 0; i < 32; i++) gs_sda[i] = p[i];
+
+    /* IVT ベクタ値 */
+    for (i = 0; i < 6; i++) {
+        u16 *v = (u16 *)v86_phys_addr(0x0000, ivt_offsets[i]);
+        gs_ivt[i][0] = v[0]; /* offset */
+        gs_ivt[i][1] = v[1]; /* segment */
+    }
+
+    guest_snapshot_valid = 1;
+}
+
+/* セッション開始時にリセット */
+void v86_debug_snapshot_clear(void)
+{
+    guest_snapshot_valid = 0;
+}
 
 
 /* ====================================================================== */
@@ -281,7 +357,54 @@ static void write_section_exit(void)
     wb_str("  Final CS:IP   : ");
     wb_hex16((u16)v86_last_cs); wb_ch(':');
     wb_hex16((u16)v86_last_ip); wb_nl();
+    wb_str("  Exit  CS:IP   : ");
+    wb_hex16((u16)v86_timeout_cs); wb_ch(':');
+    wb_hex16((u16)v86_timeout_ip); wb_nl();
     wb_nl();
+
+    /* A-1/A-2: ゲストメモリ状態ダンプ (スナップショットから出力) */
+    if (guest_snapshot_valid)
+    {
+        int di;
+
+        wb_str("[GUEST MEMORY STATE]\n");
+
+        wb_str("  BDA Timer     : 0x"); wb_hex32(gs_timer); wb_nl();
+        wb_str("  Motor Timeout : 0x"); wb_hex8(gs_motor); wb_nl();
+        wb_str("  DISK_INT      : 0x"); wb_hex8(gs_diskint); wb_nl();
+        wb_str("  DISK_EQUIP    : 0x");
+        wb_hex8(gs_diskequip[1]); wb_hex8(gs_diskequip[0]); wb_nl();
+        wb_str("  Boot Flag 584 : 0x"); wb_hex8(gs_boot_flag); wb_nl();
+        wb_str("  InDOS (60:320): 0x"); wb_hex8(gs_indos); wb_nl();
+        wb_str("  CritErr(60:321):0x"); wb_hex8(gs_crit_err); wb_nl();
+
+        wb_str("  SDA 60:0000   : ");
+        for (di = 0; di < 32; di++) {
+            wb_hex8(gs_sda[di]);
+            if (di == 15) { wb_nl(); wb_str("                  "); }
+        }
+        wb_nl();
+
+        /* IVT ベクタ値 */
+        wb_str("  IVT INT 08h   : ");
+        wb_hex16(gs_ivt[0][1]); wb_ch(':'); wb_hex16(gs_ivt[0][0]); wb_nl();
+        wb_str("  IVT INT 1Bh   : ");
+        wb_hex16(gs_ivt[1][1]); wb_ch(':'); wb_hex16(gs_ivt[1][0]); wb_nl();
+        wb_str("  IVT INT 1Ch   : ");
+        wb_hex16(gs_ivt[2][1]); wb_ch(':'); wb_hex16(gs_ivt[2][0]); wb_nl();
+        wb_str("  IVT INT 21h   : ");
+        wb_hex16(gs_ivt[3][1]); wb_ch(':'); wb_hex16(gs_ivt[3][0]); wb_nl();
+        wb_str("  IVT INT 2Ah   : ");
+        wb_hex16(gs_ivt[4][1]); wb_ch(':'); wb_hex16(gs_ivt[4][0]); wb_nl();
+        wb_str("  IVT INT 2Fh   : ");
+        wb_hex16(gs_ivt[5][1]); wb_ch(':'); wb_hex16(gs_ivt[5][0]); wb_nl();
+        wb_nl();
+    }
+    else
+    {
+        wb_str("[GUEST MEMORY STATE]\n");
+        wb_str("  (snapshot not taken)\n\n");
+    }
 
     wb_separator();
     wb_str("EXECUTION STATISTICS\n");
@@ -306,6 +429,7 @@ static void write_section_exit(void)
     wb_str("  gp-inject     : "); wb_dec(v86_irq0_gp_inject_count); wb_nl();
     wb_str("  gp-skip-isr   : "); wb_dec(v86_irq0_gp_skip_isr); wb_nl();
     wb_str("  gp-skip-ivt   : "); wb_dec(v86_irq0_gp_skip_ivt); wb_nl();
+    wb_str("  noif-force-inj: "); wb_dec(v86_irq0_inject_count); wb_nl();
     wb_nl();
 
     wb_str("[VSYNC]\n");

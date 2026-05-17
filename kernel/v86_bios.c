@@ -87,24 +87,7 @@ static void tvram_putchar(u8 ch, u8 attr)
     v86_cursor_x++;
 }
 
-/* ====================================================================== */
-/*  ヘルパー: テキストVRAMクリア                                           */
-/* ====================================================================== */
-static void tvram_clear_all(void)
-{
-    volatile u16 *char_area = (volatile u16 *)TVRAM_BASE;
-    volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR;
-    int i;
-    int total = TVRAM_COLS * TVRAM_ROWS;
 
-    for (i = 0; i < total; i++) {
-        char_area[i] = 0x0020;  /* スペース */
-        attr_area[i] = 0x00E1;  /* 白色 */
-    }
-
-    v86_cursor_x = 0;
-    v86_cursor_y = 0;
-}
 
 /* ====================================================================== */
 /*  v86_bios_int18 — INT 18h エミュレーション                              */
@@ -276,10 +259,25 @@ int v86_bios_int18(u32 *regs)
 
     /* ================================================================ */
     /*  AH=16h: テキストVRAMのクリア                                    */
+    /*  NP21/W bios0x18_16() 準拠: DL=文字コード, DH=アトリビュート    */
     /* ================================================================ */
-    case 0x16:
-        tvram_clear_all();
+    case 0x16: {
+        u8 fill_ch = (u8)(regs[V86_REG_EDX] & 0xFF);         /* DL */
+        u8 fill_at = (u8)((regs[V86_REG_EDX] >> 8) & 0xFF);  /* DH */
+        volatile u16 *char_area = (volatile u16 *)TVRAM_BASE;
+        volatile u16 *attr_area = (volatile u16 *)TVRAM_ATTR;
+        int i;
+        int total = TVRAM_COLS * TVRAM_ROWS;
+        if (fill_ch == 0) fill_ch = 0x20;
+        if (fill_at == 0) fill_at = 0xE1;
+        for (i = 0; i < total; i++) {
+            char_area[i] = (u16)fill_ch;
+            attr_area[i] = (u16)fill_at;
+        }
+        v86_cursor_x = 0;
+        v86_cursor_y = 0;
         break;
+    }
 
     /* ================================================================ */
     /*  AH=10h: カーソルブリンクの有無設定                               */

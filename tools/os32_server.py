@@ -20,6 +20,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib.parse
 import queue
 import subprocess
+import ctypes
+import ctypes.wintypes
 
 try:
     import win32pipe
@@ -35,6 +37,86 @@ HTTP_PORT = 8032
 pipe_handle = None
 pipe_write_lock = threading.Lock()
 rx_queue = queue.Queue()
+
+# ==================================================================
+# キー送信機能 — PostMessage で NP21/W にキーイベントを送信
+# ==================================================================
+
+# キー名 → (VKコード, スキャンコード, 拡張キーフラグ) マッピング
+KEY_MAP = {
+    "F1":  (0x70, 0x3B, 0), "F2":  (0x71, 0x3C, 0), "F3":  (0x72, 0x3D, 0),
+    "F4":  (0x73, 0x3E, 0), "F5":  (0x74, 0x3F, 0), "F6":  (0x75, 0x40, 0),
+    "F7":  (0x76, 0x41, 0), "F8":  (0x77, 0x42, 0), "F9":  (0x78, 0x43, 0),
+    "F10": (0x79, 0x44, 0), "F11": (0x7A, 0x57, 0), "F12": (0x7B, 0x58, 0),
+    "ENTER": (0x0D, 0x1C, 0), "ESC": (0x1B, 0x01, 0),
+    "SPACE": (0x20, 0x39, 0), "TAB": (0x09, 0x0F, 0),
+    "BACKSPACE": (0x08, 0x0E, 0),
+    "UP":    (0x26, 0x48, 1), "DOWN":  (0x28, 0x50, 1),
+    "LEFT":  (0x25, 0x4B, 1), "RIGHT": (0x27, 0x4D, 1),
+    "INSERT":   (0x2D, 0x52, 1), "DELETE":   (0x2E, 0x53, 1),
+    "HOME":     (0x24, 0x47, 1), "END":      (0x23, 0x4F, 1),
+    "PAGEUP":   (0x21, 0x49, 1), "PAGEDOWN": (0x22, 0x51, 1),
+}
+
+def _find_np21w_window():
+    """NP21/W ウィンドウハンドルを検索して (hwnd, title) を返す"""
+    user32 = ctypes.windll.user32
+    found = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+    )
+    def callback(hwnd, lparam):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            if 'Neko Project' in title or 'np21' in title.lower():
+                if user32.IsWindowVisible(hwnd):
+                    found.append((hwnd, title))
+        return True
+    user32.EnumWindows(WNDENUMPROC(callback), 0)
+    return found[0] if found else None
+
+def _make_key_lparam(scan_code, extended, is_keyup):
+    """WM_KEYDOWN/WM_KEYUP の lParam を構築"""
+    lparam = 1  # repeat count = 1
+    lparam |= (scan_code & 0xFF) << 16
+    if extended:
+        lparam |= 1 << 24
+    if is_keyup:
+        lparam |= 1 << 30  # previous key state
+        lparam |= 1 << 31  # transition state
+    # lParam は符号付き32bitとして渡す必要がある
+    if lparam >= 0x80000000:
+        lparam -= 0x100000000
+    return lparam
+
+def send_key_to_np21w(key_name):
+    """NP21/Wウィンドウにキーイベントを PostMessage で送信"""
+    key_name = key_name.upper().strip()
+    if key_name not in KEY_MAP:
+        return False, "Unknown key: {}".format(key_name)
+
+    vk_code, scan_code, extended = KEY_MAP[key_name]
+    result = _find_np21w_window()
+    if not result:
+        return False, "NP21/W window not found."
+
+    hwnd, title = result
+    user32 = ctypes.windll.user32
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP   = 0x0101
+
+    lp_down = _make_key_lparam(scan_code, extended, False)
+    lp_up   = _make_key_lparam(scan_code, extended, True)
+
+    user32.PostMessageW(hwnd, WM_KEYDOWN, vk_code, lp_down)
+    time.sleep(0.05)
+    user32.PostMessageW(hwnd, WM_KEYUP, vk_code, lp_up)
+
+    return True, "Sent {} (VK=0x{:02X}) to '{}'".format(key_name, vk_code, title)
+
 
 def connect_to_pipe():
     global pipe_handle
@@ -174,6 +256,13 @@ class OS32RequestHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             self.wfile.write(output.encode('utf-8', errors='replace'))
+        elif parsed_path.path == '/key':
+            key_name = post_data.decode('utf-8', errors='replace').strip()
+            ok, msg = send_key_to_np21w(key_name)
+            self.send_response(200 if ok else 500)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(msg.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
