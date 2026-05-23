@@ -45,21 +45,16 @@ update_*.py
 screenshot*.png
 demo*_fixed.png
 kernel_objdump.txt
+os32_serial_log.txt
 test_rect.script
 
 # テスト用バイナリアセット
 *.vdp
 *.vqd
 *.vqi
-*.VQI
 rance.png
 
-# ルートのビルド成果物 (boot/ 配下は追跡対象)
-/boot.bin
-/boot_fat.bin
-/boot_hdd.bin
-/loader.bin
-/loader_hdd.bin
+# ルートのビルド成果物 (*.bin, *.elf, *.map はグローバルパターンでカバー)
 /vmkernel.lz4
 /cat
 
