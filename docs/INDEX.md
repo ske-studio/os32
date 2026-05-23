@@ -32,8 +32,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) | ブートアーキテクチャ — VK32フォーマット、メモリマップ、HDD/FDDローダー、デプロイ |
 | [V86_USERLAND_MIGRATION.md](V86_USERLAND_MIGRATION.md) | V86 ユーザー空間化 移行プラン — カーネル/ユーザー切り分け思想・段階的移行ロードマップ |
 | [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) | SQLite カーネル統合 — アーキテクチャ、ビルド設定、VFS、IPC、障害サマリ |
-| [CROSS_COMPILER_REBUILD.md](CROSS_COMPILER_REBUILD.md) | i386-elf クロスコンパイラ soft-float 再構築手順 (見送り・参照資料) |
-| [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
+| [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.1 GUIシェル計画〜) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
 
@@ -45,6 +44,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [README.md](../README.md) | プロジェクト概要・機能一覧・クイックスタート |
 | [INSTALL.md](../INSTALL.md) | インストール・ビルド手順 |
 | [CHANGELOG.md](../CHANGELOG.md) | リリース変更履歴 |
+| [GEMINI.md](../GEMINI.md) | AI コーディングアシスタント向けガイダンス (共通) |
+| [CLAUDE.md](../CLAUDE.md) | Claude Code 向けポインタ (→ GEMINI.md) |
 
 ## KAPI 仕様書 構成
 
@@ -90,23 +91,21 @@ V86 サブシステムの DOS 互換性実装で参照するソースコード:
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/v86_integration/README.md](tasks/v86_integration/README.md) | **V86統合** — V86サブシステム統合リファクタリング |
-| [tasks/v86/INDEX.md](tasks/v86/INDEX.md) | **V86** — V86サブシステム 設計・実装ドキュメント (旧VDOS) |
-| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP (日本語入力) — 実装状態スナップショット |
+| [tasks/v86/README.md](tasks/v86/README.md) | **V86** — V86サブシステム 設計・実装ドキュメント |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-
-### ユーザー空間ライブラリ設計書
-
-| ドキュメント | 内容 |
-|-------------|------|
-| [tasks/libs/INDEX.md](tasks/libs/INDEX.md) | **ライブラリ設計書索引** — 全13ライブラリの設計書一覧 |
+| [tasks/libs/INDEX.md](tasks/libs/INDEX.md) | **ライブラリ設計書索引** — 全13ライブラリ (実装完了、設計書はアーカイブ済み) |
 
 ### アーカイブ (完了済み実装の元ドキュメント)
 
-| ドキュメント | 集約先 |
+| ドキュメント | 集約先 / 備考 |
 |-------------|-------|
 | [tasks/_archived/boot_reform/](tasks/_archived/boot_reform/) | → [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) |
 | [tasks/_archived/sqlite/](tasks/_archived/sqlite/) | → [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) |
+| [tasks/_archived/fep/FEP_STATUS.md](tasks/_archived/fep/FEP_STATUS.md) | FEP 基盤実装完了時のスナップショット |
+| [tasks/_archived/libs/](tasks/_archived/libs/) | 全13ライブラリの設計書 (全て実装完了) |
+| [tasks/_archived/tilemap/](tasks/_archived/tilemap/) | tilemap 完了タスク (02〜06) |
+| [_archived/ROADMAP_v1.0.md](_archived/ROADMAP_v1.0.md) | v0.1〜v1.0 到達済みロードマップ (歴史的記録) |
+| [_archived/CROSS_COMPILER_REBUILD.md](_archived/CROSS_COMPILER_REBUILD.md) | クロスコンパイラ soft-float 再構築 (見送り・参照資料) |
 
 ## ソースツリー概要
 
@@ -144,4 +143,4 @@ src/os32/
 
 ---
 
-*Last Updated: 2026-05-11*
+*Last Updated: 2026-05-23*
