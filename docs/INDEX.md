@@ -107,6 +107,16 @@ V86 サブシステムの DOS 互換性実装で参照するソースコード:
 | [_archived/ROADMAP_v1.0.md](_archived/ROADMAP_v1.0.md) | v0.1〜v1.0 到達済みロードマップ (歴史的記録) |
 | [_archived/CROSS_COMPILER_REBUILD.md](_archived/CROSS_COMPILER_REBUILD.md) | クロスコンパイラ soft-float 再構築 (見送り・参照資料) |
 
+### リファクタリング計画
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [refactoring/INDEX.md](refactoring/INDEX.md) | **リファクタリング計画索引** — 全体概要と問題一覧 |
+| [refactoring/01_BUILD_OUTPUT.md](refactoring/01_BUILD_OUTPUT.md) | ビルド成果物出力先統合 (Makefile全体) |
+| [refactoring/02_KERNEL_V86_SPLIT.md](refactoring/02_KERNEL_V86_SPLIT.md) | kernel/ V86サブディレクトリ分離 (kernel.mk) |
+| [refactoring/03_LIB_RENAME.md](refactoring/03_LIB_RENAME.md) | ライブラリ命名規則統一 (libs.mk + 全プログラム) |
+| [refactoring/04_PROGRAMS_CLEANUP.md](refactoring/04_PROGRAMS_CLEANUP.md) | programs/ 配下の構造整理 (programs.mk) |
+
 ## ソースツリー概要
 
 ```
