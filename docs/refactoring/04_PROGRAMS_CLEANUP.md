@@ -1,7 +1,8 @@
 # programs/ 配下の構造整理
 
 策定日: 2026-05-23  
-ステータス: 未着手
+完了日: 2026-05-24  
+ステータス: **完了**
 
 ---
 
@@ -41,7 +42,7 @@
 
 ## 変更方針
 
-### Phase 1: 残骸削除 (ビルド変更なし)
+### Phase 1: 残骸削除 (ビルド変更なし) ✅ 完了 (2026-05-23)
 
 ```bash
 # programs/ 直下の古いビルド残骸を削除
@@ -58,13 +59,13 @@ find . -maxdepth 1 -name "*.elf" ! -name "shell.elf" -delete
 find . -maxdepth 1 -name "*.raw" ! -name "shell.raw" -delete
 ```
 
-### Phase 2: bench/ 残骸削除 (ビルド変更なし)
+### Phase 2: bench/ 残骸削除 (ビルド変更なし) ✅ 完了 (2026-05-23)
 
 ```bash
 rm -rf programs/bench/  # main.o のみ、ソースなし
 ```
 
-### Phase 3: ui_demo/ → apps/ 移動 (programs.mk 変更)
+### Phase 3: ui_demo/ → apps/ 移動 (programs.mk 変更) ✅ 完了 (2026-05-24)
 
 ```bash
 mv programs/ui_demo/ programs/apps/ui_demo/

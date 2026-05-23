@@ -190,13 +190,13 @@ programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLI
 mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
 # ui_demo — microUI デモ
-programs/ui_demo/ui_demo.o: programs/ui_demo/ui_demo.c
+programs/apps/ui_demo/ui_demo.o: programs/apps/ui_demo/ui_demo.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
+programs/apps/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
 
-ui_demo: $(CRT0_OBJ) programs/ui_demo/ui_demo.bin
+ui_demo: $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.bin
 
 # libos32gfx/ui.o (gfx_demo が参照)
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
