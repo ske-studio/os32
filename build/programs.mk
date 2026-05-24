@@ -4,7 +4,7 @@
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS    = $(wildcard programs/cmds/*.c)
-C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
+C_APPS    = $(wildcard programs/apps/*.c)
 C_TESTS   = $(filter-out programs/tests/fep_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
@@ -198,9 +198,17 @@ programs/apps/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/ui_dem
 
 ui_demo: $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.bin
 
-# libos32gfx/ui.o (gfx_demo が参照)
-programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+# === FEP Test ===
+lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/tests/fep_test.o: programs/tests/fep_test.c lib/fep_engine.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
+programs/tests/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o -lc -lgcc
+
+fep_test: $(CRT0_OBJ) programs/tests/fep_test.bin
 
 # === SQLite Standalone Test ===
 SQLITE_SA_DIR = programs/tests/sqlite_standalone
@@ -321,7 +329,7 @@ programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst lz4_cmd ui_demo fep_test bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
@@ -341,8 +349,9 @@ clean-programs: clean-rust
 
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
-	rm -f lib/lz4_prog.o
+	rm -f lib/lz4_prog.o lib/fep_engine_prog.o
 	rm -f unicode.bin tools/gen_unicode
+	rm -f programs/apps/ui_demo/*.o programs/apps/ui_demo/*.elf programs/apps/ui_demo/*.bin
 
 .PHONY: programs programs_base edit lz4_cmd cdinst bench bench_scale2x
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
@@ -351,5 +360,6 @@ clean-programs: clean-rust
 .PHONY: asset_test asset_demo ecs_test ecs_demo text_test text_demo
 .PHONY: econ_test ai_test btl_test board_test evt_test inv_test
 .PHONY: gfx_demo demo1 spr_test vdpview raster ekakiuta vbzview mdview
+.PHONY: ui_demo fep_test
 .PHONY: unicode_bin fep_dic
 .PHONY: clean-programs

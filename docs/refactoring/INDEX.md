@@ -17,7 +17,8 @@ Makefile 変更を伴う大規模リファクタリングは本ディレクト�
 | 1 | ビルド成果物のルート直下出力 | 🔴 高 | Makefile全体 | [01_BUILD_OUTPUT.md](01_BUILD_OUTPUT.md) |
 | 2 | kernel/ V86ファイル肥大化 (36ファイル) | 🔴 高 | kernel.mk | [02_KERNEL_V86_SPLIT.md](02_KERNEL_V86_SPLIT.md) |
 | 3 | ライブラリ命名不統一 | 🟡 中 | libs.mk + 全プログラム | [03_LIB_RENAME.md](03_LIB_RENAME.md) |
-| 4 | programs/ 配下の構造整理 | 🟡 中 | programs.mk | [04_PROGRAMS_CLEANUP.md](04_PROGRAMS_CLEANUP.md) |
+| 4 | programs/ 配下の構造整理 | ✅ 完了 | programs.mk | [04_PROGRAMS_CLEANUP.md](04_PROGRAMS_CLEANUP.md) |
+| 5 | Makefile 再構築 | 🔴 高 | Makefile全体 | [05_MAKEFILE_REBUILD.md](05_MAKEFILE_REBUILD.md) |
 
 ## 既に完了した整理
 
