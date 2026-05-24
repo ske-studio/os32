@@ -205,8 +205,8 @@ lib/fep_engine_prog.o: lib/fep_engine.c lib/fep_engine.h
 programs/tests/fep_test.o: programs/tests/fep_test.c lib/fep_engine.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
-programs/tests/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o -lc -lgcc
+programs/tests/fep_test.elf: build/app.ld $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/tests/fep_test.o lib/fep_engine_prog.o lib/utf8.o -lc -lgcc
 
 fep_test: $(CRT0_OBJ) programs/tests/fep_test.bin
 
