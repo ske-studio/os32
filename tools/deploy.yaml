@@ -188,18 +188,39 @@ filesystem:
       tags: [programs]
     - host: programs/tests/hello_gfx.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [programs, rust]
     - host: programs/tests/alloc_demo.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [programs, rust]
     - host: programs/tests/math_test_rs.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [programs, rust]
     - host: programs/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
     - host: programs/tests/sqlite_standalone/sqlite_standalone.bin
       guest: /usr/bin/sqlite_standalone.bin
+      tags: [programs]
+
+    # --- FEP テスト ---
+    - host: programs/tests/fep_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+
+    # --- UI デモ ---
+    - host: programs/apps/ui_demo/ui_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
+
+    # --- サウンド制御 ---
+    - host: programs/system/sndctl.bin
+      guest: /sbin/
+      tags: [programs]
+    - host: programs/system/sndtest.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/system/sndtest2.bin
+      guest: /usr/bin/
       tags: [programs]
 
     # --- LZ4 圧縮/展開コマンド → /bin/ ---
@@ -226,7 +247,7 @@ filesystem:
         - vdpview.bin
         - spr_test.bin
         - raster.bin
-        - fep_test.bin
+
         - mdview.bin
       tags: [programs]
 
@@ -317,7 +338,7 @@ filesystem:
     # --- フォントテスト ---
     - host: programs/tests/font_test.bin
       guest: /usr/bin/
-      tags: [programs]
+      tags: [programs, rust]
 
     - host: programs/tests/font_load_test.bin
       guest: /usr/bin/
