@@ -2,6 +2,10 @@
 #  config.mk — ツールチェーン、フラグ、パス定義
 # ============================================================================
 
+# ビルド成果物出力ディレクトリ
+BUILD_OUT = build/out
+$(shell mkdir -p $(BUILD_OUT))
+
 # 環境変数 (デプロイ先)
 NP21W_DIR ?= /tmp/np21w
 
@@ -54,11 +58,11 @@ INC_SQLITE = $(INC_COMMON) -Ilib/sqlite3 -Ifs -Idrivers -Ilib -Ikernel
 CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon -D__KERNEL_BUILD__
 # SQLite専用フラグ: -Os (サイズ最適化, -O0のスタック肥大化回避) + -Wno-long-long (int64リテラル)
 CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w -DNDEBUG -D__KERNEL_BUILD__
-LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections \
+LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --nmagic --gc-sections \
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 # === 外部プログラム用フラグ ===
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libtilemap -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libos32tilemap -Iprograms/libos32filer -Iprograms/libos32md -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 

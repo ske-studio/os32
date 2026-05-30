@@ -253,7 +253,27 @@ u32 *v86_current_jmpbuf = 0;
 
 void v86_test_exit(void)
 {
+    extern void serial_puts_polled(const char *s);
+    extern void serial_put_hex32_polled(u32 val);
+
     __asm__ volatile("sti");
+
+    /* Phase 2: longjmp前にアサーション結果をシリアル出力
+     * クラッシュ時でもデータが残るよう、ファイルI/Oではなくポーリング出力 */
+    serial_puts_polled("\r\n[V86-ASSERT] count=");
+    serial_put_hex32_polled(v86_assert_count);
+    serial_puts_polled(" esp0_err=");
+    serial_put_hex32_polled(v86_assert_esp0_err);
+    serial_puts_polled(" stk_low=");
+    serial_put_hex32_polled(v86_assert_stack_low);
+    serial_puts_polled(" regs_err=");
+    serial_put_hex32_polled(v86_assert_regs_err);
+    serial_puts_polled(" stk_min=");
+    serial_put_hex32_polled(v86_assert_stack_min);
+    serial_puts_polled(" gp#=");
+    serial_put_hex32_polled(v86_gp_count);
+    serial_puts_polled("\r\n");
+
     if (v86_current_jmpbuf) {
         exec_longjmp(v86_current_jmpbuf);
     }

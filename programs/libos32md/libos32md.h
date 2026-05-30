@@ -10,8 +10,8 @@
 /*    > ブロック引用, 段落, 空行                                          */
 /* ======================================================================== */
 
-#ifndef LIBMD_H
-#define LIBMD_H
+#ifndef LIBOS32MD_H
+#define LIBOS32MD_H
 
 /* ノードタイプ (1論理行 = 1ノード) */
 typedef enum {
@@ -76,4 +76,4 @@ typedef struct {
  */
 int md_parse(MdDocument *doc, char *text_buf, int text_len);
 
-#endif /* LIBMD_H */
+#endif /* LIBOS32MD_H */

@@ -23,6 +23,7 @@
 #include "tvram.h"
 #include "io.h"
 #include "kprintf.h"
+#include "tss.h"
 
 /* §8.4 タイムアウト (セッション変数)
  * ゲストが通常命令ループに入ったままバックしない場合、
@@ -31,6 +32,7 @@
  * デフォルト値は v86_session.c で設定される。
  * ネイティブモード (ゲーム等) では 0 に設定してタイムアウトを無効化する。 */
 extern volatile u32 tick_count;   /* isr_stub.asm で100Hzインクリメント */
+extern u8 v86_kstack[32768];      /* V86カーネルスタック (v86_session.c で定義) */
 u32 v86_timeout_ticks = 6000;     /* デフォルト: 6000 tick = 60秒 */
 u32 v86_start_tick = 0;
 
@@ -406,6 +408,86 @@ int v86_gp_handler(u32 *regs)
 
     /* GPハンドラ呼び出しカウント (デバッグ) */
     v86_gp_count++;
+
+    /* ================================================================ */
+    /*  Phase 2: ランタイムアサーション                                  */
+    /*  スタック健全性とregs[]有効性を検証する。                        */
+    /*  違反はv86_event_recordで記録、カウンタで集計。                  */
+    /* ================================================================ */
+    {
+        u32 kstack_lo = (u32)&v86_kstack[0];
+        u32 kstack_hi = (u32)&v86_kstack[sizeof(v86_kstack)];
+        u32 cur_esp;
+        u32 esp0;
+        u32 remaining;
+
+        /* 2.1 TSS ESP0 レンジチェック */
+        esp0 = tss_get_esp0();
+        if (esp0 < kstack_lo || esp0 > kstack_hi) {
+            v86_assert_count++;
+            v86_assert_esp0_err++;
+            v86_event_record(V86_EV_ASSERT,
+                (u16)(regs[V86_REG_CS] & 0xFFFF),
+                (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                V86_ASSERT_ESP0_RANGE,
+                (u8)((esp0 >> 16) & 0xFF),
+                (u8)((esp0 >> 8) & 0xFF), 0);
+        }
+
+        /* 2.2 GP handler ESP レンジ + 残量チェック */
+        __asm__ volatile("mov %%esp, %0" : "=r"(cur_esp));
+        if (cur_esp >= kstack_lo && cur_esp <= kstack_hi) {
+            remaining = cur_esp - kstack_lo;
+            if (remaining < v86_assert_stack_min) {
+                v86_assert_stack_min = remaining;
+            }
+            if (remaining < 2048) {
+                v86_assert_count++;
+                v86_assert_stack_low++;
+                v86_event_record(V86_EV_ASSERT,
+                    (u16)(regs[V86_REG_CS] & 0xFFFF),
+                    (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                    V86_ASSERT_GP_STACK_LOW,
+                    (u8)((remaining >> 8) & 0xFF),
+                    (u8)(remaining & 0xFF), 0);
+            }
+        } else {
+            v86_assert_count++;
+            v86_assert_esp0_err++;
+            v86_event_record(V86_EV_ASSERT,
+                (u16)(regs[V86_REG_CS] & 0xFFFF),
+                (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                V86_ASSERT_GP_ESP_RANGE,
+                (u8)((cur_esp >> 16) & 0xFF),
+                (u8)((cur_esp >> 8) & 0xFF), 0);
+        }
+
+        /* 2.4 regs[] 健全性チェック */
+        if (regs[V86_REG_CS] > 0xFFFF) {
+            v86_assert_count++;
+            v86_assert_regs_err++;
+            v86_event_record(V86_EV_ASSERT,
+                (u16)(regs[V86_REG_CS] & 0xFFFF),
+                (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                V86_ASSERT_CS_OVERFLOW, 0, 0, 0);
+        }
+        if (regs[V86_REG_EIP] > 0xFFFF) {
+            v86_assert_count++;
+            v86_assert_regs_err++;
+            v86_event_record(V86_EV_ASSERT,
+                (u16)(regs[V86_REG_CS] & 0xFFFF),
+                (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                V86_ASSERT_EIP_OVERFLOW, 0, 0, 0);
+        }
+        if (!(regs[V86_REG_EFLAGS] & 0x020000UL)) {
+            v86_assert_count++;
+            v86_assert_regs_err++;
+            v86_event_record(V86_EV_ASSERT,
+                (u16)(regs[V86_REG_CS] & 0xFFFF),
+                (u16)(regs[V86_REG_EIP] & 0xFFFF),
+                V86_ASSERT_VM_MISSING, 0, 0, 0);
+        }
+    }
 
     /* ★ 最初の#GP呼び出し: V86エントリ直後のレジスタ状態をダンプ */
     if (v86_gp_count == 1 && v86_debug_enabled) {
@@ -1379,6 +1461,13 @@ u32 v86_irq0_gp_skip_if = 0;    /* GPハンドラ保留注入: IF=0でスキッ�
 u32 v86_irq0_gp_skip_isr = 0;   /* GPハンドラ保留注入: ISR処理中でスキップ */
 u32 v86_irq0_gp_skip_ivt = 0;   /* GPハンドラ保留注入: IVTダミーでスキップ */
 
+/* Phase 2: ランタイムアサーションカウンタ */
+u32 v86_assert_count = 0;
+u32 v86_assert_esp0_err = 0;
+u32 v86_assert_stack_low = 0;
+u32 v86_assert_regs_err = 0;
+u32 v86_assert_stack_min = 0xFFFFFFFF;  /* 初期値: 最大 (未計測) */
+
 /* ====================================================================== */
 /*  フリーズ検出 (B-1) — グローバル変数 + ダンプ関数                       */
 /* ====================================================================== */
@@ -1438,6 +1527,26 @@ void v86_inject_timer_irq(u32 *regs)
 {
     u32 irq_divisor;
     v86_irq0_call_count++;
+
+    /* Phase 2: IRQ0 handler スタック残量チェック (ISRコンテキスト)
+     * kprintf不可のため、カウンタ記録のみ。v86_event_recordもISRでは
+     * ファイルI/O→トリプルフォルトの危険があるため呼ばない。 */
+    {
+        u32 irq_esp;
+        u32 kstack_lo = (u32)&v86_kstack[0];
+        u32 kstack_hi = (u32)&v86_kstack[sizeof(v86_kstack)];
+        __asm__ volatile("mov %%esp, %0" : "=r"(irq_esp));
+        if (irq_esp >= kstack_lo && irq_esp <= kstack_hi) {
+            u32 rem = irq_esp - kstack_lo;
+            if (rem < v86_assert_stack_min) {
+                v86_assert_stack_min = rem;
+            }
+            if (rem < 1024) {
+                v86_assert_count++;
+                v86_assert_stack_low++;
+            }
+        }
+    }
 
     /* ★ タイムアウト検出 (最優先 — VM判定より前)
      * GPハンドラ内の STI/CLI 窓で IRQ0 が発火した場合、

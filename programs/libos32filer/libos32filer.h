@@ -10,8 +10,8 @@
 /*    if (result) path = filer_get_selected_path();                         */
 /* ======================================================================== */
 
-#ifndef LIBFILER_H
-#define LIBFILER_H
+#ifndef LIBOS32FILER_H
+#define LIBOS32FILER_H
 
 #include "os32api.h"
 
@@ -61,4 +61,4 @@ int filer_open(const char *dir, const char *filter);
 /* 選択されたファイルのフルパスを取得 */
 const char *filer_get_selected_path(void);
 
-#endif /* LIBFILER_H */
+#endif /* LIBOS32FILER_H */

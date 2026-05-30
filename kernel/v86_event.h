@@ -19,7 +19,8 @@ enum v86_event_kind {
     V86_EV_ROM_CALL  = 3,   /* BIOS ROM FAR CALL (critical) */
     V86_EV_EXIT      = 4,   /* V86終了 (critical) */
     V86_EV_TIMEOUT   = 5,   /* タイムアウト (critical) */
-    V86_EV_UNKNOWN_OP= 6    /* 未知オペコード (critical) */
+    V86_EV_UNKNOWN_OP= 6,   /* 未知オペコード (critical) */
+    V86_EV_ASSERT    = 7    /* アサーション違反 (critical) */
 };
 
 /* イベントレコード (16バイト固定長) */

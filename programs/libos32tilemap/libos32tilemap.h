@@ -1,5 +1,5 @@
-#ifndef __LIBTILEMAP_H
-#define __LIBTILEMAP_H
+#ifndef __LIBOS32TILEMAP_H
+#define __LIBOS32TILEMAP_H
 
 #include "os32api.h"
 #include "libos32gfx.h"
@@ -97,4 +97,4 @@ void tilemap_scroll_sync(void);
 /* ===== パレット ===== */
 void tilemap_set_palette(const u8 pal[16][3]);
 
-#endif /* __LIBTILEMAP_H */
+#endif /* __LIBOS32TILEMAP_H */

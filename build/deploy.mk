@@ -4,13 +4,13 @@
 
 # deploy: HostDrv方式 — ビルド成果物をC:\os32にコピー (sudo不要, 再起動不要)
 # ゲストOSは /host 経由で直接アクセス可能
-deploy: vmkernel.lz4 programs unicode_bin
+deploy: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	@echo "=== HostDrv Deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 
 # deploy-kernel: vmkernel.lz4をext2に配置 (NP21/W再起動が必要)
 #   ブートローダー自体の変更時は deploy-boot を先に実行すること
-deploy-kernel: vmkernel.lz4
+deploy-kernel: $(BUILD_OUT)/vmkernel.lz4
 	@echo "=== Sync to HostDrv before NHD deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 	$(NHD_DEPLOY) sync-from-hostdrv

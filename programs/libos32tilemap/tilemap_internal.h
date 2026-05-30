@@ -1,7 +1,7 @@
 #ifndef __TILEMAP_INTERNAL_H
 #define __TILEMAP_INTERNAL_H
 
-#include "libtilemap.h"
+#include "libos32tilemap.h"
 
 typedef struct {
     KernelAPI *kapi;

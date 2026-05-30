@@ -32,7 +32,7 @@ SHELL_SRC = $(wildcard programs/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
 programs/shell/%.o: programs/shell/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ) -lc -lgcc
@@ -181,8 +181,8 @@ programs/apps/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vbzview.o $(GF
 vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 
 # mdview
-programs/apps/mdview.o: programs/apps/mdview.c programs/libmd/libmd.h programs/libmd/md_render.h programs/libfiler/libfiler.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
+programs/apps/mdview.o: programs/apps/mdview.c programs/libos32md/libos32md.h programs/libos32md/md_render.h programs/libos32filer/libos32filer.h
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
 programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
@@ -273,7 +273,7 @@ programs/%.bin: programs/%.raw programs/%.elf
 # === ヘルパーツール ===
 unicode_bin:
 	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
-	@if [ ! -f unicode.bin ]; then ./tools/gen_unicode; fi
+	@if [ ! -f $(BUILD_OUT)/unicode.bin ]; then ./tools/gen_unicode && mv unicode.bin $(BUILD_OUT)/unicode.bin; fi
 
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
@@ -350,7 +350,7 @@ clean-programs: clean-rust
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
 	rm -f lib/lz4_prog.o lib/fep_engine_prog.o
-	rm -f unicode.bin tools/gen_unicode
+	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 	rm -f programs/apps/ui_demo/*.o programs/apps/ui_demo/*.elf programs/apps/ui_demo/*.bin
 
 .PHONY: programs programs_base edit lz4_cmd cdinst bench bench_scale2x

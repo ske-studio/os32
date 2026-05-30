@@ -320,6 +320,49 @@ void v86_debug_write_header(const char *boot_mode,
     v86_event_init();
 }
 
+/* [STACK HEALTH / ASSERTIONS] (Phase 2 ランタイムアサーション結果) */
+static void write_section_assert(void)
+{
+    wb_reset();
+    wb_separator();
+    wb_str("STACK HEALTH / RUNTIME ASSERTIONS\n");
+    wb_separator();
+    wb_nl();
+
+    wb_str("[ASSERTIONS]\n");
+    wb_str("  Total violations: "); wb_dec(v86_assert_count); wb_nl();
+    wb_str("  ESP0 range errors: "); wb_dec(v86_assert_esp0_err); wb_nl();
+    wb_str("  Stack low warnings: "); wb_dec(v86_assert_stack_low); wb_nl();
+    wb_str("  Regs[] errors    : "); wb_dec(v86_assert_regs_err); wb_nl();
+    wb_str("  Stack min remain : ");
+    if (v86_assert_stack_min == 0xFFFFFFFF) {
+        wb_str("N/A (not measured)");
+    } else {
+        wb_dec(v86_assert_stack_min);
+        wb_str(" bytes");
+        if (v86_assert_stack_min < 2048) {
+            wb_str(" *** LOW ***");
+        }
+    }
+    wb_nl();
+    wb_str("  v86_kstack base  : 0x");
+    {
+        extern u8 v86_kstack[];
+        wb_hex32((u32)&v86_kstack[0]);
+    }
+    wb_nl();
+    wb_str("  v86_kstack size  : 32768 bytes\n");
+    wb_nl();
+
+    if (v86_assert_count == 0) {
+        wb_str("  >> All assertions passed.\n");
+    } else {
+        wb_str("  >> FAILURES DETECTED. Check v86_events.log for details.\n");
+    }
+    wb_nl();
+    wb_flush();
+}
+
 /* [EXIT] + [GP HANDLER] + [IRQ0] */
 static void write_section_exit(void)
 {
@@ -1227,6 +1270,7 @@ void v86_debug_dump_session(void)
     /* ファイルログ出力 */
     if (log_fd >= 0) {
         kprintf(0x0A, "[V86_DBG] writing sections...\n");
+        write_section_assert();
         write_section_exit();
         write_section_hw();
         write_section_io();

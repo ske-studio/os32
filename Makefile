@@ -43,10 +43,11 @@ include build/image.mk
 	$(AS) -f elf32 $< -o $@
 
 # === 主要ターゲット ===
-all: boot kernel.bin sqlite.bin vmkernel.lz4 images/os32_boot.d88 programs iso
+all: boot $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 images/os32_boot.d88 programs iso
 
 # === クリーン (全サブモジュール) ===
 clean: clean-kernel clean-programs clean-libs clean-images
 	rm -f os.img os.d88 os_install.img os_install.d88 os_raw.img
+	rm -rf $(BUILD_OUT)
 
 .PHONY: all clean

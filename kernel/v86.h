@@ -109,6 +109,23 @@ extern u32 v86_irq0_gp_skip_if;
 extern u32 v86_irq0_gp_skip_isr;
 extern u32 v86_irq0_gp_skip_ivt;
 
+/* Phase 2: ランタイムアサーションカウンタ (v86.c で定義) */
+/* arg1 値: 1=ESP0範囲外, 2=GP ESP範囲外, 3=GP スタック残量低,
+ *          4=IRQ0 スタック残量低, 5=CS>FFFF, 6=EIP>FFFF, 7=VM bit欠落 */
+#define V86_ASSERT_ESP0_RANGE   1   /* TSS ESP0 が v86_kstack 外 */
+#define V86_ASSERT_GP_ESP_RANGE 2   /* GP handler ESP が kstack 外 */
+#define V86_ASSERT_GP_STACK_LOW 3   /* GP handler スタック残量 <2KB */
+#define V86_ASSERT_IRQ_STACK_LOW 4  /* IRQ0 handler スタック残量 <1KB */
+#define V86_ASSERT_CS_OVERFLOW  5   /* regs[CS] > 0xFFFF */
+#define V86_ASSERT_EIP_OVERFLOW 6   /* regs[EIP] > 0xFFFF */
+#define V86_ASSERT_VM_MISSING   7   /* EFLAGS.VM=0 */
+
+extern u32 v86_assert_count;        /* アサーション違反の総数 */
+extern u32 v86_assert_esp0_err;     /* ESP0 範囲外の回数 */
+extern u32 v86_assert_stack_low;    /* スタック残量低の回数 */
+extern u32 v86_assert_regs_err;     /* regs[] 異常の回数 */
+extern u32 v86_assert_stack_min;    /* スタック残量の最小値 (バイト) */
+
 /* ====================================================================== */
 /*  ユーティリティ (v86.c で定義)                                           */
 /* ====================================================================== */
