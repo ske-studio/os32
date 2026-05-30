@@ -17,7 +17,7 @@ Offset  Size  Field
 0x08    4     version: 1
 0x0C    4     entry_count: 2 (kernel + sqlite)
 --- entry[0]: kernel ---
-0x10    4     load_addr: 0x100000 (展開先アドレス)
+0x10    4     load_addr: 0x110000 (展開先アドレス)
 0x14    4     raw_size: 展開後サイズ (バイト)
 0x18    4     data_offset: LZ4圧縮データの位置 (ファイル先頭からの絶対オフセット)
 0x1C    4     compressed_size: LZ4圧縮データサイズ
@@ -45,7 +45,7 @@ vmkernel.lz4 生成ツール (Python)。
 
 ```
 Usage: python3 tools/mkvmkernel.py \
-         --kernel kernel.bin --kernel-addr 0x100000 \
+         --kernel kernel.bin --kernel-addr 0x110000 \
          --sqlite sqlite.bin --sqlite-addr 0x200000 \
          -o vmkernel.lz4
 ```
@@ -95,7 +95,7 @@ typedef struct {
   ```makefile
   vmkernel.lz4: kernel.bin sqlite.bin
       python3 tools/mkvmkernel.py \
-          --kernel kernel.bin --kernel-addr 0x100000 \
+          --kernel kernel.bin --kernel-addr 0x110000 \
           --sqlite sqlite.bin --sqlite-addr 0x200000 \
           -o vmkernel.lz4
   ```

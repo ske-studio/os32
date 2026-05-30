@@ -23,7 +23,7 @@ ext2パーティション上の `/boot/vmkernel.lz4` を読み込んで展開・
    h) 各エントリをLZ4展開 → entry[i].load_addr
    i) メモリプローブ
    j) ESP = 0x9FFFC
-   k) far jmp 0x100000 (kentry)
+   k) far jmp 0x110000 (kentry)
 ```
 
 ## 新規ファイル
