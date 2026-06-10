@@ -25,6 +25,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---------|------|
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
+| [POLICY_AI.md](POLICY_AI.md) | **AI協業プロトコル** — 出力規約、誤り処理、継続性、スコープ、非対称バインド |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v38 仕様書 — 概要・呼び出し規約・変更履歴 |
 | [KAPI_TABLE.md](KAPI_TABLE.md) | KernelAPI v38 関数テーブル — 全162エントリ |
 | [KAPI_NOTES.md](KAPI_NOTES.md) | KernelAPI v38 補足ノート — 機能グループ別詳細説明 |

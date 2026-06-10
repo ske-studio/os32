@@ -5,6 +5,7 @@ OS32カーネルおよび外部プログラム開発における公式ポリシ�
 
 技術仕様・アーキテクチャの詳細は [DEVELOPMENT.md](DEVELOPMENT.md) を参照。
 デバッグに関するポリシーは [POLICY_DEBUG.md](POLICY_DEBUG.md) を参照。
+AI協業の対話・出力規約は [POLICY_AI.md](POLICY_AI.md) を参照。
 
 ---
 
