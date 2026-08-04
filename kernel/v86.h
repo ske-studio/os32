@@ -109,6 +109,9 @@ extern u32 v86_irq0_gp_skip_if;
 extern u32 v86_irq0_gp_skip_isr;
 extern u32 v86_irq0_gp_skip_ivt;
 
+#define V86_AH_HIST_INTS 48
+extern u8 v86_int_ah_hist[V86_AH_HIST_INTS][256];
+
 /* Phase 2: ランタイムアサーションカウンタ (v86.c で定義) */
 /* arg1 値: 1=ESP0範囲外, 2=GP ESP範囲外, 3=GP スタック残量低,
  *          4=IRQ0 スタック残量低, 5=CS>FFFF, 6=EIP>FFFF, 7=VM bit欠落 */

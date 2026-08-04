@@ -12,7 +12,8 @@ extern KernelAPI *kapi;
 #define api kapi
 
 /* 外部参照 (inv_core.c) */
-extern db_handle_t inv__get_db(void);
+const InvShopLineup *inv__get_shop_lineups(void);
+int                 inv__shop_lineup_count(void);
 
 /* ====================================================================== */
 /*  公開API: 価格取得                                                       */
@@ -36,59 +37,21 @@ u32 inv_get_sell_price(u16 item_id)
 
 int inv_shop_list(u8 shop_type, u8 stage, u16 *out_ids, int max)
 {
-    db_handle_t db;
-    int rc;
+    const InvShopLineup *lineups;
+    int total_count;
+    int i;
     int count = 0;
-
-    /* shop_lineupテーブルからクエリ */
-    /* SQLクエリを手動構築 (C89: snprintfなし、sprintfは安全性の観点で避ける) */
-    char sql[128];
-    char *p = sql;
-    const char *prefix = "SELECT item_id FROM shop_lineup WHERE shop_type=";
-    const char *mid = " AND stage<=";
-    char digits[4];
-    int di;
-    int val;
 
     if (!out_ids || max <= 0) return 0;
 
-    db = inv__get_db();
-    if (db < 0) return 0;
+    lineups = inv__get_shop_lineups();
+    total_count = inv__shop_lineup_count();
 
-    /* クエリ文字列構築 */
-    while (*prefix) { *p++ = *prefix++; }
-
-    /* shop_type を文字列に変換 */
-    val = shop_type;
-    di = 0;
-    if (val == 0) {
-        digits[di++] = '0';
-    } else {
-        while (val > 0) { digits[di++] = '0' + (char)(val % 10); val /= 10; }
-    }
-    while (di > 0) { *p++ = digits[--di]; }
-
-    while (*mid) { *p++ = *mid++; }
-
-    /* stage を文字列に変換 */
-    val = stage;
-    di = 0;
-    if (val == 0) {
-        digits[di++] = '0';
-    } else {
-        while (val > 0) { digits[di++] = '0' + (char)(val % 10); val /= 10; }
-    }
-    while (di > 0) { *p++ = digits[--di]; }
-
-    *p = '\0';
-
-    rc = db_query(db, sql);
-    if (rc < 0) return 0;
-
-    while (rc == DB_STATUS_ROW && count < max) {
-        out_ids[count] = (u16)db_column_int(0);
-        count++;
-        rc = db_step(db);
+    for (i = 0; i < total_count && count < max; i++) {
+        if (lineups[i].shop_type == shop_type && lineups[i].stage <= stage) {
+            out_ids[count] = lineups[i].item_id;
+            count++;
+        }
     }
 
     return count;

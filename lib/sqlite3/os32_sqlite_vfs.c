@@ -19,7 +19,7 @@
 #include "kprintf.h"
 
 /* ======== MEMSYS5 固定プール (200KB) + canary ======== */
-#define SQLITE_MEMSYS5_SIZE  (200 * 1024)
+#define SQLITE_MEMSYS5_SIZE  (300 * 1024)
 #define CANARY_VALUE 0xDEADBEEFUL
 static u32 canary_before[4] = {
     CANARY_VALUE, CANARY_VALUE, CANARY_VALUE, CANARY_VALUE

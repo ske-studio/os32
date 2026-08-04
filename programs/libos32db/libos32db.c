@@ -9,7 +9,7 @@
 #include "libos32db.h"
 
 /* 共有メモリベースアドレス (memmap.h MEM_SHM_BASE と一致させること) */
-#define DB_SHM_PTR   ((u8 *)0x381000)
+#define DB_SHM_PTR   ((u8 *)kapi + 0x2000)
 
 /* API テーブルへのポインタ (crt0_c.c で定義される) */
 extern KernelAPI *kapi;

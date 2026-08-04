@@ -73,15 +73,15 @@ os32/
 
 #### `tools/hostdrv_deploy.py`
 NP21/W の HostDrv 共有ディレクトリ (`C:\os32`) にビルド成果物を配置するデプロイスクリプト。
-sudo不要。ゲストOS は `/host` マウントポイント経由で直接アクセスし、`hsync` で ext2 に同期する。
 
 ```bash
 python3 tools/hostdrv_deploy.py sync              # deploy.yaml に基づく全ファイルデプロイ
 python3 tools/hostdrv_deploy.py sync --tag programs  # プログラムのみ
 python3 tools/hostdrv_deploy.py diff              # ビルド成果物との差分表示
 ```
-- プログラム変更時は NP21/W 再起動不要
-- `filecmp` で差分チェックし、変更のないファイルはスキップ
+- **注意**: ゲストOS上の `hsync` コマンドによる同期は、大容量ファイル（fep.db等）の転送時にシリアル/ディスクI/Oの詰まりによるタイムアウト・ハングアップを引き起こすため、現在は**非推奨**となっています。
+- 代わりに、`tools/nhd_deploy.py sync-from-hostdrv` を使用して WSL上からNHDイメージに直接同期し、NP21/Wを再起動するデプロイフローを使用してください。
+- `filecmp` で差分チェックし、変更のないファイルはスキップされます。
 
 #### `tools/nhd_deploy.py`
 NHD HDDイメージの管理をホスト側で一元化するデプロイメントツール。`deploy.yaml` に基づき、ローダー・全ファイルを一括デプロイする。

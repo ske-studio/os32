@@ -153,7 +153,8 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 | `hostdrvfs_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `hostdrvfs_stat(ctx, path, st)` | ファイル情報取得 |
 
-**用途**: `hsync` コマンドによる `/host` → `/` へのファイル同期 (HostDrvデプロイワークフロー) の基盤。
+**用途**: ホストPCとの動的ファイル同期の基盤。
+※ ただし大容量ファイル同期のハングアップを回避するため、デプロイワークフローの主軸は WSL上のNHD直接同期（マウントコピー）に移行しています。
 
 ---
 

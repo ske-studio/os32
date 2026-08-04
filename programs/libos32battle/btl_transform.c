@@ -118,10 +118,18 @@ void btl_transform_release(BtlUnit *unit, BtlTransformState *state)
     unit->spd = state->orig_spd;
     unit->mag = state->orig_mag;
 
-    /* max_hp を復元し、HPが超過していたらクランプ */
+    /* HP比率を維持して縮小復元 */
+    if (unit->max_hp > 0) {
+        unit->hp = (i16)((int)unit->hp * (int)state->orig_max_hp / (int)unit->max_hp);
+    }
     unit->max_hp = state->orig_max_hp;
+
+    /* 念のためクランプ */
     if (unit->hp > unit->max_hp) {
         unit->hp = unit->max_hp;
+    }
+    if (unit->hp < 0) {
+        unit->hp = 0;
     }
 
     /* 状態リセット */

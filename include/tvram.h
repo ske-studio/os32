@@ -34,4 +34,7 @@ void tvram_putkanji_at(int x, int y, u16 jis, u8 color);
 /* 1行スクロール */
 void tvram_scroll(void);
 
+/* スクロール保護設定 */
+void tvram_set_scroll_reserve(int rows);
+
 #endif /* __TVRAM_H */

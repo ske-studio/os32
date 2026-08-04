@@ -834,3 +834,33 @@ int __cdecl wrap_sys_v86_boot_image(const char *path, const char *cmdline)
     return v86_boot_image_kapi(path, cmdline);
 }
 
+int __cdecl wrap_ime_switch_dict(int variant)
+{
+    return ime_switch_dict(variant);
+}
+
+int __cdecl wrap_ime_user_list(const char *yomi_prefix, void *out, int max)
+{
+    return ime_user_list_facade(yomi_prefix, out, max);
+}
+
+int __cdecl wrap_ime_user_delete(const char *yomi, const char *kanji)
+{
+    return ime_user_delete_facade(yomi, kanji);
+}
+
+int __cdecl wrap_ime_user_export(const char *path)
+{
+    return ime_user_export_facade(path);
+}
+
+int __cdecl wrap_ime_user_clear(void)
+{
+    return ime_user_clear_facade();
+}
+
+int __cdecl wrap_ime_trygetkey(void)
+{
+    return ime_trygetkey();
+}
+

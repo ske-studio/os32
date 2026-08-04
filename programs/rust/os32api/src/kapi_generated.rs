@@ -169,13 +169,18 @@ pub struct KernelAPI {
     /* idx 159 */ pub dev_blk_read: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *mut u8) -> i32,
     /* idx 160 */ pub dev_blk_write: unsafe extern "C" fn(dev_name: *const u8, lba: u32, count: i32, buf: *const u8) -> i32,
     /* idx 161 */ pub sys_v86_boot_image: unsafe extern "C" fn(path: *const u8, cmdline: *const u8) -> i32,
-    /* idx 162 */ pub sys_v86_debug_test: unsafe extern "C" fn() -> i32,
+    /* idx 162 */ pub ime_switch_dict: unsafe extern "C" fn(variant: i32) -> i32,
+    /* idx 163 */ pub ime_user_list: unsafe extern "C" fn(yomi_prefix: *const u8, out: *mut u8, max: i32) -> i32,
+    /* idx 164 */ pub ime_user_delete: unsafe extern "C" fn(yomi: *const u8, kanji: *const u8) -> i32,
+    /* idx 165 */ pub ime_user_export: unsafe extern "C" fn(path: *const u8) -> i32,
+    /* idx 166 */ pub ime_user_clear: unsafe extern "C" fn() -> i32,
+    /* idx 167 */ pub ime_trygetkey: unsafe extern "C" fn() -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 40;
+pub const KAPI_VERSION: u32 = 41;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

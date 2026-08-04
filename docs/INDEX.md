@@ -94,7 +94,7 @@ V86 サブシステムの DOS 互換性実装で参照するソースコード:
 |-------------|------|
 | [tasks/v86/README.md](tasks/v86/README.md) | **V86** — V86サブシステム 設計・実装ドキュメント |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-| [tasks/libs/INDEX.md](tasks/libs/INDEX.md) | **ライブラリ設計書索引** — 全13ライブラリ (実装完了、設計書はアーカイブ済み) |
+| [tasks/libs/INDEX.md](tasks/libs/INDEX.md) | **ライブラリ設計書索引** — 全21ライブラリ (実装完了、docs/libs/ に再配置) |
 
 ### アーカイブ (完了済み実装の元ドキュメント)
 
@@ -103,8 +103,6 @@ V86 サブシステムの DOS 互換性実装で参照するソースコード:
 | [tasks/_archived/boot_reform/](tasks/_archived/boot_reform/) | → [BOOT_ARCHITECTURE.md](BOOT_ARCHITECTURE.md) |
 | [tasks/_archived/sqlite/](tasks/_archived/sqlite/) | → [SQLITE_INTEGRATION.md](SQLITE_INTEGRATION.md) |
 | [tasks/_archived/fep/FEP_STATUS.md](tasks/_archived/fep/FEP_STATUS.md) | FEP 基盤実装完了時のスナップショット |
-| [tasks/_archived/libs/](tasks/_archived/libs/) | 全13ライブラリの設計書 (全て実装完了) |
-| [tasks/_archived/tilemap/](tasks/_archived/tilemap/) | tilemap 完了タスク (02〜06) |
 | [_archived/ROADMAP_v1.0.md](_archived/ROADMAP_v1.0.md) | v0.1〜v1.0 到達済みロードマップ (歴史的記録) |
 | [_archived/CROSS_COMPILER_REBUILD.md](_archived/CROSS_COMPILER_REBUILD.md) | クロスコンパイラ soft-float 再構築 (見送り・参照資料) |
 

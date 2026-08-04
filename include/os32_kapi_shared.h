@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      39   /* sys_v86_boot_freedos 削除 (Phase F) */
+#define KAPI_VERSION      41   /* FEPノンブロッキングキー取得API追加 */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -316,6 +316,19 @@ typedef struct {
 
 /* パイプバッファの容量 */
 #define PIPE_BUF_SIZE   (64 * 1024)
+
+/* ======================================================================== */
+/*  FEP モード定数と構造体                                                   */
+/* ======================================================================== */
+#define IME_MODE_OFF       0
+#define IME_MODE_HIRAGANA  1
+#define IME_MODE_KATAKANA  2
+
+typedef struct {
+    char yomi[32];      /* 読み (UTF-8, ヌル終端) */
+    char kanji[32];     /* 漢字/表層形 (UTF-8, ヌル終端) */
+    int  freq;          /* 変換頻度 */
+} IME_UserEntry;
 
 /* 自動生成された APIテーブルを、全ての構造体が定義された後でインクルード */
 #include "os32_kapi_generated.h"

@@ -132,6 +132,8 @@ int board_init(const char *db_path)
                 /* unlock_type=0 は初期解放 */
                 row->unlocked = (row->unlock_type == 0) ? 1 : 0;
             });
+        db_close(h);
+        g_db_slot = -1;
     }
 
     g_initialized = 1;

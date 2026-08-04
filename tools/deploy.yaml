@@ -180,6 +180,15 @@ filesystem:
     - host: programs/tests/board_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/turn_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/rpg_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/save_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/evt_test.bin
       guest: /usr/bin/
       tags: [programs]
@@ -210,6 +219,11 @@ filesystem:
     # --- UI デモ ---
     - host: programs/apps/ui_demo/ui_demo.bin
       guest: /usr/bin/
+      tags: [programs]
+
+    # --- 対戦スゴロクRPG ---
+    - host: programs/apps/game.bin
+      guest: /bin/
       tags: [programs]
 
     # --- サウンド制御 ---
@@ -301,6 +315,11 @@ filesystem:
     # --- ボードエンジン マスターデータ (SQLite DB) ---
     - host: assets/board.db
       guest: /db/board.db
+      tags: [data]
+
+    # --- キャラ育成RPGエンジン マスターデータ (SQLite DB) ---
+    - host: assets/rpg.db
+      guest: /db/rpg.db
       tags: [data]
 
     # --- イベントスケジューラ マスターデータ (SQLite DB) ---

@@ -138,22 +138,28 @@ make all
 
 ### デプロイ方式
 
-#### HostDrv方式 (推奨 — プログラム変更時)
+#### NHD直接マウント・同期方式 (推奨)
 
-NP21/W の HostDrv 機能を利用し、ビルド成果物を `C:\os32` (WSL: `/mnt/c/os32`) に配置する。
-ゲスト OS32 は `/host` マウントポイント経由でアクセスし、`hsync` コマンドで ext2 に同期する。
+大容量ファイルの転送ハングアップ等を防ぐため、WSL上で直接NHDイメージをループバックマウントし、`C:\os32` (HostDrv) の内容を直接書き込む方式を推奨します。NP21/Wの再起動が必要です。
 
 ```bash
-/* HostDrvデプロイ (sudo不要) */
-make deploy                              /* = hostdrv_deploy.py sync */
+/* 1. Windows側でのファイルロックを避けるため、まずNP21/Wを落とす */
+taskkill.exe /F /IM np21x64w.exe
 
-/* ゲスト側で同期 */
-hsync                                    /* /host → / 全同期 */
-hsync bin                                /* /host/bin/ → /bin/ のみ */
-hsync -f                                 /* 強制上書き */
+/* 2. ビルド成果物を C:\os32 にコピー */
+python3 tools/hostdrv_deploy.py sync
+
+/* 3. NHDをマウントしてC:\os32からext2パーティションに直接同期 */
+python3 tools/nhd_deploy.py sync-from-hostdrv
+
+/* 4. アンマウントし、NHDイメージをNP21/W側にコピーしてデプロイ */
+python3 tools/nhd_deploy.py deploy
+
+/* 5. NP21/Wを起動 */
+bash ../tools/start_np21w.sh
 ```
 
-**メリット**: sudo不要、NP21/W再起動不要（カーネル未変更時）
+**メリット**: シリアル転送詰まりによるハングアップがなく、大容量ファイルも極めて高速かつ安全にデプロイできます。
 
 #### NHDブート領域書き込み (カーネル変更時)
 
@@ -233,12 +239,13 @@ AIによるGit変更操作（`git add` / `git commit` 等）は、Windowsネイ�
 
 ### 基本的な検証フロー
 
-1. `make all` でビルドエラーがないことを確認
-2. HostDrv にデプロイ (`hostdrv_deploy.py sync`)
-3. カーネル変更時は NHD に書き込み (`make deploy-kernel`) + NP21/W 再起動
-4. ゲスト側で `hsync` を実行 (HostDrv → ext2 同期)
-5. `ver` コマンドでビルドタイムスタンプを確認
-6. 変更対象の機能を手動テスト
+1. NP21/W プロセスを落とす (`taskkill.exe /F /IM np21x64w.exe`)
+2. `make all` でビルドエラーがないことを確認
+3. HostDrv にデプロイ (`hostdrv_deploy.py sync`)
+4. HostDrvからNHDイメージのext2領域に直接同期 (`nhd_deploy.py sync-from-hostdrv`)
+5. NHDイメージをNP21/Wにデプロイ (`nhd_deploy.py deploy`)
+6. NP21/W を起動し、`ver` コマンドでビルドタイムスタンプを確認
+7. 変更対象の機能を手動テスト
 
 自動化ワークフロー (`/build-os32`, `/deploy-program`) を活用すること。
 

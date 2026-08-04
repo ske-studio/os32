@@ -235,11 +235,10 @@ u32 v86_last_cs = 0;       /* 最後のINT発行時のCS */
 u32 v86_last_ip = 0;       /* 最後のINT発行時のIP */
 u32 v86_gp_count = 0;      /* GPハンドラ呼び出し総数 */
 
-/* INT AH ヒストグラム (u8 飽和カウンタ [64][256] = 16KB)
+/* INT AH ヒストグラム (u8 飽和カウンタ [V86_AH_HIST_INTS][256])
  * INT 00h-3Fh × AH値 の呼び出し頻度を集計する。
  * v86_debug_enabled == 1 のときのみ記録。
  * PC-98 BIOS/DOS で使われるINT (08h-1Bh, 20h-29h等) を全カバー。 */
-#define V86_AH_HIST_INTS 64
 u8 v86_int_ah_hist[V86_AH_HIST_INTS][256];
 u32 v86_int_ah_saturated = 0;  /* 飽和 (=255到達) 回数 */
 

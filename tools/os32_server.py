@@ -58,6 +58,20 @@ KEY_MAP = {
     "PAGEUP":   (0x21, 0x49, 1), "PAGEDOWN": (0x22, 0x51, 1),
 }
 
+# 英数字キーのマッピングを自動追加
+KEY_MAP.update({
+    "A": (0x41, 0x1E, 0), "B": (0x42, 0x30, 0), "C": (0x43, 0x2E, 0), "D": (0x44, 0x20, 0),
+    "E": (0x45, 0x12, 0), "F": (0x46, 0x21, 0), "G": (0x47, 0x22, 0), "H": (0x48, 0x23, 0),
+    "I": (0x49, 0x17, 0), "J": (0x4A, 0x24, 0), "K": (0x4B, 0x25, 0), "L": (0x4C, 0x26, 0),
+    "M": (0x4D, 0x32, 0), "N": (0x4E, 0x31, 0), "O": (0x4F, 0x18, 0), "P": (0x50, 0x19, 0),
+    "Q": (0x51, 0x10, 0), "R": (0x52, 0x13, 0), "S": (0x53, 0x1F, 0), "T": (0x54, 0x14, 0),
+    "U": (0x55, 0x16, 0), "V": (0x56, 0x2F, 0), "W": (0x57, 0x11, 0), "X": (0x58, 0x2D, 0),
+    "Y": (0x59, 0x15, 0), "Z": (0x5A, 0x2C, 0),
+    "1": (0x31, 0x02, 0), "2": (0x32, 0x03, 0), "3": (0x33, 0x04, 0), "4": (0x34, 0x05, 0),
+    "5": (0x35, 0x06, 0), "6": (0x36, 0x07, 0), "7": (0x37, 0x08, 0), "8": (0x38, 0x09, 0),
+    "9": (0x39, 0x0A, 0), "0": (0x30, 0x0B, 0),
+})
+
 def _find_np21w_window():
     """NP21/W ウィンドウハンドルを検索して (hwnd, title) を返す"""
     user32 = ctypes.windll.user32
@@ -95,19 +109,44 @@ def _make_key_lparam(scan_code, extended, is_keyup):
 def send_key_to_np21w(key_name):
     """NP21/Wウィンドウにキーイベントを PostMessage で送信"""
     key_name = key_name.upper().strip()
-    if key_name not in KEY_MAP:
-        return False, "Unknown key: {}".format(key_name)
 
-    vk_code, scan_code, extended = KEY_MAP[key_name]
     result = _find_np21w_window()
     if not result:
         return False, "NP21/W window not found."
 
     hwnd, title = result
     user32 = ctypes.windll.user32
+
+    # NP21/W ウィンドウをアクティブ化
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.05)
+
     WM_KEYDOWN = 0x0100
     WM_KEYUP   = 0x0101
 
+    if key_name == "SHIFT_SPACE":
+        # Shift + Space 同時押し
+        vk_shift, scan_shift, ext_shift = (0x10, 0x70, 0)  # LSHIFT (PC-9801 scancode 0x70)
+        lp_shift_down = _make_key_lparam(scan_shift, ext_shift, False)
+        lp_shift_up   = _make_key_lparam(scan_shift, ext_shift, True)
+
+        vk_space, scan_space, ext_space = (0x20, 0x39, 0)
+        lp_space_down = _make_key_lparam(scan_space, ext_space, False)
+        lp_space_up   = _make_key_lparam(scan_space, ext_space, True)
+
+        user32.PostMessageW(hwnd, WM_KEYDOWN, vk_shift, lp_shift_down)
+        time.sleep(0.02)
+        user32.PostMessageW(hwnd, WM_KEYDOWN, vk_space, lp_space_down)
+        time.sleep(0.05)
+        user32.PostMessageW(hwnd, WM_KEYUP, vk_space, lp_space_up)
+        time.sleep(0.02)
+        user32.PostMessageW(hwnd, WM_KEYUP, vk_shift, lp_shift_up)
+        return True, "Sent SHIFT_SPACE to '{}'".format(title)
+
+    if key_name not in KEY_MAP:
+        return False, "Unknown key: {}".format(key_name)
+
+    vk_code, scan_code, extended = KEY_MAP[key_name]
     lp_down = _make_key_lparam(scan_code, extended, False)
     lp_up   = _make_key_lparam(scan_code, extended, True)
 

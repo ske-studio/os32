@@ -1,5 +1,5 @@
 {
-  "version": 39,
+  "version": 41,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1165,6 +1165,40 @@
       "ret": "int",
       "args": ["const char *path", "const char *cmdline"],
       "target": "v86_boot_image_kapi"
+    },
+    {
+      "name": "ime_switch_dict",
+      "ret": "int",
+      "args": ["int variant"]
+    },
+    {
+      "name": "ime_user_list",
+      "ret": "int",
+      "args": ["const char *yomi_prefix", "void *out", "int max"],
+      "target": "ime_user_list_facade"
+    },
+    {
+      "name": "ime_user_delete",
+      "ret": "int",
+      "args": ["const char *yomi", "const char *kanji"],
+      "target": "ime_user_delete_facade"
+    },
+    {
+      "name": "ime_user_export",
+      "ret": "int",
+      "args": ["const char *path"],
+      "target": "ime_user_export_facade"
+    },
+    {
+      "name": "ime_user_clear",
+      "ret": "int",
+      "args": [],
+      "target": "ime_user_clear_facade"
+    },
+    {
+      "name": "ime_trygetkey",
+      "ret": "int",
+      "args": []
     }
   ]
 }
