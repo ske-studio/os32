@@ -32,7 +32,7 @@ Linuxライクなコマンド体系を実現する。動的マウントに対応
 
 ### §6-2 ext2 ファイルシステム (ext2_super.c / ext2_inode.c / ext2_dir.c / ext2_file.c / ext2_fmt.c / ext2_vfs.c)
 
-IDE HDD上のLinux ext2ファイルシステムを読み書きする。NHDヘッダに基づくPC-98固有のオフセット（NHD_HEADER_SECTORS = 136、シリンダ1開始）に対応している。マルチインスタンス方式 (Ext2Ctx) により、複数デバイスの同時ext2マウントが可能。ext2フォーマット (`ext2_format`) によるmkfs相当の機能も備える。
+IDE HDD上のLinux ext2ファイルシステムを読み書きする。パーティション開始位置は PC-98 パーティションテーブル (LBA 1) を `ext2_find_partition()` で解釈して動的に決定する (現行 NHD イメージではシリンダ12 = LBA 1632 開始。詳細は [NHD_FORMAT.md](NHD_FORMAT.md))。マルチインスタンス方式 (Ext2Ctx) により、複数デバイスの同時ext2マウントが可能。ext2フォーマット (`ext2_format`) によるmkfs相当の機能も備える。
 
 | 項目 | 値 |
 |------|-----|
@@ -137,9 +137,9 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 |------|-----|
 | 通信方式 | NP21/W HostDrv hypercall (共有メモリ + I/Oポート) |
 | マウントポイント | `/host` (カーネル自動マウント) |
-| 対応操作 | READ, LIST (ディレクトリ一覧) |
-| 書き込み | 非対応 |
-| セッション管理 | CREATE → READ/LIST → CLOSE のIRPシーケンス |
+| 対応操作 | READ, WRITE, LIST (ディレクトリ一覧) |
+| 書き込み | 対応 (`hdrv_write_file` / `hdrv_write_stream`) |
+| セッション管理 | CREATE → READ/WRITE/LIST → CLOSE のIRPシーケンス |
 | 同期要件 | 通信バッファは `volatile` 宣言必須 (GCC最適化対策) |
 
 **VFS操作**:
@@ -149,9 +149,15 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 | `hostdrvfs_init()` | HostDrv検出・自動マウント |
 | `hostdrvfs_read_file(ctx, path, buf, max)` | ファイル読み込み |
 | `hostdrvfs_read_stream(ctx, path, buf, sz, off)` | オフセット付き部分読み込み |
+| `hdrv_write_file / hdrv_write_stream` | ファイル書き込み (全体/部分) |
 | `hostdrvfs_list_dir(ctx, path, cb, user)` | ディレクトリ一覧 (コールバック) |
 | `hostdrvfs_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `hostdrvfs_stat(ctx, path, st)` | ファイル情報取得 |
+
+### §6-8 FAT12 / FatFs
+
+- **fat12.c** — PC-98 2HD フロッピー (1024B/セクタ) 用の自作 FAT12 ドライバ。FDDブート時のルートFSとして使用され、サブディレクトリ読取 (`fat12_find_path()`) に対応
+- **fatfs/ + fatfs_vfs.c** — ELM FatFs (elm-chan.org) の移植 + VfsOps 統合ラッパー。ext2_vfs.c と同じマルチインスタンスパターン (FatFsCtx を kmalloc/kfree)
 
 **用途**: `hsync` コマンドによる `/host` → `/` へのファイル同期 (HostDrvデプロイワークフロー) の基盤。
 

@@ -1,0 +1,24 @@
+# cdinst
+
+CD-ROM (ISO9660) からパッケージをインストールする
+
+## SYNOPSIS
+
+`cdinst`
+
+## DESCRIPTION
+
+ATAPI CD-ROM 上のインストール ISO (`os32_install.iso`) から
+OS32 パッケージ (.PKG) を読み込み、ext2 ルートファイルシステムへ展開する。
+BOOT / MINIMAL / NORMAL / FULL / DEBUG の各パッケージを選択してインストールできる。
+
+パッケージは `tools/mkpkg.py` (ホスト側) で生成され、
+LZSS 圧縮 + hash-chain 連結形式で格納されている。
+
+## EXAMPLES
+
+- `cdinst` — 対話形式でインストールを開始
+
+## SEE ALSO
+
+install, mount, format

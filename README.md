@@ -22,7 +22,7 @@ NP21/W エミュレータまたは実機（未確認）で動作します。
 - **IDT/PIC** 完全制御 (IRQ再マッピング, ISR ハンドラ)
 - **ページング** + ガードページ による安全なメモリ管理
 - **kmalloc** カーネルメモリアロケータ
-- **KernelAPI v26** — 118エントリの関数テーブルによる外部プログラムインタフェース
+- **KernelAPI v31** — 153エントリの関数テーブルによる外部プログラムインタフェース
 - プログラム終了時の**リソース自動回収** (FD, リダイレクト, パイプ, 共有メモリ)
 
 ### ファイルシステム
@@ -51,7 +51,7 @@ NP21/W エミュレータまたは実機（未確認）で動作します。
 - **外部プログラム方式** の高機能シェル
 - Tab補完、コマンド履歴、環境変数、`$VAR` 展開、`~` 展開
 - ワイルドカード (`*.txt`)、引用符 (`"..."`, `'...'`)
-- **スクリプトエンジン** (`.bat` / `.sh` 実行、`if`/`else`/`for`/`while`/`goto`)
+- **スクリプトエンジン** (`source`/`if`/`goto`/`return`/`ask` によるバッチ実行)
 - `/etc/profile` による起動時自動設定
 
 ### コマンド一覧
@@ -72,7 +72,7 @@ NP21/W エミュレータまたは実機（未確認）で動作します。
 `edit` (VZ Editor インスパイア) `man` `mdview` (Markdown ビューア)
 
 #### グラフィックス
-`gfx_demo` `vbzview` `hrview` `vdpview` `spr_test` `raster` `ekakiuta` `demo1`
+`gfx_demo` `vbzview` `vdpview` `spr_test` `raster` `ekakiuta` `demo1`
 
 #### サウンド
 `sndctl` `play`
@@ -92,17 +92,18 @@ NP21/W エミュレータまたは実機（未確認）で動作します。
 ## ディレクトリ構成
 
 ```text
-src/os32/
-├── boot/       — ブートローダー (16bit/32bit ASM)
+os32/
+├── boot/       — ブートローダー (16bit/32bit ASM + C)
 ├── kernel/     — カーネルコア (IDT/PIC/ページング/kmalloc/コンソール)
-├── drivers/    — デバイスドライバ (KBD/IDE/FDC/Serial/FM/RTC/KCG)
+├── drivers/    — デバイスドライバ (KBD/IDE/FDC/Serial/FM/RTC/KCG/Mouse/NP2SysP)
 ├── gfx/        — グラフィックス (CPU直接描画)
-├── fs/         — ファイルシステム (VFS/ext2/FAT12/serialfs)
+├── fs/         — ファイルシステム (VFS/ext2/FAT12/FatFs/ISO9660/HostDrv)
 ├── exec/       — プログラムローダー (OS32X)
 ├── kapi/       — KernelAPIラッパー (自動生成)
-├── lib/        — ユーティリティ (UTF-8/パス/kprintf/LZ4)
+├── lib/        — ユーティリティ (UTF-8/パス/LZ4/SQLite)
 ├── include/    — 共通ヘッダ
-├── programs/   — 外部プログラム (シェル/エディタ/ツール)
+├── programs/   — 外部プログラム (シェル/エディタ/ツール/ライブラリ/Rust)
+├── build/      — モジュール化 Makefile 群・リンカスクリプト
 ├── tools/      — ビルドツール・スクリプト
 └── docs/       — 仕様書・開発ドキュメント
 ```
@@ -112,19 +113,20 @@ src/os32/
 - [ドキュメント索引](docs/INDEX.md)
 - [KernelAPI 仕様書](docs/KAPI_SPEC.md)
 - [開発ガイドライン](docs/DEVELOPMENT.md)
+- [開発ポリシー](docs/POLICY_DEV.md) / [デバッグポリシー](docs/POLICY_DEBUG.md)
 - [リリースロードマップ](docs/ROADMAP.md)
-- [Git ポリシー](docs/GIT_POLICY.md)
 
 ## ビルド
 
 ```bash
-cd src/os32
-make all        # カーネル + 全プログラム + D88イメージ
-make clean      # クリーン
-make deploy     # NHDイメージへのデプロイ
+make all           # カーネル + 全プログラム + D88イメージ + ISO
+make clean         # クリーン
+make deploy        # HostDrv (C:\os32) へのデプロイ (再起動不要)
+make deploy-kernel # NHDイメージへのデプロイ (要NP21/W再起動)
 ```
 
-必要なツールチェイン: `i386-elf-gcc`, `nasm`, `make`, `python3`
+必要なツールチェイン: `i386-elf-gcc` (13.2.0 + newlib-nano), `nasm`, `make`, `python3` (+lz4), `rustup`
+(構築手順は [docs/08_build.md](docs/08_build.md) §8-5 参照)
 
 ## ライセンス
 

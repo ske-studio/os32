@@ -1,0 +1,31 @@
+# source
+
+スクリプトファイルを実行する (シェルスクリプトエンジン)
+
+## SYNOPSIS
+
+`source FILE`
+`. FILE`
+
+## DESCRIPTION
+
+指定ファイルをシェルスクリプトとして1行ずつ実行する。
+起動時には `/etc/profile` と `$HOME/.profile` が自動実行される。
+
+スクリプト内では以下の制御コマンドが使用できる:
+
+- `if VAL1 == VAL2 CMD...` — 条件一致時のみ CMD を実行 (ELSE 分岐なし)
+- `goto LABEL` — 行頭 `:LABEL` 形式で定義したラベルへジャンプ
+- `return` — スクリプト実行を終了してシェルに復帰
+- `ask "prompt" VAR` — ユーザー入力を環境変数 VAR に格納
+
+`$VAR` による環境変数展開が利用できる。
+
+## EXAMPLES
+
+- `source setup.bat` — setup.bat を実行
+- `ask "Install? (y/n)" ANS` + `if $ANS == y goto install` — 対話分岐
+
+## SEE ALSO
+
+env, set, echo

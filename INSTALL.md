@@ -28,22 +28,27 @@ WSL (Ubuntu) または Linux 環境で以下のツールが必要です。
 
 ### クロスコンパイラのインストール
 
-```bash
-# ソースからビルドする場合 (推奨)
-# https://wiki.osdev.org/GCC_Cross-Compiler を参照
+`i386-elf-gcc` (13.2.0) + newlib (**nano構成必須**) をソースからビルドします。
+正確な手順・configureオプションは **[docs/08_build.md §8-5](docs/08_build.md)** を参照してください。
 
-# またはパッケージマネージャから (ディストリビューションによる)
-# Ubuntu/Debian では以下が利用可能な場合がある:
-sudo apt install nasm make python3
+```bash
+sudo apt install build-essential nasm make python3 python3-lz4 python3-yaml \
+  genisoimage libgmp-dev libmpfr-dev libmpc-dev texinfo bison flex
 ```
 
-※ i386-elf-gcc は通常パッケージマネージャにないため、
-[osdev.org の手順](https://wiki.osdev.org/GCC_Cross-Compiler) に従ってビルドしてください。
+Rust プログラムのビルドには rustup も必要です (`rust-toolchain.toml` が nightly を自動解決)。
+
+インストール後、リポジトリ直下に `.env` を作成してパスを設定します:
+
+```env
+CROSS_DIR=/home/<user>/opt/cross
+NP21W_DIR=/mnt/c/<np21wの場所>
+HOSTDRV_DIR=/mnt/c/os32
+```
 
 ## 3. ビルド
 
 ```bash
-cd src/os32
 make clean
 make all
 ```
@@ -62,12 +67,18 @@ make all
 ### 4-1. NHDイメージの準備
 
 ```bash
-# 初回セットアップ: NHDイメージの作成・フォーマット・マウント
+# 初回セットアップ: NHDイメージのコピー・フォーマット・マウント
 make nhd-init
 
-# カーネル・プログラム・データをNHDに書き込み
-make deploy
+# カーネル・プログラム・データをNHDに書き込み (要NP21/W停止)
+make deploy-nhd
+make deploy-kernel
 ```
+
+> ⚠️ NP21/W 実行中は NHD への書き戻しが反映されません。デプロイ前に NP21/W を
+> 終了してください (詳細: [docs/POLICY_DEBUG.md §4-8](docs/POLICY_DEBUG.md))。
+
+HostDrv (`C:\os32`) 経由の高速デプロイ (再起動不要) は `make deploy` を使用します。
 
 ### 4-2. NP21/Wの設定
 

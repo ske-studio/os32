@@ -61,7 +61,6 @@ KernelAPIポインタを引数として実行する。
 | プログラム | ソース | 説明 |
 |---------|---------|------|
 | edit | `apps/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
-| filer | `apps/filer.c` | CUIファイラ (外部プログラム版、シェル内蔵版もあり) |
 | mdview | `apps/mdview.c` | Markdown簡易ビューア |
 | vdpview | `apps/vdpview.c` | VDP/高解像度画像ビューア (旧hrviewを統合) |
 | vbzview | `apps/vbzview.c` | VBZベクタ画像ビューア |
@@ -109,6 +108,7 @@ KernelAPIポインタを引数として実行する。
 |---------|---------|------|
 | bench | `tests/bench/` | ベンチマークプログラム |
 | bench_scale2x | `tests/bench_scale2x/` | Scale2x ベンチマーク |
+| sqlite_standalone | `tests/sqlite_standalone/` | SQLite スタンドアロンテスト |
 | mouse_test | `tests/mouse_test.c` | マウスドライバテスト |
 | flip400_test | `tests/flip400_test.c` | 400ラインページフリップテスト |
 | gfx200_test | `tests/gfx200_test.c` | 200ラインGFXテスト |
@@ -121,7 +121,18 @@ KernelAPIポインタを引数として実行する。
 | restest | `tests/restest.c` | リソーステスト |
 | stat_t | `tests/stat_t.c` | stat API テスト |
 | libc_test| `tests/libc_test.c` | newlib libc動作テスト |
+| klibc_test | `tests/klibc_test.c` | カーネルlibc動作テスト |
 | test2-4 | `tests/` | APIテスト・システム検証用 |
+| (ライブラリ別テスト) | `tests/*.c` | ai_test, asset_test/demo, blit_test/2, board_test, btl_test, chem_test/demo, db_test, demo_tile, e2test, econ_test, ecs_test/demo, evt_test, input_test, inv_test, map_test/demo, math_test, rotate_test, text_test/demo, tile_bench |
+
+**Rust プログラム** (`programs/rust/`, カスタムターゲット `i686-os32-none.json` + build-std):
+
+| プログラム | ソース | 説明 |
+|---------|---------|------|
+| hello_gfx | `rust/hello_gfx/` | Rust グラフィックスデモ |
+| alloc_demo | `rust/alloc_demo/` | Rust アロケータデモ |
+| math_test_rs | `rust/math_test_rs/` | os32_math クレートのテスト |
+| (クレート) | `rust/os32api/`, `rust/os32_math/` | KernelAPI バインディング / 数学ライブラリ |
 
 **ライブラリ**:
 
@@ -130,5 +141,20 @@ KernelAPIポインタを引数として実行する。
 | libos32 | `programs/libos32/` | newlib-nano ブリッジ (syscalls.c) |
 | libos32gfx | `programs/libos32gfx/` | グラフィックス描画ライブラリ |
 | libos32snd | `programs/libos32snd/` | サウンドライブラリ (BGM/SE) |
+| libos32math | `programs/libos32math/` | 整数数学ライブラリ (Q16.16固定小数点) |
+| libos32input | `programs/libos32input/` | 入力抽象化ライブラリ |
+| libos32db | `programs/libos32db/` | SQLite (db_* KAPI) ラッパー |
+| libos32text | `programs/libos32text/` | テキスト/メッセージ管理 |
+| libos32asset | `programs/libos32asset/` | アセット管理 |
+| libos32ecs | `programs/libos32ecs/` | ECS (Entity Component System) |
+| libos32event | `programs/libos32event/` | イベントシステム |
+| libos32map | `programs/libos32map/` | マップ/タイル管理 |
+| libos32ai | `programs/libos32ai/` | ゲームAI |
+| libos32battle | `programs/libos32battle/` | 戦闘システム |
+| libos32board | `programs/libos32board/` | ボード(掲示板)システム |
+| libos32chem | `programs/libos32chem/` | 化学シミュレーション |
+| libos32econ | `programs/libos32econ/` | 経済シミュレーション |
+| libos32inv | `programs/libos32inv/` | インベントリ管理 |
+| libtilemap | `programs/libtilemap/` | タイルマップ描画 |
 | libfiler | `programs/libfiler/` | ファイラ共通ライブラリ |
 | libmd | `programs/libmd/` | Markdown パーサーライブラリ |

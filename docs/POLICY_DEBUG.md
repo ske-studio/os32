@@ -130,7 +130,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 - **現象**: ファイルシステムのマウントが失敗する、スーパーブロックが壊れる
 - **原因**: カーネルバイナリの成長により、NHD イメージ上でカーネル後部が ext2 スーパーブロックに重なった
-- **対策**: ext2 の開始をシリンダ2 (LBA 272) に配置し、カーネルに約 133KB の成長猶予を確保
+- **対策**: ext2 の開始をシリンダ12 (LBA 1632) に配置 (詳細は [NHD_FORMAT.md](NHD_FORMAT.md))。カーネル直接配置経路の成長猶予は 128KB (LBA 262 の sqlite.bin 領域まで)
 
 ### 4-7. シリアル API タイムアウトによる「ハング」誤診
 
@@ -141,7 +141,17 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   - タイムアウト発生後は NP21/W を再起動してシリアルを再同期する
   - 「シェルが復帰しない」場合は、まず NP21/W のスクリーンショット (`/screenshot`) で画面を直接確認する
 
-### 4-8. エミュレータ共有メモリとコンパイラ最適化 (volatile欠落)
+### 4-8. NP21/W 実行中の NHD デプロイが反映されない (ファイルロック)
+
+- **現象**: `make deploy-kernel` / `deploy-nhd` が成功したように見えるのに、修正が実機に反映されない。何度デプロイ+再起動しても古いバイナリが動き続ける
+- **原因**: NP21/W が os32.nhd を開いたまま (実行中) の状態では、`nhd_deploy.py deploy` の NHD コピーが失敗またはサイレントに無効化される。パイプで出力を `tail` すると失敗メッセージも exit code も見えなくなる
+- **対策**:
+  1. NHD デプロイ前に必ず NP21/W を停止する: `taskkill.exe /F /IM np21x64w.exe`
+  2. `make deploy-kernel` → `tools/np21w_restart.py` の順で実行
+  3. デプロイ後は §2 のチェックリスト通り `ver` の Build タイムスタンプで反映を確認する
+- **教訓** (2026-08-05): この問題により「修正が効かない」調査サイクルを3回空転した。§2「バイナリ反映の確認」を最初に行っていれば1回で気づけた
+
+### 4-9. エミュレータ共有メモリとコンパイラ最適化 (volatile欠落)
 
 - **現象**: NP21/W との通信 (例: HostDrvのhypercall) で、エミュレータがステータスをメモリに書き込んでいるにも関わらず、OS32側では値が更新されていない (番兵値のまま) ように見える。
 - **原因**: 通信用メモリ構造体に `volatile` 修飾子が付与されておらず、かつ I/Oアクセス関数 (`outp` 等) のインラインアセンブラに `"memory"` clobber（コンパイラバリア）が無かった。このため、GCCの最適化 (キャッシュ) によりメモリの再読み込みが省略され、レジスタに残った古い値が評価されてしまった。
@@ -162,13 +172,20 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 ### NP21/W リモート実行 (HTTP API)
 
+Windows 側で `tools/os32_server.py` (要 Windows Python + pywin32) を起動しておくと、
+COM1 名前付きパイプ (`\\.\pipe\np21w_com1`) 経由で OS32 の rshell と HTTP で対話できる。
+
 ```bash
 /* コマンド実行 */
 curl -X POST http://localhost:8032/cmd -d "ver"
 
-/* スクリーンショット取得 */
+/* スクリーンショット取得 (要 pyautogui) */
 curl -sX GET http://localhost:8032/screenshot > screenshot.png
 ```
+
+> WSL からの `localhost:8032` が Windows ファイアウォールで遮断される環境では、
+> Windows 側の curl (`/mnt/c/Windows/System32/curl.exe`) を使用するか、
+> 8032/tcp の受信許可規則を追加する。
 
 ### 有用なゲスト側コマンド
 
@@ -179,15 +196,21 @@ curl -sX GET http://localhost:8032/screenshot > screenshot.png
 | `ls -l` | ファイル一覧 (サイズ・inode 確認) |
 | `cat /etc/profile` | 起動設定の確認 |
 
-### ビルド→デプロイ→テストの自動化
+### ビルド→デプロイ→テストの標準サイクル
 
-以下のワークフローが利用可能:
+| 変更対象 | 手順 | NP21/W再起動 |
+|----------|------|:---:|
+| プログラムのみ (HostDrv実行) | `make all` → `make deploy` | 不要 |
+| プログラムのみ (ホット) | `make dp-<name>` (シリアルpush) | 不要 |
+| カーネル / ブートFS | NP21/W停止 → `make all` → `make deploy && make deploy-kernel` → `np21w_restart.py` | **必要** |
 
-| ワークフロー | 用途 |
-|-------------|------|
-| `/build-os32` | カーネルビルド → NHD デプロイ → NP21/W 再起動 → テスト |
-| `/full-build` | `make clean` + フルビルド → デプロイ → テスト |
-| `/deploy-program` | 外部プログラムのみビルド → デプロイ → テスト |
+```bash
+# カーネル変更時のフルサイクル例
+taskkill.exe /F /IM np21x64w.exe
+make all && make deploy && make deploy-kernel
+WIN_NP21W_DIR='C:\...\np21w' python3 tools/np21w_restart.py
+curl -X POST http://localhost:8032/cmd -d "ver"   # Build タイムスタンプ確認
+```
 
 ---
 

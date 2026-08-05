@@ -69,16 +69,17 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
 ```
 電源ON
   ↓
-BIOS POST → FDD1からIPL読込 (C0/H0/S1 → 0000:7C00h)
+BIOS POST → FDD1からIPL読込 (C0/H0/S1 → 1FC0:0000)
   ↓
-boot_fat.asm (16bit リアルモード) — IPL (1024B)
+boot_fat.asm (16bit リアルモード) — FAT12 IPL (1024B)
   ├── テキストVRAMにブートメッセージ表示
-  ├── INT 1Bh: ローダーセクタ読み込み → 0x8000
+  ├── FAT12ルートDirから /LOADER.BIN を検索・読み込み → 0x8000
   └── far jmp 0000:8000h
   ↓
-loader_fat.asm (16bit → 32bit) — 第2段階
-  ├── INT 1Bh ループでカーネル読み込み (DMA境界対応)
+loader_fat_new.asm (16bit → 32bit) — 第2段階
+  ├── FAT12から /VMKRNL.LZ4 を検索・読み込み (DMA境界対応)
   ├── A20ゲート有効化 / GDT設定 / PM遷移
+  ├── VK32ヘッダ解析 + LZ4展開 (kernel.bin→0x100000, sqlite.bin→0x200000)
   ├── メモリプロービング
   └── far jmp 0x08:0x100000 (kernel_main へジャンプ)
 ```

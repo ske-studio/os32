@@ -208,7 +208,43 @@ TEXTモードではTVRAM属性反転 (ビット2 XOR) によるカーソル表�
 
 ---
 
-### §5-8 整数数学ライブラリ (libos32math)
+### §5-8 RTC (rtc.c / rtc.h)
+
+µPD4990A カレンダ時計をI/Oポート直接制御で操作する (PC9800Bible §2-4, §4-3)。
+
+| 項目 | 仕様 |
+|------|------|
+| I/Oポート | 0x20 (DI/CLK/STB/C2-C0 ビット制御) |
+| 読み出し | レジスタシフトモードでシリアル読み出し |
+| API | `rtc_read(rtc_time)` — 年月日・時分秒を取得 (KernelAPI 経由でも公開) |
+
+### §5-9 漢字キャラクタジェネレータ (kcg.c / kcg.h)
+
+PC-98内蔵フォントROMから文字パターンを読み出す。起動時にコンベンショナルメモリ
+(0x01000〜) へフォントキャッシュを構築する。
+
+| 項目 | 仕様 |
+|------|------|
+| I/Oポート | 0xA1 (JIS下位), 0xA3 (JIS上位-0x20), 0xA5 (ライン+L/R), 0xA9 (パターン) |
+| 対応文字 | ANK (8×16) / JIS第1・第2水準漢字 (16×16) |
+| API | `kcg_init()`, `kcg_read_ank(ch, buf)`, `kcg_read_kanji(jis, buf)`, `kcg_set_scale(s)` |
+
+### §5-10 NP21/W 通信 (np2sysp.c / np2sysp.h)
+
+NP21/W エミュレータの np2sysp 拡張ポートと通信し、エミュレータ検出・バージョン取得・
+HostDrv 状態確認を行う。
+
+| 項目 | 仕様 |
+|------|------|
+| I/Oポート | 0x7EF (文字列コマンド/レスポンス), 0x7ED (32bit値シフトレジスタ) |
+| API | `np2_detect()`, `np2_get_version()`, `np2_get_cpu()`, `np2_get_clock()`, `np2_check_hostdrv()` |
+
+### §5-11 デバイス抽象化層 (dev.c / disk.c)
+
+- `dev.c` — ブロック/キャラクタデバイスの登録・列挙 (`dev_count`, `dev_get_info`)。初期登録: `fdd0` (2HD), `con` (コンソール)。IDE 検出時に `hd0`〜 が追加される
+- `disk.c` — FDD セクタI/Oユーティリティ (`disk_read_lba` / `disk_write_lba`)。FDC ドライバ経由で BIOS 不使用 (PM PIO)
+
+### §5-12 整数数学ライブラリ (libos32math)
 
 FPU非依存の整数数学ライブラリ。KernelAPIへの依存なし。純粋C89整数演算のみで構成され、外部プログラムライブラリ群の最も基底に位置する。
 
@@ -231,7 +267,6 @@ libos32math  (依存なし — 最も基底のライブラリ)
      ├── libos32gfx   (math + KAPI)
      ├── libos32snd   (math + KAPI)
      ├── libtilemap   (math + gfx)
-     ├── libpyxel     (math + gfx)
      └── ゲーム本体    (math + 任意のlib)
 ```
 
