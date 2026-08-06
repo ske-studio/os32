@@ -15,11 +15,10 @@
 
 /* disk.h は CHS版 disk_read/disk_write を宣言しており、
  * FatFSの diskio.h の disk_read/disk_write と名前が衝突する。
- * LBA関数のみ forward宣言して回避。 */
-extern int disk_read_lba(int drv, int lba, int count, void *buf);
-extern int disk_write_lba(int drv, int lba, int count, const void *buf);
+ * FDD は fdc_read_sector/fdc_write_sector を直接使用する。 */
 
-#include "ide.h"
+#include "dev.h"
+#include "ide.h"    /* ide_drive_present, ide_get_info — 初期化/ioctl用 */
 #include "rtc.h"
 #include "fdc.h"
 #include "kstring.h"
@@ -45,13 +44,19 @@ static u16 hdd_sector_size = 512;
  * IDE転送は常に512Bだが、連続セクタでオーバーラップが発生するため
  * 256B時はLBAを2刻みで進める必要がある。 */
 static u16 hdd_ide_phys_size = 512;
+/* Device API ポインタ (diskio_set_hdd_drive時に取得) */
+static Device *hdd_dev = 0;
 
 /* ドライブ番号設定 API (fatfs_vfs.c から呼ばれる)
  * ドライブ変更時はstatusとオフセットをリセットし、f_mountでの再初期化を促す */
 void diskio_set_fdd_drive(int drv) { fdd_drive = drv; fdd_status = STA_NOINIT; }
 void diskio_set_hdd_drive(int drv) {
+    char devname[8];
     hdd_drive = drv; hdd_status = STA_NOINIT;
     hdd_part_offset = 0; hdd_sector_size = 512; hdd_ide_phys_size = 512;
+    devname[0] = 'h'; devname[1] = 'd';
+    devname[2] = '0' + (char)drv; devname[3] = '\0';
+    hdd_dev = dev_find(devname);
 }
 void diskio_set_hdd_partition(u32 offset) { hdd_part_offset = offset; hdd_status = STA_NOINIT; }
 void diskio_set_hdd_sector_size(u16 sz) { hdd_sector_size = sz; }
@@ -111,16 +116,21 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: disk_read_lba() は1セクタずつ読む */
+        /* FDD: fdc_read_sector (CHS ネイティブ) を直接使用 */
         for (i = 0; i < count; i++) {
-            rc = disk_read_lba(fdd_drive, (int)(sector + i), 1,
-                               buff + i * FDC_SECTOR_SIZE);
+            int lba = (int)(sector + i);
+            int sect = (lba % FDC_SPT) + 1;
+            int head = (lba / FDC_SPT) % FDC_HEADS;
+            int cyl  = lba / (FDC_SPT * FDC_HEADS);
+            rc = fdc_read_sector(fdd_drive, cyl, head, sect,
+                                 buff + i * FDC_SECTOR_SIZE);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;
 
     case DRV_HDD:
         if (hdd_status & STA_NOINIT) return RES_NOTRDY;
+        if (!hdd_dev) return RES_ERROR;
         if (hdd_ide_phys_size == 256) {
             /* SASI 256Bセクタ: NP21/WのIDE LBAは256B単位だが転送は512B。
              * 連続LBAでは256Bずつしか進まずオーバーラップするため、
@@ -128,11 +138,11 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
             u32 sasi_lba = (u32)sector * (hdd_sector_size / 256)
                          + hdd_part_offset;
             u32 total_256 = (u32)count * (hdd_sector_size / 256);
-            u32 ide_reads = total_256 / 2;  /* 512B = 2×256B */
+            u32 ide_reads = total_256 / 2;  /* 512B = 2x256B */
             u32 j;
             for (j = 0; j < ide_reads; j++) {
-                rc = ide_read_sector(hdd_drive, sasi_lba + j * 2,
-                                     buff + j * 512);
+                rc = dev_blk_read_lba(hdd_dev, sasi_lba + j * 2, 1,
+                                      buff + j * 512);
                 if (rc != 0) return RES_ERROR;
             }
         } else {
@@ -140,7 +150,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
             u32 phys_sector = (u32)sector * (hdd_sector_size / 512)
                             + hdd_part_offset;
             u32 phys_count  = (u32)count  * (hdd_sector_size / 512);
-            rc = ide_read_sectors(hdd_drive, phys_sector, phys_count, buff);
+            rc = dev_blk_read_lba(hdd_dev, phys_sector, (int)phys_count, buff);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;
@@ -163,16 +173,21 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: disk_write_lba() は1セクタずつ書く */
+        /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用 */
         for (i = 0; i < count; i++) {
-            rc = disk_write_lba(fdd_drive, (int)(sector + i), 1,
-                                buff + i * FDC_SECTOR_SIZE);
+            int lba = (int)(sector + i);
+            int sect = (lba % FDC_SPT) + 1;
+            int head = (lba / FDC_SPT) % FDC_HEADS;
+            int cyl  = lba / (FDC_SPT * FDC_HEADS);
+            rc = fdc_write_sector(fdd_drive, cyl, head, sect,
+                                  buff + i * FDC_SECTOR_SIZE);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;
 
     case DRV_HDD:
         if (hdd_status & STA_NOINIT) return RES_NOTRDY;
+        if (!hdd_dev) return RES_ERROR;
         if (hdd_ide_phys_size == 256) {
             /* SASI 256Bセクタ: LBA 2刻み書き込み */
             u32 sasi_lba = (u32)sector * (hdd_sector_size / 256)
@@ -181,8 +196,8 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
             u32 ide_writes = total_256 / 2;
             u32 j;
             for (j = 0; j < ide_writes; j++) {
-                rc = ide_write_sector(hdd_drive, sasi_lba + j * 2,
-                                      buff + j * 512);
+                rc = dev_blk_write_lba(hdd_dev, sasi_lba + j * 2, 1,
+                                       buff + j * 512);
                 if (rc != 0) return RES_ERROR;
             }
         } else {
@@ -190,7 +205,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
             u32 phys_sector = (u32)sector * (hdd_sector_size / 512)
                             + hdd_part_offset;
             u32 phys_count  = (u32)count  * (hdd_sector_size / 512);
-            rc = ide_write_sectors(hdd_drive, phys_sector, phys_count, buff);
+            rc = dev_blk_write_lba(hdd_dev, phys_sector, (int)phys_count, buff);
             if (rc != 0) return RES_ERROR;
         }
         return RES_OK;

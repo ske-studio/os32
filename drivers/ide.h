@@ -95,16 +95,15 @@ int ide_init(void);
 /* ドライブ情報取得 */
 int ide_identify(int drive, IdeInfo *info);
 
-/* セクタ読み込み (LBA指定→内部CHS変換) — 512バイト/セクタ */
+/* CHS ネイティブ 1セクタ読み書き */
+int ide_read_sector_chs(int drive, u16 cyl, u8 head, u8 sect, void *buf);
+int ide_write_sector_chs(int drive, u16 cyl, u8 head, u8 sect,
+                         const void *buf);
+
+/* LBA互換ラッパー (KAPI ABI維持用 — 内部でCHSに変換して委譲) */
 int ide_read_sector(int drive, u32 lba, void *buf);
-
-/* 複数セクタ読み込み */
-int ide_read_sectors(int drive, u32 lba, u32 count, void *buf);
-
-/* セクタ書き込み (LBA指定→内部CHS変換) */
 int ide_write_sector(int drive, u32 lba, const void *buf);
-
-/* 複数セクタ書き込み */
+int ide_read_sectors(int drive, u32 lba, u32 count, void *buf);
 int ide_write_sectors(int drive, u32 lba, u32 count, const void *buf);
 
 /* ドライブ存在チェック */

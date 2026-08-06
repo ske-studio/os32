@@ -156,6 +156,13 @@ typedef struct {
     const char * (__cdecl *db_last_error)(int handle);
     u32 (__cdecl *db_mem_used)(void);
     int (__cdecl *kcg_load_font)(const char *path);
+    int (__cdecl *ide_get_info)(int drv, void *info);
+    void (__cdecl *sys_get_build_info)(char *buf, int size);
+    int (__cdecl *loop_attach)(const char *path, int slot);
+    void (__cdecl *loop_detach)(int slot);
+    int (__cdecl *loop_status)(int slot, u32 *total, int *bps);
+    int (__cdecl *dev_blk_read)(const char *dev_name, u32 lba, int count, void *buf);
+    int (__cdecl *dev_blk_write)(const char *dev_name, u32 lba, int count, const void *buf);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 

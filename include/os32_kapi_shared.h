@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      32   /* kcg_load_font 追加 */
+#define KAPI_VERSION      33   /* loop_dev/dev_blk/ide_get_info/sys_get_build_info 追加 */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

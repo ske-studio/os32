@@ -12,13 +12,13 @@ C_KERNEL = \
     kernel/paging.c kernel/pgalloc.c kernel/shm.c kernel/kmalloc.c kernel/console.c kernel/sys.c \
     kernel/ime.c kernel/ime_romkana.c kernel/ime_dict.c kernel/snd_engine.c \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
-    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c \
+    drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c \
-    kapi/kapi_generated.c kapi/kapi_db.c \
+    kapi/kapi_generated.c kapi/kapi_db.c kapi/kapi_sys.c \
     lib/path.c lib/utf8.c lib/kprintf.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
@@ -36,6 +36,10 @@ kernel/%.o: kernel/%.c
 # drivers/ モジュール
 # mouse.c は idt.h (IRQ制御) を参照するため INC_KERNEL でビルド
 drivers/mouse.o: drivers/mouse.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# loop_dev.c は vfs.h / kprintf.h (fs/, lib/) を参照するため INC_KERNEL でビルド
+drivers/loop_dev.o: drivers/loop_dev.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
 drivers/%.o: drivers/%.c
@@ -64,8 +68,14 @@ exec/%.o: exec/%.c kapi/kapi_generated.c
 kapi/kapi_generated.c: tools/kapi.json tools/gen_kapi.py
 	python3 tools/gen_kapi.py
 
+# kapi_sys.o は __DATE__/__TIME__ を含むため毎回再コンパイル
+kapi/kapi_sys.o: kapi/kapi_sys.c .FORCE
+	$(CC) $(CFLAGS_BASE) $(INC_KAPI) -c $< -o $@
+
 kapi/%.o: kapi/%.c kapi/kapi_generated.c
 	$(CC) $(CFLAGS_BASE) $(INC_KAPI) -c $< -o $@
+
+.FORCE:
 
 # lib/ モジュール (汎用ライブラリ: カーネル依存なし)
 lib/%.o: lib/%.c

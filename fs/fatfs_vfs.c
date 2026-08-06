@@ -12,7 +12,8 @@
 #include "kmalloc.h"
 #include "kstring.h"
 #include "kprintf.h"
-#include "ide.h"
+#include "ide.h"    /* ide_get_info, ide_drive_present — ジオメトリ情報取得のみ */
+#include "dev.h"
 #include "os_time.h"
 
 extern void diskio_set_fdd_drive(int drv);
@@ -397,11 +398,20 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
     int i;
     int pt_offset;  /* パーティションテーブルのbuf内オフセット */
     int pt_max;     /* 最大エントリ数 */
+    char devname[8];
+    Device *dev;
 
     /* ジオメトリ取得 */
     if (ide_get_info(drv, &info) != 0) return 0;
     heads = info.heads;
     spt   = info.sectors;
+
+    /* Device API ポインタ取得 */
+    devname[0] = 'h'; devname[1] = 'd';
+    devname[2] = '0' + (char)drv; devname[3] = '\0';
+    dev = dev_find(devname);
+    if (!dev) return 0;
+
     kprintf(0x07, "[pc98pt] drv=%d geom: C=%d H=%d S=%d total=%lu phys=%d\n",
             drv, info.cylinders, heads, spt,
             (unsigned long)info.total_sectors, phys_sec_size);
@@ -413,12 +423,12 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
      * IDE 512Bセクタの場合: 従来通りセクタ1を読む。 */
     if (phys_sec_size == 256) {
         /* SASI: LBA 0を読んで後半256Bからパース */
-        if (ide_read_sector(drv, 0, buf) != 0) return 0;
+        if (dev_blk_read_lba(dev, 0, 1, buf) != 0) return 0;
         pt_offset = 256;
         pt_max = 8;  /* (512-256)/32 = 8エントリ */
     } else {
         /* IDE: セクタ1を読む */
-        if (ide_read_sector(drv, 1, buf) != 0) return 0;
+        if (dev_blk_read_lba(dev, 1, 1, buf) != 0) return 0;
         pt_offset = 0;
         pt_max = 16;  /* 512/32 = 16エントリ */
     }
@@ -449,7 +459,7 @@ static u32 pc98_find_fat_partition(int drv, u16 phys_sec_size)
     }
 
     /* PC-98形式で見つからなかった場合、IBM PC MBRも試す */
-    if (ide_read_sector(drv, 0, buf) != 0) return 0;
+    if (dev_blk_read_lba(dev, 0, 1, buf) != 0) return 0;
     if (buf[510] == 0x55 && buf[511] == 0xAA) {
         /* 標準MBRパーティションテーブル (offset 446) */
         for (i = 0; i < 4; i++) {
@@ -522,12 +532,21 @@ static void *fatfs_vfs_mount(int dev_id)
         IdeInfo ide_info;
         u16 phys_sec_size = 512;
         u32 part_lba;
+        Device *blkdev = (Device *)0;
 
         /* IDE物理セクタサイズを取得 (SASI 256B判定) */
         if (ide_get_info(drv_num, &ide_info) == 0) {
             phys_sec_size = ide_info.phys_sector_size;
         }
         diskio_set_hdd_ide_phys_size(phys_sec_size);
+
+        /* Device API ポインタ取得 */
+        {
+            char dname[8];
+            dname[0] = 'h'; dname[1] = 'd';
+            dname[2] = '0' + (char)drv_num; dname[3] = '\0';
+            blkdev = dev_find(dname);
+        }
 
         part_lba = pc98_find_fat_partition(drv_num, phys_sec_size);
         if (part_lba > 0) {
@@ -538,8 +557,8 @@ static void *fatfs_vfs_mount(int dev_id)
                     (unsigned long)part_lba, phys_sec_size);
             /* パーティション先頭セクタを直接読んでBPS取得。
              * part_lbaはphys_sec_size単位のLBA。
-             * ide_read_sectorは512B返すのでBPBの先頭は含まれる。 */
-            if (ide_read_sector(drv_num, (u32)part_lba, dbg) == 0) {
+             * dev_blk_read_lbaは512B返すのでBPBの先頭は含まれる。 */
+            if (blkdev && dev_blk_read_lba(blkdev, (u32)part_lba, 1, dbg) == 0) {
                 bps = (u16)dbg[11] | ((u16)dbg[12] << 8);
                 kprintf(0x07, "[fatfs] sector %lu: jmp=%02x BPS=%d\n",
                         (unsigned long)part_lba, dbg[0], bps);

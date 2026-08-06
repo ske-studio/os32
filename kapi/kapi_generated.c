@@ -29,9 +29,11 @@
 #include "snd_engine.h"
 #include "mouse.h"
 #include "kapi_db.h"
+#include "loop_dev.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
+extern void kapi_sys_get_build_info(char *buf, int size);
 
 void __cdecl wrap_gfx_init(void)
 {
@@ -781,5 +783,40 @@ u32 __cdecl wrap_db_mem_used(void)
 int __cdecl wrap_kcg_load_font(const char *path)
 {
     return kcg_load_font(path);
+}
+
+int __cdecl wrap_ide_get_info(int drv, void *info)
+{
+    return ide_get_info(drv, (IdeInfo *)info);
+}
+
+void __cdecl wrap_sys_get_build_info(char *buf, int size)
+{
+    kapi_sys_get_build_info(buf, size);
+}
+
+int __cdecl wrap_loop_attach(const char *path, int slot)
+{
+    return loop_dev_attach(path, slot);
+}
+
+void __cdecl wrap_loop_detach(int slot)
+{
+    loop_dev_detach(slot);
+}
+
+int __cdecl wrap_loop_status(int slot, u32 *total, int *bps)
+{
+    return loop_dev_status(slot, total, bps);
+}
+
+int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf)
+{
+    { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }
+}
+
+int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)
+{
+    { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }
 }
 

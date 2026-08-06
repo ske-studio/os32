@@ -24,8 +24,8 @@ static int iso_read_sector(Iso9660Ctx *ctx, u32 lba, void *buf)
     Device *dev;
     (void)ctx;
     dev = dev_find("cd0");
-    if (!dev || !dev->blk_read) return VFS_ERR_IO;
-    return dev->blk_read(dev, (int)lba, 1, buf);
+    if (!dev) return VFS_ERR_IO;
+    return dev_blk_read_lba(dev, lba, 1, buf);
 }
 
 /* 大文字変換 */
@@ -230,7 +230,7 @@ static void *iso9660_mount(int dev_id)
     if (!dev) return (void *)0;
 
     /* PVD読み出し (LBA 16) */
-    if (dev->blk_read(dev, ISO_PVD_LBA, 1, pvd) != 0)
+    if (dev_blk_read_lba(dev, ISO_PVD_LBA, 1, pvd) != 0)
         return (void *)0;
 
     /* マジック確認: pvd[1..5] == "CD001" */

@@ -10,6 +10,7 @@
 /* ======================================================================== */
 
 #include "ext2_priv.h"
+#include "ide.h"    /* ide_drive_present, ide_get_info — ジオメトリ情報取得のみ */
 
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * シングルタスクOSのため全インスタンスで共有可能。
@@ -31,11 +32,11 @@ int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
     int ret;
 
     /* セクタ0 → buf[0..511] */
-    ret = ide_read_sector(ctx->drive_num, sector, dst);
+    ret = dev_blk_read_lba(ctx->dev, sector, 1, dst);
     if (ret != 0) return ret;
 
     /* セクタ1 → buf[512..1023] */
-    ret = ide_read_sector(ctx->drive_num, sector + 1, dst + 512);
+    ret = dev_blk_read_lba(ctx->dev, sector + 1, 1, dst + 512);
     return ret;
 }
 
@@ -43,9 +44,9 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 {
     u32 sector = ctx->base_lba + block_num * 2;
     int ret;
-    ret = ide_write_sector(ctx->drive_num, sector, buf);
+    ret = dev_blk_write_lba(ctx->dev, sector, 1, buf);
     if (ret != 0) return ret;
-    ret = ide_write_sector(ctx->drive_num, sector + 1, (const u8 *)buf + 512);
+    ret = dev_blk_write_lba(ctx->dev, sector + 1, 1, (const u8 *)buf + 512);
     return ret;
 }
 
@@ -121,13 +122,21 @@ u32 ext2_find_partition(int ide_drive)
 {
     u8 pt_sect[512];
     int ret, i;
-    u32 lba = 1088; /* デフォルトフォールバック (シリンダ8) */
+    u32 lba = 1088; /* デフォルトフォールバック (シリンダー8) */
     IdeInfo info;
+    char devname[8];
+    Device *dev;
 
     if (ide_get_info(ide_drive, &info) != IDE_OK) return lba;
 
+    /* Device API 経由でパーティションテーブルを読み込み */
+    devname[0] = 'h'; devname[1] = 'd';
+    devname[2] = '0' + (char)ide_drive; devname[3] = '\0';
+    dev = dev_find(devname);
+    if (!dev) return lba;
+
     /* LBA 1 (PC-98パーティションテーブル) を読み込む */
-    ret = ide_read_sector(ide_drive, 1, pt_sect);
+    ret = dev_blk_read_lba(dev, 1, 1, pt_sect);
     if (ret != 0) return lba;
 
     for (i = 0; i < 16; i++) {
@@ -161,22 +170,29 @@ u32 ext2_find_partition(int ide_drive)
 int ext2_mount(Ext2Ctx *ctx, int ide_drive)
 {
     int ret, i;
+    char devname[8];
 
     if (ctx->mounted) ext2_unmount(ctx);
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
     ctx->drive_num = ide_drive;
 
+    /* Device API ポインタを取得 */
+    devname[0] = 'h'; devname[1] = 'd';
+    devname[2] = '0' + (char)ide_drive; devname[3] = '\0';
+    ctx->dev = dev_find(devname);
+    if (!ctx->dev) return EXT2_ERR_IO;
+
     /* パーティションテーブルを解析してbase_lbaを設定 */
     ctx->base_lba = ext2_find_partition(ide_drive);
 
-    /* スーパーブロック読み込み: ローカルバッファに読んでからg_blkへコピー */
+    /* スーパーブロック読み込み: Device API 経由 */
     {
         u8 sb_sect[512];
-        ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 2, sb_sect);
+        ret = dev_blk_read_lba(ctx->dev, ctx->base_lba + 2, 1, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
         kmemcpy(ext2_g_blk, sb_sect, 512);
         
-        ret = ide_read_sector(ctx->drive_num, ctx->base_lba + 3, sb_sect);
+        ret = dev_blk_read_lba(ctx->dev, ctx->base_lba + 3, 1, sb_sect);
         if (ret != 0) return EXT2_ERR_IO;
         kmemcpy(ext2_g_blk + 512, sb_sect, 512);
     }
