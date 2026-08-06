@@ -158,7 +158,7 @@ extern int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, v
 extern int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 33;
+kapi->version = 34;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -319,3 +319,4 @@ kapi->version = 33;
     kapi->dev_blk_read = wrap_dev_blk_read;
     kapi->dev_blk_write = wrap_dev_blk_write;
     kapi->sbrk_heap_limit = 0;
+    kapi->shm_base = 0;

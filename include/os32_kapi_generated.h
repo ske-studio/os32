@@ -164,6 +164,7 @@ typedef struct {
     int (__cdecl *dev_blk_read)(const char *dev_name, u32 lba, int count, void *buf);
     int (__cdecl *dev_blk_write)(const char *dev_name, u32 lba, int count, const void *buf);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
+    u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
 #endif

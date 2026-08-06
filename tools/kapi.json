@@ -1,10 +1,15 @@
 {
-  "version": 33,
+  "version": 34,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
       "type": "u32",
       "comment": "newlib _sbrk\u7528\u30d2\u30fc\u30d7\u4e0a\u9650\u30a2\u30c9\u30ec\u30b9 (exec_run\u3067\u30bb\u30c3\u30c8\u3055\u308c\u308b)"
+    },
+    {
+      "name": "shm_base",
+      "type": "u32",
+      "comment": "\u5171\u6709\u30e1\u30e2\u30ea (MEM_SHM_BASE) \u306e\u5148\u982d\u30a2\u30c9\u30ec\u30b9\u3002DB\u7d50\u679c\u53d7\u3051\u6e21\u3057\u306b\u4f7f\u7528 (exec_init\u3067\u30bb\u30c3\u30c8)"
     }
   ],
   "includes": [

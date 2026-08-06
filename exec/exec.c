@@ -22,6 +22,10 @@ static KernelAPI *kapi;
 void exec_init(void) {
     kapi = (KernelAPI *)KAPI_ADDR;
 #include "exec_kapi_init.inc"
+    /* 共有メモリ先頭アドレスを公開する。
+     * MEM_SHM_BASE はカーネルの __bss_end 由来で可変のため、
+     * ユーザ空間側がアドレスをハードコードしてはならない。 */
+    kapi->shm_base = (u32)MEM_SHM_BASE;
 }
 
 /* スタックを4バイト境界に揃えるためのマスク */

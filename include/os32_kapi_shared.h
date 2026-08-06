@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      33   /* loop_dev/dev_blk/ide_get_info/sys_get_build_info 追加 */
+#define KAPI_VERSION      34   /* shm_base 追加 (DB結果SHMアドレスのハードコード廃止) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

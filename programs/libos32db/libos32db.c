@@ -8,12 +8,15 @@
 
 #include "libos32db.h"
 
-/* 共有メモリベースアドレス (memmap.h MEM_SHM_BASE と一致させること) */
-#define DB_SHM_PTR   ((u8 *)0x381000)
-
 /* API テーブルへのポインタ (crt0_c.c で定義される) */
 extern KernelAPI *kapi;
 #define api kapi
+
+/* 共有メモリベースアドレス。
+ * MEM_SHM_BASE はカーネルの __bss_end 由来で可変のため、アドレスを
+ * ハードコードしてはならない (カーネルが肥大すると即座にズレる)。
+ * KAPI v34 以降は kapi->shm_base から実行時に取得する。 */
+#define DB_SHM_PTR   ((u8 *)api->shm_base)
 
 /* ======================================================================== */
 /*  接続管理                                                                 */
