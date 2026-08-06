@@ -163,11 +163,16 @@ static void dma_setup(u32 phys_addr, u16 byte_count, int is_write)
 /* ======================================================================== */
 static void fdc_motor_on(void)
 {
+    /* スタティックフラグで前回の状態を記憶し、初回のみスピンアップ待ちを行う。
+     * NP21/W の 0x94 リードはリードスイッチを返すため MTON 状態は判別不能。 */
+    static int motor_running = 0;
+
     outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
-    /* モータースピンアップ待ち: 約300ms (100Hzタイマで30tick) */
-    {
+    if (!motor_running) {
+        /* 初回のみ 約300ms スピンアップ待ち (100Hzタイマで30tick) */
         u32 start = tick_count;
         while ((tick_count - start) < 30) { /* 何もしない */ }
+        motor_running = 1;
     }
 }
 
@@ -196,7 +201,7 @@ static int fdc_reset(void)
     outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
 
     /* リセット完了IRQ待ち */
-    if (fdc_wait_irq(300) != 0) {
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) {
         /* タイムアウト: エミュレータによってはIRQが来ない場合あり */
         /* Sense Interruptで続行を試みる */
     }
@@ -230,7 +235,7 @@ static int fdc_recalibrate(int drv)
     if (fdc_send_byte((u8)drv) != 0) return -1;
 
     /* 完了IRQ待ち (最大3秒) */
-    if (fdc_wait_irq(300) != 0) return -2;
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
 
     /* Sense Interrupt */
     if (fdc_sense_interrupt(&st0, &cyl) != 0) return -3;
@@ -257,7 +262,7 @@ static int fdc_seek(int drv, int cyl, int head)
     if (fdc_send_byte((u8)cyl) != 0) return -1;
 
     /* 完了IRQ待ち */
-    if (fdc_wait_irq(300) != 0) return -2;
+    if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) return -2;
 
     /* Sense Interrupt */
     if (fdc_sense_interrupt(&st0, &result_cyl) != 0) return -3;
@@ -275,20 +280,22 @@ static int fdc_seek(int drv, int cyl, int head)
 }
 
 /* ======================================================================== */
-/*  セクタ読み込み                                                          */
+/*  セクタ読み込み (ジオメトリ指定版)                                        */
 /* ======================================================================== */
-int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
+int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
+                         const struct fdc_geom *g, void *buf)
 {
     u8 results[7];
     int n, retry;
     u32 phys = (u32)dma_buffer;
+    u16 bps = g->bps;
 
     for (retry = 0; retry < 3; retry++) {
         /* 1. シーク */
         if (fdc_seek(drv, cyl, head) != 0) continue;
 
         /* 2. DMAセットアップ (FDC→メモリ = read) */
-        dma_setup(phys, FDC_SECTOR_SIZE, 0);
+        dma_setup(phys, bps, 0);
 
         /* 3. Read Data コマンド送信 */
         fdc_irq_fired = 0;
@@ -297,13 +304,13 @@ int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
         if (fdc_send_byte((u8)cyl) != 0) continue;      /* C */
         if (fdc_send_byte((u8)head) != 0) continue;     /* H */
         if (fdc_send_byte((u8)sect) != 0) continue;     /* R (1始まり) */
-        if (fdc_send_byte(FDC_SECTOR_N) != 0) continue; /* N = 3 (1024) */
+        if (fdc_send_byte(g->sec_n) != 0) continue;     /* N */
         if (fdc_send_byte((u8)sect) != 0) continue;     /* EOT (最終セクタ) */
-        if (fdc_send_byte(FDC_GAP3) != 0) continue;     /* GPL */
-        if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL (未使用) */
+        if (fdc_send_byte(g->gap3) != 0) continue;      /* GPL */
+        if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち (データ転送完了) */
-        if (fdc_wait_irq(300) != 0) continue;
+        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し (7バイト) */
         n = fdc_read_results(results, 7);
@@ -312,7 +319,7 @@ int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
         /* 6. エラーチェック: ST0のbit6-7が00なら成功 */
         if ((results[0] & ST0_IC_MASK) == 0) {
             /* DMAバッファからユーザーバッファにコピー */
-            kmemcpy((u8 *)buf, dma_buffer, FDC_SECTOR_SIZE);
+            kmemcpy((u8 *)buf, dma_buffer, (u32)bps);
             return 0;
         }
     }
@@ -321,23 +328,25 @@ int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
 }
 
 /* ======================================================================== */
-/*  セクタ書き込み                                                          */
+/*  セクタ書き込み (ジオメトリ指定版)                                        */
 /* ======================================================================== */
-int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
+int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
+                          const struct fdc_geom *g, const void *buf)
 {
     u8 results[7];
     int n, retry;
     u32 phys = (u32)dma_buffer;
+    u16 bps = g->bps;
 
     /* ユーザーバッファからDMAバッファにコピー */
-    kmemcpy(dma_buffer, (const u8 *)buf, FDC_SECTOR_SIZE);
+    kmemcpy(dma_buffer, (const u8 *)buf, (u32)bps);
 
     for (retry = 0; retry < 3; retry++) {
         /* 1. シーク */
         if (fdc_seek(drv, cyl, head) != 0) continue;
 
         /* 2. DMAセットアップ (メモリ→FDC = write) */
-        dma_setup(phys, FDC_SECTOR_SIZE, 1);
+        dma_setup(phys, bps, 1);
 
         /* 3. Write Data コマンド送信 */
         fdc_irq_fired = 0;
@@ -346,13 +355,13 @@ int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
         if (fdc_send_byte((u8)cyl) != 0) continue;      /* C */
         if (fdc_send_byte((u8)head) != 0) continue;     /* H */
         if (fdc_send_byte((u8)sect) != 0) continue;     /* R */
-        if (fdc_send_byte(FDC_SECTOR_N) != 0) continue; /* N = 3 */
+        if (fdc_send_byte(g->sec_n) != 0) continue;     /* N */
         if (fdc_send_byte((u8)sect) != 0) continue;     /* EOT */
-        if (fdc_send_byte(FDC_GAP3) != 0) continue;     /* GPL */
+        if (fdc_send_byte(g->gap3) != 0) continue;      /* GPL */
         if (fdc_send_byte(FDC_DTL_UNUSED) != 0) continue;     /* DTL */
 
         /* 4. IRQ待ち */
-        if (fdc_wait_irq(300) != 0) continue;
+        if (fdc_wait_irq(FDC_IRQ_TIMEOUT_TICKS) != 0) continue;
 
         /* 5. リザルト読み出し */
         n = fdc_read_results(results, 7);
@@ -368,27 +377,66 @@ int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
 }
 
 /* ======================================================================== */
+/*  セクタ読み込み (2HD固定ラッパ — 既存API互換)                             */
+/* ======================================================================== */
+int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
+{
+    return fdc_read_sector_geom(drv, cyl, head, sect, &fdc_geom_2hd, buf);
+}
+
+/* ======================================================================== */
+/*  セクタ書き込み (2HD固定ラッパ — 既存API互換)                             */
+/* ======================================================================== */
+int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
+{
+    return fdc_write_sector_geom(drv, cyl, head, sect, &fdc_geom_2hd, buf);
+}
+
+/* ======================================================================== */
 /*  fdc_init — FDC初期化                                                    */
 /* ======================================================================== */
 int fdc_init(void)
 {
     int ret;
 
-    /* モーターON */
+    /* 前回の取りこぼし IRQ をクリア (冪等化対策) */
+    fdc_irq_fired = 0;
+
+    /* モーターON (既にONの場合はスピンアップ待ちをスキップ) */
     fdc_motor_on();
 
     /* FDCリセット + Specify */
     ret = fdc_reset();
     if (ret != 0) return ret;
 
-    /* Recalibrate (ヘッドをシリンダ0に移動) */
+    /* Recalibrate (ヘッドをシリンダ0に移動)
+     * 1回目失敗: リセット直後の安定化待ち(100ms)後にリトライ */
     ret = fdc_recalibrate(0);
     if (ret != 0) {
-        /* 1回目失敗の場合リトライ */
+        u32 start = tick_count;
+        while ((tick_count - start) < 10) { /* 100ms ウェイト */ }
         ret = fdc_recalibrate(0);
     }
-    /* fd1は接続されていないとタイムアウトするので一応試みる程度 */
+
+    /* ドライブ1は未接続時にタイムアウトするためエラーは無視する */
     fdc_recalibrate(1);
 
     return ret;
 }
+
+/* ======================================================================== */
+/*  既知メディアジオメトリ定義 (fdc.h で extern 宣言済み)                    */
+/* ======================================================================== */
+const struct fdc_geom fdc_geom_2hd = {
+    77, 2, 8, 3, 1024, 0x74, 0x90
+};
+const struct fdc_geom fdc_geom_2dd_640 = {
+    80, 2, 8, 2, 512, 0x2A, 0x10  /* GAP3=0x2A: MFM 512B/sec 標準値 */
+};
+const struct fdc_geom fdc_geom_2dd_720 = {
+    80, 2, 9, 2, 512, 0x2A, 0x10
+};
+const struct fdc_geom fdc_geom_2d_256 = {
+    77, 2, 16, 1, 256, 0x0E, 0x90  /* GAP3=0x0E: MFM 256B/sec, DAUA=0x90 */
+};
+

@@ -78,7 +78,7 @@
 #define FDC_IRQ     11    /* スレーブPIC IR11 */
 
 /* ======================================================================== */
-/*  ディスクパラメータ (PC-98 2HD 1MB MFM)                                 */
+/*  ディスクパラメータ (PC-98 2HD 1MB MFM) — 互換マクロ                    */
 /* ======================================================================== */
 #define FDC_CYLINDERS    77     /* シリンダ数 (0-76) */
 #define FDC_HEADS        2      /* ヘッド数 */
@@ -87,8 +87,39 @@
 #define FDC_SECTOR_N     3      /* セクタ長コード (3=1024) */
 #define FDC_GAP3         0x74   /* Read/Write ギャップ長 (MFM 1024byte/sec) */
 #define FDC_TOTAL_SECTORS (FDC_CYLINDERS * FDC_HEADS * FDC_SPT)  /* 1232 */
-#define FDC_DATARATE     0      /* 500Kbps (CCR値) */
 #define FDC_TIMEOUT_LOOP 10000  /* BSY等待ちのためのループカウンタ上限 */
+
+/* IRQ11 待ちタイムアウト (tick 単位, 1 tick = 10ms)
+ * 実FDCの正常動作時間: seek ~120ms + transfer ~100ms = ~220ms
+ * 200ms (20 tick) に設定。NP21/W で IRQ 未到達時の過度な遅延を抑制する。 */
+#define FDC_IRQ_TIMEOUT_TICKS  20
+
+/* ======================================================================== */
+/*  メディア種別 (FDI/実FDDのジオメトリ選択に使用)                          */
+/* ======================================================================== */
+typedef enum {
+    FDC_MEDIA_2HD_1232 = 0,  /* 1.2MB (PC-98標準, 77×2×8×1024) */
+    FDC_MEDIA_2DD_640  = 1,  /* 640KB (80×2×8×512) */
+    FDC_MEDIA_2DD_720  = 2,  /* 720KB (80×2×9×512) */
+    FDC_MEDIA_2D_256   = 3   /* 2D (77×2×16×256) — 古いPC-98ゲーム用 */
+} fdc_media_t;
+
+/* メディアジオメトリ構造体 */
+struct fdc_geom {
+    u8  cyls;       /* シリンダ数 */
+    u8  heads;      /* ヘッド数 */
+    u8  spt;        /* セクタ/トラック */
+    u8  sec_n;      /* セクタ長コード (2=512B, 3=1024B) */
+    u16 bps;        /* バイト/セクタ */
+    u8  gap3;       /* GAP3長 (R/W用) */
+    u8  daua_high;  /* DA/UA上位ニブル (0x90/0x10/0x70) */
+};
+
+/* 既知メディア定義 (drivers/fdc.c で実体化) */
+extern const struct fdc_geom fdc_geom_2hd;
+extern const struct fdc_geom fdc_geom_2dd_640;
+extern const struct fdc_geom fdc_geom_2dd_720;
+extern const struct fdc_geom fdc_geom_2d_256;
 
 /* ======================================================================== */
 /*  FDCドライバAPI                                                          */
@@ -97,20 +128,29 @@
 /* FDC初期化: リセット → Specify → Recalibrate */
 int fdc_init(void);
 
-/* セクタ読み込み
+/* セクタ読み込み (2HD固定ラッパ)
  *   drv:   ドライブ (0-3)
  *   cyl:   シリンダ (0-76)
  *   head:  ヘッド (0-1)
- *   sect:  セクタ (1-8)
- *   buf:   データバッファ (>= 1024バイト)
+ *   sect:  セクタ (1ベース)
+ *   buf:   データバッファ (>= FDC_SECTOR_SIZE バイト)
  * 戻り値: 0=成功
  */
 int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf);
 
-/* セクタ書き込み */
+/* セクタ書き込み (2HD固定ラッパ) */
 int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf);
+
+/* セクタ読み込み (ジオメトリ指定版) */
+int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
+                         const struct fdc_geom *g, void *buf);
+
+/* セクタ書き込み (ジオメトリ指定版) */
+int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
+                          const struct fdc_geom *g, const void *buf);
 
 /* IRQ11完了フラグ (isr_handlers.cからセット) */
 extern volatile u32 fdc_irq_fired;
 
 #endif /* FDC_H */
+
