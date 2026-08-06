@@ -8,12 +8,21 @@ deploy: vmkernel.lz4 programs unicode_bin
 	@echo "=== HostDrv Deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 
-# deploy-kernel: ローダーをNHDブート領域に書き込み + vmkernel.lz4をext2に配置
-#   + HostDrvからext2同期 (NP21/W再起動が必要)
+# deploy-kernel: vmkernel.lz4 と全ビルド成果物をNHDのext2に配置
+#   (NP21/W再起動が必要)。HostDrv を先に同期するので、HostDrv 側が古いまま
+#   ext2 を上書きして中身を失う事故を防げる。
+#   ブートローダー自体を変更した場合は deploy-boot を別途実行すること。
 deploy-kernel: vmkernel.lz4
-	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
+	@echo "=== Sync to HostDrv before NHD deploy ==="
+	$(HOSTDRV_DEPLOY) sync
 	$(NHD_DEPLOY) sync-from-hostdrv
 	$(NHD_DEPLOY) deploy
+
+# deploy-boot: ブートローダーのみNHDブート領域 (LBA 2-17) に書き込み
+#   boot/loader_hdd.bin を変更した場合のみ実行する
+deploy-boot: boot/loader_hdd.bin
+	@echo "=== Boot Loader Deploy ==="
+	$(NHD_DEPLOY) write-boot boot/loader_hdd.bin
 
 # deploy-nhd: NHDフルデプロイ (ローダー+全ファイル)
 deploy-nhd: vmkernel.lz4 programs unicode_bin
@@ -38,4 +47,4 @@ nhd-umount:
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-nhd nhd-mount nhd-umount nhd-init
+.PHONY: deploy deploy-kernel deploy-boot deploy-nhd nhd-mount nhd-umount nhd-init

@@ -89,7 +89,7 @@ python3 tools/nhd_deploy.py sync-from-hostdrv  # HostDrv (C:\os32) から ext2 �
 python3 tools/nhd_deploy.py deploy     # ローカルNHD (/tmp/os32.nhd) をNP21/Wにコピー
 python3 tools/nhd_deploy.py copy programs/shell.bin  # 個別ファイルのデプロイ
 python3 tools/nhd_deploy.py push programs/foo.bin --resolve  # シリアル経由ホットデプロイ
-# 他: mount / umount / ls / rm / mkdirs / format / write-kernel
+# 他: mount / umount / ls / rm / mkdirs / format / write-boot
 ```
 - `tools/deploy.yaml` でデプロイ対象・ゲストパス・タグを定義
 - ext2ファイルシステムへの書き込みはLinux loopデバイス経由
@@ -107,17 +107,14 @@ Makefile ターゲットとの対応 (`build/deploy.mk`):
 | ターゲット | 動作 |
 |-----------|------|
 | `make deploy` | HostDrv (`C:\os32`) への同期 — 再起動不要 |
-| `make deploy-kernel` | write-boot + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
+| `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
+| `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
 | `make dp-<name>` | 個別プログラムのシリアルホットデプロイ — 再起動不要 |
 | `make nhd-init` / `nhd-mount` / `nhd-umount` | 初期化・マウント操作 |
 
 #### `tools/hostdrv_deploy.py`
 HostDrv デプロイ先 (`HOSTDRV_DIR`, 既定 `C:\os32`) への差分同期。sudo 不要で高速。`make deploy` から呼ばれる。
-
-#### `tools/install_hdd.py` / `tools/write_ipl.py` (レガシー)
-旧世代の NHD 直接構築・セクタ書き込みツール。**パーティション開始 LBA が旧値 (272)
-のままであり、現行レイアウト (LBA 1632) とは非互換**。現在は `nhd_deploy.py` を使用すること。
 
 #### `tools/mkpkg.py`
 OS32パッケージ (.PKG) を生成するビルダー。複数ファイルをLZSS圧縮し、hash-chainで連結したパッケージを生成する。CDインストーラ (`cdinst.bin`) と連携し、ISOイメージ経由でのプログラム配布に使用される。
