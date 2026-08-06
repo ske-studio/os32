@@ -74,6 +74,9 @@ filesystem:
     - host: programs/apps/edit.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/apps/game.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/apps/gfx_demo.bin
       guest: /usr/bin/
       tags: [programs]

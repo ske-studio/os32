@@ -47,6 +47,18 @@ programs/apps/edit/%.o: programs/apps/edit/%.c
 programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
 
+# === Game (対戦スゴロクRPG) Module ===
+GAME_SRC = $(wildcard programs/apps/game/*.c)
+GAME_OBJ = $(GAME_SRC:.c=.o)
+GAME_LIBS = $(GFX_OBJ) $(LIBUI_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
+            $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) $(LIBOS32DB_OBJ)
+
+programs/apps/game/%.o: programs/apps/game/%.c
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game -Iprograms/libos32db -c $< -o $@
+
+programs/apps/game.elf: build/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS) -lc -lgcc
+
 # (SKK Module / LZSS Command は廃止済み)
 
 # === LZ4 Command ===
@@ -321,7 +333,9 @@ programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
-programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
+game: $(CRT0_OBJ) programs/apps/game.bin
+
+programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
@@ -332,6 +346,7 @@ clean-programs: clean-rust
 	rm -f programs/cmds/*.o programs/cmds/*.elf programs/cmds/*.raw programs/cmds/*.bin
 	rm -f programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin
 	rm -f programs/apps/edit/*.o
+	rm -f programs/apps/game/*.o
 	rm -f programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin
 	rm -f programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin
 	rm -f programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin
@@ -344,7 +359,7 @@ clean-programs: clean-rust
 	rm -f lib/lz4_prog.o
 	rm -f unicode.bin tools/gen_unicode
 
-.PHONY: programs programs_base edit lz4_cmd cdinst bench bench_scale2x
+.PHONY: programs programs_base edit game lz4_cmd cdinst bench bench_scale2x
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
 .PHONY: chem_test chem_demo map_test map_demo input_test
