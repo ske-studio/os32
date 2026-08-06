@@ -13,6 +13,7 @@
 #include "kstring.h"
 #include "kprintf.h"
 #include "ide.h"
+#include "os_time.h"
 
 extern void diskio_set_fdd_drive(int drv);
 extern void diskio_set_hdd_drive(int drv);
@@ -27,6 +28,11 @@ typedef struct {
     BYTE   pdrv;      /* FatFs物理ドライブ番号 */
     char   vol[4];    /* ボリューム文字列 "0:" or "1:" */
 } FatFsCtx;
+
+/* 物理ドライブ占有フラグ (pdrv 0=FDD, 1=HDD)。
+ * diskio.c のドライブ選択と FatFs[] ボリューム登録はグローバルなため、
+ * 同一 pdrv への多重マウントは先行マウントを破壊する。ここで遮断する。 */
+static int pdrv_busy[FF_VOLUMES];
 
 
 /* ======== FRESULT → VFSエラー変換 ======== */
@@ -284,10 +290,9 @@ static int fatfs_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
     } else {
         buf->st_mode = 0100644; /* -rw-r--r-- */
     }
-    /* FAT時刻 → Unix時刻変換は簡略化 (RTC epochが不定のため0) */
-    buf->st_mtime = 0;
-    buf->st_atime = 0;
-    buf->st_ctime = 0;
+    buf->st_mtime = dos_time_to_epoch(fno.fdate, fno.ftime);
+    buf->st_atime = buf->st_mtime;
+    buf->st_ctime = buf->st_mtime;
 
     return VFS_OK;
 }
@@ -476,18 +481,24 @@ static void *fatfs_vfs_mount(int dev_id)
     int dev_type;
     int drv_num;
 
-    fc = (FatFsCtx *)kmalloc(sizeof(FatFsCtx));
-    if (!fc) return (void *)0;
-    kmemset(fc, 0, sizeof(FatFsCtx));
-
-    fc->dev_id = dev_id;
-
     /* VFSからのエンコード: (dev_type << 8) | drv_num
      * dev_type=0 (VFS_DEV_HD) → HDD → pdrv=1
      * dev_type=1 (VFS_DEV_FD) → FDD → pdrv=0
      */
     dev_type = (dev_id >> 8) & 0xFF;
     drv_num  = dev_id & 0xFF;
+
+    /* FDD/HDD 以外 (CD, hostdrv等) は対象外 */
+    if (dev_type != 0 && dev_type != 1) return (void *)0;
+
+    /* pdrv 占有チェック: diskio のドライブ選択を書き換える前に判定する */
+    if (pdrv_busy[dev_type == 1 ? 0 : 1]) return (void *)0;
+
+    fc = (FatFsCtx *)kmalloc(sizeof(FatFsCtx));
+    if (!fc) return (void *)0;
+    kmemset(fc, 0, sizeof(FatFsCtx));
+
+    fc->dev_id = dev_id;
 
     if (dev_type == 1) {
         /* FDD */
@@ -547,9 +558,14 @@ static void *fatfs_vfs_mount(int dev_id)
     if (fr != FR_OK) {
         kprintf(0x07, "[fatfs] mount failed: type=%d drv=%d pdrv=%d err=%d\n",
                 dev_type, drv_num, fc->pdrv, (int)fr);
+        /* FatFs[] に登録済みの fc->fatfs を解除してから解放する
+         * (解除しないと解放済み領域への参照が残る) */
+        f_mount((FATFS *)0, fc->vol, 0);
         kfree(fc);
         return (void *)0;
     }
+
+    pdrv_busy[fc->pdrv] = 1;
 
     kprintf(0x07, "[fatfs] mounted: type=%d drv=%d pdrv=%d FAT%s\n",
             dev_type, drv_num, fc->pdrv,
@@ -568,6 +584,7 @@ static void fatfs_vfs_umount(void *ctx)
 
     if (fc) {
         f_mount((FATFS *)0, fc->vol, 0); /* アンマウント */
+        pdrv_busy[fc->pdrv] = 0;
         kfree(fc);
     }
 }

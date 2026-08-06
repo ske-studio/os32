@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  VFS.H — 仮想ファイルシステム抽象化レイヤー                                */
 /*                                                                          */
-/*  ext2/fat12等を透過的に扱うための共通インターフェース。                    */
+/*  ext2/fat等を透過的に扱うための共通インターフェース。                      */
 /*  Linuxライクなコマンド体系 (ls, cat, rm, mkdir等) を実現する。            */
 /*                                                                          */
 /*  マルチインスタンス対応: 各FSドライバは mount() でコンテキストを返し、    */
@@ -56,7 +56,7 @@ typedef void (*vfs_dir_cb)(const VfsDirEntry *entry, void *ctx);
  *   umount() → コンテキストを解放する
  */
 typedef struct {
-    const char *name;                /* "ext2", "fat12" */
+    const char *name;                /* "ext2", "fat" */
 
     /* マウント/アンマウント */
     void *(*mount)(int dev_id);      /* 成功: コンテキストptr, 失敗: NULL */

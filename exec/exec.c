@@ -9,7 +9,6 @@
 #include "kprintf.h"
 #include "paging.h"
 #include "pgalloc.h"
-#include "fat12.h"
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "shm.h"
@@ -206,9 +205,6 @@ int exec_run(const char *cmdline)
 
     /* ====== ファイル読み込み ====== */
     sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
-    if (sz <= 0 && fat12_is_mounted()) {
-        sz = fat12_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
-    }
 
     /* フォールバック: パスにスラッシュがない場合、標準ディレクトリを順に検索 */
     /* 注意: SYS_DEFAULT_PATH (config.h) と整合させること */

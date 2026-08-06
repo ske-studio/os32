@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  VFS.C — 仮想ファイルシステム ディスパッチャ                                */
 /*                                                                          */
-/*  各FSドライバ(ext2, fat12)への呼び出しを仲介し、                          */
+/*  各FSドライバ(ext2, fat等)への呼び出しを仲介し、                           */
 /*  パス文字列ベースの統一APIを提供する。                                    */
 /*                                                                          */
 /*  マルチインスタンス対応: MountPointがfs_ctxを保持し、                     */
@@ -9,7 +9,6 @@
 /* ======================================================================== */
 
 #include "vfs.h"
-#include "fat12.h"
 #include "os32_kapi_shared.h" /* O_RDONLY, SEEK_SET 等 */
 #include "kstring.h"
 #include "console.h"
@@ -253,7 +252,7 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
 
     /* dev_typeをdev_idの上位バイトにエンコード
      * FatFS等のマルチデバイス対応FSが HD/FD を区別するために使用。
-     * 既存FSドライバ (fat12, ext2) は dev_id & 0xFF のみ参照するので互換。
+     * 既存FSドライバ (ext2等) は dev_id & 0xFF のみ参照するので互換。
      * 形式: (dev_type << 8) | (dev_id & 0xFF) */
     fs_ctx = ops->mount((dev_type << 8) | (dev_id & 0xFF));
     if (!fs_ctx) return VFS_ERR_IO;
