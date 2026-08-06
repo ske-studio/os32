@@ -97,7 +97,7 @@ lib/sqlite3/os32_sqlite_vfs.o: lib/sqlite3/os32_sqlite_vfs.c lib/sqlite3/os32_sq
 	$(CC) $(CFLAGS_SQLITE) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
 
 lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_sqlite_vfs.h lib/sqlite3/os32_sqlite_config.h
-	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
+	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w $(DEPFLAGS) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
 
 # === カーネルリンク ===
 kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
