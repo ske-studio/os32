@@ -5,6 +5,7 @@ members = [
     "hello_gfx",
     "alloc_demo",
     "math_test_rs",
+    "font_test",
 ]
 resolver = "2"
 

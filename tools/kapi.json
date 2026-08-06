@@ -1,5 +1,5 @@
 {
-  "version": 31,
+  "version": 32,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1104,6 +1104,11 @@
       "ret": "u32",
       "args": [],
       "target": "kapi_db_mem_used"
+    },
+    {
+      "name": "kcg_load_font",
+      "ret": "int",
+      "args": ["const char *path"]
     }
   ]
 }

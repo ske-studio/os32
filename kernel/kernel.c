@@ -100,20 +100,26 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
     tvram_print(24, 0, tmp, TATTR_CYAN);
 
-    /* IDT/PIC/PIT 初期化 */
-    tvram_print(0, 1, "IDT...", TATTR_GREEN);
-    idt_init();
+    /* GDT 再構築 (ブートローダーのGDTから安全な場所へ移行) */
+    tvram_print(0, 1, "GDT...", TATTR_GREEN);
+    extern void gdt_init(void);
+    gdt_init();
     tvram_print(6, 1, "OK  ", TATTR_WHITE);
 
-
-
-    tvram_print(12, 1, "PIC...", TATTR_GREEN);
-    pic_init();
+    /* IDT/PIC/PIT 初期化 */
+    tvram_print(12, 1, "IDT...", TATTR_GREEN);
+    idt_init();
     tvram_print(18, 1, "OK  ", TATTR_WHITE);
 
-    tvram_print(24, 1, "PIT...", TATTR_GREEN);
-    pit_init(PIT_HZ);
+
+
+    tvram_print(24, 1, "PIC...", TATTR_GREEN);
+    pic_init();
     tvram_print(30, 1, "OK  ", TATTR_WHITE);
+
+    tvram_print(36, 1, "PIT...", TATTR_GREEN);
+    pit_init(PIT_HZ);
+    tvram_print(42, 1, "OK  ", TATTR_WHITE);
 
     /* タイマとカスケード有効化 */
     irq_enable(0);
@@ -138,24 +144,24 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
 
     /* キーボード初期化 */
-    tvram_print(36, 1, "KBD...", TATTR_GREEN);
+    tvram_print(48, 1, "KBD...", TATTR_GREEN);
     kbd_init();
-    tvram_print(42, 1, "OK", TATTR_WHITE);
+    tvram_print(54, 1, "OK", TATTR_WHITE);
 
     /* マウスドライバ初期化 (NP21/W検出→モード自動選択) */
     mouse_init();
 
     /* FDC初期化 (I/Oポート直接制御) */
-    tvram_print(48, 1, "FDC...", TATTR_GREEN);
+    tvram_print(60, 1, "FDC...", TATTR_GREEN);
     /* IRQ11 (FDD) 有効化 */
     irq_enable(FDC_IRQ);
     _enable();  /* FDC初期化前にIRQを許可 */
     {
         int fdc_ret = fdc_init();
         if (fdc_ret == 0) {
-            tvram_print(54, 1, "OK", TATTR_WHITE);
+            tvram_print(66, 1, "OK", TATTR_WHITE);
         } else {
-            tvram_print(54, 1, "ER", TATTR_RED);
+            tvram_print(66, 1, "ER", TATTR_RED);
         }
     }
 
@@ -304,6 +310,25 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * paging_reclaim 後にフラグをゼロクリアする必要がある。
      * これがないとBIOSデータの残骸がキャッシュ済みと誤認される。 */
     kcg_init();
+
+    /* [DEBUG] カーネル初期化中にフォントロードをテスト。
+     * 外部プログラム経由のクラッシュが、スタック/コンテキストの問題か
+     * lz4_decode 自体の問題かを切り分けるための一時的なテスト。
+     * 注意: Unicode テーブル (0x4A000) はまだロードされていないので
+     *        LZ4 一時バッファとして安全に使用可能。 */
+    tvram_print(0, 3, "FONT..", TATTR_GREEN);
+    {
+        int fret;
+        fret = kcg_load_font("/sys/font/default.kcgfont");
+        if (fret == 0) {
+            tvram_print(6, 3, "OK ", TATTR_WHITE);
+        } else {
+            tvram_print(6, 3, "NG ", TATTR_RED);
+            kprintf(0x07, "[KCG] kernel-init load failed: %d\n", fret);
+        }
+    }
+
+    /* TTF由来フォント: 外部プログラムから kcg_load_font() (KAPI) で呼ぶ */
 
     /* FPU 初期化 (paging_init の後で CR0 に対して設定)
      * CR0.EM=0 (ネイティブFPU使用), CR0.TS=0 (タスクスイッチ不要)

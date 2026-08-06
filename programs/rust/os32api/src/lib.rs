@@ -136,7 +136,16 @@ struct Os32Alloc;
 unsafe impl GlobalAlloc for Os32Alloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let api = &**API.0.get();
-        (api.mem_alloc)(layout.size() as u32)
+        let ptr = (api.mem_alloc)(layout.size() as u32);
+        if ptr.is_null() {
+            (api.kprintf)(
+                ATTR_RED,
+                b"[OOM] alloc failed: size=%d, align=%d\r\n\0".as_ptr(),
+                layout.size() as i32,
+                layout.align() as i32,
+            );
+        }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
@@ -152,7 +161,7 @@ static ALLOCATOR: Os32Alloc = Os32Alloc;
 /*  パニックハンドラ                                                 */
 /* ================================================================ */
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
     unsafe {
         let p = API.0.get();
         if !(*p).is_null() {
@@ -161,9 +170,94 @@ fn panic(_info: &PanicInfo) -> ! {
                 ATTR_RED,
                 b"[PANIC] Rust program panicked!\r\n\0".as_ptr(),
             );
+            /* パニック位置を表示 */
+            if let Some(loc) = info.location() {
+                /* ファイル名を表示 (Rustの&strは NUL終端でないため %.*s 使用) */
+                let file = loc.file();
+                let line = loc.line();
+                (a.kprintf)(
+                    ATTR_RED,
+                    b"  at %.*s:%d\r\n\0".as_ptr(),
+                    file.len() as i32,
+                    file.as_ptr(),
+                    line as i32,
+                );
+            }
+            /* ヒープ残量も表示 (OOM判定用) */
+            let free = (a.kmalloc_free)();
+            (a.kprintf)(
+                ATTR_YELLOW,
+                b"  kmalloc_free=%d bytes\r\n\0".as_ptr(),
+                free as i32,
+            );
         }
     }
     loop {}
+}
+
+/* ================================================================ */
+/*  ファイルI/O ヘルパー                                             */
+/* ================================================================ */
+pub mod fs {
+    use alloc::vec::Vec;
+
+    /* sys_open の mode 定数 */
+    pub const O_RDONLY: i32 = 0;
+
+    /* sys_lseek の whence 定数 */
+    pub const SEEK_SET: i32 = 0;
+    pub const SEEK_END: i32 = 2;
+
+    /// ファイルを開いて全内容を Vec<u8> に読み込む
+    ///
+    /// パスはNUL終端のバイト列で渡すこと (例: b"/data/font.ttf\0")
+    /// 失敗時は None を返す。
+    pub fn read_file(path: &[u8]) -> Option<Vec<u8>> {
+        unsafe {
+            let a = crate::api();
+
+            /* ファイルを開く */
+            let fd = (a.sys_open)(path.as_ptr(), O_RDONLY);
+            if fd < 0 {
+                return None;
+            }
+
+            /* ファイルサイズを取得 (SEEK_END → SEEK_SET) */
+            let size = (a.sys_lseek)(fd, 0, SEEK_END);
+            if size <= 0 {
+                (a.sys_close)(fd);
+                return None;
+            }
+            (a.sys_lseek)(fd, 0, SEEK_SET);
+
+            /* バッファを確保して読み込む */
+            let size_u = size as usize;
+            let mut buf: Vec<u8> = Vec::with_capacity(size_u);
+            buf.set_len(size_u);
+
+            let mut total_read: usize = 0;
+            while total_read < size_u {
+                let chunk = size_u - total_read;
+                let n = (a.sys_read)(
+                    fd,
+                    buf.as_mut_ptr().add(total_read),
+                    chunk as u32,
+                );
+                if n <= 0 {
+                    break;
+                }
+                total_read += n as usize;
+            }
+
+            (a.sys_close)(fd);
+
+            if total_read < size_u {
+                buf.truncate(total_read);
+            }
+
+            Some(buf)
+        }
+    }
 }
 
 /* ================================================================ */

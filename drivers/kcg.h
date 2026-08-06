@@ -61,4 +61,9 @@ int kcg_draw_sjis(int x, int y, const char *sjis_str, u8 fg, u8 bg);
 /* 戻り値: 描画した文字列のピクセル幅 */
 int kcg_draw_utf8(int x, int y, const char *utf8_str, u8 fg, u8 bg);
 
+/* 外部フォントファイル(.kcgfont)をロードしてキャッシュを上書き */
+/* path: ゲスト側のフォントファイルパス (例: "/sys/font/default.kcgfont") */
+/* 戻り値: 0=成功, 負数=エラー */
+int kcg_load_font(const char *path);
+
 #endif /* __KCG_H */

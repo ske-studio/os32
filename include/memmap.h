@@ -70,7 +70,9 @@ extern u32 __bss_end;
 #define MEM_IVT_PROT_START    0x01000UL
 #define MEM_IVT_PROT_END      0x05FFFUL
 
-/* loader.bin (使用済み): Read-Only → ブート後に再利用 */
+/* loader.bin (使用済み): Read-Only → ブート後に再利用 
+ * (注: ブートローダーが 0x804E に作成した GDT は
+ *  カーネル初期化時 (gdt_init) に安全な上位メモリへ退避されます) */
 #define MEM_LOADER_START      0x08000UL
 #define MEM_LOADER_END        0x08FFFUL
 

@@ -171,4 +171,154 @@ void kcg_read_kanji(u16 jis_code, u8 *buf)
     }
 }
 
+/* ======================================================================== */
+/*  外部フォントファイル (.kcgfont) ロード                                  */
+/*                                                                          */
+/*  ホスト側で gen_kcg_font.py を使って事前レンダリングした1bitビットマップ  */
+/*  をKCGキャッシュメモリに直接ロードする。                                  */
+/*                                                                          */
+/*  フォーマット:                                                            */
+/*    [0:4]   マジック "KCG1"                                               */
+/*    [4:8]   展開後サイズ (u32 LE)                                         */
+/*    [8:12]  フラグ (bit0: LZ4圧縮)                                       */
+/*    [12:16] 予約                                                           */
+/*    [16..]  ペイロード (キャッシュメモリレイアウト互換)                    */
+/*                                                                          */
+/*  ペイロード配置:                                                          */
+/*    kanji_cache  (282,752 B) + kanji_fetched (8,836 B)                    */
+/*    + ank_cache  (4,096 B) + ank_fetched (256 B)                          */
+/*    = 295,940 B (展開後)                                                   */
+/*                                                                          */
+/*  戻り値: 0=成功, -1=ファイルエラー, -2=フォーマット不正, -3=LZ4エラー    */
+/* ======================================================================== */
+
+#include "../fs/vfs.h"
+#include "../lib/lz4.h"
+#include "kprintf.h"
+#include "memmap.h"
+
+#define KCG_FONT_MAGIC  0x3147434B  /* "KCG1" リトルエンディアン */
+#define KCG_FLAG_LZ4    0x01
+#define KCG_PAYLOAD_SIZE (KANJI_CACHE_SIZE + KANJI_FETCHED_SIZE + \
+                          ANK_CACHE_SIZE + 256)
+
+/*
+ * LZ4圧縮データの一時バッファとして、Unicode変換テーブル領域
+ * (0x4A000) を流用する。0x4A000〜0x8EFFF = 282KB が利用可能。
+ * 圧縮フォントデータは ~180KB なので十分。
+ *
+ * フォントロード後に unicode_init() で上書きされるため安全。
+ * GFXバッファ(0x6A000)では 0x8F000 (スタックガード) まで 148KB しかなく不足。
+ */
+#define LZ4_TEMP_BUF     ((u8 *)MEM_UNICODE_TABLE_BASE)
+#define LZ4_TEMP_MAX     (0x8F000UL - MEM_UNICODE_TABLE_BASE)  /* 282KB */
+
+/*
+ * チャンク分割読み込みヘルパー。
+ * vfs_read_fd の大量データ一括読み込みで ext2/HostDrvFS がクラッシュする
+ * 問題を回避するため、CHUNK_SIZE ずつ分割して読み込む。
+ */
+#define LOAD_CHUNK_SIZE 1024
+
+static int kcg_read_chunked(int fd, u8 *dst, int total)
+{
+    int done = 0;
+    int n;
+    int chunk;
+    while (done < total) {
+        chunk = total - done;
+        if (chunk > LOAD_CHUNK_SIZE) chunk = LOAD_CHUNK_SIZE;
+        n = vfs_read_fd(fd, dst + done, chunk);
+        if (n <= 0) break;
+        done += n;
+    }
+    return done;
+}
+
+int kcg_load_font(const char *path)
+{
+    int fd;
+    u8 hdr[16];
+    u32 magic, payload_size, flags;
+    int n, compressed_size, ret;
+
+    kprintf(0x07, "[KCG] loading: %s\n", path);
+
+    fd = vfs_open(path, 0);
+    if (fd < 0) {
+        return -1;
+    }
+
+    /* ヘッダ読み込み (16バイト) */
+    n = vfs_read_fd(fd, hdr, 16);
+    if (n < 16) {
+        vfs_close(fd);
+        return -1;
+    }
+
+    magic = *(u32 *)&hdr[0];
+    if (magic != KCG_FONT_MAGIC) {
+        vfs_close(fd);
+        kprintf(0x07, "[KCG] invalid magic\n");
+        return -2;
+    }
+
+    payload_size = *(u32 *)&hdr[4];
+    flags = *(u32 *)&hdr[8];
+
+    if (payload_size != KCG_PAYLOAD_SIZE) {
+        vfs_close(fd);
+        kprintf(0x07, "[KCG] size mismatch\n");
+        return -2;
+    }
+
+    if (flags & KCG_FLAG_LZ4) {
+        /* === LZ4圧縮データ === */
+        compressed_size = (int)vfs_get_size(fd) - 16;
+        if (compressed_size <= 0 || compressed_size > (int)LZ4_TEMP_MAX) {
+            vfs_close(fd);
+            kprintf(0x07, "[KCG] bad size: %d\n", compressed_size);
+            return -1;
+        }
+        kprintf(0x07, "[KCG] LZ4: %d bytes\n", compressed_size);
+
+        /* 圧縮データをチャンク分割でUnicode領域に読み込み */
+        n = kcg_read_chunked(fd, LZ4_TEMP_BUF, compressed_size);
+        vfs_close(fd);
+
+        if (n < compressed_size) {
+            kprintf(0x07, "[KCG] short: %d/%d\n", n, compressed_size);
+            return -1;
+        }
+
+        kprintf(0x07, "[KCG] read OK, decoding...\n");
+
+        /* LZ4展開 → キャッシュメモリに直接書き込み */
+        ret = lz4_decode(LZ4_TEMP_BUF, compressed_size,
+                         kanji_cache, KCG_PAYLOAD_SIZE);
+
+        if (ret < 0) {
+            kprintf(0x07, "[KCG] LZ4 err: %d\n", ret);
+            return -3;
+        }
+
+        kprintf(0x07, "[KCG] loaded (LZ4): %d -> %d\n",
+                compressed_size, ret);
+    } else {
+        /* === 非圧縮データ: チャンク分割でキャッシュメモリに読み込み === */
+        n = kcg_read_chunked(fd, kanji_cache, KCG_PAYLOAD_SIZE);
+        vfs_close(fd);
+
+        if (n < (int)KCG_PAYLOAD_SIZE) {
+            kprintf(0x07, "[KCG] short: %d\n", n);
+            return -1;
+        }
+
+        kprintf(0x07, "[KCG] loaded: %u bytes\n", payload_size);
+    }
+
+    return 0;
+}
+
 /* End of kcg.c */
+

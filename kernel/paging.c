@@ -167,8 +167,10 @@ void paging_reclaim_conventional(void)
 {
     u32 addr;
 
-    /* ページ0: NOT PRESENT (NULLポインタ検出) */
-    paging_set_not_present(0x0, MEM_NULL_GUARD_END);
+    /* ページ0: Read-Only (BIOS DATA AREA アクセスを許可しつつ書き込み検出)
+     * [DEBUG] NOT PRESENT → R/O に変更: LZ4展開中にBDA参照でクラッシュする
+     * 問題を調査中。元は paging_set_not_present(0x0, MEM_NULL_GUARD_END); */
+    paging_set_readonly(0x0, MEM_NULL_GUARD_END);
 
     /* 0x1000-0x8EFFF: R/W (フォント/Unicode/GFX用) */
     for (addr = MEM_CONV_RECLAIM_START; addr <= MEM_CONV_RECLAIM_END; addr += PAGE_SIZE) {

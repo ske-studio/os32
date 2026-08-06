@@ -159,12 +159,13 @@ pub struct KernelAPI {
     /* idx 149 */ pub db_finalize: unsafe extern "C" fn(handle: i32) -> i32,
     /* idx 150 */ pub db_last_error: unsafe extern "C" fn(handle: i32) -> *const u8,
     /* idx 151 */ pub db_mem_used: unsafe extern "C" fn() -> u32,
+    /* idx 152 */ pub kcg_load_font: unsafe extern "C" fn(path: *const u8) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 31;
+pub const KAPI_VERSION: u32 = 32;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

@@ -308,3 +308,17 @@ filesystem:
     - host: programs/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
+
+    # --- TrueType フォント ---
+    - host: assets/fonts/ipaexg_subset.ttf
+      guest: /data/ipaexg_subset.ttf
+      tags: [data]
+
+    # --- フォントテスト ---
+    - host: programs/tests/font_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+
+    - host: programs/tests/font_load_test.bin
+      guest: /usr/bin/
+      tags: [programs]

@@ -155,6 +155,7 @@ typedef struct {
     int (__cdecl *db_finalize)(int handle);
     const char * (__cdecl *db_last_error)(int handle);
     u32 (__cdecl *db_mem_used)(void);
+    int (__cdecl *kcg_load_font)(const char *path);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
 } KernelAPI;
 
