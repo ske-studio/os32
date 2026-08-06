@@ -21,8 +21,11 @@
 #define PC98_HEADS   8
 #define PC98_SECTORS 17
 #define PC98_CYL0_SECTORS  (PC98_HEADS * PC98_SECTORS)  /* 136 */
-#define PC98_BOOT_CYLS     2
-#define HDD_PARTITION_LBA  (PC98_CYL0_SECTORS * PC98_BOOT_CYLS)  /* 272 */
+/* ブート予約シリンダ数。LBA 0=IPL / 1=PT / 2..5=loader / 6..=kernel.bin /
+ * 262..=sqlite.bin を収めるため 12 シリンダ (1632 セクタ) 必要。
+ * tools/nhd_deploy.py の HDD_PARTITION_LBA と必ず一致させること。 */
+#define PC98_BOOT_CYLS     12
+#define HDD_PARTITION_LBA  (PC98_CYL0_SECTORS * PC98_BOOT_CYLS)  /* 1632 */
 
 /* IOバッファ (ヒープから確保する) */
 static u8 *file_buf;
@@ -331,6 +334,9 @@ void __cdecl main(int argc, char **argv, KernelAPI *api)
     api->kprintf(0x0A, "  Written KERNEL (LBA 6, %d bytes)\n", ret);
 
     /* === Phase 2: ext2フォーマット === */
+    /* 起動時の自動マウントが残っていると、フォーマット後も古い
+     * スーパーブロック/GDT を保持した ctx で書き込むことになるため必ず外す */
+    api->sys_umount("/hd0");
     api->kprintf(ATTR_YELLOW, "%s", "\n[2/3] Formatting Ext2 Filesystem...\n");
     ret = api->ext2_format(IDE_DRIVE, info.total_sectors - HDD_PARTITION_LBA);
     if (ret != 0) {

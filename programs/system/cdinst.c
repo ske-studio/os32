@@ -30,8 +30,11 @@
 #define PC98_HEADS   8
 #define PC98_SECTORS 17
 #define PC98_CYL0_SECTORS  (PC98_HEADS * PC98_SECTORS)  /* 136 */
-#define PC98_BOOT_CYLS     2
-#define HDD_PARTITION_LBA  (PC98_CYL0_SECTORS * PC98_BOOT_CYLS)  /* 272 */
+/* ブート予約シリンダ数。LBA 0=IPL / 1=PT / 2..5=loader / 6..=kernel.bin /
+ * 262..=sqlite.bin を収めるため 12 シリンダ (1632 セクタ) 必要。
+ * tools/nhd_deploy.py の HDD_PARTITION_LBA と必ず一致させること。 */
+#define PC98_BOOT_CYLS     12
+#define HDD_PARTITION_LBA  (PC98_CYL0_SECTORS * PC98_BOOT_CYLS)  /* 1632 */
 
 /* 色定数 */
 #define COL_TITLE  (0xE1 | 0x40)
@@ -234,17 +237,11 @@ static int install_boot_sectors(int ide_drv, u32 total_sectors)
                 }
                 DBGF("[cdinst] Loader written LBA2 (%d bytes)", fsize);
             }
-            else if (str_endswith(ent->path, "kernel.bin")) {
-                /* カーネル → LBA 6+ */
-                nsects = (fsize + 511) / 512;
-                ret = api->ide_write_sectors(ide_drv, 6, nsects, fdata);
-                if (ret != 0) {
-                    api->kprintf(COL_RED, " Kernel write err=%d\n", ret);
-                    api->mem_free(data_buf);
-                    return -1;
-                }
-                DBGF("[cdinst] Kernel written LBA6 (%d bytes)", fsize);
-            }
+            /* 注: kernel.bin の LBA 6 への生書き込みは廃止した。
+             * IPL (boot_hdd.asm) は LBA 2 から 16 セクタを読むため、
+             * ローダ領域は LBA 2..17 を占有し LBA 6 と衝突する。
+             * loader v3 はカーネルを ext2 上の /boot/vmkernel.lz4 から
+             * 読むので、生カーネルの書き込み自体が不要。 */
 
             offset += ent->size;
         }
@@ -454,6 +451,23 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         DBGF("[cdinst] HDD: ide_drv=%d sects=%lu",
              ide_drv, (unsigned long)total_sects);
 
+        /* 起動時の自動マウントで /hd0 が既に掴まれていることがある。
+         * その ctx はフォーマット前のスーパーブロック/GDT を保持したままなので、
+         * 外さずに進めると mkdir が旧FSのエントリを見つけて EXIST(-6) になる。 */
+        api->sys_umount("/hd0");
+
+        /* パーティションテーブル書き込み (フォーマットより先に行うこと)
+         * ext2_format は内部で ext2_find_partition() が読む LBA 1 の
+         * パーティションテーブルから base_lba を決める。後から書くと
+         * 「旧テーブルの位置にフォーマットし、新テーブルは別の位置を指す」
+         * 状態になり、ローダが ext2 をマウントできなくなる。 */
+        print(COL_CYAN, "  Writing partition table...");
+        if (write_partition_table(ide_drv, total_sects) != 0) {
+            println(COL_RED, " FAILED");
+            return;
+        }
+        println(COL_GREEN, " OK");
+
         /* ext2フォーマット */
         {
             u32 part_sects = total_sects - HDD_PARTITION_LBA;
@@ -493,6 +507,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
                 api->kprintf(COL_RED, "\n    mkdir failed (rc=%d)\n", mr);
                 return;
             }
+            api->sys_mkdir("/hd0/boot");   /* loader v3 が読む vmkernel.lz4 の置き場 */
             api->sys_mkdir("/hd0/bin");
             api->sys_mkdir("/hd0/sbin");
             api->sys_mkdir("/hd0/usr");
