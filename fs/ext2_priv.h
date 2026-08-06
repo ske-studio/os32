@@ -35,6 +35,10 @@ u32 ext2_current_time(void);
 int ext2_write_super_raw(Ext2Ctx *ctx);
 int ext2_write_gd_raw(Ext2Ctx *ctx);
 u32 ext2_find_partition(int ide_drive);
+/* IDEドライブ番号から Device* を解決 ("hd0".."hd3")。
+ * ide_drive は VFS から (dev_type<<8)|dev_id 形式で渡ることがあるため
+ * 下位バイトのみを使用する。未登録なら NULL。 */
+Device *ext2_dev_for(int ide_drive);
 
 /* -- ext2_inode.c -- */
 int ext2_read_inode(Ext2Ctx *ctx, u32 ino, Ext2Inode *inode);

@@ -216,8 +216,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     tvram_print(14, 3, "MOUNT...", TATTR_GREEN);
     {
         int i, rc;
-        const char *names[8];
-        int num = dev_get_names(names, 8);
+        /* MAX_DEVICES 分確保する。lo0-lo3 が hd0/cd0 より先に登録されるため、
+         * 固定8個だと後続デバイスが自動マウント対象から漏れる。 */
+        const char *names[MAX_DEVICES];
+        int num = dev_get_names(names, MAX_DEVICES);
         const char *root_dev;
         const char *root_fs;
 

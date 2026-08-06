@@ -60,9 +60,13 @@ int ext2_format(int ide_drive, u32 total_sectors)
 
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
 
-    /* 一時コンテキストを初期化 */
+    /* 一時コンテキストを初期化
+     * ext2_read_block/ext2_write_block は ctx->dev (Device API) 経由で
+     * I/O するため、dev を必ず解決してから使うこと。 */
     ext2_mem_zero(&fmt_ctx, sizeof(fmt_ctx));
     fmt_ctx.drive_num = ide_drive;
+    fmt_ctx.dev = ext2_dev_for(ide_drive);
+    if (!fmt_ctx.dev) return EXT2_ERR_IO;
     fmt_ctx.base_lba = ext2_find_partition(ide_drive);
 
     total_blocks = total_sectors / 2;  /* 512B→1KB */

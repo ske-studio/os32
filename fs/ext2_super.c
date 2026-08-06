@@ -118,21 +118,28 @@ int ext2_write_gd_raw(Ext2Ctx *ctx)
 /*  パーティションテーブル解析                                               */
 /* ======================================================================== */
 
+Device *ext2_dev_for(int ide_drive)
+{
+    char devname[8];
+    devname[0] = 'h';
+    devname[1] = 'd';
+    devname[2] = (char)('0' + (ide_drive & 0xFF));
+    devname[3] = '\0';
+    return dev_find(devname);
+}
+
 u32 ext2_find_partition(int ide_drive)
 {
     u8 pt_sect[512];
     int ret, i;
     u32 lba = 1088; /* デフォルトフォールバック (シリンダー8) */
     IdeInfo info;
-    char devname[8];
     Device *dev;
 
     if (ide_get_info(ide_drive, &info) != IDE_OK) return lba;
 
     /* Device API 経由でパーティションテーブルを読み込み */
-    devname[0] = 'h'; devname[1] = 'd';
-    devname[2] = '0' + (char)ide_drive; devname[3] = '\0';
-    dev = dev_find(devname);
+    dev = ext2_dev_for(ide_drive);
     if (!dev) return lba;
 
     /* LBA 1 (PC-98パーティションテーブル) を読み込む */
@@ -170,16 +177,13 @@ u32 ext2_find_partition(int ide_drive)
 int ext2_mount(Ext2Ctx *ctx, int ide_drive)
 {
     int ret, i;
-    char devname[8];
 
     if (ctx->mounted) ext2_unmount(ctx);
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
     ctx->drive_num = ide_drive;
 
     /* Device API ポインタを取得 */
-    devname[0] = 'h'; devname[1] = 'd';
-    devname[2] = '0' + (char)ide_drive; devname[3] = '\0';
-    ctx->dev = dev_find(devname);
+    ctx->dev = ext2_dev_for(ide_drive);
     if (!ctx->dev) return EXT2_ERR_IO;
 
     /* パーティションテーブルを解析してbase_lbaを設定 */
@@ -250,6 +254,7 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     }
 
     ctx->mounted = 1;
+
     return EXT2_OK;
 }
 

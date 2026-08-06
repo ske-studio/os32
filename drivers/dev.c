@@ -195,6 +195,10 @@ void dev_register_hdd(int drive)
         hd_devs[drive]->cyls  = info.cylinders;
         hd_devs[drive]->heads = info.heads;
         hd_devs[drive]->spt   = info.sectors;
+        /* ジオメトリ未取得時のフォールバック (旧 ide_set_chs と同一)。
+         * dev_blk_read_lba は heads/spt が 0 だと即エラーを返すため必須。 */
+        if (hd_devs[drive]->heads == 0) hd_devs[drive]->heads = 8;
+        if (hd_devs[drive]->spt   == 0) hd_devs[drive]->spt   = 17;
         dev_register(hd_devs[drive]);
     }
 }
