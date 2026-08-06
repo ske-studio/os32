@@ -15,6 +15,10 @@
 # パッケージビルド出力
 /packages/
 
+# ビルド成果物出力ディレクトリ (kernel.bin / sqlite.bin / vmkernel.lz4 /
+# unicode.bin / kernel.elf / kernel.map)
+/build/out/
+
 # 特定の生成ファイル
 /unicode.bin
 /tools/gen_unicode

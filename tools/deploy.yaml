@@ -36,12 +36,12 @@ filesystem:
   # ファイルデプロイ定義
   files:
     # --- カーネルイメージ (LZ4圧縮) ---
-    - host: vmkernel.lz4
+    - host: build/out/vmkernel.lz4
       guest: /boot/vmkernel.lz4
       tags: [core]
 
     # --- カーネルデータ ---
-    - host: unicode.bin
+    - host: build/out/unicode.bin
       guest: /sys/unicode.bin
       tags: [core]
 

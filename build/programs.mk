@@ -277,7 +277,7 @@ programs/%.bin: programs/%.raw programs/%.elf
 # === ヘルパーツール ===
 unicode_bin:
 	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
-	@if [ ! -f unicode.bin ]; then ./tools/gen_unicode; fi
+	@if [ ! -f $(BUILD_OUT)/unicode.bin ]; then ./tools/gen_unicode && mv unicode.bin $(BUILD_OUT)/unicode.bin; fi
 
 fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
@@ -358,7 +358,7 @@ clean-programs: clean-rust
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
 	rm -f lib/lz4_prog.o
-	rm -f unicode.bin tools/gen_unicode
+	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
 .PHONY: programs programs_base edit game lz4_cmd cdinst bench bench_scale2x
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test

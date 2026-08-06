@@ -100,10 +100,10 @@ lib/sqlite3/os32_sqlite_test.o: lib/sqlite3/os32_sqlite_test.c lib/sqlite3/os32_
 	$(CC) -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O0 -fcommon -Wno-long-long -w $(DEPFLAGS) -include lib/sqlite3/os32_sqlite_config.h $(INC_SQLITE) -c $< -o $@
 
 # === カーネルリンク ===
-kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
+$(BUILD_OUT)/kernel.elf: $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB)
 	$(LD) $(LDFLAGS) -o $@ $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(RUST_LZ4_LIB) -lgcc
 
-kernel.bin: kernel.elf
+$(BUILD_OUT)/kernel.bin: $(BUILD_OUT)/kernel.elf
 	$(OBJCOPY) -O binary \
 		--remove-section=.sqlite_text \
 		--remove-section=.sqlite_rodata \
@@ -112,7 +112,7 @@ kernel.bin: kernel.elf
 		$< $@
 
 # SQLite 拡張域バイナリ (0x200000 にロードされる)
-sqlite.bin: kernel.elf
+$(BUILD_OUT)/sqlite.bin: $(BUILD_OUT)/kernel.elf
 	$(OBJCOPY) -O binary \
 		--only-section=.sqlite_text \
 		--only-section=.sqlite_rodata \
@@ -120,18 +120,18 @@ sqlite.bin: kernel.elf
 		$< $@
 
 # === VK32 圧縮カーネルイメージ ===
-vmkernel.lz4: kernel.bin sqlite.bin
+$(BUILD_OUT)/vmkernel.lz4: $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin
 	python3 tools/mkvmkernel.py \
-		--kernel kernel.bin --kernel-addr 0x100000 \
-		--sqlite sqlite.bin --sqlite-addr 0x200000 \
-		-o vmkernel.lz4
+		--kernel $(BUILD_OUT)/kernel.bin --kernel-addr 0x100000 \
+		--sqlite $(BUILD_OUT)/sqlite.bin --sqlite-addr 0x200000 \
+		-o $(BUILD_OUT)/vmkernel.lz4
 
 # === カーネル単独ターゲット ===
-kernel: kernel.bin sqlite.bin vmkernel.lz4
+kernel: $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4
 
 # === カーネルクリーン ===
 clean-kernel:
-	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) kernel.elf kernel.bin sqlite.bin vmkernel.lz4 kernel.map
+	rm -f $(ASM_KERNEL_OBJ) $(C_KERNEL_OBJ) $(C_SQLITE_OBJ) $(BUILD_OUT)/kernel.elf $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 $(BUILD_OUT)/kernel.map
 	cd $(RUST_LZ4_DIR) && cargo clean 2>/dev/null || true
 
 .PHONY: kernel clean-kernel

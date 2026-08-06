@@ -2,6 +2,11 @@
 #  config.mk — ツールチェーン、フラグ、パス定義
 # ============================================================================
 
+# ビルド成果物出力ディレクトリ (kernel.bin / sqlite.bin / vmkernel.lz4 /
+# unicode.bin / kernel.elf / kernel.map をリポジトリルートから分離する)
+BUILD_OUT = build/out
+$(shell mkdir -p $(BUILD_OUT))
+
 # 環境変数 (デプロイ先)
 NP21W_DIR ?= /tmp/np21w
 
@@ -58,7 +63,7 @@ DEPFLAGS = -MMD -MP
 CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon -D__KERNEL_BUILD__ $(DEPFLAGS)
 # SQLite専用フラグ: -Os (サイズ最適化, -O0のスタック肥大化回避) + -Wno-long-long (int64リテラル)
 CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w -DNDEBUG -D__KERNEL_BUILD__ $(DEPFLAGS)
-LDFLAGS = -m elf_i386 -T build/os32.ld -Map=kernel.map -nostdlib --nmagic --gc-sections \
+LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --nmagic --gc-sections \
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 # === 外部プログラム用フラグ ===

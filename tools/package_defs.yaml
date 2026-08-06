@@ -30,11 +30,11 @@ minimal:
   files:
     # loader v3 (ext2+LZ4) が読むカーネルイメージ。これが無いと
     # CD インストール後の HDD 起動が /boot/vmkernel.lz4 NOT FOUND で失敗する。
-    - host: vmkernel.lz4
+    - host: build/out/vmkernel.lz4
       guest: /boot/vmkernel.lz4
     - host: programs/shell.bin
       guest: /sys/shell.bin
-    - host: unicode.bin
+    - host: build/out/unicode.bin
       guest: /sys/unicode.bin
     - host: programs/cmds/more.bin
       guest: /bin/more.bin
