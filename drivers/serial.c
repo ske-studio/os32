@@ -225,3 +225,51 @@ void serial_puts(const char *str)
         }
     }
 }
+
+/* ======================================================================== */
+/*  ポーリング専用送信 (パニック/例外時用)                                   */
+/*  割り込みが無効化されている状態で hlt を使用するとフリーズするため、      */
+/*  タイムアウトまでスピンのみで待機する。                                   */
+/* ======================================================================== */
+static void serial_putchar_polled(char c)
+{
+    int spin;
+    for (spin = 0; spin < 50000; spin++) {
+        if (inp(SER_CMD) & STS_TXRDY) {
+            outp(SER_DATA, (unsigned)(u8)c);
+            return;
+        }
+    }
+}
+
+void serial_puts_polled(const char *str)
+{
+    int count = 0;
+    while (*str) {
+        serial_putchar_polled(*str);
+        if (*str == '\n') {
+            serial_putchar_polled('\r');
+        }
+        str++;
+        count++;
+        if ((count & 0xF) == 0) {
+            io_wait();
+            io_wait();
+        }
+    }
+}
+
+void serial_put_hex32_polled(u32 val)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[11];
+    int i;
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (i = 7; i >= 0; i--) {
+        buf[i+2] = hex[val & 0xF];
+        val >>= 4;
+    }
+    buf[10] = '\0';
+    serial_puts_polled(buf);
+}
