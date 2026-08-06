@@ -14,7 +14,7 @@
 #ifndef MD_RENDER_H
 #define MD_RENDER_H
 
-#include "libmd.h"
+#include "libos32md.h"
 #include "os32api.h"
 
 /* ======================================================================== */

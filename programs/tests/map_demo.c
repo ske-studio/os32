@@ -8,7 +8,7 @@
 #include "os32api.h"
 #include "libos32gfx.h"
 #include "gfx_font.h"
-#include "libtilemap.h"
+#include "libos32tilemap.h"
 #include "libos32map.h"
 
 extern KernelAPI *kapi;

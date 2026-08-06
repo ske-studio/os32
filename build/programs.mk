@@ -32,7 +32,7 @@ SHELL_SRC = $(wildcard programs/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
 programs/shell/%.o: programs/shell/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32filer -c $< -o $@
 
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ) -lc -lgcc
@@ -193,8 +193,8 @@ programs/apps/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vbzview.o $(GF
 vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 
 # mdview
-programs/apps/mdview.o: programs/apps/mdview.c programs/libmd/libmd.h programs/libmd/md_render.h programs/libfiler/libfiler.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
+programs/apps/mdview.o: programs/apps/mdview.c programs/libos32md/libos32md.h programs/libos32md/md_render.h programs/libos32filer/libos32filer.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32md -Iprograms/libos32filer -c $< -o $@
 
 programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
@@ -202,13 +202,13 @@ programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLI
 mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
 # ui_demo — microUI デモ
-programs/ui_demo/ui_demo.o: programs/ui_demo/ui_demo.c
+programs/apps/ui_demo/ui_demo.o: programs/apps/ui_demo/ui_demo.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
+programs/apps/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
 
-ui_demo: $(CRT0_OBJ) programs/ui_demo/ui_demo.bin
+ui_demo: $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.bin
 
 # libos32gfx/ui.o (gfx_demo が参照)
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
@@ -347,6 +347,7 @@ clean-programs: clean-rust
 	rm -f programs/apps/*.o programs/apps/*.elf programs/apps/*.raw programs/apps/*.bin
 	rm -f programs/apps/edit/*.o
 	rm -f programs/apps/game/*.o
+	rm -f programs/apps/ui_demo/*.o programs/apps/ui_demo/*.elf programs/apps/ui_demo/*.raw programs/apps/ui_demo/*.bin
 	rm -f programs/tests/*.o programs/tests/*.elf programs/tests/*.raw programs/tests/*.bin
 	rm -f programs/tests/bench/*.o programs/tests/bench/*.elf programs/tests/bench/*.raw programs/tests/bench/*.bin
 	rm -f programs/tests/bench_scale2x/*.o programs/tests/bench_scale2x/*.elf programs/tests/bench_scale2x/*.raw programs/tests/bench_scale2x/*.bin

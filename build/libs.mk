@@ -128,21 +128,21 @@ LIBEVENT_OBJ = $(libos32event_OBJ)
 $(eval $(call DEFINE_LIB,libos32inv,-Iprograms/libos32db,))
 LIBINV_OBJ = $(libos32inv_OBJ)
 
-# libtilemap — タイルマップエンジン (ASMソース含む)
-TILEMAP_SRC = $(wildcard programs/libtilemap/*.c)
-TILEMAP_ASM_SRC = $(wildcard programs/libtilemap/*.asm)
+# libos32tilemap — タイルマップエンジン (ASMソース含む)
+TILEMAP_SRC = $(wildcard programs/libos32tilemap/*.c)
+TILEMAP_ASM_SRC = $(wildcard programs/libos32tilemap/*.asm)
 TILEMAP_ASM_OBJ = $(TILEMAP_ASM_SRC:.asm=.o)
 TILEMAP_OBJ = $(TILEMAP_SRC:.c=.o) $(TILEMAP_ASM_OBJ)
 ALL_LIB_OBJ += $(TILEMAP_OBJ)
 
-programs/libtilemap/%.o: programs/libtilemap/%.c
+programs/libos32tilemap/%.o: programs/libos32tilemap/%.c
 	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
 
-programs/libtilemap/%.o: programs/libtilemap/%.asm
+programs/libos32tilemap/%.o: programs/libos32tilemap/%.asm
 	$(AS) -f elf32 $< -o $@
 
-lib-libtilemap: $(TILEMAP_OBJ)
-.PHONY: lib-libtilemap
+lib-libos32tilemap: $(TILEMAP_OBJ)
+.PHONY: lib-libos32tilemap
 
 # libos32snd — サウンドライブラリ
 programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libos32snd/libos32snd.h
@@ -150,25 +150,25 @@ programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libo
 
 ALL_LIB_OBJ += programs/libos32snd/libos32snd.o
 
-# libmd — Markdownパーサー + レンダラー
-programs/libmd/md_parse.o: programs/libmd/md_parse.c programs/libmd/libmd.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -c $< -o $@
+# libos32md — Markdownパーサー + レンダラー
+programs/libos32md/md_parse.o: programs/libos32md/md_parse.c programs/libos32md/libos32md.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32md -c $< -o $@
 
-programs/libmd/md_render.o: programs/libmd/md_render.c programs/libmd/md_render.h programs/libmd/libmd.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libmd -Iprograms/libfiler -c $< -o $@
+programs/libos32md/md_render.o: programs/libos32md/md_render.c programs/libos32md/md_render.h programs/libos32md/libos32md.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32md -Iprograms/libos32filer -c $< -o $@
 
-MDLIB_OBJ = programs/libmd/md_parse.o programs/libmd/md_render.o
+MDLIB_OBJ = programs/libos32md/md_parse.o programs/libos32md/md_render.o
 ALL_LIB_OBJ += $(MDLIB_OBJ)
 
-# libfiler — GFXファイラーライブラリ + TVRAM描画
-programs/libfiler/filer_core.o: programs/libfiler/filer_core.c programs/libfiler/libfiler.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+# libos32filer — GFXファイラーライブラリ + TVRAM描画
+programs/libos32filer/filer_core.o: programs/libos32filer/filer_core.c programs/libos32filer/libos32filer.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32filer -c $< -o $@
 
-programs/libfiler/filer_draw.o: programs/libfiler/filer_draw.c programs/libfiler/filer_draw.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libfiler -c $< -o $@
+programs/libos32filer/filer_draw.o: programs/libos32filer/filer_draw.c programs/libos32filer/filer_draw.h
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32filer -c $< -o $@
 
-FILER_OBJ = programs/libfiler/filer_core.o
-FILER_DRAW_OBJ = programs/libfiler/filer_draw.o
+FILER_OBJ = programs/libos32filer/filer_core.o
+FILER_DRAW_OBJ = programs/libos32filer/filer_draw.o
 ALL_LIB_OBJ += $(FILER_OBJ) $(FILER_DRAW_OBJ)
 
 # === ライブラリ全ビルドターゲット ===
@@ -183,8 +183,8 @@ clean-libs:
 	rm -f programs/libos32ecs/*.o programs/libos32ui/*.o
 	rm -f programs/libos32gfx/*.o programs/libos32gfx/asm/*.o
 	rm -f programs/libos32gfx/draw/*.o programs/libos32gfx/text/*.o programs/libos32gfx/geom/*.o
-	rm -f programs/libtilemap/*.o
+	rm -f programs/libos32tilemap/*.o
 	rm -f programs/libos32db/*.o programs/libos32snd/*.o
-	rm -f programs/libmd/*.o programs/libfiler/*.o
+	rm -f programs/libos32md/*.o programs/libos32filer/*.o
 
 .PHONY: libs clean-libs

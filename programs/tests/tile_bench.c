@@ -13,7 +13,7 @@
  */
 
 #include "os32api.h"
-#include "libtilemap.h"
+#include "libos32tilemap.h"
 #include <string.h>
 #include <stdio.h>
 
