@@ -811,7 +811,10 @@ def do_push(local_path, remote_name=None, resolve=False):
     try:
         result = subprocess.run(
             ['powershell.exe', '-NoProfile', '-Command', ps],
-            capture_output=True, text=True, timeout=60
+            # 日本語Windowsのコンソール出力はcp932。UTF-8で復号すると
+            # エラーメッセージ時に UnicodeDecodeError で本来の失敗理由を失う。
+            capture_output=True, text=True,
+            encoding='cp932', errors='replace', timeout=60
         )
     except subprocess.TimeoutExpired:
         print("Error: タイムアウト (60秒)", file=sys.stderr)
