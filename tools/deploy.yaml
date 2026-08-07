@@ -192,6 +192,15 @@ filesystem:
     - host: programs/tests/inv_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/turn_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/rpg_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: programs/tests/save_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/hello_gfx.bin
       guest: /usr/bin/
       tags: [programs]
@@ -296,6 +305,11 @@ filesystem:
     # --- インベントリエンジン マスターデータ (SQLite DB) ---
     - host: assets/items.db
       guest: /db/items.db
+      tags: [data]
+
+    # --- キャラ育成RPGエンジン マスターデータ (SQLite DB) ---
+    - host: assets/rpg.db
+      guest: /db/rpg.db
       tags: [data]
 
     # --- テスト用ファイル ---

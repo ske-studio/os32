@@ -5,7 +5,7 @@
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/fep_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/fep_test.c programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c programs/tests/turn_test.c programs/tests/rpg_test.c programs/tests/save_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -156,6 +156,9 @@ $(eval $(call DEFINE_TEST,btl_test,$$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMAT
 $(eval $(call DEFINE_TEST,board_test,$$(LIBBOARD_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
 $(eval $(call DEFINE_TEST,evt_test,$$(LIBEVENT_OBJ) $$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
 $(eval $(call DEFINE_TEST,inv_test,$$(LIBINV_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
+$(eval $(call DEFINE_TEST,turn_test,$$(LIBTURN_OBJ) $$(LIBMATH_OBJ),))
+$(eval $(call DEFINE_TEST,rpg_test,$$(LIBRPG_OBJ) $$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
+$(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),))
 
 # ---------------------------------------------------------------------------
 #  DEFINE_GFX_APP — GFXアプリ定義テンプレート
@@ -335,7 +338,7 @@ edit: $(CRT0_OBJ) programs/apps/edit.bin
 
 game: $(CRT0_OBJ) programs/apps/game.bin
 
-programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test hello_gfx_rust alloc_demo_rust font_test_rust
+programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test hello_gfx_rust alloc_demo_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
@@ -366,6 +369,7 @@ clean-programs: clean-rust
 .PHONY: chem_test chem_demo map_test map_demo input_test
 .PHONY: asset_test asset_demo ecs_test ecs_demo text_test text_demo
 .PHONY: econ_test ai_test btl_test board_test evt_test inv_test
+.PHONY: turn_test rpg_test save_test
 .PHONY: gfx_demo demo1 spr_test vdpview raster ekakiuta vbzview mdview
 .PHONY: unicode_bin fep_dic
 .PHONY: clean-programs

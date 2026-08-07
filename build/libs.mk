@@ -120,6 +120,18 @@ LIBBATTLE_OBJ = $(libos32battle_OBJ)
 $(eval $(call DEFINE_LIB,libos32board,-Iprograms/libos32db,))
 LIBBOARD_OBJ = $(libos32board_OBJ)
 
+# libos32turn — 手番/週スケジューラ (DB不要)
+$(eval $(call DEFINE_LIB,libos32turn,,))
+LIBTURN_OBJ = $(libos32turn_OBJ)
+
+# libos32rpg — キャラクター育成・状態・リボーン
+$(eval $(call DEFINE_LIB,libos32rpg,-Iprograms/libos32db,))
+LIBRPG_OBJ = $(libos32rpg_OBJ)
+
+# libos32save — セーブデータ管理 (DB不要)
+$(eval $(call DEFINE_LIB,libos32save,,))
+LIBSAVE_OBJ = $(libos32save_OBJ)
+
 # libos32event — イベントスケジューラ
 $(eval $(call DEFINE_LIB,libos32event,-Iprograms/libos32db,))
 LIBEVENT_OBJ = $(libos32event_OBJ)
@@ -186,5 +198,6 @@ clean-libs:
 	rm -f programs/libos32tilemap/*.o
 	rm -f programs/libos32db/*.o programs/libos32snd/*.o
 	rm -f programs/libos32md/*.o programs/libos32filer/*.o
+	rm -f programs/libos32turn/*.o programs/libos32rpg/*.o programs/libos32save/*.o
 
 .PHONY: libs clean-libs
