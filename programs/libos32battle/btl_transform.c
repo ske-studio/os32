@@ -104,7 +104,9 @@ int btl_transform_tick(BtlUnit *unit, BtlTransformState *state)
 /*  btl_transform_release — 変身強制解除                                   */
 /*                                                                          */
 /*  ステータスを変身前の値に復元する。                                       */
-/*  HPは max_hp の縮小に合わせてクランプする (超過分は切り捨て)。            */
+/*  HPは max_hp の縮小に合わせて比率を維持して縮小する。単純クランプだと      */
+/*  変身中に受けたダメージが解除時に帳消しになり、瀕死のまま変身 → 解除で     */
+/*  全快するのと変わらなくなるため。                                         */
 /* ====================================================================== */
 
 void btl_transform_release(BtlUnit *unit, BtlTransformState *state)
@@ -118,10 +120,18 @@ void btl_transform_release(BtlUnit *unit, BtlTransformState *state)
     unit->spd = state->orig_spd;
     unit->mag = state->orig_mag;
 
-    /* max_hp を復元し、HPが超過していたらクランプ */
+    /* HP比率を維持して縮小復元 */
+    if (unit->max_hp > 0) {
+        unit->hp = (i16)((int)unit->hp * (int)state->orig_max_hp / (int)unit->max_hp);
+    }
     unit->max_hp = state->orig_max_hp;
+
+    /* 念のためクランプ */
     if (unit->hp > unit->max_hp) {
         unit->hp = unit->max_hp;
+    }
+    if (unit->hp < 0) {
+        unit->hp = 0;
     }
 
     /* 状態リセット */
