@@ -177,10 +177,17 @@ make deploy-nhd                          /* nhd_deploy.py sync + deploy */
 | ビルド成果物 | ゲストパス | 設定元 |
 |-------------|-----------|--------|
 | `programs/shell.bin` | `/sys/shell.bin` | `config.h: SYS_SHELL_BIN` |
-| `kernel.bin` | (NHDブート領域) | `deploy.yaml: boot.kernel` |
-| `unicode.bin` | `/sys/unicode.bin` | `config.h: SYS_UNICODE_BIN` |
+| `build/out/vmkernel.lz4` | `/boot/vmkernel.lz4` | `deploy.yaml: filesystem.files` |
+| `boot/loader_hdd.bin` | (NHDブート領域 LBA 2-17) | `deploy.yaml: boot.loader` |
+| `build/out/unicode.bin` | `/sys/unicode.bin` | `config.h: SYS_UNICODE_BIN` |
 
 不一致はサイレントに古いバイナリが使われ続ける致命的な問題を引き起こす。
+
+> **`make deploy` (HostDrv) だけでは検証にならない。** HostDrv はゲストの `/host` に
+> しか配置せず、PATH 解決では NHD 側の `/usr/bin` が優先される。プログラム名で
+> 起動すると **NHD 上の古い .bin が黙って実行され、変更が反映されていないのに
+> 「合格」に見える**。ライブラリやテストを変更したときの検証は必ず NHD フルデプロイ
+> (NP21/W 停止 → `make deploy-kernel` → 起動) で行うこと。
 
 ### コマンド実行ルール (WSL環境)
 
@@ -191,7 +198,7 @@ make deploy-nhd                          /* nhd_deploy.py sync + deploy */
 
 ## §5. Git コミットポリシー
 
-> 本セクションは旧 [GIT_POLICY.md](GIT_POLICY.md) の内容を統合したものです。
+> 本セクションは旧 `GIT_POLICY.md` の内容を統合したものです (同ファイルは削除済み)。
 
 ### マイクロコミットの徹底
 
@@ -244,9 +251,11 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 
 1. `make all` でビルドエラーがないことを確認
 2. HostDrv にデプロイ (`hostdrv_deploy.py sync`)
-3. カーネル変更時は NHD に書き込み (`nhd_deploy.py write-kernel` + `deploy`) + NP21/W 再起動
+3. カーネル変更時は NP21/W を停止してから `make deploy-kernel` (HostDrv同期 →
+   HostDrv→ext2同期 → NHDコピー) を実行し、再起動する。
+   ブートローダー自体を変更した場合のみ `make deploy-boot` も実行する
 4. ゲスト側で `hsync` を実行 (HostDrv → ext2 同期)
-5. `ver` コマンドでビルドタイムスタンプを確認
+5. `ver` コマンドでビルドタイムスタンプと API バージョンを確認
 6. 変更対象の機能を手動テスト
 
 自動化ワークフロー (`/build-os32`, `/full-build`, `/deploy-program`) を活用すること。

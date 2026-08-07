@@ -1,4 +1,4 @@
-# KernelAPI v31 仕様書
+# KernelAPI v35 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **31** |
-| 合計エントリ数 | **153** (ヘッダ2 + 関数ポインタ150 + データフィールド1) |
+| 現在のバージョン | **35** |
+| 合計エントリ数 | **168** (ヘッダ2 + 関数ポインタ164 + データフィールド2) |
 
 ---
 
@@ -41,6 +41,33 @@ make programs
 ```
 外部プログラムは `programs/` 以下に `.c` を置き、`make programs` を実行することで、`crt0.asm` や `libos32` (newlib-nanoラッパー) とともにリンクされ、`mkos32x.py` によってヘッダが付与された `.bin` が生成されます。
 
+### §3-1 KernelAPI 関数の追加手順
+
+**`tools/kapi.json` が唯一の情報源 (SSOT)。** 構造体・ラッパー・初期化コード・Rust
+バインディングはすべてここから生成されるので、生成物を直接編集してはならない。
+
+1. `tools/kapi.json` の `api` 配列の**末尾**にエントリを追加する。
+   既存スロットの並べ替え・削除は**禁止** (ビルド済みバイナリの ABI が壊れる)。
+   必要なヘッダは同ファイルの `includes` に、プロトタイプは `externs` に追加する。
+   - `target` — 実体の関数名がエントリ名と異なる場合に指定
+   - `body` — ラッパー本体をインラインで書く場合に指定
+2. `tools/kapi.json` の `"version"` と `include/os32_kapi_shared.h` の
+   `KAPI_VERSION` を**両方**インクリメントする (一致必須)。
+3. 再生成して差分が意図した追加のみであることを確認する:
+   ```bash
+   python3 tools/gen_kapi.py && python3 tools/kapi_rust_gen.py
+   git diff --stat
+   ```
+   生成対象: `include/os32_kapi_generated.h` / `kapi/kapi_generated.c` /
+   `exec/exec_kapi_init.inc` / `programs/rust/os32api/src/kapi_generated.rs`
+4. カーネル側に実体を実装する。
+5. 本仕様書のオフセット表を更新し、新APIに依存するプログラムの
+   `build/app.conf` の要求バージョンを引き上げる。
+
+値を持つフィールド (関数ポインタでないもの) は `data_fields` に追加する。
+ジェネレータは `kapi-><field> = 0;` を出力するだけなので、実際の値は
+`exec/exec.c` の `exec_init()` (または `exec_run()`) で代入すること。
+
 ---
 
 ## §4 KernelAPI 構造体レイアウト
@@ -50,7 +77,7 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 31) |
+| 0x04 | version | APIバージョン (現在: 35) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -212,11 +239,48 @@ make programs
 | 0x258 | db_last_error | `const char *(int handle)` |
 | 0x25C | db_mem_used | `u32(void)` |
 
+### フォント (v32)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x260 | kcg_load_font | `int(const char *path)` |
+
+### デバイス / ループバック / システム情報 (v33)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x264 | ide_get_info | `int(int drv, void *info)` |
+| 0x268 | sys_get_build_info | `void(char *buf, int size)` |
+| 0x26C | loop_attach | `int(const char *path, int slot)` |
+| 0x270 | loop_detach | `void(int slot)` |
+| 0x274 | loop_status | `int(int slot, u32 *total, int *bps)` |
+| 0x278 | dev_blk_read | `int(const char *dev_name, u32 lba, int count, void *buf)` |
+| 0x27C | dev_blk_write | `int(const char *dev_name, u32 lba, int count, const void *buf)` |
+
+### FEP 辞書管理 / ノンブロッキング入力 (v35)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x280 | ime_switch_dict | `int(int variant)` |
+| 0x284 | ime_user_list | `int(const char *yomi_prefix, void *out, int max)` |
+| 0x288 | ime_user_delete | `int(const char *yomi, const char *kanji)` |
+| 0x28C | ime_user_export | `int(const char *path)` |
+| 0x290 | ime_user_clear | `int(void)` |
+| 0x294 | ime_trygetkey | `int(void)` |
+
+`ime_user_list` の `out` は `IME_UserEntry`(`include/os32_kapi_shared.h`) の配列。
+`ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
+FEP 対応版にあたる (エディタ等のメインループから使う)。
+
 ### データフィールド (構造体末尾)
+
+関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
+出力するだけなので、**実際の値は `exec_init()` / `exec_run()` で代入する**。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x260 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x298 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x29C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

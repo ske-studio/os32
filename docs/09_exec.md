@@ -155,6 +155,9 @@ KernelAPIポインタを引数として実行する。
 | libos32chem | `programs/libos32chem/` | 化学シミュレーション |
 | libos32econ | `programs/libos32econ/` | 経済シミュレーション |
 | libos32inv | `programs/libos32inv/` | インベントリ管理 |
-| libtilemap | `programs/libtilemap/` | タイルマップ描画 |
-| libfiler | `programs/libfiler/` | ファイラ共通ライブラリ |
-| libmd | `programs/libmd/` | Markdown パーサーライブラリ |
+| libos32tilemap | `programs/libos32tilemap/` | タイルマップ描画 |
+| libos32filer | `programs/libos32filer/` | ファイラ共通ライブラリ |
+| libos32md | `programs/libos32md/` | Markdown パーサーライブラリ |
+| libos32turn | `programs/libos32turn/` | 手番/週スケジューラ |
+| libos32rpg | `programs/libos32rpg/` | キャラクター育成・状態・リボーン |
+| libos32save | `programs/libos32save/` | セーブデータ管理 |

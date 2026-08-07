@@ -3,7 +3,7 @@
 ### §6-1 VFS (仮想ファイルシステム) レイヤー
 
 vfs.h/vfs.cが提供する統一的なファイル操作API。  
-各FSドライバ(ext2, fat12, iso9660, hostdrv等)をVfsOps関数ポインタテーブルで抽象化し、
+各FSドライバ(ext2, fat (FatFs), iso9660, hostdrv等)をVfsOps関数ポインタテーブルで抽象化し、
 Linuxライクなコマンド体系を実現する。動的マウントに対応し、最大同時マウント数は `VFS_MAX_FS` (8) となる。
 各FSドライバはマルチインスタンス方式 (mount時にctxをkmallocし、umount時にkfree) で複数デバイスの同時マウントをサポートする。
 
@@ -154,10 +154,17 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 | `hostdrvfs_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
 | `hostdrvfs_stat(ctx, path, st)` | ファイル情報取得 |
 
-### §6-8 FAT12 / FatFs
+### §6-8 FAT (FatFs)
 
-- **fat12.c** — PC-98 2HD フロッピー (1024B/セクタ) 用の自作 FAT12 ドライバ。FDDブート時のルートFSとして使用され、サブディレクトリ読取 (`fat12_find_path()`) に対応
-- **fatfs/ + fatfs_vfs.c** — ELM FatFs (elm-chan.org) の移植 + VfsOps 統合ラッパー。ext2_vfs.c と同じマルチインスタンスパターン (FatFsCtx を kmalloc/kfree)
+- **fatfs/ + fatfs_vfs.c** — ELM FatFs (elm-chan.org) の移植 + VfsOps 統合ラッパー。ext2_vfs.c と同じマルチインスタンスパターン (FatFsCtx を kmalloc/kfree)。FDD ブート時のルートFSでもある (`root_fs = "fat"`)
+- FatFs のボリュームは pdrv 0/1 (fd0/fd1) の2つ。`fatfs_vfs_mount` は pdrv 単位の busy フラグで二重マウントを弾く (fd1 の自動マウント試行が fd0 のマウントを壊す経路があったため)
+
+> **自作 FAT12 ドライバ (`fs/fat12.c`, 1,152行) は廃止済み。** FatFs と二重実装で
+> あるうえ、FAT を8セクタに切り詰める (1.44MB で読みはサイレント切断・書きは
+> ボリューム破壊)、`fat12_vfs_write/unlink` が basename しか見ずサブディレクトリに
+> 書けない、といった不具合を抱えていた。FatFs は LFN・FAT16/32・サブディレクトリ
+> 書き込み・rename・mkdir に対応した上位互換であるため一本化した。
+> ホスト側の `tools/mkfat12.py` はイメージ生成ツールとして残っている。
 
 **用途**: `hsync` コマンドによる `/host` → `/` へのファイル同期 (HostDrvデプロイワークフロー) の基盤。
 

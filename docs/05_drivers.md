@@ -266,7 +266,7 @@ libos32math  (依存なし — 最も基底のライブラリ)
      ↑
      ├── libos32gfx   (math + KAPI)
      ├── libos32snd   (math + KAPI)
-     ├── libtilemap   (math + gfx)
+     ├── libos32tilemap (math + gfx)
      └── ゲーム本体    (math + 任意のlib)
 ```
 

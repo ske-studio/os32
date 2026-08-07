@@ -22,7 +22,7 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **KernelAPIの厳密な分離**: `os32_kapi_shared.h` による定義の一元化。
 - **Makefileのモジュール化**: ディレクトリ別のインクルードパス導入による結合度の低下。
 - **lib/ ディレクトリの純化**: ハードウェア・カーネル依存コードの排除。
-- **VFS / FAT12 実装**: FAT12のVFSマウントおよびOS32X実行基盤の安定化。サブディレクトリ読取対応 (`fat12_find_path()`, `list_cluster_chain()`) によりHDD互換パス構造を実現。
+- **VFS / FAT 実装**: FAT のVFSマウントおよびOS32X実行基盤の安定化。当初は自作 `fs/fat12.c` を使用していたが、FatFs と二重実装であり FAT 切り詰め・サブディレクトリ書き込み不能などの不具合を抱えていたため廃止し、FatFs (`fs/fatfs/`) に一本化した。
 - **カーネルとシェルの完全分離**: カーネル内に残存していたシェル機能を完全に切り離し、独立したプログラム `shell.bin` として実装・稼働。
 - **メモリマップ全面再構築 (Phase 1-5)**: メモリ不足・配置不整合や sbrk_heap_limit バグを解消するためのレイアウト再編。プログラム空間の動的確保 (exec_heap) およびスタック・境界のガードページ保護 (GUARD A/B) 導入。
 - **FDリダイレクト・パイプ基盤**: カーネル側に `fd_redirect.c` / `pipe_buffer.c` を実装し、シェルから `>`, `>>`, `<`, `|` 演算子をサポート。
@@ -39,10 +39,16 @@ PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全か
 - **ページフリッピング (400/200ラインモード)**: GDCの表示/アクセスページ分離による完全ティアリングフリー描画。2フレームdirty rect追跡。
 - **CPU速度キャリブレーション**: PITベースのCPU速度測定 (`cpu_calibrate`) と速度非依存タイマー (`cpu_delay_us`)。
 - **CUIファイラ**: TVRAMベースのCUIファイラ (シェル内蔵コマンド + 外部プログラム)。拡張子関連付け。
-- **libpyxel**: Pyxel互換ゲームエンジン (現在は廃止・ソース削除済み。libtilemap 等に知見を継承)。
+- **libpyxel**: Pyxel互換ゲームエンジン (現在は廃止・ソース削除済み。libos32tilemap 等に知見を継承)。
 - **libos32snd**: FM/SSGサウンドライブラリ。BGMシーケンサ、SE再生。
 - **UTF-16LE変換**: HostDrvFS通信用のUTF-8/UTF-16LE相互変換ライブラリ (kutf16)。
 - **HostDrvデプロイワークフロー**: `hostdrv_deploy.py` + `deploy.yaml` によるsudo不要の高速デプロイ。
+- **ループバックブロックデバイス**: `drivers/loop_dev.c` によりディスクイメージをブロックデバイスとしてマウント可能に (`losetup` / `dd`)。デバイスレジストリ `drivers/dev.c` に統合。
+- **TrueTypeフォント基盤**: `kcg_load_font` によるフォント読み込みと microUI (`libos32ui`) の導入。
+- **FEP拡張**: 候補リストウィンドウ (↑↓/数字/ページング)、ユーザ辞書管理API、TVRAMスクロール保護、描画バックエンドの関数ポインタ化。辞書管理コマンド `ime`。
+- **ユーザ空間ライブラリの名称統一**: `libfiler` / `libmd` / `libtilemap` を `libos32*` に統一 (全24ライブラリが `libos32` 接頭辞)。
+- **ビルド成果物の集約**: `kernel.bin` / `sqlite.bin` / `vmkernel.lz4` / `unicode.bin` / `kernel.elf` / `kernel.map` を `build/out/` へ移動 (リポジトリルートを汚さない)。
+- **ゲームエンジン拡張**: `libos32turn` (手番/週スケジューラ) / `libos32rpg` (キャラ育成・状態・リボーン) / `libos32save` (セーブ管理) を追加。各エンジンlibは初期化完了時にDB接続を解放し、固定サイズの SQLite MEMSYS5 プールを枯渇させないようにした。
 
 ---
 

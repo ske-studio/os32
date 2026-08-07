@@ -329,9 +329,9 @@ if (dist_sq < radii * radii) { /* 衝突 */ }
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [05_drivers.md §5-5](../05_drivers.md) | libos32gfx 仕様 (gfx_math.c の記述あり) |
-| [DEVELOPMENT.md](../DEVELOPMENT.md) | 技術仕様ガイド |
-| [POLICY_DEV.md](../POLICY_DEV.md) | コーディング規約 (C89必須等) |
+| [05_drivers.md §5-5](../../05_drivers.md) | libos32gfx 仕様 (gfx_math.c の記述あり) |
+| [DEVELOPMENT.md](../../DEVELOPMENT.md) | 技術仕様ガイド |
+| [POLICY_DEV.md](../../POLICY_DEV.md) | コーディング規約 (C89必須等) |
 
 ---
 

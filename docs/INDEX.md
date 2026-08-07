@@ -25,7 +25,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---------|------|
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v31 仕様書 — 153エントリテーブル (ヘッダ2 + 関数150 + データフィールド1) |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v35 仕様書 — 168エントリテーブル (ヘッダ2 + 関数164 + データフィールド2) + API追加手順 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
@@ -83,8 +83,12 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | ドキュメント | 内容 |
 |-------------|------|
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
-| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP (日本語入力) — 実装状態スナップショット |
+| [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
+| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
+| [tasks/game/GAME_PORT_PLAN.md](tasks/game/GAME_PORT_PLAN.md) | 対戦スゴロクRPG 移植計画 (ステージA/B、Phase 0〜9) |
+| [tasks/game/ENGINE_EXTENSION_PLAN.md](tasks/game/ENGINE_EXTENSION_PLAN.md) | エンジン拡張実装計画 — libos32turn / libos32rpg / libos32save 設計 |
+| [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
 | [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
 | [tasks/libchem/LIBCHEM_DESIGN.md](tasks/libchem/LIBCHEM_DESIGN.md) | libos32chem — 化学エンジンライブラリ設計書 |
@@ -105,16 +109,16 @@ os32/
 ├── boot/             — ブートローダ (NASM + C: boot_main.c, ext2_mini.c, lz4_mini.c)
 ├── kernel/           — カーネルコア (メイン処理、ページング、IDT)
 ├── exec/             — プログラムローダー (OS32X)
-├── fs/               — ファイルシステム (VFS, ext2, fat12, FatFs, iso9660, hostdrvfs, fd_redirect, pipe_buffer)
-├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Mouse, Serial, RTC, FM, KCG, NP2SysPなど)
+├── fs/               — ファイルシステム (VFS, ext2, FatFs, iso9660, hostdrvfs, fd_redirect, pipe_buffer)
+├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Mouse, Serial, RTC, FM, KCG, NP2SysP, loop_dev, dev など)
 ├── gfx/              — グラフィックス (CPU描画用バックバッファ層)
 ├── kapi/             — KernelAPI ラッパー実装 (自動生成分含む)
 ├── lib/              — 汎用ライブラリ (UTF-8, UTF-16, Path, LZ4, SQLite等)
 ├── include/          — 共通ヘッダ群
 ├── programs/         — 外部プログラム
 │   ├── shell/        — システム標準シェル (モジュール構造、ファイラ・スクリプトエンジン内蔵)
-│   ├── apps/         — アプリケーション (edit, vdpview, mdview, vbzview, gfx_demo等)
-│   ├── cmds/         — コマンドラインツール (grep, less, sort等 16種)
+│   ├── apps/         — アプリケーション (edit/, game/, ui_demo/, vdpview, mdview, vbzview, gfx_demo等)
+│   ├── cmds/         — コマンドラインツール (grep, less, sort, ime等 17種)
 │   ├── system/       — システムユーティリティ (hsync, install, cdinst, sndctl等)
 │   ├── tests/        — テスト・デモプログラム (約45種)
 │   ├── rust/         — Rust プログラム (hello_gfx, alloc_demo, math_test_rs) + os32api/os32_math クレート
@@ -131,10 +135,12 @@ os32/
 │   ├── libos32ecs/   — ECSライブラリ
 │   ├── libos32event/ — イベントシステムライブラリ
 │   ├── libos32ai/ libos32battle/ libos32board/ libos32econ/ libos32inv/ — ゲームシステム各種
-│   ├── libtilemap/   — タイルマップ描画エンジン
-│   ├── libfiler/     — ファイラ共通ライブラリ
-│   └── libmd/        — Markdown パーサーライブラリ
-├── build/            — モジュール化 Makefile 群 (config/kernel/programs/deploy/image.mk) + リンカスクリプト
+│   ├── libos32turn/ libos32rpg/ libos32save/ — 手番進行・キャラ育成・セーブ
+│   ├── libos32tilemap/ — タイルマップ描画エンジン
+│   ├── libos32filer/ — ファイラ共通ライブラリ
+│   └── libos32md/    — Markdown パーサーライブラリ
+├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image.mk) + リンカスクリプト
+│   └── out/          — ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map) ※gitignore
 ├── tools/            — ホスト側ツール (デプロイ・イメージ生成・KAPI自動生成)
 ├── assets/           — データアセット (各種DB, FEP辞書, profile等)
 ├── packages/         — 生成された .PKG

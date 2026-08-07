@@ -318,7 +318,7 @@ compose_scroll V-diff      47 ticks ( 470 ms)     ← Phase 5.5b 完了
 
 ## 7. 参考
 
-- [asm_tilemap.asm](../../programs/libtilemap/asm_tilemap.asm) — NASM ルーチン (730行)
-- [tilemap_compose.c](../../programs/libtilemap/tilemap_compose.c) — 差分スクロール実装
+- [asm_tilemap.asm](../../../programs/libos32tilemap/asm_tilemap.asm) — NASM ルーチン (730行)
+- [tilemap_compose.c](../../../programs/libos32tilemap/tilemap_compose.c) — 差分スクロール実装
 - [04_SCROLL_OPT.md](04_SCROLL_OPT.md) — Phase 1〜3 実装記録
 

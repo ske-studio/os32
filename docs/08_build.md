@@ -21,23 +21,27 @@ boot/*.asm      →  nasm (-f bin / -f elf32)  →  boot/*.bin / boot/*.o
 kernel/*.asm    →  nasm (-f elf32)           →  kernel/*.o
 */*.c           →  gcc (-m32 -ffreestanding) →  */*.o
                                                ↓
-*.o + kernel/*.o → ld (-T os32.ld)           → kernel.elf (0x100000〜 + SQLite 0x200000〜)
-kernel.elf      →  objcopy (-O binary)       → kernel.bin (カーネル本体)
-                →  objcopy (--only-section)  → sqlite.bin (SQLite拡張域)
+*.o + kernel/*.o → ld (-T os32.ld)           → build/out/kernel.elf (0x100000〜 + SQLite 0x200000〜)
+                                               (+ build/out/kernel.map)
+kernel.elf      →  objcopy (-O binary)       → build/out/kernel.bin (カーネル本体)
+                →  objcopy (--only-section)  → build/out/sqlite.bin (SQLite拡張域)
                                                ↓
-kernel.bin + sqlite.bin → mkvmkernel.py      → vmkernel.lz4 (LZ4圧縮カーネルイメージ)
+kernel.bin + sqlite.bin → mkvmkernel.py      → build/out/vmkernel.lz4 (LZ4圧縮カーネルイメージ)
+
+※ カーネル関連のビルド成果物はすべて `build/out/` に集約される (`BUILD_OUT`、gitignore対象)。
+  `tools/gen_unicode` の出力 `unicode.bin` も同ディレクトリへ移動される。
 
 === HDD デプロイ ===
 boot_hdd.asm    →  nasm (-f bin)             →  boot_hdd.bin (512B IPL, LBA 0)
 loader_hdd.asm + boot_main.c + ext2_mini.c + lz4_mini.c
                 →  nasm + gcc + ld (-T loader.ld) → loader_hdd.bin (LBA 2-5)
-vmkernel.lz4   →  ext2 FS 内 /VMKRNL.LZ4 に配置 (nhd_deploy.py)
+build/out/vmkernel.lz4 → ext2 FS 内 /boot/vmkernel.lz4 に配置 (nhd_deploy.py)
 
 === FDD デプロイ (FAT12) ===
 boot_fat.asm    →  nasm (-f bin)             →  boot_fat.bin (1024B FAT12 IPL)
 loader_fat_new.asm →  nasm (-f bin)          →  loader_fat_new.bin
 mkfat12.py --tree で FAT12 イメージを構築:
-  /LOADER.BIN = loader_fat_new.bin, /VMKRNL.LZ4 = vmkernel.lz4,
+  /LOADER.BIN = loader_fat_new.bin, /VMKRNL.LZ4 = build/out/vmkernel.lz4,
   /sys/*.bin + /bin/*.bin (FDD_MIN_CMDS) を配置
                                              ↓
                                     images/os32_boot.d88 および .img
@@ -57,15 +61,16 @@ programs/*.c    → gcc -m32                   → programs/*.o
 os32/
 ├── boot/           ブートローダー (16bit/32bit ASM + C)
 ├── kernel/         カーネルコア・メモリ等・割り込みルーチン群
-├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, atapi, kcg, mouse, np2sysp 等)
+├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, atapi, kcg, mouse, np2sysp, loop_dev, dev 等)
 ├── gfx/            グラフィック描画機能
-├── fs/             ファイルシステム (vfs, ext2, fat12, fatfs, iso9660, hostdrv 等)
+├── fs/             ファイルシステム (vfs, ext2, fatfs, iso9660, hostdrv 等)
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
 ├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
 ├── include/        システム統合用共通ヘッダ群
 ├── programs/       外部プログラム実装ソース群 (shell/, cmds/, apps/, system/, tests/, lib*/, rust/)
-├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, deploy.mk, image.mk 等) + リンカスクリプト
+├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, libs.mk, deploy.mk, image.mk 等) + リンカスクリプト
+│   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)
 ├── assets/         データアセット (DB, 辞書, profile 等)
 ├── tests/          テストスクリプト
 ├── tools/          ホスト上でのイメージ生成・デプロイツール
