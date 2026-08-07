@@ -24,7 +24,7 @@ int vz_kbhit(void) {
     }
 
     /* 2. 物理キーボード（キーコードデータ形式で取得） */
-    c = kapi->kbd_trygetkey();
+    c = kapi->ime_trygetkey();
     if (c != -1) {
         kb_buf = c;
         return 1;
