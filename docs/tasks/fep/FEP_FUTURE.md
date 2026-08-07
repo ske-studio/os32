@@ -1,7 +1,10 @@
 # FEP 今後の改善・拡張タスク
 
 FEP の残存タスクと将来拡張の計画。
-現在の実装状態は [FEP_STATUS.md](FEP_STATUS.md) を参照。
+現在の実装状態は [FEP_STATUS.md](../_archived/fep/FEP_STATUS.md) を参照。
+本タスク群の**実装レベル詳細設計**は [00_INDEX.md](00_INDEX.md) を起点とする
+フェーズ別設計書群にまとめている (データ構造変更・関数シグネチャ・アルゴリズム・
+フェーズ計画・テスト項目)。
 
 ---
 
@@ -50,10 +53,10 @@ FEP の残存タスクと将来拡張の計画。
 現在の IME API はカーネル内部関数のみ。
 外部プログラムから IME を制御するための KAPI 公開:
 
-- [ ] **`ime_enable` / `ime_disable`** — FEP の有効/無効切り替え
-- [ ] **`ime_get_mode`** — 現在のモード取得 (OFF/HIRAGANA/KATAKANA)
-- [ ] **`ime_set_mode`** — モード設定
-- [ ] `kapi.json` への追加 + `kapi_generated.c` 再生成
+- [x] **`ime_enable` / `ime_disable`** — FEP の有効/無効切り替え (ime_set_mode等で代替完了)
+- [x] **`ime_get_mode`** — 現在のモード取得 (OFF/HIRAGANA/KATAKANA)
+- [x] **`ime_set_mode`** — モード設定
+- [x] `kapi.json` への追加 + `kapi_generated.c` 再生成
 
 用途: VZ エディタ等がプログラム的に FEP を制御するケース。
 
