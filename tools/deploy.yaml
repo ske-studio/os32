@@ -293,8 +293,13 @@ filesystem:
       tags: [data]
 
     # --- ボードエンジン マスターデータ (SQLite DB) ---
+    # board.db は実ゲームマップ (170マス/9区画)。board_test は固定盤面を
+    # 前提とするため、テスト用の board_test.db を別に配置する。
     - host: assets/board.db
       guest: /db/board.db
+      tags: [data]
+    - host: assets/board_test.db
+      guest: /db/board_test.db
       tags: [data]
 
     # --- イベントスケジューラ マスターデータ (SQLite DB) ---

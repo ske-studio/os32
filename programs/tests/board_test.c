@@ -70,11 +70,11 @@ static void test_db_load(void)
 
     header("Test 2: DB Load");
 
-    rc = board_init("/host/assets/board.db");
+    rc = board_init("/db/board_test.db");
     if (rc < 0) {
         api->kprintf(ATTR_YELLOW,
             "  [SKIP] board_init returned %d "
-            "(is board.db deployed?)\n", rc);
+            "(is board_test.db deployed?)\n", rc);
         return;
     }
     check("board_init(board.db)", rc == 0);
@@ -126,7 +126,7 @@ static void test_connections(void)
 
     header("Test 3: Connections");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* マス1の接続取得 */
     count = board_get_connections(1, conns, 8);
@@ -188,7 +188,7 @@ static void test_flags(void)
 {
     header("Test 5: Flags");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* 初期状態: フラグなし */
     check("mass1 no blocked", !board_has_flag(1, BOARD_FLAG_BLOCKED));
@@ -224,7 +224,7 @@ static void test_traps(void)
 {
     header("Test 6: Traps");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* 初期状態: 罠なし */
     check_eq("mass1 trap_owner=0xFF", (int)board_get_trap_owner(1), 0xFF);
@@ -254,7 +254,7 @@ static void test_walk(void)
 
     header("Test 7: Walk");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* マス0から1歩 → マス1 */
     dest = board_walk(0, 1, &remaining);
@@ -295,7 +295,7 @@ static void test_peek_path(void)
 
     header("Test 8: Peek Path");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* マス0の方向0 (→マス1) から先読み */
     count = board_peek_path(0, 0, path, 8);
@@ -333,7 +333,7 @@ static void test_distance(void)
 
     header("Test 9: BFS Distance");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* 自分自身 */
     d = board_distance(0, 0);
@@ -378,7 +378,7 @@ static void test_areas(void)
 
     header("Test 10: Area Management");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* 区画0: 初期解放 */
     check("area0 unlocked", board_is_area_unlocked(0));
@@ -414,7 +414,7 @@ static void test_reset(void)
 {
     header("Test 11: Reset");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* フラグを変更 */
     board_set_flag(1, BOARD_FLAG_BLOCKED);
@@ -455,7 +455,7 @@ static void test_dynamic(void)
 
     header("Test 12: Dynamic Mass Ops");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* マス追加 */
     memset(&new_mass, 0, sizeof(new_mass));
@@ -532,7 +532,7 @@ static void test_cost_path(void)
 
     header("Test 13: Cost Path (Dijkstra)");
 
-    board_init("/host/assets/board.db");
+    board_init("/db/board_test.db");
 
     /* 自分自身 → コスト0 */
     cost = board_distance_cost(20, 20);

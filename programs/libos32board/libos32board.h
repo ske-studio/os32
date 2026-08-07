@@ -27,7 +27,7 @@
 #define BOARD_CONNECT_NONE  0xFFFF
 
 /* 区画上限 */
-#define BOARD_MAX_AREAS     8
+#define BOARD_MAX_AREAS     16
 
 /* マスフラグ */
 #define BOARD_FLAG_NONE     0x00
