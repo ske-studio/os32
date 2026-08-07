@@ -16,6 +16,10 @@ int os32_sqlite_test(void);
 /* 戻り値: 0=正常, -1=前方破壊, -2=後方破壊 */
 int memsys5_check_canary(void);
 
+/* DB接続の main ファイルが使う OS32 VFS fd を返す (失敗時 -1) */
+/* 引数は sqlite3* (ヘッダ依存を避けるため void* で受ける) */
+int os32_sqlite_db_fd(void *db);
+
 /* VFS メソッドテーブルアドレスダンプ (デバッグ用) */
 void os32_sqlite_dump_vfs(void);
 

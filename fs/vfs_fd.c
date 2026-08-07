@@ -43,6 +43,7 @@ typedef struct {
     int mode;
     VfsOps *ops;
     void *fs_ctx;       /* FSドライバ固有のインスタンスコンテキスト */
+    int protect;        /* 1=カーネル常駐FD (exec_exitの自動クローズ対象外) */
 } VfsFile;
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
@@ -106,6 +107,7 @@ int vfs_open(const char *path, int mode)
     open_files[fd].mode = mode;
     open_files[fd].ops = ops;
     open_files[fd].fs_ctx = fs_ctx;
+    open_files[fd].protect = 0;
 
     return fd;
 }
@@ -115,7 +117,25 @@ void vfs_close(int fd)
     if (fd >= 0 && fd < VFS_MAX_OPEN_FILES) {
         open_files[fd].in_use = 0;
         open_files[fd].fs_ctx = (void *)0;
+        open_files[fd].protect = 0;
     }
+}
+
+/* カーネル常駐FDの保護フラグ設定 (FEP辞書など、exec_exit の
+ * FD一括クローズから除外したいFDに使用する) */
+int vfs_fd_set_protect(int fd, int on)
+{
+    if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
+    if (!open_files[fd].in_use) return VFS_ERR_INVAL;
+    open_files[fd].protect = on ? 1 : 0;
+    return VFS_OK;
+}
+
+int vfs_fd_is_protected(int fd)
+{
+    if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return 0;
+    if (!open_files[fd].in_use) return 0;
+    return open_files[fd].protect;
 }
 
 int vfs_read_fd(int fd, void *buf, u32 size)

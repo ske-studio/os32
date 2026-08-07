@@ -22,7 +22,10 @@
  * 一時的に 400KB へ拡張していたが、エンジンlib (board/battle/econ/inv) が
  * 起動時のRAMキャッシュ読込後もDB接続を握りっぱなしにしていたのが原因で、
  * 各libが init 完了時に db_close するよう修正して同時接続を1本に戻した。
- * よって拡張前の 200KB に復帰する。 */
+ * よって拡張前の 200KB に復帰する。
+ * 注: FEP候補ゼロ問題 (2026-08-07解決) はプール枯渇ではなく、exec_exit の
+ * FD一括クローズが FEP辞書の fd を回収していたのが原因 (vfs_fd_set_protect
+ * で保護)。FEP常駐接続 + 一時接続1本は 200KB で動作確認済み。 */
 #define SQLITE_MEMSYS5_SIZE  (200 * 1024)
 #define CANARY_VALUE 0xDEADBEEFUL
 static u32 canary_before[4] = {
@@ -168,6 +171,21 @@ static const sqlite3_io_methods os32_io_methods = {
     /* v2, v3 メソッドは NULL */
     0, 0, 0, 0, 0
 };
+
+/* DB接続の main ファイルが使う OS32 VFS fd を返す (失敗時 -1)。
+ * FEP辞書などカーネル常駐接続の fd を exec_exit の自動クローズから
+ * 保護する (vfs_fd_set_protect) ために使用する。 */
+int os32_sqlite_db_fd(void *db)
+{
+    sqlite3_file *pf = (sqlite3_file *)0;
+    if (sqlite3_file_control((sqlite3 *)db, "main",
+                             SQLITE_FCNTL_FILE_POINTER, &pf)
+            != SQLITE_OK || !pf) {
+        return -1;
+    }
+    if (pf->pMethods != &os32_io_methods) return -1;
+    return ((Os32File *)pf)->fd;
+}
 
 /* ======================================================================== */
 /*  VFS メソッド                                                             */

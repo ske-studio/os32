@@ -633,8 +633,21 @@ int ime_is_active(void)
 
 void ime_set_mode(int mode)
 {
+    /* FEP ON 時は辞書を遅延オープンする (ime_toggle と同じ)。
+     * これを欠くと dict->db が NULL のまま ime_dict_search が常に
+     * 0 件を返し、変換がかな確定にフォールバックする。 */
+    if (mode != IME_MODE_OFF && !g_ime.dict_loaded) {
+        if (ime_dict_open(&g_ime.dict, IME_DICT_PATH) == 0) {
+            g_ime.dict_loaded = 1;
+        } else {
+            kprintf(ATTR_RED, "IME: Dict load failed, FEP disabled\r\n");
+            return;
+        }
+    }
     g_ime.mode = mode;
     if (mode != IME_MODE_OFF) {
+        g_ime.state = IME_ST_INPUT;
+        g_ime.converting = 0;
         tvram_set_scroll_reserve(1);
         preedit_draw();
     } else {

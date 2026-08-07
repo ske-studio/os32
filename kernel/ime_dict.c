@@ -16,6 +16,18 @@
 #include "kprintf.h"
 #include "kstring.h"
 #include "os32_kapi_shared.h"
+#include "os32_sqlite_vfs.h"
+
+/* FEP辞書はカーネル常駐の接続なので、基底の VFS fd を exec_exit の
+ * FD一括クローズから保護する。これを欠くと外部プログラム (ime.bin 等)
+ * の終了時に fd が回収され、以後の検索が全て SQLITE_IOERR になる。 */
+static void dict_fd_protect(IME_Dict *dict, int on)
+{
+    int fd;
+    if (!dict || !dict->db) return;
+    fd = os32_sqlite_db_fd(dict->db);
+    if (fd >= 0) vfs_fd_set_protect(fd, on);
+}
 
 /* プリペアドステートメントのSQL */
 static const char SQL_EXACT[] =
@@ -110,6 +122,9 @@ int ime_dict_open(IME_Dict *dict, const char *path)
         dict->learn_stmt = (void *)0;
     }
 
+    /* 常駐接続の fd を exec クリーンアップから保護 */
+    dict_fd_protect(dict, 1);
+
     kprintf(ATTR_GREEN, "IME: Dict loaded (SQLite): %s\r\n", path);
     return 0;
 }
@@ -149,7 +164,10 @@ int ime_dict_search(IME_Dict *dict, const char *yomi,
 
     /* 結果取得ループ */
     count = 0;
-    while (count < max_results && sqlite3_step(stmt) == SQLITE_ROW) {
+    {
+        int step_rc;
+        while (count < max_results &&
+               (step_rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         IME_Result *r = &results[count];
 
         /* 漢字 (カラム0) */
@@ -177,6 +195,17 @@ int ime_dict_search(IME_Dict *dict, const char *yomi,
         }
 
         count++;
+        }
+
+        /* 診断: step がエラーで終わった場合のみ表示 (SQLITE_DONE は正常) */
+        if (count == 0 && step_rc != SQLITE_DONE) {
+            kprintf(ATTR_RED,
+                    "IME: search 0hit len=%d chars=%d step=%d err=%d ext=%d %s\r\n",
+                    yomi_len, yomi_chars, step_rc,
+                    sqlite3_errcode((sqlite3 *)dict->db),
+                    sqlite3_extended_errcode((sqlite3 *)dict->db),
+                    sqlite3_errmsg((sqlite3 *)dict->db));
+        }
     }
 
     return count;
@@ -207,6 +236,8 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
 static void ime_dict_close(IME_Dict *dict)
 {
     if (!dict || !dict->db) return;
+    /* 保護を解除してから閉じる (fd スロット再利用に備える) */
+    dict_fd_protect(dict, 0);
     if (dict->exact_stmt) {
         sqlite3_finalize((sqlite3_stmt *)dict->exact_stmt);
         dict->exact_stmt = NULL;

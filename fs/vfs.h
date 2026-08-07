@@ -126,6 +126,8 @@ int  vfs_seek(int fd, int offset, int whence);
 int  vfs_tell(int fd);
 u32  vfs_get_size(int fd);
 int  vfs_isatty(int fd);
+int  vfs_fd_set_protect(int fd, int on);
+int  vfs_fd_is_protected(int fd);
 
 /* ファイル情報 */
 int  vfs_stat(const char *path, OS32_Stat *buf);

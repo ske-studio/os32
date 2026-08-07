@@ -93,10 +93,13 @@ void exec_exit(int status)
         fd_redirect_reset(1);
         fd_redirect_reset(2);
 
-        /* (2) FD自動クローズ (FD 3以上の全オープンファイル) */
+        /* (2) FD自動クローズ (FD 3以上の全オープンファイル)
+         * ただしカーネル常駐FD (FEP辞書のSQLite接続など、
+         * vfs_fd_set_protect で保護されたFD) は回収しない。 */
         {
             int fd;
             for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+                if (vfs_fd_is_protected(fd)) continue;
                 vfs_close(fd);
             }
         }
