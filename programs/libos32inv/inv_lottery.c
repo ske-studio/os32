@@ -12,7 +12,8 @@ extern KernelAPI *kapi;
 #define api kapi
 
 /* 外部参照 (inv_core.c) */
-extern db_handle_t inv__get_db(void);
+const InvLotteryEntry *inv__get_lotteries(void);
+int                    inv__lottery_count(void);
 
 /* ====================================================================== */
 /*  内部: 簡易乱数 (LFSR16)                                                */
@@ -35,8 +36,8 @@ static u16 lottery_rand(void)
 
 u16 inv_lottery(u8 table_type, u8 stage)
 {
-    db_handle_t db;
-    int rc;
+    const InvLotteryEntry *lotteries;
+    int total_count;
     u16 items[64];
     u16 weights[64];
     int count = 0;
@@ -45,53 +46,16 @@ u16 inv_lottery(u8 table_type, u8 stage)
     u32 accum;
     int i;
 
-    /* SQLクエリ構築 */
-    char sql[160];
-    char *p = sql;
-    const char *prefix =
-        "SELECT item_id, weight FROM lottery_tables "
-        "WHERE table_type=";
-    const char *mid = " AND min_stage<=";
-    char digits[4];
-    int di;
-    int val;
+    lotteries = inv__get_lotteries();
+    total_count = inv__lottery_count();
 
-    db = inv__get_db();
-    if (db < 0) return 0;
-
-    while (*prefix) { *p++ = *prefix++; }
-
-    val = table_type;
-    di = 0;
-    if (val == 0) {
-        digits[di++] = '0';
-    } else {
-        while (val > 0) { digits[di++] = '0' + (char)(val % 10); val /= 10; }
-    }
-    while (di > 0) { *p++ = digits[--di]; }
-
-    while (*mid) { *p++ = *mid++; }
-
-    val = stage;
-    di = 0;
-    if (val == 0) {
-        digits[di++] = '0';
-    } else {
-        while (val > 0) { digits[di++] = '0' + (char)(val % 10); val /= 10; }
-    }
-    while (di > 0) { *p++ = digits[--di]; }
-
-    *p = '\0';
-
-    rc = db_query(db, sql);
-    if (rc < 0) return 0;
-
-    while (rc == DB_STATUS_ROW && count < 64) {
-        items[count]   = (u16)db_column_int(0);
-        weights[count] = (u16)db_column_int(1);
-        total_weight += weights[count];
-        count++;
-        rc = db_step(db);
+    for (i = 0; i < total_count && count < 64; i++) {
+        if (lotteries[i].table_type == table_type && lotteries[i].min_stage <= stage) {
+            items[count]   = lotteries[i].item_id;
+            weights[count] = lotteries[i].weight;
+            total_weight += lotteries[i].weight;
+            count++;
+        }
     }
 
     if (count == 0 || total_weight == 0) return 0;

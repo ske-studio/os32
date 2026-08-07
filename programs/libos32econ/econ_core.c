@@ -168,7 +168,8 @@ u16 econ__curve_lookup(u8 curve_type, u8 index)
 
 static int load_items(void)
 {
-    return DB_LOAD_TABLE(g_econ_db,
+    int rc;
+    rc = DB_LOAD_TABLE(g_econ_db,
         "SELECT id, base_price, category, rarity, weight, "
         "curve_type, season_amp, diplo_weight, elasticity, flags "
         "FROM items ORDER BY id",
@@ -185,6 +186,10 @@ static int load_items(void)
             row->elasticity  = (u8)db_column_int(8);
             row->flags       = (u8)db_column_int(9);
         });
+    if (rc < 0) {
+        api->kprintf(0x04, "[ECON] load_items failed. rc=%d, db_errmsg=%s\n", rc, db_errmsg());
+    }
+    return rc;
 }
 
 /* ====================================================================== */
@@ -511,6 +516,12 @@ int econ_init(const char *db_path)
 
     /* 不動産サブシステム初期化 (オプショナル) */
     econ_estate_init();
+
+    /* 起動時RAMキャッシュ完了につきDB接続を即時クローズ */
+    if (g_econ_db >= 0) {
+        db_close(g_econ_db);
+        g_econ_db = -1;
+    }
 
     return 0;
 }

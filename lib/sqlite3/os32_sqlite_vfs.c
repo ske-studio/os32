@@ -18,8 +18,12 @@
 #include "kstring.h"
 #include "kprintf.h"
 
-/* ======== MEMSYS5 固定プール (400KB) + canary ======== */
-#define SQLITE_MEMSYS5_SIZE  (400 * 1024)
+/* ======== MEMSYS5 固定プール (200KB) + canary ========
+ * 一時的に 400KB へ拡張していたが、エンジンlib (board/battle/econ/inv) が
+ * 起動時のRAMキャッシュ読込後もDB接続を握りっぱなしにしていたのが原因で、
+ * 各libが init 完了時に db_close するよう修正して同時接続を1本に戻した。
+ * よって拡張前の 200KB に復帰する。 */
+#define SQLITE_MEMSYS5_SIZE  (200 * 1024)
 #define CANARY_VALUE 0xDEADBEEFUL
 static u32 canary_before[4] = {
     CANARY_VALUE, CANARY_VALUE, CANARY_VALUE, CANARY_VALUE

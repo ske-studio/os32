@@ -22,6 +22,8 @@
 #define INV_MASTER_MAX     128   /* アイテムマスター上限 */
 #define INV_RECIPE_MAX      64   /* 合成レシピ上限 */
 #define INV_SET_BONUS_MAX   32   /* セットボーナス定義上限 */
+#define INV_SHOP_LINEUP_MAX 128  /* ショップ品揃え定義上限 */
+#define INV_LOTTERY_MAX     128  /* 抽選テーブル定義上限 */
 
 /* ====================================================================== */
 /*  2. 装備スロット種別                                                    */
@@ -115,6 +117,21 @@ typedef struct {
     u16  _pad2;
 } InvSetBonus;            /* 8B × 32 = 256B */
 
+/* ショップ品揃えキャッシュ用構造体 */
+typedef struct {
+    u8   shop_type;       /* ショップ種類 (0=装備屋, 1=道具屋など) */
+    u8   stage;           /* 登場ステージ */
+    u16  item_id;         /* アイテムID */
+} InvShopLineup;          /* 4B × 128 = 512B */
+
+/* 抽選テーブルキャッシュ用構造体 */
+typedef struct {
+    u8   table_type;      /* 抽選テーブル種類 (0=宝箱, 1=敵ドロップなど) */
+    u8   min_stage;       /* 最低ステージ */
+    u16  item_id;         /* アイテムID */
+    u16  weight;          /* 抽選重み */
+} InvLotteryEntry;        /* 6B × 128 = 768B */
+
 /* ====================================================================== */
 /*  6. ポリシーコールバック型                                              */
 /* ====================================================================== */
@@ -132,6 +149,12 @@ void inv_shutdown(void);
 /* マスターデータ参照 */
 const InvItemDef *inv_get_def(u16 item_id);
 int  inv_master_count(void);
+
+/* キャッシュ参照アクセサ */
+const InvShopLineup *inv__get_shop_lineups(void);
+int inv__shop_lineup_count(void);
+const InvLotteryEntry *inv__get_lotteries(void);
+int inv__lottery_count(void);
 
 /* ====================================================================== */
 /*  8. API — インベントリ操作 (inv_bag.c)                                  */

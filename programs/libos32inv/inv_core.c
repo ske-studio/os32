@@ -25,6 +25,10 @@ static InvRecipe   g_recipes[INV_RECIPE_MAX];
 static int         g_recipe_count;
 static InvSetBonus g_set_bonuses[INV_SET_BONUS_MAX];
 static int         g_set_bonus_count;
+static InvShopLineup g_shop_lineups[INV_SHOP_LINEUP_MAX];
+static int         g_shop_lineup_count;
+static InvLotteryEntry g_lotteries[INV_LOTTERY_MAX];
+static int         g_lottery_count;
 static db_handle_t g_inv_db = -1;
 
 /* 装備ポリシーコールバック */
@@ -40,7 +44,10 @@ InvRecipe  *inv__get_recipes(void)    { return g_recipes; }
 int         inv__recipe_count(void)   { return g_recipe_count; }
 InvSetBonus *inv__get_set_bonuses(void) { return g_set_bonuses; }
 int         inv__set_bonus_count(void){ return g_set_bonus_count; }
-db_handle_t inv__get_db(void)         { return g_inv_db; }
+const InvShopLineup *inv__get_shop_lineups(void) { return g_shop_lineups; }
+int         inv__shop_lineup_count(void) { return g_shop_lineup_count; }
+const InvLotteryEntry *inv__get_lotteries(void)  { return g_lotteries; }
+int         inv__lottery_count(void)    { return g_lottery_count; }
 
 inv_equip_check_fn inv__get_equip_policy(void) { return g_equip_policy; }
 
@@ -138,6 +145,37 @@ static int load_set_bonuses(void)
 }
 
 /* ====================================================================== */
+/*  DB読み込み: ショップ品揃え・抽選テーブル                               */
+/* ====================================================================== */
+
+static int load_shop_lineup(void)
+{
+    return DB_LOAD_TABLE_OPT(g_inv_db,
+        "SELECT shop_type, stage, item_id FROM shop_lineup "
+        "ORDER BY shop_type, stage, item_id",
+        g_shop_lineups, INV_SHOP_LINEUP_MAX, g_shop_lineup_count,
+        {
+            row->shop_type = (u8)db_column_int(0);
+            row->stage     = (u8)db_column_int(1);
+            row->item_id   = (u16)db_column_int(2);
+        });
+}
+
+static int load_lotteries(void)
+{
+    return DB_LOAD_TABLE_OPT(g_inv_db,
+        "SELECT table_type, item_id, weight, min_stage FROM lottery_tables "
+        "ORDER BY table_type, item_id",
+        g_lotteries, INV_LOTTERY_MAX, g_lottery_count,
+        {
+            row->table_type = (u8)db_column_int(0);
+            row->item_id    = (u16)db_column_int(1);
+            row->weight     = (u16)db_column_int(2);
+            row->min_stage  = (u8)db_column_int(3);
+        });
+}
+
+/* ====================================================================== */
 /*  公開API: システム管理                                                   */
 /* ====================================================================== */
 
@@ -154,9 +192,13 @@ int inv_init(const char *db_path)
     memset(g_masters, 0, sizeof(g_masters));
     memset(g_recipes, 0, sizeof(g_recipes));
     memset(g_set_bonuses, 0, sizeof(g_set_bonuses));
+    memset(g_shop_lineups, 0, sizeof(g_shop_lineups));
+    memset(g_lotteries, 0, sizeof(g_lotteries));
     g_master_count = 0;
     g_recipe_count = 0;
     g_set_bonus_count = 0;
+    g_shop_lineup_count = 0;
+    g_lottery_count = 0;
     g_equip_policy = (inv_equip_check_fn)0;
 
     /* DB接続 */
@@ -173,6 +215,14 @@ int inv_init(const char *db_path)
     /* セットボーナス読み込み (テーブルがなくてもエラーではない) */
     load_set_bonuses();
 
+    /* ショップ品揃え・抽選テーブルのロード */
+    load_shop_lineup();
+    load_lotteries();
+
+    /* ロード完了につきDB接続を即時クローズ */
+    db_close(g_inv_db);
+    g_inv_db = -1;
+
     return 0;
 }
 
@@ -185,6 +235,10 @@ void inv_shutdown(void)
     g_master_count = 0;
     g_recipe_count = 0;
     g_set_bonus_count = 0;
+    g_shop_lineup_count = 0;
+    g_lottery_count = 0;
+    memset(g_shop_lineups, 0, sizeof(g_shop_lineups));
+    memset(g_lotteries, 0, sizeof(g_lotteries));
     g_equip_policy = (inv_equip_check_fn)0;
 }
 

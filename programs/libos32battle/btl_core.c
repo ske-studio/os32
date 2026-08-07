@@ -118,6 +118,10 @@ int btl_init(const char *db_path)
                 row->tick_damage = (i16)db_column_int(2);
                 row->prevents_action = (u8)db_column_int(3);
             });
+
+        /* 起動時RAMキャッシュ完了につきDB接続を即時クローズ */
+        db_close(h);
+        g_db_slot = -1;
     }
 
     g_initialized = 1;
