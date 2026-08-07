@@ -642,8 +642,10 @@ static void test_transform(void)
     check_eq("restored spd=20", (int)unit.spd, 20);
     check_eq("restored mag=15", (int)unit.mag, 15);
     check_eq("restored max_hp=100", (int)unit.max_hp, 100);
-    /* HP: 変身中に240だったが max_hp=100 にクランプ */
-    check_eq("hp clamped=100", (int)unit.hp, 100);
+    /* HP: 変身時に 80 → 240 (比率80%を維持して拡大) したので、
+     * 解除時も比率を維持して 240 * 100 / 300 = 80 に戻る。
+     * 単純クランプ(=100)にすると変身→解除するだけで全快してしまう。 */
+    check_eq("hp restored=80", (int)unit.hp, 80);
 
     /* 強制解除テスト */
     memset(&state, 0, sizeof(state));
