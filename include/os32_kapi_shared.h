@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      34   /* shm_base 追加 (DB結果SHMアドレスのハードコード廃止) */
+#define KAPI_VERSION      35   /* IME 辞書管理API + ime_trygetkey 追加 */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -316,6 +316,23 @@ typedef struct {
 
 /* パイプバッファの容量 */
 #define PIPE_BUF_SIZE   (64 * 1024)
+
+/* ======================================================================== */
+/*  FEP モード定数と構造体                                                   */
+/*                                                                          */
+/*  ユーザ空間 (ime コマンド等) とカーネルの双方が参照するため、             */
+/*  kernel/ime.h ではなく共有ヘッダに置く。                                  */
+/* ======================================================================== */
+#define IME_MODE_OFF       0   /* FEP無効 (直接入力) */
+#define IME_MODE_HIRAGANA  1   /* ひらがな入力 */
+#define IME_MODE_KATAKANA  2   /* カタカナ入力 */
+
+/* ユーザ辞書エントリ (kapi ime_user_list が void* で返す実体) */
+typedef struct {
+    char yomi[32];      /* 読み (UTF-8, ヌル終端) */
+    char kanji[32];     /* 漢字/表層形 (UTF-8, ヌル終端) */
+    int  freq;          /* 変換頻度 */
+} IME_UserEntry;
 
 /* 自動生成された APIテーブルを、全ての構造体が定義された後でインクルード */
 #include "os32_kapi_generated.h"

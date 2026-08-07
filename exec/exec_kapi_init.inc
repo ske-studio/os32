@@ -156,9 +156,15 @@ extern void __cdecl wrap_loop_detach(int slot);
 extern int __cdecl wrap_loop_status(int slot, u32 *total, int *bps);
 extern int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf);
 extern int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf);
+extern int __cdecl wrap_ime_switch_dict(int variant);
+extern int __cdecl wrap_ime_user_list(const char *yomi_prefix, void *out, int max);
+extern int __cdecl wrap_ime_user_delete(const char *yomi, const char *kanji);
+extern int __cdecl wrap_ime_user_export(const char *path);
+extern int __cdecl wrap_ime_user_clear(void);
+extern int __cdecl wrap_ime_trygetkey(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 34;
+kapi->version = 35;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -318,5 +324,11 @@ kapi->version = 34;
     kapi->loop_status = wrap_loop_status;
     kapi->dev_blk_read = wrap_dev_blk_read;
     kapi->dev_blk_write = wrap_dev_blk_write;
+    kapi->ime_switch_dict = wrap_ime_switch_dict;
+    kapi->ime_user_list = wrap_ime_user_list;
+    kapi->ime_user_delete = wrap_ime_user_delete;
+    kapi->ime_user_export = wrap_ime_user_export;
+    kapi->ime_user_clear = wrap_ime_user_clear;
+    kapi->ime_trygetkey = wrap_ime_trygetkey;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

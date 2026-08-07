@@ -163,6 +163,12 @@ typedef struct {
     int (__cdecl *loop_status)(int slot, u32 *total, int *bps);
     int (__cdecl *dev_blk_read)(const char *dev_name, u32 lba, int count, void *buf);
     int (__cdecl *dev_blk_write)(const char *dev_name, u32 lba, int count, const void *buf);
+    int (__cdecl *ime_switch_dict)(int variant);
+    int (__cdecl *ime_user_list)(const char *yomi_prefix, void *out, int max);
+    int (__cdecl *ime_user_delete)(const char *yomi, const char *kanji);
+    int (__cdecl *ime_user_export)(const char *path);
+    int (__cdecl *ime_user_clear)(void);
+    int (__cdecl *ime_trygetkey)(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;

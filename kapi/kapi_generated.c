@@ -820,3 +820,33 @@ int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const v
     { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }
 }
 
+int __cdecl wrap_ime_switch_dict(int variant)
+{
+    return ime_switch_dict(variant);
+}
+
+int __cdecl wrap_ime_user_list(const char *yomi_prefix, void *out, int max)
+{
+    return ime_user_list_facade(yomi_prefix, out, max);
+}
+
+int __cdecl wrap_ime_user_delete(const char *yomi, const char *kanji)
+{
+    return ime_user_delete_facade(yomi, kanji);
+}
+
+int __cdecl wrap_ime_user_export(const char *path)
+{
+    return ime_user_export_facade(path);
+}
+
+int __cdecl wrap_ime_user_clear(void)
+{
+    return ime_user_clear_facade();
+}
+
+int __cdecl wrap_ime_trygetkey(void)
+{
+    return ime_trygetkey();
+}
+

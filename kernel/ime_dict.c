@@ -11,6 +11,7 @@
 
 #include "ime.h"
 #include "sqlite3.h"
+#include "vfs.h"
 #include "utf8.h"
 #include "kprintf.h"
 #include "kstring.h"
@@ -200,4 +201,189 @@ void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji)
     if (rc != SQLITE_DONE) {
         kprintf(ATTR_RED, "IME: Learn failed (rc=%d)\r\n", rc);
     }
+}
+
+/* 辞書クローズ内部関数 */
+static void ime_dict_close(IME_Dict *dict)
+{
+    if (!dict || !dict->db) return;
+    if (dict->exact_stmt) {
+        sqlite3_finalize((sqlite3_stmt *)dict->exact_stmt);
+        dict->exact_stmt = NULL;
+    }
+    if (dict->prefix_stmt) {
+        sqlite3_finalize((sqlite3_stmt *)dict->prefix_stmt);
+        dict->prefix_stmt = NULL;
+    }
+    if (dict->learn_stmt) {
+        sqlite3_finalize((sqlite3_stmt *)dict->learn_stmt);
+        dict->learn_stmt = NULL;
+    }
+    sqlite3_close((sqlite3 *)dict->db);
+    dict->db = NULL;
+}
+
+/* 辞書再オープン */
+int ime_dict_reopen(IME_Dict *dict, const char *path)
+{
+    ime_dict_close(dict);
+    return ime_dict_open(dict, path);
+}
+
+/* ユーザー学習辞書列挙 */
+int ime_user_list(IME_Dict *dict, const char *yomi_prefix,
+                  IME_UserEntry *out, int max)
+{
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    int rc;
+    int count = 0;
+    const char *sql;
+
+    if (!dict || !dict->db || !out || max <= 0) return 0;
+    db = (sqlite3 *)dict->db;
+
+    if (yomi_prefix && yomi_prefix[0] != '\0') {
+        sql = "SELECT yomi, kanji, freq FROM dict_user WHERE yomi >= ?1 AND yomi < ?1 || X'EFBFBF' ORDER BY freq DESC, yomi ASC LIMIT ?2";
+    } else {
+        sql = "SELECT yomi, kanji, freq FROM dict_user ORDER BY freq DESC, yomi ASC LIMIT ?2";
+    }
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        kprintf(ATTR_RED, "IME: user_list prepare failed (rc=%d)\r\n", rc);
+        return 0;
+    }
+
+    if (yomi_prefix && yomi_prefix[0] != '\0') {
+        sqlite3_bind_text(stmt, 1, yomi_prefix, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, max);
+    } else {
+        sqlite3_bind_int(stmt, 2, max);
+    }
+
+    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+        IME_UserEntry *e = &out[count];
+        const char *y_text = (const char *)sqlite3_column_text(stmt, 0);
+        const char *k_text = (const char *)sqlite3_column_text(stmt, 1);
+        int freq = sqlite3_column_int(stmt, 2);
+
+        if (y_text) {
+            kstrncpy(e->yomi, y_text, sizeof(e->yomi));
+        } else {
+            e->yomi[0] = '\0';
+        }
+
+        if (k_text) {
+            kstrncpy(e->kanji, k_text, sizeof(e->kanji));
+        } else {
+            e->kanji[0] = '\0';
+        }
+
+        e->freq = freq;
+        count++;
+    }
+
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+/* ユーザー学習辞書エントリ削除 */
+int ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji)
+{
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    int rc;
+    const char *sql;
+
+    if (!dict || !dict->db || !yomi || yomi[0] == '\0') return -1;
+    db = (sqlite3 *)dict->db;
+
+    if (kanji && kanji[0] != '\0') {
+        sql = "DELETE FROM dict_user WHERE yomi = ?1 AND kanji = ?2";
+    } else {
+        sql = "DELETE FROM dict_user WHERE yomi = ?1";
+    }
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        kprintf(ATTR_RED, "IME: user_delete prepare failed (rc=%d)\r\n", rc);
+        return -2;
+    }
+
+    sqlite3_bind_text(stmt, 1, yomi, -1, SQLITE_STATIC);
+    if (kanji && kanji[0] != '\0') {
+        sqlite3_bind_text(stmt, 2, kanji, -1, SQLITE_STATIC);
+    }
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        kprintf(ATTR_RED, "IME: user_delete execute failed (rc=%d)\r\n", rc);
+        return -3;
+    }
+
+    return 0;
+}
+
+/* ユーザー学習辞書CSVエクスポート */
+int ime_user_export(IME_Dict *dict, const char *path)
+{
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    int rc;
+    int fd;
+    const char *sql;
+    char line[128];
+
+    if (!dict || !dict->db || !path || path[0] == '\0') return -1;
+    db = (sqlite3 *)dict->db;
+
+    fd = vfs_open(path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+    if (fd < 0) {
+        kprintf(ATTR_RED, "IME: export open failed: %s (fd=%d)\r\n", path, fd);
+        return -2;
+    }
+
+    sql = "SELECT yomi, kanji, freq FROM dict_user ORDER BY freq DESC, yomi ASC";
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        kprintf(ATTR_RED, "IME: export prepare failed (rc=%d)\r\n", rc);
+        vfs_close(fd);
+        return -3;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *y_text = (const char *)sqlite3_column_text(stmt, 0);
+        const char *k_text = (const char *)sqlite3_column_text(stmt, 1);
+        int freq = sqlite3_column_int(stmt, 2);
+
+        if (!y_text || !k_text) continue;
+
+        sqlite3_snprintf(sizeof(line), line, "%s,%s,%d\n", y_text, k_text, freq);
+        vfs_write_fd(fd, line, (u32)kstrlen(line));
+    }
+
+    sqlite3_finalize(stmt);
+    vfs_close(fd);
+    return 0;
+}
+
+/* ユーザー学習辞書全消去 */
+int ime_user_clear(IME_Dict *dict)
+{
+    sqlite3 *db;
+    int rc;
+
+    if (!dict || !dict->db) return -1;
+    db = (sqlite3 *)dict->db;
+
+    rc = sqlite3_exec(db, "DELETE FROM dict_user;", NULL, NULL, NULL);
+    if (rc != SQLITE_OK) {
+        kprintf(ATTR_RED, "IME: user_clear execute failed (rc=%d)\r\n", rc);
+        return -2;
+    }
+
+    return 0;
 }

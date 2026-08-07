@@ -27,6 +27,22 @@ int rshell_active = 0;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+/* スクロール保護行数 (下から数えた固定行)。0=全行 */
+static int g_scroll_reserve = 0;
+
+#define CONSOLE_LAST_ROW  (TVRAM_ROWS - 1 - g_scroll_reserve)
+
+void tvram_set_scroll_reserve(int rows)
+{
+    if (rows < 0) {
+        rows = 0;
+    }
+    if (rows >= TVRAM_ROWS) {
+        rows = TVRAM_ROWS - 1;
+    }
+    g_scroll_reserve = rows;
+}
+
 /* ======================================================================== */
 /*  TVRAM低レベル操作                                                       */
 /* ======================================================================== */
@@ -102,12 +118,16 @@ void tvram_scroll(void)
 {
     volatile u16 *text = (volatile u16 *)TVRAM_TEXT;
     volatile u16 *attr = (volatile u16 *)TVRAM_ATTR;
+    int rows = TVRAM_ROWS - g_scroll_reserve;
     int i;
-    for (i = 0; i < TVRAM_COLS * (TVRAM_ROWS - 1); i++) {
+
+    /* 0 .. rows-2 行目までを1行引き上げ */
+    for (i = 0; i < TVRAM_COLS * (rows - 1); i++) {
         text[i] = text[i + TVRAM_COLS];
         attr[i] = attr[i + TVRAM_COLS];
     }
-    for (i = TVRAM_COLS * (TVRAM_ROWS - 1); i < TVRAM_COLS * TVRAM_ROWS; i++) {
+    /* rows-1 行目を空白化 */
+    for (i = TVRAM_COLS * (rows - 1); i < TVRAM_COLS * rows; i++) {
         text[i] = 0x0020;
         attr[i] = ATTR_WHITE;
     }
@@ -152,9 +172,9 @@ void shell_putchar(char ch, u8 color)
         cursor_x = 0;
         cursor_y++;
     }
-    if (cursor_y >= TVRAM_ROWS) {
+    if (cursor_y > CONSOLE_LAST_ROW) {
         tvram_scroll();
-        cursor_y = TVRAM_ROWS - 1;
+        cursor_y = CONSOLE_LAST_ROW;
     }
 }
 
@@ -220,9 +240,9 @@ void shell_print_utf8(const char *utf8_str, u8 color)
         if (*p == '\n') {
             cursor_x = 0;
             cursor_y++;
-            if (cursor_y >= TVRAM_ROWS) {
+            if (cursor_y > CONSOLE_LAST_ROW) {
                 tvram_scroll();
-                cursor_y = TVRAM_ROWS - 1;
+                cursor_y = CONSOLE_LAST_ROW;
             }
             p++;
             continue;
@@ -241,7 +261,7 @@ void shell_print_utf8(const char *utf8_str, u8 color)
             tvram_putchar_at(cursor_x, cursor_y, (char)ank, color);
             cursor_x++;
             if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             continue;
         }
 
@@ -250,12 +270,12 @@ void shell_print_utf8(const char *utf8_str, u8 color)
             if (cursor_x >= TVRAM_COLS - 1) {
                 cursor_x = 0;
                 cursor_y++;
-                if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+                if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             }
             tvram_putkanji_at(cursor_x, cursor_y, jis, color);
             cursor_x += 2;
             if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             continue;
         }
 
@@ -263,12 +283,12 @@ void shell_print_utf8(const char *utf8_str, u8 color)
         if (cursor_x >= TVRAM_COLS - 1) {
             cursor_x = 0;
             cursor_y++;
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
         }
         tvram_putkanji_at(cursor_x, cursor_y, 0x2222, color);  /* □ (JIS 0x2222) */
         cursor_x += 2;
         if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-        if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+        if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
     }
 }
 
@@ -292,9 +312,9 @@ void console_write(const char *buf, u32 size, u8 color)
         if (*p == '\n') {
             cursor_x = 0;
             cursor_y++;
-            if (cursor_y >= TVRAM_ROWS) {
+            if (cursor_y > CONSOLE_LAST_ROW) {
                 tvram_scroll();
-                cursor_y = TVRAM_ROWS - 1;
+                cursor_y = CONSOLE_LAST_ROW;
             }
             p++; remaining--;
             continue;
@@ -328,7 +348,7 @@ void console_write(const char *buf, u32 size, u8 color)
             tvram_putchar_at(cursor_x, cursor_y, (char)ank, color);
             cursor_x++;
             if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             continue;
         }
 
@@ -337,12 +357,12 @@ void console_write(const char *buf, u32 size, u8 color)
             if (cursor_x >= TVRAM_COLS - 1) {
                 cursor_x = 0;
                 cursor_y++;
-                if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+                if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             }
             tvram_putkanji_at(cursor_x, cursor_y, jis, color);
             cursor_x += 2;
             if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
             continue;
         }
 
@@ -350,12 +370,12 @@ void console_write(const char *buf, u32 size, u8 color)
         if (cursor_x >= TVRAM_COLS - 1) {
             cursor_x = 0;
             cursor_y++;
-            if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+            if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
         }
         tvram_putkanji_at(cursor_x, cursor_y, 0x2222, color);  /* □ (JIS 0x2222) */
         cursor_x += 2;
         if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
-        if (cursor_y >= TVRAM_ROWS) { tvram_scroll(); cursor_y = TVRAM_ROWS - 1; }
+        if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
     }
 }
 

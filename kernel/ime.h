@@ -9,14 +9,16 @@
 #define __IME_H
 
 #include "types.h"
+#include "os32_kapi_shared.h"
+#include "ime_render.h"
 
 /* ======================================================================== */
-/*  FEP モード                                                               */
+/*  IME 状態                                                                */
 /* ======================================================================== */
 
-#define IME_MODE_OFF       0    /* FEP無効 (直接入力) */
-#define IME_MODE_HIRAGANA  1    /* ひらがな入力 */
-#define IME_MODE_KATAKANA  2    /* カタカナ入力 */
+#define IME_ST_INPUT       0    /* かな入力中 (未変換) */
+#define IME_ST_CONVERT     1    /* 変換候補選択中 (インライン▼表示) */
+#define IME_ST_CANDLIST    2    /* 候補リストウィンドウ展開中 */
 
 /* ======================================================================== */
 /*  辞書検索結果                                                             */
@@ -74,6 +76,11 @@ typedef struct {
     /* 辞書 */
     IME_Dict    dict;
     int         dict_loaded;    /* 辞書ロード済みフラグ */
+    /* 描画抽象化 & 候補リスト制御 */
+    int         state;          /* IME_ST_xxx */
+    int         page;           /* 候補リストの現在ページ */
+    int         per_page;       /* 1ページの候補数 */
+    const IME_Render *render;   /* 描画バックエンド */
 } IME_State;
 
 
@@ -107,6 +114,14 @@ int  ime_trygetchar(void);
  * 制御キー (矢印, TAB等) はIMEを透過して生のkeydataを返す。
  */
 int  ime_getkey(void);
+int  ime_trygetkey(void);
+
+/* 辞書管理API (ime.c) */
+int  ime_switch_dict(int variant);
+int  ime_user_list_facade(const char *yomi_prefix, void *out, int max);
+int  ime_user_delete_facade(const char *yomi, const char *kanji);
+int  ime_user_export_facade(const char *path);
+int  ime_user_clear_facade(void);
 
 /* ======================================================================== */
 /*  内部関数 (ime_romkana.c, ime_dict.c から公開)                            */
@@ -123,5 +138,11 @@ int  ime_dict_open(IME_Dict *dict, const char *path);
 int  ime_dict_search(IME_Dict *dict, const char *yomi,
                      IME_Result *results, int max_results);
 void ime_dict_learn(IME_Dict *dict, const char *yomi, const char *kanji);
+int  ime_dict_reopen(IME_Dict *dict, const char *path);
+int  ime_user_list(IME_Dict *dict, const char *yomi_prefix,
+                   IME_UserEntry *out, int max);
+int  ime_user_delete(IME_Dict *dict, const char *yomi, const char *kanji);
+int  ime_user_export(IME_Dict *dict, const char *path);
+int  ime_user_clear(IME_Dict *dict);
 
 #endif /* __IME_H */
