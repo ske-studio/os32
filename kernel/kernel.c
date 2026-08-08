@@ -316,23 +316,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* コンベンショナルメモリ再利用 (ブート後のローダー領域等を解放) */
     paging_reclaim_conventional();
 
-    /* V86 スモークテスト (Phase 1 の一時コード。検証後に削除する)
-     * ページングと TSS が揃った直後に一度だけ実行し、V86 に入って
-     * 戻ってこられることを確認する。 */
-    {
-        int v86_rc = v86_smoke_test();
-        tvram_print(48, 2, "V86:", TATTR_GREEN);
-        if (v86_rc == 0) {
-            tvram_print(52, 2, "OK", TATTR_WHITE);
-        } else {
-            char rcbuf[4];
-            rcbuf[0] = 'E';
-            rcbuf[1] = (char)('0' + (v86_rc & 7));
-            rcbuf[2] = '\0';
-            tvram_print(52, 2, rcbuf, TATTR_RED);
-        }
-    }
-
     /* KCGフォントキャッシュ初期化
      * コンベンショナルメモリ (0x01000〜) にキャッシュを配置しているため、
      * paging_reclaim 後にフラグをゼロクリアする必要がある。
@@ -371,6 +354,15 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
     pgalloc_init(mem_kb);
+
+    /* V86 スモークテスト (Phase 1 の一時コード。検証後に削除する)
+     * バッキング RAM を pgalloc から取るので pgalloc_init の後に置くこと。 */
+    {
+        int v86_rc = v86_smoke_test();
+        tvram_print(48, 2, "V86:", TATTR_GREEN);
+        tvram_print(52, 2, v86_rc == 0 ? "OK" : "NG",
+                    v86_rc == 0 ? TATTR_WHITE : TATTR_RED);
+    }
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();

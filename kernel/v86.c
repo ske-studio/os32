@@ -9,6 +9,7 @@
 #include "v86.h"
 #include "tss.h"
 #include "paging.h"
+#include "v86_mem.h"
 #include "kprintf.h"
 
 /* setjmp/longjmp (kernel/setjmp.asm) — セッションからの脱出に使う */
@@ -143,41 +144,32 @@ static const u8 v86_test_code[] = {
     0xF4                    /* hlt → #GP でカーネルに戻る */
 };
 
-/* ゲストが触るページを user アクセス可にする。
- *
- * カーネル帯には決して付けないこと。前回の実装はトリプルフォルトの
- * 回避策としてカーネル帯に PTE_USER を付け、その結果 V86 がカーネル
- * メモリを実行できるようになり、それを「エミュレータが U/S を無視して
- * いる」と誤診した (docs/tasks/v86v2/02_np21w_paging_analysis.md)。 */
-static void v86_test_map(int user)
-{
-    u32 flags = PAGE_RW | (user ? PTE_USER : 0);
-    u32 a;
-
-    paging_set_page(V86_TEST_CODE_ADDR,  V86_TEST_CODE_ADDR,  flags);
-    paging_set_page(V86_TEST_STACK_ADDR, V86_TEST_STACK_ADDR, flags);
-    paging_set_page(V86_TEST_MAGIC_ADDR, V86_TEST_MAGIC_ADDR, flags);
-
-    /* TVRAM (文字 0xA0000-0xA1FFF / 属性 0xA2000-0xA3FFF) */
-    for (a = 0xA0000UL; a < 0xA4000UL; a += PAGE_SIZE) {
-        paging_set_page(a, a, flags);
-    }
-}
+/* スモークテストの結果を外から観測できるように残す。
+ * バッキング RAM はセッション終了で解放されてしまうので、
+ * 判定に使った値をカーネル側にコピーしておく (kernel.map 経由で読める)。 */
+u32 v86_smoke_result = 0xFFFFFFFFUL;
+u32 v86_smoke_magic  = 0;
+u32 v86_smoke_reason = 0;
 
 int v86_smoke_test(void)
 {
     struct v86_context ctx;
-    volatile u16 *magic = (volatile u16 *)V86_TEST_MAGIC_ADDR;
+    volatile u16 *magic;
     int reason;
     u32 i;
 
-    /* ゲストコードを配置し、結果格納先をクリア */
+    if (v86_mem_setup() != 0) {
+        v86_smoke_result = 0x8001;
+        return -1;
+    }
+
+    /* 低位アドレスはバッキング RAM に張り替わっているので、ここへの
+     * 書き込みはそのままゲストのメモリになる。 */
     for (i = 0; i < sizeof(v86_test_code); i++) {
         ((volatile u8 *)V86_TEST_CODE_ADDR)[i] = v86_test_code[i];
     }
+    magic = (volatile u16 *)V86_TEST_MAGIC_ADDR;
     *magic = 0;
-
-    v86_test_map(1);
 
     ctx.eip    = 0x0000;
     ctx.cs     = (u32)(V86_TEST_CODE_ADDR >> 4);
@@ -191,11 +183,13 @@ int v86_smoke_test(void)
 
     reason = v86_run(&ctx);
 
-    v86_test_map(0);    /* USER 属性を剥がす */
+    /* teardown でバッキング RAM が消えるので、判定材料を先に退避する */
+    v86_smoke_magic  = (u32)*magic;
+    v86_smoke_reason = (u32)reason;
 
-    /* 期待値: HLT で抜け、magic が書き換わっている */
-    if (reason == V86_EXIT_HLT && *magic == V86_TEST_MAGIC) {
-        return 0;
-    }
-    return reason ? reason : -1;
+    v86_mem_teardown();
+
+    v86_smoke_result = (reason == V86_EXIT_HLT &&
+                        v86_smoke_magic == V86_TEST_MAGIC) ? 0 : 1;
+    return (int)v86_smoke_result;
 }

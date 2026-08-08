@@ -211,6 +211,22 @@ void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
     if (pg_enabled) tlb_flush_all();
 }
 
+/* 指定範囲を覆う PDE から USER を落とす。
+ * paging_set_page() は USER を立てる方向にしか伝播させないので、
+ * V86 セッション終了時にカーネル側が明示的に戻すために使う。 */
+void paging_pde_clear_user(u32 start, u32 end)
+{
+    u32 pdi;
+    u32 first = start >> 22;
+    u32 last  = end >> 22;
+
+    for (pdi = first; pdi <= last && pdi < PAGING_PT_COUNT; pdi++) {
+        page_directory[pdi] &= ~(u32)PTE_USER;
+    }
+
+    if (pg_enabled) tlb_flush_all();
+}
+
 /* ======================================================================== */
 /*  paging_set_readonly — 範囲内の全ページをRead-Onlyに                     */
 /* ======================================================================== */

@@ -42,8 +42,13 @@
 /* ページング初期化・有効化 */
 void paging_init(u32 mem_kb);
 
-/* 指定ページの属性を変更 */
+/* 指定ページの属性を変更。
+ * flags に PTE_USER を含めると PDE 側にも USER を伝播させる
+ * (i386 の実効権限は PDE と PTE の論理積のため)。 */
 void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
+
+/* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末) */
+void paging_pde_clear_user(u32 start, u32 end);
 
 /* 指定範囲の全ページを Read-Only に */
 void paging_set_readonly(u32 start, u32 end);
