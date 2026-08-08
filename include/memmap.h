@@ -80,6 +80,11 @@ extern u32 __bss_end;
 #define MEM_STACK_GUARD       0x8F000UL
 #define MEM_STACK_GUARD_END   0x8FFFFUL
 
+/* カーネルスタック (0x90000-0x9FFFF、下向き成長)。
+ * 頂点は boot/loader_hdd.asm が ESP に設定する値と一致させること。 */
+#define MEM_KSTACK_BASE       0x90000UL
+#define MEM_KSTACK_TOP        0x9FFFCUL
+
 /* BIOS ROM: Read-Only */
 #define MEM_BIOS_ROM_START    0xF0000UL
 #define MEM_BIOS_ROM_END      0xFFFFFUL

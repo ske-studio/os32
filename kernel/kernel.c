@@ -7,6 +7,7 @@
  * ============================================================ */
 
 #include "idt.h"
+#include "tss.h"
 #include "io.h"
 #include "kbd.h"
 #include "fdc.h"
@@ -106,6 +107,11 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     extern void gdt_init(void);
     gdt_init();
     tvram_print(6, 1, "OK  ", TATTR_WHITE);
+
+    /* TSS (V86 モードに必須: #GP 時の Ring0 スタックと I/O 許可ビットマップ)
+     * GDT のエントリ3を使うので gdt_init の直後に呼ぶ。
+     * ESP0 は V86 突入直前に v86_enter が実際の ESP へ差し替える。 */
+    tss_init(MEM_KSTACK_TOP);
 
     /* IDT/PIC/PIT 初期化 */
     tvram_print(12, 1, "IDT...", TATTR_GREEN);

@@ -17,8 +17,16 @@ struct gdt_ptr {
     u32 base;
 } __attribute__((packed));
 
-/* GDTは3エントリ (NULL, コード, データ) */
-struct gdt_entry gdt[3];
+/* GDT は4エントリ (NULL, コード, データ, TSS)
+ *
+ * V86 ゲストは CPL=3 で走るが、リアルモード形式のセグメントを使うので
+ * ring3 用のコード/データディスクリプタは要らない。必要なのは TSS だけ —
+ * V86 から #GP でカーネルに戻るとき、CPU が TSS の SS0:ESP0 から
+ * カーネルスタックを取るため。 */
+#define GDT_ENTRIES 4
+#define GDT_TSS_IDX 3
+
+struct gdt_entry gdt[GDT_ENTRIES];
 struct gdt_ptr gp;
 
 /* アセンブラの lgdt ラッパー (kentry.asmなどに置くかインラインで) */
@@ -49,10 +57,21 @@ static void gdt_set_gate(int num, u32 base, u32 limit, u8 access, u8 gran)
     gdt[num].access = access;
 }
 
+/* TSS ディスクリプタの設定 (tss.c の tss_init から呼ばれる)
+ *
+ * access = 0x89: P=1, DPL=0, S=0 (システム), type=9 (使用中でない 32bit TSS)
+ * gran   = 0x00: バイト粒度。TSS は I/O ビットマップ込みで 8KB 強あるが、
+ *                4KB 粒度にするとリミットが切り上がってビットマップの
+ *                終端が曖昧になるので、バイト粒度で正確に指定する。 */
+void gdt_set_tss(u32 base, u32 limit)
+{
+    gdt_set_gate(GDT_TSS_IDX, base, limit, 0x89, 0x00);
+}
+
 /* カーネルGDTの初期化 */
 void gdt_init(void)
 {
-    gp.limit = (sizeof(struct gdt_entry) * 3) - 1;
+    gp.limit = (sizeof(struct gdt_entry) * GDT_ENTRIES) - 1;
     gp.base = (u32)&gdt;
 
     /* NULLディスクリプタ */
@@ -63,6 +82,10 @@ void gdt_init(void)
 
     /* データセグメント: ベース=0, リミット=4GB, 読み書き可能, 32ビット, 4KBグラニュラリティ */
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+
+    /* TSS (エントリ3) は tss_init() が gdt_set_tss() で埋める。
+     * ltr する前に present=0 のままだと不正 TSS 例外になるので、
+     * ここではゼロのままにしておき、tss_init() まで ltr しない。 */
 
     /* GDTのロードとセグメントレジスタの再設定 */
     gdt_flush((u32)&gp);
