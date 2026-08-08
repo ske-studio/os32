@@ -1,0 +1,131 @@
+/* ======================================================================== */
+/*  V86.H — 仮想8086モード ランタイム                                       */
+/*                                                                          */
+/*  16bit ゲスト (PC-98 ネイティブゲーム / DOS) を OS32 上で走らせるための   */
+/*  最小ランタイム。方式と根拠は docs/tasks/v86v2/00_approach_study.md。     */
+/*                                                                          */
+/*  カーネルに置くのは以下だけ:                                             */
+/*    特権命令の発行 / #GP・#DB・#PF の一次受け / IRQ ISR 本体 /            */
+/*    I/O トラップの一次デコード / ページテーブル直書き / V86 モード遷移     */
+/*  HLE・セッション管理・整形はユーザ空間側に寄せる。                       */
+/* ======================================================================== */
+
+#ifndef __V86_H
+#define __V86_H
+
+#include "types.h"
+
+/* EFLAGS */
+#define EFLAGS_IF       0x000200UL
+#define EFLAGS_IOPL3    0x003000UL      /* IOPL=3 */
+#define EFLAGS_VM       0x020000UL      /* 仮想8086モード */
+
+/* ゲストに渡す初期 EFLAGS。
+ *
+ * IOPL=3 にしているのが要点。386 には VME が無いため IOPL<3 では
+ * INT n / CLI / STI / PUSHF / POPF / IRET が全て #GP に落ちる。
+ * IOPL=3 ならこれらは素通りし、I/O だけが TSS の I/O 許可ビットマップで
+ * 個別に制御される。実測ではこれで #GP レートが 5〜6 倍下がる
+ * (docs/tasks/v86v2/00_approach_study.md §3.1)。
+ *
+ * 代償はゲストの CLI が実 IF を落とすこと。暴走した場合の脱出手段が
+ * 別途必要になる。
+ *
+ * IF は Phase 1 では立てない。V86 実行中に IRQ が入ると IRQ スタブが
+ * Ring0 で動くが、V86 → Ring0 の遷移で CPU が DS/ES/FS/GS を null に
+ * クリアするため、既存の IRQ スタブ (irq_stub_0 等) が DS 前提で
+ * カーネル変数を触った瞬間に落ちる。IRQ スタブを V86 安全にするのは
+ * Phase 2 の作業なので、それまでは割り込みを止めて動かす。 */
+#define V86_EFLAGS_INIT (EFLAGS_VM | EFLAGS_IOPL3 | 0x2)
+
+/* V86 突入時のコンテキスト。v86_entry.asm が iretd で積む順序と
+ * 1:1 で対応するので、フィールドの並べ替え禁止。 */
+struct v86_context {
+    u32 eip;
+    u32 cs;
+    u32 eflags;
+    u32 esp;
+    u32 ss;
+    u32 es;
+    u32 ds;
+    u32 fs;
+    u32 gs;
+};
+
+/* ------------------------------------------------------------------------ */
+/*  #GP スタックフレームのレイアウト                                        */
+/*                                                                          */
+/*  V86 から #GP が入ると、CPU は TSS の SS0:ESP0 に切り替えてから          */
+/*  GS/FS/DS/ES/SS/ESP/EFLAGS/CS/EIP と error_code を積む。                 */
+/*  スタブがさらに PUSHAD するので、ハンドラが受け取る u32 配列は:          */
+/*                                                                          */
+/*    [0..7]  PUSHAD (低位から EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX)             */
+/*    [8]     error_code                                                    */
+/*    [9..11] EIP, CS, EFLAGS                                               */
+/*    [12,13] ゲスト ESP, SS                                                */
+/*    [14..17] ES, DS, FS, GS                                               */
+/* ------------------------------------------------------------------------ */
+#define V86F_EDI        0
+#define V86F_ESI        1
+#define V86F_EBP        2
+#define V86F_ESP_DUMMY  3
+#define V86F_EBX        4
+#define V86F_EDX        5
+#define V86F_ECX        6
+#define V86F_EAX        7
+#define V86F_ERRCODE    8
+#define V86F_EIP        9
+#define V86F_CS         10
+#define V86F_EFLAGS     11
+#define V86F_ESP        12
+#define V86F_SS         13
+#define V86F_ES         14
+#define V86F_DS         15
+#define V86F_FS         16
+#define V86F_GS         17
+
+/* セッション終了理由 */
+enum v86_exit_reason {
+    V86_EXIT_NONE = 0,
+    V86_EXIT_HLT,           /* ゲストが HLT を実行 */
+    V86_EXIT_TRAP_PORT,     /* 脱出用ポートへの OUT */
+    V86_EXIT_UNKNOWN_OP,    /* 未対応命令 */
+    V86_EXIT_TIMEOUT,
+    V86_EXIT_HOTKEY,
+    V86_EXIT_FAULT          /* #PF など */
+};
+
+/* ======== API ======== */
+
+/* V86 モードへ遷移する (v86_entry.asm)。
+ * 呼び出し前に TSS.ESP0 を現在のカーネルスタックに合わせること。
+ * 正常には戻らず、セッション終了は longjmp 経由になる。 */
+void v86_enter(const struct v86_context *ctx);
+
+/* #GP の V86 経路から呼ばれる一次ハンドラ (kernel/v86.c)。
+ * 0 を返すと V86 へ復帰、非 0 でセッション終了。 */
+int v86_gp_handler(u32 *frame);
+
+/* セッションが終了した理由 */
+enum v86_exit_reason v86_get_exit_reason(void);
+
+/* デバッグ用: 直近の #GP のゲスト CS:IP と先頭オペコード */
+u32 v86_last_gp_cs(void);
+u32 v86_last_gp_ip(void);
+u32 v86_gp_count(void);
+
+/* 1 セッション実行して終了理由を返す */
+int v86_run(const struct v86_context *ctx);
+
+/* Phase 1 スモークテスト: 最小の 16bit コードを V86 で実行し、
+ * カーネルが生存したまま戻れることを確認する。戻り値は v86_exit_reason。
+ * 検証が済んだら削除する一時コード。 */
+int v86_smoke_test(void);
+
+/* スモークテストが使う低位メモリ (memmap.h の「空き 20KB」内) */
+#define V86_TEST_CODE_ADDR   0x8A000UL
+#define V86_TEST_STACK_ADDR  0x8B000UL
+#define V86_TEST_MAGIC_ADDR  0x8C000UL
+#define V86_TEST_MAGIC       0x1234U
+
+#endif /* __V86_H */

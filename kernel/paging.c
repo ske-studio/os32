@@ -197,6 +197,17 @@ void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
 
     page_tables[pdi][pti] = (phys_addr & 0xFFFFF000UL) | flags;
 
+    /* 実効権限は PDE と PTE の論理積になる (i386 の仕様)。PTE だけ USER に
+     * しても、その PDE に USER が無ければユーザ (V86 ゲスト) からは
+     * アクセスできず #PF になる。PTE に USER を付けたら PDE にも伝播させる。
+     *
+     * PDE を USER にしても、同じ PDE 配下の他のページは PTE 側が
+     * supervisor のままなので保護は保たれる。カーネル帯を USER に
+     * しないこと (docs/tasks/v86v2/02_np21w_paging_analysis.md)。 */
+    if (flags & PTE_USER) {
+        page_directory[pdi] |= PTE_USER;
+    }
+
     if (pg_enabled) tlb_flush_all();
 }
 

@@ -23,6 +23,7 @@ volatile u32 tick_count = 0;
 
 /* CPU例外ハンドラ (0-31) */
 extern void isr_stub_0(void);     /* #DE ゼロ除算 */
+extern void isr_stub_1(void);     /* #DB デバッグ (V86シングルステップ) */
 extern void isr_stub_6(void);     /* #UD 未定義命令 */
 extern void isr_stub_8(void);     /* #DF ダブルフォルト */
 extern void isr_stub_13(void);    /* #GP 一般保護例外 */
@@ -66,6 +67,7 @@ void idt_init(void)
 
     /* CPU例外ハンドラ */
     idt_set_gate(0,  isr_stub_0,  IDT_ATTR_INT_GATE32);   /* #DE ゼロ除算 */
+    idt_set_gate(1,  isr_stub_1,  IDT_ATTR_INT_GATE32);   /* #DB デバッグ */
     idt_set_gate(6,  isr_stub_6,  IDT_ATTR_INT_GATE32);   /* #UD 未定義命令 */
     idt_set_gate(8,  isr_stub_8,  IDT_ATTR_INT_GATE32);   /* #DF ダブルフォルト */
     idt_set_gate(13, isr_stub_13, IDT_ATTR_INT_GATE32);   /* #GP 一般保護例外 */

@@ -16,6 +16,26 @@ PIC1_CMD    equ 0x00
 PIC2_CMD    equ 0x08
 OCW2_EOI    equ 0x20
 
+;; ============================================================
+;; V86 からの遷移では CPU が DS/ES/FS/GS を null セレクタにクリアする。
+;; C ハンドラは DS がカーネルデータセグメントであることを前提に動くので、
+;; 復元しないまま呼ぶと即座に #GP を起こす。しかもその #GP ハンドラも
+;; DS=0 のまま C を呼ぶため、例外が無限再帰してカーネルスタックを食い潰し、
+;; ガードページに当たって #DF → トリプルフォルトになる。
+;;
+;; 実際 Phase 1 の初回検証でこれを踏んだ (#PF の一次原因が完全に隠れ、
+;; 「原因不明のトリプルフォルト」に見えた)。全スタブで必ず復元すること。
+;;
+;; PUSHAD の後に置けば EAX を潰しても POPAD で戻るので安全。
+;; ============================================================
+%macro RESTORE_KSEG 0
+        mov     ax, 0x10
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+%endmacro
+
 ;; 外部Cハンドラ (GCC ELFではアンダースコアなし)
 extern exception_handler
 extern page_fault_handler
@@ -54,10 +74,59 @@ isr_stub_%1:
 
 ;; 例外スタブ生成
 ISR_NOERR 0                    ;; #DE ゼロ除算
+ISR_NOERR 1                    ;; #DB デバッグ (V86シングルステップ用)
 ISR_NOERR 6                    ;; #UD 未定義命令
 ISR_ERR   8                    ;; #DF ダブルフォルト
-ISR_ERR   13                   ;; #GP 一般保護例外
+;; #GP (13) は V86 分岐が要るので専用スタブ (下記)
 ;; #PF は専用スタブを使用 (下記 pf_stub)
+
+;; ============================================================
+;; #GP 一般保護例外 (ISR 13) — V86 分岐付き
+;;
+;; V86 ゲストの IN/OUT・未対応命令はすべてここに落ちる。
+;; 通常の #GP と区別するため、CPU が積んだ EFLAGS の VM ビットを見る。
+;;
+;; CPU自動push後のスタック (ESP低位→高位):
+;;   [error_code] [EIP] [CS] [EFLAGS] (V86ならさらに [ESP][SS][ES][DS][FS][GS])
+;; ============================================================
+extern v86_gp_handler
+extern v86_exit_to_kernel
+
+global isr_stub_13
+isr_stub_13:
+        cli
+        test    dword [esp + 12], 0x00020000  ;; EFLAGS.VM
+        jnz     .from_v86
+
+        ;; --- 通常の #GP: 従来どおり例外ハンドラへ ---
+        push    13
+        jmp     isr_common
+
+.from_v86:
+        pushad
+
+        RESTORE_KSEG
+
+        mov     eax, esp
+        push    eax                     ;; 引数: フレーム先頭 (u32*)
+        call    v86_gp_handler
+        add     esp, 4
+
+        test    eax, eax
+        jnz     .v86_exit
+
+        ;; 0 が返った → V86 に復帰
+        popad
+        add     esp, 4                  ;; error_code をスキップ
+        iretd
+
+.v86_exit:
+        ;; 非0 が返った → セッション終了 (longjmp するので戻らない)
+        call    v86_exit_to_kernel
+.hang:
+        cli
+        hlt
+        jmp     .hang
 
 ;; ============================================================
 ;; 例外共通ハンドラ
@@ -68,6 +137,7 @@ ISR_ERR   13                   ;; #GP 一般保護例外
 ;; ============================================================
 isr_common:
         pushad                  ;; 全汎用レジスタ保存 (32B)
+        RESTORE_KSEG            ;; V86 由来だと DS/ES/FS/GS が null
                                 ;; ESP = base とする
                                 ;; base+0..31: PUSHAD
                                 ;; base+32: vector
@@ -113,6 +183,7 @@ global isr_stub_14
 isr_stub_14:
         cli
         pushad                  ;; 全汎用レジスタ保存 (32B)
+        RESTORE_KSEG            ;; V86 由来だと DS/ES/FS/GS が null
 
         ;; PUSHAD配列のポインタ (引数4: regs)
         mov     eax, esp
@@ -150,6 +221,7 @@ isr_stub_default:
 global irq_stub_0
 irq_stub_0:
         pushad
+        RESTORE_KSEG
 
         ;; tick_count をインクリメント
         inc     dword [tick_count]
@@ -170,6 +242,7 @@ irq_stub_0:
 global irq_stub_1
 irq_stub_1:
         pushad
+        RESTORE_KSEG
 
         ;; Cハンドラを呼び出し
         call    kbd_irq_handler
@@ -187,6 +260,7 @@ irq_stub_1:
 global irq_stub_4
 irq_stub_4:
         pushad
+        RESTORE_KSEG
 
         ;; Cハンドラを呼び出し
         call    serial_irq_handler
@@ -229,6 +303,7 @@ irq_stub_7:
 global irq_stub_11
 irq_stub_11:
         pushad
+        RESTORE_KSEG
 
         ;; Cハンドラを呼び出し
         call    fdc_irq_handler
@@ -248,6 +323,7 @@ irq_stub_11:
 global irq_stub_13
 irq_stub_13:
         pushad
+        RESTORE_KSEG
 
         ;; Cハンドラを呼び出し
         call    mouse_irq_handler
