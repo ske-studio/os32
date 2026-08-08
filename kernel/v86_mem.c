@@ -5,6 +5,7 @@
 #include "v86_mem.h"
 #include "paging.h"
 #include "pgalloc.h"
+#include "v86_io.h"
 
 static u32 backing_phys = 0;
 
@@ -64,6 +65,9 @@ int v86_mem_setup(void)
     map_identity(V86_SOUNDROM_START, V86_SOUNDROM_END, PAGE_RO | PTE_USER);
     map_identity(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END + 1, PAGE_RO | PTE_USER);
 
+    /* I/O 許可ビットマップにゲスト用ポリシーを適用 */
+    v86_io_apply_policy();
+
     return 0;
 }
 
@@ -93,6 +97,9 @@ void v86_mem_teardown(void)
     /* PDE 側の USER も落とす。paging_set_page() は USER を立てる方向にしか
      * 伝播させないので、ここで明示的に戻す。 */
     paging_pde_clear_user(V86_REMAP_START, MEM_BIOS_ROM_END);
+
+    /* ゲストに開けたポートを全部塞ぐ */
+    v86_io_reset_policy();
 
     pgalloc_free_n(backing_phys, V86_BACKING_PAGES);
     backing_phys = 0;
