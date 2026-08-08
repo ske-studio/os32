@@ -99,6 +99,11 @@ struct v86_context {
 #define V86I_FS         15
 #define V86I_GS         16
 
+/* PC-98 のサウンドボード (PC-9801-26K/86) は IRQ12。
+ * ゲストから見ると INT 14h になる (IRQ8-15 → INT 10h-17h)。 */
+#define V86_IRQ_SOUND       12
+#define V86_INT_SOUND       0x14
+
 /* セッション終了理由 */
 enum v86_exit_reason {
     V86_EXIT_NONE = 0,

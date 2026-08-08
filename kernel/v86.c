@@ -11,6 +11,7 @@
 #include "paging.h"
 #include "v86_mem.h"
 #include "v86_io.h"
+#include "idt.h"
 #include "kprintf.h"
 
 /* setjmp/longjmp (kernel/setjmp.asm) — セッションからの脱出に使う */
@@ -232,7 +233,13 @@ int v86_run(const struct v86_context *ctx)
 
     v86_exit_reason = V86_EXIT_NONE;
     v86_gp_n = 0;
+    v86_irq_n = 0;
     saved_esp0 = tss_get_esp0();
+
+    /* サウンドボードの IRQ をセッション中だけ開ける。
+     * ゲストの FM ドライバは OPN のタイマ割り込みで演奏を進めるので、
+     * これを開けないと「音源は見えるのに曲が鳴らない」状態になる。 */
+    irq_enable(V86_IRQ_SOUND);
 
     if (exec_setjmp(v86_jmpbuf) == 0) {
         v86_active = 1;
@@ -241,6 +248,7 @@ int v86_run(const struct v86_context *ctx)
 
     /* longjmp で戻ってきた */
     v86_active = 0;
+    irq_disable(V86_IRQ_SOUND);
     tss_set_esp0(saved_esp0);
     return (int)v86_exit_reason;
 }
