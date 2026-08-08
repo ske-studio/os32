@@ -105,6 +105,17 @@ def tool_regs(_):
     return _annotate_eip(_json(emu.get("/api/regs")))
 
 
+def tool_fault(_):
+    """Latest unrecoverable core fault (triple fault etc.).
+
+    generation is 0 until the first fault and increments on every one, so
+    comparing it against a previously seen value tells a new fault from an
+    old record. When paused is true the core is frozen at the fault site and
+    emu_regs / emu_read_mem still describe it.
+    """
+    return _annotate_eip(_json(emu.get("/api/fault")))
+
+
 def tool_tvram(_):
     d = _json(emu.get("/api/tvram"))
     return "\n".join(d.get("lines", []))
@@ -356,8 +367,16 @@ _ADDR = {"type": "string",
 
 TOOLS = {
     "emu_status": (tool_status,
-                   "Execution state, CS:EIP (symbol-annotated), CPU mode.",
+                   "Execution state, CS:EIP (symbol-annotated), CPU mode, "
+                   "display state (scrn_xmax/ymax, text_disp, grph_disp) and "
+                   "fault_generation (non-zero once the core has faulted).",
                    _obj({})),
+    "emu_fault": (tool_fault,
+                  "Latest unrecoverable core fault (triple fault etc.): "
+                  "reason text with full register dump, CS:EIP, and a "
+                  "generation counter. The core freezes at the fault site, "
+                  "so emu_regs/emu_read_mem still show it until emu_resume.",
+                  _obj({})),
     "emu_regs": (tool_regs,
                  "All CPU registers, segment bases, CR0-4, GDTR/IDTR; EIP "
                  "annotated with symbol+offset.",
