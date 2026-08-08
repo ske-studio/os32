@@ -51,7 +51,21 @@ start:
         jb      .wait
         cli
 
-        ;; --- (7) 継続の証拠: magic2 = 0x5678 ---
+        ;; --- (7) BIOS コール: INT 1Bh が HLE で処理されて戻るか ---
+        ;; スタブ経由で #GP → カーネルが AH と CF を書き換え → IRET で復帰。
+        ;; 期待値: AH = 0, CF = 0。
+        mov     ah, 0xD6                ; READ DATA (実処理は Phase 3-3b)
+        mov     al, 0x90                ; DA/UA = 2HD FDD#1
+        int     0x1B
+        mov     bx, 0                   ; BIOS 結果の記録用
+        jc      .bios_cf                ; CF が立っていたら失敗扱い
+        cmp     ah, 0
+        jne     .bios_cf
+        mov     bx, 0xB105              ; 成功マーカー
+.bios_cf:
+        mov     [6], bx
+
+        ;; --- (8) 継続の証拠: magic2 = 0x5678 ---
         mov     word [2], 0x5678
 
         hlt

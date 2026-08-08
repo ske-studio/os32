@@ -6,6 +6,7 @@
 #include "paging.h"
 #include "pgalloc.h"
 #include "v86_io.h"
+#include "v86_bios.h"
 
 static u32 backing_phys = 0;
 
@@ -27,6 +28,10 @@ int v86_mem_setup(void)
     if (backing_phys) {
         return -1;              /* 二重セットアップ */
     }
+
+    /* リマップすると実機の IVT/BDA が見えなくなるので先に退避する。
+     * ゲストはこれを引き継いで初めてまともに動ける。 */
+    v86_bios_save_real();
 
     backing_phys = pgalloc_alloc_n(V86_BACKING_PAGES);
     if (!backing_phys) {
@@ -64,6 +69,9 @@ int v86_mem_setup(void)
     map_identity(V86_EXTROM_START,   V86_EXTROM_END,   PAGE_RO | PTE_USER);
     map_identity(V86_SOUNDROM_START, V86_SOUNDROM_END, PAGE_RO | PTE_USER);
     map_identity(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END + 1, PAGE_RO | PTE_USER);
+
+    /* IVT/BDA の復元と BIOS スタブの設置 */
+    v86_bios_setup();
 
     /* I/O 許可ビットマップにゲスト用ポリシーを適用 */
     v86_io_apply_policy();

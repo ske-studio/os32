@@ -133,6 +133,7 @@ enum v86_exit_reason v86_get_exit_reason(void);
 u32 v86_last_gp_cs(void);
 u32 v86_last_gp_ip(void);
 u32 v86_gp_count(void);
+u32 v86_last_gp_eflags(void);
 
 /* 1 セッション実行して終了理由を返す */
 int v86_run(const struct v86_context *ctx);
@@ -143,6 +144,10 @@ int v86_is_active(void);
 /* IRQ スタブから呼ばれる割り込み反射。frame は PUSHAD 後のフレーム先頭。
  * ゲストの IVT を引いてスタックに FLAGS/CS/IP を積み、ISR へ飛ばす。 */
 void v86_reflect_irq(u32 *frame, u32 vector);
+
+/* #GP フレーム版の割り込み注入。ゲストの INT n のうち HLE しないものを
+ * ゲスト自身の IVT (多くは BIOS ROM) へ流すために使う。 */
+void v86_inject_int(u32 *frame, u32 vector);
 
 /* 反射した割り込みの回数 (検証用) */
 u32 v86_irq_reflect_count(void);

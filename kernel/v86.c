@@ -11,6 +11,7 @@
 #include "paging.h"
 #include "v86_mem.h"
 #include "v86_io.h"
+#include "v86_bios.h"
 #include "idt.h"
 #include "kprintf.h"
 
@@ -25,11 +26,13 @@ static enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
 /* 直近の #GP の観測値 (デバッグ用) */
 static u32 v86_gp_cs = 0;
 static u32 v86_gp_ip = 0;
+static u32 v86_gp_fl = 0;
 static u32 v86_gp_n  = 0;
 
 enum v86_exit_reason v86_get_exit_reason(void) { return v86_exit_reason; }
 u32 v86_last_gp_cs(void) { return v86_gp_cs; }
 u32 v86_last_gp_ip(void) { return v86_gp_ip; }
+u32 v86_last_gp_eflags(void) { return v86_gp_fl; }
 u32 v86_gp_count(void)   { return v86_gp_n; }
 
 /* ゲストの seg:off を物理アドレスに直す。
@@ -45,9 +48,14 @@ static u8 *v86_ptr(u32 seg, u32 off)
 /*                                                                          */
 /*  戻り値 0 で V86 に復帰、非 0 でセッション終了。                         */
 /*                                                                          */
-/*  IOPL=3 で走らせているので INT n / CLI / STI / PUSHF / POPF / IRET は     */
-/*  ここに来ない。来るのは I/O 許可ビットマップで塞いだポートへの IN/OUT と、*/
-/*  本当に未対応の命令だけ。                                                */
+/*  IOPL=3 なので CLI / STI / PUSHF / POPF / IRET はここに来ない。           */
+/*  来るのは I/O 許可ビットマップで塞いだポートへの IN/OUT、INT n、          */
+/*  そして本当に未対応の命令。                                              */
+/*                                                                          */
+/*  INT n が来る理由: V86 の INT n は IOPL に関係なくプロテクトモードの      */
+/*  IDT を引く仕様で、OS32 のゲートは DPL=0 / ゲストは CPL=3 なので          */
+/*  「softint && gate.DPL < CPL」で #GP になる。おかげでトランポリンを       */
+/*  仕込まなくても BIOS コールを横取りできる。                              */
 /* ======================================================================== */
 /* ゲストの IP を n バイト進める。V86 の IP は 16bit なのでラップさせる。 */
 static void v86_advance_ip(u32 *frame, u32 n)
@@ -78,6 +86,8 @@ int v86_gp_handler(u32 *frame)
     v86_gp_n++;
     v86_gp_cs = cs;
     v86_gp_ip = ip;
+    v86_gp_fl = frame[V86F_EFLAGS];
+
 
     /* プレフィックスを読み飛ばす。
      * 0x66 だけはオペランドサイズを変えるので覚えておく。 */
@@ -144,6 +154,24 @@ int v86_gp_handler(u32 *frame)
         v86_advance_ip(frame, len + 1);
         return 0;
 
+    case 0xCD:  /* INT imm8 */
+        /* V86 の INT n は IOPL に関係なくプロテクトモードの IDT を引く。
+         * OS32 のゲートは DPL=0、ゲストは CPL=3 なので必ずここに落ちる。
+         * (IOPL=3 が消してくれるのは CLI/STI/PUSHF/POPF/IRET のほう) */
+        {
+            u32 vec = pc[len + 1];
+            v86_advance_ip(frame, len + 2);
+            if (v86_bios_is_hle(vec)) {
+                /* HLE 対象: レジスタと CF を直接書いて戻す。
+                 * INT は配送前に落ちているのでゲストスタックは無傷。 */
+                v86_bios_dispatch(frame, vec);
+            } else {
+                /* それ以外はゲスト自身の IVT (多くは BIOS ROM) へ流す */
+                v86_inject_int(frame, vec);
+            }
+        }
+        return 0;
+
     case 0xF4:  /* HLT — Phase 1 から引き続きセッション終了の合図 */
         v86_exit_reason = V86_EXIT_HLT;
         return 1;
@@ -189,37 +217,50 @@ static u32 v86_tick_limit = 0;
 u32 v86_irq_reflect_count(void) { return v86_irq_n; }
 int v86_is_active(void)         { return v86_active; }
 
-void v86_reflect_irq(u32 *frame, u32 vector)
+/* 割り込み合成の本体。#GP フレームと IRQ フレームでインデックスが
+ * 1 ワードずれるだけで、やることは同じ (実機の INT n と等価)。 */
+static void v86_do_int(u32 *frame, u32 vector,
+                       int i_eip, int i_cs, int i_eflags, int i_esp, int i_ss)
 {
     u32 sp;
     u16 *gstack;
     const u16 *ivt;
 
-    if (!v86_active) {
-        return;
-    }
-
     /* ゲストスタックに 3 ワード積む。SP は 16bit なのでラップさせる。 */
-    sp = (frame[V86I_ESP] - 6) & 0xFFFFU;
-    gstack = (u16 *)v86_ptr(frame[V86I_SS], sp);
+    sp = (frame[i_esp] - 6) & 0xFFFFU;
+    gstack = (u16 *)v86_ptr(frame[i_ss], sp);
 
     /* ゲストには VM ビットを見せない (下位 16bit だけ積む) */
-    gstack[0] = (u16)(frame[V86I_EIP] & 0xFFFFU);
-    gstack[1] = (u16)(frame[V86I_CS]  & 0xFFFFU);
-    gstack[2] = (u16)(frame[V86I_EFLAGS] & 0xFFFFU);
+    gstack[0] = (u16)(frame[i_eip] & 0xFFFFU);
+    gstack[1] = (u16)(frame[i_cs]  & 0xFFFFU);
+    gstack[2] = (u16)(frame[i_eflags] & 0xFFFFU);
 
-    frame[V86I_ESP] = sp;
+    frame[i_esp] = sp;
 
     /* IVT からハンドラを引く。IVT はゲストの物理 0 番地にある。 */
     ivt = (const u16 *)(vector * 4);
-    frame[V86I_EIP] = ivt[0];
-    frame[V86I_CS]  = ivt[1];
+    frame[i_eip] = ivt[0];
+    frame[i_cs]  = ivt[1];
 
     /* 実機の割り込み受理と同じく IF と TF を落とす。
      * ゲストの IRET がスタックから FLAGS を戻すので IF は自動で復帰する。 */
-    frame[V86I_EFLAGS] &= ~(EFLAGS_IF | 0x100UL);
+    frame[i_eflags] &= ~(EFLAGS_IF | 0x100UL);
+}
 
+void v86_reflect_irq(u32 *frame, u32 vector)
+{
+    if (!v86_active) {
+        return;
+    }
+    v86_do_int(frame, vector,
+               V86I_EIP, V86I_CS, V86I_EFLAGS, V86I_ESP, V86I_SS);
     v86_irq_n++;
+}
+
+void v86_inject_int(u32 *frame, u32 vector)
+{
+    v86_do_int(frame, vector,
+               V86F_EIP, V86F_CS, V86F_EFLAGS, V86F_ESP, V86F_SS);
 }
 
 /* タイマ IRQ の反射経路から呼ばれる。上限を超えたら非 0 を返す。 */
@@ -322,12 +363,13 @@ int v86_run(const struct v86_context *ctx)
 static const u8 v86_test_code[] = {
     0xB8, 0x00, 0x8C, 0x8E, 0xC0, 0x31, 0xFF, 0xB8, 0x34, 0x12, 0x26, 0x89,
     0x05, 0xB0, 0x00, 0xE6, 0x5F, 0xE4, 0x60, 0xE4, 0x00, 0xB0, 0x55, 0xE6,
-    0x00, 0x31, 0xC0, 0x8E, 0xC0, 0x26, 0xC7, 0x06, 0x20, 0x00, 0x47, 0x00,
+    0x00, 0x31, 0xC0, 0x8E, 0xC0, 0x26, 0xC7, 0x06, 0x20, 0x00, 0x5E, 0x00,
     0x26, 0xC7, 0x06, 0x22, 0x00, 0x00, 0x8A, 0xB8, 0x00, 0x8C, 0x8E, 0xD8,
     0xC7, 0x06, 0x04, 0x00, 0x00, 0x00, 0xFB, 0xA1, 0x04, 0x00, 0x83, 0xF8,
-    0x03, 0x72, 0xF8, 0xFA, 0xC7, 0x06, 0x02, 0x00, 0x78, 0x56, 0xF4, 0x50,
-    0x1E, 0xB8, 0x00, 0x8C, 0x8E, 0xD8, 0xFF, 0x06, 0x04, 0x00, 0x1F, 0x58,
-    0xCF
+    0x03, 0x72, 0xF8, 0xFA, 0xB4, 0xD6, 0xB0, 0x90, 0xCD, 0x1B, 0xBB, 0x00,
+    0x00, 0x72, 0x08, 0x80, 0xFC, 0x00, 0x75, 0x03, 0xBB, 0x05, 0xB1, 0x89,
+    0x1E, 0x06, 0x00, 0xC7, 0x06, 0x02, 0x00, 0x78, 0x56, 0xF4, 0x50, 0x1E,
+    0xB8, 0x00, 0x8C, 0x8E, 0xD8, 0xFF, 0x06, 0x04, 0x00, 0x1F, 0x58, 0xCF
 };
 
 /* スモークテストの結果を外から観測できるように残す。
@@ -341,6 +383,12 @@ u32 v86_smoke_gp     = 0;   /* セッション中の #GP 回数 */
 u32 v86_smoke_iotrap = 0;   /* うち I/O トラップ回数 */
 u32 v86_smoke_irq    = 0;   /* ゲストへ反射した IRQ 回数 */
 u32 v86_smoke_gcnt   = 0;   /* ゲスト ISR が数えた回数 */
+u32 v86_smoke_bios   = 0;   /* ゲストから見た BIOS コールの結果 */
+u32 v86_smoke_bcnt   = 0;   /* カーネルが処理した BIOS コール数 */
+u32 v86_smoke_gpcs   = 0;   /* 最後に #GP したゲスト CS */
+u32 v86_smoke_gpip   = 0;   /* 同 IP */
+u32 v86_smoke_gpop   = 0;   /* 同 先頭オペコード 4 バイト */
+u32 v86_smoke_gpfl   = 0;   /* 同 ゲスト EFLAGS (IOPL 確認用) */
 
 int v86_smoke_test(void)
 {
@@ -383,6 +431,12 @@ int v86_smoke_test(void)
     v86_smoke_iotrap = v86_io_trap_count();
     v86_smoke_irq    = v86_irq_reflect_count();
     v86_smoke_gcnt   = (u32)*(volatile u16 *)(V86_TEST_MAGIC_ADDR + 4);
+    v86_smoke_bios   = (u32)*(volatile u16 *)(V86_TEST_MAGIC_ADDR + 6);
+    v86_smoke_bcnt   = v86_bios_call_count();
+    v86_smoke_gpcs   = v86_last_gp_cs();
+    v86_smoke_gpip   = v86_last_gp_ip();
+    v86_smoke_gpop   = *(volatile u32 *)v86_ptr(v86_smoke_gpcs, v86_smoke_gpip);
+    v86_smoke_gpfl   = v86_last_gp_eflags();
 
     v86_mem_teardown();
 
@@ -397,6 +451,8 @@ int v86_smoke_test(void)
                         v86_smoke_magic  == V86_TEST_MAGIC &&
                         v86_smoke_magic2 == 0x5678U &&
                         v86_smoke_iotrap == 2U &&
-                        v86_smoke_gcnt   >= 3U) ? 0 : 1;
+                        v86_smoke_gcnt   >= 3U &&
+                        v86_smoke_bios   == 0xB105U &&
+                        v86_smoke_bcnt   == 1U) ? 0 : 1;
     return (int)v86_smoke_result;
 }
