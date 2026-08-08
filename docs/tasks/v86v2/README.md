@@ -17,14 +17,23 @@
 | 1 | [01_prior_session_analysis.md](01_prior_session_analysis.md) | 前回の最終セッションに残っていたログの再解析 |
 | 2 | [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) | NP21/W のページング保護実装の検証 |
 | 3 | [03_ys_profile.md](03_ys_profile.md) | Ys I の実挙動プロファイル。全ての数値の一次データ |
-| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (9 項目) と検証方法。実装する人はここ |
-| **5** | [05_disk_bios_plan.md](05_disk_bios_plan.md) | **次にやること**。INT 1Bh を loop_dev に繋いでディスクからブートする計画 |
+| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (12 項目) と検証方法。実装する人はここ |
+| **5** | [05_disk_bios_plan.md](05_disk_bios_plan.md) | **次にやること**。INT 1Bh の実装計画。§3.5 が現在の停止点 |
 
 ## 動かしてみる
 
 ```
-v86 -t      OS32 のシェルから V86 セルフテストを実行する
+v86 -t              V86 セルフテスト (モード遷移 / I/O / IRQ 反射)
+v86 -d <image>      INT 1Bh READ DATA をディスクの直読みと突き合わせる
+v86 -b <image>      イメージの IPL を 1FC0:0000 に読んで起動する
 ```
+
+### いまどこまで動くか
+
+`v86 -b /host/Ys.D88` で **IPL が実行され、次段をロードして `CS=0x0060` へ
+制御が渡る**ところまで到達している。その先の**コピープロテクトのセクタ読み
+(SEEK cyl=1 → READ C=0,H=1,R=1) で止まっている**。
+→ [04 §7-1](04_implementation_status.md) / [05 §3.5](05_disk_bios_plan.md)
 
 ---
 
@@ -67,6 +76,16 @@ V86 の `INT n` は IOPL に関係なくプロテクトモードの IDT を引�
 結果的には直接デコードの方が簡単だったので実害は無い。
 → [04 §4-7](04_implementation_status.md)
 
+**「D88 のセクタ長はイメージごとに 1 つ」** — これも誤り。
+`Ys.D88` は track0 が 256B×16、以降が 1024B×5 で**トラックごとに違う**。
+ゲストが `CH` で指定してくる N コードをそのまま信じるのが正しい。
+→ [04 §4-12](04_implementation_status.md)
+
+**「タイムアウトがあれば暴走しても戻れる」** — IOPL=3 ではゲストの `CLI` が
+実 IF を落とすので、タイマ由来の仕組みは全部効かない。
+ウォッチドッグは `#GP` 回数で持つこと。
+→ [04 §4-10](04_implementation_status.md)
+
 ---
 
 ## 調査の作法
@@ -88,7 +107,7 @@ V86 の `INT n` は IOPL に関係なくプロテクトモードの IDT を引�
 
 | 対象 | 場所 |
 |---|---|
-| NP21/W ai-debug fork | `/home/hight/np21w-src` (ブランチ `feat/fault-capture`) |
+| NP21/W ai-debug fork | `/home/hight/np21w-src` (`main` にマージ済み) |
 | MCP サーバ | `tools/np21w_mcp/server.py` |
 | テスト用ディスクイメージ | `/mnt/c/os32/` (`Ys.D88` が動作する。`Ys_FM.D88` は壊れている) |
 | プロファイル専用 INI | `C:\Users\hight\Documents\np21w\ysprof.ini` (HDD 無し・20MHz) |
