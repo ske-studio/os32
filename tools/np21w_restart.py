@@ -13,12 +13,6 @@ import sys
 import os
 import subprocess
 import time
-import re
-
-# Windowsパス形式での指定が必要
-NP21W_DIR = os.environ.get('WIN_NP21W_DIR', r'C:\np21w')
-NP21W_EXE = os.path.join(NP21W_DIR, 'np21x64w.exe')
-NP21W_INI = os.path.join(NP21W_DIR, 'np21x64w.ini')
 
 # WSLパス変換
 def to_win_path(wsl_path):
@@ -28,6 +22,30 @@ def to_win_path(wsl_path):
         rest = wsl_path[6:].replace('/', '\\')
         return f'{drive}:{rest}'
     return wsl_path
+
+
+# NP21W_DIR: 環境変数 → .env → .env.sample の順で解決 (nhd_deploy.py と同じ規約)
+def _resolve_np21w_dir():
+    """NP21W_DIR(WSLパス)を解決する"""
+    if os.environ.get('NP21W_DIR'):
+        return os.environ['NP21W_DIR']
+    proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for env_file in ['.env', '.env.sample']:
+        env_path = os.path.join(proj_dir, env_file)
+        if os.path.isfile(env_path):
+            with open(env_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('NP21W_DIR='):
+                        return line.split('=', 1)[1].strip()
+    return "/tmp/np21w"
+
+
+NP21W_DIR_WSL = _resolve_np21w_dir()
+# PowerShellに渡すのでWindowsパス形式が必要。WIN_NP21W_DIRで直接上書きも可能。
+NP21W_DIR = os.environ.get('WIN_NP21W_DIR') or to_win_path(NP21W_DIR_WSL)
+NP21W_EXE = NP21W_DIR + '\\np21x64w.exe'
+NP21W_INI = NP21W_DIR + '\\np21x64w.ini'
 
 def stop_np21w():
     """NP21/Wプロセスを停止"""
@@ -44,9 +62,9 @@ def update_ini_fdd1(fdd1_path):
     """INIファイルのFDD1FILEを更新"""
     win_path = to_win_path(fdd1_path) if fdd1_path.startswith('/') else fdd1_path
     
-    # INIをWindowsパスで読んで書き換え
-    ini_wsl = NP21W_INI.replace('\\', '/').replace('C:', '/mnt/c')
-    
+    # 書き換えはWSL側から行うのでWSLパスを使う
+    ini_wsl = os.path.join(NP21W_DIR_WSL, 'np21x64w.ini')
+
     try:
         with open(ini_wsl, 'rb') as f:
             content = f.read()

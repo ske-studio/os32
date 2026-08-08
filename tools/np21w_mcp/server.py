@@ -10,8 +10,12 @@ Speaks the MCP stdio transport (newline-delimited JSON-RPC 2.0) using only
 the Python standard library, so no `pip install` is required.
 """
 
+import binascii
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -27,7 +31,7 @@ MAP_PATH = os.environ.get(
 SYMS = SymbolTable(os.path.normpath(MAP_PATH))
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "np21w-aidebug", "version": "1.0.0"}
+SERVER_INFO = {"name": "np21w-aidebug", "version": "1.1.0"}
 
 
 # --------------------------------------------------------------------------
@@ -53,6 +57,40 @@ def _resolve_or_error(token):
     if addr is None:
         raise emu.EmuError("unknown symbol: %s" % token)
     return addr
+
+
+# --------------------------------------------------------------------------
+# host objdump (the emulator's built-in disassembler only decodes mnemonics,
+# never ModRM/operands, so it advances one byte at a time -- unusable)
+# --------------------------------------------------------------------------
+
+_OBJDUMP_CACHE = []
+
+
+def _objdump():
+    """Path to a usable objdump, or None."""
+    if not _OBJDUMP_CACHE:
+        for cand in (os.environ.get("OS32_OBJDUMP"),
+                     "i686-elf-objdump", "objdump"):
+            found = shutil.which(cand) if cand else None
+            if found:
+                _OBJDUMP_CACHE.append(found)
+                break
+        else:
+            _OBJDUMP_CACHE.append(None)
+    return _OBJDUMP_CACHE[0]
+
+
+_OBJDUMP_LINE_RE = re.compile(r"^\s*([0-9a-f]+):\t([0-9a-f ]+?)\s*\t(.*)$")
+_OPERAND_ADDR_RE = re.compile(r"0x([0-9a-f]{4,8})\b")
+
+
+def _annotate_operands(text):
+    """Append <symbol> to branch/absolute targets that resolve in kernel.map."""
+    def sub(m):
+        sym = SYMS.annotate(int(m.group(1), 16))
+        return m.group(0) + (" <%s>" % sym if sym else "")
+    return _OPERAND_ADDR_RE.sub(sub, text)
 
 
 # --------------------------------------------------------------------------
@@ -90,10 +128,72 @@ def tool_write_mem(args):
 
 
 def tool_disasm(args):
-    q = "/api/disasm?n=%d" % int(args.get("n", 8))
+    n = max(1, min(int(args.get("n", 8)), 256))
+
     if "addr" in args:
-        q += "&addr=0x%x" % _resolve_or_error(args["addr"])
-    return _json(emu.get(q))
+        addr = _resolve_or_error(args["addr"])
+    else:
+        addr = int(_json(emu.get("/api/status"))["eip"], 16)
+
+    od = _objdump()
+    if od is None:
+        # no binutils on the host: fall back to the emulator, warts and all
+        q = "/api/disasm?n=%d&addr=0x%x" % (n, addr)
+        d = _json(emu.get(q))
+        d["warning"] = ("host objdump not found; used the emulator's built-in "
+                        "disassembler, which does not decode operands and "
+                        "reports wrong instruction lengths")
+        return d
+
+    bits = args.get("bits")
+    if bits is None:
+        st = _json(emu.get("/api/status"))
+        bits = 32 if st.get("protected_mode") and not st.get("vm86") else 16
+    bits = int(bits)
+
+    # x86 instructions are at most 15 bytes; over-read so the n-th one is whole
+    space = args.get("space", "linear")
+    nbytes = min(n * 15 + 15, 4096)
+    mem = _json(emu.get("/api/mem?addr=0x%x&len=%d&space=%s"
+                        % (addr, nbytes, space)))
+    raw = binascii.unhexlify(mem["hex"])
+
+    fd, path = tempfile.mkstemp(prefix="np21w_dis_", suffix=".bin")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        p = subprocess.run(
+            [od, "-D", "-b", "binary",
+             "-m", "i386" if bits == 32 else "i8086",
+             "--adjust-vma=0x%x" % addr, path],
+            capture_output=True, timeout=20)
+    finally:
+        os.unlink(path)
+    if p.returncode != 0:
+        raise emu.EmuError("objdump failed: %s"
+                           % p.stderr.decode("utf-8", "replace")[:200])
+
+    lines = []
+    emitted = 0
+    cur_sym = None
+    for line in p.stdout.decode("utf-8", "replace").splitlines():
+        m = _OBJDUMP_LINE_RE.match(line)
+        if not m:
+            continue
+        at = int(m.group(1), 16)
+        sym = SYMS.annotate(at)
+        name, _, off = sym.partition("+")
+        if name and name != cur_sym:
+            lines.append("%08x <%s>:" % (at - (int(off, 16) if off else 0),
+                                         name))
+            cur_sym = name
+        lines.append("  %6x:\t%-21s\t%s"
+                     % (at, m.group(2), _annotate_operands(m.group(3))))
+        emitted += 1
+        if emitted >= n:
+            break
+
+    return "\n".join(lines) if lines else "(no instructions decoded)"
 
 
 def tool_cmd(args):
@@ -151,13 +251,47 @@ def tool_step(args):
     return _annotate_eip(d)
 
 
-def tool_trace(_):
-    d = _json(emu.get("/api/trace"))
-    for e in d.get("trace", []):
-        sym = SYMS.annotate(int(e["eip"], 16))
+def tool_trace(args):
+    """Compact, bounded view of the ring buffer.
+
+    The raw endpoint returns up to 4096 entries; rendering all of them as
+    JSON is ~300 KB, which no caller can read. Default to the tail, collapse
+    runs of the same address, and emit one line per entry.
+    """
+    limit = max(1, min(int(args.get("limit", 100)), 4096))
+    collapse = args.get("collapse", True)
+    entries = _json(emu.get("/api/trace")).get("trace", [])
+    total = len(entries)
+
+    if collapse:
+        rows = []
+        for e in entries:
+            key = (e.get("cs"), e.get("eip"))
+            if rows and rows[-1][0] == key:
+                rows[-1][1] += 1
+            else:
+                rows.append([key, 1])
+    else:
+        rows = [[(e.get("cs"), e.get("eip")), 1] for e in entries]
+
+    shown = rows[:limit] if args.get("head") else rows[-limit:]
+
+    lines = []
+    for (cs, eip), count in shown:
+        sym = SYMS.annotate(int(eip, 16))
+        row = "%s:%s" % (cs, eip)
         if sym:
-            e["eip_sym"] = sym
-    return d
+            row += " " + sym
+        if count > 1:
+            row += "  x%d" % count
+        lines.append(row)
+
+    head = "trace: %d entries" % total
+    if collapse:
+        head += ", %d after collapsing runs" % len(rows)
+    head += "; showing %s %d\n" % ("first" if args.get("head") else "last",
+                                   len(shown))
+    return head + "\n".join(lines)
 
 
 def tool_trace_start(_):
@@ -168,18 +302,44 @@ def tool_trace_stop(_):
     return _json(emu.post("/api/trace/stop"))
 
 
+# statsave.h: SUCCESS=0, FAILURE=-1; everything else is a non-fatal warning
+_STATFLAGS = ((0x0001, "disk image changed since the save"),
+              (0x0002, "emulator version differs"),
+              (0x0080, "loaded with warnings"),
+              (0x0100, "state file version mismatch"))
+
+
+def _state_result(d):
+    """Re-derive success from the raw statsave flags.
+
+    The emulator reports ok=0 for any non-zero result, but only -1 is a real
+    failure -- 0x80/0x01/0x02 are warnings and the state did load.
+    """
+    r = d.get("result", 0)
+    if r < 0:
+        return {"ok": False, "result": r, "error": "statsave reported failure"}
+    out = {"ok": True, "result": r}
+    if r:
+        out["warnings"] = [msg for bit, msg in _STATFLAGS if r & bit] or \
+            ["unknown statsave flags 0x%x" % r]
+    return out
+
+
 def tool_state_save(args):
-    return _json(emu.post("/api/state/save", "file=" + args["file"]))
+    return _state_result(
+        _json(emu.post("/api/state/save", "file=" + args["file"])))
 
 
 def tool_state_load(args):
-    return _json(emu.post("/api/state/load", "file=" + args["file"]))
+    return _state_result(
+        _json(emu.post("/api/state/load", "file=" + args["file"])))
 
 
-def tool_screenshot(_):
-    path = os.path.join(tempfile.gettempdir(), "np21w_shot.bmp")
+def tool_screenshot(args):
+    path = args.get("path") or os.path.join(tempfile.gettempdir(),
+                                            "np21w_shot.bmp")
     emu.get_to_file("/api/screenshot", path)
-    return {"saved": path, "note": "BMP written to host filesystem"}
+    return {"saved": path, "note": "BMP written to the host filesystem"}
 
 
 # --------------------------------------------------------------------------
@@ -223,10 +383,17 @@ TOOLS = {
                             "space": {"type": "string", "default": "phys"}},
                            ["addr", "hex"])),
     "emu_disasm": (tool_disasm,
-                   "Disassemble n instructions (note: internal disassembler "
-                   "has known boundary quirks; prefer objdump on kernel.elf).",
+                   "Disassemble n instructions of live guest memory via host "
+                   "objdump, with kernel.map symbols on labels and branch "
+                   "targets. Defaults to the current EIP.",
                    _obj({"addr": _ADDR,
-                         "n": {"type": "integer", "default": 8}})),
+                         "n": {"type": "integer", "default": 8,
+                               "description": "1..256"},
+                         "space": {"type": "string",
+                                   "enum": ["phys", "linear", "virt"],
+                                   "default": "linear"},
+                         "bits": {"type": "integer", "enum": [16, 32],
+                                  "description": "default: from CPU mode"}})),
     "emu_cmd": (tool_cmd,
                 "Run a shell command in the OS32 rshell over the embedded "
                 "serial bridge; returns its output.",
@@ -250,12 +417,20 @@ TOOLS = {
     "emu_break_list": (tool_break_list,
                        "List breakpoints (EIP symbol-annotated).", _obj({})),
     "emu_step": (tool_step,
-                 "Single-step n instructions (must be paused at a "
-                 "breakpoint); returns the new EIP.",
+                 "Single-step n instructions; returns the new EIP. Requires a "
+                 "breakpoint (trap) pause -- emu_pause alone is not enough, "
+                 "so set a breakpoint and wait for trap_pause=1 first.",
                  _obj({"n": {"type": "integer", "default": 1}})),
     "emu_trace": (tool_trace,
-                  "Get the CS:EIP execution trace (symbol-annotated).",
-                  _obj({})),
+                  "CS:EIP execution trace, symbol-annotated, one entry per "
+                  "line. Returns the tail by default and collapses repeated "
+                  "addresses to 'xN'.",
+                  _obj({"limit": {"type": "integer", "default": 100,
+                                  "description": "max lines, 1..4096"},
+                        "head": {"type": "boolean", "default": False,
+                                 "description": "oldest entries instead of "
+                                                "newest"},
+                        "collapse": {"type": "boolean", "default": True}})),
     "emu_trace_start": (tool_trace_start,
                         "Start recording the CS:EIP trace.", _obj({})),
     "emu_trace_stop": (tool_trace_stop,
@@ -267,8 +442,11 @@ TOOLS = {
                        "Load emulator state from a file.",
                        _obj({"file": {"type": "string"}}, ["file"])),
     "emu_screenshot": (tool_screenshot,
-                       "Capture the screen to a BMP on the host filesystem.",
-                       _obj({})),
+                       "Capture the screen to a BMP on the host filesystem "
+                       "(prefer emu_tvram for text screens).",
+                       _obj({"path": {"type": "string",
+                                      "description": "output BMP path; "
+                                                     "default: a temp file"}})),
 }
 
 

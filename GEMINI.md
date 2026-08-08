@@ -345,6 +345,6 @@ os32/
 | `docs/tasks/fep/` | FEP (Japanese input) detailed design, P1–P7 |
 | `docs/tasks/game/` | Board-game RPG port plan + engine extension plan |
 | `docs/tasks/wintree_port/` | Record of the feat/vdm work-tree port |
-| `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; mirror + manual VS build |
+| `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; build and deploy from WSL with `make build && make deploy` (mirrors to Windows and drives MSBuild) |
 
 For PC-9800 hardware specs, refer to `docs/PC9800Bible/`.

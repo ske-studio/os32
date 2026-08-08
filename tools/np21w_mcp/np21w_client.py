@@ -5,14 +5,30 @@ go through the Windows curl.exe. This layer is intentionally thin so it can be
 swapped for httpx once the firewall is opened.
 """
 
+import os
 import subprocess
 
 CURL = "/mnt/c/Windows/System32/curl.exe"
-BASE = "http://127.0.0.1:8025"
+# must match aidbport= in np21x64w.ini
+BASE = os.environ.get("NP21W_AIDEBUG_URL", "http://127.0.0.1:8025")
 
 
 class EmuError(Exception):
     pass
+
+
+def _hint(rc):
+    """Translate a curl exit code into something actionable, or None."""
+    if rc == 7:
+        return ("cannot connect to %s -- NP21/W is probably not running, or "
+                "its aidebug server is off (check aidebug=true / aidbport in "
+                "np21x64w.ini)" % BASE)
+    if rc == 28:
+        return ("request timed out -- the emulator may be stopped at a "
+                "breakpoint or busy; try emu_status")
+    if rc == 56:
+        return "connection reset by the emulator (it may have just exited)"
+    return None
 
 
 def _run(args, timeout):
@@ -23,9 +39,10 @@ def _run(args, timeout):
     except subprocess.TimeoutExpired:
         raise EmuError("request timed out")
     if p.returncode != 0:
-        raise EmuError("curl failed (rc=%d): %s" %
-                       (p.returncode,
-                        p.stderr.decode("utf-8", "replace")[:200]))
+        raise EmuError(_hint(p.returncode) or
+                       "curl failed (rc=%d): %s"
+                       % (p.returncode,
+                          p.stderr.decode("utf-8", "replace")[:200]))
     return p.stdout
 
 
