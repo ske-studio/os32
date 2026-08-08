@@ -171,6 +171,7 @@ typedef struct {
     int (__cdecl *ime_trygetkey)(void);
     int (__cdecl *v86_selftest)(void);
     int (__cdecl *v86_disktest)(const char *path);
+    int (__cdecl *v86_boot)(const char *path);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;

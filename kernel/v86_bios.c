@@ -22,6 +22,14 @@ static u32 bios_calls = 0;
 static u32 bios_last_vec = 0;
 static int disk_attached = 0;
 
+/* 失敗した INT 1Bh の中身。推測でなく事実で切り分けるために残す。
+ * static にすると kernel.map に出ずホストから読めないのでグローバル。 */
+u32 v86_disk_fail_n   = 0;      /* 失敗回数 */
+u32 v86_disk_fail_why = 0;      /* 1=範囲外 2=セクタ長 3=セクタ不在 4=装置なし */
+u32 v86_disk_fail_chs = 0;      /* cyl<<16 | head<<8 | sect */
+u32 v86_disk_fail_len = 0;      /* n<<16 | count */
+u32 v86_disk_fail_dst = 0;      /* ES:BP のリニアアドレス */
+
 u32 v86_bios_call_count(void)  { return bios_calls; }
 u32 v86_bios_last_vector(void) { return bios_last_vec; }
 int v86_bios_has_disk(void)    { return disk_attached; }
@@ -187,13 +195,21 @@ static void disk_read(u32 *frame)
                 (frame[V86F_EBP] & 0xFFFFU);
     u16 cyls; u8 heads, spt; u16 bps; u32 total;
     u32 seclen;
+    /* PC-98 のセクタ長は最大 1024 バイト (N=3)。 */
+    static u8 secbuf[1024];
+
+    v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+    v86_disk_fail_len = (n << 16) | count;
+    v86_disk_fail_dst = dst;
 
     if (!disk_attached) {
+        v86_disk_fail_n++; v86_disk_fail_why = 4;
         bios_set_ah(frame, 0x60);
         bios_set_cf(frame, 1);
         return;
     }
     if (!guest_range_ok(dst, count)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 1;
         bios_set_ah(frame, 0x40);       /* パラメータ異常 */
         bios_set_cf(frame, 1);
         return;
@@ -205,23 +221,38 @@ static void disk_read(u32 *frame)
         return;
     }
 
-    /* 転送単位はイメージの実セクタ長に従う。
-     * ゲストの CH (セクタ長コード) を鵜呑みにすると、実セクタの方が大きい
-     * ときに loop_dev が要求バイト数を超えて書き込み、ゲストのメモリを
-     * 壊す。CH は参考にとどめ、食い違ったら弾く。 */
-    seclen = bps;
-    if ((128UL << (n & 3)) != seclen) {
-        bios_set_ah(frame, 0x40);       /* パラメータ異常 */
+    /* 転送単位はゲストの CH (セクタ長コード) に従う。実機の FDC と同じで、
+     * 何バイトのセクタを読むかは呼び出し側が指定する。
+     *
+     * loop_dev が報告する bps を使ってはいけない。D88 はトラックごとに
+     * セクタ長が違い得るからで、実際 Ys.D88 はトラック 0 が 256B x 16、
+     * 以降が 1024B x 5 になっている。bps (=先頭トラックの値) で弾くと、
+     * IPL の次段が読めずに INT 1Bh を無限リトライする。
+     *
+     * ただし loop_dev はセクタの実長ぶんを書き込むので、ゲストのバッファへ
+     * 直接読ませるとサイズが食い違ったときに溢れる。いったんカーネル側の
+     * バウンスバッファへ受けてから、ゲストが要求した長さだけ渡す。 */
+    seclen = 128UL << (n & 3);
+    if (seclen > sizeof(secbuf)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 2;
+        bios_set_ah(frame, 0x40);
         bios_set_cf(frame, 1);
         return;
     }
+    (void)bps;
 
     while (count >= seclen) {
+        u32 i;
         if (loop_dev_read_chs(V86_DISK_SLOT, (u16)cyl, (u8)head,
-                              (u8)sect, (void *)dst) != 0) {
+                              (u8)sect, secbuf) != 0) {
+            v86_disk_fail_n++; v86_disk_fail_why = 3;
+            v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
             bios_set_ah(frame, 0x40);   /* セクタ不在 */
             bios_set_cf(frame, 1);
             return;
+        }
+        for (i = 0; i < seclen; i++) {
+            ((volatile u8 *)dst)[i] = secbuf[i];
         }
         dst   += seclen;
         count -= seclen;

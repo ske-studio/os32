@@ -24,11 +24,15 @@ static u32 v86_jmpbuf[6];
 static volatile int v86_active = 0;
 static enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
 
-/* 直近の #GP の観測値 (デバッグ用) */
-static u32 v86_gp_cs = 0;
-static u32 v86_gp_ip = 0;
-static u32 v86_gp_fl = 0;
-static u32 v86_gp_n  = 0;
+/* 直近の #GP の観測値。
+ *
+ * static にすると kernel.map に出ずホストから読めない。セッションが
+ * 終わるまで診断値が見えないと、走り続けているゲストの様子が分からず
+ * 手が止まる。実際それで詰まったのでグローバルにしてある。 */
+u32 v86_gp_cs = 0;
+u32 v86_gp_ip = 0;
+u32 v86_gp_fl = 0;
+u32 v86_gp_n  = 0;
 
 enum v86_exit_reason v86_get_exit_reason(void) { return v86_exit_reason; }
 u32 v86_last_gp_cs(void) { return v86_gp_cs; }
@@ -88,6 +92,13 @@ int v86_gp_handler(u32 *frame)
     v86_gp_cs = cs;
     v86_gp_ip = ip;
     v86_gp_fl = frame[V86F_EFLAGS];
+
+    /* ゲストの割り込み状態に依存しない歯止め。
+     * CLI したまま #GP を出し続けるゲストはここで止める。 */
+    if (v86_gp_n > V86_GP_LIMIT) {
+        v86_exit_reason = V86_EXIT_TIMEOUT;
+        return 1;
+    }
 
 
     /* プレフィックスを読み飛ばす。
@@ -563,4 +574,71 @@ int v86_disk_test(const char *path)
                        v86_disk_marker == 0xD15CU &&
                        same == V86_DISK_SECLEN) ? 0 : 1;
     return (int)v86_disk_result;
+}
+
+/* ======================================================================== */
+/*  ディスクイメージからのブート                                            */
+/*                                                                          */
+/*  PC-98 の起動シーケンスをなぞる: IPL (C0/H0/S1) を 1FC0:0000 に読み、     */
+/*  SS:SP をBIOS 相当の低位スタックに置いて、そこへ制御を渡す。             */
+/*  あとはゲストが INT 1Bh を使って自力で続きを読み込む。                   */
+/* ======================================================================== */
+
+u32 v86_boot_reason  = 0;   /* 終了理由 */
+u32 v86_boot_gp      = 0;   /* #GP 回数 */
+u32 v86_boot_bios    = 0;   /* BIOS コール回数 */
+u32 v86_boot_iotrap  = 0;   /* I/O トラップ回数 */
+u32 v86_boot_ioport  = 0;   /* 最後にトラップした I/O ポート */
+u32 v86_boot_gpcs    = 0;   /* 最後の #GP のゲスト CS */
+u32 v86_boot_gpip    = 0;   /* 同 IP */
+u32 v86_boot_gpop    = 0;   /* 同 オペコード 4 バイト */
+u32 v86_boot_irq     = 0;   /* ゲストへ反射した IRQ 回数 */
+
+int v86_boot(const char *path)
+{
+    struct v86_context ctx;
+    int reason;
+
+    if (v86_bios_attach_disk(path) != 0) {
+        return -1;
+    }
+    if (v86_mem_setup() != 0) {
+        v86_bios_detach_disk();
+        return -2;
+    }
+
+    /* IPL を読む。ここはカーネルが直接読む (ゲストはまだ動いていない)。 */
+    if (loop_dev_read_chs(V86_DISK_SLOT, 0, 0, 1,
+                          (void *)V86_IPL_ADDR) != 0) {
+        v86_mem_teardown();
+        v86_bios_detach_disk();
+        return -3;
+    }
+
+    ctx.eip    = 0x0000;
+    ctx.cs     = V86_IPL_SEG;
+    ctx.eflags = V86_EFLAGS_INIT;
+    ctx.esp    = V86_BOOT_SP;
+    ctx.ss     = V86_BOOT_SS;
+    ctx.es     = 0x0000;
+    ctx.ds     = 0x0000;
+    ctx.fs     = 0x0000;
+    ctx.gs     = 0x0000;
+
+    reason = v86_run(&ctx);
+
+    /* teardown 前に観測値を回収する */
+    v86_boot_reason = (u32)reason;
+    v86_boot_gp     = v86_gp_count();
+    v86_boot_bios   = v86_bios_call_count();
+    v86_boot_iotrap = v86_io_trap_count();
+    v86_boot_ioport = (u32)v86_io_last_port();
+    v86_boot_irq    = v86_irq_reflect_count();
+    v86_boot_gpcs   = v86_last_gp_cs();
+    v86_boot_gpip   = v86_last_gp_ip();
+    v86_boot_gpop   = *(volatile u32 *)v86_ptr(v86_boot_gpcs, v86_boot_gpip);
+
+    v86_mem_teardown();
+    v86_bios_detach_disk();
+    return reason;
 }

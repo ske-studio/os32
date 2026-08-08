@@ -861,3 +861,8 @@ int __cdecl wrap_v86_disktest(const char *path)
     return v86_disk_test(path);
 }
 
+int __cdecl wrap_v86_boot(const char *path)
+{
+    return v86_boot(path);
+}
+

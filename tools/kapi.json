@@ -1,5 +1,5 @@
 {
-  "version": 37,
+  "version": 38,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1207,6 +1207,13 @@
         "const char *path"
       ],
       "target": "v86_disk_test"
+    },
+    {
+      "name": "v86_boot",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ]
     }
   ]
 }

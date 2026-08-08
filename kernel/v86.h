@@ -156,6 +156,22 @@ u32 v86_irq_reflect_count(void);
  * 暴走したゲストを無限に走らせないための保険。 */
 #define V86_TICK_LIMIT      (30 * 100)      /* 30 秒 */
 
+/* #GP の上限。
+ *
+ * タイマ由来のタイムアウトはゲストが STI していることが前提で、IOPL=3 では
+ * ゲストが CLI したまま回り続けると一切効かない。実際 Ys の IPL を起動したら
+ * 拒否ポートの読みが期待値を返さずポーリングループに入り、#GP を出し続けた
+ * まま止まらなくなった。
+ *
+ * ゲストの割り込み状態に依存しない歯止めとして、セッション中の #GP 総数にも
+ * 上限を設ける。実測値はゲームプレイ中で 560/s、最も重い場面でも 1,334/s
+ * なので、100 万回は正常動作を妨げない一方、暴走は数秒で止まる。 */
+/* 1 回の #GP が拒否ポートの読みだけなら数マイクロ秒だが、INT 1Bh のように
+ * 実ディスク I/O を伴うと数ミリ秒かかる。100 万回にすると後者で何分も
+ * 帰ってこなくなるので、実用的に「数十秒で必ず戻る」値にしておく。
+ * 実測: IPL 段階の INT 1Bh は数十回。ゲーム本編のロードでも数千回程度。 */
+#define V86_GP_LIMIT        50000UL
+
 /* タイマ IRQ の反射経路から呼ぶ。上限超過なら非 0。 */
 int v86_tick_and_check_timeout(void);
 
@@ -163,6 +179,10 @@ int v86_tick_and_check_timeout(void);
  * カーネルが生存したまま戻れることを確認する。戻り値は v86_exit_reason。
  * 検証が済んだら削除する一時コード。 */
 int v86_smoke_test(void);
+
+/* ディスクイメージからゲストをブートする。IPL を 1FC0:0000 に読み、
+ * そこへ制御を渡す。戻り値は v86_exit_reason。 */
+int v86_boot(const char *path);
 
 /* ディスクテスト: イメージを attach し、ゲストに INT 1Bh READ をさせて
  * 読めた中身を loop_dev の直読と突き合わせる。0=一致、負=失敗。 */
@@ -175,5 +195,12 @@ int v86_disk_test(const char *path);
 #define V86_TEST_MAGIC       0x1234U
 #define V86_TEST_BUF_ADDR    0x8D000UL   /* ディスクテストの転送先 */
 #define V86_DISK_SECLEN      256U        /* PC-98 2HD ブートトラック */
+
+/* PC-98 の IPL は 1FC0:0000 に読まれ、そこから実行が始まる。
+ * ブートスタックは BIOS が用意する低位メモリ (実測で SS:SP=0000:0286)。 */
+#define V86_IPL_SEG          0x1FC0U
+#define V86_IPL_ADDR         0x1FC00UL
+#define V86_BOOT_SS          0x0000U
+#define V86_BOOT_SP          0x0290U
 
 #endif /* __V86_H */
