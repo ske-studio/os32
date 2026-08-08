@@ -147,7 +147,9 @@ int v86_is_active(void);
 
 /* IRQ スタブから呼ばれる割り込み反射。frame は PUSHAD 後のフレーム先頭。
  * ゲストの IVT を引いてスタックに FLAGS/CS/IP を積み、ISR へ飛ばす。 */
-void v86_reflect_irq(u32 *frame, u32 vector);
+/* 実 IRQ をゲストに反射する。第 2 引数は **IRQ 番号** (ベクタではない)。
+ * ベクタとマスクの判定は仮想 PIC (v86_pic.h) が行う。 */
+void v86_reflect_irq(u32 *frame, u32 irq);
 
 /* #GP フレーム版の割り込み注入。ゲストの INT n のうち HLE しないものを
  * ゲスト自身の IVT (多くは BIOS ROM) へ流すために使う。 */

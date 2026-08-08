@@ -44,30 +44,67 @@ u32 v86_disk_ident_n  = 0;      /* 物理=論理 (フォールバック) で読�
  * リングにそのまま積んでおけば、ホストから emu_read_mem 一発で
  * 呼び出し列を復元できる。 */
 #define V86_DISKLOG_N   32
-u32 v86_disklog_w = 0;                          /* 次に書く位置 */
+u32 v86_disklog_w = 0;                          /* 積んだエントリ数 */
 u32 v86_disklog[V86_DISKLOG_N * 8];
 /*  [0] AX  [1] CX  [2] DX  [3] BX
  *  [4] ES:BP のリニアアドレス
- *  [5] 呼び出し時の物理シリンダ (cur_cyl)
+ *  [5] 呼び出し時の物理位置 (head<<8 | cyl)
  *  [6] 転送できたバイト数
- *  [7] 結果 (0=成功 / v86_disk_fail_why と同じ値) */
+ *  [7] 連続回数<<8 | 結果 (0=成功 / v86_disk_fail_why と同じ値) */
 
-/* 呼び出し時点のレジスタを積んでエントリを返す。
- * 結果 ([6],[7]) は処理のあとに呼び出し側が埋める。 */
-static u32 *disklog(u32 *frame, u32 phys)
+/* 直近 4 エントリのどれかと一致したら積まずに回数だけ数える。
+ *
+ * **これが無いとログが役に立たない。** ゲストは失敗したコマンドを
+ * 何万回でもリトライするので、32 エントリのリングが一瞬で埋まり、
+ * 「そこへ至る直前に何をしていたか」が消えてしまう。
+ * I/O トラップログ (kernel/v86_io.c) も同じ理由で同じ作りにしてある。
+ *
+ * **「直前と同じなら畳む」では足りない。** ゲストは失敗したコマンドを
+ * SEEK と READ の**組で**何万回もリトライするので、直前だけ見ていると
+ * 2 種類が交互に積まれてリングが一瞬で埋まり、そこへ至る履歴が消える。
+ * 周期 2〜4 のループを畳めるようにしておけば、最初の失敗もその後の
+ * 定常ループも同じログの中に残る。 */
+#define DISKLOG_LOOKBACK    4
+
+static void disklog(u32 *frame, u32 ax_in, u32 phys, u32 done, u32 result)
 {
-    u32 *e = &v86_disklog[(v86_disklog_w % V86_DISKLOG_N) * 8];
+    u32 rec[7];
+    u32 *e;
+    u32 back;
+    int i;
 
-    e[0] = frame[V86F_EAX] & 0xFFFFU;
-    e[1] = frame[V86F_ECX] & 0xFFFFU;
-    e[2] = frame[V86F_EDX] & 0xFFFFU;
-    e[3] = frame[V86F_EBX] & 0xFFFFU;
-    e[4] = ((frame[V86F_ES] & 0xFFFFU) << 4) + (frame[V86F_EBP] & 0xFFFFU);
-    e[5] = phys;
-    e[6] = 0;
-    e[7] = 0;
+    /* AX は処理の中で AH (ステータス) を書き換えるので、
+     * 呼び出し時点の値を別に受け取る。 */
+    rec[0] = ax_in;
+    rec[1] = frame[V86F_ECX] & 0xFFFFU;
+    rec[2] = frame[V86F_EDX] & 0xFFFFU;
+    rec[3] = frame[V86F_EBX] & 0xFFFFU;
+    rec[4] = ((frame[V86F_ES] & 0xFFFFU) << 4) + (frame[V86F_EBP] & 0xFFFFU);
+    rec[5] = phys;
+    rec[6] = done;
+
+    for (back = 1; back <= DISKLOG_LOOKBACK && back <= v86_disklog_w; back++) {
+        e = &v86_disklog[((v86_disklog_w - back) % V86_DISKLOG_N) * 8];
+        if ((e[7] & 0xFFU) != (result & 0xFFU)) {
+            continue;
+        }
+        for (i = 0; i < 7; i++) {
+            if (e[i] != rec[i]) {
+                break;
+            }
+        }
+        if (i == 7) {
+            e[7] += 0x100U;             /* 回数だけ増やす */
+            return;
+        }
+    }
+
+    e = &v86_disklog[(v86_disklog_w % V86_DISKLOG_N) * 8];
+    for (i = 0; i < 7; i++) {
+        e[i] = rec[i];
+    }
+    e[7] = 0x100U | (result & 0xFFU);
     v86_disklog_w++;
-    return e;
 }
 
 /* disk_read() が実際に転送できたバイト数 (ログ用) */
@@ -90,20 +127,31 @@ static u32 xfer_done = 0;
  *     trkseek(fdd, (fdc.treg[fdc.us] << 1) + fdc.hd)   ← 物理位置
  *     searchsector_d88()  … c/h/r/n を照合            ← 論理 ID
  *
- * 【実測】物理位置は SEEK の CL と DH の**両方**で決まる。
- * Ys の IPL が出した 9 コールを記録して突き合わせた結果:
+ * 【実測】物理シリンダは SEEK の CL、**物理ヘッドは READ の AL bit2**。
  *
- *   SEEK C=0 H=0 → READ ID(0,0,1) N=1 x16   物理trk0  (16x256)   ○
- *   SEEK C=1 H=0 → READ ID(0,1,1) N=3 x2    物理trk2  (ID C0,H1) ○
- *   SEEK C=0 H=1 → READ ID(0,0,3) N=3 x3    物理trk1  (ID C0,H0) ○
- *   SEEK C=2 H=1 → READ ID(1,0,1) N=3 x5    物理trk5  (ID C1,H0) ○
+ * 呼び出しログを最後まで並べて分かった。決め手は隣り合う 2 コール:
  *
- * READ の DH を物理ヘッドとみなすと 3 番目が物理trk0 になり、
- * そこには N=3 のセクタが無いので必ず失敗する。実際それで
- * 0x1700 へのロードが空振りし、ゲストが未初期化領域へ飛んで #UD になった。
+ *   SEEK C=1 → READ AL=94 ID(0,1,1) N=3 x2 → 0x15000
+ *              READ AL=90 ID(0,1,1) N=3 x2 → 0x15800
+ *
+ * **同じ ID を連続する 2 つのバッファへ読んでいる。** ローダが同じ 2KB を
+ * 二度読む道理は無いので、AL で行き先の物理トラックが変わっているはず。
+ * 実際 `Ys.D88` の物理trk2 と trk3 は ID が同一で中身が違う
+ * (先頭が "CHSRD10" と "BEPMU1")。AL bit2 をヘッドとすると
+ * trk3 → 0x15000、trk2 → 0x15800 となり辻褄が合う。
+ *
+ * DH をヘッドとみなす読み方も試したが、SEEK に DH=3 や DH=34 といった
+ * 値が飛んでくる (SEEK は CL しか設定していない) ため成立しない。
+ * ヘッド 1 が要る場面はすべて AL=0x94 で来ていた。
+ *
+ * 同じ ID を持つ物理トラックが 2 本ずつあるこのディスクの書式は、
+ * 「AL でヘッドを選ぶ」前提で初めて意味を持つ。
  */
 static u8 cur_cyl  = 0;
-static u8 cur_head = 0;
+static u8 cur_head = 0;      /* SEEK の DH。実際には使わないが観測用に残す */
+
+/* DA/UA (AL) から物理ヘッドを取り出す。 */
+#define V86_DAUA_HEAD(al)   (((al) >> 2) & 1U)
 
 u32 v86_bios_call_count(void)  { return bios_calls; }
 u32 v86_bios_last_vector(void) { return bios_last_vec; }
@@ -184,6 +232,7 @@ void v86_bios_setup(void)
     v86_disk_shift_n = 0;
     v86_disk_ident_n = 0;
     v86_disk_fail_n = 0;
+    v86_disklog_w = 0;
 }
 
 int v86_bios_is_hle(u32 vector)
@@ -329,8 +378,8 @@ static void disk_read(u32 *frame)
                 (frame[V86F_EBP] & 0xFFFFU);
     u16 cyls; u8 heads, spt; u16 bps; u32 total;
     u32 seclen;
-    u32 phys_cyl  = cur_cyl;    /* SEEK で決まった物理位置 */
-    u32 phys_head = cur_head;
+    u32 phys_cyl  = cur_cyl;                                /* SEEK の CL */
+    u32 phys_head = V86_DAUA_HEAD(frame[V86F_EAX] & 0xFFU); /* AL bit2 */
     int is_d88 = (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88);
     /* PC-98 のセクタ長は最大 1024 バイト (N=3)。 */
     static u8 secbuf[1024];
@@ -458,8 +507,9 @@ static void disk_read(u32 *frame)
 static void bios_int1b(u32 *frame)
 {
     u32 cmd = (frame[V86F_EAX] >> 8) & 0x0FU;   /* AH の下位ニブル */
+    u32 ax_in = frame[V86F_EAX] & 0xFFFFU;
+    u32 phys_in = ((u32)V86_DAUA_HEAD(ax_in & 0xFFU) << 8) | cur_cyl;
     u32 fails_before = v86_disk_fail_n;
-    u32 *log = disklog(frame, cur_cyl);
 
     xfer_done = 0;      /* SEEK 等でも「今回の転送量」が 0 になるように */
 
@@ -514,9 +564,9 @@ static void bios_int1b(u32 *frame)
         break;
     }
 
-    log[6] = xfer_done;
-    log[7] = (v86_disk_fail_n != fails_before) ? v86_disk_fail_why
-           : ((frame[V86F_EFLAGS] & 1UL) ? 0x80U : 0U);
+    disklog(frame, ax_in, phys_in, xfer_done,
+            (v86_disk_fail_n != fails_before) ? v86_disk_fail_why
+          : ((frame[V86F_EFLAGS] & 1UL) ? 0x80U : 0U));
 }
 
 void v86_bios_dispatch(u32 *frame, u32 vector)

@@ -56,12 +56,14 @@ extern v86_exit_to_kernel
 ;; EFLAGS は [esp+40] にある ([esp+32]=EIP, +36=CS, +40=EFLAGS)。
 ;; VM ビットが立っていればゲストからの割り込みなので反射する。
 ;;
-;; 引数は (frame*, vector) の順。C 側で v86_active も確認している。
+;; 引数は (frame*, irq 番号) の順。**ベクタ番号ではない。**
+;; どのベクタに落とすかはゲストが ICW2 に書いた値で決まるので、
+;; C 側が仮想 PIC に問い合わせて決める。マスクの判定も同じ場所。
 ;; ============================================================
 %macro V86_REFLECT 1
         test    dword [esp + 40], 0x00020000    ;; EFLAGS.VM
         jz      %%skip
-        push    dword %1                        ;; vector
+        push    dword %1                        ;; IRQ 番号
         lea     eax, [esp + 4]                  ;; frame 先頭 (PUSHAD)
         push    eax
         call    v86_reflect_irq
@@ -316,7 +318,7 @@ irq_stub_0:
         mov     al, OCW2_EOI
         out     PIC1_CMD, al
 
-        V86_REFLECT 0x08        ;; PC-98: IRQ0 → ゲストの INT 08h
+        V86_REFLECT 0           ;; IRQ0 (タイマ)。既定では INT 08h に落ちる
 
         ;; V86 セッションが長すぎたら畳む。暴走したゲストを無限に
         ;; 走らせないための保険。EOI も反射も済ませた後に判定する。
@@ -435,7 +437,7 @@ irq_stub_12:
         out     PIC2_CMD, al
         out     PIC1_CMD, al
 
-        V86_REFLECT 0x14        ;; PC-98: IRQ12 → ゲストの INT 14h
+        V86_REFLECT 12          ;; IRQ12 (サウンド)。既定では INT 14h に落ちる
 
         popad
         iretd

@@ -3,6 +3,7 @@
 /* ======================================================================== */
 
 #include "v86_io.h"
+#include "v86_pic.h"
 #include "tss.h"
 
 static u32 io_trap_n = 0;
@@ -10,6 +11,50 @@ static u16 io_last_port = 0;
 
 u32 v86_io_trap_count(void) { return io_trap_n; }
 u16 v86_io_last_port(void)  { return io_last_port; }
+
+/* ------------------------------------------------------------------------ */
+/*  I/O トラップログ                                                        */
+/*                                                                          */
+/*  カウンタと「最後に触ったポート」だけでは、ポーリングループの中身が      */
+/*  分からない。INT 1Bh でも同じところで詰まり、呼び出しログを並べて初めて  */
+/*  原因が確定した (docs/tasks/v86v2/05 §4-2)。同じ手をここにも置く。       */
+/*                                                                          */
+/*  ポーリングは同じ組み合わせが何万回も続くので、直前と同じ                */
+/*  (port, dir, value, CS:IP) は積まずに回数だけ数える。そうしないと        */
+/*  リングが 1 種類のエントリで埋まって何も読み取れない。                   */
+/* ------------------------------------------------------------------------ */
+#define V86_IOLOG_N     64
+u32 v86_iolog_w = 0;                    /* 積んだエントリ数 (回り込む前) */
+u32 v86_iolog[V86_IOLOG_N * 4];
+/*  [0] dir<<24 | size<<16 | port      dir: 0=IN, 1=OUT
+ *  [1] value                          IN なら返した値、OUT なら書かれた値
+ *  [2] cs<<16 | ip                    どの命令から来たか
+ *  [3] 同じ内容が連続した回数 */
+
+/* #GP ハンドラが記録しているゲストの CS:IP (kernel/v86.c) */
+extern u32 v86_gp_cs;
+extern u32 v86_gp_ip;
+
+static void iolog(u16 port, int size, int dir, u32 value)
+{
+    u32 key = ((u32)dir << 24) | ((u32)size << 16) | port;
+    u32 loc = ((v86_gp_cs & 0xFFFFU) << 16) | (v86_gp_ip & 0xFFFFU);
+    u32 *e;
+
+    if (v86_iolog_w != 0) {
+        e = &v86_iolog[((v86_iolog_w - 1) % V86_IOLOG_N) * 4];
+        if (e[0] == key && e[1] == value && e[2] == loc) {
+            e[3]++;
+            return;
+        }
+    }
+    e = &v86_iolog[(v86_iolog_w % V86_IOLOG_N) * 4];
+    e[0] = key;
+    e[1] = value;
+    e[2] = loc;
+    e[3] = 1;
+    v86_iolog_w++;
+}
 
 /* ------------------------------------------------------------------------ */
 /*  素通しにするポート                                                      */
@@ -85,6 +130,8 @@ void v86_io_apply_policy(void)
 
     io_trap_n = 0;
     io_last_port = 0;
+    v86_iolog_w = 0;
+    v86_pic_reset();
 
     tss_iomap_deny_all();
 
@@ -111,15 +158,27 @@ void v86_io_reset_policy(void)
 /* ------------------------------------------------------------------------ */
 u32 v86_io_in(u16 port, int size)
 {
+    u32 v;
+
+    if (v86_pic_is_port(port)) {
+        v = v86_pic_in(port);
+    } else {
+        v = (size == 1) ? 0xFFU : 0xFFFFU;
+    }
+
     io_trap_n++;
     io_last_port = port;
-    return (size == 1) ? 0xFFU : 0xFFFFU;
+    iolog(port, size, 0, v);
+    return v;
 }
 
 void v86_io_out(u16 port, int size, u32 value)
 {
-    (void)size;
-    (void)value;
+    if (v86_pic_is_port(port)) {
+        v86_pic_out(port, value);
+    }
+
     io_trap_n++;
     io_last_port = port;
+    iolog(port, size, 1, value);
 }

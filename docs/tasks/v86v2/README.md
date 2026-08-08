@@ -17,9 +17,9 @@
 | 1 | [01_prior_session_analysis.md](01_prior_session_analysis.md) | 前回の最終セッションに残っていたログの再解析 |
 | 2 | [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) | NP21/W のページング保護実装の検証 |
 | 3 | [03_ys_profile.md](03_ys_profile.md) | Ys I の実挙動プロファイル。全ての数値の一次データ |
-| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (14 項目) と検証方法。実装する人はここ |
+| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (15 項目) と検証方法。実装する人はここ |
 | 5 | [05_disk_bios_plan.md](05_disk_bios_plan.md) | INT 1Bh の実装計画と実測記録。ディスク経路は完了 |
-| **6** | [06_pic_plan.md](06_pic_plan.md) | **次にやること**。仮想 8259A の設計。いまの停止点はここ |
+| 6 | [06_pic_plan.md](06_pic_plan.md) | 仮想 8259A の設計と実測。完了 |
 
 ## 動かしてみる
 
@@ -31,11 +31,11 @@ v86 -b <image>      イメージの IPL を 1FC0:0000 に読んで起動する
 
 ### いまどこまで動くか
 
-`v86 -b /host/Ys.D88` で **IPL が実行され、15 回の `INT 1Bh` (失敗 0) で
-本体が最後まで読み込まれる**ところまで到達している。
-その先の**スレーブ PIC (`0x08`) のポーリングで止まっている** — 仮想 PIC が
-まだスタブ (読み `0xFF` / 書き破棄) なため。
-→ [04 §7-1](04_implementation_status.md) / [05 §4-1](05_disk_bios_plan.md)
+`v86 -b /host/Ys.D88` で **IPL が実行され、11 回の `INT 1Bh` (失敗 0 /
+リトライ 0) で本体が読み込まれ、仮想 PIC 経由で割り込みが回る**ところまで
+到達している。その先で**ロードしたコードの中の `#UD`** (`0160:01E6`) で
+止まっている。IRQ を全マスクしても同じ地点なので割り込みは無関係。
+→ [04 §7-1](04_implementation_status.md)
 
 ---
 
@@ -88,6 +88,12 @@ V86 の `INT n` は IOPL に関係なくプロテクトモードの IDT を引�
 特定セクタの細工ではなくディスク全体の書式。物理位置は SEEK の CL と DH で
 決まり、READ の C/H/R/N は ID 照合にしか使わない。
 → [04 §4-13](04_implementation_status.md) / [05 §3.5](05_disk_bios_plan.md)
+
+**「物理ヘッドは SEEK の DH で決まる」** — 誤り。ゲストは SEEK で `CL` しか
+設定しておらず、`DH` には `3` や `34` が入ってくる。物理ヘッドは READ の
+**`AL` (DA/UA) の bit2**。同じ ID の物理トラックが 2 本ずつあるこのディスクは、
+これを前提にしないと同じ 2KB を二度読むことになる。
+→ [05 §3.5.6](05_disk_bios_plan.md)
 
 **「タイムアウトがあれば暴走しても戻れる」** — IOPL=3 ではゲストの `CLI` が
 実 IF を落とすので、タイマ由来の仕組みは全部効かない。

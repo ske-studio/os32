@@ -11,6 +11,7 @@
 #include "paging.h"
 #include "v86_mem.h"
 #include "v86_io.h"
+#include "v86_pic.h"
 #include "v86_bios.h"
 #include "loop_dev.h"
 #include "idt.h"
@@ -42,6 +43,9 @@ u32 v86_flt_ip  = 0;
 u32 v86_flt_fl  = 0;
 u32 v86_flt_op  = 0;            /* CS:IP の先頭 4 バイト */
 u32 v86_flt_n   = 0;            /* 発生回数 */
+u32 v86_flt_ss  = 0;            /* ゲストの SS:SP。飛び先を追うのに要る */
+u32 v86_flt_sp  = 0;
+u32 v86_flt_stk[4];             /* SS:SP から 4 ワード (戻り先の手がかり) */
 
 enum v86_exit_reason v86_get_exit_reason(void) { return v86_exit_reason; }
 u32 v86_last_gp_cs(void) { return v86_gp_cs; }
@@ -112,6 +116,19 @@ void v86_fault_handler(u32 *frame, u32 vector)
     v86_flt_fl  = frame[V86F_EFLAGS];
     v86_flt_op  = (u32)pc[0] | ((u32)pc[1] << 8) |
                   ((u32)pc[2] << 16) | ((u32)pc[3] << 24);
+
+    /* ゲストのスタック先頭も残す。
+     * 「そこへ何処から飛んできたのか」は CS:IP だけでは分からず、
+     * 直前の CALL/INT の戻り先がスタックに残っていることが多い。 */
+    v86_flt_ss = frame[V86F_SS];
+    v86_flt_sp = frame[V86F_ESP];
+    {
+        const u16 *sp = (const u16 *)v86_ptr(v86_flt_ss, v86_flt_sp);
+        int i;
+        for (i = 0; i < 4; i++) {
+            v86_flt_stk[i] = sp[i];
+        }
+    }
 
     v86_exit_reason = V86_EXIT_FAULT;
 }
@@ -296,9 +313,20 @@ static void v86_do_int(u32 *frame, u32 vector,
     frame[i_eflags] &= ~(EFLAGS_IF | 0x100UL);
 }
 
-void v86_reflect_irq(u32 *frame, u32 vector)
+/* 実 IRQ をゲストに見せる。**引数は IRQ 番号であってベクタ番号ではない。**
+ *
+ * どのベクタへ落とすか、そもそも落としてよいかは仮想 PIC が決める。
+ * ゲストが IMR で塞いでいる割り込みを注入し続けると、ゲストのスタックが
+ * 際限なく伸びて IVT を割り込みフレームで踏み潰す — 前回プロジェクトが
+ * 実際に起こした事故なので、ここは必ず v86_pic_should_inject() を通す。 */
+void v86_reflect_irq(u32 *frame, u32 irq)
 {
+    u32 vector;
+
     if (!v86_active) {
+        return;
+    }
+    if (!v86_pic_should_inject(irq, &vector)) {
         return;
     }
     v86_do_int(frame, vector,
