@@ -18,7 +18,8 @@
 | 2 | [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) | NP21/W のページング保護実装の検証 |
 | 3 | [03_ys_profile.md](03_ys_profile.md) | Ys I の実挙動プロファイル。全ての数値の一次データ |
 | **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (14 項目) と検証方法。実装する人はここ |
-| **5** | [05_disk_bios_plan.md](05_disk_bios_plan.md) | **次にやること**。INT 1Bh の実装計画。§3.5 が現在の停止点 |
+| 5 | [05_disk_bios_plan.md](05_disk_bios_plan.md) | INT 1Bh の実装計画と実測記録。ディスク経路は完了 |
+| **6** | [06_pic_plan.md](06_pic_plan.md) | **次にやること**。仮想 8259A の設計。いまの停止点はここ |
 
 ## 動かしてみる
 

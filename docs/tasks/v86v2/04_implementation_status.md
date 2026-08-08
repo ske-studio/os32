@@ -442,7 +442,7 @@ I/O トラップ: 49,981 回 (ほぼ全部これ)
 |---|---|---|
 | 1 | ~~INT 1Bh の実処理~~ | ✅ SENSE / READ DATA 完了。IPL ブートまで到達 |
 | 2 | ~~SEEK 物理位置 + `loop_dev_seek_d88()`~~ | ✅ 完了。15 コール・失敗 0 (§4-13) |
-| 3 | **PIC / PIT の実仮想化** | **次のブロッカー** → §7-1。IMR/ISR/ICW を持つ仮想 8259A が要る |
+| 3 | **PIC / PIT の実仮想化** | **次のブロッカー** → §7-1。設計は [06_pic_plan.md](06_pic_plan.md) |
 | 4 | ~~セッション起動 API~~ | ✅ 完了。KAPI v36/v37/v38 (`v86_selftest` / `v86_disktest` / `v86_boot`) |
 | 5 | **キーボード入力経路** | ゲストにキーを渡す設計。IRQ1 反射 + `0x41/0x43` の仮想化 |
 | 6 | ~~暴走時の脱出手段~~ | ✅ `V86_GP_LIMIT` によるウォッチドッグを導入 (§4-10)。NMI 経路は将来検討 |
@@ -482,5 +482,6 @@ V86 側は `v86_bios_save_real()` で自衛しているため当面ブロッカ�
 - [01_prior_session_analysis.md](01_prior_session_analysis.md) — 前回残存ログの再解析
 - [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) — NP21/W のページング保護は正しかった
 - [03_ys_profile.md](03_ys_profile.md) — Ys I 実測プロファイルと FM 無音の原因特定
-- [05_disk_bios_plan.md](05_disk_bios_plan.md) — INT 1Bh の実装計画と §3.5 の現在地
+- [05_disk_bios_plan.md](05_disk_bios_plan.md) — INT 1Bh の実装計画と実測記録
+- [06_pic_plan.md](06_pic_plan.md) — 仮想 8259A の設計 (次の作業)
 - `drivers/loop_dev.h` — ディスクイメージ側の API (D88 の ID 探索を含む)
