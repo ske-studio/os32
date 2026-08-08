@@ -34,6 +34,15 @@ u32 v86_gp_ip = 0;
 u32 v86_gp_fl = 0;
 u32 v86_gp_n  = 0;
 
+/* #GP 以外の例外が V86 中に起きたときの観測値。
+ * v86_fault_handler() が埋める。 */
+u32 v86_flt_vec = 0;            /* 例外ベクタ */
+u32 v86_flt_cs  = 0;
+u32 v86_flt_ip  = 0;
+u32 v86_flt_fl  = 0;
+u32 v86_flt_op  = 0;            /* CS:IP の先頭 4 バイト */
+u32 v86_flt_n   = 0;            /* 発生回数 */
+
 enum v86_exit_reason v86_get_exit_reason(void) { return v86_exit_reason; }
 u32 v86_last_gp_cs(void) { return v86_gp_cs; }
 u32 v86_last_gp_ip(void) { return v86_gp_ip; }
@@ -77,6 +86,34 @@ static void v86_set_al(u32 *frame, u32 v)
 static void v86_set_ax(u32 *frame, u32 v)
 {
     frame[V86F_EAX] = (frame[V86F_EAX] & 0xFFFF0000UL) | (v & 0xFFFFU);
+}
+
+/* ======================================================================== */
+/*  v86_fault_handler — #GP 以外の例外を V86 中に食らったとき                */
+/*                                                                          */
+/*  #GP だけ V86 分岐を持たせていた頃は、ゲストが不正命令を実行すると        */
+/*  OS32 の汎用例外ハンドラが「カーネルが EIP=0x120 で落ちた」と表示して     */
+/*  シェルへ戻していた。**V86 のフォルトがカーネルのバグに化けて見える**の   */
+/*  が最悪で、EFLAGS の VM ビットに気づくまで原因が分からない。              */
+/*                                                                          */
+/*  ここに落ちたらセッションは畳むしかないが、少なくとも                    */
+/*  「どのベクタが、ゲストのどの命令で起きたか」は残す。                    */
+/* ======================================================================== */
+void v86_fault_handler(u32 *frame, u32 vector)
+{
+    u32 cs = frame[V86F_CS];
+    u32 ip = frame[V86F_EIP];
+    const u8 *pc = v86_ptr(cs, ip);
+
+    v86_flt_n++;
+    v86_flt_vec = vector;
+    v86_flt_cs  = cs;
+    v86_flt_ip  = ip;
+    v86_flt_fl  = frame[V86F_EFLAGS];
+    v86_flt_op  = (u32)pc[0] | ((u32)pc[1] << 8) |
+                  ((u32)pc[2] << 16) | ((u32)pc[3] << 24);
+
+    v86_exit_reason = V86_EXIT_FAULT;
 }
 
 int v86_gp_handler(u32 *frame)

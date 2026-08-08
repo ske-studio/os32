@@ -8,6 +8,7 @@
 #include "loop_dev.h"
 #include "v86_mem.h"
 #include "paging.h"
+#include "vfs.h"
 
 /* 実機の IVT (1KB) と BDA (0x400-0x5FF) の退避先。
  *
@@ -29,6 +30,80 @@ u32 v86_disk_fail_why = 0;      /* 1=範囲外 2=セクタ長 3=セクタ不在 
 u32 v86_disk_fail_chs = 0;      /* cyl<<16 | head<<8 | sect */
 u32 v86_disk_fail_len = 0;      /* n<<16 | count */
 u32 v86_disk_fail_dst = 0;      /* ES:BP のリニアアドレス */
+
+/* SEEK と ID ずれの実測用。§「物理位置と論理 ID の分離」を参照。 */
+u32 v86_disk_seek_n   = 0;      /* SEEK / RECALIBRATE の回数 */
+u32 v86_disk_seek_cyl = 0;      /* 最後に SEEK した物理シリンダ */
+u32 v86_disk_shift_n  = 0;      /* 物理≠論理のまま読めた回数 */
+u32 v86_disk_ident_n  = 0;      /* 物理=論理 (フォールバック) で読めた回数 */
+
+/* INT 1Bh 呼び出しログ。
+ *
+ * カウンタだけでは「何回失敗したか」は分かっても「どういう順で何を
+ * 要求されたか」が分からず、推測が始まってしまう。1 コール 8 ワードの
+ * リングにそのまま積んでおけば、ホストから emu_read_mem 一発で
+ * 呼び出し列を復元できる。 */
+#define V86_DISKLOG_N   32
+u32 v86_disklog_w = 0;                          /* 次に書く位置 */
+u32 v86_disklog[V86_DISKLOG_N * 8];
+/*  [0] AX  [1] CX  [2] DX  [3] BX
+ *  [4] ES:BP のリニアアドレス
+ *  [5] 呼び出し時の物理シリンダ (cur_cyl)
+ *  [6] 転送できたバイト数
+ *  [7] 結果 (0=成功 / v86_disk_fail_why と同じ値) */
+
+/* 呼び出し時点のレジスタを積んでエントリを返す。
+ * 結果 ([6],[7]) は処理のあとに呼び出し側が埋める。 */
+static u32 *disklog(u32 *frame, u32 phys)
+{
+    u32 *e = &v86_disklog[(v86_disklog_w % V86_DISKLOG_N) * 8];
+
+    e[0] = frame[V86F_EAX] & 0xFFFFU;
+    e[1] = frame[V86F_ECX] & 0xFFFFU;
+    e[2] = frame[V86F_EDX] & 0xFFFFU;
+    e[3] = frame[V86F_EBX] & 0xFFFFU;
+    e[4] = ((frame[V86F_ES] & 0xFFFFU) << 4) + (frame[V86F_EBP] & 0xFFFFU);
+    e[5] = phys;
+    e[6] = 0;
+    e[7] = 0;
+    v86_disklog_w++;
+    return e;
+}
+
+/* disk_read() が実際に転送できたバイト数 (ログ用) */
+static u32 xfer_done = 0;
+
+/* ドライブの現在位置 (SEEK で決まる物理シリンダ)。
+ *
+ * µPD765A は「どの物理トラックに居るか」をドライブ側のトラックレジスタで
+ * 持ち、READ DATA コマンドの C/H/R/N は**そのトラック上で照合する ID**
+ * でしかない。両者が一致している必要はどこにもない。
+ *
+ * Ys.D88 は実際にずれている。物理 (C1,H0) のセクタ ID は C=0,H=1、
+ * 物理 (C2,H0) は C=1,H=0 というように、ID が物理位置より 1 シリンダ
+ * 遅れて振られている (トラック 0 だけは C=0,H=0 で一致)。
+ * このため「CL を物理シリンダとみなす」実装ではトラック 0 以外
+ * 一切読めない。実測で INT 1Bh が 1647 回失敗していたのはこれ。
+ *
+ * NP21/W も同じモデルで実装されている:
+ *   src/diskimage/fd/fdd_d88.c  fdd_read_d88()
+ *     trkseek(fdd, (fdc.treg[fdc.us] << 1) + fdc.hd)   ← 物理位置
+ *     searchsector_d88()  … c/h/r/n を照合            ← 論理 ID
+ *
+ * 【実測】物理位置は SEEK の CL と DH の**両方**で決まる。
+ * Ys の IPL が出した 9 コールを記録して突き合わせた結果:
+ *
+ *   SEEK C=0 H=0 → READ ID(0,0,1) N=1 x16   物理trk0  (16x256)   ○
+ *   SEEK C=1 H=0 → READ ID(0,1,1) N=3 x2    物理trk2  (ID C0,H1) ○
+ *   SEEK C=0 H=1 → READ ID(0,0,3) N=3 x3    物理trk1  (ID C0,H0) ○
+ *   SEEK C=2 H=1 → READ ID(1,0,1) N=3 x5    物理trk5  (ID C1,H0) ○
+ *
+ * READ の DH を物理ヘッドとみなすと 3 番目が物理trk0 になり、
+ * そこには N=3 のセクタが無いので必ず失敗する。実際それで
+ * 0x1700 へのロードが空振りし、ゲストが未初期化領域へ飛んで #UD になった。
+ */
+static u8 cur_cyl  = 0;
+static u8 cur_head = 0;
 
 u32 v86_bios_call_count(void)  { return bios_calls; }
 u32 v86_bios_last_vector(void) { return bios_last_vec; }
@@ -100,6 +175,15 @@ void v86_bios_setup(void)
 
     bios_calls = 0;
     bios_last_vec = 0;
+
+    /* 電源投入直後のドライブはトラック 0 に居る */
+    cur_cyl  = 0;
+    cur_head = 0;
+    v86_disk_seek_n = 0;
+    v86_disk_seek_cyl = 0;
+    v86_disk_shift_n = 0;
+    v86_disk_ident_n = 0;
+    v86_disk_fail_n = 0;
 }
 
 int v86_bios_is_hle(u32 vector)
@@ -183,6 +267,56 @@ static void disk_sense(u32 *frame)
     bios_set_cf(frame, 0);
 }
 
+/* D88 の 1 セクタ読み。
+ *
+ * 物理トラックを (phys_cyl, head) で選び、その上で ID (id_c, id_h, id_r) を
+ * 照合する。見つかったセクタの実データ長ぶんを buf へ読む。
+ *
+ * loop_dev_read_chs() は使えない。あれは「物理=論理」を仮定するうえ、
+ * 読み出し長をイメージ全体の bps (= トラック 0 の値。Ys.D88 では 256) で
+ * 頭打ちにするため、1024 バイトセクタが 256 バイトしか転送されない。
+ *
+ * セクタ長 (= コマンドの N) も照合する。**ここを緩めてはいけない。**
+ * 緩めた実装で実測したところ、ゲストが N=3 (1024B) を要求した読みに
+ * トラック 0 の 256B セクタを 3 個返して「成功」と答えてしまい、
+ * ロード先の 3/4 が未初期化のまま残ってゲストがそこへ飛んで #UD になった。
+ * 見つからないなら見つからないと答えるほうがゲストは正しく振る舞える。
+ * NP21/W も searchsector_d88() で c/h/r に加えて n を比較している。
+ *
+ * 戻り値: 読めたバイト数、-1 = セクタ不在 / 長さ不一致 / I/O エラー */
+static int d88_read_sector(u32 phys_cyl, u32 head,
+                           u32 id_c, u32 id_h, u32 id_r, u32 seclen,
+                           u8 *buf, u32 buflen, u16 *out_spt)
+{
+    u32 off, data_len = 0, to_read;
+    u16 spt = 0;
+    int fd;
+
+    off = loop_dev_seek_d88(V86_DISK_SLOT,
+                            (u8)phys_cyl, (u8)head,
+                            (u8)id_c, (u8)id_h, (u8)id_r,
+                            &data_len, &spt);
+    if (off == 0 || data_len == 0 || data_len != seclen) {
+        return -1;
+    }
+    fd = loop_dev_get_fd(V86_DISK_SLOT);
+    if (fd < 0) {
+        return -1;
+    }
+    to_read = data_len;
+    if (to_read > buflen) {
+        to_read = buflen;
+    }
+    vfs_seek(fd, (int)off, 0);
+    if (vfs_read_fd(fd, buf, to_read) < (int)to_read) {
+        return -1;
+    }
+    if (out_spt) {
+        *out_spt = spt;
+    }
+    return (int)to_read;
+}
+
 /* AH=06h READ DATA — CHS を進めながら BX バイト転送する。 */
 static void disk_read(u32 *frame)
 {
@@ -195,12 +329,16 @@ static void disk_read(u32 *frame)
                 (frame[V86F_EBP] & 0xFFFFU);
     u16 cyls; u8 heads, spt; u16 bps; u32 total;
     u32 seclen;
+    u32 phys_cyl  = cur_cyl;    /* SEEK で決まった物理位置 */
+    u32 phys_head = cur_head;
+    int is_d88 = (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88);
     /* PC-98 のセクタ長は最大 1024 バイト (N=3)。 */
     static u8 secbuf[1024];
 
     v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
     v86_disk_fail_len = (n << 16) | count;
     v86_disk_fail_dst = dst;
+    xfer_done = 0;
 
     if (!disk_attached) {
         v86_disk_fail_n++; v86_disk_fail_why = 4;
@@ -243,21 +381,60 @@ static void disk_read(u32 *frame)
 
     while (count >= seclen) {
         u32 i;
-        if (loop_dev_read_chs(V86_DISK_SLOT, (u16)cyl, (u8)head,
-                              (u8)sect, secbuf) != 0) {
-            v86_disk_fail_n++; v86_disk_fail_why = 3;
-            v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
-            bios_set_ah(frame, 0x40);   /* セクタ不在 */
-            bios_set_cf(frame, 1);
-            return;
+        u32 got;
+        u16 trk_spt = 0;
+
+        if (is_d88) {
+            /* まず SEEK で決まった物理トラックを見る (実機の FDC と同じ)。 */
+            int r = d88_read_sector(phys_cyl, phys_head, cyl, head, sect,
+                                    seclen, secbuf, seclen, &trk_spt);
+            if (r < 0) {
+                /* そこに無ければ「物理=論理」でもう一度探す。
+                 * ゲストが SEEK を省いて BIOS の暗黙シークに頼る
+                 * 場合があるため。どちらで読めたかは実測できるよう
+                 * カウンタを分けてある。 */
+                r = d88_read_sector(cyl, head, cyl, head, sect,
+                                    seclen, secbuf, seclen, &trk_spt);
+                if (r < 0) {
+                    v86_disk_fail_n++; v86_disk_fail_why = 3;
+                    v86_disk_fail_chs = (phys_cyl << 24) | (phys_head << 28) |
+                                        (cyl << 16) | (head << 8) | sect;
+                    bios_set_ah(frame, 0x40);   /* セクタ不在 */
+                    bios_set_cf(frame, 1);
+                    return;
+                }
+                phys_cyl  = cyl;
+                phys_head = head;
+                v86_disk_ident_n++;
+            } else if (phys_cyl != cyl || phys_head != head) {
+                v86_disk_shift_n++;
+            }
+            got = (u32)r;
+            if (trk_spt != 0) {
+                spt = (u8)trk_spt;      /* トラックごとに違い得る */
+            }
+        } else {
+            if (loop_dev_read_chs(V86_DISK_SLOT, (u16)cyl, (u8)head,
+                                  (u8)sect, secbuf) != 0) {
+                v86_disk_fail_n++; v86_disk_fail_why = 3;
+                v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+                bios_set_ah(frame, 0x40);   /* セクタ不在 */
+                bios_set_cf(frame, 1);
+                return;
+            }
+            got = seclen;
         }
-        for (i = 0; i < seclen; i++) {
+
+        for (i = 0; i < got; i++) {
             ((volatile u8 *)dst)[i] = secbuf[i];
         }
+        xfer_done += got;
         dst   += seclen;
         count -= seclen;
 
-        /* セクタ → ヘッド → シリンダ の順に繰り上げる */
+        /* セクタ → ヘッド → シリンダ の順に繰り上げる。
+         * 物理位置も同じ歩幅で進める。ID のずれは連続領域では一定なので、
+         * 差を保ったまま動かせば転送を跨いでも整合が取れる。 */
         sect++;
         if (sect > spt) {
             sect = 1;
@@ -265,6 +442,11 @@ static void disk_read(u32 *frame)
             if (head >= heads) {
                 head = 0;
                 cyl++;
+            }
+            phys_head++;
+            if (phys_head >= heads) {
+                phys_head = 0;
+                phys_cyl++;
             }
         }
     }
@@ -276,6 +458,10 @@ static void disk_read(u32 *frame)
 static void bios_int1b(u32 *frame)
 {
     u32 cmd = (frame[V86F_EAX] >> 8) & 0x0FU;   /* AH の下位ニブル */
+    u32 fails_before = v86_disk_fail_n;
+    u32 *log = disklog(frame, cur_cyl);
+
+    xfer_done = 0;      /* SEEK 等でも「今回の転送量」が 0 になるように */
 
     switch (cmd) {
     case V86_DISK_SENSE:
@@ -287,11 +473,36 @@ static void bios_int1b(u32 *frame)
         break;
 
     case V86_DISK_SEEK:
-    case V86_DISK_INIT:
+        /* CL/DH の物理位置へヘッドを動かす。イメージ相手なので実体は
+         * 無いが、**位置は必ず憶えておくこと**。この後の READ は
+         * 「ここに居る物理トラック上で ID を照合する」ためにこれを使う。
+         * ヘッドも憶える — シリンダだけだと Ys の 3 番目のロードが
+         * 物理トラック 0 を見に行って空振りする。 */
+        cur_cyl  = (u8)(frame[V86F_ECX] & 0xFFU);
+        /* DH はそのまま憶える。**1 ビットにマスクしてはいけない。**
+         * 実測で DH=3 の SEEK が来ることがあり、マスクするとヘッド 1 の
+         * 別トラックが「それらしく」読めてしまう。ID は合っているので
+         * 成功として返ってしまい、中身だけが違う — いちばん質の悪い壊れ方。
+         * マスクしなければ範囲外トラックとして読みが失敗し、ゲストは
+         * 自分で DH=0 に直して読み直す。その結果が正しい。 */
+        cur_head = (u8)((frame[V86F_EDX] >> 8) & 0xFFU);
+        v86_disk_seek_n++;
+        v86_disk_seek_cyl = ((u32)cur_head << 8) | cur_cyl;
+        bios_set_ah(frame, 0x00);
+        bios_set_cf(frame, 0);
+        break;
+
     case V86_DISK_RECAL:
-        /* 位置決め系。イメージ相手には実体が無いので成功を返す。
-         * (Ys のコピープロテクトが SEEK の物理位置に依存するため、
-         *  D88 の ID 照合が要るようになったら loop_dev_seek_d88 を使う) */
+        /* トラック 0 へ戻す */
+        cur_cyl  = 0;
+        cur_head = 0;
+        v86_disk_seek_n++;
+        v86_disk_seek_cyl = 0;
+        bios_set_ah(frame, 0x00);
+        bios_set_cf(frame, 0);
+        break;
+
+    case V86_DISK_INIT:
         bios_set_ah(frame, 0x00);
         bios_set_cf(frame, 0);
         break;
@@ -302,6 +513,10 @@ static void bios_int1b(u32 *frame)
         bios_set_cf(frame, 1);
         break;
     }
+
+    log[6] = xfer_done;
+    log[7] = (v86_disk_fail_n != fails_before) ? v86_disk_fail_why
+           : ((frame[V86F_EFLAGS] & 1UL) ? 0x80U : 0U);
 }
 
 void v86_bios_dispatch(u32 *frame, u32 vector)

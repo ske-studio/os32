@@ -95,10 +95,51 @@ isr_stub_%1:
         jmp     isr_common
 %endmacro
 
+extern v86_fault_handler
+
+;; マクロ: エラーコードなし例外 — V86 分岐付き
+;;
+;; V86 中の例外を汎用ハンドラに流してはいけない。EFLAGS.VM を見ずに
+;; 「カーネルが EIP=0x120 で落ちた」と表示してしまい、ゲストのフォルトが
+;; カーネルのバグに化けて見える (実際 #UD でこれを踏んだ)。
+;;
+;; エントリ時のスタックは [EIP][CS][EFLAGS] なので VM は [esp+8]。
+%macro ISR_NOERR_V86 1
+global isr_stub_%1
+isr_stub_%1:
+        cli
+        test    dword [esp + 8], 0x00020000  ;; EFLAGS.VM
+        jnz     %%from_v86
+
+        push    0               ;; ダミーエラーコード
+        push    %1              ;; 例外番号
+        jmp     isr_common
+
+%%from_v86:
+        ;; #GP スタブと同じフレーム形にするため errcode 相当を積む
+        push    0
+        pushad
+
+        RESTORE_KSEG
+
+        mov     eax, esp
+        push    dword %1                ;; 引数2: ベクタ
+        push    eax                     ;; 引数1: フレーム先頭 (u32*)
+        call    v86_fault_handler
+        add     esp, 8
+
+        ;; 復帰できる種類の例外ではないのでセッションを畳む (戻らない)
+        call    v86_exit_to_kernel
+%%hang:
+        cli
+        hlt
+        jmp     %%hang
+%endmacro
+
 ;; 例外スタブ生成
-ISR_NOERR 0                    ;; #DE ゼロ除算
-ISR_NOERR 1                    ;; #DB デバッグ (V86シングルステップ用)
-ISR_NOERR 6                    ;; #UD 未定義命令
+ISR_NOERR_V86 0                ;; #DE ゼロ除算
+ISR_NOERR_V86 1                ;; #DB デバッグ (V86シングルステップ用)
+ISR_NOERR_V86 6                ;; #UD 未定義命令
 ISR_ERR   8                    ;; #DF ダブルフォルト
 ;; #GP (13) は V86 分岐が要るので専用スタブ (下記)
 ;; #PF は専用スタブを使用 (下記 pf_stub)
@@ -205,6 +246,25 @@ isr_common:
 global isr_stub_14
 isr_stub_14:
         cli
+        ;; V86 ゲストの #PF はカーネルのページフォルトではない。
+        ;; 汎用ハンドラに渡すとカーネルのバグとして表示されてしまう。
+        test    dword [esp + 12], 0x00020000  ;; EFLAGS.VM
+        jz      .not_v86
+
+        pushad
+        RESTORE_KSEG
+        mov     eax, esp
+        push    dword 14
+        push    eax
+        call    v86_fault_handler
+        add     esp, 8
+        call    v86_exit_to_kernel
+.v86_hang:
+        cli
+        hlt
+        jmp     .v86_hang
+
+.not_v86:
         pushad                  ;; 全汎用レジスタ保存 (32B)
         RESTORE_KSEG            ;; V86 由来だと DS/ES/FS/GS が null
 

@@ -126,6 +126,10 @@ void v86_enter(const struct v86_context *ctx);
  * 0 を返すと V86 へ復帰、非 0 でセッション終了。 */
 int v86_gp_handler(u32 *frame);
 
+/* #GP 以外の例外を V86 中に食らったときの記録。isr_stub.asm から呼ぶ。
+ * 記録したらセッションは畳む (呼び出し側が v86_exit_to_kernel する)。 */
+void v86_fault_handler(u32 *frame, u32 vector);
+
 /* セッションが終了した理由 */
 enum v86_exit_reason v86_get_exit_reason(void);
 

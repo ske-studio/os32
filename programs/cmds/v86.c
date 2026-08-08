@@ -65,6 +65,8 @@ int main(int argc, char **argv, KernelAPI *kapi)
         printf("    emu_read_mem addr=v86_boot_gpcs   len=4  (last #GP CS)\n");
         printf("    emu_read_mem addr=v86_boot_gpip   len=4  (last #GP IP)\n");
         printf("    emu_read_mem addr=v86_boot_gpop   len=4  (opcode there)\n");
+        printf("    emu_read_mem addr=v86_flt_vec     len=24 (non-#GP fault)\n");
+        printf("    emu_read_mem addr=v86_disk_ident_n len=32 (disk counters)\n");
         return 0;
     }
 
