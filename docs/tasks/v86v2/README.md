@@ -17,7 +17,13 @@
 | 1 | [01_prior_session_analysis.md](01_prior_session_analysis.md) | 前回の最終セッションに残っていたログの再解析 |
 | 2 | [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) | NP21/W のページング保護実装の検証 |
 | 3 | [03_ys_profile.md](03_ys_profile.md) | Ys I の実挙動プロファイル。全ての数値の一次データ |
-| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件と検証方法。実装する人はここ |
+| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (8 項目) と検証方法。実装する人はここ |
+
+## 動かしてみる
+
+```
+v86 -t      OS32 のシェルから V86 セルフテストを実行する
+```
 
 ---
 

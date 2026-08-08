@@ -177,6 +177,15 @@ int v86_gp_handler(u32 *frame)
 
 static u32 v86_irq_n = 0;
 
+/* セッションのタイムアウト。タイマ反射のたびに数え、上限を超えたら
+ * セッションを畳む。
+ *
+ * 注意: IOPL=3 ではゲストの CLI が実 IF を落とすため、ゲストが CLI した
+ * まま暴走するとタイマ割り込み自体が来なくなり、この計測も止まる。
+ * その場合の脱出手段は別途必要 (docs/tasks/v86v2/04_implementation_status.md §7)。 */
+static u32 v86_ticks = 0;
+static u32 v86_tick_limit = 0;
+
 u32 v86_irq_reflect_count(void) { return v86_irq_n; }
 int v86_is_active(void)         { return v86_active; }
 
@@ -213,6 +222,19 @@ void v86_reflect_irq(u32 *frame, u32 vector)
     v86_irq_n++;
 }
 
+/* タイマ IRQ の反射経路から呼ばれる。上限を超えたら非 0 を返す。 */
+int v86_tick_and_check_timeout(void)
+{
+    if (!v86_active || v86_tick_limit == 0) {
+        return 0;
+    }
+    if (++v86_ticks >= v86_tick_limit) {
+        v86_exit_reason = V86_EXIT_TIMEOUT;
+        return 1;
+    }
+    return 0;
+}
+
 /* #GP スタブから呼ばれる脱出口。v86_run() の setjmp 地点へ戻る。 */
 void v86_longjmp_out(void)
 {
@@ -226,14 +248,28 @@ void v86_longjmp_out(void)
 int v86_run(const struct v86_context *ctx)
 {
     u32 saved_esp0;
+    u32 saved_eflags;
 
     if (v86_active) {
         return -1;      /* 再入禁止 */
     }
 
+    /* セッションから抜けるのは #GP ハンドラからの longjmp なので、
+     * 戻ってきた時点の EFLAGS は「例外に入った直後の状態」になっている。
+     *
+     *   - IF は割り込みゲートが自動でクリアしている
+     *   - IOPL は V86 ゲストの値 (3) がそのまま残る
+     *
+     * longjmp は EFLAGS を復元しないため、これを直さずに返すと
+     * カーネルが割り込み禁止のまま動き続ける。実際にこれを踏んで、
+     * シェルがタイマ待ちループから二度と抜けなくなった。 */
+    __asm__ volatile("pushfl\n\tpopl %0" : "=r"(saved_eflags));
+
     v86_exit_reason = V86_EXIT_NONE;
     v86_gp_n = 0;
     v86_irq_n = 0;
+    v86_ticks = 0;
+    v86_tick_limit = V86_TICK_LIMIT;
     saved_esp0 = tss_get_esp0();
 
     /* サウンドボードの IRQ をセッション中だけ開ける。
@@ -250,6 +286,10 @@ int v86_run(const struct v86_context *ctx)
     v86_active = 0;
     irq_disable(V86_IRQ_SOUND);
     tss_set_esp0(saved_esp0);
+
+    /* IF と IOPL を呼び出し前の状態に戻す */
+    __asm__ volatile("pushl %0\n\tpopfl" : : "r"(saved_eflags) : "cc");
+
     return (int)v86_exit_reason;
 }
 

@@ -30,6 +30,7 @@
 #include "mouse.h"
 #include "kapi_db.h"
 #include "loop_dev.h"
+#include "v86.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -848,5 +849,10 @@ int __cdecl wrap_ime_user_clear(void)
 int __cdecl wrap_ime_trygetkey(void)
 {
     return ime_trygetkey();
+}
+
+int __cdecl wrap_v86_selftest(void)
+{
+    return v86_smoke_test();
 }
 

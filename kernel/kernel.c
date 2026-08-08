@@ -355,15 +355,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
     pgalloc_init(mem_kb);
 
-    /* V86 スモークテスト (Phase 1 の一時コード。検証後に削除する)
-     * バッキング RAM を pgalloc から取るので pgalloc_init の後に置くこと。 */
-    {
-        int v86_rc = v86_smoke_test();
-        tvram_print(48, 2, "V86:", TATTR_GREEN);
-        tvram_print(52, 2, v86_rc == 0 ? "OK" : "NG",
-                    v86_rc == 0 ? TATTR_WHITE : TATTR_RED);
-    }
-
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
 

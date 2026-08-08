@@ -1,5 +1,5 @@
 {
-  "version": 35,
+  "version": 36,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -42,7 +42,8 @@
     "snd_engine.h",
     "mouse.h",
     "kapi_db.h",
-    "loop_dev.h"
+    "loop_dev.h",
+    "v86.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1192,6 +1193,12 @@
       "name": "ime_trygetkey",
       "ret": "int",
       "args": []
+    },
+    {
+      "name": "v86_selftest",
+      "ret": "int",
+      "args": [],
+      "target": "v86_smoke_test"
     }
   ]
 }

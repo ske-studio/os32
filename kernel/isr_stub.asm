@@ -46,6 +46,8 @@ extern tick_count
 extern fdc_irq_handler
 extern mouse_irq_handler
 extern v86_reflect_irq
+extern v86_tick_and_check_timeout
+extern v86_exit_to_kernel
 
 ;; ============================================================
 ;; V86 実行中なら、この IRQ をゲストにも見せる (割り込み反射)。
@@ -255,6 +257,16 @@ irq_stub_0:
         out     PIC1_CMD, al
 
         V86_REFLECT 0x08        ;; PC-98: IRQ0 → ゲストの INT 08h
+
+        ;; V86 セッションが長すぎたら畳む。暴走したゲストを無限に
+        ;; 走らせないための保険。EOI も反射も済ませた後に判定する。
+        test    dword [esp + 40], 0x00020000    ;; EFLAGS.VM
+        jz      .no_timeout
+        call    v86_tick_and_check_timeout
+        test    eax, eax
+        jz      .no_timeout
+        call    v86_exit_to_kernel              ;; longjmp するので戻らない
+.no_timeout:
 
         popad
         iretd

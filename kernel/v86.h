@@ -147,6 +147,13 @@ void v86_reflect_irq(u32 *frame, u32 vector);
 /* 反射した割り込みの回数 (検証用) */
 u32 v86_irq_reflect_count(void);
 
+/* セッションのタイムアウト (100Hz タイマの tick 数)。
+ * 暴走したゲストを無限に走らせないための保険。 */
+#define V86_TICK_LIMIT      (30 * 100)      /* 30 秒 */
+
+/* タイマ IRQ の反射経路から呼ぶ。上限超過なら非 0。 */
+int v86_tick_and_check_timeout(void);
+
 /* Phase 1 スモークテスト: 最小の 16bit コードを V86 で実行し、
  * カーネルが生存したまま戻れることを確認する。戻り値は v86_exit_reason。
  * 検証が済んだら削除する一時コード。 */

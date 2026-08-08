@@ -162,9 +162,10 @@ extern int __cdecl wrap_ime_user_delete(const char *yomi, const char *kanji);
 extern int __cdecl wrap_ime_user_export(const char *path);
 extern int __cdecl wrap_ime_user_clear(void);
 extern int __cdecl wrap_ime_trygetkey(void);
+extern int __cdecl wrap_v86_selftest(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 35;
+kapi->version = 36;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -330,5 +331,6 @@ kapi->version = 35;
     kapi->ime_user_export = wrap_ime_user_export;
     kapi->ime_user_clear = wrap_ime_user_clear;
     kapi->ime_trygetkey = wrap_ime_trygetkey;
+    kapi->v86_selftest = wrap_v86_selftest;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;
