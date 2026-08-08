@@ -105,6 +105,47 @@ def tool_regs(_):
     return _annotate_eip(_json(emu.get("/api/regs")))
 
 
+def tool_prof_start(_):
+    emu.post("/api/profile", "on=1")
+    return "profiling started (counters cleared)"
+
+
+def tool_prof_stop(_):
+    emu.post("/api/profile", "on=0")
+    return "profiling stopped"
+
+
+def tool_prof(args):
+    """Instruction/I-O profile with the V86 trap cost worked out."""
+    top = int(args.get("top", 24))
+    d = _json(emu.get("/api/profile?top=%d" % top))
+    ms = d.get("elapsed_ms", 0) or 1
+    out = ["window: %d ms  (profiling %s)"
+           % (d.get("elapsed_ms", 0),
+              "on" if d.get("enabled") else "off")]
+    out.append("")
+    out.append("-- instructions that trap in V86 when IOPL<3 --")
+    for k in ("int", "iret", "cli", "sti", "pushf", "popf"):
+        n = d.get(k, 0)
+        out.append("  %-6s %10d  (%8.0f/s)" % (k, n, n * 1000.0 / ms))
+    t = d.get("traps_iopl0", 0)
+    out.append("  %-6s %10d  (%8.0f/s)  <- total #GP rate at IOPL=0"
+               % ("TOTAL", t, t * 1000.0 / ms))
+    out.append("")
+    out.append("-- I/O (trappable per-port via the TSS I/O bitmap) --")
+    for k in ("in", "out"):
+        n = d.get(k, 0)
+        out.append("  %-6s %10d  (%8.0f/s)" % (k, n, n * 1000.0 / ms))
+    out.append("")
+    out.append("-- busiest ports --")
+    out.append("  %-8s %10s %10s %10s" % ("port", "reads", "writes", "acc/s"))
+    for p in d.get("ports", []):
+        tot = p["reads"] + p["writes"]
+        out.append("  %-8s %10d %10d %10.0f"
+                   % (p["port"], p["reads"], p["writes"], tot * 1000.0 / ms))
+    return "\n".join(out)
+
+
 def tool_fault(_):
     """Latest unrecoverable core fault (triple fault etc.).
 
@@ -371,6 +412,21 @@ TOOLS = {
                    "display state (scrn_xmax/ymax, text_disp, grph_disp) and "
                    "fault_generation (non-zero once the core has faulted).",
                    _obj({})),
+    "emu_prof_start": (tool_prof_start,
+                       "Start guest profiling (clears counters). Counts the "
+                       "instructions that trap in V86 mode on a 386 and every "
+                       "I/O access per port.",
+                       _obj({})),
+    "emu_prof_stop": (tool_prof_stop,
+                      "Stop guest profiling.",
+                      _obj({})),
+    "emu_prof": (tool_prof,
+                 "Guest profile: per-class counts and rates for INT/IRET/CLI/"
+                 "STI/PUSHF/POPF (the V86 #GP sources at IOPL<3), plus I/O "
+                 "totals and the busiest ports -- the ports that must be "
+                 "passed through via the TSS I/O permission bitmap.",
+                 _obj({"top": {"type": "integer", "default": 24,
+                               "description": "how many ports to list"}})),
     "emu_fault": (tool_fault,
                   "Latest unrecoverable core fault (triple fault etc.): "
                   "reason text with full register dump, CS:EIP, and a "
