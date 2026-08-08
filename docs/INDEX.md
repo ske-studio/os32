@@ -89,6 +89,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/game/GAME_PORT_PLAN.md](tasks/game/GAME_PORT_PLAN.md) | 対戦スゴロクRPG 移植計画 (ステージA/B、Phase 0〜9) |
 | [tasks/game/ENGINE_EXTENSION_PLAN.md](tasks/game/ENGINE_EXTENSION_PLAN.md) | エンジン拡張実装計画 — libos32turn / libos32rpg / libos32save 設計 |
 | [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
+| [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。方式決定・実測・実装状況の索引 |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
 | [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
 | [tasks/libchem/LIBCHEM_DESIGN.md](tasks/libchem/LIBCHEM_DESIGN.md) | libos32chem — 化学エンジンライブラリ設計書 |
