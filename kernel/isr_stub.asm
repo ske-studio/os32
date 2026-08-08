@@ -45,6 +45,27 @@ extern serial_irq_handler
 extern tick_count
 extern fdc_irq_handler
 extern mouse_irq_handler
+extern v86_reflect_irq
+
+;; ============================================================
+;; V86 実行中なら、この IRQ をゲストにも見せる (割り込み反射)。
+;;
+;; ハードウェア割り込みはエラーコードを積まないので、PUSHAD 後の
+;; EFLAGS は [esp+40] にある ([esp+32]=EIP, +36=CS, +40=EFLAGS)。
+;; VM ビットが立っていればゲストからの割り込みなので反射する。
+;;
+;; 引数は (frame*, vector) の順。C 側で v86_active も確認している。
+;; ============================================================
+%macro V86_REFLECT 1
+        test    dword [esp + 40], 0x00020000    ;; EFLAGS.VM
+        jz      %%skip
+        push    dword %1                        ;; vector
+        lea     eax, [esp + 4]                  ;; frame 先頭 (PUSHAD)
+        push    eax
+        call    v86_reflect_irq
+        add     esp, 8
+%%skip:
+%endmacro
 
 section .text
 
@@ -232,6 +253,8 @@ irq_stub_0:
         ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
         mov     al, OCW2_EOI
         out     PIC1_CMD, al
+
+        V86_REFLECT 0x08        ;; PC-98: IRQ0 → ゲストの INT 08h
 
         popad
         iretd

@@ -157,6 +157,61 @@ int v86_gp_handler(u32 *frame)
     (void)opsize16;
 }
 
+/* ======================================================================== */
+/*  割り込み反射                                                            */
+/*                                                                          */
+/*  V86 実行中に実ハードウェアの IRQ が入ると、CPU は IDT 経由で Ring0 の    */
+/*  IRQ スタブに来る。OS32 自身の処理を済ませたあと、ゲストにも同じ割り込みを */
+/*  見せたい場合はここでリアルモードのソフトウェア割り込みを合成する。      */
+/*                                                                          */
+/*  やることは実機の INT n と同じ:                                          */
+/*    ゲストスタックに FLAGS, CS, IP を積む → IVT[vector] から CS:IP を     */
+/*    ロード → IF と TF を落とす                                            */
+/*                                                                          */
+/*  Phase 0 の実測で、Ys が差し替えている割り込みは IRQ12 (INT 14h) ただ 1 本 */
+/*  で、FM の演奏はそれだけに依存していることが分かっている。前回の実装は    */
+/*  IRQ0/1/2 しか注入しておらず、ゲストが使う唯一の IRQ を落としていた       */
+/*  (docs/tasks/v86v2/03_ys_profile.md §4)。                                */
+/* ======================================================================== */
+
+static u32 v86_irq_n = 0;
+
+u32 v86_irq_reflect_count(void) { return v86_irq_n; }
+int v86_is_active(void)         { return v86_active; }
+
+void v86_reflect_irq(u32 *frame, u32 vector)
+{
+    u32 sp;
+    u16 *gstack;
+    const u16 *ivt;
+
+    if (!v86_active) {
+        return;
+    }
+
+    /* ゲストスタックに 3 ワード積む。SP は 16bit なのでラップさせる。 */
+    sp = (frame[V86I_ESP] - 6) & 0xFFFFU;
+    gstack = (u16 *)v86_ptr(frame[V86I_SS], sp);
+
+    /* ゲストには VM ビットを見せない (下位 16bit だけ積む) */
+    gstack[0] = (u16)(frame[V86I_EIP] & 0xFFFFU);
+    gstack[1] = (u16)(frame[V86I_CS]  & 0xFFFFU);
+    gstack[2] = (u16)(frame[V86I_EFLAGS] & 0xFFFFU);
+
+    frame[V86I_ESP] = sp;
+
+    /* IVT からハンドラを引く。IVT はゲストの物理 0 番地にある。 */
+    ivt = (const u16 *)(vector * 4);
+    frame[V86I_EIP] = ivt[0];
+    frame[V86I_CS]  = ivt[1];
+
+    /* 実機の割り込み受理と同じく IF と TF を落とす。
+     * ゲストの IRET がスタックから FLAGS を戻すので IF は自動で復帰する。 */
+    frame[V86I_EFLAGS] &= ~(EFLAGS_IF | 0x100UL);
+
+    v86_irq_n++;
+}
+
 /* #GP スタブから呼ばれる脱出口。v86_run() の setjmp 地点へ戻る。 */
 void v86_longjmp_out(void)
 {
@@ -209,46 +264,22 @@ int v86_run(const struct v86_context *ctx)
  *   MOV AX,A200 / MOV ES,AX / MOV DI,009E / MOV AL,E1  / MOV ES:[DI],AL
  *   HLT
  * 0x8C000 に 0x1234 を書き、画面右上に白い 'V' を出してから HLT する。 */
+/* ゲストコード。正本は kernel/v86_test16.asm。
+ * 変更したら次で再生成すること:
+ *   nasm -f bin kernel/v86_test16.asm -o /tmp/t.bin
+ *
+ * 動作: メモリ書き込み → 許可ポート I/O (トラップしない) →
+ *       拒否ポート I/O (#GP で捕まる) → IVT[08h] に自前 ISR を登録 →
+ *       STI して IRQ0 の反射を 3 回待つ → 証拠を書いて HLT */
 static const u8 v86_test_code[] = {
-    /* --- (1) メモリ書き込み: 0x8C000 に 0x1234 --- */
-    0xB8, 0x00, 0x8C,       /* mov ax, 8C00h */
-    0x8E, 0xC0,             /* mov es, ax    */
-    0x31, 0xFF,             /* xor di, di    */
-    0xB8, 0x34, 0x12,       /* mov ax, 1234h */
-    0x26, 0x89, 0x05,       /* mov es:[di], ax */
-
-    /* --- (2) 許可ポートへの OUT: #GP してはいけない ---
-     * 0x5F は I/O ウェイト。ダミーライトなので実害がない。 */
-    0xB0, 0x00,             /* mov al, 0      */
-    0xE6, 0x5F,             /* out 5Fh, al    */
-
-    /* --- (3) 許可ポートからの IN: #GP してはいけない ---
-     * 0x60 はテキスト GDC ステータス。読むだけ。 */
-    0xE4, 0x60,             /* in al, 60h     */
-
-    /* --- (4) 拒否ポートからの IN: #GP で捕まって 0xFF が返るはず ---
-     * 0x00 はマスタ PIC。OS32 が使っているので必ず仮想化する。 */
-    0xE4, 0x00,             /* in al, 00h     */
-    0xB4, 0x00,             /* mov ah, 0      */
-    0xBF, 0x02, 0x00,       /* mov di, 2      */
-    0xB8, 0x00, 0x8C,       /* mov ax, 8C00h  */
-    0x8E, 0xC0,             /* mov es, ax     */
-    /* AL を退避してから書くと手順が増えるので、AX ごと書いてしまう。
-     * 直前の in で AL に値が入っているが、上の mov ax,8C00h で潰れるため
-     * ここでは「#GP が起きてゲストが継続できた」ことの確認に留める。 */
-
-    /* --- (5) 拒否ポートへの OUT: #GP で捕まって破棄されるはず --- */
-    0xB0, 0x55,             /* mov al, 55h    */
-    0xE6, 0x00,             /* out 00h, al    */
-
-    /* --- (6) 継続できた証拠を書く: 0x8C002 に 0x5678 --- */
-    0xB8, 0x00, 0x8C,       /* mov ax, 8C00h */
-    0x8E, 0xC0,             /* mov es, ax    */
-    0xBF, 0x02, 0x00,       /* mov di, 2     */
-    0xB8, 0x78, 0x56,       /* mov ax, 5678h */
-    0x26, 0x89, 0x05,       /* mov es:[di], ax */
-
-    0xF4                    /* hlt → #GP でカーネルに戻る */
+    0xB8, 0x00, 0x8C, 0x8E, 0xC0, 0x31, 0xFF, 0xB8, 0x34, 0x12, 0x26, 0x89,
+    0x05, 0xB0, 0x00, 0xE6, 0x5F, 0xE4, 0x60, 0xE4, 0x00, 0xB0, 0x55, 0xE6,
+    0x00, 0x31, 0xC0, 0x8E, 0xC0, 0x26, 0xC7, 0x06, 0x20, 0x00, 0x47, 0x00,
+    0x26, 0xC7, 0x06, 0x22, 0x00, 0x00, 0x8A, 0xB8, 0x00, 0x8C, 0x8E, 0xD8,
+    0xC7, 0x06, 0x04, 0x00, 0x00, 0x00, 0xFB, 0xA1, 0x04, 0x00, 0x83, 0xF8,
+    0x03, 0x72, 0xF8, 0xFA, 0xC7, 0x06, 0x02, 0x00, 0x78, 0x56, 0xF4, 0x50,
+    0x1E, 0xB8, 0x00, 0x8C, 0x8E, 0xD8, 0xFF, 0x06, 0x04, 0x00, 0x1F, 0x58,
+    0xCF
 };
 
 /* スモークテストの結果を外から観測できるように残す。
@@ -260,6 +291,8 @@ u32 v86_smoke_reason = 0;
 u32 v86_smoke_magic2 = 0;   /* 拒否ポート #GP 後も継続できたか */
 u32 v86_smoke_gp     = 0;   /* セッション中の #GP 回数 */
 u32 v86_smoke_iotrap = 0;   /* うち I/O トラップ回数 */
+u32 v86_smoke_irq    = 0;   /* ゲストへ反射した IRQ 回数 */
+u32 v86_smoke_gcnt   = 0;   /* ゲスト ISR が数えた回数 */
 
 int v86_smoke_test(void)
 {
@@ -300,15 +333,22 @@ int v86_smoke_test(void)
     v86_smoke_reason = (u32)reason;
     v86_smoke_gp     = v86_gp_count();
     v86_smoke_iotrap = v86_io_trap_count();
+    v86_smoke_irq    = v86_irq_reflect_count();
+    v86_smoke_gcnt   = (u32)*(volatile u16 *)(V86_TEST_MAGIC_ADDR + 4);
 
     v86_mem_teardown();
 
     /* 期待値:
      *   HLT で終了 / メモリ書き込み成功 / 拒否ポートの #GP 後も継続できた /
      *   I/O トラップは拒否ポートの 2 回だけ (許可ポートは素通し) */
+    /* 期待値:
+     *   HLT で終了 / メモリ書き込み成功 / 拒否ポートの #GP 後も継続 /
+     *   I/O トラップは拒否ポートの 2 回だけ (許可ポートは素通し) /
+     *   ゲスト ISR が 3 回以上呼ばれた (= IRQ 反射が届いた) */
     v86_smoke_result = (reason == V86_EXIT_HLT &&
                         v86_smoke_magic  == V86_TEST_MAGIC &&
                         v86_smoke_magic2 == 0x5678U &&
-                        v86_smoke_iotrap == 2U) ? 0 : 1;
+                        v86_smoke_iotrap == 2U &&
+                        v86_smoke_gcnt   >= 3U) ? 0 : 1;
     return (int)v86_smoke_result;
 }

@@ -31,11 +31,9 @@
  * 代償はゲストの CLI が実 IF を落とすこと。暴走した場合の脱出手段が
  * 別途必要になる。
  *
- * IF は Phase 1 では立てない。V86 実行中に IRQ が入ると IRQ スタブが
- * Ring0 で動くが、V86 → Ring0 の遷移で CPU が DS/ES/FS/GS を null に
- * クリアするため、既存の IRQ スタブ (irq_stub_0 等) が DS 前提で
- * カーネル変数を触った瞬間に落ちる。IRQ スタブを V86 安全にするのは
- * Phase 2 の作業なので、それまでは割り込みを止めて動かす。 */
+ * IF は立てない状態で渡す。ゲストが自分で STI するまで割り込みは来ない。
+ * これは実機の起動直後と同じ挙動で、ゲストが IVT を整える前に割り込みが
+ * 飛び込むのを防ぐ。IRQ スタブ側は Phase 1 で V86 安全化済み。 */
 #define V86_EFLAGS_INIT (EFLAGS_VM | EFLAGS_IOPL3 | 0x2)
 
 /* V86 突入時のコンテキスト。v86_entry.asm が iretd で積む順序と
@@ -84,6 +82,23 @@ struct v86_context {
 #define V86F_FS         16
 #define V86F_GS         17
 
+/* ------------------------------------------------------------------------ */
+/*  IRQ (割り込み) フレームのレイアウト                                     */
+/*                                                                          */
+/*  ハードウェア割り込みはエラーコードを積まないので、#GP フレームより      */
+/*  全体が 1 ワードぶん手前にずれる。ここを取り違えると EFLAGS のつもりで    */
+/*  CS を読むことになり、症状が出るのは注入した後になるので厄介。           */
+/* ------------------------------------------------------------------------ */
+#define V86I_EIP        8
+#define V86I_CS         9
+#define V86I_EFLAGS     10
+#define V86I_ESP        11
+#define V86I_SS         12
+#define V86I_ES         13
+#define V86I_DS         14
+#define V86I_FS         15
+#define V86I_GS         16
+
 /* セッション終了理由 */
 enum v86_exit_reason {
     V86_EXIT_NONE = 0,
@@ -116,6 +131,16 @@ u32 v86_gp_count(void);
 
 /* 1 セッション実行して終了理由を返す */
 int v86_run(const struct v86_context *ctx);
+
+/* V86 セッションが実行中か (IRQ スタブから参照する) */
+int v86_is_active(void);
+
+/* IRQ スタブから呼ばれる割り込み反射。frame は PUSHAD 後のフレーム先頭。
+ * ゲストの IVT を引いてスタックに FLAGS/CS/IP を積み、ISR へ飛ばす。 */
+void v86_reflect_irq(u32 *frame, u32 vector);
+
+/* 反射した割り込みの回数 (検証用) */
+u32 v86_irq_reflect_count(void);
 
 /* Phase 1 スモークテスト: 最小の 16bit コードを V86 で実行し、
  * カーネルが生存したまま戻れることを確認する。戻り値は v86_exit_reason。
