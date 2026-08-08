@@ -123,6 +123,10 @@ def tool_prof(args):
     out = ["window: %d ms  (profiling %s)"
            % (d.get("elapsed_ms", 0),
               "on" if d.get("enabled") else "off")]
+    ins = d.get("instructions", 0)
+    if ins:
+        out.append("guest: %d instructions  (%.3f MIPS)"
+                   % (ins, ins / 1000.0 / ms))
     out.append("")
     out.append("-- instructions that trap in V86 when IOPL<3 --")
     for k in ("int", "iret", "cli", "sti", "pushf", "popf"):
