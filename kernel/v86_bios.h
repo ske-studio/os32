@@ -25,7 +25,30 @@
  * バッキング RAM のリマップ範囲 (0x00000-0x8EFFF) に合わせる。 */
 #define V86_GUEST_MEM_KB    572
 
+/* ディスク BIOS が使う loop_dev スロット。
+ * 当面は「DA/UA 0x90 (2HD FDD#1) → slot 0」の固定対応で足りる。 */
+#define V86_DISK_SLOT       0
+
+/* INT 1Bh のコマンド (AH の下位ニブル)。
+ * AH の上位ビットはリトライ有無などの修飾なので、判定は下位だけ見る。
+ * 実測: Ys の IPL は AH=0xD6 で来る (= READ DATA + 修飾)。 */
+#define V86_DISK_SEEK       0x00
+#define V86_DISK_VERIFY     0x02
+#define V86_DISK_INIT       0x03
+#define V86_DISK_SENSE      0x04
+#define V86_DISK_WRITE      0x05
+#define V86_DISK_READ       0x06
+#define V86_DISK_RECAL      0x07
+
 /* ======== API ======== */
+
+/* セッションで使うディスクイメージを結び付ける。
+ * path が NULL ならディスク無しで動く。0=成功、負=失敗。 */
+int  v86_bios_attach_disk(const char *path);
+void v86_bios_detach_disk(void);
+
+/* ディスクが結び付いているか (検証用) */
+int  v86_bios_has_disk(void);
 
 /* ゲストの IVT / BDA を用意し、HLE 対象ベクタにスタブを仕込む。
  * v86_mem_setup() がバッキング RAM を張った後に呼ぶこと。 */

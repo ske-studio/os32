@@ -856,3 +856,8 @@ int __cdecl wrap_v86_selftest(void)
     return v86_smoke_test();
 }
 
+int __cdecl wrap_v86_disktest(const char *path)
+{
+    return v86_disk_test(path);
+}
+

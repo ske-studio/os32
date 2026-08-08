@@ -1,5 +1,5 @@
 {
-  "version": 36,
+  "version": 37,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1199,6 +1199,14 @@
       "ret": "int",
       "args": [],
       "target": "v86_smoke_test"
+    },
+    {
+      "name": "v86_disktest",
+      "ret": "int",
+      "args": [
+        "const char *path"
+      ],
+      "target": "v86_disk_test"
     }
   ]
 }

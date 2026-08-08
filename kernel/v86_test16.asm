@@ -54,14 +54,16 @@ start:
         ;; --- (7) BIOS コール: INT 1Bh が HLE で処理されて戻るか ---
         ;; スタブ経由で #GP → カーネルが AH と CF を書き換え → IRET で復帰。
         ;; 期待値: AH = 0, CF = 0。
-        mov     ah, 0xD6                ; READ DATA (実処理は Phase 3-3b)
+        ;; SENSE (04h)。ディスクを繋いでいないセルフテストでは
+        ;; 「装置レディでない」(AH=60h, CF=1) が正しい応答になる。
+        mov     ah, 0x04                ; SENSE
         mov     al, 0x90                ; DA/UA = 2HD FDD#1
         int     0x1B
         mov     bx, 0                   ; BIOS 結果の記録用
-        jc      .bios_cf                ; CF が立っていたら失敗扱い
-        cmp     ah, 0
+        jnc     .bios_cf                ; CF が立っていないのは想定外
+        cmp     ah, 0x60
         jne     .bios_cf
-        mov     bx, 0xB105              ; 成功マーカー
+        mov     bx, 0xB105              ; 期待どおりの応答
 .bios_cf:
         mov     [6], bx
 

@@ -88,9 +88,13 @@ void v86_mem_teardown(void)
     }
 
     /* 低位 RAM をアイデンティティマッピングに戻す。
-     * paging_init() 当時の属性を再現する: ページ0 は NULL ポインタ検出用に
-     * Not-Present、それ以外は R/W。 */
-    paging_set_page(0, 0, PAGE_NOT_PRESENT);
+     *
+     * ページ 0 は paging_reclaim_conventional() が R/O にしている
+     * (Not-Present だと LZ4 展開中の BDA 参照で落ちるため、と paging.c に
+     *  経緯が残っている)。ここを勝手に Not-Present にすると、次に
+     * v86_bios_save_real() が IVT を読んだ瞬間に #PF する。
+     * teardown は「元に戻す」のであって「あるべき姿にする」のではない。 */
+    paging_set_page(0, 0, PAGE_RO);
     for (a = V86_REMAP_START + PAGE_SIZE; a < V86_REMAP_END; a += PAGE_SIZE) {
         paging_set_page(a, a, PAGE_RW);
     }

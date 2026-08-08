@@ -164,10 +164,16 @@ int v86_tick_and_check_timeout(void);
  * 検証が済んだら削除する一時コード。 */
 int v86_smoke_test(void);
 
+/* ディスクテスト: イメージを attach し、ゲストに INT 1Bh READ をさせて
+ * 読めた中身を loop_dev の直読と突き合わせる。0=一致、負=失敗。 */
+int v86_disk_test(const char *path);
+
 /* スモークテストが使う低位メモリ (memmap.h の「空き 20KB」内) */
 #define V86_TEST_CODE_ADDR   0x8A000UL
 #define V86_TEST_STACK_ADDR  0x8B000UL
 #define V86_TEST_MAGIC_ADDR  0x8C000UL
 #define V86_TEST_MAGIC       0x1234U
+#define V86_TEST_BUF_ADDR    0x8D000UL   /* ディスクテストの転送先 */
+#define V86_DISK_SECLEN      256U        /* PC-98 2HD ブートトラック */
 
 #endif /* __V86_H */

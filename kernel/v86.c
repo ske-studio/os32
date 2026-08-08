@@ -12,6 +12,7 @@
 #include "v86_mem.h"
 #include "v86_io.h"
 #include "v86_bios.h"
+#include "loop_dev.h"
 #include "idt.h"
 #include "kprintf.h"
 
@@ -366,8 +367,8 @@ static const u8 v86_test_code[] = {
     0x00, 0x31, 0xC0, 0x8E, 0xC0, 0x26, 0xC7, 0x06, 0x20, 0x00, 0x5E, 0x00,
     0x26, 0xC7, 0x06, 0x22, 0x00, 0x00, 0x8A, 0xB8, 0x00, 0x8C, 0x8E, 0xD8,
     0xC7, 0x06, 0x04, 0x00, 0x00, 0x00, 0xFB, 0xA1, 0x04, 0x00, 0x83, 0xF8,
-    0x03, 0x72, 0xF8, 0xFA, 0xB4, 0xD6, 0xB0, 0x90, 0xCD, 0x1B, 0xBB, 0x00,
-    0x00, 0x72, 0x08, 0x80, 0xFC, 0x00, 0x75, 0x03, 0xBB, 0x05, 0xB1, 0x89,
+    0x03, 0x72, 0xF8, 0xFA, 0xB4, 0x04, 0xB0, 0x90, 0xCD, 0x1B, 0xBB, 0x00,
+    0x00, 0x73, 0x08, 0x80, 0xFC, 0x60, 0x75, 0x03, 0xBB, 0x05, 0xB1, 0x89,
     0x1E, 0x06, 0x00, 0xC7, 0x06, 0x02, 0x00, 0x78, 0x56, 0xF4, 0x50, 0x1E,
     0xB8, 0x00, 0x8C, 0x8E, 0xD8, 0xFF, 0x06, 0x04, 0x00, 0x1F, 0x58, 0xCF
 };
@@ -455,4 +456,111 @@ int v86_smoke_test(void)
                         v86_smoke_bios   == 0xB105U &&
                         v86_smoke_bcnt   == 1U) ? 0 : 1;
     return (int)v86_smoke_result;
+}
+
+/* ======================================================================== */
+/*  ディスク読み出しテスト (Phase 3-3b)                                     */
+/*                                                                          */
+/*  ゲストに INT 1Bh の READ DATA を発行させ、読めた内容をカーネルが         */
+/*  loop_dev で直接読んだものと突き合わせる。BIOS の HLE が本当に            */
+/*  ディスクの中身を運べているかを、ゲスト側の自己申告に頼らず確かめる。    */
+/* ======================================================================== */
+
+/* 正本は kernel/v86_test16_disk.asm。
+ *   nasm -f bin kernel/v86_test16_disk.asm -o /tmp/t.bin で再生成する。 */
+static const u8 v86_disk_code[] = {
+    0xB8, 0x00, 0x8C, 0x8E, 0xD8, 0xC7, 0x06, 0x08, 0x00, 0x00, 0x00, 0xB8,
+    0x00, 0x8D, 0x8E, 0xC0, 0x31, 0xED, 0xB1, 0x00, 0xB5, 0x01, 0xB6, 0x00,
+    0xB2, 0x01, 0xBB, 0x00, 0x01, 0xB8, 0x90, 0x06, 0xCD, 0x1B, 0x72, 0x06,
+    0xC7, 0x06, 0x08, 0x00, 0x5C, 0xD1, 0xF4
+};
+
+/* 検証用に外へ出す値 */
+u32 v86_disk_result = 0xFFFFFFFFUL;
+u32 v86_disk_marker = 0;        /* ゲストが書いた成功マーカー */
+u32 v86_disk_cmp    = 0;        /* 直読との一致バイト数 */
+u32 v86_disk_reason = 0;
+
+int v86_disk_test(const char *path)
+{
+    struct v86_context ctx;
+    static u8 ref[V86_DISK_SECLEN];
+    const u8 *got;
+    u32 i, same;
+    int reason;
+    u16 cyls; u8 heads, spt; u16 bps; u32 total;
+
+    v86_disk_result = 0xFFFFFFFFUL;
+    v86_disk_marker = 0;
+    v86_disk_cmp    = 0;
+
+    /* 先にカーネル側で「正解」を読んでおく。
+     * バッキング RAM を張る前に読むこと (張った後は VFS が使う低位メモリが
+     * ゲストのものに差し替わっている)。 */
+    if (v86_bios_attach_disk(path) != 0) {
+        v86_disk_result = 0x8001;
+        return -1;
+    }
+    /* ゲスト側のテストコードは 256 バイト/セクタ固定で書いてある
+     * (PC-98 2HD のブートトラックは 256B x 16 が標準)。
+     * イメージがそれ以外なら、突き合わせが成立しないので弾く。 */
+    if (loop_dev_get_geometry(V86_DISK_SLOT, &cyls, &heads, &spt,
+                              &bps, &total) != 0) {
+        v86_bios_detach_disk();
+        v86_disk_result = 0x8004;
+        return -1;
+    }
+    if (bps != V86_DISK_SECLEN) {
+        v86_bios_detach_disk();
+        v86_disk_result = 0x8005;
+        return -1;
+    }
+    if (loop_dev_read_chs(V86_DISK_SLOT, 0, 0, 1, ref) != 0) {
+        v86_bios_detach_disk();
+        v86_disk_result = 0x8002;
+        return -1;
+    }
+
+    if (v86_mem_setup() != 0) {
+        v86_bios_detach_disk();
+        v86_disk_result = 0x8003;
+        return -1;
+    }
+
+    for (i = 0; i < sizeof(v86_disk_code); i++) {
+        ((volatile u8 *)V86_TEST_CODE_ADDR)[i] = v86_disk_code[i];
+    }
+    *(volatile u16 *)(V86_TEST_MAGIC_ADDR + 8) = 0;
+
+    ctx.eip    = 0x0000;
+    ctx.cs     = (u32)(V86_TEST_CODE_ADDR >> 4);
+    ctx.eflags = V86_EFLAGS_INIT;
+    ctx.esp    = 0x0FFE;
+    ctx.ss     = (u32)(V86_TEST_STACK_ADDR >> 4);
+    ctx.es     = ctx.ss;
+    ctx.ds     = ctx.ss;
+    ctx.fs     = ctx.ss;
+    ctx.gs     = ctx.ss;
+
+    reason = v86_run(&ctx);
+
+    /* teardown でバッキング RAM が消える前に結果を回収する */
+    v86_disk_marker = (u32)*(volatile u16 *)(V86_TEST_MAGIC_ADDR + 8);
+    got = (const u8 *)V86_TEST_BUF_ADDR;
+    same = 0;
+    for (i = 0; i < V86_DISK_SECLEN; i++) {
+        if (got[i] == ref[i]) {
+            same++;
+        }
+    }
+    v86_disk_cmp = same;
+    v86_disk_reason = (u32)reason;
+
+    v86_mem_teardown();
+    v86_bios_detach_disk();
+
+    v86_disk_result = (reason == V86_EXIT_HLT &&
+                       v86_disk_marker == 0xD15CU &&
+                       same == V86_DISK_SECLEN) ? 0 : 1;
+    return (int)v86_disk_result;
 }
