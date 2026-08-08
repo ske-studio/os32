@@ -5,6 +5,15 @@
 #include "v86_io.h"
 #include "v86_pic.h"
 #include "tss.h"
+#include "pc98.h"
+#include "io.h"
+
+/* GDC はコマンドとパラメータの間に I/O ウェイトが要る (gfx_internal.h と同じ) */
+static void io_out(unsigned int port, unsigned int val)
+{
+    outp(port, val);
+    io_wait();
+}
 
 static u32 io_trap_n = 0;
 static u16 io_last_port = 0;
@@ -19,10 +28,14 @@ u16 v86_io_last_port(void)  { return io_last_port; }
 /*  分からない。INT 1Bh でも同じところで詰まり、呼び出しログを並べて初めて  */
 /*  原因が確定した (docs/tasks/v86v2/05 §4-2)。同じ手をここにも置く。       */
 /*                                                                          */
-/*  ポーリングは同じ組み合わせが何万回も続くので、直前と同じ                */
-/*  (port, dir, value, CS:IP) は積まずに回数だけ数える。そうしないと        */
-/*  リングが 1 種類のエントリで埋まって何も読み取れない。                   */
+/*  同じ組み合わせは積まずに回数だけ数える。**直前 1 件だけ見るのでは       */
+/*  足りない。** ゲストの割り込みハンドラは                                 */
+/*    OUT 08,20 → OUT 08,0B → IN 08 → OUT 00,20 → OUT 71 x2               */
+/*  のような数命令の輪を回し続けるので、隣どうしは必ず違う値になる。        */
+/*  直近 8 件と突き合わせて初めて畳める。畳めないとリングが定常ループで      */
+/*  埋まり、**知りたい初期化部分が押し出されて消える**。                    */
 /* ------------------------------------------------------------------------ */
+#define IOLOG_LOOKBACK  8
 #define V86_IOLOG_N     64
 u32 v86_iolog_w = 0;                    /* 積んだエントリ数 (回り込む前) */
 u32 v86_iolog[V86_IOLOG_N * 4];
@@ -41,11 +54,14 @@ static void iolog(u16 port, int size, int dir, u32 value)
     u32 loc = ((v86_gp_cs & 0xFFFFU) << 16) | (v86_gp_ip & 0xFFFFU);
     u32 *e;
 
-    if (v86_iolog_w != 0) {
-        e = &v86_iolog[((v86_iolog_w - 1) % V86_IOLOG_N) * 4];
-        if (e[0] == key && e[1] == value && e[2] == loc) {
-            e[3]++;
-            return;
+    {
+        u32 back;
+        for (back = 1; back <= IOLOG_LOOKBACK && back <= v86_iolog_w; back++) {
+            e = &v86_iolog[((v86_iolog_w - back) % V86_IOLOG_N) * 4];
+            if (e[0] == key && e[1] == value && e[2] == loc) {
+                e[3]++;
+                return;
+            }
         }
     }
     e = &v86_iolog[(v86_iolog_w % V86_IOLOG_N) * 4];
@@ -124,6 +140,108 @@ static const struct io_range v86_io_allow[] = {
 /*    0x07EC/0x07EE  HostDrv      — ファイル I/O 経路を守る                 */
 /* ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ */
+/*  グラフィックハードを「IPL 直後」の状態に戻してからゲストに渡す          */
+/*                                                                          */
+/*  ここを怠ると、**ゲストは自分が設定していない部分を OS32 の都合の状態の  */
+/*  まま引き継ぐ**。ゲームは BIOS が用意した既定状態を前提に、必要な所だけ  */
+/*  書き換えて動くので、前提が違うと画面だけが壊れる。                      */
+/*                                                                          */
+/*  実測 (Ys I): OS32 の gfx_init() は                                      */
+/*    6Ah=16色 / 68h=400ライン / A4h=表示ページ0 / A6h=描画ページ1          */
+/*  を設定したままにしていた。とくに **描画ページ 1 のまま渡す**のは実機の  */
+/*  どの状態とも違う。素の NP21/W で同じイメージを起動して VRAM を比べると  */
+/*  プレーンの中身はバイト単位で一致していたのに、画面だけが縦半分に潰れた  */
+/*  絵が 2 枚並ぶ状態になっていた。描いた絵は正しく、見せ方だけが違う。      */
+/*                                                                          */
+/*  PC-9800 Bible (docs/PC9800Bible/2-7_グラフィック.md, 4-3_I_Oマップ.md): */
+/*    68h  08h=高解像度(400ライン) / 09h=200ライン                          */
+/*    6Ah  00h=8色 / 01h=16色                                              */
+/*    A4h  表示ページ / A6h  描画ページ                                     */
+/*    A2h  0Dh=表示開始 / 0Ch=表示停止                                      */
+/* ------------------------------------------------------------------------ */
+static void gfx_state_for_guest(void)
+{
+    /* 表示を止める。ゲストが自分で開始する (実測: Ys が触るのは A2h=0Dh だけ)。 */
+    io_out(GDC_GFX_CMD, GDC_CMD_STOP);
+
+    /* 【未解決】ゲストはグラフィックの設定を**一切していない**。
+     *
+     * 観測モード (v86_io_observe) で採ったゲストのグラフィック I/O は
+     * セッション全体でこの 4 回だけだった:
+     *   OUT 62h,4Bh / OUT 62h,0Fh   テキスト GDC
+     *   OUT A2h,0Dh x2              グラフィック表示開始
+     *
+     * 解像度もカラーモードもページも触らない = **BIOS が残した状態を
+     * 丸ごと前提にしている**。OS32 は gfx_init() で
+     * 6Ah=16色 / 68h=400ライン / GDC CSRFORM / A6h=描画ページ1
+     * に変えてしまっているので、その差がそのまま画面の乱れになる。
+     *
+     * 68h だけ 200 ライン (09h) に戻す実験もしたが、飛び越し表示になって
+     * 悪化した。単独のポートではなく **BIOS 直後の状態一式**を復元する
+     * 必要がある。どの値が正解かは素の NP21/W 側で観測して決める。
+     * → docs/tasks/v86v2/07_gfx_state.md */
+
+    io_out(GDC_DISP_PAGE, 0x00);
+    io_out(GDC_ACCESS_PAGE, 0x00);
+}
+
+/* OS32 の描画環境を戻す。gfx_init() の末尾と同じ設定にする
+ * (VRAM は消さない — ゲストが描いた内容を残すため)。 */
+static void gfx_state_for_os32(void)
+{
+    io_out(MODE_FF2_PORT, MFF2_16COLOR);
+    io_out(GDC_GFX_CMD, GDC_GFX_400LINE);
+    io_out(GDC_GFX_PARAM, 0x00);
+    io_out(MODE_FF1_PORT, MFF1_HIRES);
+    io_out(GDC_GFX_CMD, GDC_CMD_START);
+    io_out(GDC_DISP_PAGE, 0x00);
+    io_out(GDC_ACCESS_PAGE, 0x01);
+}
+
+/* ------------------------------------------------------------------------ */
+/*  観測モード — 素通しポートを「トラップして、実 I/O もする」              */
+/*                                                                          */
+/*  素通しにしたポートは #GP を起こさないので v86_iolog に何も残らない。    */
+/*  ゲストがグラフィックをどう設定したのかを知りたいときに、この盲点が      */
+/*  そのまま行き止まりになる。                                              */
+/*                                                                          */
+/*  そこで観測したいポートだけ I/O 許可ビットマップから落とし、             */
+/*  ハンドラ側で **ログを取ってから実ポートへ中継する**。動作は素通しと     */
+/*  同じままで、値と発行元 CS:IP が全部見えるようになる。                    */
+/*                                                                          */
+/*  常時有効にすると #GP が増えて重いので既定は 0。ホストから             */
+/*    emu_write_mem addr=v86_io_observe hex=01000000                        */
+/*  で立てて 1 セッションだけ観測する。 */
+u32 v86_io_observe = 0;
+
+static const struct io_range v86_io_observe_list[] = {
+    { 0x0060, 0x006E, 2 },      /* テキスト GDC / モード F/F / ボーダー */
+    { 0x0070, 0x007A, 2 },      /* CRTC */
+    { 0x007C, 0x007E, 2 },      /* GRCG */
+    { 0x00A0, 0x00AE, 2 },      /* グラフィック GDC / パレット / ページ */
+    { 0x04A0, 0x04AF, 1 },      /* EGC */
+};
+
+static int io_is_observed(u16 port)
+{
+    u32 i;
+    if (!v86_io_observe) {
+        return 0;
+    }
+    for (i = 0; i < sizeof(v86_io_observe_list) /
+                    sizeof(v86_io_observe_list[0]); i++) {
+        const struct io_range *r = &v86_io_observe_list[i];
+        u16 p;
+        for (p = r->start; p <= r->end; p = (u16)(p + r->step)) {
+            if (p == port) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 void v86_io_apply_policy(void)
 {
     u32 i;
@@ -132,6 +250,7 @@ void v86_io_apply_policy(void)
     io_last_port = 0;
     v86_iolog_w = 0;
     v86_pic_reset();
+    gfx_state_for_guest();
 
     tss_iomap_deny_all();
 
@@ -142,11 +261,24 @@ void v86_io_apply_policy(void)
             tss_iomap_allow((u16)p);
         }
     }
+
+    /* 観測対象は許可リストの後で落とす (許可より観測が優先) */
+    if (v86_io_observe) {
+        for (i = 0; i < sizeof(v86_io_observe_list) /
+                        sizeof(v86_io_observe_list[0]); i++) {
+            const struct io_range *r = &v86_io_observe_list[i];
+            u32 p;
+            for (p = r->start; p <= (u32)r->end; p += r->step) {
+                tss_iomap_deny((u16)p);
+            }
+        }
+    }
 }
 
 void v86_io_reset_policy(void)
 {
     tss_iomap_deny_all();
+    gfx_state_for_os32();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -160,7 +292,9 @@ u32 v86_io_in(u16 port, int size)
 {
     u32 v;
 
-    if (v86_pic_is_port(port)) {
+    if (io_is_observed(port)) {
+        v = inp(port);                  /* 観測: 実ポートを読んで中継 */
+    } else if (v86_pic_is_port(port)) {
         v = v86_pic_in(port);
     } else {
         v = (size == 1) ? 0xFFU : 0xFFFFU;
@@ -174,7 +308,9 @@ u32 v86_io_in(u16 port, int size)
 
 void v86_io_out(u16 port, int size, u32 value)
 {
-    if (v86_pic_is_port(port)) {
+    if (io_is_observed(port)) {
+        outp(port, value);              /* 観測: ログを取ってから実ポートへ */
+    } else if (v86_pic_is_port(port)) {
         v86_pic_out(port, value);
     }
 
