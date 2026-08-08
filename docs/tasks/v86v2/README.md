@@ -17,7 +17,8 @@
 | 1 | [01_prior_session_analysis.md](01_prior_session_analysis.md) | 前回の最終セッションに残っていたログの再解析 |
 | 2 | [02_np21w_paging_analysis.md](02_np21w_paging_analysis.md) | NP21/W のページング保護実装の検証 |
 | 3 | [03_ys_profile.md](03_ys_profile.md) | Ys I の実挙動プロファイル。全ての数値の一次データ |
-| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (8 項目) と検証方法。実装する人はここ |
+| **4** | [04_implementation_status.md](04_implementation_status.md) | **実装状況**。守るべき不変条件 (9 項目) と検証方法。実装する人はここ |
+| **5** | [05_disk_bios_plan.md](05_disk_bios_plan.md) | **次にやること**。INT 1Bh を loop_dev に繋いでディスクからブートする計画 |
 
 ## 動かしてみる
 
@@ -56,6 +57,15 @@ v86 -t      OS32 のシェルから V86 セルフテストを実行する
 → **誤診**。エミュレータの実装は正しい。OS32 自身がトリプルフォルトの
 回避策としてカーネル帯に `PTE_USER` を付けていたのが原因だった。
 この誤診がカーネル 0x110000 スライドと A20 リバート 4 連発に繋がっていた。
+
+### 今回こちらが一度間違えたこと
+
+**「IOPL=3 なら `INT n` も素通しになる」** — これは誤り。
+V86 の `INT n` は IOPL に関係なくプロテクトモードの IDT を引くので、
+ゲート DPL=0 / ゲスト CPL=3 の組み合わせで必ず `#GP` になる。
+この前提でトランポリン方式を実装してしまい、実機で動かして気づいて作り直した。
+結果的には直接デコードの方が簡単だったので実害は無い。
+→ [04 §4-7](04_implementation_status.md)
 
 ---
 
