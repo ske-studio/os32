@@ -127,31 +127,30 @@ static u32 xfer_done = 0;
  *     trkseek(fdd, (fdc.treg[fdc.us] << 1) + fdc.hd)   ← 物理位置
  *     searchsector_d88()  … c/h/r/n を照合            ← 論理 ID
  *
- * 【実測】物理シリンダは SEEK の CL、**物理ヘッドは READ の AL bit2**。
+ * 物理シリンダはドライブのトラックレジスタ (SEEK の CL、または
+ * AH bit4 付き READ の CL)、物理ヘッドは V86_FDC_HEAD() を参照。
  *
- * 呼び出しログを最後まで並べて分かった。決め手は隣り合う 2 コール:
- *
- *   SEEK C=1 → READ AL=94 ID(0,1,1) N=3 x2 → 0x15000
- *              READ AL=90 ID(0,1,1) N=3 x2 → 0x15800
- *
- * **同じ ID を連続する 2 つのバッファへ読んでいる。** ローダが同じ 2KB を
- * 二度読む道理は無いので、AL で行き先の物理トラックが変わっているはず。
- * 実際 `Ys.D88` の物理trk2 と trk3 は ID が同一で中身が違う
- * (先頭が "CHSRD10" と "BEPMU1")。AL bit2 をヘッドとすると
- * trk3 → 0x15000、trk2 → 0x15800 となり辻褄が合う。
- *
- * DH をヘッドとみなす読み方も試したが、SEEK に DH=3 や DH=34 といった
- * 値が飛んでくる (SEEK は CL しか設定していない) ため成立しない。
- * ヘッド 1 が要る場面はすべて AL=0x94 で来ていた。
- *
- * 同じ ID を持つ物理トラックが 2 本ずつあるこのディスクの書式は、
- * 「AL でヘッドを選ぶ」前提で初めて意味を持つ。
+ * 【教訓】ここは実測ログからモデルを起こそうとして 2 回外した。
+ * 「SEEK の DH」→ 外れ、「AL bit2 だけ」→ 半分外れ (2 本が逆順)。
+ * 正解は NP21/W の src/bios/bios1b.c にそのまま書いてあった。
+ * **INT 1Bh の仕様は FDC の仕様ではない。BIOS 側のソースを読むこと。**
  */
 static u8 cur_cyl  = 0;
 static u8 cur_head = 0;      /* SEEK の DH。実際には使わないが観測用に残す */
 
-/* DA/UA (AL) から物理ヘッドを取り出す。 */
-#define V86_DAUA_HEAD(al)   (((al) >> 2) & 1U)
+/* 物理ヘッドの決まり方。**NP21/W の BIOS エミュレーションが正本。**
+ *
+ *   src/bios/bios1b.c:335
+ *     hd = ((CPU_DH) ^ (CPU_AL >> 2)) & 1;
+ *
+ * DH と DA/UA の bit2 の **XOR**。DH 単独でも AL bit2 単独でもない。
+ * 実測ログからモデルを起こしたときは「AL bit2 だけ」と読み違えていて、
+ * 同じシリンダの 2 本のトラックが逆順にロードされていた。
+ * (どちらも「別々のトラックを読む」ので、失敗が出ずに気づきにくい)
+ *
+ * セクタ ID 照合に使う H は DH そのまま (bios1b.c:68 `fdc.H = CPU_DH;`)。
+ * トラック選択とセクタ ID で別の値を使うのが 8259A ならぬ µPD765A の作法。 */
+#define V86_FDC_HEAD(dh, al)   ((((dh) ^ ((al) >> 2))) & 1U)
 
 u32 v86_bios_call_count(void)  { return bios_calls; }
 u32 v86_bios_last_vector(void) { return bios_last_vec; }
@@ -378,11 +377,21 @@ static void disk_read(u32 *frame)
                 (frame[V86F_EBP] & 0xFFFFU);
     u16 cyls; u8 heads, spt; u16 bps; u32 total;
     u32 seclen;
-    u32 phys_cyl  = cur_cyl;                                /* SEEK の CL */
-    u32 phys_head = V86_DAUA_HEAD(frame[V86F_EAX] & 0xFFU); /* AL bit2 */
+    u32 ah    = (frame[V86F_EAX] >> 8) & 0xFFU;
+    u32 al    = frame[V86F_EAX] & 0xFFU;            /* DA/UA */
+    u32 phys_cyl;
+    u32 phys_head = V86_FDC_HEAD(head, al);
     int is_d88 = (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88);
     /* PC-98 のセクタ長は最大 1024 バイト (N=3)。 */
     static u8 secbuf[1024];
+
+    /* AH bit4 が立っていたら READ 自身がシークする (bios1b.c:375
+     * `if (CPU_AH & 0x10) biosfd_seek(CPU_CL, ...)`)。
+     * 立っていなければ直前の SEEK が決めた位置のまま読む。 */
+    if (ah & 0x10) {
+        cur_cyl = (u8)cyl;
+    }
+    phys_cyl = cur_cyl;
 
     v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
     v86_disk_fail_len = (n << 16) | count;
@@ -508,7 +517,8 @@ static void bios_int1b(u32 *frame)
 {
     u32 cmd = (frame[V86F_EAX] >> 8) & 0x0FU;   /* AH の下位ニブル */
     u32 ax_in = frame[V86F_EAX] & 0xFFFFU;
-    u32 phys_in = ((u32)V86_DAUA_HEAD(ax_in & 0xFFU) << 8) | cur_cyl;
+    u32 phys_in = ((u32)V86_FDC_HEAD((ax_in >> 8) & 0xFFU, ax_in & 0xFFU) << 8)
+                  | cur_cyl;
     u32 fails_before = v86_disk_fail_n;
 
     xfer_done = 0;      /* SEEK 等でも「今回の転送量」が 0 になるように */
