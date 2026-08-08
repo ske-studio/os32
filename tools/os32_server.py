@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """
 OS32 HTTP & シリアルコンソールサーバー (os32_server.py)
+
+⚠️ 非推奨 (DEPRECATED, 2026-08-08):
+   本サーバの全機能は NP21/W ai-debug 版の内蔵 HTTP API (127.0.0.1:8025) に
+   移行済み。/cmd → /api/cmd, /key → /api/key, /screenshot → /api/screenshot。
+   内蔵 API は名前付きパイプも pywin32/pyautogui も不要。
+   詳細: /home/hight/np21w-src/docs/04-os32-integration.md
+   新規デバッグは tools/np21w_mcp/ の MCP サーバ、または curl で 8025 を使うこと。
+   本ファイルは互換のため当面残すが、将来削除する。
+
 Windows上のNP21Wの名前付きパイプ (\\.\pipe\np21w_com1) と常時接続し、
 WSLなど外部からの HTTPリクエスト を受け取ってOS32と通信する。
 
