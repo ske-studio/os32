@@ -43,7 +43,8 @@ int main(int argc, char **argv, KernelAPI *kapi)
     if (argc >= 3 && strcmp(argv[1], "-b") == 0) {
         static const char *reason[] = {
             "none", "guest executed HLT", "escape port",
-            "unsupported instruction", "timeout", "hotkey", "fault"
+            "unsupported instruction", "session timeout", "hotkey",
+            "fault", "runaway guest (#GP watchdog)"
         };
         printf("V86 boot: %s\n", argv[2]);
         rc = api->v86_boot(argv[2]);
@@ -55,7 +56,7 @@ int main(int argc, char **argv, KernelAPI *kapi)
             return 1;
         }
         printf("  exit   : %s\n",
-               (rc >= 0 && rc <= 6) ? reason[rc] : "?");
+               (rc >= 0 && rc <= 7) ? reason[rc] : "?");
         printf("\n");
         printf("  Read the counters from the host:\n");
         printf("    emu_read_mem addr=v86_boot_gp     len=4  (#GP count)\n");
@@ -67,6 +68,8 @@ int main(int argc, char **argv, KernelAPI *kapi)
         printf("    emu_read_mem addr=v86_boot_gpop   len=4  (opcode there)\n");
         printf("    emu_read_mem addr=v86_flt_vec     len=24 (non-#GP fault)\n");
         printf("    emu_read_mem addr=v86_disk_ident_n len=32 (disk counters)\n");
+        printf("    emu_read_mem addr=v86_kbd_n_push  len=12 (kbd push/read/drop)\n");
+        printf("  Exit the guest with CTRL+GRPH+DEL.\n");
         return 0;
     }
 

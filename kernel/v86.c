@@ -24,6 +24,8 @@ extern void exec_longjmp(u32 *buf, int val);
 static u32 v86_jmpbuf[6];
 static volatile int v86_active = 0;
 static enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
+static volatile int v86_exit_request = 0;
+static u32 v86_gp_since_tick = 0;   /* タイマ tick ごとに 0 に戻る #GP 数 */
 
 /* 直近の #GP の観測値。
  *
@@ -143,14 +145,24 @@ int v86_gp_handler(u32 *frame)
     u16 port;
 
     v86_gp_n++;
+    v86_gp_since_tick++;
     v86_gp_cs = cs;
     v86_gp_ip = ip;
     v86_gp_fl = frame[V86F_EFLAGS];
 
     /* ゲストの割り込み状態に依存しない歯止め。
-     * CLI したまま #GP を出し続けるゲストはここで止める。 */
-    if (v86_gp_n > V86_GP_LIMIT) {
-        v86_exit_reason = V86_EXIT_TIMEOUT;
+     * CLI したまま #GP を出し続けるゲストはここで止める。
+     *
+     * カウンタはタイマ IRQ が来るたびに 0 に戻る (v86_tick_and_check_timeout)。
+     * ゲストが正常に走っている限り実タイマは 100Hz で入るので、
+     * 何時間遊んでもここには到達しない。ゲストが CLI したまま
+     * 暴走すると実 IF が落ちてタイマが止まり、そこで初めて溜まり始める。
+     *
+     * 累計で数えていた頃は、遊べるようになった途端に
+     * **正常なプレイが 35 秒で打ち切られた** (キーボードのステータス
+     * ポーリングだけで 1,300 回/秒 の #GP が出る)。 */
+    if (v86_gp_since_tick > V86_GP_LIMIT) {
+        v86_exit_reason = V86_EXIT_GP_LIMIT;
         return 1;
     }
 
@@ -340,12 +352,38 @@ void v86_inject_int(u32 *frame, u32 vector)
                V86F_EIP, V86F_CS, V86F_EFLAGS, V86F_ESP, V86F_SS);
 }
 
+/* キーボード ISR から。脱出ホットキーを受けたことを記録する。
+ * ここで longjmp しないのは、割り込みスタックの畳み方を 1 か所
+ * (asm スタブ) に寄せるため。タイマのタイムアウトと同じ作法。 */
+void v86_request_exit(void)
+{
+    if (!v86_active) {
+        return;
+    }
+    v86_exit_request = 1;
+    v86_exit_reason = V86_EXIT_HOTKEY;
+}
+
+/* キーボード IRQ スタブから。畳むべきなら非 0 を返す。 */
+int v86_check_exit_request(void)
+{
+    if (!v86_active || !v86_exit_request) {
+        return 0;
+    }
+    v86_exit_request = 0;
+    return 1;
+}
+
 /* タイマ IRQ の反射経路から呼ばれる。上限を超えたら非 0 を返す。 */
 int v86_tick_and_check_timeout(void)
 {
     if (!v86_active || v86_tick_limit == 0) {
         return 0;
     }
+    /* 生きているタイマは「ゲストが暴走していない」ことの証明。
+     * #GP ウォッチドッグの budget をここで戻す。 */
+    v86_gp_since_tick = 0;
+
     if (++v86_ticks >= v86_tick_limit) {
         v86_exit_reason = V86_EXIT_TIMEOUT;
         return 1;
@@ -384,7 +422,9 @@ int v86_run(const struct v86_context *ctx)
     __asm__ volatile("pushfl\n\tpopl %0" : "=r"(saved_eflags));
 
     v86_exit_reason = V86_EXIT_NONE;
+    v86_exit_request = 0;
     v86_gp_n = 0;
+    v86_gp_since_tick = 0;
     v86_irq_n = 0;
     v86_ticks = 0;
     v86_tick_limit = V86_TICK_LIMIT;

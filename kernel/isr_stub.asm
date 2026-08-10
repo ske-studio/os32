@@ -47,6 +47,7 @@ extern fdc_irq_handler
 extern mouse_irq_handler
 extern v86_reflect_irq
 extern v86_tick_and_check_timeout
+extern v86_check_exit_request
 extern v86_exit_to_kernel
 
 ;; ============================================================
@@ -341,12 +342,25 @@ irq_stub_1:
         pushad
         RESTORE_KSEG
 
-        ;; Cハンドラを呼び出し
+        ;; Cハンドラを呼び出し。V86 セッション中はここでスキャンコードが
+        ;; ゲスト用 FIFO に積まれ、OS32 のリングバッファには入らない。
         call    kbd_irq_handler
 
         ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
         mov     al, OCW2_EOI
         out     PIC1_CMD, al
+
+        V86_REFLECT 1           ;; IRQ1 (キーボード)。既定では INT 09h に落ちる
+
+        ;; 脱出ホットキー (CTRL+GRPH+DEL) が押されていたら畳む。
+        ;; EOI と反射を済ませてから判定するのはタイマ側と同じ理由。
+        test    dword [esp + 40], 0x00020000    ;; EFLAGS.VM
+        jz      .no_exit
+        call    v86_check_exit_request
+        test    eax, eax
+        jz      .no_exit
+        call    v86_exit_to_kernel              ;; longjmp するので戻らない
+.no_exit:
 
         popad
         iretd

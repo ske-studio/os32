@@ -20,6 +20,13 @@
 /* 外部: irq_enable (idt.c で定義) */
 extern void irq_enable(unsigned int irq);
 
+/* 外部: V86 セッション (kernel/v86.c, kernel/v86_kbd.c)。
+ * drivers/ は -Ikernel を持たないので、この 3 本だけここで宣言する
+ * (irq_enable と同じ扱い)。ドライバが V86 の中身を知る必要はない。 */
+extern int  v86_is_active(void);
+extern void v86_request_exit(void);
+extern int  v86_kbd_push(u8 scancode);
+
 /* rshellモード判定用 (shell.cで定義) */
 extern int rshell_active;
 
@@ -108,6 +115,19 @@ void kbd_irq_handler(void)
 
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
+
+    /* V86 セッション中はキーをまるごとゲストへ回す。
+     * 8251A のデータレジスタは読んだら消えるので、ここで OS32 側の
+     * リングバッファにも入れると「シェルに打った覚えのない文字が
+     * 溜まる」ことになる。所有権はどちらか一方しか持てない。
+     * 戻り値が非 0 なら脱出ホットキー (CTRL+GRPH+DEL)。 */
+    if (v86_is_active()) {
+        if (v86_kbd_push(scancode)) {
+            v86_request_exit();
+        }
+        return;
+    }
+
     is_break = scancode & SCANCODE_BREAK;
     keycode  = scancode & SCANCODE_KEY;
 

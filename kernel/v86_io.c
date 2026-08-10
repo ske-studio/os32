@@ -4,6 +4,7 @@
 
 #include "v86_io.h"
 #include "v86_pic.h"
+#include "v86_kbd.h"
 #include "tss.h"
 #include "pc98.h"
 #include "io.h"
@@ -340,6 +341,7 @@ void v86_io_apply_policy(void)
     io_last_port = 0;
     v86_iolog_w = 0;
     v86_pic_reset();
+    v86_kbd_reset();
     gfx_state_for_guest();
     snd_state_for_guest();
 
@@ -388,6 +390,8 @@ u32 v86_io_in(u16 port, int size)
         v = inp(port);                  /* 観測: 実ポートを読んで中継 */
     } else if (v86_pic_is_port(port)) {
         v = v86_pic_in(port);
+    } else if (v86_kbd_is_port(port)) {
+        v = v86_kbd_in(port);
     } else {
         v = (size == 1) ? 0xFFU : 0xFFFFU;
     }
@@ -404,6 +408,8 @@ void v86_io_out(u16 port, int size, u32 value)
         outp(port, value);              /* 観測: ログを取ってから実ポートへ */
     } else if (v86_pic_is_port(port)) {
         v86_pic_out(port, value);
+    } else if (v86_kbd_is_port(port)) {
+        v86_kbd_out(port, value);
     }
 
     io_trap_n++;
