@@ -9,6 +9,7 @@
 #include "io.h"
 #include "gfx.h"        /* PAL_IDX_PORT / PAL_G_PORT / PAL_R_PORT / PAL_B_PORT */
 #include "palette.h"    /* palette_init() — セッション終了時の復帰 */
+#include "snd_engine.h" /* snd_set_master() — FM をゲストに明け渡す */
 
 /* GDC はコマンドとパラメータの間に I/O ウェイトが要る (gfx_internal.h と同じ) */
 static void io_out(unsigned int port, unsigned int val)
@@ -263,6 +264,32 @@ static void gfx_state_for_os32(void)
 }
 
 /* ------------------------------------------------------------------------ */
+/*  FM 音源をゲストに明け渡す                                               */
+/*                                                                          */
+/*  OPN のポート (0x188-0x18F) は素通しなので、OS32 の音源エンジンが        */
+/*  動いたままだとゲストの音楽ドライバと同じチップを取り合う。              */
+/*  `snd_tick()` は IRQ0 から毎回呼ばれ、BGM 再生中なら OPN に書く。        */
+/*  しかも `bgm_persist` があるのでプログラムを跨いで鳴り続ける。            */
+/*                                                                          */
+/*  `snd_set_master(0)` は全チャンネルをキーオフしてから停止するので、      */
+/*  鳴りっぱなしの音を残さずに明け渡せる。                                  */
+/* ------------------------------------------------------------------------ */
+static void snd_state_for_guest(void)
+{
+    snd_set_master(0);
+}
+
+/* ゲストが鳴らしっぱなしにした音を消してから OS32 に戻す。
+ * `snd_set_master(0)` が全チャンネルのキーオフを兼ねているので、
+ * 0 を経由してから 1 に戻す。これをやらないとセッション終了後も
+ * ゲームの最後の和音が鳴り続ける (実測: 終了後も ch0-2 が発音中だった)。 */
+static void snd_state_for_os32(void)
+{
+    snd_set_master(0);
+    snd_set_master(1);
+}
+
+/* ------------------------------------------------------------------------ */
 /*  観測モード — 素通しポートを「トラップして、実 I/O もする」              */
 /*                                                                          */
 /*  素通しにしたポートは #GP を起こさないので v86_iolog に何も残らない。    */
@@ -314,6 +341,7 @@ void v86_io_apply_policy(void)
     v86_iolog_w = 0;
     v86_pic_reset();
     gfx_state_for_guest();
+    snd_state_for_guest();
 
     tss_iomap_deny_all();
 
@@ -342,6 +370,7 @@ void v86_io_reset_policy(void)
 {
     tss_iomap_deny_all();
     gfx_state_for_os32();
+    snd_state_for_os32();
 }
 
 /* ------------------------------------------------------------------------ */

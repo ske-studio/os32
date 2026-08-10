@@ -174,6 +174,20 @@ def tool_gdc(_):
     return "\n".join("%-14s %s" % (k, v) for k, v in d.items())
 
 
+def tool_sound(_):
+    """Whether sound is actually coming out, not just being written.
+
+    peak is the absolute peak of the mixed output since the previous call
+    (reading resets it), so it answers what a port count cannot: did
+    anything reach the speakers. fm_playing is NOT reliable -- it only
+    counts key-ons in this build. Use fm_ch_playing / keyreg for what the
+    guest asked for, peak for what came out.
+    """
+    d = _json(emu.get("/api/sound"))
+    d.pop("ok", None)
+    return "\n".join("%-16s %s" % (k, v) for k, v in d.items())
+
+
 def tool_tvram(_):
     d = _json(emu.get("/api/tvram"))
     return "\n".join(d.get("lines", []))
@@ -458,6 +472,14 @@ TOOLS = {
                 "unreadable from the guest, so this is the only way to "
                 "compare 'what mode is the machine in' between two runs.",
                 _obj({})),
+    "emu_sound": (tool_sound,
+                  "Audio output level and FM/SSG state: peak of the mixed "
+                  "output since the last call (0 = silence, regardless of "
+                  "synthesizer), key-on bitmask and key-on register, the "
+                  "full OPN register file, and the SSG mixer/volumes. Use "
+                  "this instead of I/O port counts to tell 'the guest is "
+                  "writing to the chip' from 'sound is coming out'.",
+                  _obj({})),
     "emu_regs": (tool_regs,
                  "All CPU registers, segment bases, CR0-4, GDTR/IDTR; EIP "
                  "annotated with symbol+offset.",
