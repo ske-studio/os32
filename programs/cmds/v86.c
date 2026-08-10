@@ -69,7 +69,7 @@ int main(int argc, char **argv, KernelAPI *kapi)
         printf("    emu_read_mem addr=v86_flt_vec     len=24 (non-#GP fault)\n");
         printf("    emu_read_mem addr=v86_disk_ident_n len=32 (disk counters)\n");
         printf("    emu_read_mem addr=v86_kbd_n_push  len=12 (kbd push/read/drop)\n");
-        printf("  Exit the guest with CTRL+GRPH+DEL.\n");
+        printf("  Exit the guest with CTRL+STOP.\n");
         return 0;
     }
 
