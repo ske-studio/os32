@@ -54,6 +54,9 @@ int  v86_bios_has_disk(void);
  * v86_mem_setup() がバッキング RAM を張った後に呼ぶこと。 */
 void v86_bios_setup(void);
 
+/* セッション終了時に実機の IVT/BDA を書き戻す */
+void v86_bios_restore_real(void);
+
 /* リマップ前の実機 IVT / BDA を退避する。v86_mem_setup() の先頭で呼ぶ。 */
 void v86_bios_save_real(void);
 

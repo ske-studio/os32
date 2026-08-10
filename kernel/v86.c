@@ -435,6 +435,13 @@ int v86_run(const struct v86_context *ctx)
      * これを開けないと「音源は見えるのに曲が鳴らない」状態になる。 */
     irq_enable(V86_IRQ_SOUND);
 
+    /* VSYNC もセッション中だけ開ける。OS32 は使わないので普段は塞いである。
+     * Ys はフィールドに入ると自分で IRQ2 のマスクを外し (実測: master IMR が
+     * 0x7D → 0x79)、VSYNC ハンドラでフレームカウンタを減らす。
+     * 本体は 0160:0866 でそれが 0 になるのを待つので、届かないと
+     * **タイトルは越えられても画面が 1 フレームも進まない**。 */
+    irq_enable(V86_IRQ_VSYNC);
+
     if (exec_setjmp(v86_jmpbuf) == 0) {
         v86_active = 1;
         v86_enter(ctx);         /* 正常には戻らない */
@@ -443,6 +450,7 @@ int v86_run(const struct v86_context *ctx)
     /* longjmp で戻ってきた */
     v86_active = 0;
     irq_disable(V86_IRQ_SOUND);
+    irq_disable(V86_IRQ_VSYNC);
     tss_set_esp0(saved_esp0);
 
     /* IF と IOPL を呼び出し前の状態に戻す */

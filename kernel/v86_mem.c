@@ -38,19 +38,42 @@ int v86_mem_setup(void)
         return -2;              /* 連続領域が取れない */
     }
 
-    /* 低位 RAM をバッキングへ差し替える。
+    /* ページ 0 (IVT + BDA) だけは**実物理のまま**ゲストに見せる。
+     *
+     * NP21/W はキーボード BIOS (INT 09h) をホスト側の C で実装していて
+     * (`src/bios/bios09.c`)、ROM の `FD80:0088` にある `NOP` を踏むと
+     * `bios0x09()` が走る仕掛けになっている。そのコードは
+     * **`mem[]` = 物理メモリを直接叩く**ので、ページングを通らない。
+     *
+     * ここをバッキング RAM に張り替えていたせいで、
+     *
+     *   物理 0x528 (キーバッファ個数) = 0x01   ← BIOS が書いた
+     *   ゲストが見る 0x528            = 0x00   ← 誰も書いていない
+     *
+     * という食い違いが起き、Ys はタイトル画面で
+     * `0000:052A` のキー入力状態テーブルを永久に舐め続けていた。
+     * 実機なら ROM のコードがゲストとして走るので、その書き込みは
+     * ページテーブルを通って正しい場所に落ちる。
+     *
+     * ページ 0 で OS32 が使っているのは IVT と BDA だけで、
+     * どちらもセッション前に退避しセッション後に戻す。
+     * フォントキャッシュ以降 (0x1000-) はバッキングのままなので、
+     * ゲストが OS32 のデータを壊す心配はない。
+     *
      * ゲストは CPL=3 なので USER を付ける。paging_set_page() が PDE 側にも
      * USER を伝播させる (実効権限は PDE と PTE の論理積のため)。 */
-    for (a = V86_REMAP_START; a < V86_REMAP_END; a += PAGE_SIZE) {
+    paging_set_page(0, 0, PAGE_RW | PTE_USER);
+
+    for (a = V86_REMAP_START + PAGE_SIZE; a < V86_REMAP_END; a += PAGE_SIZE) {
         paging_set_page(a, backing_phys + (a - V86_REMAP_START),
                         PAGE_RW | PTE_USER);
     }
 
-    /* ゲストに渡す前にゼロクリアしておく。IVT/BDA の中身を作るのは
-     * BIOS エミュレーションの仕事なので Phase 3 で載せる。 */
+    /* ゲストに渡す前にゼロクリアする。ページ 0 は実機の IVT/BDA が
+     * そのまま入っているので触らない。 */
     {
-        volatile u32 *p = (volatile u32 *)V86_REMAP_START;
-        u32 n = (V86_REMAP_END - V86_REMAP_START) / 4;
+        volatile u32 *p = (volatile u32 *)(V86_REMAP_START + PAGE_SIZE);
+        u32 n = (V86_REMAP_END - (V86_REMAP_START + PAGE_SIZE)) / 4;
         u32 i;
         for (i = 0; i < n; i++) {
             p[i] = 0;
@@ -86,6 +109,11 @@ void v86_mem_teardown(void)
     if (!backing_phys) {
         return;
     }
+
+    /* ゲストが書き換えた実機の IVT/BDA を元に戻す。
+     * ページ 0 は実物理のまま渡してあるので、ここを戻さないと
+     * OS32 が持っている実機の割り込みベクタが壊れたままになる。 */
+    v86_bios_restore_real();
 
     /* 低位 RAM をアイデンティティマッピングに戻す。
      *

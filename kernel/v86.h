@@ -104,6 +104,10 @@ struct v86_context {
 #define V86_IRQ_SOUND       12
 #define V86_INT_SOUND       0x14
 
+/* VSYNC は IRQ2 → ゲストから見ると INT 0Ah。
+ * OS32 自身は使わないので、セッション中だけ開ける。 */
+#define V86_IRQ_VSYNC       2
+
 /* セッション終了理由 */
 enum v86_exit_reason {
     V86_EXIT_NONE = 0,

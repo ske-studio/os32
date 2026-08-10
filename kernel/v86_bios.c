@@ -202,6 +202,18 @@ void v86_bios_save_real(void)
     real_saved = 1;
 }
 
+/* セッション終了時に実機の IVT/BDA を書き戻す。
+ * ページ 0 は実物理のままゲストに渡している (v86_mem.c 参照) ので、
+ * ゲストが書き換えた分をここで巻き戻さないと OS32 側に残ってしまう。 */
+void v86_bios_restore_real(void)
+{
+    if (!real_saved) {
+        return;
+    }
+    paging_set_page(0, 0, PAGE_RW);
+    kmemcpy((void *)0, real_lowmem, REAL_SNAPSHOT_SIZE);
+}
+
 void v86_bios_setup(void)
 {
     u8 *guest = (u8 *)0;        /* リマップ済みのゲスト低位メモリ */
