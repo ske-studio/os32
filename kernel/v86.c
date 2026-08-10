@@ -524,6 +524,13 @@ int v86_smoke_test(void)
     for (i = 0; i < sizeof(v86_test_code); i++) {
         ((volatile u8 *)V86_TEST_CODE_ADDR)[i] = v86_test_code[i];
     }
+    /* 仮想 PIC の既定は実機どおり IRQ0 (タイマ) がマスクされている。
+     * このテストは「反射したタイマ IRQ がゲスト ISR に届くこと」を
+     * 確かめるものなので、ここだけ開ける。ゲストコード側で OCW1 を
+     * 書くのが筋だが、あのバイト列は相対ジャンプと絶対 IVT 値
+     * (mov es:[0x20], 0x005E) が混在していて先頭に命令を足せない。 */
+    v86_pic_set_imr(0, 0x00);
+
     magic = (volatile u16 *)V86_TEST_MAGIC_ADDR;
     *magic = 0;
     *(volatile u16 *)(V86_TEST_MAGIC_ADDR + 2) = 0;

@@ -31,23 +31,29 @@ int v86_pic_is_port(u16 port)
             port == V86_PIC_S_CMD  || port == V86_PIC_S_DATA);
 }
 
-static void pic_init_one(struct pic *p, u8 base)
+static void pic_init_one(struct pic *p, u8 imr, u8 base)
 {
-    /* 既定の IMR を 0x00 (全許可) にしてある。
+    /* 既定の IMR は**素の NP21/W で実測した値**。推測ではない。
      *
-     * 本当に忠実なのは「実機 BIOS が IPL 直前に設定した値」だが、それは
-     * 分からない。OS32 の IMR は OS32 の都合なので流用できない。
+     * Ys は ICW1 も OCW1 も一度も出さない (v86_pic_icw1_n = 0)。
+     * BIOS が IPL 直前に設定した状態を丸ごと前提にしているので、
+     * こちらが実機と同じ初期マスクを用意する義務がある。
+     * グラフィックとまったく同じ形の問題 (v86_io.c の
+     * gfx_state_for_guest() を参照)。
      *
-     * ここで全マスクにすると、ゲストが OCW1 を一度も書かない場合に
-     * 割り込みが一切届かなくなる。実測で Ys は ICW1 すら出しておらず
-     * (v86_pic_icw1_n = 0)、BIOS が設定した状態を前提に動いている。
-     * 全許可なら少なくとも従来と同じ挙動になり、ゲストが自分で塞ぐことは
-     * できる。反射しているのは IRQ0 と IRQ12 の 2 本だけなので実害も小さい。
+     * 素の NP21/W で Ys.D88 を起動して `emu_pic` を読むと:
      *
-     * 0xFF (全マスク) でも実験したが、Ys が止まる地点は変わらなかった。
-     * どちらが正しいかはまだ決め手が無いので、FM (IRQ12) が要る先のことを
-     * 考えて開けておく。 */
-    p->imr = 0x00;
+     *   master IMR = 0x7D   IRQ0 (タイマ) **マスク** / IRQ1 (キー) 許可
+     *                       IRQ2-6 マスク / IRQ7 (スレーブカスケード) 許可
+     *   slave  IMR = 0x61   IRQ9-12 許可 / IRQ8,13,14 マスク / IRQ15 許可
+     *
+     * **IRQ0 がマスクされているのが要点。** 以前は 0x00 (全許可) にして
+     * いたので、実機なら絶対に来ないタイマ割り込みをゲストに毎秒 100 回
+     * 注入していた。ゲストは INT 08h を差し替えていないので BIOS ROM の
+     * タイマハンドラが走り、毎回 PIT を再設定し (FD80:00AD の OUT 71h)、
+     * タイトル画面から先へ進まなくなっていた。
+     * 素の NP21/W の I/O プロファイルに 0x71 が一切現れないのが決め手。 */
+    p->imr = imr;
     p->irr = 0;
     p->isr = 0;
     p->base = base;
@@ -59,12 +65,17 @@ static void pic_init_one(struct pic *p, u8 base)
 
 void v86_pic_reset(void)
 {
-    pic_init_one(&pic_m, V86_PIC_M_BASE);
-    pic_init_one(&pic_s, V86_PIC_S_BASE);
+    pic_init_one(&pic_m, V86_PIC_M_IMR_INIT, V86_PIC_M_BASE);
+    pic_init_one(&pic_s, V86_PIC_S_IMR_INIT, V86_PIC_S_BASE);
     v86_pic_ocw2_n = 0;
     v86_pic_icw1_n = 0;
     v86_pic_masked_n = 0;
     v86_pic_inject_n = 0;
+}
+
+void v86_pic_set_imr(int slave, u8 imr)
+{
+    (slave ? &pic_s : &pic_m)->imr = imr;
 }
 
 u32 v86_pic_state(int slave)

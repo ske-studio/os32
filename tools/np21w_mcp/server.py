@@ -174,6 +174,19 @@ def tool_gdc(_):
     return "\n".join("%-14s %s" % (k, v) for k, v in d.items())
 
 
+def tool_pic(_):
+    """8259A master/slave state: IMR/ISR/IRR/ICW.
+
+    The mask register is write-only from the guest, so "which interrupts
+    is this machine set up to take?" has no answer from inside. A monitor
+    handing a guest the wrong default mask injects interrupts a real
+    machine would block -- which looks like nothing at all going wrong.
+    """
+    d = _json(emu.get("/api/pic"))
+    d.pop("ok", None)
+    return "\n".join("%-10s %s" % (k, v) for k, v in d.items())
+
+
 def tool_sound(_):
     """Whether sound is actually coming out, not just being written.
 
@@ -471,6 +484,13 @@ TOOLS = {
                 "PITCH) for both GDCs. All of these are write-only or "
                 "unreadable from the guest, so this is the only way to "
                 "compare 'what mode is the machine in' between two runs.",
+                _obj({})),
+    "emu_pic": (tool_pic,
+                "8259A master/slave IMR/ISR/IRR/ICW. The mask register is "
+                "write-only from the guest, so this is the only way to see "
+                "which interrupts a machine is actually set up to take -- "
+                "use it to check what mask a real BIOS leaves behind before "
+                "handing a guest to a V86 monitor.",
                 _obj({})),
     "emu_sound": (tool_sound,
                   "Audio output level and FM/SSG state: peak of the mixed "
