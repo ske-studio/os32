@@ -161,6 +161,19 @@ def tool_fault(_):
     return _annotate_eip(_json(emu.get("/api/fault")))
 
 
+def tool_gdc(_):
+    """Graphics chip state the guest cannot read back.
+
+    Ports 68h / 6Ah / A4h / A6h are write-only on real hardware and the
+    uPD7220 parameter RAM (SYNC / PITCH / SCROLL) is not readable at all,
+    so a monitor handing a guest its own leftover mode has no way to see
+    the mismatch from inside. Here it is a diff between two machines.
+    """
+    d = _json(emu.get("/api/gdc"))
+    d.pop("ok", None)
+    return "\n".join("%-14s %s" % (k, v) for k, v in d.items())
+
+
 def tool_tvram(_):
     d = _json(emu.get("/api/tvram"))
     return "\n".join(d.get("lines", []))
@@ -437,6 +450,14 @@ TOOLS = {
                   "generation counter. The core freezes at the fault site, "
                   "so emu_regs/emu_read_mem still show it until emu_resume.",
                   _obj({})),
+    "emu_gdc": (tool_gdc,
+                "GDC / mode F/F / CRTC state: mode1 (68h), mode2 (6Ah), "
+                "display and access page (A4h/A6h), display enable, GRCG, "
+                "CRTC, and the uPD7220 parameter RAM (SYNC/CSRFORM/SCROLL/"
+                "PITCH) for both GDCs. All of these are write-only or "
+                "unreadable from the guest, so this is the only way to "
+                "compare 'what mode is the machine in' between two runs.",
+                _obj({})),
     "emu_regs": (tool_regs,
                  "All CPU registers, segment bases, CR0-4, GDTR/IDTR; EIP "
                  "annotated with symbol+offset.",

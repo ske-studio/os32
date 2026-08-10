@@ -7,6 +7,8 @@
 #include "tss.h"
 #include "pc98.h"
 #include "io.h"
+#include "gfx.h"        /* PAL_IDX_PORT / PAL_G_PORT / PAL_R_PORT / PAL_B_PORT */
+#include "palette.h"    /* palette_init() — セッション終了時の復帰 */
 
 /* GDC はコマンドとパラメータの間に I/O ウェイトが要る (gfx_internal.h と同じ) */
 static void io_out(unsigned int port, unsigned int val)
@@ -162,25 +164,66 @@ static const struct io_range v86_io_allow[] = {
 /* ------------------------------------------------------------------------ */
 static void gfx_state_for_guest(void)
 {
-    /* 表示を止める。ゲストが自分で開始する (実測: Ys が触るのは A2h=0Dh だけ)。 */
-    io_out(GDC_GFX_CMD, GDC_CMD_STOP);
+    u32 i;
 
-    /* 【未解決】ゲストはグラフィックの設定を**一切していない**。
+    /* ゲストはグラフィックの設定を**一切しない**。
      *
-     * 観測モード (v86_io_observe) で採ったゲストのグラフィック I/O は
+     * 観測モード (v86_io_observe) で採った Ys のグラフィック I/O は
      * セッション全体でこの 4 回だけだった:
      *   OUT 62h,4Bh / OUT 62h,0Fh   テキスト GDC
      *   OUT A2h,0Dh x2              グラフィック表示開始
      *
      * 解像度もカラーモードもページも触らない = **BIOS が残した状態を
-     * 丸ごと前提にしている**。OS32 は gfx_init() で
-     * 6Ah=16色 / 68h=400ライン / GDC CSRFORM / A6h=描画ページ1
-     * に変えてしまっているので、その差がそのまま画面の乱れになる。
+     * 丸ごと前提にしている**。だからこちらが BIOS 相当の初期状態を
+     * 用意して渡す義務がある。
      *
-     * 68h だけ 200 ライン (09h) に戻す実験もしたが、飛び越し表示になって
-     * 悪化した。単独のポートではなく **BIOS 直後の状態一式**を復元する
-     * 必要がある。どの値が正解かは素の NP21/W 側で観測して決める。
+     * 下の値は推測ではない。素の NP21/W で Ys を起動し、エミュレータ内部
+     * の GDC 状態 (`emu_gdc`) を OS32 の V86 セッション中の同じ dump と
+     * 突き合わせて採った。差は 4 つだけだった:
+     *
+     *   項目          素の NP21/W    OS32 の V86
+     *   mode1 (68h)   0x99           0x89        bit4 = 200 ライン
+     *   mode2 (6Ah)   0x00           0x01        8 色 / 16 色
+     *   CSRFORM       01 00 00       00 00 00    LR = 2 ラスタ/行
+     *   PRAM (SCROLL) 全部 0         LEN=400     表示分割の長さ
+     *
+     * 以前 68h だけ 200 ラインに戻して悪化したのは、CSRFORM を
+     * 400 ライン用 (LR=1) のままにしていたから。mode1 bit4 は
+     * 「奇数ラスタを捨てる」で、GDC 側の行あたりラスタ数とセットでないと
+     * 飛び越し表示になる。**この 2 つは必ず一緒に変える。**
      * → docs/tasks/v86v2/07_gfx_state.md */
+
+    /* 表示を止めてから触る。ゲストが自分で A2h=0Dh を出して開始する。 */
+    io_out(GDC_GFX_CMD, GDC_CMD_STOP);
+
+    io_out(MODE_FF2_PORT, MFF2_8COLOR);     /* 6Ah: 8 色モード */
+    io_out(MODE_FF1_PORT, MFF1_200LINE);    /* 68h: 200 ライン */
+
+    /* CSRFORM (4Bh): P1 の下位 5bit = LR-1。1 = 2 ラスタ/行 */
+    io_out(GDC_GFX_CMD, GDC_GFX_400LINE);
+    io_out(GDC_GFX_PARAM, 0x01);
+    io_out(GDC_GFX_PARAM, 0x00);
+    io_out(GDC_GFX_PARAM, 0x00);
+
+    /* PRAM (70h): 表示分割を BIOS 直後と同じ「全部 0」に戻す。
+     * OS32 は gfx_scroll_init() で LEN=400 を入れているので、
+     * 消さないと 200 ライン表示と噛み合わない。 */
+    io_out(GDC_GFX_CMD, GDC_CMD_SCROLL);
+    for (i = 0; i < 8; i++) {
+        io_out(GDC_GFX_PARAM, 0x00);
+    }
+
+    /* デジタルパレット (8 色モードの A8h/AAh/ACh/AEh)。
+     * ゲストはパレットも設定しないので BIOS 既定値を入れる。
+     * 素の NP21/W で Ys を起動したときの値と同じ:
+     *   A8h=0x37  AAh=0x15  ACh=0x26  AEh=0x04
+     * OS32 の palette_init() は 16 色アナログのつもりで同じポートを
+     * 叩くため、8 色モードではこれが 0F0F0F0F に潰れて画面が
+     * 白一色になる。 */
+    io_out(PAL_IDX_PORT, 0x37);
+    io_out(PAL_G_PORT,   0x15);
+    io_out(PAL_R_PORT,   0x26);
+    io_out(PAL_B_PORT,   0x04);
 
     io_out(GDC_DISP_PAGE, 0x00);
     io_out(GDC_ACCESS_PAGE, 0x00);
@@ -190,13 +233,33 @@ static void gfx_state_for_guest(void)
  * (VRAM は消さない — ゲストが描いた内容を残すため)。 */
 static void gfx_state_for_os32(void)
 {
+    u32 i;
+    /* gfx_hardware_scroll(0) が 400 ライン・スクロール無しで出す値
+     * (SAD=0 / SL=400 の 1 分割)。実測した OS32 側の PRAM と一致する。 */
+    static const u8 pram_400[8] = { 0x00, 0x00, 0x00, 0x19,
+                                    0x00, 0x00, 0x00, 0x00 };
+
+    io_out(GDC_GFX_CMD, GDC_CMD_STOP);
+
     io_out(MODE_FF2_PORT, MFF2_16COLOR);
+    io_out(MODE_FF1_PORT, MFF1_HIRES);
+
     io_out(GDC_GFX_CMD, GDC_GFX_400LINE);
     io_out(GDC_GFX_PARAM, 0x00);
-    io_out(MODE_FF1_PORT, MFF1_HIRES);
+    io_out(GDC_GFX_PARAM, 0x00);
+    io_out(GDC_GFX_PARAM, 0x00);
+
+    io_out(GDC_GFX_CMD, GDC_CMD_SCROLL);
+    for (i = 0; i < 8; i++) {
+        io_out(GDC_GFX_PARAM, pram_400[i]);
+    }
+
     io_out(GDC_GFX_CMD, GDC_CMD_START);
     io_out(GDC_DISP_PAGE, 0x00);
     io_out(GDC_ACCESS_PAGE, 0x01);
+
+    /* 16 色に戻した後でないとアナログパレットとして書き込まれない */
+    palette_init();
 }
 
 /* ------------------------------------------------------------------------ */
