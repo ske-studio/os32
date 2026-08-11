@@ -6,8 +6,9 @@
 /*    .d88/.d77/.88d → D88 (トラックテーブル + セクタヘッダ走査)            */
 /*    .fdi           → FDI (4096B ヘッダ + RAW データ, FDD用)               */
 /*    .hdi           → HDI (4096B ヘッダ + RAW データ, HDD用)               */
+/*    .nhd           → NHD (T98-Next r0, 512B ヘッダ + RAW データ, HDD用)   */
 /*    .img/.bin       → RAW (ヘッダなし, 既知容量テーブルで判定)            */
-/*    その他         → 将来: NHD/ISO 等                                    */
+/*    その他         → 将来: ISO 等                                        */
 /*                                                                          */
 /*  D88 部分の実装根拠: docs/D88_FORMAT_SPEC.md                             */
 /*  FDI 部分の実装根拠: Anex86 FDI header specification                     */
@@ -38,11 +39,21 @@
 #define FDI_HDR_SIZE      4096
 #define FDI_HDR_FIELDS    32    /* 先頭 32B にジオメトリ情報 */
 
+/* ======== NHD 定数 (docs/NHD_FORMAT.md) ======== */
+#define NHD_HDR_SIZE      512
+#define NHD_SIG           "T98HDDIMAGE.R0"   /* sig[16] 先頭 14 文字 + NUL */
+#define NHD_OFF_HDRSIZE   0x110   /* LE32 ヘッダサイズ (=512) */
+#define NHD_OFF_CYLS      0x114   /* LE32 シリンダ数 */
+#define NHD_OFF_HEADS     0x118   /* LE16 ヘッド数 */
+#define NHD_OFF_SPT       0x11A   /* LE16 セクタ/トラック */
+#define NHD_OFF_BPS       0x11C   /* LE16 セクタ長 */
+
 /* ======== 内部構造体 ======== */
 typedef struct {
     int      in_use;
     int      fd;
     int      owns_fd;          /* 1=detach時にclose, 0=呼び出し側が管理 */
+    int      writable;         /* 1=O_RDWR で開けた (loop_dev_attach 経由のみ) */
     u8       fmt;              /* LOOP_FMT_D88 / LOOP_FMT_FDI / LOOP_FMT_HDI */
     u32      file_size;
     u32      data_offset;      /* RAW データ開始位置 (FDI:4096, D88:未使用) */
@@ -119,6 +130,8 @@ static int detect_format(const char *path)
         return LOOP_FMT_FDI;
     if (str_ends_with(path, ".hdi"))
         return LOOP_FMT_HDI;
+    if (str_ends_with(path, ".nhd"))
+        return LOOP_FMT_NHD;
     if (str_ends_with(path, ".img") ||
         str_ends_with(path, ".bin"))
         return LOOP_FMT_RAW;
@@ -414,6 +427,63 @@ static int attach_hdi(LoopSlot *s, int fd, u32 fsize)
     s->lba_sect_size = (u16)sect_size;
     s->total_lba     = cyls * surfaces * spt;
     s->fmt           = LOOP_FMT_HDI;
+    s->dev.blk_read  = raw_blk_read;
+    return 0;
+}
+
+/* ======================================================================== */
+/*  attach_nhd — NHD (T98-Next r0) イメージのアタッチ処理                    */
+/*                                                                          */
+/*  512B ヘッダ + RAW データ。HDI と違いマジックがあるので必ず照合する。      */
+/*  ジオメトリはヘッダの C/H/S/BPS をそのまま使う (docs/NHD_FORMAT.md)。     */
+/* ======================================================================== */
+static int attach_nhd(LoopSlot *s, int fd, u32 fsize)
+{
+    u8  hdr[NHD_OFF_BPS + 2];
+    u32 hdr_size, cyls, heads, spt, bps;
+    int rd, i;
+    static const char sig[] = NHD_SIG;
+
+    if (fsize < NHD_HDR_SIZE) return -2;
+
+    vfs_seek(fd, 0, 0);
+    rd = vfs_read_fd(fd, hdr, sizeof(hdr));
+    if (rd < (int)sizeof(hdr)) return -4;
+
+    for (i = 0; sig[i]; i++) {
+        if (hdr[i] != (u8)sig[i]) return -2;
+    }
+
+    hdr_size = le32(hdr + NHD_OFF_HDRSIZE);
+    cyls     = le32(hdr + NHD_OFF_CYLS);
+    heads    = le16(hdr + NHD_OFF_HEADS);
+    spt      = le16(hdr + NHD_OFF_SPT);
+    bps      = le16(hdr + NHD_OFF_BPS);
+
+    /* バリデーション (LoopSlot.cyls は u16 なので上限 65535)。
+     * C*H*S*BPS は u32 を溢れ得るので段階的に上限を確かめる。
+     * ファイルサイズが u32 なのでイメージは 4GB 未満しか扱えない。 */
+    if (hdr_size < NHD_HDR_SIZE || hdr_size > 65536) return -2;
+    if (hdr_size >= fsize) return -2;
+    if (bps == 0 || bps > 4096) return -2;
+    if (spt == 0 || spt > 255) return -2;
+    if (heads == 0 || heads > 255) return -2;
+    if (cyls == 0 || cyls > 65535) return -2;
+    {
+        u32 per_cyl = heads * spt;              /* <= 255*255, 溢れない */
+        if (cyls > 0xFFFFFFFFU / per_cyl) return -2;
+        if (cyls * per_cyl > 0xFFFFFFFFU / bps) return -2;
+        if (cyls * per_cyl * bps > fsize - hdr_size) return -2;
+    }
+
+    s->data_offset   = hdr_size;
+    s->file_size     = fsize;
+    s->cyls          = (u16)cyls;
+    s->heads         = (u8)heads;
+    s->spt           = (u8)spt;
+    s->lba_sect_size = (u16)bps;
+    s->total_lba     = cyls * heads * spt;
+    s->fmt           = LOOP_FMT_NHD;
     s->dev.blk_read  = raw_blk_read;
     return 0;
 }
@@ -735,6 +805,7 @@ void loop_dev_init(void)
         s->in_use       = 0;
         s->fd           = -1;
         s->owns_fd      = 0;
+        s->writable     = 0;
         s->fmt          = LOOP_FMT_NONE;
         s->dev.name     = slot_names[i];
         s->dev.type     = DEV_BLOCK;
@@ -793,6 +864,10 @@ int loop_dev_attach_fd(int fd, int slot, int fmt)
         ret = attach_hdi(s, fd, fsize);
         fmt_name = "HDI";
         break;
+    case LOOP_FMT_NHD:
+        ret = attach_nhd(s, fd, fsize);
+        fmt_name = "NHD";
+        break;
     case LOOP_FMT_RAW:
         ret = attach_raw(s, fd, fsize);
         fmt_name = "RAW";
@@ -845,15 +920,26 @@ int loop_dev_attach(const char *vfs_path, int slot)
     if (fmt == LOOP_FMT_NONE)
         return -2;
 
-    /* ファイルオープン */
-    fd = vfs_open(vfs_path, 0);
-    if (fd < 0)
-        return -1;
+    /* ファイルオープン。ゲストの WRITE (INT 1Bh AH=05h) を通すため
+     * まず O_RDWR を試み、開けないファイルシステムでは O_RDONLY に
+     * フォールバックして読み取り専用フラグを立てる。
+     * (vfs_fd.c は O_RDONLY fd への write を拒否する — 「成功と答えて
+     *  書いていない」状態を作らないため、可否はここで確定させる) */
+    fd = vfs_open(vfs_path, O_RDWR);
+    if (fd >= 0) {
+        s->writable = 1;
+    } else {
+        fd = vfs_open(vfs_path, 0);
+        if (fd < 0)
+            return -1;
+        s->writable = 0;
+    }
 
     /* fd ベースのアタッチに委譲 */
     ret = loop_dev_attach_fd(fd, slot, fmt);
     if (ret != 0) {
         vfs_close(fd);
+        s->writable = 0;
         return ret;
     }
 
@@ -877,6 +963,7 @@ void loop_dev_detach(int slot)
     s->fd      = -1;
     s->in_use  = 0;
     s->owns_fd = 0;
+    s->writable = 0;
     s->fmt     = LOOP_FMT_NONE;
     s->dev.blk_read    = 0;
     s->dev.blk_write   = 0;
@@ -887,6 +974,71 @@ void loop_dev_detach(int slot)
     s->dev.cyls  = 0;
     s->dev.heads = 0;
     s->dev.spt   = 0;
+}
+
+/* ------------------------------------------------------------------------ */
+/*  LBA API — FDI/HDI/NHD/RAW 用 (D88 は非対応)                             */
+/*                                                                          */
+/*  SASI/IDE BIOS の LBA 線形アクセス用。範囲チェックは呼び出し側           */
+/*  (sasi_pos) にもあるが、ここでも二重に持つ                               */
+/*  (08_dos5.md §2「範囲外要求に無関係なセクタを返して成功」の再発防止)。   */
+/* ------------------------------------------------------------------------ */
+static LoopSlot *lba_slot_ok(int slot, u32 lba, u32 count)
+{
+    LoopSlot *s;
+    if (slot < 0 || slot >= LOOP_MAX_SLOTS) return 0;
+    s = &loop_slots[slot];
+    if (!s->in_use) return 0;
+    if (count == 0) return 0;
+    if (lba >= s->total_lba) return 0;
+    if (count > s->total_lba - lba) return 0;
+    return s;
+}
+
+int loop_dev_read_lba(int slot, u32 lba, u32 count, void *buf)
+{
+    LoopSlot *s;
+    u32 offset, total_bytes;
+    int rd;
+
+    s = lba_slot_ok(slot, lba, count);
+    if (!s) return -1;
+    if (s->fmt == LOOP_FMT_D88) return -2;
+
+    offset = s->data_offset + lba * (u32)s->lba_sect_size;
+    total_bytes = count * (u32)s->lba_sect_size;
+
+    vfs_seek(s->fd, (int)offset, 0);
+    rd = vfs_read_fd(s->fd, buf, total_bytes);
+    if (rd < (int)total_bytes) return -1;
+    return 0;
+}
+
+int loop_dev_write_lba(int slot, u32 lba, u32 count, const void *buf)
+{
+    LoopSlot *s;
+    u32 offset, total_bytes;
+    int wr;
+
+    s = lba_slot_ok(slot, lba, count);
+    if (!s) return -1;
+    if (s->fmt == LOOP_FMT_D88) return -2;
+    if (!s->writable) return -3;
+
+    offset = s->data_offset + lba * (u32)s->lba_sect_size;
+    total_bytes = count * (u32)s->lba_sect_size;
+
+    vfs_seek(s->fd, (int)offset, 0);
+    wr = vfs_write_fd(s->fd, buf, total_bytes);
+    if (wr < (int)total_bytes) return -1;
+    return 0;
+}
+
+int loop_dev_is_writable(int slot)
+{
+    if (slot < 0 || slot >= LOOP_MAX_SLOTS) return 0;
+    if (!loop_slots[slot].in_use) return 0;
+    return loop_slots[slot].writable;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -945,8 +1097,10 @@ int loop_dev_get_format(int slot)
 /* ------------------------------------------------------------------------ */
 int loop_dev_is_hdd(int slot)
 {
+    u8 fmt;
     if (slot < 0 || slot >= LOOP_MAX_SLOTS) return 0;
-    return (loop_slots[slot].fmt == LOOP_FMT_HDI) ? 1 : 0;
+    fmt = loop_slots[slot].fmt;
+    return (fmt == LOOP_FMT_HDI || fmt == LOOP_FMT_NHD) ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -959,7 +1113,7 @@ int loop_dev_get_media(int slot)
     s = &loop_slots[slot];
     if (!s->in_use) return 0;
 
-    if (s->fmt == LOOP_FMT_HDI)
+    if (s->fmt == LOOP_FMT_HDI || s->fmt == LOOP_FMT_NHD)
         return LOOP_MEDIA_HDD;
 
     /* FDD: セクタサイズで判定 */

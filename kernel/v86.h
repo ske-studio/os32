@@ -205,6 +205,10 @@ int v86_smoke_test(void);
  * そこへ制御を渡す。戻り値は v86_exit_reason。 */
 int v86_boot(const char *path);
 
+/* 2 イメージ版。path がブートドライブ (slot 0)、second は 2 台目 (slot 1、
+ * NULL 可)。HDD イメージ (.nhd/.hdi) なら DA/UA 0x80、FDD なら 0x90 になる。 */
+int v86_boot2(const char *path, const char *second);
+
 /* ディスクテスト: イメージを attach し、ゲストに INT 1Bh READ をさせて
  * 読めた中身を loop_dev の直読と突き合わせる。0=一致、負=失敗。 */
 int v86_disk_test(const char *path);

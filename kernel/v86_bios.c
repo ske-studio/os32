@@ -23,6 +23,19 @@ static u32 bios_calls = 0;
 static u32 bios_last_vec = 0;
 static int disk_attached = 0;
 
+/* ドライブ表 — DA/UA と loop_dev スロットの対応 (08_dos5.md §5-6 の宿題)。
+ *
+ * [0] = ブートイメージ (slot 0)、[1] = 2 台目 (slot 1)。
+ * daua は種別ニブル + ユニット番号の完成形 (0x90/0x91/0x80/0x81)。
+ * in_use=0 のエントリはどの DA/UA にも答えない。 */
+struct v86_drive {
+    int in_use;
+    u8  daua;
+    i8  slot;
+};
+static struct v86_drive v86_drives[V86_DRIVE_MAX];
+static u8 v86_boot_daua_v = V86_DAUA_FDD;
+
 /* 失敗した INT 1Bh の中身。推測でなく事実で切り分けるために残す。
  * static にすると kernel.map に出ずホストから読めないのでグローバル。 */
 u32 v86_disk_fail_n   = 0;      /* 失敗回数 */
@@ -161,27 +174,73 @@ u32 v86_bios_call_count(void)  { return bios_calls; }
 u32 v86_bios_last_vector(void) { return bios_last_vec; }
 int v86_bios_has_disk(void)    { return disk_attached; }
 
+u32 v86_bios_boot_daua(void) { return v86_boot_daua_v; }
+
+/* イメージをスロットにアタッチし、ドライブ表に登録する。
+ * DA/UA の種別ニブルは loop_dev の HDD 判定から、ユニット番号は
+ * 「同種の既登録ドライブの数」から決める (2 台目の FDD は 0x91)。 */
+static int drive_register(const char *path, int slot, int idx)
+{
+    u8 type, unit;
+    int i;
+
+    if (loop_dev_attach(path, slot) != 0) {
+        return -1;
+    }
+    type = loop_dev_is_hdd(slot) ? V86_DAUA_HDD : V86_DAUA_FDD;
+    unit = 0;
+    for (i = 0; i < V86_DRIVE_MAX; i++) {
+        if (v86_drives[i].in_use && (v86_drives[i].daua & 0xF0U) == type) {
+            unit++;
+        }
+    }
+    v86_drives[idx].in_use = 1;
+    v86_drives[idx].daua   = (u8)(type | unit);
+    v86_drives[idx].slot   = (i8)slot;
+    return 0;
+}
+
 int v86_bios_attach_disk(const char *path)
 {
     if (disk_attached) {
         v86_bios_detach_disk();
     }
+    v86_boot_daua_v = V86_DAUA_FDD;
     if (path == (const char *)0) {
         return 0;               /* ディスク無しで動かす */
     }
-    if (loop_dev_attach(path, V86_DISK_SLOT) != 0) {
+    if (drive_register(path, V86_DISK_SLOT, 0) != 0) {
         return -1;
     }
+    v86_boot_daua_v = v86_drives[0].daua;
     disk_attached = 1;
     return 0;
 }
 
+int v86_bios_attach_second(const char *path)
+{
+    if (!disk_attached || path == (const char *)0) {
+        return -1;              /* ブートイメージが先 */
+    }
+    if (v86_drives[1].in_use) {
+        return -1;
+    }
+    return drive_register(path, V86_DISK_SLOT_2ND, 1);
+}
+
 void v86_bios_detach_disk(void)
 {
-    if (disk_attached) {
-        loop_dev_detach(V86_DISK_SLOT);
-        disk_attached = 0;
+    int i;
+    for (i = 0; i < V86_DRIVE_MAX; i++) {
+        if (v86_drives[i].in_use) {
+            loop_dev_detach(v86_drives[i].slot);
+            v86_drives[i].in_use = 0;
+            v86_drives[i].daua = 0;
+            v86_drives[i].slot = -1;
+        }
     }
+    disk_attached = 0;
+    v86_boot_daua_v = V86_DAUA_FDD;
 }
 
 /* HLE する割り込みベクタ。ここに無いものは実機の IVT の値
@@ -262,11 +321,35 @@ void v86_bios_setup(void)
     /* ブートデバイスと装置構成。
      *   0x0584  MEMB_DISK_BOOT    起動した装置の DA/UA
      *   0x055C  MEMW_DISK_EQUIP   bit0-3=2HD FDD / bit8-11=SASI / bit12-15=2DD
-     *   0x0482  MEMB_DISK_EQUIPS  ハードディスクの装備
-     *   0x0480  MEMB_SYS_TYPE     bit7 = IDE あり
-     *   0x05AE  MEMB_F144_SUP     1.44MB 対応ドライブのビットマップ */
-    guest[0x0584] = V86_BOOT_DAUA;
-    *(u16 *)(guest + 0x055C) = 0x0001;      /* 2HD ユニット 0 だけ */
+     *   0x0482  MEMB_DISK_EQUIPS  SCSI 用 (SASI/IDE ブートでは 0 のまま —
+     *                             実測: 10_dos_hdd.md §2-4)
+     *   0x0480  MEMB_SYS_TYPE     bit7 = IDE あり (IDE ポートは拒否している
+     *                             ので落とす。DOS 5 標準ドライバは INT 1Bh
+     *                             経由なので不要 — 実測で確認)
+     *   0x05AE  MEMB_F144_SUP     1.44MB 対応ドライブのビットマップ
+     *
+     * DISK_EQUIP はドライブ表から組み立てる。FDD はユニットの bit0-3、
+     * SASI/IDE HDD は bit8-11 (実測: HDD ブートの実機 BDA は 0x0103 だが
+     * 存在しない FDD まで申告する必要はない)。 */
+    {
+        u16 equip = 0;
+        int i;
+        for (i = 0; i < V86_DRIVE_MAX; i++) {
+            if (!v86_drives[i].in_use) {
+                continue;
+            }
+            if ((v86_drives[i].daua & 0xF0U) == V86_DAUA_HDD) {
+                equip |= (u16)(0x0100U << (v86_drives[i].daua & 0x03U));
+            } else {
+                equip |= (u16)(0x0001U << (v86_drives[i].daua & 0x03U));
+            }
+        }
+        if (equip == 0) {
+            equip = 0x0001;     /* ディスク無しセッションは従来どおり */
+        }
+        guest[0x0584] = v86_boot_daua_v;
+        *(u16 *)(guest + 0x055C) = equip;
+    }
     guest[0x0482] = 0x00;
     guest[0x0480] = (u8)(guest[0x0480] & ~0x80U);
     guest[0x05AE] = 0x00;
@@ -364,14 +447,35 @@ static int guest_range_ok(u32 linear, u32 len)
  *
  * 上位ニブルが装置種別、下位 2bit がユニット番号
  * (np21w-src/src/bios/bios1b.c `bios0x1b()` の devtype = AL & 0xF0)。
- * こちらが用意しているのは 2HD FDD のユニット 0 ただ 1 台。 */
-static int daua_is_ours(u32 al)
+ * ドライブ表を引いて loop_dev スロットを返す。-1 = うちの装置ではない。
+ *
+ * **DA=0x00 は 0x80 の旧 SASI 表記。** DOS 5 のブロックデバイスドライバは
+ * AL=0x00 の LBA モードで叩いてくる (実測 10_dos_hdd.md §2-2、READ の
+ * 126/130 がこれ)。ここを落とすと IO.SYS のロードで止まる。 */
+static int daua_to_slot(u32 al)
 {
+    u8 t = (u8)(al & 0xF0U);
+    u8 unit = (u8)(al & 0x03U);
+    int i;
+
     if (!disk_attached) {
-        return 0;
+        return -1;
     }
-    return ((al & 0xF0U) == (u32)V86_BOOT_DAUA) && ((al & 0x03U) == 0U);
+    if (t == 0x00U) {
+        t = V86_DAUA_HDD;
+    }
+    for (i = 0; i < V86_DRIVE_MAX; i++) {
+        if (v86_drives[i].in_use && v86_drives[i].daua == (u8)(t | unit)) {
+            return v86_drives[i].slot;
+        }
+    }
+    return -1;
 }
+
+/* FDD 側 INT 1Bh が今回のコールで使うスロット。
+ * bios_fdd_int1b() の冒頭で daua_to_slot() の結果を入れる。
+ * (FDD が 2 台目 = slot 1 のこともあるので定数では持てない) */
+static int cur_fdd_slot = V86_DISK_SLOT;
 
 /* AH=04h SENSE — 装置の状態を返す。
  * ゲストは起動時にこれで「ドライブがあるか」を確かめる。
@@ -423,14 +527,14 @@ static int d88_read_sector(u32 phys_cyl, u32 head,
     u16 spt = 0;
     int fd;
 
-    off = loop_dev_seek_d88(V86_DISK_SLOT,
+    off = loop_dev_seek_d88(cur_fdd_slot,
                             (u8)phys_cyl, (u8)head,
                             (u8)id_c, (u8)id_h, (u8)id_r,
                             &data_len, &spt);
     if (off == 0 || data_len == 0 || data_len != seclen) {
         return -1;
     }
-    fd = loop_dev_get_fd(V86_DISK_SLOT);
+    fd = loop_dev_get_fd(cur_fdd_slot);
     if (fd < 0) {
         return -1;
     }
@@ -468,7 +572,7 @@ static void disk_read_common(u32 *frame, int transfer)
     u32 al    = frame[V86F_EAX] & 0xFFU;            /* DA/UA */
     u32 phys_cyl;
     u32 phys_head = V86_FDC_HEAD(head, al);
-    int is_d88 = (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88);
+    int is_d88 = (loop_dev_get_format(cur_fdd_slot) == LOOP_FMT_D88);
     /* PC-98 のセクタ長は最大 1024 バイト (N=3)。 */
     static u8 secbuf[1024];
 
@@ -512,7 +616,7 @@ static void disk_read_common(u32 *frame, int transfer)
         bios_set_cf(frame, 1);
         return;
     }
-    if (loop_dev_get_geometry(V86_DISK_SLOT, &cyls, &heads, &spt,
+    if (loop_dev_get_geometry(cur_fdd_slot, &cyls, &heads, &spt,
                               &bps, &total) != 0 || spt == 0) {
         bios_set_ah(frame, 0x60);
         bios_set_cf(frame, 1);
@@ -597,7 +701,7 @@ static void disk_read_common(u32 *frame, int transfer)
                 bios_set_cf(frame, 1);
                 return;
             }
-            if (loop_dev_read_chs(V86_DISK_SLOT, (u16)cyl, (u8)head,
+            if (loop_dev_read_chs(cur_fdd_slot, (u16)cyl, (u8)head,
                                   (u8)sect, secbuf) != 0) {
                 v86_disk_fail_n++; v86_disk_fail_why = 3;
                 v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
@@ -660,6 +764,142 @@ static void disk_read_common(u32 *frame, int transfer)
 static void disk_read(u32 *frame)   { disk_read_common(frame, 1); }
 static void disk_verify(u32 *frame) { disk_read_common(frame, 0); }
 
+/* AH=05h WRITE — FDD 規約の書き込み。正本は bios1b.c case 0x05。
+ *
+ * READ と同じレジスタ規約・同じ「トラックを跨がない」歩き方で、
+ * 方向だけが逆。FDI/RAW のみ対応 (D88 の ID ずらしイメージへ書く用途は
+ * 無い — Ys 等は読み専用。来たら正直に AH=0x40 で返す)。
+ * エラーコードは実機と同じ: 0x70 ライトプロテクト / 0x20 64KB 境界 /
+ * 0xC0 転送しきれず。 */
+static void disk_write(u32 *frame)
+{
+    u32 cyl   = (frame[V86F_ECX] >> 0) & 0xFFU;     /* CL */
+    u32 n     = (frame[V86F_ECX] >> 8) & 0xFFU;     /* CH: セクタ長コード */
+    u32 head  = (frame[V86F_EDX] >> 8) & 0xFFU;     /* DH */
+    u32 sect  = (frame[V86F_EDX] >> 0) & 0xFFU;     /* DL (1 起算) */
+    u32 count = frame[V86F_EBX] & 0xFFFFU;          /* BX: バイト数 */
+    u32 src   = ((frame[V86F_ES] & 0xFFFFU) << 4) +
+                (frame[V86F_EBP] & 0xFFFFU);
+    u16 cyls; u8 heads, spt; u16 bps; u32 total;
+    u32 seclen;
+    u32 ah    = (frame[V86F_EAX] >> 8) & 0xFFU;
+    u32 phys_head;
+    static u8 secbuf[1024];
+
+    if (ah & 0x10) {
+        cur_cyl = (u8)cyl;
+    }
+    phys_head = V86_FDC_HEAD(head, frame[V86F_EAX] & 0xFFU);
+
+    v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+    v86_disk_fail_len = (n << 16) | count;
+    v86_disk_fail_dst = src;
+    xfer_done = 0;
+
+    if (!disk_attached) {
+        v86_disk_fail_n++; v86_disk_fail_why = 4;
+        bios_set_ah(frame, 0x60);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (count == 0) {
+        bios_set_ah(frame, 0x00);
+        bios_set_cf(frame, 0);
+        return;
+    }
+    if ((src & 0xFFFFU) > ((src + count - 1) & 0xFFFFU)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 1;
+        bios_set_ah(frame, 0x20);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (!guest_range_ok(src, count)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 1;
+        bios_set_ah(frame, 0x40);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (loop_dev_get_geometry(cur_fdd_slot, &cyls, &heads, &spt,
+                              &bps, &total) != 0 || spt == 0) {
+        bios_set_ah(frame, 0x60);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (!loop_dev_is_writable(cur_fdd_slot)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 1;
+        bios_set_ah(frame, 0x70);       /* ライトプロテクト */
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (loop_dev_get_format(cur_fdd_slot) == LOOP_FMT_D88) {
+        v86_disk_fail_n++; v86_disk_fail_why = 2;
+        bios_set_ah(frame, 0x40);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    seclen = 128UL << (n & 3);
+    if (seclen != (u32)bps || seclen > sizeof(secbuf)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 2;
+        bios_set_ah(frame, 0x40);
+        bios_set_cf(frame, 1);
+        return;
+    }
+
+    while (count) {
+        u32 i;
+        u32 xfer = (count > seclen) ? seclen : count;
+
+        /* 端数セクタは読んでから前半だけ差し替える (RMW)。
+         * 残りを 0 で埋めて書くと隣のデータを消してしまう。 */
+        if (xfer < seclen) {
+            if (loop_dev_read_chs(cur_fdd_slot, (u16)cyl, (u8)head,
+                                  (u8)sect, secbuf) != 0) {
+                v86_disk_fail_n++; v86_disk_fail_why = 3;
+                bios_set_ah(frame, 0x40);
+                bios_set_cf(frame, 1);
+                return;
+            }
+        }
+        for (i = 0; i < xfer; i++) {
+            secbuf[i] = ((volatile u8 *)src)[i];
+        }
+        if (loop_dev_write_chs(cur_fdd_slot, (u16)cyl, (u8)head,
+                               (u8)sect, secbuf) != 0) {
+            v86_disk_fail_n++; v86_disk_fail_why = 3;
+            v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+            bios_set_ah(frame, 0x40);
+            bios_set_cf(frame, 1);
+            return;
+        }
+        xfer_done += xfer;
+        src   += xfer;
+        count -= xfer;
+
+        /* READ と同じ: トラックは跨がない。AH bit7 + 表面なら裏面へ。 */
+        if (sect >= spt) {
+            if ((ah & 0x80U) && phys_head == 0 && heads > 1) {
+                head      = 1;
+                phys_head = 1;
+                sect      = 1;
+            } else {
+                break;
+            }
+        } else {
+            sect++;
+        }
+    }
+
+    if (count) {
+        v86_disk_fail_n++; v86_disk_fail_why = 3;
+        bios_set_ah(frame, 0xC0);
+        bios_set_cf(frame, 1);
+        return;
+    }
+
+    bios_set_ah(frame, 0x00);
+    bios_set_cf(frame, 0);
+}
+
 /* AH=0Ah READ ID — ヘッドの下を次に通るセクタの ID を返す。
  *
  * **ゲストはこれでディスクのフォーマットを知る。** MS-DOS 5 は
@@ -691,7 +931,7 @@ static void disk_readid(u32 *frame)
     }
     head = V86_FDC_HEAD((frame[V86F_EDX] >> 8) & 0xFFU, al);
 
-    if (loop_dev_get_geometry(V86_DISK_SLOT, &cyls, &heads, &spt,
+    if (loop_dev_get_geometry(cur_fdd_slot, &cyls, &heads, &spt,
                               &bps, &total) != 0 || spt == 0) {
         bios_set_ah(frame, 0x60);
         bios_set_cf(frame, 1);
@@ -699,7 +939,7 @@ static void disk_readid(u32 *frame)
     }
 
     if (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88) {
-        if (loop_dev_track_id_d88(V86_DISK_SLOT, cur_cyl, (u8)head,
+        if (loop_dev_track_id_d88(cur_fdd_slot, cur_cyl, (u8)head,
                                   (u16)cur_id_idx,
                                   &id_c, &id_h, &id_r, &id_n,
                                   &trk_spt) != 0) {
@@ -719,7 +959,7 @@ static void disk_readid(u32 *frame)
         id_c = cur_cyl;
         id_h = (u8)head;
         id_r = (u8)(cur_id_idx + 1);
-        id_n = loop_dev_get_sec_n(V86_DISK_SLOT);
+        id_n = loop_dev_get_sec_n(cur_fdd_slot);
     }
 
     if (++cur_id_idx >= spt) {
@@ -735,13 +975,14 @@ static void disk_readid(u32 *frame)
     bios_set_cf(frame, 0);
 }
 
-static void bios_int1b(u32 *frame)
+static void bios_fdd_int1b(u32 *frame)
 {
     u32 cmd = (frame[V86F_EAX] >> 8) & 0x0FU;   /* AH の下位ニブル */
     u32 ax_in = frame[V86F_EAX] & 0xFFFFU;
     u32 phys_in = ((u32)V86_FDC_HEAD((ax_in >> 8) & 0xFFU, ax_in & 0xFFU) << 8)
                   | cur_cyl;
     u32 fails_before = v86_disk_fail_n;
+    int slot;
 
     xfer_done = 0;      /* SEEK 等でも「今回の転送量」が 0 になるように */
 
@@ -755,13 +996,15 @@ static void bios_int1b(u32 *frame)
      *
      * 初期化 (AH=03h) だけは実機も装置の有無を見ずに答えるので通す
      * (bios1b.c: `if ((CPU_AH & 0x0f) != 0x03) { ...ready チェック... }`)。 */
-    if (cmd != V86_DISK_INIT && !daua_is_ours(ax_in & 0xFFU)) {
+    slot = daua_to_slot(ax_in & 0xFFU);
+    if (cmd != V86_DISK_INIT && slot < 0) {
         v86_disk_fail_n++; v86_disk_fail_why = 4;
         bios_set_ah(frame, 0x60);
         bios_set_cf(frame, 1);
         disklog(frame, ax_in, phys_in, 0, v86_disk_fail_why);
         return;
     }
+    cur_fdd_slot = (slot >= 0) ? slot : V86_DISK_SLOT;
 
     switch (cmd) {
     case V86_DISK_SENSE:
@@ -771,6 +1014,10 @@ static void bios_int1b(u32 *frame)
     case V86_DISK_READ:
     case V86_DISK_READ_DIAG:
         disk_read(frame);
+        break;
+
+    case V86_DISK_WRITE:
+        disk_write(frame);
         break;
 
     case V86_DISK_VERIFY:
@@ -827,6 +1074,242 @@ static void bios_int1b(u32 *frame)
     disklog(frame, ax_in, phys_in, xfer_done,
             (v86_disk_fail_n != fails_before) ? v86_disk_fail_why
           : ((frame[V86F_EFLAGS] & 1UL) ? 0x80U : 0U));
+}
+
+/* ======================================================================== */
+/*  INT 1Bh — SASI/IDE HDD (DA=0x80 / 旧表記 0x00)                          */
+/*                                                                          */
+/*  **FDD と共用しない。** レジスタ規約 (CX/DL/BX)、エラーコード             */
+/*  (0xD0/0x40 系)、転送モデル (LBA 線形 vs トラック内)、コマンド表          */
+/*  (READ ID の成否が逆) のすべてが違う。if を差し込むと 08_dos5.md §2 の    */
+/*  「偶然動く」型の事故が再発する。                                          */
+/*                                                                          */
+/*  正本: np21w-src/src/bios/sxsibios.c (sxsi_pos / sasifunc / sense)。      */
+/*  実測: docs/tasks/v86v2/10_dos_hdd.md §2 (2026-08-11 の 154 呼び出し)。   */
+/*                                                                          */
+/*  レジスタ規約 (FDD と違う点だけ):                                         */
+/*    CHS モード (AL bit7=1): CX=16bit シリンダ全体 / DH=ヘッド /            */
+/*                            DL=セクタ (**0 起算**)                          */
+/*    LBA モード (AL bit7=0): pos = (DL<<16) | CX                            */
+/*    BX = バイト数。**0 は 0x10000 (64KB)** — FDD の「0 なら何もしない」と逆 */
+/*    転送は pos++ の線形でトラックもシリンダも自由に跨ぐ                     */
+/*  戻り: AH >= 0x20 のときだけ CF=1 (0x0F は CF=0 の成功扱い)               */
+/* ======================================================================== */
+
+/* 戻り AH と CF をまとめて書く。CF の閾値 0x20 は bios1b.c の
+ * `if (ret_ah >= 0x20) flag += 1;` と np2sysp_sasi の両方に一致。 */
+static void sasi_done(u32 *frame, u32 ret)
+{
+    bios_set_ah(frame, ret);
+    bios_set_cf(frame, ret >= 0x20U);
+}
+
+/* アドレッシング。sxsi_pos() の移植。範囲外は 0xD0。 */
+static u32 sasi_pos(u32 *frame, u16 cyls, u8 heads, u8 spt, u32 total_lba,
+                    u32 *out_pos)
+{
+    u32 al = frame[V86F_EAX] & 0xFFU;
+    u32 cx = frame[V86F_ECX] & 0xFFFFU;
+    u32 dh = (frame[V86F_EDX] >> 8) & 0xFFU;
+    u32 dl = frame[V86F_EDX] & 0xFFU;
+    u32 pos;
+
+    if (al & 0x80U) {
+        /* CHS: DL は 0 起算。範囲照合してから線形位置へ落とす。 */
+        if (dl >= (u32)spt || dh >= (u32)heads || cx >= (u32)cyls) {
+            return 0xD0;
+        }
+        pos = (cx * (u32)heads + dh) * (u32)spt + dl;
+    } else {
+        /* LBA: 総セクタ数 <= 0xFFFFFF (u32 ファイルサイズの上限から
+         * 4GB/512B = 8.4M セクタ < 16.7M) なので (DL<<16)|CX で足りる。 */
+        pos = (dl << 16) | cx;
+    }
+    if (pos >= total_lba) {
+        return 0xD0;
+    }
+    *out_pos = pos;
+    return 0;
+}
+
+/* READ (06) / WRITE (05)。バウンスバッファ 1 セクタで pos++ の線形転送。
+ * ゲスト側アドレスは ES:BP からリニアに進み、セグメントの繰り上がりは
+ * 気にしない (実機の MEML_READS/WRITES も物理線形)。 */
+static u8 sasi_bounce[4096];
+
+static u32 sasi_rw(u32 *frame, int slot, int is_write,
+                   u16 bps, u32 pos, u32 total_lba)
+{
+    u32 size = frame[V86F_EBX] & 0xFFFFU;
+    u32 addr = ((frame[V86F_ES] & 0xFFFFU) << 4)
+             + (frame[V86F_EBP] & 0xFFFFU);
+    u32 r;
+
+    if (size == 0) {
+        size = 0x10000;         /* BX=0 は 64KB。FDD と逆 (sxsibios.c) */
+    }
+
+    if (is_write && !loop_dev_is_writable(slot)) {
+        return 0x70;            /* ライトプロテクト。黙って捨てない */
+    }
+
+    while (size) {
+        r = size;
+        if (r > (u32)bps) {
+            r = bps;
+        }
+        if (pos >= total_lba) {
+            return 0xD0;        /* 転送中に末尾を越えた */
+        }
+        if (!guest_range_ok(addr, r)) {
+            v86_disk_fail_n++; v86_disk_fail_why = 1;
+            v86_disk_fail_dst = addr;
+            return 0x40;        /* バッキング RAM の外。書くと カーネルが壊れる */
+        }
+        if (is_write) {
+            /* 端数はセクタを読んでから前半だけ差し替える (RMW)。 */
+            if (r < (u32)bps) {
+                if (loop_dev_read_lba(slot, pos, 1, sasi_bounce) != 0) {
+                    return 0xD0;
+                }
+            }
+            kmemcpy(sasi_bounce, (const void *)addr, r);
+            if (loop_dev_write_lba(slot, pos, 1, sasi_bounce) != 0) {
+                return 0xD0;
+            }
+        } else {
+            if (loop_dev_read_lba(slot, pos, 1, sasi_bounce) != 0) {
+                return 0xD0;
+            }
+            kmemcpy((void *)addr, sasi_bounce, r);
+        }
+        addr += r;
+        size -= r;
+        pos++;
+        xfer_done += r;
+    }
+    return 0;
+}
+
+/* SENSE (nibble=4)。AH=84h のときだけジオメトリをレジスタで返す。
+ * 戻り AH は SASI 標準ジオメトリ (SPT=33) なら容量クラス、それ以外は
+ * 0x0F (CF=0)。NHD/HDI (SPT=17 等) は常に 0x0F — 実測どおり。 */
+static u32 sasi_sense(u32 *frame, u16 cyls, u8 heads, u8 spt, u16 bps)
+{
+    u32 ah = (frame[V86F_EAX] >> 8) & 0xFFU;
+
+    if (ah == 0x84U) {
+        frame[V86F_EBX] = (frame[V86F_EBX] & 0xFFFF0000UL) | bps;
+        frame[V86F_ECX] = (frame[V86F_ECX] & 0xFFFF0000UL) | cyls;
+        frame[V86F_EDX] = (frame[V86F_EDX] & 0xFFFF0000UL)
+                        | ((u32)heads << 8) | spt;
+    }
+    if (spt == 33 && heads <= 8) {
+        u32 bytes = (u32)cyls * heads * spt * bps;
+        if (bytes < 10475520U)  return 0;   /* < 10MB */
+        if (bytes < 15713280U)  return 1;   /* < 15MB */
+        if (bytes < 20275200U)  return 2;   /* < 20MB */
+        if (bytes < 41564160U)  return 3;   /* < 40MB */
+        if (bytes == 41564160U) return 4;   /* = 40MB */
+    }
+    return 0x0F;
+}
+
+/* INIT (nibble=3)。実機は BDA 0x55C の SASI ビットを接続台数で立て直す
+ * (sxsibios.c sasibios_init)。装置の有無は見ずに成功する。 */
+static u32 sasi_init(void)
+{
+    u8 *guest = (u8 *)0;
+    u16 equip = *(u16 *)(guest + 0x055C);
+    int i;
+
+    equip &= 0xF0FF;
+    for (i = 0; i < V86_DRIVE_MAX; i++) {
+        if (v86_drives[i].in_use &&
+            (v86_drives[i].daua & 0xF0U) == V86_DAUA_HDD) {
+            equip |= (u16)(0x0100U << (v86_drives[i].daua & 0x03U));
+        }
+    }
+    *(u16 *)(guest + 0x055C) = equip;
+    return 0;
+}
+
+static void bios_sasi_int1b(u32 *frame)
+{
+    u32 cmd = (frame[V86F_EAX] >> 8) & 0x0FU;
+    u32 ax_in = frame[V86F_EAX] & 0xFFFFU;
+    u32 fails_before = v86_disk_fail_n;
+    u32 ret;
+    u32 pos = 0;
+    int slot;
+    u16 cyls = 0, bps = 0;
+    u8 heads = 0, spt = 0;
+    u32 total_lba = 0;
+
+    xfer_done = 0;
+
+    /* INIT 以外は装置の有無を先に見る (sasibios_operate と同じ)。 */
+    slot = daua_to_slot(ax_in & 0xFFU);
+    if (cmd == V86_DISK_INIT) {
+        ret = sasi_init();
+        sasi_done(frame, ret);
+        disklog(frame, ax_in, 0, 0, 0);
+        return;
+    }
+    if (slot < 0 || !loop_dev_is_hdd(slot)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 4;
+        sasi_done(frame, 0x60);
+        disklog(frame, ax_in, 0, 0, v86_disk_fail_why);
+        return;
+    }
+    loop_dev_get_geometry(slot, &cyls, &heads, &spt, &bps, &total_lba);
+
+    switch (cmd) {
+    case V86_DISK_VERIFY:               /* 実機も実読みしない */
+    case V86_DISK_RECAL:
+    case V86_SASI_RETRACT2:
+        ret = 0;
+        break;
+
+    case V86_DISK_SENSE:
+        ret = sasi_sense(frame, cyls, heads, spt, bps);
+        break;
+
+    case V86_DISK_READ:
+    case V86_DISK_WRITE:
+        ret = sasi_pos(frame, cyls, heads, spt, total_lba, &pos);
+        if (ret == 0) {
+            ret = sasi_rw(frame, slot, (cmd == V86_DISK_WRITE),
+                          bps, pos, total_lba);
+        }
+        break;
+
+    default:
+        /* SEEK(0)/READ_DIAG(2)/READID(A)/FORMAT(D)/密度(E) その他。
+         * SASI では失敗が正 — 実測でも AH=8E が飛んできて 0x40 で
+         * 流している (10_dos_hdd.md §2-2)。 */
+        ret = 0x40;
+        break;
+    }
+
+    sasi_done(frame, ret);
+    disklog(frame, ax_in, pos & 0xFFFFFFU, xfer_done,
+            (v86_disk_fail_n != fails_before) ? v86_disk_fail_why
+          : ((ret >= 0x20U) ? 0x80U : 0U));
+}
+
+/* devtype (AL の上位ニブル) で FDD 規約と SASI 規約に振り分ける。
+ * bios1b.c `bios0x1b()` の switch(devtype) と同じ構造。 */
+static void bios_int1b(u32 *frame)
+{
+    u32 al = frame[V86F_EAX] & 0xFFU;
+    u32 devtype = al & 0xF0U;
+
+    if (devtype == 0x80U || devtype == 0x00U) {
+        bios_sasi_int1b(frame);
+        return;
+    }
+    bios_fdd_int1b(frame);
 }
 
 void v86_bios_dispatch(u32 *frame, u32 vector)

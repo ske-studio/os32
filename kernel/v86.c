@@ -723,7 +723,7 @@ u32 v86_boot_gpip    = 0;   /* 同 IP */
 u32 v86_boot_gpop    = 0;   /* 同 オペコード 4 バイト */
 u32 v86_boot_irq     = 0;   /* ゲストへ反射した IRQ 回数 */
 
-int v86_boot(const char *path)
+int v86_boot2(const char *path, const char *second)
 {
     struct v86_context ctx;
     int reason;
@@ -731,14 +731,43 @@ int v86_boot(const char *path)
     if (v86_bios_attach_disk(path) != 0) {
         return -1;
     }
+    if (second != (const char *)0 &&
+        v86_bios_attach_second(second) != 0) {
+        v86_bios_detach_disk();
+        return -1;
+    }
     if (v86_mem_setup() != 0) {
         v86_bios_detach_disk();
         return -2;
     }
 
-    /* IPL を読む。ここはカーネルが直接読む (ゲストはまだ動いていない)。 */
-    if (loop_dev_read_chs(V86_DISK_SLOT, 0, 0, 1,
-                          (void *)V86_IPL_ADDR) != 0) {
+    /* IPL を読む。ここはカーネルが直接読む (ゲストはまだ動いていない)。
+     *
+     * FDD: C0/H0/S1 の 1 セクタ (boot_fd1)。
+     * HDD: **LBA 0 から 1024 バイト** (bios1b.c boot_hd() の
+     *      `sxsi_read(..., 0, mem + 0x1fc00, 0x400)`)。
+     *      1 セクタだけ読むと IPL 後半が欠けて静かに壊れる。 */
+    if ((v86_bios_boot_daua() & 0xF0U) == V86_DAUA_HDD) {
+        u16 bps = 0;
+        u32 count;
+        if (loop_dev_get_geometry(V86_DISK_SLOT, 0, 0, 0, &bps, 0) != 0 ||
+            bps == 0) {
+            v86_mem_teardown();
+            v86_bios_detach_disk();
+            return -3;
+        }
+        count = 1024U / bps;
+        if (count == 0) {
+            count = 1;
+        }
+        if (loop_dev_read_lba(V86_DISK_SLOT, 0, count,
+                              (void *)V86_IPL_ADDR) != 0) {
+            v86_mem_teardown();
+            v86_bios_detach_disk();
+            return -3;
+        }
+    } else if (loop_dev_read_chs(V86_DISK_SLOT, 0, 0, 1,
+                                 (void *)V86_IPL_ADDR) != 0) {
         v86_mem_teardown();
         v86_bios_detach_disk();
         return -3;
@@ -770,4 +799,9 @@ int v86_boot(const char *path)
     v86_mem_teardown();
     v86_bios_detach_disk();
     return reason;
+}
+
+int v86_boot(const char *path)
+{
+    return v86_boot2(path, (const char *)0);
 }

@@ -41,15 +41,20 @@
  * IPL はそれを読んで自分の読み方を決める (実測: DOS 5 の IPL は
  * `mov al,[0584]` で始まる)。上位ニブルが装置種別で、
  *   0x90 = 2HD FDD / 0x30,0xB0 = 2DD FDD / 0x80,0x00 = SASI HDD
- * ここを実機の値のまま渡すと、OS32 は NHD から起動しているので
- * 0x80 になり、フロッピーイメージから起動した DOS が
- * 「自分はハードディスク起動だ」と思い込む。
- * → docs/tasks/v86v2/08_dos5.md §2 */
-#define V86_BOOT_DAUA       0x90        /* 2HD FDD ユニット 0 */
+ * FDD イメージから起動するゲストに実機の値 (OS32 は NHD 起動なので
+ * 0x80) を渡すと、DOS が「自分はハードディスク起動だ」と思い込む。
+ * → docs/tasks/v86v2/08_dos5.md §2
+ * HDD イメージから起動するときは逆に 0x80 を「意図的に」渡す。
+ * → docs/tasks/v86v2/10_dos_hdd.md */
+#define V86_DAUA_FDD        0x90        /* 2HD FDD (上位ニブル) */
+#define V86_DAUA_HDD        0x80        /* SASI/IDE HDD (上位ニブル) */
 
 /* ディスク BIOS が使う loop_dev スロット。
- * 当面は「DA/UA 0x90 (2HD FDD#1) → slot 0」の固定対応で足りる。 */
+ * ブートイメージ → slot 0、2 台目 (v86_boot2 の第 2 引数) → slot 1。
+ * DA/UA との対応はドライブ表 (v86_bios.c の v86_drives[]) が持つ。 */
 #define V86_DISK_SLOT       0
+#define V86_DISK_SLOT_2ND   1
+#define V86_DRIVE_MAX       2
 
 /* INT 1Bh のコマンド (AH の下位ニブル)。**正本は np21w-src の
  * src/bios/bios1b.c `fdd_operate()`。** AH の上位ビットはリトライ有無
@@ -65,15 +70,34 @@
 #define V86_DISK_RECAL      0x07
 #define V86_DISK_READID     0x0A        /* ID 読み込み (フォーマット判定) */
 
+/* SASI/IDE (DA=0x80/0x00) 側のコマンド。正本は np21w-src の
+ * src/bios/sxsibios.c `sasifunc[16]`。FDD と同じ下位ニブルでも
+ * レジスタ規約・エラーコード・転送モデルが全部違う (10_dos_hdd.md §2-5)。
+ *   nibble 1 = VERIFY (無条件成功)   3 = INIT   4 = SENSE (84h=ジオメトリ)
+ *   nibble 5 = WRITE   6 = READ   7/F = リトラクト (無条件成功)
+ *   その他 = 未サポート → 0x40
+ * エラーコード: 0x00 成功 / 0x0F 容量クラス外 (CF=0!) / 0x40 未サポート /
+ *   0x60 装置なし / 0x70 ライトプロテクト / 0xD0 範囲外。
+ * CF は戻り AH >= 0x20 のときだけ立てる。 */
+#define V86_SASI_RETRACT2   0x0F
+
 /* ======== API ======== */
 
 /* セッションで使うディスクイメージを結び付ける。
- * path が NULL ならディスク無しで動く。0=成功、負=失敗。 */
+ * path が NULL ならディスク無しで動く。0=成功、負=失敗。
+ * イメージ種別 (FDD/HDD) は loop_dev が判定し、ドライブ表に登録される。 */
 int  v86_bios_attach_disk(const char *path);
+
+/* 2 台目のイメージを結び付ける (v86_boot2 の第 2 引数)。
+ * ブートイメージと同種なら次のユニット番号 (0x91 / 0x81) になる。 */
+int  v86_bios_attach_second(const char *path);
 void v86_bios_detach_disk(void);
 
 /* ディスクが結び付いているか (検証用) */
 int  v86_bios_has_disk(void);
+
+/* ブートドライブの DA/UA (0x90=FDD / 0x80=HDD)。未アタッチなら 0x90。 */
+u32  v86_bios_boot_daua(void);
 
 /* ゲストの IVT / BDA を用意し、HLE 対象ベクタにスタブを仕込む。
  * v86_mem_setup() がバッキング RAM を張った後に呼ぶこと。 */

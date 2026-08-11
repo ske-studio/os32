@@ -20,10 +20,13 @@ static void usage(void)
 {
     printf("Usage: v86 -t\n");
     printf("       v86 -d <image>\n");
-    printf("       v86 -b <image>\n");
+    printf("       v86 -b <image> [second]\n");
     printf("\n");
     printf("  -t   run the V86 self test\n");
-    printf("  -b   boot <image>: load its IPL at 1FC0:0000 and run it\n");
+    printf("  -b   boot <image>: load its IPL at 1FC0:0000 and run it.\n");
+    printf("       .nhd/.hdi boot as SASI HDD (DA/UA 80h), others as\n");
+    printf("       2HD FDD (90h). [second] attaches another image as\n");
+    printf("       the next drive (e.g. HDD boot + FDD for file copy)\n");
     printf("  -d   read sector C0/H0/S1 from <image> through the guest's\n");
     printf("       INT 1Bh and compare it with a direct read\n");
     printf("\n");
@@ -46,13 +49,18 @@ int main(int argc, char **argv, KernelAPI *kapi)
             "unsupported instruction", "session timeout", "hotkey",
             "fault", "runaway guest (#GP watchdog)"
         };
+        const char *second;
+        second = (argc >= 4) ? argv[3] : (const char *)0;
         printf("V86 boot: %s\n", argv[2]);
-        rc = api->v86_boot(argv[2]);
+        if (second) {
+            printf("  second : %s\n", second);
+        }
+        rc = api->v86_boot2(argv[2], second);
         if (rc < 0) {
             printf("  could not start (rc=%d)\n", rc);
             printf("    -1 = image not found / attach failed\n");
             printf("    -2 = no memory for the guest\n");
-            printf("    -3 = could not read the IPL (C0/H0/S1)\n");
+            printf("    -3 = could not read the IPL\n");
             return 1;
         }
         printf("  exit   : %s\n",

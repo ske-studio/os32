@@ -866,3 +866,8 @@ int __cdecl wrap_v86_boot(const char *path)
     return v86_boot(path);
 }
 
+int __cdecl wrap_v86_boot2(const char *path, const char *second)
+{
+    return v86_boot2(path, second);
+}
+

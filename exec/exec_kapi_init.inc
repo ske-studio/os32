@@ -165,9 +165,10 @@ extern int __cdecl wrap_ime_trygetkey(void);
 extern int __cdecl wrap_v86_selftest(void);
 extern int __cdecl wrap_v86_disktest(const char *path);
 extern int __cdecl wrap_v86_boot(const char *path);
+extern int __cdecl wrap_v86_boot2(const char *path, const char *second);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 38;
+kapi->version = 39;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -336,5 +337,6 @@ kapi->version = 38;
     kapi->v86_selftest = wrap_v86_selftest;
     kapi->v86_disktest = wrap_v86_disktest;
     kapi->v86_boot = wrap_v86_boot;
+    kapi->v86_boot2 = wrap_v86_boot2;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

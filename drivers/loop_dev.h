@@ -35,6 +35,7 @@ int  loop_dev_attach_fd(int fd, int slot, int fmt);
 #define LOOP_FMT_FDI      2
 #define LOOP_FMT_HDI      3
 #define LOOP_FMT_RAW      4
+#define LOOP_FMT_NHD      5
 
 /* メディア種別定数 (DA/UA 上位ニブル) */
 #define LOOP_MEDIA_2HD_1232  0x90
@@ -96,6 +97,27 @@ int loop_dev_track_id_d88(int slot, u8 trk_cyl, u8 trk_head, u16 index,
                           u8 *out_c, u8 *out_h, u8 *out_r, u8 *out_n,
                           u16 *out_spt);
 
+/* ================================================================== */
+/*  LBA API (FDI/HDI/NHD/RAW 用。D88 は対象外)                         */
+/*                                                                    */
+/*  SASI/IDE BIOS (INT 1Bh の DA=0x80/0x00) は LBA 線形アドレスで     */
+/*  読み書きしてくるため、CHS を経由しない直接の LBA 経路を公開する。  */
+/*  0 起算セクタを CHS API に流すと raw_chs_ok が正しく拒否するので、  */
+/*  SASI 側は必ずこちらを使うこと。                                   */
+/* ================================================================== */
+
+/* LBA セクタ読み出し。lba+count が総 LBA を超えたらエラー。
+ * 戻り値: 0=成功, -1=範囲外/未アタッチ/I-Oエラー, -2=D88 は非対応 */
+int loop_dev_read_lba(int slot, u32 lba, u32 count, void *buf);
+
+/* LBA セクタ書き込み。書き込み不可アタッチなら -3。
+ * 戻り値: 0=成功, -1=範囲外等, -2=D88 非対応, -3=ライトプロテクト */
+int loop_dev_write_lba(int slot, u32 lba, u32 count, const void *buf);
+
+/* 書き込み可能アタッチか (loop_dev_attach が O_RDWR で開けたか)
+ * 戻り値: 1=書き込み可, 0=読み取り専用または未アタッチ */
+int loop_dev_is_writable(int slot);
+
 /* スロットの VFS fd を取得 (-1 = 未アタッチ) */
 int loop_dev_get_fd(int slot);
 
@@ -109,7 +131,7 @@ int loop_dev_get_geometry(int slot, u16 *cyls, u8 *heads, u8 *spt,
 int loop_dev_get_format(int slot);
 
 /* HDD イメージ判定
- * 戻り値: 1=HDI, 0=それ以外 */
+ * 戻り値: 1=HDI/NHD, 0=それ以外 */
 int loop_dev_is_hdd(int slot);
 
 /* メディア種別取得 (LOOP_MEDIA_*)
