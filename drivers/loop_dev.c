@@ -531,12 +531,88 @@ u32 loop_dev_seek_d88(int slot,
 }
 
 /* ------------------------------------------------------------------------ */
+/*  loop_dev_track_id_d88 — D88 の物理トラック上の index 番目のセクタ ID     */
+/*                                                                          */
+/*  FDC の READ ID コマンド用。ヘッドの下を通る順にセクタ ID が並んでいて、  */
+/*  READ ID はそれを 1 つずつ返す。ゲストはこれでフォーマットを判定する。    */
+/*  (np21w-src/src/diskimage/fd/fdd_d88.c `fdd_readid_d88()` と同じ走査)     */
+/*                                                                          */
+/*  戻り値: 0=成功, -1=トラック/セクタ不在                                   */
+/* ------------------------------------------------------------------------ */
+int loop_dev_track_id_d88(int slot, u8 trk_cyl, u8 trk_head, u16 index,
+                          u8 *out_c, u8 *out_h, u8 *out_r, u8 *out_n,
+                          u16 *out_spt)
+{
+    LoopSlot *s;
+    u32 track_idx, trk_off, pos;
+    u8  shdr[D88_SECT_HDR_SIZE];
+    u16 track_spt, data_len;
+    int si, rd;
+
+    if (slot < 0 || slot >= LOOP_MAX_SLOTS) return -1;
+    s = &loop_slots[slot];
+    if (!s->in_use || s->fmt != LOOP_FMT_D88) return -1;
+
+    track_idx = (u32)trk_cyl * (u32)s->heads + (u32)trk_head;
+    if (track_idx >= D88_MAX_TRACKS) return -1;
+
+    trk_off = s->track_offset[track_idx];
+    if (trk_off == 0 || trk_off >= s->file_size) return -1;
+
+    vfs_seek(s->fd, (int)trk_off, 0);
+    rd = vfs_read_fd(s->fd, shdr, D88_SECT_HDR_SIZE);
+    if (rd < D88_SECT_HDR_SIZE) return -1;
+    track_spt = le16(shdr + 4);
+    if (track_spt == 0 || track_spt > 64) return -1;
+    if (out_spt) *out_spt = track_spt;
+    if (index >= track_spt) return -1;
+
+    pos = trk_off;
+    for (si = 0; si < (int)track_spt; si++) {
+        vfs_seek(s->fd, (int)pos, 0);
+        rd = vfs_read_fd(s->fd, shdr, D88_SECT_HDR_SIZE);
+        if (rd < D88_SECT_HDR_SIZE) return -1;
+        data_len = le16(shdr + 14);
+
+        if (si == (int)index) {
+            if (out_c) *out_c = shdr[0];
+            if (out_h) *out_h = shdr[1];
+            if (out_r) *out_r = shdr[2];
+            if (out_n) *out_n = shdr[3];
+            return 0;
+        }
+        pos += D88_SECT_HDR_SIZE + (u32)data_len;
+    }
+    return -1;
+}
+
+/* ------------------------------------------------------------------------ */
 /*  loop_dev_read_chs — CHS セクタ読み出し (全フォーマット共通)              */
 /*                                                                          */
 /*  D88: loop_dev_seek_d88 → vfs_read                                      */
 /*  FDI/RAW: オフセット計算 → vfs_read                                     */
 /*  sect は 1-based (ATA/FDC 準拠)                                          */
 /* ------------------------------------------------------------------------ */
+/* FDI/HDI/RAW のオフセット計算に入れてよい CHS か。
+ *
+ * **sect は 1 起算。0 を素通ししてはいけない。**
+ * オフセット計算の `(u32)(sect - 1)` が 0xFFFFFFFF に化け、
+ * セクタ長を掛けた時点で桁溢れしてイメージ先頭付近へ回り込む。
+ * 「offset + セクタ長 がファイル末尾を超えないか」の境界チェックも
+ * 通ってしまうので、**範囲外の要求に無関係なセクタを返して成功と
+ * 答える**という、いちばん質の悪い壊れ方になる。
+ *
+ * 実測: MS-DOS 5 が SASI 規約で投げた C=0/H=0/R=0 の読みに対して、
+ * FAT 領域の中身を「成功」として返していた。
+ * → docs/tasks/v86v2/08_dos5.md §2 */
+static int raw_chs_ok(const LoopSlot *s, u16 cyl, u8 head, u8 sect)
+{
+    if (sect == 0 || (u32)sect > (u32)s->spt)   return 0;
+    if ((u32)head >= (u32)s->heads)             return 0;
+    if ((u32)cyl  >= (u32)s->cyls)              return 0;
+    return 1;
+}
+
 int loop_dev_read_chs(int slot, u16 cyl, u8 head, u8 sect, void *buf)
 {
     LoopSlot *s;
@@ -572,6 +648,8 @@ int loop_dev_read_chs(int slot, u16 cyl, u8 head, u8 sect, void *buf)
         /* FDI/HDI/RAW: オフセット計算 */
         u32 offset;
         u32 data_size;
+
+        if (!raw_chs_ok(s, cyl, head, sect)) return -1;
 
         data_size = s->file_size - s->data_offset;
         offset = s->data_offset
@@ -627,6 +705,8 @@ int loop_dev_write_chs(int slot, u16 cyl, u8 head, u8 sect,
         /* FDI/HDI/RAW: オフセット計算 */
         u32 offset;
         u32 data_size;
+
+        if (!raw_chs_ok(s, cyl, head, sect)) return -1;
 
         data_size = s->file_size - s->data_offset;
         offset = s->data_offset

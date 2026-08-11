@@ -138,6 +138,11 @@ static u32 xfer_done = 0;
 static u8 cur_cyl  = 0;
 static u8 cur_head = 0;      /* SEEK の DH。実際には使わないが観測用に残す */
 
+/* READ ID がトラック内のどこまで返したか (実機の fdc.crcn)。
+ * READ ID 以外のコマンドが来たら 0 に戻す — 実機も同じ
+ * (bios1b.c: `if ((CPU_AH & 0x0f) != 0x0a) fdc.crcn = 0;`)。 */
+static u8 cur_id_idx = 0;
+
 /* 物理ヘッドの決まり方。**NP21/W の BIOS エミュレーションが正本。**
  *
  *   src/bios/bios1b.c:335
@@ -225,12 +230,46 @@ void v86_bios_setup(void)
         kmemcpy(guest, real_lowmem, REAL_SNAPSHOT_SIZE);
     }
 
-    /* ゲストに見せるメモリ量をバッキング RAM の範囲に合わせる。
-     *   0x0413  MEM_SIZE   コンベンショナルメモリ (KB)
-     *   0x05AE  CONV_MEM   同 (4KB 単位)
-     */
-    *(u16 *)(guest + 0x0413) = (u16)V86_GUEST_MEM_KB;
-    *(u8  *)(guest + 0x05AE) = (u8)(V86_GUEST_MEM_KB / 4);
+    /* ゲストに見せるマシン構成を作る。
+     *
+     * **実機の BDA をそのまま渡してよいのは、BIOS ワークエリアを読まない
+     * ゲストだけ。** Ys は読まないので実機の値で問題にならなかったが、
+     * MS-DOS は 0000:0584 でブートデバイスを決め、0000:055C で装置を数え、
+     * 0000:0501 でメモリ量を知る。実機 (= NHD から起動した OS32) の値を
+     * 渡すと、フロッピーイメージから起動した DOS が「自分はハードディスク
+     * 起動だ」と思い込み、途中から SASI 規約で INT 1Bh を呼び始める。
+     *
+     * **渡すべきは「実機の状態」ではなく「仮想マシンの構成」。**
+     * ここで作る仮想マシンは「2HD FDD 1 台 / HDD 無し / 拡張メモリ無し /
+     * コンベンショナル 512KB」。
+     * → docs/tasks/v86v2/08_dos5.md §2, §3-1, §3-2
+     *
+     * アドレスの正本は np21w-src/src/bios/biosmem.h。
+     * **0x0413 は IBM PC の流儀で PC-98 には無い。0x05AE は 1.44MB
+     * ドライブ対応ビットマップ (MEMB_F144_SUP) であってメモリ量ではない。**
+     * 以前はここに 572/4 を書いていて、全ドライブが 1.44MB 対応だと
+     * 嘘をついていた。 */
+
+    /* コンベンショナルメモリ量 (0x0501 = MEMB_BIOS_FLAG1 の下位 3bit) */
+    guest[0x0501] = (u8)((guest[0x0501] & ~0x07U) | V86_GUEST_MEM_CODE);
+
+    /* 拡張メモリは無い。
+     *   0x0401  MEMB_EXPMMSZ  128KB 単位 << 3 (16MB まで)
+     *   0x0594                16MB を超える分 (word) */
+    guest[0x0401] = 0x00;
+    *(u16 *)(guest + 0x0594) = 0;
+
+    /* ブートデバイスと装置構成。
+     *   0x0584  MEMB_DISK_BOOT    起動した装置の DA/UA
+     *   0x055C  MEMW_DISK_EQUIP   bit0-3=2HD FDD / bit8-11=SASI / bit12-15=2DD
+     *   0x0482  MEMB_DISK_EQUIPS  ハードディスクの装備
+     *   0x0480  MEMB_SYS_TYPE     bit7 = IDE あり
+     *   0x05AE  MEMB_F144_SUP     1.44MB 対応ドライブのビットマップ */
+    guest[0x0584] = V86_BOOT_DAUA;
+    *(u16 *)(guest + 0x055C) = 0x0001;      /* 2HD ユニット 0 だけ */
+    guest[0x0482] = 0x00;
+    guest[0x0480] = (u8)(guest[0x0480] & ~0x80U);
+    guest[0x05AE] = 0x00;
 
     bios_calls = 0;
     bios_last_vec = 0;
@@ -238,6 +277,7 @@ void v86_bios_setup(void)
     /* 電源投入直後のドライブはトラック 0 に居る */
     cur_cyl  = 0;
     cur_head = 0;
+    cur_id_idx = 0;
     v86_disk_seek_n = 0;
     v86_disk_seek_cyl = 0;
     v86_disk_shift_n = 0;
@@ -314,16 +354,47 @@ static int guest_range_ok(u32 linear, u32 len)
     return 1;
 }
 
-/* AH=04h SENSE — 装置の状態を返す。
- * ゲストは起動時にこれで「ドライブがあるか」を確かめる。 */
-static void disk_sense(u32 *frame)
+/* この DA/UA はこちらが持っている装置か。
+ *
+ * **AL を無視してはいけない。** 以前は装置番号を一切見ずに、どの DA/UA に
+ * 対しても「レディ」と答えていた。ゲストが 1 台しか無いはずのマシンで
+ * 4 台のドライブとハードディスクを見つけてしまう。実測でも MS-DOS が
+ * DA/UA 0x80 (SASI HDD) の SENSE に成功をもらい、その後 SASI 規約で
+ * READ を投げてきた (docs/tasks/v86v2/08_dos5.md §2)。
+ *
+ * 上位ニブルが装置種別、下位 2bit がユニット番号
+ * (np21w-src/src/bios/bios1b.c `bios0x1b()` の devtype = AL & 0xF0)。
+ * こちらが用意しているのは 2HD FDD のユニット 0 ただ 1 台。 */
+static int daua_is_ours(u32 al)
 {
     if (!disk_attached) {
-        bios_set_ah(frame, 0x60);       /* 装置レディでない */
-        bios_set_cf(frame, 1);
-        return;
+        return 0;
     }
-    bios_set_ah(frame, 0x00);
+    return ((al & 0xF0U) == (u32)V86_BOOT_DAUA) && ((al & 0x03U) == 0U);
+}
+
+/* AH=04h SENSE — 装置の状態を返す。
+ * ゲストは起動時にこれで「ドライブがあるか」を確かめる。
+ *
+ * **AH の戻り値はビットの集まりで、DOS のメディア判定はこれを見る。**
+ * 正本は bios1b.c の case 0x04:
+ *   0x10 書き込み禁止 / 0x01 2HD / 0x08 1MB・640KB 両用ドライブ /
+ *   0x04 1.44MB 対応 (AH bit6 かつドライブが対応しているとき)
+ * 常に 0x00 を返していた頃は「2DD の片用ドライブ」と判定されていた。 */
+static void disk_sense(u32 *frame)
+{
+    u32 ax = frame[V86F_EAX] & 0xFFFFU;
+    u32 ah = 0x00;
+
+    if (ax & 0x0080U) {
+        ah |= 0x01U;                    /* AL bit7 = 2HD */
+    }
+    if ((ax & 0x8F40U) == 0x8400U) {
+        ah |= 0x08U;                    /* 1MB/640KB 両用ドライブ */
+        /* 1.44MB (0x04) は用意していないので立てない */
+    }
+
+    bios_set_ah(frame, ah);
     bios_set_cf(frame, 0);
 }
 
@@ -377,8 +448,12 @@ static int d88_read_sector(u32 phys_cyl, u32 head,
     return (int)to_read;
 }
 
-/* AH=06h READ DATA — CHS を進めながら BX バイト転送する。 */
-static void disk_read(u32 *frame)
+/* AH=06h READ DATA / AH=01h VERIFY — CHS を進めながら BX バイト転送する。
+ *
+ * transfer=0 ならゲストのバッファへは書かずに読めるかどうかだけ見る
+ * (ベリファイ)。実機も同じ作りで、bios1b.c の case 0x01 と case 0x06 は
+ * `MEML_WRITES()` の有無しか違わない。 */
+static void disk_read_common(u32 *frame, int transfer)
 {
     u32 cyl   = (frame[V86F_ECX] >> 0) & 0xFFU;     /* CL */
     u32 n     = (frame[V86F_ECX] >> 8) & 0xFFU;     /* CH: セクタ長コード */
@@ -416,14 +491,29 @@ static void disk_read(u32 *frame)
         bios_set_cf(frame, 1);
         return;
     }
-    if (!guest_range_ok(dst, count)) {
+    if (count == 0) {
+        /* 実機は BX=0 を「何もせず成功」として返す (while(size) に入らない) */
+        bios_set_ah(frame, 0x00);
+        bios_set_cf(frame, 0);
+        return;
+    }
+    /* 実機は 64KB 境界を跨ぐ転送をエラーにする (bios1b.c: AH=0x20)。
+     * ES:BP のオフセットは 16bit なので、跨いだ瞬間にゲストが意図した
+     * 場所と違うところへ落ちる。素通しにすると壊れ方が静かになる。 */
+    if ((dst & 0xFFFFU) > ((dst + count - 1) & 0xFFFFU)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 1;
+        bios_set_ah(frame, 0x20);
+        bios_set_cf(frame, 1);
+        return;
+    }
+    if (transfer && !guest_range_ok(dst, count)) {
         v86_disk_fail_n++; v86_disk_fail_why = 1;
         bios_set_ah(frame, 0x40);       /* パラメータ異常 */
         bios_set_cf(frame, 1);
         return;
     }
     if (loop_dev_get_geometry(V86_DISK_SLOT, &cyls, &heads, &spt,
-                              &bps, &total) != 0) {
+                              &bps, &total) != 0 || spt == 0) {
         bios_set_ah(frame, 0x60);
         bios_set_cf(frame, 1);
         return;
@@ -447,12 +537,19 @@ static void disk_read(u32 *frame)
         bios_set_cf(frame, 1);
         return;
     }
-    (void)bps;
-
-    while (count >= seclen) {
+    while (count) {
         u32 i;
-        u32 got;
+        u32 got;                    /* セクタから読めたバイト数 */
+        u32 xfer;                   /* うちゲストへ渡す長さ */
         u16 trk_spt = 0;
+
+        /* 実機は最後の 1 セクタだけ端数を転送する
+         * (bios1b.c: `accesssize = min(size, secsize)`)。
+         * **端数を捨てて成功を返してはいけない。** 以前は
+         * `while (count >= seclen)` で回していたので、BX がセクタ長の
+         * 倍数でないとき残りを黙って捨てて CF=0 を返していた。
+         * ゲストは読めたつもりで未初期化領域を使うことになる。 */
+        xfer = (count > seclen) ? seclen : count;
 
         if (is_d88) {
             /* まず SEEK で決まった物理トラックを見る (実機の FDC と同じ)。 */
@@ -484,6 +581,22 @@ static void disk_read(u32 *frame)
                 spt = (u8)trk_spt;      /* トラックごとに違い得る */
             }
         } else {
+            /* RAW/FDI はイメージ全体で 1 つのセクタ長しか持たない。
+             * ゲストが違う長さを要求してきたら、実機の FDC が ID 照合で
+             * 空振りするのと同じく「セクタ不在」で返す。
+             *
+             * **ここを素通りさせてはいけない。** N を見ていなかった頃は、
+             * MS-DOS が SASI 規約で投げた「128B / セクタ 0」の読みに
+             * FAT 領域のゴミを返して成功と答えていた
+             * (docs/tasks/v86v2/08_dos5.md §2)。
+             * セクタ長を照合しておけば secbuf の溢れも同時に閉じる。 */
+            if (seclen != (u32)bps) {
+                v86_disk_fail_n++; v86_disk_fail_why = 2;
+                v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+                bios_set_ah(frame, 0x40);
+                bios_set_cf(frame, 1);
+                return;
+            }
             if (loop_dev_read_chs(V86_DISK_SLOT, (u16)cyl, (u8)head,
                                   (u8)sect, secbuf) != 0) {
                 v86_disk_fail_n++; v86_disk_fail_why = 3;
@@ -495,32 +608,129 @@ static void disk_read(u32 *frame)
             got = seclen;
         }
 
-        for (i = 0; i < got; i++) {
-            ((volatile u8 *)dst)[i] = secbuf[i];
+        if (got > xfer) {
+            got = xfer;                 /* 端数セクタは要求ぶんだけ渡す */
+        }
+        if (transfer) {
+            for (i = 0; i < got; i++) {
+                ((volatile u8 *)dst)[i] = secbuf[i];
+            }
         }
         xfer_done += got;
-        dst   += seclen;
-        count -= seclen;
+        dst   += xfer;
+        count -= xfer;
 
-        /* セクタ → ヘッド → シリンダ の順に繰り上げる。
-         * 物理位置も同じ歩幅で進める。ID のずれは連続領域では一定なので、
-         * 差を保ったまま動かせば転送を跨いでも整合が取れる。 */
-        sect++;
-        if (sect > spt) {
-            sect = 1;
-            head++;
-            if (head >= heads) {
-                head = 0;
-                cyl++;
+        /* 次のセクタへ。**実機はトラックを跨がない。**
+         *
+         * bios1b.c は最終セクタ (R == para) を読んだ時点で
+         *   - AH bit7 が立っていて物理ヘッドが 0 なら → 裏面へ続ける
+         *   - そうでなければ → ループを抜ける (残っていればエラー)
+         * となっていて、**シリンダは絶対に跨がない**。
+         * 以前はここでヘッドもシリンダも自由に繰り上げていたので、
+         * 実機ならエラーになる要求が「成功」として通ってしまい、
+         * 隣のトラックの中身が返っていた。
+         *
+         * 物理位置も同じ歩幅で動かす。ID のずれは連続領域では一定なので、
+         * 差を保ったまま動かせば整合が取れる。 */
+        if (sect >= spt) {
+            if ((ah & 0x80U) && phys_head == 0 && heads > 1) {
+                head      = 1;
+                phys_head = 1;
+                sect      = 1;
+            } else {
+                break;
             }
-            phys_head++;
-            if (phys_head >= heads) {
-                phys_head = 0;
-                phys_cyl++;
-            }
+        } else {
+            sect++;
         }
     }
 
+    if (count) {
+        v86_disk_fail_n++; v86_disk_fail_why = 3;
+        v86_disk_fail_chs = (cyl << 16) | (head << 8) | sect;
+        bios_set_ah(frame, 0xC0);       /* 転送しきれなかった */
+        bios_set_cf(frame, 1);
+        return;
+    }
+
+    bios_set_ah(frame, 0x00);
+    bios_set_cf(frame, 0);
+}
+
+static void disk_read(u32 *frame)   { disk_read_common(frame, 1); }
+static void disk_verify(u32 *frame) { disk_read_common(frame, 0); }
+
+/* AH=0Ah READ ID — ヘッドの下を次に通るセクタの ID を返す。
+ *
+ * **ゲストはこれでディスクのフォーマットを知る。** MS-DOS 5 は
+ * RECALIBRATE → SENSE → READ ID の順に呼んで、返ってきた N (セクタ長コード)
+ * と R からメディアが 2HD (1024B×8) か 2DD (512B×8/9) かを判定する。
+ * 未実装 (AH=0x86) で返していた頃は、ここで諦めて
+ * 「MSDOS.SYS 読み込み時にエラー」になっていた。
+ *
+ * 実機は `fdc.crcn` にトラック内のセクタ番号を持ち、呼ばれるたびに
+ * 1 つ進めて末尾で 0 に戻す (bios1b.c case 0x0a → fdd_readid_*)。
+ * 返すのは物理位置の C/H と、そのセクタが実際に持っている ID の R/N。
+ *
+ * 実機との差: 実機は crcn が一周したときトラックも進める。
+ * こちらは進めない — READ ID がシーク位置を動かす副作用は、
+ * この後の READ の物理位置を狂わせるほうが害が大きい。
+ * (フォーマット判定に使う限り一周する前に答えが出る) */
+static void disk_readid(u32 *frame)
+{
+    u32 ah  = (frame[V86F_EAX] >> 8) & 0xFFU;
+    u32 al  = frame[V86F_EAX] & 0xFFU;
+    u32 cyl = frame[V86F_ECX] & 0xFFU;              /* CL */
+    u32 head;
+    u16 cyls; u8 heads, spt; u16 bps; u32 total;
+    u8  id_c, id_h, id_r, id_n;
+    u16 trk_spt = 0;
+
+    if (ah & 0x10) {                                /* AH bit4 = シーク付き */
+        cur_cyl = (u8)cyl;
+    }
+    head = V86_FDC_HEAD((frame[V86F_EDX] >> 8) & 0xFFU, al);
+
+    if (loop_dev_get_geometry(V86_DISK_SLOT, &cyls, &heads, &spt,
+                              &bps, &total) != 0 || spt == 0) {
+        bios_set_ah(frame, 0x60);
+        bios_set_cf(frame, 1);
+        return;
+    }
+
+    if (loop_dev_get_format(V86_DISK_SLOT) == LOOP_FMT_D88) {
+        if (loop_dev_track_id_d88(V86_DISK_SLOT, cur_cyl, (u8)head,
+                                  (u16)cur_id_idx,
+                                  &id_c, &id_h, &id_r, &id_n,
+                                  &trk_spt) != 0) {
+            cur_id_idx = 0;
+            bios_set_ah(frame, 0xE0);               /* ID が見つからない */
+            bios_set_cf(frame, 1);
+            return;
+        }
+        spt = (u8)trk_spt;
+    } else {
+        /* RAW/FDI は全トラック同じ書式。ID は物理位置そのもの。 */
+        if (cur_cyl >= (u8)cyls || head >= (u32)heads) {
+            bios_set_ah(frame, 0xE0);
+            bios_set_cf(frame, 1);
+            return;
+        }
+        id_c = cur_cyl;
+        id_h = (u8)head;
+        id_r = (u8)(cur_id_idx + 1);
+        id_n = loop_dev_get_sec_n(V86_DISK_SLOT);
+    }
+
+    if (++cur_id_idx >= spt) {
+        cur_id_idx = 0;
+    }
+
+    /* CL=C / DH=H / DL=R / CH=N を返す (bios1b.c case 0x0a の末尾と同じ) */
+    frame[V86F_ECX] = (frame[V86F_ECX] & 0xFFFF0000UL) |
+                      ((u32)id_n << 8) | (u32)id_c;
+    frame[V86F_EDX] = (frame[V86F_EDX] & 0xFFFF0000UL) |
+                      ((u32)id_h << 8) | (u32)id_r;
     bios_set_ah(frame, 0x00);
     bios_set_cf(frame, 0);
 }
@@ -535,13 +745,40 @@ static void bios_int1b(u32 *frame)
 
     xfer_done = 0;      /* SEEK 等でも「今回の転送量」が 0 になるように */
 
+    /* READ ID 以外が来たらトラック内の走査位置を戻す (実機と同じ) */
+    if (cmd != V86_DISK_READID) {
+        cur_id_idx = 0;
+    }
+
+    /* 装置番号 (DA/UA) の判定。こちらが持っていない装置には
+     * 「レディでない」で答える。
+     *
+     * 初期化 (AH=03h) だけは実機も装置の有無を見ずに答えるので通す
+     * (bios1b.c: `if ((CPU_AH & 0x0f) != 0x03) { ...ready チェック... }`)。 */
+    if (cmd != V86_DISK_INIT && !daua_is_ours(ax_in & 0xFFU)) {
+        v86_disk_fail_n++; v86_disk_fail_why = 4;
+        bios_set_ah(frame, 0x60);
+        bios_set_cf(frame, 1);
+        disklog(frame, ax_in, phys_in, 0, v86_disk_fail_why);
+        return;
+    }
+
     switch (cmd) {
     case V86_DISK_SENSE:
         disk_sense(frame);
         break;
 
     case V86_DISK_READ:
+    case V86_DISK_READ_DIAG:
         disk_read(frame);
+        break;
+
+    case V86_DISK_VERIFY:
+        disk_verify(frame);
+        break;
+
+    case V86_DISK_READID:
+        disk_readid(frame);
         break;
 
     case V86_DISK_SEEK:
@@ -580,7 +817,8 @@ static void bios_int1b(u32 *frame)
         break;
 
     default:
-        /* WRITE と VERIFY は Phase 3-3b の後半で足す */
+        /* WRITE (05) / FORMAT (0D) / 密度設定 (0E) は未実装。
+         * CF=1 / AH=0x86 (機能なし) で返せばゲストは自前の代替手段に進める。 */
         bios_set_ah(frame, 0x86);
         bios_set_cf(frame, 1);
         break;

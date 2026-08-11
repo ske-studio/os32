@@ -87,6 +87,15 @@ u32 loop_dev_seek_d88(int slot,
                       u8 id_c, u8 id_h, u8 id_r,
                       u32 *out_data_len, u16 *out_spt);
 
+/* D88 専用: 物理トラック上の index 番目のセクタ ID を返す (READ ID 用)
+ *
+ * ヘッドの下を通る順に並んだセクタ ID を 1 つずつ取り出す。
+ * ゲストはこれを何度か呼んでフォーマット (セクタ長 N / 本数) を判定する。
+ * 戻り値: 0=成功, -1=トラック/セクタ不在 */
+int loop_dev_track_id_d88(int slot, u8 trk_cyl, u8 trk_head, u16 index,
+                          u8 *out_c, u8 *out_h, u8 *out_r, u8 *out_n,
+                          u16 *out_spt);
+
 /* スロットの VFS fd を取得 (-1 = 未アタッチ) */
 int loop_dev_get_fd(int slot);
 
