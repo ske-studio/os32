@@ -448,7 +448,7 @@ void main(int argc, char **argv, KernelAPI *kapi)
     DBG_DUMPN(file_data, 128);
     /* テスト3: ガードページ (BLOCKED: blacklist) */
     DBG("[vbzview] guard page test (should be BLOCKED):");
-    DBG_DUMP(0x8F000);
+    DBG_DUMP(0x1FB000);
     /* テスト4: 未実装メモリ (BLOCKED: NOT PRESENT) */
     DBG("[vbzview] unmapped memory test (should be BLOCKED):");
     DBG_DUMP(0xF00000);

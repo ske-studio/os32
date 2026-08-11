@@ -22,15 +22,21 @@
 #include "types.h"
 #include "memmap.h"
 
-/* リマップ範囲は 0x00000 から カーネルスタックガードの直前まで。
+/* リマップ範囲は 0x00000 から VRAM の直前 (0xA0000) まで = 640KB。
  *
- * カーネルスタック (0x90000-0x9FFFF) は絶対にリマップしてはならない。
- * V86 から #GP が入ると CPU はそのスタックにフレームを積むので、
- * 実行中に張り替えたらその瞬間に全てが壊れる。
- * 結果としてゲストから見える連続 RAM は 572KB になる。 */
+ * **実行中のスタックを含む範囲は絶対にリマップしてはならない。**
+ * V86 から #GP が入ると CPU は TSS.ESP0 が指すスタックにフレームを積む。
+ * v86_entry.asm が ESP0 を「v86_enter を呼んだ時点の ESP」にしているので、
+ * それはこのセッションを起動した v86 プログラムのスタック (0x400000 以降) で、
+ * 低位には無い。カーネルスタックも 0x1FC000 に退避済み。
+ *
+ * かつてカーネルスタックが 0x90000-0x9FFFF に居た頃はここを 0x8F000 で
+ * 止めるしかなく、ゲストに渡せる RAM は 572KB だった。PC-98 は 128KB 単位
+ * でしか申告できないので、それは実質 512KB を意味していた。
+ * → docs/tasks/v86v2/09_memmap.md */
 #define V86_REMAP_START     0x00000UL
-#define V86_REMAP_END       MEM_STACK_GUARD          /* 0x8F000 (含まず) */
-#define V86_BACKING_PAGES   (V86_REMAP_END / PAGE_SIZE)   /* 143 ページ */
+#define V86_REMAP_END       MEM_CONV_END             /* 0xA0000 (含まず) */
+#define V86_BACKING_PAGES   (V86_REMAP_END / PAGE_SIZE)   /* 160 ページ */
 
 /* VRAM / ROM 帯 (リマップせず実物理を見せる) */
 #define V86_VRAM_START      0xA0000UL

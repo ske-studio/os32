@@ -15,14 +15,14 @@
 /*                                                                          */
 /*  [コンベンショナルメモリ]                                                */
 /*    0x00000 - 0x00FFF : NP   (NULLポインタ検出, paging_reclaim後)          */
-/*    0x01000 - 0x8EFFF : R/W  (フォント/Unicode/GFX, ブート後に再利用)      */
-/*    0x8F000 - 0x8FFFF : NP   (カーネルスタックガード)                    */
-/*    0x90000 - 0x9FFFF : R/W  (カーネルスタック, 64KB)                    */
+/*    0x01000 - 0x9FFFF : R/W  (フォント/Unicode/GFX, ブート後に再利用)      */
 /*    0xA0000 - 0xEFFFF : R/W  (テキスト/グラフィックVRAM)                  */
 /*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
 /*                                                                          */
 /*  [拡張メモリ]                                                            */
-/*    0x100000 - 0x1FFFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
+/*    0x100000 - 0x1FAFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
+/*    0x1FB000 - 0x1FBFFF : NP   (カーネルスタックガード)                    */
+/*    0x1FC000 - 0x1FFFFF : R/W  (カーネルスタック, 16KB)                    */
 /*    0x200000 - 0x23FFFF : R/W  (SQLite帯域: code+BSS+代替スタック)      */
 /*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
 /*    0x300000 - 0x3FFFFF : R/W  (シェル常駐帯域, ガード付き)             */
@@ -108,10 +108,28 @@ void paging_init(u32 mem_kb)
      *  保護属性の設定
      * ======================================================== */
 
+    /* カーネルスタック: R/W を強制する。
+     *
+     * 上のループはプローブしたメモリ量 (max_mem_bytes) を超える範囲を
+     * Not-Present にするので、極端に小さいメモリ量が報告された場合でも
+     * **自分が今立っているスタックだけは必ず生かしておく**。
+     * ここを NP にした瞬間に次の push で三重フォルトになる。 */
+    {
+        u32 sp_addr;
+        for (sp_addr = MEM_KSTACK_BASE; sp_addr <= MEM_KSTACK_TOP;
+             sp_addr += PAGE_SIZE) {
+            u32 pdi = sp_addr >> 22;
+            u32 pti = (sp_addr >> 12) & 0x3FF;
+            if (pdi < PAGING_PT_COUNT) {
+                page_tables[pdi][pti] = (sp_addr & ~(PAGE_SIZE - 1)) | PAGE_RW;
+            }
+        }
+    }
+
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
 
-    /* カーネル帯域内SHM後方予約: Not-Present */
+    /* カーネル帯域内SHM後方予約: Not-Present (スタックガードの手前まで) */
     paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END);
 
     /* カーネル予約域 (SQLite帯域後 〜 シェル帯域前): Not-Present */
@@ -161,7 +179,7 @@ void paging_init(u32 mem_kb)
 /* ======================================================================== */
 /*  paging_reclaim_conventional — ブート後のコンベンショナルメモリ属性変更    */
 /*  ページ0: NOT PRESENT (NULLポインタ検出)                                 */
-/*  0x1000-0x8EFFF: R/W (旧R/O/ローダー領域を解放)                          */
+/*  0x1000-0x9FFFF: R/W (旧R/O/ローダー領域とブート時スタックを解放)         */
 /* ======================================================================== */
 void paging_reclaim_conventional(void)
 {
@@ -172,7 +190,7 @@ void paging_reclaim_conventional(void)
      * 問題を調査中。元は paging_set_not_present(0x0, MEM_NULL_GUARD_END); */
     paging_set_readonly(0x0, MEM_NULL_GUARD_END);
 
-    /* 0x1000-0x8EFFF: R/W (フォント/Unicode/GFX用) */
+    /* 0x1000-0x9FFFF: R/W (フォント/Unicode/GFX用) */
     for (addr = MEM_CONV_RECLAIM_START; addr <= MEM_CONV_RECLAIM_END; addr += PAGE_SIZE) {
         u32 pdi = addr >> 22;
         u32 pti = (addr >> 12) & 0x3FF;

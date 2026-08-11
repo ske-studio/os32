@@ -275,8 +275,8 @@ void dbg_serial_hexdump(const void *addr, int len)
 /* 静的ブラックリスト: 既知のNOT PRESENTページ */
 static int _dbg_is_blacklisted(u32 addr)
 {
-    /* カーネルスタックガード */
-    if (addr >= 0x8F000UL && addr <= 0x8FFFFUL) return 1;
+    /* カーネルスタックガード (0x1FB000。低位から移設済み) */
+    if (addr >= 0x1FB000UL && addr <= 0x1FBFFFUL) return 1;
     /* カーネル予約域 */
     if (addr >= 0x200000UL && addr <= 0x2FFFFFUL) return 1;
     /* シェルスタックガード */

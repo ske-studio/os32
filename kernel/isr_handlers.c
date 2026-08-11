@@ -126,7 +126,12 @@ static void exc_dump_stack_trace(int row, u32 *regs, int max_row, int serial)
     for (frame = 0; frame < 8 && tr < max_row; frame++) {
         u32 ret_addr;
         u32 prev_ebp;
-        if (ebp < 0x90000 || ebp >= 0xF00000) break;
+        /* 妥当なスタックの範囲か。下限はカーネルスタック
+         * (MEM_KSTACK_BASE)。シェルは 0x376000、プログラムは
+         * 0x400000 以降なので、どのスタックでもこれより上に居る。
+         * 低位 1MB は V86 ゲストに明け渡す領域なので、そこを指す EBP は
+         * フレームチェーンとしては信用しない。 */
+        if (ebp < MEM_KSTACK_BASE || ebp >= 0xF00000) break;
         if (!paging_is_present(ebp) ||
             !paging_is_present(ebp + 4)) break;
         prev_ebp = *(u32 *)ebp;

@@ -11,20 +11,25 @@
 /*      0x01000-0x49FFF  フォントキャッシュ (292KB) ※ブート後に配置          */
 /*      0x4A000-0x69FFF  Unicode-JIS変換テーブル (128KB) ※ブート後に配置     */
 /*      0x6A000-0x89FFF  GFXバックバッファ (128KB) ※ブート後に配置          */
-/*      0x8A000-0x8EFFF  空き (20KB, 将来用)                                 */
-/*      0x8F000-0x8FFFF  カーネルスタックガード (NOT PRESENT)                 */
-/*      0x90000-0x9FFFF  カーネルスタック (64KB)                              */
+/*      0x8A000-0x9FFFF  空き (88KB, 将来用)                                 */
 /*      0xA0000-0xEFFFF  VRAM (テキスト+グラフィック)                         */
 /*      0xF0000-0xFFFFF  BIOS ROM (R/O)                                      */
 /*                                                                          */
+/*      ※ 0x00000-0x9FFFF は V86 セッション中まるごとゲストに明け渡す。      */
+/*         V86 のリニアアドレスは CPU が (seg<<4)+off で作るので低位 1MB に   */
+/*         固定されており、この窓を空けられるかどうかがゲストに 640KB を      */
+/*         渡せるかどうかを決める (docs/tasks/v86v2/09_memmap.md)。           */
+/*                                                                          */
 /*    [カーネル帯域 0x100000-0x1FFFFF, 1MB]                                  */
-/*      0x100000          カーネルバイナリ (.text+.data+.bss, ~200KB)         */
+/*      0x100000          カーネルバイナリ (.text+.data+.bss, ~220KB)         */
 /*      __bss_end (align) カーネルヒープ (320KB)                             */
 /*      +320KB            KAPIテーブル (4KB)                                  */
 /*      +4KB              SHM前方ガード (NP, 4KB)                            */
 /*      +4KB              共有メモリ本体 (256KB)                              */
 /*      +256KB            SHM後方ガード (NP, 4KB)                            */
-/*      残り              空き/予約                                           */
+/*      〜0x1FAFFF        空き/予約 (NP)                                      */
+/*      0x1FB000-0x1FBFFF カーネルスタックガード (NOT PRESENT)                 */
+/*      0x1FC000-0x1FFFFF カーネルスタック (16KB)                             */
 /*                                                                          */
 /*    [SQLite帯域 0x200000-0x2FFFFF, 1MB]                                    */
 /*      0x200000          SQLite code+BSS (~579KB)                            */
@@ -76,14 +81,40 @@ extern u32 __bss_end;
 #define MEM_LOADER_START      0x08000UL
 #define MEM_LOADER_END        0x08FFFUL
 
-/* カーネルスタックガードページ: Not-Present */
-#define MEM_STACK_GUARD       0x8F000UL
-#define MEM_STACK_GUARD_END   0x8FFFFUL
+/* ====================================================================== */
+/*  カーネルスタック (カーネル帯域の末尾, 下向き成長)                        */
+/*                                                                          */
+/*  **低位に置いてはいけない。** V86 のゲストが見るリニアアドレスは CPU が   */
+/*  (seg<<4)+off で作るので 0x00000-0x10FFEF に固定されている。カーネル      */
+/*  スタックが低位のリニアを占有していると、その分だけゲストに渡せる         */
+/*  コンベンショナルメモリが減る。しかも PC-98 は 128KB 単位でしか申告       */
+/*  できないので、中途半端に空けても切り捨てで 512KB のままになる。          */
+/*  0x00000-0x9FFFF を丸ごと空けて初めて 640KB を渡せる。                    */
+/*                                                                          */
+/*  サイズは実測にもとづく。ブート直後からシェル起動までの最深到達点は       */
+/*  3,068 バイト (0x9F400) で、その後は誰もこのスタックを使わない            */
+/*  (GDT はリング 0 のみ = 割り込みで特権遷移が起きない / exec_run() は      */
+/*   子ごとに ESP を張り替える / V86 の #GP フレームは v86_enter が          */
+/*   TSS.ESP0 を呼び出し元の ESP にするので v86 プログラムのスタックに載る)。 */
+/*  16KB は実測の 5 倍強。**リング 3 のユーザプログラムを導入したら          */
+/*  ここが全プログラムの ISR ネストを受けることになるので、その時は          */
+/*  measure し直すこと。**                                                  */
+/*  → docs/tasks/v86v2/09_memmap.md                                         */
+/* ====================================================================== */
+#define MEM_STACK_GUARD       0x1FB000UL
+#define MEM_STACK_GUARD_END   0x1FBFFFUL
+#define MEM_KSTACK_BASE       0x1FC000UL
+#define MEM_KSTACK_TOP        0x1FFFFCUL
 
-/* カーネルスタック (0x90000-0x9FFFF、下向き成長)。
- * 頂点は boot/loader_hdd.asm が ESP に設定する値と一致させること。 */
-#define MEM_KSTACK_BASE       0x90000UL
-#define MEM_KSTACK_TOP        0x9FFFCUL
+/* ブート時スタック (ローダー専用)。
+ *
+ * **ここは低位のままでなければならない。** ローダーは PM に入った後も
+ * ディスク BIOS (INT 1Bh) を呼ぶためにリアルモードへ戻るので、SS:SP で
+ * 届く 1MB 未満にスタックが要る。3 つのローダーの `mov esp, 0009FFFCh` が
+ * この値。カーネルは kentry.asm で MEM_KSTACK_TOP に張り替えるため、
+ * この領域はカーネルが動き出した時点で用済みになる
+ * (V86 セッションはブートの遥か後なので競合しない)。 */
+#define MEM_BOOT_STACK_TOP    0x9FFFCUL
 
 /* BIOS ROM: Read-Only */
 #define MEM_BIOS_ROM_START    0xF0000UL
@@ -94,7 +125,11 @@ extern u32 __bss_end;
 /*  Step 04 で最終アドレスに更新される。暫定的にカーネル帯域後方にも配置。   */
 /* ====================================================================== */
 #define MEM_CONV_RECLAIM_START  0x01000UL
-#define MEM_CONV_RECLAIM_END    0x8EFFFUL
+#define MEM_CONV_RECLAIM_END    0x9FFFFUL
+
+/* コンベンショナルメモリの終端 (VRAM の直前)。
+ * V86 ゲストに渡せるリニアの上限でもある。 */
+#define MEM_CONV_END            0xA0000UL
 
 /* NULLポインタ検出ガード */
 #define MEM_NULL_GUARD_END      0x00FFFUL
@@ -130,9 +165,10 @@ extern u32 __bss_end;
 /* カーネル帯域終端 */
 #define MEM_KERNEL_BAND_END   0x1FFFFFUL
 
-/* SHM後方予約域 (NOT PRESENT): SHMガード後 〜 カーネル帯域終端 */
+/* SHM後方予約域 (NOT PRESENT): SHMガード後 〜 カーネルスタックガードの直前。
+ * 末尾 20KB はカーネルスタックとそのガードが使う。 */
 #define MEM_SHM_RESV_START    (MEM_SHM_GUARD_HI + 0x1000UL)
-#define MEM_SHM_RESV_END      MEM_KERNEL_BAND_END
+#define MEM_SHM_RESV_END      (MEM_STACK_GUARD - 1)
 
 /* ====================================================================== */
 /*  SQLite帯域 (0x200000-0x2FFFFF, 1MB)                                     */

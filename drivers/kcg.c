@@ -204,14 +204,15 @@ void kcg_read_kanji(u16 jis_code, u8 *buf)
 
 /*
  * LZ4圧縮データの一時バッファとして、Unicode変換テーブル領域
- * (0x4A000) を流用する。0x4A000〜0x8EFFF = 282KB が利用可能。
+ * (0x4A000) を流用する。0x4A000〜0x9FFFF = 344KB が利用可能。
  * 圧縮フォントデータは ~180KB なので十分。
  *
  * フォントロード後に unicode_init() で上書きされるため安全。
- * GFXバッファ(0x6A000)では 0x8F000 (スタックガード) まで 148KB しかなく不足。
+ * 上限は VRAM の直前 (MEM_CONV_END)。カーネルスタックを 0x1FC000 へ
+ * 退避する前は 0x8F000 (スタックガード) で頭打ちだった。
  */
 #define LZ4_TEMP_BUF     ((u8 *)MEM_UNICODE_TABLE_BASE)
-#define LZ4_TEMP_MAX     (0x8F000UL - MEM_UNICODE_TABLE_BASE)  /* 282KB */
+#define LZ4_TEMP_MAX     (MEM_CONV_END - MEM_UNICODE_TABLE_BASE)  /* 344KB */
 
 /*
  * チャンク分割読み込みヘルパー。

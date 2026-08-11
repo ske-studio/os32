@@ -43,6 +43,9 @@ typedef struct {
 
 /* メモリアドレス */
 #define LOAD_BUF           0x10000UL   /* vmkernel.lz4 一時読み込み先 */
+/* ステージング先の上限は **ブート時スタック (0x9FFFC)** の手前。
+ * カーネルスタックを 0x1FC000 へ移した後もローダーは低位スタックを
+ * 使い続けるので、ここは広げられない。 */
 #define MAX_IMAGE_SIZE     (508*1024)  /* 0x10000-0x8EFFF */
 
 /* ASMから呼ばれるセクタ読み込み関数 (loader_hdd_new.asm で定義) */

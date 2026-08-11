@@ -56,7 +56,7 @@ void paging_set_readonly(u32 start, u32 end);
 /* 指定範囲の全ページを Not-Present に */
 void paging_set_not_present(u32 start, u32 end);
 
-/* ブート後のコンベンショナルメモリ再利用 (ページ0: NP, 0x1000-0x8EFFF: R/W) */
+/* ブート後のコンベンショナルメモリ再利用 (ページ0: NP, 0x1000-0x9FFFF: R/W) */
 void paging_reclaim_conventional(void);
 
 /* ページング有効かどうか */

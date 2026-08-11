@@ -241,7 +241,7 @@ void v86_bios_setup(void)
      *
      * **渡すべきは「実機の状態」ではなく「仮想マシンの構成」。**
      * ここで作る仮想マシンは「2HD FDD 1 台 / HDD 無し / 拡張メモリ無し /
-     * コンベンショナル 512KB」。
+     * コンベンショナル 640KB」。
      * → docs/tasks/v86v2/08_dos5.md §2, §3-1, §3-2
      *
      * アドレスの正本は np21w-src/src/bios/biosmem.h。
@@ -338,7 +338,7 @@ static void bios_set_ah(u32 *frame, u32 ah)
 /* ゲストのリニアアドレスがバッキング RAM の中に収まっているか。
  *
  * ES:BP は 16bit の掛け算なので理屈上 1MB 近くを指せるが、
- * 実際に張ってあるのは 0x00000-0x8EFFF だけ。範囲外を黙って書くと
+ * 実際に張ってあるのは 0x00000-0x9FFFF だけ。範囲外を黙って書くと
  * カーネルを壊すので、必ず弾いて CF=1 で返す。 */
 static int guest_range_ok(u32 linear, u32 len)
 {
