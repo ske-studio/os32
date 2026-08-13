@@ -30,7 +30,11 @@ extern int  v86_kbd_push(u8 scancode);
 /* rshellモード判定用 (shell.cで定義) */
 extern int rshell_active;
 
-/* ======== シフトキー状態 ======== */
+/* ======== シフトキー状態 ========
+ * **書き込むのは kbd_irq_handler (IRQ1 ISR) だけ**。ISR は割り込みゲート
+ * 経由で IF=0 のまま走り自身に再入しないので、ここでの |= / &= / ^= は
+ * ロック無しで安全。カーネル側は読むだけ (ime.c 等)。
+ * この所有権を破って通常コンテキストから書くなら irq_save が要る。 */
 volatile u8 kbd_shift_state = 0;
 
 /* ======== キー押下状態ビットマップ (128キー分) ======== */

@@ -209,8 +209,9 @@ static void snd_bgm_tick(void)
     SndBGMTrack *bgm = &g_snd.bgm;
     SndNote *cur;
 
-    /* まだ現在のノートの持続時間中 */
-    if (tick_count < bgm->next_tick) return;
+    /* まだ現在のノートの持続時間中。
+     * tick_count の一周 (497 日) をまたいでも壊れないよう差分で比較する。 */
+    if ((i32)(tick_count - bgm->next_tick) < 0) return;
 
     /* 現在のノートを停止 (前のノートの発音を止める) */
     cur = &bgm->notes[bgm->pos];
@@ -240,7 +241,7 @@ static void snd_fm_se_tick(void)
 {
     if (!g_snd.fm_se.active) return;
 
-    if (tick_count >= g_snd.fm_se.end_tick) {
+    if ((i32)(tick_count - g_snd.fm_se.end_tick) >= 0) {
         fm_note_off(SND_FM_SE_CH);
         g_snd.fm_se.active = 0;
 
@@ -276,7 +277,7 @@ static void snd_ssg_se_tick(void)
         ssg_volume(SND_SSG_SE_CH, g_snd.ssg_se.ssg_vol);
     }
 
-    if (tick_count >= g_snd.ssg_se.end_tick) {
+    if ((i32)(tick_count - g_snd.ssg_se.end_tick) >= 0) {
         ssg_volume(SND_SSG_SE_CH, 0);
         g_snd.ssg_se.active = 0;
 

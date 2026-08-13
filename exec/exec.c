@@ -503,20 +503,35 @@ int exec_run(const char *cmdline)
         }
         argv_area[argc] = NULL;
 
-        new_esp = stack_top;
+        /* ---- 呼び出しフレームを子スタック上に自分で組む ----
+         *
+         * 以前は引数 3 つを asm 内で push しており、しかも "g" 制約で
+         * 渡していた。"g" はメモリオペランドを許すので GCC が
+         * 「-4(%esp)」のような **ESP 相対アドレス**を選ぶことがあり、
+         * その場合 `mov %1, %%esp` でスタックを切り替えた後の push が
+         * 子スタック上の無関係な場所を読む。実際に壊れていなかったのは
+         * レジスタが選ばれていた偶然でしかない。
+         *
+         * 引数を C 側で書き込んでおけば asm は「ESP を差し替えて call」
+         * だけになり、入力は new_esp と entry の 2 本 (どちらも "r") で済む。
+         *
+         * ExecEntry は __cdecl (int argc, char **argv, KernelAPI *api) なので
+         * 低位から argc, argv, kapi の順に並べる。
+         * call 時点で ESP を 16 バイト境界に揃えるのは SysV i386 ABI の
+         * 要求 (GCC は SSE スピルでこれを前提にする)。 */
+        new_esp = (stack_top - 3 * sizeof(u32)) & ~(u32)15;
+        ((u32 *)new_esp)[0] = (u32)argc;
+        ((u32 *)new_esp)[1] = (u32)argv_area;
+        ((u32 *)new_esp)[2] = (u32)kapi;
 
         __asm__ volatile(
-            "mov %%esp, %0\n\t"
-            "mov %1, %%esp\n\t"
-            "push %4\n\t"
-            "push %3\n\t"
-            "push %2\n\t"
-            "call *%5\n\t"
-            "add $12, %%esp\n\t"
-            "mov %0, %%esp"
+            "movl %%esp, %0\n\t"
+            "movl %1, %%esp\n\t"
+            "call *%2\n\t"
+            "movl %0, %%esp"
             : "=m"(saved_esp_stack[exec_nest_level - 1])
-            : "r"(new_esp), "g"(argc), "g"(argv_area), "g"(kapi), "r"(entry)
-            : "eax", "ecx", "edx", "memory"
+            : "r"(new_esp), "r"(entry)
+            : "eax", "ecx", "edx", "cc", "memory"
         );
         exec_exit(EXEC_SUCCESS);
     }

@@ -451,8 +451,14 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         /* シェルが終了 (exitコマンド) またはクラッシュ復帰 */
         /* FDD負荷軽減用ウェイト (約100ms) の後、画面クリアして再起動 */
         {
-            u32 wait_end = tick_count + SHELL_RELOAD_DELAY;
-            while (tick_count < wait_end) asm volatile("hlt");
+            /* tick_count は 100Hz で回る u32 で 497 日で一周する。
+             * 絶対値比較 (tick_count < wait_end) だと一周をまたいだ瞬間に
+             * 待たずに抜ける。差分を符号付きで見る形にすれば一周しても
+             * 正しい (待ち時間 << 2^31 tick である限り)。 */
+            u32 start = tick_count;
+            while ((i32)(tick_count - start) < (i32)SHELL_RELOAD_DELAY) {
+                asm volatile("hlt");
+            }
         }
         tvram_clear();
     }

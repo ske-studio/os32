@@ -106,6 +106,10 @@ void serial_init(unsigned long baud)
 /*  PC-98ではRS-232Cの送受信が同一IRQ4を共有                                */
 /*  ステータスを読んで受信か送信かを判定                                      */
 /* ======================================================================== */
+/* 受信バッファ溢れで捨てたバイト数 (kernel.map 経由で観測する)。
+ * static にするとホストから読めないので意図的にグローバル。 */
+u32 ser_overflow_n = 0;
+
 void serial_irq_handler(void)
 {
     u8 sts;
@@ -124,11 +128,16 @@ void serial_irq_handler(void)
 
         data = (u8)inp(SER_DATA);
 
-        /* バッファに格納 */
+        /* バッファに格納。
+         * 満杯なら捨てるしかないが、黙って捨てると「rshell の応答が
+         * たまに欠ける」の原因が分からなくなるので回数を残す
+         * (ISR 内なので kprintf は使えない — 出力先が自分自身)。 */
         if (ser_count < SER_BUF_SIZE) {
             ser_buf[ser_tail] = data;
             ser_tail = (ser_tail + 1) % SER_BUF_SIZE;
             ser_count++;
+        } else {
+            ser_overflow_n++;
         }
 
         /* 異常な割り込み嵐を防ぐため、1回のIRQで最大128バイト読んだら一旦抜ける */
