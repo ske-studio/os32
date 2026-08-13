@@ -27,6 +27,7 @@
 #include "pgalloc.h"
 #include "shm.h"
 #include "utf8.h"
+#include "kselftest.h"
 #include "exec.h"
 #include "ide.h"
 #include "atapi.h"
@@ -358,6 +359,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
+
+    /* カーネル内プリミティブの自己診断。
+     * 外部プログラムの klibc_test は newlib 側を試すだけで、カーネルが
+     * 実際に使う kstring_asm / kmalloc / kprintf は一度も踏んでいない。
+     * ここで境界ケースだけを実機で毎回確認する (全通過なら 1 行)。 */
+    kselftest_run();
 
     /* FDリダイレクト初期化 (プログラムローダーより前に) */
     fd_redirect_init();
