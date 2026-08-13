@@ -77,4 +77,22 @@ static inline void io_wait(void) {
     outp(0x5F, 0);
 }
 
+/* n 回ウェイト (約 0.6µs × n)。手書きの io_wait() 連打はこれを使う。 */
+static inline void io_wait_n(int n) {
+    while (n-- > 0) io_wait();
+}
+
+/* ---- リングバッファの取り出し (割り込み保護付き) ----
+ * ISR がエンキューするリングバッファから 1 要素取り出す共通イディオム。
+ * 要素型が u16/int などバッファごとに違うためマクロで提供する。
+ * 呼び出し前に count > 0 を確認しておくこと。 */
+#define RING_DEQUEUE(entry, buf, head, count, bufsize)      \
+    do {                                                    \
+        unsigned int ring_flags_ = irq_save();              \
+        (entry) = (buf)[(head)];                            \
+        (head) = ((head) + 1) % (bufsize);                  \
+        (count)--;                                          \
+        irq_restore(ring_flags_);                           \
+    } while (0)
+
 #endif /* IO_H */

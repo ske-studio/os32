@@ -41,15 +41,12 @@ void gfx_scroll_init(void);
 #define GDC_PRM_PORT    0xA0
 #define GDC_CMD_SCROLL  0x70
 
-static inline void _out(unsigned int port, unsigned int val) {
-    __asm__ volatile("outb %b0, %w1" : : "a"((unsigned char)val), "Nd"(port));
-}
-
-static inline unsigned int _in(unsigned int port) {
-    unsigned char ret;
-    __asm__ volatile("inb %w1, %b0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
+/* ポート I/O は include/io.h の共通実装を使う。
+ * かつてはここに同一のインライン asm が重複定義されていた (IR3)。
+ * 既存呼び出し (43 箇所) を書き換えないためエイリアスで提供する。 */
+#include "io.h"
+#define _out(port, val)  outp((port), (val))
+#define _in(port)        inp((port))
 
 static inline void _memcpy_w(void *dst, const void *src, unsigned int words) {
     __asm__ volatile("rep movsw"

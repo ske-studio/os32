@@ -249,7 +249,6 @@ int kbd_has_key(void)
 int kbd_trygetchar(void)
 {
     u16 entry;
-    unsigned int flags;
     
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -260,11 +259,7 @@ int kbd_trygetchar(void)
     
     if (kbd_count == 0) return -1;
 
-    flags = irq_save();
-    entry = kbd_buf[kbd_head];
-    kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
-    kbd_count--;
-    irq_restore(flags);
+    RING_DEQUEUE(entry, kbd_buf, kbd_head, kbd_count, KBD_BUF_SIZE);
 
     return (int)(entry & 0xFF);
 }
@@ -272,7 +267,6 @@ int kbd_trygetchar(void)
 int kbd_getchar(void)
 {
     u16 entry;
-    unsigned int flags;
     u32 timeout_ticks;
 
     /* rshellモード: KBD_TIMEOUT_TICKS タイムアウト (デフォルト300 ticks @ 100Hz) */
@@ -284,11 +278,8 @@ int kbd_getchar(void)
         for (;;) {
             /* キーボードバッファ */
             if (kbd_count > 0) {
-                flags = irq_save();
-                entry = kbd_buf[kbd_head];
-                kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
-                kbd_count--;
-                irq_restore(flags);
+                RING_DEQUEUE(entry, kbd_buf, kbd_head, kbd_count,
+                             KBD_BUF_SIZE);
                 return (int)(entry & 0xFF);
             }
 
@@ -314,16 +305,11 @@ int kbd_getchar(void)
 int kbd_getkey(void)
 {
     u16 entry;
-    unsigned int flags;
     while (kbd_count == 0) {
         __asm__ volatile("hlt");
     }
 
-    flags = irq_save();
-    entry = kbd_buf[kbd_head];
-    kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
-    kbd_count--;
-    irq_restore(flags);
+    RING_DEQUEUE(entry, kbd_buf, kbd_head, kbd_count, KBD_BUF_SIZE);
 
     return (int)entry;
 }
@@ -332,7 +318,6 @@ int kbd_getkey(void)
 int kbd_trygetkey(void)
 {
     u16 entry;
-    unsigned int flags;
 
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -343,11 +328,7 @@ int kbd_trygetkey(void)
 
     if (kbd_count == 0) return -1;
 
-    flags = irq_save();
-    entry = kbd_buf[kbd_head];
-    kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
-    kbd_count--;
-    irq_restore(flags);
+    RING_DEQUEUE(entry, kbd_buf, kbd_head, kbd_count, KBD_BUF_SIZE);
 
     return (int)entry;  /* 上位=キーコード, 下位=ASCII */
 }

@@ -47,19 +47,14 @@ void opn_write(uchar reg, uchar val)
     /* アドレス送信 */
     outp(OPN_ADDR, reg);
 
-    /* ウェイト: io_wait() × 6回 ≈ 3.6μs */
-    io_wait(); io_wait(); io_wait();
-    io_wait(); io_wait(); io_wait();
+    /* ウェイト: 約 3.6μs */
+    io_wait_n(6);
 
     /* データ送信 */
     outp(OPN_DATA, val);
 
-    /* データ書込み後のウェイト × 20回 ≈ 12μs */
-    io_wait(); io_wait(); io_wait(); io_wait();
-    io_wait(); io_wait(); io_wait(); io_wait();
-    io_wait(); io_wait(); io_wait(); io_wait();
-    io_wait(); io_wait(); io_wait(); io_wait();
-    io_wait(); io_wait(); io_wait(); io_wait();
+    /* データ書込み後のウェイト: 約 12μs */
+    io_wait_n(20);
 
     irq_restore(flags);
 }
