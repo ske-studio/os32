@@ -371,9 +371,12 @@ int exec_run(const char *cmdline)
         kapi->sbrk_heap_limit = guard_a;
         ctx->sbrk_heap_limit = guard_a;
 
-        /* ガードページ設定 */
-        paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1);
-        paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1);
+        /* ガードページ設定。失敗＝保護なしで走ることを意味するので必ず検知する */
+        if (paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1) != 0 ||
+            paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1) != 0) {
+            kprintf(0xC1, "[exec] guard page setup failed (a=%x b=%x)\n",
+                    guard_a, guard_b);
+        }
     }
 
     /* setjmp — 毎回実行 (ネスト対応) */

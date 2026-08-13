@@ -37,6 +37,11 @@
 #define PAGING_MAP_SIZE (16UL * 1024UL * 1024UL)
 #define PAGING_PT_COUNT (PAGING_MAP_SIZE / (PTE_COUNT * PAGE_SIZE))
 
+/* ページ境界アライメント (切り上げ/切り下げ)。
+ * 手書きの (x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) イディオムはこれを使う。 */
+#define PAGE_ALIGN_DOWN(x)  ((u32)(x) & ~(u32)(PAGE_SIZE - 1))
+#define PAGE_ALIGN_UP(x)    (((u32)(x) + PAGE_SIZE - 1) & ~(u32)(PAGE_SIZE - 1))
+
 /* ======== API ======== */
 
 /* ページング初期化・有効化 */
@@ -44,17 +49,25 @@ void paging_init(u32 mem_kb);
 
 /* 指定ページの属性を変更。
  * flags に PTE_USER を含めると PDE 側にも USER を伝播させる
- * (i386 の実効権限は PDE と PTE の論理積のため)。 */
-void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
+ * (i386 の実効権限は PDE と PTE の論理積のため)。
+ * 戻り値: 0=成功, -1=マッピング範囲外 (何も変更されない)。
+ * ガードページ設置のような保護目的の呼び出しは必ず戻り値を確認すること
+ * (無言 no-op だと保護が入らないまま fail-open になる)。 */
+int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
 
-/* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末) */
-void paging_pde_clear_user(u32 start, u32 end);
+/* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末)
+ * 戻り値: 0=成功, -1=範囲全体がマッピング範囲外 */
+int paging_pde_clear_user(u32 start, u32 end);
 
-/* 指定範囲の全ページを Read-Only に */
-void paging_set_readonly(u32 start, u32 end);
+/* 指定範囲の全ページを Read-Only に。
+ * 既存 PTE の物理フレームは保持する (V86 リマップ中でも壊さない)。
+ * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+int paging_set_readonly(u32 start, u32 end);
 
-/* 指定範囲の全ページを Not-Present に */
-void paging_set_not_present(u32 start, u32 end);
+/* 指定範囲の全ページを Not-Present に。
+ * PTE のフレーム/属性ビットは保持し P ビットのみ落とす。
+ * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+int paging_set_not_present(u32 start, u32 end);
 
 /* ブート後のコンベンショナルメモリ再利用 (ページ0: NP, 0x1000-0x9FFFF: R/W) */
 void paging_reclaim_conventional(void);

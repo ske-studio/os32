@@ -205,13 +205,14 @@ void paging_reclaim_conventional(void)
 /* ======================================================================== */
 /*  paging_set_page — 1ページの属性を変更                                   */
 /* ======================================================================== */
-void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
+int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
 {
     u32 pdi = virt_addr >> 22;
     u32 pti = (virt_addr >> 12) & 0x3FF;
 
-    /* マッピング範囲外なら無視 */
-    if (pdi >= PAGING_PT_COUNT) return;
+    /* マッピング範囲外。無言 no-op にすると「ガードページを置いたつもり」の
+     * まま保護なしで走る (fail-open) ので、必ず失敗を返す。 */
+    if (pdi >= PAGING_PT_COUNT) return -1;
 
     page_tables[pdi][pti] = (phys_addr & 0xFFFFF000UL) | flags;
 
@@ -227,60 +228,79 @@ void paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
     }
 
     if (pg_enabled) tlb_flush_all();
+    return 0;
 }
 
 /* 指定範囲を覆う PDE から USER を落とす。
  * paging_set_page() は USER を立てる方向にしか伝播させないので、
  * V86 セッション終了時にカーネル側が明示的に戻すために使う。 */
-void paging_pde_clear_user(u32 start, u32 end)
+int paging_pde_clear_user(u32 start, u32 end)
 {
     u32 pdi;
     u32 first = start >> 22;
     u32 last  = end >> 22;
+
+    if (first >= PAGING_PT_COUNT) return -1;
 
     for (pdi = first; pdi <= last && pdi < PAGING_PT_COUNT; pdi++) {
         page_directory[pdi] &= ~(u32)PTE_USER;
     }
 
     if (pg_enabled) tlb_flush_all();
+    return 0;
 }
 
 /* ======================================================================== */
 /*  paging_set_readonly — 範囲内の全ページをRead-Onlyに                     */
 /* ======================================================================== */
-void paging_set_readonly(u32 start, u32 end)
+int paging_set_readonly(u32 start, u32 end)
 {
     u32 addr;
-    start &= ~(PAGE_SIZE - 1);     /* ページ境界に切り下げ */
-    end = (end + PAGE_SIZE) & ~(PAGE_SIZE - 1);  /* 切り上げ */
+    int rc = 0;
+    start = PAGE_ALIGN_DOWN(start);
+    end = PAGE_ALIGN_DOWN(end) + PAGE_SIZE;      /* end は inclusive 指定 */
 
     for (addr = start; addr < end; addr += PAGE_SIZE) {
         u32 pdi = addr >> 22;
         u32 pti = (addr >> 12) & 0x3FF;
-        if (pdi >= PAGING_PT_COUNT) break;
-        page_tables[pdi][pti] = (addr & 0xFFFFF000UL) | PAGE_RO;
+        u32 pte;
+        if (pdi >= PAGING_PT_COUNT) { rc = -1; break; }
+        /* 既存 PTE の物理フレームを保持する。identity で上書きすると、
+         * V86 リマップ中のページを R/O 化した時にマッピング自体が
+         * 壊れてしまう (フラグ変更のつもりが張り替えになる)。 */
+        pte = page_tables[pdi][pti];
+        if (pte & PTE_PRESENT) {
+            page_tables[pdi][pti] = (pte & 0xFFFFF000UL) | PAGE_RO;
+        } else {
+            page_tables[pdi][pti] = (addr & 0xFFFFF000UL) | PAGE_RO;
+        }
     }
 
     if (pg_enabled) tlb_flush_all();
+    return rc;
 }
 
 /* ======================================================================== */
 /*  paging_set_not_present — 範囲内の全ページをアクセス不可に               */
 /* ======================================================================== */
-void paging_set_not_present(u32 start, u32 end)
+int paging_set_not_present(u32 start, u32 end)
 {
     u32 addr;
-    start &= ~(PAGE_SIZE - 1);
-    end = (end + PAGE_SIZE) & ~(PAGE_SIZE - 1);
+    int rc = 0;
+    start = PAGE_ALIGN_DOWN(start);
+    end = PAGE_ALIGN_DOWN(end) + PAGE_SIZE;      /* end は inclusive 指定 */
 
     for (addr = start; addr < end; addr += PAGE_SIZE) {
         u32 pdi = addr >> 22;
         u32 pti = (addr >> 12) & 0x3FF;
-        if (pdi >= PAGING_PT_COUNT) break;
-        page_tables[pdi][pti] = PAGE_NOT_PRESENT;
+        if (pdi >= PAGING_PT_COUNT) { rc = -1; break; }
+        /* フレーム/属性は保持して P ビットだけ落とす。全消去 (=0) だと
+         * 解除時に identity 以外のマッピングを復元できない。 */
+        page_tables[pdi][pti] &= ~(u32)PTE_PRESENT;
     }
 
     if (pg_enabled) tlb_flush_all();
+    return rc;
 }
 
 /* ======================================================================== */
