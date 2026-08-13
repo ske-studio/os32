@@ -274,6 +274,18 @@ Build artifacts land in `build/out/` (gitignored), not the repository root.
 
 **ABI break after KernelAPI change**: After modifying `KernelAPI` struct, run `make clean` before rebuilding. Stale `.o` files with old struct layout cause silent corruption.
 
+**KAPI にポインタ検証はない (設計上の制約)**: GDT にユーザディスクリプタが
+なく、外部プログラムも CPL=0 で実行される。KAPI に渡されたポインタ/サイズは
+検証されずカーネルがそのまま使うため、プログラムのバグは即カーネル破壊に
+なり得る。リング 3 導入はアーキテクチャ変更 (GDT/TSS/ゲート全面改修) で
+2026-08 の信頼性向上 (Phase 1-3) ではスコープ外と判断した。
+呼び出し側 (プログラム) が防衛的に書くこと。
+
+**deploy.yaml に無いバイナリは NHD 上で stale 化する**: KAPI レイアウトが
+変わると旧バイナリの KAPI 呼び出しが別関数へ飛び、exit 後の `jmp $` で
+永久スピンして rshell ごと沈黙する (2026-08-13 に sndctl で実測)。
+起動対象になるバイナリは PKG 配布でも必ず deploy.yaml に載せる。
+
 **HostDrv deploy does not override `/usr/bin`**: `make deploy` only writes to `C:\os32`
 (the guest's `/host`). PATH resolution prefers the NHD's `/usr/bin`, so running a program
 by name after a HostDrv-only deploy silently executes the **old** binary on the NHD.
