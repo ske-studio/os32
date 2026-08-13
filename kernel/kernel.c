@@ -26,6 +26,7 @@
 #include "paging.h"
 #include "pgalloc.h"
 #include "shm.h"
+#include "utf8.h"
 #include "exec.h"
 #include "ide.h"
 #include "atapi.h"
@@ -377,8 +378,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         int bytes = vfs_read(SYS_UNICODE_BIN, (void *)MEM_UNICODE_TABLE_BASE, MEM_UNICODE_TABLE_SIZE);
         kprintf(0x07, "[BOOT] UNI load: bytes=%d\n", bytes);
         if (bytes == (int)MEM_UNICODE_TABLE_SIZE) {
+            utf8_set_jis_table_ready(1);
             tvram_print(67, 2, "OK", TATTR_WHITE);
         } else {
+            /* 表を有効化しない。ロード失敗のまま引くと、0x4A000 に
+             * 残っていた別のデータを変換表として読んでしまう。 */
+            utf8_set_jis_table_ready(0);
             tvram_print(67, 2, "ER", TATTR_RED);
         }
     }

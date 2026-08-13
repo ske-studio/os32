@@ -167,6 +167,18 @@ int ime_rk_append(IME_RomKana *rk, char c)
 
     len = (int)kstrlen(rk->preedit);
 
+    /* preedit も temp も 8 バイト。len は最大 7 まであり得るので、
+     * 無条件に temp[len]=c / temp[len+1]='\0' と書くと temp[8] が
+     * スタックを 1 バイト踏む。ここまで伸びた時点でテーブルには
+     * 一致しない (最長のローマ字綴りでも 4 文字) ので、打ち切って
+     * 入力し直しにする。 */
+    if (len + 2 > (int)sizeof(temp)) {
+        rk->preedit[0] = c;
+        rk->preedit[1] = '\0';
+        rk->n_wait = 0;
+        return 0;
+    }
+
     /* 促音: 同一子音連続 (tt, kk, ss 等) */
     if (len == 1 && rk->preedit[0] == c &&
         c != 'n' && c != 'a' && c != 'i' && c != 'u' &&

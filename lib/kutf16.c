@@ -34,13 +34,17 @@ int kutf8_to_utf16le(const char *utf8, u16 *utf16, int max_words)
             if ((*s & 0xC0) != 0x80) break;
             cp |= (*s++ & 0x3F);
         } else {
-            /* 4バイト以上 (BMP外): スキップ */
+            /* 4バイト以上 (BMP外)。UTF-16 で表すにはサロゲートペアが要る
+             * が未対応なので、**黙って消さずに** U+FFFD (置換文字) を
+             * 1 個出す。消すとファイル名が別名に化けて「無いファイル」に
+             * なり、しかも呼び出し側は何が起きたか分からない。 */
             s++;
             while ((*s & 0xC0) == 0x80) s++;
+            utf16[out++] = 0xFFFD;
             continue;
         }
-        /* BMP範囲チェック */
-        if (cp > 0xFFFF) continue;
+        /* BMP 範囲外は表現できないので置換文字にする */
+        if (cp > 0xFFFF) cp = 0xFFFD;
         utf16[out++] = (u16)cp;
     }
     utf16[out++] = 0;   /* NULL終端 */

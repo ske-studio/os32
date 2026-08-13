@@ -23,5 +23,6 @@ int  console_get_cursor_x(void);
 int  console_get_cursor_y(void);
 void console_set_cursor(int x, int y);
 
-#endif /* __CONSOLE_H */
 void console_get_size(int *w, int *h);
+
+#endif /* __CONSOLE_H */

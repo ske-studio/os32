@@ -23,6 +23,18 @@
 
 static const u16 *unicode_jis_table = (const u16 *)MEM_UNICODE_TABLE_BASE;
 
+/* Unicode→JIS 変換表 (/sys/unicode.bin) がロード済みか。
+ * 表は BSS ではなく生の物理アドレス (0x4A000) に置かれるので、ロードに
+ * 失敗しても「ゼロ埋め」にはならず、前に居たデータがそのまま表として
+ * 読まれる — 画面が意味不明な漢字で埋まり、原因が表のロード失敗だと
+ * 気づけない。ロード成否を明示的に持ち、未ロードなら変換不可を返す。 */
+static int jis_table_ready = 0;
+
+void utf8_set_jis_table_ready(int ready)
+{
+    jis_table_ready = ready ? 1 : 0;
+}
+
 /* ======================================================================== */
 /*  u32 最適化プリミティブ                                                   */
 /* ======================================================================== */
@@ -211,6 +223,9 @@ u16 unicode_to_jis(u32 cp)
 
     /* BMP範囲外 → 変換不可 */
     if (cp > 0xFFFF) return 0;
+
+    /* 表が無いなら引かない (未ロードのゴミを漢字として表示しない) */
+    if (!jis_table_ready) return 0;
 
     /* O(1) でテーブルから直接引く */
     return unicode_jis_table[cp];

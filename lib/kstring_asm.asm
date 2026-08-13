@@ -34,7 +34,7 @@ memcpy:
     mov eax, edi        ; 戻り値 eax = dst
 
     cmp ecx, 4
-    jl .do_bytes
+    jb .do_bytes        ; n は u32 なので符号なし比較 (jl だと 2GB 超で誤判定)
 
     ; dst アライメント (4バイト境界になるまで1バイトずつ)
     test edi, 3
@@ -88,7 +88,7 @@ memset:
     imul eax, eax, 0x01010101
     
     cmp ecx, 4
-    jl .do_bytes
+    jb .do_bytes        ; n は u32 なので符号なし比較 (jl だと 2GB 超で誤判定)
 
     ; dst アライメント
     test edi, 3

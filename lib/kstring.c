@@ -39,7 +39,12 @@ char *kstrncat(char *dst, const char *src, u32 n)
     /* n==0 を先に弾く。弾かないと n-1 が 0xFFFFFFFF にラップして
      * ガードが一切効かなくなる */
     if (n == 0) return dst;
-    dlen = kstrlen(dst);
+
+    /* dst の長さ測定も n で打ち切る。kstrlen(dst) をそのまま使うと、
+     * dst が n バイト以内に NUL を持たない (呼び出し側のバグ or
+     * 未初期化) 場合にバッファ外を読み続ける。 */
+    for (dlen = 0; dlen < n && dst[dlen]; dlen++) {
+    }
     if (dlen >= n - 1) return dst;
     for (i = 0; src[i] && (dlen + i) < n - 1; i++) {
         dst[dlen + i] = src[i];
