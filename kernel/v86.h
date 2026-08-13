@@ -157,8 +157,9 @@ int v86_is_active(void);
 void v86_reflect_irq(u32 *frame, u32 irq);
 
 /* #GP フレーム版の割り込み注入。ゲストの INT n のうち HLE しないものを
- * ゲスト自身の IVT (多くは BIOS ROM) へ流すために使う。 */
-void v86_inject_int(u32 *frame, u32 vector);
+ * ゲスト自身の IVT (多くは BIOS ROM) へ流すために使う。
+ * 戻り値 1 = 成功 / 0 = ゲストスタック不正 (呼び出し元でセッションを畳む)。 */
+int v86_inject_int(u32 *frame, u32 vector);
 
 /* 反射した割り込みの回数 (検証用) */
 u32 v86_irq_reflect_count(void);

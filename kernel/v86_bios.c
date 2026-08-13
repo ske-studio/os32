@@ -418,24 +418,9 @@ static void bios_set_ah(u32 *frame, u32 ah)
 /*  戻り: CF=0 成功 / CF=1 失敗、AH にステータス。                          */
 /* ------------------------------------------------------------------------ */
 
-/* ゲストのリニアアドレスがバッキング RAM の中に収まっているか。
- *
- * ES:BP は 16bit の掛け算なので理屈上 1MB 近くを指せるが、
- * 実際に張ってあるのは 0x00000-0x9FFFF だけ。範囲外を黙って書くと
- * カーネルを壊すので、必ず弾いて CF=1 で返す。 */
-static int guest_range_ok(u32 linear, u32 len)
-{
-    if (len == 0) {
-        return 0;
-    }
-    if (linear >= V86_REMAP_END) {
-        return 0;
-    }
-    if (linear + len > V86_REMAP_END) {
-        return 0;
-    }
-    return 1;
-}
+/* ゲストのリニアアドレス検証は v86_mem.h の v86_guest_range_ok() に共通化。
+ * 範囲外は必ず弾いて CF=1 で返す。 */
+#define guest_range_ok(linear, len) v86_guest_range_ok((linear), (len))
 
 /* この DA/UA はこちらが持っている装置か。
  *

@@ -110,15 +110,22 @@ void v86_fault_handler(u32 *frame, u32 vector)
 {
     u32 cs = frame[V86F_CS];
     u32 ip = frame[V86F_EIP];
-    const u8 *pc = v86_ptr(cs, ip);
+    u32 pc_lin = ((cs & 0xFFFFU) << 4) + (ip & 0xFFFFU);
 
     v86_flt_n++;
     v86_flt_vec = vector;
     v86_flt_cs  = cs;
     v86_flt_ip  = ip;
     v86_flt_fl  = frame[V86F_EFLAGS];
-    v86_flt_op  = (u32)pc[0] | ((u32)pc[1] << 8) |
-                  ((u32)pc[2] << 16) | ((u32)pc[3] << 24);
+
+    /* 診断値の読み出しでも範囲外は読まない (0x10FFEF はカーネル内)。 */
+    if (v86_guest_range_ok(pc_lin, 4)) {
+        const u8 *pc = v86_ptr(cs, ip);
+        v86_flt_op  = (u32)pc[0] | ((u32)pc[1] << 8) |
+                      ((u32)pc[2] << 16) | ((u32)pc[3] << 24);
+    } else {
+        v86_flt_op  = 0xFFFFFFFFUL;
+    }
 
     /* ゲストのスタック先頭も残す。
      * 「そこへ何処から飛んできたのか」は CS:IP だけでは分からず、
@@ -126,10 +133,17 @@ void v86_fault_handler(u32 *frame, u32 vector)
     v86_flt_ss = frame[V86F_SS];
     v86_flt_sp = frame[V86F_ESP];
     {
-        const u16 *sp = (const u16 *)v86_ptr(v86_flt_ss, v86_flt_sp);
+        u32 sp_lin = ((v86_flt_ss & 0xFFFFU) << 4) + (v86_flt_sp & 0xFFFFU);
         int i;
-        for (i = 0; i < 4; i++) {
-            v86_flt_stk[i] = sp[i];
+        if (v86_guest_range_ok(sp_lin, 8)) {
+            const u16 *sp = (const u16 *)v86_ptr(v86_flt_ss, v86_flt_sp);
+            for (i = 0; i < 4; i++) {
+                v86_flt_stk[i] = sp[i];
+            }
+        } else {
+            for (i = 0; i < 4; i++) {
+                v86_flt_stk[i] = 0xFFFFFFFFUL;
+            }
         }
     }
 
@@ -151,6 +165,13 @@ int v86_gp_handler(u32 *frame)
     v86_gp_ip = ip;
     v86_gp_fl = frame[V86F_EFLAGS];
 
+    /* CS:IP がバッキング RAM の外を指しているなら命令は読めない
+     * (0x10FFEF まで届き得て、それはカーネル内)。デコードせず畳む。 */
+    if (!v86_guest_range_ok(((cs & 0xFFFFU) << 4) + (ip & 0xFFFFU), 16)) {
+        v86_exit_reason = V86_EXIT_FAULT;
+        return 1;
+    }
+
     /* ゲストの割り込み状態に依存しない歯止め。
      * CLI したまま #GP を出し続けるゲストはここで止める。
      *
@@ -169,9 +190,16 @@ int v86_gp_handler(u32 *frame)
 
 
     /* プレフィックスを読み飛ばす。
-     * 0x66 だけはオペランドサイズを変えるので覚えておく。 */
+     * 0x66 だけはオペランドサイズを変えるので覚えておく。
+     * x86 の命令長上限は 15 バイトなので、それを超えて続くプレフィックス列は
+     * デコードを打ち切る (範囲チェック済みの 16 バイトからもはみ出さない)。 */
     for (;;) {
-        u8 b = pc[len];
+        u8 b;
+        if (len >= 14) {
+            v86_exit_reason = V86_EXIT_UNKNOWN_OP;
+            return 1;
+        }
+        b = pc[len];
         if (b == 0x66) { opsize16 = 0; len++; continue; }
         if (b == 0x67 || b == 0xF3 || b == 0xF2 || b == 0xF0 ||
             b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
@@ -246,7 +274,10 @@ int v86_gp_handler(u32 *frame)
                 v86_bios_dispatch(frame, vec);
             } else {
                 /* それ以外はゲスト自身の IVT (多くは BIOS ROM) へ流す */
-                v86_inject_int(frame, vec);
+                if (!v86_inject_int(frame, vec)) {
+                    v86_exit_reason = V86_EXIT_FAULT;
+                    return 1;
+                }
             }
         }
         return 0;
@@ -297,16 +328,26 @@ u32 v86_irq_reflect_count(void) { return v86_irq_n; }
 int v86_is_active(void)         { return v86_active; }
 
 /* 割り込み合成の本体。#GP フレームと IRQ フレームでインデックスが
- * 1 ワードずれるだけで、やることは同じ (実機の INT n と等価)。 */
-static void v86_do_int(u32 *frame, u32 vector,
-                       int i_eip, int i_cs, int i_eflags, int i_esp, int i_ss)
+ * 1 ワードずれるだけで、やることは同じ (実機の INT n と等価)。
+ *
+ * 戻り値 1 = 注入成功 / 0 = ゲストスタックが不正で注入できず。
+ * SS:SP はゲストが自由に書ける値で、(SS<<4)+SP は最大 0x10FFEF まで
+ * 届く — それはカーネルの中。検証せずに 6 バイト書くとゲストが任意の
+ * カーネル領域を破壊できるので、必ず範囲を確認する。 */
+static int v86_do_int(u32 *frame, u32 vector,
+                      int i_eip, int i_cs, int i_eflags, int i_esp, int i_ss)
 {
     u32 sp;
+    u32 sp_lin;
     u16 *gstack;
     const u16 *ivt;
 
     /* ゲストスタックに 3 ワード積む。SP は 16bit なのでラップさせる。 */
     sp = (frame[i_esp] - 6) & 0xFFFFU;
+    sp_lin = ((frame[i_ss] & 0xFFFFU) << 4) + sp;
+    if (!v86_guest_range_ok(sp_lin, 6)) {
+        return 0;
+    }
     gstack = (u16 *)v86_ptr(frame[i_ss], sp);
 
     /* ゲストには VM ビットを見せない (下位 16bit だけ積む) */
@@ -316,7 +357,8 @@ static void v86_do_int(u32 *frame, u32 vector,
 
     frame[i_esp] = sp;
 
-    /* IVT からハンドラを引く。IVT はゲストの物理 0 番地にある。 */
+    /* IVT からハンドラを引く。IVT はゲストの物理 0 番地にある。
+     * vector は u8 由来なので vector*4+4 <= 0x400 で常に範囲内。 */
     ivt = (const u16 *)(vector * 4);
     frame[i_eip] = ivt[0];
     frame[i_cs]  = ivt[1];
@@ -324,6 +366,7 @@ static void v86_do_int(u32 *frame, u32 vector,
     /* 実機の割り込み受理と同じく IF と TF を落とす。
      * ゲストの IRET がスタックから FLAGS を戻すので IF は自動で復帰する。 */
     frame[i_eflags] &= ~(EFLAGS_IF | 0x100UL);
+    return 1;
 }
 
 /* 実 IRQ をゲストに見せる。**引数は IRQ 番号であってベクタ番号ではない。**
@@ -342,15 +385,22 @@ void v86_reflect_irq(u32 *frame, u32 irq)
     if (!v86_pic_should_inject(irq, &vector)) {
         return;
     }
-    v86_do_int(frame, vector,
-               V86I_EIP, V86I_CS, V86I_EFLAGS, V86I_ESP, V86I_SS);
+    if (!v86_do_int(frame, vector,
+                    V86I_EIP, V86I_CS, V86I_EFLAGS, V86I_ESP, V86I_SS)) {
+        /* ゲストスタックが不正。IRQ スタブの中なのでここでは畳めない。
+         * 脱出要求を立てて、タイマ/キーボードスタブの判定経路で畳ませる。 */
+        v86_exit_reason = V86_EXIT_FAULT;
+        v86_exit_request = 1;
+        return;
+    }
     v86_irq_n++;
 }
 
-void v86_inject_int(u32 *frame, u32 vector)
+/* 戻り値 1 = 成功 / 0 = ゲストスタック不正 (呼び出し元でセッションを畳む) */
+int v86_inject_int(u32 *frame, u32 vector)
 {
-    v86_do_int(frame, vector,
-               V86F_EIP, V86F_CS, V86F_EFLAGS, V86F_ESP, V86F_SS);
+    return v86_do_int(frame, vector,
+                      V86F_EIP, V86F_CS, V86F_EFLAGS, V86F_ESP, V86F_SS);
 }
 
 /* キーボード ISR から。脱出ホットキーを受けたことを記録する。
@@ -380,6 +430,13 @@ int v86_tick_and_check_timeout(void)
 {
     if (!v86_active || v86_tick_limit == 0) {
         return 0;
+    }
+    /* 割り込み反射の失敗 (ゲストスタック不正) などで脱出要求が立って
+     * いたら、タイマ経路でもセッションを畳む。ホットキー以外の要求は
+     * キーボード IRQ が来ない限り放置されてしまうため。 */
+    if (v86_exit_request) {
+        v86_exit_request = 0;
+        return 1;
     }
     /* 生きているタイマは「ゲストが暴走していない」ことの証明。
      * #GP ウォッチドッグの budget をここで戻す。 */
