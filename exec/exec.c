@@ -35,6 +35,19 @@ void exec_init(void) {
 /* コード領域のページ数 (1MB / 4KB = 256ページ) — pgalloc_mark_used 用 */
 #define EXEC_CODE_PAGES  ((MEM_EXEC_MAX_SIZE + PAGE_SIZE - 1) / PAGE_SIZE)
 
+/* 動的確保リザーブ (1MB)。
+ *
+ * 子プロセスの空間はコード+ヒープ+スタックで pgalloc の管理域
+ * (0x400000〜mem_end) をほぼ使い切る。かつてはコード 1MB しか
+ * pgalloc_mark_used していなかったため、子の実行中に v86_mem_setup() の
+ * pgalloc_alloc_n(160) が「空いている」ヒープ領域 0x500000〜 を確保して
+ * 636KB を memset(0) し、起動元プログラムのヒープを破壊していた。
+ *
+ * 対策: 子の exec ヒープをこのぶんだけ縮め、ヒープ末尾とスタックガードの
+ * 間に pgalloc 専用の穴を残す。V86 バッキング RAM (160 ページ = 640KB
+ * 連続) はここから取れる。 */
+#define EXEC_DYN_RESERVE  (256UL * PAGE_SIZE)
+
 /* ======================================================================== */
 /*  ExecContext — ネスト階層ごとのコンテキスト保存構造体                     */
 /*                                                                          */
@@ -63,6 +76,34 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 
 extern int exec_setjmp(u32 *buf);
 extern void exec_longjmp(u32 *buf);
+
+/* ======================================================================== */
+/*  exec_child_claim — 子プロセスが占有する物理ページ範囲を求める            */
+/*                                                                          */
+/*  範囲 A: コード + guard_a + exec ヒープ (動的確保リザーブの手前まで)      */
+/*  範囲 B: guard_b + スタック (mem_end まで)                               */
+/*  A と B の間の穴 (EXEC_DYN_RESERVE) は pgalloc の動的確保用に残す。       */
+/*                                                                          */
+/*  mark (exec_run) と free (setjmp 復帰) の双方から同じ式で計算する。       */
+/*  グローバル (sys_mem_kb) と定数だけから求めるのは、setjmp 後に書き換わる  */
+/*  ローカル変数を longjmp 復帰側で参照しないため。                          */
+/* ======================================================================== */
+static void exec_child_claim(u32 *a_start, int *a_pages,
+                             u32 *b_start, int *b_pages)
+{
+    u32 mem_end = sys_mem_kb * 1024;
+    u32 heap_base = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE + PAGE_SIZE;
+    u32 guard_b = mem_end - MEM_EXEC_STACK_SIZE - PAGE_SIZE;
+    u32 a_end = guard_b;
+
+    if (guard_b > heap_base && (guard_b - heap_base) > EXEC_DYN_RESERVE * 2) {
+        a_end = guard_b - EXEC_DYN_RESERVE;
+    }
+    *a_start = MEM_EXEC_LOAD_ADDR;
+    *a_pages = (int)((a_end - MEM_EXEC_LOAD_ADDR) / PAGE_SIZE);
+    *b_start = guard_b;
+    *b_pages = (int)((mem_end - guard_b) / PAGE_SIZE);
+}
 
 /* ======================================================================== */
 /*  exec_exit — 現在の実行階層を終了し、親のsetjmp復帰ポイントへ戻る        */
@@ -205,6 +246,10 @@ int exec_run(const char *cmdline)
         guard_a   = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE;
         exec_heap_base = guard_a + PAGE_SIZE;
         exec_heap_size = guard_b - exec_heap_base;
+        /* ヒープ末尾に動的確保リザーブの穴を空ける (上のコメント参照) */
+        if (exec_heap_size > EXEC_DYN_RESERVE * 2) {
+            exec_heap_size -= EXEC_DYN_RESERVE;
+        }
     }
 
     file_buf  = (u8 *)load_base;
@@ -276,8 +321,15 @@ int exec_run(const char *cmdline)
 
     /* コードセクションの配置 + BSS ゼロクリア */
     if (!is_shell) {
-        /* 子プロセスの物理ページを予約 (アイデンティティマッピング) */
-        pgalloc_mark_used(MEM_EXEC_LOAD_ADDR, EXEC_CODE_PAGES);
+        /* 子プロセスが使う全域 (コード+ヒープ+スタック) を予約する。
+         * コード 1MB しか予約しないと、実行中の動的確保 (V86 バッキング等)
+         * がヒープ領域を「空き」と誤認して確保・ゼロクリアしてしまう。
+         * マークは冪等なのでネスト exec でもそのまま呼んでよい。 */
+        u32 ca_start, cb_start;
+        int ca_pages, cb_pages;
+        exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
+        pgalloc_mark_used(ca_start, ca_pages);
+        pgalloc_mark_used(cb_start, cb_pages);
     }
 
     {
@@ -341,6 +393,19 @@ int exec_run(const char *cmdline)
         /* 子プロセスのヒープリセット */
         if (ctx->exec_heap_base != 0) {
             exec_heap_reset();
+        }
+
+        /* 子プロセス空間の物理ページ予約を解放する。
+         * ネスト exec (親も子プロセス) の場合は領域がまだ使用中なので、
+         * シェル (Level 1) まで戻ったときだけ解放する。
+         * 動的確保リザーブの穴は最初から予約していないので、そこに
+         * 生きている確保 (V86 バッキング等) を巻き込むことはない。 */
+        if (!is_shell && exec_nest_level == 1) {
+            u32 ca_start, cb_start;
+            int ca_pages, cb_pages;
+            exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
+            pgalloc_free_n(ca_start, ca_pages);
+            pgalloc_free_n(cb_start, cb_pages);
         }
 
         /* 親のヒープ/sbrk状態を復元 */

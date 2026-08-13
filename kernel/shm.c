@@ -16,6 +16,7 @@
 
 #include "shm.h"
 #include "paging.h"
+#include "kstring.h"
 
 /* ブロック管理テーブル */
 static u8 shm_state[SHM_BLOCK_COUNT]; /* 各ブロックの状態 */
@@ -99,6 +100,10 @@ void *shm_alloc(int block_count)
                 shm_state[start + i] = SHM_USED;
             }
             shm_block_span[start] = block_count;
+            /* 前のプログラムの IPC データを次のプログラムに
+             * 見せないよう、確保時に必ずゼロクリアする */
+            kmemset((void *)block_to_addr(start), 0,
+                    (u32)block_count * SHM_BLOCK_SIZE);
             return (void *)block_to_addr(start);
         }
     }
