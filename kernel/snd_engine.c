@@ -33,9 +33,13 @@ static const u16 ssg_period_base[12] = {
     676,  638,  602,  568,  536,  506
 };
 
-/* チャンネル借用状態 */
+/* チャンネル借用状態
+ *
+ * ISR (snd_tick) と通常コンテキスト (snd_bgm_play 等) の双方が
+ * 読み書きするフラグ類には volatile を付ける。状態遷移そのものは
+ * 公開 API 側の irq_save/irq_restore で直列化する。 */
 typedef struct {
-    int  borrowed;           /* 1 = SEが借用中 */
+    volatile int  borrowed;  /* 1 = SEが借用中 */
     u8   saved_tone;         /* 保存したBGM音色番号 */
     u8   saved_note;         /* 保存したBGMノート番号 */
     int  saved_was_sounding; /* 借用時にBGMが鳴っていたか */
@@ -43,13 +47,13 @@ typedef struct {
 
 /* FM SE スロット */
 typedef struct {
-    int  active;
+    volatile int  active;
     u32  end_tick;
 } SndFmSE;
 
 /* SSG SE スロット */
 typedef struct {
-    int  active;
+    volatile int  active;
     u32  end_tick;
     u8   ssg_vol;
     u8   ssg_decay;
@@ -59,7 +63,7 @@ typedef struct {
 typedef struct {
     SndNote notes[SND_MAX_NOTES];
     int     num_notes;
-    int     playing;
+    volatile int playing;
     int     pos;
     u32     next_tick;
     int     loop_pos;        /* ループ開始位置 (-1=なし) */
@@ -84,8 +88,8 @@ typedef struct {
     SndBorrowState  fm_borrow;
     SndBorrowState  ssg_borrow;
     SndSE_Def       se_table[SND_SE_MAX];
-    int             master_enable;
-    int             bgm_persist;     /* 1=exec_exit時にBGMを停止しない */
+    volatile int    master_enable;
+    volatile int    bgm_persist;     /* 1=exec_exit時にBGMを停止しない */
 } SndEngine;
 
 static SndEngine g_snd;
@@ -629,20 +633,21 @@ void snd_bgm_play(const char *mml)
 {
     int loop_pos = -1;
     int num;
-    int len;
+    unsigned int flags;
 
-    /* 再生中なら停止 */
-    if (g_snd.bgm.playing) {
-        snd_bgm_stop();
-    }
+    /* 再生中なら停止。以降 playing=0 なので ISR は bgm を触らない */
+    snd_bgm_stop();
 
     /* 先頭のクォートをスキップ */
     if (*mml == '"') mml++;
 
-    /* MML をパースしてノート配列に変換 */
+    /* MML をパースしてノート配列に変換 (playing=0 のためロック不要) */
     num = snd_mml_parse(mml, g_snd.bgm.notes, SND_MAX_NOTES, &loop_pos);
 
-    /* 末尾のクォート分をチェック (パーサ内の ']' 処理で対応済み) */
+    /* 状態のコミットと最初の発音は ISR (snd_tick) と競合させない。
+     * playing=1 を立ててから OPN 初期化が終わるまでの間に snd_bgm_tick が
+     * 走ると、クリア途中のレジスタへ発音してしまう。 */
+    flags = irq_save();
 
     g_snd.bgm.num_notes = num;
     g_snd.bgm.pos = 0;
@@ -655,10 +660,13 @@ void snd_bgm_play(const char *mml)
 
     /* 最初のノートを即座に発音開始 */
     snd_bgm_start_note(&g_snd.bgm);
+
+    irq_restore(flags);
 }
 
 void snd_bgm_stop(void)
 {
+    unsigned int flags = irq_save();
     g_snd.bgm.playing = 0;
     g_snd.bgm_persist = 0;
     g_snd.fm_borrow.borrowed = 0;
@@ -667,6 +675,7 @@ void snd_bgm_stop(void)
     g_snd.ssg_se.active = 0;
     fm_all_off();
     ssg_all_off();
+    irq_restore(flags);
 }
 
 int snd_bgm_is_playing(void)
@@ -677,36 +686,45 @@ int snd_bgm_is_playing(void)
 void snd_se_play(int se_id)
 {
     SndSE_Def *def;
+    unsigned int flags;
     if (se_id < 0 || se_id >= SND_SE_MAX) return;
     if (!g_snd.master_enable) return;
 
     def = &g_snd.se_table[se_id];
     if (def->duration == 0) return;  /* 未定義 */
 
+    /* 借用状態の保存〜発音までを snd_tick の返却処理と競合させない */
+    flags = irq_save();
     if (def->use_fm) {
         snd_fm_se_start(def->tone_num, def->note, def->duration);
     } else {
         snd_ssg_se_start(def->ssg_period, def->ssg_vol,
                          def->ssg_decay, def->duration);
     }
+    irq_restore(flags);
 }
 
 void snd_se_play_raw(int note, int duration_ticks, int tone)
 {
+    unsigned int flags;
     if (!g_snd.master_enable) return;
     if (duration_ticks < 1) duration_ticks = 1;
     if (duration_ticks > 255) duration_ticks = 255;
 
+    flags = irq_save();
     snd_fm_se_start(tone, note, duration_ticks);
+    irq_restore(flags);
 }
 
 void snd_set_master(int enable)
 {
+    unsigned int flags = irq_save();
     g_snd.master_enable = enable;
     if (!enable) {
         fm_all_off();
         ssg_all_off();
     }
+    irq_restore(flags);
 }
 
 void snd_cleanup(void)

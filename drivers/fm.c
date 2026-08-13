@@ -14,15 +14,35 @@
 /*  OPN低レベルI/O — snddrv/src/opn.c 移植                                 */
 /* ======================================================================== */
 
+/* BUSY 待ちの上限。1 周 ≈ 1µs (inp) なので 10000 回 ≈ 10ms。
+ * OPN の BUSY は通常数µs で落ちる。落ちないのは音源が居ない/固まって
+ * いる場合で、無期限スピンだと ISR (snd_tick) ごとカーネルがハングする。 */
+#define OPN_BUSY_TIMEOUT  10000UL
+
 /* OPNレジスタ書込み
  * PC9800Bible推奨手順:
  * 1. BUSYフラグ確認
  * 2. アドレス送信 + ウェイト6回
- * 3. データ送信 + ウェイト20回 */
+ * 3. データ送信 + ウェイト20回
+ *
+ * アドレスラッチ→データ送信の 2 段階なので、途中で割り込まれて別の
+ * opn_write が走るとレジスタ番号が化ける。通常コンテキストと ISR
+ * (snd_tick) の両方から呼ばれるため、全体を irq_save で保護する。 */
 void opn_write(uchar reg, uchar val)
 {
-    /* BUSY待ち */
-    while (inp(OPN_STATUS) & OPN_BUSY);
+    unsigned int flags;
+    u32 guard;
+
+    flags = irq_save();
+
+    /* BUSY待ち (タイムアウト付き) */
+    guard = OPN_BUSY_TIMEOUT;
+    while ((inp(OPN_STATUS) & OPN_BUSY) && --guard != 0);
+    if (guard == 0) {
+        /* 音源が応答しない。書いても捨てられるだけなので諦める */
+        irq_restore(flags);
+        return;
+    }
 
     /* アドレス送信 */
     outp(OPN_ADDR, reg);
@@ -40,6 +60,8 @@ void opn_write(uchar reg, uchar val)
     io_wait(); io_wait(); io_wait(); io_wait();
     io_wait(); io_wait(); io_wait(); io_wait();
     io_wait(); io_wait(); io_wait(); io_wait();
+
+    irq_restore(flags);
 }
 
 /* OPN初期化 — snddrv/src/opn.c opn_init() 移植 */
