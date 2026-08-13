@@ -27,6 +27,8 @@ static int path_slen(const char *s)
 static void path_scpy(char *dst, const char *src, int max)
 {
     int i;
+    /* max<=0 だと下の dst[0]=0 がバッファ外書き込みになる */
+    if (max <= 0) return;
     for (i = 0; i < max - 1 && src[i]; i++)
         dst[i] = src[i];
     dst[i] = 0;

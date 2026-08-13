@@ -338,7 +338,10 @@ int exec_run(const char *cmdline)
     }
 
     {
-        kmemcpy(load_addr, load_addr + code_off, text_sz);
+        /* ヘッダ分だけ前方へ詰めるオーバーラップコピー。kmemcpy は
+         * オーバーラップ時の動作を保証しない (rep movsd 実装の内部詳細に
+         * 依存していた) ので memmove を使う。 */
+        memmove(load_addr, load_addr + code_off, text_sz);
         kmemset(load_addr + text_sz, 0, bss_sz);
     }
 

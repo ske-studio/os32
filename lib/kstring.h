@@ -11,6 +11,8 @@
 #include "types.h"
 
 /* ======== メモリ操作 ======== */
+/* 注意: kmemcpy はオーバーラップ時の動作を保証しない (rep movsd 実装)。
+ * 重なる可能性がある範囲のコピーは memmove を使うこと。 */
 void *kmemcpy(void *dst, const void *src, u32 n);
 void *kmemset(void *dst, int val, u32 n);
 

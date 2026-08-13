@@ -50,6 +50,9 @@ void vfs_resolve_path(const char *input, char *output, int out_size)
     int num_parts = 0;
     int i, p, o;
 
+    /* out_size<=0 の u32 キャストは巨大長に化ける */
+    if (!output || out_size <= 0) return;
+
     if (!input || !input[0]) {
         kstrncpy(output, cwd, (u32)out_size);
         return;
@@ -174,7 +177,11 @@ static MountPoint *vfs_find_mount(const char *path, const char **out_relpath)
 VfsOps *vfs_route(const char *path, char *rel_out, int max_rel, void **ctx_out)
 {
     const char *rel_ptr;
-    MountPoint *mnt = vfs_find_mount(path, &rel_ptr);
+    MountPoint *mnt;
+
+    if (!rel_out || max_rel <= 0) return (VfsOps *)0;
+
+    mnt = vfs_find_mount(path, &rel_ptr);
     if (!mnt) {
         if (ctx_out) *ctx_out = (void *)0;
         return (VfsOps *)0;

@@ -107,7 +107,6 @@ utf8_decode_t utf8_decode(const u8 *src)
 {
     utf8_decode_t result;
     u8 b0 = src[0];
-    u32 w;
     u8 b1, b2, b3;
 
     if (b0 < 0x80) {
@@ -117,11 +116,12 @@ utf8_decode_t utf8_decode(const u8 *src)
         return result;
     }
 
-    /* マルチバイト: u32一括読み出しで全バイトを取得 */
-    w = *(const u32 *)src;
-    b1 = (u8)(w >> 8);
-    b2 = (u8)(w >> 16);
-    b3 = (u8)(w >> 24);
+    /* マルチバイト: バイト単位で読み、NUL で打ち切る。
+     * 以前の u32 一括読みは文字列末尾の不完全シーケンスで NUL 終端の
+     * 先 (次ページ) まで読みに行き、ページ境界で #PF になり得た。 */
+    b1 = src[1];
+    b2 = (b1 != 0) ? src[2] : 0;
+    b3 = (b2 != 0) ? src[3] : 0;
 
     if ((b0 & 0xE0) == 0xC0) {
         /* 2バイトシーケンス */

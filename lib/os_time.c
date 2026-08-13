@@ -17,7 +17,15 @@ os_time_t datetime_to_epoch(int year, int month, int day, int hour, int min, int
     u32 days = 0;
     os_time_t epoch;
     int leap;
-    
+
+    /* 範囲外の値をクランプする。RTC の読み損ないや壊れた FAT の
+     * タイムスタンプで負値が来ると、u32 演算に混ざって巨大な
+     * epoch に化ける (符号昇格)。1970 未満は epoch 0 相当に丸める。 */
+    if (year < 1970) year = 1970;
+    if (hour < 0) hour = 0; else if (hour > 23) hour = 23;
+    if (min  < 0) min  = 0; else if (min  > 59) min  = 59;
+    if (sec  < 0) sec  = 0; else if (sec  > 59) sec  = 59;
+
     /* 1970年からの経過日数を計算 */
     for (y = 1970; y < year; y++) {
         days += is_leap_year(y) ? 366 : 365;
