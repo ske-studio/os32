@@ -158,13 +158,14 @@ int serial_has_data(void)
 int serial_trygetchar(void)
 {
     int ch;
+    unsigned int flags;
     if (ser_count == 0) return -1;
 
-    _disable();
+    flags = irq_save();
     ch = ser_buf[ser_head];
     ser_head = (ser_head + 1) % SER_BUF_SIZE;
     ser_count--;
-    _enable();
+    irq_restore(flags);
 
     return ch;
 }
@@ -173,15 +174,16 @@ int serial_trygetchar(void)
 int serial_getchar(void)
 {
     int ch;
+    unsigned int flags;
     while (ser_count == 0) {
         __asm__ volatile("hlt");
     }
 
-    _disable();
+    flags = irq_save();
     ch = ser_buf[ser_head];
     ser_head = (ser_head + 1) % SER_BUF_SIZE;
     ser_count--;
-    _enable();
+    irq_restore(flags);
 
     return ch;
 }

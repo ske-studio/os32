@@ -128,13 +128,15 @@ int bus_mouse_init(void)
 /* ====================================================================== */
 void bus_mouse_get(i16 *dx, i16 *dy, u8 *buttons)
 {
+    unsigned int flags;
+
     /* 割り込み禁止区間で累積値を読取・リセット */
-    __asm__ volatile("cli");
+    flags = irq_save();
     *dx = bus_accum_dx;
     *dy = bus_accum_dy;
     bus_accum_dx = 0;
     bus_accum_dy = 0;
-    __asm__ volatile("sti");
+    irq_restore(flags);
 
     /* ボタン: 負論理→正論理変換 */
     *buttons = 0;

@@ -1,6 +1,7 @@
 #include "gfx_internal.h"
 #include "os32_kapi_shared.h"
 #include "cpu_calibrate.h"
+#include "io.h"
 
 static void _flush_dirty_queue(void);
 static void _merge_prev_dirty(void);
@@ -294,6 +295,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
 {
     int entry_idx, line;
     int has_dirty;
+    unsigned int flags;
 
     if (!table || table->count == 0) return;
 
@@ -310,7 +312,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
         }
         /* VSYNC待ち → パレット書き換えのみ */
         while ((_in(0x60) & 0x20) == 0) { }
-        __asm__ volatile("cli");
+        flags = irq_save();
         while (_in(GDC_STATUS_PORT) & 0x20) { }
         for (entry_idx = 0; entry_idx < table->count; entry_idx++) {
             GFX_RasterPalEntry *e = &table->entries[entry_idx];
@@ -320,7 +322,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
             _out(PAL_B_PORT, e->b & 0x0F);
             _raster_delay();
         }
-        __asm__ volatile("sti");
+        irq_restore(flags);
         return;
     }
 
@@ -330,7 +332,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     while ((_in(0x60) & 0x20) == 0) { }
 
     /* 割り込み禁止 (全ラスタ期間を通じて安定させる) */
-    __asm__ volatile("cli");
+    flags = irq_save();
 
     /* VSYNC終了を待つ → アクティブ表示領域が始まる */
     while (_in(GDC_STATUS_PORT) & 0x20) { }
@@ -366,7 +368,7 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     }
 
     /* 割り込み復帰 */
-    __asm__ volatile("sti");
+    irq_restore(flags);
 
     dirty_queue.count = 0;
 }

@@ -249,6 +249,7 @@ int kbd_has_key(void)
 int kbd_trygetchar(void)
 {
     u16 entry;
+    unsigned int flags;
     
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -259,11 +260,11 @@ int kbd_trygetchar(void)
     
     if (kbd_count == 0) return -1;
 
-    _disable();
+    flags = irq_save();
     entry = kbd_buf[kbd_head];
     kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
     kbd_count--;
-    _enable();
+    irq_restore(flags);
 
     return (int)(entry & 0xFF);
 }
@@ -271,6 +272,7 @@ int kbd_trygetchar(void)
 int kbd_getchar(void)
 {
     u16 entry;
+    unsigned int flags;
     u32 timeout_ticks;
 
     /* rshellモード: KBD_TIMEOUT_TICKS タイムアウト (デフォルト300 ticks @ 100Hz) */
@@ -282,11 +284,11 @@ int kbd_getchar(void)
         for (;;) {
             /* キーボードバッファ */
             if (kbd_count > 0) {
-                _disable();
+                flags = irq_save();
                 entry = kbd_buf[kbd_head];
                 kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
                 kbd_count--;
-                _enable();
+                irq_restore(flags);
                 return (int)(entry & 0xFF);
             }
 
@@ -312,15 +314,16 @@ int kbd_getchar(void)
 int kbd_getkey(void)
 {
     u16 entry;
+    unsigned int flags;
     while (kbd_count == 0) {
         __asm__ volatile("hlt");
     }
 
-    _disable();
+    flags = irq_save();
     entry = kbd_buf[kbd_head];
     kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
     kbd_count--;
-    _enable();
+    irq_restore(flags);
 
     return (int)entry;
 }
@@ -329,6 +332,7 @@ int kbd_getkey(void)
 int kbd_trygetkey(void)
 {
     u16 entry;
+    unsigned int flags;
 
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -339,11 +343,11 @@ int kbd_trygetkey(void)
 
     if (kbd_count == 0) return -1;
 
-    _disable();
+    flags = irq_save();
     entry = kbd_buf[kbd_head];
     kbd_head = (kbd_head + 1) % KBD_BUF_SIZE;
     kbd_count--;
-    _enable();
+    irq_restore(flags);
 
     return (int)entry;  /* 上位=キーコード, 下位=ASCII */
 }
