@@ -36,6 +36,12 @@ int   strcmp(const char *a, const char *b);
 int   strncmp(const char *a, const char *b, u32 n);
 int   memcmp(const void *a, const void *b, u32 n);
 void *memmove(void *dst, const void *src, u32 n);
+
+/* kstrncpy/kstrncat の n は「コピー文字数」ではなく**バッファ全体サイズ**
+ * (BSD strlcpy/strlcat と同じセマンティクス)。libc の strncpy/strncat とは
+ * 違うことを名前で明示するため、こちらのエイリアスを推奨する。 */
+#define kstrlcpy kstrncpy
+#define kstrlcat kstrncat
 char *strchr(const char *s, int c);
 u32   strcspn(const char *s, const char *reject);
 u32   strspn(const char *s, const char *accept);

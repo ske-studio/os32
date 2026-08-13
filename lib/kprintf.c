@@ -24,11 +24,11 @@
 #include "kprintf.h"
 #include "console.h"
 
-/* ======== 内部: 数値→文字列変換 ======== */
+/* ======== 数値→文字列変換 (kprintf.h で公開) ======== */
 
 /* 符号なし10進を文字列バッファに変換 (末尾NUL付き) */
 /* 戻り値: 桁数 */
-static int utoa_dec(u32 val, char *buf, int bufsz)
+int kutoa_dec(u32 val, char *buf, int bufsz)
 {
     int i = bufsz - 1;
     int len;
@@ -58,7 +58,7 @@ static int utoa_dec(u32 val, char *buf, int bufsz)
 }
 
 /* 符号なし16進を文字列バッファに変換 */
-static int utoa_hex(u32 val, char *buf, int bufsz, int upper)
+int kutoa_hex(u32 val, char *buf, int bufsz, int upper)
 {
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     int i = bufsz - 1;
@@ -174,7 +174,7 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
                     } else {
                         uval = (u32)val;
                     }
-                    len = utoa_dec(uval, numbuf + 1, 14);
+                    len = kutoa_dec(uval, numbuf + 1, 14);
                     if (neg) {
                         /* 符号の処理 */
                         if (pad_char == '0' && !left_align) {
@@ -195,7 +195,7 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
                 }
                 case 'u': {
                     u32 val = args[ai++];
-                    len = utoa_dec(val, numbuf, 15);
+                    len = kutoa_dec(val, numbuf, 15);
                     emit_padded(numbuf, len, width,
                                 pad_char, left_align, attr);
                     break;
@@ -204,7 +204,7 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
                 case 'X': {
                     u32 val = args[ai++];
                     int upper = (*p == 'X');
-                    len = utoa_hex(val, numbuf, 15, upper);
+                    len = kutoa_hex(val, numbuf, 15, upper);
                     emit_padded(numbuf, len, width,
                                 pad_char, left_align, attr);
                     break;

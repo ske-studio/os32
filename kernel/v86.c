@@ -19,8 +19,7 @@
 #include "io.h"
 
 /* setjmp/longjmp (kernel/setjmp.asm) — セッションからの脱出に使う */
-extern int  exec_setjmp(u32 *buf);
-extern void exec_longjmp(u32 *buf, int val);
+#include "ksetjmp.h"
 
 static u32 v86_jmpbuf[6];
 static volatile int v86_active = 0;
@@ -454,7 +453,7 @@ int v86_tick_and_check_timeout(void)
 void v86_longjmp_out(void)
 {
     v86_active = 0;
-    exec_longjmp(v86_jmpbuf, 1);
+    exec_longjmp(v86_jmpbuf);
 }
 
 /* ======================================================================== */

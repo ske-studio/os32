@@ -74,8 +74,7 @@ volatile int exec_nest_level = 0;
 volatile int exec_exit_status = EXEC_SUCCESS;
 static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 
-extern int exec_setjmp(u32 *buf);
-extern void exec_longjmp(u32 *buf);
+#include "ksetjmp.h"
 
 /* ======================================================================== */
 /*  exec_child_claim — 子プロセスが占有する物理ページ範囲を求める            */

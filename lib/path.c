@@ -3,6 +3,7 @@
 /* ======================================================================== */
 
 #include "path.h"
+#include "kstring.h"
 
 /* ======== コールバック ======== */
 static PathDeviceValidator device_validator = (PathDeviceValidator)0;
@@ -17,21 +18,19 @@ static char cur_drive[PATH_DRIVE_LEN] = "fdd0";
 static char cur_cwd[PATH_MAX_LEN]     = "/";
 
 /* ======== ユーティリティ ======== */
+/* ローカル再実装だった path_slen/path_scpy は kstring に統一 (SR5)。
+ * path_scpy は kstrlcpy (n=バッファ全体サイズ, NUL 終端保証) の
+ * ガード付きラッパー。 */
 static int path_slen(const char *s)
 {
-    int n = 0;
-    while (*s++) n++;
-    return n;
+    return (int)kstrlen(s);
 }
 
 static void path_scpy(char *dst, const char *src, int max)
 {
-    int i;
-    /* max<=0 だと下の dst[0]=0 がバッファ外書き込みになる */
+    /* max<=0 の u32 キャストは巨大長に化けるので先に弾く */
     if (max <= 0) return;
-    for (i = 0; i < max - 1 && src[i]; i++)
-        dst[i] = src[i];
-    dst[i] = 0;
+    kstrlcpy(dst, src, (u32)max);
 }
 
 /* ======== API ======== */

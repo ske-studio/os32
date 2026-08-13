@@ -22,11 +22,10 @@
 /*  PIC (8259相当) — PC9800Bible §1-4, §4-3 #1/#2                         */
 /* ====================================================================== */
 /*  マスタ: IRQ0-7, スレーブ: IRQ8-15 (カスケード IRQ7)                     */
-#define PIC_MASTER_CMD      0x00    /* マスタPIC コマンド/ステータス */
-#define PIC_MASTER_DATA     0x02    /* マスタPIC データ (IMR) */
-#define PIC_SLAVE_CMD       0x08    /* スレーブPIC コマンド/ステータス */
-#define PIC_SLAVE_DATA      0x0A    /* スレーブPIC データ (IMR) */
-#define PIC_EOI             0x20    /* EOI (End of Interrupt) */
+/*  ポート定数は kernel/idt.h (PIC1_CMD, PIC1_DATA, PIC2_xxx, OCW2_EOI)     */
+/*  が正。                                                                  */
+/*  かつてはここに別名の重複定義があり 3 か所 (idt.h/pc98.h/isr_stub.asm)   */
+/*  で食い違うリスクがあった。C 側は idt.h を使うこと。                     */
 
 
 /* ====================================================================== */

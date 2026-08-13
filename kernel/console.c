@@ -11,6 +11,7 @@
 #include "tvram.h"
 #include "io.h"
 #include "pc98.h"
+#include "kprintf.h"
 
 /* V86 セッション中の画面描画抑止 (kernel/v86.c)。
  * セッション中は低位 640KB がゲスト用バッキング RAM に差し替わっており、
@@ -196,22 +197,12 @@ void shell_print(const char *str, u8 color)
     }
 }
 
-/* 10進表示 */
+/* 10進表示 (変換は kprintf.h の kutoa_dec に統一) */
 void shell_print_dec(u32 val, u8 color)
 {
     char buf[12];
-    int i = 10;
-    buf[11] = '\0';
-    if (val == 0) {
-        shell_print("0", color);
-        return;
-    }
-    while (val > 0 && i >= 0) {
-        buf[i] = '0' + (val % 10);
-        val /= 10;
-        i--;
-    }
-    shell_print(&buf[i + 1], color);
+    kutoa_dec(val, buf, (int)sizeof(buf));
+    shell_print(buf, color);
 }
 
 /* 32ビット16進表示 */

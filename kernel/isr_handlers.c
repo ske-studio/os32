@@ -24,6 +24,9 @@ static void sputs(const char *str)
     serial_puts_polled(str);
 }
 
+/* 注: この下の 16 進変換 (sput_hex32/tvram_put_hex32) は kutoa_hex に
+ * 統一しない。例外ハンドラはコンソール状態が壊れていても動く必要があり、
+ * 固定 8 桁で TVRAM/シリアルへ直接書く自己完結実装を意図的に残している。 */
 static void sput_hex32(u32 val)
 {
     static const char hex[] = "0123456789ABCDEF";
