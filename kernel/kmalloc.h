@@ -10,6 +10,22 @@
 
 #include "types.h"
 
+/* ======== ヒープ記述子 (共通アロケータ実装) ======== */
+/* kmalloc (カーネルヒープ) と exec_heap (プログラムヒープ) は
+ * この記述子を取る kheap_* 共通実装の 2 インスタンス。 */
+typedef struct {
+    u8         *base;   /* ヒープ先頭 (0 = 未初期化/空) */
+    u32         size;   /* ヒープ総サイズ */
+    u32         used;   /* 使用中バイト数 (ヘッダ込み) */
+    const char *name;   /* 診断表示用の名前 */
+} KHeap;
+
+void  kheap_init(KHeap *h, void *base, u32 size, const char *name);
+void *kheap_alloc(KHeap *h, u32 size);
+void  kheap_free(KHeap *h, void *ptr);
+void  kheap_reset(KHeap *h);
+u32   kheap_block_size(KHeap *h, void *ptr);
+
 /* ======== API ======== */
 
 /* ヒープ初期化 (起動時に1回だけ呼ぶ) */

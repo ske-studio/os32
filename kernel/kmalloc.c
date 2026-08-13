@@ -1,8 +1,13 @@
 /* ======================================================================== */
-/*  KMALLOC.C — カーネルメモリアロケータ                                    */
+/*  KMALLOC.C — ヒープアロケータ共通実装 + カーネルヒープ                    */
 /*                                                                          */
-/*  ファーストフィット方式の簡易アロケータ                                   */
+/*  Best-fit 方式の簡易アロケータ                                            */
 /*  連結リストでフリーブロックを管理、隣接ブロック結合付き                    */
+/*                                                                          */
+/*  実装はヒープ記述子 (KHeap) をパラメータに取る kheap_* 共通関数群で、      */
+/*  カーネルヒープ (kmalloc) と exec ヒープ (exec/exec_heap.c) は同じ         */
+/*  実装の 2 インスタンス。かつては exec_heap.c がこのファイルのクローンで、  */
+/*  バグ修正が二重管理になっていた (R1)。                                    */
 /*                                                                          */
 /*  ブロックヘッダ構造 (8バイト):                                            */
 /*    u32 size    — データ部サイズ (ヘッダ含まず)                            */
@@ -25,41 +30,36 @@ typedef struct BlkHdr {
     u32 magic;     /* マジックナンバー */
 } BlkHdr;
 
-/* ======== ヒープ管理 ======== */
-static u8  *heap_base = (u8 *)0;
-static u32  heap_sz   = 0;
-static u32  heap_used = 0;
+/* ======================================================================== */
+/*  共通実装 (kheap_*)                                                      */
+/* ======================================================================== */
 
-/* ======================================================================== */
-/*  初期化                                                                  */
-/* ======================================================================== */
-void kmalloc_init(void *heap_start, u32 heap_size)
+void kheap_init(KHeap *h, void *base, u32 size, const char *name)
 {
     BlkHdr *first;
 
+    h->name = name;
+
     /* ヘッダすら入らないサイズなら空ヒープとして初期化する
-     * (first->size = heap_size - BLK_HDR_SIZE のアンダーフロー防止) */
-    if (heap_size < BLK_HDR_SIZE + BLK_ALIGN) {
-        heap_base = (u8 *)0;
-        heap_sz   = 0;
-        heap_used = 0;
+     * (first->size = size - BLK_HDR_SIZE のアンダーフロー防止) */
+    if (size < BLK_HDR_SIZE + BLK_ALIGN) {
+        h->base = (u8 *)0;
+        h->size = 0;
+        h->used = 0;
         return;
     }
 
-    heap_base = (u8 *)heap_start;
-    heap_sz   = heap_size;
-    heap_used = 0;
+    h->base = (u8 *)base;
+    h->size = size;
+    h->used = 0;
 
     /* ヒープ全体を1つのフリーブロックにする */
-    first = (BlkHdr *)heap_base;
-    first->size  = heap_size - BLK_HDR_SIZE;
+    first = (BlkHdr *)h->base;
+    first->size  = size - BLK_HDR_SIZE;
     first->magic = BLK_MAGIC_FREE;
 }
 
-/* ======================================================================== */
-/*  kmalloc — メモリ確保                                                    */
-/* ======================================================================== */
-void *kmalloc(u32 size)
+void *kheap_alloc(KHeap *h, u32 size)
 {
     u8 *p;
     BlkHdr *blk;
@@ -67,23 +67,23 @@ void *kmalloc(u32 size)
     u8 *best_p = (u8 *)0;
     u32 best_size = 0xFFFFFFFF;
 
-    /* size > heap_sz の除外はアライン時の整数オーバーフロー
+    /* size > h->size の除外はアライン時の整数オーバーフロー
      * (0xFFFFFFFD〜 が 0 に化ける) も同時に防ぐ */
-    if (size == 0 || size > heap_sz) return (void *)0;
+    if (size == 0 || size > h->size) return (void *)0;
 
     /* 4バイトアライメント */
     size = (size + BLK_ALIGN - 1) & ~(BLK_ALIGN - 1);
 
     /* Best-fit 探索 */
-    p = heap_base;
-    while (p + BLK_HDR_SIZE <= heap_base + heap_sz) {
+    p = h->base;
+    while (p + BLK_HDR_SIZE <= h->base + h->size) {
         blk = (BlkHdr *)p;
 
         /* 壊れたブロック検出 (マジック不正、またはサイズがヒープ外を指す) */
         if (blk->magic != BLK_MAGIC_FREE && blk->magic != BLK_MAGIC_USED) {
             return (void *)0;   /* ヒープ破損 */
         }
-        if (blk->size > (u32)(heap_base + heap_sz - p) - BLK_HDR_SIZE) {
+        if (blk->size > (u32)(h->base + h->size - p) - BLK_HDR_SIZE) {
             return (void *)0;   /* ヒープ破損 */
         }
 
@@ -121,11 +121,105 @@ void *kmalloc(u32 size)
         }
 
         blk->magic = BLK_MAGIC_USED;
-        heap_used += blk->size + BLK_HDR_SIZE;
+        h->used += blk->size + BLK_HDR_SIZE;
         return (void *)(p + BLK_HDR_SIZE);
     }
 
     return (void *)0;   /* メモリ不足 */
+}
+
+void kheap_free(KHeap *h, void *ptr)
+{
+    BlkHdr *blk;
+    u8 *p;
+
+    if (ptr == (void *)0) return;
+
+    /* ポインタ検証: ヒープ範囲外・アライメント不正はヘッダを読む前に弾く。
+     * 検証せずに ptr-8 を読むと、任意アドレスの free でヒープ管理が壊れる */
+    if ((u8 *)ptr < h->base + BLK_HDR_SIZE ||
+        (u8 *)ptr >= h->base + h->size ||
+        (((u32)ptr) & (BLK_ALIGN - 1)) != 0) {
+        kprintf(0xC1, "[%s] invalid free %x\n", h->name, (u32)ptr);
+        return;
+    }
+
+    blk = (BlkHdr *)((u8 *)ptr - BLK_HDR_SIZE);
+
+    /* マジック検証 (double free / ヘッダ破壊の検出) */
+    if (blk->magic != BLK_MAGIC_USED) {
+        kprintf(0xC1, "[%s] bad magic %x at %x (double free?)\n",
+                h->name, blk->magic, (u32)ptr);
+        return;
+    }
+
+    blk->magic = BLK_MAGIC_FREE;
+    h->used -= blk->size + BLK_HDR_SIZE;
+
+    /* 前方結合: ヒープを先頭から走査して隣接フリーブロックを結合 */
+    p = h->base;
+    while (p + BLK_HDR_SIZE <= h->base + h->size) {
+        BlkHdr *cur = (BlkHdr *)p;
+        u8 *next_p;
+
+        if (cur->magic != BLK_MAGIC_FREE && cur->magic != BLK_MAGIC_USED) {
+            break;  /* ヒープ破損 */
+        }
+        if (cur->size > (u32)(h->base + h->size - p) - BLK_HDR_SIZE) {
+            break;  /* ヒープ破損 */
+        }
+
+        next_p = p + BLK_HDR_SIZE + cur->size;
+
+        /* 隣接する2つのフリーブロックを結合 */
+        if (cur->magic == BLK_MAGIC_FREE &&
+            next_p + BLK_HDR_SIZE <= h->base + h->size) {
+            BlkHdr *next = (BlkHdr *)next_p;
+            if (next->magic == BLK_MAGIC_FREE) {
+                cur->size += BLK_HDR_SIZE + next->size;
+                continue;  /* 結合後、同じ位置から再チェック */
+            }
+        }
+
+        p = next_p;
+    }
+}
+
+void kheap_reset(KHeap *h)
+{
+    if (h->size > 0) {
+        BlkHdr *first = (BlkHdr *)h->base;
+        first->size  = h->size - BLK_HDR_SIZE;
+        first->magic = BLK_MAGIC_FREE;
+    }
+    h->used = 0;
+}
+
+u32 kheap_block_size(KHeap *h, void *ptr)
+{
+    BlkHdr *blk;
+    if (ptr == (void *)0) return 0;
+    if ((u8 *)ptr < h->base + BLK_HDR_SIZE ||
+        (u8 *)ptr >= h->base + h->size ||
+        (((u32)ptr) & (BLK_ALIGN - 1)) != 0) return 0;
+    blk = (BlkHdr *)((u8 *)ptr - BLK_HDR_SIZE);
+    if (blk->magic != BLK_MAGIC_USED) return 0;
+    return blk->size;
+}
+
+/* ======================================================================== */
+/*  カーネルヒープ インスタンス                                              */
+/* ======================================================================== */
+static KHeap kernel_heap;
+
+void kmalloc_init(void *heap_start, u32 heap_size)
+{
+    kheap_init(&kernel_heap, heap_start, heap_size, "kheap");
+}
+
+void *kmalloc(u32 size)
+{
+    return kheap_alloc(&kernel_heap, size);
 }
 
 /* ======================================================================== */
@@ -141,80 +235,14 @@ void *kzalloc(u32 size)
     return p;
 }
 
-/* ======================================================================== */
-/*  kfree — メモリ解放 + 隣接フリーブロック結合                              */
-/* ======================================================================== */
 void kfree(void *ptr)
 {
-    BlkHdr *blk;
-    u8 *p;
-
-    if (ptr == (void *)0) return;
-
-    /* ポインタ検証: ヒープ範囲外・アライメント不正はヘッダを読む前に弾く。
-     * 検証せずに ptr-8 を読むと、任意アドレスの kfree でヒープ管理が壊れる */
-    if ((u8 *)ptr < heap_base + BLK_HDR_SIZE ||
-        (u8 *)ptr >= heap_base + heap_sz ||
-        (((u32)ptr) & (BLK_ALIGN - 1)) != 0) {
-        kprintf(0xC1, "[kfree] invalid ptr %x\n", (u32)ptr);
-        return;
-    }
-
-    blk = (BlkHdr *)((u8 *)ptr - BLK_HDR_SIZE);
-
-    /* マジック検証 (double free / ヘッダ破壊の検出) */
-    if (blk->magic != BLK_MAGIC_USED) {
-        kprintf(0xC1, "[kfree] bad magic %x at %x (double free?)\n",
-                blk->magic, (u32)ptr);
-        return;
-    }
-
-    blk->magic = BLK_MAGIC_FREE;
-    heap_used -= blk->size + BLK_HDR_SIZE;
-
-    /* 前方結合: ヒープを先頭から走査して隣接フリーブロックを結合 */
-    p = heap_base;
-    while (p + BLK_HDR_SIZE <= heap_base + heap_sz) {
-        BlkHdr *cur = (BlkHdr *)p;
-        u8 *next_p;
-
-        if (cur->magic != BLK_MAGIC_FREE && cur->magic != BLK_MAGIC_USED) {
-            break;  /* ヒープ破損 */
-        }
-        if (cur->size > (u32)(heap_base + heap_sz - p) - BLK_HDR_SIZE) {
-            break;  /* ヒープ破損 */
-        }
-
-        next_p = p + BLK_HDR_SIZE + cur->size;
-
-        /* 隣接する2つのフリーブロックを結合 */
-        if (cur->magic == BLK_MAGIC_FREE &&
-            next_p + BLK_HDR_SIZE <= heap_base + heap_sz) {
-            BlkHdr *next = (BlkHdr *)next_p;
-            if (next->magic == BLK_MAGIC_FREE) {
-                cur->size += BLK_HDR_SIZE + next->size;
-                continue;  /* 結合後、同じ位置から再チェック */
-            }
-        }
-
-        p = next_p;
-    }
+    kheap_free(&kernel_heap, ptr);
 }
 
-/* ======================================================================== */
-/*  kmalloc_block_size — 確保済みブロックのデータ部サイズを取得               */
-/*  テスト・krealloc用。ptr が無効な場合は 0 を返す。                         */
-/* ======================================================================== */
 u32 kmalloc_block_size(void *ptr)
 {
-    BlkHdr *blk;
-    if (ptr == (void *)0) return 0;
-    if ((u8 *)ptr < heap_base + BLK_HDR_SIZE ||
-        (u8 *)ptr >= heap_base + heap_sz ||
-        (((u32)ptr) & (BLK_ALIGN - 1)) != 0) return 0;
-    blk = (BlkHdr *)((u8 *)ptr - BLK_HDR_SIZE);
-    if (blk->magic != BLK_MAGIC_USED) return 0;
-    return blk->size;
+    return kheap_block_size(&kernel_heap, ptr);
 }
 
 /* ======================================================================== */
@@ -251,9 +279,9 @@ void *krealloc(void *ptr, u32 new_size)
 /* ======================================================================== */
 /*  ヒープ情報                                                              */
 /* ======================================================================== */
-u32 kmalloc_total(void) { return heap_sz; }
-u32 kmalloc_used(void)  { return heap_used; }
-u32 kmalloc_free(void)  { return heap_sz - heap_used; }
+u32 kmalloc_total(void) { return kernel_heap.size; }
+u32 kmalloc_used(void)  { return kernel_heap.used; }
+u32 kmalloc_free(void)  { return kernel_heap.size - kernel_heap.used; }
 
 /* ======================================================================== */
 /*  libc互換ラッパー                                                         */
