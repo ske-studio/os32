@@ -286,12 +286,37 @@ static int try_exec(const char *bin_path, int argc, char **argv)
     s = bin_path;
     while (*s && p < limit_path) *p++ = *s++;
 
-    /* 引数を追加 */
+    /* 引数を追加。
+     * parse_args_and_glob が剥がしたクォートをここで復元する。
+     * 復元せずに空白区切りで再結合すると、exec_run 側の再トークナイズで
+     * 空白入り引数 (例: sndctl play "T120 O4 ...") がばらばらに割れる。 */
     for (i = 1; i < argc; i++) {
+        int need_quote = 0;
+        const char *q;
+
         if (p >= limit_args) break;
         *p++ = ' ';
+
         s = argv[i];
-        while (*s && p < limit_args) *p++ = *s++;
+        for (q = s; *q; q++) {
+            if (*q == ' ' || *q == '"' || *q == '\'' || *q == '\\') {
+                need_quote = 1;
+                break;
+            }
+        }
+        if (*s == '\0') need_quote = 1;   /* 空引数もクォートで保存 */
+
+        if (need_quote) {
+            if (p < limit_args) *p++ = '"';
+            /* 閉じクォート分の余裕を残してコピー。" と \ はエスケープ */
+            while (*s && p + 2 < limit_args) {
+                if (*s == '"' || *s == '\\') *p++ = '\\';
+                *p++ = *s++;
+            }
+            if (p < limit_args) *p++ = '"';
+        } else {
+            while (*s && p < limit_args) *p++ = *s++;
+        }
     }
     *p = '\0';
 
