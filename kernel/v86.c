@@ -24,9 +24,9 @@ extern void exec_longjmp(u32 *buf, int val);
 
 static u32 v86_jmpbuf[6];
 static volatile int v86_active = 0;
-static enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
+static volatile enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
 static volatile int v86_exit_request = 0;
-static u32 v86_gp_since_tick = 0;   /* タイマ tick ごとに 0 に戻る #GP 数 */
+static volatile u32 v86_gp_since_tick = 0;   /* タイマ tick ごとに 0 に戻る #GP 数 */
 
 /* 直近の #GP の観測値。
  *
@@ -314,7 +314,7 @@ int v86_gp_handler(u32 *frame)
 /*  (docs/tasks/v86v2/03_ys_profile.md §4)。                                */
 /* ======================================================================== */
 
-static u32 v86_irq_n = 0;
+static volatile u32 v86_irq_n = 0;
 
 /* セッションのタイムアウト。タイマ反射のたびに数え、上限を超えたら
  * セッションを畳む。
@@ -322,8 +322,8 @@ static u32 v86_irq_n = 0;
  * 注意: IOPL=3 ではゲストの CLI が実 IF を落とすため、ゲストが CLI した
  * まま暴走するとタイマ割り込み自体が来なくなり、この計測も止まる。
  * その場合の脱出手段は別途必要 (docs/tasks/v86v2/04_implementation_status.md §7)。 */
-static u32 v86_ticks = 0;
-static u32 v86_tick_limit = 0;
+static volatile u32 v86_ticks = 0;
+static volatile u32 v86_tick_limit = 0;
 
 u32 v86_irq_reflect_count(void) { return v86_irq_n; }
 int v86_is_active(void)         { return v86_active; }

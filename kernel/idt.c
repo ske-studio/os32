@@ -199,10 +199,14 @@ void pit_init(unsigned int hz)
 /* ======================================================================== */
 /*  IRQ個別マスク制御                                                       */
 /* ======================================================================== */
+/* IMR の read-modify-write は割り込みで分断されると、間に走った別の
+ * irq_enable/irq_disable の変更を書き戻しで巻き戻してしまう。
+ * 必ず irq_save で括る。 */
 void irq_enable(unsigned int irq)
 {
     u16 port;
     u8 mask;
+    unsigned int flags;
 
     if (irq < 8) {
         port = PIC1_DATA;
@@ -210,14 +214,17 @@ void irq_enable(unsigned int irq)
         port = PIC2_DATA;
         irq -= 8;
     }
+    flags = irq_save();
     mask = (u8)inp(port) & ~(1 << irq);
     outp(port, mask);
+    irq_restore(flags);
 }
 
 void irq_disable(unsigned int irq)
 {
     u16 port;
     u8 mask;
+    unsigned int flags;
 
     if (irq < 8) {
         port = PIC1_DATA;
@@ -225,8 +232,10 @@ void irq_disable(unsigned int irq)
         port = PIC2_DATA;
         irq -= 8;
     }
+    flags = irq_save();
     mask = (u8)inp(port) | (1 << irq);
     outp(port, mask);
+    irq_restore(flags);
 }
 
 /* ======================================================================== */

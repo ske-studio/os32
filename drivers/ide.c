@@ -11,6 +11,10 @@
 #include "pc98.h"
 #include "kprintf.h"
 
+/* 外部: irq_disable (kernel/idt.c で定義)。drivers/ は -Ikernel を
+ * 持たないため、kbd.c の irq_enable と同じ扱いでここに宣言する。 */
+extern void irq_disable(unsigned int irq);
+
 /* ドライブ検出フラグ (4ドライブ対応)
  * drive 0 = バンク0 Master (NP21/W IDE #0)
  * drive 1 = バンク0 Slave  (NP21/W IDE #1)
@@ -120,11 +124,9 @@ int ide_init(void)
     int bank, drv;
 
     /* PC-98スレーブPICでIRQ9をマスク。
-       IRQ9 = スレーブPIC bit1。未処理IRQによるシステム破壊を防止。 */
-    {
-        u8 mask = (u8)inp(PIC_SLAVE_DATA);
-        outp(PIC_SLAVE_DATA, mask | 0x02);  /* bit1 = IRQ9をマスク */
-    }
+       IRQ9 = スレーブPIC bit1。未処理IRQによるシステム破壊を防止。
+       手書きの IMR RMW は割り込みに分断されると危険なので共通 API を使う。 */
+    irq_disable(9);
 
     /* 全バンクの全ドライブをスキャン */
     for (bank = 0; bank < 2; bank++) {

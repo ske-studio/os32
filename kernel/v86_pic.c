@@ -15,8 +15,11 @@ struct pic {
     u8 read_isr;    /* OCW3 の RR/RIS。0=IRR を読む 1=ISR を読む */
 };
 
-static struct pic pic_m;
-static struct pic pic_s;
+/* #GP ハンドラ (ゲスト OUT) と IRQ スタブ (反射ゲート) の両方の割り込み
+ * 文脈から触られるため volatile。どちらも IF=0 で走るので直列化自体は
+ * ゲートが保証するが、コンパイラのキャッシュ/並べ替えはこれで防ぐ。 */
+static volatile struct pic pic_m;
+static volatile struct pic pic_s;
 
 /* 実測用。ゲストが何を書いたかは v86_iolog にも残るが、
  * 「最終的にどういう状態になったか」はこちらで見る。 */
@@ -31,7 +34,7 @@ int v86_pic_is_port(u16 port)
             port == V86_PIC_S_CMD  || port == V86_PIC_S_DATA);
 }
 
-static void pic_init_one(struct pic *p, u8 imr, u8 base)
+static void pic_init_one(volatile struct pic *p, u8 imr, u8 base)
 {
     /* 既定の IMR は**素の NP21/W で実測した値**。推測ではない。
      *
@@ -80,12 +83,12 @@ void v86_pic_set_imr(int slave, u8 imr)
 
 u32 v86_pic_state(int slave)
 {
-    const struct pic *p = slave ? &pic_s : &pic_m;
+    const volatile struct pic *p = slave ? &pic_s : &pic_m;
     return ((u32)p->isr << 16) | ((u32)p->irr << 8) | p->imr;
 }
 
 /* 最も優先度の高い (= ビット番号の小さい) セット済みビットを落とす。 */
-static void clear_highest(u8 *reg)
+static void clear_highest(volatile u8 *reg)
 {
     int i;
     for (i = 0; i < 8; i++) {
@@ -104,7 +107,7 @@ static void clear_highest(u8 *reg)
 /*    bit4 = 0, bit3 = 1  → OCW3 (読み出すレジスタの選択 / ポーリング)      */
 /*    bit4 = 0, bit3 = 0  → OCW2 (EOI 系)                                   */
 /* ------------------------------------------------------------------------ */
-static void pic_write_cmd(struct pic *p, u8 v)
+static void pic_write_cmd(volatile struct pic *p, u8 v)
 {
     if (v & 0x10) {
         /* ICW1 */
@@ -140,7 +143,7 @@ static void pic_write_cmd(struct pic *p, u8 v)
     }
 }
 
-static void pic_write_data(struct pic *p, u8 v)
+static void pic_write_data(volatile struct pic *p, u8 v)
 {
     switch (p->icw_step) {
     case 1:                     /* ICW2 — ベクタベース */
@@ -198,7 +201,7 @@ void v86_pic_out(u16 port, u32 value)
 /* ------------------------------------------------------------------------ */
 int v86_pic_should_inject(u32 irq, u32 *out_vector)
 {
-    struct pic *p;
+    volatile struct pic *p;
     u8 bit;
 
     if (irq >= 16) {
