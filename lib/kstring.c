@@ -34,8 +34,12 @@ char *kstrcat(char *dst, const char *src)
 /* ======================================================================== */
 char *kstrncat(char *dst, const char *src, u32 n)
 {
-    u32 dlen = kstrlen(dst);
+    u32 dlen;
     u32 i;
+    /* n==0 を先に弾く。弾かないと n-1 が 0xFFFFFFFF にラップして
+     * ガードが一切効かなくなる */
+    if (n == 0) return dst;
+    dlen = kstrlen(dst);
     if (dlen >= n - 1) return dst;
     for (i = 0; src[i] && (dlen + i) < n - 1; i++) {
         dst[dlen + i] = src[i];

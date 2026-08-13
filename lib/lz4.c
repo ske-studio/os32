@@ -67,12 +67,15 @@ int lz4_decode(const u8 *src, int compressed_size,
                 if (ip >= ip_end) return -1;
                 s = *ip++;
                 lit_len += s;
+                /* 壊れた入力での長さ累積 (int オーバーフロー) を止める */
+                if (lit_len > dst_capacity) return -1;
             } while (s == 255);
         }
 
-        /* リテラルバイト列をコピー */
-        if (ip + lit_len > ip_end) return -1;
-        if (op + lit_len > op_end) return -2;
+        /* リテラルバイト列をコピー。
+         * ip + lit_len 形式はポインタラップですり抜けるので差分比較 */
+        if (lit_len > (int)(ip_end - ip)) return -1;
+        if (lit_len > (int)(op_end - op)) return -2;
         for (i = 0; i < lit_len; i++) {
             *op++ = *ip++;
         }
@@ -98,11 +101,12 @@ int lz4_decode(const u8 *src, int compressed_size,
                 if (ip >= ip_end) return -1;
                 s = *ip++;
                 match_len += s;
+                if (match_len > dst_capacity) return -1;
             } while (s == 255);
         }
 
         /* マッチコピー (オーバーラップ対応: 1バイトずつコピー) */
-        if (op + match_len > op_end) return -2;
+        if (match_len > (int)(op_end - op)) return -2;
         match_src = op - offset;
         for (i = 0; i < match_len; i++) {
             *op++ = match_src[i];

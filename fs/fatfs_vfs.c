@@ -72,7 +72,10 @@ static void ff_make_path(const FatFsCtx *fc, const char *path, char *out, int ma
             out[len++] = '/';
             out[len] = '\0';
         }
-        kstrncat(out, path, max - len - 1);
+        /* kstrncat の n は「残り容量」ではなくバッファ全体サイズ
+         * (strlcat セマンティクス)。max - len - 1 を渡すと数文字ぶん
+         * 早く切り詰められていた */
+        kstrncat(out, path, (u32)max);
     } else {
         out[len++] = '/';
         out[len] = '\0';

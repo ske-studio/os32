@@ -254,6 +254,13 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
         } else {
             const char *start = p;
             while (*p && *p != '%') p++;
+            if (p == start) {
+                /* 末尾の '%' (p[1]=='\0' なので上の分岐に入らない)。
+                 * ここで進めないと *p が '%' のまま無限ループする。 */
+                console_write(p, 1, attr);
+                p++;
+                continue;
+            }
             console_write(start, (u32)(p - start), attr);
             continue;
         }

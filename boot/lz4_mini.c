@@ -34,10 +34,15 @@ int boot_lz4_decode(const u8 *src, int compressed_size,
                 if (ip >= ip_end) return -1;
                 s = *ip++;
                 lit_len += s;
+                /* 壊れた入力での長さ累積 (int オーバーフロー) を止める。
+                 * 出力容量を超えた時点で正当なストリームではない */
+                if (lit_len > dst_capacity) return -1;
             } while (s == 255);
         }
-        if (ip + lit_len > ip_end) return -1;
-        if (op + lit_len > op_end) return -2;
+        /* ip + lit_len 形式はポインタが上位アドレスでラップすると
+         * すり抜けるので、差分 (ip_end - ip) と比較する */
+        if (lit_len > (int)(ip_end - ip)) return -1;
+        if (lit_len > (int)(op_end - op)) return -2;
         for (i = 0; i < lit_len; i++) *op++ = *ip++;
 
         if (ip >= ip_end) break;
@@ -57,9 +62,10 @@ int boot_lz4_decode(const u8 *src, int compressed_size,
                 if (ip >= ip_end) return -1;
                 s = *ip++;
                 match_len += s;
+                if (match_len > dst_capacity) return -1;
             } while (s == 255);
         }
-        if (op + match_len > op_end) return -2;
+        if (match_len > (int)(op_end - op)) return -2;
         match_src = op - offset;
         for (i = 0; i < match_len; i++) *op++ = match_src[i];
     }
