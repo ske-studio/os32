@@ -5,6 +5,10 @@
 #include "tss.h"
 #include "kstring.h"
 
+/* I/O 許可ビットマップは全 65536 ポートを覆う必要がある (1 ポート 1 bit)。
+ * 足りないとリミット外のポートが CPL/IOPL 次第で素通りする。 */
+STATIC_ASSERT(TSS_IOMAP_SIZE == 65536 / 8, tss_iomap_covers_all_ports);
+
 /* GDT 側で TSS ディスクリプタを作るため公開する */
 struct tss_entry kernel_tss;
 

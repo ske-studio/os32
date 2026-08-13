@@ -29,5 +29,14 @@ typedef signed long    i32;
 
 #endif /* OS32_KAPI_SHARED_H */
 
+/* コンパイル時アサーション (C89)。
+ * cond が偽だと「負サイズの配列」でコンパイルエラーになる。
+ * 二重定義に見える定数の一致 (SHM サイズ等) やレイアウトの隣接関係は
+ * コメントでなくこれで担保する。 */
+#ifndef STATIC_ASSERT
+#define STATIC_ASSERT(cond, name) \
+    typedef char static_assert_##name[(cond) ? 1 : -1]
+#endif
+
 #endif /* TYPES_H */
 

@@ -18,6 +18,10 @@
 #include "paging.h"
 #include "kstring.h"
 
+/* shm.h のブロック定義と memmap.h の帯域サイズは別々に書かれている。
+ * 食い違うとガードページの位置やゼロクリア範囲が実帯域からずれる。 */
+STATIC_ASSERT(SHM_TOTAL_SIZE == MEM_SHM_SIZE, shm_size_matches_memmap);
+
 /* ブロック管理テーブル */
 static u8 shm_state[SHM_BLOCK_COUNT]; /* 各ブロックの状態 */
 static int shm_block_span[SHM_BLOCK_COUNT]; /* 各確保の先頭ブロックが持つスパン数 */

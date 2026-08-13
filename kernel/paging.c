@@ -36,6 +36,16 @@
 #include "pc98.h"
 #include "memmap.h"
 
+/* カーネルスタック帯のレイアウト不変条件。
+ * ガードページはスタック直下に隣接し、スタックは 2MB 境界 (SQLite 帯域)
+ * の手前で終わる。ずれると paging_init の R/W 強制やガード設定が
+ * 意図しないページに掛かる。 */
+STATIC_ASSERT(MEM_STACK_GUARD_END + 1 == MEM_KSTACK_BASE,
+              kstack_guard_adjacent);
+STATIC_ASSERT(MEM_KSTACK_TOP < 0x200000UL, kstack_below_sqlite_band);
+STATIC_ASSERT((MEM_STACK_GUARD & (PAGE_SIZE - 1)) == 0,
+              kstack_guard_page_aligned);
+
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
 /* Open Watcomでは __declspec(align(4096)) が使えないため、
  * 手動でアライメントを確保する。
