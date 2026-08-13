@@ -12,6 +12,13 @@
 #include "io.h"
 #include "pc98.h"
 
+/* V86 セッション中の画面描画抑止 (kernel/v86.c)。
+ * セッション中は低位 640KB がゲスト用バッキング RAM に差し替わっており、
+ * Unicode-JIS 表 (0x4A000) を読むとゲストのメモリをテーブルとして解釈して
+ * 文字化けする。TVRAM/KCG への書き込みもゲストの画面と CG 状態を汚す。
+ * 描画だけを抑止し、シリアル出力 (rshell ログ) は通す。 */
+extern int v86_is_active(void);
+
 /* テキストVRAM定義 (tvram.hとpc98.hの定義を使用) */
 #define TVRAM_TEXT  TVRAM_BASE
 
@@ -181,8 +188,9 @@ void shell_putchar(char ch, u8 color)
 /* 文字列表示 */
 void shell_print(const char *str, u8 color)
 {
+    int render = !v86_is_active();
     while (*str) {
-        shell_putchar(*str, color);
+        if (render) shell_putchar(*str, color);
         if (rshell_active) serial_putchar(*str);
         str++;
     }
@@ -231,6 +239,7 @@ void shell_print_utf8(const char *utf8_str, u8 color)
         const char *s = utf8_str;
         while (*s) serial_putchar(*s++);
     }
+    if (v86_is_active()) return;    /* 描画抑止 (シリアルには出した) */
     while (*p) {
         utf8_decode_t dec;
         u32 cp;
@@ -302,7 +311,9 @@ void console_write(const char *buf, u32 size, u8 color)
         u32 i;
         for (i = 0; i < size; i++) serial_putchar(buf[i]);
     }
-    
+
+    if (v86_is_active()) return;    /* 描画抑止 (シリアルには出した) */
+
     while (remaining > 0) {
         utf8_decode_t dec;
         u32 cp;
