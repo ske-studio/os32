@@ -12,7 +12,14 @@
 /*  ブロックヘッダ構造 (8バイト):                                            */
 /*    u32 size    — データ部サイズ (ヘッダ含まず)                            */
 /*    u32 magic   — 確保済み=0xA110CA7E, 解放済み=0xFEEEFEEE                */
-/*    [data...]   — ユーザデータ (4バイトアライン)                           */
+/*    [data...]   — ユーザデータ (8バイトアライン)                           */
+/*                                                                          */
+/*  不変条件:                                                               */
+/*   1. 隣接する 2 つのフリーブロックは存在しない (free 時に必ず結合する)。   */
+/*      これにより free の結合は前後 1 個ずつを見るだけで足りる。            */
+/*   2. **アロケータは再入不可**。内部の走査と h->used の更新は割り込みで    */
+/*      保護していないので、ISR から kmalloc/kfree を呼んではならない。      */
+/*      (保護すると O(n) の走査中ずっと割り込み禁止になり遅延が跳ねる)       */
 /* ======================================================================== */
 
 #include "kmalloc.h"
@@ -23,7 +30,13 @@
 #define BLK_MAGIC_USED  0xA110CA7EUL  /* "ALLOCATE" */
 #define BLK_MAGIC_FREE  0xFEEEFEEEUL
 #define BLK_HDR_SIZE    8             /* sizeof(BlkHdr) */
-#define BLK_ALIGN       4             /* 4バイトアライメント */
+
+/* 8バイトアライメント。
+ * SQLite は double を含む構造体をこのヒープ上に置く (malloc ラッパー経由)。
+ * 4 バイト境界だと i386 では動くが未定義動作寄りで、SSE 命令を使う
+ * コードが混ざった途端に落ちる。ヘッダも 8 バイトなので、ベースさえ
+ * 8 バイト境界なら全データポインタが 8 バイト境界になる。 */
+#define BLK_ALIGN       8
 
 typedef struct BlkHdr {
     u32 size;      /* データ部サイズ */
@@ -37,8 +50,21 @@ typedef struct BlkHdr {
 void kheap_init(KHeap *h, void *base, u32 size, const char *name)
 {
     BlkHdr *first;
+    u32 addr = (u32)base;
+    u32 aligned = (addr + BLK_ALIGN - 1) & ~(u32)(BLK_ALIGN - 1);
 
     h->name = name;
+
+    /* ベースを BLK_ALIGN 境界へ切り上げる。ここが揃っていないと
+     * 以降のデータポインタが全てずれる (呼び出し元はページ境界を
+     * 渡してくるので通常は no-op)。 */
+    if (aligned - addr < size) {
+        size -= (aligned - addr);
+    } else {
+        size = 0;
+    }
+    /* 末尾も切り捨てて全体を BLK_ALIGN の倍数にする */
+    size &= ~(u32)(BLK_ALIGN - 1);
 
     /* ヘッダすら入らないサイズなら空ヒープとして初期化する
      * (first->size = size - BLK_HDR_SIZE のアンダーフロー防止) */
@@ -49,7 +75,7 @@ void kheap_init(KHeap *h, void *base, u32 size, const char *name)
         return;
     }
 
-    h->base = (u8 *)base;
+    h->base = (u8 *)aligned;
     h->size = size;
     h->used = 0;
 
@@ -156,7 +182,33 @@ void kheap_free(KHeap *h, void *ptr)
     blk->magic = BLK_MAGIC_FREE;
     h->used -= blk->size + BLK_HDR_SIZE;
 
-    /* 前方結合: ヒープを先頭から走査して隣接フリーブロックを結合 */
+    /* ---- 結合は解放したブロックの前後 1 個だけ見れば足りる ----
+     *
+     * 不変条件 1 (隣接フリーブロックは存在しない) が保たれているので、
+     * このブロックの直前と直後さえ調べれば「結合漏れ」は起きない。
+     *
+     * かつては free のたびにヒープ全域を走査して全隣接ペアを結合しており、
+     * ブロック数 n に対して free 1 回が O(n)、n 個を解放すると O(n^2) に
+     * なっていた。 */
+
+    /* 前方結合: 直後がフリーなら取り込む (O(1)) */
+    {
+        u8 *next_p = (u8 *)blk + BLK_HDR_SIZE + blk->size;
+        if (next_p + BLK_HDR_SIZE <= h->base + h->size) {
+            BlkHdr *next = (BlkHdr *)next_p;
+            if (next->magic == BLK_MAGIC_FREE &&
+                next->size <= (u32)(h->base + h->size - next_p) - BLK_HDR_SIZE) {
+                blk->size += BLK_HDR_SIZE + next->size;
+            }
+        }
+    }
+
+    /* 後方結合: 直前のブロックを探す。
+     * 依然として先頭からの線形探索だが、見つけた時点で打ち切るので
+     * 全域走査にはならない。O(1) にするにはブロック末尾にサイズを
+     * 書くフッタ (boundary tag) が要る — 必要になったら入れる。 */
+    if ((u8 *)blk == h->base) return;
+
     p = h->base;
     while (p + BLK_HDR_SIZE <= h->base + h->size) {
         BlkHdr *cur = (BlkHdr *)p;
@@ -170,16 +222,15 @@ void kheap_free(KHeap *h, void *ptr)
         }
 
         next_p = p + BLK_HDR_SIZE + cur->size;
+        if (next_p <= p) break;         /* size 破損時の無限ループ防止 */
 
-        /* 隣接する2つのフリーブロックを結合 */
-        if (cur->magic == BLK_MAGIC_FREE &&
-            next_p + BLK_HDR_SIZE <= h->base + h->size) {
-            BlkHdr *next = (BlkHdr *)next_p;
-            if (next->magic == BLK_MAGIC_FREE) {
-                cur->size += BLK_HDR_SIZE + next->size;
-                continue;  /* 結合後、同じ位置から再チェック */
+        if (next_p == (u8 *)blk) {
+            if (cur->magic == BLK_MAGIC_FREE) {
+                cur->size += BLK_HDR_SIZE + blk->size;
             }
+            return;                     /* 直前が見つかった時点で終了 */
         }
+        if (next_p > (u8 *)blk) break;  /* 通り越した = 連鎖が壊れている */
 
         p = next_p;
     }
@@ -255,7 +306,6 @@ void *krealloc(void *ptr, u32 new_size)
 {
     void *new_ptr;
     u32 old_size;
-    u32 copy_size;
 
     if (ptr == (void *)0) return kmalloc(new_size);
     if (new_size == 0) { kfree(ptr); return (void *)0; }
@@ -263,14 +313,17 @@ void *krealloc(void *ptr, u32 new_size)
     old_size = kmalloc_block_size(ptr);
     if (old_size == 0) return (void *)0; /* 無効なポインタ */
 
-    /* 既に十分なサイズがある場合はそのまま返す */
+    /* 縮小・同サイズは同じブロックを返す (ブロック分割はしない)。
+     * libc の realloc と同じく「戻り値のブロックは new_size 以上」を
+     * 満たすので契約違反ではない。 */
     if (old_size >= new_size) return ptr;
 
     new_ptr = kmalloc(new_size);
     if (new_ptr == (void *)0) return (void *)0;
 
-    copy_size = (old_size < new_size) ? old_size : new_size;
-    kmemcpy(new_ptr, ptr, copy_size);
+    /* ここに来る時点で old_size < new_size が確定しているので、
+     * コピー量は常に old_size (旧実装の min() は死んだ分岐だった) */
+    kmemcpy(new_ptr, ptr, old_size);
     kfree(ptr);
 
     return new_ptr;
@@ -281,7 +334,26 @@ void *krealloc(void *ptr, u32 new_size)
 /* ======================================================================== */
 u32 kmalloc_total(void) { return kernel_heap.size; }
 u32 kmalloc_used(void)  { return kernel_heap.used; }
-u32 kmalloc_free(void)  { return kernel_heap.size - kernel_heap.used; }
+
+/* 実際に確保可能なバイト数。
+ * size - used はフリーブロックのヘッダ分を数えないため、フリーブロックが
+ * 増えるほど過大申告になっていた。フリーブロックのデータ部を実際に
+ * 合計する (統計表示用なので O(n) 走査でよい)。 */
+u32 kmalloc_free(void)
+{
+    KHeap *h = &kernel_heap;
+    u8 *p = h->base;
+    u32 total = 0;
+
+    while (p != (u8 *)0 && p + BLK_HDR_SIZE <= h->base + h->size) {
+        BlkHdr *cur = (BlkHdr *)p;
+        if (cur->magic != BLK_MAGIC_FREE && cur->magic != BLK_MAGIC_USED) break;
+        if (cur->size > (u32)(h->base + h->size - p) - BLK_HDR_SIZE) break;
+        if (cur->magic == BLK_MAGIC_FREE) total += cur->size;
+        p += BLK_HDR_SIZE + cur->size;
+    }
+    return total;
+}
 
 /* ======================================================================== */
 /*  libc互換ラッパー                                                         */
