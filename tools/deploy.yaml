@@ -255,7 +255,6 @@ filesystem:
         - vdpview.bin
         - spr_test.bin
         - raster.bin
-        - fep_test.bin
         - mdview.bin
       tags: [programs]
 
