@@ -36,7 +36,12 @@
  * → docs/tasks/v86v2/09_memmap.md */
 #define V86_REMAP_START     0x00000UL
 #define V86_REMAP_END       MEM_CONV_END             /* 0xA0000 (含まず) */
-#define V86_BACKING_PAGES   (V86_REMAP_END / PAGE_SIZE)   /* 160 ページ */
+
+/* バッキング RAM のページ数。
+ * ページ 0 (IVT+BDA) は**実物理のまま**ゲストに見せるのでバッキングを
+ * 持たない (理由は v86_mem.c の setup 内コメント)。160 ページ確保して
+ * 先頭 1 ページを使わず捨てていたのを 159 ページに詰めてある。 */
+#define V86_BACKING_PAGES   ((V86_REMAP_END / PAGE_SIZE) - 1)   /* 159 ページ */
 
 /* VRAM / ROM 帯 (リマップせず実物理を見せる) */
 #define V86_VRAM_START      0xA0000UL

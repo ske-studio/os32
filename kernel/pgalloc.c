@@ -3,7 +3,8 @@
 /*                                                                          */
 /*  プログラム空間 (0x400000 〜 mem_end) の物理ページを管理する。            */
 /*  ビットマップ方式: 1ビット = 1ページ (4KB)。                              */
-/*  最大16MB → 最大3072ページ (0x400000〜0xFFFFFF) → ビットマップ 384バイト  */
+/*  管理域は 0x400000〜0xFFFFFF の 12MB = 3072ページ → ビットマップ 384バイト */
+/*  (ページング側の上限 16MB から先頭 4MB のカーネル/シェル帯を除いた分)      */
 /*                                                                          */
 /*  Level 0 (シェル) が使用するページは pgalloc_mark_used() で予約する。     */
 /*  Level 1+ のネスト呼び出し時に pgalloc_alloc_n() で物理ページを確保し、   */
@@ -29,9 +30,16 @@ static u32 used_pages;
 /* ======================================================================== */
 void pgalloc_init(u32 mem_kb)
 {
-    u32 mem_end = mem_kb * 1024;
+    u32 mem_end;
     u32 avail;
     u32 i;
+
+    /* mem_kb * 1024 の桁あふれ防止 (mem_kb > 4194303 で u32 が一周する)。
+     * ページングの管理上限 16MB を超える申告はそこで頭打ちにする。 */
+    if (mem_kb > PAGING_MAP_SIZE / 1024) {
+        mem_kb = PAGING_MAP_SIZE / 1024;
+    }
+    mem_end = mem_kb * 1024;
 
     /* 管理対象: PGALLOC_BASE 〜 mem_end */
     if (mem_end <= PGALLOC_BASE) {
@@ -43,6 +51,11 @@ void pgalloc_init(u32 mem_kb)
     avail = mem_end - PGALLOC_BASE;
     total_pages = avail / PAGE_SIZE;
     if (total_pages > PGALLOC_MAX_PAGES) {
+        /* 実装メモリがビットマップの容量を超えている。超過分は
+         * 単に使わないだけで動作はするが、黙って捨てると
+         * 「メモリを積んだのに空きが増えない」の原因が分からなくなる。 */
+        kprintf(0xE1, "[pgalloc] %u pages available, managing %u (bitmap limit)\n",
+                total_pages, (u32)PGALLOC_MAX_PAGES);
         total_pages = PGALLOC_MAX_PAGES;
     }
 

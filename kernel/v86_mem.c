@@ -72,8 +72,12 @@ int v86_mem_setup(void)
      * USER を伝播させる (実効権限は PDE と PTE の論理積のため)。 */
     paging_set_page(0, 0, PAGE_RW | PTE_USER);
 
-    paging_map_range(V86_REMAP_START + PAGE_SIZE, V86_REMAP_END,
-                     backing_phys + PAGE_SIZE, PAGE_RW | PTE_USER);
+    /* ページ 1 以降をバッキング RAM へ。backing_phys の先頭がゲストの
+     * 0x1000 に対応する (ページ 0 はバッキングを持たない)。 */
+    if (paging_map_range(V86_REMAP_START + PAGE_SIZE, V86_REMAP_END,
+                         backing_phys, PAGE_RW | PTE_USER) != 0) {
+        goto fail;
+    }
 
     /* ゲストに渡す前にゼロクリアする。ページ 0 は実機の IVT/BDA が
      * そのまま入っているので触らない。 */
@@ -96,7 +100,10 @@ int v86_mem_setup(void)
         int mi;
         for (mi = 0; mi < V86_IDENT_MAP_N; mi++) {
             const struct v86_ident_ent *e = &v86_ident_map[mi];
-            paging_map_range(e->start, e->end, e->start, e->setup_flags);
+            if (paging_map_range(e->start, e->end, e->start,
+                                 e->setup_flags) != 0) {
+                goto fail;
+            }
         }
     }
 
@@ -107,6 +114,14 @@ int v86_mem_setup(void)
     v86_io_apply_policy();
 
     return 0;
+
+fail:
+    /* 途中で失敗したら張りかけのマッピングを必ず巻き戻す。
+     * 中途半端に USER が付いた低位ページを残したままカーネルに戻ると、
+     * 次に低位メモリを使うコード (フォント/GFX) が壊れた地図の上で動く。
+     * teardown が identity 復帰・IVT/BDA 復元・バッキング解放を兼ねる。 */
+    v86_mem_teardown();
+    return -3;
 }
 
 void v86_mem_teardown(void)
