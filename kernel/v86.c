@@ -119,7 +119,7 @@ void v86_fault_handler(u32 *frame, u32 vector)
     v86_flt_fl  = frame[V86F_EFLAGS];
 
     /* 診断値の読み出しでも範囲外は読まない (0x10FFEF はカーネル内)。 */
-    if (v86_guest_range_ok(pc_lin, 4)) {
+    if (v86_guest_read_ok(pc_lin, 4)) {
         const u8 *pc = v86_ptr(cs, ip);
         v86_flt_op  = (u32)pc[0] | ((u32)pc[1] << 8) |
                       ((u32)pc[2] << 16) | ((u32)pc[3] << 24);
@@ -135,7 +135,7 @@ void v86_fault_handler(u32 *frame, u32 vector)
     {
         u32 sp_lin = ((v86_flt_ss & 0xFFFFU) << 4) + (v86_flt_sp & 0xFFFFU);
         int i;
-        if (v86_guest_range_ok(sp_lin, 8)) {
+        if (v86_guest_read_ok(sp_lin, 8)) {
             const u16 *sp = (const u16 *)v86_ptr(v86_flt_ss, v86_flt_sp);
             for (i = 0; i < 4; i++) {
                 v86_flt_stk[i] = sp[i];
@@ -165,9 +165,10 @@ int v86_gp_handler(u32 *frame)
     v86_gp_ip = ip;
     v86_gp_fl = frame[V86F_EFLAGS];
 
-    /* CS:IP がバッキング RAM の外を指しているなら命令は読めない
-     * (0x10FFEF まで届き得て、それはカーネル内)。デコードせず畳む。 */
-    if (!v86_guest_range_ok(((cs & 0xFFFFU) << 4) + (ip & 0xFFFFU), 16)) {
+    /* CS:IP がゲストにマップされた 1MB の外を指しているなら命令は読めない
+     * (0x10FFEF まで届き得て、それはカーネル内)。デコードせず畳む。
+     * ROM (0xC0000-) のコードも実行される (IPL 実測) ので RAM に限らない。 */
+    if (!v86_guest_read_ok(((cs & 0xFFFFU) << 4) + (ip & 0xFFFFU), 16)) {
         v86_exit_reason = V86_EXIT_FAULT;
         return 1;
     }

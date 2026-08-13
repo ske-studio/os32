@@ -634,9 +634,15 @@ void snd_bgm_play(const char *mml)
     int loop_pos = -1;
     int num;
     unsigned int flags;
+    int persist;
 
-    /* 再生中なら停止。以降 playing=0 なので ISR は bgm を触らない */
+    /* 再生中なら停止。以降 playing=0 なので ISR は bgm を触らない。
+     * snd_bgm_stop() は persist もクリアするが、呼び出し側は
+     * set_persist(1) → play の順で使う (sndctl) ので、play を跨いで
+     * persist は保存する。 */
+    persist = g_snd.bgm_persist;
     snd_bgm_stop();
+    g_snd.bgm_persist = persist;
 
     /* 先頭のクォートをスキップ */
     if (*mml == '"') mml++;

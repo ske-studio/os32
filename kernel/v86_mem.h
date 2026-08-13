@@ -71,6 +71,31 @@ static inline int v86_guest_range_ok(u32 linear, u32 len)
     return 1;
 }
 
+/* ------------------------------------------------------------------------ */
+/*  v86_guest_read_ok — 読み出し (命令フェッチ/診断) 用の範囲検証            */
+/*                                                                          */
+/*  ゲストは VRAM (0xA0000-) や BIOS ROM (0xC0000-0xFFFFF) のコードも       */
+/*  実行する (実測: IPL は FD80:xxxx の ROM 内で I/O して #GP を出す)。      */
+/*  したがって命令デコードの検証は 1MB 全域を許可する。                     */
+/*  **書き込みの検証には使わないこと** — ゲストスタックへの書き込みは       */
+/*  v86_guest_range_ok() (バッキング RAM 内) で検証する。                    */
+/* ------------------------------------------------------------------------ */
+#define V86_GUEST_MAP_END   0x100000UL
+
+static inline int v86_guest_read_ok(u32 linear, u32 len)
+{
+    if (len == 0) {
+        return 0;
+    }
+    if (linear >= V86_GUEST_MAP_END) {
+        return 0;
+    }
+    if (linear + len > V86_GUEST_MAP_END) {
+        return 0;
+    }
+    return 1;
+}
+
 /* ======== API ======== */
 
 /* バッキング RAM を確保して低位アドレスをリマップする。
