@@ -12,19 +12,27 @@ static u32 backing_phys = 0;
 
 u32 v86_mem_backing_phys(void) { return backing_phys; }
 
-/* 指定範囲を「実物理そのまま」で属性だけ張り替える */
-static void map_identity(u32 start, u32 end, u32 flags)
-{
-    u32 a;
-    for (a = start; a < end; a += PAGE_SIZE) {
-        paging_set_page(a, a, flags);
-    }
-}
+/* VRAM/ROM 帯のマップリスト (setup と teardown で同じ表を使う)。
+ * setup はゲスト用に USER を付け、teardown で元の属性に戻す。
+ * かつては setup/teardown に同じ範囲リストが 2 回書かれていて、
+ * 片方だけ直して食い違う事故の温床だった (R8)。 */
+static const struct v86_ident_ent {
+    u32 start;
+    u32 end;            /* exclusive */
+    u32 setup_flags;    /* セッション中 (ゲストから見える) */
+    u32 teardown_flags; /* 平常時 */
+} v86_ident_map[] = {
+    { V86_VRAM_START,     V86_VRAM_END,         PAGE_RW | PTE_USER, PAGE_RW },
+    { V86_GVRAM_E_START,  V86_GVRAM_E_END,      PAGE_RW | PTE_USER, PAGE_RW },
+    { V86_EXTROM_START,   V86_EXTROM_END,       PAGE_RO | PTE_USER, PAGE_RO },
+    { V86_SOUNDROM_START, V86_SOUNDROM_END,     PAGE_RO | PTE_USER, PAGE_RO },
+    { MEM_BIOS_ROM_START, MEM_BIOS_ROM_END + 1, PAGE_RO | PTE_USER, PAGE_RO },
+};
+#define V86_IDENT_MAP_N \
+    ((int)(sizeof(v86_ident_map) / sizeof(v86_ident_map[0])))
 
 int v86_mem_setup(void)
 {
-    u32 a;
-
     if (backing_phys) {
         return -1;              /* 二重セットアップ */
     }
@@ -64,10 +72,8 @@ int v86_mem_setup(void)
      * USER を伝播させる (実効権限は PDE と PTE の論理積のため)。 */
     paging_set_page(0, 0, PAGE_RW | PTE_USER);
 
-    for (a = V86_REMAP_START + PAGE_SIZE; a < V86_REMAP_END; a += PAGE_SIZE) {
-        paging_set_page(a, backing_phys + (a - V86_REMAP_START),
-                        PAGE_RW | PTE_USER);
-    }
+    paging_map_range(V86_REMAP_START + PAGE_SIZE, V86_REMAP_END,
+                     backing_phys + PAGE_SIZE, PAGE_RW | PTE_USER);
 
     /* ゲストに渡す前にゼロクリアする。ページ 0 は実機の IVT/BDA が
      * そのまま入っているので触らない。 */
@@ -80,18 +86,19 @@ int v86_mem_setup(void)
         }
     }
 
-    /* VRAM は実物理を直マップ。ここが #GP しないことが性能の前提。 */
-    map_identity(V86_VRAM_START,     V86_VRAM_END,     PAGE_RW | PTE_USER);
-    map_identity(V86_GVRAM_E_START,  V86_GVRAM_E_END,  PAGE_RW | PTE_USER);
-
-    /* ROM 帯は読み取り専用で見せる。
-     * BIOS ROM も含めて実行可能にしておく — 前回プロジェクトは ROM 実行を
-     * 排除する「方法C」を実装した翌日に、NP21/W のソースを読んで
-     * 「ROM は CPU が直接実行するのが正しい」と判明して全撤回している
-     * (docs/tasks/v86v2/01_prior_session_analysis.md)。同じ回り道はしない。 */
-    map_identity(V86_EXTROM_START,   V86_EXTROM_END,   PAGE_RO | PTE_USER);
-    map_identity(V86_SOUNDROM_START, V86_SOUNDROM_END, PAGE_RO | PTE_USER);
-    map_identity(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END + 1, PAGE_RO | PTE_USER);
+    /* VRAM は実物理を直マップ。ここが #GP しないことが性能の前提。
+     * ROM 帯は読み取り専用で見せる。BIOS ROM も含めて実行可能にしておく —
+     * 前回プロジェクトは ROM 実行を排除する「方法C」を実装した翌日に、
+     * NP21/W のソースを読んで「ROM は CPU が直接実行するのが正しい」と
+     * 判明して全撤回している (docs/tasks/v86v2/01_prior_session_analysis.md)。
+     * 同じ回り道はしない。 */
+    {
+        int mi;
+        for (mi = 0; mi < V86_IDENT_MAP_N; mi++) {
+            const struct v86_ident_ent *e = &v86_ident_map[mi];
+            paging_map_range(e->start, e->end, e->start, e->setup_flags);
+        }
+    }
 
     /* IVT/BDA の復元と BIOS スタブの設置 */
     v86_bios_setup();
@@ -104,8 +111,6 @@ int v86_mem_setup(void)
 
 void v86_mem_teardown(void)
 {
-    u32 a;
-
     if (!backing_phys) {
         return;
     }
@@ -123,16 +128,17 @@ void v86_mem_teardown(void)
      * v86_bios_save_real() が IVT を読んだ瞬間に #PF する。
      * teardown は「元に戻す」のであって「あるべき姿にする」のではない。 */
     paging_set_page(0, 0, PAGE_RO);
-    for (a = V86_REMAP_START + PAGE_SIZE; a < V86_REMAP_END; a += PAGE_SIZE) {
-        paging_set_page(a, a, PAGE_RW);
-    }
+    paging_map_range(V86_REMAP_START + PAGE_SIZE, V86_REMAP_END,
+                     V86_REMAP_START + PAGE_SIZE, PAGE_RW);
 
-    /* VRAM / ROM から USER を剥がす */
-    map_identity(V86_VRAM_START,     V86_VRAM_END,     PAGE_RW);
-    map_identity(V86_GVRAM_E_START,  V86_GVRAM_E_END,  PAGE_RW);
-    map_identity(V86_EXTROM_START,   V86_EXTROM_END,   PAGE_RO);
-    map_identity(V86_SOUNDROM_START, V86_SOUNDROM_END, PAGE_RO);
-    map_identity(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END + 1, PAGE_RO);
+    /* VRAM / ROM から USER を剥がす (setup と同じ表の teardown 側属性) */
+    {
+        int mi;
+        for (mi = 0; mi < V86_IDENT_MAP_N; mi++) {
+            const struct v86_ident_ent *e = &v86_ident_map[mi];
+            paging_map_range(e->start, e->end, e->start, e->teardown_flags);
+        }
+    }
 
     /* PDE 側の USER も落とす。paging_set_page() は USER を立てる方向にしか
      * 伝播させないので、ここで明示的に戻す。 */

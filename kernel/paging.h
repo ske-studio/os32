@@ -55,6 +55,13 @@ void paging_init(u32 mem_kb);
  * (無言 no-op だと保護が入らないまま fail-open になる)。 */
 int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
 
+/* 範囲マップ。[virt_start, virt_end) を phys_start からの連続物理へ
+ * flags でマップする (end は exclusive)。TLB フラッシュは最後に 1 回。
+ * 複数ページの属性変更/張り替えは paging_set_page のループでなく必ず
+ * これを使うこと (ページごとの CR3 全リロードを避ける)。
+ * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags);
+
 /* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末)
  * 戻り値: 0=成功, -1=範囲全体がマッピング範囲外 */
 int paging_pde_clear_user(u32 start, u32 end);

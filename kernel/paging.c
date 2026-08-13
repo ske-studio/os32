@@ -124,17 +124,9 @@ void paging_init(u32 mem_kb)
      * Not-Present にするので、極端に小さいメモリ量が報告された場合でも
      * **自分が今立っているスタックだけは必ず生かしておく**。
      * ここを NP にした瞬間に次の push で三重フォルトになる。 */
-    {
-        u32 sp_addr;
-        for (sp_addr = MEM_KSTACK_BASE; sp_addr <= MEM_KSTACK_TOP;
-             sp_addr += PAGE_SIZE) {
-            u32 pdi = sp_addr >> 22;
-            u32 pti = (sp_addr >> 12) & 0x3FF;
-            if (pdi < PAGING_PT_COUNT) {
-                page_tables[pdi][pti] = (sp_addr & ~(PAGE_SIZE - 1)) | PAGE_RW;
-            }
-        }
-    }
+    paging_map_range(MEM_KSTACK_BASE,
+                     PAGE_ALIGN_DOWN(MEM_KSTACK_TOP) + PAGE_SIZE,
+                     MEM_KSTACK_BASE, PAGE_RW);
 
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
@@ -155,17 +147,10 @@ void paging_init(u32 mem_kb)
      * ブートローダーが sqlite.bin を 0x200000 にロード済み。
      * 代替スタックも含めメモリプローブ結果に関係なく R/W を保証する。 */
     {
-        u32 sq_addr;
         extern u32 __sqlite_start;
-        u32 sq_start = (u32)&__sqlite_start & ~(PAGE_SIZE - 1);
-        u32 sq_end   = (MEM_SQLITE_STACK_TOP + PAGE_SIZE) & ~(PAGE_SIZE - 1);
-        for (sq_addr = sq_start; sq_addr < sq_end; sq_addr += PAGE_SIZE) {
-            u32 pdi = sq_addr >> 22;
-            u32 pti = (sq_addr >> 12) & 0x3FF;
-            if (pdi < PAGING_PT_COUNT) {
-                page_tables[pdi][pti] = sq_addr | PAGE_RW;
-            }
-        }
+        u32 sq_start = PAGE_ALIGN_DOWN((u32)&__sqlite_start);
+        u32 sq_end   = PAGE_ALIGN_DOWN(MEM_SQLITE_STACK_TOP + PAGE_SIZE);
+        paging_map_range(sq_start, sq_end, sq_start, PAGE_RW);
     }
 
     /* BIOS ROM: Read-Only */
@@ -193,29 +178,22 @@ void paging_init(u32 mem_kb)
 /* ======================================================================== */
 void paging_reclaim_conventional(void)
 {
-    u32 addr;
-
     /* ページ0: Read-Only (BIOS DATA AREA アクセスを許可しつつ書き込み検出)
      * [DEBUG] NOT PRESENT → R/O に変更: LZ4展開中にBDA参照でクラッシュする
      * 問題を調査中。元は paging_set_not_present(0x0, MEM_NULL_GUARD_END); */
     paging_set_readonly(0x0, MEM_NULL_GUARD_END);
 
     /* 0x1000-0x9FFFF: R/W (フォント/Unicode/GFX用) */
-    for (addr = MEM_CONV_RECLAIM_START; addr <= MEM_CONV_RECLAIM_END; addr += PAGE_SIZE) {
-        u32 pdi = addr >> 22;
-        u32 pti = (addr >> 12) & 0x3FF;
-        if (pdi < PAGING_PT_COUNT) {
-            page_tables[pdi][pti] = addr | PAGE_RW;
-        }
-    }
-
-    if (pg_enabled) tlb_flush_all();
+    paging_map_range(MEM_CONV_RECLAIM_START, MEM_CONV_RECLAIM_END + 1,
+                     MEM_CONV_RECLAIM_START, PAGE_RW);
 }
 
 /* ======================================================================== */
 /*  paging_set_page — 1ページの属性を変更                                   */
 /* ======================================================================== */
-int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
+/* 1 ページ設定の共通部 (TLB フラッシュなし)。
+ * paging_set_page と paging_map_range から使う。 */
+static int set_page_noflush(u32 virt_addr, u32 phys_addr, u32 flags)
 {
     u32 pdi = virt_addr >> 22;
     u32 pti = (virt_addr >> 12) & 0x3FF;
@@ -236,9 +214,42 @@ int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
     if (flags & PTE_USER) {
         page_directory[pdi] |= PTE_USER;
     }
+    return 0;
+}
+
+int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
+{
+    int rc = set_page_noflush(virt_addr, phys_addr, flags);
+    if (rc == 0 && pg_enabled) tlb_flush_all();
+    return rc;
+}
+
+/* ======================================================================== */
+/*  paging_map_range — 範囲マップ (end は exclusive)                        */
+/*                                                                          */
+/*  [virt_start, virt_end) を phys_start からの連続物理へ flags でマップし、 */
+/*  TLB フラッシュを最後に 1 回だけ行う。かつてはページごとに               */
+/*  paging_set_page → CR3 全リロードが走り、V86 setup だけで 300 回超の      */
+/*  フラッシュが発生していた (R9)。                                          */
+/* ======================================================================== */
+int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags)
+{
+    u32 v;
+    u32 off = 0;
+    int rc = 0;
+
+    virt_start = PAGE_ALIGN_DOWN(virt_start);
+    phys_start = PAGE_ALIGN_DOWN(phys_start);
+
+    for (v = virt_start; v < virt_end; v += PAGE_SIZE, off += PAGE_SIZE) {
+        if (set_page_noflush(v, phys_start + off, flags) != 0) {
+            rc = -1;
+            break;
+        }
+    }
 
     if (pg_enabled) tlb_flush_all();
-    return 0;
+    return rc;
 }
 
 /* 指定範囲を覆う PDE から USER を落とす。

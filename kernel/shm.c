@@ -55,7 +55,6 @@ static int addr_to_block(void *ptr)
 void shm_init(void)
 {
     int i;
-    u32 addr;
 
     /* 全ブロックを未使用に初期化 */
     for (i = 0; i < SHM_BLOCK_COUNT; i++) {
@@ -70,10 +69,8 @@ void shm_init(void)
                            MEM_SHM_GUARD_HI + PAGE_SIZE - 1);
 
     /* 共有メモリ領域を R/W に設定 (アイデンティティマッピング) */
-    for (addr = MEM_SHM_BASE; addr < MEM_SHM_BASE + SHM_TOTAL_SIZE;
-         addr += PAGE_SIZE) {
-        paging_set_page(addr, addr, PAGE_RW);
-    }
+    paging_map_range(MEM_SHM_BASE, MEM_SHM_BASE + SHM_TOTAL_SIZE,
+                     MEM_SHM_BASE, PAGE_RW);
 }
 
 /* ======================================================================== */
@@ -135,13 +132,10 @@ int shm_lock(void *ptr)
         if (shm_state[idx + i] != SHM_USED) return -1;
     }
 
-    /* 全ブロックの全ページを Read-Only に */
+    /* 全ブロックの全ページを Read-Only に (連続範囲なので一括) */
+    addr = block_to_addr(idx);
+    paging_map_range(addr, addr + (u32)span * SHM_BLOCK_SIZE, addr, PAGE_RO);
     for (i = 0; i < span; i++) {
-        u32 blk_start = block_to_addr(idx + i);
-        for (addr = blk_start; addr < blk_start + SHM_BLOCK_SIZE;
-             addr += PAGE_SIZE) {
-            paging_set_page(addr, addr, PAGE_RO);
-        }
         shm_state[idx + i] = SHM_LOCKED;
     }
 
@@ -164,13 +158,10 @@ int shm_free(void *ptr)
     /* span が壊れていると idx+i が管理テーブル外に出る */
     if (span <= 0 || idx + span > SHM_BLOCK_COUNT) return -1;
 
-    /* 全ブロックの全ページを R/W に戻して解放 */
+    /* 全ブロックの全ページを R/W に戻して解放 (連続範囲なので一括) */
+    addr = block_to_addr(idx);
+    paging_map_range(addr, addr + (u32)span * SHM_BLOCK_SIZE, addr, PAGE_RW);
     for (i = 0; i < span; i++) {
-        u32 blk_start = block_to_addr(idx + i);
-        for (addr = blk_start; addr < blk_start + SHM_BLOCK_SIZE;
-             addr += PAGE_SIZE) {
-            paging_set_page(addr, addr, PAGE_RW);
-        }
         shm_state[idx + i] = SHM_FREE;
     }
     shm_block_span[idx] = 0;
@@ -185,17 +176,14 @@ int shm_free(void *ptr)
 void shm_cleanup_all(void)
 {
     int i;
-    u32 addr;
     u32 blk_start;
 
     for (i = 0; i < SHM_BLOCK_COUNT; i++) {
         if (shm_state[i] != SHM_FREE) {
             /* ページ属性をR/Wに戻す */
             blk_start = block_to_addr(i);
-            for (addr = blk_start; addr < blk_start + SHM_BLOCK_SIZE;
-                 addr += PAGE_SIZE) {
-                paging_set_page(addr, addr, PAGE_RW);
-            }
+            paging_map_range(blk_start, blk_start + SHM_BLOCK_SIZE,
+                             blk_start, PAGE_RW);
             shm_state[i] = SHM_FREE;
         }
         shm_block_span[i] = 0;
