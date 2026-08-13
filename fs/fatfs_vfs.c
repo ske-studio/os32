@@ -507,9 +507,8 @@ static void *fatfs_vfs_mount(int dev_id)
     /* pdrv 占有チェック: diskio のドライブ選択を書き換える前に判定する */
     if (pdrv_busy[dev_type == 1 ? 0 : 1]) return (void *)0;
 
-    fc = (FatFsCtx *)kmalloc(sizeof(FatFsCtx));
+    fc = (FatFsCtx *)kzalloc(sizeof(FatFsCtx));
     if (!fc) return (void *)0;
-    kmemset(fc, 0, sizeof(FatFsCtx));
 
     fc->dev_id = dev_id;
 

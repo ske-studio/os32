@@ -19,6 +19,9 @@ void kmalloc_init(void *heap_start, u32 heap_size);
 /* メモリ確保 (アライメント: 4バイト) */
 void *kmalloc(u32 size);
 
+/* ゼロクリア付き確保 (kmalloc + kmemset の手書きはこれに置き換える) */
+void *kzalloc(u32 size);
+
 /* メモリ解放 */
 void kfree(void *ptr);
 

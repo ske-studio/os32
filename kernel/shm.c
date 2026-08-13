@@ -124,7 +124,8 @@ int shm_lock(void *ptr)
     if (idx < 0) return -1;
 
     span = shm_block_span[idx];
-    if (span <= 0) return -1;
+    /* span が壊れていると idx+i が管理テーブル外に出る */
+    if (span <= 0 || idx + span > SHM_BLOCK_COUNT) return -1;
 
     for (i = 0; i < span; i++) {
         if (shm_state[idx + i] != SHM_USED) return -1;
@@ -156,7 +157,8 @@ int shm_free(void *ptr)
     if (idx < 0) return -1;
 
     span = shm_block_span[idx];
-    if (span <= 0) return -1;
+    /* span が壊れていると idx+i が管理テーブル外に出る */
+    if (span <= 0 || idx + span > SHM_BLOCK_COUNT) return -1;
 
     /* 全ブロックの全ページを R/W に戻して解放 */
     for (i = 0; i < span; i++) {

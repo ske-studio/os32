@@ -230,9 +230,8 @@ static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
 
 static void *ext2_vfs_mount(int dev_id)
 {
-    Ext2Ctx *ec = (Ext2Ctx *)kmalloc(sizeof(Ext2Ctx));
+    Ext2Ctx *ec = (Ext2Ctx *)kzalloc(sizeof(Ext2Ctx));
     if (!ec) return (void *)0;
-    kmemset(ec, 0, sizeof(Ext2Ctx));
     if (ext2_mount(ec, dev_id) != EXT2_OK) {
         kfree(ec);
         return (void *)0;

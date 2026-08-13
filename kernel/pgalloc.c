@@ -11,6 +11,7 @@
 /* ======================================================================== */
 
 #include "pgalloc.h"
+#include "kprintf.h"
 
 /* 最大16MBまでの物理ページ管理 */
 /* 0x400000〜0xFFFFFF = 12MB = 3072ページ */
@@ -104,11 +105,18 @@ void pgalloc_free_page(u32 phys_addr)
 {
     u32 idx;
     if (phys_addr < PGALLOC_BASE) return;
+    /* ページ非アラインの phys は別ページの解放に化けるので弾く */
+    if (phys_addr & (PAGE_SIZE - 1)) {
+        kprintf(0xC1, "[pgalloc] unaligned free %x\n", phys_addr);
+        return;
+    }
     idx = phys_to_idx(phys_addr);
     if (idx >= total_pages) return;
     if (bmp_test(idx)) {
         bmp_clear(idx);
         used_pages--;
+    } else {
+        kprintf(0xC1, "[pgalloc] double free %x\n", phys_addr);
     }
 }
 
@@ -150,6 +158,10 @@ void pgalloc_free_n(u32 phys_addr, int n)
 {
     u32 idx, i;
     if (phys_addr < PGALLOC_BASE || n <= 0) return;
+    if (phys_addr & (PAGE_SIZE - 1)) {
+        kprintf(0xC1, "[pgalloc] unaligned free_n %x\n", phys_addr);
+        return;
+    }
     idx = phys_to_idx(phys_addr);
     for (i = 0; i < (u32)n && (idx + i) < total_pages; i++) {
         if (bmp_test(idx + i)) {
@@ -166,6 +178,10 @@ void pgalloc_mark_used(u32 phys_start, int page_count)
 {
     u32 idx, i;
     if (phys_start < PGALLOC_BASE || page_count <= 0) return;
+    if (phys_start & (PAGE_SIZE - 1)) {
+        kprintf(0xC1, "[pgalloc] unaligned mark_used %x\n", phys_start);
+        return;
+    }
     idx = phys_to_idx(phys_start);
     for (i = 0; i < (u32)page_count && (idx + i) < total_pages; i++) {
         if (!bmp_test(idx + i)) {

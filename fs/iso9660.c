@@ -238,7 +238,8 @@ static void *iso9660_mount(int dev_id)
                      || pvd[3] != '0' || pvd[4] != '0' || pvd[5] != '1')
         return (void *)0;
 
-    ctx = (Iso9660Ctx *)kmalloc(sizeof(Iso9660Ctx));
+    /* kzalloc: 未初期化フィールドが残らないようにする */
+    ctx = (Iso9660Ctx *)kzalloc(sizeof(Iso9660Ctx));
     if (!ctx) return (void *)0;
 
     ctx->dev_id = dev_id;
