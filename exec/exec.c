@@ -1,5 +1,6 @@
 #include "exec.h"
 #include "exec_heap.h"
+#include "io.h"
 #include "console.h"
 #include "kstring.h"
 #include "vfs.h"
@@ -321,6 +322,12 @@ int exec_run(const char *cmdline)
     /* setjmp — 毎回実行 (ネスト対応) */
     if (exec_setjmp(ctx->jmpbuf) != 0) {
         /* ======== longjmp復帰ポイント ======== */
+
+        /* フォルト経由の復帰では例外ゲートが IF をクリアしたまま
+         * longjmp してくる (exec_longjmp は EFLAGS を復元しない)。
+         * exec_run の呼び出し元は常に割り込み有効で動いているので、
+         * ここで無条件に開けてよい。 */
+        _enable();
 
         ctx = &exec_ctx_stack[exec_nest_level];
 

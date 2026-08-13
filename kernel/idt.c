@@ -21,13 +21,39 @@ volatile u32 tick_count = 0;
 /*  外部ASMスタブ (isr_stub.asm で定義)                                     */
 /* ======================================================================== */
 
-/* CPU例外ハンドラ (0-31) */
+/* CPU例外ハンドラ (0-31) — 全ベクタに専用スタブを用意する */
 extern void isr_stub_0(void);     /* #DE ゼロ除算 */
 extern void isr_stub_1(void);     /* #DB デバッグ (V86シングルステップ) */
+extern void isr_stub_2(void);     /* NMI */
+extern void isr_stub_3(void);     /* #BP ブレークポイント */
+extern void isr_stub_4(void);     /* #OF オーバーフロー */
+extern void isr_stub_5(void);     /* #BR BOUND範囲外 */
 extern void isr_stub_6(void);     /* #UD 未定義命令 */
+extern void isr_stub_7(void);     /* #NM コプロセッサ不在 */
 extern void isr_stub_8(void);     /* #DF ダブルフォルト */
+extern void isr_stub_9(void);     /* コプロセッサセグメントオーバーラン */
+extern void isr_stub_10(void);    /* #TS 無効TSS */
+extern void isr_stub_11(void);    /* #NP セグメント不在 */
+extern void isr_stub_12(void);    /* #SS スタックフォルト */
 extern void isr_stub_13(void);    /* #GP 一般保護例外 */
 extern void isr_stub_14(void);    /* #PF ページフォルト */
+extern void isr_stub_15(void);    /* 予約 */
+extern void isr_stub_16(void);    /* #MF x87 FPUエラー */
+extern void isr_stub_17(void);    /* #AC アライメントチェック */
+extern void isr_stub_18(void);    /* #MC マシンチェック */
+extern void isr_stub_19(void);    /* #XM SIMD FPU例外 */
+extern void isr_stub_20(void);    /* 予約 (20-31) */
+extern void isr_stub_21(void);
+extern void isr_stub_22(void);
+extern void isr_stub_23(void);
+extern void isr_stub_24(void);
+extern void isr_stub_25(void);
+extern void isr_stub_26(void);
+extern void isr_stub_27(void);
+extern void isr_stub_28(void);
+extern void isr_stub_29(void);
+extern void isr_stub_30(void);
+extern void isr_stub_31(void);
 
 /* IRQハンドラ */
 extern void irq_stub_0(void);     /* IRQ0: タイマ (INT 0x20) */
@@ -39,7 +65,17 @@ extern void irq_stub_2(void);     /* IRQ2:  VSYNC (INT 0x22) — V86 ゲスト�
 extern void irq_stub_12(void);    /* IRQ12: サウンドボード (INT 0x2C) */
 extern void irq_stub_13(void);    /* IRQ13: マウス (INT 0x2D) */
 
-/* デフォルトハンドラ */
+/* 未登録ハード IRQ 用スタブ (EOI + 診断表示のみ) */
+extern void irq_stub_unexp_3(void);
+extern void irq_stub_unexp_5(void);
+extern void irq_stub_unexp_6(void);
+extern void irq_stub_unexp_8(void);
+extern void irq_stub_unexp_9(void);
+extern void irq_stub_unexp_10(void);
+extern void irq_stub_unexp_14(void);
+extern void irq_stub_unexp_15(void);
+
+/* デフォルトハンドラ (ベクタ 0x30 以降のみ) */
 extern void isr_stub_default(void);
 
 /* ======================================================================== */
@@ -67,13 +103,22 @@ void idt_init(void)
         idt_set_gate(i, isr_stub_default, IDT_ATTR_INT_GATE32);
     }
 
-    /* CPU例外ハンドラ */
-    idt_set_gate(0,  isr_stub_0,  IDT_ATTR_INT_GATE32);   /* #DE ゼロ除算 */
-    idt_set_gate(1,  isr_stub_1,  IDT_ATTR_INT_GATE32);   /* #DB デバッグ */
-    idt_set_gate(6,  isr_stub_6,  IDT_ATTR_INT_GATE32);   /* #UD 未定義命令 */
-    idt_set_gate(8,  isr_stub_8,  IDT_ATTR_INT_GATE32);   /* #DF ダブルフォルト */
-    idt_set_gate(13, isr_stub_13, IDT_ATTR_INT_GATE32);   /* #GP 一般保護例外 */
-    idt_set_gate(14, isr_stub_14, IDT_ATTR_INT_GATE32);   /* #PF ページフォルト */
+    /* CPU例外ハンドラ — 0-31 全ベクタを専用スタブで受ける */
+    {
+        static void (*const exc_stubs[32])(void) = {
+            isr_stub_0,  isr_stub_1,  isr_stub_2,  isr_stub_3,
+            isr_stub_4,  isr_stub_5,  isr_stub_6,  isr_stub_7,
+            isr_stub_8,  isr_stub_9,  isr_stub_10, isr_stub_11,
+            isr_stub_12, isr_stub_13, isr_stub_14, isr_stub_15,
+            isr_stub_16, isr_stub_17, isr_stub_18, isr_stub_19,
+            isr_stub_20, isr_stub_21, isr_stub_22, isr_stub_23,
+            isr_stub_24, isr_stub_25, isr_stub_26, isr_stub_27,
+            isr_stub_28, isr_stub_29, isr_stub_30, isr_stub_31
+        };
+        for (i = 0; i < 32; i++) {
+            idt_set_gate(i, exc_stubs[i], IDT_ATTR_INT_GATE32);
+        }
+    }
 
     /* IRQハンドラ (PIC再マッピング後) */
     idt_set_gate(0x20, irq_stub_0, IDT_ATTR_INT_GATE32);  /* IRQ0: タイマ */
@@ -84,6 +129,18 @@ void idt_init(void)
     idt_set_gate(0x22, irq_stub_2,  IDT_ATTR_INT_GATE32); /* IRQ2:  VSYNC (V86ゲスト用) */
     idt_set_gate(0x2C, irq_stub_12, IDT_ATTR_INT_GATE32); /* IRQ12: サウンド (V86ゲスト用) */
     idt_set_gate(0x2D, irq_stub_13, IDT_ATTR_INT_GATE32); /* IRQ13: マウス */
+
+    /* 未登録のハード IRQ にも EOI 付きスタブを入れる。
+     * 素の iretd スタブだと PIC の ISR ビットが立ったままになり、
+     * 同順位以下の IRQ が永久にブロックされる。 */
+    idt_set_gate(0x23, irq_stub_unexp_3,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x25, irq_stub_unexp_5,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x26, irq_stub_unexp_6,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x28, irq_stub_unexp_8,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x29, irq_stub_unexp_9,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2A, irq_stub_unexp_10, IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2E, irq_stub_unexp_14, IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2F, irq_stub_unexp_15, IDT_ATTR_INT_GATE32);
 
     /* IDTRをロード */
     idtp.limit = sizeof(idt) - 1;

@@ -47,6 +47,20 @@ static inline void _disable(void) {
     __asm__ volatile("cli" : : : "memory");
 }
 
+/* ---- 割り込み状態の保存/復元 ---- */
+/* 盲目的な cli/sti ペアの代替。呼び出し時点の EFLAGS を保存して CLI し、  */
+/* irq_restore() で IF を元の状態 (有効/無効) に戻す。割り込み禁止区間が   */
+/* ネストしても安全 (内側の restore が外側の禁止状態を壊さない)。          */
+static inline unsigned int irq_save(void) {
+    unsigned int flags;
+    __asm__ volatile("pushfl\n\tpopl %0\n\tcli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void irq_restore(unsigned int flags) {
+    __asm__ volatile("pushl %0\n\tpopfl" : : "r"(flags) : "memory", "cc");
+}
+
 /* ---- 特権命令 ---- */
 static inline void _lidt(void *ptr) {
     __asm__ volatile("lidt (%0)" : : "r"(ptr) : "memory");

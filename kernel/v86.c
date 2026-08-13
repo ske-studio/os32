@@ -16,6 +16,7 @@
 #include "loop_dev.h"
 #include "idt.h"
 #include "kprintf.h"
+#include "io.h"
 
 /* setjmp/longjmp (kernel/setjmp.asm) — セッションからの脱出に使う */
 extern int  exec_setjmp(u32 *buf);
@@ -418,8 +419,10 @@ int v86_run(const struct v86_context *ctx)
      *
      * longjmp は EFLAGS を復元しないため、これを直さずに返すと
      * カーネルが割り込み禁止のまま動き続ける。実際にこれを踏んで、
-     * シェルがタイマ待ちループから二度と抜けなくなった。 */
-    __asm__ volatile("pushfl\n\tpopl %0" : "=r"(saved_eflags));
+     * シェルがタイマ待ちループから二度と抜けなくなった。
+     * (irq_save は CLI も行うが、直後の v86_enter がゲスト EFLAGS を
+     *  iretd でロードするので問題ない) */
+    saved_eflags = irq_save();
 
     v86_exit_reason = V86_EXIT_NONE;
     v86_exit_request = 0;
@@ -454,7 +457,7 @@ int v86_run(const struct v86_context *ctx)
     tss_set_esp0(saved_esp0);
 
     /* IF と IOPL を呼び出し前の状態に戻す */
-    __asm__ volatile("pushl %0\n\tpopfl" : : "r"(saved_eflags) : "cc");
+    irq_restore(saved_eflags);
 
     return (int)v86_exit_reason;
 }

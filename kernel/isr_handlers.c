@@ -9,6 +9,7 @@
 #include "io.h"
 #include "paging.h"
 #include "memmap.h"
+#include "kprintf.h"
 
 /* exec フォルト復帰用 (exec.c で定義) */
 extern volatile int exec_nest_level;
@@ -206,7 +207,15 @@ static const char *exception_names[] = {
     "#SS Stack Fault",         /* 12 */
     "#GP General Protection",  /* 13 */
     "#PF Page Fault",          /* 14 */
+    "Reserved (15)",           /* 15 */
+    "#MF x87 FP Error",        /* 16 */
+    "#AC Alignment Check",     /* 17 */
+    "#MC Machine Check",       /* 18 */
+    "#XM SIMD FP Exception",   /* 19 */
 };
+
+#define EXCEPTION_NAME_COUNT \
+    ((u32)(sizeof(exception_names) / sizeof(exception_names[0])))
 
 void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
                        u32 *regs)
@@ -226,7 +235,7 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
         }
     }
 
-    if (vector < 15)
+    if (vector < EXCEPTION_NAME_COUNT)
         name = exception_names[vector];
     else
         name = "Unknown Exception";
@@ -268,7 +277,9 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
     /* exec実行中なら復帰、それ以外はシステム停止 */
     if (exec_nest_level > 0) {
         tvram_puts_at(24, 0, " >> Returning to shell...               ", 0xA1);
-        _enable();
+        /* ここで _enable() してはいけない。IRQ ハンドラ内のフォルトだと
+         * EOI 前に割り込みを開けて longjmp することになり、その IRQ が
+         * 恒久ブロックされる。IF は exec_run の setjmp 復帰側で戻す。 */
         exec_fault_recover();
     }
 
@@ -363,12 +374,47 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
     /* exec実行中なら復帰、それ以外はシステム停止 */
     if (exec_nest_level > 0) {
         tvram_puts_at(24, 0, " >> Returning to shell...               ", 0xA1);
-        _enable();
+        /* ここで _enable() してはいけない。IRQ ハンドラ内のフォルトだと
+         * EOI 前に割り込みを開けて longjmp することになり、その IRQ が
+         * 恒久ブロックされる。IF は exec_run の setjmp 復帰側で戻す。 */
         exec_fault_recover();
     }
 
     tvram_puts_at(24, 0, " System halted.                         ", 0x41);
     for (;;) { /* hlt */ }
+}
+
+/* ======================================================================== */
+/*  isr_unexpected_irq — 未登録ハード IRQ の受け皿                          */
+/*  (isr_stub.asm の irq_stub_unexp_* から呼ばれる)                         */
+/*                                                                          */
+/*  ここに来るのは OS32 が使っていない IRQ が上がった場合。EOI を送らないと */
+/*  PIC の ISR ビットが立ったままになり同順位以下が永久ブロックされるため、 */
+/*  正しいマスタ/スレーブ EOI を送り、初回のみ診断を表示する。              */
+/* ======================================================================== */
+void isr_unexpected_irq(u32 irq)
+{
+    static u16 reported = 0;
+
+    if (irq == 15) {
+        /* スレーブ側スプリアス (IRQ15): ISR を読んで IR7 が立っていなければ
+         * スレーブへの EOI は送らない (マスタのカスケード分のみ)。 */
+        u8 slave_isr;
+        outp(PIC2_CMD, OCW3_ISR);
+        slave_isr = (u8)inp(PIC2_CMD);
+        outp(PIC2_CMD, OCW3_IRR);       /* 既定の IRR 読み出しに戻す */
+        if (!(slave_isr & 0x80)) {
+            outp(PIC1_CMD, OCW2_EOI);
+            return;
+        }
+    }
+
+    pic_eoi((unsigned int)irq);
+
+    if (irq < 16 && !(reported & (u16)(1u << irq))) {
+        reported |= (u16)(1u << irq);
+        kprintf(0xC1, "[isr] unexpected IRQ%d (EOI sent)\n", (int)irq);
+    }
 }
 
 /* ======================================================================== */

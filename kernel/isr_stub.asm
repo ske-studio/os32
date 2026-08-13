@@ -139,13 +139,74 @@ isr_stub_%1:
         jmp     %%hang
 %endmacro
 
-;; 例外スタブ生成
+;; マクロ: エラーコードあり例外 — V86 分岐付き
+;;
+;; エラーコードは CPU が自動 push 済みなので、エントリ時のスタックは
+;; [errcode][EIP][CS][EFLAGS]。VM ビットは [esp+12] にある。
+;; V86 側フレーム形は ISR_NOERR_V86 と同じ ([PUSHAD][errcode][EIP]...)。
+%macro ISR_ERR_V86 1
+global isr_stub_%1
+isr_stub_%1:
+        cli
+        test    dword [esp + 12], 0x00020000  ;; EFLAGS.VM
+        jnz     %%from_v86
+
+        push    %1              ;; 例外番号
+        jmp     isr_common
+
+%%from_v86:
+        pushad
+
+        RESTORE_KSEG
+
+        mov     eax, esp
+        push    dword %1                ;; 引数2: ベクタ
+        push    eax                     ;; 引数1: フレーム先頭 (u32*)
+        call    v86_fault_handler
+        add     esp, 8
+
+        call    v86_exit_to_kernel
+%%hang:
+        cli
+        hlt
+        jmp     %%hang
+%endmacro
+
+;; 例外スタブ生成 — ベクタ 0-31 をすべて専用スタブで受ける。
+;; 以前は未登録の例外がデフォルトスタブ (EOI なし iretd) に落ちて
+;; 無限フォルトループになっていた。
 ISR_NOERR_V86 0                ;; #DE ゼロ除算
 ISR_NOERR_V86 1                ;; #DB デバッグ (V86シングルステップ用)
+ISR_NOERR_V86 2                ;; NMI
+ISR_NOERR_V86 3                ;; #BP ブレークポイント
+ISR_NOERR_V86 4                ;; #OF オーバーフロー
+ISR_NOERR_V86 5                ;; #BR BOUND範囲外
 ISR_NOERR_V86 6                ;; #UD 未定義命令
+ISR_NOERR_V86 7                ;; #NM コプロセッサ不在
 ISR_ERR   8                    ;; #DF ダブルフォルト
+ISR_NOERR_V86 9                ;; コプロセッサセグメントオーバーラン
+ISR_ERR_V86   10               ;; #TS 無効TSS
+ISR_ERR_V86   11               ;; #NP セグメント不在
+ISR_ERR_V86   12               ;; #SS スタックフォルト
 ;; #GP (13) は V86 分岐が要るので専用スタブ (下記)
 ;; #PF は専用スタブを使用 (下記 pf_stub)
+ISR_NOERR_V86 15               ;; 予約
+ISR_NOERR_V86 16               ;; #MF x87 FPUエラー
+ISR_ERR_V86   17               ;; #AC アライメントチェック
+ISR_NOERR_V86 18               ;; #MC マシンチェック
+ISR_NOERR_V86 19               ;; #XM SIMD FPU例外
+ISR_NOERR_V86 20               ;; 予約 (20-31)
+ISR_NOERR_V86 21
+ISR_NOERR_V86 22
+ISR_NOERR_V86 23
+ISR_NOERR_V86 24
+ISR_NOERR_V86 25
+ISR_NOERR_V86 26
+ISR_NOERR_V86 27
+ISR_NOERR_V86 28
+ISR_NOERR_V86 29
+ISR_NOERR_V86 30
+ISR_NOERR_V86 31
 
 ;; ============================================================
 ;; #GP 一般保護例外 (ISR 13) — V86 分岐付き
@@ -295,11 +356,45 @@ isr_stub_14:
         iretd
 
 ;; ============================================================
-;; デフォルトハンドラ (何もせずIRETD)
+;; デフォルトハンドラ (ベクタ 0x30 以降の未使用ソフトウェア割り込み用)
+;;
+;; 例外 (0-31) とハード IRQ (0x20-0x2F) はすべて専用スタブを持つので、
+;; ここに落ちるのはカーネル内の明示的な INT n だけ。何もせず復帰する。
 ;; ============================================================
 global isr_stub_default
 isr_stub_default:
         iretd
+
+;; ============================================================
+;; 未登録ハード IRQ 用デフォルトスタブ
+;;
+;; 以前は isr_stub_default (EOI なし iretd) が全ベクタに入っていたため、
+;; 未登録の IRQ が一度でも上がると PIC の ISR ビットが立ったままになり、
+;; 同順位以下の IRQ が永久にブロックされていた (実際 IRQ9 で発生)。
+;; C 側 isr_unexpected_irq() が正しいマスタ/スレーブ EOI と診断表示を行う。
+;; ============================================================
+extern isr_unexpected_irq
+
+%macro IRQ_UNEXP 1
+global irq_stub_unexp_%1
+irq_stub_unexp_%1:
+        pushad
+        RESTORE_KSEG
+        push    dword %1                ;; IRQ 番号 (ベクタではない)
+        call    isr_unexpected_irq
+        add     esp, 4
+        popad
+        iretd
+%endmacro
+
+IRQ_UNEXP 3                     ;; INT 0x23
+IRQ_UNEXP 5                     ;; INT 0x25
+IRQ_UNEXP 6                     ;; INT 0x26
+IRQ_UNEXP 8                     ;; INT 0x28
+IRQ_UNEXP 9                     ;; INT 0x29
+IRQ_UNEXP 10                    ;; INT 0x2A
+IRQ_UNEXP 14                    ;; INT 0x2E
+IRQ_UNEXP 15                    ;; INT 0x2F
 
 ;; ============================================================
 ;; IRQ0: タイマ割り込み (INT 0x20)
@@ -394,7 +489,12 @@ irq_stub_7:
         mov     al, 0x0B        ;; OCW3: ISR読み出し指定
         out     PIC1_CMD, al
         in      al, PIC1_CMD
-        test    al, 0x80        ;; IR7がセットされているか
+        mov     ah, al          ;; ISR 値を退避
+        ;; OCW3 を IRR 読み出しに戻す (pic_init が設定した既定モード)。
+        ;; 戻さないと以後の PIC1_CMD リードが全部 ISR を返してしまう。
+        mov     al, 0x0A        ;; OCW3: IRR読み出し指定
+        out     PIC1_CMD, al
+        test    ah, 0x80        ;; IR7がセットされているか
         jnz     .real            ;; 本物の割り込みなら処理
 
         ;; スプリアス → EOIを送らずに無視
