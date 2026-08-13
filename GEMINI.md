@@ -272,6 +272,12 @@ Build artifacts land in `build/out/` (gitignored), not the repository root.
 
 ## ⚠️ Known Gotchas
 
+**カーネル内 selftest はブート時に必ず走る** (`kernel/kselftest.c`): kstring_asm /
+kmalloc / kprintf の境界ケースを実機で毎回検証する。失敗すると赤字で項目名が出る。
+`programs/tests/klibc_test.c` は **newlib とリンクされる**ので、あちらが通っても
+カーネル側の実装は検証されない。プリミティブを触ったら selftest に項目を足すこと。
+結果は `kselftest_pass` / `kselftest_fail` を `emu_read_mem` で読める。
+
 **ABI break after KernelAPI change**: After modifying `KernelAPI` struct, run `make clean` before rebuilding. Stale `.o` files with old struct layout cause silent corruption.
 
 **KAPI にポインタ検証はない (設計上の制約)**: GDT にユーザディスクリプタが
