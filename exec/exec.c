@@ -115,8 +115,13 @@ void exec_exit(int status)
     if (exec_nest_level > 0) {
         exec_exit_status = status;
 
-        /* 現在のレベルのクリーンアップ (ガードページ解除 + ヒープリセット) */
-        ctx = &exec_ctx_stack[exec_nest_level];
+        /* 現在のレベルのクリーンアップ (ガードページ解除 + ヒープリセット)。
+         *
+         * ネストレベル N で走っているプログラムのコンテキストは、親の
+         * exec_run がインデックス N-1 に書いたもの。[exec_nest_level] を
+         * 読むと 1 つ先 (未初期化/過去のゴミ、N==MAX_EXEC_NEST なら配列外)
+         * を参照し、ゴミの guard_a に対して paging_set_page してしまう。 */
+        ctx = &exec_ctx_stack[exec_nest_level - 1];
         if (ctx->guard_a != 0) {
             paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
             paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
@@ -438,7 +443,16 @@ int exec_run(const char *cmdline)
         const char *s = cmdline;
         char *d;
         u32 new_esp;
-        static u32 saved_esp;
+        /* 呼び出し元 ESP の退避先。
+         *
+         * ローカル変数にしないのは、子プログラムのスタックへ切り替えた後の
+         * 復帰ムーブが %esp/%ebp 相対アドレスでは読めないため (static なら
+         * 絶対アドレスでアクセスされる)。
+         *
+         * 単一の static だとネスト exec で上書きされる: 子 A の実行中に
+         * 孫 B を exec すると B の退避値が A のものを潰し、A の main が
+         * 通常 return したときに壊れた ESP を復元していた。レベル別に持つ。 */
+        static u32 saved_esp_stack[MAX_EXEC_NEST];
 
         stack_top -= (cmd_len + 1);
         stack_top &= ~((u32)STACK_ALIGN_MASK);
@@ -495,7 +509,7 @@ int exec_run(const char *cmdline)
             "call *%5\n\t"
             "add $12, %%esp\n\t"
             "mov %0, %%esp"
-            : "=m"(saved_esp)
+            : "=m"(saved_esp_stack[exec_nest_level - 1])
             : "r"(new_esp), "g"(argc), "g"(argv_area), "g"(kapi), "r"(entry)
             : "eax", "ecx", "edx", "memory"
         );
