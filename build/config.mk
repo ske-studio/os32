@@ -7,6 +7,12 @@
 BUILD_OUT = build/out
 $(shell mkdir -p $(BUILD_OUT))
 
+# ユーザー空間ライブラリのアーカイブ (.a) 出力先。
+# 外部プログラムはここを -L で見る。将来 SDK を切り出すときは
+# このディレクトリがそのまま sysroot の lib/ になる。
+LIBDIR = $(BUILD_OUT)/lib
+$(shell mkdir -p $(LIBDIR))
+
 # 環境変数 (デプロイ先)
 NP21W_DIR ?= /tmp/np21w
 
@@ -18,6 +24,7 @@ PROJDIR = .
 
 # Tools
 CC = i386-elf-gcc
+AR = i386-elf-ar
 AS = nasm
 LD = i386-elf-ld
 OBJCOPY = i386-elf-objcopy
@@ -91,7 +98,13 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --
 # 必要なターゲットだけに渡すこと (一括で並べると層の逆流が隠れる)。
 PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude -Iprograms -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
-	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
+	-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
+
+# ライブラリアーカイブは --start-group で囲む。アーカイブは左から順に
+# 一度しか走査されないため、並び順が依存順と食い違うと未解決シンボルになる。
+# グループで囲めば解決しなくなるまで反復するので、並び順を気にしなくてよい。
+LGRP_BEG = --start-group
+LGRP_END = --end-group
 
 # === CRT0 / デバッグオブジェクト ===
 CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o

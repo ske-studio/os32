@@ -35,7 +35,7 @@ programs/shell/%.o: programs/shell/%.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/shell $(INC_libos32filer) -c $< -o $@
 
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
-	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ) -lc -lgcc
+	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) $(LGRP_END) -lc -lgcc
 
 # === Edit (VZ-inspired Editor) Module ===
 EDIT_SRC = $(wildcard programs/apps/edit/*.c)
@@ -45,7 +45,7 @@ programs/apps/edit/%.o: programs/apps/edit/%.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/edit $(INC_libos32gfx) -Ilib -c $< -o $@
 
 programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
 # === Game (対戦スゴロクRPG) Module ===
 GAME_SRC = $(wildcard programs/apps/game/*.c)
@@ -69,7 +69,7 @@ programs/apps/game/%.o: programs/apps/game/%.c
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game $(GAME_INC) -c $< -o $@
 
 programs/apps/game.elf: build/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(LGRP_BEG) $(GAME_LIBS) $(LGRP_END) -lc -lgcc
 
 # (SKK Module / LZSS Command は廃止済み)
 
@@ -114,7 +114,7 @@ programs/tests/bench/%.o: programs/tests/bench/%.c
 	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/tests/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
 bench: $(CRT0_OBJ) programs/tests/bench.bin
 
@@ -126,7 +126,7 @@ programs/tests/bench_scale2x/%.o: programs/tests/bench_scale2x/%.c
 	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/tests/bench_scale2x.elf: build/app.ld $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
 bench_scale2x: $(CRT0_OBJ) programs/tests/bench_scale2x.bin
 
@@ -141,7 +141,7 @@ programs/tests/$(1).o: programs/tests/$(1).c
 	$$(CC) $$(PROGRAM_FLAGS) $(3) -c $$< -o $$@
 
 programs/tests/$(1).elf: build/app.ld $$(CRT0_OBJ) programs/tests/$(1).o $(2)
-	$$(LD) $$(PROGRAM_LDFLAGS) -o $$@ $$(CRT0_OBJ) programs/tests/$(1).o $(2) -lc -lgcc
+	$$(LD) $$(PROGRAM_LDFLAGS) -o $$@ $$(CRT0_OBJ) programs/tests/$(1).o $$(LGRP_BEG) $(2) $$(LGRP_END) -lc -lgcc
 
 $(1): $$(CRT0_OBJ) programs/tests/$(1).bin
 
@@ -194,7 +194,7 @@ programs/apps/$(1).o: programs/apps/$(1).c
 	$$(CC) $$(PROGRAM_FLAGS) $$(INC_libos32gfx) $(3) -c $$< -o $$@
 
 programs/apps/$(1).elf: build/app.ld $$(CRT0_OBJ) programs/apps/$(1).o $$(GFX_OBJ) $(2)
-	$$(LD) $$(PROGRAM_LDFLAGS) -o $$@ $$(CRT0_OBJ) programs/apps/$(1).o $$(GFX_OBJ) $(2) -lc -lgcc
+	$$(LD) $$(PROGRAM_LDFLAGS) -o $$@ $$(CRT0_OBJ) programs/apps/$(1).o $$(LGRP_BEG) $$(GFX_OBJ) $(2) $$(LGRP_END) -lc -lgcc
 
 $(1): $$(CRT0_OBJ) programs/apps/$(1).bin
 
@@ -215,7 +215,7 @@ programs/apps/vbzview.o: programs/apps/vbzview.c
 	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/apps/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vbzview.o $(GFX_OBJ) $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/apps/vbzview.o $(GFX_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/apps/vbzview.o $(LGRP_BEG) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
 vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 
@@ -224,7 +224,7 @@ programs/apps/mdview.o: programs/apps/mdview.c programs/libos32md/libos32md.h pr
 	$(CC) $(PROGRAM_FLAGS) $(INC_libos32md) $(INC_libos32filer) -c $< -o $@
 
 programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(DBG_OBJ) $(LGRP_BEG) $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
 mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
@@ -233,7 +233,7 @@ programs/apps/ui_demo/ui_demo.o: programs/apps/ui_demo/ui_demo.c
 	$(CC) $(PROGRAM_FLAGS) $(INC_libos32ui) -c $< -o $@
 
 programs/apps/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(LGRP_BEG) $(GFX_OBJ) $(LIBUI_OBJ) $(LGRP_END) -lc -lgcc
 
 ui_demo: $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.bin
 
@@ -333,8 +333,8 @@ $(RUST_TARGET_DIR)/lib$(1).a: FORCE $(RUST_KAPI_RS)
 
 $(2)/$(1).elf: build/app.ld $$(CRT0_OBJ) $(RUST_TARGET_DIR)/lib$(1).a $(3)
 	$$(LD) $$(PROGRAM_LDFLAGS) --allow-multiple-definition \
-		-o $$@ $$(CRT0_OBJ) $(3) \
-		$(RUST_TARGET_DIR)/lib$(1).a \
+		-o $$@ $$(CRT0_OBJ) \
+		$$(LGRP_BEG) $(3) $(RUST_TARGET_DIR)/lib$(1).a $$(LGRP_END) \
 		-lc -lgcc
 
 $(1)_rust: $$(CRT0_OBJ) $(2)/$(1).bin
