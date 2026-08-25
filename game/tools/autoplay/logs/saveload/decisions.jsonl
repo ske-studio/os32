@@ -1,4 +1,0 @@
-{"event": "scenario_start", "name": "セーブ→再起動→ロードで状態が一致するか", "file": "tools/autoplay/scenarios/save_load.json", "ts": "11:43:32"}
-{"event": "wait", "step": 0, "want": "DICE", "ok": false, "ts": "11:45:32"}
-{"event": "scenario_fail", "step": 0, "anomalies": ["wait timeout: DICE"], "shot": "/home/hight/os32/tools/autoplay/logs/saveload/shots/fail_0.png", "ts": "11:45:33"}
-{"event": "scenario_end", "ok": false, "ts": "11:45:33"}

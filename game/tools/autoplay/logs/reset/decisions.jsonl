@@ -1,5 +1,0 @@
-{"event": "scenario_start", "name": "reset to dice", "file": "/dev/fd/63", "ts": "11:50:30"}
-{"event": "key", "step": 0, "key": "3", "ts": "11:50:31"}
-{"event": "key", "step": 2, "key": "3", "ts": "11:50:34"}
-{"event": "wait", "step": 4, "want": "DICE", "ok": true, "ts": "11:50:36"}
-{"event": "scenario_end", "ok": true, "ts": "11:50:36"}
