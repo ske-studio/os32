@@ -132,4 +132,8 @@ append:
       guest: /data/images/
     - host: "assets/images/*.vdp"
       guest: /data/images/
+    - host: "assets/manga/*.mgx"
+      guest: /data/manga/
+    - host: "assets/manga/*.MGX"
+      guest: /data/manga/
 

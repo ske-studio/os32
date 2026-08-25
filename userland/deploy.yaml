@@ -205,6 +205,17 @@ filesystem:
     - host: userland/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
+    # --- MGX 漫画サンプルページ (tools/img2mgx.py で生成) ---
+    - host: "assets/manga/*.MGX"
+      guest: /data/manga/
+      type: glob
+      tags: [data]
+    # --- bpp 別ベンチ用 (同一画像を bpp 1..4 で符号化したもの) ---
+    - host: "assets/manga/bench/*.MGX"
+      guest: /data/manga/bench/
+      type: glob
+      tags: [data]
+
     # --- ビットマップフォント (KCG キャッシュ形式) ---
     # カーネルが起動時に /sys/font/default.kcgfont を読む
     # (kernel.c の kcg_load_font)。tools/gen_font16.py で生成する。

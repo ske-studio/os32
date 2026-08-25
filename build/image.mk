@@ -34,7 +34,6 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 packages: programs
 	python3 tools/mkpkg.py --defs build/core_packages.yaml \
 	                     --defs userland/package_defs.yaml \
-	                     --defs game/package_defs.yaml \
 	                     --output packages/ --base .
 
 iso: packages

@@ -39,7 +39,6 @@ DEPLOY_MANIFESTS = [
 PACKAGE_MANIFESTS = [
     "build/core_packages.yaml",
     "userland/package_defs.yaml",
-    "game/package_defs.yaml",
 ]
 APP_CONF = "build/app.conf"
 
