@@ -542,7 +542,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--png', action='store_true')
     ap.add_argument('--write', action='store_true',
-                    help='assets/board.db を生成する')
+                    help='game/build/db/board.db を生成する')
     args = ap.parse_args()
 
     masses, conns, gate_conns, ids, cells = build()
@@ -575,7 +575,7 @@ def main():
         if problems:
             print('  ! 問題があるので board.db は書き出さない')
             return 1
-        out = os.path.join(PROJ_DIR, 'assets', 'board.db')
+        out = os.path.join(PROJ_DIR, 'build', 'db', 'board.db')
         nc, na = write_db(masses, conns, gate_conns, out)
         print('  board.db -> %s' % os.path.normpath(out))
         print('    %d masses, %d connections, %d areas' % (len(masses), nc, na))

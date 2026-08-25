@@ -4,7 +4,7 @@
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', 'items.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'build', 'db', 'items.db')
 
 def main():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)

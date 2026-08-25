@@ -1,41 +1,15 @@
 # ============================================================================
-#  OS32 パッケージ定義 (package_defs.yaml)
+#  userland/package_defs.yaml — 標準ユーザーランドのパッケージ内容
 #
-#  mkpkg.py が読み込み、各パッケージの .PKG ファイルを生成する。
-#
-#  各パッケージ:
-#    type: package (通常) / boot (ブートセクタ直接書込み)
-#    version: パッケージバージョン (整数)
-#    lzss: true/false (LZSS圧縮の有無)
-#    files: ファイルリスト (host: ビルドパス, guest: インストール先パス)
+#  カーネル層は build/core_packages.yaml、ゲームは game/package_defs.yaml。
+#  mkpkg.py が同名パッケージをマージする。
 # ============================================================================
-
-# --- ブートパッケージ (特殊: ブートセクタ直接書込み) ---
-boot:
-  type: boot
-  version: 1
-  lzss: false
-  files:
-    - host: boot/boot_hdd.bin
-      guest: /boot/boot_hdd.bin
-    - host: boot/loader_hdd.bin
-      guest: /boot/loader_hdd.bin
 
 # --- 最小パッケージ ---
 minimal:
-  type: package
-  version: 1
-  # lzss: true
-  lzss: false
   files:
-    # loader v3 (ext2+LZ4) が読むカーネルイメージ。これが無いと
-    # CD インストール後の HDD 起動が /boot/vmkernel.lz4 NOT FOUND で失敗する。
-    - host: build/out/vmkernel.lz4
-      guest: /boot/vmkernel.lz4
     - host: userland/shell.bin
       guest: /sys/shell.bin
-    - host: build/out/unicode.bin
-      guest: /sys/unicode.bin
     - host: userland/cmds/more.bin
       guest: /bin/more.bin
     - host: userland/cmds/less.bin
@@ -158,7 +132,4 @@ append:
       guest: /data/images/
     - host: "assets/images/*.vdp"
       guest: /data/images/
-    - host: "game/assets/manga/*.mgx"
-      guest: /data/manga/
-    - host: "game/assets/manga/*.MGX"
-      guest: /data/manga/
+

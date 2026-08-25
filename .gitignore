@@ -22,6 +22,9 @@
 # SDK staging (make sdk の出力。sdk/ のソースから毎回組み立てる)
 /build/sdk/
 
+# ゲームの生成データ (make game-data で game/data/ のスクリプトから作る)
+/game/build/
+
 # 特定の生成ファイル
 /unicode.bin
 /tools/gen_unicode

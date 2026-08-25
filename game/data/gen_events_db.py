@@ -3,8 +3,8 @@
 """
 gen_events_db.py — libos32event 用イベント定義の生成
 
-  --game (既定)  assets/events.db       対戦スゴロクRPG の週次イベント9種
-  --test         assets/events_test.db  evt_test が前提とする汎用テストデータ
+  --game (既定)  game/build/db/events.db       対戦スゴロクRPG の週次イベント9種
+  --test         game/build/db/events_test.db  evt_test が前提とする汎用テストデータ
 
 evt_tick() は毎ターン呼ぶ。libos32event の乱数発火は
 「rng % 256 < 無発生カウンタ」で、カウンタは tick ごとに +1 されるため、
@@ -25,7 +25,7 @@ import sqlite3
 import sys
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         '..', 'assets')
+                         '..', 'build', 'db')
 
 TYPE_PERIODIC = 0
 TYPE_RANDOM = 1

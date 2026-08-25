@@ -1,0 +1,48 @@
+# ============================================================================
+#  core_packages.yaml — カーネル層が提供するパッケージ内容
+#
+#  パッケージ (BOOT/MINIMAL/NORMAL/FULL/DEBUG/APPEND) の中身は層ごとに
+#  分かれている。mkpkg.py が同名パッケージの files: を連結して 1 つの
+#  .PKG にする。メタデータ (type / version / lzss) は、そのパッケージを
+#  最初に定義した層のものを使う (core -> userland -> game の順)。
+#
+#  ここには自層の成果物しか書かないこと。
+# ============================================================================
+
+# ============================================================================
+#  OS32 パッケージ定義 (package_defs.yaml)
+#
+#  mkpkg.py が読み込み、各パッケージの .PKG ファイルを生成する。
+#
+#  各パッケージ:
+#    type: package (通常) / boot (ブートセクタ直接書込み)
+#    version: パッケージバージョン (整数)
+#    lzss: true/false (LZSS圧縮の有無)
+#    files: ファイルリスト (host: ビルドパス, guest: インストール先パス)
+# ============================================================================
+
+# --- ブートパッケージ (特殊: ブートセクタ直接書込み) ---
+boot:
+  type: boot
+  version: 1
+  lzss: false
+  files:
+    - host: boot/boot_hdd.bin
+      guest: /boot/boot_hdd.bin
+    - host: boot/loader_hdd.bin
+      guest: /boot/loader_hdd.bin
+
+# --- 最小パッケージ ---
+minimal:
+  type: package
+  version: 1
+  # lzss: true
+  lzss: false
+  files:
+    # loader v3 (ext2+LZ4) が読むカーネルイメージ。これが無いと
+    # CD インストール後の HDD 起動が /boot/vmkernel.lz4 NOT FOUND で失敗する。
+    - host: build/out/vmkernel.lz4
+      guest: /boot/vmkernel.lz4
+    - host: build/out/unicode.bin
+      guest: /sys/unicode.bin
+

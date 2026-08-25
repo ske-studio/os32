@@ -129,8 +129,8 @@ PKG_TYPE_DIR  = 1
 
 # KAPI_VERSION を os32_kapi_shared.h から読み取る
 def read_kapi_version(base_dir):
-    """include/os32_kapi_shared.h から KAPI_VERSION を取得"""
-    path = os.path.join(base_dir, 'include', 'os32_kapi_shared.h')
+    """SDK の契約ヘッダから KAPI_VERSION を取得"""
+    path = os.path.join(base_dir, 'sdk', 'include', 'os32', 'os32_kapi_shared.h')
     try:
         with open(path, 'r') as f:
             for line in f:
@@ -222,10 +222,32 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
     return bytes(header) + bytes(file_table) + data_part
 
 
-def build_from_yaml(yaml_path, output_dir, base_dir):
-    """package_defs.yaml からパッケージを一括生成"""
-    # 簡易YAMLパーサー (PyYAML不要)
-    packages = parse_simple_yaml(yaml_path)
+def merge_package_defs(yaml_paths):
+    """層ごとのパッケージ定義をマージする
+
+    同名パッケージの files: を読み込み順に連結する。メタデータ
+    (type / version / lzss) は最初に現れた定義のものを使う。
+    層をまたいで 1 つの .PKG を組むための仕組みで、たとえば MINIMAL は
+    カーネルイメージ (core) と標準コマンド (userland) の両方を含む。
+    """
+    merged = {}
+    for path in yaml_paths:
+        if not os.path.isfile(path):
+            continue
+        for name, pdef in parse_simple_yaml(path).items():
+            if name not in merged:
+                merged[name] = dict(pdef)
+                merged[name]['files'] = list(pdef.get('files', []))
+            else:
+                merged[name]['files'].extend(pdef.get('files', []))
+    return merged
+
+
+def build_from_yaml(yaml_paths, output_dir, base_dir):
+    """パッケージ定義 (複数可) からパッケージを一括生成"""
+    if isinstance(yaml_paths, str):
+        yaml_paths = [yaml_paths]
+    packages = merge_package_defs(yaml_paths)
     kapi_ver = read_kapi_version(base_dir)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -341,7 +363,8 @@ def parse_simple_yaml(path):
 
 def main():
     parser = argparse.ArgumentParser(description='OS32 Package (.pkg) Builder')
-    parser.add_argument('--defs', help='Package definitions YAML file')
+    parser.add_argument('--defs', action='append', default=None,
+                        help='Package definitions YAML file (層ごとに複数指定できる。同名パッケージはマージされる)')
     parser.add_argument('--output', '-o', default='packages/',
                         help='Output directory or file')
     parser.add_argument('--name', help='Package name (single pkg mode)')
@@ -356,7 +379,7 @@ def main():
     args = parser.parse_args()
 
     if args.defs:
-        print(f"Building packages from {args.defs}...")
+        print("Building packages from {}...".format(", ".join(args.defs)))
         build_from_yaml(args.defs, args.output, args.base)
     elif args.name and args.files:
         kapi_ver = read_kapi_version(args.base)

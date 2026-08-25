@@ -5,7 +5,7 @@ check_manifests.py — 配備マニフェストと app.conf の参照先を検�
 
 3 種類の食い違いを検出する。いずれも「静かに壊れる」たちの悪い部類:
 
-1. deploy.yaml / package_defs.yaml が挙げているのにビルドされないファイル
+1. 配備定義が挙げているのにビルドされないファイル
    → NHD 上に古いバイナリが残り続ける。KAPI レイアウトが変わると
      旧バイナリの KAPI 呼び出しが別関数へ飛び、exit 後の jmp $ で
      永久スピンして rshell ごと沈黙する (deploy.yaml 冒頭の警告)。
@@ -14,7 +14,7 @@ check_manifests.py — 配備マニフェストと app.conf の参照先を検�
    → 既定値 (api 7 / heap 64KB) で出荷される。設定したつもりの
      ヒープサイズが効かない。
 
-3. ビルドされるのに deploy.yaml に載っていないバイナリ
+3. ビルドされるのに配備定義に載っていないバイナリ
    → 実機に届かない。
 
 先に make all を通してから実行すること。
@@ -30,8 +30,17 @@ except ImportError:
     print("PyYAML が必要: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
-DEPLOY = "tools/deploy.yaml"
-PACKAGES = "tools/package_defs.yaml"
+# 配備定義は所有する層ごとに分かれている。
+DEPLOY_MANIFESTS = [
+    "build/core.yaml",
+    "userland/deploy.yaml",
+    "game/deploy.yaml",
+]
+PACKAGE_MANIFESTS = [
+    "build/core_packages.yaml",
+    "userland/package_defs.yaml",
+    "game/package_defs.yaml",
+]
 APP_CONF = "build/app.conf"
 
 
@@ -52,26 +61,34 @@ def check_missing_hosts():
     """
     bad = []
     warn = []
-    with open(DEPLOY, encoding="utf-8") as f:
-        d = yaml.safe_load(f)
-    for e in d["filesystem"]["files"]:
-        h = e["host"]
-        if e.get("type") == "glob" or "*" in h:
-            if not glob.glob(h):
-                warn.append((DEPLOY, h, "glob 一致なし"))
-        elif not os.path.isfile(h):
-            bad.append((DEPLOY, h, "ファイルなし"))
-
-    with open(PACKAGES, encoding="utf-8") as f:
-        p = yaml.safe_load(f)
-    for pkg, body in p.items():
-        for e in body.get("files", []):
+    for path in DEPLOY_MANIFESTS:
+        if not os.path.isfile(path):
+            bad.append((path, "-", "マニフェストがない"))
+            continue
+        with open(path, encoding="utf-8") as f:
+            d = yaml.safe_load(f) or {}
+        for e in (d.get("filesystem") or {}).get("files") or []:
             h = e["host"]
-            if "*" in h:
+            if e.get("type") == "glob" or "*" in h:
                 if not glob.glob(h):
-                    warn.append((PACKAGES + " [" + pkg + "]", h, "glob 一致なし"))
+                    warn.append((path, h, "glob 一致なし"))
             elif not os.path.isfile(h):
-                bad.append((PACKAGES + " [" + pkg + "]", h, "ファイルなし"))
+                bad.append((path, h, "ファイルなし"))
+
+    for path in PACKAGE_MANIFESTS:
+        if not os.path.isfile(path):
+            bad.append((path, "-", "マニフェストがない"))
+            continue
+        with open(path, encoding="utf-8") as f:
+            p = yaml.safe_load(f) or {}
+        for pkg, body in p.items():
+            for e in (body or {}).get("files", []):
+                h = e["host"]
+                if "*" in h:
+                    if not glob.glob(h):
+                        warn.append((path + " [" + pkg + "]", h, "glob 一致なし"))
+                elif not os.path.isfile(h):
+                    bad.append((path + " [" + pkg + "]", h, "ファイルなし"))
     return bad, warn
 
 
@@ -90,15 +107,18 @@ def check_app_conf(bins):
 
 
 def check_undeployed(bins):
-    with open(DEPLOY, encoding="utf-8") as f:
-        d = yaml.safe_load(f)
     deployed = set()
-    for e in d["filesystem"]["files"]:
-        h = e["host"]
-        if "*" in h:
-            deployed.update(glob.glob(h))
-        else:
-            deployed.add(h)
+    for path in DEPLOY_MANIFESTS:
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            d = yaml.safe_load(f) or {}
+        for e in (d.get("filesystem") or {}).get("files") or []:
+            h = e["host"]
+            if "*" in h:
+                deployed.update(glob.glob(h))
+            else:
+                deployed.add(h)
     return sorted(bins - deployed)
 
 
@@ -134,7 +154,7 @@ def main():
         print("  なし")
 
     undeployed = check_undeployed(bins)
-    print("== 3. ビルドされるが deploy.yaml に載っていないバイナリ ==")
+    print("== 3. ビルドされるが配備定義に載っていないバイナリ ==")
     if undeployed:
         for h in undeployed:
             print("  [--] {}".format(h))

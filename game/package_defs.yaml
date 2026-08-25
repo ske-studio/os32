@@ -1,0 +1,15 @@
+# ============================================================================
+#  game/package_defs.yaml — ゲームのパッケージ内容
+#
+#  カーネル層は build/core_packages.yaml、ユーザーランドは
+#  userland/package_defs.yaml。mkpkg.py が同名パッケージをマージする。
+# ============================================================================
+
+# --- 追加データパッケージ ---
+append:
+  files:
+    - host: "game/assets/manga/*.mgx"
+      guest: /data/manga/
+    - host: "game/assets/manga/*.MGX"
+      guest: /data/manga/
+

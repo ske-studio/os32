@@ -4,11 +4,11 @@ econ_db_init.py — libos32econ マスタデータベース生成ツール
 
 2種類のDBを出し分ける (gen_board_db.py と同じ方式):
 
-  --game (既定)  assets/econ.db      対戦スゴロクRPG の実データ
+  --game (既定)  game/build/db/econ.db      対戦スゴロクRPG の実データ
                  estates は全8ステージ 59 村。id は board.db の
                  masses.param (村ID 1〜59) と 1 対 1 で対応する。
 
-  --test         assets/econ_test.db libos32econ のテスト用固定データ
+  --test         game/build/db/econ_test.db libos32econ のテスト用固定データ
                  econ_test.c が前提とする 4 件の不動産 (Village/Port/
                  Fort/Mine) を持つ。
 
@@ -22,7 +22,7 @@ import os
 import sys
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         '..', 'assets')
+                         '..', 'build', 'db')
 
 SCHEMA = """
 /* 商品マスタ */

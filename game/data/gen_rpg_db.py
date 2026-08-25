@@ -3,7 +3,7 @@
 """
 gen_rpg_db.py — libos32rpg 用データベース生成スクリプト
 
-assets/rpg.db に以下のテーブルを作成:
+game/build/db/rpg.db に以下のテーブルを作成:
   - exp_curve: 累計必要経験値テーブル (1〜99)
   - level_growth: 職業/氏神別の成長パラメーターおよび配分ポイント数
   - status_field: フィールド上の状態異常定義 (毒, 麻痺, 眠り, 呪い, 臆病等)
@@ -14,7 +14,7 @@ import sqlite3
 import os
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       '..', 'assets', 'rpg.db')
+                       '..', 'build', 'db', 'rpg.db')
 
 SCHEMA = """
 /* 経験値曲線 */

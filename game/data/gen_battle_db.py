@@ -3,7 +3,7 @@
 """
 gen_battle_db.py — libos32battle 用サンプルデータベース生成スクリプト
 
-assets/battle.db に以下のテーブルを作成:
+game/build/db/battle.db に以下のテーブルを作成:
   - command_matrix: コマンドマトリクス (攻撃/防御コマンドの組み合わせ結果)
   - status_effects: 状態異常定義 (毒, 麻痺, 眠り, 混乱, 盲目)
   - element_chart:  属性相性テーブル (火→氷, 氷→火, 火→火, 雷→水 等)
@@ -18,7 +18,7 @@ import sqlite3
 import os
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       '..', 'assets', 'battle.db')
+                       '..', 'build', 'db', 'battle.db')
 
 SCHEMA = """
 /* コマンドマトリクス */

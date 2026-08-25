@@ -7,8 +7,8 @@ BotW型化学エンジン用のルール辞書 (chem.db) を生成する。
 ゲームデザイナーがこのスクリプトを編集してルールを追加・変更可能。
 
 使い方:
-    python3 tools/chem_db_init.py                  # assets/chem.db を生成
-    python3 tools/chem_db_init.py -o /path/to.db   # 出力先を指定
+    python3 game/data/chem_db_init.py                  # game/build/db/chem.db を生成
+    python3 game/data/chem_db_init.py -o /path/to.db   # 出力先を指定
 
 ページサイズは OS32 カーネルの SQLITE_DEFAULT_PAGE_SIZE (1024) に合わせる。
 """
@@ -236,8 +236,8 @@ def populate_object_types(conn):
 def main():
     parser = argparse.ArgumentParser(
         description="OS32 化学エンジン マスターデータ生成")
-    parser.add_argument("-o", "--output", default="assets/chem.db",
-                        help="出力DBファイルパス (default: assets/chem.db)")
+    parser.add_argument("-o", "--output", default="game/build/db/chem.db",
+                        help="出力DBファイルパス (default: game/build/db/chem.db)")
     args = parser.parse_args()
 
     output = args.output

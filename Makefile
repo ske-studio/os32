@@ -32,6 +32,7 @@ include build/programs.mk
 include build/deploy.mk
 include build/image.mk
 include build/sdk.mk
+include build/game.mk
 
 # === ヘッダ依存の取り込み ===
 # 各 .c のコンパイル時に -MMD -MP (build/config.mk の DEPFLAGS) が生成する .d を読み込む。

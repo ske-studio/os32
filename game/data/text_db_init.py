@@ -7,16 +7,16 @@ text_db_init.py — libos32text テスト用データベース生成
 実際のゲーム用DBは各ゲームのビルドパイプラインで生成すること。
 
 使い方:
-    python3 tools/text_db_init.py
+    python3 game/data/text_db_init.py
 
 出力:
-    assets/text.db
+    game/build/db/text.db
 """
 
 import sqlite3
 import os
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', 'text.db')
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'build', 'db', 'text.db')
 
 def create_tables(conn):
     """テーブル作成"""

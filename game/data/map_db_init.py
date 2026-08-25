@@ -6,8 +6,8 @@ map_db_init.py — テスト用マップデータ生成
 既存DBがある場合は上書き。
 
 使い方:
-    python3 tools/map_db_init.py            # デフォルト: assets/map.db
-    python3 tools/map_db_init.py -o /path/to/map.db
+    python3 game/data/map_db_init.py            # デフォルト: game/build/db/map.db
+    python3 game/data/map_db_init.py -o /path/to/map.db
 """
 
 import sqlite3
@@ -278,7 +278,7 @@ def populate_test_data(conn):
 
 def main():
     """エントリポイント"""
-    out_path = 'assets/map.db'
+    out_path = 'game/build/db/map.db'
     if len(sys.argv) > 2 and sys.argv[1] == '-o':
         out_path = sys.argv[2]
 

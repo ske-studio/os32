@@ -3,7 +3,7 @@
 """
 gen_ai_db.py — libos32ai 用サンプルデータベース生成スクリプト
 
-assets/ai.db に profiles テーブルを作成し、
+game/build/db/ai.db に profiles テーブルを作成し、
 4種類のAIプロファイル (慎重・攻撃的・ランダム・バランス) を挿入する。
 """
 
@@ -12,7 +12,7 @@ import os
 import sys
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       '..', 'assets', 'ai.db')
+                       '..', 'build', 'db', 'ai.db')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS profiles (

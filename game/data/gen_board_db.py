@@ -5,11 +5,11 @@ gen_board_db.py — libos32board 用ボードDB生成スクリプト
 
 2種類のDBを出し分ける:
 
-  --game (既定)  assets/board.db      対戦スゴロクRPG の実マップ
+  --game (既定)  game/build/db/board.db      対戦スゴロクRPG の実マップ
                  オノコロ島(10マス) + 全8ステージ(各20マス) = 170マス。
                  ゲスト側 /db/board.db として game が読む。
 
-  --test         assets/board_test.db libos32board のテスト用固定盤面
+  --test         game/build/db/board_test.db libos32board のテスト用固定盤面
                  board_test.c が前提とする12マス構成 + 経路探索用の並列経路。
                  ゲスト側 /db/board_test.db として board_test が読む。
 
@@ -23,7 +23,7 @@ import os
 import sys
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         '..', 'assets')
+                         '..', 'build', 'db')
 
 # ==========================================================================
 #  実マップ定義 (--game)

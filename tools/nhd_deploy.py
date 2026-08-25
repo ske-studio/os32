@@ -55,8 +55,15 @@ MOUNT_POINT = "/tmp/os32"
 
 # プロジェクトルート (tools/ の親ディレクトリ)
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEPLOY_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'deploy.yaml')
+# 配備定義は所有する層ごとに分かれている。カーネル層が boot: と
+# ディレクトリ構造を持ち、ユーザーランドとゲームは自層の files: だけを
+# 持つ。ここでマージして 1 つの定義として扱う。
+# 各マニフェストは自層の成果物しか参照しない (make check-manifests で検査)。
+DEPLOY_MANIFESTS = [
+    os.path.join(PROJ_DIR, 'build', 'core.yaml'),
+    os.path.join(PROJ_DIR, 'userland', 'deploy.yaml'),
+    os.path.join(PROJ_DIR, 'game', 'deploy.yaml'),
+]
 
 # === ext2パーティション オフセット ===
 # NHDヘッダ(512B) + ブート領域(LBA 0-1631) = 1633セクタ
@@ -464,12 +471,29 @@ def do_init():
 
 
 def load_deploy_yaml():
-    """deploy.yaml を読み込んで返す"""
-    if not os.path.isfile(DEPLOY_YAML):
-        print("Error: {} が見つかりません".format(DEPLOY_YAML), file=sys.stderr)
+    """層ごとの配備定義をマージして返す
+
+    boot: と filesystem.directories: はカーネル層 (build/core.yaml) が持つ。
+    filesystem.files: は全マニフェストを読み込み順に連結する。
+    """
+    merged = {'filesystem': {'directories': [], 'files': []}}
+    found = False
+    for path in DEPLOY_MANIFESTS:
+        if not os.path.isfile(path):
+            continue
+        found = True
+        with open(path, 'r', encoding='utf-8') as f:
+            d = yaml.safe_load(f) or {}
+        if 'boot' in d:
+            merged['boot'] = d['boot']
+        fs = d.get('filesystem') or {}
+        merged['filesystem']['directories'].extend(fs.get('directories') or [])
+        merged['filesystem']['files'].extend(fs.get('files') or [])
+    if not found:
+        print("Error: 配備定義が 1 つも見つかりません:\n  {}".format(
+            "\n  ".join(DEPLOY_MANIFESTS)), file=sys.stderr)
         return None
-    with open(DEPLOY_YAML, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+    return merged
 
 
 def resolve_files_from_entry(entry):
@@ -866,7 +890,7 @@ def main():
         print("  NHDローカル:  {}".format(NHD_LOCAL))
         print("  NHD NP21/W:   {}".format(NHD_REMOTE))
         print("  マウント:     {}".format(MOUNT_POINT))
-        print("  deploy.yaml:  {}".format(DEPLOY_YAML))
+        print("  deploy defs:  {}".format(", ".join(DEPLOY_MANIFESTS)))
         return
 
     cmd = sys.argv[1]
