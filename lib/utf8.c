@@ -23,16 +23,50 @@
 
 static const u16 *unicode_jis_table = (const u16 *)MEM_UNICODE_TABLE_BASE;
 
-/* Unicode→JIS 変換表 (/sys/unicode.bin) がロード済みか。
+/* Unicode→JIS 変換表 (/sys/unicode.bin) が使える状態か。
+ *   -1 未判定 (初回参照時に自己診断する)
+ *    0 使えない
+ *    1 使える
+ *
  * 表は BSS ではなく生の物理アドレス (0x4A000) に置かれるので、ロードに
  * 失敗しても「ゼロ埋め」にはならず、前に居たデータがそのまま表として
  * 読まれる — 画面が意味不明な漢字で埋まり、原因が表のロード失敗だと
- * 気づけない。ロード成否を明示的に持ち、未ロードなら変換不可を返す。 */
-static int jis_table_ready = 0;
+ * 気づけない。だから「読めるかどうか」ではなく「正しい表かどうか」を
+ * 確かめる必要がある。
+ *
+ * このフラグは static なので、カーネルと各外部プログラムがそれぞれ別の
+ * 実体を持つ。カーネルはロード直後に utf8_set_jis_table_ready(1) を呼ぶが、
+ * 外部プログラムには対応する契機が無く、以前は全プログラムで漢字が出ない
+ * ままだった (ゲームだけが自前で有効化していた)。表は物理アドレス固定で
+ * 共有されているので、こちら側で内容を検証して自動的に判定する。 */
+static int jis_table_ready = -1;
 
 void utf8_set_jis_table_ready(int ready)
 {
     jis_table_ready = ready ? 1 : 0;
+}
+
+/* 既知の (Unicode, JIS X 0208) 対応を数点照合して、0x4A000 に載っている
+ * のが本当に変換表かを確かめる。1 点だけだと残骸が偶然一致しうるので
+ * 離れた位置から複数取る。 */
+static int jis_table_probe(void)
+{
+    static const u32 probe_cp[4]  = { 0x4E9C, 0x4E00, 0x5BFE, 0x9078 };
+    static const u16 probe_jis[4] = { 0x3021, 0x306C, 0x4250, 0x412A };
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        if (unicode_jis_table[probe_cp[i]] != probe_jis[i]) return 0;
+    }
+    return 1;
+}
+
+static int jis_table_usable(void)
+{
+    if (jis_table_ready < 0) {
+        jis_table_ready = jis_table_probe();
+    }
+    return jis_table_ready;
 }
 
 /* ======================================================================== */
@@ -224,8 +258,9 @@ u16 unicode_to_jis(u32 cp)
     /* BMP範囲外 → 変換不可 */
     if (cp > 0xFFFF) return 0;
 
-    /* 表が無いなら引かない (未ロードのゴミを漢字として表示しない) */
-    if (!jis_table_ready) return 0;
+    /* 表が無いなら引かない (未ロードのゴミを漢字として表示しない)。
+       未判定なら内容を検証して自動的に決める。 */
+    if (!jis_table_usable()) return 0;
 
     /* O(1) でテーブルから直接引く */
     return unicode_jis_table[cp];
