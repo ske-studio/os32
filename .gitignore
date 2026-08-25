@@ -19,6 +19,9 @@
 # unicode.bin / kernel.elf / kernel.map)
 /build/out/
 
+# SDK staging (make sdk の出力。sdk/ のソースから毎回組み立てる)
+/build/sdk/
+
 # 特定の生成ファイル
 /unicode.bin
 /tools/gen_unicode

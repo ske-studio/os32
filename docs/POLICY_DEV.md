@@ -124,7 +124,7 @@ make all
 
 ### KernelAPI 拡張手順
 
-1. `tools/kapi.json` に関数プロトタイプ定義を追加
+1. `sdk/kapi.json` に関数プロトタイプ定義を追加
 2. `make all` で API メタデータを自動生成
 3. 必要に応じて `kapi/` にラッパーを実装
 4. **`make clean` → `make all` で全プログラムを再ビルド**
@@ -285,7 +285,7 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 | 定数 | 定義場所 | 用途 |
 |------|---------|------|
 | `SYS_VERSION` | `include/config.h` | OS全体のバージョン文字列 |
-| `KAPI_VERSION` | `include/os32_kapi_shared.h` | KernelAPI の互換性バージョン |
+| `KAPI_VERSION` | `sdk/include/os32/os32_kapi_shared.h` | KernelAPI の互換性バージョン |
 
 ### タグ付け方針
 

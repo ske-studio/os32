@@ -2,7 +2,7 @@ import json
 import re
 import sys
 
-with open("tools/kapi.json", "r", encoding="utf-8") as f:
+with open("sdk/kapi.json", "r", encoding="utf-8") as f:
     data = json.load(f)
 
 def get_arg_names(args):
@@ -43,7 +43,7 @@ for field in data.get("data_fields", []):
 
 header_content += "} KernelAPI;\n\n#endif\n"
 
-with open("include/os32_kapi_generated.h", "w", encoding="utf-8") as f:
+with open("sdk/include/os32/os32_kapi_generated.h", "w", encoding="utf-8") as f:
     f.write(header_content)
 
 

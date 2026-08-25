@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "os32api",
+    # os32api は SDK 側 (sdk/rust/os32api) にあり、ワークスペース外なので
+    # members には入れない (cargo はワークスペース root の下しかメンバに
+    # できない)。各クレートからは path 依存として参照する。
     "os32_math",
     "hello_gfx",
     "alloc_demo",

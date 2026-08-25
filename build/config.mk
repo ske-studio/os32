@@ -31,7 +31,13 @@ OBJCOPY = i386-elf-objcopy
 
 # === インクルードパス (モジュール別) ===
 # 共通: 全カーネルモジュールが参照する基盤ヘッダ
-INC_COMMON = -I. -Iinclude
+# SDK 公開ヘッダ。-Isdk/include は "os32/xxx.h" 形式、
+# -Isdk/include/os32 は既存の "os32_kapi_shared.h" 形式の両方を通すため。
+SDK_INC    = -Isdk/include -Isdk/include/os32
+
+# SDK の契約ヘッダ。KernelAPI 構造体の唯一の定義元 (sdk/kapi.json から生成)。
+SDK_KAPI_HDR = sdk/include/os32/os32_kapi_shared.h
+INC_COMMON = -I. -Iinclude $(SDK_INC)
 
 # カーネルコア: 自身 + ドライバ + fs + exec + shell + gfx + lib + kapi
 # (kernel.c は全サブシステムの初期化を行うため全モジュールを参照)
@@ -96,8 +102,8 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --
 #   -Iinclude        include/os32_kapi_shared.h ほか
 # ライブラリ固有の -I はここには置かない。build/libs.mk の INC_<lib> を
 # 必要なターゲットだけに渡すこと (一括で並べると層の逆流が隠れる)。
-PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude -Iprograms -I$(CROSS_DIR)/i386-elf/include
-PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
+PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude $(SDK_INC) -Iprograms -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_LDFLAGS = -m elf_i386 -T sdk/link/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
 # ライブラリアーカイブは --start-group で囲む。アーカイブは左から順に
@@ -107,7 +113,7 @@ LGRP_BEG = --start-group
 LGRP_END = --end-group
 
 # === CRT0 / デバッグオブジェクト ===
-CRT0_OBJ = programs/crt0.o programs/crt0_c.o programs/libos32/syscalls.o programs/libos32/help.o
+CRT0_OBJ = sdk/crt/crt0.o sdk/crt/crt0_c.o sdk/crt/syscalls.o sdk/crt/help.o
 DBG_OBJ  = programs/libos32/dbgserial.o
 
 # === デプロイ先 ===

@@ -163,8 +163,8 @@ def generate_rust(data, output_path):
 
 
 def main():
-    json_path = "tools/kapi.json"
-    output_path = "programs/rust/os32api/src/kapi_generated.rs"
+    json_path = "sdk/kapi.json"
+    output_path = "sdk/rust/os32api/src/kapi_generated.rs"
 
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)

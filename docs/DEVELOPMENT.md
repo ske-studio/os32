@@ -109,11 +109,11 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ## 5. KernelAPI 拡張手順
 
-1. `tools/kapi.json` に増やす関数のプロトタイプ定義を追加する。
-2. `make all` または `make include/os32_kapi_generated.h` などを実行して、APIメタデータを自動生成。
+1. `sdk/kapi.json` に増やす関数のプロトタイプ定義を追加する。
+2. `make all` または `make sdk/include/os32/os32_kapi_generated.h` などを実行して、APIメタデータを自動生成。
 3. 必要に応じて、`kapi/` ディレクトリ内にラッパー (例: `kapi_sys.c`) を実装。
 4. プログラム・カーネル側から新しいKAPIを利用する。
-5. `KAPI_VERSION` は `include/os32_kapi_shared.h` で定義されている。バージョン変更時は手動で更新する。
+5. `KAPI_VERSION` は `sdk/include/os32/os32_kapi_shared.h` で定義されている。バージョン変更時は手動で更新する。
 
 > ⚠️ KernelAPI 変更時のビルドルール（`make clean` 必須）は [POLICY_DEV.md §4](POLICY_DEV.md) を参照。
 
@@ -131,7 +131,7 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ## 7. 外部プログラム開発 (OS32X)
 
-- `programs/os32api.h` をインクルードして開発する。
+- `sdk/include/os32/os32api.h` をインクルードして開発する。
 - `api->xxx()` 経由でシステムコールを呼び出す。
 - `api->mem_alloc()` はプログラム専用ヒープ (`exec_heap`領域) から動的に割り当てられる。
 - **⚠️ ヒープメモリの静的割り当て**: `api->mem_alloc()` で利用可能なヒープ領域の上限は、ビルド時に `mkos32x.py` の `--heap` オプションで**静的に決定**され、OS32Xバイナリのヘッダに書き込まれます。カーネルはロード時にこの固定サイズ分だけをあらかじめ割り当てるため、**実行時の動的なヒープ拡張はできません**。ファイルの一括読み込み等で大きなメモリが必要なプログラムを作成する場合は、`Makefile` で自身の `--heap` サイズを十分に大きく指定してください（デフォルト不足時は `ENOMEM` が発生します）。

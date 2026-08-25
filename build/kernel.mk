@@ -65,8 +65,8 @@ exec/%.o: exec/%.c kapi/kapi_generated.c
 	$(CC) $(CFLAGS_BASE) $(INC_EXEC) -c $< -o $@
 
 # kapi/ モジュール
-kapi/kapi_generated.c: tools/kapi.json tools/gen_kapi.py
-	python3 tools/gen_kapi.py
+kapi/kapi_generated.c: sdk/kapi.json sdk/gen_kapi.py
+	python3 sdk/gen_kapi.py
 
 # kapi_sys.o は __DATE__/__TIME__ を含むため毎回再コンパイル
 kapi/kapi_sys.o: kapi/kapi_sys.c .FORCE

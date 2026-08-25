@@ -3,7 +3,7 @@
 /* ======================================================================== */
 #include "shell.h"
 #include "config.h"
-#include "libos32/help.h"
+#include "os32/help.h"
 
 KernelAPI *g_api;
 

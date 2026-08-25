@@ -6,7 +6,7 @@
 /*         man -k KEYWORD  キーワード検索 (NAME行)                          */
 /* ======================================================================== */
 #include "os32api.h"
-#include "libos32/help.h"
+#include "os32/help.h"
 #include <string.h>
 #include <stdio.h>
 

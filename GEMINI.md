@@ -59,7 +59,7 @@ side — **it is copied to `C:\os32tools\` manually, so re-copy it after editing
 |--------|----------|-----------|
 | Kernel | i386-elf-gcc | `-std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -O2` |
 | SQLite | i386-elf-gcc | `-Os -ffunction-sections -fdata-sections` (size-optimized) |
-| External programs | i386-elf-gcc | Same base flags, linked with `build/app.ld` |
+| External programs | i386-elf-gcc | Same base flags, linked with `sdk/link/app.ld` |
 | ASM | NASM | `-f elf32` (kernel), `-f bin` (boot sectors) |
 
 The cross-compiler lives at `$CROSS_DIR/` (default `/usr/local/cross`). The build config is in `build/config.mk`.
@@ -154,27 +154,27 @@ KernelAPI DB functions (`kapi/kapi_db.c`): `db_open`, `db_close`, `db_exec`, `db
 
 The KernelAPI is the ABI between the kernel and external programs:
 
-- **`include/os32_kapi_shared.h`** — Single source of truth: `KernelAPI` struct layout, `KAPI_VERSION`, shared types. Both kernel and programs include this.
-- **`include/os32_kapi_generated.h`** — Generated accessor macros.
-- **`kapi/kapi_generated.c`** — `__cdecl` wrappers (auto-generated from `tools/kapi.json`).
+- **`sdk/include/os32/os32_kapi_shared.h`** — Single source of truth: `KernelAPI` struct layout, `KAPI_VERSION`, shared types. Both kernel and programs include this.
+- **`sdk/include/os32/os32_kapi_generated.h`** — Generated accessor macros.
+- **`kapi/kapi_generated.c`** — `__cdecl` wrappers (auto-generated from `sdk/kapi.json`).
 - **`kapi/kapi_sys.c`** — System call wrappers.
 - **`kapi/kapi_db.c`** — SQLite DB API wrappers.
 - **`exec/exec_kapi_init.inc`** — KernelAPI table initialization (included by `exec/exec.c`).
 
-**To add a KernelAPI function** — `tools/kapi.json` is the single source of truth and the
+**To add a KernelAPI function** — `sdk/kapi.json` is the single source of truth and the
 wrappers/struct/init are all generated from it. Never hand-edit the generated files:
 
-1. Append the entry to the **end** of the `api` array in `tools/kapi.json` (append-only —
+1. Append the entry to the **end** of the `api` array in `sdk/kapi.json` (append-only —
    never reorder or remove existing slots; that breaks the ABI for already-built binaries).
    Add any needed header to `includes` / prototype to `externs` in the same file.
-2. Bump `"version"` in `tools/kapi.json` **and** `KAPI_VERSION` in
-   `include/os32_kapi_shared.h` (they must match).
+2. Bump `"version"` in `sdk/kapi.json` **and** `KAPI_VERSION` in
+   `sdk/include/os32/os32_kapi_shared.h` (they must match).
 3. Regenerate and confirm the tree is in sync:
    ```bash
-   python3 tools/gen_kapi.py && python3 tools/kapi_rust_gen.py
+   python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
    git diff --stat   # only the intended additions should appear
    ```
-   This rewrites `include/os32_kapi_generated.h`, `kapi/kapi_generated.c`,
+   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `kapi/kapi_generated.c`,
    `exec/exec_kapi_init.inc`, and `programs/rust/os32api/src/kapi_generated.rs`.
 4. Implement the target function in the kernel (or give the entry a `target` /
    inline `body` in the JSON).
@@ -186,7 +186,7 @@ emits `kapi-><field> = 0;` and the value must be assigned at runtime in `exec_in
 
 ### External Programs (`programs/`)
 
-Programs are OS32X flat ELF binaries linked with `build/app.ld`, starting with `programs/crt0.asm`. The `main()` function must be the **first function** in the source file; helpers go after `main()` with forward declarations.
+Programs are OS32X flat ELF binaries linked with `sdk/link/app.ld`, starting with `sdk/crt/crt0.asm`. The `main()` function must be the **first function** in the source file; helpers go after `main()` with forward declarations.
 
 #### Directory Structure
 

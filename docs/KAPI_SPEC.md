@@ -1,4 +1,4 @@
-# KernelAPI v35 仕様書
+# KernelAPI v39 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -43,22 +43,22 @@ make programs
 
 ### §3-1 KernelAPI 関数の追加手順
 
-**`tools/kapi.json` が唯一の情報源 (SSOT)。** 構造体・ラッパー・初期化コード・Rust
+**`sdk/kapi.json` が唯一の情報源 (SSOT)。** 構造体・ラッパー・初期化コード・Rust
 バインディングはすべてここから生成されるので、生成物を直接編集してはならない。
 
-1. `tools/kapi.json` の `api` 配列の**末尾**にエントリを追加する。
+1. `sdk/kapi.json` の `api` 配列の**末尾**にエントリを追加する。
    既存スロットの並べ替え・削除は**禁止** (ビルド済みバイナリの ABI が壊れる)。
    必要なヘッダは同ファイルの `includes` に、プロトタイプは `externs` に追加する。
    - `target` — 実体の関数名がエントリ名と異なる場合に指定
    - `body` — ラッパー本体をインラインで書く場合に指定
-2. `tools/kapi.json` の `"version"` と `include/os32_kapi_shared.h` の
+2. `sdk/kapi.json` の `"version"` と `sdk/include/os32/os32_kapi_shared.h` の
    `KAPI_VERSION` を**両方**インクリメントする (一致必須)。
 3. 再生成して差分が意図した追加のみであることを確認する:
    ```bash
-   python3 tools/gen_kapi.py && python3 tools/kapi_rust_gen.py
+   python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
    git diff --stat
    ```
-   生成対象: `include/os32_kapi_generated.h` / `kapi/kapi_generated.c` /
+   生成対象: `sdk/include/os32/os32_kapi_generated.h` / `kapi/kapi_generated.c` /
    `exec/exec_kapi_init.inc` / `programs/rust/os32api/src/kapi_generated.rs`
 4. カーネル側に実体を実装する。
 5. 本仕様書のオフセット表を更新し、新APIに依存するプログラムの
@@ -268,7 +268,7 @@ make programs
 | 0x290 | ime_user_clear | `int(void)` |
 | 0x294 | ime_trygetkey | `int(void)` |
 
-`ime_user_list` の `out` は `IME_UserEntry`(`include/os32_kapi_shared.h`) の配列。
+`ime_user_list` の `out` は `IME_UserEntry`(`sdk/include/os32/os32_kapi_shared.h`) の配列。
 `ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
 FEP 対応版にあたる (エディタ等のメインループから使う)。
 

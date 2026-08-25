@@ -7,4 +7,4 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-os32api = { path = "../os32api" }
+os32api = { path = "../../../sdk/rust/os32api" }

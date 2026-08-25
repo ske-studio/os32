@@ -1,5 +1,5 @@
 #include "os32api.h"
-#include "libos32/help.h"
+#include "os32/help.h"
 
 KernelAPI *kapi;
 
