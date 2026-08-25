@@ -1,0 +1,83 @@
+{
+ "name": "セーブ→再起動→ロードで状態が一致するか",
+ "steps": [
+  {
+   "key": "3"
+  },
+  {
+   "sleep": 1.5
+  },
+  {
+   "key": "3"
+  },
+  {
+   "sleep": 1.5
+  },
+  {
+   "wait": {
+    "state": "DICE",
+    "human": true,
+    "timeout": 120
+   }
+  },
+  {
+   "snap": "before_save"
+  },
+  {
+   "key": "W"
+  },
+  {
+   "sleep": 4
+  },
+  {
+   "wait": {
+    "state": "DICE",
+    "human": true,
+    "timeout": 60
+   }
+  },
+  {
+   "shot": "saved"
+  },
+  {
+   "key": "ESC"
+  },
+  {
+   "sleep": 6
+  },
+  {
+   "text": "game"
+  },
+  {
+   "key": "ENTER"
+  },
+  {
+   "sleep": 14
+  },
+  {
+   "wait": {
+    "state": "TITLE",
+    "timeout": 60
+   }
+  },
+  {
+   "key": "L"
+  },
+  {
+   "sleep": 4
+  },
+  {
+   "wait": {
+    "state": "DICE",
+    "human": true,
+    "timeout": 60
+   }
+  },
+  {
+   "snap": "after_load"
+  },
+  {
+   "shot": "loaded"
+  }
+ ]
+}
