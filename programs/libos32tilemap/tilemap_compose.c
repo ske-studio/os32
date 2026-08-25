@@ -37,13 +37,13 @@ extern void __cdecl asm_draw_row_tiles(
 /* ======================================================================== */
 
 /* カバレッジマスク: 2タイルペア単位 (DWORD/行)
- * 12ペア × 24行 × (4bytes × 16行) = 18,432 bytes */
-#define COV_PAIRS       (TILEMAP_COLS / 2)  /* 12 */
+ * 既定構成 (26x20) で 13ペア × 20行 × (4bytes × 16行) = 16,640 bytes */
+#define COV_PAIRS       (TILEMAP_COLS / 2)  /* 既定 13 */
 #define COV_PAIR_BYTES  (4 * TILE_H)        /* 64 */
 
-/* スクロール差分の大ジャンプ閾値 (画面幅/高さの半分) */
-#define SCROLL_JUMP_THRESHOLD_X  ((TILEMAP_COLS * TILE_W) / 2)  /* 192px */
-#define SCROLL_JUMP_THRESHOLD_Y  ((TILEMAP_ROWS * TILE_H) / 2)  /* 192px */
+/* スクロール差分の大ジャンプ閾値 (プレーン幅/高さの半分) */
+#define SCROLL_JUMP_THRESHOLD_X  ((TILEMAP_COLS * TILE_W) / 2)  /* 既定 208px */
+#define SCROLL_JUMP_THRESHOLD_Y  ((TILEMAP_ROWS * TILE_H) / 2)  /* 既定 160px */
 
 static u8 s_cov_mask[TILEMAP_ROWS][COV_PAIRS][COV_PAIR_BYTES];
 static u8 s_cov_full[TILEMAP_ROWS][COV_PAIRS];

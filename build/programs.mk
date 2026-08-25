@@ -50,7 +50,8 @@ programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 # === Game (対戦スゴロクRPG) Module ===
 GAME_SRC = $(wildcard programs/apps/game/*.c)
 GAME_OBJ = $(GAME_SRC:.c=.o)
-GAME_LIBS = $(GFX_OBJ) $(LIBUI_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
+# 注: microUI (LIBUI_OBJ) はリンクしない。game は microUI を使っていない。
+GAME_LIBS = $(GFX_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
             $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) \
             $(LIBRPG_OBJ) $(LIBTURN_OBJ) $(LIBSAVE_OBJ) \
             $(LIBEVENT_OBJ) $(TILEMAP_OBJ) $(LIBASSET_OBJ) \

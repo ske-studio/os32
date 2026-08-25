@@ -6,7 +6,11 @@
 /*  SQLiteデータベースで一元管理し、ランタイムではRAMキャッシュで高速動作。    */
 /*                                                                          */
 /*  依存: libos32db (KAPI経由SQLite)                                        */
-/*  描画 (libtilemap / libos32gfx) には依存しない。                          */
+/*                                                                          */
+/*  マップデータの管理・問い合わせ部分は描画に依存しない。ただし             */
+/*  map_apply_to_tilemap() だけは例外で libos32tilemap を直接呼ぶ            */
+/*  (実装は map_view.c)。この関数を使わないなら tilemap をリンクする         */
+/*  必要はない。                                                            */
 /* ======================================================================== */
 
 #ifndef LIBOS32MAP_H
@@ -187,9 +191,11 @@ void map_get_camera(i16 *out_x, i16 *out_y);
 /* ビューポート左上座標を取得 (カメラ位置+マップ端クランプ) */
 void map_get_viewport(int *out_col, int *out_row);
 
-/* ビューポート内のタイルを libtilemap の BG に転送 */
-/* (24x24タイル分のウィンドウを切り出して tilemap_set に反映) */
-/* 注: この関数を使うには libtilemap.h を事前にインクルードすること */
+/* ビューポート内のタイルを libos32tilemap の BG に転送 */
+/* (TILEMAP_COLS x TILEMAP_ROWS のウィンドウを切り出して tilemap_set に反映) */
+/* 注: この関数を使うには libos32tilemap.h を事前にインクルードし、          */
+/*     libos32tilemap をリンクすること。マップ管理のうちここだけが描画層に   */
+/*     依存する。                                                           */
 void map_apply_to_tilemap(int bg_layer, int map_layer);
 
 /* ====================================================================== */

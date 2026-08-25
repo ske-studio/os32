@@ -14,10 +14,19 @@
 #define MAX_TILES       1024
 
 /* BG プレーンの大きさ (タイル数)。
-   対戦スゴロクRPG の盤面が 400x304px = 25x19 タイルなので、
-   スクロールの糊しろを足して 26x20 にしてある。 */
+   既定は 26x20 = 416x320px。表示領域 400x304px (25x19 タイル) に
+   スクロールの糊しろを 1 タイルずつ足したもの。
+
+   ビルド時に -DTILEMAP_COLS=... で上書きできる。プレーンは BSS の静的
+   配列なので、大きくするとメモリ使用量が (COLS*ROWS) に比例して増える。
+   TILEMAP_COLS は偶数であること — 合成器がカバレッジマスクを 2 タイル
+   ペア単位で持つため (tilemap_compose.c の COV_PAIRS)。 */
+#ifndef TILEMAP_COLS
 #define TILEMAP_COLS    26
+#endif
+#ifndef TILEMAP_ROWS
 #define TILEMAP_ROWS    20
+#endif
 #define BG_COUNT        4
 
 /* タイル不透明度 (事前計算) */

@@ -81,7 +81,8 @@ $(eval $(call DEFINE_LIB,libos32chem,-Iprograms/libos32db,))
 LIBCHEM_OBJ = $(libos32chem_OBJ)
 
 # libos32map — マップ管理
-$(eval $(call DEFINE_LIB,libos32map,-Iprograms/libos32db,))
+# map_view.c だけが libos32tilemap を直接呼ぶ (BG への転送)。
+$(eval $(call DEFINE_LIB,libos32map,-Iprograms/libos32db -Iprograms/libos32tilemap,))
 LIBMAP_OBJ = $(libos32map_OBJ)
 
 # libos32input — 入力抽象化
