@@ -5,7 +5,7 @@
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/dbq.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c programs/tests/turn_test.c programs/tests/rpg_test.c programs/tests/save_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/dbq.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c programs/tests/turn_test.c programs/tests/rpg_test.c programs/tests/save_test.c programs/tests/mgx_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -164,6 +164,7 @@ $(eval $(call DEFINE_TEST,inv_test,$$(LIBINV_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/l
 $(eval $(call DEFINE_TEST,turn_test,$$(LIBTURN_OBJ) $$(LIBMATH_OBJ),))
 $(eval $(call DEFINE_TEST,rpg_test,$$(LIBRPG_OBJ) $$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
 $(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),))
+$(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),-Iprograms/libos32mgx -Ilib/zlib))
 
 # ---------------------------------------------------------------------------
 #  DEFINE_GFX_APP — GFXアプリ定義テンプレート
@@ -190,6 +191,7 @@ $(eval $(call DEFINE_GFX_APP,spr_test,,))
 $(eval $(call DEFINE_GFX_APP,vdpview,,))
 $(eval $(call DEFINE_GFX_APP,raster,,))
 $(eval $(call DEFINE_GFX_APP,ekakiuta,,))
+$(eval $(call DEFINE_GFX_APP,mgxview,$$(LIBMGX_OBJ) $$(FILER_OBJ),-Iprograms/libos32mgx -Ilib/zlib -Iprograms/libos32filer))
 
 # vbzview は DBG_OBJ を追加
 programs/apps/vbzview.o: programs/apps/vbzview.c
@@ -343,7 +345,7 @@ edit: $(CRT0_OBJ) programs/apps/edit.bin
 
 game: $(CRT0_OBJ) programs/apps/game.bin
 
-programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test hello_gfx_rust alloc_demo_rust font_test_rust
+programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview mgxview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test mgx_test hello_gfx_rust alloc_demo_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
@@ -366,6 +368,7 @@ clean-programs: clean-rust
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
 	rm -f lib/lz4_prog.o
+	rm -f lib/zlib/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
 .PHONY: programs programs_base edit game lz4_cmd cdinst bench bench_scale2x

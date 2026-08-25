@@ -95,6 +95,9 @@ filesystem:
     - host: programs/apps/vdpview.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/apps/mgxview.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/apps/spr_test.bin
       guest: /usr/bin/
       tags: [programs]
@@ -204,6 +207,9 @@ filesystem:
     - host: programs/tests/save_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/mgx_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/hello_gfx.bin
       guest: /usr/bin/
       tags: [programs]
@@ -256,6 +262,7 @@ filesystem:
         - ekakiuta.bin
         - vbzview.bin
         - vdpview.bin
+        - mgxview.bin
         - spr_test.bin
         - raster.bin
         - mdview.bin
@@ -360,6 +367,18 @@ filesystem:
     - host: programs/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
+
+    # --- MGX 漫画サンプルページ (tools/img2mgx.py で生成) ---
+    - host: "assets/manga/*.MGX"
+      guest: /data/manga/
+      type: glob
+      tags: [data]
+
+    # --- bpp 別ベンチ用 (同一画像を bpp 1..4 で符号化したもの) ---
+    - host: "assets/manga/bench/*.MGX"
+      guest: /data/manga/bench/
+      type: glob
+      tags: [data]
 
     # --- TrueType フォント ---
     - host: assets/fonts/ipaexg_subset.ttf

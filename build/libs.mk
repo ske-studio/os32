@@ -156,6 +156,26 @@ programs/libos32tilemap/%.o: programs/libos32tilemap/%.asm
 lib-libos32tilemap: $(TILEMAP_OBJ)
 .PHONY: lib-libos32tilemap
 
+# zlib inflate (展開のみ) — lib/zlib/ に無改変で取り込んだ zlib 公式ソース。
+#   ゲスト側は展開だけを行うので deflate/gzip/crc32 は取り込んでいない。
+#   -DNO_GZIP で gzip ストリーム対応を、-DZ_SOLO で libc 依存部を落としている。
+#   Z_SOLO を付けると zlib が malloc を直接呼ばなくなるので、
+#   アロケータは programs/libos32mgx/mgx_decode.c が z_stream に渡す。
+#   詳細と出所は lib/zlib/README.OS32 を参照。
+ZLIB_DIR = lib/zlib
+ZLIB_INFLATE_OBJ = $(ZLIB_DIR)/inflate_prog.o $(ZLIB_DIR)/inffast_prog.o \
+                   $(ZLIB_DIR)/inftrees_prog.o $(ZLIB_DIR)/adler32_prog.o \
+                   $(ZLIB_DIR)/zutil_prog.o
+
+$(ZLIB_DIR)/%_prog.o: $(ZLIB_DIR)/%.c
+	$(CC) $(PROGRAM_FLAGS) -Os -DNO_GZIP -DZ_SOLO -I$(ZLIB_DIR) -c $< -o $@
+
+ALL_LIB_OBJ += $(ZLIB_INFLATE_OBJ)
+
+# libos32mgx — MGX (漫画専用グレースケール画像形式) デコーダ
+$(eval $(call DEFINE_LIB,libos32mgx,-Iprograms/libos32mgx -Ilib/zlib,))
+LIBMGX_OBJ = $(libos32mgx_OBJ) $(ZLIB_INFLATE_OBJ)
+
 # libos32snd — サウンドライブラリ
 LIBSND_OBJ = programs/libos32snd/libos32snd.o
 
@@ -201,5 +221,6 @@ clean-libs:
 	rm -f programs/libos32db/*.o programs/libos32snd/*.o
 	rm -f programs/libos32md/*.o programs/libos32filer/*.o
 	rm -f programs/libos32turn/*.o programs/libos32rpg/*.o programs/libos32save/*.o
+	rm -f programs/libos32mgx/*.o lib/zlib/*.o
 
 .PHONY: libs clean-libs
