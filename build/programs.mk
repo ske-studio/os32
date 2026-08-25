@@ -356,13 +356,16 @@ FORCE:
 .PHONY: clean-rust FORCE
 
 # === プログラム集約ターゲット ===
+# programs: に足し忘れたターゲットは make all でビルドされないまま
+# tools/deploy.yaml が古いバイナリを NHD に残す (deploy.yaml 冒頭の警告を参照)。
+# プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) programs/apps/edit.bin
 
 game: $(CRT0_OBJ) programs/apps/game.bin
 
-programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview mgxview raster ekakiuta vbzview mdview cdinst bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test mgx_test hello_gfx_rust alloc_demo_rust font_test_rust
+programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview mgxview raster ekakiuta vbzview mdview ui_demo cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 programs/%.o: include/os32_kapi_shared.h
