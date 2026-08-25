@@ -6,7 +6,7 @@
 #define _VZ_H_
 
 #include "std.h"
-#include "../../lib/utf8.h"
+#include "utf8.h"
 #include "lconsole.h"
 #include <stdlib.h>
 

@@ -34,40 +34,6 @@ filesystem:
     - host: userland/system/hsync.bin
       guest: /sbin/
       tags: [programs]
-    # --- ユーザー・デモプログラム → /usr/bin/ ---
-    - host: userland/apps/edit.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/ui_demo/ui_demo.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/gfx_demo.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/demo1.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/ekakiuta.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/vbzview.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/vdpview.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/mgxview.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/spr_test.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/raster.bin
-      guest: /usr/bin/
-      tags: [programs]
-    - host: userland/apps/mdview.bin
-      guest: /usr/bin/
-      tags: [programs]
     - host: userland/tests/bench_scale2x.bin
       guest: /usr/bin/
       tags: [programs]

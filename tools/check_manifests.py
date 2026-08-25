@@ -34,18 +34,20 @@ except ImportError:
 DEPLOY_MANIFESTS = [
     "build/core.yaml",
     "userland/deploy.yaml",
+    "apps/deploy.yaml",
     "game/deploy.yaml",
 ]
 PACKAGE_MANIFESTS = [
     "build/core_packages.yaml",
     "userland/package_defs.yaml",
+    "apps/package_defs.yaml",
 ]
 APP_CONF = "build/app.conf"
 
 
 def built_binaries():
     out = set()
-    for root in ("userland", "game"):
+    for root in ("userland", "apps", "game"):
         for p in glob.glob(root + "/**/*.bin", recursive=True):
             out.add(p)
     return out

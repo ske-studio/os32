@@ -1,0 +1,9 @@
+# ビルド生成物
+*.o
+*.d
+*.elf
+*.raw
+*.bin
+
+__pycache__/
+*.pyc

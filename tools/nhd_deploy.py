@@ -62,6 +62,7 @@ PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEPLOY_MANIFESTS = [
     os.path.join(PROJ_DIR, 'build', 'core.yaml'),
     os.path.join(PROJ_DIR, 'userland', 'deploy.yaml'),
+    os.path.join(PROJ_DIR, 'apps', 'deploy.yaml'),
     os.path.join(PROJ_DIR, 'game', 'deploy.yaml'),
 ]
 

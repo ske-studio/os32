@@ -7,7 +7,14 @@
 #ifndef UTF8_H
 #define UTF8_H
 
+/* 基本型 (u8/u16/u32) の出どころ。カーネルビルド時は include/types.h、
+   ユーザー空間では SDK の契約ヘッダから取る。utf8.c はカーネルと
+   外部プログラムの双方でビルドされるため、両対応にしておく。 */
+#ifdef __KERNEL_BUILD__
 #include "types.h"
+#else
+#include "os32_kapi_shared.h"
+#endif
 
 /* UTF-8デコード結果 */
 typedef struct {

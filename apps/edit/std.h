@@ -5,7 +5,9 @@
 #ifndef _VZ_STD_H_
 #define _VZ_STD_H_
 
-#include "types.h"
+/* 型 (u8/u16/u32/i8/i16/i32) と NULL は os32api.h 経由で
+   os32_kapi_shared.h が提供する。カーネル内部の types.h は使わない
+   (SDK だけでビルドできる必要があるため)。 */
 #include "os32api.h"
 
 /* Typedefs replacing DOS/Assembly types */

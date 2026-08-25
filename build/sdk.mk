@@ -31,6 +31,8 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 	done
 	@mkdir -p $(SDK_OUT)/include/rt
 	cp userland/lib/rt/*.h                $(SDK_OUT)/include/rt/
+	@# 共有 C の公開ヘッダ。実装は libos32gfx.a に入っている (utf8_prog.o)。
+	cp lib/utf8.h                         $(SDK_OUT)/include/
 	cp $(LIBDIR)/*.a                     $(SDK_OUT)/lib/
 	cp $(CRT0_OBJ) $(DBG_OBJ)            $(SDK_OUT)/crt/
 	cp sdk/link/*.ld                     $(SDK_OUT)/link/

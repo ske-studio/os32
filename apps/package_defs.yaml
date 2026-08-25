@@ -1,0 +1,34 @@
+# ============================================================================
+#  apps/package_defs.yaml — 標準アプリのパッケージ内容
+#
+#  mkpkg.py が同名パッケージをマージする。メタデータ (type/version/lzss) は
+#  最初に定義した層 (core -> userland -> apps -> game) のものを使う。
+# ============================================================================
+
+# --- 通常パッケージ: エディタ ---
+normal:
+  files:
+    - host: apps/edit/edit.bin
+      guest: /usr/bin/edit.bin
+
+# --- フルパッケージ: GFX アプリ・デモ ---
+full:
+  files:
+    - host: apps/gfx_demo/gfx_demo.bin
+      guest: /usr/bin/gfx_demo.bin
+    - host: apps/demo1/demo1.bin
+      guest: /usr/bin/demo1.bin
+    - host: apps/ekakiuta/ekakiuta.bin
+      guest: /usr/bin/ekakiuta.bin
+    - host: apps/vbzview/vbzview.bin
+      guest: /usr/bin/vbzview.bin
+    - host: apps/vdpview/vdpview.bin
+      guest: /usr/bin/vdpview.bin
+    - host: apps/mgxview/mgxview.bin
+      guest: /usr/bin/mgxview.bin
+    - host: apps/raster/raster.bin
+      guest: /usr/bin/raster.bin
+    - host: apps/spr_test/spr_test.bin
+      guest: /usr/bin/spr_test.bin
+    - host: apps/mdview/mdview.bin
+      guest: /usr/bin/mdview.bin

@@ -48,8 +48,6 @@ normal:
   # lzss: true
   lzss: false
   files:
-    - host: userland/apps/edit.bin
-      guest: /usr/bin/edit.bin
     - host: userland/cmds/man.bin
       guest: /bin/man.bin
     - host: userland/cmds/diff.bin
@@ -70,24 +68,6 @@ full:
   # lzss: true
   lzss: false
   files:
-    - host: userland/apps/gfx_demo.bin
-      guest: /usr/bin/gfx_demo.bin
-    - host: userland/apps/demo1.bin
-      guest: /usr/bin/demo1.bin
-    - host: userland/apps/ekakiuta.bin
-      guest: /usr/bin/ekakiuta.bin
-    - host: userland/apps/vbzview.bin
-      guest: /usr/bin/vbzview.bin
-    - host: userland/apps/vdpview.bin
-      guest: /usr/bin/vdpview.bin
-    - host: userland/apps/mgxview.bin
-      guest: /usr/bin/mgxview.bin
-    - host: userland/apps/raster.bin
-      guest: /usr/bin/raster.bin
-    - host: userland/apps/spr_test.bin
-      guest: /usr/bin/spr_test.bin
-    - host: userland/apps/mdview.bin
-      guest: /usr/bin/mdview.bin
     - host: userland/system/sndtest.bin
       guest: /usr/bin/sndtest.bin
 
