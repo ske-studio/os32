@@ -19,8 +19,9 @@
 # unicode.bin / kernel.elf / kernel.map)
 /build/out/
 
-# SDK staging (make sdk の出力。sdk/ のソースから毎回組み立てる)
+# SDK staging と配布 tarball (make sdk / make sdk-dist の出力)
 /build/sdk/
+/build/dist/
 
 # ゲームの生成データ (make game-data で game/data/ のスクリプトから作る)
 /game/build/
