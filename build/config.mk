@@ -84,7 +84,12 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 # === 外部プログラム用フラグ ===
-PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libos32tilemap -Iprograms/libos32turn -Iprograms/libos32rpg -Iprograms/libos32save -Iprograms/libos32mgx -Ilib/zlib -I$(CROSS_DIR)/i386-elf/include
+# 外部プログラムの素のインクルードパス。
+#   -Iprograms       libos32/ (crt/help/pkg/dbgserial) を "libos32/xxx.h" で引く
+#   -Iinclude        include/os32_kapi_shared.h ほか
+# ライブラリ固有の -I はここには置かない。build/libs.mk の INC_<lib> を
+# 必要なターゲットだけに渡すこと (一括で並べると層の逆流が隠れる)。
+PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude -Iprograms -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 

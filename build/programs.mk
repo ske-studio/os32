@@ -32,7 +32,7 @@ SHELL_SRC = $(wildcard programs/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
 programs/shell/%.o: programs/shell/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32filer -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/shell $(INC_libos32filer) -c $< -o $@
 
 programs/shell.elf: build/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) -m elf_i386 -T build/app_sys.ld -nostdlib --nmagic --gc-sections -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ) -lc -lgcc
@@ -42,7 +42,7 @@ EDIT_SRC = $(wildcard programs/apps/edit/*.c)
 EDIT_OBJ = $(EDIT_SRC:.c=.o)
 
 programs/apps/edit/%.o: programs/apps/edit/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/edit -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/edit $(INC_libos32gfx) -Ilib -c $< -o $@
 
 programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ) -lc -lgcc
@@ -50,6 +50,14 @@ programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 # === Game (対戦スゴロクRPG) Module ===
 GAME_SRC = $(wildcard programs/apps/game/*.c)
 GAME_OBJ = $(GAME_SRC:.c=.o)
+# game が直接 include するライブラリのインクルードパス。
+# GAME_LIBS のリンク対象と対応させること。
+GAME_INC = $(INC_libos32gfx) $(INC_libos32board) $(INC_libos32battle) \
+           $(INC_libos32econ) $(INC_libos32inv) $(INC_libos32ai) \
+           $(INC_libos32rpg) $(INC_libos32turn) $(INC_libos32save) \
+           $(INC_libos32event) $(INC_libos32tilemap) $(INC_libos32db) \
+           $(INC_libos32snd) -Ilib
+
 # 注: microUI (LIBUI_OBJ) はリンクしない。game は microUI を使っていない。
 GAME_LIBS = $(GFX_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
             $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) \
@@ -58,8 +66,7 @@ GAME_LIBS = $(GFX_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
             $(LIBOS32DB_OBJ) $(LIBSND_OBJ)
 
 programs/apps/game/%.o: programs/apps/game/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game -Iprograms/libos32db \
-	      -Iprograms/libos32snd -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game $(GAME_INC) -c $< -o $@
 
 programs/apps/game.elf: build/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS) -lc -lgcc
@@ -104,7 +111,7 @@ BENCH_SRC = $(wildcard programs/tests/bench/*.c)
 BENCH_OBJ = $(BENCH_SRC:.c=.o)
 
 programs/tests/bench/%.o: programs/tests/bench/%.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/tests/bench.elf: build/app.ld $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_OBJ) $(GFX_OBJ) -lc -lgcc
@@ -116,7 +123,7 @@ BENCH_S2X_SRC = programs/tests/bench_scale2x/main.c
 BENCH_S2X_OBJ = $(BENCH_S2X_SRC:.c=.o)
 
 programs/tests/bench_scale2x/%.o: programs/tests/bench_scale2x/%.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/tests/bench_scale2x.elf: build/app.ld $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(BENCH_S2X_OBJ) $(GFX_OBJ) -lc -lgcc
@@ -143,38 +150,38 @@ endef
 
 # --- テストプログラム登録 ---
 
-$(eval $(call DEFINE_TEST,gfx200_test,$$(GFX_OBJ),))
-$(eval $(call DEFINE_TEST,gfx_demo200,$$(GFX_OBJ),))
-$(eval $(call DEFINE_TEST,blit_test,$$(GFX_OBJ),))
-$(eval $(call DEFINE_TEST,blit_test2,$$(GFX_OBJ),))
-$(eval $(call DEFINE_TEST,rotate_test,$$(GFX_OBJ),))
-$(eval $(call DEFINE_TEST,demo_tile,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),))
-$(eval $(call DEFINE_TEST,tile_bench,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),))
-$(eval $(call DEFINE_TEST,db_test,$$(LIBOS32DB_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,dbq,$$(LIBOS32DB_OBJ),-Iprograms/libos32db))
+$(eval $(call DEFINE_TEST,gfx200_test,$$(GFX_OBJ),$$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,gfx_demo200,$$(GFX_OBJ),$$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,blit_test,$$(GFX_OBJ),$$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,blit_test2,$$(GFX_OBJ),$$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,rotate_test,$$(GFX_OBJ),$$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,demo_tile,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),$$(INC_libos32tilemap)))
+$(eval $(call DEFINE_TEST,tile_bench,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),$$(INC_libos32tilemap)))
+$(eval $(call DEFINE_TEST,db_test,$$(LIBOS32DB_OBJ),$$(INC_libos32db)))
+$(eval $(call DEFINE_TEST,dbq,$$(LIBOS32DB_OBJ),$$(INC_libos32db)))
 $(eval $(call DEFINE_TEST,e2test,,))
-$(eval $(call DEFINE_TEST,math_test,$$(LIBMATH_OBJ),))
-$(eval $(call DEFINE_TEST,chem_test,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,chem_demo,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,map_test,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,map_demo,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ) $$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,input_test,$$(LIBINPUT_OBJ) $$(LIBMATH_OBJ),))
-$(eval $(call DEFINE_TEST,asset_test,$$(LIBASSET_OBJ),))
-$(eval $(call DEFINE_TEST,asset_demo,$$(LIBASSET_OBJ),))
-$(eval $(call DEFINE_TEST,ecs_test,$$(LIBECS_OBJ) $$(LIBMATH_OBJ),))
-$(eval $(call DEFINE_TEST,ecs_demo,$$(LIBECS_OBJ) $$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,text_test,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,text_demo,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,econ_test,$$(LIBECON_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,ai_test,$$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,btl_test,$$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,board_test,$$(LIBBOARD_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,evt_test,$$(LIBEVENT_OBJ) $$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,inv_test,$$(LIBINV_OBJ) $$(LIBOS32DB_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,turn_test,$$(LIBTURN_OBJ) $$(LIBMATH_OBJ),))
-$(eval $(call DEFINE_TEST,rpg_test,$$(LIBRPG_OBJ) $$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))
-$(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),))
-$(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),-Iprograms/libos32mgx -Ilib/zlib))
+$(eval $(call DEFINE_TEST,math_test,$$(LIBMATH_OBJ),$$(INC_libos32math)))
+$(eval $(call DEFINE_TEST,chem_test,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32chem)))
+$(eval $(call DEFINE_TEST,chem_demo,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),$$(INC_libos32chem) $$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,map_test,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32map)))
+$(eval $(call DEFINE_TEST,map_demo,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ) $$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),$$(INC_libos32map) $$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,input_test,$$(LIBINPUT_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32input)))
+$(eval $(call DEFINE_TEST,asset_test,$$(LIBASSET_OBJ),$$(INC_libos32asset)))
+$(eval $(call DEFINE_TEST,asset_demo,$$(LIBASSET_OBJ),$$(INC_libos32asset)))
+$(eval $(call DEFINE_TEST,ecs_test,$$(LIBECS_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ecs)))
+$(eval $(call DEFINE_TEST,ecs_demo,$$(LIBECS_OBJ) $$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ecs) $$(INC_libos32chem)))
+$(eval $(call DEFINE_TEST,text_test,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32text)))
+$(eval $(call DEFINE_TEST,text_demo,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),$$(INC_libos32text) $$(INC_libos32gfx)))
+$(eval $(call DEFINE_TEST,econ_test,$$(LIBECON_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32econ)))
+$(eval $(call DEFINE_TEST,ai_test,$$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ai)))
+$(eval $(call DEFINE_TEST,btl_test,$$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32battle)))
+$(eval $(call DEFINE_TEST,board_test,$$(LIBBOARD_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32board)))
+$(eval $(call DEFINE_TEST,evt_test,$$(LIBEVENT_OBJ) $$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32event)))
+$(eval $(call DEFINE_TEST,inv_test,$$(LIBINV_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32inv)))
+$(eval $(call DEFINE_TEST,turn_test,$$(LIBTURN_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32turn)))
+$(eval $(call DEFINE_TEST,rpg_test,$$(LIBRPG_OBJ) $$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32rpg)))
+$(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),$$(INC_libos32save)))
+$(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),$$(INC_libos32mgx)))
 
 # ---------------------------------------------------------------------------
 #  DEFINE_GFX_APP — GFXアプリ定義テンプレート
@@ -184,7 +191,7 @@ $(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),-Iprograms/libos32mgx -Ilib/zl
 # ---------------------------------------------------------------------------
 define DEFINE_GFX_APP
 programs/apps/$(1).o: programs/apps/$(1).c
-	$$(CC) $$(PROGRAM_FLAGS) $(3) -c $$< -o $$@
+	$$(CC) $$(PROGRAM_FLAGS) $$(INC_libos32gfx) $(3) -c $$< -o $$@
 
 programs/apps/$(1).elf: build/app.ld $$(CRT0_OBJ) programs/apps/$(1).o $$(GFX_OBJ) $(2)
 	$$(LD) $$(PROGRAM_LDFLAGS) -o $$@ $$(CRT0_OBJ) programs/apps/$(1).o $$(GFX_OBJ) $(2) -lc -lgcc
@@ -201,11 +208,11 @@ $(eval $(call DEFINE_GFX_APP,spr_test,,))
 $(eval $(call DEFINE_GFX_APP,vdpview,,))
 $(eval $(call DEFINE_GFX_APP,raster,,))
 $(eval $(call DEFINE_GFX_APP,ekakiuta,,))
-$(eval $(call DEFINE_GFX_APP,mgxview,$$(LIBMGX_OBJ) $$(FILER_OBJ),-Iprograms/libos32mgx -Ilib/zlib -Iprograms/libos32filer))
+$(eval $(call DEFINE_GFX_APP,mgxview,$$(LIBMGX_OBJ) $$(FILER_OBJ),$$(INC_libos32mgx) $$(INC_libos32filer)))
 
 # vbzview は DBG_OBJ を追加
 programs/apps/vbzview.o: programs/apps/vbzview.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 programs/apps/vbzview.elf: build/app.ld $(CRT0_OBJ) programs/apps/vbzview.o $(GFX_OBJ) $(DBG_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(DBG_OBJ) programs/apps/vbzview.o $(GFX_OBJ) -lc -lgcc
@@ -214,7 +221,7 @@ vbzview: $(CRT0_OBJ) programs/apps/vbzview.bin
 
 # mdview
 programs/apps/mdview.o: programs/apps/mdview.c programs/libos32md/libos32md.h programs/libos32md/md_render.h programs/libos32filer/libos32filer.h
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32md -Iprograms/libos32filer -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32md) $(INC_libos32filer) -c $< -o $@
 
 programs/apps/mdview.elf: build/app.ld $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/mdview.o $(MDLIB_OBJ) $(FILER_OBJ) $(GFX_OBJ) $(DBG_OBJ) -lc -lgcc
@@ -223,7 +230,7 @@ mdview: $(CRT0_OBJ) programs/apps/mdview.bin
 
 # ui_demo — microUI デモ
 programs/apps/ui_demo/ui_demo.o: programs/apps/ui_demo/ui_demo.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32ui) -c $< -o $@
 
 programs/apps/ui_demo/ui_demo.elf: build/app.ld $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.o $(GFX_OBJ) $(LIBUI_OBJ) -lc -lgcc
@@ -232,7 +239,7 @@ ui_demo: $(CRT0_OBJ) programs/apps/ui_demo/ui_demo.bin
 
 # libos32gfx/ui.o (gfx_demo が参照)
 programs/libos32gfx/ui.o: programs/libos32gfx/ui.c
-	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o $@
 
 # === SQLite Standalone Test ===
 SQLITE_SA_DIR = programs/tests/sqlite_standalone
@@ -263,7 +270,7 @@ programs/cmds/%.elf: programs/cmds/%.c build/app.ld $(CRT0_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/cmds/$*.o -lc -lgcc
 
 programs/apps/%.elf: programs/apps/%.c build/app.ld $(CRT0_OBJ)
-	$(CC) $(PROGRAM_FLAGS) -c $< -o programs/apps/$*.o
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32gfx) -c $< -o programs/apps/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) programs/apps/$*.o -lc -lgcc
 
 programs/tests/%.elf: programs/tests/%.c build/app.ld $(CRT0_OBJ)
