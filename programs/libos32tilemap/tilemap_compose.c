@@ -68,7 +68,10 @@ static void drawn_tracking_mark(int col, int row)
     if (row > s_drawn_row_max) s_drawn_row_max = row;
 }
 
-/* 追跡結果から最小限の dirty rect を登録 */
+/* 表示クリップ矩形 (tilemap_set_clip で設定。w<=0 = 無効) */
+static int s_clip_x = 0, s_clip_y = 0, s_clip_w = 0, s_clip_h = 0;
+
+/* 追跡結果から最小限の dirty rect を登録 (クリップ矩形内に収める) */
 static void flush_drawn_dirty(void)
 {
     int c, start;
@@ -78,15 +81,26 @@ static void flush_drawn_dirty(void)
 
     dy = _tilemap.origin_y + s_drawn_row_min * TILE_H;
     dh = (s_drawn_row_max - s_drawn_row_min + 1) * TILE_H;
+    if (s_clip_w > 0 && s_clip_h > 0) {
+        if (dy < s_clip_y) { dh -= s_clip_y - dy; dy = s_clip_y; }
+        if (dy + dh > s_clip_y + s_clip_h) dh = s_clip_y + s_clip_h - dy;
+        if (dh <= 0) return;
+    }
 
     c = 0;
     while (c < TILEMAP_COLS) {
+        int rx, rw;
         if (!s_col_drawn[c]) { c++; continue; }
         start = c;
         while (c < TILEMAP_COLS && s_col_drawn[c]) c++;
-        _tilemap.kapi->gfx_add_dirty_rect(
-            _tilemap.origin_x + start * TILE_W,
-            dy, (c - start) * TILE_W, dh);
+        rx = _tilemap.origin_x + start * TILE_W;
+        rw = (c - start) * TILE_W;
+        if (s_clip_w > 0 && s_clip_h > 0) {
+            if (rx < s_clip_x) { rw -= s_clip_x - rx; rx = s_clip_x; }
+            if (rx + rw > s_clip_x + s_clip_w) rw = s_clip_x + s_clip_w - rx;
+            if (rw <= 0) continue;
+        }
+        _tilemap.kapi->gfx_add_dirty_rect(rx, dy, rw, dh);
     }
 }
 
@@ -135,6 +149,17 @@ static void tile_to_surface_flipped(GFX_Surface *s, const TileDef *t,
     s->_pool_idx = -1;
 }
 
+/* 表示クリップ矩形を設定する (画面座標)。w<=0 なら無効 = 従来どおり全域。
+   スクロールの糊しろタイルが盤面の外 (UIパネル等) を上書きしないように
+   使う。tilemap_compose_btf / ftb 系に効く。 */
+void tilemap_set_clip(int x, int y, int w, int h)
+{
+    s_clip_x = x;
+    s_clip_y = y;
+    s_clip_w = w;
+    s_clip_h = h;
+}
+
 /* スクロールを考慮したタイル描画座標とsrc_rectを計算 */
 static int calc_tile_draw(int col, int row,
                           i16 scroll_x, i16 scroll_y,
@@ -145,6 +170,7 @@ static int calc_tile_draw(int col, int row,
     int map_x = col * TILE_W - scroll_x;
     int map_y = row * TILE_H - scroll_y;
     int dx, dy, sx, sy, sw, sh;
+    int bx0, by0, bx1, by1;
 
     while (map_x < -TILE_W) map_x += TILEMAP_COLS * TILE_W;
     while (map_x >= TILEMAP_COLS * TILE_W) map_x -= TILEMAP_COLS * TILE_W;
@@ -155,19 +181,31 @@ static int calc_tile_draw(int col, int row,
     dy = origin_y + map_y;
     sx = 0; sy = 0; sw = TILE_W; sh = TILE_H;
 
-    if (dx < origin_x) {
-        int clip = origin_x - dx;
-        sx += clip; sw -= clip; dx = origin_x;
+    /* 描画可能な範囲 = プレーン全域 ∩ クリップ矩形 */
+    bx0 = origin_x;
+    by0 = origin_y;
+    bx1 = origin_x + TILEMAP_COLS * TILE_W;
+    by1 = origin_y + TILEMAP_ROWS * TILE_H;
+    if (s_clip_w > 0 && s_clip_h > 0) {
+        if (s_clip_x > bx0) bx0 = s_clip_x;
+        if (s_clip_y > by0) by0 = s_clip_y;
+        if (s_clip_x + s_clip_w < bx1) bx1 = s_clip_x + s_clip_w;
+        if (s_clip_y + s_clip_h < by1) by1 = s_clip_y + s_clip_h;
     }
-    if (dy < origin_y) {
-        int clip = origin_y - dy;
-        sy += clip; sh -= clip; dy = origin_y;
+
+    if (dx < bx0) {
+        int clip = bx0 - dx;
+        sx += clip; sw -= clip; dx = bx0;
     }
-    if (dx + sw > origin_x + TILEMAP_COLS * TILE_W) {
-        sw = origin_x + TILEMAP_COLS * TILE_W - dx;
+    if (dy < by0) {
+        int clip = by0 - dy;
+        sy += clip; sh -= clip; dy = by0;
     }
-    if (dy + sh > origin_y + TILEMAP_ROWS * TILE_H) {
-        sh = origin_y + TILEMAP_ROWS * TILE_H - dy;
+    if (dx + sw > bx1) {
+        sw = bx1 - dx;
+    }
+    if (dy + sh > by1) {
+        sh = by1 - dy;
     }
 
     if (sw <= 0 || sh <= 0) return 0;

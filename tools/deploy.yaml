@@ -138,6 +138,9 @@ filesystem:
     - host: programs/tests/db_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: programs/tests/dbq.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: programs/tests/math_test.bin
       guest: /usr/bin/
       tags: [programs]
@@ -291,8 +294,14 @@ filesystem:
       tags: [data]
 
     # --- 経済エンジン マスターデータ (SQLite DB) ---
+    # econ.db は実ゲームの村マスタ (59村)。econ_test は固定の4件を前提と
+    # するため、テスト用の econ_test.db を別に配置する。
     - host: assets/econ.db
       guest: /db/econ.db
+      tags: [data]
+
+    - host: assets/econ_test.db
+      guest: /db/econ_test.db
       tags: [data]
 
     # --- AI意思決定エンジン プロファイルデータ (SQLite DB) ---
@@ -316,8 +325,13 @@ filesystem:
       tags: [data]
 
     # --- イベントスケジューラ マスターデータ (SQLite DB) ---
+    # events.db は実ゲームの週次イベント9種。evt_test は固定の汎用データを
+    # 前提とするため、テスト用の events_test.db を別に配置する。
     - host: assets/events.db
       guest: /db/events.db
+      tags: [data]
+    - host: assets/events_test.db
+      guest: /db/events_test.db
       tags: [data]
 
     # --- インベントリエンジン マスターデータ (SQLite DB) ---

@@ -259,16 +259,19 @@ static int test_file_db(void)
 {
     int rc;
 
-    header("Test 2: File DB Init (/db/econ.db)");
+    /* econ.db は実ゲーム (対戦スゴロクRPG) の 59 村が入るため、
+       固定の期待値を持つテストは econ_test.db を使う
+       (board.db / board_test.db と同じ方式)。 */
+    header("Test 2: File DB Init (/db/econ_test.db)");
 
-    rc = econ_init("/db/econ.db");
+    rc = econ_init("/db/econ_test.db");
     if (rc < 0) {
         api->kprintf(ATTR_YELLOW,
             "  [SKIP] econ_init returned %d "
-            "(is /db/econ.db deployed?)\n", rc);
+            "(is /db/econ_test.db deployed?)\n", rc);
         return -1;
     }
-    check("econ_init(/db/econ.db)", rc == 0);
+    check("econ_init(/db/econ_test.db)", rc == 0);
 
     check("item_count > 0", econ_item_count() > 0);
     check("market_count > 0", econ_market_count() > 0);

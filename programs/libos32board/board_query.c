@@ -25,6 +25,13 @@ const BoardMass *board_get_mass(u16 id)
     return &board_get_masses()[idx];
 }
 
+const BoardMass *board_get_mass_at(int index)
+{
+    if (index < 0 || index >= board_get_mass_count())
+        return (const BoardMass *)0;
+    return &board_get_masses()[index];
+}
+
 u8 board_get_type(u16 id)
 {
     int idx = board_find_index(id);

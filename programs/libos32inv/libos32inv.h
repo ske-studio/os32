@@ -219,6 +219,14 @@ u32  inv_get_sell_price(u16 item_id);   /* 売値 = price / 2 */
 /* 購入 (wallet から減算, バッグに追加) */
 int  inv_shop_buy(InvBag *bag, u16 item_id, u32 *wallet);
 
+/* 購入価格の倍率 (百分率)。100=定価, 75=25%引き, 0=購入不可(休業)。
+   曜日セールのようなゲーム側の都合を、店ロジックへ持ち込まずに表現する。
+   売値 (inv_shop_sell) には影響しない。 */
+void inv_shop_set_price_scale(u16 percent);
+u16  inv_shop_get_price_scale(void);
+/* 倍率適用後の購入価格 */
+u32  inv_shop_buy_price(u16 item_id);
+
 /* 売却 (バッグから除去, wallet に加算) */
 int  inv_shop_sell(InvBag *bag, u8 slot, u32 *wallet);
 

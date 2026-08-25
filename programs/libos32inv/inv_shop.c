@@ -61,25 +61,51 @@ int inv_shop_list(u8 shop_type, u8 stage, u16 *out_ids, int max)
 /*  公開API: 購入                                                           */
 /* ====================================================================== */
 
+/* 購入価格の倍率 (百分率)。既定は定価 */
+static u16 g_price_scale = 100;
+
+void inv_shop_set_price_scale(u16 percent)
+{
+    g_price_scale = percent;
+}
+
+u16 inv_shop_get_price_scale(void)
+{
+    return g_price_scale;
+}
+
+u32 inv_shop_buy_price(u16 item_id)
+{
+    const InvItemDef *def = inv_get_def(item_id);
+    if (!def) return 0;
+    return (u32)def->price * (u32)g_price_scale / 100;
+}
+
 int inv_shop_buy(InvBag *bag, u16 item_id, u32 *wallet)
 {
     const InvItemDef *def;
+    u32 price;
     int rc;
 
     if (!bag || !wallet) return -1;
 
+    /* 倍率0 = 休業日。買えない */
+    if (g_price_scale == 0) return -4;
+
     def = inv_get_def(item_id);
     if (!def) return -1;
 
+    price = (u32)def->price * (u32)g_price_scale / 100;
+
     /* 資金チェック */
-    if (*wallet < def->price) return -2;
+    if (*wallet < price) return -2;
 
     /* インベントリに追加 */
     rc = inv_add(bag, item_id, 1);
     if (rc < 0) return -3;  /* 満杯 */
 
     /* 資金減算 */
-    *wallet -= def->price;
+    *wallet -= price;
 
     return 0;
 }

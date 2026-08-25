@@ -157,10 +157,12 @@ lib-libos32tilemap: $(TILEMAP_OBJ)
 .PHONY: lib-libos32tilemap
 
 # libos32snd — サウンドライブラリ
+LIBSND_OBJ = programs/libos32snd/libos32snd.o
+
 programs/libos32snd/libos32snd.o: programs/libos32snd/libos32snd.c programs/libos32snd/libos32snd.h
 	$(CC) $(PROGRAM_FLAGS) -Iprograms/libos32snd -c $< -o $@
 
-ALL_LIB_OBJ += programs/libos32snd/libos32snd.o
+ALL_LIB_OBJ += $(LIBSND_OBJ)
 
 # libos32md — Markdownパーサー + レンダラー
 programs/libos32md/md_parse.o: programs/libos32md/md_parse.c programs/libos32md/libos32md.h

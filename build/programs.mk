@@ -5,7 +5,7 @@
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS    = $(wildcard programs/cmds/*.c)
 C_APPS    = $(filter-out programs/apps/edit.c, $(wildcard programs/apps/*.c))
-C_TESTS   = $(filter-out programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c programs/tests/turn_test.c programs/tests/rpg_test.c programs/tests/save_test.c, $(wildcard programs/tests/*.c))
+C_TESTS   = $(filter-out programs/tests/gfx200_test.c programs/tests/gfx_demo200.c programs/tests/blit_test.c programs/tests/blit_test2.c programs/tests/demo_tile.c programs/tests/tile_bench.c programs/tests/rotate_test.c programs/tests/db_test.c programs/tests/dbq.c programs/tests/e2test.c programs/tests/math_test.c programs/tests/chem_test.c programs/tests/chem_demo.c programs/tests/map_test.c programs/tests/map_demo.c programs/tests/input_test.c programs/tests/asset_test.c programs/tests/asset_demo.c programs/tests/ecs_test.c programs/tests/ecs_demo.c programs/tests/text_test.c programs/tests/text_demo.c programs/tests/econ_test.c programs/tests/ai_test.c programs/tests/btl_test.c programs/tests/board_test.c programs/tests/evt_test.c programs/tests/inv_test.c programs/tests/turn_test.c programs/tests/rpg_test.c programs/tests/save_test.c, $(wildcard programs/tests/*.c))
 C_SYSTEM  = $(filter-out programs/system/lz4.c programs/system/cdinst.c, $(wildcard programs/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
@@ -51,10 +51,14 @@ programs/apps/edit.elf: build/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 GAME_SRC = $(wildcard programs/apps/game/*.c)
 GAME_OBJ = $(GAME_SRC:.c=.o)
 GAME_LIBS = $(GFX_OBJ) $(LIBUI_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
-            $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) $(LIBOS32DB_OBJ)
+            $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) \
+            $(LIBRPG_OBJ) $(LIBTURN_OBJ) $(LIBSAVE_OBJ) \
+            $(LIBEVENT_OBJ) $(TILEMAP_OBJ) $(LIBASSET_OBJ) \
+            $(LIBOS32DB_OBJ) $(LIBSND_OBJ)
 
 programs/apps/game/%.o: programs/apps/game/%.c
-	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game -Iprograms/libos32db -c $< -o $@
+	$(CC) $(PROGRAM_FLAGS) -Iprograms/apps/game -Iprograms/libos32db \
+	      -Iprograms/libos32snd -c $< -o $@
 
 programs/apps/game.elf: build/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS) -lc -lgcc
@@ -137,6 +141,7 @@ $(eval $(call DEFINE_TEST,rotate_test,$$(GFX_OBJ),))
 $(eval $(call DEFINE_TEST,demo_tile,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),))
 $(eval $(call DEFINE_TEST,tile_bench,$$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),))
 $(eval $(call DEFINE_TEST,db_test,$$(LIBOS32DB_OBJ),-Iprograms/libos32db))
+$(eval $(call DEFINE_TEST,dbq,$$(LIBOS32DB_OBJ),-Iprograms/libos32db))
 $(eval $(call DEFINE_TEST,e2test,,))
 $(eval $(call DEFINE_TEST,math_test,$$(LIBMATH_OBJ),))
 $(eval $(call DEFINE_TEST,chem_test,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),-Iprograms/libos32db))

@@ -4,6 +4,7 @@
 /*  GFXバックバッファへの描画と、KAPI経由の入力注入を行う。                  */
 /* ======================================================================== */
 
+#include <string.h>
 #include "libos32ui.h"
 #include "libos32gfx.h"
 #include "gfx_font.h"
@@ -168,7 +169,27 @@ void mui_init(mu_Context *ctx, KernelAPI *api, int font_w, int font_h)
 /*  入力ブリッジ                                                            */
 /* ======================================================================== */
 
-void mui_pump_input(mu_Context *ctx)
+/* キー1文字を microUI へ流し込む。
+   ch <= 0 なら何もしない (キーなし) */
+static void feed_char(mu_Context *ctx, int ch)
+{
+    if (ch <= 0) return;
+
+    if (ch == 0x08) {
+        mu_input_keydown(ctx, MU_KEY_BACKSPACE);
+        mu_input_keyup(ctx, MU_KEY_BACKSPACE);
+    } else if (ch == 0x0D || ch == 0x0A) {
+        mu_input_keydown(ctx, MU_KEY_RETURN);
+        mu_input_keyup(ctx, MU_KEY_RETURN);
+    } else if (ch >= 0x20 && ch < 0x7F) {
+        char buf[2];
+        buf[0] = (char)ch;
+        buf[1] = '\0';
+        mu_input_text(ctx, buf);
+    }
+}
+
+void mui_pump_input_ch(mu_Context *ctx, int ch)
 {
     MouseInfo mi;
     unsigned char btn;
@@ -193,28 +214,39 @@ void mui_pump_input(mu_Context *ctx)
     prev_buttons = btn;
 
     /* キーボード: Backspace / Enter のエッジ検出 */
-    {
-        int ch = ui_api->kbd_trygetchar();
-        if (ch > 0) {
-            if (ch == 0x08) {
-                mu_input_keydown(ctx, MU_KEY_BACKSPACE);
-                mu_input_keyup(ctx, MU_KEY_BACKSPACE);
-            } else if (ch == 0x0D || ch == 0x0A) {
-                mu_input_keydown(ctx, MU_KEY_RETURN);
-                mu_input_keyup(ctx, MU_KEY_RETURN);
-            } else if (ch >= 0x20 && ch < 0x7F) {
-                char buf[2];
-                buf[0] = (char)ch;
-                buf[1] = '\0';
-                mu_input_text(ctx, buf);
-            }
-        }
-    }
+    feed_char(ctx, ch);
+}
+
+void mui_pump_input(mu_Context *ctx)
+{
+    /* キーはここで読み切ってしまうので、アプリ側でも自前でキーを処理したい
+       場合は mui_pump_input_ch() に読んだ文字を渡すこと。
+       (この関数を使うと kbd_trygetchar() の戻りが常に空になる) */
+    mui_pump_input_ch(ctx, ui_api->kbd_trygetchar());
 }
 
 /* ======================================================================== */
 /*  レンダラ                                                                */
 /* ======================================================================== */
+
+int mui_render_cached(mu_Context *ctx, int force)
+{
+    /* mu のコマンドリストはフレームごとに先頭から組み直されるので、
+       バイト列が一致すれば見た目も同一。まるごと比較して同じなら
+       描画も VRAM 転送も発生させない */
+    static char prev[MU_COMMANDLIST_SIZE];
+    static int prev_len = -1;
+    int len = ctx->command_list.idx;
+
+    if (!force && len == prev_len &&
+        memcmp(ctx->command_list.items, prev, (size_t)len) == 0) {
+        return 0;
+    }
+    memcpy(prev, ctx->command_list.items, (size_t)len);
+    prev_len = len;
+    mui_render(ctx);
+    return 1;
+}
 
 void mui_render(mu_Context *ctx)
 {

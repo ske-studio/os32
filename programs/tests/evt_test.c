@@ -430,14 +430,14 @@ static void test_db_load(void)
 
     header("Test 10: DB Load");
 
-    rc = evt_init("/db/events.db");
+    rc = evt_init("/db/events_test.db");
     if (rc < 0) {
         api->kprintf(ATTR_YELLOW,
             "  [SKIP] evt_init returned %d "
-            "(is events.db deployed?)\n", rc);
+            "(is events_test.db deployed?)\n", rc);
         return;
     }
-    check("evt_init(/db/events.db)", rc == 0);
+    check("evt_init(/db/events_test.db)", rc == 0);
 
     /* 定義数を確認 */
     api->kprintf(ATTR_WHITE, "  def_count = %d\n", (int)g_evt_def_count);

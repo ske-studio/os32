@@ -21,7 +21,7 @@
 #define BOARD_MAX_CONNECT   8
 
 /* 同時管理マス上限 */
-#define BOARD_MAX_MASSES    256
+#define BOARD_MAX_MASSES    384
 
 /* 接続先なしのセンチネル値 */
 #define BOARD_CONNECT_NONE  0xFFFF
@@ -36,8 +36,18 @@
 #define BOARD_FLAG_HIDDEN   0x04  /* 非表示 (天の岩戸等) */
 #define BOARD_FLAG_TRAP     0x08  /* 罠あり */
 
+/* 地形 (マスの見た目と通過/停止時の効果)
+   毒沼は「通過しただけで」効果、雪原は「止まったとき」効果。
+   効果の適用はゲーム側の責務で、board は種別を保持するだけ。 */
+#define BOARD_TERR_PLAIN    0
+#define BOARD_TERR_FOREST   1
+#define BOARD_TERR_ROCK     2
+#define BOARD_TERR_DESERT   3
+#define BOARD_TERR_SWAMP    4   /* 毒の沼: 通過で毒 */
+#define BOARD_TERR_SNOW     5   /* 雪原: 止まるとマヒ */
+
 /* BFS用内部キュー上限 */
-#define BOARD_BFS_QUEUE_MAX 256
+#define BOARD_BFS_QUEUE_MAX 384
 
 /* ====================================================================== */
 /*  2. データ構造                                                          */
@@ -54,8 +64,10 @@ typedef struct {
     u16  param;                            /* マス固有パラメータ */
     u8   cost;                             /* 通行コスト (0=無料) */
     u8   trap_owner;                       /* 罠設置者ID (0xFF=なし) */
-    i16  x, y;                             /* 表示座標 */
-} BoardMass;                               /* 26B */
+    i16  x, y;                             /* 表示座標 (2Dグリッド上のマス座標) */
+    u8   terrain;                          /* BOARD_TERR_* (地形) */
+    u8   _pad;
+} BoardMass;                               /* 28B */
 
 /* 区画 (ステージ) */
 typedef struct {
@@ -90,6 +102,9 @@ int  board_mass_count(void);
 
 /* IDからマスを取得 (NULL=見つからない) */
 const BoardMass *board_get_mass(u16 id);
+/* 読み込み順 (id昇順) の index でアクセスする。
+   id が連番である保証はないので、全件走査にはこちらを使う。範囲外は NULL */
+const BoardMass *board_get_mass_at(int index);
 
 /* マス種別を取得 (0=見つからない) */
 u8   board_get_type(u16 id);

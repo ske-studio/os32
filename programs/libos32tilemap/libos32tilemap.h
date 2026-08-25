@@ -13,8 +13,11 @@
 #define TILE_TOTAL_SZ   128     /* 32 * 4 = 128バイト/タイル */
 #define MAX_TILES       1024
 
-#define TILEMAP_COLS    24
-#define TILEMAP_ROWS    24
+/* BG プレーンの大きさ (タイル数)。
+   対戦スゴロクRPG の盤面が 400x304px = 25x19 タイルなので、
+   スクロールの糊しろを足して 26x20 にしてある。 */
+#define TILEMAP_COLS    26
+#define TILEMAP_ROWS    20
 #define BG_COUNT        4
 
 /* タイル不透明度 (事前計算) */
@@ -88,6 +91,10 @@ void tilemap_present(void);
 /* ===== 画面配置 ===== */
 /* 描画オフセット (8の倍数に揃えられる、デフォルト0,0) */
 void tilemap_set_origin(int ox, int oy);
+/* 表示クリップ矩形 (画面座標)。w<=0 で無効化 (デフォルト = 全域)。
+   スクロール中の糊しろタイルがビューの外へはみ出すのを防ぐ。
+   compose_btf / compose_ftb に効く (compose_btf_fast は非対応)。 */
+void tilemap_set_clip(int x, int y, int w, int h);
 
 /* ===== HWスクロール ===== */
 /* 全プレーン同方向スクロール (GDC SCROLLコマンド経由) */

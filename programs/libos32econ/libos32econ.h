@@ -53,7 +53,9 @@
 #define ECON_MAX_RECIPES     32
 #define ECON_MAX_RECIPE_MAT   8
 
-#define ECON_ESTATE_MAX      32   /* 同時管理不動産上限 */
+/* 同時管理不動産上限。対戦スゴロクRPG の実マップが 59 村を持つため 64 とする
+   (32 のままだと load_estates() が黙って 32 件で打ち切る) */
+#define ECON_ESTATE_MAX      64
 #define ECON_ESTATE_LV_MAX    8   /* 最大レベル */
 #define ECON_ESTATE_TYPE_MAX  8   /* 不動産種別上限 */
 #define ECON_OWNER_NONE    0xFF
@@ -188,7 +190,7 @@ typedef struct {
     u8   monster_id;      /* 支配モンスターID (0=なし) */
     u8   stage;           /* 所属ステージ */
     u16  _pad2;
-} EconEstate;              /* 24B * 32 = 768B */
+} EconEstate;              /* 24B * 64 = 1536B */
 
 /* レベルテーブル (RAMキャッシュ) */
 typedef struct {
@@ -372,6 +374,10 @@ int  econ_estate_list(u8 owner, u16 *out, int max);
 
 /* クエリ */
 const EconEstate *econ_estate_get(u16 id);
+/* 読み込み順 (id昇順) の index でアクセスする。
+   id が連番である保証はないので、全件走査にはこちらを使う。
+   範囲外なら NULL */
+const EconEstate *econ_estate_at(int index);
 int  econ_estate_total(void);
 u8   econ_estate_level(u16 id);
 u32  econ_estate_value(u16 id);

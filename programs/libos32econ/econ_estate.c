@@ -416,6 +416,12 @@ const EconEstate *econ_estate_get(u16 id)
     return &g_estates[idx];
 }
 
+const EconEstate *econ_estate_at(int index)
+{
+    if (index < 0 || index >= g_estate_count) return (const EconEstate *)0;
+    return &g_estates[index];
+}
+
 int econ_estate_total(void)
 {
     return g_estate_count;

@@ -76,18 +76,20 @@ int board_init(const char *db_path)
 
         /* マスデータをロード */
         DB_LOAD_TABLE(h,
-            "SELECT id, type, area, param, cost, flags, x, y"
+            "SELECT id, type, area, param, cost, flags, x, y, terrain"
             " FROM masses ORDER BY id",
             g_masses, BOARD_MAX_MASSES, g_mass_count,
             {
-                row->id    = (u16)db_column_int(0);
-                row->type  = (u8)db_column_int(1);
-                row->area  = (u8)db_column_int(2);
-                row->param = (u16)db_column_int(3);
-                row->cost  = (u8)db_column_int(4);
-                row->flags = (u8)db_column_int(5);
-                row->x     = (i16)db_column_int(6);
-                row->y     = (i16)db_column_int(7);
+                row->id      = (u16)db_column_int(0);
+                row->type    = (u8)db_column_int(1);
+                row->area    = (u8)db_column_int(2);
+                row->param   = (u16)db_column_int(3);
+                row->cost    = (u8)db_column_int(4);
+                row->flags   = (u8)db_column_int(5);
+                row->x       = (i16)db_column_int(6);
+                row->y       = (i16)db_column_int(7);
+                row->terrain = (u8)db_column_int(8);
+                row->_pad    = 0;
                 row->connect_count = 0;
                 row->trap_owner = 0xFF;
             });

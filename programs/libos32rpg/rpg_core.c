@@ -131,6 +131,13 @@ int rpg_init(const char *db_path)
                 row->min_turns   = (u8)db_column_int(1);
                 row->max_turns   = (u8)db_column_int(2);
             });
+
+        /* 起動時RAMキャッシュ完了につきDB接続を即時クローズ。
+           SQLite の MEMSYS5 プールは 200KB 固定で、接続を握ったままだと
+           後続ライブラリの *_init() が確保に失敗する (econ_core.c と同方針)。
+           g_db_slot は init 以降参照しないため保持する意味がない。 */
+        db_close(h);
+        g_db_slot = -1;
     }
 
     g_initialized = 1;

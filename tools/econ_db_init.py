@@ -2,15 +2,27 @@
 """
 econ_db_init.py — libos32econ マスタデータベース生成ツール
 
-/db/econ.db にテスト用の経済マスタデータを投入する。
-ゲーム実装時は各タイトルが独自のデータを投入する想定。
+2種類のDBを出し分ける (gen_board_db.py と同じ方式):
+
+  --game (既定)  assets/econ.db      対戦スゴロクRPG の実データ
+                 estates は全8ステージ 59 村。id は board.db の
+                 masses.param (村ID 1〜59) と 1 対 1 で対応する。
+
+  --test         assets/econ_test.db libos32econ のテスト用固定データ
+                 econ_test.c が前提とする 4 件の不動産 (Village/Port/
+                 Fort/Mine) を持つ。
+
+estates 以外 (商品/市場/通貨/交易/商人など) は両者で同一。
+実マップの 59 村を econ.db に入れると econ_test の期待値
+(id=1 が base_value 6400 の村…) が壊れるため、テスト用を分離している。
 """
 
 import sqlite3
 import os
 import sys
 
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'assets', 'econ.db')
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         '..', 'assets')
 
 SCHEMA = """
 /* 商品マスタ */
@@ -158,8 +170,101 @@ CREATE TABLE IF NOT EXISTS estate_types (
 );
 """
 
-def insert_test_data(conn):
-    """テスト用マスタデータを投入"""
+# ==========================================================================
+#  実ゲームの村マスタ (--game)
+# ==========================================================================
+#
+#  board.db の masses.param が村ID (1〜59) を持ち、そのまま estates.id に
+#  なる。ステージごとの村数は gen_board_db.py の VILLAGES_PER_STAGE
+#  [7,7,7,8,8,8,7,7] と一致していなければならない。
+#
+#  収入は income = base_value / 640 * income_mul[level] / 100 で決まるので、
+#  base_value = 640 * (Lv1 の 1 週あたり上納金) となる。
+#  奥のステージほど高収入・高投資額になるよう Lv1 収入を設計する。
+
+# ステージごとの村名 (7 or 8 個ずつ、合計59)。名は記紀の地名から採った。
+GAME_VILLAGE_NAMES = [
+    # ステージ1 (7村) — 葦原中国の入口
+    ['Ashihara', 'Takachiho', 'Kushiro', 'Hinokuma', 'Isuzu',
+     'Awaji', 'Onogoro'],
+    # ステージ2 (7村) — 出雲
+    ['Izumo', 'Inaba', 'Yakumo', 'Kizuki', 'Sada',
+     'Tamatsukuri', 'Hii River'],
+    # ステージ3 (7村) — 日向・筑紫
+    ['Hyuga', 'Tsukushi', 'Usa', 'Kirishima', 'Aso',
+     'Munakata', 'Itoshima'],
+    # ステージ4 (8村) — 大和
+    ['Yamato', 'Miwa', 'Asuka', 'Katsuragi', 'Ikaruga',
+     'Uda', 'Yoshino', 'Hase'],
+    # ステージ5 (8村) — 東国
+    ['Owari', 'Suruga', 'Sagami', 'Kazusa', 'Hitachi',
+     'Shinano', 'Kai', 'Kozuke'],
+    # ステージ6 (8村) — 北陸・越
+    ['Koshi', 'Wakasa', 'Noto', 'Echigo', 'Sado',
+     'Tsuruga', 'Hakusan', 'Tateyama'],
+    # ステージ7 (7村) — 常世・海路
+    ['Tokoyo', 'Watatsumi', 'Ryugu', 'Awashima', 'Okinoshima',
+     'Nagisa', 'Shiogama'],
+    # ステージ8 (7村) — 黄泉・高天原の麓
+    ['Yomotsu', 'Hirasaka', 'Sakamoto', 'Amanoiwato', 'Ukehi',
+     'Takamagahara', 'Ama-no-Yasu'],
+]
+
+# ステージごとの Lv1 週次上納金 (base_value = これ * 640)
+GAME_STAGE_INCOME = [10, 14, 18, 24, 30, 38, 48, 60]
+
+# ステージ内の並び順に割り当てる不動産種別。
+# 村が基本で、要所に港/砦/鉱山を配置して収入ボーナスに差を付ける。
+GAME_STAGE_TYPES = [
+    #  0        1        2        3        4        5        6        7
+    [0,       0,       1,       0,       0,       2,       0],
+    [0,       1,       0,       0,       2,       0,       3],
+    [0,       0,       2,       1,       0,       0,       3],
+    [0,       2,       0,       1,       0,       3,       0,       0],
+    [1,       0,       0,       2,       0,       0,       3,       0],
+    [0,       1,       2,       0,       3,       0,       0,       0],
+    [1,       1,       0,       2,       0,       3,       0],
+    [2,       0,       3,       0,       2,       0,       3],
+]
+
+
+def build_game_estates():
+    """実マップの 59 村を (id, name, type, stage, base_value) で返す"""
+    estates = []
+    vid = 1
+    for stage_idx, names in enumerate(GAME_VILLAGE_NAMES):
+        types = GAME_STAGE_TYPES[stage_idx]
+        if len(types) != len(names):
+            raise ValueError(
+                'stage {}: name/type count mismatch ({} vs {})'.format(
+                    stage_idx + 1, len(names), len(types)))
+        for slot, name in enumerate(names):
+            etype = types[slot]
+            # 種別ごとに基礎収入を補正 (砦は守りが堅い代わりに収入低め)
+            income = GAME_STAGE_INCOME[stage_idx] + slot
+            if etype == 1:      # 港
+                income += 4
+            elif etype == 2:    # 砦
+                income -= 2
+            elif etype == 3:    # 鉱山
+                income += 8
+            estates.append((vid, name, etype, stage_idx + 1, income * 640))
+            vid += 1
+    return estates
+
+
+# テスト用不動産 (econ_test.c が期待する固定データ)
+TEST_ESTATES = [
+    # (id, name, type, stage, base_value)
+    (1, 'Greenhill Village',   0, 1, 6400),    # 村 (base_value/640=10)
+    (2, 'Harbor Town',         1, 1, 12800),   # 港 (base_value/640=20)
+    (3, 'Iron Fortress',       2, 2, 19200),   # 砦 (base_value/640=30)
+    (4, 'Gold Mine',           3, 2, 32000),   # 鉱山 (base_value/640=50)
+]
+
+
+def insert_test_data(conn, estates):
+    """マスタデータを投入 (estates 以外は game/test 共通)"""
     c = conn.cursor()
 
     # === 商品 (8品目) ===
@@ -274,14 +379,7 @@ def insert_test_data(conn):
     ]
     c.executemany("INSERT INTO merchants VALUES (?,?,?,?,?,?,?)", merchants_data)
 
-    # === 不動産 (4件) ===
-    estates = [
-        # (id, name, type, stage, base_value)
-        (1, 'Greenhill Village',   0, 1, 6400),   # 村 (base_value/640=10)
-        (2, 'Harbor Town',         1, 1, 12800),   # 港 (base_value/640=20)
-        (3, 'Iron Fortress',       2, 2, 19200),   # 砦 (base_value/640=30)
-        (4, 'Gold Mine',           3, 2, 32000),   # 鉱山 (base_value/640=50)
-    ]
+    # === 不動産 (呼び出し側が game/test を選ぶ) ===
     c.executemany(
         "INSERT INTO estates (id, name, type, stage, base_value) "
         "VALUES (?,?,?,?,?)",
@@ -322,23 +420,24 @@ def insert_test_data(conn):
 
     conn.commit()
 
-def main():
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-        print(f"Removed existing: {DB_PATH}")
+def generate(db_name, estates):
+    db_path = os.path.join(ASSET_DIR, db_name)
+    if os.path.exists(db_path):
+        os.remove(db_path)
+        print(f"Removed existing: {db_path}")
 
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(ASSET_DIR, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH)
-    print(f"Creating: {DB_PATH}")
+    conn = sqlite3.connect(db_path)
+    print(f"Creating: {db_path}")
 
     # スキーマ作成
     conn.executescript(SCHEMA)
     print("  Schema created")
 
-    # テストデータ投入
-    insert_test_data(conn)
-    print("  Test data inserted")
+    # マスタデータ投入
+    insert_test_data(conn, estates)
+    print("  Master data inserted")
 
     # 統計表示
     c = conn.cursor()
@@ -368,5 +467,27 @@ def main():
     conn.close()
     print("Done!")
 
+
+def main():
+    mode = 'game'
+    for arg in sys.argv[1:]:
+        if arg == '--test':
+            mode = 'test'
+        elif arg == '--game':
+            mode = 'game'
+        elif arg == '--all':
+            mode = 'all'
+        else:
+            print("Usage: econ_db_init.py [--game | --test | --all]",
+                  file=sys.stderr)
+            return 1
+
+    if mode in ('game', 'all'):
+        generate('econ.db', build_game_estates())
+    if mode in ('test', 'all'):
+        generate('econ_test.db', TEST_ESTATES)
+    return 0
+
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

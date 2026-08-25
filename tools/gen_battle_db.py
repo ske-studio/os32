@@ -7,6 +7,11 @@ assets/battle.db に以下のテーブルを作成:
   - command_matrix: コマンドマトリクス (攻撃/防御コマンドの組み合わせ結果)
   - status_effects: 状態異常定義 (毒, 麻痺, 眠り, 混乱, 盲目)
   - element_chart:  属性相性テーブル (火→氷, 氷→火, 火→火, 雷→水 等)
+  - enemies:        敵マスタ (対戦スゴロクRPG 用: 野生44体 + ボス8体)
+
+前3テーブルは libos32battle が btl_init() で読む汎用データ。
+enemies はゲーム固有なので libos32battle は関知せず、
+programs/apps/game の game_glue.c が直接読む。
 """
 
 import sqlite3
@@ -40,6 +45,23 @@ CREATE TABLE IF NOT EXISTS element_chart (
     elem_def    INTEGER NOT NULL,
     multiplier  INTEGER NOT NULL DEFAULT 256,
     PRIMARY KEY (elem_atk, elem_def)
+);
+
+/* 敵マスタ (ゲーム固有。libos32battle は読まない) */
+CREATE TABLE IF NOT EXISTS enemies (
+    id       INTEGER PRIMARY KEY,
+    name     TEXT NOT NULL,
+    stage    INTEGER NOT NULL DEFAULT 1,   /* 出現ステージ 1-8 (board の area に対応) */
+    kind     INTEGER NOT NULL DEFAULT 0,   /* 0=野生, 1=ボス */
+    max_hp   INTEGER NOT NULL,
+    atk      INTEGER NOT NULL,
+    def      INTEGER NOT NULL,
+    spd      INTEGER NOT NULL,
+    mag      INTEGER NOT NULL,
+    elements INTEGER NOT NULL DEFAULT 0,   /* 属性ビット (element_chart と同じ割当) */
+    exp      INTEGER NOT NULL,
+    gold     INTEGER NOT NULL,
+    class_id INTEGER NOT NULL DEFAULT 1
 );
 """
 
@@ -126,6 +148,120 @@ ELEMENT_CHART = [
 ]
 
 
+# ==========================================================================
+#  敵マスタ
+#
+#  DOS 版のオリジナル敵データ (sample/game/enemy_data.c) は本リポジトリに
+#  存在しないため、以下は記紀・妖怪の名を借りた合成データ。
+#  ステージ 1-8 の野生敵 44 体 + 各ステージのボス 8 体 = 52 体。
+#
+#  ID 割り当て:
+#    1〜44   野生敵 (ステージ順に連番)
+#    101〜108 ボス (101 = ステージ1 のボス)
+#  ボスIDを別レンジにしておくと、game 側が stage から boss を
+#  100 + stage で直に引ける。
+# ==========================================================================
+
+# ステージごとの野生敵名。ステージ 1-4 が 6 体、5-8 が 5 体で計 44 体。
+WILD_NAMES = [
+    ['ねずみ',     'こだま',     'きつね',     'たぬき',     'からす',   'むかで'],
+    ['鬼火',       '河童',       '小天狗',     '山犬',       '牛鬼',     'なまず'],
+    ['雪女',       'ろくろ首',   '鵺',         '海坊主',     '犬神',     '人魂'],
+    ['小鬼',       'がしゃ髑髏', '絡新婦',     'かまいたち', 'ばさん',   '雷獣'],
+    ['ぬらりひょん', '大天狗',   '山童',       '鬼女',       '天邪鬼'],
+    ['土蜘蛛',     '輪入道',     'おとろし',   '般若',       'なまはげ'],
+    ['山姥',       '髪切り',     '煙々羅',     '船幽霊',     '怨霊'],
+    ['龍神',       '風神',       '雷神',       '迦具土',     '八咫烏'],
+]
+
+# ステージごとのボス名 (index 0 = ステージ1)
+BOSS_NAMES = [
+    '赤鬼',
+    '青鬼',
+    '鵺の君',
+    '酒呑童子',
+    '茨木童子',
+    '土蜘蛛王',
+    '八岐大蛇',
+    '伊邪那美',
+]
+
+# ステージごとの野生敵の属性ビット (1=火, 2=氷, 4=雷, 8=水, 16=風, 32=地)
+# 名前と同じ並び。0 = 無属性。
+WILD_ELEMENTS = [
+    [0,  32, 1,  0,  16, 32],
+    [1,  8,  16, 0,  32, 8],
+    [2,  0,  16, 8,  32, 1],
+    [32, 0,  2,  16, 16, 4],
+    [0,  16, 32, 1,  0],
+    [32, 1,  32, 2,  1],
+    [2,  16, 1,  8,  0],
+    [8,  16, 4,  1,  16],
+]
+
+# ステージごとのボス属性
+BOSS_ELEMENTS = [1, 2, 16, 1, 32, 32, 8, 4]
+
+
+def enemy_stats(stage, slot, is_boss):
+    """ステージとスロットからステータスを算出する。
+
+    ステージが上がるごとに直線的に強くなり、同一ステージ内では
+    slot が後ろほど少しだけ強い (雑魚の中の当たり外れ)。
+    ボスはその係数を上乗せする。
+    """
+    max_hp = 24 + stage * 14 + slot * 4
+    atk    = 6 + stage * 3 + slot
+    dfn    = 4 + stage * 3 + slot
+    spd    = 6 + stage * 2 + slot
+    mag    = 3 + stage * 2 + slot
+
+    exp    = stage * stage * 8 + slot * 3 + 4
+    gold   = stage * 40 + slot * 10 + 20
+
+    if is_boss:
+        max_hp = max_hp * 5 // 2
+        atk    = atk * 8 // 5
+        dfn    = dfn * 8 // 5
+        spd    = spd * 6 // 5
+        mag    = mag * 8 // 5
+        exp    = stage * stage * 40 + 100
+        gold   = stage * 300 + 200
+
+    return max_hp, atk, dfn, spd, mag, exp, gold
+
+
+def build_enemies():
+    """敵マスタ行を (id, name, stage, kind, max_hp, atk, def, spd, mag,
+    elements, exp, gold, class_id) のタプルで返す"""
+    rows = []
+
+    eid = 1
+    for stage_idx, names in enumerate(WILD_NAMES):
+        stage = stage_idx + 1
+        elems = WILD_ELEMENTS[stage_idx]
+        if len(elems) != len(names):
+            raise ValueError(
+                "stage {}: 名前 {} 件に対し属性 {} 件".format(
+                    stage, len(names), len(elems)))
+        for slot, name in enumerate(names):
+            hp, atk, dfn, spd, mag, exp, gold = enemy_stats(stage, slot, False)
+            rows.append((eid, name, stage, 0, hp, atk, dfn, spd, mag,
+                         elems[slot], exp, gold, 1))
+            eid += 1
+
+    for stage_idx, name in enumerate(BOSS_NAMES):
+        stage = stage_idx + 1
+        hp, atk, dfn, spd, mag, exp, gold = enemy_stats(stage, 5, True)
+        rows.append((100 + stage, name, stage, 1, hp, atk, dfn, spd, mag,
+                     BOSS_ELEMENTS[stage_idx], exp, gold, 2))
+
+    return rows
+
+
+ENEMIES = build_enemies()
+
+
 def main():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
@@ -154,13 +290,25 @@ def main():
         ELEMENT_CHART
     )
 
+    cur.executemany(
+        "INSERT INTO enemies (id, name, stage, kind, max_hp, atk, def,"
+        " spd, mag, elements, exp, gold, class_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ENEMIES
+    )
+
     conn.commit()
     conn.close()
+
+    wild = sum(1 for e in ENEMIES if e[3] == 0)
+    boss = len(ENEMIES) - wild
 
     print(f"Generated {DB_PATH}")
     print(f"  command_matrix: {len(COMMAND_MATRIX)} entries")
     print(f"  status_effects: {len(STATUS_EFFECTS)} entries")
     print(f"  element_chart:  {len(ELEMENT_CHART)} entries")
+    print(f"  enemies:        {len(ENEMIES)} entries "
+          f"(wild {wild} / boss {boss})")
 
 
 if __name__ == '__main__':

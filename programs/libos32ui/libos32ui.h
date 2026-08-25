@@ -25,11 +25,25 @@ void mui_init(mu_Context *ctx, KernelAPI *api, int font_w, int font_h);
 
 /* 入力をポーリングして mu_Context に注入する。
  * mu_begin() の前に毎フレーム呼ぶこと。 */
+/* マウスとキーボードの入力を microUI へ流し込む。
+   キーボードはこの中で kbd_trygetchar() を呼んで消費するため、アプリ側で
+   同じフレームに自前でキーを読むことはできない。 */
 void mui_pump_input(mu_Context *ctx);
+
+/* 上と同じだが、キーはアプリ側が読んだものを渡す。
+   アプリが独自のキー処理も行う場合はこちらを使う (ch<=0 でキーなし) */
+void mui_pump_input_ch(mu_Context *ctx, int ch);
 
 /* コマンドバッファを走査してGFXバックバッファに描画する。
  * mu_end() の後に呼ぶこと。 */
 void mui_render(mu_Context *ctx);
+
+/* コマンドリストが前回の呼び出しと同一なら描画をスキップする版。
+   force=1 で無条件に描画 (下のレイヤーを描き直した直後などに使う)。
+   戻り値: 1=描画した, 0=スキップした。
+   低クロック機では UI が変化しないフレームの再描画が支配的なコストに
+   なるため、待機中はこちらを使う。 */
+int mui_render_cached(mu_Context *ctx, int force);
 
 /* ======================================================================== */
 /*  パレット設定                                                            */

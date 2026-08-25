@@ -47,9 +47,14 @@ MASS_MAGIC_CHEST = 12
 ONOKORO_SIZE = 10
 ST_SIZE = 20
 
-# 各ステージの村param開始値とステージごとの村数
-VILLAGE_OFFSETS = [0, 7, 14, 21, 29, 37, 45, 52]
+# 各ステージの村param開始値とステージごとの村数。
+# param は econ.db の estates.id (村マスタ) を指す 1 始まりの村ID で、
+# param=0 は「村マスタなし」を意味する。全ステージ合計で 1〜59 が連番になる。
+VILLAGE_OFFSETS = [1, 8, 15, 22, 30, 38, 46, 53]
 VILLAGES_PER_STAGE = [7, 7, 7, 8, 8, 8, 7, 7]
+
+# 村が 8 個のステージで、追加の 1 村に転用する空地マスの位置
+EXTRA_VILLAGE_SLOT = 3
 
 ONOKORO_PATTERN = [
     MASS_CASTLE,      # 0: スタート地点
@@ -66,9 +71,9 @@ ONOKORO_PATTERN = [
 
 STAGE_PATTERN = [
     MASS_CASTLE,      # 0: 起点
-    MASS_EMPTY,       # 1
+    MASS_BATTLE,      # 1: モンスター遭遇
     MASS_VILLAGE,     # 2: 村0
-    MASS_EMPTY,       # 3
+    MASS_BATTLE,      # 3: モンスター遭遇 (村8個のステージでは村に転用される)
     MASS_TREASURE,    # 4
     MASS_VILLAGE,     # 5: 村1
     MASS_ITEM_SHOP,   # 6: 道具屋
@@ -97,7 +102,8 @@ def create_schema(c, default_cost):
         cost    INTEGER DEFAULT {},
         flags   INTEGER DEFAULT 0,
         x       INTEGER DEFAULT 0,
-        y       INTEGER DEFAULT 0
+        y       INTEGER DEFAULT 0,
+        terrain INTEGER DEFAULT 0
     )'''.format(default_cost))
 
     c.execute('''CREATE TABLE connections (
@@ -137,6 +143,11 @@ def build_game():
             # ステージ2以降のマス0は空地に変更 (起点はステージ1のみ)
             if i == 0 and stage > 0:
                 mtype = MASS_EMPTY
+
+            # STAGE_PATTERN の村は 7 個しかないので、村 8 個のステージでは
+            # 空地を 1 マス村に転用する
+            if i == EXTRA_VILLAGE_SLOT and VILLAGES_PER_STAGE[stage] > 7:
+                mtype = MASS_VILLAGE
 
             param = 0
             if mtype == MASS_VILLAGE and v_count < VILLAGES_PER_STAGE[stage]:
@@ -250,7 +261,8 @@ def generate(db_name, builder, default_cost):
     create_schema(c, default_cost)
 
     masses, connections, areas = builder()
-    c.executemany('INSERT INTO masses VALUES (?,?,?,?,?,?,?,?)', masses)
+    c.executemany('INSERT INTO masses (id,type,area,param,cost,flags,x,y)'
+                  ' VALUES (?,?,?,?,?,?,?,?)', masses)
     c.executemany('INSERT INTO connections VALUES (?,?,?)', connections)
     c.executemany('INSERT INTO areas VALUES (?,?,?)', areas)
 
