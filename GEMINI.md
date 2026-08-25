@@ -287,6 +287,51 @@ kmalloc / kprintf の境界ケースを実機で毎回検証する。失敗す�
 2026-08 の信頼性向上 (Phase 1-3) ではスコープ外と判断した。
 呼び出し側 (プログラム) が防衛的に書くこと。
 
+**ビットマップフォントは `tools/gen_font16.py` で焼く** (旧 `gen_kcg_font.py` の
+置き換え)。カーネルは起動時に `/sys/font/default.kcgfont` を読む
+(`kernel.c` の `kcg_load_font`)。**IPAex 系は欧文がプロポーショナル**なので、
+'W' (14px) や 'M' (13px) を 8px の ANK セルへ中央寄せすると左右が切られて
+W が A に、M が V に見える (2026-08-18 まで実際にそうなっていた)。
+gen_font16.py はセルからはみ出す字だけ横に畳んでから焼く。
+**縦位置は必ずベースライン基準で置く** (`anchor='ls'`)。字ごとの ink box を
+基準にすると 'g' 'j' 'y' や '.' ',' が上下にばらつき、行がガタつく。
+縦は絶対に縮めないこと (縮めるとベースラインが合わなくなる)。
+`--preview out.png` で焼く前に等倍と3倍を並べた確認画像を出せる。
+**等倍で読めるかだけが判断基準** — 拡大像だけ見て決めないこと。
+**16x16 の漢字は明朝だと細い横画が飛ぶ**ので本文用はゴシック
+(`assets/fonts/ipaexg16.kcgfont`)。
+半角 (size15/baseline12) と全角 (size16/baseline13) はベースライン行が
+1px ずれるが、これは 16px セルに「漢字の高さ13 + 欧文の descender 4」が
+収まらないための妥協。共通ベースラインにすると漢字を size13 まで
+落とすことになり、そちらの方が明確に見劣りする (比較検証済み)。
+
+**外部プログラムで漢字を出すには変換表を自分で有効化する**:
+カーネルは起動時に `/sys/unicode.bin` を `MEM_UNICODE_TABLE_BASE` (0x4A000) へ
+読み込み `utf8_set_jis_table_ready(1)` を呼ぶが、**このフラグは lib/utf8.c の
+static 変数**で、外部プログラムは自分の `lib/utf8.o` をリンクするため別の実体に
+なる。有効化しないと `unicode_to_jis()` が常に 0 を返し、`kcg_draw_utf8()` は
+JIS 0x2222 にフォールバックして**漢字が全部 □ になる** (仮名は
+ハードコードされた範囲変換なので出てしまい、原因が分かりにくい)。
+表のデータ自体は共有物理メモリにあるので、プログラム側で
+`utf8_set_jis_table_ready(1)` を呼べば引ける。ただし**無条件に立てないこと** —
+ロード失敗時に 0x4A000 の残骸を変換表として読む。既知の対応
+(U+4E9C→0x3021 など) を数点検証してから立てる
+(`programs/apps/game/main.c` の `enable_kanji_table()` が実例)。
+
+**日本語を表示するプログラムはバッファ幅に注意**: UTF-8 の日本語は 1文字3バイト、
+表示幅は半角2桁 (16px)。英語前提の `char buf[64]` は簡単にあふれる。
+文字列を切り詰めるときは UTF-8 の途中で切らないこと
+(`view_panel.c` の `add_line()` が後続バイト 10xxxxxx を見て戻す実装)。
+
+**物理 0x90000 は自動プレイ観測用メールボックスとして予約** (2026-08-18):
+game が毎フレーム状態ブロックを書き (`programs/apps/game/view_export.c`)、
+ホストが `GET /api/mem?addr=0x90000&space=phys` で読む。空き領域
+0x8C000-0x9EFFF の一部。V86 セッションはこの領域を壊すが、ゲームと
+V86 は同時に使わない。レイアウトを変えたら
+`tools/autoplay/driver.py` の `read_mailbox()` と EXPORT_VERSION も更新すること。
+ローカルAI (flm serve の gemma4-it:e4b) にゲームを自動プレイさせる
+基盤は `tools/autoplay/` (driver.py / flm_serve.py / mcp_server.py)。
+
 **deploy.yaml に無いバイナリは NHD 上で stale 化する**: KAPI レイアウトが
 変わると旧バイナリの KAPI 呼び出しが別関数へ飛び、exit 後の `jmp $` で
 永久スピンして rshell ごと沈黙する (2026-08-13 に sndctl で実測)。
@@ -299,10 +344,24 @@ Library or test changes must be verified with a full NHD deploy
 (stop NP21/W → `make deploy-kernel` → restart). Serial hot deploy
 (`nhd_deploy.py push`) is not an alternative while `os32_server.py` holds the named pipe.
 
-**SQLite MEMSYS5 is a fixed 200KB pool** (`lib/sqlite3/os32_sqlite_vfs.c`): shared by every
+**SQLite MEMSYS5 is a fixed 384KB pool** (`lib/sqlite3/os32_sqlite_vfs.c`): shared by every
 DB connection including the kernel-side FEP dictionary. Programs that hold several
 connections open at once exhaust it and get `-2` from `db_query`. Engine libraries avoid
-this by closing the connection at the end of `*_init()`.
+this by closing the connection at the end of `*_init()`. 200KB では game
+(econ 常時接続 + battle/items/rpg/events の順次ロード) が枯渇して最後の
+`db_query` が `out of memory` になったため 2026-08-18 に 384KB へ拡大した
+(SQLite 拡張域 0x200000-0x2FFFFF 内、残り ~280KB)。**枯渇の診断は
+`db_last_error()` を必ず出すこと** — 戻り値だけでは「テーブルがない」と
+区別できず、原因究明が遠回りになる。実機で任意 DB を調べる診断ツール
+`dbq` (`programs/tests/dbq.c`) を rshell から使える。
+
+**`mui_pump_input()` consumes the keyboard queue** (`programs/libos32ui/libos32ui_core.c`):
+it calls `kbd_trygetchar()` internally to feed microUI, so an app that also polls
+`kbd_trygetchar()` in the same frame gets nothing and appears to ignore all key input.
+Apps needing their own key handling must read the char once and pass it to
+`mui_pump_input_ch(ctx, ch)` instead. (This silently broke every keyboard shortcut in
+`programs/apps/game` until 2026-08-17 — the auto-play debug timers existed to work
+around it.)
 
 **`exec_exit()` closes every FD ≥ 3 on program exit** (`exec/exec.c`): any kernel-resident
 file descriptor that must outlive user programs (e.g. the FEP dictionary's SQLite

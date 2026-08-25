@@ -63,6 +63,7 @@ KernelAPIポインタを引数として実行する。
 | edit | `apps/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
 | mdview | `apps/mdview.c` | Markdown簡易ビューア |
 | vdpview | `apps/vdpview.c` | VDP/高解像度画像ビューア (旧hrviewを統合) |
+| mgxview | `apps/mgxview.c` | MGX 漫画ビューア (可変bpp・ファイラ・先読みキャッシュ) |
 | vbzview | `apps/vbzview.c` | VBZベクタ画像ビューア |
 | demo1 | `apps/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
 | ekakiuta| `apps/ekakiuta.c` | えかきうたアニメーション |
