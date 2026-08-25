@@ -380,6 +380,13 @@ filesystem:
       type: glob
       tags: [data]
 
+    # --- ビットマップフォント (KCG キャッシュ形式) ---
+    # カーネルが起動時に /sys/font/default.kcgfont を読む
+    # (kernel.c の kcg_load_font)。tools/gen_font16.py で生成する。
+    - host: assets/fonts/ipaexg16.kcgfont
+      guest: /sys/font/default.kcgfont
+      tags: [data]
+
     # --- TrueType フォント ---
     - host: assets/fonts/ipaexg_subset.ttf
       guest: /data/ipaexg_subset.ttf
