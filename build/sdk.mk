@@ -38,6 +38,12 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 	cp sdk/rust/i686-os32-none.json      $(SDK_OUT)/rust/
 	cp -r sdk/rust/os32api               $(SDK_OUT)/rust/
 	@rm -rf $(SDK_OUT)/rust/os32api/target
+	@# 動くサンプル。SDK だけでビルドできることの実証も兼ねる。
+	@mkdir -p $(SDK_OUT)/example
+	cp -r sdk/example/hello              $(SDK_OUT)/example/
+	@rm -f $(SDK_OUT)/example/hello/*.o $(SDK_OUT)/example/hello/*.elf \
+	       $(SDK_OUT)/example/hello/*.raw $(SDK_OUT)/example/hello/*.bin
+	cp sdk/README.md                     $(SDK_OUT)/
 	@echo $(KAPI_VERSION) > $(SDK_OUT)/KAPI_VERSION
 	@echo "=== OS32 SDK $(SDK_OUT) (KAPI v$(KAPI_VERSION)) ==="
 	@echo "  include       $$(ls $(SDK_OUT)/include/*.h | wc -l) lib headers"
@@ -46,6 +52,32 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 	@echo "  lib           $$(ls $(SDK_OUT)/lib | wc -l) archives"
 	@echo "  crt           $$(ls $(SDK_OUT)/crt | wc -l) objects"
 	@echo "  link          $$(ls $(SDK_OUT)/link | wc -l) linker scripts"
+	@echo "  example       hello (SDK のみでビルドできる最小例)"
+
+# ----------------------------------------------------------------------------
+#  配布用 tarball
+#
+#  サードパーティが OS のソースを持たずにアプリを作れるようにするための
+#  成果物。KAPI バージョンをファイル名に入れてあるので、どの OS 世代向けに
+#  ビルドされたアプリかが一目で分かる。
+#
+#  展開して OS32_SDK を向けるだけで使える:
+#    tar xzf os32-sdk-39.tar.gz
+#    make -C myapp OS32_SDK=$(pwd)/os32-sdk-39
+# ----------------------------------------------------------------------------
+SDK_DIST_NAME = os32-sdk-$(KAPI_VERSION)
+SDK_DIST_DIR  = build/dist
+
+sdk-dist: sdk
+	@rm -rf $(SDK_DIST_DIR)/$(SDK_DIST_NAME)
+	@mkdir -p $(SDK_DIST_DIR)
+	cp -r $(SDK_OUT) $(SDK_DIST_DIR)/$(SDK_DIST_NAME)
+	@python3 tools/gen_sdk_manifest.py $(SDK_DIST_DIR)/$(SDK_DIST_NAME)
+	tar czf $(SDK_DIST_DIR)/$(SDK_DIST_NAME).tar.gz \
+	        -C $(SDK_DIST_DIR) $(SDK_DIST_NAME)
+	@rm -rf $(SDK_DIST_DIR)/$(SDK_DIST_NAME)
+	@echo "=== $(SDK_DIST_DIR)/$(SDK_DIST_NAME).tar.gz "\
+	      "($$(stat -c%s $(SDK_DIST_DIR)/$(SDK_DIST_NAME).tar.gz) bytes) ==="
 
 # 手書きされた KAPI バージョンが kapi.json とずれていないか検査する。
 # ずれていると「どれが本当の版か」が分からなくなる。
@@ -59,6 +91,6 @@ check-manifests:
 check: check-kapi-version check-manifests
 
 clean-sdk:
-	rm -rf $(SDK_OUT)
+	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk clean-sdk check-kapi-version check-manifests check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check
