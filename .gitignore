@@ -25,6 +25,15 @@
 # ゲームの生成データ (make game-data で game/data/ のスクリプトから作る)
 /game/build/
 
+# 派生アセット (make assets-all で assets/ の上流ファイルから生成する)
+# 上流 (fonts/ipaex{g,m}.ttf, ipadic/*.csv) と設定 (filetypes, profile) は追跡する。
+/assets/fonts/*_subset.ttf
+/assets/fonts/*.kcgfont
+/assets/fep.db
+/assets/fep_s.db
+/assets/fep_l.db
+/assets/fep.dic
+
 # 特定の生成ファイル
 /unicode.bin
 /tools/gen_unicode

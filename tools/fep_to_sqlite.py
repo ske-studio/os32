@@ -205,12 +205,22 @@ def create_db(entries, output_path, cost_limit):
         filtered
     )
 
-    # 重複排除: yomi+kanji でグループ化し、最小コストのみを残す
+    # 重複排除: yomi+kanji でグループ化し、最小コストのみを残す。
+    #
+    # コストが同点のときの pos_id は最小のものを採る。単に
+    # "SELECT pos_id, MIN(cost) ... GROUP BY" と書くと、同点行のうち
+    # どの pos_id が採られるかが SQLite の実装依存になり、同じ入力から
+    # 毎回違う DB ができる (実測で 97,514 行中 11 行が揺れた)。
+    # 生成物を git で追跡しない以上、再生成の再現性は担保しておく。
     cur.execute("""
         CREATE TABLE dict AS
-        SELECT yomi, kanji, pos_id, MIN(cost) as cost
-        FROM dict_raw
-        GROUP BY yomi, kanji
+        SELECT d.yomi, d.kanji, MIN(d.pos_id) AS pos_id, d.cost
+        FROM dict_raw d
+        JOIN (
+            SELECT yomi, kanji, MIN(cost) AS min_cost
+            FROM dict_raw GROUP BY yomi, kanji
+        ) m ON d.yomi = m.yomi AND d.kanji = m.kanji AND d.cost = m.min_cost
+        GROUP BY d.yomi, d.kanji
     """)
 
     cur.execute("DROP TABLE dict_raw")
