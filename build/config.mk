@@ -60,14 +60,31 @@ INC_SQLITE = $(INC_COMMON) -Ilib/sqlite3 -Ifs -Idrivers -Ilib -Ikernel
 #   これが無いと構造体定義を変えても .o が再ビルドされず、
 #   同じ構造体を異なるレイアウトで扱う .o が混在して実行時に壊れる。
 DEPFLAGS = -MMD -MP
-CFLAGS_BASE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -O2 -Wall -fcommon -D__KERNEL_BUILD__ $(DEPFLAGS)
+
+# カーネル空間とユーザー空間で共通の素性 (フリースタンディング i386 コード)。
+# ここには「どちらの空間か」を示すマクロを入れないこと。
+CFLAGS_COMMON = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector \
+                -nostdlib -mno-red-zone -fcommon $(DEPFLAGS)
+
+# カーネル空間。__KERNEL_BUILD__ は include/os32_kapi_shared.h が
+# memmap.h と KAPI_ADDR を出すかどうかの判定に使う。
+KERNEL_CFLAGS = $(CFLAGS_COMMON) -O2 -Wall -D__KERNEL_BUILD__
+
+# ユーザー空間。__KERNEL_BUILD__ を付けないので KAPI テーブルの固定アドレスは
+# 見えない。外部プログラムは main() の第3引数で KernelAPI を受け取る。
+USER_CFLAGS   = $(CFLAGS_COMMON) -O2 -Wall -D__OS32_USERLAND__
+
+# 旧名。既存の参照が残っている間の互換のために残す。
+CFLAGS_BASE = $(KERNEL_CFLAGS)
+
 # SQLite専用フラグ: -Os (サイズ最適化, -O0のスタック肥大化回避) + -Wno-long-long (int64リテラル)
-CFLAGS_SQLITE = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -nostdlib -mno-red-zone -Os -fcommon -ffunction-sections -fdata-sections -Wno-long-long -w -DNDEBUG -D__KERNEL_BUILD__ $(DEPFLAGS)
+CFLAGS_SQLITE = $(CFLAGS_COMMON) -Os -ffunction-sections -fdata-sections \
+                -Wno-long-long -w -DNDEBUG -D__KERNEL_BUILD__
 LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --nmagic --gc-sections \
 	-L$(shell $(CC) -print-libgcc-file-name | xargs dirname)
 
 # === 外部プログラム用フラグ ===
-PROGRAM_FLAGS = $(CFLAGS_BASE) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libos32tilemap -Iprograms/libos32turn -Iprograms/libos32rpg -Iprograms/libos32save -Iprograms/libos32mgx -Ilib/zlib -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude -Iprograms -Iprograms/shell -Iprograms/libos32gfx -Iprograms/libos32math -Iprograms/libos32chem -Iprograms/libos32map -Iprograms/libos32input -Iprograms/libos32asset -Iprograms/libos32ecs -Iprograms/libos32text -Iprograms/libos32econ -Iprograms/libos32ai -Iprograms/libos32battle -Iprograms/libos32board -Iprograms/libos32event -Iprograms/libos32inv -Iprograms/libos32ui -Iprograms/libos32tilemap -Iprograms/libos32turn -Iprograms/libos32rpg -Iprograms/libos32save -Iprograms/libos32mgx -Ilib/zlib -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T build/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 

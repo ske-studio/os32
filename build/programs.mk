@@ -65,6 +65,15 @@ programs/apps/game.elf: build/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
 
 # (SKK Module / LZSS Command は廃止済み)
 
+# === 共有 C ソースのユーザー空間ビルド ===
+# lib/ のいくつかはカーネルと外部プログラムの双方から使う。カーネル側の
+# lib/%.o は KERNEL_CFLAGS でビルドされる (build/kernel.mk) ため、
+# そのオブジェクトを外部プログラムにリンクすると 1 つの .o が 2 つの
+# リンクドメインに跨ることになる。ユーザー空間用は _prog.o として
+# PROGRAM_FLAGS で別途ビルドする。
+lib/utf8_prog.o: lib/utf8.c lib/utf8.h include/memmap.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
+
 # === LZ4 Command ===
 lib/lz4_prog.o: lib/lz4.c lib/lz4.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
@@ -367,7 +376,7 @@ clean-programs: clean-rust
 
 	rm -f programs/libos32/*.o
 	rm -f programs/tests/sqlite_standalone/*.o programs/tests/sqlite_standalone/*.elf programs/tests/sqlite_standalone/*.raw programs/tests/sqlite_standalone/*.bin
-	rm -f lib/lz4_prog.o
+	rm -f lib/lz4_prog.o lib/utf8_prog.o
 	rm -f lib/zlib/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 

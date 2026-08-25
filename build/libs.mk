@@ -44,7 +44,7 @@ GFX_SRC = $(wildcard programs/libos32gfx/*.c) \
           $(wildcard programs/libos32gfx/geom/*.c)
 ASM_GFX_SRC = $(wildcard programs/libos32gfx/asm/*.asm)
 ASM_GFX_OBJ = $(ASM_GFX_SRC:.asm=.o)
-GFX_OBJ = $(GFX_SRC:.c=.o) $(ASM_GFX_OBJ) $(LIBMATH_OBJ) lib/utf8.o
+GFX_OBJ = $(GFX_SRC:.c=.o) $(ASM_GFX_OBJ) $(LIBMATH_OBJ) lib/utf8_prog.o
 ALL_LIB_OBJ += $(GFX_SRC:.c=.o) $(ASM_GFX_OBJ)
 
 programs/libos32gfx/%.o: programs/libos32gfx/%.c
