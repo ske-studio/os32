@@ -236,8 +236,11 @@ def populate_object_types(conn):
 def main():
     parser = argparse.ArgumentParser(
         description="OS32 化学エンジン マスターデータ生成")
-    parser.add_argument("-o", "--output", default="game/build/db/chem.db",
-                        help="出力DBファイルパス (default: game/build/db/chem.db)")
+    # 既定はスクリプト位置基準。cwd に依らず game/build/db/ へ出す。
+    default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "build", "db", "chem.db")
+    parser.add_argument("-o", "--output", default=default_out,
+                        help="出力DBファイルパス (default: <game>/build/db/chem.db)")
     args = parser.parse_args()
 
     output = args.output
@@ -247,6 +250,8 @@ def main():
     if os.path.exists(output):
         os.remove(output)
         print(f"  removed existing {output}")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
 
     conn = sqlite3.connect(output)
 

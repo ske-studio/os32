@@ -8,6 +8,10 @@
 
 SDK_OUT = build/sdk
 
+# 公開ヘッダを SDK に載せるプラットフォームライブラリ。
+# rt/ は "rt/dbgserial.h" 形式で引くので別扱い (下のルール参照)。
+SDK_LIB_HEADER_DIRS = math gfx db ui input asset snd tilemap md filer mgx save ecs
+
 # kapi.json の version が KAPI バージョンの唯一の情報源。
 # ヘッダ・Rust バインディング・ドキュメントはすべてここから導出する。
 KAPI_VERSION := $(shell python3 -c "import json;print(json.load(open('sdk/kapi.json'))['version'])")
@@ -17,6 +21,16 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 	@mkdir -p $(SDK_OUT)/include/os32 $(SDK_OUT)/lib $(SDK_OUT)/crt \
 	          $(SDK_OUT)/link $(SDK_OUT)/bin $(SDK_OUT)/rust
 	cp sdk/include/os32/*.h              $(SDK_OUT)/include/os32/
+	@# プラットフォームライブラリの公開ヘッダ。アーカイブだけ配っても
+	@# ヘッダが無ければ使えない。internal と付くものは実装内部なので除く。
+	@for d in $(SDK_LIB_HEADER_DIRS); do \
+	    for h in userland/lib/$$d/*.h; do \
+	        case "$$h" in *_internal.h) continue;; esac; \
+	        cp "$$h" $(SDK_OUT)/include/ || exit 1; \
+	    done; \
+	done
+	@mkdir -p $(SDK_OUT)/include/rt
+	cp userland/lib/rt/*.h                $(SDK_OUT)/include/rt/
 	cp $(LIBDIR)/*.a                     $(SDK_OUT)/lib/
 	cp $(CRT0_OBJ) $(DBG_OBJ)            $(SDK_OUT)/crt/
 	cp sdk/link/*.ld                     $(SDK_OUT)/link/
@@ -26,7 +40,9 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 	@rm -rf $(SDK_OUT)/rust/os32api/target
 	@echo $(KAPI_VERSION) > $(SDK_OUT)/KAPI_VERSION
 	@echo "=== OS32 SDK $(SDK_OUT) (KAPI v$(KAPI_VERSION)) ==="
-	@echo "  include/os32  $$(ls $(SDK_OUT)/include/os32 | wc -l) headers"
+	@echo "  include       $$(ls $(SDK_OUT)/include/*.h | wc -l) lib headers"
+	@echo "  include/os32  $$(ls $(SDK_OUT)/include/os32 | wc -l) contract headers"
+	@echo "  include/rt    $$(ls $(SDK_OUT)/include/rt | wc -l) runtime headers"
 	@echo "  lib           $$(ls $(SDK_OUT)/lib | wc -l) archives"
 	@echo "  crt           $$(ls $(SDK_OUT)/crt | wc -l) objects"
 	@echo "  link          $$(ls $(SDK_OUT)/link | wc -l) linker scripts"

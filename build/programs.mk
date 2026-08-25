@@ -1,12 +1,12 @@
 # ============================================================================
-#  programs.mk — 外部プログラム (OS32X) ビルドルール
+# programs.mk — 外部プログラム (OS32X) ビルドルール
 # ============================================================================
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
-C_CMDS    = $(wildcard userland/cmds/*.c)
-C_APPS    = $(filter-out userland/apps/edit.c, $(wildcard userland/apps/*.c))
-C_TESTS   = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c, $(wildcard userland/tests/*.c))
-C_SYSTEM  = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
+C_CMDS = $(wildcard userland/cmds/*.c)
+C_APPS = $(filter-out userland/apps/edit.c, $(wildcard userland/apps/*.c))
+C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c, $(wildcard userland/tests/*.c))
+C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_APPS) $(C_TESTS) $(C_SYSTEM)
 BASE_PROGRAMS_BIN = $(C_BASE_PROGRAMS:.c=.bin) userland/shell.bin
@@ -47,29 +47,9 @@ userland/apps/edit/%.o: userland/apps/edit/%.c
 userland/apps/edit.elf: sdk/link/app.ld $(CRT0_OBJ) $(EDIT_OBJ) $(GFX_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(EDIT_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(LGRP_END) -lc -lgcc
 
-# === Game (対戦スゴロクRPG) Module ===
-GAME_SRC = $(wildcard game/app/*.c)
-GAME_OBJ = $(GAME_SRC:.c=.o)
-# game が直接 include するライブラリのインクルードパス。
-# GAME_LIBS のリンク対象と対応させること。
-GAME_INC = $(INC_libos32gfx) $(INC_libos32board) $(INC_libos32battle) \
-           $(INC_libos32econ) $(INC_libos32inv) $(INC_libos32ai) \
-           $(INC_libos32rpg) $(INC_libos32turn) $(INC_libos32save) \
-           $(INC_libos32event) $(INC_libos32tilemap) $(INC_libos32db) \
-           $(INC_libos32snd) -Ilib
-
-# 注: microUI (LIBUI_OBJ) はリンクしない。game は microUI を使っていない。
-GAME_LIBS = $(GFX_OBJ) $(LIBBOARD_OBJ) $(LIBBATTLE_OBJ) \
-            $(LIBECON_OBJ) $(LIBINV_OBJ) $(LIBAI_OBJ) \
-            $(LIBRPG_OBJ) $(LIBTURN_OBJ) $(LIBSAVE_OBJ) \
-            $(LIBEVENT_OBJ) $(TILEMAP_OBJ) $(LIBASSET_OBJ) \
-            $(LIBOS32DB_OBJ) $(LIBSND_OBJ)
-
-game/app/%.o: game/app/%.c
-	$(CC) $(PROGRAM_FLAGS) -Igame/app $(GAME_INC) -c $< -o $@
-
-game/app/game.elf: sdk/link/app.ld $(CRT0_OBJ) $(GAME_OBJ) $(GAME_LIBS)
-	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(GAME_OBJ) $(LGRP_BEG) $(GAME_LIBS) $(LGRP_END) -lc -lgcc
+# === Game (対戦スゴロクRPG) ===
+# ゲームは game/Makefile が SDK 経由でビルドする。ここでは定義を持たない。
+# 詳細は build/game.mk の game ターゲットを参照。
 
 # (SKK Module / LZSS Command は廃止済み)
 
@@ -131,12 +111,12 @@ userland/tests/bench_scale2x.elf: sdk/link/app.ld $(CRT0_OBJ) $(BENCH_S2X_OBJ) $
 bench_scale2x: $(CRT0_OBJ) userland/tests/bench_scale2x.bin
 
 # ---------------------------------------------------------------------------
-#  DEFINE_TEST — テストプログラム定義テンプレート
-#  $(1) = テスト名 (tests/ 以下のベース名)
-#  $(2) = リンク対象 OBJ リスト
-#  $(3) = 追加コンパイルフラグ
+# DEFINE_TEST — テストプログラム定義テンプレート
+# $(1) = テスト名 (tests/ 以下のベース名)
+# $(2) = リンク対象 OBJ リスト
+# $(3) = 追加コンパイルフラグ
 # ---------------------------------------------------------------------------
-#  $(4) = テストの所在ディレクトリ (userland/tests または game/tests)
+# $(4) = テストの所在ディレクトリ (userland/tests または game/tests)
 define DEFINE_TEST
 $(4)/$(1).o: $(4)/$(1).c
 	$$(CC) $$(PROGRAM_FLAGS) $(3) -c $$< -o $$@
@@ -162,33 +142,18 @@ $(eval $(call DEFINE_TEST,db_test,$$(LIBOS32DB_OBJ),$$(INC_libos32db),userland/t
 $(eval $(call DEFINE_TEST,dbq,$$(LIBOS32DB_OBJ),$$(INC_libos32db),userland/tests))
 $(eval $(call DEFINE_TEST,e2test,,,userland/tests))
 $(eval $(call DEFINE_TEST,math_test,$$(LIBMATH_OBJ),$$(INC_libos32math),userland/tests))
-$(eval $(call DEFINE_TEST,chem_test,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32chem),game/tests))
-$(eval $(call DEFINE_TEST,chem_demo,$$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),$$(INC_libos32chem) $$(INC_libos32gfx),game/tests))
-$(eval $(call DEFINE_TEST,map_test,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32map),game/tests))
-$(eval $(call DEFINE_TEST,map_demo,$$(LIBMAP_OBJ) $$(LIBOS32DB_OBJ) $$(TILEMAP_OBJ) $$(GFX_OBJ) $$(LIBASSET_OBJ),$$(INC_libos32map) $$(INC_libos32gfx),game/tests))
 $(eval $(call DEFINE_TEST,input_test,$$(LIBINPUT_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32input),userland/tests))
 $(eval $(call DEFINE_TEST,asset_test,$$(LIBASSET_OBJ),$$(INC_libos32asset),userland/tests))
 $(eval $(call DEFINE_TEST,asset_demo,$$(LIBASSET_OBJ),$$(INC_libos32asset),userland/tests))
 $(eval $(call DEFINE_TEST,ecs_test,$$(LIBECS_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ecs),userland/tests))
-$(eval $(call DEFINE_TEST,ecs_demo,$$(LIBECS_OBJ) $$(LIBCHEM_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ecs) $$(INC_libos32chem),game/tests))
-$(eval $(call DEFINE_TEST,text_test,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32text),game/tests))
-$(eval $(call DEFINE_TEST,text_demo,$$(LIBTEXT_OBJ) $$(LIBOS32DB_OBJ) $$(GFX_OBJ),$$(INC_libos32text) $$(INC_libos32gfx),game/tests))
-$(eval $(call DEFINE_TEST,econ_test,$$(LIBECON_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32econ),game/tests))
-$(eval $(call DEFINE_TEST,ai_test,$$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ai),game/tests))
-$(eval $(call DEFINE_TEST,btl_test,$$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32battle),game/tests))
-$(eval $(call DEFINE_TEST,board_test,$$(LIBBOARD_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32board),game/tests))
-$(eval $(call DEFINE_TEST,evt_test,$$(LIBEVENT_OBJ) $$(LIBAI_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32event),game/tests))
-$(eval $(call DEFINE_TEST,inv_test,$$(LIBINV_OBJ) $$(LIBOS32DB_OBJ),$$(INC_libos32inv),game/tests))
-$(eval $(call DEFINE_TEST,turn_test,$$(LIBTURN_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32turn),game/tests))
-$(eval $(call DEFINE_TEST,rpg_test,$$(LIBRPG_OBJ) $$(LIBBATTLE_OBJ) $$(LIBOS32DB_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32rpg),game/tests))
 $(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),$$(INC_libos32save),userland/tests))
 $(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),$$(INC_libos32mgx),userland/tests))
 
 # ---------------------------------------------------------------------------
-#  DEFINE_GFX_APP — GFXアプリ定義テンプレート
-#  $(1) = アプリのベース名 (apps/ 以下)
-#  $(2) = 追加 OBJ リスト (GFX_OBJ は常にリンク)
-#  $(3) = 追加コンパイルフラグ
+# DEFINE_GFX_APP — GFXアプリ定義テンプレート
+# $(1) = アプリのベース名 (apps/ 以下)
+# $(2) = 追加 OBJ リスト (GFX_OBJ は常にリンク)
+# $(3) = 追加コンパイルフラグ
 # ---------------------------------------------------------------------------
 define DEFINE_GFX_APP
 userland/apps/$(1).o: userland/apps/$(1).c
@@ -287,14 +252,11 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/system/$*.o -lc -lgcc
 
 # === ELF → RAW → OS32X BIN 変換 ===
-# userland/ と game/ の 2 ルートぶんを定義する。
+# ユーザーランドぶん。ゲームは game/Makefile が自前で持つ。
 # build/app.conf のキーはリポジトリルートからの拡張子なしパス
-# (例: userland/apps/edit, game/app/game)。キーが実在するターゲットと
+# (例: userland/apps/edit)。キーが実在するターゲットと
 # 一致しているかは make check-app-conf で検査できる。
 userland/%.raw: userland/%.elf
-	$(OBJCOPY) -O binary $< $@
-
-game/%.raw: game/%.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/%.bin: userland/%.raw userland/%.elf
@@ -308,17 +270,6 @@ userland/%.bin: userland/%.raw userland/%.elf
 		python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api; \
 	fi
 
-game/%.bin: game/%.raw game/%.elf
-	@_api=$$(awk '$$1 == "game/$*" { print $$2 }' build/app.conf); \
-	_heap=$$(awk '$$1 == "game/$*" { print $$3 }' build/app.conf); \
-	_api=$${_api:-7}; \
-	_heap=$${_heap:-0}; \
-	if [ "$$_heap" != "0" ]; then \
-		python3 sdk/mkos32x.py $< $@ --elf game/$*.elf --api $$_api --heap $$_heap; \
-	else \
-		python3 sdk/mkos32x.py $< $@ --elf game/$*.elf --api $$_api; \
-	fi
-
 # === ヘルパーツール ===
 unicode_bin:
 	@if [ ! -f tools/gen_unicode ]; then gcc tools/gen_unicode.c -I. -Iinclude -O2 -o tools/gen_unicode; fi
@@ -328,22 +279,22 @@ fep_dic:
 	@if [ ! -f assets/fep.db ]; then python3 tools/fep_to_sqlite.py; fi
 
 # ============================================================================
-#  Rust プログラム ビルドルール
+# Rust プログラム ビルドルール
 # ============================================================================
 RUST_PROGRAMS_DIR = userland/rust
-RUST_TARGET_JSON  = i686-os32-none
-RUST_TARGET_DIR   = $(RUST_PROGRAMS_DIR)/target/$(RUST_TARGET_JSON)/release
-RUST_KAPI_RS      = sdk/rust/os32api/src/kapi_generated.rs
+RUST_TARGET_JSON = i686-os32-none
+RUST_TARGET_DIR = $(RUST_PROGRAMS_DIR)/target/$(RUST_TARGET_JSON)/release
+RUST_KAPI_RS = sdk/rust/os32api/src/kapi_generated.rs
 
 # Rustバインディング自動再生成 (kapi.json変更時)
 $(RUST_KAPI_RS): sdk/kapi.json sdk/kapi_rust_gen.py
 	python3 sdk/kapi_rust_gen.py
 
 # ---------------------------------------------------------------------------
-#  DEFINE_RUST_PROGRAM — Rustプログラム定義テンプレート
-#  $(1) = Rustクレート名 (Cargoワークスペースメンバー名)
-#  $(2) = 出力先ディレクトリ (例: userland/tests)
-#  $(3) = 追加リンクOBJ (例: $(GFX_OBJ))
+# DEFINE_RUST_PROGRAM — Rustプログラム定義テンプレート
+# $(1) = Rustクレート名 (Cargoワークスペースメンバー名)
+# $(2) = 出力先ディレクトリ (例: userland/tests)
+# $(3) = 追加リンクOBJ (例: $(GFX_OBJ))
 # ---------------------------------------------------------------------------
 define DEFINE_RUST_PROGRAM
 $(RUST_TARGET_DIR)/lib$(1).a: FORCE $(RUST_KAPI_RS)
@@ -381,13 +332,10 @@ programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
 edit: $(CRT0_OBJ) userland/apps/edit.bin
 
-game: $(CRT0_OBJ) game/app/game.bin
-
-programs: $(DBG_OBJ) programs_base edit game bench gfx_demo spr_test demo1 vdpview mgxview raster ekakiuta vbzview mdview ui_demo cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test chem_test chem_demo map_test map_demo input_test asset_test asset_demo ecs_test ecs_demo text_test text_demo econ_test ai_test btl_test board_test evt_test inv_test turn_test rpg_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
+programs: $(DBG_OBJ) programs_base edit bench gfx_demo spr_test demo1 vdpview mgxview raster ekakiuta vbzview mdview ui_demo cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
-game/%.o: $(SDK_KAPI_HDR)
 $(shell find userland game -name '*.o' 2>/dev/null): $(SDK_KAPI_HDR)
 
 # === プログラムクリーン ===
@@ -395,8 +343,6 @@ clean-programs: clean-rust
 	rm -f userland/cmds/*.o userland/cmds/*.elf userland/cmds/*.raw userland/cmds/*.bin
 	rm -f userland/apps/*.o userland/apps/*.elf userland/apps/*.raw userland/apps/*.bin
 	rm -f userland/apps/edit/*.o
-	rm -f game/app/*.o game/app/*.elf game/app/*.raw game/app/*.bin
-	rm -f game/tests/*.o game/tests/*.elf game/tests/*.raw game/tests/*.bin
 	rm -f userland/apps/ui_demo/*.o userland/apps/ui_demo/*.elf userland/apps/ui_demo/*.raw userland/apps/ui_demo/*.bin
 	rm -f userland/tests/*.o userland/tests/*.elf userland/tests/*.raw userland/tests/*.bin
 	rm -f userland/tests/bench/*.o userland/tests/bench/*.elf userland/tests/bench/*.raw userland/tests/bench/*.bin
@@ -414,10 +360,10 @@ clean-programs: clean-rust
 .PHONY: programs programs_base edit game lz4_cmd cdinst bench bench_scale2x
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
-.PHONY: chem_test chem_demo map_test map_demo input_test
-.PHONY: asset_test asset_demo ecs_test ecs_demo text_test text_demo
-.PHONY: econ_test ai_test btl_test board_test evt_test inv_test
-.PHONY: turn_test rpg_test save_test
+.PHONY: input_test
+.PHONY: asset_test asset_demo ecs_test text_demo
+.PHONY: inv_test
+.PHONY: save_test
 .PHONY: gfx_demo demo1 spr_test vdpview raster ekakiuta vbzview mdview
 .PHONY: unicode_bin fep_dic
 .PHONY: clean-programs

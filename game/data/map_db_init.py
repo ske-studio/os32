@@ -278,7 +278,9 @@ def populate_test_data(conn):
 
 def main():
     """エントリポイント"""
-    out_path = 'game/build/db/map.db'
+    # 既定はスクリプト位置基準。cwd に依らず <game>/build/db/ へ出す。
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            '..', 'build', 'db', 'map.db')
     if len(sys.argv) > 2 and sys.argv[1] == '-o':
         out_path = sys.argv[2]
 

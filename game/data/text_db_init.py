@@ -120,6 +120,8 @@ def main():
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
 
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH)
     create_tables(conn)
     insert_test_data(conn)

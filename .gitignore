@@ -94,7 +94,7 @@ rance.png
 /shared.vqd
 
 # 自動プレイの実行ログ (スクリーンショット・決定ログ)
-/tools/autoplay/logs/
+/game/tools/autoplay/logs/
 
 # 環境変数ファイル
 .env
