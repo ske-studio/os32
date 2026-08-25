@@ -13,7 +13,7 @@
 /*                                                                          */
 /*  例:                                                                     */
 /*    #define OS32_DBG_SERIAL                                                */
-/*    #include "libos32/dbgserial.h"                                         */
+/*    #include "rt/dbgserial.h"                                         */
 /*    ...                                                                    */
 /*    dbg_init(kapi);                                                        */
 /*    DBG("hello from serial");                                              */

@@ -31,9 +31,11 @@ deploy-nhd: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	$(NHD_DEPLOY) deploy
 
 # dp-<name>: 個別プログラムのビルド → シリアル経由でのホットデプロイ(再起動不要)
-dp-%: programs/%.bin
+# dp-<path>: 個別プログラムのホットデプロイ。パスはリポジトリルートから
+#   (例: make dp-userland/cmds/wc, make dp-game/app/game)
+dp-%: %.bin
 	@echo "=== Hot Deploy (Serial Push): $*.bin ==="
-	$(NHD_DEPLOY) push programs/$*.bin --resolve
+	$(NHD_DEPLOY) push $*.bin --resolve
 
 # nhd-mount: NHDのext2パーティションをマウント
 nhd-mount:

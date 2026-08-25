@@ -98,11 +98,11 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --
 
 # === 外部プログラム用フラグ ===
 # 外部プログラムの素のインクルードパス。
-#   -Iprograms       libos32/ (crt/help/pkg/dbgserial) を "libos32/xxx.h" で引く
+#   -Iuserland/lib   ランタイム小物を "rt/dbgserial.h" 形式で引く
 #   -Iinclude        include/os32_kapi_shared.h ほか
 # ライブラリ固有の -I はここには置かない。build/libs.mk の INC_<lib> を
 # 必要なターゲットだけに渡すこと (一括で並べると層の逆流が隠れる)。
-PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude $(SDK_INC) -Iprograms -I$(CROSS_DIR)/i386-elf/include
+PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude $(SDK_INC) -Iuserland/lib -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T sdk/link/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0
 
@@ -114,7 +114,7 @@ LGRP_END = --end-group
 
 # === CRT0 / デバッグオブジェクト ===
 CRT0_OBJ = sdk/crt/crt0.o sdk/crt/crt0_c.o sdk/crt/syscalls.o sdk/crt/help.o
-DBG_OBJ  = programs/libos32/dbgserial.o
+DBG_OBJ  = userland/lib/rt/dbgserial.o
 
 # === デプロイ先 ===
 HOSTDRV_DIR ?= /mnt/c/os32

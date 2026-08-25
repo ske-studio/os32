@@ -36,7 +36,13 @@ sdk: $(ALL_LIB_ARCHIVES) $(CRT0_OBJ) $(DBG_OBJ) $(SDK_KAPI_HDR)
 check-kapi-version:
 	@python3 tools/check_kapi_version.py
 
+# 配備マニフェストと app.conf の参照先を検査する (要 make all)
+check-manifests:
+	@python3 tools/check_manifests.py
+
+check: check-kapi-version check-manifests
+
 clean-sdk:
 	rm -rf $(SDK_OUT)
 
-.PHONY: sdk clean-sdk check-kapi-version
+.PHONY: sdk clean-sdk check-kapi-version check-manifests check

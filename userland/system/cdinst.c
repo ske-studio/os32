@@ -12,8 +12,8 @@
 
 #define OS32_DBG_SERIAL
 #include "os32api.h"
-#include "libos32/dbgserial.h"
-#include "libos32/pkg.h"
+#include "rt/dbgserial.h"
+#include "rt/pkg.h"
 
 #define CD_MOUNT "/cd0"
 #define HDD_MOUNT "/hd0"

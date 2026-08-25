@@ -46,188 +46,188 @@ filesystem:
       tags: [core]
 
     # --- シェル (カーネルは /shell をロードする: config.h SYS_SHELL_BIN) ---
-    - host: programs/shell.bin
+    - host: userland/shell.bin
       guest: /sys/shell.bin
       tags: [core]
 
     # --- システム管理プログラム → /sbin/ ---
-    - host: programs/system/install.bin
+    - host: userland/system/install.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/tests/crash.bin
+    - host: userland/tests/crash.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/tests/bench.bin
+    - host: userland/tests/bench.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/tests/restest.bin
+    - host: userland/tests/restest.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/system/cdinst.bin
+    - host: userland/system/cdinst.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/system/hsync.bin
+    - host: userland/system/hsync.bin
       guest: /sbin/
       tags: [programs]
 
     # --- ユーザー・デモプログラム → /usr/bin/ ---
-    - host: programs/apps/edit.bin
+    - host: userland/apps/edit.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/game.bin
+    - host: game/app/game.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/ui_demo/ui_demo.bin
+    - host: userland/apps/ui_demo/ui_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/gfx_demo.bin
+    - host: userland/apps/gfx_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/demo1.bin
+    - host: userland/apps/demo1.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/ekakiuta.bin
+    - host: userland/apps/ekakiuta.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/vbzview.bin
+    - host: userland/apps/vbzview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/vdpview.bin
+    - host: userland/apps/vdpview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/mgxview.bin
+    - host: userland/apps/mgxview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/spr_test.bin
+    - host: userland/apps/spr_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/apps/raster.bin
+    - host: userland/apps/raster.bin
       guest: /usr/bin/
       tags: [programs]
 
-    - host: programs/apps/mdview.bin
+    - host: userland/apps/mdview.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/bench_scale2x.bin
+    - host: userland/tests/bench_scale2x.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/gfx200_test.bin
+    - host: userland/tests/gfx200_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/gfx_demo200.bin
+    - host: userland/tests/gfx_demo200.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/mouse_test.bin
+    - host: userland/tests/mouse_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/blit_test.bin
+    - host: userland/tests/blit_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/blit_test2.bin
+    - host: userland/tests/blit_test2.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/demo_tile.bin
+    - host: userland/tests/demo_tile.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/tile_bench.bin
+    - host: userland/tests/tile_bench.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/rotate_test.bin
+    - host: userland/tests/rotate_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/klibc_test.bin
+    - host: userland/tests/klibc_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/db_test.bin
+    - host: userland/tests/db_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/dbq.bin
+    - host: userland/tests/dbq.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/math_test.bin
+    - host: userland/tests/math_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/chem_test.bin
+    - host: game/tests/chem_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/chem_demo.bin
+    - host: game/tests/chem_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/map_test.bin
+    - host: game/tests/map_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/map_demo.bin
+    - host: game/tests/map_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/input_test.bin
+    - host: userland/tests/input_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/asset_test.bin
+    - host: userland/tests/asset_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/asset_demo.bin
+    - host: userland/tests/asset_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/ecs_test.bin
+    - host: userland/tests/ecs_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/ecs_demo.bin
+    - host: game/tests/ecs_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/text_test.bin
+    - host: game/tests/text_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/text_demo.bin
+    - host: game/tests/text_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/econ_test.bin
+    - host: game/tests/econ_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/ai_test.bin
+    - host: game/tests/ai_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/btl_test.bin
+    - host: game/tests/btl_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/board_test.bin
+    - host: game/tests/board_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/evt_test.bin
+    - host: game/tests/evt_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/inv_test.bin
+    - host: game/tests/inv_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/turn_test.bin
+    - host: game/tests/turn_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/rpg_test.bin
+    - host: game/tests/rpg_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/save_test.bin
+    - host: userland/tests/save_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/mgx_test.bin
+    - host: userland/tests/mgx_test.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/hello_gfx.bin
+    - host: userland/tests/hello_gfx.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/alloc_demo.bin
+    - host: userland/tests/alloc_demo.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/math_test_rs.bin
+    - host: userland/tests/math_test_rs.bin
       guest: /usr/bin/
       tags: [programs]
-    - host: programs/tests/e2test.bin
+    - host: userland/tests/e2test.bin
       guest: /sbin/
       tags: [programs]
-    - host: programs/tests/sqlite_standalone/sqlite_standalone.bin
+    - host: userland/tests/sqlite_standalone/sqlite_standalone.bin
       guest: /usr/bin/sqlite_standalone.bin
       tags: [programs]
 
     # --- LZ4 圧縮/展開コマンド → /bin/ ---
-    - host: programs/system/lz4.bin
+    - host: userland/system/lz4.bin
       guest: /bin/lz4.bin
       tags: [programs]
 
@@ -235,18 +235,18 @@ filesystem:
     # deploy.yaml に無いバイナリは NHD 上で stale 化し、KAPI レイアウトが
     # 変わった時に旧バイナリが別関数へ飛んでハングする (2026-08-13 実測)。
     # PKG 配布物でも起動対象になるものは必ずここに載せること。
-    - host: programs/system/sndctl.bin
+    - host: userland/system/sndctl.bin
       guest: /bin/sndctl.bin
       tags: [programs]
-    - host: programs/system/sndtest.bin
+    - host: userland/system/sndtest.bin
       guest: /bin/sndtest.bin
       tags: [programs]
-    - host: programs/system/sndtest2.bin
+    - host: userland/system/sndtest2.bin
       guest: /bin/sndtest2.bin
       tags: [programs]
 
     # --- 一般プログラム → /bin/ ---
-    - host: "programs/cmds/*.bin"
+    - host: "userland/cmds/*.bin"
       guest: /bin/
       type: glob
       exclude:
@@ -352,30 +352,30 @@ filesystem:
       tags: [data]
 
     # --- テスト用ファイル ---
-    - host: programs/tests/data/test.txt
+    - host: userland/tests/data/test.txt
       guest: /home/user/test.txt
       tags: [test]
 
-    - host: programs/tests/data/test_utf8.txt
+    - host: userland/tests/data/test_utf8.txt
       guest: /home/user/test_utf8.txt
       tags: [test]
 
-    - host: programs/tests/data/test_pager.txt
+    - host: userland/tests/data/test_pager.txt
       guest: /home/user/test_pager.txt
       tags: [test]
 
-    - host: programs/tests/data/test_script.bat
+    - host: userland/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
 
     # --- MGX 漫画サンプルページ (tools/img2mgx.py で生成) ---
-    - host: "assets/manga/*.MGX"
+    - host: "game/assets/manga/*.MGX"
       guest: /data/manga/
       type: glob
       tags: [data]
 
     # --- bpp 別ベンチ用 (同一画像を bpp 1..4 で符号化したもの) ---
-    - host: "assets/manga/bench/*.MGX"
+    - host: "game/assets/manga/bench/*.MGX"
       guest: /data/manga/bench/
       type: glob
       tags: [data]
@@ -393,10 +393,10 @@ filesystem:
       tags: [data]
 
     # --- フォントテスト ---
-    - host: programs/tests/font_test.bin
+    - host: userland/tests/font_test.bin
       guest: /usr/bin/
       tags: [programs]
 
-    - host: programs/tests/font_load_test.bin
+    - host: userland/tests/font_load_test.bin
       guest: /usr/bin/
       tags: [programs]

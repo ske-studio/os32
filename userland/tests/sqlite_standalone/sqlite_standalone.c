@@ -9,7 +9,7 @@
 
 #define OS32_DBG_SERIAL
 #include "os32api.h"
-#include "libos32/dbgserial.h"
+#include "rt/dbgserial.h"
 #include "os32_sqlite_config.h"
 #include "sqlite3.h"
 

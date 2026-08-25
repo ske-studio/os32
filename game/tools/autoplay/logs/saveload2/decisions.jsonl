@@ -1,0 +1,17 @@
+{"event": "scenario_start", "name": "セーブ→再起動→ロードで状態が一致するか", "file": "tools/autoplay/scenarios/save_load.json", "ts": "11:46:20"}
+{"event": "key", "step": 0, "key": "3", "ts": "11:46:21"}
+{"event": "key", "step": 2, "key": "3", "ts": "11:46:24"}
+{"event": "wait", "step": 4, "want": "DICE", "ok": true, "ts": "11:46:26"}
+{"event": "snap", "step": 5, "tag": "before_save", "mailbox": {"seq": 17904, "version": 1, "frame": 17904, "state": 1, "state_name": "DICE", "turn": 17, "week": 3, "cur": 0, "nplayers": 4, "boss": 1, "dungeon_floor": 0, "dungeon_loot": 0, "victory_type": 0, "victory_winner": -1, "dice": 0, "players": [{"name": "スサノオ", "hp": 50, "max_hp": 50, "pos": 17, "level": 1, "cpu": false, "devil": false, "gold": 1100}, {"name": "ヤマトタケル", "hp": 50, "max_hp": 50, "pos": 15, "level": 1, "cpu": true, "devil": false, "gold": 1014}, {"name": "オオクニヌシ", "hp": 50, "max_hp": 50, "pos": 19, "level": 1, "cpu": true, "devil": false, "gold": 1000}, {"name": "アマテラス", "hp": 50, "max_hp": 50, "pos": 29, "level": 1, "cpu": true, "devil": false, "gold": 1090}], "panel": ["17 ターン ／ 第3週 (火曜)", "手番: スサノオ", "2: サイコロ  I: 持ち物  W: 記録  M: 音 ON"], "attrs": [0, 1, 0]}, "ts": "11:46:26"}
+{"event": "key", "step": 6, "key": "W", "ts": "11:46:27"}
+{"event": "wait", "step": 8, "want": "DICE", "ok": true, "ts": "11:46:31"}
+{"event": "shot", "step": 9, "path": "/home/hight/os32/tools/autoplay/logs/saveload2/shots/saved.png", "ts": "11:46:32"}
+{"event": "key", "step": 10, "key": "ESC", "ts": "11:46:32"}
+{"event": "text", "step": 12, "text": "game", "ts": "11:46:39"}
+{"event": "key", "step": 13, "key": "ENTER", "ts": "11:46:40"}
+{"event": "wait", "step": 15, "want": "TITLE", "ok": true, "ts": "11:46:55"}
+{"event": "key", "step": 16, "key": "L", "ts": "11:46:55"}
+{"event": "wait", "step": 18, "want": "DICE", "ok": true, "ts": "11:47:00"}
+{"event": "snap", "step": 19, "tag": "after_load", "mailbox": {"seq": 515, "version": 1, "frame": 515, "state": 1, "state_name": "DICE", "turn": 17, "week": 3, "cur": 0, "nplayers": 4, "boss": 1, "dungeon_floor": 0, "dungeon_loot": 0, "victory_type": 0, "victory_winner": -1, "dice": 0, "players": [{"name": "スサノオ", "hp": 50, "max_hp": 50, "pos": 17, "level": 1, "cpu": false, "devil": false, "gold": 1100}, {"name": "ヤマトタケル", "hp": 50, "max_hp": 50, "pos": 15, "level": 1, "cpu": true, "devil": false, "gold": 1014}, {"name": "オオクニヌシ", "hp": 50, "max_hp": 50, "pos": 19, "level": 1, "cpu": true, "devil": false, "gold": 1000}, {"name": "アマテラス", "hp": 50, "max_hp": 50, "pos": 29, "level": 1, "cpu": true, "devil": false, "gold": 1090}], "panel": ["17 ターン ／ 第3週 (火曜)", "手番: スサノオ", "2: サイコロ  I: 持ち物  W: 記録  M: 音 ON"], "attrs": [0, 1, 0]}, "ts": "11:47:00"}
+{"event": "shot", "step": 20, "path": "/home/hight/os32/tools/autoplay/logs/saveload2/shots/loaded.png", "ts": "11:47:01"}
+{"event": "scenario_end", "ok": true, "ts": "11:47:01"}

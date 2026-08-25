@@ -18,7 +18,7 @@
 
 /* ---- デバッグシリアル (リリース時はこの行をコメントアウト) ---- */
 #define OS32_DBG_SERIAL
-#include "libos32/dbgserial.h"
+#include "rt/dbgserial.h"
 
 #include <stdio.h>
 #include <string.h>

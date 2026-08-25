@@ -20,11 +20,11 @@
 #include <stdlib.h>
 #include "os32api.h"
 #include "libos32gfx.h"
-#include "libos32md/libos32md.h"
-#include "libos32md/md_render.h"
+#include "libos32md.h"
+#include "md_render.h"
 /* #define OS32_DBG_SERIAL */
-#include "libos32/dbgserial.h"
-#include "libos32filer/libos32filer.h"
+#include "rt/dbgserial.h"
+#include "libos32filer.h"
 
 static KernelAPI *api;
 

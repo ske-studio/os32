@@ -11,20 +11,20 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	@args="--tree"; \
 	args="$$args /LOADER.BIN=boot/loader_fat_new.bin"; \
 	args="$$args /VMKRNL.LZ4=$(BUILD_OUT)/vmkernel.lz4"; \
-	args="$$args /sys/shell.bin=programs/shell.bin"; \
+	args="$$args /sys/shell.bin=userland/shell.bin"; \
 	args="$$args /sys/unicode.bin=$(BUILD_OUT)/unicode.bin"; \
 	args="$$args /sys/boot_hdd.bin=boot/boot_hdd.bin"; \
 	args="$$args /sys/loader_h.bin=boot/loader_hdd.bin"; \
 	for cmd in $$(echo $(FDD_MIN_CMDS)); do \
-		if [ -f "programs/cmds/$$cmd.bin" ]; then \
-			args="$$args /bin/$$cmd.bin=programs/cmds/$$cmd.bin"; \
-		elif [ -f "programs/system/$$cmd.bin" ]; then \
-			args="$$args /bin/$$cmd.bin=programs/system/$$cmd.bin"; \
+		if [ -f "userland/cmds/$$cmd.bin" ]; then \
+			args="$$args /bin/$$cmd.bin=userland/cmds/$$cmd.bin"; \
+		elif [ -f "userland/system/$$cmd.bin" ]; then \
+			args="$$args /bin/$$cmd.bin=userland/system/$$cmd.bin"; \
 		fi; \
 	done; \
-	args="$$args /bin/edit.bin=programs/apps/edit.bin"; \
-	args="$$args /sbin/install.bin=programs/system/install.bin"; \
-	args="$$args /sbin/cdinst.bin=programs/system/cdinst.bin"; \
+	args="$$args /bin/edit.bin=userland/apps/edit.bin"; \
+	args="$$args /sbin/install.bin=userland/system/install.bin"; \
+	args="$$args /sbin/cdinst.bin=userland/system/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
 	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 $$args
 	@echo "Copying os32_boot.d88 to NP21/W directory..."

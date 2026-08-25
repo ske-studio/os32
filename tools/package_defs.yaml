@@ -32,39 +32,39 @@ minimal:
     # CD インストール後の HDD 起動が /boot/vmkernel.lz4 NOT FOUND で失敗する。
     - host: build/out/vmkernel.lz4
       guest: /boot/vmkernel.lz4
-    - host: programs/shell.bin
+    - host: userland/shell.bin
       guest: /sys/shell.bin
     - host: build/out/unicode.bin
       guest: /sys/unicode.bin
-    - host: programs/cmds/more.bin
+    - host: userland/cmds/more.bin
       guest: /bin/more.bin
-    - host: programs/cmds/less.bin
+    - host: userland/cmds/less.bin
       guest: /bin/less.bin
-    - host: programs/cmds/grep.bin
+    - host: userland/cmds/grep.bin
       guest: /bin/grep.bin
-    - host: programs/cmds/find.bin
+    - host: userland/cmds/find.bin
       guest: /bin/find.bin
-    - host: programs/cmds/sort.bin
+    - host: userland/cmds/sort.bin
       guest: /bin/sort.bin
-    - host: programs/cmds/head.bin
+    - host: userland/cmds/head.bin
       guest: /bin/head.bin
-    - host: programs/cmds/tail.bin
+    - host: userland/cmds/tail.bin
       guest: /bin/tail.bin
-    - host: programs/cmds/wc.bin
+    - host: userland/cmds/wc.bin
       guest: /bin/wc.bin
-    - host: programs/cmds/tee.bin
+    - host: userland/cmds/tee.bin
       guest: /bin/tee.bin
-    - host: programs/cmds/touch.bin
+    - host: userland/cmds/touch.bin
       guest: /bin/touch.bin
-    - host: programs/cmds/hexdump.bin
+    - host: userland/cmds/hexdump.bin
       guest: /bin/hexdump.bin
-    - host: programs/cmds/sleep.bin
+    - host: userland/cmds/sleep.bin
       guest: /bin/sleep.bin
-    - host: programs/system/sndctl.bin
+    - host: userland/system/sndctl.bin
       guest: /bin/sndctl.bin
-    - host: programs/system/install.bin
+    - host: userland/system/install.bin
       guest: /sbin/install.bin
-    - host: programs/system/cdinst.bin
+    - host: userland/system/cdinst.bin
       guest: /sbin/cdinst.bin
 
 # --- 標準パッケージ (差分) ---
@@ -74,15 +74,15 @@ normal:
   # lzss: true
   lzss: false
   files:
-    - host: programs/apps/edit.bin
+    - host: userland/apps/edit.bin
       guest: /usr/bin/edit.bin
-    - host: programs/cmds/man.bin
+    - host: userland/cmds/man.bin
       guest: /bin/man.bin
-    - host: programs/cmds/diff.bin
+    - host: userland/cmds/diff.bin
       guest: /bin/diff.bin
-    - host: programs/cmds/du.bin
+    - host: userland/cmds/du.bin
       guest: /bin/du.bin
-    - host: programs/cmds/cal.bin
+    - host: userland/cmds/cal.bin
       guest: /bin/cal.bin
     - host: "docs/manpages/*.1"
       guest: /usr/man/
@@ -96,25 +96,25 @@ full:
   # lzss: true
   lzss: false
   files:
-    - host: programs/apps/gfx_demo.bin
+    - host: userland/apps/gfx_demo.bin
       guest: /usr/bin/gfx_demo.bin
-    - host: programs/apps/demo1.bin
+    - host: userland/apps/demo1.bin
       guest: /usr/bin/demo1.bin
-    - host: programs/apps/ekakiuta.bin
+    - host: userland/apps/ekakiuta.bin
       guest: /usr/bin/ekakiuta.bin
-    - host: programs/apps/vbzview.bin
+    - host: userland/apps/vbzview.bin
       guest: /usr/bin/vbzview.bin
-    - host: programs/apps/vdpview.bin
+    - host: userland/apps/vdpview.bin
       guest: /usr/bin/vdpview.bin
-    - host: programs/apps/mgxview.bin
+    - host: userland/apps/mgxview.bin
       guest: /usr/bin/mgxview.bin
-    - host: programs/apps/raster.bin
+    - host: userland/apps/raster.bin
       guest: /usr/bin/raster.bin
-    - host: programs/apps/spr_test.bin
+    - host: userland/apps/spr_test.bin
       guest: /usr/bin/spr_test.bin
-    - host: programs/apps/mdview.bin
+    - host: userland/apps/mdview.bin
       guest: /usr/bin/mdview.bin
-    - host: programs/system/sndtest.bin
+    - host: userland/system/sndtest.bin
       guest: /usr/bin/sndtest.bin
 
 # --- デバッグパッケージ ---
@@ -124,27 +124,27 @@ debug:
   # lzss: true
   lzss: false
   files:
-    - host: programs/tests/hello.bin
+    - host: userland/tests/hello.bin
       guest: /bin/hello.bin
-    - host: programs/tests/crash.bin
+    - host: userland/tests/crash.bin
       guest: /sbin/crash.bin
-    - host: programs/tests/bench.bin
+    - host: userland/tests/bench.bin
       guest: /sbin/bench.bin
-    - host: programs/tests/restest.bin
+    - host: userland/tests/restest.bin
       guest: /sbin/restest.bin
-    - host: programs/tests/libc_test.bin
+    - host: userland/tests/libc_test.bin
       guest: /bin/libc_test.bin
-    - host: programs/tests/test2.bin
+    - host: userland/tests/test2.bin
       guest: /bin/test2.bin
-    - host: programs/tests/test3.bin
+    - host: userland/tests/test3.bin
       guest: /bin/test3.bin
-    - host: programs/tests/test4.bin
+    - host: userland/tests/test4.bin
       guest: /bin/test4.bin
-    - host: programs/tests/stat_t.bin
+    - host: userland/tests/stat_t.bin
       guest: /bin/stat_t.bin
-    - host: programs/tests/args.bin
+    - host: userland/tests/args.bin
       guest: /bin/args.bin
-    - host: programs/tests/nop.bin
+    - host: userland/tests/nop.bin
       guest: /bin/nop.bin
 
 # --- 追加データパッケージ ---
@@ -158,7 +158,7 @@ append:
       guest: /data/images/
     - host: "assets/images/*.vdp"
       guest: /data/images/
-    - host: "assets/manga/*.mgx"
+    - host: "game/assets/manga/*.mgx"
       guest: /data/manga/
-    - host: "assets/manga/*.MGX"
+    - host: "game/assets/manga/*.MGX"
       guest: /data/manga/
