@@ -26,7 +26,12 @@
  * 注: FEP候補ゼロ問題 (2026-08-07解決) はプール枯渇ではなく、exec_exit の
  * FD一括クローズが FEP辞書の fd を回収していたのが原因 (vfs_fd_set_protect
  * で保護)。FEP常駐接続 + 一時接続1本は 200KB で動作確認済み。 */
-#define SQLITE_MEMSYS5_SIZE  (200 * 1024)
+/* MEMSYS5 固定プール。
+   200KB では game (econ 常時接続 + battle/rpg/items/events の順次ロード) が
+   最後の battle.db 二回目 open の prepare で out of memory になった
+   (使用中 188KB で枯渇)。SQLite 拡張域 0x200000-0x2FFFFF は
+   text+rodata+data で 374KB 使用なので、384KB に広げても 240KB 余る。 */
+#define SQLITE_MEMSYS5_SIZE  (384 * 1024)
 #define CANARY_VALUE 0xDEADBEEFUL
 static u32 canary_before[4] = {
     CANARY_VALUE, CANARY_VALUE, CANARY_VALUE, CANARY_VALUE
