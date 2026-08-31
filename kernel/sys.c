@@ -3,6 +3,7 @@
 /* ======================================================================== */
 
 #include "sys.h"
+#include "memmap.h"
 #include "io.h"
 #include "pc98.h"
 #include "rtc.h"
@@ -38,6 +39,21 @@ u32 sys_mem_kb = 1024; /* 初期値(1MB) */
 u32 sys_get_mem_kb(void)
 {
     return sys_mem_kb;
+}
+
+/* 物理末尾からホットデプロイ用ステージング領域を除いた、割り当てて
+ * よい上限。子プロセスのスタックはここから下へ伸びる。
+ * 設計: docs/tasks/hotdeploy/DESIGN.md */
+u32 sys_usable_mem_end(void)
+{
+    u32 end = sys_mem_kb * 1024;
+    return (end > MEM_HOTDEPLOY_SIZE * 2) ? (end - MEM_HOTDEPLOY_SIZE) : end;
+}
+
+/* ステージング領域の先頭 (物理)。 */
+u32 sys_hotdeploy_base(void)
+{
+    return sys_usable_mem_end();
 }
 
 os_time_t sys_time(void)

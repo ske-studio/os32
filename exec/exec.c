@@ -90,7 +90,7 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 static void exec_child_claim(u32 *a_start, int *a_pages,
                              u32 *b_start, int *b_pages)
 {
-    u32 mem_end = sys_mem_kb * 1024;
+    u32 mem_end = sys_usable_mem_end();  /* 末尾はホットデプロイ用に予約 */
     u32 heap_base = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE + PAGE_SIZE;
     u32 guard_b = mem_end - MEM_EXEC_STACK_SIZE - PAGE_SIZE;
     u32 a_end = guard_b;
@@ -201,7 +201,7 @@ int exec_run(const char *cmdline)
     u32 exec_heap_base, exec_heap_size;
     int is_shell;
 
-    u32 mem_end = sys_mem_kb * 1024;
+    u32 mem_end = sys_usable_mem_end();  /* 末尾はホットデプロイ用に予約 */
     u8 *file_buf;
     u8 *load_addr;
     OS32Header *hdr;

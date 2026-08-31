@@ -16,6 +16,9 @@
 #include "kbd.h"
 #include "io.h"
 #include "serial.h"
+#include "hotdeploy.h"
+
+extern volatile int exec_nest_level;  /* exec/exec.c */
 
 /* 外部: irq_enable (idt.c で定義) */
 extern void irq_enable(unsigned int irq);
@@ -253,7 +256,16 @@ int kbd_has_key(void)
 int kbd_trygetchar(void)
 {
     u16 entry;
-    
+
+    /* ホストからのファイル配置要求は「シェルが応答している」ときだけ
+     * 反映する。exec_nest_level==1 がシェル、2 以上は子プロセス。
+     * 子プロセスの文脈で VFS を触ると、そのプログラムが持つ状態と
+     * 干渉しうるので踏み込まない。要求が無ければ magic 判定だけで戻る。
+     * 設計: docs/tasks/hotdeploy/DESIGN.md */
+    if (exec_nest_level <= 1) {
+        hotdeploy_poll();
+    }
+
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
         int sch;

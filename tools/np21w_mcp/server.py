@@ -223,6 +223,37 @@ def tool_write_mem(args):
     return _json(emu.post(q, args["hex"]))
 
 
+def tool_put_file(args):
+    """Place a host file at an arbitrary path inside the running guest.
+
+    Replaces the old flow of "sync to HostDrv, then run hsync in the guest".
+    The bytes go straight into guest memory over /api/deploy; the guest
+    kernel agent writes the file when the shell is next responsive.
+    """
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))))
+    from hotdeploy import push
+
+    local = args["local_path"]
+    if not os.path.isfile(local):
+        return tool_error("local file not found: %s" % local)
+    try:
+        ok = push(local, args.get("guest_path"))
+    except SystemExit as e:
+        return tool_error(str(e))
+    if not ok:
+        return tool_error("the guest did not accept the file")
+    return {"ok": True, "local_path": local,
+            "guest_path": args.get("guest_path") or "(resolved from manifests)",
+            "bytes": os.path.getsize(local)}
+
+
+def tool_deploy_status(args):
+    """Report the guest-side file-placement agent state."""
+    return _json(emu.get("/api/deploy"))
+
+
 def tool_disasm(args):
     n = max(1, min(int(args.get("n", 8)), 256))
 
@@ -524,6 +555,23 @@ TOOLS = {
                             "hex": {"type": "string"},
                             "space": {"type": "string", "default": "phys"}},
                            ["addr", "hex"])),
+    "emu_put_file": (tool_put_file,
+                     "Place a host file at an arbitrary path inside the "
+                     "RUNNING guest, without a reboot or an NHD rewrite. "
+                     "Use this instead of the HostDrv+hsync round trip. "
+                     "guest_path may be omitted for a file the deploy "
+                     "manifests already know (e.g. apps/x/x.bin).",
+                     _obj({"local_path": {"type": "string",
+                                          "description": "path on the host"},
+                           "guest_path": {"type": "string",
+                                          "description": "absolute path in the "
+                                                         "guest, e.g. "
+                                                         "/usr/bin/x.bin"}},
+                          ["local_path"])),
+    "emu_deploy_status": (tool_deploy_status,
+                          "State of the guest-side file-placement agent "
+                          "(present? staging window? last request).",
+                          _obj({})),
     "emu_disasm": (tool_disasm,
                    "Disassemble n instructions of live guest memory via host "
                    "objdump, with kernel.map symbols on labels and branch "

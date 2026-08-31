@@ -13,6 +13,12 @@ APPS_MAKE = $(MAKE) -C $(APPS_DIR) OS32_SDK=$(abspath $(SDK_OUT)) CROSS_DIR=$(CR
 apps: sdk
 	$(APPS_MAKE) all
 
+# apps/<name>/<name>.bin を単体で作れるようにする。個別ホットデプロイ
+# (make dp-apps/<name>/<name>) がこのパターンを要求する。
+# $* = <name>/<name> なので notdir でアプリ名だけを取り出して委譲する。
+apps/%.bin: sdk
+	$(APPS_MAKE) $(notdir $*)
+
 clean-apps:
 	$(APPS_MAKE) clean
 

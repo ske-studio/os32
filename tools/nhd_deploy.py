@@ -55,16 +55,10 @@ MOUNT_POINT = "/tmp/os32"
 
 # プロジェクトルート (tools/ の親ディレクトリ)
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 配備定義は所有する層ごとに分かれている。カーネル層が boot: と
-# ディレクトリ構造を持ち、ユーザーランドとゲームは自層の files: だけを
-# 持つ。ここでマージして 1 つの定義として扱う。
+# 配備定義は所有する層ごとに分かれている。リストとマージ処理の実体は
+# tools/deploy_manifests.py。二重に持つと食い違うので参照だけにすること。
 # 各マニフェストは自層の成果物しか参照しない (make check-manifests で検査)。
-DEPLOY_MANIFESTS = [
-    os.path.join(PROJ_DIR, 'build', 'core.yaml'),
-    os.path.join(PROJ_DIR, 'userland', 'deploy.yaml'),
-    os.path.join(PROJ_DIR, 'apps', 'deploy.yaml'),
-    os.path.join(PROJ_DIR, 'game', 'deploy.yaml'),
-]
+from deploy_manifests import DEPLOY_MANIFESTS, load_merged as _load_merged
 
 # === ext2パーティション オフセット ===
 # NHDヘッダ(512B) + ブート領域(LBA 0-1631) = 1633セクタ
@@ -105,7 +99,8 @@ def do_mount():
 
     if not os.path.isfile(NHD_LOCAL):
         print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
-        print("  'init' コマンドでWindows側からコピーしてください", file=sys.stderr)
+        print("  'pull' でWindows側から取り込めます (init はフォーマットを伴う)",
+              file=sys.stderr)
         return False
 
     # マウントポイント作成
@@ -339,10 +334,20 @@ def do_write_boot(loader_bin):
     if len(loader_data) > MAX_LOADER_SECTORS * SECTOR:
         print("Error: ローダーが{}Bを超過 ({} bytes)".format(
             MAX_LOADER_SECTORS * SECTOR, len(loader_data)))
-        return
+        return False
 
     # 8KBにパディング
     loader_data = loader_data.ljust(MAX_LOADER_SECTORS * SECTOR, b'\x00')
+
+    # /tmp は再起動で消える。素の FileNotFoundError を投げると原因が
+    # 分からないので、do_mount と同じ案内を出して False を返す。
+    if not os.path.isfile(NHD_LOCAL):
+        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
+        print("  'python3 tools/nhd_deploy.py pull' で取り込めます",
+              file=sys.stderr)
+        print("  (make nhd-init はフォーマットを伴うので通常は pull を使う)",
+              file=sys.stderr)
+        return False
 
     with open(NHD_LOCAL, 'r+b') as nhd:
         nhd.seek(loader_offset)
@@ -351,6 +356,7 @@ def do_write_boot(loader_bin):
     print("  loader: {} bytes -> LBA {}-{}".format(
         len(loader_data), LOADER_LBA, LOADER_LBA + MAX_LOADER_SECTORS - 1))
     print("Done!")
+    return True
 
 
 def do_format():
@@ -430,6 +436,35 @@ def update_partition_table(nhd_path):
         start_cyl, HDD_PARTITION_LBA))
 
 
+def do_pull():
+    """Windows側NHDを/tmpに取り込む (フォーマットしない)
+
+    /tmp は再起動で消えるため NHD_LOCAL は頻繁に失われる。init は
+    フォーマットを伴いゲスト側で作られたデータ (home/db/save) を消すので、
+    作業を再開したいだけのときはこちらを使う。
+    """
+    if is_mounted():
+        print("マウント中です。先に umount してください。", file=sys.stderr)
+        return False
+
+    if not os.path.isfile(NHD_REMOTE):
+        print("Error: {} が見つかりません".format(NHD_REMOTE), file=sys.stderr)
+        return False
+
+    print("NHDイメージを取り込み中 (フォーマットなし)...")
+    print("  {} -> {}".format(NHD_REMOTE, NHD_LOCAL))
+    try:
+        shutil.copy2(NHD_REMOTE, NHD_LOCAL)
+    except PermissionError:
+        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+              file=sys.stderr)
+        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        return False
+
+    print("完了! ({:.1f} MB)".format(os.path.getsize(NHD_LOCAL) / (1024 * 1024)))
+    return do_mount()
+
+
 def do_init():
     """Windows側NHDを/tmpにコピー + パーティション更新 + フォーマット + マウント"""
     if is_mounted():
@@ -472,29 +507,8 @@ def do_init():
 
 
 def load_deploy_yaml():
-    """層ごとの配備定義をマージして返す
-
-    boot: と filesystem.directories: はカーネル層 (build/core.yaml) が持つ。
-    filesystem.files: は全マニフェストを読み込み順に連結する。
-    """
-    merged = {'filesystem': {'directories': [], 'files': []}}
-    found = False
-    for path in DEPLOY_MANIFESTS:
-        if not os.path.isfile(path):
-            continue
-        found = True
-        with open(path, 'r', encoding='utf-8') as f:
-            d = yaml.safe_load(f) or {}
-        if 'boot' in d:
-            merged['boot'] = d['boot']
-        fs = d.get('filesystem') or {}
-        merged['filesystem']['directories'].extend(fs.get('directories') or [])
-        merged['filesystem']['files'].extend(fs.get('files') or [])
-    if not found:
-        print("Error: 配備定義が 1 つも見つかりません:\n  {}".format(
-            "\n  ".join(DEPLOY_MANIFESTS)), file=sys.stderr)
-        return None
-    return merged
+    """層ごとの配備定義をマージして返す (tools/deploy_manifests.py に委譲)"""
+    return _load_merged()
 
 
 def resolve_files_from_entry(entry):
@@ -558,7 +572,8 @@ def do_sync(tag_filter=None):
 
         if loader_path and os.path.isfile(loader_path):
             print("\n[boot] ローダー書き込み")
-            do_write_boot(loader_path)
+            if not do_write_boot(loader_path):
+                return False
         else:
             print("Warning: ローダー {} が見つかりません".format(loader_path))
 
@@ -698,174 +713,78 @@ def do_sync_from_hostdrv():
 
 
 def resolve_guest_path(host_file):
-    """deploy.yaml からホストファイルに対応するゲストパスを解決する
+    """マニフェストからホストファイルに対応するゲストパスを解決する
+
+    照合はプロジェクト相対のフルパスで行う。以前は glob パターンの
+    ベース名 (``*.bin``) だけを見ていたため、どの .bin も最初に現れた
+    ``*.bin`` エントリに吸い込まれ、apps/ のアプリが /bin/ に解決されていた。
+
+    優先順:
+      1. type: file の host 完全一致
+      2. type: glob のパターン一致 (フルパス)
+      3. 互換のためのベース名一致
 
     Returns: ゲストパス文字列 (見つからなければ None)
     """
+    import fnmatch
+
     cfg = load_deploy_yaml()
     if cfg is None:
         return None
 
+    relpath = os.path.relpath(os.path.abspath(host_file), PROJ_DIR)
+    relpath = relpath.replace(os.sep, '/')
     basename = os.path.basename(host_file)
-    fs = cfg.get('filesystem', {})
-    files = fs.get('files', [])
+    files = (cfg.get('filesystem') or {}).get('files') or []
 
-    for entry in files:
-        entry_type = entry.get('type', 'file')
-        exclude = entry.get('exclude', [])
+    def _guest_for(entry):
         guest = entry['guest']
+        if basename in (entry.get('exclude') or []):
+            return None
+        return guest + basename if guest.endswith('/') else guest
 
-        if entry_type == 'glob':
-            # glob パターンにマッチするか確認
-            import fnmatch
-            host_pattern = entry['host']
-            pattern_basename = os.path.basename(host_pattern)
-            if fnmatch.fnmatch(basename, pattern_basename):
-                if basename in exclude:
-                    continue
-                if guest.endswith('/'):
-                    return guest + basename
-                else:
-                    return guest
-        else:
-            # 完全一致
-            if os.path.basename(entry['host']) == basename:
-                return guest
+    # 1. 完全一致
+    for entry in files:
+        if entry.get('type', 'file') != 'glob' and entry['host'] == relpath:
+            g = _guest_for(entry)
+            if g:
+                return g
+
+    # 2. glob パターン (フルパスで照合)
+    for entry in files:
+        if entry.get('type', 'file') == 'glob' and \
+                fnmatch.fnmatch(relpath, entry['host']):
+            g = _guest_for(entry)
+            if g:
+                return g
+
+    # 3. ベース名一致 (旧挙動の互換)
+    for entry in files:
+        if os.path.basename(entry['host']) == basename:
+            g = _guest_for(entry)
+            if g:
+                return g
 
     return None
 
 
 def do_push(local_path, remote_name=None, resolve=False):
-    """シリアル経由ホットデプロイ (再起動不要)
+    """ホットデプロイ (再起動不要) — tools/hotdeploy.py に委譲
 
-    名前付きパイプ経由で rshell の upload コマンドを使い、
-    実行中の OS32 にファイルを転送する。
-
-    Args:
-        local_path: ホスト側ファイルパス
-        remote_name: ゲスト側ファイル名 (Noneならbasenameを使用)
-        resolve: Trueなら deploy.yaml からゲストパスを自動解決
+    旧実装は名前付きパイプ経由で rshell の `upload` コマンドへ hex を
+    流し込んでいたが、`upload` はゲスト側で削除済みで常に失敗していた。
+    現在は NP21/W 内蔵 aidebug の POST /api/mem でステージングバッファへ
+    直接書き、rshell の `hotdeploy` でファイル化する。
+    設計: docs/tasks/hotdeploy/DESIGN.md
     """
-    PIPE_NAME = 'np21w_com1'
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from hotdeploy import push
 
-    if not os.path.isfile(local_path):
-        print("Error: {} が見つかりません".format(local_path), file=sys.stderr)
-        return False
+    guest = None
+    if not resolve and remote_name:
+        guest = remote_name if remote_name.startswith('/') else '/' + remote_name
+    return push(local_path, guest)
 
-    # ゲストパス解決
-    if resolve:
-        guest_path = resolve_guest_path(local_path)
-        if guest_path:
-            remote_name = guest_path.lstrip('/')
-            print("deploy.yaml から解決: {} -> /{}".format(
-                os.path.basename(local_path), remote_name))
-        else:
-            print("Warning: deploy.yaml にマッチなし、ファイル名をそのまま使用")
-            remote_name = os.path.basename(local_path)
-    elif remote_name is None:
-        remote_name = os.path.basename(local_path)
-
-    with open(local_path, 'rb') as f:
-        data = f.read()
-
-    size = len(data)
-    size_hex = format(size, 'x')
-    hex_data = data.hex()
-
-    print("Push: {} ({} bytes) -> /{}".format(
-        os.path.basename(local_path), size, remote_name))
-
-    cmd_str = " upload {} {}".format(remote_name, size_hex)
-    cmd_bytes = cmd_str.encode('ascii') + b'\n'
-    hex_bytes_data = hex_data.encode('ascii')
-
-    # 全送信データを一時ファイルに保存
-    all_data = cmd_bytes + hex_bytes_data
-    tmp_path = os.path.join(PROJ_DIR, 'tmp_upload.bin')
-    
-    # WSLパスをWindowsパスに変換 (PowerShell用)
-    try:
-        import subprocess
-        result = subprocess.run(['wslpath', '-w', tmp_path], capture_output=True, text=True, check=True)
-        win_tmp_path = result.stdout.strip().replace('\\', '\\\\')
-    except Exception:
-        # WSL環境外などでのフォールバック
-        win_tmp_path = tmp_path.replace('/', '\\\\')
-
-    with open(tmp_path, 'wb') as f:
-        f.write(all_data)
-
-    cmd_len = len(cmd_bytes)
-
-    # PowerShellスクリプト: 名前付きパイプ経由で送信
-    ps = (
-        "$ErrorActionPreference = 'Stop'; "
-        "try {{ "
-        "  $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', "
-        "'{pipe}', [System.IO.Pipes.PipeDirection]::InOut); "
-        "  $pipe.Connect(5000); "
-        "  $data = [System.IO.File]::ReadAllBytes('{tmp}'); "
-        "  $pipe.Write($data, 0, {cmd_len}); "
-        "  $pipe.Flush(); "
-        "  Start-Sleep -Milliseconds 500; "
-        "  for ($i = {cmd_len}; $i -lt $data.Length; $i += 64) {{ "
-        "    $end = [Math]::Min($i + 64, $data.Length); "
-        "    $len = $end - $i; "
-        "    $pipe.Write($data, $i, $len); "
-        "    if (($i % 1024) -eq 0) {{ $pipe.Flush(); Start-Sleep -Milliseconds 2; }} "
-        "  }}; "
-        "  $pipe.Flush(); "
-        "  $buf = New-Object byte[] 1; "
-        "  $sb = New-Object System.Text.StringBuilder; "
-        "  $timeout = [DateTime]::Now.AddSeconds(8); "
-        "  while ([DateTime]::Now -lt $timeout) {{ "
-        "    if ($pipe.Read($buf, 0, 1) -gt 0) {{ "
-        "      if ($buf[0] -eq 4) {{ break; }} "
-        "      [void]$sb.Append([char]$buf[0]); "
-        "      $timeout = [DateTime]::Now.AddSeconds(3); "
-        "    }} "
-        "  }}; "
-        "  Write-Host $sb.ToString(); "
-        "  $pipe.Close(); "
-        "}} catch {{ "
-        "  Write-Host ('ERROR: ' + $_); "
-        "}}"
-    ).format(pipe=PIPE_NAME, tmp=win_tmp_path, cmd_len=cmd_len)
-
-    print("転送中...")
-    try:
-        result = subprocess.run(
-            ['powershell.exe', '-NoProfile', '-Command', ps],
-            # 日本語Windowsのコンソール出力はcp932。UTF-8で復号すると
-            # エラーメッセージ時に UnicodeDecodeError で本来の失敗理由を失う。
-            capture_output=True, text=True,
-            encoding='cp932', errors='replace', timeout=60
-        )
-    except subprocess.TimeoutExpired:
-        print("Error: タイムアウト (60秒)", file=sys.stderr)
-        return False
-    except FileNotFoundError:
-        print("Error: powershell.exe が見つかりません", file=sys.stderr)
-        return False
-
-    # 一時ファイル削除
-    try:
-        os.unlink(tmp_path)
-    except OSError:
-        pass
-
-    output = result.stdout.strip()
-    if output:
-        print(output)
-
-    if 'OK' in output:
-        print("Push 成功: /{} ({} bytes)".format(remote_name, size))
-        return True
-    else:
-        print("Push 失敗の可能性があります")
-        if result.stderr:
-            print("stderr: {}".format(result.stderr.strip()))
-        return False
 
 
 def main():
@@ -970,6 +889,10 @@ def main():
 
     elif cmd == 'format':
         do_format()
+
+    elif cmd == 'pull':
+        if not do_pull():
+            sys.exit(1)
 
     elif cmd == 'init':
         do_init()

@@ -13,6 +13,7 @@
 
 #include "pgalloc.h"
 #include "kprintf.h"
+#include "memmap.h"
 
 /* 最大16MBまでの物理ページ管理 */
 /* 0x400000〜0xFFFFFF = 12MB = 3072ページ */
@@ -40,6 +41,11 @@ void pgalloc_init(u32 mem_kb)
         mem_kb = PAGING_MAP_SIZE / 1024;
     }
     mem_end = mem_kb * 1024;
+    /* 末尾はホットデプロイ用ステージング領域。ページ割り当ての
+     * 対象から外す (docs/tasks/hotdeploy/DESIGN.md)。 */
+    if (mem_end > MEM_HOTDEPLOY_SIZE * 2) {
+        mem_end -= MEM_HOTDEPLOY_SIZE;
+    }
 
     /* 管理対象: PGALLOC_BASE 〜 mem_end */
     if (mem_end <= PGALLOC_BASE) {

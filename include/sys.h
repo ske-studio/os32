@@ -13,5 +13,7 @@ void buz_on(void);
 void buz_off(void);
 
 u32 sys_get_mem_kb(void);
+u32 sys_usable_mem_end(void);
+u32 sys_hotdeploy_base(void);
 
 #endif /* __SYS_H */

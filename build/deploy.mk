@@ -30,12 +30,21 @@ deploy-nhd: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	$(NHD_DEPLOY) sync
 	$(NHD_DEPLOY) deploy
 
-# dp-<name>: 個別プログラムのビルド → シリアル経由でのホットデプロイ(再起動不要)
-# dp-<path>: 個別プログラムのホットデプロイ。パスはリポジトリルートから
-#   (例: make dp-userland/cmds/wc, make dp-game/app/game)
-dp-%: %.bin
-	@echo "=== Hot Deploy (Serial Push): $*.bin ==="
-	$(NHD_DEPLOY) push $*.bin --resolve
+# hotdeploy: 個別バイナリのビルド → ホットデプロイ (再起動不要)
+#   例: make hotdeploy FILE=apps/hello32/hello32.bin
+#       make hotdeploy FILE=userland/shell.bin
+#   配備先はマニフェストから解決する。GUEST= で明示指定もできる。
+#
+#   旧 `dp-%` パターンルールは GNU make の仕様上成立していなかった。
+#   ターゲットパターンにスラッシュが無い場合、make はディレクトリ部を
+#   除いたファイル名だけを照合するため `dp-apps/x/x` はどの規則にも当たらない。
+hotdeploy:
+	@test -n "$(FILE)" || { \
+	  echo "usage: make hotdeploy FILE=<path/to/x.bin> [GUEST=/usr/bin/x.bin]"; \
+	  exit 1; }
+	$(MAKE) $(FILE)
+	@echo "=== Hot Deploy: $(FILE) ==="
+	python3 tools/hotdeploy.py $(FILE) $(GUEST)
 
 # nhd-mount: NHDのext2パーティションをマウント
 nhd-mount:
@@ -45,8 +54,14 @@ nhd-mount:
 nhd-umount:
 	$(NHD_DEPLOY) umount
 
+# nhd-pull: Windows側NHDを/tmpに取り込む (フォーマットしない)
+#   /tmp は再起動で消えるので、作業再開時はこれを使う
+nhd-pull:
+	$(NHD_DEPLOY) pull
+
 # nhd-init: 初回セットアップ (Windows側NHDコピー + フォーマット + マウント)
+#   フォーマットするのでゲスト側で作られたデータは消える
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-boot deploy-nhd nhd-mount nhd-umount nhd-init
+.PHONY: deploy deploy-kernel deploy-boot deploy-nhd hotdeploy nhd-mount nhd-umount nhd-pull nhd-init

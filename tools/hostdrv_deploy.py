@@ -27,8 +27,11 @@ import filecmp
 
 # プロジェクトルート (tools/ の親ディレクトリ)
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEPLOY_YAML = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            'deploy.yaml')
+
+# 配備定義は層別 (build/core.yaml, userland/, apps/, game/)。実体は
+# tools/deploy_manifests.py。以前はここが削除済みの tools/deploy.yaml を
+# 単独で見ており、`make deploy` が無言で何もしない状態だった。
+from deploy_manifests import DEPLOY_MANIFESTS, load_merged as _load_merged
 
 
 def _resolve_hostdrv_dir():
@@ -50,12 +53,8 @@ HOSTDRV_DIR = _resolve_hostdrv_dir()
 
 
 def load_deploy_yaml():
-    """deploy.yaml を読み込んで返す"""
-    if not os.path.isfile(DEPLOY_YAML):
-        print("Error: {} が見つかりません".format(DEPLOY_YAML), file=sys.stderr)
-        return None
-    with open(DEPLOY_YAML, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+    """層ごとの配備定義をマージして返す (tools/deploy_manifests.py に委譲)"""
+    return _load_merged()
 
 
 def resolve_files_from_entry(entry):
@@ -87,7 +86,8 @@ def resolve_files_from_entry(entry):
     else:
         fpath = os.path.join(PROJ_DIR, host_pattern)
         if os.path.isfile(fpath):
-            results.append((fpath, guest))
+            g = guest + os.path.basename(fpath) if guest.endswith('/') else guest
+            results.append((fpath, g))
         else:
             print("  Warning: {} not found".format(host_pattern))
 
@@ -106,7 +106,7 @@ def do_sync(tag_filter=None):
 
     print("=" * 55)
     print("  OS32 HostDrv デプロイ")
-    print("  {} -> {}".format("deploy.yaml", HOSTDRV_DIR))
+    print("  {} 層のマニフェスト -> {}".format(len(DEPLOY_MANIFESTS), HOSTDRV_DIR))
     if tag_filter:
         print("  タグフィルタ: {}".format(tag_filter))
     print("=" * 55)
@@ -251,14 +251,14 @@ def main():
         print("")
         print("使い方: {} <command>".format(sys.argv[0]))
         print("")
-        print("  sync [--tag TAG]  — deploy.yaml に基づくデプロイ")
+        print("  sync [--tag TAG]  — 層別マニフェストに基づくデプロイ")
         print("  diff [--tag TAG]  — ビルド成果物との差分表示")
         print("  clean             — HostDrvディレクトリをクリア")
         print("  ls [path]         — ファイル一覧")
         print("")
         print("パス:")
         print("  HostDrv:     {}".format(HOSTDRV_DIR))
-        print("  deploy.yaml: {}".format(DEPLOY_YAML))
+        print("  マニフェスト: {}".format(", ".join(DEPLOY_MANIFESTS)))
         print("  Project:     {}".format(PROJ_DIR))
         return
 
@@ -273,7 +273,8 @@ def main():
                 i += 2
             else:
                 i += 1
-        do_sync(tag_filter=tag_filter)
+        if not do_sync(tag_filter=tag_filter):
+            sys.exit(1)
 
     elif cmd == 'diff':
         tag_filter = None
@@ -294,7 +295,8 @@ def main():
         do_ls(path)
 
     else:
-        print("Unknown command: {}".format(cmd))
+        print("Unknown command: {}".format(cmd), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
