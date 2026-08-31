@@ -135,11 +135,11 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 ### 4-7. シリアル API タイムアウトによる「ハング」誤診
 
 - **現象**: `exec` 実行後にシェルが復帰しない。`exec_exit` にデバッグ出力を追加しても表示されない
-- **原因**: NP21/W HTTP API (`curl -X POST http://localhost:8032/cmd`) の `curl -m` タイムアウトが短すぎた。エミュレータの処理速度（~16MHz）でプログラム実行に時間がかかり、応答が返る前にタイムアウト。タイムアウト後はシリアルプロトコルが非同期状態になり、後続コマンドもすべて失敗する
+- **原因**: NP21/W デバッグ HTTP API (`curl -X POST http://127.0.0.1:8025/api/cmd`) の `curl -m` タイムアウトが短すぎた。エミュレータの処理速度（~16MHz）でプログラム実行に時間がかかり、応答が返る前にタイムアウト。タイムアウト後はシリアルプロトコルが非同期状態になり、後続コマンドもすべて失敗する
 - **対策**:
   - `curl -m` は十分長く設定する（最低15秒、長時間プログラムは60秒以上）
   - タイムアウト発生後は NP21/W を再起動してシリアルを再同期する
-  - 「シェルが復帰しない」場合は、まず NP21/W のスクリーンショット (`/screenshot`) で画面を直接確認する
+  - 「シェルが復帰しない」場合は、まず画面を直接確認する (`/api/tvram` か `/api/screenshot`)
 
 ### 4-8. NP21/W 実行中の NHD デプロイが反映されない (ファイルロック)
 
@@ -172,20 +172,26 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 ### NP21/W リモート実行 (HTTP API)
 
-Windows 側で `tools/os32_server.py` (要 Windows Python + pywin32) を起動しておくと、
-COM1 名前付きパイプ (`\\.\pipe\np21w_com1`) 経由で OS32 の rshell と HTTP で対話できる。
+NP21/W (ai-debug フォーク) は内蔵のデバッグ HTTP サーバを持つ。`np21x64w.ini` で
+`aidebug=true` / `aidbport=8025` を設定すると、OS32 の rshell と HTTP で対話できる。
+外部の中継プロセスは不要。
 
 ```bash
-/* コマンド実行 */
-curl -X POST http://localhost:8032/cmd -d "ver"
+# コマンド実行
+curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"
 
-/* スクリーンショット取得 (要 pyautogui) */
-curl -sX GET http://localhost:8032/screenshot > screenshot.png
+# 画面テキスト (UTF-8) — 画面判定はこちらの方が速い
+curl -s http://127.0.0.1:8025/api/tvram
+
+# スクリーンショット取得
+curl -s http://127.0.0.1:8025/api/screenshot > screenshot.png
 ```
 
-> WSL からの `localhost:8032` が Windows ファイアウォールで遮断される環境では、
-> Windows 側の curl (`/mnt/c/Windows/System32/curl.exe`) を使用するか、
-> 8032/tcp の受信許可規則を追加する。
+> WSL からの `127.0.0.1:8025` が届かない環境 (NAT モード + ファイアウォール) では、
+> Windows 側の curl (`/mnt/c/Windows/System32/curl.exe`) を使うか、
+> WSL をミラーモード (`.wslconfig` の `networkingMode=mirrored`) にする。
+> レジスタ・メモリ・逆アセンブル・ブレークポイントまで要るときは
+> `tools/np21w_mcp/` の MCP サーバを使う。
 
 ### 有用なゲスト側コマンド
 
@@ -209,7 +215,7 @@ curl -sX GET http://localhost:8032/screenshot > screenshot.png
 taskkill.exe /F /IM np21x64w.exe
 make all && make deploy && make deploy-kernel
 WIN_NP21W_DIR='C:\...\np21w' python3 tools/np21w_restart.py
-curl -X POST http://localhost:8032/cmd -d "ver"   # Build タイムスタンプ確認
+curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイムスタンプ確認
 ```
 
 ---

@@ -262,9 +262,10 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 
 ### シリアルコンソール経由のリモートテスト
 
-- `os32_server.py` (HTTP API) を通じてコマンドを送信し、結果を自動取得できる。
-- `curl -X POST http://localhost:8032/cmd -d "コマンド"` で実行可能。
-- スクリーンショットの自動取得: `curl -sX GET http://localhost:8032/screenshot`
+- NP21/W 内蔵のデバッグ HTTP API を通じてコマンドを送信し、結果を自動取得できる。
+- `curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "コマンド"` で実行可能。
+- 画面テキストの取得: `curl -s http://127.0.0.1:8025/api/tvram`
+- スクリーンショットの取得: `curl -s http://127.0.0.1:8025/api/screenshot`
 
 ### テスト対象の優先度
 

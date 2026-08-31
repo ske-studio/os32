@@ -43,15 +43,18 @@ After any kernel change, always run `make kernel` and verify zero errors before 
 
 **Remote testing** (after NP21/W is running):
 ```bash
-curl -X POST http://localhost:8032/cmd -d "ver"     # run a shell command over serial
-curl -X POST http://localhost:8032/cmd -d "ls"
-curl -X POST http://localhost:8032/key -d "SPACE"   # inject a key event into the NP21/W window
-curl -X POST http://localhost:8032/key -d "SHIFT_SPACE"   # FEP on/off toggle
-curl      http://localhost:8032/screenshot           # capture the emulator window
+curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"  # run a shell command over serial
+curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ls"
+curl -X POST http://127.0.0.1:8025/api/key -d "seq=SPACE"       # inject a key event
+curl -X POST http://127.0.0.1:8025/api/key -d "seq=SHIFT+SPACE" # FEP on/off toggle
+curl      http://127.0.0.1:8025/api/tvram                       # screen contents as UTF-8 text
+curl      http://127.0.0.1:8025/api/screenshot                  # capture the emulator window
 ```
-`/cmd` can only send whole command lines; use `/key` for anything that reads raw keystrokes
-(FEP conversion, the editor, games). The server is `tools/os32_server.py`, run on the Windows
-side — **it is copied to `C:\os32tools\` manually, so re-copy it after editing.**
+`/api/cmd` can only send whole command lines; use `/api/key` for anything that reads raw
+keystrokes (FEP conversion, the editor, games). The debug server is **built into
+`np21x64w.exe`** (the ai-debug fork) and is switched on with `aidebug=true` / `aidbport=8025`
+in `np21x64w.ini` — no external relay process is involved. Richer inspection (registers,
+memory, disassembly, breakpoints, trace) is available through `tools/np21w_mcp/`.
 
 ## Compiler & Flags
 
@@ -341,8 +344,7 @@ V86 は同時に使わない。レイアウトを変えたら
 (the guest's `/host`). PATH resolution prefers the NHD's `/usr/bin`, so running a program
 by name after a HostDrv-only deploy silently executes the **old** binary on the NHD.
 Library or test changes must be verified with a full NHD deploy
-(stop NP21/W → `make deploy-kernel` → restart). Serial hot deploy
-(`nhd_deploy.py push`) is not an alternative while `os32_server.py` holds the named pipe.
+(stop NP21/W → `make deploy-kernel` → restart).
 
 **SQLite MEMSYS5 is a fixed 384KB pool** (`lib/sqlite3/os32_sqlite_vfs.c`): shared by every
 DB connection including the kernel-side FEP dictionary. Programs that hold several
