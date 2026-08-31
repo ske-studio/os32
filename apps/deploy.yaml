@@ -43,3 +43,6 @@ filesystem:
     - host: apps/mdview/mdview.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: apps/hello32/hello32.bin
+      guest: /usr/bin/
+      tags: [programs]
