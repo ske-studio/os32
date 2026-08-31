@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "config.h"
 #include "os32/help.h"
 
 /* ======================================================================== */
@@ -54,7 +55,8 @@ static void cmd_tick(int argc, char **argv)
 static void cmd_ver(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    g_api->kprintf(ATTR_GREEN, "%s", "PC-9801 OS32 v1.0 (External Shell Modular)\n");
+    g_api->kprintf(ATTR_GREEN, "PC-9801 OS32 v%s (External Shell Modular)\n",
+                   SYS_VERSION);
     g_api->kprintf(ATTR_CYAN, "%s", "  CPU: Intel 386+ (Protected Mode + Paging)\n");
     g_api->kprintf(ATTR_CYAN, "%s", "  PIC: 8259A x2 (remapped to INT 20h+)\n");
     g_api->kprintf(ATTR_CYAN, "%s", "  PIT: 8254 @ 100Hz\n");
