@@ -87,6 +87,17 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 |---------|------|------|
 | `filer` | `filer [dir]` | CUIファイラ (カーソル移動・Enter実行・拡張子関連付け) |
 
+**その他の組み込みコマンド**:
+
+| コマンド | 書式 | 説明 |
+|---------|------|------|
+| `losetup` | `losetup <path> <slot> \| -d <slot> \| -l` | ループデバイス管理 (ディスクイメージをブロックデバイスとして接続) |
+| `dd` | `dd <dev> lba=N count=M [file=PATH]` | ブロックデバイスのセクタ読み出し |
+| `export` | `export VAR=VALUE` | 環境変数の設定 |
+
+**エイリアス**: `cls`→`clear`、`uname`→`ver`、`.`→`source`、`cat2`→`cat`、
+`heap`→`mem`、`df`→`dev`。
+
 ### §7-2 プログラム実行とPATH探索
 
 | 実行方法 | 例 | 説明 |
@@ -100,7 +111,8 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 - `*` や `?` などの簡単なワイルドカードもサポート
 
 **外部コマンド** (`/bin` に配置、`userland/cmds/`):
-`cal` `diff` `du` `find` `grep` `head` `hexdump` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `wc`
+`cal` `diff` `du` `find` `grep` `head` `hexdump` `ime` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `v86` `wc`
+(`ime` は FEP の有効化/辞書操作、`v86` は V86 モードでのゲスト起動)
 (その他 `/sbin` に `install` `cdinst`、`/usr/bin` にアプリ群。詳細は [09_exec.md](09_exec.md) 参照)
 
 ### §7-3 パイプ・リダイレクト

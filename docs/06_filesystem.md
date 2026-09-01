@@ -38,10 +38,10 @@ IDE HDD上のLinux ext2ファイルシステムを読み書きする。パーテ
 |------|-----|
 | ブロックサイズ | 1024バイト |
 | inodeサイズ | 128バイト |
-| inode数 | 動的 (ブロック数/4, 最大65536) |
+| inode数 | 動的 (ブロック数/4、最小 16。グループ数で均等割りし 8 の倍数へ切り上げ) |
 | 対応ブロック | ダイレクト(12) + 間接(1) + 二重間接(1) |
-| ルートinode | 2 (EXT2_ROOT_INO) |
-| ブロックグループ | 単一グループ |
+| ルートinode | 2 (`EXT2_ROOT_INO`) |
+| ブロックグループ | マルチグループ対応。1 グループ最大 8192 ブロック (`EXT2_BLOCKS_PER_GROUP_MAX`)、グループ数上限 32 (`EXT2_MAX_GROUPS`) |
 
 **API**:
 
@@ -146,13 +146,21 @@ NP21/WエミュレータのHostDrv機能を利用し、ホストPC (Windows) の
 
 | 関数 | 説明 |
 |------|------|
+公開エントリは `hostdrvfs_init` / `hostdrvfs_detect` の 2 つだけで、VfsOps に
+登録される実体は `hdrv_*` 接頭辞を持つ (`fs/hostdrvfs.c`)。
+
+| 関数 | 説明 |
+|------|------|
 | `hostdrvfs_init()` | HostDrv検出・自動マウント |
-| `hostdrvfs_read_file(ctx, path, buf, max)` | ファイル読み込み |
-| `hostdrvfs_read_stream(ctx, path, buf, sz, off)` | オフセット付き部分読み込み |
+| `hostdrvfs_detect()` | HostDrv の有無を判定 |
+| `hdrv_mount / hdrv_umount / hdrv_is_mounted` | マウント制御 |
+| `hdrv_read_file / hdrv_read_stream` | ファイル読み込み (全体/オフセット付き部分) |
 | `hdrv_write_file / hdrv_write_stream` | ファイル書き込み (全体/部分) |
-| `hostdrvfs_list_dir(ctx, path, cb, user)` | ディレクトリ一覧 (コールバック) |
-| `hostdrvfs_get_file_size(ctx, path, size)` | ファイルサイズ取得 |
-| `hostdrvfs_stat(ctx, path, st)` | ファイル情報取得 |
+| `hdrv_list_dir` | ディレクトリ一覧 (コールバック) |
+| `hdrv_get_file_size` / `hdrv_stat` | サイズ・ファイル情報取得 |
+| `hdrv_unlink / hdrv_rename / hdrv_mkdir / hdrv_rmdir` | 削除・改名・ディレクトリ操作 |
+| `hdrv_sync` | メタデータ書き戻し |
+| `hdrv_block_size / hdrv_free_blocks / hdrv_total_blocks` | 容量問い合わせ |
 
 ### §6-8 FAT (FatFs)
 

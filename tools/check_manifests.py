@@ -128,6 +128,51 @@ def check_doc_counts():
     return bad
 
 
+def check_shell_commands():
+    """docs/07_shell.md のコマンド一覧が実装と合っているか
+
+    組み込みは userland/shell/*.c の ShellCmd テーブル、外部コマンドは
+    userland/cmds/*.c が実体。コマンドを足しても一覧に載せ忘れる。
+    実際 ime と v86 が漏れ、組み込みも 9 件抜けていた。
+
+    文書にしか無いものは「消したのに残っている」、実装にしか無いものは
+    「足したのに書いていない」。どちらも検出する。
+    """
+    import re
+
+    doc_path = "docs/07_shell.md"
+    if not os.path.isfile(doc_path):
+        return []
+
+    doc = set()
+    with open(doc_path, encoding="utf-8") as f:
+        text = f.read()
+    for line in text.splitlines():
+        m = re.match(r"^\|\s*`([a-z0-9_.]+)`", line)
+        if m:
+            doc.add(m.group(1))
+    # 「エイリアス: `cls`→`clear`」の形で挙げたものも記載済みとみなす
+    for m in re.finditer(r"`([a-z0-9_.]+)`\s*→", text):
+        doc.add(m.group(1))
+    # 外部コマンドは列挙行に並ぶ
+    for m in re.finditer(r"`([a-z0-9_.]+)`", text):
+        doc.add(m.group(1))
+
+    builtin = set()
+    for path in glob.glob("userland/shell/*.c"):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for m in re.finditer(r'\{\s*"([a-z0-9_.]+)"\s*,\s*cmd_', f.read()):
+                builtin.add(m.group(1))
+    external = set(os.path.basename(p)[:-2] for p in glob.glob("userland/cmds/*.c"))
+
+    missing = sorted((builtin | external) - doc)
+    bad = []
+    if missing:
+        bad.append(("docs/07_shell.md", ", ".join(missing),
+                    "実装にあるが一覧に無い"))
+    return bad
+
+
 def check_app_conf(bins):
     """app.conf のキーが実在の .bin に対応しているか"""
     bad = []
@@ -185,6 +230,15 @@ def main():
         rc = 1
         for src, claimed, why in doc_counts:
             print("  [NG] {:34s} {}  ({})".format(src, claimed, why))
+    else:
+        print("  なし")
+
+    shell_cmds = check_shell_commands()
+    print("== 1c. シェルコマンド一覧が実装と合っているか ==")
+    if shell_cmds:
+        rc = 1
+        for src, what, why in shell_cmds:
+            print("  [NG] {:34s} {}  ({})".format(src, what, why))
     else:
         print("  なし")
 
