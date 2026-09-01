@@ -121,9 +121,9 @@ os32/
 ├── include/          — 共通ヘッダ群
 ├── userland/         — ユーザー空間 (SDK に対してビルドする層)
 │   ├── shell/        — システム標準シェル (モジュール構造、ファイラ・スクリプトエンジン内蔵)
-│   ├── cmds/         — コマンドラインツール (grep, less, sort, ime等 17種)
+│   ├── cmds/         — コマンドラインツール (grep, less, sort, ime等 18種)
 │   ├── system/       — システムユーティリティ (hsync, install, cdinst, sndctl等)
-│   ├── tests/        — テスト・デモプログラム (約45種)
+│   ├── tests/        — テスト・デモプログラム (36 種)
 │   ├── rust/         — Rust プログラム (hello_gfx, alloc_demo, math_test_rs) + os32_math クレート
 │   ├── lib/          — ユーザー空間ライブラリ (gfx, math, md, mgx, ui, save, snd,
 │   │                   input, db, ecs, asset, tilemap, filer, rt)

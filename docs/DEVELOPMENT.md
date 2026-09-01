@@ -85,21 +85,29 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ## 4. メモリマップとアーキテクチャ制約
 
+> 番地の正典は `include/memmap.h`、表としての正典は
+> [02_memory.md](02_memory.md) §2-1。ここは開発時に効く制約だけを挙げる。
+> カーネルスタックは V86 ゲストに 640KB を渡すため 0x90000 から
+> 0x1FC000 へ移動済み (0x9FFFC はローダー段の ESP として今も使う)。
+
 | 範囲 | 用途 | 注意 |
 |------|------|------|
 | 0x00000-0x00FFF | NP (NULLポインタ検出) | ブート後にNot-Present化 |
 | 0x01000-0x89FFF | フォント/Unicode/GFXバックバッファ | ブート後にコンベンショナルメモリ再利用 |
-| 0x8F000-0x8FFFF | カーネルスタックガード | Not-Present |
-| 0x90000-0x9FFFF | カーネルスタック (64KB) | ESP初期値=0x9FFFC |
+| 0x8C000-0x8CFFF | ホットデプロイ制御ブロック | MEM_HOTDEPLOY_DESC |
+| 0x8D000-0x9FFFF | 空き + 自動プレイ用メールボックス (0x90000) | V86 ゲスト窓の一部 |
 | 0xA0000-0xEFFFF | VRAM (テキスト+グラフィック) | R/W |
 | 0xF0000-0xFFFFF | BIOS ROM | Read-Only |
-| 0x100000-0x1FFFFF | カーネル帯域 (1MB) | code+heap+KAPI+SHM (動的レイアウト) |
+| 0x100000-0x1FAFFF | カーネル帯域 | code+heap+KAPI+SHM (動的レイアウト) |
+| 0x1FB000-0x1FBFFF | カーネルスタックガード | Not-Present |
+| 0x1FC000-0x1FFFFC | カーネルスタック (16KB) | ESP初期値=0x1FFFFC |
 | 0x200000-0x2FFFFF | SQLite帯域 (1MB) | code+BSS+代替スタック(128KB) |
 | 0x300000-0x3FFFFF | シェル常駐帯域 (1MB) | shell.bin専用, ガードページ付き |
 | 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
 | 0x400000- | 外部プログラム | コードロード領域 (最大1MB) |
 | 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, 動的計算) |
-| 動的〜 | プログラムスタック | 256KB, メモリ終端付近に配置 |
+| 動的〜 | プログラムスタック | 256KB, mem_end 付近に配置 |
+| 物理末尾 256KB | ホットデプロイ・ステージング窓 | MEM_HOTDEPLOY_SIZE。mem_end = sys_usable_mem_end() でこの分を差し引く |
 
 **カーネル帯域内の動的配置**: KAPI テーブルとSHM (共有メモリ) は `__bss_end` から動的に算出される。`KAPI_ADDR = KHEAP_BASE + KHEAP_SIZE`、SHMはKAPIの直後に前後ガードページ付きで配置。
 

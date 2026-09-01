@@ -17,7 +17,7 @@ make sdk            # build/sdk/ に staging される
 こちら側でビルドする:
 
 ```
-make OS32_SDK=/path/to/os32/build/sdk        # 全 11 本
+make OS32_SDK=/path/to/os32/build/sdk        # 全 12 本
 make OS32_SDK=/path/to/os32/build/sdk edit   # 個別
 ```
 
@@ -39,6 +39,7 @@ make OS32_SDK=/path/to/os32/build/sdk edit   # 個別
 | `demo1/` | VDP/スプライト表示デモ |
 | `spr_test/` | スプライト描画テスト |
 | `ui_demo/` | microUI (イミディエイトモード GUI) デモ |
+| `hello32/` | 最小デモ (16 色の帯を 5 秒表示)。配置経路の疎通確認にも使う |
 
 ## アプリを追加する
 

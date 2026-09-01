@@ -93,6 +93,41 @@ def check_missing_hosts():
     return bad, warn
 
 
+def check_doc_counts():
+    """ドキュメントが書いている件数が実態と合っているか
+
+    「17 commands」「全 11 本」の類。増減しても誰も気づかず、気づいたときには
+    どれが正しいのか分からなくなる。数えられるものは数えて突き合わせる。
+    """
+    import re
+
+    def count(pattern):
+        return len(glob.glob(pattern))
+
+    checks = [
+        ("CLAUDE.md", r"\((\d+) commands\)",
+         count("userland/cmds/*.c"), "userland/cmds/*.c"),
+        ("docs/INDEX.md", r"ime等 (\d+)種",
+         count("userland/cmds/*.c"), "userland/cmds/*.c"),
+        ("apps/README.md", r"全 (\d+) 本",
+         len([d for d in glob.glob("apps/*/") if os.path.isdir(d)]), "apps/*/"),
+    ]
+
+    bad = []
+    for path, pat, actual, what in checks:
+        if not os.path.isfile(path):
+            continue
+        m = re.search(pat, open(path, encoding="utf-8").read())
+        if not m:
+            bad.append((path, "-", "件数の記述が見つからない (%s)" % pat))
+            continue
+        claimed = int(m.group(1))
+        if claimed != actual:
+            bad.append((path, str(claimed),
+                        "実際は %d (%s)" % (actual, what)))
+    return bad
+
+
 def check_app_conf(bins):
     """app.conf のキーが実在の .bin に対応しているか"""
     bad = []
@@ -143,6 +178,15 @@ def main():
     if warn:
         for src, h, why in warn:
             print("  [--] {:34s} {}  ({})".format(src, h, why))
+
+    doc_counts = check_doc_counts()
+    print("== 1b. ドキュメントの件数が実態と合っているか ==")
+    if doc_counts:
+        rc = 1
+        for src, claimed, why in doc_counts:
+            print("  [NG] {:34s} {}  ({})".format(src, claimed, why))
+    else:
+        print("  なし")
 
     bad_keys = check_app_conf(bins)
     print("== 2. 実在ターゲットに一致しない app.conf のキー ==")

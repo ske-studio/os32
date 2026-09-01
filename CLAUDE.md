@@ -258,9 +258,9 @@ own repositories unchanged.
 | Directory | Content |
 |-----------|---------|
 | `userland/shell/` | System shell (resident at 0x300000, modular: 12+ source files) |
-| `userland/cmds/` | CLI commands: `grep`, `less`, `sort`, `diff`, `find`, `wc`, `hexdump`, `man`, etc. (17 commands) |
+| `userland/cmds/` | CLI commands: `grep`, `less`, `sort`, `diff`, `find`, `wc`, `hexdump`, `man`, etc. (18 commands) |
 | `userland/system/` | System utilities: `hsync` (HostDrv sync), `install`, `cdinst`, `sndctl`, `lz4` |
-| `userland/tests/` | Test/demo programs (45 programs including per-library test suites) |
+| `userland/tests/` | Test/demo programs (36 sources including per-library test suites) |
 | `userland/rust/` | Rust programs (Cargo workspace: `alloc_demo`, `hello_gfx`, etc.) |
 | `userland/lib/` | User-space libraries (see below) |
 | `apps/` | Standard applications: `edit/` (VZ-style editor), `ui_demo/` (microUI), `mdview`, `mgxview`, `vbzview`, `vdpview`, `ekakiuta`, `raster`, `gfx_demo`, `demo1`, `spr_test`, `hello32` |
