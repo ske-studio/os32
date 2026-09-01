@@ -85,7 +85,7 @@ typedef struct {
     u8  dither;      /* MGX_DITHER_* (情報用) */
     u32 data_size;   /* ヘッダ直後のペイロード長 */
     u32 raw_size;    /* 展開後のサイズ = height * pitch * bpp */
-    u8  bpp;         /* 1 または 4 */
+    u8  bpp;         /* 1..MGX_MAX_BPP (=4) = 格納プレーン数 */
     u8  npal;        /* 使用パレット数 (1 << bpp) */
 
     /* パレット表: プレーン値 i を表示するグレー階調 (0..15)。
