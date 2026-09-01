@@ -150,7 +150,7 @@ static void ovl_draw_glyph(int px, int py, const u8 *pat, int wb, int h, u8 colo
 | B: テキスト/グラフィック混在表示 | 既存 TVRAM 描画を流用できる | GDC モード制御が機種/エミュ依存、ハードウェアアクセラレータ禁止規定との整合確認要 |
 
 → **採用は方式 A**。方式 B は GDC のテキスト表示 ON 制御が
-「ハードウェアアクセラレータ使用禁止」(GEMINI.md) の精神に照らしてリスクがあり、
+「ハードウェアアクセラレータ使用禁止」(CLAUDE.md) の精神に照らしてリスクがあり、
 NP21/W 互換も未検証のため将来検討に留める。`tvram_set_visible()` の新設は方式 B 採用時のみ。
 
 ---

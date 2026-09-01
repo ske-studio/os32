@@ -84,7 +84,7 @@ int  ime_switch_dict(int variant);   /* 0=S,1=M,2=L → reopen */
 
 ---
 
-## 5. KAPI 拡張手順 (GEMINI.md 準拠)
+## 5. KAPI 拡張手順 (CLAUDE.md 準拠)
 
 1. `exec/exec.h` の `KernelAPI` 構造体**末尾**に関数ポインタ追加 (バイナリ互換)。
 2. `kapi/kapi_ime.c` (新規 or 既存) に `__cdecl` ラッパー実装。

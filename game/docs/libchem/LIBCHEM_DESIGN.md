@@ -403,6 +403,6 @@ PC-98 (640x400, 16色) の画面に同時に表示・管理できるゲームオ
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (依存先) |
-| [KAPI_SPEC.md](../../KAPI_SPEC.md) | KernelAPI 仕様書 (DB接続) |
-| [05_drivers.md](../../05_drivers.md) | デバイスドライバ・ライブラリ仕様 |
+| [LIBMATH_DESIGN.md](../../../docs/tasks/libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (依存先) |
+| [KAPI_SPEC.md](../../../docs/KAPI_SPEC.md) | KernelAPI 仕様書 (DB接続) |
+| [05_drivers.md](../../../docs/05_drivers.md) | デバイスドライバ・ライブラリ仕様 |

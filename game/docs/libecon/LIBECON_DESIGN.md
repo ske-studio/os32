@@ -589,5 +589,5 @@ programs/tests/
 | ドキュメント | 内容 |
 |-------------|------|
 | [LIBCHEM_DESIGN.md](../libchem/LIBCHEM_DESIGN.md) | libos32chem 設計書 (同層ライブラリ) |
-| [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (依存先) |
-| [KAPI_SPEC.md](../../KAPI_SPEC.md) | KernelAPI 仕様書 (DB接続) |
+| [LIBMATH_DESIGN.md](../../../docs/tasks/libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (依存先) |
+| [KAPI_SPEC.md](../../../docs/KAPI_SPEC.md) | KernelAPI 仕様書 (DB接続) |

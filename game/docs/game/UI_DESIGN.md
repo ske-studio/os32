@@ -82,7 +82,7 @@ microUI のフローティングウィンドウは、差分描画と組み合わ
   行の内容が前フレームと同じなら描画も VRAM 転送も起きない
 - バトルのコマンド表示も同じパネルに出す (`view_battle_panel()`)
 - microUI は game からリンクごと外れた (バイナリ -21KB)。
-  他アプリで使う場合の注意は GEMINI.md の Known Gotchas
+  他アプリで使う場合の注意は CLAUDE.md の Known Gotchas
   (`mui_pump_input` がキーを食う件) を参照
 
 ---

@@ -22,7 +22,7 @@ $(FONT_DIR)/%_subset.ttf: $(FONT_DIR)/%.ttf tools/subset_font.py
 	python3 tools/subset_font.py $< $@
 
 # --- 16px ビットマップフォント (カーネルが /sys/font/default.kcgfont で読む) ---
-# 本文用はゴシック。明朝は 16x16 だと細い横画が飛ぶ (GEMINI.md の Known Gotchas)。
+# 本文用はゴシック。明朝は 16x16 だと細い横画が飛ぶ (CLAUDE.md の Known Gotchas)。
 $(FONT_DIR)/ipaexg16.kcgfont: $(FONT_DIR)/ipaexg.ttf tools/gen_font16.py
 	python3 tools/gen_font16.py $< $@
 

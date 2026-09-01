@@ -14,7 +14,7 @@
 | 1 | `userland/shell/rshell.c:159` | `cmd_upload` は本体が削除され、赤字で "upload: removed" を出すだけ。`nhd_deploy.py push` はこのコマンドを送り続けている → シリアル・ホットデプロイは常に失敗 |
 | 2 | `userland/shell/rshell.c:214` | 代替とされた `recv host:PATH` は `xfer_buf[4096]` に `sys_read` を **1 回**呼ぶだけ。ループが無いので 4KB を超えるファイルは黙って切り詰められる。最小のアプリでも 15KB あるため実用にならない |
 | 3 | `tools/hostdrv_deploy.py:29` | `tools/deploy.yaml` を読むが、このファイルは 2cd9872「配備マニフェストを層ごとに分割」で削除済み。`load_deploy_yaml()` は `None` を返すのに **exit 0** で終わるため、`make deploy` は成功扱いで何もしない |
-| 4 | `build/deploy.mk:15` | `deploy-kernel` は `hostdrv sync` → `sync-from-hostdrv` → `deploy` の順。#3 で第 1 段が空振りするので、**古い `C:\os32` の木がそのまま NHD へ書かれる**。GEMINI.md が謳う「HostDrv を先に同期するので ext2 を古いまま上書きする事故を防げる」保護は現在効いていない |
+| 4 | `build/deploy.mk:15` | `deploy-kernel` は `hostdrv sync` → `sync-from-hostdrv` → `deploy` の順。#3 で第 1 段が空振りするので、**古い `C:\os32` の木がそのまま NHD へ書かれる**。CLAUDE.md が謳う「HostDrv を先に同期するので ext2 を古いまま上書きする事故を防げる」保護は現在効いていない |
 
 補足: `make deploy-nhd` は `nhd_deploy.py` が層別 yaml
 (`build/core.yaml` / `userland` / `apps` / `game`) を正しくマージするので

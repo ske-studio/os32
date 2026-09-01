@@ -357,7 +357,7 @@ u8 target = ai_decide(&prof, target_opts, enemy_count);
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (乱数依存先) |
+| [LIBMATH_DESIGN.md](../../../docs/tasks/libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (乱数依存先) |
 | [LIBBATTLE_DESIGN.md](../libbattle/LIBBATTLE_DESIGN.md) | バトルエンジン (AI判断の消費者) |
 | [LIBBOARD_DESIGN.md](../libboard/LIBBOARD_DESIGN.md) | ボードエンジン (方向選択の消費者) |
 

@@ -382,7 +382,7 @@ DOSの純ロジックは標準C89で、**ホスト(gcc)でもそのままビル�
 
 本計画は `feat/vdm` 系の作業ツリーで着手され、成果を本リポジトリ `main` へ
 移植・実機検証した。移植の経緯は
-[`../wintree_port/PORT_PLAN.md`](../wintree_port/PORT_PLAN.md) を参照。
+[`../wintree_port/PORT_PLAN.md`](../../../docs/tasks/wintree_port/PORT_PLAN.md) を参照。
 
 | 項目 | 状態 | 備考 |
 |------|------|------|
@@ -488,7 +488,7 @@ DOSの純ロジックは標準C89で、**ホスト(gcc)でもそのままビル�
 プレイヤー名・曜日・勝利称号・週次イベント文。
 
 - **漢字を出すにはプログラム側で変換表を有効化する必要がある**
-  (`enable_kanji_table()`)。詳細は GEMINI.md の Known Gotchas。
+  (`enable_kanji_table()`)。詳細は CLAUDE.md の Known Gotchas。
   これを忘れると仮名だけ出て漢字が全部 □ になる
 - UTF-8 は 1文字3バイトなので文字列バッファを軒並み広げた。
   `PANEL_COLS` は 78 → 120 バイト、`add_line()` は UTF-8 の

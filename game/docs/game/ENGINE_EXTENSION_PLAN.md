@@ -410,7 +410,7 @@ KAPIファイルI/O(`open`/`read`/`write`/`seek`、`KAPI_O_CREAT|KAPI_O_TRUNC|KA
 
 > **M0 は達成済み (2026-08-07)。** 実装は `feat/vdm` 系の作業ツリーで行われ、
 > 本リポジトリ `main` へ移植・実機検証した (移植計画:
-> [`../wintree_port/PORT_PLAN.md`](../wintree_port/PORT_PLAN.md) フェーズ4)。
+> [`../wintree_port/PORT_PLAN.md`](../../../docs/tasks/wintree_port/PORT_PLAN.md) フェーズ4)。
 
 M0達成後、`GAME_PORT_PLAN.md` ステージB Phase 0 へ進む。
 
