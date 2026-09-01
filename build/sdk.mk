@@ -90,9 +90,14 @@ check-kapi-version:
 check-manifests:
 	@python3 tools/check_manifests.py
 
-check: check-kapi-version check-manifests
+# プロジェクト制約 (docs/CONSTRAINTS.md) と、それを参照する CLAUDE.md /
+# SOUL.md のずれを検査する。ID での照合なので文言は場所ごとに変えてよい。
+check-constraints:
+	@python3 tools/check_constraints.py
+
+check: check-kapi-version check-manifests check-constraints
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check

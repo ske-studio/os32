@@ -74,16 +74,55 @@ memory, disassembly, breakpoints, trace) is available through `tools/np21w_mcp/`
 
 The cross-compiler lives at `$CROSS_DIR/` (default `/usr/local/cross`). The build config is in `build/config.mk`.
 
-## Coding Rules
+## Project Constraints
 
-**C89 (GNU89) mandatory** — the entire codebase uses `-std=gnu89`:
-- No `//` comments — use `/* */`
-- Variables declared at block start only (no `for (int i = ...)`)
-- No C99 features: no `_Bool`, no VLAs, no `restrict`
+Violating any of these either breaks the OS or makes verification meaningless.
+The lines below are the whole rule; the reasoning and the detail live in
+[`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md), which is the **normative source**.
+`make check` verifies this list has not drifted from it.
 
-**Calling convention** — KernelAPI functions exposed to external programs must have `__cdecl` wrappers in `kapi/`. The kernel uses System V i386 ABI internally.
+**C / ABI**
 
-**String functions** — use `kstrncpy`, `kstrncat`, `kstrlen`, `kstrcmp` from `lib/kstring.h` instead of libc equivalents inside the kernel.
+- **[C1]** C89 (GNU89) mandatory — no `//` comments, declarations at block start
+  only, no C99 features (`_Bool`, VLAs, `restrict`).
+- **[C2]** Inside the kernel use `kstrncpy` / `kstrncat` / `kstrlen` / `kstrcmp`
+  from `lib/kstring.h`, never the libc equivalents.
+- **[C3]** KernelAPI functions exposed to external programs must have `__cdecl`
+  wrappers in `kapi/`. The kernel uses System V i386 ABI internally.
+- **[C4]** No hardcoded constants — follow the three-layer constant scheme.
+
+**Hardware**
+
+- **[HW1]** Never use EGC / GRCG / GDC drawing commands. All pixel writes go
+  through the CPU directly to VRAM at `0xA8000`.
+- **[HW2]** DMA buffers must not straddle a 64KB boundary.
+
+**KernelAPI (ABI)**
+
+- **[ABI1]** `sdk/kapi.json` is the single source of truth. Never hand-edit the
+  generated files.
+- **[ABI2]** Append entries only. Never reorder or delete an existing slot.
+- **[ABI3]** After a KAPI change, bump the version and run `make clean` →
+  `make all`. An incremental build breaks silently.
+- **[ABI4]** KAPI does not validate pointers. The caller must be defensive —
+  external programs run at CPL=0, so their bugs corrupt the kernel.
+
+**Verification**
+
+- **[V1]** `make deploy` (HostDrv) alone is not verification — PATH prefers the
+  NHD's `/usr/bin`, so an old binary runs silently and looks like a pass.
+- **[V2]** Register every launchable binary in its own layer's `deploy.yaml`.
+- **[V3]** Do not shorten the curl timeout for remote execution (15s minimum,
+  60s+ for long-running programs).
+- **[V4]** Report failures and skipped steps as they happened. Never present
+  something unverified as a pass.
+
+**Destructive operations**
+
+- **[D1]** Never deploy to the NHD while NP21/W is running. Stop → deploy → start.
+- **[D2]** Get approval before irreversible operations (overwriting NHD or disk
+  image masters, `rm -rf`, `git reset --hard`, editing `*.ini`).
+- **[D3]** Never put the contents of `.env`, API keys or passwords in output.
 
 ## Architecture
 
@@ -285,7 +324,7 @@ All statically linked. Organized by layer:
 
 ### Graphics
 
-All pixel writes go through CPU directly to VRAM at `0xA8000` (graphics planes). Never use EGC/GRCG/GDC hardware accelerators — hardware bugs and emulator compatibility issues. Flow: draw to backbuffer → `gfx_present()` → VRAM with page flip (port A4h/A6h). Page flip is automatic; no VSYNC wait needed.
+All pixel writes go through CPU directly to VRAM at `0xA8000` (graphics planes) — see **[HW1]**. Flow: draw to backbuffer → `gfx_present()` → VRAM with page flip (port A4h/A6h). Page flip is automatic; no VSYNC wait needed.
 
 ### Deploy Workflow
 
