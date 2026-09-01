@@ -33,7 +33,7 @@
 
 ### バグの場所
 
-[kstring_asm.asm](file:///mnt/c/WATCOM/src/os32/lib/kstring_asm.asm#L102-L110) の `kmemset` 関数、`.aligned` パス:
+`lib/kstring_asm.asm#L102-L110` の `kmemset` 関数、`.aligned` パス:
 
 ```diff
  .aligned:
@@ -159,7 +159,7 @@ kmemset: アライン処理後の残りが 1〜3 バイト
 
 ## 5. ISR スタブ修正（今回実施済み）
 
-[isr_stub.asm](file:///mnt/c/WATCOM/src/os32/kernel/isr_stub.asm) のスタックオフセット計算バグも同時に修正済み:
+`kernel/isr_stub.asm` のスタックオフセット計算バグも同時に修正済み:
 
 - `error_code`, `vector`, `fault_eip` が正しく `exception_handler` に渡されるようになった
 - `regs` ポインタ（PUSHAD配列）も引数として渡すように拡張

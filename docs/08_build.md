@@ -47,10 +47,13 @@ mkfat12.py --tree で FAT12 イメージを構築:
                                     images/os32_boot.d88 および .img
 
 === 外部プログラム ===
-programs/*.c    → gcc -m32                   → programs/*.o
-                → ld -T app.ld               → programs/*.elf (newlib-nano -lc -lgcc リンク)
-                → objcopy                    → programs/*.raw
-                → mkos32x.py                 → programs/*.bin
+userland/**/*.c → gcc -m32                   → *.o
+                → ld -T sdk/link/app.ld      → *.elf (newlib-nano -lc -lgcc リンク)
+                → objcopy                    → *.raw
+                → sdk/mkos32x.py             → *.bin (OS32X ヘッダ付き)
+
+apps/ と game/ は staged SDK (build/sdk/) だけを使い、それぞれの
+Makefile が同じ流れを回す。OS のソースツリーは参照しない。
 ```
 
 インクルードパスは `Makefile` で細かく制御されており、基本的にソースファイルから他のヘッダディレクトリは `-I` によって自動解決できるため `#include "file.h"` で問題なく参照可能。
@@ -68,8 +71,11 @@ os32/
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
 ├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
 ├── include/        システム統合用共通ヘッダ群
-├── programs/       外部プログラム実装ソース群 (shell/, cmds/, apps/, system/, tests/, lib*/, rust/)
-├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, libs.mk, deploy.mk, image.mk 等) + リンカスクリプト
+├── userland/       ユーザー空間 (shell/, cmds/, system/, tests/, rust/, lib/)
+├── apps/           標準アプリ (SDK だけでビルドする独立ツリー)
+├── game/           ゲーム (同上)
+├── sdk/            配布 SDK (include/, crt/, link/, rust/, example/)
+├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, libs.mk, deploy.mk, image.mk, sdk.mk, apps.mk, game.mk 等) + リンカスクリプト
 │   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)
 ├── assets/         データアセット (DB, 辞書, profile 等)
 ├── tests/          テストスクリプト
@@ -92,11 +98,12 @@ python3 tools/nhd_deploy.py sync       # deploy.yaml に基づくフルデプロ
 python3 tools/nhd_deploy.py write-boot boot/loader_hdd.bin  # ブート領域書き込み
 python3 tools/nhd_deploy.py sync-from-hostdrv  # HostDrv (C:\os32) から ext2 へ同期
 python3 tools/nhd_deploy.py deploy     # ローカルNHD (/tmp/os32.nhd) をNP21/Wにコピー
-python3 tools/nhd_deploy.py copy programs/shell.bin  # 個別ファイルのデプロイ
-python3 tools/nhd_deploy.py push programs/foo.bin --resolve  # シリアル経由ホットデプロイ
+python3 tools/nhd_deploy.py copy userland/shell.bin  # 個別ファイルのデプロイ
+make hotdeploy FILE=apps/foo/foo.bin                        # ホットデプロイ (再起動不要)
 # 他: mount / umount / ls / rm / mkdirs / format / write-boot
 ```
-- `tools/deploy.yaml` でデプロイ対象・ゲストパス・タグを定義
+- 配備対象・ゲストパス・タグは層ごとの deploy.yaml で定義する
+  (`build/core.yaml`, `userland/`, `apps/`, `game/`)。マージは `tools/deploy_manifests.py`
 - ext2ファイルシステムへの書き込みはLinux loopデバイス経由
   (sudo NOPASSWD 推奨: `mount, umount, losetup, e2fsck, mkfs.ext2, mke2fs, cp, mkdir, rm`)
 - `config.h` の `SYS_*` 定数と `deploy.yaml` のパスは必ず整合させること
@@ -107,7 +114,9 @@ python3 tools/nhd_deploy.py push programs/foo.bin --resolve  # シリアル経�
 > の順で実行**し、デプロイ後は `ver` の Build タイムスタンプで反映を確認すること
 > (POLICY_DEBUG.md §2 / §4-9)。
 
-Makefile ターゲットとの対応 (`build/deploy.mk`):
+<a id="ビルドターゲット"></a>
+Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジトリで
+ターゲット一覧の正典はこの表**で、他のドキュメントはここを指すこと:
 
 | ターゲット | 動作 |
 |-----------|------|
@@ -115,7 +124,14 @@ Makefile ターゲットとの対応 (`build/deploy.mk`):
 | `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
-| `make dp-<name>` | 個別プログラムのシリアルホットデプロイ — 再起動不要 |
+| `make hotdeploy FILE=<path>` | 個別バイナリのホットデプロイ — 再起動不要。ユーザーランドのみ |
+| `make nhd-pull` | Windows 側 NHD を /tmp に取り込む (フォーマットしない) |
+| `make nhd-init` | 初回セットアップ — **フォーマットするのでゲスト側データが消える** |
+
+ビルド側のターゲットは `make all` / `kernel` / `libs` / `programs` / `sdk` /
+`apps` / `game` / `clean` / `clean-kernel` / `clean-libs` / `clean-programs`。
+KernelAPI の構造体を変えたときは `make clean` → `make all` が必須
+(古い `.o` が残ると ABI 不整合で静かに壊れる)。
 | `make nhd-init` / `nhd-mount` / `nhd-umount` | 初期化・マウント操作 |
 
 #### `tools/hostdrv_deploy.py`
@@ -183,14 +199,14 @@ make -j$(nproc) && make install
 
 #### Rust ツールチェーン
 
-`programs/rust/` の Rust プログラム (hello_gfx, alloc_demo, math_test_rs) のビルドには
+`userland/rust/` の Rust プログラム (hello_gfx, alloc_demo, math_test_rs) のビルドには
 rustup が必要。バージョンは `rust-toolchain.toml` (nightly + rust-src) が自動解決する。
 
 ```bash
 curl https://sh.rustup.rs -sSf | sh -s -- -y
 ```
 カスタムターゲット `i686-os32-none.json` と build-std
-(`programs/rust/.cargo/config.toml`) により `core`/`alloc`/`compiler_builtins` を
+(`userland/rust/.cargo/config.toml`) により `core`/`alloc`/`compiler_builtins` を
 ソースからビルドする。
 
 #### Makefile へのパス設定 (.env)

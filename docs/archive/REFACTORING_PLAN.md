@@ -64,7 +64,7 @@
 | B15 | `cmds/du.c:51`, `find.c:68` | コールバック内から `sys_ls` 再帰 → ext2 の共有グローバルバッファ破壊で**エントリ欠落**(cmd_file.c は collect-then-recurse で正しく回避済み) |
 | B16 | `system/hsync.c:147`, `install.c:218` | 空文字列パスで `dst_path[-1]` 参照。加えて `str_cpy/str_cat` が長さ無制限 |
 | B17 | `programs/lib*` 全域 | `db_finalize` 呼び忘れが系統的(`chem_spawn` は1オブジェクトごとに1ステートメントリーク)。準拠は libos32text のみ |
-| B18 | `apps/vbzview.c:442` | 起動のたびにガードページ+未マップ領域を**意図的にデリファレンス**するデバッグコードが本番パスに残存 |
+| B18 | `apps/vbzview/vbzview.c:442` | 起動のたびにガードページ+未マップ領域を**意図的にデリファレンス**するデバッグコードが本番パスに残存 |
 
 ---
 

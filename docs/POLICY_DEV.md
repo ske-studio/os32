@@ -99,25 +99,13 @@ Makefile は `build/` ディレクトリに分割された `.mk` ファイルで
 
 ### 基本ルール
 
+**ターゲット一覧の正典は [08_build.md](08_build.md#ビルドターゲット) にある。**
+ここには方針だけを書く。一覧を二重に持つと必ず片方が腐る (実際 `dp-` の
+廃止時に 3 箇所が取り残された)。
+
 ```bash
-/* 全体ビルド */
-make all
-
-/* 部分ビルド */
-make kernel              /* カーネル + SQLite のみ */
-make libs                /* 全ライブラリのみ */
-make programs            /* 全外部プログラムのみ */
-make econ_test           /* 個別プログラム */
-
-/* クリーン (全体 / モジュール別) */
-make clean
-make clean-kernel
-make clean-libs
-make clean-programs
-
-/* クリーンビルド (KernelAPI構造体変更時は必須) */
-make clean
-make all
+make all       # 全体
+make clean     # KernelAPI 構造体を変えたら clean → all が必須
 ```
 
 > ⚠️ **重要**: `os32_kapi_shared.h` / `os32_kapi_generated.h` / `kapi.json` を変更した場合は、必ず `make clean` → `make all` を実行すること。古い `syscalls.o` が残ると ABI 不整合で `malloc` が全て ENOMEM で失敗する。
@@ -133,7 +121,7 @@ make all
 
 1. `build/programs.mk` にソース定義とリンクルールを追加（テンプレートマクロ `DEFINE_TEST` / `DEFINE_GFX_APP` を活用）
 2. `build/app.conf` に APIバージョンとヒープサイズを追加
-3. `tools/deploy.yaml` にデプロイ先パスを追加
+3. 自層の `deploy.yaml` (`userland/` / `apps/` / `game/`) にデプロイ先パスを追加
 
 ### デプロイ方式
 
@@ -176,7 +164,7 @@ make deploy-nhd                          /* nhd_deploy.py sync + deploy */
 
 | ビルド成果物 | ゲストパス | 設定元 |
 |-------------|-----------|--------|
-| `programs/shell.bin` | `/sys/shell.bin` | `config.h: SYS_SHELL_BIN` |
+| `userland/shell.bin` | `/sys/shell.bin` | `config.h: SYS_SHELL_BIN` |
 | `build/out/vmkernel.lz4` | `/boot/vmkernel.lz4` | `deploy.yaml: filesystem.files` |
 | `boot/loader_hdd.bin` | (NHDブート領域 LBA 2-17) | `deploy.yaml: boot.loader` |
 | `build/out/unicode.bin` | `/sys/unicode.bin` | `config.h: SYS_UNICODE_BIN` |
@@ -258,7 +246,8 @@ WSL環境からWindowsファイルシステムへのGit操作（`git add`, `git 
 5. `ver` コマンドでビルドタイムスタンプと API バージョンを確認
 6. 変更対象の機能を手動テスト
 
-自動化ワークフロー (`/build-os32`, `/full-build`, `/deploy-program`) を活用すること。
+ビルドから実機検証までは `os32-cycle` (build / push / deploy / run / tvram / shot) に
+畳んである。詳細は `docs/tasks/hotdeploy/DESIGN.md`。
 
 ### シリアルコンソール経由のリモートテスト
 

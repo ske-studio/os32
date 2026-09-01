@@ -54,24 +54,24 @@ KernelAPIポインタを引数として実行する。
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
-| shell | `programs/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン・ファイラ内蔵) |
+| shell | `userland/shell/` | システム標準シェル (階層化モジュール構造、スクリプトエンジン・ファイラ内蔵) |
 
-**アプリケーション** (`programs/apps/`):
+**アプリケーション** (`apps/`, ゲームは `game/app/`):
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
 | edit | `apps/edit/` | OS32 Edit (VZ Editorにインスパイアされたテキストエディタ) |
-| mdview | `apps/mdview.c` | Markdown簡易ビューア |
-| vdpview | `apps/vdpview.c` | VDP/高解像度画像ビューア (旧hrviewを統合) |
-| mgxview | `apps/mgxview.c` | MGX 漫画ビューア (可変bpp・ファイラ・先読みキャッシュ) |
-| vbzview | `apps/vbzview.c` | VBZベクタ画像ビューア |
-| demo1 | `apps/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
-| ekakiuta| `apps/ekakiuta.c` | えかきうたアニメーション |
-| gfx_demo| `apps/gfx_demo.c` | libos32gfx グラフィックスデモ |
-| raster | `apps/raster.c` | ラスタパレット効果デモ |
-| spr_test| `apps/spr_test.c` | スプライト描画テスト |
+| mdview | `apps/mdview/mdview.c` | Markdown簡易ビューア |
+| vdpview | `apps/vdpview/vdpview.c` | VDP/高解像度画像ビューア (旧hrviewを統合) |
+| mgxview | `apps/mgxview/mgxview.c` | MGX 漫画ビューア (可変bpp・ファイラ・先読みキャッシュ) |
+| vbzview | `apps/vbzview/vbzview.c` | VBZベクタ画像ビューア |
+| demo1 | `apps/demo1/demo1.c` | ランス画像表示デモ (VDP/スプライト) |
+| ekakiuta| `apps/ekakiuta/ekakiuta.c` | えかきうたアニメーション |
+| gfx_demo| `apps/gfx_demo/gfx_demo.c` | libos32gfx グラフィックスデモ |
+| raster | `apps/raster/raster.c` | ラスタパレット効果デモ |
+| spr_test| `apps/spr_test/spr_test.c` | スプライト描画テスト |
 
-**コマンドラインツール** (`programs/cmds/`):
+**コマンドラインツール** (`userland/cmds/`):
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
@@ -92,7 +92,7 @@ KernelAPIポインタを引数として実行する。
 | sleep | `cmds/sleep.c` | 指定秒数のウェイト (PIT 100Hz) |
 | touch | `cmds/touch.c` | 空ファイル作成 |
 
-**システムユーティリティ** (`programs/system/`):
+**システムユーティリティ** (`userland/system/`):
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
@@ -103,7 +103,7 @@ KernelAPIポインタを引数として実行する。
 | sndtest | `system/sndtest.c` | FM音源テスト |
 | sndtest2| `system/sndtest2.c` | SSG音源テスト |
 
-**テスト・デモ** (`programs/tests/`):
+**テスト・デモ** (`userland/tests/`):
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
@@ -126,7 +126,7 @@ KernelAPIポインタを引数として実行する。
 | test2-4 | `tests/` | APIテスト・システム検証用 |
 | (ライブラリ別テスト) | `tests/*.c` | ai_test, asset_test/demo, blit_test/2, board_test, btl_test, chem_test/demo, db_test, demo_tile, e2test, econ_test, ecs_test/demo, evt_test, input_test, inv_test, map_test/demo, math_test, rotate_test, text_test/demo, tile_bench |
 
-**Rust プログラム** (`programs/rust/`, カスタムターゲット `i686-os32-none.json` + build-std):
+**Rust プログラム** (`userland/rust/`, カスタムターゲット `i686-os32-none.json` + build-std):
 
 | プログラム | ソース | 説明 |
 |---------|---------|------|
@@ -139,26 +139,26 @@ KernelAPIポインタを引数として実行する。
 
 | ライブラリ | ソース | 説明 |
 |---------|---------|------|
-| libos32 | `programs/libos32/` | newlib-nano ブリッジ (syscalls.c) |
-| libos32gfx | `programs/libos32gfx/` | グラフィックス描画ライブラリ |
-| libos32snd | `programs/libos32snd/` | サウンドライブラリ (BGM/SE) |
-| libos32math | `programs/libos32math/` | 整数数学ライブラリ (Q16.16固定小数点) |
-| libos32input | `programs/libos32input/` | 入力抽象化ライブラリ |
-| libos32db | `programs/libos32db/` | SQLite (db_* KAPI) ラッパー |
-| libos32text | `programs/libos32text/` | テキスト/メッセージ管理 |
-| libos32asset | `programs/libos32asset/` | アセット管理 |
-| libos32ecs | `programs/libos32ecs/` | ECS (Entity Component System) |
-| libos32event | `programs/libos32event/` | イベントシステム |
-| libos32map | `programs/libos32map/` | マップ/タイル管理 |
-| libos32ai | `programs/libos32ai/` | ゲームAI |
-| libos32battle | `programs/libos32battle/` | 戦闘システム |
-| libos32board | `programs/libos32board/` | ボード(掲示板)システム |
-| libos32chem | `programs/libos32chem/` | 化学シミュレーション |
-| libos32econ | `programs/libos32econ/` | 経済シミュレーション |
-| libos32inv | `programs/libos32inv/` | インベントリ管理 |
-| libos32tilemap | `programs/libos32tilemap/` | タイルマップ描画 |
-| libos32filer | `programs/libos32filer/` | ファイラ共通ライブラリ |
-| libos32md | `programs/libos32md/` | Markdown パーサーライブラリ |
-| libos32turn | `programs/libos32turn/` | 手番/週スケジューラ |
-| libos32rpg | `programs/libos32rpg/` | キャラクター育成・状態・リボーン |
-| libos32save | `programs/libos32save/` | セーブデータ管理 |
+| crt | `sdk/crt/` | newlib-nano ブリッジ (syscalls.c) |
+| libos32gfx | `userland/lib/gfx/` | グラフィックス描画ライブラリ |
+| libos32snd | `userland/lib/snd/` | サウンドライブラリ (BGM/SE) |
+| libos32math | `userland/lib/math/` | 整数数学ライブラリ (Q16.16固定小数点) |
+| libos32input | `userland/lib/input/` | 入力抽象化ライブラリ |
+| libos32db | `userland/lib/db/` | SQLite (db_* KAPI) ラッパー |
+| libos32text | `game/lib/text/` | テキスト/メッセージ管理 |
+| libos32asset | `userland/lib/asset/` | アセット管理 |
+| libos32ecs | `userland/lib/ecs/` | ECS (Entity Component System) |
+| libos32event | `game/lib/event/` | イベントシステム |
+| libos32map | `game/lib/map/` | マップ/タイル管理 |
+| libos32ai | `game/lib/ai/` | ゲームAI |
+| libos32battle | `game/lib/battle/` | 戦闘システム |
+| libos32board | `game/lib/board/` | ボード(掲示板)システム |
+| libos32chem | `game/lib/chem/` | 化学シミュレーション |
+| libos32econ | `game/lib/econ/` | 経済シミュレーション |
+| libos32inv | `game/lib/inv/` | インベントリ管理 |
+| libos32tilemap | `userland/lib/tilemap/` | タイルマップ描画 |
+| libos32filer | `userland/lib/filer/` | ファイラ共通ライブラリ |
+| libos32md | `userland/lib/md/` | Markdown パーサーライブラリ |
+| libos32turn | `game/lib/turn/` | 手番/週スケジューラ |
+| libos32rpg | `game/lib/rpg/` | キャラクター育成・状態・リボーン |
+| libos32save | `userland/lib/save/` | セーブデータ管理 |

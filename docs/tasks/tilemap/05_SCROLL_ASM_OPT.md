@@ -62,7 +62,7 @@ tilemap_compose_scroll()
 
 ### Phase 4 — NASM: bb_shift_horiz / bb_shift_vert 高速化
 
-**ファイル**: `programs/libtilemap/asm_tilemap.asm`
+**ファイル**: `userland/lib/tilemap/asm_tilemap.asm`
 
 #### 4.1 現在の C 実装
 
@@ -131,7 +131,7 @@ void __cdecl asm_bb_shift_vert(
 
 ### Phase 5 — NASM: タイルブリット (draw_column / draw_row) 高速化
 
-**ファイル**: `programs/libtilemap/asm_tilemap.asm`
+**ファイル**: `userland/lib/tilemap/asm_tilemap.asm`
 
 #### 5.1 問題
 
@@ -195,7 +195,7 @@ void __cdecl asm_draw_column_opaque(
 
 ### Phase 5.5 — 上層BG再描画の最適化
 
-**ファイル**: `programs/libtilemap/tilemap_compose.c`
+**ファイル**: `userland/lib/tilemap/tilemap_compose.c`
 
 #### 5.5.1 問題
 
@@ -234,7 +234,7 @@ for (row = 0; row < TILEMAP_ROWS; row++)
 
 ### Phase 6 — H-diff + V-diff 同時処理 (斜めスクロール)
 
-**ファイル**: `programs/libtilemap/tilemap_compose.c`
+**ファイル**: `userland/lib/tilemap/tilemap_compose.c`
 
 #### 6.1 現状
 
@@ -318,7 +318,7 @@ compose_scroll V-diff      47 ticks ( 470 ms)     ← Phase 5.5b 完了
 
 ## 7. 参考
 
-- [asm_tilemap.asm](../../../programs/libos32tilemap/asm_tilemap.asm) — NASM ルーチン (730行)
-- [tilemap_compose.c](../../../programs/libos32tilemap/tilemap_compose.c) — 差分スクロール実装
+- [asm_tilemap.asm](../../../userland/lib/tilemap/asm_tilemap.asm) — NASM ルーチン (730行)
+- [tilemap_compose.c](../../../userland/lib/tilemap/tilemap_compose.c) — 差分スクロール実装
 - [04_SCROLL_OPT.md](04_SCROLL_OPT.md) — Phase 1〜3 実装記録
 

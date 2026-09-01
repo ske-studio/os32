@@ -3,8 +3,8 @@
 漫画専用モノクロ (グレースケール) 画像形式 **MGX** (ManGa eXchange) の仕様書。
 
 - **エンコーダ**: `tools/img2mgx.py` (ホスト側のみ)
-- **デコーダ**: `programs/libos32mgx/` (ゲスト側のみ)
-- **ビューワ**: `programs/apps/mgxview.c`
+- **デコーダ**: `userland/lib/mgx/` (ゲスト側のみ)
+- **ビューワ**: `apps/mgxview/mgxview.c`
 - **展開ルーチン**: `lib/zlib/` (zlib 本体の inflate、無改変で取り込み)
 
 ---
@@ -13,7 +13,7 @@
 
 ### 1.1 なぜ VDP ではないのか
 
-既存の `VDP` 形式 (`programs/apps/vdpview.c`) は PC-98 のスクリーンショット保存用で、
+既存の `VDP` 形式 (`apps/vdpview/vdpview.c`) は PC-98 のスクリーンショット保存用で、
 漫画には向かない。
 
 | 問題 | 内容 |
@@ -395,7 +395,7 @@ python3 tools/img2mgx.py input.png -o output.mgx [options]
 
 ## 4. デコーダ (ゲスト側)
 
-`programs/libos32mgx/` は gfx にも KernelAPI にも依存しない純デコーダで、
+`userland/lib/mgx/` は gfx にも KernelAPI にも依存しない純デコーダで、
 ファイル入出力とメモリ確保は呼び出し側の責務。
 
 ```c
@@ -414,8 +414,8 @@ int  mgx_blit_planes(u8 *const planes[4], int dst_pitch, int dst_w, int dst_h,
 
 | ファイル | text | 内容 |
 |---|---|---|
-| `programs/libos32mgx/mgx_decode.c` | 825 B | ヘッダ解析 / パレット表 / inflate 呼び出し |
-| `programs/libos32mgx/mgx_blit.c` | 1,268 B | プレーン転送 (bpp=1..4 共通の 1 本) |
+| `userland/lib/mgx/mgx_decode.c` | 825 B | ヘッダ解析 / パレット表 / inflate 呼び出し |
+| `userland/lib/mgx/mgx_blit.c` | 1,268 B | プレーン転送 (bpp=1..4 共通の 1 本) |
 | `lib/zlib/` (inflate 一式) | 12,174 B | deflate 展開 |
 
 エラーは全て負値で返り、破損データに対して `dst_cap` を超えて書き込むことはない
@@ -482,7 +482,7 @@ exec mgxview [FILE.MGX] [-k] [-i]
 - 選択されたファイルのディレクトリを新しい走査対象にして、ページ一覧を作り直す。
   **その際キャッシュは全部捨てる** (前のディレクトリのページなので)。
 - `libos32filer` の色番号 (`FC_TITLE` = 2 など) は `libos32md` の `md_palette`
-  (`programs/libos32md/md_render.c`) を前提にしているので、ファイラを出す間だけ
+  (`userland/lib/md/md_render.c`) を前提にしているので、ファイラを出す間だけ
   そのパレットへ差し替える。値は `mgxview.c` が持っている
   (パレットのためだけに libos32md をリンクしないで済ませるため)。
   ファイラを閉じたあとは `draw_page()` が階調ランプへ戻す。
@@ -549,11 +549,11 @@ bpp=3 で 96,000、bpp=2 で 64,000 バイト。`build/app.conf` の `apps/mgxvi
 | パス | 役割 |
 |---|---|
 | `tools/img2mgx.py` | ホスト側エンコーダ / 参照デコーダ |
-| `programs/libos32mgx/libos32mgx.h` | 公開ヘッダ (フォーマット定数はここと `img2mgx.py` を同期させる) |
-| `programs/libos32mgx/mgx_decode.c` | ヘッダ解析と展開 |
-| `programs/libos32mgx/mgx_blit.c` | プレーン転送とパレット変換 |
+| `userland/lib/mgx/libos32mgx.h` | 公開ヘッダ (フォーマット定数はここと `img2mgx.py` を同期させる) |
+| `userland/lib/mgx/mgx_decode.c` | ヘッダ解析と展開 |
+| `userland/lib/mgx/mgx_blit.c` | プレーン転送とパレット変換 |
 | `lib/zlib/` | deflate 展開 (zlib 本体、無改変。`README.OS32` に出所) |
-| `programs/apps/mgxview.c` | ビューワ (ファイラは `libos32filer` を利用) |
-| `programs/tests/mgx_test.c` | ユニットテスト (56 項目) |
+| `apps/mgxview/mgxview.c` | ビューワ (ファイラは `libos32filer` を利用) |
+| `userland/tests/mgx_test.c` | ユニットテスト (56 項目) |
 | `assets/manga/*.MGX` | サンプルページ |
 | `assets/manga/bench/B1..B4.MGX` | 同一画像を bpp 1..4 で符号化した計測用データ |

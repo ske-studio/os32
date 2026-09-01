@@ -13,6 +13,9 @@ OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with 
 
 ## Build Commands
 
+The full target list lives in `docs/08_build.md`; what follows is the
+subset you need day to day.
+
 ```bash
 # Full build (kernel + programs + disk images)
 make all
@@ -23,8 +26,9 @@ make kernel
 # All external programs
 make programs
 
-# Individual program hot-deploy (build + push via serial without reboot)
-make dp-<name>        # e.g. make dp-shell
+# Individual binary hot-deploy (build + place into the running guest, no reboot).
+# Userland only; the kernel and /sys need a full NHD deploy.
+make hotdeploy FILE=apps/edit/edit.bin
 
 # Deploy to HostDrv (C:\os32 on Windows host, no reboot)
 make deploy
@@ -83,14 +87,26 @@ The cross-compiler lives at `$CROSS_DIR/` (default `/usr/local/cross`). The buil
 ### Memory Layout
 
 ```
-0x00000–0x0FFFF   Conventional memory (font cache, Unicode table, GFX backbuffer)
-0x90000–0x9FFFF   Kernel stack (64KB, guard page at 0x8F000)
+0x00000–0x00FFF   NULL guard (not present)
+0x01000–0x9FFFF   Conventional memory. Font cache 0x01000, Unicode table
+                  0x4A000 (128KB), GFX backbuffer 0x6A000. Also the window
+                  handed to the V86 guest (MS-DOS gets the full 640KB).
+0x8C000–0x8CFFF   Hot-deploy control block (MEM_HOTDEPLOY_DESC)
 0xA0000–0xEFFFF   VRAM (text + graphics planes)
-0x100000          Kernel binary (.text/.data/.bss, ~200KB), then heap
-0x200000          SQLite code + BSS (~579KB) + alternate stack
-0x300000          Shell resident binary (~113KB) + stack
-0x400000          External program load area (max 1MB) + stack
+0xF0000–0xFFFFF   BIOS ROM
+0x100000–0x1FAFFF Kernel band: binary (.text/.data/.bss) + heap + KAPI + SHM (256KB)
+0x1FB000–0x1FBFFF Kernel stack guard (not present)
+0x1FC000–0x1FFFFC Kernel stack (16KB)
+0x200000–0x2FFFFF SQLite band (1MB): code + BSS + alternate stack (128KB)
+0x300000–0x3FFFFF Shell band (1MB): resident binary + guard 0x375000 + stack
+0x400000–         External program load area (max 1MB) + heap + stack
+(top 256KB)       Hot-deploy staging window — carved out of physical memory
+                  by sys_usable_mem_end(); exec and pgalloc must avoid it
 ```
+
+Authoritative definitions live in `include/memmap.h`. The kernel stack moved
+from conventional memory to 0x1FC000 so the V86 guest could be handed the
+full 640KB — do not reintroduce the old 0x90000 assumption.
 
 ### Kernel Subsystems (`kernel/`)
 
@@ -178,7 +194,7 @@ wrappers/struct/init are all generated from it. Never hand-edit the generated fi
    git diff --stat   # only the intended additions should appear
    ```
    This rewrites `sdk/include/os32/os32_kapi_generated.h`, `kapi/kapi_generated.c`,
-   `exec/exec_kapi_init.inc`, and `programs/rust/os32api/src/kapi_generated.rs`.
+   `exec/exec_kapi_init.inc`, and `sdk/rust/os32api/src/kapi_generated.rs`.
 4. Implement the target function in the kernel (or give the entry a `target` /
    inline `body` in the JSON).
 5. Update `docs/KAPI_SPEC.md`, and bump the required version in `build/app.conf`
@@ -187,22 +203,28 @@ wrappers/struct/init are all generated from it. Never hand-edit the generated fi
 Data fields (plain values rather than function pointers) go in `data_fields`; the generator
 emits `kapi-><field> = 0;` and the value must be assigned at runtime in `exec_init()`.
 
-### External Programs (`programs/`)
+### External Programs (`userland/`, `apps/`, `game/`)
 
 Programs are OS32X flat ELF binaries linked with `sdk/link/app.ld`, starting with `sdk/crt/crt0.asm`. The `main()` function must be the **first function** in the source file; helpers go after `main()` with forward declarations.
 
 #### Directory Structure
 
+The tree is split by ownership. `userland/` builds inside the OS tree; `apps/`
+and `game/` build against the staged SDK alone and could be lifted into their
+own repositories unchanged.
+
 | Directory | Content |
 |-----------|---------|
-| `shell/` | System shell (resident at 0x300000, modular: 12+ source files) |
-| `apps/` | GUI applications: `edit/` (VZ-style editor), `game/` (board-game RPG, WIP), `ui_demo/` (microUI), `mdview`, `ekakiuta`, `vdpview`, etc. |
-| `cmds/` | CLI commands: `grep`, `less`, `sort`, `diff`, `find`, `wc`, `hexdump`, `man`, etc. (17 commands) |
-| `system/` | System utilities: `hsync` (HostDrv sync), `install`, `cdinst`, `sndctl`, `lz4` |
-| `tests/` | Test/demo programs (45 programs including per-library test suites) |
-| `rust/` | Rust programs (Cargo workspace: `alloc_demo`, `hello_gfx`, etc.) |
+| `userland/shell/` | System shell (resident at 0x300000, modular: 12+ source files) |
+| `userland/cmds/` | CLI commands: `grep`, `less`, `sort`, `diff`, `find`, `wc`, `hexdump`, `man`, etc. (17 commands) |
+| `userland/system/` | System utilities: `hsync` (HostDrv sync), `install`, `cdinst`, `sndctl`, `lz4` |
+| `userland/tests/` | Test/demo programs (45 programs including per-library test suites) |
+| `userland/rust/` | Rust programs (Cargo workspace: `alloc_demo`, `hello_gfx`, etc.) |
+| `userland/lib/` | User-space libraries (see below) |
+| `apps/` | Standard applications: `edit/` (VZ-style editor), `ui_demo/` (microUI), `mdview`, `mgxview`, `vbzview`, `vdpview`, `ekakiuta`, `raster`, `gfx_demo`, `demo1`, `spr_test`, `hello32` |
+| `game/` | The board-game RPG: `app/`, `lib/`, `assets/`, `data/` |
 
-#### Shell Architecture (`programs/shell/`)
+#### Shell Architecture (`userland/shell/`)
 
 Modular design with command registration mechanism (`ShellCmd` struct, max 128 commands):
 - `main.c` — Entry, command router, pipe execution, wildcard expansion
@@ -211,7 +233,7 @@ Modular design with command registration mechanism (`ShellCmd` struct, max 128 c
 - `cmd_script.c` — Script engine (if/else/for/while/source, max 128 lines, 4-deep nesting)
 - `rshell.c` — Remote shell via serial
 
-#### Libraries (`programs/lib*/`)
+#### Libraries (`userland/lib/`, `game/lib/`)
 
 All statically linked. Organized by layer:
 
@@ -269,7 +291,9 @@ Three deployment paths:
 2. **NHD** (`make deploy-kernel`): Syncs HostDrv, then writes the whole tree (kernel + programs + data) into the NHD ext2 image. **Requires NP21/W to be stopped first** and restarted afterwards.
 3. **Boot sector** (`make deploy-boot`): Writes `boot/loader_hdd.bin` to the NHD boot area (LBA 2–17). Only needed when the loader itself changed.
 
-Configuration in `tools/deploy.yaml`. Environment variables: `HOSTDRV_DIR` (default `/mnt/c/os32`), `NP21W_DIR` (default `/tmp/np21w`).
+Deployment manifests are split by owning layer (`build/core.yaml`,
+`userland/deploy.yaml`, `apps/deploy.yaml`, `game/deploy.yaml`); the list
+and the merge live in `tools/deploy_manifests.py`. Environment variables: `HOSTDRV_DIR` (default `/mnt/c/os32`), `NP21W_DIR` (default `/tmp/np21w`).
 
 Build artifacts land in `build/out/` (gitignored), not the repository root.
 
@@ -277,7 +301,7 @@ Build artifacts land in `build/out/` (gitignored), not the repository root.
 
 **カーネル内 selftest はブート時に必ず走る** (`kernel/kselftest.c`): kstring_asm /
 kmalloc / kprintf の境界ケースを実機で毎回検証する。失敗すると赤字で項目名が出る。
-`programs/tests/klibc_test.c` は **newlib とリンクされる**ので、あちらが通っても
+`userland/tests/klibc_test.c` は **newlib とリンクされる**ので、あちらが通っても
 カーネル側の実装は検証されない。プリミティブを触ったら selftest に項目を足すこと。
 結果は `kselftest_pass` / `kselftest_fail` を `emu_read_mem` で読める。
 
@@ -319,7 +343,7 @@ JIS 0x2222 にフォールバックして**漢字が全部 □ になる** (仮�
 `utf8_set_jis_table_ready(1)` を呼べば引ける。ただし**無条件に立てないこと** —
 ロード失敗時に 0x4A000 の残骸を変換表として読む。既知の対応
 (U+4E9C→0x3021 など) を数点検証してから立てる
-(`programs/apps/game/main.c` の `enable_kanji_table()` が実例)。
+(`game/app/main.c` の `enable_kanji_table()` が実例)。
 
 **日本語を表示するプログラムはバッファ幅に注意**: UTF-8 の日本語は 1文字3バイト、
 表示幅は半角2桁 (16px)。英語前提の `char buf[64]` は簡単にあふれる。
@@ -327,7 +351,7 @@ JIS 0x2222 にフォールバックして**漢字が全部 □ になる** (仮�
 (`view_panel.c` の `add_line()` が後続バイト 10xxxxxx を見て戻す実装)。
 
 **物理 0x90000 は自動プレイ観測用メールボックスとして予約** (2026-08-18):
-game が毎フレーム状態ブロックを書き (`programs/apps/game/view_export.c`)、
+game が毎フレーム状態ブロックを書き (`game/app/view_export.c`)、
 ホストが `GET /api/mem?addr=0x90000&space=phys` で読む。空き領域
 0x8C000-0x9EFFF の一部。V86 セッションはこの領域を壊すが、ゲームと
 V86 は同時に使わない。レイアウトを変えたら
@@ -355,14 +379,14 @@ this by closing the connection at the end of `*_init()`. 200KB では game
 (SQLite 拡張域 0x200000-0x2FFFFF 内、残り ~280KB)。**枯渇の診断は
 `db_last_error()` を必ず出すこと** — 戻り値だけでは「テーブルがない」と
 区別できず、原因究明が遠回りになる。実機で任意 DB を調べる診断ツール
-`dbq` (`programs/tests/dbq.c`) を rshell から使える。
+`dbq` (`userland/tests/dbq.c`) を rshell から使える。
 
-**`mui_pump_input()` consumes the keyboard queue** (`programs/libos32ui/libos32ui_core.c`):
+**`mui_pump_input()` consumes the keyboard queue** (`userland/lib/ui/libos32ui_core.c`):
 it calls `kbd_trygetchar()` internally to feed microUI, so an app that also polls
 `kbd_trygetchar()` in the same frame gets nothing and appears to ignore all key input.
 Apps needing their own key handling must read the char once and pass it to
 `mui_pump_input_ch(ctx, ch)` instead. (This silently broke every keyboard shortcut in
-`programs/apps/game` until 2026-08-17 — the auto-play debug timers existed to work
+`game/app` until 2026-08-17 — the auto-play debug timers existed to work
 around it.)
 
 **`exec_exit()` closes every FD ≥ 3 on program exit** (`exec/exec.c`): any kernel-resident
@@ -392,15 +416,19 @@ os32/
 ├── kapi/             — KernelAPI __cdecl wrappers (including auto-generated)
 ├── lib/              — Kernel libraries (kstring, kprintf, UTF-8/16, path, sqlite3)
 ├── include/          — Shared headers (os32_kapi_shared.h, etc.)
-├── programs/
+├── userland/         — User space (built against the SDK)
 │   ├── shell/        — System shell (modular, resident at 0x300000)
-│   ├── apps/         — Applications (edit/, game/, ui_demo/, mdview, ekakiuta, vdpview, etc.)
 │   ├── cmds/         — CLI commands (grep, less, sort, diff, find, wc, etc.)
 │   ├── system/       — System utilities (hsync, install, cdinst, sndctl)
 │   ├── tests/        — Test/demo programs (40+)
 │   ├── rust/         — Rust programs (Cargo workspace)
-│   └── libos32*/     — User-space libraries (24 libraries, all libos32-prefixed)
-├── tools/            — Host-side tools (Python scripts, kapi.json, deploy.yaml)
+│   ├── lib/          — User-space libraries (gfx, math, md, mgx, ui, save, ...)
+│   └── deploy.yaml   — This layer's deployment manifest
+├── apps/             — Standard applications (edit, mdview, mgxview, ui_demo, ...)
+│                       Built from the SDK alone; no dependency on the OS tree
+├── game/             — The game (app/, lib/, assets/, data/) — SDK build too
+├── sdk/              — Distributable SDK (headers, crt, linker scripts, rust, example)
+├── tools/            — Host-side tools (Python scripts, kapi.json)
 ├── docs/             — Documentation (specs, policies, tasks, manpages)
 ├── build/            — Build config (Makefiles, linker scripts)
 │   └── out/          — Build artifacts (kernel.bin, sqlite.bin, vmkernel.lz4,

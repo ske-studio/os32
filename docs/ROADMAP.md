@@ -2,7 +2,7 @@
 
 *策定: 2026-04-17 / v1.x GUIシェル計画*
 
-*v1.0 到達までの開発履歴は [ROADMAP_v1.0.md](ROADMAP_v1.0.md) を参照*
+*v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 
 ---
 

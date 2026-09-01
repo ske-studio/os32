@@ -1,6 +1,6 @@
 ## 第7部 シェル (外部プログラム)
 
-OS32カーネルは内蔵シェルを持たず、起動時に外部プログラム `programs/shell.bin` を実行してシステム制御を引き渡します。各種コマンドや入力機能はすべてこのシェルプログラムがKernelAPIを介して提供します。
+OS32カーネルは内蔵シェルを持たず、起動時に外部プログラム `userland/shell.bin` を実行してシステム制御を引き渡します。各種コマンドや入力機能はすべてこのシェルプログラムがKernelAPIを介して提供します。
 
 ### §7-1 コマンド一覧
 
@@ -74,7 +74,7 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 | `terminal` | `terminal` | ターミナルモード (ESCで終了) |
 | `rshell` | `rshell` | リモートシェルモード開始 (ESCで終了) |
 | `send` | `send TEXT...` | RS-232C文字列送信 |
-| `upload` | `upload FILE HEXSIZE`| バイナリファイルをシリアル経由でアップロード |
+| `hotdeploy` | `hotdeploy [PATH LEN CRC32]` | ステージング領域の内容をファイル化 (引数なしで領域の番地を報告)。ホスト側は `tools/hotdeploy.py` から使う |
 | `recv` | `recv [host:PATH [LOCAL]]` | ファイル受信 (SerialFS または旧プロトコル) |
 | `push` | `push LOCAL host:PATH` | SerialFS 経由でホストへファイル送信 |
 | `tvdump` | `tvdump` | テキストVRAMダンプをシリアル送信 |
@@ -99,7 +99,7 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 - 起動時に `/etc/profile` → `$HOME/.profile` の順で自動読み込み (環境変数・PATHの初期設定用)
 - `*` や `?` などの簡単なワイルドカードもサポート
 
-**外部コマンド** (`/bin` に配置、`programs/cmds/`):
+**外部コマンド** (`/bin` に配置、`userland/cmds/`):
 `cal` `diff` `du` `find` `grep` `head` `hexdump` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `wc`
 (その他 `/sbin` に `install` `cdinst`、`/usr/bin` にアプリ群。詳細は [09_exec.md](09_exec.md) 参照)
 

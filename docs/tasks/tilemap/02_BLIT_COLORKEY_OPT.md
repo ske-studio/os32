@@ -2,7 +2,7 @@
 
 ## 1. 現状の問題
 
-[gfx_surface.c L151-183](../../../programs/libos32gfx/draw/gfx_surface.c) の
+[gfx_surface.c L151-183](../../../userland/lib/gfx/draw/gfx_surface.c) の
 `gfx_blit_colorkey()` はピクセル単位のネストループで実装されている:
 
 ```c

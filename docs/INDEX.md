@@ -28,6 +28,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v39 仕様書 — 172エントリテーブル (ヘッダ2 + 関数168 + データフィールド2) + API追加手順 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
+| [archive/](archive/) | 完了済みの計画書 (ROADMAP_v1.0, REFACTORING_PLAN) — 当時の記録 |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
 | [MGX_FORMAT.md](MGX_FORMAT.md) | MGX 漫画専用グレースケール画像形式 仕様 (48Bヘッダ + パレット表 + deflate、4bpp 16階調、ホスト側エンコード専用) |
 | [BENCHMARK.md](BENCHMARK.md) | ベンチマークプログラム(bench.bin) の仕様とテスト内容 |
@@ -87,13 +88,13 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-| [tasks/game/GAME_PORT_PLAN.md](tasks/game/GAME_PORT_PLAN.md) | 対戦スゴロクRPG 移植計画 (ステージA/B、Phase 0〜9) |
-| [tasks/game/ENGINE_EXTENSION_PLAN.md](tasks/game/ENGINE_EXTENSION_PLAN.md) | エンジン拡張実装計画 — libos32turn / libos32rpg / libos32save 設計 |
+| [game/docs/game/GAME_PORT_PLAN.md](../game/docs/game/GAME_PORT_PLAN.md) | 対戦スゴロクRPG 移植計画 (ステージA/B、Phase 0〜9) |
+| [game/docs/game/ENGINE_EXTENSION_PLAN.md](../game/docs/game/ENGINE_EXTENSION_PLAN.md) | エンジン拡張実装計画 — game/lib/turn, game/lib/rpg, userland/lib/save 設計 |
 | [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
 | [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。方式決定・実測・実装状況の索引 |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
 | [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
-| [tasks/libchem/LIBCHEM_DESIGN.md](tasks/libchem/LIBCHEM_DESIGN.md) | libos32chem — 化学エンジンライブラリ設計書 |
+| [game/docs/libchem/LIBCHEM_DESIGN.md](../game/docs/libchem/LIBCHEM_DESIGN.md) | game/lib/chem — 化学エンジンライブラリ設計書 |
 | [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
 | [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 | `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
@@ -117,31 +118,23 @@ os32/
 ├── kapi/             — KernelAPI ラッパー実装 (自動生成分含む)
 ├── lib/              — 汎用ライブラリ (UTF-8, UTF-16, Path, LZ4, SQLite等)
 ├── include/          — 共通ヘッダ群
-├── programs/         — 外部プログラム
+├── userland/         — ユーザー空間 (SDK に対してビルドする層)
 │   ├── shell/        — システム標準シェル (モジュール構造、ファイラ・スクリプトエンジン内蔵)
-│   ├── apps/         — アプリケーション (edit/, game/, ui_demo/, vdpview, mdview, vbzview, gfx_demo等)
 │   ├── cmds/         — コマンドラインツール (grep, less, sort, ime等 17種)
 │   ├── system/       — システムユーティリティ (hsync, install, cdinst, sndctl等)
 │   ├── tests/        — テスト・デモプログラム (約45種)
-│   ├── rust/         — Rust プログラム (hello_gfx, alloc_demo, math_test_rs) + os32api/os32_math クレート
-│   ├── libos32/      — newlib-nano ブリッジ
-│   ├── libos32math/  — 整数数学ライブラリ (固定小数点, LUT, ベクトル)
-│   ├── libos32gfx/   — グラフィックスライブラリ
-│   ├── libos32snd/   — サウンドライブラリ
-│   ├── libos32chem/  — 化学エンジンライブラリ (SQLite連携)
-│   ├── libos32map/   — マップ管理ライブラリ (SQLite連携)
-│   ├── libos32input/ — 入力抽象化ライブラリ (アクションバインディング)
-│   ├── libos32db/    — SQLiteデータベースアクセスライブラリ
-│   ├── libos32text/  — テキスト/メッセージ管理ライブラリ
-│   ├── libos32asset/ — アセット管理ライブラリ
-│   ├── libos32ecs/   — ECSライブラリ
-│   ├── libos32event/ — イベントシステムライブラリ
-│   ├── libos32ai/ libos32battle/ libos32board/ libos32econ/ libos32inv/ — ゲームシステム各種
-│   ├── libos32turn/ libos32rpg/ libos32save/ — 手番進行・キャラ育成・セーブ
-│   ├── libos32tilemap/ — タイルマップ描画エンジン
-│   ├── libos32filer/ — ファイラ共通ライブラリ
-│   └── libos32md/    — Markdown パーサーライブラリ
-├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image.mk) + リンカスクリプト
+│   ├── rust/         — Rust プログラム (hello_gfx, alloc_demo, math_test_rs) + os32_math クレート
+│   ├── lib/          — ユーザー空間ライブラリ (gfx, math, md, mgx, ui, save, snd,
+│   │                   input, db, ecs, asset, tilemap, filer, rt)
+│   └── deploy.yaml   — この層の配備マニフェスト
+├── apps/             — 標準アプリ (edit, mdview, mgxview, vbzview, vdpview, ekakiuta,
+│                       raster, gfx_demo, demo1, spr_test, ui_demo, hello32)
+│                       OS のソースツリーに依存せず SDK だけでビルドする
+├── game/             — ゲーム (app/, lib/, assets/, data/) — 同じく SDK ビルド
+│   └── lib/          — ゲーム専用ライブラリ (ai, battle, board, chem, econ, event,
+│                       inv, map, rpg, text, turn)
+├── sdk/              — 配布 SDK (ヘッダ, crt, リンカスクリプト, rust, example)
+├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image/sdk/apps/game.mk) + リンカスクリプト
 │   └── out/          — ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map) ※gitignore
 ├── tools/            — ホスト側ツール (デプロイ・イメージ生成・KAPI自動生成)
 ├── assets/           — データアセット (各種DB, FEP辞書, profile等)

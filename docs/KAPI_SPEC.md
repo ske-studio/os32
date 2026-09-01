@@ -39,7 +39,7 @@
 # 一括ビルド (Makefile利用)
 make programs
 ```
-外部プログラムは `programs/` 以下に `.c` を置き、`make programs` を実行することで、`crt0.asm` や `libos32` (newlib-nanoラッパー) とともにリンクされ、`mkos32x.py` によってヘッダが付与された `.bin` が生成されます。
+外部プログラムは `userland/` 以下 (標準アプリなら `apps/`) に `.c` を置き、`make programs` / `make apps` を実行することで、`crt0.asm` や `libos32` (newlib-nanoラッパー) とともにリンクされ、`mkos32x.py` によってヘッダが付与された `.bin` が生成されます。
 
 ### §3-1 KernelAPI 関数の追加手順
 
@@ -59,7 +59,7 @@ make programs
    git diff --stat
    ```
    生成対象: `sdk/include/os32/os32_kapi_generated.h` / `kapi/kapi_generated.c` /
-   `exec/exec_kapi_init.inc` / `programs/rust/os32api/src/kapi_generated.rs`
+   `exec/exec_kapi_init.inc` / `sdk/rust/os32api/src/kapi_generated.rs`
 4. カーネル側に実体を実装する。
 5. 本仕様書のオフセット表を更新し、新APIに依存するプログラムの
    `build/app.conf` の要求バージョンを引き上げる。
@@ -288,7 +288,7 @@ v22以降、基本的な描画プリミティブ (`gfx_clear`, `gfx_pixel`, `gfx
 
 外部プログラムでグラフィックス描画を行う場合は、以下の２つの方式から選択します:
 
-1. **libos32gfx ライブラリ** (推奨): `programs/libos32gfx/` で提供されるスタティックリンクライブラリ。サーフェス、スプライト、描画プリミティブ、ダーティ矩形管理、フォントレンダリングなど高レベルな描画機能を提供します。
+1. **libos32gfx ライブラリ** (推奨): `userland/lib/gfx/` で提供されるスタティックリンクライブラリ。サーフェス、スプライト、描画プリミティブ、ダーティ矩形管理、フォントレンダリングなど高レベルな描画機能を提供します。
 2. **フレームバッファ直接操作**: `gfx_get_framebuffer()` で取得した `GFX_Framebuffer` 構造体を介して、4プレーンのバックバッファに直接書き込み、`gfx_add_dirty_rect()` + `gfx_present_dirty()` でVRAMに転送します。
 
 **描画モード**:

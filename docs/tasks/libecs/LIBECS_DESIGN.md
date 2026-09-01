@@ -446,6 +446,6 @@ libos32ecs のコア配列には触れない。
 | ドキュメント | 内容 |
 |-------------|------|
 | [LIBINPUT_DESIGN.md](../libinput/LIBINPUT_DESIGN.md) | 入力連携 |
-| [LIBCHEM_DESIGN.md](../libchem/LIBCHEM_DESIGN.md) | 化学ブリッジ |
+| [LIBCHEM_DESIGN.md](../../../game/docs/libchem/LIBCHEM_DESIGN.md) | 化学ブリッジ |
 | [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | fix16_t |
 | [DEVELOPMENT.md](../../DEVELOPMENT.md) | 技術仕様ガイド |

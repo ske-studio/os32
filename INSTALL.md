@@ -58,7 +58,7 @@ make all
 | ファイル | 説明 |
 |---------|------|
 | `kernel.bin` | OS32カーネルバイナリ |
-| `programs/*.bin` | 外部プログラム (OS32X形式) |
+| `userland/**/*.bin`, `apps/*/*.bin` | 外部プログラム (OS32X形式) |
 | `images/os32_boot.d88` | FDDブート用D88ディスクイメージ |
 | `images/os32_boot.img` | FDDブート用RAWイメージ |
 

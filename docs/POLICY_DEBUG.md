@@ -207,7 +207,7 @@ curl -s http://127.0.0.1:8025/api/screenshot > screenshot.png
 | 変更対象 | 手順 | NP21/W再起動 |
 |----------|------|:---:|
 | プログラムのみ (HostDrv実行) | `make all` → `make deploy` | 不要 |
-| プログラムのみ (ホット) | `make dp-<name>` (シリアルpush) | 不要 |
+| プログラムのみ (ホット) | `make hotdeploy FILE=<path>` | 不要 |
 | カーネル / ブートFS | NP21/W停止 → `make all` → `make deploy && make deploy-kernel` → `np21w_restart.py` | **必要** |
 
 ```bash

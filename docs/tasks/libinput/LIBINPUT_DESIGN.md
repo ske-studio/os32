@@ -540,7 +540,7 @@ libos32chem (~5.5KB), libos32map (~16KB) と比較しても最小クラス。
 | ドキュメント | 内容 |
 |-------------|------|
 | [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | libos32math 設計書 (fix16_t 依存先) |
-| [LIBCHEM_DESIGN.md](../libchem/LIBCHEM_DESIGN.md) | libos32chem 設計書 (同一アーキテクチャパターン) |
+| [LIBCHEM_DESIGN.md](../../../game/docs/libchem/LIBCHEM_DESIGN.md) | libos32chem 設計書 (同一アーキテクチャパターン) |
 | [KAPI_SPEC.md](../../KAPI_SPEC.md) | KernelAPI 仕様書 (kbd/mouse API定義) |
 | [ROADMAP.md](../../ROADMAP.md) | v1.1 GUIシェル計画 (イベントループ基盤) |
 | [05_drivers.md](../../05_drivers.md) | デバイスドライバ仕様 (kbd.c, mouse.c) |

@@ -364,7 +364,7 @@ C 側の `exception_handler(vector, error_code, fault_eip, regs)` の
 - スタックダンプに `0x001A4295` = `zeroPage` 関数内 (SQLite B-tree)
 
 **原因**:
-[kstring_asm.asm](file:///mnt/c/WATCOM/src/os32/lib/kstring_asm.asm)
+`lib/kstring_asm.asm`
 の `kmemset` 関数、`.aligned` パスにおける `push ecx` / `pop ecx` の
 スタック不整合バグ:
 
