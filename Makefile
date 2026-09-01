@@ -55,10 +55,10 @@ DEPFILES := $(shell find boot kernel drivers gfx fs exec kapi lib programs sdk \
 # ゲームは SDK 経由でビルドするので、programs (= SDK のもとになる
 # ライブラリ群) と sdk のあとに置く。iso はパッケージ生成を含むため最後。
 all: boot $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 \
-     images/os32_boot.d88 programs sdk apps game game-data iso
+     images/os32_boot.d88 programs sdk apps game assets-deployed game-data iso
 
 # === クリーン (全サブモジュール) ===
-clean: clean-kernel clean-programs clean-libs clean-images clean-sdk clean-apps clean-game clean-deps
+clean: clean-kernel clean-programs clean-libs clean-images clean-sdk clean-apps clean-game clean-assets clean-deps
 	rm -f os.img os.d88 os_install.img os_install.d88 os_raw.img
 
 # 依存ファイル (.d) の一括削除 — Rust の target/ 以下は対象外
