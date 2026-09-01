@@ -268,6 +268,18 @@ make programs
 | 0x290 | ime_user_clear | `int(void)` |
 | 0x294 | ime_trygetkey | `int(void)` |
 
+### V86 / VDM (v36-v39)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x298 | v86_selftest | `int(void)` |
+| 0x29C | v86_disktest | `int(const char *path)` |
+| 0x2A0 | v86_boot | `int(const char *path)` |
+| 0x2A4 | v86_boot2 | `int(const char *path, const char *second)` |
+
+`v86_boot` は HDD イメージ (NHD/HDI) から、`v86_boot2` は 2 イメージ構成で
+V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
+
 `ime_user_list` の `out` は `IME_UserEntry`(`sdk/include/os32/os32_kapi_shared.h`) の配列。
 `ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
 FEP 対応版にあたる (エディタ等のメインループから使う)。
@@ -279,8 +291,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x298 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x29C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2A8 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2AC | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 
