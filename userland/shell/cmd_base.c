@@ -55,7 +55,7 @@ static void cmd_tick(int argc, char **argv)
 static void cmd_ver(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    g_api->kprintf(ATTR_GREEN, "PC-9801 OS32 v%s (External Shell Modular)\n",
+    g_api->kprintf(ATTR_GREEN, "PC-9801 OS32 v%s (Ring3 Native)\n",
                    SYS_VERSION);
     g_api->kprintf(ATTR_CYAN, "%s", "  CPU: Intel 386+ (Protected Mode + Paging)\n");
     g_api->kprintf(ATTR_CYAN, "%s", "  PIC: 8259A x2 (remapped to INT 20h+)\n");
