@@ -88,6 +88,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
 | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
 | [tasks/v2/CONTRACTS.md](tasks/v2/CONTRACTS.md) | v2 実装の凍結インターフェース契約 (2 コーダー体制、C1-C7) |
+| [tasks/v2/TASK_coder1_M0b_privileged.md](tasks/v2/TASK_coder1_M0b_privileged.md) | コーダー1 タスク — ユーザランドの特権命令除去 (M1 前提) |
 | [tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) | v2 M1 設計 — リング3 土台 (GDT/PD 切替/CPL=3 遷移/検証項目) |
 | [tasks/v2/M2_KAPI_TRAMPOLINE.md](tasks/v2/M2_KAPI_TRAMPOLINE.md) | v2 M2 設計 — KAPI トランポリン (CPL=3 から int 0x80 経由、アプリ無変更) |
 | [tasks/v2/M3_VERIFY.md](tasks/v2/M3_VERIFY.md) | v2 M3 設計 — 検証 (フォールト注入/特権命令の静的検査/性能再測) |
