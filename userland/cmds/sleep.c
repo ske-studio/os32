@@ -39,9 +39,9 @@ int main(int argc, char **argv, KernelAPI *api)
     wait_ticks = seconds * TICKS_PER_SEC;
     start = api->get_tick();
 
-    /* hlt でCPUをスリープさせつつ待機 */
+    /* sys_halt で次の割り込みまでCPUをスリープさせつつ待機 */
     while (api->get_tick() - start < wait_ticks) {
-        __asm__ __volatile__("hlt");
+        api->sys_halt();
     }
 
     return 0;

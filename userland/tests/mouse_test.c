@@ -116,7 +116,7 @@ int main(int argc, char **argv, KernelAPI *k)
         {
             u32 next = api->get_tick() + 2;
             while (api->get_tick() < next) {
-                __asm__ volatile("hlt");
+                api->sys_halt();
             }
         }
     }

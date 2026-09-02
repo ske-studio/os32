@@ -100,7 +100,7 @@ static int wait_key(void)
         ch = api->kbd_trygetchar();
         if (ch >= 0) return ch;
         /* CPU をアイドルにして次の割り込みを待つ */
-        __asm__ volatile("hlt");
+        api->sys_halt();
     }
 }
 

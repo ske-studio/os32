@@ -27,7 +27,7 @@ v2 でユーザプログラムは CPL=3 で走る (M1)。CPL=3 では `hlt` や 
 |---|---|---|
 | `userland/cmds/less.c:81` | `__asm__ volatile("hlt");` | `api->sys_halt();` |
 | `userland/cmds/more.c:103` | 同 | 同 |
-| `userland/cmds/sleep.c:44` | `__asm__ __volatile__("hlt");` | `kapi->sys_halt();` |
+| `userland/cmds/sleep.c:44` | `__asm__ __volatile__("hlt");` | `api->sys_halt();` |
 | `userland/tests/mouse_test.c:119` | `__asm__ volatile("hlt");` | `api->sys_halt();` |
 
 - 各ファイルで `api` / `kapi` のどちらの名前が使われているかはソース先頭

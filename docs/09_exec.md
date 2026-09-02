@@ -111,7 +111,6 @@ KernelAPIポインタを引数として実行する。
 | bench_scale2x | `tests/bench_scale2x/` | Scale2x ベンチマーク |
 | sqlite_standalone | `tests/sqlite_standalone/` | SQLite スタンドアロンテスト |
 | mouse_test | `tests/mouse_test.c` | マウスドライバテスト |
-| flip400_test | `tests/flip400_test.c` | 400ラインページフリップテスト |
 | gfx200_test | `tests/gfx200_test.c` | 200ラインGFXテスト |
 | gfx_demo200 | `tests/gfx_demo200.c` | 200ライングラフィックスデモ |
 | fep_test| `tests/fep_test.c` | FEP (日本語入力) テスト |

@@ -78,7 +78,7 @@ static int wait_key(void)
     for (;;) {
         ch = api->kbd_trygetchar();
         if (ch >= 0) return ch;
-        __asm__ volatile("hlt");
+        api->sys_halt();
     }
 }
 
