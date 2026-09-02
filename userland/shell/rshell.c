@@ -66,8 +66,12 @@ static void cmd_terminal(int argc, char **argv)
             }
         }
         if (kch < 0 && sch < 0) {
+            /* 次の割り込み (PIT 100Hz / KBD / SER) まで CPU を止める。
+             * get_tick の連打で 1 tick を潰していたが、リング 3 では
+             * KAPI 1 回 6us でアイドルが CPU を振り切る。sys_halt なら
+             * 待ち時間 (~1 tick) を保ったまま get_tick 呼び出しがゼロになる。 */
             u32 w = g_api->get_tick() + 1;
-            while (g_api->get_tick() < w);
+            while (g_api->get_tick() < w) g_api->sys_halt();
         }
     }
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Terminal closed]\n");
@@ -108,8 +112,10 @@ static void cmd_rshell(int argc, char **argv)
                 break;
             }
             {
+                /* rshell コマンド待ち。sys_halt でアイドル時の get_tick
+                 * 連打 (実測 311k/s) を止める。SER 受信 IRQ でも起きる。 */
                 u32 w = g_api->get_tick() + 1;
-                while (g_api->get_tick() < w);
+                while (g_api->get_tick() < w) g_api->sys_halt();
             }
         }
 
@@ -146,7 +152,7 @@ static void cmd_rshell(int argc, char **argv)
 
         {
             u32 wait_end = g_api->get_tick() + 1;
-            while (g_api->get_tick() < wait_end);
+            while (g_api->get_tick() < wait_end) g_api->sys_halt();
         }
 
         g_api->serial_putchar(0x04);
