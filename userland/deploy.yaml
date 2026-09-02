@@ -77,6 +77,10 @@ filesystem:
     - host: userland/tests/ring3_hello.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- ring3_fault (CPL=3 フォールト kill 検証, v2 M1e) ---
+    - host: userland/tests/ring3_fault.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/math_test.bin
       guest: /usr/bin/
       tags: [programs]

@@ -14,6 +14,10 @@
 /* exec フォルト復帰用 (exec.c で定義) */
 extern volatile int exec_nest_level;
 extern void exec_fault_recover(void);
+/* CPL=3 (リング3) 由来のフォールトでアプリを kill する (exec.c, v2 M1e)。
+ * fault_kill_count をインクリメントし master CR3 復帰 → AS 破棄 → longjmp。
+ * この関数は戻らない。 */
+extern void ring3_fault_kill(void);
 
 #include "serial.h"
 #include "tvram.h"
@@ -228,6 +232,22 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
 
     _disable();
 
+    /* ---- CPL=3 (リング3) 由来のフォールトはアプリだけ kill (v2 M1e/V4) ----
+     * フォールトフレームの CS は PUSHAD 配列の上に CPU が積んだもの。
+     * isr_common のフレーム: regs[8]=vector, regs[9]=error_code,
+     * regs[10]=EIP(=fault_eip), regs[11]=CS, regs[12]=EFLAGS。
+     * CS.RPL==3 なら CPL=3 由来 = リング3 アプリのフォールト。カーネル
+     * (CPL=0) 自身のフォールトは CS.RPL==0 なので従来どおり停止させる
+     * (ここを取り違えるとカーネルのバグを握り潰す)。ring3_fault_kill は
+     * master CR3 に戻して longjmp するので戻らない。 */
+    if ((regs[11] & 3) == 3) {
+        sputs("\n[ring3] exception from CPL=3 vec=");
+        sput_hex32(vector);
+        sputs(" EIP="); sput_hex32(fault_eip);
+        sputs(" -> kill app\n");
+        ring3_fault_kill();     /* 戻らない */
+    }
+
     /* 画面上部クリア */
     {
         int r;
@@ -304,6 +324,20 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
     int row = 0;  /* 画面最上部から表示 (最大限の情報量) */
 
     _disable();
+
+    /* ---- CPL=3 (リング3) 由来の #PF はアプリだけ kill (v2 M1e/V4) ----
+     * #PF フレーム (isr_stub_14 .not_v86): regs[8]=error_code,
+     * regs[9]=EIP(=fault_eip), regs[10]=CS, regs[11]=EFLAGS。
+     * CS.RPL==3 なら CPL=3 由来。カーネル帯域 (PTE supervisor) への書き込みや
+     * 未マップ読みで #PF したリング3 アプリを、カーネルを巻き込まず畳む。
+     * カーネル自身の #PF は CS.RPL==0 なので従来どおり停止 (赤画面)。 */
+    if ((regs[10] & 3) == 3) {
+        sputs("\n[ring3] #PF from CPL=3 addr=");
+        sput_hex32(fault_addr);
+        sputs(" EIP="); sput_hex32(fault_eip);
+        sputs(" -> kill app\n");
+        ring3_fault_kill();     /* 戻らない */
+    }
 
     /* 画面上部をクリア (15行のみ — row 15以降のテスト出力を保持) */
     {

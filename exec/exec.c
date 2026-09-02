@@ -95,6 +95,11 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 static struct addrspace g_ring3_as;
 static volatile int g_ring3_active = 0;
 
+/* CPL=3 アプリをフォールト (#PF/#GP) で kill した回数 (CONTRACTS C6, v2 M1e)。
+ * static にせずカーネルシンボルとして公開する (kselftest_pass 等と同じ形)。
+ * PM の V4 検証が emu_read_mem で読む。 */
+volatile u32 fault_kill_count = 0;
+
 #include "ksetjmp.h"
 
 /* ======================================================================== */
@@ -227,6 +232,29 @@ void __cdecl ring3_syscall_dispatch(u32 slot, u32 arg0)
     }
     /* exec_exit は longjmp で exec_run の復帰点へ跳ぶ (戻らない)。 */
     exec_exit((int)arg0);
+}
+
+/* ======================================================================== */
+/*  ring3_fault_kill — CPL=3 由来の #PF/#GP でアプリを kill (v2 M1e)        */
+/*                                                                          */
+/*  #PF/#GP ハンドラ (kernel/isr_handlers.c) がフォールトフレームの         */
+/*  CS.RPL=3 (= CPL=3 由来) を検出したときに呼ぶ。カーネルを巻き込まず       */
+/*  アプリだけを畳んでシェルに戻す ([ABI4] 解消の実装点, V4)。              */
+/*                                                                          */
+/*  後始末は ring3_syscall_dispatch (正常終了) と同一: master CR3 復帰 →     */
+/*  AS 破棄 → exec_fault_recover (= exec_exit(EXEC_ERR_FAULT) → longjmp)。   */
+/*  二重破棄は g_ring3_active で防ぐ (destroy 側もアクティブ CR3 を弾く)。    */
+/*  この関数は longjmp するので戻らない。                                    */
+/* ======================================================================== */
+void ring3_fault_kill(void)
+{
+    fault_kill_count++;
+    if (g_ring3_active) {
+        paging_load_cr3(paging_kernel_pd_phys());
+        paging_addrspace_destroy(&g_ring3_as);
+        g_ring3_active = 0;
+    }
+    exec_fault_recover();   /* longjmp するので戻らない */
 }
 
 /* ======================================================================== */
