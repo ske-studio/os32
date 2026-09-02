@@ -104,8 +104,6 @@ The lines below are the whole rule; the reasoning and the detail live in
 - **[ABI2]** Append entries only. Never reorder or delete an existing slot.
 - **[ABI3]** After a KAPI change, bump the version and run `make clean` →
   `make all`. An incremental build breaks silently.
-- **[ABI4]** KAPI does not validate pointers. The caller must be defensive —
-  external programs run at CPL=0, so their bugs corrupt the kernel.
 
 **Verification**
 
@@ -345,13 +343,18 @@ kmalloc / kprintf の境界ケースを実機で毎回検証する。失敗す�
 
 **ABI break after KernelAPI change**: After modifying `KernelAPI` struct, run `make clean` before rebuilding. Stale `.o` files with old struct layout cause silent corruption.
 
-**KAPI にポインタ検証はない (設計上の制約)**: GDT にユーザディスクリプタが
-なく、外部プログラムも CPL=0 で実行される。KAPI に渡されたポインタ/サイズは
-検証されずカーネルがそのまま使うため、プログラムのバグは即カーネル破壊に
-なり得る。リング 3 導入はアーキテクチャ変更 (GDT/TSS/ゲート全面改修) で
-2026-08 の信頼性向上 (Phase 1-3) ではスコープ外と判断した。
-呼び出し側 (プログラム) が防衛的に書くこと。**v2 でリング 3 を導入して
-この制約を解消する方針が決まっている** (2026-09-01)。
+**KAPI ポインタ検証とリング3 (v2 M1-M3 で解消済み, 2026-09-03)**: 外部プログラムは
+**既定で CPL=3 (リング3)** で走る。GDT に USER セグメント (USER_CS=0x23/USER_DS=0x2B)、
+プログラムごとに独立 PD (カーネル帯域は全 PD 共有・非 USER)、KAPI は USER
+トランポリンページ経由で `int 0x80` に入る。ディスパッチャがポインタ引数を
+アプリ帯 (0x400000-0x7FFFFF)/SHM/VRAM の範囲で早期検証し、可変長引数など
+検証しきれない不正アクセスは「ring3 syscall 実行中フォールトガード」が捕捉して、
+**不正ポインタはアプリを kill するだけ (カーネルは無傷、`fault_kill_count` を増やして
+シェル復帰)**。かつての「KAPI にポインタ検証はない/呼ぶ側が防衛的に」という
+設計制約 (旧 ABI4) はアーキテクチャで解消し、CONSTRAINTS.md の規則から削除した。
+**例外**: shell (常駐 0x300000, CPL=0, 信頼扱い) と `OS32X_FLAG_FORCE_CPL0`
+(mkos32x `--cpl0`) で明示的に CPL=0 起動したプログラムのみ、従来どおり非保護。
+設計と検証は `docs/tasks/v2/`。
 
 **ビットマップフォントは `tools/gen_font16.py` で焼く** (旧 `gen_kcg_font.py` の
 置き換え)。カーネルは起動時に `/sys/font/default.kcgfont` を読む

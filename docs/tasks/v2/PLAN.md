@@ -161,6 +161,27 @@ ring3 をデフォルト化 (全外部プログラムを CPL=3) する判断と�
   ことを `kselftest` に追加 (現在この種のテストが無い)
 - 6μs ゲートの実測 CPU が M0 後に無視できる水準であることを再計測
 
+**完了 (2026-09-03) — ring3 デフォルト化 + 回帰ゼロ + [ABI4] 削除。**
+commit `b96f27d` (M3 デフォルト化) ほか。
+
+- ring3 を全外部プログラムのデフォルトに反転 (`want_ring3 = !is_shell &&
+  !FORCE_CPL0`)。共有低位メモリ (フォント/Unicode 表/GFX バックバッファ) を
+  USER マップ。プログラム帯 USER マップを code+heap 全域 [0x400000,0x7C0000) へ
+  拡張し sbrk 上限を調整。ユーザスタック 256KB。
+- **実機回帰掃き**: userland 15 プログラム中 14 が無変更で CPL=3 動作
+  (漢字表示/GFX/GUI(coder2 gui_demo)/SQLite/CLI)。唯一の回帰 alloc_demo
+  (ヒープ 1MB 超) も上記拡張で解消 → **回帰ゼロ** (fault_kill_count=0)。
+- フォールト注入 (M1e ring3_fault / M2e faultprobe_r3 case 1-4) で
+  「アプリ死・カーネル生存・シェル復帰」を実証済み。静的検査は
+  `make check` の check_privileged。
+- **[ABI4] を CONSTRAINTS.md / CLAUDE.md / SOUL.md の規則から削除** (規則
+  17→16 件)。外部プログラムのバグはもうカーネルを破壊しない。例外は shell と
+  FORCE_CPL0 (CPL=0 信頼扱い) のみ。**= v2 の中核目標を達成。**
+
+残: ヒープ/スタック境界 (0x7C0000) のガードページ挿入は将来のハードニング候補
+(旧 CPL=0 モデルと同等リスクのため今回スコープ外)。KAPI トランポリンの性能は
+hello_r3 が体感遅延なく完走 (get_tick 根絶済みで KAPI 頻度 ~233/s)。
+
 ---
 
 ## 5. Rust の適用範囲
