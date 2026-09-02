@@ -16,6 +16,10 @@ PIC1_CMD    equ 0x00
 PIC2_CMD    equ 0x08
 OCW2_EOI    equ 0x20
 
+;; ユーザデータセグメント (CONTRACTS C1, kernel/gdt.h の USER_DS)。
+;; CPL=3 中断からの復帰でセグメントを再ロードするのに使う。
+USER_DS     equ 0x2B
+
 ;; ============================================================
 ;; V86 からの遷移では CPU が DS/ES/FS/GS を null セレクタにクリアする。
 ;; C ハンドラは DS がカーネルデータセグメントであることを前提に動くので、
@@ -34,6 +38,45 @@ OCW2_EOI    equ 0x20
         mov     es, ax
         mov     fs, ax
         mov     gs, ax
+%endmacro
+
+;; ============================================================
+;; IRETD_USER — CPL=3 (リング3) 対応の iretd。全復帰点で iretd の代わりに使う。
+;;
+;; isr_stub は入口で RESTORE_KSEG により DS/ES/FS/GS を KERNEL_DS にするが、
+;; popad/iretd は汎用レジスタと CS/SS/EIP/ESP/EFLAGS しか復元しない。
+;; CPL=0 中断や V86 (CPU がフレームからセグメントを復元) では無害だが、
+;; **保護モード CPL=3 (v2 リング3) を中断した場合**、復帰後の DS/ES/FS/GS が
+;; KERNEL_DS のまま残り、CPL=3 が DS 経由でメモリに触れた瞬間に
+;; 「CPL=3 が DPL=0 セグメント使用」で #GP する
+;; (V3 実測: PIT 割り込みを跨いだ後の movl が EIP=0x40003D, CS=0x23 で #GP)。
+;;
+;; 対策: iretd 直前 (スタックが [EIP][CS][EFLAGS](+[ESP][SS]) に正規化された
+;; 時点。全スタブで esp+4=CS, esp+8=EFLAGS) に復帰先を判定し、保護モード
+;; CPL=3 へ戻るときだけユーザデータセグメント USER_DS を再ロードする。
+;; システムのユーザデータセレクタは USER_DS ただ 1 本 (フラット, GDT 固定)
+;; なので、割り込みごとに元値を保存せずとも USER_DS を入れれば正しい。
+;;   - V86 (EFLAGS.VM=1): iretd がフレームからセグメントを復元 → 触らない
+;;   - CPL=0 (CS.RPL=0):  KERNEL_DS のまま (再ロードしない)
+;;   - CPL=3 (CS.RPL=3):  USER_DS を DS/ES/FS/GS に再ロード
+;;
+;; V86 経路 (ISR_*_V86 / V86_REFLECT) は EFLAGS.VM=1 で必ず素通しになるので
+;; 壊さない。CPL=0 割り込みも RPL=0 で素通し。追加コストは分岐 2 つのみ。
+;; ============================================================
+%macro IRETD_USER 0
+        test    dword [esp + 8], 0x00020000    ;; EFLAGS.VM?
+        jnz     %%do_iret                      ;; V86 → iretd がフレームから復元
+        test    dword [esp + 4], 3             ;; CS.RPL == 3 (CPL=3 へ戻る)?
+        jz      %%do_iret                      ;; CPL=0 → KERNEL_DS のまま
+        push    eax
+        mov     ax, USER_DS
+        mov     ds, ax
+        mov     es, ax
+        mov     fs, ax
+        mov     gs, ax
+        pop     eax
+%%do_iret:
+        iretd
 %endmacro
 
 ;; 外部Cハンドラ (GCC ELFではアンダースコアなし)
@@ -246,7 +289,7 @@ isr_stub_13:
         ;; 0 が返った → V86 に復帰
         popad
         add     esp, 4                  ;; error_code をスキップ
-        iretd
+        IRETD_USER
 
 .v86_exit:
         ;; 非0 が返った → セッション終了 (longjmp するので戻らない)
@@ -293,7 +336,7 @@ isr_common:
 
         popad
         add     esp, 8          ;; error_code + vector をスキップ
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; #PF ページフォルト専用スタブ (ISR 14)
@@ -353,7 +396,7 @@ isr_stub_14:
 
         popad
         add     esp, 4          ;; error_code をスキップ
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; デフォルトハンドラ (ベクタ 0x30 以降の未使用ソフトウェア割り込み用)
@@ -363,7 +406,7 @@ isr_stub_14:
 ;; ============================================================
 global isr_stub_default
 isr_stub_default:
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; 未登録ハード IRQ 用デフォルトスタブ
@@ -384,7 +427,7 @@ irq_stub_unexp_%1:
         call    isr_unexpected_irq
         add     esp, 4
         popad
-        iretd
+        IRETD_USER
 %endmacro
 
 IRQ_UNEXP 3                     ;; INT 0x23
@@ -427,7 +470,7 @@ irq_stub_0:
 .no_timeout:
 
         popad
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ1: キーボード割り込み (INT 0x21)
@@ -458,7 +501,7 @@ irq_stub_1:
 .no_exit:
 
         popad
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ4: RS-232C 割り込み (INT 0x24)
@@ -476,7 +519,7 @@ irq_stub_4:
         out     PIC1_CMD, al
 
         popad
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ7: スプリアス対策 (INT 0x27)
@@ -499,14 +542,14 @@ irq_stub_7:
 
         ;; スプリアス → EOIを送らずに無視
         pop     eax
-        iretd
+        IRETD_USER
 
 .real:
         ;; 本物のIR7割り込み (スレーブカスケード等)
         mov     al, OCW2_EOI
         out     PIC1_CMD, al
         pop     eax
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ11: FDD割り込み (INT 0x2B) — スレーブPIC IR11
@@ -526,7 +569,7 @@ irq_stub_11:
         out     PIC1_CMD, al
 
         popad
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ12: サウンドボード (INT 0x2C) — スレーブPIC IR4
@@ -565,7 +608,7 @@ irq_stub_2:
         V86_REFLECT 2           ;; IRQ2 (VSYNC)。既定では INT 0Ah に落ちる
 
         popad
-        iretd
+        IRETD_USER
 
 global irq_stub_12
 irq_stub_12:
@@ -580,7 +623,7 @@ irq_stub_12:
         V86_REFLECT 12          ;; IRQ12 (サウンド)。既定では INT 14h に落ちる
 
         popad
-        iretd
+        IRETD_USER
 
 ;; ============================================================
 ;; IRQ13: マウス割り込み (INT 0x2D) — スレーブPIC IR5
@@ -600,4 +643,4 @@ irq_stub_13:
         out     PIC1_CMD, al
 
         popad
-        iretd
+        IRETD_USER

@@ -3,7 +3,7 @@
 # ============================================================================
 
 # === カーネル ASM ソース ===
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===

@@ -4,7 +4,7 @@
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS = $(wildcard userland/cmds/*.c)
-C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c, $(wildcard userland/tests/*.c))
+C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/ring3_hello.c, $(wildcard userland/tests/*.c))
 C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_TESTS) $(C_SYSTEM)
@@ -110,6 +110,26 @@ userland/tests/faultprobe.elf: sdk/link/app.ld $(CRT0_OBJ) $(FAULTPROBE_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(FAULTPROBE_OBJ) $(LGRP_BEG) $(LGRP_END) -lc -lgcc
 
 faultprobe: $(CRT0_OBJ) userland/tests/faultprobe.bin
+
+# --- ring3_hello (CPL=3 検証用最小プログラム, v2 M1) ---
+# crt0 を link しない自己完結バイナリ (独自 _start)。標準 crt0 は
+# kapi->sys_exit() 等カーネル関数ポインタを呼ぶが、M2 トランポリン前は CPL=3
+# から呼べないため。mkos32x に --ring3 を付け OS32X_FLAG_RING3 を立てる。
+# KAPI 不使用なので --api は最小でよい。explicit ルールなので generic の
+# %.elf / %.bin / %.raw パターンより優先される (crt0 リンクを回避)。
+userland/tests/ring3_hello.o: userland/tests/ring3_hello.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+userland/tests/ring3_hello.elf: userland/tests/ring3_hello.o sdk/link/app.ld
+	$(LD) -m elf_i386 -T sdk/link/app.ld -nostdlib --nmagic --gc-sections -o $@ userland/tests/ring3_hello.o
+
+userland/tests/ring3_hello.bin: userland/tests/ring3_hello.elf
+	$(OBJCOPY) -O binary $< userland/tests/ring3_hello.raw
+	python3 sdk/mkos32x.py userland/tests/ring3_hello.raw $@ --elf $< --api 39 --ring3
+	@rm -f userland/tests/ring3_hello.raw
+
+ring3_hello: userland/tests/ring3_hello.bin
+.PHONY: ring3_hello
 
 # ---------------------------------------------------------------------------
 # DEFINE_TEST — テストプログラム定義テンプレート
@@ -278,7 +298,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)

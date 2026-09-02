@@ -30,6 +30,8 @@ struct idt_ptr {
 /* IDTタイプ/属性ビット */
 #define IDT_ATTR_INT_GATE32  0x8E   /* P=1, DPL=0, 32ビット割込みゲート */
 #define IDT_ATTR_TRAP_GATE32 0x8F   /* P=1, DPL=0, 32ビットトラップゲート */
+#define IDT_ATTR_INT_GATE32_DPL3 0xEE /* P=1, DPL=3, 32ビット割込みゲート
+                                       * (CPL=3 から int 0x80 を呼ぶ用, v2 M2/C4) */
 
 /* GDTコードセグメントセレクタ */
 #define KERNEL_CS  0x08

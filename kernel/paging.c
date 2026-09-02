@@ -444,6 +444,53 @@ void paging_addrspace_destroy(struct addrspace *as)
     as->app_pde = 0;
 }
 
+int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
+                              u32 flags)
+{
+    u32 pdi = virt >> 22;
+    u32 pti = (virt >> 12) & 0x3FF;
+    u32 *pd;
+
+    if (!as || !as->pd_phys) return -1;
+    pd = (u32 *)as->pd_phys;
+
+    if (pdi == as->app_pde) {
+        /* アプリ固有 PT (このアプリの PD からしか見えない) */
+        ((u32 *)as->app_pt_phys)[pti] = (phys & 0xFFFFF000UL) | flags;
+    } else {
+        /* 共有 PT (master と同一)。VRAM/SHM 等 C2 で共有 + USER の領域用。 */
+        if (pdi >= PAGING_PT_COUNT) return -1;
+        page_tables[pdi][pti] = (phys & 0xFFFFF000UL) | flags;
+    }
+
+    /* このアプリ PD の PDE にだけ USER を伝播 (master の PDE は触らない)。 */
+    if (flags & PTE_USER) {
+        pd[pdi] |= PTE_USER;
+    }
+    return 0;
+}
+
+int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
+                                    u32 vend, u32 flags)
+{
+    u32 v;
+    int rc = 0;
+
+    vstart = PAGE_ALIGN_DOWN(vstart);
+    for (v = vstart; v < vend; v += PAGE_SIZE) {
+        if (paging_addrspace_map_user(as, v, v, flags) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    /* この PD が既にアクティブなら TLB を捨てる。通常は CR3 に載せる前に
+     * 呼ぶので不要だが、載せた後の追加マップにも備える。 */
+    if (as && as->pd_phys && paging_current_cr3() == as->pd_phys) {
+        paging_load_cr3(as->pd_phys);
+    }
+    return rc;
+}
+
 /* V1 自己診断用のプローブ。カーネル .bss (0x100000-0x1FFFFF, PDE 0) に置かれ、
  * 全 PD で共有される領域。SHM 等の実データを触らずに共有を検証できる。 */
 static volatile u32 pd_selftest_probe;

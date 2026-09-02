@@ -12,6 +12,7 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --api VER      最低APIバージョン (デフォルト: 1)
     --entry OFF    エントリポイントオフセット (デフォルト: 0)
     --gfx          GFXフラグを設定
+    --ring3        CPL=3 (リング3) フラグを設定 (v2 M1)
 """
 
 import sys
@@ -22,6 +23,7 @@ import re
 OS32X_MAGIC = 0x4F533332  # 'OS32'
 OS32X_HDR_V1_SIZE = 40
 OS32X_FLAG_GFX = 0x0001
+OS32X_FLAG_RING3 = 0x0002
 
 
 import subprocess
@@ -132,6 +134,7 @@ def main():
         print("  --api VER     最低APIバージョン")
         print("  --entry OFF   エントリポイントオフセット")
         print("  --gfx         GFXフラグ設定")
+        print("  --ring3       CPL=3 リング3フラグ設定")
         sys.exit(1)
 
     input_path = sys.argv[1]
@@ -164,6 +167,8 @@ def main():
             i += 2
         elif sys.argv[i] == '--gfx':
             flags |= OS32X_FLAG_GFX
+        elif sys.argv[i] == '--ring3':
+            flags |= OS32X_FLAG_RING3
             i += 1
         else:
             print(f"不明なオプション: {sys.argv[i]}")

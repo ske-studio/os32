@@ -15,10 +15,15 @@
 #include "shm.h"
 #include "snd_engine.h"
 #include "kapi_db.h"
+#include "gdt.h"
+#include "tss.h"
 
 extern void shell_print(const char *s, u8 attr);
 extern void shell_print_dec(u32 val, u8 color);
 extern u32 sys_mem_kb;
+/* kernel/tss.c の TSS 実体。CPL=3 遷移で TSS.ESP0 を現在のカーネル ESP に
+ * 合わせる (割り込み/int 0x80 のフレームが exec_run の frame を踏まないよう)。*/
+extern struct tss_entry kernel_tss;
 static KernelAPI *kapi;
 void exec_init(void) {
     kapi = (KernelAPI *)KAPI_ADDR;
@@ -73,6 +78,22 @@ typedef struct {
 volatile int exec_nest_level = 0;
 volatile int exec_exit_status = EXEC_SUCCESS;
 static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
+
+/* ======================================================================== */
+/*  リング3 (CPL=3) 実行状態 (v2 M1)                                        */
+/*                                                                          */
+/*  M1 は単一アプリのみ (リング3 のネストは後続)。CPL=3 で走るアプリの      */
+/*  アドレス空間を 1 つだけ保持する。int 0x80 (sys_exit) の C 側ディスパッチ */
+/*  がここを参照して master PD へ戻し AS を破棄する。                        */
+/* ======================================================================== */
+
+/* リング3 ユーザスタック: 0x400000 帯 (APP_BAND_PDE) 上端に置く (M1_RING3 §5)。
+ * プログラムは 0x400000 から最大 1MB。スタックはその十分上、帯の最上位 64KB。 */
+#define RING3_USTACK_TOP     (MEM_EXEC_LOAD_ADDR + 0x400000UL)  /* 0x800000 (帯上端, exclusive) */
+#define RING3_USTACK_SIZE    0x010000UL                          /* 64KB */
+
+static struct addrspace g_ring3_as;
+static volatile int g_ring3_active = 0;
 
 #include "ksetjmp.h"
 
@@ -185,6 +206,30 @@ void __cdecl kapi_sys_exit(int status)
 }
 
 /* ======================================================================== */
+/*  ring3_syscall_dispatch — CPL=3 からの int 0x80 の C 側入口 (v2 M1)      */
+/*                                                                          */
+/*  kernel/ring3_entry.asm から cdecl で (slot, arg0) が渡る。M1 の唯一の    */
+/*  システムコールは sys_exit なので slot は未使用 (M2 のトランポリンが      */
+/*  slot ディスパッチと引数コピー/ポインタ検証を担う, CONTRACTS C4)。        */
+/*                                                                          */
+/*  実行中は CR3 がアプリ PD のまま (割り込み/int は CR3 を変えない)。       */
+/*  アプリ PD はカーネル帯域 (PDE0) を master と共有しているので、この       */
+/*  ハンドラのコード/スタックは問題なく走る。exec_exit の後始末は master PD  */
+/*  上で行うため、先に CR3 を master へ戻し AS を破棄する。                  */
+/* ======================================================================== */
+void __cdecl ring3_syscall_dispatch(u32 slot, u32 arg0)
+{
+    (void)slot;
+    if (g_ring3_active) {
+        paging_load_cr3(paging_kernel_pd_phys());
+        paging_addrspace_destroy(&g_ring3_as);
+        g_ring3_active = 0;
+    }
+    /* exec_exit は longjmp で exec_run の復帰点へ跳ぶ (戻らない)。 */
+    exec_exit((int)arg0);
+}
+
+/* ======================================================================== */
 /*  exec_run — 外部プログラムのロードと実行 (シェル常駐モデル)              */
 /*                                                                          */
 /*  Level 0 (シェル): 0x300000 にロード。スタック=0x380000。                 */
@@ -209,6 +254,7 @@ int exec_run(const char *cmdline)
     u32 code_off, text_sz, bss_sz, heap_sz, entry_off;
     ExecEntry entry;
     ExecContext *ctx;
+    int want_ring3 = 0;      /* CPL=3 で走らせるか (OS32X_FLAG_RING3, v2 M1) */
 
     char path[VFS_MAX_PATH];
     const char *p = cmdline;
@@ -302,6 +348,16 @@ int exec_run(const char *cmdline)
     bss_sz    = hdr->bss_size;
     heap_sz   = hdr->heap_size;
     entry_off = hdr->entry_offset;
+
+    /* リング3 実行の意思表示 (v2 M1)。シェル (Level 0) は常駐帯域で
+     * CPL=0 のまま。子プログラムだけが OS32X_FLAG_RING3 で CPL=3 に降りる。
+     * M1 の対象は KAPI を使わない自己完結プログラム (トランポリンは M2)。 */
+    want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_RING3) != 0);
+    if (want_ring3) {
+        /* ユーザスタックを 0x400000 帯 (PD ごと) の上端へ移す。argv は
+         * この後この stack_top を使って積まれるので、ここで差し替える。 */
+        stack_top = RING3_USTACK_TOP;
+    }
 
     if (text_sz + bss_sz > max_size) {
         shell_print("[DBG] NOMEM: text=", 0xE1);
@@ -524,15 +580,77 @@ int exec_run(const char *cmdline)
         ((u32 *)new_esp)[1] = (u32)argv_area;
         ((u32 *)new_esp)[2] = (u32)kapi;
 
-        __asm__ volatile(
-            "movl %%esp, %0\n\t"
-            "movl %1, %%esp\n\t"
-            "call *%2\n\t"
-            "movl %0, %%esp"
-            : "=m"(saved_esp_stack[exec_nest_level - 1])
-            : "r"(new_esp), "r"(entry)
-            : "eax", "ecx", "edx", "cc", "memory"
-        );
+        if (want_ring3) {
+            /* ================= CPL=3 への遷移 (v2 M1c/M1d) ================= */
+            if (paging_addrspace_create(&g_ring3_as) != 0) {
+                shell_print("Error: ring3 addrspace create failed\n", ATTR_RED);
+                exec_nest_level--;
+                return EXEC_ERR_NOMEM;
+            }
+
+            /* --- M1c: 0x400000 帯・ユーザスタック・VRAM・SHM を RW+USER に ---
+             * 共有 PDE (カーネル帯域) には USER を立てない = CPL=3 から不可のまま。 */
+            /* プログラム帯 (code/data/bss + 予備) */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                MEM_EXEC_LOAD_ADDR, MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE,
+                PAGE_RW | PTE_USER);
+            /* ユーザスタック帯 (0x400000 帯の上端, PD ごと) */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                RING3_USTACK_TOP - RING3_USTACK_SIZE, RING3_USTACK_TOP,
+                PAGE_RW | PTE_USER);
+            /* VRAM (テキスト 0xA0000 + グラフィック 0xA8000) — C2: 全PD共有+USER */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                0xA0000UL, 0xC0000UL, PAGE_RW | PTE_USER);
+            /* SHM (アプリ間データ受け渡し) — C2: 全PD共有+USER */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                (u32)MEM_SHM_BASE, (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE,
+                PAGE_RW | PTE_USER);
+
+            g_ring3_active = 1;
+
+            /* --- M1d: iret で CPL=3 に降りる ---
+             * v86_entry.asm の iretd フレーム構築 (SS/ESP/EFLAGS/CS/EIP) を流用。
+             * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)
+             * なので CPL=3 は cli/sti/in/out で #GP (M0b で特権命令は除去済み)。
+             * TSS.ESP0 を現在の ESP に設定 (v86_enter と同じ手法): CPL=3 実行中の
+             * 割り込み / int 0x80 のフレームがこの直下に積まれ、exec_run の
+             * setjmp フレームを踏まない。ここから通常 return しない —
+             * 終了は int 0x80 → ring3_syscall_dispatch → longjmp。 */
+            __asm__ volatile(
+                "cli\n\t"
+                "movl %%esp, %[e0]\n\t"     /* TSS.ESP0 = 現在のカーネル ESP */
+                "movl %[pd], %%cr3\n\t"     /* アプリ PD へ切替 */
+                "movl %[uds], %%eax\n\t"
+                "movw %%ax, %%ds\n\t"
+                "movw %%ax, %%es\n\t"
+                "movw %%ax, %%fs\n\t"
+                "movw %%ax, %%gs\n\t"
+                "pushl %[uds]\n\t"          /* SS = USER_DS */
+                "pushl %[uesp]\n\t"         /* ESP = ユーザスタック */
+                "pushl $0x202\n\t"          /* EFLAGS: IF=1, IOPL=0 */
+                "pushl %[ucs]\n\t"          /* CS = USER_CS */
+                "pushl %[eip]\n\t"          /* EIP = エントリポイント */
+                "iret\n\t"
+                : [e0] "=m"(kernel_tss.esp0)
+                : [pd]  "r"(g_ring3_as.pd_phys),
+                  [uesp]"r"(new_esp),
+                  [eip] "r"((u32)entry),
+                  [uds] "i"(USER_DS),
+                  [ucs] "i"(USER_CS)
+                : "eax", "memory"
+            );
+            /* iret 後はここへ戻らない */
+        } else {
+            __asm__ volatile(
+                "movl %%esp, %0\n\t"
+                "movl %1, %%esp\n\t"
+                "call *%2\n\t"
+                "movl %0, %%esp"
+                : "=m"(saved_esp_stack[exec_nest_level - 1])
+                : "r"(new_esp), "r"(entry)
+                : "eax", "ecx", "edx", "cc", "memory"
+            );
+        }
         exec_exit(EXEC_SUCCESS);
     }
 

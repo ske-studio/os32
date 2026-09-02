@@ -135,6 +135,24 @@ int paging_addrspace_create(struct addrspace *as);
  * paging_load_cr3(paging_kernel_pd_phys()) で master へ戻すこと。 */
 void paging_addrspace_destroy(struct addrspace *as);
 
+/* アプリ AS の 1 ページを USER でマップする (M1c)。
+ *   - virt が 0x400000 帯 (app_pde) なら、アプリ固有 PT に書く
+ *     (このアプリの PD からしか見えない)。
+ *   - それ以外の共有帯 (VRAM 0xA8000 / SHM 等、C2 で全 PD 共有 + USER と
+ *     定めた領域) なら共有 PT の PTE に USER を立てる。共有 PT は master と
+ *     同一だが、master 側の PDE には USER を伝播させないので (このアプリ PD
+ *     の PDE コピーにだけ立てる)、カーネル/シェルから見た実効権限は
+ *     supervisor のまま保たれる (PDE と PTE の論理積)。
+ * flags に PTE_USER を含めること。戻り値 0=成功, -1=範囲外。 */
+int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
+                              u32 flags);
+
+/* [vstart, vend) を identity (phys=virt) で USER マップする (M1c)。
+ * end は exclusive。プログラム帯・ユーザスタック・VRAM・SHM に使う。
+ * 戻り値 0=成功, -1=範囲の一部が範囲外 (範囲内分は適用済み)。 */
+int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
+                                    u32 vend, u32 flags);
+
 /* PD 複製の自己診断 (V1)。CPL=0 のまま:
  *   1. アプリ AS を作る
  *   2. CR3 を新 PD に載せてもカーネル (コード/スタック/データ) が生存する

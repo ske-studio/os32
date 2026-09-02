@@ -78,6 +78,11 @@ extern void irq_stub_unexp_15(void);
 /* デフォルトハンドラ (ベクタ 0x30 以降のみ) */
 extern void isr_stub_default(void);
 
+/* リング3 システムコール入口 (kernel/ring3_entry.asm, v2 M1/M2)。
+ * ベクタ 0x80, ゲート DPL=3 で CPL=3 から呼べる。M1 では sys_exit のみ。 */
+extern void int80_stub(void);
+#define RING3_SYSCALL_VECTOR 0x80
+
 /* ======================================================================== */
 /*  idt_set_gate — IDTエントリを設定                                        */
 /* ======================================================================== */
@@ -141,6 +146,10 @@ void idt_init(void)
     idt_set_gate(0x2A, irq_stub_unexp_10, IDT_ATTR_INT_GATE32);
     idt_set_gate(0x2E, irq_stub_unexp_14, IDT_ATTR_INT_GATE32);
     idt_set_gate(0x2F, irq_stub_unexp_15, IDT_ATTR_INT_GATE32);
+
+    /* リング3 システムコール (int 0x80): ゲート DPL=3 で CPL=3 から呼べる。
+     * 他の例外/IRQ ゲートは DPL=0 のまま (ユーザから直接呼べない, C4)。 */
+    idt_set_gate(RING3_SYSCALL_VECTOR, int80_stub, IDT_ATTR_INT_GATE32_DPL3);
 
     /* IDTRをロード */
     idtp.limit = sizeof(idt) - 1;
