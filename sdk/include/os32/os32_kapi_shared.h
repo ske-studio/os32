@@ -117,6 +117,7 @@ typedef enum {
 /* フラグ定義 */
 #define OS32X_FLAG_GFX    0x0001        /* GFXモードを使用 */
 #define OS32X_FLAG_RING3  0x0002        /* CPL=3 (リング3) で実行する (v2 M1) */
+#define OS32X_FLAG_FORCE_CPL0 0x0004    /* CPL=0 強制 (ring3 デフォルト化後のエスケープハッチ, v2 M3) */
 
 typedef struct {
     u32 magic;            /* 0x00: OS32X_MAGIC */

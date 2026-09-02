@@ -143,6 +143,7 @@ extern u32 __bss_end;
 
 /* GFXバックバッファ (コンベンショナル, 128KB = 32000B × 4プレーン) */
 #define MEM_GFX_BB_BASE         0x6A000UL
+#define MEM_GFX_BB_SIZE         0x20000UL  /* 128KB (32000B×4プレーン, 0x6A000-0x89FFF) */
 
 /* KernelAPIテーブルアドレスは os32_kapi_shared.h で定義 (KAPI_ADDR) */
 

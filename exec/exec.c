@@ -162,7 +162,11 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 /* リング3 ユーザスタック: 0x400000 帯 (APP_BAND_PDE) 上端に置く (M1_RING3 §5)。
  * プログラムは 0x400000 から最大 1MB。スタックはその十分上、帯の最上位 64KB。 */
 #define RING3_USTACK_TOP     (MEM_EXEC_LOAD_ADDR + 0x400000UL)  /* 0x800000 (帯上端, exclusive) */
-#define RING3_USTACK_SIZE    0x010000UL                          /* 64KB */
+/* ユーザスタックサイズ。旧 CPL=0 子プロセスの MEM_EXEC_STACK_SIZE (256KB) に
+ * 合わせる (ring3 デフォルト化での深いスタック使用の回帰を避ける)。
+ * スタック帯 [0x7C0000, 0x800000) は PDE1 内・プログラム帯 (0x400000-0x4FFFFF)
+ * より十分上。 */
+#define RING3_USTACK_SIZE    MEM_EXEC_STACK_SIZE
 
 static struct addrspace g_ring3_as;
 static volatile int g_ring3_active = 0;
@@ -186,10 +190,9 @@ volatile int ring3_in_syscall = 0;
 static int ring3_ptr_ok(u32 p)
 {
     if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
-    if (p >= MEM_EXEC_LOAD_ADDR &&
-        p <  MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE) return 1; /* プログラム帯 */
-    if (p >= RING3_USTACK_TOP - RING3_USTACK_SIZE &&
-        p <  RING3_USTACK_TOP) return 1;          /* ユーザスタック帯 */
+    if (p >= MEM_EXEC_LOAD_ADDR && p < RING3_USTACK_TOP) return 1;
+        /* 0x400000 帯 = code/data/bss/heap (スタック下端まで) + ユーザスタック。
+         * 全域を USER マップ済みなので、この範囲のポインタはすべて有効。 */
     if (p >= (u32)MEM_SHM_BASE &&
         p <  (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE) return 1;  /* SHM */
     if (p >= 0xA0000UL && p < 0xC0000UL) return 1;/* VRAM (テキスト/グラフィック) */
@@ -545,7 +548,11 @@ int exec_run(const char *cmdline)
     /* リング3 実行の意思表示 (v2 M1)。シェル (Level 0) は常駐帯域で
      * CPL=0 のまま。子プログラムだけが OS32X_FLAG_RING3 で CPL=3 に降りる。
      * M1 の対象は KAPI を使わない自己完結プログラム (トランポリンは M2)。 */
-    want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_RING3) != 0);
+    /* v2 M3a: ring3 をデフォルト化。シェル (Level 0, 常駐 0x300000) は CPL=0
+     * のまま。それ以外の全プログラムを CPL=3 で起動する。稀に CPL=3 で
+     * 動かせないものは OS32X_FLAG_FORCE_CPL0 (mkos32x --cpl0) で CPL=0 に落とす
+     * (原則は修正で対応。エスケープハッチ)。 */
+    want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_FORCE_CPL0) == 0);
     if (want_ring3) {
         /* ユーザスタックを 0x400000 帯 (PD ごと) の上端へ移す。argv は
          * この後この stack_top を使って積まれるので、ここで差し替える。 */
@@ -784,9 +791,12 @@ int exec_run(const char *cmdline)
 
             /* --- M1c: 0x400000 帯・ユーザスタック・VRAM・SHM を RW+USER に ---
              * 共有 PDE (カーネル帯域) には USER を立てない = CPL=3 から不可のまま。 */
-            /* プログラム帯 (code/data/bss + 予備) */
+            /* プログラム帯 (code/data/bss/heap): スタック直下まで USER(RW)。
+             * 旧 CPL=0 子はコード帯の後ろにヒープが伸びていたので、CPL=3 でも
+             * ヒープをスタック手前まで使えるよう [0x400000, スタック下端) を覆う
+             * (v2 M3 回帰修正: alloc_demo が 1MB 超で 0x501008 に #PF していた)。 */
             paging_addrspace_map_user_range(&g_ring3_as,
-                MEM_EXEC_LOAD_ADDR, MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE,
+                MEM_EXEC_LOAD_ADDR, RING3_USTACK_TOP - RING3_USTACK_SIZE,
                 PAGE_RW | PTE_USER);
             /* ユーザスタック帯 (0x400000 帯の上端, PD ごと) */
             paging_addrspace_map_user_range(&g_ring3_as,
@@ -799,6 +809,24 @@ int exec_run(const char *cmdline)
             paging_addrspace_map_user_range(&g_ring3_as,
                 (u32)MEM_SHM_BASE, (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE,
                 PAGE_RW | PTE_USER);
+
+            /* --- v2 M3b: CPL=3 から直接触る共有低位メモリ (PDE0) を USER (RW) に ---
+             * いずれもブート後配置の共有領域。VRAM/SHM と同じ要領。境界は
+             * memmap.h の定数を使う ([C4])。まず RW (Unicode/フォントは将来 RO 可)。 */
+            /* フォントキャッシュ (0x01000-0x49FFF): kcg フォントビットマップ直読 */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                (u32)MEM_FONT_CACHE_BASE, (u32)MEM_UNICODE_TABLE_BASE,
+                PAGE_RW | PTE_USER);
+            /* Unicode-JIS 変換表 (0x4A000, 128KB): unicode_to_jis() 直読 */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                (u32)MEM_UNICODE_TABLE_BASE,
+                (u32)MEM_UNICODE_TABLE_BASE + (u32)MEM_UNICODE_TABLE_SIZE,
+                PAGE_RW | PTE_USER);
+            /* GFX バックバッファ (0x6A000, 128KB): libos32gfx がピクセルを書く先 */
+            paging_addrspace_map_user_range(&g_ring3_as,
+                (u32)MEM_GFX_BB_BASE,
+                (u32)MEM_GFX_BB_BASE + (u32)MEM_GFX_BB_SIZE,
+                PAGE_RW | PTE_USER);
             /* KAPI トランポリンページ (RO+USER, 全PD共有)。この app PD の PDE0 に
              * USER を伝播させる (VRAM/SHM で既に立つが明示・冪等)。 */
             paging_addrspace_map_user(&g_ring3_as, ring3_tramp_page,
@@ -808,8 +836,11 @@ int exec_run(const char *cmdline)
              * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので
              * 無変更。データフィールド (sbrk_heap_limit/shm_base) を本物の表から
              * トランポリンへ反映してから渡す (CR0.WP=0 で RO ページへ書ける)。 */
+            /* CPL=3 の sbrk 上限は USER マップした範囲の上端 (スタック下端) に
+             * 合わせる。旧 CPL=0 の mem_end 由来値だと USER マップ外を指し、
+             * _sbrk が伸ばした先で #PF する。 */
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] =
-                kapi->sbrk_heap_limit;
+                RING3_USTACK_TOP - RING3_USTACK_SIZE;
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] =
                 kapi->shm_base;
             ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */
