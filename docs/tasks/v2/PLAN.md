@@ -106,6 +106,21 @@ halt 入りループ、通常シェルの kbd_getkey も元から hlt ブロッ�
   (`paging_set_page` は対応済み)
 - ユーザスタックを CPL=3 用に用意。カーネルスタックは TSS.ESP0 で復帰
 
+**完了 (2026-09-03) — 全ゲート実機通過。** commit `d662f77` (M1a+M1b) /
+`1910a9a` (M1c+M1d) / `84ac4fb` (M1e)。
+
+- **V1** PD 複製: 新 PD に CR3 を載せてもカーネル帯域が同一物理で共有・生存。
+  ブート時 `kselftest` に常設 (fail=0 / pass=42)。
+- **V2** CPL=3 到達 + USER マップした VRAM への描画 (`ring3_hello`: 0xA8000="RNG3")。
+- **V3** 割り込みを跨いだ CPL=3 継続。`isr_stub` がユーザセグメントを復元せず
+  #GP していたのを `IRETD_USER` マクロ (VM/RPL で分岐、CPL=3 復帰時のみ USER_DS
+  再ロード) で修正。0xA8004="DONE" 書込で実証。
+- **V4** CPL=3 由来の #PF/#GP でアプリのみ kill・カーネル生存 (`ring3_fault`:
+  0x100000 書込 → kill、`fault_kill_count`=1、0x100000 無傷、シェル復帰)。
+  = **[ABI4](CPL=3 からカーネル破壊)の構造的解消を実証。** 削除は M2+M3 後。
+
+PD 切替単一アプリ (M1) で成立。複数アプリ同時ロード (§6) は後続。
+
 ### M2 — KAPI トランポリン
 
 > 設計: [M2_KAPI_TRAMPOLINE.md](M2_KAPI_TRAMPOLINE.md)
