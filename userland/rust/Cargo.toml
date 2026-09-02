@@ -8,6 +8,8 @@ members = [
     "alloc_demo",
     "math_test_rs",
     "font_test",
+    "libos32gui",
+    "gui_demo",
 ]
 resolver = "2"
 
