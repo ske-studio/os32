@@ -215,6 +215,179 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     8,  /* v86_boot2 */
 };
 
+/* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
+ * ディスパッチャが wrap 前に範囲検証する引数を示す (可変長はガード担保)。 */
+const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
+    0x0000,  /* gfx_init */
+    0x0000,  /* gfx_init_200 */
+    0x0000,  /* gfx_shutdown */
+    0x0000,  /* gfx_present */
+    0x0000,  /* kbd_trygetchar */
+    0x0000,  /* mem_alloc */
+    0x0001,  /* mem_free: ptr */
+    0x0000,  /* get_tick */
+    0x0002,  /* kprintf: fmt */
+    0x0001,  /* sys_unlink: path */
+    0x0003,  /* sys_rename: oldpath,newpath */
+    0x0001,  /* sys_mkdir: path */
+    0x0007,  /* sys_ls: path,cb,ctx */
+    0x0000,  /* kmalloc_total */
+    0x0000,  /* kmalloc_used */
+    0x0000,  /* kmalloc_free */
+    0x0000,  /* paging_enabled */
+    0x0001,  /* rtc_read: rtc_time */
+    0x0000,  /* tvram_clear */
+    0x0000,  /* tvram_putchar_at */
+    0x0000,  /* tvram_putkanji_at */
+    0x0000,  /* tvram_scroll */
+    0x0000,  /* kbd_getchar */
+    0x0000,  /* kbd_getkey */
+    0x0000,  /* kbd_trygetkey */
+    0x0007,  /* sys_mount: prefix,dev,fs */
+    0x0001,  /* sys_umount: prefix */
+    0x0001,  /* sys_is_mounted: prefix */
+    0x0001,  /* sys_chdir: path */
+    0x0000,  /* sys_getcwd */
+    0x0001,  /* vfs_devname: prefix */
+    0x0000,  /* vfs_sync */
+    0x0001,  /* sys_rmdir: path */
+    0x0000,  /* serial_init */
+    0x0001,  /* serial_puts: s */
+    0x0000,  /* serial_getchar */
+    0x0000,  /* serial_putchar */
+    0x0000,  /* serial_trygetchar */
+    0x0000,  /* serial_is_initialized */
+    0x0001,  /* exec_run: path */
+    0x0000,  /* dev_count */
+    0x001A,  /* dev_get_info: name,type,sects */
+    0x0000,  /* fm_startup_sound */
+    0x0001,  /* fm_play_mml: mml */
+    0x0000,  /* np2_detect */
+    0x0001,  /* np2_get_version: buf */
+    0x0001,  /* np2_get_cpu: buf */
+    0x0001,  /* np2_get_clock: buf */
+    0x0001,  /* np2_check_hostdrv: buf */
+    0x0000,  /* ide_init */
+    0x0000,  /* ide_drive_present */
+    0x0002,  /* ide_identify: info */
+    0x0004,  /* ide_read_sector: buf */
+    0x0000,  /* path_get_drive */
+    0x0000,  /* path_get_cwd */
+    0x0001,  /* path_set_drive: d */
+    0x0001,  /* path_set_cwd: p */
+    0x0003,  /* path_parse: input,result */
+    0x0000,  /* ext2_format */
+    0x0000,  /* kcg_init */
+    0x0000,  /* kcg_set_scale */
+    0x0000,  /* buz_on */
+    0x0000,  /* buz_off */
+    0x0000,  /* rshell_set_active */
+    0x0004,  /* ide_write_sector: buf */
+    0x0008,  /* ide_write_sectors: buf */
+    0x0000,  /* sys_reboot */
+    0x0000,  /* sys_halt */
+    0x0000,  /* shell_putchar */
+    0x0001,  /* shell_print_utf8: utf8_str */
+    0x0000,  /* console_get_cursor_x */
+    0x0000,  /* console_get_cursor_y */
+    0x0000,  /* console_set_cursor */
+    0x0001,  /* sys_open: path */
+    0x0000,  /* sys_close */
+    0x0002,  /* sys_read: buf */
+    0x0002,  /* sys_write: buf */
+    0x0000,  /* sys_lseek */
+    0x0003,  /* console_get_size: w,h */
+    0x0000,  /* kbd_get_modifiers */
+    0x0000,  /* sys_get_mem_kb */
+    0x0000,  /* sys_time */
+    0x0000,  /* gfx_hardware_scroll */
+    0x0000,  /* gfx_present_rect */
+    0x0000,  /* sys_exit */
+    0x0000,  /* sys_isatty */
+    0x0003,  /* sys_stat: path,buf */
+    0x0002,  /* sys_fstat: buf */
+    0x0000,  /* gfx_set_palette */
+    0x000E,  /* gfx_get_palette: r,g,b */
+    0x0001,  /* gfx_get_framebuffer: fb */
+    0x0000,  /* gfx_add_dirty_rect */
+    0x0000,  /* gfx_present_dirty */
+    0x0000,  /* gfx_present_nosync */
+    0x0001,  /* gfx_present_raster: table */
+    0x0002,  /* kcg_read_ank: buf */
+    0x0002,  /* kcg_read_kanji: buf */
+    0x0000,  /* sys_shm_alloc */
+    0x0001,  /* sys_shm_lock: ptr */
+    0x0001,  /* sys_shm_free: ptr */
+    0x0000,  /* ime_getchar */
+    0x0000,  /* ime_trygetchar */
+    0x0000,  /* ime_toggle */
+    0x0000,  /* ime_is_active */
+    0x0000,  /* ime_set_mode */
+    0x0000,  /* ime_get_mode */
+    0x0000,  /* ime_getkey */
+    0x0002,  /* sys_redirect_fd: path */
+    0x0000,  /* sys_reset_redirect */
+    0x0000,  /* sys_is_redirected */
+    0x0000,  /* sys_pipe_alloc */
+    0x0000,  /* sys_pipe_free */
+    0x0000,  /* sys_pipe_get_buf */
+    0x0000,  /* sys_pipe_get_len */
+    0x0000,  /* sys_pipe_clear */
+    0x0002,  /* sys_redirect_fd_buf: buf */
+    0x0000,  /* sys_redirect_get_buf_len */
+    0x0000,  /* paging_is_present */
+    0x0001,  /* snd_bgm_play: mml */
+    0x0000,  /* snd_bgm_stop */
+    0x0000,  /* snd_bgm_is_playing */
+    0x0000,  /* snd_se_play */
+    0x0000,  /* snd_se_play_raw */
+    0x0000,  /* snd_set_master */
+    0x0000,  /* snd_bgm_set_persist */
+    0x0000,  /* kbd_is_pressed */
+    0x0000,  /* fm_note_on */
+    0x0000,  /* fm_note_off */
+    0x0000,  /* fm_set_tone_num */
+    0x0000,  /* ssg_tone */
+    0x0000,  /* ssg_volume */
+    0x0000,  /* ssg_all_off */
+    0x0001,  /* mouse_poll: info */
+    0x0000,  /* mouse_available */
+    0x0000,  /* mouse_set_bounds */
+    0x000C,  /* tvram_readchar_at: code,attr */
+    0x0000,  /* tvram_reverse_cell */
+    0x0000,  /* mouse_cursor_set_mode */
+    0x0000,  /* mouse_cursor_show */
+    0x0000,  /* mouse_cursor_hide */
+    0x0001,  /* db_open: path */
+    0x0000,  /* db_close */
+    0x0002,  /* db_exec: sql */
+    0x0002,  /* db_prepare: sql */
+    0x0000,  /* db_step */
+    0x0000,  /* db_column_int */
+    0x0000,  /* db_column_text */
+    0x0000,  /* db_finalize */
+    0x0000,  /* db_last_error */
+    0x0000,  /* db_mem_used */
+    0x0001,  /* kcg_load_font: path */
+    0x0002,  /* ide_get_info: info */
+    0x0001,  /* sys_get_build_info: buf */
+    0x0001,  /* loop_attach: path */
+    0x0000,  /* loop_detach */
+    0x0006,  /* loop_status: total,bps */
+    0x0009,  /* dev_blk_read: dev_name,buf */
+    0x0009,  /* dev_blk_write: dev_name,buf */
+    0x0000,  /* ime_switch_dict */
+    0x0003,  /* ime_user_list: yomi_prefix,out */
+    0x0003,  /* ime_user_delete: yomi,kanji */
+    0x0001,  /* ime_user_export: path */
+    0x0000,  /* ime_user_clear */
+    0x0000,  /* ime_trygetkey */
+    0x0000,  /* v86_selftest */
+    0x0001,  /* v86_disktest: path */
+    0x0001,  /* v86_boot: path */
+    0x0003,  /* v86_boot2: path,second */
+};
+
 void __cdecl wrap_gfx_init(void)
 {
     KAPI_HIT(0);

@@ -18,6 +18,9 @@ extern void exec_fault_recover(void);
  * fault_kill_count をインクリメントし master CR3 復帰 → AS 破棄 → longjmp。
  * この関数は戻らない。 */
 extern void ring3_fault_kill(void);
+/* ring3 syscall (wrap) 実行中フラグ (exec.c, v2 M2e)。立っている間の CPL=0
+ * フォールトは「ring3 アプリ由来 (KAPI ポインタ deref 等)」とみなし kill する。 */
+extern volatile int ring3_in_syscall;
 
 #include "serial.h"
 #include "tvram.h"
@@ -240,8 +243,8 @@ void exception_handler(u32 error_code, u32 vector, u32 fault_eip,
      * (CPL=0) 自身のフォールトは CS.RPL==0 なので従来どおり停止させる
      * (ここを取り違えるとカーネルのバグを握り潰す)。ring3_fault_kill は
      * master CR3 に戻して longjmp するので戻らない。 */
-    if ((regs[11] & 3) == 3) {
-        sputs("\n[ring3] exception from CPL=3 vec=");
+    if ((regs[11] & 3) == 3 || ring3_in_syscall) {
+        sputs("\n[ring3] exception (CPL=3 / syscall) vec=");
         sput_hex32(vector);
         sputs(" EIP="); sput_hex32(fault_eip);
         sputs(" -> kill app\n");
@@ -331,8 +334,8 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
      * CS.RPL==3 なら CPL=3 由来。カーネル帯域 (PTE supervisor) への書き込みや
      * 未マップ読みで #PF したリング3 アプリを、カーネルを巻き込まず畳む。
      * カーネル自身の #PF は CS.RPL==0 なので従来どおり停止 (赤画面)。 */
-    if ((regs[10] & 3) == 3) {
-        sputs("\n[ring3] #PF from CPL=3 addr=");
+    if ((regs[10] & 3) == 3 || ring3_in_syscall) {
+        sputs("\n[ring3] #PF (CPL=3 / syscall) addr=");
         sput_hex32(fault_addr);
         sputs(" EIP="); sput_hex32(fault_eip);
         sputs(" -> kill app\n");

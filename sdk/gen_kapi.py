@@ -52,6 +52,10 @@ header_content += f"#define KAPI_FUNC_COUNT {len(data['api'])}\n"
 # 固定分のみを数える (ディスパッチャが下限に使う)。カーネル側 (kapi_generated.c)
 # で定義。プログラム側では未使用。
 header_content += "extern const u16 kapi_argsize[KAPI_FUNC_COUNT];\n"
+# kapi_argptr[slot] = 固定引数のうちポインタ型のビットマスク (bit k = 引数 k が
+# ポインタ)。int 0x80 ディスパッチャが wrap 呼び出し前に 0x400000帯/SHM/VRAM
+# 範囲を早期検証するのに使う (可変長 ... はガードで担保)。カーネル側で定義。
+header_content += "extern const u16 kapi_argptr[KAPI_FUNC_COUNT];\n"
 
 header_content += "\n#endif\n"
 
@@ -87,6 +91,24 @@ for _slot, _api in enumerate(data["api"]):
     _variadic = any(a == "..." for a in _api.get("args", []))
     _tag = "  /* %s%s */" % (_api["name"], " (...)" if _variadic else "")
     c_content += f"    {_bytes},{_tag}\n"
+c_content += "};\n\n"
+
+# --- M2e: kapi_argptr[] (CONTRACTS C5 追記) ---
+c_content += "/* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。\n"
+c_content += " * ディスパッチャが wrap 前に範囲検証する引数を示す (可変長はガード担保)。 */\n"
+c_content += "const u16 kapi_argptr[KAPI_FUNC_COUNT] = {\n"
+for _slot, _api in enumerate(data["api"]):
+    _mask = 0
+    _k = 0
+    for _a in _api.get("args", []):
+        if _a == "...":
+            continue
+        if "*" in _a:
+            _mask |= (1 << _k)
+        _k += 1
+    _pnames = [get_arg_names([a])[0] for a in _api.get("args", []) if a != "..." and "*" in a]
+    _tag = ("  /* %s: %s */" % (_api["name"], ",".join(_pnames))) if _mask else ("  /* %s */" % _api["name"])
+    c_content += f"    0x{_mask:04X},{_tag}\n"
 c_content += "};\n\n"
 
 for slot, api in enumerate(data["api"]):

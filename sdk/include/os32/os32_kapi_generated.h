@@ -179,5 +179,6 @@ typedef struct {
 
 #define KAPI_FUNC_COUNT 168
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
+extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 
 #endif

@@ -172,6 +172,30 @@ static volatile int g_ring3_active = 0;
  * PM の V4 検証が emu_read_mem で読む。 */
 volatile u32 fault_kill_count = 0;
 
+/* ring3 syscall (wrap) 実行中フラグ (v2 M2e フォールトガードの核)。
+ * dispatcher が kapi_invoke を挟む間だけ立てる。この間に #PF/#GP が起きたら
+ * (wrap 内 = CPL=0 でも) カーネル停止でなくアプリだけ kill する。可変長 %s の
+ * ような静的に検証できないポインタ deref もこれで捕捉でき [ABI4] を塞ぐ。
+ * 非 static (isr_handlers.c が extern で参照)。 */
+volatile int ring3_in_syscall = 0;
+
+/* ユーザポインタ引数の早期範囲検証 (v2 M2e 補助)。exec が CPL=3 アプリに
+ * USER マップした領域 (プログラム帯/ユーザスタック/SHM/VRAM) と NULL のみ許可。
+ * 範囲外 (例: 0xDEADBEEF) は wrap に入る前に弾き、カーネル状態不整合を避ける。
+ * 可変長引数はここでは見えないのでフォールトガードが担保する。 */
+static int ring3_ptr_ok(u32 p)
+{
+    if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
+    if (p >= MEM_EXEC_LOAD_ADDR &&
+        p <  MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE) return 1; /* プログラム帯 */
+    if (p >= RING3_USTACK_TOP - RING3_USTACK_SIZE &&
+        p <  RING3_USTACK_TOP) return 1;          /* ユーザスタック帯 */
+    if (p >= (u32)MEM_SHM_BASE &&
+        p <  (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE) return 1;  /* SHM */
+    if (p >= 0xA0000UL && p < 0xC0000UL) return 1;/* VRAM (テキスト/グラフィック) */
+    return 0;
+}
+
 #include "ksetjmp.h"
 
 /* ======================================================================== */
@@ -288,6 +312,7 @@ void __cdecl kapi_sys_exit(int status)
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
     }
+    ring3_in_syscall = 0;   /* syscall(sys_exit) を抜ける — ガードを下ろす */
     exec_exit(status);
 }
 
@@ -328,21 +353,49 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
 
     /* 本物の表から wrap_<slot> を取得 ([magic][version] の後が fn 表)。 */
     wrapptr = ((const u32 *)KAPI_ADDR)[2 + slot];
-
-    /* ユーザスタックから引数をコピー。スタブの ret アドレス分 (+4) を飛ばす。
-     * 固定分 = kapi_argsize[slot]。kprintf 等の可変長のため広めの窓を取り、
-     * ユーザスタック上端でクランプして over-read #PF を避ける (厳密検証は M2e)。 */
     args_src = (const void *)(user_esp + 4u);
     nbytes = (u32)kapi_argsize[slot];
+
+    /* --- (核) フォールトガードを立てる (v2 M2e) ---
+     * これ以降 (引数の user memory 読み・早期検証・kapi_invoke のコピー/wrap
+     * 実行) で #PF/#GP が起きたら、CPL=0 の wrap 内であっても
+     * ring3_in_syscall により「アプリ由来」と判定され ring3_fault_kill される。
+     * 可変長 %s のワイルドポインタ deref もここで捕捉される。 */
+    ring3_in_syscall = 1;
+
+    /* --- (補助) 明示ポインタ引数の早期範囲検証 (v2 M2e) ---
+     * kapi_argptr[slot] のビットが立つ固定引数はポインタ。0x400000帯/SHM/VRAM/
+     * NULL 以外は wrap に入る前に kill (よくある不正ポインタを入口で弾き、
+     * カーネル状態不整合リスクを減らす)。args_src の読みはガード下 (bad ESP は
+     * ここで #PF → kill)。可変長分はガードが担保。 */
+    {
+        u16 ptrmask = kapi_argptr[slot];
+        if (ptrmask) {
+            const u32 *a = (const u32 *)args_src;
+            u32 nfixed = nbytes / 4u;   /* 固定引数の個数 */
+            u32 k;
+            for (k = 0; k < nfixed && k < 16u; k++) {
+                if ((ptrmask & (u16)(1u << k)) && !ring3_ptr_ok(a[k])) {
+                    ring3_fault_kill();   /* 範囲外ポインタ → kill、戻らない */
+                }
+            }
+        }
+    }
+
+    /* 引数コピー窓: 固定分 + 可変長(kprintf)のため広めに取り、ユーザスタック
+     * 上端でクランプして over-read #PF を避ける (それでも越えればガードが捕捉)。 */
     window = (nbytes < RING3_ARG_WINDOW) ? RING3_ARG_WINDOW : nbytes;
     if ((u32)args_src < RING3_USTACK_TOP &&
         (u32)args_src + window > RING3_USTACK_TOP) {
         window = RING3_USTACK_TOP - (u32)args_src;
     }
 
-    /* 本物の wrap を呼び、戻り値を eax スロットへ (popad で復元 → スタブの
-     * ret でアプリへ戻り、cdecl 呼び出し側が引数を掃除する)。 */
+    /* 本物の wrap を呼ぶ (現 CR3 = アプリ PD)。戻り値を eax スロットへ。 */
     frame[7] = kapi_invoke((void *)wrapptr, args_src, window);
+
+    /* 正常復帰: ガードを下ろす (フォールト/ sys_exit 経路は longjmp するので
+     * teardown 側 ring3_fault_kill / kapi_sys_exit でクリアされる)。 */
+    ring3_in_syscall = 0;
 }
 
 /* ======================================================================== */
@@ -365,6 +418,7 @@ void ring3_fault_kill(void)
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
     }
+    ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
     exec_fault_recover();   /* longjmp するので戻らない */
 }
 
