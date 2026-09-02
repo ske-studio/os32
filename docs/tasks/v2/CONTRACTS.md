@@ -94,6 +94,8 @@ STUB_BASE:            スタブ列 (8 バイト/個)
 | `os32-cycle fault-test` | `RESULT: OK/FAIL` を 1 行返す (M0 の RESULT 規約と同じ) |
 | `faultprobe` | 各ケース後の回復を SHM か既定番地に記録 |
 
+---
+
 ## C7. 衝突ゾーンの所有権
 
 | 所有 | ファイル |
@@ -105,6 +107,23 @@ STUB_BASE:            スタブ列 (8 バイト/個)
 - 他レーンが排他ファイルへの配線を要するときは **PM 経由で背骨に依頼**
 - `exec.c` / `idt.c` は M1 と M2 の両方が触るが、いずれもコーダー1 の排他なので
   同時編集は起きない
+
+---
+
+## C8. Rust GUI の依存方針 (D / コーダー2)
+
+**libos32gui は外部クレートを入れず、描画は既存 libos32gfx を FFI で叩く。**
+2026-09 に Web 調査済み: no_std の retained-mode ウィジェット OSS で採用に
+足るものは無く (`embedded-gui` は作者自ら experimental/"bad" と明記)、
+`embedded-graphics` は成熟しているが OS32 の libos32gfx (スプライト・ベジェ・
+ダーティ矩形・ページフリップ、PC-98 調整済み) と重複し統合面で劣る。
+
+- **依存に加えてよいクレート: なし** (`os32_lz4` と同じく std/alloc なしで自作)
+- 描画プリミティブ: `libos32gfx` を `extern "C"` で呼ぶ。Rust 側で再実装しない
+- コーダー2 が作るのは libos32gfx に無い層のみ:
+  ウィンドウ管理 / Z オーダー / メッセージディスパッチ / ウィジェット
+- 再発明を避ける相手は外部 OSS ではなく in-repo の libos32gfx (メモリ
+  os32-no-wheel-reinvention の原則)
 
 ---
 
