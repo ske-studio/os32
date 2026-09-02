@@ -59,9 +59,14 @@ STUB_BASE:            スタブ列 (8 バイト/個)
   (計 8 バイト)
 ```
 
-- `STUB_BASE = page + align4(8 + 4*KAPI_FUNC_COUNT)`
 - スタブは固定テンプレート。per-slot コード生成は不要 (カーネルが slot だけ差し替え)
-- 168 スロットで table 680B + スタブ 1344B ≈ 2KB、1 ページに収まる
+- 168 スロットで table 688B + スタブ 1344B ≈ 2KB、1 ページに収まる
+
+> **実装 (2026-09-03):** `STUB_BASE = page + align4(sizeof(KernelAPI))` (= 688)。
+> 当初式 `align4(8 + 4*KAPI_FUNC_COUNT)` (= 680) は KernelAPI 末尾の**データ
+> フィールド 2 本** (`sbrk_heap_limit` / `shm_base`, fn 表直後 offset 680/684) を
+> 見落としており、スタブがデータフィールドと衝突した。struct 全体の後ろに
+> 置くよう補正。`exec/exec.c: ring3_trampoline_init()`。
 
 ## C4. int 0x80 ABI (M2)
 
@@ -71,8 +76,19 @@ STUB_BASE:            スタブ列 (8 バイト/個)
 - 引数: ユーザスタック (cdecl)。カーネルが `kapi_argsize[slot]` バイトを
   カーネルスタックへコピーして `wrap_<slot>` を call
 - 戻り値: `eax` に格納して iret
-- **ポインタ引数の範囲検証をここで一元化** (0x400000 帯 / SHM のみ許可)。
-  これが [ABI4] 解消の実装点
+- **ポインタ引数の保護をここで一元化** — これが [ABI4] 解消の実装点
+
+> **実装 (2026-09-03):** 純粋な範囲検証だけでは (a) 可変長引数 (`kprintf` の
+> `%s` ポインタ) を守れず、(b) wrap 実行中に #PF を longjmp で抜けるとカーネル
+> 状態不整合の恐れがあるため、**2 段構え**にした:
+> - **(核) ring3 syscall フォールトガード**: dispatcher がユーザメモリに触れる
+>   前後を `ring3_in_syscall` フラグで囲む。この間の #PF/#GP は wrap 内 (CPL=0)
+>   でも `ring3_fault_kill` でアプリだけ kill (`isr_handlers.c` の CPL=3 判定を
+>   `CS.RPL==3 || ring3_in_syscall` に拡張)。可変長 %s も含め全ポインタ deref を捕捉。
+> - **(補助) 早期範囲検証**: `kapi_argptr[slot]` の立つ固定ポインタ引数を
+>   `ring3_ptr_ok` (アプリ帯 [0x400000,0x7C0000)/スタック/SHM/VRAM/NULL) で
+>   wrap 前に検査し範囲外は kill。よくある不正ポインタを入口で弾き不整合を軽減。
+> `exec/exec.c: ring3_syscall_dispatch()` / `kernel/isr_handlers.c`。
 
 ## C5. 生成器の出力形式 (sdk/gen_kapi.py, M2)
 
@@ -82,9 +98,13 @@ STUB_BASE:            スタブ列 (8 バイト/個)
 |------|-----|------|
 | `KAPI_FUNC_COUNT` | マクロ | 関数スロット数 (現 **168**) |
 | `kapi_argsize[KAPI_FUNC_COUNT]` | `u16[]` | 各スロットの引数バイト数。型は 4B 換算、可変長 (`...`) は固定分のみ |
+| `kapi_argptr[KAPI_FUNC_COUNT]` | `u16[]` | 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k がポインタ)。早期範囲検証 (C4) が使う |
 
 - append-only ([ABI2]) を維持。新スロットは配列末尾に増える
-- `kapi_argsize` と `kapi.json` の整合を `check_kapi_version.py` に照合追加 (PM)
+
+> **実装 (2026-09-03):** `kapi_argptr` は M2e で追加 (当初 C5 は argsize のみ)。
+> 生成は冪等・rust/inc に差分なし。`kapi.json` の型に `*` を含む固定引数の
+> ビットを立てる。`sdk/gen_kapi.py`。
 
 ## C6. 検証シンボルと契約 (M3)
 
