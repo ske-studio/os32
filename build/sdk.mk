@@ -95,9 +95,14 @@ check-manifests:
 check-constraints:
 	@python3 tools/check_constraints.py
 
-check: check-kapi-version check-manifests check-constraints
+# ユーザランドの特権命令検査 (リング3 準備)。既定は警告のみ (exit 0) で
+# green ビルドを壊さない。リング3 導入後に --strict でゲートする。
+check-privileged:
+	@python3 tools/check_privileged.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check
