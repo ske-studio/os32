@@ -418,6 +418,6 @@ RPGの同時テキスト表示は通常 1-2 (メインウィンドウ + シス�
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [LIBCHEM_DESIGN.md](../../../game/docs/libchem/LIBCHEM_DESIGN.md) | libos32chem 設計書 (同格ライブラリ) |
+| `os32-game:docs/libchem/LIBCHEM_DESIGN.md` (LIBCHEM_DESIGN.md) | libos32chem 設計書 (同格ライブラリ) |
 | [LIBMATH_DESIGN.md](../libmath/LIBMATH_DESIGN.md) | libos32math 設計書 |
 | [KAPI_SPEC.md](../../KAPI_SPEC.md) | KernelAPI 仕様書 (DB接続) |

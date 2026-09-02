@@ -528,7 +528,7 @@ make all
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [LIBCHEM_DESIGN.md](../../../game/docs/libchem/LIBCHEM_DESIGN.md) | libos32chem 設計書 (RAMキャッシュパターン参照) |
+| `os32-game:docs/libchem/LIBCHEM_DESIGN.md` (LIBCHEM_DESIGN.md) | libos32chem 設計書 (RAMキャッシュパターン参照) |
 | [LIBINPUT_DESIGN.md](../libinput/LIBINPUT_DESIGN.md) | libos32input 設計書 (同一アーキテクチャパターン) |
 | [06_filesystem.md](../../06_filesystem.md) | VFS仕様 (sys_open/read/close API) |
 | [02_memory.md](../../02_memory.md) | メモリマップ (exec_heap制約) |

@@ -86,16 +86,17 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | ドキュメント | 内容 |
 |-------------|------|
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
+| [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-| [game/docs/game/GAME_PORT_PLAN.md](../game/docs/game/GAME_PORT_PLAN.md) | 対戦スゴロクRPG 移植計画 (ステージA/B、Phase 0〜9) |
-| [game/docs/game/ENGINE_EXTENSION_PLAN.md](../game/docs/game/ENGINE_EXTENSION_PLAN.md) | エンジン拡張実装計画 — game/lib/turn, game/lib/rpg, userland/lib/save 設計 |
+| `os32-game:docs/game/GAME_PORT_PLAN.md` | 対戦スゴロクRPG 移植計画 (別リポジトリ ske-studio/os32-game) |
+| `os32-game:docs/game/ENGINE_EXTENSION_PLAN.md` | エンジン拡張計画 (別リポジトリ)。userland/lib/save は本体に残る |
 | [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
 | [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。方式決定・実測・実装状況の索引 |
 | [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
 | [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
-| [game/docs/libchem/LIBCHEM_DESIGN.md](../game/docs/libchem/LIBCHEM_DESIGN.md) | game/lib/chem — 化学エンジンライブラリ設計書 |
+| `os32-game:docs/libchem/LIBCHEM_DESIGN.md` | 化学エンジンライブラリ設計 (別リポジトリ) |
 | [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
 | [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 | `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
