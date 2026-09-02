@@ -82,6 +82,9 @@ CFLAGS_COMMON = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-p
 # カーネル空間。__KERNEL_BUILD__ は include/os32_kapi_shared.h が
 # memmap.h と KAPI_ADDR を出すかどうかの判定に使う。
 KERNEL_CFLAGS = $(CFLAGS_COMMON) -O2 -Wall -D__KERNEL_BUILD__
+# 計測やデバッグ用の一時フラグをコマンドラインから足す口。
+#   例: make kernel KERNEL_CFLAGS_EXTRA=-DKAPI_PROFILE
+KERNEL_CFLAGS += $(KERNEL_CFLAGS_EXTRA)
 
 # ユーザー空間。__KERNEL_BUILD__ を付けないので KAPI テーブルの固定アドレスは
 # 見えない。外部プログラムは main() の第3引数で KernelAPI を受け取る。

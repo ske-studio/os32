@@ -36,838 +36,1011 @@ extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
 extern void kapi_sys_get_build_info(char *buf, int size);
 
+#include "kapi_profile.h"
+
+#ifdef KAPI_PROFILE
+volatile u32 kapi_hits[168];
+#endif
+
 void __cdecl wrap_gfx_init(void)
 {
+    KAPI_HIT(0);
     gfx_init();
 }
 
 void __cdecl wrap_gfx_init_200(void)
 {
+    KAPI_HIT(1);
     gfx_init_200();
 }
 
 void __cdecl wrap_gfx_shutdown(void)
 {
+    KAPI_HIT(2);
     gfx_shutdown();
 }
 
 void __cdecl wrap_gfx_present(void)
 {
+    KAPI_HIT(3);
     gfx_present();
 }
 
 int __cdecl wrap_kbd_trygetchar(void)
 {
+    KAPI_HIT(4);
     return kbd_trygetchar();
 }
 
 void * __cdecl wrap_mem_alloc(u32 size)
 {
+    KAPI_HIT(5);
     return exec_heap_alloc(size);
 }
 
 void __cdecl wrap_mem_free(void *ptr)
 {
+    KAPI_HIT(6);
     exec_heap_free(ptr);
 }
 
 u32 __cdecl wrap_get_tick(void)
 {
+    KAPI_HIT(7);
     return tick_count;
 }
 
 int __cdecl wrap_sys_unlink(const char *path)
 {
+    KAPI_HIT(9);
     return vfs_rm(path);
 }
 
 int __cdecl wrap_sys_rename(const char *oldpath, const char *newpath)
 {
+    KAPI_HIT(10);
     return vfs_rename(oldpath, newpath);
 }
 
 int __cdecl wrap_sys_mkdir(const char *path)
 {
+    KAPI_HIT(11);
     return vfs_mkdir(path);
 }
 
 int __cdecl wrap_sys_ls(const char *path, void *cb, void *ctx)
 {
+    KAPI_HIT(12);
     return vfs_ls(path, (vfs_dir_cb)cb, ctx);
 }
 
 u32 __cdecl wrap_kmalloc_total(void)
 {
+    KAPI_HIT(13);
     return kmalloc_total();
 }
 
 u32 __cdecl wrap_kmalloc_used(void)
 {
+    KAPI_HIT(14);
     return kmalloc_used();
 }
 
 u32 __cdecl wrap_kmalloc_free(void)
 {
+    KAPI_HIT(15);
     return kmalloc_free();
 }
 
 int __cdecl wrap_paging_enabled(void)
 {
+    KAPI_HIT(16);
     return paging_enabled();
 }
 
 void __cdecl wrap_rtc_read(void *rtc_time)
 {
+    KAPI_HIT(17);
     rtc_read((RTC_Time *)rtc_time);
 }
 
 void __cdecl wrap_tvram_clear(void)
 {
+    KAPI_HIT(18);
     tvram_clear();
 }
 
 void __cdecl wrap_tvram_putchar_at(int x, int y, char ch, u8 attr)
 {
+    KAPI_HIT(19);
     tvram_putchar_at(x, y, ch, attr);
 }
 
 void __cdecl wrap_tvram_putkanji_at(int x, int y, u16 jis, u8 attr)
 {
+    KAPI_HIT(20);
     tvram_putkanji_at(x, y, jis, attr);
 }
 
 void __cdecl wrap_tvram_scroll(void)
 {
+    KAPI_HIT(21);
     tvram_scroll();
 }
 
 int __cdecl wrap_kbd_getchar(void)
 {
+    KAPI_HIT(22);
     return kbd_getchar();
 }
 
 int __cdecl wrap_kbd_getkey(void)
 {
+    KAPI_HIT(23);
     return kbd_getkey();
 }
 
 int __cdecl wrap_kbd_trygetkey(void)
 {
+    KAPI_HIT(24);
     return kbd_trygetkey();
 }
 
 int __cdecl wrap_sys_mount(const char *prefix, const char *dev, const char *fs)
 {
+    KAPI_HIT(25);
     return vfs_mount(prefix, dev, fs);
 }
 
 void __cdecl wrap_sys_umount(const char *prefix)
 {
+    KAPI_HIT(26);
     vfs_umount(prefix);
 }
 
 int __cdecl wrap_sys_is_mounted(const char *prefix)
 {
+    KAPI_HIT(27);
     return vfs_is_mounted(prefix);
 }
 
 int __cdecl wrap_sys_chdir(const char *path)
 {
+    KAPI_HIT(28);
     return vfs_chdir(path);
 }
 
 const char * __cdecl wrap_sys_getcwd(void)
 {
+    KAPI_HIT(29);
     return vfs_cwd();
 }
 
 const char * __cdecl wrap_vfs_devname(const char *prefix)
 {
+    KAPI_HIT(30);
     return vfs_devname(prefix);
 }
 
 int __cdecl wrap_vfs_sync(void)
 {
+    KAPI_HIT(31);
     return vfs_sync();
 }
 
 int __cdecl wrap_sys_rmdir(const char *path)
 {
+    KAPI_HIT(32);
     return vfs_rmdir(path);
 }
 
 void __cdecl wrap_serial_init(u32 baud)
 {
+    KAPI_HIT(33);
     serial_init(baud);
 }
 
 void __cdecl wrap_serial_puts(const char *s)
 {
+    KAPI_HIT(34);
     serial_puts(s);
 }
 
 int __cdecl wrap_serial_getchar(void)
 {
+    KAPI_HIT(35);
     return serial_getchar();
 }
 
 void __cdecl wrap_serial_putchar(u8 ch)
 {
+    KAPI_HIT(36);
     serial_putchar(ch);
 }
 
 int __cdecl wrap_serial_trygetchar(void)
 {
+    KAPI_HIT(37);
     return serial_trygetchar();
 }
 
 int __cdecl wrap_serial_is_initialized(void)
 {
+    KAPI_HIT(38);
     return serial_is_initialized();
 }
 
 int __cdecl wrap_exec_run(const char *path)
 {
+    KAPI_HIT(39);
     return exec_run(path);
 }
 
 int __cdecl wrap_dev_count(void)
 {
+    KAPI_HIT(40);
     return dev_count();
 }
 
 int __cdecl wrap_dev_get_info(int idx, char *name, int nm, int *type, u32 *sects)
 {
+    KAPI_HIT(41);
     return dev_api_get_info(idx, name, nm, type, sects);
 }
 
 void __cdecl wrap_fm_startup_sound(void)
 {
+    KAPI_HIT(42);
     fm_startup_sound();
 }
 
 void __cdecl wrap_fm_play_mml(const char *mml)
 {
+    KAPI_HIT(43);
     fm_play_mml(mml);
 }
 
 int __cdecl wrap_np2_detect(void)
 {
+    KAPI_HIT(44);
     return np2_detect();
 }
 
 void __cdecl wrap_np2_get_version(char *buf, int size)
 {
+    KAPI_HIT(45);
     np2_get_version(buf, size);
 }
 
 void __cdecl wrap_np2_get_cpu(char *buf, int size)
 {
+    KAPI_HIT(46);
     np2_get_cpu(buf, size);
 }
 
 void __cdecl wrap_np2_get_clock(char *buf, int size)
 {
+    KAPI_HIT(47);
     np2_get_clock(buf, size);
 }
 
 int __cdecl wrap_np2_check_hostdrv(char *buf, int size)
 {
+    KAPI_HIT(48);
     return np2_check_hostdrv(buf, size);
 }
 
 void __cdecl wrap_ide_init(void)
 {
+    KAPI_HIT(49);
     ide_init();
 }
 
 int __cdecl wrap_ide_drive_present(int drv)
 {
+    KAPI_HIT(50);
     return ide_drive_present(drv);
 }
 
 int __cdecl wrap_ide_identify(int drv, void *info)
 {
+    KAPI_HIT(51);
     return ide_identify(drv, (IdeInfo *)info);
 }
 
 int __cdecl wrap_ide_read_sector(int drv, u32 lba, void *buf)
 {
+    KAPI_HIT(52);
     return ide_read_sector(drv, lba, buf);
 }
 
 const char * __cdecl wrap_path_get_drive(void)
 {
+    KAPI_HIT(53);
     return path_get_drive();
 }
 
 const char * __cdecl wrap_path_get_cwd(void)
 {
+    KAPI_HIT(54);
     return path_get_cwd();
 }
 
 int __cdecl wrap_path_set_drive(const char *d)
 {
+    KAPI_HIT(55);
     return path_set_drive(d);
 }
 
 void __cdecl wrap_path_set_cwd(const char *p)
 {
+    KAPI_HIT(56);
     path_set_cwd(p);
 }
 
 void __cdecl wrap_path_parse(const char *input, void *result)
 {
+    KAPI_HIT(57);
     path_parse(input, (ParsedPath *)result);
 }
 
 int __cdecl wrap_ext2_format(int drv, u32 sectors)
 {
+    KAPI_HIT(58);
     return ext2_format(drv, sectors);
 }
 
 void __cdecl wrap_kcg_init(void)
 {
+    KAPI_HIT(59);
     kcg_init();
 }
 
 void __cdecl wrap_kcg_set_scale(int s)
 {
+    KAPI_HIT(60);
     kcg_set_scale(s);
 }
 
 void __cdecl wrap_buz_on(void)
 {
+    KAPI_HIT(61);
     buz_on();
 }
 
 void __cdecl wrap_buz_off(void)
 {
+    KAPI_HIT(62);
     buz_off();
 }
 
 void __cdecl wrap_rshell_set_active(int active)
 {
+    KAPI_HIT(63);
     rshell_active = active;
 }
 
 int __cdecl wrap_ide_write_sector(int drv, u32 lba, const void *buf)
 {
+    KAPI_HIT(64);
     return ide_write_sector(drv, lba, buf);
 }
 
 int __cdecl wrap_ide_write_sectors(int drv, u32 lba, u32 cnt, const void *buf)
 {
+    KAPI_HIT(65);
     return ide_write_sectors(drv, lba, cnt, buf);
 }
 
 void __cdecl wrap_sys_reboot(void)
 {
+    KAPI_HIT(66);
     sys_reboot();
 }
 
 void __cdecl wrap_sys_halt(void)
 {
+    KAPI_HIT(67);
     sys_halt();
 }
 
 void __cdecl wrap_shell_putchar(char ch, u8 attr)
 {
+    KAPI_HIT(68);
     shell_putchar(ch, attr);
 }
 
 void __cdecl wrap_shell_print_utf8(const char *utf8_str, u8 color)
 {
+    KAPI_HIT(69);
     shell_print_utf8(utf8_str, color);
 }
 
 int __cdecl wrap_console_get_cursor_x(void)
 {
+    KAPI_HIT(70);
     return console_get_cursor_x();
 }
 
 int __cdecl wrap_console_get_cursor_y(void)
 {
+    KAPI_HIT(71);
     return console_get_cursor_y();
 }
 
 void __cdecl wrap_console_set_cursor(int x, int y)
 {
+    KAPI_HIT(72);
     console_set_cursor(x, y);
 }
 
 int __cdecl wrap_sys_open(const char *path, int mode)
 {
+    KAPI_HIT(73);
     return vfs_open(path, mode);
 }
 
 void __cdecl wrap_sys_close(int fd)
 {
+    KAPI_HIT(74);
     vfs_close(fd);
 }
 
 int __cdecl wrap_sys_read(int fd, void *buf, u32 size)
 {
+    KAPI_HIT(75);
     return vfs_read_fd(fd, buf, size);
 }
 
 int __cdecl wrap_sys_write(int fd, const void *buf, u32 size)
 {
+    KAPI_HIT(76);
     return vfs_write_fd(fd, buf, size);
 }
 
 int __cdecl wrap_sys_lseek(int fd, int offset, int whence)
 {
+    KAPI_HIT(77);
     return vfs_seek(fd, offset, whence);
 }
 
 void __cdecl wrap_console_get_size(int *w, int *h)
 {
+    KAPI_HIT(78);
     console_get_size(w, h);
 }
 
 u32 __cdecl wrap_kbd_get_modifiers(void)
 {
+    KAPI_HIT(79);
     return kbd_get_modifiers();
 }
 
 u32 __cdecl wrap_sys_get_mem_kb(void)
 {
+    KAPI_HIT(80);
     return sys_get_mem_kb();
 }
 
 os_time_t __cdecl wrap_sys_time(void)
 {
+    KAPI_HIT(81);
     return sys_time();
 }
 
 void __cdecl wrap_gfx_hardware_scroll(int lines)
 {
+    KAPI_HIT(82);
     gfx_hardware_scroll(lines);
 }
 
 void __cdecl wrap_gfx_present_rect(int x, int y, int w, int h)
 {
+    KAPI_HIT(83);
     gfx_present_rect(x, y, w, h);
 }
 
 void __cdecl wrap_sys_exit(int status)
 {
+    KAPI_HIT(84);
     kapi_sys_exit(status);
 }
 
 int __cdecl wrap_sys_isatty(int fd)
 {
+    KAPI_HIT(85);
     return vfs_isatty(fd);
 }
 
 int __cdecl wrap_sys_stat(const char *path, OS32_Stat *buf)
 {
+    KAPI_HIT(86);
     return vfs_stat(path, buf);
 }
 
 int __cdecl wrap_sys_fstat(int fd, OS32_Stat *buf)
 {
+    KAPI_HIT(87);
     return vfs_fstat(fd, buf);
 }
 
 void __cdecl wrap_gfx_set_palette(int idx, u8 r, u8 g, u8 b)
 {
+    KAPI_HIT(88);
     palette_set(idx, r, g, b);
 }
 
 void __cdecl wrap_gfx_get_palette(int idx, u8 *r, u8 *g, u8 *b)
 {
+    KAPI_HIT(89);
     palette_get(idx, r, g, b);
 }
 
 void __cdecl wrap_gfx_get_framebuffer(void *fb)
 {
+    KAPI_HIT(90);
     gfx_get_framebuffer(fb);
 }
 
 void __cdecl wrap_gfx_add_dirty_rect(int x, int y, int w, int h)
 {
+    KAPI_HIT(91);
     gfx_add_dirty_rect(x, y, w, h);
 }
 
 void __cdecl wrap_gfx_present_dirty(void)
 {
+    KAPI_HIT(92);
     gfx_present_dirty();
 }
 
 void __cdecl wrap_gfx_present_nosync(void)
 {
+    KAPI_HIT(93);
     gfx_present_nosync();
 }
 
 void __cdecl wrap_gfx_present_raster(void *table)
 {
+    KAPI_HIT(94);
     gfx_present_raster((GFX_RasterPalTable *)table);
 }
 
 void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf)
 {
+    KAPI_HIT(95);
     kcg_read_ank(ch, buf);
 }
 
 void __cdecl wrap_kcg_read_kanji(u16 jis_code, u8 *buf)
 {
+    KAPI_HIT(96);
     kcg_read_kanji(jis_code, buf);
 }
 
 void * __cdecl wrap_sys_shm_alloc(int blocks)
 {
+    KAPI_HIT(97);
     return shm_alloc(blocks);
 }
 
 int __cdecl wrap_sys_shm_lock(void *ptr)
 {
+    KAPI_HIT(98);
     return shm_lock(ptr);
 }
 
 int __cdecl wrap_sys_shm_free(void *ptr)
 {
+    KAPI_HIT(99);
     return shm_free(ptr);
 }
 
 int __cdecl wrap_ime_getchar(void)
 {
+    KAPI_HIT(100);
     return ime_getchar();
 }
 
 int __cdecl wrap_ime_trygetchar(void)
 {
+    KAPI_HIT(101);
     return ime_trygetchar();
 }
 
 void __cdecl wrap_ime_toggle(void)
 {
+    KAPI_HIT(102);
     ime_toggle();
 }
 
 int __cdecl wrap_ime_is_active(void)
 {
+    KAPI_HIT(103);
     return ime_is_active();
 }
 
 void __cdecl wrap_ime_set_mode(int mode)
 {
+    KAPI_HIT(104);
     ime_set_mode(mode);
 }
 
 int __cdecl wrap_ime_get_mode(void)
 {
+    KAPI_HIT(105);
     return ime_get_mode();
 }
 
 int __cdecl wrap_ime_getkey(void)
 {
+    KAPI_HIT(106);
     return ime_getkey();
 }
 
 int __cdecl wrap_sys_redirect_fd(int fd, const char *path, int mode)
 {
+    KAPI_HIT(107);
     return fd_redirect_to_file(fd, path, mode);
 }
 
 void __cdecl wrap_sys_reset_redirect(int fd)
 {
+    KAPI_HIT(108);
     fd_redirect_reset(fd);
 }
 
 int __cdecl wrap_sys_is_redirected(int fd)
 {
+    KAPI_HIT(109);
     return fd_is_redirected(fd);
 }
 
 int __cdecl wrap_sys_pipe_alloc(void)
 {
+    KAPI_HIT(110);
     return pipe_alloc();
 }
 
 void __cdecl wrap_sys_pipe_free(int id)
 {
+    KAPI_HIT(111);
     pipe_free(id);
 }
 
 u8 * __cdecl wrap_sys_pipe_get_buf(int id)
 {
+    KAPI_HIT(112);
     return pipe_get_buf(id);
 }
 
 u32 __cdecl wrap_sys_pipe_get_len(int id)
 {
+    KAPI_HIT(113);
     return pipe_get_len(id);
 }
 
 void __cdecl wrap_sys_pipe_clear(int id)
 {
+    KAPI_HIT(114);
     pipe_clear(id);
 }
 
 int __cdecl wrap_sys_redirect_fd_buf(int fd, u8 *buf, u32 size, u32 len)
 {
+    KAPI_HIT(115);
     return fd_redirect_to_buffer(fd, buf, size, len);
 }
 
 u32 __cdecl wrap_sys_redirect_get_buf_len(int fd)
 {
+    KAPI_HIT(116);
     return fd_redirect_get_buf_len(fd);
 }
 
 int __cdecl wrap_paging_is_present(u32 addr)
 {
+    KAPI_HIT(117);
     return paging_is_present(addr);
 }
 
 void __cdecl wrap_snd_bgm_play(const char *mml)
 {
+    KAPI_HIT(118);
     snd_bgm_play(mml);
 }
 
 void __cdecl wrap_snd_bgm_stop(void)
 {
+    KAPI_HIT(119);
     snd_bgm_stop();
 }
 
 int __cdecl wrap_snd_bgm_is_playing(void)
 {
+    KAPI_HIT(120);
     return snd_bgm_is_playing();
 }
 
 void __cdecl wrap_snd_se_play(int se_id)
 {
+    KAPI_HIT(121);
     snd_se_play(se_id);
 }
 
 void __cdecl wrap_snd_se_play_raw(int note, int duration_ticks, int tone)
 {
+    KAPI_HIT(122);
     snd_se_play_raw(note, duration_ticks, tone);
 }
 
 void __cdecl wrap_snd_set_master(int enable)
 {
+    KAPI_HIT(123);
     snd_set_master(enable);
 }
 
 void __cdecl wrap_snd_bgm_set_persist(int persist)
 {
+    KAPI_HIT(124);
     snd_bgm_set_persist(persist);
 }
 
 int __cdecl wrap_kbd_is_pressed(int scancode)
 {
+    KAPI_HIT(125);
     return kbd_is_pressed(scancode);
 }
 
 void __cdecl wrap_fm_note_on(int ch, int note)
 {
+    KAPI_HIT(126);
     fm_note_on(ch, note);
 }
 
 void __cdecl wrap_fm_note_off(int ch)
 {
+    KAPI_HIT(127);
     fm_note_off(ch);
 }
 
 void __cdecl wrap_fm_set_tone_num(int ch, int tone_num)
 {
+    KAPI_HIT(128);
     fm_set_tone_num(ch, tone_num);
 }
 
 void __cdecl wrap_ssg_tone(int ch, u16 period)
 {
+    KAPI_HIT(129);
     ssg_tone(ch, period);
 }
 
 void __cdecl wrap_ssg_volume(int ch, u8 vol)
 {
+    KAPI_HIT(130);
     ssg_volume(ch, (uchar)vol);
 }
 
 void __cdecl wrap_ssg_all_off(void)
 {
+    KAPI_HIT(131);
     ssg_all_off();
 }
 
 void __cdecl wrap_mouse_poll(void *info)
 {
+    KAPI_HIT(132);
     mouse_poll((MouseState *)info);
 }
 
 int __cdecl wrap_mouse_available(void)
 {
+    KAPI_HIT(133);
     return mouse_available();
 }
 
 void __cdecl wrap_mouse_set_bounds(i16 x_min, i16 y_min, i16 x_max, i16 y_max)
 {
+    KAPI_HIT(134);
     mouse_set_bounds(x_min, y_min, x_max, y_max);
 }
 
 void __cdecl wrap_tvram_readchar_at(int x, int y, u16 *code, u8 *attr)
 {
+    KAPI_HIT(135);
     tvram_readchar_at(x, y, code, attr);
 }
 
 int __cdecl wrap_tvram_reverse_cell(int x, int y)
 {
+    KAPI_HIT(136);
     return tvram_reverse_cell(x, y);
 }
 
 void __cdecl wrap_mouse_cursor_set_mode(int mode)
 {
+    KAPI_HIT(137);
     mouse_cursor_set_mode(mode);
 }
 
 void __cdecl wrap_mouse_cursor_show(void)
 {
+    KAPI_HIT(138);
     mouse_cursor_show();
 }
 
 void __cdecl wrap_mouse_cursor_hide(void)
 {
+    KAPI_HIT(139);
     mouse_cursor_hide();
 }
 
 int __cdecl wrap_db_open(const char *path)
 {
+    KAPI_HIT(140);
     return kapi_db_open(path);
 }
 
 int __cdecl wrap_db_close(int handle)
 {
+    KAPI_HIT(141);
     return kapi_db_close(handle);
 }
 
 int __cdecl wrap_db_exec(int handle, const char *sql)
 {
+    KAPI_HIT(142);
     return kapi_db_exec(handle, sql);
 }
 
 int __cdecl wrap_db_prepare(int handle, const char *sql)
 {
+    KAPI_HIT(143);
     return kapi_db_prepare(handle, sql);
 }
 
 int __cdecl wrap_db_step(int handle)
 {
+    KAPI_HIT(144);
     return kapi_db_step(handle);
 }
 
 int __cdecl wrap_db_column_int(int handle, int col)
 {
+    KAPI_HIT(145);
     return kapi_db_column_int(handle, col);
 }
 
 const char * __cdecl wrap_db_column_text(int handle, int col)
 {
+    KAPI_HIT(146);
     return kapi_db_column_text(handle, col);
 }
 
 int __cdecl wrap_db_finalize(int handle)
 {
+    KAPI_HIT(147);
     return kapi_db_finalize(handle);
 }
 
 const char * __cdecl wrap_db_last_error(int handle)
 {
+    KAPI_HIT(148);
     return kapi_db_last_error(handle);
 }
 
 u32 __cdecl wrap_db_mem_used(void)
 {
+    KAPI_HIT(149);
     return kapi_db_mem_used();
 }
 
 int __cdecl wrap_kcg_load_font(const char *path)
 {
+    KAPI_HIT(150);
     return kcg_load_font(path);
 }
 
 int __cdecl wrap_ide_get_info(int drv, void *info)
 {
+    KAPI_HIT(151);
     return ide_get_info(drv, (IdeInfo *)info);
 }
 
 void __cdecl wrap_sys_get_build_info(char *buf, int size)
 {
+    KAPI_HIT(152);
     kapi_sys_get_build_info(buf, size);
 }
 
 int __cdecl wrap_loop_attach(const char *path, int slot)
 {
+    KAPI_HIT(153);
     return loop_dev_attach(path, slot);
 }
 
 void __cdecl wrap_loop_detach(int slot)
 {
+    KAPI_HIT(154);
     loop_dev_detach(slot);
 }
 
 int __cdecl wrap_loop_status(int slot, u32 *total, int *bps)
 {
+    KAPI_HIT(155);
     return loop_dev_status(slot, total, bps);
 }
 
 int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf)
 {
+    KAPI_HIT(156);
     { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }
 }
 
 int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)
 {
+    KAPI_HIT(157);
     { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_write_lba(d, lba, count, buf); }
 }
 
 int __cdecl wrap_ime_switch_dict(int variant)
 {
+    KAPI_HIT(158);
     return ime_switch_dict(variant);
 }
 
 int __cdecl wrap_ime_user_list(const char *yomi_prefix, void *out, int max)
 {
+    KAPI_HIT(159);
     return ime_user_list_facade(yomi_prefix, out, max);
 }
 
 int __cdecl wrap_ime_user_delete(const char *yomi, const char *kanji)
 {
+    KAPI_HIT(160);
     return ime_user_delete_facade(yomi, kanji);
 }
 
 int __cdecl wrap_ime_user_export(const char *path)
 {
+    KAPI_HIT(161);
     return ime_user_export_facade(path);
 }
 
 int __cdecl wrap_ime_user_clear(void)
 {
+    KAPI_HIT(162);
     return ime_user_clear_facade();
 }
 
 int __cdecl wrap_ime_trygetkey(void)
 {
+    KAPI_HIT(163);
     return ime_trygetkey();
 }
 
 int __cdecl wrap_v86_selftest(void)
 {
+    KAPI_HIT(164);
     return v86_smoke_test();
 }
 
 int __cdecl wrap_v86_disktest(const char *path)
 {
+    KAPI_HIT(165);
     return v86_disk_test(path);
 }
 
 int __cdecl wrap_v86_boot(const char *path)
 {
+    KAPI_HIT(166);
     return v86_boot(path);
 }
 
 int __cdecl wrap_v86_boot2(const char *path, const char *second)
 {
+    KAPI_HIT(167);
     return v86_boot2(path, second);
 }
 

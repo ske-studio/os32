@@ -57,7 +57,14 @@ for ext in data.get("externs", []):
     c_content += f"{ext}\n"
 c_content += "\n"
 
-for api in data["api"]:
+# 計測ビルド (-DKAPI_PROFILE) 用のカウンタ。既定では KAPI_HIT が空になる。
+# slot 番号は api 配列の並び順 = KernelAPI 表の並び順 (exec_kapi_init.inc と同じ)。
+c_content += '#include "kapi_profile.h"\n\n'
+c_content += "#ifdef KAPI_PROFILE\n"
+c_content += f"volatile u32 kapi_hits[{len(data['api'])}];\n"
+c_content += "#endif\n\n"
+
+for slot, api in enumerate(data["api"]):
     if api.get("direct", False):
         continue
         
@@ -67,6 +74,7 @@ for api in data["api"]:
     if not args_str: args_str = "void"
     
     c_content += f"{ret} __cdecl wrap_{name}({args_str})\n{{\n"
+    c_content += f"    KAPI_HIT({slot});\n"
     
     if "body" in api:
         lines = api["body"].split("\n")
