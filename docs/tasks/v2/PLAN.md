@@ -132,6 +132,27 @@ KAPI 表の形 (172 エントリの関数ポインタ) を保ったまま、各�
 - 制約 [ABI2] 「末尾追加のみ」も維持
 - 関数番号を EAX に載せる全面 syscall 化より ABI の断絶が小さい
 
+**完了 (2026-09-03) — 全ゲート実機通過。** commit `68fe74f` (M2a-M2d) /
+`8c50d99` (M2e)。
+
+- **M2a** `gen_kapi` が `kapi_argsize[168]` / `kapi_argptr[168]` / `KAPI_FUNC_COUNT`
+  を生成 (append-only, KAPI_VERSION 据置)。
+- **M2b-c** 全 PD 共有の USER トランポリンページ (magic/version/fn 表 + 168 スタブ
+  `B8<slot>CD80C3`)。`STUB_BASE=align4(sizeof(KernelAPI))` (C3 式はデータフィールド
+  2 本を見落としていたため実装で補正)。exec が CPL=3 アプリに api としてこのページを渡す。
+- **M2d** int 0x80 ディスパッチャ: slot 範囲チェック → 引数コピー → 本物 wrap 呼出
+  (CR3=アプリ PD)→ 戻り値。int80_stub は IRETD_USER で CPL=3 復帰。
+  crt0 スタック規約ずれ (iret は call を通らず retaddr 無し) をダミー retaddr で補正。
+- **M2e** [ABI4] の KAPI 版封鎖: (核) `ring3_in_syscall` ガード — wrap 内 (CPL=0) の
+  #PF/#GP も syscall 中ならアプリ由来と判定し kill (可変長 %s も捕捉)。(補助)
+  `kapi_argptr` による宣言ポインタ引数の早期範囲検証。
+- **T ゲート**: 既存 `hello` を `--ring3` (ソース無変更) で CPL=3 起動 → CPL=0 版と
+  同一出力・正常終了。`faultprobe` を `--ring3` で case 1-4 → 全 kill・カーネル生存・
+  `fault_kill_count`=4・シェル復帰。誤爆なし・kselftest fail=0。
+
+**残: ring3 は現状 `OS32X_FLAG_RING3` オプトイン。[ABI4] の完全削除には
+ring3 をデフォルト化 (全外部プログラムを CPL=3) する判断と回帰掃きが要る (M3)。**
+
 ### M3 — 検証
 
 > 設計: [M3_VERIFY.md](M3_VERIFY.md)
