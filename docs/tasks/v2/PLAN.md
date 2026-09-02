@@ -99,12 +99,16 @@ halt 入りループ、通常シェルの kbd_getkey も元から hlt ブロッ�
 
 ### M1 — リング 3 の土台
 
+> 設計: [M1_RING3.md](M1_RING3.md)
+
 - GDT に DPL=3 の code/data を 2 本追加 (`0xFA` / `0xF2`)。`GDT_ENTRIES` 4 → 6
 - `exec` がロードするプログラムページに `PTE_USER` を立てる
   (`paging_set_page` は対応済み)
 - ユーザスタックを CPL=3 用に用意。カーネルスタックは TSS.ESP0 で復帰
 
 ### M2 — KAPI トランポリン
+
+> 設計: [M2_KAPI_TRAMPOLINE.md](M2_KAPI_TRAMPOLINE.md)
 
 KAPI 表の形 (172 エントリの関数ポインタ) を保ったまま、各エントリを
 **ユーザ空間のスタブ**に向ける。スタブが `int 0x80` でカーネルに入る。
@@ -114,6 +118,8 @@ KAPI 表の形 (172 エントリの関数ポインタ) を保ったまま、各�
 - 関数番号を EAX に載せる全面 syscall 化より ABI の断絶が小さい
 
 ### M3 — 検証
+
+> 設計: [M3_VERIFY.md](M3_VERIFY.md)
 
 - 不正ポインタを KAPI に渡し、**カーネルが死なずページフォールトで止まる**
   ことを `kselftest` に追加 (現在この種のテストが無い)
