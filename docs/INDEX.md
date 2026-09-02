@@ -87,6 +87,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |-------------|------|
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
 | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
+| [tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) | v2 M1 設計 — リング3 土台 (GDT/PD 切替/CPL=3 遷移/検証項目) |
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
 | [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — 実装状態スナップショット |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
