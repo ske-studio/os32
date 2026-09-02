@@ -39,20 +39,9 @@ INC_libos32tilemap  = -Iuserland/lib/tilemap $(INC_libos32gfx) $(INC_libos32asse
 # 入力・汎用ロジック
 INC_libos32input    = -Iuserland/lib/input $(INC_libos32math)
 INC_libos32ecs      = -Iuserland/lib/ecs $(INC_libos32math)
-INC_libos32turn     = -Igame/lib/turn $(INC_libos32math)
 
 # DB 駆動のドメインライブラリ
-INC_libos32text     = -Igame/lib/text $(INC_libos32db)
-INC_libos32inv      = -Igame/lib/inv $(INC_libos32db)
-INC_libos32board    = -Igame/lib/board $(INC_libos32db)
-INC_libos32ai       = -Igame/lib/ai $(INC_libos32db) $(INC_libos32math)
-INC_libos32chem     = -Igame/lib/chem $(INC_libos32db) $(INC_libos32math)
-INC_libos32econ     = -Igame/lib/econ $(INC_libos32db) $(INC_libos32math)
-INC_libos32battle   = -Igame/lib/battle $(INC_libos32db) $(INC_libos32math)
-INC_libos32event    = -Igame/lib/event $(INC_libos32ai)
-INC_libos32rpg      = -Igame/lib/rpg $(INC_libos32battle)
 # map_view.c だけが libos32tilemap を直接呼ぶ (BG への転送)
-INC_libos32map      = -Igame/lib/map $(INC_libos32db) $(INC_libos32tilemap)
 
 # ---------------------------------------------------------------------------
 #  DEFINE_LIB — ライブラリ定義テンプレート
@@ -146,14 +135,6 @@ userland/lib/db/%.o: userland/lib/db/%.c
 lib-libos32db: $(LIBDIR)/libos32db.a
 .PHONY: lib-libos32db
 
-# libos32chem — 化学エンジン
-$(eval $(call DEFINE_LIB,libos32chem,game/lib/chem,,))
-LIBCHEM_OBJ = $(LIBDIR)/libos32chem.a
-
-# libos32map — マップ管理
-$(eval $(call DEFINE_LIB,libos32map,game/lib/map,,))
-LIBMAP_OBJ = $(LIBDIR)/libos32map.a
-
 # libos32input — 入力抽象化
 $(eval $(call DEFINE_LIB,libos32input,userland/lib/input,,))
 LIBINPUT_OBJ = $(LIBDIR)/libos32input.a
@@ -170,45 +151,9 @@ LIBASSET_OBJ = $(LIBDIR)/libos32asset.a
 $(eval $(call DEFINE_LIB,libos32ecs,userland/lib/ecs,,))
 LIBECS_OBJ = $(LIBDIR)/libos32ecs.a
 
-# libos32text — テキスト管理
-$(eval $(call DEFINE_LIB,libos32text,game/lib/text,,))
-LIBTEXT_OBJ = $(LIBDIR)/libos32text.a
-
-# libos32econ — 経済エンジン
-$(eval $(call DEFINE_LIB,libos32econ,game/lib/econ,,))
-LIBECON_OBJ = $(LIBDIR)/libos32econ.a
-
-# libos32ai — AI意思決定エンジン
-$(eval $(call DEFINE_LIB,libos32ai,game/lib/ai,,))
-LIBAI_OBJ = $(LIBDIR)/libos32ai.a
-
-# libos32battle — ターンバトルエンジン
-$(eval $(call DEFINE_LIB,libos32battle,game/lib/battle,,))
-LIBBATTLE_OBJ = $(LIBDIR)/libos32battle.a
-
-# libos32board — ボードゲームエンジン
-$(eval $(call DEFINE_LIB,libos32board,game/lib/board,,))
-LIBBOARD_OBJ = $(LIBDIR)/libos32board.a
-
-# libos32turn — 手番/週スケジューラ (DB不要)
-$(eval $(call DEFINE_LIB,libos32turn,game/lib/turn,,))
-LIBTURN_OBJ = $(LIBDIR)/libos32turn.a
-
-# libos32rpg — キャラクター育成・状態・リボーン
-$(eval $(call DEFINE_LIB,libos32rpg,game/lib/rpg,,))
-LIBRPG_OBJ = $(LIBDIR)/libos32rpg.a
-
 # libos32save — セーブデータ管理 (DB不要)
 $(eval $(call DEFINE_LIB,libos32save,userland/lib/save,,))
 LIBSAVE_OBJ = $(LIBDIR)/libos32save.a
-
-# libos32event — イベントスケジューラ
-$(eval $(call DEFINE_LIB,libos32event,game/lib/event,,))
-LIBEVENT_OBJ = $(LIBDIR)/libos32event.a
-
-# libos32inv — インベントリ・装備・ショップエンジン
-$(eval $(call DEFINE_LIB,libos32inv,game/lib/inv,,))
-LIBINV_OBJ = $(LIBDIR)/libos32inv.a
 
 # libos32tilemap — タイルマップエンジン (ASMソース含む)
 TILEMAP_SRC = $(wildcard userland/lib/tilemap/*.c)
@@ -307,36 +252,35 @@ $(LIBDIR)/libos32filer.a: $(FILER_ARCHIVE_OBJ)
 # === ライブラリ全ビルドターゲット ===
 # 全ライブラリのアーカイブを作る。SDK 切り出し時はこの LIBDIR がそのまま
 # sysroot の lib/ になる。
-ALL_LIB_ARCHIVES = $(LIBDIR)/libos32math.a $(LIBDIR)/libos32gfx.a \
-                   $(LIBDIR)/libos32db.a $(LIBDIR)/libos32asset.a \
-                   $(LIBDIR)/libos32save.a $(LIBDIR)/libos32snd.a \
-                   $(LIBDIR)/libos32mgx.a $(LIBDIR)/libzinflate.a \
-                   $(LIBDIR)/libos32ui.a $(LIBDIR)/libos32filer.a \
-                   $(LIBDIR)/libos32md.a $(LIBDIR)/libos32tilemap.a \
-                   $(LIBDIR)/libos32input.a $(LIBDIR)/libos32ecs.a \
-                   $(LIBDIR)/libos32turn.a $(LIBDIR)/libos32text.a \
-                   $(LIBDIR)/libos32inv.a $(LIBDIR)/libos32board.a \
-                   $(LIBDIR)/libos32ai.a $(LIBDIR)/libos32chem.a \
-                   $(LIBDIR)/libos32econ.a $(LIBDIR)/libos32battle.a \
-                   $(LIBDIR)/libos32event.a $(LIBDIR)/libos32rpg.a \
-                   $(LIBDIR)/libos32map.a
+ALL_LIB_ARCHIVES = $(LIBDIR)/libos32math.a \
+                   $(LIBDIR)/libos32gfx.a \
+                   $(LIBDIR)/libos32db.a \
+                   $(LIBDIR)/libos32asset.a \
+                   $(LIBDIR)/libos32save.a \
+                   $(LIBDIR)/libos32snd.a \
+                   $(LIBDIR)/libos32mgx.a \
+                   $(LIBDIR)/libzinflate.a \
+                   $(LIBDIR)/libos32ui.a \
+                   $(LIBDIR)/libos32filer.a \
+                   $(LIBDIR)/libos32md.a \
+                   $(LIBDIR)/libos32tilemap.a \
+                   $(LIBDIR)/libos32input.a \
+                   $(LIBDIR)/libos32ecs.a
 
 libs: $(ALL_LIB_ARCHIVES)
 
 # === ライブラリクリーン ===
 clean-libs:
 	rm -f $(LIBDIR)/*.a
-	rm -f userland/lib/math/*.o game/lib/chem/*.o game/lib/map/*.o
-	rm -f userland/lib/input/*.o userland/lib/asset/*.o game/lib/text/*.o
-	rm -f game/lib/econ/*.o game/lib/ai/*.o game/lib/battle/*.o
-	rm -f game/lib/inv/*.o game/lib/board/*.o game/lib/event/*.o
+	rm -f userland/lib/math/*.o
+	rm -f userland/lib/input/*.o userland/lib/asset/*.o
 	rm -f userland/lib/ecs/*.o userland/lib/ui/*.o
 	rm -f userland/lib/gfx/*.o userland/lib/gfx/asm/*.o
 	rm -f userland/lib/gfx/draw/*.o userland/lib/gfx/text/*.o userland/lib/gfx/geom/*.o
 	rm -f userland/lib/tilemap/*.o
 	rm -f userland/lib/db/*.o userland/lib/snd/*.o
 	rm -f userland/lib/md/*.o userland/lib/filer/*.o
-	rm -f game/lib/turn/*.o game/lib/rpg/*.o userland/lib/save/*.o
+	rm -f userland/lib/save/*.o
 	rm -f userland/lib/mgx/*.o lib/zlib/*.o
 
 .PHONY: libs clean-libs

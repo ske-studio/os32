@@ -34,20 +34,17 @@ except ImportError:
 DEPLOY_MANIFESTS = [
     "build/core.yaml",
     "userland/deploy.yaml",
-    "apps/deploy.yaml",
-    "game/deploy.yaml",
 ]
 PACKAGE_MANIFESTS = [
     "build/core_packages.yaml",
     "userland/package_defs.yaml",
-    "apps/package_defs.yaml",
 ]
 APP_CONF = "build/app.conf"
 
 
 def built_binaries():
     out = set()
-    for root in ("userland", "apps", "game"):
+    for root in ("userland",):
         for p in glob.glob(root + "/**/*.bin", recursive=True):
             out.add(p)
     return out
@@ -109,8 +106,6 @@ def check_doc_counts():
          count("userland/cmds/*.c"), "userland/cmds/*.c"),
         ("docs/INDEX.md", r"ime等 (\d+)種",
          count("userland/cmds/*.c"), "userland/cmds/*.c"),
-        ("apps/README.md", r"全 (\d+) 本",
-         len([d for d in glob.glob("apps/*/") if os.path.isdir(d)]), "apps/*/"),
     ]
 
     bad = []

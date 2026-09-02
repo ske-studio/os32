@@ -128,14 +128,10 @@ os32/
 │   ├── lib/          — ユーザー空間ライブラリ (gfx, math, md, mgx, ui, save, snd,
 │   │                   input, db, ecs, asset, tilemap, filer, rt)
 │   └── deploy.yaml   — この層の配備マニフェスト
-├── apps/             — 標準アプリ (edit, mdview, mgxview, vbzview, vdpview, ekakiuta,
-│                       raster, gfx_demo, demo1, spr_test, ui_demo, hello32)
-│                       OS のソースツリーに依存せず SDK だけでビルドする
-├── game/             — ゲーム (app/, lib/, assets/, data/) — 同じく SDK ビルド
-│   └── lib/          — ゲーム専用ライブラリ (ai, battle, board, chem, econ, event,
-│                       inv, map, rpg, text, turn)
+├── (apps/game は別リポジトリ ske-studio/os32-apps・os32-game へ分離。
+│      SDK だけでビルドし、このツリーには含まれない)
 ├── sdk/              — 配布 SDK (ヘッダ, crt, リンカスクリプト, rust, example)
-├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image/sdk/apps/game.mk) + リンカスクリプト
+├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image/sdk.mk 等) + リンカスクリプト
 │   └── out/          — ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map) ※gitignore
 ├── tools/            — ホスト側ツール (デプロイ・イメージ生成・KAPI自動生成)
 ├── assets/           — データアセット (各種DB, FEP辞書, profile等)

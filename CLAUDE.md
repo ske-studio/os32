@@ -31,7 +31,7 @@ make programs
 
 # Individual binary hot-deploy (build + place into the running guest, no reboot).
 # Userland only; the kernel and /sys need a full NHD deploy.
-make hotdeploy FILE=apps/edit/edit.bin
+make hotdeploy FILE=userland/cmds/wc.bin
 
 # Deploy to HostDrv (C:\os32 on Windows host, no reboot)
 make deploy
@@ -245,15 +245,29 @@ wrappers/struct/init are all generated from it. Never hand-edit the generated fi
 Data fields (plain values rather than function pointers) go in `data_fields`; the generator
 emits `kapi-><field> = 0;` and the value must be assigned at runtime in `exec_init()`.
 
-### External Programs (`userland/`, `apps/`, `game/`)
+### External Programs (`userland/`)
 
 Programs are OS32X flat ELF binaries linked with `sdk/link/app.ld`, starting with `sdk/crt/crt0.asm`. The `main()` function must be the **first function** in the source file; helpers go after `main()` with forward declarations.
 
 #### Directory Structure
 
-The tree is split by ownership. `userland/` builds inside the OS tree; `apps/`
-and `game/` build against the staged SDK alone and could be lifted into their
-own repositories unchanged.
+`userland/` builds inside the OS tree. 標準アプリとゲームは別リポジトリに
+分離済み — SDK だけでビルドし、このリポジトリの成果物には含まれない:
+
+- **`ske-studio/os32-apps`** — edit / mdview / mgxview / ui_demo / vbzview /
+  vdpview / ekakiuta / raster / gfx_demo / demo1 / spr_test / hello32
+- **`ske-studio/os32-game`** — 対戦スゴロク RPG (`app/`, `lib/`, `assets/`, `data/`)
+
+どちらも `make sdk` で生成した `build/sdk/` を指してビルドする:
+
+```bash
+git clone https://github.com/ske-studio/os32-apps
+cd os32-apps && make OS32_SDK=/path/to/os32/build/sdk
+```
+
+ゲームエンジンのライブラリ (chem / board / ai / battle / econ / event / inv /
+map / rpg / text / turn) は os32-game リポジトリが自前のソースからビルドする。
+このリポジトリの `build/libs.mk` は userland/lib の 14 ライブラリだけを扱う。
 
 | Directory | Content |
 |-----------|---------|
@@ -263,8 +277,6 @@ own repositories unchanged.
 | `userland/tests/` | Test/demo programs (36 sources including per-library test suites) |
 | `userland/rust/` | Rust programs (Cargo workspace: `alloc_demo`, `hello_gfx`, etc.) |
 | `userland/lib/` | User-space libraries (see below) |
-| `apps/` | Standard applications: `edit/` (VZ-style editor), `ui_demo/` (microUI), `mdview`, `mgxview`, `vbzview`, `vdpview`, `ekakiuta`, `raster`, `gfx_demo`, `demo1`, `spr_test`, `hello32` |
-| `game/` | The board-game RPG: `app/`, `lib/`, `assets/`, `data/` |
 
 #### Shell Architecture (`userland/shell/`)
 
@@ -275,7 +287,7 @@ Modular design with command registration mechanism (`ShellCmd` struct, max 128 c
 - `cmd_script.c` — Script engine (if/else/for/while/source, max 128 lines, 4-deep nesting)
 - `rshell.c` — Remote shell via serial
 
-#### Libraries (`userland/lib/`, `game/lib/`)
+#### Libraries (`userland/lib/`)
 
 All statically linked. Organized by layer:
 
@@ -299,28 +311,12 @@ All statically linked. Organized by layer:
 | `libos32filer` | GFX file browser (modal file selection UI) |
 | `libos32md` | Markdown parser + GFX renderer |
 
-**Game Engine:**
+**Game Engine** (別リポジトリ `ske-studio/os32-game` へ移動):
 
-> These libraries read their master data into a RAM cache during `*_init()` and then
-> **close the DB connection immediately**. Keeping connections open exhausts the fixed
-> SQLite MEMSYS5 pool once several engines are initialized in one program.
-
-| Library | Description |
-|---------|-------------|
-| `libos32ai` | Score-based AI decision engine |
-| `libos32asset` | Asset/resource lifecycle management |
-| `libos32battle` | Turn-based battle resolution engine |
-| `libos32board` | Node-graph board game engine |
-| `libos32chem` | BotW-style chemistry engine (SQLite-backed) |
-| `libos32econ` | Turn-based data-driven economy simulation (+ estate subsystem) |
-| `libos32ecs` | Entity-Component-System game object management |
-| `libos32event` | Event scheduler (turn/weekly/conditional/probability triggers) |
-| `libos32inv` | Inventory, equipment, shop engine |
-| `libos32map` | RPG map management (SQLite-backed, tiled, 3 layers) |
-| `libos32rpg` | Persistent character growth: EXP curve, level-up, field status ticks, death/reborn, ranking (SQLite-backed) |
-| `libos32save` | Save-state management: region registration, magic/version/CRC32 verification, migration callback |
-| `libos32text` | RPG/ADV text management engine |
-| `libos32turn` | Multi-player turn rotation, week boundaries, max turns, skip handling |
+> ai / battle / board / chem / econ / event / inv / map / rpg / text / turn の
+> 11 ライブラリは os32-game が自前のソースからビルドする。いずれも `*_init()` で
+> マスターデータを RAM キャッシュへ読み込んだら **DB 接続を即閉じる** 作法。
+> 設計は os32-game リポジトリの `docs/` を参照。
 
 ### Graphics
 
@@ -334,7 +330,7 @@ Three deployment paths:
 3. **Boot sector** (`make deploy-boot`): Writes `boot/loader_hdd.bin` to the NHD boot area (LBA 2–17). Only needed when the loader itself changed.
 
 Deployment manifests are split by owning layer (`build/core.yaml`,
-`userland/deploy.yaml`, `apps/deploy.yaml`, `game/deploy.yaml`); the list
+`userland/deploy.yaml`); the list
 and the merge live in `tools/deploy_manifests.py`. Environment variables: `HOSTDRV_DIR` (default `/mnt/c/os32`), `NP21W_DIR` (default `/tmp/np21w`).
 
 Build artifacts land in `build/out/` (gitignored), not the repository root.
@@ -354,7 +350,8 @@ kmalloc / kprintf の境界ケースを実機で毎回検証する。失敗す�
 検証されずカーネルがそのまま使うため、プログラムのバグは即カーネル破壊に
 なり得る。リング 3 導入はアーキテクチャ変更 (GDT/TSS/ゲート全面改修) で
 2026-08 の信頼性向上 (Phase 1-3) ではスコープ外と判断した。
-呼び出し側 (プログラム) が防衛的に書くこと。
+呼び出し側 (プログラム) が防衛的に書くこと。**v2 でリング 3 を導入して
+この制約を解消する方針が決まっている** (2026-09-01)。
 
 **ビットマップフォントは `tools/gen_font16.py` で焼く** (旧 `gen_kcg_font.py` の
 置き換え)。カーネルは起動時に `/sys/font/default.kcgfont` を読む
@@ -385,7 +382,7 @@ JIS 0x2222 にフォールバックして**漢字が全部 □ になる** (仮�
 `utf8_set_jis_table_ready(1)` を呼べば引ける。ただし**無条件に立てないこと** —
 ロード失敗時に 0x4A000 の残骸を変換表として読む。既知の対応
 (U+4E9C→0x3021 など) を数点検証してから立てる
-(`game/app/main.c` の `enable_kanji_table()` が実例)。
+(実例は `ske-studio/os32-game` の `app/main.c` の `enable_kanji_table()`)。
 
 **日本語を表示するプログラムはバッファ幅に注意**: UTF-8 の日本語は 1文字3バイト、
 表示幅は半角2桁 (16px)。英語前提の `char buf[64]` は簡単にあふれる。
@@ -393,7 +390,7 @@ JIS 0x2222 にフォールバックして**漢字が全部 □ になる** (仮�
 (`view_panel.c` の `add_line()` が後続バイト 10xxxxxx を見て戻す実装)。
 
 **物理 0x90000 は自動プレイ観測用メールボックスとして予約** (2026-08-18):
-game が毎フレーム状態ブロックを書き (`game/app/view_export.c`)、
+game が毎フレーム状態ブロックを書き (`os32-game` の `app/view_export.c`)、
 ホストが `GET /api/mem?addr=0x90000&space=phys` で読む。空き領域
 0x8C000-0x9EFFF の一部。V86 セッションはこの領域を壊すが、ゲームと
 V86 は同時に使わない。レイアウトを変えたら
@@ -428,7 +425,7 @@ it calls `kbd_trygetchar()` internally to feed microUI, so an app that also poll
 `kbd_trygetchar()` in the same frame gets nothing and appears to ignore all key input.
 Apps needing their own key handling must read the char once and pass it to
 `mui_pump_input_ch(ctx, ch)` instead. (This silently broke every keyboard shortcut in
-`game/app` until 2026-08-17 — the auto-play debug timers existed to work
+`os32-game` の app until 2026-08-17 — the auto-play debug timers existed to work
 around it.)
 
 **`exec_exit()` closes every FD ≥ 3 on program exit** (`exec/exec.c`): any kernel-resident
@@ -466,16 +463,13 @@ os32/
 │   ├── rust/         — Rust programs (Cargo workspace)
 │   ├── lib/          — User-space libraries (gfx, math, md, mgx, ui, save, ...)
 │   └── deploy.yaml   — This layer's deployment manifest
-├── apps/             — Standard applications (edit, mdview, mgxview, ui_demo, ...)
-│                       Built from the SDK alone; no dependency on the OS tree
-├── game/             — The game (app/, lib/, assets/, data/) — SDK build too
 ├── sdk/              — Distributable SDK (headers, crt, linker scripts, rust, example)
 ├── tools/            — Host-side tools (Python scripts, kapi.json)
 ├── docs/             — Documentation (specs, policies, tasks, manpages)
 ├── build/            — Build config (Makefiles, linker scripts)
 │   └── out/          — Build artifacts (kernel.bin, sqlite.bin, vmkernel.lz4,
 │                       unicode.bin, kernel.elf, kernel.map) — gitignored
-├── assets/           — Game assets
+├── assets/           — Assets (fonts, FEP dict, unicode table, etc.)
 ├── CLAUDE.md         — This file (AI guidance)
 └── Makefile          — Top-level build script
 ```

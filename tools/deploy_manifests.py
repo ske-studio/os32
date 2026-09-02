@@ -21,8 +21,6 @@ PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST_RELPATHS = [
     os.path.join('build', 'core.yaml'),
     os.path.join('userland', 'deploy.yaml'),
-    os.path.join('apps', 'deploy.yaml'),
-    os.path.join('game', 'deploy.yaml'),
 ]
 
 DEPLOY_MANIFESTS = [os.path.join(PROJ_DIR, p) for p in MANIFEST_RELPATHS]

@@ -22,7 +22,6 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 			args="$$args /bin/$$cmd.bin=userland/system/$$cmd.bin"; \
 		fi; \
 	done; \
-	args="$$args /bin/edit.bin=userland/apps/edit.bin"; \
 	args="$$args /sbin/install.bin=userland/system/install.bin"; \
 	args="$$args /sbin/cdinst.bin=userland/system/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
@@ -34,7 +33,6 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 packages: programs
 	python3 tools/mkpkg.py --defs build/core_packages.yaml \
 	                     --defs userland/package_defs.yaml \
-	                     --defs apps/package_defs.yaml \
 	                     --output packages/ --base .
 
 iso: packages

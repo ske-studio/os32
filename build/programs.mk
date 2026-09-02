@@ -38,7 +38,7 @@ userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OB
 
 # === Game (対戦スゴロクRPG) ===
 # ゲームは game/Makefile が SDK 経由でビルドする。ここでは定義を持たない。
-# 詳細は build/game.mk の game ターゲットを参照。
+# ゲームは別リポジトリ ske-studio/os32-game (SDK 経由ビルド)。
 
 # (SKK Module / LZSS Command は廃止済み)
 
@@ -140,7 +140,7 @@ $(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),$$(INC_libos32mgx),userland/te
 
 # === 標準アプリ ===
 # アプリは apps/Makefile が SDK 経由でビルドする。ここでは定義を持たない。
-# 詳細は build/apps.mk の apps ターゲットを参照。
+# 標準アプリは別リポジトリ ske-studio/os32-apps (SDK 経由ビルド)。
 
 # libos32gfx/ui.o (gfx_demo が参照)
 userland/lib/gfx/ui.o: userland/lib/gfx/ui.c
@@ -265,11 +265,11 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
-$(shell find userland game -name '*.o' 2>/dev/null): $(SDK_KAPI_HDR)
+$(shell find userland -name '*.o' 2>/dev/null): $(SDK_KAPI_HDR)
 
 # === プログラムクリーン ===
 clean-programs: clean-rust
