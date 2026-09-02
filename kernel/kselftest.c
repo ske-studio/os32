@@ -19,6 +19,7 @@
 #include "kstring.h"
 #include "kprintf.h"
 #include "kmalloc.h"
+#include "paging.h"
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -266,6 +267,20 @@ static void test_kprintf(void)
 /* ======================================================================== */
 /*  公開エントリ                                                            */
 /* ======================================================================== */
+/* ------------------------------------------------------------------------ */
+/*  リング3 PD 複製 (v2 M1b): 新 PD を作って CR3 に載せてもカーネル帯域が    */
+/*  同一物理で共有され続けるか (V1)。ここが壊れると CPL=3 化以降が全滅する    */
+/*  ので、ブート時に毎回検証する (CLAUDE.md: プリミティブは selftest に載せる)。*/
+/* ------------------------------------------------------------------------ */
+static void test_ring3_pd(void)
+{
+    int rc = paging_pd_clone_selftest();
+    check(rc == 0, "ring3 PD clone (kernel band shared across PDs)");
+    if (rc != 0) {
+        kprintf(0xC1, "[selftest]   paging_pd_clone_selftest rc=%d\n", rc);
+    }
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -276,6 +291,7 @@ int kselftest_run(void)
     test_utoa();
     test_heap();
     test_kprintf();
+    test_ring3_pd();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

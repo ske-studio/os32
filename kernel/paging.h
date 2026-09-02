@@ -85,4 +85,63 @@ int paging_enabled(void);
 /* 指定アドレスのページがPresentかどうか (メモリダンプ安全チェック用) */
 int paging_is_present(u32 virt_addr);
 
+/* ======================================================================== */
+/*  リング3 アドレス空間 (M1b: PD 複製)                                     */
+/*                                                                          */
+/*  CPL=3 プログラムごとに独立したページディレクトリ (PD) を持たせるための   */
+/*  基盤。カーネル帯域・SHM・VRAM・ホットデプロイ窓は全 PD で共有し          */
+/*  (同一物理を指す)、0x400000 帯 (プログラム code/data/heap/stack) だけ     */
+/*  アプリ固有のページテーブルに差し替える (CONTRACTS C2)。                  */
+/*                                                                          */
+/*  共有/非共有の境界は PDE 単位:                                            */
+/*    PDE 0 (0x000000-0x3FFFFF) : 共有 — カーネル/SQLite/シェル/SHM/VRAM     */
+/*    PDE 1 (0x400000-0x7FFFFF) : アプリ固有 — プログラム帯 (APP_BAND_PDE)   */
+/*    PDE 2 (0x800000-0xBFFFFF) : 共有                                       */
+/*    PDE 3 (0xC00000-0xFFFFFF) : 共有 — 物理末尾のホットデプロイ窓を含む     */
+/*                                                                          */
+/*  M1b の時点ではアプリ PT を master と同一の identity で初期化する          */
+/*  (0x400000 帯も present/RW/identity)。これにより CPL=0 のまま CR3 を       */
+/*  新 PD に載せてもカーネルは動き続ける (V1)。CPL=3 用の USER マッピングは    */
+/*  M1c で overlay する。 */
+
+/* 0x400000 帯を覆う PDE インデックス (= MEM_EXEC_LOAD_ADDR >> 22 = 1) */
+#define APP_BAND_PDE   1
+
+struct addrspace {
+    u32 pd_phys;       /* 新 PD の物理アドレス (CR3 に載せる値)。0=無効 */
+    u32 app_pt_phys;   /* 0x400000 帯アプリ PT の物理アドレス */
+    u32 app_pde;       /* アプリ固有にした PDE インデックス */
+};
+
+/* カーネル (master) PD の物理アドレス。CR3 を戻すときに使う。 */
+u32 paging_kernel_pd_phys(void);
+
+/* 現在の CR3 (= 現在アクティブな PD 物理アドレス) を読む。 */
+u32 paging_current_cr3(void);
+
+/* CR3 に PD をロードする (= アドレス空間切り替え + TLB フラッシュ)。 */
+void paging_load_cr3(u32 pd_phys);
+
+/* アプリ用アドレス空間を 1 つ作る。
+ * master の全 PDE をコピーしてカーネル帯域を共有し、0x400000 帯 (APP_BAND_PDE)
+ * だけ新規確保したアプリ PT に差し替える。アプリ PT は M1b では master と
+ * 同一の identity で初期化する。
+ * PD/PT のバッキングは pgalloc から取る (pgalloc_init 済みが前提)。
+ * 戻り値: 0=成功 (as を埋める), -1=物理ページ不足。 */
+int paging_addrspace_create(struct addrspace *as);
+
+/* アプリ用アドレス空間を破棄し PD/PT のバッキングページを解放する。
+ * 破棄する PD がアクティブ (CR3) であってはならない — 先に
+ * paging_load_cr3(paging_kernel_pd_phys()) で master へ戻すこと。 */
+void paging_addrspace_destroy(struct addrspace *as);
+
+/* PD 複製の自己診断 (V1)。CPL=0 のまま:
+ *   1. アプリ AS を作る
+ *   2. CR3 を新 PD に載せてもカーネル (コード/スタック/データ) が生存する
+ *   3. カーネル帯域の 1 語が master PD と新 PD で同一物理を指す (共有の証明)
+ *   4. CR3 を master に戻し、AS を破棄する
+ * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。
+ * ブート時に kselftest_run() から呼ぶ想定 (pgalloc_init 後)。 */
+int paging_pd_clone_selftest(void);
+
 #endif /* __PAGING_H */

@@ -35,6 +35,7 @@
 #include "io.h"
 #include "pc98.h"
 #include "memmap.h"
+#include "pgalloc.h"
 
 /* カーネルスタック帯のレイアウト不変条件。
  * ガードページはスタック直下に隣接し、スタックは 2MB 境界 (SQLite 帯域)
@@ -45,6 +46,12 @@ STATIC_ASSERT(MEM_STACK_GUARD_END + 1 == MEM_KSTACK_BASE,
 STATIC_ASSERT(MEM_KSTACK_TOP < 0x200000UL, kstack_below_sqlite_band);
 STATIC_ASSERT((MEM_STACK_GUARD & (PAGE_SIZE - 1)) == 0,
               kstack_guard_page_aligned);
+
+/* リング3 アプリ帯 PDE (M1b) は 0x400000 帯を覆う PDE と一致し、かつ静的
+ * page_tables[] の範囲内でなければならない。ここがずれるとアプリ PD が
+ * カーネル帯域を差し替えたり範囲外 PT を読んだりして黙って壊れる。 */
+STATIC_ASSERT(APP_BAND_PDE == (MEM_EXEC_LOAD_ADDR >> 22), app_band_pde_matches);
+STATIC_ASSERT(APP_BAND_PDE < PAGING_PT_COUNT, app_band_pde_in_range);
 
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
 /* Open Watcomでは __declspec(align(4096)) が使えないため、
@@ -342,5 +349,139 @@ int paging_is_present(u32 virt_addr)
     if (pdi >= PAGING_PT_COUNT) return 0; /* 16MB超: マッピング範囲外 */
     pti = (virt_addr >> 12) & 0x3FF;
     return (page_tables[pdi][pti] & PTE_PRESENT) ? 1 : 0;
+}
+
+/* ======================================================================== */
+/*  リング3 アドレス空間 (M1b: PD 複製)                                     */
+/*                                                                          */
+/*  カーネル全体は identity マッピング (仮想=物理) なので、pgalloc が返す     */
+/*  物理アドレスはそのまま仮想アドレスとして読み書きできる。新 PD / アプリ    */
+/*  PT のバッキングは 0x400000 帯 (APP_BAND_PDE の範囲) から取られるが、      */
+/*  アプリ PT を master と同一 identity で初期化するため、CR3 を新 PD に      */
+/*  載せた後もそれらのページは自分自身を identity で見られる。               */
+/* ======================================================================== */
+
+u32 paging_kernel_pd_phys(void)
+{
+    /* identity マッピングなので page_directory の仮想アドレス = 物理。 */
+    return (u32)page_directory;
+}
+
+u32 paging_current_cr3(void)
+{
+    u32 cr3_val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
+    return cr3_val;
+}
+
+void paging_load_cr3(u32 pd_phys)
+{
+    __asm__ volatile("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
+}
+
+int paging_addrspace_create(struct addrspace *as)
+{
+    u32 pd_phys;
+    u32 pt_phys;
+    u32 *new_pd;
+    u32 *app_pt;
+    int i;
+
+    if (!as) return -1;
+    as->pd_phys = 0;
+    as->app_pt_phys = 0;
+    as->app_pde = 0;
+
+    /* PD 用に 1 ページ、0x400000 帯アプリ PT 用に 1 ページ確保する。
+     * どちらも 0x400000 帯 (identity) から取られるので、そのまま
+     * 物理=仮想で書き込める。 */
+    pd_phys = pgalloc_alloc_page();
+    if (!pd_phys) return -1;
+    pt_phys = pgalloc_alloc_page();
+    if (!pt_phys) {
+        pgalloc_free_page(pd_phys);
+        return -1;
+    }
+
+    new_pd = (u32 *)pd_phys;
+    app_pt = (u32 *)pt_phys;
+
+    /* 全 PDE を master からコピー = カーネル帯域・SHM・VRAM・ホットデプロイ窓
+     * を含む全域を共有する。共有 PDE は master と同じ PT (同一物理) を指す。 */
+    for (i = 0; i < PDE_COUNT; i++) {
+        new_pd[i] = page_directory[i];
+    }
+
+    /* 0x400000 帯アプリ PT を master の同帯 PT と同一の identity で初期化。
+     * これで CPL=0 のまま CR3 を新 PD に載せてもカーネルから見た 0x400000 帯
+     * は変わらない (V1)。CPL=3 用の USER overlay は M1c で行う。 */
+    for (i = 0; i < PTE_COUNT; i++) {
+        app_pt[i] = page_tables[APP_BAND_PDE][i];
+    }
+
+    /* 新 PD の 0x400000 帯 PDE だけアプリ PT に差し替える (PRESENT|RW)。
+     * USER はまだ立てない — M1c で USER ページを張った時に伝播させる。 */
+    new_pd[APP_BAND_PDE] = (pt_phys & 0xFFFFF000UL) | PAGE_RW;
+
+    as->pd_phys = pd_phys;
+    as->app_pt_phys = pt_phys;
+    as->app_pde = APP_BAND_PDE;
+    return 0;
+}
+
+void paging_addrspace_destroy(struct addrspace *as)
+{
+    if (!as || !as->pd_phys) return;
+    /* アクティブな PD を破棄してはならない (呼び出し側が master へ戻す責任)。
+     * ここでは確認だけして、万一アクティブでも解放は続行しない。 */
+    if (paging_current_cr3() == as->pd_phys) {
+        return;
+    }
+    if (as->app_pt_phys) pgalloc_free_page(as->app_pt_phys);
+    pgalloc_free_page(as->pd_phys);
+    as->pd_phys = 0;
+    as->app_pt_phys = 0;
+    as->app_pde = 0;
+}
+
+/* V1 自己診断用のプローブ。カーネル .bss (0x100000-0x1FFFFF, PDE 0) に置かれ、
+ * 全 PD で共有される領域。SHM 等の実データを触らずに共有を検証できる。 */
+static volatile u32 pd_selftest_probe;
+
+int paging_pd_clone_selftest(void)
+{
+    struct addrspace as;
+    u32 saved_cr3;
+    u32 seen;
+    int rc = 0;
+
+    if (!pg_enabled) return 0; /* ページング無効なら検証対象外 */
+
+    if (paging_addrspace_create(&as) != 0) return 1;
+
+    saved_cr3 = paging_current_cr3();
+
+    /* master 経由で既知値を書く。 */
+    pd_selftest_probe = 0x12345678UL;
+
+    /* CR3 を新 PD に載せる。この行以降が実行できている時点で、カーネルの
+     * コード (PDE 0) とスタック (PDE 0) が新 PD でも共有されている証拠。 */
+    paging_load_cr3(as.pd_phys);
+
+    /* 新 PD からカーネル帯域の同じ番地を読む — master が書いた値が見えるなら
+     * 同一物理を指している (共有 OK)。 */
+    seen = pd_selftest_probe;
+
+    /* 新 PD 側から書き換える。 */
+    pd_selftest_probe = 0xA5A5F00DUL;
+
+    /* master に戻す。 */
+    paging_load_cr3(saved_cr3);
+
+    if (seen != 0x12345678UL) rc |= 2;                 /* 新 PD から共有が見えない */
+    if (pd_selftest_probe != 0xA5A5F00DUL) rc |= 4;    /* 新 PD の書込が master に反映されない */
+
+    paging_addrspace_destroy(&as);
+    return rc;
 }
 
