@@ -70,6 +70,9 @@ filesystem:
     - host: userland/tests/dbq.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: userland/tests/faultprobe.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/math_test.bin
       guest: /usr/bin/
       tags: [programs]

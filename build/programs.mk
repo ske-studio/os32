@@ -99,6 +99,18 @@ userland/tests/bench_scale2x.elf: sdk/link/app.ld $(CRT0_OBJ) $(BENCH_S2X_OBJ) $
 
 bench_scale2x: $(CRT0_OBJ) userland/tests/bench_scale2x.bin
 
+# --- faultprobe (リング3 フォールト注入テスト, M3) ---
+FAULTPROBE_SRC = userland/tests/faultprobe/main.c
+FAULTPROBE_OBJ = $(FAULTPROBE_SRC:.c=.o)
+
+userland/tests/faultprobe/%.o: userland/tests/faultprobe/%.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+userland/tests/faultprobe.elf: sdk/link/app.ld $(CRT0_OBJ) $(FAULTPROBE_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(FAULTPROBE_OBJ) $(LGRP_BEG) $(LGRP_END) -lc -lgcc
+
+faultprobe: $(CRT0_OBJ) userland/tests/faultprobe.bin
+
 # ---------------------------------------------------------------------------
 # DEFINE_TEST — テストプログラム定義テンプレート
 # $(1) = テスト名 (tests/ 以下のベース名)
@@ -265,7 +277,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
@@ -287,7 +299,7 @@ clean-programs: clean-rust
 	rm -f lib/zlib/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
-.PHONY: programs programs_base game lz4_cmd cdinst bench bench_scale2x
+.PHONY: programs programs_base game lz4_cmd cdinst bench bench_scale2x faultprobe
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
 .PHONY: input_test
