@@ -148,6 +148,18 @@ userland/tests/ring3_fault.bin: userland/tests/ring3_fault.elf
 ring3_fault: userland/tests/ring3_fault.bin
 .PHONY: ring3_fault
 
+# --- hello_r3 (M2 KAPI トランポリン検証: 既存 hello.c をソース無変更で CPL=3) ---
+# hello.elf (crt0 リンク済み, 通常ビルド) をそのまま使い、--ring3 を付けた
+# 別名 .bin にする。api->kprintf(%d/%s) / api->magic / api->version /
+# crt0 の sys_exit 往復を CPL=3 で網羅する (T1-T5)。ソースは一切変えない。
+userland/tests/hello_r3.bin: userland/tests/hello.elf
+	$(OBJCOPY) -O binary $< userland/tests/hello_r3.raw
+	python3 sdk/mkos32x.py userland/tests/hello_r3.raw $@ --elf $< --api 39 --ring3
+	@rm -f userland/tests/hello_r3.raw
+
+hello_r3: userland/tests/hello_r3.bin
+.PHONY: hello_r3
+
 # ---------------------------------------------------------------------------
 # DEFINE_TEST — テストプログラム定義テンプレート
 # $(1) = テスト名 (tests/ 以下のベース名)
@@ -315,7 +327,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault hello_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)

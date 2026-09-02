@@ -25,6 +25,32 @@ extern u32 sys_mem_kb;
  * 合わせる (割り込み/int 0x80 のフレームが exec_run の frame を踏まないよう)。*/
 extern struct tss_entry kernel_tss;
 static KernelAPI *kapi;
+
+/* ======================================================================== */
+/*  KAPI トランポリン (v2 M2)                                                */
+/*                                                                          */
+/*  CPL=3 アプリは本物の KAPI 表 (カーネルコードポインタ) を読めない/呼べない */
+/*  ので、全 PD 共有の USER ページ 1 枚に「本物と同一レイアウトのユーザ可視表 */
+/*  + スタブ列」を置き、exec はアプリにこのページのアドレスを渡す。アプリの   */
+/*  api->kprintf(...) は表のスタブを呼び、スタブが int 0x80 でカーネルに入る。 */
+/*  カーネル band (.bss, PDE0 共有) に置き PTE を RO+USER にする              */
+/*  (CR0.WP=0 なのでカーネルは RO でも書ける = per-launch のデータ更新可)。   */
+/*  レイアウト (CONTRACTS C3, KernelAPI と同一オフセット):                    */
+/*    0x00 magic / 0x04 version / 0x08+ 表[i]=STUB_BASE+i*8 /                */
+/*    データフィールド (値) / STUB_BASE: 各 8B スタブ B8<slot>CD80C3         */
+/* ======================================================================== */
+static u8  ring3_tramp_raw[PAGE_SIZE * 2];   /* 4KB アライン用に 2 ページ分 */
+static u32 ring3_tramp_page = 0;             /* 4KB 境界に揃えた実アドレス (=物理) */
+static void ring3_trampoline_init(void);
+
+/* int 0x80 引数コピー+呼び出しの ASM ヘルパ (kernel/ring3_entry.asm)。
+ * args_src から nbytes をスタックへコピーして wrapfn を cdecl 呼び出し、
+ * 戻り値 (eax) を返す。 */
+extern u32 kapi_invoke(void *wrapfn, const void *args_src, u32 nbytes);
+
+/* CPL=3 由来のフォールト/不正 slot でアプリを kill (定義は下方, v2 M1e/M2d) */
+void ring3_fault_kill(void);
+
 void exec_init(void) {
     kapi = (KernelAPI *)KAPI_ADDR;
 #include "exec_kapi_init.inc"
@@ -32,6 +58,52 @@ void exec_init(void) {
      * MEM_SHM_BASE はカーネルの __bss_end 由来で可変のため、
      * ユーザ空間側がアドレスをハードコードしてはならない。 */
     kapi->shm_base = (u32)MEM_SHM_BASE;
+
+    /* CPL=3 用 KAPI トランポリンページを構築 (paging_init 済みが前提) */
+    ring3_trampoline_init();
+}
+
+/* ======================================================================== */
+/*  ring3_trampoline_init — トランポリンページの構築 (v2 M2b)               */
+/* ======================================================================== */
+static void ring3_trampoline_init(void)
+{
+    u32 page = ((u32)ring3_tramp_raw + PAGE_SIZE - 1) & ~(u32)(PAGE_SIZE - 1);
+    u32 *tbl = (u32 *)page;
+    u32 stub_base = (page + sizeof(KernelAPI) + 3u) & ~3u; /* 全 struct の後ろ */
+    u32 i;
+
+    ring3_tramp_page = page;
+
+    /* magic / version は本物と同じ値 */
+    tbl[0] = kapi->magic;
+    tbl[1] = kapi->version;
+
+    for (i = 0; i < KAPI_FUNC_COUNT; i++) {
+        u8 *st = (u8 *)(stub_base + i * 8u);
+        /* ユーザ可視表: entry[i] = スタブ i の番地 (KernelAPI fn[i] と同一 offset) */
+        tbl[2 + i] = stub_base + i * 8u;
+        /* スタブ: B8 <slot:imm32> CD 80 C3  (mov eax,slot; int 0x80; ret) */
+        st[0] = 0xB8;
+        st[1] = (u8)(i & 0xFF);
+        st[2] = (u8)((i >> 8) & 0xFF);
+        st[3] = (u8)((i >> 16) & 0xFF);
+        st[4] = (u8)((i >> 24) & 0xFF);
+        st[5] = 0xCD;   /* int */
+        st[6] = 0x80;   /* 0x80 */
+        st[7] = 0xC3;   /* ret */
+    }
+
+    /* データフィールド (値): KernelAPI 表と同一オフセット (fn 表の直後)。
+     * index 2+KAPI_FUNC_COUNT = sbrk_heap_limit, +1 = shm_base。
+     * sbrk_heap_limit は exec_run が launch 時に上書きする。 */
+    tbl[2 + KAPI_FUNC_COUNT + 0] = 0;
+    tbl[2 + KAPI_FUNC_COUNT + 1] = (u32)MEM_SHM_BASE;
+
+    /* 全 PD 共有で RO+USER マップ (kernel band PDE0)。i386 は NX なしなので
+     * RO でも実行可能 (スタブ実行 OK)。ユーザは書けない = スタブ改竄不可。
+     * CR0.WP=0 によりカーネルは RO でも書ける (per-launch のデータ更新)。 */
+    paging_set_page(page, page, PAGE_RO | PTE_USER);
 }
 
 /* スタックを4バイト境界に揃えるためのマスク */
@@ -207,31 +279,70 @@ void exec_fault_recover(void)
 
 void __cdecl kapi_sys_exit(int status)
 {
-    exec_exit(status);
-}
-
-/* ======================================================================== */
-/*  ring3_syscall_dispatch — CPL=3 からの int 0x80 の C 側入口 (v2 M1)      */
-/*                                                                          */
-/*  kernel/ring3_entry.asm から cdecl で (slot, arg0) が渡る。M1 の唯一の    */
-/*  システムコールは sys_exit なので slot は未使用 (M2 のトランポリンが      */
-/*  slot ディスパッチと引数コピー/ポインタ検証を担う, CONTRACTS C4)。        */
-/*                                                                          */
-/*  実行中は CR3 がアプリ PD のまま (割り込み/int は CR3 を変えない)。       */
-/*  アプリ PD はカーネル帯域 (PDE0) を master と共有しているので、この       */
-/*  ハンドラのコード/スタックは問題なく走る。exec_exit の後始末は master PD  */
-/*  上で行うため、先に CR3 を master へ戻し AS を破棄する。                  */
-/* ======================================================================== */
-void __cdecl ring3_syscall_dispatch(u32 slot, u32 arg0)
-{
-    (void)slot;
+    /* CPL=3 (リング3) アプリからの正常終了 (トランポリン経由, v2 M2)。
+     * exec_exit の後始末とシェル復帰は master PD 上で行うので、先に master
+     * CR3 へ戻し AS を破棄する。CPL=0 プログラム (シェル等) は g_ring3_active
+     * が偽なので従来どおり。二重破棄は g_ring3_active と destroy 側で防ぐ。 */
     if (g_ring3_active) {
         paging_load_cr3(paging_kernel_pd_phys());
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
     }
-    /* exec_exit は longjmp で exec_run の復帰点へ跳ぶ (戻らない)。 */
-    exec_exit((int)arg0);
+    exec_exit(status);
+}
+
+/* ======================================================================== */
+/*  ring3_syscall_dispatch — CPL=3 からの int 0x80 ディスパッチャ (v2 M2d)   */
+/*                                                                          */
+/*  kernel/ring3_entry.asm の int80_stub が pushad 後のフレーム先頭を渡す。  */
+/*  フレーム (u32 配列, pushad + CPU が積んだ例外フレーム):                   */
+/*    [0..7]=pushad (EDI,ESI,EBP,ESP,EBX,EDX,ECX,EAX)  → EAX=[7]             */
+/*    [8]=EIP [9]=CS [10]=EFLAGS [11]=userESP [12]=userSS                    */
+/*                                                                          */
+/*  eax(=[7]) がスタブの積んだ slot。範囲外は即 kill (CONTRACTS C4)。        */
+/*  本物の KAPI 表 (KAPI_ADDR: [magic][version][fn0..]) から wrap を引き、    */
+/*  ユーザスタック (userESP+4, スタブの ret アドレス分を飛ばす) から引数を    */
+/*  コピーして呼ぶ。戻り値は eax スロット([7])へ書く → popad で復元される。   */
+/*  現 CR3 はアプリ PD のまま呼ぶ (ユーザポインタ引数がアプリ帯で解決される)。*/
+/*  sys_exit は wrap → kapi_sys_exit が teardown+longjmp するのでここへ戻らない。*/
+/*  ※ ポインタ/ESP の厳密な範囲検証は M2e (ここでは上端クランプのみ)。       */
+/* ======================================================================== */
+
+/* 可変長引数 (kprintf) を拾うためのコピー窓 (固定分より広めに取る)。 */
+#define RING3_ARG_WINDOW  64u
+
+void __cdecl ring3_syscall_dispatch(u32 *frame)
+{
+    u32 slot     = frame[7];         /* スタブが積んだ slot (eax) */
+    u32 user_esp = frame[11];        /* CPL=3 の ESP (int が積んだ) */
+    const void *args_src;
+    u32 nbytes;
+    u32 window;
+    u32 wrapptr;
+
+    /* 範囲外 slot はワイルド呼び出し → アプリだけ kill (カーネルを飛ばさない)。
+     * ring3_fault_kill は fault_kill_count++ / teardown / longjmp で戻らない。 */
+    if (slot >= (u32)KAPI_FUNC_COUNT) {
+        ring3_fault_kill();
+    }
+
+    /* 本物の表から wrap_<slot> を取得 ([magic][version] の後が fn 表)。 */
+    wrapptr = ((const u32 *)KAPI_ADDR)[2 + slot];
+
+    /* ユーザスタックから引数をコピー。スタブの ret アドレス分 (+4) を飛ばす。
+     * 固定分 = kapi_argsize[slot]。kprintf 等の可変長のため広めの窓を取り、
+     * ユーザスタック上端でクランプして over-read #PF を避ける (厳密検証は M2e)。 */
+    args_src = (const void *)(user_esp + 4u);
+    nbytes = (u32)kapi_argsize[slot];
+    window = (nbytes < RING3_ARG_WINDOW) ? RING3_ARG_WINDOW : nbytes;
+    if ((u32)args_src < RING3_USTACK_TOP &&
+        (u32)args_src + window > RING3_USTACK_TOP) {
+        window = RING3_USTACK_TOP - (u32)args_src;
+    }
+
+    /* 本物の wrap を呼び、戻り値を eax スロットへ (popad で復元 → スタブの
+     * ret でアプリへ戻り、cdecl 呼び出し側が引数を掃除する)。 */
+    frame[7] = kapi_invoke((void *)wrapptr, args_src, window);
 }
 
 /* ======================================================================== */
@@ -532,6 +643,7 @@ int exec_run(const char *cmdline)
         const char *s = cmdline;
         char *d;
         u32 new_esp;
+        u32 u_esp;   /* ring3: iret に渡すユーザ ESP (ダミー retaddr 込み) */
         /* 呼び出し元 ESP の退避先。
          *
          * ローカル変数にしないのは、子プログラムのスタックへ切り替えた後の
@@ -633,6 +745,33 @@ int exec_run(const char *cmdline)
             paging_addrspace_map_user_range(&g_ring3_as,
                 (u32)MEM_SHM_BASE, (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE,
                 PAGE_RW | PTE_USER);
+            /* KAPI トランポリンページ (RO+USER, 全PD共有)。この app PD の PDE0 に
+             * USER を伝播させる (VRAM/SHM で既に立つが明示・冪等)。 */
+            paging_addrspace_map_user(&g_ring3_as, ring3_tramp_page,
+                ring3_tramp_page, PAGE_RO | PTE_USER);
+
+            /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
+             * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので
+             * 無変更。データフィールド (sbrk_heap_limit/shm_base) を本物の表から
+             * トランポリンへ反映してから渡す (CR0.WP=0 で RO ページへ書ける)。 */
+            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] =
+                kapi->sbrk_heap_limit;
+            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] =
+                kapi->shm_base;
+            ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */
+
+            /* --- crt0 スタック規約合わせ (v2 M2, retaddr ズレ修正) ---
+             * crt0.asm/_start_c は CPL=0 の `call *entry` を前提にし、
+             * [esp]=retaddr, [esp+4]=argc, [esp+8]=argv, [esp+12]=api を読む。
+             * だが ring3 は iret でエントリへ飛ぶため call が無く retaddr が
+             * 積まれず、スタックが 1 スロットずれて argc↔argv↔api が食い違う
+             * (実測: argv[1] に version=0x27 が入り #PF)。iret に渡す ESP を
+             * argc の 1 スロット下にし、そこにダミー retaddr を置いて
+             * call 経路と同一レイアウトに揃える。crt0 は main 後 sys_exit する
+             * ので retaddr へは戻らない (0 でよい)。ダミーは USER 済みの
+             * ユーザスタック帯 (0x7F0000-0x800000) 内。 */
+            u_esp = new_esp - sizeof(u32);
+            ((u32 *)u_esp)[0] = 0;   /* ダミー retaddr */
 
             g_ring3_active = 1;
 
@@ -661,7 +800,7 @@ int exec_run(const char *cmdline)
                 "iret\n\t"
                 : [e0] "=m"(kernel_tss.esp0)
                 : [pd]  "r"(g_ring3_as.pd_phys),
-                  [uesp]"r"(new_esp),
+                  [uesp]"r"(u_esp),
                   [eip] "r"((u32)entry),
                   [uds] "i"(USER_DS),
                   [ucs] "i"(USER_CS)

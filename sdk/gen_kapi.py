@@ -41,7 +41,19 @@ for field in data.get("data_fields", []):
     else:
         header_content += f"    {field['type']} {field['name']};\n"
 
-header_content += "} KernelAPI;\n\n#endif\n"
+header_content += "} KernelAPI;\n\n"
+
+# --- M2 (KAPI トランポリン): CONTRACTS C5 ---
+# KAPI_FUNC_COUNT = 関数スロット数 (トランポリンのスタブ生成ループ / int 0x80
+# ディスパッチャの範囲チェックに使う)。データフィールドは含めない。
+header_content += f"#define KAPI_FUNC_COUNT {len(data['api'])}\n"
+# kapi_argsize[slot] = 各スロットの cdecl 引数バイト数 (固定分)。i386 では
+# int/ポインタ/char/short いずれも 4B スタックスロット。可変長 (...) は
+# 固定分のみを数える (ディスパッチャが下限に使う)。カーネル側 (kapi_generated.c)
+# で定義。プログラム側では未使用。
+header_content += "extern const u16 kapi_argsize[KAPI_FUNC_COUNT];\n"
+
+header_content += "\n#endif\n"
 
 with open("sdk/include/os32/os32_kapi_generated.h", "w", encoding="utf-8") as f:
     f.write(header_content)
@@ -63,6 +75,19 @@ c_content += '#include "kapi_profile.h"\n\n'
 c_content += "#ifdef KAPI_PROFILE\n"
 c_content += f"volatile u32 kapi_hits[{len(data['api'])}];\n"
 c_content += "#endif\n\n"
+
+# --- M2: kapi_argsize[] (CONTRACTS C5) ---
+# slot = api 配列の並び順 (KernelAPI 表 / wrap / init と同一)。
+c_content += "/* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが\n"
+c_content += " * ユーザスタックからこの量をコピーして本物の wrap を呼ぶ (可変長は下限)。 */\n"
+c_content += "const u16 kapi_argsize[KAPI_FUNC_COUNT] = {\n"
+for _slot, _api in enumerate(data["api"]):
+    _fixed = [a for a in _api.get("args", []) if a != "..."]
+    _bytes = 4 * len(_fixed)
+    _variadic = any(a == "..." for a in _api.get("args", []))
+    _tag = "  /* %s%s */" % (_api["name"], " (...)" if _variadic else "")
+    c_content += f"    {_bytes},{_tag}\n"
+c_content += "};\n\n"
 
 for slot, api in enumerate(data["api"]):
     if api.get("direct", False):

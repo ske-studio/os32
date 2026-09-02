@@ -177,4 +177,7 @@ typedef struct {
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
+#define KAPI_FUNC_COUNT 168
+extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
+
 #endif
