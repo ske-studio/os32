@@ -4,7 +4,7 @@
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS = $(wildcard userland/cmds/*.c)
-C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c, $(wildcard userland/tests/*.c))
+C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c, $(wildcard userland/tests/*.c))
 C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_TESTS) $(C_SYSTEM)
@@ -147,6 +147,21 @@ userland/tests/ring3_fault.bin: userland/tests/ring3_fault.elf
 
 ring3_fault: userland/tests/ring3_fault.bin
 .PHONY: ring3_fault
+
+# --- ring3_guard (M3 ハードニング: heap/stack ガードページ検証) ---
+userland/tests/ring3_guard.o: userland/tests/ring3_guard.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+userland/tests/ring3_guard.elf: userland/tests/ring3_guard.o sdk/link/app.ld
+	$(LD) -m elf_i386 -T sdk/link/app.ld -nostdlib --nmagic --gc-sections -o $@ userland/tests/ring3_guard.o
+
+userland/tests/ring3_guard.bin: userland/tests/ring3_guard.elf
+	$(OBJCOPY) -O binary $< userland/tests/ring3_guard.raw
+	python3 sdk/mkos32x.py userland/tests/ring3_guard.raw $@ --elf $< --api 39
+	@rm -f userland/tests/ring3_guard.raw
+
+ring3_guard: userland/tests/ring3_guard.bin
+.PHONY: ring3_guard
 
 # --- hello_r3 (M2 KAPI トランポリン検証: 既存 hello.c をソース無変更で CPL=3) ---
 # hello.elf (crt0 リンク済み, 通常ビルド) をそのまま使い、--ring3 を付けた
@@ -338,7 +353,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)

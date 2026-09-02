@@ -168,6 +168,14 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
  * より十分上。 */
 #define RING3_USTACK_SIZE    MEM_EXEC_STACK_SIZE
 
+/* ヒープとスタックの間に 1 ページのガードを挟む (v2 M3 ハードニング)。
+ * ヒープのオーバーラン / スタックのアンダーフローがガード(非present)に当たり
+ * #PF → ring3_fault_kill でアプリのみ kill。相互の静かな破壊を防ぐ。 */
+#define RING3_GUARD_SIZE     PAGE_SIZE
+#define RING3_STACK_BOTTOM   (RING3_USTACK_TOP - RING3_USTACK_SIZE)     /* 0x7C0000 */
+#define RING3_GUARD_BASE     (RING3_STACK_BOTTOM - RING3_GUARD_SIZE)    /* 0x7BF000 */
+#define RING3_HEAP_TOP       RING3_GUARD_BASE                           /* heap 上限=ガード直下 */
+
 static struct addrspace g_ring3_as;
 static volatile int g_ring3_active = 0;
 
@@ -190,9 +198,11 @@ volatile int ring3_in_syscall = 0;
 static int ring3_ptr_ok(u32 p)
 {
     if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
-    if (p >= MEM_EXEC_LOAD_ADDR && p < RING3_USTACK_TOP) return 1;
-        /* 0x400000 帯 = code/data/bss/heap (スタック下端まで) + ユーザスタック。
-         * 全域を USER マップ済みなので、この範囲のポインタはすべて有効。 */
+    if (p >= MEM_EXEC_LOAD_ADDR && p < RING3_HEAP_TOP) return 1;
+        /* code/data/bss/heap (ガード直下まで) */
+    if (p >= RING3_STACK_BOTTOM && p < RING3_USTACK_TOP) return 1;
+        /* ユーザスタック帯。ガードページ [RING3_GUARD_BASE, RING3_STACK_BOTTOM)
+         * は不許可 (ここを指すポインタは早期検証で kill)。 */
     if (p >= (u32)MEM_SHM_BASE &&
         p <  (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE) return 1;  /* SHM */
     if (p >= 0xA0000UL && p < 0xC0000UL) return 1;/* VRAM (テキスト/グラフィック) */
@@ -796,11 +806,16 @@ int exec_run(const char *cmdline)
              * ヒープをスタック手前まで使えるよう [0x400000, スタック下端) を覆う
              * (v2 M3 回帰修正: alloc_demo が 1MB 超で 0x501008 に #PF していた)。 */
             paging_addrspace_map_user_range(&g_ring3_as,
-                MEM_EXEC_LOAD_ADDR, RING3_USTACK_TOP - RING3_USTACK_SIZE,
+                MEM_EXEC_LOAD_ADDR, RING3_HEAP_TOP,
                 PAGE_RW | PTE_USER);
-            /* ユーザスタック帯 (0x400000 帯の上端, PD ごと) */
+            /* ヒープ/スタック境界のガードページ (非present, USER なし)。
+             * オーバーラン/アンダーフローを #PF で捕捉する。map_user に flags=0
+             * を渡し present ビットを落とす (identity コピーの present を上書き)。 */
+            paging_addrspace_map_user(&g_ring3_as,
+                RING3_GUARD_BASE, RING3_GUARD_BASE, 0);
+            /* ユーザスタック帯 (ガードの上、0x400000 帯の上端, PD ごと) */
             paging_addrspace_map_user_range(&g_ring3_as,
-                RING3_USTACK_TOP - RING3_USTACK_SIZE, RING3_USTACK_TOP,
+                RING3_STACK_BOTTOM, RING3_USTACK_TOP,
                 PAGE_RW | PTE_USER);
             /* VRAM (テキスト 0xA0000 + グラフィック 0xA8000) — C2: 全PD共有+USER */
             paging_addrspace_map_user_range(&g_ring3_as,
@@ -840,7 +855,7 @@ int exec_run(const char *cmdline)
              * 合わせる。旧 CPL=0 の mem_end 由来値だと USER マップ外を指し、
              * _sbrk が伸ばした先で #PF する。 */
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] =
-                RING3_USTACK_TOP - RING3_USTACK_SIZE;
+                RING3_HEAP_TOP;
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] =
                 kapi->shm_base;
             ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */

@@ -81,6 +81,10 @@ filesystem:
     - host: userland/tests/ring3_fault.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- ring3_guard (M3 heap/stack ガード検証) ---
+    - host: userland/tests/ring3_guard.bin
+      guest: /usr/bin/
+      tags: [programs]
     # --- hello_r3 (M2 KAPI トランポリン検証, ソース無変更 hello の CPL=3 版) ---
     - host: userland/tests/hello_r3.bin
       guest: /usr/bin/
