@@ -7,12 +7,14 @@
 /* ======================================================================== */
 
 #include "pipe_buffer.h"
+#include "fd_redirect.h"   /* res_owner_get */
 #include "kmalloc.h"
 
 /* パイプバッファ管理構造 (ポインタ + メタデータのみ。BSS = 数十バイト) */
 static u8 *pipe_ptr[PIPE_BUF_COUNT];
 static u32 pipe_len[PIPE_BUF_COUNT];
 static int pipe_used[PIPE_BUF_COUNT];
+static int pipe_owner[PIPE_BUF_COUNT];   /* 確保した実行レベル */
 
 void pipe_buffer_init(void)
 {
@@ -21,6 +23,7 @@ void pipe_buffer_init(void)
         pipe_ptr[i] = (u8 *)0;
         pipe_used[i] = 0;
         pipe_len[i] = 0;
+        pipe_owner[i] = 0;
     }
 }
 
@@ -36,10 +39,21 @@ int pipe_alloc(void)
             }
             pipe_used[i] = 1;
             pipe_len[i] = 0;
+            pipe_owner[i] = res_owner_get();
             return i;
         }
     }
     return -1;
+}
+
+void pipe_free_owned(int owner)
+{
+    int i;
+    for (i = 0; i < PIPE_BUF_COUNT; i++) {
+        if (pipe_used[i] && pipe_owner[i] == owner) {
+            pipe_free(i);
+        }
+    }
 }
 
 void pipe_free(int id)
@@ -51,6 +65,7 @@ void pipe_free(int id)
         }
         pipe_used[id] = 0;
         pipe_len[id] = 0;
+        pipe_owner[id] = 0;
     }
 }
 

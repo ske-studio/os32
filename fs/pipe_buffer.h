@@ -31,6 +31,11 @@ int pipe_alloc(void);
 /* パイプバッファの解放 */
 void pipe_free(int id);
 
+/* 指定所有者 (res_owner_get() の値で確保時にタグ付け) のバッファだけ解放。
+ * exec_exit の安全網用: シェルが張ったパイプラインのバッファを、途中段の
+ * 外部プログラム終了で巻き込まないため */
+void pipe_free_owned(int owner);
+
 /* バッファのポインタを取得 */
 u8 *pipe_get_buf(int id);
 

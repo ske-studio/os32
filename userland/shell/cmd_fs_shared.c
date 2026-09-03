@@ -6,6 +6,7 @@
 /*  バイナリ重複を避けるため .c ファイルに移動した。                          */
 /* ======================================================================== */
 #include "shell.h"
+#include "cmd_fs_shared.h"
 
 /* ======================================================================== */
 /*  skip_space — 先頭の空白文字をスキップしてポインタを返す                   */
@@ -35,6 +36,59 @@ int fs_is_dir(const char *path)
     int found = 0;
     int rc = g_api->sys_ls(path, (void *)fs_dummy_ls_cb, &found);
     return (rc == 0);
+}
+
+/* ======================================================================== */
+/*  fs_path_kind — stat でパス種別を判定 (stat 非対応 FS は sys_ls で代替)    */
+/* ======================================================================== */
+int fs_path_kind(const char *path)
+{
+    OS32_Stat st;
+    int rc = g_api->sys_stat(path, &st);
+    if (rc == 0) {
+        return ((st.st_mode & OS_S_IFMT) == OS_S_IFDIR) ? FS_KIND_DIR : FS_KIND_FILE;
+    }
+    if (rc == OS32_ERR_NOTFOUND) return rc;
+    if (fs_is_dir(path)) return FS_KIND_DIR;
+    return rc;
+}
+
+/* ======================================================================== */
+/*  fs_same_file — cp/mv の自己上書き防止                                     */
+/*                                                                          */
+/*  `cp a a` は src を開いた後に dst を O_TRUNC で開くので a が 0 バイトに、  */
+/*  `mv a a` はコピー後に unlink するので a が消えていた。                    */
+/* ======================================================================== */
+int fs_same_file(const char *a, const char *b)
+{
+    OS32_Stat sa, sb;
+
+    if (strcmp(a, b) == 0) return 1;
+    if (g_api->sys_stat(a, &sa) != 0) return 0;
+    if (g_api->sys_stat(b, &sb) != 0) return 0;
+    /* hostdrv 等 inode を返さない FS (st_ino=0) は比較できないので文字列一致のみ */
+    if (sa.st_ino == 0 || sb.st_ino == 0) return 0;
+    return (sa.st_ino == sb.st_ino && sa.st_dev == sb.st_dev);
+}
+
+/* ======================================================================== */
+/*  fs_strerror — OS32_ERR_* → メッセージ                                    */
+/* ======================================================================== */
+const char *fs_strerror(int rc)
+{
+    switch (rc) {
+    case 0:                 return "Success";
+    case OS32_ERR_IO:       return "I/O error";
+    case OS32_ERR_NOTFOUND: return "No such file or directory";
+    case OS32_ERR_NOMOUNT:  return "Not mounted";
+    case OS32_ERR_NOSPC:    return "No space left on device";
+    case OS32_ERR_EXIST:    return "File exists";
+    case OS32_ERR_NOTDIR:   return "Not a directory";
+    case OS32_ERR_NOTEMPTY: return "Directory not empty";
+    case OS32_ERR_ISDIR:    return "Is a directory";
+    case OS32_ERR_INVAL:    return "Invalid argument";
+    default:                return "Unknown error";
+    }
 }
 
 /* ======================================================================== */

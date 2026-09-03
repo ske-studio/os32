@@ -147,8 +147,11 @@ void paging_init(u32 mem_kb)
     /* シェルスタックガード: Not-Present */
     paging_set_not_present(MEM_SHELL_GUARD, MEM_SHELL_GUARD + PAGE_SIZE - 1);
 
-    /* シェル帯域後方 (0x380000-0x3FFFFF): Not-Present */
-    paging_set_not_present(0x380000UL, MEM_SHELL_BAND_END);
+    /* シェル帯域後方 (MEM_SHELL_HEAP_BASE 0x380000 - 0x3FFFFF) はシェルの
+     * exec_heap (KAPI mem_alloc) として present R/W のまま使う。かつては
+     * Not-Present の空白帯だったが、シェルの exec_heap を newlib の sbrk
+     * (BSS 直後) から分離するためにここへ移した (include/memmap.h 参照)。
+     * PTE に USER は立てないので CPL=3 のアプリからは触れない */
 
     /* SQLite帯域 + 代替スタック (0x200000〜): 強制R/W
      * ブートローダーが sqlite.bin を 0x200000 にロード済み。

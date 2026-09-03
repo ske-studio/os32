@@ -42,9 +42,16 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 
 [ シェル常駐帯域 (0x300000 - 0x3FFFFF, 1MB) ]
 0x300000 - +468KB(max)    ~375KB   shell.bin (.text + .data + .bss)           R/W
-0x375000 - 0x375FFF       4KB      ★ シェルスタックガード                    NP
+(BSS終端) - 0x374FFF               newlib sbrk ヒープ (malloc / stdio)        R/W
+0x375000 - 0x375FFF       4KB      ★ シェルスタックガード (= sbrk 上限)      NP
 0x376000 - 0x37FFFF       40KB     シェルスタック (ESP初期値=0x380000)        R/W
-0x380000 - 0x3FFFFF       512KB    帯域間ギャップ (NP)                       NP
+0x380000 - 0x3FFFFF       512KB    シェル exec_heap (KAPI mem_alloc)          R/W
+
+> シェルは newlib の sbrk ヒープと KAPI `mem_alloc` の exec_heap の 2 系統を
+> 持つ。かつては両方が BSS 終端から始まり互いを上書きしていた
+> (`ls > file` の化け、`pipe: out of memory`、double free 警告)。
+> 2026-09-03 に exec_heap を 0x380000 (旧 NP ギャップ) へ分離した。
+> PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
 [ プログラム空間 (0x400000 - mem_end) — 動的レイアウト ]
 0x400000 - 0x4FFFFF       1MB      .text + .data + .bss + sbrk (最大1MB)      R/W

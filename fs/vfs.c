@@ -30,7 +30,15 @@ const char *vfs_cwd(void) { return cwd; }
 int vfs_chdir(const char *path)
 {
     char resolved[VFS_MAX_PATH];
+    int kind;
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+
+    /* 実在するディレクトリだけ受け付ける。以前は検証なしに cwd を書き換えて
+     * いたので `cd /nonexistent` が成功して見え、以後の相対パスが全部壊れた */
+    kind = vfs_path_kind(resolved);
+    if (kind < 0) return kind;
+    if (kind != VFS_KIND_DIR) return VFS_ERR_NOTDIR;
+
     kstrncpy(cwd, resolved, VFS_MAX_PATH);
     /* 末尾に / を保証 */
     {
@@ -439,19 +447,86 @@ u32 vfs_block_size(void) {
     return (mnt && mnt->ops->block_size) ? mnt->ops->block_size(mnt->fs_ctx) : 0;
 }
 
+/* マウントルート ("/") の stat 合成。FatFs の f_stat はルートに
+ * FR_INVALID_NAME を返すなど、FS ドライバはルートを stat できないことがある */
+static void vfs_synth_root_stat(OS32_Stat *buf)
+{
+    kmemset(buf, 0, sizeof(OS32_Stat));
+    buf->st_mode  = OS_S_IFDIR | OS_S_IRWXU;
+    buf->st_nlink = 2;
+}
+
+static int vfs_rel_is_root(const char *rel_path)
+{
+    return rel_path[0] == '/' && rel_path[1] == '\0';
+}
+
 int vfs_stat(const char *path, OS32_Stat *buf)
 {
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
-    
+    int rc;
+
     if (!buf) return VFS_ERR_INVAL;
 
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
-    
-    if (!ops || !ops->stat) return VFS_ERR_NOMOUNT;
-    return ops->stat(fs_ctx, rel_path, buf);
+
+    if (!ops) return VFS_ERR_NOMOUNT;
+    if (!ops->stat) {
+        if (vfs_rel_is_root(rel_path)) { vfs_synth_root_stat(buf); return VFS_OK; }
+        return VFS_ERR_NOMOUNT;
+    }
+    rc = ops->stat(fs_ctx, rel_path, buf);
+    if (rc != VFS_OK && vfs_rel_is_root(rel_path)) {
+        vfs_synth_root_stat(buf);
+        return VFS_OK;
+    }
+    return rc;
+}
+
+/* vfs_path_kind の list_dir プローブ用 (何もしない) */
+static void vfs_kind_probe_cb(const VfsDirEntry *entry, void *ctx)
+{
+    (void)entry; (void)ctx;
+}
+
+int vfs_path_kind(const char *path)
+{
+    char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
+    VfsOps *ops;
+    OS32_Stat st;
+    int rc;
+
+    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
+    if (!ops) return VFS_ERR_NOMOUNT;
+
+    /* マウントルートは常にディレクトリ (FS ドライバに聞かない) */
+    if (vfs_rel_is_root(rel_path)) return VFS_KIND_DIR;
+
+    if (ops->stat) {
+        rc = ops->stat(fs_ctx, rel_path, &st);
+        if (rc == VFS_OK) {
+            return ((st.st_mode & OS_S_IFMT) == OS_S_IFDIR) ? VFS_KIND_DIR : VFS_KIND_FILE;
+        }
+        if (rc == VFS_ERR_NOTFOUND) return VFS_ERR_NOTFOUND;
+        /* それ以外のエラーはドライバの stat 未対応とみなし下のプローブへ */
+    }
+
+    /* stat が無い/失敗した FS: list_dir が通ればディレクトリ、
+     * get_file_size が通ればファイル */
+    if (ops->list_dir &&
+        ops->list_dir(fs_ctx, rel_path, vfs_kind_probe_cb, (void *)0) == VFS_OK) {
+        return VFS_KIND_DIR;
+    }
+    if (ops->get_file_size) {
+        u32 sz;
+        if (ops->get_file_size(fs_ctx, rel_path, &sz) == VFS_OK) return VFS_KIND_FILE;
+    }
+    return VFS_ERR_NOTFOUND;
 }
 
 /* end of vfs.c */

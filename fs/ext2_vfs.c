@@ -67,6 +67,29 @@ static void ext2_to_vfs_cb(const Ext2DirEntry *e, void *ctx)
     lc->user_cb(&ve, lc->user_ctx);
 }
 
+/* EXT2_ERR_* → VFS_ERR_* 変換。番号体系が異なる (EXT2 の -3 は NOTFOUND だが
+ * VFS の -3 は NOMOUNT) ので、ドライバの戻り値をそのまま上げてはいけない。
+ * 以前はそのまま返していたため、シェルが `rm nonexist` に -3 (NOMOUNT)、
+ * `mkdir exists` に -6 (VFS では NOTDIR) を表示していた。正の値 (バイト数) は
+ * そのまま通す */
+static int ext2_to_vfs_err(int rc)
+{
+    if (rc >= 0) return rc;
+    switch (rc) {
+    case EXT2_ERR_IO:       return VFS_ERR_IO;
+    case EXT2_ERR_MAGIC:    return VFS_ERR_IO;
+    case EXT2_ERR_NOTFOUND: return VFS_ERR_NOTFOUND;
+    case EXT2_ERR_NOMOUNT:  return VFS_ERR_NOMOUNT;
+    case EXT2_ERR_NOSPC:    return VFS_ERR_NOSPC;
+    case EXT2_ERR_EXIST:    return VFS_ERR_EXIST;
+    case EXT2_ERR_NOTDIR:   return VFS_ERR_NOTDIR;
+    case EXT2_ERR_NOTEMPTY: return VFS_ERR_NOTEMPTY;
+    case EXT2_ERR_ISDIR:    return VFS_ERR_ISDIR;
+    case EXT2_ERR_INVAL:    return VFS_ERR_INVAL;
+    default:                return VFS_ERR_IO;
+    }
+}
+
 static int ext2_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user_ctx)
 {
     Ext2Ctx *ec = (Ext2Ctx *)ctx;
@@ -80,7 +103,7 @@ static int ext2_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user_
     lc.user_cb = cb;
     lc.user_ctx = user_ctx;
     lc.ec = ec;
-    return ext2_list_dir(ec, ino, ext2_to_vfs_cb, &lc);
+    return ext2_to_vfs_err(ext2_list_dir(ec, ino, ext2_to_vfs_cb, &lc));
 }
 
 static int ext2_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
@@ -90,7 +113,7 @@ static int ext2_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_read_file(ec, ino, buf, max_size);
+    return ext2_to_vfs_err(ext2_read_file(ec, ino, buf, max_size));
 }
 
 static int ext2_vfs_write(void *ctx, const char *path, const void *data, u32 size)
@@ -112,10 +135,10 @@ static int ext2_vfs_write(void *ctx, const char *path, const void *data, u32 siz
     rc = ext2_find_entry(ec, dir_ino, fname, &file_ino, &ftype);
     if (rc == 0) {
         /* 既存ファイル → 上書き */
-        return ext2_write(ec, file_ino, data, size);
+        return ext2_to_vfs_err(ext2_write(ec, file_ino, data, size));
     } else {
         /* 新規作成 */
-        return ext2_create(ec, dir_ino, fname, data, size);
+        return ext2_to_vfs_err(ext2_create(ec, dir_ino, fname, data, size));
     }
 }
 
@@ -131,7 +154,25 @@ static int ext2_vfs_unlink(void *ctx, const char *path)
 
     rc = ext2_resolve_path(ec, dir_path, &dir_ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_unlink(ec, dir_ino, fname);
+    return ext2_to_vfs_err(ext2_unlink(ec, dir_ino, fname));
+}
+
+static int ext2_vfs_rename(void *ctx, const char *oldpath, const char *newpath)
+{
+    Ext2Ctx *ec = (Ext2Ctx *)ctx;
+    char old_dir[VFS_MAX_PATH], new_dir[VFS_MAX_PATH];
+    const char *old_name, *new_name;
+    u32 old_ino, new_ino;
+    int rc;
+
+    ext2_split_path(oldpath, old_dir, &old_name);
+    ext2_split_path(newpath, new_dir, &new_name);
+
+    rc = ext2_resolve_path(ec, old_dir, &old_ino);
+    if (rc != 0) return VFS_ERR_NOTFOUND;
+    rc = ext2_resolve_path(ec, new_dir, &new_ino);
+    if (rc != 0) return VFS_ERR_NOTFOUND;
+    return ext2_to_vfs_err(ext2_rename(ec, old_ino, old_name, new_ino, new_name));
 }
 
 static int ext2_vfs_mkdir(void *ctx, const char *path)
@@ -146,7 +187,7 @@ static int ext2_vfs_mkdir(void *ctx, const char *path)
 
     rc = ext2_resolve_path(ec, dir_path, &parent_ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_mkdir(ec, parent_ino, dname);
+    return ext2_to_vfs_err(ext2_mkdir(ec, parent_ino, dname));
 }
 
 static int ext2_vfs_rmdir(void *ctx, const char *path)
@@ -161,7 +202,7 @@ static int ext2_vfs_rmdir(void *ctx, const char *path)
 
     rc = ext2_resolve_path(ec, dir_path, &parent_ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_rmdir(ec, parent_ino, dname);
+    return ext2_to_vfs_err(ext2_rmdir(ec, parent_ino, dname));
 }
 
 static int ext2_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size, u32 offset)
@@ -171,7 +212,7 @@ static int ext2_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_read_stream(ec, ino, buf, size, offset);
+    return ext2_to_vfs_err(ext2_read_stream(ec, ino, buf, size, offset));
 }
 
 static int ext2_vfs_write_stream(void *ctx, const char *path, const void *data, u32 size, u32 offset)
@@ -181,7 +222,7 @@ static int ext2_vfs_write_stream(void *ctx, const char *path, const void *data, 
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_write_stream(ec, ino, data, size, offset);
+    return ext2_to_vfs_err(ext2_write_stream(ec, ino, data, size, offset));
 }
 
 static int ext2_vfs_get_size(void *ctx, const char *path, u32 *size)
@@ -191,7 +232,7 @@ static int ext2_vfs_get_size(void *ctx, const char *path, u32 *size)
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
     if (rc != 0) return VFS_ERR_NOTFOUND;
-    return ext2_get_size_ino(ec, ino, size);
+    return ext2_to_vfs_err(ext2_get_size_ino(ec, ino, size));
 }
 
 static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
@@ -257,7 +298,7 @@ static int ext2_vfs_is_mounted(void *ctx)
 static int ext2_vfs_sync(void *ctx)
 {
     Ext2Ctx *ec = (Ext2Ctx *)ctx;
-    return ec ? ext2_sync(ec) : EXT2_ERR_NOMOUNT;
+    return ec ? ext2_to_vfs_err(ext2_sync(ec)) : VFS_ERR_NOMOUNT;
 }
 
 static u32 ext2_vfs_total_blocks(void *ctx) {
@@ -279,7 +320,7 @@ static VfsOps ext2_ops = {
     ext2_vfs_mount, ext2_vfs_umount, ext2_vfs_is_mounted,
     ext2_vfs_list, ext2_vfs_mkdir, ext2_vfs_rmdir,
     ext2_vfs_read, ext2_vfs_write, ext2_vfs_unlink,
-    (void *)0, /* rename */
+    ext2_vfs_rename,
     ext2_vfs_get_size, ext2_vfs_read_stream, ext2_vfs_write_stream,
     ext2_vfs_sync,
     ext2_vfs_total_blocks, ext2_vfs_free_blocks, ext2_vfs_block_size,

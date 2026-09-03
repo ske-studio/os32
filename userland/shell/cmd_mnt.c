@@ -20,6 +20,11 @@ static void cmd_umount(int argc, char **argv)
         shell_print_help(argv[0]);
         return;
     }
+    /* sys_umount は void なので、未マウントは先に弾いて知らせる */
+    if (!g_api->sys_is_mounted(argv[1])) {
+        g_api->kprintf(ATTR_RED, "umount: %s: not mounted\n", argv[1]);
+        return;
+    }
     g_api->sys_umount(argv[1]);
 }
 

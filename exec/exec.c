@@ -140,6 +140,7 @@ typedef struct {
     u32  sbrk_heap_limit;     /* sbrk上限 */
     u32  exec_heap_base;      /* ヒープベースアドレス */
     u32  exec_heap_size;      /* ヒープサイズ */
+    u32  exec_heap_used;      /* 子を起動した時点の使用量 (復帰時に戻す) */
     u32  load_addr;           /* このレベルのロードアドレス */
     u32  stack_top;           /* このレベルのスタック先頭 */
 } ExecContext;
@@ -269,29 +270,22 @@ void exec_exit(int status)
         /*  プログラムがclose/reset忘れてもカーネルが回収する            */
         /* ============================================================ */
 
+        /* (1)-(3) は **このレベルが確保したものだけ** を回収する
+         * (res_owner_get() で open/確保時にタグ付け)。全部を無条件に回収すると、
+         * シェルが張ったパイプライン `cmd1 | cmd2` の 1 段目 (外部プログラム)
+         * の終了でシェルのパイプバッファが kfree され、2 段目の stdin が
+         * コンソールに落ちてキーボード待ちでハングした (2026-09-03 実測)。 */
+
         /* (1) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ) */
-        fd_redirect_reset(0);
-        fd_redirect_reset(1);
-        fd_redirect_reset(2);
+        fd_redirect_reset_owned(exec_nest_level);
 
-        /* (2) FD自動クローズ (FD 3以上の全オープンファイル)
-         * ただしカーネル常駐FD (FEP辞書のSQLite接続など、
-         * vfs_fd_set_protect で保護されたFD) は回収しない。 */
-        {
-            int fd;
-            for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
-                if (vfs_fd_is_protected(fd)) continue;
-                vfs_close(fd);
-            }
-        }
+        /* (2) FD自動クローズ (このレベルが open した FD 3以上)
+         * カーネル常駐FD (FEP辞書のSQLite接続など、vfs_fd_set_protect で
+         * 保護されたFD) は vfs_close_owned 側で除外される。 */
+        vfs_close_owned(exec_nest_level);
 
-        /* (3) パイプバッファ自動解放 (全バッファを解放) */
-        {
-            int pi;
-            for (pi = 0; pi < PIPE_BUF_COUNT; pi++) {
-                pipe_free(pi);
-            }
-        }
+        /* (3) パイプバッファ自動解放 (このレベルが確保したもの) */
+        pipe_free_owned(exec_nest_level);
 
         /* (4) 共有メモリ自動解放 (全ブロックの使用中フラグを解除) */
         shm_cleanup_all();
@@ -304,6 +298,7 @@ void exec_exit(int status)
 
         /* 親レベルへ復帰 */
         exec_nest_level--;
+        res_owner_set(exec_nest_level);
         ctx = &exec_ctx_stack[exec_nest_level];
         exec_longjmp(ctx->jmpbuf);
     }
@@ -613,14 +608,13 @@ int exec_run(const char *cmdline)
 
     /* ヒープ・ガードページ設定 */
     if (is_shell) {
-        /* シェルも BSS 終端からスタックガードの直前までをヒープとして使用可能にする */
-        exec_heap_base = (u32)load_addr + text_sz + bss_sz;
-        exec_heap_base = (exec_heap_base + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        if (guard_b > exec_heap_base) {
-            exec_heap_size = guard_b - exec_heap_base;
-        } else {
-            exec_heap_size = 0;
-        }
+        /* シェルのヒープは 2 系統あり、領域を分ける (include/memmap.h 参照):
+         *   - newlib の sbrk (malloc / stdio バッファ): BSS 終端 〜 guard_b
+         *   - KAPI mem_alloc (exec_heap): スタック上の MEM_SHELL_HEAP_BASE 〜
+         * かつては両方を BSS 終端から始めていたため互いを上書きし、
+         * `ls > file` の化け・`pipe: out of memory`・double free 警告が出た。 */
+        exec_heap_base = MEM_SHELL_HEAP_BASE;
+        exec_heap_size = MEM_SHELL_HEAP_SIZE;
         ctx->exec_heap_base = exec_heap_base;
         ctx->exec_heap_size = exec_heap_size;
         kapi->sbrk_heap_limit = guard_b;
@@ -631,6 +625,11 @@ int exec_run(const char *cmdline)
         if (heap_sz > 0 && heap_sz < exec_heap_size) {
             exec_heap_size = heap_sz;
             ctx->exec_heap_size = exec_heap_size;
+        }
+        /* 親 (シェル等) のヒープ使用量を控えてから子のヒープへ切り替える。
+         * 復帰時は exec_heap_restore_state で管理変数だけ戻す */
+        if (exec_nest_level > 0) {
+            exec_heap_save_state(&exec_ctx_stack[exec_nest_level - 1].exec_heap_used);
         }
         exec_heap_init_at(exec_heap_base, exec_heap_size);
     }
@@ -689,8 +688,14 @@ int exec_run(const char *cmdline)
             ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
             /* 親が子プロセス (Level 1+) の場合のみ復元 */
             if (parent->exec_heap_base != 0) {
-
-                exec_heap_init_at(parent->exec_heap_base, parent->exec_heap_size);
+                /* 管理変数だけ親の値に戻す。ここで exec_heap_init_at を呼ぶと
+                 * 親ヒープ先頭に空きブロックヘッダを書き直してしまい、親が
+                 * 子の起動前に確保していたブロック (シェルのパイプ用 seg_buf や
+                 * glob 展開文字列) のヘッダが壊れる。free 時の
+                 * "[exec_heap] bad magic feeefeee (double free?)" の正体 */
+                exec_heap_restore_state(parent->exec_heap_base,
+                                        parent->exec_heap_size,
+                                        parent->exec_heap_used);
                 kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
                 paging_set_not_present(parent->guard_a,
                                        parent->guard_a + PAGE_SIZE - 1);
@@ -705,6 +710,9 @@ int exec_run(const char *cmdline)
     entry = (ExecEntry)(load_addr + entry_off);
 
     exec_nest_level++;
+    /* ここから先の open / リダイレクト / パイプ確保はこのレベルの所有物。
+     * exec_exit はこのタグを見て自分の分だけ回収する */
+    res_owner_set(exec_nest_level);
 
     {
         char *str_area;

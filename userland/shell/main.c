@@ -4,6 +4,7 @@
 #include "shell.h"
 #include "config.h"
 #include "os32/help.h"
+#include <stdio.h>
 
 KernelAPI *g_api;
 
@@ -19,6 +20,11 @@ const char *cmd_names[MAX_CMDS + 1];
 int main(int argc, char **argv, KernelAPI *api)
 {
     g_api = api;
+
+    /* stdout は常に行バッファ。newlib は最初の出力時に isatty で
+     * バッファ方式を一度だけ決めるので、最初の printf がリダイレクト中に
+     * 走るとその後ずっと全バッファになり出力がコンソールへ遅れて漏れる */
+    setvbuf(stdout, (char *)0, _IOLBF, BUFSIZ);
 
     /* 環境変数の初期化 (コマンド登録より先に) */
     env_init();
@@ -65,10 +71,23 @@ const ShellCmd *shell_get_cmds(int *count)
 
 void shell_print_help(const char *cmd_name)
 {
+    int count, i;
+    const ShellCmd *cmds;
+
     /* manページを参照 */
-    if (os32_help_show(cmd_name) != 0) {
-        g_api->kprintf(ATTR_RED, "No manual entry for %s\n", cmd_name);
+    if (os32_help_show(cmd_name) == 0) return;
+
+    /* man が無い内部コマンドは登録テーブルの usage を出す
+     * (以前は `unset` / `cp` を引数なしで打つと "No manual entry" だけだった) */
+    cmds = shell_get_cmds(&count);
+    for (i = 0; i < count; i++) {
+        if (str_eq(cmds[i].name, cmd_name)) {
+            g_api->kprintf(ATTR_WHITE, "Usage: %s %s\n", cmds[i].name, cmds[i].usage);
+            g_api->kprintf(ATTR_WHITE, "  %s\n", cmds[i].description);
+            return;
+        }
     }
+    g_api->kprintf(ATTR_RED, "No manual entry for %s\n", cmd_name);
 }
 
 /* ======================================================================== */
@@ -587,7 +606,12 @@ static void execute_single(const char *cmd)
             run_cmd_internal(argc, argv);
         }
     }
-    
+
+    /* newlib の stdout バッファをここで吐き出す。リダイレクト解除後に
+     * 遅れて flush されると、ファイルに入るはずの出力が次のコマンドの
+     * コンソールに混ざる (`ls > file` の後半が欠ける原因の一つ) */
+    fflush(stdout);
+
     for (j = 0; j < alloc_count; j++) {
         g_api->mem_free(allocated_strings[j]);
     }
@@ -709,7 +733,13 @@ void execute_command(const char *cmd)
                 /* stdin のリダイレクト (最初以外) */
                 if (!is_first && prev_buf >= 0) {
                     u8 *buf = g_api->sys_pipe_get_buf(prev_buf);
-                    g_api->sys_redirect_fd_buf(0, buf, PIPE_BUF_SIZE, saved_len);
+                    /* バッファが消えていたら黙って続けない。以前はここが NULL
+                     * (前段の exec_exit がパイプを回収していた) でも続行し、
+                     * 次段が stdin をキーボードから読んでハングした */
+                    if (!buf || g_api->sys_redirect_fd_buf(0, buf, PIPE_BUF_SIZE, saved_len) < 0) {
+                        g_api->kprintf(ATTR_RED, "%s", "pipe: stdin buffer lost\n");
+                        break;
+                    }
                 }
 
                 /* stdout のリダイレクト (最後以外) */
@@ -717,7 +747,11 @@ void execute_command(const char *cmd)
                     cur_buf = alloc_buf[i % num_alloc];
                     {
                         u8 *buf = g_api->sys_pipe_get_buf(cur_buf);
-                        g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0);
+                        if (!buf || g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0) < 0) {
+                            g_api->kprintf(ATTR_RED, "%s", "pipe: stdout buffer lost\n");
+                            reset_all_redirects();
+                            break;
+                        }
                     }
                 }
 

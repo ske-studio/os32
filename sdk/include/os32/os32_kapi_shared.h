@@ -223,6 +223,20 @@ typedef struct {
     u8 year, month, day, wday, hour, min, sec;
 } RTC_Time_Ext;
 
+/* VFS 系 KAPI (sys_open/sys_chdir/sys_unlink/sys_mkdir/sys_rmdir/sys_rename
+ * /sys_stat 等) が返す負のエラーコード。カーネル内の VFS_ERR_* (fs/vfs.h)
+ * はこの別名。各 FS ドライバの内部コード (EXT2_ERR_* 等) はドライバ境界で
+ * 必ずこの体系に変換される */
+#define OS32_ERR_IO        -1   /* 入出力エラー */
+#define OS32_ERR_NOTFOUND  -2   /* パスが存在しない */
+#define OS32_ERR_NOMOUNT   -3   /* 該当マウントなし / FS 未対応操作 */
+#define OS32_ERR_NOSPC     -4   /* 空き容量・FD・スロット不足 */
+#define OS32_ERR_EXIST     -5   /* 既に存在する */
+#define OS32_ERR_NOTDIR    -6   /* ディレクトリではない */
+#define OS32_ERR_NOTEMPTY  -7   /* ディレクトリが空でない */
+#define OS32_ERR_ISDIR     -8   /* ディレクトリである (open/unlink 不可) */
+#define OS32_ERR_INVAL     -9   /* 引数不正 / FS をまたぐ rename 等 */
+
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1
 #define OS32_FILE_TYPE_DIR  2

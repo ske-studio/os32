@@ -27,16 +27,18 @@
 #define VFS_MNTPATH_MAX    16
 
 /* エラーコード */
+/* 値の定義元は sdk/include/os32/os32_kapi_shared.h の OS32_ERR_* (SSoT)。
+ * 外部プログラムも同じ値を見るので、ここで独自の番号を振らないこと */
 #define VFS_OK          0
-#define VFS_ERR_IO     -1
-#define VFS_ERR_NOTFOUND -2
-#define VFS_ERR_NOMOUNT -3
-#define VFS_ERR_NOSPC  -4
-#define VFS_ERR_EXIST  -5
-#define VFS_ERR_NOTDIR -6
-#define VFS_ERR_NOTEMPTY -7
-#define VFS_ERR_ISDIR  -8
-#define VFS_ERR_INVAL  -9
+#define VFS_ERR_IO       OS32_ERR_IO
+#define VFS_ERR_NOTFOUND OS32_ERR_NOTFOUND
+#define VFS_ERR_NOMOUNT  OS32_ERR_NOMOUNT
+#define VFS_ERR_NOSPC    OS32_ERR_NOSPC
+#define VFS_ERR_EXIST    OS32_ERR_EXIST
+#define VFS_ERR_NOTDIR   OS32_ERR_NOTDIR
+#define VFS_ERR_NOTEMPTY OS32_ERR_NOTEMPTY
+#define VFS_ERR_ISDIR    OS32_ERR_ISDIR
+#define VFS_ERR_INVAL    OS32_ERR_INVAL
 
 /* ディレクトリエントリ (FS共通) */
 typedef struct {
@@ -120,6 +122,9 @@ int  vfs_rename(const char *oldpath, const char *newpath);
 /* ストリーム操作 (ファイルディスクリプタ・シーク対応) */
 int  vfs_open(const char *path, int mode);
 void vfs_close(int fd);
+/* 指定所有者 (res_owner_get() の値で open 時にタグ付け) の FD を一括クローズ。
+ * vfs_fd_set_protect で保護された FD は対象外。exec_exit の安全網用 */
+void vfs_close_owned(int owner);
 int  vfs_read_fd(int fd, void *buf, u32 size);
 int  vfs_write_fd(int fd, const void *buf, u32 size);
 int  vfs_seek(int fd, int offset, int whence);
@@ -142,7 +147,12 @@ u32 vfs_block_size(void);
 
 /* カレントディレクトリ */
 const char *vfs_cwd(void);
-int vfs_chdir(const char *path);
+int vfs_chdir(const char *path);   /* 存在するディレクトリ以外は VFS_ERR_NOTFOUND / VFS_ERR_NOTDIR */
+
+/* パスの種別判定。戻り値: VFS_KIND_DIR / VFS_KIND_FILE、負値は VFS_ERR_* */
+#define VFS_KIND_FILE 0
+#define VFS_KIND_DIR  1
+int vfs_path_kind(const char *path);
 
 /* パスの正規化 (相対→絶対) */
 void vfs_resolve_path(const char *input, char *output, int out_size);

@@ -29,7 +29,23 @@ typedef struct {
     u32 buf_capacity;       /* バッファ容量 */
     u32 buf_pos;            /* 現在の読み書き位置 */
     u32 buf_len;            /* バッファ内の有効データ長 */
+    int owner;              /* 設定した実行レベル (res_owner_get() の値) */
 } FdRedirect;
+
+/* ======== リソース所有者タグ ======== */
+/*
+ * exec のネスト深度 (0=カーネル, 1=シェル, 2+=外部プログラム) を「現在の
+ * 所有者」として保持する。リダイレクト / パイプバッファ / open FD は確保時に
+ * この値でタグ付けされ、exec_exit は **終了するレベルが確保したものだけ**
+ * を回収する。
+ *
+ * 以前は exec_exit が全リダイレクト・全パイプ・全 FD を無条件に回収して
+ * いたため、シェルが張ったパイプライン (cmd1 | cmd2) の 1 段目 (外部
+ * プログラム) が終了した時点でシェルのパイプバッファが kfree され、2 段目
+ * が stdin をキーボードから読んでハングしていた (2026-09-03 実測)。
+ */
+void res_owner_set(int owner);
+int  res_owner_get(void);
 
 /* ======== API ======== */
 
@@ -54,6 +70,9 @@ int fd_redirect_to_buffer(int fd, u8 *buf, u32 size, u32 len);
 /* FD 0/1/2 のリダイレクトを解除 (コンソールモードに戻す)
  * ファイルリダイレクト中の場合、ファイルを自動でクローズする */
 void fd_redirect_reset(int fd);
+
+/* 指定所有者が設定したリダイレクトだけを解除する (exec_exit の安全網用) */
+void fd_redirect_reset_owned(int owner);
 
 /* リダイレクト状態の問い合わせ
  * 戻り値: 1=リダイレクト中, 0=コンソールモード */

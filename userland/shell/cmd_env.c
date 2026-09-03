@@ -130,6 +130,14 @@ int env_expand(const char *src, char *dst, int max)
             }
             var_name[vi] = '\0';
 
+            /* 名前が続かない裸の '$' はリテラルとして残す
+             * (以前は空文字列で env_get を引き、`set =x` で出来た
+             * 名前空の変数にヒットして "x" が出た) */
+            if (vi == 0) {
+                dst[di++] = '$';
+                continue;
+            }
+
             val = env_get(var_name);
             if (val) {
                 while (*val && di < max - 1) dst[di++] = *val++;
@@ -178,6 +186,11 @@ static void cmd_set(int argc, char **argv)
         while (*arg && *arg != '=' && ni < ENV_NAME_MAX - 1)
             name[ni++] = *arg++;
         name[ni] = '\0';
+
+        if (name[0] == '\0') {
+            g_api->kprintf(ATTR_RED, "%s: invalid variable name '%s'\n", argv[0], argv[1]);
+            return;
+        }
 
         if (*arg == '=') {
             arg++; /* '=' をスキップ */

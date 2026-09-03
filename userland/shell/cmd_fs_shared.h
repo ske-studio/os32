@@ -15,6 +15,17 @@ const char *fs_skip_space(const char *s);
 /* ディレクトリ判定 (sys_ls が成功すればディレクトリ) */
 int fs_is_dir(const char *path);
 
+/* パス種別: FS_KIND_DIR / FS_KIND_FILE、負値は OS32_ERR_* (存在しない等) */
+#define FS_KIND_FILE 0
+#define FS_KIND_DIR  1
+int fs_path_kind(const char *path);
+
+/* 2 つのパスが同じファイルを指すか (文字列一致 or stat の dev/ino 一致) */
+int fs_same_file(const char *a, const char *b);
+
+/* OS32_ERR_* → 人間向けメッセージ */
+const char *fs_strerror(int rc);
+
 /* sys_ls 用ダミーコールバック (is_dir 内部で使用) */
 void fs_dummy_ls_cb(const DirEntry_Ext *entry, void *ctx);
 

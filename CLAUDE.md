@@ -431,11 +431,37 @@ Apps needing their own key handling must read the char once and pass it to
 `os32-game` の app until 2026-08-17 — the auto-play debug timers existed to work
 around it.)
 
-**`exec_exit()` closes every FD ≥ 3 on program exit** (`exec/exec.c`): any kernel-resident
-file descriptor that must outlive user programs (e.g. the FEP dictionary's SQLite
-connection) must be protected with `vfs_fd_set_protect(fd, 1)`, or it gets silently
-reclaimed and subsequent I/O on it fails (this was the root cause of the 2026-08-07
-"FEP zero candidates" bug — every `sqlite3_step` returned `SQLITE_IOERR_READ`).
+**`exec_exit()` reclaims FDs / redirects / pipe buffers by owner** (`exec/exec.c`):
+every open FD, std-FD redirect and pipe buffer is tagged at allocation with
+`res_owner_get()` (= exec nest level: 0 kernel, 1 shell, 2+ apps) and `exec_exit()`
+only reclaims what the exiting level allocated. Kernel-resident FDs (e.g. the FEP
+dictionary's SQLite connection) are owner 0 and additionally protected with
+`vfs_fd_set_protect(fd, 1)`; before the owner tags existed (until 2026-09-03) *every*
+FD ≥ 3 was closed on any program exit, which caused the 2026-08-07 "FEP zero
+candidates" bug, and every pipe buffer was kfree'd, which made `ext_cmd1 | ext_cmd2`
+hang on keyboard input. When returning to the parent, restore the parent's exec_heap
+with `exec_heap_restore_state()` — never `exec_heap_init_at()`, which rewrites the
+parent's first block header and turns later frees into
+`[exec_heap] bad magic feeefeee (double free?)`.
+
+**The shell has two heaps that must not overlap** (`include/memmap.h`): newlib's sbrk
+(malloc / stdio buffers) grows from the BSS end up to `MEM_SHELL_GUARD`, and the KAPI
+`mem_alloc` exec_heap lives at `MEM_SHELL_HEAP_BASE` (0x380000, 512KB). Both used to
+start at the BSS end and overwrote each other (`ls > file` garbage,
+`pipe: out of memory`, double-free warnings). `kernel/paging.c` must keep 0x380000–
+0x3FFFFF present (it used to be an NP gap).
+
+**Never touch the FS from inside a `sys_ls` callback path without a private buffer**
+(`fs/ext2_dir.c`): `ext2_list_dir` copies each directory block to a local buffer before
+invoking callbacks, because a callback that writes a file (e.g. `ls > file` — printf
+goes through `ext2_write_stream`) clobbers the shared `ext2_g_aux` block buffer.
+FatFs/HostDrv list_dir have not been audited for the same re-entrancy.
+
+**VFS error codes are `OS32_ERR_*` in `os32_kapi_shared.h`** (SSoT); `VFS_ERR_*` are
+aliases. FS drivers must translate their internal codes at the boundary
+(`ext2_to_vfs_err`) — ext2's `-3` is NOTFOUND while the VFS `-3` is NOMOUNT, and until
+2026-09-03 raw ext2 codes leaked to the shell. `vfs_open` refuses directories
+(`OS32_ERR_ISDIR`) and `vfs_chdir` refuses anything that is not an existing directory.
 
 **FAT12 loader PM transition**: Protected-mode transition code is inlined in `boot/loader_fat.asm`. Do not split it to a separate file — address overlap causes data corruption.
 

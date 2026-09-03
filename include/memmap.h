@@ -190,15 +190,23 @@ extern u32 __sqlite_end;
 /*                                                                          */
 /*  レイアウト:                                                             */
 /*    0x300000-           .text + .data + .bss (~466KB)                     */
-/*    (〜0x372000)        BSS終端                                           */
-/*    0x375000            ガードページ (Not-Present, 4KB)                   */
+/*    (〜0x372000)        BSS終端 → ここから newlib の sbrk ヒープ (malloc) */
+/*    0x375000            ガードページ (Not-Present, 4KB) = sbrk 上限        */
 /*    0x376000-0x37FFFF   スタック (40KB, ESP初期値=0x380000)               */
+/*    0x380000-0x3FFFFF   exec_heap (KAPI mem_alloc/mem_free 用, 512KB)      */
+/*                                                                          */
+/*  sbrk ヒープと exec_heap は **必ず別領域** にすること。かつて両方が BSS   */
+/*  終端から始まっていたため、newlib の stdio バッファと mem_alloc のブロック */
+/*  ヘッダが互いを上書きし、`ls > file` の化け・`pipe: out of memory`・     */
+/*  double free 警告として現れていた (2026-09-03 実測)。                     */
 /* ====================================================================== */
 #define MEM_SHELL_LOAD_ADDR   0x300000UL  /* シェルロードアドレス */
 #define MEM_SHELL_MAX_SIZE    0x075000UL  /* シェルcode+bss最大 (468KB) */
-#define MEM_SHELL_GUARD       0x375000UL  /* シェルスタックガード */
+#define MEM_SHELL_GUARD       0x375000UL  /* シェルスタックガード (= sbrk 上限) */
 #define MEM_SHELL_STACK_TOP   0x380000UL  /* シェルスタック先頭 (下向き成長) */
 #define MEM_SHELL_STACK_SIZE  0x00A000UL  /* シェルスタックサイズ (40KB) */
+#define MEM_SHELL_HEAP_BASE   0x380000UL  /* シェル exec_heap 先頭 (mem_alloc) */
+#define MEM_SHELL_HEAP_SIZE   0x080000UL  /* シェル exec_heap サイズ (512KB) */
 #define MEM_SHELL_BAND_END    0x3FFFFFUL  /* シェル帯域終端 */
 
 /* ====================================================================== */

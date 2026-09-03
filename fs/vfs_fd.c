@@ -44,6 +44,7 @@ typedef struct {
     VfsOps *ops;
     void *fs_ctx;       /* FSドライバ固有のインスタンスコンテキスト */
     int protect;        /* 1=カーネル常駐FD (exec_exitの自動クローズ対象外) */
+    int owner;          /* open した実行レベル (res_owner_get()) */
 } VfsFile;
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
@@ -60,6 +61,11 @@ int vfs_open(const char *path, int mode)
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
+
+    /* ディレクトリは open できない。以前は get_file_size がディレクトリの
+     * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
+     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた */
+    if (vfs_path_kind(resolved) == VFS_KIND_DIR) return VFS_ERR_ISDIR;
 
     /* 空きスロットを探す (FD0, 1, 2 は標準入出力用に予約) */
     for (i = 3; i < VFS_MAX_OPEN_FILES; i++) {
@@ -108,6 +114,7 @@ int vfs_open(const char *path, int mode)
     open_files[fd].ops = ops;
     open_files[fd].fs_ctx = fs_ctx;
     open_files[fd].protect = 0;
+    open_files[fd].owner = res_owner_get();
 
     return fd;
 }
@@ -118,6 +125,18 @@ void vfs_close(int fd)
         open_files[fd].in_use = 0;
         open_files[fd].fs_ctx = (void *)0;
         open_files[fd].protect = 0;
+        open_files[fd].owner = 0;
+    }
+}
+
+void vfs_close_owned(int owner)
+{
+    int fd;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        if (!open_files[fd].in_use) continue;
+        if (open_files[fd].protect) continue;
+        if (open_files[fd].owner != owner) continue;
+        vfs_close(fd);
     }
 }
 
@@ -148,12 +167,20 @@ int vfs_read_fd(int fd, void *buf, u32 size)
         if (fd_is_redirected(0)) {
             return fd_redirect_read(0, buf, size);
         }
-        /* デフォルト: キーボードから1文字ずつ読む */
+        /* デフォルト: キーボードから行単位で読む (TTY の canonical 相当)。
+         * 以前は size バイト溜まるまで返らなかったので、`head` のように
+         * 64KB を要求するプログラムが TTY から読むと永久にブロックした。
+         * Enter (CR) は '\n' に正規化して行末で返す */
         {
             u8 *p = (u8 *)buf;
-            u32 i;
-            for (i = 0; i < size; i++) p[i] = (u8)kbd_getchar();
-            return size;
+            u32 i = 0;
+            while (i < size) {
+                int c = kbd_getchar();
+                if (c == '\r') c = '\n';
+                p[i++] = (u8)c;
+                if (c == '\n') break;
+            }
+            return (int)i;
         }
     }
     if (fd == 1 || fd == 2) return VFS_ERR_INVAL;

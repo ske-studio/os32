@@ -72,7 +72,8 @@ static void cmd_ls(int argc, char **argv)
         if (!opts.format_long) printf("\n");
     } else {
         for (i = path_idx_start; i < argc; i++) {
-            if (fs_is_dir(argv[i])) {
+            int kind = fs_path_kind(argv[i]);
+            if (kind == FS_KIND_DIR) {
                 if (argc - path_idx_start > 1) {
                     if (is_tty) g_api->kprintf(ATTR_CYAN, "\n%s:\n", argv[i]);
                     else printf("\n%s:\n", argv[i]);
@@ -83,10 +84,21 @@ static void cmd_ls(int argc, char **argv)
                 }
                 g_api->sys_ls(argv[i], vfs_ls_cb, &opts);
                 if (!opts.format_long) printf("\n");
+            } else if (kind == FS_KIND_FILE) {
+                if (opts.format_long) {
+                    OS32_Stat st;
+                    char size_buf[16];
+                    u32 sz = (g_api->sys_stat(argv[i], &st) == 0) ? st.st_size : 0;
+                    format_size(sz, size_buf, 10);
+                    printf("  %s B  FILE  %s\n", size_buf, argv[i]);
+                } else {
+                    printf("%s  ", argv[i]);
+                    if (i == argc - 1) printf("\n");
+                }
             } else {
-                if (opts.format_long) printf("  ????     FILE  %s\n", argv[i]);
-                else printf("%s  ", argv[i]);
-                if (!opts.format_long && i == argc - 1) printf("\n");
+                /* 以前は存在しないパスもファイル名として印字していた */
+                g_api->kprintf(ATTR_RED, "ls: cannot access '%s': %s\n",
+                               argv[i], fs_strerror(kind));
             }
         }
     }
@@ -98,17 +110,39 @@ static void cmd_cd(int argc, char **argv)
 {
     int rc;
     const char *target;
+    const char *cwd;
+    char old_dir[PATH_MAX_LEN];
+    int print_after = 0;
+
     if (argc < 2) {
         /* 引数なし: ホームディレクトリに移動 */
         target = env_get("HOME");
         if (!target) target = "/";
+    } else if (str_eq(argv[1], "-")) {
+        /* 直前のディレクトリへ (以前は "-" という名前へ cd していた) */
+        target = env_get("OLDPWD");
+        if (!target) {
+            g_api->kprintf(ATTR_RED, "%s", "cd: OLDPWD not set\n");
+            return;
+        }
+        print_after = 1;
     } else {
         target = argv[1];
     }
+
+    cwd = g_api->sys_getcwd();
+    strncpy(old_dir, cwd ? cwd : "/", PATH_MAX_LEN - 1);
+    old_dir[PATH_MAX_LEN - 1] = '\0';
+
     rc = g_api->sys_chdir(target);
     if (rc != 0) {
-        g_api->kprintf(ATTR_RED, "cd: %s: not found (%d)\n", target, rc);
+        g_api->kprintf(ATTR_RED, "cd: %s: %s\n", target, fs_strerror(rc));
+        return;
     }
+    env_set("OLDPWD", old_dir);
+    cwd = g_api->sys_getcwd();
+    env_set("PWD", cwd ? cwd : "/");
+    if (print_after) printf("%s\n", cwd ? cwd : "/");
 }
 
 static void cmd_pwd(int argc, char **argv)
@@ -129,7 +163,8 @@ static void cmd_mkdir(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         rc = g_api->sys_mkdir(argv[i]);
         if (rc != 0) {
-            g_api->kprintf(ATTR_RED, "mkdir: %s: failed (%d)\n", argv[i], rc);
+            g_api->kprintf(ATTR_RED, "mkdir: cannot create directory '%s': %s\n",
+                           argv[i], fs_strerror(rc));
         }
     }
 }
@@ -144,7 +179,8 @@ static void cmd_rmdir(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         rc = g_api->sys_rmdir(argv[i]);
         if (rc != 0) {
-            g_api->kprintf(ATTR_RED, "rmdir: %s: failed (%d)\n", argv[i], rc);
+            g_api->kprintf(ATTR_RED, "rmdir: failed to remove '%s': %s\n",
+                           argv[i], fs_strerror(rc));
         }
     }
 }

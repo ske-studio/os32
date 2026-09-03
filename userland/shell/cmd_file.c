@@ -18,15 +18,28 @@ static void release_io_buf(void)
 
 static int do_copy_file(const char *cmd_name, const char *src, const char *dst) {
     int fd_in, fd_out, sz;
+
+    if (fs_same_file(src, dst)) {
+        g_api->kprintf(ATTR_RED, "%s: '%s' and '%s' are the same file\n",
+                       cmd_name, src, dst);
+        return -1;
+    }
+    if (ensure_io_buf() < 0) {
+        g_api->kprintf(ATTR_RED, "%s: out of memory\n", cmd_name);
+        return -1;
+    }
+
     fd_in = g_api->sys_open(src, KAPI_O_RDONLY);
     if (fd_in < 0) {
-        g_api->kprintf(ATTR_RED, "%s: %s not found\n", cmd_name, src);
+        g_api->kprintf(ATTR_RED, "%s: cannot open '%s': %s\n",
+                       cmd_name, src, fs_strerror(fd_in));
         return -1;
     }
 
     fd_out = g_api->sys_open(dst, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd_out < 0) {
-        g_api->kprintf(ATTR_RED, "%s: open failed %s\n", cmd_name, dst);
+        g_api->kprintf(ATTR_RED, "%s: cannot create '%s': %s\n",
+                       cmd_name, dst, fs_strerror(fd_out));
         g_api->sys_close(fd_in);
         return -1;
     }
@@ -141,11 +154,7 @@ static void cmd_cp(int argc, char **argv)
         shell_print_help(argv[0]);
         return;
     }
-    if (ensure_io_buf() < 0) {
-        g_api->kprintf(ATTR_RED, "%s", "cp: out of memory\n");
-        return;
-    }
-    
+
     /* オプション解析 */
     for (i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
@@ -203,37 +212,71 @@ static void cmd_cp(int argc, char **argv)
     release_io_buf();
 }
 
+/* 1 件の移動: 同一 FS なら rename、FS をまたぐときだけコピー+削除 */
+static void do_move_one(const char *src, const char *dpath)
+{
+    int rc;
+
+    if (fs_same_file(src, dpath)) {
+        g_api->kprintf(ATTR_RED, "mv: '%s' and '%s' are the same file\n", src, dpath);
+        return;
+    }
+
+    rc = g_api->sys_rename(src, dpath);
+    if (rc == 0) return;
+
+    if (rc != OS32_ERR_INVAL) {
+        g_api->kprintf(ATTR_RED, "mv: cannot move '%s' to '%s': %s\n",
+                       src, dpath, fs_strerror(rc));
+        return;
+    }
+
+    /* OS32_ERR_INVAL = FS をまたぐ (または rename 非対応 FS)。
+     * ディレクトリはコピーできないので拒否する。以前は無条件にコピー+削除で、
+     * ディレクトリを渡すとディレクトリの生ブロックを新ファイルへ書き、
+     * 元は消えないという壊れ方をしていた */
+    if (fs_is_dir(src)) {
+        g_api->kprintf(ATTR_RED,
+            "mv: cannot move directory '%s' to '%s' (across filesystems or into itself)\n",
+            src, dpath);
+        return;
+    }
+    if (do_copy_file("mv", src, dpath) == 0) {
+        rc = g_api->sys_unlink(src);
+        if (rc != 0) {
+            g_api->kprintf(ATTR_RED, "mv: copied but cannot remove '%s': %s\n",
+                           src, fs_strerror(rc));
+        }
+    }
+}
+
 static void cmd_mv(int argc, char **argv)
 {
     int i, is_dest_dir;
     const char *dst;
-    
+
     if (argc < 3) {
         shell_print_help(argv[0]);
         return;
     }
-    if (ensure_io_buf() < 0) {
-        g_api->kprintf(ATTR_RED, "%s", "mv: out of memory\n");
-        return;
-    }
-    
+
     dst = argv[argc - 1];
     is_dest_dir = fs_is_dir(dst);
-    
+
     if (argc > 3 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "mv: multiple files must be moved into a directory\n");
         return;
     }
-    
+
     for (i = 1; i < argc - 1; i++) {
         const char *src = argv[i];
-        
+
         if (is_dest_dir) {
             char dpath[PATH_MAX_LEN];
             fs_join_path(dpath, dst, get_basename(src));
-            if (do_copy_file("mv", src, dpath) == 0) g_api->sys_unlink(src);
+            do_move_one(src, dpath);
         } else {
-            if (do_copy_file("mv", src, dst) == 0) g_api->sys_unlink(src);
+            do_move_one(src, dst);
         }
     }
     release_io_buf();
@@ -242,12 +285,19 @@ static void cmd_mv(int argc, char **argv)
 static void cmd_rm(int argc, char **argv)
 {
     int i;
+    if (argc < 2) {
+        shell_print_help(argv[0]);
+        return;
+    }
     for (i = 1; i < argc; i++) {
         if (fs_is_dir(argv[i])) {
-            g_api->kprintf(ATTR_RED, "rm: cannot remove directory %s\n", argv[i]);
+            g_api->kprintf(ATTR_RED, "rm: cannot remove '%s': Is a directory (use rmdir)\n", argv[i]);
         } else {
             int ret = g_api->sys_unlink(argv[i]);
-            if (ret != 0) g_api->kprintf(ATTR_RED, "rm: failed to remove %s (%d)\n", argv[i], ret);
+            if (ret != 0) {
+                g_api->kprintf(ATTR_RED, "rm: cannot remove '%s': %s\n",
+                               argv[i], fs_strerror(ret));
+            }
         }
     }
 }
@@ -309,7 +359,9 @@ static void cmd_cat(int argc, char **argv)
 
         fd = g_api->sys_open(argv[i], KAPI_O_RDONLY);
         if (fd < 0) {
-            g_api->kprintf(ATTR_RED, "cat: %s not found (err %d)\n", argv[i], fd);
+            /* ディレクトリは open が OS32_ERR_ISDIR を返す (以前は生の
+             * ディレクトリブロックを吐いていた) */
+            g_api->kprintf(ATTR_RED, "cat: %s: %s\n", argv[i], fs_strerror(fd));
             continue;
         }
         if (ensure_io_buf() < 0) {

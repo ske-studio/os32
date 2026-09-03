@@ -58,6 +58,19 @@
 - 外部プログラムがclose/freeを忘れても、`exec_exit()` 内でカーネルが自動的に回収する
 - **対象**: FDリダイレクト (stdin/stdout/stderr)、ファイルFD (FD 3以上)、パイプバッファ、共有メモリ
 - **理由**: クラッシュ復帰時やユーザプログラムのバグによるリソースリークを防止するため
+- **所有者タグ (2026-09-03)**: リダイレクト・パイプバッファ・FD は確保時に
+  `res_owner_get()` (= exec ネスト深度: 0 カーネル / 1 シェル / 2+ アプリ) で
+  タグ付けされ、`exec_exit()` は **終了するレベルが確保した分だけ** 回収する
+  (`fd_redirect_reset_owned` / `vfs_close_owned` / `pipe_free_owned`)。
+  以前は全部を無条件に回収していたため、シェルのパイプライン `cmd1 | cmd2` で
+  1 段目 (外部プログラム) の終了がシェルのパイプバッファを kfree し、2 段目が
+  stdin をキーボードから読んでハングしていた。所有者は `exec_run` / `exec_exit`
+  のレベル遷移で `res_owner_set()` が更新する (`fs/fd_redirect.c`)
+- **親ヒープの復元**: 子プロセスから戻るとき、親の exec_heap は
+  `exec_heap_restore_state()` で管理変数だけ戻す。`exec_heap_init_at()` で
+  再初期化すると親ヒープ先頭の空きブロックヘッダを書き直し、親が子の起動前に
+  確保していたブロック (パイプ用 seg_buf 等) の free が
+  `[exec_heap] bad magic feeefeee (double free?)` になる
 - **例外**: `vfs_fd_set_protect(fd, 1)` で保護されたカーネル常駐FDは回収しない。
   FEP辞書のSQLite接続 (`ime_dict_open`) がこれを使用する。保護を欠くと、
   外部プログラム (例: `ime on` を実行した ime.bin) の終了時に常駐fdが回収され、

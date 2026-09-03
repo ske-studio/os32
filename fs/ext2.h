@@ -126,6 +126,10 @@ typedef struct {
 #define EXT2_ERR_NOTDIR  -7
 #define EXT2_ERR_NOTEMPTY -8
 #define EXT2_ERR_ISDIR   -9
+#define EXT2_ERR_INVAL   -10  /* 不正操作 (ディレクトリを自身の配下へ rename 等) */
+
+/* rename の循環検査で ".." を辿る上限 (壊れた FS でのループ防止) */
+#define EXT2_RENAME_MAX_DEPTH 64
 
 /* 前方宣言: Ext2Ctx (ext2_ctx.h で定義) */
 struct Ext2Ctx_tag;

@@ -56,6 +56,9 @@ int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ct
 int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type);
 int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file_type);
 int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name);
+/* old_dir/old_name を new_dir/new_name へ付け替える (同一 FS 内、ファイル/ディレクトリ両対応) */
+int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
+                u32 new_dir, const char *new_name);
 int ext2_lookup(Ext2Ctx *ctx, const char *path, u32 *out_ino);
 int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name);
 int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name);

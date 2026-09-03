@@ -15,6 +15,12 @@
 /* FD 0/1/2 のリダイレクト状態テーブル */
 static FdRedirect redir_table[3];
 
+/* 現在のリソース所有者 (exec ネスト深度)。exec.c がレベル遷移時に更新する */
+static int cur_res_owner = 0;
+
+void res_owner_set(int owner) { cur_res_owner = owner; }
+int  res_owner_get(void)      { return cur_res_owner; }
+
 /* ======================================================================== */
 /*  初期化                                                                  */
 /* ======================================================================== */
@@ -29,6 +35,7 @@ void fd_redirect_init(void)
         redir_table[i].buf_capacity = 0;
         redir_table[i].buf_pos = 0;
         redir_table[i].buf_len = 0;
+        redir_table[i].owner = 0;
     }
 }
 
@@ -71,6 +78,7 @@ int fd_redirect_to_file(int fd, const char *path, int mode)
     redir_table[fd].buf_capacity = 0;
     redir_table[fd].buf_pos = 0;
     redir_table[fd].buf_len = 0;
+    redir_table[fd].owner = cur_res_owner;
 
     return 0;
 }
@@ -89,6 +97,7 @@ int fd_redirect_to_buffer(int fd, u8 *buf, u32 size, u32 len)
     redir_table[fd].buf_capacity = size;
     redir_table[fd].buf_pos = 0;
     redir_table[fd].buf_len = len;
+    redir_table[fd].owner = cur_res_owner;
 
     return 0;
 }
@@ -114,6 +123,18 @@ void fd_redirect_reset(int fd)
     redir_table[fd].buf_capacity = 0;
     redir_table[fd].buf_pos = 0;
     redir_table[fd].buf_len = 0;
+    redir_table[fd].owner = 0;
+}
+
+void fd_redirect_reset_owned(int owner)
+{
+    int fd;
+    for (fd = 0; fd < 3; fd++) {
+        if (redir_table[fd].target_type != FD_TARGET_CONSOLE &&
+            redir_table[fd].owner == owner) {
+            fd_redirect_reset(fd);
+        }
+    }
 }
 
 /* ======================================================================== */
