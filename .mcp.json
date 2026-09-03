@@ -2,12 +2,16 @@
   "mcpServers": {
     "np21w": {
       "command": "python3",
-      "args": ["tools/np21w_mcp/server.py"],
+      "args": [
+        "tools/np21w_mcp/server.py"
+      ],
       "env": {}
     },
-    "autoplay": {
+    "emu_agent": {
       "command": "python3",
-      "args": ["tools/autoplay/mcp_server.py"],
+      "args": [
+        "tools/emu_agent/mcp_server.py"
+      ],
       "env": {}
     }
   }
