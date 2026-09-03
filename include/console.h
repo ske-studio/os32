@@ -22,6 +22,7 @@ void console_write(const char *buf, u32 size, u8 color);
 int  console_get_cursor_x(void);
 int  console_get_cursor_y(void);
 void console_set_cursor(int x, int y);
+void console_hw_cursor_enable(void);   /* GDC カーソルを表示にして論理位置へ同期 */
 
 void console_get_size(int *w, int *h);
 

@@ -58,6 +58,7 @@ extern void fatfs_init(void);
 #define SHELL_RELOAD_DELAY 10
 
 /* tvram_clear は console.c 側に実装済みのため削除 */
+extern void console_hw_cursor_enable(void);   /* console.c */
 
 /* 文字列表示 */
 static void tvram_print(int x, int y, const char *str, u8 color)
@@ -92,6 +93,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     sys_mem_kb = mem_kb;
     
     tvram_clear();
+    console_hw_cursor_enable();   /* GDC カーソル表示 ON (以後は出力に追従) */
 
     tvram_print(0, 0, "PC-9801 OS32 booting...", TATTR_CYAN);
     

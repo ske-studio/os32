@@ -2,8 +2,9 @@
 """
 nhd_deploy.py — NHDイメージのext2パーティションをmountして操作する
 
-/tmp/os32.nhd をループデバイスでマウントし、通常のファイル操作でデプロイする。
-NP21/Wへの反映は deploy コマンドで /tmp/os32.nhd をWindows側にコピーする。
+build/nhd/os32.nhd (NHD_LOCAL) をループデバイスでマウントし、通常のファイル操作で
+デプロイする。NP21/Wへの反映は deploy コマンドでそれをWindows側にコピーする。
+NHD_LOCAL が無ければ Windows 側から自動で取り込む (NP21/W 停止中のみ可能)。
 
 前提:
   sudoers に以下が設定済み (NOPASSWD):
@@ -31,7 +32,10 @@ import glob as globmod
 import yaml
 
 # === パス設定 ===
-NHD_LOCAL = "/tmp/os32.nhd"
+# 作業用 NHD (ループマウントして書き込む側)。以前は /tmp/os32.nhd だったが、
+# /tmp は WSL 再起動で消え、消えた状態で make deploy-nhd を走らせると何も
+# 書かずに成功扱いになっていた (2026-09-04)。リポジトリ内の build/nhd/ に置く
+# (gitignore 済み、make clean の対象外)。NHD_LOCAL は PROJ_DIR の後で決める。
 
 # NP21W_DIR: 環境変数 → .env → .env.sample → デフォルト の順で解決
 def _resolve_np21w_dir():
@@ -55,6 +59,7 @@ MOUNT_POINT = "/tmp/os32"
 
 # プロジェクトルート (tools/ の親ディレクトリ)
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NHD_LOCAL = os.environ.get("OS32_NHD_LOCAL") or os.path.join(PROJ_DIR, "build", "nhd", "os32.nhd")
 # 配備定義は所有する層ごとに分かれている。リストとマージ処理の実体は
 # tools/deploy_manifests.py。二重に持つと食い違うので参照だけにすること。
 # 各マニフェストは自層の成果物しか参照しない (make check-manifests で検査)。
@@ -91,16 +96,35 @@ def get_loop_device():
     return None
 
 
+
+def ensure_local_nhd():
+    """NHD_LOCAL が無ければ Windows 側から取り込む (NP21/W 停止中のみ可能)。
+    build/nhd/ は make clean の対象外だが、clone 直後や手で消した後は無い。"""
+    if os.path.isfile(NHD_LOCAL):
+        return True
+    print("{} が無いので Windows 側 NHD から取り込みます".format(NHD_LOCAL))
+    if not os.path.isfile(NHD_REMOTE):
+        print("Error: {} も見つかりません".format(NHD_REMOTE), file=sys.stderr)
+        return False
+    os.makedirs(os.path.dirname(NHD_LOCAL), exist_ok=True)
+    try:
+        shutil.copy2(NHD_REMOTE, NHD_LOCAL)
+    except PermissionError:
+        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+              file=sys.stderr)
+        print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        return False
+    print("  取り込み完了 ({:.1f} MB)".format(os.path.getsize(NHD_LOCAL) / (1024 * 1024)))
+    return True
+
+
 def do_mount():
     """ext2パーティションをマウント"""
     if is_mounted():
         print("既にマウント済みです: " + MOUNT_POINT)
         return True
 
-    if not os.path.isfile(NHD_LOCAL):
-        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
-        print("  'pull' でWindows側から取り込めます (init はフォーマットを伴う)",
-              file=sys.stderr)
+    if not ensure_local_nhd():
         return False
 
     # マウントポイント作成
@@ -295,8 +319,7 @@ def do_deploy():
         if not do_umount():
             return False
 
-    if not os.path.isfile(NHD_LOCAL):
-        print("Error: {} が見つかりません".format(NHD_LOCAL), file=sys.stderr)
+    if not ensure_local_nhd():
         return False
 
     print("NHDイメージをNP21/Wにコピー中...")
@@ -453,6 +476,7 @@ def do_pull():
 
     print("NHDイメージを取り込み中 (フォーマットなし)...")
     print("  {} -> {}".format(NHD_REMOTE, NHD_LOCAL))
+    os.makedirs(os.path.dirname(NHD_LOCAL), exist_ok=True)
     try:
         shutil.copy2(NHD_REMOTE, NHD_LOCAL)
     except PermissionError:
@@ -482,6 +506,7 @@ def do_init():
     print("NHDイメージをコピー中...")
     print("  {} -> {}".format(NHD_REMOTE, NHD_LOCAL))
 
+    os.makedirs(os.path.dirname(NHD_LOCAL), exist_ok=True)
     try:
         shutil.copy2(NHD_REMOTE, NHD_LOCAL)
     except PermissionError:
@@ -555,6 +580,8 @@ def do_sync(tag_filter=None):
     2. ディレクトリ構造作成
     3. 全ファイルコピー
     """
+    if not ensure_local_nhd():
+        return False
     cfg = load_deploy_yaml()
     if cfg is None:
         return False
@@ -875,7 +902,8 @@ def main():
         do_rm(sys.argv[2])
 
     elif cmd == 'deploy':
-        do_deploy()
+        if not do_deploy():
+            sys.exit(1)
 
     elif cmd == 'write-boot':
         if len(sys.argv) < 3:
@@ -907,7 +935,8 @@ def main():
                 i += 2
             else:
                 i += 1
-        do_sync(tag_filter=tag_filter)
+        if do_sync(tag_filter=tag_filter) is False:
+            sys.exit(1)
 
     elif cmd == 'sync-from-hostdrv':
         do_sync_from_hostdrv()

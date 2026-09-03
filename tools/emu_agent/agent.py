@@ -300,6 +300,14 @@ def parse_action(msg):
     return obj if isinstance(obj, dict) else None
 
 
+_OBS_FAIL = re.compile(r'^error:|"ok":\s*false|\[aidebug:|serial bridge|exit=(?!0 )\S+|RESULT: FAIL|connection (error|refused|reset)', re.I | re.M)
+
+
+def obs_failed(obs):
+    """ドライバ/実機/ホスト側の失敗を示す観測か (シェルの通常のエラー表示は含めない)"""
+    return bool(_OBS_FAIL.search(obs or ""))
+
+
 def clip(s):
     if len(s) <= OBS_LIMIT:
         return s
@@ -326,6 +334,7 @@ def run(task, model, max_steps, session):
     say("[emu_agent] task: %s" % task)
 
     bad = 0
+    fails = 0
     CTX["session"] = session
     for step in range(1, max_steps + 1):
         CTX["step"] = step
@@ -357,9 +366,10 @@ def run(task, model, max_steps, session):
         kind = str(action.get("action"))
         if kind == "done":
             report = str(action.get("report", ""))
-            rec(event="done", step=step, report=report)
+            rec(event="done", step=step, report=report, obs_failures=fails)
             say("[emu_agent] DONE: %s" % report)
-            return {"ok": True, "report": report, "steps": step}
+            # ok はモデルの自己申告ではなく「完走かつ観測に失敗が無い」
+            return {"ok": fails == 0, "report": report, "steps": step, "obs_failures": fails}
 
         fn = ACTIONS.get(kind)
         if fn is None:
@@ -371,7 +381,9 @@ def run(task, model, max_steps, session):
                 obs = "error: %s" % e
         if kind not in ("make", "hotdeploy", "deploy"):
             obs = clip(obs)
-        rec(event="obs", step=step, action=action, obs=obs)
+        if obs_failed(obs):
+            fails += 1
+        rec(event="obs", step=step, action=action, obs=obs, failed=obs_failed(obs))
         say("     obs: %s" % obs.strip().replace("\n", " | ")[:200])
         messages.append({"role": "user", "content": "Observation:\n" + obs})
 

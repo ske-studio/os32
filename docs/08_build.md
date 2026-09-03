@@ -96,7 +96,7 @@ python3 tools/nhd_deploy.py init       # NP21/WからNHDをコピー+パーテ�
 python3 tools/nhd_deploy.py sync       # deploy.yaml に基づくフルデプロイ
 python3 tools/nhd_deploy.py write-boot boot/loader_hdd.bin  # ブート領域書き込み
 python3 tools/nhd_deploy.py sync-from-hostdrv  # HostDrv (C:\os32) から ext2 へ同期
-python3 tools/nhd_deploy.py deploy     # ローカルNHD (/tmp/os32.nhd) をNP21/Wにコピー
+python3 tools/nhd_deploy.py deploy     # ローカルNHD (build/nhd/os32.nhd、無ければ自動 pull) をNP21/Wにコピー
 python3 tools/nhd_deploy.py copy userland/shell.bin  # 個別ファイルのデプロイ
 make hotdeploy FILE=apps/foo/foo.bin                        # ホットデプロイ (再起動不要)
 # 他: mount / umount / ls / rm / mkdirs / format / write-boot

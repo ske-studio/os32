@@ -35,6 +35,22 @@ int rshell_active = 0;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+/* GDC (テキスト) のハードウェアカーソルを論理カーソルへ追従させる。
+ * 以前は console_set_cursor() (シェルの行編集) だけが CSRW を出していたので、
+ * 通常出力やスクロールで論理位置が進んでもハードウェアカーソルは最後に
+ * 置かれた場所で点滅し続けた (「左下でちかちか」)。1 文字ごとではなく
+ * 文字列単位の出力の末尾で呼ぶ。V86 セッション中は GDC をゲストが
+ * 握っているので触らない。 */
+static void console_hw_cursor_sync(void)
+{
+    u16 offset;
+    if (v86_is_active()) return;
+    offset = (u16)(cursor_y * TVRAM_COLS + cursor_x);
+    outp(GDC_TEXT_CMD, GDC_CMD_CSRW);
+    outp(GDC_TEXT_PARAM, (u8)(offset & 0xFF));
+    outp(GDC_TEXT_PARAM, (u8)((offset >> 8) & 0xFF));
+}
+
 /* スクロール保護行数 (下から数えた固定行)。0=全行 */
 static int g_scroll_reserve = 0;
 
@@ -67,6 +83,7 @@ void tvram_clear(void)
     }
     cursor_x = 0;
     cursor_y = 0;
+    console_hw_cursor_sync();
 }
 
 void tvram_putchar_at(int x, int y, char ch, u8 color)
@@ -158,8 +175,8 @@ void tvram_putkanji_at(int x, int y, u16 jis, u8 color)
 /*  コンソール出力 (カーソル追従)                                            */
 /* ======================================================================== */
 
-/* 1文字出力 */
-void shell_putchar(char ch, u8 color)
+/* 1文字出力 (ハードウェアカーソルは同期しない内部版) */
+static void putchar_raw(char ch, u8 color)
 {
     if (ch == '\n') {
         cursor_x = 0;
@@ -186,15 +203,23 @@ void shell_putchar(char ch, u8 color)
     }
 }
 
+/* 1文字出力 */
+void shell_putchar(char ch, u8 color)
+{
+    putchar_raw(ch, color);
+    console_hw_cursor_sync();
+}
+
 /* 文字列表示 */
 void shell_print(const char *str, u8 color)
 {
     int render = !v86_is_active();
     while (*str) {
-        if (render) shell_putchar(*str, color);
+        if (render) putchar_raw(*str, color);
         if (rshell_active) serial_putchar(*str);
         str++;
     }
+    if (render) console_hw_cursor_sync();
 }
 
 /* 10進表示 (変換は kprintf.h の kutoa_dec に統一) */
@@ -290,6 +315,7 @@ void shell_print_utf8(const char *utf8_str, u8 color)
         if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
         if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
     }
+    console_hw_cursor_sync();
 }
 
 /* UTF-8ストリーム出力 (サイズ指定) */
@@ -379,26 +405,33 @@ void console_write(const char *buf, u32 size, u8 color)
         if (cursor_x >= TVRAM_COLS) { cursor_x = 0; cursor_y++; }
         if (cursor_y > CONSOLE_LAST_ROW) { tvram_scroll(); cursor_y = CONSOLE_LAST_ROW; }
     }
+    console_hw_cursor_sync();
 }
 
 /* カーソル位置取得/設定 (外部プログラム用) */
 int console_get_cursor_x(void) { return cursor_x; }
 int console_get_cursor_y(void) { return cursor_y; }
-void console_set_cursor(int x, int y) 
-{ 
-    u16 offset;
-    cursor_x = x; 
-    cursor_y = y; 
+void console_set_cursor(int x, int y)
+{
+    cursor_x = x;
+    cursor_y = y;
+    console_hw_cursor_enable();
+}
 
-    /* PC-98 GDC (テキスト) カーソル更新 */
-    /* CSONコマンドでカーソル表示を明示的に有効化 */
-    outp(GDC_TEXT_CMD, GDC_CMD_CSON);
-    
-    /* CSRWコマンドで位置設定 */
-    offset = (u16)(y * TVRAM_COLS + x);
-    outp(GDC_TEXT_CMD, GDC_CMD_CSRW);
-    outp(GDC_TEXT_PARAM, (u8)(offset & 0xFF));
-    outp(GDC_TEXT_PARAM, (u8)((offset >> 8) & 0xFF));
+/* GDC (テキスト) カーソルを表示にして論理位置へ同期する。
+ * CSRFORM: P1 = DC | (LR-1), P2 = CTOP, P3 = CBOT<<3 | BR上位。
+ * 以前の実装は存在しない 0x0B を出していたので OS32 は一度も
+ * ハードウェアカーソルを表示しておらず、V86 中に DOS が DC=1 にした
+ * カーソルだけが終了後も DOS 最後の位置で点滅し続けていた (2026-09-04)。
+ * 起動時と V86 セッション終了時にも呼ぶ。 */
+void console_hw_cursor_enable(void)
+{
+    if (v86_is_active()) return;
+    outp(GDC_TEXT_CMD, GDC_CMD_CSRFORM);
+    outp(GDC_TEXT_PARAM, (u8)(GDC_CSRFORM_DC | (GDC_TEXT_LINES_PER_ROW - 1)));
+    outp(GDC_TEXT_PARAM, (u8)GDC_TEXT_CSR_TOP);
+    outp(GDC_TEXT_PARAM, (u8)((GDC_TEXT_CSR_BOTTOM << 3) | GDC_TEXT_CSR_BR_HI));
+    console_hw_cursor_sync();
 }
 
 /* コンソール画面サイズ取得 */

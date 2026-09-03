@@ -156,7 +156,13 @@
 #define GDC_CMD_PITCH        0x47   /* メモリ幅設定 */
 #define GDC_CMD_CSRW         0x49   /* カーソル位置設定 (CSRW) */
 #define GDC_CMD_CSRR         0xE0   /* カーソル位置読出し (CSRR) */
-#define GDC_CMD_CSON         0x0B   /* カーソル表示ON (STARTのサブセット) */
+/* 旧 GDC_CMD_CSON (0x0B) は uPD7220 に存在しないコマンドで、カーソルは
+ * 出なかった。表示 ON/OFF は CSRFORM (0x4B) P1 の DC ビットで行う。 */
+#define GDC_CSRFORM_DC       0x80   /* CSRFORM P1 bit7: カーソル表示 */
+#define GDC_TEXT_LINES_PER_ROW 16   /* テキスト 1 行のラスタ数 (CSRFORM P1 = LR-1) */
+#define GDC_TEXT_CSR_TOP     14     /* カーソル上端ラスタ (2 ライン下線) */
+#define GDC_TEXT_CSR_BOTTOM  15     /* カーソル下端ラスタ */
+#define GDC_TEXT_CSR_BR_HI   0x03   /* 点滅周期 上位 3bit (BIOS 既定値と同じ) */
 #define GDC_CMD_WRITE        0x20   /* メモリ書込み準備 */
 #define GDC_CMD_READ         0xA0   /* メモリ読出し指示 */
 

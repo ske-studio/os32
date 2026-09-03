@@ -54,8 +54,8 @@ nhd-mount:
 nhd-umount:
 	$(NHD_DEPLOY) umount
 
-# nhd-pull: Windows側NHDを/tmpに取り込む (フォーマットしない)
-#   /tmp は再起動で消えるので、作業再開時はこれを使う
+# nhd-pull: Windows側NHDを build/nhd/ に取り込む (フォーマットしない)
+#   deploy-nhd はローカル NHD が無ければ自動で pull するので通常は不要
 nhd-pull:
 	$(NHD_DEPLOY) pull
 

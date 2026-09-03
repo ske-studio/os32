@@ -10,6 +10,7 @@
 #include "io.h"
 #include "gfx.h"        /* PAL_IDX_PORT / PAL_G_PORT / PAL_R_PORT / PAL_B_PORT */
 #include "palette.h"    /* palette_init() — セッション終了時の復帰 */
+#include "console.h"    /* console_hw_cursor_enable() — DOS が変えた CSRFORM を戻す */
 #include "snd_engine.h" /* snd_set_master() — FM をゲストに明け渡す */
 
 /* GDC はコマンドとパラメータの間に I/O ウェイトが要る (gfx_internal.h と同じ) */
@@ -262,6 +263,10 @@ static void gfx_state_for_os32(void)
 
     /* 16 色に戻した後でないとアナログパレットとして書き込まれない */
     palette_init();
+
+    /* テキスト GDC のカーソル形状/位置もゲストが書き換えている
+     * (DOS は DC=1 のブロックカーソルを最後の位置に残す)。OS32 の形に戻す。 */
+    console_hw_cursor_enable();
 }
 
 /* ------------------------------------------------------------------------ */

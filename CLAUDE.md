@@ -463,6 +463,22 @@ aliases. FS drivers must translate their internal codes at the boundary
 2026-09-03 raw ext2 codes leaked to the shell. `vfs_open` refuses directories
 (`OS32_ERR_ISDIR`) and `vfs_chdir` refuses anything that is not an existing directory.
 
+**NHD デプロイの作業イメージは `build/nhd/os32.nhd`** (2026-09-04 に `/tmp/os32.nhd` から移動):
+`/tmp` は WSL 再起動で消え、消えた状態の `make deploy-nhd` は **NHD を書かずに exit 0** で
+返っていた (nhd_deploy.py が失敗を終了コードに載せていなかった)。同日に修正済み:
+無ければ Windows 側から自動 pull し (NP21/W 停止中のみ可能)、失敗は exit 1、さらに
+`os32-cycle deploy` はブート後にゲストの `/boot/vmkernel.lz4` サイズが手元の成果物と
+一致しなければ FAIL にする。**「配備完了」の文言だけを信じないこと** — カーネル変更の
+検証は `kselftest_pass` を新しい kernel.map のアドレスで読むか、この一致チェックで行う。
+
+**テキスト GDC のカーソルは CSRFORM (0x4B) の DC ビットでしか出ない**: 旧 `GDC_CMD_CSON`
+(0x0B) は uPD7220 に存在しないコマンドで、OS32 は 2026-09-04 までハードウェアカーソルを
+一度も表示していなかった。V86 中に DOS が DC=1 にしたカーソルだけが終了後も DOS 最後の
+位置で点滅し続け「左下でちかちか」に見えた。現在は `console_hw_cursor_enable()` (起動時 /
+V86 終了時 / `console_set_cursor`) で表示にし、`console_hw_cursor_sync()` が文字列出力の
+末尾で論理位置へ追従させる。GDC の実状態は MCP `emu_gdc` の `m_csrform` で読める
+(`8f0e7b` = 表示・2 ライン下線)。
+
 **FAT12 loader PM transition**: Protected-mode transition code is inlined in `boot/loader_fat.asm`. Do not split it to a separate file — address overlap causes data corruption.
 
 **WASM dot-label bug** (legacy ASM files): In `.386p` + `USE16` mode, dot-prefixed local labels (`.wait:`) cause wasm to silently skip object generation. Use plain labels (`wait_bsy:`) instead.
