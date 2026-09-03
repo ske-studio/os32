@@ -34,8 +34,27 @@ TOOLS = [
                                          "ダウンロードを始めるので注意"},
                 "max_steps": {"type": "integer", "description": "最大行動回数 (既定 12)"},
                 "session": {"type": "string", "description": "ログ名"},
+                "verbose": {"type": "boolean",
+                            "description": "true でステップごとの行動と観測も返す "
+                                           "(既定 false: RESULT 行だけ。詳細は steps.jsonl)"},
             },
             "required": ["task"],
+        },
+    },
+    {
+        "name": "emu_agent_suite",
+        "description": "タスクファイル (tools/emu_agent/tasks/*.txt) の各タスクを順に"
+                       "ローカル LLM に実行させ、SUMMARY と RESULT 行を返す。"
+                       "既定は tasks/regress.txt。同期実行 (十数分かかることがある)。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "タスクファイルのパス"},
+                "model": {"type": "string"},
+                "max_steps": {"type": "integer"},
+                "session": {"type": "string"},
+                "verbose": {"type": "boolean"},
+            },
         },
     },
     {
@@ -70,7 +89,20 @@ def call(name, args):
             argv += ["--max-steps", str(args["max_steps"])]
         if args.get("session"):
             argv += ["--session", args["session"]]
+        if not args.get("verbose"):
+            argv.append("--quiet")
         return _run(argv, timeout=3600)
+    if name == "emu_agent_suite":
+        argv = ["suite", args.get("file") or os.path.join(HERE, "tasks", "regress.txt")]
+        if args.get("model"):
+            argv += ["--model", args["model"]]
+        if args.get("max_steps"):
+            argv += ["--max-steps", str(args["max_steps"])]
+        if args.get("session"):
+            argv += ["--session", args["session"]]
+        if not args.get("verbose"):
+            argv.append("--quiet")
+        return _run(argv, timeout=7200)
     if name == "emu_agent_tail":
         argv = ["tail"]
         if args.get("session"):
