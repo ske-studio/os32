@@ -105,3 +105,6 @@ docs/DESIGN_PHILOSOPHY.md
 SOUL.md
 tools/emu_agent/logs/
 /build/nhd/
+
+# PC-98 ハードウェア資料のローカルミラー (著作権物。tools/sync_hwdocs.sh で写す。git に入れない)
+/docs/hw/

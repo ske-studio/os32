@@ -69,6 +69,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |-------------|------|
 | `C:\WATCOM\docs\undocumented\` | **非公開メモリ・I/Oポート資料集 (独自調査基盤、より正確)** |
 | `C:\WATCOM\docs\PC9800Bible\` | PC-9800シリーズ テクニカルデータブック (公式資料ベース) |
+| `docs/hw/` (git 管理外) | 上記と UNDOCUMENTED の Markdown をローカルにミラーしたもの。`tools/sync_hwdocs.sh` で更新。著作権物なので git に入れない |
 | `C:\WATCOM\docs\D88_FORMAT_SPEC.md` | D88 フロッピーイメージ形式仕様 |
 | `C:\WATCOM\docs\NP21W_DEBUG_PORT.md` | NP21/W デバッグポート資料 |
 

@@ -547,6 +547,8 @@ os32/
 | `docs/tasks/wintree_port/` | Record of the feat/vdm work-tree port |
 | `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; build and deploy from WSL with `make build && make deploy` (mirrors to Windows and drives MSBuild) |
 
-For PC-9800 hardware specs, refer to `C:\WATCOM\docs\` (`/mnt/c/WATCOM/docs/`): `PC9800Bible/`
-(PC-9801 Bible) and `undocumented/` (UNDOCUMENTED 9801/9821 Vol.2, `io_*.md`). When the
-two disagree, UNDOCUMENTED wins (see `docs/INDEX.md`).
+For PC-9800 hardware specs, read the local mirror `docs/hw/` (`PC9800Bible/` = PC-9801
+Bible, `undocumented/` = UNDOCUMENTED 9801/9821 Vol.2 `io_*.md`). The source of truth is
+`C:\WATCOM\docs\` (`/mnt/c/WATCOM/docs/`); refresh the mirror with `tools/sync_hwdocs.sh`.
+**The mirror is copyrighted material and is gitignored (`/docs/hw/`) — never commit it.**
+When the two books disagree, UNDOCUMENTED wins (see `docs/INDEX.md`).
