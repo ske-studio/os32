@@ -7,6 +7,7 @@
 deploy: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	@echo "=== HostDrv Deploy ==="
 	$(HOSTDRV_DEPLOY) sync
+	$(PRUNE_STALE) hostdrv $(PRUNE_FLAG)
 
 # deploy-kernel: vmkernel.lz4 と全ビルド成果物をNHDのext2に配置
 #   (NP21/W再起動が必要)。HostDrv を先に同期するので、HostDrv 側が古いまま
@@ -16,6 +17,7 @@ deploy-kernel: $(BUILD_OUT)/vmkernel.lz4
 	@echo "=== Sync to HostDrv before NHD deploy ==="
 	$(HOSTDRV_DEPLOY) sync
 	$(NHD_DEPLOY) sync-from-hostdrv
+	$(PRUNE_STALE) both $(PRUNE_FLAG)
 	$(NHD_DEPLOY) deploy
 
 # deploy-boot: ブートローダーのみNHDブート領域 (LBA 2-17) に書き込み
@@ -28,7 +30,22 @@ deploy-boot: boot/loader_hdd.bin
 deploy-nhd: $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	@echo "=== NHD Deploy (using deploy.yaml) ==="
 	$(NHD_DEPLOY) sync
+	$(PRUNE_STALE) both $(PRUNE_FLAG)
 	$(NHD_DEPLOY) deploy
+
+# prune-stale: 配備先 (HostDrv + NHD) に残ったマニフェストに無い *.bin を掃除する。
+#   配備は書くだけで消さないので、KAPI 変更後の stale バイナリ (別関数へ飛んで
+#   rshell ごと沈黙する) が溜まる。deploy / deploy-nhd / deploy-kernel は既定で
+#   削除まで行う (NO_PRUNE=1 で一覧だけ)。対象はシステム側ディレクトリ直下の
+#   *.bin のみで、/home /data /etc には触れない。
+#   例: make prune-stale            一覧だけ (dry-run)
+#       make prune-stale-delete     削除 (NHD 側は次の deploy で Windows へ反映)
+PRUNE_STALE = python3 tools/prune_stale.py
+PRUNE_FLAG  = $(if $(NO_PRUNE),,--delete)
+prune-stale:
+	$(PRUNE_STALE) both
+prune-stale-delete:
+	$(PRUNE_STALE) both --delete
 
 # hotdeploy: 個別バイナリのビルド → ホットデプロイ (再起動不要)
 #   例: make hotdeploy FILE=apps/hello32/hello32.bin
@@ -64,4 +81,4 @@ nhd-pull:
 nhd-init:
 	$(NHD_DEPLOY) init
 
-.PHONY: deploy deploy-kernel deploy-boot deploy-nhd hotdeploy nhd-mount nhd-umount nhd-pull nhd-init
+.PHONY: deploy deploy-kernel deploy-boot deploy-nhd hotdeploy nhd-mount nhd-umount nhd-pull nhd-init prune-stale prune-stale-delete

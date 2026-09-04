@@ -414,6 +414,9 @@ V86 は同時に使わない。レイアウトを変えたら
 変わると旧バイナリの KAPI 呼び出しが別関数へ飛び、exit 後の `jmp $` で
 永久スピンして rshell ごと沈黙する (2026-08-13 に sndctl で実測)。
 起動対象になるバイナリは PKG 配布でも必ず deploy.yaml に載せる。
+2026-09-04 から `make deploy` / `deploy-nhd` / `deploy-kernel` は同期のあとに
+`tools/prune_stale.py` でマニフェストに無いシステム側の *.bin を削除する
+(`NO_PRUNE=1` で一覧のみ、`make prune-stale` で手動確認)。
 
 **HostDrv deploy does not override `/usr/bin`**: `make deploy` only writes to `C:\os32`
 (the guest's `/host`). PATH resolution prefers the NHD's `/usr/bin`, so running a program
