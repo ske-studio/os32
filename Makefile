@@ -86,3 +86,8 @@ clean-deps:
 	  -name '*.d' -not -path '*/target/*' -delete 2>/dev/null || true
 
 .PHONY: all clean clean-deps
+
+# ドキュメントを Windows 側 (C:\WATCOM\docs\os32) へミラー / 逆方向は tools/sync_hwdocs.sh
+.PHONY: docs-win
+docs-win:
+	sh tools/sync_docs_to_win.sh

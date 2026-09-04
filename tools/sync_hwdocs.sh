@@ -10,8 +10,10 @@ SRC="${HWDOCS_SRC:-/mnt/c/WATCOM/docs}"
 DST="$(cd "$(dirname "$0")/.." && pwd)/docs/hw"
 [ -d "$SRC" ] || { echo "ERROR: $SRC が無い (Windows 側の資料ディレクトリ)"; exit 1; }
 mkdir -p "$DST"
-rsync -a --delete --include='*/' --include='*.md' --exclude='*' \
-      --exclude='PDF/' --exclude='__pycache__/' \
+# 除外は --include='*/' より前に置く (後ろだと全ディレクトリが先に採用されて効かない)。
+# os32/ は tools/sync_docs_to_win.sh の出力先 (往復ループ防止)。
+rsync -a --delete --delete-excluded --exclude='PDF/' --exclude='os32/' --exclude='__pycache__/' \
+      --include='*/' --include='*.md' --exclude='*' \
       "$SRC/" "$DST/"
 cat > "$DST/README.md" <<'EOT'
 # docs/hw — PC-98 ハードウェア資料のローカルミラー (git 管理外)

@@ -552,4 +552,7 @@ For PC-9800 hardware specs, read the local mirror `docs/hw/` (`PC9800Bible/` = P
 Bible, `undocumented/` = UNDOCUMENTED 9801/9821 Vol.2 `io_*.md`). The source of truth is
 `C:\WATCOM\docs\` (`/mnt/c/WATCOM/docs/`); refresh the mirror with `tools/sync_hwdocs.sh`.
 **The mirror is copyrighted material and is gitignored (`/docs/hw/`) — never commit it.**
+The reverse direction exists too: `make docs-win` (`tools/sync_docs_to_win.sh`) mirrors this
+repository's `docs/` + `README.md` + `CLAUDE.md` to `C:\WATCOM\docs\os32\` for reading from
+Windows. That copy is read-only output — edit the files here, never there.
 When the two books disagree, UNDOCUMENTED wins (see `docs/INDEX.md`).
