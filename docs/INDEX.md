@@ -91,7 +91,10 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/v2/CONTRACTS.md](tasks/v2/CONTRACTS.md) | v2 実装の凍結インターフェース契約 (2 コーダー体制、C1-C7) |
 | [tasks/v2/TASK_coder1_M0b_privileged.md](tasks/v2/TASK_coder1_M0b_privileged.md) | コーダー1 タスク — ユーザランドの特権命令除去 (M1 前提) |
 | [tasks/v2/TASK_coder1_M1_ring3.md](tasks/v2/TASK_coder1_M1_ring3.md) | コーダー1 タスク — M1 リング3 土台の実装 (M1a-M1e) |
-| [tasks/v2/TASK_coder2_libos32gui.md](tasks/v2/TASK_coder2_libos32gui.md) | コーダー2 タスク — libos32gui (Rust GUI) 新規開発 |
+| [tasks/v2/TASK_coder2_libos32gui.md](tasks/v2/TASK_coder2_libos32gui.md) | コーダー2 タスク — libos32gui (Rust GUI) 新規開発 (試作。v1.1 では tasks/gui/ の票で WM と共有ライブラリに分割) |
+| [tasks/gui/DESIGN.md](tasks/gui/DESIGN.md) | **GUI シェル v1.x 設計記録** (2026-09-04) — 再描画モデル、HAL/バックエンド表、9821 PEGC / Cirrus、ボトルネック、API 様式、共有ライブラリ帯域 |
+| [tasks/gui/API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) | libos32gui 凍結インターフェース契約 (2026-09-04 凍結) — G 描画 / T 経路 / U 窓とイベント / P 性能規約 |
+| [tasks/gui/TASKS.md](tasks/gui/TASKS.md) | GUI v1.1 作業分担票 (2026-09-05) — レーン H/K/W/C、依存順、排他、共有定数、ゲート G1〜G5。各票 `TASK_{H1..H3,K1..K4,W1..W2,C1..C3}.md` |
 | [tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) | v2 M1 設計 — リング3 土台 (GDT/PD 切替/CPL=3 遷移/検証項目) |
 | [tasks/v2/M2_KAPI_TRAMPOLINE.md](tasks/v2/M2_KAPI_TRAMPOLINE.md) | v2 M2 設計 — KAPI トランポリン (CPL=3 から int 0x80 経由、アプリ無変更) |
 | [tasks/v2/M3_VERIFY.md](tasks/v2/M3_VERIFY.md) | v2 M3 設計 — 検証 (フォールト注入/特権命令の静的検査/性能再測) |

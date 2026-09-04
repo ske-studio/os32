@@ -543,6 +543,7 @@ os32/
 | `docs/POLICY_DEBUG.md` | Debug procedures, binary deployment checklist |
 | `docs/ROADMAP.md` | Release roadmap (v1.1 GUI shell~) |
 | `docs/tasks/fep/` | FEP (Japanese input) detailed design, P1–P7 |
+| `docs/tasks/gui/` | GUI shell v1.x: `DESIGN.md` (design record), `API_CONTRACTS.md` (frozen 2026-09-04), `TASKS.md` + `TASK_*.md` (lane tickets H/K/W/C, gates G1–G5) |
 | `docs/tasks/game/` | Board-game RPG port plan + engine extension plan |
 | `docs/tasks/wintree_port/` | Record of the feat/vdm work-tree port |
 | `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; build and deploy from WSL with `make build && make deploy` (mirrors to Windows and drives MSBuild) |
