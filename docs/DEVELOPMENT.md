@@ -104,8 +104,8 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 | 0x200000-0x2FFFFF | SQLite帯域 (1MB) | code+BSS+代替スタック(128KB) |
 | 0x300000-0x3FFFFF | シェル常駐帯域 (1MB) | shell.bin専用, ガードページ付き |
 | 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
-| 0x400000- | 外部プログラム | コードロード領域 (最大1MB) |
-| 動的〜 | exec_heap | プログラム用ヒープ (sbrk_heap_limit, 動的計算) |
+| 0x400000- | 外部プログラム | code+bss → sbrk (固定上限なし、2026-09-04) |
+| 動的〜 | exec_heap | スタックガード直下に配置。sbrk との取り分は OS32X heap_size か折半 (sbrk_heap_limit = guard_a) |
 | 動的〜 | プログラムスタック | 256KB, mem_end 付近に配置 |
 | 物理末尾 256KB | ホットデプロイ・ステージング窓 | MEM_HOTDEPLOY_SIZE。mem_end = sys_usable_mem_end() でこの分を差し引く |
 

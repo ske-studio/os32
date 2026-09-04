@@ -139,7 +139,9 @@ The lines below are the whole rule; the reasoning and the detail live in
 0x1FC000–0x1FFFFC Kernel stack (16KB)
 0x200000–0x2FFFFF SQLite band (1MB): code + BSS + alternate stack (128KB)
 0x300000–0x3FFFFF Shell band (1MB): resident binary + guard 0x375000 + stack
-0x400000–         External program load area (max 1MB) + heap + stack
+0x400000–         External program band: code+bss, then newlib sbrk, guard page,
+                  KAPI exec_heap directly below the stack guard (no fixed 1MB cap
+                  since 2026-09-04; sbrk/exec_heap split by OS32X heap_size or 50/50)
 (top 256KB)       Hot-deploy staging window — carved out of physical memory
                   by sys_usable_mem_end(); exec and pgalloc must avoid it
 ```
@@ -535,4 +537,6 @@ os32/
 | `docs/tasks/wintree_port/` | Record of the feat/vdm work-tree port |
 | `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; build and deploy from WSL with `make build && make deploy` (mirrors to Windows and drives MSBuild) |
 
-For PC-9800 hardware specs, refer to `docs/PC9800Bible/`.
+For PC-9800 hardware specs, refer to `C:\WATCOM\docs\` (`/mnt/c/WATCOM/docs/`): `PC9800Bible/`
+(PC-9801 Bible) and `undocumented/` (UNDOCUMENTED 9801/9821 Vol.2, `io_*.md`). When the
+two disagree, UNDOCUMENTED wins (see `docs/INDEX.md`).

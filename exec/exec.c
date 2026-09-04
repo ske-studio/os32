@@ -109,9 +109,6 @@ static void ring3_trampoline_init(void)
 /* スタックを4バイト境界に揃えるためのマスク */
 #define STACK_ALIGN_MASK 3
 
-/* コード領域のページ数 (1MB / 4KB = 256ページ) — pgalloc_mark_used 用 */
-#define EXEC_CODE_PAGES  ((MEM_EXEC_MAX_SIZE + PAGE_SIZE - 1) / PAGE_SIZE)
-
 /* 動的確保リザーブ (1MB)。
  *
  * 子プロセスの空間はコード+ヒープ+スタックで pgalloc の管理域
@@ -161,7 +158,8 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 /* ======================================================================== */
 
 /* リング3 ユーザスタック: 0x400000 帯 (APP_BAND_PDE) 上端に置く (M1_RING3 §5)。
- * プログラムは 0x400000 から最大 1MB。スタックはその十分上、帯の最上位 64KB。 */
+ * プログラム (code + sbrk + exec_heap) は 0x400000 からスタックガード直下まで
+ * (レイアウトは include/memmap.h の子プロセス帯の説明を参照)。 */
 #define RING3_USTACK_TOP     (MEM_EXEC_LOAD_ADDR + 0x400000UL)  /* 0x800000 (帯上端, exclusive) */
 /* ユーザスタックサイズ。旧 CPL=0 子プロセスの MEM_EXEC_STACK_SIZE (256KB) に
  * 合わせる (ring3 デフォルト化での深いスタック使用の回帰を避ける)。
@@ -227,11 +225,11 @@ static void exec_child_claim(u32 *a_start, int *a_pages,
                              u32 *b_start, int *b_pages)
 {
     u32 mem_end = sys_usable_mem_end();  /* 末尾はホットデプロイ用に予約 */
-    u32 heap_base = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE + PAGE_SIZE;
     u32 guard_b = mem_end - MEM_EXEC_STACK_SIZE - PAGE_SIZE;
     u32 a_end = guard_b;
 
-    if (guard_b > heap_base && (guard_b - heap_base) > EXEC_DYN_RESERVE * 2) {
+    if (guard_b > MEM_EXEC_LOAD_ADDR &&
+        (guard_b - MEM_EXEC_LOAD_ADDR) > EXEC_DYN_RESERVE * 2) {
         a_end = guard_b - EXEC_DYN_RESERVE;
     }
     *a_start = MEM_EXEC_LOAD_ADDR;
@@ -445,6 +443,7 @@ int exec_run(const char *cmdline)
     u32 stack_top;
     u32 guard_a, guard_b;
     u32 exec_heap_base, exec_heap_size;
+    u32 heap_top_cpl0 = 0;   /* 子 (CPL=0) の exec_heap 上端 (動的確保リザーブの手前) */
     int is_shell;
 
     u32 mem_end = sys_usable_mem_end();  /* 末尾はホットデプロイ用に予約 */
@@ -487,20 +486,28 @@ int exec_run(const char *cmdline)
         exec_heap_base = 0;
         exec_heap_size = 0;
     } else {
-        /* Level 1+ (子プロセス): 0x400000〜 アイデンティティマッピング */
+        /* Level 1+ (子プロセス): 0x400000〜 アイデンティティマッピング。
+         * guard_a / exec_heap はヘッダ (text+bss, heap_size) を見てから決める。
+         * ここでは読み込み上限だけ求める: CPL=3 帯 (RING3_HEAP_TOP) と CPL=0 の
+         * heap_top の小さい方から、sbrk 最低分・ガード・exec_heap 最低分を引く。 */
         u32 child_stack_bottom;
+        u32 read_top;
         load_base = MEM_EXEC_LOAD_ADDR;
-        max_size  = MEM_EXEC_MAX_SIZE;
         stack_top = mem_end;
         child_stack_bottom = stack_top - MEM_EXEC_STACK_SIZE;
         guard_b   = child_stack_bottom - PAGE_SIZE;
-        guard_a   = MEM_EXEC_LOAD_ADDR + MEM_EXEC_MAX_SIZE;
-        exec_heap_base = guard_a + PAGE_SIZE;
-        exec_heap_size = guard_b - exec_heap_base;
-        /* ヒープ末尾に動的確保リザーブの穴を空ける (上のコメント参照) */
-        if (exec_heap_size > EXEC_DYN_RESERVE * 2) {
-            exec_heap_size -= EXEC_DYN_RESERVE;
+        heap_top_cpl0 = guard_b;
+        /* CPL=0 子はヒープ上端と guard_b の間に動的確保リザーブの穴を空ける
+         * (exec_child_claim と同じ式。上のコメント参照) */
+        if (guard_b > MEM_EXEC_LOAD_ADDR &&
+            (guard_b - MEM_EXEC_LOAD_ADDR) > EXEC_DYN_RESERVE * 2) {
+            heap_top_cpl0 = guard_b - EXEC_DYN_RESERVE;
         }
+        read_top = (heap_top_cpl0 < RING3_HEAP_TOP) ? heap_top_cpl0 : RING3_HEAP_TOP;
+        max_size = read_top - load_base - MEM_EXEC_SBRK_MIN - PAGE_SIZE - MEM_EXEC_HEAP_MIN;
+        guard_a = 0;
+        exec_heap_base = 0;
+        exec_heap_size = 0;
     }
 
     file_buf  = (u8 *)load_base;
@@ -564,7 +571,40 @@ int exec_run(const char *cmdline)
         stack_top = RING3_USTACK_TOP;
     }
 
-    if (text_sz + bss_sz > max_size) {
+    if (!is_shell) {
+        /* 子プロセス帯のレイアウト確定 (include/memmap.h 参照):
+         *   [load..code_end) 本体 / [code_end..guard_a) sbrk / [guard_a] ガード /
+         *   [exec_heap_base..heap_top) exec_heap
+         * 本体の固定 1MB 上限は撤廃 (2026-09-04)。sbrk と exec_heap の取り分は
+         * ヘッダの heap_size (exec_heap の要求量) があればそれ、0 なら折半。 */
+        u32 heap_top = want_ring3 ? RING3_HEAP_TOP : heap_top_cpl0;
+        u32 code_end = (load_base + text_sz + bss_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        u32 need = MEM_EXEC_SBRK_MIN + PAGE_SIZE + MEM_EXEC_HEAP_MIN;
+        u32 avail;
+
+        if (heap_top < code_end || heap_top - code_end < need) {
+            shell_print("[DBG] NOMEM: text=", 0xE1);
+            shell_print_dec(text_sz, 0xE1);
+            shell_print(" bss=", 0xE1);
+            shell_print_dec(bss_sz, 0xE1);
+            shell_print(" max=", 0xE1);
+            shell_print_dec((heap_top > load_base + need) ? heap_top - need - load_base : 0, 0xE1);
+            shell_print("\n", 0xE1);
+            return EXEC_ERR_NOMEM;
+        }
+        /* sbrk 最低分とガードを除いた残りを exec_heap と sbrk 追加分で分ける */
+        avail = heap_top - code_end - MEM_EXEC_SBRK_MIN - PAGE_SIZE;
+        if (heap_sz > 0) {
+            exec_heap_size = (heap_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
+            if (exec_heap_size > avail) exec_heap_size = avail;
+        } else {
+            exec_heap_size = (avail / 2) & ~(PAGE_SIZE - 1);
+            if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
+        }
+        exec_heap_base = heap_top - exec_heap_size;
+        guard_a = exec_heap_base - PAGE_SIZE;
+    } else if (text_sz + bss_sz > max_size) {
         shell_print("[DBG] NOMEM: text=", 0xE1);
         shell_print_dec(text_sz, 0xE1);
         shell_print(" bss=", 0xE1);
@@ -621,8 +661,9 @@ int exec_run(const char *cmdline)
     }
 
     if (exec_heap_size > 0) {
-        /* OS32X ヘッダの heap_size 指定があればサイズを制限 */
-        if (heap_sz > 0 && heap_sz < exec_heap_size) {
+        /* シェルは OS32X ヘッダの heap_size 指定があればサイズを制限
+         * (子プロセスは上のレイアウト確定で heap_size を織り込み済み) */
+        if (is_shell && heap_sz > 0 && heap_sz < exec_heap_size) {
             exec_heap_size = heap_sz;
             ctx->exec_heap_size = exec_heap_size;
         }
@@ -859,11 +900,11 @@ int exec_run(const char *cmdline)
              * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので
              * 無変更。データフィールド (sbrk_heap_limit/shm_base) を本物の表から
              * トランポリンへ反映してから渡す (CR0.WP=0 で RO ページへ書ける)。 */
-            /* CPL=3 の sbrk 上限は USER マップした範囲の上端 (スタック下端) に
-             * 合わせる。旧 CPL=0 の mem_end 由来値だと USER マップ外を指し、
-             * _sbrk が伸ばした先で #PF する。 */
+            /* CPL=3 の sbrk 上限は guard_a (exec_heap の直下のガード)。
+             * かつては RING3_HEAP_TOP を渡していたため sbrk が exec_heap の
+             * 領域へ伸びて 2 つのヒープが重なり得た (2026-09-04 修正)。 */
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] =
-                RING3_HEAP_TOP;
+                guard_a;
             ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] =
                 kapi->shm_base;
             ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */

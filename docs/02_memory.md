@@ -54,10 +54,15 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
 [ プログラム空間 (0x400000 - mem_end) — 動的レイアウト ]
-0x400000 - 0x4FFFFF       1MB      .text + .data + .bss + sbrk (最大1MB)      R/W
-0x500000 - 0x500FFF       4KB      ★ GUARD A: sbrk上限ガード                 NP
-0x501000 - ...                     exec_heap (動的確保上限まで)               R/W
-  ...    - (mem_end-260KB)         ↓
+0x400000 - code_end                .text + .data + .bss (固定上限なし)        R/W
+code_end - guard_a                 newlib sbrk (最低 MEM_EXEC_SBRK_MIN=256KB)  R/W
+guard_a  (4KB)                     ★ GUARD A: sbrk上限ガード (位置は動的)     NP
+guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/W
+                                   heap_top = CPL=3: 0x7BF000 (帯上端のスタック
+                                   ガード直下) / CPL=0: GUARD B - 動的確保リザーブ
+                                   大きさ: OS32X ヘッダ heap_size 指定があれば
+                                   それ、0 なら空きを sbrk と折半 (2026-09-04)
+  ...    - (mem_end-260KB)         (CPL=0 のみ) 動的確保リザーブの穴 1MB
 (mem_end-260KB) - (-256KB) 4KB     ★ GUARD B: スタックovrflowガード           NP
 (mem_end-256KB) - mem_end  256KB   プログラムスタック (下向き展開)            R/W
 (物理末尾) - (+256KB)     256KB   ホットデプロイ・ステージング窓             R/W

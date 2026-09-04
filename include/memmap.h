@@ -42,8 +42,9 @@
 /*      ~0x3FFFFF         スタック (下向き成長)                               */
 /*                                                                          */
 /*    [プログラム空間 0x400000-メモリ上限]  ※旧アドレス維持                  */
-/*      0x400000          外部プログラム (最大1MB)                            */
-/*      ガード            sbrk/スタックガードページ                          */
+/*      0x400000          外部プログラム code+bss → sbrk (固定上限なし)      */
+/*      ガード A          sbrk 上限ガード (exec_heap の直下、位置は動的)       */
+/*      ~ヒープ上端       exec_heap (KAPI mem_alloc、スタックガード直下)     */
 /*      ~mem_end          プログラムスタック (256KB)                          */
 /* ======================================================================== */
 
@@ -215,7 +216,17 @@ extern u32 __sqlite_end;
 /*  スタック/ヒープは exec_run() にてシステムメモリ量から動的に計算される      */
 /* ====================================================================== */
 #define MEM_EXEC_LOAD_ADDR    0x400000UL
-#define MEM_EXEC_MAX_SIZE     (0x100000UL)       /* コード+sbrk 最大1MB */
+/* 子プロセス帯のレイアウト (2026-09-04 に固定 1MB 上限を撤廃):
+ *   [load .. code_end)            code + data + bss
+ *   [code_end .. guard_a)         newlib sbrk (少なくとも MEM_EXEC_SBRK_MIN)
+ *   [guard_a]                     ガードページ (非present)
+ *   [exec_heap_base .. heap_top)  KAPI mem_alloc (exec_heap)。ヘッダ heap_size
+ *                                 指定があればその大きさ、0 なら空きを折半
+ *   heap_top = スタックガード直下 (CPL=3: RING3_HEAP_TOP / CPL=0: guard_b
+ *              から動的確保リザーブを引いた位置)
+ * 本体の上限は heap_top - MEM_EXEC_SBRK_MIN - ガード - MEM_EXEC_HEAP_MIN で決まる。 */
+#define MEM_EXEC_SBRK_MIN     0x40000UL          /* sbrk に最低限残す 256KB */
+#define MEM_EXEC_HEAP_MIN     0x10000UL          /* exec_heap の最小 64KB */
 #define MEM_EXEC_STACK_SIZE   0x40000UL          /* スタックサイズ 256KB (-O0 SQLite対応) */
 
 /* ====================================================================== */

@@ -27,7 +27,6 @@
 
 /* プログラムのロード先 (固定) */
 #define EXEC_LOAD_ADDR    MEM_EXEC_LOAD_ADDR
-#define EXEC_MAX_SIZE     MEM_EXEC_MAX_SIZE
 /* ======== API ======== */
 void exec_init(void);
 int exec_run(const char *cmdline);

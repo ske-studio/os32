@@ -1,0 +1,372 @@
+# libos32gui — 凍結インターフェース契約
+
+> 策定: 2026-09-04 / 親: [DESIGN.md](DESIGN.md) / 書式は [v2 CONTRACTS](../v2/CONTRACTS.md) に倣う
+> 位置づけ: **凍結 (2026-09-04)**。未決 4 点 (G6/G8 色、T2/T2a SHM、U2a キー) をユーザ
+> レビューで確定し、凍結した。以後の変更にはユーザ承認を要する (op 番号・イベント種別・
+> 構造体は末尾追記のみ)。方針は DESIGN.md §9.4 (Wayland 型の協定 + 保持型ウィジェット木 + モーダルの
+> 状態機械 + ステートレス描画 + syscall 境界ポンプ)。
+> 順序: G (GDI 相当) → T (呼び出し経路) → U (USER 相当)。数値は提案値。
+
+体制: WM = gshell 内 (Rust)、クライアント = 共有ライブラリ帯域 (Rust, no_std)、
+カーネル側は `gui_call` 1 本と syscall 境界ポンプのフックだけ (C)。
+
+---
+
+## G. 描画 (GDI 相当) — HAL のプリミティブと同じ粒度
+
+### G1. 基本型
+
+| 型 | 定義 | 備考 |
+|---|---|---|
+| `Rect` | `{x: i16, y: i16, w: i16, h: i16}` | 空は `w<=0 \|\| h<=0`。座標は描画先サーフェスのローカル |
+| `Color` | `u8` | 0〜15 はシステム色 (G6)。16〜255 は 256 色バックエンドでのみ有効 |
+| `Style` | `{fg: Color, bg: Color, flags: u8}` | flags は G6 で確定: `TRANSPARENT_BG` / `XOR` / `DOTTED` / `DITHER50` |
+| `SurfaceId` | `u32` (index:16 \| generation:16、0 = 無効) | ウィンドウのクライアント面、またはオフスクリーン |
+| `BitmapId` | 同上 | 16 色版必須、256 色版任意 (DESIGN §2 色方針) |
+| `FontId` | 同上 | v1 は KCG 固定 2 種: `FONT_ANK` 8x16 / `FONT_KANJI` 16x16 (自動選択) |
+
+- **ステートレス**: 描画呼び出しは毎回 `Style` を受け取る。DC 相当の「選択状態」は持たない。
+- **ポインタは API に現れない**。バッファは ID で参照する。
+- 浮動小数なし。曲線は v1 の契約に含めない (libos32gfx を直接使う道は残す)。
+
+### G2. プリミティブ (すべて `surface: SurfaceId` を第 1 引数に取る)
+
+| 関数 | 内容 |
+|---|---|
+| `fill_rect(rect, style)` | 塗り。`bg` を使う |
+| `draw_rect(rect, style)` | 1px 枠。`fg` |
+| `hline / vline / line(x0,y0,x1,y1, style)` | 線。`fg` |
+| `blit(dst_xy, bitmap, src_rect)` | ビットマップ転送 (カラーキー = 色 255) |
+| `text(x, y, utf8: &[u8], style)` | UTF-8 を KCG で描く。半角 8px / 全角 16px、ベースライン規約は既存 gen_font16 のもの |
+| `push_clip(rect) / pop_clip()` | クリップは常に「現在のクリップ ∩ サーフェス」。深さ 8 |
+| `measure_text(utf8) -> (w, h)` | レイアウト用 |
+
+- 対応する HAL のプリミティブ: 塗り / 矩形転送 / 文字 / ビットマップ (DESIGN §7-1)。
+  線と枠はクライアント側の CPU 実装 (HAL には要求しない)。
+- ソフトウェアバックエンドではクライアントが共有バックバッファへ直接書く。
+  **クリップの強制はクライアントライブラリの責任** (v1 の信頼モデル、DESIGN §8 の表)。
+
+### G3. サーフェス
+
+- `SurfaceId` は「描画先」の抽象。v1 の実体は (a) ウィンドウのクライアント面 = 全画面
+  バックバッファの部分矩形、(b) オフスクリーン = 主記憶 (既存 `GFX_Surface`)。
+- 将来「ウィンドウごとの SHM サーフェス + WM 合成」に替えても G2 の署名は変わらない。
+- `create_surface(w, h) -> SurfaceId` / `destroy_surface(id)`。上限 16。
+
+### G4. 無効化と commit (Wayland の damage + commit)
+
+- `invalidate(window, rect)`: 損傷を申告する。WM が統合し (32px 境界、隣接は結合。既存
+  `gfx_add_dirty_rect` と同じ規則)、次の `Paint` イベントを発行する。
+- `Paint{window, rect}` を受けたときだけクライアント面に描く (`rect` にクリップ済み)。
+- `commit(window)`: そのウィンドウの損傷分を `present_rect` で画面へ。**ループ 1 周に 1 回**
+  (U3)。commit 前の描画は画面に出ない = 半端な状態が見えない。
+- 全画面 present は WM だけが行う (デスクトップ切替、フルスクリーン GFX からの復帰)。
+
+### G5. 能力の問い合わせ
+
+`screen_info() -> {w, h, colors, format, flags}`。flags: `TEXT_OVERLAY`, `HW_FILL`,
+`HW_BLT`, `PAGE_FLIP`。GUI とアプリはこれを信じ、400 ライン・16 色を決め打ちしない。
+
+### G6. システム色 (16 色固定、役割名で参照) — 確定 2026-09-04
+
+gshell が起動時に `gfx_set_palette` でこの表を入れる (現状は誰もパレットを設定しておらず、
+PC-98 既定パレットのまま = 既存 libos32gui の色コメントは実機と食い違っている)。
+フルスクリーン GFX プログラムの前後で WM が退避・復元する。256 色バックエンドでも 0〜15 は
+この表のまま、16〜255 をアイコン・画像に使う。
+
+| index | 役割 | RGB (0〜15) | 用途 |
+|---|---|---|---|
+| 0 | `TEXT` | 0,0,0 | 文字、枠 |
+| 1 | `TITLE_ACTIVE` / `SEL_BG` | 0,0,8 | アクティブタイトル、選択背景 |
+| 2 | `SHADOW` | 6,6,6 | 立体枠の影 |
+| 3 | `DISABLED` | 9,9,9 | 無効文字 |
+| 4 | `OK` | 0,10,0 | 成功表示 |
+| 5 | `WARN` | 14,12,0 | 警告表示 |
+| 6 | `FACE` / `TITLE_INACTIVE` | 12,12,12 | ボタン面、非アクティブタイトル |
+| 7 | `WINDOW` / `TITLE_TEXT` | 15,15,15 | クライアント面、タイトル文字 |
+| 8 | `CLOSE` / `ALERT` | 12,0,0 | 閉じるボタン、エラー |
+| 9 | `LINK` | 0,10,14 | リンク、情報 |
+| 10 | `ACCENT` | 12,0,12 | 強調 (アプリ任せ) |
+| 11 | `LIGHT` | 14,14,14 | 立体枠のハイライト |
+| 12 | `DESKTOP` | 0,8,10 | デスクトップ |
+| 13 | `HIGHLIGHT` | 0,0,15 | 押下、フォーカスリング |
+| 14 | `SEL_TEXT` | 15,15,15 | 選択項目の文字 |
+| 15 | `EDIT_BG` | 15,15,14 | テキストボックス背景 |
+
+白系が 7 / 11 / 14 / 15 で重なるのは、役割を分けておいて後で色だけ変えられるようにするため。
+アプリは index ではなく役割名で参照する。ウィンドウ内でアプリがパレットを自由に変えることは
+できない (ラスタ効果はフルスクリーン GFX の領分)。ただし G8 のリースで一部を貸す。
+
+`Style.flags` (u8) — 確定: `TRANSPARENT_BG` (背景を塗らず文字だけ) / `XOR` (枠ドラッグ) /
+`DOTTED` (フォーカス矩形の点線) / `DITHER50` (50% 市松塗り。無効面や 16 色での中間調)。
+
+### G7. カウンタ (DESIGN §8)
+
+`stats() -> {present_bytes, hw_ops, io_accesses, commits}`。累積。デバッグ用で契約の一部
+(NP21/W ではこれで性能を見積もる)。
+
+### G8. パレットのリース — 確定 2026-09-04 (フォーカスのあるアプリに 14 色を貸す)
+
+- `lease_palette(first, count, entries) -> i32`: **フォーカスを持つウィンドウだけ**が、
+  バックエンドが許す範囲のパレット項目を自分の色に置き換えられる。範囲は `screen_info()`
+  の `lease_mask` (16 色) / `lease_first, lease_count` (256 色) で問い合わせる:
+  - 16 色バックエンド: **index 1〜6 と 8〜15 の 14 項目**。不可侵は 0 (`TEXT` 黒) と
+    7 (`WINDOW` 白) の 2 つだけ (PC-98 既定パレットでも 0 = 黒、7 = 白なので、ゲーム側の
+    慣習とも合う)。
+  - 256 色バックエンド: index 16〜255 の 240 項目 (0〜15 はシステム色のまま、WM の
+    クロームはフルカラーで残る)。
+- リース中、16 色バックエンドの WM は**クロームを 2 色 + パターンで描く**: 文字と枠は
+  `TEXT`、面は `WINDOW`、影と無効面は `DITHER50`、フォーカスは `DOTTED`、アクティブ
+  タイトルは黒地に白文字、非アクティブは白地に黒文字、デスクトップは市松。Windows 1.x/2.x
+  のモノクロ表示と同じ骨格で、`Style.flags` の 4 つはこのために用意してある。
+- リースはフォーカスに従う。フォーカスを得たときに WM がアプリの色を入れ、失ったときに
+  システム色へ戻す。どちらもアプリへ `Palette{active: bool}` イベントで通知する
+  (イベント種別は末尾追記)。
+- **ウィンドウの外 (他のウィンドウ・デスクトップ) がリース中に色崩れするのは許容する**
+  (ユーザ決定 2026-09-04)。フォーカスを失ったリース元のウィンドウもシステム色で表示される。
+  気にするアプリは `Palette{active:false}` で代替色に描き直す。
+- コスト: 項目あたり OUT 4 本。16 色で最大 56 本、256 色で最大 960 本。フォーカス切替時
+  にしか起きない。
+- 全 16 色とラスタ効果 (走査線ごとのパレット切替) が要るゲームは**フルスクリーン占有**
+  (ROADMAP) を使う。WM はその前後でパレット全体を退避・復元する。
+
+---
+
+## T. 呼び出し経路 (アプリ ⇄ WM)
+
+### T1. KAPI 入口は 1 本
+
+```
+i32 gui_call(u32 op, u32 arg);       /* sdk/kapi.json 末尾に追加 (ABI2)、KAPI_VERSION 更新 */
+```
+
+- `op` は追記のみ (ABI2 と同じ)。`arg` は op ごとの小さな値 (ハンドルなど)。
+- 大きな引数と応答は SHM の固定ブロック (T2) 経由。**ポインタは渡さない**。
+- 同期呼び出しだが、**WM からアプリへのコールバックは無い** (再入の根絶)。
+  WM がアプリへ伝えたいことはすべてイベント (T3) になる。
+
+### T2. SHM レイアウト — 確定 2026-09-04
+
+SHM (`MEM_SHM_BASE`, 256KB = 16KB × 16 ブロック) のうち、DB 結果はブロック 0 を固定使用、
+`shm_alloc` の利用者はツリー内に無い。GUI は**末尾側のブロック 12〜15 (先頭 + 192KB から
+64KB) を `MEM_SHM_GUI_BASE` として予約**し、`shm_alloc` の管理表で使用済みに固定する。
+
+- 16KB = 1 スロット = アプリ 1 本。v1 はスロット 0 のみ。PD 切替で複数アプリになったら
+  スロット 1〜3 を割り当てる (最大 4 アプリ。足りなくなれば DB 領域との間の空きブロックを
+  追加スロットに回す)。
+
+| スロット内のブロック | 大きさ | 内容 |
+|---|---|---|
+| ヘッダ | 16B | `proto_version: u16`, `flags: u16`, `seq: u32`, `ring_head/tail: u16` |
+| 要求 | 512B | op ごとの構造体 (文字列は長さ前置、最大 256B) |
+| 応答 | 512B | 同上 |
+| イベントリング | 128 × 16B = 2KB | `Event` (T3)。WM が書き、アプリが読む |
+| 引数バッファ | 8KB | 一括登録 (リストボックス 128 項目 × 40B = 5KB が 1 回で収まる) |
+| 予備 | 約 5KB | 将来の追記用 |
+
+### T2a. 複数アプリ時のスロット割当と譲り合い — 確定 2026-09-04
+
+- **割当**: アプリは起動直後に `gui_call(OP_INIT)` を呼び、戻り値でスロット番号 (0〜3) を
+  受け取る。スロットの先頭 = `shm_base + 192KB + 番号 × 16KB`。WM はスロットをウィンドウの
+  所有者 (T4 の owner タグ) に紐づけ、アプリ終了・kill 時に回収する。空きが無ければ
+  `ERR_FULL` (5 本目は起動できない)。v1 は常に 0 が返る。
+- **配送**: イベントはウィンドウの所有者のスロットへ書く。`OP_POLL` は呼んだアプリの
+  スロットだけを読む。フォーカス切替で特別な処理は無い (リングはアプリごとに独立)。
+- **譲り合いの点は `OP_WAIT` だけ**: 協調型なので、カーネル / WM がほかのアプリへ PD を
+  切り替えてよいのは `OP_WAIT` の中に限る (v2 PLAN §6 の PD 切替との唯一の接点)。
+  `OP_POLL` や描画の途中で切り替わることは無い = アプリは自分のスロットの整合性を
+  ループ 1 周の間は前提にしてよい。
+- **可視性**: SHM は全 PD 共有 + USER なので、アプリは他アプリのスロットを読める。GUI の
+  要求・イベントに秘密は無く、v1 はこれを許容する。後で「同じ仮想アドレスにアプリごとの
+  物理ページ」(DESIGN §9.3 の共有ライブラリの data ページと同じ機構) に替えれば、番号 0 の
+  固定アドレスのまま完全に分離できる。API は変わらない。
+
+
+
+- WM はイベントをリングへ**追記するだけ**。アプリは `gui_call(OP_POLL)` 1 回で溜まった分を
+  全部受け取る (戻り値 = 件数)。**1 イベント 1 syscall にしない** (int 0x80 は 6µs 級)。
+- `gui_call(OP_WAIT, timeout_ticks)`: イベントもタイマも無ければカーネル内で `sys_halt` で
+  待つ (v2 M0 のアイドル作法)。GetMessage の代替。
+- 順序は FIFO。入力イベントには `serial: u16` が付く (Wayland の serial。押下と解放、
+  フォーカス変更の突き合わせに使う)。
+- **合成**: 連続する `Pointer` (移動) は最新 1 件に畳む。`Paint` は損傷を統合して 1 件。
+  リングが満杯なら古い `Pointer` を落とし、それ以外は落とさない (`OVERFLOW` フラグ)。
+
+### T4. ハンドルと所有者
+
+- すべての ID は `index:16 | generation:16`。破棄後の再利用で generation が進み、古い ID は
+  `ERR_STALE` で弾く。0 は無効。
+- 所有者 = exec のネスト段 (`res_owner_get()`、FD と同じ)。アプリ終了 / kill 時に WM が
+  そのアプリのウィンドウ・サーフェス・タイマを全部回収する。
+- クライアント側 (Rust) は所有型 (`Drop` で destroy)。
+
+### T5. バージョン
+
+- SHM ヘッダの `proto_version`。WM は自分の版より新しい要求を `ERR_VERSION` で返す。
+- op 番号・イベント種別・構造体は**末尾追記のみ**。
+
+### T6. syscall 境界ポンプ (「1 アプリが戻らないと止まる」対策)
+
+- カーネルは int 0x80 の入口で gshell が登録したフック `gui_pump()` を**上限付きで**呼ぶ
+  (入力の取り込みとリングへの追記だけ。描画はしない)。アプリが KAPI を呼ぶ限り WM は
+  入力を失わない。
+- 純粋な計算ループの間は効かない。ISR 側の強制脱出キー (現行の CTRL+STOP 系) で
+  `fault_kill` 経路へ落とし、シェルへ復帰する。
+- 長い処理をするアプリは `OP_POLL` を定期的に呼ぶか、仕事をタイマで分割する (U5)。
+
+### T7. エラー
+
+戻り値は `i32`: `>= 0` 成功 (件数やハンドル)、`< 0` は `OS32_ERR_*` の流儀で
+`ERR_STALE` / `ERR_VERSION` / `ERR_FULL` / `ERR_ARG` を追加。GetLastError は作らない。
+
+---
+
+## U. ウィンドウとイベント (USER 相当)
+
+### U1. ウィンドウ
+
+```
+create_window(spec) -> WindowId      spec = {title: [u8; 40], rect, flags, min_size}
+destroy_window(id)                   move_window(id, xy)     resize_window(id, wh)
+show_window(id, bool)                set_title(id, utf8)     client_rect(id) -> Rect
+raise(id)                            set_focus(id)
+```
+
+- 上限 16 (既存 `MAX_WINDOWS`)。flags は既存 `GUI_WF_*` を継承。
+- 移動・リサイズは WM が決め、結果は `Configure` イベントで返る (アプリ側で座標を持たない)。
+- 枠・タイトルバー・閉じるボタンは WM が描く。アプリが触れるのはクライアント面だけ。
+- ドラッグ中は WM が XOR 枠だけを描き、ドロップ時に 1 回 `Configure` + `Paint` (DESIGN R2)。
+
+### U2. イベント (型付き、16B 固定)
+
+| 種別 | ペイロード | 備考 |
+|---|---|---|
+| `Paint` | window, rect | G4 |
+| `Configure` | window, rect | 位置・大きさが確定した |
+| `Close` | window | 閉じるボタン。破棄はアプリが決める |
+| `Focus` | window, in: bool, serial | |
+| `Key` | window, scan: u8, ch: u8, mods: u8, down: bool, serial | U2a |
+| `Text` | window, utf8: [u8; 12], len: u8, more: bool | U2a。FEP 確定文字列 / 印字可能文字 |
+| `Pointer` | window, x, y, buttons, serial | 移動。合成される (T3) |
+| `Button` | window, x, y, button, down, serial | |
+| `Timer` | id | U5 |
+| `Widget` | window, widget, kind, value | クライアント側で合成 (U6) |
+| `Modal` | dialog, result | U4 |
+| `Quit` | 理由 | WM からの終了要求 (シャットダウン等)。受けたら速やかに戻る |
+
+### U2a. キー入力と文字入力の分離 — 確定 2026-09-04 (Key.code の体系)
+
+事実: カーネルのキー待ち行列は `(scancode << 8) | ascii` の 16bit (drivers/kbd.c)。scancode は
+PC-98 の 7bit コード (`drivers/kbd.h` の `KEY_*`: F1〜F10 = 62h〜6Bh、VF1〜5、ROLL UP/DOWN、
+INS/DEL、HELP、XFER/NFER、COPY、STOP、テンキー) で、ascii は変換後の文字 (無ければ 0)。
+修飾は `kbd_get_modifiers` の 5bit (SHIFT 01h / CAPS 02h / KANA 04h / GRPH 08h / CTRL 10h)。
+FEP は `ime_trygetkey` が確定済み UTF-8 を 1 バイトずつ (scancode=0) 返す。既存 libos32gui の
+`KEY_*` は ascii 側だけを見た 1 バイト体系で、矢印を 1Ch〜1Fh に押し込んでいる (制御文字と
+衝突、F キーや ROLL UP を表せない)。
+
+決め:
+
+- **`Key` は PC-98 スキャンコードをそのまま運ぶ**: `scan: u8` (= `KEY_*`)、`ch: u8`
+  (変換後の ASCII、無ければ 0)、`mods: u8` (= `kbd_get_modifiers` のビットそのまま)、
+  `down: bool`。スキャンコードは実機の定義なので将来も変わらず、ASCII の無いキーも表せる。
+- **文字入力は `Text` として別に届ける** (Wayland の wl_keyboard と text-input の分離):
+  FEP オフなら印字可能文字 1 つ、FEP オンなら確定文字列。16B のリング項目に収めるため
+  12B ずつ UTF-8 境界で区切り、続きがあれば `more=1`。
+- 規則: **`Key` は常に届く。印字可能な入力には加えて `Text` が届く。** テキストボックスは
+  `Text` で挿入し、`Key` で編集キー (BS / DEL / 矢印 / HOME) とショートカットを見る。
+  ゲームは `Key` だけを見る。二重処理は起きない。
+- **FEP は WM が持つ**: オン/オフ (SHIFT+SPACE) は WM が処理し、未確定文字列と候補窓は
+  WM が既存 `ime_render` の関数表に GFX バックエンドを足して描く。描く位置はウィジェットが
+  `set_text_cursor(window, x, y)` で知らせる (text-input の cursor rectangle 相当)。辞書は
+  カーネル常駐 (SQLite) のまま。
+- 押し上げ (`down=false`) は v1 の待ち行列にブレイクが入っていないため**当面は届かない**。
+  必要なアプリ (ゲーム) は `kbd_is_pressed(scan)` のポーリング KAPI を使う。ブレイクの
+  待ち行列化はドライバ側の追記課題。
+
+ (GetMessage の代替、入れ子なし)
+
+```
+loop {
+    n = gui_call(OP_POLL)            // リングから一括で取り出す
+    for ev in events[..n] { handle(ev) }   // 状態更新 + invalidate だけ。ここで描かない
+    paint_damaged()                  // Paint を受けたウィンドウを描く
+    commit_all()                     // 1 周 1 回
+    gui_call(OP_WAIT, next_timer)    // 何も無ければ sys_halt で待つ
+}
+```
+
+- ハンドラの中から `OP_WAIT` を呼ばない (再入禁止はライブラリが `debug_assert`)。
+- 長い処理は「タイマで分割」か「途中で `OP_POLL` を呼んで `Quit`/`Close` に応じる」。
+
+### U4. モーダル (状態機械)
+
+- `open_modal(spec) -> DialogId`: WM が入力の宛先をそのダイアログに限定する。親は `Paint` を
+  受け続ける (再描画は止まらない)。
+- 完了は `Modal{dialog, result}` イベント。**入れ子ループは存在しない**。
+- 標準ダイアログ (メッセージ / ファイル選択 = 既存 libos32filer 相当) は WM 側に置く。
+
+### U5. タイマ
+
+`set_timer(id: u8, interval_ticks: u16, repeat: bool)` / `kill_timer(id)`。PIT 10ms 粒度。
+上限 8 / アプリ。`Timer` イベントで届く。`OP_WAIT` は次のタイマまでで起きる。
+
+### U6. ウィジェット木 (クライアント側、保持型)
+
+- ウィジェットは**共有ライブラリ内 (アプリの空間)** に置き、WM はウィンドウしか知らない。
+  描画は in-process、syscall はゼロ。
+- `WidgetId` (generation 付き)。種別: v1 は既存の button / label / checkbox / textbox /
+  listbox + コンテナ `row` / `column` (U7)。
+- **プロパティ変更 → 自分の矩形を invalidate**。全面再描画はしない。
+- ウィジェットのイベント (`Widget{kind: CLICK / TEXT_CHANGED / TOGGLED / SELECT / FOCUS}`) は
+  `Pointer` / `Button` / `Key` からライブラリが合成し、同じリングの流儀でアプリに渡す
+  (アプリから見て WM 由来か合成かは区別しない)。
+- ハンドラは種別ごと (`on_click(widget, fn)`)。巨大 switch は書かせない。
+- 固定配列: ウィジェット 64 / ウィンドウ合計、リスト項目プール 128 (既存値)。
+
+### U7. レイアウト (箱 1 種類)
+
+- `row` / `column` コンテナ。子は `Fixed(px)` か `Flex(weight)`、`min` と `padding` を持つ。
+- `Configure` を受けたときに再計算 (整数のみ)。400 / 480 / それ以上で同じアプリが崩れない。
+- 絶対座標配置も残す (`Absolute(rect)`)。
+
+### U8. 所有者と後始末
+
+- ウィンドウ / サーフェス / タイマ / ダイアログはアプリの所有。終了・kill で WM が回収 (T4)。
+- WM 自身のウィンドウ (デスクトップ・フォルダ・ターミナル) は gshell 内で同じ API を使う
+  (経路が直接呼び出しになるだけ)。
+
+### U9. テキスト
+
+UTF-8 入力、KCG の 8x16 / 16x16 セル、幅は半角セル数 × 8。プロポーショナルは v1 に無い。
+切り詰めは UTF-8 の境界で行う (CLAUDE.md の注意事項)。
+
+---
+
+## P. 性能規約 (386 で守る数値。DESIGN §8 の根拠)
+
+| 項目 | 値 |
+|---|---|
+| イベントリング | 128 件。`Pointer` は最新 1 件に合成 |
+| 損傷矩形 | 最大 8 件 / ウィンドウ (32px 境界、隣接は結合) |
+| commit | ループ 1 周 1 回。全画面 present は WM のみ |
+| syscall | プリミティブごとには呼ばない。1 周あたり `OP_POLL` + `commit` + `OP_WAIT` の 3 回が基本 |
+| タイマ | 10ms 粒度、8 本 / アプリ |
+| 文字列 | 256B / 要求 |
+
+---
+
+## 実装順 (提案)
+
+1. G (描画) をクライアントライブラリとして起こし、既存 libos32gfx の上に載せる。
+   既存 libos32gui のウィジェット部を G2 のステートレス描画へ寄せる。
+2. T (経路): `gui_call` を kapi.json に追加、SHM ブロック、イベントリング、`OP_POLL/OP_WAIT`。
+   既存 libos32gui のウィンドウ管理部を gshell 側 WM に移す。
+3. U (窓とイベント): 既存デモ (`gui_demo`) を U3 のループに書き換えて動作確認。
+4. T6 (syscall 境界ポンプ) と U4 (モーダル) は 3 の後。
+5. 共有ライブラリ帯域 (DESIGN §9.3) への移動はロードアドレス変更と一緒に最後。
+
+## 凍結の記録
+
+2026-09-04: G6 (色表 + Style.flags)、G8 (パレットのリース 14 色)、T2 (SHM ブロック 12〜15 の
+4 スロット)、T2a (スロット割当と OP_WAIT の譲り場所)、U2a (Key はスキャンコード、Text を
+別配送、FEP は WM 持ち) をユーザ承認で確定。数値 (P 性能規約) も凍結。
