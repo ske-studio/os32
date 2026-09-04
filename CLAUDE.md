@@ -258,12 +258,19 @@ Programs are OS32X flat ELF binaries linked with `sdk/link/app.ld`, starting wit
   vdpview / ekakiuta / raster / gfx_demo / demo1 / spr_test / hello32
 - **`ske-studio/os32-game`** — 対戦スゴロク RPG (`app/`, `lib/`, `assets/`, `data/`)
 
-どちらも `make sdk` で生成した `build/sdk/` を指してビルドする:
+どちらも **git submodule** として `apps/` と `game/` に置き (2026-09-04)、`make sdk` で
+生成した `build/sdk/` を指してビルドする:
 
 ```bash
-git clone https://github.com/ske-studio/os32-apps
-cd os32-apps && make OS32_SDK=/path/to/os32/build/sdk
+git submodule update --init          # 初回 / clone 直後
+make external                        # apps + game (make apps / make game で個別)
 ```
+
+検証した組み合わせは submodule のポインタとして os32 のコミットに残る。KAPI を
+動かしたら `make external` で両方を再ビルドし、ポインタを更新してコミットする。
+`apps/deploy.yaml` と `game/deploy.yaml` は配備マニフェストに統合される
+(`tools/deploy_manifests.py`)。emu_agent の `make` は `apps` / `game` / `external` を
+許可リストに含む。
 
 ゲームエンジンのライブラリ (chem / board / ai / battle / econ / event / inv /
 map / rpg / text / turn) は os32-game リポジトリが自前のソースからビルドする。

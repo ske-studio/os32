@@ -55,6 +55,27 @@ DEPFILES := $(shell find boot kernel drivers gfx fs exec kapi lib programs sdk \
 all: boot $(BUILD_OUT)/kernel.bin $(BUILD_OUT)/sqlite.bin $(BUILD_OUT)/vmkernel.lz4 \
      images/os32_boot.d88 programs sdk assets-deployed iso
 
+# === 外部リポジトリ (git submodule) ===
+# apps/ = ske-studio/os32-apps、game/ = ske-studio/os32-game。どちらも SDK だけで
+# ビルドする独立リポジトリで、この Makefile は SDK と CROSS_DIR を渡して呼ぶだけ。
+# 検証した組み合わせは submodule のポインタとして os32 のコミットに残る。
+# 空なら `git submodule update --init` を促す。
+EXT_MAKEFLAGS = OS32_SDK=$(abspath build/sdk) CROSS_DIR=$(CROSS_DIR)
+define ext_check
+	@[ -f $(1)/Makefile ] || { echo "ERROR: $(1)/ is empty — run: git submodule update --init $(1)"; exit 1; }
+endef
+apps: sdk
+	$(call ext_check,apps)
+	$(MAKE) -C apps $(EXT_MAKEFLAGS) all
+game: sdk
+	$(call ext_check,game)
+	$(MAKE) -C game $(EXT_MAKEFLAGS) all
+external: apps game
+clean-external:
+	-[ -f apps/Makefile ] && $(MAKE) -C apps $(EXT_MAKEFLAGS) clean
+	-[ -f game/Makefile ] && $(MAKE) -C game $(EXT_MAKEFLAGS) clean
+.PHONY: apps game external clean-external
+
 # === クリーン (全サブモジュール) ===
 clean: clean-kernel clean-programs clean-libs clean-images clean-sdk clean-assets clean-deps
 	rm -f os.img os.d88 os_install.img os_install.d88 os_raw.img

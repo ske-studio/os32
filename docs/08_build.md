@@ -123,6 +123,9 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 | `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
+| `make apps` / `make game` | 外部リポジトリ (git submodule `apps/` = os32-apps、`game/` = os32-game) を SDK 経由でビルド。空なら `git submodule update --init` を促す |
+| `make external` | 上記 2 つをまとめて。KAPI を動かしたあとは必ずこれで再ビルドし、submodule のポインタを更新してコミットする |
+| `make clean-external` | 外部リポジトリの生成物を削除 |
 | `make hotdeploy FILE=<path>` | 個別バイナリのホットデプロイ — 再起動不要。ユーザーランドのみ |
 | `make nhd-pull` | Windows 側 NHD を /tmp に取り込む (フォーマットしない) |
 | `make nhd-init` | 初回セットアップ — **フォーマットするのでゲスト側データが消える** |

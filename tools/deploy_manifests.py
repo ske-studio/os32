@@ -21,6 +21,9 @@ PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MANIFEST_RELPATHS = [
     os.path.join('build', 'core.yaml'),
     os.path.join('userland', 'deploy.yaml'),
+    # 外部リポジトリ (git submodule)。未取得なら無いので load_merged が読み飛ばす。
+    os.path.join('apps', 'deploy.yaml'),
+    os.path.join('game', 'deploy.yaml'),
 ]
 
 DEPLOY_MANIFESTS = [os.path.join(PROJ_DIR, p) for p in MANIFEST_RELPATHS]
