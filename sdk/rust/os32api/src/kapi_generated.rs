@@ -177,13 +177,16 @@ pub struct KernelAPI {
     /* idx 167 */ pub v86_disktest: unsafe extern "C" fn(path: *const u8) -> i32,
     /* idx 168 */ pub v86_boot: unsafe extern "C" fn(path: *const u8) -> i32,
     /* idx 169 */ pub v86_boot2: unsafe extern "C" fn(path: *const u8, second: *const u8) -> i32,
+    /* idx 170 */ pub gfx_screen_info: unsafe extern "C" fn(out: *mut u8),
+    /* idx 171 */ pub gfx_hw_fill_rect: unsafe extern "C" fn(x: i32, y: i32, w: i32, h: i32, color: u8) -> i32,
+    /* idx 172 */ pub gfx_hw_blit: unsafe extern "C" fn(dx: i32, dy: i32, sx: i32, sy: i32, w: i32, h: i32) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 39;
+pub const KAPI_VERSION: u32 = 40;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

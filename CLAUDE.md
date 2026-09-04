@@ -527,7 +527,7 @@ os32/
 |----------|---------|
 | `docs/INDEX.md` | Document index (master reference) |
 | `docs/01_system.md` ~ `docs/10_notes.md` | Kernel technical spec (10 parts) |
-| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v35**, 164 functions + 2 data fields) |
+| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v40**, 171 functions + 2 data fields) |
 | `docs/DEVELOPMENT.md` | Architecture, subsystem details |
 | `docs/POLICY_DEV.md` | Coding policy, build rules |
 | `docs/POLICY_DEBUG.md` | Debug procedures, binary deployment checklist |

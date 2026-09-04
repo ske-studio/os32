@@ -1,5 +1,5 @@
 {
-  "version": 39,
+  "version": 40,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1222,6 +1222,21 @@
         "const char *path",
         "const char *second"
       ]
+    },
+    {
+      "name": "gfx_screen_info",
+      "ret": "void",
+      "args": ["void *out"]
+    },
+    {
+      "name": "gfx_hw_fill_rect",
+      "ret": "int",
+      "args": ["int x", "int y", "int w", "int h", "u8 color"]
+    },
+    {
+      "name": "gfx_hw_blit",
+      "ret": "int",
+      "args": ["int dx", "int dy", "int sx", "int sy", "int w", "int h"]
     }
   ]
 }

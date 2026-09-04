@@ -89,6 +89,10 @@ filesystem:
     - host: userland/tests/heap_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- hal_test (KAPI v40 GUI HAL 枠: screen_info / hw_* の NOSYS 確認) ---
+    - host: userland/tests/hal_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     # --- hello_r3 (M2 KAPI トランポリン検証, ソース無変更 hello の CPL=3 版) ---
     - host: userland/tests/hello_r3.bin
       guest: /usr/bin/

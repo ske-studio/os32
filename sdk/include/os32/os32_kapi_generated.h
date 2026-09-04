@@ -173,11 +173,14 @@ typedef struct {
     int (__cdecl *v86_disktest)(const char *path);
     int (__cdecl *v86_boot)(const char *path);
     int (__cdecl *v86_boot2)(const char *path, const char *second);
+    void (__cdecl *gfx_screen_info)(void *out);
+    int (__cdecl *gfx_hw_fill_rect)(int x, int y, int w, int h, u8 color);
+    int (__cdecl *gfx_hw_blit)(int dx, int dy, int sx, int sy, int w, int h);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
-#define KAPI_FUNC_COUNT 168
+#define KAPI_FUNC_COUNT 171
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

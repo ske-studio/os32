@@ -39,7 +39,7 @@ extern void kapi_sys_get_build_info(char *buf, int size);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[168];
+volatile u32 kapi_hits[171];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -213,6 +213,9 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* v86_disktest */
     4,  /* v86_boot */
     8,  /* v86_boot2 */
+    4,  /* gfx_screen_info */
+    20,  /* gfx_hw_fill_rect */
+    24,  /* gfx_hw_blit */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -386,6 +389,9 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0001,  /* v86_disktest: path */
     0x0001,  /* v86_boot: path */
     0x0003,  /* v86_boot2: path,second */
+    0x0001,  /* gfx_screen_info: out */
+    0x0000,  /* gfx_hw_fill_rect */
+    0x0000,  /* gfx_hw_blit */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1388,5 +1394,23 @@ int __cdecl wrap_v86_boot2(const char *path, const char *second)
 {
     KAPI_HIT(167);
     return v86_boot2(path, second);
+}
+
+void __cdecl wrap_gfx_screen_info(void *out)
+{
+    KAPI_HIT(168);
+    gfx_screen_info(out);
+}
+
+int __cdecl wrap_gfx_hw_fill_rect(int x, int y, int w, int h, u8 color)
+{
+    KAPI_HIT(169);
+    return gfx_hw_fill_rect(x, y, w, h, color);
+}
+
+int __cdecl wrap_gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h)
+{
+    KAPI_HIT(170);
+    return gfx_hw_blit(dx, dy, sx, sy, w, h);
 }
 

@@ -61,6 +61,12 @@ void gfx_present_rect(int rx, int ry, int rw, int rh);
 void gfx_present_raster(GFX_RasterPalTable *table);
 /* VSYNC待ちなしVRAM転送 (自前フレームレート制御用) */
 void gfx_present_nosync(void);
+/* GUI HAL 枠 (KAPI v40): 能力の問い合わせと、アクセラレータ向けのハードウェア塗り/転送。
+ * CPU バックエンド (9801 プレーン / PEGC) では hw_* は OS32_ERR_NOSYS を返し、
+ * 共有ライブラリが CPU 実装へフォールバックする。 */
+void __cdecl gfx_screen_info(void *out);
+int  __cdecl gfx_hw_fill_rect(int x, int y, int w, int h, u8 color);
+int  __cdecl gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h);
 
 /* ======== 描画プリミティブ (バックバッファ対象) ======== */
 void gfx_clear(u8 color);

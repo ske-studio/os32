@@ -1,4 +1,4 @@
-# KernelAPI v39 仕様書
+# KernelAPI v40 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **35** |
-| 合計エントリ数 | **168** (ヘッダ2 + 関数ポインタ164 + データフィールド2) |
+| 現在のバージョン | **40** |
+| 合計エントリ数 | **175** (ヘッダ2 + 関数ポインタ171 + データフィールド2) |
 
 ---
 
@@ -77,7 +77,7 @@ make programs
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 35) |
+| 0x04 | version | APIバージョン (現在: 40) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -280,6 +280,21 @@ make programs
 `v86_boot` は HDD イメージ (NHD/HDI) から、`v86_boot2` は 2 イメージ構成で
 V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 
+### GUI HAL 枠 (v40)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x2A8 | gfx_screen_info | `void(void *out)` |
+| 0x2AC | gfx_hw_fill_rect | `int(int x, int y, int w, int h, u8 color)` |
+| 0x2B0 | gfx_hw_blit | `int(int dx, int dy, int sx, int sy, int w, int h)` |
+
+`gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
+画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは
+これを信じて 400 ライン・16 色を決め打ちしない。`gfx_hw_fill_rect` / `gfx_hw_blit` は
+アクセラレータ系バックエンド用の枠で、CPU バックエンド (9801 プレーン / PEGC) では
+`OS32_ERR_NOSYS` (-10) を返す。呼ぶ側は `GFX_CAP_HW_FILL` / `GFX_CAP_HW_BLT` を見て
+CPU 実装へフォールバックする。設計: `docs/tasks/gui/API_CONTRACTS.md` G5 / DESIGN.md §7。
+
 `ime_user_list` の `out` は `IME_UserEntry`(`sdk/include/os32/os32_kapi_shared.h`) の配列。
 `ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
 FEP 対応版にあたる (エディタ等のメインループから使う)。
@@ -291,8 +306,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2A8 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2AC | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2B4 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2B8 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

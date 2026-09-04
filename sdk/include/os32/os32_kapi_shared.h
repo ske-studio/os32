@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      39   /* v86_boot2 (HDD ブート + 2 ドライブ) 追加 */
+#define KAPI_VERSION      40   /* gfx_screen_info / gfx_hw_fill_rect / gfx_hw_blit (GUI HAL 枠) 追加 */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -159,6 +159,26 @@ typedef struct {
     u8 *planes[4];  /* 0:B, 1:R, 2:G, 3:I */
 } GFX_Framebuffer;
 
+/* 画面能力 (GUI HAL 用、docs/tasks/gui/API_CONTRACTS.md G5)。gfx_screen_info() が埋める。
+ * バックエンド (9801 プレーン / PEGC 8bpp / アクセラレータ) の違いはここで問い合わせ、
+ * GUI とアプリは 400 ライン・16 色を決め打ちしない。末尾追記のみ。 */
+#define GFX_FMT_PLANAR4   0   /* 4 プレーン 16 色 (PC-9801 標準) */
+#define GFX_FMT_PACKED8   1   /* 1 バイト 1 ピクセル 256 色 (PEGC / アクセラレータ) */
+#define GFX_CAP_TEXT_OVERLAY  0x0001  /* テキスト VRAM がグラフィック上に合成される */
+#define GFX_CAP_HW_FILL       0x0002  /* gfx_hw_fill_rect が使える */
+#define GFX_CAP_HW_BLT        0x0004  /* gfx_hw_blit が使える */
+#define GFX_CAP_PAGE_FLIP     0x0008  /* 表裏ページ切替あり */
+typedef struct {
+    u16 width, height;   /* 640 x 400/480 ... */
+    u8  bpp;             /* 4 or 8 */
+    u8  format;          /* GFX_FMT_* */
+    u32 flags;           /* GFX_CAP_* */
+    u16 lease_mask;      /* 16 色: フォーカスアプリに貸せるパレット index のビット集合 (G8) */
+    u16 lease_first;     /* 256 色: 貸せる先頭 index */
+    u16 lease_count;     /* 256 色: 貸せる項目数 */
+    u16 reserved[5];
+} GFX_ScreenInfo;
+
 /* パレットエントリ (各0-15) */
 typedef struct {
     u8 r, g, b;
@@ -236,6 +256,7 @@ typedef struct {
 #define OS32_ERR_NOTEMPTY  -7   /* ディレクトリが空でない */
 #define OS32_ERR_ISDIR     -8   /* ディレクトリである (open/unlink 不可) */
 #define OS32_ERR_INVAL     -9   /* 引数不正 / FS をまたぐ rename 等 */
+#define OS32_ERR_NOSYS     -10  /* このバックエンド / 機種では未対応 */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

@@ -64,8 +64,15 @@
 
 ### G5. 能力の問い合わせ
 
-`screen_info() -> {w, h, colors, format, flags}`。flags: `TEXT_OVERLAY`, `HW_FILL`,
-`HW_BLT`, `PAGE_FLIP`。GUI とアプリはこれを信じ、400 ライン・16 色を決め打ちしない。
+`screen_info() -> GFX_ScreenInfo` (KAPI v40 `gfx_screen_info`、`os32_kapi_shared.h`):
+`{width, height, bpp, format: GFX_FMT_PLANAR4 / PACKED8, flags: GFX_CAP_TEXT_OVERLAY /
+HW_FILL / HW_BLT / PAGE_FLIP, lease_mask, lease_first, lease_count}`。GUI とアプリはこれを
+信じ、400 ライン・16 色を決め打ちしない。
+
+アクセラレータ用の枠も KAPI v40 で先に切ってある (2026-09-04): `gfx_hw_fill_rect` /
+`gfx_hw_blit`。CPU バックエンドでは `OS32_ERR_NOSYS` (-10) を返し、共有ライブラリは
+`GFX_CAP_HW_*` を見て CPU 実装へフォールバックする。KAPI は末尾追記のみなので、
+共有ライブラリは最初からこの最終形に対して書く。
 
 ### G6. システム色 (16 色固定、役割名で参照) — 確定 2026-09-04
 

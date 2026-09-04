@@ -35,6 +35,43 @@ void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
     fb->planes[3] = bb[3];
 }
 
+/* ======================================================================== */
+/*  KAPI: 画面能力の問い合わせ (GUI HAL, docs/tasks/gui/API_CONTRACTS.md G5)  */
+/*  現在の唯一のバックエンドは 9801 プレーン: CPU 直書き、HW 塗り/転送なし。   */
+/* ======================================================================== */
+void __cdecl gfx_screen_info(void *out)
+{
+    GFX_ScreenInfo *si = (GFX_ScreenInfo *)out;
+    int i;
+    if (!si) return;
+    si->width  = (u16)GFX_WIDTH;
+    si->height = (u16)gfx_current_height;
+    si->bpp    = 4;
+    si->format = GFX_FMT_PLANAR4;
+    si->flags  = GFX_CAP_TEXT_OVERLAY | (gfx_flip_enabled ? GFX_CAP_PAGE_FLIP : 0);
+    si->lease_mask  = 0x7F7E;   /* index 1-6, 8-15 (0=TEXT, 7=WINDOW は不可侵) */
+    si->lease_first = 0;
+    si->lease_count = 0;
+    for (i = 0; i < 5; i++) si->reserved[i] = 0;
+}
+
+/* ======================================================================== */
+/*  KAPI: ハードウェア塗り / 転送 (アクセラレータ系バックエンド用の枠)        */
+/*  CPU バックエンドでは未対応 (OS32_ERR_NOSYS)。呼ぶ側は GFX_CAP_HW_* を    */
+/*  見て CPU 実装へフォールバックする。                                       */
+/* ======================================================================== */
+int __cdecl gfx_hw_fill_rect(int x, int y, int w, int h, u8 color)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)color;
+    return OS32_ERR_NOSYS;
+}
+
+int __cdecl gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h)
+{
+    (void)dx; (void)dy; (void)sx; (void)sy; (void)w; (void)h;
+    return OS32_ERR_NOSYS;
+}
+
 int gfx_get_height(void)
 {
     return gfx_current_height;

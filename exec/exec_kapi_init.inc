@@ -166,9 +166,12 @@ extern int __cdecl wrap_v86_selftest(void);
 extern int __cdecl wrap_v86_disktest(const char *path);
 extern int __cdecl wrap_v86_boot(const char *path);
 extern int __cdecl wrap_v86_boot2(const char *path, const char *second);
+extern void __cdecl wrap_gfx_screen_info(void *out);
+extern int __cdecl wrap_gfx_hw_fill_rect(int x, int y, int w, int h, u8 color);
+extern int __cdecl wrap_gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 39;
+kapi->version = 40;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -338,5 +341,8 @@ kapi->version = 39;
     kapi->v86_disktest = wrap_v86_disktest;
     kapi->v86_boot = wrap_v86_boot;
     kapi->v86_boot2 = wrap_v86_boot2;
+    kapi->gfx_screen_info = wrap_gfx_screen_info;
+    kapi->gfx_hw_fill_rect = wrap_gfx_hw_fill_rect;
+    kapi->gfx_hw_blit = wrap_gfx_hw_blit;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;
