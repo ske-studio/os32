@@ -187,6 +187,8 @@ pub struct KernelAPI {
     /* idx 177 */ pub sys_switch_shell: unsafe extern "C" fn(path: *const u8) -> i32,
     /* idx 178 */ pub kbd_dropped_count: unsafe extern "C" fn() -> u32,
     /* idx 179 */ pub kbd_trygetrawkey: unsafe extern "C" fn() -> i32,
+    /* idx 180 */ pub ime_feed_key: unsafe extern "C" fn(keydata: i32) -> i32,
+    /* idx 181 */ pub ime_set_render: unsafe extern "C" fn(table: *mut u8),
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }

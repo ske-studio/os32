@@ -42,7 +42,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[178];
+volatile u32 kapi_hits[180];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -226,6 +226,8 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* sys_switch_shell */
     0,  /* kbd_dropped_count */
     0,  /* kbd_trygetrawkey */
+    4,  /* ime_feed_key */
+    4,  /* ime_set_render */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -409,6 +411,8 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0001,  /* sys_switch_shell: path */
     0x0000,  /* kbd_dropped_count */
     0x0000,  /* kbd_trygetrawkey */
+    0x0000,  /* ime_feed_key */
+    0x0001,  /* ime_set_render: table */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1471,5 +1475,17 @@ int __cdecl wrap_kbd_trygetrawkey(void)
 {
     KAPI_HIT(177);
     return kbd_trygetrawkey();
+}
+
+int __cdecl wrap_ime_feed_key(int keydata)
+{
+    KAPI_HIT(178);
+    return ime_feed_key(keydata);
+}
+
+void __cdecl wrap_ime_set_render(void *table)
+{
+    KAPI_HIT(179);
+    ime_set_render(table);
 }
 

@@ -305,6 +305,8 @@ fn grid_clear_all(f: &mut Fep) {
 pub fn install() {
     let f = state();
     f.render_table = &GSHELL_IME_RENDER_GFX as *const ImeRender as u32;
+    /* カーネル FEP の描画先を GFX 版の関数表へ (K 依頼 2 = ime_set_render)。 */
+    unsafe { (os32api::api().ime_set_render)(f.render_table as *mut u8) };
     grid_clear_all(f);
     f.on = unsafe { (os32api::api().ime_is_active)() } != 0;
     refresh_indicator(f);
@@ -323,13 +325,10 @@ pub enum Fed {
     Consumed,
 }
 
-/// カーネル FEP へ打鍵を 1 件渡す。
-///
-/// **まだ KAPI が無い** (モジュール冒頭の申し送り 1)。`ime_feed_key` が生えたら
-/// この 1 行を `Some(unsafe { (os32api::api().ime_feed_key)(keydata) })` にする。
+/// カーネル FEP へ打鍵を 1 件渡す (KAPI `ime_feed_key`、2026-09-06 に K が追加)。
 #[inline]
-fn feed_kernel(_keydata: i32) -> Option<i32> {
-    None
+fn feed_kernel(keydata: i32) -> Option<i32> {
+    Some(unsafe { (os32api::api().ime_feed_key)(keydata) })
 }
 
 /// SHIFT+SPACE。FEP を on/off して表示を更新する (常に WM が消費する)。

@@ -742,6 +742,59 @@ int ime_trygetchar(void)
     return -1;
 }
 
+/* ======================================================================== */
+/*  ime_feed_key — WM (gshell) が打鍵を 1 件 FEP に通す (GUI v1.1 W2、K 依頼 1)  */
+/*                                                                          */
+/*  GUI 中はカーネルが cooked キューに積まない (K2) ので、ime_trygetkey 系は  */
+/*  キーを引けない。WM が raw から作った keydata = (scancode << 8) | ascii を  */
+/*  ここへ渡す。keydata < 0 は「新しいキーは無い、確定文字列の続きだけ」。      */
+/*  戻り値:                                                                 */
+/*    < 0            FEP が消費した (WM はアプリへ Key を配送しない)          */
+/*    >= 0x100       素通り (keydata そのもの)                               */
+/*    == 0x1B        素通りの ESC (scancode 0 は ESC だけで ascii は 0x1B)     */
+/*    1..0xFF        確定文字列の 1 バイト (UTF-8)。続きは keydata < 0 で引く  */
+/*  分類が一意なのは、確定文字列 (UTF-8) に 0x1B が現れないため。            */
+/*  SHIFT+SPACE の on/off は WM が ime_toggle で行うので、ここでは見ない。      */
+/* ======================================================================== */
+int ime_feed_key(int keydata)
+{
+    int result;
+
+    /* 確定済みの続きがあれば先にそれを返す */
+    if (g_ime.commit_pos < g_ime.commit_len) {
+        return (int)(u8)g_ime.commit_buf[g_ime.commit_pos++];
+    }
+    if (keydata < 0) {
+        return -1;
+    }
+
+    /* FEP OFF: 素通り */
+    if (g_ime.mode == IME_MODE_OFF) {
+        return keydata;
+    }
+
+    result = ime_process_key(keydata);
+    if (result == 1 && g_ime.commit_pos < g_ime.commit_len) {
+        return (int)(u8)g_ime.commit_buf[g_ime.commit_pos++];
+    }
+    if (result == -1) {
+        return keydata;      /* FEP が関与しないキー: 素通り */
+    }
+    return -1;               /* 消費 (未確定の更新など) */
+}
+
+/* ======================================================================== */
+/*  ime_set_render — 描画バックエンドの差し替え (GUI v1.1 W2、K 依頼 2)       */
+/*                                                                          */
+/*  WM (gshell、CPL=0) が GFX 版の IME_Render 関数表を渡す。NULL で TVRAM 版  */
+/*  に戻す。表の実体は呼び手が常駐している間だけ有効なので、gshell は終了時    */
+/*  (CUI へ戻る前) に NULL を渡すこと。                                      */
+/* ======================================================================== */
+void ime_set_render(void *table)
+{
+    g_ime.render = table ? (const IME_Render *)table : &g_ime_render_tvram;
+}
+
 int ime_getkey(void)
 {
     int keydata;

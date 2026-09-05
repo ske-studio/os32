@@ -176,6 +176,8 @@ extern int __cdecl wrap_gfx_lease_palette(int first, int count, const u8 *rgb);
 extern int __cdecl wrap_sys_switch_shell(const char *path);
 extern u32 __cdecl wrap_kbd_dropped_count(void);
 extern int __cdecl wrap_kbd_trygetrawkey(void);
+extern int __cdecl wrap_ime_feed_key(int keydata);
+extern void __cdecl wrap_ime_set_render(void *table);
 
 kapi->magic = 0x4B415049UL;
 kapi->version = 41;
@@ -358,5 +360,7 @@ kapi->version = 41;
     kapi->sys_switch_shell = wrap_sys_switch_shell;
     kapi->kbd_dropped_count = wrap_kbd_dropped_count;
     kapi->kbd_trygetrawkey = wrap_kbd_trygetrawkey;
+    kapi->ime_feed_key = wrap_ime_feed_key;
+    kapi->ime_set_render = wrap_ime_set_render;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

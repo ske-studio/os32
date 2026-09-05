@@ -17,7 +17,7 @@
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
 | 現在のバージョン | **41** |
-| 合計エントリ数 | **182** (ヘッダ2 + 関数ポインタ178 + データフィールド2) |
+| 合計エントリ数 | **184** (ヘッダ2 + 関数ポインタ180 + データフィールド2) |
 
 ---
 
@@ -80,7 +80,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | 版 | 状態 | 追加内容 | 出典 |
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
-| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
+| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2 の申し送り。v41 は main 未リリースなので同じ版に末尾追記、v42 のネットワーク予約は変えない) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
 | v42 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 
 調停 (2026-09-06): GUI (K1) を先に実装するので **v41 = GUI、v42 = ネットワーク Host Services**
@@ -318,6 +318,8 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2C4 | sys_switch_shell | `int(const char *path)` |
 | 0x2C8 | kbd_dropped_count | `u32(void)` |
 | 0x2CC | kbd_trygetrawkey | `int(void)` — 戻り値 `keycode \| down<<8 \| mods<<9` (mods = イベント時点の SHIFT_*、GUI モード中のみ記録)、無ければ -1 |
+| 0x2D0 | ime_feed_key | `int(int keydata)` — WM が打鍵 `(scancode<<8)\|ascii` を FEP に通す (GUI 中はカーネルが cooked に積まないため)。負 = 確定文字列の続きだけ。戻り値: <0 消費 / >=0x100 素通り / 0x1B ESC 素通り / 1..0xFF 確定 UTF-8 の 1 バイト (W2) |
+| 0x2D4 | ime_set_render | `void(void *table)` — FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2) |
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは
@@ -337,8 +339,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2D0 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2D4 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2D8 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2DC | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

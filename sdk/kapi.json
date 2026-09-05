@@ -1275,6 +1275,16 @@
       "name": "kbd_trygetrawkey",
       "ret": "int",
       "args": []
+    },
+    {
+      "name": "ime_feed_key",
+      "ret": "int",
+      "args": ["int keydata"]
+    },
+    {
+      "name": "ime_set_render",
+      "ret": "void",
+      "args": ["void *table"]
     }
   ]
 }

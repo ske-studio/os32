@@ -93,6 +93,8 @@ void ime_init(void);
 
 /* FEP ON/OFF トグル (初回呼び出し時に辞書ロード) */
 void ime_toggle(void);
+int  ime_feed_key(int keydata);     /* WM から打鍵を 1 件通す (GUI v1.1、K 依頼 1) */
+void ime_set_render(void *table);  /* 描画バックエンド差し替え、NULL で TVRAM 版 (K 依頼 2) */
 
 /* FEP 状態取得 */
 int  ime_is_active(void);
