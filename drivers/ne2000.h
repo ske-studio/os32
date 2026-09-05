@@ -77,6 +77,8 @@ struct ne2k_stats {
     u32 rx_backlog_events; /* 予算超過で IMR をマスクしたまま返した回数 (M3) */
     u32 watchdog_frames; /* 100Hz ウォッチドッグが回収した (= IRQ が取りこぼした) フレーム数 (M4) */
     u32 watchdog_hits;   /* ウォッチドッグが 1 フレーム以上回収した tick 数 (M4) */
+    u32 rx_pages_total;  /* 受信フレームがリングで消費した総ページ数 (§2-3 の実測用) */
+    u32 rdc_retry;       /* Remote DMA の RDC 再発行回数 (一過性ハズレの吸収, M4/L1) */
 };
 
 /* ---- API (docs/tasks/network/PLAN.md §3) ---- */

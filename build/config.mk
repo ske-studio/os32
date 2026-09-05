@@ -41,7 +41,7 @@ INC_COMMON = -I. -Iinclude $(SDK_INC)
 
 # カーネルコア: 自身 + ドライバ + fs + exec + shell + gfx + lib + kapi
 # (kernel.c は全サブシステムの初期化を行うため全モジュールを参照)
-INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ikapi -Ilib/sqlite3
+INC_KERNEL = $(INC_COMMON) -Ikernel -Idrivers -Inet -Ifs -Iexec -Igfx -Ilib -Ikapi -Ilib/sqlite3
 
 # ドライバ: 共通 + 自身 + gfx (kcg->gfx依存)
 INC_DRIVERS = $(INC_COMMON) -Idrivers -Igfx -Ilib
@@ -86,19 +86,22 @@ KERNEL_CFLAGS = $(CFLAGS_COMMON) -O2 -Wall -D__KERNEL_BUILD__
 #   例: make kernel KERNEL_CFLAGS_EXTRA=-DKAPI_PROFILE
 KERNEL_CFLAGS += $(KERNEL_CFLAGS_EXTRA)
 
-# LAN (LGY-98) を有効にしたカーネル: make kernel-lgy98 (戻すのは make kernel-nolgy98)
-#   選択は $(LGY98_STAMP) に残り、以後の make kernel / deploy-nhd も同じ設定で
-#   ビルドする (deploy がカーネルを作り直しても無効に戻らない)。
+# LAN (LGY-98) を有効にしたカーネル: make kernel-lgy98 (反射, M2/M3/M4 試験) /
+#   kernel-lgy98-link (リンク層 L0 試験) / kernel-nolgy98 (無効に戻す)。
+#   選択は $(LGY98_STAMP) にフラグ値ごと残るので、以後の make kernel / deploy-nhd も
+#   同じ設定でビルドする (deploy がカーネルを作り直しても設定が戻らない)。
 #   BASE / IRQ / FLAGS は LGY98_BASE / LGY98_IRQ / LGY98_FLAGS で上書きできる
-#   (既定は NP21/W の値。FLAGS = LGY98_FLAG_* の和、既定 5 = 起動時診断 + 反射モード)。読むのは drivers/lgy98.c だけで、
-#   その .o は毎回コンパイルされる (build/kernel.mk)。
-LGY98_STAMP = $(BUILD_OUT)/lgy98.enabled
+#   (既定は NP21/W の値。FLAGS = LGY98_FLAG_* の和。DIAG 1 / LOOPBACK 2 / REFLECT 4 /
+#   LINKTEST 8。kernel-lgy98 = 5 (DIAG+REFLECT)、kernel-lgy98-link = 9 (DIAG+LINKTEST))。
+#   読むのは drivers/lgy98.c だけで、その .o は毎回コンパイルされる (build/kernel.mk)。
+LGY98_STAMP = $(BUILD_OUT)/lgy98.flags
 LGY98_BASE  ?= 0x10D0
 LGY98_IRQ   ?= 5
-LGY98_FLAGS ?= 5
 ifneq ($(wildcard $(LGY98_STAMP)),)
-LGY98 ?= 1
+LGY98       ?= 1
+LGY98_FLAGS ?= $(shell cat $(LGY98_STAMP))
 endif
+LGY98_FLAGS ?= 5
 ifdef LGY98
 KERNEL_CFLAGS += -DCONFIG_LGY98_BASE=$(LGY98_BASE) -DCONFIG_LGY98_IRQ=$(LGY98_IRQ) -DCONFIG_LGY98_FLAGS=$(LGY98_FLAGS)
 endif

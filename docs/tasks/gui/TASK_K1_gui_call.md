@@ -48,6 +48,12 @@
    `docs/KAPI_SPEC.md` / `README.md` / `docs/INDEX.md` / `CLAUDE.md` の v41 表記、
    `make clean && make all` ([ABI3])。
 
+> **版番号の調整メモ (2026-09-05)**: この「v41」は GUI 実装時の暫定値。ネットワークの
+> Host Services (L3、[tasks/network/LINK_PLAN.md](../network/LINK_PLAN.md)) も KAPI を末尾追記で
+> 追加する計画で、そちらも当面 v41 を想定している。KAPI は append-only なので実体の衝突は
+> しないが、**先に実装した方が次版 (v41) を取り、後発は v42 以降にずれる**。GUI 実装に着手する
+> 時点で、L3 の状況を見て版番号と追記順を確定すること (現在の KAPI は v40、どちらも未実装)。
+
 ## 鉄則
 
 - カーネルは op の意味を解釈しない (WM の仕事)。`gui_call` は転送 + owner 付与だけ。

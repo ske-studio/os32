@@ -210,33 +210,45 @@ static int wait_rdc(void)
 }
 
 /* NIC RAM addr から len バイトを buf へ。page0 前提。
- * len が奇数でも RBCR は偶数丸め、PIO は末尾を安全に扱う。 */
+ * len が奇数でも RBCR は偶数丸め、PIO は末尾を安全に扱う。
+ * RDC が期限内に立たない一過性のハズレは、リング全体を捨てる reinit ではなく
+ * ここで 1 回だけ Remote DMA を再発行して吸収する (M4/L1 の堅牢性)。 */
 static int dma_read(u16 addr, void *buf, u16 len)
 {
     u16 n = (u16)((len + 1) & ~1);
+    int try_i;
     if (len == 0) return NE2K_OK;
-    wr(NE2K_P0_ISR, NE2K_ISR_RDC);      /* 古い RDC を消す */
-    wr(NE2K_P0_RBCR0, (u8)(n & 0xFF));
-    wr(NE2K_P0_RBCR1, (u8)(n >> 8));
-    wr(NE2K_P0_RSAR0, (u8)(addr & 0xFF));
-    wr(NE2K_P0_RSAR1, (u8)(addr >> 8));
-    wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD0 | NE2K_CR_STA);   /* Remote DMA は STA で発行 (Linux ne.c / FreeBSD if_ed と同じ) */
-    ne2k_pio_read(nic.cfg.data_port, buf, len);
-    return wait_rdc();
+    for (try_i = 0; try_i < 2; try_i++) {
+        wr(NE2K_P0_ISR, NE2K_ISR_RDC);      /* 古い RDC を消す */
+        wr(NE2K_P0_RBCR0, (u8)(n & 0xFF));
+        wr(NE2K_P0_RBCR1, (u8)(n >> 8));
+        wr(NE2K_P0_RSAR0, (u8)(addr & 0xFF));
+        wr(NE2K_P0_RSAR1, (u8)(addr >> 8));
+        wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD0 | NE2K_CR_STA); /* STA で発行 (Linux ne.c / FreeBSD if_ed と同じ) */
+        ne2k_pio_read(nic.cfg.data_port, buf, len);
+        if (wait_rdc() == NE2K_OK) return NE2K_OK;
+        nic.st.rdc_retry++;
+    }
+    return NE2K_ERR_TIMEOUT;
 }
 
 static int dma_write(u16 addr, const void *buf, u16 len)
 {
     u16 n = (u16)((len + 1) & ~1);
+    int try_i;
     if (len == 0) return NE2K_OK;
-    wr(NE2K_P0_ISR, NE2K_ISR_RDC);
-    wr(NE2K_P0_RBCR0, (u8)(n & 0xFF));
-    wr(NE2K_P0_RBCR1, (u8)(n >> 8));
-    wr(NE2K_P0_RSAR0, (u8)(addr & 0xFF));
-    wr(NE2K_P0_RSAR1, (u8)(addr >> 8));
-    wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD1 | NE2K_CR_STA);
-    ne2k_pio_write(nic.cfg.data_port, buf, len);
-    return wait_rdc();
+    for (try_i = 0; try_i < 2; try_i++) {
+        wr(NE2K_P0_ISR, NE2K_ISR_RDC);
+        wr(NE2K_P0_RBCR0, (u8)(n & 0xFF));
+        wr(NE2K_P0_RBCR1, (u8)(n >> 8));
+        wr(NE2K_P0_RSAR0, (u8)(addr & 0xFF));
+        wr(NE2K_P0_RSAR1, (u8)(addr >> 8));
+        wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD1 | NE2K_CR_STA);
+        ne2k_pio_write(nic.cfg.data_port, buf, len);
+        if (wait_rdc() == NE2K_OK) return NE2K_OK;
+        nic.st.rdc_retry++;
+    }
+    return NE2K_ERR_TIMEOUT;
 }
 
 /* ====================================================================== */
@@ -625,6 +637,12 @@ static int rx_one(u8 curr)
         nic.st.rx_bytes += dlen;
     }
 
+    /* リングで消費したページ数を実測に足す (§2-3、リンク層の credit cost 用) */
+    {
+        unsigned int size = (unsigned int)(nic.rx_stop - nic.rx_start);
+        if (size) nic.st.rx_pages_total +=
+            ((unsigned int)h.next + size - nic.rx_next) % size;
+    }
     /* データ回収後に next を進め、BNRY はその 1 ページ前 */
     nic.rx_next = h.next;
     wr(NE2K_P0_BNRY, ne2k_ring_bnry_for(nic.rx_start, nic.rx_stop, nic.rx_next));
