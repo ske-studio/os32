@@ -1,4 +1,5 @@
 #include "gfx_internal.h"
+#include "gfx_hal.h"
 #include "os32_kapi_shared.h"
 #include "kstring.h"
 
@@ -21,6 +22,34 @@ int gfx_flip_enabled = 0;
 int gfx_display_page = 0;
 
 /* ======================================================================== */
+/*  HAL バックエンド選択とカウンタ (GUI v1.1, レーン H1)                     */
+/*  g_backend は probe 順で選ばれる。静的初期化子で 9801 を指すので、        */
+/*  gfx_init 前でも NULL にならない (boot_splash 等が present を呼べる)。     */
+/* ======================================================================== */
+GfxCounters gfx_counters = { 0, 0, 0, 0 };
+
+const GfxBackend *g_backend = &gfx_backend_pc98;
+
+/* probe 順のバックエンド一覧。v1 は 9801 のみ。H2 (PEGC) / H3 (Cirrus) は
+ * 実機に近い順で前へ足す (Cirrus → PEGC → 9801)。 */
+static const GfxBackend *const g_backend_list[] = {
+    &gfx_backend_pc98
+};
+
+static void gfx_select_backend(void)
+{
+    int i;
+    int n = (int)(sizeof(g_backend_list) / sizeof(g_backend_list[0]));
+    for (i = 0; i < n; i++) {
+        if (g_backend_list[i]->probe && g_backend_list[i]->probe()) {
+            g_backend = g_backend_list[i];
+            return;
+        }
+    }
+    g_backend = &gfx_backend_pc98;   /* フォールバック */
+}
+
+/* ======================================================================== */
 /*  KAPI: フレームバッファ取得                                              */
 /* ======================================================================== */
 void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
@@ -41,35 +70,82 @@ void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
 /* ======================================================================== */
 void __cdecl gfx_screen_info(void *out)
 {
-    GFX_ScreenInfo *si = (GFX_ScreenInfo *)out;
-    int i;
-    if (!si) return;
-    si->width  = (u16)GFX_WIDTH;
-    si->height = (u16)gfx_current_height;
-    si->bpp    = 4;
-    si->format = GFX_FMT_PLANAR4;
-    si->flags  = GFX_CAP_TEXT_OVERLAY | (gfx_flip_enabled ? GFX_CAP_PAGE_FLIP : 0);
-    si->lease_mask  = 0x7F7E;   /* index 1-6, 8-15 (0=TEXT, 7=WINDOW は不可侵) */
-    si->lease_first = 0;
-    si->lease_count = 0;
-    for (i = 0; i < 5; i++) si->reserved[i] = 0;
+    if (!out) return;
+    /* 決め打ちせずバックエンドに問い合わせる (契約 G5)。9801 だけの現状でも
+     * 400/200 ラインやフリップ有無はバックエンドが正直に申告する。 */
+    if (g_backend && g_backend->init) {
+        g_backend->init((GFX_ScreenInfo *)out);
+    }
 }
 
 /* ======================================================================== */
 /*  KAPI: ハードウェア塗り / 転送 (アクセラレータ系バックエンド用の枠)        */
-/*  CPU バックエンドでは未対応 (OS32_ERR_NOSYS)。呼ぶ側は GFX_CAP_HW_* を    */
-/*  見て CPU 実装へフォールバックする。                                       */
+/*  バックエンドが fill_rect / blit を持てばそれへ、無ければ OS32_ERR_NOSYS。 */
+/*  呼ぶ側は GFX_CAP_HW_* を見て CPU 実装へフォールバックする。               */
 /* ======================================================================== */
 int __cdecl gfx_hw_fill_rect(int x, int y, int w, int h, u8 color)
 {
-    (void)x; (void)y; (void)w; (void)h; (void)color;
+    if (g_backend && g_backend->fill_rect)
+        return g_backend->fill_rect(x, y, w, h, color);
     return OS32_ERR_NOSYS;
 }
 
 int __cdecl gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h)
 {
-    (void)dx; (void)dy; (void)sx; (void)sy; (void)w; (void)h;
+    if (g_backend && g_backend->blit)
+        return g_backend->blit(dx, dy, sx, sy, w, h);
     return OS32_ERR_NOSYS;
+}
+
+/* ======================================================================== */
+/*  KAPI (v41): 描画カウンタの取得 (契約 G7 / DESIGN §8)。                   */
+/*  GFX_Stats を埋める。K1 が kapi.json に載せる弱既定 (NOSYS 返し) を、この   */
+/*  強シンボルがリンク時に上書きする。                                       */
+/* ======================================================================== */
+int __cdecl gfx_stats(void *out)
+{
+    GFX_Stats *s = (GFX_Stats *)out;
+    if (!s) return OS32_ERR_INVAL;
+    s->present_bytes = gfx_counters.present_bytes;
+    s->hw_ops        = gfx_counters.hw_ops;
+    s->io_accesses   = gfx_counters.io_accesses;
+    s->commits       = gfx_counters.commits;
+    return 0;
+}
+
+/* ======================================================================== */
+/*  KAPI (v41): パレットのリース (契約 G8)。                                 */
+/*  フォーカスのあるアプリ / WM が、バックエンドが許す範囲だけパレットを      */
+/*  差し替える。範囲は gfx_screen_info() の lease_mask (16 色) /              */
+/*  lease_first, lease_count (256 色) が正典。範囲外は OS32_ERR_INVAL で弾く。 */
+/*  H1 は状態を持たない — システム色へ戻すのは WM が同じ関数で行う。          */
+/* ======================================================================== */
+int __cdecl gfx_lease_palette(int first, int count, const u8 *rgb)
+{
+    GFX_ScreenInfo si;
+    int i;
+
+    if (count <= 0 || first < 0 || !rgb) return OS32_ERR_INVAL;
+    if (!g_backend || !g_backend->init || !g_backend->set_palette)
+        return OS32_ERR_NOSYS;
+
+    g_backend->init(&si);
+
+    if (si.lease_count > 0) {
+        /* 256 色機: 連続範囲 [lease_first, lease_first + lease_count) */
+        if (first < (int)si.lease_first ||
+            first + count > (int)si.lease_first + (int)si.lease_count)
+            return OS32_ERR_INVAL;
+    } else {
+        /* 16 色機: lease_mask のビットが立つ index だけ貸せる */
+        if (first + count > 16) return OS32_ERR_INVAL;
+        for (i = first; i < first + count; i++) {
+            if (!(si.lease_mask & (u16)(1u << i))) return OS32_ERR_INVAL;
+        }
+    }
+
+    g_backend->set_palette(first, count, rgb);
+    return 0;
 }
 
 int gfx_get_height(void)
@@ -140,6 +216,10 @@ void gfx_init(void)
 
     palette_init();
     gfx_scroll_init();
+
+    /* HAL バックエンドを選び、表示出力を有効化 (9801 の enter は空) */
+    gfx_select_backend();
+    if (g_backend && g_backend->enter) g_backend->enter();
 }
 
 void gfx_init_200(void)
@@ -177,17 +257,17 @@ void gfx_init_200(void)
 
     palette_init();
     gfx_scroll_init();
+
+    /* HAL バックエンドを選び、表示出力を有効化 (9801 の enter は空) */
+    gfx_select_backend();
+    if (g_backend && g_backend->enter) g_backend->enter();
 }
 
 void gfx_shutdown(void)
 {
-    /* フリップモード解除: ページ0に復帰 */
-    if (gfx_flip_enabled) {
-        _out(GDC_DISP_PAGE, 0x00);
-        _out(GDC_ACCESS_PAGE, 0x00);
-        gfx_flip_enabled = 0;
-        gfx_display_page = 0;
-    }
-    gfx_current_height = GFX_HEIGHT;
-    _out(GDC_GFX_CMD, GDC_CMD_STOP);
+    /* 表示出力を戻し (leave)、バックエンドのハードウェア終了処理へ。
+     * 9801 では leave は空、shutdown がフリップ解除 + GDC 表示停止を行う
+     * (旧 gfx_shutdown の本体は backend_pc98.c の pc98_shutdown に移設)。 */
+    if (g_backend && g_backend->leave) g_backend->leave();
+    if (g_backend && g_backend->shutdown) g_backend->shutdown();
 }
