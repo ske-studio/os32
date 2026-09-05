@@ -1,185 +1,101 @@
-# OS32 技術仕様ガイド
+# OS32 開発案内 — 作業別の参照先とファイル地図
 
-OS32カーネルおよび外部プログラム開発における技術仕様と実装ガイドを示す。
-
-> **関連ドキュメント**
-> - コーディング規約・ビルド手順・Gitポリシー → [POLICY_DEV.md](POLICY_DEV.md)
-> - デバッグ手順・教訓集 → [POLICY_DEBUG.md](POLICY_DEBUG.md)
-> - リリースロードマップ → [ROADMAP.md](ROADMAP.md)
+> 役割 (2026-09-05 に再定義): **「何をしたいか」から「どこを読み、どこを触り、どう検証するか」へ
+> 案内する**文書。仕様・規則・番地・手順の本文はここに置かない (正典は
+> [INDEX.md「情報単位ごとの正典」](INDEX.md) の表)。ここに書くのは参照先と、
+> ファイルと役割の対応だけ。
 
 ---
 
-## 1. 開発の基本指針と優先課題
+## 1. 作業別の参照先
 
-PC-9800シリーズ向け32ビットOSとしての特性を活かし、安全かつ効率的な開発を行うための指針。
+| やりたいこと | 先に読む | 触る場所 | 検証 |
+|---|---|---|---|
+| KernelAPI を足す | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) (手順の正典) | `sdk/kapi.json` → 再生成 → 実体 | `make clean && make all`、`make check`、NHD 配備後に呼ぶテスト |
+| カーネルを直す | 該当部の仕様 [01](01_system.md)〜[10](10_notes.md)、[CONSTRAINTS.md](CONSTRAINTS.md) | `kernel/` `drivers/` `fs/` `gfx/` (下の地図) | `make kernel` → NP21/W 停止 → `make deploy-kernel` → 起動 → kselftest と `ver` ([POLICY_DEBUG §2](POLICY_DEBUG.md)) |
+| ドライバを足す / 変える | [05_drivers.md](05_drivers.md)、ハード資料 `docs/hw/` (UNDOCUMENTED 優先) | `drivers/`、定数は [C4] の三層 | 同上。GUI 向けバックエンドは [tasks/gui/DESIGN.md §7](tasks/gui/DESIGN.md) の指針 |
+| 外部プログラムを書く | [09_exec.md](09_exec.md)、[KAPI_SPEC.md](KAPI_SPEC.md)、`sdk/example/` | `userland/` (本体) / `apps/` `game/` (submodule) | 自層の `deploy.yaml` に登録 ([V2])、`make hotdeploy` で回し、最後は NHD 配備 ([V1]) |
+| ユーザ空間ライブラリを触る | 各設計書 `tasks/lib*/`、[07_shell.md](07_shell.md) | `userland/lib/<name>/` | 対応する `userland/tests/<name>_test` |
+| シェルを触る | [07_shell.md](07_shell.md) | `userland/shell/` | rshell から `/api/cmd`。パイプ・リダイレクトは `ext_cmd1 \| ext_cmd2` も |
+| 日本語入力 (FEP) | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) (進捗の正典) | `kernel/ime*.c` | メモリ os32-fep-testing の手順、`/api/key` |
+| GUI シェル | [tasks/gui/TASKS.md](tasks/gui/TASKS.md) → 各票 | 票の排他ゾーン | 票のゲート |
+| V86 / DOS | [tasks/v86v2/README.md](tasks/v86v2/README.md) | `kernel/v86*.c` | `v86 -t` / `-b`、脱出は CTRL+STOP |
+| ビルド・配備の仕組みを変える | [08_build.md](08_build.md) | `Makefile` `build/*.mk` `tools/*.py` | `make check`、`os32-cycle deploy` |
+| 障害を追う | [POLICY_DEBUG.md](POLICY_DEBUG.md) (§2 反映確認 → §4 教訓集 → §5 道具) | — | `tools/np21w_mcp/`、`/api/tvram` |
+| 資料を直す | [INDEX.md](INDEX.md) の正典表で更新先を 1 つに決める | その 1 か所 + 参照側は要約のみ | `make check` (件数・制約 ID)、`make docs-win` |
 
-### 最優先課題 (Ongoing / Future)
+## 2. ファイル地図 (どのファイルが何で、仕様はどこか)
 
-1.  **BIOSの完全切り離し (達成済み)**: ext2+LZ4ローダーによる新ブートアーキテクチャが完成済み。カーネルは0x100000 (1MB) にロードされる。BIOS (INT 1Bh) を使用するのはブート段階 (IPL・第2ステージローダー) のみで、カーネル起動後のディスクI/OはPM PIO (`drivers/ide.c` / `drivers/fdc.c` + DMA) に完全移行しており、実行時にBIOSは呼び出さない。
+### カーネル `kernel/`
 
-### これまでの主要な成果 (Archived)
+| ファイル | 役割 | 仕様 |
+|---|---|---|
+| `kernel.c` `kentry.asm` | 起動、シェル起動ループ、`/etc/system.cfg` (GUI 化は K4 票) | [01 §1-2](01_system.md) |
+| `paging.c` `pgalloc.c` | ページテーブル、ガードページ、物理ページ確保。PD はプログラムごと (v2 M1) | [02](02_memory.md)、[tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) |
+| `kmalloc.c` | カーネルヒープ (320KB) | [02 §2-1](02_memory.md) |
+| `shm.c` | 共有メモリ 16 ブロック × 16KB。ブロック 0 = DB 結果、12〜15 = GUI (K1 票) | [02](02_memory.md)、[tasks/gui/API_CONTRACTS.md T2](tasks/gui/API_CONTRACTS.md) |
+| `idt.c` `isr_*.c` | 割り込み、`int 0x80` KAPI トランポリン着地点 | [04](04_interrupts.md)、[tasks/v2/M2](tasks/v2/M2_KAPI_TRAMPOLINE.md) |
+| `ime.c` `ime_romkana.c` `ime_dict.c` `ime_render*.c` | FEP。描画は関数表 (`ime_render.h`) 越し | [tasks/fep/](tasks/fep/00_INDEX.md) |
+| `console.c` | TVRAM 出力、スクロール予約 (`tvram_set_scroll_reserve`)、GDC カーソル | [05 §5-9](05_drivers.md) 周辺、[POLICY_DEBUG §4-18](POLICY_DEBUG.md) |
+| `snd_engine.c` | FM/SSG シーケンサ (タイマ IRQ 駆動) | [05 §5-3](05_drivers.md) |
+| `v86*.c` | V86 モニタ、仮想 PIC、キー所有権、脱出キー | [tasks/v86v2/](tasks/v86v2/README.md) |
+| `kselftest.c` | ブート時セルフテスト (kstring / kmalloc / kprintf)。プリミティブを触ったら項目を足す | [POLICY_DEBUG §2](POLICY_DEBUG.md) |
 
-- **KernelAPIの厳密な分離**: `os32_kapi_shared.h` による定義の一元化。
-- **Makefileのモジュール化**: ディレクトリ別のインクルードパス導入による結合度の低下。
-- **lib/ ディレクトリの純化**: ハードウェア・カーネル依存コードの排除。
-- **VFS / FAT 実装**: FAT のVFSマウントおよびOS32X実行基盤の安定化。当初は自作 `fs/fat12.c` を使用していたが、FatFs と二重実装であり FAT 切り詰め・サブディレクトリ書き込み不能などの不具合を抱えていたため廃止し、FatFs (`fs/fatfs/`) に一本化した。
-- **カーネルとシェルの完全分離**: カーネル内に残存していたシェル機能を完全に切り離し、独立したプログラム `shell.bin` として実装・稼働。
-- **メモリマップ全面再構築 (Phase 1-5)**: メモリ不足・配置不整合や sbrk_heap_limit バグを解消するためのレイアウト再編。プログラム空間の動的確保 (exec_heap) およびスタック・境界のガードページ保護 (GUARD A/B) 導入。
-- **FDリダイレクト・パイプ基盤**: カーネル側に `fd_redirect.c` / `pipe_buffer.c` を実装し、シェルから `>`, `>>`, `<`, `|` 演算子をサポート。
-- **環境変数システム**: `env`/`set`/`export`/`unset` コマンド、`$VAR` 展開、`.profile` 自動読み込み。
-- **PATH探索・コマンド実行**: `PATH` 環境変数による複数ディレクトリ探索、コマンド名のみでの外部プログラム実行。
-- **フィルタコマンド群**: grep, wc, head, tail, tee を外部プログラムとして実装。stdin/ファイル両対応でパイプ連携可能。
-- **VBZベクタグラフィックスパイプライン**: Python側 `img2vbz.py` (potraceベースベクタ化) とPC-98側 `vbzview.bin` (整数演算スキャンラインフィル) によるベクタ画像表示。
-- **ラスタパレット効果**: VSYNC+HBLANK同期による走査線単位パレット書き換え。KernelAPI `gfx_present_raster` と libos32gfx ラッパー。
-- **libos32gfx拡張**: ベジェ曲線、円/丸弧描画、整数sin/cos LUT、BMPsave機能、NASM高速ユーティリティ。
-- **シェルスクリプトエンジン**: `source`/`if`/`goto`/`return`/`ask` コマンドによるバッチスクリプト実行。`/etc/profile` による起動時自動設定。
-- **リソース自動クリーンアップ**: `exec_exit()` でプログラム終了時にFD・パイプ・共有メモリを自動回収。
-- **HostDrvFS**: NP21/W HostDrv hypercall経由のホストファイルシステムアクセス。セッションベースI/O、volatile同期。`hsync` コマンドによるホスト→ゲスト同期。
-- **マウスドライバ**: PC-98バスマウス + NP21/Wシームレスマウス対応。カーネル管理マウスカーソル (TVRAM属性反転方式)。
-- **ページフリッピング (400/200ラインモード)**: GDCの表示/アクセスページ分離による完全ティアリングフリー描画。2フレームdirty rect追跡。
-- **CPU速度キャリブレーション**: PITベースのCPU速度測定 (`cpu_calibrate`) と速度非依存タイマー (`cpu_delay_us`)。
-- **CUIファイラ**: TVRAMベースのCUIファイラ (シェル内蔵コマンド + 外部プログラム)。拡張子関連付け。
-- **libpyxel**: Pyxel互換ゲームエンジン (現在は廃止・ソース削除済み。libos32tilemap 等に知見を継承)。
-- **libos32snd**: FM/SSGサウンドライブラリ。BGMシーケンサ、SE再生。
-- **UTF-16LE変換**: HostDrvFS通信用のUTF-8/UTF-16LE相互変換ライブラリ (kutf16)。
-- **HostDrvデプロイワークフロー**: `hostdrv_deploy.py` + `deploy.yaml` によるsudo不要の高速デプロイ。
-- **ループバックブロックデバイス**: `drivers/loop_dev.c` によりディスクイメージをブロックデバイスとしてマウント可能に (`losetup` / `dd`)。デバイスレジストリ `drivers/dev.c` に統合。
-- **TrueTypeフォント基盤**: `kcg_load_font` によるフォント読み込みと microUI (`libos32ui`) の導入。
-- **FEP拡張**: 候補リストウィンドウ (↑↓/数字/ページング)、ユーザ辞書管理API、TVRAMスクロール保護、描画バックエンドの関数ポインタ化。辞書管理コマンド `ime`。
-- **ユーザ空間ライブラリの名称統一**: `libfiler` / `libmd` / `libtilemap` を `libos32*` に統一 (全24ライブラリが `libos32` 接頭辞)。
-- **ビルド成果物の集約**: `kernel.bin` / `sqlite.bin` / `vmkernel.lz4` / `unicode.bin` / `kernel.elf` / `kernel.map` を `build/out/` へ移動 (リポジトリルートを汚さない)。
-- **ゲームエンジン拡張**: `libos32turn` (手番/週スケジューラ) / `libos32rpg` (キャラ育成・状態・リボーン) / `libos32save` (セーブ管理) を追加。各エンジンlibは初期化完了時にDB接続を解放し、固定サイズの SQLite MEMSYS5 プールを枯渇させないようにした。
+### 実行と KernelAPI `exec/` `kapi/` `sdk/`
 
----
+| ファイル | 役割 | 仕様 |
+|---|---|---|
+| `exec/exec.c` `exec_heap.c` | OS32X ローダ、子プロセス帯の動的レイアウト、所有者別の資源回収、`exec_run` の setjmp 分割壁 | [09](09_exec.md) |
+| `exec/exec_kapi_init.inc` | KAPI 表の初期化 (生成物) | [KAPI_SPEC §3-1](KAPI_SPEC.md) |
+| `kapi/kapi_generated.c` `kapi_sys.c` `kapi_db.c` | `__cdecl` ラッパー (生成 + 手書き) | 同上 |
+| `sdk/kapi.json` | **KAPI の正典** | 同上 |
+| `sdk/include/os32/os32_kapi_shared.h` | 構造体・`KAPI_VERSION`・`OS32_ERR_*` (エラーコードの正典) | 同上 |
+| `sdk/link/app.ld` `sdk/crt/crt0.asm` | アプリのリンク (0x400000。共有ライブラリ導入時に 0x500000 へ: K3 票) | [09](09_exec.md) |
 
-## 2. グラフィックス実装方式
+### ドライバ `drivers/`
 
-全てのピクセル操作は CPU (i386) による VRAM (`0xA8000`) 直接書き込みで行う。
-メインメモリ上のバックバッファに描画し、`gfx_present()` で VRAM に一括転送する方式。
+| ファイル | 役割 | 仕様 |
+|---|---|---|
+| `fdc.c` `disk.c` `dev.c` `loop_dev.c` | FDC、論理ディスク、デバイス登録簿、ループバック | [05 §5-2, §5-11](05_drivers.md) |
+| `ide.c` `atapi.c` | IDE HDD、ATAPI CD-ROM | [06 §6-3](06_filesystem.md)、[05 §5-6](05_drivers.md) |
+| `kbd.c` | PC-98 キーボード、修飾キー、V86 への注入 | [05 §5-1](05_drivers.md) |
+| `serial.c` | RS-232C (rshell / ai-debug の経路) | [05 §5-4](05_drivers.md) |
+| `mouse*.c` | バスマウス + NP21/W シームレスマウス | [05 §5-7](05_drivers.md) |
+| `fm.c` | OPN/OPM | [05 §5-3](05_drivers.md) |
+| `kcg.c` | 漢字 ROM / ビットマップフォント | [05 §5-9](05_drivers.md) |
+| `np2sysp.c` | NP21/W ハイパーコール | [05 §5-10](05_drivers.md) |
 
-> ハードウェア制約の詳細（EGC/GRCG/GDC 使用禁止の理由）は [POLICY_DEV.md §3](POLICY_DEV.md) を参照。
+### ファイルシステム `fs/`
 
-### 描画モード
+| ファイル | 役割 | 仕様 |
+|---|---|---|
+| `vfs.c` `vfs_fd.c` | VFS、FD 表、所有者タグ・保護 FD | [06 §6-1](06_filesystem.md) |
+| `ext2_*.c` | ext2 読み書き (NHD の主 FS) | [06 §6-2](06_filesystem.md) |
+| `fatfs/` `fatfs_vfs.c` | FatFs (唯一の FAT 実装) | [06 §6-8](06_filesystem.md) |
+| `hostdrvfs.c` | HostDrv (`/host`) | [06 §6-7](06_filesystem.md) |
+| `pipe_buffer.c` `fd_redirect.c` | パイプ・リダイレクト | [06 §6-4, §6-5](06_filesystem.md) |
+| `iso9660.c` | CD-ROM | [06 §6-6](06_filesystem.md) |
 
-| モード | 論理解像度 | 初期化関数 | ページフリップ |
-|--------|-----------|------------|---------------|
-| 400ラインモード | 640×400 | `gfx_init()` | **自動有効** (ポート A4H/A6H) |
-| 200ラインモード | 640×200 | `gfx_init_200()` | **自動有効** (ポート A4H/A6H) |
+### グラフィックス `gfx/`、SQLite `lib/sqlite3/`、ブート `boot/`
 
-### ページフリッピング
+| ファイル | 役割 | 仕様 |
+|---|---|---|
+| `gfx/gfx_core.c` `gfx_vram.c` `palette.c` | バックバッファ、present (ページフリップ)、パレット。GUI 向けにバックエンド表へ組み替える (H1 票) | [05 §5-5](05_drivers.md) |
+| `lib/sqlite3/os32_sqlite_vfs.c` `os32_sqlite_config.h` `sqlite_stack.asm` | カーネル内 SQLite (0x200000 帯、MEMSYS5 384KB、代替スタック) | [tasks/sqlite/](tasks/sqlite/00_INDEX.md) |
+| `boot/boot_*.asm` `loader_*.asm` `boot_main.c` `ext2_mini.c` `lz4_mini.c` | IPL、第 2 段ローダ (PM 遷移を含む、分割禁止)、LZ4 展開 | [01 §1-2](01_system.md)、[10 §10-2, §10-3](10_notes.md)、[tasks/boot_reform/](tasks/boot_reform/00_OVERVIEW.md) |
 
-`gfx_init()` / `gfx_init_200()` のいずれでもページフリップが自動的に有効化される。
-PC-9801のVRAMは各プレーンに物理的に2バンク (64KB) 存在し、
-A4H (表示ページ) / A6H (アクセスページ) で切替可能。
+### ユーザ空間 `userland/`
 
-- **原理**: GDCの表示ページ (A4H) と描画ページ (A6H) を分離し、非表示ページに
-  BBからVRAM転送後にページ切替 (~3µs) を行うことで、ティアリングフリーな描画を実現。
-- **GDC競合排除**: 表示中のページとCPUの書き込み先が異なるためバス競合が発生しない。
-- **VSYNC待ち不要**: ページ切替が原子的なため、VSYNC待ちループによる最大17ms遅延を排除。
-- **ステイルページ対策**: 前フレームのdirty rectを次フレームにマージする2フレーム追跡方式。
-- **ラスタパレットとの併用**: `gfx_present_raster()` はフリップ転送後、VSYNC同期で
-  パレット書き換えのみ実行することでフリップモードでも動作する。
-- **外部プログラムへの影響**: なし。BBポインタは不変でKAPI変更不要。
+| 場所 | 役割 | 仕様 |
+|---|---|---|
+| `shell/main.c` `ui.c` `cmd_*.c` `cmd_script.c` `rshell.c` | 常駐シェル (0x300000, CPL=0)。コマンド登録 (`ShellCmd`, 最大 128)、行編集・補完・履歴、スクリプト、シリアル rshell | [07](07_shell.md) |
+| `cmds/` `system/` `tests/` `rust/` | コマンド、システムユーティリティ、テスト、Rust (Cargo ワークスペース、`os32api` クレート) | 一覧は各 `deploy.yaml` と [07 §7-1](07_shell.md) |
+| `lib/os32` `math` `input` `gfx` `snd` `db` | 基盤ライブラリ (デバッグ出力 / 整数数学 / 入力抽象 / 描画 / FM・SSG / SQLite ラッパ) | `tasks/lib*/`、[05 §5-5](05_drivers.md) |
+| `lib/tilemap` `ui` `filer` `md` `asset` `ecs` `save` | 描画・UI 系 (タイルマップ / microUI (テスト導入) / ファイラ / Markdown / アセット / ECS / セーブ) | 同上 |
+| `apps/` `game/` (submodule) | 標準アプリ、対戦スゴロク RPG。ゲームエンジン 11 ライブラリは os32-game が自前ビルド | 各リポジトリの `docs/` |
 
----
+## 3. 参照
 
-## 4. メモリマップとアーキテクチャ制約
-
-> 番地の正典は `include/memmap.h`、表としての正典は
-> [02_memory.md](02_memory.md) §2-1。ここは開発時に効く制約だけを挙げる。
-> カーネルスタックは V86 ゲストに 640KB を渡すため 0x90000 から
-> 0x1FC000 へ移動済み (0x9FFFC はローダー段の ESP として今も使う)。
-
-番地表はここに複製しない (2026-09-05 に削除。0x380000〜 をギャップと書いたまま
-シェル exec_heap への転用に追従できていなかった)。開発時に効く制約は以下の 3 点。
-
-**カーネル帯域内の動的配置**: KAPI テーブルとSHM (共有メモリ) は `__bss_end` から動的に算出される。`KAPI_ADDR = KHEAP_BASE + KHEAP_SIZE`、SHMはKAPIの直後に前後ガードページ付きで配置。
-
-ガードページ (Not-Present) が各境界 (sbrk上限, スタック上限, カーネルスタック上限, シェルスタック上限, SHM前後) に配置されます。
-
-- **DMA 64KB境界**: FDD等のDMAバッファは64KB境界をまたいではならない。`disk.c` ではBSS配置により回避。
-
-## 5. KernelAPI 拡張手順
-
-手順の正典は [KAPI_SPEC.md §3-1](KAPI_SPEC.md) (末尾追記、版番号 2 箇所、
-`gen_kapi.py` + `kapi_rust_gen.py` の再生成、`make clean` → `make all`)。
-CLAUDE.md の「To add a KernelAPI function」はその写し。ここには複製しない。
-
----
-
-## 6. 実装上の注意点
-
-> 過去の致命的バグに基づく教訓集は [POLICY_DEBUG.md §4](POLICY_DEBUG.md) を参照。
-
-### NASM ローカルラベルの活用
-- NASM移行により、旧アセンブラ (wasm) の制約（ドット始まりのラベル禁止）は解消された。
-- 新規コードでは `.loop:` 等のローカルラベルを積極的に使用し、名前空間を整理すること。
-
----
-
-## 7. 外部プログラム開発 (OS32X)
-
-- `sdk/include/os32/os32api.h` をインクルードして開発する。
-- `api->xxx()` 経由でシステムコールを呼び出す。
-- `api->mem_alloc()` はプログラム専用ヒープ (`exec_heap`領域) から動的に割り当てられる。
-- **⚠️ ヒープメモリの静的割り当て**: `api->mem_alloc()` で利用可能なヒープ領域の上限は、ビルド時に `mkos32x.py` の `--heap` オプションで**静的に決定**され、OS32Xバイナリのヘッダに書き込まれます。カーネルはロード時にこの固定サイズ分だけをあらかじめ割り当てるため、**実行時の動的なヒープ拡張はできません**。ファイルの一括読み込み等で大きなメモリが必要なプログラムを作成する場合は、`Makefile` で自身の `--heap` サイズを十分に大きく指定してください（デフォルト不足時は `ENOMEM` が発生します）。
-- **プロセス置換**: `api->exec_run()` で別のプログラムを起動すると、現在のプログラムは破棄・完全置換されます（`execve` 方式）。正常起動した場合は元のプログラムにはリターンしません。終了時は自動的にカーネルへ戻り、シェルが再起動します。
-- ビルドは `make programs` を使用する（`mkos32x.py` によりヘッダが付加される）。
-
----
-
-## 8. 未着手・将来課題
-
-- **ライブラリのコールバック化**: `lib/path.c` が `dev_find` (ドライバ層) に依存している問題を、関数ポインタの登録制にリファクタリングして疎結合にする。
-- **タイムアウトループのタイマーベース移行**: `ide.c`などで使われている `IDE_TIMEOUT_LOOP` 等のビジーループを、CPUクロック非依存のタイマー待ち(`kdelay_us` 又は `kdelay_ms`)へ置換する。
-
----
-
-## 9. `exec_run` のリファクタリング制約
-
-`exec_run()` は約280行の大きな関数だが、以下の理由により**関数分割は行わない**方針とする。
-
-### setjmp による分割壁
-
-`exec_run` 内部で `exec_setjmp()` / `exec_longjmp()` を使ったコルーチン的制御フローを持つ。setjmp 後のブロック（ローカル変数のライフタイム管理、`saved_esp` のインラインasm、`exec_nest_level` のインクリメント）は物理的に別関数に分離できない。
-
-### ルール
-
-1. **setjmp 後のブロック (argv構築 + asm実行) は分離禁止**
-2. **拡張時は setjmp 前のブロック (パス解決・ファイル読込・ヘッダ検証) にのみ追加すること**
-3. **将来300行を超えた場合**: パス解決〜ファイル読込 (setjmp 前) を `exec_load_binary()` として分離を検討
-
-### 詳細分析
-
-構造分析および将来的な肥大化リスクの検証レポート (`exec_run_analysis.md`, 2026-04-16)
-はリポジトリから削除済み。必要なら git 履歴を参照。
-
----
-
-## 10. 文字列ユーティリティ
-
-> コーディング規約の全体は [POLICY_DEV.md §2](POLICY_DEV.md) を参照。
-
-### kstring.h 標準関数
-
-カーネル内での文字列操作は `lib/kstring.h` の関数を優先して使用すること。
-
-| 関数 | 用途 |
-|------|------|
-| `kstrncpy` | 安全な文字列コピー |
-| `kstrncat` | バッファサイズを考慮した安全な文字列連結 |
-| `kstrlen` | 文字列長取得 |
-| `kstrcmp` / `kstrncmp` | 文字列比較 |
-
-### 定数定義の方針
-
-| 定数 | 定義場所 | 説明 |
-|------|---------|------|
-| `SYS_DEFAULT_PATH` | `config.h` | デフォルトのコマンド検索パス |
-| `TVRAM_COLS` / `TVRAM_ROWS` | `pc98.h` / `tvram.h` | テキストVRAMの列数・行数 |
-| `VFS_MAX_PATH` | `vfs.h` | パス名の最大長 |
-| バッファオフセット | 各モジュール内で定数化 | ハードコードの`500`等は禁止 |
-
----
-
-*OS32 Technical Guide — Updated: 2026-04-29*
+- 規則の正典: [CONSTRAINTS.md](CONSTRAINTS.md) (CLAUDE.md / SOUL.md は ID で参照)
+- 成果の履歴: [CHANGELOG.md](../CHANGELOG.md)、[archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md)。計画: [ROADMAP.md](ROADMAP.md)
+- 落とし穴の経緯: [POLICY_DEBUG.md §4](POLICY_DEBUG.md)。短い注意は CLAUDE.md「Known Gotchas」

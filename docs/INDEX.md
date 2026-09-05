@@ -4,6 +4,31 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 ---
 
+## 情報単位ごとの正典 (更新先は 1 つ)
+
+同じ事実を 2 か所で独立に更新する構造は必ず食い違う (2026-09-05 の診断で 6 件)。
+**変わりやすい数値・手順・進捗は下表の正典だけを更新し、他の文書は要約と参照に留める。**
+
+| 情報単位 | 正典 (ここだけ更新) | 参照側 (要約 + リンクのみ) |
+|---|---|---|
+| 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md / SOUL.md (ID 参照、`make check` が照合) |
+| 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) (説明) | CLAUDE.md「Memory Layout」(要約図) |
+| KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README / CLAUDE.md の版番号 (`make check` が照合) |
+| KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | CLAUDE.md (AI 入口の写し。両方直す) |
+| エラーコード | `os32_kapi_shared.h` の `OS32_ERR_*` | 各 FS は境界で翻訳 |
+| ビルドターゲット・ツール | [08_build.md](08_build.md) | CLAUDE.md「Build Commands」(日常分のみ) |
+| 配備 3 経路の使い分け | CLAUDE.md「Deploy Workflow」 | [POLICY_DEV.md §4](POLICY_DEV.md) (表のみ)、[08 §8-4](08_build.md) (ツール) |
+| ディレクトリ木 | [08_build.md §8-3](08_build.md) | CLAUDE.md / INDEX は参照のみ |
+| ファイル → 役割 → 仕様の対応 | [DEVELOPMENT.md §2](DEVELOPMENT.md) | — |
+| 作業別の参照先 | [DEVELOPMENT.md §1](DEVELOPMENT.md) | — |
+| 実行モデル (ローダ、ネスト、リング3、資源回収、exec_run の分割壁) | [09_exec.md](09_exec.md) | [10 §10-9](10_notes.md)、`tasks/v2/` (設計経緯) |
+| 描画方式 (ページフリップ、200 ライン) | [05_drivers.md §5-5](05_drivers.md) | CLAUDE.md「Graphics」(1 行) |
+| 落とし穴の経緯・検証記録 | [POLICY_DEBUG.md §4](POLICY_DEBUG.md) | CLAUDE.md「Known Gotchas」(2〜3 行の注意 + §番号) |
+| コーディング規約 (C89、kstring、三層定数、asm) | [POLICY_DEV.md §2](POLICY_DEV.md) | CONSTRAINTS [C1]〜[C4] (規則行) |
+| 進捗 | 領域別索引 ([tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) の表、[tasks/v86v2/04](tasks/v86v2/04_implementation_status.md)、[tasks/gui/TASKS.md](tasks/gui/TASKS.md) のゲート) | [ROADMAP.md](ROADMAP.md) (計画)、[CHANGELOG.md](../CHANGELOG.md) (履歴) |
+| プログラムの一覧 | 各層の `deploy.yaml` (機械可読の正典)、コマンドは [07_shell.md §7-1](07_shell.md) | 09_exec / INDEX に表を持たない |
+| 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
+
 ## カーネル技術仕様書 (§1-§10)
 
 | ファイル | 内容 |
@@ -27,7 +52,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v40 仕様書 — 175エントリテーブル (ヘッダ2 + 関数171 + データフィールド2) + API追加手順 |
-| [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — 描画方式、メモリ上の制約、exec_run の分割壁、文字列ユーティリティ (番地表と KAPI 手順は複製しない) |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | **開発案内** — 作業別の参照先 (読む / 触る / 検証) と、ファイル → 役割 → 仕様のファイル地図。仕様本文は持たない |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [archive/](archive/) | 完了済みの計画書 (ROADMAP_v1.0, REFACTORING_PLAN) — 当時の記録 |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |

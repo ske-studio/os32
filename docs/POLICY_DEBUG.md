@@ -157,6 +157,59 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **原因**: 通信用メモリ構造体に `volatile` 修飾子が付与されておらず、かつ I/Oアクセス関数 (`outp` 等) のインラインアセンブラに `"memory"` clobber（コンパイラバリア）が無かった。このため、GCCの最適化 (キャッシュ) によりメモリの再読み込みが省略され、レジスタに残った古い値が評価されてしまった。
 - **対策**: エミュレータが外部から直接読み書きする通信バッファや状態変数は、必ず `volatile` 宣言を行うこと。また、初期化時にエミュレータへの明示的なリセットシーケンスを送信して状態を同期させること。
 
+### 4-10. ビットマップフォントの焼き方 (`tools/gen_font16.py`)
+
+- **現象** (〜2026-08-18): 'W' が 'A'、'M' が 'V' に見える。行がガタつく
+- **原因**: IPAex 系は欧文がプロポーショナルで、'W' (14px) や 'M' (13px) を 8px の ANK セルへ中央寄せすると左右が切られる。字ごとの ink box を縦位置の基準にすると 'g' 'j' 'y' や '.' ',' が上下にばらつく
+- **対策**: セルからはみ出す字だけ横に畳む。**縦は必ずベースライン基準** (`anchor='ls'`)、縦は縮めない。16x16 の漢字は明朝だと細い横画が飛ぶので本文はゴシック (`assets/fonts/ipaexg16.kcgfont`)。半角 (size15/baseline12) と全角 (size16/baseline13) のベースライン 1px ずれは、16px セルに「漢字の高さ 13 + 欧文 descender 4」が収まらないための妥協 (共通ベースラインにすると漢字が size13 に落ちて見劣りする。比較検証済み)
+- **検証**: `--preview out.png` で等倍と 3 倍を並べる。**等倍で読めるかだけが判断基準**。カーネルは起動時に `/sys/font/default.kcgfont` を読む (`kernel.c` の `kcg_load_font`)
+
+### 4-11. 外部プログラムで漢字が全部 □ になる (Unicode→JIS 表の未有効化)
+
+- **現象**: 仮名は出るのに漢字だけ □
+- **原因**: カーネルは `/sys/unicode.bin` を `MEM_UNICODE_TABLE_BASE` (0x4A000) へ読み `utf8_set_jis_table_ready(1)` を呼ぶが、このフラグは `lib/utf8.c` の static 変数で、外部プログラムは自分の `utf8.o` を持つため別実体。未有効化だと `unicode_to_jis()` が 0 を返し `kcg_draw_utf8()` が JIS 0x2222 にフォールバックする。仮名はハードコードの範囲変換なので出てしまい、原因が分かりにくい
+- **対策**: 表は共有物理メモリにあるので、プログラム側で既知の対応 (U+4E9C→0x3021 など) を数点検証してから `utf8_set_jis_table_ready(1)` を立てる。無条件に立てるとロード失敗時の残骸を表として読む (実例: os32-game `app/main.c` の `enable_kanji_table()`)
+
+### 4-12. deploy.yaml に無いバイナリが NHD 上で stale 化し rshell が沈黙する
+
+- **現象** (2026-08-13, sndctl): KAPI レイアウト変更後、古いバイナリの KAPI 呼び出しが別関数へ飛び、exit 後の `jmp $` で永久スピン。rshell ごと沈黙
+- **対策**: 起動対象は PKG 配布でも必ず自層の deploy.yaml に載せる ([V2])。2026-09-04 から `make deploy` / `deploy-nhd` / `deploy-kernel` は同期後に `tools/prune_stale.py` でマニフェストに無いシステム側 *.bin を消す (`NO_PRUNE=1` で一覧のみ、`make prune-stale` で手動確認)
+
+### 4-13. SQLite MEMSYS5 プールの枯渇 (`db_query` が -2)
+
+- **現象** (2026-08-18): game で econ 常時接続 + battle/items/rpg/events の順次ロードの最後の `db_query` が `out of memory`
+- **原因**: MEMSYS5 は固定プール (`lib/sqlite3/os32_sqlite_vfs.c`) で、カーネル側 FEP 辞書を含む全接続が共有する。当時 200KB
+- **対策**: 384KB に拡大 (SQLite 拡張域 0x200000〜0x2FFFFF 内、残り約 280KB)。エンジンライブラリは `*_init()` の末尾で接続を閉じる。**枯渇の診断は `db_last_error()` を必ず出す** — 戻り値だけでは「テーブルがない」と区別できない。実機で任意 DB を調べるには `dbq` (`userland/tests/dbq.c`)
+
+### 4-14. `mui_pump_input()` がキー待ち行列を食う
+
+- **現象** (〜2026-08-17): os32-game のキーボードショートカットが全部効かない。自動プレイのデバッグタイマはこの回避策だった
+- **原因**: `userland/lib/ui/libos32ui_core.c` の `mui_pump_input()` が内部で `kbd_trygetchar()` を呼ぶので、同じフレームでアプリが `kbd_trygetchar()` を呼んでも何も来ない
+- **対策**: アプリが 1 回だけ読んで `mui_pump_input_ch(ctx, ch)` に渡す
+
+### 4-15. `exec_exit()` の全回収と `exec_heap_init_at()` による親ヒープ破壊
+
+- **現象**: (a) 2026-08-07 「FEP 候補ゼロ」— `ime on` を実行した ime.bin の終了で常駐辞書の SQLite FD が閉じられた。(b) `ext_cmd1 | ext_cmd2` がキーボード入力で固まる — 1 段目の終了でシェルのパイプバッファが kfree された。(c) `[exec_heap] bad magic feeefeee (double free?)`
+- **原因**: 2026-09-03 まで `exec_exit()` は FD ≥ 3 とパイプを所有者に関係なく全部回収していた。(c) は子から戻るとき `exec_heap_init_at()` で親ヒープを再初期化し、先頭ブロックヘッダを書き直したため
+- **対策**: 所有者タグ (`res_owner_get()` = ネスト段) で終了段の分だけ回収、カーネル常駐 FD は `vfs_fd_set_protect(fd, 1)`。親へ戻るときは `exec_heap_restore_state()`。仕様は [10_notes §10-9](10_notes.md)
+
+### 4-16. シェルの 2 つのヒープが重なる
+
+- **現象**: `ls > file` の化け、`pipe: out of memory`、double-free 警告
+- **原因**: newlib の sbrk (malloc / stdio) と KAPI `mem_alloc` の exec_heap が両方 BSS 終端から始まり互いを上書き
+- **対策** (2026-09-03): exec_heap を `MEM_SHELL_HEAP_BASE` (0x380000, 512KB) へ分離。`kernel/paging.c` は 0x380000〜0x3FFFFF を present に保つ (以前は NP ギャップ)。番地は [02_memory.md](02_memory.md)
+
+### 4-17. NHD 作業イメージが `/tmp` にあり、消えても deploy が exit 0 で返っていた
+
+- **現象** (〜2026-09-04): WSL 再起動で `/tmp/os32.nhd` が消え、その状態の `make deploy-nhd` が NHD を書かずに成功扱い
+- **対策**: 作業イメージを `build/nhd/os32.nhd` へ移動。無ければ Windows 側から自動 pull (NP21/W 停止中のみ)、失敗は exit 1。`os32-cycle deploy` はブート後にゲストの `/boot/vmkernel.lz4` サイズが手元の成果物と一致しなければ FAIL。**「配備完了」の文言を信じない** — カーネル変更の検証は `kselftest_pass` を新しい kernel.map の番地で読むか、この一致チェックで行う (§2)
+
+### 4-18. テキスト GDC のカーソルが「左下でちかちか」
+
+- **現象** (〜2026-09-04): V86 で DOS を動かした後、DOS 最後のカーソル位置で点滅が残る。OS32 自身はハードウェアカーソルを一度も表示していなかった
+- **原因**: 旧 `GDC_CMD_CSON` (0x0B) は uPD7220 に無いコマンド。カーソル表示は CSRFORM (0x4B) の DC ビットでしか制御できない
+- **対策**: `console_hw_cursor_enable()` (起動時 / V86 終了時 / `console_set_cursor`) で表示し、`console_hw_cursor_sync()` が文字列出力の末尾で論理位置へ追従させる。GDC の実状態は MCP `emu_gdc` の `m_csrform` (`8f0e7b` = 表示・2 ライン下線)
+
 ---
 
 ## §5. デバッグ道具箱

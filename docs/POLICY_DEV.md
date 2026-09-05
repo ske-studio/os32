@@ -52,6 +52,13 @@ GCC 環境においても `-std=gnu89` を維持する。
 | `kstrlen` | 文字列長取得 |
 | `kstrcmp` / `kstrncmp` | 文字列比較 |
 
+### アセンブラ
+
+- NASM (`-f elf32` / ブートセクタは `-f bin`)。ローカルラベル `.loop:` は使ってよい
+  (wasm 時代の制約は無い: [10_notes §10-11](10_notes.md))
+- `boot_fat.asm` は `.8086`: 即値シフト不可 (`mov cl, N` / `shr ax, cl`)。IPL の INT 1Bh は
+  4 回まで ([10_notes §10-2](10_notes.md))。`loader_fat.asm` の PM 遷移は分割禁止 (アドレス重なり)
+
 ### 定数定義の3層管理
 
 | レイヤー | 定義場所 | 例 |
