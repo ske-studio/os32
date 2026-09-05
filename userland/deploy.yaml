@@ -19,6 +19,10 @@ filesystem:
     - host: userland/gshell.bin
       guest: /bin/gshell.bin
       tags: [core]
+    # --- GUI 共有ライブラリ (0x400000 常駐、config.h SYS_SHLIB_GUI、K3 のローダが起動時に読む) ---
+    - host: userland/libos32gui.shlib
+      guest: /sys/lib/libos32gui.shlib
+      tags: [core]
     # --- システム管理プログラム → /sbin/ ---
     - host: userland/system/install.bin
       guest: /sbin/

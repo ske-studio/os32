@@ -364,10 +364,43 @@ $(eval $(call DEFINE_RUST_PROGRAM,hello_gfx,userland/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,alloc_demo,userland/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,math_test_rs,userland/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,font_test,userland/tests,$$(GFX_OBJ)))
-$(eval $(call DEFINE_RUST_PROGRAM,gui_demo,userland/tests,$$(GFX_OBJ)))
+# gshell 配下の GUI アプリは libos32gui_stub をリンクし、描画とウィジェットの本体は
+# 共有ライブラリ /sys/lib/libos32gui.shlib (下) にある。libos32gfx もライブラリ側に
+# 入っているので $(GFX_OBJ) は要らない (C3)。gdi_test だけは libos32gfx_init を
+# 直接呼ぶ単独 GFX プログラムなので従来どおり。
+$(eval $(call DEFINE_RUST_PROGRAM,gui_demo,userland/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,gdi_test,userland/tests,$$(GFX_OBJ)))
-$(eval $(call DEFINE_RUST_PROGRAM,lease_test,userland/tests,$$(GFX_OBJ)))
-$(eval $(call DEFINE_RUST_PROGRAM,gui_bench,userland/tests,$$(GFX_OBJ)))
+$(eval $(call DEFINE_RUST_PROGRAM,lease_test,userland/tests,))
+$(eval $(call DEFINE_RUST_PROGRAM,gui_bench,userland/tests,))
+
+# === libos32gui.shlib — 共有ライブラリ (0x400000 常駐、票 C3 / K3) ===
+# 先頭 4KB がジャンプ表 (OS32ShlibHeader)。crt0 は付けない (入口は表であって
+# _start ではない)。tools/mkshlib.py が ELF のセクション情報からヘッダの
+# text_pages / data_vaddr / data_pages を焼き、OS32X_FLAG_SHLIB 付きの OS32X にする。
+# 番号表 (shlib.rs と stub.rs) の突き合わせは make check-shlib。
+SHLIB_GUI_LIB = $(RUST_TARGET_DIR)/liblibos32gui.a
+
+$(SHLIB_GUI_LIB): FORCE $(RUST_KAPI_RS)
+	cd $(RUST_PROGRAMS_DIR) && cargo build --release -p libos32gui
+
+userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ)
+	$(LD) -m elf_i386 -T sdk/link/shlib.ld -nostdlib --nmagic --gc-sections \
+		--allow-multiple-definition -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib \
+		-L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ \
+		$(LGRP_BEG) $(GFX_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
+
+userland/libos32gui.raw: userland/libos32gui.elf
+	$(OBJCOPY) -O binary $< $@
+
+userland/libos32gui.shlib: userland/libos32gui.raw userland/libos32gui.elf tools/mkshlib.py
+	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 41
+
+shlib: userland/libos32gui.shlib
+
+check-shlib:
+	python3 tools/mkshlib.py --check
+
+.PHONY: shlib check-shlib
 
 # Rustクリーン
 clean-rust:
@@ -382,7 +415,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust gshell
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust gshell shlib
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
