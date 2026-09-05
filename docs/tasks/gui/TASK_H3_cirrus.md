@@ -30,10 +30,13 @@ DESIGN §6 の二層で、Xe10 内蔵 Cirrus をバックエンド表の 3 枚�
    BitBLT (塗り・矩形転送・色展開)、ビジー待ち。**PC-98 のポート番号を一切含めず**
    `glue->out(reg, val)` / `glue->in(reg)` で書く。BLT レジスタは MMIO で設定する
    (DESIGN §8: OUT より速い)。
-3. **バックエンド `backend_cirrus`**: 画面の実体をカード VRAM に置く (主記憶バックバッファ
-   無し、`bb_base = リニア FB`)。`fill_rect` / `blit` はエンジン、十数ピクセル角以下は
-   CPU 直書きへ切り替える閾値をカウンタで決める。`enter` / `leave` でリレー切替。
-   `present_rect` は「エンジンの完了待ち」だけ (転送は無い)。
+3. **バックエンド `backend_cirrus`**: クライアント面はカード VRAM の**非表示領域** (表示面の
+   後ろ。1MB VRAM なら 640×480×1B の面がもう 1 枚以上入る) に置き、`bb_base` はそこを指す
+   (主記憶バックバッファ無し)。`fill_rect` / `blit` はエンジン、十数ピクセル角以下は
+   CPU 直書きへ切り替える閾値をカウンタで決める。**`present_rect` = 非表示面から表示面への
+   エンジン BLT** (損傷矩形単位) + 完了待ち。これで契約 G4 の「commit 前の描画は画面に
+   出ない」をソフトウェアバックエンドと同じに保つ (2026-09-05 改訂。表示面へ直接描く案は
+   取り下げ)。`enter` / `leave` でリレー切替。
 4. **能力ビット**: `HW_FILL | HW_BLT`、`TEXT_OVERLAY` は 0 (リレー中は 98 側テキストが
    見えない)、画面は 640×480 / 8bpp から。
 
@@ -46,6 +49,7 @@ DESIGN §6 の二層で、Xe10 内蔵 Cirrus をバックエンド表の 3 枚�
 ## 完了条件
 
 - Xe10 設定で `hal_test` が HW_FILL|HW_BLT を表示、`gfx_hw_fill_rect` が 0 を返す。
-- `gdi_test` が同じ絵を出し、`gfx_stats().hw_ops` が塗り・転送の回数だけ増え、
-  `present_bytes` が 0 (CPU がピクセルを運ばない)。
+- `gdi_test` が同じ絵を出し、`gfx_stats().hw_ops` が塗り・転送・commit の BLT の回数だけ増え、
+  `present_bytes` が 0 (CPU がピクセルを運ばない)。commit 前に途中経過が表示面に出ない
+  (描画途中で screenshot を撮っても前フレームのまま)。
 - 9801 / PEGC 設定で回帰なし。

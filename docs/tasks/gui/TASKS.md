@@ -34,14 +34,15 @@
         H1 ─────┐
         K1 ─────┼──► W1 ──► K2 ──► W2 ──┐
         C1 ─────┤     │                  ├──► K3 + C3 (一斉再ビルド)
-                └──► C2 ─┘              │
-        K4 ─────────────────────────────┘
+        K4 ─────┘     └──► C2 ─┘         │
+                                         │
         H1 ──► H2 ──► H3 (screenshot 拡張は H3 の前提)
 ```
 
 - **並列で始められるもの**: H1、K1、C1、K4。互いに触るファイルが重ならない (§3)。
-- **W1 は K1 と H1 の後**: `gui_register` (K1) が無いと WM がアプリから呼べず、カウンタ
-  (H1) が無いと性能規約 P を測れない。
+- **W1 は K1 と H1 と K4 の後**: `gui_register` (K1) が無いと WM がアプリから呼べず、カウンタ
+  (H1) が無いと性能規約 P を測れず、`sys_switch_shell` (K4) が無いと CUI から gshell を
+  起動できない (契約 T9。gshell は shell.bin と同じ 0x300000 に載るので exec では起動できない)。
 - **C2 は K1 の後**: op 番号と SHM レイアウトの共有ヘッダ (K1 成果物) を写す。動作確認は
   W1 と結合してから。
 - **K2 は W1 の後**: ポンプの呼び先 (`gui_pump`) は W1 が作る。
@@ -76,21 +77,22 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 | `GUI_PROTO_VERSION` | 1 |
 | SHM | `MEM_SHM_GUI_BASE = MEM_SHM_BASE + 192KB`、スロット 16KB × 4、オフセット: ヘッダ 0 / 要求 16 / 応答 528 / リング 1040 (128 × 16B) / 引数 3088 (8KB) |
 | op | 0 予約、1 `INIT`、2 `POLL`、3 `WAIT`、4 `COMMIT`、5 `INVALIDATE`、6 `STATS`、7 `LEASE_PALETTE`、16〜 ウィンドウ (`CREATE` `DESTROY` `MOVE` `RESIZE` `SHOW` `SET_TITLE` `CLIENT_RECT` `RAISE` `SET_FOCUS` `SET_TEXT_CURSOR`)、32〜 サーフェス (`CREATE` `DESTROY`)、48〜 タイマ (`SET` `KILL`)、64〜 モーダル (`OPEN`)、80〜 予備 |
-| イベント種別 | 契約 U2 の並び順どおり 1 から: `PAINT` `CONFIGURE` `CLOSE` `FOCUS` `KEY` `TEXT` `POINTER` `BUTTON` `TIMER` `WIDGET` `MODAL` `QUIT`、末尾追記で `PALETTE` (G8) |
+| イベント種別 | 契約 U2 の並び順どおり 1 から: `PAINT` `CONFIGURE` `CLOSE` `FOCUS` `KEY` `TEXT` `POINTER` `BUTTON` `TIMER` `WIDGET` `MODAL` `QUIT` `PALETTE` |
+| イベント配置 | **16B = 共通ヘッダ 6B (`kind` u8 @0, `sub` u8 @1, `window` u16 @2, `serial` u16 @4) + ペイロード 10B** (契約 U2 の表)。C / Rust とも大きさとオフセットを static assert |
 | エラー | `OS32_ERR_STALE -11` `OS32_ERR_VERSION -12` `OS32_ERR_FULL -13` `OS32_ERR_ARG` は既存 `OS32_ERR_INVAL` (-9) を使う |
 | 色 | 契約 G6 の 16 色を `GUI_COLOR_*` の役割名で、RGB は `GUI_SYSTEM_PALETTE[16]` |
 | `Style.flags` | `TRANSPARENT_BG 0x01` `XOR 0x02` `DOTTED 0x04` `DITHER50 0x08` |
 | 上限 | ウィンドウ 16、サーフェス 16、ウィジェット 64、リスト項目 128、タイマ 8/アプリ、クリップ深さ 8、損傷 8/ウィンドウ、文字列 256B |
-| 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)` |
+| 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)`、`sys_switch_shell(const char *path) -> i32` (shell 帯からのみ、K4) |
 
 ## 5. ゲート (検証層が `os32-cycle` で回す。各票の完了条件はゲートに対応させる)
 
 | ゲート | 名前 | 通過条件 | 検証 |
 |---|---|---|---|
-| G0 | 契約凍結 | 済 (2026-09-04) | — |
+| G0 | 契約凍結 | 済 (2026-09-04)。**G0b: 契約の実装可能性** (2026-09-05 追加) = 契約末尾の 5 筋書き (イベント配置 / 重なった 2 窓 / リング満杯 / 変換中の BS / CUI ⇄ gshell) を PM が机上で通し、`check_gui_proto.py` のオフセット照合が動く | 机上 + スクリプト |
 | G1 | 描ける | C1 の `gdi_test` が G API だけで契約 G6 の 16 色見本・文字・クリップを描き、H1 の `gfx_stats` が present バイト数を返す。既存 GFX テスト (gfx_demo / blit_test / hello_gfx) に回帰なし | `os32-cycle demo gdi_test` の screenshot を `docs/tasks/gui/ref/g1.png` と目視比較、`stats` を tvram で確認 |
-| G2 | 窓が出る | CUI シェルから `gshell` を起動し、その上で書き換えた `gui_demo` (別プロセス, CPL=3) が窓 2 枚・XOR ドラッグ・フォーカス・ボタン・テキストボックス・リストボックスを動かす。1 周の syscall が `POLL` + `COMMIT` + `WAIT` の 3 回 (P) | `/api/key` で操作、`/api/screenshot`、`gfx_stats` と `gui_call` 回数を tvram または `emu_read_mem` で |
-| G3 | デスクトップで起動 | `os32gui` → 再起動で gshell が Level 0 起動、FEP が WM で動き (SHIFT+SPACE → 変換 → `Text` 配送)、14 色リース中に 2 色クロームが出る、モーダルが入れ子ループ無しで閉じる、計算ループ中のアプリでも WM がマウスを失わない (K2) | `os32-cycle deploy` からの起動確認 + G2 と同じ操作 + FEP 手順 (メモリ os32-fep-testing) |
+| G2 | 窓が出る | CUI シェルから `os32gui` で gshell に切り替え (T9)、その上で書き換えた `gui_demo` (別プロセス, CPL=3) が窓 2 枚・XOR ドラッグ・フォーカス・ボタン・テキストボックス・リストボックスを動かす。重なった 2 窓で背面の再描画が前面を壊さない (G4)。1 周の syscall が `POLL` + `COMMIT` + `WAIT` の 3 回、代表操作の転送量が P2 の予算内 | `/api/key` で操作、`/api/screenshot`、`gui_bench` の tvram 出力 |
+| G3 | デスクトップで起動 | `os32gui` → 再起動で gshell が Level 0 起動、FEP が WM で動き (SHIFT+SPACE → 変換 → `Text` 配送)、14 色リース中に 2 色クロームが出る、モーダルが入れ子ループ無しで閉じる、計算ループ中のアプリ (KAPI は呼ぶ) でもカーソルが追従しクリックが失われない (K2、T8 の限界どおりメニューは開かない) | `os32-cycle deploy` からの起動確認 + G2 と同じ操作 + FEP 手順 (メモリ os32-fep-testing) |
 | G4 | 共有ライブラリ | ライブラリが 0x400000 に常駐、アプリが 0x500000 から動き、os32-apps / os32-game が再ビルドで無変更動作。`gui_demo` の .bin がライブラリ分だけ小さくなる | `heap_test` の guard_a 表示、`make external` + 全 deploy.yaml の起動確認 |
 | G5 | 9821 (v1.1 後半〜) | PEGC 256 色で G1〜G3 と同じ絵、Cirrus Xe10 で HW 塗り / BLT の能力ビットが立ちカウンタの hw_ops が増える | np21x64w.ini の切替 ([D2] 承認要) + screenshot 拡張 |
 

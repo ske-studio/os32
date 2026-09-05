@@ -24,6 +24,11 @@
    `blit` / `text` / `measure_text` / `push_clip` / `pop_clip` (深さ 8)。
    - `surface` が全画面バックバッファの部分矩形 (窓のクライアント面) のときは、
      クリップ = 「現在のクリップ ∩ サーフェス矩形」を**必ず**掛けてから libos32gfx を呼ぶ。
+   - **基底クリップは処理中の `Paint` 矩形** (契約 G2 改訂): C2 のループが `Paint{rect}` を
+     処理する間、C1 の `set_base_clip(surface, rect)` で基底を固定し、`push_clip` はその
+     内側にしか効かない。`Paint` の外 (基底未設定) では窓面への描画を拒む (`debug_assert` +
+     no-op)。WM が `Paint` を可視領域の内側にしか出さないので (G4)、これで重なった前面を
+     背面が上書きしない。
    - `Style.flags`: `TRANSPARENT_BG` (文字だけ)、`XOR` (枠ドラッグ、`gfx` の XOR 描画が無ければ
      C1 で足す: 読み戻しは**バックバッファ**に対して行う。VRAM は読まない)、`DOTTED`、`DITHER50`
      (市松は 2 色のパターン塗り)。

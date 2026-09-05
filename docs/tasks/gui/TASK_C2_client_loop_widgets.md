@@ -17,8 +17,10 @@ Rust の所有型 (`Window` / `Widget` / `Timer`、`Drop` で destroy) とハン
    `MEM_SHM_GUI_BASE + n × 16KB` を要求 / 応答 / リング / 引数バッファに切る (K1 のオフセット)。
    `proto_version` 照合 (`ERR_VERSION` なら即 exit、理由を `dbg_print`)。
    戻り値 `< 0` は `Result<_, GuiErr>` に。**GetLastError は作らない** (T7)。
-2. **イベント取り出し**: `OP_POLL` の戻り値 (件数) 分をリングから `[GuiEvent; 128]` に
-   写して返す。`OVERFLOW` フラグは `dbg_print` に出す。
+2. **イベント取り出し** (契約 T3): `OP_POLL` の戻り値 (件数) 分をリングから `[GuiEvent; 128]`
+   に写し、**`head` を自分で進める** (`tail` は WM のもの。触らない)。`OVERFLOW` フラグは
+   `dbg_print` に出す。`Paint` は矩形ごとに 1 件来るので、`paint_damaged` は各矩形を基底
+   クリップ (C1 の `set_base_clip`) にしてウィジェット木を描く。
 3. **U3 ループ** (`app.rs`): `run(app: &mut impl App)`:
    ```
    loop { poll → handle (状態更新 + invalidate だけ) → paint_damaged → commit_all → wait(next_timer) }
@@ -41,6 +43,10 @@ Rust の所有型 (`Window` / `Widget` / `Timer`、`Drop` で destroy) とハン
    (アプリ 1 本の中で WM を動かす構成は終了)。
 9. **`lease_test`** (`userland/rust/lease_test/`、W2 の検証用): フォーカス中に 14 色を
    リースして独自パレットの絵を描き、`Palette{active:false}` で代替色に描き直す。
+10. **`gui_bench`** (`userland/rust/gui_bench/`、契約 P2 の測定器): `/api/key` からの入力を
+   受けて `commit` 完了までの tick 差と `gfx_stats` の差分を代表操作 (1 文字入力 /
+   ドラッグ / メニュー / リストスクロール) ごとに tvram に出す。NP21/W では転送量、
+   実機では遅延を読む。
 
 ## 鉄則
 

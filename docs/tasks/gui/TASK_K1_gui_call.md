@@ -14,9 +14,14 @@
 ## 作業
 
 1. **`sdk/include/os32/os32_gui_shared.h`** (新規): TASKS.md §4 の表を C の定数と
-   構造体にする。`GuiSlotHeader` (16B)、`GuiEvent` (16B、`kind: u8` + 種別ごとの union)、
-   `GuiReq*` / `GuiResp*` (op ごと、512B 以内、文字列は `u8 len; u8 s[255]`)。
-   16B / 512B は `STATIC_ASSERT` で固定。C89 なので union + 共通ヘッダで書く。
+   構造体にする。`GuiSlotHeader` (16B: `proto_version u16` / `flags u16` (bit0 OVERFLOW) /
+   `seq u32` / `ring_head u16` (アプリが書く) / `ring_tail u16` (WM が書く) / 予備)、
+   `GuiEvent` (16B、契約 U2 の配置: 共通ヘッダ `kind u8 @0, sub u8 @1, window u16 @2,
+   serial u16 @4` + ペイロード union 10B @6)、`GuiReq*` / `GuiResp*` (op ごと、512B 以内、
+   文字列は `u8 len; u8 s[255]`)。**大きさ (16 / 512) と各フィールドのオフセット**を
+   `STATIC_ASSERT` (`offsetof`) で固定し、同じ数表を `docs/tasks/gui/PROTO_LAYOUT.md` に
+   書き出す (PM の `check_gui_proto.py` が C 側の正典として読む)。C89 なので union +
+   共通ヘッダで書く。
 2. **SHM 予約** (契約 T2): `include/memmap.h` に `MEM_SHM_GUI_BASE = MEM_SHM_BASE + 0x30000`、
    `MEM_SHM_GUI_SIZE = 0x10000`、`GUI_SLOT_SIZE = 0x4000`、`GUI_SLOT_MAX = 4`。
    `kernel/shm.c` の初期化でブロック 12〜15 を使用済みに固定 (`shm_alloc` が配らない)。
