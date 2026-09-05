@@ -370,3 +370,68 @@ const _: () = assert!(offset_of!(GuiWinSpec, flags) == 48);
 const _: () = assert!(size_of::<GuiWinSpec>() <= GUI_SLOT_REQ_SIZE);
 /* パレットの要素数は型 [GuiRgb; 16] が保証する (静的 static は const 文脈から参照
  * できないため .len() の assert は置かない)。 */
+
+/* ======================================================================== */
+/*  op ごとの要求 / 応答構造体 (C os32_gui_shared.h の GuiReq* / GuiResp*)   */
+/*  正典は C ヘッダ。末尾追記のみ (契約 T5)。W1 (gshell) と C2 (libos32gui)  */
+/*  が共有する。レイアウトは #[repr(C)] で C と一致させる。                   */
+/* ======================================================================== */
+
+/* 単一ハンドルを対象にする op (DESTROY / RAISE / SET_FOCUS / CLIENT_RECT)。
+ * W1 は arg≠0 ならそれをハンドルとみなし、0 なら要求ブロックのこれを読む。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqWindow { pub window: u32 }                                   /* 4B */
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqWinMove { pub window: u32, pub x: i16, pub y: i16 }          /* MOVE 8B */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqWinResize { pub window: u32, pub w: i16, pub h: i16 }        /* RESIZE 8B */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqWinShow { pub window: u32, pub show: u8, pub _pad: [u8; 3] } /* SHOW 8B */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqTextCursor { pub window: u32, pub x: i16, pub y: i16, pub visible: u8, pub _pad: u8 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqWinTitle { pub window: u32, pub title: GuiString }           /* SET_TITLE 260B */
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqSurfCreate { pub w: i16, pub h: i16 }                        /* SURF_CREATE */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqTimerSet { pub window: u32, pub timer_id: u16, pub interval_ms: u16 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqTimerKill { pub window: u32, pub timer_id: u16, pub _pad: u16 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqModal { pub buttons: u16, pub _pad: u16, pub message: GuiString } /* MODAL_OPEN 260B */
+
+/* INVALIDATE (op 5): 契約 G4 の invalidate(window, rect)。rect はクライアント座標。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqInvalidate { pub window: u32, pub rect: GuiRect16 }          /* 12B */
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiRespWindow { pub result: i32, pub window: u32 }                 /* CREATE -> window */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiRespSurface { pub result: i32, pub surface: u32 }               /* SURF_CREATE -> surface */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiRespRect { pub result: i32, pub rect: GuiRect16 }               /* CLIENT_RECT -> rect */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiRespModal { pub result: i32, pub button: i16, pub _pad: i16 }   /* MODAL_OPEN -> button */
+
+const _: () = assert!(size_of::<GuiReqWinMove>() == 8);
+const _: () = assert!(size_of::<GuiReqInvalidate>() == 12);
+const _: () = assert!(size_of::<GuiReqWinTitle>() <= GUI_SLOT_REQ_SIZE);
+const _: () = assert!(size_of::<GuiReqModal>() <= GUI_SLOT_REQ_SIZE);
+const _: () = assert!(size_of::<GuiRespRect>() <= GUI_SLOT_RESP_SIZE);
