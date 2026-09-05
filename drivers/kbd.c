@@ -50,6 +50,10 @@ static volatile int kbd_head = 0;
 static volatile int kbd_tail = 0;
 static volatile int kbd_count = 0;
 
+/* 待ち行列が満杯で捨てた打鍵の累計 (契約 T3、GUI v1.1)。IRQ1 ISR だけが
+ * 加算する (kbd_shift_state と同じ所有権)。KAPI kbd_dropped_count() で読む。 */
+static volatile u32 kbd_dropped = 0;
+
 /* ======================================================================== */
 /*  スキャンコード → ASCII 変換テーブル                                    */
 /*  PC9800Bible §2-5 表2-14 の「通常」列から抽出                           */
@@ -197,6 +201,10 @@ void kbd_irq_handler(void)
         kbd_buf[kbd_tail] = entry;
         kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
         kbd_count++;
+    } else {
+        /* 満杯なら新しい打鍵を捨てて数える (契約 T3)。WM が
+         * kbd_dropped_count() の差分を dropped に合算し OVERFLOW を立てる。 */
+        kbd_dropped++;
     }
 }
 
@@ -232,6 +240,7 @@ void kbd_init(void)
     kbd_head = 0;
     kbd_tail = 0;
     kbd_count = 0;
+    kbd_dropped = 0;
     kbd_shift_state = 0;
 
     /* キー状態ビットマップクリア */
@@ -360,4 +369,10 @@ int kbd_is_pressed(int scancode)
 {
     if (scancode < 0 || scancode > 127) return 0;
     return (kbd_key_pressed[scancode >> 3] >> (scancode & 7)) & 1;
+}
+
+/* 待ち行列が満杯で捨てた打鍵の累計を返す (契約 T3、GUI v1.1 の KAPI)。 */
+u32 kbd_dropped_count(void)
+{
+    return kbd_dropped;
 }

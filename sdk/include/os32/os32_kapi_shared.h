@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      40   /* gfx_screen_info / gfx_hw_fill_rect / gfx_hw_blit (GUI HAL 枠) 追加 */
+#define KAPI_VERSION      41   /* gui_call / gui_register / gfx_stats / gfx_lease_palette / sys_switch_shell / kbd_dropped_count (GUI v1.1 背骨) 追加 */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -179,6 +179,16 @@ typedef struct {
     u16 reserved[5];
 } GFX_ScreenInfo;
 
+/* GUI カウンタ (gfx_stats() が埋める、docs/tasks/gui/API_CONTRACTS.md G7)。
+ * 累積値。NP21/W ではウェイトを再現しないので、性能はこの回数・転送量で
+ * 見積もる (契約 P2)。末尾追記のみ。 */
+typedef struct {
+    u32 present_bytes;   /* VRAM へ転送したバイト数の累計 */
+    u32 hw_ops;          /* アクセラレータの塗り/転送回数 */
+    u32 io_accesses;     /* I/O ポートアクセス回数 */
+    u32 commits;         /* commit 回数 */
+} GFX_Stats;
+
 /* パレットエントリ (各0-15) */
 typedef struct {
     u8 r, g, b;
@@ -257,6 +267,10 @@ typedef struct {
 #define OS32_ERR_ISDIR     -8   /* ディレクトリである (open/unlink 不可) */
 #define OS32_ERR_INVAL     -9   /* 引数不正 / FS をまたぐ rename 等 */
 #define OS32_ERR_NOSYS     -10  /* このバックエンド / 機種では未対応 */
+/* GUI (KAPI v41、KAPI_SPEC §3-2 の予約どおり)。-14 以降はネットワーク用に空ける。 */
+#define OS32_ERR_STALE     -11  /* 破棄済み / generation 不一致のハンドル (契約 T4) */
+#define OS32_ERR_VERSION   -12  /* proto_version が WM より新しい (契約 T5) */
+#define OS32_ERR_FULL      -13  /* スロット / 資源が満杯 (契約 T2a) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

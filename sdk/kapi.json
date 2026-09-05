@@ -1,5 +1,5 @@
 {
-  "version": 40,
+  "version": 41,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -43,12 +43,15 @@
     "mouse.h",
     "kapi_db.h",
     "loop_dev.h",
-    "v86.h"
+    "v86.h",
+    "gui.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
     "extern void kapi_sys_exit(int status);",
-    "extern void kapi_sys_get_build_info(char *buf, int size);"
+    "extern void kapi_sys_get_build_info(char *buf, int size);",
+    "extern int gfx_stats(void *out);",
+    "extern int gfx_lease_palette(int first, int count, const u8 *rgb);"
   ],
   "api": [
     {
@@ -1237,6 +1240,36 @@
       "name": "gfx_hw_blit",
       "ret": "int",
       "args": ["int dx", "int dy", "int sx", "int sy", "int w", "int h"]
+    },
+    {
+      "name": "gui_call",
+      "ret": "int",
+      "args": ["u32 op", "u32 arg"]
+    },
+    {
+      "name": "gui_register",
+      "ret": "int",
+      "args": ["void *handler", "void *pump"]
+    },
+    {
+      "name": "gfx_stats",
+      "ret": "int",
+      "args": ["void *out"]
+    },
+    {
+      "name": "gfx_lease_palette",
+      "ret": "int",
+      "args": ["int first", "int count", "const u8 *rgb"]
+    },
+    {
+      "name": "sys_switch_shell",
+      "ret": "int",
+      "args": ["const char *path"]
+    },
+    {
+      "name": "kbd_dropped_count",
+      "ret": "u32",
+      "args": []
     }
   ]
 }

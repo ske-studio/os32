@@ -31,15 +31,18 @@
 #include "kapi_db.h"
 #include "loop_dev.h"
 #include "v86.h"
+#include "gui.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
 extern void kapi_sys_get_build_info(char *buf, int size);
+extern int gfx_stats(void *out);
+extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[171];
+volatile u32 kapi_hits[177];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -216,6 +219,12 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* gfx_screen_info */
     20,  /* gfx_hw_fill_rect */
     24,  /* gfx_hw_blit */
+    8,  /* gui_call */
+    8,  /* gui_register */
+    4,  /* gfx_stats */
+    12,  /* gfx_lease_palette */
+    4,  /* sys_switch_shell */
+    0,  /* kbd_dropped_count */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -392,6 +401,12 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0001,  /* gfx_screen_info: out */
     0x0000,  /* gfx_hw_fill_rect */
     0x0000,  /* gfx_hw_blit */
+    0x0000,  /* gui_call */
+    0x0003,  /* gui_register: handler,pump */
+    0x0001,  /* gfx_stats: out */
+    0x0004,  /* gfx_lease_palette: rgb */
+    0x0001,  /* sys_switch_shell: path */
+    0x0000,  /* kbd_dropped_count */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1412,5 +1427,41 @@ int __cdecl wrap_gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h)
 {
     KAPI_HIT(170);
     return gfx_hw_blit(dx, dy, sx, sy, w, h);
+}
+
+int __cdecl wrap_gui_call(u32 op, u32 arg)
+{
+    KAPI_HIT(171);
+    return gui_call(op, arg);
+}
+
+int __cdecl wrap_gui_register(void *handler, void *pump)
+{
+    KAPI_HIT(172);
+    return gui_register(handler, pump);
+}
+
+int __cdecl wrap_gfx_stats(void *out)
+{
+    KAPI_HIT(173);
+    return gfx_stats(out);
+}
+
+int __cdecl wrap_gfx_lease_palette(int first, int count, const u8 *rgb)
+{
+    KAPI_HIT(174);
+    return gfx_lease_palette(first, count, rgb);
+}
+
+int __cdecl wrap_sys_switch_shell(const char *path)
+{
+    KAPI_HIT(175);
+    return sys_switch_shell(path);
+}
+
+u32 __cdecl wrap_kbd_dropped_count(void)
+{
+    KAPI_HIT(176);
+    return kbd_dropped_count();
 }
 

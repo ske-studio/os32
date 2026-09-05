@@ -169,9 +169,15 @@ extern int __cdecl wrap_v86_boot2(const char *path, const char *second);
 extern void __cdecl wrap_gfx_screen_info(void *out);
 extern int __cdecl wrap_gfx_hw_fill_rect(int x, int y, int w, int h, u8 color);
 extern int __cdecl wrap_gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h);
+extern int __cdecl wrap_gui_call(u32 op, u32 arg);
+extern int __cdecl wrap_gui_register(void *handler, void *pump);
+extern int __cdecl wrap_gfx_stats(void *out);
+extern int __cdecl wrap_gfx_lease_palette(int first, int count, const u8 *rgb);
+extern int __cdecl wrap_sys_switch_shell(const char *path);
+extern u32 __cdecl wrap_kbd_dropped_count(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 40;
+kapi->version = 41;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -344,5 +350,11 @@ kapi->version = 40;
     kapi->gfx_screen_info = wrap_gfx_screen_info;
     kapi->gfx_hw_fill_rect = wrap_gfx_hw_fill_rect;
     kapi->gfx_hw_blit = wrap_gfx_hw_blit;
+    kapi->gui_call = wrap_gui_call;
+    kapi->gui_register = wrap_gui_register;
+    kapi->gfx_stats = wrap_gfx_stats;
+    kapi->gfx_lease_palette = wrap_gfx_lease_palette;
+    kapi->sys_switch_shell = wrap_sys_switch_shell;
+    kapi->kbd_dropped_count = wrap_kbd_dropped_count;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

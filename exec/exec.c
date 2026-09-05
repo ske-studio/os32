@@ -13,6 +13,7 @@
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "shm.h"
+#include "gui.h"
 #include "snd_engine.h"
 #include "kapi_db.h"
 #include "gdt.h"
@@ -293,6 +294,11 @@ void exec_exit(int status)
 
         /* (6) SQLite DB リソースクリーンアップ (未closeのDB接続を解放) */
         db_cleanup_all();
+
+        /* (7) GUI リソース回収 (契約 T4 / U8)。WM が登録済みなら、この owner
+         * (= exec_nest_level) のウィンドウ・サーフェス・タイマ・スロットを
+         * 回収する。未登録なら何もしない (W1 が後で使う口)。 */
+        gui_owner_exit(exec_nest_level);
 
         /* 親レベルへ復帰 */
         exec_nest_level--;

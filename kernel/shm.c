@@ -22,6 +22,17 @@
  * 食い違うとガードページの位置やゼロクリア範囲が実帯域からずれる。 */
 STATIC_ASSERT(SHM_TOTAL_SIZE == MEM_SHM_SIZE, shm_size_matches_memmap);
 
+/* GUI 予約 (契約 T2): ブロック 12〜15 = MEM_SHM_GUI_BASE から 4 ブロック。
+ * 先頭とサイズがブロック境界に乗っていること、SHM 帯に収まることを固定する。 */
+#define SHM_GUI_BLOCK_FIRST  ((int)((MEM_SHM_GUI_BASE - MEM_SHM_BASE) / SHM_BLOCK_SIZE))
+#define SHM_GUI_BLOCK_COUNT  ((int)(MEM_SHM_GUI_SIZE / SHM_BLOCK_SIZE))
+STATIC_ASSERT((MEM_SHM_GUI_BASE - MEM_SHM_BASE) % SHM_BLOCK_SIZE == 0, shm_gui_base_aligned);
+STATIC_ASSERT(MEM_SHM_GUI_SIZE % SHM_BLOCK_SIZE == 0, shm_gui_size_aligned);
+STATIC_ASSERT(GUI_SLOT_SIZE == SHM_BLOCK_SIZE, shm_gui_slot_is_block);
+STATIC_ASSERT(SHM_GUI_BLOCK_COUNT == GUI_SLOT_MAX, shm_gui_slot_count);
+STATIC_ASSERT((MEM_SHM_GUI_BASE + MEM_SHM_GUI_SIZE) <= (MEM_SHM_BASE + SHM_TOTAL_SIZE),
+              shm_gui_within_band);
+
 /* ブロック管理テーブル */
 static u8 shm_state[SHM_BLOCK_COUNT]; /* 各ブロックの状態 */
 static int shm_block_span[SHM_BLOCK_COUNT]; /* 各確保の先頭ブロックが持つスパン数 */
@@ -60,6 +71,14 @@ void shm_init(void)
     for (i = 0; i < SHM_BLOCK_COUNT; i++) {
         shm_state[i] = SHM_FREE;
         shm_block_span[i] = 0;
+    }
+
+    /* GUI 予約 (契約 T2): ブロック 12〜15 を固定予約。shm_alloc は SHM_FREE
+     * だけを配るので予約済みは配られず、shm_cleanup_all / shm_free も
+     * SHM_RESERVED を触らない。span は 0 のまま (単独管理ではない)。 */
+    for (i = SHM_GUI_BLOCK_FIRST;
+         i < SHM_GUI_BLOCK_FIRST + SHM_GUI_BLOCK_COUNT; i++) {
+        shm_state[i] = SHM_RESERVED;
     }
 
     /* ガードページ設定 */
@@ -179,6 +198,10 @@ void shm_cleanup_all(void)
     u32 blk_start;
 
     for (i = 0; i < SHM_BLOCK_COUNT; i++) {
+        /* GUI 予約ブロックはプログラム終了で回収しない (契約 T2)。 */
+        if (shm_state[i] == SHM_RESERVED) {
+            continue;
+        }
         if (shm_state[i] != SHM_FREE) {
             /* ページ属性をR/Wに戻す */
             blk_start = block_to_addr(i);

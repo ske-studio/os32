@@ -19,9 +19,12 @@
 #define SHM_TOTAL_SIZE   (SHM_BLOCK_SIZE * SHM_BLOCK_COUNT) /* 256KB */
 
 /* ブロック状態 */
-#define SHM_FREE    0   /* 未使用 */
-#define SHM_USED    1   /* 確保済み (R/W) */
-#define SHM_LOCKED  2   /* ロック済み (R/O) */
+#define SHM_FREE     0   /* 未使用 */
+#define SHM_USED     1   /* 確保済み (R/W) */
+#define SHM_LOCKED   2   /* ロック済み (R/O) */
+#define SHM_RESERVED 3   /* カーネルが固定予約 (GUI ブロック 12〜15 等)。
+                          * shm_alloc は配らず、shm_free / shm_cleanup_all は
+                          * 触らない (契約 T2)。 */
 
 /* ======== API ======== */
 

@@ -164,6 +164,17 @@ extern u32 __bss_end;
 #define MEM_SHM_END           (MEM_SHM_BASE + MEM_SHM_SIZE - 1)
 #define MEM_SHM_GUARD_HI      (MEM_SHM_BASE + MEM_SHM_SIZE)
 
+/* GUI 予約 SHM (契約 T2 / docs/tasks/gui/API_CONTRACTS.md)。
+ * SHM 帯 (MEM_SHM_BASE, 16KB×16 ブロック) の末尾側ブロック 12〜15
+ * (先頭 +192KB から 64KB) を GUI 用に固定予約する。kernel/shm.c の初期化で
+ * この 4 ブロックを SHM_RESERVED にし、shm_alloc が配らないようにする。
+ * 1 スロット (16KB) = アプリ 1 本、最大 4 アプリ (v1 はスロット 0 のみ)。
+ * PTE は SHM 帯として既に RW+USER (v2 C2)。 */
+#define MEM_SHM_GUI_BASE      (MEM_SHM_BASE + 0x30000UL)  /* +192KB = ブロック 12 */
+#define MEM_SHM_GUI_SIZE      0x10000UL                    /* 64KB = 4 ブロック */
+#define GUI_SLOT_SIZE         0x4000UL                     /* 16KB = 1 スロット */
+#define GUI_SLOT_MAX          4                            /* スロット 0〜3 */
+
 /* カーネル帯域終端 */
 #define MEM_KERNEL_BAND_END   0x1FFFFFUL
 

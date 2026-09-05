@@ -46,6 +46,9 @@ filesystem:
     - host: userland/tests/mouse_test.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: userland/tests/gui_call_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/blit_test.bin
       guest: /usr/bin/
       tags: [programs]
