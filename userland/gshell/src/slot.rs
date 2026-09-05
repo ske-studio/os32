@@ -10,9 +10,26 @@ use core::ptr;
 
 use crate::wm::{GuiState, GUI_SHM_OFFSET};
 use os32api::gui::proto::{
-    GuiSlotHeader, GUI_PROTO_VERSION, GUI_SLOT_HDR_OFF, GUI_SLOT_REQ_OFF, GUI_SLOT_RESP_OFF,
-    GUI_SLOT_RING_OFF, GUI_SLOT_SIZE,
+    GuiSlotHeader, GUI_PROTO_VERSION, GUI_SLOT_ARGS_OFF, GUI_SLOT_ARGS_SIZE, GUI_SLOT_HDR_OFF,
+    GUI_SLOT_REQ_OFF, GUI_SLOT_RESP_OFF, GUI_SLOT_RING_OFF, GUI_SLOT_SIZE,
 };
+
+/* ================================================================ */
+/*  取り込み tick の記録 (契約 P2)                                    */
+/*                                                                  */
+/*  「WM は入力を取り込んだ tick を serial ごとに直近 64 件、スロットの */
+/*  予備領域 (T2 の約 5KB のうち 256B) に記録する」。引数バッファの直後  */
+/*  = 11280 から 256B を 64 エントリ × 4B で使う:                     */
+/*      +0 u16 serial / +2 u16 tick の下位 16bit (10ms 粒度)          */
+/*  索引は serial % 64。**共有ヘッダには未記載** — C2 の gui_bench が   */
+/*  読むときは PM 経由で os32_gui_shared.h へ追記が要る (申し送り)。    */
+/* ================================================================ */
+pub const GUI_SLOT_TRACE_OFF: usize = GUI_SLOT_ARGS_OFF + GUI_SLOT_ARGS_SIZE; /* 11280 */
+pub const GUI_TRACE_ENTRIES: usize = 64;
+pub const GUI_SLOT_TRACE_SIZE: usize = GUI_TRACE_ENTRIES * 4; /* 256B */
+
+/* 予備領域に収まることを固定する。 */
+const _: () = assert!(GUI_SLOT_TRACE_OFF + GUI_SLOT_TRACE_SIZE <= GUI_SLOT_SIZE);
 
 /// スロット N の先頭バイトポインタ。
 #[inline]
@@ -80,4 +97,14 @@ pub unsafe fn read_req<T: Copy>(st: &GuiState, slot: usize) -> T {
 #[inline]
 pub fn write_resp<T: Copy>(st: &GuiState, slot: usize, v: T) {
     unsafe { ptr::write_unaligned(resp_ptr(st, slot) as *mut T, v) }
+}
+
+/// 入力を取り込んだ tick を serial ごとに記録する (契約 P2)。
+pub fn record_trace(st: &GuiState, slot: usize, serial: u16, tick: u32) {
+    let idx = (serial as usize) % GUI_TRACE_ENTRIES;
+    unsafe {
+        let p = slot_base(st, slot).add(GUI_SLOT_TRACE_OFF + idx * 4) as *mut u16;
+        ptr::write_unaligned(p, serial);
+        ptr::write_unaligned(p.add(1), (tick & 0xFFFF) as u16);
+    }
 }

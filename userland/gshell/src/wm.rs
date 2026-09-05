@@ -15,13 +15,13 @@
 
 use core::cell::UnsafeCell;
 
-use os32api::gfx;
 use os32api::gui::proto::{
     GuiWinSpec, GUI_MAX_DAMAGE, GUI_MAX_TIMERS, GUI_MAX_WINDOWS, GUI_SLOT_MAX, GUI_WF_BORDER,
     GUI_WF_HAS_CLOSE, GUI_WF_MOVABLE, GUI_WF_VISIBLE, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_STALE,
 };
 
-use crate::{chrome, damage, visible};
+use crate::cursor::Cursor;
+use crate::{chrome, cursor, damage, desktop, input, visible};
 
 /* ================================================================ */
 /*  レイアウト定数 (ピクセル)                                        */
@@ -358,6 +358,15 @@ pub struct GuiState {
     /* 入力取りこぼしの累計 (kbd_dropped_count の前回値)。 */
     pub last_kbd_dropped: u32,
 
+    /* マウスカーソル (損傷とは別経路。契約 W1 作業 7)。 */
+    pub cursor: Cursor,
+
+    /* 直近に読んだ tick (取り込み時刻の記録 P2 と期限判定で共有)。 */
+    pub now: u32,
+
+    /* ポンプ (X4) の再入防止。 */
+    pub in_pump: bool,
+
     /* 標準単独ループ用フラグ。 */
     pub quit: bool,
     pub launch_pending: bool,
@@ -383,9 +392,25 @@ impl GuiState {
         prev_buttons: 0,
         screen_dirty: RectSet::EMPTY,
         last_kbd_dropped: 0,
+        cursor: Cursor::EMPTY,
+        now: 0,
+        in_pump: false,
         quit: false,
         launch_pending: false,
     };
+}
+
+/// generation を 1〜0x7FFF の範囲で進める。**0x8000 以上にしない**のは、
+/// WindowId (`gen << 16 | index`) を `gui_call` の戻り値 (i32) として非負で
+/// 返すため (負値は `OS32_ERR_*` の領域)。
+#[inline]
+pub fn next_gen(g: u16) -> u16 {
+    let n = g.wrapping_add(1) & 0x7FFF;
+    if n == 0 {
+        1
+    } else {
+        n
+    }
 }
 
 struct GuiCell(UnsafeCell<GuiState>);
@@ -530,6 +555,21 @@ impl GuiState {
         None
     }
 
+    /// WM 所有の画面損傷 (デスクトップ + クローム) に 1 矩形を足す。
+    ///
+    /// `RectSet::push` は容量 (16) を超えると**黙って捨てる**ので、そのまま
+    /// 使うと塗り残しが残る。溢れた分は先頭と union して「過剰申告 = 安全側」に
+    /// 倒す (転送量が増えるだけで、画面が壊れることは無い)。
+    pub fn dirty_screen(&mut self, r: Rect) {
+        let clip = r.intersect(&Rect::new(0, 0, self.screen_w, self.screen_h));
+        if clip.is_empty() {
+            return;
+        }
+        if !self.screen_dirty.push(clip) {
+            self.screen_dirty.rects[0] = self.screen_dirty.rects[0].union(&clip);
+        }
+    }
+
     /// 画面座標の点 (px,py) を含む最前面の可視ウィンドウ index。
     pub fn hit_window(&self, px: i32, py: i32) -> Option<usize> {
         let mut z = self.z_count;
@@ -552,10 +592,10 @@ impl GuiState {
             if self.windows[i].used && self.windows[i].owner == owner {
                 let vac = self.windows[i].outer();
                 self.z_remove(i);
-                let gen = self.windows[i].gen.wrapping_add(1);
+                let gen = next_gen(self.windows[i].gen);
                 self.windows[i] = Win::EMPTY;
-                self.windows[i].gen = if gen == 0 { 1 } else { gen };
-                self.screen_dirty.push(vac);
+                self.windows[i].gen = gen;
+                self.dirty_screen(vac);
                 if self.drag_index == i as i32 {
                     self.drag_index = -1;
                 }
@@ -587,21 +627,41 @@ pub fn wf_visible(flags: u16) -> bool {
     (flags & GUI_WF_VISIBLE) != 0
 }
 
+
 /* ================================================================ */
 /*  present / compositor (WM が所有する画面 = デスクトップ + クローム) */
 /*                                                                  */
 /*  クライアント面の内側には触れない (アプリの COMMIT が present する)。 */
 /* ================================================================ */
 
-/// 画面座標の矩形を present (VRAM 転送)。画面外はクランプ。
-pub fn present_rect(st: &GuiState, r: Rect) {
+/// 画面座標の矩形を **転送キューへ積む** (まだ VRAM へは出さない)。
+///
+/// `gfx_present_rect` は 1 回ごとに `gfx_present_dirty` を呼ぶので
+/// `gfx_stats().commits` が矩形の数だけ増える。契約 P の「commit はループ 1 周
+/// 1 回」を守るため、WM は矩形を `gfx_add_dirty_rect` で積み、最後に
+/// [`flush_present`] を 1 回だけ呼ぶ。
+pub fn queue_present(st: &GuiState, r: Rect) {
     let clip = r.intersect(&Rect::new(0, 0, st.screen_w, st.screen_h));
     if clip.is_empty() {
         return;
     }
     unsafe {
-        (os32api::api().gfx_present_rect)(clip.x, clip.y, clip.w, clip.h);
+        (os32api::api().gfx_add_dirty_rect)(clip.x, clip.y, clip.w, clip.h);
     }
+}
+
+/// 積んだ矩形をまとめて VRAM へ転送する (`commits` += 1)。積んだものが
+/// 無ければカーネル側で早期 return する (commits は増えない)。
+pub fn flush_present() {
+    unsafe {
+        (os32api::api().gfx_present_dirty)();
+    }
+}
+
+/// 1 矩形だけを即転送する近道 (積む + 流す)。
+pub fn present_rect(st: &GuiState, r: Rect) {
+    queue_present(st, r);
+    flush_present();
 }
 
 /// 画面座標の矩形にデスクトップ + クロームを再合成する (バックバッファのみ)。
@@ -626,10 +686,17 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
         z += 1;
     }
     let mut i = 0;
+    let mut hit_hint = false;
     while i < region.len {
         let d = region.rects[i];
-        chrome::fill_desktop(d.x, d.y, d.w, d.h);
+        desktop::fill(st, d);
+        if d.intersects(&desktop::hint_rect()) {
+            hit_hint = true;
+        }
         i += 1;
+    }
+    if hit_hint {
+        desktop::draw_hint(st);
     }
     /* クローム: clip に掛かる窓を背面→前面で描き直す。 */
     let mut z2 = 0;
@@ -644,31 +711,49 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
     }
 }
 
-/// 画面全体を合成して present する (起動時・全面復帰)。全画面 present は WM のみ。
-pub fn composite_full(st: &GuiState) {
+/// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
+/// **全画面 present は WM だけ** (契約 G4)。カーソルは描き直す。
+pub fn composite_full(st: &mut GuiState) {
     let whole = Rect::new(0, 0, st.screen_w, st.screen_h);
+    cursor::discard(st); /* 下地は全部塗り替わる */
     composite_rect(st, whole);
-    present_rect(st, whole);
+    st.screen_dirty.clear();
+    cursor::show(st);
+    queue_present(st, whole);
+    flush_present();
 }
 
 /// WM が溜めた画面損傷 (デスクトップ + クローム) を合成して present し、クリアする。
-/// アプリのクライアント面 (COMMIT) とは独立。
+/// アプリのクライアント面 (COMMIT) とは独立。commit は 1 回にまとめる。
 pub fn flush_screen_dirty(st: &mut GuiState) {
+    let dragging = st.drag_index >= 0;
+    if st.screen_dirty.is_empty() && !dragging {
+        return;
+    }
+    /* 下地を描き替えるので、まずカーソルを外して下地を戻す。 */
+    cursor::hide(st);
+
     let n = st.screen_dirty.len;
     let mut i = 0;
     while i < n {
         let r = st.screen_dirty.rects[i];
         composite_rect(st, r);
-        present_rect(st, r);
+        queue_present(st, r);
         i += 1;
     }
     st.screen_dirty.clear();
+
     /* ドラッグ中なら枠を再描画 (合成で消えているため)。 */
-    if st.drag_index >= 0 {
+    if dragging {
         let f = st.drag_frame;
         chrome::draw_drag_outline(f.x, f.y, f.w, f.h);
-        present_rect(st, f);
+        queue_present(st, f);
     }
+
+    cursor::show(st);
+    let cr = cursor::rect(st);
+    queue_present(st, cr);
+    flush_present();
 }
 
 /* ================================================================ */
@@ -676,10 +761,35 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
 /* ================================================================ */
 
 /// WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップの present。
-/// `wm_ui` = 状態機械を進めるか (OP_WAIT / 単独ループ = true)。
-pub fn wm_cycle(st: &mut GuiState, wm_ui: bool) {
-    crate::input::capture(st, wm_ui);
-    flush_screen_dirty(st);
+/// 文脈は [`input::Ctx`] (X3 = Wait / Standalone、X4 = Pump)。
+pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
+    input::capture(st, ctx);
+    if ctx != input::Ctx::Pump {
+        flush_screen_dirty(st);
+    }
+}
+
+/* ================================================================ */
+/*  フォーカス (契約 U1 の set_focus)                                */
+/* ================================================================ */
+
+/// ウィンドウを最前面へ出してフォーカスを移す。`Focus` イベントを両者へ流す。
+pub fn set_focus(st: &mut GuiState, owner: i32, id: u32) -> i32 {
+    let index = match resolve_owned(st, owner, id) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    if st.front_index() == Some(index) {
+        return 0;
+    }
+    let old_id = st.front_id();
+    st.bring_to_front(index);
+    visible::recompute_and_expose(st);
+    let outer = st.windows[index].outer();
+    st.dirty_screen(outer);
+    let new_id = st.windows[index].id(index);
+    input::emit_focus_change(st, old_id, new_id);
+    0
 }
 
 /* ================================================================ */
@@ -755,8 +865,9 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     /* 初回は全面 dirty + 露出計算。 */
     damage::set_dirty_full(&mut st.windows[index]);
     visible::recompute_and_expose(st);
-    st.screen_dirty.push(st.windows[index].outer());
-    st.windows[index].id(index)
+    st.dirty_screen(st.windows[index].outer());
+    /* generation は 1〜0x7FFF に制限してあるので i32 として必ず非負。 */
+    st.windows[index].id(index) as i32
 }
 
 pub fn destroy_window(st: &mut GuiState, owner: i32, id: u32) -> i32 {
@@ -766,13 +877,13 @@ pub fn destroy_window(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     };
     let vac = st.windows[index].outer();
     st.z_remove(index);
-    let gen = st.windows[index].gen.wrapping_add(1);
+    let gen = next_gen(st.windows[index].gen);
     st.windows[index] = Win::EMPTY;
-    st.windows[index].gen = if gen == 0 { 1 } else { gen };
+    st.windows[index].gen = gen;
     if st.drag_index == index as i32 {
         st.drag_index = -1;
     }
-    st.screen_dirty.push(vac);
+    st.dirty_screen(vac);
     visible::recompute_and_expose(st);
     0
 }
@@ -785,8 +896,8 @@ pub fn move_window(st: &mut GuiState, owner: i32, id: u32, x: i32, y: i32) -> i3
     let old = st.windows[index].outer();
     st.windows[index].x = x;
     st.windows[index].y = y;
-    st.screen_dirty.push(old);
-    st.screen_dirty.push(st.windows[index].outer());
+    st.dirty_screen(old);
+    st.dirty_screen(st.windows[index].outer());
     damage::set_dirty_full(&mut st.windows[index]);
     st.windows[index].configure_pending = true;
     visible::recompute_and_expose(st);
@@ -815,8 +926,8 @@ pub fn resize_window(st: &mut GuiState, owner: i32, id: u32, w: i32, h: i32) -> 
     }
     st.windows[index].w = nw;
     st.windows[index].h = nh;
-    st.screen_dirty.push(old);
-    st.screen_dirty.push(st.windows[index].outer());
+    st.dirty_screen(old);
+    st.dirty_screen(st.windows[index].outer());
     damage::set_dirty_full(&mut st.windows[index]);
     st.windows[index].configure_pending = true;
     visible::recompute_and_expose(st);
@@ -836,7 +947,7 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
     } else {
         st.windows[index].flags &= !GUI_WF_VISIBLE;
     }
-    st.screen_dirty.push(outer);
+    st.dirty_screen(outer);
     visible::recompute_and_expose(st);
     0
 }
@@ -859,7 +970,7 @@ pub fn set_title(st: &mut GuiState, owner: i32, id: u32, title: &[u8], len: usiz
     }
     st.windows[index].title[39] = 0;
     /* タイトルバーだけ再描画。 */
-    st.screen_dirty.push(st.windows[index].titlebar_rect());
+    st.dirty_screen(st.windows[index].titlebar_rect());
     0
 }
 
@@ -870,7 +981,7 @@ pub fn raise(st: &mut GuiState, owner: i32, id: u32) -> i32 {
     };
     if st.front_index() != Some(index) {
         st.bring_to_front(index);
-        st.screen_dirty.push(st.windows[index].outer());
+        st.dirty_screen(st.windows[index].outer());
         visible::recompute_and_expose(st);
     }
     0

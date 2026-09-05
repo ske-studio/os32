@@ -17,11 +17,11 @@ pub struct GuiReqWindow {
     pub window: u32,
 }
 
-/* INVALIDATE (op 5) 用。**注意: 共有ヘッダ os32_gui_shared.h に対応する
- * GuiReqInvalidate が無い** (契約 G4 の invalidate(window, rect) を運ぶ構造体が
- * 未定義)。ここでは自然なレイアウト {window@0, rect@4} を仮採用し、PM へ
- * 「末尾追記で C 側に GuiReqInvalidate を足す」よう申し送る。C1 の proto.rs と
- * 突き合わせるまで gshell 側のこの定義が暫定の正となる。 */
+/* INVALIDATE (op 5) 用。共有ヘッダ os32_gui_shared.h 末尾に
+ * `typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;` (12B) が
+ * 追記済み (2026-09-06、前回の申し送り分) なので、こちらはその写し。
+ * **PM への申し送り**: C1 の `proto.rs` にはまだ写されていない (C2 が要求
+ * ブロックへ書くときに要る)。 */
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GuiReqInvalidate {

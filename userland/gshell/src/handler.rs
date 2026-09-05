@@ -1,0 +1,530 @@
+//! handler.rs — `gui_call` ハンドラ (契約 T1 / T8 の X1・X2・X3)。
+//!
+//! カーネル (`kernel/gui.c`) は `gui_call(op, arg)` を
+//! `handler(op, arg, res_owner_get())` へ転送するだけで、op の意味を知らない。
+//! ここが WM の唯一の入口。op → 関数表で引き、owner ↔ スロットを検証してから
+//! 各処理へ渡す (match の巨大化を避ける)。
+//!
+//! 実行文脈の割り当て (契約 T8。**票の鉄則と対**):
+//!   - X1 = WAIT / COMMIT 以外のすべて。**状態更新とリング追記だけ**。VRAM へ
+//!     書かず、待たず、数十 µs で戻る。画面の描き直しが要るものは
+//!     `st.screen_dirty` / `win.dirty` に積むだけで、実際に描くのは X3。
+//!   - X2 = [`op_commit`]。issued 矩形の present とカーソルの描き直しだけ。
+//!   - X3 = [`op_wait`]。WM の全周期 (入力 → WM の UI → クローム present → halt)。
+//!
+//! 要求は SHM スロットの要求ブロック (512B) から読み、応答は応答ブロック
+//! (512B) へ書く。小さい値 (WindowId など) は `arg` に直接載ってくるので、
+//! **`arg != 0` ならそれを、0 なら要求ブロックの `GuiReqWindow` を**採る
+//! (どちらの流儀のクライアントでも動く)。
+
+use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
+use crate::{cursor, damage, input, reqs, ring, slot, timer, visible};
+use os32api::gui::proto::{
+    GuiRect16, GuiWinSpec, GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT,
+    GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
+    GUI_OP_STATS, GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY, GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET,
+    GUI_OP_WAIT, GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
+    GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE, GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR,
+    GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW, GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL,
+    OS32_ERR_NOSYS, OS32_ERR_STALE, OS32_ERR_VERSION,
+};
+
+/* ================================================================ */
+/*  入口 (カーネルが呼ぶ C ABI)                                      */
+/* ================================================================ */
+
+/// `gui_register` に渡すハンドラ。**この 1 本がアプリ → WM の全経路**。
+#[no_mangle]
+pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
+    let st = wm::g();
+    if !st.inited {
+        return OS32_ERR_NOSYS;
+    }
+    st.now = unsafe { (os32api::api().get_tick)() };
+
+    /* スロットを要らない (あるいは持てない) op を先に片づける。 */
+    if op == GUI_OP_OWNER_EXIT {
+        /* カーネルの exec_exit から。owner のウィンドウ / タイマ / スロットを回収。
+         * 描かない (X1) — 空いた領域は screen_dirty に積まれ、次の X3 で埋まる。 */
+        st.reclaim_owner(owner);
+        visible::recompute_and_expose(st);
+        return 0;
+    }
+    if op == GUI_OP_INIT {
+        return op_init(st, owner, arg);
+    }
+
+    let slot_no = match st.slot_of_owner(owner) {
+        Some(s) => s,
+        None => return OS32_ERR_INVAL, /* OP_INIT を先に呼ぶこと */
+    };
+    match lookup(op) {
+        Some(f) => f(st, owner, slot_no, arg),
+        None => OS32_ERR_NOSYS,
+    }
+}
+
+/* ================================================================ */
+/*  op → 関数表                                                      */
+/* ================================================================ */
+
+type OpFn = fn(&mut GuiState, i32, usize, u32) -> i32;
+
+struct Entry {
+    op: u32,
+    f: OpFn,
+}
+
+static TABLE: [Entry; 21] = [
+    Entry { op: GUI_OP_POLL, f: op_poll },
+    Entry { op: GUI_OP_WAIT, f: op_wait },
+    Entry { op: GUI_OP_COMMIT, f: op_commit },
+    Entry { op: GUI_OP_INVALIDATE, f: op_invalidate },
+    Entry { op: GUI_OP_STATS, f: op_stats },
+    Entry { op: GUI_OP_LEASE_PALETTE, f: op_nosys },
+    Entry { op: GUI_OP_WIN_CREATE, f: op_win_create },
+    Entry { op: GUI_OP_WIN_DESTROY, f: op_win_destroy },
+    Entry { op: GUI_OP_WIN_MOVE, f: op_win_move },
+    Entry { op: GUI_OP_WIN_RESIZE, f: op_win_resize },
+    Entry { op: GUI_OP_WIN_SHOW, f: op_win_show },
+    Entry { op: GUI_OP_WIN_SET_TITLE, f: op_win_set_title },
+    Entry { op: GUI_OP_WIN_CLIENT_RECT, f: op_win_client_rect },
+    Entry { op: GUI_OP_WIN_RAISE, f: op_win_raise },
+    Entry { op: GUI_OP_WIN_SET_FOCUS, f: op_win_set_focus },
+    Entry { op: GUI_OP_WIN_SET_TEXT_CURSOR, f: op_win_set_text_cursor },
+    Entry { op: GUI_OP_SURF_CREATE, f: op_nosys },
+    Entry { op: GUI_OP_SURF_DESTROY, f: op_nosys },
+    Entry { op: GUI_OP_TIMER_SET, f: op_timer_set },
+    Entry { op: GUI_OP_TIMER_KILL, f: op_timer_kill },
+    Entry { op: GUI_OP_MODAL_OPEN, f: op_nosys },
+];
+
+fn lookup(op: u32) -> Option<OpFn> {
+    let mut i = 0;
+    while i < TABLE.len() {
+        if TABLE[i].op == op {
+            return Some(TABLE[i].f);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 契約にある op のうち W1 では実装しないもの (G3 サーフェスはクライアント側、
+/// G8 リースと U4 モーダルは W2 以降)。`OS32_ERR_NOSYS`。
+fn op_nosys(_st: &mut GuiState, _owner: i32, _slot: usize, _arg: u32) -> i32 {
+    OS32_ERR_NOSYS
+}
+
+/* ================================================================ */
+/*  小道具                                                           */
+/* ================================================================ */
+
+#[inline]
+fn rect16(r: Rect) -> GuiRect16 {
+    GuiRect16 { x: r.x as i16, y: r.y as i16, w: r.w as i16, h: r.h as i16 }
+}
+
+/// 対象ウィンドウ ID を決める: `arg` が非 0 ならそれ、0 なら要求ブロックの
+/// `GuiReqWindow` (契約 T2 の「小さい値は arg に載せる」の両対応)。
+fn target_window(st: &GuiState, slot_no: usize, arg: u32) -> u32 {
+    if arg != 0 {
+        arg
+    } else {
+        let r: reqs::GuiReqWindow = unsafe { slot::read_req(st, slot_no) };
+        r.window
+    }
+}
+
+/// 所有者の窓 index を引く (generation + owner 検証つき)。
+fn owned_index(st: &GuiState, owner: i32, id: u32) -> Result<usize, i32> {
+    match st.win_by_id(id) {
+        None => Err(OS32_ERR_STALE),
+        Some(i) => {
+            if st.windows[i].owner != owner {
+                Err(OS32_ERR_INVAL)
+            } else {
+                Ok(i)
+            }
+        }
+    }
+}
+
+/// 損傷集合へ 1 矩形を足す (上限を超えたら先頭と union して数を保つ)。
+fn push_or_merge(set: &mut RectSet, r: Rect) {
+    if r.is_empty() {
+        return;
+    }
+    if set.len < MAX_DMG {
+        set.push(r);
+    } else {
+        set.rects[0] = set.rects[0].union(&r);
+    }
+}
+
+/* ================================================================ */
+/*  OP_INIT (契約 T2a / T5)                                          */
+/*                                                                  */
+/*  arg = アプリが期待する proto_version (0 = 指定なし)。戻り値は     */
+/*  スロット番号 (0〜3)。v1 は常に 0。                                */
+/* ================================================================ */
+fn op_init(st: &mut GuiState, owner: i32, arg: u32) -> i32 {
+    if arg != 0 && arg != GUI_PROTO_VERSION as u32 {
+        return OS32_ERR_VERSION;
+    }
+    let slot_no = match st.alloc_slot(owner) {
+        Some(s) => s,
+        None => return OS32_ERR_FULL, /* 5 本目は起動できない (T2a) */
+    };
+    slot::init_header(st, slot_no);
+    st.slots[slot_no].serial = 0;
+    st.slots[slot_no].last_reported_dropped = 0;
+    slot_no as i32
+}
+
+/* ================================================================ */
+/*  OP_POLL (契約 T3) — 導出型を同じリングへ追記して未読件数を返す     */
+/* ================================================================ */
+fn op_poll(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    /* 前回の OP_POLL で渡した dropped / OVERFLOW を消し込む (受領済み)。 */
+    consume_reported_dropped(st, slot_no);
+
+    /* (1) 導出型を追記: Configure → Timer → Paint。 */
+    emit_configures(st, owner, slot_no);
+    let now = st.now;
+    timer::fire_expired(st, slot_no, owner, now);
+    emit_paints(st, owner, slot_no);
+
+    /* (2) 戻り値 = tail − head。seq を進め、今回渡した dropped を控える。 */
+    let mut h = slot::read_header(st, slot_no);
+    h.seq = h.seq.wrapping_add(1);
+    slot::write_header(st, slot_no, &h);
+    st.slots[slot_no].last_reported_dropped = h.dropped;
+    ring::count(h.ring_head, h.ring_tail) as i32
+}
+
+/// 前回の `OP_POLL` でアプリへ見せた分の `dropped` を引き、0 になったら
+/// `OVERFLOW` を落とす。その後に増えた分は残す (見せていないので消さない)。
+fn consume_reported_dropped(st: &mut GuiState, slot_no: usize) {
+    let seen = st.slots[slot_no].last_reported_dropped;
+    if seen == 0 {
+        return;
+    }
+    let mut h = slot::read_header(st, slot_no);
+    h.dropped = h.dropped.saturating_sub(seen);
+    if h.dropped == 0 {
+        h.flags &= !os32api::gui::proto::GUI_HDR_FLAG_OVERFLOW;
+    }
+    slot::write_header(st, slot_no, &h);
+    st.slots[slot_no].last_reported_dropped = 0;
+}
+
+/// 座標が確定した窓の `Configure` を流す (導出型、最新 1 件)。
+fn emit_configures(st: &mut GuiState, owner: i32, _slot_no: usize) {
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        if st.windows[idx].used
+            && st.windows[idx].owner == owner
+            && st.windows[idx].configure_pending
+        {
+            input::emit_configure(st, idx);
+        }
+        idx += 1;
+    }
+}
+
+/// dirty ∩ 可視領域を `Paint` にして流し、渡った分を issued へ移す (契約 G4)。
+/// リングに入らなかった分と可視領域の外は dirty のまま残る (状態なので失われない)。
+fn emit_paints(st: &mut GuiState, owner: i32, slot_no: usize) {
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        if st.windows[idx].used && st.windows[idx].owner == owner {
+            emit_paints_win(st, idx, slot_no);
+        }
+        idx += 1;
+    }
+}
+
+fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
+    if st.windows[idx].dirty.is_empty() || st.windows[idx].vis.is_empty() {
+        return;
+    }
+    let id = st.windows[idx].id(idx);
+    let dirty = st.windows[idx].dirty;
+
+    /* (a) 配送候補 = dirty ∩ 可視領域。issued の空き (16) までで打ち切る。 */
+    let mut cand: [(usize, Rect); MAX_VIS] = [(0, Rect::EMPTY); MAX_VIS];
+    let mut ncand = 0;
+    let mut i = 0;
+    while i < dirty.len && ncand < MAX_VIS {
+        let pieces = damage::clip_to_vis(&st.windows[idx], dirty.rects[i]);
+        let mut k = 0;
+        while k < pieces.len && ncand < MAX_VIS {
+            cand[ncand] = (i, pieces.rects[k]);
+            ncand += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+
+    /* (b) リングへ流す。空きが尽きたらそこで止める (残りは dirty のまま)。 */
+    let mut delivered = [false; MAX_VIS];
+    let mut j = 0;
+    while j < ncand {
+        if st.windows[idx].issued.len >= MAX_VIS {
+            break;
+        }
+        let ev = ring::ev_rect(GUI_EV_PAINT, id, rect16(cand[j].1));
+        if !ring::append(st, slot_no, &ev) {
+            break;
+        }
+        st.windows[idx].issued.push(cand[j].1);
+        delivered[j] = true;
+        j += 1;
+    }
+
+    /* (c) 渡せなかった分を dirty として残す (dirty 各矩形 − 渡した断片)。 */
+    let mut new_dirty = RectSet::EMPTY;
+    let mut d = 0;
+    while d < dirty.len {
+        let mut region = RectSet::EMPTY;
+        region.push(dirty.rects[d]);
+        let mut m = 0;
+        while m < ncand {
+            if delivered[m] && cand[m].0 == d {
+                let (next, _ok) = visible::region_subtract_rect(&region, cand[m].1);
+                region = next;
+            }
+            m += 1;
+        }
+        let mut r = 0;
+        while r < region.len {
+            push_or_merge(&mut new_dirty, region.rects[r]);
+            r += 1;
+        }
+        d += 1;
+    }
+    st.windows[idx].dirty = new_dirty;
+}
+
+/* ================================================================ */
+/*  OP_WAIT (契約 T3 / T8 の X3) — WM の全周期を回して眠る            */
+/* ================================================================ */
+fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let start = unsafe { (os32api::api().get_tick)() };
+    let timeout = arg; /* ticks。0 = 期限なし */
+
+    /* 期限 = min(timeout, 次のタイマ) (契約 U5)。どちらも無ければ「起こされるまで」。 */
+    let mut deadline: Option<u32> = if timeout > 0 { Some(start.wrapping_add(timeout)) } else { None };
+    if let Some(t) = timer::next_deadline_owner(st, owner) {
+        deadline = Some(match deadline {
+            Some(d) if d.wrapping_sub(t) >= 0x8000_0000 => d, /* d <= t */
+            _ => t,
+        });
+    }
+
+    loop {
+        /* WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップ present。 */
+        wm::wm_cycle(st, input::Ctx::Wait);
+
+        if wake_ready(st, owner, slot_no) {
+            break;
+        }
+        let now = st.now;
+        if let Some(d) = deadline {
+            /* now >= d (ラップ安全) */
+            if now.wrapping_sub(d) < 0x8000_0000 {
+                break;
+            }
+        }
+        /* 待ちは sys_halt だけ (get_tick スピン禁止)。PIT 10ms で必ず起きる。 */
+        unsafe { (os32api::api().sys_halt)() };
+    }
+    ring::pending(st, slot_no) as i32
+}
+
+/// `OP_WAIT` が戻る条件 (契約 T3): 未読がある、または**配送できる**導出型がある。
+/// 完全に隠れた窓の dirty (可視領域が空) では起きない (G0b-3c)。
+fn wake_ready(st: &GuiState, owner: i32, slot_no: usize) -> bool {
+    if ring::pending(st, slot_no) > 0 {
+        return true;
+    }
+    if timer::has_expired(st, owner, st.now) {
+        return true;
+    }
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        let w = &st.windows[idx];
+        if w.used && w.owner == owner {
+            if w.configure_pending {
+                return true;
+            }
+            if damage::has_deliverable_paint(w) {
+                return true;
+            }
+        }
+        idx += 1;
+    }
+    false
+}
+
+/* ================================================================ */
+/*  OP_COMMIT (契約 G4 / T8 の X2) — issued だけを present            */
+/* ================================================================ */
+fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
+    let target = arg; /* 0 = この owner の全ウィンドウ */
+    if target != 0 {
+        if let Err(e) = owned_index(st, owner, target) {
+            return e;
+        }
+    }
+    let mut touched = Rect::EMPTY;
+    let mut any = false;
+
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        let hit = st.windows[idx].used
+            && st.windows[idx].owner == owner
+            && (target == 0 || st.windows[idx].id(idx) == target);
+        if hit && st.windows[idx].issued.len > 0 {
+            let (cox, coy) = st.windows[idx].client_origin();
+            let n = st.windows[idx].issued.len;
+            let mut i = 0;
+            while i < n {
+                /* issued はクライアントローカル。画面座標へ移して積む。 */
+                let scr = st.windows[idx].issued.rects[i].translate(cox, coy);
+                wm::queue_present(st, scr);
+                touched = touched.union(&scr);
+                i += 1;
+            }
+            st.windows[idx].issued.clear();
+            any = true;
+        }
+        idx += 1;
+    }
+
+    if !any {
+        return 0;
+    }
+    /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
+     * 退避を捨てて退避し直し、同じ commit で一緒に出す (X2 の許される描画)。 */
+    if cursor::refresh_if_hit(st, touched) {
+        let cr = cursor::rect(st);
+        wm::queue_present(st, cr);
+    }
+    wm::flush_present(); /* ← 1 周 1 回の commit (契約 P) */
+    0
+}
+
+/* ================================================================ */
+/*  OP_INVALIDATE (契約 G4) — dirty に足すだけ                        */
+/* ================================================================ */
+fn op_invalidate(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqInvalidate = unsafe { slot::read_req(st, slot_no) };
+    let idx = match owned_index(st, owner, req.window) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let r = Rect::new(req.rect.x as i32, req.rect.y as i32, req.rect.w as i32, req.rect.h as i32);
+    damage::add_dirty(&mut st.windows[idx], r);
+    0
+}
+
+/* ================================================================ */
+/*  OP_STATS (契約 G7) — GFX_Stats を応答ブロックへ                   */
+/* ================================================================ */
+fn op_stats(st: &mut GuiState, _owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let out = slot::resp_ptr(st, slot_no);
+    unsafe { (os32api::api().gfx_stats)(out) }
+}
+
+/* ================================================================ */
+/*  ウィンドウ (契約 U1)                                              */
+/* ================================================================ */
+
+fn op_win_create(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let spec: GuiWinSpec = unsafe { slot::read_req(st, slot_no) };
+    let r = wm::create_window(st, owner, &spec);
+    let resp = reqs::GuiRespWindow {
+        result: if r < 0 { r } else { 0 },
+        window: if r < 0 { 0 } else { r as u32 },
+    };
+    slot::write_resp(st, slot_no, resp);
+    r
+}
+
+fn op_win_destroy(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let id = target_window(st, slot_no, arg);
+    wm::destroy_window(st, owner, id)
+}
+
+fn op_win_move(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqWinMove = unsafe { slot::read_req(st, slot_no) };
+    wm::move_window(st, owner, req.window, req.x as i32, req.y as i32)
+}
+
+fn op_win_resize(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqWinResize = unsafe { slot::read_req(st, slot_no) };
+    wm::resize_window(st, owner, req.window, req.w as i32, req.h as i32)
+}
+
+fn op_win_show(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqWinShow = unsafe { slot::read_req(st, slot_no) };
+    wm::show_window(st, owner, req.window, req.show != 0)
+}
+
+fn op_win_set_title(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqWinTitle = unsafe { slot::read_req(st, slot_no) };
+    let len = req.title.len as usize;
+    wm::set_title(st, owner, req.window, &req.title.s, len)
+}
+
+fn op_win_client_rect(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let id = target_window(st, slot_no, arg);
+    match wm::client_rect(st, owner, id) {
+        Ok(r) => {
+            let resp = reqs::GuiRespRect { result: 0, rect: rect16(r) };
+            slot::write_resp(st, slot_no, resp);
+            0
+        }
+        Err(e) => {
+            let resp =
+                reqs::GuiRespRect { result: e, rect: GuiRect16 { x: 0, y: 0, w: 0, h: 0 } };
+            slot::write_resp(st, slot_no, resp);
+            e
+        }
+    }
+}
+
+fn op_win_raise(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let id = target_window(st, slot_no, arg);
+    wm::raise(st, owner, id)
+}
+
+fn op_win_set_focus(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let id = target_window(st, slot_no, arg);
+    wm::set_focus(st, owner, id)
+}
+
+fn op_win_set_text_cursor(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqTextCursor = unsafe { slot::read_req(st, slot_no) };
+    wm::set_text_cursor(st, owner, req.window, req.x as i32, req.y as i32, req.visible != 0)
+}
+
+/* ================================================================ */
+/*  タイマ (契約 U5)                                                  */
+/* ================================================================ */
+
+fn op_timer_set(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqTimerSet = unsafe { slot::read_req(st, slot_no) };
+    if owned_index(st, owner, req.window).is_err() {
+        return OS32_ERR_STALE;
+    }
+    let now = st.now;
+    timer::set(st, owner, req.window, req.timer_id, req.interval_ms, now)
+}
+
+fn op_timer_kill(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: reqs::GuiReqTimerKill = unsafe { slot::read_req(st, slot_no) };
+    timer::kill(st, owner, req.window, req.timer_id)
+}
