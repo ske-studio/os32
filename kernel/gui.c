@@ -66,6 +66,14 @@ void gui_owner_exit(int owner)
     if (g_gui_handler != 0) {
         g_gui_handler(GUI_OP_OWNER_EXIT, 0, owner);
     }
+    /* WM 自身 (gshell = shell 帯 owner 1) が終了するなら登録を解除する。
+     * これをしないと、gshell.bin が抜けて同じ 0x300000 に shell.bin が
+     * 載った後も g_gui_handler / g_gui_pump が旧コードを指したままになり、
+     * K2 の syscall 境界ポンプが別コードを呼んでしまう (レビュー ①)。 */
+    if (owner == GUI_SHELL_OWNER) {
+        g_gui_handler = 0;
+        g_gui_pump    = 0;
+    }
 }
 
 /* ======================================================================== */

@@ -52,7 +52,7 @@ static int pc98_init(GFX_ScreenInfo *info)
                    (gfx_flip_enabled ? GFX_CAP_PAGE_FLIP : 0);
     /* パレットのリース (G8): 16 色機は index 1-6, 8-15 の 14 項目を貸せる。
      * 不可侵は 0 (TEXT 黒) と 7 (WINDOW 白)。lease_first/count は 256 色機用。 */
-    info->lease_mask  = 0x7F7E;
+    info->lease_mask  = 0xFF7E;   /* index 1-6 と 8-15 の 14 色 (契約 G8)。0 と 7 のみ不可侵 */
     info->lease_first = 0;
     info->lease_count = 0;
     for (i = 0; i < 5; i++) info->reserved[i] = 0;

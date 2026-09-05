@@ -321,10 +321,10 @@ fn draw_clip_demo(screen: SurfaceId) {
     /* はみ出す対角線 (クリップされる)。 */
     g::line(
         screen,
-        (cx - 30) as i16,
-        (cy - 30) as i16,
-        (cx + cw + 30) as i16,
-        (cy + ch + 30) as i16,
+        cx - 30,
+        cy - 30,
+        cx + cw + 30,
+        cy + ch + 30,
         Style::pen(GUI_COLOR_TEXT),
     );
     /* 内側クリップを入れ子に。別の色で塗る。 */

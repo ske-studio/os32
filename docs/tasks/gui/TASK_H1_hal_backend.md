@@ -36,7 +36,7 @@
    表には塗りと矩形転送だけを置く (契約 G2 の対応表)。
 2. **9801 バックエンド** (`gfx/backend_pc98.c`、実体は現行 `gfx_vram.c` の移設):
    `probe` は常に 1、`init` は 640×400 (または 200 行モード) / bpp 4 / `GFX_FMT_PLANAR4` /
-   `GFX_CAP_TEXT_OVERLAY | PAGE_FLIP` / `lease_mask = 0x7F7E`。`fill_rect` / `blit` は
+   `GFX_CAP_TEXT_OVERLAY | PAGE_FLIP` / `lease_mask = 0xFF7E` (index 1-6・8-15 の 14 色, 0 と 7 のみ不可侵)。`fill_rect` / `blit` は
    NULL (CPU 実装)。`enter` / `leave` は空。
 3. **`gfx_core.c` を表経由に**: `gfx_present*` / `gfx_set_palette*` / `gfx_screen_info` /
    `gfx_hw_*` が `g_backend->...` を呼ぶ。`gfx_init` で `probe` 順に最初の 1 枚を選ぶ
@@ -70,7 +70,7 @@
 ## 完了条件 (ゲート G1 の H 側)
 
 - `gfx_screen_info()` の内容が現行と同じ (hal_test で確認: 640×400、bpp 4、PLANAR4、
-  TEXT_OVERLAY|PAGE_FLIP、lease_mask 0x7F7E)。
+  TEXT_OVERLAY|PAGE_FLIP、lease_mask 0xFF7E)。
 - `gfx_stats()` が `present_bytes` を返し、`gfx_present()` 1 回で 128000 (640×400×4/8)、
   `gfx_present_rect(0,0,32,16)` で 256 増える。
 - 既存 GFX プログラムに回帰なし: `gfx_demo`、`blit_test`、`blit_test2`、`gfx200_test`、
