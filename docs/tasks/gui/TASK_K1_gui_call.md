@@ -63,7 +63,10 @@
 - shell から `gui_register` した後、テスト用のダミーハンドラ (K1 が `userland/tests/gui_call_test.c`
   に置く: op をそのまま返す) を通して `gui_call(5, 7)` が `5` を返し、owner が 2 で届く。
 - SHM ブロック 12〜15 が `shm_alloc` で配られない (`db_test` 等の既存 SHM 利用者に回帰なし)。
-- `make check` (check_kapi_version / check_constraints) を通る。KAPI_SPEC v41、175+4 項目。
+- `make check` (check_kapi_version / check_constraints) を通る。KAPI_SPEC v41 の項目数が
+  `kapi.json` の生成結果と一致する (`check_kapi_version.py` が照合。本票発行時点の追加は 6 関数:
+  `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` /
+  `kbd_dropped_count`。増減があれば実物に合わせる)。
 
 ## 検証手順
 
