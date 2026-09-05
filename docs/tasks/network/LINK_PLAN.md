@@ -166,7 +166,7 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 | 段階 | 合格条件 |
 |---|---|
 | L0 Stop-and-Wait | **エミュレータ合格 (2026-09-05)**。HELLO 交換後、1 要求 1 応答が往復。ACK まで次を送らない。重複 WINDOW/ACK に耐える。ページ消費表を凍結 |
-| L1 WINDOW/Credit | Host が credit_pages を超えて送らない。OVW を通常運転で起こさない。重複 WINDOW で二重加算しない (絶対値) |
+| L1 WINDOW/Credit | **エミュレータ合格 (2026-09-05)**。Host が credit_pages を超えて送らない。OVW を通常運転で起こさない。重複 WINDOW で二重加算しない (絶対値) |
 | L2 Streaming | 大容量応答を seq 連続で受け、OS32 側の再結合バッファ無しで順次消費。欠落は再送で埋まる |
 | L3 Host Services | 外部プログラムから HTTP_GET → host_read が動く。回線速度に依らず OS32 側のメモリ上限が一定 |
 
@@ -178,9 +178,18 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   `tools/host_agent.py` (HELLO 応答 + REQUEST→RESPONSE echo) を対向に、
   `make check-net-l0` で HELLO 確立・10/10 往復・再送 0・取りこぼし 0 を確認。
   ビルドは `make kernel-lgy98-link` (LGY98_FLAGS=9 = DIAG+LINKTEST、反射なし)。
-- **未了 (L0 の詰め)**: ページ消費量の実測と表の凍結 (§2-3)。現状は往復のみで、
-  CURR の進みからの消費ページ計測はまだ。L1 (WINDOW/Credit) 着手時に併せて行う。
-- **次**: L1 (絶対値 WINDOW でホスト→OS32 を複数フレーム化)。
+- **L1 実装・エミュレータ合格 (2026-09-05)**: 絶対値 WINDOW (ack=順序どおり受けた最終 seq、
+  payload に credit_pages)。credit = min(`ne2k_rx_ring_free_pages`, `ne2k_rx_queue_free`×6)
+  − 安全マージン 12 ページ。`link_l1_bulk` がホストに DATA を流させ、`make check-net-l1` で
+  200/200 を順序どおり・EOF・NIC drop 0・credit 有界 (36 ページ) を確認。ホストは credit を
+  絶対値として守り (host_agent.py の in-flight 計上)、リングを溢れさせない。
+- **ページ消費の実測 (§2-3) 完了**: ドライバの `rx_pages_total` を CURR の進みから積算し、
+  512B ペイロードで **2.99 ページ/フレーム** を計測 (理論値 ceil((4+14+16+512)/256)=3 と一致)。
+  credit cost は当面この実測値を使い、host_agent は保守的に 6 ページ/フレームで見積もる。
+- **途中の修正**: 連続転送中に Remote DMA の RDC が 1 回タイムアウトし reinit が走って
+  リング全体 (in-flight DATA) が消え、L1 が gap でデッドロックしていた。dma_read/write を
+  1 回だけ再発行するようにして解消 (commit)。
+- **次**: L2 (DATA seq のストリーミング再開・欠落再送) → L3 (Host Services)。
 
 ## 6. Host Agent
 
