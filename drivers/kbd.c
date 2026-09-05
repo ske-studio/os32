@@ -54,6 +54,16 @@ static volatile int kbd_count = 0;
  * 加算する (kbd_shift_state と同じ所有権)。KAPI kbd_dropped_count() で読む。 */
 static volatile u32 kbd_dropped = 0;
 
+/* 生 make/break イベントリング (レビュー ⑥、GUI の Key down/up 用)。
+ * cooked な kbd_buf (make のみ、ASCII 化) と別に、全キーの押下/離しを
+ * 順序どおり積む。WM (gshell) が kbd_trygetrawkey() で読み、down=1/0 の
+ * Key イベントを作る。エントリ = keycode | (down << 8)。満杯なら捨てる
+ * (WM が追いつく前提。取りこぼしは kbd_dropped と別勘定にしない)。 */
+static volatile u16 kbd_raw_buf[KBD_BUF_SIZE];
+static volatile int kbd_raw_head = 0;
+static volatile int kbd_raw_tail = 0;
+static volatile int kbd_raw_count = 0;
+
 /* ======================================================================== */
 /*  スキャンコード → ASCII 変換テーブル                                    */
 /*  PC9800Bible §2-5 表2-14 の「通常」列から抽出                           */
@@ -147,6 +157,13 @@ void kbd_irq_handler(void)
         kbd_key_pressed[keycode >> 3] &= ~(1 << (keycode & 7));
     } else {
         kbd_key_pressed[keycode >> 3] |=  (1 << (keycode & 7));
+    }
+
+    /* 生イベントを raw リングへ (make も break も、全キー。IRQ 内なので保護不要) */
+    if (kbd_raw_count < KBD_BUF_SIZE) {
+        kbd_raw_buf[kbd_raw_tail] = (u16)keycode | (is_break ? 0 : 0x100);
+        kbd_raw_tail = (kbd_raw_tail + 1) % KBD_BUF_SIZE;
+        kbd_raw_count++;
     }
 
     /* シフトキー状態の更新 */
@@ -247,6 +264,7 @@ void kbd_init(void)
     {
         int i;
         for (i = 0; i < 16; i++) kbd_key_pressed[i] = 0;
+        kbd_raw_head = kbd_raw_tail = kbd_raw_count = 0;
     }
 
     /* キーボードIRQを有効化 */
@@ -369,6 +387,17 @@ int kbd_is_pressed(int scancode)
 {
     if (scancode < 0 || scancode > 127) return 0;
     return (kbd_key_pressed[scancode >> 3] >> (scancode & 7)) & 1;
+}
+
+/* 生 make/break イベントを 1 件取り出す (レビュー ⑥)。無ければ -1。
+ * 戻り値 = keycode | (down << 8)。down=1 が押下 (make)、0 が離し (break)。
+ * WM (gshell) が Key down/up イベントを作るのに使う。 */
+int kbd_trygetrawkey(void)
+{
+    u16 entry;
+    if (kbd_raw_count == 0) return -1;
+    RING_DEQUEUE(entry, kbd_raw_buf, kbd_raw_head, kbd_raw_count, KBD_BUF_SIZE);
+    return (int)entry;
 }
 
 /* 待ち行列が満杯で捨てた打鍵の累計を返す (契約 T3、GUI v1.1 の KAPI)。 */

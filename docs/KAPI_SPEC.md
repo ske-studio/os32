@@ -17,7 +17,7 @@
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
 | 現在のバージョン | **41** |
-| 合計エントリ数 | **181** (ヘッダ2 + 関数ポインタ177 + データフィールド2) |
+| 合計エントリ数 | **182** (ヘッダ2 + 関数ポインタ178 + データフィールド2) |
 
 ---
 
@@ -80,7 +80,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | 版 | 状態 | 追加内容 | 出典 |
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
-| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
+| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
 | v42 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 
 調停 (2026-09-06): GUI (K1) を先に実装するので **v41 = GUI、v42 = ネットワーク Host Services**
@@ -317,6 +317,7 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2C0 | gfx_lease_palette | `int(int first, int count, const u8 *rgb)` |
 | 0x2C4 | sys_switch_shell | `int(const char *path)` |
 | 0x2C8 | kbd_dropped_count | `u32(void)` |
+| 0x2CC | kbd_trygetrawkey | `int(void)` |
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは
@@ -336,8 +337,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2CC | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2D0 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2D0 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2D4 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

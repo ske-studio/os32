@@ -1270,6 +1270,11 @@
       "name": "kbd_dropped_count",
       "ret": "u32",
       "args": []
+    },
+    {
+      "name": "kbd_trygetrawkey",
+      "ret": "int",
+      "args": []
     }
   ]
 }
