@@ -109,6 +109,16 @@
 #define GUI_STYLE_DITHER50        0x08  /* 50% 市松塗り */
 
 /* ======================================================================== */
+/*  ウィンドウフラグ GUI_WF_* (u16) — 契約 U1。GuiWinSpec.flags で使う。      */
+/*  既存 libos32gui (types.rs) と同値。ABI 確定 (レビュー ③)。末尾追記のみ。 */
+/* ======================================================================== */
+#define GUI_WF_VISIBLE    0x0001  /* 生成時から可視 */
+#define GUI_WF_HAS_CLOSE  0x0002  /* 閉じるボタンを WM が描く */
+#define GUI_WF_MOVABLE    0x0004  /* タイトルバーでドラッグ移動可 */
+#define GUI_WF_BORDER     0x0008  /* 立体枠を WM が描く */
+#define GUI_WF_DEFAULT    (GUI_WF_VISIBLE | GUI_WF_HAS_CLOSE | GUI_WF_MOVABLE | GUI_WF_BORDER)
+
+/* ======================================================================== */
 /*  システム色 (16 色固定、役割名で参照) — G6                                */
 /*                                                                          */
 /*  アプリは index でなく役割名で参照する。gshell が起動時に                 */
@@ -307,5 +317,41 @@ typedef struct {
 STATIC_ASSERT(GUI_OFFSETOF(GuiWinSpec, rect)  == 40, gui_winspec_rect_40);
 STATIC_ASSERT(GUI_OFFSETOF(GuiWinSpec, flags) == 48, gui_winspec_flags_48);
 STATIC_ASSERT(sizeof(GuiWinSpec) <= GUI_SLOT_REQ_SIZE, gui_winspec_fits_req);
+
+/* ======================================================================== */
+/*  op ごとの要求 / 応答 (契約 U1 / U4 / U5 / G3)。ABI 確定 (レビュー ③)。    */
+/*                                                                          */
+/*  gui_call(op, arg) で arg が小さい値 (WindowId 等) だけの op は arg に直接  */
+/*  載せる。複数フィールドが要る op は下の GuiReq* を要求ブロック (512B) に    */
+/*  書いてから呼び、結果は GuiResp* を応答ブロック (512B) から読む。           */
+/*  WindowId / SurfaceId は u32 (index:16 | generation:16)。result<0 は        */
+/*  OS32_ERR_*。W (gshell) / C (libos32gui) はこの並びを Rust へ写す。         */
+/*  **末尾追記のみ** (契約 T5)。                                              */
+/* ======================================================================== */
+
+/* 単一ハンドルを対象にする op (DESTROY / RAISE / SET_FOCUS / CLIENT_RECT) */
+typedef struct { u32 window; } GuiReqWindow;                        /* 4B */
+
+typedef struct { u32 window; i16 x; i16 y; } GuiReqWinMove;         /* MOVE   8B */
+typedef struct { u32 window; i16 w; i16 h; } GuiReqWinResize;       /* RESIZE 8B */
+typedef struct { u32 window; u8 show; u8 _pad[3]; } GuiReqWinShow;  /* SHOW   8B */
+typedef struct { u32 window; i16 x; i16 y; u8 visible; u8 _pad; } GuiReqTextCursor; /* SET_TEXT_CURSOR */
+typedef struct { u32 window; GuiString title; } GuiReqWinTitle;     /* SET_TITLE 260B */
+
+typedef struct { i16 w; i16 h; } GuiReqSurfCreate;                  /* SURF_CREATE */
+typedef struct { u32 window; u16 timer_id; u16 interval_ms; } GuiReqTimerSet; /* TIMER_SET */
+typedef struct { u32 window; u16 timer_id; u16 _pad; } GuiReqTimerKill;       /* TIMER_KILL */
+typedef struct { u16 buttons; u16 _pad; GuiString message; } GuiReqModal;     /* MODAL_OPEN 260B */
+
+typedef struct { i32 result; u32 window;   } GuiRespWindow;         /* CREATE -> window */
+typedef struct { i32 result; u32 surface;  } GuiRespSurface;       /* SURF_CREATE -> surface */
+typedef struct { i32 result; GuiRect16 rect; } GuiRespRect;         /* CLIENT_RECT -> rect */
+typedef struct { i32 result; i16 button; i16 _pad; } GuiRespModal;  /* MODAL_OPEN -> button */
+
+STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
+STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
+STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
+STATIC_ASSERT(sizeof(GuiRespRect)     <= GUI_SLOT_RESP_SIZE, gui_resp_rect_fits);
+STATIC_ASSERT(sizeof(GuiRespWindow)   <= GUI_SLOT_RESP_SIZE, gui_resp_window_fits);
 
 #endif /* OS32_GUI_SHARED_H */

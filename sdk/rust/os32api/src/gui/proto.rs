@@ -79,6 +79,14 @@ pub const GUI_STYLE_XOR: u8 = 0x02;
 pub const GUI_STYLE_DOTTED: u8 = 0x04;
 pub const GUI_STYLE_DITHER50: u8 = 0x08;
 
+/* ウィンドウフラグ GUI_WF_* (u16) — 契約 U1 / os32_gui_shared.h と同値 (レビュー ③) */
+pub const GUI_WF_VISIBLE: u16 = 0x0001;
+pub const GUI_WF_HAS_CLOSE: u16 = 0x0002;
+pub const GUI_WF_MOVABLE: u16 = 0x0004;
+pub const GUI_WF_BORDER: u16 = 0x0008;
+pub const GUI_WF_DEFAULT: u16 =
+    GUI_WF_VISIBLE | GUI_WF_HAS_CLOSE | GUI_WF_MOVABLE | GUI_WF_BORDER;
+
 /* ======================================================================== */
 /*  システム色 (16 色固定、役割名で参照) — G6                                */
 /* ======================================================================== */
