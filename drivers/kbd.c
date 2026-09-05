@@ -466,6 +466,13 @@ void kbd_set_gui_mode(int on)
     kbd_head  = 0;
     kbd_tail  = 0;
     kbd_count = 0;
+    /* raw リングも空にする。raw は WM しか読まないので、CUI 中の打鍵 (rshell を
+     * 閉じた ESC 等) が残ったまま次の gshell に届き、起動直後に ESC で終了して
+     * しまう (2026-09-06 実測: os32gui の直後に CUI へ戻る)。GUI → CUI の
+     * 向きも同様に、次回の gshell へ古い打鍵を持ち越さない。 */
+    kbd_raw_head  = 0;
+    kbd_raw_tail  = 0;
+    kbd_raw_count = 0;
     irq_restore(flags);
 }
 
