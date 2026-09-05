@@ -113,3 +113,16 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
    (`docs/hw/undocumented/io_*.md`。ミラーは git 管理外)。
 6. **検証は [V1]〜[V4]**: deploy.yaml に載せる、NHD 配備で確かめる、失敗はそのまま書く。
 7. **`get_tick` スピン禁止** (v2 M0)。待つのは `OP_WAIT` → `sys_halt` だけ。
+
+## 7. 進捗 (PM が更新。ゲートは実機 = NP21/W の NHD 配備で判定)
+
+| 日付 | 事項 |
+|---|---|
+| 2026-09-05 | K1 (KAPI v41 / 共有ヘッダ)、H1 (GfxBackend 表 / backend_pc98)、C1 (G 描画 API / gdi_test)、K4 (system.cfg / CUI⇄gshell 起動ループ / os32gui) を feat/gui に結合。**G1 通過** (gdi_test が描画し `gfx_stats` の present_bytes=512000)。レビュー 2 回 (11 点) 反映 |
+| 2026-09-06 | **W1 結合** (gshell: handler / pump / cursor / desktop / wm / slot / ring / damage / visible / chrome / input / timer、`make gshell` で 0x300000 リンク、`/bin/gshell.bin`)。カーネル修正 §4-19 (CPL=3 の KAPI 中に IF=0 で hlt が永久停止 → `int80_stub` で sti / 出口 cli。G2 以降の `OP_WAIT` の前提)。**G2 の W 側 (単独)**: `os32gui` → デスクトップ (背景・手引き・カーソル) → ESC → CUI、3 往復で `ver` 応答。残りの G2 (gui_demo の窓 2 枚、ドラッグ、G4 の重なり、契約 P) は C2 結合後 |
+
+### 記録しておく v1 の限界 (W1 の申し送り)
+
+- **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
+- **cooked キュー**: WM は raw リングだけ読むので、GUI 中に cooked (`kbd_buf`) が溢れて `kbd_dropped` が偽 OVERFLOW になる。暫定は gshell の `drain_cooked_queue`、本筋は K2 で「GUI 中は cooked に積まない」。
+- W1 の解釈 (契約に受け渡し場所の記述が無かったもの): `OP_INIT` の proto_version は arg、単一ハンドル op は arg≠0 ならハンドル / 0 なら `GuiReqWindow`、`OP_STATS` は応答ブロック先頭に `GFX_Stats` 生、P2 の取り込み tick はスロット +11280 に 64×4B (`u16 serial` + `u16 tick`)、`Configure` の rect は画面絶対座標 / `Paint` はクライアントローカル、タイマは反復固定。C2 はこれに合わせる。
