@@ -42,109 +42,63 @@ def send_key(seq):
 
 
 class During:
-    """試験の間、ゲストで別のコマンド (CPL3 プログラムや V86 セッション) を走らせておく。
-    /api/cmd は完了までブロックするので別スレッドで投げ、終了は exit_key で促す。"""
+    """試験の間、ゲストで別のコマンド (CPL3 プログラム) を常駐させておく。
+
+    aidebug のデバッグサーバは単一スレッドで、要求を 1 つずつ処理する
+    (aidebug_server.cpp の設計)。したがって sleep のように戻ってこない
+    コマンドを /api/cmd で投げると、その間 inject / capture / mem がすべて
+    詰まって試験にならない。ここでは less のような対話プログラムを使う:
+    最初の画面を出してキー入力待ちに入ると /api/cmd は戻り (チャネルが空く)、
+    プログラム自身は CPL3 に常駐したままになる。常駐は tvram の wait_for で確認し、
+    終了は exit_key (less なら q) で促す。"""
 
     def __init__(self, cmd, exit_key, wait_for, settle, timeout):
         self.cmd, self.exit_key, self.wait_for = cmd, exit_key, wait_for
         self.settle, self.timeout = settle, timeout
-        self.result = None
         self.thread = None
 
     def _run(self):
         try:
             req = urllib.request.Request(BASE + "/api/cmd", data=self.cmd.encode(), method="POST")
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                self.result = r.read().decode("utf-8", "replace")
-        except Exception as e:      # timeout も含めて記録だけする
-            self.result = "error: %s" % e
+            urllib.request.urlopen(req, timeout=self.timeout).read()
+        except Exception:
+            pass
 
     def start(self):
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
         t0 = time.time()
-        if self.wait_for:
-            while time.time() - t0 < self.timeout:
-                if self.wait_for in tvram_text():
-                    break
-                time.sleep(1.0)
-            else:
-                print("FAIL during: '%s' did not show '%s' within %ds" % (self.cmd, self.wait_for, self.timeout))
-                return False
-        time.sleep(self.settle)
-        if self.thread.is_alive():
-            print("during: '%s' is running (guest busy while the LAN test runs)" % self.cmd)
-            return True
-        print("FAIL during: '%s' already returned before the test started" % self.cmd)
-        return False
+        # /api/cmd が戻る (対話プログラムがキー待ちに入る) まではデバッグサーバが
+        # 塞がっているので tvram も返らない。戻った後に wait_for を確認する。
+        while time.time() - t0 < self.timeout:
+            if not self.thread.is_alive():
+                break
+            time.sleep(0.5)
+        else:
+            print("FAIL during: '%s' never freed the debug channel within %ds "
+                  "(non-interactive command? use an interactive one)" % (self.cmd, self.timeout))
+            return False
+        if self.wait_for and self.wait_for not in tvram_text():
+            time.sleep(self.settle)
+        if self.wait_for and self.wait_for not in tvram_text():
+            print("FAIL during: '%s' is not resident ('%s' not on screen)" % (self.cmd, self.wait_for))
+            return False
+        print("during: '%s' resident at CPL3 while the LAN test runs" % self.cmd)
+        return True
 
     def stop(self):
-        if self.exit_key and self.thread.is_alive():
+        if self.exit_key:
             send_key(self.exit_key)
-        self.thread.join(60)
-        alive = self.thread.is_alive()
-        print("%-4s during: '%s' %s" % ("FAIL" if alive else "ok", self.cmd,
-                                        "still running after exit key" if alive else "returned"))
-        return not alive
-
-
-def sym(name):
-    try:
-        for line in open(MAP, encoding="utf-8", errors="replace"):
-            m = re.match(r"\s+0x([0-9a-f]+)\s+%s$" % re.escape(name), line)
-            if m:
-                return int(m.group(1), 16)
-    except OSError:
-        pass
-    return None
-
-
-def read_u32(addr):
-    d = http("/api/mem?addr=0x%x&len=4&space=phys" % addr)
-    return struct.unpack("<I", bytes.fromhex(d["hex"]))[0]
-
-
-# drivers/ne2000.c struct ne2k_dev のオフセット (i386-elf-gcc の offsetof で確認、2026-09-05)
-NIC_IRQ_ON = 31
-NIC_ST = 13716
-ST_IRQ_COUNT, ST_IRQ_DEFERRED, ST_RX_DROPPED, ST_IRQ_RECHECKS, ST_BACKLOG = 20, 21, 11, 24, 25
-
-
-def nic_snapshot():
-    a = sym("ne2k_nic")
-    if a is None:
-        return None
-    hdr = bytes.fromhex(http("/api/mem?addr=0x%x&len=40&space=phys" % a)["hex"])
-    st = struct.unpack("<26I", bytes.fromhex(http("/api/mem?addr=0x%x&len=104&space=phys" % (a + NIC_ST))["hex"]))
-    return {"irq_on": hdr[NIC_IRQ_ON], "irq_count": st[ST_IRQ_COUNT], "irq_deferred": st[ST_IRQ_DEFERRED],
-            "rx_dropped": st[ST_RX_DROPPED], "irq_rechecks": st[ST_IRQ_RECHECKS], "backlog": st[ST_BACKLOG]}
-
-
-def frame(mac, length, seq):
-    payload = bytes((seq + i) & 0xFF for i in range(max(0, length - 14)))
-    return mac + PEER + struct.pack(">H", ETHERTYPE) + payload
-
-
-def expected_reflection(f):
-    out = f[6:12] + f[0:6] + f[12:]
-    if len(out) < 60:
-        out += b"\0" * (60 - len(out))        # NP21/W は受信時に 60B へ padding する
-    return out
-
-
-def tx_frames():
-    return [bytes.fromhex(x["hex"]) for x in http("/api/net/capture")["frames"] if x.get("dir") == "tx"]
-
-
-def wait_tx(pred, timeout=3.0):
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        for f in tx_frames():
-            if pred(f):
-                return f
-        time.sleep(0.1)
-    return None
-
+            time.sleep(1.0)
+        # ver でシェルに戻ったことを確認
+        try:
+            out = urllib.request.urlopen(urllib.request.Request(BASE + "/api/cmd", data=b"ver", method="POST"),
+                                         timeout=60).read().decode("utf-8", "replace")
+            ok = "OS32" in out
+        except Exception:
+            ok = False
+        print("%-4s during: '%s' exited, shell responds (ver)" % ("ok" if ok else "FAIL", self.cmd))
+        return ok
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -261,19 +215,8 @@ def main():
     net = http("/api/net")
     print("np21w: tx %s rx %s tx_dropped %s rx_dropped %s" %
           (net["tx_frames"], net["rx_frames"], net["tx_dropped"], net["rx_dropped"]))
-    if during is not None:
-        if not during.stop():
-            fails += 1
-        else:
-            # 戻ってきたシェルが生きていることを確認する
-            try:
-                out = urllib.request.urlopen(urllib.request.Request(BASE + "/api/cmd", data=b"ver", method="POST"),
-                                             timeout=60).read().decode("utf-8", "replace")
-                ok_ver = "OS32" in out
-            except Exception:
-                ok_ver = False
-            print("%-4s shell responds after the concurrent command (ver)" % ("ok" if ok_ver else "FAIL"))
-            fails += 0 if ok_ver else 1
+    if during is not None and not during.stop():
+        fails += 1
     print("RESULT: %s (%d failures)" % ("OK" if fails == 0 else "FAIL", fails))
     return 1 if fails else 0
 
