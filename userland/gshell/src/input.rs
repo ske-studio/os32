@@ -233,8 +233,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             break;
         }
         /* X4 (ポンプ) で FEP がオンなら変換をここでは行わない (契約 T8: 辞書検索
-         * まで走る)。退避して次の X3 に回す。満杯なら読まずにカーネル側に残す。 */
-        if ctx == Ctx::Pump && fep::is_on() {
+         * まで走る)。退避して次の X3 に回す。満杯なら読まずにカーネル側に残す。
+         * SHIFT+SPACE が保留中 (on/off が次の X3 で確定する) のときと、既に退避
+         * した打鍵があるときも退避する — でないと「SHIFT+SPACE → n i h o n g o」が
+         * X4 に来た場合、toggle 前の打鍵が FEP を素通りして先にアプリへ届く
+         * (2026-09-06 実測: 変換されず "nihongo" が入った)。 */
+        if ctx == Ctx::Pump && (fep::is_on() || fep::toggle_pending() || st.pending_raw_n > 0) {
             if st.pending_raw_n >= st.pending_raw.len() {
                 break;
             }

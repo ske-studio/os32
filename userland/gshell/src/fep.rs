@@ -204,6 +204,12 @@ pub fn is_on() -> bool {
     state().on
 }
 
+/// SHIFT+SPACE の on/off が次の X3 まで保留中か。保留中に届いた打鍵は FEP の
+/// 状態が確定するまで配送できないので、X4 は退避する (順序を保つ)。
+pub fn toggle_pending() -> bool {
+    state().toggle_pending
+}
+
 pub fn state() -> &'static mut Fep {
     unsafe { &mut *FEP.0.get() }
 }
