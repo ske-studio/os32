@@ -131,6 +131,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **C3 結合・G4 通過 (実機)**: `libos32gui.shlib` (84,920 B、ジャンプ表 95 本、text 17 ページ + data 4 ページ) を `/sys/lib` に配備、K3 のローダが 0x400000 に載せる。**gui_demo.bin 67,208 → 13,132 B (−80%)**、lease_test 62,312 → 9,644、gui_bench 66,260 → 12,808 (gdi_test は単独 GFX なので 30,420 → 22,312)。shlib 経由の gui_demo が窓 2 枚・チェックボックス ON/OFF、lease_test (14 色) → gui_demo の連続起動で状態が混ざらない (アプリごと .data ページ)。`make check-shlib` で番号表を突き合わせ。**未実行**: 版不一致の拒否 (`GUI_PROTO_VERSION` と `shlib.rs` の `.long` を両方上げてライブラリだけ焼き直す手順。コードレビューで経路は確認、実機は次回) |
 
+| 2026-09-06 | **H2 結合** (`5bcf7a0` + kernel.mk 登録): PEGC 256 色バックエンド、⑤ boot 順反転 (probe → init)、`paging_map_phys`、300KB バックバッファは物理末尾に予約。**実測**: NP21/W (SUPPORT_PC9821 / SUPPORT_PEGC 込み) は現行 ini (`ExMemory=16`) のままで probe が通り、`hal_test` = 640×480 / bpp 8 / PACKED8 / lease 16〜240、`gdi_test` は無変更で `present_bytes=307200 commits=1`、kselftest 42/0。**ini 変更 ([D2]) は不要**。**gshell は起動直後に #PF** (`asm_gfx_hline` の `rep stos` が NULL へ: libos32gfx が 4 プレーン決め打ちで `planes[1..3]=NULL` を踏む) → K4 の保険で CUI に戻る。対策 = H2b (libos32gfx の PACKED8 対応 + `GFX=pc98|pegc|auto` の強制指定。NP21/W が常に PEGC 相当になったので 9801 経路の回帰にも `GFX=pc98` が要る)。TEXT_OVERLAY / 480 ライン / 24kHz 復帰は gshell 復旧後に確認 |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
