@@ -373,6 +373,17 @@ STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
 STATIC_ASSERT(sizeof(GuiReqInvalidate) == 12, gui_req_invalidate_12);
 STATIC_ASSERT(sizeof(GuiReqTimerSet)  == 8,  gui_req_timerset_8);
 STATIC_ASSERT(sizeof(GuiReqLease)     == 52, gui_req_lease_52);
+
+/* MODAL_OPEN (op 64、契約 U4) の GuiReqModal.buttons と GuiEvtModal.result の値
+ * (W2 の申し送り、2026-09-06 追記)。result は 1 = OK / Yes / Open、0 = Cancel / No / ESC。
+ * ファイル選択のパスをアプリへ返す経路 (応答ブロックへ GuiString を書く
+ * GUI_OP_MODAL_RESULT) は未定義 — 追記候補。 */
+#define GUI_MODAL_OK          0   /* OK */
+#define GUI_MODAL_OK_CANCEL   1   /* OK / Cancel */
+#define GUI_MODAL_YES_NO      2   /* Yes / No */
+#define GUI_MODAL_FILE_OPEN   3   /* ファイル選択 (Open / Cancel) */
+#define GUI_MODAL_RESULT_CANCEL 0
+#define GUI_MODAL_RESULT_OK     1
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
 STATIC_ASSERT(sizeof(GuiRespRect)     <= GUI_SLOT_RESP_SIZE, gui_resp_rect_fits);

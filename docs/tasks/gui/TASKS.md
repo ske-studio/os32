@@ -123,6 +123,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **K2 結合** (syscall 境界ポンプ、CTRL+STOP で CPL=3 を畳む経路を新設、GUI 中は cooked に積まない)。**C2 結合** (libos32gui: client / app (U3) / window / widget / layout / timer、gui_demo 書き換え、lease_test、gui_bench)。**レビュー #3 (6 点) 反映**: ① 可視領域の打ち切りは部分集合のみ、② raw キーにイベント時点の修飾 (`keycode \| down<<8 \| mods<<9`)、③ raw は GUI 中のみ + 切替時に破棄、④ 切替要求は `gui_take_next_shell` の consume 方式、⑤ タイマ ABI を契約 U5 に (`u8 id / u8 repeat / u16 interval_ticks`)、⑥ フォーカス = 最前面の可視窓 (hide / create で Focus を流す)。実機検証: `make all` → NHD 配備 → kselftest 42/0 → gdi_test 復帰 → `os32gui` → **F1 で gui_demo の窓 2 枚 (Widgets / Help) が出て TAB でフォーカスが巡回、ESC でアプリの窓が全部消え (owner 回収)、ESC で CUI へ、ver 応答** = **G2 の主要項目通過** (screenshot: tools/emu_agent/logs/20260906-034431/shots/step12・16・19)。未確認: XOR ドラッグと重なりの再描画 (G4) は **NP21/W ai-debug にマウス注入 API が無い** (`/api/key` のみ) ため自動化できず、`/api/mouse` の追加 (np21w-src 側) が要る。契約 P の syscall 回数は gui_bench で次回 |
 
+| 2026-09-06 | **W2 結合** (FEP を WM で: SHIFT+SPACE / 未確定行と候補窓の GFX 描画 / Text 配送、14 色リースと 2 色クローム、モーダルと標準ダイアログ、F1〜F5 起動)。K 依頼 2 本を PM が実装: **`ime_feed_key` / `ime_set_render` を KAPI v41 末尾に追記** (180 関数。v41 は main 未リリースのため同じ版、v42 のネットワーク予約は不変)。共有ヘッダに `GUI_MODAL_*` を追記。未定義: ファイル選択のパスをアプリへ返す `GUI_OP_MODAL_RESULT` (追記候補)。K3 / C3 (G4) を投下中 |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。

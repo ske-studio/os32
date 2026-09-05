@@ -444,3 +444,11 @@ const _: () = assert!(size_of::<GuiRespRect>() <= GUI_SLOT_RESP_SIZE);
 #[derive(Clone, Copy)]
 pub struct GuiReqLease { pub first: u16, pub count: u16, pub rgb: [GuiRgb; 16] }   /* 52B */
 const _: () = assert!(size_of::<GuiReqLease>() == 52);
+
+/* MODAL_OPEN (op 64、契約 U4): GuiReqModal.buttons と GuiEvtModal.result の値 (W2)。 */
+pub const GUI_MODAL_OK: u16 = 0;
+pub const GUI_MODAL_OK_CANCEL: u16 = 1;
+pub const GUI_MODAL_YES_NO: u16 = 2;
+pub const GUI_MODAL_FILE_OPEN: u16 = 3;
+pub const GUI_MODAL_RESULT_CANCEL: i16 = 0;
+pub const GUI_MODAL_RESULT_OK: i16 = 1;
