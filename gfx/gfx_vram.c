@@ -127,6 +127,10 @@ static void _flush_dirty_queue(void)
 
         if (words <= 0) continue;
 
+        /* 実 VRAM 書き込み量を数える (レビュー ⑦)。1 行 = words ワード ×2B ×4 プレーン、
+         * ×r->h 行。ステイルページのマージ (prev_dirty) 分もここで正しく積まれる。 */
+        gfx_counters.present_bytes += (u32)words * 2u * 4u * (u32)r->h;
+
         physical_y = (r->y + vram_scroll_y) % gfx_current_height;
         phys_off = (unsigned long)physical_y * GFX_BPL + byte_x;
         base_off = (unsigned long)r->y * GFX_BPL + byte_x;

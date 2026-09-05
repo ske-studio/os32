@@ -36,7 +36,11 @@ typedef struct GfxBackend {
     const char *name;
 
     int  (*probe)(void);                /* 機種検出。1 = このバックエンドが使える */
-    int  (*init)(GFX_ScreenInfo *info); /* 能力ビットと画面情報を埋める。0 = 成功 */
+    void (*init)(void);                 /* ハードウェア初期化 (PEGC/Cirrus)。NULL = 別 hw-init 不要 (9801)。
+                                         * gfx_init が select_backend の直後に 1 回だけ呼ぶ (レビュー ⑤) */
+    int  (*query)(GFX_ScreenInfo *info);/* 能力ビットと画面情報を埋める (副作用なし・冪等)。0 = 成功。
+                                         * gfx_screen_info はこれを呼ぶ。init と分離してあるので
+                                         * 情報取得でハードを再初期化しない (レビュー ⑤) */
     void (*shutdown)(void);             /* バックエンドのハードウェア終了処理 */
 
     void (*present_rect)(int x, int y, int w, int h); /* バックバッファ→表示面 */

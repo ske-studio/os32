@@ -73,8 +73,25 @@ void __cdecl gfx_screen_info(void *out)
     if (!out) return;
     /* 決め打ちせずバックエンドに問い合わせる (契約 G5)。9801 だけの現状でも
      * 400/200 ラインやフリップ有無はバックエンドが正直に申告する。 */
-    if (g_backend && g_backend->init) {
-        g_backend->init((GFX_ScreenInfo *)out);
+    if (g_backend && g_backend->query) {
+        g_backend->query((GFX_ScreenInfo *)out);
+    }
+}
+
+/* ======================================================================== */
+/*  KAPI: gfx_set_palette — 1 色差し替え。HAL 経由 (レビュー ④)。            */
+/*  従来は palette_set を直接叩いており、PEGC/Cirrus でも 9801 の 16 色       */
+/*  palette_set へ行ってしまう問題があった。バックエンドの set_palette へ    */
+/*  通し、機種ごとの実装に届くようにする。                                   */
+/* ======================================================================== */
+void __cdecl gfx_set_palette_hal(int idx, u8 r, u8 g, u8 b)
+{
+    u8 rgb[3];
+    rgb[0] = r; rgb[1] = g; rgb[2] = b;
+    if (g_backend && g_backend->set_palette) {
+        g_backend->set_palette(idx, 1, rgb);
+    } else {
+        palette_set(idx, r, g, b);   /* 保険 */
     }
 }
 
@@ -126,10 +143,10 @@ int __cdecl gfx_lease_palette(int first, int count, const u8 *rgb)
     int i;
 
     if (count <= 0 || first < 0 || !rgb) return OS32_ERR_INVAL;
-    if (!g_backend || !g_backend->init || !g_backend->set_palette)
+    if (!g_backend || !g_backend->query || !g_backend->set_palette)
         return OS32_ERR_NOSYS;
 
-    g_backend->init(&si);
+    g_backend->query(&si);
 
     if (si.lease_count > 0) {
         /* 256 色機: 連続範囲 [lease_first, lease_first + lease_count) */

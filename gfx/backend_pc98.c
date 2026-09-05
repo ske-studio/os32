@@ -39,7 +39,7 @@ static int pc98_probe(void)
 /*  現在のモード (400/200 ライン, フリップ有無) を正直に申告する — GUI が      */
 /*  gfx_screen_info() を信じられるのはここが決め打ちしないから (DESIGN §7-2)。 */
 /* ------------------------------------------------------------------------ */
-static int pc98_init(GFX_ScreenInfo *info)
+static int pc98_query(GFX_ScreenInfo *info)
 {
     int i;
     if (!info) return OS32_ERR_INVAL;
@@ -96,7 +96,8 @@ static void pc98_count_present(int x, int y, int w, int h)
     if (aw <= 0 || h <= 0) return;
 
     /* aw は 32 の倍数なので aw/8 は偶数 → 実転送ワード×2 と一致する */
-    gfx_counters.present_bytes += (u32)(aw >> 3) * 4u * (u32)h;
+    /* present_bytes は実 VRAM 転送点 (_flush_dirty_queue) で数える (レビュー ⑦)。
+     * ここで論理 damage を数えると、ステイルページ再転送分が漏れる。 */
 }
 
 /* ------------------------------------------------------------------------ */
@@ -141,7 +142,8 @@ static void pc98_leave(void) { }
 const GfxBackend gfx_backend_pc98 = {
     "pc98-planar",
     pc98_probe,
-    pc98_init,
+    (void (*)(void))0,   /* init: 9801 は GDC/プレーンを gfx_init が済ませるので別 hw-init 不要 */
+    pc98_query,
     pc98_shutdown,
     pc98_present_rect,
     pc98_set_palette,

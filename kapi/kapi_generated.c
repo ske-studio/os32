@@ -934,7 +934,7 @@ int __cdecl wrap_sys_fstat(int fd, OS32_Stat *buf)
 void __cdecl wrap_gfx_set_palette(int idx, u8 r, u8 g, u8 b)
 {
     KAPI_HIT(88);
-    palette_set(idx, r, g, b);
+    gfx_set_palette_hal(idx, r, g, b);
 }
 
 void __cdecl wrap_gfx_get_palette(int idx, u8 *r, u8 *g, u8 *b)

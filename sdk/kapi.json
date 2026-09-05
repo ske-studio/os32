@@ -683,7 +683,7 @@
         "u8 g",
         "u8 b"
       ],
-      "target": "palette_set"
+      "target": "gfx_set_palette_hal"
     },
     {
       "name": "gfx_get_palette",
