@@ -31,7 +31,7 @@ dependencies = [
 name = "gdi_test"
 version = "0.1.0"
 dependencies = [
- "libos32gui",
+ "libos32gui_stub",
  "os32api",
 ]
 
@@ -39,7 +39,7 @@ dependencies = [
 name = "gui_bench"
 version = "0.1.0"
 dependencies = [
- "libos32gui",
+ "libos32gui_stub",
  "os32api",
 ]
 
@@ -47,7 +47,7 @@ dependencies = [
 name = "gui_demo"
 version = "0.1.0"
 dependencies = [
- "libos32gui",
+ "libos32gui_stub",
  "os32api",
 ]
 
@@ -62,7 +62,7 @@ dependencies = [
 name = "lease_test"
 version = "0.1.0"
 dependencies = [
- "libos32gui",
+ "libos32gui_stub",
  "os32api",
 ]
 
@@ -74,6 +74,13 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libos32gui"
+version = "0.1.0"
+dependencies = [
+ "os32api",
+]
+
+[[package]]
+name = "libos32gui_stub"
 version = "0.1.0"
 dependencies = [
  "os32api",

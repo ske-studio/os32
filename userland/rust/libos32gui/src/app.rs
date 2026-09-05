@@ -14,123 +14,136 @@
 //! - `Quit` を受けたら速やかに戻る。
 //! - 1 周の `gui_call` は `POLL` + `COMMIT` + `WAIT` + 状態変更だけ (契約 P)。
 
+use core::ffi::c_void;
+
 use crate::client::{self, GuiResult};
 use crate::uistate::{s, GUI_NONE};
-use crate::widget::{self, WidgetId, WEV_CLICK, WEV_FOCUS, WEV_SELECT, WEV_TEXT_CHANGED, WEV_TOGGLED};
+use crate::widget::{self, WEV_CLICK, WEV_FOCUS, WEV_SELECT, WEV_TEXT_CHANGED, WEV_TOGGLED};
 use crate::window;
 use os32api::gui::proto::{
     GuiEvent, GUI_COLOR_TEXT, GUI_COLOR_WINDOW, GUI_EV_BUTTON, GUI_EV_CLOSE, GUI_EV_CONFIGURE,
     GUI_EV_FOCUS, GUI_EV_KEY, GUI_EV_MODAL, GUI_EV_PAINT, GUI_EV_PALETTE, GUI_EV_POINTER,
     GUI_EV_QUIT, GUI_EV_TEXT, GUI_EV_TIMER, GUI_RING_CAPACITY,
 };
-use os32api::gui::types::{Rect, Style, SurfaceId};
+use os32api::gui::stub::AppVTable;
+use os32api::gui::types::{Rect, Style};
 
 /* ================================================================ */
-/*  Ui — ループからハンドラへ渡す取っ手                              */
+/*  Ui / App                                                        */
+/*                                                                  */
+/*  型の正典は `os32api::gui::stub` — 共有ライブラリ (票 C3) の両側が  */
+/*  同じ形を見る必要がある。ループ (ここ) と `Ui` の状態はライブラリの  */
+/*  `.data`/`.bss` にあり、ハンドラの実体はアプリ側にある。境界は       */
+/*  `AppVTable` (C ABI) 1 枚。                                       */
 /* ================================================================ */
 
-/// アプリのハンドラが触るループ側の状態。実体はグローバル (単一アプリ)。
-pub struct Ui {
-    /// 次の `OP_WAIT` のタイムアウト (tick)。0 = 期限なし (WM のタイマで起きる)。
-    pub timeout_ticks: u32,
+pub use os32api::gui::stub::{App, Ui};
+
+/* ================================================================ */
+/*  ハンドラ表の包み — ループからはふつうのメソッド呼びに見せる        */
+/* ================================================================ */
+
+pub(crate) struct VApp {
+    vt: *const AppVTable,
+    this: *mut c_void,
 }
 
-impl Ui {
-    pub fn new() -> Ui {
-        Ui { timeout_ticks: 0 }
-    }
-
-    /// ループを終える。
+#[allow(dead_code)]
+impl VApp {
     #[inline]
-    pub fn quit(&mut self) {
-        s().quit = true;
+    fn vt(&self) -> &AppVTable {
+        unsafe { &*self.vt }
     }
-
     #[inline]
-    pub fn is_quitting(&self) -> bool {
-        s().quit
+    fn on_click(&self, ui: &mut Ui, w: widget::WidgetId) {
+        (self.vt().on_click)(self.this, ui, w.raw())
     }
-
-    /// 生きているウィンドウ枚数 (0 になったらループは戻る)。
     #[inline]
-    pub fn window_count(&self) -> usize {
-        window::count()
+    fn on_toggled(&self, ui: &mut Ui, w: widget::WidgetId, on: bool) {
+        (self.vt().on_toggled)(self.this, ui, w.raw(), on as u32)
     }
-
-    /// `OVERFLOW` を受けた直後か (入力状態を未知として扱う。契約 T3)。
     #[inline]
-    pub fn input_unknown(&self) -> bool {
-        s().input_unknown
+    fn on_text_changed(&self, ui: &mut Ui, w: widget::WidgetId) {
+        (self.vt().on_text_changed)(self.this, ui, w.raw())
     }
-
-    /// 押下状態を読み直す (`OVERFLOW` からの復帰。契約 T3)。
-    pub fn key_is_pressed(&self, scan: u8) -> bool {
-        unsafe { (os32api::api().kbd_is_pressed)(scan as i32) != 0 }
+    #[inline]
+    fn on_select(&self, ui: &mut Ui, w: widget::WidgetId, index: i32) {
+        (self.vt().on_select)(self.this, ui, w.raw(), index)
     }
-}
-
-impl Default for Ui {
-    fn default() -> Ui {
-        Ui::new()
+    #[inline]
+    fn on_widget_focus(&self, ui: &mut Ui, w: widget::WidgetId) {
+        (self.vt().on_widget_focus)(self.this, ui, w.raw())
     }
-}
-
-/* ================================================================ */
-/*  App — 種別ごとのハンドラ (契約 U6: 巨大 switch を書かせない)      */
-/* ================================================================ */
-
-#[allow(unused_variables)]
-pub trait App {
-    /* --- ウィジェット (クライアント側で合成) --- */
-    fn on_click(&mut self, ui: &mut Ui, w: WidgetId) {}
-    fn on_toggled(&mut self, ui: &mut Ui, w: WidgetId, on: bool) {}
-    fn on_text_changed(&mut self, ui: &mut Ui, w: WidgetId) {}
-    fn on_select(&mut self, ui: &mut Ui, w: WidgetId, index: i32) {}
-    fn on_widget_focus(&mut self, ui: &mut Ui, w: WidgetId) {}
-
-    /* --- WM 由来 --- */
-    /// 生イベント (種別ごとのハンドラの前に 1 回)。`serial` を見たい計測器
-    /// (`gui_bench`、契約 P2) 用。ふつうのアプリは実装しない。
-    fn on_raw(&mut self, ui: &mut Ui, ev: &GuiEvent) {}
-
-    /// 閉じるボタン。既定はループ終了 (破棄はアプリが決める。契約 U1)。
-    fn on_close(&mut self, ui: &mut Ui, window: u32) {
-        ui.quit();
+    #[inline]
+    fn on_raw(&self, ui: &mut Ui, ev: &GuiEvent) {
+        (self.vt().on_raw)(self.this, ui, ev as *const GuiEvent)
     }
-    fn on_focus(&mut self, ui: &mut Ui, window: u32, focused: bool) {}
-    /// 生キー (契約 U2a: `scan` は PC-98 スキャンコード)。`down=false` も来る。
-    fn on_key(&mut self, ui: &mut Ui, window: u32, scan: u8, ch: u8, mods: u8, down: bool) {}
-    fn on_timer(&mut self, ui: &mut Ui, window: u32, id: u8) {}
-    fn on_configure(&mut self, ui: &mut Ui, window: u32) {}
-    fn on_palette(&mut self, ui: &mut Ui, window: u32, active: bool) {}
-    fn on_modal(&mut self, ui: &mut Ui, dialog: u16, result: i16) {}
-    /// WM からの終了要求。既定はループ終了。
-    fn on_quit(&mut self, ui: &mut Ui, reason: u8) {
-        ui.quit();
+    #[inline]
+    fn on_close(&self, ui: &mut Ui, window: u32) {
+        (self.vt().on_close)(self.this, ui, window)
     }
-    /// 取りこぼし通知 (契約 T3)。押しっぱなしの前提を捨てる。
-    fn on_overflow(&mut self, ui: &mut Ui, dropped: u16) {}
-
-    /* --- 描画 --- */
-    /// ウィジェット木の後に呼ばれる。基底クリップは `rect` に固定済み (契約 G2)。
-    fn on_paint(&mut self, ui: &mut Ui, window: u32, surface: SurfaceId, rect: Rect) {}
-
-    /// `commit` の直後 (`OP_WAIT` の前)。計測 (`gui_bench`) 用の締めの場所。
-    fn after_commit(&mut self, ui: &mut Ui) {}
+    #[inline]
+    fn on_focus(&self, ui: &mut Ui, window: u32, focused: bool) {
+        (self.vt().on_focus)(self.this, ui, window, focused as u32)
+    }
+    #[inline]
+    fn on_key(&self, ui: &mut Ui, window: u32, scan: u8, ch: u8, mods: u8, down: bool) {
+        (self.vt().on_key)(
+            self.this,
+            ui,
+            window,
+            scan as u32,
+            ch as u32,
+            mods as u32,
+            down as u32,
+        )
+    }
+    #[inline]
+    fn on_timer(&self, ui: &mut Ui, window: u32, id: u8) {
+        (self.vt().on_timer)(self.this, ui, window, id as u32)
+    }
+    #[inline]
+    fn on_configure(&self, ui: &mut Ui, window: u32) {
+        (self.vt().on_configure)(self.this, ui, window)
+    }
+    #[inline]
+    fn on_palette(&self, ui: &mut Ui, window: u32, active: bool) {
+        (self.vt().on_palette)(self.this, ui, window, active as u32)
+    }
+    #[inline]
+    fn on_modal(&self, ui: &mut Ui, dialog: u16, result: i16) {
+        (self.vt().on_modal)(self.this, ui, dialog as u32, result as i32)
+    }
+    #[inline]
+    fn on_quit(&self, ui: &mut Ui, reason: u8) {
+        (self.vt().on_quit)(self.this, ui, reason as u32)
+    }
+    #[inline]
+    fn on_overflow(&self, ui: &mut Ui, dropped: u16) {
+        (self.vt().on_overflow)(self.this, ui, dropped as u32)
+    }
+    #[inline]
+    fn on_paint(&self, ui: &mut Ui, window: u32, surface: os32api::gui::types::SurfaceId, rect: Rect) {
+        (self.vt().on_paint)(self.this, ui, window, surface.raw(), rect)
+    }
+    #[inline]
+    fn after_commit(&self, ui: &mut Ui) {
+        (self.vt().after_commit)(self.this, ui)
+    }
 }
 
 /* ================================================================ */
 /*  U3 ループ                                                        */
 /* ================================================================ */
 
-/// 1 アプリ 1 本のイベントループ。`Quit` / 全ウィンドウ消滅 / `Ui::quit` で戻る。
-pub fn run(app: &mut impl App) -> GuiResult<()> {
-    let mut ui = Ui::new();
-    run_with(app, &mut ui)
-}
-
-/// `Ui` を呼び出し側が用意する版 (タイムアウトを最初から与えたいとき)。
-pub fn run_with(app: &mut impl App, ui: &mut Ui) -> GuiResult<()> {
+/// 1 アプリ 1 本のイベントループ (ジャンプ表 `E_RUN` の実体)。
+/// `Quit` / 全ウィンドウ消滅 / `Ui::quit` で戻る。
+pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult<()> {
+    if vt.is_null() {
+        return Err(client::GuiErr::INVAL);
+    }
+    let app = VApp { vt, this };
+    let app = &app;
     let zero = GuiEvent { kind: 0, sub: 0, serial: 0, window: 0, payload: [0; 8] };
     let mut buf = [zero; GUI_RING_CAPACITY];
 
@@ -199,7 +212,7 @@ fn to_rect(r: os32api::gui::proto::GuiRect16) -> Rect {
     Rect::new(r.x, r.y, r.w, r.h)
 }
 
-fn dispatch(app: &mut impl App, ui: &mut Ui, ev: &GuiEvent) {
+fn dispatch(app: &VApp, ui: &mut Ui, ev: &GuiEvent) {
     /* generation が自分の表と一致しないイベントは捨てる (契約 U2)。 */
     let slot = s().win_slot(ev.window);
     if slot.is_none() && ev.kind != GUI_EV_QUIT {
@@ -273,7 +286,7 @@ fn dispatch(app: &mut impl App, ui: &mut Ui, ev: &GuiEvent) {
 }
 
 /// 合成したウィジェットイベントを種別ごとのハンドラへ渡す。
-fn emit(app: &mut impl App, ui: &mut Ui, out: &widget::WidgetOut) {
+fn emit(app: &VApp, ui: &mut Ui, out: &widget::WidgetOut) {
     let evs = out.as_slice();
     let mut i = 0;
     while i < evs.len() {
@@ -294,7 +307,7 @@ fn emit(app: &mut impl App, ui: &mut Ui, out: &widget::WidgetOut) {
 /*  描画 (契約 G2: 基底クリップ = 処理中の Paint 矩形)                */
 /* ================================================================ */
 
-fn paint_damaged(app: &mut impl App, ui: &mut Ui) {
+fn paint_damaged(app: &VApp, ui: &mut Ui) {
     let n = s().paint.len;
     let mut i = 0;
     while i < n {

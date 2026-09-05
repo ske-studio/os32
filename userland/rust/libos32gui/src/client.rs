@@ -173,7 +173,9 @@ extern "C" {
     fn gfx_sprite_init();
 }
 
-fn attach_gfx() {
+/// framebuffer 記述子とサーフェス/スプライトのプールを取り直す。
+/// `init()` と共有ライブラリの `shlib_init` (票 C3) の両方から呼ぶ。冪等。
+pub(crate) fn attach_gfx() {
     unsafe {
         let a = os32api::api();
         gfx_api = os32api::api_ptr();

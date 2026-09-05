@@ -15,4 +15,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 os32api = { path = "../../../sdk/rust/os32api" }
-libos32gui = { path = "../libos32gui" }
+# 票 C3: 本体は 0x400000 常駐の共有ライブラリ。アプリはスタブだけをリンクする
+# (名前は libos32gui のまま — アプリのソースは無変更)。
+libos32gui = { path = "../libos32gui_stub", package = "libos32gui_stub" }

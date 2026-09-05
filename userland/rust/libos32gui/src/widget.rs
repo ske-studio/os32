@@ -99,31 +99,12 @@ impl WidgetOut {
 
 /* ================================================================ */
 /*  WidgetId (index:16 | generation:16)                              */
+/*                                                                  */
+/*  正典は os32api::gui::stub — `App` のハンドラ引数に出るので、       */
+/*  共有ライブラリ (票 C3) の両側が同じ型を見る必要がある。            */
 /* ================================================================ */
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct WidgetId(pub u32);
-
-impl WidgetId {
-    pub const NULL: WidgetId = WidgetId(0);
-
-    #[inline]
-    pub const fn new(index: u16, generation: u16) -> WidgetId {
-        WidgetId((index as u32) | ((generation as u32) << 16))
-    }
-    #[inline]
-    pub const fn index(self) -> u16 {
-        (self.0 & 0xFFFF) as u16
-    }
-    #[inline]
-    pub const fn generation(self) -> u16 {
-        (self.0 >> 16) as u16
-    }
-    #[inline]
-    pub const fn is_null(self) -> bool {
-        self.0 == 0
-    }
-}
+pub use os32api::gui::stub::WidgetId;
 
 /// `WidgetId` からスロット添字を引く (generation 検査つき)。
 pub fn resolve(id: WidgetId) -> Option<usize> {

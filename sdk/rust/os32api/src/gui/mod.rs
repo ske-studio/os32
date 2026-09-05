@@ -9,7 +9,11 @@
 //! 描画の実体 (libos32gfx を FFI で呼ぶ) は `userland/rust/libos32gui` にある。
 //! ここには値と `#[repr(C)]` 型だけを置く。
 
+//! - [`stub`] … 共有ライブラリ `libos32gui.shlib` のジャンプ表 ABI (票 C3)。
+//!   ヘッダの形・エントリ番号・`App` / `Ui` / `AppVTable` はライブラリ側と
+//!   アプリ側の両方がこの 1 か所を見る。
 pub mod proto;
+pub mod stub;
 pub mod types;
 
 pub use proto::*;
