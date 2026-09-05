@@ -42,7 +42,9 @@ userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OB
 # DEFINE_RUST_PROGRAM は使わず個別に書く。カーネルが /bin/gshell.bin を
 # シェル帯へ直接ロードする (config.h SYS_GSHELL_BIN、K4)。
 GSHELL_DIR = userland/gshell
-GSHELL_LIB = $(GSHELL_DIR)/target/$(RUST_TARGET_JSON)/release/libgshell.a
+# RUST_TARGET_JSON はこの後 (Rust 節) で定義されるので、ここでは前提の
+# 展開時に空にならないよう名前を直に書く。
+GSHELL_LIB = $(GSHELL_DIR)/target/i686-os32-none/release/libgshell.a
 
 $(GSHELL_LIB): FORCE $(RUST_KAPI_RS)
 	cd $(GSHELL_DIR) && cargo build --release
@@ -378,7 +380,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust gshell
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
