@@ -8,20 +8,11 @@
 use crate::wm::Win;
 use os32api::gfx;
 use os32api::gui::proto::{
-    GUI_COLOR_CLOSE, GUI_COLOR_DESKTOP, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT, GUI_COLOR_SHADOW,
-    GUI_COLOR_TEXT, GUI_COLOR_TITLE_ACTIVE, GUI_COLOR_TITLE_INACTIVE, GUI_COLOR_TITLE_TEXT,
-    GUI_COLOR_WINDOW,
+    GUI_COLOR_CLOSE, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT, GUI_COLOR_SHADOW, GUI_COLOR_TEXT,
+    GUI_COLOR_TITLE_ACTIVE, GUI_COLOR_TITLE_INACTIVE, GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW,
 };
 
-/// 画面座標の矩形をデスクトップ色で塗る (バックバッファ)。
-pub fn fill_desktop(x: i32, y: i32, w: i32, h: i32) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    unsafe {
-        gfx::gfx_fill_rect(x, y, w, h, GUI_COLOR_DESKTOP);
-    }
-}
+/* デスクトップの背景は desktop.rs (背景 + 手引き) が持つ。 */
 
 /// ウィンドウの装飾を描く (バックバッファ)。active = 最前面 (フォーカス)。
 pub fn draw_window_chrome(win: &Win, active: bool) {
