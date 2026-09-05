@@ -104,7 +104,10 @@ int paging_is_present(u32 virt_addr);
 /*  新 PD に載せてもカーネルは動き続ける (V1)。CPL=3 用の USER マッピングは    */
 /*  M1c で overlay する。 */
 
-/* 0x400000 帯を覆う PDE インデックス (= MEM_EXEC_LOAD_ADDR >> 22 = 1) */
+/* アプリ帯域 0x400000-0x7FFFFF を覆う PDE インデックス
+ * (= MEM_APP_BAND_BASE >> 22 = 1)。共有ライブラリ帯域 (0x400000-0x4FFFFF)・
+ * プログラム本体 (MEM_EXEC_LOAD_ADDR 0x500000-)・ユーザスタックが全部この
+ * 1 枚に載る。整合は kernel/paging.c の STATIC_ASSERT が検査する。 */
 #define APP_BAND_PDE   1
 
 struct addrspace {

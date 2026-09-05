@@ -14,6 +14,8 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --gfx          GFXフラグを設定
     --ring3        CPL=3 (リング3) フラグを設定 (v2 M1)
     --cpl0         CPL=0 強制フラグを設定 (ring3 デフォルト化後のエスケープ, v2 M3)
+    --shlib        共有ライブラリフラグを設定 (MEM_SHLIB_BASE 常駐, GUI v1.1 K3)
+    --load ADDR    リンク時のロードアドレス (--elf 指定時は ELF の .text から自動)
 """
 
 import sys
@@ -23,9 +25,14 @@ import re
 
 OS32X_MAGIC = 0x4F533332  # 'OS32'
 OS32X_HDR_V1_SIZE = 40
+# v2: 末尾に load_addr (u32) を追記。sdk/include/os32/os32_kapi_shared.h の
+# OS32Header / OS32X_HDR_V2_SIZE / OS32X_HDR_VERSION と一致させること。
+OS32X_HDR_V2_SIZE = 44
+OS32X_HDR_VERSION = 2
 OS32X_FLAG_GFX = 0x0001
 OS32X_FLAG_RING3 = 0x0002
 OS32X_FLAG_FORCE_CPL0 = 0x0004
+OS32X_FLAG_SHLIB = 0x0008
 
 
 import subprocess
@@ -47,10 +54,13 @@ def parse_elf_bss(elf_path):
 
 
 def parse_elf_entry(elf_path):
-    """ELFファイルからエントリポイントのオフセットを取得する。
+    """ELFファイルからエントリポイントのオフセットとロードアドレスを取得する。
 
     ELFヘッダの e_entry (仮想アドレス) と .text セクションの開始アドレスの
-    差分を計算し、バイナリ先頭からのオフセットを返す。
+    差分を計算し、(バイナリ先頭からのオフセット, .text の仮想アドレス) を返す。
+    .text の仮想アドレスがそのままリンク時のロードアドレス
+    (sdk/link/app.ld の `. = 0x500000` 等) になる。
+    失敗時は None。
     """
     try:
         with open(elf_path, 'rb') as f:
@@ -120,7 +130,7 @@ def parse_elf_entry(elf_path):
                 print(f"  警告: エントリポイントが .text より前にあります ({elf_path})")
                 return None
 
-            return entry_off
+            return (entry_off, text_addr)
 
     except Exception as e:
         print(f"  警告: ELFエントリポイント読み取りに失敗 ({elf_path}): {e}")
@@ -138,6 +148,8 @@ def main():
         print("  --gfx         GFXフラグ設定")
         print("  --ring3       CPL=3 リング3フラグ設定")
         print("  --cpl0        CPL=0 強制フラグ設定")
+        print("  --shlib       共有ライブラリフラグ設定")
+        print("  --load ADDR   ロードアドレス (--elf があれば自動検出)")
         sys.exit(1)
 
     input_path = sys.argv[1]
@@ -148,6 +160,7 @@ def main():
     bss_size = 0
     min_api_ver = 1
     entry_offset = 0
+    load_addr = 0
     flags = 0
     elf_path = None
 
@@ -177,6 +190,12 @@ def main():
         elif sys.argv[i] == '--cpl0':
             flags |= OS32X_FLAG_FORCE_CPL0
             i += 1
+        elif sys.argv[i] == '--shlib':
+            flags |= OS32X_FLAG_SHLIB
+            i += 1
+        elif sys.argv[i] == '--load' and i + 1 < len(sys.argv):
+            load_addr = int(sys.argv[i + 1], 0)
+            i += 2
         else:
             print(f"不明なオプション: {sys.argv[i]}")
             sys.exit(1)
@@ -187,14 +206,18 @@ def main():
         if elf_bss > 0:
             bss_size = elf_bss
 
-    # ELFファイルからエントリポイント自動取得
-    # --entry で手動指定されていなければ ELF の値を使用
-    if elf_path and entry_offset == 0:
-        elf_entry = parse_elf_entry(elf_path)
-        if elf_entry is not None:
-            entry_offset = elf_entry
-            if entry_offset != 0:
-                print(f"  注意: ELFからエントリオフセット自動検出: 0x{entry_offset:X}")
+    # ELFファイルからエントリポイントとロードアドレスを自動取得
+    # --entry / --load で手動指定されていなければ ELF の値を使用
+    if elf_path:
+        elf_info = parse_elf_entry(elf_path)
+        if elf_info is not None:
+            elf_entry, elf_text_addr = elf_info
+            if entry_offset == 0:
+                entry_offset = elf_entry
+                if entry_offset != 0:
+                    print(f"  注意: ELFからエントリオフセット自動検出: 0x{entry_offset:X}")
+            if load_addr == 0:
+                load_addr = elf_text_addr
 
     # 入力ファイル読み込み
     with open(input_path, 'rb') as f:
@@ -202,11 +225,11 @@ def main():
 
     text_size = len(code_data)
 
-    # ヘッダ構築 (40バイト = 10 x u32)
-    header = struct.pack('<IIIIIIIIII',
+    # ヘッダ構築 (v2 = 44バイト = 11 x u32)
+    header = struct.pack('<IIIIIIIIIII',
         OS32X_MAGIC,        # magic
-        OS32X_HDR_V1_SIZE,  # header_size
-        1,                  # version
+        OS32X_HDR_V2_SIZE,  # header_size
+        OS32X_HDR_VERSION,  # version
         flags,              # flags
         entry_offset,       # entry_offset
         text_size,          # text_size
@@ -214,19 +237,21 @@ def main():
         heap_size,          # heap_size
         0,                  # stack_size (予約)
         min_api_ver,        # min_api_ver
+        load_addr,          # load_addr (v2)
     )
 
-    assert len(header) == OS32X_HDR_V1_SIZE, f"Header size mismatch: {len(header)}"
+    assert len(header) == OS32X_HDR_V2_SIZE, f"Header size mismatch: {len(header)}"
 
     # 出力
     with open(output_path, 'wb') as f:
         f.write(header)
         f.write(code_data)
 
-    total = OS32X_HDR_V1_SIZE + text_size
+    total = OS32X_HDR_V2_SIZE + text_size
     print(f"  OS32X: {os.path.basename(output_path)} "
           f"(text={text_size}, bss={bss_size}, heap={heap_size}, "
-          f"entry=0x{entry_offset:X}, api>={min_api_ver}, total={total})")
+          f"entry=0x{entry_offset:X}, load=0x{load_addr:X}, "
+          f"api>={min_api_ver}, total={total})")
 
 if __name__ == '__main__':
     main()

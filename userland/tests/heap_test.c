@@ -14,6 +14,11 @@
 #define CHUNK   (64u * 1024u)
 #define MAXN    128            /* 最大 8MB 分 */
 
+/* crt0.asm の入口。sdk/link/app.ld が .text.startup を先頭に置くので、
+ * この番地がそのままロードアドレス (= カーネルの MEM_EXEC_LOAD_ADDR)。
+ * 定数を書かずにリンク結果を表示するので、帯域が動いてもここは腐らない。 */
+extern char _start[];
+
 void main(int argc, char **argv, KernelAPI *api)
 {
     static void *mb[MAXN];
@@ -23,6 +28,7 @@ void main(int argc, char **argv, KernelAPI *api)
 
     (void)argc; (void)argv;
 
+    api->kprintf(0xE1, "load                      = 0x%x\n", (unsigned)_start);
     api->kprintf(0xE1, "sbrk_heap_limit (guard_a) = 0x%x\n", api->sbrk_heap_limit);
     probe = (char *)malloc(16);
     api->kprintf(0xE1, "first malloc block         = 0x%x\n", (unsigned)probe);

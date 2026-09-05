@@ -26,7 +26,9 @@
 /*    0x200000 - 0x23FFFF : R/W  (SQLite帯域: code+BSS+代替スタック)      */
 /*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
 /*    0x300000 - 0x3FFFFF : R/W  (シェル常駐帯域, ガード付き)             */
-/*    0x400000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
+/*    0x400000 - 0x4FFFFF : R/O+U(共有ライブラリ帯域: .text/.rodata。      */
+/*                                .data/.bss はアプリ PD ごとに差し替え)   */
+/*    0x500000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
 /*    mem_end  - 0xFFFFFF : NP   (未実装メモリ)                             */
 /* ======================================================================== */
 
@@ -47,11 +49,18 @@ STATIC_ASSERT(MEM_KSTACK_TOP < 0x200000UL, kstack_below_sqlite_band);
 STATIC_ASSERT((MEM_STACK_GUARD & (PAGE_SIZE - 1)) == 0,
               kstack_guard_page_aligned);
 
-/* リング3 アプリ帯 PDE (M1b) は 0x400000 帯を覆う PDE と一致し、かつ静的
+/* リング3 アプリ帯 PDE (M1b) はアプリ帯域を覆う PDE と一致し、かつ静的
  * page_tables[] の範囲内でなければならない。ここがずれるとアプリ PD が
- * カーネル帯域を差し替えたり範囲外 PT を読んだりして黙って壊れる。 */
-STATIC_ASSERT(APP_BAND_PDE == (MEM_EXEC_LOAD_ADDR >> 22), app_band_pde_matches);
+ * カーネル帯域を差し替えたり範囲外 PT を読んだりして黙って壊れる。
+ * K3 以降、この 1 枚の PDE が「共有ライブラリ帯域 + プログラム帯 +
+ * ユーザスタック」を丸ごと覆う。3 つとも同じ PDE の内側であること
+ * (別 PDE に出ると、PD ごとの差し替えから外れて共有されてしまう)。 */
+STATIC_ASSERT(APP_BAND_PDE == (MEM_APP_BAND_BASE >> 22), app_band_pde_matches);
 STATIC_ASSERT(APP_BAND_PDE < PAGING_PT_COUNT, app_band_pde_in_range);
+STATIC_ASSERT((MEM_SHLIB_BASE >> 22) == APP_BAND_PDE, shlib_base_in_app_band);
+STATIC_ASSERT((MEM_EXEC_LOAD_ADDR >> 22) == APP_BAND_PDE, exec_load_in_app_band);
+STATIC_ASSERT(((MEM_APP_BAND_TOP - 1) >> 22) == APP_BAND_PDE, app_band_top_in_pde);
+STATIC_ASSERT(MEM_SHLIB_END <= MEM_EXEC_LOAD_ADDR, shlib_band_below_exec);
 
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
 /* Open Watcomでは __declspec(align(4096)) が使えないため、

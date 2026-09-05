@@ -25,6 +25,10 @@
 #define SYS_PROFILE_SYS       "/etc/profile"       /* システムプロファイル */
 #define SYS_UNICODE_BIN       "/sys/unicode.bin"   /* Unicodeテーブル */
 #define SYS_SQLITE_BIN        "/sys/sqlite.bin"    /* SQLite拡張域バイナリ */
+#define SYS_SHLIB_GUI         "/sys/lib/libos32gui.shlib"
+                                                   /* GUI 共有ライブラリ (K3/C3)。
+                                                    * MEM_SHLIB_BASE 常駐。無ければ
+                                                    * 静かに未ロード (CUI は動く) */
 
 /* ====================================================================== */
 /*  デフォルトコマンド検索パス                                                */
