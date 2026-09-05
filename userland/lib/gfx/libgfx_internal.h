@@ -19,6 +19,44 @@ static inline void _memset_d(void *dst, unsigned int val32, unsigned int dwords)
     __asm__ volatile("rep stosl" : "+D"(dst), "+c"(dwords) : "a"(val32) : "memory");
 }
 
+/* ------------------------------------------------------------------------ */
+/*  パックド 8bpp (PEGC) 共通ヘルパ — 票 H2b                                  */
+/*                                                                            */
+/*  プレーン経路 (9801) は一切通らない。gfx_packed が 0 のときは従来どおり     */
+/*  asm_* の高速経路へ落ちる (回帰ゼロ)。パックドでは 1 バイト 1 画素なので    */
+/*  「先頭 = planes[0] + y*pitch + x」だけを見ればよい。                       */
+/* ------------------------------------------------------------------------ */
+
+extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+
+/* 画面 1 行のスパン [x, x2] を塗る。base は y * gfx_fb.pitch (両形式共通)。
+ * 呼び出し側が x/x2/y をクリップ済みであることを前提にする (従来の
+ * asm_gfx_hline と同じ契約)。 */
+static inline void gfx_span_raw(int base, int x, int x2, u8 color)
+{
+    if (gfx_packed) {
+        u8 *d = gfx_fb.planes[0] + base + x;
+        int n = x2 - x + 1;
+        if (n <= 0) return;
+        while (n--) *d++ = color;
+        return;
+    }
+    asm_gfx_hline(gfx_fb.planes, base, x, x2, color);
+}
+
+/* 画面 1 画素の書き/読み (クリップ込み)。パックド専用。 */
+static inline void gfx_p_put(int x, int y, u8 color)
+{
+    if (x < 0 || x >= gfx_fb.width || y < 0 || y >= gfx_fb.height) return;
+    gfx_fb.planes[0][y * gfx_fb.pitch + x] = color;
+}
+
+static inline u8 gfx_p_get(int x, int y)
+{
+    if (x < 0 || x >= gfx_fb.width || y < 0 || y >= gfx_fb.height) return 0;
+    return gfx_fb.planes[0][y * gfx_fb.pitch + x];
+}
+
 #define SURF_POOL_MAX  16
 #define SURF_DATA_SIZE 2048
 
