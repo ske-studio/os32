@@ -92,7 +92,10 @@ struct ne2k_dev {
     struct ne2k_stats st;
 };
 
-static struct ne2k_dev nic;
+/* static にするとホストから読めない (kernel.map に載らない) ので意図的にグローバル。
+ * emu_read_mem で state / mac / ram_pages / st を観測する (serial.c の ser_overflow_n と同じ流儀)。 */
+struct ne2k_dev ne2k_nic;
+#define nic ne2k_nic
 
 /* ====================================================================== */
 /*  レジスタアクセス                                                        */
