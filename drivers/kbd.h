@@ -93,6 +93,7 @@ u32  kbd_get_modifiers(void);/* 修飾キー状態取得 */
 int  kbd_is_pressed(int scancode); /* スキャンコード押下状態 (1=押下中) */
 u32  kbd_dropped_count(void); /* 満杯で捨てた打鍵の累計 (契約 T3, GUI v1.1)。cooked+raw を合算 */
 int  kbd_trygetrawkey(void);  /* 生 make/break イベント (keycode | down<<8)、無ければ -1。GUI Key 用 (レビュー ④/⑥) */
+void kbd_set_gui_mode(int on);/* GUI (WM 常駐) 中は cooked リングに積まない (K2-B)。kernel/gui.c だけが呼ぶ */
 
 /* シフトキー状態 */
 extern volatile u8 kbd_shift_state;

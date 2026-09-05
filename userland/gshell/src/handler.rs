@@ -430,7 +430,7 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
 /*  OP_LEASE_PALETTE (契約 G8) — 記録だけ。適用は X2 / X3            */
 /* ================================================================ */
 fn op_lease_palette(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
-    let req: reqs::GuiReqLease = unsafe { slot::read_req(st, slot_no) };
+    let req: os32api::gui::proto::GuiReqLease = unsafe { slot::read_req(st, slot_no) };
     lease::request(st, owner, req.first, req.count, &req.rgb)
 }
 
@@ -567,7 +567,7 @@ fn op_timer_set(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32
         return OS32_ERR_STALE;
     }
     let now = st.now;
-    timer::set(st, owner, req.window, req.timer_id, req.interval_ms, now)
+    timer::set(st, owner, req.window, req.timer_id, req.interval_ticks, req.repeat != 0, now)
 }
 
 fn op_timer_kill(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {

@@ -78,8 +78,12 @@ pub fn region_subtract_region(a: &RectSet, b: &RectSet) -> (RectSet, bool) {
 }
 
 /// 1 ウィンドウの可視領域を計算する (クライアントローカル座標)。
-/// 容量超過時は「全体を不可視」ではなく可視のまま (安全側) にするため、
-/// 打ち切りが起きたら full-client 1 枚で近似する。
+/// 容量 (16) 超過時は**計算できた部分だけ**を可視とする。`region_subtract_rect`
+/// は矩形を削るだけ (穴の内側を可視に戻すことはない) ので、途中で捨てた
+/// 断片があっても残った矩形は真の可視領域の部分集合になる。全面可視に
+/// 倒すと、隠れている場所へ `Paint` が出て背面アプリの COMMIT が前面を
+/// 上書きする (共有バックバッファ、契約 G4。レビュー #3 ①)。捨てた分は
+/// dirty に残るので次周以降で (重なりが減れば) 描かれる。
 fn compute_vis(st: &GuiState, index: usize) -> RectSet {
     let w = &st.windows[index];
     let mut out = RectSet::EMPTY;
@@ -100,37 +104,27 @@ fn compute_vis(st: &GuiState, index: usize) -> RectSet {
         None => return out,
     };
     let mut z = myz + 1;
-    let mut capped = false;
     while z < st.z_count {
         let above = st.zorder[z];
         let wa = &st.windows[above];
         if wa.used && wa.visible {
-            let (next, ok) = region_subtract_rect(&region, wa.outer());
+            /* 打ち切り (ok=false) でも next は可視領域の部分集合。そのまま使う。 */
+            let (next, _ok) = region_subtract_rect(&region, wa.outer());
             region = next;
-            if !ok {
-                capped = true;
-            }
         }
         z += 1;
     }
 
     /* モーダルダイアログは WM 自身の窓で Z 順の最前面 (契約 U4)。ここで穴を
      * 開けておくと、下のアプリはダイアログの下を描かず、閉じたときに露出分の
-     * `Paint` を受け取る (入れ子ループを作らずに再描画が回る)。 */
+     * `Paint` を受け取る (入れ子ループを作らずに再描画が回る)。
+     * 打ち切りでも next は可視領域の部分集合なのでそのまま使う (レビュー #3 ①)。 */
     let dlg = crate::modal::rect();
     if !dlg.is_empty() {
-        let (next, ok) = region_subtract_rect(&region, dlg);
+        let (next, _ok) = region_subtract_rect(&region, dlg);
         region = next;
-        if !ok {
-            capped = true;
-        }
     }
 
-    if capped {
-        /* 近似: クライアント全面を可視扱い (次周で正確化される)。 */
-        out.push(Rect::new(0, 0, cw, ch));
-        return out;
-    }
     /* 画面座標 → クライアントローカルへ移して格納。 */
     let mut i = 0;
     while i < region.len && out.len < MAX_VIS {

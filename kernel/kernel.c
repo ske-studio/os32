@@ -67,7 +67,7 @@ extern void console_text_gdc_start(void);     /* console.c (K4): CUI 復帰で�
 /* 次に起動するシェルのパス (契約 T9)。実体は kernel/gui.c (K1)。
  * gui.h を丸ごと取り込むと os32_gui_shared.h まで引くので、
  * 起動ループが使う 1 本だけを extern 宣言する。 */
-extern const char *gui_next_shell(void);
+extern int gui_take_next_shell(char *out, int cap);
 
 /* 文字列表示 */
 static void tvram_print(int x, int y, const char *str, u8 color)
@@ -470,14 +470,13 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * 載らない。終了/クラッシュ時のフォールバックとして再起動ループにする。
      *
      * 起動シェルの決定順:
-     *   1. シェルが sys_switch_shell() で残した切替要求 (gui_next_shell)。
-     *      K1 の gui.c は記録を消さないので、前回消費したパスと変わった
-     *      ときだけ「新しい要求」とみなして 1 回だけ採用する。
+     *   1. シェルが sys_switch_shell() で残した切替要求 (gui_take_next_shell
+     *      で取り出して消す。consume 方式、レビュー #3 ④)。
      *   2. 記録が無ければ、起動時に読んだ /etc/system.cfg の GUI= に従う
      *      (GUI=1 → gshell、既定 → shell)。 */
     {
         const char *cur_shell = SYS_SHELL_BIN;
-        char consumed[OS32_MAX_PATH];   /* 最後に採用した切替パス */
+        char consumed[OS32_MAX_PATH];   /* 取り出した切替パス (cur_shell が指す) */
         int gui_fault_streak = 0;       /* gshell 連続クラッシュ回数 */
         consumed[0] = '\0';
 
@@ -487,16 +486,14 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         }
 
         for (;;) {
-            const char *next;
             int rc;
             int is_gui;
 
-            /* 切替要求を 1 回だけ消費する (gui.c は消さないので差分で判定) */
-            next = gui_next_shell();
-            if (next != (const char *)0 && kstrcmp(next, consumed) != 0) {
-                kstrncpy(consumed, next, OS32_MAX_PATH);
-                consumed[OS32_MAX_PATH - 1] = '\0';
-                cur_shell = next;
+            /* 切替要求を取り出して消す (consume 方式、レビュー #3 ④)。
+             * 取り出した後は要求が空になるので、gshell のロード失敗や連続
+             * fault で CUI に落ちた後でも、次の os32gui が普通に採用される。 */
+            if (gui_take_next_shell(consumed, OS32_MAX_PATH)) {
+                cur_shell = consumed;
                 gui_fault_streak = 0;   /* 別シェルへ切替 → 連続失敗をリセット */
             }
 
@@ -513,9 +510,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
             rc = exec_run(cur_shell);
 
-            /* gshell がロードできない (W1 未着手で未存在、不正バイナリ等) →
-             * 警告して CUI に落ちる。fault (実行後のクラッシュ) は別扱い。
-             * consumed は gshell のままなので同じ要求は再採用されない。 */
+            /* gshell がロードできない (未存在、不正バイナリ等) → 警告して CUI に
+             * 落ちる。fault (実行後のクラッシュ) は別扱い。要求は取り出し済みで
+             * 空なので、修復後の os32gui は普通に採用される。 */
             if (is_gui && rc < 0 && rc != EXEC_ERR_FAULT) {
                 console_text_gdc_start();
                 tvram_clear();

@@ -36,6 +36,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui_bench"
+version = "0.1.0"
+dependencies = [
+ "libos32gui",
+ "os32api",
+]
+
+[[package]]
 name = "gui_demo"
 version = "0.1.0"
 dependencies = [
@@ -47,6 +55,14 @@ dependencies = [
 name = "hello_gfx"
 version = "0.1.0"
 dependencies = [
+ "os32api",
+]
+
+[[package]]
+name = "lease_test"
+version = "0.1.0"
+dependencies = [
+ "libos32gui",
  "os32api",
 ]
 

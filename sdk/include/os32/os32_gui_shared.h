@@ -339,8 +339,11 @@ typedef struct { u32 window; i16 x; i16 y; u8 visible; u8 _pad; } GuiReqTextCurs
 typedef struct { u32 window; GuiString title; } GuiReqWinTitle;     /* SET_TITLE 260B */
 
 typedef struct { i16 w; i16 h; } GuiReqSurfCreate;                  /* SURF_CREATE */
-typedef struct { u32 window; u16 timer_id; u16 interval_ms; } GuiReqTimerSet; /* TIMER_SET */
-typedef struct { u32 window; u16 timer_id; u16 _pad; } GuiReqTimerKill;       /* TIMER_KILL */
+/* タイマ (契約 U5: set_timer(id: u8, interval_ticks: u16, repeat: bool))。
+ * 2026-09-06 レビュー #3 ⑤で契約に合わせた: id は u8 (Timer イベントの sub と同幅)、
+ * 間隔は tick (10ms)、repeat=0 は単発 (1 回発火して WM が消す)。 */
+typedef struct { u32 window; u8 timer_id; u8 repeat; u16 interval_ticks; } GuiReqTimerSet; /* TIMER_SET 8B */
+typedef struct { u32 window; u8 timer_id; u8 _pad[3]; } GuiReqTimerKill;                  /* TIMER_KILL 8B */
 typedef struct { u16 buttons; u16 _pad; GuiString message; } GuiReqModal;     /* MODAL_OPEN 260B */
 
 typedef struct { i32 result; u32 window;   } GuiRespWindow;         /* CREATE -> window */
@@ -352,6 +355,15 @@ typedef struct { i32 result; i16 button; i16 _pad; } GuiRespModal;  /* MODAL_OPE
  * (2026-09-06)。rect は窓のクライアント座標。 */
 typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;    /* INVALIDATE 12B */
 
+/* SHM 内の GUI 領域: スロットの番地 = kapi->shm_base + GUI_SHM_OFFSET + slot × GUI_SLOT_SIZE。
+ * 正典は include/memmap.h (MEM_SHM_GUI_BASE / GUI_SLOT_SIZE)。C のアプリが自前定義しなくて
+ * 済むよう写しを置く (K2 の申し送り、2026-09-06)。カーネル側は memmap.h が先に定義する。 */
+#define GUI_SHM_OFFSET  0x30000UL   /* MEM_SHM_BASE からのオフセット (ブロック 12、+192KB) */
+#ifndef GUI_SLOT_SIZE
+#define GUI_SLOT_SIZE   0x4000UL    /* 16KB = 1 スロット */
+#endif
+STATIC_ASSERT(GUI_SLOT_ARGS_OFF + GUI_SLOT_ARGS_SIZE <= GUI_SLOT_SIZE, gui_slot_fits_slot_size);
+
 /* LEASE_PALETTE (op 7、契約 G8): first/count は要求ブロック、色は要求ブロック内に
  * 直接 (16 色 × 3B = 48B、引数バッファは使わない)。count=0 で返却。W2 が実装。
  * 追記 2026-09-06 (W1 の申し送り)。 */
@@ -359,6 +371,7 @@ typedef struct { u16 first; u16 count; GuiRgb rgb[16]; } GuiReqLease;    /* 52B 
 
 STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
 STATIC_ASSERT(sizeof(GuiReqInvalidate) == 12, gui_req_invalidate_12);
+STATIC_ASSERT(sizeof(GuiReqTimerSet)  == 8,  gui_req_timerset_8);
 STATIC_ASSERT(sizeof(GuiReqLease)     == 52, gui_req_lease_52);
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);

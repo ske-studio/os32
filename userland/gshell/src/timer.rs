@@ -2,31 +2,31 @@
 //!
 //! `TIMER_SET` / `TIMER_KILL` を処理し、期限を過ぎた ID を導出型 `Timer` として
 //! リングへ流す。`OP_WAIT` の期限計算 (次のタイマまで) にも使う。
-//! 共有 ABI (GuiReqTimerSet) に repeat フィールドが無いため、v1 のタイマは
-//! **反復 (interval ごと)** として扱う (判断: PM へ報告)。
+//! 契約 U5 どおり `set_timer(id: u8, interval_ticks: u16, repeat: bool)`。
+//! repeat=false は単発: 1 回発火したら WM が消す (レビュー #3 ⑤)。
 
 use crate::ring;
 use crate::wm::{GuiState, Timer};
 use os32api::gui::proto::{GUI_MAX_TIMERS, GUI_SLOT_MAX, OS32_ERR_FULL, OS32_ERR_INVAL};
 
-fn ms_to_ticks(ms: u16) -> u32 {
-    let t = (ms as u32) / 10;
-    if t == 0 {
+fn clamp_ticks(ticks: u16) -> u32 {
+    if ticks == 0 {
         1
     } else {
-        t
+        ticks as u32
     }
 }
 
 /// タイマを設定する。同じ (owner,window,id) があれば更新。
-pub fn set(st: &mut GuiState, owner: i32, window: u32, id: u16, interval_ms: u16, now: u32) -> i32 {
-    let interval = ms_to_ticks(interval_ms);
+pub fn set(st: &mut GuiState, owner: i32, window: u32, id: u8, interval_ticks: u16, repeat: bool, now: u32) -> i32 {
+    let interval = clamp_ticks(interval_ticks);
     /* 既存を探す。 */
     let mut i = 0;
     while i < st.timers.len() {
         let t = &mut st.timers[i];
         if t.used && t.owner == owner && t.window == window && t.timer_id == id {
             t.interval = interval;
+            t.repeat = repeat;
             t.next_deadline = now.wrapping_add(interval);
             return 0;
         }
@@ -54,6 +54,7 @@ pub fn set(st: &mut GuiState, owner: i32, window: u32, id: u16, interval_ms: u16
                 window,
                 timer_id: id,
                 interval,
+                repeat,
                 next_deadline: now.wrapping_add(interval),
             };
             return 0;
@@ -64,7 +65,7 @@ pub fn set(st: &mut GuiState, owner: i32, window: u32, id: u16, interval_ms: u16
 }
 
 /// タイマを消す。
-pub fn kill(st: &mut GuiState, owner: i32, window: u32, id: u16) -> i32 {
+pub fn kill(st: &mut GuiState, owner: i32, window: u32, id: u8) -> i32 {
     let mut i = 0;
     while i < st.timers.len() {
         let t = &st.timers[i];
@@ -112,17 +113,22 @@ pub fn has_expired(st: &GuiState, owner: i32, now: u32) -> bool {
 pub fn fire_expired(st: &mut GuiState, slot: usize, owner: i32, now: u32) {
     let mut i = 0;
     while i < st.timers.len() {
-        let (used, towner, window, id, interval, deadline) = {
+        let (used, towner, window, id, interval, deadline, repeat) = {
             let t = &st.timers[i];
-            (t.used, t.owner, t.window, t.timer_id, t.interval, t.next_deadline)
+            (t.used, t.owner, t.window, t.timer_id, t.interval, t.next_deadline, t.repeat)
         };
         if used && towner == owner {
             /* now >= deadline (ラップ安全) */
             if now.wrapping_sub(deadline) < 0x8000_0000 {
-                let ev = ring::ev_timer(window, id as u8);
+                let ev = ring::ev_timer(window, id);
                 if ring::append(st, slot, &ev) {
-                    /* 次の期限へ (反復)。取りこぼしを避けるため now 基準。 */
-                    st.timers[i].next_deadline = now.wrapping_add(interval);
+                    if repeat {
+                        /* 次の期限へ (反復)。取りこぼしを避けるため now 基準。 */
+                        st.timers[i].next_deadline = now.wrapping_add(interval);
+                    } else {
+                        /* 単発: 1 回で消す (契約 U5)。 */
+                        st.timers[i] = Timer::EMPTY;
+                    }
                 } else {
                     /* 満杯: 進めずに次周へ持ち越す。 */
                     return;

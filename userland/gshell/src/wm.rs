@@ -199,10 +199,10 @@ pub struct Win {
     pub tc_x: i32,
     pub tc_y: i32,
     pub tc_visible: bool,
-    /* パレットのリース (契約 G8、W2)。フォーカスを得たときに WM が入れる。 */
-    pub lease_used: bool,
-    pub lease_first: u16,
-    pub lease_count: u16,
+    /* パレットのリース (契約 G8、W2)。フォーカスを得たときに WM が入れる。
+     * アプリは範囲を分けて複数回呼ぶ (lease_test は 1〜6 と 8〜15 の 2 回) ので、
+     * **借りている index のビット集合 + 16 色分の色**で持つ。 */
+    pub lease_mask: u16,
     pub lease_rgb: [GuiRgb; 16],
 }
 
@@ -227,9 +227,7 @@ impl Win {
         tc_x: 0,
         tc_y: 0,
         tc_visible: false,
-        lease_used: false,
-        lease_first: 0,
-        lease_count: 0,
+        lease_mask: 0,
         lease_rgb: [GuiRgb { r: 0, g: 0, b: 0 }; 16],
     };
 
@@ -319,8 +317,9 @@ pub struct Timer {
     pub used: bool,
     pub owner: i32,
     pub window: u32,        /* 完全な WindowId */
-    pub timer_id: u16,
+    pub timer_id: u8,       /* 契約 U5 (Timer イベントの sub と同幅) */
     pub interval: u32,      /* ティック単位 (最小 1) */
+    pub repeat: bool,       /* false = 単発 (発火後に消す) */
     pub next_deadline: u32, /* 発火予定 tick */
 }
 
@@ -331,6 +330,7 @@ impl Timer {
         window: 0,
         timer_id: 0,
         interval: 0,
+        repeat: false,
         next_deadline: 0,
     };
 }
@@ -379,9 +379,10 @@ pub struct GuiState {
 
     /* ---- パレットのリース (契約 G8、W2) ---- */
     /// `gfx_screen_info()` が申告する貸せる範囲 (契約 G5、決め打ち禁止)。
-    pub lease_mask: u16,
-    pub lease_first: u16,
-    pub lease_count: u16,
+    /// `Win::lease_mask` (窓が借りている index) とは別物なので `cap_` を付ける。
+    pub cap_lease_mask: u16,
+    pub cap_lease_first: u16,
+    pub cap_lease_count: u16,
     /// いま**実際に適用されている**リース元ウィンドウの完全な id (0 = 無し)。
     pub lease_applied: u32,
     /// リースの内容が変わったので入れ直しが要る。
@@ -418,9 +419,9 @@ impl GuiState {
         cursor: Cursor::EMPTY,
         now: 0,
         in_pump: false,
-        lease_mask: 0,
-        lease_first: 0,
-        lease_count: 0,
+        cap_lease_mask: 0,
+        cap_lease_first: 0,
+        cap_lease_count: 0,
         lease_applied: 0,
         lease_dirty: false,
         quit: false,
@@ -474,13 +475,19 @@ impl GuiState {
         }
     }
 
-    /// 最前面ウィンドウの index (無ければ None)。
+    /// 最前面の**可視**ウィンドウの index (無ければ None)。キーボードフォーカスは
+    /// これ。非表示の窓は Z 順に残っていてもフォーカスを持たない (レビュー #3 ⑥:
+    /// 最前面を hide しても見えない窓へ Key/Pointer が配送され続けていた)。
     pub fn front_index(&self) -> Option<usize> {
-        if self.z_count == 0 {
-            None
-        } else {
-            Some(self.zorder[self.z_count - 1])
+        let mut z = self.z_count;
+        while z > 0 {
+            z -= 1;
+            let i = self.zorder[z];
+            if self.windows[i].used && self.windows[i].visible {
+                return Some(i);
+            }
         }
+        None
     }
     /// 最前面ウィンドウの owner (無ければ 0)。
     pub fn front_owner(&self) -> i32 {
@@ -635,6 +642,7 @@ impl GuiState {
                 if self.lease_applied == self.windows[i].id(i) {
                     self.lease_dirty = true;
                 }
+                self.windows[i].lease_mask = 0;
                 let vac = self.windows[i].outer();
                 self.z_remove(i);
                 let gen = next_gen(self.windows[i].gen);
@@ -931,11 +939,18 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     w.visible = wf_visible(w.flags);
     w.configure_pending = true;
     st.windows[index] = w;
+    let old_front = st.front_id();
     st.z_add_top(index);
     /* 初回は全面 dirty + 露出計算。 */
     damage::set_dirty_full(&mut st.windows[index]);
     visible::recompute_and_expose(st);
     st.dirty_screen(st.windows[index].outer());
+    /* 可視で生成された窓は最前面 = フォーカス。旧 front に out、新窓に in を
+     * 流す (C2 の観察: 窓 1 枚のアプリが Focus{in} を一度も受け取れなかった)。 */
+    let new_front = st.front_id();
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
     /* generation は 1〜0x7FFF に制限してあるので i32 として必ず非負。 */
     st.windows[index].id(index) as i32
 }
@@ -1011,6 +1026,7 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
         Err(e) => return e,
     };
     let outer = st.windows[index].outer();
+    let old_front = st.front_id();
     st.windows[index].visible = show;
     if show {
         st.windows[index].flags |= GUI_WF_VISIBLE;
@@ -1020,6 +1036,11 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
     }
     st.dirty_screen(outer);
     visible::recompute_and_expose(st);
+    /* フォーカス = 最前面の可視窓。hide / show で変わったら Focus を流す。 */
+    let new_front = st.front_id();
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
     0
 }
 
@@ -1139,9 +1160,9 @@ pub fn read_screen_info(st: &mut GuiState) {
         st.screen_h = si.height as i32;
     }
     /* パレットのリースで貸せる範囲 (契約 G8 / G5)。決め打ちしない。 */
-    st.lease_mask = si.lease_mask;
-    st.lease_first = si.lease_first;
-    st.lease_count = si.lease_count;
+    st.cap_lease_mask = si.lease_mask;
+    st.cap_lease_first = si.lease_first;
+    st.cap_lease_count = si.lease_count;
 }
 
 /* ================================================================ */

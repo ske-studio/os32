@@ -53,6 +53,10 @@ filesystem:
     - host: userland/tests/gui_call_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- K2 の完了条件アプリ (計算中の syscall 境界ポンプ、--nokapi で CTRL+STOP 脱出) ---
+    - host: userland/tests/gui_busy.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/blit_test.bin
       guest: /usr/bin/
       tags: [programs]

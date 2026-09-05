@@ -317,7 +317,7 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2C0 | gfx_lease_palette | `int(int first, int count, const u8 *rgb)` |
 | 0x2C4 | sys_switch_shell | `int(const char *path)` |
 | 0x2C8 | kbd_dropped_count | `u32(void)` |
-| 0x2CC | kbd_trygetrawkey | `int(void)` |
+| 0x2CC | kbd_trygetrawkey | `int(void)` — 戻り値 `keycode \| down<<8 \| mods<<9` (mods = イベント時点の SHIFT_*、GUI モード中のみ記録)、無ければ -1 |
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは

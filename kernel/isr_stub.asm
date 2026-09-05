@@ -93,6 +93,9 @@ extern v86_tick_and_check_timeout
 extern v86_check_exit_request
 extern v86_exit_to_kernel
 extern ne2k_irq
+;; CPL=3 アプリの強制脱出 (CTRL+STOP)。要求があれば longjmp して戻らない
+;; (exec/exec.c、票 K2 作業 4)。
+extern ring3_abort_check
 
 ;; ============================================================
 ;; V86 実行中なら、この IRQ をゲストにも見せる (割り込み反射)。
@@ -500,6 +503,20 @@ irq_stub_1:
         jz      .no_exit
         call    v86_exit_to_kernel              ;; longjmp するので戻らない
 .no_exit:
+
+        ;; CPL=3 アプリの強制脱出 (CTRL+STOP、契約 T6 / 票 K2 作業 4)。
+        ;; kbd_irq_handler が要求を立て、ここで畳む。**割り込まれた文脈が
+        ;; CPL=3 (= アプリのコードそのもの) のときだけ**: カーネル内 (KAPI の
+        ;; wrap 実行中など) で longjmp するとカーネル状態が中途半端になるので、
+        ;; その場合は要求を残し ring3_syscall_dispatch の入口で畳む。
+        ;; EOI と V86 反射を済ませてから判定するのは V86 の脱出と同じ理由。
+        ;; フレーム: pushad(32B) の上に [esp+32]=EIP [esp+36]=CS [esp+40]=EFLAGS
+        test    dword [esp + 40], 0x00020000    ;; EFLAGS.VM (V86 は対象外)
+        jnz     .no_abort
+        test    dword [esp + 36], 3             ;; CS.RPL == 3 (CPL=3 を割り込んだ)?
+        jz      .no_abort
+        call    ring3_abort_check               ;; 要求があれば longjmp (戻らない)
+.no_abort:
 
         popad
         IRETD_USER

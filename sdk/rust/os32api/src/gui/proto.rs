@@ -404,10 +404,10 @@ pub struct GuiReqWinTitle { pub window: u32, pub title: GuiString }           /*
 pub struct GuiReqSurfCreate { pub w: i16, pub h: i16 }                        /* SURF_CREATE */
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct GuiReqTimerSet { pub window: u32, pub timer_id: u16, pub interval_ms: u16 }
+pub struct GuiReqTimerSet { pub window: u32, pub timer_id: u8, pub repeat: u8, pub interval_ticks: u16 } /* 契約 U5、8B */
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct GuiReqTimerKill { pub window: u32, pub timer_id: u16, pub _pad: u16 }
+pub struct GuiReqTimerKill { pub window: u32, pub timer_id: u8, pub _pad: [u8; 3] }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GuiReqModal { pub buttons: u16, pub _pad: u16, pub message: GuiString } /* MODAL_OPEN 260B */
@@ -432,6 +432,7 @@ pub struct GuiRespModal { pub result: i32, pub button: i16, pub _pad: i16 }   /*
 
 const _: () = assert!(size_of::<GuiReqWinMove>() == 8);
 const _: () = assert!(size_of::<GuiReqInvalidate>() == 12);
+const _: () = assert!(size_of::<GuiReqTimerSet>() == 8);
 const _: () = assert!(size_of::<GuiReqWinTitle>() <= GUI_SLOT_REQ_SIZE);
 const _: () = assert!(size_of::<GuiReqModal>() <= GUI_SLOT_REQ_SIZE);
 const _: () = assert!(size_of::<GuiRespRect>() <= GUI_SLOT_RESP_SIZE);

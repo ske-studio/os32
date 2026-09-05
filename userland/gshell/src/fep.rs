@@ -1,32 +1,45 @@
 //! fep.rs — 日本語入力 (FEP) を WM が持つ (契約 U2a、票 W2 の A)。
 //!
-//! ## 誰がキーを読むか
+//! ## 誰がキーを読むか (2026-09-06 の K2 反映後)
 //!
-//! `drivers/kbd.c` は 1 打鍵につき **2 本**の待ち行列へ積む:
+//! `drivers/kbd.c` は打鍵を 2 本の待ち行列へ積むが、**GUI モード中 (WM が
+//! `gui_register` した間) は cooked (`kbd_buf`) に積まない** (K2)。したがって
+//! `ime_trygetkey()` / `ime_trygetchar()` は GUI 中いつでも -1 を返す —
+//! カーネル FEP は自分でキーを引けない。WM だけが raw を読む唯一の読み手になる。
 //!
-//! | 行列 | 内容 | 読み手 |
+//! そこで役割はこう分かれる:
+//!
+//! | 事柄 | 誰が | 使う KAPI |
 //! |---|---|---|
-//! | cooked `kbd_buf` | make のみ、`(scancode<<8) \| ascii` | **FEP** (`ime_trygetkey`) |
-//! | raw `kbd_raw_buf` | make / break の全キー | WM ([`crate::input`]) — break だけ使う |
+//! | SHIFT+SPACE で on/off | WM ([`toggle`]) | `ime_toggle` / `ime_is_active` |
+//! | 打鍵 1 件の変換処理 | カーネル FEP | **`ime_feed_key` (未実装、K への依頼)** |
+//! | 未確定文字列 / 候補窓の描画 | WM ([`draw`]) | `IME_Render` 関数表 (下) |
+//! | 確定文字列の配送 | WM ([`flush_text`]) | — (`Text` イベント) |
 //!
-//! カーネルの FEP (`kernel/ime.c`) は `ime_trygetkey()` の中で自分から
-//! `kbd_trygetkey()` を引く。したがって **cooked 側の所有者は FEP** で、WM は
-//! `ime_trygetkey()` を回すだけでよい (W1 の `drain_cooked_queue` は不要になった)。
-//! make の `Key` はここから配送し、raw 側は break (`down=0`) 専用にする。
-//! これで「FEP が消費したキーは `Key` として配送しない」(契約 U2a 改訂) が
-//! **対応付けの推測なしに**成立する — 消費されたキーはそもそも出てこない。
+//! ### PM への申し送り 1 — `ime_feed_key` (K レーンへの依頼、G3 の前提)
 //!
-//! `ime_trygetkey()` の戻り値は 3 種類あり、次の規則で**一意に**分類できる:
+//! `kernel/ime.c` の変換本体 `ime_process_key(keydata)` は static で、公開 API
+//! (`ime_getkey` 系) はどれも `kbd_trygetkey()` から自分でキーを引く。GUI 中は
+//! cooked が空なので**この経路が丸ごと死んでいる**。次の 1 本を足してほしい:
 //!
-//! | 値 | 意味 |
-//! |---|---|
-//! | `< 0` | FEP が消費した / 行列が空 |
-//! | `>= 0x100` | 素通りしたキー `(scancode<<8) \| ascii` |
-//! | `== 0x1B` | 素通りした ESC (scancode 0、ascii 0x1B) |
-//! | その他 `0x01..0xFF` | **確定文字列の 1 バイト** |
+//! ```c
+//! /* keydata = (scancode << 8) | ascii。負なら「新しいキーは無い、
+//!  * 確定文字列の続きだけ寄こせ」。戻り値:
+//!  *   < 0        … FEP が消費した (アプリへ Key を配送しない)
+//!  *   >= 0x100   … 素通り (そのまま keydata)
+//!  *   == 0x1B    … 素通りの ESC (scancode 0、ascii 0x1B)
+//!  *   その他 1..0xFF … 確定文字列の 1 バイト (UTF-8)。続きは keydata<0 で引く */
+//! int ime_feed_key(int keydata);
+//! ```
 //!
-//! scancode 0 は ESC だけで、その ascii は必ず 0x1B。確定文字列 (かな・漢字・
-//! ローマ字出力の UTF-8) に 0x1B は現れないので、両者は衝突しない。
+//! 中身は既存の `ime_process_key` + `commit_buf` の取り出しそのままで書ける
+//! (`ime_trygetkey` から `kbd_trygetkey()` の呼び出しを外した版)。分類が一意に
+//! なるのは、scancode 0 のキーが ESC だけで ascii が必ず 0x1B、確定文字列
+//! (かな・漢字・ローマ字出力の UTF-8) に 0x1B が現れないため。
+//!
+//! WM 側は [`feed_kernel`] の 1 行を差し替えるだけで繋がる。それまで
+//! [`feed`] は常に「素通り」を返すので、**FEP をオンにしても打鍵はそのまま
+//! アプリへ届く** (壊れず、ただ変換されない)。
 //!
 //! ## 未確定文字列と候補窓の描画
 //!
@@ -142,6 +155,8 @@ pub struct Fep {
     cand_c0: usize,
     cand_c1: usize,
     pending_draw: bool,
+    /// X4 (ポンプ) で SHIFT+SPACE を見たときの持ち越し。実際の切り替えは X3。
+    toggle_pending: bool,
     commit: [u8; COMMIT_MAX],
     commit_len: usize,
     /// [`GSHELL_IME_RENDER_GFX`] の番地。K が `ime_set_render` を足したら
@@ -171,6 +186,7 @@ impl Fep {
         cand_c0: 0,
         cand_c1: 0,
         pending_draw: false,
+        toggle_pending: false,
         commit: [0; COMMIT_MAX],
         commit_len: 0,
         render_table: 0,
@@ -291,54 +307,92 @@ pub fn install() {
     f.render_table = &GSHELL_IME_RENDER_GFX as *const ImeRender as u32;
     grid_clear_all(f);
     f.on = unsafe { (os32api::api().ime_is_active)() } != 0;
-    f.grid_dirty = true;
+    refresh_indicator(f);
 }
 
 /* ================================================================ */
 /*  キーの取り込み (契約 U2a / T3)                                   */
 /* ================================================================ */
 
-/// cooked 待ち行列を FEP 越しに読み切り、`Key` / `Text` をリングへ流す。
+/// 打鍵を FEP へ通した結果 (契約 U2a)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fed {
+    /// FEP は関与しない。`Key` (と印字可能なら `Text`) を通常どおり配送する。
+    Pass,
+    /// FEP が消費した。`Key` を配送しない。確定文字列は [`flush_text`] が出す。
+    Consumed,
+}
+
+/// カーネル FEP へ打鍵を 1 件渡す。
 ///
-/// `ctx` が [`input::Ctx::Pump`] (X4) のときはモーダル中は何もしない
-/// (モーダルの状態機械を進めるのは X3 だけ = 契約 T8)。
-pub fn pump(st: &mut GuiState, ctx: input::Ctx, mods: u32) {
-    if ctx == input::Ctx::Pump && modal::is_open() {
-        return;
+/// **まだ KAPI が無い** (モジュール冒頭の申し送り 1)。`ime_feed_key` が生えたら
+/// この 1 行を `Some(unsafe { (os32api::api().ime_feed_key)(keydata) })` にする。
+#[inline]
+fn feed_kernel(_keydata: i32) -> Option<i32> {
+    None
+}
+
+/// SHIFT+SPACE。FEP を on/off して表示を更新する (常に WM が消費する)。
+///
+/// `ime_toggle` は初回に辞書 (SQLite) を開くので**速くない**。契約 T8 の X4
+/// (ポンプ) では呼べないため、そこでは [`request_toggle`] で持ち越し、次の X3 で
+/// [`apply_pending_toggle`] が実行する。
+pub fn toggle(st: &mut GuiState) {
+    unsafe {
+        (os32api::api().ime_toggle)();
     }
-    let mut guard = 0;
-    loop {
-        guard += 1;
-        if guard > 128 {
-            break;
-        }
-        /* リングの空きが無ければ取り込まない (契約 T3: カーネル待ち行列に残す)。 */
-        if !space_ok(st) {
-            break;
-        }
-        let v = unsafe { (os32api::api().ime_trygetkey)() };
-        if v < 0 {
-            break;
-        }
-        if v >= 0x100 || v == 0x1B {
-            /* 素通りしたキー。直前までの確定文字列を先に出して順序を保つ。 */
-            flush_commit(st);
-            deliver_key(st, ctx, v, mods);
-        } else {
-            push_commit(v as u8);
-        }
-    }
-    flush_commit(st);
     sync_mode(st);
 }
 
-/// フォーカス窓のリングに `Key` + `Text` 2 件分の空きがあるか。
-fn space_ok(st: &GuiState) -> bool {
-    match input::focus_target(st) {
-        Some(t) => ring::space(st, t.slot) >= 4,
-        /* 宛先が無いときは読む (行列を空けるだけ)。 */
-        None => true,
+/// X4 で見た SHIFT+SPACE を次の X3 へ持ち越す (打鍵を落とさないため)。
+#[inline]
+pub fn request_toggle() {
+    state().toggle_pending = true;
+}
+
+/// 持ち越した SHIFT+SPACE を X3 で実行する。
+pub fn apply_pending_toggle(st: &mut GuiState) {
+    if !state().toggle_pending {
+        return;
     }
+    state().toggle_pending = false;
+    toggle(st);
+}
+
+/// 打鍵 1 件 (make) を FEP へ通す。返り値が [`Fed::Consumed`] なら `Key` を
+/// 配送してはいけない (契約 U2a 改訂: 変換中の BS が本文まで消す事故を防ぐ)。
+pub fn feed(st: &mut GuiState, scan: u8, ch: u8, _mods: u32) -> Fed {
+    if !state().on {
+        return Fed::Pass;
+    }
+    let keydata = ((scan as i32) << 8) | (ch as i32);
+    let v = match feed_kernel(keydata) {
+        Some(v) => v,
+        /* KAPI 未実装: FEP は関与できないので素通りさせる。 */
+        None => return Fed::Pass,
+    };
+    if v < 0 {
+        sync_mode(st);
+        return Fed::Consumed;
+    }
+    if v >= 0x100 || v == 0x1B {
+        return Fed::Pass;
+    }
+    /* 確定文字列の 1 バイト目。続きを引き切る。 */
+    push_commit(v as u8);
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > COMMIT_MAX {
+            break;
+        }
+        match feed_kernel(-1) {
+            Some(b) if b > 0 && b < 0x100 && b != 0x1B => push_commit(b as u8),
+            _ => break,
+        }
+    }
+    sync_mode(st);
+    Fed::Consumed
 }
 
 fn push_commit(b: u8) {
@@ -365,20 +419,20 @@ fn utf8_len(b: u8) -> usize {
 }
 
 /// 溜まった確定文字列を `Text` (8B ずつ UTF-8 境界、`more`) で配送する (契約 U2)。
-fn flush_commit(st: &mut GuiState) {
+pub fn flush_text(st: &mut GuiState) {
     let len = state().commit_len;
     if len == 0 {
         return;
     }
     state().commit_len = 0;
-    let t = match input::focus_target(st) {
-        Some(t) => t,
-        /* 宛先無し (モーダル中・窓無し) は捨てる。 */
-        None => return,
-    };
     if modal::is_open() {
         return;
     }
+    let t = match input::focus_target(st) {
+        Some(t) => t,
+        /* 宛先無し (窓が無い) は捨てる。 */
+        None => return,
+    };
     let mut i = 0;
     while i < len {
         let mut n = 0;
@@ -415,58 +469,30 @@ fn flush_commit(st: &mut GuiState) {
     }
 }
 
-/// FEP を素通りしたキー 1 件を届ける。
-fn deliver_key(st: &mut GuiState, ctx: input::Ctx, keydata: i32, mods: u32) {
-    let scan = ((keydata >> 8) & 0x7F) as u8;
-    let ch = (keydata & 0xFF) as u8;
-
-    /* モーダル中は宛先をダイアログに限定する (契約 U4)。 */
-    if modal::is_open() {
-        if ctx != input::Ctx::Pump {
-            modal::on_key(st, scan, ch);
-        }
-        return;
-    }
-    /* gshell 単独 (窓が 1 枚も無い) ときの WM ショートカット。 */
-    if ctx == input::Ctx::Standalone && st.front_index().is_none() {
-        input::standalone_key(st, scan);
-        return;
-    }
-    let t = match input::focus_target(st) {
-        Some(t) => t,
-        None => return,
-    };
-    let serial = input::next_serial(st, t.slot);
-    let ev = ring::ev_key(true, t.win_id, scan, ch, mods as u8, serial);
-    ring::append(st, t.slot, &ev);
-
-    /* 印字可能キーは `Text` も配送 (契約 U2a)。FEP オン中に印字可能キーが
-     * 素通りすることは無い (かな入力として消費される) ので二重にならない。 */
-    if ch >= 0x20 && ch <= 0x7E {
-        let mut utf8 = [0u8; 8];
-        utf8[0] = ch;
-        let s2 = input::next_serial(st, t.slot);
-        let evt = ring::ev_text(t.win_id, utf8, 1, s2);
-        ring::append(st, t.slot, &evt);
-    }
-}
-
-/// `ime_is_active()` を写し取り、関数表が繋がっていない間のモード表示を作る。
+/// `ime_is_active()` を写し取り、変化していたらモード表示を作り直す。
 fn sync_mode(st: &mut GuiState) {
     let on = unsafe { (os32api::api().ime_is_active)() } != 0;
+    let _ = st;
     let f = state();
     if on == f.on {
         return;
     }
     f.on = on;
-    let _ = st;
+    refresh_indicator(f);
+}
+
+/// 関数表がまだカーネルに繋がっていない間の代替表示。
+///
+/// カーネルが `IME_Render` を呼べるようになれば (`ime_set_render`)、未確定行は
+/// カーネルの `preedit_draw` / `preedit_clear` が書くので WM は手を出さない。
+/// それまでは TVRAM 版と同じ「[あ]」を未確定行に置き、**FEP が on になったことが
+/// 画面で分かる**ようにしておく (G3 の目視確認用)。
+fn refresh_indicator(f: &mut Fep) {
     if f.kernel_drives {
-        /* 未確定行はカーネルが描く (preedit_draw / preedit_clear)。 */
         return;
     }
     grid_clear_row(f, PREEDIT_ROW as i32, 0);
-    if on {
-        /* TVRAM 版の preedit_draw と同じ「[あ]」。 */
+    if f.on {
         grid_put(f, 0, PREEDIT_ROW as i32, b'[' as u32, K_ATTR_CYAN, 1);
         grid_put(f, 1, PREEDIT_ROW as i32, 0x3042, K_ATTR_CYAN, 2);
         grid_put(f, 3, PREEDIT_ROW as i32, b']' as u32, K_ATTR_CYAN, 1);

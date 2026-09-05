@@ -1,0 +1,582 @@
+//! client.rs — `gui_call` の薄い包み (契約 T1 / T2 / T2a / T3 / T7)。票 C2 作業 1・2。
+//!
+//! アプリは `gui_call` を直接触らない。この層が
+//!   - `OP_INIT` でスロット番号を受け、`MEM_SHM_GUI_BASE + n × 16KB` を
+//!     ヘッダ / 要求 / 応答 / リング / 引数バッファに切る (K1 のオフセット)、
+//!   - `proto_version` を照合し (不一致は `ERR_VERSION`)、
+//!   - 戻り値 `< 0` を [`GuiErr`] に写す (**GetLastError は作らない** — 契約 T7)
+//! ところまでを持つ。所有型 (`Window` / `Timer`) とウィジェット木はこの上。
+//!
+//! **鉄則 (契約 P)**: プリミティブごとに syscall しない。1 周の `gui_call` は
+//! `POLL` + `COMMIT` + `WAIT` (+ 状態変更) だけ。描画はサーフェスへ直接 (C1 の G API)。
+//! ポインタは SHM に載せない。文字列は長さ前置で引数 / 要求ブロックへ。
+
+use core::cell::UnsafeCell;
+use core::ptr;
+
+use os32api::gui::proto::{
+    GuiEvent, GuiRect16, GuiReqInvalidate, GuiReqTextCursor, GuiReqTimerKill, GuiReqTimerSet,
+    GuiReqWinMove, GuiReqWinResize, GuiReqWinShow, GuiReqWinTitle, GuiReqWindow, GuiRespRect,
+    GuiRgb, GuiSlotHeader, GuiString, GuiWinSpec, GUI_HDR_FLAG_OVERFLOW, GUI_OP_COMMIT,
+    GUI_OP_INIT, GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_POLL, GUI_OP_STATS,
+    GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET, GUI_OP_WAIT,
+    GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
+    GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE, GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR,
+    GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW, GUI_PROTO_VERSION, GUI_RING_CAPACITY,
+    GUI_SLOT_ARGS_OFF, GUI_SLOT_ARGS_SIZE, GUI_SLOT_HDR_OFF, GUI_SLOT_REQ_OFF, GUI_SLOT_RESP_OFF,
+    GUI_SLOT_RING_OFF, GUI_SLOT_SIZE, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_NOSYS,
+    OS32_ERR_STALE, OS32_ERR_VERSION,
+};
+use os32api::gui::types::{Rect, Stats};
+
+/* ================================================================ */
+/*  SHM 内の番地 (memmap.h)                                          */
+/*                                                                  */
+/*  MEM_SHM_GUI_BASE = MEM_SHM_BASE + 0x30000 (ブロック 12、+192KB)。 */
+/*  `shm_base` は KAPI のデータフィールドなのでアプリから読める。      */
+/*  **PM への申し送り**: この 0x30000 は共有ヘッダ / proto.rs に無く、   */
+/*  gshell (`wm::GUI_SHM_OFFSET`) と C2 で二重定義になっている。        */
+/* ================================================================ */
+/// `MEM_SHM_BASE` からの GUI 予約 SHM のオフセット (memmap.h `MEM_SHM_GUI_BASE`)。
+pub const GUI_SHM_OFFSET: u32 = 0x30000;
+
+/* 取り込み tick の記録 (契約 P2)。引数バッファの直後 256B = 64 × 4B。
+ * 索引は `serial % 64`、各項目は u16 serial + u16 tick 下位。W1 の
+ * `gshell::slot::GUI_SLOT_TRACE_OFF` と同値 (共有ヘッダには未記載。申し送り)。 */
+/// 取り込み tick 表のスロット内オフセット (契約 P2)。
+pub const SLOT_TRACE_OFF: usize = GUI_SLOT_ARGS_OFF + GUI_SLOT_ARGS_SIZE; /* 11280 */
+/// 取り込み tick 表の項目数。
+pub const TRACE_ENTRIES: usize = 64;
+
+const _: () = assert!(SLOT_TRACE_OFF + TRACE_ENTRIES * 4 <= GUI_SLOT_SIZE);
+
+/* ================================================================ */
+/*  エラー (契約 T7) — GetLastError は作らない                        */
+/* ================================================================ */
+
+/// `gui_call` の負の戻り値 (`OS32_ERR_*`)。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct GuiErr(pub i32);
+
+impl GuiErr {
+    pub const INVAL: GuiErr = GuiErr(OS32_ERR_INVAL);
+    pub const NOSYS: GuiErr = GuiErr(OS32_ERR_NOSYS);
+    pub const STALE: GuiErr = GuiErr(OS32_ERR_STALE);
+    pub const VERSION: GuiErr = GuiErr(OS32_ERR_VERSION);
+    pub const FULL: GuiErr = GuiErr(OS32_ERR_FULL);
+
+    #[inline]
+    pub const fn code(self) -> i32 {
+        self.0
+    }
+
+    /// 人間が読む名前 (`dbg_print` 用。NUL 終端しない)。
+    pub fn name(self) -> &'static [u8] {
+        match self.0 {
+            OS32_ERR_INVAL => b"ERR_ARG",
+            OS32_ERR_NOSYS => b"ERR_NOSYS",
+            OS32_ERR_STALE => b"ERR_STALE",
+            OS32_ERR_VERSION => b"ERR_VERSION",
+            OS32_ERR_FULL => b"ERR_FULL",
+            _ => b"ERR",
+        }
+    }
+}
+
+pub type GuiResult<T> = Result<T, GuiErr>;
+
+/* ================================================================ */
+/*  デバッグ出力 (KAPI に dbg_print は無いので kprintf を包む)        */
+/* ================================================================ */
+
+/// 1 行のデバッグ出力 (NUL 終端不要)。
+pub fn dbg_print(msg: &[u8]) {
+    unsafe {
+        let a = os32api::api();
+        (a.kprintf)(
+            os32api::ATTR_YELLOW,
+            b"%.*s\r\n\0".as_ptr(),
+            msg.len() as i32,
+            msg.as_ptr(),
+        );
+    }
+}
+
+/// 「文字列 + 整数」のデバッグ出力。
+pub fn dbg_print_num(msg: &[u8], v: i32) {
+    unsafe {
+        let a = os32api::api();
+        (a.kprintf)(
+            os32api::ATTR_YELLOW,
+            b"%.*s %d\r\n\0".as_ptr(),
+            msg.len() as i32,
+            msg.as_ptr(),
+            v,
+        );
+    }
+}
+
+/* ================================================================ */
+/*  クライアント状態 (スロット 1 本)                                  */
+/* ================================================================ */
+
+struct Client {
+    inited: bool,
+    slot: u32,
+    base: *mut u8,
+    /// ハンドラ実行中フラグ (`wait` の再入禁止を `debug_assert` する。契約 U3)。
+    in_handler: bool,
+}
+
+impl Client {
+    const NEW: Client = Client {
+        inited: false,
+        slot: 0,
+        base: ptr::null_mut(),
+        in_handler: false,
+    };
+}
+
+struct Cell(UnsafeCell<Client>);
+unsafe impl Sync for Cell {}
+static CLIENT: Cell = Cell(UnsafeCell::new(Client::NEW));
+
+#[inline]
+fn c() -> &'static mut Client {
+    unsafe { &mut *CLIENT.0.get() }
+}
+
+/// `OP_INIT` 済みか。
+#[inline]
+pub fn is_inited() -> bool {
+    c().inited
+}
+
+/// 割り当てられたスロット番号 (v1 は常に 0)。
+#[inline]
+pub fn slot() -> u32 {
+    c().slot
+}
+
+/// スロット先頭 (デバッグ / `gui_bench` の予備領域読み出し用)。
+#[inline]
+pub fn slot_base() -> *mut u8 {
+    c().base
+}
+
+/* ================================================================ */
+/*  libos32gfx のアタッチ                                            */
+/*                                                                  */
+/*  gshell が既に GFX モードにしているので、アプリは `libos32gfx_init` */
+/*  を呼んではいけない (中の `gfx_init()` が VRAM 両ページを消し、     */
+/*  パレットを初期化してデスクトップを壊す)。framebuffer 記述子だけを  */
+/*  取り直し、サーフェス / スプライトのプールを初期化する。            */
+/* ================================================================ */
+extern "C" {
+    static mut gfx_api: *mut os32api::KernelAPI;
+    fn gfx_surface_init();
+    fn gfx_sprite_init();
+}
+
+fn attach_gfx() {
+    unsafe {
+        let a = os32api::api();
+        gfx_api = os32api::api_ptr();
+        /* gfx_fb は C1 の ffi で読み取り専用宣言なので、番地を取って書く。 */
+        let fb = ptr::addr_of!(crate::ffi::gfx_fb) as *mut crate::ffi::GfxFramebuffer;
+        (a.gfx_get_framebuffer)(fb as *mut u8);
+        gfx_surface_init();
+        gfx_sprite_init();
+    }
+    crate::gstate::refresh_screen_info();
+}
+
+/* ================================================================ */
+/*  初期化 (契約 T2a / T5)                                            */
+/* ================================================================ */
+
+/// WM に接続してスロットを 1 本もらう (契約 T2a)。返り値はスロット番号。
+///
+/// `arg` に `proto_version` を載せる (W1 の `op_init`)。WM が古ければ
+/// `ERR_VERSION`、スロットが埋まっていれば `ERR_FULL`、WM 未登録なら `ERR_NOSYS`。
+pub fn init() -> GuiResult<u32> {
+    let r = raw(GUI_OP_INIT, GUI_PROTO_VERSION as u32);
+    if r < 0 {
+        return Err(GuiErr(r));
+    }
+    let slot_no = r as u32;
+    let shm_base = unsafe { (*os32api::api_ptr()).shm_base };
+    let base = (shm_base + GUI_SHM_OFFSET + slot_no * (GUI_SLOT_SIZE as u32)) as *mut u8;
+
+    let st = c();
+    st.slot = slot_no;
+    st.base = base;
+    st.inited = true;
+
+    /* WM が入れたヘッダの proto_version を照合する (契約 T5)。 */
+    let h = read_header();
+    if h.proto_version != GUI_PROTO_VERSION {
+        st.inited = false;
+        return Err(GuiErr::VERSION);
+    }
+
+    attach_gfx();
+    Ok(slot_no)
+}
+
+/* ================================================================ */
+/*  低レベル呼び出し                                                 */
+/* ================================================================ */
+
+#[inline]
+fn raw(op: u32, arg: u32) -> i32 {
+    unsafe { (os32api::api().gui_call)(op, arg) }
+}
+
+/// `gui_call` を 1 回。負の戻り値は [`GuiErr`] に写す (契約 T7)。
+#[inline]
+pub fn call(op: u32, arg: u32) -> GuiResult<i32> {
+    let r = raw(op, arg);
+    if r < 0 {
+        Err(GuiErr(r))
+    } else {
+        Ok(r)
+    }
+}
+
+/* ---- スロット内の各ブロック ---- */
+
+#[inline]
+fn header_ptr() -> *mut GuiSlotHeader {
+    unsafe { c().base.add(GUI_SLOT_HDR_OFF) as *mut GuiSlotHeader }
+}
+
+#[inline]
+fn req_ptr() -> *mut u8 {
+    unsafe { c().base.add(GUI_SLOT_REQ_OFF) }
+}
+
+#[inline]
+fn resp_ptr() -> *const u8 {
+    unsafe { c().base.add(GUI_SLOT_RESP_OFF) as *const u8 }
+}
+
+#[inline]
+fn ring_ptr() -> *const u8 {
+    unsafe { c().base.add(GUI_SLOT_RING_OFF) as *const u8 }
+}
+
+/// 引数バッファ (8KB)。一括登録に使う (契約 T2)。
+#[inline]
+pub fn args_ptr() -> *mut u8 {
+    unsafe { c().base.add(GUI_SLOT_ARGS_OFF) }
+}
+
+/// スロットヘッダを読む。
+#[inline]
+pub fn read_header() -> GuiSlotHeader {
+    unsafe { ptr::read_unaligned(header_ptr()) }
+}
+
+/// `ring_head` だけを進める (**アプリが書けるのはここだけ** — 契約 T3)。
+#[inline]
+fn write_ring_head(head: u16) {
+    unsafe {
+        let p = header_ptr() as *mut u8;
+        ptr::write_unaligned(p.add(8) as *mut u16, head);
+    }
+}
+
+/// 要求ブロックへ構造体を 1 つ置く (先頭から)。
+#[inline]
+pub fn write_req<T: Copy>(v: &T) {
+    debug_assert!(core::mem::size_of::<T>() <= os32api::gui::proto::GUI_SLOT_REQ_SIZE);
+    unsafe { ptr::write_unaligned(req_ptr() as *mut T, *v) }
+}
+
+/// 応答ブロックから構造体を 1 つ読む (先頭から)。
+#[inline]
+pub fn read_resp<T: Copy>() -> T {
+    debug_assert!(core::mem::size_of::<T>() <= os32api::gui::proto::GUI_SLOT_RESP_SIZE);
+    unsafe { ptr::read_unaligned(resp_ptr() as *const T) }
+}
+
+/* ================================================================ */
+/*  イベント取り出し (契約 T3) — 票 C2 作業 2                         */
+/* ================================================================ */
+
+/// `OP_POLL` 1 回の結果。
+pub struct Poll {
+    /// 取り出した件数 (`out` の先頭から)。
+    pub count: usize,
+    /// WM が取りこぼした打鍵数 (受け取った時点で WM が消す)。
+    pub dropped: u16,
+    /// `OVERFLOW`: 入力状態を未知として扱う (押しっぱなしの前提を捨てる)。
+    pub overflow: bool,
+}
+
+/// リングに溜まったイベントを一括で取り出す (契約 T3 の 3 手順)。
+///
+/// (1) `OP_POLL` (WM が導出型を追記し、未読件数を返す) → (2) `[head, tail)` を
+/// `out` へ写す → (3) **`head = tail` に進める** (`tail` は WM のもの。触らない)。
+pub fn poll(out: &mut [GuiEvent]) -> GuiResult<Poll> {
+    let n = call(GUI_OP_POLL, 0)? as usize;
+    let h = read_header();
+    let cap = if out.len() < GUI_RING_CAPACITY { out.len() } else { GUI_RING_CAPACITY };
+    let n = if n > cap { cap } else { n };
+
+    let base = ring_ptr();
+    let mut i = 0;
+    while i < n {
+        let idx = (h.ring_head.wrapping_add(i as u16)) % (GUI_RING_CAPACITY as u16);
+        out[i] = unsafe { ptr::read_unaligned(base.add((idx as usize) * 16) as *const GuiEvent) };
+        i += 1;
+    }
+    /* 消費確認は head を進めることだけ (WM は head を読んで空きを判断する)。 */
+    write_ring_head(h.ring_head.wrapping_add(n as u16));
+
+    Ok(Poll {
+        count: n,
+        dropped: h.dropped,
+        overflow: (h.flags & GUI_HDR_FLAG_OVERFLOW) != 0,
+    })
+}
+
+/// `OP_WAIT` (GetMessage の代替)。`timeout_ticks` = 0 は「起こされるまで」。
+///
+/// **ハンドラの中から呼んではいけない** (契約 U3。`debug_assert` で守る)。
+pub fn wait(timeout_ticks: u32) -> GuiResult<i32> {
+    debug_assert!(!c().in_handler, "gui wait() called from inside an event handler (U3)");
+    call(GUI_OP_WAIT, timeout_ticks)
+}
+
+/// ハンドラ実行中の印 (再入検出用)。`app::run` が包む。
+#[inline]
+pub fn enter_handler() {
+    c().in_handler = true;
+}
+
+#[inline]
+pub fn leave_handler() {
+    c().in_handler = false;
+}
+
+/// `OP_COMMIT`: issued の矩形だけを画面へ (契約 G4)。**ループ 1 周に 1 回**。
+/// `window = 0` はこのアプリの全ウィンドウ。
+pub fn commit(window: u32) -> GuiResult<()> {
+    call(GUI_OP_COMMIT, window).map(|_| ())
+}
+
+/// 損傷を申告する (契約 G4)。`rect` はクライアントローカル。
+pub fn invalidate(window: u32, rect: Rect) -> GuiResult<()> {
+    let req = GuiReqInvalidate { window, rect: r16(rect) };
+    write_req(&req);
+    call(GUI_OP_INVALIDATE, 0).map(|_| ())
+}
+
+/// カウンタ (契約 G7)。応答ブロック先頭に `GFX_Stats` 生で返る。
+pub fn stats() -> GuiResult<Stats> {
+    call(GUI_OP_STATS, 0)?;
+    Ok(read_resp::<Stats>())
+}
+
+/// 取り込み tick (契約 P2)。`serial` に対応する記録が残っていれば tick の下位 16bit。
+pub fn trace_tick(serial: u16) -> Option<u16> {
+    if !is_inited() {
+        return None;
+    }
+    let idx = (serial as usize) % TRACE_ENTRIES;
+    unsafe {
+        let p = c().base.add(SLOT_TRACE_OFF + idx * 4) as *const u16;
+        let s = ptr::read_unaligned(p);
+        if s != serial {
+            return None;
+        }
+        Some(ptr::read_unaligned(p.add(1)))
+    }
+}
+
+/* ================================================================ */
+/*  ウィンドウ op (契約 U1) — 所有型 `window::Window` の下請け        */
+/* ================================================================ */
+
+#[inline]
+fn r16(r: Rect) -> GuiRect16 {
+    GuiRect16 { x: r.x, y: r.y, w: r.w, h: r.h }
+}
+
+#[inline]
+fn r16_to_rect(r: GuiRect16) -> Rect {
+    Rect::new(r.x, r.y, r.w, r.h)
+}
+
+/// `create_window(spec)`。戻り値は WindowId (index:16 | generation:16)。
+pub fn win_create(spec: &GuiWinSpec) -> GuiResult<u32> {
+    write_req(spec);
+    let r = call(GUI_OP_WIN_CREATE, 0)?;
+    Ok(r as u32)
+}
+
+/// 単一ハンドル op (DESTROY / RAISE / SET_FOCUS)。W1 は `arg != 0` を優先する。
+fn win_simple(op: u32, window: u32) -> GuiResult<()> {
+    let req = GuiReqWindow { window };
+    write_req(&req);
+    call(op, window).map(|_| ())
+}
+
+pub fn win_destroy(window: u32) -> GuiResult<()> {
+    win_simple(GUI_OP_WIN_DESTROY, window)
+}
+
+pub fn win_raise(window: u32) -> GuiResult<()> {
+    win_simple(GUI_OP_WIN_RAISE, window)
+}
+
+pub fn win_set_focus(window: u32) -> GuiResult<()> {
+    win_simple(GUI_OP_WIN_SET_FOCUS, window)
+}
+
+/// クライアント矩形 (**原点は画面絶対座標**、大きさはクライアント面。W1 の規約)。
+pub fn win_client_rect(window: u32) -> GuiResult<Rect> {
+    let req = GuiReqWindow { window };
+    write_req(&req);
+    call(GUI_OP_WIN_CLIENT_RECT, window)?;
+    let resp = read_resp::<GuiRespRect>();
+    if resp.result < 0 {
+        return Err(GuiErr(resp.result));
+    }
+    Ok(r16_to_rect(resp.rect))
+}
+
+pub fn win_move(window: u32, x: i16, y: i16) -> GuiResult<()> {
+    let req = GuiReqWinMove { window, x, y };
+    write_req(&req);
+    call(GUI_OP_WIN_MOVE, 0).map(|_| ())
+}
+
+pub fn win_resize(window: u32, w: i16, h: i16) -> GuiResult<()> {
+    let req = GuiReqWinResize { window, w, h };
+    write_req(&req);
+    call(GUI_OP_WIN_RESIZE, 0).map(|_| ())
+}
+
+pub fn win_show(window: u32, show: bool) -> GuiResult<()> {
+    let req = GuiReqWinShow { window, show: show as u8, _pad: [0; 3] };
+    write_req(&req);
+    call(GUI_OP_WIN_SHOW, 0).map(|_| ())
+}
+
+/// タイトルを差し替える。UTF-8 境界で 255B に切り詰める (契約 U9)。
+pub fn win_set_title(window: u32, title: &[u8]) -> GuiResult<()> {
+    let mut s = GuiString { len: 0, s: [0u8; 255] };
+    let n = utf8_truncate(title, 255);
+    let mut i = 0;
+    while i < n {
+        s.s[i] = title[i];
+        i += 1;
+    }
+    s.len = n as u8;
+    let req = GuiReqWinTitle { window, title: s };
+    write_req(&req);
+    call(GUI_OP_WIN_SET_TITLE, 0).map(|_| ())
+}
+
+/// FEP の候補窓の位置 (契約 U2a の cursor rectangle)。座標はクライアントローカル。
+pub fn win_set_text_cursor(window: u32, x: i16, y: i16, visible: bool) -> GuiResult<()> {
+    let req = GuiReqTextCursor { window, x, y, visible: visible as u8, _pad: 0 };
+    write_req(&req);
+    call(GUI_OP_WIN_SET_TEXT_CURSOR, 0).map(|_| ())
+}
+
+/* ================================================================ */
+/*  パレットのリース (契約 G8) — W1 では NOSYS (W2 待ち)              */
+/*                                                                  */
+/*  **PM への申し送り**: `lease_palette(first, count, entries)` の要求 */
+/*  ブロックのレイアウトが共有ヘッダ (os32_gui_shared.h) に無い。ここ  */
+/*  では 16 色バックエンド向けに次を仮に決めてある。W2 が実装するとき   */
+/*  ヘッダへ末尾追記して両側を合わせること。                           */
+/*      u16 first / u16 count / GuiRgb entries[16]                   */
+/*  256 色 (最大 240 項目) は引数バッファ (8KB) 経由になる想定。        */
+/* ================================================================ */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqLeasePalette {
+    pub first: u16,
+    pub count: u16,
+    pub entries: [GuiRgb; 16],
+}
+
+const _: () = assert!(
+    core::mem::size_of::<GuiReqLeasePalette>() <= os32api::gui::proto::GUI_SLOT_REQ_SIZE
+);
+
+/// フォーカス中のウィンドウが自分の色を入れる (契約 G8)。16 色版のみ。
+/// 範囲は `screen_info()` の `lease_mask` で問い合わせること。
+pub fn lease_palette(first: u16, entries: &[GuiRgb]) -> GuiResult<i32> {
+    if entries.is_empty() || entries.len() > 16 {
+        return Err(GuiErr::INVAL);
+    }
+    let mut req = GuiReqLeasePalette { first, count: entries.len() as u16, entries: [GuiRgb { r: 0, g: 0, b: 0 }; 16] };
+    let mut i = 0;
+    while i < entries.len() {
+        req.entries[i] = entries[i];
+        i += 1;
+    }
+    write_req(&req);
+    call(GUI_OP_LEASE_PALETTE, 0)
+}
+
+/* ================================================================ */
+/*  タイマ (契約 U5)                                                  */
+/* ================================================================ */
+
+/// タイマを張る。W1 の `GuiReqTimerSet` は ms 指定・**反復固定** (repeat 無し)。
+pub fn timer_set(window: u32, timer_id: u16, interval_ms: u16) -> GuiResult<()> {
+    let req = GuiReqTimerSet { window, timer_id, interval_ms };
+    write_req(&req);
+    call(GUI_OP_TIMER_SET, 0).map(|_| ())
+}
+
+pub fn timer_kill(window: u32, timer_id: u16) -> GuiResult<()> {
+    let req = GuiReqTimerKill { window, timer_id, _pad: 0 };
+    write_req(&req);
+    call(GUI_OP_TIMER_KILL, 0).map(|_| ())
+}
+
+/* ================================================================ */
+/*  文字列 (契約 U9) — 切り詰めは UTF-8 の境界で                      */
+/* ================================================================ */
+
+/// UTF-8 の先頭バイトから符号単位のバイト長を得る (不正バイトは 1)。
+#[inline]
+pub fn utf8_seq_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b & 0xE0 == 0xC0 {
+        2
+    } else if b & 0xF0 == 0xE0 {
+        3
+    } else if b & 0xF8 == 0xF0 {
+        4
+    } else {
+        1
+    }
+}
+
+/// `max` バイト以内に収まる UTF-8 の切れ目を返す (NUL 終端も尊重)。
+/// 途中の符号単位で切らない (CLAUDE.md の注意事項 / 契約 U9)。
+pub fn utf8_truncate(s: &[u8], max: usize) -> usize {
+    let lim = if s.len() < max { s.len() } else { max };
+    let mut i = 0usize;
+    while i < lim {
+        if s[i] == 0 {
+            break;
+        }
+        let need = utf8_seq_len(s[i]);
+        if i + need > lim {
+            break;
+        }
+        i += need;
+    }
+    i
+}

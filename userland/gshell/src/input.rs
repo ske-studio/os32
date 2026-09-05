@@ -2,7 +2,7 @@
 //!
 //! `kbd_trygetrawkey` の生 make/break を `Key` (down 0/1) に、印字可能キーは加えて
 //! `Text` にして、フォーカス窓の所有者スロットのリングへ積む。`mouse_poll` から
-//! `Pointer` (最新 1 件へ畳む) と `Button` を作る。修飾は `kbd_get_modifiers`。
+//! `Pointer` (最新 1 件へ畳む) と `Button` を作る。修飾は raw エントリに載る (イベント時点)。
 //! `kbd_dropped_count` の差分を `dropped` に足して `OVERFLOW` (契約 T3)。
 //!
 //! WM 自身の UI (ドラッグ / 閉じる / フォーカス切替) は [`Ctx::Wait`] /
@@ -10,12 +10,11 @@
 //! 進める。ポンプ [`Ctx::Pump`] (X4) は入力のリング追記とカーソル移動だけで、
 //! 状態機械を進めない。
 //!
-//! **W2 の変更**: `make` (押下) の `Key` と `Text` は **cooked 待ち行列を持つ
-//! FEP** ([`crate::fep`]) から出る。ここが読むのは raw 待ち行列の
-//! **break (押し上げ) と修飾キーだけ**になった。cooked を空読みして捨てていた
-//! W1 の `drain_cooked_queue` は不要になり (FEP が正規の読み手なので)、
-//! 「FEP が消費したキーは `Key` として配送しない」(契約 U2a) が対応付けの
-//! 推測なしに成立する。理由と分類規則は `fep.rs` の冒頭を参照。
+//! **W2 で足したもの** (契約 U2a / U4): SHIFT+SPACE を WM が消費して FEP を
+//! 切り替え、押下は先に FEP ([`crate::fep`]) へ通して**消費されたキーは `Key` と
+//! して配送しない**。確定文字列は取り込みの最後に `Text` でまとめて流す。
+//! モーダル中は宛先をダイアログに限定する。GUI 中は cooked 待ち行列
+//! (`kbd_buf`) にカーネルが積まないので (K2)、打鍵の入口は raw 1 本だけ。
 
 use crate::wm::{GuiState, Rect};
 use crate::{cursor, fep, modal, ring, slot, visible, wm};
@@ -53,6 +52,8 @@ const SC_CTRL: u8 = 0x74;
 const SC_ESC: u8 = 0x00;
 const SC_F1: u8 = 0x62;
 const SC_F2: u8 = 0x63;
+/* KEY_SPACE。SHIFT+SPACE で FEP を切り替える (契約 U2a)。 */
+const SC_SPACE: u8 = 0x34;
 
 const MOUSE_BTN_LEFT: u8 = 0x01;
 
@@ -154,8 +155,7 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
     capture_mouse(st, ctx);
 }
 
-/// gshell 単独 (窓が 1 枚も無い) ときに WM が横取りするキー。
-/// [`crate::fep`] の配送経路から呼ばれる (make のみ)。
+/// gshell 単独 (窓が 1 枚も無い) ときに WM が横取りするキー (make のみ)。
 pub fn standalone_key(st: &mut GuiState, scan: u8) {
     if scan == SC_ESC {
         st.quit = true;
@@ -169,11 +169,24 @@ pub fn standalone_key(st: &mut GuiState, scan: u8) {
     }
 }
 
+/// raw リング (`kbd_trygetrawkey`) のエントリ = `keycode | down<<8 | mods<<9`。
+/// `mods` は**そのイベント時点**の修飾状態 (kbd.c の SHIFT_*、MOD_* と同値)。
+/// 取り込み時の最新状態で変換すると Shift↓ A↓ A↑ Shift↑ が溜まったときに
+/// a/A を取り違えるため、イベントごとの値を使う (レビュー #3 ②)。
+/// cooked キュー (`kbd_buf`) は GUI モード中カーネルが積まない (K2) ので触らない。
+///
+/// **W2 で足したもの** (契約 U2a / U4):
+///   1. SHIFT+SPACE は常に WM が消費して FEP を on/off する (配送しない)。
+///   2. モーダル中は宛先をダイアログに限定する。
+///   3. 押下は先に FEP へ通し、FEP が消費したら `Key` を配送しない。
+///      確定文字列は取り込みの最後に `Text` でまとめて流す。
 fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
-    let mods = unsafe { (os32api::api().kbd_get_modifiers)() };
+    /* X4 で見た SHIFT+SPACE をここで実行する (契約 T8: 辞書を開く重い処理は X3)。 */
+    if ctx.wm_ui() {
+        fep::apply_pending_toggle(st);
+    }
 
-    /* 取りこぼしの差分を dropped に加算 (契約 T3)。cooked / raw どちらの
-     * 溢れも `kbd_dropped_count()` に合算されている。 */
+    /* 取りこぼしの差分を dropped に加算 (契約 T3)。 */
     let cur_drop = unsafe { (os32api::api().kbd_dropped_count)() };
     let delta = cur_drop.wrapping_sub(st.last_kbd_dropped);
     st.last_kbd_dropped = cur_drop;
@@ -184,13 +197,16 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
     }
 
-    /* ---- (1) raw 待ち行列: break (押し上げ) だけを配送する ----
-     * make の Key / Text は cooked 側 = FEP が出す (モジュール冒頭)。
-     * 修飾キーは状態 (mods) で見るので配送しない。 */
     loop {
-        /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。 */
+        /* モーダル中の X4 は取り込まない — 宛先はダイアログで、その状態機械を
+         * 進めてよいのは X3 だけ (契約 T8)。打鍵はカーネル待ち行列に残す。 */
+        if ctx == Ctx::Pump && modal::is_open() {
+            break;
+        }
+        /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。
+         * FEP の確定文字列が続く可能性があるので 4 件分を見る。 */
         let space_ok = match focus_target(st) {
-            Some(t) => ring::space(st, t.slot) >= 2,
+            Some(t) => ring::space(st, t.slot) >= 4,
             None => true, /* 宛先無し: 取り込んでも捨てるだけなので読む (キューを空ける) */
         };
         if !space_ok {
@@ -202,29 +218,73 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
+        let mods = ((raw >> 9) & 0x7F) as u32; /* イベント時点の修飾状態 */
 
+        /* 修飾キー自体は Key として配送しない (状態は mods で見る)。 */
         if scan >= SC_SHIFT && scan <= SC_CTRL {
             continue;
         }
-        if down {
+
+        /* SHIFT+SPACE = FEP の on/off。**常に WM が消費**し、押下も離しも
+         * アプリへ配送しない (契約 U2a)。 */
+        if scan == SC_SPACE && (mods & MOD_SHIFT) != 0 {
+            if down {
+                if ctx.wm_ui() {
+                    fep::toggle(st);
+                } else {
+                    fep::request_toggle();
+                }
+            }
             continue;
         }
-        /* モーダル中はアプリに入力を渡さない (契約 U4)。 */
+
+        /* モーダル中は宛先をダイアログに限定する (契約 U4)。 */
         if modal::is_open() {
+            if down && ctx.wm_ui() {
+                let ch = translate(scan, mods);
+                modal::on_key(st, scan, ch);
+            }
             continue;
         }
+
+        /* WM 単独時 (フォーカス窓なし) の横取り: ESC=終了 / F1=デモ / F2=ファイル選択。
+         * アプリの OP_WAIT (Ctx::Wait) では横取りしない — ESC はアプリのもの。 */
+        if ctx == Ctx::Standalone && st.front_index().is_none() {
+            if down {
+                standalone_key(st, scan);
+            }
+            continue;
+        }
+
+        let ch = translate(scan, mods);
+
+        /* 押下は**先に FEP へ通す** (契約 U2a)。FEP が消費したキー (かな入力、
+         * 未確定の編集、候補操作、確定、取消) は `Key` として配送しない。 */
+        if down && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
+            continue;
+        }
+
         let t = match focus_target(st) {
             Some(t) => t,
             None => continue,
         };
-        let ch = translate(scan, mods);
         let serial = next_serial(st, t.slot);
-        let ev = ring::ev_key(false, t.win_id, scan, ch, mods as u8, serial);
+        let ev = ring::ev_key(down, t.win_id, scan, ch, mods as u8, serial);
         ring::append(st, t.slot, &ev);
+
+        /* 印字可能キーは Text も配送 (契約 U2a。FEP が消費していれば上で
+         * continue しているので二重にはならない)。 */
+        if down && ch >= 0x20 && ch <= 0x7E {
+            let mut utf8 = [0u8; 8];
+            utf8[0] = ch;
+            let s2 = next_serial(st, t.slot);
+            let evt = ring::ev_text(t.win_id, utf8, 1, s2);
+            ring::append(st, t.slot, &evt);
+        }
     }
 
-    /* ---- (2) cooked 待ち行列 = FEP。Key (make) / Text はここから ---- */
-    fep::pump(st, ctx, mods);
+    /* FEP の確定文字列を `Text` (8B ずつ、`more`) で流す (契約 U2)。 */
+    fep::flush_text(st);
 }
 
 fn capture_mouse(st: &mut GuiState, ctx: Ctx) {

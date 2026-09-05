@@ -17,6 +17,14 @@
  * owner = 呼び出し元の exec ネスト段 (res_owner_get())。 */
 typedef i32 (*GuiHandler)(u32 op, u32 arg, int owner);
 
+/* 入力ポンプの C 署名 (契約 T6 / T8 の X4)。引数なし・戻り値なし。
+ * gshell 側の実体は Rust の `gshell_gui_pump()` (userland/gshell/src/pump.rs)。 */
+typedef void (*GuiPump)(void);
+
+/* シェル帯の実行レベル (exec_exit の注記どおり level 1 = シェル)。
+ * WM (gshell) 自身の owner。K2 の syscall 境界ポンプもこれで自分を除外する。 */
+#define GUI_SHELL_OWNER  1
+
 /* KAPI: アプリ → WM の唯一の入口。未登録なら OS32_ERR_NOSYS。 */
 i32 gui_call(u32 op, u32 arg);
 
@@ -28,7 +36,8 @@ i32 gui_register(void *handler, void *pump);
  * ハンドラが登録済みなら GUI_OP_OWNER_EXIT を渡して WM に回収させる。 */
 void gui_owner_exit(int owner);
 
-/* K2 用: 登録された入力ポンプ (gui_pump) を返す。未登録なら NULL。 */
+/* K2 用: 登録された入力ポンプ (gui_pump) を返す。未登録なら NULL。
+ * 実体の型は GuiPump (void (*)(void))。 */
 void *gui_get_pump(void);
 
 /* KAPI: 次に起動するシェルのパスをカーネルに記録する (契約 T9、K4 の入口)。
@@ -38,5 +47,6 @@ i32 sys_switch_shell(const char *path);
 
 /* K4 用: sys_switch_shell で記録された次シェルのパス (無ければ NULL)。 */
 const char *gui_next_shell(void);
+int gui_take_next_shell(char *out, int cap);   /* 取り出して消す (K4 の起動ループ用) */
 
 #endif /* __GUI_H */
