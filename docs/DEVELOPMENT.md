@@ -98,6 +98,7 @@
 
 ## 3. 参照
 
+- Claude Code / Codex 共用スキル: [os32-emu-debug](../.claude/skills/os32-emu-debug/SKILL.md) (NP21/W 調査)、[os32-build-verify](../.claude/skills/os32-build-verify/SKILL.md) (変更別ビルド・反映確認)。本文は `.claude/skills/`、Codex の `.agents/skills/` から同じフォルダを参照する。`.agents/` は現行の Git 除外対象なので共有リンクは環境ごとに設置する (例: `.agents/skills/os32-emu-debug` → `../../.claude/skills/os32-emu-debug`)。
 - 規則の正典: [CONSTRAINTS.md](CONSTRAINTS.md) (CLAUDE.md / SOUL.md は ID で参照)
 - 成果の履歴: [CHANGELOG.md](../CHANGELOG.md)、[archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md)。計画: [ROADMAP.md](ROADMAP.md)
 - 落とし穴の経緯: [POLICY_DEBUG.md §4](POLICY_DEBUG.md)。短い注意は CLAUDE.md「Known Gotchas」
