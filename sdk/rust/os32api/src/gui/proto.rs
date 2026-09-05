@@ -183,8 +183,10 @@ pub const GUI_SLOT_RING_SIZE: usize = GUI_RING_CAPACITY * 16; /* 2048 */
 pub const GUI_SLOT_ARGS_OFF: usize = 3088;
 pub const GUI_SLOT_ARGS_SIZE: usize = 8192;
 
-/* MEM_SHM_GUI_BASE (= MEM_SHM_BASE + 0x30000) は memmap.h / カーネル側の管轄。
- * SHM のアドレス解決は C2 が持つので、ここではスロット内オフセットだけ写す。 */
+/* GUI 予約 SHM の位置 = kapi.shm_base + GUI_SHM_OFFSET + slot × GUI_SLOT_SIZE。
+ * 正典は memmap.h (MEM_SHM_GUI_BASE) / C の os32_gui_shared.h (GUI_SHM_OFFSET)。
+ * gshell と libos32gui の二重定義を解消するためここに写す (2026-09-06)。 */
+pub const GUI_SHM_OFFSET: u32 = 0x30000;
 
 /* ======================================================================== */
 /*  基本図形 — 座標は描画先サーフェスのローカル (G1)                          */

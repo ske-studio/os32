@@ -15,7 +15,7 @@ use core::cell::UnsafeCell;
 use core::ptr;
 
 use os32api::gui::proto::{
-    GuiEvent, GuiRect16, GuiReqInvalidate, GuiReqTextCursor, GuiReqTimerKill, GuiReqTimerSet,
+    GuiEvent, GuiRect16, GuiReqInvalidate, GuiReqLease, GuiReqTextCursor, GuiReqTimerKill, GuiReqTimerSet,
     GuiReqWinMove, GuiReqWinResize, GuiReqWinShow, GuiReqWinTitle, GuiReqWindow, GuiRespRect,
     GuiRgb, GuiSlotHeader, GuiString, GuiWinSpec, GUI_HDR_FLAG_OVERFLOW, GUI_OP_COMMIT,
     GUI_OP_INIT, GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_POLL, GUI_OP_STATS,
@@ -30,15 +30,10 @@ use os32api::gui::proto::{
 use os32api::gui::types::{Rect, Stats};
 
 /* ================================================================ */
-/*  SHM 内の番地 (memmap.h)                                          */
-/*                                                                  */
-/*  MEM_SHM_GUI_BASE = MEM_SHM_BASE + 0x30000 (ブロック 12、+192KB)。 */
-/*  `shm_base` は KAPI のデータフィールドなのでアプリから読める。      */
-/*  **PM への申し送り**: この 0x30000 は共有ヘッダ / proto.rs に無く、   */
-/*  gshell (`wm::GUI_SHM_OFFSET`) と C2 で二重定義になっている。        */
+/*  SHM の GUI 予約領域: proto::GUI_SHM_OFFSET (正典は memmap.h /       */
+/*  os32_gui_shared.h)。`shm_base` は KAPI のデータフィールド。         */
 /* ================================================================ */
-/// `MEM_SHM_BASE` からの GUI 予約 SHM のオフセット (memmap.h `MEM_SHM_GUI_BASE`)。
-pub const GUI_SHM_OFFSET: u32 = 0x30000;
+pub use os32api::gui::proto::GUI_SHM_OFFSET;
 
 /* 取り込み tick の記録 (契約 P2)。引数バッファの直後 256B = 64 × 4B。
  * 索引は `serial % 64`、各項目は u16 serial + u16 tick 下位。W1 の
@@ -498,28 +493,19 @@ pub fn win_set_text_cursor(window: u32, x: i16, y: i16, visible: bool) -> GuiRes
 /*      u16 first / u16 count / GuiRgb entries[16]                   */
 /*  256 色 (最大 240 項目) は引数バッファ (8KB) 経由になる想定。        */
 /* ================================================================ */
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct GuiReqLeasePalette {
-    pub first: u16,
-    pub count: u16,
-    pub entries: [GuiRgb; 16],
-}
-
-const _: () = assert!(
-    core::mem::size_of::<GuiReqLeasePalette>() <= os32api::gui::proto::GUI_SLOT_REQ_SIZE
-);
-
+/*  パレットリース (契約 G8)。要求は proto::GuiReqLease (共有ヘッダに   */
+/*  追記済み: first / count / rgb[16]、count=0 で返却)。16 色版のみ。   */
+/* ================================================================ */
 /// フォーカス中のウィンドウが自分の色を入れる (契約 G8)。16 色版のみ。
 /// 範囲は `screen_info()` の `lease_mask` で問い合わせること。
 pub fn lease_palette(first: u16, entries: &[GuiRgb]) -> GuiResult<i32> {
     if entries.is_empty() || entries.len() > 16 {
         return Err(GuiErr::INVAL);
     }
-    let mut req = GuiReqLeasePalette { first, count: entries.len() as u16, entries: [GuiRgb { r: 0, g: 0, b: 0 }; 16] };
+    let mut req = GuiReqLease { first, count: entries.len() as u16, rgb: [GuiRgb { r: 0, g: 0, b: 0 }; 16] };
     let mut i = 0;
     while i < entries.len() {
-        req.entries[i] = entries[i];
+        req.rgb[i] = entries[i];
         i += 1;
     }
     write_req(&req);
@@ -530,15 +516,15 @@ pub fn lease_palette(first: u16, entries: &[GuiRgb]) -> GuiResult<i32> {
 /*  タイマ (契約 U5)                                                  */
 /* ================================================================ */
 
-/// タイマを張る。W1 の `GuiReqTimerSet` は ms 指定・**反復固定** (repeat 無し)。
-pub fn timer_set(window: u32, timer_id: u16, interval_ms: u16) -> GuiResult<()> {
-    let req = GuiReqTimerSet { window, timer_id, interval_ms };
+/// タイマを張る (契約 U5: id u8、間隔 tick (10ms)、repeat=false は単発で WM が消す)。
+pub fn timer_set(window: u32, timer_id: u8, interval_ticks: u16, repeat: bool) -> GuiResult<()> {
+    let req = GuiReqTimerSet { window, timer_id, repeat: if repeat { 1 } else { 0 }, interval_ticks };
     write_req(&req);
     call(GUI_OP_TIMER_SET, 0).map(|_| ())
 }
 
-pub fn timer_kill(window: u32, timer_id: u16) -> GuiResult<()> {
-    let req = GuiReqTimerKill { window, timer_id, _pad: 0 };
+pub fn timer_kill(window: u32, timer_id: u8) -> GuiResult<()> {
+    let req = GuiReqTimerKill { window, timer_id, _pad: [0; 3] };
     write_req(&req);
     call(GUI_OP_TIMER_KILL, 0).map(|_| ())
 }
