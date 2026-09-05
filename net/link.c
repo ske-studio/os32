@@ -18,6 +18,7 @@
 #define LINK_MAXFRAME_PAGES 6       /* 最大 Ethernet フレームが占めるページ数 */
 #define LINK_CREDIT_MARGIN  12      /* 安全マージン (最大フレーム 2 枚分のページ) */
 #define LINK_L1_TIMEOUT     500     /* bulk 全体の待ち上限 (tick, 5s) */
+#define LINK_L2_TIMEOUT     1500    /* stream 全体の待ち上限 (tick, 15s) */
 
 /* ---- タイムアウト・再送 (100Hz tick 基準) ---- */
 #define LINK_RTO_TICKS      20      /* 1 往復の待ち上限 (200ms)。実機余裕は後で調整 */
@@ -63,6 +64,58 @@ u32 link_l1_done = 0;
 u32 link_l1_meas_pages = 0;
 static int link_l1_active = 0;
 static u32 link_l1_next = 1;     /* 次に期待する DATA seq */
+
+/* L2: ストリーム受信 (再結合バッファを持たず順次消費、欠落は Go-Back-N で再送)。
+ * リング状の小さなバッファに順序どおりの DATA を溜め、消費側が読み進める。
+ * バッファの空きは credit に反映され、消費が遅いとホストへ背圧がかかる。 */
+#define LINK_STREAM_BUF 8192
+static u8  link_stream_buf[LINK_STREAM_BUF];
+static u32 link_stream_head = 0;
+static u32 link_stream_count = 0;
+static int link_stream_active = 0;
+u32 link_l2_bytes = 0;          /* ストリームに溜めた総バイト数 */
+u32 link_l2_read = 0;           /* 消費側が読んだ総バイト数 */
+u32 link_l2_gaps = 0;           /* 先行 DATA (seq > 期待) を捨てた回数 (Go-Back-N で回復) */
+u32 link_l2_bad = 0;            /* 内容不一致バイト数 */
+u32 link_l2_eof = 0;            /* EOF 受信 (0/1) */
+u32 link_l2_overflow = 0;       /* バッファ満杯で溜められなかった回数 (credit が正しければ 0) */
+
+static u32 link_stream_free(void)
+{
+    return LINK_STREAM_BUF - link_stream_count;
+}
+
+/* 順序どおりの DATA payload をストリームバッファへ溜める。 */
+static void link_stream_push(const u8 *p, u16 n)
+{
+    u32 tail, first;
+    if (n > link_stream_free()) { link_l2_overflow++; return; }
+    tail = (link_stream_head + link_stream_count) % LINK_STREAM_BUF;
+    first = LINK_STREAM_BUF - tail;
+    if (first > n) first = n;
+    kmemcpy(link_stream_buf + tail, p, first);
+    if (n > first) kmemcpy(link_stream_buf, p + first, n - first);
+    link_stream_count += n;
+    link_l2_bytes += n;
+}
+
+/* ストリームから最大 n バイト読み出す (再結合バッファ不要、順次消費)。戻り値は実バイト数。 */
+unsigned int link_stream_read(void *buf, unsigned int n)
+{
+    u8 *d = (u8 *)buf;
+    u32 got = 0;
+    while (got < n && link_stream_count > 0) {
+        u32 chunk = LINK_STREAM_BUF - link_stream_head;
+        if (chunk > link_stream_count) chunk = link_stream_count;
+        if (chunk > (u32)n - got) chunk = (u32)n - got;
+        kmemcpy(d + got, link_stream_buf + link_stream_head, chunk);
+        link_stream_head = (link_stream_head + chunk) % LINK_STREAM_BUF;
+        link_stream_count -= chunk;
+        got += chunk;
+    }
+    link_l2_read += got;
+    return got;
+}
 
 /* ---- 小さな LE アクセサ (受信フレームは非整列なのでバイト単位で読む) ---- */
 static int mac_eq(const u8 *a, const u8 *b)
@@ -159,18 +212,30 @@ static void link_dispatch(const u8 *f, unsigned int flen)
         link_rx_ack = seq;
         break;
     case LINK_OP_DATA:
-        if (link_l1_active) {
-            if (seq == link_l1_next) {          /* 順序どおり */
+        if (link_stream_active) {               /* L2: 順次消費するストリーム */
+            if (seq == link_l1_next) {
+                if (plen <= link_stream_free()) {
+                    link_stream_push(h + LINK_HDR_LEN, plen);
+                    link_l1_next++;             /* 溜められた分だけ ack が進む */
+                } else {
+                    link_l2_overflow++;         /* 空き不足 → 受けない。ack 停止 → ホスト再送 */
+                }
+            } else if (seq > link_l1_next) {
+                link_l2_gaps++;                 /* 先行 → 捨てる。ack が止まりホストが Go-Back-N */
+            }
+        } else if (link_l1_active) {            /* L1: 数えるだけ */
+            if (seq == link_l1_next) {
                 link_l1_next++;
                 link_l1_recv++;
                 link_l1_bytes += plen;
-            } else if (seq > link_l1_next) {    /* 欠落 (信頼ソケットでは通常起きない) */
+            } else if (seq > link_l1_next) {
                 link_l1_ooo++;
-            }                                    /* seq < next は重複、無視 */
+            }
         }
         break;
     case LINK_OP_EOF:
-        if (link_l1_active) link_l1_done = 1;
+        if (link_stream_active) link_l2_eof = 1;
+        else if (link_l1_active) link_l1_done = 1;
         break;
     case LINK_OP_REQUEST:
     case LINK_OP_ACK:
@@ -262,6 +327,12 @@ static u16 link_credit_pages(void)
     unsigned int ring = ne2k_rx_ring_free_pages();
     unsigned int qpages = ne2k_rx_queue_free() * LINK_MAXFRAME_PAGES;
     unsigned int c = (ring < qpages) ? ring : qpages;
+    /* L2: ストリームバッファの空き (= 消費側がどれだけ読み進めたか) も律速に含める。
+     * 消費が遅ければ credit が縮み、ホストへ背圧がかかる (LINK_PLAN.md §2-2 / §3)。 */
+    if (link_stream_active) {
+        unsigned int spages = link_stream_free() / 256;   /* 256B = 1 リングページ */
+        if (spages < c) c = spages;
+    }
     c = (c > LINK_CREDIT_MARGIN) ? c - LINK_CREDIT_MARGIN : 0;
     return (u16)c;
 }
@@ -338,6 +409,58 @@ void link_l1_bulk(unsigned int count, unsigned int payload)
             (int)link_l1_min_credit, (int)link_l1_max_credit,
             (int)(link_l1_meas_pages / 100), (int)(link_l1_meas_pages % 100),
             link_l1_done ? " (EOF)" : " (timeout)");
+}
+
+void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq)
+{
+    char req[48];
+    u32 deadline, last_win_tick, expected_off = 0;
+    unsigned int i;
+    static u8 tmp[1024];        /* 消費用の小さなバッファ (再結合バッファではない) */
+
+    if (!link_ready || !link_hello_ok) {
+        kprintf(0xC1, "[link] L2 skipped (no peer)\n");
+        return;
+    }
+    link_l2_bytes = link_l2_read = link_l2_gaps = link_l2_bad = link_l2_eof = link_l2_overflow = 0;
+    link_stream_head = link_stream_count = 0;
+    link_l1_next = 1;
+    link_stream_active = 1;
+
+    i = 0;
+    req[i++] = 'S'; req[i++] = 'T'; req[i++] = 'R'; req[i++] = 'E'; req[i++] = 'A'; req[i++] = 'M'; req[i++] = ' ';
+    i += (unsigned int)kutoa_dec(total, req + i, (int)(sizeof(req) - i)); req[i++] = ' ';
+    i += (unsigned int)kutoa_dec(plen, req + i, (int)(sizeof(req) - i)); req[i++] = ' ';
+    i += (unsigned int)kutoa_dec(dropseq, req + i, (int)(sizeof(req) - i));
+    link_send(LINK_OP_REQUEST, link_peer_mac, 0, link_l1_next - 1, req, i);
+
+    deadline = tick_count + LINK_L2_TIMEOUT;
+    last_win_tick = tick_count - 1;
+    while (link_l2_read < total && (i32)(deadline - tick_count) > 0) {
+        unsigned int n;
+        link_poll();
+        for (;;) {                          /* 溜まった分を順次消費し、内容を検証 */
+            unsigned int k;
+            n = link_stream_read(tmp, sizeof(tmp));
+            if (n == 0) break;
+            for (k = 0; k < n; k++) {
+                if (tmp[k] != (u8)(expected_off + k)) link_l2_bad++;
+            }
+            expected_off += n;
+        }
+        if (tick_count != last_win_tick) {
+            last_win_tick = tick_count;
+            link_send_window();             /* ack を進めつつ credit を広告 (背圧つき) */
+        }
+        if (link_l2_eof && link_stream_count == 0 && link_l2_read >= total) break;
+    }
+    link_send_window();
+    link_stream_active = 0;
+
+    kprintf((link_l2_read == total && link_l2_bad == 0) ? 0x07 : 0xC1,
+            "[link] L2 stream: read %d/%d bytes, gaps %d, bad %d, overflow %d%s\n",
+            (int)link_l2_read, (int)total, (int)link_l2_gaps, (int)link_l2_bad,
+            (int)link_l2_overflow, link_l2_eof ? " (EOF)" : " (timeout)");
 }
 
 void link_selftest(int rounds)

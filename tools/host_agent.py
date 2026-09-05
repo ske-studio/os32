@@ -85,6 +85,8 @@ class HostAgent:
         self.window_count = 0
         # bulk (L1) 状態
         self.bulk = None   # dict: os32, count, plen, sent, acked, credit, eof_sent, max_inflight
+        # stream (L2) 状態
+        self.stream = None
 
     def log(self, *a):
         if not self.quiet:
@@ -118,6 +120,8 @@ class HostAgent:
             self.request_count += 1
             if payload[:5] == b"BULK ":
                 self._start_bulk(src, payload)
+            elif payload[:7] == b"STREAM ":
+                self._start_stream(src, payload)
             else:
                 body = b"PONG " + payload
                 stream.send(self.build(src, OP["RESPONSE"], seq, seq, body[:1484]))
@@ -143,12 +147,64 @@ class HostAgent:
         self.log("BULK request: %d frames x %d bytes -> streaming under credit" % (count, plen))
 
     def _on_window(self, ack, credit, stream):
-        b = self.bulk
-        if not b:
+        if self.bulk:
+            b = self.bulk
+            b["acked"] = max(b["acked"], ack)
+            b["credit"] = credit
+            self._pump_bulk(stream)
+        if self.stream:
+            self._on_window_stream(ack, credit, stream)
+
+    def _start_stream(self, os32, payload):
+        try:
+            _, tot, plen, drop = payload.split(b" ")[:4]
+            total, plen, dropseq = int(tot), int(plen), int(drop)
+        except ValueError:
+            self.log("bad STREAM request: %r" % payload)
             return
-        b["acked"] = max(b["acked"], ack)
-        b["credit"] = credit
-        self._pump_bulk(stream)
+        nframes = (total + plen - 1) // plen
+        self.stream = {"os32": os32, "total": total, "plen": plen, "dropseq": dropseq,
+                       "nframes": nframes, "sent": 0, "acked": 0, "credit": 0,
+                       "eof_sent": False, "dropped": False, "stall": 0, "max_inflight": 0, "retx": 0}
+        self.log("STREAM request: %d bytes (%d frames x %d), drop seq %d" % (total, nframes, plen, dropseq))
+
+    def _on_window_stream(self, ack, credit, stream):
+        s = self.stream
+        if ack > s["acked"]:
+            s["acked"] = ack
+            s["stall"] = 0
+        else:
+            s["stall"] += 1
+            # ack が進まない = 欠落。Go-Back-N で acked+1 から再送する。
+            if s["stall"] >= 8 and s["sent"] > s["acked"]:
+                s["retx"] += s["sent"] - s["acked"]
+                s["sent"] = s["acked"]
+                s["stall"] = 0
+        s["credit"] = credit
+        self._pump_stream(stream)
+
+    def _pump_stream(self, stream):
+        s = self.stream
+        while s["sent"] < s["nframes"]:
+            inflight = FRAME_PAGES * (s["sent"] - s["acked"])
+            if inflight + FRAME_PAGES > s["credit"]:
+                break
+            seq = s["sent"] + 1
+            if seq == s["dropseq"] and not s["dropped"]:
+                s["dropped"] = True          # 1 回だけ落とす (Go-Back-N が回復する)
+                s["sent"] = seq
+                continue
+            off = (seq - 1) * s["plen"]
+            ln = min(s["plen"], s["total"] - off)
+            body = bytes((off + k) & 0xFF for k in range(ln))
+            stream.send(self.build(s["os32"], OP["DATA"], seq, 0, body))
+            s["sent"] = seq
+            s["max_inflight"] = max(s["max_inflight"], FRAME_PAGES * (s["sent"] - s["acked"]))
+        if s["sent"] == s["nframes"] and not s["eof_sent"]:
+            stream.send(self.build(s["os32"], OP["EOF"], s["nframes"] + 1, 0, b""))
+            s["eof_sent"] = True
+            self.log("STREAM done: %d frames, max in-flight %d pages, retransmit %d"
+                     % (s["nframes"], s["max_inflight"], s["retx"]))
 
     def _pump_bulk(self, stream):
         b = self.bulk

@@ -210,4 +210,8 @@ check-net-l0:
 check-net-l1:
 	@python3 tools/net_l1_test.py
 
-.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0 check-net-l1
+# L2: ストリーミング。128KB を 8KB バッファで順次消費し、欠落を Go-Back-N で回復する。
+check-net-l2:
+	@python3 tools/net_l2_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0 check-net-l1 check-net-l2

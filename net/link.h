@@ -77,6 +77,14 @@ void link_selftest(int rounds);
  * ことと、ページ消費の実測 (§2-3) を確認する。link_hello 済みが前提。 */
 void link_l1_bulk(unsigned int count, unsigned int payload);
 
+/* L2 自己試験: ホストに total バイトのストリーム (各 plen バイトの DATA) を流させ、
+ * 再結合バッファを持たず順次消費して内容を検証する。dropseq>0 なら、その seq を
+ * ホストに 1 回だけ落とさせて Go-Back-N の欠落回復も確認する。link_hello 済みが前提。 */
+void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq);
+
+/* ストリームから最大 n バイト読み出す (Host Services / アプリが順次消費する入口)。 */
+unsigned int link_stream_read(void *buf, unsigned int n);
+
 /* ホストから kernel.map 経由で観測するカウンタ (static にしない)。 */
 extern u32 link_hello_ok;       /* HELLO 確立 (0/1) */
 extern u32 link_rt_ok;          /* 成功した往復数 */
@@ -96,5 +104,13 @@ extern u32 link_l1_max_credit;  /* 広告した credit_pages の最大値 */
 extern u32 link_l1_min_credit;  /* 広告した credit_pages の最小値 (0 除く) */
 extern u32 link_l1_done;        /* EOF を受けた (0/1) */
 extern u32 link_l1_meas_pages;  /* 実測: DATA 1 フレームあたりの平均消費ページ ×100 */
+
+/* L2 (ストリーミング) 観測用 */
+extern u32 link_l2_bytes;       /* ストリームに溜めた総バイト数 */
+extern u32 link_l2_read;        /* 消費側が読んだ総バイト数 */
+extern u32 link_l2_gaps;        /* 先行 DATA を捨てた回数 (Go-Back-N で回復) */
+extern u32 link_l2_bad;         /* 内容不一致バイト数 */
+extern u32 link_l2_eof;         /* EOF を受けた (0/1) */
+extern u32 link_l2_overflow;    /* バッファ満杯で受けられなかった回数 (credit が正しければ 0) */
 
 #endif /* OS32_NET_LINK_H */
