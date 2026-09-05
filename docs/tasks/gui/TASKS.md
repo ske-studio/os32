@@ -125,6 +125,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **W2 結合** (FEP を WM で: SHIFT+SPACE / 未確定行と候補窓の GFX 描画 / Text 配送、14 色リースと 2 色クローム、モーダルと標準ダイアログ、F1〜F5 起動)。K 依頼 2 本を PM が実装: **`ime_feed_key` / `ime_set_render` を KAPI v41 末尾に追記** (180 関数。v41 は main 未リリースのため同じ版、v42 のネットワーク予約は不変)。共有ヘッダに `GUI_MODAL_*` を追記。未定義: ファイル選択のパスをアプリへ返す `GUI_OP_MODAL_RESULT` (追記候補)。K3 / C3 (G4) を投下中 |
 
+| 2026-09-06 | **G3 通過 (実機)**: 一斉再ビルド (`make clean` → `make all`) → NHD 配備 → kselftest 42/0。(1) FEP: gui_demo のテキストボックスで SHIFT+SPACE → `nihongo` → SPACE → RETURN で「日本語」が入る (`ime_feed_key` / GFX 版 `IME_Render` 経由)。(2) リース: lease_test (F4) で 14 色が独自パレット、クロームが白黒 2 色・デスクトップが市松、ESC で復元。(3) ポンプ: gui_busy (F3) の計算中に 20 打鍵 → `POLL=68 (key=40 text=20 ptr=5)`、`flags=0 dropped=0 kbd_dropped_delta=0` (偽 OVERFLOW 無し)。(4) モーダル: F5 のファイル選択が開閉。(5) `os32gui on` → `system.cfg GUI=1` → リセットで gshell が起動時に上がる → ESC で CUI → `os32gui off`。screenshot は scratchpad の `g3_*.png` (セッション内)。**残課題**: FEP の `[あ]`/候補窓が左下固定 (テキストカーソル位置に出ない — C2 の textbox が `SET_TEXT_CURSOR` を送っているか要確認)、`ime_toggle` が TVRAM に "Dict loaded" 等を出す (GUI 中は抑止したい)、gui_busy の窓は WM の X3 が回らないので枠が出ない (契約 T8 の限界として記録)、`--nokapi` + CTRL+STOP は起動手段 (引数付き起動) が無く未検証、gshell 常駐中は hotdeploy が効かない (K2 の注記) |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
