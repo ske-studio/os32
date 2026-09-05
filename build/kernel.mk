@@ -214,4 +214,9 @@ check-net-l1:
 check-net-l2:
 	@python3 tools/net_l2_test.py
 
-.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0 check-net-l1 check-net-l2
+# L3: Host Services。ホストに GET (本文をストリーム) / TIME (RPC) をさせ、OS32 が
+# 要求を出して結果だけ受け取ることを確認する。
+check-net-l3:
+	@python3 tools/net_l3_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0 check-net-l1 check-net-l2 check-net-l3

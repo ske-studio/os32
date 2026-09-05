@@ -411,20 +411,54 @@ void link_l1_bulk(unsigned int count, unsigned int payload)
             link_l1_done ? " (EOF)" : " (timeout)");
 }
 
+/* アクティブなストリームを total バイト消費するまで回す (背圧つき WINDOW を送りつつ
+ * 順次消費)。verify なら受信バイトが offset の下位 8bit と一致するか検査する。
+ * 呼び出し前に link_stream_active=1・カウンタ初期化・REQUEST 送信済みであること。 */
+static void link_consume_stream(u32 total, int verify)
+{
+    u32 deadline = tick_count + LINK_L2_TIMEOUT;
+    u32 last_win_tick = tick_count - 1;
+    u32 off = 0;
+    static u8 tmp[1024];        /* 消費用の小さなバッファ (再結合バッファではない) */
+
+    while (link_l2_read < total && (i32)(deadline - tick_count) > 0) {
+        unsigned int n;
+        link_poll();
+        for (;;) {
+            unsigned int k;
+            n = link_stream_read(tmp, sizeof(tmp));
+            if (n == 0) break;
+            if (verify) {
+                for (k = 0; k < n; k++) if (tmp[k] != (u8)(off + k)) link_l2_bad++;
+            }
+            off += n;
+        }
+        if (tick_count != last_win_tick) {
+            last_win_tick = tick_count;
+            link_send_window();             /* ack を進めつつ credit を広告 (背圧つき) */
+        }
+        if (link_l2_eof && link_stream_count == 0 && link_l2_read >= total) break;
+    }
+    link_send_window();
+}
+
+static void link_stream_reset(void)
+{
+    link_l2_bytes = link_l2_read = link_l2_gaps = link_l2_bad = link_l2_eof = link_l2_overflow = 0;
+    link_stream_head = link_stream_count = 0;
+    link_l1_next = 1;
+}
+
 void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq)
 {
     char req[48];
-    u32 deadline, last_win_tick, expected_off = 0;
     unsigned int i;
-    static u8 tmp[1024];        /* 消費用の小さなバッファ (再結合バッファではない) */
 
     if (!link_ready || !link_hello_ok) {
         kprintf(0xC1, "[link] L2 skipped (no peer)\n");
         return;
     }
-    link_l2_bytes = link_l2_read = link_l2_gaps = link_l2_bad = link_l2_eof = link_l2_overflow = 0;
-    link_stream_head = link_stream_count = 0;
-    link_l1_next = 1;
+    link_stream_reset();
     link_stream_active = 1;
 
     i = 0;
@@ -434,33 +468,103 @@ void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq)
     i += (unsigned int)kutoa_dec(dropseq, req + i, (int)(sizeof(req) - i));
     link_send(LINK_OP_REQUEST, link_peer_mac, 0, link_l1_next - 1, req, i);
 
-    deadline = tick_count + LINK_L2_TIMEOUT;
-    last_win_tick = tick_count - 1;
-    while (link_l2_read < total && (i32)(deadline - tick_count) > 0) {
-        unsigned int n;
-        link_poll();
-        for (;;) {                          /* 溜まった分を順次消費し、内容を検証 */
-            unsigned int k;
-            n = link_stream_read(tmp, sizeof(tmp));
-            if (n == 0) break;
-            for (k = 0; k < n; k++) {
-                if (tmp[k] != (u8)(expected_off + k)) link_l2_bad++;
-            }
-            expected_off += n;
-        }
-        if (tick_count != last_win_tick) {
-            last_win_tick = tick_count;
-            link_send_window();             /* ack を進めつつ credit を広告 (背圧つき) */
-        }
-        if (link_l2_eof && link_stream_count == 0 && link_l2_read >= total) break;
-    }
-    link_send_window();
+    link_consume_stream(total, 1);
     link_stream_active = 0;
 
     kprintf((link_l2_read == total && link_l2_bad == 0) ? 0x07 : 0xC1,
             "[link] L2 stream: read %d/%d bytes, gaps %d, bad %d, overflow %d%s\n",
             (int)link_l2_read, (int)total, (int)link_l2_gaps, (int)link_l2_bad,
             (int)link_l2_overflow, link_l2_eof ? " (EOF)" : " (timeout)");
+}
+
+/* ====================================================================== */
+/*  L3: Host Services (要求応答 + ストリーム配送)                            */
+/*  OS32 は「GET <資源>」等を出し、ホストが実処理 (HTTP/TLS/File) をして      */
+/*  RESPONSE (status u16 + length u32) を返し、本文を DATA ストリームで送る。 */
+/*  巨大な本文もホスト RAM に貯まり、OS32 は credit の分だけ順次受ける。      */
+/* ====================================================================== */
+
+u32 link_l3_get_status = 0;
+u32 link_l3_get_len = 0;
+u32 link_l3_get_read = 0;
+u32 link_l3_get_bad = 0;
+u32 link_l3_404 = 0;
+u32 link_l3_http_status = 0;
+u32 link_l3_http_read = 0;
+u32 link_l3_time_len = 0;
+
+/* サービス要求を出し、RESPONSE の status/length を得て、本文があればストリーム消費する。
+ * verify なら pattern 検査。戻り値 LINK_OK なら status と len が有効。 */
+int link_service_get(const char *req, unsigned int req_len,
+                     u32 *status, u32 *len, int verify)
+{
+    u8 resp[8];
+    unsigned int rlen = 0;
+    int rc;
+
+    if (!link_ready || !link_hello_ok) return LINK_ERR_NOPEER;
+    rc = link_request(req, req_len, resp, sizeof(resp), &rlen);
+    if (rc != LINK_OK) return rc;
+    if (rlen < 6) { *status = 0; *len = 0; return LINK_ERR; }
+    *status = rd16(resp);
+    *len = rd32(resp + 2);
+    if (*status != 200 || *len == 0) return LINK_OK;   /* 本文なし */
+
+    link_stream_reset();
+    link_stream_active = 1;
+    link_consume_stream(*len, verify);
+    link_stream_active = 0;
+    return LINK_OK;
+}
+
+static unsigned int cstr(const char *s, char *dst, unsigned int cap)
+{
+    unsigned int n = 0;
+    while (s[n] && n < cap) { dst[n] = s[n]; n++; }
+    return n;
+}
+
+void link_l3_service(void)
+{
+    char req[64];
+    u8 t[64];
+    unsigned int n, tl = 0;
+    u32 status = 0, len = 0;
+
+    if (!link_ready || !link_hello_ok) {
+        kprintf(0xC1, "[link] L3 skipped (no peer)\n");
+        return;
+    }
+
+    /* 1. GET /pattern/65536 — 決定的な本文をストリームで受けて検証 */
+    n = cstr("GET /pattern/65536", req, sizeof(req));
+    link_service_get(req, n, &status, &len, 1);
+    link_l3_get_status = status;
+    link_l3_get_len = len;
+    link_l3_get_read = link_l2_read;
+    link_l3_get_bad = link_l2_bad;
+
+    /* 2. GET /notfound — エラー (404) の要求応答 */
+    status = 0; len = 0;
+    n = cstr("GET /notfound", req, sizeof(req));
+    link_service_get(req, n, &status, &len, 0);
+    link_l3_404 = status;
+
+    /* 3. GET http://example.com/ — ホストが実 HTTP を取得 (オフラインなら status≠200)。付録 */
+    status = 0; len = 0;
+    n = cstr("GET http://example.com/", req, sizeof(req));
+    link_service_get(req, n, &status, &len, 0);
+    link_l3_http_status = status;
+    link_l3_http_read = link_l2_read;
+
+    /* 4. TIME — 本文のない RPC (要求応答だけ) */
+    n = cstr("TIME", req, sizeof(req));
+    if (link_request(req, n, t, sizeof(t), &tl) == LINK_OK) link_l3_time_len = tl;
+
+    kprintf((link_l3_get_status == 200 && link_l3_get_read == 65536 && link_l3_get_bad == 0) ? 0x07 : 0xC1,
+            "[link] L3: GET /pattern -> %d %d/%dB bad %d; /notfound -> %d; http -> %d %dB; TIME -> %dB\n",
+            (int)link_l3_get_status, (int)link_l3_get_read, (int)link_l3_get_len, (int)link_l3_get_bad,
+            (int)link_l3_404, (int)link_l3_http_status, (int)link_l3_http_read, (int)link_l3_time_len);
 }
 
 void link_selftest(int rounds)

@@ -18,6 +18,7 @@ import socket
 import struct
 import sys
 import time
+import urllib.request
 
 LINK_ETHERTYPE = 0x88B5
 ETH_HDR = 14
@@ -122,6 +123,12 @@ class HostAgent:
                 self._start_bulk(src, payload)
             elif payload[:7] == b"STREAM ":
                 self._start_stream(src, payload)
+            elif payload[:4] == b"GET ":
+                self._service_get(src, seq, payload[4:].decode("latin1").strip(), stream)
+            elif payload[:4] == b"TIME":
+                ans = time.strftime("%Y-%m-%dT%H:%M:%S").encode()
+                stream.send(self.build(src, OP["RESPONSE"], seq, seq, ans))
+                self.log("TIME -> %s" % ans.decode())
             else:
                 body = b"PONG " + payload
                 stream.send(self.build(src, OP["RESPONSE"], seq, seq, body[:1484]))
@@ -142,6 +149,7 @@ class HostAgent:
         except ValueError:
             self.log("bad BULK request: %r" % payload)
             return
+        self.stream = None
         self.bulk = {"os32": os32, "count": count, "plen": plen, "sent": 0,
                      "acked": 0, "credit": 0, "eof_sent": False, "max_inflight": 0}
         self.log("BULK request: %d frames x %d bytes -> streaming under credit" % (count, plen))
@@ -155,6 +163,48 @@ class HostAgent:
         if self.stream:
             self._on_window_stream(ack, credit, stream)
 
+    def _service_get(self, os32, seq, resource, stream):
+        """L3 GET: ホストが実処理して RESPONSE(status,len) を返し、本文を DATA で流す。
+        OS32 側は現代のスタック (HTTP/TLS/File) を持たず、結果だけ受け取る。"""
+        status, body, gen = 200, b"", None
+        if resource.startswith("/pattern/"):
+            try:
+                n = int(resource[len("/pattern/"):])
+            except ValueError:
+                n = 0
+            # 本文はホスト RAM に貯めず、offset から生成する (巨大でも定数メモリ)
+            gen, total = (lambda off, ln: bytes((off + k) & 0xFF for k in range(ln))), n
+        elif resource.startswith("http://") or resource.startswith("https://"):
+            try:
+                with urllib.request.urlopen(resource, timeout=10) as r:
+                    body = r.read()
+                    status = getattr(r, "status", 200) or 200
+            except Exception as e:
+                status, body = 502, b""
+                self.log("GET %s failed: %s" % (resource, e))
+            total = len(body)
+        elif resource.startswith("/file/"):
+            try:
+                with open(resource[len("/file/"):], "rb") as fh:
+                    body = fh.read()
+            except OSError:
+                status, body = 404, b""
+            total = len(body)
+        else:
+            status, total = 404, 0
+
+        stream.send(self.build(os32, OP["RESPONSE"], seq, seq, struct.pack("<HI", status, total)))
+        self.log("GET %s -> %d, %d bytes" % (resource, status, total))
+        if status == 200 and total > 0:
+            # 本文を L2 のストリーム機構 (WINDOW/Credit + Go-Back-N) で配送する
+            plen = 512
+            nframes = (total + plen - 1) // plen
+            self.bulk = None
+            self.stream = {"os32": os32, "total": total, "plen": plen, "dropseq": 0,
+                           "nframes": nframes, "sent": 0, "acked": 0, "credit": 0,
+                           "eof_sent": False, "dropped": False, "stall": 0, "max_inflight": 0,
+                           "retx": 0, "body": body, "gen": gen}
+
     def _start_stream(self, os32, payload):
         try:
             _, tot, plen, drop = payload.split(b" ")[:4]
@@ -163,6 +213,7 @@ class HostAgent:
             self.log("bad STREAM request: %r" % payload)
             return
         nframes = (total + plen - 1) // plen
+        self.bulk = None
         self.stream = {"os32": os32, "total": total, "plen": plen, "dropseq": dropseq,
                        "nframes": nframes, "sent": 0, "acked": 0, "credit": 0,
                        "eof_sent": False, "dropped": False, "stall": 0, "max_inflight": 0, "retx": 0}
@@ -196,7 +247,12 @@ class HostAgent:
                 continue
             off = (seq - 1) * s["plen"]
             ln = min(s["plen"], s["total"] - off)
-            body = bytes((off + k) & 0xFF for k in range(ln))
+            if s.get("gen") is not None:              # 生成 (パターン): ホスト RAM に貯めない
+                body = s["gen"](off, ln)
+            elif s.get("body") is not None:           # 実データ (HTTP/File): ホスト RAM から
+                body = s["body"][off:off + ln]
+            else:
+                body = bytes((off + k) & 0xFF for k in range(ln))
             stream.send(self.build(s["os32"], OP["DATA"], seq, 0, body))
             s["sent"] = seq
             s["max_inflight"] = max(s["max_inflight"], FRAME_PAGES * (s["sent"] - s["acked"]))

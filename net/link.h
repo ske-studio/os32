@@ -85,6 +85,16 @@ void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq)
 /* ストリームから最大 n バイト読み出す (Host Services / アプリが順次消費する入口)。 */
 unsigned int link_stream_read(void *buf, unsigned int n);
 
+/* L3 Host Services: サービス要求を出し、RESPONSE の status/length を得て、本文があれば
+ * ストリーム消費する (verify なら pattern 検査)。req は "GET <資源>" 等。KAPI 公開は
+ * 版番号調整後 (LINK_PLAN §5-1 の調整メモ)。 */
+int link_service_get(const char *req, unsigned int req_len,
+                     u32 *status, u32 *len, int verify);
+
+/* L3 自己試験: GET /pattern (検証)、GET /notfound (404)、GET http:// (実 HTTP, 付録)、
+ * TIME (要求応答のみ) を順に行い、下のカウンタに残す。 */
+void link_l3_service(void);
+
 /* ホストから kernel.map 経由で観測するカウンタ (static にしない)。 */
 extern u32 link_hello_ok;       /* HELLO 確立 (0/1) */
 extern u32 link_rt_ok;          /* 成功した往復数 */
@@ -112,5 +122,15 @@ extern u32 link_l2_gaps;        /* 先行 DATA を捨てた回数 (Go-Back-N で
 extern u32 link_l2_bad;         /* 内容不一致バイト数 */
 extern u32 link_l2_eof;         /* EOF を受けた (0/1) */
 extern u32 link_l2_overflow;    /* バッファ満杯で受けられなかった回数 (credit が正しければ 0) */
+
+/* L3 (Host Services) 観測用 */
+extern u32 link_l3_get_status;  /* GET /pattern の status (200) */
+extern u32 link_l3_get_len;     /* RESPONSE が告げた本文長 */
+extern u32 link_l3_get_read;    /* 実際にストリーム消費したバイト数 */
+extern u32 link_l3_get_bad;     /* 内容不一致バイト数 */
+extern u32 link_l3_404;         /* GET /notfound の status (404) */
+extern u32 link_l3_http_status; /* 実 HTTP GET の status (200 ならオンライン) */
+extern u32 link_l3_http_read;   /* 実 HTTP 本文の受信バイト数 */
+extern u32 link_l3_time_len;    /* TIME RPC の応答長 */
 
 #endif /* OS32_NET_LINK_H */

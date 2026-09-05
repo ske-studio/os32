@@ -131,6 +131,7 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         link_selftest(10);          /* L0: HELLO + PING/PONG */
         link_l1_bulk(200, 512);     /* L1: WINDOW/Credit で 200 フレームを溢れさせず受ける */
         link_l2_stream(131072, 512, 100);  /* L2: 128KB を再結合なしで消費、seq100 で欠落→Go-Back-N 回復 */
+        link_l3_service();                 /* L3: Host Services (GET / 404 / 実HTTP / TIME) */
     }
     if (flags & LGY98_FLAG_DIAG) {
         ne2k_get_stats(&st);
