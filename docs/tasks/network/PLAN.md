@@ -305,7 +305,7 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 | M1 | **エミュレータで合格** (2026-09-05) | `make clean` → `kernel-lgy98` → NHD 配備。起動後 `ne2k_nic` を `/api/mem` で読み: RUNNING、MAC = ini の値、PROM 重複あり、RAM 32KB 検出 (PSTOP 0xC0)、RAM 全域パターン試験 0 エラー、Remote DMA 往復 (1/2/3/59/60/61/255/256/257/1513/1514B、読み側余白無傷) 0 エラー、RDC timeout 0。kselftest 42/0、配備後回帰 6/6 |
 | M2 | **エミュレータで合格** (inject/capture 経路) | `make check-net-m2` (`tools/net_m2_test.py`): 14/60/61/100/255/256/257/1000/1513/1514B の反射が内容一致、連続 10 フレーム順序どおり、1000〜1514B × 60 逐次で PSTOP wrap を繰り返して 0 失敗、ドライバ計数 = 送った数、NP21/W 側 drop 0。**未実施**: 対向機との raw Ethernet (helper は ARP/ICMP/UDP しか返さず、IP 層が無いので保留)、内部 loopback (NP21/W が再現しない、実機項目) |
 | M3 | **エミュレータで合格** (2026-09-05) | IRQ 駆動: IRQ5 スタブ登録 + IMR。`make check-net-m2` を IRQ 駆動カーネルで実行し `irq +80`・0 drop・ACK 後の recheck が毎回機能。`make check-net-m2-cpl3` で CPL3 プログラム (`less`) 常駐中も `irq +80`・0 drop、`less` は正常終了しシェル復帰。kselftest 42/0、回帰 6/6 |
-| M4 | 未着手。**課題を 1 件発見** | 受信がドレインより速く続きリングが飽和したまま放置されると、IMR は 0x3f・rx_backlog 0 の見かけ正常のまま IRQ が二度と来ない wedge を再現 (単一スレッドのデバッグサーバを 40s 塞いだ後に 80 フレームを一括 inject した病的手順で誘発)。OVW / バックプレッシャ経路の堅牢化と過負荷試験が M4 の中心。リブートで回復 |
+| M4 | **エミュレータで合格** (2026-09-05) | 「溢れても・取りこぼしても壊れない」安全網。`ne2k_timer_tick` を 100Hz 受信ウォッチドッグ化 (RUNNING/OVW_WAIT かつ非 busy なら毎 tick 有界 poll、健全時は CURR 1 読みで戻る)。`make check-net-m4`: 200 フレーム一括 inject でも state RUNNING・drop 0・バースト後の単発受信 OK・wedge なし。リンク層向けに `ne2k_rx_ring_free_pages()` / `ne2k_rx_queue_free()` を公開。M3 で見つけた wedge (リングに残り二度と IRQ が来ない) の再発防止。**注記**: 本試験では IRQ が追いつき watchdog_frames は 0 (ウォッチドッグは安全網として実装・コードレビュー確認、強制 IRQ 喪失下の発火は未計測)。NP21/W は OVW を立てず黙って捨てるため OVW 復帰経路は実カード項目 |
 | M5 | 未着手 | 実機で性能・サイズ・現行仕様化 |
 
 ### M0 で凍結した表
