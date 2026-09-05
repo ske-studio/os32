@@ -301,8 +301,9 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 | 段階 | 状態 | 備考 |
 |---|---|---|
 | M0 | **凍結 (エミュレータ基準)** | 下表。実カードの列は未確認のまま |
-| M1 | 実装済み・**未検証** | `drivers/ne2000*.{c,h,asm}` `lgy98.{c,h}`。ホスト試験 (`make check` の `check-ne2000-ring`) と `make kernel` はローカル AI に委譲 |
-| M2〜M5 | 未着手 | M2 の対向試験は ini 5 キーの追加 ([D2]) が先 |
+| M1 | **エミュレータで合格** (2026-09-05) | `make clean` → `kernel-lgy98` → NHD 配備。起動後 `ne2k_nic` を `/api/mem` で読み: RUNNING、MAC = ini の値、PROM 重複あり、RAM 32KB 検出 (PSTOP 0xC0)、RAM 全域パターン試験 0 エラー、Remote DMA 往復 (1/2/3/59/60/61/255/256/257/1513/1514B、読み側余白無傷) 0 エラー、RDC timeout 0。kselftest 42/0、配備後回帰 6/6 |
+| M2 | **エミュレータで合格** (inject/capture 経路) | `make check-net-m2` (`tools/net_m2_test.py`): 14/60/61/100/255/256/257/1000/1513/1514B の反射が内容一致、連続 10 フレーム順序どおり、1000〜1514B × 60 逐次で PSTOP wrap を繰り返して 0 失敗、ドライバ計数 = 送った数、NP21/W 側 drop 0。**未実施**: 対向機との raw Ethernet (helper は ARP/ICMP/UDP しか返さず、IP 層が無いので保留)、内部 loopback (NP21/W が再現しない、実機項目) |
+| M3〜M5 | 未着手 | M3 は IRQ 入口・固定キュー・予算。反射モード (`LGY98_FLAG_REFLECT`、100Hz tick で poll) は M2 の試験経路であり M3 の代替ではない |
 
 ### M0 で凍結した表
 
@@ -342,6 +343,10 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
   deploy がカーネルを作り直した時に無効へ戻る (2026-09-05 に実際に踏んだ)。
 - IRQ 入口 (`isr_stub.asm` のスタブ、`idt.c` の登録、IMR の有効化) は M3 で入れる。
   `ne2k_irq()` の busy/pending の枠だけ先に置いた。
+- **M2 の試験経路は反射モード**: `LGY98_FLAG_REFLECT` で `timer_handler` (100Hz) から `lgy98_tick()`
+  が `ne2k_poll(2)` と受信フレームの MAC 入れ替え送信を行う。`tools/net_m2_test.py` が
+  `/api/net/inject` → `/api/net/capture` (dir=tx) と `lgy98_reflected` (kernel.map 経由) で照合する。
+  試験は `make check-net-m2` (ローカル AI の許可リスト) で回す。KAPI は未追加。
 
 ### エミュレータでは確認できないこと (M4/M5 の実機項目)
 
