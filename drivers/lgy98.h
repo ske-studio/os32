@@ -44,6 +44,7 @@
 #define LGY98_FLAG_DIAG      0x01   /* 初期化時に RAM 全域試験と Remote DMA 往復試験を行う */
 #define LGY98_FLAG_LOOPBACK  0x02   /* 内部ループバックで起動 (M2 試験用) */
 #define LGY98_FLAG_REFLECT   0x04   /* 反射モード: 100Hz tick で poll し、受信フレームの MAC を入れ替えて送り返す (M2 試験用) */
+#define LGY98_FLAG_LINKTEST  0x08   /* attach 後にリンク層 L0 自己試験 (HELLO + PING/PONG)。Host Agent が要る */
 
 /* 設定検証。0 = 妥当, 負 = NE2K_ERR_* */
 int lgy98_validate_base(unsigned int base);

@@ -15,6 +15,7 @@ C_KERNEL = \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
     drivers/lgy98.c drivers/ne2000.c drivers/ne2000_ring.c \
+    net/link.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
@@ -50,6 +51,10 @@ drivers/ne2000.o: drivers/ne2000.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
 drivers/lgy98.o: drivers/lgy98.c .FORCE
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# net/ (リンク層。ne2000.h / idt.h / kstring.h を参照するため INC_KERNEL)
+net/%.o: net/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
 
 # NE2000 受信リング計算のホスト試験 (I/O 無し)。make check から呼ばれる。
@@ -161,14 +166,21 @@ clean-kernel:
 # make kernel / deploy-nhd も LAN 有効のまま。kernel-nolgy98 で既定 (無効) に戻す。
 kernel-lgy98:
 	@mkdir -p $(BUILD_OUT)
-	@touch $(LGY98_STAMP)
+	@echo 5 > $(LGY98_STAMP)
+	$(MAKE) kernel
+
+# リンク層 L0 試験用 (DIAG 1 + LINKTEST 8 = 9、反射なし)。Host Agent
+# (tools/host_agent.py) を先に起動しておくこと。
+kernel-lgy98-link:
+	@mkdir -p $(BUILD_OUT)
+	@echo 9 > $(LGY98_STAMP)
 	$(MAKE) kernel
 
 kernel-nolgy98:
 	@rm -f $(LGY98_STAMP)
 	$(MAKE) kernel
 
-.PHONY: kernel-lgy98 kernel-nolgy98
+.PHONY: kernel-lgy98 kernel-lgy98-link kernel-nolgy98
 
 # M2 の対向試験 (inject → 受信 → 反射送信 → capture)。NP21/W が LAN 有効 + 反射モードの
 # カーネルで起動していること。make check には入れない (実機が要る)。
@@ -188,4 +200,9 @@ check-net-m2-cpl3:
 check-net-m4:
 	@python3 tools/net_m4_test.py
 
-.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4
+# L0: リンク層 (Stop-and-Wait) の HELLO + PING/PONG 10 往復を確認する。
+# 先に tools/host_agent.py を NP2NETSOCK ポートで起動し、kernel-lgy98-link を配備する。
+check-net-l0:
+	@python3 tools/net_l0_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0

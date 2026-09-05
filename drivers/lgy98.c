@@ -16,6 +16,7 @@
 #include "idt.h"
 #include "io.h"
 #include "kstring.h"
+#include "link.h"
 
 /* IRQ 入口 (kernel/isr_stub.asm)。どれを使うかは設定の PIC IRQ で決まる */
 extern void irq_stub_nic_3(void);
@@ -117,6 +118,7 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         lgy98_reflect_on = 1;
         kprintf(0x07, "[lgy98] reflect mode (M2 test): rx frames are sent back with MACs swapped\n");
     }
+    link_init(mac);
     /* IRQ 駆動へ: IDT 登録 → IMR 有効化 → PIC 有効化 (この順序、§4) */
     {
         void (*stub)(void) = (irq == LGY98_INT0_IRQ) ? irq_stub_nic_3
@@ -125,6 +127,7 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         ne2k_irq_enable();
         irq_enable(irq);
     }
+    if (flags & LGY98_FLAG_LINKTEST) link_selftest(10);
     if (flags & LGY98_FLAG_DIAG) {
         ne2k_get_stats(&st);
         kprintf(st.diag_ram_errors || st.diag_dma_errors ? 0xC1 : 0x07,
