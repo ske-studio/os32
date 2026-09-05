@@ -9,6 +9,41 @@ static void _merge_prev_dirty(void);
 static void _flip_page(void);
 
 /* ======================================================================== */
+/*  パックド系バックエンド (PEGC 256 色 / H2) 用のダーティ転送               */
+/*                                                                          */
+/*  _flush_dirty_queue 以下は 4 プレーンの VRAM (0xA8000 系) を前提にした    */
+/*  9801 専用の転送エンジン。パックド 8bpp ではプレーンが無く、しかも        */
+/*  拡張グラフィックモードでは 0xA8000 が 32KB のバンク窓に化けているので、  */
+/*  同じ経路を走らせると画面が壊れる。gdi_test / gshell の WM は            */
+/*  gfx_present_dirty() を直接呼ぶ (KAPI) ため、ここで受けてバックエンドの   */
+/*  present_rect へ流す。                                                    */
+/*                                                                          */
+/*  戻り値: 1 = パックド系だったので処理した (呼び出し元は即 return)。       */
+/* ======================================================================== */
+static int _present_dirty_packed(void)
+{
+    u32 commits_before;
+    int i;
+
+    if (!g_backend || g_backend->bb_format == GFX_BB_PLANAR4) return 0;
+    if (!g_backend->present_rect) return 1;
+    if (dirty_queue.count == 0) return 1;
+
+    /* present_rect は 1 回ごとに commits を数えるが、契約 G7 の commits は
+     * 「present (commit) 回数」なので、この 1 回ぶんに揃える。 */
+    commits_before = gfx_counters.commits;
+    for (i = 0; i < dirty_queue.count; i++) {
+        GFX_Rect *r = &dirty_queue.rects[i];
+        g_backend->present_rect(r->x, r->y, r->w, r->h);
+    }
+    gfx_counters.commits = commits_before + 1;
+
+    dirty_queue.count = 0;
+    prev_dirty.count = 0;   /* ページフリップが無いのでステイルページも無い */
+    return 1;
+}
+
+/* ======================================================================== */
 /*  KAPI: ダーティレクタングルの追加 (OS管理)                              */
 /* ======================================================================== */
 void __cdecl gfx_add_dirty_rect(int x, int y, int w, int h)
@@ -184,6 +219,7 @@ static void _flip_page(void)
 /* ======================================================================== */
 void __cdecl gfx_present_dirty(void)
 {
+    if (_present_dirty_packed()) return;
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
@@ -211,6 +247,7 @@ void __cdecl gfx_present_dirty(void)
 /* ======================================================================== */
 void __cdecl gfx_present_nosync(void)
 {
+    if (_present_dirty_packed()) return;
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
@@ -309,6 +346,11 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     unsigned int flags;
 
     if (!table || table->count == 0) return;
+
+    /* ラスタパレットは 16 色プレーン機の HBLANK 同期パレット書き換え。
+     * パックド系 (PEGC 256 色) には対応物が無いので、v1 では普通の present に
+     * 落とす (色は化けず、ラスタ効果だけが出ない)。 */
+    if (_present_dirty_packed()) return;
 
     gfx_counters.commits++;
 

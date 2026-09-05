@@ -5,6 +5,7 @@
 #include "kstring.h"
 #include "vfs.h"
 #include "gfx.h"
+#include "gfx_hal.h"   /* gfx_bb_phys_range: CPL=3 へ USER マップする範囲 */
 #include "kbd.h"
 #include "kmalloc.h"
 #include "kprintf.h"
@@ -1050,11 +1051,18 @@ int exec_run(const char *cmdline)
                 (u32)MEM_UNICODE_TABLE_BASE,
                 (u32)MEM_UNICODE_TABLE_BASE + (u32)MEM_UNICODE_TABLE_SIZE,
                 PAGE_RW | PTE_USER);
-            /* GFX バックバッファ (0x6A000, 128KB): libos32gfx がピクセルを書く先 */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                (u32)MEM_GFX_BB_BASE,
-                (u32)MEM_GFX_BB_BASE + (u32)MEM_GFX_BB_SIZE,
-                PAGE_RW | PTE_USER);
+            /* GFX バックバッファ: libos32gfx がピクセルを書く先。
+             * 番地はバックエンドに聞く (H2) — 9801 は 0x6A000 + 128KB で
+             * 従来と同じ値、PEGC 256 色は物理末尾から切り出した 300KB。
+             * 決め打ちにすると 9821 でアプリが自分のバックバッファに触れず
+             * #PF になる。 */
+            {
+                u32 bb_base = 0, bb_size = 0;
+                gfx_bb_phys_range(&bb_base, &bb_size);
+                if (bb_size)
+                    paging_addrspace_map_user_range(&g_ring3_as,
+                        bb_base, bb_base + bb_size, PAGE_RW | PTE_USER);
+            }
             /* KAPI トランポリンページ (RO+USER, 全PD共有)。この app PD の PDE0 に
              * USER を伝播させる (VRAM/SHM で既に立つが明示・冪等)。 */
             paging_addrspace_map_user(&g_ring3_as, ring3_tramp_page,

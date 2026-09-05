@@ -30,10 +30,12 @@ GfxCounters gfx_counters = { 0, 0, 0, 0 };
 
 const GfxBackend *g_backend = &gfx_backend_pc98;
 
-/* probe 順のバックエンド一覧。v1 は 9801 のみ。H2 (PEGC) / H3 (Cirrus) は
- * 実機に近い順で前へ足す (Cirrus → PEGC → 9801)。 */
+/* probe 順のバックエンド一覧。実機に近い順に前から並べ、最初に probe() が
+ * 1 を返したものを使う (Cirrus → PEGC → 9801)。H3 で Cirrus を先頭に足す。
+ * 9801 の probe は常に 1 なので、末尾が必ず受け皿になる。 */
 static const GfxBackend *const g_backend_list[] = {
-    &gfx_backend_pc98
+    &gfx_backend_pegc,   /* 9821 PEGC 256 色 (H2)。9801 では probe が 0 */
+    &gfx_backend_pc98    /* 9801 標準グラフィック (H1)。最後の受け皿 */
 };
 
 static void gfx_select_backend(void)
@@ -41,6 +43,9 @@ static void gfx_select_backend(void)
     int i;
     int n = (int)(sizeof(g_backend_list) / sizeof(g_backend_list[0]));
     for (i = 0; i < n; i++) {
+        /* weak 宣言のバックエンド (未リンクなら 0) を飛ばす。
+         * → include/gfx_hal.h の gfx_backend_pegc の注記 */
+        if (!g_backend_list[i]) continue;
         if (g_backend_list[i]->probe && g_backend_list[i]->probe()) {
             g_backend = g_backend_list[i];
             return;
@@ -57,11 +62,34 @@ void __cdecl gfx_get_framebuffer(GFX_Framebuffer *fb)
     if (!fb) return;
     fb->width = GFX_WIDTH;
     fb->height = gfx_current_height;
-    fb->pitch = GFX_BPL;
-    fb->planes[0] = bb[0];
-    fb->planes[1] = bb[1];
-    fb->planes[2] = bb[2];
-    fb->planes[3] = bb[3];
+    /* ピッチと先頭はバックエンドの記述子から取る (9801 は 80B/ライン ×
+     * 4 プレーンで従来と同じ値、PEGC は 640B/ライン のパックド 1 面)。
+     * 決め打ちにするとパックド系で嘘のピッチを返す。 */
+    fb->pitch = (int)(g_backend ? g_backend->bb_pitch : (u32)GFX_BPL);
+    if (g_backend && g_backend->bb_format == GFX_BB_PACKED8) {
+        fb->planes[0] = g_backend->bb_base;
+        fb->planes[1] = (u8 *)0;
+        fb->planes[2] = (u8 *)0;
+        fb->planes[3] = (u8 *)0;
+    } else {
+        fb->planes[0] = bb[0];
+        fb->planes[1] = bb[1];
+        fb->planes[2] = bb[2];
+        fb->planes[3] = bb[3];
+    }
+}
+
+/* ======================================================================== */
+/*  バックバッファの物理範囲 (exec が CPL=3 へ USER マップする範囲)。        */
+/*  9801 は 0x6A000 の 128KB、PEGC は物理末尾から切り出した 300KB。          */
+/* ======================================================================== */
+void gfx_bb_phys_range(u32 *base, u32 *size)
+{
+    if (base) *base = 0;
+    if (size) *size = 0;
+    if (!g_backend || !g_backend->bb_base || g_backend->bb_size == 0) return;
+    if (base) *base = (u32)g_backend->bb_base;
+    if (size) *size = g_backend->bb_size;
 }
 
 /* ======================================================================== */
@@ -198,8 +226,44 @@ static void _gfx_common_init(int plane_sz)
     _out(MODE_FF2_PORT, MFF2_16COLOR);
 }
 
+/* ======================================================================== */
+/*  バックエンド選択 → 選ばれたバックエンドの hw-init (H1 レビュー ⑤)       */
+/*                                                                          */
+/*  かつては gfx_init の **末尾** で probe していたため、9801 の GDC/プレーン */
+/*  初期化を丸ごと済ませてから機種を判定していた。PEGC (H2) はモード F/F2 と  */
+/*  MMIO で表示のしくみ自体を差し替えるので、その順序では 9801 用の設定を     */
+/*  上書きするだけの無駄が出るうえ、E0000h の意味が途中で変わる (プレーン 3   */
+/*  → 制御レジスタ) 危険な窓ができる。probe を先に回し、選ばれた 1 枚に       */
+/*  初期化させる。                                                          */
+/*                                                                          */
+/*  戻り値: 1 = バックエンドが自前で init() を持っていた (9821 等)。         */
+/*          0 = init が NULL = 9801。呼び出し側が従来の GDC 初期化を行う。   */
+/*  9801 では従来とまったく同じ経路を通る (回帰ゼロ)。                       */
+/* ======================================================================== */
+static int gfx_select_and_init_backend(void)
+{
+    gfx_select_backend();
+    if (g_backend && g_backend->init) {
+        g_backend->init();
+        /* init が失敗して probe が取り下げられた場合は 9801 へ落とす
+         * (バックバッファが取れない等)。 */
+        if (g_backend->probe && !g_backend->probe()) {
+            g_backend = &gfx_backend_pc98;
+            return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 void gfx_init(void)
 {
+    /* ⑤: GDC 初期化より前にバックエンドを決める */
+    if (gfx_select_and_init_backend()) {
+        if (g_backend->enter) g_backend->enter();
+        return;   /* 9821 等: モード設定もバックバッファも init() が済ませた */
+    }
+
     gfx_current_height = GFX_HEIGHT;  /* 400ラインモード */
     gfx_display_page = 0;
     prev_dirty.count = 0;
@@ -234,13 +298,21 @@ void gfx_init(void)
     palette_init();
     gfx_scroll_init();
 
-    /* HAL バックエンドを選び、表示出力を有効化 (9801 の enter は空) */
-    gfx_select_backend();
+    /* 表示出力を有効化 (9801 の enter は空)。バックエンドの選択は先頭で済み。 */
     if (g_backend && g_backend->enter) g_backend->enter();
 }
 
 void gfx_init_200(void)
 {
+    /* ⑤: GDC 初期化より前にバックエンドを決める。
+     * 200 ラインは 9801 プレーン専用のモードなので、パックド系が選ばれた
+     * ときはそのバックエンドのネイティブ解像度で立ち上げる (200 ラインの
+     * 縦 2 倍表示は 16 色プレーンの機能で、PEGC には対応物が無い)。 */
+    if (gfx_select_and_init_backend()) {
+        if (g_backend->enter) g_backend->enter();
+        return;
+    }
+
     gfx_current_height = GFX_HEIGHT_200;  /* 200ラインモード */
 
     _gfx_common_init(GFX_PLANE_SZ_200);
@@ -275,8 +347,7 @@ void gfx_init_200(void)
     palette_init();
     gfx_scroll_init();
 
-    /* HAL バックエンドを選び、表示出力を有効化 (9801 の enter は空) */
-    gfx_select_backend();
+    /* 表示出力を有効化 (9801 の enter は空)。バックエンドの選択は先頭で済み。 */
     if (g_backend && g_backend->enter) g_backend->enter();
 }
 

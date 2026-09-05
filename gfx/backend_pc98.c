@@ -153,5 +153,6 @@ const GfxBackend gfx_backend_pc98 = {
     (int (*)(int, int, int, int, int, int))0,  /* blit:      CPU 実装へ */
     (u8 *)MEM_GFX_BB_BASE,   /* bb_base: プレーン 0 (青) 先頭 */
     (u32)GFX_BPL,            /* bb_pitch: 80 バイト/ライン */
-    GFX_BB_PLANAR4
+    GFX_BB_PLANAR4,
+    (u32)MEM_GFX_BB_SIZE     /* bb_size: 4 プレーン分 128KB (0x6A000-0x89FFF) */
 };

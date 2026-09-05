@@ -80,7 +80,10 @@ void hotdeploy_init(void)
     }
 
     d->version  = HD_VERSION;
-    d->buf_phys = sys_usable_mem_end();     /* 予約した末尾がそのまま窓 */
+    /* 予約した末尾がそのまま窓。sys_usable_mem_end() は H2 以降 PEGC の
+     * バックバッファ予約でさらに下がるので、窓の位置は専用の getter で取る
+     * (両者は 9801 では同じ値)。 */
+    d->buf_phys = sys_hotdeploy_base();
     d->buf_size = MEM_HOTDEPLOY_SIZE;
     d->status   = HD_IDLE;
 
