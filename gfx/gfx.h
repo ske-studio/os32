@@ -67,6 +67,11 @@ void gfx_present_nosync(void);
 void __cdecl gfx_screen_info(void *out);
 int  __cdecl gfx_hw_fill_rect(int x, int y, int w, int h, u8 color);
 int  __cdecl gfx_hw_blit(int dx, int dy, int sx, int sy, int w, int h);
+/* GUI HAL カウンタとパレットリース (KAPI v41、契約 G7 / G8)。
+ * gfx_stats は GFX_Stats を埋め、gfx_lease_palette は lease_mask の範囲内だけ
+ * パレットを差し替える。K1 が kapi.json に載せる弱既定を強シンボルで上書きする。 */
+int  __cdecl gfx_stats(void *out);
+int  __cdecl gfx_lease_palette(int first, int count, const u8 *rgb);
 
 /* ======== 描画プリミティブ (バックバッファ対象) ======== */
 void gfx_clear(u8 color);

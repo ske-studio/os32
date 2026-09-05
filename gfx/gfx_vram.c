@@ -1,4 +1,5 @@
 #include "gfx_internal.h"
+#include "gfx_hal.h"
 #include "os32_kapi_shared.h"
 #include "cpu_calibrate.h"
 #include "io.h"
@@ -168,6 +169,7 @@ static void _flip_page(void)
     gfx_display_page ^= 1;
     _out(GDC_DISP_PAGE, gfx_display_page);
     _out(GDC_ACCESS_PAGE, gfx_display_page ^ 1);
+    gfx_counters.io_accesses += 2;   /* OUT ×2 (表示ページ + 描画ページ) */
 }
 
 /* ======================================================================== */
@@ -181,6 +183,7 @@ void __cdecl gfx_present_dirty(void)
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        gfx_counters.commits++;
         /* 今フレームのオリジナルdirtyを保存 (マージ前) */
         snapshot = dirty_queue;
         _merge_prev_dirty();
@@ -189,6 +192,7 @@ void __cdecl gfx_present_dirty(void)
         _flip_page();
     } else {
         if (dirty_queue.count == 0) return;
+        gfx_counters.commits++;
         /* VSYNC期間になるまで待つ */
         while ((_in(0x60) & 0x20) == 0) { }
         _flush_dirty_queue();
@@ -206,6 +210,7 @@ void __cdecl gfx_present_nosync(void)
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        gfx_counters.commits++;
         snapshot = dirty_queue;
         _merge_prev_dirty();
         _flush_dirty_queue();
@@ -213,6 +218,7 @@ void __cdecl gfx_present_nosync(void)
         _flip_page();
     } else {
         if (dirty_queue.count == 0) return;
+        gfx_counters.commits++;
         _flush_dirty_queue();
     }
 }
@@ -222,14 +228,15 @@ void __cdecl gfx_present_nosync(void)
 /* ======================================================================== */
 void __cdecl gfx_present(void)
 {
-    gfx_add_dirty_rect(0, 0, GFX_WIDTH, GFX_HEIGHT);
-    gfx_present_dirty();
+    /* HAL バックエンド経由 (契約 G4 の present_rect)。全画面 present。 */
+    if (g_backend && g_backend->present_rect)
+        g_backend->present_rect(0, 0, GFX_WIDTH, gfx_current_height);
 }
 
 void __cdecl gfx_present_rect(int rx, int ry, int rw, int rh)
 {
-    gfx_add_dirty_rect(rx, ry, rw, rh);
-    gfx_present_dirty();
+    if (g_backend && g_backend->present_rect)
+        g_backend->present_rect(rx, ry, rw, rh);
 }
 
 /* ======================================================================== */
@@ -298,6 +305,8 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     unsigned int flags;
 
     if (!table || table->count == 0) return;
+
+    gfx_counters.commits++;
 
     /* フリップモード: VRAM転送はフリップ経由、パレット書き換えのみVSYNC同期 */
     if (gfx_flip_enabled) {
