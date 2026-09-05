@@ -348,7 +348,12 @@ typedef struct { i32 result; u32 surface;  } GuiRespSurface;       /* SURF_CREAT
 typedef struct { i32 result; GuiRect16 rect; } GuiRespRect;         /* CLIENT_RECT -> rect */
 typedef struct { i32 result; i16 button; i16 _pad; } GuiRespModal;  /* MODAL_OPEN -> button */
 
+/* INVALIDATE (op 5): 契約 G4 の invalidate(window, rect)。W1 の申し送りで追記
+ * (2026-09-06)。rect は窓のクライアント座標。 */
+typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;    /* INVALIDATE 12B */
+
 STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
+STATIC_ASSERT(sizeof(GuiReqInvalidate) == 12, gui_req_invalidate_12);
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
 STATIC_ASSERT(sizeof(GuiRespRect)     <= GUI_SLOT_RESP_SIZE, gui_resp_rect_fits);
