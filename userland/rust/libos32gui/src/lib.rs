@@ -38,6 +38,11 @@ mod uistate;
 pub mod widget;
 pub mod window;
 
+/* ---- 共有ライブラリの先頭ページ (票 C3) ----
+ * `.shlib_hdr` に 32B ヘッダ + ジャンプ表を置き、公開関数を `extern "C"` で
+ * 出す。アプリはこの表を通してだけライブラリに入る (`libos32gui_stub`)。 */
+pub mod shlib;
+
 /// 契約 G の一式をまとめた入口 (`libos32gui::gapi::*`)。
 pub mod gapi {
     /// 共有定数 (op / イベント種別 / Style フラグ / 色 / 上限 / SHM / エラー)。
@@ -55,8 +60,9 @@ pub mod gapi {
     };
 }
 
-/* ---- よく使うものを直下へ (アプリの `use libos32gui::*;` 用) ---- */
-pub use app::{run, run_with, App, Ui};
+/* ---- よく使うものを直下へ ---- */
+/* アプリは `libos32gui_stub` (同名で再公開) を使う。ここは本体 (shlib) 側。 */
+pub use app::{run_vt, App, Ui};
 pub use client::{GuiErr, GuiResult};
 pub use layout::SizeSpec;
 pub use timer::Timer;

@@ -68,35 +68,117 @@ pub struct Window {
     id: u32,
 }
 
+/* ================================================================ */
+/*  非所有の下請け (ジャンプ表 E_WINDOW_* の実体。票 C3)              */
+/*                                                                  */
+/*  所有型 `Window` はアプリ側 (スタブ) にあり、`Drop` で             */
+/*  [`drop_window`] を呼ぶ。登録表・サーフェス・ウィジェット木は      */
+/*  すべてライブラリの `.data`/`.bss` にある。                        */
+/* ================================================================ */
+
+/// ウィンドウを作り、クライアント面のサーフェスを用意する。戻り値は WindowId。
+pub fn create_raw(spec: &GuiWinSpec) -> GuiResult<u32> {
+    let id = client::win_create(spec)?;
+    let rect = client::win_client_rect(id)?;
+
+    let st = s();
+    let slot = match st.alloc_win() {
+        Some(i) => i,
+        None => {
+            let _ = client::win_destroy(id);
+            return Err(client::GuiErr::FULL);
+        }
+    };
+    st.windows[slot].id = id;
+    st.windows[slot].client = rect;
+    st.windows[slot].surface = crate::surface::create_window_surface(rect);
+    /* 新しい窓は WM が最前面に置く (`z_add_top`)。W1 の `set_focus` は
+     * 既に最前面なら `Focus` を出さないので、こちら側で初期値を入れておく
+     * (**PM への申し送り**: 1 枚しか窓を持たないアプリは `Focus{in}` を
+     * 一度も受け取らない)。後から届く `Focus{out}` で正しく落ちる。 */
+    let mut k = 0;
+    while k < st.windows.len() {
+        if st.windows[k].used {
+            st.windows[k].focused = k == slot;
+        }
+        k += 1;
+    }
+    Ok(id)
+}
+
+/// クライアント面のサーフェス (C1 の G API に渡す)。
+pub fn surface_of(id: u32) -> SurfaceId {
+    match s().win_slot(id) {
+        Some(i) => s().windows[i].surface,
+        None => SurfaceId::NULL,
+    }
+}
+
+/// クライアント面の大きさ (ローカル原点 0,0)。
+pub fn client_size_of(id: u32) -> (i16, i16) {
+    match s().win_slot(id) {
+        Some(i) => (s().windows[i].client.w, s().windows[i].client.h),
+        None => (0, 0),
+    }
+}
+
+/// ウィジェット木の根を差し替える (`row` / `column`)。既存の木は捨てる。
+pub fn set_root_of(id: u32, root: WidgetId) -> GuiResult<()> {
+    let slot = match s().win_slot(id) {
+        Some(i) => i,
+        None => return Err(client::GuiErr::STALE),
+    };
+    let old = s().windows[slot].root;
+    if old != GUI_NONE {
+        widget::free_tree(old as usize - 1);
+    }
+    let idx = match widget::resolve(root) {
+        Some(i) => i,
+        None => return Err(client::GuiErr::STALE),
+    };
+    s().windows[slot].root = (idx as u16) + 1;
+    widget::assign_window(idx, id);
+    s().windows[slot].focus = widget::first_focusable((idx as u16) + 1);
+    relayout_of(id);
+    Ok(())
+}
+
+/// 根から箱レイアウトを引き直し、全面を `invalidate` する (契約 U7)。
+pub fn relayout_of(id: u32) {
+    let slot = match s().win_slot(id) {
+        Some(i) => i,
+        None => return,
+    };
+    let root = s().windows[slot].root;
+    let client = s().windows[slot].client;
+    crate::layout::layout_window(root, client);
+    let (w, h) = client_size_of(id);
+    s().damage.push(id, Rect::new(0, 0, w, h));
+}
+
+/// 損傷を申告する (クライアントローカル)。描くのは次の `Paint`。
+pub fn invalidate_of(id: u32, rect: Rect) {
+    s().damage.push(id, rect);
+}
+
+/// WM からフォーカスを持っているか (`Focus{in}` の記録)。
+pub fn is_focused_of(id: u32) -> bool {
+    match s().win_slot(id) {
+        Some(i) => s().windows[i].focused,
+        None => false,
+    }
+}
+
+/// 所有型の `Drop` 相当: 登録表から落として WM へ `DESTROY` を送る。
+pub fn drop_window(id: u32) {
+    unregister(id);
+    let _ = client::win_destroy(id);
+}
+
 impl Window {
     /// ウィンドウを作り、クライアント面のサーフェスを用意する。
     pub fn create(spec: &WindowSpec) -> GuiResult<Window> {
-        let id = client::win_create(&spec.inner)?;
-        let rect = client::win_client_rect(id)?;
-
-        let st = s();
-        let slot = match st.alloc_win() {
-            Some(i) => i,
-            None => {
-                let _ = client::win_destroy(id);
-                return Err(client::GuiErr::FULL);
-            }
-        };
-        st.windows[slot].id = id;
-        st.windows[slot].client = rect;
-        st.windows[slot].surface = crate::surface::create_window_surface(rect);
-        /* 新しい窓は WM が最前面に置く (`z_add_top`)。W1 の `set_focus` は
-         * 既に最前面なら `Focus` を出さないので、こちら側で初期値を入れておく
-         * (**PM への申し送り**: 1 枚しか窓を持たないアプリは `Focus{in}` を
-         * 一度も受け取らない)。後から届く `Focus{out}` で正しく落ちる。 */
-        let mut k = 0;
-        while k < st.windows.len() {
-            if st.windows[k].used {
-                st.windows[k].focused = k == slot;
-            }
-            k += 1;
-        }
-        Ok(Window { id })
+        Ok(Window { id: create_raw(&spec.inner)? })
     }
 
     /// WindowId (index:16 | generation:16)。
@@ -107,18 +189,12 @@ impl Window {
 
     /// クライアント面のサーフェス (C1 の G API に渡す)。
     pub fn surface(&self) -> SurfaceId {
-        match s().win_slot(self.id) {
-            Some(i) => s().windows[i].surface,
-            None => SurfaceId::NULL,
-        }
+        surface_of(self.id)
     }
 
     /// クライアント面の大きさ (ローカル原点 0,0)。
     pub fn client_size(&self) -> (i16, i16) {
-        match s().win_slot(self.id) {
-            Some(i) => (s().windows[i].client.w, s().windows[i].client.h),
-            None => (0, 0),
-        }
+        client_size_of(self.id)
     }
 
     /// クライアント面のローカル矩形。
@@ -129,41 +205,18 @@ impl Window {
 
     /// ウィジェット木の根を差し替える (`row` / `column`)。既存の木は捨てる。
     pub fn set_root(&self, root: WidgetId) -> GuiResult<()> {
-        let slot = match s().win_slot(self.id) {
-            Some(i) => i,
-            None => return Err(client::GuiErr::STALE),
-        };
-        let old = s().windows[slot].root;
-        if old != GUI_NONE {
-            widget::free_tree(old as usize - 1);
-        }
-        let idx = match widget::resolve(root) {
-            Some(i) => i,
-            None => return Err(client::GuiErr::STALE),
-        };
-        s().windows[slot].root = (idx as u16) + 1;
-        widget::assign_window(idx, self.id);
-        s().windows[slot].focus = widget::first_focusable((idx as u16) + 1);
-        self.relayout();
-        Ok(())
+        set_root_of(self.id, root)
     }
 
     /// 根から箱レイアウトを引き直し、全面を `invalidate` する (契約 U7)。
     pub fn relayout(&self) {
-        let slot = match s().win_slot(self.id) {
-            Some(i) => i,
-            None => return,
-        };
-        let root = s().windows[slot].root;
-        let client = s().windows[slot].client;
-        crate::layout::layout_window(root, client);
-        let _ = self.invalidate_all();
+        relayout_of(self.id)
     }
 
     /// 損傷を申告する (クライアントローカル)。描くのは次の `Paint`。
-    /// 実際の `OP_INVALIDATE` は 1 周分をまとめて送る (契約 P。[`crate::app::run`])。
+    /// 実際の `OP_INVALIDATE` は 1 周分をまとめて送る (契約 P。[`crate::app::run_vt`])。
     pub fn invalidate(&self, rect: Rect) -> GuiResult<()> {
-        s().damage.push(self.id, rect);
+        invalidate_of(self.id, rect);
         Ok(())
     }
 
@@ -204,17 +257,13 @@ impl Window {
 
     /// WM からフォーカスを持っているか (`Focus{in}` の記録)。
     pub fn is_focused(&self) -> bool {
-        match s().win_slot(self.id) {
-            Some(i) => s().windows[i].focused,
-            None => false,
-        }
+        is_focused_of(self.id)
     }
 }
 
 impl Drop for Window {
     fn drop(&mut self) {
-        unregister(self.id);
-        let _ = client::win_destroy(self.id);
+        drop_window(self.id);
     }
 }
 
