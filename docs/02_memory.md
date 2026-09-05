@@ -53,8 +53,13 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > 2026-09-03 に exec_heap を 0x380000 (旧 NP ギャップ) へ分離した。
 > PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
-[ プログラム空間 (0x400000 - mem_end) — 動的レイアウト ]
-0x400000 - code_end                .text + .data + .bss (固定上限なし)        R/W
+[ 共有ライブラリ帯域 (0x400000 - 0x4FFFFF, K3 2026-09-06) ]
+0x400000 - text_end                libos32gui.shlib の先頭 4KB ジャンプ表 + .text/.rodata  RO, USER, 全 PD 共有
+data_vaddr - data_end              .data/.bss (アプリごとに物理ページを複製)         R/W, USER
+0x4FFFFF 直下                      .data/.bss の原本 (ロード時に退避)
+
+[ プログラム空間 (0x500000 - mem_end) — 動的レイアウト ]
+0x500000 - code_end                .text + .data + .bss (固定上限なし)        R/W
 code_end - guard_a                 newlib sbrk (最低 MEM_EXEC_SBRK_MIN=256KB)  R/W
 guard_a  (4KB)                     ★ GUARD A: sbrk上限ガード (位置は動的)     NP
 guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/W
@@ -74,7 +79,7 @@ guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/
     (sys_usable_mem_end())。15MB 構成なら 0xF00000 - 0x40000 = 0xEC0000
   ※ カーネル帯域内のKAPI/SHMアドレスは __bss_end を基点に動的算出される
   ※ 入れ子起動は子として走り終了で親へ戻る (最大 4 段)。CPL=3 のプログラムは
-    PD ごとに独立した 0x400000 帯を持つ (09_exec.md)
+    PD ごとに独立した 0x500000 帯を持つ (09_exec.md)。0x400000 帯の shlib .text は共有、.data はアプリごと
 ```
 
 ### §2-2 DMA 64KB境界制約

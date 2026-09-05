@@ -15,7 +15,7 @@ Claude Code は本ファイルを自動で読み込む。他のツールから�
 
 ## Project Overview
 
-OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with a GCC i386-elf cross-compiler and NASM. The kernel runs in protected mode at physical address 0x100000 (1MB). External programs are loaded at 0x400000.
+OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with a GCC i386-elf cross-compiler and NASM. The kernel runs in protected mode at physical address 0x100000 (1MB). External programs are loaded at 0x500000 (0x400000–0x4FFFFF is the shared-library band, GUI v1.1 K3).
 
 ## Build Commands
 
@@ -142,7 +142,9 @@ The lines below are the whole rule; the reasoning and the detail live in
 0x1FC000–0x1FFFFC Kernel stack (16KB)
 0x200000–0x2FFFFF SQLite band (1MB): code + BSS + alternate stack (128KB)
 0x300000–0x3FFFFF Shell band (1MB): resident binary + guard 0x375000 + stack
-0x400000–         External program band: code+bss, then newlib sbrk, guard page,
+0x400000–0x4FFFFF Shared library band (libos32gui.shlib, K3): .text read-only shared by
+                  every PD, .data/.bss duplicated per app; original kept at the band's end
+0x500000–         External program band: code+bss, then newlib sbrk, guard page,
                   KAPI exec_heap directly below the stack guard (no fixed 1MB cap
                   since 2026-09-04; sbrk/exec_heap split by OS32X heap_size or 50/50)
 (top 256KB)       Hot-deploy staging window — carved out of physical memory

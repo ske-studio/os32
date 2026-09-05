@@ -317,9 +317,13 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2C0 | gfx_lease_palette | `int(int first, int count, const u8 *rgb)` |
 | 0x2C4 | sys_switch_shell | `int(const char *path)` |
 | 0x2C8 | kbd_dropped_count | `u32(void)` |
-| 0x2CC | kbd_trygetrawkey | `int(void)` — 戻り値 `keycode \| down<<8 \| mods<<9` (mods = イベント時点の SHIFT_*、GUI モード中のみ記録)、無ければ -1 |
-| 0x2D0 | ime_feed_key | `int(int keydata)` — WM が打鍵 `(scancode<<8)\|ascii` を FEP に通す (GUI 中はカーネルが cooked に積まないため)。負 = 確定文字列の続きだけ。戻り値: <0 消費 / >=0x100 素通り / 0x1B ESC 素通り / 1..0xFF 確定 UTF-8 の 1 バイト (W2) |
-| 0x2D4 | ime_set_render | `void(void *table)` — FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2) |
+| 0x2CC | kbd_trygetrawkey | `int(void)` |
+| 0x2D0 | ime_feed_key | `int(int keydata)` |
+| 0x2D4 | ime_set_render | `void(void *table)` |
+
+- `kbd_trygetrawkey`: 戻り値 `keycode | down<<8 | mods<<9` (mods = そのイベント時点の `SHIFT_*`、GUI モード中のみ記録)、無ければ -1。WM (gshell) が Key down/up を作る。
+- `ime_feed_key(keydata)`: WM が打鍵 `(scancode<<8)|ascii` を FEP に通す (GUI 中はカーネルが cooked に積まないため)。負 = 確定文字列の続きだけ。戻り値: <0 消費 / >=0x100 素通り / 0x1B ESC 素通り / 1..0xFF 確定 UTF-8 の 1 バイト (W2)。
+- `ime_set_render(table)`: FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2)。
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは

@@ -1100,6 +1100,19 @@ pub fn focused(win: usize) -> WidgetId {
 }
 
 /// テキストボックスのキャレット位置を WM へ知らせる (契約 U2a、FEP の候補窓)。
+/// 窓が `Focus{in}` を受けたとき、フォーカス中のウィジェットが textbox なら
+/// キャレット位置を WM へ知らせ直す (FEP の `[あ]` / 候補窓の原点。窓生成直後は
+/// まだ送っていないので、これが無いと画面左下に出る — G3 で実測)。
+pub(crate) fn report_text_cursor(win: usize) {
+    let f = s().windows[win].focus;
+    if f != GUI_NONE {
+        let idx = f as usize - 1;
+        if s().widgets[idx].used && s().widgets[idx].kind == WK_TEXTBOX {
+            send_text_cursor(idx);
+        }
+    }
+}
+
 fn send_text_cursor(idx: usize) {
     let (win_id, r, caret) = {
         let w = &s().widgets[idx];

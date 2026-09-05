@@ -225,6 +225,9 @@ fn dispatch(app: &mut impl App, ui: &mut Ui, ev: &GuiEvent) {
             if f != GUI_NONE {
                 widget::invalidate(f as usize - 1);
             }
+            if ev.sub != 0 {
+                widget::report_text_cursor(i);
+            }
             app.on_focus(ui, win, ev.sub != 0);
         }
         GUI_EV_KEY => {
