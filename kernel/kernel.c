@@ -52,6 +52,7 @@ extern void fatfs_init(void);
 #include "pipe_buffer.h"
 #include "snd_engine.h"
 #include "mouse.h"
+#include "lgy98.h"
 #include "os32_sqlite_vfs.h"
 #include "kapi_db.h"
 
@@ -414,6 +415,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     snd_init();
     tvram_print(14, 4, "OK ", TATTR_WHITE);
     kprintf(0x07, "[BOOT] snd_init OK\n");
+
+    /* LAN (LGY-98)。CONFIG_LGY98_BASE=0 (既定) なら何もしない。
+     * カード未装着・応答不良でも NIC だけ無効にして起動を続ける。 */
+    lgy98_init();
 
     tvram_print(18, 4, "SQ..", TATTR_GREEN);
     kprintf(0x07, "[BOOT] sqlite_init...\n");

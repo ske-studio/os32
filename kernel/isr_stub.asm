@@ -92,6 +92,7 @@ extern v86_reflect_irq
 extern v86_tick_and_check_timeout
 extern v86_check_exit_request
 extern v86_exit_to_kernel
+extern ne2k_irq
 
 ;; ============================================================
 ;; V86 実行中なら、この IRQ をゲストにも見せる (割り込み反射)。
@@ -644,3 +645,29 @@ irq_stub_13:
 
         popad
         IRETD_USER
+
+;; ============================================================
+;; LAN (LGY-98 / NE2000) の IRQ 入口 — マスタ PIC の IRQ3 / 5 / 6
+;;
+;; どの IRQ を使うかは起動設定で決まり、drivers/lgy98.c が
+;; idt_register_irq() で該当スタブを IDT に入れる (未使用の IRQ は
+;; irq_stub_unexp_* のまま)。NIC は OS32 が所有するので V86 ゲストへは
+;; 反射しない。C ハンドラ ne2k_irq() は処理した ISR ビットだけを ACK し、
+;; PIC の EOI はここで 1 回だけ送る。string 命令の前に cld で DF=0。
+;; ============================================================
+%macro IRQ_NIC 1
+global irq_stub_nic_%1
+irq_stub_nic_%1:
+        pushad
+        RESTORE_KSEG
+        cld
+        call    ne2k_irq
+        mov     al, OCW2_EOI
+        out     PIC1_CMD, al
+        popad
+        IRETD_USER
+%endmacro
+
+IRQ_NIC 3                       ;; INT 0x23
+IRQ_NIC 5                       ;; INT 0x25
+IRQ_NIC 6                       ;; INT 0x26

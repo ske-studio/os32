@@ -20,7 +20,7 @@
 | 日本語入力 (FEP) | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) (進捗の正典) | `kernel/ime*.c` | メモリ os32-fep-testing の手順、`/api/key` |
 | GUI シェル | [tasks/gui/TASKS.md](tasks/gui/TASKS.md) → 各票 | 票の排他ゾーン | 票のゲート |
 | V86 / DOS | [tasks/v86v2/README.md](tasks/v86v2/README.md) | `kernel/v86*.c` | `v86 -t` / `-b`、脱出は CTRL+STOP |
-| LAN (LGY-98) | [tasks/network/PLAN.md](tasks/network/PLAN.md) (M0〜M5) | `drivers/lgy98.c` `ne2000*.{c,asm}` (予定) | NP21/W の `/api/net/*` と `np2net_helper.py` (計画 §8)、ini 追加は [D2] |
+| LAN (LGY-98) | ドライバ [tasks/network/PLAN.md](tasks/network/PLAN.md) (M0〜M5、進捗 §9)、リンク層+Host Services [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | `drivers/lgy98.c` `ne2000.c` `ne2000_ring.c` `ne2000_io.asm`、有効化は `make kernel-lgy98` (戻すのは `kernel-nolgy98`) | `make check` のホスト試験 (リング計算)、`make check-net-m2` (NP21/W で inject → 反射 → capture)、ini は [D2] |
 | ビルド・配備の仕組みを変える | [08_build.md](08_build.md) | `Makefile` `build/*.mk` `tools/*.py` | `make check`、`os32-cycle deploy` |
 | 障害を追う | [POLICY_DEBUG.md](POLICY_DEBUG.md) (§2 反映確認 → §4 教訓集 → §5 道具) | — | `tools/np21w_mcp/`、`/api/tvram` |
 | 資料を直す | [INDEX.md](INDEX.md) の正典表で更新先を 1 つに決める | その 1 か所 + 参照側は要約のみ | `make check` (件数・制約 ID)、`make docs-win` |
@@ -65,7 +65,7 @@
 | `fm.c` | OPN/OPM | [05 §5-3](05_drivers.md) |
 | `kcg.c` | 漢字 ROM / ビットマップフォント | [05 §5-9](05_drivers.md) |
 | `np2sysp.c` | NP21/W ハイパーコール | [05 §5-10](05_drivers.md) |
-| (予定) `lgy98.c` `ne2000.c` `ne2000_io.asm` | LGY-98 (NE2000 互換 C バス LAN)。未実装 | [tasks/network/PLAN.md](tasks/network/PLAN.md) |
+| `lgy98.c` `ne2000.c` `ne2000_ring.c` `ne2000_io.asm` `ne2000_regs.h` | LGY-98 (NE2000 互換 C バス LAN)。カード固有 / 8390 本体 / リング計算 (ホスト試験可) / 16bit PIO / レジスタ定数の正典。既定は無効 (`CONFIG_LGY98_BASE=0`) | [tasks/network/PLAN.md](tasks/network/PLAN.md) |
 
 ### ファイルシステム `fs/`
 

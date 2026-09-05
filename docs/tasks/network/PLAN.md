@@ -7,7 +7,8 @@
 
 LGY-98 1枚を対象に、32bit protected mode のカーネルから Ethernet フレームを
 送受信できるようにする。PCI/ISA の汎用検出、多数の互換カード、複数 NIC は対象外。
-ARP/IP/ICMP/UDP/TCP、DHCP、DNS、ソケット、アプリケーションは別計画とする。
+ARP/IP/ICMP/UDP/TCP、DHCP、DNS、ソケット、アプリケーションは別計画とする
+(独自リンクプロトコルと Host Services は [LINK_PLAN.md](LINK_PLAN.md))。
 ドライバの完成は raw Ethernet の対向試験で判定でき、IP スタックを前提にしない。
 
 推奨構成は **転送と IRQ 入口を NASM、初期化・リング管理・復旧を GNU89 C** とする。
@@ -295,3 +296,80 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 - ドキュメント運用: 本計画が設計と進捗の正典 (INDEX.md「情報単位ごとの正典」の流儀)。
   実装完了後の現行仕様は `docs/05_drivers.md` へ、落とし穴の経緯は `POLICY_DEBUG.md §4` へ。
 
+
+## 9. 進捗と確定事項 (2026-09-05 着手、ブランチ `feat/lgy98`)
+
+| 段階 | 状態 | 備考 |
+|---|---|---|
+| M0 | **凍結 (エミュレータ基準)** | 下表。実カードの列は未確認のまま |
+| M1 | **エミュレータで合格** (2026-09-05) | `make clean` → `kernel-lgy98` → NHD 配備。起動後 `ne2k_nic` を `/api/mem` で読み: RUNNING、MAC = ini の値、PROM 重複あり、RAM 32KB 検出 (PSTOP 0xC0)、RAM 全域パターン試験 0 エラー、Remote DMA 往復 (1/2/3/59/60/61/255/256/257/1513/1514B、読み側余白無傷) 0 エラー、RDC timeout 0。kselftest 42/0、配備後回帰 6/6 |
+| M2 | **エミュレータで合格** (inject/capture 経路) | `make check-net-m2` (`tools/net_m2_test.py`): 14/60/61/100/255/256/257/1000/1513/1514B の反射が内容一致、連続 10 フレーム順序どおり、1000〜1514B × 60 逐次で PSTOP wrap を繰り返して 0 失敗、ドライバ計数 = 送った数、NP21/W 側 drop 0。**未実施**: 対向機との raw Ethernet (helper は ARP/ICMP/UDP しか返さず、IP 層が無いので保留)、内部 loopback (NP21/W が再現しない、実機項目) |
+| M3 | **エミュレータで合格** (2026-09-05) | IRQ 駆動: IRQ5 スタブ登録 + IMR。`make check-net-m2` を IRQ 駆動カーネルで実行し `irq +80`・0 drop・ACK 後の recheck が毎回機能。`make check-net-m2-cpl3` で CPL3 プログラム (`less`) 常駐中も `irq +80`・0 drop、`less` は正常終了しシェル復帰。kselftest 42/0、回帰 6/6 |
+| M4 | **エミュレータで合格** (2026-09-05) | 「溢れても・取りこぼしても壊れない」安全網。`ne2k_timer_tick` を 100Hz 受信ウォッチドッグ化 (RUNNING/OVW_WAIT かつ非 busy なら毎 tick 有界 poll、健全時は CURR 1 読みで戻る)。`make check-net-m4`: 200 フレーム一括 inject でも state RUNNING・drop 0・バースト後の単発受信 OK・wedge なし。リンク層向けに `ne2k_rx_ring_free_pages()` / `ne2k_rx_queue_free()` を公開。M3 で見つけた wedge (リングに残り二度と IRQ が来ない) の再発防止。**注記**: 本試験では IRQ が追いつき watchdog_frames は 0 (ウォッチドッグは安全網として実装・コードレビュー確認、強制 IRQ 喪失下の発火は未計測)。NP21/W は OVW を立てず黙って捨てるため OVW 復帰経路は実カード項目 |
+| M5 | 未着手 | 実機で性能・サイズ・現行仕様化 |
+
+### M0 で凍結した表
+
+| 項目 | 設計値 | 根拠 | 実カードでの確認 |
+|---|---|---|---|
+| レジスタ | BASE+0x00〜0x0F (8bit) | §2 / §8 | 未 |
+| データポート | BASE+0x200 (16bit のみ、DCR WTS=1) | §8 (iocore) | 未 (8bit 転送の可否) |
+| リセット | BASE+0x18 読み出し → ISR.RST を最大 20ms 待つ | §8 (`lgy98_ib018`)、DP8390D | 未 (read/write の別、待ち時間) |
+| 存在確認 | PSTART/PSTOP を書いて page2 から読み返し + PROM 署名 0x57 (byte 14/15、重複なら 28..31) | 不在時は 0xFF | 未 |
+| PROM | Remote DMA read 32B。全 16 組が重複なら偶数バイトを MAC | NP21/W は重複 | 未 (並び) |
+| MAC 検査 | 全 0 / 全 1 / multicast ビットを拒否 | §2 | — |
+| RAM | 先頭ページ 0x40。probe で 16KB / 32KB を判定 (16KB 末尾 + 32KB 側の往復 + 先頭ページのエイリアス検査) | NP21/W は 32KB | 未 (実カードは 16KB 想定) |
+| 配置 | TX 0x40〜0x45 (1 スロット)、RX PSTART 0x46、PSTOP = 0x40 + RAM ページ数 (0x80 / 0xC0) | §4 | — |
+| DCR | 0x49 (WTS, LS, FT1) | NE2000 系ドライバの標準値 | 未 |
+| RCR / TCR | 通常: RCR=AB (自 MAC + broadcast)、TCR=0。probe 中: RCR=MON、TCR=内部 loopback | DP8390D §11 | 未 |
+| IRQ | PIC IRQ 3 / 5 / 6 のみ受理、12 は拒否 (NE2K_ERR_IRQ)。IMR でマスク中 (未使用) であることを確認 | §2 | — |
+| 受信 count | 実カード: ヘッダ 4B + データ + FCS 4B (DP8390D)。NP21/W: FCS を含まない (`np2_detect()` で切替) | §8 / DP8390D | **未 (最重要)** |
+| 待ち上限 | reset 20ms / RDC 4ms / OVW 停止後 2ms / TX 50ms (tick, IF=1 のみ) / 再初期化 3 回 / 不整合ヘッダ 4 連続 | DP8390D の値に余裕 | M5 で見直し |
+| Remote DMA | STA を立てて発行 (Linux ne.c / FreeBSD if_ed と同じ)。probe 中は PSTOP=0xFF で折り返しを避ける | 8390 は PSTOP で PSTART へ戻る | 未 |
+
+### 実装上の決定 (計画からの差分)
+
+- **NASM の生成 include は不要**: `ne2000_io.asm` はポート番号を引数で受けるので、
+  レジスタ定数の正典は `drivers/ne2000_regs.h` 1 か所で済む。
+- **リング計算を `ne2000_ring.c` に分離**: I/O 無しの純粋関数にし、`tools/tests/ne2000_ring_test.c`
+  をホスト gcc で `make check` から回す (実カード形式と NP21/W 形式の両方、ページ境界、PSTOP wrap、
+  異常ヘッダ)。幾何だけでは count の形式違い (FCS の有無) は検出できないので、その判定は
+  `np2_detect()` と M0 の実機確認に置く。
+- **ホスト側 RX キュー 8 × 1516B、TX 作業領域 1516B** を BSS に置く (約 13.6KB)。
+  カーネル帯域の余裕は約 144KB (kernel.map、2026-09-05) なので収まる。
+- **診断は初期化時のフラグ** (`LGY98_FLAG_DIAG` → RAM 全域パターン試験 + Remote DMA 往復試験
+  1/2/3/59/60/61/255/256/257/1513/1514 バイトと読み側余白の検査) で行い、結果は統計
+  (`diag_ram_errors` / `diag_dma_errors` / `rdc_timeout`) と起動ログに出す。
+- **有効化はビルド時** `make kernel-lgy98` (スタンプ `build/out/lgy98.enabled` を置くので、以後の
+  `make kernel` / `deploy-nhd` も有効のまま。`make kernel-nolgy98` で戻す。emu_agent の許可リストに追加)。
+  `CONFIG_LGY98_BASE=0` (既定) では `lgy98_init()` は何もしない。`make kernel LGY98=1` だけだと
+  deploy がカーネルを作り直した時に無効へ戻る (2026-09-05 に実際に踏んだ)。
+- IRQ 入口 (`isr_stub.asm` のスタブ、`idt.c` の登録、IMR の有効化) は M3 で入れる。
+  `ne2k_irq()` の busy/pending の枠だけ先に置いた。
+- **M2 の試験経路は反射モード**: `LGY98_FLAG_REFLECT` で `timer_handler` (100Hz) から `lgy98_tick()`
+  が `ne2k_poll(2)` と受信フレームの MAC 入れ替え送信を行う。`tools/net_m2_test.py` が
+  `/api/net/inject` → `/api/net/capture` (dir=tx) と `lgy98_reflected` (kernel.map 経由) で照合する。
+  試験は `make check-net-m2` (ローカル AI の許可リスト) で回す。KAPI は未追加。
+
+### エミュレータでは確認できないこと (M4/M5 の実機項目)
+
+- OVW: NP21/W の `ne2000_receive` はリング満杯時にフレームを**捨てる**だけで OVW を立てない。
+  復旧経路 (§4) はモデル試験と実機で確認する。
+- 内部 loopback: NP21/W は TCR の loopback を再現せず常に外へ送る。M2 の「内部 loopback」は
+  実機項目に回し、エミュレータでは inject/capture で代替する。
+- MON: NP21/W は RCR.MON を再現しない。probe 中に自 MAC 宛ユニキャストが届くと PROM 複製
+  領域 (mem[0..]) が上書きされ得るが、PROM は reset 直後に読むので実害はない。
+- 2ms 以内の IRQ 再アサート抑制 (§8) は M3 の試験条件に残す。合格した M3 試験では
+  ドライバの ACK 後 recheck (ISR / CURR を有限回再確認) が毎回働き、この抑制下でも取りこぼしゼロ。
+
+### M3 で分かった注意点
+
+- **aidebug のデバッグサーバは単一スレッド**で要求を 1 つずつ処理する
+  (`np21w-src/src/win9x/aidebug/aidebug_server.cpp`)。`sleep` のように戻らないコマンドを
+  `/api/cmd` で投げている間は `/api/net/inject` も `/api/mem` も詰まる。同時実行試験は
+  `less` のような対話常駐プログラム (画面を出してキー待ちに入り `/api/cmd` が戻る) で行う。
+  `v86` セッション中の LAN 試験は inject 経路が使えないので別機構が要る (M4 以降)。
+- **過負荷 wedge (M4 で直す)**: 上記の病的手順 (デバッグサーバ 40s 停止 → 80 フレーム一括
+  inject) でリングが飽和し、ドライバが `imr 0x3f` / `rx_backlog 0` の見かけ正常なのに IRQ が
+  来なくなる状態を再現した。通常運転 (フレームが来るたびにドレイン) では起きない。OVW の
+  検出・復帰とホストキュー満杯時のバックプレッシャを M4 で詰める。

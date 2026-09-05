@@ -36,4 +36,22 @@
 /* ====================================================================== */
 #define SYS_SERIAL_BAUD       38400
 
+/* ====================================================================== */
+/*  LAN (LGY-98, docs/tasks/network/PLAN.md)                                */
+/*                                                                          */
+/*  BASE 0 = 無効 (既定)。有効化はビルド時: make kernel-lgy98 (戻すのは        */
+/*  kernel-nolgy98)。build/config.mk がスタンプを見て CONFIG_LGY98_* を -D で   */
+/*  渡す。広域スキャンや IRQ の                                              */
+/*  自動検出はしない。値は PIC IRQ (3 / 5 / 6)。                             */
+/* ====================================================================== */
+#ifndef CONFIG_LGY98_BASE
+#define CONFIG_LGY98_BASE     0
+#endif
+#ifndef CONFIG_LGY98_IRQ
+#define CONFIG_LGY98_IRQ      0
+#endif
+#ifndef CONFIG_LGY98_FLAGS
+#define CONFIG_LGY98_FLAGS    0       /* LGY98_FLAG_DIAG 1 | LGY98_FLAG_LOOPBACK 2 */
+#endif
+
 #endif /* CONFIG_H */

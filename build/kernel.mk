@@ -3,7 +3,7 @@
 # ============================================================================
 
 # === カーネル ASM ソース ===
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm drivers/ne2000_io.asm
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
@@ -14,6 +14,7 @@ C_KERNEL = \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
+    drivers/lgy98.c drivers/ne2000.c drivers/ne2000_ring.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
@@ -41,6 +42,25 @@ drivers/mouse.o: drivers/mouse.c
 # loop_dev.c は vfs.h / kprintf.h (fs/, lib/) を参照するため INC_KERNEL でビルド
 drivers/loop_dev.o: drivers/loop_dev.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# LAN: ne2000.c は idt.h (tick_count) / cpu_calibrate.h、lgy98.c は idt.h (PIC) を
+# 参照するため INC_KERNEL。lgy98.o は CONFIG_LGY98_* (make kernel LGY98=1) を
+# 唯一読む場所なので、フラグ変更が拾えるよう毎回コンパイルする。
+drivers/ne2000.o: drivers/ne2000.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+drivers/lgy98.o: drivers/lgy98.c .FORCE
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# NE2000 受信リング計算のホスト試験 (I/O 無し)。make check から呼ばれる。
+# I/O の実動作試験を代替しない (docs/tasks/network/PLAN.md §6)。
+check-ne2000-ring:
+	@mkdir -p $(BUILD_OUT)
+	@gcc -std=gnu89 -Wall -Wextra -DNE2K_HOST_TEST -Idrivers \
+	    -o $(BUILD_OUT)/ne2000_ring_test tools/tests/ne2000_ring_test.c drivers/ne2000_ring.c
+	@$(BUILD_OUT)/ne2000_ring_test
+
+.PHONY: check-ne2000-ring
 
 drivers/%.o: drivers/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_DRIVERS) -c $< -o $@
@@ -135,3 +155,37 @@ clean-kernel:
 	cd $(RUST_LZ4_DIR) && cargo clean 2>/dev/null || true
 
 .PHONY: kernel clean-kernel
+
+# LAN (LGY-98) 有効カーネル。emu_agent の許可リストから呼べる 1 語ターゲット。
+# スタンプ (build/config.mk LGY98_STAMP) を置いてからビルドするので、以後の
+# make kernel / deploy-nhd も LAN 有効のまま。kernel-nolgy98 で既定 (無効) に戻す。
+kernel-lgy98:
+	@mkdir -p $(BUILD_OUT)
+	@touch $(LGY98_STAMP)
+	$(MAKE) kernel
+
+kernel-nolgy98:
+	@rm -f $(LGY98_STAMP)
+	$(MAKE) kernel
+
+.PHONY: kernel-lgy98 kernel-nolgy98
+
+# M2 の対向試験 (inject → 受信 → 反射送信 → capture)。NP21/W が LAN 有効 + 反射モードの
+# カーネルで起動していること。make check には入れない (実機が要る)。
+check-net-m2:
+	@python3 tools/net_m2_test.py
+
+# M3: CPL3 プログラム常駐中に同じ試験を回す。aidebug のデバッグサーバは単一スレッドで
+# 要求を 1 つずつ処理するため、戻ってこないコマンド (sleep 等) を /api/cmd で投げると
+# inject / capture が詰まって試験にならない。less のような対話プログラムなら最初の画面で
+# キー待ちに入って /api/cmd が戻り (チャネルが空く)、プログラムは CPL3 に常駐したままになる。
+# → NIC IRQ がアプリの CR3 が有効な状態で配送・処理されることを確認する。
+check-net-m2-cpl3:
+	@python3 tools/net_m2_test.py --during-cmd "less /etc/profile" --wait-for "/etc/profile" --exit-key q --during-timeout 30
+
+# M4: フロー制御なしでリングを故意に飽和させ、ドライバが wedge せず 100Hz
+# ウォッチドッグで自己回復することを確認する (溢れても壊れない安全網)。
+check-net-m4:
+	@python3 tools/net_m4_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4

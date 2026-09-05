@@ -462,10 +462,14 @@ void isr_unexpected_irq(u32 irq)
 /*  tick_countのインクリメントはASMスタブで行う                             */
 /* ======================================================================== */
 extern void snd_tick(void);  /* kernel/snd_engine.c */
+#include "ne2000.h"          /* ne2k_timer_tick: 予算超過の残り・OVW 復旧・送信タイムアウト */
+#include "lgy98.h"           /* lgy98_tick: 反射モード (M2 試験) */
 
 void timer_handler(void)
 {
     snd_tick();
+    ne2k_timer_tick();
+    lgy98_tick();
 }
 
 /* ======================================================================== */
