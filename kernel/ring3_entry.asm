@@ -54,6 +54,14 @@ int80_stub:
         call    ring3_syscall_dispatch  ;; sys_exit/範囲外は戻らない (longjmp)
         add     esp, 4
 
+        ;; 出口は IF=0 で通す。USER_DS を DS/ES/FS/GS に載せてから iretd まで
+        ;; の間に IRQ が入ると、IRQ スタブが RESTORE_KSEG で DS=KERNEL_DS に
+        ;; し、フレームの CS が CPL=0 (ここ) なので IRETD_USER が USER_DS を
+        ;; 戻さず、そのまま CPL=3 へ iretd → 最初のメモリ参照で #GP になる
+        ;; (2026-09-06 gdi_test の gfx_pixel で実測)。iretd がフレームの
+        ;; EFLAGS (IF=1) を復元するので、ユーザ側の IF は変わらない。
+        cli
+
         popad                           ;; eax = 戻り値 (dispatcher が frame[7] に格納)
 
         ;; --- IRETD_USER: CPL=3 へ戻るならユーザセグメントを復元 ---
