@@ -7,7 +7,8 @@
 
 LGY-98 1枚を対象に、32bit protected mode のカーネルから Ethernet フレームを
 送受信できるようにする。PCI/ISA の汎用検出、多数の互換カード、複数 NIC は対象外。
-ARP/IP/ICMP/UDP/TCP、DHCP、DNS、ソケット、アプリケーションは別計画とする。
+ARP/IP/ICMP/UDP/TCP、DHCP、DNS、ソケット、アプリケーションは別計画とする
+(独自リンクプロトコルと Host Services は [LINK_PLAN.md](LINK_PLAN.md))。
 ドライバの完成は raw Ethernet の対向試験で判定でき、IP スタックを前提にしない。
 
 推奨構成は **転送と IRQ 入口を NASM、初期化・リング管理・復旧を GNU89 C** とする。
