@@ -88,7 +88,9 @@ static int link_send(u8 op, const u8 *dst, u32 seq, u32 ack,
     if (len > LINK_MAX_PAYLOAD) return LINK_ERR_TOOBIG;
     kmemcpy(p, dst, 6);
     kmemcpy(p + 6, link_my_mac, 6);
-    wr16(p + 12, LINK_ETHERTYPE);
+    /* EtherType はワイヤ上 big-endian。リンクヘッダ以降は自前プロトコルなので LE。 */
+    p[12] = (u8)(LINK_ETHERTYPE >> 8);
+    p[13] = (u8)(LINK_ETHERTYPE & 0xFF);
     p[14] = op;
     p[15] = 0;                          /* flags */
     wr16(p + 16, link_epoch);
@@ -110,7 +112,7 @@ static void link_dispatch(const u8 *f, unsigned int flen)
     u32 seq, ack;
 
     if (flen < LINK_ETH_HDR_LEN + LINK_HDR_LEN) { link_rx_dropped++; return; }
-    if (rd16(f + 12) != LINK_ETHERTYPE) { link_rx_dropped++; return; }
+    if ((((u16)f[12] << 8) | f[13]) != LINK_ETHERTYPE) { link_rx_dropped++; return; }  /* EtherType は big-endian */
     /* 宛先が自分か broadcast か (P2P なので基本は自分宛) */
     if (!mac_eq(f, link_my_mac) && !mac_eq(f, link_bcast)) {
         link_rx_dropped++;
