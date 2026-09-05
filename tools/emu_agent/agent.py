@@ -62,7 +62,7 @@ BUILD_OBS_LIMIT = 2400
 ROOT = os.environ.get("OS32_ROOT", os.path.abspath(os.path.join(HERE, "..", "..")))
 OS32_CYCLE = os.environ.get("OS32_CYCLE", os.path.expanduser("~/.local/bin/os32-cycle"))
 MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "check-net-l2", "check-net-l3", "programs", "sdk", "all", "check", "clean", "deploy",
-                "apps", "game", "external")
+                "apps", "game", "external", "gshell")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")
 WAIT_MAX = 60

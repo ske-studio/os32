@@ -36,6 +36,30 @@ userland/shell/%.o: userland/shell/%.c
 userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
+# === gshell — GUI シェル (Rust、票 W1) ===
+# shell.bin と同じシェル帯 (0x300000, app_sys.ld) に常駐する WM。userland/rust の
+# ワークスペース外 (userland/gshell/、独立ワークスペース) にあるので
+# DEFINE_RUST_PROGRAM は使わず個別に書く。カーネルが /bin/gshell.bin を
+# シェル帯へ直接ロードする (config.h SYS_GSHELL_BIN、K4)。
+GSHELL_DIR = userland/gshell
+GSHELL_LIB = $(GSHELL_DIR)/target/$(RUST_TARGET_JSON)/release/libgshell.a
+
+$(GSHELL_LIB): FORCE $(RUST_KAPI_RS)
+	cd $(GSHELL_DIR) && cargo build --release
+
+userland/gshell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(GSHELL_LIB) $(GFX_OBJ)
+	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections --allow-multiple-definition \
+		-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 \
+		-o $@ $(CRT0_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(GSHELL_LIB) $(LGRP_END) -lc -lgcc
+
+gshell: $(CRT0_OBJ) userland/gshell.bin
+
+clean-gshell:
+	cd $(GSHELL_DIR) && cargo clean 2>/dev/null || true
+	rm -f userland/gshell.elf userland/gshell.raw userland/gshell.bin
+
+.PHONY: gshell clean-gshell
+
 # === Game (対戦スゴロクRPG) ===
 # ゲームは game/Makefile が SDK 経由でビルドする。ここでは定義を持たない。
 # ゲームは別リポジトリ ske-studio/os32-game (SDK 経由ビルド)。
@@ -354,7 +378,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust gshell
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
