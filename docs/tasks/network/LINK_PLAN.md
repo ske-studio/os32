@@ -165,10 +165,22 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 
 | 段階 | 合格条件 |
 |---|---|
-| L0 Stop-and-Wait | HELLO 交換後、1 要求 1 応答が往復。ACK まで次を送らない。重複 WINDOW/ACK に耐える。ページ消費表を凍結 |
+| L0 Stop-and-Wait | **エミュレータ合格 (2026-09-05)**。HELLO 交換後、1 要求 1 応答が往復。ACK まで次を送らない。重複 WINDOW/ACK に耐える。ページ消費表を凍結 |
 | L1 WINDOW/Credit | Host が credit_pages を超えて送らない。OVW を通常運転で起こさない。重複 WINDOW で二重加算しない (絶対値) |
 | L2 Streaming | 大容量応答を seq 連続で受け、OS32 側の再結合バッファ無しで順次消費。欠落は再送で埋まる |
 | L3 Host Services | 外部プログラムから HTTP_GET → host_read が動く。回線速度に依らず OS32 側のメモリ上限が一定 |
+
+## 5-1. 進捗 (ブランチ `feat/net-link`)
+
+- **L0 実装・エミュレータ合格 (2026-09-05)**: `net/link.{c,h}` (独自 EtherType 0x88B5、
+  16B リンクヘッダ op/epoch/seq/ack/length、EtherType はワイヤ big-endian・以降は LE)。
+  `drivers/lgy98.c` は `LGY98_FLAG_LINKTEST` で attach 後に `link_selftest(10)` を実行。
+  `tools/host_agent.py` (HELLO 応答 + REQUEST→RESPONSE echo) を対向に、
+  `make check-net-l0` で HELLO 確立・10/10 往復・再送 0・取りこぼし 0 を確認。
+  ビルドは `make kernel-lgy98-link` (LGY98_FLAGS=9 = DIAG+LINKTEST、反射なし)。
+- **未了 (L0 の詰め)**: ページ消費量の実測と表の凍結 (§2-3)。現状は往復のみで、
+  CURR の進みからの消費ページ計測はまだ。L1 (WINDOW/Credit) 着手時に併せて行う。
+- **次**: L1 (絶対値 WINDOW でホスト→OS32 を複数フレーム化)。
 
 ## 6. Host Agent
 
