@@ -63,6 +63,9 @@ static volatile u16 kbd_raw_buf[KBD_BUF_SIZE];
 static volatile int kbd_raw_head = 0;
 static volatile int kbd_raw_tail = 0;
 static volatile int kbd_raw_count = 0;
+/* raw リング満杯で捨てた生イベント数 (レビュー ①)。GUI の取りこぼし検出用に
+ * kbd_dropped_count() へ合算する。break を落とすと WM の修飾状態がずれるため必須。 */
+static volatile u32 kbd_raw_dropped = 0;
 
 /* ======================================================================== */
 /*  スキャンコード → ASCII 変換テーブル                                    */
@@ -164,6 +167,8 @@ void kbd_irq_handler(void)
         kbd_raw_buf[kbd_raw_tail] = (u16)keycode | (is_break ? 0 : 0x100);
         kbd_raw_tail = (kbd_raw_tail + 1) % KBD_BUF_SIZE;
         kbd_raw_count++;
+    } else {
+        kbd_raw_dropped++;   /* GUI が resync できるよう必ず数える (レビュー ①) */
     }
 
     /* シフトキー状態の更新 */
@@ -403,5 +408,5 @@ int kbd_trygetrawkey(void)
 /* 待ち行列が満杯で捨てた打鍵の累計を返す (契約 T3、GUI v1.1 の KAPI)。 */
 u32 kbd_dropped_count(void)
 {
-    return kbd_dropped;
+    return kbd_dropped + kbd_raw_dropped;
 }

@@ -32,6 +32,8 @@ struct Painter {
     packed8: bool,
     fb_base: *mut u8,
     fb_pitch: i32,
+    fb_w: i32,  /* 物理画面幅 (PACKED8 直書きの境界。レビュー ③) */
+    fb_h: i32,  /* 物理画面高 */
     clip: Rect, /* 局所座標、サーフェス境界内 */
 }
 
@@ -52,6 +54,8 @@ impl Painter {
             packed8,
             fb_base,
             fb_pitch,
+            fb_w: info.width as i32,
+            fb_h: info.height as i32,
             clip: t.clip,
         }
     }
@@ -70,8 +74,15 @@ impl Painter {
         if !self.offscreen.is_null() {
             unsafe { ffi::gfx_surface_pixel(self.offscreen, lx, ly, color) };
         } else if self.packed8 {
-            if !self.fb_base.is_null() {
-                let off = (self.oy + ly) as isize * self.fb_pitch as isize + (self.ox + lx) as isize;
+            /* PACKED8 は Rust が直接 framebuffer を書くので、局所クリップに加えて
+             * 物理画面境界も最終チェックする (画面外 Window Surface での OOB write 防止、
+             * レビュー ③)。 */
+            let gx = self.ox + lx;
+            let gy = self.oy + ly;
+            if !self.fb_base.is_null()
+                && gx >= 0 && gy >= 0 && gx < self.fb_w && gy < self.fb_h
+            {
+                let off = gy as isize * self.fb_pitch as isize + gx as isize;
                 unsafe { *self.fb_base.offset(off) = color };
             }
         } else {
@@ -85,10 +96,14 @@ impl Painter {
         if !self.offscreen.is_null() {
             0 /* オフスクリーンの読み戻しは libos32gfx に口が無い (XOR は画面用) */
         } else if self.packed8 {
-            if self.fb_base.is_null() {
+            let gx = self.ox + lx;
+            let gy = self.oy + ly;
+            if self.fb_base.is_null()
+                || gx < 0 || gy < 0 || gx >= self.fb_w || gy >= self.fb_h
+            {
                 0
             } else {
-                let off = (self.oy + ly) as isize * self.fb_pitch as isize + (self.ox + lx) as isize;
+                let off = gy as isize * self.fb_pitch as isize + gx as isize;
                 unsafe { *self.fb_base.offset(off) }
             }
         } else {
@@ -205,18 +220,19 @@ pub fn draw_rect(surface: SurfaceId, rect: Rect, style: Style) {
     if rect.is_empty() {
         return;
     }
-    let y0 = rect.y as i32;
-    let x1 = rect.right() - 1;
-    let y1 = rect.bottom() - 1;
-    hline(surface, rect.x, rect.y, rect.w, style);
-    if rect.h > 1 {
-        hline(surface, rect.x, y1 as i16, rect.w, style);
+    let x = rect.x as i32;
+    let y = rect.y as i32;
+    let w = rect.w as i32;
+    let h = rect.h as i32;
+    hline(surface, x, y, w, style);
+    if h > 1 {
+        hline(surface, x, y + h - 1, w, style);
     }
-    if rect.h > 2 {
-        let inner_h = rect.h - 2;
-        vline(surface, rect.x, (y0 + 1) as i16, inner_h, style);
-        if rect.w > 1 {
-            vline(surface, x1 as i16, (y0 + 1) as i16, inner_h, style);
+    if h > 2 {
+        let inner_h = h - 2;
+        vline(surface, x, y + 1, inner_h, style);
+        if w > 1 {
+            vline(surface, x + w - 1, y + 1, inner_h, style);
         }
     }
 }
@@ -362,17 +378,36 @@ pub fn blit(surface: SurfaceId, dx: i32, dy: i32, bitmap: SurfaceId, src_rect: R
         return;
     }
 
+    /* src_rect を source surface 境界に収める (レビュー ②)。切り落とした左上ぶん
+     * dx/dy も動かす。これをしないと gfx_blit_colorkey が source の前後を OOB read し、
+     * CPL3 では #PF でアプリが kill され得る。 */
+    let sw = s.surfaces[bidx].w as i32;
+    let sh = s.surfaces[bidx].h as i32;
+    let srx = src_rect.x as i32;
+    let sry = src_rect.y as i32;
+    let sx0 = if srx < 0 { 0 } else { srx };
+    let sy0 = if sry < 0 { 0 } else { sry };
+    let sx1 = core::cmp::min(srx + src_rect.w as i32, sw);
+    let sy1 = core::cmp::min(sry + src_rect.h as i32, sh);
+    if sx1 <= sx0 || sy1 <= sy0 {
+        return;
+    }
+    let cdx = dx + (sx0 - srx);
+    let cdy = dy + (sy0 - sry);
+    let cw = sx1 - sx0;
+    let ch = sy1 - sy0;
+
     /* dst 矩形をクリップ。src 原点をクリップのぶんだけずらす。 */
-    let dst_full = Rect::new(dx as i16, dy as i16, src_rect.w, src_rect.h);
+    let dst_full = Rect::new(cdx as i16, cdy as i16, cw as i16, ch as i16);
     let dst = clip_rect(&t, dst_full);
     if dst.is_empty() {
         return;
     }
-    let off_x = dst.x as i32 - dx as i32;
-    let off_y = dst.y as i32 - dy as i32;
+    let off_x = dst.x as i32 - cdx;
+    let off_y = dst.y as i32 - cdy;
     let sr = ffi::GfxRect {
-        x: src_rect.x as i32 + off_x,
-        y: src_rect.y as i32 + off_y,
+        x: sx0 + off_x,
+        y: sy0 + off_y,
         w: dst.w as i32,
         h: dst.h as i32,
     };
