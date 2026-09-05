@@ -112,6 +112,13 @@ void main(int argc, char **argv, KernelAPI *api)
     /* --- 溜まったイベントを一括で受け取る (契約 T3 の OP_POLL) --- */
     polled = (int)api->gui_call(GUI_OP_POLL, 0);
     report(api, slot_base, polled, api->kbd_dropped_count() - kdrop0);
+
+    /* 結果を 5 秒残す。gshell へ戻ると全画面合成でテキスト面が消え、
+     * /api/tvram で読めなくなるため (検証用)。 */
+    {
+        u32 hold = api->get_tick();
+        while (api->get_tick() - hold < 500u) api->sys_halt();
+    }
 }
 
 /* ======================================================================== */
