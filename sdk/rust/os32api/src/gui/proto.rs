@@ -435,3 +435,9 @@ const _: () = assert!(size_of::<GuiReqInvalidate>() == 12);
 const _: () = assert!(size_of::<GuiReqWinTitle>() <= GUI_SLOT_REQ_SIZE);
 const _: () = assert!(size_of::<GuiReqModal>() <= GUI_SLOT_REQ_SIZE);
 const _: () = assert!(size_of::<GuiRespRect>() <= GUI_SLOT_RESP_SIZE);
+
+/* LEASE_PALETTE (op 7、契約 G8): first/count と色 16 本を要求ブロックに直接。count=0 で返却。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqLease { pub first: u16, pub count: u16, pub rgb: [GuiRgb; 16] }   /* 52B */
+const _: () = assert!(size_of::<GuiReqLease>() == 52);

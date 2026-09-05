@@ -352,8 +352,14 @@ typedef struct { i32 result; i16 button; i16 _pad; } GuiRespModal;  /* MODAL_OPE
  * (2026-09-06)。rect は窓のクライアント座標。 */
 typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;    /* INVALIDATE 12B */
 
+/* LEASE_PALETTE (op 7、契約 G8): first/count は要求ブロック、色は要求ブロック内に
+ * 直接 (16 色 × 3B = 48B、引数バッファは使わない)。count=0 で返却。W2 が実装。
+ * 追記 2026-09-06 (W1 の申し送り)。 */
+typedef struct { u16 first; u16 count; GuiRgb rgb[16]; } GuiReqLease;    /* 52B */
+
 STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
 STATIC_ASSERT(sizeof(GuiReqInvalidate) == 12, gui_req_invalidate_12);
+STATIC_ASSERT(sizeof(GuiReqLease)     == 52, gui_req_lease_52);
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
 STATIC_ASSERT(sizeof(GuiRespRect)     <= GUI_SLOT_RESP_SIZE, gui_resp_rect_fits);
