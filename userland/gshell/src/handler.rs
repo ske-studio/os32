@@ -18,7 +18,7 @@
 //! (どちらの流儀のクライアントでも動く)。
 
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
-use crate::{cursor, damage, input, reqs, ring, slot, timer, visible};
+use crate::{cursor, damage, fep, input, lease, modal, reqs, ring, slot, timer, visible};
 use os32api::gui::proto::{
     GuiRect16, GuiWinSpec, GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT,
     GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
@@ -46,6 +46,7 @@ pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
     if op == GUI_OP_OWNER_EXIT {
         /* カーネルの exec_exit から。owner のウィンドウ / タイマ / スロットを回収。
          * 描かない (X1) — 空いた領域は screen_dirty に積まれ、次の X3 で埋まる。 */
+        modal::reclaim_owner(st, owner);
         st.reclaim_owner(owner);
         visible::recompute_and_expose(st);
         return 0;
@@ -81,7 +82,7 @@ static TABLE: [Entry; 21] = [
     Entry { op: GUI_OP_COMMIT, f: op_commit },
     Entry { op: GUI_OP_INVALIDATE, f: op_invalidate },
     Entry { op: GUI_OP_STATS, f: op_stats },
-    Entry { op: GUI_OP_LEASE_PALETTE, f: op_nosys },
+    Entry { op: GUI_OP_LEASE_PALETTE, f: op_lease_palette },
     Entry { op: GUI_OP_WIN_CREATE, f: op_win_create },
     Entry { op: GUI_OP_WIN_DESTROY, f: op_win_destroy },
     Entry { op: GUI_OP_WIN_MOVE, f: op_win_move },
@@ -96,7 +97,7 @@ static TABLE: [Entry; 21] = [
     Entry { op: GUI_OP_SURF_DESTROY, f: op_nosys },
     Entry { op: GUI_OP_TIMER_SET, f: op_timer_set },
     Entry { op: GUI_OP_TIMER_KILL, f: op_timer_kill },
-    Entry { op: GUI_OP_MODAL_OPEN, f: op_nosys },
+    Entry { op: GUI_OP_MODAL_OPEN, f: op_modal_open },
 ];
 
 fn lookup(op: u32) -> Option<OpFn> {
@@ -110,8 +111,8 @@ fn lookup(op: u32) -> Option<OpFn> {
     None
 }
 
-/// 契約にある op のうち W1 では実装しないもの (G3 サーフェスはクライアント側、
-/// G8 リースと U4 モーダルは W2 以降)。`OS32_ERR_NOSYS`。
+/// 契約にある op のうち WM が実装しないもの (G3 のサーフェスはクライアント側の
+/// 領分)。`OS32_ERR_NOSYS`。
 fn op_nosys(_st: &mut GuiState, _owner: i32, _slot: usize, _arg: u32) -> i32 {
     OS32_ERR_NOSYS
 }
@@ -372,6 +373,8 @@ fn wake_ready(st: &GuiState, owner: i32, slot_no: usize) -> bool {
 /*  OP_COMMIT (契約 G4 / T8 の X2) — issued だけを present            */
 /* ================================================================ */
 fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
+    /* X1 で控えたパレットのリースをここで実際に入れる (契約 T8 / G8)。 */
+    lease::reconcile(st);
     let target = arg; /* 0 = この owner の全ウィンドウ */
     if target != 0 {
         if let Err(e) = owned_index(st, owner, target) {
@@ -408,12 +411,55 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     }
     /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
      * 退避を捨てて退避し直し、同じ commit で一緒に出す (X2 の許される描画)。 */
+    /* WM 自身の最前面物 (モーダル / FEP の候補窓) が潰されていたら描き直す。 */
+    if modal::refresh_if_hit(st, touched) {
+        wm::queue_present(st, modal::rect());
+    }
+    if fep::refresh_if_hit(st, touched) {
+        wm::queue_present(st, fep::rect());
+    }
     if cursor::refresh_if_hit(st, touched) {
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
     }
     wm::flush_present(); /* ← 1 周 1 回の commit (契約 P) */
     0
+}
+
+/* ================================================================ */
+/*  OP_LEASE_PALETTE (契約 G8) — 記録だけ。適用は X2 / X3            */
+/* ================================================================ */
+fn op_lease_palette(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: os32api::gui::proto::GuiReqLease = unsafe { slot::read_req(st, slot_no) };
+    lease::request(st, owner, req.first, req.count, &req.rgb)
+}
+
+/* ================================================================ */
+/*  OP_MODAL_OPEN (契約 U4) — ダイアログを立てるだけ (描画は X3)     */
+/* ================================================================ */
+fn op_modal_open(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    let req: reqs::GuiReqModal = unsafe { slot::read_req(st, slot_no) };
+    /* 親ウィンドウ: arg で指定されていればそれ、無ければこの owner の最前面。 */
+    let parent = if arg != 0 {
+        match owned_index(st, owner, arg) {
+            Ok(i) => st.windows[i].id(i),
+            Err(e) => return e,
+        }
+    } else {
+        match st.front_index() {
+            Some(i) if st.windows[i].owner == owner => st.windows[i].id(i),
+            _ => 0,
+        }
+    };
+    let len = req.message.len as usize;
+    let r = modal::open(st, owner, parent, req.buttons, &req.message.s, len);
+    let resp = reqs::GuiRespModal {
+        result: if r < 0 { r } else { 0 },
+        button: 0,
+        _pad: 0,
+    };
+    slot::write_resp(st, slot_no, resp);
+    r
 }
 
 /* ================================================================ */

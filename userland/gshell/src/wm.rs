@@ -16,12 +16,13 @@
 use core::cell::UnsafeCell;
 
 use os32api::gui::proto::{
-    GuiWinSpec, GUI_MAX_DAMAGE, GUI_MAX_TIMERS, GUI_MAX_WINDOWS, GUI_SLOT_MAX, GUI_WF_BORDER,
-    GUI_WF_HAS_CLOSE, GUI_WF_MOVABLE, GUI_WF_VISIBLE, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_STALE,
+    GuiRgb, GuiWinSpec, GUI_MAX_DAMAGE, GUI_MAX_TIMERS, GUI_MAX_WINDOWS, GUI_SLOT_MAX,
+    GUI_WF_BORDER, GUI_WF_HAS_CLOSE, GUI_WF_MOVABLE, GUI_WF_VISIBLE, OS32_ERR_FULL, OS32_ERR_INVAL,
+    OS32_ERR_STALE,
 };
 
 use crate::cursor::Cursor;
-use crate::{chrome, cursor, damage, desktop, input, visible};
+use crate::{chrome, cursor, damage, desktop, fep, input, lease, modal, visible};
 
 /* ================================================================ */
 /*  レイアウト定数 (ピクセル)                                        */
@@ -194,10 +195,15 @@ pub struct Win {
     pub vis: RectSet,
     /* Configure 通知が必要 (座標確定時に立てる)。 */
     pub configure_pending: bool,
-    /* テキストカーソル (SET_TEXT_CURSOR。FEP/キャレット位置は W2)。 */
+    /* テキストカーソル (SET_TEXT_CURSOR)。FEP の未確定文字列を描く原点 (W2)。 */
     pub tc_x: i32,
     pub tc_y: i32,
     pub tc_visible: bool,
+    /* パレットのリース (契約 G8、W2)。フォーカスを得たときに WM が入れる。
+     * アプリは範囲を分けて複数回呼ぶ (lease_test は 1〜6 と 8〜15 の 2 回) ので、
+     * **借りている index のビット集合 + 16 色分の色**で持つ。 */
+    pub lease_mask: u16,
+    pub lease_rgb: [GuiRgb; 16],
 }
 
 impl Win {
@@ -221,6 +227,8 @@ impl Win {
         tc_x: 0,
         tc_y: 0,
         tc_visible: false,
+        lease_mask: 0,
+        lease_rgb: [GuiRgb { r: 0, g: 0, b: 0 }; 16],
     };
 
     /// 外形矩形 (画面座標)。
@@ -369,9 +377,23 @@ pub struct GuiState {
     /* ポンプ (X4) の再入防止。 */
     pub in_pump: bool,
 
+    /* ---- パレットのリース (契約 G8、W2) ---- */
+    /// `gfx_screen_info()` が申告する貸せる範囲 (契約 G5、決め打ち禁止)。
+    /// `Win::lease_mask` (窓が借りている index) とは別物なので `cap_` を付ける。
+    pub cap_lease_mask: u16,
+    pub cap_lease_first: u16,
+    pub cap_lease_count: u16,
+    /// いま**実際に適用されている**リース元ウィンドウの完全な id (0 = 無し)。
+    pub lease_applied: u32,
+    /// リースの内容が変わったので入れ直しが要る。
+    pub lease_dirty: bool,
+
     /* 標準単独ループ用フラグ。 */
     pub quit: bool,
     pub launch_pending: bool,
+    /// F2 のファイル選択で選んだ実行ファイル (NUL 終端)。0 長なら既定のデモ。
+    pub launch_path: [u8; 256],
+    pub launch_path_len: usize,
 }
 
 impl GuiState {
@@ -397,8 +419,15 @@ impl GuiState {
         cursor: Cursor::EMPTY,
         now: 0,
         in_pump: false,
+        cap_lease_mask: 0,
+        cap_lease_first: 0,
+        cap_lease_count: 0,
+        lease_applied: 0,
+        lease_dirty: false,
         quit: false,
         launch_pending: false,
+        launch_path: [0; 256],
+        launch_path_len: 0,
     };
 }
 
@@ -592,12 +621,28 @@ impl GuiState {
         None
     }
 
+    /// F2 のファイル選択が決めた起動パスを控える (NUL 終端で保持)。
+    pub fn set_launch_path(&mut self, path: &[u8], len: usize) {
+        let n = if len > 254 { 254 } else { len };
+        let mut i = 0;
+        while i < n {
+            self.launch_path[i] = path[i];
+            i += 1;
+        }
+        self.launch_path[n] = 0;
+        self.launch_path_len = n;
+    }
+
     /* ---- 所有者回収 (契約 T4 / U8。GUI_OP_OWNER_EXIT) ---- */
     pub fn reclaim_owner(&mut self, owner: i32) {
         /* ウィンドウ */
         let mut i = 0;
         while i < GUI_MAX_WINDOWS {
             if self.windows[i].used && self.windows[i].owner == owner {
+                if self.lease_applied == self.windows[i].id(i) {
+                    self.lease_dirty = true;
+                }
+                self.windows[i].lease_mask = 0;
                 let vac = self.windows[i].outer();
                 self.z_remove(i);
                 let gen = next_gen(self.windows[i].gen);
@@ -707,16 +752,20 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
         desktop::draw_hint(st);
     }
     /* クローム: clip に掛かる窓を背面→前面で描き直す。 */
+    let mono = lease::mono(st);
     let mut z2 = 0;
     while z2 < st.z_count {
         let idx = st.zorder[z2];
         let w = &st.windows[idx];
         if w.used && w.visible && w.outer().intersects(&clip) {
             let active = z2 + 1 == st.z_count;
-            chrome::draw_window_chrome(w, active);
+            chrome::draw_window_chrome(w, active, mono);
         }
         z2 += 1;
     }
+    /* モーダルダイアログは WM 自身の窓なので、クロームの最後に直接描く
+     * (契約 U8 / U4)。可視領域の計算でも「上にある窓」として扱われる。 */
+    modal::draw(st, clip);
 }
 
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
@@ -726,6 +775,8 @@ pub fn composite_full(st: &mut GuiState) {
     cursor::discard(st); /* 下地は全部塗り替わる */
     composite_rect(st, whole);
     st.screen_dirty.clear();
+    /* FEP の未確定行 / 候補窓は下地ごと消えたので次の周で描き直す。 */
+    fep::mark_redraw();
     cursor::show(st);
     queue_present(st, whole);
     flush_present();
@@ -742,19 +793,29 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     cursor::hide(st);
 
     let n = st.screen_dirty.len;
+    let fr = fep::rect();
+    let mut fep_hit = false;
     let mut i = 0;
     while i < n {
         let r = st.screen_dirty.rects[i];
         composite_rect(st, r);
         queue_present(st, r);
+        if !fr.is_empty() && fr.intersects(&r) {
+            fep_hit = true;
+        }
         i += 1;
     }
     st.screen_dirty.clear();
+    /* FEP の未確定行 / 候補窓は最前面。下地を塗り替えたら描き直す。 */
+    if fep_hit {
+        fep::redraw_now(st);
+        queue_present(st, fr);
+    }
 
     /* ドラッグ中なら枠を再描画 (合成で消えているため)。 */
     if dragging {
         let f = st.drag_frame;
-        chrome::draw_drag_outline(f.x, f.y, f.w, f.h);
+        chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
         queue_present(st, f);
     }
 
@@ -768,12 +829,21 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
 /*  WM の周期 (契約 X3 / 単独ループ)                                 */
 /* ================================================================ */
 
-/// WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップの present。
+/// WM の 1 周: 入力取り込み → パレットのリース調停 → FEP の配置 →
+/// クローム/デスクトップの present → FEP の描画。
 /// 文脈は [`input::Ctx`] (X3 = Wait / Standalone、X4 = Pump)。
+///
+/// 順序が肝: FEP の配置決め ([`fep::pre_cycle`]) を **`flush_screen_dirty` の前**に
+/// 置き、旧 ∪ 新の領域を先に損傷として積む。こうすると同じ周で下地が塗り直され、
+/// その上に FEP が乗る (逆順にすると「描く → 次の周で消される → また描く」で
+/// ちらつく)。
 pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
     input::capture(st, ctx);
     if ctx != input::Ctx::Pump {
+        lease::reconcile(st);
+        fep::pre_cycle(st);
         flush_screen_dirty(st);
+        fep::post_cycle(st);
     }
 }
 
@@ -890,6 +960,7 @@ pub fn destroy_window(st: &mut GuiState, owner: i32, id: u32) -> i32 {
         Ok(i) => i,
         Err(e) => return e,
     };
+    lease::release_window(st, index);
     let vac = st.windows[index].outer();
     st.z_remove(index);
     let gen = next_gen(st.windows[index].gen);
@@ -1030,7 +1101,11 @@ pub fn set_text_cursor(
     st.windows[index].tc_x = x;
     st.windows[index].tc_y = y;
     st.windows[index].tc_visible = visible_flag;
-    /* FEP / キャレット描画位置の記録のみ (実描画は W2)。 */
+    /* FEP の未確定文字列 / 候補窓はこの位置に出る (契約 U2a、W2)。
+     * 出ている最中に動いたら配置し直す (描画は X3)。 */
+    if !fep::rect().is_empty() && st.front_index() == Some(index) {
+        fep::mark_redraw();
+    }
     0
 }
 
@@ -1083,5 +1158,46 @@ pub fn read_screen_info(st: &mut GuiState) {
     if si.width > 0 && si.height > 0 {
         st.screen_w = si.width as i32;
         st.screen_h = si.height as i32;
+    }
+    /* パレットのリースで貸せる範囲 (契約 G8 / G5)。決め打ちしない。 */
+    st.cap_lease_mask = si.lease_mask;
+    st.cap_lease_first = si.lease_first;
+    st.cap_lease_count = si.lease_count;
+}
+
+/* ================================================================ */
+/*  パレット全体の退避・復元 (フルスクリーン GFX プログラムの前後)   */
+/*  契約 G6 / G8: WM が前後で退避・復元する。                        */
+/* ================================================================ */
+
+/// いまの 16 色を読み出す (`gfx_get_palette`)。
+pub fn save_palette() -> [u8; 48] {
+    let a = unsafe { os32api::api() };
+    let mut out = [0u8; 48];
+    let mut i = 0;
+    while i < 16 {
+        let mut r: u8 = 0;
+        let mut g: u8 = 0;
+        let mut b: u8 = 0;
+        unsafe {
+            (a.gfx_get_palette)(i as i32, &mut r, &mut g, &mut b);
+        }
+        out[i * 3] = r;
+        out[i * 3 + 1] = g;
+        out[i * 3 + 2] = b;
+        i += 1;
+    }
+    out
+}
+
+/// [`save_palette`] で控えた 16 色を戻す。
+pub fn restore_palette(p: &[u8; 48]) {
+    let a = unsafe { os32api::api() };
+    let mut i = 0;
+    while i < 16 {
+        unsafe {
+            (a.gfx_set_palette)(i as i32, p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+        }
+        i += 1;
     }
 }

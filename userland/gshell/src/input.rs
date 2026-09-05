@@ -8,10 +8,16 @@
 //! WM 自身の UI (ドラッグ / 閉じる / フォーカス切替) は [`Ctx::Wait`] /
 //! [`Ctx::Standalone`] (= `OP_WAIT` の中 / gshell 単独ループ、契約 X3) でだけ
 //! 進める。ポンプ [`Ctx::Pump`] (X4) は入力のリング追記とカーソル移動だけで、
-//! 状態機械を進めない。FEP (契約 U2a の未確定文字列と `Key` の抑止) は W2。
+//! 状態機械を進めない。
+//!
+//! **W2 で足したもの** (契約 U2a / U4): SHIFT+SPACE を WM が消費して FEP を
+//! 切り替え、押下は先に FEP ([`crate::fep`]) へ通して**消費されたキーは `Key` と
+//! して配送しない**。確定文字列は取り込みの最後に `Text` でまとめて流す。
+//! モーダル中は宛先をダイアログに限定する。GUI 中は cooked 待ち行列
+//! (`kbd_buf`) にカーネルが積まないので (K2)、打鍵の入口は raw 1 本だけ。
 
 use crate::wm::{GuiState, Rect};
-use crate::{cursor, ring, slot, visible, wm};
+use crate::{cursor, fep, modal, ring, slot, visible, wm};
 use os32api::gui::proto::{GuiRect16, GUI_EV_CONFIGURE, GUI_EV_FOCUS};
 
 /// 入力取り込みの実行文脈 (契約 T8)。
@@ -42,9 +48,12 @@ const MOD_CTRL: u32 = 0x10;
 /* 修飾キーのスキャンコード (KEY_SHIFT..KEY_CTRL)。Key として配送しない。 */
 const SC_SHIFT: u8 = 0x70;
 const SC_CTRL: u8 = 0x74;
-/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1)。 */
+/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1 / KEY_F2)。 */
 const SC_ESC: u8 = 0x00;
 const SC_F1: u8 = 0x62;
+const SC_F2: u8 = 0x63;
+/* KEY_SPACE。SHIFT+SPACE で FEP を切り替える (契約 U2a)。 */
+const SC_SPACE: u8 = 0x34;
 
 const MOUSE_BTN_LEFT: u8 = 0x01;
 
@@ -120,14 +129,14 @@ fn translate(scan: u8, mods: u32) -> u8 {
 }
 
 /// フォーカス窓 (最前面) の配送先。無ければ None。
-struct Target {
-    slot: usize,
-    win_id: u32,
-    cox: i32,
-    coy: i32,
+pub struct Target {
+    pub slot: usize,
+    pub win_id: u32,
+    pub cox: i32,
+    pub coy: i32,
 }
 
-fn focus_target(st: &GuiState) -> Option<Target> {
+pub fn focus_target(st: &GuiState) -> Option<Target> {
     let index = st.front_index()?;
     let owner = st.windows[index].owner;
     let slot = st.slot_of_owner(owner)?;
@@ -146,12 +155,37 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
     capture_mouse(st, ctx);
 }
 
+/// gshell 単独 (窓が 1 枚も無い) ときに WM が横取りするキー (make のみ)。
+pub fn standalone_key(st: &mut GuiState, scan: u8) {
+    if scan == SC_ESC {
+        st.quit = true;
+    } else if scan == SC_F1 {
+        /* 既定のデモアプリ。 */
+        st.launch_path_len = 0;
+        st.launch_pending = true;
+    } else if scan == SC_F2 {
+        /* WM 自身のファイル選択ダイアログ (契約 U4 の標準ダイアログ)。 */
+        modal::open_wm_file(st, b"/");
+    }
+}
+
 /// raw リング (`kbd_trygetrawkey`) のエントリ = `keycode | down<<8 | mods<<9`。
 /// `mods` は**そのイベント時点**の修飾状態 (kbd.c の SHIFT_*、MOD_* と同値)。
 /// 取り込み時の最新状態で変換すると Shift↓ A↓ A↑ Shift↑ が溜まったときに
 /// a/A を取り違えるため、イベントごとの値を使う (レビュー #3 ②)。
 /// cooked キュー (`kbd_buf`) は GUI モード中カーネルが積まない (K2) ので触らない。
+///
+/// **W2 で足したもの** (契約 U2a / U4):
+///   1. SHIFT+SPACE は常に WM が消費して FEP を on/off する (配送しない)。
+///   2. モーダル中は宛先をダイアログに限定する。
+///   3. 押下は先に FEP へ通し、FEP が消費したら `Key` を配送しない。
+///      確定文字列は取り込みの最後に `Text` でまとめて流す。
 fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
+    /* X4 で見た SHIFT+SPACE をここで実行する (契約 T8: 辞書を開く重い処理は X3)。 */
+    if ctx.wm_ui() {
+        fep::apply_pending_toggle(st);
+    }
+
     /* 取りこぼしの差分を dropped に加算 (契約 T3)。 */
     let cur_drop = unsafe { (os32api::api().kbd_dropped_count)() };
     let delta = cur_drop.wrapping_sub(st.last_kbd_dropped);
@@ -164,9 +198,15 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
     }
 
     loop {
-        /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。 */
+        /* モーダル中の X4 は取り込まない — 宛先はダイアログで、その状態機械を
+         * 進めてよいのは X3 だけ (契約 T8)。打鍵はカーネル待ち行列に残す。 */
+        if ctx == Ctx::Pump && modal::is_open() {
+            break;
+        }
+        /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。
+         * FEP の確定文字列が続く可能性があるので 4 件分を見る。 */
         let space_ok = match focus_target(st) {
-            Some(t) => ring::space(st, t.slot) >= 2,
+            Some(t) => ring::space(st, t.slot) >= 4,
             None => true, /* 宛先無し: 取り込んでも捨てるだけなので読む (キューを空ける) */
         };
         if !space_ok {
@@ -178,21 +218,49 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
-        let mods = ((raw >> 9) & 0x7F) as u32;   /* イベント時点の修飾状態 */
+        let mods = ((raw >> 9) & 0x7F) as u32; /* イベント時点の修飾状態 */
 
         /* 修飾キー自体は Key として配送しない (状態は mods で見る)。 */
         if scan >= SC_SHIFT && scan <= SC_CTRL {
             continue;
         }
 
-        /* WM 単独時 (フォーカス窓なし) の横取り: ESC=終了 / F1=起動。
+        /* SHIFT+SPACE = FEP の on/off。**常に WM が消費**し、押下も離しも
+         * アプリへ配送しない (契約 U2a)。 */
+        if scan == SC_SPACE && (mods & MOD_SHIFT) != 0 {
+            if down {
+                if ctx.wm_ui() {
+                    fep::toggle(st);
+                } else {
+                    fep::request_toggle();
+                }
+            }
+            continue;
+        }
+
+        /* モーダル中は宛先をダイアログに限定する (契約 U4)。 */
+        if modal::is_open() {
+            if down && ctx.wm_ui() {
+                let ch = translate(scan, mods);
+                modal::on_key(st, scan, ch);
+            }
+            continue;
+        }
+
+        /* WM 単独時 (フォーカス窓なし) の横取り: ESC=終了 / F1=デモ / F2=ファイル選択。
          * アプリの OP_WAIT (Ctx::Wait) では横取りしない — ESC はアプリのもの。 */
         if ctx == Ctx::Standalone && st.front_index().is_none() {
-            if down && scan == SC_ESC {
-                st.quit = true;
-            } else if down && scan == SC_F1 {
-                st.launch_pending = true;
+            if down {
+                standalone_key(st, scan);
             }
+            continue;
+        }
+
+        let ch = translate(scan, mods);
+
+        /* 押下は**先に FEP へ通す** (契約 U2a)。FEP が消費したキー (かな入力、
+         * 未確定の編集、候補操作、確定、取消) は `Key` として配送しない。 */
+        if down && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
             continue;
         }
 
@@ -200,12 +268,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             Some(t) => t,
             None => continue,
         };
-        let ch = translate(scan, mods);
         let serial = next_serial(st, t.slot);
         let ev = ring::ev_key(down, t.win_id, scan, ch, mods as u8, serial);
         ring::append(st, t.slot, &ev);
 
-        /* 印字可能キーは Text も配送 (FEP オフ時。FEP は W2)。 */
+        /* 印字可能キーは Text も配送 (契約 U2a。FEP が消費していれば上で
+         * continue しているので二重にはならない)。 */
         if down && ch >= 0x20 && ch <= 0x7E {
             let mut utf8 = [0u8; 8];
             utf8[0] = ch;
@@ -214,6 +282,9 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             ring::append(st, t.slot, &evt);
         }
     }
+
+    /* FEP の確定文字列を `Text` (8B ずつ、`more`) で流す (契約 U2)。 */
+    fep::flush_text(st);
 }
 
 fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
@@ -229,6 +300,21 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     let btn = mi.buttons;
     let down_edge = (btn & MOUSE_BTN_LEFT) != 0 && (st.prev_buttons & MOUSE_BTN_LEFT) == 0;
     let up_edge = (btn & MOUSE_BTN_LEFT) == 0 && (st.prev_buttons & MOUSE_BTN_LEFT) != 0;
+
+    /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
+    if modal::is_open() {
+        if moved {
+            cursor::move_to(st, mx, my);
+        }
+        /* 状態機械を進めるのは X3 だけ (契約 T8)。X4 では押下を捨てない
+         * ように見えるが、cooked と違いマウスは状態のサンプルなので
+         * 次の X3 で現在値から拾い直される。 */
+        if ctx.wm_ui() && down_edge {
+            let _ = modal::on_button(st, mx, my);
+        }
+        st.prev_buttons = btn;
+        return;
+    }
 
     if ctx.wm_ui() {
         /* ---- ドラッグ追従 (枠だけ動かす。実体は drop で移す。R2) ---- */
@@ -298,7 +384,7 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_dy = my - w.y;
         st.drag_frame = w.outer();
         cursor::hide(st);
-        crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h);
+        crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
         queue_frame_edges(st, w.outer());
         cursor::show(st);
         let cr = cursor::rect(st);
@@ -364,7 +450,13 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
     /* 旧枠を下地で消し、新枠を描いて、両者の縁とカーソルを 1 回で present。 */
     cursor::hide(st);
     erase_frame_edges(st, old_frame);
-    crate::chrome::draw_drag_outline(new_frame.x, new_frame.y, new_frame.w, new_frame.h);
+    crate::chrome::draw_drag_outline(
+        new_frame.x,
+        new_frame.y,
+        new_frame.w,
+        new_frame.h,
+        crate::lease::mono(st),
+    );
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
@@ -449,7 +541,7 @@ pub fn emit_configure(st: &mut GuiState, index: usize) {
 /// 入力イベントの `serial` を 1 つ払い出し、**取り込んだ tick を記録する**
 /// (契約 P2: serial ごとに直近 64 件をスロットの予備領域へ)。
 #[inline]
-fn next_serial(st: &mut GuiState, slot_no: usize) -> u16 {
+pub fn next_serial(st: &mut GuiState, slot_no: usize) -> u16 {
     st.slots[slot_no].serial = st.slots[slot_no].serial.wrapping_add(1);
     let s = st.slots[slot_no].serial;
     slot::record_trace(st, slot_no, s, st.now);

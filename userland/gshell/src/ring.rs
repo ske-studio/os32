@@ -139,3 +139,11 @@ pub fn ev_button(down: bool, window: u32, x: i16, y: i16, button: u8, serial: u1
 pub fn ev_timer(window: u32, id: u8) -> GuiEvent {
     GuiEvent { kind: os32api::gui::proto::GUI_EV_TIMER, sub: id, serial: 0, window, payload: payload_zero() }
 }
+
+/// `Modal{dialog, result}` (契約 U4 / U2)。`window` は親ウィンドウ。
+pub fn ev_modal(window: u32, dialog: u16, result: i16) -> GuiEvent {
+    let mut p = [0u8; 8];
+    p[0..2].copy_from_slice(&dialog.to_le_bytes());
+    p[2..4].copy_from_slice(&result.to_le_bytes());
+    GuiEvent { kind: os32api::gui::proto::GUI_EV_MODAL, sub: 0, serial: 0, window, payload: p }
+}

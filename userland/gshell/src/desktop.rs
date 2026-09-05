@@ -3,27 +3,62 @@
 //! `wm::composite_rect` から「どのウィンドウにも覆われていない矩形」ごとに
 //! 呼ばれる。塗るのは背景色 (G6 の `DESKTOP`) だけで、文字は**掛かるウィンドウが
 //! 無いときにだけ**描く (kcg にはクリップが無く、窓の上へはみ出せないため)。
+//!
+//! 14 色リース中 (契約 G8) はシステム色が使えないので、**不可侵の 2 色
+//! (`TEXT` / `WINDOW`) の市松**で塗る。1 画素単位の市松は面積が広すぎて
+//! 386 では割に合わないので、8x8 の粗い市松にしてある (Windows 1.x の
+//! デスクトップと同じ骨格)。
 
+use crate::lease;
 use crate::wm::{GuiState, Rect};
 use os32api::gfx;
-use os32api::gui::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TITLE_TEXT};
+use os32api::gui::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW};
 
 /// 手引きの位置 (左上) と占有矩形。ANK 8x16 なので 1 文字 8px。
 const HINT_X: i32 = 8;
 const HINT_Y: i32 = 8;
-const HINT_W: i32 = 8 * 44;
+const HINT_W: i32 = 8 * 52;
 const HINT_H: i32 = 16;
 
+/// 市松の升目 (画素)。
+const CHECK: i32 = 8;
+
 /// 単独起動時の手引き (UTF-8, NUL 終端)。全角は 16px 幅。
-static HINT: &[u8] = b"OS32 GUI shell   ESC: CUI  /  F1: gui_demo\0";
+static HINT: &[u8] = b"OS32 GUI shell  ESC: CUI / F1: gui_demo / F2: open\0";
 
 /// 背景の 1 矩形を塗る (画面座標、バックバッファ)。
-pub fn fill(_st: &GuiState, r: Rect) {
+pub fn fill(st: &GuiState, r: Rect) {
     if r.is_empty() {
         return;
     }
+    if !lease::mono(st) {
+        unsafe {
+            gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, GUI_COLOR_DESKTOP);
+        }
+        return;
+    }
+    /* 2 色モード: 白地に黒の 8x8 市松。画面格子に合わせるので、矩形を
+     * またいで描き直しても継ぎ目が出ない。 */
     unsafe {
-        gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, GUI_COLOR_DESKTOP);
+        gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, GUI_COLOR_WINDOW);
+    }
+    let x0 = (r.x / CHECK) * CHECK;
+    let y0 = (r.y / CHECK) * CHECK;
+    let mut y = y0;
+    while y < r.bottom() {
+        let mut x = x0;
+        while x < r.right() {
+            if (((x / CHECK) + (y / CHECK)) & 1) == 0 {
+                let cell = Rect::new(x, y, CHECK, CHECK).intersect(&r);
+                if !cell.is_empty() {
+                    unsafe {
+                        gfx::gfx_fill_rect(cell.x, cell.y, cell.w, cell.h, GUI_COLOR_TEXT);
+                    }
+                }
+            }
+            x += CHECK;
+        }
+        y += CHECK;
     }
 }
 
@@ -46,8 +81,13 @@ pub fn draw_hint(st: &GuiState) {
         }
         z += 1;
     }
+    let (fg, bg) = if lease::mono(st) {
+        (GUI_COLOR_WINDOW, GUI_COLOR_TEXT)
+    } else {
+        (GUI_COLOR_TITLE_TEXT, GUI_COLOR_DESKTOP)
+    };
     unsafe {
         gfx::kcg_set_scale(1);
-        gfx::kcg_draw_utf8(HINT_X, HINT_Y, HINT.as_ptr(), GUI_COLOR_TITLE_TEXT, GUI_COLOR_DESKTOP);
+        gfx::kcg_draw_utf8(HINT_X, HINT_Y, HINT.as_ptr(), fg, bg);
     }
 }
