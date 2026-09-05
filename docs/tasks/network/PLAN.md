@@ -295,3 +295,58 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 - ドキュメント運用: 本計画が設計と進捗の正典 (INDEX.md「情報単位ごとの正典」の流儀)。
   実装完了後の現行仕様は `docs/05_drivers.md` へ、落とし穴の経緯は `POLICY_DEBUG.md §4` へ。
 
+
+## 9. 進捗と確定事項 (2026-09-05 着手、ブランチ `feat/lgy98`)
+
+| 段階 | 状態 | 備考 |
+|---|---|---|
+| M0 | **凍結 (エミュレータ基準)** | 下表。実カードの列は未確認のまま |
+| M1 | 実装済み・**未検証** | `drivers/ne2000*.{c,h,asm}` `lgy98.{c,h}`。ホスト試験 (`make check` の `check-ne2000-ring`) と `make kernel` はローカル AI に委譲 |
+| M2〜M5 | 未着手 | M2 の対向試験は ini 5 キーの追加 ([D2]) が先 |
+
+### M0 で凍結した表
+
+| 項目 | 設計値 | 根拠 | 実カードでの確認 |
+|---|---|---|---|
+| レジスタ | BASE+0x00〜0x0F (8bit) | §2 / §8 | 未 |
+| データポート | BASE+0x200 (16bit のみ、DCR WTS=1) | §8 (iocore) | 未 (8bit 転送の可否) |
+| リセット | BASE+0x18 読み出し → ISR.RST を最大 20ms 待つ | §8 (`lgy98_ib018`)、DP8390D | 未 (read/write の別、待ち時間) |
+| 存在確認 | PSTART/PSTOP を書いて page2 から読み返し + PROM 署名 0x57 (byte 14/15、重複なら 28..31) | 不在時は 0xFF | 未 |
+| PROM | Remote DMA read 32B。全 16 組が重複なら偶数バイトを MAC | NP21/W は重複 | 未 (並び) |
+| MAC 検査 | 全 0 / 全 1 / multicast ビットを拒否 | §2 | — |
+| RAM | 先頭ページ 0x40。probe で 16KB / 32KB を判定 (16KB 末尾 + 32KB 側の往復 + 先頭ページのエイリアス検査) | NP21/W は 32KB | 未 (実カードは 16KB 想定) |
+| 配置 | TX 0x40〜0x45 (1 スロット)、RX PSTART 0x46、PSTOP = 0x40 + RAM ページ数 (0x80 / 0xC0) | §4 | — |
+| DCR | 0x49 (WTS, LS, FT1) | NE2000 系ドライバの標準値 | 未 |
+| RCR / TCR | 通常: RCR=AB (自 MAC + broadcast)、TCR=0。probe 中: RCR=MON、TCR=内部 loopback | DP8390D §11 | 未 |
+| IRQ | PIC IRQ 3 / 5 / 6 のみ受理、12 は拒否 (NE2K_ERR_IRQ)。IMR でマスク中 (未使用) であることを確認 | §2 | — |
+| 受信 count | 実カード: ヘッダ 4B + データ + FCS 4B (DP8390D)。NP21/W: FCS を含まない (`np2_detect()` で切替) | §8 / DP8390D | **未 (最重要)** |
+| 待ち上限 | reset 20ms / RDC 4ms / OVW 停止後 2ms / TX 50ms (tick, IF=1 のみ) / 再初期化 3 回 / 不整合ヘッダ 4 連続 | DP8390D の値に余裕 | M5 で見直し |
+| Remote DMA | STA を立てて発行 (Linux ne.c / FreeBSD if_ed と同じ)。probe 中は PSTOP=0xFF で折り返しを避ける | 8390 は PSTOP で PSTART へ戻る | 未 |
+
+### 実装上の決定 (計画からの差分)
+
+- **NASM の生成 include は不要**: `ne2000_io.asm` はポート番号を引数で受けるので、
+  レジスタ定数の正典は `drivers/ne2000_regs.h` 1 か所で済む。
+- **リング計算を `ne2000_ring.c` に分離**: I/O 無しの純粋関数にし、`tools/tests/ne2000_ring_test.c`
+  をホスト gcc で `make check` から回す (実カード形式と NP21/W 形式の両方、ページ境界、PSTOP wrap、
+  異常ヘッダ)。幾何だけでは count の形式違い (FCS の有無) は検出できないので、その判定は
+  `np2_detect()` と M0 の実機確認に置く。
+- **ホスト側 RX キュー 8 × 1516B、TX 作業領域 1516B** を BSS に置く (約 13.6KB)。
+  カーネル帯域の余裕は約 144KB (kernel.map、2026-09-05) なので収まる。
+- **診断は初期化時のフラグ** (`LGY98_FLAG_DIAG` → RAM 全域パターン試験 + Remote DMA 往復試験
+  1/2/3/59/60/61/255/256/257/1513/1514 バイトと読み側余白の検査) で行い、結果は統計
+  (`diag_ram_errors` / `diag_dma_errors` / `rdc_timeout`) と起動ログに出す。
+- **有効化はビルド時** `make kernel LGY98=1` (= `make kernel-lgy98`、emu_agent の許可リストに追加)。
+  `CONFIG_LGY98_BASE=0` (既定) では `lgy98_init()` は何もしない。
+- IRQ 入口 (`isr_stub.asm` のスタブ、`idt.c` の登録、IMR の有効化) は M3 で入れる。
+  `ne2k_irq()` の busy/pending の枠だけ先に置いた。
+
+### エミュレータでは確認できないこと (M4/M5 の実機項目)
+
+- OVW: NP21/W の `ne2000_receive` はリング満杯時にフレームを**捨てる**だけで OVW を立てない。
+  復旧経路 (§4) はモデル試験と実機で確認する。
+- 内部 loopback: NP21/W は TCR の loopback を再現せず常に外へ送る。M2 の「内部 loopback」は
+  実機項目に回し、エミュレータでは inject/capture で代替する。
+- MON: NP21/W は RCR.MON を再現しない。probe 中に自 MAC 宛ユニキャストが届くと PROM 複製
+  領域 (mem[0..]) が上書きされ得るが、PROM は reset 直後に読むので実害はない。
+- 2ms 以内の IRQ 再アサート抑制 (§8) は M3 の試験条件に残す。

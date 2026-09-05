@@ -1,0 +1,119 @@
+/* ======================================================================== */
+/*  LGY98.C — メルコ LGY-98 (NE2000 互換 C バス LAN) の OS32 接続             */
+/*                                                                          */
+/*  BASE / IRQ の検証、カード固有ポートの割り当て、起動時の初期化入口。       */
+/*  8390 の制御は drivers/ne2000.c。計画: docs/tasks/network/PLAN.md。        */
+/*                                                                          */
+/*  「カードの INT 番号」「PIC IRQ」「IDT ベクタ」を混同しない:              */
+/*  設定とログはすべて PIC IRQ (3 / 5 / 6) で扱う。                          */
+/* ======================================================================== */
+
+#include "lgy98.h"
+#include "ne2000.h"
+#include "np2sysp.h"
+#include "config.h"
+#include "kprintf.h"
+#include "idt.h"
+#include "io.h"
+
+int lgy98_validate_base(unsigned int base)
+{
+    if (base < LGY98_BASE_LOW || base > LGY98_BASE_HIGH) return NE2K_ERR_INVAL;
+    if ((base & LGY98_BASE_LOWMASK) != LGY98_BASE_LOW) return NE2K_ERR_INVAL;
+    return NE2K_OK;
+}
+
+int lgy98_validate_irq(unsigned int irq)
+{
+    if (irq == LGY98_INT0_IRQ || irq == LGY98_INT1_IRQ || irq == LGY98_INT2_IRQ) {
+        return NE2K_OK;
+    }
+    if (irq == LGY98_INT5_IRQ) return NE2K_ERR_IRQ;   /* 音源 / V86 との排他が未決 */
+    return NE2K_ERR_INVAL;
+}
+
+/* PIC の IMR でマスクされたまま (= OS32 の他のドライバが使っていない) ことを確認 */
+static int irq_is_free(unsigned int irq)
+{
+    u8 imr = (u8)inp((irq < 8) ? PIC1_DATA : PIC2_DATA);
+    return (int)((imr >> (irq & 7)) & 1);
+}
+
+static void print_mac(const u8 *mac)
+{
+    static const char hex[] = "0123456789abcdef";
+    char buf[18];
+    int i;
+    for (i = 0; i < 6; i++) {
+        buf[i * 3]     = hex[mac[i] >> 4];
+        buf[i * 3 + 1] = hex[mac[i] & 0x0F];
+        buf[i * 3 + 2] = (i == 5) ? '\0' : ':';
+    }
+    kprintf(0x07, "%s", buf);
+}
+
+int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
+{
+    struct ne2k_config cfg;
+    struct ne2k_stats st;
+    u8 mac[6];
+    int rc;
+
+    rc = lgy98_validate_base(base);
+    if (rc) {
+        kprintf(0xC1, "[lgy98] invalid base 0x%x (0x00D0 + n*0x1000, n=0..7)\n", base);
+        return rc;
+    }
+    rc = lgy98_validate_irq(irq);
+    if (rc) {
+        kprintf(0xC1, "[lgy98] irq %d not usable (3/5/6 only; 12 is reserved)\n", (int)irq);
+        return rc;
+    }
+    if (!irq_is_free(irq)) {
+        kprintf(0xC1, "[lgy98] irq %d already enabled in PIC -> conflict, NIC disabled\n", (int)irq);
+        return NE2K_ERR_IRQ;
+    }
+
+    cfg.reg_base       = (u16)(base + LGY98_OFS_REGS);
+    cfg.data_port      = (u16)(base + LGY98_OFS_DATA);
+    cfg.reset_port     = (u16)(base + LGY98_OFS_RESET);
+    cfg.irq            = (u8)irq;
+    cfg.ram_page_first = LGY98_RAM_PAGE_FIRST;
+    cfg.ram_pages_max  = LGY98_RAM_PAGES_32K;
+    cfg.flags          = 0;
+    /* NP21/W の受信ヘッダ count は FCS を含まない (PLAN.md §8)。実カードは
+     * DP8390D の定義どおり含む前提で、M0 の実機確認項目。 */
+    if (np2_detect()) cfg.flags |= NE2K_CFG_RX_COUNT_NO_FCS;
+    if (flags & LGY98_FLAG_DIAG) cfg.flags |= NE2K_CFG_DIAG_RAM | NE2K_CFG_DIAG_DMA;
+    if (flags & LGY98_FLAG_LOOPBACK) cfg.flags |= NE2K_CFG_LOOPBACK;
+
+    rc = ne2k_init(&cfg);
+    if (rc) {
+        kprintf(0xC1, "[lgy98] init failed rc=%d (base 0x%x irq %d) -> NIC disabled\n",
+                rc, base, (int)irq);
+        return rc;
+    }
+
+    ne2k_get_mac(mac);
+    kprintf(0x07, "[lgy98] base 0x%x irq %d mac ", base, (int)irq);
+    print_mac(mac);
+    kprintf(0x07, " ram %dKB%s%s\n", (int)(ne2k_ram_bytes() / 1024),
+            (cfg.flags & NE2K_CFG_RX_COUNT_NO_FCS) ? " (np21w)" : "",
+            (cfg.flags & NE2K_CFG_LOOPBACK) ? " loopback" : "");
+    if (flags & LGY98_FLAG_DIAG) {
+        ne2k_get_stats(&st);
+        kprintf(st.diag_ram_errors || st.diag_dma_errors ? 0xC1 : 0x07,
+                "[lgy98] diag: ram errors %d, dma errors %d, rdc timeouts %d\n",
+                (int)st.diag_ram_errors, (int)st.diag_dma_errors, (int)st.rdc_timeout);
+    }
+    return NE2K_OK;
+}
+
+int lgy98_init(void)
+{
+#if CONFIG_LGY98_BASE == 0
+    return 0;                       /* 未設定 = 無効 (既定) */
+#else
+    return lgy98_attach(CONFIG_LGY98_BASE, CONFIG_LGY98_IRQ, CONFIG_LGY98_FLAGS);
+#endif
+}

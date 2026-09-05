@@ -3,7 +3,7 @@
 # ============================================================================
 
 # === カーネル ASM ソース ===
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm
+ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm drivers/ne2000_io.asm
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
@@ -14,6 +14,7 @@ C_KERNEL = \
     drivers/kbd.c drivers/serial.c drivers/fm.c \
     drivers/fdc.c drivers/disk.c drivers/ide.c drivers/atapi.c drivers/rtc.c drivers/dev.c drivers/kcg.c drivers/np2sysp.c drivers/loop_dev.c \
     drivers/mouse.c drivers/mouse_bus.c drivers/mouse_seamless.c \
+    drivers/lgy98.c drivers/ne2000.c drivers/ne2000_ring.c \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
@@ -41,6 +42,25 @@ drivers/mouse.o: drivers/mouse.c
 # loop_dev.c は vfs.h / kprintf.h (fs/, lib/) を参照するため INC_KERNEL でビルド
 drivers/loop_dev.o: drivers/loop_dev.c
 	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# LAN: ne2000.c は idt.h (tick_count) / cpu_calibrate.h、lgy98.c は idt.h (PIC) を
+# 参照するため INC_KERNEL。lgy98.o は CONFIG_LGY98_* (make kernel LGY98=1) を
+# 唯一読む場所なので、フラグ変更が拾えるよう毎回コンパイルする。
+drivers/ne2000.o: drivers/ne2000.c
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+drivers/lgy98.o: drivers/lgy98.c .FORCE
+	$(CC) $(CFLAGS_BASE) $(INC_KERNEL) -c $< -o $@
+
+# NE2000 受信リング計算のホスト試験 (I/O 無し)。make check から呼ばれる。
+# I/O の実動作試験を代替しない (docs/tasks/network/PLAN.md §6)。
+check-ne2000-ring:
+	@mkdir -p $(BUILD_OUT)
+	@gcc -std=gnu89 -Wall -Wextra -DNE2K_HOST_TEST -Idrivers \
+	    -o $(BUILD_OUT)/ne2000_ring_test tools/tests/ne2000_ring_test.c drivers/ne2000_ring.c
+	@$(BUILD_OUT)/ne2000_ring_test
+
+.PHONY: check-ne2000-ring
 
 drivers/%.o: drivers/%.c
 	$(CC) $(CFLAGS_BASE) $(INC_DRIVERS) -c $< -o $@
@@ -135,3 +155,10 @@ clean-kernel:
 	cd $(RUST_LZ4_DIR) && cargo clean 2>/dev/null || true
 
 .PHONY: kernel clean-kernel
+
+# LAN (LGY-98) 有効カーネル。emu_agent の許可リストから呼べる 1 語ターゲット。
+# 既定値は build/config.mk (LGY98_BASE=0x10D0 / LGY98_IRQ=5 / LGY98_FLAGS=1)。
+kernel-lgy98:
+	$(MAKE) kernel LGY98=1
+
+.PHONY: kernel-lgy98
