@@ -45,6 +45,7 @@ extern void fatfs_init(void);
 #include "pc98.h"
 #include "memmap.h"
 #include "config.h"
+#include "sysconfig.h"
 #include "kstring.h"
 #include "sys.h"
 #include "ime.h"
@@ -60,6 +61,13 @@ extern void fatfs_init(void);
 
 /* tvram_clear は console.c 側に実装済みのため削除 */
 extern void console_hw_cursor_enable(void);   /* console.c */
+extern void console_text_gdc_stop(void);      /* console.c (K4): GUI 時にカーソルを消す */
+extern void console_text_gdc_start(void);     /* console.c (K4): CUI 復帰でカーソル再表示 */
+
+/* 次に起動するシェルのパス (契約 T9)。実体は kernel/gui.c (K1)。
+ * gui.h を丸ごと取り込むと os32_gui_shared.h まで引くので、
+ * 起動ループが使う 1 本だけを extern 宣言する。 */
+extern const char *gui_next_shell(void);
 
 /* 文字列表示 */
 static void tvram_print(int x, int y, const char *str, u8 color)
@@ -457,33 +465,101 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     boot_splash();
 
 
-    /* 外部シェル起動 — 終了/クラッシュ時のフォールバックとして再起動ループ */
-    for (;;) {
-        int rc;
-        tvram_print(0, 0, "Loading shell...", TATTR_GRAY);
-        rc = exec_run(SYS_SHELL_BIN);
-        if (rc < 0 && rc != EXEC_ERR_FAULT) {
-            /* HDDパスで見つからない場合、FDDフォールバック */
-            rc = exec_run(SYS_SHELL_BIN_FDD);
+    /* 外部シェル起動 — CUI(shell.bin) と GUI(gshell.bin) を同じシェル帯
+     * (0x300000, Level 1) で入れ替えながら回す (契約 T9)。両者は同時に
+     * 載らない。終了/クラッシュ時のフォールバックとして再起動ループにする。
+     *
+     * 起動シェルの決定順:
+     *   1. シェルが sys_switch_shell() で残した切替要求 (gui_next_shell)。
+     *      K1 の gui.c は記録を消さないので、前回消費したパスと変わった
+     *      ときだけ「新しい要求」とみなして 1 回だけ採用する。
+     *   2. 記録が無ければ、起動時に読んだ /etc/system.cfg の GUI= に従う
+     *      (GUI=1 → gshell、既定 → shell)。 */
+    {
+        const char *cur_shell = SYS_SHELL_BIN;
+        char consumed[OS32_MAX_PATH];   /* 最後に採用した切替パス */
+        int gui_fault_streak = 0;       /* gshell 連続クラッシュ回数 */
+        consumed[0] = '\0';
+
+        /* 起動時: system.cfg の GUI=1 なら gshell を既定にする */
+        if (sysconfig_get_int(SYS_SYSTEM_CFG, "GUI", 0) == 1) {
+            cur_shell = SYS_GSHELL_BIN;
         }
-        if (rc < 0 && rc != EXEC_ERR_FAULT) {
-            /* シェルバイナリのロード自体が失敗 — 致命的エラー */
-            tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
-            for (;;) asm volatile("hlt");
-        }
-        /* シェルが終了 (exitコマンド) またはクラッシュ復帰 */
-        /* FDD負荷軽減用ウェイト (約100ms) の後、画面クリアして再起動 */
-        {
-            /* tick_count は 100Hz で回る u32 で 497 日で一周する。
-             * 絶対値比較 (tick_count < wait_end) だと一周をまたいだ瞬間に
-             * 待たずに抜ける。差分を符号付きで見る形にすれば一周しても
-             * 正しい (待ち時間 << 2^31 tick である限り)。 */
-            u32 start = tick_count;
-            while ((i32)(tick_count - start) < (i32)SHELL_RELOAD_DELAY) {
-                asm volatile("hlt");
+
+        for (;;) {
+            const char *next;
+            int rc;
+            int is_gui;
+
+            /* 切替要求を 1 回だけ消費する (gui.c は消さないので差分で判定) */
+            next = gui_next_shell();
+            if (next != (const char *)0 && kstrcmp(next, consumed) != 0) {
+                kstrncpy(consumed, next, OS32_MAX_PATH);
+                consumed[OS32_MAX_PATH - 1] = '\0';
+                cur_shell = next;
+                gui_fault_streak = 0;   /* 別シェルへ切替 → 連続失敗をリセット */
             }
+
+            is_gui = (kstrcmp(cur_shell, SYS_GSHELL_BIN) == 0);
+
+            /* GUI は全画面 GFX を握るのでテキストカーソルを消す。CUI は出す。 */
+            if (is_gui) {
+                console_text_gdc_stop();
+                tvram_print(0, 0, "Loading gshell...", TATTR_GRAY);
+            } else {
+                console_text_gdc_start();
+                tvram_print(0, 0, "Loading shell...", TATTR_GRAY);
+            }
+
+            rc = exec_run(cur_shell);
+
+            /* gshell がロードできない (W1 未着手で未存在、不正バイナリ等) →
+             * 警告して CUI に落ちる。fault (実行後のクラッシュ) は別扱い。
+             * consumed は gshell のままなので同じ要求は再採用されない。 */
+            if (is_gui && rc < 0 && rc != EXEC_ERR_FAULT) {
+                console_text_gdc_start();
+                tvram_clear();
+                tvram_print(0, 0, "gshell load failed -> CUI shell", TATTR_RED);
+                cur_shell = SYS_SHELL_BIN;
+                gui_fault_streak = 0;
+                continue;   /* ウェイト無しで即 CUI を起動 */
+            }
+
+            /* gshell がクラッシュ (fault_kill) を繰り返すなら CUI に落とす保険。
+             * 連続 3 回で CUI へ (完了条件: gshell 再起動の無限ループ回避)。 */
+            if (is_gui) {
+                if (rc == EXEC_ERR_FAULT) {
+                    gui_fault_streak++;
+                    if (gui_fault_streak >= 3) {
+                        tvram_print(0, 0, "gshell crashed 3x -> CUI shell", TATTR_RED);
+                        cur_shell = SYS_SHELL_BIN;
+                        gui_fault_streak = 0;
+                    }
+                } else {
+                    gui_fault_streak = 0;   /* 正常終了なら連続失敗をリセット */
+                }
+            } else if (rc < 0 && rc != EXEC_ERR_FAULT) {
+                /* CUI シェルのロード自体が失敗 — FDD フォールバックを試す */
+                rc = exec_run(SYS_SHELL_BIN_FDD);
+                if (rc < 0 && rc != EXEC_ERR_FAULT) {
+                    /* シェルバイナリのロード自体が失敗 — 致命的エラー */
+                    tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
+                    for (;;) asm volatile("hlt");
+                }
+            }
+
+            /* シェルが終了 (切替 or exit) またはクラッシュ復帰。
+             * FDD負荷軽減用ウェイト (約100ms) の後、画面クリアして再起動。
+             * tick_count は 100Hz で回る u32 で 497 日で一周する。差分を
+             * 符号付きで見れば一周しても正しい (待ち << 2^31 tick である限り)。 */
+            {
+                u32 start = tick_count;
+                while ((i32)(tick_count - start) < (i32)SHELL_RELOAD_DELAY) {
+                    asm volatile("hlt");
+                }
+            }
+            tvram_clear();
         }
-        tvram_clear();
     }
 
     /* 失敗時フォールバック */

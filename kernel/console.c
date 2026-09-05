@@ -434,6 +434,28 @@ void console_hw_cursor_enable(void)
     console_hw_cursor_sync();
 }
 
+/* GUI モード: GDC のテキストカーソルを消す (CSRFORM の DC ビットを立てない)。
+ * gshell が全画面 GFX を握る間、CUI 由来や DOS 由来のテキストカーソルが
+ * 点滅し続けるのを止める (契約 T9 / TASK_K4 作業 2、CLAUDE.md「Text GDC
+ * cursor」§4-18)。バックエンドが TVRAM をクローム描画に使うかどうかの判断は
+ * gshell 側 (W1) の責任だが、起動ループは GUI シェルを載せる直前に消しておく。
+ * V86 セッション中は GDC をゲストが握っているので触らない。 */
+void console_text_gdc_stop(void)
+{
+    if (v86_is_active()) return;
+    outp(GDC_TEXT_CMD, GDC_CMD_CSRFORM);
+    outp(GDC_TEXT_PARAM, (u8)(GDC_TEXT_LINES_PER_ROW - 1));   /* DC=0 → 非表示 */
+    outp(GDC_TEXT_PARAM, (u8)GDC_TEXT_CSR_TOP);
+    outp(GDC_TEXT_PARAM, (u8)((GDC_TEXT_CSR_BOTTOM << 3) | GDC_TEXT_CSR_BR_HI));
+}
+
+/* CUI モード復帰: GDC テキストカーソルを再表示して論理位置へ同期する。
+ * console_hw_cursor_enable() と同じだが、GUI からの復帰を明示するための別名。 */
+void console_text_gdc_start(void)
+{
+    console_hw_cursor_enable();
+}
+
 /* コンソール画面サイズ取得 */
 void console_get_size(int *w, int *h)
 {

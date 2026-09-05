@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "config.h"   /* SYS_GSHELL_BIN, SYS_SYSTEM_CFG (K4: os32gui) */
 
 /* ======================================================================== */
 /*  システム操作モジュール (cmd_sys.c)                                      */
@@ -114,6 +115,105 @@ static void cmd_play(int argc, char **argv)
     g_api->fm_play_mml(argv[1]);
 }
 
+/* ------------------------------------------------------------------------ */
+/*  os32gui — CUI ⇄ GUI シェル切替 (契約 T9 / TASK_K4 作業 0・3)             */
+/* ------------------------------------------------------------------------ */
+
+/* 行 [p, p+len) が "GUI=" (前後空白許容) で始まるか判定する。 */
+static int os32gui_line_is_gui(const char *p, int len)
+{
+    int i = 0;
+    while (i < len && (p[i] == ' ' || p[i] == '\t')) i++;
+    if (i + 3 > len) return 0;
+    if (p[i] != 'G' || p[i + 1] != 'U' || p[i + 2] != 'I') return 0;
+    i += 3;
+    while (i < len && (p[i] == ' ' || p[i] == '\t')) i++;
+    return (i < len && p[i] == '=');
+}
+
+/* /etc/system.cfg の GUI= 行を on(1)/off(0) に差し替える (無ければ追記)。
+ * 既存の他キー行は保存する。成功で 0、失敗で -1。 */
+static int os32gui_set_cfg(int on)
+{
+    char buf[1024];
+    char out[1152];
+    int fd, n, i, o;
+
+    /* 既存内容を読む (無ければ空から作る) */
+    n = 0;
+    fd = g_api->sys_open(SYS_SYSTEM_CFG, KAPI_O_RDONLY);
+    if (fd >= 0) {
+        int r = g_api->sys_read(fd, buf, (int)sizeof(buf) - 1);
+        g_api->sys_close(fd);
+        if (r > 0) n = r;
+    }
+
+    /* 行ごとにコピー。旧 GUI= 行は捨てる。 */
+    o = 0;
+    i = 0;
+    while (i < n) {
+        int ls = i;
+        int len;
+        while (i < n && buf[i] != '\n') i++;
+        len = i - ls;          /* 改行を含まない行長 */
+        if (i < n) i++;        /* 改行を飛ばす */
+        if (os32gui_line_is_gui(&buf[ls], len)) continue;
+        {
+            int k;
+            for (k = 0; k < len && o < (int)sizeof(out) - 8; k++)
+                out[o++] = buf[ls + k];
+            out[o++] = '\n';
+        }
+    }
+
+    /* 新しい GUI 行を追記 */
+    out[o++] = 'G'; out[o++] = 'U'; out[o++] = 'I'; out[o++] = '=';
+    out[o++] = on ? '1' : '0';
+    out[o++] = '\n';
+
+    fd = g_api->sys_open(SYS_SYSTEM_CFG, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+    if (fd < 0) return -1;
+    {
+        int w = g_api->sys_write(fd, out, o);
+        g_api->sys_close(fd);
+        if (w != o) return -1;
+    }
+    return 0;
+}
+
+static void cmd_os32gui(int argc, char **argv)
+{
+    if (argc >= 2) {
+        /* on|off: system.cfg の GUI= を書き換える (次回起動から有効) */
+        if (str_eq(argv[1], "on")) {
+            if (os32gui_set_cfg(1) == 0)
+                g_api->kprintf(ATTR_GREEN, "%s", "GUI enabled at next boot (system.cfg GUI=1)\n");
+            else
+                g_api->kprintf(ATTR_RED, "%s", "os32gui: failed to write /etc/system.cfg\n");
+        } else if (str_eq(argv[1], "off")) {
+            if (os32gui_set_cfg(0) == 0)
+                g_api->kprintf(ATTR_GREEN, "%s", "GUI disabled at next boot (system.cfg GUI=0)\n");
+            else
+                g_api->kprintf(ATTR_RED, "%s", "os32gui: failed to write /etc/system.cfg\n");
+        } else {
+            shell_print_help(argv[0]);
+        }
+        return;
+    }
+
+    /* 引数なし: 今すぐ gshell へ切替。カーネルに次シェルを記録して自分は
+     * 終了する → 起動ループが gshell を 0x300000 に載せる (契約 T9)。 */
+    {
+        int rc = g_api->sys_switch_shell(SYS_GSHELL_BIN);
+        if (rc < 0) {
+            g_api->kprintf(ATTR_RED, "os32gui: switch not permitted (rc=%d)\n", rc);
+            return;
+        }
+        g_api->kprintf(ATTR_CYAN, "%s", "Switching to GUI shell...\n");
+        g_api->sys_exit(0);
+    }
+}
+
 /* 登録用テーブル */
 static const ShellCmd sys_cmds[] = {
     { "mem",    cmd_mem,    "",              "Show memory statistics" },
@@ -124,6 +224,7 @@ static const ShellCmd sys_cmds[] = {
     { "ide",    cmd_ide,    "[0-3]",         "Show IDE drive geometry" },
     { "format", cmd_format, "[0-3] [sects]", "Format a drive to ext2" },
     { "play",   cmd_play,   "MML",           "Play MML via FM synth" },
+    { "os32gui",cmd_os32gui,"[on|off]",      "Switch to GUI shell now, or set GUI at boot" },
     { (const char *)0, 0, 0, 0 }
 };
 
