@@ -259,7 +259,7 @@ fn dispatch(app: &mut impl App, ui: &mut Ui, ev: &GuiEvent) {
             emit(app, ui, &out);
         }
         GUI_EV_TIMER => {
-            crate::timer::fired(win, ev.sub as u16);
+            /* 単発は WM が消す (契約 U5)。クライアント側の台帳は不要。 */
             app.on_timer(ui, win, ev.sub);
         }
         GUI_EV_MODAL => {

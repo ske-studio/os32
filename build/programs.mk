@@ -366,6 +366,8 @@ $(eval $(call DEFINE_RUST_PROGRAM,math_test_rs,userland/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,font_test,userland/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,gui_demo,userland/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,gdi_test,userland/tests,$$(GFX_OBJ)))
+$(eval $(call DEFINE_RUST_PROGRAM,lease_test,userland/tests,$$(GFX_OBJ)))
+$(eval $(call DEFINE_RUST_PROGRAM,gui_bench,userland/tests,$$(GFX_OBJ)))
 
 # Rustクリーン
 clean-rust:
@@ -380,7 +382,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust gshell
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust gshell
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)

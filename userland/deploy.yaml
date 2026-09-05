@@ -246,6 +246,13 @@ filesystem:
     - host: userland/tests/gdi_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- GUI C2: パレットリース検証 (W2) と入力→表示の測定器 (契約 P2) ---
+    - host: userland/tests/lease_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: userland/tests/gui_bench.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/font_load_test.bin
       guest: /usr/bin/
       tags: [programs]
