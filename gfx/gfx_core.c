@@ -38,10 +38,49 @@ static const GfxBackend *const g_backend_list[] = {
     &gfx_backend_pc98    /* 9801 標準グラフィック (H1)。最後の受け皿 */
 };
 
+/* 起動設定 (/etc/system.cfg GFX=) から渡される希望バックエンド (票 H2b)。
+ * kernel.c が gfx_init より前に gfx_set_backend_pref() で設定する。 */
+static int g_backend_pref = GFX_PREF_AUTO;
+
+void gfx_set_backend_pref(int pref)
+{
+    if (pref != GFX_PREF_PC98 && pref != GFX_PREF_PEGC) pref = GFX_PREF_AUTO;
+    g_backend_pref = pref;
+}
+
+int gfx_get_backend_pref(void)
+{
+    return g_backend_pref;
+}
+
 static void gfx_select_backend(void)
 {
     int i;
     int n = (int)(sizeof(g_backend_list) / sizeof(g_backend_list[0]));
+
+    /* 強制指定 (GFX=) は probe より先に効く。
+     * pc98 は probe をまったく行わない (9801 は最後の受け皿なので常に成功)。
+     * pegc は probe だけは通す — 実機に PEGC が無ければ描けないので、
+     * 失敗したら従来どおり 9801 へ落とす。 */
+    if (g_backend_pref == GFX_PREF_PC98) {
+        g_backend = &gfx_backend_pc98;
+        return;
+    }
+    if (g_backend_pref == GFX_PREF_PEGC) {
+        for (i = 0; i < n; i++) {
+            /* weak 宣言なので未リンクなら要素が 0 (→ 9801 へ落ちる) */
+            if (!g_backend_list[i]) continue;
+            if (g_backend_list[i] != &gfx_backend_pegc) continue;
+            if (g_backend_list[i]->probe && g_backend_list[i]->probe()) {
+                g_backend = g_backend_list[i];
+                return;
+            }
+            break;
+        }
+        g_backend = &gfx_backend_pc98;
+        return;
+    }
+
     for (i = 0; i < n; i++) {
         /* weak 宣言のバックエンド (未リンクなら 0) を飛ばす。
          * → include/gfx_hal.h の gfx_backend_pegc の注記 */

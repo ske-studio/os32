@@ -14,8 +14,7 @@
 /* ベジェ平坦化の最大深度 */
 #define FLATTEN_MAX_DEPTH 10
 
-/* Phase 4b: scanline_fill からasm_gfx_hline を直接呼び出す (dirty rect省略版) */
-extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
+/* Phase 4b: scanline_fill から gfx_span_raw を直接呼び出す (dirty rect省略版) */
 
 /* ======================================================================== */
 /*  エッジテーブル操作                                                      */
@@ -284,7 +283,7 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
         }
 
         /* 5. even-odd rule で塗りつぶし */
-        /* Phase 4b: asm_gfx_hline を直接呼び出し (dirty rectは事前登録済み) */
+        /* Phase 4b: gfx_span_raw を直接呼び出し (dirty rectは事前登録済み) */
         for (i = 0; i + 1 < n_intersect; i += 2) {
             int x_start = et->intersect_buf[i];
             int x_end = et->intersect_buf[i + 1];
@@ -292,7 +291,7 @@ void gfx_scanline_fill(GFX_EdgeTable *et, u8 color, int min_y, int max_y)
             if (x_start < 0) x_start = 0;
             if (x_end >= 640) x_end = 639;
             if (x_start <= x_end) {
-                asm_gfx_hline(gfx_fb.planes, base, x_start, x_end, color);
+                gfx_span_raw(base, x_start, x_end, color);
             }
         }
 

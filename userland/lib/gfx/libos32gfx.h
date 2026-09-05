@@ -7,6 +7,12 @@ extern KernelAPI *gfx_api;
 extern GFX_Framebuffer gfx_fb;
 extern int gfx_dirty_suppress;  /* 非0のとき gfx_blit 等の dirty rect 登録を抑制 */
 
+/* 画素形式 (票 H2b)。0 = 4 プレーン 16 色 (PC-9801 標準)、
+ * 非0 = パックド 8bpp (PEGC 256 色: planes[0] + y*pitch + x に 1 バイト/画素)。
+ * libos32gfx_init が gfx_get_framebuffer / gfx_screen_info を見て決める。
+ * 色は 0〜15 をそのまま使う (システム色に同じ番号が割ってある)。 */
+extern int gfx_packed;
+
 void libos32gfx_init(KernelAPI *api);
 void libos32gfx_shutdown(void);
 void gfx_present(void);

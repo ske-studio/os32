@@ -97,6 +97,25 @@ extern const GfxBackend gfx_backend_pc98;
  * 置くとファイルを足すまでリンクが通らなくなるため。 */
 extern GfxBackend gfx_backend_pegc __attribute__((weak));
 
+/* ------------------------------------------------------------------------ */
+/*  バックエンドの強制指定 (票 H2b)。                                        */
+/*                                                                            */
+/*  /etc/system.cfg の GFX= を kernel.c が読み、gfx_init より前に              */
+/*  gfx_set_backend_pref() へ渡す。probe より先に効く。                       */
+/*  目的: NP21/W は常に PEGC 相当なので、既定 (auto) のままでは 9801 プレーン  */
+/*  経路をエミュレータで回帰試験できない。GFX=pc98 でそれを強制する。          */
+/* ------------------------------------------------------------------------ */
+#define GFX_PREF_AUTO  0   /* 既定: probe 順 (PEGC → 9801) */
+#define GFX_PREF_PC98  1   /* 9801 プレーン強制 (probe を行わない) */
+#define GFX_PREF_PEGC  2   /* PEGC 強制。probe が通らなければ 9801 へ落とす */
+
+/* 起動設定から読んだ希望バックエンドを覚える。gfx_init() より前に呼ぶこと
+ * (probe の直前に参照される)。範囲外の値は GFX_PREF_AUTO 扱い。 */
+void gfx_set_backend_pref(int pref);
+
+/* 現在の希望値 (GFX_PREF_*)。既定は GFX_PREF_AUTO。 */
+int  gfx_get_backend_pref(void);
+
 /* 現在のバックエンドのバックバッファの物理範囲を返す (base は 4KB 境界)。
  * exec が CPL=3 アプリへ USER マップする範囲。バックバッファを持たない
  * バックエンド (アクセラレータ系) では *size に 0 が入る。

@@ -6,10 +6,10 @@
 /* ======================================================================== */
 
 #include "libos32gfx.h"
+#include "libgfx_internal.h"   /* gfx_span_raw (H2b: プレーン/パックド共通スパン) */
 #include "os32api.h"
 
 /* gfx_fill_circle \u3067 dirty rect \u767b\u9332\u3092\u56de\u907f\u3057\u3066\u76f4\u63a5\u547c\u3073\u51fa\u3059 */
-extern void __cdecl asm_gfx_hline(u8 **planes, int base, int x, int x2, u8 color);
 
 /* ======================================================================== */
 /*  円の輪郭 (Midpoint Circle Algorithm)                                    */
@@ -70,7 +70,7 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
     /* dirty rect をバウンディングボックスで1回だけ登録 */
     gfx_api->gfx_add_dirty_rect(cx - r, cy - r, r * 2 + 1, r * 2 + 1);
 
-    /* 内部では asm_gfx_hline を直接呼び、dirty rect の個別登録を回避 */
+    /* 内部では gfx_span_raw を直接呼び、dirty rect の個別登録を回避 */
     while (x <= y) {
         int lx, rx2, ly, hy;
 
@@ -82,7 +82,7 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
             if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
             if (lx <= rx2) {
                 base = ly * gfx_fb.pitch;
-                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+                gfx_span_raw(base, lx, rx2, color);
             }
         }
 
@@ -94,7 +94,7 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
             if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
             if (lx <= rx2) {
                 base = hy * gfx_fb.pitch;
-                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+                gfx_span_raw(base, lx, rx2, color);
             }
         }
 
@@ -106,7 +106,7 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
             if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
             if (lx <= rx2) {
                 base = ly * gfx_fb.pitch;
-                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+                gfx_span_raw(base, lx, rx2, color);
             }
         }
 
@@ -118,7 +118,7 @@ void gfx_fill_circle(int cx, int cy, int r, u8 color)
             if (rx2 >= gfx_fb.width) rx2 = gfx_fb.width - 1;
             if (lx <= rx2) {
                 base = hy * gfx_fb.pitch;
-                asm_gfx_hline(gfx_fb.planes, base, lx, rx2, color);
+                gfx_span_raw(base, lx, rx2, color);
             }
         }
 

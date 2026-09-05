@@ -157,6 +157,11 @@ int gfx_screenshot(const char *path) {
     int i;
     u8 *ptr;
 
+    /* VDP1 DUMP は 4 プレーン 32000B×4 固定の形式。パックド 8bpp (PEGC) は
+     * 写せないので早期に失敗させる (票 H2b。256 色対応の data_type を足すのは
+     * 別票)。ここを通すと planes[1..3] = NULL を読んで #PF になる。 */
+    if (gfx_packed) return -1;
+
     fd = gfx_api->sys_open(path, O_CREAT | O_WRONLY | O_TRUNC);
     if (fd < 0) return -1;
 
@@ -201,6 +206,9 @@ int gfx_load_vdp(const char *path) {
     int fd;
     VdpHeader hdr;
     int i;
+
+    /* 4 プレーン専用 (gfx_screenshot と同じ理由、票 H2b) */
+    if (gfx_packed) return -1;
 
     fd = gfx_api->sys_open(path, O_RDONLY);
     if (fd < 0) return -1;

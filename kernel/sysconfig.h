@@ -16,4 +16,12 @@
  * カーネル内専用 (kstr* 使用、libc に依存しない)。 */
 int sysconfig_get_int(const char *path, const char *key, int def);
 
+/* 同じ書式から key の文字列値を out へ取り出す (票 H2b: GFX=pc98|pegc|auto)。
+ *   - 値は行末 / 空白 / '#' / ';' までを切り出し、前後の空白は落とす。
+ *   - out は必ず NUL 終端する。値が長ければ outsz-1 バイトで切り詰める。
+ *   - 見つかったら切り出した長さ (0 以上)、無ければ -1 を返す
+ *     (このとき out は空文字列)。
+ * カーネル内専用 (kstr* 使用、libc に依存しない)。 */
+int sysconfig_get_str(const char *path, const char *key, char *out, int outsz);
+
 #endif /* __SYSCONFIG_H */

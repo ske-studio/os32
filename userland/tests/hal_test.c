@@ -19,6 +19,11 @@ void main(int argc, char **argv, KernelAPI *api)
         return;
     }
     api->gfx_screen_info(&si);
+    /* 選ばれたバックエンド名。GFX_ScreenInfo には名前が無いので format から
+     * 引く (票 H2b: gfxmode pc98/pegc/auto がどれを選んだかを 1 行で見る)。 */
+    api->kprintf(0xE1, "backend %s (%s)\n",
+                 (si.format == GFX_FMT_PACKED8) ? "pegc" : "pc98",
+                 (si.format == GFX_FMT_PACKED8) ? "packed 8bpp" : "planar 4bpp");
     api->kprintf(0xE1, "screen %dx%d bpp=%d fmt=%d flags=0x%x lease_mask=0x%x first=%d count=%d\n",
                  si.width, si.height, si.bpp, si.format, si.flags,
                  si.lease_mask, si.lease_first, si.lease_count);
