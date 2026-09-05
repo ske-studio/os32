@@ -71,6 +71,27 @@ make programs
 ジェネレータは `kapi-><field> = 0;` を出力するだけなので、実際の値は
 `exec/exec.c` の `exec_init()` (または `exec_run()`) で代入すること。
 
+### §3-2 版番号の予約 (未実装の追加を先取りで調停)
+
+KAPI は append-only で版番号は単調増加。複数の計画が独立に「次版」を想定すると
+版番号だけが衝突する (関数スロットは末尾追記なので実体は衝突しない)。実装着手時に
+迷わないよう、**予約を下表で一元管理する。ここが版番号割り当ての正典。**
+
+| 版 | 状態 | 追加内容 | 出典 |
+|---|---|---|---|
+| v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
+| v41 | 予約 (GUI 実装が先) | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
+| v42 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
+
+調停 (2026-09-06): GUI (K1) を先に実装するので **v41 = GUI、v42 = ネットワーク Host Services**
+に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
+先に実装した側が実際の版番号を確定し、後発は次版へずらす。
+
+**エラー番号の予約** (`os32_kapi_shared.h`、現在 -1〜-10): GUI (K1) が **-11 `STALE` /
+-12 `VERSION` / -13 `FULL`** を取る。ネットワーク Host Services は既存の -1〜-10 に写像し
+(送信失敗→`IO` -1、引数不正→`INVAL` -9、未対応→`NOSYS` -10 等)、固有の番号が要るときだけ
+**-14 以降**を使う (GUI の -11〜-13 を避ける)。
+
 ---
 
 ## §4 KernelAPI 構造体レイアウト

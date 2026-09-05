@@ -1,6 +1,7 @@
 # OS32 リンクプロトコル / Host Services 実装計画
 
-> **計画・未実装。2026-09-05。** 対象は LGY-98 ドライバの上に載る 2 層 ―
+> **L0〜L3 の機構はエミュレータ実装・合格済み (2026-09-05、ブランチ→main)。残るは L3 の
+> KAPI 公開 (KAPI v42、下記) のみ。** 対象は LGY-98 ドライバの上に載る 2 層 ―
 > OS32 独自リンクプロトコル (フロー制御つき raw Ethernet) と Host Services
 > (HTTP / File / RPC の要求応答)。この文書を設計・進捗の正典とする。
 > NIC ドライバそのものは [PLAN.md](PLAN.md) (別計画)。実装完了後の現行仕様は
@@ -201,14 +202,23 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   OS32 は TCP/IP も HTTP も持たず、要求を出して結果だけ受け取る (方針どおり)。
   `link_stream_read` がアプリ側の消費入口。Host Agent (`tools/host_agent.py`) は /pattern を
   生成配送、http(s):// を urllib で実取得、/file/ をホストファイル読み、TIME を時刻応答。
-- **残りは KAPI 公開だけ**: `host_get` / `host_read` を外部プログラムへ出す KAPI 追加。
-  版番号 (v41) が GUI の K1 と競合し得るので、GUI 実装時に調整する (§5-1 の調整メモ)。
-  リンク層と Host Agent の機構そのものは完成している。
-  > **版番号の調整メモ (2026-09-05)**: GUI (未実装) の K1 票
-  > ([tasks/gui/TASK_K1_gui_call.md](../gui/TASK_K1_gui_call.md)) も KAPI v41 を想定している。
-  > KAPI は append-only なので実体は衝突しないが、版番号は 1 つしか取れない。**GUI 実装が
-  > まだなので、L3 に着手する時点で GUI 側の状況を確認し、先に実装した方が v41、後発は v42
-  > 以降にずらす** (現在は v40、どちらも未実装)。この調整は GUI 実装の見直しと合わせて行う。
+- **残りは KAPI 公開だけ (KAPI v42、GUI の v41 の次に確定)**: Host Services を外部プログラムへ
+  出す。版番号は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) で **v42** に調停済み
+  (GUI の K1 が v41、その次)。追加する KAPI (案、末尾追記):
+
+  | 関数 | 内容 |
+  |---|---|
+  | `i32 host_open(const char *req, u32 len)` | サービス要求 (`GET <資源>` 等) を送りハンドルを返す。RESPONSE の status/length は `host_status` で取る。負値は `LINK_ERR*` を `OS32_ERR_*` に写像 |
+  | `i32 host_read(i32 h, void *buf, u32 cap)` | ストリームから最大 cap バイト読む (`link_stream_read` の口)。0 = EOF、負値 = エラー。回線速度に依らず OS32 のメモリ上限は buf 分だけ (§3 の思想) |
+  | `i32 host_status(i32 h, u32 *status, u32 *length)` | RESPONSE の status (200/404 等) と本文長 |
+  | `void host_close(i32 h)` | ハンドルを閉じ、未読ストリームを捨てる |
+
+  エラー番号は既存の `OS32_ERR_*` (-1〜-10) に写像する: 送信失敗 → `IO` (-1)、引数不正 →
+  `INVAL` (-9)、未対応 → `NOSYS` (-10)。**GUI が取る -11〜-13 は使わず**、固有番号が要るときは
+  -14 以降 (KAPI_SPEC §3-2 の予約)。
+  現状の `link_service_get` は同期版 (自己試験用)。KAPI 化では `host_open` / `host_read` を
+  逐次・非ブロッキングに分け、アプリの `sys_halt` / GUI の `OP_WAIT` と協調して `link_poll` を
+  回す (計算ループでカーソルを止めないのと同じ設計)。**GUI 実装 (v41) の後に着手する。**
 
 ## 6. Host Agent
 

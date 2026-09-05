@@ -15,6 +15,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) (説明) | CLAUDE.md「Memory Layout」(要約図) |
 | KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README / CLAUDE.md の版番号 (`make check` が照合) |
 | KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | CLAUDE.md (AI 入口の写し。両方直す) |
+| KAPI 版番号・エラー番号の予約 (未実装の先取り調停) | [KAPI_SPEC.md §3-2](KAPI_SPEC.md) | 各計画 (GUI TASK_K1、network LINK_PLAN) は参照 |
 | エラーコード | `os32_kapi_shared.h` の `OS32_ERR_*` | 各 FS は境界で翻訳 |
 | ビルドターゲット・ツール | [08_build.md](08_build.md) | CLAUDE.md「Build Commands」(日常分のみ) |
 | 配備 3 経路の使い分け | CLAUDE.md「Deploy Workflow」 | [POLICY_DEV.md §4](POLICY_DEV.md) (表のみ)、[08 §8-4](08_build.md) (ツール) |

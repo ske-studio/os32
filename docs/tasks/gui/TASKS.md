@@ -85,7 +85,7 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 | 上限 | ウィンドウ 16、サーフェス 16、ウィジェット 64、リスト項目 128、タイマ 8/アプリ、クリップ深さ 8、損傷 8/ウィンドウ、文字列 256B |
 | 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)`、`sys_switch_shell(const char *path) -> i32` (shell 帯からのみ、K4)、`kbd_dropped_count(void) -> u32` (カーネルのキー待ち行列が捨てた打鍵の累計。`drivers/kbd.c` の満杯分岐で加算) |
 
-> **版番号 (v41) は暫定**: ネットワークの Host Services (L3、[../network/LINK_PLAN.md](../network/LINK_PLAN.md)) も KAPI を末尾追記で足す計画で、そちらも v41 を想定している。KAPI は append-only なので実体は衝突しないが版番号は 1 つ。GUI 実装に着手する時点で L3 の状況を見て、先発が v41・後発が v42 以降と確定する (詳細は [TASK_K1](TASK_K1_gui_call.md) の調整メモ。現在 v40、どちらも未実装)。
+> **版番号 (v41) 確定**: ネットワークの Host Services (L3、[../network/LINK_PLAN.md](../network/LINK_PLAN.md)) も KAPI を足すが v42 にずらした。GUI (K1) が先に実装され v41、ネットワークが後発で v42 (2026-09-06 調停)。版番号割り当ての正典は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md)。
 
 ## 5. ゲート (検証層が `os32-cycle` で回す。各票の完了条件はゲートに対応させる)
 
