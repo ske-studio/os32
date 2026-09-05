@@ -129,8 +129,11 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **K3 結合・K 側 G4 通過 (実機)**: `make clean` → `make all` → 配備 → kselftest 42/0。`heap_test` が `load = 0x500000`、`guard_a = 0x680000`。`ring3_guard` は従来どおり kill (addr=0x7BF000)、`ring3_guard shlib` は `addr=0x00400000 [shlib band, WRITE] -> kill app` で shlib .text の書き込みを捕捉。gdi_test / klibc_test 49/49 は 0x500000 でも無変更で通る。shlib 未配備時は `[shlib] not found` で CUI が通常起動。`make external` で apps / game を 0x500000 で焼き直して配備、`hello32` と `ui_demo` (microUI) が無変更で起動。ui_demo を **CTRL+STOP** で畳めた (`ring3_abort_count` / `fault_kill_count` が +1、rshell 生存 = K2 作業 4)。submodule ポインタは変更なし。C3 (libos32gui.shlib) 結合が残り |
 
+| 2026-09-06 | **C3 結合・G4 通過 (実機)**: `libos32gui.shlib` (84,920 B、ジャンプ表 95 本、text 17 ページ + data 4 ページ) を `/sys/lib` に配備、K3 のローダが 0x400000 に載せる。**gui_demo.bin 67,208 → 13,132 B (−80%)**、lease_test 62,312 → 9,644、gui_bench 66,260 → 12,808 (gdi_test は単独 GFX なので 30,420 → 22,312)。shlib 経由の gui_demo が窓 2 枚・チェックボックス ON/OFF、lease_test (14 色) → gui_demo の連続起動で状態が混ざらない (アプリごと .data ページ)。`make check-shlib` で番号表を突き合わせ。**未実行**: 版不一致の拒否 (`GUI_PROTO_VERSION` と `shlib.rs` の `.long` を両方上げてライブラリだけ焼き直す手順。コードレビューで経路は確認、実機は次回) |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
+- **K3 の副作用** (2026-09-06): 子プロセスの空間が 1MB 減る (8MB 機で本体上限 ≈1.2MB)。shlib ロード時に帯域 1MB を pgalloc から永久に取る。`EXEC_DYN_RESERVE` の穴 (1MB) を V86 バッキング 640KB と per-app data で分けるので、ライブラリ .data/.bss が 300KB を超えると V86 と競合。`--cpl0` バイナリは master PD なので .data を共有 (仕様)。gshell 常駐中は hotdeploy のポーリングが止まる (K2)。
 - **cooked キュー**: WM は raw リングだけ読むので、GUI 中に cooked (`kbd_buf`) が溢れて `kbd_dropped` が偽 OVERFLOW になる。暫定は gshell の `drain_cooked_queue`、本筋は K2 で「GUI 中は cooked に積まない」。
 - W1 の解釈 (契約に受け渡し場所の記述が無かったもの): `OP_INIT` の proto_version は arg、単一ハンドル op は arg≠0 ならハンドル / 0 なら `GuiReqWindow`、`OP_STATS` は応答ブロック先頭に `GFX_Stats` 生、P2 の取り込み tick はスロット +11280 に 64×4B (`u16 serial` + `u16 tick`)、`Configure` の rect は画面絶対座標 / `Paint` はクライアントローカル。タイマは契約 U5 のとおり (レビュー #3 ⑤で修正、反復固定は撤回)。C2 はこれに合わせてある。`Key` は down=false (break) も届く (契約 U2a の「当面届かない」より前進、クライアントは編集に使わない)。gshell 配下のアプリは `libos32gfx_init()` を呼ばず `client::init()` の attach を使う (gfx_init が VRAM とパレットを壊す)。
