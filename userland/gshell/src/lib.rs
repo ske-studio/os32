@@ -56,7 +56,7 @@ static CUI_SHELL: &[u8] = b"/sys/shell.bin\0";
 
 /// F1 で起動する確認用アプリ (C2 の `gui_demo`)。**PM へ**: パスは
 /// `userland/deploy.yaml` の登録に合わせて直す。
-static DEMO_APP: &[u8] = b"/bin/gui_demo.bin\0";
+static DEMO_APP: &[u8] = b"/usr/bin/gui_demo.bin\0";
 
 /* ================================================================ */
 /*  エントリ (crt0.asm が main(argc, argv, api) を呼ぶ)              */

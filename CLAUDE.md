@@ -308,6 +308,9 @@ Short form only. The history, symptoms and verification for each item are in
   `os32-cycle deploy` size check. → §4-17
 - **Text GDC cursor** is controlled only by CSRFORM's DC bit; use `console_hw_cursor_enable()` /
   `console_hw_cursor_sync()`. → §4-18
+- **CPL=3 KAPI calls run with IF=1** (`int80_stub` does `sti` after the segment reload and
+  `cli` before `iretd`). A `hlt`-waiting wrap hanging with `tick_count` frozen means that
+  pair was broken; the exit must stay IF=0 or an IRQ leaves DS=KERNEL_DS for CPL=3. → §4-19
 - **Boot loaders**: PM transition stays inlined in `boot/loader_fat.asm`; `boot_fat.asm` is
   `.8086` (no immediate shifts); the IPL may call INT 1Bh at most 4 times on NP21/W.
   → `docs/10_notes.md` §10-2, §10-3

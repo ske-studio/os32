@@ -210,6 +210,13 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **原因**: 旧 `GDC_CMD_CSON` (0x0B) は uPD7220 に無いコマンド。カーソル表示は CSRFORM (0x4B) の DC ビットでしか制御できない
 - **対策**: `console_hw_cursor_enable()` (起動時 / V86 終了時 / `console_set_cursor`) で表示し、`console_hw_cursor_sync()` が文字列出力の末尾で論理位置へ追従させる。GDC の実状態は MCP `emu_gdc` の `m_csrform` (`8f0e7b` = 表示・2 ライン下線)
 
+### 4-19. CPL=3 からの KAPI 呼び出し中は割り込みが止まっていた (`int 0x80` 割込みゲート)
+
+- **現象** (〜2026-09-06): CPL=3 の `gdi_test` が最後の `kbd_getchar()` で固まり、`/api/cmd` も `/api/key` も効かない。`less` (`kbd_trygetchar` + `sys_halt`) も同じ。`/api/regs` で EFLAGS=0x004/0x084 (IF=0)、EIP は `hlt`、`tick_count` が止まり、`/api/pic` の IRR に IRQ0/1 が滞留
+- **原因**: `int 0x80` は割込みゲート (0xEE) なので入口で IF=0 になるが、`int80_stub` → `ring3_syscall_dispatch` → `kapi_invoke` → `wrap_*` のどこにも `sti` が無かった。KAPI 本体は CPL=0 の `call` 経路 (IF=1) と同じ前提で書かれ、`hlt` で IRQ を待つ関数 (`kbd_getchar` / `kbd_getkey` / `sys_halt`、GUI の `gui_call(OP_WAIT)`) は IF=0 だと二度と起きない。ポーリング型のアプリは syscall の合間 (ユーザコード、IF=1) に IRQ が届くので気づきにくく、rshell 経由 (シリアルはポーリング) の検証ではさらに隠れる。M3 の「`less` 常駐中の CPL3 同時試験」はこの理由で実質検証になっていなかった疑いがある
+- **対策**: `kernel/ring3_entry.asm` の `int80_stub` でカーネルセグメント復元直後に `sti`、出口 (`popad` の前) で `cli`。出口を IF=0 で通すのは、USER_DS を DS に載せてから `iretd` までに IRQ が入ると IRQ スタブが DS=KERNEL_DS にしたまま (フレームの CS が CPL=0 なので `IRETD_USER` が戻さない) CPL=3 へ帰り、最初のメモリ参照で #GP するため (gdi_test の `gfx_pixel` で実測)。`exec_run` の setjmp 復帰点にある `_enable()` は従来どおり (sys_exit の longjmp 経路)
+- **検証**: `gdi_test` が rshell から約 3 秒で自動復帰してプロンプトに戻る、キーボードから `less` → `q` で終了する、`ver` が返る
+
 ---
 
 ## §5. デバッグ道具箱
