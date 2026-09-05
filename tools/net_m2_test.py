@@ -41,6 +41,64 @@ def send_key(seq):
     http("/api/key", ("seq=" + urllib.parse.quote(seq, safe="")).encode())
 
 
+def sym(name):
+    try:
+        for line in open(MAP, encoding="utf-8", errors="replace"):
+            m = re.match(r"\s+0x([0-9a-f]+)\s+%s$" % re.escape(name), line)
+            if m:
+                return int(m.group(1), 16)
+    except OSError:
+        pass
+    return None
+
+
+def read_u32(addr):
+    d = http("/api/mem?addr=0x%x&len=4&space=phys" % addr)
+    return struct.unpack("<I", bytes.fromhex(d["hex"]))[0]
+
+
+# drivers/ne2000.c struct ne2k_dev のオフセット (i386-elf-gcc の offsetof で確認、2026-09-05)
+NIC_IRQ_ON = 31
+NIC_ST = 13716
+ST_IRQ_COUNT, ST_IRQ_DEFERRED, ST_RX_DROPPED, ST_IRQ_RECHECKS, ST_BACKLOG = 20, 21, 11, 24, 25
+
+
+def nic_snapshot():
+    a = sym("ne2k_nic")
+    if a is None:
+        return None
+    hdr = bytes.fromhex(http("/api/mem?addr=0x%x&len=40&space=phys" % a)["hex"])
+    st = struct.unpack("<26I", bytes.fromhex(http("/api/mem?addr=0x%x&len=104&space=phys" % (a + NIC_ST))["hex"]))
+    return {"irq_on": hdr[NIC_IRQ_ON], "irq_count": st[ST_IRQ_COUNT], "irq_deferred": st[ST_IRQ_DEFERRED],
+            "rx_dropped": st[ST_RX_DROPPED], "irq_rechecks": st[ST_IRQ_RECHECKS], "backlog": st[ST_BACKLOG]}
+
+
+def frame(mac, length, seq):
+    payload = bytes((seq + i) & 0xFF for i in range(max(0, length - 14)))
+    return mac + PEER + struct.pack(">H", ETHERTYPE) + payload
+
+
+def expected_reflection(f):
+    out = f[6:12] + f[0:6] + f[12:]
+    if len(out) < 60:
+        out += b"\0" * (60 - len(out))        # NP21/W は受信時に 60B へ padding する
+    return out
+
+
+def tx_frames():
+    return [bytes.fromhex(x["hex"]) for x in http("/api/net/capture")["frames"] if x.get("dir") == "tx"]
+
+
+def wait_tx(pred, timeout=3.0):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        for f in tx_frames():
+            if pred(f):
+                return f
+        time.sleep(0.1)
+    return None
+
+
 class During:
     """試験の間、ゲストで別のコマンド (CPL3 プログラム) を常駐させておく。
 
