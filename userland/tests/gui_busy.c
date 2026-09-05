@@ -20,12 +20,8 @@
 #include "os32api.h"
 #include "os32_gui_shared.h"
 
-/* GUI 予約 SHM は SHM 帯の +192KB (memmap.h の MEM_SHM_GUI_BASE)。
- * カーネル側の memmap.h は SDK に出ていないので、gshell (wm.rs の
- * GUI_SHM_OFFSET) と同じ値をここでも置く。
- * **申し送り**: 本来は os32_gui_shared.h に置くべき共有定数 (PM 判断)。 */
-#define GUI_SHM_OFFSET      0x30000UL
-#define GUI_SLOT_BYTES      0x4000UL      /* memmap.h の GUI_SLOT_SIZE (16KB) */
+/* GUI 予約 SHM の位置は共有ヘッダの GUI_SHM_OFFSET / GUI_SLOT_SIZE (正典は
+ * memmap.h の MEM_SHM_GUI_BASE / GUI_SLOT_SIZE)。 */
 
 /* 走行時間 (tick, 100Hz) と、KAPI を呼ばない版の計算量。 */
 #define RUN_TICKS           3000UL      /* 30 秒 */
@@ -70,7 +66,7 @@ void main(int argc, char **argv, KernelAPI *api)
         return;
     }
     slot_base = api->shm_base + (u32)GUI_SHM_OFFSET +
-                (u32)slot * (u32)GUI_SLOT_BYTES;
+                (u32)slot * (u32)GUI_SLOT_SIZE;
 
     /* --- 窓を 1 枚。打鍵とクリックの宛先 (フォーカス) を作るため --- */
     win = make_window(api, slot_base);

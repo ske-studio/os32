@@ -352,6 +352,15 @@ typedef struct { i32 result; i16 button; i16 _pad; } GuiRespModal;  /* MODAL_OPE
  * (2026-09-06)。rect は窓のクライアント座標。 */
 typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;    /* INVALIDATE 12B */
 
+/* SHM 内の GUI 領域: スロットの番地 = kapi->shm_base + GUI_SHM_OFFSET + slot × GUI_SLOT_SIZE。
+ * 正典は include/memmap.h (MEM_SHM_GUI_BASE / GUI_SLOT_SIZE)。C のアプリが自前定義しなくて
+ * 済むよう写しを置く (K2 の申し送り、2026-09-06)。カーネル側は memmap.h が先に定義する。 */
+#define GUI_SHM_OFFSET  0x30000UL   /* MEM_SHM_BASE からのオフセット (ブロック 12、+192KB) */
+#ifndef GUI_SLOT_SIZE
+#define GUI_SLOT_SIZE   0x4000UL    /* 16KB = 1 スロット */
+#endif
+STATIC_ASSERT(GUI_SLOT_ARGS_OFF + GUI_SLOT_ARGS_SIZE <= GUI_SLOT_SIZE, gui_slot_fits_slot_size);
+
 /* LEASE_PALETTE (op 7、契約 G8): first/count は要求ブロック、色は要求ブロック内に
  * 直接 (16 色 × 3B = 48B、引数バッファは使わない)。count=0 で返却。W2 が実装。
  * 追記 2026-09-06 (W1 の申し送り)。 */
