@@ -93,6 +93,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ドキュメント | 内容 |
 |-------------|------|
+| [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 ドライバ計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（未実装） |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
 | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
 | [tasks/v2/CONTRACTS.md](tasks/v2/CONTRACTS.md) | v2 実装の凍結インターフェース契約 (2 コーダー体制、C1-C7) |

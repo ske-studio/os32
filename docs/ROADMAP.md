@@ -253,7 +253,8 @@ v1.xはシングルタスクだが、v2.0ではタイマー割り込みベース
 
 ### その他の長期テーマ
 
-- PC-98用NIC (C-bus LAN) → ネットワーク対応
+- PC-98用NIC (C-bus LAN) → ネットワーク対応。ドライバ計画 (LGY-98 / NE2000、未実装):
+  [tasks/network/PLAN.md](tasks/network/PLAN.md)。IP スタック以上は別計画
 
 ---
 
