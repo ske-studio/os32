@@ -60,9 +60,16 @@ use os32api::KernelAPI;
 /// 「CUI へ」で戻る先 (契約 T9)。
 static CUI_SHELL: &[u8] = b"/sys/shell.bin\0";
 
-/// F1 で起動する確認用アプリ (C2 の `gui_demo`)。**PM へ**: パスは
-/// `userland/deploy.yaml` の登録に合わせて直す。
-static DEMO_APP: &[u8] = b"/usr/bin/gui_demo.bin\0";
+/// F1〜F4 で起動する確認用アプリ (ゲート G2 / G3 の検証用)。gshell 単独時
+/// (窓が 1 枚も無いとき) に [`input::standalone_key`] が横取りして起動する。
+/// パスは `userland/deploy.yaml` の登録 (`/usr/bin/`) に合わせてある。
+/// F5 は WM 自身のファイル選択ダイアログ (任意の .bin を選んで起動)。
+pub(crate) static LAUNCH_APPS: [&[u8]; 4] = [
+    b"/usr/bin/gui_demo.bin\0",   /* F1 — C2 のデモ (窓 2 枚・ウィジェット) */
+    b"/usr/bin/gui_bench.bin\0",  /* F2 — 契約 P2 の入力→表示の測定器 */
+    b"/usr/bin/gui_busy.bin\0",   /* F3 — K2 の計算中ポンプ / CTRL+STOP 脱出 */
+    b"/usr/bin/lease_test.bin\0", /* F4 — 契約 G8 の 14 色リース */
+];
 
 /* ================================================================ */
 /*  エントリ (crt0.asm が main(argc, argv, api) を呼ぶ)              */
@@ -147,9 +154,12 @@ fn launch_app(st: &mut wm::GuiState) {
     cursor::hide(st);
     /* フルスクリーン GFX プログラムに備えてパレット全体を退避する (契約 G6/G8)。 */
     let saved = wm::save_palette();
-    /* F2 のファイル選択で選ばれたパスがあればそれ、無ければ既定のデモ。 */
-    let path: *const u8 =
-        if st.launch_path_len > 0 { st.launch_path.as_ptr() } else { DEMO_APP.as_ptr() };
+    /* F1〜F4 / F5 のファイル選択が置いたパス。無ければ既定のデモ。 */
+    let path: *const u8 = if st.launch_path_len > 0 {
+        st.launch_path.as_ptr()
+    } else {
+        LAUNCH_APPS[0].as_ptr()
+    };
     unsafe {
         let a = os32api::api();
         (a.exec_run)(path);
