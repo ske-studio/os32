@@ -73,6 +73,8 @@ struct ne2k_stats {
     u32 irq_deferred;    /* busy 中に来た IRQ (M3) */
     u32 diag_ram_errors; /* NE2K_CFG_DIAG_RAM の不一致バイト数 */
     u32 diag_dma_errors; /* NE2K_CFG_DIAG_DMA の失敗ケース数 */
+    u32 irq_rechecks;    /* ACK 後の再確認で追加処理した回数 (M3) */
+    u32 rx_backlog_events; /* 予算超過で IMR をマスクしたまま返した回数 (M3) */
 };
 
 /* ---- API (docs/tasks/network/PLAN.md §3) ---- */
@@ -97,8 +99,21 @@ int  ne2k_recv(void *frame, unsigned int capacity, unsigned int *length);
  * カウンタ、OVW 復旧、送信タイムアウト。M2 までは診断ループが頻繁に呼ぶ。 */
 void ne2k_poll(unsigned int budget);
 
-/* IRQ 入口 (M3)。busy 中は NIC レジスタに触らず pending を立てるだけ。 */
+/* IRQ 入口 (kernel/isr_stub.asm irq_stub_nic_*)。busy 中は NIC レジスタに触らず
+ * pending を立てるだけ。1 回で NE2K_IRQ_BUDGET フレームまで回収し、ACK 後に
+ * ISR / CURR を再確認する。予算超過なら IMR をマスクしたまま返す。 */
 void ne2k_irq(void);
+
+/* IRQ 駆動に切り替える。呼び出し側が先に IDT へスタブを登録し、この後で PIC を
+ * irq_enable() する (順序: デバイス初期化 → IDT → IMR → PIC)。 */
+void ne2k_irq_enable(void);
+
+/* 100Hz タイマ補助 (kernel/isr_handlers.c)。予算超過の残り・OVW 復旧・送信
+ * タイムアウトだけを進める。busy なら延期して再入しない。プロトコル処理はしない。 */
+void ne2k_timer_tick(void);
+
+/* foreground 操作中 (タイマ文脈から send/recv を呼ぶ前に確認する) */
+int  ne2k_is_busy(void);
 
 void ne2k_get_stats(struct ne2k_stats *stats);
 int  ne2k_state(void);

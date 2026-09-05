@@ -45,6 +45,22 @@ def read_u32(addr):
     return struct.unpack("<I", bytes.fromhex(d["hex"]))[0]
 
 
+# drivers/ne2000.c struct ne2k_dev のオフセット (i386-elf-gcc の offsetof で確認、2026-09-05)
+NIC_IRQ_ON = 31
+NIC_ST = 13716
+ST_IRQ_COUNT, ST_IRQ_DEFERRED, ST_RX_DROPPED, ST_IRQ_RECHECKS, ST_BACKLOG = 20, 21, 11, 24, 25
+
+
+def nic_snapshot():
+    a = sym("ne2k_nic")
+    if a is None:
+        return None
+    hdr = bytes.fromhex(http("/api/mem?addr=0x%x&len=40&space=phys" % a)["hex"])
+    st = struct.unpack("<26I", bytes.fromhex(http("/api/mem?addr=0x%x&len=104&space=phys" % (a + NIC_ST))["hex"]))
+    return {"irq_on": hdr[NIC_IRQ_ON], "irq_count": st[ST_IRQ_COUNT], "irq_deferred": st[ST_IRQ_DEFERRED],
+            "rx_dropped": st[ST_RX_DROPPED], "irq_rechecks": st[ST_IRQ_RECHECKS], "backlog": st[ST_BACKLOG]}
+
+
 def frame(mac, length, seq):
     payload = bytes((seq + i) & 0xFF for i in range(max(0, length - 14)))
     return mac + PEER + struct.pack(">H", ETHERTYPE) + payload
@@ -86,6 +102,7 @@ def main():
     refl0 = read_u32(refl_addr) if refl_addr else None
     if refl0 is None:
         print("note: lgy98_reflected not in kernel.map, driver counters skipped")
+    snap0 = nic_snapshot()
 
     # --- 長さ別 ---
     seq = 1
@@ -153,6 +170,19 @@ def main():
         print("%-4s driver counters: reflected +%d (want %d), reflect_fail %d" %
               ("ok" if cnt_ok else "FAIL", refl1 - refl0, want_n, rfail))
         fails += 0 if cnt_ok else 1
+
+    snap1 = nic_snapshot()
+    if snap0 and snap1:
+        d_irq = snap1["irq_count"] - snap0["irq_count"]
+        print("driver: irq_on %d irq +%d deferred +%d rechecks +%d backlog_events +%d rx_dropped %d" %
+              (snap1["irq_on"], d_irq, snap1["irq_deferred"] - snap0["irq_deferred"],
+               snap1["irq_rechecks"] - snap0["irq_rechecks"], snap1["backlog"] - snap0["backlog"],
+               snap1["rx_dropped"]))
+        if snap1["irq_on"]:
+            irq_ok = d_irq > 0 and snap1["rx_dropped"] == 0
+            print("%-4s irq-driven: %d interrupts during test, host queue drops %d" %
+                  ("ok" if irq_ok else "FAIL", d_irq, snap1["rx_dropped"]))
+            fails += 0 if irq_ok else 1
 
     net = http("/api/net")
     print("np21w: tx %s rx %s tx_dropped %s rx_dropped %s" %

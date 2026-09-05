@@ -107,6 +107,7 @@ void idt_init(void);
 void pic_init(void);
 void pit_init(unsigned int hz);
 
+void idt_register_irq(unsigned int irq, void (*stub)(void));
 void irq_enable(unsigned int irq);
 void irq_disable(unsigned int irq);
 void pic_eoi(unsigned int irq);

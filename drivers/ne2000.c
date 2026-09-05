@@ -50,6 +50,10 @@
 #define NE2K_TX_REINIT_MAX   3      /* 連続タイムアウトでの再初期化上限 */
 #define NE2K_BAD_HDR_MAX     4      /* 連続する不整合ヘッダで再初期化 */
 #define NE2K_OVW_DRAIN_BUDGET 64    /* OVW 復旧時のリング回収上限 (16KB なら十分) */
+#define NE2K_IRQ_BUDGET      4      /* IRQ 1 回 / タイマ補助 1 回で回収する受信フレーム数 (§5) */
+#define NE2K_IRQ_RECHECK     4      /* ACK 後の ISR / CURR 再確認の上限 (NP21/W の 2ms 再アサート抑制対策) */
+#define NE2K_IMR_MASK        (NE2K_ISR_PRX | NE2K_ISR_PTX | NE2K_ISR_RXE | NE2K_ISR_TXE | \
+                              NE2K_ISR_OVW | NE2K_ISR_CNT)   /* RDC は同期待ちなので割り込みにしない */
 
 /* ====================================================================== */
 /*  デバイス状態                                                            */
@@ -67,7 +71,10 @@ struct ne2k_dev {
 
     volatile u8 busy;
     volatile u8 irq_pending;
-    u8  imr_mask;            /* leave() で戻す IMR。M3 まで 0 */
+    u8  imr_mask;            /* leave() で戻す IMR (ne2k_irq_enable 後は NE2K_IMR_MASK) */
+    u8  irq_on;              /* IRQ 駆動 (IDT 登録 + IMR 有効化済み) */
+    u8  in_irq;              /* IRQ / タイマ文脈で処理中 (待ちを tick で数える) */
+    u8  rx_backlog;          /* 予算を使い切り、リングに未回収が残っている (IMR はマスク中) */
 
     /* TX */
     u8  tx_busy;
@@ -143,24 +150,39 @@ static void ne2k_enter(void)
     unsigned int f = irq_save();
     nic.busy = 1;
     irq_restore(f);
-    /* M3: ここで IMR をマスクする (page0 前提)。M1/M2 は IMR=0 のまま。 */
+    /* foreground の操作中は NIC の割り込みを止める (page0 は前回の leave が保証)。
+     * この直前に来た IRQ は ne2k_irq() が pending にして leave() へ回す。 */
+    if (nic.irq_on) wr(NE2K_P0_IMR, 0);
 }
 
 static void service(unsigned int budget);
+static u8 read_curr(void);
 
+/* 出るときは page0・DMA idle。busy 中の IRQ (pending) と、ACK 後に到着した分
+ * (ISR に残ったビット、CURR と rx_next の差) を有限回だけ処理してから IMR を戻す。
+ * 予算超過 (rx_backlog) のときは IMR をマスクしたままにし、タイマ補助か次の poll が
+ * 続きを回収して戻す (§5)。 */
 static void ne2k_leave(void)
 {
-    /* 出るときは page0・DMA idle。busy 中に IRQ が来ていたら処理する。 */
+    int pass;
+
     cr_page0_idle();
-    nic.busy = 0;
-    if (nic.irq_pending) {
+    for (pass = 0; pass < NE2K_IRQ_RECHECK; pass++) {
+        int need = nic.irq_pending;
+        if (!need && nic.state == NE2K_STATE_RUNNING && !nic.rx_backlog) {
+            if (rd(NE2K_P0_ISR) & NE2K_IMR_MASK) need = 1;
+            else if (read_curr() != nic.rx_next) need = 1;
+        }
+        if (!need) break;
         nic.irq_pending = 0;
-        nic.busy = 1;
-        service(4);
+        nic.st.irq_rechecks++;
+        service(NE2K_IRQ_BUDGET);
         cr_page0_idle();
-        nic.busy = 0;
     }
-    /* M3: ISR / CURR を再確認してから IMR を戻す */
+    if (nic.irq_on && nic.state == NE2K_STATE_RUNNING && !nic.rx_backlog) {
+        wr(NE2K_P0_IMR, nic.imr_mask);
+    }
+    nic.busy = 0;
 }
 
 /* ====================================================================== */
@@ -442,6 +464,7 @@ static void reset_soft_state(void)
     nic.bad_hdr_run = 0;
     nic.rxq_head = nic.rxq_tail = nic.rxq_count = 0;
     nic.irq_pending = 0;
+    nic.rx_backlog = 0;
 }
 
 /* 停止状態からの再構築。統計は保持する。 */
@@ -503,6 +526,8 @@ void ne2k_stop(void)
     if (nic.state == NE2K_STATE_OFF) return;
     ne2k_enter();
     wr(NE2K_P0_IMR, 0);
+    nic.irq_on = 0;
+    nic.imr_mask = 0;
     wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
     nic.state = NE2K_STATE_STOPPED;
     reset_soft_state();
@@ -603,17 +628,17 @@ static int rx_one(u8 curr)
     return 1;
 }
 
-/* budget フレームまで回収。戻り値 -1 = 再初期化要 */
+/* budget フレームまで回収。戻り値 -1 = 再初期化要、1 = 予算を使い切り未回収が残る、0 = 空 */
 static int rx_drain(unsigned int budget)
 {
     while (budget > 0) {
         u8 curr = read_curr();
         int r = rx_one(curr);
         if (r < 0) return -1;
-        if (r == 0) break;
+        if (r == 0) return 0;
         budget--;
     }
-    return 0;
+    return (read_curr() != nic.rx_next) ? 1 : 0;
 }
 
 /* ====================================================================== */
@@ -626,6 +651,7 @@ static void ovw_begin(u8 isr)
     nic.ovw_txp_was = (u8)((rd(NE2K_CR) & NE2K_CR_TXP) ? 1 : 0);
     nic.ovw_tx_done = (u8)((isr & (NE2K_ISR_PTX | NE2K_ISR_TXE)) ? 1 : 0);
     wr(NE2K_CR, NE2K_CR_PAGE0 | NE2K_CR_RD2 | NE2K_CR_STP);
+    if (nic.irq_on) wr(NE2K_P0_IMR, 0);         /* 復旧完了まで NIC 割り込みは止める */
     nic.ovw_tick = tick_count;
     nic.ovw_used_delay = 0;
     nic.state = NE2K_STATE_OVW_WAIT;
@@ -636,7 +662,8 @@ static void ovw_continue(void)
 {
     int resend;
 
-    if (eflags_if()) {
+    if (eflags_if() || nic.in_irq) {
+        /* tick は IF=1 の foreground でもタイマ文脈 (tick を数えた直後) でも進む */
         if ((u32)(tick_count - nic.ovw_tick) < NE2K_OVW_WAIT_TICKS) return;
     } else if (!nic.ovw_used_delay) {
         cpu_delay_us(NE2K_OVW_WAIT_US);
@@ -702,7 +729,7 @@ static void tx_check_timeout(void)
         tx_complete(rd(NE2K_P0_ISR));
         return;
     }
-    if (!eflags_if()) return;
+    if (!eflags_if() && !nic.in_irq) return;    /* IF=0 の診断ループでは tick が進まない */
     if ((u32)(tick_count - nic.tx_start_tick) >= NE2K_TX_TIMEOUT_TICKS) {
         nic.st.tx_timeouts++;
         reinit_or_fail();
@@ -734,9 +761,14 @@ static void service(unsigned int budget)
     if (isr & NE2K_ISR_RDC) wr(NE2K_P0_ISR, NE2K_ISR_RDC);
 
     /* リングは ISR に関係なく CURR で判定する (ACK 前後の到着を取りこぼさない) */
-    if (rx_drain(budget) < 0) {
-        reinit_or_fail();
-        return;
+    {
+        int r = rx_drain(budget);
+        if (r < 0) {
+            reinit_or_fail();
+            return;
+        }
+        if (r == 1 && !nic.rx_backlog) nic.st.rx_backlog_events++;
+        nic.rx_backlog = (u8)(r == 1);
     }
     tx_check_timeout();
 }
@@ -821,6 +853,8 @@ void ne2k_poll(unsigned int budget)
 
 void ne2k_irq(void)
 {
+    int pass;
+
     nic.st.irq_count++;
     if (nic.busy) {
         /* busy 中の入口は NIC レジスタを変更しない。leave() が処理する。 */
@@ -829,9 +863,47 @@ void ne2k_irq(void)
         return;
     }
     nic.busy = 1;
-    service(4);
-    cr_page0_idle();
+    nic.in_irq = 1;
+    for (pass = 0; pass < NE2K_IRQ_RECHECK; pass++) {
+        service(NE2K_IRQ_BUDGET);
+        cr_page0_idle();
+        if (nic.rx_backlog || nic.state != NE2K_STATE_RUNNING) break;
+        /* ACK 後に到着した分。NP21/W は 2ms 以内の再アサートを抑えるので、
+         * ここで見ないと次の IRQ まで取り残す (実機でも安全側)。 */
+        if (!(rd(NE2K_P0_ISR) & NE2K_IMR_MASK) && read_curr() == nic.rx_next) break;
+        nic.st.irq_rechecks++;
+    }
+    if (nic.irq_on) {
+        /* 予算超過なら IMR をマスクしたまま返し、タイマ補助 / poll が続きを回収して戻す */
+        wr(NE2K_P0_IMR, (nic.rx_backlog || nic.state != NE2K_STATE_RUNNING) ? 0 : nic.imr_mask);
+    }
+    nic.in_irq = 0;
     nic.busy = 0;
+}
+
+void ne2k_irq_enable(void)
+{
+    if (nic.state == NE2K_STATE_OFF) return;
+    nic.imr_mask = NE2K_IMR_MASK;
+    nic.irq_on = 1;
+    /* 有効化前に届いていた分を回収してから IMR を入れる (poll の leave が行う) */
+    ne2k_poll(NE2K_IRQ_BUDGET);
+}
+
+void ne2k_timer_tick(void)
+{
+    if (nic.busy) return;                       /* foreground 操作中は延期 (再入しない) */
+    if (nic.state == NE2K_STATE_OVW_WAIT || nic.rx_backlog ||
+        (nic.state == NE2K_STATE_RUNNING && nic.tx_busy)) {
+        nic.in_irq = 1;
+        ne2k_poll(NE2K_IRQ_BUDGET);
+        nic.in_irq = 0;
+    }
+}
+
+int ne2k_is_busy(void)
+{
+    return nic.busy ? 1 : 0;
 }
 
 void ne2k_get_stats(struct ne2k_stats *stats)

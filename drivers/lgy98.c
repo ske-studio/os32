@@ -17,6 +17,11 @@
 #include "io.h"
 #include "kstring.h"
 
+/* IRQ 入口 (kernel/isr_stub.asm)。どれを使うかは設定の PIC IRQ で決まる */
+extern void irq_stub_nic_3(void);
+extern void irq_stub_nic_5(void);
+extern void irq_stub_nic_6(void);
+
 /* 反射モード (LGY98_FLAG_REFLECT)。static にするとホストから読めないので意図的にグローバル。 */
 static int lgy98_reflect_on = 0;
 u32 lgy98_reflected = 0;
@@ -112,6 +117,14 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         lgy98_reflect_on = 1;
         kprintf(0x07, "[lgy98] reflect mode (M2 test): rx frames are sent back with MACs swapped\n");
     }
+    /* IRQ 駆動へ: IDT 登録 → IMR 有効化 → PIC 有効化 (この順序、§4) */
+    {
+        void (*stub)(void) = (irq == LGY98_INT0_IRQ) ? irq_stub_nic_3
+                           : (irq == LGY98_INT1_IRQ) ? irq_stub_nic_5 : irq_stub_nic_6;
+        idt_register_irq(irq, stub);
+        ne2k_irq_enable();
+        irq_enable(irq);
+    }
     if (flags & LGY98_FLAG_DIAG) {
         ne2k_get_stats(&st);
         kprintf(st.diag_ram_errors || st.diag_dma_errors ? 0xC1 : 0x07,
@@ -135,7 +148,7 @@ void lgy98_tick(void)
     int n;
     if (!lgy98_reflect_on) return;
     if (ne2k_state() != NE2K_STATE_RUNNING) return;
-    ne2k_poll(2);
+    if (ne2k_is_busy()) return;                 /* foreground の send/recv を中断した tick では触らない */
     for (n = 0; n < 2; n++) {
         unsigned int len = 0;
         u8 tmp[6];
