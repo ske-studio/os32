@@ -39,8 +39,9 @@
 /* ====================================================================== */
 /*  LAN (LGY-98, docs/tasks/network/PLAN.md)                                */
 /*                                                                          */
-/*  BASE 0 = 無効 (既定)。有効化はビルド時: make kernel LGY98=1              */
-/*  (build/config.mk が CONFIG_LGY98_* を -D で渡す)。広域スキャンや IRQ の  */
+/*  BASE 0 = 無効 (既定)。有効化はビルド時: make kernel-lgy98 (戻すのは        */
+/*  kernel-nolgy98)。build/config.mk がスタンプを見て CONFIG_LGY98_* を -D で   */
+/*  渡す。広域スキャンや IRQ の                                              */
 /*  自動検出はしない。値は PIC IRQ (3 / 5 / 6)。                             */
 /* ====================================================================== */
 #ifndef CONFIG_LGY98_BASE

@@ -25,7 +25,7 @@ tools/np21w_mcp/np21w_client.py を流用する (curl.exe フォールバック�
   {"action":"status"}                  エミュレータの状態
   {"action":"done","report":"..."}     終了。report は人間向けの報告
 ホスト側 (ビルド/配備。許可リスト方式で自由なシェルは与えない):
-  {"action":"make","target":"kernel"}  make <target> (kernel/kernel-lgy98/programs/sdk/all/check/clean/apps/game/external)
+  {"action":"make","target":"kernel"}  make <target> (kernel/kernel-lgy98/kernel-nolgy98/programs/sdk/all/check/clean/apps/game/external)
   {"action":"hotdeploy","file":"userland/cmds/wc.bin"}  再起動なしで 1 バイナリ差し替え
   {"action":"deploy"}                  os32-cycle deploy (停止→NHD 配備→起動→ver)
 """
@@ -61,7 +61,7 @@ BUILD_OBS_LIMIT = 2400
 
 ROOT = os.environ.get("OS32_ROOT", os.path.abspath(os.path.join(HERE, "..", "..")))
 OS32_CYCLE = os.environ.get("OS32_CYCLE", os.path.expanduser("~/.local/bin/os32-cycle"))
-MAKE_TARGETS = ("kernel", "kernel-lgy98", "programs", "sdk", "all", "check", "clean", "deploy",
+MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-nolgy98", "programs", "sdk", "all", "check", "clean", "deploy",
                 "apps", "game", "external")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")
@@ -91,7 +91,7 @@ Actions:
 {"action":"selftest"}                            read the kernel self-test counters (kselftest_pass / kselftest_fail)
 {"action":"done","report":"<what you found>"}    finish the task and report
 Host-side build actions (they run on the development PC, not on OS32):
-{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル), programs, sdk, all, check, clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
+{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル、以後の deploy も有効のまま), kernel-nolgy98 (無効に戻す), programs, sdk, all, check, clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
 {"action":"hotdeploy","file":"userland/cmds/wc.bin"}  rebuild that one program and place it into the running OS32 without reboot
 {"action":"deploy"}                              full deploy: stop emulator, write NHD, restart, wait for OS32 (takes minutes)
 

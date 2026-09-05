@@ -86,13 +86,19 @@ KERNEL_CFLAGS = $(CFLAGS_COMMON) -O2 -Wall -D__KERNEL_BUILD__
 #   例: make kernel KERNEL_CFLAGS_EXTRA=-DKAPI_PROFILE
 KERNEL_CFLAGS += $(KERNEL_CFLAGS_EXTRA)
 
-# LAN (LGY-98) を有効にしたカーネル: make kernel LGY98=1
+# LAN (LGY-98) を有効にしたカーネル: make kernel-lgy98 (戻すのは make kernel-nolgy98)
+#   選択は $(LGY98_STAMP) に残り、以後の make kernel / deploy-nhd も同じ設定で
+#   ビルドする (deploy がカーネルを作り直しても無効に戻らない)。
 #   BASE / IRQ / FLAGS は LGY98_BASE / LGY98_IRQ / LGY98_FLAGS で上書きできる
 #   (既定は NP21/W の値。FLAGS 1 = 起動時診断)。読むのは drivers/lgy98.c だけで、
 #   その .o は毎回コンパイルされる (build/kernel.mk)。
+LGY98_STAMP = $(BUILD_OUT)/lgy98.enabled
 LGY98_BASE  ?= 0x10D0
 LGY98_IRQ   ?= 5
 LGY98_FLAGS ?= 1
+ifneq ($(wildcard $(LGY98_STAMP)),)
+LGY98 ?= 1
+endif
 ifdef LGY98
 KERNEL_CFLAGS += -DCONFIG_LGY98_BASE=$(LGY98_BASE) -DCONFIG_LGY98_IRQ=$(LGY98_IRQ) -DCONFIG_LGY98_FLAGS=$(LGY98_FLAGS)
 endif

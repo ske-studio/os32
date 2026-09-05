@@ -336,8 +336,10 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 - **診断は初期化時のフラグ** (`LGY98_FLAG_DIAG` → RAM 全域パターン試験 + Remote DMA 往復試験
   1/2/3/59/60/61/255/256/257/1513/1514 バイトと読み側余白の検査) で行い、結果は統計
   (`diag_ram_errors` / `diag_dma_errors` / `rdc_timeout`) と起動ログに出す。
-- **有効化はビルド時** `make kernel LGY98=1` (= `make kernel-lgy98`、emu_agent の許可リストに追加)。
-  `CONFIG_LGY98_BASE=0` (既定) では `lgy98_init()` は何もしない。
+- **有効化はビルド時** `make kernel-lgy98` (スタンプ `build/out/lgy98.enabled` を置くので、以後の
+  `make kernel` / `deploy-nhd` も有効のまま。`make kernel-nolgy98` で戻す。emu_agent の許可リストに追加)。
+  `CONFIG_LGY98_BASE=0` (既定) では `lgy98_init()` は何もしない。`make kernel LGY98=1` だけだと
+  deploy がカーネルを作り直した時に無効へ戻る (2026-09-05 に実際に踏んだ)。
 - IRQ 入口 (`isr_stub.asm` のスタブ、`idt.c` の登録、IMR の有効化) は M3 で入れる。
   `ne2k_irq()` の busy/pending の枠だけ先に置いた。
 
