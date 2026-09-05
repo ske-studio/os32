@@ -51,6 +51,7 @@
 #define NE2K_BAD_HDR_MAX     4      /* 連続する不整合ヘッダで再初期化 */
 #define NE2K_OVW_DRAIN_BUDGET 64    /* OVW 復旧時のリング回収上限 (16KB なら十分) */
 #define NE2K_IRQ_BUDGET      4      /* IRQ 1 回 / タイマ補助 1 回で回収する受信フレーム数 (§5) */
+#define NE2K_WATCHDOG_BUDGET 4      /* 100Hz ウォッチドッグ 1 回で回収する上限 (取りこぼし自己回復, M4) */
 #define NE2K_IRQ_RECHECK     4      /* ACK 後の ISR / CURR 再確認の上限 (NP21/W の 2ms 再アサート抑制対策) */
 #define NE2K_IMR_MASK        (NE2K_ISR_PRX | NE2K_ISR_PTX | NE2K_ISR_RXE | NE2K_ISR_TXE | \
                               NE2K_ISR_OVW | NE2K_ISR_CNT)   /* RDC は同期待ちなので割り込みにしない */
@@ -88,6 +89,7 @@ struct ne2k_dev {
     u8  ovw_used_delay;      /* IF=0 だったので cpu_delay_us で待った */
 
     u8  bad_hdr_run;
+    u8  last_curr;           /* 直近に読んだ CURR (getter が NIC に触れず空きを見積もる, M4) */
 
     /* ホスト側受信キュー (単一生産者 / 単一消費者) */
     u8  rxq_head, rxq_tail, rxq_count;
@@ -565,6 +567,7 @@ static u8 read_curr(void)
     cr_page1_idle();
     c = rd(NE2K_P1_CURR);
     cr_page0_idle();
+    nic.last_curr = c;
     return c;
 }
 
@@ -890,15 +893,45 @@ void ne2k_irq_enable(void)
     ne2k_poll(NE2K_IRQ_BUDGET);
 }
 
+/* 100Hz の受信ウォッチドッグ (M4)。NIC IRQ を取りこぼしても (NP21/W の 2ms
+ * 再アサート抑制やエッジ喪失、リング飽和後の停止) ここで CURR を見て回収するので、
+ * 「フレームがリングに残ったまま二度と IRQ が来ない」wedge を防ぐ。健全時は CURR ==
+ * rx_next で 1 回の CURR 読みだけで戻る (安価)。溢れそのものはリンク層の Credit で
+ * 防ぐ ([LINK_PLAN.md])。ここは「溢れても・取りこぼしても壊れない」安全網。 */
 void ne2k_timer_tick(void)
 {
+    u32 before;
     if (nic.busy) return;                       /* foreground 操作中は延期 (再入しない) */
-    if (nic.state == NE2K_STATE_OVW_WAIT || nic.rx_backlog ||
-        (nic.state == NE2K_STATE_RUNNING && nic.tx_busy)) {
-        nic.in_irq = 1;
-        ne2k_poll(NE2K_IRQ_BUDGET);
-        nic.in_irq = 0;
-    }
+    if (nic.state != NE2K_STATE_RUNNING && nic.state != NE2K_STATE_OVW_WAIT) return;
+    nic.in_irq = 1;
+    before = nic.st.rx_frames + nic.st.rx_dropped;
+    ne2k_poll(nic.rx_backlog ? NE2K_IRQ_BUDGET : NE2K_WATCHDOG_BUDGET);
+    /* この tick で回収できたフレーム = IRQ が取りこぼしていた分 (健全時は 0)。 */
+    nic.st.watchdog_frames += (nic.st.rx_frames + nic.st.rx_dropped) - before;
+    if (nic.st.rx_frames + nic.st.rx_dropped != before) nic.st.watchdog_hits++;
+    nic.in_irq = 0;
+}
+
+/* ---- リンク層が Credit を作るための空き容量 (LINK_PLAN.md §2-2)。
+ * ドライバは空きを返すだけで Credit は計算しない。NIC には触れず、
+ * ウォッチドッグ / IRQ が更新した last_curr と rx_next から見積もる。 */
+unsigned int ne2k_rx_ring_free_pages(void)
+{
+    unsigned int size, c, b;
+    if (nic.state != NE2K_STATE_RUNNING) return 0;
+    size = (unsigned int)(nic.rx_stop - nic.rx_start);
+    if (size == 0) return 0;
+    /* BNRY = rx_next - 1 (先頭なら rx_stop-1)。NIC は CURR から BNRY 手前まで受信できる。 */
+    b = (unsigned int)((nic.rx_next == nic.rx_start ? nic.rx_stop - 1 : nic.rx_next - 1) - nic.rx_start);
+    c = (unsigned int)(nic.last_curr - nic.rx_start);
+    if (c >= size) c = 0;                        /* last_curr 未取得時の安全側 */
+    return (b + size - c) % size;
+}
+
+unsigned int ne2k_rx_queue_free(void)
+{
+    unsigned int used = nic.rxq_count;
+    return (used >= NE2K_RXQ_SLOTS) ? 0 : (NE2K_RXQ_SLOTS - used);
 }
 
 int ne2k_is_busy(void)

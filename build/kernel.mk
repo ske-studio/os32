@@ -183,4 +183,9 @@ check-net-m2:
 check-net-m2-cpl3:
 	@python3 tools/net_m2_test.py --during-cmd "less /etc/profile" --wait-for "/etc/profile" --exit-key q --during-timeout 30
 
-.PHONY: check-net-m2 check-net-m2-cpl3
+# M4: フロー制御なしでリングを故意に飽和させ、ドライバが wedge せず 100Hz
+# ウォッチドッグで自己回復することを確認する (溢れても壊れない安全網)。
+check-net-m4:
+	@python3 tools/net_m4_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4

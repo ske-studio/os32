@@ -75,6 +75,8 @@ struct ne2k_stats {
     u32 diag_dma_errors; /* NE2K_CFG_DIAG_DMA の失敗ケース数 */
     u32 irq_rechecks;    /* ACK 後の再確認で追加処理した回数 (M3) */
     u32 rx_backlog_events; /* 予算超過で IMR をマスクしたまま返した回数 (M3) */
+    u32 watchdog_frames; /* 100Hz ウォッチドッグが回収した (= IRQ が取りこぼした) フレーム数 (M4) */
+    u32 watchdog_hits;   /* ウォッチドッグが 1 フレーム以上回収した tick 数 (M4) */
 };
 
 /* ---- API (docs/tasks/network/PLAN.md §3) ---- */
@@ -111,6 +113,11 @@ void ne2k_irq_enable(void);
 /* 100Hz タイマ補助 (kernel/isr_handlers.c)。予算超過の残り・OVW 復旧・送信
  * タイムアウトだけを進める。busy なら延期して再入しない。プロトコル処理はしない。 */
 void ne2k_timer_tick(void);
+
+/* リンク層が Credit を作るための空き容量 (LINK_PLAN.md §2-2)。ドライバは空きを
+ * 返すだけで Credit は計算しない。NIC には触れず last_curr / rx_next から見積もる。 */
+unsigned int ne2k_rx_ring_free_pages(void);
+unsigned int ne2k_rx_queue_free(void);
 
 /* foreground 操作中 (タイマ文脈から send/recv を呼ぶ前に確認する) */
 int  ne2k_is_busy(void);
