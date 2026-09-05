@@ -167,7 +167,7 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 |---|---|
 | L0 Stop-and-Wait | **エミュレータ合格 (2026-09-05)**。HELLO 交換後、1 要求 1 応答が往復。ACK まで次を送らない。重複 WINDOW/ACK に耐える。ページ消費表を凍結 |
 | L1 WINDOW/Credit | **エミュレータ合格 (2026-09-05)**。Host が credit_pages を超えて送らない。OVW を通常運転で起こさない。重複 WINDOW で二重加算しない (絶対値) |
-| L2 Streaming | 大容量応答を seq 連続で受け、OS32 側の再結合バッファ無しで順次消費。欠落は再送で埋まる |
+| L2 Streaming | **エミュレータ合格 (2026-09-05)**。大容量応答を seq 連続で受け、OS32 側の再結合バッファ無しで順次消費。欠落は再送で埋まる |
 | L3 Host Services | 外部プログラムから HTTP_GET → host_read が動く。回線速度に依らず OS32 側のメモリ上限が一定 |
 
 ## 5-1. 進捗 (ブランチ `feat/net-link`)
@@ -189,7 +189,13 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 - **途中の修正**: 連続転送中に Remote DMA の RDC が 1 回タイムアウトし reinit が走って
   リング全体 (in-flight DATA) が消え、L1 が gap でデッドロックしていた。dma_read/write を
   1 回だけ再発行するようにして解消 (commit)。
-- **次**: L2 (DATA seq のストリーミング再開・欠落再送) → L3 (Host Services)。
+- **L2 実装・エミュレータ合格 (2026-09-05)**: 8KB のリングバッファに順序どおりの DATA を
+  溜め `link_stream_read` で順次消費 (再結合バッファなし)。バッファ空きを credit に反映して
+  消費が遅ければホストへ背圧。欠落 (seq>期待) は捨てて ack を止め、ホストの Go-Back-N 再送で
+  埋める。`make check-net-l2`: 128KB を 8KB バッファで全消費・内容一致・EOF・誘発した欠落を
+  回復 (gaps>0 かつ read==total)・overflow 0・NIC drop 0。
+- **次**: L3 (Host Services — HTTP/File/RPC を KAPI 末尾追加)。KAPI 版は GUI の K1 (v41) と
+  順序調整が要る。`link_stream_read` がアプリ側の消費入口になる。
 
 ## 6. Host Agent
 
