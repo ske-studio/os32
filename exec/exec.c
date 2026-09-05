@@ -191,6 +191,112 @@ volatile u32 fault_kill_count = 0;
  * 非 static (isr_handlers.c が extern で参照)。 */
 volatile int ring3_in_syscall = 0;
 
+/* ======================================================================== */
+/*  GUI 入力ポンプと強制脱出 (K2 / 契約 T6・T8 の X4)                        */
+/* ======================================================================== */
+
+/* IRQ0 が 100Hz で加算するティック (kernel/idt.h)。ポンプの上限判定は
+ * これを **読むだけ** で行う (票 K2 の鉄則: get_tick を叩く回数を増やさない)。 */
+extern volatile u32 tick_count;
+
+/* ポンプ実行中フラグ (票 K2-3 の再入防止)。ポンプ自身は CPL=0 の WM コード
+ * なので int 0x80 は経由しないが、将来ポンプの中から何かが syscall 境界を
+ * 通っても二重取り込みにならないようにカーネル側でも止める。 */
+static volatile int g_gui_pump_busy = 0;
+
+/* 最後にポンプを回した tick と、その値が有効かどうか。
+ * 「同じ tick の間は 1 回だけ」= 前回から 1 tick (10ms) 未満なら呼ばない。 */
+static u32 g_gui_pump_tick = 0;
+static int g_gui_pump_tick_valid = 0;
+
+/* CPL=3 アプリの強制脱出要求 (CTRL+STOP、契約 T6)。IRQ1 の kbd_irq_handler が
+ * 立て、(a) IRQ1 スタブ (割り込まれた文脈が CPL=3 = アプリのコード実行中の
+ * とき) と (b) syscall 入口 が見て ring3_fault_kill する。カーネル内 (wrap の
+ * 実行中) では畳まない — 中途半端なカーネル状態で longjmp しないため、
+ * 要求は残して次の安全な地点で処理する。 */
+static volatile int g_ring3_abort_req = 0;
+
+/* CTRL+STOP で畳んだ回数 (PM の V4 検証が emu_read_mem で読む)。
+ * fault_kill_count にも含まれる (畳む経路は同じ ring3_fault_kill)。 */
+volatile u32 ring3_abort_count = 0;
+
+/* ======================================================================== */
+/*  ring3_abort_request — CTRL+STOP を受けた (IRQ1 の ISR から呼ばれる)      */
+/*                                                                          */
+/*  ISR の中では畳まない (EOI も V86 反射も済んでいない)。CPL=3 アプリが      */
+/*  走っているときだけ要求を立てる。CUI でシェルしか居ないときは無視。        */
+/* ======================================================================== */
+void ring3_abort_request(void)
+{
+    if (g_ring3_active) {
+        g_ring3_abort_req = 1;
+    }
+}
+
+/* ======================================================================== */
+/*  ring3_abort_check — 要求があればアプリを畳む (戻らない)                  */
+/*                                                                          */
+/*  呼び出し元は 2 か所:                                                     */
+/*    - kernel/isr_stub.asm の IRQ1 スタブ (EOI と V86 反射の後、割り込まれた */
+/*      文脈が CPL=3 のときだけ)。KAPI を呼ばない計算ループはここで死ぬ。     */
+/*    - ring3_syscall_dispatch の入口 (wrap に入る前)。                      */
+/*  ring3_fault_kill は master CR3 復帰 → AS 破棄 → longjmp で戻らない。      */
+/*  longjmp 先の exec_run は復帰点で _enable() するので、割り込みゲート経由で */
+/*  IF=0 のまま来ても割り込みは戻る。                                        */
+/* ======================================================================== */
+void ring3_abort_check(void)
+{
+    if (!g_ring3_abort_req) return;
+    g_ring3_abort_req = 0;
+    if (!g_ring3_active) return;    /* アプリはもう居ない */
+    ring3_abort_count++;
+    ring3_fault_kill();             /* 戻らない */
+}
+
+/* ======================================================================== */
+/*  ring3_gui_pump — syscall 境界の入力ポンプ (票 K2-1/2/3、契約 T6)         */
+/*                                                                          */
+/*  アプリが KAPI を呼んでいる限り、WM (gshell) が登録したポンプをここで      */
+/*  回し、キーボードとマウスの入力を取りこぼさないようにする。               */
+/*                                                                          */
+/*  上限 (票 K2-1):                                                          */
+/*    - syscall 1 回につき最大 1 回 (この関数はディスパッチャから 1 回だけ    */
+/*      呼ばれる)。                                                          */
+/*    - 前回から 1 tick (10ms) 未満なら呼ばない。KAPI を毎秒数百回叩く        */
+/*      アプリ (v2 PLAN §3 の実測 233/s) で WM の処理が支配的にならないため。 */
+/*                                                                          */
+/*  除外 (票 K2-3): WM 自身 (owner 1 = シェル帯) からの呼び出し。WM は自分の  */
+/*  周期 (X3 = OP_WAIT) で回すので、ここで二重に回さない。                    */
+/*                                                                          */
+/*  呼ぶ位置は kapi_invoke の **前**、かつフォールトガード                    */
+/*  (ring3_in_syscall) の **外側**。ポンプは CPL=0 の WM コードで、ここで      */
+/*  落ちるのはアプリのせいではない (契約 T8 の X4: 落ちたらカーネルの責任)。  */
+/*  ポンプ実行中も IF=1 のまま — IRQ は普通に入る (int80_stub が sti 済み)。  */
+/* ======================================================================== */
+static void ring3_gui_pump(void)
+{
+    GuiPump pump;
+    u32 now;
+
+    if (g_gui_pump_busy) return;             /* 再入防止 (票 K2-3) */
+
+    pump = (GuiPump)gui_get_pump();
+    if (pump == 0) return;                   /* WM 未登録 (CUI) */
+
+    if (res_owner_get() == GUI_SHELL_OWNER) return;  /* WM 自身の syscall */
+
+    now = tick_count;
+    if (g_gui_pump_tick_valid && now == g_gui_pump_tick) {
+        return;                              /* 同じ tick 内 = 1 tick 未満 */
+    }
+    g_gui_pump_tick = now;
+    g_gui_pump_tick_valid = 1;
+
+    g_gui_pump_busy = 1;
+    pump();
+    g_gui_pump_busy = 0;
+}
+
 /* ユーザポインタ引数の早期範囲検証 (v2 M2e 補助)。exec が CPL=3 アプリに
  * USER マップした領域 (プログラム帯/ユーザスタック/SHM/VRAM) と NULL のみ許可。
  * 範囲外 (例: 0xDEADBEEF) は wrap に入る前に弾き、カーネル状態不整合を避ける。
@@ -356,6 +462,17 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     u32 nbytes;
     u32 window;
     u32 wrapptr;
+
+    /* --- CTRL+STOP の要求があればここで畳む (契約 T6) ---
+     * IRQ1 の ISR が要求を立て、CPL=3 のコードを割り込んだときはスタブ側で
+     * 畳む。KAPI 呼び出しの最中に割り込まれた場合はカーネル内なので畳まず、
+     * この地点 (wrap に入る前 = カーネル状態が静かな点) まで持ち越す。 */
+    ring3_abort_check();        /* 要求があれば longjmp して戻らない */
+
+    /* --- GUI 入力ポンプ (票 K2-1、契約 T6 / T8 の X4) ---
+     * フォールトガード (ring3_in_syscall) を立てる **前** に回す。ポンプは
+     * CPL=0 の WM コードなので、そこで落ちたらアプリではなくカーネルの責任。 */
+    ring3_gui_pump();
 
     /* 範囲外 slot はワイルド呼び出し → アプリだけ kill (カーネルを飛ばさない)。
      * ring3_fault_kill は fault_kill_count++ / teardown / longjmp で戻らない。 */
@@ -929,6 +1046,11 @@ int exec_run(const char *cmdline)
             ((u32 *)u_esp)[0] = 0;   /* ダミー retaddr */
 
             g_ring3_active = 1;
+
+            /* 前のアプリ宛に残った CTRL+STOP 要求を持ち越さない (K2 作業 4)。
+             * 持ち越すと、起動したばかりのアプリが最初の syscall で
+             * 身に覚えのない kill を食う。 */
+            g_ring3_abort_req = 0;
 
             /* --- M1d: iret で CPL=3 に降りる ---
              * v86_entry.asm の iretd フレーム構築 (SS/ESP/EFLAGS/CS/EIP) を流用。

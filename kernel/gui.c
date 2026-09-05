@@ -8,13 +8,13 @@
 
 #include "gui.h"
 #include "kstring.h"
+#include "kbd.h"      /* kbd_set_gui_mode (K2-B) */
 
 /* res_owner_get() は fs/fd_redirect.c。FD と同じ「確保した実行レベル」。
  * ドライバ/カーネル各所と同じ流儀で extern 宣言する (-Ifs 非依存)。 */
 extern int res_owner_get(void);
 
-/* シェル帯の実行レベル (exec_exit の注記どおり level 1 = シェル)。 */
-#define GUI_SHELL_OWNER  1
+/* GUI_SHELL_OWNER (= 1) は gui.h。K2 の syscall 境界ポンプも同じ値を使う。 */
 
 /* ======== WM 登録状態 ======== */
 /* gui_register で shell 帯から一度だけ登録される。CPL=0 のシェル帯コード
@@ -50,7 +50,13 @@ i32 gui_register(void *handler, void *pump)
         return OS32_ERR_INVAL;
     }
     g_gui_handler = (GuiHandler)handler;
-    g_gui_pump    = pump;   /* K2 が使う。今は保存だけ */
+    g_gui_pump    = pump;   /* K2 の syscall 境界ポンプが呼ぶ (exec/exec.c) */
+
+    /* WM が入ったのでキーボードを GUI モードへ (K2-B、W1 申し送り ①)。
+     * WM は raw リングだけを読むので、cooked リング (kbd_buf) に積み続けると
+     * 32 打鍵で溢れて kbd_dropped が増え、実際には落ちていない打鍵が
+     * 偽の OVERFLOW として WM → アプリへ伝わる。GUI 中は積まない。 */
+    kbd_set_gui_mode(1);
     return 0;
 }
 
@@ -73,6 +79,9 @@ void gui_owner_exit(int owner)
     if (owner == GUI_SHELL_OWNER) {
         g_gui_handler = 0;
         g_gui_pump    = 0;
+        /* CUI に戻るのでキーボードを元に戻す (cooked リングを再開)。
+         * これをしないと shell.bin が載っても打鍵が届かない (K2-B)。 */
+        kbd_set_gui_mode(0);
     }
 }
 
