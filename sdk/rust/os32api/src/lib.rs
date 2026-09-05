@@ -15,6 +15,10 @@ extern crate alloc;
 pub mod kapi_generated;
 pub use kapi_generated::*;
 
+/* GUI シェル v1.1 共有定義 (proto / types)。C レーン (C1) 所有。
+ * 値の正典は sdk/include/os32/os32_gui_shared.h。 */
+pub mod gui;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::panic::PanicInfo;

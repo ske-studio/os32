@@ -16,6 +16,35 @@ extern crate os32api;
 
 pub mod types;
 
+/* ---------------------------------------------------------------- */
+/*  G 描画レイヤ (票 C1) — 契約 G の Rect/Style/Surface/クリップ/文字。 */
+/*  既存のウィジェット API (下) とは独立。C2 がウィジェット描画を       */
+/*  これへ寄せる前提。libos32gfx を FFI で呼ぶ (自前でピクセルを書かない)。*/
+/* ---------------------------------------------------------------- */
+mod ffi;
+mod gstate;
+pub mod clip;
+pub mod draw;
+pub mod surface;
+
+/// 契約 G の一式をまとめた入口。`libos32gui::gapi::*` で使う
+/// (既存の内部 `fn g()` と名前空間は別だが、紛れを避けて gapi と呼ぶ)。
+pub mod gapi {
+    /// 共有定数 (op / イベント種別 / Style フラグ / 色 / 上限 / SHM / エラー)。
+    pub use os32api::gui::proto;
+    /// 基本型 (Rect / Color / Style / SurfaceId / BitmapId / FontId / ScreenInfo / Stats)。
+    pub use os32api::gui::types;
+
+    pub use crate::clip::{clear_base_clip, current_clip, pop_clip, push_clip, set_base_clip};
+    pub use crate::draw::{
+        base_violation_count, blit, draw_rect, fill_rect, hline, line, measure_text, screen_info,
+        stats, text, vline,
+    };
+    pub use crate::surface::{
+        create_surface, create_window_surface, destroy_surface, screen_surface, surface_size,
+    };
+}
+
 use core::cell::UnsafeCell;
 use os32api::gfx;
 use os32api::KernelAPI;
