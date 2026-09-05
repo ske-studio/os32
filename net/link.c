@@ -14,6 +14,11 @@
 #include "idt.h"            /* tick_count */
 #include "cpu_calibrate.h"  /* cpu_delay_us */
 
+/* L1 の credit 計算パラメータ (LINK_PLAN.md §2-2) */
+#define LINK_MAXFRAME_PAGES 6       /* 最大 Ethernet フレームが占めるページ数 */
+#define LINK_CREDIT_MARGIN  12      /* 安全マージン (最大フレーム 2 枚分のページ) */
+#define LINK_L1_TIMEOUT     500     /* bulk 全体の待ち上限 (tick, 5s) */
+
 /* ---- タイムアウト・再送 (100Hz tick 基準) ---- */
 #define LINK_RTO_TICKS      20      /* 1 往復の待ち上限 (200ms)。実機余裕は後で調整 */
 #define LINK_POLL_BUDGET    4
@@ -46,6 +51,18 @@ u32 link_rx_frames = 0;
 u32 link_rx_dropped = 0;
 u8  link_peer_mac[6] = { 0, 0, 0, 0, 0, 0 };
 u16 link_epoch = 0;
+
+/* L1 状態・カウンタ */
+u32 link_l1_recv = 0;
+u32 link_l1_bytes = 0;
+u32 link_l1_ooo = 0;
+u32 link_l1_windows = 0;
+u32 link_l1_max_credit = 0;
+u32 link_l1_min_credit = 0;
+u32 link_l1_done = 0;
+u32 link_l1_meas_pages = 0;
+static int link_l1_active = 0;
+static u32 link_l1_next = 1;     /* 次に期待する DATA seq */
 
 /* ---- 小さな LE アクセサ (受信フレームは非整列なのでバイト単位で読む) ---- */
 static int mac_eq(const u8 *a, const u8 *b)
@@ -141,13 +158,25 @@ static void link_dispatch(const u8 *f, unsigned int flen)
         link_last_resp_valid = 1;
         link_rx_ack = seq;
         break;
-    case LINK_OP_REQUEST:
     case LINK_OP_DATA:
+        if (link_l1_active) {
+            if (seq == link_l1_next) {          /* 順序どおり */
+                link_l1_next++;
+                link_l1_recv++;
+                link_l1_bytes += plen;
+            } else if (seq > link_l1_next) {    /* 欠落 (信頼ソケットでは通常起きない) */
+                link_l1_ooo++;
+            }                                    /* seq < next は重複、無視 */
+        }
+        break;
     case LINK_OP_EOF:
+        if (link_l1_active) link_l1_done = 1;
+        break;
+    case LINK_OP_REQUEST:
     case LINK_OP_ACK:
     case LINK_OP_WINDOW:
     default:
-        /* L0 では OS32 が要求側。Host からの REQUEST/DATA は L2/L3 で扱う。 */
+        /* L0/L1 では OS32 が要求側。Host からの REQUEST は L2/L3 で扱う。 */
         break;
     }
 }
@@ -224,6 +253,91 @@ int link_request(const void *req, unsigned int req_len,
     }
     link_rt_fail++;
     return LINK_ERR_TIMEOUT;
+}
+
+/* いま許可できる credit (絶対値, ページ)。リング空きと SW キュー空きの小さい方
+ * から安全マージンを引く (LINK_PLAN.md §2-2)。ドライバは空きを返すだけ。 */
+static u16 link_credit_pages(void)
+{
+    unsigned int ring = ne2k_rx_ring_free_pages();
+    unsigned int qpages = ne2k_rx_queue_free() * LINK_MAXFRAME_PAGES;
+    unsigned int c = (ring < qpages) ? ring : qpages;
+    c = (c > LINK_CREDIT_MARGIN) ? c - LINK_CREDIT_MARGIN : 0;
+    return (u16)c;
+}
+
+/* WINDOW を 1 つ送る (絶対値: ack = 順序どおり受けた最終 seq、payload に credit_pages)。 */
+static void link_send_window(void)
+{
+    u8 pl[2];
+    u16 credit = link_credit_pages();
+    pl[0] = (u8)credit;
+    pl[1] = (u8)(credit >> 8);
+    if (link_send(LINK_OP_WINDOW, link_peer_mac, 0, link_l1_next - 1, pl, 2) != LINK_OK) return;
+    link_l1_windows++;
+    if (credit > link_l1_max_credit) link_l1_max_credit = credit;
+    if (credit && (link_l1_min_credit == 0 || credit < link_l1_min_credit)) link_l1_min_credit = credit;
+}
+
+void link_l1_bulk(unsigned int count, unsigned int payload)
+{
+    char req[32];
+    u32 deadline, last_win_tick;
+    u32 rxf0, pages0;
+    struct ne2k_stats st;
+    unsigned int i;
+
+    if (!link_ready || !link_hello_ok) {
+        kprintf(0xC1, "[link] L1 skipped (no peer)\n");
+        return;
+    }
+    /* リセット */
+    link_l1_recv = link_l1_bytes = link_l1_ooo = link_l1_windows = 0;
+    link_l1_max_credit = link_l1_min_credit = link_l1_done = link_l1_meas_pages = 0;
+    link_l1_next = 1;
+    link_l1_active = 1;
+
+    ne2k_get_stats(&st);
+    rxf0 = st.rx_frames;
+    pages0 = st.rx_pages_total;
+
+    /* "BULK <count> <payload>" を送る (固定書式、10 進) */
+    i = 0;
+    req[i++] = 'B'; req[i++] = 'U'; req[i++] = 'L'; req[i++] = 'K'; req[i++] = ' ';
+    i += (unsigned int)kutoa_dec(count, req + i, (int)(sizeof(req) - i));
+    req[i++] = ' ';
+    i += (unsigned int)kutoa_dec(payload, req + i, (int)(sizeof(req) - i));
+    link_send(LINK_OP_REQUEST, link_peer_mac, 0, link_l1_next - 1, req, i);
+
+    /* 受信ループ: 100Hz で WINDOW を送りつつ DATA を回収する */
+    deadline = tick_count + LINK_L1_TIMEOUT;
+    last_win_tick = tick_count - 1;
+    while (!link_l1_done && link_l1_recv < count && (i32)(deadline - tick_count) > 0) {
+        link_poll();
+        if (tick_count != last_win_tick) {
+            last_win_tick = tick_count;
+            link_send_window();
+        }
+    }
+    /* 最終 WINDOW (ack を最新に) */
+    link_send_window();
+
+    /* 実測: この bulk で受けたフレームの平均消費ページ ×100 */
+    ne2k_get_stats(&st);
+    {
+        u32 df = st.rx_frames - rxf0;
+        u32 dp = st.rx_pages_total - pages0;
+        if (df) link_l1_meas_pages = (dp * 100) / df;
+    }
+    link_l1_active = 0;
+
+    kprintf((link_l1_recv == count && link_l1_ooo == 0) ? 0x07 : 0xC1,
+            "[link] L1 bulk: %d/%d frames, ooo %d, windows %d, credit %d..%d pages, "
+            "meas %d.%02d pages/frame%s\n",
+            (int)link_l1_recv, (int)count, (int)link_l1_ooo, (int)link_l1_windows,
+            (int)link_l1_min_credit, (int)link_l1_max_credit,
+            (int)(link_l1_meas_pages / 100), (int)(link_l1_meas_pages % 100),
+            link_l1_done ? " (EOF)" : " (timeout)");
 }
 
 void link_selftest(int rounds)

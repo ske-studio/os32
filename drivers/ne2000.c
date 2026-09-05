@@ -625,6 +625,12 @@ static int rx_one(u8 curr)
         nic.st.rx_bytes += dlen;
     }
 
+    /* リングで消費したページ数を実測に足す (§2-3、リンク層の credit cost 用) */
+    {
+        unsigned int size = (unsigned int)(nic.rx_stop - nic.rx_start);
+        if (size) nic.st.rx_pages_total +=
+            ((unsigned int)h.next + size - nic.rx_next) % size;
+    }
     /* データ回収後に next を進め、BNRY はその 1 ページ前 */
     nic.rx_next = h.next;
     wr(NE2K_P0_BNRY, ne2k_ring_bnry_for(nic.rx_start, nic.rx_stop, nic.rx_next));

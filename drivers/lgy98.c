@@ -127,7 +127,10 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         ne2k_irq_enable();
         irq_enable(irq);
     }
-    if (flags & LGY98_FLAG_LINKTEST) link_selftest(10);
+    if (flags & LGY98_FLAG_LINKTEST) {
+        link_selftest(10);          /* L0: HELLO + PING/PONG */
+        link_l1_bulk(200, 512);     /* L1: WINDOW/Credit で 200 フレームを溢れさせず受ける */
+    }
     if (flags & LGY98_FLAG_DIAG) {
         ne2k_get_stats(&st);
         kprintf(st.diag_ram_errors || st.diag_dma_errors ? 0xC1 : 0x07,

@@ -72,6 +72,11 @@ void link_poll(void);
  * 成否をログと下のカウンタに残す。Host Agent が起動している前提。 */
 void link_selftest(int rounds);
 
+/* L1 自己試験: ホストに DATA を count フレーム (各 payload バイト) 流させ、
+ * 絶対値 WINDOW でフロー制御する。溢れさせずに全フレームを順序どおり受ける
+ * ことと、ページ消費の実測 (§2-3) を確認する。link_hello 済みが前提。 */
+void link_l1_bulk(unsigned int count, unsigned int payload);
+
 /* ホストから kernel.map 経由で観測するカウンタ (static にしない)。 */
 extern u32 link_hello_ok;       /* HELLO 確立 (0/1) */
 extern u32 link_rt_ok;          /* 成功した往復数 */
@@ -81,5 +86,15 @@ extern u32 link_rx_frames;      /* 受け取ったリンクフレーム数 */
 extern u32 link_rx_dropped;     /* 自分宛でない / 壊れた等で捨てた数 */
 extern u8  link_peer_mac[6];    /* 確立した Host Agent の MAC */
 extern u16 link_epoch;
+
+/* L1 (WINDOW/Credit の bulk 受信) 観測用 */
+extern u32 link_l1_recv;        /* 順序どおり受けた DATA フレーム数 */
+extern u32 link_l1_bytes;       /* 受けた DATA の総ペイロードバイト数 */
+extern u32 link_l1_ooo;         /* 順序外 / 欠落 (期待 seq と不一致) の回数 */
+extern u32 link_l1_windows;     /* 送った WINDOW 数 */
+extern u32 link_l1_max_credit;  /* 広告した credit_pages の最大値 */
+extern u32 link_l1_min_credit;  /* 広告した credit_pages の最小値 (0 除く) */
+extern u32 link_l1_done;        /* EOF を受けた (0/1) */
+extern u32 link_l1_meas_pages;  /* 実測: DATA 1 フレームあたりの平均消費ページ ×100 */
 
 #endif /* OS32_NET_LINK_H */

@@ -25,7 +25,7 @@ tools/np21w_mcp/np21w_client.py を流用する (curl.exe フォールバック�
   {"action":"status"}                  エミュレータの状態
   {"action":"done","report":"..."}     終了。report は人間向けの報告
 ホスト側 (ビルド/配備。許可リスト方式で自由なシェルは与えない):
-  {"action":"make","target":"kernel"}  make <target> (kernel/kernel-lgy98/kernel-lgy98-link/kernel-nolgy98/check-net-m2/check-net-m2-cpl3/check-net-m4/check-net-l0/programs/sdk/all/check/clean/apps/game/external)
+  {"action":"make","target":"kernel"}  make <target> (kernel/kernel-lgy98/kernel-lgy98-link/kernel-nolgy98/check-net-m2/check-net-m2-cpl3/check-net-m4/check-net-l0/check-net-l1/programs/sdk/all/check/clean/apps/game/external)
   {"action":"hotdeploy","file":"userland/cmds/wc.bin"}  再起動なしで 1 バイナリ差し替え
   {"action":"deploy"}                  os32-cycle deploy (停止→NHD 配備→起動→ver)
 """
@@ -61,7 +61,7 @@ BUILD_OBS_LIMIT = 2400
 
 ROOT = os.environ.get("OS32_ROOT", os.path.abspath(os.path.join(HERE, "..", "..")))
 OS32_CYCLE = os.environ.get("OS32_CYCLE", os.path.expanduser("~/.local/bin/os32-cycle"))
-MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "programs", "sdk", "all", "check", "clean", "deploy",
+MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "programs", "sdk", "all", "check", "clean", "deploy",
                 "apps", "game", "external")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")

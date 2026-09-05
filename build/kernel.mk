@@ -205,4 +205,9 @@ check-net-m4:
 check-net-l0:
 	@python3 tools/net_l0_test.py
 
-.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0
+# L1: WINDOW/Credit のフロー制御。ホストに 200 DATA を流させ、絶対値 WINDOW で
+# リングを溢れさせずに全部・順序どおり受けられることを確認する (host_agent.py が対向)。
+check-net-l1:
+	@python3 tools/net_l1_test.py
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m4 check-net-l0 check-net-l1

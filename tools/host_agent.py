@@ -71,6 +71,9 @@ def parse_mac(s):
     return bytes(int(x, 16) for x in s.split(":"))
 
 
+FRAME_PAGES = 6   # 最大 Ethernet フレームが占める SRAM ページ数 (保守的な見積り)
+
+
 class HostAgent:
     def __init__(self, mac, epoch=1, quiet=False):
         self.mac = mac
@@ -79,6 +82,9 @@ class HostAgent:
         self.hello_count = 0
         self.request_count = 0
         self.ack_count = 0
+        self.window_count = 0
+        # bulk (L1) 状態
+        self.bulk = None   # dict: os32, count, plen, sent, acked, credit, eof_sent, max_inflight
 
     def log(self, *a):
         if not self.quiet:
@@ -110,14 +116,56 @@ class HostAgent:
             self.log("HELLO from %s -> reply (epoch %d)" % (mac_str(src), self.epoch))
         elif op == OP["REQUEST"]:
             self.request_count += 1
-            body = b"PONG " + payload
-            reply = self.build(src, OP["RESPONSE"], seq, seq, body[:1484])
-            stream.send(reply)
-            self.log("REQUEST seq=%d len=%d -> RESPONSE ack=%d" % (seq, plen, seq))
+            if payload[:5] == b"BULK ":
+                self._start_bulk(src, payload)
+            else:
+                body = b"PONG " + payload
+                stream.send(self.build(src, OP["RESPONSE"], seq, seq, body[:1484]))
+                self.log("REQUEST seq=%d len=%d -> RESPONSE ack=%d" % (seq, plen, seq))
+        elif op == OP["WINDOW"]:
+            self.window_count += 1
+            credit = struct.unpack("<H", payload[:2])[0] if len(payload) >= 2 else 0
+            self._on_window(ack, credit, stream)
         elif op == OP["ACK"]:
             self.ack_count += 1
         else:
-            self.log("%s seq=%d (ignored at L0)" % (OPNAME.get(op, "op%d" % op), seq))
+            self.log("%s seq=%d (ignored)" % (OPNAME.get(op, "op%d" % op), seq))
+
+    def _start_bulk(self, os32, payload):
+        try:
+            _, cnt, plen = payload.split(b" ")[:3]
+            count, plen = int(cnt), int(plen)
+        except ValueError:
+            self.log("bad BULK request: %r" % payload)
+            return
+        self.bulk = {"os32": os32, "count": count, "plen": plen, "sent": 0,
+                     "acked": 0, "credit": 0, "eof_sent": False, "max_inflight": 0}
+        self.log("BULK request: %d frames x %d bytes -> streaming under credit" % (count, plen))
+
+    def _on_window(self, ack, credit, stream):
+        b = self.bulk
+        if not b:
+            return
+        b["acked"] = max(b["acked"], ack)
+        b["credit"] = credit
+        self._pump_bulk(stream)
+
+    def _pump_bulk(self, stream):
+        b = self.bulk
+        if not b:
+            return
+        while b["sent"] < b["count"]:
+            inflight = FRAME_PAGES * (b["sent"] - b["acked"])
+            if inflight + FRAME_PAGES > b["credit"]:
+                break                       # credit を超えるので待つ (絶対値 WINDOW を守る)
+            b["sent"] += 1
+            body = bytes((b["sent"] + k) & 0xFF for k in range(b["plen"]))
+            stream.send(self.build(b["os32"], OP["DATA"], b["sent"], 0, body))
+            b["max_inflight"] = max(b["max_inflight"], FRAME_PAGES * (b["sent"] - b["acked"]))
+        if b["sent"] == b["count"] and not b["eof_sent"]:
+            stream.send(self.build(b["os32"], OP["EOF"], b["count"] + 1, 0, b""))
+            b["eof_sent"] = True
+            self.log("BULK done: %d frames sent, max in-flight %d pages" % (b["count"], b["max_inflight"]))
 
 
 def open_stream(args):
