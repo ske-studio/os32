@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use os32api::gui::proto::{GuiRect16, GuiString};
+use os32api::gui::proto::{GuiRect16, GuiRgb, GuiString};
 
 /* 単一ハンドル対象 (DESTROY / RAISE / SET_FOCUS / CLIENT_RECT)。arg で渡す場合も
  * あるが、CLIENT_RECT のように応答が要るものは要求ブロック経由。 */
@@ -99,6 +99,17 @@ pub struct GuiReqModal {
     pub buttons: u16,
     pub _pad: u16,
     pub message: GuiString,
+}
+
+/* LEASE_PALETTE (op 7、契約 G8)。共有ヘッダ os32_gui_shared.h 末尾の
+ * `typedef struct { u16 first; u16 count; GuiRgb rgb[16]; } GuiReqLease;` (52B)
+ * の写し。色は引数バッファでなく**要求ブロック内**に直接載る。count=0 で返却。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqLease {
+    pub first: u16,
+    pub count: u16,
+    pub rgb: [GuiRgb; 16],
 }
 
 /* ---- 応答 ---- */

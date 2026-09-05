@@ -24,6 +24,9 @@
 //! | `desktop.rs` | 背景と手引き (v1.2 でタスクバー) |
 //! | `cursor.rs`  | マウスカーソル (損傷とは別経路の退避・再描画) |
 //! | `input.rs`   | 入力取り込み → Key / Text / Pointer / Button (T3 / U2a) |
+//! | `fep.rs`     | 日本語入力 (U2a)。cooked 待ち行列 = FEP、未確定行と候補窓 |
+//! | `lease.rs`   | 14 色パレットのリースとフォーカス追従 (G8) |
+//! | `modal.rs`   | モーダルと標準ダイアログ (U4)。入れ子ループなし |
 //! | `timer.rs`   | アプリタイマ 8 本 (U5) |
 //! | `handler.rs` | `gui_call` ハンドラ (op → 関数表)。X1 / X2 / X3 |
 //! | `pump.rs`    | syscall 境界ポンプ (X4) |
@@ -37,9 +40,12 @@ mod chrome;
 mod cursor;
 mod damage;
 mod desktop;
+mod fep;
 mod ffi;
 mod handler;
 mod input;
+mod lease;
+mod modal;
 mod pump;
 mod reqs;
 mod ring;
@@ -79,6 +85,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
     wm::read_screen_info(st);
     /* G6 のシステムパレットを入れる。 */
     wm::install_system_palette();
+    /* FEP (契約 U2a)。GFX 版の IME_Render を用意する (K の KAPI 待ち)。 */
+    fep::install();
 
     unsafe {
         let a = os32api::api();
@@ -137,14 +145,23 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 /// 終了時にカーネルが `gui_owner_exit` を呼ぶので、窓は自動で回収される。
 fn launch_app(st: &mut wm::GuiState) {
     cursor::hide(st);
+    /* フルスクリーン GFX プログラムに備えてパレット全体を退避する (契約 G6/G8)。 */
+    let saved = wm::save_palette();
+    /* F2 のファイル選択で選ばれたパスがあればそれ、無ければ既定のデモ。 */
+    let path: *const u8 =
+        if st.launch_path_len > 0 { st.launch_path.as_ptr() } else { DEMO_APP.as_ptr() };
     unsafe {
         let a = os32api::api();
-        (a.exec_run)(DEMO_APP.as_ptr());
-        /* アプリがフルスクリーン GFX を使って抜けた場合に備えて描画モードと
-         * パレットを戻す (契約 G6: WM が前後で退避・復元する)。 */
+        (a.exec_run)(path);
+        /* アプリがフルスクリーン GFX を使って抜けた場合に備えて描画モードを戻す。 */
         (a.gfx_init)();
     }
+    st.launch_path_len = 0;
+    /* 退避しておいた 16 色をそのまま戻し、念のためシステム色を入れ直してから、
+     * まだ生きているリースがあれば再適用する。 */
+    wm::restore_palette(&saved);
     wm::install_system_palette();
+    lease::reapply(st);
     visible::recompute_and_expose(st);
     wm::composite_full(st);
 }

@@ -114,6 +114,18 @@ fn compute_vis(st: &GuiState, index: usize) -> RectSet {
         z += 1;
     }
 
+    /* モーダルダイアログは WM 自身の窓で Z 順の最前面 (契約 U4)。ここで穴を
+     * 開けておくと、下のアプリはダイアログの下を描かず、閉じたときに露出分の
+     * `Paint` を受け取る (入れ子ループを作らずに再描画が回る)。 */
+    let dlg = crate::modal::rect();
+    if !dlg.is_empty() {
+        let (next, ok) = region_subtract_rect(&region, dlg);
+        region = next;
+        if !ok {
+            capped = true;
+        }
+    }
+
     if capped {
         /* 近似: クライアント全面を可視扱い (次周で正確化される)。 */
         out.push(Rect::new(0, 0, cw, ch));
