@@ -226,7 +226,7 @@ pub fn draw_rect(surface: SurfaceId, rect: Rect, style: Style) {
 /* ================================================================ */
 
 /// 水平線 (契約 G2)。`style.fg`。長さ `w`。`DOTTED` / `XOR` 対応。
-pub fn hline(surface: SurfaceId, x: i16, y: i16, w: i16, style: Style) {
+pub fn hline(surface: SurfaceId, x: i32, y: i32, w: i32, style: Style) {
     if w <= 0 {
         return;
     }
@@ -234,7 +234,7 @@ pub fn hline(surface: SurfaceId, x: i16, y: i16, w: i16, style: Style) {
         Some(t) => t,
         None => return,
     };
-    let rc = clip_rect(&t, Rect::new(x, y, w, 1));
+    let rc = clip_rect(&t, Rect::new(x as i16, y as i16, w as i16, 1));
     if rc.is_empty() {
         return;
     }
@@ -254,7 +254,7 @@ pub fn hline(surface: SurfaceId, x: i16, y: i16, w: i16, style: Style) {
 }
 
 /// 垂直線 (契約 G2)。`style.fg`。長さ `h`。`DOTTED` / `XOR` 対応。
-pub fn vline(surface: SurfaceId, x: i16, y: i16, h: i16, style: Style) {
+pub fn vline(surface: SurfaceId, x: i32, y: i32, h: i32, style: Style) {
     if h <= 0 {
         return;
     }
@@ -262,7 +262,7 @@ pub fn vline(surface: SurfaceId, x: i16, y: i16, h: i16, style: Style) {
         Some(t) => t,
         None => return,
     };
-    let rc = clip_rect(&t, Rect::new(x, y, 1, h));
+    let rc = clip_rect(&t, Rect::new(x as i16, y as i16, 1, h as i16));
     if rc.is_empty() {
         return;
     }
@@ -297,7 +297,7 @@ fn span_pixel(p: &Painter, lx: i32, ly: i32, parity_src: i32, style: &Style) {
 
 /// 任意直線 (契約 G2)。`style.fg`。Bresenham を 1 画素ごとにクリップ判定して描く
 /// (クリップ外へ 1 画素も出さない)。`DOTTED` / `XOR` 対応。
-pub fn line(surface: SurfaceId, x0: i16, y0: i16, x1: i16, y1: i16, style: Style) {
+pub fn line(surface: SurfaceId, x0: i32, y0: i32, x1: i32, y1: i32, style: Style) {
     let t = match clip::resolve_target(surface) {
         Some(t) => t,
         None => return,
@@ -340,7 +340,7 @@ pub fn line(surface: SurfaceId, x0: i16, y0: i16, x1: i16, y1: i16, style: Style
 
 /// `bitmap` (オフスクリーンサーフェス) の `src_rect` を `(dx,dy)` へ転送する。
 /// カラーキー 255 は転送しない。dst は画面サーフェスのみ (v1)。
-pub fn blit(surface: SurfaceId, dx: i16, dy: i16, bitmap: SurfaceId, src_rect: Rect) {
+pub fn blit(surface: SurfaceId, dx: i32, dy: i32, bitmap: SurfaceId, src_rect: Rect) {
     let t = match clip::resolve_target(surface) {
         Some(t) => t,
         None => return,
@@ -363,7 +363,7 @@ pub fn blit(surface: SurfaceId, dx: i16, dy: i16, bitmap: SurfaceId, src_rect: R
     }
 
     /* dst 矩形をクリップ。src 原点をクリップのぶんだけずらす。 */
-    let dst_full = Rect::new(dx, dy, src_rect.w, src_rect.h);
+    let dst_full = Rect::new(dx as i16, dy as i16, src_rect.w, src_rect.h);
     let dst = clip_rect(&t, dst_full);
     if dst.is_empty() {
         return;
@@ -406,7 +406,7 @@ fn decode_glyph(bytes: &[u8]) -> (usize, bool, i32) {
 
 /// UTF-8 文字列を `(x,y)` から KCG で描く (契約 G2)。半角 8px / 全角 16px。
 /// クリップはグリフセル単位 (ANK かつ `TRANSPARENT_BG` は画素単位)。戻り値: 送り幅 px。
-pub fn text(surface: SurfaceId, x: i16, y: i16, utf8: &[u8], style: Style) -> i32 {
+pub fn text(surface: SurfaceId, x: i32, y: i32, utf8: &[u8], style: Style) -> i32 {
     let t = match clip::resolve_target(surface) {
         Some(t) => t,
         None => return 0,
