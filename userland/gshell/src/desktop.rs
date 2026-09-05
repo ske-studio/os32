@@ -17,14 +17,15 @@ use os32api::gui::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_COLOR_TITLE_TEX
 /// 手引きの位置 (左上) と占有矩形。ANK 8x16 なので 1 文字 8px。
 const HINT_X: i32 = 8;
 const HINT_Y: i32 = 8;
-const HINT_W: i32 = 8 * 52;
+const HINT_W: i32 = 8 * 65;
 const HINT_H: i32 = 16;
 
 /// 市松の升目 (画素)。
 const CHECK: i32 = 8;
 
 /// 単独起動時の手引き (UTF-8, NUL 終端)。全角は 16px 幅。
-static HINT: &[u8] = b"OS32 GUI shell  ESC: CUI / F1: gui_demo / F2: open\0";
+static HINT: &[u8] =
+    b"OS32 GUI shell  ESC:CUI F1:demo F2:bench F3:busy F4:lease F5:open\0";
 
 /// 背景の 1 矩形を塗る (画面座標、バックバッファ)。
 pub fn fill(st: &GuiState, r: Rect) {

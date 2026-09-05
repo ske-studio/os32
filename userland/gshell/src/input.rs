@@ -48,10 +48,12 @@ const MOD_CTRL: u32 = 0x10;
 /* 修飾キーのスキャンコード (KEY_SHIFT..KEY_CTRL)。Key として配送しない。 */
 const SC_SHIFT: u8 = 0x70;
 const SC_CTRL: u8 = 0x74;
-/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1 / KEY_F2)。 */
+/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1〜F5)。
+ * F1〜F4 = `crate::LAUNCH_APPS` の起動、F5 = ファイル選択ダイアログ。 */
 const SC_ESC: u8 = 0x00;
 const SC_F1: u8 = 0x62;
-const SC_F2: u8 = 0x63;
+const SC_F4: u8 = 0x65;
+const SC_F5: u8 = 0x66;
 /* KEY_SPACE。SHIFT+SPACE で FEP を切り替える (契約 U2a)。 */
 const SC_SPACE: u8 = 0x34;
 
@@ -159,11 +161,13 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
 pub fn standalone_key(st: &mut GuiState, scan: u8) {
     if scan == SC_ESC {
         st.quit = true;
-    } else if scan == SC_F1 {
-        /* 既定のデモアプリ。 */
-        st.launch_path_len = 0;
+    } else if scan >= SC_F1 && scan <= SC_F4 {
+        /* F1〜F4 = 検証用アプリの起動 (G2 / G3)。実際に走らせるのは
+         * 単独ループ (`lib.rs` の `launch_app`) — ここでは予約だけ。 */
+        let p = crate::LAUNCH_APPS[(scan - SC_F1) as usize];
+        st.set_launch_path(p, p.len() - 1); /* 末尾 NUL は set 側が付ける */
         st.launch_pending = true;
-    } else if scan == SC_F2 {
+    } else if scan == SC_F5 {
         /* WM 自身のファイル選択ダイアログ (契約 U4 の標準ダイアログ)。 */
         modal::open_wm_file(st, b"/");
     }
