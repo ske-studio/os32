@@ -8,11 +8,14 @@ LGY98_FLAG_REFLECT) のカーネルで起動していること。対向機は不
 検査: 最短 / 奇数長 / 256 バイトページ境界前後 / 最大長 / 連続 10 フレーム。
 最後に RESULT: OK / FAIL を 1 行出す (exit 0 / 1)。
 """
+import argparse
 import json
 import re
 import struct
 import sys
+import threading
 import time
+import urllib.parse
 import urllib.request
 
 BASE = "http://127.0.0.1:8025"
@@ -27,6 +30,62 @@ def http(path, body=None, timeout=15):
     req = urllib.request.Request(BASE + path, data=body, method="POST" if body is not None else "GET")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def tvram_text():
+    d = http("/api/tvram")
+    return d.get("text") or "\n".join(d.get("lines", [])) if isinstance(d, dict) else str(d)
+
+
+def send_key(seq):
+    http("/api/key", ("seq=" + urllib.parse.quote(seq, safe="")).encode())
+
+
+class During:
+    """試験の間、ゲストで別のコマンド (CPL3 プログラムや V86 セッション) を走らせておく。
+    /api/cmd は完了までブロックするので別スレッドで投げ、終了は exit_key で促す。"""
+
+    def __init__(self, cmd, exit_key, wait_for, settle, timeout):
+        self.cmd, self.exit_key, self.wait_for = cmd, exit_key, wait_for
+        self.settle, self.timeout = settle, timeout
+        self.result = None
+        self.thread = None
+
+    def _run(self):
+        try:
+            req = urllib.request.Request(BASE + "/api/cmd", data=self.cmd.encode(), method="POST")
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                self.result = r.read().decode("utf-8", "replace")
+        except Exception as e:      # timeout も含めて記録だけする
+            self.result = "error: %s" % e
+
+    def start(self):
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        t0 = time.time()
+        if self.wait_for:
+            while time.time() - t0 < self.timeout:
+                if self.wait_for in tvram_text():
+                    break
+                time.sleep(1.0)
+            else:
+                print("FAIL during: '%s' did not show '%s' within %ds" % (self.cmd, self.wait_for, self.timeout))
+                return False
+        time.sleep(self.settle)
+        if self.thread.is_alive():
+            print("during: '%s' is running (guest busy while the LAN test runs)" % self.cmd)
+            return True
+        print("FAIL during: '%s' already returned before the test started" % self.cmd)
+        return False
+
+    def stop(self):
+        if self.exit_key and self.thread.is_alive():
+            send_key(self.exit_key)
+        self.thread.join(60)
+        alive = self.thread.is_alive()
+        print("%-4s during: '%s' %s" % ("FAIL" if alive else "ok", self.cmd,
+                                        "still running after exit key" if alive else "returned"))
+        return not alive
 
 
 def sym(name):
@@ -88,7 +147,22 @@ def wait_tx(pred, timeout=3.0):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--during-cmd", metavar="CMD", help="試験中にゲストで走らせておくシェルコマンド (CPL3 / V86)")
+    ap.add_argument("--exit-key", metavar="SEQ", help="そのコマンドを終える /api/key の seq (例 q, CTRL+STOP)")
+    ap.add_argument("--wait-for", metavar="TEXT", help="開始前に tvram に現れるのを待つ文字列 (例 A>)")
+    ap.add_argument("--settle", type=float, default=2.0, help="開始後に待つ秒数")
+    ap.add_argument("--during-timeout", type=int, default=180)
+    args = ap.parse_args()
+
     fails = 0
+    during = None
+    if args.during_cmd:
+        during = During(args.during_cmd, args.exit_key, args.wait_for, args.settle, args.during_timeout)
+        if not during.start():
+            print("RESULT: FAIL (could not start the concurrent guest command)")
+            return 1
+
     net = http("/api/net")
     if not net.get("enabled"):
         print("RESULT: FAIL LAN is not enabled in NP21/W (/api/net enabled=false)")
@@ -187,6 +261,19 @@ def main():
     net = http("/api/net")
     print("np21w: tx %s rx %s tx_dropped %s rx_dropped %s" %
           (net["tx_frames"], net["rx_frames"], net["tx_dropped"], net["rx_dropped"]))
+    if during is not None:
+        if not during.stop():
+            fails += 1
+        else:
+            # 戻ってきたシェルが生きていることを確認する
+            try:
+                out = urllib.request.urlopen(urllib.request.Request(BASE + "/api/cmd", data=b"ver", method="POST"),
+                                             timeout=60).read().decode("utf-8", "replace")
+                ok_ver = "OS32" in out
+            except Exception:
+                ok_ver = False
+            print("%-4s shell responds after the concurrent command (ver)" % ("ok" if ok_ver else "FAIL"))
+            fails += 0 if ok_ver else 1
     print("RESULT: %s (%d failures)" % ("OK" if fails == 0 else "FAIL", fails))
     return 1 if fails else 0
 

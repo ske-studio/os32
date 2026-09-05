@@ -175,4 +175,12 @@ kernel-nolgy98:
 check-net-m2:
 	@python3 tools/net_m2_test.py
 
-.PHONY: check-net-m2
+# M3: CPL3 プログラム (sleep) の実行中、および V86 (DOS) セッション中に同じ試験を回す。
+# V86 は /host/dos5hd.nhd (C:\os32) が要る。CTRL+STOP で DOS を畳んで ver で戻りを確認する。
+check-net-m2-cpl3:
+	@python3 tools/net_m2_test.py --during-cmd "sleep 40" --settle 2
+
+check-net-m2-v86:
+	@python3 tools/net_m2_test.py --during-cmd "v86 -b /host/dos5hd.nhd" --wait-for "A>" --settle 3 --exit-key CTRL+STOP
+
+.PHONY: check-net-m2 check-net-m2-cpl3 check-net-m2-v86
