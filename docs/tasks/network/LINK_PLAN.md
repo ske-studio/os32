@@ -194,8 +194,13 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   消費が遅ければホストへ背圧。欠落 (seq>期待) は捨てて ack を止め、ホストの Go-Back-N 再送で
   埋める。`make check-net-l2`: 128KB を 8KB バッファで全消費・内容一致・EOF・誘発した欠落を
   回復 (gaps>0 かつ read==total)・overflow 0・NIC drop 0。
-- **次**: L3 (Host Services — HTTP/File/RPC を KAPI 末尾追加)。KAPI 版は GUI の K1 (v41) と
-  順序調整が要る。`link_stream_read` がアプリ側の消費入口になる。
+- **次**: L3 (Host Services — HTTP/File/RPC を KAPI 末尾追加)。`link_stream_read` がアプリ側の
+  消費入口になる。
+  > **版番号の調整メモ (2026-09-05)**: GUI (未実装) の K1 票
+  > ([tasks/gui/TASK_K1_gui_call.md](../gui/TASK_K1_gui_call.md)) も KAPI v41 を想定している。
+  > KAPI は append-only なので実体は衝突しないが、版番号は 1 つしか取れない。**GUI 実装が
+  > まだなので、L3 に着手する時点で GUI 側の状況を確認し、先に実装した方が v41、後発は v42
+  > 以降にずらす** (現在は v40、どちらも未実装)。この調整は GUI 実装の見直しと合わせて行う。
 
 ## 6. Host Agent
 
