@@ -1,4 +1,4 @@
-# KernelAPI v40 仕様書
+# KernelAPI v41 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **40** |
-| 合計エントリ数 | **175** (ヘッダ2 + 関数ポインタ171 + データフィールド2) |
+| 現在のバージョン | **41** |
+| 合計エントリ数 | **181** (ヘッダ2 + 関数ポインタ177 + データフィールド2) |
 
 ---
 
@@ -80,7 +80,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | 版 | 状態 | 追加内容 | 出典 |
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
-| v41 | 予約 (GUI 実装が先) | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
+| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
 | v42 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 
 調停 (2026-09-06): GUI (K1) を先に実装するので **v41 = GUI、v42 = ネットワーク Host Services**
@@ -101,7 +101,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | Offset | フィールド | 説明 |
 |--------|-----------|------|
 | 0x00 | magic | 0x4B415049 ("KAPI") |
-| 0x04 | version | APIバージョン (現在: 40) |
+| 0x04 | version | APIバージョン (現在: 41) |
 
 ### API関数 (自動生成 — os32_kapi_generated.h 準拠)
 
@@ -311,6 +311,12 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2A8 | gfx_screen_info | `void(void *out)` |
 | 0x2AC | gfx_hw_fill_rect | `int(int x, int y, int w, int h, u8 color)` |
 | 0x2B0 | gfx_hw_blit | `int(int dx, int dy, int sx, int sy, int w, int h)` |
+| 0x2B4 | gui_call | `int(u32 op, u32 arg)` |
+| 0x2B8 | gui_register | `int(void *handler, void *pump)` |
+| 0x2BC | gfx_stats | `int(void *out)` |
+| 0x2C0 | gfx_lease_palette | `int(int first, int count, const u8 *rgb)` |
+| 0x2C4 | sys_switch_shell | `int(const char *path)` |
+| 0x2C8 | kbd_dropped_count | `u32(void)` |
 
 `gfx_screen_info` の `out` は `GFX_ScreenInfo` (`os32_kapi_shared.h`): 画面サイズ・bpp・
 画素形式 (`GFX_FMT_*`)・能力ビット (`GFX_CAP_*`)・パレットリース範囲。GUI とアプリは
@@ -330,8 +336,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2B4 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2B8 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2CC | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2D0 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 
