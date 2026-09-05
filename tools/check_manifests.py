@@ -104,8 +104,8 @@ def check_doc_counts():
     checks = [
         ("CLAUDE.md", r"\((\d+) commands\)",
          count("userland/cmds/*.c"), "userland/cmds/*.c"),
-        ("docs/INDEX.md", r"ime等 (\d+)種",
-         count("userland/cmds/*.c"), "userland/cmds/*.c"),
+        # docs/INDEX.md のソースツリー複製は 2026-09-05 に削除 (件数を持つ文書は
+        # CLAUDE.md の 1 か所だけにする)。
     ]
 
     bad = []

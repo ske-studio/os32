@@ -4,7 +4,8 @@ OS32 カーネル常駐型 FEP (日本語入力フロントエンドプロセッ
 **実装レベルの詳細設計**。[`FEP_FUTURE.md`](FEP_FUTURE.md) の各タスクを、データ構造変更・
 関数シグネチャ・アルゴリズム・コードスケッチ・影響範囲・テスト計画まで落とし込んだ設計書群。
 
-- 現在の実装状態: [`FEP_STATUS.md`](FEP_STATUS.md)
+- 実装状態の正典は**下表** (フェーズ別)。[`FEP_STATUS.md`](FEP_STATUS.md) は 2026-04-27 時点の
+  アーキテクチャ説明 (辞書スキーマ / 入力フロー / 公開 API) で、進捗の判断には使わない
 - 元タスク一覧: [`FEP_FUTURE.md`](FEP_FUTURE.md)
 - SQLite カーネル統合: [`../sqlite/00_INDEX.md`](../sqlite/00_INDEX.md)
 - 対象ソース: `kernel/ime.c` / `kernel/ime.h` / `kernel/ime_dict.c` / `kernel/ime_romkana.c`

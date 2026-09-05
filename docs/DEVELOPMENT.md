@@ -90,24 +90,8 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 > カーネルスタックは V86 ゲストに 640KB を渡すため 0x90000 から
 > 0x1FC000 へ移動済み (0x9FFFC はローダー段の ESP として今も使う)。
 
-| 範囲 | 用途 | 注意 |
-|------|------|------|
-| 0x00000-0x00FFF | NP (NULLポインタ検出) | ブート後にNot-Present化 |
-| 0x01000-0x89FFF | フォント/Unicode/GFXバックバッファ | ブート後にコンベンショナルメモリ再利用 |
-| 0x8C000-0x8CFFF | ホットデプロイ制御ブロック | MEM_HOTDEPLOY_DESC |
-| 0x8D000-0x9FFFF | 空き + 自動プレイ用メールボックス (0x90000) | V86 ゲスト窓の一部 |
-| 0xA0000-0xEFFFF | VRAM (テキスト+グラフィック) | R/W |
-| 0xF0000-0xFFFFF | BIOS ROM | Read-Only |
-| 0x100000-0x1FAFFF | カーネル帯域 | code+heap+KAPI+SHM (動的レイアウト) |
-| 0x1FB000-0x1FBFFF | カーネルスタックガード | Not-Present |
-| 0x1FC000-0x1FFFFC | カーネルスタック (16KB) | ESP初期値=0x1FFFFC |
-| 0x200000-0x2FFFFF | SQLite帯域 (1MB) | code+BSS+代替スタック(128KB) |
-| 0x300000-0x3FFFFF | シェル常駐帯域 (1MB) | shell.bin専用, ガードページ付き |
-| 0x380000-0x3FFFFF | 帯域間ギャップ | Not-Present |
-| 0x400000- | 外部プログラム | code+bss → sbrk (固定上限なし、2026-09-04) |
-| 動的〜 | exec_heap | スタックガード直下に配置。sbrk との取り分は OS32X heap_size か折半 (sbrk_heap_limit = guard_a) |
-| 動的〜 | プログラムスタック | 256KB, mem_end 付近に配置 |
-| 物理末尾 256KB | ホットデプロイ・ステージング窓 | MEM_HOTDEPLOY_SIZE。mem_end = sys_usable_mem_end() でこの分を差し引く |
+番地表はここに複製しない (2026-09-05 に削除。0x380000〜 をギャップと書いたまま
+シェル exec_heap への転用に追従できていなかった)。開発時に効く制約は以下の 3 点。
 
 **カーネル帯域内の動的配置**: KAPI テーブルとSHM (共有メモリ) は `__bss_end` から動的に算出される。`KAPI_ADDR = KHEAP_BASE + KHEAP_SIZE`、SHMはKAPIの直後に前後ガードページ付きで配置。
 
@@ -117,13 +101,9 @@ A4H (表示ページ) / A6H (アクセスページ) で切替可能。
 
 ## 5. KernelAPI 拡張手順
 
-1. `sdk/kapi.json` に増やす関数のプロトタイプ定義を追加する。
-2. `make all` または `make sdk/include/os32/os32_kapi_generated.h` などを実行して、APIメタデータを自動生成。
-3. 必要に応じて、`kapi/` ディレクトリ内にラッパー (例: `kapi_sys.c`) を実装。
-4. プログラム・カーネル側から新しいKAPIを利用する。
-5. `KAPI_VERSION` は `sdk/include/os32/os32_kapi_shared.h` で定義されている。バージョン変更時は手動で更新する。
-
-> ⚠️ KernelAPI 変更時のビルドルール（`make clean` 必須）は [POLICY_DEV.md §4](POLICY_DEV.md) を参照。
+手順の正典は [KAPI_SPEC.md §3-1](KAPI_SPEC.md) (末尾追記、版番号 2 箇所、
+`gen_kapi.py` + `kapi_rust_gen.py` の再生成、`make clean` → `make all`)。
+CLAUDE.md の「To add a KernelAPI function」はその写し。ここには複製しない。
 
 ---
 

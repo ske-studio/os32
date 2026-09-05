@@ -104,10 +104,8 @@ make clean     # KernelAPI 構造体を変えたら clean → all が必須
 
 ### KernelAPI 拡張手順
 
-1. `sdk/kapi.json` に関数プロトタイプ定義を追加
-2. `make all` で API メタデータを自動生成
-3. 必要に応じて `kapi/` にラッパーを実装
-4. **`make clean` → `make all` で全プログラムを再ビルド**
+[KAPI_SPEC.md §3-1](KAPI_SPEC.md) が正典 (末尾追記 / 版番号 2 箇所 / 再生成 /
+`make clean` → `make all`)。ここには複製しない。
 
 ### 新規プログラム追加手順
 
@@ -117,38 +115,17 @@ make clean     # KernelAPI 構造体を変えたら clean → all が必須
 
 ### デプロイ方式
 
-#### HostDrv方式 (推奨 — プログラム変更時)
+3 経路の使い分けは CLAUDE.md「Deploy Workflow」、ツールの詳細は
+[08_build.md §8-4](08_build.md) が正典。要点だけ:
 
-NP21/W の HostDrv 機能を利用し、ビルド成果物を `C:\os32` (WSL: `/mnt/c/os32`) に配置する。
-ゲスト OS32 は `/host` マウントポイント経由でアクセスし、`hsync` コマンドで ext2 に同期する。
+| 目的 | コマンド | 備考 |
+|---|---|---|
+| ユーザランド変更 | `make deploy` (HostDrv) / `make hotdeploy FILE=...` | 再起動不要。ただし PATH は NHD の `/usr/bin` を優先するので、これだけでは検証にならない ([V1]) |
+| カーネル / `/sys` 変更 | `make deploy-kernel` | HostDrv 同期 + NHD 全体書き込み。**NP21/W を止めてから** ([D1])、起動後に `ver` / kselftest で到達確認 |
+| ローダ変更 | `make deploy-boot` | NHD ブート領域 (LBA 2〜17) |
 
-```bash
-/* HostDrvデプロイ (sudo不要) */
-make deploy                              /* = hostdrv_deploy.py sync */
-
-/* ゲスト側で同期 */
-hsync                                    /* /host → / 全同期 */
-hsync bin                                /* /host/bin/ → /bin/ のみ */
-hsync -f                                 /* 強制上書き */
-```
-
-**メリット**: sudo不要、NP21/W再起動不要（カーネル未変更時）
-
-#### NHDブート領域書き込み (カーネル変更時)
-
-カーネル変更時は NHD ブート領域への直接書き込みが必要。NP21/W の再起動も必要。
-
-```bash
-make deploy-kernel                       /* NHDブート領域書き込み + NP21/Wへコピー */
-```
-
-#### NHDフルデプロイ (レガシー)
-
-従来の NHD ext2 マウント方式。HostDrv が使えない環境向け。
-
-```bash
-make deploy-nhd                          /* nhd_deploy.py sync + deploy */
-```
+(2026-09-05 訂正: 以前ここにあった「deploy-kernel = ブート領域書き込み」「NHD フル
+デプロイはレガシー」は誤り。NHD 全体書き込みが現行の標準経路。)
 
 ### デプロイパスの整合性
 

@@ -46,6 +46,9 @@ make programs
 **`sdk/kapi.json` が唯一の情報源 (SSOT)。** 構造体・ラッパー・初期化コード・Rust
 バインディングはすべてここから生成されるので、生成物を直接編集してはならない。
 
+> この節が手順の正典。CLAUDE.md「To add a KernelAPI function」は AI 向け入口としての
+> 写しで、変えるときは両方を直す。DEVELOPMENT.md / POLICY_DEV.md はここを参照するだけ。
+
 1. `sdk/kapi.json` の `api` 配列の**末尾**にエントリを追加する。
    既存スロットの並べ替え・削除は**禁止** (ビルド済みバイナリの ABI が壊れる)。
    必要なヘッダは同ファイルの `includes` に、プロトタイプは `externs` に追加する。

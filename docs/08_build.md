@@ -72,7 +72,9 @@ os32/
 ├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
 ├── include/        システム統合用共通ヘッダ群
 ├── userland/       ユーザー空間 (shell/, cmds/, system/, tests/, rust/, lib/)
-├── (apps/game は別リポジトリ os32-apps, os32-game に分離)
+├── apps/           git submodule (ske-studio/os32-apps) — 標準アプリ。make external / make apps
+├── game/           git submodule (ske-studio/os32-game) — 対戦スゴロク RPG。make external / make game
+├── docs/hw/        PC-98 資料のローカルミラー (git 管理外、tools/sync_hwdocs.sh)
 ├── sdk/            配布 SDK (include/, crt/, link/, rust/, example/)
 ├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, libs.mk, deploy.mk, image.mk, sdk.mk 等) + リンカスクリプト
 │   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)

@@ -27,7 +27,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
 | [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v40 仕様書 — 175エントリテーブル (ヘッダ2 + 関数171 + データフィールド2) + API追加手順 |
-| [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — メモリマップ、アーキテクチャ制約、KernelAPI拡張手順 |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | 技術仕様ガイド — 描画方式、メモリ上の制約、exec_run の分割壁、文字列ユーティリティ (番地表と KAPI 手順は複製しない) |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [archive/](archive/) | 完了済みの計画書 (ROADMAP_v1.0, REFACTORING_PLAN) — 当時の記録 |
 | [NHD_FORMAT.md](NHD_FORMAT.md) | NHD r0形式ファイル構造仕様 |
@@ -42,24 +42,6 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [README.md](../README.md) | プロジェクト概要・機能一覧・クイックスタート |
 | [INSTALL.md](../INSTALL.md) | インストール・ビルド手順 |
 | [CHANGELOG.md](../CHANGELOG.md) | リリース変更履歴 |
-
-## KAPI_SPEC.md 目次
-
-| 節 | 内容 |
-|----|------|
-| §1 | 概要（アドレス配置、マジックナンバー） |
-| §2 | 呼び出し規約（System V ABI, cdecl等） |
-| §3 | 外部プログラムのビルド手順（main配置ルール） |
-| §4 | KernelAPI 構造体レイアウト（ヘッダ2 + 関数150 + データ1） |
-| §4-1 | グラフィクスAPI補足（libos32gfx移行について） |
-| §4-2 | ラスタパレット (gfx_present_raster) |
-| §4-3 | FDリダイレクト・パイプAPI |
-| §4-4 | ページング問い合わせAPI |
-| §4-5 | キー押下状態ポーリングAPI |
-| §4-6 | FM/SSG個別チャンネル制御API |
-| §4-7 | マウスAPI |
-| §4-8 | TVRAM読取・反転API |
-| §4-9 | マウスカーソル制御API |
 
 ## ハードウェア技術資料 (外部リファレンス)
 
@@ -99,7 +81,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/v2/M2_KAPI_TRAMPOLINE.md](tasks/v2/M2_KAPI_TRAMPOLINE.md) | v2 M2 設計 — KAPI トランポリン (CPL=3 から int 0x80 経由、アプリ無変更) |
 | [tasks/v2/M3_VERIFY.md](tasks/v2/M3_VERIFY.md) | v2 M3 設計 — 検証 (フォールト注入/特権命令の静的検査/性能再測) |
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
-| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — 実装状態スナップショット |
+| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — アーキテクチャ説明 (2026-04-27 時点のスナップショット。進捗は 00_INDEX の表) |
 | [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
 | `os32-game:docs/game/GAME_PORT_PLAN.md` | 対戦スゴロクRPG 移植計画 (別リポジトリ ske-studio/os32-game) |
 | `os32-game:docs/game/ENGINE_EXTENSION_PLAN.md` | エンジン拡張計画 (別リポジトリ)。userland/lib/save は本体に残る |
@@ -120,40 +102,4 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 ## ソースツリー概要
 
-```
-os32/
-├── boot/             — ブートローダ (NASM + C: boot_main.c, ext2_mini.c, lz4_mini.c)
-├── kernel/           — カーネルコア (メイン処理、ページング、IDT)
-├── exec/             — プログラムローダー (OS32X)
-├── fs/               — ファイルシステム (VFS, ext2, FatFs, iso9660, hostdrvfs, fd_redirect, pipe_buffer)
-├── drivers/          — 各種ドライバ (IDE, ATAPI, FDC, KBD, Mouse, Serial, RTC, FM, KCG, NP2SysP, loop_dev, dev など)
-├── gfx/              — グラフィックス (CPU描画用バックバッファ層)
-├── kapi/             — KernelAPI ラッパー実装 (自動生成分含む)
-├── lib/              — 汎用ライブラリ (UTF-8, UTF-16, Path, LZ4, SQLite等)
-├── include/          — 共通ヘッダ群
-├── userland/         — ユーザー空間 (SDK に対してビルドする層)
-│   ├── shell/        — システム標準シェル (モジュール構造、ファイラ・スクリプトエンジン内蔵)
-│   ├── cmds/         — コマンドラインツール (grep, less, sort, ime等 18種)
-│   ├── system/       — システムユーティリティ (hsync, install, cdinst, sndctl等)
-│   ├── tests/        — テスト・デモプログラム (36 種)
-│   ├── rust/         — Rust プログラム (hello_gfx, alloc_demo, math_test_rs) + os32_math クレート
-│   ├── lib/          — ユーザー空間ライブラリ (gfx, math, md, mgx, ui, save, snd,
-│   │                   input, db, ecs, asset, tilemap, filer, rt)
-│   └── deploy.yaml   — この層の配備マニフェスト
-├── (apps/game は別リポジトリ ske-studio/os32-apps・os32-game へ分離。
-│      SDK だけでビルドし、このツリーには含まれない)
-├── sdk/              — 配布 SDK (ヘッダ, crt, リンカスクリプト, rust, example)
-├── build/            — モジュール化 Makefile 群 (config/kernel/programs/libs/deploy/image/sdk.mk 等) + リンカスクリプト
-│   └── out/          — ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map) ※gitignore
-├── tools/            — ホスト側ツール (デプロイ・イメージ生成・KAPI自動生成)
-├── assets/           — データアセット (各種DB, FEP辞書, profile等)
-├── packages/         — 生成された .PKG
-├── images/           — 生成されたブートイメージ
-├── tests/            — ホスト側テストスクリプト
-├── Makefile          — マスタービルドスクリプト (build/*.mk を include)
-└── docs/             — 仕様書ドキュメント群 (本ファイル含む)
-```
-
----
-
-*Last Updated: 2026-08-06*
+[08_build.md §8-3](08_build.md) を参照 (複製しない。CLAUDE.md「Source Tree」も同じ表)。
