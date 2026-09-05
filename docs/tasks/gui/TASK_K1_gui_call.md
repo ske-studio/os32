@@ -15,7 +15,7 @@
 
 1. **`sdk/include/os32/os32_gui_shared.h`** (新規): TASKS.md §4 の表を C の定数と
    構造体にする。`GuiSlotHeader` (16B: `proto_version u16` / `flags u16` (bit0 OVERFLOW) /
-   `seq u32` / `ring_head u16` (アプリが書く) / `ring_tail u16` (WM が書く) / 予備)、
+   `seq u32` / `ring_head u16` (アプリが書く) / `ring_tail u16` (WM が書く) / `dropped u16` / 予備 2B)、
    `GuiEvent` (16B、契約 U2 の配置: 共通ヘッダ `kind u8 @0, sub u8 @1, window u16 @2,
    serial u16 @4` + ペイロード union 10B @6)、`GuiReq*` / `GuiResp*` (op ごと、512B 以内、
    文字列は `u8 len; u8 s[255]`)。**大きさ (16 / 512) と各フィールドのオフセット**を

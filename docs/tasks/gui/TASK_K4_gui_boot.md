@@ -34,8 +34,9 @@ ROADMAP の切替フローをカーネルとシェルに実装する。gshell �
 
 ## 完了条件 (ゲート G3 の起動部分)
 
-- `os32gui` → 再起動 → gshell が上がる (W1 完了後)。W1 前は「gshell.bin が無い」警告で
-  CUI に落ちることを確認。
-- gshell から「CUI で再起動」→ `shell.bin` が上がる。
+- `os32gui` → その場で gshell に切り替わる (W1 完了後、再起動なし)。W1 前は
+  `sys_switch_shell` が「gshell.bin が無い」で失敗し CUI のままであることを確認。
+- gshell から「CUI へ」→ `shell.bin` に切り替わる。3 往復して kselftest / rshell が生きている。
+- `os32gui on` + 再起動 → 起動時から gshell (`system.cfg` 経路)。
 - `GUI=1` のまま gshell がクラッシュ (`fault_kill`) しても CUI ではなく gshell を再起動する
   ループに入らないこと: 連続 3 回失敗したら CUI に落とす保険を入れる。

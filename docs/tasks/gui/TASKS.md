@@ -92,7 +92,7 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 | G0 | 契約凍結 | 済 (2026-09-04)。**G0b: 契約の実装可能性** (2026-09-05 追加) = 契約末尾の 5 筋書き (イベント配置 / 重なった 2 窓 / リング満杯 / 変換中の BS / CUI ⇄ gshell) を PM が机上で通し、`check_gui_proto.py` のオフセット照合が動く | 机上 + スクリプト |
 | G1 | 描ける | C1 の `gdi_test` が G API だけで契約 G6 の 16 色見本・文字・クリップを描き、H1 の `gfx_stats` が present バイト数を返す。既存 GFX テスト (gfx_demo / blit_test / hello_gfx) に回帰なし | `os32-cycle demo gdi_test` の screenshot を `docs/tasks/gui/ref/g1.png` と目視比較、`stats` を tvram で確認 |
 | G2 | 窓が出る | CUI シェルから `os32gui` で gshell に切り替え (T9)、その上で書き換えた `gui_demo` (別プロセス, CPL=3) が窓 2 枚・XOR ドラッグ・フォーカス・ボタン・テキストボックス・リストボックスを動かす。重なった 2 窓で背面の再描画が前面を壊さない (G4)。1 周の syscall が `POLL` + `COMMIT` + `WAIT` の 3 回、代表操作の転送量が P2 の予算内 | `/api/key` で操作、`/api/screenshot`、`gui_bench` の tvram 出力 |
-| G3 | デスクトップで起動 | `os32gui` → 再起動で gshell が Level 0 起動、FEP が WM で動き (SHIFT+SPACE → 変換 → `Text` 配送)、14 色リース中に 2 色クロームが出る、モーダルが入れ子ループ無しで閉じる、計算ループ中のアプリ (KAPI は呼ぶ) でもカーソルが追従しクリックが失われない (K2、T8 の限界どおりメニューは開かない) | `os32-cycle deploy` からの起動確認 + G2 と同じ操作 + FEP 手順 (メモリ os32-fep-testing) |
+| G3 | デスクトップで起動 | `GUI=1` の `system.cfg` で起動時から gshell が上がる (K4-1)、`os32gui` / 「CUI へ」の切替が再起動なしで往復する (T9)、FEP が WM で動き (SHIFT+SPACE → 変換 → `Text` 配送)、14 色リース中に 2 色クロームが出る、モーダルが入れ子ループ無しで閉じる、計算ループ中のアプリ (KAPI は呼ぶ) でもカーソルが追従しクリックが失われない (K2、T8 の限界どおりメニューは開かない) | `os32-cycle deploy` からの起動確認 + G2 と同じ操作 + FEP 手順 (メモリ os32-fep-testing) |
 | G4 | 共有ライブラリ | ライブラリが 0x400000 に常駐、アプリが 0x500000 から動き、os32-apps / os32-game が再ビルドで無変更動作。`gui_demo` の .bin がライブラリ分だけ小さくなる | `heap_test` の guard_a 表示、`make external` + 全 deploy.yaml の起動確認 |
 | G5 | 9821 (v1.1 後半〜) | PEGC 256 色で G1〜G3 と同じ絵、Cirrus Xe10 で HW 塗り / BLT の能力ビットが立ちカウンタの hw_ops が増える | np21x64w.ini の切替 ([D2] 承認要) + screenshot 拡張 |
 

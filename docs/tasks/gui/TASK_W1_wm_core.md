@@ -54,14 +54,19 @@ userland/gshell/
 4. **イベントリングと入力** (契約 T3): `input.rs` が `Key` (スキャンコード + ch + mods) と
    `Text` (印字可能文字、FEP は W2) と `Pointer` / `Button` を作り、フォーカス窓の
    所有者のスロットへ追記 (`tail` だけ書く。`head` はアプリが進める)。`Pointer` は最新
-   1 件に畳む。`serial` を振る。満杯なら `Pointer` を落とし、それでも無ければ取り込みを
-   止めて `OVERFLOW` (キーはカーネルの待ち行列に残す。欠落させない)。
-   `Paint` / `Configure` / `Timer` は**導出型**: リングに入れず、`OP_POLL` のときに損傷 ∩
-   可視領域・最新矩形・期限切れタイマから生成して返す。`OP_POLL` の戻り値は件数。
-   `OP_WAIT(timeout)` はリングが空かつタイマ未到来なら `sys_halt` で待つ。
-5. **損傷と commit** (契約 G4): `INVALIDATE` で損傷を統合し、`Paint` は「損傷 ∩ 可視領域」の
-   矩形ごとに 1 件 (常に可視領域の内側)。`COMMIT` で損傷分を `gfx_present_rect` (H1 表経由)
-   し、その矩形にかかるカーソルを退避・再描画。全画面 present は WM だけ (起動時、
+   1 件に畳む。`serial` を振り、取り込み tick を serial ごとに直近 64 件、スロット予備領域に
+   記録する (P2)。満杯なら `Pointer` を落とし、それでも無ければ取り込みを止めて捨て、
+   `dropped` を数えて `OVERFLOW` (契約 T3。カーネル側 32 打鍵の先は仕様上の欠落)。
+   `Paint` / `Configure` / `Timer` は**導出型**: `OP_POLL` の中で損傷 ∩ 可視領域・最新矩形・
+   期限切れタイマから作って**同じリングへ追記**し (入らない分は状態のまま持ち越し)、
+   戻り値 = `tail - head`。`OVERFLOW` / `dropped` は `OP_POLL` で渡したら消す。
+   `destroy_window` は残っている宛先項目を `kind = NONE` にし、その index を所有者の次の
+   `OP_POLL` が戻るまで再利用しない (U2 の検疫)。
+   `OP_WAIT(timeout)` は「未読なし かつ 導出型の保留なし かつ 期限前」のときだけ `sys_halt`。
+5. **損傷と commit** (契約 G4 の 3 状態): `INVALIDATE` は dirty に足すだけ。`OP_POLL` で
+   dirty ∩ 可視領域のうちリングに入った矩形を **issued** へ移して `Paint` にする (入らない分と
+   16 超は dirty のまま)。`COMMIT` は **issued だけ**を `gfx_present_rect` (H1 表経由) して
+   空にし、その矩形にかかるカーソルを退避・再描画。dirty は転送しない。全画面 present は WM だけ (起動時、
    フルスクリーン GFX からの復帰)。`gfx_stats().commits` が 1 周 1 回であることをここで守る。
 5b. **実行文脈** (契約 T8。票の「鉄則」と対): ハンドラ (X1) は状態更新とリング追記だけ。
    `OP_COMMIT` (X2) は present とカーソルだけ。**WM 自身の操作 (ドラッグ、閉じる、メニュー、
@@ -94,7 +99,10 @@ userland/gshell/
   `kselftest` / rshell が生きている (契約 T9、G0b-5)。
 - 重なった 2 窓 (G0b-2): 背面の全面 `invalidate` で前面が壊れない、前面を閉じると露出分だけ
   `Paint` が出る (screenshot と `gfx_stats` の present バイト数で確認)。
-- リング満杯 (G0b-3): `gui_busy` (K2) で 200 キー連打 → 欠落ゼロで後から届く。
+- リング満杯 (G0b-3): `gui_busy` (K2) で印字可能キー 60 連打 → 120 件が全部後から届く。
+  200 連打 → `OVERFLOW` と `dropped ≥ 1`、先頭分は届き、`head` が進むと取り込み再開。
+- 検疫 (U2): 一括取得 → 処理中に A を破棄 → 同じ処理中に B を作成 → B は別 index、A 宛の
+  残りはクライアントが捨てる。
 - C2 の `gui_demo` (CPL=3、別プロセス) が窓 2 枚を出し、XOR ドラッグ・前面化・フォーカス・
   閉じるが動く。`gui_demo` を CTRL+STOP で kill しても窓が全部消える (owner 回収)。
 - `gfx_stats()` で 1 周あたり `commits = 1`、`gui_call` の回数が `POLL + COMMIT + WAIT` の

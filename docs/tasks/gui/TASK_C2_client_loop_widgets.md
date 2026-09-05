@@ -18,8 +18,10 @@ Rust の所有型 (`Window` / `Widget` / `Timer`、`Drop` で destroy) とハン
    `proto_version` 照合 (`ERR_VERSION` なら即 exit、理由を `dbg_print`)。
    戻り値 `< 0` は `Result<_, GuiErr>` に。**GetLastError は作らない** (T7)。
 2. **イベント取り出し** (契約 T3): `OP_POLL` の戻り値 (件数) 分をリングから `[GuiEvent; 128]`
-   に写し、**`head` を自分で進める** (`tail` は WM のもの。触らない)。`OVERFLOW` フラグは
-   `dbg_print` に出す。`Paint` は矩形ごとに 1 件来るので、`paint_damaged` は各矩形を基底
+   に写し、**`head = tail` に進める** (`tail` は WM のもの。触らない)。導出型 (`Paint` /
+   `Configure` / `Timer`) も同じリングに入って来るので区別しない。`OVERFLOW` なら `dropped` を
+   `dbg_print` に出し、押下中と仮定していたキー状態を捨てる (必要なら `kbd_is_pressed`)。
+   処理中に破棄したハンドルの index 宛イベントが配列に残っていたら捨てる (U2 の検疫)。`Paint` は矩形ごとに 1 件来るので、`paint_damaged` は各矩形を基底
    クリップ (C1 の `set_base_clip`) にしてウィジェット木を描く。
 3. **U3 ループ** (`app.rs`): `run(app: &mut impl App)`:
    ```
@@ -44,8 +46,9 @@ Rust の所有型 (`Window` / `Widget` / `Timer`、`Drop` で destroy) とハン
 9. **`lease_test`** (`userland/rust/lease_test/`、W2 の検証用): フォーカス中に 14 色を
    リースして独自パレットの絵を描き、`Palette{active:false}` で代替色に描き直す。
 10. **`gui_bench`** (`userland/rust/gui_bench/`、契約 P2 の測定器): `/api/key` からの入力を
-   受けて `commit` 完了までの tick 差と `gfx_stats` の差分を代表操作 (1 文字入力 /
-   ドラッグ / メニュー / リストスクロール) ごとに tvram に出す。NP21/W では転送量、
+   受け、その `serial` の**取り込み tick** (WM がスロット予備領域に記録) から `commit`
+   完了までの差と `gfx_stats` の差分を代表操作 (1 文字入力 / ドラッグ / メニュー /
+   リストスクロール) ごとに tvram に出す。WM とリングの待ち時間を含む「入力 → 表示」。NP21/W では転送量、
    実機では遅延を読む。
 
 ## 鉄則
