@@ -127,10 +127,28 @@ def main():
     print("%-4s burst %d -> got %d, in order %s" % ("ok" if order_ok else "FAIL", BURST, len(got), order_ok))
     fails += 0 if order_ok else 1
 
+    # --- リング wrap: 1000〜1514B を長さを変えながら 60 フレーム逐次 (PSTOP を何度もまたぐ) ---
+    # NIC リングは 0x46〜0xC0 (122 ページ)。1519B は 6 ページなので約 20 フレームごとに wrap する。
+    wrap_n = 60
+    wrap_fail = 0
+    for i in range(wrap_n):
+        ln = 1000 + (i * 37) % 515
+        http("/api/net/capture?clear=1")
+        f = frame(mac, ln, 0x80 + i)
+        want = expected_reflection(f)
+        http("/api/net/inject", f.hex().encode())
+        got = wait_tx(lambda x: x[:14] == want[:14] and x[14:16] == want[14:16], 2.0)
+        if got != want:
+            wrap_fail += 1
+            print("FAIL wrap #%d len %d -> %s" % (i, ln, "no reflection" if got is None else "content mismatch"))
+    print("%-4s wrap %d frames (1000..1514B, ~%d PSTOP wraps) -> %d failures" %
+          ("ok" if wrap_fail == 0 else "FAIL", wrap_n, wrap_n * 6 // 122, wrap_fail))
+    fails += 0 if wrap_fail == 0 else 1
+
     if refl0 is not None:
         refl1 = read_u32(refl_addr)
         rfail = read_u32(fail_addr) if fail_addr else 0
-        want_n = len(LENS) + BURST
+        want_n = len(LENS) + BURST + wrap_n
         cnt_ok = (refl1 - refl0) == want_n and rfail == 0
         print("%-4s driver counters: reflected +%d (want %d), reflect_fail %d" %
               ("ok" if cnt_ok else "FAIL", refl1 - refl0, want_n, rfail))
