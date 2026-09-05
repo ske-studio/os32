@@ -10,6 +10,7 @@ members = [
     "font_test",
     "libos32gui",
     "gui_demo",
+    "gdi_test",
 ]
 resolver = "2"
 
