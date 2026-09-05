@@ -21,7 +21,8 @@ Rust の所有型 (`Window` / `Widget` / `Timer`、`Drop` で destroy) とハン
    に写し、**`head = tail` に進める** (`tail` は WM のもの。触らない)。導出型 (`Paint` /
    `Configure` / `Timer`) も同じリングに入って来るので区別しない。`OVERFLOW` なら `dropped` を
    `dbg_print` に出し、押下中と仮定していたキー状態を捨てる (必要なら `kbd_is_pressed`)。
-   処理中に破棄したハンドルの index 宛イベントが配列に残っていたら捨てる (U2 の検疫)。`Paint` は矩形ごとに 1 件来るので、`paint_damaged` は各矩形を基底
+   `window` の generation が自分の表と一致しないイベントは捨てる (U2。破棄後に同じ index で
+   作られた窓へ古いイベントが届かない)。`Paint` は矩形ごとに 1 件来るので、`paint_damaged` は各矩形を基底
    クリップ (C1 の `set_base_clip`) にしてウィジェット木を描く。
 3. **U3 ループ** (`app.rs`): `run(app: &mut impl App)`:
    ```

@@ -55,14 +55,17 @@ userland/gshell/
    `Text` (印字可能文字、FEP は W2) と `Pointer` / `Button` を作り、フォーカス窓の
    所有者のスロットへ追記 (`tail` だけ書く。`head` はアプリが進める)。`Pointer` は最新
    1 件に畳む。`serial` を振り、取り込み tick を serial ごとに直近 64 件、スロット予備領域に
-   記録する (P2)。満杯なら `Pointer` を落とし、それでも無ければ取り込みを止めて捨て、
-   `dropped` を数えて `OVERFLOW` (契約 T3。カーネル側 32 打鍵の先は仕様上の欠落)。
+   記録する (P2)。満杯なら `Pointer` を落とし、それでも無ければ**カーネルの待ち行列から
+   読まない** (打鍵はそこに残る)。取り込みのたびに `kbd_dropped_count()` の差分を `dropped` に
+   足して `OVERFLOW` (契約 T3。マウスの押下 + 解放が取り込みの間に完結した分は数えられない)。
    `Paint` / `Configure` / `Timer` は**導出型**: `OP_POLL` の中で損傷 ∩ 可視領域・最新矩形・
    期限切れタイマから作って**同じリングへ追記**し (入らない分は状態のまま持ち越し)、
    戻り値 = `tail - head`。`OVERFLOW` / `dropped` は `OP_POLL` で渡したら消す。
-   `destroy_window` は残っている宛先項目を `kind = NONE` にし、その index を所有者の次の
-   `OP_POLL` が戻るまで再利用しない (U2 の検疫)。
-   `OP_WAIT(timeout)` は「未読なし かつ 導出型の保留なし かつ 期限前」のときだけ `sys_halt`。
+   イベントの `window` は完全な ID (index | generation) を載せる (U2)。破棄後の index は
+   generation を進めて再利用してよい。
+   `OP_WAIT(timeout)` は「未読なし かつ 配送できる導出型なし (dirty ∩ 可視領域が空、Configure
+   通知済み、期限切れタイマなし) かつ 期限前」のときだけ `sys_halt`。完全に隠れた窓の dirty
+   では起きない (G0b-3c)。
 5. **損傷と commit** (契約 G4 の 3 状態): `INVALIDATE` は dirty に足すだけ。`OP_POLL` で
    dirty ∩ 可視領域のうちリングに入った矩形を **issued** へ移して `Paint` にする (入らない分と
    16 超は dirty のまま)。`COMMIT` は **issued だけ**を `gfx_present_rect` (H1 表経由) して
@@ -101,8 +104,10 @@ userland/gshell/
   `Paint` が出る (screenshot と `gfx_stats` の present バイト数で確認)。
 - リング満杯 (G0b-3): `gui_busy` (K2) で印字可能キー 60 連打 → 120 件が全部後から届く。
   200 連打 → `OVERFLOW` と `dropped ≥ 1`、先頭分は届き、`head` が進むと取り込み再開。
-- 検疫 (U2): 一括取得 → 処理中に A を破棄 → 同じ処理中に B を作成 → B は別 index、A 宛の
-  残りはクライアントが捨てる。
+- generation (G0b-3d): 一括取得 → A を破棄 → 途中で再 `OP_POLL` → 同じ index で B を作成 →
+  A 宛の残りは generation 不一致でクライアントが捨て、B には届かない。
+- 隠れた窓 (G0b-3c): 完全に覆われた A の `invalidate` で A の `OP_WAIT` が空回りしない
+  (`gfx_stats().commits` が増えない)。
 - C2 の `gui_demo` (CPL=3、別プロセス) が窓 2 枚を出し、XOR ドラッグ・前面化・フォーカス・
   閉じるが動く。`gui_demo` を CTRL+STOP で kill しても窓が全部消える (owner 回収)。
 - `gfx_stats()` で 1 周あたり `commits = 1`、`gui_call` の回数が `POLL + COMMIT + WAIT` の

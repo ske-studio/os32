@@ -78,12 +78,12 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 | SHM | `MEM_SHM_GUI_BASE = MEM_SHM_BASE + 192KB`、スロット 16KB × 4、オフセット: ヘッダ 0 / 要求 16 / 応答 528 / リング 1040 (128 × 16B) / 引数 3088 (8KB) |
 | op | 0 予約、1 `INIT`、2 `POLL`、3 `WAIT`、4 `COMMIT`、5 `INVALIDATE`、6 `STATS`、7 `LEASE_PALETTE`、16〜 ウィンドウ (`CREATE` `DESTROY` `MOVE` `RESIZE` `SHOW` `SET_TITLE` `CLIENT_RECT` `RAISE` `SET_FOCUS` `SET_TEXT_CURSOR`)、32〜 サーフェス (`CREATE` `DESTROY`)、48〜 タイマ (`SET` `KILL`)、64〜 モーダル (`OPEN`)、80〜 予備 |
 | イベント種別 | 契約 U2 の並び順どおり 1 から: `PAINT` `CONFIGURE` `CLOSE` `FOCUS` `KEY` `TEXT` `POINTER` `BUTTON` `TIMER` `WIDGET` `MODAL` `QUIT` `PALETTE` |
-| イベント配置 | **16B = 共通ヘッダ 6B (`kind` u8 @0, `sub` u8 @1, `window` u16 @2, `serial` u16 @4) + ペイロード 10B** (契約 U2 の表)。C / Rust とも大きさとオフセットを static assert |
+| イベント配置 | **16B = 共通ヘッダ 8B (`kind` u8 @0, `sub` u8 @1, `serial` u16 @2, `window` u32 @4 = index:16 \| generation:16) + ペイロード 8B** (契約 U2 の表)。C / Rust とも大きさとオフセットを static assert |
 | エラー | `OS32_ERR_STALE -11` `OS32_ERR_VERSION -12` `OS32_ERR_FULL -13` `OS32_ERR_ARG` は既存 `OS32_ERR_INVAL` (-9) を使う |
 | 色 | 契約 G6 の 16 色を `GUI_COLOR_*` の役割名で、RGB は `GUI_SYSTEM_PALETTE[16]` |
 | `Style.flags` | `TRANSPARENT_BG 0x01` `XOR 0x02` `DOTTED 0x04` `DITHER50 0x08` |
 | 上限 | ウィンドウ 16、サーフェス 16、ウィジェット 64、リスト項目 128、タイマ 8/アプリ、クリップ深さ 8、損傷 8/ウィンドウ、文字列 256B |
-| 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)`、`sys_switch_shell(const char *path) -> i32` (shell 帯からのみ、K4) |
+| 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)`、`sys_switch_shell(const char *path) -> i32` (shell 帯からのみ、K4)、`kbd_dropped_count(void) -> u32` (カーネルのキー待ち行列が捨てた打鍵の累計。`drivers/kbd.c` の満杯分岐で加算) |
 
 ## 5. ゲート (検証層が `os32-cycle` で回す。各票の完了条件はゲートに対応させる)
 

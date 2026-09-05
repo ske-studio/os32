@@ -16,8 +16,8 @@
 1. **`sdk/include/os32/os32_gui_shared.h`** (新規): TASKS.md §4 の表を C の定数と
    構造体にする。`GuiSlotHeader` (16B: `proto_version u16` / `flags u16` (bit0 OVERFLOW) /
    `seq u32` / `ring_head u16` (アプリが書く) / `ring_tail u16` (WM が書く) / `dropped u16` / 予備 2B)、
-   `GuiEvent` (16B、契約 U2 の配置: 共通ヘッダ `kind u8 @0, sub u8 @1, window u16 @2,
-   serial u16 @4` + ペイロード union 10B @6)、`GuiReq*` / `GuiResp*` (op ごと、512B 以内、
+   `GuiEvent` (16B、契約 U2 の配置: 共通ヘッダ `kind u8 @0, sub u8 @1, serial u16 @2,
+   window u32 @4` (index:16 | generation:16) + ペイロード union 8B @8)、`GuiReq*` / `GuiResp*` (op ごと、512B 以内、
    文字列は `u8 len; u8 s[255]`)。**大きさ (16 / 512) と各フィールドのオフセット**を
    `STATIC_ASSERT` (`offsetof`) で固定し、同じ数表を `docs/tasks/gui/PROTO_LAYOUT.md` に
    書き出す (PM の `check_gui_proto.py` が C 側の正典として読む)。C89 なので union +
@@ -33,6 +33,7 @@
    | `i32 gui_register(void *handler, void *pump)` | shell 帯 (owner 1, CPL=0) からのみ。それ以外は `OS32_ERR_INVAL`。`pump` は K2 が使う (今は保存だけ) |
    | `i32 gfx_stats(void *out)` | H1 からの依頼。`GFX_Stats` 型を `os32_kapi_shared.h` に |
    | `i32 gfx_lease_palette(int first, int count, const u8 *rgb)` | H1 からの依頼 |
+   | `u32 kbd_dropped_count(void)` | `drivers/kbd.c` の満杯分岐 (`kbd_count >= KBD_BUF_SIZE`) で `kbd_dropped++` し、累計を返す (契約 T3) |
    ハンドラの C 署名: `i32 (*GuiHandler)(u32 op, u32 arg, int owner)`。
    ポインタ引数 (`out`, `rgb`) はディスパッチャの既存検証 (アプリ帯 / SHM) が効く。
 4. **エラー番号**: `OS32_ERR_STALE -11` / `OS32_ERR_VERSION -12` / `OS32_ERR_FULL -13` を
