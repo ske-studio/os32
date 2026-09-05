@@ -338,6 +338,13 @@ void page_fault_handler(u32 error_code, u32 fault_addr, u32 fault_eip, u32 *regs
         sputs("\n[ring3] #PF (CPL=3 / syscall) addr=");
         sput_hex32(fault_addr);
         sputs(" EIP="); sput_hex32(fault_eip);
+        /* 共有ライブラリ帯域 (K3) の切り分け。.text/.rodata は read-only +
+         * USER なので、ここへの書き込みは保護違反 (error_code bit0=1,
+         * bit1=1) になる。「番地がライブラリ帯」と出れば、アプリのポインタ
+         * 計算ミスかライブラリ自身が定数域へ書いたかがすぐ分かる。 */
+        if (fault_addr >= MEM_SHLIB_BASE && fault_addr < MEM_SHLIB_END) {
+            sputs((error_code & 2) ? " [shlib band, WRITE]" : " [shlib band, READ]");
+        }
         sputs(" -> kill app\n");
         ring3_fault_kill();     /* 戻らない */
     }

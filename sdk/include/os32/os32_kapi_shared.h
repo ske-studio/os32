@@ -113,6 +113,8 @@ typedef enum {
 
 #define OS32X_MAGIC       0x4F533332UL  /* 'OS32' リトルエンディアン */
 #define OS32X_HDR_V1_SIZE 40            /* v1ヘッダのサイズ */
+#define OS32X_HDR_V2_SIZE 44            /* v2ヘッダのサイズ (load_addr を末尾に追記) */
+#define OS32X_HDR_VERSION 2             /* mkos32x.py が現在焼く version */
 
 /* フラグ定義 */
 #define OS32X_FLAG_GFX    0x0001        /* GFXモードを使用 */
@@ -131,7 +133,16 @@ typedef struct {
     u32 heap_size;        /* 0x1C: 要求ヒープサイズ */
     u32 stack_size;       /* 0x20: 要求スタックサイズ */
     u32 min_api_ver;      /* 0x24: 必要な最低KernelAPIバージョン */
-} OS32Header;             /* 合計: 40バイト (0x28) */
+    /* ---- v2 (header_size >= OS32X_HDR_V2_SIZE のときだけ有効) ---- */
+    u32 load_addr;        /* 0x28: リンク時のロードアドレス (mkos32x が ELF の
+                           * .text から焼く)。exec はここが自分の置こうとして
+                           * いる番地と一致するかを確かめ、食い違えば
+                           * OS32_ERR_INVAL で弾く。0 = 不明 (警告のみ)。
+                           * GUI v1.1 K3 でロードアドレスが 0x400000 →
+                           * 0x500000 に動いたため、旧バイナリ (version 1 /
+                           * header_size 40) が黙って別番地へ飛ぶのを防ぐ。 */
+} OS32Header;             /* 合計: 44バイト (0x2C)。version 1 のバイナリは
+                           * 先頭 40 バイト (min_api_ver まで) のみ有効。 */
 
 /* ======================================================================== */
 /*  共有ライブラリ (OS32X_FLAG_SHLIB) のジャンプ表 — GUI v1.1 K3 / C3        */

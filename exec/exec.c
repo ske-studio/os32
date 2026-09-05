@@ -10,6 +10,7 @@
 #include "kprintf.h"
 #include "paging.h"
 #include "pgalloc.h"
+#include "shlib.h"
 #include "fd_redirect.h"
 #include "pipe_buffer.h"
 #include "shm.h"
@@ -158,14 +159,17 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 /*  がここを参照して master PD へ戻し AS を破棄する。                        */
 /* ======================================================================== */
 
-/* リング3 ユーザスタック: 0x400000 帯 (APP_BAND_PDE) 上端に置く (M1_RING3 §5)。
- * プログラム (code + sbrk + exec_heap) は 0x400000 からスタックガード直下まで
- * (レイアウトは include/memmap.h の子プロセス帯の説明を参照)。 */
-#define RING3_USTACK_TOP     (MEM_EXEC_LOAD_ADDR + 0x400000UL)  /* 0x800000 (帯上端, exclusive) */
+/* リング3 ユーザスタック: アプリ帯 (APP_BAND_PDE) の上端に置く (M1_RING3 §5)。
+ * プログラム (code + sbrk + exec_heap) は MEM_EXEC_LOAD_ADDR からスタック
+ * ガード直下まで (レイアウトは include/memmap.h の子プロセス帯の説明を参照)。
+ * K3 でロードアドレスが 1MB 上がったが、**帯の上端は動かさない** —
+ * MEM_EXEC_LOAD_ADDR から導くと PDE 1 の外 (0x900000) へ出てしまうため、
+ * 帯そのものの定数 MEM_APP_BAND_TOP を使う。 */
+#define RING3_USTACK_TOP     MEM_APP_BAND_TOP                   /* 0x800000 (帯上端, exclusive) */
 /* ユーザスタックサイズ。旧 CPL=0 子プロセスの MEM_EXEC_STACK_SIZE (256KB) に
  * 合わせる (ring3 デフォルト化での深いスタック使用の回帰を避ける)。
- * スタック帯 [0x7C0000, 0x800000) は PDE1 内・プログラム帯 (0x400000-0x4FFFFF)
- * より十分上。 */
+ * スタック帯 [0x7C0000, 0x800000) は PDE1 内・プログラム帯 (0x500000-) と
+ * 共有ライブラリ帯 (0x400000-0x4FFFFF) より十分上。 */
 #define RING3_USTACK_SIZE    MEM_EXEC_STACK_SIZE
 
 /* ヒープとスタックの間に 1 ページのガードを挟む (v2 M3 ハードニング)。
@@ -298,14 +302,18 @@ static void ring3_gui_pump(void)
 }
 
 /* ユーザポインタ引数の早期範囲検証 (v2 M2e 補助)。exec が CPL=3 アプリに
- * USER マップした領域 (プログラム帯/ユーザスタック/SHM/VRAM) と NULL のみ許可。
- * 範囲外 (例: 0xDEADBEEF) は wrap に入る前に弾き、カーネル状態不整合を避ける。
+ * USER マップした領域 (共有ライブラリ帯/プログラム帯/ユーザスタック/SHM/VRAM)
+ * と NULL のみ許可。範囲外 (例: 0xDEADBEEF) は wrap に入る前に弾き、
+ * カーネル状態不整合を避ける。
  * 可変長引数はここでは見えないのでフォールトガードが担保する。 */
 static int ring3_ptr_ok(u32 p)
 {
     if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
-    if (p >= MEM_EXEC_LOAD_ADDR && p < RING3_HEAP_TOP) return 1;
-        /* code/data/bss/heap (ガード直下まで) */
+    if (p >= MEM_SHLIB_BASE && p < RING3_HEAP_TOP) return 1;
+        /* 共有ライブラリ帯 (K3: .rodata の文字列や .data の構造体を KAPI に
+         * 渡せる。.text への **書き込み** は PTE が RO なのでハードウェアの
+         * #PF で捕まる — ここは「番地として正しいか」だけを見る) +
+         * アプリの code/data/bss/heap (ガード直下まで) */
     if (p >= RING3_STACK_BOTTOM && p < RING3_USTACK_TOP) return 1;
         /* ユーザスタック帯。ガードページ [RING3_GUARD_BASE, RING3_STACK_BOTTOM)
          * は不許可 (ここを指すポインタは早期検証で kill)。 */
@@ -427,6 +435,8 @@ void __cdecl kapi_sys_exit(int status)
      * が偽なので従来どおり。二重破棄は g_ring3_active と destroy 側で防ぐ。 */
     if (g_ring3_active) {
         paging_load_cr3(paging_kernel_pd_phys());
+        /* 共有ライブラリの .data 複製ページを返す (PD 破棄の前, K3) */
+        shlib_addrspace_detach(&g_ring3_as);
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
     }
@@ -544,6 +554,8 @@ void ring3_fault_kill(void)
     fault_kill_count++;
     if (g_ring3_active) {
         paging_load_cr3(paging_kernel_pd_phys());
+        /* 共有ライブラリの .data 複製ページを返す (PD 破棄の前, K3) */
+        shlib_addrspace_detach(&g_ring3_as);
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
     }
@@ -638,7 +650,7 @@ int exec_run(const char *cmdline)
 
 
     /* ====== ファイル読み込み ====== */
-    sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V1_SIZE);
+    sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V2_SIZE);
 
     /* フォールバック: パスにスラッシュがない場合、標準ディレクトリを順に検索 */
     /* 注意: SYS_DEFAULT_PATH (config.h) と整合させること */
@@ -657,7 +669,7 @@ int exec_run(const char *cmdline)
                 char try_path[VFS_MAX_PATH];
                 kstrncpy(try_path, search_dirs[di], VFS_MAX_PATH);
                 kstrncat(try_path, path, VFS_MAX_PATH);
-                sz = vfs_read(try_path, file_buf, max_size + OS32X_HDR_V1_SIZE);
+                sz = vfs_read(try_path, file_buf, max_size + OS32X_HDR_V2_SIZE);
                 if (sz > 0) break;
             }
         }
@@ -672,6 +684,35 @@ int exec_run(const char *cmdline)
     if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE || hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
         return EXEC_ERR_INVALID;
+    }
+
+    /* ---- ロードアドレスの照合 (K3) ----
+     * 子プロセスのロードアドレスは 0x400000 → MEM_EXEC_LOAD_ADDR (0x500000)
+     * へ動いた (0x400000-0x4FFFFF は共有ライブラリ帯域)。旧レイアウトで
+     * リンクされたバイナリをそのまま走らせると、絶対番地の関数ポインタや
+     * 文字列が 1MB ずれたまま「黙って別の場所へ飛ぶ」ので必ず弾く。
+     * 判定は KAPI 版ではなくヘッダの load_addr (v2 で末尾に追記) で行う
+     * (v42 はネットワークに予約されているため)。
+     * シェル (Level 0) は 0x300000 のままなので対象外 — 旧 shell.bin でも
+     * 起動できるようにしておく (再ビルド前でもブートが死なない)。 */
+    if (!is_shell) {
+        if (hdr->version < OS32X_HDR_VERSION ||
+            hdr->header_size < OS32X_HDR_V2_SIZE) {
+            shell_print("Error: old OS32X binary (no load_addr) - rebuild required\n",
+                        ATTR_RED);
+            return EXEC_ERR_INVALID;
+        }
+        if (hdr->load_addr == 0) {
+            /* mkos32x に --elf も --load も渡されなかった。判定できないので
+             * 通すが、ずれていれば謎の #PF になるため必ず記録する。 */
+            kprintf(0xE1, "[exec] warning: %s has no load_addr\n", path);
+        } else if (hdr->load_addr != load_base) {
+            kprintf(0xC1, "[exec] load addr mismatch: bin=%x expected=%x\n",
+                    hdr->load_addr, load_base);
+            shell_print("Error: OS32X load address mismatch - rebuild required\n",
+                        ATTR_RED);
+            return EXEC_ERR_INVALID;
+        }
     }
 
     code_off  = hdr->header_size;
@@ -1018,6 +1059,14 @@ int exec_run(const char *cmdline)
              * USER を伝播させる (VRAM/SHM で既に立つが明示・冪等)。 */
             paging_addrspace_map_user(&g_ring3_as, ring3_tramp_page,
                 ring3_tramp_page, PAGE_RO | PTE_USER);
+
+            /* --- K3: 共有ライブラリ帯域 (0x400000-0x4FFFFF) ---
+             * .text/.rodata は read-only + USER (master から写っているが
+             * 明示する)、.data/.bss は同じ仮想番地にこのアプリ専用の物理
+             * ページを張る (原本から複製)。未ロードなら何もしない。
+             * ここは 0x500000 からの map_user_range の **後** — 帯が重なって
+             * いないことは memmap.h の定数が保証する。 */
+            shlib_addrspace_attach(&g_ring3_as);
 
             /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
              * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので

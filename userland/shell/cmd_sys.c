@@ -38,7 +38,8 @@ static void cmd_mem(int argc, char **argv)
     g_api->kprintf(ATTR_WHITE, "%s", "  0x1FC000-0x1FFFFF  Kernel Stack (16KB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x200000-0x2FFFFF  SQLite Band (1MB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x300000-0x3FFFFF  Shell Band (1MB)\n");
-    g_api->kprintf(ATTR_WHITE, "%s", "  0x400000-          Program Space\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x400000-0x4FFFFF  Shared Library Band (1MB)\n");
+    g_api->kprintf(ATTR_WHITE, "%s", "  0x500000-          Program Space\n");
 }
 
 static void cmd_reboot(int argc, char **argv)

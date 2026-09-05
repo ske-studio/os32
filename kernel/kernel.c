@@ -25,6 +25,7 @@
 #include "cpu_calibrate.h"
 #include "paging.h"
 #include "pgalloc.h"
+#include "shlib.h"
 #include "hotdeploy.h"
 #include "shm.h"
 #include "utf8.h"
@@ -464,6 +465,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* ブートスプラッシュ表示 (カーネル内蔵) */
     boot_splash();
 
+    /* 共有ライブラリ (0x400000 帯) を常駐させる — シェルを載せる **前** に
+     * 1 回だけ (票 K3)。ここより後だと pgalloc が帯域のページを配ってしまう。
+     * ライブラリが無ければ静かに未ロードで続行し、CUI は従来どおり動く。 */
+    shlib_init();
 
     /* 外部シェル起動 — CUI(shell.bin) と GUI(gshell.bin) を同じシェル帯
      * (0x300000, Level 1) で入れ替えながら回す (契約 T9)。両者は同時に
