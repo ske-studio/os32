@@ -193,6 +193,11 @@ pub struct Win {
     pub issued: RectSet, /* Paint 発行済み・COMMIT 待ち */
     /* 可視領域 (クライアントローカル、互いに素、≤16)。 */
     pub vis: RectSet,
+    /* 可視領域が 16 矩形に収まらず一部を捨てた (レビュー #4 ⑤)。dirty が残る限り
+     * OP_POLL ごとに vis_rot を進めて計算順を回し、捨てる断片を入れ替える
+     * (契約 G4「超過分は次の周」)。 */
+    pub vis_capped: bool,
+    pub vis_rot: u32,
     /* Configure 通知が必要 (座標確定時に立てる)。 */
     pub configure_pending: bool,
     /* テキストカーソル (SET_TEXT_CURSOR)。FEP の未確定文字列を描く原点 (W2)。 */
@@ -223,6 +228,8 @@ impl Win {
         dirty: RectSet::EMPTY,
         issued: RectSet::EMPTY,
         vis: RectSet::EMPTY,
+        vis_capped: false,
+        vis_rot: 0,
         configure_pending: false,
         tc_x: 0,
         tc_y: 0,
@@ -391,6 +398,10 @@ pub struct GuiState {
     /* 標準単独ループ用フラグ。 */
     pub quit: bool,
     pub launch_pending: bool,
+    /* X4 (ポンプ) で FEP がオンのとき退避する raw 打鍵 (レビュー #4 ②)。FEP の
+     * 変換 (辞書検索) は X3 でだけ行う。次の X3 が先頭から取り込む。 */
+    pub pending_raw: [i32; 32],
+    pub pending_raw_n: usize,
     /// F2 のファイル選択で選んだ実行ファイル (NUL 終端)。0 長なら既定のデモ。
     pub launch_path: [u8; 256],
     pub launch_path_len: usize,
@@ -426,6 +437,8 @@ impl GuiState {
         lease_dirty: false,
         quit: false,
         launch_pending: false,
+        pending_raw: [0; 32],
+        pending_raw_n: 0,
         launch_path: [0; 256],
         launch_path_len: 0,
     };

@@ -476,6 +476,13 @@ void kbd_set_gui_mode(int on)
 
     flags = irq_save();
     kbd_gui_mode = next;
+    if (next) {
+        /* GUI セッションの起点で取りこぼし累計を 0 に戻す (レビュー #4 ③)。
+         * gshell は last_kbd_dropped=0 から差分を取るので、前回セッションや
+         * CUI 中の cooked drop が最初の取り込みで偽の OVERFLOW になっていた。 */
+        kbd_dropped     = 0;
+        kbd_raw_dropped = 0;
+    }
     kbd_head  = 0;
     kbd_tail  = 0;
     kbd_count = 0;

@@ -1074,7 +1074,16 @@ int exec_run(const char *cmdline)
              * ページを張る (原本から複製)。未ロードなら何もしない。
              * ここは 0x500000 からの map_user_range の **後** — 帯が重なって
              * いないことは memmap.h の定数が保証する。 */
-            shlib_addrspace_attach(&g_ring3_as);
+            if (shlib_addrspace_attach(&g_ring3_as) < 0) {
+                /* per-app data ページが張れない (表満杯 / 物理ページ不足)。
+                 * 黙って CPL=3 へ降りると最初のライブラリ状態アクセスで #PF
+                 * = アプリ fault に見えるので、起動前に NOMEM で戻す
+                 * (レビュー #4 ⑥)。 */
+                shell_print("Error: shlib data attach failed (out of memory)\n", ATTR_RED);
+                paging_addrspace_destroy(&g_ring3_as);
+                exec_nest_level--;
+                return EXEC_ERR_NOMEM;
+            }
 
             /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
              * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので

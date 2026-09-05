@@ -136,6 +136,10 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
     st.inited = false;
     unsafe {
         let a = os32api::api();
+        /* FEP の描画先を TVRAM 版へ戻す (レビュー #4 ①)。gshell が抜けると同じ
+         * 0x300000 帯に shell.bin が載るので、GFX 版の関数表を残すとカーネル FEP が
+         * 上書き済みコードへ間接 call する。gfx_shutdown より前に行う。 */
+        (a.ime_set_render)(core::ptr::null_mut());
         (a.gfx_shutdown)();
         (a.tvram_clear)();
         (a.sys_switch_shell)(CUI_SHELL.as_ptr());

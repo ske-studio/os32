@@ -9,6 +9,7 @@
 #include "gui.h"
 #include "kstring.h"
 #include "kbd.h"      /* kbd_set_gui_mode (K2-B) */
+#include "ime.h"      /* ime_set_render (レビュー #4 ①: gshell 終了時の防御的リセット) */
 
 /* res_owner_get() は fs/fd_redirect.c。FD と同じ「確保した実行レベル」。
  * ドライバ/カーネル各所と同じ流儀で extern 宣言する (-Ifs 非依存)。 */
@@ -82,6 +83,10 @@ void gui_owner_exit(int owner)
         /* CUI に戻るのでキーボードを元に戻す (cooked リングを再開)。
          * これをしないと shell.bin が載っても打鍵が届かない (K2-B)。 */
         kbd_set_gui_mode(0);
+        /* FEP の描画先を TVRAM 版へ戻す (レビュー #4 ①)。gshell は自分でも
+         * NULL を渡すが、クラッシュで抜けた場合も 0x300000 の旧コードを
+         * 指したままにしない。 */
+        ime_set_render((void *)0);
     }
 }
 

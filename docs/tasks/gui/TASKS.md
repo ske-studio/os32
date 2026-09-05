@@ -133,6 +133,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **H2 結合** (`5bcf7a0` + kernel.mk 登録): PEGC 256 色バックエンド、⑤ boot 順反転 (probe → init)、`paging_map_phys`、300KB バックバッファは物理末尾に予約。**実測**: NP21/W (SUPPORT_PC9821 / SUPPORT_PEGC 込み) は現行 ini (`ExMemory=16`) のままで probe が通り、`hal_test` = 640×480 / bpp 8 / PACKED8 / lease 16〜240、`gdi_test` は無変更で `present_bytes=307200 commits=1`、kselftest 42/0。**ini 変更 ([D2]) は不要**。**gshell は起動直後に #PF** (`asm_gfx_hline` の `rep stos` が NULL へ: libos32gfx が 4 プレーン決め打ちで `planes[1..3]=NULL` を踏む) → K4 の保険で CUI に戻る。対策 = H2b (libos32gfx の PACKED8 対応 + `GFX=pc98|pegc|auto` の強制指定。NP21/W が常に PEGC 相当になったので 9801 経路の回帰にも `GFX=pc98` が要る)。TEXT_OVERLAY / 480 ライン / 24kHz 復帰は gshell 復旧後に確認 |
 
+| 2026-09-06 | **レビュー #4 (6 点) 反映**: ① gshell 終了時に `ime_set_render(NULL)` (gfx_shutdown より前) + カーネル `gui_owner_exit(1)` でも防御的に NULL、② X4 (ポンプ) で FEP オン中の raw 打鍵は WM の退避キュー (32) に積み、変換 (辞書検索) は次の X3 でだけ、③ `kbd_set_gui_mode(1)` で `kbd_dropped` / `kbd_raw_dropped` を 0 に (GUI セッションの起点 = gshell の baseline 0 と一致)、④ モーダル中の X4 は `prev_buttons` を進めない (エッジは X3 が拾う)、⑤ 可視領域 16 超の窓は OP_POLL ごとに `vis_rot` で計算順を回し捨てる断片を入れ替える (`visible::page_vis`)、⑥ `shlib_addrspace_attach` 失敗は `EXEC_ERR_NOMEM` で起動前に戻す。**KAPI v41 への追記は main マージ前に再確認** (レビュー指摘) |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。

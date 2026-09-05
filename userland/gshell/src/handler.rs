@@ -247,6 +247,9 @@ fn emit_paints(st: &mut GuiState, owner: i32, slot_no: usize) {
 }
 
 fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
+    /* 可視領域が 16 超で打ち切られていた窓は、周ごとに捨てる断片を入れ替える
+     * (契約 G4「超過分は次の周」、レビュー #4 ⑤)。 */
+    visible::page_vis(st, idx);
     if st.windows[idx].dirty.is_empty() || st.windows[idx].vis.is_empty() {
         return;
     }

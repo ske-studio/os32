@@ -216,9 +216,31 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         if !space_ok {
             break;
         }
-        let raw = unsafe { (os32api::api().kbd_trygetrawkey)() };
+        /* X3 は前の X4 が退避した raw を先に消費する (順序を保つ)。 */
+        let raw = if ctx.wm_ui() && st.pending_raw_n > 0 {
+            let r = st.pending_raw[0];
+            let mut q = 1;
+            while q < st.pending_raw_n {
+                st.pending_raw[q - 1] = st.pending_raw[q];
+                q += 1;
+            }
+            st.pending_raw_n -= 1;
+            r
+        } else {
+            unsafe { (os32api::api().kbd_trygetrawkey)() }
+        };
         if raw < 0 {
             break;
+        }
+        /* X4 (ポンプ) で FEP がオンなら変換をここでは行わない (契約 T8: 辞書検索
+         * まで走る)。退避して次の X3 に回す。満杯なら読まずにカーネル側に残す。 */
+        if ctx == Ctx::Pump && fep::is_on() {
+            if st.pending_raw_n >= st.pending_raw.len() {
+                break;
+            }
+            st.pending_raw[st.pending_raw_n] = raw;
+            st.pending_raw_n += 1;
+            continue;
         }
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
@@ -310,13 +332,16 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         if moved {
             cursor::move_to(st, mx, my);
         }
-        /* 状態機械を進めるのは X3 だけ (契約 T8)。X4 では押下を捨てない
-         * ように見えるが、cooked と違いマウスは状態のサンプルなので
-         * 次の X3 で現在値から拾い直される。 */
-        if ctx.wm_ui() && down_edge {
-            let _ = modal::on_button(st, mx, my);
+        /* 状態機械を進めるのは X3 だけ (契約 T8)。X4 (ポンプ) では
+         * prev_buttons を**進めない** — 進めると X4 が先に押下を見たとき
+         * 次の X3 に down_edge が立たず、ダイアログのボタンが反応しない
+         * (レビュー #4 ④)。X3 が現在値と prev を比べてエッジを拾う。 */
+        if ctx.wm_ui() {
+            if down_edge {
+                let _ = modal::on_button(st, mx, my);
+            }
+            st.prev_buttons = btn;
         }
-        st.prev_buttons = btn;
         return;
     }
 

@@ -199,6 +199,11 @@ static FEP: FepCell = FepCell(core::cell::UnsafeCell::new(Fep::NEW));
 
 /// FEP 状態への可変参照 (単一スレッド前提。`wm::g()` と同じ流儀)。
 #[inline]
+/// FEP がオンか (X4 が打鍵を退避すべきか)。
+pub fn is_on() -> bool {
+    state().on
+}
+
 pub fn state() -> &'static mut Fep {
     unsafe { &mut *FEP.0.get() }
 }

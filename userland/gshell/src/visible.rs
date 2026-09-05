@@ -84,33 +84,57 @@ pub fn region_subtract_region(a: &RectSet, b: &RectSet) -> (RectSet, bool) {
 /// 倒すと、隠れている場所へ `Paint` が出て背面アプリの COMMIT が前面を
 /// 上書きする (共有バックバッファ、契約 G4。レビュー #3 ①)。捨てた分は
 /// dirty に残るので次周以降で (重なりが減れば) 描かれる。
-fn compute_vis(st: &GuiState, index: usize) -> RectSet {
+/// region の矩形順を k だけ回す (容量超過時に捨てる断片を入れ替えるため)。
+fn rotate(region: &RectSet, k: usize) -> RectSet {
+    let mut out = RectSet::EMPTY;
+    if region.len == 0 {
+        return out;
+    }
+    let n = region.len;
+    let mut i = 0;
+    while i < n {
+        out.push(region.rects[(i + k) % n]);
+        i += 1;
+    }
+    out
+}
+
+/// 戻り値 (可視領域, 打ち切りが起きたか)。
+fn compute_vis(st: &GuiState, index: usize) -> (RectSet, bool) {
     let w = &st.windows[index];
     let mut out = RectSet::EMPTY;
     if !w.visible {
-        return out;
+        return (out, false);
     }
     let (cox, coy) = w.client_origin();
     let (cw, ch) = w.client_size();
     if cw <= 0 || ch <= 0 {
-        return out;
+        return (out, false);
     }
     let mut region = RectSet::EMPTY;
     region.push(Rect::new(cox, coy, cw, ch)); /* 画面座標で計算 */
+    let mut capped = false;
+    let rot = w.vis_rot as usize;
 
     /* 自分より前面 (Z が上) の可視ウィンドウの外形を引く。 */
     let myz = match st.z_of(index) {
         Some(z) => z,
-        None => return out,
+        None => return (out, false),
     };
     let mut z = myz + 1;
     while z < st.z_count {
         let above = st.zorder[z];
         let wa = &st.windows[above];
         if wa.used && wa.visible {
-            /* 打ち切り (ok=false) でも next は可視領域の部分集合。そのまま使う。 */
-            let (next, _ok) = region_subtract_rect(&region, wa.outer());
+            /* 打ち切り (ok=false) でも next は可視領域の部分集合。そのまま使う。
+             * 捨てられるのは末尾の断片なので、vis_rot で順番を回して周ごとに
+             * 別の断片が残るようにする (レビュー #4 ⑤)。 */
+            let rotated = if region.len > 1 { rotate(&region, rot % region.len) } else { region };
+            let (next, ok) = region_subtract_rect(&rotated, wa.outer());
             region = next;
+            if !ok {
+                capped = true;
+            }
         }
         z += 1;
     }
@@ -132,7 +156,20 @@ fn compute_vis(st: &GuiState, index: usize) -> RectSet {
         out.push(r.translate(-cox, -coy));
         i += 1;
     }
-    out
+    (out, capped)
+}
+
+/// 打ち切りが起きた窓の可視領域を、計算順を 1 つ回して作り直す (OP_POLL ごと)。
+/// dirty のうち前回 vis に入らなかった断片が今回入れば Paint になる。露出計算は
+/// しない (painted 済みの領域は dirty に無いので二重に描かせない)。
+pub fn page_vis(st: &mut GuiState, index: usize) {
+    if !st.windows[index].vis_capped || st.windows[index].dirty.is_empty() {
+        return;
+    }
+    st.windows[index].vis_rot = st.windows[index].vis_rot.wrapping_add(1);
+    let (new_vis, capped) = compute_vis(st, index);
+    st.windows[index].vis = new_vis;
+    st.windows[index].vis_capped = capped;
 }
 
 /// 全ウィンドウの可視領域を再計算し、**露出した分を dirty に足す** (契約 G4)。
@@ -145,7 +182,8 @@ pub fn recompute_and_expose(st: &mut GuiState) {
             continue;
         }
         let old_vis = st.windows[idx].vis;
-        let new_vis = compute_vis(st, idx);
+        let (new_vis, capped) = compute_vis(st, idx);
+        st.windows[idx].vis_capped = capped;
         /* 露出 = new − old。露出分のみ dirty に足す (完全に隠れた窓は空)。 */
         let (exposed, _ok) = region_subtract_region(&new_vis, &old_vis);
         st.windows[idx].vis = new_vis;
