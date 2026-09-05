@@ -30,7 +30,7 @@ section .text
 
 global int80_stub
 int80_stub:
-        ;; ゲートは割込みゲートなので IF は既にクリア済み。
+        ;; ゲートは割込みゲートなので IF はクリア済み (セグメント復元まで保つ)。
         pushad                          ;; フレーム先頭 = esp
 
         ;; C ハンドラはカーネルデータセグメント前提。CPL=3 由来では
@@ -40,6 +40,14 @@ int80_stub:
         mov     es, ax
         mov     fs, ax
         mov     gs, ax
+
+        ;; 割込みゲートで IF=0 になっているので、ここで戻す。KAPI 本体
+        ;; (wrap_*) は CPL=0 の call 経路と同じく IF=1 で走る前提で書かれて
+        ;; いる: kbd_getchar / sys_halt / gui_call(OP_WAIT) は hlt で IRQ を
+        ;; 待つため、IF=0 のままだと CPL=3 からの呼び出しで永久停止する
+        ;; (2026-09-06、gdi_test の kbd_getchar と less の sys_halt で実測)。
+        ;; iretd が EFLAGS をフレームから復元するので戻りの cli は不要。
+        sti
 
         mov     eax, esp                ;; frame ptr (pushad 先頭)
         push    eax
