@@ -15,6 +15,13 @@
 #include "kprintf.h"
 #include "idt.h"
 #include "io.h"
+#include "kstring.h"
+
+/* 反射モード (LGY98_FLAG_REFLECT)。static にするとホストから読めないので意図的にグローバル。 */
+static int lgy98_reflect_on = 0;
+u32 lgy98_reflected = 0;
+u32 lgy98_reflect_fail = 0;
+static u8 lgy98_reflect_buf[1514 + 2];
 
 int lgy98_validate_base(unsigned int base)
 {
@@ -86,6 +93,7 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
     if (np2_detect()) cfg.flags |= NE2K_CFG_RX_COUNT_NO_FCS;
     if (flags & LGY98_FLAG_DIAG) cfg.flags |= NE2K_CFG_DIAG_RAM | NE2K_CFG_DIAG_DMA;
     if (flags & LGY98_FLAG_LOOPBACK) cfg.flags |= NE2K_CFG_LOOPBACK;
+    lgy98_reflect_on = 0;
 
     rc = ne2k_init(&cfg);
     if (rc) {
@@ -100,6 +108,10 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
     kprintf(0x07, " ram %dKB%s%s\n", (int)(ne2k_ram_bytes() / 1024),
             (cfg.flags & NE2K_CFG_RX_COUNT_NO_FCS) ? " (np21w)" : "",
             (cfg.flags & NE2K_CFG_LOOPBACK) ? " loopback" : "");
+    if (flags & LGY98_FLAG_REFLECT) {
+        lgy98_reflect_on = 1;
+        kprintf(0x07, "[lgy98] reflect mode (M2 test): rx frames are sent back with MACs swapped\n");
+    }
     if (flags & LGY98_FLAG_DIAG) {
         ne2k_get_stats(&st);
         kprintf(st.diag_ram_errors || st.diag_dma_errors ? 0xC1 : 0x07,
@@ -116,4 +128,24 @@ int lgy98_init(void)
 #else
     return lgy98_attach(CONFIG_LGY98_BASE, CONFIG_LGY98_IRQ, CONFIG_LGY98_FLAGS);
 #endif
+}
+
+void lgy98_tick(void)
+{
+    int n;
+    if (!lgy98_reflect_on) return;
+    if (ne2k_state() != NE2K_STATE_RUNNING) return;
+    ne2k_poll(2);
+    for (n = 0; n < 2; n++) {
+        unsigned int len = 0;
+        u8 tmp[6];
+        int rc = ne2k_recv(lgy98_reflect_buf, sizeof(lgy98_reflect_buf), &len);
+        if (rc != NE2K_OK) break;
+        if (len < 14) { lgy98_reflect_fail++; continue; }
+        kmemcpy(tmp, lgy98_reflect_buf, 6);
+        kmemcpy(lgy98_reflect_buf, lgy98_reflect_buf + 6, 6);
+        kmemcpy(lgy98_reflect_buf + 6, tmp, 6);
+        if (ne2k_send(lgy98_reflect_buf, len) == NE2K_OK) lgy98_reflected++;
+        else lgy98_reflect_fail++;
+    }
 }

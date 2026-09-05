@@ -169,3 +169,10 @@ kernel-nolgy98:
 	$(MAKE) kernel
 
 .PHONY: kernel-lgy98 kernel-nolgy98
+
+# M2 の対向試験 (inject → 受信 → 反射送信 → capture)。NP21/W が LAN 有効 + 反射モードの
+# カーネルで起動していること。make check には入れない (実機が要る)。
+check-net-m2:
+	@python3 tools/net_m2_test.py
+
+.PHONY: check-net-m2

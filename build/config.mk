@@ -90,12 +90,12 @@ KERNEL_CFLAGS += $(KERNEL_CFLAGS_EXTRA)
 #   選択は $(LGY98_STAMP) に残り、以後の make kernel / deploy-nhd も同じ設定で
 #   ビルドする (deploy がカーネルを作り直しても無効に戻らない)。
 #   BASE / IRQ / FLAGS は LGY98_BASE / LGY98_IRQ / LGY98_FLAGS で上書きできる
-#   (既定は NP21/W の値。FLAGS 1 = 起動時診断)。読むのは drivers/lgy98.c だけで、
+#   (既定は NP21/W の値。FLAGS = LGY98_FLAG_* の和、既定 5 = 起動時診断 + 反射モード)。読むのは drivers/lgy98.c だけで、
 #   その .o は毎回コンパイルされる (build/kernel.mk)。
 LGY98_STAMP = $(BUILD_OUT)/lgy98.enabled
 LGY98_BASE  ?= 0x10D0
 LGY98_IRQ   ?= 5
-LGY98_FLAGS ?= 1
+LGY98_FLAGS ?= 5
 ifneq ($(wildcard $(LGY98_STAMP)),)
 LGY98 ?= 1
 endif

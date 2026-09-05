@@ -43,6 +43,7 @@
 /* ---- 起動設定 (include/config.h の CONFIG_LGY98_*) に対する flags ---- */
 #define LGY98_FLAG_DIAG      0x01   /* 初期化時に RAM 全域試験と Remote DMA 往復試験を行う */
 #define LGY98_FLAG_LOOPBACK  0x02   /* 内部ループバックで起動 (M2 試験用) */
+#define LGY98_FLAG_REFLECT   0x04   /* 反射モード: 100Hz tick で poll し、受信フレームの MAC を入れ替えて送り返す (M2 試験用) */
 
 /* 設定検証。0 = 妥当, 負 = NE2K_ERR_* */
 int lgy98_validate_base(unsigned int base);
@@ -54,5 +55,14 @@ int lgy98_init(void);
 
 /* 明示的に接続する (base / irq / LGY98_FLAG_*)。lgy98_init が使う。 */
 int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags);
+
+/* 100Hz タイマから呼ぶ (kernel/isr_handlers.c timer_handler)。反射モードのときだけ
+ * NIC を poll して受信フレームを送り返す。それ以外は即座に戻る。
+ * M3 で IRQ 駆動になるまでの M2 試験経路であり、完成ドライバの受信保証ではない。 */
+void lgy98_tick(void);
+
+/* 反射した / 反射に失敗したフレーム数 (ホストから kernel.map 経由で観測する) */
+extern u32 lgy98_reflected;
+extern u32 lgy98_reflect_fail;
 
 #endif /* LGY98_H */
