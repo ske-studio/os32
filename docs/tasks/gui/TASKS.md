@@ -137,6 +137,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **KAPI を v42 として確定** (`aec21de`、ユーザー承諾。ネットワークは v43)。**H2b 結合** (`324d15b`): libos32gfx の PACKED8 対応、`GFX=pc98|pegc|auto` / `gfxmode`。一斉再ビルド → 配備: `ver` が `API: v42`、kselftest 42/0、klibc 49/49、hal_test `backend pegc (packed 8bpp) 640x480 bpp=8`、gdi_test 307200。**PEGC で gshell が #PF なしに動き gui_demo の窓 2 枚が描ける**。**未解決 (H2c)**: (1) パレットがほぼ黒 (全色が暗い — PEGC 256 色モードのパレット書き込み経路が NP21/W の実装と合っていない疑い)、(2) 表示が 640×400 のまま (`/api/status` scrn_ymax=400、H2 が予告した 480 ライン SYNC 未設定)、(3) `grph_disp=0`。NP21/W のソース (`/home/hight/np21w-src`) が正典なので、それに合わせて直す |
 
+| 2026-09-06 | **9801 プレーン経路の回帰 (`GFX=pc98`) 通過**: `gfxmode pc98` → **reset** (deploy は `/etc/system.cfg` を巻き戻すので設定切替の検証は reset で) → hal_test `backend pc98 (planar 4bpp) 640x400 bpp=4`、gdi_test 512000、gshell → gui_demo → FEP で「日本語」入力 → ESC → CUI → `gfxmode auto` に戻した。レビュー #4 の修正込みで退行なし |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
