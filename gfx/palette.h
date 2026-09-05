@@ -33,6 +33,10 @@ void palette_init(void);
 /* パレット設定 (ハードウェア+シャドウ同時更新) */
 void palette_set(int idx, u8 r, u8 g, u8 b);
 
+/* シャドウのみ更新 (ハードウェアには書かない)。輝度が 8bit の 256 色
+ * バックエンドが、自分で書いた 0〜15 のシステム色を台帳へ反映するために使う。 */
+void palette_shadow_set(int idx, u8 r, u8 g, u8 b);
+
 /* シャドウパレット取得 */
 void palette_get(int idx, u8 *r, u8 *g, u8 *b);
 

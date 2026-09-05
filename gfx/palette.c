@@ -59,6 +59,19 @@ void palette_set(int idx, u8 r, u8 g, u8 b)
     hw_set_palette(idx, shadow[idx].r, shadow[idx].g, shadow[idx].b);
 }
 
+/* シャドウだけを更新する (ハードウェアには書かない)。
+ * 256 色バックエンド (PEGC) はパレットレジスタの輝度が 8bit で、この
+ * ファイルの hw_set_palette (4bit) を通せない。それでも KAPI の
+ * gfx_get_palette は palette_get = シャドウを読むので、バックエンド側が
+ * 0〜15 のシステム色を書いたときはここで台帳を合わせる (票 H2c)。 */
+void palette_shadow_set(int idx, u8 r, u8 g, u8 b)
+{
+    if (idx < 0 || idx >= PALETTE_COUNT) return;
+    shadow[idx].r = r & 0x0F;
+    shadow[idx].g = g & 0x0F;
+    shadow[idx].b = b & 0x0F;
+}
+
 void palette_get(int idx, u8 *r, u8 *g, u8 *b)
 {
     if (idx < 0 || idx >= PALETTE_COUNT) return;

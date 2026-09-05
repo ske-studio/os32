@@ -74,7 +74,9 @@
 /*  UNDOCUMENTED は水平。UNDOCUMENTED を採る。                               */
 /*  640x480 は 31kHz のときだけ指定できる ([B] INT 18h AH=30h の解説)。      */
 /*  ⚠ [U] の解説:「周波数を切り替えたら GDC の SYNC コマンド等で同期信号を   */
-/*  設定しなおさないと正常に表示されない」。→ backend_pegc.c の注記参照。    */
+/*  設定しなおさないと正常に表示されない」。**実測でもそのとおりだった**:     */
+/*  09A8h と 6Ah (800 ライン構成) だけでは 400 ラインのままで、GDC の SYNC を */
+/*  入れて初めて 480 ラインになる (票 H2c)。パラメータは下の §9。            */
 /* ------------------------------------------------------------------------ */
 #define PEGC_HSYNC_PORT        0x09A8
 #define PEGC_HSYNC_24KHZ       0x00  /* 24.83kHz (640x400 の既定) */
@@ -165,9 +167,22 @@
 /*  **並びは G, R, B** (AAh=緑, ACh=赤, AEh=青) — RGB ではない。             */
 /*  ポート番号自体は gfx/gfx.h の PAL_IDX_PORT / PAL_G_PORT / PAL_R_PORT /    */
 /*  PAL_B_PORT が正典なので、ここでは重複定義せず色数だけを置く。            */
+/*                                                                          */
+/*  NP21/W での確認 (票 H2c):                                                */
+/*    src/io/gdc.c gdc_oa8/gdc_oaa/gdc_oac/gdc_oae — 256 色モード             */
+/*    (gdc.analog bit GDCANALOG_256) では A8h が索引 (0〜255)、AAh/ACh/AEh の */
+/*    値が **8bit のまま** gdc.anareg[16*3 + idx*4 + 0..2] に入る。           */
+/*    src/vram/palettes.c pal_make9821() がそれを np2_pal32[NP2PAL_GRPHEX+i]  */
+/*    の p.g / p.r / p.b へ **無加工で** 代入する。                           */
+/*    → レジスタは 0〜255。0〜15 を書くと 1/17 の輝度 = ほぼ黒になる。        */
+/*  一方 OS32 の KAPI (gfx_set_palette / gfx_lease_palette) の輝度は          */
+/*  **0〜15** (契約 G6/G8 の GuiRgb = PC-98 16 色の流儀)。                    */
+/*  そこでバックエンドは KAPI 値を ×17 で 8bit へ伸ばす (15→255, 0→0)。      */
 /* ------------------------------------------------------------------------ */
 #define PEGC_PALETTE_COUNT     256
 #define PEGC_PALETTE_MAX       255   /* 各輝度の最大値 (16 色機は 15) */
+#define PEGC_PAL_KAPI_MASK     0x0F  /* KAPI 側の輝度は 4bit (0〜15) */
+#define PEGC_PAL_KAPI_SCALE    17    /* 4bit → 8bit の伸張係数 (15*17 = 255) */
 
 /* GUI がフォーカスアプリに貸せる範囲 (契約 G8)。0〜15 はシステム色として
  * 不可侵、16〜255 の 240 本を貸す。 */
@@ -200,5 +215,55 @@
 #define PEGC_BIOS_CRT_480LINE  0x01   /* bit0: 1=640x480 */
 #define PEGC_BIOS_PRXDUPD      0x054DUL
 #define PEGC_BIOS_PRX_EXTGFX   0x80   /* bit7: 1=拡張グラフィックス (現在値) */
+
+/* ------------------------------------------------------------------------ */
+/*  9. GDC の表示タイミング (SYNC / SCROLL) — 480 ライン化 (票 H2c)           */
+/*                                                                          */
+/*  ⚠ **資料の欠落をエミュレータのソースで埋めた箇所**。ミラー [B]/[U] には   */
+/*  480 ライン用の GDC SYNC パラメータ表が無い (400 ラインの PITCH 80/40 ワード*/
+/*  しか載っていない)。検証対象は NP21/W なので、そちらの実装を正典として     */
+/*  値を採った (docs/INDEX.md の「食い違ったら…」の適用: この環境では NP21/W)。*/
+/*                                                                          */
+/*  出典 (NP21/W ai-debug fork, /home/hight/np21w-src/src/):                  */
+/*    bios/bios18.c gdcmastersync[6][8] / gdcslavesync[6][8]                 */
+/*      — INT 18h AH=42h (CRT モード設定) が GDC へ流す SYNC 8 バイト。       */
+/*        master[2]="31"(400/31kHz), [5]="31-480:30", [1]="24"(400/24.83kHz)  */
+/*        slave [1]="31-H"(480), [3]="24-M"(400/80 桁)                       */
+/*    vram/dispsync.c dispsync_renewalvertical()                             */
+/*      — 表示ライン数は SYNC の P7/P8 から計算される:                        */
+/*        ymax = ((LOADINTELWORD(para+SYNC+6) - 1) & 0x3ff) + 1、             */
+/*        vbp  = para[SYNC+7] >> 2、scrnymax = max(text,grph) を 8 で切り上げ。*/
+/*        → 480 を出すには P7=E0h, P8=95h ((0x95E0-1)&0x3FF)+1 = 480。        */
+/*        09A8h (31kHz) と 6Ah (800 ライン構成) だけでは scrnymax は 400 の    */
+/*        まま = H2 で観測された症状。                                        */
+/*    vram/makegrex.c makegrphex()/grphput_all()                             */
+/*      — 256 色 (packed) の表示は GDC_SCROLL の SAD/LEN と GDC_PITCH で走査   */
+/*        する。LEN が表示ライン数より小さいと下端がパーティション 1 の内容に  */
+/*        化けるので、BIOS と同じ「SAD=0 / para[3]=40h (LEN=1024)」を入れる。  */
+/*        PITCH は触らない: 現状 (BIOS 既定 40 + gdc.clock bit7=0) で          */
+/*        実効 80 ワード = 640 バイト/ライン になっており 480 でも変わらない。 */
+/*  ※ P1〜P8 は uPD7220 SYNC の並び (P1=モード, P2=CR, P5=HBP, P7/P8=AL/VBP)。 */
+/*    ポート番号は pc98.h の GDC_TEXT_CMD/PARAM (マスタ=テキスト) と          */
+/*    GDC_GFX_CMD/PARAM (スレーブ=グラフィック) が正典。                      */
+/* ------------------------------------------------------------------------ */
+#define PEGC_GDC_SYNC_LEN      8    /* SYNC のパラメータ数 */
+#define PEGC_GDC_SCROLL_LEN    4    /* SCROLL のパラメータ数 (パーティション 1 面) */
+
+/* 31.47kHz / 640x480 (テキストは 16 ラスタ × 30 行) */
+#define PEGC_GDC_MSYNC_480     { 0x10, 0x4E, 0x4B, 0x0C, 0x03, 0x06, 0xE0, 0x95 }
+#define PEGC_GDC_SSYNC_480     { 0x02, 0x4E, 0x4B, 0x0C, 0x83, 0x06, 0xE0, 0x95 }
+/* 24.83kHz / 640x400 (OS32 のテキストコンソールの前提) — 復帰用 */
+#define PEGC_GDC_MSYNC_400     { 0x10, 0x4E, 0x07, 0x25, 0x07, 0x07, 0x90, 0x65 }
+#define PEGC_GDC_SSYNC_400     { 0x02, 0x4E, 0x07, 0x25, 0x87, 0x07, 0x90, 0x65 }
+
+/* グラフィック GDC の表示開始・区間長。SAD=0、LEN は para[3] bit6 = 1024 ライン。
+ * 400 ライン側は BIOS と同じ全 0 (LEN=0 = 無制限扱い)。 */
+#define PEGC_GDC_SCROLL_480    { 0x00, 0x00, 0x00, 0x40 }
+#define PEGC_GDC_SCROLL_400    { 0x00, 0x00, 0x00, 0x00 }
+
+/* 480 ラインでのテキスト行数 (16 ラスタ/行)。モード切替時にここまでクリアして
+ * おかないと 25 行目以降に古い内容が残り、テキスト面がグラフィックを隠す
+ * (NP21/W vram/sdrawex.mcr の pex_2: テキストが 0 以外の画素はテキスト優先)。 */
+#define PEGC_TEXT_ROWS_480     30
 
 #endif /* __PEGC_H */

@@ -15,6 +15,18 @@
 /*                                                                          */
 /*  ページテーブルは触らない。リニア窓は K の paging_map_phys() に張らせる。  */
 /*  バックバッファは物理メモリ末尾から sys_reserve_top() で切り出す。        */
+/*                                                                          */
+/*  票 H2c (NP21/W 実機で出た 3 点を修正。根拠は NP21/W のソース):            */
+/*    1. パレットがほぼ黒 → KAPI の輝度は 0〜15、PEGC の 256 色パレット      */
+/*       レジスタは 0〜255。set_palette で ×17 して伸ばす。                   */
+/*       (io/gdc.c gdc_oaa/oac/oae, vram/palettes.c pal_make9821)            */
+/*    2. 480 ラインにならない → 09A8h と 6Ah だけでは足りず、GDC の SYNC     */
+/*       パラメータが表示ライン数を決める。両 GDC へ 480 ライン用の SYNC を   */
+/*       流す。(vram/dispsync.c dispsync_renewalvertical,                    */
+/*        bios/bios18.c gdcmastersync/gdcslavesync)                          */
+/*    3. grph_disp=0 → グラフィック GDC へ START (0Dh) を出していないと      */
+/*       gdcs.grphdisp の GDCSCRN_ENABLE が立たず、そもそも合成されない。     */
+/*       (io/gdc.c gdc_work, vram/scrndraw.c scrndraw_draw)                  */
 /* ======================================================================== */
 
 #include "gfx_internal.h"   /* gfx.h (PAL_*_PORT), pc98.h, memmap.h, _out/_in */
@@ -25,7 +37,18 @@
 #include "sys.h"
 #include "kstring.h"
 #include "kprintf.h"
+#include "palette.h"   /* palette_get_all / palette_shadow_set */
 #include "os32_kapi_shared.h"
+
+/* ------------------------------------------------------------------------ */
+/*  GDC 表示タイミング表 (値と出典は include/pegc.h §9)                      */
+/* ------------------------------------------------------------------------ */
+static const u8 s_msync_480[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_MSYNC_480;
+static const u8 s_ssync_480[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_SSYNC_480;
+static const u8 s_msync_400[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_MSYNC_400;
+static const u8 s_ssync_400[PEGC_GDC_SYNC_LEN]   = PEGC_GDC_SSYNC_400;
+static const u8 s_scroll_480[PEGC_GDC_SCROLL_LEN] = PEGC_GDC_SCROLL_480;
+static const u8 s_scroll_400[PEGC_GDC_SCROLL_LEN] = PEGC_GDC_SCROLL_400;
 
 /* ------------------------------------------------------------------------ */
 /*  内部状態                                                                */
@@ -76,6 +99,67 @@ static void ff2_locked_write(u8 val)
     _out(MODE_FF2_PORT, val);
     _out(MODE_FF2_PORT, PEGC_FF2_LOCK);
     gfx_counters.io_accesses += 3;
+}
+
+/* ------------------------------------------------------------------------ */
+/*  GDC の表示制御 (票 H2c)                                                  */
+/*                                                                          */
+/*  [HW1] が禁じているのは GDC の **描画** コマンド (VECTW/VECTE/TEXTE/      */
+/*  WDAT 等) であって、表示制御 (SYNC / SCROLL / START / STOP / PITCH) は    */
+/*  9801 側の backend_pc98.c / gfx_core.c も従来から使っている。画素は        */
+/*  引き続き CPU からリニア窓へ直接書くだけ。                                */
+/*                                                                          */
+/*  コマンドは 62h (マスタ = テキスト) / A2h (スレーブ = グラフィック)、      */
+/*  パラメータは 60h / A0h。                                                 */
+/* ------------------------------------------------------------------------ */
+static void gdc_send(unsigned int cmd_port, unsigned int prm_port,
+                     u8 cmd, const u8 *para, int n)
+{
+    int i;
+    _out(cmd_port, cmd);
+    for (i = 0; i < n; i++) _out(prm_port, para[i]);
+    gfx_counters.io_accesses += (u32)(n + 1);
+}
+
+/* 両 GDC の SYNC を入れ直し、グラフィック GDC の表示区間を置いて表示を開始する。
+ * SYNC (0Eh, DE=0) で同期パラメータを流し込んでから START (0Dh) で表示を許可
+ * する — これが NP21/W 側の gdcs.textdisp / gdcs.grphdisp の GDCSCRN_ENABLE
+ * (= /api/status の grph_disp) を立てる唯一の道 (io/gdc.c gdc_work())。 */
+static void pegc_gdc_set_timing(const u8 *msync, const u8 *ssync,
+                                const u8 *scroll)
+{
+    gdc_send(GDC_TEXT_CMD, GDC_TEXT_PARAM, GDC_CMD_SYNC,
+             msync, PEGC_GDC_SYNC_LEN);
+    gdc_send(GDC_GFX_CMD, GDC_GFX_PARAM, GDC_CMD_SYNC,
+             ssync, PEGC_GDC_SYNC_LEN);
+    gdc_send(GDC_GFX_CMD, GDC_GFX_PARAM, GDC_CMD_SCROLL,
+             scroll, PEGC_GDC_SCROLL_LEN);
+
+    /* 画面表示可 (モード F1 0Fh)。NP21/W の vram/scrndraw.c scrndraw_draw()
+     * は gdc.mode1 bit7 が立っていないとテキストもグラフィックも合成しない。
+     * 起動時から立っている値だが、モードを触った直後に念を押しておく。 */
+    _out(MODE_FF1_PORT, MFF1_DISP_ON);
+    _out(GDC_TEXT_CMD, GDC_CMD_START);
+    _out(GDC_GFX_CMD, GDC_CMD_START);
+    gfx_counters.io_accesses += 3;
+}
+
+/* テキスト VRAM の row0 行目から row1 行目の手前までをクリアする。
+ * 480 ラインでは 30 行が見えるので、25 行モードのまま切り替えると
+ * 26 行目以降に古い内容が残り、テキストがグラフィックを隠す
+ * (NP21/W vram/sdrawex.mcr pex_2 はテキスト画素優先)。 */
+static void pegc_tvram_clear(int row0, int row1)
+{
+    volatile u16 *tvram_char = (volatile u16 *)TVRAM_CHAR_BASE;
+    volatile u8  *tvram_attr = (volatile u8  *)TVRAM_ATTR_BASE;
+    int i;
+    int from = TVRAM_COLS * row0;
+    int to   = TVRAM_COLS * row1;
+
+    for (i = from; i < to; i++) {
+        tvram_char[i] = 0x0000;
+        tvram_attr[i * 2] = 0x00;
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -184,6 +268,18 @@ restore_mode:
 /*  16〜231: 6×6×6 の色立方 (216 色)。                                       */
 /*  232〜255: 24 段のグレースケール。                                        */
 /*  16 以降が契約 G8 のリース範囲 (lease_first=16, lease_count=240)。         */
+/*                                                                          */
+/*  ⚠ **輝度のスケールに 2 つの世界がある** (票 H2c の障害):                  */
+/*    - ハードウェア (AAh/ACh/AEh) は 256 色モードでは **0〜255**。           */
+/*      NP21/W は書いた値をそのまま np2_pal32 の RGB 成分にする               */
+/*      (io/gdc.c gdc_oaa/oac/oae → vram/palettes.c pal_make9821)。          */
+/*    - KAPI (gfx_set_palette / gfx_lease_palette) は **0〜15**。             */
+/*      契約 G6 の GUI_SYSTEM_PALETTE も 0〜15 で、gshell が起動時に          */
+/*      gfx_set_palette で 16 色ぶん流し込む (userland/gshell wm.rs)。        */
+/*  H2 では KAPI 値を素通ししていたため、gshell がシステム色を入れた瞬間に     */
+/*  0〜15 が 8bit レジスタへ書かれ、白 (15,15,15) が輝度 15/255 ≒ ほぼ黒に    */
+/*  なっていた (実測: 画面全体が暗く、文字がかろうじて見える)。               */
+/*  → KAPI から来る値は必ず pegc_pal8() で 8bit へ伸ばす。                    */
 /* ------------------------------------------------------------------------ */
 static void pegc_write_palette(int idx, u8 r, u8 g, u8 b)
 {
@@ -194,6 +290,12 @@ static void pegc_write_palette(int idx, u8 r, u8 g, u8 b)
     gfx_counters.io_accesses += 4;
 }
 
+/* KAPI の 4bit 輝度 (0〜15) → PEGC の 8bit 輝度 (0〜255)。15*17 = 255。 */
+static u8 pegc_pal8(u8 v)
+{
+    return (u8)((v & PEGC_PAL_KAPI_MASK) * PEGC_PAL_KAPI_SCALE);
+}
+
 static void pegc_palette_init(void)
 {
     static const u8 cube[6] = { 0, 51, 102, 153, 204, 255 };
@@ -202,9 +304,8 @@ static void pegc_palette_init(void)
 
     /* 0-15: 9801 の 16 色をそのまま (4bit 輝度 → 8bit) */
     for (i = 0; i < PALETTE_COUNT; i++) {
-        pegc_write_palette(i,
-                           (u8)(sys[i].r * 17), (u8)(sys[i].g * 17),
-                           (u8)(sys[i].b * 17));
+        pegc_write_palette(i, pegc_pal8(sys[i].r), pegc_pal8(sys[i].g),
+                           pegc_pal8(sys[i].b));
     }
 
     /* 16-231: 6x6x6 色立方 */
@@ -233,9 +334,6 @@ static void pegc_palette_init(void)
 static void pegc_init(void)
 {
     u32 npages = (u32)(PEGC_FB_SIZE_480 + PAGE_SIZE - 1) / PAGE_SIZE;
-    volatile u16 *tvram_char = (volatile u16 *)TVRAM_CHAR_BASE;
-    volatile u8  *tvram_attr = (volatile u8  *)TVRAM_ATTR_BASE;
-    int i;
 
     if (!pegc_probe()) return;
 
@@ -260,10 +358,19 @@ static void pegc_init(void)
     }
 
     /* --- 表示モード ---
-     * 31kHz (640x480 は 31kHz のときだけ指定できる) → 800 ライン VRAM 構成
-     * (「480 ラインモードのデフォルト」) → 拡張グラフィックモード。 */
+     * 31kHz (640x480 は 31kHz のときだけ指定できる) → GDC の同期信号を
+     * 480 ライン用に入れ直す → 800 ライン VRAM 構成 (「480 ラインモードの
+     * デフォルト」) → 拡張グラフィックモード。
+     *
+     * SYNC を 6Ah の 69h/21h より **前** に置くのが肝 (票 H2c)。NP21/W は
+     * 表示サイズを毎フレーム再計算するが、それを走らせるのは
+     * gdcs.textdisp / gdcs.grphdisp の GDCSCRN_EXT で、09A8h への書き込み
+     * (io/gdc.c gdc_o9a8) と gdc_analogext() (6Ah 21h) がそれを立てる
+     * (pccore.c → vram/dispsync.c dispsync_renewalvertical)。SYNC を先に
+     * 入れておけば、その再計算が新しい 480 ラインの値を読む。 */
     _out(PEGC_HSYNC_PORT, PEGC_HSYNC_31KHZ);
     gfx_counters.io_accesses++;
+    pegc_gdc_set_timing(s_msync_480, s_ssync_480, s_scroll_480);
     ff2_locked_write(PEGC_FF2_VRAM_800L);
     ff2_locked_write(PEGC_FF2_EXT_GFX);
 
@@ -283,26 +390,20 @@ static void pegc_init(void)
     kmemset((u8 *)PEGC_LINEAR_BASE, 0, (u32)PEGC_FB_SIZE_480);
 
     /* テキスト VRAM もクリアする (9801 の _gfx_common_init と同じ扱い)。
-     * 256 色モードでテキスト面が合成されるかは未確認 (DESIGN §5 / 票 7)。 */
-    for (i = 0; i < TVRAM_COLS * TVRAM_ROWS; i++) {
-        tvram_char[i] = 0x0000;
-        tvram_attr[i * 2] = 0x00;
-    }
+     * 480 ラインでは 30 行ぶんが見えるので 25 行では足りない (票 H2c)。
+     * テキスト面が非 0 の画素はグラフィックより優先されるため、消し残しは
+     * そのまま窓を隠す (NP21/W vram/sdrawex.mcr pex_2)。
+     * 文字セルは 400/25 行と 480/30 行で同じ 16 ラスタなので、CSRFORM も
+     * テキスト CRTC (70h〜) も触る必要はない
+     * (NP21/W bios/bios18.c crtdata の "400-25" と "480-30" が同値)。 */
+    pegc_tvram_clear(0, PEGC_TEXT_ROWS_480);
 
     pegc_palette_init();
 
-    /* GDC は 400 ライン用の CSRFORM (ライン 2 倍表示なし) のまま。
-     * ⚠ 資料 ([U] I/O 09A8h) は「周波数を切り替えたら GDC の SYNC コマンド等
-     * で同期信号を設定しなおさないと正常に表示が行われない」と言うが、
-     * ミラーには **480 ライン用の GDC SYNC パラメータ表が無い** (400 ライン
-     * の PITCH 80/40 ワードしか載っていない)。誤った SYNC 値を流すと画面が
-     * 出なくなるので、v1 では 09A8h (31kHz) と 6Ah (800 ライン構成) の指定
-     * だけに留め、実際に 480 ラインのラスタが出るかは NP21/W で確認する
-     * (ゲート G5)。400 ラインしか出ないようなら SYNC の再設定が次の一手。 */
-    _out(GDC_GFX_CMD, GDC_GFX_400LINE);
-    _out(GDC_GFX_PARAM, 0x00);
-    _out(GDC_GFX_CMD, GDC_CMD_START);
-    gfx_counters.io_accesses += 3;
+    /* GDC の CSRFORM は触らない: 256 色パックド表示 (NP21/W
+     * vram/makegrex.c makegrphex) はライン 2 倍表示を見ないし、GDC_PITCH も
+     * 起動時のまま (BIOS 既定 40 ワード → 実効 80 = 640 バイト/ライン) で
+     * 480 ラインでも変わらない。表示の開始と区間長は上の SCROLL で確定済み。 */
 
     /* HAL 共通の状態。PEGC ではハードウェアページ切替を使わない
      * (800 ライン構成では 00A4h が使えない — pegc.h の PEGC_FF2_VRAM_800L)。 */
@@ -402,6 +503,12 @@ static void pegc_present_rect(int x, int y, int w, int h)
 /*  set_palette — 連続する count 項目を差し替える (rgb は 3B/項目)           */
 /*  ハードウェアの並びは G, R, B ([U] パレットレジスタ) だが、HAL の引数は    */
 /*  9801 と同じ R, G, B 順。                                                 */
+/*                                                                          */
+/*  引数の輝度は **KAPI のスケール = 0〜15** (契約 G6/G8 の GuiRgb)。         */
+/*  gfx_set_palette (9801 互換の 1 色差し替え) も gfx_lease_palette (G8) も   */
+/*  この単位で来るので、ここで一括して 8bit へ伸ばす (票 H2c)。               */
+/*  0〜15 のシステム色はシャドウ台帳にも書き戻し、gfx_get_palette            */
+/*  (= palette_get) が実際の色を返せるようにしておく。                        */
 /* ------------------------------------------------------------------------ */
 static void pegc_set_palette(int first, int count, const u8 *rgb)
 {
@@ -409,9 +516,12 @@ static void pegc_set_palette(int first, int count, const u8 *rgb)
     if (!rgb) return;
     for (k = 0; k < count; k++) {
         int idx = first + k;
+        u8 r = rgb[k * 3 + 0];
+        u8 g = rgb[k * 3 + 1];
+        u8 b = rgb[k * 3 + 2];
         if (idx < 0 || idx >= PEGC_PALETTE_COUNT) continue;
-        pegc_write_palette(idx, rgb[k * 3 + 0], rgb[k * 3 + 1],
-                           rgb[k * 3 + 2]);
+        pegc_write_palette(idx, pegc_pal8(r), pegc_pal8(g), pegc_pal8(b));
+        if (idx < PALETTE_COUNT) palette_shadow_set(idx, r, g, b);
     }
 }
 
@@ -432,6 +542,11 @@ static void pegc_leave(void) { }
 /*  そのに済ませておく。                                                     */
 /*  ※ OS32 のテキスト画面は 640x400 24.83kHz 前提。31kHz のまま抜けると      */
 /*  機種によっては表示が乱れるため 24kHz へ戻す (G5 で確認する項目)。        */
+/*  ※ 480 ライン化で GDC の SYNC を書き換えているので、周波数だけでなく      */
+/*  同期パラメータと表示区間も 400 ライン用へ確実に戻す (票 H2c)。           */
+/*  戻したあとグラフィック GDC は STOP にする — 9801 経路の gfx_init() が     */
+/*  改めて START を出すし、テキストだけの状態では表示していてはいけない       */
+/*  (従来の挙動を維持)。テキスト GDC は START のままにしてコンソールを残す。  */
 /* ------------------------------------------------------------------------ */
 static void pegc_shutdown(void)
 {
@@ -440,9 +555,17 @@ static void pegc_shutdown(void)
     mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_OFF);
     ff2_locked_write(PEGC_FF2_STD_GFX);
     ff2_locked_write(PEGC_FF2_VRAM_400L);
+
+    /* 480 ラインでだけ見えていた 26〜30 行目を消す。25 行までは
+     * コンソールの内容なので触らない (init 側で一度消してある)。 */
+    pegc_tvram_clear(TVRAM_ROWS, PEGC_TEXT_ROWS_480);
+
     _out(PEGC_HSYNC_PORT, PEGC_HSYNC_24KHZ);
+    gfx_counters.io_accesses++;
+    pegc_gdc_set_timing(s_msync_400, s_ssync_400, s_scroll_400);
+
     _out(GDC_GFX_CMD, GDC_CMD_STOP);
-    gfx_counters.io_accesses += 2;
+    gfx_counters.io_accesses++;
 
     gfx_current_height = GFX_HEIGHT;
     s_active = 0;
