@@ -57,6 +57,10 @@ typedef struct GfxBackend {
     u8  *bb_base;
     u32  bb_pitch;
     u8   bb_format;   /* GFX_BB_* */
+    u32  bb_size;     /* バックバッファ全体のバイト数。CPL=3 へ USER マップする
+                       * 範囲でもある (exec が gfx_bb_phys_range() で取る)。
+                       * pitch×height から計算できない (9801 は 4 プレーン +
+                       * 端数パディングで 128KB) ので明示的に持つ。 */
 } GfxBackend;
 
 /* ------------------------------------------------------------------------ */
@@ -80,7 +84,23 @@ extern GfxCounters gfx_counters;
 extern const GfxBackend *g_backend;
 
 /* 9801 プレーンバックエンド (gfx/backend_pc98.c)。
- * H2 (PEGC) / H3 (Cirrus) はこの表にもう 1 枚ずつ足す。 */
+ * H3 (Cirrus) はこの表にもう 1 枚足す。 */
 extern const GfxBackend gfx_backend_pc98;
+
+/* 9821 PEGC 256 色バックエンド (gfx/backend_pegc.c, H2)。
+ * **const ではない**: バックバッファは物理メモリ末尾から実行時に切り出すので、
+ * bb_base / bb_size を init() が埋める (9801 はコンパイル時定数で済む)。
+ *
+ * **weak 宣言**: gfx/backend_pegc.c を build/kernel.mk の C_KERNEL に入れて
+ * いないビルドではこのシンボルは 0 になり、バックエンド表の該当要素が NULL に
+ * なって probe から外れる (= 9801 だけの従来どおりの動作)。表に強い参照を
+ * 置くとファイルを足すまでリンクが通らなくなるため。 */
+extern GfxBackend gfx_backend_pegc __attribute__((weak));
+
+/* 現在のバックエンドのバックバッファの物理範囲を返す (base は 4KB 境界)。
+ * exec が CPL=3 アプリへ USER マップする範囲。バックバッファを持たない
+ * バックエンド (アクセラレータ系) では *size に 0 が入る。
+ * 9801 では常に (MEM_GFX_BB_BASE, MEM_GFX_BB_SIZE) = 従来と同じ。 */
+void gfx_bb_phys_range(u32 *base, u32 *size);
 
 #endif /* __GFX_HAL_H */

@@ -10,6 +10,7 @@
 
 #include "gfx.h"
 #include "gfx_internal.h"
+#include "gfx_hal.h"   /* g_backend / GFX_BB_*: 4 プレーン機かどうかの判定 */
 #include "palette.h"
 #include "tvram.h"
 #include "types.h"
@@ -274,8 +275,20 @@ void boot_splash(void)
     gdata[2] = glyph_3;  gcount[2] = GLYPH_3_N;
     gdata[3] = glyph_2;  gcount[3] = GLYPH_2_N;
 
-    /* GFXモード初期化 */
+    /* GFXモード初期化。ここでバックエンドが決まる (H1 レビュー ⑤ で probe を
+     * GDC 初期化より前へ移した)。 */
     gfx_init();
+
+    /* スプラッシュのアートは 4 プレーン 16 色専用 (bb[0..3] への直書きと
+     * ラスタパレット)。9821 の PEGC が選ばれるとバックバッファはパックド
+     * 8bpp の 1 面なので、同じコードを走らせると画面が壊れる。
+     * 256 色向けのスプラッシュは v1 の範囲外 — 静かに飛ばして黒画面のまま
+     * テキストへ戻す (H2)。 */
+    if (g_backend && g_backend->bb_format != GFX_BB_PLANAR4) {
+        gfx_shutdown();
+        tvram_clear();
+        return;
+    }
 
     /* パレット設定 */
     palette_set(PAL_BG,         0,  0,  0);

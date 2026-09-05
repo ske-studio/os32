@@ -62,6 +62,16 @@ int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
  * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
 int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags);
 
+/* デバイス窓マップ (ページ数で指定する paging_map_range)。
+ * master PD の PTE を張るので、以後に作られるアプリ AS
+ * (paging_addrspace_create は master の PDE を全部コピーする) からも
+ * 同じ物理が見える。PEGC のリニア窓 F00000h のように「機種固有のドライバが
+ * 欲しい物理窓」を、ドライバ側にページテーブルを触らせずに張るための入口。
+ * flags に PTE_USER を含めれば PDE にも USER が伝播する
+ * (同じ PDE 配下の他ページは PTE が supervisor のままなので保護は保たれる)。
+ * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み)。 */
+int paging_map_phys(u32 virt_addr, u32 phys_addr, u32 npages, u32 flags);
+
 /* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末)
  * 戻り値: 0=成功, -1=範囲全体がマッピング範囲外 */
 int paging_pde_clear_user(u32 start, u32 end);

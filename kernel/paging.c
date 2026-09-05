@@ -271,6 +271,20 @@ int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags)
     return rc;
 }
 
+/* ======================================================================== */
+/*  paging_map_phys — デバイス窓マップ (ページ数指定)                        */
+/*                                                                          */
+/*  paging_map_range のページ数版。ドライバ (gfx/ など) が「この物理窓を     */
+/*  この仮想番地へ npages 分」と書けるようにするための入口で、               */
+/*  ページテーブルはカーネル側 (本ファイル) だけが触る、という分担を保つ。   */
+/* ======================================================================== */
+int paging_map_phys(u32 virt_addr, u32 phys_addr, u32 npages, u32 flags)
+{
+    if (npages == 0) return 0;
+    return paging_map_range(virt_addr, virt_addr + npages * PAGE_SIZE,
+                            phys_addr, flags);
+}
+
 /* 指定範囲を覆う PDE から USER を落とす。
  * paging_set_page() は USER を立てる方向にしか伝播させないので、
  * V86 セッション終了時にカーネル側が明示的に戻すために使う。 */
