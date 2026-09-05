@@ -154,6 +154,7 @@ void kbd_irq_handler(void)
     u8 keycode;
     u8 ascii;
     int is_break;
+    int is_mod;
 
     /* μPD8251Aからスキャンコード読み取り */
     scancode = (u8)inp(KBD_DATA);
@@ -180,39 +181,49 @@ void kbd_irq_handler(void)
         kbd_key_pressed[keycode >> 3] |=  (1 << (keycode & 7));
     }
 
-    /* 生イベントを raw リングへ (make も break も、全キー。IRQ 内なので保護不要) */
-    if (kbd_raw_count < KBD_BUF_SIZE) {
-        kbd_raw_buf[kbd_raw_tail] = (u16)keycode | (is_break ? 0 : 0x100);
-        kbd_raw_tail = (kbd_raw_tail + 1) % KBD_BUF_SIZE;
-        kbd_raw_count++;
-    } else {
-        kbd_raw_dropped++;   /* GUI が resync できるよう必ず数える (レビュー ①) */
-    }
-
-    /* シフトキー状態の更新 */
+    /* シフトキー状態の更新。raw リングへ積む前に行い、raw エントリに
+     * 「このイベント時点の修飾状態」を焼き込む (レビュー #3 ②: WM が取り込む
+     * ときの最新状態で変換すると Shift↓ A↓ A↑ Shift↑ が溜まった場合に
+     * a/A を取り違える)。修飾キー自身のイベントは更新後の状態を載せる。 */
+    is_mod = 0;
     if (keycode == KEY_SHIFT) {
         if (is_break) kbd_shift_state &= ~SHIFT_SHIFT;
         else          kbd_shift_state |=  SHIFT_SHIFT;
-        return;
-    }
-    if (keycode == KEY_CTRL) {
+        is_mod = 1;
+    } else if (keycode == KEY_CTRL) {
         if (is_break) kbd_shift_state &= ~SHIFT_CTRL;
         else          kbd_shift_state |=  SHIFT_CTRL;
-        return;
-    }
-    if (keycode == KEY_CAPS) {
+        is_mod = 1;
+    } else if (keycode == KEY_CAPS) {
         if (!is_break) kbd_shift_state ^= SHIFT_CAPS;
-        return;
-    }
-    if (keycode == KEY_KANA) {
+        is_mod = 1;
+    } else if (keycode == KEY_KANA) {
         if (!is_break) kbd_shift_state ^= SHIFT_KANA;
-        return;
-    }
-    if (keycode == KEY_GRPH) {
+        is_mod = 1;
+    } else if (keycode == KEY_GRPH) {
         if (is_break) kbd_shift_state &= ~SHIFT_GRPH;
         else          kbd_shift_state |=  SHIFT_GRPH;
-        return;
+        is_mod = 1;
     }
+
+    /* 生イベントを raw リングへ (make も break も、全キー。IRQ 内なので保護不要)。
+     * エントリ = keycode | (down << 8) | (修飾状態 (SHIFT_*, 7bit) << 9)。
+     * raw は WM (gshell) しか読まないので GUI モード中だけ積む — CUI 中に
+     * 溜めると次の gshell に古い打鍵が届き、kbd_raw_dropped も水増しになる
+     * (レビュー #3 ③)。 */
+    if (kbd_gui_mode) {
+        if (kbd_raw_count < KBD_BUF_SIZE) {
+            kbd_raw_buf[kbd_raw_tail] = (u16)keycode
+                                      | (is_break ? 0 : 0x100)
+                                      | (u16)((kbd_shift_state & 0x7F) << 9);
+            kbd_raw_tail = (kbd_raw_tail + 1) % KBD_BUF_SIZE;
+            kbd_raw_count++;
+        } else {
+            kbd_raw_dropped++;   /* GUI が resync できるよう必ず数える (レビュー ①) */
+        }
+    }
+
+    if (is_mod) return;
 
     /* 強制脱出キー CTRL+STOP (契約 T6 / K2 作業 4)。
      * PC-98 で「止める」といえばこれ (V86 セッションの脱出と同じキー)。
@@ -430,7 +441,9 @@ int kbd_is_pressed(int scancode)
 }
 
 /* 生 make/break イベントを 1 件取り出す (レビュー ⑥)。無ければ -1。
- * 戻り値 = keycode | (down << 8)。down=1 が押下 (make)、0 が離し (break)。
+ * 戻り値 = keycode | (down << 8) | (mods << 9)。down=1 が押下 (make)、0 が離し
+ * (break)。mods はそのイベント時点の修飾状態 (SHIFT_* の 7bit、レビュー #3 ②)。
+ * GUI モード中 (kbd_set_gui_mode(1)) にしか積まれない。
  * WM (gshell) が Key down/up イベントを作るのに使う。 */
 int kbd_trygetrawkey(void)
 {

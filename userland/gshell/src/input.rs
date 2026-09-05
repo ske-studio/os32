@@ -2,7 +2,7 @@
 //!
 //! `kbd_trygetrawkey` の生 make/break を `Key` (down 0/1) に、印字可能キーは加えて
 //! `Text` にして、フォーカス窓の所有者スロットのリングへ積む。`mouse_poll` から
-//! `Pointer` (最新 1 件へ畳む) と `Button` を作る。修飾は `kbd_get_modifiers`。
+//! `Pointer` (最新 1 件へ畳む) と `Button` を作る。修飾は raw エントリに載る (イベント時点)。
 //! `kbd_dropped_count` の差分を `dropped` に足して `OVERFLOW` (契約 T3)。
 //!
 //! WM 自身の UI (ドラッグ / 閉じる / フォーカス切替) は [`Ctx::Wait`] /
@@ -146,39 +146,12 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
     capture_mouse(st, ctx);
 }
 
-/// **cooked キュー (`kbd_buf`) を空にして捨てる。**
-///
-/// `drivers/kbd.c` は 1 打鍵につき (a) cooked = `(keycode<<8)|ascii` (make のみ) と
-/// (b) raw = `keycode|(down<<8)` (make/break) の**2 本**へ積む。WM は raw だけを
-/// 読むので、cooked を放っておくと 32 打鍵で溢れて `kbd_dropped` が増え続け、
-/// `kbd_dropped_count()` の差分を `dropped` に足す契約 T3 の経路が**偽の
-/// OVERFLOW** を出す (60 打鍵の試験 G0b-3 が通らなくなる)。
-/// そこで毎回 cooked を空にし、取りこぼしの勘定を raw リングだけに一本化する。
-/// ASCII は [`translate`] (kbd.c の表の写し) で作るので情報は失わない。
-///
-/// **PM への申し送り**: 本来は K レーンで「GUI 用に cooked を積まない」か
-/// 「`kbd_dropped_count()` を raw の分だけにする」のが筋。また rshell 有効時の
-/// `kbd_trygetkey` はシリアル入力も返すので、gshell 動作中はそれもここで
-/// 捨てることになる (CUI シェルが居ないので実害は無いはず)。
-fn drain_cooked_queue() {
-    let a = unsafe { os32api::api() };
-    /* X4 (ポンプ) からも呼ばれるので上限を切る。KBD_BUF_SIZE = 32 の 2 倍。 */
-    let mut guard = 0;
-    while guard < 64 {
-        let k = unsafe { (a.kbd_trygetkey)() };
-        if k < 0 {
-            break;
-        }
-        guard += 1;
-    }
-}
-
+/// raw リング (`kbd_trygetrawkey`) のエントリ = `keycode | down<<8 | mods<<9`。
+/// `mods` は**そのイベント時点**の修飾状態 (kbd.c の SHIFT_*、MOD_* と同値)。
+/// 取り込み時の最新状態で変換すると Shift↓ A↓ A↑ Shift↑ が溜まったときに
+/// a/A を取り違えるため、イベントごとの値を使う (レビュー #3 ②)。
+/// cooked キュー (`kbd_buf`) は GUI モード中カーネルが積まない (K2) ので触らない。
 fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
-    let mods = unsafe { (os32api::api().kbd_get_modifiers)() };
-
-    /* cooked キューは使わないので毎回空にする (上のコメント参照)。 */
-    drain_cooked_queue();
-
     /* 取りこぼしの差分を dropped に加算 (契約 T3)。 */
     let cur_drop = unsafe { (os32api::api().kbd_dropped_count)() };
     let delta = cur_drop.wrapping_sub(st.last_kbd_dropped);
@@ -205,6 +178,7 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
         let scan = (raw & 0x7F) as u8;
         let down = ((raw >> 8) & 1) != 0;
+        let mods = ((raw >> 9) & 0x7F) as u32;   /* イベント時点の修飾状態 */
 
         /* 修飾キー自体は Key として配送しない (状態は mods で見る)。 */
         if scan >= SC_SHIFT && scan <= SC_CTRL {

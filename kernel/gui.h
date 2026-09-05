@@ -47,5 +47,6 @@ i32 sys_switch_shell(const char *path);
 
 /* K4 用: sys_switch_shell で記録された次シェルのパス (無ければ NULL)。 */
 const char *gui_next_shell(void);
+int gui_take_next_shell(char *out, int cap);   /* 取り出して消す (K4 の起動ループ用) */
 
 #endif /* __GUI_H */

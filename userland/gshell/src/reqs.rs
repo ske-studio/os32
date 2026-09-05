@@ -81,16 +81,17 @@ pub struct GuiReqSurfCreate {
 #[derive(Clone, Copy)]
 pub struct GuiReqTimerSet {
     pub window: u32,
-    pub timer_id: u16,
-    pub interval_ms: u16,
+    pub timer_id: u8,       /* Timer イベントの sub と同幅 (契約 U5) */
+    pub repeat: u8,         /* 0 = 単発 (1 回発火して WM が消す) */
+    pub interval_ticks: u16, /* tick (10ms) 単位 */
 }
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GuiReqTimerKill {
     pub window: u32,
-    pub timer_id: u16,
-    pub _pad: u16,
+    pub timer_id: u8,
+    pub _pad: [u8; 3],
 }
 
 #[repr(C)]

@@ -309,8 +309,9 @@ pub struct Timer {
     pub used: bool,
     pub owner: i32,
     pub window: u32,        /* 完全な WindowId */
-    pub timer_id: u16,
+    pub timer_id: u8,       /* 契約 U5 (Timer イベントの sub と同幅) */
     pub interval: u32,      /* ティック単位 (最小 1) */
+    pub repeat: bool,       /* false = 単発 (発火後に消す) */
     pub next_deadline: u32, /* 発火予定 tick */
 }
 
@@ -321,6 +322,7 @@ impl Timer {
         window: 0,
         timer_id: 0,
         interval: 0,
+        repeat: false,
         next_deadline: 0,
     };
 }
@@ -444,13 +446,19 @@ impl GuiState {
         }
     }
 
-    /// 最前面ウィンドウの index (無ければ None)。
+    /// 最前面の**可視**ウィンドウの index (無ければ None)。キーボードフォーカスは
+    /// これ。非表示の窓は Z 順に残っていてもフォーカスを持たない (レビュー #3 ⑥:
+    /// 最前面を hide しても見えない窓へ Key/Pointer が配送され続けていた)。
     pub fn front_index(&self) -> Option<usize> {
-        if self.z_count == 0 {
-            None
-        } else {
-            Some(self.zorder[self.z_count - 1])
+        let mut z = self.z_count;
+        while z > 0 {
+            z -= 1;
+            let i = self.zorder[z];
+            if self.windows[i].used && self.windows[i].visible {
+                return Some(i);
+            }
         }
+        None
     }
     /// 最前面ウィンドウの owner (無ければ 0)。
     pub fn front_owner(&self) -> i32 {
@@ -861,11 +869,18 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     w.visible = wf_visible(w.flags);
     w.configure_pending = true;
     st.windows[index] = w;
+    let old_front = st.front_id();
     st.z_add_top(index);
     /* 初回は全面 dirty + 露出計算。 */
     damage::set_dirty_full(&mut st.windows[index]);
     visible::recompute_and_expose(st);
     st.dirty_screen(st.windows[index].outer());
+    /* 可視で生成された窓は最前面 = フォーカス。旧 front に out、新窓に in を
+     * 流す (C2 の観察: 窓 1 枚のアプリが Focus{in} を一度も受け取れなかった)。 */
+    let new_front = st.front_id();
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
     /* generation は 1〜0x7FFF に制限してあるので i32 として必ず非負。 */
     st.windows[index].id(index) as i32
 }
@@ -940,6 +955,7 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
         Err(e) => return e,
     };
     let outer = st.windows[index].outer();
+    let old_front = st.front_id();
     st.windows[index].visible = show;
     if show {
         st.windows[index].flags |= GUI_WF_VISIBLE;
@@ -949,6 +965,11 @@ pub fn show_window(st: &mut GuiState, owner: i32, id: u32, show: bool) -> i32 {
     }
     st.dirty_screen(outer);
     visible::recompute_and_expose(st);
+    /* フォーカス = 最前面の可視窓。hide / show で変わったら Focus を流す。 */
+    let new_front = st.front_id();
+    if new_front != old_front {
+        input::emit_focus_change(st, old_front, new_front);
+    }
     0
 }
 

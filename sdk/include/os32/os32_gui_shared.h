@@ -339,8 +339,11 @@ typedef struct { u32 window; i16 x; i16 y; u8 visible; u8 _pad; } GuiReqTextCurs
 typedef struct { u32 window; GuiString title; } GuiReqWinTitle;     /* SET_TITLE 260B */
 
 typedef struct { i16 w; i16 h; } GuiReqSurfCreate;                  /* SURF_CREATE */
-typedef struct { u32 window; u16 timer_id; u16 interval_ms; } GuiReqTimerSet; /* TIMER_SET */
-typedef struct { u32 window; u16 timer_id; u16 _pad; } GuiReqTimerKill;       /* TIMER_KILL */
+/* タイマ (契約 U5: set_timer(id: u8, interval_ticks: u16, repeat: bool))。
+ * 2026-09-06 レビュー #3 ⑤で契約に合わせた: id は u8 (Timer イベントの sub と同幅)、
+ * 間隔は tick (10ms)、repeat=0 は単発 (1 回発火して WM が消す)。 */
+typedef struct { u32 window; u8 timer_id; u8 repeat; u16 interval_ticks; } GuiReqTimerSet; /* TIMER_SET 8B */
+typedef struct { u32 window; u8 timer_id; u8 _pad[3]; } GuiReqTimerKill;                  /* TIMER_KILL 8B */
 typedef struct { u16 buttons; u16 _pad; GuiString message; } GuiReqModal;     /* MODAL_OPEN 260B */
 
 typedef struct { i32 result; u32 window;   } GuiRespWindow;         /* CREATE -> window */
@@ -368,6 +371,7 @@ typedef struct { u16 first; u16 count; GuiRgb rgb[16]; } GuiReqLease;    /* 52B 
 
 STATIC_ASSERT(sizeof(GuiReqWinMove)   == 8,  gui_req_winmove_8);
 STATIC_ASSERT(sizeof(GuiReqInvalidate) == 12, gui_req_invalidate_12);
+STATIC_ASSERT(sizeof(GuiReqTimerSet)  == 8,  gui_req_timerset_8);
 STATIC_ASSERT(sizeof(GuiReqLease)     == 52, gui_req_lease_52);
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
