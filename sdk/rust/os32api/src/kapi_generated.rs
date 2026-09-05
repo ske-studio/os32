@@ -195,7 +195,7 @@ pub struct KernelAPI {
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 41;
+pub const KAPI_VERSION: u32 = 42;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

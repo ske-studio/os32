@@ -1,7 +1,7 @@
 # OS32 リンクプロトコル / Host Services 実装計画
 
 > **L0〜L3 の機構はエミュレータ実装・合格済み (2026-09-05、ブランチ→main)。残るは L3 の
-> KAPI 公開 (KAPI v42、下記) のみ。** 対象は LGY-98 ドライバの上に載る 2 層 ―
+> KAPI 公開 (KAPI v43、下記) のみ。** 対象は LGY-98 ドライバの上に載る 2 層 ―
 > OS32 独自リンクプロトコル (フロー制御つき raw Ethernet) と Host Services
 > (HTTP / File / RPC の要求応答)。この文書を設計・進捗の正典とする。
 > NIC ドライバそのものは [PLAN.md](PLAN.md) (別計画)。実装完了後の現行仕様は
@@ -202,9 +202,9 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   OS32 は TCP/IP も HTTP も持たず、要求を出して結果だけ受け取る (方針どおり)。
   `link_stream_read` がアプリ側の消費入口。Host Agent (`tools/host_agent.py`) は /pattern を
   生成配送、http(s):// を urllib で実取得、/file/ をホストファイル読み、TIME を時刻応答。
-- **残りは KAPI 公開だけ (KAPI v42、GUI の v41 の次に確定)**: Host Services を外部プログラムへ
-  出す。版番号は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) で **v42** に調停済み
-  (GUI の K1 が v41、その次)。追加する KAPI (案、末尾追記):
+- **残りは KAPI 公開だけ (KAPI v43、GUI の v42 の次に確定)**: Host Services を外部プログラムへ
+  出す。版番号は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) で **v43** に調停済み
+  (GUI が v42、その次。2026-09-06 に v41/v42 → v42/v43 へ改訂)。追加する KAPI (案、末尾追記):
 
   | 関数 | 内容 |
   |---|---|
@@ -218,7 +218,7 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   -14 以降 (KAPI_SPEC §3-2 の予約)。
   現状の `link_service_get` は同期版 (自己試験用)。KAPI 化では `host_open` / `host_read` を
   逐次・非ブロッキングに分け、アプリの `sys_halt` / GUI の `OP_WAIT` と協調して `link_poll` を
-  回す (計算ループでカーソルを止めないのと同じ設計)。**GUI 実装 (v41) の後に着手する。**
+  回す (計算ループでカーソルを止めないのと同じ設計)。**GUI 実装 (v42) の後に着手する。**
 
 ## 6. Host Agent
 

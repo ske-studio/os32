@@ -85,7 +85,7 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 | 上限 | ウィンドウ 16、サーフェス 16、ウィジェット 64、リスト項目 128、タイマ 8/アプリ、クリップ深さ 8、損傷 8/ウィンドウ、文字列 256B |
 | 追加 KAPI (v41) | `gui_call(u32 op, u32 arg) -> i32`、`gui_register(handler, pump) -> i32` (shell 帯からのみ)、`gfx_stats(void *out)`、`gfx_lease_palette(first, count, const u8 *rgb)`、`sys_switch_shell(const char *path) -> i32` (shell 帯からのみ、K4)、`kbd_dropped_count(void) -> u32` (カーネルのキー待ち行列が捨てた打鍵の累計。`drivers/kbd.c` の満杯分岐で加算) |
 
-> **版番号 (v41) 確定**: ネットワークの Host Services (L3、[../network/LINK_PLAN.md](../network/LINK_PLAN.md)) も KAPI を足すが v42 にずらした。GUI (K1) が先に実装され v41、ネットワークが後発で v42 (2026-09-06 調停)。版番号割り当ての正典は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md)。
+> **版番号確定 (2026-09-06、同日改訂)**: GUI は **v42** (ime_feed_key / ime_set_render を含む 180 関数。開発中は v41 と呼んでいた)、ネットワークの Host Services ([../network/LINK_PLAN.md](../network/LINK_PLAN.md)) は **v43**。ユーザー承諾済み。版番号割り当ての正典は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md)。
 
 ## 5. ゲート (検証層が `os32-cycle` で回す。各票の完了条件はゲートに対応させる)
 

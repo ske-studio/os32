@@ -331,7 +331,7 @@ gitignored hardware mirror).
 |----------|---------|
 | `docs/INDEX.md` | Document index. Its first table, **情報単位ごとの正典**, says which file to update for each kind of fact |
 | `docs/01_system.md` ~ `docs/10_notes.md` | Kernel technical spec (10 parts) |
-| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v41**, 180 functions + 2 data fields) |
+| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v42**, 180 functions + 2 data fields) |
 | `docs/DEVELOPMENT.md` | Development guide: task → what to read / touch / verify, and the file map (file → role → spec section) |
 | `docs/POLICY_DEV.md` | Coding policy, build rules |
 | `docs/POLICY_DEBUG.md` | Debug procedures, binary deployment checklist, **§4 lessons (the long form of Known Gotchas)** |

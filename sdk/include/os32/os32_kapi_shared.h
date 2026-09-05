@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      41   /* gui_call / gui_register / gfx_stats / gfx_lease_palette / sys_switch_shell / kbd_dropped_count (GUI v1.1 背骨) 追加 */
+#define KAPI_VERSION      42   /* GUI v1.1: gui_call / gui_register / gfx_stats / gfx_lease_palette / sys_switch_shell / kbd_dropped_count / kbd_trygetrawkey / ime_feed_key / ime_set_render (2026-09-06 に v41 → v42 へ確定、ネットワーク Host Services は v43) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -305,7 +305,7 @@ typedef struct {
 #define OS32_ERR_ISDIR     -8   /* ディレクトリである (open/unlink 不可) */
 #define OS32_ERR_INVAL     -9   /* 引数不正 / FS をまたぐ rename 等 */
 #define OS32_ERR_NOSYS     -10  /* このバックエンド / 機種では未対応 */
-/* GUI (KAPI v41、KAPI_SPEC §3-2 の予約どおり)。-14 以降はネットワーク用に空ける。 */
+/* GUI (KAPI v42、KAPI_SPEC §3-2 の予約どおり)。-14 以降はネットワーク用に空ける。 */
 #define OS32_ERR_STALE     -11  /* 破棄済み / generation 不一致のハンドル (契約 T4) */
 #define OS32_ERR_VERSION   -12  /* proto_version が WM より新しい (契約 T5) */
 #define OS32_ERR_FULL      -13  /* スロット / 資源が満杯 (契約 T2a) */

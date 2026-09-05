@@ -180,7 +180,7 @@ extern int __cdecl wrap_ime_feed_key(int keydata);
 extern void __cdecl wrap_ime_set_render(void *table);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 41;
+kapi->version = 42;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;

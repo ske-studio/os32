@@ -1,4 +1,4 @@
-# KernelAPI v41 仕様書
+# KernelAPI v42 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -80,10 +80,10 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | 版 | 状態 | 追加内容 | 出典 |
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
-| v41 | **実装済み (2026-09-06)** | `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2 の申し送り。v41 は main 未リリースなので同じ版に末尾追記、v42 のネットワーク予約は変えない) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
-| v42 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
+| v42 | **実装済み (2026-09-06)** | GUI v1.1: `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2)。開発中は v41 と呼んでいたが、ime_* の追記を機に main マージ前に **v42 として確定** (2026-09-06 ユーザー承諾)。v41 の成果物は存在しない (main 未リリース) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
+| v43 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 
-調停 (2026-09-06): GUI (K1) を先に実装するので **v41 = GUI、v42 = ネットワーク Host Services**
+調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
 先に実装した側が実際の版番号を確定し、後発は次版へずらす。
 
