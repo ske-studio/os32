@@ -179,9 +179,124 @@ def scenario_v11(h, shots):
     return ok and st2.get("wab_relay") == 0
 
 
+# ---------------------------------------------------------------------------
+#  v1.2 の台本 (W3 が報告した座標。ax/ay 換算は Mouse が行う)
+#  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
+#  Start menu 行 r: (82, H-107+18r) = Programs / File Manager / Run... / CUI mode / Shut Down
+#  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
+# ---------------------------------------------------------------------------
+def tb(h):
+    return h - 12
+
+
+def start_row(h, r):
+    return (82, h - 107 + 18 * r)
+
+
+def scenario_v12_g1(h, shots):
+    """G1: taskbar / Start / Programs / context menu / clock / window button."""
+    m = Mouse(h)
+    print("[g1] enter gshell")
+    enter_gshell()
+    shots.take("g1_1_desktop_taskbar")
+    print("[g1] Start menu open")
+    m.click(30, tb(h))
+    shots.take("g1_2_start_menu")
+    print("[g1] Programs page")
+    m.click(*start_row(h, 0))
+    time.sleep(1.5)
+    shots.take("g1_3_programs")
+    key(seq="ESC")
+    time.sleep(0.4)
+    key(seq="ESC")
+    time.sleep(0.4)
+    print("[g1] desktop context menu (right button)")
+    m.click(320, 240, btn=2)
+    shots.take("g1_4_context_menu")
+    key(seq="ESC")
+    time.sleep(0.4)
+    print("[g1] Run... -> /usr/bin/gui_demo.bin")
+    m.click(30, tb(h))
+    m.click(*start_row(h, 2))
+    time.sleep(1.5)
+    key(text="/usr/bin/gui_demo.bin")
+    time.sleep(1)
+    key(seq="RETURN")
+    time.sleep(5)
+    shots.take("g1_5_demo_with_taskbar")
+    print("[g1] taskbar window button #1 -> raise Help")
+    m.click(210, tb(h))
+    shots.take("g1_6_window_button")
+    print("[g1] wait for clock minute change (up to 65 s)")
+    t0 = time.time()
+    a = shots.take("g1_7_clock_a")
+    while time.time() - t0 < 65:
+        time.sleep(5)
+    shots.take("g1_8_clock_b")
+    print("[g1] quit demo (ESC) and back to CUI")
+    key(seq="ESC")
+    time.sleep(2)
+    return leave_gshell(m)
+
+
+def scenario_v12_g4(h, shots, do_halt=False):
+    """G4: app replacement (Run... while an app runs), CUI mode with confirmation,
+    optionally Shut Down (halt: NP21/W must be restarted afterwards)."""
+    m = Mouse(h)
+    print("[g4] gshell + gui_demo via Run...")
+    enter_gshell()
+    m.click(30, tb(h))
+    m.click(*start_row(h, 2))
+    time.sleep(1.5)
+    key(text="/usr/bin/gui_demo.bin")
+    key(seq="RETURN")
+    time.sleep(5)
+    shots.take("g4_1_demo")
+    print("[g4] Run... again while demo runs -> v12_api_test replaces it")
+    m.click(30, tb(h))
+    m.click(*start_row(h, 2))
+    time.sleep(1.5)
+    key(text="/usr/bin/v12_api_test.bin")
+    key(seq="RETURN")
+    time.sleep(6)
+    shots.take("g4_2_replaced")
+    print("[g4] app-initiated launch (key 4 = session_launch gui_demo)")
+    key(text="4")
+    time.sleep(6)
+    shots.take("g4_3_app_launch")
+    print("[g4] CUI mode -> confirmation -> Yes")
+    m.click(30, tb(h))
+    m.click(*start_row(h, 3))
+    time.sleep(1.5)
+    shots.take("g4_4_cui_confirm")
+    m.click(410, h // 2 + 11)
+    time.sleep(6)
+    m.off()
+    key(text="rshell")
+    key(seq="RETURN")
+    time.sleep(2)
+    out = _cmd_raw("ver", 20)
+    ok = "OS32" in out
+    print("  CUI back: %s" % ("ok" if ok else "NG"))
+    cfg = _cmd_raw("cat /etc/system.cfg", 20)
+    print("  system.cfg: %s" % " | ".join(l for l in cfg.splitlines() if "GUI" in l))
+    if do_halt:
+        print("[g4] Shut Down -> halt (NP21/W must be restarted by os32-cycle deploy)")
+        enter_gshell()
+        m.click(30, tb(h))
+        m.click(*start_row(h, 4))
+        time.sleep(1.5)
+        m.click(410, h // 2 + 11)
+        time.sleep(4)
+        shots.take("g4_5_halt_screen")
+        print("  status %s" % status())
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("scenario", choices=["v11", "shot", "click"])
+    ap.add_argument("scenario", choices=["v11", "v12g1", "v12g4", "shot", "click"])
+    ap.add_argument("--halt", action="store_true", help="v12g4: 最後に Shut Down まで行う")
     ap.add_argument("args", nargs="*")
     ap.add_argument("--h", type=int, default=480, help="画面高 (9801=400, PEGC/Cirrus=480)")
     ap.add_argument("--out", default="build/out/gui_gate")
@@ -193,7 +308,12 @@ def main():
     if a.scenario == "click":
         Mouse(a.h).click(int(a.args[0]), int(a.args[1]))
         return 0
-    ok = scenario_v11(a.h, shots)
+    if a.scenario == "v12g1":
+        ok = scenario_v12_g1(a.h, shots)
+    elif a.scenario == "v12g4":
+        ok = scenario_v12_g4(a.h, shots, a.halt)
+    else:
+        ok = scenario_v11(a.h, shots)
     print("RESULT: %s (判定はスクリーンショットで)" % ("OK" if ok else "NG"))
     return 0 if ok else 1
 
