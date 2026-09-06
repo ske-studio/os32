@@ -319,15 +319,52 @@ impl Filer {
         }
     }
 
-    fn repaint_right(&self) {
-        self.repaint(widget::rect(self.right_pad));
+    /// 右ペインの 1 行の矩形 (見えていなければ空)。
+    fn row_rect(&self, r: &Rect, row: usize) -> Rect {
+        if row < self.list_top {
+            return Rect::EMPTY;
+        }
+        let i = row - self.list_top;
+        if i >= self.visible_rows(r) {
+            return Rect::EMPTY;
+        }
+        Rect::new(
+            r.x,
+            (r.y as i32 + ROWS_Y0 + (i as i32) * ROW_H) as i16,
+            r.w,
+            ROW_H as i16,
+        )
     }
 
-    /// 選択が動いたときの再描画。行の反転だけでなく**パス行も**出し直す —
-    /// パス行は選択中の名前を出しており (破壊的キーの対象)、右ペインだけを
-    /// 申告すると名前が前の行のまま残る (§10 差し戻し B)。
-    fn repaint_sel(&self) {
-        self.repaint_right();
+    /// 行領域だけ (見出しと枠の下)。
+    fn rows_band(&self, r: &Rect) -> Rect {
+        let h = r.h as i32 - ROWS_Y0;
+        if h <= 0 {
+            return Rect::EMPTY;
+        }
+        Rect::new(r.x, (r.y as i32 + ROWS_Y0) as i16, r.w, h as i16)
+    }
+
+    /// 選択が動いたときの再描画。**動いた 2 行とパス行だけ**を申告する
+    /// (見出しも枠も変わらない)。スクロールしたときは行領域だけ。
+    ///
+    /// ペイン全面 (約 400x300 = 12 万画素) を毎回塗り直すと、1 打鍵の描画に
+    /// 1.3 秒かかっていた (v1.2 G3 実測)。行 2 本なら 1/15 以下になる。
+    /// パス行は選択中の名前を出しているので必ず一緒に出し直す (差し戻し B)。
+    fn repaint_sel(&self, old_sel: usize, old_top: usize) {
+        let r = widget::rect(self.right_pad);
+        if r.is_empty() {
+            return;
+        }
+        if old_top != self.list_top {
+            /* スクロールした: 行が全部ずれるので帯ごと。 */
+            self.repaint(self.rows_band(&r));
+        } else {
+            self.repaint(self.row_rect(&r, old_sel));
+            if self.list_sel != old_sel {
+                self.repaint(self.row_rect(&r, self.list_sel));
+            }
+        }
         self.repaint_path();
     }
 
@@ -1105,10 +1142,11 @@ impl App for Filer {
             self.active = PANE_LIST;
             let row = self.row_at(&rp, y);
             if b.button == 2 {
+                let old_sel = self.list_sel;
                 if let Some(rw) = row {
                     self.list_sel = rw;
                 }
-                self.repaint_sel();
+                self.repaint_sel(old_sel, self.list_top);
                 self.open_menu(x, y, row.is_some());
                 return;
             }
@@ -1118,10 +1156,11 @@ impl App for Filer {
                     let t = os32api::get_tick();
                     let dbl =
                         self.last_row == rw as i32 && t.wrapping_sub(self.last_tick) <= DBLCLICK_TICKS;
+                    let old_sel = self.list_sel;
                     self.list_sel = rw;
                     self.last_row = rw as i32;
                     self.last_tick = t;
-                    self.repaint_sel();
+                    self.repaint_sel(old_sel, self.list_top);
                     if dbl {
                         self.last_row = -1;
                         self.activate_row(rw);
@@ -1271,6 +1310,8 @@ impl App for Filer {
             let nent = fs().nent;
             let r = widget::rect(self.right_pad);
             let page = if r.is_empty() { 1 } else { self.visible_rows(&r) };
+            let old_sel = self.list_sel;
+            let old_top = self.list_top;
             let mut moved = true;
             if scan == SCAN_UP {
                 if self.list_sel > 0 {
@@ -1291,7 +1332,7 @@ impl App for Filer {
             }
             if moved {
                 self.ensure_visible();
-                self.repaint_sel();
+                self.repaint_sel(old_sel, old_top);
                 return;
             }
         }

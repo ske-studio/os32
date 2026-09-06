@@ -38,18 +38,27 @@ pub fn draw_icon16(surface: SurfaceId, x: i32, y: i32, icon: &GuiIcon16) {
     }
     let p = Painter::from_target(&t);
 
+    /* アイコンごとクリップの外なら何もしない。 */
+    if p.cell_hidden(x, y, ICON16_SIZE, ICON16_SIZE) {
+        return;
+    }
     let mut row = 0i32;
     while row < ICON16_SIZE {
         let mrow = (row * 2) as usize;
         let prow = (row * 8) as usize;
+        /* 行のクリップ判定は 1 回だけ (PACKED8 の画面のみ。他は put へ)。 */
+        let fast = p.row(y + row);
         let mut col = 0i32;
         while col < ICON16_SIZE {
             let mbits = icon.mask[mrow + (col >> 3) as usize];
             if (mbits >> (7 - (col & 7))) & 1 != 0 {
                 let pb = icon.pixels[prow + (col >> 1) as usize];
                 let c = if col & 1 == 0 { pb >> 4 } else { pb & 0x0F };
-                /* put がクリップ (と PACKED8 の物理境界) を見る。 */
-                p.put(x + col, y + row, c);
+                match &fast {
+                    Some(r) => r.put(x + col, c),
+                    /* put がクリップ (と PACKED8 の物理境界) を見る。 */
+                    None => p.put(x + col, y + row, c),
+                }
             }
             col += 1;
         }
