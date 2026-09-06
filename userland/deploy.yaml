@@ -246,6 +246,10 @@ filesystem:
     - host: userland/tests/gui_demo.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- GUI v1.2 client API 試験 (C4: modal_result / session_launch / icon16) ---
+    - host: userland/tests/v12_api_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     # --- GUI G1 ゲート描画テスト (libos32gui) ---
     - host: userland/tests/gdi_test.bin
       guest: /usr/bin/
