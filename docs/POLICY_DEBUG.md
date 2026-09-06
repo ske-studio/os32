@@ -218,6 +218,59 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **検証**: `gdi_test` が rshell から約 3 秒で自動復帰してプロンプトに戻る、キーボードから `less` → `q` で終了する、`ver` が返る
 - **関連 (K2、同日)**: CTRL+STOP で CPL=3 アプリを畳む経路はそれまで存在せず (V86 脱出のみ)、K2 が `ring3_abort_request` / `ring3_abort_check` を新設した。CUI からでも暴走した CPL=3 アプリを CTRL+STOP で kill できる (`ring3_abort_count` / `fault_kill_count` が +1)。KAPI 実行中に押された場合は次の syscall 入口で畳む
 
+### 4-20. gshell 配下のアプリだけ漢字が描けない (PACKED8 判定の抜け)
+
+- **現象** (2026-09-06、G5 後半): PEGC / Cirrus で gui_demo のテキストボックスに FEP で「日本語」を入れると、
+  カーソルは 3 文字ぶん進むのに字が出ない (白い矩形だけ)。ANK は出る。gshell 自身の候補窓には漢字が出る。
+- **原因**: gshell 配下のアプリは `gfx_init` を呼べない (デスクトップを消す) ので `libos32gfx_init` ではなく
+  `attach_gfx` で framebuffer だけ取り直していたが、そこで `gfx_packed` (PACKED8 判定) を立てておらず、
+  共有ライブラリ内の `gfx_draw_font` (漢字経路) が 4 プレーン経路に落ちていた。ANK は libos32gui が自前で
+  画素を置くので気付かなかった。
+- **対策**: 判定を C 側の `libos32gfx_attach()` に集約し、`libos32gfx_init` と attach の両方から呼ぶ。
+  SDK ライブラリを変えたので `make external` も必要 (§4-12 と同じ罠)。
+- **検証**: PEGC / Cirrus で「日本語abc」が textbox とラベルに出る。9801 (`gfxmode pc98`) は元から正常。
+
+### 4-21. Cirrus: 窓を shutdown で畳むと単独アプリが #PF、再 init でリレーが倒れたまま
+
+- **現象** (2026-09-06、レビュー #5 ② を入れた直後): (a) `gdi_test` (単独 CPL=3 アプリ) がクライアント面
+  0104B000h で #PF。gshell 配下では通る。(b) gshell でアプリを CTRL+STOP で畳むとデスクトップが 98 側の
+  黒画面に隠れる (`/api/status` の `wab_relay=0`)。
+- **原因**: (a) exec がアプリ PD にクライアント面を USER で写すのは **アプリが `gfx_init` を呼ぶ前**。
+  直前の shutdown が窓を畳んで `bb_base=NULL` にしていたうえ、再 init の `paging_map_phys` が共有 PT の
+  PTE を supervisor で上書きして USER を消していた。(b) gshell はアプリ終了後に `gfx_init` を呼び直すが、
+  グルーの init (FF82h) がリレーを 98 側へ倒すのに `s_relay_on=1` のままで `enter()` が書かなかった。
+- **対策**: 窓は最初の init で一度だけ張り (supervisor + PCD)、shutdown では畳まず `bb_base` も保持。init で
+  `s_relay_on=0` に戻して `enter()` に必ず書かせる。
+- **検証**: `gdi_test` present_bytes=0 hw_ops=9、`ring3_guard bb` 生存、`ring3_guard cirrus` は表示面で kill、
+  gui_busy → CTRL+STOP でも `wab_relay=1` 維持。
+
+### 4-22. gshell の X4 がボタンエッジを先に見ると WM の状態機械に届かない
+
+- **現象** (2026-09-06、`/api/mouse` で初めて実測): ドラッグの離しが失われて XOR 枠が残ったまま次の押下まで
+  動き続ける、× を押すと閉じずに前面化だけ起きる、背面窓への押下がクライアントへ届く。
+- **原因**: アプリの syscall 境界ポンプ (X4) が `prev_buttons` を進めてアプリへ転送していたため、X3 (WM の
+  状態機械) には次のエッジが立たない。レビュー #4 ④でモーダルだけ直した問題の一般形。
+- **対策**: `wm_owns_edge()` — ドラッグ中 / 窓の外 / 背面窓 / 閉じる / タイトルバーのエッジは X4 で据え置き
+  (prev_buttons を進めない) → 次の X3 が拾う。前面窓のクライアント・枠だけを X4 で配る。判定順は
+  `wm_button_down` と同じにする (ずれると二重配送か取りこぼし)。
+- **検証**: ドラッグ → drop → 重なり再描画 → 背面クリックで前面化 → × で閉じる → チェックボックス / OK →
+  デスクトップ無反応 (スクリーンショット、TASKS §7)。
+
+### 4-23. NP21/W 実機検証の罠 (GUI 版)
+
+- `/api/key` の `seq=SHIFT+SPACE` は **`--data-urlencode`** で送る。`-d` だと `+` が空白になり FEP が入らず、
+  「Cirrus で FEP が効かない」と誤診しかけた。
+- `make deploy*` は `/etc/system.cfg` を巻き戻す。`gfxmode` / `os32gui` の設定切替は `/api/reset` で検証する。
+- `hotdeploy` は CUI で rshell が生きているときだけ効く (`hotdeploy_poll` は `kbd_trygetchar` から)。gshell 中や
+  `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す (ESC → SHIFT+SPACE → `ime off` → `rshell`)。
+- OS32 は NP21/W ではシームレスマウス (np2sysp `getmpos`) なので、`/api/mouse` は **`ax`/`ay`** (絶対座標
+  0..65535、`ax = px*65535/639`、`ay = py*65535/(H-1)`)。`dx/dy` はバスマウス計数で効かない。検証後は `abs=off`。
+- `gfx_stats` のカウンタは起動からの累計。`gdi_test` の値は起動直後の 1 回目だけが基準。
+- 自己完結テストの終了は `int 0x80` で **eax=KAPI_SLOT_SYS_EXIT (84)**。eax=0 はスロット 0 = `gfx_init` で
+  終了しない (ring3_guard がそれで GFX モードに入ったまま無限ループしていた)。
+- NP21/W の停止は `taskkill.exe /F /IM np21x64w.exe` (os32-cycle deploy と同じ) で PM が行える。ini の編集
+  ([D2]) と np21w-src の `make deploy` は停止中に。
+
 ---
 
 ## §5. デバッグ道具箱

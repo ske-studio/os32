@@ -106,18 +106,38 @@ YM2203 (OPN) FM音源チップ制御。FM 3ch + SSG 3ch。
 
 **フロー制御**: `serial_puts`は16バイトごとに`io_wait`を挿入し、NP21/Wのパイプバッファ溢れを防止する。
 
-### §5-5 グラフィック (gfx.c / gfx.h / libos32gfx)
+### §5-5 グラフィック (gfx/ HAL / libos32gfx)
 
 CPU直接描画＋バックバッファ方式。カーネル層 (`gfx/`) はバックバッファ管理とVRAM転送を担当し、高レベルな描画機能は外部プログラム用ライブラリ `libos32gfx` (`userland/lib/gfx/`) に分離されている。
 
-| 項目 | 仕様 |
+**HAL バックエンド表 (GUI v1.1、2026-09-06 現行)**: `include/gfx_hal.h` の `GfxBackend`
+(probe / init / query / present_rect / set_palette / fill_rect / blit / enter / leave / shutdown、
+`bb_base` / `bb_size` / `bb_pitch` / `bb_format`) を 3 枚持ち、`gfx_core.c` が **probe 順
+Cirrus → PEGC → 9801** で最初に通ったものを使う。`/etc/system.cfg` の `GFX=pc98|pegc|cirrus|auto`
+(`gfxmode` コマンドが書く) で強制できる。能力は `gfx_screen_info()` (契約 G5) で問い合わせ、
+GUI もアプリも 400 ライン / 16 色 / プレーンを決め打ちしない。
+
+| バックエンド | 画面 | バックバッファ (CPU が描く面) | 表示面へ | 能力ビット |
+|---|---|---|---|---|
+| `backend_pc98.c` (9801) | 640×400×16 (4 プレーン) | 主記憶 0x6A000 (128KB、`MEM_GFX_BB_BASE`) | CPU 転送 + ページフリップ | TEXT_OVERLAY, PAGE_FLIP |
+| `backend_pegc.c` (9821 PEGC) | 640×480×256 (PACKED8) | 主記憶末尾から 300KB (`sys_reserve_top`) | CPU 転送 (F00000h リニア窓、GDC SYNC は BIOS 表から 480 ライン) | TEXT_OVERLAY (合成ありと実測) |
+| `backend_cirrus.c` (CL-GD5430、Xe10 内蔵) | 640×480×256 | カード VRAM のクライアント面 (リニア窓 01000000h + 04B000h、300KB) | エンジン BLT (`present_rect` = 非表示面 → 表示面)。塗り / 転送も HW、256 画素以下は CPU 直書き | HW_FILL, HW_BLT (映像はリレーで切替、TEXT_OVERLAY 無し) |
+
+デバイス窓は master PD に **supervisor + PCD** で張り、CPL=3 に見せるのはクライアント面だけ
+(表示面へ直接描かせない = 契約 G4。写像の規則は [02 §2-1](02_memory.md))。counters
+(`gfx_stats`: present_bytes / hw_ops / io_accesses / commits) で「CPU が運んだ量」と
+「エンジンに任せた回数」を測る (NP21/W では時間が測れないため)。設計と経緯は
+[tasks/gui/DESIGN.md §5〜§8](tasks/gui/DESIGN.md)、Cirrus の資料は `include/wab_xe10.h` と
+`drivers/wab_*`。NP21/W では Cirrus は ini の `USEGD5430=true` / `GD5430TYPE=91` (Xe10) を要する ([D2])。
+
+| 項目 | 仕様 (9801 バックエンド) |
 |------|------|
 | 解像度 | 640×400 (`gfx_init`) / 640×200 (`gfx_init_200`、縦は HW が 2 倍表示) |
-| 色数 | 16色 (4プレーン)。9821 の PEGC 256 色 / アクセラレータは GUI 向けバックエンド表で追加予定 ([tasks/gui/DESIGN.md](tasks/gui/DESIGN.md)) |
+| 色数 | 16色 (4プレーン) |
 | ページフリップ | 両モードで自動有効 (ポート A4h = 表示ページ / A6h = アクセスページ) |
 | 描画方式 | システムRAMバックバッファ → VRAM一括転送 |
 | プレーンサイズ | 32,000バイト (80×400) |
-| パレットI/O | 0xA8 (idx), 0xAA (G), 0xAC (R), 0xAE (B) |
+| パレットI/O | 0xA8 (idx), 0xAA (G), 0xAC (R), 0xAE (B)。PEGC / Cirrus はバックエンドの `set_palette` (256 色、下位 16 はシステム色) |
 
 **ページフリッピング** (DEVELOPMENT.md から 2026-09-05 に移動):
 PC-9801 の VRAM は各プレーンに物理 2 バンク (64KB) あり、A4h (表示) / A6h (アクセス) で
@@ -138,7 +158,8 @@ PC-9801 の VRAM は各プレーンに物理 2 バンク (64KB) あり、A4h (�
 | `gfx_present_rect(x,y,w,h)` | 矩形領域のみVRAM転送 |
 | `gfx_present_dirty()` | ダーティ矩形のみVRAM転送 (KernelAPI経由) |
 | `gfx_add_dirty_rect(x,y,w,h)` | ダーティ矩形の登録 (KernelAPI経由) |
-| `gfx_get_framebuffer(fb)` | バックバッファ情報取得 (KernelAPI経由) |
+| `gfx_get_framebuffer(fb)` | バックバッファ情報取得 (KernelAPI経由)。パックド系は `planes[0]` だけ、`planes[1..3]=NULL` |
+| `gfx_screen_info(si)` / `gfx_hw_fill_rect` / `gfx_hw_blit` / `gfx_stats` / `gfx_lease_palette` | HAL の問い合わせ / HW 塗り・転送 (無いバックエンドは `OS32_ERR_NOSYS`、`gfx_init` 前も NOSYS) / カウンタ / パレットリース (KernelAPI v40〜v42) |
 | `gfx_hardware_scroll(lines)` | GDCハードウェアスクロール |
 | `gfx_clear(color)` | 画面クリア (カーネル内部用) |
 | `gfx_fill_rect(x,y,w,h,c)` | 矩形塗りつぶし (カーネル内部用) |
@@ -148,7 +169,8 @@ PC-9801 の VRAM は各プレーンに物理 2 バンク (64KB) あり、A4h (�
 
 | モジュール | 説明 |
 |------------|------|
-| `gfx_draw.c` | 描画プリミティブ (pixel, hline, vline, line, rect, fill_rect) |
+| `libos32gfx_core.c` | `libos32gfx_init` (gfx_init + attach) / `libos32gfx_attach` (gshell 配下のアプリと shlib: framebuffer 取り直し + **画素形式 `gfx_packed` の判定** + プール初期化。判定をここに集約しないと PACKED8 で漢字が描けない、2026-09-06) |
+| `gfx_draw.c` | 描画プリミティブ (pixel, hline, vline, line, rect, fill_rect)。4 プレーンと PACKED8 の両経路 (`gfx_packed`) |
 | `gfx_surface.c` | サーフェス管理 (create, free, clear, pixel, fill_rect) |
 | `gfx_sprite.c` | スプライト管理 (create, free, draw, 背景退避/復帰) |
 | `gfx_blt.c` | ブリット (矩形の退避/復帰) |
@@ -192,8 +214,9 @@ PC-98バスマウスおよびNP21/Wシームレスマウスに対応するポー
 | 項目 | 仕様 |
 |------|------|
 | バスマウスI/O | 0x7FD9 (データ `MOUSE_DATA`), 0x7FDD (制御 `MOUSE_CTRL`), 0x7FDF (8255 モード `MOUSE_MODE`)。IRQ13 (スレーブ PIC IR5, INT 0x2D) |
-| シームレスマウス | NP21/W拡張 (NP2SysP経由) |
-| 座標系 | 画面座標 (0,0)-(639,399) |
+| シームレスマウス | NP21/W拡張 (NP2SysP `getmpos`)。ホストカーソルの絶対座標 (0..65535) を `mouse_poll` ごとに読み、**現在の移動範囲 (`mouse_set_bounds`) へ比例配分**する (2026-09-06 まで 639/399 決め打ちで 480 ラインの下端に届かなかった)。ボタンは両モードとも 8255 ポート A から読む |
+| 座標系 | 画面座標 (0,0)-(639,399)。gshell は PEGC / Cirrus で bounds を (639,479) にする |
+| 検証 (NP21/W) | ai-debug の `POST /api/mouse`: シームレスには `ax`/`ay` (0..65535 の絶対座標の上書き、`abs=off` で解除)、バスマウスには `dx`/`dy`、ボタンは `btn`/`hold` (両モード共通) |
 | ボタン | 左/右/中 (3ボタン) |
 | ポーリング方式 | `mouse_poll()` でフレーム単位取得 |
 

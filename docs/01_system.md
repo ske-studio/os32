@@ -61,9 +61,13 @@ kernel.c :: kernel_main(u32 mem_kb, u32 boot_drive)
   ├── exec_init() (KernelAPIテーブル構築)
   ├── Unicodeテーブルロード / ime_init()
   ├── snd_init() / os32_sqlite_init()
-  ├── boot_splash() (ブートスプラッシュ)
-  └── exec_run(SYS_SHELL_BIN="/sys/shell.bin") (シェル起動、終了/クラッシュ時自動再起動)
-      └── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
+  ├── /etc/system.cfg 読み取り (sysconfig.c: GUI=0/1、GFX=pc98|pegc|cirrus|auto → gfx_set_backend_pref)
+  ├── boot_splash() (ブートスプラッシュ。ここで最初の gfx_init → HAL バックエンドの probe/init)
+  └── シェル起動ループ: exec_run("/sys/shell.bin" または GUI=1 なら "/bin/gshell.bin")
+      ├── シェル内で /etc/profile を自動実行 (環境変数・パス初期化)
+      ├── CUI の `os32gui` / gshell の ESC は sys_switch_shell() で次シェルを予約して exit →
+      │   ループが gui_take_next_shell() (consume 方式) で読んで入れ替える (両方ともシェル帯 0x300000)
+      └── gshell はロード失敗 / 連続 fault なら CUI へ戻す (保険)
 ```
 
 #### FDD ブート (セカンダリ)
@@ -93,14 +97,19 @@ loader_fat_new.asm (16bit → 32bit) — 第2段階
 上位レイヤーは下位レイヤーの機能を利用するが、下位レイヤーが上位レイヤーの具体的な実装に依存すること（逆参照）は原則として禁止する。
 
 ```text
-[ アプリケーション層 ] (userland/, apps/, game/)
+[ アプリケーション層 ] (userland/, apps/, game/)   CPL=3、PD 分離
+        |                 |
+        |        [ 共有ライブラリ ] (libos32gui.shlib @0x400000)
+        |                 |
+        v                 v
+[ シェル層 ] CUI shell.bin / GUI gshell.bin (WM) — シェル帯 0x300000、CPL=0、gui_call の受け手
         |
         v
-[ API・システムコール層 ] (kapi/) <--- (kapi.json から自動生成)
+[ API・システムコール層 ] (kapi/) <--- (kapi.json から自動生成)、int 0x80 トランポリン
         |
         +-----------------------+-----------------------+
         |                       |                       |
-[ ファイルシステム層 ] (fs/)  [ グラフィックス層 ] (gfx/)  [ 実行制御 ] (exec/)
+[ ファイルシステム層 ] (fs/)  [ グラフィックス HAL ] (gfx/: 9801 / PEGC / Cirrus)  [ 実行制御 ] (exec/)
         |                       |                       |
         +-----------+-----------+-----------+-----------+
                     |           |           |

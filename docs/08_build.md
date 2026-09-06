@@ -54,7 +54,25 @@ userland/**/*.c → gcc -m32                   → *.o
 
 apps/ と game/ は staged SDK (build/sdk/) だけを使い、それぞれの
 Makefile が同じ流れを回す。OS のソースツリーは参照しない。
+
+=== GUI シェルと共有ライブラリ (2026-09-06) ===
+userland/gshell (Rust, cargo)  → libgshell.a
+  + crt0 + libos32gfx (GFX_OBJ) → ld -T sdk/link/app_sys.ld → userland/gshell.bin (シェル帯 0x300000、make gshell)
+userland/rust/libos32gui       → ld -T sdk/link/shlib.ld     → userland/libos32gui.elf/.raw
+                → tools/mkshlib.py --api 42 → userland/libos32gui.shlib (/sys/lib、make shlib)
+                   (make check-shlib = 番号表の突き合わせ。ジャンプ表は末尾追記のみ)
+GUI アプリ      → libos32gui_stub (ジャンプ表への薄いスタブ) を静的リンク、libos32gfx は入れない
 ```
+
+日常のターゲット (`make all` に含まれる): `kernel` `programs` `libs` `gshell` `shlib` `external`
+(`apps` + `game`)。検査: `make check` (= `check-kapi-version` `check-manifests` `check-constraints`
+`check-privileged` `check-ne2000-ring` `check-shlib`)。`emu_agent` (ローカル AI) の `make` は
+許可リスト (`tools/emu_agent/agent.py` の `MAKE_TARGETS`) に載ったターゲットしか実行しない。
+
+**GitHub Actions** (`.github/workflows/check.yml`、2026-09-06): push / PR で、クロスツールチェーン無しで
+回せる検査だけを自動ゲートにする — KAPI 版番号の一致、`sdk/kapi.json` からの生成物がコミット済みと
+一致すること ([ABI1])、CONSTRAINTS ⇄ CLAUDE.md、`mkshlib --check`、ne2000 リングのホストテスト。
+`check-manifests` は `make all` の成果物を見るので対象外 (WSL 側の `make check` で回す)。
 
 インクルードパスは `Makefile` で細かく制御されており、基本的にソースファイルから他のヘッダディレクトリは `-I` によって自動解決できるため `#include "file.h"` で問題なく参照可能。
 
@@ -63,24 +81,25 @@ Makefile が同じ流れを回す。OS のソースツリーは参照しない�
 ```
 os32/
 ├── boot/           ブートローダー (16bit/32bit ASM + C)
-├── kernel/         カーネルコア・メモリ等・割り込みルーチン群
-├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, atapi, kcg, mouse, np2sysp, loop_dev, dev 等)
-├── gfx/            グラフィック描画機能
+├── kernel/         カーネルコア・メモリ等・割り込みルーチン群 (gui.c / shlib.c / sysconfig.c / ring3_entry.asm を含む)
+├── drivers/        ハードウェアドライバ (kbd, rtc, fm, fdc, disk, ide, atapi, kcg, mouse, np2sysp, loop_dev, dev, wab_* (Cirrus / Xe10 グルー) 等)
+├── gfx/            グラフィック HAL (gfx_core + backend_pc98 / backend_pegc / backend_cirrus)
 ├── fs/             ファイルシステム (vfs, ext2, fatfs, iso9660, hostdrv 等)
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
 ├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
-├── include/        システム統合用共通ヘッダ群
-├── userland/       ユーザー空間 (shell/, cmds/, system/, tests/, rust/, lib/)
+├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)
+├── userland/       ユーザー空間 (shell/, gshell/ (GUI シェル, Rust), cmds/, system/, tests/, rust/ (libos32gui 等), lib/)
+├── .github/        GitHub Actions (workflows/check.yml: 静的ゲート)
 ├── apps/           git submodule (ske-studio/os32-apps) — 標準アプリ。make external / make apps
 ├── game/           git submodule (ske-studio/os32-game) — 対戦スゴロク RPG。make external / make game
 ├── docs/hw/        PC-98 資料のローカルミラー (git 管理外、tools/sync_hwdocs.sh)
-├── sdk/            配布 SDK (include/, crt/, link/, rust/, example/)
+├── sdk/            配布 SDK (include/, crt/, link/ (app.ld / app_sys.ld / shlib.ld), rust/, example/)、kapi.json と生成器
 ├── build/          モジュール化 Makefile 群 (config.mk, kernel.mk, programs.mk, libs.mk, deploy.mk, image.mk, sdk.mk 等) + リンカスクリプト
 │   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)
 ├── assets/         データアセット (DB, 辞書, profile 等)
 ├── tests/          テストスクリプト
-├── tools/          ホスト上でのイメージ生成・デプロイツール
+├── tools/          ホスト上でのイメージ生成・デプロイ・検査ツール (nhd_deploy, hotdeploy, mkshlib, check_*, emu_agent/ (ローカル AI の実機操作), np21w_mcp/)
 ├── packages/       生成された .PKG (make packages)
 ├── images/         生成されたブートイメージ (make all / iso)
 ├── Makefile        マスタービルドスクリプト (build/*.mk を include)
