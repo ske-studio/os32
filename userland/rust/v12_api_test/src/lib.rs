@@ -5,11 +5,14 @@
 //! 出す** — `/api/screenshot` だけで合否を判定できるようにするため。
 //!
 //! ```text
-//!   キー / ボタン        試すもの
-//!   1 / [MsgBox]        modal_open(OK)  → on_modal → modal_result (値は空)
-//!   2 / [File]          file_open       → on_modal → modal_result (絶対パス)
-//!   3 / [Input]         input_open      → on_modal → modal_result (UTF-8。FEP 可)
-//!   4 / [Launch]        session_launch("/usr/bin/gui_demo.bin") の戻り値
+//!   キー / ボタン        試すもの                                    表示先
+//!   1 / [1 MsgBox]      modal_open(OK) → on_modal → modal_result     msg:
+//!   2 / [2 File]        file_open      → on_modal → modal_result     file:
+//!   3 / [3 Input]       input_open     → on_modal → modal_result     input:
+//!   4 / [4 Launch]      session_launch("/usr/bin/gui_demo.bin")      launch:
+//!   5 / [5 FULL]        FULL / STALE の否定試験 (契約 M2)            msg:
+//!   6 / [6 Ring]        リング満杯を跨いだ Modal の生存 (契約 V12-P) msg:
+//!   7 / [7 CUI]         session_switch_cui() の戻り値 (契約 S6)      launch:
 //!   ESC                 終了
 //! ```
 //!
@@ -18,7 +21,7 @@
 //! 下地の上に描くので、右のアイコンの角に下地色が透けていれば mask が効いている。
 //!
 //! `GUI_EV_QUIT` は libos32gui の既定 `on_quit` (= `ui.quit()`) で抜ける
-//! (`session_launch` が受理されると WM が Quit を投げてくる)。
+//! (`session_launch` / `session_switch_cui` が受理されると WM が Quit を投げてくる)。
 #![no_std]
 #![no_main]
 
@@ -29,12 +32,18 @@ use libos32gui::gapi::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_MODAL_OK};
 use libos32gui::gapi::types::{Rect, Style};
 use libos32gui::icon::{draw_icon16, GuiIcon16};
 use libos32gui::widget::{self, WidgetId, SCAN_ESC};
-use libos32gui::{modal, session, App, GuiErr, SizeSpec, Ui, Window, WindowSpec};
+use libos32gui::{modal, session, App, GuiErr, GuiResult, SizeSpec, Ui, Window, WindowSpec};
 use os32api::gui::types::SurfaceId;
 use os32api::KernelAPI;
 
 /// 起動要求で差し替える相手 (v1.2 の LAUNCH は絶対パスのみ)。
 const LAUNCH_PATH: &[u8] = b"/usr/bin/gui_demo.bin";
+
+/// キー 6 でポンプを止めておく長さ (tick = 10ms なので 600 tick = 6 秒)。
+const RING_PAUSE_TICKS: u32 = 600;
+
+/// `modal_result` に渡す「絶対に存在しない」ダイアログ ID (ERR_STALE 期待)。
+const BOGUS_DIALOG: u16 = 9999;
 
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI) -> i32 {
@@ -53,36 +62,63 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 /*  アプリの状態                                                     */
 /* ================================================================ */
 
+/// `on_modal` をどの試験として解釈するか。
+const MODE_PLAIN: u8 = 0;
+/// キー 5: FULL / STALE の否定試験 (契約 M2)。
+const MODE_FULL: u8 = 5;
+/// キー 6: リング満杯を跨いだ Modal の生存 (契約 V12-P)。
+const MODE_RING: u8 = 6;
+
 struct Test {
     win: Option<Window>,
     b_msg: WidgetId,
     b_file: WidgetId,
     b_input: WidgetId,
     b_launch: WidgetId,
+    b_full: WidgetId,
+    b_ring: WidgetId,
+    b_cui: WidgetId,
     lbl_modal: WidgetId,
     lbl_file: WidgetId,
     lbl_input: WidgetId,
     lbl_sess: WidgetId,
-    /// 発行した DialogId → どの試験か (1=msg / 2=file / 3=input)。0 = 未発行。
+    lbl_hint: WidgetId,
+    /// 発行した DialogId → どの試験か (1=msg/5/6 共用 / 2=file / 3=input)。0 = 未発行。
     pending: [u16; 4],
+    /// `on_modal` の解釈 (`MODE_*`)。
+    mode: u8,
+    /// キー 5 の途中経過 (`5: open2=...`)。`on_modal` で続きを足す。
+    seq: [u8; 64],
+    seq_len: usize,
+    /* --- キー 6 (リング満杯) の記録 --- */
+    /// `after_commit` で 6 秒止まる予約。
+    ring_pause: bool,
+    /// 一度でもキー 6 を走らせたか (`on_overflow` でラベルを描き直す)。
+    ring_active: bool,
+    /// `on_overflow` を受けた回数。
+    ovf_count: u32,
+    /// `dropped` の累計。
+    dropped_total: u32,
+    /// `modal_result` の結果 (未着は `i32::MIN`)。
+    ring_result: i32,
 }
 
 impl Test {
-    fn build() -> libos32gui::GuiResult<Test> {
+    fn build() -> GuiResult<Test> {
         let info = libos32gui::gapi::screen_info();
         let sw = info.width as i32;
         let sh = info.height as i32;
         let w = clamp(sw * 3 / 5, 300, 380);
-        let h = clamp(sh * 3 / 5, 210, 260);
+        let h = clamp(sh * 7 / 10, 250, 300);
 
         let win = Window::create(
-            &WindowSpec::new(b"v12 api test", Rect::new(24, 24, w as i16, h as i16))
-                .min_size(300, 210),
+            &WindowSpec::new(b"v12 api test", Rect::new(24, 20, w as i16, h as i16))
+                .min_size(300, 250),
         )?;
 
         let root = widget::column(8, 5)?;
 
-        /* --- ボタン列 (PM の /api/mouse 台本はこの並びを叩く) --- */
+        /* --- ボタン列 1 (PM の /api/mouse 台本はこの並びを叩く) --- */
         let btns = widget::row(0, 6)?;
         let b_msg = widget::button(b"1 MsgBox")?;
         let b_file = widget::button(b"2 File")?;
@@ -94,6 +130,16 @@ impl Test {
         widget::add(btns, b_launch, SizeSpec::Flex(1))?;
         widget::add(root, btns, SizeSpec::Fixed(26))?;
 
+        /* --- ボタン列 2: G2 の否定ケース --- */
+        let btns2 = widget::row(0, 6)?;
+        let b_full = widget::button(b"5 FULL")?;
+        let b_ring = widget::button(b"6 Ring")?;
+        let b_cui = widget::button(b"7 CUI")?;
+        widget::add(btns2, b_full, SizeSpec::Flex(1))?;
+        widget::add(btns2, b_ring, SizeSpec::Flex(1))?;
+        widget::add(btns2, b_cui, SizeSpec::Flex(1))?;
+        widget::add(root, btns2, SizeSpec::Fixed(26))?;
+
         /* --- 結果ラベル (screenshot で読む) --- */
         let lbl_modal = widget::label(b"msg: -")?;
         let lbl_file = widget::label(b"file: -")?;
@@ -104,8 +150,8 @@ impl Test {
         widget::add(root, lbl_input, SizeSpec::Fixed(17))?;
         widget::add(root, lbl_sess, SizeSpec::Fixed(17))?;
 
-        let hint = widget::label(b"ESC: quit  icons: opaque / masked")?;
-        widget::add(root, hint, SizeSpec::Fixed(17))?;
+        let lbl_hint = widget::label(b"ESC: quit  icons: opaque / masked")?;
+        widget::add(root, lbl_hint, SizeSpec::Fixed(17))?;
 
         /* 残りは widget を置かない = 下地のまま。そこへ on_paint で icon16 を描く。 */
         win.set_root(root)?;
@@ -117,11 +163,23 @@ impl Test {
             b_file,
             b_input,
             b_launch,
+            b_full,
+            b_ring,
+            b_cui,
             lbl_modal,
             lbl_file,
             lbl_input,
             lbl_sess,
+            lbl_hint,
             pending: [0; 4],
+            mode: MODE_PLAIN,
+            seq: [0; 64],
+            seq_len: 0,
+            ring_pause: false,
+            ring_active: false,
+            ovf_count: 0,
+            dropped_total: 0,
+            ring_result: i32::MIN,
         })
     }
 
@@ -132,51 +190,221 @@ impl Test {
         }
     }
 
-    /* ---- 3 つの open。DialogId を控えて on_modal で照合する ---- */
+    /* ---- 1〜3: 3 つの open。DialogId を控えて on_modal で照合する ---- */
 
     fn do_msgbox(&mut self) {
+        self.mode = MODE_PLAIN;
         let r = modal::modal_open(self.win_id(), GUI_MODAL_OK, b"v1.2 MODAL_RESULT test");
         self.note_open(r, 1, self.lbl_modal, b"msg");
     }
 
     fn do_file(&mut self) {
+        self.mode = MODE_PLAIN;
         let r = modal::file_open(self.win_id(), b"Open a file");
         self.note_open(r, 2, self.lbl_file, b"file");
     }
 
     fn do_input(&mut self) {
+        self.mode = MODE_PLAIN;
         let r = modal::input_open(self.win_id(), b"Type text (SHIFT+SPACE = FEP)");
         self.note_open(r, 3, self.lbl_input, b"input");
     }
 
-    /// `session_launch` は「受理」しか返さない。受理されれば WM が Quit を投げる。
+    /// 4: `session_launch` は「受理」しか返さない。受理されれば WM が Quit を投げる。
     fn do_launch(&mut self) {
         let mut buf = [0u8; 64];
         let n = match session::session_launch(LAUNCH_PATH) {
-            Ok(()) => fmt2(&mut buf, b"launch: accepted ", LAUNCH_PATH),
-            Err(e) => fmt2(&mut buf, b"launch: ", e.name()),
+            Ok(()) => fmt2(&mut buf, b"launch: accepted", LAUNCH_PATH),
+            Err(e) => fmt2(&mut buf, b"launch", short_err(e)),
         };
         let _ = widget::set_text(self.lbl_sess, &buf[..n]);
-        let _ = self.invalidate_all();
+        self.repaint();
     }
 
-    fn note_open(&mut self, r: libos32gui::GuiResult<u16>, kind: usize, lbl: WidgetId, tag: &[u8]) {
+    /* ---- 5: FULL / STALE の否定試験 (契約 M2) ---- */
+    ///
+    /// 1 手目でモーダルを開き、**consume せずに**もう 1 回 `modal_open` する。
+    /// 続きは `on_modal` の中 (`full_finish`)。
+    fn do_full(&mut self) {
+        self.seq_len = 0;
+        self.seq_len = put(&mut self.seq, 0, b"5: ");
+        let id = match modal::modal_open(self.win_id(), GUI_MODAL_OK, b"FULL/STALE test") {
+            Ok(id) => id,
+            Err(e) => {
+                let n = self.seq_len;
+                let n = put_str(&mut self.seq, n, b"open1=");
+                let n = put_str(&mut self.seq, n, short_err(e));
+                self.seq_len = n;
+                self.mode = MODE_PLAIN;
+                self.show_seq();
+                return;
+            }
+        };
+        self.pending[1] = id;
+        self.mode = MODE_FULL;
+
+        /* 表示中のモーダルがあるので 2 本目は開けない (契約 M2 / v1 は 1 枚)。 */
+        let open2 = res_name(modal::modal_open(self.win_id(), GUI_MODAL_OK, b"second"));
+        let n = self.seq_len;
+        let n = put_str(&mut self.seq, n, b"open2=");
+        let n = put_str(&mut self.seq, n, open2);
+        self.seq_len = n;
+        self.show_seq();
+    }
+
+    /// キー 5 の続き。`on_modal` が来た時点で走る (まだ consume していない)。
+    fn full_finish(&mut self, dialog: u16) {
+        let mut val = [0u8; 256];
+
+        /* (a) 未 consume の結果があるので MODAL_OPEN は ERR_FULL (契約 M2)。 */
+        let open3 = res_name(modal::modal_open(self.win_id(), GUI_MODAL_OK, b"third"));
+        let n = put_str(&mut self.seq, self.seq_len, b" open3=");
+        let n = put_str(&mut self.seq, n, open3);
+
+        /* (b) 正規の 1 回目: r=1 (OK)、値は空。 */
+        let n = put_str(&mut self.seq, n, b" r=");
+        let n = match modal::modal_result(dialog, &mut val) {
+            Ok(m) => {
+                let k = put_num(&mut self.seq, n, m.result as i32);
+                if m.copied != 0 {
+                    /* MessageBox は値が空のはず。空でなければ長さを見せる。 */
+                    let k = put_str(&mut self.seq, k, b"+v");
+                    put_num(&mut self.seq, k, m.copied as i32)
+                } else {
+                    k
+                }
+            }
+            Err(e) => put_str(&mut self.seq, n, short_err(e)),
+        };
+
+        /* (c) 二重 consume は ERR_STALE (契約 M2)。 */
+        let n = put_str(&mut self.seq, n, b" again=");
+        let n = put_str(&mut self.seq, n, res_name(modal::modal_result(dialog, &mut val)));
+
+        /* (d) 存在しない ID も ERR_STALE。 */
+        let n = put_str(&mut self.seq, n, b" bad=");
+        let n = put_str(
+            &mut self.seq,
+            n,
+            res_name(modal::modal_result(BOGUS_DIALOG, &mut val)),
+        );
+
+        self.seq_len = n;
+        self.mode = MODE_PLAIN;
+        self.show_seq();
+    }
+
+    /* ---- 6: リング満杯を跨いだ Modal の生存 (契約 V12-P / T3) ---- */
+    ///
+    /// モーダルを開いてから `after_commit` で 6 秒ポンプだけ回す (gui_call は 1 回も
+    /// しない)。その間に PM がマウスを振ってリングを溢れさせ、OK をクリックする。
+    /// 再開後の `OP_POLL` で `OVERFLOW` を受けても Modal イベントと結果は残る。
+    fn do_ring(&mut self) {
+        self.ring_active = true;
+        self.ovf_count = 0;
+        self.dropped_total = 0;
+        self.ring_result = i32::MIN;
+        match modal::modal_open(self.win_id(), GUI_MODAL_OK, b"ring-full: move mouse, click OK") {
+            Ok(id) => {
+                self.pending[1] = id;
+                self.mode = MODE_RING;
+                self.ring_pause = true;
+            }
+            Err(e) => {
+                self.mode = MODE_PLAIN;
+                let mut buf = [0u8; 64];
+                let n = fmt2(&mut buf, b"6: open", short_err(e));
+                let _ = widget::set_text(self.lbl_modal, &buf[..n]);
+            }
+        }
+        self.show_ring();
+    }
+
+    /// `6: r=<n> ovf=<n> dropped=<n>` を組み立てて `msg:` ラベルへ。
+    fn show_ring(&mut self) {
+        let mut buf = [0u8; 64];
+        let n = put(&mut buf, 0, b"6: r=");
+        let n = if self.ring_result == i32::MIN {
+            put_str(&mut buf, n, b"?")
+        } else {
+            put_num(&mut buf, n, self.ring_result)
+        };
+        let n = put_str(&mut buf, n, b" ovf=");
+        let n = put_num(&mut buf, n, self.ovf_count as i32);
+        let n = put_str(&mut buf, n, b" dropped=");
+        let n = put_num(&mut buf, n, self.dropped_total as i32);
+        let _ = widget::set_text(self.lbl_modal, &buf[..n]);
+        self.repaint();
+    }
+
+    /// 6 秒間 **gui_call を 1 回もせず** KAPI だけ叩いて待つ。
+    ///
+    /// KAPI 呼び出し (int 0x80) を続けるのは、syscall 境界のポンプ X4 を回して
+    /// WM に入力を取り込ませ続けるため (契約 T3 の「リング満杯」の条件)。
+    /// `OP_POLL` を呼ばないのでリングは溢れる。
+    fn ring_pause_now(&mut self) {
+        unsafe {
+            let a = os32api::api();
+            let t0 = (a.get_tick)();
+            let mut guard: u32 = 0;
+            loop {
+                if (a.get_tick)().wrapping_sub(t0) >= RING_PAUSE_TICKS {
+                    break;
+                }
+                (a.sys_halt)();
+                guard += 1;
+                if guard > 200_000 {
+                    break; /* tick が進まない環境でも抜ける保険 */
+                }
+            }
+        }
+    }
+
+    /* ---- 7: セッション API で CUI へ ---- */
+
+    fn do_switch_cui(&mut self) {
+        let mut buf = [0u8; 64];
+        let n = match session::session_switch_cui() {
+            Ok(()) => put(&mut buf, 0, b"7: switch_cui=accepted"),
+            Err(e) => {
+                let k = put(&mut buf, 0, b"7: switch_cui=");
+                put_str(&mut buf, k, short_err(e))
+            }
+        };
+        let _ = widget::set_text(self.lbl_sess, &buf[..n]);
+        self.repaint();
+    }
+
+    /* ---- 小物 ---- */
+
+    fn show_seq(&mut self) {
+        let n = self.seq_len;
+        let mut tmp = [0u8; 64];
+        let mut i = 0;
+        while i < n && i < tmp.len() {
+            tmp[i] = self.seq[i];
+            i += 1;
+        }
+        let _ = widget::set_text(self.lbl_modal, &tmp[..i]);
+        self.repaint();
+    }
+
+    fn note_open(&mut self, r: GuiResult<u16>, kind: usize, lbl: WidgetId, tag: &[u8]) {
         let mut buf = [0u8; 64];
         let n = match r {
             Ok(id) => {
                 self.pending[kind] = id;
                 fmt_num(&mut buf, tag, b": dialog #", id as i32)
             }
-            Err(e) => fmt2(&mut buf, tag, e.name()),
+            Err(e) => fmt2(&mut buf, tag, short_err(e)),
         };
         let _ = widget::set_text(lbl, &buf[..n]);
-        let _ = self.invalidate_all();
+        self.repaint();
     }
 
-    fn invalidate_all(&self) -> libos32gui::GuiResult<()> {
-        match self.win.as_ref() {
-            Some(w) => w.invalidate_all(),
-            None => Err(GuiErr::STALE),
+    fn repaint(&self) {
+        if let Some(w) = self.win.as_ref() {
+            let _ = w.invalidate_all();
         }
     }
 }
@@ -195,6 +423,12 @@ impl App for Test {
             self.do_input();
         } else if w == self.b_launch {
             self.do_launch();
+        } else if w == self.b_full {
+            self.do_full();
+        } else if w == self.b_ring {
+            self.do_ring();
+        } else if w == self.b_cui {
+            self.do_switch_cui();
         }
     }
 
@@ -212,6 +446,9 @@ impl App for Test {
             b'2' => self.do_file(),
             b'3' => self.do_input(),
             b'4' => self.do_launch(),
+            b'5' => self.do_full(),
+            b'6' => self.do_ring(),
+            b'7' => self.do_switch_cui(),
             _ => {}
         }
     }
@@ -219,10 +456,26 @@ impl App for Test {
     /// **ここが票 C4 の要**: 値は `on_modal` の中で `modal_result` から取る。
     /// 非同期なので open が同期で path/text を返すことはない。
     fn on_modal(&mut self, _ui: &mut Ui, dialog: u16, result: i16) {
+        let _ = result; /* 値も結果も modal_result 側で受ける (契約 M1) */
+
+        /* キー 5 / 6 は専用の筋書き。 */
+        if self.mode == MODE_FULL && dialog == self.pending[1] {
+            self.full_finish(dialog);
+            return;
+        }
+        if self.mode == MODE_RING && dialog == self.pending[1] {
+            let mut val = [0u8; 256];
+            self.ring_result = match modal::modal_result(dialog, &mut val) {
+                Ok(m) => m.result as i32,
+                Err(e) => e.code(),
+            };
+            self.mode = MODE_PLAIN;
+            self.show_ring();
+            return;
+        }
+
         let mut val = [0u8; 256];
         let r = modal::modal_result(dialog, &mut val);
-
-        /* どの試験の結果かは控えた DialogId で決める。 */
         let (lbl, tag) = if dialog == self.pending[2] {
             (self.lbl_file, &b"file"[..])
         } else if dialog == self.pending[3] {
@@ -241,11 +494,28 @@ impl App for Test {
                     fmt2(&mut buf, tag, &val[..m.copied])
                 }
             }
-            Err(e) => fmt2(&mut buf, tag, e.name()),
+            Err(e) => fmt2(&mut buf, tag, short_err(e)),
         };
         let _ = widget::set_text(lbl, &buf[..n]);
-        let _ = result; /* 値は modal_result 側で受ける (契約 M1) */
-        let _ = self.invalidate_all();
+        self.repaint();
+    }
+
+    /// 取りこぼし通知 (契約 T3)。キー 6 の合否はこの回数と `dropped` で見る。
+    fn on_overflow(&mut self, _ui: &mut Ui, dropped: u16) {
+        self.ovf_count = self.ovf_count.wrapping_add(1);
+        self.dropped_total = self.dropped_total.wrapping_add(dropped as u32);
+        if self.ring_active {
+            self.show_ring();
+        }
+    }
+
+    /// `commit` の直後。キー 6 の「6 秒ポンプだけ回す」はここで走らせる —
+    /// モーダルが画面に出てからでないと PM が OK をクリックできない。
+    fn after_commit(&mut self, _ui: &mut Ui) {
+        if self.ring_pause {
+            self.ring_pause = false;
+            self.ring_pause_now();
+        }
     }
 
     fn on_close(&mut self, ui: &mut Ui, _window: u32) {
@@ -258,13 +528,18 @@ impl App for Test {
     /// 下地はデスクトップ色。左は mask 全 1、右は菱形 mask なので、右の角に
     /// 下地色が残っていれば「mask=0 は描かない」が効いている。
     fn on_paint(&mut self, _ui: &mut Ui, _window: u32, surface: SurfaceId, _rect: Rect) {
-        let (cw, ch) = match self.win.as_ref() {
+        /* ヒント行の下に置く (窓の高さやタイトルバー厚に依存しない)。 */
+        let hint = widget::rect(self.lbl_hint);
+        if hint.is_empty() {
+            return;
+        }
+        let y = hint.bottom() + 6;
+        let (_, ch) = match self.win.as_ref() {
             Some(w) => w.client_size(),
             None => return,
         };
-        let y = ch as i32 - 30;
-        if y < 0 || cw < 96 {
-            return;
+        if y + 24 > ch as i32 {
+            return; /* 入らないなら描かない (widget を潰さない) */
         }
         /* 下地: 24x24 のデスクトップ色パッチ 2 枚 */
         let bg = Style::new(GUI_COLOR_TEXT, GUI_COLOR_DESKTOP);
@@ -342,6 +617,24 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
     }
 }
 
+/// `GuiErr::name()` から `ERR_` を落とした短い名前 (`FULL` / `STALE` / `NOSYS` …)。
+fn short_err(e: GuiErr) -> &'static [u8] {
+    let n = e.name();
+    if n.len() > 4 && n[0] == b'E' && n[1] == b'R' && n[2] == b'R' && n[3] == b'_' {
+        &n[4..]
+    } else {
+        n
+    }
+}
+
+/// 成功なら `ok`、失敗なら短いエラー名 (否定試験の 1 語表示用)。
+fn res_name<T>(r: GuiResult<T>) -> &'static [u8] {
+    match r {
+        Ok(_) => b"ok",
+        Err(e) => short_err(e),
+    }
+}
+
 /// `a` + `": "` + `b` を詰める。返り値: 書いたバイト数。
 fn fmt2(dst: &mut [u8], a: &[u8], b: &[u8]) -> usize {
     let mut n = put(dst, 0, a);
@@ -353,6 +646,12 @@ fn fmt2(dst: &mut [u8], a: &[u8], b: &[u8]) -> usize {
 fn fmt_num(dst: &mut [u8], a: &[u8], b: &[u8], v: i32) -> usize {
     let mut n = put(dst, 0, a);
     n = put(dst, n, b);
+    put_num(dst, n, v)
+}
+
+/// `dst[at..]` へ 10 進数を詰める。返り値: 新しい末尾。
+fn put_num(dst: &mut [u8], at: usize, v: i32) -> usize {
+    let mut n = at;
     let mut tmp = [0u8; 12];
     let mut k = 0usize;
     let neg = v < 0;
@@ -377,6 +676,12 @@ fn fmt_num(dst: &mut [u8], a: &[u8], b: &[u8], v: i32) -> usize {
         }
     }
     n
+}
+
+/// [`put`] の別名 (読みやすさのため。中身は同じ)。
+#[inline]
+fn put_str(dst: &mut [u8], at: usize, src: &[u8]) -> usize {
+    put(dst, at, src)
 }
 
 /// `dst[at..]` へ `src` を NUL 手前まで詰める。返り値: 新しい末尾。
