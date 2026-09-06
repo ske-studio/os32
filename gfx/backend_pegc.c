@@ -235,7 +235,8 @@ static int pegc_linear_selftest(void)
     mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_ON);
 
     /* K のページング API で master PD に張る (H はページテーブルを触らない)。
-     * ここではまだ USER は付けない — 本採用は init() で行う。 */
+     * USER は付けない — init() の本採用でも同じ supervisor + PCD (表示面を
+     * CPL=3 に見せないため。レビュー #5 ②)。 */
     if (paging_map_phys(PEGC_LINEAR_BASE, PEGC_LINEAR_BASE, npages,
                         PAGE_RW | PTE_PCD) != 0)
         goto disable_linear;
@@ -378,12 +379,19 @@ static void pegc_init(void)
     mmio_w8(PEGC_MMIO_PIXFMT, PEGC_PIXFMT_PACKED);
     mmio_w16(PEGC_MMIO_LINEAR, PEGC_LINEAR_ON);
 
-    /* リニア窓を master PD に張る (RW + USER + キャッシュ無効)。
-     * paging_addrspace_create() は master の PDE を全部コピーするので、
-     * 以後に作られるアプリ PD からも同じ物理が見える。
-     * PCD: VRAM は書き込み専用に使うデバイス窓なのでキャッシュに載せない。 */
+    /* リニア窓を master PD に張る (**supervisor** + RW + キャッシュ無効)。
+     * probe の pegc_linear_selftest() と同じ属性 = 本採用でも USER は付けない。
+     * PCD: VRAM は書き込み専用に使うデバイス窓なのでキャッシュに載せない。
+     *
+     * H2 の初版はここに PTE_USER を付けていた。理由は「paging_addrspace_create
+     * が master の PDE を写すので全アプリ PD で共有される」— つまりアプリから
+     * 見えるようにするため、だった。だが F00000h は **表示面そのもの** で、
+     * PEGC のバックバッファは主記憶側 (sys_reserve_top の 300KB) にある。
+     * アプリが要るのはそちらだけで、exec が gfx_bb_phys_range() 経由で
+     * USER マップする。表示面を USER にすると CPL=3 が commit を経ずに画面へ
+     * 書けてしまい契約 G4 が崩れるので外した (レビュー #5 ②、2026-09-06)。 */
     paging_map_phys(PEGC_LINEAR_BASE, PEGC_LINEAR_BASE, npages,
-                    PAGE_RW | PTE_USER | PTE_PCD);
+                    PAGE_RW | PTE_PCD);
 
     /* --- 画面をクリア --- */
     kmemset((u8 *)s_bb_phys, 0, (u32)MEM_GFX_BB8_SIZE);

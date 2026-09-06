@@ -1054,15 +1054,23 @@ int exec_run(const char *cmdline)
             /* GFX バックバッファ: libos32gfx がピクセルを書く先。
              * 番地はバックエンドに聞く (H2) — 9801 は 0x6A000 + 128KB で
              * 従来と同じ値、PEGC 256 色は物理末尾から切り出した 300KB、
-             * Cirrus はリニア窓 0x1000000 の中の非表示面 300KB (H3b。
-             * カード VRAM なので主記憶の外だが、扱いは同じ)。
+             * Cirrus はリニア窓 0x1000000 の中の非表示面 (クライアント面)
+             * 300KB (H3b。カード VRAM なので主記憶の外だが、扱いは同じ)。
              * 決め打ちにすると 9821 でアプリが自分のバックバッファに触れず
-             * #PF になる。 */
+             * #PF になる。
+             * ここで USER にするのは **クライアント面だけ** — 表示面は
+             * バックエンドが master に supervisor + PCD で張ったまま触らない
+             * (契約 G4: commit 前の描画は表示面に出ない)。
+             * map_user_range ではなく **_keep** を使う: Cirrus のクライアント面は
+             * PCD 付きのデバイス窓で、flags をそのまま書くと PCD が落ちる。
+             * この PTE は共有 PT にあるので、落とすと master 側 = カーネルの
+             * 描画まで巻き添えになり、CPU が書いた画素をキャッシュに残したまま
+             * BLT エンジンが古い VRAM を読む (レビュー #5 ②③)。 */
             {
                 u32 bb_base = 0, bb_size = 0;
                 gfx_bb_phys_range(&bb_base, &bb_size);
                 if (bb_size)
-                    paging_addrspace_map_user_range(&g_ring3_as,
+                    paging_addrspace_map_user_keep(&g_ring3_as,
                         bb_base, bb_base + bb_size, PAGE_RW | PTE_USER);
             }
             /* KAPI トランポリンページ (RO+USER, 全PD共有)。この app PD の PDE0 に

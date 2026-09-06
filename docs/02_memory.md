@@ -57,9 +57,23 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 恒等マップの守備範囲は 32MB (PAGING_MAP_SIZE、PT 8 枚 = +16KB BSS)。実 RAM として扱うのは
 従来どおり 16MB まで (PAGING_RAM_LIMIT: pgalloc / sys_usable_mem_end / ホットデプロイ窓は不変)。
 16MB〜32MB は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
-0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)
-0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ)
-  +000000h 表示面 / +04B000h クライアント面 (300KB、CPL=3 へ USER マップ) / +096000h 塗りパターン
+0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)  supervisor + PCD
+0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ) supervisor + PCD
+  +000000h 表示面 / +04B000h クライアント面 (300KB) / +096000h 塗りパターン
+
+> **デバイス窓の貸し出し規則 (レビュー #5 ②③、2026-09-06)**
+> バックエンドが master PD に張る窓は **supervisor + PCD** で、PTE_USER を付けない。
+> `paging_addrspace_create()` は master の PDE を 1024 本すべて写すので、master で
+> USER にすると CPL=3 アプリが**表示面**に直接書けてしまい、契約 G4 (commit 前の
+> 描画は表示面に出ない) が崩れる。CPL=3 に見せるのは **クライアント面だけ** で、
+> `gfx_bb_phys_range()` が返す範囲 (Cirrus: リニア窓 +04B000h の 300KB、PEGC/9801:
+> 主記憶のバックバッファ) を exec が `paging_addrspace_map_user_keep()` で
+> **アプリ PD ごとに** USER へ昇格させる。この 300KB の PTE は共有 PT にあるので
+> master からも USER に見えるが、master 側の PDE には USER を伝播させないため
+> 実効権限は supervisor のまま (C2 の「共有 + USER」と同じ模型)。
+> `_keep` は既存 PTE の **PCD/PWT を引き継ぐ** — 落とすと CPU が書いた画素が
+> キャッシュに残り、Cirrus の BLT エンジンが古い VRAM を読む。
+> 不変条件はブート時の kselftest (`paging_map_user_keep_selftest`) が毎回検査する。
 
 [ 共有ライブラリ帯域 (0x400000 - 0x4FFFFF, K3 2026-09-06) ]
 0x400000 - text_end                libos32gui.shlib の先頭 4KB ジャンプ表 + .text/.rodata  RO, USER, 全 PD 共有

@@ -89,6 +89,12 @@ int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags);
  * 欲しい物理窓」を、ドライバ側にページテーブルを触らせずに張るための入口。
  * flags に PTE_USER を含めれば PDE にも USER が伝播する
  * (同じ PDE 配下の他ページは PTE が supervisor のままなので保護は保たれる)。
+ *
+ * **表示面を含むデバイス窓に PTE_USER を渡してはならない** (レビュー #5 ②)。
+ * master に USER で張ると、PDE をまるごと写す paging_addrspace_create() の
+ * 先で CPL=3 アプリが表示 VRAM に直接書けてしまい、契約 G4 (commit 前の描画は
+ * 表示面に出ない) が崩れる。窓は supervisor + PTE_PCD で張り、アプリに見せる
+ * クライアント面だけを exec が paging_addrspace_map_user_keep() で昇格させる。
  * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み)。 */
 int paging_map_phys(u32 virt_addr, u32 phys_addr, u32 npages, u32 flags);
 
@@ -190,6 +196,16 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
 int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
                                     u32 vend, u32 flags);
 
+/* map_user_range と同じだが、**既存 PTE のキャッシュ属性 (PCD/PWT) を引き継ぐ**。
+ * デバイス窓の一部を CPL=3 へ貸すとき用 (GFX バックバッファ)。Cirrus では
+ * クライアント面がカード VRAM (master で PCD 付き) なので、flags をそのまま
+ * 書き込むと PCD が消え、CPU が書いた画素がキャッシュに残ったまま BLT エンジン
+ * が古い VRAM を読む。共有 PT の PTE は master からも見えるため、属性を落とすと
+ * カーネル側の描画まで巻き添えになる (レビュー #5 ③)。
+ * 戻り値 0=成功, -1=範囲の一部が範囲外 (範囲内分は適用済み)。 */
+int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
+                                   u32 vend, u32 flags);
+
 /* PD 複製の自己診断 (V1)。CPL=0 のまま:
  *   1. アプリ AS を作る
  *   2. CR3 を新 PD に載せてもカーネル (コード/スタック/データ) が生存する
@@ -198,5 +214,14 @@ int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
  * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。
  * ブート時に kselftest_run() から呼ぶ想定 (pgalloc_init 後)。 */
 int paging_pd_clone_selftest(void);
+
+/* デバイス窓の貸し出しの自己診断 (レビュー #5 ②③)。守備範囲末尾の 2 ページを
+ * 「supervisor + PCD のデバイス窓」に見立て、片方だけを
+ * paging_addrspace_map_user_keep() で昇格させて次を確かめる:
+ *   USER が立つ / PCD が消えない / 隣のページ (表示面役) が supervisor のまま /
+ *   master の PDE に USER が伝播せずアプリ PD の PDE にだけ立つ。
+ * ハードウェアには依存しない (実 RAM の無い番地を使い、PTE は必ず戻す)。
+ * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。 */
+int paging_map_user_keep_selftest(void);
 
 #endif /* __PAGING_H */
