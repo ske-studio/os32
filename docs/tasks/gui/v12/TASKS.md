@@ -12,13 +12,13 @@
 
 v1.2 は HAL 拡張版ではなく、**v1.1 で完成した GUI 基盤をデスクトップ環境として完成させる版**とする。
 
-PEGC / Cirrus / 9801 バックエンドは原則 freeze し、H レーンは回帰検証のみとする。
+PEGC / Cirrus / 9801 backend は原則 freeze し、H lane は regression 検証のみ。
 
-KAPI v42 は freeze する。
+**KAPI v42 は freeze。v43 は network / Host Services 用の予約で GUI は使わない。**
 
-新機能は可能な限り既存 `gui_call` と `libos32gui` 上に実装する。
+新機能は既存 `gui_call` と `libos32gui` 上に実装する。
 
-v1.1 で問題になった「X4 で重い処理」「暗黙の ABI 変更」「共有 PT」「起動途中状態」のような跨層変更を避け、v1.2 は W / C 中心に進める。
+v1.1 で問題になった「X4 で重い処理」「暗黙 ABI 変更」「共有 PT」「起動途中状態」のような跨層変更を避け、v1.2 は W / C 中心に進める。
 
 ---
 
@@ -26,48 +26,50 @@ v1.1 で問題になった「X4 で重い処理」「暗黙の ABI 変更」「�
 
 | レーン | 言語 / 場所 | 票 | 内容 |
 |---|---|---|---|
-| **K** プロトコル | C / Rust, `sdk/include/os32/`, `sdk/rust/os32api/src/gui/` | `TASK_K5_v12_proto.md` | `MODAL_RESULT` / `INPUT` / Quit reason の末尾追記。KAPI 追加なし |
-| **W** WM | Rust, `userland/gshell/` | `TASK_W3_desktop_session.md` | taskbar / Start / clock / launcher / session state machine |
-| | | `TASK_W4_dialogs.md` | message / file-open / input dialog 完成、結果保持 |
-| **C** ライブラリ | Rust, `userland/rust/libos32gui/` | `TASK_C4_desktop_api.md` | modal 結果 API、icon16、client menu helper |
-| **C** アプリ | Rust, `userland/rust/filer/` | `TASK_C5_filer.md` | File Manager |
-| **H** HAL | C, `gfx/`, `drivers/` | 新規票なし | 9801 / PEGC / Cirrus の回帰のみ |
-| **PM / 検証** | Python / NP21/W | 本書 §5 | mouse 注入、自動ゲート、契約照合、ROADMAP 更新 |
+| **K** protocol | C / Rust, `sdk/include/os32/`, `sdk/rust/os32api/src/gui/` | [TASK_K5_v12_proto.md](TASK_K5_v12_proto.md) | op 65/66、Modal result、Session request、Quit reason。KAPI追加なし |
+| **W** WM | Rust, `userland/gshell/` | [TASK_W3_desktop_session.md](TASK_W3_desktop_session.md) | taskbar / Start / clock / launcher / session state machine / halt |
+| | | [TASK_W4_dialogs.md](TASK_W4_dialogs.md) | message / file-open / input dialog、completed result、sticky Modal |
+| **C** library | Rust, `userland/rust/libos32gui/` | [TASK_C4_desktop_api.md](TASK_C4_desktop_api.md) | modal/session API、Icon16、shlib entry 95〜100 |
+| **C** app | Rust, `userland/rust/filer/` | [TASK_C5_filer.md](TASK_C5_filer.md) | File Manager |
+| **H** HAL | C, `gfx/`, `drivers/` | 新規票なし | 9801 / PEGC / Cirrus regression のみ |
+| **PM / 検証** | Python / NP21/W | 本書 §5 | 既存 `/api/mouse` を使う自動 gate、契約照合、ROADMAP 更新 |
 
 ### レーン原則
 
-- H レーンは原則変更禁止。回帰で実装バグが見つかった場合のみ bug ticket を別に切る。
-- KAPI v42 は変更しない。
-- GUI プロトコル番号、イベント、共有ライブラリジャンプ表は既存値を変更せず末尾追記のみ。
-- AppVTable の既存フィールド配置は変更しない。
+- H lane は原則変更禁止。regression で backend bug が見つかった時だけ bug ticket を別に切る。
+- `sdk/kapi.json` は v1.2 では変更しない。
+- GUI op/event/struct、shlib jump table は末尾追記のみ。
+- AppVTable の既存 field 配置は変更しない。
+- popup Window ABI は v1.2 では作らない。
 
 ---
 
 ## 2. 依存と順序
 
 ```text
-             ┌── K5 ──┬── W4 ──┐
-G0 契約凍結 ─┤        │        ├── C4 ──► C5 ──┐
-             │        └────────┘               │
-             └──────── W3 ──────────────────────┼──► G4 / G5
-                                               │
-mouse injection / test harness ────────────────┘
+                  ┌────────► W3 ────────────────┐
+G0 contract ─► K5 ┤                              ├──► G4 / G5
+                  ├────────► W4 ──┐             │
+                  └────────► C4 ──┼──► C5 ──────┘
+                                  │
+existing /api/mouse + gates ──────┘
 ```
 
 ### 並列開始可能
 
-- K5
+K5 が protocol 数値を commit した後、次の 3 本を並列化できる。
+
 - W3
-- PM mouse injection
-
-### K5 完了後
-
 - W4
 - C4
 
+C4 は W4 implementation 完了を待たず wrapper を作れるが、結合 gate G2 は W4 後。
+
 ### C5 開始条件
 
-C5 は C4 / W4 の公開 API が固まってから開始する。
+- C4 の公開 API / shlib entry が固定済み。
+- W3 `SESSION_REQUEST` が動作。
+- W4 modal result が動作。
 
 ---
 
@@ -75,232 +77,148 @@ C5 は C4 / W4 の公開 API が固まってから開始する。
 
 | 所有 | ファイル |
 |---|---|
-| K | `sdk/include/os32/os32_gui_shared.h`、対応する Rust proto 定義 |
-| W | `userland/gshell/**` |
+| K5 | `sdk/include/os32/os32_gui_shared.h`、`sdk/rust/os32api/src/gui/proto.rs` |
+| W3/W4 | `userland/gshell/**`。W3/W4 間の同一 file は PM が順序を決める |
 | C4 | `userland/rust/libos32gui/**`、`sdk/rust/os32api/src/gui/stub.rs` |
 | C5 | `userland/rust/filer/**` |
 | PM | `docs/tasks/gui/v12/**`、`tools/**`、`docs/ROADMAP.md` |
-| H | `gfx/**`、`drivers/**` — 原則 freeze |
+| H | `gfx/**`、`drivers/**` — freeze |
 
-共有ライブラリのジャンプ表は C4 のみが変更する。
+共有 library jump table は C4 だけが変更する。
 
-既存 entry 0〜94 は変更禁止。新規 API は 95 以降へ追記する。
+既存 entry 0〜94 は変更禁止。v1.2 公開 entry は 95〜100。
 
----
+`tools/check_gui_proto.py` は PM 所有。K5 の定数追加に合わせて PM が照合項目を更新する。
 
-## 4. 各票のゴール
-
-### K5 — v1.2 protocol completion
-
-追加するもの:
-
-- `GUI_OP_MODAL_RESULT = 65`
-- `GUI_MODAL_INPUT = 4`
-- `GuiReqModalResult`
-- `GuiRespModalResult`
-- `GUI_QUIT_REASON_*`
-
-既存値は一切変更しない。
-
-`GUI_PROTO_VERSION = 1` を維持する。
-
-KAPI v42 を維持する。
-
-#### 完了条件
-
-- `check_gui_proto.py` が通る。
-- C / Rust 定義が一致する。
-- v1.1 クライアントが無変更でビルドできる。
-- 既存の `GUI_OP_MODAL_OPEN = 64` と既存イベント番号が不変。
+共有 build/deploy file (`build/programs.mk`, `userland/deploy.yaml`) は PM 経由。
 
 ---
+
+## 4. 各票の要約
+
+### K5 — protocol completion
+
+固定:
+
+```text
+GUI_OP_MODAL_RESULT      = 65
+GUI_OP_SESSION_REQUEST   = 66
+GUI_MODAL_INPUT          = 4
+GUI_SESSION_LAUNCH       = 1
+GUI_SESSION_SWITCH_CUI   = 2
+GUI_SESSION_SHUTDOWN     = 3
+GUI_QUIT_REASON_REPLACE_APP = 1
+GUI_QUIT_REASON_SWITCH_CUI  = 2
+GUI_QUIT_REASON_SHUTDOWN    = 3
+```
+
+加える struct:
+
+- `GuiReqModalResult` 4B
+- `GuiRespModalResult` 260B
+- `GuiReqSession` 260B
+
+`GUI_PROTO_VERSION=1` / KAPI v42 を維持。
+
+詳細: [TASK_K5_v12_proto.md](TASK_K5_v12_proto.md)
 
 ### W3 — desktop / session
 
-新規モジュール候補:
+- taskbar 24px
+- Start / Programs(max 96) / File Manager / Run / CUI / Shut Down
+- work area
+- clock dirty rect
+- SessionAction 1 件
+- external app から session request
+- sticky Quit
+- nested `exec_run()` 禁止
+- CUI cfg 更新失敗時の rollback
+- `for (;;) sys_halt()` の terminal halt
+
+詳細: [TASK_W3_desktop_session.md](TASK_W3_desktop_session.md)
+
+### W4 — dialogs
+
+- completed modal result / slot
+- result 未 consume 中の next modal = `ERR_FULL`
+- wrong/double consume = `ERR_STALE`
+- Modal event sticky delivery
+- File Open path result
+- Input dialog + FEP
+- owner cleanup
+
+詳細: [TASK_W4_dialogs.md](TASK_W4_dialogs.md)
+
+### C4 — client API
+
+shlib:
 
 ```text
-desktop.rs     既存: 背景 + taskbar
-startmenu.rs   Start メニュー
-session.rs     pending launch / CUI / shutdown
+95  modal_open
+96  modal_result
+97  file_open
+98  input_open
+99  session_request
+100 draw_icon16
 ```
 
-#### 作業
+`SHLIB_NFUNC=101`。
 
-1. taskbar 24 px
-2. Start button
-3. window buttons
-4. clock
-5. work-area
-6. Start menu
-7. `/usr/bin/*.bin` program list
-8. pending launch
-9. replace-current-app state machine
-10. CUI switch
-11. shutdown
-12. desktop context menu
+AppVTable は変更しない。File/Input は非同期。
 
-#### 必須設計条件
+Icon16 は 160B (`4bpp pixels 128B + 1bpp mask 32B`)。
 
-アプリ実行中に WM の `gui_call` / X3 / X4 から `exec_run()` してはならない。
-
-launch / CUI / shutdown はすべて pending 化し、現在の `exec_run()` が戻ってからトップレベルで実行する。
-
-X4 では入力と session action の予約までに留める。
-
-Start メニューの `/usr/bin` 列挙は X3 またはトップレベルで行い、毎フレーム実行しない。
-
-#### 完了条件
-
-- taskbar がアプリ Window 上限 16 と SHM スロット 4 本を消費しない。
-- 640×400 / 640×480 の両方で作業領域が正しい。
-- clock 更新で全画面 present しない。
-- Start から現在アプリとは別のアプリを選んでも nested `exec_run()` が発生しない。
-
----
-
-### W4 — standard dialogs
-
-#### 作業
-
-1. MessageBox
-2. File Open
-3. Input
-4. completed result / slot
-5. `MODAL_RESULT`
-6. owner cleanup
-7. overflow 時にも path / text を失わない
-8. ESC / Cancel
-9. dialog 下地の damage 復元
-10. Input dialog で FEP を使用可能にする
-
-#### 完了条件
-
-- 親ループを入れ子にしない。
-- File Open で 255 B までのフルパスが返る。
-- Input で UTF-8 文字列が返る。
-- FEP 入力が Input dialog でも動く。
-- owner kill 後に modal state / completed result が残らない。
-- イベントリング overflow が起きても completed result 自体は失われない。
-
----
-
-### C4 — desktop client API
-
-追加候補:
-
-- `modal_open`
-- `modal_result`
-- `open_file_dialog`
-- `input_dialog`
-- `draw_icon16`
-- client-side menu helper
-
-共有ライブラリジャンプ表へ末尾追記する。
-
-既存 95 本の番号は完全固定する。
-
-#### 互換条件
-
-新しいアプリ + 古い shlib:
-
-- `nfunc too short` で拒否する。
-
-古いアプリ + 新しい shlib:
-
-- 正常起動する。
-
-版不一致試験は v1.1 で未実走だったため、この票で必ず実機実行する。
-
-#### 完了条件
-
-- `make check-shlib`
-- jump table 旧 0〜94 不変
-- 新 API は 95 以降
-- 古い `gui_demo` が新 shlib で起動
-- 新テストアプリが旧 shlib を安全に拒否
-
----
+詳細: [TASK_C4_desktop_api.md](TASK_C4_desktop_api.md)
 
 ### C5 — File Manager
 
-新規アプリ:
+- 2 pane
+- lazy directory tree
+- navigate / mkdir / rename / delete / rmdir
+- file copy / same-FS move
+- `.bin` launch は `SESSION_REQUEST`、直接 exec 禁止
+- right-click menu は client surface overlay
+- large copy は最大 16KB / event-loop cycle 程度に分割
 
-```text
-/usr/bin/filer.bin
-```
+KAPI v42 の既存 `sys_ls/stat/mkdir/rename/unlink/rmdir/open/read/write/close` だけを使う。
 
-画面イメージ:
-
-```text
-┌──────────────────────────────────────────────┐
-│ File Manager                                 │
-├────────────────┬─────────────────────────────┤
-│ [-] /          │ name        size   type     │
-│   [-] usr      │ gui_demo    ...    BIN      │
-│     bin        │ ...                         │
-│   etc          │                             │
-│   sys          │                             │
-├────────────────┴─────────────────────────────┤
-│ /usr/bin                                     │
-└──────────────────────────────────────────────┘
-```
-
-#### 必須
-
-- navigate
-- launch
-- mkdir
-- rename
-- delete
-- rmdir
-- copy
-- move
-- context menu
-- confirmation dialog
-
-v1.2 では TreeView ABI を増やさず、既存 listbox を使う。
-
-`.bin` 起動は W3 の pending launch / replace-current-app 経路を使う。ファイラー自身のイベント処理中に別アプリを nested exec しない。
-
-#### 対象外
-
-- drag & drop
-- recursive directory copy
-- thumbnail
+詳細: [TASK_C5_filer.md](TASK_C5_filer.md)
 
 ---
 
 ## 5. 検証層
 
-v1.2 では**マウス操作の自動化を必須前提**にする。
+v1.1 完了後に NP21/W ai-debug の **`/api/mouse` は実装済み**。v1.2 では新設作業ではなく、この API を gate automation に利用する。
 
-v1.1 で残った「NP21/W ai-debug にマウス注入 API がなく、ドラッグ / 重なりを自動確認できない」をここで解消する。
+最低操作:
 
-最低 API:
-
-```text
-/api/mouse?x=...&y=...
-/api/mouse?buttons=...
-```
-
-必要操作:
-
-- move
+- absolute move
 - left down / up
 - right down / up
 
-相対移動は不要。
+併用:
 
-これを `os32-cycle` / GUI ゲートから使用する。
+- `/api/key`
+- `/api/screenshot`
+- `/api/status`
 
-PM / 検証層は併せて以下を維持する。
+PM / 検証層は以下を維持・拡張する。
 
-- `check_gui_proto.py`
+- `tools/check_gui_proto.py`
 - `make check-shlib`
 - `make check`
+- GitHub Actions static gate
 - `make external` が必要な SDK / shlib 更新の検出
-- 9801 / PEGC / Cirrus 3 バックエンドの回帰
+- 9801 / PEGC / Cirrus 3 backend regression
+
+### 自動化で必ず mouse を使う項目
+
+- Start button
+- taskbar window button
+- right-click context menu
+- dialog button
+- File Manager selection
+- v1.1 drag/overlap regression
 
 ---
 
@@ -308,97 +226,131 @@ PM / 検証層は併せて以下を維持する。
 
 | Gate | 名前 | 通過条件 |
 |---|---|---|
-| **G0** | v1.2 契約凍結 | `CONTRACTS.md` 確定、KAPI v42 維持、GUI ABI 末尾追記確認 |
-| **G1** | Desktop | taskbar / Start / clock / window focus をマウスで自動操作 |
-| **G2** | Dialog | message / file / input、path / text 返却、FEP、overflow / owner cleanup |
-| **G3** | Filer | navigate / mkdir / rename / delete / copy / launch |
-| **G4** | Session | app→別 app、app→CUI、shutdown、CTRL+STOP 後の pending action |
-| **G5** | Release | pc98 / PEGC / Cirrus + v1.1 G1〜G5 + shlib mismatch + `make check` |
+| **G0** | v1.2 contract freeze | K5 値 / size / offset 固定、KAPI v42、v43不使用、個別5票存在 |
+| **G1** | Desktop | taskbar / Start / clock / focus / Programs を `/api/mouse` で自動操作。clock partial present |
+| **G2** | Dialog/API | message/file/input、path/text返却、FEP、sticky Modal、ERR_FULL/STALE、old/new shlib組合せ |
+| **G3** | Filer | navigate / mkdir / rename / copy / move / delete / context menu / error path |
+| **G4** | Session | app→別app、app→CUI、halt、CTRL+STOP後 pending action、nested exec なし |
+| **G5** | Release | pc98 / PEGC / Cirrus + v1.1 G1〜G5 regression + shlib mismatch + `make check` |
 
 ---
 
-## 7. G4 セッション試験の具体例
+## 7. 主要シナリオ
 
-### 7.1 アプリ置換
+### 7.1 app replacement
 
-1. `gui_demo` 起動
-2. Start → Programs → File Manager
-3. `gui_demo` へ `Quit(REPLACE_APP)`
-4. `gui_demo` 終了
-5. gshell の既存 `exec_run()` が戻る
-6. `filer` 起動
+1. `gui_demo` 起動。
+2. Start -> Programs -> File Manager。
+3. SessionAction `LAUNCH(/usr/bin/filer.bin)`。
+4. `gui_demo` へ sticky `Quit(REPLACE_APP)`。
+5. gui_demo 終了。
+6. 既存 `exec_run()` が gshell top-level へ戻る。
+7. filer 起動。
 
-**WM ハンドラ内の nested exec が 1 回も発生しないこと。**
+**WM handler / X3 / X4 内の nested `exec_run()` は 0 回。**
 
-### 7.2 CUI 切替
+### 7.2 CUI switch
 
-1. `filer` 起動中
-2. Start → CUI mode
-3. `filer` へ Quit
-4. `filer` 終了
-5. FEP render callback 解除
-6. `gfx_shutdown()`
-7. `/etc/system.cfg` を `GUI=0`
-8. `shell.bin` へ切替
-9. `ver` 応答
+1. filer 起動中。
+2. Start -> CUI mode。
+3. sticky Quit。
+4. filer 終了。
+5. cursor hide / FEP callback解除 / gfx shutdown。
+6. cfg `GUI=0` 更新成功。
+7. shell switch。
+8. `ver` 応答。
 
-### 7.3 Shutdown
+cfg 書込みを失敗注入した場合は shell switch せず GUI に残る。
 
-1. アプリ実行中
-2. Start → Shut Down
-3. Quit 配送
-4. アプリ終了
-5. FEP render callback 解除
-6. `gfx_shutdown()`
-7. `sys_halt()`
+### 7.3 System halt
 
-### 7.4 応答しないアプリ
+1. app 起動中。
+2. Start -> Shut Down。
+3. sticky Quit。
+4. app 終了。
+5. GFX/FEP cleanup。
+6. halt screen。
+7. `for (;;) sys_halt()`。
 
-1. `gui_busy`
-2. session action を予約
-3. アプリが Quit に応答しない場合 CTRL+STOP
-4. app 回収
-5. pending session action を続行
-6. gshell / kernel が生存
+タイマ IRQ 等が入っても desktop へ復帰しない。
+
+### 7.4 Unresponsive app
+
+1. `gui_busy`。
+2. SessionAction を予約できる文脈で予約。
+3. Quit を無視 / loop 継続。
+4. CTRL+STOP。
+5. owner 回収。
+6. pending SessionAction 続行。
+7. gshell / kernel 生存。
+
+### 7.5 Modal overflow
+
+1. event ring を人工的に満杯近くまで埋める。
+2. File/Input dialog 完了。
+3. completed result 保存。
+4. Modal event は pending。
+5. app が poll して空き生成。
+6. Modal event 再配送。
+7. `MODAL_RESULT` で value 取得。
+
+### 7.6 Large file copy
+
+1. 十分大きい file を copy。
+2. 1 cycle 最大 16KB 程度。
+3. copy 中も cursor / clock / event loop が進む。
+4. Quit を受けたら copy state/fd を閉じて exit 可能。
 
 ---
 
 ## 8. v1.2 でやらないもの
-
-次は v1.3 以降とする。
 
 - GUI terminal
 - CUI output redirect
 - multi-process GUI
 - popup-window ABI
 - drag & drop
-- recursive directory copy
+- recursive directory copy/delete
+- cross-FS move
 - thumbnail
 - arbitrary icon formats
 - new GFX backend
-- higher resolution support
+- >640x480
+- command-line args / PATH search in Run
+- true power-off
 
 ---
 
 ## 9. 完了定義
 
-v1.2 完成とは、次の一連の操作を **CUI コマンド入力なし**で完走できること。
+v1.2 完成とは、CUI command 入力なしで:
 
 ```text
-OS 起動
-  → GUI
-  → Start メニュー
-  → File Manager
-  → ファイル操作
-  → GUI アプリ起動
-  → 別アプリへ切替
-  → CUI へ戻る / shutdown
+OS boot
+ -> GUI
+ -> Start
+ -> File Manager
+ -> file operations
+ -> GUI app launch
+ -> another app launch
+ -> CUI switch / system halt
 ```
 
-かつ同じ手順が以下の 3 バックエンドで成立すること。
+を完走できること。
 
-- PC-9801 planar 640×400
-- PEGC 640×480
-- Cirrus 640×480
+同じ flow が:
 
-さらに v1.1 G1〜G5 の既存回帰、Ring3 表示面隔離、PC98 fallback BB、共有ライブラリ保護を維持すること。
+- PC-9801 planar 640x400
+- PEGC 640x480
+- Cirrus 640x480
+
+で成立し、v1.1 regression がないこと。
+
+---
+
+## 10. 進捗記録
+
+| 日付 | 記録 |
+|---|---|
+| 2026-09-06 | v1.2 設計採用。`CONTRACTS.md` / `TASKS.md` 初版を発行 |
+| 2026-09-06 | 設計再点検を反映: app→gshell の `SESSION_REQUEST`、shutdown の非復帰 halt、sticky Quit/Modal、modal consume 規則、KAPI v42 freeze / v43 network予約、既存 `/api/mouse` 前提、個別 K5/W3/W4/C4/C5 票を追加 |
