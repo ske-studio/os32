@@ -94,8 +94,14 @@ void mouse_poll(MouseState *state)
 
     } else if (mouse_mode_current == MOUSE_MODE_SEAMLESS) {
         i16 abs_x, abs_y;
-        /* シームレス: 絶対座標取得 */
+        /* シームレス: 絶対座標取得。seamless_mouse_poll は 0..32767 の正規化値
+         * (NP21/W の 0..65535 を半分に畳んだもの) を返すので、現在の移動範囲に
+         * 比例配分する。決め打ちの 639/399 だと 480 ラインで下端に届かない。 */
         if (seamless_mouse_poll(&abs_x, &abs_y)) {
+            abs_x = (i16)(bound_x_min +
+                          (long)abs_x * (long)(bound_x_max - bound_x_min) / 32767L);
+            abs_y = (i16)(bound_y_min +
+                          (long)abs_y * (long)(bound_y_max - bound_y_min) / 32767L);
             if (prev_abs_valid) {
                 dx = abs_x - prev_abs_x;
                 dy = abs_y - prev_abs_y;
