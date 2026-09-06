@@ -69,6 +69,22 @@ File Manager は `/usr/bin/filer.bin` を起動要求する。
 
 Run... は W4 の Input dialog を使い、絶対パスを入力して `LAUNCH` する。v1.2 では引数列や PATH 検索は対象外。
 
+CUI mode / Shut Down は **WM 内蔵の確認ダイアログ (Yes / No) を経てから** SessionAction を立てる
+(契約 S6)。1 キーで無言のまま CUI へ落ちる経路は作らない。
+
+### 4.1 デバッグ用の残置と撤去
+
+v1.1 の ESC 即時切替と上部バー (`OS32 GUI shell ESC:CUI F1..F5`) は開発中のデバッグ用として残し、
+**G5 (v1.2 完成) で撤去する** (ユーザー決定 2026-09-06)。撤去後、CUI へ戻る経路は Start → 確認 →
+SessionAction だけになる。F1〜F5 のランチャは Start → Programs / Run... で置き換わる。
+
+### 4.2 右ボタン
+
+v1.1 の `input.rs` は左ボタンのエッジしか扱わない。右ボタンの down/up エッジを取り込み、
+`wm_owns_edge` と同じ領分判定で、デスクトップ / taskbar 上は WM の context menu、前面窓の
+クライアント上はアプリへ `Button{button=2}` として配送する。X4 で WM の領分のエッジを
+消費しない規則 (POLICY_DEBUG §4-22) は右ボタンにも適用する。
+
 ## 5. SessionAction
 
 1 件だけ保持する。
@@ -185,7 +201,9 @@ X4 で禁止:
 
 ## 完了条件 (G1 / G4)
 
-- `/api/mouse` で Start を開閉できる。
+- `/api/mouse` で Start を開閉できる。右クリックでデスクトップ menu が出る。
+- CUI mode / Shut Down は確認ダイアログの Yes を経ないと実行されない。
+- (G5 で) ESC 即時切替と上部バーが撤去され、`/api/key` の ESC で CUI へ落ちない。
 - taskbar window button で 2 窓の focus/raise が切替わる。
 - 9801 400-line / PEGC,Cirrus 480-line で work area が正しい。
 - clock 更新の present は時計矩形だけ。

@@ -211,6 +211,16 @@ PM / 検証層は以下を維持・拡張する。
 - `make external` が必要な SDK / shlib 更新の検出
 - 9801 / PEGC / Cirrus 3 backend regression
 
+### PM の成果物 (票なし、ここがチェックリスト)
+
+| 成果物 | 時期 | 内容 |
+|---|---|---|
+| `tools/check_gui_proto.py` | **G0 の前** (v1.1 で未作成だった) | `os32_gui_shared.h` ⇄ `proto.rs` の定数 (op / event / modal / session / quit reason / flags / 上限) と構造体の大きさ・フィールド並びを照合。`make check` と GitHub Actions に載せる |
+| `tools/gui_gate.py` | G1 まで | `/api/mouse` (`ax/ay` = シームレス絶対座標) + `/api/key` + `/api/screenshot` + `/api/status` で G1〜G5 の操作列を回す。v1.1 のドラッグ / 重なり回帰も含む |
+| 配備登録 | C5 / C4 のテストアプリ着手時 | `build/programs.mk` (`DEFINE_RUST_PROGRAM`)、`userland/deploy.yaml`、`build/app.conf` |
+| 契約照合 | K5 完了時 | C / Rust の値・size・offset、KAPI v42 / 180 関数のまま |
+| ROADMAP / TASKS §10 | ゲート通過ごと | 記録 |
+
 ### 自動化で必ず mouse を使う項目
 
 - Start button
@@ -355,3 +365,4 @@ OS boot
 | 2026-09-06 | v1.2 設計採用。`CONTRACTS.md` / `TASKS.md` 初版を発行 |
 | 2026-09-06 | 設計再点検を反映: app→gshell の `SESSION_REQUEST`、shutdown の非復帰 halt、sticky Quit/Modal、modal consume 規則、KAPI v42 freeze / v43 network予約、既存 `/api/mouse` 前提、個別 K5/W3/W4/C4/C5 票を追加 |
 | 2026-09-06 | **PM 点検 (実装前、コードと突き合わせ)**。**一致を確認**: op 64 / 80、EV_MODAL 11 / EV_QUIT 12、modal kind 0〜3、`GuiString` 256B、`GuiReqModal` 260B (→ `GuiRespModalResult` / `GuiReqSession` 260B は整合)、shlib entry 95 本 (0〜94)、KAPI v42 に `sys_time` (`os_time_t`) / `sys_ls`〜`sys_close` / `sys_halt` / `sys_switch_shell` / `exec_run` あり、`OS32_ERR_FULL` -13 / `STALE` -11 あり、libos32gui の U3 ループは `GUI_EV_QUIT` で戻る (v1.1 アプリも Quit で終了できる)。**ずれ・不足**: (1) `OS32_ERR_AGAIN` は無い → C4 の modal_result は「event 到着後だけ呼ぶ API」で確定 (未完成 query は公開しない)。(2) **`tools/check_gui_proto.py` は v1.1 で未作成** (`make check` にも無い) → G0 の前に PM が作る (C ⇄ Rust の定数 / size / offset 照合、CI にも載せる)。(3) **gshell は右ボタンを一切扱っていない** (`input.rs` は左のエッジのみ) → W3 に「右ボタンのエッジ取り込み + `wm_owns_edge` の扱い + Button イベント配送」を明記する (D4 / F5 の前提)。(4) gshell は今 `GUI_EV_QUIT` を送っていない → W3 の sticky Quit は新設 (既存経路なし)。(5) 現行の ESC (「CUI へ」) は cfg を書かない即時切替。S6 の SWITCH_CUI は `GUI=0` を永続化する → **ESC を SessionAction 経由にするか (永続化)、開発用の一時切替として残すかは要決定**。(6) 現行の上部バー (`ESC:CUI F1..F5`) と v1.2 の下部 taskbar の関係が未記載 → v1.2 で撤去 / デバッグ用に残すを W3 に書く。(7) `OS32ShlibHeader.version` は 1 のまま (nfunc で拒否) と明記する。(8) Programs は `/usr/bin` の全 `.bin` (テスト用も含む ~40 本) を並べる → v1.2 はそれでよいが、将来のフィルタ (manifest / 拡張子以外の印) を対象外として記す。(9) PM 側の成果物 (`check_gui_proto.py`、`/api/mouse` を使う gate スクリプト、filer / v12_api_test の deploy 登録) に票が無い → 本書 §5 に PM チェックリストとして列挙する。(10) `make external` は apps/game が libos32gui を使わない限り不要 (SDK の libos32gfx を変えたときだけ) と §9 に注記。実装はユーザー指示待ち |
+| 2026-09-06 | **ユーザー決定**: ESC 即時切替は完成後 (G5) に廃止。CUI へ戻るのは Start → 確認ダイアログ → SessionAction の 1 本だけ (無言の 1 キーで CUI に落ちると GUI の状態が失われて危険)。開発中はデバッグ用に残す。上部バーも同じ扱い。**着手前の提案はすべて承認** → 反映: CONTRACTS S6 / D2 / D4 / V12-C / §8 / §9、W3 §4.1〜4.2 (デバッグ残置と撤去、右ボタン)、C4 (AGAIN 無し、shlib version 1)、本書 §5 の PM チェックリスト。**`tools/check_gui_proto.py` を作成** (定数 96 件 / 構造体 28 件、packed と union 対応、C 側に `GUI_SLOT_MAX` を追加して Rust と揃えた)、`make check-gui-proto` と GitHub Actions に組み込み。G0 の前提が揃った。実装 (K5 →) は次の指示で開始 |

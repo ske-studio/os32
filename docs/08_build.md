@@ -66,12 +66,13 @@ GUI アプリ      → libos32gui_stub (ジャンプ表への薄いスタブ) �
 
 日常のターゲット (`make all` に含まれる): `kernel` `programs` `libs` `gshell` `shlib` `external`
 (`apps` + `game`)。検査: `make check` (= `check-kapi-version` `check-manifests` `check-constraints`
-`check-privileged` `check-ne2000-ring` `check-shlib`)。`emu_agent` (ローカル AI) の `make` は
+`check-privileged` `check-ne2000-ring` `check-shlib` `check-gui-proto`)。`emu_agent` (ローカル AI) の `make` は
 許可リスト (`tools/emu_agent/agent.py` の `MAKE_TARGETS`) に載ったターゲットしか実行しない。
 
 **GitHub Actions** (`.github/workflows/check.yml`、2026-09-06): push / PR で、クロスツールチェーン無しで
 回せる検査だけを自動ゲートにする — KAPI 版番号の一致、`sdk/kapi.json` からの生成物がコミット済みと
-一致すること ([ABI1])、CONSTRAINTS ⇄ CLAUDE.md、`mkshlib --check`、ne2000 リングのホストテスト。
+一致すること ([ABI1])、CONSTRAINTS ⇄ CLAUDE.md、`mkshlib --check`、GUI プロトコルの C ⇄ Rust 照合
+(`check_gui_proto.py`)、ne2000 リングのホストテスト。
 `check-manifests` は `make all` の成果物を見るので対象外 (WSL 側の `make check` で回す)。
 
 インクルードパスは `Makefile` で細かく制御されており、基本的にソースファイルから他のヘッダディレクトリは `-I` によって自動解決できるため `#include "file.h"` で問題なく参照可能。

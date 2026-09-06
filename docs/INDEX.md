@@ -17,6 +17,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | CLAUDE.md (AI 入口の写し。両方直す) |
 | KAPI 版番号・エラー番号の予約 (未実装の先取り調停) | [KAPI_SPEC.md §3-2](KAPI_SPEC.md) | 各計画 (GUI TASK_K1、network LINK_PLAN) は参照 |
 | エラーコード | `os32_kapi_shared.h` の `OS32_ERR_*` | 各 FS は境界で翻訳 |
+| GUI 共有プロトコル (op / イベント / 構造体 / SHM 配置) | `sdk/include/os32/os32_gui_shared.h` (C が正典) → [tasks/gui/API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) (契約) | `sdk/rust/os32api/src/gui/proto.rs` は写し (`tools/check_gui_proto.py` = `make check-gui-proto` が照合)、[tasks/gui/PROTO_LAYOUT.md](tasks/gui/PROTO_LAYOUT.md) |
 | ビルドターゲット・ツール | [08_build.md](08_build.md) | CLAUDE.md「Build Commands」(日常分のみ) |
 | 配備 3 経路の使い分け | CLAUDE.md「Deploy Workflow」 | [POLICY_DEV.md §4](POLICY_DEV.md) (表のみ)、[08 §8-4](08_build.md) (ツール) |
 | ディレクトリ木 | [08_build.md §8-3](08_build.md) | CLAUDE.md / INDEX は参照のみ |

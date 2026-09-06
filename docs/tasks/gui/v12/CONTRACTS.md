@@ -116,6 +116,14 @@ Quit は control event なのでリング満杯で捨てない。WM は slot/own
 
 ### S6. SWITCH_CUI
 
+**CUI へ戻る経路は Start → CUI mode → 確認ダイアログ → SessionAction の 1 本だけ** (2026-09-06 決定)。
+確認は WM 内蔵の MessageBox (Yes / No、「CUI モードへ切り替えます。GUI の状態は保持されません」)
+で、Yes で初めて `SWITCH_CUI` を立てる。1 キーで無言のまま CUI へ落ちる経路は作らない —
+CUI へ戻ると GUI の状態 (窓・アプリ) は設計上維持されないので危険。
+
+v1.1 の **ESC 即時切替と上部の `ESC:CUI F1..F5` バーはデバッグ用として v1.2 の開発中だけ残し、
+v1.2 完成時 (G5) に撤去する** (W3 の完了条件)。SHUTDOWN も同じく確認ダイアログを経る。
+
 SessionAction 実行は current app が終了して top-level へ戻ってから。
 
 1. cursor hide。
@@ -194,6 +202,8 @@ Win95 風の WM 内部 menu。
 - Shut Down
 
 Programs は `/usr/bin` の `.bin` を列挙し、v1.2 は最大 96 件。超過分は省略表示でよい。
+テスト用バイナリ (`ring3_guard` 等、~40 本) も並ぶが v1.2 はそれでよい。manifest やアイコンによる
+フィルタは対象外 (§8)。
 
 Directory scan は menu open 時の X3 で 1 回だけ行い、open 中は cache。毎 frame / X4 では走査しない。
 
@@ -208,6 +218,10 @@ Directory scan は menu open 時の X3 で 1 回だけ行い、open 中は cache
 ### D4. WM context menu
 
 Desktop の right-click menu は WM internal overlay とする。最低 File Manager / Run... / Refresh Programs。
+
+**右ボタンは v1.1 の gshell では一切扱っていない** (`input.rs` は左のエッジだけ)。W3 が右ボタンの
+エッジ取り込み (`wm_owns_edge` と同じ領分判定) を足し、デスクトップ上は WM の menu、前面窓の
+クライアント上はアプリへ `Button{button=2}` として配送する (F5 のクライアント overlay menu の前提)。
 
 ---
 
@@ -289,7 +303,11 @@ KAPI v42 / `GUI_PROTO_VERSION=1` / AppVTable 既存 layout を維持する。
 100 os32gui_draw_icon16
 ```
 
-`SHLIB_NFUNC = 101`。
+`SHLIB_NFUNC = 101`。`OS32ShlibHeader.version` は **1 のまま** (末尾追記なので版は上げない。
+新アプリ → 旧 shlib は `nfunc` 不足で bind 拒否する)。
+
+`modal_result` は **event 到着後だけ呼ぶ API** とする。`OS32_ERR_AGAIN` は存在しないので、
+未完成状態を問い合わせる口は公開しない (C4)。
 
 互換条件:
 
@@ -407,6 +425,7 @@ popup Window ABI は作らず、owner window client surface 内の overlay と�
 - new GFX backend
 - 640x480 超の解像度
 - Start/Run の command-line argument / PATH search
+- Programs の manifest / アイコン / 種別によるフィルタ
 - true power-off control
 
 ---
@@ -415,7 +434,8 @@ popup Window ABI は作らず、owner window client surface 内の overlay と�
 
 - KAPI は v42 のままなので kernel/API 全体の version bump はしない。
 - GUI wire protocol は version 1 のまま、op を末尾追記。
-- shlib jump table を増やしたら `make clean && make all` と `make external` の要否を確認する。
+- shlib jump table を増やしたら `make clean && make all`。`make external` は apps / game が
+  libos32gui を使わない限り不要 (SDK の libos32gfx を変えたときだけ要る。CLAUDE.md の規則)。
 - v1.2 の gshell / shlib / v1.2 app は同一 image として配備する。
 - old app compatibility は維持する。
 - `make check-shlib` / `check_gui_proto.py` で stale を gate する。

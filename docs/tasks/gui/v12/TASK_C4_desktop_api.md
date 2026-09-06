@@ -23,7 +23,7 @@ KAPI v42 と AppVTable の既存配置は変更しない。
 100 os32gui_draw_icon16
 ```
 
-`SHLIB_NFUNC = 101`。
+`SHLIB_NFUNC = 101`。`OS32ShlibHeader.version` は 1 のまま (末尾追記)。
 
 この票では general-purpose popup menu ABI は作らない。File Manager の右クリック menu は C5 が既存 drawing/input 上に client-area overlay として実装する。v1.2 の「右クリックメニュー基盤」はこの実装パターンを成果物とし、popup Window / AppVTable 拡張を避ける。
 
@@ -48,7 +48,9 @@ modal_result(dialog, out_value) -> result / error
 `GUI_OP_MODAL_RESULT` を 1 回呼び、response の `GuiString` を caller buffer へコピーする。
 
 - `ERR_STALE`: wrong id / already consumed
-- `ERR_FULL`: result 未完成、ではなく protocol misuse 用には使わない。未完成状態で呼んだ場合は `ERR_STALE` ではなく `OS32_ERR_AGAIN` が既存ならそれを使う。既存に無ければ C4 は event 到着後だけ呼ぶ API とし、未完成 query を公開しない。
+- `OS32_ERR_AGAIN` は存在しない (確認済み 2026-09-06)。よって `modal_result` は **`on_modal` の
+  event 到着後だけ呼ぶ API** とし、未完成状態を問い合わせる口は公開しない。未完成で呼ばれた場合
+  WM は保持中 ID と一致しないので `ERR_STALE` が返る (これを「未完成」の合図として使わない)。
 
 クライアントの通常作法は `on_modal(dialog,result)` を受けてから `modal_result(dialog, ...)`。
 

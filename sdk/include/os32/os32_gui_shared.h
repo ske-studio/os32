@@ -359,6 +359,7 @@ typedef struct { u32 window; GuiRect16 rect; } GuiReqInvalidate;    /* INVALIDAT
  * 正典は include/memmap.h (MEM_SHM_GUI_BASE / GUI_SLOT_SIZE)。C のアプリが自前定義しなくて
  * 済むよう写しを置く (K2 の申し送り、2026-09-06)。カーネル側は memmap.h が先に定義する。 */
 #define GUI_SHM_OFFSET  0x30000UL   /* MEM_SHM_BASE からのオフセット (ブロック 12、+192KB) */
+#define GUI_SLOT_MAX     4        /* スロット 0〜3 (契約 T2: 4 本)。Rust 側 proto.rs と同値 */
 #ifndef GUI_SLOT_SIZE
 #define GUI_SLOT_SIZE   0x4000UL    /* 16KB = 1 スロット */
 #endif
