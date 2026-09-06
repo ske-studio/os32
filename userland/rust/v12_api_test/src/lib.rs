@@ -28,7 +28,9 @@
 extern crate libos32gui;
 extern crate os32api;
 
-use libos32gui::gapi::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_MODAL_OK};
+use libos32gui::gapi::proto::{
+    GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_MAX_TIMERS, GUI_MODAL_OK, GUI_OP_POLL,
+};
 use libos32gui::gapi::types::{Rect, Style};
 use libos32gui::icon::{draw_icon16, GuiIcon16};
 use libos32gui::widget::{self, WidgetId, SCAN_ESC};
@@ -39,8 +41,10 @@ use os32api::KernelAPI;
 /// 起動要求で差し替える相手 (v1.2 の LAUNCH は絶対パスのみ)。
 const LAUNCH_PATH: &[u8] = b"/usr/bin/gui_demo.bin";
 
-/// キー 6 でポンプを止めておく長さ (tick = 10ms なので 600 tick = 6 秒)。
+/// キー 6 でループへ戻らない長さ (tick = 10ms なので 600 tick = 6 秒)。
 const RING_PAUSE_TICKS: u32 = 600;
+/// そのうち「生の `OP_POLL` でリングを埋める」時間 (2 秒)。残りは無通信で待つ。
+const RING_FILL_TICKS: u32 = 200;
 
 /// `modal_result` に渡す「絶対に存在しない」ダイアログ ID (ERR_STALE 期待)。
 const BOGUS_DIALOG: u16 = 9999;
@@ -99,6 +103,8 @@ struct Test {
     ovf_count: u32,
     /// `dropped` の累計。
     dropped_total: u32,
+    /// リングに溜まった最大件数 (128 = `GUI_RING_CAPACITY` なら満杯を作れた)。
+    ring_max: u16,
     /// `modal_result` の結果 (未着は `i32::MIN`)。
     ring_result: i32,
 }
@@ -179,6 +185,7 @@ impl Test {
             ring_active: false,
             ovf_count: 0,
             dropped_total: 0,
+            ring_max: 0,
             ring_result: i32::MIN,
         })
     }
@@ -294,23 +301,37 @@ impl Test {
         self.show_seq();
     }
 
-    /* ---- 6: リング満杯を跨いだ Modal の生存 (契約 V12-P / T3) ---- */
+    /* ---- 6: リング満杯を跨いだ Modal の生存 (契約 V12-P / M3) ---- */
     ///
-    /// モーダルを開いてから `after_commit` で 6 秒ポンプだけ回す (gui_call は 1 回も
-    /// しない)。その間に PM がマウスを振ってリングを溢れさせ、OK をクリックする。
-    /// 再開後の `OP_POLL` で `OVERFLOW` を受けても Modal イベントと結果は残る。
+    /// **アプリ自身でリングを満杯にする**。マウスや打鍵に頼ると溢れない —
+    /// WM は連続 Pointer を 1 件に畳み (`ring::append`)、モーダル表示中の打鍵は
+    /// ダイアログ宛で app のリングには積まないため (2026-09-06 実測 ovf=0)。
+    ///
+    /// 手順:
+    /// 1. 1 tick 反復のタイマを 8 本 (`GUI_MAX_TIMERS`) 張る。
+    /// 2. MessageBox を開く。
+    /// 3. `after_commit` で約 6 秒、**`ring_head` を進めずに生の `OP_POLL` だけ**
+    ///    を回す。WM は `OP_POLL` の中で期限切れタイマを追記する
+    ///    (`timer::fire_expired`) ので、リングは 128 件で満杯のまま張り付く。
+    /// 4. その間に PM が OK をクリックする。WM は満杯で `GUI_EV_MODAL` を積めず、
+    ///    **捨てずに pending として保持**して次の `OP_POLL` で再配送する (契約 M3)。
+    /// 5. 再開後に通常の `poll` がリングを空にし、次の周で Modal が届く。
+    ///    タイマは `on_modal` で落とす (それまでループを起こし続ける役も兼ねる)。
     fn do_ring(&mut self) {
         self.ring_active = true;
         self.ovf_count = 0;
         self.dropped_total = 0;
+        self.ring_max = 0;
         self.ring_result = i32::MIN;
-        match modal::modal_open(self.win_id(), GUI_MODAL_OK, b"ring-full: move mouse, click OK") {
+        self.arm_ring_timers();
+        match modal::modal_open(self.win_id(), GUI_MODAL_OK, b"ring-full test: click OK") {
             Ok(id) => {
                 self.pending[1] = id;
                 self.mode = MODE_RING;
                 self.ring_pause = true;
             }
             Err(e) => {
+                self.kill_ring_timers();
                 self.mode = MODE_PLAIN;
                 let mut buf = [0u8; 64];
                 let n = fmt2(&mut buf, b"6: open", short_err(e));
@@ -320,7 +341,31 @@ impl Test {
         self.show_ring();
     }
 
-    /// `6: r=<n> ovf=<n> dropped=<n>` を組み立てて `msg:` ラベルへ。
+    /// 1 tick 反復のタイマを上限本数まで張る (リングを埋める種)。
+    fn arm_ring_timers(&self) {
+        let w = self.win_id();
+        let mut id = 0u8;
+        while (id as usize) < GUI_MAX_TIMERS {
+            let _ = libos32gui::client::timer_set(w, id, 1, true);
+            id += 1;
+        }
+    }
+
+    fn kill_ring_timers(&self) {
+        let w = self.win_id();
+        let mut id = 0u8;
+        while (id as usize) < GUI_MAX_TIMERS {
+            let _ = libos32gui::client::timer_kill(w, id);
+            id += 1;
+        }
+    }
+
+    /// `6: r=<n> ring=<max> ovf=<n> dropped=<n>` を組み立てて `msg:` ラベルへ。
+    ///
+    /// `ring` は溜まった最大件数 (128 = `GUI_RING_CAPACITY` に張り付けば満杯を
+    /// 作れている)。`ovf` / `dropped` はカーネルの打鍵待ち行列が溢れた分しか
+    /// 増えない (WM は導出イベントを捨てず期限を進めないだけなので、外から
+    /// `/api/key` を連打しない限り 0 のままで正しい)。
     fn show_ring(&mut self) {
         let mut buf = [0u8; 64];
         let n = put(&mut buf, 0, b"6: r=");
@@ -329,6 +374,8 @@ impl Test {
         } else {
             put_num(&mut buf, n, self.ring_result)
         };
+        let n = put(&mut buf, n, b" ring=");
+        let n = put_num(&mut buf, n, self.ring_max as i32);
         let n = put(&mut buf, n, b" ovf=");
         let n = put_num(&mut buf, n, self.ovf_count as i32);
         let n = put(&mut buf, n, b" dropped=");
@@ -337,19 +384,43 @@ impl Test {
         self.repaint();
     }
 
-    /// 6 秒間 **gui_call を 1 回もせず** KAPI だけ叩いて待つ。
+    /// 約 6 秒、リングを満杯にしたまま張り付かせる。2 段構え。
     ///
-    /// KAPI 呼び出し (int 0x80) を続けるのは、syscall 境界のポンプ X4 を回して
-    /// WM に入力を取り込ませ続けるため (契約 T3 の「リング満杯」の条件)。
-    /// `OP_POLL` を呼ばないのでリングは溢れる。
-    fn ring_pause_now(&mut self) {
+    /// **第 1 段 (最初の [`RING_FILL_TICKS`])**: `ring_head` を進めずに生の
+    /// `OP_POLL` を回す。`client::poll()` は使わない — あれは `ring_head` を
+    /// tail まで進める (= 消費してしまう)。ここで欲しいのは「WM は積むが
+    /// アプリは消費しない」状態で、WM は `OP_POLL` の中でしか導出イベントを
+    /// 積まない (`timer::fire_expired`) ので、こちらから叩く必要がある。
+    ///
+    /// **第 2 段 (残り)**: `gui_call` を一切やめて `sys_halt` だけで待つ。リングは
+    /// 満杯のままなので、X4 のポンプは打鍵をカーネル待ち行列に残す
+    /// (`input::capture` の `space_ok`)。ここで `/api/key` を連打されると
+    /// カーネル待ち行列が溢れ、`kbd_dropped_count` の差分が `dropped` +
+    /// `OVERFLOW` として上がる (契約 T3 の筋書き 3b)。連打が無ければ 0 のまま
+    /// で正しい — WM は導出イベントを「捨てる」のではなく期限を進めないだけ
+    /// なので、タイマだけでは `dropped` は増えない。
+    ///
+    /// `OP_WAIT` はハンドラ内から呼んではいけない (契約 U3) ので、待ちは
+    /// `sys_halt` (KAPI) で作る。
+    fn ring_fill_now(&mut self) {
+        let mut max = self.ring_max;
         unsafe {
             let a = os32api::api();
             let t0 = (a.get_tick)();
             let mut guard: u32 = 0;
             loop {
-                if (a.get_tick)().wrapping_sub(t0) >= RING_PAUSE_TICKS {
+                let elapsed = (a.get_tick)().wrapping_sub(t0);
+                if elapsed >= RING_PAUSE_TICKS {
                     break;
+                }
+                if elapsed < RING_FILL_TICKS {
+                    /* 第 1 段: WM に導出イベント (Timer) を積ませる。head は動かさない。 */
+                    let _ = libos32gui::client::call(GUI_OP_POLL, 0);
+                    let h = libos32gui::client::read_header();
+                    let depth = h.ring_tail.wrapping_sub(h.ring_head);
+                    if depth > max {
+                        max = depth;
+                    }
                 }
                 (a.sys_halt)();
                 guard += 1;
@@ -358,6 +429,7 @@ impl Test {
                 }
             }
         }
+        self.ring_max = max;
     }
 
     /* ---- 7: セッション API で CUI へ ---- */
@@ -464,6 +536,10 @@ impl App for Test {
             return;
         }
         if self.mode == MODE_RING && dialog == self.pending[1] {
+            /* リングを埋め続けていたタイマはここで止める (ここまでループを
+             * 起こし続ける役でもあった — 満杯で保留された Modal が届くまで
+             * OP_WAIT で寝てしまわないように)。 */
+            self.kill_ring_timers();
             let mut val = [0u8; 256];
             self.ring_result = match modal::modal_result(dialog, &mut val) {
                 Ok(m) => m.result as i32,
@@ -509,12 +585,12 @@ impl App for Test {
         }
     }
 
-    /// `commit` の直後。キー 6 の「6 秒ポンプだけ回す」はここで走らせる —
+    /// `commit` の直後。キー 6 の「6 秒リングを埋める」はここで走らせる —
     /// モーダルが画面に出てからでないと PM が OK をクリックできない。
     fn after_commit(&mut self, _ui: &mut Ui) {
         if self.ring_pause {
             self.ring_pause = false;
-            self.ring_pause_now();
+            self.ring_fill_now();
         }
     }
 
