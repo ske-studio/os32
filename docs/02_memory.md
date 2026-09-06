@@ -53,6 +53,14 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > 2026-09-03 に exec_heap を 0x380000 (旧 NP ギャップ) へ分離した。
 > PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
+[ ページング (H3b 2026-09-06) ]
+恒等マップの守備範囲は 32MB (PAGING_MAP_SIZE、PT 8 枚 = +16KB BSS)。実 RAM として扱うのは
+従来どおり 16MB まで (PAGING_RAM_LIMIT: pgalloc / sys_usable_mem_end / ホットデプロイ窓は不変)。
+16MB〜32MB は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
+0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)
+0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ)
+  +000000h 表示面 / +04B000h クライアント面 (300KB、CPL=3 へ USER マップ) / +096000h 塗りパターン
+
 [ 共有ライブラリ帯域 (0x400000 - 0x4FFFFF, K3 2026-09-06) ]
 0x400000 - text_end                libos32gui.shlib の先頭 4KB ジャンプ表 + .text/.rodata  RO, USER, 全 PD 共有
 data_vaddr - data_end              .data/.bss (アプリごとに物理ページを複製)         R/W, USER
