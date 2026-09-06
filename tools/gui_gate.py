@@ -45,15 +45,16 @@ def get(path, timeout=20):
 
 
 def key(seq=None, text=None):
-    """文字列は 8 文字ずつ送る。raw リングは 32 エントリ (make+break で 1 文字 2 本) しか
+    """文字列は 4 文字ずつ送る。raw リングは 32 エントリ (make+break で 1 文字 2 本) しか
     無く、長い text を一度に注入すると後ろが落ちる (2026-09-06: Run... のパスが
-    `/usr/bin/gui_dem` で切れた)。"""
+    `/usr/bin/gui_dem` で切れた)。8 文字 / 0.3 秒でも 9801 (planar) でアプリ実行中は
+    WM の drain が追いつかず 2 文字落ちた (2026-09-07: `v12_api_test.n`) ので 4 文字に。"""
     if text is not None:
         i = 0
         while i < len(text):
-            post("/api/key", {"text": text[i:i + 8]})
-            time.sleep(0.3)
-            i += 8
+            post("/api/key", {"text": text[i:i + 4]})
+            time.sleep(0.35)
+            i += 4
     if seq is not None:
         post("/api/key", {"seq": seq})   # urlencode が + を %2B にする
 
