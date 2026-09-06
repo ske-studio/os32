@@ -195,8 +195,10 @@ wrappers/struct/init are all generated from it. Never hand-edit the generated fi
    python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
    git diff --stat   # only the intended additions should appear
    ```
-   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `kapi/kapi_generated.c`,
+   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `sdk/include/os32/os32_kapi_slots.h`
+   (`KAPI_SLOT_*` = int 0x80 のスロット番号、型非依存), `kapi/kapi_generated.c`,
    `exec/exec_kapi_init.inc`, and `sdk/rust/os32api/src/kapi_generated.rs`.
+   GitHub Actions (`.github/workflows/check.yml`) が生成物と kapi.json の一致を検査する。
 4. Implement the target function in the kernel (or give the entry a `target` /
    inline `body` in the JSON).
 5. Update `docs/KAPI_SPEC.md`, and bump the required version in `build/app.conf`

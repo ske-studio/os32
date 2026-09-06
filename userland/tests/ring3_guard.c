@@ -46,6 +46,9 @@
 /*  上にあるので CPL=3 から読める)。                                          */
 /* ========================================================================= */
 
+/* スロット番号だけの生成ヘッダ (型に依存しないので自己完結のまま include できる)。 */
+#include "os32_kapi_slots.h"
+
 void _start(int argc, char **argv) __attribute__((section(".text.startup"), used, noreturn));
 
 void _start(int argc, char **argv)
@@ -101,12 +104,12 @@ void _start(int argc, char **argv)
 
     /* sys_exit(0) を KAPI トランポリンと同じ規約で呼ぶ: eax = スロット、引数は
      * ユーザスタックの [esp+4] から (先頭 1 語はスタブの戻り番地ぶん)。
-     * sys_exit のスロットは 84 (sdk/kapi.json、末尾追記のみなので不変)。
-     * かつては eax=0 で呼んでいたが、それはスロット 0 = gfx_init であって
-     * 終了しない (2026-09-06 実測: ケース E で GFX モードに入ったまま無限
-     * ループ、CTRL+STOP で回収した)。 */
+     * スロット番号は生成ヘッダ os32_kapi_slots.h の KAPI_SLOT_SYS_EXIT (= 84、
+     * 末尾追記のみなので不変)。かつては eax=0 で呼んでいたが、それはスロット
+     * 0 = gfx_init であって終了しない (2026-09-06 実測: ケース E で GFX モードに
+     * 入ったまま無限ループ、CTRL+STOP で回収した)。 */
     __asm__ __volatile__("pushl $0\n\tpushl $0\n\tint $0x80"
-                         : : "a"(84) : "memory");
+                         : : "a"(KAPI_SLOT_SYS_EXIT) : "memory");
 
     for (;;) {
         __asm__ __volatile__("" ::: "memory");
