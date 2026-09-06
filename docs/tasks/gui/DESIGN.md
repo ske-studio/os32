@@ -141,7 +141,8 @@ GUI の設計判断はすべてこの上限の内側で行い、下限は 386 �
   `/api/cmd` で `ver` 等を出してテキストを置いた状態で **`/api/screenshot`** を撮る。256 色の絵の上に
   TVRAM の文字が重なって見えれば合成あり → `gfx/backend_pegc.c` の `pegc_query` で
   `GFX_CAP_TEXT_OVERLAY` を立てる。`/api/tvram` は TVRAM の中身を読むだけで合成の証拠に
-  ならない。H2 は確認まで **0** にしてある。
+  ならない。**確認済み (2026-09-06)**: gui_busy の kprintf (TVRAM) が 256 色の絵の上に見えた →
+  合成あり、`pegc_query` で `GFX_CAP_TEXT_OVERLAY` を立てた (R4 の TVRAM クロームは PEGC でも使える)。
 - H2 の要検証事項 (エミュレータ待ち): 480 ラインのラスタが出るか (資料ミラーに 480 ライン用の
   GDC SYNC 表が無く、v1 は 09A8h (31kHz) + 6Ah の指定だけ。400 ラインしか出なければ SYNC 再設定が
   次の一手)、`pegc_shutdown` の 24kHz 復帰後にテキスト画面が乱れないか。資料の訂正 2 点は

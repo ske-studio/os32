@@ -139,6 +139,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **9801 プレーン経路の回帰 (`GFX=pc98`) 通過**: `gfxmode pc98` → **reset** (deploy は `/etc/system.cfg` を巻き戻すので設定切替の検証は reset で) → hal_test `backend pc98 (planar 4bpp) 640x400 bpp=4`、gdi_test 512000、gshell → gui_demo → FEP で「日本語」入力 → ESC → CUI → `gfxmode auto` に戻した。レビュー #4 ② の退避で **SHIFT+SPACE 直後の打鍵が FEP を素通りする順序問題**が出た (変換されず "nihongo") → 退避条件を「FEP オン / toggle 保留中 / 退避済みあり」に広げて解消 (`41e2de8`、hotdeploy で再確認: `[あ]▼日本語(01/02)` の候補窓がキャレット位置に出て「日本語」が入る)。gshell の hotdeploy は CUI で rshell が生きているときだけ効く |
 
+| 2026-09-06 | **H2c 結合 → G5 前半 (PEGC) 通過 (実機)**: `/api/status` が `scrn_ymax=480` / `grph_disp=1`、hal_test `backend pegc 640x480 bpp=8`、gdi_test 307200、gshell のデスクトップと gui_demo が **640×480 / 正しいシステム 16 色**で描ける、ESC で CUI へ戻ると 400 ライン / `grph_disp=0` に復帰しテキストが正常。**TEXT_OVERLAY**: gui_busy (F3) の kprintf が 256 色の絵の上に合成されて見えた → `GFX_CAP_TEXT_OVERLAY` を立てる (DESIGN §5 に書き戻し)。残る G5 後半は H3 (Cirrus Xe10、NP21/W の WAB CL-GD54xx を Enable にする [D2]) |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。

@@ -428,13 +428,13 @@ static int pegc_query(GFX_ScreenInfo *info)
     info->format = GFX_FMT_PACKED8;
 
     /* 能力ビット (票 7):
-     *  TEXT_OVERLAY = 0。256 色モードでテキスト面が合成されるかは資料に
-     *    明文が無く (DESIGN §5 の未確認事項)、**実機で確かめるまで立てない**。
-     *    確認手順は票 H2 の報告と DESIGN §5 に書き戻す。
+     *  TEXT_OVERLAY = 1。NP21/W で実測 (2026-09-06): 256 色モード中に TVRAM へ
+     *    書いた文字 (gui_busy の kprintf) が 256 色の絵の上に合成されて見えた
+     *    (DESIGN §5 に書き戻し済み)。R4 の TVRAM クロームは PEGC でも使える。
      *  PAGE_FLIP    = 0。800 ライン VRAM 構成では 00A4h (表示ページ選択) が
      *    使えないので、PEGC のページ切替は v1 では使わない。
      *  HW_FILL/HW_BLT = 0。PEGC は塗り/転送エンジンを持たない (CPU 直書き)。 */
-    info->flags  = 0;
+    info->flags  = GFX_CAP_TEXT_OVERLAY;
 
     /* パレットのリース (契約 G8): 256 色機は連続範囲で申告する。
      * lease_mask は 16 色機用なので 0。 */
