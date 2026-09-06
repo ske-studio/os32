@@ -355,6 +355,94 @@ static void exec_child_claim(u32 *a_start, int *a_pages,
 }
 
 /* ======================================================================== */
+/*  exec_launch_abort — 起動途中で失敗したときの唯一の巻き戻し口 (レビュー   */
+/*                      #5 ④)                                               */
+/*                                                                          */
+/*  exec_run が exec_nest_level++ / res_owner_set した後、実際に子のエントリ */
+/*  へ飛ぶ前に失敗した場合に呼ぶ。かつては `exec_nest_level--; return` だけ  */
+/*  だったので、pgalloc 予約・非present のガードページ・子に切り替えた       */
+/*  exec_heap・kapi->sbrk_heap_limit がすべて子のまま親に戻り、親 (シェル)   */
+/*  の malloc/free が壊れていた。                                           */
+/*                                                                          */
+/*  戻す項目と順序は longjmp 復帰ブロック (exec_run 内) と **同一**。        */
+/*  片方だけ直すと必ず食い違うので、変更時は両方を見ること:                  */
+/*    (0) 生成済みならアドレス空間を破棄                                     */
+/*    (1) exec_nest_level を親へ戻し、res_owner も親のタグへ戻す             */
+/*    (2) 子のガードページ (guard_a/guard_b) を present に戻す               */
+/*    (3) 子の exec_heap をリセット                                          */
+/*    (4) 子プロセス帯の物理ページ予約を解放 (シェル直下の子のときだけ)      */
+/*    (5) 親の exec_heap 管理変数 / sbrk 上限 / ガードページを復元           */
+/*                                                                          */
+/*  exec_exit と違い FD / リダイレクト / パイプ / GUI の所有者回収は行わない: */
+/*  呼び出し点は res_owner_set の直後から iret までの間しかなく、その間の    */
+/*  処理は argv の組み立てとページテーブル操作だけで、子のコードは 1 命令も  */
+/*  走っていない。よってこのレベルの所有者タグを持つリソースは存在し得ない。 */
+/*  (この区間に open / パイプ確保を足すなら、ここにも回収を足すこと)         */
+/*                                                                          */
+/*  ローカル変数を避ける longjmp 側と違い、こちらは通常の呼び出しなので      */
+/*  is_shell を素直に引数で受け取る。戻り値は呼び出し元がそのまま返す        */
+/*  エラーコード。                                                          */
+/* ======================================================================== */
+static int exec_launch_abort(int is_shell, struct addrspace *as, int status)
+{
+    ExecContext *ctx;
+
+    /* (0) 生成済みのアドレス空間を破棄。CR3 はまだ master のままなので
+     *     アクティブ PD を破棄する心配はない。shlib の per-app データは
+     *     attach 成功時にしか登録されないので detach は不要。 */
+    if (as != 0) {
+        paging_addrspace_destroy(as);
+    }
+
+    /* (1) 親レベルへ戻す (exec_exit の末尾と同じ順序) */
+    exec_nest_level--;
+    res_owner_set(exec_nest_level);
+
+    ctx = &exec_ctx_stack[exec_nest_level];
+
+    /* (2) ガードページ解除 (子プロセスのガードのみ) */
+    if (ctx->guard_a != 0) {
+        paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
+        paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
+    }
+
+    /* (3) 子プロセスのヒープリセット */
+    if (ctx->exec_heap_base != 0) {
+        exec_heap_reset();
+    }
+
+    /* (4) 子プロセス空間の物理ページ予約を解放する
+     *     (条件は longjmp 側と同一 — シェル (Level 1) まで戻ったときだけ) */
+    if (!is_shell && exec_nest_level == 1) {
+        u32 ca_start, cb_start;
+        int ca_pages, cb_pages;
+        exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
+        pgalloc_free_n(ca_start, ca_pages);
+        pgalloc_free_n(cb_start, cb_pages);
+    }
+
+    /* (5) 親のヒープ/sbrk状態を復元 */
+    if (exec_nest_level > 0) {
+        ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
+        /* 親が子プロセス (Level 1+) の場合のみ復元 */
+        if (parent->exec_heap_base != 0) {
+            /* exec_heap_init_at ではなく restore_state。理由は longjmp 側の
+             * コメント ("bad magic feeefeee (double free?)" の正体) を参照。 */
+            exec_heap_restore_state(parent->exec_heap_base,
+                                    parent->exec_heap_size,
+                                    parent->exec_heap_used);
+            kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
+            paging_set_not_present(parent->guard_a,
+                                   parent->guard_a + PAGE_SIZE - 1);
+            paging_set_not_present(parent->guard_b,
+                                   parent->guard_b + PAGE_SIZE - 1);
+        }
+    }
+
+    return status;
+}
+
+/* ======================================================================== */
 /*  exec_exit — 現在の実行階層を終了し、親のsetjmp復帰ポイントへ戻る        */
 /* ======================================================================== */
 void exec_exit(int status)
@@ -1009,8 +1097,10 @@ int exec_run(const char *cmdline)
             /* ================= CPL=3 への遷移 (v2 M1c/M1d) ================= */
             if (paging_addrspace_create(&g_ring3_as) != 0) {
                 shell_print("Error: ring3 addrspace create failed\n", ATTR_RED);
-                exec_nest_level--;
-                return EXEC_ERR_NOMEM;
+                /* AS は出来ていないので破棄対象なし (第2引数 0)。それ以外の
+                 * 起動途中状態は exec_launch_abort が親の形に戻す。 */
+                return exec_launch_abort(is_shell, (struct addrspace *)0,
+                                         EXEC_ERR_NOMEM);
             }
 
             /* --- M1c: 0x400000 帯・ユーザスタック・VRAM・SHM を RW+USER に ---
@@ -1082,9 +1172,8 @@ int exec_run(const char *cmdline)
                  * = アプリ fault に見えるので、起動前に NOMEM で戻す
                  * (レビュー #4 ⑥)。 */
                 shell_print("Error: shlib data attach failed (out of memory)\n", ATTR_RED);
-                paging_addrspace_destroy(&g_ring3_as);
-                exec_nest_level--;
-                return EXEC_ERR_NOMEM;
+                return exec_launch_abort(is_shell, &g_ring3_as,
+                                         EXEC_ERR_NOMEM);
             }
 
             /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
