@@ -216,6 +216,20 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         if !space_ok {
             break;
         }
+        /* X4 (ポンプ) で FEP がオンなら変換をここでは行わない (契約 T8: 辞書検索
+         * まで走る)。退避して次の X3 に回す。SHIFT+SPACE が保留中 (on/off が次の
+         * X3 で確定する) のときと、既に退避した打鍵があるときも退避する — でないと
+         * 「SHIFT+SPACE → n i h o n g o」が X4 に来た場合、toggle 前の打鍵が FEP を
+         * 素通りして先にアプリへ届く (2026-09-06 実測: 変換されず "nihongo" が入った)。
+         *
+         * 退避先の空きは **カーネルから取り出す前に** 見る (レビュー #5 ①)。取り出した
+         * 後に満杯を知ると、その 1 件はカーネル待ち行列にも退避列にも残らず、dropped
+         * にも数えられずに消える。空きが無ければ読まずにカーネル側へ残す (契約 T3)。 */
+        let defer = ctx == Ctx::Pump
+            && (fep::is_on() || fep::toggle_pending() || st.pending_raw_n > 0);
+        if defer && st.pending_raw_n >= st.pending_raw.len() {
+            break;
+        }
         /* X3 は前の X4 が退避した raw を先に消費する (順序を保つ)。 */
         let raw = if ctx.wm_ui() && st.pending_raw_n > 0 {
             let r = st.pending_raw[0];
@@ -232,16 +246,8 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         if raw < 0 {
             break;
         }
-        /* X4 (ポンプ) で FEP がオンなら変換をここでは行わない (契約 T8: 辞書検索
-         * まで走る)。退避して次の X3 に回す。満杯なら読まずにカーネル側に残す。
-         * SHIFT+SPACE が保留中 (on/off が次の X3 で確定する) のときと、既に退避
-         * した打鍵があるときも退避する — でないと「SHIFT+SPACE → n i h o n g o」が
-         * X4 に来た場合、toggle 前の打鍵が FEP を素通りして先にアプリへ届く
-         * (2026-09-06 実測: 変換されず "nihongo" が入った)。 */
-        if ctx == Ctx::Pump && (fep::is_on() || fep::toggle_pending() || st.pending_raw_n > 0) {
-            if st.pending_raw_n >= st.pending_raw.len() {
-                break;
-            }
+        if defer {
+            /* 空きは取り出す前に確認済み。 */
             st.pending_raw[st.pending_raw_n] = raw;
             st.pending_raw_n += 1;
             continue;
