@@ -38,8 +38,15 @@ def get(path, timeout=20):
 
 
 def key(seq=None, text=None):
+    """文字列は 8 文字ずつ送る。raw リングは 32 エントリ (make+break で 1 文字 2 本) しか
+    無く、長い text を一度に注入すると後ろが落ちる (2026-09-06: Run... のパスが
+    `/usr/bin/gui_dem` で切れた)。"""
     if text is not None:
-        post("/api/key", {"text": text})
+        i = 0
+        while i < len(text):
+            post("/api/key", {"text": text[i:i + 8]})
+            time.sleep(0.3)
+            i += 8
     if seq is not None:
         post("/api/key", {"seq": seq})   # urlencode が + を %2B にする
 

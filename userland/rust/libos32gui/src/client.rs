@@ -84,28 +84,34 @@ pub type GuiResult<T> = Result<T, GuiErr>;
 /*  デバッグ出力 (KAPI に dbg_print は無いので kprintf を包む)        */
 /* ================================================================ */
 
+/// NUL 終端の作業バッファへ写す (カーネルの kprintf は `%.*s` を解釈しない —
+/// 2026-09-06 実測: ".*s" と、桁の合わないポインタ値が出て診断が読めなかった)。
+fn nul_copy(msg: &[u8], buf: &mut [u8; 96]) {
+    let n = if msg.len() > 95 { 95 } else { msg.len() };
+    buf[..n].copy_from_slice(&msg[..n]);
+    buf[n] = 0;
+}
+
 /// 1 行のデバッグ出力 (NUL 終端不要)。
 pub fn dbg_print(msg: &[u8]) {
+    let mut buf = [0u8; 96];
+    nul_copy(msg, &mut buf);
     unsafe {
         let a = os32api::api();
-        (a.kprintf)(
-            os32api::ATTR_YELLOW,
-            b"%.*s\r\n\0".as_ptr(),
-            msg.len() as i32,
-            msg.as_ptr(),
-        );
+        (a.kprintf)(os32api::ATTR_YELLOW, b"%s\r\n\0".as_ptr(), buf.as_ptr());
     }
 }
 
 /// 「文字列 + 整数」のデバッグ出力。
 pub fn dbg_print_num(msg: &[u8], v: i32) {
+    let mut buf = [0u8; 96];
+    nul_copy(msg, &mut buf);
     unsafe {
         let a = os32api::api();
         (a.kprintf)(
             os32api::ATTR_YELLOW,
-            b"%.*s %d\r\n\0".as_ptr(),
-            msg.len() as i32,
-            msg.as_ptr(),
+            b"%s %d\r\n\0".as_ptr(),
+            buf.as_ptr(),
             v,
         );
     }
