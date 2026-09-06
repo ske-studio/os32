@@ -323,6 +323,14 @@ impl Filer {
         self.repaint(widget::rect(self.right_pad));
     }
 
+    /// 選択が動いたときの再描画。行の反転だけでなく**パス行も**出し直す —
+    /// パス行は選択中の名前を出しており (破壊的キーの対象)、右ペインだけを
+    /// 申告すると名前が前の行のまま残る (§10 差し戻し B)。
+    fn repaint_sel(&self) {
+        self.repaint_right();
+        self.repaint_path();
+    }
+
     fn repaint_path(&self) {
         self.repaint(widget::rect(self.path_pad));
     }
@@ -1100,7 +1108,7 @@ impl App for Filer {
                 if let Some(rw) = row {
                     self.list_sel = rw;
                 }
-                self.repaint_right();
+                self.repaint_sel();
                 self.open_menu(x, y, row.is_some());
                 return;
             }
@@ -1113,7 +1121,7 @@ impl App for Filer {
                     self.list_sel = rw;
                     self.last_row = rw as i32;
                     self.last_tick = t;
-                    self.repaint_right();
+                    self.repaint_sel();
                     if dbl {
                         self.last_row = -1;
                         self.activate_row(rw);
@@ -1283,7 +1291,7 @@ impl App for Filer {
             }
             if moved {
                 self.ensure_visible();
-                self.repaint_right();
+                self.repaint_sel();
                 return;
             }
         }
