@@ -355,6 +355,10 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
             st.abort_seen = false;
             break;
         }
+        /* `wake_ready` を見る前に、`emit_paints_win` と同じ可視領域の入れ替えを
+         * 回す (下の `page_vis_owner`)。これが無いと起床判定と配送判定が
+         * 食い違ったまま噛み合わない — 詳細はその関数のコメント。 */
+        page_vis_owner(st, owner);
         if wake_ready(st, owner, slot_no) {
             break;
         }
@@ -369,6 +373,37 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
         unsafe { (os32api::api().sys_halt)() };
     }
     ring::pending(st, slot_no) as i32
+}
+
+/// 打ち切られた可視領域を持つ窓の `vis` を、`OP_WAIT` の各周でも作り直す。
+///
+/// `emit_paints_win` は先頭で `visible::page_vis` を呼び、可視矩形が 16 を超えて
+/// 打ち切られた窓では**周ごとに残す断片を入れ替えてから**配送を判定する
+/// (契約 G4「超過分は次の周」)。一方 `wake_ready` → `has_deliverable_paint` は
+/// 保存済みの `vis` をそのまま見る。つまり打ち切られている窓では、
+///
+///   - `vis` は真の可視領域の**部分集合**でしかなく、
+///   - その断片から外れた場所の `dirty` は「配送できない」と判定され `OP_WAIT`
+///     は起きず、
+///   - 断片を入れ替える `page_vis` は `OP_POLL` の中でしか回らない
+///
+/// ので、「起こされないと入れ替わらない / 入れ替わらないと起きられない」で
+/// 止まる。打鍵のように後続イベントが無い入力では、次に何か (マウス移動など)
+/// が来てアプリを起こすまで `Paint` が出ない — v1.2 G3 で実測した症状そのもの
+/// (キーを押しても画面が変わらず、マウスを 2px 動かした瞬間に出る。その周で
+/// 初めて `page_vis` が回るため)。
+///
+/// ここで同じ入れ替えを回してから `wake_ready` を見れば、起床判定と配送判定が
+/// 同じ可視領域を見る。`page_vis` は打ち切られていて `dirty` がある窓でしか
+/// 動かないので、ふつうの窓では何もしない。
+fn page_vis_owner(st: &mut GuiState, owner: i32) {
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        if st.windows[idx].used && st.windows[idx].owner == owner {
+            visible::page_vis(st, idx);
+        }
+        idx += 1;
+    }
 }
 
 /// `OP_WAIT` が戻る条件 (契約 T3): 未読がある、または**配送できる**導出型がある。
