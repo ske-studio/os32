@@ -146,6 +146,13 @@
 //! 92  os32gui_ui_is_quitting
 //! 93  os32gui_ui_input_unknown
 //! 94  os32gui_ui_key_is_pressed
+//!  ---- v1.2 デスクトップ client API (票 C4、契約 V12-C / V12-I) ----
+//! 95  os32gui_modal_open                MODAL_OPEN の薄い包み → DialogId
+//! 96  os32gui_modal_result              MODAL_RESULT 1 回。値を caller buffer へ
+//! 97  os32gui_file_open                 GUI_MODAL_FILE_OPEN を開くだけ
+//! 98  os32gui_input_open                GUI_MODAL_INPUT を開くだけ
+//! 99  os32gui_session_request           SESSION_REQUEST (LAUNCH/SWITCH_CUI/SHUTDOWN)
+//! 100 os32gui_draw_icon16               16x16 アイコン (mask 付き) を描く
 //! ```
 #![allow(clippy::missing_safety_doc)]
 
@@ -158,7 +165,7 @@ use crate::widget;
 use crate::window;
 use os32api::gui::proto::{GuiEvent, GuiRgb, GuiSlotHeader, GuiWinSpec};
 use os32api::gui::stub::{
-    style_of, AppVTable, Ui, WidgetId, SIZE_ABSOLUTE, SIZE_FIXED, SIZE_FLEX,
+    style_of, AppVTable, GuiIcon16, Ui, WidgetId, SIZE_ABSOLUTE, SIZE_FIXED, SIZE_FLEX,
 };
 use os32api::gui::types::{Rect, ScreenInfo, Stats, SurfaceId};
 use os32api::KernelAPI;
@@ -181,7 +188,7 @@ core::arch::global_asm!(
 __os32_shlib_header:
     .long   0x42494C53                  /* 0x00 magic  'SLIB'            */
     .long   1                           /* 0x04 version = GUI_PROTO_VERSION */
-    .long   95                          /* 0x08 nfunc                    */
+    .long   101                         /* 0x08 nfunc                    */
     .long   __shlib_data_start          /* 0x0C data_vaddr               */
     .long   __shlib_data_pages          /* 0x10 data_pages               */
     .long   __shlib_text_pages          /* 0x14 text_pages               */
@@ -283,6 +290,12 @@ __os32_shlib_header:
     .long   os32gui_ui_is_quitting              /* 92 */
     .long   os32gui_ui_input_unknown            /* 93 */
     .long   os32gui_ui_key_is_pressed           /* 94 */
+    .long   os32gui_modal_open                  /* 95 */
+    .long   os32gui_modal_result                /* 96 */
+    .long   os32gui_file_open                   /* 97 */
+    .long   os32gui_input_open                  /* 98 */
+    .long   os32gui_session_request             /* 99 */
+    .long   os32gui_draw_icon16                 /* 100 */
     .text
 "#
 );
@@ -1033,4 +1046,91 @@ pub extern "C" fn os32gui_ui_input_unknown() -> u32 {
 #[no_mangle]
 pub extern "C" fn os32gui_ui_key_is_pressed(scan: u32) -> u32 {
     unsafe { ((os32api::api().kbd_is_pressed)(scan as i32) != 0) as u32 }
+}
+
+/* ================================================================ */
+/*  95..=100: v1.2 デスクトップ client API (票 C4)                    */
+/*                                                                  */
+/*  戻り値の約束は他のエントリと同じ: 非負が成功、負は `OS32_ERR_*`。 */
+/*  古い gshell では op 65 / 66 が `OS32_ERR_NOSYS` を返すので、       */
+/*  ここはそれをそのまま呼び出し側へ通す (panic も loop もしない)。   */
+/* ================================================================ */
+
+/// `modal_open(parent, kind, message)` → DialogId (正) / 負のエラー。**待たない**。
+#[no_mangle]
+pub extern "C" fn os32gui_modal_open(parent: u32, kind: u32, msg: *const u8, len: u32) -> i32 {
+    match crate::modal::modal_open(parent, kind as u16, unsafe { slice(msg, len) }) {
+        Ok(id) => id as i32,
+        Err(e) => e.code(),
+    }
+}
+
+/// `modal_result(dialog, out, cap)` → `GUI_MODAL_RESULT_*` (非負) / 負のエラー。
+///
+/// `out` へ値を UTF-8 境界で `cap` バイトまで写す。`value_len` (NULL 可) には
+/// WM が持っていた**本来の**長さ、`copied` (NULL 可) には実際に写した長さ。
+/// **`on_modal` を受けた後にだけ呼ぶこと** (`OS32_ERR_AGAIN` は存在しない)。
+#[no_mangle]
+pub extern "C" fn os32gui_modal_result(
+    dialog: u32,
+    out: *mut u8,
+    cap: u32,
+    value_len: *mut u32,
+    copied: *mut u32,
+) -> i32 {
+    let buf = unsafe { slice_mut(out, cap) };
+    match crate::modal::modal_result(dialog as u16, buf) {
+        Ok(r) => {
+            if !value_len.is_null() {
+                unsafe { ptr::write_unaligned(value_len, r.len as u32) }
+            }
+            if !copied.is_null() {
+                unsafe { ptr::write_unaligned(copied, r.copied as u32) }
+            }
+            r.result as i32
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// `file_open(parent, prompt)` → DialogId (正) / 負のエラー。path は同期返却しない。
+#[no_mangle]
+pub extern "C" fn os32gui_file_open(parent: u32, prompt: *const u8, len: u32) -> i32 {
+    match crate::modal::file_open(parent, unsafe { slice(prompt, len) }) {
+        Ok(id) => id as i32,
+        Err(e) => e.code(),
+    }
+}
+
+/// `input_open(parent, prompt)` → DialogId (正) / 負のエラー。text は同期返却しない。
+#[no_mangle]
+pub extern "C" fn os32gui_input_open(parent: u32, prompt: *const u8, len: u32) -> i32 {
+    match crate::modal::input_open(parent, unsafe { slice(prompt, len) }) {
+        Ok(id) => id as i32,
+        Err(e) => e.code(),
+    }
+}
+
+/// `session_request(action, value)` → 0 (**受理**。完了ではない) / 負のエラー。
+///
+/// `action` は `GUI_SESSION_LAUNCH` / `SWITCH_CUI` / `SHUTDOWN`。LAUNCH の
+/// `value` は 1〜255B の絶対パスで、不正なら **WM を呼ばずに** `ERR_INVAL`。
+#[no_mangle]
+pub extern "C" fn os32gui_session_request(action: u32, value: *const u8, len: u32) -> i32 {
+    if action > 0xFF {
+        return os32api::gui::proto::OS32_ERR_INVAL;
+    }
+    r0(crate::session::session_request(action as u8, unsafe { slice(value, len) }))
+}
+
+/// `draw_icon16(surface, x, y, icon)` — 16x16 固定、mask=0 は描かない、拡大縮小なし。
+#[no_mangle]
+pub extern "C" fn os32gui_draw_icon16(surface: u32, x: i32, y: i32, icon: *const GuiIcon16) {
+    if icon.is_null() {
+        return;
+    }
+    /* アイコンは 160B なので値渡しせずアプリ側のバッファをそのまま読む
+     * (align_of == 1 なので unaligned でも安全)。 */
+    let ic = unsafe { ptr::read_unaligned(icon) };
+    crate::icon::draw_icon16(SurfaceId(surface), x, y, &ic)
 }

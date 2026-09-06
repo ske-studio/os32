@@ -215,10 +215,68 @@ pub const E_UI_IS_QUITTING: usize = 92;
 pub const E_UI_INPUT_UNKNOWN: usize = 93;
 pub const E_UI_KEY_IS_PRESSED: usize = 94;
 
+/* --- 95..=100: v1.2 デスクトップ client API (票 C4、契約 V12-C / V12-I) --- */
+pub const E_MODAL_OPEN: usize = 95;
+pub const E_MODAL_RESULT: usize = 96;
+pub const E_FILE_OPEN: usize = 97;
+pub const E_INPUT_OPEN: usize = 98;
+pub const E_SESSION_REQUEST: usize = 99;
+pub const E_DRAW_ICON16: usize = 100;
+
 /// ジャンプ表の本数 (末尾追記のたびに増やす)。
-pub const SHLIB_NFUNC: usize = 95;
+pub const SHLIB_NFUNC: usize = 101;
 
 const _: () = assert!(SHLIB_NFUNC <= OS32_SHLIB_MAX_FUNC);
+
+/* ================================================================ */
+/*  Icon16 (契約 V12-I) — WM と libos32gui が同じ論理形式を使う       */
+/*                                                                  */
+/*  16x16 固定。`pixels` は 4bpp row-major (even x = 上位ニブル、     */
+/*  odd x = 下位ニブル)、`mask` は 1bpp row-major (bit7 が左端、      */
+/*  1 = 不透明 / 0 = 透明)。色 index は GUI system 16 色 (proto の    */
+/*  `GUI_COLOR_*`)。拡大縮小・PNG/BMP/ICO の解読は v1.2 対象外。      */
+/* ================================================================ */
+
+/// 16x16 の標準アイコン (160B)。`draw_icon16` に渡す。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiIcon16 {
+    /// 16*16*4bpp = 128B。`pixels[y*8 + x/2]`、even x = 上位ニブル。
+    pub pixels: [u8; 128],
+    /// 16*16*1bpp = 32B。`mask[y*2 + x/8]` の bit(7 - x%8)。1 = 不透明。
+    pub mask: [u8; 32],
+}
+
+impl GuiIcon16 {
+    /// 全画素が色 0 / 全透明のアイコン。
+    pub const ZERO: GuiIcon16 = GuiIcon16 { pixels: [0; 128], mask: [0; 32] };
+
+    /// `(x, y)` の色 index (0..15)。範囲外は 0。
+    #[inline]
+    pub fn pixel(&self, x: usize, y: usize) -> u8 {
+        if x >= 16 || y >= 16 {
+            return 0;
+        }
+        let b = self.pixels[y * 8 + (x >> 1)];
+        if x & 1 == 0 {
+            b >> 4
+        } else {
+            b & 0x0F
+        }
+    }
+
+    /// `(x, y)` が不透明か。範囲外は false。
+    #[inline]
+    pub fn opaque(&self, x: usize, y: usize) -> bool {
+        if x >= 16 || y >= 16 {
+            return false;
+        }
+        (self.mask[y * 2 + (x >> 3)] >> (7 - (x & 7))) & 1 != 0
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<GuiIcon16>() == 160);
+const _: () = assert!(core::mem::align_of::<GuiIcon16>() == 1);
 
 /* ================================================================ */
 /*  WidgetId — App のハンドラ引数に出るので共有側に置く                */

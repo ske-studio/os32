@@ -25,7 +25,8 @@ const KANJI_W: i32 = 16; /* 全角セル幅 */
 /*  低レベル画素バックエンド (Target に対して局所座標で書く)         */
 /* ================================================================ */
 
-struct Painter {
+/// 画素バックエンド。`icon.rs` も使うので crate 内公開 (票 C4)。
+pub(crate) struct Painter {
     ox: i32,
     oy: i32,
     offscreen: *mut ffi::GfxSurface, /* null = 画面 */
@@ -38,7 +39,7 @@ struct Painter {
 }
 
 impl Painter {
-    fn from_target(t: &Target) -> Painter {
+    pub(crate) fn from_target(t: &Target) -> Painter {
         let info = screen_info_cached();
         let packed8 = !t.offscreen && info.format == GFX_FMT_PACKED8;
         let (fb_base, fb_pitch) = if packed8 {
@@ -67,7 +68,7 @@ impl Painter {
 
     /// 1 画素 (局所座標、クリップ判定つき)。
     #[inline]
-    fn put(&self, lx: i32, ly: i32, color: u8) {
+    pub(crate) fn put(&self, lx: i32, ly: i32, color: u8) {
         if !self.in_clip(lx, ly) {
             return;
         }

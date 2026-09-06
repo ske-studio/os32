@@ -458,16 +458,22 @@ pub fn win_show(window: u32, show: bool) -> GuiResult<()> {
     call(GUI_OP_WIN_SHOW, 0).map(|_| ())
 }
 
-/// タイトルを差し替える。UTF-8 境界で 255B に切り詰める (契約 U9)。
-pub fn win_set_title(window: u32, title: &[u8]) -> GuiResult<()> {
+/// `&[u8]` を長さ前置文字列へ (UTF-8 境界で 255B に切り詰め。契約 U9)。
+pub fn gui_string(src: &[u8]) -> GuiString {
     let mut s = GuiString { len: 0, s: [0u8; 255] };
-    let n = utf8_truncate(title, 255);
+    let n = utf8_truncate(src, 255);
     let mut i = 0;
     while i < n {
-        s.s[i] = title[i];
+        s.s[i] = src[i];
         i += 1;
     }
     s.len = n as u8;
+    s
+}
+
+/// タイトルを差し替える。UTF-8 境界で 255B に切り詰める (契約 U9)。
+pub fn win_set_title(window: u32, title: &[u8]) -> GuiResult<()> {
+    let s = gui_string(title);
     let req = GuiReqWinTitle { window, title: s };
     write_req(&req);
     call(GUI_OP_WIN_SET_TITLE, 0).map(|_| ())
