@@ -23,9 +23,11 @@ v1.1 で実機通過した 9801 / PEGC / Cirrus の 3 バックエンド、Ring3
 - 標準ダイアログの結果返却
 - ファイルマネージャ
 - GUI セッション終了 / CUI 切替
-- マウス操作を含む自動回帰検証
+- 既存 `/api/mouse` を使った自動回帰検証
 
-v1.2 では KAPI v42 を変更しない。新機能は既存 `gui_call(op, arg)` と GUI 共有プロトコル、`libos32gui.shlib` の末尾追記で実現する。
+**KAPI v42 は変更しない。** v43 は network / Host Services 用の予約であり、GUI v1.2 は使用しない。新機能は既存 `gui_call(op, arg)` と GUI 共有プロトコル、`libos32gui.shlib` の末尾追記で実現する。
+
+`GUI_PROTO_VERSION` は 1 のままとする。古い WM が新 op を知らない場合は `OS32_ERR_NOSYS` で安全に拒否し、stale 組合せでメモリ破壊や別 op 実行を起こさない。
 
 ---
 
@@ -38,60 +40,119 @@ v1.2 でも実行モデルは協調型シングルフォアグラウンドアプ
 - gshell はシェル帯に常駐する。
 - 外部アプリは `exec_run()` で 1 本だけ実行する。
 - 1 アプリは複数ウィンドウを所有できる。
-- タスクバーのウィンドウボタンは「プロセス切替」ではなく、そのアプリ内のウィンドウの raise / focus を行う。
+- タスクバーのウィンドウボタンは process switch ではなく、そのアプリ内の window の raise / focus を行う。
 - v1.2 では複数外部プロセスの同時 GUI 実行を導入しない。
 
 ### S2. アプリ実行中の別アプリ起動
 
-WM の `gui_call` ハンドラ、X3、X4 から直接 `exec_run()` を呼んではならない。
+WM の `gui_call` handler、X3、X4 から直接 `exec_run()` を呼んではならない。
 
 別アプリ起動要求が発生した場合:
 
-1. `next_launch_path` を gshell に保存する。
-2. 現在のアプリへ `Quit{reason=REPLACE_APP}` を配送する。
-3. 現アプリが終了し、既存の `exec_run()` が gshell のトップレベルへ戻る。
-4. トップレベルループが `next_launch_path` を見て次のアプリを起動する。
+1. `LAUNCH(path)` を gshell 私有状態へ保存する。
+2. 現在 owner へ `Quit{reason=REPLACE_APP}` を配送する。
+3. 現 app が終了し、既存の `exec_run()` が gshell top-level へ戻る。
+4. top-level が pending path を見て次 app を起動する。
 
-アプリが Quit に応答しない場合は既存の CTRL+STOP で回収する。回収後も保留中の起動要求は維持する。
+アプリが Quit に応答しない場合は既存 CTRL+STOP で回収する。正常 exit / CTRL+STOP / fault kill のいずれでも pending SessionAction は失わない。
 
-### S3. セッションアクション
+### S3. SessionAction
 
-gshell は次の内部状態を 1 つ持つ。
+gshell は同時に 1 件だけ保持する。
 
-- `NONE`
-- `LAUNCH(path)`
-- `SWITCH_CUI`
-- `SHUTDOWN`
+```text
+NONE
+LAUNCH(path)
+SWITCH_CUI
+SHUTDOWN
+```
 
-アプリ実行中に要求された場合は S2 と同じく、まず `Quit` を配送し、アプリ終了後にトップレベルで実行する。
+新しい要求で既存 pending を上書きしない。既に pending がある場合は `OS32_ERR_FULL`。
 
-`SWITCH_CUI`:
+### S4. Session request ABI
 
-- `/etc/system.cfg` の `GUI=0` を永続化する。
-- GUI の FEP 描画コールバックと GFX を安全に終了する。
-- `sys_switch_shell("/sys/shell.bin")` で CUI シェルへ切り替える。
-- 切替だけのための不要な再起動は行わない。
+外部 app から gshell へ action を依頼するため、既存 modal range の末尾へ追加する。
 
-`SHUTDOWN`:
+```c
+#define GUI_OP_MODAL_RESULT      65
+#define GUI_OP_SESSION_REQUEST   66
 
-- アプリ終了後に FEP 描画コールバックを解除する。
-- `gfx_shutdown()` する。
-- `sys_halt()` する。
+#define GUI_SESSION_LAUNCH       1
+#define GUI_SESSION_SWITCH_CUI   2
+#define GUI_SESSION_SHUTDOWN     3
 
-### S4. X4 bounded-work
+typedef struct {
+    u8 action;
+    u8 flags;       /* v1.2 は 0 のみ */
+    u16 _pad;
+    GuiString value;
+} GuiReqSession;                    /* 260B */
+```
+
+`LAUNCH` の `value` は 1〜255B の絶対 path。`SWITCH_CUI` / `SHUTDOWN` は value 空。
+
+戻り値:
+
+- `0`: pending として受理。
+- `OS32_ERR_INVAL`: action / flags / path 不正。
+- `OS32_ERR_FULL`: 既に action pending。
+- `OS32_ERR_NOSYS`: 古い WM。
+
+成功は action の**完了**ではなく**受理**だけを意味する。
+
+### S5. Quit reason と sticky 配送
+
+既存 `GUI_EV_QUIT = 12` の `sub`:
+
+```c
+#define GUI_QUIT_REASON_REPLACE_APP  1
+#define GUI_QUIT_REASON_SWITCH_CUI   2
+#define GUI_QUIT_REASON_SHUTDOWN     3
+```
+
+0 は予約。
+
+Quit は control event なのでリング満杯で捨てない。WM は slot/owner に `quit_pending` を保持し、`OP_POLL` の返却準備または X3 で空きができるまで再配送する。`dropped` には加算しない。
+
+### S6. SWITCH_CUI
+
+SessionAction 実行は current app が終了して top-level へ戻ってから。
+
+1. cursor hide。
+2. `ime_set_render(NULL)`。
+3. `gfx_shutdown()`。
+4. `/etc/system.cfg` を `GUI=0` に更新。
+5. `sys_switch_shell("/sys/shell.bin")`。
+6. gshell exit。
+
+cfg 更新に失敗した場合、shell switch を実行せず desktop へ戻してエラー表示する。永続設定と実 shell の不一致を作らない。
+
+### S7. SHUTDOWN
+
+v1.2 の Shut Down は**電源 OFF ではなく system halt** とする。
+
+`sys_halt()` は 1 回の `hlt` であり IRQ 後に復帰するので、1 回呼んで終了扱いにしてはならない。
+
+1. current app を Quit で終了させる。
+2. cursor hide。
+3. `ime_set_render(NULL)`。
+4. `gfx_shutdown()`。
+5. 必要なら TVRAM に `System halted. Reset to restart.` を表示。
+6. `for (;;) { sys_halt(); }` に入り、通常 code へ二度と戻らない。
+
+### S8. X4 bounded-work
 
 syscall 境界ポンプ X4 では以下を禁止する。
 
-- VFS ディレクトリ走査
-- ファイル読み書き
+- VFS directory 走査
+- file 読み書き
 - `exec_run`
 - `system.cfg` 更新
-- モーダルのディレクトリ再走査
-- Start メニュー項目の生成
+- modal directory reload
+- Start menu 項目生成
+- full composite
 
-X4 は入力を取得して**要求を保留するところまで**とする。
-
-VFS、起動、終了処理、メニュー構築などは X3 または gshell トップレベルで行う。
+X4 は input 取得、cursor sprite、小さい pending flag 更新まで。VFS、起動、終了処理、menu 構築は X3 または gshell top-level で行う。
 
 ---
 
@@ -99,30 +160,30 @@ VFS、起動、終了処理、メニュー構築などは X3 または gshell �
 
 ### D1. タスクバー
 
-タスクバーは WM 自身の UI とし、アプリ用 Window / Surface / SHM スロットを消費しない。
+タスクバーは WM 自身の UI とし、app 用 Window / Surface / SHM slot を消費しない。
 
-- 高さ: 24 px
+- 高さ: 24px
 - 画面下端固定
 - 左: Start
-- 中央: 通常トップレベルウィンドウのボタン
+- 中央: visible top-level window button
 - 右: 時計
-- WM 内部描画 (契約 U8)
-- タスクバー領域のマウス入力はアプリへ配送しない
+- WM 内部描画 (U8)
+- taskbar 領域の mouse input は app へ配送しない
 
-クライアント作業領域:
+作業領域:
 
 ```text
 work_height = screen_height - 24
 ```
 
-- 640×400 → 640×376
-- 640×480 → 640×456
+- 640x400 -> 640x376
+- 640x480 -> 640x456
 
-既存アプリとの互換性のため、ウィンドウが作業領域外へ存在すること自体は fault にしない。新規配置・ドラッグ時だけ作業領域へクランプする。
+既存 app との互換性のため、window が work area 外へ存在すること自体は fault にしない。新規配置・drag 確定時だけ work area へ clamp。
 
-### D2. Start メニュー
+### D2. Start menu
 
-Win95 風の WM 内部メニューとする。
+Win95 風の WM 内部 menu。
 
 最低項目:
 
@@ -132,15 +193,21 @@ Win95 風の WM 内部メニューとする。
 - CUI mode
 - Shut Down
 
-`Programs` は `/usr/bin` の `.bin` を列挙する。
+Programs は `/usr/bin` の `.bin` を列挙し、v1.2 は最大 96 件。超過分は省略表示でよい。
 
-ディレクトリ走査はメニューを開いた X3 で行い、そのセッション中はキャッシュする。毎フレーム走査しない。
+Directory scan は menu open 時の X3 で 1 回だけ行い、open 中は cache。毎 frame / X4 では走査しない。
+
+`Run...` は Input dialog で絶対 path を受ける。PATH search / argument line は v1.2 対象外。
 
 ### D3. 時計
 
-`sys_time` / tick を用い、1 秒単位で更新する。
+`sys_time()` を用い HH:MM を表示する。1 秒より細かい更新は不要。
 
-時計更新だけで全画面再描画してはならない。時計矩形のみ dirty にする。
+表示が変わった時だけ時計矩形を dirty にする。時計更新だけで fullscreen present しない。
+
+### D4. WM context menu
+
+Desktop の right-click menu は WM internal overlay とする。最低 File Manager / Run... / Refresh Programs。
 
 ---
 
@@ -148,178 +215,232 @@ Win95 風の WM 内部メニューとする。
 
 ### M1. `GUI_OP_MODAL_RESULT`
 
-既存:
-
-```c
-#define GUI_OP_MODAL_OPEN 64
-```
-
-に続けて、末尾追記で:
-
 ```c
 #define GUI_OP_MODAL_RESULT 65
-```
 
-を追加する。
-
-要求:
-
-```c
 typedef struct {
     u16 dialog;
     u16 _pad;
-} GuiReqModalResult;
-```
+} GuiReqModalResult;                 /* 4B */
 
-応答:
-
-```c
 typedef struct {
     i16 result;
     u16 dialog;
     GuiString value;
-} GuiRespModalResult;
+} GuiRespModalResult;                /* 260B */
 ```
 
-`value` の意味:
+`value`:
 
-- Message box: 空
-- File Open: 選択したフルパス
-- Input: 入力された UTF-8 文字列
+- MessageBox: 空
+- File Open: 選択した絶対 path
+- Input: 入力した UTF-8
 
-最大 255 B。
+最大 255B。path/text を切り詰めて別値として返してはならない。
 
-### M2. 完了結果の保持
+### M2. completed result
 
-WM は各 GUI スロットにつき最低 1 件の completed-modal result を保持する。
+WM は各 GUI slot につき 1 件だけ completed result を保持する。
 
-ダイアログ完了時:
+- 未 consume result がある間、その slot の新しい `MODAL_OPEN` は `OS32_ERR_FULL`。
+- wrong dialog ID は `OS32_ERR_STALE`。
+- `MODAL_RESULT` 成功時は response を完全に書いてから consume。
+- 二重 consume は `OS32_ERR_STALE`。
+- owner 回収で result を破棄。
 
-1. completed result を保存する。
-2. その後 `Modal{dialog,result}` イベントをリングへ積む。
+### M3. Modal event は sticky
 
-したがってイベントリングが overflow しても、選択パスや入力文字列そのものを失わない。
+完了時は result を先に保存し、その後 `GUI_EV_MODAL` を配送する。
 
-`MODAL_RESULT(dialog)` 成功後に結果を consume する。
+Modal event も control event なので ring full で捨てない。pending bit を保持し、空きができるまで再配送する。これにより app は `on_modal` を受けて `MODAL_RESULT` を取得できる。
 
-owner 回収時には completed result も破棄する。
-
-### M3. Input dialog
-
-追加:
+### M4. Input dialog
 
 ```c
 #define GUI_MODAL_INPUT 4
 ```
 
-prompt は既存 `GuiReqModal.message` を使用する。
+prompt は既存 `GuiReqModal.message`。
 
-入力値は `MODAL_RESULT` で返す。
+- 1 line edit
+- OK / Cancel
+- UTF-8 codepoint 境界で caret 移動
+- BS / DEL / HOME / END
+- SHIFT+SPACE FEP
+- RETURN=OK / ESC=Cancel
+- 最大 255B
 
-v1.2 では初期値指定・パスフィルタ・複数選択は対象外。
+FEP 未確定 / candidate は modal caret に追従する。
 
 ---
 
 ## 4. V12-C: クライアント側追加
 
-KAPI v42 は変更しない。
+KAPI v42 / `GUI_PROTO_VERSION=1` / AppVTable 既存 layout を維持する。
 
-`gui_call()` が既に汎用入口なので、v1.2 の追加は GUI プロトコル内だけで完結させる。
+`libos32gui.shlib` entry 0〜94 は固定し、以下を追加する。
 
-`GUI_PROTO_VERSION` も 1 のままとし、互換な末尾追記だけを行う。
+```text
+95  os32gui_modal_open
+96  os32gui_modal_result
+97  os32gui_file_open
+98  os32gui_input_open
+99  os32gui_session_request
+100 os32gui_draw_icon16
+```
 
-`libos32gui.shlib` のジャンプ表にも末尾追記のみ行う。
-
-最低追加 API:
-
-- `modal_open`
-- `modal_result`
-- `file_open_dialog`
-- `input_dialog`
-- `draw_icon16`
-- client-side menu helper
+`SHLIB_NFUNC = 101`。
 
 互換条件:
 
-- 古いアプリ → 新しい shlib: そのまま動く。
-- 新しいアプリ → 古い shlib: 必要 `nfunc` が不足するため既存 bind 検査で拒否する。
-- AppVTable の既存フィールド配置は変更しない。
+- old app -> new shlib: 正常。
+- new app -> old shlib: `nfunc` 不足で bind 拒否。
+- new shlib -> old gshell: op 65/66 が `OS32_ERR_NOSYS`、wrapper はそのまま error を返す。
+- GUI protocol version mismatch: bind で拒否。
+
+File/Input dialog は非同期。open API が path/text を同期 return して nested event loop を作ってはならない。既存 `on_modal` 内から `modal_result()` で value を取得する。
 
 ---
 
-## 5. V12-I: アイコン
+## 5. V12-I: Icon16
 
-v1.2 のアイコンは 16×16 を標準とする。
+v1.2 の標準 icon は 16x16 固定。
 
-形式:
+```c
+typedef struct {
+    u8 pixels[128]; /* row-major 4bpp。even x=high nibble / odd x=low nibble */
+    u8 mask[32];    /* row-major 1bpp。bit7=左。1=opaque / 0=transparent */
+} GuiIcon16;        /* 160B */
+```
 
-- 16×16
-- 4 bpp = GUI システム 16 色
-- 1 bit transparency mask
-- 拡大縮小なし
+- 色 index は GUI system 16 色。
+- clipping 必須。
+- mask=0 は描かない。
+- 拡大縮小なし。
+- PNG / BMP / ICO decoder は v1.4 以降。
 
-PNG / BMP / ICO デコーダや任意サイズアイコンは v1.4 以降とする。
-
-WM と libos32gui で同じ論理形式を使用する。
+WM と libos32gui は同じ論理形式を使う。
 
 ---
 
-## 6. V12-F: ファイルマネージャ
+## 6. V12-F: File Manager
 
-Win3.1 風 2 ペインとする。
+Win3.1 風 2 pane。
 
 左:
 
-- ディレクトリ一覧
-- インデント + `[+]` / `[-]` による簡易ツリー
+- directory tree の簡易表示
+- indent + `[+]` / `[-]`
+- lazy load
 
 右:
 
-- ファイル一覧
+- current directory file list
+- name / size / type
 
-v1.2 必須操作:
+必須:
 
-- ディレクトリ移動
-- `.bin` 起動
+- navigate
+- `.bin` launch
 - mkdir
 - rename
 - delete / rmdir
 - file copy
 - 同一 FS 内 move
-- context menu
-- file open dialog との連携
+- right-click context menu
+- confirmation / input dialog
 
-専用 TreeView ABI は作らない。既存 listbox + クライアント側ロジックで実装する。
+専用 TreeView ABI は作らない。既存 listbox + client logic で実装。
 
-drag & drop、再帰ディレクトリコピー、サムネイルは対象外。
+### F1. Launch
+
+filer は `exec_run()` を直接呼ばない。`GUI_OP_SESSION_REQUEST / LAUNCH(path)` を使い、Quit を受けて終了した後に gshell が次 app を起動する。
+
+### F2. VFS
+
+KAPI v42 既存の `sys_ls/stat/mkdir/rename/unlink/rmdir/open/read/write/close` だけで実装する。KAPI 追加は禁止。
+
+### F3. Copy
+
+file のみ。4096B buffer で copy し、大きい file は 1 event-loop 周につき最大 16KB 程度へ分割して UI / Quit を生存させる。short write を扱う。
+
+partial destination は error を表示し、可能なら cleanup する。overwrite は confirmation 必須。
+
+### F4. Move
+
+同一 FS の `sys_rename` だけ。cross-FS copy+delete は対象外。
+
+### F5. client context menu
+
+popup Window ABI は作らず、owner window client surface 内の overlay とする。client rect 内へ clamp。ESC / outside click で close し、close rect を invalidate。
 
 ---
 
 ## 7. V12-P: 性能・安全条件
 
-- X4 で VFS / exec をしない。
-- 時計更新で fullscreen present しない。
-- Start メニューのディレクトリ走査は open 時のみ。
-- taskbar はアプリ用 Window 上限 16 を消費しない。
-- taskbar はアプリ用 SHM スロット 4 本を消費しない。
-- PC98 / PEGC / Cirrus の 3 バックエンドで同じデスクトップ機能を提供する。
-- v1.1 の G1〜G5 回帰をすべて維持する。
-- v1.1 で成立した Ring3 表示面隔離、PC98 fallback BB、PCD/PWT 保持を変更しない。
+- X4 で VFS / exec / cfg update をしない。
+- clock 更新で fullscreen present しない。
+- Start menu directory scan は open 時のみ。
+- taskbar は app Window 上限 16 を消費しない。
+- taskbar は app SHM slot 4 本を消費しない。
+- Quit / Modal completion event は ring full で捨てない。
+- session action は owner kill でも失わない。
+- file copy は event loop へ定期的に戻る。
+- PC98 / PEGC / Cirrus の 3 backend で同じ desktop 機能を提供する。
+- v1.1 G1〜G5 回帰を維持する。
+- v1.1 の Ring3 display isolation、PC98 fallback BB、PCD/PWT 保持を変更しない。
 
 ---
 
 ## 8. v1.2 対象外
 
-以下は v1.3 以降へ送る。
-
-- 複数外部アプリの同時実行
-- プリエンプティブ GUI
-- GUI ターミナル
-- CUI 出力リダイレクト
-- 任意ウィンドウ外へ出るアプリ用 popup-window ABI
+- 複数外部 app 同時実行
+- preemptive GUI
+- GUI terminal
+- CUI output redirect
+- app 用 popup-window ABI
 - drag & drop
-- 再帰ディレクトリコピー
-- サムネイル
-- PNG / BMP / ICO 等の任意アイコン形式
-- 新しい GFX バックエンド
-- 640×480 を超える解像度
+- recursive directory copy/delete
+- cross-FS move
+- thumbnail
+- PNG / BMP / ICO 等の任意 icon format
+- new GFX backend
+- 640x480 超の解像度
+- Start/Run の command-line argument / PATH search
+- true power-off control
+
+---
+
+## 9. 配備 / stale 規則
+
+- KAPI は v42 のままなので kernel/API 全体の version bump はしない。
+- GUI wire protocol は version 1 のまま、op を末尾追記。
+- shlib jump table を増やしたら `make clean && make all` と `make external` の要否を確認する。
+- v1.2 の gshell / shlib / v1.2 app は同一 image として配備する。
+- old app compatibility は維持する。
+- `make check-shlib` / `check_gui_proto.py` で stale を gate する。
+
+---
+
+## 10. 完了定義
+
+v1.2 完成とは、CUI command 入力なしで次を完走できること。
+
+```text
+OS boot
+ -> GUI desktop
+ -> Start
+ -> File Manager
+ -> file operations
+ -> GUI app launch
+ -> another app launch
+ -> CUI switch または system halt
+```
+
+かつ同じ手順が:
+
+- PC-9801 planar 640x400
+- PEGC 640x480
+- Cirrus 640x480
+
+の 3 backend で成立し、v1.1 の全 gate を regression しないこと。
