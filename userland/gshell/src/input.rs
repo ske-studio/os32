@@ -351,6 +351,8 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         let serial = next_serial(st, t.slot);
         let ev = ring::ev_key(down, t.win_id, scan, ch, mods as u8, serial);
         ring::append(st, t.slot, &ev);
+        crate::wm::dbg_inc(crate::wm::DBG_KEY_APPENDED);
+        crate::wm::dbg_set(crate::wm::DBG_TICK_KEY, st.now);
 
         /* 印字可能キーは Text も配送 (契約 U2a。FEP が消費していれば上で
          * continue しているので二重にはならない)。 */
