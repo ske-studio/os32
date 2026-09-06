@@ -148,28 +148,30 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
     let mut buf = [zero; GUI_RING_CAPACITY];
 
     loop {
+        /* (1) poll + handle: 状態更新 + invalidate だけ。ここで描かない。 */
         let p = client::poll(&mut buf)?;
-
-        /* 取りこぼしは受け取った周だけ「入力状態を未知」にする (契約 T3)。 */
-        s().input_unknown = p.overflow;
-        if p.overflow {
-            client::dbg_print_num(b"[gui] input OVERFLOW, dropped =", p.dropped as i32);
-            client::enter_handler();
-            app.on_overflow(ui, p.dropped);
-            client::leave_handler();
-        }
-
-        /* (1) handle: 状態更新 + invalidate だけ。ここで描かない。 */
-        client::enter_handler();
-        let mut i = 0;
-        while i < p.count {
-            dispatch(app, ui, &buf[i]);
-            i += 1;
-        }
-        client::leave_handler();
+        handle_events(app, ui, &buf, &p, true);
 
         /* (1b) 1 周分に溜まった損傷をまとめて申告する (契約 P: gui_call を減らす)。 */
+        let declared = s().damage.len > 0;
         flush_damage();
+
+        /* (1c) いま申告した損傷が `Paint` になるのは **次の `OP_POLL`** — WM は
+         * 処理中の `invalidate` を dirty に足すだけで、導出型を追記するのは
+         * `OP_POLL` だから (契約 G4 / T3)。ここで周を終えると、その `Paint` は
+         * 「次にこの周へ戻ってきたとき」まで描かれない。後続のイベントが続く
+         * 入力 (マウス: 移動 → 押下 → 解放) では次の周がすぐ来るので見えないが、
+         * 打鍵のように 1 発で終わる入力では**次に何か起きるまで画面が変わらない**
+         * (v1.2 G3 実測: HOME を押しても次のキーまで反映されない)。
+         *
+         * 申告した周のうちに `OP_POLL` をもう 1 回だけ回して `Paint` を取りに行く。
+         * 損傷を出さなかった周は今までどおり 1 回のまま。契約 P の gui_call 予算
+         * (POLL + COMMIT + WAIT が基本、合計 ≤ 10 / 周) の内側。 */
+        if declared {
+            let p2 = client::poll(&mut buf)?;
+            handle_events(app, ui, &buf, &p2, false);
+            flush_damage();
+        }
 
         /* (2) Paint を受けた窓を描く。 */
         paint_damaged(app, ui);
@@ -189,6 +191,30 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
         client::wait(ui.timeout_ticks)?;
     }
     Ok(())
+}
+
+/// `OP_POLL` 1 回分のイベントを配る。`first` = その周の最初の `OP_POLL` か
+/// (`OVERFLOW` は「受け取った周」の印なので、同じ周の 2 回目で下ろさない)。
+fn handle_events(app: &VApp, ui: &mut Ui, buf: &[GuiEvent], p: &client::Poll, first: bool) {
+    /* 取りこぼしは受け取った周だけ「入力状態を未知」にする (契約 T3)。 */
+    if first {
+        s().input_unknown = p.overflow;
+    } else if p.overflow {
+        s().input_unknown = true;
+    }
+    if p.overflow {
+        client::dbg_print_num(b"[gui] input OVERFLOW, dropped =", p.dropped as i32);
+        client::enter_handler();
+        app.on_overflow(ui, p.dropped);
+        client::leave_handler();
+    }
+    client::enter_handler();
+    let mut i = 0;
+    while i < p.count {
+        dispatch(app, ui, &buf[i]);
+        i += 1;
+    }
+    client::leave_handler();
 }
 
 /* ================================================================ */
