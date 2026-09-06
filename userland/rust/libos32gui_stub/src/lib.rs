@@ -28,6 +28,11 @@ pub mod timer;
 pub mod widget;
 pub mod window;
 
+/* ---- v1.2 デスクトップ client API (票 C4、契約 V12-C / V12-I / V12-S) ---- */
+pub mod icon;
+pub mod modal;
+pub mod session;
+
 /// ジャンプ表のエントリを取り出して呼ぶ。
 ///
 /// `$idx` は `os32api::gui::stub::E_*`、`$ty` はそのエントリの
@@ -54,12 +59,17 @@ pub mod gapi {
     pub use crate::surface::{
         create_surface, create_window_surface, destroy_surface, screen_surface, surface_size,
     };
+    /// 16x16 標準アイコン (契約 V12-I、票 C4)。
+    pub use crate::icon::{draw_icon16, GuiIcon16, ICON16_SIZE};
 }
 
 /* ---- よく使うものを直下へ (アプリの `use libos32gui::*;` 用) ---- */
 pub use app::{run, run_with, App, Ui};
 pub use client::{GuiErr, GuiResult};
+pub use icon::{draw_icon16, GuiIcon16};
 pub use layout::SizeSpec;
+pub use modal::{file_open, input_open, modal_open, modal_result, ModalResult};
+pub use session::{session_launch, session_request, session_shutdown, session_switch_cui};
 pub use timer::Timer;
 pub use widget::{WidgetEvent, WidgetId};
 pub use window::{Window, WindowSpec};
