@@ -273,6 +273,14 @@ static void cirrus_init(void)
     /* ボードを起こす。glue->init() の中で 0FABh レジスタ 02h が出て
      * リニア窓が開く (番地はボードの領分。include/wab_xe10.h §4)。 */
     if (s_glue->init) s_glue->init();
+    /* glue->init() の Video Subsystem Enable (FF82h) は NP21/W ではリレーを
+     * 98 側へ倒す。s_relay_on が 1 のまま (= 前回の init から leave() を
+     * 経ずに再 init された: gshell がアプリ終了後に gfx_init を呼び直す経路)
+     * だと直後の enter() が「もう入っている」と判断してリレーを立て直さず、
+     * デスクトップが 98 側の黒画面に隠れたままになる (2026-09-06 実測:
+     * gui_busy を CTRL+STOP で畳んだ後 wab_relay=0)。ハードの実状態に合わせて
+     * ここで 0 に戻し、enter() に必ず書かせる。 */
+    s_relay_on = 0;
 
     /* リニア窓を master PD に張る (H はページテーブルを触らない: K の API
      * 経由)。**supervisor + PCD** — USER は付けない (レビュー #5 ②)。
@@ -289,17 +297,24 @@ static void cirrus_init(void)
      * paging_addrspace_create() は master の PDE を全部コピーするので、
      * 物理そのものは以後に作られるアプリ PD からも見える (CPL=0 のみ、H3b)。 */
     npages = (s_glue->lin_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    /* 失敗しても「範囲内の分は適用済み」で返ってくる (paging_map_range の
+    /* 窓を張るのは **最初の init だけ** で、shutdown でも畳まない (下記)。
+     * 二度目以降の init で張り直すと、共有 PT の PTE を supervisor で上書きし、
+     * 起動中の CPL=3 アプリのために exec が立てたクライアント面の USER が
+     * 消える — 単独アプリ (gdi_test) は exec → gfx_init の順なので、まさに
+     * その順で #PF した (2026-09-06 実測 addr=0104B000h)。
+     * 失敗しても「範囲内の分は適用済み」で返ってくる (paging_map_range の
      * 契約) ので、剥がす枚数は呼ぶ前に控えておく。 */
-    s_lin_pages = npages;
-    if (paging_map_phys(s_glue->lin_base, s_glue->lin_base, npages,
-                        PAGE_RW | PTE_PCD) != 0) {
-        kprintf(0xC1, "[cirrus] linear window map failed\n");
-        cirrus_linear_unmap();
-        s_glue->relay(0);
-        s_probe_ok = 0;
-        cirrus_sync_io();
-        return;
+    if (s_lin_pages == 0) {
+        s_lin_pages = npages;
+        if (paging_map_phys(s_glue->lin_base, s_glue->lin_base, npages,
+                            PAGE_RW | PTE_PCD) != 0) {
+            kprintf(0xC1, "[cirrus] linear window map failed\n");
+            cirrus_linear_unmap();
+            s_glue->relay(0);
+            s_probe_ok = 0;
+            cirrus_sync_io();
+            return;
+        }
     }
     s_lin = (u8 *)s_glue->lin_base;
 
@@ -532,18 +547,22 @@ static void cirrus_leave(void)
 /*  shutdown — 98 側の表示へ戻す                                             */
 /*  leave() が呼ばれていなくてもリレーは必ず戻す (二重に呼んでも無害)。      */
 /*                                                                          */
-/*  リニア窓を畳むのは **ここだけ** (leave() ではない)。leave() は映像出力の  */
-/*  切替であって、enter() で戻ってくることがある — そこで窓を剥がすと        */
-/*  enter() 後の描画が Not-Present ページへの書き込みになる。                */
-/*  畳んだ時点で bb_base も NULL に戻るので、`gfxmode pc98` のあとに          */
-/*  gfx_get_framebuffer() が死んだ窓を指すことはない。                       */
+/*  リニア窓 (ページ) と bb_base は **畳まない** (レビュー #5 ② の追補、      */
+/*  2026-09-06)。exec は CPL=3 アプリを起動するたびに gfx_bb_phys_range() の  */
+/*  範囲をアプリ PD で USER へ昇格させるが、それは **アプリが gfx_init を     */
+/*  呼ぶ前** = 直前の shutdown の後。ここで窓を畳んで bb_base を NULL に      */
+/*  戻すと、単独アプリ (gdi_test / hello32) の exec 時点で昇格する範囲が無く、 */
+/*  gfx_init 後の最初の描画がクライアント面で #PF する。窓は起動時の最初の    */
+/*  init で一度だけ張り (supervisor + PCD)、以後は識別子として持ち続ける。    */
+/*  ハードウェア側 (レジスタ 02h) は wab_cirrus_shutdown が閉じ、次の init の */
+/*  glue->init() が開き直す。窓の番地は実 RAM の外なので、present のまま      */
+/*  残しても誰も踏まない。畳むのは init 途中の失敗 (cirrus_linear_unmap) だけ。*/
 /* ------------------------------------------------------------------------ */
 static void cirrus_shutdown(void)
 {
     if (!s_active) return;
     cirrus_leave();
     wab_cirrus_shutdown(s_glue);
-    cirrus_linear_unmap();
     cirrus_sync_io();
     gfx_current_height = GFX_HEIGHT;
     s_active = 0;
@@ -554,7 +573,8 @@ static void cirrus_shutdown(void)
 /*  bb_base / bb_size は init() が埋める (票 H3b): リニア窓の中の非表示面     */
 /*  = 01000000h + 04B000h の 300KB。窓が張れるまでは値が決まらないので、      */
 /*  静的初期化子では NULL / 0 のまま置く (PEGC と同じ流儀)。                 */
-/*  shutdown() が窓を畳むときに NULL / 0 へ戻す。                            */
+/*  最初の init() で決まったら shutdown() を挟んでも持ち続ける (exec が      */
+/*  アプリ起動時に見るため)。NULL に戻るのは init 途中の失敗だけ。           */
 /* ------------------------------------------------------------------------ */
 GfxBackend gfx_backend_cirrus = {
     "cirrus-gd54xx",

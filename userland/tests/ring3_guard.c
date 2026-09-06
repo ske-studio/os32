@@ -12,6 +12,15 @@
 /*                         ので保護違反 (#PF err bit0=1,bit1=1,bit2=1)。       */
 /*                         ライブラリ未ロードでも USER が立っていないので     */
 /*                         同じく #PF になる (どちらでも kill が正解)。       */
+/*    ring3_guard cirrus   ケース C: Cirrus のリニア窓オフセット 0 = 表示面    */
+/*                         (01000000h) へ書き込む。窓は master に supervisor   */
+/*                         + PCD で張られ、アプリ PD で USER になるのは         */
+/*                         クライアント面 (+4B000h) だけ (レビュー #5 ②)。     */
+/*                         Cirrus 無しの機種では Not-Present。どちらも #PF。   */
+/*    ring3_guard pegc     ケース D: PEGC のリニア窓 (F00000h) = 表示面へ      */
+/*                         書き込む。同じく supervisor か Not-Present。       */
+/*                         (9801 のプレーン VRAM A8000h は C2 で USER なので   */
+/*                          対象外 — あちらはバックバッファが主記憶にある)     */
 /*                                                                           */
 /*  動作:                                                                     */
 /*    1. テキスト VRAM に "RG"                                               */
@@ -26,7 +35,8 @@
 /*                                                                           */
 /*  引数は exec_run が CPL=3 のユーザスタックに call 互換で積む               */
 /*  ([esp]=ダミー retaddr, [esp+4]=argc, ...) ので、cdecl の宣言でそのまま     */
-/*  受け取れる。argv の中身は読まない (argc だけで分岐)。                     */
+/*  受け取れる。argv[1] の先頭 1 文字だけで分岐する (文字列はユーザスタック  */
+/*  上にあるので CPL=3 から読める)。                                          */
 /* ========================================================================= */
 
 void _start(int argc, char **argv) __attribute__((section(".text.startup"), used, noreturn));
@@ -40,13 +50,26 @@ void _start(int argc, char **argv)
     /* 共有ライブラリ帯域の先頭ページ = ジャンプ表 (.text/.rodata と同じ RO)。
      * include/memmap.h の MEM_SHLIB_BASE。カーネルヘッダは引けないので直値。 */
     volatile unsigned int   *shtext = (volatile unsigned int *)0x00400000UL;
-
-    (void)argv;
+    /* 表示面 (レビュー #5 ②)。Cirrus はグルーの lin_base (include/wab_xe10.h、
+     * 01000000h)、PEGC は PEGC_LINEAR_BASE (F00000h)。直値なのは上と同じ理由。 */
+    volatile unsigned int   *cirrus_vis = (volatile unsigned int *)0x01000000UL;
+    volatile unsigned int   *pegc_vis   = (volatile unsigned int *)0x00F00000UL;
+    char sel = (argc > 1 && argv[1]) ? argv[1][0] : 0;
 
     tvram[76] = (unsigned short)'R'; avram[76] = 0x00E5;
     tvram[77] = (unsigned short)'G'; avram[77] = 0x00E5;
 
-    if (argc > 1) {
+    if (sel == 'c') {
+        /* ---- ケース C: Cirrus 表示面 (リニア窓オフセット 0) ---- */
+        /* 0x3F534956 = LE 56 49 53 3F = "VIS?" */
+        mark[0] = 0x3F534956UL;
+        *cirrus_vis = 0xDEADBEEFUL;
+    } else if (sel == 'p') {
+        /* ---- ケース D: PEGC 表示面 (F00000h) ---- */
+        /* 0x3F474550 = LE 50 45 47 3F = "PEG?" */
+        mark[0] = 0x3F474550UL;
+        *pegc_vis = 0xDEADBEEFUL;
+    } else if (argc > 1) {
         /* ---- ケース B: 共有ライブラリ帯域 .text への書き込み (K3) ---- */
         /* 0x3F424C53 = LE 53 4C 42 3F = "SLB?" */
         mark[0] = 0x3F424C53UL;
