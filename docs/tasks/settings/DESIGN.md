@@ -218,6 +218,6 @@ tar c /hd0/backup/etc.tar /etc/settings.json /etc/system.cfg /etc/profile   # �
 | S3 | システム | `install --recover-settings` / `cdinst` 同等 (退避 → コピー → 表示 → sync) |
 | S4 | W | gshell の `GuiConfig` 読み込みと通知、設定の書き戻し点 (窓位置、壁紙)、`assets/filetypes` の移行 |
 | S5 | PM / 検証 | §6 の実測、リカバリの実走 (壊した DB → FDD ブート → 復元 → GUI 復帰)、3 バックエンド回帰。`export` → 壊す → `import` の往復も |
-| S6 | C | `tar` コマンド (ustar サブセット: regular / directory、100B 名、圧縮なし)。`lz4` と組み合わせて `etc.tar.lz4`。ホストの `tarfile` で読めることを確認 |
+| S6 | C | `tar` コマンド。**自作せず既製の単一ファイル実装を vendor する** (方針「車輪の再発明を避ける」): 第一候補 **microtar** (rxi、MIT、約 500 行、ustar の読み書き、I/O はコールバックなので KAPI の `sys_open/read/write` に差し替えるだけ)。GNU tar は不可 (gnulib + autotools、fork/exec で圧縮子を呼ぶ、数万行、GPL)。busybox tar (GPLv2) は MIT の本体と混ぜない。`lz4` と組み合わせて `etc.tar.lz4`。ホストの `tarfile` で読めることを確認 |
 
 順序: S1 → S2 → (S3 ∥ S4 ∥ S6) → S5。v1.4 の設定アプリはこの上に載る。
