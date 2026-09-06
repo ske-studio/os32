@@ -15,6 +15,14 @@ filesystem:
     - host: userland/shell.bin
       guest: /sys/shell.bin
       tags: [core]
+    # --- GUI シェル (WM 常駐、config.h SYS_GSHELL_BIN、K4 の起動ループが読む) ---
+    - host: userland/gshell.bin
+      guest: /bin/gshell.bin
+      tags: [core]
+    # --- GUI 共有ライブラリ (0x400000 常駐、config.h SYS_SHLIB_GUI、K3 のローダが起動時に読む) ---
+    - host: userland/libos32gui.shlib
+      guest: /sys/lib/libos32gui.shlib
+      tags: [core]
     # --- システム管理プログラム → /sbin/ ---
     - host: userland/system/install.bin
       guest: /sbin/
@@ -44,6 +52,13 @@ filesystem:
       guest: /usr/bin/
       tags: [programs]
     - host: userland/tests/mouse_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: userland/tests/gui_call_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    # --- K2 の完了条件アプリ (計算中の syscall 境界ポンプ、--nokapi で CTRL+STOP 脱出) ---
+    - host: userland/tests/gui_busy.bin
       guest: /usr/bin/
       tags: [programs]
     - host: userland/tests/blit_test.bin
@@ -229,6 +244,17 @@ filesystem:
       tags: [programs]
     # --- GUI デモ (libos32gui) ---
     - host: userland/tests/gui_demo.bin
+      guest: /usr/bin/
+      tags: [programs]
+    # --- GUI G1 ゲート描画テスト (libos32gui) ---
+    - host: userland/tests/gdi_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    # --- GUI C2: パレットリース検証 (W2) と入力→表示の測定器 (契約 P2) ---
+    - host: userland/tests/lease_test.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: userland/tests/gui_bench.bin
       guest: /usr/bin/
       tags: [programs]
     - host: userland/tests/font_load_test.bin

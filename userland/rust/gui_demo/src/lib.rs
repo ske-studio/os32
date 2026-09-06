@@ -1,162 +1,242 @@
-//! gui_demo — libos32gui の目視確認デモ (2nd スコープ)
+//! gui_demo — GUI シェル v1.1 の目視確認デモ (票 C2 作業 8、ゲート G2 のアプリ側)
+//!
+//! gshell (WM) の下で動く**普通のアプリ**。旧版の「アプリの中で WM を動かす」
+//! 構成 (`gui_pump` / `gui_draw`) は廃止し、契約 U3 のループ + 所有型 + `row` /
+//! `column` の箱レイアウトに書き換えた。
 //!
 //! Window 1「Widgets」: テキストボックス / チェックボックス / リストボックス /
-//!   OK ボタン と、それぞれの状態を映すラベル。
+//!   OK ボタンと、それぞれの状態を映すラベル。
 //! Window 2「Help」: 操作説明。
 //!
-//! 確認できること:
-//!   - Zオーダー/移動/前面化/閉じる (1st スコープ)
-//!   - テキストボックス編集: フォーカス中にタイプ、← → で移動、BS/DEL で削除
-//!   - チェックボックス: クリック or SPACE でトグル
-//!   - リストボックス: クリック or ↑↓ で選択移動
-//!   - Tab / Shift+Tab: フォーカスウィジェット移動 (青い枠)
-//!   - キーは最前面ウィンドウのフォーカスウィジェットへ届く
+//! 確認できること (ゲート G2):
+//!   - 窓 2 枚・タイトルバーのドラッグ・前面化・閉じるボタン (WM 側)
+//!   - テキストボックス編集 (タイプ / ← → / BS / DEL / HOME)
+//!   - チェックボックス (クリック or SPACE)
+//!   - リストボックス (クリック or ↑↓ / ROLL)
+//!   - Tab / Shift+Tab のフォーカス移動 (点線の枠)
+//!   - 400 / 480 ラインで崩れないこと (すべて row / column)
 //!
-//! 起動: シェルから `gui_demo`。終了: 全ウィンドウを閉じる or ESC。
+//! 起動: gshell の F1、またはシェルから `gui_demo`。終了: ESC / 窓を全部閉じる。
 #![no_std]
 #![no_main]
 
+extern crate libos32gui;
 extern crate os32api;
 
+use libos32gui::widget::{self, WidgetId, SCAN_ESC};
+use libos32gui::{App, SizeSpec, Ui, Window, WindowSpec};
+use os32api::gui::types::Rect;
 use os32api::KernelAPI;
-
-const ESC: i32 = 27;
 
 #[no_mangle]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI) -> i32 {
-    os32api::os32_init(api);
-    if libos32gui::gui_init(api) != 0 {
+    if libos32gui::init(api).is_err() {
         return -1;
     }
-
-    /* ---- Window 1: ウィジェット ---- */
-    let w1 = libos32gui::gui_create_window(
-        40,
-        40,
-        320,
-        236,
-        b"Widgets\0".as_ptr(),
-        libos32gui::GUI_WF_DEFAULT,
-    );
-    libos32gui::gui_add_label(w1, 12, 10, b"name:\0".as_ptr());
-    let tb = libos32gui::gui_add_textbox(w1, 60, 6, 236, 20);
-    let cb = libos32gui::gui_add_checkbox(w1, 12, 36, b"Enable sound\0".as_ptr());
-    let lbl_cb = libos32gui::gui_add_label(w1, 12, 60, b"sound: OFF\0".as_ptr());
-    let lb = libos32gui::gui_add_listbox(w1, 12, 84, 170, 80);
-    libos32gui::gui_listbox_add_item(lb, b"Apple\0".as_ptr());
-    libos32gui::gui_listbox_add_item(lb, b"Banana\0".as_ptr());
-    libos32gui::gui_listbox_add_item(lb, b"Cherry\0".as_ptr());
-    libos32gui::gui_listbox_add_item(lb, b"Durian\0".as_ptr());
-    libos32gui::gui_listbox_add_item(lb, b"Elderberry\0".as_ptr());
-    libos32gui::gui_listbox_add_item(lb, b"Fig\0".as_ptr());
-    let lbl_sel = libos32gui::gui_add_label(w1, 196, 88, b"sel: -\0".as_ptr());
-    let btn = libos32gui::gui_add_button(w1, 196, 116, 100, 26, b"OK\0".as_ptr());
-    let lbl_tb = libos32gui::gui_add_label(w1, 12, 176, b"text:\0".as_ptr());
-    let lbl_ok = libos32gui::gui_add_label(w1, 12, 200, b"\0".as_ptr());
-
-    /* ---- Window 2: ヘルプ ---- */
-    let w2 = libos32gui::gui_create_window(
-        378,
-        66,
-        236,
-        176,
-        b"Help\0".as_ptr(),
-        libos32gui::GUI_WF_DEFAULT,
-    );
-    libos32gui::gui_add_label(w2, 12, 10, b"Tab: next widget\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 30, b"S-Tab: prev widget\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 50, b"type: edit textbox\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 70, b"SPACE: toggle check\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 90, b"UP/DOWN: list select\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 110, b"drag title: move win\0".as_ptr());
-    libos32gui::gui_add_label(w2, 12, 130, b"x: close   ESC: quit\0".as_ptr());
-
-    /* Window 1 を最前面・フォーカスに */
-    libos32gui::gui_set_focus(w1);
-
-    let mut running = true;
-    while running {
-        libos32gui::gui_pump();
-
-        let mut ev = libos32gui::GuiEvent::NONE;
-        while unsafe { libos32gui::gui_poll_event(&mut ev as *mut _) } != 0 {
-            match ev.kind {
-                libos32gui::GUI_EV_WIN_CLOSE => {
-                    libos32gui::gui_destroy_window(ev.win_id);
-                }
-                libos32gui::GUI_EV_TEXT_CHANGED => {
-                    if ev.widget_id == tb {
-                        let mut content = [0u8; 40];
-                        unsafe {
-                            libos32gui::gui_textbox_get_text(tb, content.as_mut_ptr(), 40);
-                        }
-                        let mut buf = [0u8; 64];
-                        let n = concat(&mut buf, b"text: ", &content);
-                        buf[n] = 0;
-                        libos32gui::gui_widget_set_text(lbl_tb, buf.as_ptr());
-                    }
-                }
-                libos32gui::GUI_EV_CHECKBOX_TOGGLED => {
-                    if ev.widget_id == cb {
-                        let msg: &[u8] = if ev.button != 0 {
-                            b"sound: ON\0"
-                        } else {
-                            b"sound: OFF\0"
-                        };
-                        libos32gui::gui_widget_set_text(lbl_cb, msg.as_ptr());
-                    }
-                }
-                libos32gui::GUI_EV_LIST_SELECT => {
-                    if ev.widget_id == lb {
-                        let mut item = [0u8; 40];
-                        unsafe {
-                            libos32gui::gui_listbox_get_item_text(lb, ev.x, item.as_mut_ptr(), 40);
-                        }
-                        let mut buf = [0u8; 64];
-                        let n = concat(&mut buf, b"sel: ", &item);
-                        buf[n] = 0;
-                        libos32gui::gui_widget_set_text(lbl_sel, buf.as_ptr());
-                    }
-                }
-                libos32gui::GUI_EV_BUTTON_CLICK => {
-                    if ev.widget_id == btn {
-                        libos32gui::gui_widget_set_text(lbl_ok, b"OK pressed!\0".as_ptr());
-                    }
-                }
-                libos32gui::GUI_EV_KEY => {
-                    if ev.key == ESC {
-                        running = false;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if libos32gui::gui_window_count() == 0 {
-            running = false;
-        }
-
-        libos32gui::gui_draw();
-
-        let t0 = os32api::get_tick();
-        while os32api::get_tick() == t0 {}
-    }
-
-    libos32gui::gui_shutdown();
+    let mut demo = match Demo::build() {
+        Ok(d) => d,
+        Err(e) => return e.code(),
+    };
+    let _ = libos32gui::run(&mut demo);
     0
 }
 
-/* prefix + NUL 終端 src を dst に連結。返り値: 書いたバイト数 (NUL 除く) */
+/* ================================================================ */
+/*  アプリの状態 (窓は所有型。Drop で WM へ DESTROY)                 */
+/* ================================================================ */
+
+struct Demo {
+    w1: Option<Window>,
+    w2: Option<Window>,
+    tb: WidgetId,
+    cb: WidgetId,
+    lb: WidgetId,
+    btn: WidgetId,
+    lbl_cb: WidgetId,
+    lbl_sel: WidgetId,
+    lbl_tb: WidgetId,
+    lbl_ok: WidgetId,
+}
+
+impl Demo {
+    fn build() -> libos32gui::GuiResult<Demo> {
+        /* 画面能力を信じる (契約 G5: 640×400 / 16 色を決め打ちしない)。 */
+        let info = libos32gui::gapi::screen_info();
+        let sw = info.width as i32;
+        let sh = info.height as i32;
+        let w1w = clamp(sw / 2, 220, 330);
+        let w1h = clamp(sh * 3 / 5, 150, 240);
+        let w2w = clamp(sw * 2 / 5, 200, 244);
+        let w2h = clamp(sh * 45 / 100, 120, 180);
+
+        /* ---- Window 1: ウィジェット ---- */
+        let w1 = Window::create(
+            &WindowSpec::new(
+                b"Widgets",
+                Rect::new((sw / 16) as i16, (sh / 10) as i16, w1w as i16, w1h as i16),
+            )
+            .min_size(220, 150),
+        )?;
+
+        let root = widget::column(8, 6)?;
+
+        let name_row = widget::row(0, 6)?;
+        let lbl_name = widget::label(b"name:")?;
+        let tb = widget::textbox(b"")?;
+        widget::add(name_row, lbl_name, SizeSpec::Fixed(48))?;
+        widget::add(name_row, tb, SizeSpec::Flex(1))?;
+        widget::add(root, name_row, SizeSpec::Fixed(20))?;
+
+        let cb = widget::checkbox(b"Enable sound", false)?;
+        widget::add(root, cb, SizeSpec::Fixed(18))?;
+
+        let lbl_cb = widget::label(b"sound: OFF")?;
+        widget::add(root, lbl_cb, SizeSpec::Fixed(16))?;
+
+        let mid = widget::row(0, 8)?;
+        let lb = widget::listbox()?;
+        widget::list_add(lb, b"Apple")?;
+        widget::list_add(lb, b"Banana")?;
+        widget::list_add(lb, b"Cherry")?;
+        widget::list_add(lb, b"Durian")?;
+        widget::list_add(lb, b"Elderberry")?;
+        widget::list_add(lb, b"Fig")?;
+
+        let side = widget::column(0, 6)?;
+        let lbl_sel = widget::label(b"sel: Apple")?;
+        let btn = widget::button(b"OK")?;
+        let lbl_ok = widget::label(b"")?;
+        widget::add(side, lbl_sel, SizeSpec::Fixed(16))?;
+        widget::add(side, btn, SizeSpec::Fixed(26))?;
+        widget::add(side, lbl_ok, SizeSpec::Flex(1))?;
+
+        widget::add(mid, lb, SizeSpec::Flex(2))?;
+        widget::add(mid, side, SizeSpec::Flex(1))?;
+        widget::add(root, mid, SizeSpec::Flex(1))?;
+
+        let lbl_tb = widget::label(b"text:")?;
+        widget::add(root, lbl_tb, SizeSpec::Fixed(16))?;
+
+        w1.set_root(root)?;
+
+        /* ---- Window 2: ヘルプ ---- */
+        let w2x = clamp(sw / 16 + w1w + 12, 0, sw - w2w - 4);
+        let w2 = Window::create(&WindowSpec::new(
+            b"Help",
+            Rect::new(w2x as i16, (sh / 6) as i16, w2w as i16, w2h as i16),
+        ))?;
+        let help = widget::column(8, 4)?;
+        add_help(help, b"Tab: next widget")?;
+        add_help(help, b"S-Tab: prev widget")?;
+        add_help(help, b"type: edit textbox")?;
+        add_help(help, b"SPACE: toggle check")?;
+        add_help(help, b"UP/DOWN: list select")?;
+        add_help(help, b"drag title: move win")?;
+        add_help(help, b"x: close   ESC: quit")?;
+        w2.set_root(help)?;
+
+        /* Window 1 を最前面・フォーカスに */
+        w1.set_focus()?;
+
+        Ok(Demo {
+            w1: Some(w1),
+            w2: Some(w2),
+            tb,
+            cb,
+            lb,
+            btn,
+            lbl_cb,
+            lbl_sel,
+            lbl_tb,
+            lbl_ok,
+        })
+    }
+}
+
+fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+fn add_help(parent: WidgetId, text: &[u8]) -> libos32gui::GuiResult<()> {
+    let l = widget::label(text)?;
+    widget::add(parent, l, SizeSpec::Fixed(18))
+}
+
+/* ================================================================ */
+/*  ハンドラ (種別ごと。巨大 switch は書かない — 契約 U6)             */
+/* ================================================================ */
+
+impl App for Demo {
+    fn on_click(&mut self, _ui: &mut Ui, w: WidgetId) {
+        if w == self.btn {
+            let _ = widget::set_text(self.lbl_ok, b"OK pressed!");
+        }
+    }
+
+    fn on_toggled(&mut self, _ui: &mut Ui, w: WidgetId, on: bool) {
+        if w == self.cb {
+            let msg: &[u8] = if on { b"sound: ON" } else { b"sound: OFF" };
+            let _ = widget::set_text(self.lbl_cb, msg);
+        }
+    }
+
+    fn on_text_changed(&mut self, _ui: &mut Ui, w: WidgetId) {
+        if w == self.tb {
+            let mut content = [0u8; 48];
+            let n = widget::text(self.tb, &mut content);
+            let mut buf = [0u8; 64];
+            let k = concat(&mut buf, b"text: ", &content[..n]);
+            let _ = widget::set_text(self.lbl_tb, &buf[..k]);
+        }
+    }
+
+    fn on_select(&mut self, _ui: &mut Ui, w: WidgetId, index: i32) {
+        if w == self.lb {
+            let mut item = [0u8; 40];
+            let n = widget::list_item_text(self.lb, index, &mut item);
+            let mut buf = [0u8; 64];
+            let k = concat(&mut buf, b"sel: ", &item[..n]);
+            let _ = widget::set_text(self.lbl_sel, &buf[..k]);
+        }
+    }
+
+    /// 閉じるボタン: その窓だけ落とす (`Option::take` → `Drop` で DESTROY)。
+    fn on_close(&mut self, ui: &mut Ui, window: u32) {
+        if self.w1.as_ref().map(|w| w.id()) == Some(window) {
+            self.w1 = None;
+        } else if self.w2.as_ref().map(|w| w.id()) == Some(window) {
+            self.w2 = None;
+        }
+        if self.w1.is_none() && self.w2.is_none() {
+            ui.quit();
+        }
+    }
+
+    /// ESC で終了 (契約 U2a: `scan` は PC-98 スキャンコード)。
+    fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, _ch: u8, _mods: u8, down: bool) {
+        if down && scan == SCAN_ESC {
+            ui.quit();
+        }
+    }
+}
+
+/* prefix + src を dst に詰める。返り値: 書いたバイト数。 */
 fn concat(dst: &mut [u8], prefix: &[u8], src: &[u8]) -> usize {
     let mut n = 0usize;
     let mut i = 0;
-    while i < prefix.len() && n + 1 < dst.len() {
+    while i < prefix.len() && n < dst.len() {
         dst[n] = prefix[i];
         n += 1;
         i += 1;
     }
     let mut j = 0;
-    while j < src.len() && src[j] != 0 && n + 1 < dst.len() {
+    while j < src.len() && src[j] != 0 && n < dst.len() {
         dst[n] = src[j];
         n += 1;
         j += 1;

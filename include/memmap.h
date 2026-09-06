@@ -41,8 +41,14 @@
 /*      ガード            スタックガード (NP)                                 */
 /*      ~0x3FFFFF         スタック (下向き成長)                               */
 /*                                                                          */
-/*    [プログラム空間 0x400000-メモリ上限]  ※旧アドレス維持                  */
-/*      0x400000          外部プログラム code+bss → sbrk (固定上限なし)      */
+/*    [共有ライブラリ帯域 0x400000-0x4FFFFF, 1MB]  (GUI v1.1 K3)             */
+/*      0x400000          libos32gui.shlib の先頭ページ = ジャンプ表          */
+/*      +text_pages       .text/.rodata (read-only + USER、全 PD 共有)        */
+/*      data_vaddr        .data/.bss (アプリごとの物理ページを同じ仮想番地に) */
+/*      帯域末尾          .data/.bss の原本 (ロード時に退避、複製元)          */
+/*                                                                          */
+/*    [プログラム空間 0x500000-メモリ上限]  ※2026-09-05 に 1MB 上へ移動      */
+/*      0x500000          外部プログラム code+bss → sbrk (固定上限なし)      */
 /*      ガード A          sbrk 上限ガード (exec_heap の直下、位置は動的)       */
 /*      ~ヒープ上端       exec_heap (KAPI mem_alloc、スタックガード直下)     */
 /*      ~mem_end          プログラムスタック (256KB)                          */
@@ -146,6 +152,27 @@ extern u32 __bss_end;
 #define MEM_GFX_BB_BASE         0x6A000UL
 #define MEM_GFX_BB_SIZE         0x20000UL  /* 128KB (32000B×4プレーン, 0x6A000-0x89FFF) */
 
+/* ====================================================================== */
+/*  8bpp パックドバックバッファ (PEGC 256 色, GUI v1.1 H2)                  */
+/*                                                                          */
+/*  640×480×1B = 307,200B = ちょうど 75 ページ。9801 の 4 プレーン用         */
+/*  128KB (MEM_GFX_BB_BASE) には収まらず、コンベンショナルの空き            */
+/*  (0x8A000-0x9FFFF, 88KB) にも入らない。                                  */
+/*                                                                          */
+/*  **置き場所は物理メモリの末尾** — ホットデプロイ窓の直下を削って取る。    */
+/*  0x400000-0x7FFFFF (アプリ帯 PDE 1) は PD ごとに差し替わるので共有面を    */
+/*  置けず、それ以外の 0x500000〜mem_end は CPL=0 子プロセスの              */
+/*  コード/ヒープ/スタックが sys_usable_mem_end() まで使い切る。よって      */
+/*  「使ってよい上限」そのものを下げる sys_reserve_top() が唯一の安全策。    */
+/*  予約は PEGC バックエンドが選ばれたときだけ行い、9801 では 0 バイト =     */
+/*  従来と完全に同じレイアウトになる (H2 の 9801 回帰ゼロ条件)。            */
+/* ====================================================================== */
+#define MEM_GFX_BB8_WIDTH       640UL
+#define MEM_GFX_BB8_HEIGHT      480UL
+#define MEM_GFX_BB8_PITCH       MEM_GFX_BB8_WIDTH        /* 1B/px パックド */
+#define MEM_GFX_BB8_SIZE        (MEM_GFX_BB8_PITCH * MEM_GFX_BB8_HEIGHT)
+                                                         /* 307200B = 75 ページ */
+
 /* KernelAPIテーブルアドレスは os32_kapi_shared.h で定義 (KAPI_ADDR) */
 
 /* ====================================================================== */
@@ -163,6 +190,17 @@ extern u32 __bss_end;
 #define MEM_SHM_SIZE          0x040000UL  /* 256KB */
 #define MEM_SHM_END           (MEM_SHM_BASE + MEM_SHM_SIZE - 1)
 #define MEM_SHM_GUARD_HI      (MEM_SHM_BASE + MEM_SHM_SIZE)
+
+/* GUI 予約 SHM (契約 T2 / docs/tasks/gui/API_CONTRACTS.md)。
+ * SHM 帯 (MEM_SHM_BASE, 16KB×16 ブロック) の末尾側ブロック 12〜15
+ * (先頭 +192KB から 64KB) を GUI 用に固定予約する。kernel/shm.c の初期化で
+ * この 4 ブロックを SHM_RESERVED にし、shm_alloc が配らないようにする。
+ * 1 スロット (16KB) = アプリ 1 本、最大 4 アプリ (v1 はスロット 0 のみ)。
+ * PTE は SHM 帯として既に RW+USER (v2 C2)。 */
+#define MEM_SHM_GUI_BASE      (MEM_SHM_BASE + 0x30000UL)  /* +192KB = ブロック 12 */
+#define MEM_SHM_GUI_SIZE      0x10000UL                    /* 64KB = 4 ブロック */
+#define GUI_SLOT_SIZE         0x4000UL                     /* 16KB = 1 スロット */
+#define GUI_SLOT_MAX          4                            /* スロット 0〜3 */
 
 /* カーネル帯域終端 */
 #define MEM_KERNEL_BAND_END   0x1FFFFFUL
@@ -211,11 +249,49 @@ extern u32 __sqlite_end;
 #define MEM_SHELL_BAND_END    0x3FFFFFUL  /* シェル帯域終端 */
 
 /* ====================================================================== */
-/*  外部プログラムロード関連 (子プロセス用: 0x400000〜)                      */
+/*  アプリ帯域 (APP_BAND_PDE = PDE 1, 0x400000-0x7FFFFF)                    */
+/*                                                                          */
+/*  この 4MB だけが「PD ごと」の帯域 (kernel/paging.h の CONTRACTS C2)。     */
+/*  先頭 1MB を共有ライブラリに、残りを外部プログラム本体とユーザスタックに   */
+/*  割り当てる。PDE 単位で切り替わるので、境界を PDE をまたぐ位置へ動かして   */
+/*  はならない (paging.c の STATIC_ASSERT が検査する)。                      */
+/* ====================================================================== */
+#define MEM_APP_BAND_BASE     0x400000UL  /* PDE 1 の先頭 */
+#define MEM_APP_BAND_TOP      0x800000UL  /* PDE 1 の上端 (exclusive) */
+
+/* ====================================================================== */
+/*  共有ライブラリ帯域 (0x400000-0x4FFFFF, 1MB)  — GUI v1.1 K3              */
+/*                                                                          */
+/*  固定アドレス常駐の位置依存ライブラリ (再配置なし、ロードアドレスは 1 つ)。 */
+/*  カーネル (kernel/shlib.c) が /sys/lib/libos32gui.shlib を起動時にここへ  */
+/*  読み、レイアウトは先頭ページの OS32ShlibHeader が決める:                 */
+/*                                                                          */
+/*    0x400000                          ジャンプ表 (OS32_SHLIB_HDR_SIZE=4KB) */
+/*    +.. text_pages ページ             .text/.rodata — read-only + USER。   */
+/*                                      master PD に張るので全 PD で共有。   */
+/*    data_vaddr .. +data_pages ページ  .data/.bss — 同じ仮想番地に          */
+/*                                      **アプリごとの物理ページ**を張る。    */
+/*    帯域末尾 data_pages ページ         .data/.bss の原本 (複製元)。          */
+/*                                      pgalloc の管理外に置くため帯域内。    */
+/*                                                                          */
+/*  帯域全体はロード成功時に pgalloc_mark_used() で予約する (子プロセスの     */
+/*  claim は MEM_EXEC_LOAD_ADDR からなので、ここは別に押さえないと            */
+/*  PD/PT や V86 バッキングに持っていかれる)。未ロードなら予約しない。        */
+/* ====================================================================== */
+#define MEM_SHLIB_BASE        MEM_APP_BAND_BASE   /* 0x400000 */
+#define MEM_SHLIB_SIZE        0x100000UL          /* 1MB */
+#define MEM_SHLIB_END         (MEM_SHLIB_BASE + MEM_SHLIB_SIZE)  /* 0x500000 */
+
+/* ====================================================================== */
+/*  外部プログラムロード関連 (子プロセス用: 0x500000〜)                      */
 /*  シェル常駐帯域とは完全に分離。アイデンティティマッピング。               */
 /*  スタック/ヒープは exec_run() にてシステムメモリ量から動的に計算される      */
+/*                                                                          */
+/*  2026-09-05 (K3): 共有ライブラリ帯域を下に挿し込んだので 0x400000 →       */
+/*  0x500000 へ 1MB 上がった。sdk/link/app.ld と mkos32x の load_addr、      */
+/*  および exec の旧バイナリ判定がこの値に追従する。                          */
 /* ====================================================================== */
-#define MEM_EXEC_LOAD_ADDR    0x400000UL
+#define MEM_EXEC_LOAD_ADDR    MEM_SHLIB_END
 /* 子プロセス帯のレイアウト (2026-09-04 に固定 1MB 上限を撤廃):
  *   [load .. code_end)            code + data + bss
  *   [code_end .. guard_a)         newlib sbrk (少なくとも MEM_EXEC_SBRK_MIN)

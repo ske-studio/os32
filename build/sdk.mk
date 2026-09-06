@@ -100,7 +100,7 @@ check-constraints:
 check-privileged:
 	@python3 tools/check_privileged.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)

@@ -198,6 +198,40 @@ void gfx_free_sprite(GFX_Sprite *spr)
 
 extern void __cdecl asm_gfx_draw_sprite_core(int x, int y, int w, int h, int src_pitch, const u8 **planes, const u8 *mask, u8 **bb_array);
 
+/* パックド 8bpp のスプライト転送 (票 H2b)。
+ * スプライトのデータ自体は 4 プレーン + マスクのまま (x&7 でシフト済みの
+ * 8 通りを持つ形式) で、ここで 1 画素ずつ色を組み立てて画面へ置く。
+ * 画面の左端バイト列は x & ~7 — シフト済みデータの位置に合わせる。
+ * mask のビットが 1 = 透過 (書かない)。 */
+static void gfx_draw_sprite_packed(int x, int y, int h, int pitch,
+                                   const u8 **planes, const u8 *mask)
+{
+    int cols = pitch * 8;
+    int basex = x & ~7;
+    int iy, col, p;
+
+    for (iy = 0; iy < h; iy++) {
+        int py = y + iy;
+        int row_off;
+        if (py < 0 || py >= gfx_fb.height) continue;
+        row_off = iy * pitch;
+        for (col = 0; col < cols; col++) {
+            int off = row_off + (col >> 3);
+            u8 bit = (u8)(0x80 >> (col & 7));
+            int px;
+            u8 color;
+            if (mask[off] & bit) continue;      /* 透過 */
+            px = basex + col;
+            if (px < 0 || px >= gfx_fb.width) continue;
+            color = 0;
+            for (p = 0; p < 4; p++) {
+                if (planes[p][off] & bit) color |= (u8)(1 << p);
+            }
+            gfx_fb.planes[0][py * gfx_fb.pitch + px] = color;
+        }
+    }
+}
+
 void gfx_draw_sprite(int x, int y, const GFX_Sprite *spr)
 {
     if (!spr) return;
@@ -224,7 +258,10 @@ void gfx_draw_sprite(int x, int y, const GFX_Sprite *spr)
             }
 
             if (mask) {
-                asm_gfx_draw_sprite_core(x, y, spr->w, spr->h, spr->pitch, planes, mask, gfx_fb.planes);
+                if (gfx_packed)
+                    gfx_draw_sprite_packed(x, y, spr->h, spr->pitch, planes, mask);
+                else
+                    asm_gfx_draw_sprite_core(x, y, spr->w, spr->h, spr->pitch, planes, mask, gfx_fb.planes);
             }
         }
     }

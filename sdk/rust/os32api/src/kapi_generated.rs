@@ -180,13 +180,22 @@ pub struct KernelAPI {
     /* idx 170 */ pub gfx_screen_info: unsafe extern "C" fn(out: *mut u8),
     /* idx 171 */ pub gfx_hw_fill_rect: unsafe extern "C" fn(x: i32, y: i32, w: i32, h: i32, color: u8) -> i32,
     /* idx 172 */ pub gfx_hw_blit: unsafe extern "C" fn(dx: i32, dy: i32, sx: i32, sy: i32, w: i32, h: i32) -> i32,
+    /* idx 173 */ pub gui_call: unsafe extern "C" fn(op: u32, arg: u32) -> i32,
+    /* idx 174 */ pub gui_register: unsafe extern "C" fn(handler: *mut u8, pump: *mut u8) -> i32,
+    /* idx 175 */ pub gfx_stats: unsafe extern "C" fn(out: *mut u8) -> i32,
+    /* idx 176 */ pub gfx_lease_palette: unsafe extern "C" fn(first: i32, count: i32, rgb: *const u8) -> i32,
+    /* idx 177 */ pub sys_switch_shell: unsafe extern "C" fn(path: *const u8) -> i32,
+    /* idx 178 */ pub kbd_dropped_count: unsafe extern "C" fn() -> u32,
+    /* idx 179 */ pub kbd_trygetrawkey: unsafe extern "C" fn() -> i32,
+    /* idx 180 */ pub ime_feed_key: unsafe extern "C" fn(keydata: i32) -> i32,
+    /* idx 181 */ pub ime_set_render: unsafe extern "C" fn(table: *mut u8),
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 40;
+pub const KAPI_VERSION: u32 = 42;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

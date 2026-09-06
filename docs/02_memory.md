@@ -53,8 +53,40 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > 2026-09-03 に exec_heap を 0x380000 (旧 NP ギャップ) へ分離した。
 > PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
-[ プログラム空間 (0x400000 - mem_end) — 動的レイアウト ]
-0x400000 - code_end                .text + .data + .bss (固定上限なし)        R/W
+[ ページング (H3b 2026-09-06) ]
+恒等マップの守備範囲は 32MB (PAGING_MAP_SIZE、PT 8 枚 = +16KB BSS)。実 RAM として扱うのは
+従来どおり 16MB まで (PAGING_RAM_LIMIT: pgalloc / sys_usable_mem_end / ホットデプロイ窓は不変)。
+16MB〜32MB は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
+0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)  supervisor + PCD
+0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ) supervisor + PCD
+  +000000h 表示面 / +04B000h クライアント面 (300KB) / +096000h 塗りパターン
+
+> **デバイス窓の貸し出し規則 (レビュー #5 ②③、2026-09-06)**
+> バックエンドが master PD に張る窓は **supervisor + PCD** で、PTE_USER を付けない。
+> `paging_addrspace_create()` は master の PDE を 1024 本すべて写すので、master で
+> USER にすると CPL=3 アプリが**表示面**に直接書けてしまい、契約 G4 (commit 前の
+> 描画は表示面に出ない) が崩れる。CPL=3 に見せるのは **クライアント面だけ** で、
+> `gfx_bb_phys_range()` が返す範囲 (Cirrus: リニア窓 +04B000h の 300KB、PEGC/9801:
+> 主記憶のバックバッファ) を exec が `paging_addrspace_map_user_keep()` で
+> **アプリ PD ごとに** USER へ昇格させる。この 300KB の PTE は共有 PT にあるので
+> master からも USER に見えるが、master 側の PDE には USER を伝播させないため
+> 実効権限は supervisor のまま (C2 の「共有 + USER」と同じ模型)。
+> `_keep` は既存 PTE の **PCD/PWT を引き継ぐ** — 落とすと CPU が書いた画素が
+> キャッシュに残り、Cirrus の BLT エンジンが古い VRAM を読む。
+> 不変条件はブート時の kselftest (`paging_map_user_keep_selftest`) が毎回検査する。
+> 9801 の主記憶バックバッファ (0x6A000、128KB) は選ばれているバックエンドに関わらず
+> **常に** USER にする (レビュー #6、2026-09-06): アプリの gfx_init でアクセラレータの
+> setup が失敗すると HAL は 9801 へ落ち、以後 `gfx_get_framebuffer()` が 0x6A000 を返す
+> ため。写していないとフォールバック直後の最初の描画で #PF になる (`ring3_guard bb` が
+> 「書けて生き残る」ことを確認する)。
+
+[ 共有ライブラリ帯域 (0x400000 - 0x4FFFFF, K3 2026-09-06) ]
+0x400000 - text_end                libos32gui.shlib の先頭 4KB ジャンプ表 + .text/.rodata  RO, USER, 全 PD 共有
+data_vaddr - data_end              .data/.bss (アプリごとに物理ページを複製)         R/W, USER
+0x4FFFFF 直下                      .data/.bss の原本 (ロード時に退避)
+
+[ プログラム空間 (0x500000 - mem_end) — 動的レイアウト ]
+0x500000 - code_end                .text + .data + .bss (固定上限なし)        R/W
 code_end - guard_a                 newlib sbrk (最低 MEM_EXEC_SBRK_MIN=256KB)  R/W
 guard_a  (4KB)                     ★ GUARD A: sbrk上限ガード (位置は動的)     NP
 guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/W
@@ -74,7 +106,7 @@ guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/
     (sys_usable_mem_end())。15MB 構成なら 0xF00000 - 0x40000 = 0xEC0000
   ※ カーネル帯域内のKAPI/SHMアドレスは __bss_end を基点に動的算出される
   ※ 入れ子起動は子として走り終了で親へ戻る (最大 4 段)。CPL=3 のプログラムは
-    PD ごとに独立した 0x400000 帯を持つ (09_exec.md)
+    PD ごとに独立した 0x500000 帯を持つ (09_exec.md)。0x400000 帯の shlib .text は共有、.data はアプリごと
 ```
 
 ### §2-2 DMA 64KB境界制約

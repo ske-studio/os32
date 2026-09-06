@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      40   /* gfx_screen_info / gfx_hw_fill_rect / gfx_hw_blit (GUI HAL 枠) 追加 */
+#define KAPI_VERSION      42   /* GUI v1.1: gui_call / gui_register / gfx_stats / gfx_lease_palette / sys_switch_shell / kbd_dropped_count / kbd_trygetrawkey / ime_feed_key / ime_set_render (2026-09-06 に v41 → v42 へ確定、ネットワーク Host Services は v43) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -113,11 +113,14 @@ typedef enum {
 
 #define OS32X_MAGIC       0x4F533332UL  /* 'OS32' リトルエンディアン */
 #define OS32X_HDR_V1_SIZE 40            /* v1ヘッダのサイズ */
+#define OS32X_HDR_V2_SIZE 44            /* v2ヘッダのサイズ (load_addr を末尾に追記) */
+#define OS32X_HDR_VERSION 2             /* mkos32x.py が現在焼く version */
 
 /* フラグ定義 */
 #define OS32X_FLAG_GFX    0x0001        /* GFXモードを使用 */
 #define OS32X_FLAG_RING3  0x0002        /* CPL=3 (リング3) で実行する (v2 M1) */
 #define OS32X_FLAG_FORCE_CPL0 0x0004    /* CPL=0 強制 (ring3 デフォルト化後のエスケープハッチ, v2 M3) */
+#define OS32X_FLAG_SHLIB  0x0008        /* 共有ライブラリ (MEM_SHLIB_BASE 常駐、GUI v1.1 K3/C3) */
 
 typedef struct {
     u32 magic;            /* 0x00: OS32X_MAGIC */
@@ -130,7 +133,42 @@ typedef struct {
     u32 heap_size;        /* 0x1C: 要求ヒープサイズ */
     u32 stack_size;       /* 0x20: 要求スタックサイズ */
     u32 min_api_ver;      /* 0x24: 必要な最低KernelAPIバージョン */
-} OS32Header;             /* 合計: 40バイト (0x28) */
+    /* ---- v2 (header_size >= OS32X_HDR_V2_SIZE のときだけ有効) ---- */
+    u32 load_addr;        /* 0x28: リンク時のロードアドレス (mkos32x が ELF の
+                           * .text から焼く)。exec はここが自分の置こうとして
+                           * いる番地と一致するかを確かめ、食い違えば
+                           * OS32_ERR_INVAL で弾く。0 = 不明 (警告のみ)。
+                           * GUI v1.1 K3 でロードアドレスが 0x400000 →
+                           * 0x500000 に動いたため、旧バイナリ (version 1 /
+                           * header_size 40) が黙って別番地へ飛ぶのを防ぐ。 */
+} OS32Header;             /* 合計: 44バイト (0x2C)。version 1 のバイナリは
+                           * 先頭 40 バイト (min_api_ver まで) のみ有効。 */
+
+/* ======================================================================== */
+/*  共有ライブラリ (OS32X_FLAG_SHLIB) のジャンプ表 — GUI v1.1 K3 / C3        */
+/*                                                                          */
+/*  ライブラリ本体 (OS32X) の先頭 4KB がこのヘッダ。カーネル (K3) が            */
+/*  MEM_SHLIB_BASE に読み、.text/.rodata を read-only + USER で全 PD に共有、  */
+/*  data_vaddr から data_pages ページをアプリごとの物理ページにする。          */
+/*  アプリ側スタブ (C3) は magic / version を照合してから entry[i] を呼ぶ。    */
+/*  entry[] は **末尾追記のみ** (KAPI と同じ作法)。ヘッダ 32B の直後から。      */
+/* ======================================================================== */
+#define OS32_SHLIB_MAGIC      0x42494C53UL  /* 'SLIB' リトルエンディアン */
+#define OS32_SHLIB_HDR_SIZE   4096          /* ジャンプ表を含む先頭ページ */
+#define OS32_SHLIB_ENTRY_OFF  32            /* entry[0] のヘッダ先頭からのオフセット */
+#define OS32_SHLIB_MAX_FUNC   ((OS32_SHLIB_HDR_SIZE - OS32_SHLIB_ENTRY_OFF) / 4)
+
+typedef struct {
+    u32 magic;        /* 0x00: OS32_SHLIB_MAGIC */
+    u32 version;      /* 0x04: ライブラリの版 (libos32gui は GUI_PROTO_VERSION) */
+    u32 nfunc;        /* 0x08: entry[] の有効数 */
+    u32 data_vaddr;   /* 0x0C: .data/.bss の先頭仮想アドレス (ページ境界) */
+    u32 data_pages;   /* 0x10: アプリごとに複製する物理ページ数 */
+    u32 text_pages;   /* 0x14: 共有する read-only ページ数 (先頭ページ含む) */
+    u32 _rsvd[2];     /* 0x18: 0 */
+    /* 0x20: u32 entry[nfunc] — 関数の絶対アドレス (C89 なので配列は持たない。
+     *       ((const u32 *)hdr)[OS32_SHLIB_ENTRY_OFF / 4 + i] で読む) */
+} OS32ShlibHeader;    /* 32B */
 
 /* ======================================================================== */
 /*  KernelAPI 構造体                                                         */
@@ -178,6 +216,16 @@ typedef struct {
     u16 lease_count;     /* 256 色: 貸せる項目数 */
     u16 reserved[5];
 } GFX_ScreenInfo;
+
+/* GUI カウンタ (gfx_stats() が埋める、docs/tasks/gui/API_CONTRACTS.md G7)。
+ * 累積値。NP21/W ではウェイトを再現しないので、性能はこの回数・転送量で
+ * 見積もる (契約 P2)。末尾追記のみ。 */
+typedef struct {
+    u32 present_bytes;   /* VRAM へ転送したバイト数の累計 */
+    u32 hw_ops;          /* アクセラレータの塗り/転送回数 */
+    u32 io_accesses;     /* I/O ポートアクセス回数 */
+    u32 commits;         /* commit 回数 */
+} GFX_Stats;
 
 /* パレットエントリ (各0-15) */
 typedef struct {
@@ -257,6 +305,10 @@ typedef struct {
 #define OS32_ERR_ISDIR     -8   /* ディレクトリである (open/unlink 不可) */
 #define OS32_ERR_INVAL     -9   /* 引数不正 / FS をまたぐ rename 等 */
 #define OS32_ERR_NOSYS     -10  /* このバックエンド / 機種では未対応 */
+/* GUI (KAPI v42、KAPI_SPEC §3-2 の予約どおり)。-14 以降はネットワーク用に空ける。 */
+#define OS32_ERR_STALE     -11  /* 破棄済み / generation 不一致のハンドル (契約 T4) */
+#define OS32_ERR_VERSION   -12  /* proto_version が WM より新しい (契約 T5) */
+#define OS32_ERR_FULL      -13  /* スロット / 資源が満杯 (契約 T2a) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

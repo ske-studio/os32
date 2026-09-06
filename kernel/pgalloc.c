@@ -36,9 +36,12 @@ void pgalloc_init(u32 mem_kb)
     u32 i;
 
     /* mem_kb * 1024 の桁あふれ防止 (mem_kb > 4194303 で u32 が一周する)。
-     * ページングの管理上限 16MB を超える申告はそこで頭打ちにする。 */
-    if (mem_kb > PAGING_MAP_SIZE / 1024) {
-        mem_kb = PAGING_MAP_SIZE / 1024;
+     * 実 RAM の管理上限 16MB を超える申告はそこで頭打ちにする。
+     * ⚠ 見るのは PAGING_RAM_LIMIT であって PAGING_MAP_SIZE ではない (H3b)。
+     * 後者はページテーブルの守備範囲 (32MB) で、16MB 超はデバイス窓のための
+     * 空き番地。そこを RAM として配ると Cirrus のリニア窓と衝突する。 */
+    if (mem_kb > PAGING_RAM_LIMIT / 1024) {
+        mem_kb = PAGING_RAM_LIMIT / 1024;
     }
     mem_end = mem_kb * 1024;
     /* 末尾はホットデプロイ用ステージング領域。ページ割り当ての

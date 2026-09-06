@@ -28,6 +28,8 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 | `ide` | `ide [0-3]` | IDEドライブのCH/S・LBA情報 |
 | `format` | `format [0-3] [sects]` | ドライブをext2でフォーマット |
 | `play` | `play MML` | MML文字列をFM音源で再生 |
+| `os32gui` | `os32gui [on\|off]` | GUI シェル (/bin/gshell.bin) へ切り替え / 起動時 GUI の既定を `/etc/system.cfg` に書く (GUI v1.1 K4) |
+| `gfxmode` | `gfxmode pc98\|pegc\|cirrus\|auto` | 次回起動のグラフィクスバックエンドを `/etc/system.cfg` の `GFX=` に書く (GUI v1.1 H2b) |
 
 **ディレクトリコマンド** (cmd_dir.c):
 

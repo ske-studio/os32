@@ -15,7 +15,7 @@ Claude Code は本ファイルを自動で読み込む。他のツールから�
 
 ## Project Overview
 
-OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with a GCC i386-elf cross-compiler and NASM. The kernel runs in protected mode at physical address 0x100000 (1MB). External programs are loaded at 0x400000.
+OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with a GCC i386-elf cross-compiler and NASM. The kernel runs in protected mode at physical address 0x100000 (1MB). External programs are loaded at 0x500000 (0x400000–0x4FFFFF is the shared-library band, GUI v1.1 K3).
 
 ## Build Commands
 
@@ -142,7 +142,9 @@ The lines below are the whole rule; the reasoning and the detail live in
 0x1FC000–0x1FFFFC Kernel stack (16KB)
 0x200000–0x2FFFFF SQLite band (1MB): code + BSS + alternate stack (128KB)
 0x300000–0x3FFFFF Shell band (1MB): resident binary + guard 0x375000 + stack
-0x400000–         External program band: code+bss, then newlib sbrk, guard page,
+0x400000–0x4FFFFF Shared library band (libos32gui.shlib, K3): .text read-only shared by
+                  every PD, .data/.bss duplicated per app; original kept at the band's end
+0x500000–         External program band: code+bss, then newlib sbrk, guard page,
                   KAPI exec_heap directly below the stack guard (no fixed 1MB cap
                   since 2026-09-04; sbrk/exec_heap split by OS32X heap_size or 50/50)
 (top 256KB)       Hot-deploy staging window — carved out of physical memory
@@ -226,6 +228,8 @@ make external                        # apps + game (make apps / make game で個
 
 検証した組み合わせは submodule のポインタとして os32 のコミットに残る。KAPI を
 動かしたら `make external` で両方を再ビルドし、ポインタを更新してコミットする。
+**SDK のライブラリ (libos32gfx 等) を変えたときも同様** — アプリは静的リンクなので、
+古い .bin は新しいバックエンド (PEGC の PACKED8 等) で #PF する (2026-09-06 hello32 で実測)。
 `apps/deploy.yaml` と `game/deploy.yaml` は配備マニフェストに統合される
 (`tools/deploy_manifests.py`)。emu_agent の `make` は `apps` / `game` / `external` を
 許可リストに含む。
@@ -308,6 +312,9 @@ Short form only. The history, symptoms and verification for each item are in
   `os32-cycle deploy` size check. → §4-17
 - **Text GDC cursor** is controlled only by CSRFORM's DC bit; use `console_hw_cursor_enable()` /
   `console_hw_cursor_sync()`. → §4-18
+- **CPL=3 KAPI calls run with IF=1** (`int80_stub` does `sti` after the segment reload and
+  `cli` before `iretd`). A `hlt`-waiting wrap hanging with `tick_count` frozen means that
+  pair was broken; the exit must stay IF=0 or an IRQ leaves DS=KERNEL_DS for CPL=3. → §4-19
 - **Boot loaders**: PM transition stays inlined in `boot/loader_fat.asm`; `boot_fat.asm` is
   `.8086` (no immediate shifts); the IPL may call INT 1Bh at most 4 times on NP21/W.
   → `docs/10_notes.md` §10-2, §10-3
@@ -326,7 +333,7 @@ gitignored hardware mirror).
 |----------|---------|
 | `docs/INDEX.md` | Document index. Its first table, **情報単位ごとの正典**, says which file to update for each kind of fact |
 | `docs/01_system.md` ~ `docs/10_notes.md` | Kernel technical spec (10 parts) |
-| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v40**, 171 functions + 2 data fields) |
+| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v42**, 180 functions + 2 data fields) |
 | `docs/DEVELOPMENT.md` | Development guide: task → what to read / touch / verify, and the file map (file → role → spec section) |
 | `docs/POLICY_DEV.md` | Coding policy, build rules |
 | `docs/POLICY_DEBUG.md` | Debug procedures, binary deployment checklist, **§4 lessons (the long form of Known Gotchas)** |

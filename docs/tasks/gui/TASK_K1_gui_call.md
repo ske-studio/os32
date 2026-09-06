@@ -48,7 +48,7 @@
    `docs/KAPI_SPEC.md` / `README.md` / `docs/INDEX.md` / `CLAUDE.md` の v41 表記、
    `make clean && make all` ([ABI3])。
 
-> **版番号 (2026-09-06 調停済み)**: この v41 は確定。ネットワークの Host Services
+> **版番号 (2026-09-06 調停、同日改訂)**: GUI は最終的に **v42** として確定 (ime_* の追記後、ユーザー承諾)。開発中の記述は v41 のまま残す。ネットワークは v43。ネットワークの Host Services
 > ([../network/LINK_PLAN.md](../network/LINK_PLAN.md)) も KAPI を足すが、そちらは v42 に
 > ずらした ([KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) が版番号割り当ての正典)。GUI (K1) を
 > 先に実装するので v41、ネットワークが後発で v42。KAPI は append-only なので実体は衝突しない。

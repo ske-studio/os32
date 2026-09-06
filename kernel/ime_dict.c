@@ -14,6 +14,7 @@
 #include "vfs.h"
 #include "utf8.h"
 #include "kprintf.h"
+#include "serial.h"
 #include "kstring.h"
 #include "os32_kapi_shared.h"
 #include "os32_sqlite_vfs.h"
@@ -125,7 +126,12 @@ int ime_dict_open(IME_Dict *dict, const char *path)
     /* 常駐接続の fd を exec クリーンアップから保護 */
     dict_fd_protect(dict, 1);
 
-    kprintf(ATTR_GREEN, "IME: Dict loaded (SQLite): %s\r\n", path);
+    /* 成功の知らせはシリアルだけに出す。GUI (gshell) 中に SHIFT+SPACE で
+     * 初めて辞書を開くと、この行が TVRAM に残って GFX 画面に透けるため
+     * (2026-09-06 G3 で実測)。失敗は今までどおり画面にも出す。 */
+    serial_puts("IME: Dict loaded (SQLite): ");
+    serial_puts(path);
+    serial_puts("\r\n");
     return 0;
 }
 

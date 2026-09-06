@@ -1,4 +1,5 @@
 #include "gfx_internal.h"
+#include "gfx_hal.h"
 #include "os32_kapi_shared.h"
 #include "cpu_calibrate.h"
 #include "io.h"
@@ -6,6 +7,41 @@
 static void _flush_dirty_queue(void);
 static void _merge_prev_dirty(void);
 static void _flip_page(void);
+
+/* ======================================================================== */
+/*  パックド系バックエンド (PEGC 256 色 / H2) 用のダーティ転送               */
+/*                                                                          */
+/*  _flush_dirty_queue 以下は 4 プレーンの VRAM (0xA8000 系) を前提にした    */
+/*  9801 専用の転送エンジン。パックド 8bpp ではプレーンが無く、しかも        */
+/*  拡張グラフィックモードでは 0xA8000 が 32KB のバンク窓に化けているので、  */
+/*  同じ経路を走らせると画面が壊れる。gdi_test / gshell の WM は            */
+/*  gfx_present_dirty() を直接呼ぶ (KAPI) ため、ここで受けてバックエンドの   */
+/*  present_rect へ流す。                                                    */
+/*                                                                          */
+/*  戻り値: 1 = パックド系だったので処理した (呼び出し元は即 return)。       */
+/* ======================================================================== */
+static int _present_dirty_packed(void)
+{
+    u32 commits_before;
+    int i;
+
+    if (!g_backend || g_backend->bb_format == GFX_BB_PLANAR4) return 0;
+    if (!g_backend->present_rect) return 1;
+    if (dirty_queue.count == 0) return 1;
+
+    /* present_rect は 1 回ごとに commits を数えるが、契約 G7 の commits は
+     * 「present (commit) 回数」なので、この 1 回ぶんに揃える。 */
+    commits_before = gfx_counters.commits;
+    for (i = 0; i < dirty_queue.count; i++) {
+        GFX_Rect *r = &dirty_queue.rects[i];
+        g_backend->present_rect(r->x, r->y, r->w, r->h);
+    }
+    gfx_counters.commits = commits_before + 1;
+
+    dirty_queue.count = 0;
+    prev_dirty.count = 0;   /* ページフリップが無いのでステイルページも無い */
+    return 1;
+}
 
 /* ======================================================================== */
 /*  KAPI: ダーティレクタングルの追加 (OS管理)                              */
@@ -126,6 +162,10 @@ static void _flush_dirty_queue(void)
 
         if (words <= 0) continue;
 
+        /* 実 VRAM 書き込み量を数える (レビュー ⑦)。1 行 = words ワード ×2B ×4 プレーン、
+         * ×r->h 行。ステイルページのマージ (prev_dirty) 分もここで正しく積まれる。 */
+        gfx_counters.present_bytes += (u32)words * 2u * 4u * (u32)r->h;
+
         physical_y = (r->y + vram_scroll_y) % gfx_current_height;
         phys_off = (unsigned long)physical_y * GFX_BPL + byte_x;
         base_off = (unsigned long)r->y * GFX_BPL + byte_x;
@@ -168,6 +208,7 @@ static void _flip_page(void)
     gfx_display_page ^= 1;
     _out(GDC_DISP_PAGE, gfx_display_page);
     _out(GDC_ACCESS_PAGE, gfx_display_page ^ 1);
+    gfx_counters.io_accesses += 2;   /* OUT ×2 (表示ページ + 描画ページ) */
 }
 
 /* ======================================================================== */
@@ -178,9 +219,11 @@ static void _flip_page(void)
 /* ======================================================================== */
 void __cdecl gfx_present_dirty(void)
 {
+    if (_present_dirty_packed()) return;
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        gfx_counters.commits++;
         /* 今フレームのオリジナルdirtyを保存 (マージ前) */
         snapshot = dirty_queue;
         _merge_prev_dirty();
@@ -189,6 +232,7 @@ void __cdecl gfx_present_dirty(void)
         _flip_page();
     } else {
         if (dirty_queue.count == 0) return;
+        gfx_counters.commits++;
         /* VSYNC期間になるまで待つ */
         while ((_in(0x60) & 0x20) == 0) { }
         _flush_dirty_queue();
@@ -203,9 +247,11 @@ void __cdecl gfx_present_dirty(void)
 /* ======================================================================== */
 void __cdecl gfx_present_nosync(void)
 {
+    if (_present_dirty_packed()) return;
     if (gfx_flip_enabled) {
         DirtyRectQueue snapshot;
         if (dirty_queue.count == 0 && prev_dirty.count == 0) return;
+        gfx_counters.commits++;
         snapshot = dirty_queue;
         _merge_prev_dirty();
         _flush_dirty_queue();
@@ -213,6 +259,7 @@ void __cdecl gfx_present_nosync(void)
         _flip_page();
     } else {
         if (dirty_queue.count == 0) return;
+        gfx_counters.commits++;
         _flush_dirty_queue();
     }
 }
@@ -222,14 +269,15 @@ void __cdecl gfx_present_nosync(void)
 /* ======================================================================== */
 void __cdecl gfx_present(void)
 {
-    gfx_add_dirty_rect(0, 0, GFX_WIDTH, GFX_HEIGHT);
-    gfx_present_dirty();
+    /* HAL バックエンド経由 (契約 G4 の present_rect)。全画面 present。 */
+    if (g_backend && g_backend->present_rect)
+        g_backend->present_rect(0, 0, GFX_WIDTH, gfx_current_height);
 }
 
 void __cdecl gfx_present_rect(int rx, int ry, int rw, int rh)
 {
-    gfx_add_dirty_rect(rx, ry, rw, rh);
-    gfx_present_dirty();
+    if (g_backend && g_backend->present_rect)
+        g_backend->present_rect(rx, ry, rw, rh);
 }
 
 /* ======================================================================== */
@@ -298,6 +346,13 @@ void __cdecl gfx_present_raster(GFX_RasterPalTable *table)
     unsigned int flags;
 
     if (!table || table->count == 0) return;
+
+    /* ラスタパレットは 16 色プレーン機の HBLANK 同期パレット書き換え。
+     * パックド系 (PEGC 256 色) には対応物が無いので、v1 では普通の present に
+     * 落とす (色は化けず、ラスタ効果だけが出ない)。 */
+    if (_present_dirty_packed()) return;
+
+    gfx_counters.commits++;
 
     /* フリップモード: VRAM転送はフリップ経由、パレット書き換えのみVSYNC同期 */
     if (gfx_flip_enabled) {

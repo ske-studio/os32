@@ -176,11 +176,20 @@ typedef struct {
     void (__cdecl *gfx_screen_info)(void *out);
     int (__cdecl *gfx_hw_fill_rect)(int x, int y, int w, int h, u8 color);
     int (__cdecl *gfx_hw_blit)(int dx, int dy, int sx, int sy, int w, int h);
+    int (__cdecl *gui_call)(u32 op, u32 arg);
+    int (__cdecl *gui_register)(void *handler, void *pump);
+    int (__cdecl *gfx_stats)(void *out);
+    int (__cdecl *gfx_lease_palette)(int first, int count, const u8 *rgb);
+    int (__cdecl *sys_switch_shell)(const char *path);
+    u32 (__cdecl *kbd_dropped_count)(void);
+    int (__cdecl *kbd_trygetrawkey)(void);
+    int (__cdecl *ime_feed_key)(int keydata);
+    void (__cdecl *ime_set_render)(void *table);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
-#define KAPI_FUNC_COUNT 171
+#define KAPI_FUNC_COUNT 180
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

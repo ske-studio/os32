@@ -109,8 +109,10 @@ void gfx_blit(int dx, int dy,
         sx = 0; sy = 0; sw = src->w; sh = src->h;
     }
 
-    /* バイト境界揃い時の高速パス */
-    if ((sx & 7) == 0 && (dx & 7) == 0) {
+    /* バイト境界揃い時の高速パス (プレーン限定 — サーフェスは常に 4 プレーン
+     * なので、画面がパックド 8bpp のときはプレーン単位の転送ができない。
+     * 票 H2b: パックドでは下の画素単位フォールバックへ落とす)。 */
+    if (!gfx_packed && (sx & 7) == 0 && (dx & 7) == 0) {
         int wb = (sw + 7) >> 3;
         int dy_clip = dy;
         int sy_clip = sy;
@@ -203,8 +205,8 @@ void gfx_blit_transparent(int dx, int dy,
         sx = 0; sy = 0; sw = src->w; sh = src->h;
     }
 
-    /* バイト境界揃い時の高速パス */
-    if ((sx & 7) == 0 && (dx & 7) == 0 && (sw & 7) == 0) {
+    /* バイト境界揃い時の高速パス (プレーン限定。理由は gfx_blit と同じ) */
+    if (!gfx_packed && (sx & 7) == 0 && (dx & 7) == 0 && (sw & 7) == 0) {
         int wb = sw >> 3;
         int dy_clip = dy;
         int sy_clip = sy;

@@ -8,8 +8,16 @@ members = [
     "alloc_demo",
     "math_test_rs",
     "font_test",
+    # libos32gui = 共有ライブラリ本体 (0x400000 常駐、staticlib → libos32gui.shlib)
+    # libos32gui_stub = アプリ側スタブ (ジャンプ表を叩くだけ)。アプリは
+    #   `libos32gui = { path = "../libos32gui_stub", package = "libos32gui_stub" }`
+    #   で取り込むのでソースは無変更 (票 C3)。
     "libos32gui",
+    "libos32gui_stub",
     "gui_demo",
+    "gdi_test",
+    "lease_test",
+    "gui_bench",
 ]
 resolver = "2"
 

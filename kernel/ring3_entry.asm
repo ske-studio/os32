@@ -30,7 +30,7 @@ section .text
 
 global int80_stub
 int80_stub:
-        ;; ゲートは割込みゲートなので IF は既にクリア済み。
+        ;; ゲートは割込みゲートなので IF はクリア済み (セグメント復元まで保つ)。
         pushad                          ;; フレーム先頭 = esp
 
         ;; C ハンドラはカーネルデータセグメント前提。CPL=3 由来では
@@ -41,10 +41,26 @@ int80_stub:
         mov     fs, ax
         mov     gs, ax
 
+        ;; 割込みゲートで IF=0 になっているので、ここで戻す。KAPI 本体
+        ;; (wrap_*) は CPL=0 の call 経路と同じく IF=1 で走る前提で書かれて
+        ;; いる: kbd_getchar / sys_halt / gui_call(OP_WAIT) は hlt で IRQ を
+        ;; 待つため、IF=0 のままだと CPL=3 からの呼び出しで永久停止する
+        ;; (2026-09-06、gdi_test の kbd_getchar と less の sys_halt で実測)。
+        ;; iretd が EFLAGS をフレームから復元するので戻りの cli は不要。
+        sti
+
         mov     eax, esp                ;; frame ptr (pushad 先頭)
         push    eax
         call    ring3_syscall_dispatch  ;; sys_exit/範囲外は戻らない (longjmp)
         add     esp, 4
+
+        ;; 出口は IF=0 で通す。USER_DS を DS/ES/FS/GS に載せてから iretd まで
+        ;; の間に IRQ が入ると、IRQ スタブが RESTORE_KSEG で DS=KERNEL_DS に
+        ;; し、フレームの CS が CPL=0 (ここ) なので IRETD_USER が USER_DS を
+        ;; 戻さず、そのまま CPL=3 へ iretd → 最初のメモリ参照で #GP になる
+        ;; (2026-09-06 gdi_test の gfx_pixel で実測)。iretd がフレームの
+        ;; EFLAGS (IF=1) を復元するので、ユーザ側の IF は変わらない。
+        cli
 
         popad                           ;; eax = 戻り値 (dispatcher が frame[7] に格納)
 

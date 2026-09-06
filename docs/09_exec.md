@@ -1,6 +1,6 @@
 ## 第9部 外部プログラム実行 (exec)
 
-OS32Xバイナリ形式の実行ファイルをext2から0x400000にロードし、
+OS32Xバイナリ形式の実行ファイルをext2から0x500000 (`MEM_EXEC_LOAD_ADDR`) にロードし、
 KernelAPIポインタを引数として実行する。
 
 詳細は **[KAPI_SPEC.md](KAPI_SPEC.md)** を参照。
@@ -12,7 +12,7 @@ KernelAPIポインタを引数として実行する。
 | ソースファイル | `exec/exec.c` / `exec/exec.h` / `exec/exec_heap.c` |
 | KAPIラッパー | `kapi/kapi_*.c` (自動生成分 + 手動分)。版は [KAPI_SPEC.md](KAPI_SPEC.md) |
 | KAPIテーブルアドレス | 動的算出 (KHEAP_BASE + KHEAP_SIZE) |
-| ロードアドレス | `MEM_EXEC_LOAD_ADDR` = 0x400000 (共有ライブラリ帯域の導入で 0x500000 へ移す計画: [tasks/gui/TASK_K3](tasks/gui/TASK_K3_shared_lib_band.md)) |
+| ロードアドレス | `MEM_EXEC_LOAD_ADDR` = 0x500000 (2026-09-06 K3。0x400000〜0x4FFFFF は共有ライブラリ帯域 `MEM_SHLIB_BASE`: [tasks/gui/TASK_K3](tasks/gui/TASK_K3_shared_lib_band.md)。OS32X ヘッダ v2 の `load_addr` が一致しないバイナリは `EXEC_ERR_INVALID`) |
 | 特権レベル | **既定で CPL=3** (v2 M1〜M3, 2026-09-03)。例外は shell (CPL=0 常駐) と `OS32X_FLAG_FORCE_CPL0` (`mkos32x --cpl0`) |
 | アドレス空間 | プログラムごとに PD。カーネル帯 0x100000〜0x3FFFFF は全 PD 共有・非 USER、SHM / VRAM は USER |
 | ヒープ | [本体][newlib sbrk (最低 256KB)][ガード][exec_heap] を**ロード時に動的に決める** (固定 1MB 上限は 2026-09-04 に撤廃)。exec_heap の大きさは OS32X ヘッダ `heap_size` (`mkos32x --heap`) があればそれ、0 なら空きを sbrk と折半。実行中の拡張は無い |
