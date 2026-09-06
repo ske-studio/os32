@@ -164,26 +164,21 @@ pub fn slot_base() -> *mut u8 {
 /*                                                                  */
 /*  gshell が既に GFX モードにしているので、アプリは `libos32gfx_init` */
 /*  を呼んではいけない (中の `gfx_init()` が VRAM 両ページを消し、     */
-/*  パレットを初期化してデスクトップを壊す)。framebuffer 記述子だけを  */
-/*  取り直し、サーフェス / スプライトのプールを初期化する。            */
+/*  パレットを初期化してデスクトップを壊す)。`libos32gfx_attach` が    */
+/*  framebuffer 記述子の取り直し・画素形式 (gfx_packed) の判定・        */
+/*  サーフェス / スプライトのプール初期化をまとめて行う。判定を C 側に */
+/*  置くのは、ここで個別にやると PACKED8 判定を忘れて漢字が描けなく    */
+/*  なるため (2026-09-06 に実測)。                                     */
 /* ================================================================ */
 extern "C" {
-    static mut gfx_api: *mut os32api::KernelAPI;
-    fn gfx_surface_init();
-    fn gfx_sprite_init();
+    fn libos32gfx_attach(api: *mut os32api::KernelAPI);
 }
 
-/// framebuffer 記述子とサーフェス/スプライトのプールを取り直す。
+/// framebuffer 記述子・画素形式・サーフェス/スプライトのプールを取り直す。
 /// `init()` と共有ライブラリの `shlib_init` (票 C3) の両方から呼ぶ。冪等。
 pub(crate) fn attach_gfx() {
     unsafe {
-        let a = os32api::api();
-        gfx_api = os32api::api_ptr();
-        /* gfx_fb は C1 の ffi で読み取り専用宣言なので、番地を取って書く。 */
-        let fb = ptr::addr_of!(crate::ffi::gfx_fb) as *mut crate::ffi::GfxFramebuffer;
-        (a.gfx_get_framebuffer)(fb as *mut u8);
-        gfx_surface_init();
-        gfx_sprite_init();
+        libos32gfx_attach(os32api::api_ptr());
     }
     crate::gstate::refresh_screen_info();
 }

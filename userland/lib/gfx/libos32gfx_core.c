@@ -4,15 +4,27 @@ KernelAPI *gfx_api;
 GFX_Framebuffer gfx_fb;
 int gfx_dirty_suppress;
 
-/* パックド 8bpp (PEGC 256 色) モードか。0 = 4 プレーン (PC-9801 標準)。
- * libos32gfx_init が 1 度だけ決め、各描画関数はこれを見て経路を分ける。
+/* パックド 8bpp (PEGC 256 色 / Cirrus) モードか。0 = 4 プレーン (PC-9801 標準)。
+ * libos32gfx_attach が決め、各描画関数はこれを見て経路を分ける。
  * 票 H2b / 契約 G5。 */
 int gfx_packed;
 
-void libos32gfx_init(KernelAPI *api)
+/* ------------------------------------------------------------------------ */
+/*  libos32gfx_attach — 既に GFX モードの画面へ「取り付く」                   */
+/*                                                                          */
+/*  gfx_init() は呼ばない。framebuffer 記述子を取り直し、画素形式を判定し、   */
+/*  サーフェス / スプライトのプールを初期化する。                            */
+/*  呼び手: libos32gfx_init (gfx_init の後)、libos32gui の attach_gfx         */
+/*  (gshell 配下のアプリと共有ライブラリの shlib_init。gshell が既に GFX      */
+/*  モードにしているので init を呼ぶとデスクトップを壊す)。                  */
+/*  ⚠ 画素形式の判定をここに置くのは、attach 側で忘れると PACKED8 でも        */
+/*  プレーン経路に落ちて漢字 (gfx_draw_font) が描けなくなるため              */
+/*  (2026-09-06、G5 後半の gui_demo で実測。ANK は libos32gui が自前で置く    */
+/*  ので気付きにくい)。冪等。                                                */
+/* ------------------------------------------------------------------------ */
+void libos32gfx_attach(KernelAPI *api)
 {
     gfx_api = api;
-    gfx_api->gfx_init();
     gfx_api->gfx_get_framebuffer(&gfx_fb);
 
     /* 画素形式の判定 (H2b)。
@@ -30,6 +42,13 @@ void libos32gfx_init(KernelAPI *api)
 
     gfx_surface_init();
     gfx_sprite_init();
+}
+
+void libos32gfx_init(KernelAPI *api)
+{
+    gfx_api = api;
+    gfx_api->gfx_init();
+    libos32gfx_attach(api);
 }
 
 void libos32gfx_shutdown(void)
