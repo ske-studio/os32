@@ -158,9 +158,11 @@ def scenario_v11(h, shots):
     print("[v11] click Help title (450,90) -> raise")
     m.click(450, 90)
     shots.take("v11_4_help_raised")
-    print("[v11] checkbox (257,252) / OK (500,324) on moved Widgets")
-    m.click(257, 252)
-    m.click(500, 324)
+    # drop 後の Widgets は (240,198) 付近 (drag の差分 +150 を 48 に足した位置)。
+    # チェックボックスは窓原点 +(17,63)、OK は +(260,134)。
+    print("[v11] checkbox (257,261) / OK (500,332) on moved Widgets")
+    m.click(257, 261)
+    m.click(500, 332)
     shots.take("v11_5_widgets_clicked")
     print("[v11] close Help via x (604,90)")
     m.click(604, 90)
