@@ -75,8 +75,12 @@
 #define GUI_OP_TIMER_SET       48
 #define GUI_OP_TIMER_KILL      49
 
-/* モーダル (64〜) — U4 */
+/* モーダル (64〜) — U4。65 / 66 は v1.2 の追記 (v12/CONTRACTS.md §1 S4 / §3 M1)。
+ * 67〜79 は予約。未実装 op を受けた WM は OS32_ERR_NOSYS を返すので、
+ * 「新 shlib + 古い gshell」は GUI_PROTO_VERSION=1 のままでも安全に失敗する。 */
 #define GUI_OP_MODAL_OPEN      64
+#define GUI_OP_MODAL_RESULT    65  /* 完了したモーダルの結果取得 (v1.2 M1) */
+#define GUI_OP_SESSION_REQUEST 66  /* gshell へのセッション要求 (v1.2 S4) */
 
 /* 予備 (80〜)。GUI_OP_OWNER_EXIT はカーネルが exec_exit から WM ハンドラへ
  * 渡す内部 op (契約 T4 / U8)。アプリは送らない。 */
@@ -377,17 +381,87 @@ STATIC_ASSERT(sizeof(GuiReqLease)     == 52, gui_req_lease_52);
 
 /* MODAL_OPEN (op 64、契約 U4) の GuiReqModal.buttons と GuiEvtModal.result の値
  * (W2 の申し送り、2026-09-06 追記)。result は 1 = OK / Yes / Open、0 = Cancel / No / ESC。
- * ファイル選択のパスをアプリへ返す経路 (応答ブロックへ GuiString を書く
- * GUI_OP_MODAL_RESULT) は未定義 — 追記候補。 */
+ * 選択したパスや入力文字列をアプリへ返す経路は GUI_OP_MODAL_RESULT (op 65、v1.2 M1)。 */
 #define GUI_MODAL_OK          0   /* OK */
 #define GUI_MODAL_OK_CANCEL   1   /* OK / Cancel */
 #define GUI_MODAL_YES_NO      2   /* Yes / No */
 #define GUI_MODAL_FILE_OPEN   3   /* ファイル選択 (Open / Cancel) */
+#define GUI_MODAL_INPUT       4   /* 1 行入力 (OK / Cancel) — v1.2 M4。prompt は
+                                   * 既存 GuiReqModal.message。0〜3 は不変。 */
 #define GUI_MODAL_RESULT_CANCEL 0
 #define GUI_MODAL_RESULT_OK     1
 STATIC_ASSERT(sizeof(GuiReqWinTitle)  <= GUI_SLOT_REQ_SIZE,  gui_req_wintitle_fits);
 STATIC_ASSERT(sizeof(GuiReqModal)     <= GUI_SLOT_REQ_SIZE,  gui_req_modal_fits);
 STATIC_ASSERT(sizeof(GuiRespRect)     <= GUI_SLOT_RESP_SIZE, gui_resp_rect_fits);
 STATIC_ASSERT(sizeof(GuiRespWindow)   <= GUI_SLOT_RESP_SIZE, gui_resp_window_fits);
+
+/* ======================================================================== */
+/*  v1.2 追記 (K5) — MODAL_RESULT / SESSION_REQUEST                          */
+/*                                                                          */
+/*  正典: docs/tasks/gui/v12/CONTRACTS.md §1 (S4 / S5) と §3 (M1 / M4)。      */
+/*  KAPI は v42 のまま、GUI_PROTO_VERSION も 1 のまま。既存の op / イベント / */
+/*  構造体は動かさず末尾へ足すだけ (契約 T5)。SHM にポインタは載せない (T1) —  */
+/*  パスも入力文字列も長さ前置の GuiString で値渡しする。                     */
+/*                                                                          */
+/*  ■ GUI_OP_MODAL_RESULT (op 65) の consume 規則 (M2):                      */
+/*    - WM は GUI スロットごとに完了済みの結果を 1 件だけ保持する。            */
+/*    - 未 consume の結果がある間、そのスロットの MODAL_OPEN は                */
+/*      OS32_ERR_FULL。                                                      */
+/*    - 要求の dialog が保持中の ID と違えば OS32_ERR_STALE。                  */
+/*    - 成功時は応答ブロックへ result / value を全部書いてから consume する。   */
+/*    - consume 済みの ID をもう一度取りに行くと OS32_ERR_STALE。              */
+/*    - owner 回収 (OWNER_EXIT) で未 consume の結果も破棄する。                */
+/*    value は MessageBox なら空、File Open なら選択した絶対パス、Input なら    */
+/*    入力した UTF-8 (いずれも最大 255B、切り詰めて別の値として返さない)。      */
+/*                                                                          */
+/*  ■ GUI_OP_SESSION_REQUEST (op 66) の意味 (S2 / S3):                       */
+/*    外部アプリが自分で exec_run() せず、gshell のトップレベルへ起動 / CUI    */
+/*    復帰 / 停止を依頼する経路。戻り値 0 は**受理**であって完了ではない —      */
+/*    WM は値を私有メモリへ写して pending を立てるだけで、VFS / exec_run /     */
+/*    system.cfg 更新は行わない (X4 の bounded-work 規約 S8)。                */
+/*    同時に保持できる SessionAction は 1 件で、新しい要求で上書きしない        */
+/*    (pending 中は OS32_ERR_FULL)。action / flags / パスが不正なら             */
+/*    OS32_ERR_INVAL、op を知らない古い WM は OS32_ERR_NOSYS。                 */
+/* ======================================================================== */
+
+/* SessionAction の種別 (GuiReqSession.action)。0 は「要求なし」で予約。 */
+#define GUI_SESSION_LAUNCH      1   /* value = 1〜255B の絶対パス */
+#define GUI_SESSION_SWITCH_CUI  2   /* value は空でなければならない */
+#define GUI_SESSION_SHUTDOWN    3   /* value は空でなければならない */
+
+/* GUI_EV_QUIT (kind 12) の GuiEvent.sub に入る終了理由。0 は予約 (S5)。
+ * Quit は制御イベントなのでリング満杯でも捨てず、WM が sticky に再配送する。 */
+#define GUI_QUIT_REASON_REPLACE_APP  1   /* 別アプリ起動のため退去 */
+#define GUI_QUIT_REASON_SWITCH_CUI   2   /* CUI モードへ切替 */
+#define GUI_QUIT_REASON_SHUTDOWN     3   /* system halt */
+
+typedef struct {
+    u16 dialog;    /* @0 結果を取りに行くダイアログ ID */
+    u16 _pad;      /* @2 */
+} GuiReqModalResult;                     /* MODAL_RESULT 要求 4B */
+
+typedef struct {
+    i16       result;   /* @0 GUI_MODAL_RESULT_* / <0 は OS32_ERR_* */
+    u16       dialog;   /* @2 応答した ID (要求と一致) */
+    GuiString value;    /* @4 パス / 入力文字列。MessageBox は len=0 */
+} GuiRespModalResult;                    /* MODAL_RESULT 応答 260B */
+
+typedef struct {
+    u8        action;   /* @0 GUI_SESSION_* */
+    u8        flags;    /* @1 v1.2 は 0 のみ */
+    u16       _pad;     /* @2 */
+    GuiString value;    /* @4 LAUNCH は絶対パス、他は len=0 */
+} GuiReqSession;                         /* SESSION_REQUEST 要求 260B */
+
+STATIC_ASSERT(sizeof(GuiReqModalResult)  == 4,   gui_req_modalresult_4);
+STATIC_ASSERT(sizeof(GuiRespModalResult) == 260, gui_resp_modalresult_260);
+STATIC_ASSERT(sizeof(GuiReqSession)      == 260, gui_req_session_260);
+STATIC_ASSERT(GUI_OFFSETOF(GuiRespModalResult, dialog) == 2, gui_resp_modalresult_dialog_2);
+STATIC_ASSERT(GUI_OFFSETOF(GuiRespModalResult, value)  == 4, gui_resp_modalresult_value_4);
+STATIC_ASSERT(GUI_OFFSETOF(GuiReqSession, flags) == 1, gui_req_session_flags_1);
+STATIC_ASSERT(GUI_OFFSETOF(GuiReqSession, value) == 4, gui_req_session_value_4);
+STATIC_ASSERT(sizeof(GuiReqModalResult)  <= GUI_SLOT_REQ_SIZE,  gui_req_modalresult_fits);
+STATIC_ASSERT(sizeof(GuiReqSession)      <= GUI_SLOT_REQ_SIZE,  gui_req_session_fits);
+STATIC_ASSERT(sizeof(GuiRespModalResult) <= GUI_SLOT_RESP_SIZE, gui_resp_modalresult_fits);
 
 #endif /* OS32_GUI_SHARED_H */
