@@ -18,16 +18,20 @@
 //! (どちらの流儀のクライアントでも動く)。
 
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
-use crate::{cursor, damage, fep, input, lease, modal, reqs, ring, slot, timer, visible};
+use crate::{
+    cursor, damage, fep, input, lease, modal, reqs, ring, session, slot, startmenu, taskbar, timer,
+    visible,
+};
 use os32api::gui::proto::{
-    GuiRect16, GuiReqModalResult, GuiRespModalResult, GuiString, GuiWinSpec, GUI_EV_PAINT,
-    GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT, GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE,
-    GUI_OP_MODAL_OPEN, GUI_OP_MODAL_RESULT, GUI_OP_OWNER_EXIT, GUI_OP_POLL, GUI_OP_STATS,
-    GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY, GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET, GUI_OP_WAIT,
-    GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
-    GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE, GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR,
-    GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW, GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL,
-    OS32_ERR_NOSYS, OS32_ERR_STALE, OS32_ERR_VERSION,
+    GuiRect16, GuiReqModalResult, GuiReqSession, GuiRespModalResult, GuiString, GuiWinSpec,
+    GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT, GUI_OP_INVALIDATE,
+    GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_MODAL_RESULT, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
+    GUI_OP_SESSION_REQUEST, GUI_OP_STATS, GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY,
+    GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET, GUI_OP_WAIT, GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE,
+    GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE, GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE,
+    GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR, GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW,
+    GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_NOSYS, OS32_ERR_STALE,
+    OS32_ERR_VERSION,
 };
 
 /* ================================================================ */
@@ -48,6 +52,9 @@ pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
         /* カーネルの exec_exit から。owner のウィンドウ / タイマ / スロットを回収。
          * 描かない (X1) — 空いた領域は screen_dirty に積まれ、次の X3 で埋まる。 */
         modal::reclaim_owner(st, owner);
+        /* sticky な Quit は宛先ごと消える。**SessionAction は残す** (契約 S2:
+         * 正常 exit / CTRL+STOP / fault kill のいずれでも失わない)。 */
+        session::reclaim_owner(owner);
         st.reclaim_owner(owner);
         visible::recompute_and_expose(st);
         return 0;
@@ -77,7 +84,7 @@ struct Entry {
     f: OpFn,
 }
 
-static TABLE: [Entry; 22] = [
+static TABLE: [Entry; 23] = [
     Entry { op: GUI_OP_POLL, f: op_poll },
     Entry { op: GUI_OP_WAIT, f: op_wait },
     Entry { op: GUI_OP_COMMIT, f: op_commit },
@@ -101,6 +108,8 @@ static TABLE: [Entry; 22] = [
     Entry { op: GUI_OP_MODAL_OPEN, f: op_modal_open },
     /* v1.2 (W4): 完了したモーダルの結果取得 (契約 V12-M の M1 / M2)。 */
     Entry { op: GUI_OP_MODAL_RESULT, f: op_modal_result },
+    /* v1.2 (W3): セッション要求 (契約 V12-S の S4)。 */
+    Entry { op: GUI_OP_SESSION_REQUEST, f: op_session_request },
 ];
 
 fn lookup(op: u32) -> Option<OpFn> {
@@ -193,9 +202,11 @@ fn op_poll(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
     /* 前回の OP_POLL で渡した dropped / OVERFLOW を消し込む (受領済み)。 */
     consume_reported_dropped(st, slot_no);
 
-    /* (0) sticky な `GUI_EV_MODAL` を Paint より先に入れる (W4 §1 の 4 / §8)。
-     * リング満杯で入らなかった完了通知は捨てず、空きができたここで届く。 */
+    /* (0) sticky な制御イベントを Paint より先に入れる (W4 §1 の 4 / §8、
+     * W3 の契約 S5)。リング満杯で入らなかった完了通知 / Quit は捨てず、
+     * 空きができたここで届く。**`dropped` には数えない**。 */
     modal::retry_pending(st, slot_no);
+    session::retry_pending(st, slot_no);
 
     /* (1) 導出型を追記: Configure → Timer → Paint。 */
     emit_configures(st, owner, slot_no);
@@ -434,6 +445,14 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     if fep::refresh_if_hit(st, touched) {
         wm::queue_present(st, fep::rect());
     }
+    /* タスクバー / メニューは可視領域から引いてあるので普通は掛からないが、
+     * 掛かったら描き直す (モーダルと同じ保険。契約 D1 / D2)。 */
+    if taskbar::refresh_if_hit(st, touched) {
+        wm::queue_present(st, taskbar::rect(st));
+    }
+    if startmenu::refresh_if_hit(st, touched) {
+        wm::queue_present(st, startmenu::rect());
+    }
     if cursor::refresh_if_hit(st, touched) {
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
@@ -535,6 +554,19 @@ fn op_modal_result(st: &mut GuiState, _owner: i32, slot_no: usize, _arg: u32) ->
     /* (2) 書き切ってから consume (以後は STALE)。 */
     modal::consume_completed(slot_no, req.dialog);
     0
+}
+
+/* ================================================================ */
+/*  OP_SESSION_REQUEST (契約 V12-S の S4、W3 §5.2)                   */
+/*                                                                  */
+/*  X1: 検証して私有バッファへ写し、pending を立てるだけ。            */
+/*  **VFS / exec_run / system.cfg 更新はここでは絶対にしない** (S8)。  */
+/*  戻り値 0 は「受理」であって action の完了ではない。               */
+/* ================================================================ */
+fn op_session_request(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: GuiReqSession = unsafe { slot::read_req(st, slot_no) };
+    let len = req.value.len as usize;
+    session::request(st, owner, req.action, req.flags, &req.value.s, len)
 }
 
 /* ================================================================ */

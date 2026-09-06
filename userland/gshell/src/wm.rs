@@ -22,7 +22,9 @@ use os32api::gui::proto::{
 };
 
 use crate::cursor::Cursor;
-use crate::{chrome, cursor, damage, desktop, fep, input, lease, modal, visible};
+use crate::{
+    chrome, cursor, damage, desktop, fep, input, lease, modal, session, startmenu, taskbar, visible,
+};
 
 /* ================================================================ */
 /*  レイアウト定数 (ピクセル)                                        */
@@ -697,6 +699,45 @@ pub fn wf_visible(flags: u16) -> bool {
     (flags & GUI_WF_VISIBLE) != 0
 }
 
+/* ================================================================ */
+/*  作業領域 (契約 V12-D の D1)                                       */
+/* ================================================================ */
+
+/// 画面からタスクバー (下端 24px) を除いた作業領域。
+/// 640x400 → 640x376 / 640x480 → 640x456。
+#[inline]
+pub fn work_area(st: &GuiState) -> Rect {
+    Rect::new(0, 0, st.screen_w, st.screen_h - taskbar::TASKBAR_H)
+}
+
+/// 外形 (x,y,w,h) を作業領域へクランプした左上座標を返す。
+///
+/// **新規配置とドラッグ確定のときだけ**使う (契約 D1)。既存の窓が作業領域の
+/// 外に居ること自体は fault にしないので、既存座標を勝手には動かさない。
+/// 作業領域に収まらない大きさの窓は左上に寄せる (掴める場所を残す)。
+pub fn clamp_to_work_area(st: &GuiState, x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    let wa = work_area(st);
+    let nx = if w > wa.w {
+        wa.x
+    } else if x < wa.x {
+        wa.x
+    } else if x + w > wa.right() {
+        wa.right() - w
+    } else {
+        x
+    };
+    let ny = if h > wa.h {
+        wa.y
+    } else if y < wa.y {
+        wa.y
+    } else if y + h > wa.bottom() {
+        wa.bottom() - h
+    } else {
+        y
+    };
+    (nx, ny)
+}
+
 
 /* ================================================================ */
 /*  present / compositor (WM が所有する画面 = デスクトップ + クローム) */
@@ -783,6 +824,10 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
     /* モーダルダイアログは WM 自身の窓なので、クロームの最後に直接描く
      * (契約 U8 / U4)。可視領域の計算でも「上にある窓」として扱われる。 */
     modal::draw(st, clip);
+    /* タスクバーとメニューは最前面 (契約 D1 / D2 / D4)。可視領域からも
+     * 引いてあるので、アプリの Paint / COMMIT がここへ来ることは無い。 */
+    taskbar::draw(st, clip);
+    startmenu::draw(st, clip);
 }
 
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
@@ -860,6 +905,12 @@ pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
         /* モーダルの X3 分 (W4): 保留していた VFS 走査と、sticky な
          * `GUI_EV_MODAL` の再配送 (リングに空きができるまで諦めない)。 */
         modal::x3_cycle(st);
+        /* Start メニューの `/usr/bin` 走査 (契約 D2: X3 で 1 回だけ)。 */
+        startmenu::x3_cycle(st);
+        /* sticky な `GUI_EV_QUIT` の再配送 (契約 S5)。 */
+        session::x3_cycle(st);
+        /* 時計 (1 秒粒度) と窓ボタンの変化 (契約 D1 / D3)。 */
+        taskbar::x3_cycle(st);
         lease::reconcile(st);
         fep::pre_cycle(st);
         flush_screen_dirty(st);
@@ -927,8 +978,6 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     w.used = true;
     w.gen = gen;
     w.owner = owner;
-    w.x = spec.rect.x as i32;
-    w.y = spec.rect.y as i32;
     let mut ww = spec.rect.w as i32;
     let mut wh = spec.rect.h as i32;
     if ww < 60 {
@@ -937,6 +986,10 @@ pub fn create_window(st: &mut GuiState, owner: i32, spec: &GuiWinSpec) -> i32 {
     if wh < TITLEBAR_H + 8 {
         wh = TITLEBAR_H + 8;
     }
+    /* 新規配置は作業領域 (画面 − タスクバー) へクランプする (契約 D1)。 */
+    let (nx, ny) = clamp_to_work_area(st, spec.rect.x as i32, spec.rect.y as i32, ww, wh);
+    w.x = nx;
+    w.y = ny;
     w.w = ww;
     w.h = wh;
     w.flags = if spec.flags == 0 {

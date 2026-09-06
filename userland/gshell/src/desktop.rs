@@ -63,15 +63,21 @@ pub fn fill(st: &GuiState, r: Rect) {
     }
 }
 
-/// 手引きの占有矩形。
+/// 手引きの占有矩形。デバッグ用の残置を切ったら空 (契約 S6 / W3 §4.1)。
 #[inline]
 pub fn hint_rect() -> Rect {
+    if !crate::DEBUG_SHORTCUTS {
+        return Rect::EMPTY;
+    }
     Rect::new(HINT_X, HINT_Y, HINT_W, HINT_H)
 }
 
 /// 手引きの文字を描く。掛かるウィンドウが 1 枚でもあれば描かない
 /// (kcg_draw_utf8 にクリップが無いので、はみ出して窓を壊さないための保険)。
 pub fn draw_hint(st: &GuiState) {
+    if !crate::DEBUG_SHORTCUTS {
+        return;
+    }
     let hr = hint_rect();
     let mut z = 0;
     while z < st.z_count {

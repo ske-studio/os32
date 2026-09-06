@@ -149,6 +149,17 @@ fn compute_vis(st: &GuiState, index: usize) -> (RectSet, bool) {
         region = next;
     }
 
+    /* タスクバー (契約 D1) と Start / context メニュー (D2 / D4) も WM の
+     * 最前面 UI。ここで穴を開けておくと、アプリの `Paint` / COMMIT が
+     * タスクバーの上に出ない (共有バックバッファなので上書きは即事故になる)。 */
+    let (next, _ok) = region_subtract_rect(&region, crate::taskbar::rect(st));
+    region = next;
+    let menu = crate::startmenu::rect();
+    if !menu.is_empty() {
+        let (next, _ok) = region_subtract_rect(&region, menu);
+        region = next;
+    }
+
     /* 画面座標 → クライアントローカルへ移して格納。 */
     let mut i = 0;
     while i < region.len && out.len < MAX_VIS {

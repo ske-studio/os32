@@ -54,14 +54,31 @@
 #![allow(dead_code)]
 
 use crate::wm::{self, GuiState, Rect};
-use crate::{chrome, damage, fep, lease, ring, visible};
+use crate::{chrome, damage, fep, lease, ring, session, visible};
 use os32api::gfx;
 use os32api::gui::proto::{
     GuiString, GUI_COLOR_FACE, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT, GUI_COLOR_SEL_BG,
     GUI_COLOR_SEL_TEXT, GUI_COLOR_SHADOW, GUI_COLOR_TEXT, GUI_COLOR_TITLE_ACTIVE,
-    GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW, GUI_MAX_WINDOWS, GUI_SLOT_MAX, OS32_ERR_FULL,
-    OS32_ERR_INVAL, OS32_ERR_STALE,
+    GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW, GUI_MAX_WINDOWS, GUI_SESSION_SHUTDOWN,
+    GUI_SESSION_SWITCH_CUI, GUI_SLOT_MAX, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_STALE,
 };
+
+/* ================================================================ */
+/*  WM 自身が開いたダイアログの用途 (W3)                             */
+/*                                                                  */
+/*  WM owned のダイアログは completed result を作らない (アプリに宛先が */
+/*  無い)。代わりに `finish` が用途ごとの後始末を行う。               */
+/* ================================================================ */
+/// v1.1 の F5: ファイル選択で選んだ `.bin` をそのまま起動する。
+pub const WM_PURPOSE_FILE_LAUNCH: u8 = 0;
+/// Start → Run...: 入力された絶対パスを `LAUNCH` にする (契約 D2)。
+pub const WM_PURPOSE_RUN: u8 = 1;
+/// Start → CUI mode の確認 (契約 S6)。Yes で初めて `SWITCH_CUI`。
+pub const WM_PURPOSE_CONFIRM_CUI: u8 = 2;
+/// Start → Shut Down の確認 (契約 S6 / S7)。Yes で初めて `SHUTDOWN`。
+pub const WM_PURPOSE_CONFIRM_HALT: u8 = 3;
+/// 通知だけ (起動失敗 / cfg 更新失敗)。押しても何も起きない。
+pub const WM_PURPOSE_NOTIFY: u8 = 4;
 
 /* ================================================================ */
 /*  ダイアログ種別 / result (正典は sdk/include/os32/os32_gui_shared.h、  */
@@ -353,6 +370,8 @@ pub struct Modal {
     view_off: usize,
     /// WM 自身が開いたダイアログ (アプリへ `Modal` を送らない)。
     wm_owned: bool,
+    /// `wm_owned` のときの用途 (`WM_PURPOSE_*`)。W3 の Start / Run / 確認。
+    wm_purpose: u8,
 }
 
 impl Modal {
@@ -385,6 +404,7 @@ impl Modal {
         caret: 0,
         view_off: 0,
         wm_owned: false,
+        wm_purpose: WM_PURPOSE_FILE_LAUNCH,
     };
 }
 
@@ -424,11 +444,10 @@ pub fn rect() -> Rect {
 /*  開く / 閉じる                                                    */
 /* ================================================================ */
 
-/// v1.2 では taskbar がまだ無い (W3 が入れる) ので作業領域 = 画面全体。
-/// W3 はここだけを直せば「taskbar の上に中央寄せ」になる (W4 §7)。
+/// 作業領域 = 画面 − taskbar (契約 D1)。ダイアログはこの中央に置く (W4 §7)。
 #[inline]
 fn work_area(st: &GuiState) -> Rect {
-    Rect::new(0, 0, st.screen_w, st.screen_h)
+    wm::work_area(st)
 }
 
 /// 次の DialogId。**0 を使わない** (W4 §2)。
@@ -504,8 +523,30 @@ pub fn open(
 /// WM 自身がファイル選択を開く (デスクトップからプログラムを起動する)。
 /// v1.1 の F5 と同じ経路 — completed result は作らず `launch_path` を立てる。
 pub fn open_wm_file(st: &mut GuiState, start_dir: &[u8]) {
-    if state().used {
+    if !open_wm(st, GUI_MODAL_FILE_OPEN, b"\0", WM_PURPOSE_FILE_LAUNCH) {
         return;
+    }
+    set_cwd(start_dir);
+    state().reload_pending = true;
+}
+
+/// WM 自身の MessageBox (契約 S6 の確認、起動失敗の通知)。
+/// `buttons` は [`GUI_MODAL_OK`] / [`GUI_MODAL_YES_NO`] など。
+pub fn open_wm_message(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) {
+    open_wm(st, buttons, msg, purpose);
+}
+
+/// WM 自身の 1 行入力 (Start → Run...)。prompt は `msg`。
+pub fn open_wm_input(st: &mut GuiState, prompt: &[u8], purpose: u8) {
+    if open_wm(st, GUI_MODAL_INPUT, prompt, purpose) {
+        fep::mark_redraw(); /* 未確定行の原点が field の caret へ移る */
+    }
+}
+
+/// WM owned ダイアログの共通の開き方。既に 1 枚出ていれば開かない (false)。
+fn open_wm(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) -> bool {
+    if state().used {
+        return false;
     }
     let next_id = next_dialog_id();
     {
@@ -515,24 +556,32 @@ pub fn open_wm_file(st: &mut GuiState, start_dir: &[u8]) {
         m.id = next_id;
         m.owner = 0;
         m.parent_win = 0;
-        m.buttons = GUI_MODAL_FILE_OPEN;
+        m.buttons = buttons;
         m.wm_owned = true;
-        m.nbtn = 2;
+        m.wm_purpose = purpose;
+        let mut n = 0;
+        while n < msg.len() && n < MSG_LEN && msg[n] != 0 {
+            m.msg[n] = msg[n];
+            n += 1;
+        }
+        m.msg[n] = 0;
+        m.msg_len = n;
+        m.nbtn = if buttons == GUI_MODAL_OK { 1 } else { 2 };
+        m.focus_btn = 0;
     }
-    set_cwd(start_dir);
-    state().reload_pending = true;
     layout(st);
     let r = state().rect;
     st.dirty_screen(r);
     visible::recompute_and_expose(st);
+    true
 }
 
 /// 完了 (W4 §1 の順序)。結果を先にスロットへ保存し、その後 sticky な
 /// `GUI_EV_MODAL` を積む。下地は損傷にして下のクライアントへ damage を戻す。
 fn finish(st: &mut GuiState, result: i16) {
-    let (id, owner, parent, wm_owned, r, buttons) = {
+    let (id, owner, parent, wm_owned, r, buttons, purpose) = {
         let m = state();
-        (m.id, m.owner, m.parent_win, m.wm_owned, m.rect, m.buttons)
+        (m.id, m.owner, m.parent_win, m.wm_owned, m.rect, m.buttons, m.wm_purpose)
     };
 
     /* ---- 値 (契約 M1): File Open = 絶対パス、Input = UTF-8、その他は空 ---- */
@@ -554,18 +603,17 @@ fn finish(st: &mut GuiState, result: i16) {
         }
     }
 
-    /* WM 自身のファイル選択: 選ばれた .bin を起動予約にする (v1.1 の F5)。 */
+    /* **後始末より先に閉じる**: 用途によってはここから次のダイアログ
+     * (エラー通知) を開くので、`used` を落としておかないと開けない (W3)。 */
+    state().used = false;
+
     if wm_owned {
-        if result == MODAL_RESULT_OK && vlen > 0 {
-            st.set_launch_path(&value, vlen);
-            st.launch_pending = true;
-        }
+        finish_wm(st, purpose, result, &value, vlen);
     } else if let Some(slot) = st.slot_of_owner(owner) {
         store_completed(slot, owner, id, result, &value, vlen, parent);
         deliver_pending(st, slot);
     }
 
-    state().used = false;
     /* 下に隠れていたものを描き直す (デスクトップ + クローム + アプリの Paint)。 */
     st.dirty_screen(r);
     let mut i = 0;
@@ -580,6 +628,52 @@ fn finish(st: &mut GuiState, result: i16) {
     /* FEP の未確定行 / 候補窓は field の caret に紐づいていた。原点を戻す。 */
     if buttons == GUI_MODAL_INPUT {
         fep::mark_redraw();
+    }
+}
+
+/// WM owned ダイアログの後始末 (W3 §4)。呼ばれた時点でダイアログは閉じている。
+///
+/// - `FILE_LAUNCH` … v1.1 の F5。選んだ `.bin` を単独ループの起動予約に。
+/// - `RUN`         … 絶対パスなら `LAUNCH` に。相対パスは受けずにエラー表示。
+/// - `CONFIRM_*`   … **Yes のときだけ** SessionAction を立てる (契約 S6)。
+/// - `NOTIFY`      … 何もしない。
+fn finish_wm(st: &mut GuiState, purpose: u8, result: i16, value: &[u8], vlen: usize) {
+    match purpose {
+        WM_PURPOSE_FILE_LAUNCH => {
+            if result == MODAL_RESULT_OK && vlen > 0 {
+                st.set_launch_path(value, vlen);
+                st.launch_pending = true;
+            }
+        }
+        WM_PURPOSE_RUN => {
+            if result != MODAL_RESULT_OK {
+                return;
+            }
+            /* v1.2 の Run は絶対パスのみ (PATH 検索も引数列も対象外。契約 D2)。 */
+            if vlen == 0 || value[0] != b'/' {
+                open_wm_message(
+                    st,
+                    GUI_MODAL_OK,
+                    b"Run: absolute path required (e.g. /usr/bin/filer.bin)\0",
+                    WM_PURPOSE_NOTIFY,
+                );
+                return;
+            }
+            if session::set_wm(st, os32api::gui::proto::GUI_SESSION_LAUNCH, &value[..vlen]) < 0 {
+                open_wm_message(st, GUI_MODAL_OK, b"Run: another action is pending\0", WM_PURPOSE_NOTIFY);
+            }
+        }
+        WM_PURPOSE_CONFIRM_CUI => {
+            if result == MODAL_RESULT_OK {
+                let _ = session::set_wm(st, GUI_SESSION_SWITCH_CUI, b"\0");
+            }
+        }
+        WM_PURPOSE_CONFIRM_HALT => {
+            if result == MODAL_RESULT_OK {
+                let _ = session::set_wm(st, GUI_SESSION_SHUTDOWN, b"\0");
+            }
+        }
+        _ => {}
     }
 }
 
@@ -635,7 +729,7 @@ fn layout(st: &GuiState) {
             TITLE_H + PAD + LINE_H * (LIST_ROWS as i32 + 1) + PAD + BTN_H + PAD,
         ),
         GUI_MODAL_INPUT => {
-            let text_w = (m.msg_len as i32) * 8;
+            let text_w = msg_display_width(m);
             let mut w = text_w + PAD * 2 + 4;
             if w < FIELD_MIN_W + PAD * 2 {
                 w = FIELD_MIN_W + PAD * 2;
@@ -646,7 +740,9 @@ fn layout(st: &GuiState) {
             (w, TITLE_H + PAD + LINE_H + 4 + FIELD_H + PAD + BTN_H + PAD)
         }
         _ => {
-            let text_w = (m.msg_len as i32) * 8;
+            /* 日本語の確認文 (契約 S6) は 1 文字 3B / 16px なので、バイト数 × 8 で
+             * 幅を出すと画面いっぱいに広がる。表示幅で測る (W3)。 */
+            let text_w = msg_display_width(m);
             let mut w = text_w + PAD * 2 + 4;
             let min_w = (m.nbtn as i32) * BTN_W + ((m.nbtn as i32) - 1) * BTN_GAP + PAD * 2;
             if w < min_w {
@@ -663,6 +759,11 @@ fn layout(st: &GuiState) {
     let x = wa.x + (wa.w - w) / 2;
     let y = wa.y + (wa.h - h) / 2;
     m.rect = Rect::new(if x < 0 { 0 } else { x }, if y < 0 { 0 } else { y }, w, h);
+}
+
+/// メッセージ (prompt) の表示幅。ANK 8px / 全角 16px で数える。
+fn msg_display_width(m: &Modal) -> i32 {
+    text_width(&m.msg, m.msg_len, 0, m.msg_len)
 }
 
 /// ボタン i の矩形 (画面座標)。右詰め。
