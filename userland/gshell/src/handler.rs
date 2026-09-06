@@ -74,44 +74,6 @@ pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
 }
 
 /* ================================================================ */
-/*  G3 追跡カウンタ (一時的)                                          */
-/*                                                                  */
-/*  「打鍵の結果が 1 周遅れる」を実機で切り分けるための素の計数。      */
-/*  `i386-elf-nm userland/gshell.elf | grep GSHELL_DBG` で番地を引き、 */
-/*  `emu_read_mem` で 8 × u32 を読む。原因が確定したら削る。          */
-/*      [0] OP_INVALIDATE 回数                                       */
-/*      [1] OP_INVALIDATE で窓が引けなかった回数                      */
-/*      [2] emit_paints_win 入場                                     */
-/*      [3] dirty が空で戻った                                       */
-/*      [4] 可視領域が空で戻った                                     */
-/*      [5] Paint をリングへ入れた件数                                */
-/*      [6] issued 満杯で打ち切り                                    */
-/*      [7] OP_COMMIT が issued 空で何も present しなかった           */
-/* ================================================================ */
-#[no_mangle]
-pub static mut GSHELL_DBG: [u32; 8] = [0; 8];
-
-const DBG_INVALIDATE: usize = 0;
-const DBG_INVAL_BADWIN: usize = 1;
-const DBG_EMIT_ENTER: usize = 2;
-const DBG_EMIT_NO_DIRTY: usize = 3;
-const DBG_EMIT_NO_VIS: usize = 4;
-const DBG_PAINT_SENT: usize = 5;
-const DBG_EMIT_ISSUED_FULL: usize = 6;
-const DBG_COMMIT_EMPTY: usize = 7;
-/* リング満杯は issued 満杯と同じ枠に足す (どちらも「入らなかった」)。 */
-const DBG_EMIT_RING_FULL: usize = 6;
-
-/// カウンタを 1 つ進める。`static mut` への参照は作らない (lint 回避)。
-#[inline]
-fn dbg_inc(i: usize) {
-    unsafe {
-        let p = (core::ptr::addr_of_mut!(GSHELL_DBG) as *mut u32).add(i);
-        core::ptr::write_unaligned(p, core::ptr::read_unaligned(p).wrapping_add(1));
-    }
-}
-
-/* ================================================================ */
 /*  op → 関数表                                                      */
 /* ================================================================ */
 
@@ -305,14 +267,8 @@ fn emit_paints(st: &mut GuiState, owner: i32, slot_no: usize) {
 fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     /* 可視領域が 16 超で打ち切られていた窓は、周ごとに捨てる断片を入れ替える
      * (契約 G4「超過分は次の周」、レビュー #4 ⑤)。 */
-    dbg_inc(DBG_EMIT_ENTER);
     visible::page_vis(st, idx);
-    if st.windows[idx].dirty.is_empty() {
-        dbg_inc(DBG_EMIT_NO_DIRTY);
-        return;
-    }
-    if st.windows[idx].vis.is_empty() {
-        dbg_inc(DBG_EMIT_NO_VIS);
+    if st.windows[idx].dirty.is_empty() || st.windows[idx].vis.is_empty() {
         return;
     }
     let id = st.windows[idx].id(idx);
@@ -338,15 +294,12 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     let mut j = 0;
     while j < ncand {
         if st.windows[idx].issued.len >= MAX_VIS {
-            dbg_inc(DBG_EMIT_ISSUED_FULL);
             break;
         }
         let ev = ring::ev_rect(GUI_EV_PAINT, id, rect16(cand[j].1));
         if !ring::append(st, slot_no, &ev) {
-            dbg_inc(DBG_EMIT_RING_FULL);
             break;
         }
-        dbg_inc(DBG_PAINT_SENT);
         st.windows[idx].issued.push(cand[j].1);
         delivered[j] = true;
         j += 1;
@@ -481,7 +434,6 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     }
 
     if !any {
-        dbg_inc(DBG_COMMIT_EMPTY);
         return 0;
     }
     /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
@@ -621,29 +573,13 @@ fn op_session_request(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) 
 /*  OP_INVALIDATE (契約 G4) — dirty に足すだけ                        */
 /* ================================================================ */
 fn op_invalidate(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
-    dbg_inc(DBG_INVALIDATE);
     let req: reqs::GuiReqInvalidate = unsafe { slot::read_req(st, slot_no) };
     let idx = match owned_index(st, owner, req.window) {
         Ok(i) => i,
-        Err(e) => {
-            dbg_inc(DBG_INVAL_BADWIN);
-            return e;
-        }
+        Err(e) => return e,
     };
     let r = Rect::new(req.rect.x as i32, req.rect.y as i32, req.rect.w as i32, req.rect.h as i32);
     damage::add_dirty(&mut st.windows[idx], r);
-
-    /* 導出型 (`Paint`) を作るのが `OP_POLL` だけだと、ハンドラの中で出した損傷は
-     * 必ず 1 周遅れる (契約 G4 の「次の周」)。次の周が回るのは次のイベントが
-     * 来たときなので、**後続イベントの無い入力 = 打鍵**では次の打鍵まで画面が
-     * 変わらない (v1.2 G3 実測: HOME → 無反応、次のキーで HOME の結果が出る)。
-     * マウスは 1 操作が移動 → 押下 → 解放と続くので次の周がすぐ来て見えない。
-     *
-     * ここで同じ窓の `Paint` をその場で配る。アプリは同じ周のうちに受け取って
-     * 描き、`OP_COMMIT` で present できる。判定 (dirty ∩ 可視領域 / issued の
-     * 空き / リングの空き) は `OP_POLL` と同じ関数を使うので、入らなかった分は
-     * dirty のまま次の `OP_POLL` に残る — 契約 G4 の 3 状態は変わらない。 */
-    emit_paints_win(st, idx, slot_no);
     0
 }
 

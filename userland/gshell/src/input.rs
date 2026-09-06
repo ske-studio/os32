@@ -420,8 +420,14 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         } else if rup_edge {
             wm_right_up(st, mx, my);
         }
-        if !down_edge && !up_edge && !rdown_edge && !rup_edge {
-            /* 移動: フォーカス窓へ Pointer (畳み込み) */
+        if moved && !down_edge && !up_edge && !rdown_edge && !rup_edge {
+            /* 移動: フォーカス窓へ Pointer (畳み込み)。
+             * **動いたときだけ** — `moved` を見ないと、マウスが止まっていても
+             * `wm_cycle` のたびに `Pointer` を 1 件積んでしまう。リングが空だと
+             * `ring::append` の畳み込みも効かないので、そのままアプリのリングに
+             * 溜まり、`OP_WAIT` は `ring::pending > 0` で毎回すぐ戻る = アプリは
+             * 二度と眠らず PIT の速さで回り続ける (v1.2 G3 実測: 無操作で毎秒
+             * 33 周、マウス移動中は毎秒 2000 周)。契約 P と U5 の趣旨に反する。 */
             forward_pointer(st, mx, my, btn);
         }
     } else {
@@ -456,7 +462,8 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         } else if rup_edge {
             forward_button(st, mx, my, MOUSE_BTN_RIGHT, false);
         }
-        if !down_edge && !up_edge && !rdown_edge && !rup_edge {
+        if moved && !down_edge && !up_edge && !rdown_edge && !rup_edge {
+            /* X3 と同じ理由で `moved` が要る (上のコメント)。 */
             forward_pointer(st, mx, my, btn);
         }
     }
