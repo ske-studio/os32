@@ -21,6 +21,8 @@ members = [
     # 票 C4: v1.2 デスクトップ client API (modal_result / file / input /
     # session / icon16) の実機確認アプリ。
     "v12_api_test",
+    # 票 C5: v1.2 ファイルマネージャ (/usr/bin/filer.bin、契約 V12-F)。
+    "filer",
 ]
 resolver = "2"
 
