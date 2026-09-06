@@ -209,9 +209,15 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         }
         /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。
          * FEP の確定文字列が続く可能性があるので 4 件分を見る。 */
-        let space_ok = match focus_target(st) {
-            Some(t) => ring::space(st, t.slot) >= 4,
-            None => true, /* 宛先無し: 取り込んでも捨てるだけなので読む (キューを空ける) */
+        let space_ok = if modal::is_open() {
+            /* 打鍵の宛先はダイアログ (WM 自身) でリングへは積まない。アプリの
+             * リングが満杯でもダイアログは操作できなければならない (W4 §7.5)。 */
+            true
+        } else {
+            match focus_target(st) {
+                Some(t) => ring::space(st, t.slot) >= 4,
+                None => true, /* 宛先無し: 取り込んでも捨てるだけなので読む (キューを空ける) */
+            }
         };
         if !space_ok {
             break;
@@ -274,11 +280,19 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             continue;
         }
 
-        /* モーダル中は宛先をダイアログに限定する (契約 U4)。 */
+        /* モーダル中は宛先をダイアログに限定する (契約 U4)。
+         *
+         * W4 §6: Input dialog では**先に FEP へ通す**。WM がアプリへ配るときと
+         * 同じ経路 (`fep::feed`) を使い、消費された打鍵はダイアログにも渡さない
+         * (変換中の BS が field の本文まで消す事故を防ぐ)。確定文字列は
+         * `fep::flush_text` が field へ差し込む。 */
         if modal::is_open() {
             if down && ctx.wm_ui() {
                 let ch = translate(scan, mods);
-                modal::on_key(st, scan, ch);
+                if modal::is_input() && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
+                    continue;
+                }
+                modal::on_key(st, scan, ch, mods);
             }
             continue;
         }

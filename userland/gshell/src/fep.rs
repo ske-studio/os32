@@ -429,6 +429,9 @@ fn utf8_len(b: u8) -> usize {
 }
 
 /// 溜まった確定文字列を `Text` (8B ずつ UTF-8 境界、`more`) で配送する (契約 U2)。
+///
+/// モーダル中はアプリへ流さない。Input dialog (W4 §6) のときだけ、確定した
+/// UTF-8 をそのまま field の caret 位置へ差し込む。
 pub fn flush_text(st: &mut GuiState) {
     let len = state().commit_len;
     if len == 0 {
@@ -436,6 +439,16 @@ pub fn flush_text(st: &mut GuiState) {
     }
     state().commit_len = 0;
     if modal::is_open() {
+        if modal::is_input() {
+            /* `state()` は 'static mut なので、差し込みの前に値を写しておく。 */
+            let mut buf = [0u8; COMMIT_MAX];
+            let mut i = 0;
+            while i < len && i < COMMIT_MAX {
+                buf[i] = state().commit[i];
+                i += 1;
+            }
+            modal::insert_commit(st, &buf[..i]);
+        }
         return;
     }
     let t = match input::focus_target(st) {
@@ -516,7 +529,14 @@ fn refresh_indicator(f: &mut Fep) {
 
 /// 描く原点 = フォーカス窓が `SET_TEXT_CURSOR` で知らせた位置 (画面座標)。
 /// 知らせが無ければ TVRAM 版と同じ「画面最下行の左端」。
+///
+/// **モーダルの Input dialog が開いている間はその field の caret が最優先**
+/// (W4 §6: `SET_TEXT_CURSOR` 相当の内部位置を modal 自身が FEP へ渡す)。
+/// ダイアログは最前面の WM オーバレイなので、下の窓の tc は使わない。
 fn anchor(st: &GuiState) -> (i32, i32) {
+    if let Some(p) = modal::fep_caret() {
+        return p;
+    }
     if let Some(i) = st.front_index() {
         let w = &st.windows[i];
         if w.tc_visible {
