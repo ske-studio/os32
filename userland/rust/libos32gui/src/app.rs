@@ -166,7 +166,12 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
          *
          * 申告した周のうちに `OP_POLL` をもう 1 回だけ回して `Paint` を取りに行く。
          * 損傷を出さなかった周は今までどおり 1 回のまま。契約 P の gui_call 予算
-         * (POLL + COMMIT + WAIT が基本、合計 ≤ 10 / 周) の内側。 */
+         * (POLL + COMMIT + WAIT が基本、合計 ≤ 10 / 周) の内側。
+         *
+         * **WM 側と対**: `op_invalidate` は `add_dirty` の直後にその窓の `Paint`
+         * を配る (gshell の handler.rs)。つまりここで拾わないと、`issued` にだけ
+         * 入った (= 描いていない) 矩形を次の `OP_COMMIT` が present してしまう。
+         * 損傷を申告したら同じ周で必ず拾うこと。 */
         if declared {
             let p2 = client::poll(&mut buf)?;
             handle_events(app, ui, &buf, &p2, false);
