@@ -20,10 +20,11 @@
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
 use crate::{cursor, damage, fep, input, lease, modal, reqs, ring, slot, timer, visible};
 use os32api::gui::proto::{
-    GuiRect16, GuiWinSpec, GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT,
-    GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
-    GUI_OP_STATS, GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY, GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET,
-    GUI_OP_WAIT, GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
+    GuiRect16, GuiReqModalResult, GuiRespModalResult, GuiString, GuiWinSpec, GUI_EV_PAINT,
+    GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT, GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE,
+    GUI_OP_MODAL_OPEN, GUI_OP_MODAL_RESULT, GUI_OP_OWNER_EXIT, GUI_OP_POLL, GUI_OP_STATS,
+    GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY, GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET, GUI_OP_WAIT,
+    GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
     GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE, GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR,
     GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW, GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL,
     OS32_ERR_NOSYS, OS32_ERR_STALE, OS32_ERR_VERSION,
@@ -76,7 +77,7 @@ struct Entry {
     f: OpFn,
 }
 
-static TABLE: [Entry; 21] = [
+static TABLE: [Entry; 22] = [
     Entry { op: GUI_OP_POLL, f: op_poll },
     Entry { op: GUI_OP_WAIT, f: op_wait },
     Entry { op: GUI_OP_COMMIT, f: op_commit },
@@ -98,6 +99,8 @@ static TABLE: [Entry; 21] = [
     Entry { op: GUI_OP_TIMER_SET, f: op_timer_set },
     Entry { op: GUI_OP_TIMER_KILL, f: op_timer_kill },
     Entry { op: GUI_OP_MODAL_OPEN, f: op_modal_open },
+    /* v1.2 (W4): 完了したモーダルの結果取得 (契約 V12-M の M1 / M2)。 */
+    Entry { op: GUI_OP_MODAL_RESULT, f: op_modal_result },
 ];
 
 fn lookup(op: u32) -> Option<OpFn> {
@@ -189,6 +192,10 @@ fn op_init(st: &mut GuiState, owner: i32, arg: u32) -> i32 {
 fn op_poll(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
     /* 前回の OP_POLL で渡した dropped / OVERFLOW を消し込む (受領済み)。 */
     consume_reported_dropped(st, slot_no);
+
+    /* (0) sticky な `GUI_EV_MODAL` を Paint より先に入れる (W4 §1 の 4 / §8)。
+     * リング満杯で入らなかった完了通知は捨てず、空きができたここで届く。 */
+    modal::retry_pending(st, slot_no);
 
     /* (1) 導出型を追記: Configure → Timer → Paint。 */
     emit_configures(st, owner, slot_no);
@@ -438,24 +445,51 @@ fn op_lease_palette(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) ->
 }
 
 /* ================================================================ */
-/*  OP_MODAL_OPEN (契約 U4) — ダイアログを立てるだけ (描画は X3)     */
+/*  OP_MODAL_OPEN (契約 U4 + v1.2 の W4 §2)                          */
+/*  ダイアログを立てるだけ (描画も VFS 走査も X3)。                   */
 /* ================================================================ */
+
+/// この owner が持つ**現存する**ウィンドウのうち最前面のもの (Z 順)。
+/// W4 §2 の「parent は caller owner の現存 window」の解決に使う。
+fn front_owned_index(st: &GuiState, owner: i32) -> Option<usize> {
+    let mut z = st.z_count;
+    while z > 0 {
+        z -= 1;
+        let i = st.zorder[z];
+        if st.windows[i].used && st.windows[i].owner == owner {
+            return Some(i);
+        }
+    }
+    /* Z 順に載っていない窓 (生成直後に溢れた等) も救う。 */
+    let mut i = 0;
+    while i < GUI_MAX_WINDOWS {
+        if st.windows[i].used && st.windows[i].owner == owner {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn op_modal_open(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
     let req: reqs::GuiReqModal = unsafe { slot::read_req(st, slot_no) };
-    /* 親ウィンドウ: arg で指定されていればそれ、無ければこの owner の最前面。 */
+    /* 親ウィンドウ: arg で指定されていればそれ (generation + owner 検証つき)、
+     * 無ければこの owner の最前面。**どちらも無ければ STALE** (W4 §2)。 */
     let parent = if arg != 0 {
         match owned_index(st, owner, arg) {
             Ok(i) => st.windows[i].id(i),
-            Err(e) => return e,
+            Err(e) => return modal_open_fail(st, slot_no, e),
         }
     } else {
-        match st.front_index() {
-            Some(i) if st.windows[i].owner == owner => st.windows[i].id(i),
-            _ => 0,
+        match front_owned_index(st, owner) {
+            Some(i) => st.windows[i].id(i),
+            None => return modal_open_fail(st, slot_no, OS32_ERR_STALE),
         }
     };
     let len = req.message.len as usize;
-    let r = modal::open(st, owner, parent, req.buttons, &req.message.s, len);
+    /* 未 consume の completed result / active modal / 種別の検査は modal::open。 */
+    let r = modal::open(st, slot_no, owner, parent, req.buttons, &req.message.s, len);
+    /* v1.1 の GuiRespModal (button) はそのまま。値は MODAL_RESULT で取る。 */
     let resp = reqs::GuiRespModal {
         result: if r < 0 { r } else { 0 },
         button: 0,
@@ -463,6 +497,38 @@ fn op_modal_open(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32
     };
     slot::write_resp(st, slot_no, resp);
     r
+}
+
+/// `MODAL_OPEN` の失敗を応答ブロックにも書いてから返す。
+fn modal_open_fail(st: &GuiState, slot_no: usize, e: i32) -> i32 {
+    let resp = reqs::GuiRespModal { result: e, button: 0, _pad: 0 };
+    slot::write_resp(st, slot_no, resp);
+    e
+}
+
+/* ================================================================ */
+/*  OP_MODAL_RESULT (契約 V12-M の M1 / M2、W4 §3)                   */
+/*                                                                  */
+/*  応答 (result / dialog / GuiString) を**全部書いてから** consume する。 */
+/*  ID 不一致・二重 consume は OS32_ERR_STALE。                       */
+/* ================================================================ */
+fn op_modal_result(st: &mut GuiState, _owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: GuiReqModalResult = unsafe { slot::read_req(st, slot_no) };
+    let mut resp = GuiRespModalResult {
+        result: 0,
+        dialog: 0,
+        value: GuiString { len: 0, s: [0; 255] },
+    };
+    modal::fill_resp(slot_no, req.dialog, &mut resp);
+    let ok = resp.result >= 0;
+    /* (1) 応答を書き切る。 */
+    slot::write_resp(st, slot_no, resp);
+    if !ok {
+        return OS32_ERR_STALE;
+    }
+    /* (2) 書き切ってから consume (以後は STALE)。 */
+    modal::consume_completed(slot_no, req.dialog);
+    0
 }
 
 /* ================================================================ */

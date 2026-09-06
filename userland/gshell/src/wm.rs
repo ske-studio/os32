@@ -853,6 +853,9 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
 pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
     input::capture(st, ctx);
     if ctx != input::Ctx::Pump {
+        /* モーダルの X3 分 (W4): 保留していた VFS 走査と、sticky な
+         * `GUI_EV_MODAL` の再配送 (リングに空きができるまで諦めない)。 */
+        modal::x3_cycle(st);
         lease::reconcile(st);
         fep::pre_cycle(st);
         flush_screen_dirty(st);
