@@ -308,6 +308,9 @@ Short form only. The history, symptoms and verification for each item are in
 - **Never touch the FS from a `sys_ls` callback without a private buffer** — `ext2_list_dir`
   copies each block first because a writing callback clobbers `ext2_g_aux`. FatFs / HostDrv
   list_dir are not audited.
+- **`ext2_g_aux` is the bitmap scratch buffer**: `ext2_free_block`/alloc reload the bitmap into it,
+  so never keep an indirect table or data there across a free/alloc (files >12KB got cross-linked
+  on overwrite until 2026-09-06). → §4-24
 - **VFS error codes are `OS32_ERR_*`** (`os32_kapi_shared.h`); FS drivers translate at the
   boundary (`ext2_to_vfs_err`). `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs.
 - **NHD work image is `build/nhd/os32.nhd`** (auto-pulled from Windows when missing, NP21/W
