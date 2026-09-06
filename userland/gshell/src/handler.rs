@@ -338,6 +338,12 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
         /* WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップ present。 */
         wm::wm_cycle(st, input::Ctx::Wait);
 
+        /* CTRL+STOP (契約 T6): 待ちを抜けてアプリへ戻す。戻った syscall の出口で
+         * カーネルが畳む (exec.c)。ここで待ち続けると永遠に畳めない。 */
+        if st.abort_seen {
+            st.abort_seen = false;
+            break;
+        }
         if wake_ready(st, owner, slot_no) {
             break;
         }

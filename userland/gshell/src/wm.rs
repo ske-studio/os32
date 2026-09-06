@@ -402,6 +402,9 @@ pub struct GuiState {
      * 変換 (辞書検索) は X3 でだけ行う。次の X3 が先頭から取り込む。 */
     pub pending_raw: [i32; 32],
     pub pending_raw_n: usize,
+    /// CTRL+STOP を raw で見た (契約 T6)。OP_WAIT の待ちループがこれで抜けて
+    /// アプリへ戻し、カーネルが syscall の出口で畳む。消費したら 0 に戻す。
+    pub abort_seen: bool,
     /// F2 のファイル選択で選んだ実行ファイル (NUL 終端)。0 長なら既定のデモ。
     pub launch_path: [u8; 256],
     pub launch_path_len: usize,
@@ -439,6 +442,7 @@ impl GuiState {
         launch_pending: false,
         pending_raw: [0; 32],
         pending_raw_n: 0,
+        abort_seen: false,
         launch_path: [0; 256],
         launch_path_len: 0,
     };

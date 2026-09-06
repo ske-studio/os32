@@ -56,6 +56,7 @@ const SC_F4: u8 = 0x65;
 const SC_F5: u8 = 0x66;
 /* KEY_SPACE。SHIFT+SPACE で FEP を切り替える (契約 U2a)。 */
 const SC_SPACE: u8 = 0x34;
+const SC_STOP: u8 = 0x60; /* STOP キー (kbd.h KEY_STOP)。CTRL+STOP = 強制脱出 (契約 T6) */
 
 const MOUSE_BTN_LEFT: u8 = 0x01;
 
@@ -264,6 +265,17 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
 
         /* 修飾キー自体は Key として配送しない (状態は mods で見る)。 */
         if scan >= SC_SHIFT && scan <= SC_CTRL {
+            continue;
+        }
+        /* CTRL+STOP (契約 T6): カーネルは要求を立てて cooked には配らないが、raw には
+         * 積む。アプリが OP_WAIT で寝ている間はカーネルの判定点 (syscall 入口 /
+         * CPL=3 を割り込んだ IRQ1) を通らないので、WM が待ちを抜けてアプリへ戻し、
+         * syscall の出口で畳ませる (exec.c ring3_syscall_dispatch)。打鍵としては
+         * どこにも配らない (2026-09-06、v1.2 G2 で実測した隙間)。 */
+        if scan == SC_STOP && (mods & MOD_CTRL) != 0 {
+            if down {
+                st.abort_seen = true;
+            }
             continue;
         }
 

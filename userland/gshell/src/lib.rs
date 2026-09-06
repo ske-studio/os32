@@ -156,6 +156,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 /// 終了時にカーネルが `gui_owner_exit` を呼ぶので、窓は自動で回収される。
 fn launch_app(st: &mut wm::GuiState) {
     cursor::hide(st);
+    /* 前のアプリ宛の CTRL+STOP を持ち越さない (カーネル側 g_ring3_abort_req と同じ扱い)。 */
+    st.abort_seen = false;
     /* フルスクリーン GFX プログラムに備えてパレット全体を退避する (契約 G6/G8)。 */
     let saved = wm::save_palette();
     /* F1〜F4 / F5 のファイル選択が置いたパス。無ければ既定のデモ。 */
