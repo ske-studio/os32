@@ -72,6 +72,18 @@ typedef struct WabGlue {
     u32  win_base;
     u32  win_size;
 
+    /* CPU から見える **リニア窓** (物理アドレス / バイト数)。バンク
+     * レジスタを通らず VRAM オフセット 0 から連続して見える窓で、
+     * ボードが持っていなければ lin_size = 0。
+     * 窓の物理番地はボードが決める (バックエンドは番地を知らない)。
+     * init() が開く。閉じるのは linear_enable(0) — バックエンドの
+     * leave()/shutdown() から呼ぶ。 */
+    u32  lin_base;
+    u32  lin_size;
+
+    /* リニア窓の有効/無効。窓を持たないボードは NULL でよい。 */
+    void (*linear_enable)(int on);
+
     /* MMIO 窓の先頭 (無いボードは NULL)。BLT レジスタを OUT ではなく
      * メモリ書き込みで設定するための入口 (DESIGN §8)。 */
     volatile u8 *mmio;

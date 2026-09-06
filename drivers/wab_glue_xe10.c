@@ -89,17 +89,41 @@ static int xe10_probe(void)
 /*  2. VRAM 窓を既定 (F60000h) に固定する。ITF が設定済みの値と同じなので     */
 /*     実機では実質 no-op、NP21/W でも初期値と同じ                           */
 /*     (pc98_cirrus_vga_initVRAMWindowAddr → VRAMWindowAddr2 = 0xf60000)。   */
-/*  3. リレーと MMIO は落としたままにする。画面を奪うのは enter() の仕事。    */
+/*  3. リニア窓 (レジスタ 02h) を 01000000h に開く (票 H3b)。バンク窓と違い   */
+/*     VRAM オフセット 0 から 2MB が連続して見えるので、300KB のクライアント  */
+/*     面を CPU から一望できる。ページを張るのはバックエンド (K の            */
+/*     paging_map_phys) の仕事で、ここはレジスタを出すだけ。番地の根拠は      */
+/*     include/wab_xe10.h §4。                                               */
+/*  4. リレーと MMIO は落としたままにする。画面を奪うのは enter() の仕事。    */
 /*     MMIO 窓は Xe10 では NP21/W に存在しない (pciMMIO_Addr = 0 のまま) ので */
 /*     bit0 は 0 のまま = BLT レジスタは I/O 経由で設定する。                 */
 /* ------------------------------------------------------------------------ */
+static void xe10_linear_enable(int on);
+
 static void xe10_init(void)
 {
     outp(WAB_XE10_POS102_PORT, WAB_XE10_POS102_ENABLE);
     wab_glue_xe10.io_count++;
 
     ctrl_out(WAB_XE10_REG_VRAMWIN, WAB_XE10_WIN_SEL);
+    xe10_linear_enable(1);
     ctrl_out(WAB_XE10_REG_RELAY, 0);
+}
+
+/* ------------------------------------------------------------------------ */
+/*  リニア窓の開閉 ([W] 0FABh レジスタ 02h / include/wab_xe10.h §4)           */
+/*                                                                          */
+/*  on  : dat = 01h → 物理 01000000h から 2MB。                              */
+/*  off : dat = 00h。⚠ NP21/W はこの値を捨てる                               */
+/*        ([N] cirrusvga_ofab case 0x02 の `if(dat!=0x00 && dat!=0xff)`)      */
+/*        ので、エミュレータ上では窓は開いたまま残る。実際の後始末は          */
+/*        バックエンドがページを Not-Present に戻すことで行い、ここは実機     */
+/*        向けの作法として書き込みだけ出す。                                 */
+/* ------------------------------------------------------------------------ */
+static void xe10_linear_enable(int on)
+{
+    ctrl_out(WAB_XE10_REG_LINEARWIN,
+             on ? WAB_XE10_LINEARWIN_SEL : WAB_XE10_LINEARWIN_OFF);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -175,6 +199,9 @@ WabGlue wab_glue_xe10 = {
     xe10_mmio_enable,
     (u32)WAB_XE10_WIN_BASE,
     (u32)WAB_XE10_WIN_SIZE,
+    (u32)WAB_XE10_LINEARWIN_BASE,   /* リニア窓 01000000h (票 H3b) */
+    (u32)WAB_XE10_LINEARWIN_SIZE,   /* 2MB */
+    xe10_linear_enable,
     (volatile u8 *)0,   /* MMIO 窓なし (NP21/W の Xe10 は pciMMIO_Addr = 0) */
     0                   /* io_count */
 };

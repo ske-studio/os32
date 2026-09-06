@@ -107,8 +107,10 @@
 /*  VRA2WINDOW_SIZEX = 0x8000、CIRRUS_VRAMWINDOW2MASK、および                 */
 /*  cirrus_linear_memwnd_addr_convert の `addr &= 0x7fff`)。窓内のオフセット  */
 /*  はチップのバンクレジスタ (GR09/GR0A/GR0B) が VRAM のどこを指すかで決まる。 */
-/*  → 300KB のクライアント面を CPU から一望することはできない。CPU 直書きは   */
-/*  小さい矩形だけに使い、面全体の移動はエンジンに任せる (DESIGN §8)。        */
+/*  → 300KB のクライアント面をこの窓から一望することはできない。              */
+/*  **H3b 以降、backend_cirrus はこの窓を使わない** — CPU から触るのは §4 の   */
+/*  リニア窓 (2MB) で、バンク切替そのものが要らなくなった。この定数群は        */
+/*  グルーが reg 01h を既定値 (ITF の設定) に固定するためだけに残っている。    */
 /*                                                                          */
 /*  PEGC のリニア窓 (F00000h) と場所が重なりうるので、既定の F60000h をその   */
 /*  まま使う。PEGC と Cirrus は同時に選ばれない (バックエンドは 1 枚) が、     */
@@ -131,22 +133,41 @@
 #define WAB_XE10_WIN_SIZE       0x8000UL   /* 32KB ([N] VRA2WINDOW_SIZEX) */
 
 /* ------------------------------------------------------------------------ */
-/*  4. 「リニア VRAM アクセス用アドレス」(レジスタ 02h) — v1 では使わない      */
+/*  4. 「リニア VRAM アクセス用アドレス」(レジスタ 02h) — H3b で採用          */
 /*                                                                          */
 /*  [W] は 0FABh の 02h を「VRAM ウィンドウアドレス ■[PC-9821Ap2/As2/An/     */
 /*  Xs/Xp/Xn/Ap3/As3]」= S3 搭載機用としか書いておらず、CL-GD5430 内蔵機での   */
 /*  意味は**資料に無い**。NP21/W はこれを全内蔵型で受け付け、                  */
 /*  `VRAMWindowAddr = dat << 24` として **2MB のリニア窓** を開く              */
 /*  ([N] cirrusvga_ofab case 0x02、cirrus_vga_extern.h VRAMWINDOW_SIZE =      */
-/*   0x200000、i286c/cpumem.c memp_read8 の vramWndAddr 分岐)。               */
+/*   0x200000、i386c/cpumem.c memp_read8 の vramWndAddr 分岐)。               */
 /*                                                                          */
-/*  これが使えれば 300KB のクライアント面を CPU から直接触れるが、値が        */
-/*  dat<<24 = **16MB 単位**なので最小でも 01000000h になり、OS32 の            */
-/*  ページテーブルの守備範囲 (PAGING_MAP_SIZE = 16MB) の外に出る。            */
-/*  paging を広げるのは K レーンの領分なので v1 では採用しない。定数と経緯     */
-/*  だけ残す (PM への申し送り事項)。 */
+/*  窓は §3 のバンク窓と違い **バンクレジスタ (GR09) を通らない** ([N]        */
+/*  cirrus_linear_readb / _writeb は addr &= cirrus_addr_mask するだけ。      */
+/*  GR09 を見る cirrus_linear_memwnd_addr_convert は 01h の窓専用)。          */
+/*  つまり窓の先頭 = VRAM オフセット 0 の線形写像で、300KB のクライアント面を  */
+/*  CPU から一望できる。SR4 bit3 (chain4) を立てた 8bpp では 1 バイト 1 画素。 */
+/*                                                                          */
+/*  値は dat<<24 = **16MB 単位**なので最小でも 01000000h。かつては OS32 の     */
+/*  ページテーブルの守備範囲 (16MB) の外だったので使えなかったが、票 H3b で    */
+/*  PAGING_MAP_SIZE を 32MB へ広げた (16MB〜32MB は既定 Not-Present で、       */
+/*  paging_map_phys() が窓だけを張る)。kernel/paging.h の PAGING_RAM_LIMIT /  */
+/*  PAGING_MAP_SIZE の注記を参照。                                            */
+/*                                                                          */
+/*  ⚠ **窓を閉じる書き込みは NP21/W では効かない**: cirrusvga_ofab case 0x02   */
+/*  は `if(dat!=0x00 && dat!=0xff)` で 00h/FFh を捨てるので、一度開いた窓は    */
+/*  VRAMWindowAddr が残る。OS32 側の後始末は「ページを Not-Present に戻す」    */
+/*  ことで行い、レジスタへの 0 書き込みは実機向けの作法として併せて出す。      */
 /* ------------------------------------------------------------------------ */
 #define WAB_XE10_LINEARWIN_SHIFT 24          /* dat << 24 が窓の物理先頭 */
 #define WAB_XE10_LINEARWIN_SIZE  0x00200000UL /* 2MB ([N] VRAMWINDOW_SIZE) */
+
+/* OS32 が使うリニア窓。dat = 01h → 01000000h (16MB ちょうど)。
+ * 実 RAM の管理上限 (PAGING_RAM_LIMIT = 16MB) の直上で、RAM とは重ならない
+ * (重なる構成では backend_cirrus の probe が窓を拒否する)。 */
+#define WAB_XE10_LINEARWIN_SEL   0x01
+#define WAB_XE10_LINEARWIN_OFF   0x00        /* 窓を閉じる値 (NP21/W は無視) */
+#define WAB_XE10_LINEARWIN_BASE \
+    ((u32)WAB_XE10_LINEARWIN_SEL << WAB_XE10_LINEARWIN_SHIFT)
 
 #endif /* __WAB_XE10_H */

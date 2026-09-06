@@ -8,8 +8,8 @@
 /*                                                                          */
 /*  構造:                                                                   */
 /*    page_directory[1024]  — ページディレクトリ (4KB)                      */
-/*    page_tables[4][1024]  — ページテーブル4枚 = 16MBカバー (16KB)         */
-/*    合計BSS: ~40KB (アライメント用パディング含む)                         */
+/*    page_tables[8][1024]  — ページテーブル8枚 = 32MBカバー (32KB)         */
+/*    合計BSS: ~44KB (アライメント用パディング含む)                         */
 /*                                                                          */
 /*  保護マップ (ブートアーキテクチャ改善後):                               */
 /*                                                                          */
@@ -30,6 +30,11 @@
 /*                                .data/.bss はアプリ PD ごとに差し替え)   */
 /*    0x500000 - mem_end  : R/W  (プログラム空間, ガードページ付き)         */
 /*    mem_end  - 0xFFFFFF : NP   (未実装メモリ)                             */
+/*                                                                          */
+/*  [16MB 超のデバイス窓帯 (H3b)]                                            */
+/*    0x1000000-0x1FFFFFF : NP   (実 RAM 無し。既定は全ページ Not-Present)   */
+/*      paging_map_phys() でドライバが窓だけを張る。現在の利用者は Xe10      */
+/*      内蔵 Cirrus のリニア窓 0x1000000〜0x11FFFFF (2MB)。                  */
 /* ======================================================================== */
 
 #include "paging.h"
@@ -62,14 +67,34 @@ STATIC_ASSERT((MEM_EXEC_LOAD_ADDR >> 22) == APP_BAND_PDE, exec_load_in_app_band)
 STATIC_ASSERT(((MEM_APP_BAND_TOP - 1) >> 22) == APP_BAND_PDE, app_band_top_in_pde);
 STATIC_ASSERT(MEM_SHLIB_END <= MEM_EXEC_LOAD_ADDR, shlib_band_below_exec);
 
+/* H3b: 「実 RAM の上限」と「ページテーブルの守備範囲」の関係。
+ *   - 実 RAM 上限は守備範囲の内側 (でないと恒等マップの穴ができる)。
+ *   - どちらも 4MB (= 1 PDE) の倍数。端数があると RAM 上限が PT の途中に
+ *     落ち、pgalloc とページテーブルの境界がずれる。
+ *   - 守備範囲が実 RAM 上限より広い = 16MB 超にデバイス窓を張る余地がある
+ *     (これが H3b の目的そのもの)。 */
+STATIC_ASSERT(PAGING_RAM_LIMIT <= PAGING_MAP_SIZE, ram_limit_within_map);
+STATIC_ASSERT((PAGING_RAM_LIMIT % (PTE_COUNT * PAGE_SIZE)) == 0,
+              ram_limit_pde_aligned);
+STATIC_ASSERT((PAGING_MAP_SIZE % (PTE_COUNT * PAGE_SIZE)) == 0,
+              map_size_pde_aligned);
+/* ホットデプロイ窓は物理 RAM の末尾を削って作るので、必ず実 RAM 上限の
+ * 内側に収まる (16MB 超のデバイス窓帯には出てこない)。 */
+STATIC_ASSERT(MEM_HOTDEPLOY_SIZE * 2 < PAGING_RAM_LIMIT,
+              hotdeploy_window_within_ram);
+
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
 /* Open Watcomでは __declspec(align(4096)) が使えないため、
  * 手動でアライメントを確保する。
  * 実際のテーブルサイズ + 4095バイトのパディングを確保し、
  * 4096境界に切り上げたアドレスを使用する。 */
 
+/* ページテーブルは 1 本の連続バッファから切り出す。かつては 1 枚ごとに
+ * 4095 バイトのパディングを持たせていたが (u8[N][4096+4095])、H3b で枚数が
+ * 4 → 8 になると捨てるぶんも倍 (32KB) になる。先頭だけ 4096 境界に上げれば
+ * 以降の 4KB 刻みは自動的に境界に乗るので、増分は表そのものの +16KB で済む。 */
 static u8 pd_raw[4096 + 4095];      /* ページディレクトリ用生バッファ */
-static u8 pt_raw[PAGING_PT_COUNT][4096 + 4095];  /* ページテーブル用生バッファ */
+static u8 pt_raw[PAGING_PT_COUNT * 4096 + 4095];  /* ページテーブル用生バッファ */
 
 static u32 *page_directory;          /* アライン済みポインタ */
 static u32 *page_tables[PAGING_PT_COUNT];
@@ -101,12 +126,22 @@ void paging_init(u32 mem_kb)
     int i, j;
     u32 phys;
     u32 pd_phys;
-    u32 max_mem_bytes = mem_kb * 1024; /* プローブされた実メモリ上限 */
+    u32 max_mem_bytes;
+    u32 *pt_base;
 
-    /* アライン済みポインタを取得 */
+    /* プローブされた実メモリ量を「OS32 が RAM として面倒を見る上限」で頭打ちに
+     * する (H3b)。従来はページテーブルが 16MB ぶんしか無かったので自然に
+     * 16MB 止まりだったが、守備範囲を 32MB に広げた今は明示的に切る必要がある。
+     * 16MB 超はデバイス窓のための空き番地であって RAM ではない。
+     * mem_kb * 1024 の桁あふれ (mem_kb > 4194303) もこれで防げる。 */
+    if (mem_kb > PAGING_RAM_LIMIT / 1024) mem_kb = PAGING_RAM_LIMIT / 1024;
+    max_mem_bytes = mem_kb * 1024;
+
+    /* アライン済みポインタを取得 (先頭だけ上げれば以降は 4KB 刻みで乗る) */
     page_directory = align4096(pd_raw);
+    pt_base = align4096(pt_raw);
     for (i = 0; i < PAGING_PT_COUNT; i++) {
-        page_tables[i] = align4096(pt_raw[i]);
+        page_tables[i] = pt_base + (u32)i * PTE_COUNT;
     }
 
     /* ページディレクトリ初期化: 全エントリをNot-Presentに */
@@ -114,7 +149,11 @@ void paging_init(u32 mem_kb)
         page_directory[i] = 0;
     }
 
-    /* ページテーブル構築: 実装されている範囲のみR/W、超えた範囲はNot-Present */
+    /* ページテーブル構築: 実装されている範囲のみR/W、超えた範囲はNot-Present。
+     * 16MB〜32MB を覆う PT (H3b で足した 4 枚) は全ページ Not-Present のまま
+     * になるが、**PDE は present で登録しておく** — こうしておけば
+     * paging_map_phys() がデバイス窓を張るときに PTE を書くだけで済み、
+     * PDE の張り替え (= 他 PD との整合) を考えなくてよい。 */
     for (i = 0; i < PAGING_PT_COUNT; i++) {
         for (j = 0; j < PTE_COUNT; j++) {
             phys = (u32)(i * PTE_COUNT + j) * PAGE_SIZE;
@@ -372,7 +411,7 @@ int paging_is_present(u32 virt_addr)
     u32 pdi, pti;
     if (!pg_enabled) return 1;
     pdi = virt_addr >> 22;
-    if (pdi >= PAGING_PT_COUNT) return 0; /* 16MB超: マッピング範囲外 */
+    if (pdi >= PAGING_PT_COUNT) return 0; /* PAGING_MAP_SIZE 超: 範囲外 */
     pti = (virt_addr >> 12) & 0x3FF;
     return (page_tables[pdi][pti] & PTE_PRESENT) ? 1 : 0;
 }
@@ -433,7 +472,11 @@ int paging_addrspace_create(struct addrspace *as)
     app_pt = (u32 *)pt_phys;
 
     /* 全 PDE を master からコピー = カーネル帯域・SHM・VRAM・ホットデプロイ窓
-     * を含む全域を共有する。共有 PDE は master と同じ PT (同一物理) を指す。 */
+     * を含む全域を共有する。共有 PDE は master と同じ PT (同一物理) を指す。
+     * ループは PDE_COUNT (1024 本) なので、H3b で守備範囲が 32MB に広がって
+     * 増えた PDE 4〜7 (16MB 超のデバイス窓帯) も自動的に写る。master に
+     * paging_map_phys() で張った Cirrus のリニア窓は、以後に作られる
+     * CPL=3 アプリの PD からも同じ物理を指す。 */
     for (i = 0; i < PDE_COUNT; i++) {
         new_pd[i] = page_directory[i];
     }
