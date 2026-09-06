@@ -346,11 +346,27 @@ void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
         }
     }
 
+    /* ---- 間接テーブルは ext2_g_aux に置いてはいけない ----
+     *
+     * `ext2_free_block()` は中でブロックビットマップを **ext2_g_aux へ読み直す**。
+     * 間接テーブルを ext2_g_aux に読んでから解放ループを回すと、**1 本目を解放した
+     * 瞬間に表がビットマップへ化け**、以降 j=1.. はビットマップのバイト列を
+     * ブロック番号と誤読して**他のファイルのブロックを片端から解放**する。
+     * 解放されたブロックは次の割り当てで別ファイルへ再配布され、ファイルが
+     * 相互リンクして中身が混ざる (2026-09-06 実測: 15KB の
+     * /usr/bin/v12_api_test.bin を 21KB で上書きしたら、新しいファイルの
+     * データブロック 0 のオフセット 12..19 に別ファイルの間接エントリが現れ、
+     * OS32X ヘッダの flags / entry_offset が化けて exec_run が
+     * `load + 0xC639` へ飛んだ)。
+     *
+     * ext2_free_block が触るのは ext2_g_aux だけなので、表は ext2_g_blk
+     * (単一間接) と ext2_g_dat (二重間接の内側) に置く。ext2_g_dat は
+     * ext2_write_stream 専用だが、そこから ext2_free_all_blocks は呼ばれない。 */
     if (inode->block[EXT2_IND_BLOCK] != 0) {
-        if (ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_aux) == 0) {
+        if (ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_blk) == 0) {
             u32 j;
             for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
-                u32 blk = *(u32 *)&ext2_g_aux[j * 4];
+                u32 blk = *(u32 *)&ext2_g_blk[j * 4];
                 if (blk != 0) ext2_free_block(ctx, blk);
             }
         }
@@ -359,17 +375,18 @@ void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
     }
 
     if (inode->block[EXT2_DIND_BLOCK] != 0) {
-        /* dindテーブルをg_auxに読む。indテーブルはg_blkに読む。
-         * 同じバッファを再利用するとdindのエントリが破壊される。 */
-        if (ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_aux) == 0) {
+        /* dind テーブルを g_blk、その先の ind テーブルを g_dat に読む。
+         * どちらも ext2_free_block が触らないバッファでなければならない
+         * (同じバッファの再利用でも上の表が壊れる)。 */
+        if (ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_blk) == 0) {
             u32 j;
             for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
-                u32 ind1 = *(u32 *)&ext2_g_aux[j * 4];
+                u32 ind1 = *(u32 *)&ext2_g_blk[j * 4];
                 if (ind1 != 0) {
-                    if (ext2_read_block(ctx, ind1, ext2_g_blk) == 0) {
+                    if (ext2_read_block(ctx, ind1, ext2_g_dat) == 0) {
                         u32 k;
                         for (k = 0; k < EXT2_ADDR_PER_BLOCK; k++) {
-                            u32 blk = *(u32 *)&ext2_g_blk[k * 4];
+                            u32 blk = *(u32 *)&ext2_g_dat[k * 4];
                             if (blk != 0) ext2_free_block(ctx, blk);
                         }
                     }

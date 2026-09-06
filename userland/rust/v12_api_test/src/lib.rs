@@ -232,8 +232,8 @@ impl Test {
             Ok(id) => id,
             Err(e) => {
                 let n = self.seq_len;
-                let n = put_str(&mut self.seq, n, b"open1=");
-                let n = put_str(&mut self.seq, n, short_err(e));
+                let n = put(&mut self.seq, n, b"open1=");
+                let n = put(&mut self.seq, n, short_err(e));
                 self.seq_len = n;
                 self.mode = MODE_PLAIN;
                 self.show_seq();
@@ -246,8 +246,8 @@ impl Test {
         /* 表示中のモーダルがあるので 2 本目は開けない (契約 M2 / v1 は 1 枚)。 */
         let open2 = res_name(modal::modal_open(self.win_id(), GUI_MODAL_OK, b"second"));
         let n = self.seq_len;
-        let n = put_str(&mut self.seq, n, b"open2=");
-        let n = put_str(&mut self.seq, n, open2);
+        let n = put(&mut self.seq, n, b"open2=");
+        let n = put(&mut self.seq, n, open2);
         self.seq_len = n;
         self.show_seq();
     }
@@ -258,32 +258,32 @@ impl Test {
 
         /* (a) 未 consume の結果があるので MODAL_OPEN は ERR_FULL (契約 M2)。 */
         let open3 = res_name(modal::modal_open(self.win_id(), GUI_MODAL_OK, b"third"));
-        let n = put_str(&mut self.seq, self.seq_len, b" open3=");
-        let n = put_str(&mut self.seq, n, open3);
+        let n = put(&mut self.seq, self.seq_len, b" open3=");
+        let n = put(&mut self.seq, n, open3);
 
         /* (b) 正規の 1 回目: r=1 (OK)、値は空。 */
-        let n = put_str(&mut self.seq, n, b" r=");
+        let n = put(&mut self.seq, n, b" r=");
         let n = match modal::modal_result(dialog, &mut val) {
             Ok(m) => {
                 let k = put_num(&mut self.seq, n, m.result as i32);
                 if m.copied != 0 {
                     /* MessageBox は値が空のはず。空でなければ長さを見せる。 */
-                    let k = put_str(&mut self.seq, k, b"+v");
+                    let k = put(&mut self.seq, k, b"+v");
                     put_num(&mut self.seq, k, m.copied as i32)
                 } else {
                     k
                 }
             }
-            Err(e) => put_str(&mut self.seq, n, short_err(e)),
+            Err(e) => put(&mut self.seq, n, short_err(e)),
         };
 
         /* (c) 二重 consume は ERR_STALE (契約 M2)。 */
-        let n = put_str(&mut self.seq, n, b" again=");
-        let n = put_str(&mut self.seq, n, res_name(modal::modal_result(dialog, &mut val)));
+        let n = put(&mut self.seq, n, b" again=");
+        let n = put(&mut self.seq, n, res_name(modal::modal_result(dialog, &mut val)));
 
         /* (d) 存在しない ID も ERR_STALE。 */
-        let n = put_str(&mut self.seq, n, b" bad=");
-        let n = put_str(
+        let n = put(&mut self.seq, n, b" bad=");
+        let n = put(
             &mut self.seq,
             n,
             res_name(modal::modal_result(BOGUS_DIALOG, &mut val)),
@@ -325,13 +325,13 @@ impl Test {
         let mut buf = [0u8; 64];
         let n = put(&mut buf, 0, b"6: r=");
         let n = if self.ring_result == i32::MIN {
-            put_str(&mut buf, n, b"?")
+            put(&mut buf, n, b"?")
         } else {
             put_num(&mut buf, n, self.ring_result)
         };
-        let n = put_str(&mut buf, n, b" ovf=");
+        let n = put(&mut buf, n, b" ovf=");
         let n = put_num(&mut buf, n, self.ovf_count as i32);
-        let n = put_str(&mut buf, n, b" dropped=");
+        let n = put(&mut buf, n, b" dropped=");
         let n = put_num(&mut buf, n, self.dropped_total as i32);
         let _ = widget::set_text(self.lbl_modal, &buf[..n]);
         self.repaint();
@@ -368,7 +368,7 @@ impl Test {
             Ok(()) => put(&mut buf, 0, b"7: switch_cui=accepted"),
             Err(e) => {
                 let k = put(&mut buf, 0, b"7: switch_cui=");
-                put_str(&mut buf, k, short_err(e))
+                put(&mut buf, k, short_err(e))
             }
         };
         let _ = widget::set_text(self.lbl_sess, &buf[..n]);
@@ -605,8 +605,13 @@ const fn diamond_mask() -> [u8; 32] {
 
 /* ================================================================ */
 /*  小道具 (alloc も core::fmt も使わない)                            */
+/*                                                                  */
+/*  すべて `#[inline(never)]`。ラベル 1 本組むたびに展開されると      */
+/*  .text が 21.6KB まで膨らんでいた (18.8KB に戻る)。試験アプリの    */
+/*  中身は変わらないので、複製を減らして読みやすさを取る。            */
 /* ================================================================ */
 
+#[inline(never)]
 fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
     if v < lo {
         lo
@@ -618,6 +623,7 @@ fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
 }
 
 /// `GuiErr::name()` から `ERR_` を落とした短い名前 (`FULL` / `STALE` / `NOSYS` …)。
+#[inline(never)]
 fn short_err(e: GuiErr) -> &'static [u8] {
     let n = e.name();
     if n.len() > 4 && n[0] == b'E' && n[1] == b'R' && n[2] == b'R' && n[3] == b'_' {
@@ -628,6 +634,7 @@ fn short_err(e: GuiErr) -> &'static [u8] {
 }
 
 /// 成功なら `ok`、失敗なら短いエラー名 (否定試験の 1 語表示用)。
+#[inline(never)]
 fn res_name<T>(r: GuiResult<T>) -> &'static [u8] {
     match r {
         Ok(_) => b"ok",
@@ -636,6 +643,7 @@ fn res_name<T>(r: GuiResult<T>) -> &'static [u8] {
 }
 
 /// `a` + `": "` + `b` を詰める。返り値: 書いたバイト数。
+#[inline(never)]
 fn fmt2(dst: &mut [u8], a: &[u8], b: &[u8]) -> usize {
     let mut n = put(dst, 0, a);
     n = put(dst, n, b": ");
@@ -643,6 +651,7 @@ fn fmt2(dst: &mut [u8], a: &[u8], b: &[u8]) -> usize {
 }
 
 /// `a` + `b` + 10 進数を詰める。
+#[inline(never)]
 fn fmt_num(dst: &mut [u8], a: &[u8], b: &[u8], v: i32) -> usize {
     let mut n = put(dst, 0, a);
     n = put(dst, n, b);
@@ -650,6 +659,7 @@ fn fmt_num(dst: &mut [u8], a: &[u8], b: &[u8], v: i32) -> usize {
 }
 
 /// `dst[at..]` へ 10 進数を詰める。返り値: 新しい末尾。
+#[inline(never)]
 fn put_num(dst: &mut [u8], at: usize, v: i32) -> usize {
     let mut n = at;
     let mut tmp = [0u8; 12];
@@ -678,13 +688,8 @@ fn put_num(dst: &mut [u8], at: usize, v: i32) -> usize {
     n
 }
 
-/// [`put`] の別名 (読みやすさのため。中身は同じ)。
-#[inline]
-fn put_str(dst: &mut [u8], at: usize, src: &[u8]) -> usize {
-    put(dst, at, src)
-}
-
 /// `dst[at..]` へ `src` を NUL 手前まで詰める。返り値: 新しい末尾。
+#[inline(never)]
 fn put(dst: &mut [u8], at: usize, src: &[u8]) -> usize {
     let mut n = at;
     let mut i = 0usize;
