@@ -228,6 +228,8 @@ make external                        # apps + game (make apps / make game で個
 
 検証した組み合わせは submodule のポインタとして os32 のコミットに残る。KAPI を
 動かしたら `make external` で両方を再ビルドし、ポインタを更新してコミットする。
+**SDK のライブラリ (libos32gfx 等) を変えたときも同様** — アプリは静的リンクなので、
+古い .bin は新しいバックエンド (PEGC の PACKED8 等) で #PF する (2026-09-06 hello32 で実測)。
 `apps/deploy.yaml` と `game/deploy.yaml` は配備マニフェストに統合される
 (`tools/deploy_manifests.py`)。emu_agent の `make` は `apps` / `game` / `external` を
 許可リストに含む。
