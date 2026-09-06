@@ -49,6 +49,10 @@ pub const GUI_OP_TIMER_SET: u32 = 48;
 pub const GUI_OP_TIMER_KILL: u32 = 49;
 
 pub const GUI_OP_MODAL_OPEN: u32 = 64;
+/// 完了したモーダルの結果取得 (v1.2 M1)。67〜79 は予約。
+pub const GUI_OP_MODAL_RESULT: u32 = 65;
+/// gshell へのセッション要求 (v1.2 S4)。古い WM は `OS32_ERR_NOSYS` を返す。
+pub const GUI_OP_SESSION_REQUEST: u32 = 66;
 
 /// カーネル内部 op (exec_exit → WM)。アプリは送らない。
 pub const GUI_OP_OWNER_EXIT: u32 = 80;
@@ -450,5 +454,65 @@ pub const GUI_MODAL_OK: u16 = 0;
 pub const GUI_MODAL_OK_CANCEL: u16 = 1;
 pub const GUI_MODAL_YES_NO: u16 = 2;
 pub const GUI_MODAL_FILE_OPEN: u16 = 3;
+/// 1 行入力 (OK / Cancel) — v1.2 M4。prompt は既存 `GuiReqModal.message`。
+pub const GUI_MODAL_INPUT: u16 = 4;
 pub const GUI_MODAL_RESULT_CANCEL: i16 = 0;
 pub const GUI_MODAL_RESULT_OK: i16 = 1;
+
+/* ======================================================================== */
+/*  v1.2 追記 (K5) — MODAL_RESULT / SESSION_REQUEST                          */
+/*                                                                          */
+/*  正典は C 側 os32_gui_shared.h と docs/tasks/gui/v12/CONTRACTS.md         */
+/*  §1 (S4 / S5) / §3 (M1 / M4)。GUI_PROTO_VERSION は 1 のまま、末尾追記のみ。*/
+/*                                                                          */
+/*  MODAL_RESULT (op 65) の consume 規則 (M2): WM はスロットごとに完了済みの  */
+/*  結果を 1 件だけ保持し、未 consume の間は MODAL_OPEN が OS32_ERR_FULL、    */
+/*  ID 不一致と二重 consume は OS32_ERR_STALE、owner 回収で破棄する。         */
+/*                                                                          */
+/*  SESSION_REQUEST (op 66) の意味 (S2 / S3): 戻り値 0 は**受理**であって完了 */
+/*  ではない。WM は値を私有メモリへ写して pending を立てるだけで、VFS /       */
+/*  exec_run / system.cfg 更新はしない。pending 中は OS32_ERR_FULL、不正は    */
+/*  OS32_ERR_INVAL、古い WM は OS32_ERR_NOSYS。                              */
+/* ======================================================================== */
+
+/// SessionAction の種別 (`GuiReqSession.action`)。0 は「要求なし」で予約。
+pub const GUI_SESSION_LAUNCH: u8 = 1;
+pub const GUI_SESSION_SWITCH_CUI: u8 = 2;
+pub const GUI_SESSION_SHUTDOWN: u8 = 3;
+
+/// `GUI_EV_QUIT` (kind 12) の `GuiEvent.sub` に入る終了理由。0 は予約 (S5)。
+/// Quit は制御イベントなのでリング満杯でも捨てず sticky に再配送する。
+pub const GUI_QUIT_REASON_REPLACE_APP: u8 = 1;
+pub const GUI_QUIT_REASON_SWITCH_CUI: u8 = 2;
+pub const GUI_QUIT_REASON_SHUTDOWN: u8 = 3;
+
+/* MODAL_RESULT (op 65) の要求 / 応答。value は MessageBox なら空、File Open は
+ * 選択した絶対パス、Input は入力した UTF-8 (最大 255B)。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqModalResult { pub dialog: u16, pub _pad: u16 }               /* 4B */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiRespModalResult { pub result: i16, pub dialog: u16, pub value: GuiString } /* 260B */
+
+/* SESSION_REQUEST (op 66) の要求。LAUNCH は 1〜255B の絶対パス、
+ * SWITCH_CUI / SHUTDOWN は value 空 (len=0)。flags は v1.2 では 0 のみ。 */
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GuiReqSession { pub action: u8, pub flags: u8, pub _pad: u16, pub value: GuiString } /* 260B */
+
+const _: () = assert!(size_of::<GuiReqModalResult>() == 4);
+const _: () = assert!(size_of::<GuiRespModalResult>() == 260);
+const _: () = assert!(size_of::<GuiReqSession>() == 260);
+const _: () = assert!(offset_of!(GuiReqModalResult, dialog) == 0);
+const _: () = assert!(offset_of!(GuiReqModalResult, _pad) == 2);
+const _: () = assert!(offset_of!(GuiRespModalResult, result) == 0);
+const _: () = assert!(offset_of!(GuiRespModalResult, dialog) == 2);
+const _: () = assert!(offset_of!(GuiRespModalResult, value) == 4);
+const _: () = assert!(offset_of!(GuiReqSession, action) == 0);
+const _: () = assert!(offset_of!(GuiReqSession, flags) == 1);
+const _: () = assert!(offset_of!(GuiReqSession, _pad) == 2);
+const _: () = assert!(offset_of!(GuiReqSession, value) == 4);
+const _: () = assert!(size_of::<GuiReqModalResult>() <= GUI_SLOT_REQ_SIZE);
+const _: () = assert!(size_of::<GuiReqSession>() <= GUI_SLOT_REQ_SIZE);
+const _: () = assert!(size_of::<GuiRespModalResult>() <= GUI_SLOT_RESP_SIZE);
