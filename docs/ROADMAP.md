@@ -1,6 +1,6 @@
 # OS32 リリースロードマップ
 
-*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-06 改訂 (v1.1 完了・v1.2 契約反映)*
+*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-07 改訂 (v1.1 完了・v1.2 実装完了、レビュー待ち)*
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 
@@ -112,6 +112,8 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 ---
 
 ### v1.2 — 「デスクトップ環境」
+
+> **状況 (2026-09-07)**: 実装完了、G0〜G5 を PEGC / 9801 / Cirrus で通過 (feat/gui)。ESC 即時切替と上部バーは撤去済み (`DEBUG_SHORTCUTS`)。main へのマージはレビュー待ち。経過: [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) §10。
 
 **ゴール**: taskbar・Start・File Manager・launcher が揃い、GUIだけで基本操作が完結する。app 置換、CUI 切替、system halt を現在の single-foreground-app model を壊さず実現する。
 

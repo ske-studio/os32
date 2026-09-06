@@ -624,6 +624,16 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     /* 正常復帰: ガードを下ろす (フォールト/ sys_exit 経路は longjmp するので
      * teardown 側 ring3_fault_kill / kapi_sys_exit でクリアされる)。 */
     ring3_in_syscall = 0;
+
+    /* --- 出口でも CTRL+STOP を見る (契約 T6、v1.2 G2 で実測した隙間) ---
+     * 入口の ring3_abort_check と IRQ1 スタブ (割り込まれた文脈が CPL=3 のとき)
+     * だけだと、アプリが OP_WAIT (gshell の sys_halt ループ、CPL=0) で寝ている
+     * 間に押された CTRL+STOP は、次に syscall へ入るまで効かない — モーダルを
+     * 開いたまま待っているアプリは二度と syscall へ入らないので永遠に畳めない
+     * (2026-09-06 実測)。gshell は raw リングで CTRL+STOP を見たら OP_WAIT を
+     * 抜けてここへ戻すので、出口で畳む。wrap は終わっているのでカーネル状態は
+     * 整っている (longjmp して戻らない)。 */
+    ring3_abort_check();
 }
 
 /* ======================================================================== */

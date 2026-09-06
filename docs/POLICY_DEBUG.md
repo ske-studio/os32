@@ -262,14 +262,71 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   「Cirrus で FEP が効かない」と誤診しかけた。
 - `make deploy*` は `/etc/system.cfg` を巻き戻す。`gfxmode` / `os32gui` の設定切替は `/api/reset` で検証する。
 - `hotdeploy` は CUI で rshell が生きているときだけ効く (`hotdeploy_poll` は `kbd_trygetchar` から)。gshell 中や
-  `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す (ESC → SHIFT+SPACE → `ime off` → `rshell`)。
+  `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す。**GUI から CUI へ戻る経路は
+  Start → "CUI mode" → 確認ダイアログ Yes だけ** (G5 で ESC の即時切替は撤去。契約 S6 / 票 W3 §4.1) —
+  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82,H-107+54) →
+  Yes (410,H/2+11) → 約 6 秒待ち → `abs=off` → `rshell`)。その後 SHIFT+SPACE → `ime off` → `rshell`。
+  この経路は `/etc/system.cfg` に `GUI=0` を永続化するので、GUI 自動起動へ戻すときは `os32gui`
+  (その場で GUI へ入る) か cfg の `GUI=1` 書き戻しを使う。
 - OS32 は NP21/W ではシームレスマウス (np2sysp `getmpos`) なので、`/api/mouse` は **`ax`/`ay`** (絶対座標
   0..65535、`ax = px*65535/639`、`ay = py*65535/(H-1)`)。`dx/dy` はバスマウス計数で効かない。検証後は `abs=off`。
 - `gfx_stats` のカウンタは起動からの累計。`gdi_test` の値は起動直後の 1 回目だけが基準。
+- `/api/key` の `text=` は **8 文字ずつ** 送る (`tools/gui_gate.py` の `key()`)。raw リングは 32 エントリ
+  (make+break で 1 文字 2 本) しか無く、長いパスを一度に注入すると後ろが落ちる (Run... のパスが
+  `/usr/bin/gui_dem` で切れ「Launch failed」と誤診しかけた)。連打も 0.3s 間隔で。
 - 自己完結テストの終了は `int 0x80` で **eax=KAPI_SLOT_SYS_EXIT (84)**。eax=0 はスロット 0 = `gfx_init` で
   終了しない (ring3_guard がそれで GFX モードに入ったまま無限ループしていた)。
 - NP21/W の停止は `taskkill.exe /F /IM np21x64w.exe` (os32-cycle deploy と同じ) で PM が行える。ini の編集
   ([D2]) と np21w-src の `make deploy` は停止中に。
+- **エミュレータは同時に 1 人**。コーダーに「CUI で再現してよい」と hotdeploy を許可したら、PM の GUI 検証と
+  混ざってゲストのファイルが差し替わり、壊れたバイナリを判定してしまった (2026-09-06)。
+
+### 4-24. ext2: 解放系がスクラッチバッファを共有していてファイルが相互リンクする
+
+- **現象** (2026-09-06、v1.2 G2): 15KB の `/usr/bin/v12_api_test.bin` を 21KB で上書き (hotdeploy) すると、
+  新しいファイルの先頭ブロックのオフセット 12〜19 に別ファイルの間接エントリが現れ、OS32X ヘッダの
+  `flags` / `entry_offset` が化けて `exec_run` が `load + 0xC639` へ飛んで #PF。`gui_demo.bin` も
+  「invalid OS32X binary」になった。ホスト側のビルドは正常。
+- **原因**: `ext2_free_all_blocks()` が単一間接テーブルを `ext2_g_aux` に読んで解放ループを回すが、
+  `ext2_free_block()` はブロックビットマップを同じ `ext2_g_aux` に読み直す。1 本目を解放した瞬間に表が
+  ビットマップに化け、以降はビットマップのバイト列をブロック番号と誤読して**他のファイルのブロックを
+  片端から解放**する。解放されたブロックは次の割り当てで再配布され、ファイルが混ざる。二重間接も同型。
+  12KB (直接ブロック 12 本) を超えるファイルの上書き / 削除のたびに起きていた。
+- **対策**: 表を `ext2_g_blk` (単一間接) と `ext2_g_dat` (二重間接の内側) に置く (`fs/ext2_inode.c`)。
+  **規則**: `ext2_g_aux` はビットマップ用。解放・割り当てを呼ぶ経路で表やデータを `g_aux` に置かない
+  (§4 の `sys_ls` コールバックの注意と同じ根)。
+- **診断の手順**: ゲストの `hexdump` でファイル先頭をホストのビルドと比べる → 差分の位置がヘッダなら
+  ローダの `entry` を疑う → `/api/regs` / breakpoint で `_start` に届かないことを確認。NHD の健全性は
+  `dd skip=1633` で ext2 部分を切り出して `e2fsck -fn` (読み取り専用)。**ゲストが壊した内容は Windows 側の
+  コピーにしか無く、次の NHD 配備で WSL 側 (ホストの Python が書く) から丸ごと上書きされる** ので、
+  配備し直せば消える (逆に、ゲストが書いた物は配備で消える — 従来どおり)。
+- **検証**: 修正カーネルで 21KB のファイルを繰り返し上書き → `hexdump` がホストと一致、`v12_api_test` が
+  起動する (v1.2 G2)。
+
+---
+
+### 4-25. GUI の「反応が遅い」は起床経路を疑う前に present と EIP を測る
+
+- **現象** (2026-09-07、v1.2 G3): filer の右ペインで DOWN / ROLLDOWN を押すと画面が 1.3〜2 秒後に変わる。
+  マウスを 2px 動かすと直後に変わるように見えた (実際は時間の一致)。gui_demo のリストは即時。
+- **迷走**: 「Paint が次の周にしか出ない」「OP_WAIT が起きない」と決めつけて、アプリの二重 POLL、
+  OP_INVALIDATE で Paint 即時配送、可視領域の回転、と 3 回直しても効かなかった (いずれも撤回)。
+- **決め手**: (1) カーネルの `gfx_counters` (`kernel.map` の番地を `/api/mem` で読む) — 打鍵後 1.3 秒間
+  `commits` / `present_bytes` が増えない = **present が 1 回も呼ばれていない**。(2) gshell の一時カウンタで
+  Key 到着・OP_INVALIDATE・起床・2 回目の POLL がすべて同じ tick、present だけ 136 tick 後。
+  (3) `/api/status` の `eip` を 30ms ごとに 1.6 秒サンプル → 11/11 が shlib の
+  `libos32gui::draw::Painter::fill_solid` の内側。**真因**: 1 ピクセルごとに clip 4 回 + 枠 4 回の比較をする
+  per-pixel ループで、右ペイン ~108k px の塗りに 1.3 秒。gui_demo は塗り面積が小さいだけだった。
+- **対策**: `fill_solid` は矩形を clip と物理枠で 1 回だけ交差させ、行ごとに `write_bytes` (memset)。
+  glyph / icon も行単位化。filer は選択変更で「前後の 2 行 + パス行」だけ再描画。打鍵→present が
+  0.27〜0.45 秒 (HTTP 往復込み) に。PEGC / 9801 / Cirrus で同じ。
+- **副産物として直した実欠陥**: gshell が Pointer を `moved` に関係なく毎周 ring に積み、
+  `OP_WAIT` が眠らず 33 回/秒の空 commit をしていた (`gfx_counters` の idle 増分で発覚)。
+  起床判定と配送判定が別実装で乖離し得たので `damage::deliverable_cand` に統合。
+- **手順 (30 秒で決まる)**: ① `gfx_counters` を打鍵前後で読み present の有無を見る → 無ければ
+  「アプリが描いていない or 起きていない」。② `/api/status` の `eip` を連続サンプルし、0x5xxxxx (アプリ) /
+  0x4xxxxx (shlib) / 0x3xxxxx (gshell) / 0x1xxxxx (カーネル idle) のどこに居るかを数える。
+  ③ shlib / アプリなら `i386-elf-nm -n` でシンボルに落とす。起床経路のカウンタはそのあと。
 
 ---
 

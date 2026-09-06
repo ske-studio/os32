@@ -168,6 +168,36 @@ gshell 起動
 
 ---
 
+## 6b. バックアップと復元 (ユーザー提案 2026-09-06)
+
+DB ファイルの生コピーは SQLite の版・スキーマ・ページ形式に縛られ、壊れた DB をそのまま
+複製してしまう。**正式なバックアップは JSON への書き出し**とし、圧縮は既存の LZ4 を使う。
+
+```text
+cfg export /hd0/backup/settings.json          # 全 scope。schema_version と日時をヘッダに持つ
+cfg import /hd0/backup/settings.json [--scope app:filer]   # トランザクション 1 回で置換 / 併合
+lz4 c settings.json settings.json.lz4         # 既存 /bin/lz4 (lib/lz4.c)
+tar c /hd0/backup/etc.tar /etc/settings.json /etc/system.cfg /etc/profile   # 束ねるとき
+```
+
+- JSON の形は 1 レコード 1 行 (`{"scope":"gshell","key":"desktop/wallpaper","type":1,"v":"..."}`)。
+  blob は base64。人が `edit` で直せる = FDD からの復旧でも扱える。
+- 読み書きは `libos32cfg` に**最小の JSON writer / reader** を持たせる (この形しか読まない。
+  汎用 JSON ライブラリは持ち込まない — 依存を増やさない方針)。
+- `import` は `schema_version` を見て、新しいファイルは拒否、古いファイルは読める範囲で取り込む。
+- **tar**: `.tar` を扱う道具は無いので、束ねたいときのために **ustar のサブセット** (regular file と
+  directory だけ、100B 名、圧縮なし) の `tar c|x|t` を `userland/cmds/` に足す (ホスト側は Python の
+  `tarfile` で同じ形が読める)。圧縮は `tar` に持たせず `lz4` を外で掛ける (`etc.tar.lz4`)。
+- リカバリモードとの関係: `install --recover-settings` はマスタ DB を戻す。バックアップからの
+  復元は `cfg import` (通常運用) で、リカバリモードにも `--from <json|tar.lz4>` を足せる (S3 に含める)。
+- 自動バックアップ: 設定を書き戻すたびに JSON を出すのは重いので、**`install` / 大きな変更の
+  前だけ** (設定アプリの「書き出し」ボタン、または `cfg export` を手で)。世代管理はしない。
+
+票への反映: S2 に `cfg export|import` と JSON の最小 reader/writer、新しい **S6 = `tar` コマンド
+(ustar サブセット) と `lz4` との組合せの確認**。
+
+---
+
 ## 7. 対象外・将来
 
 - ユーザー別 (マルチユーザー) の分離 — `user` scope を予約するだけ。
@@ -187,6 +217,7 @@ gshell 起動
 | S2 | C | `libos32cfg` (C89)、`cfg` コマンド、libos32gui への末尾追記 (101〜) |
 | S3 | システム | `install --recover-settings` / `cdinst` 同等 (退避 → コピー → 表示 → sync) |
 | S4 | W | gshell の `GuiConfig` 読み込みと通知、設定の書き戻し点 (窓位置、壁紙)、`assets/filetypes` の移行 |
-| S5 | PM / 検証 | §6 の実測、リカバリの実走 (壊した DB → FDD ブート → 復元 → GUI 復帰)、3 バックエンド回帰 |
+| S5 | PM / 検証 | §6 の実測、リカバリの実走 (壊した DB → FDD ブート → 復元 → GUI 復帰)、3 バックエンド回帰。`export` → 壊す → `import` の往復も |
+| S6 | C | `tar` コマンド。**自作せず既製の単一ファイル実装を vendor する** (方針「車輪の再発明を避ける」): 第一候補 **microtar** (rxi、MIT、約 500 行、ustar の読み書き、I/O はコールバックなので KAPI の `sys_open/read/write` に差し替えるだけ)。GNU tar は不可 (gnulib + autotools、fork/exec で圧縮子を呼ぶ、数万行、GPL)。busybox tar (GPLv2) は MIT の本体と混ぜない。`lz4` と組み合わせて `etc.tar.lz4`。ホストの `tarfile` で読めることを確認 |
 
-順序: S1 → S2 → (S3 ∥ S4) → S5。v1.4 の設定アプリはこの上に載る。
+順序: S1 → S2 → (S3 ∥ S4 ∥ S6) → S5。v1.4 の設定アプリはこの上に載る。

@@ -38,6 +38,11 @@ mod uistate;
 pub mod widget;
 pub mod window;
 
+/* ---- v1.2 デスクトップ client API (票 C4、契約 V12-C / V12-I / V12-S) ---- */
+pub mod icon;
+pub mod modal;
+pub mod session;
+
 /* ---- 共有ライブラリの先頭ページ (票 C3) ----
  * `.shlib_hdr` に 32B ヘッダ + ジャンプ表を置き、公開関数を `extern "C"` で
  * 出す。アプリはこの表を通してだけライブラリに入る (`libos32gui_stub`)。 */
@@ -58,6 +63,8 @@ pub mod gapi {
     pub use crate::surface::{
         create_surface, create_window_surface, destroy_surface, screen_surface, surface_size,
     };
+    /// 16x16 標準アイコン (契約 V12-I、票 C4)。
+    pub use crate::icon::{draw_icon16, GuiIcon16, ICON16_SIZE};
 }
 
 /* ---- よく使うものを直下へ ---- */

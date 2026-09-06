@@ -84,28 +84,34 @@ pub type GuiResult<T> = Result<T, GuiErr>;
 /*  デバッグ出力 (KAPI に dbg_print は無いので kprintf を包む)        */
 /* ================================================================ */
 
+/// NUL 終端の作業バッファへ写す (カーネルの kprintf は `%.*s` を解釈しない —
+/// 2026-09-06 実測: ".*s" と、桁の合わないポインタ値が出て診断が読めなかった)。
+fn nul_copy(msg: &[u8], buf: &mut [u8; 96]) {
+    let n = if msg.len() > 95 { 95 } else { msg.len() };
+    buf[..n].copy_from_slice(&msg[..n]);
+    buf[n] = 0;
+}
+
 /// 1 行のデバッグ出力 (NUL 終端不要)。
 pub fn dbg_print(msg: &[u8]) {
+    let mut buf = [0u8; 96];
+    nul_copy(msg, &mut buf);
     unsafe {
         let a = os32api::api();
-        (a.kprintf)(
-            os32api::ATTR_YELLOW,
-            b"%.*s\r\n\0".as_ptr(),
-            msg.len() as i32,
-            msg.as_ptr(),
-        );
+        (a.kprintf)(os32api::ATTR_YELLOW, b"%s\r\n\0".as_ptr(), buf.as_ptr());
     }
 }
 
 /// 「文字列 + 整数」のデバッグ出力。
 pub fn dbg_print_num(msg: &[u8], v: i32) {
+    let mut buf = [0u8; 96];
+    nul_copy(msg, &mut buf);
     unsafe {
         let a = os32api::api();
         (a.kprintf)(
             os32api::ATTR_YELLOW,
-            b"%.*s %d\r\n\0".as_ptr(),
-            msg.len() as i32,
-            msg.as_ptr(),
+            b"%s %d\r\n\0".as_ptr(),
+            buf.as_ptr(),
             v,
         );
     }
@@ -458,16 +464,22 @@ pub fn win_show(window: u32, show: bool) -> GuiResult<()> {
     call(GUI_OP_WIN_SHOW, 0).map(|_| ())
 }
 
-/// タイトルを差し替える。UTF-8 境界で 255B に切り詰める (契約 U9)。
-pub fn win_set_title(window: u32, title: &[u8]) -> GuiResult<()> {
+/// `&[u8]` を長さ前置文字列へ (UTF-8 境界で 255B に切り詰め。契約 U9)。
+pub fn gui_string(src: &[u8]) -> GuiString {
     let mut s = GuiString { len: 0, s: [0u8; 255] };
-    let n = utf8_truncate(title, 255);
+    let n = utf8_truncate(src, 255);
     let mut i = 0;
     while i < n {
-        s.s[i] = title[i];
+        s.s[i] = src[i];
         i += 1;
     }
     s.len = n as u8;
+    s
+}
+
+/// タイトルを差し替える。UTF-8 境界で 255B に切り詰める (契約 U9)。
+pub fn win_set_title(window: u32, title: &[u8]) -> GuiResult<()> {
+    let s = gui_string(title);
     let req = GuiReqWinTitle { window, title: s };
     write_req(&req);
     call(GUI_OP_WIN_SET_TITLE, 0).map(|_| ())

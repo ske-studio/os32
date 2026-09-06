@@ -18,15 +18,20 @@
 //! (どちらの流儀のクライアントでも動く)。
 
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
-use crate::{cursor, damage, fep, input, lease, modal, reqs, ring, slot, timer, visible};
+use crate::{
+    cursor, damage, fep, input, lease, modal, reqs, ring, session, slot, startmenu, taskbar, timer,
+    visible,
+};
 use os32api::gui::proto::{
-    GuiRect16, GuiWinSpec, GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT,
-    GUI_OP_INVALIDATE, GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
-    GUI_OP_STATS, GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY, GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET,
-    GUI_OP_WAIT, GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE, GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE,
-    GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE, GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR,
-    GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW, GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL,
-    OS32_ERR_NOSYS, OS32_ERR_STALE, OS32_ERR_VERSION,
+    GuiRect16, GuiReqModalResult, GuiReqSession, GuiRespModalResult, GuiString, GuiWinSpec,
+    GUI_EV_PAINT, GUI_MAX_WINDOWS, GUI_OP_COMMIT, GUI_OP_INIT, GUI_OP_INVALIDATE,
+    GUI_OP_LEASE_PALETTE, GUI_OP_MODAL_OPEN, GUI_OP_MODAL_RESULT, GUI_OP_OWNER_EXIT, GUI_OP_POLL,
+    GUI_OP_SESSION_REQUEST, GUI_OP_STATS, GUI_OP_SURF_CREATE, GUI_OP_SURF_DESTROY,
+    GUI_OP_TIMER_KILL, GUI_OP_TIMER_SET, GUI_OP_WAIT, GUI_OP_WIN_CLIENT_RECT, GUI_OP_WIN_CREATE,
+    GUI_OP_WIN_DESTROY, GUI_OP_WIN_MOVE, GUI_OP_WIN_RAISE, GUI_OP_WIN_RESIZE,
+    GUI_OP_WIN_SET_FOCUS, GUI_OP_WIN_SET_TEXT_CURSOR, GUI_OP_WIN_SET_TITLE, GUI_OP_WIN_SHOW,
+    GUI_PROTO_VERSION, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_NOSYS, OS32_ERR_STALE,
+    OS32_ERR_VERSION,
 };
 
 /* ================================================================ */
@@ -47,6 +52,9 @@ pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
         /* カーネルの exec_exit から。owner のウィンドウ / タイマ / スロットを回収。
          * 描かない (X1) — 空いた領域は screen_dirty に積まれ、次の X3 で埋まる。 */
         modal::reclaim_owner(st, owner);
+        /* sticky な Quit は宛先ごと消える。**SessionAction は残す** (契約 S2:
+         * 正常 exit / CTRL+STOP / fault kill のいずれでも失わない)。 */
+        session::reclaim_owner(owner);
         st.reclaim_owner(owner);
         visible::recompute_and_expose(st);
         return 0;
@@ -76,7 +84,7 @@ struct Entry {
     f: OpFn,
 }
 
-static TABLE: [Entry; 21] = [
+static TABLE: [Entry; 23] = [
     Entry { op: GUI_OP_POLL, f: op_poll },
     Entry { op: GUI_OP_WAIT, f: op_wait },
     Entry { op: GUI_OP_COMMIT, f: op_commit },
@@ -98,6 +106,10 @@ static TABLE: [Entry; 21] = [
     Entry { op: GUI_OP_TIMER_SET, f: op_timer_set },
     Entry { op: GUI_OP_TIMER_KILL, f: op_timer_kill },
     Entry { op: GUI_OP_MODAL_OPEN, f: op_modal_open },
+    /* v1.2 (W4): 完了したモーダルの結果取得 (契約 V12-M の M1 / M2)。 */
+    Entry { op: GUI_OP_MODAL_RESULT, f: op_modal_result },
+    /* v1.2 (W3): セッション要求 (契約 V12-S の S4)。 */
+    Entry { op: GUI_OP_SESSION_REQUEST, f: op_session_request },
 ];
 
 fn lookup(op: u32) -> Option<OpFn> {
@@ -190,6 +202,12 @@ fn op_poll(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
     /* 前回の OP_POLL で渡した dropped / OVERFLOW を消し込む (受領済み)。 */
     consume_reported_dropped(st, slot_no);
 
+    /* (0) sticky な制御イベントを Paint より先に入れる (W4 §1 の 4 / §8、
+     * W3 の契約 S5)。リング満杯で入らなかった完了通知 / Quit は捨てず、
+     * 空きができたここで届く。**`dropped` には数えない**。 */
+    modal::retry_pending(st, slot_no);
+    session::retry_pending(st, slot_no);
+
     /* (1) 導出型を追記: Configure → Timer → Paint。 */
     emit_configures(st, owner, slot_no);
     let now = st.now;
@@ -246,6 +264,18 @@ fn emit_paints(st: &mut GuiState, owner: i32, slot_no: usize) {
     }
 }
 
+/// `cand` に dirty の添字 `d` 由来の断片があるか。
+fn cand_has(cand: &[(usize, Rect); MAX_VIS], ncand: usize, d: usize) -> bool {
+    let mut m = 0;
+    while m < ncand {
+        if cand[m].0 == d {
+            return true;
+        }
+        m += 1;
+    }
+    false
+}
+
 fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     /* 可視領域が 16 超で打ち切られていた窓は、周ごとに捨てる断片を入れ替える
      * (契約 G4「超過分は次の周」、レビュー #4 ⑤)。 */
@@ -256,20 +286,10 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     let id = st.windows[idx].id(idx);
     let dirty = st.windows[idx].dirty;
 
-    /* (a) 配送候補 = dirty ∩ 可視領域。issued の空き (16) までで打ち切る。 */
-    let mut cand: [(usize, Rect); MAX_VIS] = [(0, Rect::EMPTY); MAX_VIS];
-    let mut ncand = 0;
-    let mut i = 0;
-    while i < dirty.len && ncand < MAX_VIS {
-        let pieces = damage::clip_to_vis(&st.windows[idx], dirty.rects[i]);
-        let mut k = 0;
-        while k < pieces.len && ncand < MAX_VIS {
-            cand[ncand] = (i, pieces.rects[k]);
-            ncand += 1;
-            k += 1;
-        }
-        i += 1;
-    }
+    /* (a) 配送候補 = dirty ∩ 可視領域。**起床判定と同じ関数**を使う
+     * (`damage::has_deliverable_paint` もこれを通る。両者が食い違うと
+     * 「起こされないと配れない / 配れないと起きられない」で止まる)。 */
+    let (cand, ncand) = damage::deliverable_cand(&st.windows[idx]);
 
     /* (b) リングへ流す。空きが尽きたらそこで止める (残りは dirty のまま)。 */
     let mut delivered = [false; MAX_VIS];
@@ -287,10 +307,22 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
         j += 1;
     }
 
-    /* (c) 渡せなかった分を dirty として残す (dirty 各矩形 − 渡した断片)。 */
+    /* (c) 渡せなかった分を dirty として残す (dirty 各矩形 − 渡した断片)。
+     *
+     * ただし**可視領域が確定していて (打ち切り無し・空でない)、候補が 1 つも
+     * 出なかった dirty** は捨てる。`add_dirty` の 32px 丸めではみ出した縁など、
+     * 可視領域の外にある分は何周回しても `Paint` にならず、`dirty` が永久に
+     * 空にならない原因になる (実測: dirty が空になる周が 1 度も無かった)。
+     * 隠れていた場所が後で出てきたときは `recompute_and_expose` が露出分を
+     * dirty に足し直すので、描き落としにはならない (契約 G4)。 */
+    let authoritative = !st.windows[idx].vis_capped && !st.windows[idx].vis.is_empty();
     let mut new_dirty = RectSet::EMPTY;
     let mut d = 0;
     while d < dirty.len {
+        if authoritative && !cand_has(&cand, ncand, d) {
+            d += 1;
+            continue;
+        }
         let mut region = RectSet::EMPTY;
         region.push(dirty.rects[d]);
         let mut m = 0;
@@ -331,6 +363,12 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
         /* WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップ present。 */
         wm::wm_cycle(st, input::Ctx::Wait);
 
+        /* CTRL+STOP (契約 T6): 待ちを抜けてアプリへ戻す。戻った syscall の出口で
+         * カーネルが畳む (exec.c)。ここで待ち続けると永遠に畳めない。 */
+        if st.abort_seen {
+            st.abort_seen = false;
+            break;
+        }
         if wake_ready(st, owner, slot_no) {
             break;
         }
@@ -421,6 +459,14 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     if fep::refresh_if_hit(st, touched) {
         wm::queue_present(st, fep::rect());
     }
+    /* タスクバー / メニューは可視領域から引いてあるので普通は掛からないが、
+     * 掛かったら描き直す (モーダルと同じ保険。契約 D1 / D2)。 */
+    if taskbar::refresh_if_hit(st, touched) {
+        wm::queue_present(st, taskbar::rect(st));
+    }
+    if startmenu::refresh_if_hit(st, touched) {
+        wm::queue_present(st, startmenu::rect());
+    }
     if cursor::refresh_if_hit(st, touched) {
         let cr = cursor::rect(st);
         wm::queue_present(st, cr);
@@ -438,24 +484,51 @@ fn op_lease_palette(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) ->
 }
 
 /* ================================================================ */
-/*  OP_MODAL_OPEN (契約 U4) — ダイアログを立てるだけ (描画は X3)     */
+/*  OP_MODAL_OPEN (契約 U4 + v1.2 の W4 §2)                          */
+/*  ダイアログを立てるだけ (描画も VFS 走査も X3)。                   */
 /* ================================================================ */
+
+/// この owner が持つ**現存する**ウィンドウのうち最前面のもの (Z 順)。
+/// W4 §2 の「parent は caller owner の現存 window」の解決に使う。
+fn front_owned_index(st: &GuiState, owner: i32) -> Option<usize> {
+    let mut z = st.z_count;
+    while z > 0 {
+        z -= 1;
+        let i = st.zorder[z];
+        if st.windows[i].used && st.windows[i].owner == owner {
+            return Some(i);
+        }
+    }
+    /* Z 順に載っていない窓 (生成直後に溢れた等) も救う。 */
+    let mut i = 0;
+    while i < GUI_MAX_WINDOWS {
+        if st.windows[i].used && st.windows[i].owner == owner {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 fn op_modal_open(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
     let req: reqs::GuiReqModal = unsafe { slot::read_req(st, slot_no) };
-    /* 親ウィンドウ: arg で指定されていればそれ、無ければこの owner の最前面。 */
+    /* 親ウィンドウ: arg で指定されていればそれ (generation + owner 検証つき)、
+     * 無ければこの owner の最前面。**どちらも無ければ STALE** (W4 §2)。 */
     let parent = if arg != 0 {
         match owned_index(st, owner, arg) {
             Ok(i) => st.windows[i].id(i),
-            Err(e) => return e,
+            Err(e) => return modal_open_fail(st, slot_no, e),
         }
     } else {
-        match st.front_index() {
-            Some(i) if st.windows[i].owner == owner => st.windows[i].id(i),
-            _ => 0,
+        match front_owned_index(st, owner) {
+            Some(i) => st.windows[i].id(i),
+            None => return modal_open_fail(st, slot_no, OS32_ERR_STALE),
         }
     };
     let len = req.message.len as usize;
-    let r = modal::open(st, owner, parent, req.buttons, &req.message.s, len);
+    /* 未 consume の completed result / active modal / 種別の検査は modal::open。 */
+    let r = modal::open(st, slot_no, owner, parent, req.buttons, &req.message.s, len);
+    /* v1.1 の GuiRespModal (button) はそのまま。値は MODAL_RESULT で取る。 */
     let resp = reqs::GuiRespModal {
         result: if r < 0 { r } else { 0 },
         button: 0,
@@ -463,6 +536,51 @@ fn op_modal_open(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32
     };
     slot::write_resp(st, slot_no, resp);
     r
+}
+
+/// `MODAL_OPEN` の失敗を応答ブロックにも書いてから返す。
+fn modal_open_fail(st: &GuiState, slot_no: usize, e: i32) -> i32 {
+    let resp = reqs::GuiRespModal { result: e, button: 0, _pad: 0 };
+    slot::write_resp(st, slot_no, resp);
+    e
+}
+
+/* ================================================================ */
+/*  OP_MODAL_RESULT (契約 V12-M の M1 / M2、W4 §3)                   */
+/*                                                                  */
+/*  応答 (result / dialog / GuiString) を**全部書いてから** consume する。 */
+/*  ID 不一致・二重 consume は OS32_ERR_STALE。                       */
+/* ================================================================ */
+fn op_modal_result(st: &mut GuiState, _owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: GuiReqModalResult = unsafe { slot::read_req(st, slot_no) };
+    let mut resp = GuiRespModalResult {
+        result: 0,
+        dialog: 0,
+        value: GuiString { len: 0, s: [0; 255] },
+    };
+    modal::fill_resp(slot_no, req.dialog, &mut resp);
+    let ok = resp.result >= 0;
+    /* (1) 応答を書き切る。 */
+    slot::write_resp(st, slot_no, resp);
+    if !ok {
+        return OS32_ERR_STALE;
+    }
+    /* (2) 書き切ってから consume (以後は STALE)。 */
+    modal::consume_completed(slot_no, req.dialog);
+    0
+}
+
+/* ================================================================ */
+/*  OP_SESSION_REQUEST (契約 V12-S の S4、W3 §5.2)                   */
+/*                                                                  */
+/*  X1: 検証して私有バッファへ写し、pending を立てるだけ。            */
+/*  **VFS / exec_run / system.cfg 更新はここでは絶対にしない** (S8)。  */
+/*  戻り値 0 は「受理」であって action の完了ではない。               */
+/* ================================================================ */
+fn op_session_request(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    let req: GuiReqSession = unsafe { slot::read_req(st, slot_no) };
+    let len = req.value.len as usize;
+    session::request(st, owner, req.action, req.flags, &req.value.s, len)
 }
 
 /* ================================================================ */

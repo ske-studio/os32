@@ -1,0 +1,295 @@
+//! session.rs — SessionAction とトップレベル handoff (契約 V12-S、票 W3 §5〜§7)。
+//!
+//! **WM の文脈 (X1 / X3 / X4) から `exec_run()` を絶対に呼ばない**のがこの票の
+//! 最重要条件。別アプリ起動 / CUI 復帰 / system halt の要求はここに 1 件だけ
+//! 溜め、現アプリを `Quit` で終わらせ、`exec_run()` が gshell の top-level へ
+//! 戻ってから ([`crate::lib`] の単独ループ) 実行する。
+//!
+//! ```text
+//!   要求        Start メニュー (set_wm_*) / アプリの op 66 (request)
+//!    ↓ X1・X3   action を私有状態へ (VFS も exec も cfg 更新もしない)
+//!    ↓          現 owner のスロットへ sticky な Quit{reason} を配送
+//!   アプリ終了  exec_run が返る → top-level
+//!    ↓          LAUNCH → exec_run / SWITCH_CUI → cfg + switch_shell /
+//!               SHUTDOWN → halt ループ
+//! ```
+//!
+//! 状態を `GuiState` ではなく**このモジュールの static** に置くのは、
+//! `GuiState::reclaim_owner` (owner の窓 / タイマ / スロットの回収) が
+//! SessionAction を絶対に消さないことを構造で保証するため (契約 S2 の
+//! 「正常 exit / CTRL+STOP / fault kill のいずれでも pending を失わない」)。
+//!
+//! Quit は制御イベントなのでリング満杯でも捨てない (契約 S5)。スロットごとに
+//! `quit_pending` を持ち、`OP_POLL` の返却準備と毎 X3 で空きができるまで
+//! 再配送する。**`dropped` には加算しない** (W4 の Modal と同じ仕掛け)。
+
+use crate::ring;
+use crate::wm::GuiState;
+use os32api::gui::proto::{
+    GUI_EV_QUIT, GUI_QUIT_REASON_REPLACE_APP, GUI_QUIT_REASON_SHUTDOWN,
+    GUI_QUIT_REASON_SWITCH_CUI, GUI_SESSION_LAUNCH, GUI_SESSION_SHUTDOWN, GUI_SESSION_SWITCH_CUI,
+    GUI_SLOT_MAX, OS32_ERR_FULL, OS32_ERR_INVAL,
+};
+
+/// LAUNCH の絶対パスに載る最大バイト数 (契約 S4 の `GuiString`)。
+pub const PATH_MAX: usize = 255;
+
+/* ================================================================ */
+/*  状態                                                             */
+/* ================================================================ */
+
+/// スロット 1 本ぶんの sticky な Quit 配送。
+#[derive(Clone, Copy)]
+struct QuitPend {
+    pending: bool,
+    /// 立てた時点の owner (スロット再利用の誤配送よけ)。
+    owner: i32,
+    reason: u8,
+    /// `GUI_EV_QUIT` の `window` に載せる窓 (無ければ 0)。
+    window: u32,
+}
+
+impl QuitPend {
+    const NEW: QuitPend = QuitPend { pending: false, owner: 0, reason: 0, window: 0 };
+}
+
+pub struct Session {
+    /// `GUI_SESSION_*`。0 = 要求なし (契約 S3)。
+    action: u8,
+    path: [u8; PATH_MAX + 1],
+    path_len: usize,
+    quit: [QuitPend; GUI_SLOT_MAX],
+}
+
+impl Session {
+    const NEW: Session = Session {
+        action: 0,
+        path: [0; PATH_MAX + 1],
+        path_len: 0,
+        quit: [QuitPend::NEW; GUI_SLOT_MAX],
+    };
+}
+
+struct SessionCell(core::cell::UnsafeCell<Session>);
+unsafe impl Sync for SessionCell {}
+static SESSION: SessionCell = SessionCell(core::cell::UnsafeCell::new(Session::NEW));
+
+#[inline]
+fn s() -> &'static mut Session {
+    unsafe { &mut *SESSION.0.get() }
+}
+
+/// 保留中の action (`GUI_SESSION_*`、0 = なし)。
+#[inline]
+pub fn pending_action() -> u8 {
+    s().action
+}
+
+/// action と path を捨てる (実行した / 実行しないと決めた後)。
+pub fn clear() {
+    let st = s();
+    st.action = 0;
+    st.path_len = 0;
+    st.path[0] = 0;
+}
+
+/// 保留中の LAUNCH パスを NUL 終端で `out` へ写す。戻り値はバイト数
+/// (NUL を含まない)。**action は消さない** — 呼ぶ側が `clear()` する。
+pub fn copy_path(out: &mut [u8; PATH_MAX + 1]) -> usize {
+    let st = s();
+    let mut i = 0;
+    while i < st.path_len {
+        out[i] = st.path[i];
+        i += 1;
+    }
+    out[i] = 0;
+    st.path_len
+}
+
+/* ================================================================ */
+/*  要求の受理 (X1 / X3)                                             */
+/* ================================================================ */
+
+/// `GUI_OP_SESSION_REQUEST` (op 66) を X1 で受ける (契約 S4)。
+///
+/// **ここでは VFS / exec / cfg を一切触らない。** 検証して私有バッファへ写し、
+/// 現 owner へ sticky な `Quit` を積むだけ。戻り値 0 は「受理」であって完了ではない。
+pub fn request(st: &mut GuiState, _owner: i32, action: u8, flags: u8, value: &[u8], len: usize) -> i32 {
+    if flags != 0 {
+        return OS32_ERR_INVAL; /* v1.2 の flags は 0 のみ */
+    }
+    match action {
+        GUI_SESSION_LAUNCH => {
+            /* 1〜255B の絶対パスだけ (契約 S4)。 */
+            if len == 0 || len > PATH_MAX || value.len() < len || value[0] != b'/' {
+                return OS32_ERR_INVAL;
+            }
+        }
+        GUI_SESSION_SWITCH_CUI | GUI_SESSION_SHUTDOWN => {
+            if len != 0 {
+                return OS32_ERR_INVAL;
+            }
+        }
+        _ => return OS32_ERR_INVAL,
+    }
+    if s().action != 0 {
+        return OS32_ERR_FULL; /* 既存 pending は上書きしない (契約 S3) */
+    }
+    set_action(action, value, len);
+    arm_quit(st, reason_of(action));
+    0
+}
+
+/// Start メニュー / WM 内蔵ダイアログからの設定 (契約 S3 の 5.1)。
+/// 戻り値は `request` と同じ (0 / `OS32_ERR_FULL` / `OS32_ERR_INVAL`)。
+pub fn set_wm(st: &mut GuiState, action: u8, value: &[u8]) -> i32 {
+    let mut len = 0;
+    while len < value.len() && value[len] != 0 {
+        len += 1;
+    }
+    request(st, 0, action, 0, value, len)
+}
+
+/// `/usr/bin/...` を起動要求にする近道 (Start の Programs / File Manager / Run...)。
+#[inline]
+pub fn set_wm_launch(st: &mut GuiState, path: &[u8]) -> i32 {
+    set_wm(st, GUI_SESSION_LAUNCH, path)
+}
+
+fn set_action(action: u8, value: &[u8], len: usize) {
+    let st = s();
+    st.action = action;
+    let n = if len > PATH_MAX { PATH_MAX } else { len };
+    let mut i = 0;
+    while i < n {
+        st.path[i] = value[i];
+        i += 1;
+    }
+    st.path[n] = 0;
+    st.path_len = n;
+}
+
+#[inline]
+fn reason_of(action: u8) -> u8 {
+    match action {
+        GUI_SESSION_LAUNCH => GUI_QUIT_REASON_REPLACE_APP,
+        GUI_SESSION_SWITCH_CUI => GUI_QUIT_REASON_SWITCH_CUI,
+        _ => GUI_QUIT_REASON_SHUTDOWN,
+    }
+}
+
+/* ================================================================ */
+/*  sticky な Quit の配送 (契約 S5)                                  */
+/* ================================================================ */
+
+/// 使用中の全スロット (= 走っている GUI アプリ。v1.2 は S1 で 1 本) へ
+/// `quit_pending` を立て、すぐ 1 回配送を試みる。
+fn arm_quit(st: &mut GuiState, reason: u8) {
+    let mut i = 0;
+    while i < GUI_SLOT_MAX {
+        if st.slots[i].used {
+            let owner = st.slots[i].owner;
+            let q = &mut s().quit[i];
+            q.pending = true;
+            q.owner = owner;
+            q.reason = reason;
+            q.window = front_window_of(st, owner);
+        }
+        i += 1;
+    }
+    retry_all(st);
+}
+
+/// この owner が持つ最前面の窓 id (無ければ 0)。
+fn front_window_of(st: &GuiState, owner: i32) -> u32 {
+    let mut z = st.z_count;
+    while z > 0 {
+        z -= 1;
+        let i = st.z_at(z);
+        if st.windows[i].used && st.windows[i].owner == owner {
+            return st.windows[i].id(i);
+        }
+    }
+    0
+}
+
+/// 1 スロットぶんの再配送。満杯なら pending を残す (**`dropped` に加算しない**)。
+fn deliver(st: &mut GuiState, slot_no: usize) {
+    if slot_no >= GUI_SLOT_MAX {
+        return;
+    }
+    let (pending, owner, reason, window) = {
+        let q = &s().quit[slot_no];
+        (q.pending, q.owner, q.reason, q.window)
+    };
+    if !pending {
+        return;
+    }
+    /* スロットが別の owner へ渡っていたら配らない (誤配送よけ)。 */
+    if !st.slots[slot_no].used || st.slots[slot_no].owner != owner {
+        s().quit[slot_no] = QuitPend::NEW;
+        return;
+    }
+    let ev = ring::ev_simple(GUI_EV_QUIT, reason, window);
+    if ring::append(st, slot_no, &ev) {
+        s().quit[slot_no] = QuitPend::NEW;
+    }
+}
+
+/// `OP_POLL` の返却準備で呼ぶ再試行 (契約 S5)。
+#[inline]
+pub fn retry_pending(st: &mut GuiState, slot_no: usize) {
+    deliver(st, slot_no);
+}
+
+/// 全スロットの再試行。
+fn retry_all(st: &mut GuiState) {
+    let mut i = 0;
+    while i < GUI_SLOT_MAX {
+        deliver(st, i);
+        i += 1;
+    }
+}
+
+/// X3 の周期ごとに呼ぶ再試行 (契約 S5)。
+#[inline]
+pub fn x3_cycle(st: &mut GuiState) {
+    retry_all(st);
+}
+
+/// owner が回収された (正常終了 / CTRL+STOP / fault kill)。
+/// **SessionAction は消さない** — 消すのは top-level が実行した後だけ (契約 S2)。
+pub fn reclaim_owner(owner: i32) {
+    let st = s();
+    let mut i = 0;
+    while i < GUI_SLOT_MAX {
+        if st.quit[i].pending && st.quit[i].owner == owner {
+            st.quit[i] = QuitPend::NEW;
+        }
+        i += 1;
+    }
+}
+
+/* ================================================================ */
+/*  top-level の判定                                                 */
+/* ================================================================ */
+
+/// まだ外部アプリが生きているか (窓かスロットが残っている)。
+/// SessionAction の実行は「回収済み」を確認してからでなければならない (§7.1)。
+pub fn owner_active(st: &GuiState) -> bool {
+    let mut i = 0;
+    while i < GUI_SLOT_MAX {
+        if st.slots[i].used {
+            return true;
+        }
+        i += 1;
+    }
+    let mut w = 0;
+    while w < st.windows.len() {
+        if st.windows[w].used {
+            return true;
+        }
+        w += 1;
+    }
+    false
+}

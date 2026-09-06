@@ -1,4 +1,4 @@
-//! modal.rs — モーダルダイアログ (契約 U4、票 W2 の C)。
+//! modal.rs — モーダルダイアログ (契約 U4、票 W2 の C / 票 W4 の完成版)。
 //!
 //! **入れ子ループを作らない**のが要点。`MODAL_OPEN` は「入力の宛先をダイアログに
 //! 限定する」状態を立てるだけで、WM は X3 (`OP_WAIT`) の周期の中でダイアログを
@@ -18,51 +18,97 @@
 //! | [`GUI_MODAL_OK_CANCEL`] | メッセージ | OK / Cancel |
 //! | [`GUI_MODAL_YES_NO`] | メッセージ | Yes / No |
 //! | [`GUI_MODAL_FILE_OPEN`] | ファイル選択 | Open / Cancel |
+//! | [`GUI_MODAL_INPUT`] | 1 行入力 (v1.2 M4) | OK / Cancel |
 //!
 //! `result` は 1 = OK / Yes / Open、0 = Cancel / No / ESC。
 //!
-//! **PM への申し送り (契約の不足)**: ファイル選択で選ばれた**パスをアプリへ渡す
-//! 経路が契約に無い** (`Modal` のペイロードは `dialog` + `result` の 4B)。
-//! `GUI_OP_MODAL_RESULT` (応答ブロックへ `GuiString` を書く) のような op を
-//! 末尾追記してもらうまで、ファイル選択は WM 自身の用途 (デスクトップから
-//! プログラムを起動する) にだけ使い、アプリには 1/0 しか返さない。
-//! `buttons` の値と `result` の意味も共有ヘッダに無いので、ここの定数を
-//! `os32_gui_shared.h` へ写してほしい。
+//! ## v1.2 (W4) で足したもの
+//!
+//! ### completed result (契約 V12-M の M2)
+//!
+//! ダイアログの**値** (ファイルの絶対パス / 入力文字列) はイベントリングでは
+//! 運べない (`GuiEvent` のペイロードは 8B)。そこで GUI スロットごとに
+//! [`Completed`] を 1 件だけ持ち、`GUI_OP_MODAL_RESULT` (op 65) で取りに来て
+//! もらう。完了時の順序は W4 §1 のとおり:
+//!
+//! 1. [`store_completed`] で結果をスロットへ保存する (**リングとは独立**)。
+//! 2. `modal_event_pending` (sticky) を立てる。
+//! 3. [`deliver_pending`] でリングへ `GUI_EV_MODAL` を積む。
+//! 4. 満杯なら pending を残し、`OP_POLL` の準備 ([`retry_pending`]) と
+//!    毎 X3 ([`retry_pending_all`]) で空きができるまで再試行する。
+//!    **`dropped` には数えない** (W4 §8: 制御イベントは捨てない)。
+//!
+//! 結果本体はリングが溢れても失われない。consume 後の再取得と ID 不一致は
+//! `OS32_ERR_STALE`、未 consume の結果がある間の `MODAL_OPEN` は
+//! `OS32_ERR_FULL` (規則の実装は [`has_completed`] / [`fill_resp`] /
+//! [`consume_completed`])。
+//!
+//! ### Input dialog (M4)
+//!
+//! 1 行 edit + OK/Cancel。ANK / UTF-8 Text、BS / DEL、LEFT / RIGHT は
+//! **UTF-8 コードポイント境界**で移動、HOME / END、SHIFT+SPACE で FEP。
+//! FEP の未確定行 / 候補窓は [`fep_caret`] が返す field の caret 位置に出る
+//! (`SET_TEXT_CURSOR` 相当の内部位置を modal 自身が [`crate::fep`] へ渡す)。
+//! 最大 255B で、超える入力は**入れずに既存内容を保つ** (切り詰めない)。
 
 #![allow(dead_code)]
 
 use crate::wm::{self, GuiState, Rect};
-use crate::{chrome, damage, lease, ring, visible};
+use crate::{chrome, damage, fep, lease, ring, session, visible};
 use os32api::gfx;
 use os32api::gui::proto::{
-    GUI_COLOR_FACE, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT, GUI_COLOR_SEL_BG, GUI_COLOR_SEL_TEXT,
-    GUI_COLOR_SHADOW, GUI_COLOR_TEXT, GUI_COLOR_TITLE_ACTIVE, GUI_COLOR_TITLE_TEXT,
-    GUI_COLOR_WINDOW, GUI_MAX_WINDOWS, OS32_ERR_FULL, OS32_ERR_INVAL,
+    GuiString, GUI_COLOR_FACE, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT, GUI_COLOR_SEL_BG,
+    GUI_COLOR_SEL_TEXT, GUI_COLOR_SHADOW, GUI_COLOR_TEXT, GUI_COLOR_TITLE_ACTIVE,
+    GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW, GUI_MAX_WINDOWS, GUI_SESSION_SHUTDOWN,
+    GUI_SESSION_SWITCH_CUI, GUI_SLOT_MAX, OS32_ERR_FULL, OS32_ERR_INVAL, OS32_ERR_STALE,
 };
 
 /* ================================================================ */
-/*  ダイアログ種別 (共有ヘッダに無いので暫定。上の申し送り参照)      */
+/*  WM 自身が開いたダイアログの用途 (W3)                             */
+/*                                                                  */
+/*  WM owned のダイアログは completed result を作らない (アプリに宛先が */
+/*  無い)。代わりに `finish` が用途ごとの後始末を行う。               */
 /* ================================================================ */
-pub const GUI_MODAL_OK: u16 = 0;
-pub const GUI_MODAL_OK_CANCEL: u16 = 1;
-pub const GUI_MODAL_YES_NO: u16 = 2;
-pub const GUI_MODAL_FILE_OPEN: u16 = 3;
+/// v1.1 の F5: ファイル選択で選んだ `.bin` をそのまま起動する。
+pub const WM_PURPOSE_FILE_LAUNCH: u8 = 0;
+/// Start → Run...: 入力された絶対パスを `LAUNCH` にする (契約 D2)。
+pub const WM_PURPOSE_RUN: u8 = 1;
+/// Start → CUI mode の確認 (契約 S6)。Yes で初めて `SWITCH_CUI`。
+pub const WM_PURPOSE_CONFIRM_CUI: u8 = 2;
+/// Start → Shut Down の確認 (契約 S6 / S7)。Yes で初めて `SHUTDOWN`。
+pub const WM_PURPOSE_CONFIRM_HALT: u8 = 3;
+/// 通知だけ (起動失敗 / cfg 更新失敗)。押しても何も起きない。
+pub const WM_PURPOSE_NOTIFY: u8 = 4;
 
-pub const MODAL_RESULT_CANCEL: i16 = 0;
-pub const MODAL_RESULT_OK: i16 = 1;
+/* ================================================================ */
+/*  ダイアログ種別 / result (正典は sdk/include/os32/os32_gui_shared.h、  */
+/*  その Rust 写しが os32api::gui::proto。ここでは再輸出だけする)         */
+/* ================================================================ */
+pub use os32api::gui::proto::{
+    GUI_MODAL_FILE_OPEN, GUI_MODAL_INPUT, GUI_MODAL_OK, GUI_MODAL_OK_CANCEL,
+    GUI_MODAL_RESULT_CANCEL as MODAL_RESULT_CANCEL, GUI_MODAL_RESULT_OK as MODAL_RESULT_OK,
+    GUI_MODAL_YES_NO,
+};
 
 /* スキャンコード (drivers/kbd.h)。 */
 const SC_ESC: u8 = 0x00;
+const SC_BS: u8 = 0x0E;
 const SC_TAB: u8 = 0x0F;
 const SC_RETURN: u8 = 0x1C;
 const SC_SPACE: u8 = 0x34;
 const SC_ROLLUP: u8 = 0x36;
 const SC_ROLLDOWN: u8 = 0x37;
+const SC_DEL: u8 = 0x39;
 const SC_UP: u8 = 0x3A;
 const SC_LEFT: u8 = 0x3B;
 const SC_RIGHT: u8 = 0x3C;
 const SC_DOWN: u8 = 0x3D;
 const SC_HOME: u8 = 0x3E;
+/// PC-98 のキーボードに END は無い。HELP と SHIFT+HOME を END として扱う。
+const SC_HELP: u8 = 0x3F;
+
+/* 修飾ビット (drivers/kbd.h の SHIFT_*、input.rs の MOD_* と同値)。 */
+const MOD_SHIFT: u32 = 0x01;
 
 /* 見た目 (libos32filer の版面に合わせた寸法)。 */
 const BTN_W: i32 = 72;
@@ -71,6 +117,10 @@ const BTN_GAP: i32 = 12;
 const PAD: i32 = 10;
 const LINE_H: i32 = 18;
 const TITLE_H: i32 = 18;
+/// Input dialog の edit field の高さ。
+const FIELD_H: i32 = 20;
+/// Input dialog の最小幅 (画素)。
+const FIELD_MIN_W: i32 = 320;
 
 pub const MAX_ENTRIES: usize = 96;
 pub const NAME_LEN: usize = 48;
@@ -78,6 +128,10 @@ pub const PATH_LEN: usize = 256;
 const MSG_LEN: usize = 200;
 /// ファイル選択の一覧に出す行数。
 const LIST_ROWS: usize = 12;
+/// `GuiString` に載せられる最大バイト数 (契約 M1)。**切り詰めない**。
+pub const VALUE_MAX: usize = 255;
+/// ダブルクリックとみなす間隔 (tick = 10ms)。
+const DBLCLICK_TICKS: u32 = 40;
 
 /* ================================================================ */
 /*  DirEntry_Ext (os32_kapi_shared.h) の写し                         */
@@ -91,11 +145,195 @@ struct DirEntryExt {
 const FILE_TYPE_DIR: u8 = 2;
 
 /* ================================================================ */
+/*  completed result (契約 V12-M の M2、W4 §1)                       */
+/* ================================================================ */
+
+/// GUI スロット 1 本につき 1 件だけ持つ「完了したダイアログの結果」。
+///
+/// `used` (= 未 consume の結果がある) と `modal_event_pending` (= sticky な
+/// `GUI_EV_MODAL` がまだリングへ入っていない) は**独立**に落ちる。consume が
+/// 先に起きても pending は残り、空きができ次第 1 件だけ届く (W4 §8 の
+/// 「古い通知として到着し得る」)。両方落ちたところで全体を捨てる。
+#[derive(Clone, Copy)]
+pub struct Completed {
+    pub used: bool,
+    /// このスロットを持っていた owner (スロット再利用の誤配送よけ)。
+    pub owner: i32,
+    pub dialog_id: u16,
+    pub result: i16,
+    pub value_len: usize,
+    pub value: [u8; VALUE_MAX],
+    pub modal_event_pending: bool,
+    /// `GUI_EV_MODAL` の `window` に載せる親ウィンドウ。
+    pub ev_window: u32,
+}
+
+impl Completed {
+    pub const NEW: Completed = Completed {
+        used: false,
+        owner: 0,
+        dialog_id: 0,
+        result: 0,
+        value_len: 0,
+        value: [0; VALUE_MAX],
+        modal_event_pending: false,
+        ev_window: 0,
+    };
+}
+
+struct CompletedCell(core::cell::UnsafeCell<[Completed; GUI_SLOT_MAX]>);
+unsafe impl Sync for CompletedCell {}
+static COMPLETED: CompletedCell =
+    CompletedCell(core::cell::UnsafeCell::new([Completed::NEW; GUI_SLOT_MAX]));
+
+#[inline]
+fn completed(slot: usize) -> &'static mut Completed {
+    unsafe { &mut (*COMPLETED.0.get())[slot] }
+}
+
+/// スロットに未 consume の結果があるか (契約 M2: ある間 `MODAL_OPEN` は
+/// `OS32_ERR_FULL`)。
+#[inline]
+pub fn has_completed(slot: usize) -> bool {
+    if slot >= GUI_SLOT_MAX {
+        return false;
+    }
+    completed(slot).used
+}
+
+/// 結果と pending の両方が落ちたら枠ごと捨てる。
+#[inline]
+fn drop_if_idle(slot: usize) {
+    let c = completed(slot);
+    if !c.used && !c.modal_event_pending {
+        *c = Completed::NEW;
+    }
+}
+
+/// ダイアログ完了の (1)(2): 結果を保存し sticky pending を立てる。
+fn store_completed(
+    slot: usize,
+    owner: i32,
+    dialog: u16,
+    result: i16,
+    value: &[u8],
+    value_len: usize,
+    ev_window: u32,
+) {
+    let c = completed(slot);
+    *c = Completed::NEW;
+    c.used = true;
+    c.owner = owner;
+    c.dialog_id = dialog;
+    c.result = result;
+    let n = if value_len > VALUE_MAX { VALUE_MAX } else { value_len };
+    let mut i = 0;
+    while i < n {
+        c.value[i] = value[i];
+        i += 1;
+    }
+    c.value_len = n;
+    c.modal_event_pending = true;
+    c.ev_window = ev_window;
+}
+
+/// ダイアログ完了の (3)(4): sticky な `GUI_EV_MODAL` をリングへ積む。満杯なら
+/// pending を残して戻る (**`dropped` には加算しない**。W4 §8)。
+fn deliver_pending(st: &mut GuiState, slot: usize) {
+    if slot >= GUI_SLOT_MAX {
+        return;
+    }
+    let (pending, owner, win, dialog, result) = {
+        let c = completed(slot);
+        (c.modal_event_pending, c.owner, c.ev_window, c.dialog_id, c.result)
+    };
+    if !pending {
+        return;
+    }
+    /* スロットが別の owner へ渡っていたら配らない (誤配送よけ)。 */
+    if !st.slots[slot].used || st.slots[slot].owner != owner {
+        return;
+    }
+    let ev = ring::ev_modal(win, dialog, result);
+    if ring::append(st, slot, &ev) {
+        completed(slot).modal_event_pending = false;
+        drop_if_idle(slot);
+    }
+}
+
+/// `OP_POLL` の返却準備で呼ぶ再試行 (W4 §1 の 4)。
+#[inline]
+pub fn retry_pending(st: &mut GuiState, slot: usize) {
+    deliver_pending(st, slot);
+}
+
+/// X3 の周期ごとに呼ぶ再試行 (W4 §1 の 4)。
+pub fn retry_pending_all(st: &mut GuiState) {
+    let mut s = 0;
+    while s < GUI_SLOT_MAX {
+        deliver_pending(st, s);
+        s += 1;
+    }
+}
+
+/// X3 (`wm::wm_cycle` の Wait / Standalone) で 1 回だけ呼ぶ周期処理。
+///
+/// - 溜まっている VFS 走査 (`MODAL_OPEN` が立てた `reload_pending`) をここで実行する。
+///   **X1 / X4 では走らせない** (契約 T8 / S8、W4 §5)。
+/// - sticky な `GUI_EV_MODAL` の再配送 (W4 §1 の 4 / §8)。
+pub fn x3_cycle(st: &mut GuiState) {
+    if state().used && state().reload_pending {
+        state().reload_pending = false;
+        reload_dir();
+        let r = state().rect;
+        st.dirty_screen(r);
+    }
+    retry_pending_all(st);
+}
+
+/// `GUI_OP_MODAL_RESULT` の応答を**全部**書く (契約 M2: 書き切ってから consume)。
+/// 戻り値 0 = 成功、`OS32_ERR_STALE` = ID 不一致 / 二重 consume。
+pub fn fill_resp(slot: usize, dialog: u16, resp: &mut os32api::gui::proto::GuiRespModalResult) {
+    resp.result = OS32_ERR_STALE as i16;
+    resp.dialog = dialog;
+    resp.value = GuiString { len: 0, s: [0; VALUE_MAX] };
+    if slot >= GUI_SLOT_MAX {
+        return;
+    }
+    let c = completed(slot);
+    if !c.used || c.dialog_id != dialog {
+        return;
+    }
+    resp.result = c.result;
+    resp.dialog = c.dialog_id;
+    resp.value.len = c.value_len as u8;
+    let mut i = 0;
+    while i < c.value_len {
+        resp.value.s[i] = c.value[i];
+        i += 1;
+    }
+}
+
+/// 応答を書き切った後の consume (契約 M2)。以後の再取得は `OS32_ERR_STALE`。
+pub fn consume_completed(slot: usize, dialog: u16) {
+    if slot >= GUI_SLOT_MAX {
+        return;
+    }
+    let c = completed(slot);
+    if !c.used || c.dialog_id != dialog {
+        return;
+    }
+    c.used = false;
+    c.value_len = 0;
+    drop_if_idle(slot);
+}
+
+/* ================================================================ */
 /*  状態                                                             */
 /* ================================================================ */
 pub struct Modal {
     pub used: bool,
-    /// DialogId (1 から。破棄で進む = 古い `Modal` を捨てられる)。
+    /// DialogId (1 から。破棄で進む = 古い `Modal` を捨てられる)。**0 にしない**。
     pub id: u16,
     pub owner: i32,
     pub parent_win: u32,
@@ -116,8 +354,24 @@ pub struct Modal {
     /// 選ばれたフルパス (NUL 終端)。WM 自身が使う。
     pub sel: [u8; PATH_LEN],
     pub sel_len: usize,
+    /// ダブルクリック判定 (行 index と直近の押下 tick)。
+    last_click_row: i32,
+    last_click_tick: u32,
+    /// ディレクトリの読み直しが要る。**`sys_ls` は X3 でしか走らせない**
+    /// (W4 §5 / 契約 S8)。`MODAL_OPEN` は X1 なのでフラグを立てるだけにし、
+    /// 実際の走査は [`x3_cycle`] が行う。
+    reload_pending: bool,
+    /* ---- Input dialog (M4) ---- */
+    text: [u8; VALUE_MAX + 1],
+    text_len: usize,
+    /// caret のバイト位置 (**常に UTF-8 コードポイント境界**)。
+    caret: usize,
+    /// 表示の左端バイト位置 (横スクロール。同じく境界)。
+    view_off: usize,
     /// WM 自身が開いたダイアログ (アプリへ `Modal` を送らない)。
     wm_owned: bool,
+    /// `wm_owned` のときの用途 (`WM_PURPOSE_*`)。W3 の Start / Run / 確認。
+    wm_purpose: u8,
 }
 
 impl Modal {
@@ -142,7 +396,15 @@ impl Modal {
         cwd_len: 0,
         sel: [0; PATH_LEN],
         sel_len: 0,
+        last_click_row: -1,
+        last_click_tick: 0,
+        reload_pending: false,
+        text: [0; VALUE_MAX + 1],
+        text_len: 0,
+        caret: 0,
+        view_off: 0,
         wm_owned: false,
+        wm_purpose: WM_PURPOSE_FILE_LAUNCH,
     };
 }
 
@@ -160,6 +422,13 @@ pub fn is_open() -> bool {
     state().used
 }
 
+/// いま開いているのが Input dialog か (input.rs が FEP へ通すかの判定)。
+#[inline]
+pub fn is_input() -> bool {
+    let m = state();
+    m.used && m.buttons == GUI_MODAL_INPUT
+}
+
 /// ダイアログの外形 (画面座標)。閉じていれば空。
 #[inline]
 pub fn rect() -> Rect {
@@ -175,30 +444,47 @@ pub fn rect() -> Rect {
 /*  開く / 閉じる                                                    */
 /* ================================================================ */
 
+/// 作業領域 = 画面 − taskbar (契約 D1)。ダイアログはこの中央に置く (W4 §7)。
+#[inline]
+fn work_area(st: &GuiState) -> Rect {
+    wm::work_area(st)
+}
+
+/// 次の DialogId。**0 を使わない** (W4 §2)。
+fn next_dialog_id() -> u16 {
+    let n = state().id.wrapping_add(1) & 0x7FFF;
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
 /// `MODAL_OPEN` (X1)。**描かない** — 矩形を決めて損傷に積むだけ。
+///
+/// 規則 (W4 §2): 呼び出し元スロットに未 consume の結果があれば `OS32_ERR_FULL`、
+/// 既に active modal があれば `OS32_ERR_FULL`、種別が範囲外なら `OS32_ERR_INVAL`。
+/// 親ウィンドウの検証は handler 側 (`op_modal_open`) で行う。
 pub fn open(
     st: &mut GuiState,
+    slot: usize,
     owner: i32,
     parent_win: u32,
     buttons: u16,
     msg: &[u8],
     msg_len: usize,
 ) -> i32 {
-    if state().used {
-        return OS32_ERR_FULL; /* v1 は 1 枚だけ */
+    /* M2: 未 consume の結果があるスロットは次のダイアログを開けない。 */
+    if has_completed(slot) {
+        return OS32_ERR_FULL;
     }
-    if buttons > GUI_MODAL_FILE_OPEN {
+    if state().used {
+        return OS32_ERR_FULL; /* WM 全体で active modal は 1 枚 */
+    }
+    if buttons > GUI_MODAL_INPUT {
         return OS32_ERR_INVAL;
     }
-    let next_id = {
-        let m = state();
-        let n = m.id.wrapping_add(1) & 0x7FFF;
-        if n == 0 {
-            1
-        } else {
-            n
-        }
-    };
+    let next_id = next_dialog_id();
     {
         let m = state();
         *m = Modal::NEW;
@@ -220,30 +506,49 @@ pub fn open(
         m.focus_btn = 0;
     }
     if buttons == GUI_MODAL_FILE_OPEN {
+        /* start directory は v1.2 では "/" のまま (W4 §5)。走査は X3 で。 */
         set_cwd(b"/");
-        reload_dir();
+        state().reload_pending = true;
     }
     layout(st);
     let r = state().rect;
     st.dirty_screen(r);
     visible::recompute_and_expose(st);
+    if buttons == GUI_MODAL_INPUT {
+        fep::mark_redraw(); /* 未確定行の原点が field の caret へ移る */
+    }
     state().id as i32
 }
 
 /// WM 自身がファイル選択を開く (デスクトップからプログラムを起動する)。
+/// v1.1 の F5 と同じ経路 — completed result は作らず `launch_path` を立てる。
 pub fn open_wm_file(st: &mut GuiState, start_dir: &[u8]) {
-    if state().used {
+    if !open_wm(st, GUI_MODAL_FILE_OPEN, b"\0", WM_PURPOSE_FILE_LAUNCH) {
         return;
     }
-    let next_id = {
-        let m = state();
-        let n = m.id.wrapping_add(1) & 0x7FFF;
-        if n == 0 {
-            1
-        } else {
-            n
-        }
-    };
+    set_cwd(start_dir);
+    state().reload_pending = true;
+}
+
+/// WM 自身の MessageBox (契約 S6 の確認、起動失敗の通知)。
+/// `buttons` は [`GUI_MODAL_OK`] / [`GUI_MODAL_YES_NO`] など。
+pub fn open_wm_message(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) {
+    open_wm(st, buttons, msg, purpose);
+}
+
+/// WM 自身の 1 行入力 (Start → Run...)。prompt は `msg`。
+pub fn open_wm_input(st: &mut GuiState, prompt: &[u8], purpose: u8) {
+    if open_wm(st, GUI_MODAL_INPUT, prompt, purpose) {
+        fep::mark_redraw(); /* 未確定行の原点が field の caret へ移る */
+    }
+}
+
+/// WM owned ダイアログの共通の開き方。既に 1 枚出ていれば開かない (false)。
+fn open_wm(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) -> bool {
+    if state().used {
+        return false;
+    }
+    let next_id = next_dialog_id();
     {
         let m = state();
         *m = Modal::NEW;
@@ -251,38 +556,64 @@ pub fn open_wm_file(st: &mut GuiState, start_dir: &[u8]) {
         m.id = next_id;
         m.owner = 0;
         m.parent_win = 0;
-        m.buttons = GUI_MODAL_FILE_OPEN;
+        m.buttons = buttons;
         m.wm_owned = true;
-        m.nbtn = 2;
+        m.wm_purpose = purpose;
+        let mut n = 0;
+        while n < msg.len() && n < MSG_LEN && msg[n] != 0 {
+            m.msg[n] = msg[n];
+            n += 1;
+        }
+        m.msg[n] = 0;
+        m.msg_len = n;
+        m.nbtn = if buttons == GUI_MODAL_OK { 1 } else { 2 };
+        m.focus_btn = 0;
     }
-    set_cwd(start_dir);
-    reload_dir();
     layout(st);
     let r = state().rect;
     st.dirty_screen(r);
     visible::recompute_and_expose(st);
+    true
 }
 
-/// 完了。親のリングへ `Modal{dialog, result}` を 1 件流し、下地を損傷にする。
+/// 完了 (W4 §1 の順序)。結果を先にスロットへ保存し、その後 sticky な
+/// `GUI_EV_MODAL` を積む。下地は損傷にして下のクライアントへ damage を戻す。
 fn finish(st: &mut GuiState, result: i16) {
-    let (id, owner, parent, wm_owned, r) = {
+    let (id, owner, parent, wm_owned, r, buttons, purpose) = {
         let m = state();
-        (m.id, m.owner, m.parent_win, m.wm_owned, m.rect)
+        (m.id, m.owner, m.parent_win, m.wm_owned, m.rect, m.buttons, m.wm_purpose)
     };
-    /* WM 自身のファイル選択: 選ばれた .bin を起動予約にする。 */
-    if wm_owned {
-        if result == MODAL_RESULT_OK {
-            let m = state();
-            if m.sel_len > 0 {
-                st.set_launch_path(&m.sel, m.sel_len);
-                st.launch_pending = true;
+
+    /* ---- 値 (契約 M1): File Open = 絶対パス、Input = UTF-8、その他は空 ---- */
+    let mut value = [0u8; VALUE_MAX];
+    let mut vlen = 0usize;
+    if result == MODAL_RESULT_OK {
+        let m = state();
+        if buttons == GUI_MODAL_FILE_OPEN {
+            /* sel_len は build_selection が 255B 以内を保証している。 */
+            while vlen < m.sel_len && vlen < VALUE_MAX {
+                value[vlen] = m.sel[vlen];
+                vlen += 1;
+            }
+        } else if buttons == GUI_MODAL_INPUT {
+            while vlen < m.text_len && vlen < VALUE_MAX {
+                value[vlen] = m.text[vlen];
+                vlen += 1;
             }
         }
-    } else if let Some(slot) = st.slot_of_owner(owner) {
-        let ev = ring::ev_modal(parent, id, result);
-        ring::append(st, slot, &ev);
     }
+
+    /* **後始末より先に閉じる**: 用途によってはここから次のダイアログ
+     * (エラー通知) を開くので、`used` を落としておかないと開けない (W3)。 */
     state().used = false;
+
+    if wm_owned {
+        finish_wm(st, purpose, result, &value, vlen);
+    } else if let Some(slot) = st.slot_of_owner(owner) {
+        store_completed(slot, owner, id, result, &value, vlen, parent);
+        deliver_pending(st, slot);
+    }
+
     /* 下に隠れていたものを描き直す (デスクトップ + クローム + アプリの Paint)。 */
     st.dirty_screen(r);
     let mut i = 0;
@@ -294,18 +625,95 @@ fn finish(st: &mut GuiState, result: i16) {
         i += 1;
     }
     visible::recompute_and_expose(st);
+    /* FEP の未確定行 / 候補窓は field の caret に紐づいていた。原点を戻す。 */
+    if buttons == GUI_MODAL_INPUT {
+        fep::mark_redraw();
+    }
 }
 
-/// アプリが落ちたらそのダイアログも畳む (契約 U8)。
+/// WM owned ダイアログの後始末 (W3 §4)。呼ばれた時点でダイアログは閉じている。
+///
+/// - `FILE_LAUNCH` … v1.1 の F5。選んだ `.bin` を単独ループの起動予約に。
+/// - `RUN`         … 絶対パスなら `LAUNCH` に。相対パスは受けずにエラー表示。
+/// - `CONFIRM_*`   … **Yes のときだけ** SessionAction を立てる (契約 S6)。
+/// - `NOTIFY`      … 何もしない。
+fn finish_wm(st: &mut GuiState, purpose: u8, result: i16, value: &[u8], vlen: usize) {
+    match purpose {
+        WM_PURPOSE_FILE_LAUNCH => {
+            if result == MODAL_RESULT_OK && vlen > 0 {
+                st.set_launch_path(value, vlen);
+                st.launch_pending = true;
+            }
+        }
+        WM_PURPOSE_RUN => {
+            if result != MODAL_RESULT_OK {
+                return;
+            }
+            /* v1.2 の Run は絶対パスのみ (PATH 検索も引数列も対象外。契約 D2)。 */
+            if vlen == 0 || value[0] != b'/' {
+                open_wm_message(
+                    st,
+                    GUI_MODAL_OK,
+                    b"Run: absolute path required (e.g. /usr/bin/filer.bin)\0",
+                    WM_PURPOSE_NOTIFY,
+                );
+                return;
+            }
+            if session::set_wm(st, os32api::gui::proto::GUI_SESSION_LAUNCH, &value[..vlen]) < 0 {
+                open_wm_message(st, GUI_MODAL_OK, b"Run: another action is pending\0", WM_PURPOSE_NOTIFY);
+            }
+        }
+        WM_PURPOSE_CONFIRM_CUI => {
+            if result == MODAL_RESULT_OK {
+                let _ = session::set_wm(st, GUI_SESSION_SWITCH_CUI, b"\0");
+            }
+        }
+        WM_PURPOSE_CONFIRM_HALT => {
+            if result == MODAL_RESULT_OK {
+                let _ = session::set_wm(st, GUI_SESSION_SHUTDOWN, b"\0");
+            }
+        }
+        _ => {}
+    }
+}
+
+/// アプリが落ちたら (`gui_owner_exit`) そのダイアログと結果を畳む (W4 §9)。
+///
+/// **別 owner の completed result は消さない。**
 pub fn reclaim_owner(st: &mut GuiState, owner: i32) {
-    let m = state();
-    if !m.used || m.wm_owned || m.owner != owner {
+    /* (a) completed result / pending Modal event。 */
+    let mut s = 0;
+    while s < GUI_SLOT_MAX {
+        let c = completed(s);
+        if (c.used || c.modal_event_pending) && c.owner == owner {
+            *c = Completed::NEW;
+        }
+        s += 1;
+    }
+    /* (b) active modal (+ modal FEP / caret 状態)。 */
+    let (hit, r, was_input) = {
+        let m = state();
+        if !m.used || m.wm_owned || m.owner != owner {
+            (false, Rect::EMPTY, false)
+        } else {
+            (true, m.rect, m.buttons == GUI_MODAL_INPUT)
+        }
+    };
+    if !hit {
         return;
     }
-    let r = m.rect;
-    m.used = false;
+    {
+        let m = state();
+        m.used = false;
+        m.text_len = 0;
+        m.caret = 0;
+        m.view_off = 0;
+    }
     st.dirty_screen(r);
     visible::recompute_and_expose(st);
+    if was_input {
+        fep::mark_redraw();
+    }
 }
 
 /* ================================================================ */
@@ -314,27 +722,48 @@ pub fn reclaim_owner(st: &mut GuiState, owner: i32) {
 
 fn layout(st: &GuiState) {
     let m = state();
-    let (w, h) = if m.buttons == GUI_MODAL_FILE_OPEN {
-        /* タイトル帯 + パス行 + 一覧 LIST_ROWS 行 + ボタン。 */
-        (
+    let (w, h) = match m.buttons {
+        GUI_MODAL_FILE_OPEN => (
+            /* タイトル帯 + パス行 + 一覧 LIST_ROWS 行 + ボタン。 */
             8 * 46 + PAD * 2,
             TITLE_H + PAD + LINE_H * (LIST_ROWS as i32 + 1) + PAD + BTN_H + PAD,
-        )
-    } else {
-        let text_w = (m.msg_len as i32) * 8;
-        let mut w = text_w + PAD * 2 + 4;
-        let min_w = (m.nbtn as i32) * BTN_W + ((m.nbtn as i32) - 1) * BTN_GAP + PAD * 2;
-        if w < min_w {
-            w = min_w;
+        ),
+        GUI_MODAL_INPUT => {
+            let text_w = msg_display_width(m);
+            let mut w = text_w + PAD * 2 + 4;
+            if w < FIELD_MIN_W + PAD * 2 {
+                w = FIELD_MIN_W + PAD * 2;
+            }
+            if w > st.screen_w - 16 {
+                w = st.screen_w - 16;
+            }
+            (w, TITLE_H + PAD + LINE_H + 4 + FIELD_H + PAD + BTN_H + PAD)
         }
-        if w > st.screen_w - 16 {
-            w = st.screen_w - 16;
+        _ => {
+            /* 日本語の確認文 (契約 S6) は 1 文字 3B / 16px なので、バイト数 × 8 で
+             * 幅を出すと画面いっぱいに広がる。表示幅で測る (W3)。 */
+            let text_w = msg_display_width(m);
+            let mut w = text_w + PAD * 2 + 4;
+            let min_w = (m.nbtn as i32) * BTN_W + ((m.nbtn as i32) - 1) * BTN_GAP + PAD * 2;
+            if w < min_w {
+                w = min_w;
+            }
+            if w > st.screen_w - 16 {
+                w = st.screen_w - 16;
+            }
+            (w, TITLE_H + PAD * 2 + LINE_H + BTN_H + PAD)
         }
-        (w, TITLE_H + PAD * 2 + LINE_H + BTN_H + PAD)
     };
-    let x = (st.screen_w - w) / 2;
-    let y = (st.screen_h - h) / 3;
+    /* 作業領域の中央 (W4 §7)。v1.2 の taskbar は W3 が work_area へ入れる。 */
+    let wa = work_area(st);
+    let x = wa.x + (wa.w - w) / 2;
+    let y = wa.y + (wa.h - h) / 2;
     m.rect = Rect::new(if x < 0 { 0 } else { x }, if y < 0 { 0 } else { y }, w, h);
+}
+
+/// メッセージ (prompt) の表示幅。ANK 8px / 全角 16px で数える。
+fn msg_display_width(m: &Modal) -> i32 {
+    text_width(&m.msg, m.msg_len, 0, m.msg_len)
 }
 
 /// ボタン i の矩形 (画面座標)。右詰め。
@@ -346,20 +775,58 @@ fn button_rect(m: &Modal, i: usize) -> Rect {
     Rect::new(x0 + (i as i32) * (BTN_W + BTN_GAP), y, BTN_W, BTN_H)
 }
 
-/// 一覧の 1 行の矩形 (ファイル選択)。
+/// ボタン帯 (損傷を絞るための外接矩形)。
+fn buttons_band(m: &Modal) -> Rect {
+    Rect::new(
+        m.rect.x + 1,
+        m.rect.y + m.rect.h - PAD - BTN_H - 2,
+        m.rect.w - 2,
+        BTN_H + PAD + 1,
+    )
+}
+
+/// 一覧の 1 行の矩形 (ファイル選択、画面座標)。
+/// 先頭にパス行 1 行分の隙間があるので `LINE_H` 下げる (v1.1 は `draw_list` 側で
+/// 下げていて `on_button` の当たり判定と 1 行ずれていた — W4 で揃えた)。
 fn row_rect(m: &Modal, row: usize) -> Rect {
     Rect::new(
         m.rect.x + PAD,
-        m.rect.y + TITLE_H + PAD + (row as i32) * LINE_H,
+        m.rect.y + TITLE_H + PAD + ((row + 1) as i32) * LINE_H,
         m.rect.w - PAD * 2,
         LINE_H,
     )
 }
 
+/// 一覧 + パス行の帯 (損傷を絞る用)。
+fn list_band(m: &Modal) -> Rect {
+    Rect::new(
+        m.rect.x + 1,
+        m.rect.y + TITLE_H + 1,
+        m.rect.w - 2,
+        PAD + LINE_H * (LIST_ROWS as i32 + 1),
+    )
+}
+
+/// Input dialog の edit field (画面座標)。
+fn field_rect(m: &Modal) -> Rect {
+    Rect::new(
+        m.rect.x + PAD,
+        m.rect.y + TITLE_H + PAD + LINE_H + 4,
+        m.rect.w - PAD * 2,
+        FIELD_H,
+    )
+}
+
+/// field の中の文字を置ける矩形。
+fn field_text_rect(m: &Modal) -> Rect {
+    let f = field_rect(m);
+    Rect::new(f.x + 3, f.y + 2, f.w - 6, 16)
+}
+
 fn button_label(buttons: u16, i: usize) -> &'static [u8] {
     match buttons {
         GUI_MODAL_OK => b"OK\0",
-        GUI_MODAL_OK_CANCEL => {
+        GUI_MODAL_OK_CANCEL | GUI_MODAL_INPUT => {
             if i == 0 {
                 b"OK\0"
             } else {
@@ -384,11 +851,77 @@ fn button_label(buttons: u16, i: usize) -> &'static [u8] {
 }
 
 fn title_label(buttons: u16) -> &'static [u8] {
-    if buttons == GUI_MODAL_FILE_OPEN {
-        b"Open file\0"
-    } else {
-        b"Message\0"
+    match buttons {
+        GUI_MODAL_FILE_OPEN => b"Open file\0",
+        GUI_MODAL_INPUT => b"Input\0",
+        _ => b"Message\0",
     }
+}
+
+/* ================================================================ */
+/*  UTF-8 の小道具 (caret はコードポイント境界でしか動かない)         */
+/* ================================================================ */
+
+/// UTF-8 先頭バイトから文字の長さ (壊れていれば 1)。
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >= 0xF0 {
+        4
+    } else if b >= 0xE0 {
+        3
+    } else if b >= 0xC0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// `i` の 1 つ前のコードポイント先頭 (継続バイト 0b10xxxxxx を飛ばす)。
+fn prev_boundary(t: &[u8], i: usize) -> usize {
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        if (t[k] & 0xC0) != 0x80 {
+            return k;
+        }
+    }
+    0
+}
+
+/// `i` の次のコードポイント先頭。
+fn next_boundary(t: &[u8], len: usize, i: usize) -> usize {
+    if i >= len {
+        return len;
+    }
+    let n = utf8_len(t[i]);
+    let k = i + n;
+    if k > len {
+        len
+    } else {
+        k
+    }
+}
+
+/// 1 コードポイントの表示幅 (ANK 8px / それ以外は全角 16px)。
+#[inline]
+fn cp_width(b: u8) -> i32 {
+    if b < 0x80 {
+        8
+    } else {
+        16
+    }
+}
+
+/// `from`〜`to` (バイト、境界前提) の表示幅。
+fn text_width(t: &[u8], len: usize, from: usize, to: usize) -> i32 {
+    let mut w = 0;
+    let mut i = from;
+    while i < to && i < len {
+        w += cp_width(t[i]);
+        i = next_boundary(t, len, i);
+    }
+    w
 }
 
 /* ================================================================ */
@@ -396,25 +929,36 @@ fn title_label(buttons: u16) -> &'static [u8] {
 /* ================================================================ */
 
 /// キー 1 件。ダイアログが閉じたら true。
-pub fn on_key(st: &mut GuiState, scan: u8, _ch: u8) -> bool {
+///
+/// 呼び出し元は `input::capture_keyboard` の X3 経路だけ (`ctx.wm_ui()`)。
+/// X4 (ポンプ) はモーダル中に打鍵を取り込まないので、ここから `sys_ls` などの
+/// VFS 走査を呼んでも契約 T8 / W4 §5 に反しない。
+pub fn on_key(st: &mut GuiState, scan: u8, ch: u8, mods: u32) -> bool {
     if !state().used {
         return false;
     }
-    let file = state().buttons == GUI_MODAL_FILE_OPEN;
+    let buttons = state().buttons;
+    if buttons == GUI_MODAL_INPUT {
+        return input_key(st, scan, ch, mods);
+    }
+    let file = buttons == GUI_MODAL_FILE_OPEN;
     match scan {
         SC_ESC => {
+            /* W4 §4: OK / OK-Cancel / Yes-No のいずれも ESC は result=0。 */
             finish(st, MODAL_RESULT_CANCEL);
             return true;
         }
         SC_TAB | SC_RIGHT => {
             let m = state();
             m.focus_btn = (m.focus_btn + 1) % m.nbtn;
-            invalidate(st);
+            let band = buttons_band(m);
+            st.dirty_screen(band);
         }
         SC_LEFT => {
             let m = state();
             m.focus_btn = (m.focus_btn + m.nbtn - 1) % m.nbtn;
-            invalidate(st);
+            let band = buttons_band(m);
+            st.dirty_screen(band);
         }
         SC_UP if file => {
             move_cursor(st, -1);
@@ -429,10 +973,13 @@ pub fn on_key(st: &mut GuiState, scan: u8, _ch: u8) -> bool {
             move_cursor(st, LIST_ROWS as i32);
         }
         SC_HOME if file => {
-            let m = state();
-            m.cursor = 0;
-            m.scroll = 0;
-            invalidate(st);
+            {
+                let m = state();
+                m.cursor = 0;
+                m.scroll = 0;
+            }
+            let band = list_band(state());
+            st.dirty_screen(band);
         }
         SC_RETURN | SC_SPACE => {
             return activate(st);
@@ -441,6 +988,179 @@ pub fn on_key(st: &mut GuiState, scan: u8, _ch: u8) -> bool {
     }
     false
 }
+
+/* ---------------- Input dialog のキー (契約 M4 / W4 §6) ---------------- */
+
+fn input_key(st: &mut GuiState, scan: u8, ch: u8, mods: u32) -> bool {
+    match scan {
+        SC_ESC => {
+            finish(st, MODAL_RESULT_CANCEL);
+            return true;
+        }
+        SC_RETURN => {
+            /* W4 §6: RETURN = OK。focus はボタンへ移らない (下の SC_TAB 参照)。 */
+            state().focus_btn = 0;
+            finish(st, MODAL_RESULT_OK);
+            return true;
+        }
+        SC_TAB => {
+            /* Input では TAB を focus 移動に使わない — RETURN が常に OK である
+             * という契約 (M4) を素直に保つため。ボタンはマウスで押せる。 */
+            return false;
+        }
+        SC_LEFT => {
+            let m = state();
+            if m.caret > 0 {
+                m.caret = prev_boundary(&m.text, m.caret);
+            }
+            after_text_change(st, false);
+            return false;
+        }
+        SC_RIGHT => {
+            let m = state();
+            if m.caret < m.text_len {
+                m.caret = next_boundary(&m.text, m.text_len, m.caret);
+            }
+            after_text_change(st, false);
+            return false;
+        }
+        SC_HOME => {
+            let m = state();
+            /* SHIFT+HOME は END 相当 (PC-98 に END キーが無いため)。 */
+            m.caret = if (mods & MOD_SHIFT) != 0 { m.text_len } else { 0 };
+            after_text_change(st, false);
+            return false;
+        }
+        SC_HELP => {
+            let m = state();
+            m.caret = m.text_len;
+            after_text_change(st, false);
+            return false;
+        }
+        SC_BS => {
+            let m = state();
+            if m.caret > 0 {
+                let from = prev_boundary(&m.text, m.caret);
+                remove_range(m, from, m.caret);
+                m.caret = from;
+            }
+            after_text_change(st, true);
+            return false;
+        }
+        SC_DEL => {
+            let m = state();
+            if m.caret < m.text_len {
+                let to = next_boundary(&m.text, m.text_len, m.caret);
+                let c = m.caret;
+                remove_range(m, c, to);
+            }
+            after_text_change(st, true);
+            return false;
+        }
+        _ => {}
+    }
+    /* 印字可能 ANK の挿入 (UTF-8 の 1 バイト文字)。 */
+    if ch >= 0x20 && ch <= 0x7E {
+        let one = [ch];
+        insert_bytes(st, &one);
+    }
+    false
+}
+
+/// FEP の確定文字列 (UTF-8) を field へ入れる (`fep::flush_text` から)。
+pub fn insert_commit(st: &mut GuiState, bytes: &[u8]) {
+    if !is_input() {
+        return;
+    }
+    insert_bytes(st, bytes);
+}
+
+/// caret 位置へ UTF-8 バイト列を挿入する。**255B を超えるなら入れない**
+/// (既存内容を保つ。W4 §6: 切り詰めない)。
+fn insert_bytes(st: &mut GuiState, bytes: &[u8]) {
+    {
+        let m = state();
+        let n = bytes.len();
+        if n == 0 || m.text_len + n > VALUE_MAX {
+            return; /* 超過分は丸ごと拒否 */
+        }
+        /* 後ろへずらす。 */
+        let mut i = m.text_len;
+        while i > m.caret {
+            m.text[i + n - 1] = m.text[i - 1];
+            i -= 1;
+        }
+        let mut k = 0;
+        while k < n {
+            m.text[m.caret + k] = bytes[k];
+            k += 1;
+        }
+        m.text_len += n;
+        m.caret += n;
+        m.text[m.text_len] = 0;
+    }
+    after_text_change(st, true);
+}
+
+fn remove_range(m: &mut Modal, from: usize, to: usize) {
+    if to <= from || to > m.text_len {
+        return;
+    }
+    let n = to - from;
+    let mut i = to;
+    while i < m.text_len {
+        m.text[i - n] = m.text[i];
+        i += 1;
+    }
+    m.text_len -= n;
+    m.text[m.text_len] = 0;
+    if m.caret > m.text_len {
+        m.caret = m.text_len;
+    }
+}
+
+/// 文字列 / caret が動いた後の後始末: 横スクロールを詰め直し、field だけを
+/// 損傷にし、FEP の未確定行を caret に追従させる。
+fn after_text_change(st: &mut GuiState, _edited: bool) {
+    {
+        let m = state();
+        let avail = field_text_rect(m).w;
+        /* caret が左に出たら view を戻す。 */
+        if m.caret < m.view_off {
+            m.view_off = m.caret;
+        }
+        /* caret が右に出たら 1 コードポイントずつ view を進める。 */
+        let mut guard = 0;
+        while text_width(&m.text, m.text_len, m.view_off, m.caret) > avail - 8 {
+            guard += 1;
+            if guard > VALUE_MAX {
+                break;
+            }
+            if m.view_off >= m.caret {
+                break;
+            }
+            m.view_off = next_boundary(&m.text, m.text_len, m.view_off);
+        }
+    }
+    let fr = field_rect(state());
+    st.dirty_screen(fr);
+    /* SET_TEXT_CURSOR 相当: FEP の未確定行 / 候補窓を caret へ移す。 */
+    fep::mark_redraw();
+}
+
+/// FEP が未確定行 / 候補窓を出す原点 (画面座標)。Input dialog のときだけ。
+/// [`crate::fep::anchor`] が窓の `SET_TEXT_CURSOR` より優先して使う (W4 §6)。
+pub fn fep_caret() -> Option<(i32, i32)> {
+    let m = state();
+    if !m.used || m.buttons != GUI_MODAL_INPUT {
+        return None;
+    }
+    let tr = field_text_rect(m);
+    let cx = tr.x + text_width(&m.text, m.text_len, m.view_off, m.caret);
+    Some((cx, tr.y + 16 + 1))
+}
+
+/* ---------------- マウス ---------------- */
 
 /// クリック 1 件 (押下)。ダイアログが閉じたら true。
 pub fn on_button(st: &mut GuiState, mx: i32, my: i32) -> bool {
@@ -461,17 +1181,43 @@ pub fn on_button(st: &mut GuiState, mx: i32, my: i32) -> bool {
         }
         i += 1;
     }
-    /* 一覧の行 */
+    /* Input: field をクリックしたら caret を移す。 */
+    if buttons == GUI_MODAL_INPUT {
+        let fr = field_rect(state());
+        if fr.contains(mx, my) {
+            caret_from_x(st, mx);
+        }
+        return false;
+    }
+    /* 一覧の行 (ダブルクリックで降りる / 確定 = W4 §5) */
     if buttons == GUI_MODAL_FILE_OPEN {
+        let now = st.now;
         let mut row = 0;
         while row < LIST_ROWS {
             let rr = row_rect(state(), row);
             if rr.contains(mx, my) {
-                let m = state();
-                let idx = m.scroll + row;
-                if idx < m.nentries {
+                let (idx, dbl) = {
+                    let m = state();
+                    let idx = m.scroll + row;
+                    let dbl = m.last_click_row == idx as i32
+                        && now.wrapping_sub(m.last_click_tick) < DBLCLICK_TICKS;
+                    (idx, dbl)
+                };
+                if idx >= state().nentries {
+                    return false;
+                }
+                {
+                    let m = state();
                     m.cursor = idx;
-                    invalidate(st);
+                    m.last_click_row = idx as i32;
+                    m.last_click_tick = now;
+                }
+                let band = list_band(state());
+                st.dirty_screen(band);
+                if dbl {
+                    /* ダブルクリック = Open ボタン相当。 */
+                    state().focus_btn = 0;
+                    return activate(st);
                 }
                 return false;
             }
@@ -479,6 +1225,29 @@ pub fn on_button(st: &mut GuiState, mx: i32, my: i32) -> bool {
         }
     }
     false
+}
+
+/// field のクリック位置から caret を決める (コードポイント境界へ丸める)。
+fn caret_from_x(st: &mut GuiState, mx: i32) {
+    {
+        let m = state();
+        let tr = field_text_rect(m);
+        let mut i = m.view_off;
+        let mut x = tr.x;
+        while i < m.text_len {
+            let w = cp_width(m.text[i]);
+            if mx < x + w / 2 {
+                break;
+            }
+            x += w;
+            if x > tr.x + tr.w {
+                break;
+            }
+            i = next_boundary(&m.text, m.text_len, i);
+        }
+        m.caret = i;
+    }
+    after_text_change(st, false);
 }
 
 /// 「決定」= フォーカス中のボタンを押す。閉じたら true。
@@ -504,7 +1273,10 @@ fn activate(st: &mut GuiState) -> bool {
             enter_dir(st);
             return false;
         }
-        build_selection();
+        /* W4 §5: 255B を超える絶対パスの項目は Open できない (切り詰めない)。 */
+        if !build_selection() {
+            return false;
+        }
         finish(st, MODAL_RESULT_OK);
         return true;
     }
@@ -533,17 +1305,18 @@ fn move_cursor(st: &mut GuiState, delta: i32) {
             m.scroll = m.cursor + 1 - LIST_ROWS;
         }
     }
-    invalidate(st);
+    let band = list_band(state());
+    st.dirty_screen(band);
 }
 
-/// 中身が変わったので描き直す (X3 の合成に任せる)。
+/// 中身が変わったので描き直す (X3 の合成に任せる)。矩形を絞れないときだけ使う。
 fn invalidate(st: &mut GuiState) {
     let r = state().rect;
     st.dirty_screen(r);
 }
 
 /* ================================================================ */
-/*  ファイル選択のディレクトリ走査                                   */
+/*  ファイル選択のディレクトリ走査 (X3 だけ。W4 §5)                  */
 /* ================================================================ */
 
 fn set_cwd(path: &[u8]) {
@@ -587,6 +1360,7 @@ fn reload_dir() {
         m.nentries = 0;
         m.cursor = 0;
         m.scroll = 0;
+        m.last_click_row = -1;
     }
     let path = {
         let m = state();
@@ -606,6 +1380,24 @@ fn reload_dir() {
             core::ptr::null_mut(),
         );
     }
+}
+
+/// カーソル位置のエントリ名の長さ。
+fn name_len(m: &Modal, idx: usize) -> usize {
+    let mut i = 0;
+    while i < NAME_LEN && m.names[idx][i] != 0 {
+        i += 1;
+    }
+    i
+}
+
+/// `cwd` + "/" + `names[cursor]` の長さ (絶対パスのバイト数)。
+fn selection_len(m: &Modal) -> usize {
+    let mut n = m.cwd_len;
+    if n > 0 && m.cwd[n - 1] != b'/' {
+        n += 1;
+    }
+    n + name_len(m, m.cursor)
 }
 
 /// カーソル位置のディレクトリへ降りる / ".." で上がる。
@@ -631,6 +1423,11 @@ fn enter_dir(st: &mut GuiState) {
             m.cwd[n] = 0;
             m.cwd_len = n;
         } else {
+            /* W4 §5: 255B を超える path は作らない (作っても中の file が
+             * Open できず、切り詰めた別 path を返すのは禁止)。 */
+            if selection_len(m) > VALUE_MAX {
+                return;
+            }
             let mut n = m.cwd_len;
             if n > 0 && m.cwd[n - 1] != b'/' && n < PATH_LEN - 1 {
                 m.cwd[n] = b'/';
@@ -647,12 +1444,18 @@ fn enter_dir(st: &mut GuiState) {
         }
     }
     reload_dir();
-    invalidate(st);
+    invalidate(st); /* パス行 + 一覧 + 選択が総取り替え */
 }
 
 /// カーソル位置のファイルのフルパスを `sel` に組む。
-fn build_selection() {
+/// 255B を超えるなら**何も書かず false** (W4 §5: 切り詰めた別 path を返さない)。
+fn build_selection() -> bool {
     let m = state();
+    if selection_len(m) > VALUE_MAX {
+        m.sel_len = 0;
+        m.sel[0] = 0;
+        return false;
+    }
     let mut n = 0;
     while n < m.cwd_len && n < PATH_LEN - 1 {
         m.sel[n] = m.cwd[n];
@@ -670,6 +1473,7 @@ fn build_selection() {
     }
     m.sel[n] = 0;
     m.sel_len = n;
+    true
 }
 
 /* ================================================================ */
@@ -677,6 +1481,7 @@ fn build_selection() {
 /* ================================================================ */
 
 /// `clip` に掛かるならダイアログ全体を描き直す (kcg にクリップが無いため)。
+/// **present するのは損傷矩形だけ**なので、部分損傷でも転送量は増えない。
 pub fn draw(st: &GuiState, clip: Rect) {
     let m = state();
     if !m.used || !m.rect.intersects(&clip) {
@@ -708,10 +1513,10 @@ pub fn draw(st: &GuiState, clip: Rect) {
         gfx::kcg_draw_utf8(tb.x + 4, tb.y + 1, title_label(m.buttons).as_ptr(), ttxt, tcol);
     }
 
-    if m.buttons == GUI_MODAL_FILE_OPEN {
-        draw_list(m, mono, face);
-    } else {
-        unsafe {
+    match m.buttons {
+        GUI_MODAL_FILE_OPEN => draw_list(m, mono, face),
+        GUI_MODAL_INPUT => draw_input(m, mono, face),
+        _ => unsafe {
             gfx::kcg_draw_utf8(
                 r.x + PAD,
                 r.y + TITLE_H + PAD,
@@ -719,7 +1524,7 @@ pub fn draw(st: &GuiState, clip: Rect) {
                 GUI_COLOR_TEXT,
                 face,
             );
-        }
+        },
     }
 
     /* ボタン */
@@ -741,7 +1546,7 @@ fn draw_list(m: &Modal, mono: bool, face: u8) {
     }
     let mut row = 0;
     while row < LIST_ROWS {
-        let rr = row_rect(m, row).translate(0, LINE_H);
+        let rr = row_rect(m, row);
         let idx = m.scroll + row;
         let sel = idx == m.cursor && idx < m.nentries;
         let bg = if !sel {
@@ -769,6 +1574,64 @@ fn draw_list(m: &Modal, mono: bool, face: u8) {
             }
         }
         row += 1;
+    }
+}
+
+/// Input dialog: prompt + 沈んだ edit field + caret。
+fn draw_input(m: &Modal, mono: bool, face: u8) {
+    let r = m.rect;
+    unsafe {
+        gfx::kcg_set_scale(1);
+        /* prompt = GuiReqModal.message */
+        gfx::kcg_draw_utf8(
+            r.x + PAD,
+            r.y + TITLE_H + PAD,
+            m.msg.as_ptr(),
+            GUI_COLOR_TEXT,
+            face,
+        );
+    }
+    let fr = field_rect(m);
+    let tr = field_text_rect(m);
+    unsafe {
+        gfx::gfx_fill_rect(fr.x, fr.y, fr.w, fr.h, GUI_COLOR_WINDOW);
+        gfx::gfx_rect(fr.x, fr.y, fr.w, fr.h, GUI_COLOR_TEXT);
+        if !mono {
+            /* 沈んだ枠 (上/左が影)。 */
+            gfx::gfx_hline(fr.x + 1, fr.y + 1, fr.w - 2, GUI_COLOR_SHADOW);
+            gfx::gfx_vline(fr.x + 1, fr.y + 1, fr.h - 2, GUI_COLOR_SHADOW);
+        }
+    }
+    /* 見えている範囲だけを NUL 終端で切り出す (kcg にクリップが無い)。 */
+    let mut buf = [0u8; VALUE_MAX + 1];
+    let mut n = 0;
+    let mut i = m.view_off;
+    let mut w = 0;
+    while i < m.text_len {
+        let cw = cp_width(m.text[i]);
+        if w + cw > tr.w {
+            break;
+        }
+        let nb = next_boundary(&m.text, m.text_len, i);
+        let mut k = i;
+        while k < nb && n < VALUE_MAX {
+            buf[n] = m.text[k];
+            n += 1;
+            k += 1;
+        }
+        w += cw;
+        i = nb;
+    }
+    buf[n] = 0;
+    if n > 0 {
+        unsafe {
+            gfx::kcg_draw_utf8(tr.x, tr.y, buf.as_ptr(), GUI_COLOR_TEXT, GUI_COLOR_WINDOW);
+        }
+    }
+    /* caret (縦線)。 */
+    let cx = tr.x + text_width(&m.text, m.text_len, m.view_off, m.caret);
+    unsafe {
+        gfx::gfx_vline(cx, tr.y, 16, GUI_COLOR_TEXT);
     }
 }
 
