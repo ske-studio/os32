@@ -85,6 +85,14 @@
 
 - `lib/path.c` が `dev_find` (ドライバ層) に依存している。関数ポインタの登録制にして疎結合にする
 - `ide.c` などの `IDE_TIMEOUT_LOOP` 系ビジーループを、CPU クロック非依存の `kdelay_us` / `kdelay_ms` 待ちへ置き換える
+- GUI v1.1 (2026-09-06、詳細は [tasks/gui/TASKS.md §7](tasks/gui/TASKS.md) 末尾の申し送り):
+  - 9801 バックエンドは単一バックバッファを WM とアプリで共有するので、commit 前の描画が WM の present に
+    巻き込まれて表示面に出うる (PEGC / Cirrus は面が分かれており出ない)。
+  - K3 の副作用で子プロセスの空間が 1MB 減る (shlib 帯 0x400000〜)。8MB 機では本体上限 ≈1.2MB。
+  - `sys_mem_kb` は 16MB で頭打ち (32MB ページングでも実 RAM 管理は 16MB)。
+  - Cirrus の setup 失敗 → 9801 フォールバックは実走未検証 (NP21/W では失敗を起こせない。写像は `ring3_guard bb`)。
+  - NP21/W の `/api/mouse` の絶対座標上書きはプロセス寿命の状態で、検証後に `abs=off` を送らないと
+    人間のマウスが効かない。
 
 ### §10-11 wasm のドット始まりラベル (歴史的注記)
 

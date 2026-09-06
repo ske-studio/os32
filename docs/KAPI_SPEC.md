@@ -61,8 +61,11 @@ make programs
    python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
    git diff --stat
    ```
-   生成対象: `sdk/include/os32/os32_kapi_generated.h` / `kapi/kapi_generated.c` /
-   `exec/exec_kapi_init.inc` / `sdk/rust/os32api/src/kapi_generated.rs`
+   生成対象: `sdk/include/os32/os32_kapi_generated.h` / `sdk/include/os32/os32_kapi_slots.h`
+   (`KAPI_SLOT_<NAME>` = `int 0x80` のスロット番号。型に依存しないので crt0 非依存の
+   自己完結テストからも include できる) / `kapi/kapi_generated.c` /
+   `exec/exec_kapi_init.inc` / `sdk/rust/os32api/src/kapi_generated.rs`。
+   GitHub Actions (`.github/workflows/check.yml`) が生成物と kapi.json の一致を検査する。
 4. カーネル側に実体を実装する。
 5. 本仕様書のオフセット表を更新し、新APIに依存するプログラムの
    `build/app.conf` の要求バージョンを引き上げる。

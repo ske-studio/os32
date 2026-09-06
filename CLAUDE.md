@@ -321,6 +321,15 @@ Short form only. The history, symptoms and verification for each item are in
 - **Boot loaders**: PM transition stays inlined in `boot/loader_fat.asm`; `boot_fat.asm` is
   `.8086` (no immediate shifts); the IPL may call INT 1Bh at most 4 times on NP21/W.
   → `docs/10_notes.md` §10-2, §10-3
+- **Apps under gshell attach, never `gfx_init`**: `libos32gfx_attach()` owns the PACKED8 detection
+  (`gfx_packed`); a separate attach path that skips it draws no kanji on PEGC/Cirrus. → §4-20
+- **Cirrus linear window is mapped once and kept across shutdown** (supervisor+PCD in master, client
+  300KB promoted per app PD before the app's `gfx_init`); re-init must reset the relay flag. → §4-21
+- **gshell X4 must not consume WM-owned button edges** (`wm_owns_edge`): drag release, title bar,
+  close box, back windows stay for X3. → §4-22
+- **GUI verification on NP21/W**: `/api/key` needs `--data-urlencode` for `SHIFT+SPACE`; `/api/mouse`
+  uses `ax/ay` (seamless); deploy rewrites `system.cfg` (test with `/api/reset`); hotdeploy only from
+  CUI+rshell; self-contained tests exit with `KAPI_SLOT_SYS_EXIT`. → §4-23
 
 ## Source Tree
 

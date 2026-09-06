@@ -7,6 +7,7 @@
 #   - kapi.json からの生成物がコミット済みのものと一致 ([ABI1] 生成物を手で触らない)
 #   - プロジェクト制約 (docs/CONSTRAINTS.md ⇄ CLAUDE.md) のずれ
 #   - libos32gui.shlib の番号表 (tools/mkshlib.py --check)
+#   - GUI 共有プロトコルの C ⇄ Rust 照合 (tools/check_gui_proto.py)
 #   - ne2000 リングのホストテスト (gcc でビルドして実行)
 # check-manifests は make all の成果物を見るので対象外 (実機側の make check で回す)。
 name: check
@@ -44,6 +45,9 @@ jobs:
 
       - name: Shared library jump table
         run: python3 tools/mkshlib.py --check
+
+      - name: GUI protocol (C header vs Rust proto.rs)
+        run: python3 tools/check_gui_proto.py
 
       - name: ne2000 ring host test
         run: make check-ne2000-ring
