@@ -21,12 +21,19 @@
 /*                         書き込む。同じく supervisor か Not-Present。       */
 /*                         (9801 のプレーン VRAM A8000h は C2 で USER なので   */
 /*                          対象外 — あちらはバックバッファが主記憶にある)     */
+/*    ring3_guard bb       ケース E (**生き残るのが正解**): 9801 の主記憶      */
+/*                         バックバッファ 6A000h へ書く。どのバックエンドが   */
+/*                         選ばれていても exec が常に USER で写す (レビュー   */
+/*                         #6: アプリの gfx_init でアクセラレータが失敗して   */
+/*                         9801 へ落ちたときの描画先)。kill されたら退行。    */
+/*                         0xA8000="BB??" かつ 0xA8004="SURV" で合格。          */
 /*                                                                           */
 /*  動作:                                                                     */
 /*    1. テキスト VRAM に "RG"                                               */
 /*    2. 0xA8000 に "GRD?" / "SLB?" マーカー (書込試行直前)                    */
 /*    3. 対象へ書き込む → #PF → kill されるはず                              */
-/*    4. 生き残ったら 0xA8004 に "SURV" を書いて int 0x80 終了 (=保護無効)     */
+/*    4. 生き残ったら 0xA8004 に "SURV" を書いて sys_exit (ケース E 以外は     */
+/*       =保護無効)                                                          */
 /*                                                                           */
 /*  PM 検証: fault_kill_count +1、0xA8000="GRD?"(または "SLB?") かつ          */
 /*           0xA8004≠"SURV"、シリアルに [ring3] #PF ... addr=0x007BF000       */
@@ -54,12 +61,19 @@ void _start(int argc, char **argv)
      * 01000000h)、PEGC は PEGC_LINEAR_BASE (F00000h)。直値なのは上と同じ理由。 */
     volatile unsigned int   *cirrus_vis = (volatile unsigned int *)0x01000000UL;
     volatile unsigned int   *pegc_vis   = (volatile unsigned int *)0x00F00000UL;
+    /* 9801 の主記憶バックバッファ (include/memmap.h MEM_GFX_BB_BASE)。 */
+    volatile unsigned int   *pc98_bb    = (volatile unsigned int *)0x0006A000UL;
     char sel = (argc > 1 && argv[1]) ? argv[1][0] : 0;
 
     tvram[76] = (unsigned short)'R'; avram[76] = 0x00E5;
     tvram[77] = (unsigned short)'G'; avram[77] = 0x00E5;
 
-    if (sel == 'c') {
+    if (sel == 'b') {
+        /* ---- ケース E: 9801 主記憶バックバッファ (USER であるべき) ---- */
+        /* 0x3F3F4242 = LE 42 42 3F 3F = "BB??" */
+        mark[0] = 0x3F3F4242UL;
+        *pc98_bb = 0x00000000UL;   /* 生き残れば下の "SURV" まで進む */
+    } else if (sel == 'c') {
         /* ---- ケース C: Cirrus 表示面 (リニア窓オフセット 0) ---- */
         /* 0x3F534956 = LE 56 49 53 3F = "VIS?" */
         mark[0] = 0x3F534956UL;
@@ -81,10 +95,18 @@ void _start(int argc, char **argv)
         *guard = 0xDEADBEEFUL;
     }
 
-    /* ここに来た = 保護が効いていない。0x56525553 = LE "SURV" */
+    /* ここに来た = 書けた。ケース E ではこれが正解、それ以外は保護が効いて
+     * いない (退行)。0x56525553 = LE "SURV" */
     mark[1] = 0x56525553UL;
 
-    __asm__ __volatile__("int $0x80" : : "a"(0), "b"(1) : "memory");
+    /* sys_exit(0) を KAPI トランポリンと同じ規約で呼ぶ: eax = スロット、引数は
+     * ユーザスタックの [esp+4] から (先頭 1 語はスタブの戻り番地ぶん)。
+     * sys_exit のスロットは 84 (sdk/kapi.json、末尾追記のみなので不変)。
+     * かつては eax=0 で呼んでいたが、それはスロット 0 = gfx_init であって
+     * 終了しない (2026-09-06 実測: ケース E で GFX モードに入ったまま無限
+     * ループ、CTRL+STOP で回収した)。 */
+    __asm__ __volatile__("pushl $0\n\tpushl $0\n\tint $0x80"
+                         : : "a"(84) : "memory");
 
     for (;;) {
         __asm__ __volatile__("" ::: "memory");

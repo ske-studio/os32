@@ -74,6 +74,11 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > `_keep` は既存 PTE の **PCD/PWT を引き継ぐ** — 落とすと CPU が書いた画素が
 > キャッシュに残り、Cirrus の BLT エンジンが古い VRAM を読む。
 > 不変条件はブート時の kselftest (`paging_map_user_keep_selftest`) が毎回検査する。
+> 9801 の主記憶バックバッファ (0x6A000、128KB) は選ばれているバックエンドに関わらず
+> **常に** USER にする (レビュー #6、2026-09-06): アプリの gfx_init でアクセラレータの
+> setup が失敗すると HAL は 9801 へ落ち、以後 `gfx_get_framebuffer()` が 0x6A000 を返す
+> ため。写していないとフォールバック直後の最初の描画で #PF になる (`ring3_guard bb` が
+> 「書けて生き残る」ことを確認する)。
 
 [ 共有ライブラリ帯域 (0x400000 - 0x4FFFFF, K3 2026-09-06) ]
 0x400000 - text_end                libos32gui.shlib の先頭 4KB ジャンプ表 + .text/.rodata  RO, USER, 全 PD 共有

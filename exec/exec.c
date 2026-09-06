@@ -1158,6 +1158,21 @@ int exec_run(const char *cmdline)
              * BLT エンジンが古い VRAM を読む (レビュー #5 ②③)。 */
             {
                 u32 bb_base = 0, bb_size = 0;
+                /* 9801 の主記憶バックバッファ (0x6A000, 128KB) は **常に** USER に
+                 * する (レビュー #6)。アプリは exec の後に gfx_init を呼ぶが、
+                 * その中でアクセラレータ (Cirrus) の setup が失敗すると
+                 * gfx_select_and_init_backend() は 9801 へ落ち、以後の
+                 * gfx_get_framebuffer() は 0x6A000 を返す。ここを写して
+                 * いないと、フォールバック直後の最初の CPU 描画が #PF になる。
+                 * フォント (〜0x49FFF) / Unicode 表 (〜0x69FFF) と VRAM (0xA0000〜)
+                 * の間にちょうど穴があった。主記憶側のバックバッファなので
+                 * 表示面の隔離 (契約 G4) には触れない。 */
+                paging_addrspace_map_user_range(&g_ring3_as,
+                    (u32)MEM_GFX_BB_BASE,
+                    (u32)MEM_GFX_BB_BASE + (u32)MEM_GFX_BB_SIZE,
+                    PAGE_RW | PTE_USER);
+                /* その上で、いま選ばれているバックエンド固有の面を足す
+                 * (9801 なら同じ範囲を重ねて書くだけで無害)。 */
                 gfx_bb_phys_range(&bb_base, &bb_size);
                 if (bb_size)
                     paging_addrspace_map_user_keep(&g_ring3_as,
