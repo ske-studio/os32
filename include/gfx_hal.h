@@ -97,6 +97,16 @@ extern const GfxBackend gfx_backend_pc98;
  * 置くとファイルを足すまでリンクが通らなくなるため。 */
 extern GfxBackend gfx_backend_pegc __attribute__((weak));
 
+/* Cirrus GD54xx アクセラレータバックエンド (gfx/backend_cirrus.c, H3)。
+ * PEGC と同じく **const ではない / weak 宣言**:
+ *   - const でない: 将来 VRAM 容量に応じて面の割り付けを変えられるように、
+ *     表を書き換え可能なままにしておく (現状 init は bb_* を触らない)。
+ *   - weak: gfx/backend_cirrus.c を build/kernel.mk に入れていないビルドでは
+ *     0 になり、バックエンド表の要素が NULL になって probe から外れる。
+ * **bb_base は常に NULL** — クライアント面はカード VRAM の非表示領域にあり、
+ * 主記憶のバックバッファを持たない (契約 G4 / DESIGN §8)。 */
+extern GfxBackend gfx_backend_cirrus __attribute__((weak));
+
 /* ------------------------------------------------------------------------ */
 /*  バックエンドの強制指定 (票 H2b)。                                        */
 /*                                                                            */
@@ -105,9 +115,10 @@ extern GfxBackend gfx_backend_pegc __attribute__((weak));
 /*  目的: NP21/W は常に PEGC 相当なので、既定 (auto) のままでは 9801 プレーン  */
 /*  経路をエミュレータで回帰試験できない。GFX=pc98 でそれを強制する。          */
 /* ------------------------------------------------------------------------ */
-#define GFX_PREF_AUTO  0   /* 既定: probe 順 (PEGC → 9801) */
-#define GFX_PREF_PC98  1   /* 9801 プレーン強制 (probe を行わない) */
-#define GFX_PREF_PEGC  2   /* PEGC 強制。probe が通らなければ 9801 へ落とす */
+#define GFX_PREF_AUTO   0   /* 既定: probe 順 (Cirrus → PEGC → 9801) */
+#define GFX_PREF_PC98   1   /* 9801 プレーン強制 (probe を行わない) */
+#define GFX_PREF_PEGC   2   /* PEGC 強制。probe が通らなければ 9801 へ落とす */
+#define GFX_PREF_CIRRUS 3   /* Cirrus 強制。probe が通らなければ 9801 へ落とす */
 
 /* 起動設定から読んだ希望バックエンドを覚える。gfx_init() より前に呼ぶこと
  * (probe の直前に参照される)。範囲外の値は GFX_PREF_AUTO 扱い。 */

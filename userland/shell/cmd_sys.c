@@ -231,10 +231,12 @@ static void cmd_os32gui(int argc, char **argv)
 /*                                                                          */
 /*  /etc/system.cfg の GFX= を書く。カーネルが起動時に読み、最初の           */
 /*  gfx_init より前に HAL へ渡すので **次回起動から** 有効。                  */
-/*    pc98  9801 プレーン 16 色を強制 (NP21/W は常に PEGC 相当なので、        */
-/*          プレーン経路の回帰試験にはこれが要る)                            */
-/*    pegc  PEGC 256 色を強制 (probe が通らなければ 9801 へ落ちる)           */
-/*    auto  既定。probe 順 (PEGC → 9801)                                     */
+/*    pc98   9801 プレーン 16 色を強制 (NP21/W は常に PEGC 相当なので、       */
+/*           プレーン経路の回帰試験にはこれが要る)                           */
+/*    pegc   PEGC 256 色を強制 (probe が通らなければ 9801 へ落ちる)          */
+/*    cirrus Cirrus GD54xx アクセラレータを強制 (票 H3。NP21/W では ini の    */
+/*           USEGD5430 / GD5430TYPE で有効化していないと probe が落ちる)     */
+/*    auto   既定。probe 順 (Cirrus → PEGC → 9801)                           */
 /* ------------------------------------------------------------------------ */
 static void cmd_gfxmode(int argc, char **argv)
 {
@@ -243,7 +245,7 @@ static void cmd_gfxmode(int argc, char **argv)
         return;
     }
     if (!str_eq(argv[1], "pc98") && !str_eq(argv[1], "pegc") &&
-        !str_eq(argv[1], "auto")) {
+        !str_eq(argv[1], "cirrus") && !str_eq(argv[1], "auto")) {
         shell_print_help(argv[0]);
         return;
     }
@@ -266,7 +268,7 @@ static const ShellCmd sys_cmds[] = {
     { "format", cmd_format, "[0-3] [sects]", "Format a drive to ext2" },
     { "play",   cmd_play,   "MML",           "Play MML via FM synth" },
     { "os32gui",cmd_os32gui,"[on|off]",      "Switch to GUI shell now, or set GUI at boot" },
-    { "gfxmode",cmd_gfxmode,"pc98|pegc|auto","Force the graphics backend at next boot" },
+    { "gfxmode",cmd_gfxmode,"pc98|pegc|cirrus|auto","Force the graphics backend at next boot" },
     { (const char *)0, 0, 0, 0 }
 };
 
