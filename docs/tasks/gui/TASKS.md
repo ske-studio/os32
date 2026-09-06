@@ -141,6 +141,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **H2c 結合 → G5 前半 (PEGC) 通過 (実機)**: `/api/status` が `scrn_ymax=480` / `grph_disp=1`、hal_test `backend pegc 640x480 bpp=8`、gdi_test 307200、gshell のデスクトップと gui_demo が **640×480 / 正しいシステム 16 色**で描ける、ESC で CUI へ戻ると 400 ライン / `grph_disp=0` に復帰しテキストが正常。**TEXT_OVERLAY**: gui_busy (F3) の kprintf が 256 色の絵の上に合成されて見えた → `GFX_CAP_TEXT_OVERLAY` を立てる (DESIGN §5 に書き戻し)。残る G5 後半は H3 (Cirrus Xe10、NP21/W の WAB CL-GD54xx を Enable にする [D2]) |
 
+| 2026-09-06 | **H3 着手** (ユーザー承認: NP21/W の WAB CL-GD54xx を Enable / Xe10 built-in に切り替えるのは H3 のコード完成後に PM が行い、検証後 OFF に戻す)。並行して np21w-src 側で `/api/screenshot` の WAB 出力対応 (票 §0 の前提) と `/api/status` の `wab_relay` を実装中。どちらも Opus 5 |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。
