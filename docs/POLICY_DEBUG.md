@@ -262,7 +262,12 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   「Cirrus で FEP が効かない」と誤診しかけた。
 - `make deploy*` は `/etc/system.cfg` を巻き戻す。`gfxmode` / `os32gui` の設定切替は `/api/reset` で検証する。
 - `hotdeploy` は CUI で rshell が生きているときだけ効く (`hotdeploy_poll` は `kbd_trygetchar` から)。gshell 中や
-  `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す (ESC → SHIFT+SPACE → `ime off` → `rshell`)。
+  `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す。**GUI から CUI へ戻る経路は
+  Start → "CUI mode" → 確認ダイアログ Yes だけ** (G5 で ESC の即時切替は撤去。契約 S6 / 票 W3 §4.1) —
+  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82,H-107+54) →
+  Yes (410,H/2+11) → 約 6 秒待ち → `abs=off` → `rshell`)。その後 SHIFT+SPACE → `ime off` → `rshell`。
+  この経路は `/etc/system.cfg` に `GUI=0` を永続化するので、GUI 自動起動へ戻すときは `os32gui`
+  (その場で GUI へ入る) か cfg の `GUI=1` 書き戻しを使う。
 - OS32 は NP21/W ではシームレスマウス (np2sysp `getmpos`) なので、`/api/mouse` は **`ax`/`ay`** (絶対座標
   0..65535、`ax = px*65535/639`、`ay = py*65535/(H-1)`)。`dx/dy` はバスマウス計数で効かない。検証後は `abs=off`。
 - `gfx_stats` のカウンタは起動からの累計。`gdi_test` の値は起動直後の 1 回目だけが基準。

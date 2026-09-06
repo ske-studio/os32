@@ -9,7 +9,8 @@
 //!  アプリ実行中は WM はアプリの gui_call の中でだけ走る (契約 T8):
 //!         X1 ハンドラ / X2 COMMIT / X3 WAIT / X4 ポンプ
 //!  終了  Start → CUI mode / Shut Down → 確認 → SessionAction → top-level で実行
-//!         (v1.2 開発中は ESC の即時切替も残す = DEBUG_SHORTCUTS、G5 で撤去)
+//!         (**これが唯一の経路**。ESC の即時切替と上部バーは G5 で製品から撤去、
+//!          デバッグ時だけ DEBUG_SHORTCUTS で戻せる)
 //! ```
 //!
 //! モジュールの役割:
@@ -74,17 +75,22 @@ static CUI_SHELL: &[u8] = b"/sys/shell.bin\0";
 /// 正典は `include/config.h` の `SYS_SYSTEM_CFG`。
 static SYSTEM_CFG: &[u8] = b"/etc/system.cfg\0";
 
-/// **デバッグ用の残置** (票 W3 §4.1、ユーザー決定 2026-09-06)。
+/// **デバッグ専用スイッチ** (票 W3 §4.1、ユーザー決定 2026-09-06)。
 ///
 /// v1.1 の「ESC で即 CUI」「上部の `OS32 GUI shell ESC:CUI F1..F5` バー」
-/// 「F1〜F5 のランチャ」を v1.2 の開発中だけ残すためのスイッチ。
-/// **G5 (v1.2 完成) でこの定数ごと、下の [`LAUNCH_APPS`] と
-/// [`input::standalone_key`] / [`desktop::draw_hint`] を撤去する** (契約 S6)。
-/// 撤去後、CUI へ戻る経路は Start → CUI mode → 確認ダイアログだけになる。
-pub(crate) const DEBUG_SHORTCUTS: bool = true;
+/// 「F1〜F5 のランチャ」を出す。**G5 (v1.2 完成) で `false` に倒し、製品の
+/// 出荷形はこの 3 つを持たない** (契約 S6、票 W3 §4.1〜4.2)。CUI へ戻る経路は
+/// Start → "CUI mode" → 確認ダイアログ → SessionAction (`GUI=0` を永続化) だけ。
+///
+/// コード本体は**デバッグ設備として残してある** — 実機で GUI が起動直後に
+/// 固まったときに `true` へ戻せば、Start メニューを操作できなくても ESC で
+/// CUI へ抜けられる。`true` に倒すのは手元の調査中だけで、コミットはしない。
+/// 参照先 ([`LAUNCH_APPS`] / [`input::standalone_key`] / [`desktop::draw_hint`] /
+/// [`launch_app`]) はこの定数から到達可能なので、`false` でも警告は出ない。
+pub(crate) const DEBUG_SHORTCUTS: bool = false;
 
-/// F1〜F4 で起動する確認用アプリ (ゲート G2 / G3 の検証用)。gshell 単独時
-/// (窓が 1 枚も無いとき) に [`input::standalone_key`] が横取りして起動する。
+/// F1〜F4 で起動する確認用アプリ (ゲート G2 / G3 の検証用、[`DEBUG_SHORTCUTS`])。
+/// gshell 単独時 (窓が 1 枚も無いとき) に [`input::standalone_key`] が横取りする。
 /// パスは `userland/deploy.yaml` の登録 (`/usr/bin/`) に合わせてある。
 /// F5 は WM 自身のファイル選択ダイアログ (任意の .bin を選んで起動)。
 pub(crate) static LAUNCH_APPS: [&[u8]; 4] = [
@@ -161,7 +167,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
         unsafe { (os32api::api().sys_halt)() };
     }
 
-    /* ---- 「CUI へ」(デバッグ用の ESC。契約 T9) ---- */
+    /* ---- 「CUI へ」(デバッグ用の ESC = DEBUG_SHORTCUTS。契約 T9)。
+     *      製品では `st.quit` が立たないのでここは通らない — 出荷形の CUI 復帰は
+     *      下の `switch_cui` (SessionAction) 側だけ。 ---- */
     cursor::hide(st);
     st.inited = false;
     unsafe {
@@ -181,7 +189,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 /*  アプリの起動 (単独ループから。G2 の目視確認用)                    */
 /* ================================================================ */
 
-/// デバッグ用の F1〜F5 経路 ([`DEBUG_SHORTCUTS`])。G5 で撤去する。
+/// デバッグ用の F1〜F5 経路 ([`DEBUG_SHORTCUTS`])。製品では `launch_pending` が
+/// 立たないので呼ばれない (出荷形の起動は Start → Run... = `GUI_SESSION_LAUNCH`)。
 fn launch_app(st: &mut wm::GuiState) {
     /* F1〜F4 / F5 のファイル選択が置いたパス。無ければ既定のデモ。 */
     let mut path = [0u8; 256];
