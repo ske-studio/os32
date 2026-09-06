@@ -330,6 +330,10 @@ Short form only. The history, symptoms and verification for each item are in
   300KB promoted per app PD before the app's `gfx_init`); re-init must reset the relay flag. → §4-21
 - **gshell X4 must not consume WM-owned button edges** (`wm_owns_edge`): drag release, title bar,
   close box, back windows stay for X3. → §4-22
+- **"GUI feels slow" → measure before theorising**: read `gfx_counters` (`/api/mem`) around the
+  keystroke to see whether a present happened at all, then sample `/api/status` `eip` to find where the
+  CPU is (app / shlib / gshell / kernel). A per-pixel `fill_solid` cost 1.3 s per pane on 2026-09-07;
+  the wake path was innocent. → §4-25
 - **GUI verification on NP21/W**: `/api/key` needs `--data-urlencode` for `SHIFT+SPACE`; `/api/mouse`
   uses `ax/ay` (seamless); deploy rewrites `system.cfg` (test with `/api/reset`); hotdeploy only from
   CUI+rshell; self-contained tests exit with `KAPI_SLOT_SYS_EXIT`. → §4-23

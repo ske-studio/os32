@@ -305,6 +305,31 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 ---
 
+### 4-25. GUI の「反応が遅い」は起床経路を疑う前に present と EIP を測る
+
+- **現象** (2026-09-07、v1.2 G3): filer の右ペインで DOWN / ROLLDOWN を押すと画面が 1.3〜2 秒後に変わる。
+  マウスを 2px 動かすと直後に変わるように見えた (実際は時間の一致)。gui_demo のリストは即時。
+- **迷走**: 「Paint が次の周にしか出ない」「OP_WAIT が起きない」と決めつけて、アプリの二重 POLL、
+  OP_INVALIDATE で Paint 即時配送、可視領域の回転、と 3 回直しても効かなかった (いずれも撤回)。
+- **決め手**: (1) カーネルの `gfx_counters` (`kernel.map` の番地を `/api/mem` で読む) — 打鍵後 1.3 秒間
+  `commits` / `present_bytes` が増えない = **present が 1 回も呼ばれていない**。(2) gshell の一時カウンタで
+  Key 到着・OP_INVALIDATE・起床・2 回目の POLL がすべて同じ tick、present だけ 136 tick 後。
+  (3) `/api/status` の `eip` を 30ms ごとに 1.6 秒サンプル → 11/11 が shlib の
+  `libos32gui::draw::Painter::fill_solid` の内側。**真因**: 1 ピクセルごとに clip 4 回 + 枠 4 回の比較をする
+  per-pixel ループで、右ペイン ~108k px の塗りに 1.3 秒。gui_demo は塗り面積が小さいだけだった。
+- **対策**: `fill_solid` は矩形を clip と物理枠で 1 回だけ交差させ、行ごとに `write_bytes` (memset)。
+  glyph / icon も行単位化。filer は選択変更で「前後の 2 行 + パス行」だけ再描画。打鍵→present が
+  0.27〜0.45 秒 (HTTP 往復込み) に。PEGC / 9801 / Cirrus で同じ。
+- **副産物として直した実欠陥**: gshell が Pointer を `moved` に関係なく毎周 ring に積み、
+  `OP_WAIT` が眠らず 33 回/秒の空 commit をしていた (`gfx_counters` の idle 増分で発覚)。
+  起床判定と配送判定が別実装で乖離し得たので `damage::deliverable_cand` に統合。
+- **手順 (30 秒で決まる)**: ① `gfx_counters` を打鍵前後で読み present の有無を見る → 無ければ
+  「アプリが描いていない or 起きていない」。② `/api/status` の `eip` を連続サンプルし、0x5xxxxx (アプリ) /
+  0x4xxxxx (shlib) / 0x3xxxxx (gshell) / 0x1xxxxx (カーネル idle) のどこに居るかを数える。
+  ③ shlib / アプリなら `i386-elf-nm -n` でシンボルに落とす。起床経路のカウンタはそのあと。
+
+---
+
 ## §5. デバッグ道具箱
 
 ### カーネル内デバッグ出力
