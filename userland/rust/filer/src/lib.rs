@@ -61,8 +61,8 @@ use libos32gui::gapi::types::{Rect, Style, SurfaceId};
 use libos32gui::gapi::{draw_rect, fill_rect, hline, text};
 use libos32gui::icon::draw_icon16;
 use libos32gui::widget::{
-    self, WidgetId, SCAN_DOWN, SCAN_ESC, SCAN_HOME, SCAN_LEFT, SCAN_RETURN, SCAN_RIGHT,
-    SCAN_ROLLDOWN, SCAN_ROLLUP, SCAN_TAB, SCAN_UP,
+    self, WidgetId, LIST_ROW_H, SCAN_DOWN, SCAN_ESC, SCAN_HOME, SCAN_LEFT, SCAN_RETURN,
+    SCAN_RIGHT, SCAN_ROLLDOWN, SCAN_ROLLUP, SCAN_TAB, SCAN_UP,
 };
 use libos32gui::{modal, session, App, GuiResult, SizeSpec, Timer, Ui, Window, WindowSpec};
 use model::*;
@@ -150,6 +150,10 @@ const PEND_COPY_DST: u8 = 6;
 const PEND_COPY_OVERWRITE: u8 = 7;
 /// エラー表示だけのメッセージボックス (結果は捨てる)。
 const PEND_ERROR: u8 = 8;
+/// 移動の実行確認 (Yes → 移動先の入力へ)。
+const PEND_MOVE_CONFIRM: u8 = 9;
+/// ディレクトリ改名の確認 (Yes → 新しい名前の入力へ)。
+const PEND_RENAME_CONFIRM: u8 = 10;
 
 /* ================================================================ */
 /*  アプリの状態                                                     */
@@ -172,6 +176,11 @@ struct Filer {
     cur_button: u8,
     cur_x: i32,
     swallow: bool,
+
+    /* ツリーの左クリック。選択が変わらないと `on_select` が来ないので、
+     * 印を付けて `after_commit` で拾う (§10 差し戻し 1)。 */
+    tree_click: bool,
+    tree_click_y: i32,
 
     /* ダブルクリックの合成 */
     last_tick: u32,
@@ -245,6 +254,8 @@ impl Filer {
             cur_button: 0,
             cur_x: 0,
             swallow: false,
+            tree_click: false,
+            tree_click_y: 0,
             last_tick: 0,
             last_row: -1,
             menu_open: false,
@@ -471,6 +482,51 @@ impl Filer {
         self.tree_sel = node as i32;
         self.rebuild_tree();
         self.navigate(&p);
+    }
+
+    /// ツリー行の左クリックの処理。`[+]` / `[-]` の 3 桁 (24px) を叩いたら
+    /// 開閉だけ、それ以外はその枝へ移動する。`on_select` と `after_commit`
+    /// (選択が変わらないクリック) の両方から呼ぶ。
+    fn tree_click_at(&mut self, node: usize, cur_x: i32) {
+        let depth = {
+            let st = fs();
+            if node >= st.ntree {
+                return;
+            }
+            st.tree[node].depth as i32
+        };
+        let r = widget::rect(self.tree_lb);
+        let mx0 = r.x as i32 + 3 + depth * 16;
+        if cur_x >= mx0 && cur_x < mx0 + 24 {
+            self.tree_toggle(node);
+        } else {
+            self.tree_go(node);
+        }
+    }
+
+    /// クリックの y が実在するツリー行に当たっているか。
+    ///
+    /// listbox は先頭行 (`top`) を公開しないが、**項目数が見える行数以下なら
+    /// `top` は必ず 0** — `list_clear` が 0 に戻し、`ensure_visible` は選択が
+    /// 下へはみ出したときしか動かさないため。あふれているときは可視行が
+    /// すべて実項目なので、矩形の中ならどこでも当たり。
+    fn tree_row_hit(&self, y: i32) -> bool {
+        let r = widget::rect(self.tree_lb);
+        if r.is_empty() {
+            return false;
+        }
+        let row_h = LIST_ROW_H as i32;
+        let n = fs().ntree;
+        let h = r.h as i32 - 2;
+        let vis = if h < row_h { 1 } else { (h / row_h) as usize };
+        if n > vis {
+            return true;
+        }
+        let rel = y - (r.y as i32 + 1);
+        if rel < 0 {
+            return false;
+        }
+        ((rel / row_h) as usize) < n
     }
 
     /* ------------------------------------------------------------ */
@@ -746,11 +802,26 @@ impl Filer {
         if self.busy() || !self.take_target() {
             return;
         }
+        if self.target_dir {
+            /* ディレクトリの改名は中身ごと動くので 1 枚挟む (§10 差し戻し 2)。 */
+            let mut buf = [0u8; 96];
+            let n = self.confirm_msg(&mut buf, b"Rename directory ");
+            self.ask(GUI_MODAL_YES_NO, &buf[..n], PEND_RENAME_CONFIRM);
+            return;
+        }
         self.ask(
             GUI_MODAL_INPUT,
             b"Rename to (name only):",
             PEND_RENAME,
         );
+    }
+
+    /// 確認モーダルの本文 `<head><basename> ?` を組む (1 行しか描かれない)。
+    fn confirm_msg(&self, buf: &mut [u8; 96], head: &[u8]) -> usize {
+        let off = basename_off(&self.target[..self.target_len]);
+        let mut n = fmt::put(buf, 0, head);
+        n = fmt::put(buf, n, fit(&self.target[off..self.target_len], 48));
+        fmt::put(buf, n, b" ?")
     }
 
     fn op_delete(&mut self) {
@@ -762,10 +833,7 @@ impl Filer {
         let mut buf = [0u8; 96];
         let head: &[u8] =
             if self.target_dir { b"Remove directory " } else { b"Delete file " };
-        let off = basename_off(&self.target[..self.target_len]);
-        let mut n = fmt::put(&mut buf, 0, head);
-        n = fmt::put(&mut buf, n, fit(&self.target[off..self.target_len], 48));
-        n = fmt::put(&mut buf, n, b" ?");
+        let n = self.confirm_msg(&mut buf, head);
         let pend = if self.target_dir { PEND_RMDIR } else { PEND_DELETE_FILE };
         self.ask(GUI_MODAL_YES_NO, &buf[..n], pend);
     }
@@ -790,11 +858,10 @@ impl Filer {
         if self.busy() || !self.take_target() {
             return;
         }
-        self.ask(
-            GUI_MODAL_INPUT,
-            b"Move to (absolute path):",
-            PEND_MOVE,
-        );
+        /* 移動は元の場所から消える。まず対象を見せて確認する (§10 差し戻し 2)。 */
+        let mut buf = [0u8; 96];
+        let n = self.confirm_msg(&mut buf, b"Move ");
+        self.ask(GUI_MODAL_YES_NO, &buf[..n], PEND_MOVE_CONFIRM);
     }
 
     /// 入力された名前を現在地に足して `sys_mkdir`。
@@ -1059,9 +1126,37 @@ impl App for Filer {
         let tr = widget::rect(self.tree_lb);
         if !tr.is_empty() && tr.contains(x, y) {
             /* 行の確定はライブラリ側 (スクロール量を持っているのはあちら)。
-             * ここではペインの切り替えだけして `on_select` を待つ。 */
+             * ここではペインを切り替え、左クリックなら印を付けるだけ。
+             * 選択が変わるクリックは `on_select` が、変わらないクリック
+             * (すでに選ばれている行) は `after_commit` が処理する。 */
             self.active = PANE_TREE;
+            if b.button == 1 {
+                self.tree_click = true;
+                self.tree_click_y = y;
+            }
         }
+    }
+
+    /// 1 周の commit の後。選択が変わらなかったツリーのクリックをここで拾う
+    /// (ライブラリは同じ行を叩いても `WEV_SELECT` を出さない)。`on_select`
+    /// が処理したときは印が下りているので、二重には効かない。
+    fn after_commit(&mut self, _ui: &mut Ui) {
+        if !self.tree_click {
+            return;
+        }
+        self.tree_click = false;
+        if self.menu_open || self.swallow {
+            return;
+        }
+        if !self.tree_row_hit(self.tree_click_y) {
+            return; /* 最終行より下の余白 */
+        }
+        let sel = widget::list_selection(self.tree_lb);
+        if sel < 0 {
+            return;
+        }
+        self.tree_sel = sel;
+        self.tree_click_at(sel as usize, self.cur_x);
     }
 
     /// 左ツリーの選択。クリック由来のときだけ移動する (矢印での移動では読み直さない)。
@@ -1069,6 +1164,8 @@ impl App for Filer {
         if w != self.tree_lb {
             return;
         }
+        /* このクリックはここで片付ける (`after_commit` の取りこぼし用の印を下ろす)。 */
+        self.tree_click = false;
         if self.swallow || self.menu_open || (self.active != PANE_TREE && self.cur_button == 0) {
             /* メニュー操作 / 右ペイン操作の巻き添えは戻す。 */
             let _ = widget::list_set_selection(self.tree_lb, self.tree_sel);
@@ -1078,22 +1175,7 @@ impl App for Filer {
         if self.cur_button != 1 {
             return; /* キー移動と右クリックは選択だけ */
         }
-        let node = index as usize;
-        let depth = {
-            let st = fs();
-            if node >= st.ntree {
-                return;
-            }
-            st.tree[node].depth as i32
-        };
-        /* `[+]` / `[-]` の 3 桁 (24px) を叩いたら開閉だけ、それ以外は移動。 */
-        let r = widget::rect(self.tree_lb);
-        let mx0 = r.x as i32 + 3 + depth * 16;
-        if self.cur_x >= mx0 && self.cur_x < mx0 + 24 {
-            self.tree_toggle(node);
-        } else {
-            self.tree_go(node);
-        }
+        self.tree_click_at(index as usize, self.cur_x);
     }
 
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, ch: u8, _mods: u8, down: bool) {
@@ -1239,7 +1321,14 @@ impl App for Filer {
             return;
         }
         if m.result != GUI_MODAL_RESULT_OK {
-            return; /* Cancel / No */
+            /* Cancel / No。確認で止めたときは掴んでいた対象も捨てる。 */
+            if op == PEND_MOVE_CONFIRM || op == PEND_RENAME_CONFIRM {
+                self.target_len = 0;
+                self.target_dir = false;
+                self.status_msg(b"cancelled");
+                self.repaint_path();
+            }
+            return;
         }
         let n = if m.copied > 255 { 255 } else { m.copied };
         val[n] = 0;
@@ -1247,6 +1336,18 @@ impl App for Filer {
         value[..n + 1].copy_from_slice(&val[..n + 1]);
 
         match op {
+            /* 確認で Yes。掴んだ対象はそのままに、次の入力を開く
+             * (`pending` は上で NONE に戻してあるので `ask` が使える)。 */
+            PEND_MOVE_CONFIRM => self.ask(
+                GUI_MODAL_INPUT,
+                b"Move to (absolute path):",
+                PEND_MOVE,
+            ),
+            PEND_RENAME_CONFIRM => self.ask(
+                GUI_MODAL_INPUT,
+                b"Rename to (name only):",
+                PEND_RENAME,
+            ),
             PEND_MKDIR => self.do_mkdir(&value),
             PEND_RENAME => self.do_rename(&value),
             PEND_MOVE => self.do_move(&value),
@@ -1418,6 +1519,12 @@ impl Filer {
         let mut buf = [0u8; 128];
         let st = fs();
         let mut n = fmt::put(&mut buf, 0, st.cwd_slice());
+        /* いま選んでいる行 — 破壊的なキー (d / r / m) が何に効くかを見せる。 */
+        if let Some(e) = st.row_entry(self.list_sel) {
+            n = fmt::put(&mut buf, n, b"  [");
+            n = fmt::put(&mut buf, n, fit(e.name_slice(), 24));
+            n = fmt::put(&mut buf, n, b"]");
+        }
         if st.ent_overflow {
             n = fmt::put(&mut buf, n, b"  [truncated list]");
         }
