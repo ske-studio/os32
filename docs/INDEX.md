@@ -30,6 +30,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 進捗 | 領域別索引 ([tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) の表、[tasks/v86v2/04](tasks/v86v2/04_implementation_status.md)、[tasks/gui/TASKS.md](tasks/gui/TASKS.md) のゲート) | [ROADMAP.md](ROADMAP.md) (計画)、[CHANGELOG.md](../CHANGELOG.md) (履歴) |
 | プログラムの一覧 | 各層の `deploy.yaml` (機械可読の正典)、コマンドは [07_shell.md §7-1](07_shell.md) | 09_exec / INDEX に表を持たない |
 | LAN の設計・進捗 | ドライバ = [tasks/network/PLAN.md](tasks/network/PLAN.md)、リンク層と Host Services = [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | 05_drivers / DEVELOPMENT は要約 + リンク |
+| 設定の置き場 (system.cfg の残すキー、settings.db のスキーマ / API / リカバリ) | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) (計画、v1.3) | ROADMAP は 1 行 |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
 ## カーネル技術仕様書 (§1-§10)
@@ -97,6 +98,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | ドキュメント | 内容 |
 |-------------|------|
 | [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
+| [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ** (計画、v1.3) — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite) の 2 層、初期値はインストール媒体だけが持ちリカバリモードで復元、`libos32cfg` API、SQLite プールとの共存の実測項目 |
 | [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | OS32 **リンクプロトコル / Host Services** 計画 — 独自 raw Ethernet、絶対値 WINDOW フロー制御、DATA ストリーミング、HTTP/File/RPC を KAPI で公開（未実装） |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
 | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |

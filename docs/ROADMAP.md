@@ -172,6 +172,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 | full-screen GFX program | GUI | exec_run後にGUI全体再描画 |
 | shell script | terminal | terminal内 script engine |
 | CUI/GUI abstraction | API | console/GUI window の I/O 抽象化 |
+| 設定レジストリ | system/API | `/etc/settings.db` (SQLite) + `libos32cfg`、初期値はインストール媒体のみ (リカバリモードで復元)。設計: [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md)。v1.4 の設定アプリの下敷き |
 
 #### CUI/GUI 抽象化レイヤー
 
