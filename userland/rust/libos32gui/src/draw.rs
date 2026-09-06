@@ -112,8 +112,16 @@ impl Painter {
         }
     }
 
-    /// クリップ済みの塗り矩形 (rc は既に self.clip 内)。まとめて塗る (速い経路)。
+    /// 矩形塗り。**クリップと物理画面境界の交差は 1 回だけ**取り、内側は
+    /// 1 行 `write_bytes` (memset) で埋める。
+    ///
+    /// 以前はここが 1 画素ごとに `put` を呼んでいて、画素あたり 8 本前後の
+    /// 比較 (クリップ 4 + 画面境界 4) を回していた。filer のペイン再描画は
+    /// 10 万画素規模なので、実測で 1 打鍵あたり約 1.36 秒かかっていた
+    /// (v1.2 G3: EIP サンプル 11/11 がこのループの中)。判定を外へ出すだけで
+    /// 内側は「1 行 = memset 1 回」になる。
     fn fill_solid(&self, rc: Rect, color: u8) {
+        let rc = rc.intersect(&self.clip);
         if rc.is_empty() {
             return;
         }
@@ -129,16 +137,36 @@ impl Painter {
                 )
             };
         } else if self.packed8 {
-            let mut ly = rc.y as i32;
-            let y1 = rc.bottom();
-            while ly < y1 {
-                let mut lx = rc.x as i32;
-                let x1 = rc.right();
-                while lx < x1 {
-                    self.put(lx, ly, color);
-                    lx += 1;
-                }
-                ly += 1;
+            if self.fb_base.is_null() {
+                return;
+            }
+            /* 画面外 Window Surface での OOB write 防止 (レビュー ③) は
+             * ここで 1 回だけ効かせる。 */
+            let mut gx0 = self.ox + rc.x as i32;
+            let mut gy0 = self.oy + rc.y as i32;
+            let mut gx1 = self.ox + rc.right();
+            let mut gy1 = self.oy + rc.bottom();
+            if gx0 < 0 {
+                gx0 = 0;
+            }
+            if gy0 < 0 {
+                gy0 = 0;
+            }
+            if gx1 > self.fb_w {
+                gx1 = self.fb_w;
+            }
+            if gy1 > self.fb_h {
+                gy1 = self.fb_h;
+            }
+            if gx1 <= gx0 || gy1 <= gy0 {
+                return;
+            }
+            let n = (gx1 - gx0) as usize;
+            let mut gy = gy0;
+            while gy < gy1 {
+                let off = gy as isize * self.fb_pitch as isize + gx0 as isize;
+                unsafe { core::ptr::write_bytes(self.fb_base.offset(off), color, n) };
+                gy += 1;
             }
         } else {
             unsafe {
@@ -150,6 +178,62 @@ impl Painter {
                     color,
                 )
             };
+        }
+    }
+
+    /// この矩形はクリップに全く掛からないか (セル単位の早期打ち切り用)。
+    #[inline]
+    pub(crate) fn cell_hidden(&self, lx: i32, ly: i32, w: i32, h: i32) -> bool {
+        Rect::new(lx as i16, ly as i16, w as i16, h as i16)
+            .intersect(&self.clip)
+            .is_empty()
+    }
+
+    /// PACKED8 の画面サーフェスなら、その行への直書き情報を返す。
+    /// クリップと画面境界を**行ごとに 1 回**畳んでおき、1 画素の書き込みは
+    /// 範囲比較 1 つ + ストア 1 つになる。オフスクリーン / PLANAR4 は `None`
+    /// (呼び出し側は従来どおり `put` を使う)。
+    #[inline]
+    pub(crate) fn row(&self, ly: i32) -> Option<Row> {
+        if !self.offscreen.is_null() || !self.packed8 || self.fb_base.is_null() {
+            return None;
+        }
+        if ly < self.clip.y as i32 || ly >= self.clip.bottom() {
+            return None;
+        }
+        let gy = self.oy + ly;
+        if gy < 0 || gy >= self.fb_h {
+            return None;
+        }
+        let mut lo = self.clip.x as i32;
+        let mut hi = self.clip.right();
+        if lo < -self.ox {
+            lo = -self.ox;
+        }
+        if hi > self.fb_w - self.ox {
+            hi = self.fb_w - self.ox;
+        }
+        if hi <= lo {
+            return None;
+        }
+        let base = unsafe { self.fb_base.offset(gy as isize * self.fb_pitch as isize) };
+        Some(Row { base, ox: self.ox, lo, hi })
+    }
+}
+
+/// `Painter::row` が返す 1 行の直書き口 (PACKED8 の画面のみ)。
+pub(crate) struct Row {
+    base: *mut u8, /* その行の物理 x=0 */
+    ox: i32,
+    lo: i32, /* 書いてよい局所 x の下限 */
+    hi: i32, /* 同上限 (排他) */
+}
+
+impl Row {
+    #[inline]
+    pub(crate) fn put(&self, lx: i32, color: u8) {
+        if lx >= self.lo && lx < self.hi {
+            unsafe { *self.base.offset((self.ox + lx) as isize) = color };
         }
     }
 }
@@ -499,24 +583,45 @@ fn draw_ank_bitmap(p: &Painter, penx: i32, ly: i32, ch: u8, fg: u8, bg: Option<u
         /* オフスクリーンの不透過 ANK は塗ってから... だが read_ank のビット順に依存するため
          * v1 では画面サーフェスに限定。オフスクリーン文字は未対応 (票 C1 の割り切り)。 */
     }
+    /* セルごとクリップの外なら何もしない (行 × 画素の判定を 1 回に畳む)。 */
+    if p.cell_hidden(penx, ly, ANK_W, CELL_H) {
+        return;
+    }
     /* ANK は 8x16 = 16B。念のため広めに確保して先頭 16B だけ使う。 */
     let mut pat = [0u8; 32];
     unsafe {
         let a = os32api::api();
         (a.kcg_read_ank)(ch, pat.as_mut_ptr());
     }
+    /* 不透過ならセルをまとめて塗ってから前景ビットだけ置く。結果は
+     * 「画素ごとに fg / bg を選ぶ」のと同じで、背景側が memset になる。 */
+    if let Some(b) = bg {
+        p.fill_solid(Rect::new(penx as i16, ly as i16, ANK_W as i16, CELL_H as i16), b);
+    }
     let mut row = 0i32;
     while row < CELL_H {
         let bits = pat[row as usize];
-        let mut col = 0i32;
-        while col < ANK_W {
-            let on = (bits >> (7 - col)) & 1 != 0;
-            if on {
-                p.put(penx + col, ly + row, fg);
-            } else if let Some(b) = bg {
-                p.put(penx + col, ly + row, b);
+        if bits != 0 {
+            match p.row(ly + row) {
+                Some(r) => {
+                    let mut col = 0i32;
+                    while col < ANK_W {
+                        if (bits >> (7 - col)) & 1 != 0 {
+                            r.put(penx + col, fg);
+                        }
+                        col += 1;
+                    }
+                }
+                None => {
+                    let mut col = 0i32;
+                    while col < ANK_W {
+                        if (bits >> (7 - col)) & 1 != 0 {
+                            p.put(penx + col, ly + row, fg);
+                        }
+                        col += 1;
+                    }
+                }
             }
-            col += 1;
         }
         row += 1;
     }

@@ -467,65 +467,6 @@ struct GuiCell(UnsafeCell<GuiState>);
 unsafe impl Sync for GuiCell {}
 static GUI: GuiCell = GuiCell(UnsafeCell::new(GuiState::NEW));
 
-/* ================================================================ */
-/*  G3 追跡カウンタ (一時的 — 原因が確定したら消す)                   */
-/*                                                                  */
-/*  `i386-elf-nm userland/gshell.elf | grep GSHELL_DBG` で番地を引き、 */
-/*  `/api/mem` で 12 × u32 (48B、リトルエンディアン) を読む。          */
-/*                                                                  */
-/*    [0] OP_WAIT 入場: どの窓にも dirty が無い                       */
-/*    [1] OP_WAIT 入場: dirty はあるが配送できない                    */
-/*    [2] OP_WAIT 入場: 配送できる (= すぐ戻る)                       */
-/*    [3] 眠った後、リングにイベントが来て戻った                       */
-/*    [4] 眠った後、配送できる Paint が立って戻った                    */
-/*    [5] 眠った後、期限 (timeout / タイマ) で戻った                   */
-/*    [6] Key をフォーカス窓のリングへ積んだ回数                       */
-/*    [7] OP_POLL 回数                                               */
-/*    [8] OP_INVALIDATE 回数                                         */
-/*    [9] 最後に Key を積んだ tick                                    */
-/*   [10] 最後の OP_INVALIDATE の tick                                */
-/*   [11] 実際に present した最後の OP_COMMIT の tick                 */
-/*                                                                  */
-/*  [3] は「戻った時点でリングに未読がある」で判定するので、タイマ満了と */
-/*  同時に入力が来た場合は [3] に寄る (filer はタイマを使わない)。      */
-/* ================================================================ */
-#[no_mangle]
-pub static mut GSHELL_DBG: [u32; 12] = [0; 12];
-
-pub const DBG_WAIT_NO_DIRTY: usize = 0;
-pub const DBG_WAIT_STUCK: usize = 1;
-pub const DBG_WAIT_DELIVERABLE: usize = 2;
-pub const DBG_WOKE_RING: usize = 3;
-pub const DBG_WOKE_PAINT: usize = 4;
-pub const DBG_WOKE_DEADLINE: usize = 5;
-pub const DBG_KEY_APPENDED: usize = 6;
-pub const DBG_POLL: usize = 7;
-pub const DBG_INVALIDATE: usize = 8;
-pub const DBG_TICK_KEY: usize = 9;
-pub const DBG_TICK_INVALIDATE: usize = 10;
-pub const DBG_TICK_PRESENT: usize = 11;
-
-#[inline]
-fn dbg_ptr(i: usize) -> *mut u32 {
-    /* `static mut` への参照は作らない (static_mut_refs 回避)。 */
-    unsafe { (core::ptr::addr_of_mut!(GSHELL_DBG) as *mut u32).add(i) }
-}
-
-/// カウンタを 1 つ進める。
-#[inline]
-pub fn dbg_inc(i: usize) {
-    unsafe {
-        let p = dbg_ptr(i);
-        core::ptr::write_unaligned(p, core::ptr::read_unaligned(p).wrapping_add(1));
-    }
-}
-
-/// 時刻などの値をそのまま置く。
-#[inline]
-pub fn dbg_set(i: usize, v: u32) {
-    unsafe { core::ptr::write_unaligned(dbg_ptr(i), v) }
-}
-
 /// グローバル状態への可変参照 (単一スレッド前提)。
 #[inline]
 pub fn g() -> &'static mut GuiState {
