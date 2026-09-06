@@ -99,12 +99,13 @@ extern GfxBackend gfx_backend_pegc __attribute__((weak));
 
 /* Cirrus GD54xx アクセラレータバックエンド (gfx/backend_cirrus.c, H3)。
  * PEGC と同じく **const ではない / weak 宣言**:
- *   - const でない: 将来 VRAM 容量に応じて面の割り付けを変えられるように、
- *     表を書き換え可能なままにしておく (現状 init は bb_* を触らない)。
+ *   - const でない: bb_base / bb_size を init() が実行時に埋める。
  *   - weak: gfx/backend_cirrus.c を build/kernel.mk に入れていないビルドでは
  *     0 になり、バックエンド表の要素が NULL になって probe から外れる。
- * **bb_base は常に NULL** — クライアント面はカード VRAM の非表示領域にあり、
- * 主記憶のバックバッファを持たない (契約 G4 / DESIGN §8)。 */
+ * **bb_base はカード VRAM の中を指す** (票 H3b, 2026-09-06)。クライアント面は
+ * 主記憶ではなくカード VRAM の非表示領域にあり (契約 G4 / DESIGN §8)、
+ * 0FABh レジスタ 02h の 2MB リニア窓 (物理 01000000h) 越しに CPU から線形に
+ * 見える。H3 の時点では 32KB のバンク窓しか無く bb_base = NULL だった。 */
 extern GfxBackend gfx_backend_cirrus __attribute__((weak));
 
 /* ------------------------------------------------------------------------ */
@@ -128,9 +129,11 @@ void gfx_set_backend_pref(int pref);
 int  gfx_get_backend_pref(void);
 
 /* 現在のバックエンドのバックバッファの物理範囲を返す (base は 4KB 境界)。
- * exec が CPL=3 アプリへ USER マップする範囲。バックバッファを持たない
- * バックエンド (アクセラレータ系) では *size に 0 が入る。
- * 9801 では常に (MEM_GFX_BB_BASE, MEM_GFX_BB_SIZE) = 従来と同じ。 */
+ * exec が CPL=3 アプリへ USER マップする範囲。まだ init() が済んでいない
+ * (= 面が決まっていない) バックエンドでは *size に 0 が入る。
+ *   9801  : 常に (MEM_GFX_BB_BASE, MEM_GFX_BB_SIZE) = 従来と同じ
+ *   PEGC  : 物理末尾から切り出した 300KB (主記憶)
+ *   Cirrus: リニア窓の中の非表示面 300KB (カード VRAM, H3b) */
 void gfx_bb_phys_range(u32 *base, u32 *size);
 
 #endif /* __GFX_HAL_H */

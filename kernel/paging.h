@@ -33,8 +33,28 @@
 #define PAGE_RO         (PTE_PRESENT)                 /* 読み取り専用 */
 #define PAGE_NOT_PRESENT 0                            /* アクセス不可 */
 
-/* マッピング範囲 (16MB = 4 ページテーブル) */
-#define PAGING_MAP_SIZE (16UL * 1024UL * 1024UL)
+/* ------------------------------------------------------------------------ */
+/*  マッピング範囲 (H3b, 2026-09-06)                                          */
+/*                                                                            */
+/*  2 つの上限を区別する:                                                     */
+/*                                                                            */
+/*    PAGING_RAM_LIMIT — **実 RAM** として恒等マップする上限 (16MB)。          */
+/*      pgalloc の管理上限でもある。ここを超える物理 RAM は (積まれていても)   */
+/*      OS32 は使わない — ページ割り当ての対象外で、ブート時は Not-Present。    */
+/*      従来 PAGING_MAP_SIZE が兼ねていた役割で、値も従来どおり 16MB。         */
+/*                                                                            */
+/*    PAGING_MAP_SIZE  — **ページテーブルの守備範囲** (32MB = 8 枚)。           */
+/*      16MB〜32MB には物理 RAM が無いので既定は全ページ Not-Present。          */
+/*      デバイス窓を置きたいドライバが paging_map_phys() で必要な分だけ張る。   */
+/*      現在の唯一の利用者は Xe10 内蔵 Cirrus のリニア窓                       */
+/*      (01000000h から 2MB、include/wab_xe10.h §4)。この窓は                  */
+/*      「dat << 24」でしか置けず最小でも 16MB 番地になるため、16MB 止まりの    */
+/*      ページテーブルからは届かなかった (票 H3 の申し送り 4)。                 */
+/*                                                                            */
+/*  静的テーブルは PAGING_PT_COUNT 枚 = 32KB (従来 16KB) を BSS に置く。       */
+/* ------------------------------------------------------------------------ */
+#define PAGING_RAM_LIMIT (16UL * 1024UL * 1024UL)
+#define PAGING_MAP_SIZE (32UL * 1024UL * 1024UL)
 #define PAGING_PT_COUNT (PAGING_MAP_SIZE / (PTE_COUNT * PAGE_SIZE))
 
 /* ページ境界アライメント (切り上げ/切り下げ)。
@@ -108,6 +128,10 @@ int paging_is_present(u32 virt_addr);
 /*    PDE 1 (0x400000-0x7FFFFF) : アプリ固有 — プログラム帯 (APP_BAND_PDE)   */
 /*    PDE 2 (0x800000-0xBFFFFF) : 共有                                       */
 /*    PDE 3 (0xC00000-0xFFFFFF) : 共有 — 物理末尾のホットデプロイ窓を含む     */
+/*    PDE 4-7 (0x1000000-0x1FFFFFF) : 共有 — 実 RAM 無し。既定は全 Not-      */
+/*      Present で、デバイス窓 (Cirrus のリニア窓 01000000h) だけを張る。      */
+/*      paging_addrspace_create は PDE を 1024 本すべてコピーするので、       */
+/*      master に張った窓はそのまま全アプリ PD から見える (H3b)。            */
 /*                                                                          */
 /*  M1b の時点ではアプリ PT を master と同一の identity で初期化する          */
 /*  (0x400000 帯も present/RW/identity)。これにより CPL=0 のまま CR3 を       */
