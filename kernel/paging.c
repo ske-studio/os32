@@ -476,7 +476,10 @@ int paging_addrspace_create(struct addrspace *as)
      * ループは PDE_COUNT (1024 本) なので、H3b で守備範囲が 32MB に広がって
      * 増えた PDE 4〜7 (16MB 超のデバイス窓帯) も自動的に写る。master に
      * paging_map_phys() で張った Cirrus のリニア窓は、以後に作られる
-     * CPL=3 アプリの PD からも同じ物理を指す。 */
+     * CPL=3 アプリの PD からも同じ物理を指す。
+     * ただしデバイス窓は master では **supervisor + PCD** で張られている
+     * (レビュー #5 ②)。CPL=3 に見せてよいのはクライアント面だけなので、
+     * 昇格は exec が paging_addrspace_map_user_keep() で 1 枚ずつ行う。 */
     for (i = 0; i < PDE_COUNT; i++) {
         new_pd[i] = page_directory[i];
     }
@@ -513,24 +516,33 @@ void paging_addrspace_destroy(struct addrspace *as)
     as->app_pde = 0;
 }
 
-int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
-                              u32 flags)
+/* 1 ページ分の実体。keep_cache=1 なら既存 PTE のキャッシュ属性 (PCD/PWT) を
+ * 引き継ぐ。デバイス窓の中を USER へ昇格させるとき、flags に PCD を書き忘れる
+ * と「CPU が書いた画素がキャッシュに残り、BLT エンジンが古い VRAM を読む」に
+ * なる (Cirrus のクライアント面)。呼び出し側に属性を復唱させるのではなく、
+ * 張ってあるものを保つ方が壊れにくい (レビュー #5 ③)。 */
+static int addrspace_map_user_page(struct addrspace *as, u32 virt, u32 phys,
+                                   u32 flags, int keep_cache)
 {
     u32 pdi = virt >> 22;
     u32 pti = (virt >> 12) & 0x3FF;
     u32 *pd;
+    u32 *pt;
 
     if (!as || !as->pd_phys) return -1;
     pd = (u32 *)as->pd_phys;
 
     if (pdi == as->app_pde) {
         /* アプリ固有 PT (このアプリの PD からしか見えない) */
-        ((u32 *)as->app_pt_phys)[pti] = (phys & 0xFFFFF000UL) | flags;
+        pt = (u32 *)as->app_pt_phys;
     } else {
         /* 共有 PT (master と同一)。VRAM/SHM 等 C2 で共有 + USER の領域用。 */
         if (pdi >= PAGING_PT_COUNT) return -1;
-        page_tables[pdi][pti] = (phys & 0xFFFFF000UL) | flags;
+        pt = page_tables[pdi];
     }
+
+    if (keep_cache) flags |= (pt[pti] & (u32)(PTE_PCD | PTE_PWT));
+    pt[pti] = (phys & 0xFFFFF000UL) | flags;
 
     /* このアプリ PD の PDE にだけ USER を伝播 (master の PDE は触らない)。 */
     if (flags & PTE_USER) {
@@ -539,15 +551,22 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
     return 0;
 }
 
-int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
-                                    u32 vend, u32 flags)
+int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
+                              u32 flags)
+{
+    return addrspace_map_user_page(as, virt, phys, flags, 0);
+}
+
+/* 範囲版の共通部。末尾の TLB 処理まで含めて 1 か所にまとめる。 */
+static int addrspace_map_user_range(struct addrspace *as, u32 vstart,
+                                    u32 vend, u32 flags, int keep_cache)
 {
     u32 v;
     int rc = 0;
 
     vstart = PAGE_ALIGN_DOWN(vstart);
     for (v = vstart; v < vend; v += PAGE_SIZE) {
-        if (paging_addrspace_map_user(as, v, v, flags) != 0) {
+        if (addrspace_map_user_page(as, v, v, flags, keep_cache) != 0) {
             rc = -1;
             break;
         }
@@ -558,6 +577,18 @@ int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
         paging_load_cr3(as->pd_phys);
     }
     return rc;
+}
+
+int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
+                                    u32 vend, u32 flags)
+{
+    return addrspace_map_user_range(as, vstart, vend, flags, 0);
+}
+
+int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
+                                   u32 vend, u32 flags)
+{
+    return addrspace_map_user_range(as, vstart, vend, flags, 1);
 }
 
 /* V1 自己診断用のプローブ。カーネル .bss (0x100000-0x1FFFFF, PDE 0) に置かれ、
@@ -598,6 +629,78 @@ int paging_pd_clone_selftest(void)
     if (pd_selftest_probe != 0xA5A5F00DUL) rc |= 4;    /* 新 PD の書込が master に反映されない */
 
     paging_addrspace_destroy(&as);
+    return rc;
+}
+
+/* ======================================================================== */
+/*  paging_map_user_keep_selftest — デバイス窓を CPL=3 へ貸すときの不変条件   */
+/*                                                                          */
+/*  レビュー #5 ②③ の回帰止め。Cirrus のクライアント面のように「共有 PT の   */
+/*  中の 1 枚だけを USER にする」操作で、次の 4 つが同時に成り立つこと:      */
+/*    1. 貸したページに USER が立つ                                          */
+/*    2. そのページの PCD (キャッシュ無効) が消えない                        */
+/*       — 消えると CPU が書いた画素がキャッシュに残り、BLT エンジンが       */
+/*         古い VRAM を読む                                                  */
+/*    3. 同じ PT の隣のページ (= 表示面に相当) は supervisor のまま無傷       */
+/*    4. master の PDE には USER が伝播しない (アプリ PD 側にだけ立つ)        */
+/*                                                                          */
+/*  ハードウェアには一切依存しない: 使うのは守備範囲 (32MB) の末尾 2 ページ   */
+/*  で、実 RAM も無く既定 Not-Present、どのドライバの窓とも重ならない         */
+/*  (Cirrus の窓は 01000000h〜011FFFFFh)。PTE は試験前の値へ戻す。            */
+/* ======================================================================== */
+int paging_map_user_keep_selftest(void)
+{
+    struct addrspace as;
+    u32 vclient = PAGING_MAP_SIZE - PAGE_SIZE;        /* 貸す側 (クライアント面役) */
+    u32 vvisible = PAGING_MAP_SIZE - 2 * PAGE_SIZE;   /* 貸さない側 (表示面役) */
+    u32 pdi = vclient >> 22;
+    u32 pti_c = (vclient >> 12) & 0x3FF;
+    u32 pti_v = (vvisible >> 12) & 0x3FF;
+    u32 saved_c, saved_v, saved_pde;
+    u32 pte_c, pte_v;
+    u32 *app_pd;
+    int rc = 0;
+
+    if (!pg_enabled) return 0;              /* ページング無効なら検証対象外 */
+    if (pdi >= PAGING_PT_COUNT) return 1;   /* 定数がずれた (起こらないはず) */
+
+    saved_c = page_tables[pdi][pti_c];
+    saved_v = page_tables[pdi][pti_v];
+    saved_pde = page_directory[pdi];
+
+    /* バックエンド init を模す: どちらも supervisor + PCD のデバイス窓。 */
+    page_tables[pdi][pti_c] = (vclient & 0xFFFFF000UL) | PAGE_RW | PTE_PCD;
+    page_tables[pdi][pti_v] = (vvisible & 0xFFFFF000UL) | PAGE_RW | PTE_PCD;
+
+    if (paging_addrspace_create(&as) != 0) {
+        page_tables[pdi][pti_c] = saved_c;
+        page_tables[pdi][pti_v] = saved_v;
+        page_directory[pdi] = saved_pde;
+        tlb_flush_all();
+        return 2;
+    }
+    app_pd = (u32 *)as.pd_phys;
+
+    /* exec が bb 範囲に対して行う操作そのもの。 */
+    if (paging_addrspace_map_user_keep(&as, vclient, vclient + PAGE_SIZE,
+                                       PAGE_RW | PTE_USER) != 0) rc |= 4;
+
+    pte_c = page_tables[pdi][pti_c];
+    pte_v = page_tables[pdi][pti_v];
+
+    if (!(pte_c & PTE_USER)) rc |= 8;                       /* 1 */
+    if (!(pte_c & PTE_PCD))  rc |= 16;                      /* 2 */
+    if (pte_v & PTE_USER)    rc |= 32;                      /* 3 */
+    if (!(pte_v & PTE_PCD))  rc |= 64;                      /* 3 */
+    if (page_directory[pdi] & PTE_USER) rc |= 128;          /* 4 (master) */
+    if (!(app_pd[pdi] & PTE_USER))      rc |= 256;          /* 4 (アプリ PD) */
+
+    paging_addrspace_destroy(&as);
+
+    page_tables[pdi][pti_c] = saved_c;
+    page_tables[pdi][pti_v] = saved_v;
+    page_directory[pdi] = saved_pde;
+    tlb_flush_all();
     return rc;
 }
 

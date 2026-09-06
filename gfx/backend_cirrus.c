@@ -27,7 +27,10 @@
 /*  以後 CPU 直書きはすべてこの窓越しで、バンク切替は使わない。              */
 /*    01000000h + 000000h  表示面      (CPL=3 へは見せない)                  */
 /*    01000000h + 04B000h  クライアント面 = bb_base、300KB                   */
-/*  exec は gfx_bb_phys_range() でこの 300KB だけを CPL=3 へ USER マップする。 */
+/*  窓は master には **supervisor + PCD** で張り、exec が                     */
+/*  gfx_bb_phys_range() を見てこの 300KB だけをアプリ PD で USER へ昇格させる */
+/*  (paging_addrspace_map_user_keep、PCD は保つ)。表示面の PTE は決して USER  */
+/*  にならない = 契約 G4 (レビュー #5 ②③、2026-09-06)。                      */
 /* ======================================================================== */
 
 #include "gfx_internal.h"   /* gfx.h, pc98.h, memmap.h */
@@ -272,19 +275,25 @@ static void cirrus_init(void)
     if (s_glue->init) s_glue->init();
 
     /* リニア窓を master PD に張る (H はページテーブルを触らない: K の API
-     * 経由)。RW + USER + PCD は PEGC の F00000h 窓と同じ扱い —
-     *   USER: クライアント面が CPL=3 アプリの描画先 (bb_base) になるため。
-     *         master 側の PDE にも USER が伝播するが、CPL=0 の実効権限は
-     *         変わらない (カーネル/シェルは元から supervisor で通る)。
-     *   PCD : 書き込み専用に使うデバイス窓なのでキャッシュに載せない。
+     * 経由)。**supervisor + PCD** — USER は付けない (レビュー #5 ②)。
+     *   USER 無し: この窓のオフセット 0 は **表示面**。master に USER で張ると
+     *         paging_addrspace_create() が PDE を丸ごと写す先で CPL=3 アプリが
+     *         表示 VRAM へ直接書けてしまい、契約 G4 (commit 前の描画は表示面に
+     *         出ない) が崩れる。アプリに見せるのはクライアント面だけで、その
+     *         300KB は exec が gfx_bb_phys_range() を見て
+     *         paging_addrspace_map_user_keep() でアプリ PD ごとに昇格させる。
+     *   PCD : 書き込み専用に使うデバイス窓なのでキャッシュに載せない。CPU が
+     *         書いた画素を BLT エンジンが読むので、クライアント面を USER へ
+     *         昇格させたあとも PCD は残らなければならない (…map_user_keep が
+     *         既存 PTE の PCD/PWT を引き継ぐのはそのため)。
      * paging_addrspace_create() は master の PDE を全部コピーするので、
-     * 以後に作られるアプリ PD からも同じ物理が見える (H3b)。 */
+     * 物理そのものは以後に作られるアプリ PD からも見える (CPL=0 のみ、H3b)。 */
     npages = (s_glue->lin_size + PAGE_SIZE - 1) / PAGE_SIZE;
     /* 失敗しても「範囲内の分は適用済み」で返ってくる (paging_map_range の
      * 契約) ので、剥がす枚数は呼ぶ前に控えておく。 */
     s_lin_pages = npages;
     if (paging_map_phys(s_glue->lin_base, s_glue->lin_base, npages,
-                        PAGE_RW | PTE_USER | PTE_PCD) != 0) {
+                        PAGE_RW | PTE_PCD) != 0) {
         kprintf(0xC1, "[cirrus] linear window map failed\n");
         cirrus_linear_unmap();
         s_glue->relay(0);
@@ -330,8 +339,8 @@ static void cirrus_init(void)
     /* --- バックバッファ記述子 (票 H3b) ---
      * クライアント面はリニア窓の中の非表示面。libos32gfx はここへ CPU で
      * 直接描き、commit (present_rect) がエンジン BLT で表示面へ運ぶ。
-     * exec は gfx_bb_phys_range() でこの 300KB だけを CPL=3 へ USER
-     * マップする (表示面は見せない = 契約 G4)。 */
+     * exec は gfx_bb_phys_range() でこの 300KB だけをアプリ PD で USER へ
+     * 昇格させる (表示面の PTE は supervisor のまま = 契約 G4)。 */
     gfx_backend_cirrus.bb_base = s_lin + CIRRUS_CLIENT_OFF;
     gfx_backend_cirrus.bb_size = (u32)CIRRUS_SURFACE_SIZE;
 
