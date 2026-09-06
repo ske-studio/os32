@@ -143,6 +143,8 @@ C レーンが同じ値を写す。PM の `tools/check_gui_proto.py` が両者�
 
 | 2026-09-06 | **H3 着手** (ユーザー承認: NP21/W の WAB CL-GD54xx を Enable / Xe10 built-in に切り替えるのは H3 のコード完成後に PM が行い、検証後 OFF に戻す)。並行して np21w-src 側で `/api/screenshot` の WAB 出力対応 (票 §0 の前提) と `/api/status` の `wab_relay` を実装中。どちらも Opus 5 |
 
+| 2026-09-06 | **H3 結合** (`0d04a03` + kernel.mk 登録): `include/wab_xe10.h` / `drivers/wab_glue.h` (グルー契約) / `drivers/wab_glue_xe10.c` / `drivers/wab_cirrus.c` / `gfx/backend_cirrus.c`、probe 順 Cirrus → PEGC → 9801、`GFX=cirrus`。NP21/W の根拠は `wab/cirrus_vga.c`。**設計の前提が 1 つ崩れた**: Xe10 内蔵の CPU 窓は 32KB バンク窓のみで、2MB のリニア窓 (reg 02h) は最小 0x01000000 = OS32 の 16MB ページングの外。H3 は `bb_base=NULL` にしてあり、そのままでは CPU 描画 (gshell / gdi_test) が #PF する → **PM 判断: 案 (a) ページングを 32MB に広げてリニア窓を採る (H3b、投下中)**。DESIGN §8 の「BLT レジスタは MMIO」は Xe10 モードに MMIO 窓が無いため I/O 経由 (逸脱を記録)。ini のキーは `[NekoProject21]` の `USEGD5430=true` / `GD5430TYPE=91` (10 進 = 5Bh) — 票 §0 の記述を訂正。np21w-src の screenshot WAB 対応は 337e7ff (未 deploy) |
+
 ### 記録しておく v1 の限界 (W1 の申し送り)
 
 - **commit 前の描画が表示面に出うる**: ソフトウェアバックエンド (9801) は単一バックバッファを WM とアプリで共有するので、WM の X3 present (クローム / デスクトップ) がアプリの未 commit 描画を巻き込む。契約 G4 は「バックエンドの責任」としており、v1 では許容。PEGC / Cirrus (H2 / H3) でサーフェスを分けられれば解消。

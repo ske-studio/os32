@@ -10,8 +10,7 @@
 - NP21/W ai-debug の `/api/screenshot` は 98 側 VRAM しか拾わない (DESIGN §4)。WAB 出力を
   含める拡張を `/home/hight/np21w-src` で先に行う (`scrnsave` に WAB フレームバッファの
   経路を足す)。これが無いと H3 は目視検証できない。
-- `np21x64w.ini` に `USEGD5430=true` / `GD5430TYPE=5Bh` (Xe10 固定、AUTO 禁止) を入れる。
-  **[D2] 承認事項**。
+- `np21x64w.ini` の **`[NekoProject21]` セクション** に `USEGD5430=true` / `GD5430TYPE=91` (10 進。PFTYPE_UINT16 は 16 進表記を受け付けない。91 = 5Bh = Xe10 固定、AUTO 禁止) を入れる。**[D2] 承認事項** (2026-09-06 承認済み、切替は H3b 完成後に PM)。
 
 ## ゴール
 
