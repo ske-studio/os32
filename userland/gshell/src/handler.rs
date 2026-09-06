@@ -199,6 +199,7 @@ fn op_init(st: &mut GuiState, owner: i32, arg: u32) -> i32 {
 /*  OP_POLL (契約 T3) — 導出型を同じリングへ追記して未読件数を返す     */
 /* ================================================================ */
 fn op_poll(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    wm::dbg_inc(wm::DBG_POLL);
     /* 前回の OP_POLL で渡した dropped / OVERFLOW を消し込む (受領済み)。 */
     consume_reported_dropped(st, slot_no);
 
@@ -264,6 +265,18 @@ fn emit_paints(st: &mut GuiState, owner: i32, slot_no: usize) {
     }
 }
 
+/// `cand` に dirty の添字 `d` 由来の断片があるか。
+fn cand_has(cand: &[(usize, Rect); MAX_VIS], ncand: usize, d: usize) -> bool {
+    let mut m = 0;
+    while m < ncand {
+        if cand[m].0 == d {
+            return true;
+        }
+        m += 1;
+    }
+    false
+}
+
 fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     /* 可視領域が 16 超で打ち切られていた窓は、周ごとに捨てる断片を入れ替える
      * (契約 G4「超過分は次の周」、レビュー #4 ⑤)。 */
@@ -274,20 +287,10 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     let id = st.windows[idx].id(idx);
     let dirty = st.windows[idx].dirty;
 
-    /* (a) 配送候補 = dirty ∩ 可視領域。issued の空き (16) までで打ち切る。 */
-    let mut cand: [(usize, Rect); MAX_VIS] = [(0, Rect::EMPTY); MAX_VIS];
-    let mut ncand = 0;
-    let mut i = 0;
-    while i < dirty.len && ncand < MAX_VIS {
-        let pieces = damage::clip_to_vis(&st.windows[idx], dirty.rects[i]);
-        let mut k = 0;
-        while k < pieces.len && ncand < MAX_VIS {
-            cand[ncand] = (i, pieces.rects[k]);
-            ncand += 1;
-            k += 1;
-        }
-        i += 1;
-    }
+    /* (a) 配送候補 = dirty ∩ 可視領域。**起床判定と同じ関数**を使う
+     * (`damage::has_deliverable_paint` もこれを通る。両者が食い違うと
+     * 「起こされないと配れない / 配れないと起きられない」で止まる)。 */
+    let (cand, ncand) = damage::deliverable_cand(&st.windows[idx]);
 
     /* (b) リングへ流す。空きが尽きたらそこで止める (残りは dirty のまま)。 */
     let mut delivered = [false; MAX_VIS];
@@ -305,10 +308,22 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
         j += 1;
     }
 
-    /* (c) 渡せなかった分を dirty として残す (dirty 各矩形 − 渡した断片)。 */
+    /* (c) 渡せなかった分を dirty として残す (dirty 各矩形 − 渡した断片)。
+     *
+     * ただし**可視領域が確定していて (打ち切り無し・空でない)、候補が 1 つも
+     * 出なかった dirty** は捨てる。`add_dirty` の 32px 丸めではみ出した縁など、
+     * 可視領域の外にある分は何周回しても `Paint` にならず、`dirty` が永久に
+     * 空にならない原因になる (実測: dirty が空になる周が 1 度も無かった)。
+     * 隠れていた場所が後で出てきたときは `recompute_and_expose` が露出分を
+     * dirty に足し直すので、描き落としにはならない (契約 G4)。 */
+    let authoritative = !st.windows[idx].vis_capped && !st.windows[idx].vis.is_empty();
     let mut new_dirty = RectSet::EMPTY;
     let mut d = 0;
     while d < dirty.len {
+        if authoritative && !cand_has(&cand, ncand, d) {
+            d += 1;
+            continue;
+        }
         let mut region = RectSet::EMPTY;
         region.push(dirty.rects[d]);
         let mut m = 0;
@@ -333,6 +348,16 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
 /*  OP_WAIT (契約 T3 / T8 の X3) — WM の全周期を回して眠る            */
 /* ================================================================ */
 fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
+    /* 入場時の状態を分類する (G3 追跡)。 */
+    if owner_deliverable(st, owner) {
+        wm::dbg_inc(wm::DBG_WAIT_DELIVERABLE);
+    } else if owner_dirty_any(st, owner) {
+        wm::dbg_inc(wm::DBG_WAIT_STUCK);
+    } else {
+        wm::dbg_inc(wm::DBG_WAIT_NO_DIRTY);
+    }
+    let mut slept = false;
+
     let start = unsafe { (os32api::api().get_tick)() };
     let timeout = arg; /* ticks。0 = 期限なし */
 
@@ -355,55 +380,58 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
             st.abort_seen = false;
             break;
         }
-        /* `wake_ready` を見る前に、`emit_paints_win` と同じ可視領域の入れ替えを
-         * 回す (下の `page_vis_owner`)。これが無いと起床判定と配送判定が
-         * 食い違ったまま噛み合わない — 詳細はその関数のコメント。 */
-        page_vis_owner(st, owner);
         if wake_ready(st, owner, slot_no) {
+            if slept {
+                if ring::pending(st, slot_no) > 0 {
+                    wm::dbg_inc(wm::DBG_WOKE_RING);
+                } else {
+                    wm::dbg_inc(wm::DBG_WOKE_PAINT);
+                }
+            }
             break;
         }
         let now = st.now;
         if let Some(d) = deadline {
             /* now >= d (ラップ安全) */
             if now.wrapping_sub(d) < 0x8000_0000 {
+                if slept {
+                    wm::dbg_inc(wm::DBG_WOKE_DEADLINE);
+                }
                 break;
             }
         }
         /* 待ちは sys_halt だけ (get_tick スピン禁止)。PIT 10ms で必ず起きる。 */
+        slept = true;
         unsafe { (os32api::api().sys_halt)() };
     }
     ring::pending(st, slot_no) as i32
 }
 
-/// 打ち切られた可視領域を持つ窓の `vis` を、`OP_WAIT` の各周でも作り直す。
-///
-/// `emit_paints_win` は先頭で `visible::page_vis` を呼び、可視矩形が 16 を超えて
-/// 打ち切られた窓では**周ごとに残す断片を入れ替えてから**配送を判定する
-/// (契約 G4「超過分は次の周」)。一方 `wake_ready` → `has_deliverable_paint` は
-/// 保存済みの `vis` をそのまま見る。つまり打ち切られている窓では、
-///
-///   - `vis` は真の可視領域の**部分集合**でしかなく、
-///   - その断片から外れた場所の `dirty` は「配送できない」と判定され `OP_WAIT`
-///     は起きず、
-///   - 断片を入れ替える `page_vis` は `OP_POLL` の中でしか回らない
-///
-/// ので、「起こされないと入れ替わらない / 入れ替わらないと起きられない」で
-/// 止まる。打鍵のように後続イベントが無い入力では、次に何か (マウス移動など)
-/// が来てアプリを起こすまで `Paint` が出ない — v1.2 G3 で実測した症状そのもの
-/// (キーを押しても画面が変わらず、マウスを 2px 動かした瞬間に出る。その周で
-/// 初めて `page_vis` が回るため)。
-///
-/// ここで同じ入れ替えを回してから `wake_ready` を見れば、起床判定と配送判定が
-/// 同じ可視領域を見る。`page_vis` は打ち切られていて `dirty` がある窓でしか
-/// 動かないので、ふつうの窓では何もしない。
-fn page_vis_owner(st: &mut GuiState, owner: i32) {
+/// この owner の窓に dirty が 1 つでもあるか (G3 追跡)。
+fn owner_dirty_any(st: &GuiState, owner: i32) -> bool {
     let mut idx = 0;
     while idx < GUI_MAX_WINDOWS {
-        if st.windows[idx].used && st.windows[idx].owner == owner {
-            visible::page_vis(st, idx);
+        let w = &st.windows[idx];
+        if w.used && w.owner == owner && !w.dirty.is_empty() {
+            return true;
         }
         idx += 1;
     }
+    false
+}
+
+/// この owner の窓に配送できる Paint があるか (G3 追跡。`wake_ready` の
+/// Paint 節だけを取り出したもの)。
+fn owner_deliverable(st: &GuiState, owner: i32) -> bool {
+    let mut idx = 0;
+    while idx < GUI_MAX_WINDOWS {
+        let w = &st.windows[idx];
+        if w.used && w.owner == owner && damage::has_deliverable_paint(w) {
+            return true;
+        }
+        idx += 1;
+    }
+    false
 }
 
 /// `OP_WAIT` が戻る条件 (契約 T3): 未読がある、または**配送できる**導出型がある。
@@ -471,6 +499,7 @@ fn op_commit(st: &mut GuiState, owner: i32, _slot_no: usize, arg: u32) -> i32 {
     if !any {
         return 0;
     }
+    wm::dbg_set(wm::DBG_TICK_PRESENT, st.now);
     /* アプリが描いた領域にカーソルが掛かっていれば、下地は既に潰れている。
      * 退避を捨てて退避し直し、同じ commit で一緒に出す (X2 の許される描画)。 */
     /* WM 自身の最前面物 (モーダル / FEP の候補窓) が潰されていたら描き直す。 */
@@ -608,6 +637,8 @@ fn op_session_request(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) 
 /*  OP_INVALIDATE (契約 G4) — dirty に足すだけ                        */
 /* ================================================================ */
 fn op_invalidate(st: &mut GuiState, owner: i32, slot_no: usize, _arg: u32) -> i32 {
+    wm::dbg_inc(wm::DBG_INVALIDATE);
+    wm::dbg_set(wm::DBG_TICK_INVALIDATE, st.now);
     let req: reqs::GuiReqInvalidate = unsafe { slot::read_req(st, slot_no) };
     let idx = match owned_index(st, owner, req.window) {
         Ok(i) => i,
