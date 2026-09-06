@@ -121,8 +121,9 @@ Quit は control event なのでリング満杯で捨てない。WM は slot/own
 で、Yes で初めて `SWITCH_CUI` を立てる。1 キーで無言のまま CUI へ落ちる経路は作らない —
 CUI へ戻ると GUI の状態 (窓・アプリ) は設計上維持されないので危険。
 
-v1.1 の **ESC 即時切替と上部の `ESC:CUI F1..F5` バーはデバッグ用として v1.2 の開発中だけ残し、
-v1.2 完成時 (G5) に撤去する** (W3 の完了条件)。SHUTDOWN も同じく確認ダイアログを経る。
+v1.1 の **ESC 即時切替と上部の `ESC:CUI F1..F5` バーは G5 で撤去済み** (2026-09-07、W3 §4.1)。
+`gshell` の `DEBUG_SHORTCUTS` (既定 `false`) の下にデバッグ設備としてコードだけ残っており、
+出荷形では ESC も F1〜F5 も効かず、上部バーも描かれない。SHUTDOWN も同じく確認ダイアログを経る。
 
 SessionAction 実行は current app が終了して top-level へ戻ってから。
 

@@ -14,6 +14,13 @@ np2sysp getmpos で位置を取るので dx/dy は効かない。POLICY_DEBUG §
 出力: 各手順の要点 1 行と、スクリーンショット (--out、既定 build/out/gui_gate/) の PNG。
 判定は人間 (PM) がする。数値 (wab_relay / scrn_ymax / fault_generation) だけ自動で照合する。
 v1.2 の台本 (Start / taskbar / dialog / filer / session) は W3〜C5 の結合時にここへ足す。
+
+CUI へ戻る経路について (G5 で ESC の即時切替と上部バーを撤去した。契約 S6 / 票 W3 §4.1):
+  どの台本も Start → "CUI mode" → 確認ダイアログ Yes で戻る (`leave_gshell`)。この経路は
+  `/etc/system.cfg` の `GUI=0` を**永続化する**が、台本は必ず CUI (rshell) から始まり、
+  GUI へは `os32gui` コマンドで入る (`enter_gshell`) ので支障は無い。`os32gui` は cfg の
+  値に関わらず GUI へ入り、次回の自動起動だけが CUI になる。GUI 自動起動へ戻したい
+  ときは、ゲート後に CUI で `os32gui` を使うか cfg の `GUI=1` を書き戻すこと。
 """
 import argparse
 import os
@@ -124,16 +131,54 @@ class Shots:
         return out
 
 
+# ---------------------------------------------------------------------------
+#  v1.2 の座標 (W3 が報告した値。ax/ay 換算は Mouse が行う)
+#  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
+#  Start menu 行 r: (82, H-107+18r) = Programs / File Manager / Run... / CUI mode / Shut Down
+#  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
+# ---------------------------------------------------------------------------
+def tb(h):
+    return h - 12
+
+
+def start_row(h, r):
+    return (82, h - 107 + 18 * r)
+
+
 def enter_gshell():
     key(text="os32gui")
     key(seq="RETURN")
     time.sleep(6)
 
 
-def leave_gshell(mouse):
-    """デバッグ用の ESC (v1.2 完成で撤去予定) で CUI へ戻り、rshell を復旧する。"""
-    key(seq="ESC")
+def run_dialog(mouse, path):
+    """Start → "Run..." (行 2) にパスを打って RETURN。アプリが立ち上がるまで待つ。"""
+    mouse.click(30, tb(mouse.h))
+    mouse.click(*start_row(mouse.h, 2))
+    time.sleep(1.5)
+    key(text=path)
+    time.sleep(1)
+    key(seq="RETURN")
     time.sleep(5)
+
+
+def leave_gshell(mouse, shots=None, shot_name=None):
+    """Start → "CUI mode" (行 3) → 確認ダイアログ Yes で CUI へ戻り、rshell を復旧する。
+
+    G5 で ESC の即時切替は製品から撤去したので、**これが唯一の CUI 復帰経路**
+    (契約 S6 / 票 W3 §4.1〜4.2)。`shots` と `shot_name` を渡すと、Yes を押す前の
+    確認ダイアログを撮る。
+
+    この経路は `/etc/system.cfg` の `GUI=0` を永続化する。台本は CUI から始めて
+    `os32gui` で GUI へ入る前提なので、それで構わない (モジュール先頭の注記を参照)。
+    """
+    mouse.click(30, tb(mouse.h))
+    mouse.click(*start_row(mouse.h, 3))
+    time.sleep(1.5)
+    if shots is not None and shot_name:
+        shots.take(shot_name)
+    mouse.click(410, mouse.h // 2 + 11)
+    time.sleep(6)
     mouse.off()
     key(text="rshell")
     key(seq="RETURN")
@@ -147,12 +192,11 @@ def leave_gshell(mouse):
 def scenario_v11(h, shots):
     """v1.1 G2 相当: gui_demo の窓 2 枚でドラッグ / 重なり / クリック配送。"""
     m = Mouse(h)
-    print("[v11] enter gshell + gui_demo (F1)")
+    print("[v11] enter gshell + gui_demo (Start -> Run...)")
     enter_gshell()
     st = status()
     print("  status %s" % st)
-    key(seq="F1")
-    time.sleep(4)
+    run_dialog(m, "/usr/bin/gui_demo.bin")
     shots.take("v11_1_two_windows")
     print("[v11] drag Widgets title (100,58) -> (300,208) with XOR frame")
     m.move(100, 58)
@@ -177,27 +221,15 @@ def scenario_v11(h, shots):
     print("[v11] bottom edge (20,%d)" % (h - 20))
     m.move(20, h - 20)
     shots.take("v11_7_bottom_edge")
-    print("[v11] ESC closes demo, then CUI")
+    # ESC は gui_demo 自身の終了キー (アプリが処理する)。gshell は ESC を横取り
+    # しなくなった (G5) ので、デスクトップへ戻った後は Start 経由で CUI へ抜ける。
+    print("[v11] ESC closes demo (app's own quit key), then CUI via Start")
     key(seq="ESC")
     time.sleep(2)
     ok = leave_gshell(m)
     st2 = status()
     print("  status %s" % st2)
     return ok and st2.get("wab_relay") == 0
-
-
-# ---------------------------------------------------------------------------
-#  v1.2 の台本 (W3 が報告した座標。ax/ay 換算は Mouse が行う)
-#  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
-#  Start menu 行 r: (82, H-107+18r) = Programs / File Manager / Run... / CUI mode / Shut Down
-#  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
-# ---------------------------------------------------------------------------
-def tb(h):
-    return h - 12
-
-
-def start_row(h, r):
-    return (82, h - 107 + 18 * r)
 
 
 def scenario_v12_g1(h, shots):
@@ -223,13 +255,7 @@ def scenario_v12_g1(h, shots):
     key(seq="ESC")
     time.sleep(0.4)
     print("[g1] Run... -> /usr/bin/gui_demo.bin")
-    m.click(30, tb(h))
-    m.click(*start_row(h, 2))
-    time.sleep(1.5)
-    key(text="/usr/bin/gui_demo.bin")
-    time.sleep(1)
-    key(seq="RETURN")
-    time.sleep(5)
+    run_dialog(m, "/usr/bin/gui_demo.bin")
     shots.take("g1_5_demo_with_taskbar")
     print("[g1] taskbar window button #1 -> raise Help")
     m.click(210, tb(h))
@@ -240,7 +266,7 @@ def scenario_v12_g1(h, shots):
     while time.time() - t0 < 65:
         time.sleep(5)
     shots.take("g1_8_clock_b")
-    print("[g1] quit demo (ESC) and back to CUI")
+    print("[g1] quit demo (ESC = app's own quit key) and back to CUI via Start")
     key(seq="ESC")
     time.sleep(2)
     return leave_gshell(m)
@@ -252,39 +278,18 @@ def scenario_v12_g4(h, shots, do_halt=False):
     m = Mouse(h)
     print("[g4] gshell + gui_demo via Run...")
     enter_gshell()
-    m.click(30, tb(h))
-    m.click(*start_row(h, 2))
-    time.sleep(1.5)
-    key(text="/usr/bin/gui_demo.bin")
-    key(seq="RETURN")
-    time.sleep(5)
+    run_dialog(m, "/usr/bin/gui_demo.bin")
     shots.take("g4_1_demo")
     print("[g4] Run... again while demo runs -> v12_api_test replaces it")
-    m.click(30, tb(h))
-    m.click(*start_row(h, 2))
-    time.sleep(1.5)
-    key(text="/usr/bin/v12_api_test.bin")
-    key(seq="RETURN")
-    time.sleep(6)
+    run_dialog(m, "/usr/bin/v12_api_test.bin")
+    time.sleep(1)
     shots.take("g4_2_replaced")
     print("[g4] app-initiated launch (key 4 = session_launch gui_demo)")
     key(text="4")
     time.sleep(6)
     shots.take("g4_3_app_launch")
     print("[g4] CUI mode -> confirmation -> Yes")
-    m.click(30, tb(h))
-    m.click(*start_row(h, 3))
-    time.sleep(1.5)
-    shots.take("g4_4_cui_confirm")
-    m.click(410, h // 2 + 11)
-    time.sleep(6)
-    m.off()
-    key(text="rshell")
-    key(seq="RETURN")
-    time.sleep(2)
-    out = _cmd_raw("ver", 20)
-    ok = "OS32" in out
-    print("  CUI back: %s" % ("ok" if ok else "NG"))
+    ok = leave_gshell(m, shots, "g4_4_cui_confirm")
     cfg = _cmd_raw("cat /etc/system.cfg", 20)
     print("  system.cfg: %s" % " | ".join(l for l in cfg.splitlines() if "GUI" in l))
     if do_halt:

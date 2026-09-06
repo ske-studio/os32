@@ -24,7 +24,8 @@ use os32api::gui::proto::{GuiRect16, GUI_EV_CONFIGURE, GUI_EV_FOCUS};
 ///
 /// - [`Ctx::Pump`]       … X4。int 0x80 の入口 (K2)。入力のリング追記とカーソル移動だけ。
 /// - [`Ctx::Wait`]       … X3。アプリの `OP_WAIT` の中。WM の状態機械を全部進める。
-/// - [`Ctx::Standalone`] … X3。gshell 単独ループ。Wait に加えて ESC / F1 を横取りする。
+/// - [`Ctx::Standalone`] … X3。gshell 単独ループ。Wait に加えて
+///   [`standalone_key`] (デバッグ専用の ESC / F1〜F5) を横取りする。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Ctx {
     Pump,
@@ -48,8 +49,9 @@ const MOD_CTRL: u32 = 0x10;
 /* 修飾キーのスキャンコード (KEY_SHIFT..KEY_CTRL)。Key として配送しない。 */
 const SC_SHIFT: u8 = 0x70;
 const SC_CTRL: u8 = 0x74;
-/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1〜F5)。
- * F1〜F4 = `crate::LAUNCH_APPS` の起動、F5 = ファイル選択ダイアログ。 */
+/* WM が単独時に横取りするキー (KEY_ESC / KEY_F1〜F5)。**デバッグ専用**
+ * (`crate::DEBUG_SHORTCUTS`、既定 false)。F1〜F4 = `crate::LAUNCH_APPS` の起動、
+ * F5 = ファイル選択ダイアログ。製品ではどれも横取りしない。 */
 const SC_ESC: u8 = 0x00;
 const SC_F1: u8 = 0x62;
 const SC_F4: u8 = 0x65;
@@ -163,8 +165,9 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
 
 /// gshell 単独 (窓が 1 枚も無い) ときに WM が横取りするキー (make のみ)。
 ///
-/// **v1.2 では開発中のデバッグ用** ([`crate::DEBUG_SHORTCUTS`])。G5 で撤去され、
-/// CUI へ戻る経路は Start → CUI mode → 確認ダイアログだけになる (契約 S6)。
+/// **デバッグ専用** ([`crate::DEBUG_SHORTCUTS`])。G5 (v1.2 完成) で既定 `false`
+/// に倒したので、製品ではこの関数は入口で戻る = ESC も F1〜F5 も効かない。
+/// CUI へ戻る経路は Start → "CUI mode" → 確認ダイアログだけ (契約 S6)。
 pub fn standalone_key(st: &mut GuiState, scan: u8) {
     if !crate::DEBUG_SHORTCUTS {
         return;
@@ -327,8 +330,10 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             continue;
         }
 
-        /* WM 単独時 (フォーカス窓なし) の横取り: ESC=終了 / F1=デモ / F2=ファイル選択。
-         * アプリの OP_WAIT (Ctx::Wait) では横取りしない — ESC はアプリのもの。 */
+        /* WM 単独時 (フォーカス窓なし) の横取り。**デバッグ専用**で、製品
+         * (`DEBUG_SHORTCUTS == false`) では `standalone_key` が即戻るため何も
+         * 起きない。アプリの OP_WAIT (Ctx::Wait) では元から横取りしない
+         * — ESC はアプリのもの。メニュー / モーダルの ESC はここより上で処理済み。 */
         if ctx == Ctx::Standalone && st.front_index().is_none() {
             if down {
                 standalone_key(st, scan);

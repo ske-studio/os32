@@ -72,11 +72,24 @@ Run... は W4 の Input dialog を使い、絶対パスを入力して `LAUNCH` 
 CUI mode / Shut Down は **WM 内蔵の確認ダイアログ (Yes / No) を経てから** SessionAction を立てる
 (契約 S6)。1 キーで無言のまま CUI へ落ちる経路は作らない。
 
-### 4.1 デバッグ用の残置と撤去
+### 4.1 デバッグ用の残置と撤去 — **G5 で撤去済み (2026-09-07)**
 
 v1.1 の ESC 即時切替と上部バー (`OS32 GUI shell ESC:CUI F1..F5`) は開発中のデバッグ用として残し、
-**G5 (v1.2 完成) で撤去する** (ユーザー決定 2026-09-06)。撤去後、CUI へ戻る経路は Start → 確認 →
-SessionAction だけになる。F1〜F5 のランチャは Start → Programs / Run... で置き換わる。
+**G5 (v1.2 完成) で撤去する** (ユーザー決定 2026-09-06) — 完了。`lib.rs` の
+`DEBUG_SHORTCUTS` を `false` に倒し、出荷形からは次の 3 つが消えた:
+
+- ESC の即時 CUI 切替 (`input::standalone_key`)
+- 上部の手引きバー (`desktop::draw_hint` / `hint_rect` は空矩形を返し、そこは素の背景)
+- F1〜F5 のランチャ (`LAUNCH_APPS` / F5 のファイル選択ダイアログ)
+
+CUI へ戻る経路は Start → "CUI mode" → 確認ダイアログ → SessionAction (`GUI=0` を永続化) だけ。
+F1〜F5 のランチャは Start → Programs / Run... で置き換わった。
+
+コード本体は `DEBUG_SHORTCUTS` の下に**デバッグ設備として残してある** (実機で Start が
+操作できないほど壊れたときの脱出路)。`true` に倒すのは手元の調査中だけで、コミットしない。
+手引きバーは元から作業領域 (`wm::work_area` = 画面 − taskbar) を取っていないので、撤去で
+空く座標や再配置は無い。ゲート台本 `tools/gui_gate.py` も ESC / F1〜F5 を使わなくなった
+(`leave_gshell` が Start → CUI mode → Yes を踏む)。
 
 ### 4.2 右ボタン
 
@@ -203,7 +216,7 @@ X4 で禁止:
 
 - `/api/mouse` で Start を開閉できる。右クリックでデスクトップ menu が出る。
 - CUI mode / Shut Down は確認ダイアログの Yes を経ないと実行されない。
-- (G5 で) ESC 即時切替と上部バーが撤去され、`/api/key` の ESC で CUI へ落ちない。
+- (G5 で) ESC 即時切替と上部バーが撤去され、`/api/key` の ESC で CUI へ落ちない。**済 (§4.1)**
 - taskbar window button で 2 窓の focus/raise が切替わる。
 - 9801 400-line / PEGC,Cirrus 480-line で work area が正しい。
 - clock 更新の present は時計矩形だけ。

@@ -1,8 +1,14 @@
-//! desktop.rs — デスクトップ (背景と操作の手引き)。v1.2 でタスクバー。
+//! desktop.rs — デスクトップ (背景)。v1.2 でタスクバー。
 //!
 //! `wm::composite_rect` から「どのウィンドウにも覆われていない矩形」ごとに
-//! 呼ばれる。塗るのは背景色 (G6 の `DESKTOP`) だけで、文字は**掛かるウィンドウが
-//! 無いときにだけ**描く (kcg にはクリップが無く、窓の上へはみ出せないため)。
+//! 呼ばれる。塗るのは背景色 (G6 の `DESKTOP`) だけ。
+//!
+//! 上部の手引きバー (`OS32 GUI shell ESC:CUI F1..F5`) は **G5 で製品から撤去**
+//! した — `crate::DEBUG_SHORTCUTS` が `false` の間 [`hint_rect`] は空矩形を返し、
+//! [`draw_hint`] は何も描かないので、そこは素の背景になる。バーは作業領域
+//! (`wm::work_area` = 画面 − タスクバー) を取っていないので、撤去で空く座標は無い。
+//! デバッグで `true` に戻したときだけ、文字は**掛かるウィンドウが無いときに
+//! だけ**描く (kcg にはクリップが無く、窓の上へはみ出せないため)。
 //!
 //! 14 色リース中 (契約 G8) はシステム色が使えないので、**不可侵の 2 色
 //! (`TEXT` / `WINDOW`) の市松**で塗る。1 画素単位の市松は面積が広すぎて
@@ -23,7 +29,7 @@ const HINT_H: i32 = 16;
 /// 市松の升目 (画素)。
 const CHECK: i32 = 8;
 
-/// 単独起動時の手引き (UTF-8, NUL 終端)。全角は 16px 幅。
+/// 単独起動時の手引き (UTF-8, NUL 終端)。デバッグ専用 (`DEBUG_SHORTCUTS`)。
 static HINT: &[u8] =
     b"OS32 GUI shell  ESC:CUI F1:demo F2:bench F3:busy F4:lease F5:open\0";
 
@@ -63,7 +69,8 @@ pub fn fill(st: &GuiState, r: Rect) {
     }
 }
 
-/// 手引きの占有矩形。デバッグ用の残置を切ったら空 (契約 S6 / W3 §4.1)。
+/// 手引きの占有矩形。製品 (`DEBUG_SHORTCUTS == false`) では空 (契約 S6 / W3 §4.1)。
+/// 空矩形は `intersects` が常に偽なので、`composite_rect` は `draw_hint` を呼ばない。
 #[inline]
 pub fn hint_rect() -> Rect {
     if !crate::DEBUG_SHORTCUTS {
@@ -72,7 +79,7 @@ pub fn hint_rect() -> Rect {
     Rect::new(HINT_X, HINT_Y, HINT_W, HINT_H)
 }
 
-/// 手引きの文字を描く。掛かるウィンドウが 1 枚でもあれば描かない
+/// 手引きの文字を描く (デバッグ専用)。掛かるウィンドウが 1 枚でもあれば描かない
 /// (kcg_draw_utf8 にクリップが無いので、はみ出して窓を壊さないための保険)。
 pub fn draw_hint(st: &GuiState) {
     if !crate::DEBUG_SHORTCUTS {
