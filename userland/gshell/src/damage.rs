@@ -4,7 +4,7 @@
 //! 既存 dirty と重なる/隣接するものを結合する (既存 `gfx_add_dirty_rect` と同じ規則、
 //! 上限 8/ウィンドウ)。上限を超える場合は外接矩形へ潰す (過剰申告は安全側)。
 
-use crate::wm::{Rect, RectSet, Win, DAMAGE_SNAP, MAX_DMG};
+use crate::wm::{Rect, RectSet, Win, DAMAGE_SNAP, MAX_DMG, MAX_VIS};
 
 /// 32px グリッドへ拡張する。
 fn snap32(r: Rect) -> Rect {
@@ -98,22 +98,46 @@ pub fn clip_to_vis(win: &Win, dirty_rect: Rect) -> RectSet {
     out
 }
 
-/// dirty ∩ visible が空でない (= 配送できる Paint がある) か。契約 T3 の
-/// `OP_WAIT` 起床条件。完全に隠れた窓 (vis 空) では常に false。
-pub fn has_deliverable_paint(win: &Win) -> bool {
-    if win.vis.is_empty() || win.dirty.is_empty() {
-        return false;
+/// dirty ∩ 可視領域 = **配送できる `Paint` の候補**。`(添字 = 元の dirty,
+/// 断片)` を最大 `MAX_VIS` 件。
+///
+/// **起床判定 (`OP_WAIT`) も配送 (`OP_POLL`) も必ずこれを通す。** 2 か所で
+/// 別々に書くと必ず食い違い、「起こされないと配れない / 配れないと起きられない」
+/// で止まる (v1.2 G3 で実測: 打鍵の結果がマウスを動かすまで画面に出ない)。
+pub fn deliverable_cand(win: &Win) -> ([(usize, Rect); MAX_VIS], usize) {
+    let mut cand = [(0usize, Rect::EMPTY); MAX_VIS];
+    let mut n = 0;
+    if win.dirty.is_empty() || win.vis.is_empty() {
+        return (cand, n);
     }
     let mut i = 0;
-    while i < win.dirty.len {
+    while i < win.dirty.len && n < MAX_VIS {
+        let pieces = clip_to_vis(win, win.dirty.rects[i]);
         let mut k = 0;
-        while k < win.vis.len {
-            if win.dirty.rects[i].intersects(&win.vis.rects[k]) {
-                return true;
-            }
+        while k < pieces.len && n < MAX_VIS {
+            cand[n] = (i, pieces.rects[k]);
+            n += 1;
             k += 1;
         }
         i += 1;
     }
-    false
+    (cand, n)
+}
+
+/// 配送できる `Paint` があるか (契約 T3 の `OP_WAIT` 起床条件)。
+/// 完全に隠れた窓 (可視領域が空) では常に false — 露出で初めて配送対象になる
+/// (契約 G4)。
+pub fn has_deliverable_paint(win: &Win) -> bool {
+    if win.dirty.is_empty() {
+        return false;
+    }
+    /* 可視領域が打ち切られている窓 (契約 G4「超過分は次の周」) の `vis` は
+     * 真の可視領域の**部分集合**でしかなく、断片を入れ替えるのは `OP_POLL` の
+     * 中の `page_vis` だけ。ここで部分集合だけを見て「配送できない」と決めると、
+     * 入れ替えの機会そのものが来ない。dirty があるなら起こして `OP_POLL` に
+     * 判断させる (そこで配れなければ `emit_paints_win` が dirty を掃除する)。 */
+    if win.vis_capped {
+        return true;
+    }
+    deliverable_cand(win).1 > 0
 }
