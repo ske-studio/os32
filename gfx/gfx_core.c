@@ -30,10 +30,11 @@ GfxCounters gfx_counters = { 0, 0, 0, 0 };
 
 const GfxBackend *g_backend = &gfx_backend_pc98;
 
-/* probe 順のバックエンド一覧。実機に近い順に前から並べ、最初に probe() が
- * 1 を返したものを使う (Cirrus → PEGC → 9801)。H3 で Cirrus を先頭に足す。
+/* probe 順のバックエンド一覧。速い/高機能な順に前から並べ、最初に probe() が
+ * 1 を返したものを使う (Cirrus → PEGC → 9801)。
  * 9801 の probe は常に 1 なので、末尾が必ず受け皿になる。 */
 static const GfxBackend *const g_backend_list[] = {
+    &gfx_backend_cirrus, /* Cirrus GD54xx アクセラレータ (H3)。ID 5Bh のみ */
     &gfx_backend_pegc,   /* 9821 PEGC 256 色 (H2)。9801 では probe が 0 */
     &gfx_backend_pc98    /* 9801 標準グラフィック (H1)。最後の受け皿 */
 };
@@ -44,7 +45,9 @@ static int g_backend_pref = GFX_PREF_AUTO;
 
 void gfx_set_backend_pref(int pref)
 {
-    if (pref != GFX_PREF_PC98 && pref != GFX_PREF_PEGC) pref = GFX_PREF_AUTO;
+    if (pref != GFX_PREF_PC98 && pref != GFX_PREF_PEGC &&
+        pref != GFX_PREF_CIRRUS)
+        pref = GFX_PREF_AUTO;
     g_backend_pref = pref;
 }
 
@@ -66,11 +69,15 @@ static void gfx_select_backend(void)
         g_backend = &gfx_backend_pc98;
         return;
     }
-    if (g_backend_pref == GFX_PREF_PEGC) {
+    if (g_backend_pref == GFX_PREF_PEGC ||
+        g_backend_pref == GFX_PREF_CIRRUS) {
+        const GfxBackend *want = (g_backend_pref == GFX_PREF_CIRRUS)
+                                     ? &gfx_backend_cirrus
+                                     : &gfx_backend_pegc;
         for (i = 0; i < n; i++) {
             /* weak 宣言なので未リンクなら要素が 0 (→ 9801 へ落ちる) */
             if (!g_backend_list[i]) continue;
-            if (g_backend_list[i] != &gfx_backend_pegc) continue;
+            if (g_backend_list[i] != want) continue;
             if (g_backend_list[i]->probe && g_backend_list[i]->probe()) {
                 g_backend = g_backend_list[i];
                 return;
