@@ -56,7 +56,8 @@ After any kernel change, always run `make kernel` and verify zero errors before 
 curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"  # run a shell command over serial
 curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ls"
 curl -X POST http://127.0.0.1:8025/api/key -d "seq=SPACE"       # inject a key event
-curl -X POST http://127.0.0.1:8025/api/key -d "seq=SHIFT+SPACE" # FEP on/off toggle
+curl -X POST http://127.0.0.1:8025/api/key --data-urlencode "seq=SHIFT+SPACE" # FEP on/off (+ は必ず URL エンコード)
+curl -X POST http://127.0.0.1:8025/api/mouse -d "ax=32818&ay=32851&btn=1&hold=80" # クリック: ax=px*65535/639, ay=py*65535/(H-1) (OS32 はシームレス絶対座標)。btn=1/0 でドラッグ、abs=off で人間に返す
 curl      http://127.0.0.1:8025/api/tvram                       # screen contents as UTF-8 text
 curl      http://127.0.0.1:8025/api/screenshot                  # capture the emulator window
 ```
@@ -195,8 +196,10 @@ wrappers/struct/init are all generated from it. Never hand-edit the generated fi
    python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
    git diff --stat   # only the intended additions should appear
    ```
-   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `kapi/kapi_generated.c`,
+   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `sdk/include/os32/os32_kapi_slots.h`
+   (`KAPI_SLOT_*` = int 0x80 のスロット番号、型非依存), `kapi/kapi_generated.c`,
    `exec/exec_kapi_init.inc`, and `sdk/rust/os32api/src/kapi_generated.rs`.
+   GitHub Actions (`.github/workflows/check.yml`) が生成物と kapi.json の一致を検査する。
 4. Implement the target function in the kernel (or give the entry a `target` /
    inline `body` in the JSON).
 5. Update `docs/KAPI_SPEC.md`, and bump the required version in `build/app.conf`

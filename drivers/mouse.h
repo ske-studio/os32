@@ -83,7 +83,8 @@ int  bus_mouse_init(void);
 /* シームレスマウス: 初期化 */
 int  seamless_mouse_init(void);
 
-/* シームレスマウス: 絶対座標取得 */
+/* シームレスマウス: 絶対座標取得 (0..32767 の正規化値。画面座標への換算は
+ * mouse.c が現在の移動範囲で行う) */
 int  seamless_mouse_poll(i16 *x, i16 *y);
 
 /* ボタン状態を8255ポートAから直接読取 (両モード共用) */

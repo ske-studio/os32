@@ -372,9 +372,20 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             forward_pointer(st, mx, my, btn);
         }
     } else {
-        /* ポンプ (X4): 状態機械を進めず、入力の追記とカーソル移動だけ。 */
+        /* ポンプ (X4): 状態機械を進めず、入力の追記とカーソル移動だけ。
+         *
+         * ボタンのエッジは **WM が扱うものなら prev_buttons を進めない**
+         * (モーダルと同じ扱い、レビュー #4 ④ の一般形)。進めてしまうと X4 が
+         * 先に見たエッジは次の X3 に立たず、ドラッグ中の離しは永久に来ず
+         * (枠が残ったまま次の押下まで動き続ける)、タイトルバー / 閉じる /
+         * 背面窓への押下はアプリのクライアントへ誤配される (2026-09-06 に
+         * /api/mouse で実測: 離しが失われ、× を押すと前面化だけ起きた)。
+         * アプリの領分 (前面窓のクライアント / 枠) のエッジだけをここで配る。 */
         if moved {
             cursor::move_to(st, mx, my);
+        }
+        if (down_edge || up_edge) && wm_owns_edge(st, mx, my, down_edge) {
+            return; /* prev_buttons は据え置き → 次の X3 がエッジを拾う */
         }
         if down_edge {
             forward_button(st, mx, my, btn, true);
@@ -385,6 +396,35 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         }
     }
     st.prev_buttons = btn;
+}
+
+/// このボタンエッジは WM の状態機械 (X3) が処理すべきものか。
+/// - ドラッグ中: 押下も離しも WM (離しで drop する)
+/// - 押下: 窓の外 (デスクトップ) / 背面の窓 (前面化 + Focus) / 閉じるボタン /
+///   タイトルバー (ドラッグ開始) は WM。前面窓のクライアント・枠だけがアプリ
+/// wm_button_down と同じ判定順で見る (ずれると二重配送か取りこぼしになる)。
+fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool) -> bool {
+    if st.drag_index >= 0 {
+        return true;
+    }
+    if !down_edge {
+        return false; /* ドラッグ外の離しはアプリの領分 */
+    }
+    let idx = match st.hit_window(mx, my) {
+        Some(i) => i,
+        None => return true,
+    };
+    if st.front_index() != Some(idx) {
+        return true;
+    }
+    let w = st.windows[idx];
+    if w.has_close() && w.close_rect().contains(mx, my) {
+        return true;
+    }
+    if w.movable() && w.titlebar_rect().contains(mx, my) {
+        return true;
+    }
+    false
 }
 
 /* ---- WM 状態機械 (X3 のみ) ---- */

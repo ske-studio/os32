@@ -1,0 +1,49 @@
+# OS32 静的ゲート (2026-09-06)
+#
+# クロスコンパイラ (i386-elf-gcc + newlib nano) と NP21/W が要る本体ビルドと
+# 実機検証は WSL 側 (os32-cycle) で行う。ここではツールチェーン無しで回せる
+# 検査だけを自動ゲートにする:
+#   - KAPI 版番号の 4 箇所一致 (tools/check_kapi_version.py)
+#   - kapi.json からの生成物がコミット済みのものと一致 ([ABI1] 生成物を手で触らない)
+#   - プロジェクト制約 (docs/CONSTRAINTS.md ⇄ CLAUDE.md) のずれ
+#   - libos32gui.shlib の番号表 (tools/mkshlib.py --check)
+#   - ne2000 リングのホストテスト (gcc でビルドして実行)
+# check-manifests は make all の成果物を見るので対象外 (実機側の make check で回す)。
+name: check
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: KAPI version consistency
+        run: python3 tools/check_kapi_version.py
+
+      - name: Generated KAPI files are in sync with sdk/kapi.json
+        run: |
+          python3 sdk/gen_kapi.py
+          python3 sdk/kapi_rust_gen.py
+          git diff --exit-code -- sdk/include/os32/os32_kapi_generated.h \
+                                 sdk/include/os32/os32_kapi_slots.h \
+                                 kapi/kapi_generated.c \
+                                 exec/exec_kapi_init.inc \
+                                 sdk/rust/os32api/src/kapi_generated.rs
+
+      - name: Project constraints (CONSTRAINTS.md vs CLAUDE.md)
+        run: python3 tools/check_constraints.py
+
+      - name: Shared library jump table
+        run: python3 tools/mkshlib.py --check
+
+      - name: ne2000 ring host test
+        run: make check-ne2000-ring
