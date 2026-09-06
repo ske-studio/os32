@@ -17,7 +17,7 @@
 //! (`kbd_buf`) にカーネルが積まないので (K2)、打鍵の入口は raw 1 本だけ。
 
 use crate::wm::{GuiState, Rect};
-use crate::{cursor, fep, modal, ring, slot, visible, wm};
+use crate::{cursor, fep, modal, ring, slot, startmenu, taskbar, visible, wm};
 use os32api::gui::proto::{GuiRect16, GUI_EV_CONFIGURE, GUI_EV_FOCUS};
 
 /// 入力取り込みの実行文脈 (契約 T8)。
@@ -58,7 +58,10 @@ const SC_F5: u8 = 0x66;
 const SC_SPACE: u8 = 0x34;
 const SC_STOP: u8 = 0x60; /* STOP キー (kbd.h KEY_STOP)。CTRL+STOP = 強制脱出 (契約 T6) */
 
+/* drivers/mouse.h の MOUSE_BTN_*。`GuiEvtButton.button` にもこの値を載せる
+ * (契約 D4 の「前面窓のクライアントへ `Button{button=2}`」)。 */
 const MOUSE_BTN_LEFT: u8 = 0x01;
+const MOUSE_BTN_RIGHT: u8 = 0x02;
 
 /// mouse_poll(*mut u8) が書き込む構造体 (os32_kapi_shared.h MouseInfo と同一)。
 #[repr(C)]
@@ -159,7 +162,13 @@ pub fn capture(st: &mut GuiState, ctx: Ctx) {
 }
 
 /// gshell 単独 (窓が 1 枚も無い) ときに WM が横取りするキー (make のみ)。
+///
+/// **v1.2 では開発中のデバッグ用** ([`crate::DEBUG_SHORTCUTS`])。G5 で撤去され、
+/// CUI へ戻る経路は Start → CUI mode → 確認ダイアログだけになる (契約 S6)。
 pub fn standalone_key(st: &mut GuiState, scan: u8) {
+    if !crate::DEBUG_SHORTCUTS {
+        return;
+    }
     if scan == SC_ESC {
         st.quit = true;
     } else if scan >= SC_F1 && scan <= SC_F4 {
@@ -205,12 +214,12 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
     loop {
         /* モーダル中の X4 は取り込まない — 宛先はダイアログで、その状態機械を
          * 進めてよいのは X3 だけ (契約 T8)。打鍵はカーネル待ち行列に残す。 */
-        if ctx == Ctx::Pump && modal::is_open() {
+        if ctx == Ctx::Pump && (modal::is_open() || startmenu::is_open()) {
             break;
         }
         /* 満杯に近ければ取り込まない (カーネル待ち行列に残す。契約 T3)。
          * FEP の確定文字列が続く可能性があるので 4 件分を見る。 */
-        let space_ok = if modal::is_open() {
+        let space_ok = if modal::is_open() || startmenu::is_open() {
             /* 打鍵の宛先はダイアログ (WM 自身) でリングへは積まない。アプリの
              * リングが満杯でもダイアログは操作できなければならない (W4 §7.5)。 */
             true
@@ -309,6 +318,15 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             continue;
         }
 
+        /* Start / context メニュー (契約 D2 / D4): UP/DOWN/RETURN/ESC。
+         * モーダルより下・アプリより上。X3 でだけ状態機械を進める。 */
+        if startmenu::is_open() {
+            if down && ctx.wm_ui() {
+                startmenu::on_key(st, scan);
+            }
+            continue;
+        }
+
         /* WM 単独時 (フォーカス窓なし) の横取り: ESC=終了 / F1=デモ / F2=ファイル選択。
          * アプリの OP_WAIT (Ctx::Wait) では横取りしない — ESC はアプリのもの。 */
         if ctx == Ctx::Standalone && st.front_index().is_none() {
@@ -360,8 +378,11 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     st.mouse_x = mx;
     st.mouse_y = my;
     let btn = mi.buttons;
+    /* 左右それぞれのエッジ (契約 D4 / W3 §4.2)。右は v1.1 では見ていなかった。 */
     let down_edge = (btn & MOUSE_BTN_LEFT) != 0 && (st.prev_buttons & MOUSE_BTN_LEFT) == 0;
     let up_edge = (btn & MOUSE_BTN_LEFT) == 0 && (st.prev_buttons & MOUSE_BTN_LEFT) != 0;
+    let rdown_edge = (btn & MOUSE_BTN_RIGHT) != 0 && (st.prev_buttons & MOUSE_BTN_RIGHT) == 0;
+    let rup_edge = (btn & MOUSE_BTN_RIGHT) == 0 && (st.prev_buttons & MOUSE_BTN_RIGHT) != 0;
 
     /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
     if modal::is_open() {
@@ -393,7 +414,13 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             wm_button_down(st, mx, my);
         } else if up_edge {
             wm_button_up(st, mx, my);
-        } else {
+        }
+        if rdown_edge {
+            wm_right_down(st, mx, my);
+        } else if rup_edge {
+            wm_right_up(st, mx, my);
+        }
+        if !down_edge && !up_edge && !rdown_edge && !rup_edge {
             /* 移動: フォーカス窓へ Pointer (畳み込み) */
             forward_pointer(st, mx, my, btn);
         }
@@ -410,14 +437,26 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         if moved {
             cursor::move_to(st, mx, my);
         }
-        if (down_edge || up_edge) && wm_owns_edge(st, mx, my, down_edge) {
-            return; /* prev_buttons は据え置き → 次の X3 がエッジを拾う */
+        /* 左右のどちらかでも WM の領分なら **prev_buttons を進めずに戻る**。
+         * 次の X3 が両方のエッジを derive し直すので二重配送にはならない。 */
+        let hold_l =
+            (down_edge || up_edge) && wm_owns_edge(st, mx, my, down_edge, MOUSE_BTN_LEFT);
+        let hold_r =
+            (rdown_edge || rup_edge) && wm_owns_edge(st, mx, my, rdown_edge, MOUSE_BTN_RIGHT);
+        if hold_l || hold_r {
+            return;
         }
         if down_edge {
-            forward_button(st, mx, my, btn, true);
+            forward_button(st, mx, my, MOUSE_BTN_LEFT, true);
         } else if up_edge {
-            forward_button(st, mx, my, btn, false);
-        } else {
+            forward_button(st, mx, my, MOUSE_BTN_LEFT, false);
+        }
+        if rdown_edge {
+            forward_button(st, mx, my, MOUSE_BTN_RIGHT, true);
+        } else if rup_edge {
+            forward_button(st, mx, my, MOUSE_BTN_RIGHT, false);
+        }
+        if !down_edge && !up_edge && !rdown_edge && !rup_edge {
             forward_pointer(st, mx, my, btn);
         }
     }
@@ -425,12 +464,28 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
 }
 
 /// このボタンエッジは WM の状態機械 (X3) が処理すべきものか。
+/// - メニューが開いている / タスクバーの上: 左右とも押下も離しも WM
+///   (契約 D1「taskbar 領域の入力をアプリへ配送しない」)
 /// - ドラッグ中: 押下も離しも WM (離しで drop する)
 /// - 押下: 窓の外 (デスクトップ) / 背面の窓 (前面化 + Focus) / 閉じるボタン /
 ///   タイトルバー (ドラッグ開始) は WM。前面窓のクライアント・枠だけがアプリ
-/// wm_button_down と同じ判定順で見る (ずれると二重配送か取りこぼしになる)。
-fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool) -> bool {
+/// - 右ボタン: デスクトップ / タスクバーは WM の context menu、前面窓の
+///   クライアントはアプリ (契約 D4 / W3 §4.2)
+///
+/// [`wm_button_down`] / [`wm_right_down`] と**同じ判定順**で見る
+/// (ずれると二重配送か取りこぼしになる。POLICY_DEBUG §4-22)。
+fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool, button: u8) -> bool {
+    if startmenu::is_open() {
+        return true;
+    }
+    /* 押下でメニューが閉じた直後の離しは WM が捨てる (X3 で消費する)。 */
+    if !down_edge && startmenu::swallow_up_pending() {
+        return true;
+    }
     if st.drag_index >= 0 {
+        return true;
+    }
+    if taskbar::hit(st, mx, my) {
         return true;
     }
     if !down_edge {
@@ -438,10 +493,13 @@ fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool) -> bool {
     }
     let idx = match st.hit_window(mx, my) {
         Some(i) => i,
-        None => return true,
+        None => return true, /* デスクトップ: 左=無視 / 右=context menu */
     };
     if st.front_index() != Some(idx) {
         return true;
+    }
+    if button == MOUSE_BTN_RIGHT {
+        return false; /* 前面窓の中の右押下はアプリへ */
     }
     let w = st.windows[idx];
     if w.has_close() && w.close_rect().contains(mx, my) {
@@ -456,6 +514,16 @@ fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool) -> bool {
 /* ---- WM 状態機械 (X3 のみ) ---- */
 
 fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
+    /* メニューが開いている間は押下を全部メニューが取る (外側は「閉じる」)。 */
+    if startmenu::is_open() {
+        startmenu::on_button(st, mx, my);
+        return;
+    }
+    /* タスクバー: Start / 窓ボタン / 時計。アプリへは配送しない (契約 D1)。 */
+    if taskbar::hit(st, mx, my) {
+        taskbar::on_button(st, mx, my);
+        return;
+    }
     let hit = st.hit_window(mx, my);
     let idx = match hit {
         Some(i) => i,
@@ -505,10 +573,12 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
     if st.drag_index >= 0 {
         let idx = st.drag_index as usize;
         let old_outer = st.windows[idx].outer();
-        /* 枠の最終位置へ実体を移す。 */
+        /* 枠の最終位置へ実体を移す。ドラッグ確定は作業領域へクランプする
+         * (契約 D1。枠の追従でも同じ規則を使っているので普通は動かない)。 */
         let nf = st.drag_frame;
-        st.windows[idx].x = nf.x;
-        st.windows[idx].y = nf.y;
+        let (cx, cy) = wm::clamp_to_work_area(st, nf.x, nf.y, nf.w, nf.h);
+        st.windows[idx].x = cx;
+        st.windows[idx].y = cy;
         st.drag_index = -1;
         st.drag_frame = Rect::EMPTY;
 
@@ -523,27 +593,71 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         emit_configure(st, idx);
         return;
     }
-    forward_button(st, mx, my, 0, false);
+    /* メニュー中とタスクバー上の離しはアプリへ配送しない (契約 D1)。
+     * メニューの押下で閉じた直後の離しも捨てる (押していないボタンの
+     * 離しがアプリへ飛ぶのを防ぐ)。 */
+    if startmenu::take_swallow_up() || startmenu::is_open() || taskbar::hit(st, mx, my) {
+        return;
+    }
+    forward_button(st, mx, my, MOUSE_BTN_LEFT, false);
+}
+
+/* ---- 右ボタン (契約 D4 / W3 §4.2) ---- */
+
+/// 右押下。デスクトップ / タスクバーは WM の context menu、前面窓の
+/// クライアントはアプリへ `Button{button=2}`。判定順は [`wm_owns_edge`] と対。
+fn wm_right_down(st: &mut GuiState, mx: i32, my: i32) {
+    if startmenu::is_open() {
+        startmenu::close(st);
+        startmenu::set_swallow_up(); /* 対になる離しは捨てる */
+        return;
+    }
+    if st.drag_index >= 0 {
+        return; /* ドラッグ中の右クリックは捨てる */
+    }
+    if taskbar::hit(st, mx, my) {
+        startmenu::open_context(st, mx, my);
+        return;
+    }
+    let idx = match st.hit_window(mx, my) {
+        Some(i) => i,
+        None => {
+            startmenu::open_context(st, mx, my);
+            return;
+        }
+    };
+    if st.front_index() != Some(idx) {
+        /* 背面窓の上: 前面化 + フォーカスだけ (左と同じ)。 */
+        let old_front = st.front_id();
+        st.bring_to_front(idx);
+        visible::recompute_and_expose(st);
+        let vac = st.windows[idx].outer();
+        st.dirty_screen(vac);
+        let new_front = st.windows[idx].id(idx);
+        emit_focus_change(st, old_front, new_front);
+        return;
+    }
+    forward_button(st, mx, my, MOUSE_BTN_RIGHT, true);
+}
+
+fn wm_right_up(st: &mut GuiState, mx: i32, my: i32) {
+    if startmenu::take_swallow_up()
+        || startmenu::is_open()
+        || st.drag_index >= 0
+        || taskbar::hit(st, mx, my)
+    {
+        return;
+    }
+    forward_button(st, mx, my, MOUSE_BTN_RIGHT, false);
 }
 
 fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
     let idx = st.drag_index as usize;
     let w = st.windows[idx];
-    let mut nx = mx - st.drag_dx;
-    let mut ny = my - st.drag_dy;
-    /* 画面内にクランプ (タイトルバーが掴める範囲を残す)。 */
-    if nx < -(w.w - 40) {
-        nx = -(w.w - 40);
-    }
-    if nx > st.screen_w - 40 {
-        nx = st.screen_w - 40;
-    }
-    if ny < 0 {
-        ny = 0;
-    }
-    if ny > st.screen_h - crate::wm::TITLEBAR_H {
-        ny = st.screen_h - crate::wm::TITLEBAR_H;
-    }
+    let nx0 = mx - st.drag_dx;
+    let ny0 = my - st.drag_dy;
+    /* 作業領域 (画面 − タスクバー) へクランプする (契約 D1)。 */
+    let (nx, ny) = wm::clamp_to_work_area(st, nx0, ny0, w.w, w.h);
     let old_frame = st.drag_frame;
     let new_frame = Rect::new(nx, ny, w.w, w.h);
     let old_cursor = cursor::rect(st);
@@ -576,6 +690,11 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
 /* ---- アプリへの配送 ---- */
 
 fn forward_pointer(st: &mut GuiState, mx: i32, my: i32, btn: u8) {
+    /* WM の領分 (メニュー / タスクバー) の上ではアプリへ動きも配らない
+     * (契約 D1「taskbar 領域の入力をアプリへ配送しない」)。 */
+    if startmenu::is_open() || taskbar::hit(st, mx, my) {
+        return;
+    }
     let t = match focus_target(st) {
         Some(t) => t,
         None => return,
@@ -587,7 +706,9 @@ fn forward_pointer(st: &mut GuiState, mx: i32, my: i32, btn: u8) {
     ring::append(st, t.slot, &ev);
 }
 
-fn forward_button(st: &mut GuiState, mx: i32, my: i32, btn: u8, down: bool) {
+/// `Button` をフォーカス窓へ配る。`button` は `MOUSE_BTN_LEFT` (1) /
+/// `MOUSE_BTN_RIGHT` (2) をそのまま `GuiEvtButton.button` に載せる (契約 D4)。
+fn forward_button(st: &mut GuiState, mx: i32, my: i32, button: u8, down: bool) {
     let t = match focus_target(st) {
         Some(t) => t,
         None => return,
@@ -595,9 +716,8 @@ fn forward_button(st: &mut GuiState, mx: i32, my: i32, btn: u8, down: bool) {
     let cx = (mx - t.cox) as i16;
     let cy = (my - t.coy) as i16;
     let serial = next_serial(st, t.slot);
-    let ev = ring::ev_button(down, t.win_id, cx, cy, MOUSE_BTN_LEFT, serial);
+    let ev = ring::ev_button(down, t.win_id, cx, cy, button, serial);
     ring::append(st, t.slot, &ev);
-    let _ = btn;
 }
 
 /* ---- Focus / Configure ---- */
