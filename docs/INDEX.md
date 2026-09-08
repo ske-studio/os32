@@ -125,7 +125,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
 | [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 | `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
-| [tasks/brain_pwsh5/HARDWARE.md](tasks/brain_pwsh5/HARDWARE.md) | **SHARP Brain PW-SH5 ハードウェア調査** (2026-09-08、調査記録) — i.MX28 / ARM926EJ-S の構成、LCDIF+ILI9805・GPIO キーマトリクス・LRADC タッチ・eMMC/SD、独自コードの起動経路、OS32 の x86 依存の棚卸しと未確認事項 |
+| [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | **他アーキテクチャ移植調査** の索引 — 対象一覧、共通の調査軸 (ISA/番地/表示/入力/記憶/起動/検証環境/棚卸し/未確認)、移植先を問わず先にやれる作業。調査記録の置き場であり計画ではない |
+| [tasks/arch_port/PWSH5_HARDWARE.md](tasks/arch_port/PWSH5_HARDWARE.md) | SHARP Brain PW-SH5 ハードウェア調査 (2026-09-08、机上のみ) — i.MX28 / ARM926EJ-S の構成、LCDIF+ILI9805・GPIO キーマトリクス・LRADC タッチ・eMMC/SD、独自コードの起動経路、OS32 の x86 依存の棚卸しと未確認事項 |
 | [tasks/cross_compiler_rebuild.md](tasks/cross_compiler_rebuild.md) / [tasks/ext2_dind_debug.md](tasks/ext2_dind_debug.md) | 単発タスク記録 |
 
 ## man ページ
