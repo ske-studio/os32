@@ -15,7 +15,8 @@ PC-9801/9821 のハードウェアに密着している。
 
 | 対象 | ISA | 調査文書 | 状態 |
 |---|---|---|---|
-| SHARP Brain PW-SH5 (電子辞書, 2018) | ARMv5TEJ (i.MX28 / ARM926EJ-S) | [PWSH5_HARDWARE.md](PWSH5_HARDWARE.md) | 机上調査のみ (2026-09-08)。実機未入手、実測値なし |
+| **SHARP Brain PW-SH4** (電子辞書, 2017) | ARMv5TEJ (i.MX28 / ARM926EJ-S) | [BRAIN_MX28_HARDWARE.md](BRAIN_MX28_HARDWARE.md) | **実機保有**。机上調査は完了、実測はこれから (文書 §9 に確認項目) |
+| SHARP Brain PW-SH1〜SH7 とその同世代機 | 同上 | 同上 (§4-0 機種差分表) | SH4 向けの調査がほぼそのまま通る。差はキーマップ程度 |
 
 ---
 
