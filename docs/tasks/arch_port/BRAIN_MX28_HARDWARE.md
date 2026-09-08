@@ -17,16 +17,17 @@
 
 | 問い | 答え |
 |---|---|
-| PW-SH4 の中身は何か | Freescale/NXP **i.MX28 系 SoC** (ARM926EJ-S / ARMv5TEJ)、DRAM 128MB、854×480 の MPU 接続 LCD |
+| PW-SH4 の中身は何か | **NXP i.MX283** (ARM926EJ-S / ARMv5TEJ, 定格 454MHz)、LPDDR **128MB**、内蔵 eMMC **8GB**、854×480 の MPU 接続 LCD |
 | SH5 との違いは | **キーマトリクスの配列だけ**。U-Boot のボード対応はターゲット名と DTB 名以外バイト単位で同一 |
 | OS32 はそのまま動くか | **動かない**。OS32 は i386 専用 (保護モード / GDT / IDT / PIC / V86 / `int 0x80`)。命令セットが違う |
 | どれくらいの作業か | 「移植」ではなく **ARM 版 OS32 の新規実装**。カーネル中枢・全ドライバ・ブート・KAPI ABI・全バイナリ資産が作り直し |
 | 逆に流用できるものは何か | C89 で書かれた **FS (ext2/FAT/VFS)、SQLite 統合、シェル、libos32* の大半、userland のロジック** |
-| 独自コードは載せられるか | **載る**。BrainLILO が ED-SH4 を `gen3_4.bin` として対応済みで、SD カードだけで完結し **リセットボタンで純正 WinCE に戻る** |
-| 一番大きな技術的壁は何か | ① ISA が違うこと ② **NP21/W に相当する検証環境が無い** ③ V86/MS-DOS 機能は原理的に消滅 |
+| **CE を通さずに起動できるか** | **できる**。ブート連鎖の CE 依存部分は eMMC 上の SB (EBOOT) だけで、Boot ROM と I2C EEPROM は OS 非依存。**USB recovery boot (JP501 短絡)** なら eMMC を書き換えずに任意コードを流し込める (§5) |
+| 一番大きな技術的壁は何か | ① ISA が違うこと ② V86/MS-DOS 機能は原理的に消滅 ③ キャッシュ管理の新規実装 (§7-3)。**検証環境は USB recovery boot が答えになりうる** (§5-3) |
 
 先行事例として **brain-hackers / Brainux** が同じ機種に U-Boot + Linux を通しており、
 PW-Sx4 世代は「Linux 起動 ✅ / キーボード ✅」として対応表に載っている。
+さらに 2022 年には **eMMC の Program Image を自前に置き換えて Windows CE を完全に消す**ところまで到達している。
 本調査のハードウェア情報はほぼすべて、その公開ソース (U-Boot ボード対応、Linux DT、BrainLILO、Wiki) から取った。
 **PW-SH4 で独自コードを起動する経路は既に他人が拓いている**のが唯一かつ最大の追い風である。
 
@@ -53,8 +54,9 @@ PW-Sx4 世代は「Linux 起動 ✅ / キーボード ✅」として対応表�
 
 | 項目 | 値 | 出典 |
 |---|---|---|
+| SoC | **NXP i.MX283** | brain-hackers 技術資料 (2022) が実機解析として明記 |
 | コア | ARM926EJ-S (**ARMv5TEJ**) | linux-brain `imx28.dtsi` の `compatible = "arm,arm926ej-s"` |
-| クロック | U-Boot が **CPU 分周比 1 = 480MHz** に設定 (`mxs_set_divcpu(1)`、PLL 480MHz) | u-boot-brain `board/sharp/pwsh4/pwsh4.c` |
+| クロック | 定格 **454MHz**。ただし U-Boot は **分周比 1 = 480MHz** を設定しており定格超え (要実測) | 資料は 454MHz、`board/sharp/pwsh4/pwsh4.c` は `mxs_set_divcpu(1)` |
 | キャッシュ | 16KB I / 16KB D、**VIVT** (仮想アドレスタグ) | ARM926EJ-S 仕様 |
 | MMU | あり (ARMv5 の 2 段ページテーブル、1MB セクション / 4KB スモールページ) | 同上 |
 | FPU | **無し** (i.MX28 に VFP 非搭載)。整数のみ | i.MX28 データシート |
@@ -62,16 +64,16 @@ PW-Sx4 世代は「Linux 起動 ✅ / キーボード ✅」として対応表�
 | 非整列アクセス | **不可**。ARMv5 は非整列 load/store が壊れる (回転した値が返る) | ARMv5 アーキテクチャ仕様 |
 | クロック制御 | Linux 側に cpufreq 実装なし (2021 年時点) | Brainux Wiki ロードマップ |
 
-正確な派生型番 (i.MX283 / i.MX287 など) は公開情報で確認できなかった。
-brain-hackers 側も `ARCH_MX28` として汎用に扱っており、機種差はボードファイルで吸収している。
-なお NXP の定格は 454MHz であり、480MHz 設定は定格超えである点に注意 (§10)。
+派生型番は **i.MX283** で確定した (brain-hackers が 2022 年の実機解析で明記)。
+U-Boot 側は `ARCH_MX28` として汎用に扱っており、機種差はボードファイルで吸収している。
+定格 454MHz に対し U-Boot が 480MHz を設定している理由は不明のままである (§10-1)。
 
 ### 3-2. 物理メモリ配置
 
 | 範囲 | 内容 | 出典 |
 |---|---|---|
 | `0x00000000–` | オンチップ SRAM (128KB)。ブート ROM が SPL をここに展開する | U-Boot `CONFIG_SPL_TEXT_BASE=0x00001000` |
-| `0x40000000–0x47FFFFFF` | **DRAM 128MB** | `imx28-brain.dtsi` `memory@40000000 reg = <0x40000000 0x08000000>`、U-Boot `PHYS_SDRAM_1_SIZE 0x8000000` |
+| `0x40000000–0x47FFFFFF` | **LPDDR 128MB** | `imx28-brain.dtsi` `memory@40000000 reg = <0x40000000 0x08000000>`、U-Boot `PHYS_SDRAM_1_SIZE 0x8000000` |
 | `0x40200000` | U-Boot 本体のロード先 | `CONFIG_SYS_TEXT_BASE` |
 | `0x41000000` / `0x42000000` | U-Boot の DT / カーネルロード先 | `brain_mx28_common.h` |
 | `0x80000000–0x8003FFFF` | APBH バス (高速周辺 + DMA) | `imx28.dtsi` |
@@ -212,7 +214,7 @@ SoC 内蔵 ADC で読むため外付けコントローラは無い。
 
 | 経路 | デバイス | 備考 |
 |---|---|---|
-| SSP0 (8bit) | **内蔵 eMMC** | 純正 WinCE と辞書コンテンツが入っている |
+| SSP0 (8bit) | **内蔵 eMMC 8GB** | 純正 WinCE と辞書コンテンツが入っている。先頭に i.MX28 専用パーティション型 `0x53` の SB 領域がある (§5-1) |
 | SSP1 (4bit) | **microSD スロット** | カード検出・WP は常に「挿入・書込可」を返す実装 (U-Boot `brain_mmc_cd`) |
 | GPMI | NAND | Brain では未使用の模様 |
 
@@ -242,6 +244,7 @@ OS32 に置き換えると、**USB CDC ガジェットが `/api/cmd` 相当の�
 
 | デバイス | 状態 |
 |---|---|
+| 磁気センサ | **蓋の開閉検出**に使われている。DT には現れていない (要調査) |
 | RTC | dtsi で **`status = "disabled"`**。Brain では使われていない (要調査) |
 | 電源コントローラ | Linux 側 **未対応** (2021 年時点)。充電状態・電池残量は読めない |
 | 電源断 | POWER ブロックの `poweroff`。電源ボタンは PC の電源ボタンと同じ扱い |
@@ -251,37 +254,104 @@ OS32 に置き換えると、**USB CDC ガジェットが `/api/cmd` 相当の�
 
 ---
 
-## 5. 独自コードを起動する経路 (PW-SH4)
+## 5. 独自コードを起動する経路 — CE を通さない方法
 
-**PW-SH4 は対応済み**である。BrainLILO のモデル表に `{L"ED-SH4", L"gen3_4.bin"}` として載っており、
-Brainux の対応機種表でも「PW-Sx4, H7700, SR2 → Linux 起動 ✅ / キーボード ✅」となっている。
+**方針: Windows CE は起動させない。** そのうえで何が可能かを、ブート連鎖の実際の構造から整理する。
+出典は brain-hackers の技術資料 2 本 (`202110_brain_boot_sequence.md`, `202208_install_linux_into_the_emmc.md`)。
+どちらも実機の解析記録であり、**OTP の実測値・EEPROM の吸い出し・eMMC のセクタ配置**まで含む。
 
-| 経路 | 仕組み | 危険度 |
-|---|---|---|
-| **① アプリメニューから起動** | SD ルートに `アプリ/BrainLILO/` (`AppMain.exe` + 空の `index.din`) と `LOADER/u-boot.bin` を置き、純正 WinCE のアプリメニューから起動する | **低**。eMMC を一切書かない |
-| **② SD からの直接起動** | SD 第1パーティションの `nk` ディレクトリの中身をルートへコピーし、WinCE の起動シーケンスに割り込む | **低**〜中。SD 上で完結する |
-| **③ eMMC へインストール** | 純正領域を上書きする | **高**。Wiki では 2021 年時点「研究中」、2023 年に達成報告あり |
+### 5-1. 純正のブート連鎖 (解析済み)
 
-**復旧手段が確認できたのが大きい**: ①② はいずれも SD カード上で完結し、
-**リセットボタンを押せば純正 Windows CE が起動する**。SD を抜けば元の電子辞書に戻る。
-つまり **③ に手を出さない限り文鎮化しない**。当面 ③ は対象外にしてよい。
+```text
+Reset
+ └─ On-chip ROM (Boot ROM)          SoC 内蔵。CE とは無関係
+     └─ OTP の BOOT_MODE を読む      0x8002C1A0 の上位 8bit = 0x01
+         = 「I2C0 master, 3.3V」     → 最初の読み出し先は I2C EEPROM
+     └─ I2C EEPROM (U502, Rohm BR24G32 4KB)
+         SB (Boot Stream) を実行     eMMC 周辺の設定を書き、MODE コマンドで
+                                     eMMC ブートモード (0x09) へ遷移
+                                     ★ 内容は OS 非依存 (ハード調整のみ)
+         └─ eMMC の SB               MBR → i.MX28 専用パーティション型 0x53
+             セクタ 0   MBR           → その先頭に SB へのセクタ番号
+             セクタ 256 SB           ★ ここに EBOOT が入っている = CE 依存
+             セクタ 198912 FAT32     Windows CE 本体 (NK イメージ)
+             └─ EBOOT                NK イメージを DRAM に展開して jump
+                 └─ Windows CE
+```
 
-### 5-1. 注意点
+**CE に属するのは eMMC 側の SB (EBOOT) から先だけ**である。
+Boot ROM と I2C EEPROM は OS 非依存で、ここを触る必要はない。
+つまり **eMMC の SB を自前のものに差し替えれば、CE は連鎖から完全に消える**。
 
-- **SH4 世代から「非公式アプリ起動のプロテクト」が入った** (PW-SB 系を除く)。
-  後に回避ツールが作られており BrainLILO は SH4 に対応しているが、
-  **具体的に何をどう回避しているのかは未確認** (§10)。SH3 以前より手数が増えるのは確か。
-- 正常にシャットダウンせずリセットすると **SD カード上のデータが壊れることがある**。
-- ビルド環境は Debian/Ubuntu + `gcc-arm-linux-gnueabi`。
-  `buildbrain` リポジトリで `make udefconfig-sh4` → `make ubuild` (`u-boot.sb` 生成) → `make nk.bin`。
+### 5-2. 経路の比較
 
-### 5-2. OS32 から見た起動物の形
+| 経路 | 仕組み | CE 依存度 | eMMC 書換 | 実績 |
+|---|---|---|---|---|
+| A. BrainLILO | CE を起動し、アプリとして U-Boot へ chain-load | **CE を完全に起動する** | 不要 | 確立済み |
+| B. EBOOT chain-load | U-Boot を NK イメージに偽装して SD に置き、EBOOT に読ませる (SH4 は `edsh4exe.bin`) | CE カーネルは起動しないが **EBOOT は通る** | 不要 | 確立済み |
+| C. **Program Image 自作** | eMMC の SB を自前 (U-Boot SPL + U-Boot) に上書き | **なし** | **必要** | 2022 年に達成済み |
+| D. **USB recovery boot** | 基板の **JP501 を短絡**して USB 接続し、PC から SB を注入 | **なし** | 不要 | 復旧手段として実証済み |
 
-U-Boot が入る前提に立てるなら、OS32 側の起動物は **U-Boot が `bootz` で読める形式** (ロードアドレス `0x42000000`、
-DT は `0x41000000`) にするのが最短で、`boot/` の IPL / ローダ (PC-98 の INT 1Bh、`.8086` 制約、LBA 2–17) は
-**全部不要になる**。SD の第1パーティション (FAT) にカーネルを置き、U-Boot の `fatload` + `bootz` で起動する。
+**要件「CE でブートさせない」を満たすのは C と D。** A は論外、B も EBOOT を経由する。
 
----
+### 5-3. OS32 にとっての最適解 — D を開発用、C を最終形
+
+#### D. USB recovery boot = 開発サイクルの本命
+
+i.MX28 の Boot ROM は USB スレーブ (recovery) からの起動に対応しており、
+**JP501 (eMMC の隣のパッド) を短絡しながら USB を挿す**と強制的にそのモードに入る。
+PC 側からは NXP の `uuu` (mfgtools) で SB を流し込む。buildbrain には既にターゲットがある:
+
+```bash
+make udefconfig-sh4 && make ubuild   # u-boot.sb を生成
+make uuu                             # sudo uuu ./u-boot-brain/u-boot.sb
+```
+
+OS32 にとっての意味は大きい:
+
+- **eMMC を一切書き換えない。** 電源を切って JP501 を離せば、次回は純正 CE が普通に起動する。文鎮化しない。
+- **毎回好きなバイナリを流し込める。** これは NP21/W での `make hotdeploy` に相当する開発ループになる。
+  §7-1 で「検証環境が無い」と書いた問題に対する、現時点で最も現実的な答えがこれである。
+- SB (Boot Stream) は Boot ROM が解釈するコマンド列 (LOAD / FILL / CALL / MODE) で、
+  U-Boot の `mkimage` で生成できる。**OS32 を SB として直接流し込む**ことも原理的に可能で、
+  その場合 U-Boot すら経由しない。
+
+#### C. Program Image 自作 = 最終的に自立させるとき
+
+eMMC の SB を自前のものに置き換える。2022 年に達成済みで、イメージ構成も判明している:
+
+```text
+MBR (Entry0: FAT32 / Entry1: SB / Entry2: Ext4)
+ セクタ  2048  FAT32
+ セクタ 20800  SB (U-Boot 入り)   ← Boot ROM がここを読む
+ セクタ 24800  Ext4 rootfs
+```
+
+書き込みは **SD から Linux を起動し、`/dev/mmcblk0` に `dd`** するだけ。
+
+- 純正 CE は消える。**必ず先に eMMC 全体をバックアップすること** (SD から Linux を起動して `dd` で吸える)。
+- 失敗しても **D (USB boot) + UART で復旧できる**。ただし UART は基板のテストポイントへの
+  細線ハンダ付けが要る (§10-4)。**C に進む前に D と UART を先に確立しておくのが順序**である。
+
+### 5-4. 注意点
+
+- 上記の OTP 値・EEPROM 部品位置 (U502)・JP501 の位置・eMMC セクタ配置は、
+  **brain-hackers が解析した個体のもの**である。PW-SH4 で同一である保証はない (§10-5)。
+  少なくとも OTP の BOOT_MODE は CE 上の Scalpel で `0x8002C1A0` を読めば確認できる
+  ——が、それは CE を起動して確認する作業なので、方針と相談になる。
+- **I2C EEPROM は触らない。** OS 非依存でハード調整しかしておらず、
+  ここを壊すと Boot ROM が eMMC に到達できなくなる。復旧は USB boot 頼みになる。
+- **SH4 世代には非公式アプリ起動のプロテクトがある**が、これは経路 A (CE アプリ) の話であり、
+  C・D には関係しない。CE を通さない以上、プロテクトも迂回対象にならない。
+
+### 5-5. OS32 から見た起動物の形
+
+U-Boot を経由する前提なら、OS32 側の起動物は **U-Boot が `bootz` で読める形式** (ロードアドレス
+`0x42000000`、DT は `0x41000000`) にするのが最短で、`boot/` の IPL / ローダ (PC-98 の INT 1Bh、
+`.8086` 制約、LBA 2–17) は **全部不要になる**。
+
+U-Boot も外すなら、OS32 自身を **SB (Boot Stream) 形式**にして Boot ROM に直接ロードさせる。
+DRAM の初期化を自前でやる必要が出るため、まずは U-Boot 経由で立ち上げ、後から検討する順序が現実的。
 
 ## 6. OS32 側の棚卸し — 何が残り、何が消えるか
 
@@ -315,12 +385,15 @@ OS32 の開発サイクルは NP21/W ai-debug フォーク (HTTP デバッグサ
 - i.MX28 を実用的な精度で再現するエミュレータは知られていない (QEMU に mxs マシンは無い)。
 - **Brainux Wiki にシリアルコンソールの記述が一切無い**。コミュニティは分解せず SD と本体画面だけで開発している。
   DUART は SoC にあるが、基板上でどう引き出すかは誰も文書化していない (§10)。
-- 代わりに現実的な経路は 2 つある:
-  1. **U-Boot / カーネルのコンソールを LCD に出す**。U-Boot の Brain 設定は既に `stdout=serial,vga` で、
+- 代わりに現実的な経路が 3 つある。**この 3 つが揃えば、当初の「1〜2 桁遅くなる」という評価は緩む**:
+  1. **USB recovery boot** (§5-3)。JP501 を短絡して USB を挿し、`uuu` で SB を流し込む。
+     eMMC を書き換えないので何度でもやり直せる。**これが `make hotdeploy` に相当する開発ループになる。**
+  2. **U-Boot / カーネルのコンソールを LCD に出す**。U-Boot の Brain 設定は既に `stdout=serial,vga` で、
      LCD 出力を持っている。半田付けなしで最初のログが見える。
-  2. **USB ガジェット** (§4-6)。`dr_mode=peripheral` で PC と USB 1 本。
+  3. **USB ガジェット** (§4-6)。`dr_mode=peripheral` で PC と USB 1 本。
      OS32 に CDC ガジェットを実装できれば `/api/cmd` 相当の遠隔試験が復活する。
-- それでも **開発速度が 1〜2 桁落ちる**という評価は変わらない。これが最大の障害である。
+- 残る不足は「動いている OS32 の中を覗く」手段 (レジスタ・メモリ・逆アセンブル) である。
+  NP21/W の MCP に相当するものは無く、UART + 自前のデバッグ出力で代替することになる。
 
 ### 7-2. V86 サブシステムの消滅
 
@@ -365,9 +438,9 @@ Brain では意味を失うか、別の規則 (キャッシュ管理必須、非
 | 段 | 内容 | 実機の要否 |
 |---|---|---|
 | M0 | 既存 C コードの**非整列アクセス / キャッシュ前提の監査**、ARM クロスコンパイラの整備 → **実施済み (2026-09-08)**: [M0_PORTABILITY_AUDIT.md](M0_PORTABILITY_AUDIT.md) | 不要 |
-| M1 | **Brainux の SD イメージをそのまま起動**して実機とハードウェアの挙動を確認 (キーマップ、タッチ、画面) | 要 |
-| M2 | `buildbrain` で **PW-SH4 用 U-Boot を自前ビルド**し、SD から起動させる | 要 |
-| M3 | U-Boot から `bootz` で読める最小カーネル。**LCD コンソールに "hello"** | 要 |
+| M1 | 分解して **JP501 と UART のテストポイントを特定**し、USB recovery boot に入れることを確認 (§5-3 D) | 要 |
+| M2 | `buildbrain` で **PW-SH4 用 U-Boot を自前ビルド** (`make udefconfig-sh4 && make ubuild`) し、`make uuu` で流し込んで起動させる。**ここまで eMMC は無傷** | 要 |
+| M3 | U-Boot から `bootz` で読める最小カーネル。**LCD コンソールと UART に "hello"** | 要 |
 | M4 | ICOLL + TIMROT で**割り込みとタイマ**、`sys_get_tick` 相当 | 要 |
 | M5 | MMU + ページング、kmalloc、kselftest の ARM 版 | 要 |
 | M6 | **LCDIF + ILI9805 で画面**。RGB565 バックエンド、KCG フォント描画、キャッシュ clean | 要 |
@@ -378,6 +451,8 @@ Brain では意味を失うか、別の規則 (キャッシュ管理必須、非
 
 M0 だけは今のリポジトリで単独に価値がある (x86 でも潜在バグの発見になる)。
 M1・M2 は OS32 のコードを 1 行も書かずに実機とツールチェインの健全性を確かめられるので、着手するなら最初にここを通す。
+**eMMC への書き込み (経路 C) はこの表に入れていない。** D で開発ループが回り、UART で復旧できる
+ことを確認してからでよく、それまで純正 eMMC は保険として温存する。
 
 ---
 
@@ -385,14 +460,18 @@ M1・M2 は OS32 のコードを 1 行も書かずに実機とツールチェイ
 
 実機があるので、以下は **調査として今すぐ埋められる**。いずれも OS32 のコードを書く前にできる。
 
-1. Brainux の SD イメージを焼いて起動し、**リセットで純正 WinCE に戻ることを自分で確認する** (§5 の前提)。
-2. キーマトリクスの実測 — SH4 の Symbol キー `(4,3)` と修飾キー割当が DT どおりか。
-3. LRADC タッチのキャリブレーション値を自分の個体で採る (Wiki の値は他人の個体)。
-4. **LCD の実測フレームレート** — 全画面 800KB 転送に何 ms かかるか。OS32 の GUI 性能見積りの根拠になる。
-5. `/proc/cpuinfo`・`dmesg` から **SoC の派生型番と実クロック**を読む (§10-1 の解決)。
-6. eMMC と DRAM の実容量 (§10-2, §10-3 の解決)。
-7. USB を `peripheral` に切り替え、**USB ガジェット経路が本当に使えるか**を確かめる (§7-1 の代替経路の可否)。
-8. 基板を開けずに DUART が引き出せるか (§10-4)。
+CE を起動せずに済むものを優先して並べた。
+
+1. **分解して JP501 と UART のテストポイントを特定する** (§10-4)。CE を起動せずにできる。
+   これが取れれば開発ループと復旧手段が同時に手に入るので、最優先。
+2. **USB recovery boot に入れることを確認する** — JP501 短絡 + USB 接続で PC から SoC が見えるか。
+3. `make uuu` で自前ビルドの U-Boot を流し込み、**eMMC を書き換えずに起動する**ことを確認 (§5-3 D)。
+4. U-Boot が上がったら、そのコンソールから **実クロック・DRAM/eMMC の実容量**を読む (§10-1〜3 の解決)。
+5. キーマトリクスの実測 — SH4 の Symbol キー `(4,3)` と修飾キー割当が DT どおりか。
+6. LRADC タッチのキャリブレーション値を自分の個体で採る (Wiki の値は他人の個体)。
+7. **LCD の実測フレームレート** — 全画面 800KB 転送に何 ms かかるか。OS32 の GUI 性能見積りの根拠になる。
+8. eMMC 全体の `dd` バックアップを取る (経路 C に進む前の必須作業)。
+9. USB を `peripheral` に切り替え、**USB ガジェット経路が本当に使えるか**を確かめる (§7-1 の 3)。
 
 ---
 
@@ -400,17 +479,25 @@ M1・M2 は OS32 のコードを 1 行も書かずに実機とツールチェイ
 
 実機または一次資料でしか埋まらない項目。§9 で埋まるものは番号を対応させた。
 
-1. **i.MX28 の正確な派生型番** (i.MX283 / i.MX287 など)。定格 454MHz に対し U-Boot が 480MHz を設定している理由も含めて未確認。
-2. DRAM 128MB は DT と U-Boot の記述であり、**実チップの容量は未確認**。
-3. 内蔵 eMMC の容量。
-4. **DUART パッドの物理位置**、分解の要否、信号電圧。Brainux Wiki に記述が無く、コミュニティも使っていない模様。
-5. **SH4 世代のプロテクトの具体的内容**と、BrainLILO がそれをどう回避しているか。
-6. ブートモードピン / OCOTP による SD 直接ブートの可否と、設定を戻せるか。
-7. RTC が dtsi で無効な理由 (存在しない / 未対応 / 電池が別)。
-8. ブザー・音声出力の実装有無 (dtsi の枠は SH1〜SH7 で有効化されていない)。
-9. 電源管理 (充電、サスペンド、電池残量読み出し) の方法。Linux 側は未対応。
-10. LCD の実測フレームレートと LCDIF 転送に要する時間。
-11. eMMC を書き換えた場合の復旧手段 (経路 ③ に進む場合のみ必要)。
+**2026-09-08 の追加調査で解決したもの**: SoC = i.MX283 / DRAM = LPDDR 128MB / eMMC = 8GB /
+ブート連鎖と OTP の BOOT_MODE / CE を通さない経路の有無 / eMMC 書き換え後の復旧手段 (USB boot + UART)。
+
+残っているもの:
+
+1. 定格 454MHz に対し U-Boot が **480MHz を設定している理由**。定格超えで常用してよいのか。
+2. **PW-SH4 個体での JP501 の位置**。解析記録は brain-hackers が扱った個体のもので、
+   SH4 で同じ位置・同じ手順である保証がない (§5-4)。
+3. **UART テストポイントの物理位置**と信号電圧。Brainux Wiki に記述が無く、
+   2022 年の資料では「細線ハンダ付けで引き出した」とあるだけ。
+4. PW-SH4 の OTP BOOT_MODE の実測値。解析個体では `0x8002C1A0` の上位 8bit = `0x01` (I2C0 master)。
+   **確認するには CE 上の Scalpel を使うのが定石で、CE 非起動の方針と衝突する** —
+   U-Boot が上がった後に同番地を読めば代替できる。
+5. I2C EEPROM (U502, Rohm BR24G32) の内容が SH4 でも OS 非依存か。
+6. RTC が dtsi で無効な理由 (存在しない / 未対応 / 電池が別)。
+7. ブザー・音声出力の実装有無 (dtsi の枠は SH1〜SH7 で有効化されていない)。
+8. 電源管理 (充電、サスペンド、電池残量読み出し)、および磁気センサ (蓋検出) の読み方。
+9. LCD の実測フレームレートと LCDIF 転送に要する時間。
+10. OS32 を U-Boot 抜きで **SB 形式**にして Boot ROM に直接ロードさせる場合の DRAM 初期化手順。
 
 ---
 
@@ -422,7 +509,11 @@ M1・M2 は OS32 のコードを 1 行も書かずに実機とツールチェイ
 - brain-hackers / **linux-brain** — `arch/arm/boot/dts/{imx28-pwsh1..7.dts,imx28-brain.dtsi,imx28.dtsi}`, `drivers/gpu/drm/tiny/brain.c`, `drivers/input/keyboard/brain-kbd-gpio.c` : https://github.com/brain-hackers/linux-brain
 - brain-hackers / **brainlilo** — `README.md`, `models.h` (ED-SH4 → `gen3_4.bin`) : https://github.com/brain-hackers/brainlilo
 - brain-hackers / **wiki.brainux.org** — `collections/_beginners/get-started.md` (対応機種表・キー割当・起動手順), `_beginners/roadmap.md`, `_tips/{touch-panel,usb-ethernet-gadget,otg}.md`, `_build/uboot.md` : https://github.com/brain-hackers/wiki.brainux.org
-- brain-hackers / **buildbrain** (SD イメージ配布・ビルド) : https://github.com/brain-hackers/buildbrain
+- brain-hackers / **buildbrain** — `README.md` (i.MX283 と recovery mode、`make uuu`)、`Makefile`、
+  および `docs/knowledge/` の技術資料 2 本 : https://github.com/brain-hackers/buildbrain
+  - `202110_brain_boot_sequence.md` — ブート連鎖 (Reset → Boot ROM → EEPROM → eMMC → EBOOT → CE)、経路の分類
+  - `202208_install_linux_into_the_emmc.md` — OTP BOOT_MODE の実測、I2C EEPROM (U502) の吸い出し、
+    eMMC のセクタ配置、JP501 短絡による USB boot、eMMC 上書きと UART 復旧
 
 二次情報:
 
