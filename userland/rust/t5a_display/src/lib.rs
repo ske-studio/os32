@@ -1,0 +1,19 @@
+#![no_std]
+#![no_main]
+
+mod boundary;
+mod guest;
+mod input;
+mod paint;
+mod session;
+mod state;
+mod status;
+mod storage;
+mod view;
+
+use os32api::KernelAPI;
+
+#[no_mangle]
+pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI) -> i32 {
+    guest::run(api)
+}

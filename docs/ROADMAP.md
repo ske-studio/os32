@@ -1,6 +1,6 @@
 # OS32 リリースロードマップ
 
-*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-07 改訂 (v1.1 完了・v1.2 実装完了、レビュー待ち)*
+*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-07 の v1.2 main マージを反映 (v1.1・v1.2 完了)*
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 
@@ -113,7 +113,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ### v1.2 — 「デスクトップ環境」
 
-> **状況 (2026-09-07)**: 実装完了、G0〜G5 を PEGC / 9801 / Cirrus で通過 (feat/gui)。ESC 即時切替と上部バーは撤去済み (`DEBUG_SHORTCUTS`)。main へのマージはレビュー待ち。経過: [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) §10。
+> **状況 (2026-09-07)**: main へマージ済み (`d739494`)。G0〜G5 の検証記録と既知の検証上の制約は [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) §10 を参照。ESC 即時切替と上部バーは撤去済み (`DEBUG_SHORTCUTS`)。
 
 **ゴール**: taskbar・Start・File Manager・launcher が揃い、GUIだけで基本操作が完結する。app 置換、CUI 切替、system halt を現在の single-foreground-app model を壊さず実現する。
 
@@ -162,6 +162,8 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 ---
 
 ### v1.3 — 「ターミナル統合とCUI抽象化」
+
+着手計画・実装前ゲート: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)。現状は静的調査済み、契約未凍結・実装未着手。
 
 **ゴール**: GUI desktop 上で CUI command が実行でき、既存 CUI program との互換性を確保する。
 

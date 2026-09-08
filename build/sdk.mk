@@ -105,9 +105,24 @@ check-privileged:
 check-gui-proto:
 	@python3 tools/check_gui_proto.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto
+# 独立端末モデルのホスト試験。guest用Cargo設定を避けるためrootから実行。
+# ゲストクロスリンク・描画・CUI統合の検証ではない。
+check-term-model:
+	cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+	cargo check --manifest-path userland/libos32term/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
+
+# 純粋描画アダプタ。人工glyphによるホスト試験であり実ROM描画の検証ではない。
+check-term-render:
+	cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+	cargo check --manifest-path userland/libos32term_render/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
+
+# T5aの純粋状態・座標・所有権試験。guest.rsの実行は含まない。
+check-t5a-host:
+	cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check
