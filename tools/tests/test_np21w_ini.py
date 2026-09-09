@@ -18,10 +18,40 @@ else:
     ini = None
 
 RAW = (b'; opaque \x82\xa0\xff\r\n[NekoProject21]\r\n'
-       b' USEGD5430 = false \t; keep\r\nGD5430TYPE=91\n'
+       b' USEGD5430 = false \t; keep\r\nGD5430TYPE=91\nUSEPEGCP=false\n'
        b'private=DO_NOT_PRINT\r\n[other]\r\nUSEGD5430=false')
 CHANGES = {'USEGD5430': 'true'}
 EXPECTED = RAW.replace(b'= false', b'= true', 1)
+
+
+class Pegc(unittest.TestCase):
+    """USEPEGCP gates np2cfg.usepegcplane -> pegc.enable (win9x/ini.cpp:687,
+    io/pegc.c:375). Same [NekoProject21] table and PFTYPE_BOOL as USEGD5430."""
+
+    def test_pegc_on_off_round_trip(self):
+        on, diff = ini.transform(RAW, {'USEPEGCP': 'true'})
+        self.assertEqual(diff, ['USEPEGCP: false -> true'])
+        self.assertEqual(on, RAW.replace(b'USEPEGCP=false', b'USEPEGCP=true'))
+        back, diff = ini.transform(on, {'USEPEGCP': 'false'})
+        self.assertEqual((back, diff), (RAW, ['USEPEGCP: true -> false']))
+
+    def test_pegc_is_independent_of_cirrus(self):
+        out, diff = ini.transform(RAW, {'USEPEGCP': 'true'})
+        self.assertIn(b' USEGD5430 = false \t; keep', out)
+        self.assertIn(b'GD5430TYPE=91', out)
+        self.assertEqual(diff, ['USEPEGCP: false -> true'])
+
+    def test_rejects_bad_pegc_values(self):
+        for value in ('1', 'True', 'yes', '', 'true\nprivate=x'):
+            with self.assertRaises(ini.IniError):
+                ini.transform(RAW, {'USEPEGCP': value})
+
+    def test_missing_or_duplicate_pegc_field_fails_closed(self):
+        for raw in (RAW.replace(b'USEPEGCP=false\n', b''),
+                    RAW.replace(b'USEPEGCP=false', b'USEPEGCP=false\nusepegcp=false'),
+                    RAW.replace(b'USEPEGCP=false', b'USEPEGCP=unknown')):
+            with self.assertRaises(ini.IniError):
+                ini.transform(raw, {'USEGD5430': 'true'})
 
 
 class Availability(unittest.TestCase):
@@ -39,9 +69,10 @@ class Transformation(unittest.TestCase):
     def test_bom_newlines_and_no_final_newline(self):
         for prefix in (b'', b'\xef\xbb\xbf'):
             for newline in (b'\r\n', b'\n', b'\r'):
-                raw = prefix + newline.join((b'[NekoProject21]', b'USEGD5430=false', b'GD5430TYPE=91'))
+                raw = prefix + newline.join((b'[NekoProject21]', b'USEGD5430=false',
+                                             b'GD5430TYPE=91', b'USEPEGCP=false'))
                 result, _ = ini.transform(raw, CHANGES)
-                self.assertEqual(result, raw.replace(b'false', b'true'))
+                self.assertEqual(result, raw.replace(b'USEGD5430=false', b'USEGD5430=true'))
 
     def test_noop_and_disable(self):
         self.assertEqual(ini.transform(EXPECTED, CHANGES), (EXPECTED, []))

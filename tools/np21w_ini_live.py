@@ -2,7 +2,7 @@
 """Bounded NP21/W configuration workflow. WSL Python + Windows PowerShell 5.1.
 
 Only the trusted operator binds absolute executable/ini paths. Models receive a
-bound Live instance and one of three operations, never an executor or shell.
+bound Live instance and one of the listed operations, never an executor or shell.
 Default is a live READ-ONLY preview; --live-apply and exclusive operator use are
 both required for mutation. No HTTP, environment loader or deployment helper.
 """
@@ -14,8 +14,16 @@ import re
 import sys
 from np21w_ini import IniError, LIMIT, transform
 
+# pegc-* changes only USEPEGCP and cirrus-* only the two WAB fields, so the
+# two backends can be selected independently. USEPEGCP is the PEGC gate:
+# np21w-src win9x/ini.cpp:687 binds it to np2cfg.usepegcplane and io/pegc.c:375
+# copies that into pegc.enable, which mem/memvga.c checks on every PEGC VRAM
+# access. pc_model does not gate PEGC (OS32 reads BIOS 0x045C bit6 / 0x0597
+# bit2, both already set with pc_model=VX; measured on the guest 2026-09-09).
 OPERATIONS = {'cirrus-on': {'USEGD5430': 'true', 'GD5430TYPE': '91'},
-              'cirrus-off': {'USEGD5430': 'false', 'GD5430TYPE': '91'}}
+              'cirrus-off': {'USEGD5430': 'false', 'GD5430TYPE': '91'},
+              'pegc-on': {'USEPEGCP': 'true'},
+              'pegc-off': {'USEPEGCP': 'false'}}
 SIGNATURE_LIMIT = 256  # FileIdentity.Read: seven decimal integers + separators.
 SIGNATURE_JSON_BYTES = 12 * SIGNATURE_LIMIT  # Escaped UTF-16 surrogate pair per character.
 PROCESS_ID_MAX = 2147483647  # Query casts ProcessId to signed Int32.

@@ -33,10 +33,24 @@ OS32 の `pegc_probe()` (gfx/backend_pegc.c:185) が BIOS ワークエリアの�
 
 ## 1. 扱えるキーの範囲
 
-現在ツールが扱うのは `[NekoProject21]` の **`USEGD5430` / `GD5430TYPE` / `e_resume`
-の 3 つだけ**。`pc_model` `ExMemory` `MEMswtch` `DIPswtch` などは**未対応**で、
-推測して追記・変更しない。RAM 量やマシン種別を変える検証が要る場合は、
+現在ツールが扱うのは `[NekoProject21]` の **`USEGD5430` / `GD5430TYPE` /
+`USEPEGCP` / `e_resume`** だけ。`pc_model` `ExMemory` `MEMswtch` `DIPswtch` などは
+**未対応**で、推測して追記・変更しない。RAM 量やマシン種別を変える検証が要る場合は、
 ツールの拡張を別タスクとして起こし、その実装と実適用の承認を分ける。
+
+`transform()` は**変更するキーが 1 つでも全キーの存在を要求して fail closed** する。
+NP21/W の `initsave` は `s_IniItems[]` 表を丸ごと書くので、このエミュレータが
+書いた ini には常に揃っている。
+
+| 操作 | 変えるキー | 根拠 |
+|---|---|---|
+| `cirrus-on` / `cirrus-off` | `USEGD5430` (+ `GD5430TYPE=91` 維持) | TASK_H3_cirrus §0 |
+| `pegc-on` / `pegc-off` | `USEPEGCP` のみ | `win9x/ini.cpp:687` が `np2cfg.usepegcplane` に束縛し、`io/pegc.c:375` が `pegc.enable` に写す。`mem/memvga.c` が PEGC の VRAM 経路ごとに見る |
+
+**`pc_model` は PEGC の gate ではない。** OS32 の `pegc_probe()` が見るのは BIOS
+ワークエリア 0x045C bit6 と 0x0597 bit2 で、2026-09-09 の実測では `pc_model=VX` の
+まま両方立っていた (`0x40` / `0x84`)。`pc_model` は VM/VX の 2 値 (CPU 世代) しか取らない。
+PEGC と Cirrus は独立に選べる (操作が触るキーが重ならない)。
 
 ## 承認済み Cirrus trial（通常終了・新規 ini）
 

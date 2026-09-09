@@ -15,7 +15,8 @@ EXE = r'C:\Trial Fixture\np21x64w.exe'
 BASE = r'C:\Trial Fixture\np21x64w.ini'
 CWD = r'C:\Trial Fixture'
 CREATED = '2026-09-09T01:02:03.0000000Z'
-RAW = b'\xef\xbb\xbf[NekoProject21]\r\nUSEGD5430 = false ;keep\nGD5430TYPE=91\r\ne_resume = true\r\nopaque=\x82\xa0\n'
+RAW = (b'\xef\xbb\xbf[NekoProject21]\r\nUSEGD5430 = false ;keep\nGD5430TYPE=91\r\n'
+       b'USEPEGCP=false\r\ne_resume = true\r\nopaque=\x82\xa0\n')
 POST_EXIT = RAW + b'; normal exit saved settings\r\n'
 
 def plan():
@@ -71,7 +72,8 @@ class TrialTests(unittest.TestCase):
 
     def test_transform_preserves_opaque_bytes_and_only_proven_changes(self):
         actual, diff = trial.transform_trial(RAW)
-        self.assertEqual(actual, RAW.replace(b'false', b'true').replace(b'e_resume = true', b'e_resume = false'))
+        self.assertEqual(actual, RAW.replace(b'USEGD5430 = false', b'USEGD5430 = true')
+                         .replace(b'e_resume = true', b'e_resume = false'))
         self.assertEqual(diff, ['USEGD5430: false -> true', 'e_resume: true -> false'])
         self.assertEqual(trial.transform_trial(actual), (actual, []))
 

@@ -20,7 +20,20 @@ import uuid
 
 # Proven by docs/tasks/gui/TASK_H3_cirrus.md §0 and TASKS.md 2026-09-06
 # (WAB OFF recheck). Other WAB fields/board IDs have no approved values here.
-ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',)}
+#
+# USEPEGCP is the PEGC gate, proven by np21w-src src/win9x/ini.cpp:687
+# (PFVAL("USEPEGCP", PFTYPE_BOOL, &np2cfg.usepegcplane), same s_IniItems[]
+# table and [NekoProject21] section as USEGD5430) and src/io/pegc.c:375
+# (pegc.enable = np2cfg.usepegcplane), which mem/memvga.c reads on every
+# PEGC VRAM path. pc_model is NOT the gate: OS32's pegc_probe() reads BIOS
+# work area 0x045C bit6 / 0x0597 bit2, and both are already set with
+# pc_model=VX (measured on the guest 2026-09-09).
+#
+# All fields are required even when changing one, so a partial or unknown
+# backend configuration fails closed. NP21/W's initsave writes the whole
+# s_IniItems[] table, so an ini it produced always carries them.
+ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',),
+           'USEPEGCP': ('true', 'false')}
 SECTION = b'nekoproject21'
 LIMIT = 4 * 1024 * 1024
 

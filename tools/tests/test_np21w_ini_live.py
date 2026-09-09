@@ -11,8 +11,10 @@ TARGET = {'exe': r'C:\NP21\np21x64w.exe', 'ini': r'C:\NP21\chosen.ini'}
 ROW = {'pid': 42, 'exe': TARGET['exe'],
        'command': '"' + TARGET['exe'] + '" "' + TARGET['ini'] + '"',
        'created': '20260908010000'}
-RAW = b'; opaque \xff\r\n[NekoProject21]\r\nUSEGD5430=false\r\nGD5430TYPE=91\nprivate=SECRET'
-NEW = RAW.replace(b'false', b'true')
+RAW = (b'; opaque \xff\r\n[NekoProject21]\r\nUSEGD5430=false\r\nGD5430TYPE=91\n'
+       b'USEPEGCP=false\nprivate=SECRET')
+NEW = RAW.replace(b'USEGD5430=false', b'USEGD5430=true')
+PEGC_ON = RAW.replace(b'USEPEGCP=false', b'USEPEGCP=true')
 
 
 class Fake:
@@ -482,10 +484,33 @@ class ReceiptAndPathBoundaries(unittest.TestCase):
                 self.assertLessEqual(len(restored_json), live.LIMIT)
                 self.assertEqual(live.wire(json.loads(restored_json), decode=True), f.record)
 
+    def test_pegc_operations_are_available_and_independent(self):
+        """USEPEGCP gates np2cfg.usepegcplane -> pegc.enable (np21w-src
+        win9x/ini.cpp:687, io/pegc.c:375). Cirrus fields must not move."""
+        self.assertIn('pegc-on', live.OPERATIONS)
+        self.assertIn('pegc-off', live.OPERATIONS)
+        on, diff = live.transform(RAW, live.OPERATIONS['pegc-on'])
+        self.assertEqual(diff, ['USEPEGCP: false -> true'])
+        self.assertEqual(on, PEGC_ON)
+        self.assertIn(b'USEGD5430=false', on)
+        off, diff = live.transform(on, live.OPERATIONS['pegc-off'])
+        self.assertEqual((off, diff), (RAW, ['USEPEGCP: true -> false']))
+
+    def test_pegc_and_cirrus_do_not_disturb_each_other(self):
+        cirrus, _ = live.transform(RAW, live.OPERATIONS['cirrus-on'])
+        both, diff = live.transform(cirrus, live.OPERATIONS['pegc-on'])
+        self.assertEqual(diff, ['USEPEGCP: false -> true'])
+        self.assertIn(b'USEGD5430=true', both)
+        back, diff = live.transform(both, live.OPERATIONS['cirrus-off'])
+        self.assertEqual(diff, ['USEGD5430: true -> false'])
+        self.assertIn(b'USEPEGCP=true', back)
+
     def test_receipt_bound_covers_signature_escaping_and_restart_metadata(self):
         import json
+        starts = {'cirrus-on': RAW, 'cirrus-off': NEW,
+                  'pegc-on': RAW, 'pegc-off': PEGC_ON}
         for operation in live.OPERATIONS:
-            raw = RAW if operation == 'cirrus-on' else NEW
+            raw = starts[operation]
             candidate, diff = live.transform(raw, live.OPERATIONS[operation])
             planned = {'target': TARGET, 'operation': operation,
                        'original': {'data': raw, 'signature': 'initial'},
