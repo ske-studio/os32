@@ -7,9 +7,10 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 ## 体制
 
 PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
-レビュアー = Codex CLI (read-only)、テスター = ローカル AI (`tools/emu_agent/`)。
-役割の境界・起動コマンド・規約 3 行の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
-承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大の 3 つだけ。
+レビュアー = **ユーザー経由**、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
+役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
+承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大・
+**独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で報告して渡す。
 
 ## Project Overview
 

@@ -26,6 +26,7 @@ hermes (Nous Research の Agent CLI, `~/.hermes`) を PM に据え、Claude Code
 | 独自スキルの消失 | `~/.hermes/skills/software-development/os32/` が更新で消えた。同梱スキル木の下に置いたため |
 | PM モデルが 2 日で 2 回振替 | `claude-fable-5` → `anthropic/claude-opus-4.6` (openrouter) → `gpt-6-astra` (openai-codex) |
 | 並行エージェントによる記録の消失 | 共有ファイルへの同時編集で TDD ログが上書きされ、`tools/tests/np21w_transport_tdd.md` は委譲ログから経過を再構成する羽目になった |
+| Codex のクォータ枯渇 | hermes の PM を `gpt-6-astra` (provider `openai-codex`) で回した結果、同じ枠を使う Codex CLI を使い切った。**レビュアー役をその場で失った** |
 
 ## 4. 増幅装置になったもの
 
