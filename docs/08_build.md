@@ -75,6 +75,17 @@ GUI アプリ      → libos32gui_stub (ジャンプ表への薄いスタブ) �
 (`check_gui_proto.py`)、ne2000 リングのホストテスト。
 `check-manifests` は `make all` の成果物を見るので対象外 (WSL 側の `make check` で回す)。
 
+**コンパイラとフラグ** (実体は `build/config.mk`。ここは読むための写しで、値は config.mk が正しい):
+
+| 対象 | コンパイラ | 主なフラグ |
+|---|---|---|
+| カーネル | i386-elf-gcc | `-std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -O2` |
+| SQLite | i386-elf-gcc | 上記 + `-Os -ffunction-sections -fdata-sections` (サイズ優先) |
+| 外部プログラム | i386-elf-gcc | 同じ基本フラグ + `sdk/link/app.ld` でリンク |
+| アセンブラ | NASM | `-f elf32` (カーネル) / `-f bin` (ブートセクタ) |
+
+クロスコンパイラは `$CROSS_DIR` (既定 `/usr/local/cross`)。構築手順は §8-5。
+
 インクルードパスは `Makefile` で細かく制御されており、基本的にソースファイルから他のヘッダディレクトリは `-I` によって自動解決できるため `#include "file.h"` で問題なく参照可能。
 
 ### §8-3 ディレクトリ構造
@@ -147,17 +158,58 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 | `make deploy-nhd` | deploy.yaml フルデプロイ + NHDコピー — **要NP21/W再起動** |
 | `make prune-stale` / `make prune-stale-delete` | 配備先 (HostDrv + NHD) に残ったマニフェストに無い *.bin を一覧 / 削除。deploy 系は既定で削除まで行う (`NO_PRUNE=1` で一覧のみ) |
 | `make apps` / `make game` | 外部リポジトリ (git submodule `apps/` = os32-apps、`game/` = os32-game) を SDK 経由でビルド。空なら `git submodule update --init` を促す |
-| `make external` | 上記 2 つをまとめて。KAPI を動かしたあとは必ずこれで再ビルドし、submodule のポインタを更新してコミットする |
+| `make external` | 上記 2 つをまとめて。KAPI / SDK ライブラリ変更後に再ビルドする。ポインタ更新条件は下記参照 |
 | `make clean-external` | 外部リポジトリの生成物を削除 |
 | `make hotdeploy FILE=<path>` | 個別バイナリのホットデプロイ — 再起動不要。ユーザーランドのみ |
-| `make nhd-pull` | Windows 側 NHD を /tmp に取り込む (フォーマットしない) |
+| `make nhd-pull` | Windows 側 NHD を作業イメージ `build/nhd/os32.nhd` に取り込む (フォーマットしない)。deploy 系は無ければ自動で pull する |
 | `make nhd-init` | 初回セットアップ — **フォーマットするのでゲスト側データが消える** |
+| `make nhd-mount` / `make nhd-umount` | 作業イメージの手動マウント・アンマウント |
 
 ビルド側のターゲットは `make all` / `kernel` / `libs` / `programs` / `sdk` /
 `apps` / `game` / `clean` / `clean-kernel` / `clean-libs` / `clean-programs`。
 KernelAPI の構造体を変えたときは `make clean` → `make all` が必須
 (古い `.o` が残ると ABI 不整合で静かに壊れる)。
-| `make nhd-init` / `nhd-mount` / `nhd-umount` | 初期化・マウント操作 |
+
+<a id="配備3経路"></a>
+#### 配備 3 経路の使い分け (正典)
+
+| 経路 | コマンド | 何が起きるか | 再起動 |
+|---|---|---|:---:|
+| **HostDrv** | `make deploy` | 成果物を `C:\os32` へ同期。ゲストは `/host` マウントで読む。速い反復用 | 不要 |
+| **NHD** | `make deploy-kernel` | HostDrv 同期 + カーネル・プログラム・データを NHD の ext2 へ丸ごと書く | **必要** |
+| **ブートセクタ** | `make deploy-boot` | `boot/loader_hdd.bin` を NHD のブート領域 (LBA 2〜17) へ。ローダを変えたときだけ | **必要** |
+
+- **NHD への書き込みは NP21/W を止めてから** ([D1])。停止 → 配備 → 起動の順。
+  `emu_pause`、breakpoint 停止、HTTP 無応答はプロセス終了の証拠にならない。
+- **HostDrv だけでは検証にならない** ([V1])。ゲストの PATH は NHD の `/usr/bin` を先に見るので、
+  古いバイナリが黙って動き、合格したように見える。
+- 単発のユーザーランドバイナリは `make hotdeploy FILE=...` で再起動なしに差し替えられる
+  (カーネルと `/sys` は不可)。
+- 配備マニフェストは所有層ごとに分かれている (`build/core.yaml`、`userland/deploy.yaml`、
+  `apps/deploy.yaml`、`game/deploy.yaml`)。統合は `tools/deploy_manifests.py`。
+  マニフェストに無いバイナリは配備先で stale 化するので、`make deploy*` が
+  `tools/prune_stale.py` で刈る (`NO_PRUNE=1` で一覧のみ)。
+- 環境変数: `HOSTDRV_DIR` (既定 `/mnt/c/os32`)、`NP21W_DIR` (既定 `/tmp/np21w`)。
+- 判断と検証の進め方はスキル `os32-build-verify`、反映確認の手順は
+  [POLICY_DEBUG.md §2](POLICY_DEBUG.md)。
+
+#### submodule (`apps/` `game/`) の扱い
+
+標準アプリとゲームは別リポジトリ (`ske-studio/os32-apps` / `ske-studio/os32-game`) で、
+`apps/` `game/` に git submodule として置き、`make sdk` が作る `build/sdk/` を指してビルドする。
+
+```bash
+git submodule update --init     # 初回 / clone 直後
+make external                   # apps + game (make apps / make game で個別)
+```
+
+- **KAPI を動かしたら `make external` で両方を再ビルドする。**
+  再ビルドだけでは submodule のコミットもポインタも変わらない。submodule 側のソース変更を
+  コミットして参照先が変わった場合にだけ、検証した組み合わせのポインタを親リポジトリで更新する。
+  コミット・push はユーザーの明示的な指示がある場合のみ行う。
+- **SDK のライブラリ (libos32gfx 等) を変えたときも同じ。** アプリは静的リンクなので、
+  古い `.bin` は新しいバックエンド (PEGC の PACKED8 等) で #PF する
+  (2026-09-06 に hello32 で実測)。
 
 #### `tools/hostdrv_deploy.py`
 HostDrv デプロイ先 (`HOSTDRV_DIR`, 既定 `C:\os32`) への差分同期。sudo 不要で高速。`make deploy` から呼ばれる。
