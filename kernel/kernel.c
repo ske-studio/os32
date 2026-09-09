@@ -25,7 +25,7 @@
 #include "boot_splash.h"
 #include "cpu_calibrate.h"
 #include "paging.h"
-#include "pgalloc.h"
+#include "memory_boot.h"
 #include "shlib.h"
 #include "hotdeploy.h"
 #include "shm.h"
@@ -369,7 +369,10 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
 
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
-    pgalloc_init(mem_kb);
+    if (!memory_boot_init(mem_kb)) {
+        kprintf(0x07, "[MEM] bootstrap/stage failed; boot halted\n");
+        for (;;) { __asm__ volatile("cli; hlt"); }
+    }
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();

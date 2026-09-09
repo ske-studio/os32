@@ -33,29 +33,22 @@
 #define PAGE_RO         (PTE_PRESENT)                 /* 読み取り専用 */
 #define PAGE_NOT_PRESENT 0                            /* アクセス不可 */
 
-/* ------------------------------------------------------------------------ */
-/*  マッピング範囲 (H3b, 2026-09-06)                                          */
-/*                                                                            */
-/*  2 つの上限を区別する:                                                     */
-/*                                                                            */
-/*    PAGING_RAM_LIMIT — **実 RAM** として恒等マップする上限 (16MB)。          */
-/*      pgalloc の管理上限でもある。ここを超える物理 RAM は (積まれていても)   */
-/*      OS32 は使わない — ページ割り当ての対象外で、ブート時は Not-Present。    */
-/*      従来 PAGING_MAP_SIZE が兼ねていた役割で、値も従来どおり 16MB。         */
-/*                                                                            */
-/*    PAGING_MAP_SIZE  — **ページテーブルの守備範囲** (32MB = 8 枚)。           */
-/*      16MB〜32MB には物理 RAM が無いので既定は全ページ Not-Present。          */
-/*      デバイス窓を置きたいドライバが paging_map_phys() で必要な分だけ張る。   */
-/*      現在の唯一の利用者は Xe10 内蔵 Cirrus のリニア窓                       */
-/*      (01000000h から 2MB、include/wab_xe10.h §4)。この窓は                  */
-/*      「dat << 24」でしか置けず最小でも 16MB 番地になるため、16MB 止まりの    */
-/*      ページテーブルからは届かなかった (票 H3 の申し送り 4)。                 */
-/*                                                                            */
-/*  静的テーブルは PAGING_PT_COUNT 枚 = 32KB (従来 16KB) を BSS に置く。       */
-/* ------------------------------------------------------------------------ */
+/* Phase 1: full 32-bit addressability, expressed as PFNs, never a wrapped
+ * 4GiB exclusive byte address. Eight bootstrap PTs remain static; the other
+ * PDEs start absent and acquire one zeroed PT only when explicitly mapped.
+ * Bootstrap RAM mapping remains clamped to 16MiB. Dynamic PT backing scans
+ * to pgalloc_limit_pfn(), not the eligible count: only known master shared
+ * tables with identity supervisor RW, cacheable PTEs qualify. New PTs still
+ * require master CR3 and no live address spaces; no high RAM is auto-mapped.
+ * No optional device guard policy is introduced here. */
 #define PAGING_RAM_LIMIT (16UL * 1024UL * 1024UL)
-#define PAGING_MAP_SIZE (32UL * 1024UL * 1024UL)
-#define PAGING_PT_COUNT (PAGING_MAP_SIZE / (PTE_COUNT * PAGE_SIZE))
+#define PAGING_PFN_COUNT 1048576UL
+#define PAGING_PT_COUNT PDE_COUNT
+#define PAGING_BOOT_PT_COUNT 8
+#define PAGING_BOOT_MAP_SIZE (PAGING_BOOT_PT_COUNT * PTE_COUNT * PAGE_SIZE)
+/* Legacy backend aperture checks still use the bootstrap window size.
+ * Not the mapping API ceiling: use PAGING_PFN_COUNT for address spans. */
+#define PAGING_MAP_SIZE PAGING_BOOT_MAP_SIZE
 
 /* ページ境界アライメント (切り上げ/切り下げ)。
  * 手書きの (x + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1) イディオムはこれを使う。 */
@@ -64,13 +57,19 @@
 
 /* ======== API ======== */
 
-/* ページング初期化・有効化 */
+/* ページング初期化・有効化。一度だけ実行し、以後の呼出しは完全な no-op。
+ * mem_kb を変更しても既存 PT / AS / CR3 / allocator をリセットしない。 */
+/* Internal single-owner boot-stage gate; requires enabled master and no AS. */
+int paging_boot_context(void);
+/* Trusted layout verifier: complete identity supervisor RW cacheable span.
+ * PTE A/D and PDE USER (when PTE is supervisor) do not weaken this contract. */
+int paging_verify_identity(u32 first_pfn, u32 pages, void *identity);
 void paging_init(u32 mem_kb);
 
 /* 指定ページの属性を変更。
  * flags に PTE_USER を含めると PDE 側にも USER を伝播させる
  * (i386 の実効権限は PDE と PTE の論理積のため)。
- * 戻り値: 0=成功, -1=マッピング範囲外 (何も変更されない)。
+ * 戻り値: 0=成功, -1=必要 PT の確保不可 (何も変更されない)。
  * ガードページ設置のような保護目的の呼び出しは必ず戻り値を確認すること
  * (無言 no-op だと保護が入らないまま fail-open になる)。 */
 int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
@@ -79,7 +78,7 @@ int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags);
  * flags でマップする (end は exclusive)。TLB フラッシュは最後に 1 回。
  * 複数ページの属性変更/張り替えは paging_set_page のループでなく必ず
  * これを使うこと (ページごとの CR3 全リロードを避ける)。
- * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+ * 戻り値: 0=成功, -1=逆順/桁あふれ/必要 PT の確保不可 (全範囲を未変更) */
 int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags);
 
 /* デバイス窓マップ (ページ数で指定する paging_map_range)。
@@ -89,27 +88,32 @@ int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags);
  * 欲しい物理窓」を、ドライバ側にページテーブルを触らせずに張るための入口。
  * flags に PTE_USER を含めれば PDE にも USER が伝播する
  * (同じ PDE 配下の他ページは PTE が supervisor のままなので保護は保たれる)。
+ * npages=0 は no-op。最終ページ 0xFFFFF000 も 1 ページとして指定可能。
+ * 新 PDE の追加は master CR3、pgalloc 初期化後、live AS が 0 の時だけ。
+ * 既存 PT の更新は従来どおり。追加 PT は master の寿命まで保持する。
+ * 失敗時には追加 PT を全解放し、既存 PTE/PDE も変更しない。
  *
  * **表示面を含むデバイス窓に PTE_USER を渡してはならない** (レビュー #5 ②)。
  * master に USER で張ると、PDE をまるごと写す paging_addrspace_create() の
  * 先で CPL=3 アプリが表示 VRAM に直接書けてしまい、契約 G4 (commit 前の描画は
  * 表示面に出ない) が崩れる。窓は supervisor + PTE_PCD で張り、アプリに見せる
  * クライアント面だけを exec が paging_addrspace_map_user_keep() で昇格させる。
- * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み)。 */
+ * 戻り値: 0=成功, -1=逆順/桁あふれ/必要 PT の確保不可 (全範囲を未変更)。 */
 int paging_map_phys(u32 virt_addr, u32 phys_addr, u32 npages, u32 flags);
 
 /* 指定範囲を覆う PDE から USER を落とす (V86 セッション終了時の後始末)
- * 戻り値: 0=成功, -1=範囲全体がマッピング範囲外 */
+ * end は inclusive。戻り値: 0=成功, -1=逆順 (未変更) */
 int paging_pde_clear_user(u32 start, u32 end);
 
 /* 指定範囲の全ページを Read-Only に。
- * 既存 PTE の物理フレームは保持する (V86 リマップ中でも壊さない)。
- * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+ * end は inclusive。RW だけを落とし物理フレーム/USER/PCD/P/他属性を保持。
+ * 不在 PT/PTE は不在のまま (RAM を生成しない)。
+ * 戻り値: 0=成功, -1=逆順 (全範囲を未変更) */
 int paging_set_readonly(u32 start, u32 end);
 
 /* 指定範囲の全ページを Not-Present に。
- * PTE のフレーム/属性ビットは保持し P ビットのみ落とす。
- * 戻り値: 0=成功, -1=範囲の一部がマッピング範囲外 (範囲内分は適用済み) */
+ * end は inclusive。PTE のフレーム/属性ビットは保持し P ビットのみ落とす。
+ * 戻り値: 0=成功, -1=逆順 (全範囲を未変更) */
 int paging_set_not_present(u32 start, u32 end);
 
 /* ブート後のコンベンショナルメモリ再利用 (ページ0: NP, 0x1000-0x9FFFF: R/W) */
@@ -192,7 +196,7 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
 
 /* [vstart, vend) を identity (phys=virt) で USER マップする (M1c)。
  * end は exclusive。プログラム帯・ユーザスタック・VRAM・SHM に使う。
- * 戻り値 0=成功, -1=範囲の一部が範囲外 (範囲内分は適用済み)。 */
+ * 戻り値 0=成功, -1=AS 無効・逆順・必要 PT/PDE 不在 (全範囲を未変更)。 */
 int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
                                     u32 vend, u32 flags);
 
@@ -202,7 +206,7 @@ int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
  * 書き込むと PCD が消え、CPU が書いた画素がキャッシュに残ったまま BLT エンジン
  * が古い VRAM を読む。共有 PT の PTE は master からも見えるため、属性を落とすと
  * カーネル側の描画まで巻き添えになる (レビュー #5 ③)。
- * 戻り値 0=成功, -1=範囲の一部が範囲外 (範囲内分は適用済み)。 */
+ * 戻り値 0=成功, -1=AS 無効・逆順・必要 PT/PDE 不在 (全範囲を未変更)。 */
 int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
                                    u32 vend, u32 flags);
 

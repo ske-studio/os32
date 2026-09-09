@@ -120,6 +120,15 @@ check-term-render:
 check-t5a-host:
 	cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 
+check-memory-host:
+	python3 -B tools/tests/test_physmem.py
+	python3 -B tools/tests/test_paging_bounds.py
+	python3 -B tools/tests/test_pgalloc_model.py
+	python3 -B tools/tests/test_pgalloc_range.py
+	python3 -B tools/tests/test_highram_stage.py
+	python3 -B tools/tests/test_memory_boot.py
+	python3 -B tools/tests/test_device_reservation.py
+
 check-boot-splash-host:
 	python3 -B tools/tests/test_boot_splash_native.py
 
@@ -139,9 +148,9 @@ check-vfs-fd-sqlite-host:
 check-sqlite-groups-host:
 	python3 tools/tests/test_sqlite_groups.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host check
