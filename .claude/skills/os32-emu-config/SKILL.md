@@ -24,12 +24,18 @@ description: NP21/W ini の限定変更。変更権限は PM (Claude Code) だ�
 (`gfxmode pc98|pegc|cirrus|auto` → `/etc/system.cfg` 読み戻し → リセット)。
 ini が要るのは、そのバックエンドをエミュレータが提供していないときだけ。
 
-**要求した設定と実際のバックエンドは別物**。`ver` の `GFX:` 行も当てにならない。
-実際のバックエンドは必ず `hal_test` で確認する。2026-09-09 の実測: `GFX=pegc` を
-書いてリセットしても `hal_test` は `backend pc98 (planar 4bpp)` のままだった。
-OS32 の `pegc_probe()` (gfx/backend_pegc.c:185) が BIOS ワークエリアの拡張グラフィック
-フラグを見るためで、現構成の `pc_model=VX` (PC-9801VX) ではそのフラグが立たない。
-**PEGC の検証には機種設定の変更が要る — これは §1 のとおり現在のツールの範囲外。**
+**要求した設定と実際のバックエンドは別物**。`ver` の `GFX:` 行は当てにならない
+(起動時に固定された文字列)。実際のバックエンドは `hal_test` の 1 行目で確認する。
+
+`hal_test` の読み方に注意がある。**`hal_test` は `gfx_init()` を呼ばず
+`gfx_screen_info()` を読むだけ** (HW 塗りが立つ機種でだけ init する)。つまり
+**起動時に選ばれたバックエンドを報告している**。`gfx_prepare_backend()` が
+boot_splash の直後にカーネル文脈で選択・初期化するので現在はこれが正しい値だが、
+`gfxmode` を変えたら**リセットするまで `hal_test` の値は変わらない**。
+2026-09-09 に、リセット前の `hal_test` を見て「PEGC が使えない」と誤診した。
+
+probe が本当に走ったかまで見たいときは、`kernel.map` の `s_probed` / `s_probe_ok` と
+`sys_top_reserved` を `/api/mem?space=phys` で読む (バックバッファ予約が取れたかが分かる)。
 
 ## 1. 扱えるキーの範囲
 

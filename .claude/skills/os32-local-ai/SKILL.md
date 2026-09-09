@@ -104,8 +104,10 @@ kselftest は `kselftest_pass` / `kselftest_fail` を**新しい `kernel.map` �
   → HostDrv 側で `sha256sum` と `cmp`。**サイズ一致は存在とサイズの証明でしかない**
 - GFX バックエンドはゲストの `gfxmode pc98|pegc|cirrus` → `/etc/system.cfg` 読み戻し →
   リセット。**GFX 切替のために再配備しない** (deploy が `system.cfg` を上書きする)。
-  実際のバックエンドは要求値ではなく `hal_test` で確認する。ホスト ini で Cirrus を
-  有効にしてもゲストの `GFX=pc98` は上書きされない (2 層ある)
+  実際のバックエンドは要求値ではなく `hal_test` の 1 行目で確認する。ただし
+  **`hal_test` は `gfx_init()` を呼ばず起動時に選ばれた値を報告するだけ**なので、
+  `gfxmode` の後は**リセットしないと値が変わらない** (2026-09-09 に誤診した)。
+  ホスト ini で Cirrus を有効にしてもゲストの `GFX=pc98` は上書きされない (2 層ある)
 - ホスト試験・リンク・配備同一性・ゲスト実行・見た目・性能は**別々のゲート**として扱う
 
 ## 7. GUI 入力
