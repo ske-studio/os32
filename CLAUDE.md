@@ -166,4 +166,5 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 `C:\WATCOM\docs\os32\` に書き出す (読み取り専用の出力。編集はここ側で行う)。
 
 スキル: **`os32-build-verify`** (ビルド・配備・検証の選択)、**`os32-emu-debug`** (エミュレータ上の障害調査)、
-**`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)。
+**`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)、
+**`os32-local-ai`** (ビルド・試験・配備をローカル AI に実行させる)。

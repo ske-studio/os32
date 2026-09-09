@@ -33,6 +33,10 @@ python3 tools/emu_agent/agent.py suite tools/emu_agent/tasks/regress.txt
 python3 tools/emu_agent/agent.py tail
 ```
 
+**ビルド・ホスト試験・配備・実機検証は PM が手で回さず、この役に投げる。**
+投げ方と結果の読み方はスキル **`os32-local-ai`**、何を確かめるべきかの選択は
+スキル **`os32-build-verify`** が正典。
+
 厳格版が要る操作 (GUI 入力など、誤操作が実機を壊す経路) は `tools/emu_agent/playbook.py` を使う。
 承認済み JSON 台本と操作・引数・順序が完全一致したものだけを実行し、既定は dry-run。
 
