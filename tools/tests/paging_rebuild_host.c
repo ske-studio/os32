@@ -33,7 +33,7 @@ void _start(void)
                             MEM_EXEC_LOAD_ADDR / PAGE_SIZE, verify_metadata));
     CHECK(pgalloc_reserve_pfn(PGALLOC_BASE / PAGE_SIZE, MEM_EXEC_LOAD_ADDR / PAGE_SIZE));
     CHECK(pgalloc_reserve_pfn((MEM_EXEC_LOAD_ADDR + bytes) / PAGE_SIZE,
-                             (0x1000000UL - MEM_HOTDEPLOY_SIZE) / PAGE_SIZE));
+                             0x1000000UL / PAGE_SIZE));
     /* This fixture exercises the retained legacy mapped-candidate scanner,
      * not the new MODEL stage (covered by highram_stage_host.c). Install a
      * synthetic eligibility snapshot explicitly; no production reset/bypass. */

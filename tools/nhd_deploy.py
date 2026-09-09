@@ -796,21 +796,18 @@ def resolve_guest_path(host_file):
 
 
 def do_push(local_path, remote_name=None, resolve=False):
-    """ホットデプロイ (再起動不要) — tools/hotdeploy.py に委譲
+    """廃止 (2026-09-09)。ホットデプロイの窓を撤去した。
 
-    旧実装は名前付きパイプ経由で rshell の `upload` コマンドへ hex を
-    流し込んでいたが、`upload` はゲスト側で削除済みで常に失敗していた。
-    現在は NP21/W 内蔵 aidebug の POST /api/mem でステージングバッファへ
-    直接書き、rshell の `hotdeploy` でファイル化する。
-    設計: docs/tasks/hotdeploy/DESIGN.md
+    物理末尾の 256KB 予約は CPL=3 スタック帯と同じ範囲で、8MB 構成では
+    アプリと必ず衝突していた。配送は HostDrv に一本化:
+      make deploy       (ホスト -> C:/os32)
+      ゲストで hsync    (/host → / 、既定で sys は除く)
+    経緯: docs/tasks/hotdeploy/DESIGN.md
     """
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from hotdeploy import push
-
-    guest = None
-    if not resolve and remote_name:
-        guest = remote_name if remote_name.startswith('/') else '/' + remote_name
-    return push(local_path, guest)
+    del local_path, remote_name, resolve
+    print("push は廃止されました (2026-09-09)。", file=sys.stderr)
+    print("  make deploy → ゲストで hsync を使ってください。", file=sys.stderr)
+    return False
 
 
 

@@ -63,7 +63,7 @@ int physmem_add_trusted(struct physmem *m, u32 first, u32 end, u32 source);
 int physmem_count(const struct physmem *m, u32 first, u32 end,
                   u32 kind, u32 *pages);
 /* Old loader compatibility policy only: clamp mem_kb BEFORE arithmetic to
- * 16MiB; reserve below the allocator band and the hotdeploy tail. Does not
+ * 16MiB; reserve below the allocator band. Does not
  * detect RAM or import any reported memory above 16MiB. No inactive-device
  * aperture exclusions. Other fixed reservations must be supplied by caller. */
 #define PHYSMEM_LEGACY_MAX_PFN 4096UL

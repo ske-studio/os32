@@ -79,11 +79,6 @@ STATIC_ASSERT((PAGING_RAM_LIMIT % (PTE_COUNT * PAGE_SIZE)) == 0,
               ram_limit_pde_aligned);
 STATIC_ASSERT((PAGING_BOOT_MAP_SIZE % (PTE_COUNT * PAGE_SIZE)) == 0,
               map_size_pde_aligned);
-/* ホットデプロイ窓は物理 RAM の末尾を削って作るので、必ず実 RAM 上限の
- * 内側に収まる (16MB 超のデバイス窓帯には出てこない)。 */
-STATIC_ASSERT(MEM_HOTDEPLOY_SIZE * 2 < PAGING_RAM_LIMIT,
-              hotdeploy_window_within_ram);
-
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
 /* Open Watcomでは __declspec(align(4096)) が使えないため、
  * 手動でアライメントを確保する。

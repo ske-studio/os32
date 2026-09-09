@@ -89,20 +89,19 @@ int physmem_add_trusted(struct physmem *m, u32 first, u32 end, u32 source)
 
 void physmem_bootstrap_legacy(struct physmem *m, u32 mem_kb)
 {
-    u32 end, usable, low, tail;
+    u32 end, low;
     physmem_init(m);
     if (mem_kb > PHYSMEM_LEGACY_MAX_PFN * (PHYSMEM_PAGE_SIZE / 1024UL))
         mem_kb = PHYSMEM_LEGACY_MAX_PFN * (PHYSMEM_PAGE_SIZE / 1024UL);
     end = mem_kb / (PHYSMEM_PAGE_SIZE / 1024UL);
     low = MEM_APP_BAND_BASE / PHYSMEM_PAGE_SIZE;
-    tail = MEM_HOTDEPLOY_SIZE / PHYSMEM_PAGE_SIZE;
-    usable = end > tail * 2 ? end - tail : end;
+    /* ホットデプロイ窓の撤去 (2026-09-09) で末尾の予約は無くなった。
+     * legacy アリーナは実 RAM の末尾までそのまま使える。 */
     /* At most four normalized intervals; capacity cannot fail here. */
     physmem_exclude(m, 0, low, PHYSMEM_RESERVED);
-    if (usable > low) overlay(m, low, usable, PHYSMEM_RAM, PHYSMEM_SOURCE_LEGACY);
-    if (usable < end) physmem_exclude(m, usable, end, PHYSMEM_RESERVED);
-    if (usable > MEM_EXEC_LOAD_ADDR / PHYSMEM_PAGE_SIZE)
-        m->legacy_ceiling = usable;
+    if (end > low) overlay(m, low, end, PHYSMEM_RAM, PHYSMEM_SOURCE_LEGACY);
+    if (end > MEM_EXEC_LOAD_ADDR / PHYSMEM_PAGE_SIZE)
+        m->legacy_ceiling = end;
 }
 
 u32 physmem_legacy_end(const struct physmem *m)

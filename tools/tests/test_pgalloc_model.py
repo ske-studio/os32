@@ -95,29 +95,33 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(physmem_add_trusted(&m, 1048575, 1048576, PHYSMEM_SOURCE_SYNTHETIC));
     before = m;
     for (i = 0; i < 65537; i++) backing[i] = 0xace01234UL;
-    CHECK(!pgalloc_init_model(&m, backing, 262143, 3968, verified));
-    CHECK(!pgalloc_init_model(&m, backing, 262144, 4032, verified));
+    CHECK(!pgalloc_init_model(&m, backing, 262143, 4032, verified));
+    CHECK(!pgalloc_init_model(&m, backing, 262144, 4096, verified));
     CHECK(!pgalloc_init_model(&m, backing, 262144, 1024, verified));
-    CHECK(!pgalloc_init_model(&m, backing, 262144, 3968, denied));
+    CHECK(!pgalloc_init_model(&m, backing, 262144, 4032, denied));
     a = (unsigned char *)&m; b = (unsigned char *)&before;
     for (i = 0; i < sizeof(m); i++) CHECK(a[i] == b[i]);
     for (i = 0; i < 65537; i++) CHECK(backing[i] == 0xace01234UL);
-    for (i = 0; i < 29; i++)
+    /* 窓の撤去 (2026-09-09) で bootstrap の区間が 1 つ減った。容量ちょうどに
+     * するのは分割 1 回あたり 2 区間なので、29 + 末尾 1 本 (= 63) ではなく
+     * 30 回で 64 に届く。狙いは「容量いっぱいのモデルでは init_model が
+     * 何も変えずに失敗する」ことの確認で、そこは変わらない。 */
+    for (i = 0; i < 30; i++)
         CHECK(physmem_exclude(&m, 20000 + i * 2, 20001 + i * 2, PHYSMEM_RESERVED));
-    CHECK(physmem_exclude(&m, 1048574, 1048575, PHYSMEM_RESERVED));
     CHECK(m.count == PHYSMEM_MAX_RANGES);
     before = m;
     CHECK(!pgalloc_init_model(&m, backing, 262144, 3900, verified));
     for (i = 0; i < sizeof(m); i++) CHECK(a[i] == b[i]);
     for (i = 0; i < 65537; i++) CHECK(backing[i] == 0xace01234UL);
     physmem_bootstrap_legacy((struct physmem *)backing, 16384);
-    CHECK(!pgalloc_init_model((struct physmem *)backing, backing, 262144, 4031, verified));
-    CHECK(((struct physmem *)backing)->count == 4);
+    CHECK(!pgalloc_init_model((struct physmem *)backing, backing, 262144, 4095, verified));
+    /* 窓の撤去で bootstrap の区間は 3 本 (旧 4 本)。 */
+    CHECK(((struct physmem *)backing)->count == 3);
     physmem_bootstrap_legacy(&m, 16384);
-    CHECK(pgalloc_init_model(&m, backing, 262144, 4031, verified));
+    CHECK(pgalloc_init_model(&m, backing, 262144, 4095, verified));
     CHECK(backing[65536] == 0xace01234UL);
     CHECK(pgalloc_metadata_bytes(&m) == PAGE_SIZE);
-    CHECK(pgalloc_limit_pfn() == 4032);
+    CHECK(pgalloc_limit_pfn() == 4096);
 ''', flags=('-DPHYSMEM_HOST_TEST=1', '-DPGALLOC_HOST_TEST=1'))
 
     def test_production_rejects_forged_synthetic_and_host_backing(self):
@@ -146,7 +150,7 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(physmem_add_trusted(&m, 4096, END, PHYSMEM_SOURCE_SYNTHETIC));
     bytes = pgalloc_metadata_bytes(&m);
     CHECK(bytes == ((END / 32 * 8 + 4095) & ~4095UL));
-    first = 4032 - bytes / PAGE_SIZE;
+    first = 4096 - bytes / PAGE_SIZE;
     backing[2048] = 0x12345678UL;
     CHECK(pgalloc_init_model(&m, backing, bytes, first, verified));
     CHECK(pgalloc_limit_pfn() == END);
@@ -184,31 +188,32 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(sys_memory_init_model != 0);
     physmem_bootstrap_legacy(&m, 16384);
     CHECK(physmem_add_trusted(&m, 1048575, 1048576, PHYSMEM_SOURCE_SYNTHETIC));
-    CHECK(sys_memory_init_model(&m, backing, sizeof(backing), 3968, verified));
-    CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
-    CHECK(sys_usable_mem_end() == 3968 * PAGE_SIZE);
+    CHECK(sys_memory_init_model(&m, backing, sizeof(backing), 4032, verified));
+    CHECK(sys_usable_mem_end() == 4032 * PAGE_SIZE);
     sys_mem_kb = 65536;
-    CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
+    CHECK(sys_usable_mem_end() == 4032 * PAGE_SIZE);
     /* The model path must still honour sys_reserve_top: the PEGC 8bpp
        backbuffer (H2) is its only caller and refusing it disables PEGC.
        Metadata/workspace sit above the frozen exec ceiling, so the carve
-       lowers that ceiling instead of the hotdeploy base. */
-    CHECK(sys_reserve_top(PAGE_SIZE) == 3967 * PAGE_SIZE);
-    CHECK(sys_usable_mem_end() == 3967 * PAGE_SIZE);
-    CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
-    CHECK(!pgalloc_alloc_n_range(1, 3967 * PAGE_SIZE, 3968 * PAGE_SIZE));
+       lowers that ceiling. The hotdeploy window was retired 2026-09-09,
+       so the arena now ends at real RAM. */
+    CHECK(sys_reserve_top(PAGE_SIZE) == 4031 * PAGE_SIZE);
+    CHECK(sys_usable_mem_end() == 4031 * PAGE_SIZE);
+    CHECK(!pgalloc_alloc_n_range(1, 4031 * PAGE_SIZE, 4032 * PAGE_SIZE));
     CHECK(!pgalloc_alloc_n_pfn(1, 1048575, 1048576, &p));
-    CHECK(!sys_memory_init_model(&m, backing, sizeof(backing), 3968, verified));
+    CHECK(!sys_memory_init_model(&m, backing, sizeof(backing), 4032, verified));
 ''', flags=('-DPHYSMEM_HOST_TEST=1', '-DPGALLOC_HOST_TEST=1'))
 
     def test_sys_low_stable(self):
         self.run_c('''
     u32 base;
     sys_mem_kb = 0xffffffffUL;
-    CHECK(sys_hotdeploy_base() == 0xfc0000UL);
-    base = sys_hotdeploy_base();
+    /* Retired hotdeploy window (2026-09-09): the arena ends at real RAM,
+       clamped to PHYSMEM_LEGACY_MAX_PFN = 16MiB. */
+    CHECK(sys_usable_mem_end() == 0x1000000UL);
+    base = sys_usable_mem_end();
     CHECK(!sys_reserve_top(0xffffffffUL));
-    CHECK(sys_hotdeploy_base() == base);
+    CHECK(sys_usable_mem_end() == base);
     pgalloc_init(16384);
     CHECK(sys_reserve_top(PAGE_SIZE) == base - PAGE_SIZE);
     CHECK(sys_usable_mem_end() == base - PAGE_SIZE);
@@ -225,11 +230,11 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(physmem_add_trusted(&m, 4096, 8192, PHYSMEM_SOURCE_SYNTHETIC));
     CHECK(physmem_add_trusted(&m, 12288, 16384, PHYSMEM_SOURCE_SYNTHETIC));
     CHECK(physmem_add_trusted(&m, 1048575, 1048576, PHYSMEM_SOURCE_SYNTHETIC));
-    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing) - 1, 3968, verified));
-    CHECK(!pgalloc_init_model(&m, backing + 1, sizeof(backing), 3968, verified));
-    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing), 4000, verified));
-    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing), 3968, 0));
-    CHECK(pgalloc_init_model(&m, backing, sizeof(backing), 3968, verified));
+    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing) - 1, 4032, verified));
+    CHECK(!pgalloc_init_model(&m, backing + 1, sizeof(backing), 4032, verified));
+    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing), 4064, verified));
+    CHECK(!pgalloc_init_model(&m, backing, sizeof(backing), 4032, 0));
+    CHECK(pgalloc_init_model(&m, backing, sizeof(backing), 4032, verified));
     CHECK(pgalloc_limit_pfn() == 1048576);
     CHECK(pgalloc_alloc_n_pfn(1, 1048575, 1048576, &p) && p == 1048575);
     CHECK(pgalloc_free_n_pfn(p, 1));
@@ -241,7 +246,7 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(!pgalloc_alloc_n_pfn(0, 1048575, 1048576, &p));
     CHECK(!pgalloc_alloc_n_pfn(-1, 1048575, 1048576, &p));
     CHECK(!pgalloc_alloc_n_pfn(2147483647, 1048575, 1048576, &p));
-    CHECK(!pgalloc_alloc_n_pfn(1, 3968, 4032, &p));
+    CHECK(!pgalloc_alloc_n_pfn(1, 4032, 4096, &p));
     CHECK(!pgalloc_alloc_n_pfn(1, 8192, 12288, &p));
     CHECK(p == 99);
     CHECK(!pgalloc_free_n_pfn(1048575, 2));
@@ -264,9 +269,10 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     baseline = pgalloc_free_pages();
     total = pgalloc_total_pages();
     exec_child_claim(&a, &na, &b, &nb);
-    CHECK(a == 0x500000UL && na == 2431);
-    CHECK(b == 0xf7f000UL && nb == 65);
-    CHECK(b + nb * PAGE_SIZE == 0xfc0000UL);
+    /* 窓の撤去 (2026-09-09) で mem_end が 0xfc0000 -> 0x1000000 に伸びた。 */
+    CHECK(a == 0x500000UL && na == 2495);
+    CHECK(b == 0xfbf000UL && nb == 65);
+    CHECK(b + nb * PAGE_SIZE == 0x1000000UL);
     gap = a + na * PAGE_SIZE;
     CHECK(b - gap == EXEC_DYN_RESERVE);
     for (pass = 0; pass < 2; pass++) {
@@ -349,15 +355,16 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     u32 baseline, total, p;
     physmem_bootstrap_legacy(&m, 16384);
     CHECK(physmem_add_trusted(&m, 1048575, 1048576, PHYSMEM_SOURCE_SYNTHETIC));
-    CHECK(pgalloc_init_model(&m, backing, sizeof(backing), 3968, verified));
+    CHECK(pgalloc_init_model(&m, backing, sizeof(backing), 4032, verified));
     baseline = pgalloc_free_pages();
     total = pgalloc_total_pages();
-    pgalloc_mark_used(3967 * PAGE_SIZE, 65); /* live + metadata */
+    /* 窓の撤去 (2026-09-09) で metadata が [3968,4032) -> [4032,4096) に上がった。 */
+    pgalloc_mark_used(4031 * PAGE_SIZE, 65); /* live + metadata */
     pgalloc_mark_used(8192 * PAGE_SIZE, 1); /* UNKNOWN below high-water */
     CHECK(pgalloc_free_pages() == baseline - 1);
-    CHECK(!pgalloc_free_n_pfn(3967, 65));
-    CHECK(!pgalloc_free_n_pfn(3968, 64));
-    CHECK(pgalloc_free_n_pfn(3967, 1));
+    CHECK(!pgalloc_free_n_pfn(4031, 65));
+    CHECK(!pgalloc_free_n_pfn(4032, 64));
+    CHECK(pgalloc_free_n_pfn(4031, 1));
     pgalloc_mark_used(0xfffff000UL, 1);
     pgalloc_mark_used(0xfffff000UL, 1);
     CHECK(pgalloc_free_pages() == baseline - 1);
@@ -365,7 +372,7 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(pgalloc_free_pages() == baseline);
     CHECK(pgalloc_total_pages() == total);
     p = 99;
-    CHECK(!pgalloc_alloc_n_pfn(1, 3968, 4032, &p));
+    CHECK(!pgalloc_alloc_n_pfn(1, 4032, 4096, &p));
     CHECK(!pgalloc_alloc_n_pfn(1, 8192, 8193, &p));
     CHECK(p == 99);
 ''', flags=('-DPHYSMEM_HOST_TEST=1', '-DPGALLOC_HOST_TEST=1'))

@@ -111,7 +111,7 @@ os32/
 │   └── out/        ビルド成果物 (kernel.bin, sqlite.bin, vmkernel.lz4, unicode.bin, kernel.elf/.map)
 ├── assets/         データアセット (DB, 辞書, profile 等)
 ├── tests/          テストスクリプト
-├── tools/          ホスト上でのイメージ生成・デプロイ・検査ツール (nhd_deploy, hotdeploy, mkshlib, check_*, emu_agent/ (ローカル AI の実機操作), np21w_mcp/)
+├── tools/          ホスト上でのイメージ生成・デプロイ・検査ツール (nhd_deploy, mkshlib, check_*, emu_agent/ (ローカル AI の実機操作), np21w_mcp/)
 ├── packages/       生成された .PKG (make packages)
 ├── images/         生成されたブートイメージ (make all / iso)
 ├── Makefile        マスタービルドスクリプト (build/*.mk を include)
@@ -131,7 +131,7 @@ python3 tools/nhd_deploy.py write-boot boot/loader_hdd.bin  # ブート領域書
 python3 tools/nhd_deploy.py sync-from-hostdrv  # HostDrv (C:\os32) から ext2 へ同期
 python3 tools/nhd_deploy.py deploy     # ローカルNHD (build/nhd/os32.nhd、無ければ自動 pull) をNP21/Wにコピー
 python3 tools/nhd_deploy.py copy userland/shell.bin  # 個別ファイルのデプロイ
-make hotdeploy FILE=apps/foo/foo.bin                        # ホットデプロイ (再起動不要)
+make deploy                                                # HostDrv 同期 → ゲストで hsync (再起動不要)
 # 他: mount / umount / ls / rm / mkdirs / format / write-boot
 ```
 - 配備対象・ゲストパス・タグは層ごとの deploy.yaml で定義する
@@ -160,7 +160,7 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 | `make apps` / `make game` | 外部リポジトリ (git submodule `apps/` = os32-apps、`game/` = os32-game) を SDK 経由でビルド。空なら `git submodule update --init` を促す |
 | `make external` | 上記 2 つをまとめて。KAPI / SDK ライブラリ変更後に再ビルドする。ポインタ更新条件は下記参照 |
 | `make clean-external` | 外部リポジトリの生成物を削除 |
-| `make hotdeploy FILE=<path>` | 個別バイナリのホットデプロイ — 再起動不要。ユーザーランドのみ |
+| `make deploy` → ゲストで `hsync` | HostDrv 経由の配送 — 再起動不要。`hsync` は既定で `/sys` を外す (稼働中のシェル・共有ライブラリ)。入れ替えるときは `hsync sys` |
 | `make nhd-pull` | Windows 側 NHD を作業イメージ `build/nhd/os32.nhd` に取り込む (フォーマットしない)。deploy 系は無ければ自動で pull する |
 | `make nhd-init` | 初回セットアップ — **フォーマットするのでゲスト側データが消える** |
 | `make nhd-mount` / `make nhd-umount` | 作業イメージの手動マウント・アンマウント |
@@ -183,7 +183,8 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   `emu_pause`、breakpoint 停止、HTTP 無応答はプロセス終了の証拠にならない。
 - **HostDrv だけでは検証にならない** ([V1])。ゲストの PATH は NHD の `/usr/bin` を先に見るので、
   古いバイナリが黙って動き、合格したように見える。
-- 単発のユーザーランドバイナリは `make hotdeploy FILE=...` で再起動なしに差し替えられる
+- ユーザーランドは `make deploy` → ゲストで `hsync` で再起動なしに差し替えられる
+  (ホットデプロイの物理末尾 256KB 窓は 2026-09-09 に撤去)
   (カーネルと `/sys` は不可)。
 - 配備マニフェストは所有層ごとに分かれている (`build/core.yaml`、`userland/deploy.yaml`、
   `apps/deploy.yaml`、`game/deploy.yaml`)。統合は `tools/deploy_manifests.py`。

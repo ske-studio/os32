@@ -10,18 +10,22 @@
 #include "rtc.h"
 #include "os_time.h"
 
+/* 管理する物理 RAM の末尾 (バイト)。legacy 経路の上限そのもの。 */
+static u32 sys_phys_end(void);
+
 int sys_device_reserve_core(u32 owner, const struct sys_device_span *spans,
                             u32 count, const struct sys_device_capability *cap)
 {
     unsigned int flags;
-    u32 hot;
+    u32 end;
     int ok;
     flags = irq_save();
-    hot = sys_hotdeploy_base() / PAGE_SIZE;
+    /* sys low fixed extent の上端 = 管理する実 RAM の末尾。ホットデプロイ窓を
+     * 撤去した (2026-09-09) ので、その分の上乗せは無い。 */
+    end = sys_phys_end() / PAGE_SIZE;
     ok = 0;
-    if (hot <= PHYSMEM_MAX_PFN - MEM_HOTDEPLOY_SIZE / PAGE_SIZE)
-        ok = pgalloc_device_reserve(owner, spans, count, cap,
-                                    hot + MEM_HOTDEPLOY_SIZE / PAGE_SIZE);
+    if (end && end <= PHYSMEM_MAX_PFN)
+        ok = pgalloc_device_reserve(owner, spans, count, cap, end);
     irq_restore(flags);
     return ok;
 }
@@ -62,7 +66,7 @@ u32 sys_get_mem_kb(void)
  * 現状の唯一の利用者は PEGC 8bpp バックバッファ (H2)。9801 では 0 のまま
  * なので sys_usable_mem_end() は従来と同じ値を返す (回帰ゼロ)。 */
 static u32 sys_top_reserved = 0;
-static u32 sys_frozen_exec, sys_frozen_hot;
+static u32 sys_frozen_exec, sys_frozen_end;
 static int sys_model_staged;
 
 int sys_memory_bootstrap_model(struct physmem *m, const struct pgalloc_layout *l,
@@ -74,7 +78,7 @@ int sys_memory_bootstrap_model(struct physmem *m, const struct pgalloc_layout *l
     int ok;
     flags = irq_save();
     ok = 0;
-    if (sys_frozen_hot || sys_top_reserved || !m || !l || !verify ||
+    if (sys_frozen_end || sys_top_reserved || !m || !l || !verify ||
         !paging_boot_context()) goto done;
     /* Backing is about to be zeroed; retain no borrowed layout pointer. */
     layout = *l;
@@ -86,14 +90,14 @@ int sys_memory_bootstrap_model(struct physmem *m, const struct pgalloc_layout *l
         l->workspace_end != l->metadata_first ||
         l->workspace_first < (MEM_EXEC_LOAD_ADDR + MEM_EXEC_STACK_SIZE +
             MEM_EXEC_SBRK_MIN + MEM_EXEC_HEAP_MIN) / PAGE_SIZE ||
-        top > PHYSMEM_LEGACY_MAX_PFN - MEM_HOTDEPLOY_SIZE / PAGE_SIZE) goto done;
-    if (!physmem_count(m, top, top + MEM_HOTDEPLOY_SIZE / PAGE_SIZE,
-                       PHYSMEM_RESERVED, &count) ||
-        count != MEM_HOTDEPLOY_SIZE / PAGE_SIZE ||
-        !verify(top, count, (void *)(top * PAGE_SIZE))) goto done;
+        top > PHYSMEM_LEGACY_MAX_PFN) goto done;
+    /* ホットデプロイ窓を撤去したので、legacy 上端の直上に予約帯は無い。
+     * 検証すべきは metadata / workspace の写像だけで、それは
+     * pgalloc_init_layout が verify を通して行う。 */
+    (void)count;
     if (!pgalloc_init_layout(m, l, verify)) goto done;
     sys_frozen_exec = l->workspace_first * PAGE_SIZE;
-    sys_frozen_hot = top * PAGE_SIZE;
+    sys_frozen_end = top * PAGE_SIZE;
     sys_model_staged = 1;
     ok = 1;
 done:
@@ -114,7 +118,7 @@ int sys_memory_init_model(struct physmem *m, void *backing, u32 capacity,
     int ok;
     flags = irq_save();
     ok = 0;
-    if (sys_frozen_hot || sys_top_reserved || !m || !verify) goto done;
+    if (sys_frozen_end || sys_top_reserved || !m || !verify) goto done;
     bytes = pgalloc_metadata_bytes(m);
     if (!bytes) goto done;
     top = physmem_legacy_end(m);
@@ -122,40 +126,36 @@ int sys_memory_init_model(struct physmem *m, void *backing, u32 capacity,
                MEM_EXEC_SBRK_MIN + MEM_EXEC_HEAP_MIN) / PAGE_SIZE;
     if (top != m->legacy_ceiling || first < minimum || first >= top ||
         bytes / PAGE_SIZE != top - first ||
-        top > PHYSMEM_LEGACY_MAX_PFN - MEM_HOTDEPLOY_SIZE / PAGE_SIZE) goto done;
-    if (!physmem_count(m, top, top + MEM_HOTDEPLOY_SIZE / PAGE_SIZE,
-                       PHYSMEM_RESERVED, &count) ||
-        count != MEM_HOTDEPLOY_SIZE / PAGE_SIZE ||
-        !verify(top, count, (void *)(top * PAGE_SIZE))) goto done;
+        top > PHYSMEM_LEGACY_MAX_PFN) goto done;
+    (void)count;
     if (!pgalloc_init_model(m, backing, capacity, first, verify)) goto done;
     sys_frozen_exec = first * PAGE_SIZE;
-    sys_frozen_hot = top * PAGE_SIZE;
+    sys_frozen_end = top * PAGE_SIZE;
     ok = 1;
 done:
     irq_restore(flags);
     return ok;
 }
 
-/* ステージング領域の先頭 (物理)。物理末尾からホットデプロイ窓を引いた位置で、
- * 追加予約 (sys_top_reserved) には影響されない。
- * 設計: docs/tasks/hotdeploy/DESIGN.md */
-u32 sys_hotdeploy_base(void)
+/* 管理する物理 RAM の末尾 (バイト)。ホットデプロイ窓を撤去した (2026-09-09)
+ * ので、ここが legacy アリーナの上端そのもの。固定予約 (sys_top_reserved) には
+ * 影響されない。 */
+static u32 sys_phys_end(void)
 {
-    u32 kb, end;
-    if (sys_frozen_hot) return sys_frozen_hot;
+    u32 kb;
+    if (sys_frozen_end) return sys_frozen_end;
     kb = sys_mem_kb;
     if (kb > PHYSMEM_LEGACY_MAX_PFN * (PAGE_SIZE / 1024))
         kb = PHYSMEM_LEGACY_MAX_PFN * (PAGE_SIZE / 1024);
-    end = (kb / (PAGE_SIZE / 1024)) * PAGE_SIZE;
-    return (end > MEM_HOTDEPLOY_SIZE * 2) ? (end - MEM_HOTDEPLOY_SIZE) : end;
+    return (kb / (PAGE_SIZE / 1024)) * PAGE_SIZE;
 }
 
-/* 物理末尾からホットデプロイ用ステージング領域と固定予約を除いた、
- * 割り当ててよい上限。子プロセスのスタックはここから下へ伸びる。 */
+/* 物理末尾から固定予約 (PEGC バックバッファ等) を除いた、割り当ててよい上限。
+ * 子プロセスのスタックはここから下へ伸びる。 */
 u32 sys_usable_mem_end(void)
 {
-    if (sys_frozen_hot) return sys_frozen_exec;
-    return sys_hotdeploy_base() - sys_top_reserved;
+    if (sys_frozen_end) return sys_frozen_exec;
+    return sys_phys_end() - sys_top_reserved;
 }
 
 /* ======================================================================== */
@@ -201,7 +201,7 @@ u32 sys_reserve_top(u32 bytes)
     if (!pgalloc_reserve_pfn((ceiling - need) / PAGE_SIZE,
                              ceiling / PAGE_SIZE)) goto done;
     sys_top_reserved = need;
-    if (sys_frozen_hot) sys_frozen_exec = ceiling - need;
+    if (sys_frozen_end) sys_frozen_exec = ceiling - need;
     result = ceiling - need;
 done:
     irq_restore(flags);

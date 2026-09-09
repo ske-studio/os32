@@ -57,7 +57,7 @@ void _start(void)
     CHECK(physmem_exclude(&m, 5000, 5002, PHYSMEM_MMIO));
     CHECK(physmem_add_trusted(&m, 1048575, 1048576, PHYSMEM_SOURCE_SYNTHETIC));
     l.capacity = pgalloc_metadata_bytes(&m);
-    l.metadata_first = 4032 - l.capacity / PAGE_SIZE;
+    l.metadata_first = 4096 - l.capacity / PAGE_SIZE;
     l.metadata = (void *)(l.metadata_first * PAGE_SIZE);
     l.workspace_end = l.metadata_first;
     l.workspace_first = l.workspace_end - 16;
@@ -72,7 +72,7 @@ void _start(void)
         struct physmem *alias = (struct physmem *)(l.workspace_first * PAGE_SIZE);
         *alias = m;
         CHECK(!sys_memory_bootstrap_model(alias, &l, paging_verify_identity));
-        CHECK(!initialized && !sys_frozen_hot);
+        CHECK(!initialized && !sys_frozen_end);
         die(0);
     }
 #endif
@@ -95,7 +95,7 @@ void _start(void)
             if (i == 5) page_tables[l.workspace_first / PTE_COUNT][l.workspace_first % PTE_COUNT] |= PTE_USER;
             if (i == 6) page_tables[l.workspace_first / PTE_COUNT][l.workspace_first % PTE_COUNT] |= PTE_PCD;
             CHECK(!sys_memory_bootstrap_model(&m, &bad, paging_verify_identity));
-            CHECK(!pgalloc_model_state() && !initialized && !sys_frozen_hot);
+            CHECK(!pgalloc_model_state() && !initialized && !sys_frozen_end);
             CHECK(pgalloc_free_pages() == free_before);
             for (j = 0; j < sizeof(m); j++) CHECK(a[j] == b[j]);
             for (j = 0; j < l.capacity / sizeof(u32); j++) CHECK(storage[j] == 0xa55aa55aUL);
@@ -111,7 +111,6 @@ void _start(void)
     CHECK(sys_memory_bootstrap_model(&m, &l, paging_verify_identity));
 #endif
     CHECK(sys_usable_mem_end() == l.workspace_first * PAGE_SIZE);
-    CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
     CHECK(!pgalloc_alloc_page());
     p = 99;
     CHECK(!pgalloc_alloc_n_pfn(1, 4096, TEST_END, &p) && p == 99);
@@ -158,8 +157,8 @@ void _start(void)
     for (i = 0; i < 4096; i++) CHECK(low[i] == page_tables[i / PTE_COUNT][i % PTE_COUNT]);
 #ifdef TEST_RESERVE_TOP
     /* PEGC 8bpp backbuffer (H2) must still be reservable on the model path.
-     * Legacy carved below the hotdeploy window; the model must carve below the
-     * frozen exec ceiling instead, since metadata/workspace sit above it. */
+     * The model must carve below the frozen exec ceiling, since
+     * metadata/workspace sit above it (the hotdeploy window is gone). */
     {
         u32 ceiling = sys_usable_mem_end();
         u32 need = ((u32)MEM_GFX_BB8_SIZE + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -167,7 +166,8 @@ void _start(void)
         CHECK(base != 0);
         CHECK(base == ceiling - need);
         CHECK(sys_usable_mem_end() == base);
-        CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
+        /* 予約の分だけ上限が下がる。窓は無いので workspace_first からちょうど need。 */
+        CHECK(base == l.workspace_first * PAGE_SIZE - need);
         /* Idempotent for the same size, and the reserved pages never allocate. */
         CHECK(sys_reserve_top((u32)MEM_GFX_BB8_SIZE) == base);
         CHECK(!sys_reserve_top((u32)MEM_GFX_BB8_SIZE + PAGE_SIZE));
@@ -180,7 +180,7 @@ void _start(void)
     CHECK(!paging_is_present(TEST_END * PAGE_SIZE));
     CHECK(paging_is_present(0xffffffffUL));
     CHECK(pgalloc_model_state() == PGALLOC_ONLINE);
-    CHECK(!pgalloc_alloc_n_pfn(1, l.workspace_first, 4032, &p));
+    CHECK(!pgalloc_alloc_n_pfn(1, l.workspace_first, 4096, &p));
     CHECK(!pgalloc_free_n_pfn(l.workspace_first, 1));
     CHECK(!pgalloc_free_n_pfn(l.metadata_first, 1));
     for (i = 8; i < TEST_END / PTE_COUNT; i++) {

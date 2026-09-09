@@ -43,7 +43,7 @@ class MemoryBoot(unittest.TestCase):
                 self.run_case(case, 16384)
 
     def test_actual_pte_verification_before_write(self):
-        for case in ('metadata_pte', 'workspace_pte', 'hot_pte'):
+        for case in ('metadata_pte', 'workspace_pte'):
             with self.subTest(case=case):
                 self.run_case(case, 16384)
 
@@ -53,7 +53,7 @@ class MemoryBoot(unittest.TestCase):
         self.assertIn(gate, s)
         start = s.index(gate)
         downstream = min(s.index(f'{name}();') for name in
-                         ('shm_init', 'hotdeploy_init', 'kselftest_run', 'shlib_init'))
+                         ('shm_init', 'kselftest_run', 'shlib_init'))
         self.assertLess(s.index('paging_init(mem_kb);'), start)
         self.assertLess(start, downstream)
         self.assertNotIn('pgalloc_init(mem_kb)', s)

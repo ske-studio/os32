@@ -38,14 +38,15 @@ void buz_on(void);
 void buz_off(void);
 
 /* Boot-only model handoff; metadata must occupy the contiguous low RAM tail.
- * Freezes legacy exec below metadata and leaves hotdeploy at its old base.
- * verify has pgalloc_init_model's mapping contract, also for hotdeploy.
+ * Freezes legacy exec below metadata; the arena ends at real RAM (the
+ * hotdeploy window was retired 2026-09-09). verify has pgalloc_init_model's
+ * mapping contract.
  * Does not map high RAM or authorize general high-address dereferences.
  * Current kernel entry still uses the safe legacy path; provider not wired. */
 struct physmem;
 struct pgalloc_layout;
 /* Opt-in staged boot, not called by the current kernel entry. Layout is
- * [final exec][low PT workspace][metadata][unchanged hotdeploy]. Both low
+ * [final exec][low PT workspace][metadata] up to real RAM end. Both low
  * claims validate atomically before any backing/model/sys state changes.
  * Pass paging_verify_identity after legacy paging_init. BOOTSTRAP denies
  * all general allocations; stage maps eligible high RAM and only then
@@ -60,9 +61,8 @@ int sys_memory_init_model(struct physmem *model, void *backing, u32 capacity,
                           u32 first_pfn, int (*verify)(u32, u32, void *));
 u32 sys_get_mem_kb(void);
 u32 sys_usable_mem_end(void);
-u32 sys_hotdeploy_base(void);
 
-/* 物理末尾側 (ホットデプロイ窓の直下) に bytes バイトを固定予約し、先頭物理を
+/* 物理末尾側 (使用可能上限の直下) に bytes バイトを固定予約し、先頭物理を
  * 返す。以後 sys_usable_mem_end() はその分下がる。ブート中に 1 回だけ。
  * 戻り値 0 = 予約できなかった。→ kernel/sys.c の説明 */
 u32 sys_reserve_top(u32 bytes);

@@ -39,7 +39,7 @@ int pgalloc_device_reserve(u32 owner, const struct sys_device_span *spans,
 #define PGALLOC_BOOTSTRAP 1
 #define PGALLOC_ONLINE 2
 /* Model-only boot layout: [workspace_first,workspace_end) and metadata are
- * disjoint, mapped low RAM tails above final exec and below hotdeploy.
+ * disjoint, mapped low RAM tails above final exec, up to real RAM end.
  * Workspace is permanently excluded from general allocation. */
 struct pgalloc_layout {
     void *metadata;

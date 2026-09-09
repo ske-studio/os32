@@ -205,7 +205,7 @@ static void boundaries(void)
         range_expect(1, PGALLOC_BASE, PGALLOC_BASE + PAGE_SIZE, PGALLOC_BASE);
         pgalloc_init(0);
         range_expect(1, PGALLOC_BASE, PGALLOC_BASE + PAGE_SIZE, 0);
-        pgalloc_init((PGALLOC_BASE + MEM_HOTDEPLOY_SIZE + PAGE_SIZE + 1024) / 1024);
+        pgalloc_init((PGALLOC_BASE + PAGE_SIZE + 1024) / 1024);
         range_expect(1, PGALLOC_BASE, PGALLOC_BASE + 2 * PAGE_SIZE, 0);
         range_expect(1, PGALLOC_BASE, PGALLOC_BASE + PAGE_SIZE, PGALLOC_BASE);
     }
@@ -261,7 +261,7 @@ static void generic_regression(void)
 {
     u32 count, base = PGALLOC_BASE;
     pgalloc_init(0xffffffffUL);
-    count = (PAGING_RAM_LIMIT - MEM_HOTDEPLOY_SIZE - base) / PAGE_SIZE;
+    count = (PAGING_RAM_LIMIT - base) / PAGE_SIZE;
     CHECK(pgalloc_total_pages() == count && pgalloc_free_pages() == count);
     CHECK(pgalloc_alloc_n(0) == 0 && pgalloc_alloc_n(-1) == 0);
     CHECK(pgalloc_alloc_n(2147483647) == 0);

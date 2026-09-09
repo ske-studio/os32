@@ -27,7 +27,6 @@
 #include "paging.h"
 #include "memory_boot.h"
 #include "shlib.h"
-#include "hotdeploy.h"
 #include "shm.h"
 #include "utf8.h"
 #include "kselftest.h"
@@ -376,9 +375,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
-
-    /* ホットデプロイ制御ブロック初期化 (ホストが番地を読むので早めに) */
-    hotdeploy_init();
 
     /* カーネル内プリミティブの自己診断。
      * 外部プログラムの klibc_test は newlib 側を試すだけで、カーネルが

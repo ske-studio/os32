@@ -263,11 +263,12 @@ class Broker(unittest.TestCase):
     sys_mem_kb = 8192;
     pgalloc_init(sys_mem_kb);
     total = pgalloc_total_pages();
-    CHECK(total == 1984 - 1024);
+    /* 8MiB。窓の撤去 (2026-09-09) で末尾 64 ページが戻り 1984 -> 2048。 */
+    CHECK(total == 2048 - 1024);
     CHECK(sys_device_reserve_core(1, &s, 1, &cap));
     CHECK(sys_device_reserve_core(1, &s, 1, &cap));
     CHECK(pgalloc_total_pages() == total && pgalloc_free_pages() == total);
-    CHECK(sys_usable_mem_end() == 1984 * PAGE_SIZE);
+    CHECK(sys_usable_mem_end() == 2048 * PAGE_SIZE);
     CHECK(!sys_device_reserve_core(2, &s, 1, &cap));
     s.end--;
     CHECK(!sys_device_reserve_core(1, &s, 1, &cap));

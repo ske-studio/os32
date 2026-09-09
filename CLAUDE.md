@@ -29,7 +29,8 @@ make external                             # apps/ + game/ — after any KAPI or 
 make check                                # KAPI version, manifests, constraint IDs, GUI proto, etc.
 make clean                                # required after a KAPI struct change ([ABI3])
 make deploy                               # HostDrv (C:\os32) — no reboot, not verification ([V1])
-make hotdeploy FILE=userland/cmds/wc.bin  # one userland binary into the running guest
+# userland delivery: make deploy (host -> C:\os32) then `hsync` in the guest
+#   hsync skips /sys (running shell + shlibs) unless you name it: `hsync sys`
 make deploy-kernel / deploy-boot          # NHD / boot area — stop NP21/W first ([D1])
 ```
 
@@ -133,7 +134,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   detection), the Cirrus linear window is mapped once and kept across shutdown (re-init resets the relay
   flag), and gshell X4 must not consume WM-owned button edges (`wm_owns_edge`). → §4-20〜§4-22
 - GUI verification on NP21/W: `--data-urlencode` for `SHIFT+SPACE`, `/api/mouse` uses `ax/ay`, deploy
-  rewrites `system.cfg`, hotdeploy only from CUI+rshell. → §4-23
+  rewrites `system.cfg`. → §4-23
 - `ext2_g_aux` is the bitmap scratch buffer — never keep an indirect table or data there across a free/alloc
   (files >12KB got cross-linked on overwrite until 2026-09-06). → §4-24
 - "GUI feels slow" → measure first: read `gfx_counters` around the keystroke to see whether a present

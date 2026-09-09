@@ -30,7 +30,7 @@ python3 tools/emu_agent/agent.py tail                                      # 直
 | 種別 | 操作 |
 |---|---|
 | 実機 | `cmd` `cmd_nowait` `wait` `key` `tvram` `status` `screenshot` `selftest` |
-| ホスト | `make <許可 target>` `hotdeploy FILE=...` `deploy` (= `os32-cycle deploy`) |
+| ホスト | `make <許可 target>` `deploy` (= `os32-cycle deploy`) |
 
 `make` の許可リストは `MAKE_TARGETS` (agent.py)。`check-*` の個別ターゲットも入れてある
 (落ちた 1 本だけ回し直すため)。**`build/sdk.mk` に `check-*` を足したら `MAKE_TARGETS`

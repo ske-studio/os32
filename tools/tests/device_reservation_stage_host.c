@@ -44,7 +44,7 @@ void _start(void)
     physmem_bootstrap_legacy(&m,16384);
     CHECK(physmem_add_trusted(&m,4096,8192,PHYSMEM_SOURCE_SYNTHETIC));
     l.capacity = pgalloc_metadata_bytes(&m);
-    l.metadata_first = 4032 - l.capacity / PAGE_SIZE;
+    l.metadata_first = 4096 - l.capacity / PAGE_SIZE;
     l.metadata = (void *)(l.metadata_first * PAGE_SIZE);
     l.workspace_end = l.metadata_first;
     l.workspace_first = l.workspace_end - 16;

@@ -63,7 +63,7 @@ void _start(void) {
     u32 i, count, pfn;
     unsigned char *a, *b;
     physmem_bootstrap_legacy(&m, 0xffffffffUL);
-    CHECK(physmem_legacy_end(&m) == 4032);
+    CHECK(physmem_legacy_end(&m) == 4096);
     CHECK(m.ranges[1].sources == PHYSMEM_SOURCE_LEGACY);
     CHECK(physmem_add_trusted(&m, 5000, 5010, PHYSMEM_SOURCE_MACHINE));
     CHECK(physmem_exclude(&m, 5004, 5006, PHYSMEM_MMIO));
@@ -80,7 +80,7 @@ void _start(void) {
     CHECK(pfn == 99);
     CHECK(physmem_count(&m, 4096, PHYSMEM_MAX_PFN, PHYSMEM_RAM, &count));
     CHECK(count == 8);
-    CHECK(physmem_legacy_end(&m) == 4032);
+    CHECK(physmem_legacy_end(&m) == 4096);
     CHECK(!physmem_add_trusted(&m, 4096, 5000, PHYSMEM_SOURCE_LEGACY));
     CHECK(!physmem_add_trusted(&m, 4096, 5000, 0));
     CHECK(!physmem_add_trusted(&m, 4096, 5000, 0xffffffffUL));
@@ -173,20 +173,22 @@ void _start(void) {
     struct physmem m;
     u32 count;
     physmem_bootstrap_legacy(&m, 0xffffffffUL);
-    CHECK(physmem_legacy_end(&m) == 4032UL);
+    CHECK(physmem_legacy_end(&m) == 4096UL);
     CHECK(physmem_count(&m, 4096, PHYSMEM_MAX_PFN, PHYSMEM_UNKNOWN, &count));
     CHECK(count == PHYSMEM_MAX_PFN - 4096);
     CHECK(physmem_count(&m, 0, 1024, PHYSMEM_RESERVED, &count) && count == 1024);
-    CHECK(physmem_count(&m, 4032, 4096, PHYSMEM_RESERVED, &count) && count == 64);
+    /* ホットデプロイ窓を撤去 (2026-09-09) したので末尾の予約帯は無い。 */
+    CHECK(physmem_count(&m, 4032, 4096, PHYSMEM_RAM, &count) && count == 64);
     CHECK(m.ranges[1].sources == PHYSMEM_SOURCE_LEGACY);
     CHECK(physmem_add_trusted(&m, 4096, PHYSMEM_MAX_PFN, PHYSMEM_SOURCE_SYNTHETIC));
-    CHECK(physmem_legacy_end(&m) == 4032);
+    CHECK(physmem_legacy_end(&m) == 4096);
     CHECK(physmem_exclude(&m, 1500, 1501, PHYSMEM_RESERVED));
     CHECK(physmem_legacy_end(&m) == 1500);
     CHECK(physmem_add_trusted(&m, 1500, 1501, PHYSMEM_SOURCE_MACHINE));
     CHECK(physmem_legacy_end(&m) == 1500);
+    /* 8MB 相当。窓の撤去 (2026-09-09) で末尾 64 ページが解放され 1984 -> 2048。 */
     physmem_bootstrap_legacy(&m, 8195);
-    CHECK(physmem_legacy_end(&m) == 1984);
+    CHECK(physmem_legacy_end(&m) == 2048);
     physmem_bootstrap_legacy(&m, 0);
     CHECK(physmem_legacy_end(&m) == 0);
     CHECK(physmem_count(&m, 0, PHYSMEM_MAX_PFN, PHYSMEM_RAM, &count) && count == 0);
@@ -273,7 +275,7 @@ void _start(void) {
     CHECK(WAB_XE10_LINEARWIN_SIZE == 0x00200000UL);
     CHECK(xe_end == 0x01200000UL / PHYSMEM_PAGE_SIZE);
     /* Inactive apertures must not impose a default CUI RAM restriction. */
-    CHECK(physmem_count(&m, guard, 4032, PHYSMEM_RAM, &count) && count == 192);
+    CHECK(physmem_count(&m, guard, 4096, PHYSMEM_RAM, &count) && count == 256);
     CHECK(physmem_add_trusted(&m, xe, PHYSMEM_MAX_PFN, PHYSMEM_SOURCE_SYNTHETIC));
     CHECK(physmem_find(&m, xe, xe_end, 512, 1, &pfn) && pfn == xe);
     /* Synthetic boot-only example, NOT safe live backend activation code. */

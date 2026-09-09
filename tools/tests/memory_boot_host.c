@@ -79,21 +79,20 @@ void _start(void)
     paging_init(TEST_KB);
     sys_mem_kb = TEST_KB;
     CHECK(memory_boot_init != 0);
-#if defined(TEST_METADATA_PTE) || defined(TEST_WORKSPACE_PTE) || defined(TEST_HOT_PTE)
-    *(u32 *)0xEBF000 = 0xA55AA55A;
+/* 15MiB clamp なので legacy 上端は 0xF00。窓の撤去 (2026-09-09) で
+ * metadata が 0xEFF、workspace が 0xEFE に上がった (旧: 0xEBF / 0xEBE)。 */
+#if defined(TEST_METADATA_PTE) || defined(TEST_WORKSPACE_PTE)
+    *(u32 *)0xEFF000 = 0xA55AA55A;
 #ifdef TEST_METADATA_PTE
-    page_tables[3][0xEBF % PTE_COUNT] |= PTE_USER;
+    page_tables[3][0xEFF % PTE_COUNT] |= PTE_USER;
 #endif
 #ifdef TEST_WORKSPACE_PTE
-    page_tables[3][0xEBE % PTE_COUNT] &= ~PTE_PRESENT;
-#endif
-#ifdef TEST_HOT_PTE
-    page_tables[3][0xEFF % PTE_COUNT] |= PTE_PCD;
+    page_tables[3][0xEFE % PTE_COUNT] &= ~PTE_PRESENT;
 #endif
     CHECK(!memory_boot_init(TEST_KB));
     CHECK(bootstrap_calls == 1 && !stage_calls && !legacy_calls);
     CHECK(!initialized && !sys_model_staged && !pgalloc_alloc_page());
-    CHECK(*(u32 *)0xEBF000 == 0xA55AA55A);
+    CHECK(*(u32 *)0xEFF000 == 0xA55AA55A);
     die(0);
 #endif
 #if defined(TEST_BOOTSTRAP_FAIL) || defined(TEST_STAGE_FAIL)
@@ -105,16 +104,17 @@ void _start(void)
 #ifdef TEST_LEGACY
     CHECK(legacy_calls == 1 && !bootstrap_calls && !stage_calls);
     CHECK(initialized && !model_mode && !sys_model_staged);
-    CHECK(sys_usable_mem_end() == (TEST_KB * 1024 - MEM_HOTDEPLOY_SIZE));
+    CHECK(sys_usable_mem_end() == TEST_KB * 1024);
 #else
     CHECK(pgalloc_model_state() == PGALLOC_ONLINE);
-    CHECK(sys_hotdeploy_base() == 0xEC0000);
-    CHECK(sys_usable_mem_end() == 0xEBE000);
-    CHECK(workspace_first == 0xEBE && workspace_end == 0xEBF);
-    CHECK((u32)eligible == 0xEBF000);
+    CHECK(sys_usable_mem_end() == 0xEFE000);
+    CHECK(workspace_first == 0xEFE && workspace_end == 0xEFF);
+    CHECK((u32)eligible == 0xEFF000);
     CHECK(physmem_count(&device_boot_map, 0xF00, 0x100000, PHYSMEM_UNKNOWN, &count));
     CHECK(count == 0x100000 - 0xF00);
-    CHECK(pgalloc_limit_pfn() < 0xF00);
+    /* 窓が無くなったのでアリーナは 15MiB ちょうどで終わる (排他上限 0xF00)。
+     * 未証明の [15,16)MiB へは踏み込まない、という意図は変わらない。 */
+    CHECK(pgalloc_limit_pfn() == 0xF00);
 #endif
     (void)count;
     CHECK(pgalloc_alloc_page() != 0);
