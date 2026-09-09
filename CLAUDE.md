@@ -1,8 +1,15 @@
 # CLAUDE.md — AI コーディングアシスタント向けガイダンス
 
-AI コーディングアシスタント (Claude Code, Gemini, Hermes 等) 共通の入口。**置くのは指示と参照だけ**で、
+AI コーディングアシスタント共通の入口。**置くのは指示と参照だけ**で、
 番地・KAPI 表・ファイル地図・障害の経緯といった技術情報の本文は置かない。更新先は
 [`docs/INDEX.md`](docs/INDEX.md) 冒頭の「情報単位ごとの正典」表が 1 か所に決めている。
+
+## 体制
+
+PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
+レビュアー = Codex CLI (read-only)、テスター = ローカル AI (`tools/emu_agent/`)。
+役割の境界・起動コマンド・規約 3 行の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
+承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大の 3 つだけ。
 
 ## Project Overview
 
@@ -12,7 +19,7 @@ programs load at 0x500000 and run at CPL=3 in their own page directory.
 
 ## Build Commands
 
-Full target list and compiler flags: [`docs/08_build.md`](docs/08_build.md) §8-2 / §8-4.
+Full target list and compiler flags: [`docs/08_build.md`](docs/08_build.md#ビルドターゲット) §8-4 / §8-2.
 Which build and which verification a change actually needs: skill **`os32-build-verify`**.
 
 ```bash
@@ -72,7 +79,7 @@ tracing go through `tools/np21w_mcp/`. Chasing a failure on the emulator: skill 
 | `0x100000–0x2FFFFF` | Kernel (binary + heap + KAPI + SHM, guard, 16KB stack at 0x1FC000), then SQLite from 0x200000 |
 | `0x300000–0x4FFFFF` | Resident shell (two heaps: newlib sbrk, exec_heap at 0x380000), then the shared-library band — `libos32gui.shlib` `.text` is shared across PDs, `.data`/`.bss` per app |
 | `0x500000–` | External programs: code+bss → sbrk → guard → exec_heap → stack |
-| top 256KB | Hot-deploy staging, carved out by `sys_usable_mem_end()`; exec and pgalloc must avoid it |
+| top (256KB+) | Hot-deploy staging, carved out by `sys_usable_mem_end()`; a PEGC/Cirrus 8bpp backbuffer adds ~300KB below it via `sys_reserve_top()`. exec and pgalloc must avoid the whole reservation |
 
 **Subsystem map** — which file does what and which spec section covers it:
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §2; the task-to-entry-point table is §1.
@@ -92,7 +99,7 @@ Three facts that matter on almost every change:
 
 **External programs** — OS32X flat ELF binaries linked with `sdk/link/app.ld` and entered through
 `sdk/crt/crt0.asm`; `main()` must be the **first function** in the source file. In-tree sources are
-under `userland/`: `shell/` (resident at 0x300000), `cmds/` (18 commands), `system/`, `tests/`,
+under `userland/`: `shell/` (resident at 0x300000), `cmds/`, `system/`, `tests/`,
 `rust/` (no_std Cargo workspace), `lib/` (`libos32*`, statically linked). Standard apps and the
 board-game RPG are submodules (`apps/`, `game/`) built by `make external` — rebuild them after any
 KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
@@ -135,7 +142,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   must land on a UTF-8 boundary. → §4-27
 - Boot loaders: the PM transition stays inlined in `boot/loader_fat.asm`, `boot_fat.asm` is `.8086` (no
   immediate shifts), the IPL may call INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
-- Physical 0x90000 is the auto-play mailbox: a layout change means updating `tools/autoplay/driver.py`
+- Physical 0x90000 is the auto-play mailbox: a layout change means updating `game/tools/autoplay/driver.py`
   `read_mailbox()` and `EXPORT_VERSION` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
@@ -159,4 +166,4 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 `C:\WATCOM\docs\os32\` に書き出す (読み取り専用の出力。編集はここ側で行う)。
 
 スキル: **`os32-build-verify`** (ビルド・配備・検証の選択)、**`os32-emu-debug`** (エミュレータ上の障害調査)、
-**`os32-kapi-add`** (KernelAPI の追加・変更)。
+**`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)。

@@ -127,7 +127,7 @@ guard_a+4KB - heap_top             exec_heap (KAPI mem_alloc)                 R/
 
 > **0x90000 の自動プレイ観測メールボックス**: ゲーム側が毎フレーム状態ブロックを書き、
 > ホストが `GET /api/mem?addr=0x90000&space=phys` で読む。**レイアウトを変えたら
-> `tools/autoplay/driver.py` の `read_mailbox()` と `EXPORT_VERSION` を同じコミットで直す**
+> `game/tools/autoplay/driver.py` の `read_mailbox()` と `EXPORT_VERSION` を同じコミットで直す**
 > — 片方だけ変えるとホスト側が黙って古い解釈で読み続ける。
 
 ### §2-2 DMA 64KB境界制約

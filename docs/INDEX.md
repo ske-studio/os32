@@ -12,6 +12,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 情報単位 | 正典 (ここだけ更新) | 参照側 (要約 + リンクのみ) |
 |---|---|---|
 | 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md / SOUL.md (ID 参照、`make check` が照合) |
+| エージェント運用体制 (役割・起動・規約) | [tasks/agents/ROLES.md](tasks/agents/ROLES.md) (現行のみ) | CLAUDE.md (4 行 + リンク)。過去の経緯は [tasks/agents/RETROSPECTIVE_2026-09-09.md](tasks/agents/RETROSPECTIVE_2026-09-09.md) 側に置き、入口からは辿らせない |
 | 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) (説明) | CLAUDE.md「Memory Layout」(要約図) |
 | KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README.md / このファイル / KAPI_SPEC.md の版番号 (`tools/check_kapi_version.py` が照合。CLAUDE.md は版数を持たない) |
 | KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | スキル `.claude/skills/os32-kapi-add` と CLAUDE.md (どちらもポインタのみ) |
