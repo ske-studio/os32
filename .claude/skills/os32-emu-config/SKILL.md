@@ -20,11 +20,16 @@ description: NP21/W ini の限定変更。変更権限は PM (Claude Code) だ�
 `np21w_ini.py` の起動。**ただし包括的な保護ではない** — 別の書き方や別コマンド経由は
 文字列一致しない。規則の方が正典であり、`.claude/settings.json` は再確認の網に過ぎない。
 
-**ini に触る前に、本当に ini が要るかを先に確かめる。** 2026-09-09 に、PEGC 検証には
-ini 変更が要ると判断しかけたが、実際にはゲスト側の `gfxmode pegc` で足りた
-(`pc_model` は VM/VX = CPU 世代であって PEGC の有無ではなく、`np21x64w.exe` は
-9821 エミュレータなので PEGC は最初から在る)。
-GFX バックエンドの切替はゲスト側が先、ini は Cirrus (`USEGD5430`) のときだけ。
+**ini に触る前に、本当に ini が要るかを先に確かめる。** 順序はゲスト側が先
+(`gfxmode pc98|pegc|cirrus|auto` → `/etc/system.cfg` 読み戻し → リセット)。
+ini が要るのは、そのバックエンドをエミュレータが提供していないときだけ。
+
+**要求した設定と実際のバックエンドは別物**。`ver` の `GFX:` 行も当てにならない。
+実際のバックエンドは必ず `hal_test` で確認する。2026-09-09 の実測: `GFX=pegc` を
+書いてリセットしても `hal_test` は `backend pc98 (planar 4bpp)` のままだった。
+OS32 の `pegc_probe()` (gfx/backend_pegc.c:185) が BIOS ワークエリアの拡張グラフィック
+フラグを見るためで、現構成の `pc_model=VX` (PC-9801VX) ではそのフラグが立たない。
+**PEGC の検証には機種設定の変更が要る — これは §1 のとおり現在のツールの範囲外。**
 
 ## 1. 扱えるキーの範囲
 
