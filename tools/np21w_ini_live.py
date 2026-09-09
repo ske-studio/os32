@@ -76,7 +76,10 @@ def identify(rows, target, pid=None):
             not isinstance(row['created'], str) or not row['created'] or
             not isinstance(row['command'], str)):
         raise IniError('incomplete process identity')
-    match = re.fullmatch(r'"([^"\r\n]+)" +"([^"\r\n]+)"', row['command'])
+    # Real CreateProcess command lines end with a trailing blank after the last
+    # quoted token (measured 2026-09-09). milstr_getarg tokenizes on blanks, so
+    # trailing whitespace is insignificant; anything else is still rejected.
+    match = re.fullmatch(r'"([^"\r\n]+)"[ \t]+"([^"\r\n]+)"[ \t]*', row['command'])
     if (not match or path_key(row['exe']) != path_key(target['exe']) or
             path_key(match[1]) != path_key(target['exe']) or
             path_key(match[2]) != path_key(target['ini']) or
@@ -514,6 +517,10 @@ class WindowsExecutor:
             elif op != 'load' and value is not True:
                 raise IniError('unconfirmed executor operation')
             return value
+        except IniError:
+            # IniError subclasses ValueError; keep its precise operator
+            # diagnostic instead of the generic transport message below.
+            raise
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             raise IniError('invalid Windows executor response for ' + op) from exc
 

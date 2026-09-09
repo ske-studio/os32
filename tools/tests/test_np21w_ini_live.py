@@ -78,6 +78,30 @@ class Identity(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(live.IniError):
                 live.identify([dict(ROW, command=command)], TARGET)
 
+    def test_accepts_windows_trailing_whitespace(self):
+        """Real CreateProcess command lines carry a trailing space after the
+        last quoted token (measured 2026-09-09 on np21x64w.exe). Np2Arg::Parse
+        tokenizes, so trailing blanks are insignificant. Extra tokens are not."""
+        for suffix in (' ', '  ', '\t', ' \t '):
+            with self.subTest(suffix=repr(suffix)):
+                self.assertEqual(
+                    live.identify([dict(ROW, command=ROW['command'] + suffix)], TARGET, 42),
+                    dict(ROW, command=ROW['command'] + suffix))
+
+    def test_executor_preserves_specific_diagnostics(self):
+        """IniError subclasses ValueError; call() must not swallow its own
+        precise message behind the generic transport diagnostic."""
+        class Bad:
+            def exchange(self, request):
+                return {'ok': True, 'value': [dict(ROW, command='unsupported')]}
+        ex = live.WindowsExecutor.__new__(live.WindowsExecutor)
+        ex.transport = Bad()
+        ex.target = TARGET
+        with self.assertRaises(live.IniError) as caught:
+            ex.call('query')
+        self.assertNotIn('invalid Windows executor response', str(caught.exception))
+        self.assertIn('identity', str(caught.exception))
+
     def test_wrong_pid_exe_config_or_multiple(self):
         for rows in ([dict(ROW, pid=99)], [dict(ROW, exe=r'D:\np21x64w.exe')],
                      [dict(ROW, command=ROW['command'].replace('chosen', 'other'))], [ROW, ROW]):

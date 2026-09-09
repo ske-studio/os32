@@ -76,12 +76,23 @@ static void mmio_w16(u32 addr, u16 val)
     gfx_counters.io_accesses++;
 }
 
+/* BIOS ワークエリアは master PD にしか写像が無い (ページ 0 は R/O、アプリ
+ * PD では not present)。CPL=3 のアプリ文脈から読むと #PF でアプリが死ぬ。
+ * probe は起動時のカーネル文脈で 1 回だけ走らせて結果をキャッシュする設計
+ * (kernel.c の gfx_probe_backends) なので、ここへ来るのは想定外。多重防御
+ * として、master AS 以外では読まずに 0 を返す。 */
+static int in_master_addrspace(void)
+{
+    return paging_current_cr3() == paging_kernel_pd_phys();
+}
+
 static u8 bios_flag(u32 addr)
 {
     /* アドレスを volatile 経由にして定数畳み込みを止める。直に
      * *(volatile u8 *)0x045C と書くと GCC が「ヌルポインタ近傍の配列外」と
      * 誤診断する (-Warray-bounds)。ここは BIOS ワークエリアの実アドレス。 */
     volatile u32 a = addr;
+    if (!in_master_addrspace()) return 0;
     return *(volatile u8 *)a;
 }
 

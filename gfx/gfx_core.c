@@ -305,6 +305,36 @@ static int gfx_select_and_init_backend(void)
     return 0;
 }
 
+/* ======================================================================== */
+/*  gfx_prepare_backend — 実バックエンドを「起動時に 1 回だけ」用意する      */
+/*                                                                          */
+/*  boot_splash は PC98 を強制するので、実バックエンドの probe も init も    */
+/*  走らない。それをアプリ (CPL=3) の初回 gfx_init まで繰り延べると 2 つ壊れる: */
+/*                                                                          */
+/*   1. PEGC の probe は BIOS ワークエリア (0x045C / 0x0597) を読むが、そこは */
+/*      master PD にしか写像が無く、アプリ PD では #PF でアプリが死ぬ。       */
+/*   2. PEGC / Cirrus の init が取るバックバッファは物理末尾側の予約          */
+/*      (sys_reserve_top) だが、アプリが走っている時点ではそのアプリの        */
+/*      スタック/ヒープが上限直下を占有しており pgalloc_reserve_pfn が失敗する。 */
+/*                                                                          */
+/*  どちらも「アプリが 1 つも走っていないカーネル文脈」でなければ成立しない。  */
+/*  init まで済ませたら shutdown で表示をテキストへ戻す。予約とリニア窓は     */
+/*  shutdown をまたいで保持されるので、以後のアプリの gfx_init は再利用する。  */
+/*  9801 (init == NULL) は予約も窓も要らないので何もしない。                 */
+/* ======================================================================== */
+void gfx_prepare_backend(void)
+{
+    gfx_select_backend();
+    if (!g_backend || !g_backend->init) return;
+    g_backend->init();
+    /* init が失敗して probe が取り下げられたら 9801 へ落とす (gfx_init と同じ)。 */
+    if (g_backend->probe && !g_backend->probe()) {
+        g_backend = &gfx_backend_pc98;
+        return;
+    }
+    if (g_backend->shutdown) g_backend->shutdown();
+}
+
 void gfx_init(void)
 {
     /* ⑤: GDC 初期化より前にバックエンドを決める */
