@@ -1023,17 +1023,27 @@ impl Filer {
          *      (`fs/hostdrvfs.c` は st_dev/st_ino を 0 のままにする)。
          *      0 のまま比べると `/host` 配下の任意の 2 ファイルが「同一」に
          *      なって正当なコピーまで拒否するので、**非 0 のときだけ**信じる。
-         *   2. パス文字列 — inode が使えないときの受け皿。同じディレクトリに
-         *      同じ名前で入れる (= 実害が出る典型) はこれで捉えられる。 */
+         *   2. パス — inode が使えないときの受け皿。**生の文字列では足りない**。
+         *      filer の `check_abs` は正規化しないが VFS は `.` `..` `//` を
+         *      畳むので、`/host/a.txt` と `/host/./a.txt` は文字列としては別物
+         *      なのに同じファイルを開く。VFS と同じ規則で正規化してから比べる
+         *      (2026-09-10 のレビュー指摘 P1/blocker)。
+         *      正規化できない (深さ・長さ超過) ときは判定を諦めず、
+         *      **安全側に倒して拒否する** — 中身を失うより断る方がまし。 */
         if exists {
             let src = self.target_copy();
-            let sl = self.target_len;
-            let same_path = sl == dl && src[..sl] == d[..dl];
             let mut sst = Stat::ZERO;
             let same_ino = stat(&src, &mut sst) == 0
                 && sst.st_ino != 0
                 && sst.st_dev == stbuf.st_dev
                 && sst.st_ino == stbuf.st_ino;
+            let mut ns = [0u8; PATH_CAP];
+            let mut nd = [0u8; PATH_CAP];
+            let same_path = match (normalize_abs(&src, &mut ns),
+                                   normalize_abs(&d, &mut nd)) {
+                (Some(a), Some(b)) => a == b && ns[..a] == nd[..b],
+                _ => true,
+            };
             if same_path || same_ino {
                 self.error(b"Copy", ERR_SAME_FILE);
                 return;

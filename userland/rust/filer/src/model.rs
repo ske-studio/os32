@@ -283,6 +283,79 @@ pub fn check_abs(path: &[u8]) -> Result<usize, i32> {
     Ok(n)
 }
 
+/// VFS と同じ規則で絶対パスを正規化する (`fs/vfs.c` の `vfs_resolve_path`)。
+///
+/// 重複 `/` を畳み、`.` を捨て、`..` で 1 段戻る (根で `..` は no-op)。
+/// 深さ上限も VFS に合わせる (`VFS_MAX_PATH_DEPTH` = 32)。超える分は VFS 側でも
+/// 落ちるので、ここでも同じく落として同じ結果に寄せる。
+///
+/// **なぜ要るか**: filer の `check_abs` は先頭 `/` と長さしか見ず正規化しない。
+/// 一方 VFS は正規化する。生パスのまま比べると `/host/a.txt` と `/host/./a.txt`
+/// が別物に見えるのに、開く先は同じファイルになる。inode を返さない
+/// ファイルシステム (`fs/hostdrvfs.c`) では inode 判定も効かないので、
+/// ここを揃えないと同一ファイルへのコピーが素通りする
+/// (2026-09-10 のレビュー指摘 P1/blocker)。
+///
+/// 戻り値は `out` に書いた長さ。入力が絶対パスでなければ `None`。
+pub fn normalize_abs(path: &[u8], out: &mut [u8; PATH_CAP]) -> Option<usize> {
+    let n = cstr_len(path);
+    if n == 0 || path[0] != b'/' {
+        return None;
+    }
+    /* 各成分の [開始, 終了) を覚える。VFS と同じ 32 段まで。 */
+    let mut starts = [0usize; 32];
+    let mut ends = [0usize; 32];
+    let mut np = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        if path[i] == b'/' {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < n && path[i] != b'/' {
+            i += 1;
+        }
+        let len = i - s;
+        if len == 1 && path[s] == b'.' {
+            /* nop */
+        } else if len == 2 && path[s] == b'.' && path[s + 1] == b'.' {
+            if np > 0 {
+                np -= 1;
+            }
+        } else if np < 32 {
+            starts[np] = s;
+            ends[np] = i;
+            np += 1;
+        }
+    }
+    let mut o = 0usize;
+    out[o] = b'/';
+    o += 1;
+    let mut k = 0usize;
+    while k < np {
+        if k > 0 {
+            if o >= PATH_CAP - 1 {
+                return None;
+            }
+            out[o] = b'/';
+            o += 1;
+        }
+        let mut j = starts[k];
+        while j < ends[k] {
+            if o >= PATH_CAP - 1 {
+                return None;
+            }
+            out[o] = path[j];
+            o += 1;
+            j += 1;
+        }
+        k += 1;
+    }
+    out[o] = 0;
+    Some(o)
+}
+
 /// basename に使えるか (空でなく `/` を含まない、`.` `..` でない)。
 pub fn check_name(name: &[u8]) -> Result<usize, i32> {
     let n = cstr_len(name);
