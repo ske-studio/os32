@@ -167,7 +167,7 @@ gshell 起動
 | 同期 | `os32_sqlite_vfs.c` の xSync が ext2 の書き戻しを待つか。待たないなら `cfg_commit` の後に `sys_sync` 相当を呼ぶ |
 | 速度 | 386 相当で `cfg_open` + 20 件 get + close の時間 (tick)。gshell 起動が体感で遅れないこと |
 | 大きさ | ページサイズ 1KB / 数百件で DB が 64KB 以内に収まること (FDD の媒体にも載る) |
-| 8MB 機 | SQLite 帯は固定なので影響なし。確認だけ |
+| メモリ | 固定 SQLite プールでも FEP・設定 DB の共存時のピークと OOM・回収を実測する。CUI 最低 8MB を GUI の受入ゲートにしない。必要 RAM と開発方針は [02_memory.md](../../02_memory.md) に従う |
 
 ---
 

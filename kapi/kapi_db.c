@@ -16,6 +16,7 @@
 #include "kprintf.h"
 #include "os32_sqlite_vfs.h"
 #include "memmap.h"
+#include "fd_redirect.h"
 
 /* kapi_db.c はリンカスクリプトで EXCLUDE_FILE に含まれていないため、
  * 通常の .text に配置される。sqlite3_exec 等は .sqlite_text にあるが、
@@ -32,8 +33,13 @@ static char sql_copy_buf[SQL_COPY_BUF_SIZE];
 static char path_copy_buf[PATH_COPY_BUF_SIZE];
 
 /* ======== DB接続スロット ======== */
+#define DB_ERROR_SIZE 256
 typedef struct {
     int in_use;               /* 1=使用中, 0=空き */
+    int owner;                /* open 時の res_owner_get() */
+    int isolated;             /* close failed: never touch this connection again */
+    int cleanup_error;        /* first teardown failure, retained until reuse */
+    char cleanup_message[DB_ERROR_SIZE];
     sqlite3 *db;              /* SQLite 接続ハンドル */
     sqlite3_stmt *active_stmt; /* 実行中のステートメント */
 } DbSlot;
@@ -49,7 +55,8 @@ static DbSlot db_slots[DB_MAX_CONNECTIONS];
 static DbSlot *slot_get(int handle)
 {
     if (handle < 0 || handle >= DB_MAX_CONNECTIONS) return (DbSlot *)0;
-    if (!db_slots[handle].in_use) return (DbSlot *)0;
+    if (!db_slots[handle].in_use || db_slots[handle].isolated)
+        return (DbSlot *)0;
     return &db_slots[handle];
 }
 
@@ -70,7 +77,9 @@ static void shm_write_error(DbSlot *slot)
     data_start = (i32)sizeof(DB_ResultHeader);
     hdr->error_offset = data_start;
 
-    if (slot && slot->db) {
+    if (slot && slot->cleanup_error != SQLITE_OK) {
+        errmsg = slot->cleanup_message;
+    } else if (slot && slot->db) {
         errmsg = sqlite3_errmsg(slot->db);
     } else {
         errmsg = "invalid handle";
@@ -184,6 +193,8 @@ static int shm_write_row(DbSlot *slot)
 /*  KAPI 関数実装                                                            */
 /* ======================================================================== */
 
+static void slot_save_error(DbSlot *slot, int rc);
+
 int __cdecl kapi_db_open(const char *path)
 {
     int i;
@@ -199,11 +210,17 @@ int __cdecl kapi_db_open(const char *path)
     kstrncpy(path_copy_buf, path, PATH_COPY_BUF_SIZE - 1);
     path_copy_buf[PATH_COPY_BUF_SIZE - 1] = '\0';
 
+    db_slots[i].cleanup_error = SQLITE_OK;
+    db_slots[i].cleanup_message[0] = '\0';
+    db_slots[i].owner = res_owner_get();
     rc = sqlite3_open(path_copy_buf, &db_slots[i].db);
     if (rc != SQLITE_OK) {
+        /* Open can fail with a live connection. Save before teardown. */
+        slot_save_error(&db_slots[i], rc);
+        shm_write_error(&db_slots[i]);
         if (db_slots[i].db) {
-            sqlite3_close(db_slots[i].db);
-            db_slots[i].db = (sqlite3 *)0;
+            db_slots[i].in_use = 1;
+            kapi_db_close(i);
         }
         return -1;
     }
@@ -216,21 +233,43 @@ int __cdecl kapi_db_open(const char *path)
     return i;
 }
 
+/* Copy before any subsequent SQLite call can replace the diagnostic. */
+static void slot_save_error(DbSlot *slot, int rc)
+{
+    if (rc == SQLITE_OK || slot->cleanup_error != SQLITE_OK) return;
+    slot->cleanup_error = rc;
+    kstrncpy(slot->cleanup_message,
+             slot->db ? sqlite3_errmsg(slot->db) : sqlite3_errstr(rc),
+             DB_ERROR_SIZE - 1);
+    slot->cleanup_message[DB_ERROR_SIZE - 1] = '\0';
+}
+
 int __cdecl kapi_db_close(int handle)
 {
     DbSlot *slot = slot_get(handle);
+    int rc;
     if (!slot) return -1;
 
     /* 実行中ステートメントの finalize */
     if (slot->active_stmt) {
-        sqlite3_finalize(slot->active_stmt);
+        slot_save_error(slot, sqlite3_finalize(slot->active_stmt));
         slot->active_stmt = (sqlite3_stmt *)0;
     }
 
-    sqlite3_close(slot->db);
+    if (!sqlite3_get_autocommit(slot->db))
+        slot_save_error(slot, sqlite3_exec(slot->db, "ROLLBACK", 0, 0, 0));
+    rc = sqlite3_close(slot->db);
+    if (rc != SQLITE_OK) {
+        slot_save_error(slot, rc);
+        /* Never retry, even after this nest/owner is recycled. This does NOT
+         * protect main/journal/temp FDs against generic FD cleanup: F2 must
+         * establish complete VFS tracking/quarantine before integration. */
+        slot->isolated = 1;
+        return -1;
+    }
     slot->db = (sqlite3 *)0;
     slot->in_use = 0;
-    return 0;
+    return slot->cleanup_error == SQLITE_OK ? 0 : -1;
 }
 
 int __cdecl kapi_db_exec(int handle, const char *sql)
@@ -404,8 +443,11 @@ int __cdecl kapi_db_finalize(int handle)
 
 const char * __cdecl kapi_db_last_error(int handle)
 {
-    DbSlot *slot = slot_get(handle);
-    if (!slot || !slot->db) return "invalid handle";
+    DbSlot *slot;
+    if (handle < 0 || handle >= DB_MAX_CONNECTIONS) return "invalid handle";
+    slot = &db_slots[handle];
+    if (slot->cleanup_error != SQLITE_OK) return slot->cleanup_message;
+    if (!slot->in_use || !slot->db) return "invalid handle";
     return sqlite3_errmsg(slot->db);
 }
 
@@ -417,18 +459,21 @@ u32 __cdecl kapi_db_mem_used(void)
 /* ======================================================================== */
 /*  db_cleanup_all — exec_exit() から呼ばれるリソースクリーンアップ           */
 /* ======================================================================== */
+void db_cleanup_owned(int owner)
+{
+    int i;
+    for (i = 0; i < DB_MAX_CONNECTIONS; i++) {
+        if (db_slots[i].in_use && !db_slots[i].isolated &&
+            db_slots[i].owner == owner)
+            kapi_db_close(i);
+    }
+}
+
 void db_cleanup_all(void)
 {
     int i;
     for (i = 0; i < DB_MAX_CONNECTIONS; i++) {
-        if (db_slots[i].in_use) {
-            if (db_slots[i].active_stmt) {
-                sqlite3_finalize(db_slots[i].active_stmt);
-                db_slots[i].active_stmt = (sqlite3_stmt *)0;
-            }
-            sqlite3_close(db_slots[i].db);
-            db_slots[i].db = (sqlite3 *)0;
-            db_slots[i].in_use = 0;
-        }
+        if (db_slots[i].in_use && !db_slots[i].isolated)
+            kapi_db_close(i);
     }
 }

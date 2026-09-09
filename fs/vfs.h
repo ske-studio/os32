@@ -134,6 +134,39 @@ int  vfs_isatty(int fd);
 int  vfs_fd_set_protect(int fd, int on);
 int  vfs_fd_is_protected(int fd);
 
+/* Kernel-internal FD leases; not a KAPI/SDK interface. */
+#define VFS_FD_GENERATION_MAX 0xffffffffUL
+#define VFS_FD_GENERIC 0
+#define VFS_FD_SQLITE  1
+typedef struct {
+    int group_index;
+    u32 generation;
+} VfsSqliteCookie;
+typedef struct {
+    int fd;
+    u32 generation;
+    VfsSqliteCookie cookie;
+} VfsSqliteLease;
+int vfs_open_sqlite(const char *path, int mode, int owner,
+                    const VfsSqliteCookie *cookie, int sqlite_flags,
+                    VfsSqliteLease *out);
+/* open returns VFS_OK and fills out only on success; owner >= 0,
+ * cookie index >= 0 and generation != 0. The caller must validate group
+ * state/identity (including rejecting future opens after quarantine).
+ * FD generations never wrap, even across GENERIC reuse. No owner mutation.
+ * All functions require the existing non-reentrant VFS calling discipline. */
+
+/* Validation is read-only and performs no I/O. Close verifies the lease,
+ * rejects quarantine and releases only the table entry (no backend close).
+ * Neither function modifies the caller's lease. Failures return INVAL. */
+int vfs_close_sqlite(const VfsSqliteLease *lease);
+int vfs_validate_sqlite(const VfsSqliteLease *lease);
+/* Count includes quarantined live members. Quarantine marks only matching
+ * live members, is sticky/idempotent, and returns OK; NULL returns INVAL.
+ * No group registry, group generation allocator or quarantine reset here. */
+int vfs_count_sqlite(const VfsSqliteCookie *cookie);
+int vfs_quarantine_sqlite(const VfsSqliteCookie *cookie);
+
 /* ファイル情報 */
 int  vfs_stat(const char *path, OS32_Stat *buf);
 int  vfs_fstat(int fd, OS32_Stat *buf);
