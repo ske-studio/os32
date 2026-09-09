@@ -548,7 +548,7 @@ class ReceiptAndPathBoundaries(unittest.TestCase):
         import json
         starts = {'cirrus-on': RAW, 'cirrus-off': NEW,
                   'pegc-on': RAW, 'pegc-off': PEGC_ON,
-                  'ram-8mb': RAW, 'ram-15mb': RAM_8MB}
+                  'ram-8mb': RAW, 'ram-9mb': RAW, 'ram-15mb': RAM_8MB}
         for operation in live.OPERATIONS:
             raw = starts[operation]
             candidate, diff = live.transform(raw, live.OPERATIONS[operation])

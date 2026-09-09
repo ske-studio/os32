@@ -30,6 +30,7 @@ OPERATIONS = {'cirrus-on': {'USEGD5430': 'true', 'GD5430TYPE': '91'},
               # 構成。GUI の最低要件ではない (INSTALL.md / docs/02_memory.md /
               # tasks/gui/DESIGN.md)。16 はゲスト 15360KB = 15MB (実測)。
               'ram-8mb': {'EXMEMORY': '7'},
+              'ram-9mb': {'EXMEMORY': '8'},
               'ram-15mb': {'EXMEMORY': '16'}}
 SIGNATURE_LIMIT = 256  # FileIdentity.Read: seven decimal integers + separators.
 SIGNATURE_JSON_BYTES = 12 * SIGNATURE_LIMIT  # Escaped UTF-16 surrogate pair per character.

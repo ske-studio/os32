@@ -38,9 +38,16 @@ class ExMemory(unittest.TestCase):
         self.assertEqual((back, diff), (RAW, ['EXMEMORY: 7 -> 16']))
 
     def test_rejects_unproven_sizes(self):
-        for value in ('0', '1', '8', '13', '32', '', '16 ', '0x10'):
+        for value in ('0', '1', '13', '32', '', '16 ', '0x10'):
             with self.assertRaises(ini.IniError):
                 ini.transform(RAW, {'EXMEMORY': value})
+
+    def test_nine_mb_is_the_pegc_gui_floor(self):
+        """ExMemory=8 -> ゲスト 9MB。640x480 PEGC の 300KB 予約が
+        固定アプリ帯 0x500000-0x800000 の外に出る最小構成 (2026-09-09 実測)。"""
+        out, diff = ini.transform(RAW, {'EXMEMORY': '8'})
+        self.assertEqual(diff, ['EXMEMORY: 16 -> 8'])
+        self.assertEqual(out, RAW.replace(b'ExMemory=16', b'ExMemory=8'))
 
     def test_does_not_disturb_graphics_fields(self):
         out, diff = ini.transform(RAW, {'EXMEMORY': '7'})

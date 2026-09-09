@@ -41,11 +41,12 @@ import uuid
 # ブートローダが 1MB から 512KB 刻みで実測するので (boot/loader_fat.asm:248)、
 # ゲストの総容量はこの値で決まる。値は 2 つだけ通す:
 #   16 = 現行構成 (ゲスト 15360KB = 15MB。実測 2026-09-09)
-#    7 = CUI の最低動作環境 8MB。memory_boot の legacy フォールバックを通す
+#    7 = ゲスト 8MB。memory_boot の legacy フォールバックを通す
+#    8 = ゲスト 9MB。PEGC (640x480) の 300KB 予約がアプリ帯の外に出る最小構成
 # 8MB は CUI の最低動作環境であって GUI の最低要件ではない
 # (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md)。
 ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',),
-           'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '16')}
+           'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '8', '16')}
 SECTION = b'nekoproject21'
 LIMIT = 4 * 1024 * 1024
 
