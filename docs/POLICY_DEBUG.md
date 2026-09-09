@@ -385,6 +385,30 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 ---
 
+### 4-29. NHD 満杯を `make deploy-nhd` が黙って通す (2026-09-10)
+
+- **現象**: 配備は「完了! 183 ファイル」「Done! (199.9 MB copied)」と出て **exit 0**。
+  だが NHD の `/boot/vmkernel.lz4` が **446,464 B に切り詰められて**いて、
+  手元の成果物 (448,812 B) と一致しない。ゲストは古いカーネルで動き続ける。
+- **本当のエラー**: 出力の途中に 1 行だけ出ている。grep しないと流れる。
+  `Error: vmkernel.lz4 -> /boot/vmkernel.lz4: cp: error writing ...: No space left on device`
+- **`df` が嘘をつく**: 「69M 空き / 63% 使用」と出るのに ENOSPC。
+  `e2fsck -fn` で `Free blocks count wrong (80315, counted=2)` — スーパーブロックの
+  空きブロック数が壊れていた。修復後の実数は **203,931 / 203,932 ブロック使用**。
+- **満杯の原因**: NHD ルート直下にホスト側のディスクイメージが入っていた
+  (`dos5hd.nhd` / `dos5hdmaster.nhd` で 82MB、`Ys*.D88/NFD`・`dos5*.fdi`・
+  `fd98_2hd.img`・`os32_serial_log.txt` で約 10MB)。原本は `C:\os32` にあり
+  ゲストからは `/host` で見えるので、NHD 側は重複。削除して 92MB 空けた。
+- **対処**: `sudo losetup -f --show --offset 836096 build/nhd/os32.nhd` で
+  ループを張り `sudo e2fsck -fy <loop>` で修復 → 不要ファイルを削除 → 再配備。
+- **教訓**: 配備の成否を「完了/Done の文言」で判断しない ([V4])。
+  **必ずゲストの `ls -l /boot/vmkernel.lz4` と手元の `stat -c%s` を突き合わせる**。
+  `os32-cycle deploy` はこの照合を持つが、`make deploy-nhd` を直接叩くと素通りする。
+- **未修正**: `nhd_deploy.py do_sync` はコピー失敗を数えずに成功を返す。
+  失敗時は非ゼロで終わるべき。
+
+---
+
 ## §5. デバッグ道具箱
 
 ### カーネル内デバッグ出力

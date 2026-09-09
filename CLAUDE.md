@@ -147,6 +147,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - Physical 0x90000 is the auto-play mailbox: a layout change means updating `game/tools/autoplay/driver.py`
   `read_mailbox()` and `EXPORT_VERSION` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成で `v86 -t` が `#PF addr=0 EIP=0` で死ぬ (8MB / 15MB は無事、未解決)。 → §4-28
+- `make deploy-nhd` は NHD 満杯でも exit 0 で「完了」と出す。**必ずゲストの
+  `ls -l /boot/vmkernel.lz4` と手元のサイズを突き合わせる** ([V4])。 → §4-29
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 
