@@ -860,7 +860,18 @@ int exec_run(const char *cmdline)
         if (heap_sz > 0) {
             exec_heap_size = (heap_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
-            if (exec_heap_size > avail) exec_heap_size = avail;
+            /* 要求に足りないときは**黙って切り詰めず拒否する** (2026-09-10 方針)。
+             * スワップを持たない以上、渡せない量を渡せたことにしてはいけない。
+             * 切り詰めると、アプリは足りないと知らないまま走り出し、後の
+             * mem_alloc が途中で失敗する。ここで落として要求量と空きを見せる。 */
+            if (exec_heap_size > avail) {
+                shell_print("[DBG] NOMEM: heap request=", 0xE1);
+                shell_print_dec(heap_sz, 0xE1);
+                shell_print(" avail=", 0xE1);
+                shell_print_dec(avail, 0xE1);
+                shell_print("\n", 0xE1);
+                return EXEC_ERR_NOMEM;
+            }
         } else {
             exec_heap_size = (avail / 2) & ~(PAGE_SIZE - 1);
             if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
