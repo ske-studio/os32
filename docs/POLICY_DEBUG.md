@@ -385,7 +385,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 ---
 
-### 4-29. NHD 満杯を `make deploy-nhd` が黙って通す (2026-09-10)
+### 4-29. NHD 満杯を `make deploy-nhd` が黙って通していた (2026-09-10、修正済み)
 
 - **現象**: 配備は「完了! 183 ファイル」「Done! (199.9 MB copied)」と出て **exit 0**。
   だが NHD の `/boot/vmkernel.lz4` が **446,464 B に切り詰められて**いて、
@@ -404,8 +404,14 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **教訓**: 配備の成否を「完了/Done の文言」で判断しない ([V4])。
   **必ずゲストの `ls -l /boot/vmkernel.lz4` と手元の `stat -c%s` を突き合わせる**。
   `os32-cycle deploy` はこの照合を持つが、`make deploy-nhd` を直接叩くと素通りする。
-- **未修正**: `nhd_deploy.py do_sync` はコピー失敗を数えずに成功を返す。
-  失敗時は非ゼロで終わるべき。
+- **修正済み (2026-09-10)**: `nhd_deploy.py` の `do_sync` / `do_sync_from_hostdrv` が
+  失敗を数えるようにし、1 件でも失敗したら `False` を返す (末尾は「完了!」ではなく
+  「失敗! N ファイルをコピーできなかった」)。`sync-from-hostdrv` は戻り値すら
+  見ていなかったので `sys.exit(1)` を足した。あわせて**失敗した宛先を消す**
+  (`remove_partial`) — `cp` は書き込み前に宛先を切り詰めるので、残すとゲストが
+  「存在するが壊れた成果物」を掴む。消えていれば NOT FOUND で失敗が見える。
+  回帰は `tools/tests/test_nhd_deploy_failure.py` (`make check-tools-host` に登録)。
+  **それでもサイズ照合はやめない** — 失敗の形は ENOSPC だけではない。
 
 ---
 
