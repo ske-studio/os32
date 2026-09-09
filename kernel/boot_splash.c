@@ -258,6 +258,17 @@ static void build_raster(GFX_RasterPalTable *tbl, int offset)
     }
 }
 
+/* ブートでは必ず存在する PC98 標準表示だけを使う。任意デバイスの probe /
+ * init は後の通常 gfx_init に任せ、GFX= の希望値は描画前に戻す。
+ * 起動中の同期呼び出し専用。設定ファイルや公開 ABI は変更しない。 */
+static void splash_gfx_init(void)
+{
+    int saved_pref = gfx_get_backend_pref();
+    gfx_set_backend_pref(GFX_PREF_PC98);
+    gfx_init();
+    gfx_set_backend_pref(saved_pref);
+}
+
 /* ======================================================================== */
 /*  boot_splash - メインエントリ                                              */
 /* ======================================================================== */
@@ -275,16 +286,14 @@ void boot_splash(void)
     gdata[2] = glyph_3;  gcount[2] = GLYPH_3_N;
     gdata[3] = glyph_2;  gcount[3] = GLYPH_2_N;
 
-    /* GFXモード初期化。ここでバックエンドが決まる (H1 レビュー ⑤ で probe を
-     * GDC 初期化より前へ移した)。 */
-    gfx_init();
+    /* GUI の設定とは独立に、任意デバイスを probe しない標準表示で起動。 */
+    splash_gfx_init();
 
-    /* スプラッシュのアートは 4 プレーン 16 色専用 (bb[0..3] への直書きと
-     * ラスタパレット)。9821 の PEGC が選ばれるとバックバッファはパックド
-     * 8bpp の 1 面なので、同じコードを走らせると画面が壊れる。
-     * 256 色向けのスプラッシュは v1 の範囲外 — 静かに飛ばして黒画面のまま
-     * テキストへ戻す (H2)。 */
-    if (g_backend && g_backend->bb_format != GFX_BB_PLANAR4) {
+    /* 標準ハードの存在とソフトウェア状態の正常性は別。gfx_init は void
+     * なので、描画に必要な状態が無ければ任意デバイスへ逃げず表示を終了。
+     * 初期化中の fault や I/O 障害そのものを検出する API ではない。 */
+    if (!g_backend || g_backend->bb_format != GFX_BB_PLANAR4 ||
+        !bb[0] || !bb[1] || !bb[2] || !bb[3]) {
         gfx_shutdown();
         tvram_clear();
         return;
