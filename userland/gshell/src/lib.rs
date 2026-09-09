@@ -58,6 +58,7 @@ mod session;
 mod slot;
 mod startmenu;
 mod taskbar;
+mod terminal;
 mod timer;
 mod visible;
 mod wm;
@@ -150,21 +151,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
     wm::composite_full(st);
 
     /* ---- 単独ループ (契約 T8: アプリが居ないときは gshell が X3 を回す) ---- */
-    while !st.quit {
-        wm::wm_cycle(st, input::Ctx::Standalone);
-        if st.launch_pending {
-            st.launch_pending = false;
-            launch_app(st);
-        }
-        /* SessionAction のトップレベル handoff (契約 §7)。`launch_app` から
-         * 戻った直後と、アプリが居ないときの周回でここを通る。**WM の文脈
-         * (X1/X3/X4) からは絶対に来ない** = 入れ子 exec_run にならない。 */
-        if session::pending_action() != 0 && !session::owner_active(st) && !session_handoff(st) {
-            /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
-            return 0;
-        }
-        /* 待ちは sys_halt のみ (get_tick スピン禁止)。 */
-        unsafe { (os32api::api().sys_halt)() };
+    if !standalone_loop(st) {
+        return 0;
     }
 
     /* ---- 「CUI へ」(デバッグ用の ESC = DEBUG_SHORTCUTS。契約 T9)。
@@ -188,6 +176,30 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 /* ================================================================ */
 /*  アプリの起動 (単独ループから。G2 の目視確認用)                    */
 /* ================================================================ */
+
+/// The existing single top-level handoff, enclosed by the scoped display
+/// lifetime. No SessionAction or exec semantics change: a child runs inside
+/// step, and only after it returns can display requests mutate/free storage.
+fn standalone_loop(st: &mut wm::GuiState) -> bool {
+    let mut switched = false;
+    terminal::run(st, |st| {
+        if st.quit {
+            return false;
+        }
+        wm::wm_cycle(st, input::Ctx::Standalone);
+        if st.launch_pending {
+            st.launch_pending = false;
+            launch_app(st);
+        }
+        if session::pending_action() != 0 && !session::owner_active(st) && !session_handoff(st) {
+            switched = true;
+            return false;
+        }
+        unsafe { (os32api::api().sys_halt)() };
+        true
+    });
+    !switched
+}
 
 /// デバッグ用の F1〜F5 経路 ([`DEBUG_SHORTCUTS`])。製品では `launch_pending` が
 /// 立たないので呼ばれない (出荷形の起動は Start → Run... = `GUI_SESSION_LAUNCH`)。

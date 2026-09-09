@@ -6,7 +6,20 @@ version = 4
 name = "gshell"
 version = "0.1.0"
 dependencies = [
+ "libos32term",
+ "libos32term_render",
  "os32api",
+]
+
+[[package]]
+name = "libos32term"
+version = "0.1.0"
+
+[[package]]
+name = "libos32term_render"
+version = "0.1.0"
+dependencies = [
+ "libos32term",
 ]
 
 [[package]]

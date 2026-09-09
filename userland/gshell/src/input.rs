@@ -149,7 +149,12 @@ pub fn focus_target(st: &GuiState) -> Option<Target> {
     let owner = st.windows[index].owner;
     let slot = st.slot_of_owner(owner)?;
     let (cox, coy) = st.windows[index].client_origin();
-    Some(Target { slot, win_id: st.windows[index].id(index), cox, coy })
+    Some(Target {
+        slot,
+        win_id: st.windows[index].id(index),
+        cox,
+        coy,
+    })
 }
 
 /* ================================================================ */
@@ -373,7 +378,14 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
 }
 
 fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
-    let mut mi = MouseInfo { x: 0, y: 0, dx: 0, dy: 0, buttons: 0, mode: 0 };
+    let mut mi = MouseInfo {
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        buttons: 0,
+        mode: 0,
+    };
     unsafe {
         (os32api::api().mouse_poll)(&mut mi as *mut MouseInfo as *mut u8);
     }
@@ -391,6 +403,7 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
 
     /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
     if modal::is_open() {
+        crate::terminal::release_buttons(btn);
         if moved {
             cursor::move_to(st, mx, my);
         }
@@ -404,6 +417,16 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             }
             st.prev_buttons = btn;
         }
+        return;
+    }
+
+    // Resident display input never reaches the app ring. X4 is allowed only
+    // bounded private flags/capture bookkeeping, never model edits or glyphs.
+    if crate::terminal::mouse(st, mx, my, btn, st.prev_buttons) {
+        if moved {
+            cursor::move_to(st, mx, my);
+        }
+        st.prev_buttons = btn;
         return;
     }
 
@@ -570,6 +593,7 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_frame = w.outer();
         cursor::hide(st);
         crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
+        wm::recompose_panel(st);
         queue_frame_edges(st, w.outer());
         cursor::show(st);
         let cr = cursor::rect(st);
@@ -688,6 +712,7 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
         new_frame.h,
         crate::lease::mono(st),
     );
+    wm::recompose_panel(st);
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
@@ -702,6 +727,10 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
 /* ---- アプリへの配送 ---- */
 
 fn forward_pointer(st: &mut GuiState, mx: i32, my: i32, btn: u8) {
+    // Even a WM-owned drag must not send hover events through the fixed panel.
+    if crate::terminal::rect(st).contains(mx, my) {
+        return;
+    }
     /* WM の領分 (メニュー / タスクバー) の上ではアプリへ動きも配らない
      * (契約 D1「taskbar 領域の入力をアプリへ配送しない」)。 */
     if startmenu::is_open() || taskbar::hit(st, mx, my) {
@@ -766,7 +795,12 @@ pub fn emit_configure(st: &mut GuiState, index: usize) {
     let id = w.id(index);
     let (cw, ch) = w.client_size();
     let (cox, coy) = w.client_origin();
-    let rect = GuiRect16 { x: cox as i16, y: coy as i16, w: cw as i16, h: ch as i16 };
+    let rect = GuiRect16 {
+        x: cox as i16,
+        y: coy as i16,
+        w: cw as i16,
+        h: ch as i16,
+    };
     if let Some(slot) = st.slot_of_owner(owner) {
         let ev = ring::ev_rect(GUI_EV_CONFIGURE, id, rect);
         if ring::append(st, slot, &ev) {

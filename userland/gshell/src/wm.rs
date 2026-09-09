@@ -53,7 +53,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const EMPTY: Rect = Rect { x: 0, y: 0, w: 0, h: 0 };
+    pub const EMPTY: Rect = Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    };
 
     #[inline]
     pub fn new(x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -79,9 +84,22 @@ impl Rect {
     pub fn intersect(&self, o: &Rect) -> Rect {
         let x0 = if self.x > o.x { self.x } else { o.x };
         let y0 = if self.y > o.y { self.y } else { o.y };
-        let x1 = if self.right() < o.right() { self.right() } else { o.right() };
-        let y1 = if self.bottom() < o.bottom() { self.bottom() } else { o.bottom() };
-        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        let x1 = if self.right() < o.right() {
+            self.right()
+        } else {
+            o.right()
+        };
+        let y1 = if self.bottom() < o.bottom() {
+            self.bottom()
+        } else {
+            o.bottom()
+        };
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
     }
     #[inline]
     pub fn intersects(&self, o: &Rect) -> bool {
@@ -89,7 +107,12 @@ impl Rect {
     }
     #[inline]
     pub fn translate(&self, dx: i32, dy: i32) -> Rect {
-        Rect { x: self.x + dx, y: self.y + dy, w: self.w, h: self.h }
+        Rect {
+            x: self.x + dx,
+            y: self.y + dy,
+            w: self.w,
+            h: self.h,
+        }
     }
     /// 2 矩形を含む最小の外接矩形。
     pub fn union(&self, o: &Rect) -> Rect {
@@ -101,9 +124,22 @@ impl Rect {
         }
         let x0 = if self.x < o.x { self.x } else { o.x };
         let y0 = if self.y < o.y { self.y } else { o.y };
-        let x1 = if self.right() > o.right() { self.right() } else { o.right() };
-        let y1 = if self.bottom() > o.bottom() { self.bottom() } else { o.bottom() };
-        Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        let x1 = if self.right() > o.right() {
+            self.right()
+        } else {
+            o.right()
+        };
+        let y1 = if self.bottom() > o.bottom() {
+            self.bottom()
+        } else {
+            o.bottom()
+        };
+        Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
     }
 }
 
@@ -117,7 +153,10 @@ pub struct RectSet {
 }
 
 impl RectSet {
-    pub const EMPTY: RectSet = RectSet { rects: [Rect::EMPTY; MAX_VIS], len: 0 };
+    pub const EMPTY: RectSet = RectSet {
+        rects: [Rect::EMPTY; MAX_VIS],
+        len: 0,
+    };
 
     #[inline]
     pub fn clear(&mut self) {
@@ -279,7 +318,12 @@ impl Win {
     /// タイトルバー矩形 (画面座標)。
     #[inline]
     pub fn titlebar_rect(&self) -> Rect {
-        Rect::new(self.x + BORDER_W, self.y + BORDER_W, self.w - BORDER_W * 2, TITLEBAR_H)
+        Rect::new(
+            self.x + BORDER_W,
+            self.y + BORDER_W,
+            self.w - BORDER_W * 2,
+            TITLEBAR_H,
+        )
     }
     /// 閉じるボタン矩形 (画面座標)。
     #[inline]
@@ -738,7 +782,6 @@ pub fn clamp_to_work_area(st: &GuiState, x: i32, y: i32, w: i32, h: i32) -> (i32
     (nx, ny)
 }
 
-
 /* ================================================================ */
 /*  present / compositor (WM が所有する画面 = デスクトップ + クローム) */
 /*                                                                  */
@@ -821,6 +864,12 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
         }
         z2 += 1;
     }
+    // Chrome writes whole decorations, not merely `clip`. Recompose the
+    // ENTIRE resident panel and upper WM overlays after those actual writes.
+    // Do not pretend `clip` bounded chrome's write footprint.
+    if recompose_panel(st) {
+        return;
+    }
     /* モーダルダイアログは WM 自身の窓なので、クロームの最後に直接描く
      * (契約 U8 / U4)。可視領域の計算でも「上にある窓」として扱われる。 */
     modal::draw(st, clip);
@@ -828,6 +877,33 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
      * 引いてあるので、アプリの Paint / COMMIT がここへ来ることは無い。 */
     taskbar::draw(st, clip);
     startmenu::draw(st, clip);
+}
+
+/// Repair the full panel after an un-clipped chrome/drag write. Caller has
+/// hidden the software cursor. Glyph work is forbidden in X4; no X4 caller.
+/// All upper overlays are recomposed over their full actual write rectangles,
+/// including FEP; queue exactly these repaired areas, not just requested clip.
+pub fn recompose_panel(st: &GuiState) -> bool {
+    let panel = crate::terminal::rect(st);
+    if panel.is_empty() {
+        return false;
+    }
+    crate::terminal::draw(st, panel);
+    let whole = Rect::new(0, 0, st.screen_w, st.screen_h);
+    modal::draw(st, whole);
+    taskbar::draw(st, whole);
+    startmenu::draw(st, whole);
+    fep::redraw_now(st);
+    for r in [
+        panel,
+        modal::rect(),
+        taskbar::rect(st),
+        startmenu::rect(),
+        fep::rect(),
+    ] {
+        queue_present(st, r);
+    }
+    true
 }
 
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
@@ -878,6 +954,7 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     if dragging {
         let f = st.drag_frame;
         chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
+        recompose_panel(st);
         queue_present(st, f);
     }
 
