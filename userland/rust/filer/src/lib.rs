@@ -1013,6 +1013,32 @@ impl Filer {
                 return;
             }
         }
+        /* コピー元と同じ実体を指していないか (レビュー指摘 P1、2026-09-10)。
+         * `CopyJob::start` は読む前に宛先を O_TRUNC で開くので、同一だと
+         * **元ファイルを空にしてから空をコピーする** = 中身が消える。
+         *
+         * 判定は 2 本立てにする:
+         *   1. inode — `/a/./b` や余分な `/` のような別表記を捉えられる。
+         *      ただし **inode を返さないファイルシステムがある**
+         *      (`fs/hostdrvfs.c` は st_dev/st_ino を 0 のままにする)。
+         *      0 のまま比べると `/host` 配下の任意の 2 ファイルが「同一」に
+         *      なって正当なコピーまで拒否するので、**非 0 のときだけ**信じる。
+         *   2. パス文字列 — inode が使えないときの受け皿。同じディレクトリに
+         *      同じ名前で入れる (= 実害が出る典型) はこれで捉えられる。 */
+        if exists {
+            let src = self.target_copy();
+            let sl = self.target_len;
+            let same_path = sl == dl && src[..sl] == d[..dl];
+            let mut sst = Stat::ZERO;
+            let same_ino = stat(&src, &mut sst) == 0
+                && sst.st_ino != 0
+                && sst.st_dev == stbuf.st_dev
+                && sst.st_ino == stbuf.st_ino;
+            if same_path || same_ino {
+                self.error(b"Copy", ERR_SAME_FILE);
+                return;
+            }
+        }
         self.dst = d;
         self.dst_len = dl;
         if exists {

@@ -50,6 +50,10 @@ pub const ERR_PATH_LONG: i32 = -100;
 pub const ERR_BAD_NAME: i32 = -101;
 pub const ERR_NOT_ABS: i32 = -102;
 pub const ERR_TOO_MANY: i32 = -103;
+/// コピー元とコピー先が同じ実体を指している。
+/// 先に弾かないと、`CopyJob::start` の `O_TRUNC` が**読む前に元を空にする**
+/// (2026-09-10 のレビュー指摘 P1)。判定は st_dev / st_ino で行う。
+pub const ERR_SAME_FILE: i32 = -104;
 
 /// エラー番号 → 短い名前 (MessageBox に数値と一緒に出す、§9)。
 pub fn err_name(code: i32) -> &'static [u8] {
@@ -72,6 +76,7 @@ pub fn err_name(code: i32) -> &'static [u8] {
         ERR_BAD_NAME => b"bad name",
         ERR_NOT_ABS => b"not an absolute path",
         ERR_TOO_MANY => b"too many entries",
+        ERR_SAME_FILE => b"same file",
         _ => b"error",
     }
 }

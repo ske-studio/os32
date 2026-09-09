@@ -386,17 +386,28 @@ fn cfg_set_gui(val: &[u8]) -> bool {
     let mut buf = [0u8; CFG_BUF];
     let mut out = [0u8; CFG_OUT];
 
-    /* 既存内容を読む (無ければ空から作る)。 */
+    /* 既存内容を読む。**存在しない**なら空から作ってよいが、**読めなかった**
+     * のと**入り切らなかった**のは別で、そのまま進むと他のキーを道連れに
+     * GUI= だけのファイルで上書きしてしまう (レビュー指摘 P3、2026-09-10)。
+     * どちらも書き込みを中止する。 */
     let mut n = 0usize;
     unsafe {
         let fd = (a.sys_open)(SYSTEM_CFG.as_ptr(), 0 /* KAPI_O_RDONLY */);
         if fd >= 0 {
             let r = (a.sys_read)(fd, buf.as_mut_ptr(), (CFG_BUF - 1) as u32);
             (a.sys_close)(fd);
-            if r > 0 {
-                n = r as usize;
+            if r < 0 {
+                /* 開けたのに読めない。既存内容が分からないので触らない。 */
+                return false;
+            }
+            n = r as usize;
+            if n >= CFG_BUF - 1 {
+                /* 上限まで読めた = 続きがあるかもしれない。切り捨てて
+                 * 書き戻すと末尾のキーが消えるので中止する。 */
+                return false;
             }
         }
+        /* fd < 0 は「まだ無い」とみなして空から作る (既定の初回起動)。 */
     }
 
     /* 行ごとにコピー。旧 GUI= 行だけ捨てる。 */

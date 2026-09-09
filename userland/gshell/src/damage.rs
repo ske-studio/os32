@@ -104,24 +104,42 @@ pub fn clip_to_vis(win: &Win, dirty_rect: Rect) -> RectSet {
 /// **起床判定 (`OP_WAIT`) も配送 (`OP_POLL`) も必ずこれを通す。** 2 か所で
 /// 別々に書くと必ず食い違い、「起こされないと配れない / 配れないと起きられない」
 /// で止まる (v1.2 G3 で実測: 打鍵の結果がマウスを動かすまで画面に出ない)。
-pub fn deliverable_cand(win: &Win) -> ([(usize, Rect); MAX_VIS], usize) {
+/// 戻り値の 3 つ目は **`cand` が MAX_VIS で打ち切られたか**。
+///
+/// 打ち切られると、まだ見ていない dirty 矩形には候補が 1 つも入らない。
+/// 呼び出し側がそれを「不可視だから候補が無い」と取り違えると、**可視なのに
+/// 描かれていない領域を捨てる** (2026-09-10 のレビュー指摘 P2。可視 8 本 ×
+/// dirty 3 本 = 24 > 16 で到達する)。捨ててよいのは「見たうえで断片が 0 だった」
+/// dirty だけなので、打ち切りの有無を呼び出し側へ渡す。
+pub fn deliverable_cand(win: &Win) -> ([(usize, Rect); MAX_VIS], usize, bool) {
     let mut cand = [(0usize, Rect::EMPTY); MAX_VIS];
     let mut n = 0;
     if win.dirty.is_empty() || win.vis.is_empty() {
-        return (cand, n);
+        return (cand, n, false);
     }
     let mut i = 0;
-    while i < win.dirty.len && n < MAX_VIS {
+    let mut capped = false;
+    while i < win.dirty.len {
+        if n >= MAX_VIS {
+            /* まだ見ていない dirty が残っている */
+            capped = true;
+            break;
+        }
         let pieces = clip_to_vis(win, win.dirty.rects[i]);
         let mut k = 0;
-        while k < pieces.len && n < MAX_VIS {
+        while k < pieces.len {
+            if n >= MAX_VIS {
+                /* この dirty の断片すら入り切っていない */
+                capped = true;
+                break;
+            }
             cand[n] = (i, pieces.rects[k]);
             n += 1;
             k += 1;
         }
         i += 1;
     }
-    (cand, n)
+    (cand, n, capped)
 }
 
 /// 配送できる `Paint` があるか (契約 T3 の `OP_WAIT` 起床条件)。
