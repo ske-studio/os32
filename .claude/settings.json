@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "ask": [
+      "Bash(make deploy-kernel:*)",
+      "Bash(make deploy-nhd:*)",
+      "Bash(make deploy-boot:*)",
+      "Bash(make nhd-init:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(rm -rf:*)",
+      "Edit(**/*.ini)",
+      "Write(**/*.ini)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Bash(cat .env:*)"
+    ]
+  }
+}
