@@ -156,6 +156,25 @@ void _start(void)
 #endif
     CHECK(sys_memory_stage_online());
     for (i = 0; i < 4096; i++) CHECK(low[i] == page_tables[i / PTE_COUNT][i % PTE_COUNT]);
+#ifdef TEST_RESERVE_TOP
+    /* PEGC 8bpp backbuffer (H2) must still be reservable on the model path.
+     * Legacy carved below the hotdeploy window; the model must carve below the
+     * frozen exec ceiling instead, since metadata/workspace sit above it. */
+    {
+        u32 ceiling = sys_usable_mem_end();
+        u32 need = ((u32)MEM_GFX_BB8_SIZE + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        u32 base = sys_reserve_top((u32)MEM_GFX_BB8_SIZE);
+        CHECK(base != 0);
+        CHECK(base == ceiling - need);
+        CHECK(sys_usable_mem_end() == base);
+        CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
+        /* Idempotent for the same size, and the reserved pages never allocate. */
+        CHECK(sys_reserve_top((u32)MEM_GFX_BB8_SIZE) == base);
+        CHECK(!sys_reserve_top((u32)MEM_GFX_BB8_SIZE + PAGE_SIZE));
+        CHECK(!pgalloc_alloc_n_range(1, base, base + need));
+        die(0);
+    }
+#endif
     CHECK(paging_is_present(4096 * PAGE_SIZE));
     CHECK(!paging_is_present(5000 * PAGE_SIZE));
     CHECK(!paging_is_present(TEST_END * PAGE_SIZE));

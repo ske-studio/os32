@@ -49,6 +49,10 @@ class Stage(unittest.TestCase):
     def test_reject_bad_high_pde(self):
         self.run_case('bad_high_pde')
 
+    def test_reserve_top_on_model_path(self):
+        for end in (8192, 16384):
+            self.run_case('reserve_top', end)
+
     def test_success_32_64(self):
         for end in (8192, 16384):
             self.run_case(end=end)

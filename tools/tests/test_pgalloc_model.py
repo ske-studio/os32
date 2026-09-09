@@ -189,7 +189,14 @@ void _start(void) { int r = test(); __asm__ volatile("int $0x80" : : "a"(1), "b"
     CHECK(sys_usable_mem_end() == 3968 * PAGE_SIZE);
     sys_mem_kb = 65536;
     CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
-    CHECK(!sys_reserve_top(PAGE_SIZE));
+    /* The model path must still honour sys_reserve_top: the PEGC 8bpp
+       backbuffer (H2) is its only caller and refusing it disables PEGC.
+       Metadata/workspace sit above the frozen exec ceiling, so the carve
+       lowers that ceiling instead of the hotdeploy base. */
+    CHECK(sys_reserve_top(PAGE_SIZE) == 3967 * PAGE_SIZE);
+    CHECK(sys_usable_mem_end() == 3967 * PAGE_SIZE);
+    CHECK(sys_hotdeploy_base() == 4032 * PAGE_SIZE);
+    CHECK(!pgalloc_alloc_n_range(1, 3967 * PAGE_SIZE, 3968 * PAGE_SIZE));
     CHECK(!pgalloc_alloc_n_pfn(1, 1048575, 1048576, &p));
     CHECK(!sys_memory_init_model(&m, backing, sizeof(backing), 3968, verified));
 ''', flags=('-DPHYSMEM_HOST_TEST=1', '-DPGALLOC_HOST_TEST=1'))

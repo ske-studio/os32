@@ -174,24 +174,30 @@ u32 sys_usable_mem_end(void)
 /* ======================================================================== */
 u32 sys_reserve_top(u32 bytes)
 {
-    u32 top, need, result, minimum;
+    u32 ceiling, need, result, minimum;
     unsigned int flags;
     flags = irq_save();
     result = 0;
-    if (sys_frozen_hot || !bytes || bytes > ~0UL - (PAGE_SIZE - 1)) goto done;
+    if (!bytes || bytes > ~0UL - (PAGE_SIZE - 1)) goto done;
     need = (bytes + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    top = sys_hotdeploy_base();
+    /* Carve below the current usable ceiling, not below the hotdeploy window.
+     * On the model path metadata/workspace occupy the pages between the frozen
+     * exec ceiling and hotdeploy, so only the ceiling is safe to lower. Legacy
+     * has nothing in between, so both paths reduce to the same interval. */
+    ceiling = sys_usable_mem_end();
     if (sys_top_reserved) {
-        if (sys_top_reserved == need) result = top - need;
+        if (sys_top_reserved == need) result = ceiling;
         goto done;
     }
     minimum = MEM_EXEC_LOAD_ADDR + MEM_EXEC_STACK_SIZE +
               MEM_EXEC_SBRK_MIN + MEM_EXEC_HEAP_MIN;
-    if (top < minimum || need > top - minimum) goto done;
+    if (ceiling < minimum || need > ceiling - minimum) goto done;
     /* Old boot calls after pgalloc_init. Never publish a numeric-only claim. */
-    if (!pgalloc_reserve_pfn((top - need) / PAGE_SIZE, top / PAGE_SIZE)) goto done;
+    if (!pgalloc_reserve_pfn((ceiling - need) / PAGE_SIZE,
+                             ceiling / PAGE_SIZE)) goto done;
     sys_top_reserved = need;
-    result = top - need;
+    if (sys_frozen_hot) sys_frozen_exec = ceiling - need;
+    result = ceiling - need;
 done:
     irq_restore(flags);
     return result;
