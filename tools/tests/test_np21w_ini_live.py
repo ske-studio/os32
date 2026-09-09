@@ -12,9 +12,10 @@ ROW = {'pid': 42, 'exe': TARGET['exe'],
        'command': '"' + TARGET['exe'] + '" "' + TARGET['ini'] + '"',
        'created': '20260908010000'}
 RAW = (b'; opaque \xff\r\n[NekoProject21]\r\nUSEGD5430=false\r\nGD5430TYPE=91\n'
-       b'USEPEGCP=false\nprivate=SECRET')
+       b'USEPEGCP=false\nExMemory=16\nprivate=SECRET')
 NEW = RAW.replace(b'USEGD5430=false', b'USEGD5430=true')
 PEGC_ON = RAW.replace(b'USEPEGCP=false', b'USEPEGCP=true')
+RAM_8MB = RAW.replace(b'ExMemory=16', b'ExMemory=7')
 
 
 class Fake:
@@ -529,10 +530,25 @@ class ReceiptAndPathBoundaries(unittest.TestCase):
         self.assertEqual(diff, ['USEGD5430: true -> false'])
         self.assertIn(b'USEPEGCP=true', back)
 
+    def test_ram_operations_switch_only_extended_memory(self):
+        """ExMemory は MB 単位の拡張メモリ。8MB は CUI の最低動作環境で、
+        memory_boot の legacy フォールバック経路を通すための構成。
+        GUI の最低要件ではない (INSTALL.md / docs/02_memory.md)。"""
+        self.assertIn('ram-8mb', live.OPERATIONS)
+        self.assertIn('ram-15mb', live.OPERATIONS)
+        small, diff = live.transform(RAW, live.OPERATIONS['ram-8mb'])
+        self.assertEqual(diff, ['EXMEMORY: 16 -> 7'])
+        self.assertEqual(small, RAM_8MB)
+        self.assertIn(b'USEGD5430=false', small)
+        self.assertIn(b'USEPEGCP=false', small)
+        back, diff = live.transform(small, live.OPERATIONS['ram-15mb'])
+        self.assertEqual((back, diff), (RAW, ['EXMEMORY: 7 -> 16']))
+
     def test_receipt_bound_covers_signature_escaping_and_restart_metadata(self):
         import json
         starts = {'cirrus-on': RAW, 'cirrus-off': NEW,
-                  'pegc-on': RAW, 'pegc-off': PEGC_ON}
+                  'pegc-on': RAW, 'pegc-off': PEGC_ON,
+                  'ram-8mb': RAW, 'ram-15mb': RAM_8MB}
         for operation in live.OPERATIONS:
             raw = starts[operation]
             candidate, diff = live.transform(raw, live.OPERATIONS[operation])

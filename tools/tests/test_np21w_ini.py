@@ -18,10 +18,43 @@ else:
     ini = None
 
 RAW = (b'; opaque \x82\xa0\xff\r\n[NekoProject21]\r\n'
-       b' USEGD5430 = false \t; keep\r\nGD5430TYPE=91\nUSEPEGCP=false\n'
+       b' USEGD5430 = false \t; keep\r\nGD5430TYPE=91\nUSEPEGCP=false\nExMemory=16\n'
        b'private=DO_NOT_PRINT\r\n[other]\r\nUSEGD5430=false')
 CHANGES = {'USEGD5430': 'true'}
 EXPECTED = RAW.replace(b'= false', b'= true', 1)
+
+
+class ExMemory(unittest.TestCase):
+    """ExMemory は MB 単位の拡張メモリ (win9x/ini.cpp:477, PFTYPE_UINT16、
+    SUPPORT_LARGE_MEMORY 有効時)。ブートローダが 1MB から 512KB 刻みで実測するので
+    (boot/loader_fat.asm:248)、ゲストの総容量はこの値から決まる。
+    8MB は CUI の最低動作環境で、memory_boot の legacy フォールバック経路を通す。"""
+
+    def test_switch_between_proven_sizes(self):
+        small, diff = ini.transform(RAW, {'EXMEMORY': '7'})
+        self.assertEqual(diff, ['EXMEMORY: 16 -> 7'])
+        self.assertEqual(small, RAW.replace(b'ExMemory=16', b'ExMemory=7'))
+        back, diff = ini.transform(small, {'EXMEMORY': '16'})
+        self.assertEqual((back, diff), (RAW, ['EXMEMORY: 7 -> 16']))
+
+    def test_rejects_unproven_sizes(self):
+        for value in ('0', '1', '8', '13', '32', '', '16 ', '0x10'):
+            with self.assertRaises(ini.IniError):
+                ini.transform(RAW, {'EXMEMORY': value})
+
+    def test_does_not_disturb_graphics_fields(self):
+        out, diff = ini.transform(RAW, {'EXMEMORY': '7'})
+        self.assertIn(b' USEGD5430 = false \t; keep', out)
+        self.assertIn(b'GD5430TYPE=91', out)
+        self.assertIn(b'USEPEGCP=false', out)
+        self.assertEqual(diff, ['EXMEMORY: 16 -> 7'])
+
+    def test_missing_or_unknown_fails_closed(self):
+        for raw in (RAW.replace(b'ExMemory=16\n', b''),
+                    RAW.replace(b'ExMemory=16', b'ExMemory=13'),
+                    RAW.replace(b'ExMemory=16', b'ExMemory=16\nexmemory=16')):
+            with self.assertRaises(ini.IniError):
+                ini.transform(raw, {'USEGD5430': 'true'})
 
 
 class Pegc(unittest.TestCase):
@@ -70,7 +103,8 @@ class Transformation(unittest.TestCase):
         for prefix in (b'', b'\xef\xbb\xbf'):
             for newline in (b'\r\n', b'\n', b'\r'):
                 raw = prefix + newline.join((b'[NekoProject21]', b'USEGD5430=false',
-                                             b'GD5430TYPE=91', b'USEPEGCP=false'))
+                                             b'GD5430TYPE=91', b'USEPEGCP=false',
+                                             b'ExMemory=16'))
                 result, _ = ini.transform(raw, CHANGES)
                 self.assertEqual(result, raw.replace(b'USEGD5430=false', b'USEGD5430=true'))
 

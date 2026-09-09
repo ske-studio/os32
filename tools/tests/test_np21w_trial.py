@@ -16,7 +16,7 @@ BASE = r'C:\Trial Fixture\np21x64w.ini'
 CWD = r'C:\Trial Fixture'
 CREATED = '2026-09-09T01:02:03.0000000Z'
 RAW = (b'\xef\xbb\xbf[NekoProject21]\r\nUSEGD5430 = false ;keep\nGD5430TYPE=91\r\n'
-       b'USEPEGCP=false\r\ne_resume = true\r\nopaque=\x82\xa0\n')
+       b'USEPEGCP=false\r\nExMemory=16\r\ne_resume = true\r\nopaque=\x82\xa0\n')
 POST_EXIT = RAW + b'; normal exit saved settings\r\n'
 
 def plan():

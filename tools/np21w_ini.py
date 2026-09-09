@@ -32,8 +32,20 @@ import uuid
 # All fields are required even when changing one, so a partial or unknown
 # backend configuration fails closed. NP21/W's initsave writes the whole
 # s_IniItems[] table, so an ini it produced always carries them.
+#
+# EXMEMORY は ini では `ExMemory` と混在ケースで書かれる。transform はキーを
+# 大文字化して照合し、書き換えるのは値だけなので ini 側の綴りは保たれる
+# (既存の 3 キーはたまたま全大文字だったのでこの区別が要らなかった)。
+# MB 単位の拡張メモリ (win9x/ini.cpp:477, PFTYPE_UINT16。
+# SUPPORT_LARGE_MEMORY 無効時は UINT8、どちらも MEMORY_MAXSIZE でクランプ)。
+# ブートローダが 1MB から 512KB 刻みで実測するので (boot/loader_fat.asm:248)、
+# ゲストの総容量はこの値で決まる。値は 2 つだけ通す:
+#   16 = 現行構成 (ゲスト 15360KB = 15MB。実測 2026-09-09)
+#    7 = CUI の最低動作環境 8MB。memory_boot の legacy フォールバックを通す
+# 8MB は CUI の最低動作環境であって GUI の最低要件ではない
+# (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md)。
 ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',),
-           'USEPEGCP': ('true', 'false')}
+           'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '16')}
 SECTION = b'nekoproject21'
 LIMIT = 4 * 1024 * 1024
 

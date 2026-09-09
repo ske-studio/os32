@@ -40,9 +40,11 @@ probe が本当に走ったかまで見たいときは、`kernel.map` の `s_pro
 ## 1. 扱えるキーの範囲
 
 現在ツールが扱うのは `[NekoProject21]` の **`USEGD5430` / `GD5430TYPE` /
-`USEPEGCP` / `e_resume`** だけ。`pc_model` `ExMemory` `MEMswtch` `DIPswtch` などは
-**未対応**で、推測して追記・変更しない。RAM 量やマシン種別を変える検証が要る場合は、
+`USEPEGCP` / `ExMemory` / `e_resume`** だけ。`pc_model` `MEMswtch` `DIPswtch` などは
+**未対応**で、推測して追記・変更しない。ほかのキーが要る検証が出たら、
 ツールの拡張を別タスクとして起こし、その実装と実適用の承認を分ける。
+
+キーの照合は**大文字化して**行う。ini 側の綴り (`ExMemory`) は書き換えず、値だけ直す。
 
 `transform()` は**変更するキーが 1 つでも全キーの存在を要求して fail closed** する。
 NP21/W の `initsave` は `s_IniItems[]` 表を丸ごと書くので、このエミュレータが
@@ -52,6 +54,7 @@ NP21/W の `initsave` は `s_IniItems[]` 表を丸ごと書くので、このエ
 |---|---|---|
 | `cirrus-on` / `cirrus-off` | `USEGD5430` (+ `GD5430TYPE=91` 維持) | TASK_H3_cirrus §0 |
 | `pegc-on` / `pegc-off` | `USEPEGCP` のみ | `win9x/ini.cpp:687` が `np2cfg.usepegcplane` に束縛し、`io/pegc.c:375` が `pegc.enable` に写す。`mem/memvga.c` が PEGC の VRAM 経路ごとに見る |
+| `ram-8mb` / `ram-15mb` | `ExMemory` のみ (7 / 16) | `win9x/ini.cpp:477` (`PFTYPE_UINT16`、MB 単位)。ブートローダが 1MB から 512KB 刻みで実測する (`boot/loader_fat.asm:248`)。**8MB は CUI の最低動作環境**で `memory_boot` の legacy フォールバックを通す構成。**GUI の最低要件ではない** (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md) |
 
 **`pc_model` は PEGC の gate ではない。** OS32 の `pegc_probe()` が見るのは BIOS
 ワークエリア 0x045C bit6 と 0x0597 bit2 で、2026-09-09 の実測では `pc_model=VX` の

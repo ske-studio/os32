@@ -23,7 +23,14 @@ from np21w_ini import IniError, LIMIT, transform
 OPERATIONS = {'cirrus-on': {'USEGD5430': 'true', 'GD5430TYPE': '91'},
               'cirrus-off': {'USEGD5430': 'false', 'GD5430TYPE': '91'},
               'pegc-on': {'USEPEGCP': 'true'},
-              'pegc-off': {'USEPEGCP': 'false'}}
+              'pegc-off': {'USEPEGCP': 'false'},
+              # ExMemory (ini の綴りは ExMemory、照合は大文字) は MB 単位の
+              # 拡張メモリ。8MB は **CUI の**最低動作環境で、memory_boot が
+              # 新モデルを諦めて pgalloc_init へ落ちる legacy 経路を通すための
+              # 構成。GUI の最低要件ではない (INSTALL.md / docs/02_memory.md /
+              # tasks/gui/DESIGN.md)。16 はゲスト 15360KB = 15MB (実測)。
+              'ram-8mb': {'EXMEMORY': '7'},
+              'ram-15mb': {'EXMEMORY': '16'}}
 SIGNATURE_LIMIT = 256  # FileIdentity.Read: seven decimal integers + separators.
 SIGNATURE_JSON_BYTES = 12 * SIGNATURE_LIMIT  # Escaped UTF-16 surrogate pair per character.
 PROCESS_ID_MAX = 2147483647  # Query casts ProcessId to signed Int32.
