@@ -36,6 +36,9 @@ python3 tools/emu_agent/agent.py tail                                      # 直
 (落ちた 1 本だけ回し直すため)。**`build/sdk.mk` に `check-*` を足したら `MAKE_TARGETS`
 にも足す** — 2026-09-09 にここが古く、回し直せなかった。
 
+**ini はローカル AI に触らせない。** `ACTIONS` に ini 操作は無く、追加もしない。
+NP21/W の設定変更は PM だけの権限 (スキル `os32-emu-config` §0)。
+
 誤操作が実機を壊す経路 (GUI 入力など) は `run` ではなく
 `tools/emu_agent/playbook.py` を使う。承認済み JSON 台本と操作・引数・順序が
 完全一致したものだけを実行し、既定は dry-run。行動名の許可リストとプロンプトだけでは

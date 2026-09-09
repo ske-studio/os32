@@ -1,7 +1,37 @@
 ---
 name: os32-emu-config
-description: OS32 のバックエンド検証に必要な NP21/W ini の限定変更。通常終了後の新規 trial ini、オフライン変換、既存ライブ変更を依頼範囲で使い分ける。
+description: NP21/W ini の限定変更。変更権限は PM (Claude Code) だけで、コーダー・テスター・レビュアーには無い。通常終了後の新規 trial ini、オフライン変換、既存ライブ変更を依頼範囲で使い分ける。ini に触る前に必ず読む。
 ---
+
+## 0. 権限 — ini を変更してよいのは PM だけ
+
+**ini の変更権限は PM (Claude Code の対話セッション) にのみ与えられている。**
+他の役は読むことすら原則しない ([`ROLES.md`](../../../docs/tasks/agents/ROLES.md))。
+
+| 役 | ini |
+|---|---|
+| **PM** (Claude Code) | **変更してよい唯一の役**。ただし操作ごとに [D2] の承認を取る |
+| コーダー (サブエージェント) | 不可。ini はスコープ外。必要になったら PM に戻す |
+| テスター (ローカル AI) | 不可。`tools/emu_agent/` の `ACTIONS` に ini 操作は存在しない |
+| レビュアー | 不可 (読み取りのみの役) |
+
+機械的な裏付けは `.claude/settings.json` の `ask`:
+`Edit(**/*.ini)` / `Write(**/*.ini)` と、`np21w_ini_live.py` / `np21w_trial.py` /
+`np21w_ini.py` の起動。**ただし包括的な保護ではない** — 別の書き方や別コマンド経由は
+文字列一致しない。規則の方が正典であり、`.claude/settings.json` は再確認の網に過ぎない。
+
+**ini に触る前に、本当に ini が要るかを先に確かめる。** 2026-09-09 に、PEGC 検証には
+ini 変更が要ると判断しかけたが、実際にはゲスト側の `gfxmode pegc` で足りた
+(`pc_model` は VM/VX = CPU 世代であって PEGC の有無ではなく、`np21x64w.exe` は
+9821 エミュレータなので PEGC は最初から在る)。
+GFX バックエンドの切替はゲスト側が先、ini は Cirrus (`USEGD5430`) のときだけ。
+
+## 1. 扱えるキーの範囲
+
+現在ツールが扱うのは `[NekoProject21]` の **`USEGD5430` / `GD5430TYPE` / `e_resume`
+の 3 つだけ**。`pc_model` `ExMemory` `MEMswtch` `DIPswtch` などは**未対応**で、
+推測して追記・変更しない。RAM 量やマシン種別を変える検証が要る場合は、
+ツールの拡張を別タスクとして起こし、その実装と実適用の承認を分ける。
 
 ## 承認済み Cirrus trial（通常終了・新規 ini）
 

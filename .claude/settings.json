@@ -8,7 +8,10 @@
       "Bash(git reset --hard:*)",
       "Bash(rm -rf:*)",
       "Edit(**/*.ini)",
-      "Write(**/*.ini)"
+      "Write(**/*.ini)",
+      "Bash(python3 tools/np21w_ini_live.py:*)",
+      "Bash(python3 tools/np21w_trial.py:*)",
+      "Bash(python3 tools/np21w_ini.py:*)"
     ],
     "deny": [
       "Read(**/.env)",
