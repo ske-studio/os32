@@ -113,7 +113,7 @@ static int init_model(struct physmem *m, void *backing, u32 capacity,
     if (!physmem_reserve_ram(&next, first, first + pages) ||
         !verify(first, pages, backing)) goto done;
     if (ws_first || ws_end) {
-        if (ws_first < MEM_APP_BAND_TOP / PAGE_SIZE || ws_first >= ws_end ||
+        if (ws_first < MEM_APP_BAND_MAX_TOP / PAGE_SIZE || ws_first >= ws_end ||
             ws_end > first ||
             (model_addr < ws_end * PAGE_SIZE &&
              ws_first * PAGE_SIZE < model_addr + sizeof(*m)) ||

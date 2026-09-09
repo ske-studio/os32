@@ -40,6 +40,13 @@
 #include "palette.h"   /* palette_get_all / palette_shadow_set */
 #include "os32_kapi_shared.h"
 
+/* アプリ帯 (kernel/paging.c) がリニア窓を踏まないための照合 ([C4] 三層定数)。
+ * memmap.h 側は pegc.h を読まない (9821 の文字を core に持ち込まない) ので、
+ * 両方を読むここで値の一致を検査する。ここが落ちたら
+ * MEM_APP_BAND_DEVICE_FLOOR を PEGC_LINEAR_BASE に合わせ直すこと。 */
+STATIC_ASSERT(MEM_APP_BAND_DEVICE_FLOOR == PEGC_LINEAR_BASE,
+              app_band_device_floor_is_pegc_window);
+
 /* ------------------------------------------------------------------------ */
 /*  GDC 表示タイミング表 (値と出典は include/pegc.h §9)                      */
 /* ------------------------------------------------------------------------ */

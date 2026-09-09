@@ -9,6 +9,7 @@
 #define __PAGING_H
 
 #include "types.h"
+#include "memmap.h"   /* MEM_APP_BAND_* (struct addrspace の PT 配列長) */
 
 /* ページサイズ */
 #define PAGE_SIZE       4096
@@ -148,16 +149,21 @@ int paging_is_present(u32 virt_addr);
 /*  新 PD に載せてもカーネルは動き続ける (V1)。CPL=3 用の USER マッピングは    */
 /*  M1c で overlay する。 */
 
-/* アプリ帯域 0x400000-0x7FFFFF を覆う PDE インデックス
- * (= MEM_APP_BAND_BASE >> 22 = 1)。共有ライブラリ帯域 (0x400000-0x4FFFFF)・
- * プログラム本体 (MEM_EXEC_LOAD_ADDR 0x500000-)・ユーザスタックが全部この
- * 1 枚に載る。整合は kernel/paging.c の STATIC_ASSERT が検査する。 */
+/* アプリ帯域の **先頭** PDE インデックス (= MEM_APP_BAND_BASE >> 22 = 1)。
+ * 共有ライブラリ帯域 (0x400000-0x4FFFFF)・プログラム本体
+ * (MEM_EXEC_LOAD_ADDR 0x500000-)・ヒープ・ユーザスタックがここから載る。
+ *
+ * 2026-09-10 (票 docs/tasks/memory/APP_BAND_PDE.md): アプリ固有 PDE は
+ * 1 枚固定ではなく [APP_BAND_PDE, APP_BAND_PDE + count) の連続 count 枚。
+ * count は 1〜MEM_APP_BAND_MAX_PDES で、要求量に応じて exec が決める。
+ * 整合は kernel/paging.c の STATIC_ASSERT が検査する。 */
 #define APP_BAND_PDE   1
 
 struct addrspace {
     u32 pd_phys;       /* 新 PD の物理アドレス (CR3 に載せる値)。0=無効 */
-    u32 app_pt_phys;   /* 0x400000 帯アプリ PT の物理アドレス */
-    u32 app_pde;       /* アプリ固有にした PDE インデックス */
+    u32 app_pde;       /* アプリ固有にした先頭 PDE インデックス */
+    u32 app_pde_count; /* アプリ固有 PDE の枚数 (0=無効, 1..MAX_PDES) */
+    u32 app_pt_phys[MEM_APP_BAND_MAX_PDES];  /* 各 PDE のアプリ PT 物理 */
 };
 
 /* カーネル (master) PD の物理アドレス。CR3 を戻すときに使う。 */
@@ -169,18 +175,39 @@ u32 paging_current_cr3(void);
 /* CR3 に PD をロードする (= アドレス空間切り替え + TLB フラッシュ)。 */
 void paging_load_cr3(u32 pd_phys);
 
-/* アプリ用アドレス空間を 1 つ作る。
- * master の全 PDE をコピーしてカーネル帯域を共有し、0x400000 帯 (APP_BAND_PDE)
- * だけ新規確保したアプリ PT に差し替える。アプリ PT は M1b では master と
- * 同一の identity で初期化する。
+/* アプリ用アドレス空間を 1 つ作る (アプリ固有 PDE を pde_count 枚)。
+ * master の全 PDE をコピーしてカーネル帯域を共有し、
+ * [APP_BAND_PDE, APP_BAND_PDE + pde_count) だけ新規確保したアプリ PT に
+ * 差し替える。アプリ PT は master の同帯 PT と同一の identity で初期化する
+ * (CPL=0 のまま CR3 を載せてもカーネルから見た番地が変わらない = V1)。
  * PD/PT のバッキングは pgalloc から取る (pgalloc_init 済みが前提)。
- * 戻り値: 0=成功 (as を埋める), -1=物理ページ不足。 */
+ * pde_count は 1..MEM_APP_BAND_MAX_PDES。
+ * 戻り値: 0=成功 (as を埋める), -1=引数不正 / 物理ページ不足 (何も確保しない)。
+ *
+ * 注意 (票 §2): この関数と paging_addrspace_map_user*() 以外で
+ * アプリ AS へ写像してはならない。paging_map_phys() / paging_set_page() は
+ * master の page_tables[] に書くので、アプリ固有 PDE の範囲に使っても
+ * 走行中のアプリからは見えない。 */
+int paging_addrspace_create_n(struct addrspace *as, u32 pde_count);
+
+/* 枚数 1 の従来どおりの生成 (= paging_addrspace_create_n(as, 1))。
+ * 自己診断など「帯を広げる必要がない」呼び出しはこちらを使う。 */
 int paging_addrspace_create(struct addrspace *as);
 
-/* アプリ用アドレス空間を破棄し PD/PT のバッキングページを解放する。
+/* アプリ用アドレス空間を破棄し PD/PT (枚数分) のバッキングページを解放する。
  * 破棄する PD がアクティブ (CR3) であってはならない — 先に
  * paging_load_cr3(paging_kernel_pd_phys()) で master へ戻すこと。 */
 void paging_addrspace_destroy(struct addrspace *as);
+
+/* アプリ帯に必要な PDE 枚数を求める (票 §4-1 の規則、純関数)。
+ *   code_end : 本体 (code+data+bss) 末尾のページ境界切り上げ済み仮想番地
+ *   heap_req : exec_heap の要求量 (OS32X ヘッダの heap_size)。
+ *              **0 = 指定なしは必ず 1 枚**を返す — 指定しないプログラムの
+ *              レイアウトを従来から 1 バイトも動かさないため (回帰ゼロ)。
+ *   ram_top  : 帯を伸ばしてよい物理上限。exec は子プロセスの claim 範囲 A の
+ *              末尾を渡す (そこまでは子が予約済み = pgalloc と二重使用しない)。
+ * 戻り値: 1..MEM_APP_BAND_MAX_PDES。桁あふれ・上限不足でも 1 は必ず返す。 */
+u32 paging_app_band_pdes(u32 code_end, u32 heap_req, u32 ram_top);
 
 /* アプリ AS の 1 ページを USER でマップする (M1c)。
  *   - virt が 0x400000 帯 (app_pde) なら、アプリ固有 PT に書く
@@ -227,5 +254,16 @@ int paging_pd_clone_selftest(void);
  * ハードウェアには依存しない (実 RAM の無い番地を使い、PTE は必ず戻す)。
  * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。 */
 int paging_map_user_keep_selftest(void);
+
+/* アプリ帯の可変 PDE 化の自己診断 (票 docs/tasks/memory/APP_BAND_PDE.md §5)。
+ * 最大枚数のアドレス空間を作り、CPL=0 のまま次を確かめる:
+ *   1. 枚数分の PDE がアプリ固有 PT に差し替わり、それぞれ別物である
+ *   2. アプリ PT は master の同帯 PT と同一 identity で始まる
+ *   3. 帯の 2 枚目以降へ USER を張っても master の PT / PDE が汚れない
+ *   4. USER は当該アプリ PD の PDE にだけ伝播する
+ *   5. 破棄で PD と PT (枚数分) がきっちり返る
+ * ハードウェアには依存しない (CR3 は載せ替えない)。
+ * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。 */
+int paging_app_band_selftest(void);
 
 #endif /* __PAGING_H */

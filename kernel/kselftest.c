@@ -297,6 +297,22 @@ static void test_map_user_keep(void)
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/*  アプリ帯の可変 PDE 化 (票 docs/tasks/memory/APP_BAND_PDE.md): 帯を 4MB    */
+/*  単位で伸ばしたとき、増えた PDE がアプリ固有 PT に差し替わり、USER が      */
+/*  master の PDE/PT へ漏れないこと。ここが壊れると CPL=3 アプリが master の  */
+/*  ページテーブルを書き換えられる (= 任意物理への読み書き) が、動いている    */
+/*  ように見えてしまうので毎回ブート時に見る。                                */
+/* ------------------------------------------------------------------------ */
+static void test_app_band_pde(void)
+{
+    int rc = paging_app_band_selftest();
+    check(rc == 0, "app band PDEs (private PTs, USER never reaches master)");
+    if (rc != 0) {
+        kprintf(0xC1, "[selftest]   paging_app_band_selftest rc=%d\n", rc);
+    }
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -309,6 +325,7 @@ int kselftest_run(void)
     test_kprintf();
     test_ring3_pd();
     test_map_user_keep();
+    test_app_band_pde();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

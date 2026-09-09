@@ -20,7 +20,7 @@ KernelAPIポインタを引数として実行する。
 | ネスト実行 | 最大 4 段 (`MAX_EXEC_NEST`)。Level 0 = カーネル、1 = シェル、2+ = アプリ。**子が終了すると親に戻る** (親の exec_heap は `exec_heap_restore_state()` で復元) |
 | 資源の所有者 | FD / リダイレクト / パイプは `res_owner_get()` (= ネスト段) でタグ付け、終了段の分だけ回収 ([10 §10-9](10_notes.md)) |
 | 不正ポインタ | ディスパッチャがアプリ帯 / SHM / VRAM の範囲で早期検証。検証しきれないものは「ring3 syscall 実行中フォールトガード」が捕捉し、**アプリだけ kill** (`fault_kill_count`)。設計: [tasks/v2/](tasks/v2/PLAN.md) |
-| プログラム専用スタック | CPL=3: 物理 0x7C0000〜0x7FFFFF 固定 (256KB) + ガード 0x7BF000。CPL=0: mem_end 付近 |
+| プログラム専用スタック | CPL=3: アプリ帯の上端から 256KB + その直下にガード 1 ページ。帯 1 枚 (既定) なら 0x7C0000〜0x7FFFFF / ガード 0x7BF000、2 枚なら 0xBC0000〜0xBFFFFF / ガード 0xBBF000 ([tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md))。CPL=0: mem_end 付近 |
 | 呼び出し規約 | カーネル側 GCC (System V) + `__cdecl` ラッパー、外部プログラム System V i386 ABI |
 
 ### 実行方式
@@ -40,7 +40,7 @@ KernelAPIポインタを引数として実行する。
 |---|---|---|
 | 0x500000〜スタック直下 (`RING3_HEAP_TOP`) | RW+USER (アプリ PD 固有 PT) | 本体 / sbrk / exec_heap |
 | ガード 0x7BF000 | 非 present | ヒープ / スタック境界 (`ring3_guard`) |
-| 0x7C0000〜0x7FFFFF | RW+USER | ユーザスタック 256KB |
+| 0x7C0000〜0x7FFFFF | RW+USER | ユーザスタック 256KB (帯 1 枚のとき。2 枚なら 0xBC0000〜0xBFFFFF) |
 | 0xA0000〜0xBFFFF | RW+USER (共有 PT) | テキスト / グラフィック VRAM |
 | SHM、フォントキャッシュ 0x01000〜、Unicode 表 0x4A000〜 | RW+USER (共有 PT) | KAPI 越しでない直読み |
 | **0x6A000〜0x89FFF (9801 バックバッファ)** | RW+USER、**常に** | アプリの `gfx_init` でアクセラレータが失敗して 9801 へ落ちたときの描画先 (レビュー #6) |

@@ -26,9 +26,13 @@ int memory_boot_init(u32 mem_kb)
     top = physmem_legacy_end(&boot_memory);
     pages = layout.capacity / PAGE_SIZE;
     /* PREINIT choice only. In particular 8MiB has no shared workspace
-     * above APP_BAND_TOP; preserve its legacy allocator and exec limits. */
+     * above APP_BAND_MAX_TOP; preserve its legacy allocator and exec limits.
+     * The floor is the **maximum** app band top, not the default one: the
+     * band now grows in 4MiB steps (docs/tasks/memory/APP_BAND_PDE.md), so a
+     * workspace between 0x800000 and 0xBFFFFF could be identity-mapped USER
+     * by a two-PDE app and let it rewrite shared page tables. */
     if (!pages || top < pages + MEMORY_BOOT_WORKSPACE_PAGES ||
-        top - pages - MEMORY_BOOT_WORKSPACE_PAGES < MEM_APP_BAND_TOP / PAGE_SIZE) {
+        top - pages - MEMORY_BOOT_WORKSPACE_PAGES < MEM_APP_BAND_MAX_TOP / PAGE_SIZE) {
         pgalloc_init(mem_kb);
         return 1;
     }

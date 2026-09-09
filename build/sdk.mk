@@ -123,6 +123,7 @@ check-t5a-host:
 check-memory-host:
 	python3 -B tools/tests/test_physmem.py
 	python3 -B tools/tests/test_paging_bounds.py
+	python3 -B tools/tests/test_app_band_pde.py
 	python3 -B tools/tests/test_pgalloc_model.py
 	python3 -B tools/tests/test_pgalloc_range.py
 	python3 -B tools/tests/test_highram_stage.py
