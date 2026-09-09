@@ -110,3 +110,4 @@ tools/emu_agent/logs/
 # PC-98 ハードウェア資料のローカルミラー (著作権物。tools/sync_hwdocs.sh で写す。git に入れない)
 /docs/hw/
 .claude/settings.local.json
+.claude/worktrees/

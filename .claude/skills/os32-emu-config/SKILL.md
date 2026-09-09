@@ -1,7 +1,69 @@
 ---
 name: os32-emu-config
-description: OS32 のバックエンド検証に必要な NP21/W ini の限定変更。オフライン純粋変換と、明示対象に束縛したライブ停止・保存・再起動・復元を使い分ける。
+description: OS32 のバックエンド検証に必要な NP21/W ini の限定変更。通常終了後の新規 trial ini、オフライン変換、既存ライブ変更を依頼範囲で使い分ける。
 ---
+
+## 承認済み Cirrus trial（通常終了・新規 ini）
+
+通常終了後に exe 隣接 baseline をコピーして試す依頼は
+[tools/np21w_trial.py](../../../tools/np21w_trial.py) を使う。
+既存ライブツールの強制終了・原本置換・restore はこの承認に含めない。
+ホスト限定実装依頼では実プロセス・実 ini・ネットワークに触れない。
+試験・ソース根拠・実行例は [trial TDD 記録](../../../tools/tests/np21w_trial_tdd.md)。
+
+- 操作者が PID、CIM の UTC 生成時刻（`2026-09-09T01:02:03.0000000Z` 形式）、
+  exe、exe 隣接の同名 `.ini`、exe ディレクトリの cwd を選ぶ。
+  baseline は操作者が選んだコピー元であり、以前の active ini の証明ではない。
+  古いコマンド行から現在の設定選択を推定しない。
+- `make_plan()` の全フィールドを承認対象として `bind_trial()` に束縛する。
+  モデルにはコピーした JSON と単回 callable のみを渡す。ローカル LLM の提案は
+  strict JSON の完全一致が必須。変更・追加・重複フィールド・複数提案・tool calls は拒否。
+  不一致でも束縛を消費し、executor 構築・照会・ロック・書き込みに進まない。
+  CLI は自由シェルや既存 action registry を使わず、loopback LLM へ1回だけ要求する。
+- `--execute` なしは純粋 dry-run（実 ini の差分プレビューではない）。
+  `--execute --exclusive-operator` は、その呼出しで作成する固有 trial 名を含む計画を
+  ホスト側で承認し、LLM 照合後に通常終了→終了確認→コピー変換→明示起動を1回実行する。
+  計画を外部で事前承認するホストは `make_plan()` の戻り値を保持して `bind_trial()` を使う。
+  dry-run を別途実行したときの trial 名は次回 CLI 呼出しには引き継がない。
+- 同じ Global mutex と専有前提で、唯一の NP2/NP21 プロセスの PID・生成時刻・exe を
+  再照合する。ハンドル確保後の `CloseMainWindow()` のみで閉じ、実際の
+  `WaitForExit(10000)` と成功した空の CIM 照会で終了を確認する。
+  確認ダイアログの拒否・放置・ハングは失敗。kill fallback、自動再試行はない。
+- baseline は終了確認後に初めて読み、read-only snapshot と限定変換から
+  `CreateNew` で隣接する `np21w-trial-<UUID>.ini` を作る。原本へ直接書かない。
+  Cirrus の既知キー2つと `e_resume` のみ扱い、trial 内で
+  `USEGD5430=true`、`GD5430TYPE=91`、必要なら `e_resume=true→false`。
+  resume 欠落・重複・未知値も追記せず拒否する（この場合は終了後に停止する）。
+  無関係な全バイトを保持。通常終了が baseline を保存し直すことは許容する。
+- 起動直前に原本の内容・識別情報と trial 全バイトを再確認する。
+  起動引数は固有 trial の絶対パスだけ、cwd も明示して結果に記録する。
+  新プロセスのハンドル・PID・生成時刻・exe・明示コマンド行を照合し、再照会する。
+  これは起動検証であり、起動後の UI 設定切替やゲスト backend の検証ではない。
+- 許容するライフサイクル差は、通常終了に伴う設定・状態保存、新しい ini のファイル名、
+  上記3キー、明示 cwd、新しいプロセスと cold start。
+  VM RAM の完全保存は約束しない。共有ディスクのゲスト通常動作も隔離されない。
+  NHD のコピー・配備は行わない。resume state の名前も ini stem に従う。
+  原本の保持とはツールが終了後の baseline を上書きしない意味で、終了前の完全保存ではない。
+- 失敗は stage / completed / trial / plan を JSON に残す。部分作成ファイルや
+  起動済みプロセスを自動削除・停止・復元しない。元のコマンド行や ini 原文は表示しない。
+  ローカル NTFS、reparse/hardlink 拒否、専有を前提とする。非協調プロセスの競合を
+  完全には排除しない。既存承認が当該通常終了と trial 差分を含むなら再承認は不要 [D2]。
+
+## Transport cleanup の限定回帰試験
+
+- stdout の BufferedReader は読み取りスレッドだけが閉じる。他スレッドの
+  `close()` は read lock を待って停止し得るため、終了側は bounded join に留める。
+  EOF 未到達時は失敗を返し、最終的な stream close は reader が EOF 後に行う。
+- wait timeout を成功に変換しない。trial は kill/retry なし、共有 live は元の
+  transport kill fallback だけを維持する。cleanup で既存の wait 例外を隠さない。
+- `python3 -B tools/tests/test_np21w_transport.py -v` で実ローカル pipe と偽 process の
+  timeout・通常 EOF・遅延 EOF・CLI failure JSON の stage/process 保持を検査する。
+  実エミュレータ、CIM、実 ini を使わない。Windows parser 試験は PS 本文をデータとして
+  ParseInput に渡すだけであり、実ライフサイクルの合格とは区別する。
+
+## 従来のライブ変更・オフライン変換
+
+以下は既存ツール固有の手順。trial の通常終了承認から切り替えない。
 
 [tools/np21w_ini_live.py](../../../tools/np21w_ini_live.py) がライブ制御、
 [tools/np21w_ini.py](../../../tools/np21w_ini.py) が既存の純粋変換・オフライン準備。
@@ -63,6 +125,14 @@ python3 tools/np21w_ini_live.py restore --exe 'C:\NP21\np21x64w.exe' --ini 'C:\N
 変更なしは停止・保存をしない。正常終了 0、拒否/失敗 2。
 初回適用は明示 ini で起動中の対象が必要。復元は、記録済みの起動情報と
 成功した不在照会があれば、再起動失敗後の停止状態からも可能。
+
+追加のライブ前提: コマンド行は起動時の設定指定しか証明しない。
+NP21/Wは起動後にもsetiniFilenameで選択iniを変更できるため、現在の選択パスの
+信頼できる観測、または当該プロセスの生成時刻に結び付く管理された起動履歴が必要。
+現在のツールはこの前提を自動検証しない。明示引数だけで使用中iniを確定したと
+扱わず、前提を確認できない既存プロセスへ実適用しない。
+根拠: np21w-src/src/win9x/np2.cppの設定切替、dialog/d_cfgsave.cpp、
+ini.cppのinitload/initsave。bare起動時の既定ini導出と現在の選択は区別する。
 
 ライブ処理の順序:
 

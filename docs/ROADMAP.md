@@ -26,7 +26,8 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 | 色 | system 16色 + focused app の 14色 lease。lease 中 WM chrome は2色 |
 | CUI/GUI | `/etc/system.cfg` の GUI=0/1 は**次回 boot の既定値**。実行中 shell の切替は `sys_switch_shell` |
 | FEP | gshell が GFX renderer を保持。CUI へ戻る前に renderer callback を解除 |
-| 性能上限 | Pentium 100MHz / 32MB で「超快適」を目標。それ以上の機能は対象外 |
+| 性能目標 | Pentium 100MHz / 32MB で「超快適」を目標とするが、32MB をメモリの設計上限にしない |
+| メモリ方針 | CUI 最低 8MB は GUI 要件・開発制約ではない。GUI 必要 RAM は実測で定義。32bit フラット空間の設計対象と現行実装上限は [02_memory.md](02_memory.md) を参照 |
 
 ### 技術基盤
 

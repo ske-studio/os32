@@ -13,4 +13,7 @@ extern "C" {
 
     /// Unicode → ANK (半角) コード。0 なら全角 (`lib/utf8.c`)。
     pub fn unicode_to_ank(cp: u32) -> u8;
+
+    /// Existing lib/utf8_prog.o symbol; retains its first-use JIS table probes.
+    pub fn unicode_to_jis(cp: u32) -> u16;
 }

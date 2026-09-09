@@ -44,12 +44,18 @@ typedef struct {
     VfsOps *ops;
     void *fs_ctx;       /* FSドライバ固有のインスタンスコンテキスト */
     int protect;        /* 1=カーネル常駐FD (exec_exitの自動クローズ対象外) */
-    int owner;          /* open した実行レベル (res_owner_get()) */
+    int owner;          /* GENERIC: current owner; SQLITE: explicit owner */
+    int lifetime;
+    VfsSqliteCookie cookie;
+    u32 generation;
+    int sqlite_flags;
+    int quarantined;
 } VfsFile;
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
 
-int vfs_open(const char *path, int mode)
+static int vfs_open_internal(const char *path, int mode, int owner,
+                             const VfsSqliteCookie *cookie, int sqlite_flags)
 {
     int i, fd = -1;
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
@@ -57,6 +63,18 @@ int vfs_open(const char *path, int mode)
     int rc;
     void *fs_ctx;
     VfsOps *ops;
+
+    /* Preflight before even path probes. FD0-2 are reserved. A slot whose
+     * generation reached MAX is retired on close, including GENERIC use.
+     * Like the existing VFS, this path requires non-reentrant callers. */
+    for (i = 3; i < VFS_MAX_OPEN_FILES; i++) {
+        if (!open_files[i].in_use &&
+            open_files[i].generation < VFS_FD_GENERATION_MAX) {
+            fd = i;
+            break;
+        }
+    }
+    if (fd == -1) return VFS_ERR_NOSPC; /* FD上限 */
 
     vfs_resolve_path(path, resolved, VFS_MAX_PATH);
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
@@ -66,15 +84,6 @@ int vfs_open(const char *path, int mode)
      * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
      * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた */
     if (vfs_path_kind(resolved) == VFS_KIND_DIR) return VFS_ERR_ISDIR;
-
-    /* 空きスロットを探す (FD0, 1, 2 は標準入出力用に予約) */
-    for (i = 3; i < VFS_MAX_OPEN_FILES; i++) {
-        if (!open_files[i].in_use) {
-            fd = i;
-            break;
-        }
-    }
-    if (fd == -1) return VFS_ERR_NOSPC; /* FD上限 */
 
     /* サイズ取得・存在確認 */
     rc = -1;
@@ -106,7 +115,7 @@ int vfs_open(const char *path, int mode)
         }
     }
 
-    open_files[fd].in_use = 1;
+    open_files[fd].generation++;
     str_cpy(open_files[fd].path, rel_path, VFS_MAX_PATH);
     open_files[fd].offset = 0;
     open_files[fd].size = file_size;
@@ -114,14 +123,95 @@ int vfs_open(const char *path, int mode)
     open_files[fd].ops = ops;
     open_files[fd].fs_ctx = fs_ctx;
     open_files[fd].protect = 0;
-    open_files[fd].owner = res_owner_get();
+    open_files[fd].owner = owner;
+    open_files[fd].lifetime = cookie ? VFS_FD_SQLITE : VFS_FD_GENERIC;
+    open_files[fd].cookie.group_index = cookie ? cookie->group_index : 0;
+    open_files[fd].cookie.generation = cookie ? cookie->generation : 0;
+    open_files[fd].sqlite_flags = sqlite_flags;
+    open_files[fd].quarantined = 0;
+    open_files[fd].in_use = 1;
 
     return fd;
+}
+
+int vfs_open(const char *path, int mode)
+{
+    return vfs_open_internal(path, mode, res_owner_get(),
+                             (const VfsSqliteCookie *)0, 0);
+}
+
+int vfs_open_sqlite(const char *path, int mode, int owner,
+                    const VfsSqliteCookie *cookie, int sqlite_flags,
+                    VfsSqliteLease *out)
+{
+    int fd;
+    if (!path || !out || !cookie || cookie->group_index < 0 ||
+        cookie->generation == 0 || owner < 0) return VFS_ERR_INVAL;
+    fd = vfs_open_internal(path, mode, owner, cookie, sqlite_flags);
+    if (fd < 0) return fd;
+    out->fd = fd;
+    out->cookie = *cookie;
+    out->generation = open_files[fd].generation;
+    return VFS_OK;
+}
+
+static int sqlite_cookie_equal(const VfsSqliteCookie *a,
+                               const VfsSqliteCookie *b)
+{
+    return a->group_index == b->group_index && a->generation == b->generation;
+}
+
+int vfs_count_sqlite(const VfsSqliteCookie *cookie)
+{
+    int fd, count = 0;
+    if (!cookie) return VFS_ERR_INVAL;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        if (open_files[fd].in_use && open_files[fd].lifetime == VFS_FD_SQLITE &&
+            sqlite_cookie_equal(&open_files[fd].cookie, cookie)) count++;
+    }
+    return count;
+}
+
+int vfs_quarantine_sqlite(const VfsSqliteCookie *cookie)
+{
+    int fd;
+    if (!cookie) return VFS_ERR_INVAL;
+    for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
+        if (open_files[fd].in_use && open_files[fd].lifetime == VFS_FD_SQLITE &&
+            sqlite_cookie_equal(&open_files[fd].cookie, cookie))
+            open_files[fd].quarantined = 1;
+    }
+    return VFS_OK;
+}
+
+int vfs_validate_sqlite(const VfsSqliteLease *lease)
+{
+    const VfsFile *f;
+    if (!lease || lease->fd < 3 || lease->fd >= VFS_MAX_OPEN_FILES)
+        return VFS_ERR_INVAL;
+    f = &open_files[lease->fd];
+    if (!f->in_use || f->lifetime != VFS_FD_SQLITE || f->quarantined ||
+        f->generation != lease->generation ||
+        !sqlite_cookie_equal(&f->cookie, &lease->cookie)) return VFS_ERR_INVAL;
+    return VFS_OK;
+}
+
+int vfs_close_sqlite(const VfsSqliteLease *lease)
+{
+    VfsFile *f;
+    if (vfs_validate_sqlite(lease) != VFS_OK) return VFS_ERR_INVAL;
+    f = &open_files[lease->fd];
+    f->in_use = 0;
+    f->fs_ctx = (void *)0;
+    f->protect = 0;
+    f->owner = 0;
+    return VFS_OK;
 }
 
 void vfs_close(int fd)
 {
     if (fd >= 0 && fd < VFS_MAX_OPEN_FILES) {
+        if (open_files[fd].lifetime == VFS_FD_SQLITE) return;
         open_files[fd].in_use = 0;
         open_files[fd].fs_ctx = (void *)0;
         open_files[fd].protect = 0;
@@ -134,6 +224,7 @@ void vfs_close_owned(int owner)
     int fd;
     for (fd = 3; fd < VFS_MAX_OPEN_FILES; fd++) {
         if (!open_files[fd].in_use) continue;
+        if (open_files[fd].lifetime == VFS_FD_SQLITE) continue;
         if (open_files[fd].protect) continue;
         if (open_files[fd].owner != owner) continue;
         vfs_close(fd);
@@ -146,6 +237,7 @@ int vfs_fd_set_protect(int fd, int on)
 {
     if (fd < 3 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     if (!open_files[fd].in_use) return VFS_ERR_INVAL;
+    if (open_files[fd].lifetime == VFS_FD_SQLITE) return VFS_ERR_INVAL;
     open_files[fd].protect = on ? 1 : 0;
     return VFS_OK;
 }

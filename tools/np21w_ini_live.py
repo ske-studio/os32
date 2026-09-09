@@ -420,9 +420,14 @@ class PowerShellTransport:
         except OSError as exc:
             raise IniError('Windows PowerShell unavailable') from exc
         def read():
-            for line in self.process.stdout:
-                self.queue.put(line)
-            self.queue.put(b'')
+            try:
+                # Only this thread may close the buffered stream: another
+                # thread's close can wait indefinitely for its read lock.
+                with self.process.stdout:
+                    for line in self.process.stdout:
+                        self.queue.put(line)
+            finally:
+                self.queue.put(b'')
         self.reader = threading.Thread(target=read, daemon=True)
         self.reader.start()
 
@@ -440,15 +445,26 @@ class PowerShellTransport:
         except (OSError, ValueError, queue.Empty) as exc:
             raise IniError('Windows executor failed; retain backup; inspect process state') from exc
 
+    def _close_reader(self, *, failed=False):
+        # Descendants may retain the pipe after the PS script/parent exits.
+        # Leave eventual stream cleanup to the reader, never wait for EOF here.
+        self.reader.join(timeout=0.1)
+        # Preserve a wait/kill failure already propagating out of close().
+        if self.reader.is_alive() and not failed:
+            raise IniError('Windows executor cleanup timeout; inspect process state')
+
     def close(self):
         import subprocess
         self.process.stdin.close()
         try:
-            self.process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait(timeout=3)
-        self.process.stdout.close()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=3)
+                raise IniError('Windows executor cleanup timeout; inspect process state') from None
+        finally:
+            self._close_reader(failed=sys.exc_info()[0] is not None)
 
 
 class WindowsExecutor:
