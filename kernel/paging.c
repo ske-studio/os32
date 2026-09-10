@@ -721,14 +721,18 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
     return addrspace_map_user_page(as, virt, phys, flags, 0);
 }
 
-/* 範囲版の共通部。末尾の TLB 処理まで含めて 1 か所にまとめる。 */
+/* 範囲版の共通部。末尾の TLB 処理まで含めて 1 か所にまとめる。
+ * phys_base != 0 のときは identity ではなく [phys_base, ...) の連続物理を
+ * 張る (K5b P1)。identity 版は phys_base に 0 を渡す (物理 0 は張らない)。 */
 static int addrspace_map_user_range(struct addrspace *as, u32 vstart,
-                                    u32 vend, u32 flags, int keep_cache)
+                                    u32 vend, u32 flags, int keep_cache,
+                                    u32 phys_base)
 {
     u32 pfn, first, count, pdi;
     u32 *pd;
     if (!as || !as->pd_phys || !as->app_pde_count || vstart > vend) return -1;
     if (vstart == vend) return 0;
+    if (phys_base & (u32)(PAGE_SIZE - 1)) return -1;
     first = vstart >> PAGE_SHIFT;
     count = ((vend - 1) >> PAGE_SHIFT) - first + 1;
     pd = (u32 *)as->pd_phys;
@@ -738,9 +742,12 @@ static int addrspace_map_user_range(struct addrspace *as, u32 vstart,
         if ((pdi < as->app_pde || pdi >= as->app_pde + as->app_pde_count) &&
             (!page_tables[pdi] || !(pd[pdi] & PTE_PRESENT))) return -1;
     }
-    for (pfn = first; pfn < first + count; pfn++)
-        addrspace_map_user_page(as, pfn << PAGE_SHIFT, pfn << PAGE_SHIFT,
+    for (pfn = first; pfn < first + count; pfn++) {
+        u32 phys = phys_base ? (phys_base + ((pfn - first) << PAGE_SHIFT))
+                             : (pfn << PAGE_SHIFT);
+        addrspace_map_user_page(as, pfn << PAGE_SHIFT, phys,
                                 flags, keep_cache);
+    }
     /* この PD が既にアクティブなら TLB を捨てる。通常は CR3 に載せる前に
      * 呼ぶので不要だが、載せた後の追加マップにも備える。 */
     if (as && as->pd_phys && paging_current_cr3() == as->pd_phys) {
@@ -752,13 +759,78 @@ static int addrspace_map_user_range(struct addrspace *as, u32 vstart,
 int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
                                     u32 vend, u32 flags)
 {
-    return addrspace_map_user_range(as, vstart, vend, flags, 0);
+    return addrspace_map_user_range(as, vstart, vend, flags, 0, 0);
 }
 
 int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
                                    u32 vend, u32 flags)
 {
-    return addrspace_map_user_range(as, vstart, vend, flags, 1);
+    return addrspace_map_user_range(as, vstart, vend, flags, 1, 0);
+}
+
+/* ======================================================================== */
+/*  paging_addrspace_map_user_range_phys — per-app 物理を固定仮想へ (P1)     */
+/*  票 TASK_K5_multiapp.md D1/I5。同じ 0x500000 に 4 本を載せる土台。         */
+/* ======================================================================== */
+int paging_addrspace_map_user_range_phys(struct addrspace *as, u32 vstart,
+                                         u32 vend, u32 pstart, u32 flags)
+{
+    if (pstart == 0) return -1;   /* 物理 0 は identity 版の合図に使っている */
+    return addrspace_map_user_range(as, vstart, vend, flags, 0, pstart);
+}
+
+/* ======================================================================== */
+/*  paging_addrspace_clear_app_band — アプリ帯の identity を落とす (P2, I6)  */
+/* ======================================================================== */
+int paging_addrspace_clear_app_band(struct addrspace *as)
+{
+    u32 k, i;
+    u32 *pd;
+
+    if (!as || !as->pd_phys || !as->app_pde_count) return -1;
+    pd = (u32 *)as->pd_phys;
+    for (k = 0; k < as->app_pde_count; k++) {
+        u32 pdi = as->app_pde + k;
+        u32 *pt = (u32 *)as->app_pt_phys[k];
+        if (!pt) continue;
+        for (i = 0; i < PTE_COUNT; i++) pt[i] = 0;
+        /* PDE は PT を指したまま present/RW。USER は張り直しで立てる。 */
+        pd[pdi] &= ~(u32)PTE_USER;
+    }
+    if (paging_current_cr3() == as->pd_phys) paging_load_cr3(as->pd_phys);
+    return 0;
+}
+
+/* ======================================================================== */
+/*  paging_addrspace_free_user_range — per-app 物理を返す (P6)               */
+/*                                                                          */
+/*  アプリ固有 PDE の中だけを辿る。共有 PT (VRAM/SHM/フォント/GFX) に        */
+/*  掛かる範囲は 1 ビットも触らない — 触ると他の PD ごと巻き添えになる。      */
+/* ======================================================================== */
+u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
+                                     u32 vend)
+{
+    u32 pfn, first, count, freed = 0;
+
+    if (!as || !as->pd_phys || !as->app_pde_count || vstart >= vend) return 0;
+    first = vstart >> PAGE_SHIFT;
+    count = ((vend - 1) >> PAGE_SHIFT) - first + 1;
+    for (pfn = first; pfn < first + count; pfn++) {
+        u32 pdi = pfn / PTE_COUNT;
+        u32 pti = pfn % PTE_COUNT;
+        u32 *pt;
+        if (pdi < as->app_pde || pdi >= as->app_pde + as->app_pde_count)
+            continue;                       /* 共有帯は触らない */
+        pt = (u32 *)as->app_pt_phys[pdi - as->app_pde];
+        if (!pt) continue;
+        if (pt[pti] & PTE_PRESENT) {
+            pgalloc_free_page(pt[pti] & 0xFFFFF000UL);
+            freed++;
+        }
+        pt[pti] = 0;
+    }
+    if (paging_current_cr3() == as->pd_phys) paging_load_cr3(as->pd_phys);
+    return freed;
 }
 
 /* V1 自己診断用のプローブ。カーネル .bss (0x100000-0x1FFFFF, PDE 0) に置かれ、
@@ -947,5 +1019,56 @@ int paging_app_band_selftest(void)
     if (pgalloc_free_pages() != before_free) rc |= 2048;
     if (page_tables[pdi_last][pti] != saved_pte) rc |= 128;
     if (page_directory[pdi_last] != saved_pde) rc |= 256;
+
+    /* ---- K5b P1/P2/P6: per-app 物理 (票 TASK_K5_multiapp.md D1) ---- */
+    {
+        u32 phys, i, k2;
+        u32 *pt0;
+        u32 base_free = pgalloc_free_pages();
+
+        if (paging_addrspace_create_n(&as, MEM_APP_BAND_MAX_PDES) != 0)
+            return rc | 4096;
+        pt0 = (u32 *)as.app_pt_phys[0];
+
+        /* P2: 帯の PTE が全部 0 になる (I6 = 素通しの identity を落とす) */
+        if (paging_addrspace_clear_app_band(&as) != 0) rc |= 4096;
+        for (k2 = 0; k2 < MEM_APP_BAND_MAX_PDES; k2++) {
+            u32 *pt = (u32 *)as.app_pt_phys[k2];
+            for (i = 0; i < PTE_COUNT; i++) {
+                if (pt[i] != 0) { rc |= 4096; break; }
+            }
+        }
+        /* master 側は無傷 (共有 PT を消していない) */
+        if (page_tables[APP_BAND_PDE][0] == 0 &&
+            page_tables[APP_BAND_PDE] != pt0) rc |= 4096;
+
+        /* P1: 仮想 != 物理。帯の先頭 2 ページを別物理へ張る。 */
+        phys = pgalloc_alloc_n(2);
+        if (!phys) {
+            paging_addrspace_destroy(&as);
+            return rc | 8192;
+        }
+        if (paging_addrspace_map_user_range_phys(&as, MEM_APP_BAND_BASE,
+                MEM_APP_BAND_BASE + 2 * PAGE_SIZE, phys,
+                PAGE_RW | PTE_USER) != 0) rc |= 8192;
+        if (pt0[0] != (phys | PAGE_RW | PTE_USER)) rc |= 8192;
+        if (pt0[1] != ((phys + PAGE_SIZE) | PAGE_RW | PTE_USER)) rc |= 8192;
+        /* 仮想 = 物理 でないこと自体を見る (identity なら試験の意味が無い) */
+        if ((pt0[0] & 0xFFFFF000UL) == MEM_APP_BAND_BASE) rc |= 8192;
+        /* master の PT / PDE は汚れない */
+        if (page_directory[APP_BAND_PDE] & PTE_USER) rc |= 8192;
+        /* 非整列の物理は拒否し、何も変えない */
+        if (paging_addrspace_map_user_range_phys(&as, MEM_APP_BAND_BASE,
+                MEM_APP_BAND_BASE + PAGE_SIZE, phys + 1,
+                PAGE_RW | PTE_USER) != -1) rc |= 8192;
+        if (pt0[0] != (phys | PAGE_RW | PTE_USER)) rc |= 8192;
+
+        /* P6: 張った物理だけがきっちり返り、PTE が 0 に戻る */
+        if (paging_addrspace_free_user_range(&as, MEM_APP_BAND_BASE,
+                MEM_APP_BAND_BASE + 2 * PAGE_SIZE) != 2) rc |= 16384;
+        if (pt0[0] != 0 || pt0[1] != 0) rc |= 16384;
+        paging_addrspace_destroy(&as);
+        if (pgalloc_free_pages() != base_free) rc |= 16384;
+    }
     return rc;
 }

@@ -36,6 +36,14 @@ STATIC_ASSERT((MEM_SHM_GUI_BASE + MEM_SHM_GUI_SIZE) <= (MEM_SHM_BASE + SHM_TOTAL
 /* ブロック管理テーブル */
 static u8 shm_state[SHM_BLOCK_COUNT]; /* 各ブロックの状態 */
 static int shm_block_span[SHM_BLOCK_COUNT]; /* 各確保の先頭ブロックが持つスパン数 */
+/* 確保した所有者 (res_owner_get() の値 = アプリ ID)。0 = 所有者なし。
+ * 票 K5 の D3/P3: これが無いと exec_exit がアプリ A の終了で B のブロックまで
+ * 解放してしまう (アプリ 4 本同時では実際に起きる)。 */
+static int shm_block_owner[SHM_BLOCK_COUNT];
+
+/* res_owner_get() は fs/fd_redirect.c。kernel/ は -Ifs を持たないので
+ * kernel/gui.c と同じ流儀で extern 宣言する。 */
+extern int res_owner_get(void);
 
 /* ブロックインデックス → 物理/仮想アドレス変換 */
 static u32 block_to_addr(int idx)
@@ -71,6 +79,7 @@ void shm_init(void)
     for (i = 0; i < SHM_BLOCK_COUNT; i++) {
         shm_state[i] = SHM_FREE;
         shm_block_span[i] = 0;
+        shm_block_owner[i] = 0;
     }
 
     /* GUI 予約 (契約 T2): ブロック 12〜15 を固定予約。shm_alloc は SHM_FREE
@@ -118,6 +127,7 @@ void *shm_alloc(int block_count)
             /* 確保 */
             for (i = 0; i < block_count; i++) {
                 shm_state[start + i] = SHM_USED;
+                shm_block_owner[start + i] = res_owner_get();
             }
             shm_block_span[start] = block_count;
             /* 前のプログラムの IPC データを次のプログラムに
@@ -182,10 +192,38 @@ int shm_free(void *ptr)
     paging_map_range(addr, addr + (u32)span * SHM_BLOCK_SIZE, addr, PAGE_RW);
     for (i = 0; i < span; i++) {
         shm_state[idx + i] = SHM_FREE;
+        shm_block_owner[idx + i] = 0;
     }
     shm_block_span[idx] = 0;
 
     return 0;
+}
+
+/* ======================================================================== */
+/*  shm_free_owned — 指定所有者のブロックだけ解放 (票 K5 の D3、P3)          */
+/*                                                                          */
+/*  exec_exit / exec_kill がアプリ ID で呼ぶ。**その ID が確保したものだけ** */
+/*  を返すので、同時に生きている他のアプリのブロックは 1 つも動かない。      */
+/*  GUI 予約 (SHM_RESERVED) は所有者 0 のまま触らない (契約 T2)。            */
+/* ======================================================================== */
+void shm_free_owned(int owner)
+{
+    int i;
+    u32 blk_start;
+
+    if (owner == 0) return;             /* 所有者なしのタグは回収対象外 */
+    for (i = 0; i < SHM_BLOCK_COUNT; i++) {
+        if (shm_state[i] == SHM_RESERVED) continue;
+        if (shm_state[i] == SHM_FREE) continue;
+        if (shm_block_owner[i] != owner) continue;
+        /* ページ属性を R/W に戻す (lock されていたぶんを含む) */
+        blk_start = block_to_addr(i);
+        paging_map_range(blk_start, blk_start + SHM_BLOCK_SIZE,
+                         blk_start, PAGE_RW);
+        shm_state[i] = SHM_FREE;
+        shm_block_owner[i] = 0;
+        shm_block_span[i] = 0;
+    }
 }
 
 /* ======================================================================== */
@@ -209,6 +247,7 @@ void shm_cleanup_all(void)
                              blk_start, PAGE_RW);
             shm_state[i] = SHM_FREE;
         }
+        shm_block_owner[i] = 0;
         shm_block_span[i] = 0;
     }
 }

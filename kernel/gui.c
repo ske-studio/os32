@@ -12,8 +12,15 @@
 #include "ime.h"      /* ime_set_render (レビュー #4 ①: gshell 終了時の防御的リセット) */
 
 /* res_owner_get() は fs/fd_redirect.c。FD と同じ「確保した実行レベル」。
+ * K5b からは値の意味が **アプリ ID** (1 = シェル帯 / 2〜5 = アプリ) になった。
  * ドライバ/カーネル各所と同じ流儀で extern 宣言する (-Ifs 非依存)。 */
 extern int res_owner_get(void);
+
+/* いま処理中の op が OP_WAIT かどうかをカーネルに控えさせる (票 K5 の C4)。
+ * exec_park() はこれを見て「OP_WAIT の中からしか譲らない」を強制し、park した
+ * フレームに印を立てる。実体は exec/appslot.c (kernel/ は -Iexec 非依存)。 */
+extern void appslot_gui_op_enter(int is_wait);
+extern void appslot_gui_op_leave(void);
 
 /* GUI_SHELL_OWNER (= 1) は gui.h。K2 の syscall 境界ポンプも同じ値を使う。 */
 
@@ -31,11 +38,18 @@ static char g_next_shell[OS32_MAX_PATH];
 /* ======================================================================== */
 i32 gui_call(u32 op, u32 arg)
 {
+    i32 r;
     if (g_gui_handler == 0) {
         return OS32_ERR_NOSYS;
     }
-    /* op の意味は解釈しない。呼び出し元の owner を付けて転送するだけ。 */
-    return g_gui_handler(op, arg, res_owner_get());
+    /* op の意味は解釈しない。ただし「いまが OP_WAIT かどうか」だけは控える
+     * — 切替点を OP_WAIT に限る唯一の判定材料で、ここが op を見る唯一の場所
+     * (票 K5 の D0/C4)。WM が OP_WAIT の中で exec_park() を呼んだときは
+     * longjmp するのでこの関数へは戻ってこない。 */
+    appslot_gui_op_enter(op == GUI_OP_WAIT);
+    r = g_gui_handler(op, arg, res_owner_get());
+    appslot_gui_op_leave();
+    return r;
 }
 
 /* ======================================================================== */

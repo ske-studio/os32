@@ -1,5 +1,5 @@
 {
-  "version": 42,
+  "version": 44,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1285,6 +1285,36 @@
       "name": "ime_set_render",
       "ret": "void",
       "args": ["void *table"]
+    },
+    {
+      "name": "exec_start",
+      "ret": "i32",
+      "args": ["const char *cmdline"]
+    },
+    {
+      "name": "exec_resume",
+      "ret": "i32",
+      "args": ["i32 app_id", "i32 wait_ret"]
+    },
+    {
+      "name": "exec_park",
+      "ret": "i32",
+      "args": []
+    },
+    {
+      "name": "exec_kill",
+      "ret": "i32",
+      "args": ["i32 app_id"]
+    },
+    {
+      "name": "exec_app_state",
+      "ret": "i32",
+      "args": ["i32 app_id"]
+    },
+    {
+      "name": "snd_focus",
+      "ret": "i32",
+      "args": ["int app_id"]
     }
   ]
 }

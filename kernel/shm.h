@@ -43,7 +43,15 @@ int shm_lock(void *ptr);
  * 戻り値: 0=成功, -1=不正なポインタ */
 int shm_free(void *ptr);
 
-/* 全ブロックを強制解放 (プログラム終了時のクリーンアップ用) */
+/* 全ブロックを強制解放 (プログラム終了時のクリーンアップ用)。
+ * **所有者を見ない**ので、アプリが 4 本同時に生きる v1.3 では使わない
+ * (アプリ A の終了がアプリ B のブロックを巻き上げる)。ブート時の初期化と
+ * 診断のために残す。 */
 void shm_cleanup_all(void);
+
+/* 指定所有者 (確保時の res_owner_get() の値でタグ付け) のブロックだけ解放。
+ * exec_exit / exec_kill が ID 単位で呼ぶ (票 K5 の D3、P3)。
+ * GUI 予約ブロック (SHM_RESERVED) は触らない (契約 T2)。 */
+void shm_free_owned(int owner);
 
 #endif /* __SHM_H */

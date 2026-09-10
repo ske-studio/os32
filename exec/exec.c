@@ -1,4 +1,5 @@
 #include "exec.h"
+#include "appslot.h"
 #include "exec_heap.h"
 #include "io.h"
 #include "console.h"
@@ -56,6 +57,9 @@ void ring3_fault_kill(void);
 
 void exec_init(void) {
     kapi = (KernelAPI *)KAPI_ADDR;
+    /* アプリ ID の表を空にし、シェル帯 (ID 1) を走っている状態にする。
+     * res_owner_set(1) もここで行われる (票 K5 の D3)。 */
+    appslot_init();
 #include "exec_kapi_init.inc"
     /* 共有メモリ先頭アドレスを公開する。
      * MEM_SHM_BASE はカーネルの __bss_end 由来で可変のため、
@@ -126,31 +130,41 @@ static void ring3_trampoline_init(void)
 #define EXEC_DYN_RESERVE  (256UL * PAGE_SIZE)
 
 /* ======================================================================== */
-/*  ExecContext — ネスト階層ごとのコンテキスト保存構造体                     */
+/*  コンテキストは exec/appslot.{h,c} の AppSlot 表 (K5b、票 D2/I14)         */
 /*                                                                          */
-/*  シェル常駐モデル:                                                       */
-/*    Level 0 (シェル): 0x300000 に常駐。ヒープ/スタック不要 (静的バッファ)  */
-/*    Level 1+ (子):    0x400000 にロード。アイデンティティマッピング。       */
-/*    PD切り替え不要。物理ページ確保不要。                                   */
+/*  かつては「ネスト段のスタック」(ExecContext exec_ctx_stack[]) だったが、  */
+/*  GUI アプリを 4 本同時に生かすには段では足りない — 生きているのは 4 本    */
+/*  でも、走っているのは 1 本、残りは OP_WAIT の中で止まっている。           */
+/*  よって **ID (1 = シェル帯 / 2〜5 = アプリ) で引く表** に置き換えた。      */
+/*  空き ID を必ず小さい方から配るので、CUI の入れ子 exec_run では           */
+/*  従来どおり 段 = ID になる (D3)。                                         */
+/*                                                                          */
+/*  シェル常駐モデル (レイアウトは 1 バイトも変わっていない):                */
+/*    ID 1 (シェル): 0x300000 に常駐。CPL=0、AS は作らない                    */
+/*    ID 2〜5 (子) : 0x500000 にロード。CPL=3 なら **アプリごとの物理**を     */
+/*                   固定仮想 0x500000〜 へ写す (D1)。--cpl0 の子は従来の     */
+/*                   アイデンティティのまま (D7)。                           */
 /* ======================================================================== */
-typedef struct {
-    u32  jmpbuf[6];           /* setjmp/longjmp用バッファ */
-    u32  guard_a;             /* sbrkガードページアドレス */
-    u32  guard_b;             /* スタックガードページアドレス */
-    u32  sbrk_heap_limit;     /* sbrk上限 */
-    u32  exec_heap_base;      /* ヒープベースアドレス */
-    u32  exec_heap_size;      /* ヒープサイズ */
-    u32  exec_heap_used;      /* 子を起動した時点の使用量 (復帰時に戻す) */
-    u32  load_addr;           /* このレベルのロードアドレス */
-    u32  stack_top;           /* このレベルのスタック先頭 */
-} ExecContext;
 
 /* ======================================================================== */
 /*  グローバル状態                                                          */
 /* ======================================================================== */
+/* いま走っているプログラムの段。ID ではなく **深さ** で、シェル = 1。
+ * 外 (drivers/kbd.c, kernel/isr_handlers.c) は「> 0 ならプログラムが走って
+ * いる」としてしか見ないので意味は変わらない。 */
 volatile int exec_nest_level = 0;
 volatile int exec_exit_status = EXEC_SUCCESS;
-static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
+
+/* longjmp の理由。exec_start / exec_resume の復帰点が park と終了を
+ * 見分けるために使う (D4)。exec_run は終了しか受け取らない。 */
+#define EXEC_LJ_EXIT   1
+#define EXEC_LJ_PARK   2
+static volatile int g_longjmp_reason = EXEC_LJ_EXIT;
+static volatile int g_longjmp_id = 0;      /* park した ID (resume の戻り値) */
+
+/* いま処理中の int 0x80 フレーム (ring3_syscall_dispatch が控える)。
+ * exec_park はこれを AppSlot へ写して CPL=3 の続きを保存する (D2 の (b))。 */
+static u32 *g_cur_frame = 0;
 
 /* ======================================================================== */
 /*  リング3 (CPL=3) 実行状態 (v2 M1)                                        */
@@ -210,8 +224,10 @@ static void ring3_band_set(u32 pdes)
     g_ring3_band_top = MEM_APP_BAND_BASE + pdes * MEM_APP_BAND_PDE_SIZE;
 }
 
-static struct addrspace g_ring3_as;
-static volatile int g_ring3_active = 0;
+/* いま走っている CPL=3 アプリのスロット (0 = 居ない)。かつての
+ * g_ring3_as / g_ring3_active を 1 本にまとめたもの。park すると 0 になり、
+ * resume で戻る。生きているだけで走っていないアプリは表に横たわっている。 */
+static AppSlot *g_cur_app = 0;
 
 /* CPL=3 アプリをフォールト (#PF/#GP) で kill した回数 (CONTRACTS C6, v2 M1e)。
  * static にせずカーネルシンボルとして公開する (kselftest_pass 等と同じ形)。
@@ -247,8 +263,11 @@ static int g_gui_pump_tick_valid = 0;
  * 立て、(a) IRQ1 スタブ (割り込まれた文脈が CPL=3 = アプリのコード実行中の
  * とき) と (b) syscall 入口 が見て ring3_fault_kill する。カーネル内 (wrap の
  * 実行中) では畳まない — 中途半端なカーネル状態で longjmp しないため、
- * 要求は残して次の安全な地点で処理する。 */
-static volatile int g_ring3_abort_req = 0;
+ * 要求は残して次の安全な地点で処理する。
+ *
+ * K5b: 要求は **走っているアプリの AppSlot** に立てる (D4)。IRQ1 の時点で
+ * カーネルが知っているのはそれだけで、止めてあるアプリには届かない
+ * (そちらは WM が exec_kill で畳む)。 */
 
 /* CTRL+STOP で畳んだ回数 (PM の V4 検証が emu_read_mem で読む)。
  * fault_kill_count にも含まれる (畳む経路は同じ ring3_fault_kill)。 */
@@ -262,9 +281,7 @@ volatile u32 ring3_abort_count = 0;
 /* ======================================================================== */
 void ring3_abort_request(void)
 {
-    if (g_ring3_active) {
-        g_ring3_abort_req = 1;
-    }
+    appslot_abort_request();
 }
 
 /* ======================================================================== */
@@ -280,9 +297,10 @@ void ring3_abort_request(void)
 /* ======================================================================== */
 void ring3_abort_check(void)
 {
-    if (!g_ring3_abort_req) return;
-    g_ring3_abort_req = 0;
-    if (!g_ring3_active) return;    /* アプリはもう居ない */
+    AppSlot *a = appslot_get(appslot_cur());
+    if (!a || !a->abort_req) return;
+    a->abort_req = 0;
+    if (!g_cur_app) return;         /* CPL=3 アプリはもう居ない */
     ring3_abort_count++;
     ring3_fault_kill();             /* 戻らない */
 }
@@ -394,170 +412,291 @@ static void exec_child_claim(u32 *a_start, int *a_pages,
 /* ======================================================================== */
 static u32 ring3_band_ram_top(void)
 {
-    u32 a_start, b_start;
-    int a_pages, b_pages;
-    exec_child_claim(&a_start, &a_pages, &b_start, &b_pages);
-    return a_start + (u32)a_pages * PAGE_SIZE;
+    /* K5b (D1/I4): CPL=3 アプリはもう [0x500000, mem_end) を丸ごと押さえない。
+     * 物理は pgalloc から必要枚数だけ取るので、帯を伸ばしてよい上限は
+     * 「実 RAM の上端」そのもの。入らなければ pgalloc が失敗し、exec が
+     * EXEC_ERR_NOMEM で拒否する (切り詰めない・スワップしない、D5)。 */
+    return sys_usable_mem_end();
+}
+
+
+/* CPL=0 の子 (mkos32x --cpl0) は従来どおり identity で走り、固定帯
+ * [MEM_EXEC_LOAD_ADDR, mem_end) を exec_child_claim で押さえる (D7)。
+ * CPL=3 アプリはもう押さえないので、claim を返してよいのは
+ * **CPL=0 の子が 1 本も居なくなったとき**。段の深さでは決められない
+ * (GUI アプリが CPL=0 の子を持てるため) ので本数で数える。 */
+static int g_cpl0_children = 0;
+
+static void exec_cpl0_claim(void)
+{
+    u32 ca_start, cb_start;
+    int ca_pages, cb_pages;
+    if (g_cpl0_children++ > 0) return;
+    exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
+    pgalloc_mark_used(ca_start, ca_pages);
+    pgalloc_mark_used(cb_start, cb_pages);
+}
+
+static void exec_cpl0_release(void)
+{
+    u32 ca_start, cb_start;
+    int ca_pages, cb_pages;
+    if (g_cpl0_children <= 0) return;
+    if (--g_cpl0_children > 0) return;
+    exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
+    pgalloc_free_n(ca_start, ca_pages);
+    pgalloc_free_n(cb_start, cb_pages);
 }
 
 /* ======================================================================== */
-/*  exec_launch_abort — 起動途中で失敗したときの唯一の巻き戻し口 (レビュー   */
-/*                      #5 ④)                                               */
+/*  app_map_region — アプリ帯の 1 領域を per-app 物理で張る (D1)             */
 /*                                                                          */
-/*  exec_run が exec_nest_level++ / res_owner_set した後、実際に子のエントリ */
-/*  へ飛ぶ前に失敗した場合に呼ぶ。かつては `exec_nest_level--; return` だけ  */
-/*  だったので、pgalloc 予約・非present のガードページ・子に切り替えた       */
-/*  exec_heap・kapi->sbrk_heap_limit がすべて子のまま親に戻り、親 (シェル)   */
-/*  の malloc/free が壊れていた。                                           */
-/*                                                                          */
-/*  戻す項目と順序は longjmp 復帰ブロック (exec_run 内) と **同一**。        */
-/*  片方だけ直すと必ず食い違うので、変更時は両方を見ること:                  */
-/*    (0) 生成済みならアドレス空間を破棄                                     */
-/*    (1) exec_nest_level を親へ戻し、res_owner も親のタグへ戻す             */
-/*    (2) 子のガードページ (guard_a/guard_b) を present に戻す               */
-/*    (3) 子の exec_heap をリセット                                          */
-/*    (4) 子プロセス帯の物理ページ予約を解放 (シェル直下の子のときだけ)      */
-/*    (5) 親の exec_heap 管理変数 / sbrk 上限 / ガードページを復元           */
-/*                                                                          */
-/*  exec_exit と違い FD / リダイレクト / パイプ / GUI の所有者回収は行わない: */
-/*  呼び出し点は res_owner_set の直後から iret までの間しかなく、その間の    */
-/*  処理は argv の組み立てとページテーブル操作だけで、子のコードは 1 命令も  */
-/*  走っていない。よってこのレベルの所有者タグを持つリソースは存在し得ない。 */
-/*  (この区間に open / パイプ確保を足すなら、ここにも回収を足すこと)         */
-/*                                                                          */
-/*  ローカル変数を避ける longjmp 側と違い、こちらは通常の呼び出しなので      */
-/*  is_shell を素直に引数で受け取る。戻り値は呼び出し元がそのまま返す        */
-/*  エラーコード。                                                          */
+/*  まず連続で取り (P1 の map_user_range_phys)、断片化で取れなければ          */
+/*  ページ単位に倒す。per-app 物理にした副産物で連続は必須ではない —          */
+/*  K5a の申し送り D10 が「断片化が出たらページ単位へ倒せ」と書いた点。       */
+/*  途中で尽きたら -1。張り終えたぶんは呼び出し側の巻き戻し                   */
+/*  (exec_teardown_app → paging_addrspace_free_user_range) が PTE を辿って   */
+/*  返すので、ここで部分解放はしない。                                        */
 /* ======================================================================== */
-static int exec_launch_abort(int is_shell, struct addrspace *as, int status)
+static int app_map_region(struct addrspace *as, u32 vstart, u32 vend)
 {
-    ExecContext *ctx;
+    u32 pages, phys, v;
 
-    /* (0) 生成済みのアドレス空間を破棄。CR3 はまだ master のままなので
-     *     アクティブ PD を破棄する心配はない。shlib の per-app データは
-     *     attach 成功時にしか登録されないので detach は不要。 */
-    if (as != 0) {
-        paging_addrspace_destroy(as);
-    }
-    /* 広げたアプリ帯を既定 (1 枚) へ戻す。RING3_* マクロがこの値を見るので、
-     * 戻し忘れると次に起動する CPL=3 アプリが実在しない帯を前提に走る。 */
-    ring3_band_set(1);
+    if (vstart >= vend) return 0;
+    pages = (vend - vstart) / PAGE_SIZE;
 
-    /* (1) 親レベルへ戻す (exec_exit の末尾と同じ順序) */
-    exec_nest_level--;
-    res_owner_set(exec_nest_level);
-
-    ctx = &exec_ctx_stack[exec_nest_level];
-
-    /* (2) ガードページ解除 (子プロセスのガードのみ) */
-    if (ctx->guard_a != 0) {
-        paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
-        paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
+    phys = pgalloc_alloc_n((int)pages);
+    if (phys) {
+        if (paging_addrspace_map_user_range_phys(as, vstart, vend, phys,
+                                                 PAGE_RW | PTE_USER) == 0) {
+            return 0;
+        }
+        pgalloc_free_n(phys, (int)pages);
+        return -1;
     }
 
-    /* (3) 子プロセスのヒープリセット */
-    if (ctx->exec_heap_base != 0) {
-        exec_heap_reset();
-    }
-
-    /* (4) 子プロセス空間の物理ページ予約を解放する
-     *     (条件は longjmp 側と同一 — シェル (Level 1) まで戻ったときだけ) */
-    if (!is_shell && exec_nest_level == 1) {
-        u32 ca_start, cb_start;
-        int ca_pages, cb_pages;
-        exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
-        pgalloc_free_n(ca_start, ca_pages);
-        pgalloc_free_n(cb_start, cb_pages);
-    }
-
-    /* (5) 親のヒープ/sbrk状態を復元 */
-    if (exec_nest_level > 0) {
-        ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
-        /* 親が子プロセス (Level 1+) の場合のみ復元 */
-        if (parent->exec_heap_base != 0) {
-            /* exec_heap_init_at ではなく restore_state。理由は longjmp 側の
-             * コメント ("bad magic feeefeee (double free?)" の正体) を参照。 */
-            exec_heap_restore_state(parent->exec_heap_base,
-                                    parent->exec_heap_size,
-                                    parent->exec_heap_used);
-            kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
-            paging_set_not_present(parent->guard_a,
-                                   parent->guard_a + PAGE_SIZE - 1);
-            paging_set_not_present(parent->guard_b,
-                                   parent->guard_b + PAGE_SIZE - 1);
+    for (v = vstart; v < vend; v += PAGE_SIZE) {
+        phys = pgalloc_alloc_page();
+        if (!phys) return -1;
+        if (paging_addrspace_map_user(as, v, phys, PAGE_RW | PTE_USER) != 0) {
+            pgalloc_free_page(phys);
+            return -1;
         }
     }
+    return 0;
+}
 
+/* ======================================================================== */
+/*  exec_teardown_app — CPL=3 アプリの物理とアドレス空間を返す (D1/D4)       */
+/*                                                                          */
+/*  **master CR3 に戻してから**呼ぶこと (破棄する PD がアクティブだと         */
+/*  paging_addrspace_destroy が何もせずに戻る)。                             */
+/*  返すのはこのアプリ帯の 3 領域だけ:                                        */
+/*    [load_addr, sbrk_heap_limit)        本体 + data + bss + sbrk (最低分)   */
+/*    [exec_heap_base, +exec_heap_size)   exec_heap                          */
+/*    [band_top - stack, band_top)        ユーザスタック                     */
+/*  ガードページ (guard_a / guard_b) は「張っていない = 非 present」なので     */
+/*  返すものが無い。共有帯 (VRAM / SHM / フォント / GFX / トランポリン) は     */
+/*  paging_addrspace_free_user_range がアプリ固有 PDE の外を触らないので       */
+/*  巻き添えにならない。 */
+/* ======================================================================== */
+static void exec_teardown_app(AppSlot *a)
+{
+    if (!a || !a->cpl3 || !a->as.pd_phys) return;
+    /* 共有ライブラリの .data 複製ページを返す (PD 破棄の前, K3) */
+    shlib_addrspace_detach(&a->as);
+    if (a->sbrk_heap_limit > a->load_addr)
+        paging_addrspace_free_user_range(&a->as, a->load_addr,
+                                         a->sbrk_heap_limit);
+    if (a->exec_heap_size)
+        paging_addrspace_free_user_range(&a->as, a->exec_heap_base,
+                                         a->exec_heap_base + a->exec_heap_size);
+    if (a->band_top > RING3_USTACK_SIZE)
+        paging_addrspace_free_user_range(&a->as,
+                                         a->band_top - RING3_USTACK_SIZE,
+                                         a->band_top);
+    paging_addrspace_destroy(&a->as);
+    a->cpl3 = 0;
+}
+
+/* ======================================================================== */
+/*  exec_restore_context — 「現在のプログラム」を id のものに切り替える       */
+/*                                                                          */
+/*  票 D1 の I7 / I9 / I10 — 仮想レイアウトは動かさず、カーネル側の           */
+/*  「いま走っているのは誰か」を表す値だけを差し替える:                       */
+/*    CR3 / アプリ帯の上端 / exec_heap の管理変数 / sbrk 上限 (本物の表と      */
+/*    トランポリンの両方) / exec ネスト段。                                   */
+/*  CPL=0 のプログラム (シェル / --cpl0 の子) のガードは master の identity    */
+/*  ページなので張り直す。CPL=3 アプリのガードはアプリ PT ごと捨てるので       */
+/*  何もしない (I8)。                                                        */
+/* ======================================================================== */
+static void exec_restore_context(int id)
+{
+    AppSlot *a = appslot_at(id);
+    if (!a) return;
+
+    if (a->cpl3 && a->as.pd_phys) {
+        g_cur_app = a;
+        ring3_band_set(a->band_pdes);
+        paging_load_cr3(a->as.pd_phys);
+    } else {
+        g_cur_app = 0;
+        ring3_band_set(1);
+        paging_load_cr3(paging_kernel_pd_phys());
+    }
+
+    if (a->exec_heap_base != 0) {
+        /* exec_heap_init_at ではなく restore_state。init_at はヒープ先頭に
+         * 空きブロックヘッダを書き直してしまい、親が子の起動前に確保して
+         * いたブロックのヘッダを壊す ("bad magic feeefeee" の正体)。 */
+        exec_heap_restore_state(a->exec_heap_base, a->exec_heap_size,
+                                a->exec_heap_used);
+    }
+    kapi->sbrk_heap_limit = a->sbrk_heap_limit;
+    if (a->cpl3) {
+        ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] = a->sbrk_heap_limit;
+    }
+    if (!a->cpl3 && a->guard_a != 0) {
+        paging_set_not_present(a->guard_a, a->guard_a + PAGE_SIZE - 1);
+        paging_set_not_present(a->guard_b, a->guard_b + PAGE_SIZE - 1);
+    }
+    exec_nest_level = a->depth;
+}
+
+/* ======================================================================== */
+/*  exec_reclaim_owned — この ID が持っている資源だけを回収する (D3)         */
+/*                                                                          */
+/*  かつては「exec のネスト段」で回していた並びを、そのまま **アプリ ID** で  */
+/*  回すようにしたもの。7 種のうち shm と db は所有者を見ていなかったので     */
+/*  shm_free_owned / db_cleanup_owned へ差し替えてある (D3 の表、P3/P5)。     */
+/*  ここを段のまま残すと、アプリ A の終了がアプリ B の SHM や DB 接続を       */
+/*  巻き上げる (4 本同時では実際に起きる)。                                   */
+/* ======================================================================== */
+static void exec_reclaim_owned(int id)
+{
+    /* (1) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ)。
+     * 表は FD 0/1/2 の 3 本しかないので、2 本のアプリが同時に stdout を
+     * リダイレクトすることはできない (D3 の限界。GUI アプリは使わない)。 */
+    fd_redirect_reset_owned(id);
+    /* (2) FD自動クローズ (この ID が open した FD 3 以上)。
+     * カーネル常駐FD (vfs_fd_set_protect で保護) は除外される。 */
+    vfs_close_owned(id);
+    /* (3) パイプバッファ自動解放 */
+    pipe_free_owned(id);
+    /* (4) 共有メモリ (P3: 所有者付きになった) */
+    shm_free_owned(id);
+    /* (5) サウンド: この ID の退避済み音だけを捨てる (D9-4)。
+     * 鳴っているのがこの ID なら止める。他のアプリの音は無事。 */
+    snd_owner_exit(id);
+    /* (6) SQLite DB リソース (P5: cleanup_all → cleanup_owned) */
+    db_cleanup_owned(id);
+    /* (7) GUI リソース回収 (契約 T4 / U8)。WM がこの owner のウィンドウ・
+     * サーフェス・タイマ・スロットを回収する。畳む 3 経路すべてが
+     * ここを通るので、WM は 1 か所で回収できる。 */
+    gui_owner_exit(id);
+}
+
+/* ======================================================================== */
+/*  exec_launch_abort — 起動途中で失敗したときの唯一の巻き戻し口             */
+/*                                                                          */
+/*  K5b で構成が単純になった: 起動は **最後まで失敗しうる操作を済ませてから** */
+/*  appslot_start_commit する (= owner / 段 / ヒープの切り替えは iret の      */
+/*  直前 1 か所) ので、ここで戻すのは 3 つだけ:                              */
+/*    (1) アプリの物理ページとアドレス空間 (取れていれば)                     */
+/*    (2) CR3 と「現在のプログラム」を起動元へ                               */
+/*    (3) スロットを空へ                                                     */
+/*  起動失敗では所有者回収を回さない — 子のコードは 1 命令も走っておらず、    */
+/*  この ID のタグを持つ資源は存在し得ない (模型ケース 10)。                  */
+/* ======================================================================== */
+static int exec_launch_abort(int launcher_id, int id, int status)
+{
+    AppSlot *a = appslot_at(id);
+    if (a) {
+        /* スロットはまだ commit していない (state は FREE のまま) ので、
+         * 返すのはアプリの物理とアドレス空間だけ。回収カウンタも動かさない。 */
+        paging_load_cr3(paging_kernel_pd_phys());
+        exec_teardown_app(a);
+        a->pages = 0;
+    }
+    exec_restore_context(launcher_id);
     return status;
 }
 
+/* 起動を諦めるときに「アプリ帯の上端」だけを起動元の値へ戻す。
+ * exec_restore_context を使うと exec_heap の管理変数まで巻き戻してしまい、
+ * まだ save していない起動元のヒープ使用量が古い値で上書きされる。 */
+static void exec_restore_band(int id)
+{
+    AppSlot *a = appslot_at(id);
+    ring3_band_set((a && a->cpl3) ? a->band_pdes : 1);
+}
+
+/* longjmp する側がスロットを空にするので、jmpbuf は先に控える。 */
+static u32 g_exit_jmpbuf[KSETJMP_BUF_LEN];
+
 /* ======================================================================== */
-/*  exec_exit — 現在の実行階層を終了し、親のsetjmp復帰ポイントへ戻る        */
+/*  exec_exit — 現在のプログラムを畳み、その ID の呼び出し元へ戻る            */
+/*                                                                          */
+/*  畳むのは常に「いま走っている 1 本」だけ (D4)。正常終了・fault・          */
+/*  CTRL+STOP の 3 経路が全部ここを通る。 */
 /* ======================================================================== */
 void exec_exit(int status)
 {
-    ExecContext *ctx;
+    int id = appslot_cur();
+    AppSlot *a = appslot_get(id);
+    int parent;
+    u32 k;
 
-    if (exec_nest_level > 0) {
-        exec_exit_status = status;
+    if (!a) return;
+    exec_exit_status = status;
 
-        /* 現在のレベルのクリーンアップ (ガードページ解除 + ヒープリセット)。
-         *
-         * ネストレベル N で走っているプログラムのコンテキストは、親の
-         * exec_run がインデックス N-1 に書いたもの。[exec_nest_level] を
-         * 読むと 1 つ先 (未初期化/過去のゴミ、N==MAX_EXEC_NEST なら配列外)
-         * を参照し、ゴミの guard_a に対して paging_set_page してしまう。 */
-        ctx = &exec_ctx_stack[exec_nest_level - 1];
-        if (ctx->guard_a != 0) {
-            paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
-            paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
+    /* 後始末とシェル復帰は master PD 上で行う。 */
+    if (g_cur_app) {
+        paging_load_cr3(paging_kernel_pd_phys());
+    }
+
+    /* CPL=0 のプログラムだけがカーネルの identity ページを触っている。
+     * CPL=3 アプリのガードとヒープはアプリ PT ごと捨てるので不要 (I8)。 */
+    if (!a->cpl3) {
+        if (a->guard_a != 0) {
+            paging_set_page(a->guard_a, a->guard_a, PAGE_RW);
+            paging_set_page(a->guard_b, a->guard_b, PAGE_RW);
         }
-        if (ctx->exec_heap_base != 0) {
+        if (a->exec_heap_base != 0 && id != APP_ID_SHELL) {
             exec_heap_reset();
         }
-
-        /* ============================================================ */
-        /*  リソース自動クリーンアップ (プログラム終了時の安全網)        */
-        /*  プログラムがclose/reset忘れてもカーネルが回収する            */
-        /* ============================================================ */
-
-        /* (1)-(3) は **このレベルが確保したものだけ** を回収する
-         * (res_owner_get() で open/確保時にタグ付け)。全部を無条件に回収すると、
-         * シェルが張ったパイプライン `cmd1 | cmd2` の 1 段目 (外部プログラム)
-         * の終了でシェルのパイプバッファが kfree され、2 段目の stdin が
-         * コンソールに落ちてキーボード待ちでハングした (2026-09-03 実測)。 */
-
-        /* (1) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ) */
-        fd_redirect_reset_owned(exec_nest_level);
-
-        /* (2) FD自動クローズ (このレベルが open した FD 3以上)
-         * カーネル常駐FD (FEP辞書のSQLite接続など、vfs_fd_set_protect で
-         * 保護されたFD) は vfs_close_owned 側で除外される。 */
-        vfs_close_owned(exec_nest_level);
-
-        /* (3) パイプバッファ自動解放 (このレベルが確保したもの) */
-        pipe_free_owned(exec_nest_level);
-
-        /* (4) 共有メモリ自動解放 (全ブロックの使用中フラグを解除) */
-        shm_cleanup_all();
-
-        /* (5) サウンドエンジンクリーンアップ (bgm_persistでなければBGM停止) */
-        snd_cleanup();
-
-        /* (6) SQLite DB リソースクリーンアップ (未closeのDB接続を解放) */
-        db_cleanup_all();
-
-        /* (7) GUI リソース回収 (契約 T4 / U8)。WM が登録済みなら、この owner
-         * (= exec_nest_level) のウィンドウ・サーフェス・タイマ・スロットを
-         * 回収する。未登録なら何もしない (W1 が後で使う口)。 */
-        gui_owner_exit(exec_nest_level);
-
-        /* 親レベルへ復帰 */
-        exec_nest_level--;
-        res_owner_set(exec_nest_level);
-        ctx = &exec_ctx_stack[exec_nest_level];
-        exec_longjmp(ctx->jmpbuf);
     }
+
+    for (k = 0; k < KSETJMP_BUF_LEN; k++) g_exit_jmpbuf[k] = a->jmpbuf[k];
+
+    /* **回収より先に**親の文脈へ戻す。回収の最後に呼ぶ gui_owner_exit() は
+     * WM (gshell) のコードで、そこで KAPI の mem_alloc を踏むと exec_heap が
+     * 「畳んだアプリの仮想ヒープ」を指したままになる — その物理はもう
+     * pgalloc へ返しているので、master CR3 の下で他人のページを書きに行く。
+     * 回収は全部 ID を明示して呼ぶので、owner を先に戻しても取りこぼさない。 */
+    if (id == APP_ID_SHELL) {
+        /* シェル自身の終了 (K4 のシェル起動ループへ戻る)。従来どおり
+         * 段 0 / owner 0 に落として exec_run(shell) の setjmp 点へ帰る。 */
+        g_cur_app = 0;
+        ring3_band_set(1);
+        exec_nest_level = 0;
+        res_owner_set(0);
+        exec_reclaim_owned(id);
+    } else {
+        if (!a->cpl3) exec_cpl0_release();
+        parent = appslot_return_target(id);
+        exec_teardown_app(a);
+        appslot_reclaim(id);
+        /* 終了に伴う master 復帰は「生存アプリの集合が変わる瞬間」= G7 の
+         * 切替ではない。appslot_switch_to が transition_count で別勘定する。 */
+        appslot_switch_to(parent);
+        exec_restore_context(parent);
+        exec_reclaim_owned(id);
+    }
+
+    g_longjmp_reason = EXEC_LJ_EXIT;
+    g_longjmp_id = 0;
+    exec_longjmp(g_exit_jmpbuf);
 }
 
 void exec_fault_recover(void)
@@ -568,17 +707,8 @@ void exec_fault_recover(void)
 void __cdecl kapi_sys_exit(int status)
 {
     /* CPL=3 (リング3) アプリからの正常終了 (トランポリン経由, v2 M2)。
-     * exec_exit の後始末とシェル復帰は master PD 上で行うので、先に master
-     * CR3 へ戻し AS を破棄する。CPL=0 プログラム (シェル等) は g_ring3_active
-     * が偽なので従来どおり。二重破棄は g_ring3_active と destroy 側で防ぐ。 */
-    if (g_ring3_active) {
-        paging_load_cr3(paging_kernel_pd_phys());
-        /* 共有ライブラリの .data 複製ページを返す (PD 破棄の前, K3) */
-        shlib_addrspace_detach(&g_ring3_as);
-        paging_addrspace_destroy(&g_ring3_as);
-        g_ring3_active = 0;
-        ring3_band_set(1);   /* アプリ帯を既定 (1 枚) へ戻す */
-    }
+     * master CR3 復帰・AS 破棄・per-app 物理の返却は exec_exit が ID 単位で
+     * 行う。CPL=0 プログラム (シェル等) は g_cur_app が 0 なので従来どおり。 */
     ring3_in_syscall = 0;   /* syscall(sys_exit) を抜ける — ガードを下ろす */
     exec_exit(status);
 }
@@ -597,7 +727,10 @@ void __cdecl kapi_sys_exit(int status)
 /*  コピーして呼ぶ。戻り値は eax スロット([7])へ書く → popad で復元される。   */
 /*  現 CR3 はアプリ PD のまま呼ぶ (ユーザポインタ引数がアプリ帯で解決される)。*/
 /*  sys_exit は wrap → kapi_sys_exit が teardown+longjmp するのでここへ戻らない。*/
-/*  ※ ポインタ/ESP の厳密な範囲検証は M2e (ここでは上端クランプのみ)。       */
+/*                                                                          */
+/*  K5b: フレーム先頭を g_cur_frame に控える。gshell の op_wait が            */
+/*  exec_park() を呼んだとき、この 13 語をそのまま AppSlot へ写して           */
+/*  「CPL=3 の続き」を保存する (D2 の (b): カーネルスタックは 1 本のまま)。   */
 /* ======================================================================== */
 
 /* 可変長引数 (kprintf) を拾うためのコピー窓 (固定分より広めに取る)。 */
@@ -611,20 +744,18 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     u32 nbytes;
     u32 window;
     u32 wrapptr;
+    u32 *prev_frame = g_cur_frame;
 
-    /* --- CTRL+STOP の要求があればここで畳む (契約 T6) ---
-     * IRQ1 の ISR が要求を立て、CPL=3 のコードを割り込んだときはスタブ側で
-     * 畳む。KAPI 呼び出しの最中に割り込まれた場合はカーネル内なので畳まず、
-     * この地点 (wrap に入る前 = カーネル状態が静かな点) まで持ち越す。 */
+    g_cur_frame = frame;
+
+    /* --- CTRL+STOP の要求があればここで畳む (契約 T6) --- */
     ring3_abort_check();        /* 要求があれば longjmp して戻らない */
 
     /* --- GUI 入力ポンプ (票 K2-1、契約 T6 / T8 の X4) ---
-     * フォールトガード (ring3_in_syscall) を立てる **前** に回す。ポンプは
-     * CPL=0 の WM コードなので、そこで落ちたらアプリではなくカーネルの責任。 */
+     * フォールトガード (ring3_in_syscall) を立てる **前** に回す。 */
     ring3_gui_pump();
 
-    /* 範囲外 slot はワイルド呼び出し → アプリだけ kill (カーネルを飛ばさない)。
-     * ring3_fault_kill は fault_kill_count++ / teardown / longjmp で戻らない。 */
+    /* 範囲外 slot はワイルド呼び出し → アプリだけ kill (カーネルを飛ばさない)。 */
     if (slot >= (u32)KAPI_FUNC_COUNT) {
         ring3_fault_kill();
     }
@@ -634,18 +765,10 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     args_src = (const void *)(user_esp + 4u);
     nbytes = (u32)kapi_argsize[slot];
 
-    /* --- (核) フォールトガードを立てる (v2 M2e) ---
-     * これ以降 (引数の user memory 読み・早期検証・kapi_invoke のコピー/wrap
-     * 実行) で #PF/#GP が起きたら、CPL=0 の wrap 内であっても
-     * ring3_in_syscall により「アプリ由来」と判定され ring3_fault_kill される。
-     * 可変長 %s のワイルドポインタ deref もここで捕捉される。 */
+    /* --- (核) フォールトガードを立てる (v2 M2e) --- */
     ring3_in_syscall = 1;
 
-    /* --- (補助) 明示ポインタ引数の早期範囲検証 (v2 M2e) ---
-     * kapi_argptr[slot] のビットが立つ固定引数はポインタ。0x400000帯/SHM/VRAM/
-     * NULL 以外は wrap に入る前に kill (よくある不正ポインタを入口で弾き、
-     * カーネル状態不整合リスクを減らす)。args_src の読みはガード下 (bad ESP は
-     * ここで #PF → kill)。可変長分はガードが担保。 */
+    /* --- (補助) 明示ポインタ引数の早期範囲検証 (v2 M2e) --- */
     {
         u16 ptrmask = kapi_argptr[slot];
         if (ptrmask) {
@@ -661,28 +784,22 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     }
 
     /* 引数コピー窓: 固定分 + 可変長(kprintf)のため広めに取り、ユーザスタック
-     * 上端でクランプして over-read #PF を避ける (それでも越えればガードが捕捉)。 */
+     * 上端でクランプして over-read #PF を避ける。 */
     window = (nbytes < RING3_ARG_WINDOW) ? RING3_ARG_WINDOW : nbytes;
     if ((u32)args_src < RING3_USTACK_TOP &&
         (u32)args_src + window > RING3_USTACK_TOP) {
         window = RING3_USTACK_TOP - (u32)args_src;
     }
 
-    /* 本物の wrap を呼ぶ (現 CR3 = アプリ PD)。戻り値を eax スロットへ。 */
+    /* 本物の wrap を呼ぶ (現 CR3 = アプリ PD)。戻り値を eax スロットへ。
+     * gui_call(OP_WAIT) → exec_park() はここから longjmp して戻らない。 */
     frame[7] = kapi_invoke((void *)wrapptr, args_src, window);
 
-    /* 正常復帰: ガードを下ろす (フォールト/ sys_exit 経路は longjmp するので
-     * teardown 側 ring3_fault_kill / kapi_sys_exit でクリアされる)。 */
+    /* 正常復帰: ガードを下ろす */
     ring3_in_syscall = 0;
+    g_cur_frame = prev_frame;
 
-    /* --- 出口でも CTRL+STOP を見る (契約 T6、v1.2 G2 で実測した隙間) ---
-     * 入口の ring3_abort_check と IRQ1 スタブ (割り込まれた文脈が CPL=3 のとき)
-     * だけだと、アプリが OP_WAIT (gshell の sys_halt ループ、CPL=0) で寝ている
-     * 間に押された CTRL+STOP は、次に syscall へ入るまで効かない — モーダルを
-     * 開いたまま待っているアプリは二度と syscall へ入らないので永遠に畳めない
-     * (2026-09-06 実測)。gshell は raw リングで CTRL+STOP を見たら OP_WAIT を
-     * 抜けてここへ戻すので、出口で畳む。wrap は終わっているのでカーネル状態は
-     * 整っている (longjmp して戻らない)。 */
+    /* --- 出口でも CTRL+STOP を見る (契約 T6、v1.2 G2 で実測した隙間) --- */
     ring3_abort_check();
 }
 
@@ -691,45 +808,51 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
 /*                                                                          */
 /*  #PF/#GP ハンドラ (kernel/isr_handlers.c) がフォールトフレームの         */
 /*  CS.RPL=3 (= CPL=3 由来) を検出したときに呼ぶ。カーネルを巻き込まず       */
-/*  アプリだけを畳んでシェルに戻す ([ABI4] 解消の実装点, V4)。              */
-/*                                                                          */
-/*  後始末は ring3_syscall_dispatch (正常終了) と同一: master CR3 復帰 →     */
-/*  AS 破棄 → exec_fault_recover (= exec_exit(EXEC_ERR_FAULT) → longjmp)。   */
-/*  二重破棄は g_ring3_active で防ぐ (destroy 側もアクティブ CR3 を弾く)。    */
+/*  **その ID だけ**を畳んでシェル (WM) に戻す (D4)。                        */
+/*  後始末は正常終了と同一 — exec_exit が master CR3 復帰 → per-app 物理の   */
+/*  返却 → AS 破棄 → ID 別回収 → longjmp までを 1 か所で行う。               */
 /*  この関数は longjmp するので戻らない。                                    */
 /* ======================================================================== */
 void ring3_fault_kill(void)
 {
     fault_kill_count++;
-    if (g_ring3_active) {
-        paging_load_cr3(paging_kernel_pd_phys());
-        /* 共有ライブラリの .data 複製ページを返す (PD 破棄の前, K3) */
-        shlib_addrspace_detach(&g_ring3_as);
-        paging_addrspace_destroy(&g_ring3_as);
-        g_ring3_active = 0;
-        ring3_band_set(1);   /* アプリ帯を既定 (1 枚) へ戻す */
-    }
     ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
     exec_fault_recover();   /* longjmp するので戻らない */
 }
 
 /* ======================================================================== */
-/*  exec_run — 外部プログラムのロードと実行 (シェル常駐モデル)              */
-/*                                                                          */
-/*  Level 0 (シェル): 0x300000 にロード。スタック=0x380000。                 */
-/*  Level 1+  (子)  : 0x400000 にロード。スタック=mem_end。                  */
-/*  PD切り替え不要。メモリは完全に分離されている。                           */
+/*  ring3_resume — 保存した CPL=3 フレームへ戻る (P4、kernel/ring3_entry.asm)*/
+/*  cli → TSS.ESP0 → CR3 → フレームを積んで popad; iretd を割り込み禁止で    */
+/*  一続きに行う。戻らない。                                                 */
 /* ======================================================================== */
-int exec_run(const char *cmdline)
+extern void ring3_resume(const u32 *frame, u32 pd_phys, void *tss);
+
+/* ======================================================================== */
+/*  exec_launch — 外部プログラムのロードと実行 (exec_run / exec_start の実体) */
+/*                                                                          */
+/*  gui = 0: 従来の exec_run。子が終わるまで呼び出し元を塞ぐ。               */
+/*  gui = 1: K5b の exec_start。子が最初の OP_WAIT で park した時点でも戻る。 */
+/*                                                                          */
+/*  違いは **どこで longjmp を受けるか** の 1 点だけで、ロードもレイアウトも  */
+/*  共通。仮想レイアウト (app.ld / memmap.h の RING3_*) は 1 バイトも         */
+/*  動かない (I12/I13) — 動いたのは「物理をどこから取るか」だけ。            */
+/* ======================================================================== */
+static int exec_launch(const char *cmdline, int gui_arg)
 {
-    /* --- Level に応じたロードアドレスとレイアウトを決定 --- */
+    /* longjmp の復帰側で読む唯一のローカル。volatile でフレーム上に固定する
+     * — レジスタに置かれると longjmp で失われる (他は全部グローバルで判断)。 */
+    volatile int gui = gui_arg;
     u32 load_base;
     u32 max_size;
     u32 stack_top;
     u32 guard_a, guard_b;
     u32 exec_heap_base, exec_heap_size;
-    u32 heap_top_cpl0 = 0;   /* 子 (CPL=0) の exec_heap 上端 (動的確保リザーブの手前) */
+    u32 sbrk_end;            /* 実際に物理を張る sbrk の上端 (= sbrk 上限) */
+    u32 heap_top_cpl0 = 0;
     int is_shell;
+    int launcher_id;
+    int id;
+    u32 need_pages;
 
     u32 mem_end = sys_usable_mem_end();  /* 末尾はホットデプロイ用に予約 */
     u8 *file_buf;
@@ -738,17 +861,33 @@ int exec_run(const char *cmdline)
     int sz;
     u32 code_off, text_sz, bss_sz, heap_sz, entry_off;
     ExecEntry entry;
-    ExecContext *ctx;
+    AppSlot *ctx;
     int want_ring3 = 0;      /* CPL=3 で走らせるか (OS32X_FLAG_RING3, v2 M1) */
 
     char path[VFS_MAX_PATH];
+    /* 解決済みのパス。ヘッダを先に 1 ページ読むので、本体の読み込みでは
+     * 同じ探索をやり直さずこちらを使う (探索でヒットした綴りを保つ)。 */
+    static char resolved[VFS_MAX_PATH];
+    /* ヘッダだけを先に読むカーネル側バッファ。本体を読む先の物理は、
+     * ヘッダの text_size / bss_size / heap_size を見るまで決まらない
+     * (D1 の「起動時の順序」手順 2)。 */
+    static u8 hdrbuf[OS32X_HDR_V2_SIZE + 64];
     const char *p = cmdline;
     int i = 0;
 
-    /* ネスト上限チェック */
-    if (exec_nest_level >= MAX_EXEC_NEST) {
-        shell_print("Error: exec nest limit reached\n", ATTR_RED);
-        return EXEC_ERR_NOMEM;
+    launcher_id = appslot_cur();
+    is_shell = (exec_nest_level == 0);
+
+    /* ---- ID の池 (D3)。物理の勘定はヘッダを読んでから ---- */
+    if (is_shell) {
+        id = APP_ID_SHELL;
+    } else {
+        id = appslot_start_admit(gui, 0, 0);
+        if (id < 0) {
+            if (id == OS32_ERR_FULL)
+                shell_print("Error: too many programs running\n", ATTR_RED);
+            return id;
+        }
     }
 
     /* コマンドラインからパスを抽出 */
@@ -759,22 +898,18 @@ int exec_run(const char *cmdline)
     path[i] = '\0';
 
     /* ====== Level に応じたメモリレイアウト決定 ====== */
-    is_shell = (exec_nest_level == 0);
-
     if (is_shell) {
-        /* Level 0 (シェル): 常駐帯域 0x300000-0x37FFFF */
+        /* シェル: 常駐帯域 0x300000-0x37FFFF */
         load_base = MEM_SHELL_LOAD_ADDR;
         max_size  = MEM_SHELL_MAX_SIZE;
         stack_top = MEM_SHELL_STACK_TOP;
         guard_a   = 0; /* シェルは sbrk/exec_heap 未使用 */
         guard_b   = MEM_SHELL_GUARD;
+        sbrk_end  = 0;
         exec_heap_base = 0;
         exec_heap_size = 0;
     } else {
-        /* Level 1+ (子プロセス): 0x400000〜 アイデンティティマッピング。
-         * guard_a / exec_heap はヘッダ (text+bss, heap_size) を見てから決める。
-         * ここでは読み込み上限だけ求める: CPL=3 帯 (RING3_HEAP_TOP) と CPL=0 の
-         * heap_top の小さい方から、sbrk 最低分・ガード・exec_heap 最低分を引く。 */
+        /* 子プロセス: 0x500000〜。guard_a / exec_heap はヘッダを見てから。 */
         u32 child_stack_bottom;
         u32 read_top;
         load_base = MEM_EXEC_LOAD_ADDR;
@@ -782,31 +917,26 @@ int exec_run(const char *cmdline)
         child_stack_bottom = stack_top - MEM_EXEC_STACK_SIZE;
         guard_b   = child_stack_bottom - PAGE_SIZE;
         heap_top_cpl0 = guard_b;
-        /* CPL=0 子はヒープ上端と guard_b の間に動的確保リザーブの穴を空ける
-         * (exec_child_claim と同じ式。上のコメント参照) */
         if (guard_b > MEM_EXEC_LOAD_ADDR &&
             (guard_b - MEM_EXEC_LOAD_ADDR) > EXEC_DYN_RESERVE * 2) {
             heap_top_cpl0 = guard_b - EXEC_DYN_RESERVE;
         }
-        /* CPL=3 側は帯の枚数がヘッダを読むまで決まらないので、ここでは
-         * **最大枚数** で見積もる (読み込みの上限であってレイアウトではない)。
-         * heap_top_cpl0 が実 RAM から導かれているので、伸ばしすぎて実 RAM の
-         * 外へ読むことはない。8MB 構成では heap_top_cpl0 の方が小さく、
-         * 従来と同じ値になる。 */
         read_top = (heap_top_cpl0 < RING3_HEAP_TOP_MAX) ?
                    heap_top_cpl0 : RING3_HEAP_TOP_MAX;
         max_size = read_top - load_base - MEM_EXEC_SBRK_MIN - PAGE_SIZE - MEM_EXEC_HEAP_MIN;
         guard_a = 0;
+        sbrk_end = 0;
         exec_heap_base = 0;
         exec_heap_size = 0;
     }
 
-    file_buf  = (u8 *)load_base;
     load_addr = (u8 *)load_base;
 
-
-    /* ====== ファイル読み込み ====== */
-    sz = vfs_read(path, file_buf, max_size + OS32X_HDR_V2_SIZE);
+    /* ====== ヘッダだけ先読み (master CR3、カーネルバッファ) ======
+     * 現行のように全部読んでから枚数を決めることはできない — 読む先の
+     * 物理がまだ無いため (D1 の手順 2)。 */
+    kstrncpy(resolved, path, VFS_MAX_PATH);
+    sz = vfs_read(resolved, hdrbuf, (int)sizeof(hdrbuf));
 
     /* フォールバック: パスにスラッシュがない場合、標準ディレクトリを順に検索 */
     /* 注意: SYS_DEFAULT_PATH (config.h) と整合させること */
@@ -822,10 +952,9 @@ int exec_run(const char *cmdline)
             };
             int di;
             for (di = 0; search_dirs[di]; di++) {
-                char try_path[VFS_MAX_PATH];
-                kstrncpy(try_path, search_dirs[di], VFS_MAX_PATH);
-                kstrncat(try_path, path, VFS_MAX_PATH);
-                sz = vfs_read(try_path, file_buf, max_size + OS32X_HDR_V2_SIZE);
+                kstrncpy(resolved, search_dirs[di], VFS_MAX_PATH);
+                kstrncat(resolved, path, VFS_MAX_PATH);
+                sz = vfs_read(resolved, hdrbuf, (int)sizeof(hdrbuf));
                 if (sz > 0) break;
             }
         }
@@ -835,22 +964,15 @@ int exec_run(const char *cmdline)
         return EXEC_ERR_NOT_FOUND;
     }
 
-    hdr = (OS32Header *)file_buf;
+    hdr = (OS32Header *)hdrbuf;
 
-    if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE || hdr->min_api_ver > KAPI_VERSION) {
+    if (hdr->magic != OS32X_MAGIC || hdr->header_size < OS32X_HDR_V1_SIZE ||
+        hdr->min_api_ver > KAPI_VERSION) {
         shell_print("Error: invalid OS32X binary\n", ATTR_RED);
         return EXEC_ERR_INVALID;
     }
 
-    /* ---- ロードアドレスの照合 (K3) ----
-     * 子プロセスのロードアドレスは 0x400000 → MEM_EXEC_LOAD_ADDR (0x500000)
-     * へ動いた (0x400000-0x4FFFFF は共有ライブラリ帯域)。旧レイアウトで
-     * リンクされたバイナリをそのまま走らせると、絶対番地の関数ポインタや
-     * 文字列が 1MB ずれたまま「黙って別の場所へ飛ぶ」ので必ず弾く。
-     * 判定は KAPI 版ではなくヘッダの load_addr (v2 で末尾に追記) で行う
-     * (v42 はネットワークに予約されているため)。
-     * シェル (Level 0) は 0x300000 のままなので対象外 — 旧 shell.bin でも
-     * 起動できるようにしておく (再ビルド前でもブートが死なない)。 */
+    /* ---- ロードアドレスの照合 (K3) ---- */
     if (!is_shell) {
         if (hdr->version < OS32X_HDR_VERSION ||
             hdr->header_size < OS32X_HDR_V2_SIZE) {
@@ -859,8 +981,6 @@ int exec_run(const char *cmdline)
             return EXEC_ERR_INVALID;
         }
         if (hdr->load_addr == 0) {
-            /* mkos32x に --elf も --load も渡されなかった。判定できないので
-             * 通すが、ずれていれば謎の #PF になるため必ず記録する。 */
             kprintf(0xE1, "[exec] warning: %s has no load_addr\n", path);
         } else if (hdr->load_addr != load_base) {
             kprintf(0xC1, "[exec] load addr mismatch: bin=%x expected=%x\n",
@@ -877,34 +997,21 @@ int exec_run(const char *cmdline)
     heap_sz   = hdr->heap_size;
     entry_off = hdr->entry_offset;
 
-    /* リング3 実行の意思表示 (v2 M1)。シェル (Level 0) は常駐帯域で
-     * CPL=0 のまま。子プログラムだけが OS32X_FLAG_RING3 で CPL=3 に降りる。
-     * M1 の対象は KAPI を使わない自己完結プログラム (トランポリンは M2)。 */
-    /* v2 M3a: ring3 をデフォルト化。シェル (Level 0, 常駐 0x300000) は CPL=0
-     * のまま。それ以外の全プログラムを CPL=3 で起動する。稀に CPL=3 で
-     * 動かせないものは OS32X_FLAG_FORCE_CPL0 (mkos32x --cpl0) で CPL=0 に落とす
-     * (原則は修正で対応。エスケープハッチ)。 */
+    /* v2 M3a: ring3 をデフォルト化。シェルは CPL=0 のまま。それ以外の全
+     * プログラムを CPL=3 で起動する。稀に CPL=3 で動かせないものは
+     * OS32X_FLAG_FORCE_CPL0 (mkos32x --cpl0) で CPL=0 に落とす。 */
     want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_FORCE_CPL0) == 0);
     if (want_ring3) {
-        /* アプリ帯の枚数を決める (票 docs/tasks/memory/APP_BAND_PDE.md)。
-         * heap_size 指定が 1 枚に収まらないときだけ 4MB 単位で伸ばす。
-         * 指定なし (heap_size == 0) なら必ず 1 枚 = 従来と同じレイアウト。
-         * ここから先の early return では必ず ring3_band_set(1) で戻すこと
-         * (RING3_* マクロが g_ring3_band_top を見ているため)。 */
         u32 code_end_est = PAGE_ALIGN_UP(load_base + text_sz + bss_sz);
         ring3_band_set(paging_app_band_pdes(code_end_est, heap_sz,
                                             ring3_band_ram_top()));
-        /* ユーザスタックをアプリ帯 (PD ごと) の上端へ移す。argv は
-         * この後この stack_top を使って積まれるので、ここで差し替える。 */
         stack_top = RING3_USTACK_TOP;
     }
 
     if (!is_shell) {
         /* 子プロセス帯のレイアウト確定 (include/memmap.h 参照):
          *   [load..code_end) 本体 / [code_end..guard_a) sbrk / [guard_a] ガード /
-         *   [exec_heap_base..heap_top) exec_heap
-         * 本体の固定 1MB 上限は撤廃 (2026-09-04)。sbrk と exec_heap の取り分は
-         * ヘッダの heap_size (exec_heap の要求量) があればそれ、0 なら折半。 */
+         *   [exec_heap_base..heap_top) exec_heap */
         u32 heap_top = want_ring3 ? RING3_HEAP_TOP : heap_top_cpl0;
         u32 code_end = (load_base + text_sz + bss_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
         u32 need = MEM_EXEC_SBRK_MIN + PAGE_SIZE + MEM_EXEC_HEAP_MIN;
@@ -918,25 +1025,21 @@ int exec_run(const char *cmdline)
             shell_print(" max=", 0xE1);
             shell_print_dec((heap_top > load_base + need) ? heap_top - need - load_base : 0, 0xE1);
             shell_print("\n", 0xE1);
-            ring3_band_set(1);   /* 広げた帯を既定へ戻す (起動しない) */
+            exec_restore_band(launcher_id);   /* 帯を起動元の値へ戻す */
             return EXEC_ERR_NOMEM;
         }
-        /* sbrk 最低分とガードを除いた残りを exec_heap と sbrk 追加分で分ける */
         avail = heap_top - code_end - MEM_EXEC_SBRK_MIN - PAGE_SIZE;
         if (heap_sz > 0) {
             exec_heap_size = (heap_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
-            /* 要求に足りないときは**黙って切り詰めず拒否する** (2026-09-10 方針)。
-             * スワップを持たない以上、渡せない量を渡せたことにしてはいけない。
-             * 切り詰めると、アプリは足りないと知らないまま走り出し、後の
-             * mem_alloc が途中で失敗する。ここで落として要求量と空きを見せる。 */
+            /* 要求に足りないときは**黙って切り詰めず拒否する** (2026-09-10 方針)。*/
             if (exec_heap_size > avail) {
                 shell_print("[DBG] NOMEM: heap request=", 0xE1);
                 shell_print_dec(heap_sz, 0xE1);
                 shell_print(" avail=", 0xE1);
                 shell_print_dec(avail, 0xE1);
                 shell_print("\n", 0xE1);
-                ring3_band_set(1);   /* 広げた帯を既定へ戻す (起動しない) */
+                exec_restore_band(launcher_id);
                 return EXEC_ERR_NOMEM;
             }
         } else {
@@ -945,6 +1048,17 @@ int exec_run(const char *cmdline)
         }
         exec_heap_base = heap_top - exec_heap_size;
         guard_a = exec_heap_base - PAGE_SIZE;
+
+        /* sbrk に **物理を張る**のは最低分 (MEM_EXEC_SBRK_MIN) だけ (D5 の
+         * per-app ページ勘定)。identity だった頃は帯の残り全部が黙って
+         * sbrk に使えたが、per-app 物理では張ったぶんしか無い。張らない
+         * [sbrk_end, guard_a) は穴のままにし、sbrk 上限も sbrk_end に下げる
+         * — こうすると足りないとき newlib の sbrk が素直に失敗し (malloc が
+         * NULL を返す)、静かな #PF にならない。
+         * CPL=0 の子は従来どおり帯を丸ごと identity で押さえるので guard_a。 */
+        sbrk_end = code_end + MEM_EXEC_SBRK_MIN;
+        if (sbrk_end > guard_a) sbrk_end = guard_a;
+        if (!want_ring3) sbrk_end = guard_a;
     } else if (text_sz + bss_sz > max_size) {
         shell_print("[DBG] NOMEM: text=", 0xE1);
         shell_print_dec(text_sz, 0xE1);
@@ -956,145 +1070,209 @@ int exec_run(const char *cmdline)
         return EXEC_ERR_NOMEM;
     }
 
-    /* ======== コンテキスト設定 ======== */
-    ctx = &exec_ctx_stack[exec_nest_level];
+    /* ======== 物理の勘定 (D5)。入らなければ拒否、切り詰めない ======== */
+    need_pages = 0;
+    if (want_ring3) {
+        need_pages = (sbrk_end - load_base) / PAGE_SIZE         /* 本体 + sbrk */
+                   + exec_heap_size / PAGE_SIZE                 /* exec_heap */
+                   + RING3_USTACK_SIZE / PAGE_SIZE              /* ユーザスタック */
+                   + 1 + g_ring3_band_pdes;                     /* PD + アプリ PT */
+        if (appslot_start_admit(gui, need_pages, pgalloc_free_pages()) < 0) {
+            shell_print("[DBG] NOMEM: need pages=", 0xE1);
+            shell_print_dec(need_pages, 0xE1);
+            shell_print(" free=", 0xE1);
+            shell_print_dec(pgalloc_free_pages(), 0xE1);
+            shell_print("\n", 0xE1);
+            exec_restore_band(launcher_id);
+            return EXEC_ERR_NOMEM;
+        }
+    }
+
+    /* ======== 起動元のヒープ使用量を控える (I7) ========
+     * ここから先の失敗 (exec_launch_abort) は起動元の状態を戻すので、
+     * **失敗しうる操作より前に**控えておく。後ろに置くと、巻き戻しが
+     * 古い exec_heap_used で起動元のヒープ管理変数を上書きする。 */
+    if (!is_shell) {
+        exec_heap_save_state(&appslot_at(launcher_id)->exec_heap_used);
+    }
+
+    /* ======== スロットに諸元を書く (まだ commit しない) ======== */
+    ctx = appslot_at(id);
     ctx->load_addr = load_base;
     ctx->stack_top = stack_top;
     ctx->guard_a = guard_a;
     ctx->guard_b = guard_b;
     ctx->exec_heap_base = exec_heap_base;
     ctx->exec_heap_size = exec_heap_size;
+    ctx->exec_heap_used = 0;
+    ctx->sbrk_heap_limit = is_shell ? guard_b : sbrk_end;
+    ctx->cpl3 = 0;
+    ctx->band_top = g_ring3_band_top;
+    ctx->band_pdes = g_ring3_band_pdes;
+    ctx->pages = need_pages;
 
-    /* コードセクションの配置 + BSS ゼロクリア */
-    if (!is_shell) {
-        /* 子プロセスが使う全域 (コード+ヒープ+スタック) を予約する。
-         * コード 1MB しか予約しないと、実行中の動的確保 (V86 バッキング等)
-         * がヒープ領域を「空き」と誤認して確保・ゼロクリアしてしまう。
-         * マークは冪等なのでネスト exec でもそのまま呼んでよい。 */
-        u32 ca_start, cb_start;
-        int ca_pages, cb_pages;
-        exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
-        pgalloc_mark_used(ca_start, ca_pages);
-        pgalloc_mark_used(cb_start, cb_pages);
+    /* ======== CPL=3: アドレス空間と per-app 物理 (D1) ======== */
+    if (want_ring3) {
+        u32 bb_base = 0, bb_size = 0;
+
+        if (paging_addrspace_create_n(&ctx->as, g_ring3_band_pdes) != 0) {
+            shell_print("Error: ring3 addrspace create failed\n", ATTR_RED);
+            exec_restore_band(launcher_id);
+            return EXEC_ERR_NOMEM;
+        }
+        ctx->cpl3 = 1;
+
+        /* **I6**: アプリ PT は master の identity PTE で初期化されている。
+         * 落とし忘れると物理 0x5xxxxx が素通しで見え、他アプリのページや
+         * pgalloc の作業域が CPL=3 から読める。ここが本設計で最も静かに
+         * 壊れる箇所なので、per-app 物理を張る前に必ず全部 0 にする。 */
+        paging_addrspace_clear_app_band(&ctx->as);
+
+        /* 3 領域を per-app 物理で張る。連続が取れなければページ単位へ倒す
+         * (D10 の断片化の申し送り)。ガードは張らない = 非 present のまま。 */
+        if (app_map_region(&ctx->as, load_base, sbrk_end) != 0 ||
+            app_map_region(&ctx->as, exec_heap_base,
+                           exec_heap_base + exec_heap_size) != 0 ||
+            app_map_region(&ctx->as, RING3_STACK_BOTTOM, RING3_USTACK_TOP) != 0) {
+            shell_print("Error: out of physical memory for app\n", ATTR_RED);
+            return exec_launch_abort(launcher_id, id, EXEC_ERR_NOMEM);
+        }
+
+        /* VRAM (テキスト 0xA0000 + グラフィック 0xA8000) — C2: 全PD共有+USER */
+        paging_addrspace_map_user_range(&ctx->as,
+            0xA0000UL, 0xC0000UL, PAGE_RW | PTE_USER);
+        /* SHM (アプリ間データ受け渡し) — C2: 全PD共有+USER */
+        paging_addrspace_map_user_range(&ctx->as,
+            (u32)MEM_SHM_BASE, (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE,
+            PAGE_RW | PTE_USER);
+        /* フォントキャッシュ (0x01000-0x49FFF): kcg フォントビットマップ直読 */
+        paging_addrspace_map_user_range(&ctx->as,
+            (u32)MEM_FONT_CACHE_BASE, (u32)MEM_UNICODE_TABLE_BASE,
+            PAGE_RW | PTE_USER);
+        /* Unicode-JIS 変換表 (0x4A000, 128KB): unicode_to_jis() 直読 */
+        paging_addrspace_map_user_range(&ctx->as,
+            (u32)MEM_UNICODE_TABLE_BASE,
+            (u32)MEM_UNICODE_TABLE_BASE + (u32)MEM_UNICODE_TABLE_SIZE,
+            PAGE_RW | PTE_USER);
+        /* 9801 の主記憶バックバッファ (0x6A000, 128KB) は **常に** USER に
+         * する (レビュー #6)。Cirrus の setup 失敗で 9801 へ落ちたとき、
+         * 最初の CPU 描画が #PF になるのを防ぐ。 */
+        paging_addrspace_map_user_range(&ctx->as,
+            (u32)MEM_GFX_BB_BASE,
+            (u32)MEM_GFX_BB_BASE + (u32)MEM_GFX_BB_SIZE,
+            PAGE_RW | PTE_USER);
+        /* いま選ばれているバックエンド固有の面を足す。map_user_range では
+         * なく **_keep** — Cirrus のクライアント面は PCD 付きのデバイス窓で、
+         * flags をそのまま書くと PCD が落ちる (レビュー #5 ②③)。 */
+        gfx_bb_phys_range(&bb_base, &bb_size);
+        if (bb_size)
+            paging_addrspace_map_user_keep(&ctx->as,
+                bb_base, bb_base + bb_size, PAGE_RW | PTE_USER);
+        /* KAPI トランポリンページ (RO+USER, 全PD共有) */
+        paging_addrspace_map_user(&ctx->as, ring3_tramp_page,
+            ring3_tramp_page, PAGE_RO | PTE_USER);
+
+        /* --- K3: 共有ライブラリ帯域 (0x400000-0x4FFFFF) ---
+         * .text/.rodata は RO+USER、.data/.bss は同じ仮想番地にこのアプリ
+         * 専用の物理ページ (原本から複製)。**master CR3 のまま**行う —
+         * 原本 g_data_master は共有ライブラリ帯の末尾 = アプリ固有 PDE の
+         * 中にあり、アプリ CR3 の下では別物を指す (I11)。 */
+        if (shlib_addrspace_attach(&ctx->as) < 0) {
+            shell_print("Error: shlib data attach failed (out of memory)\n", ATTR_RED);
+            return exec_launch_abort(launcher_id, id, EXEC_ERR_NOMEM);
+        }
+    }
+
+    /* ======== setjmp — この ID の呼び出し元へ帰る点 ======== */
+    if (exec_setjmp(ctx->jmpbuf) != 0) {
+        /* ======== longjmp復帰ポイント ========
+         * ローカル変数は当てにできない (setjmp 後に書き換わったものが
+         * 復帰側では読めない)。判断材料はグローバルだけに限る。
+         *
+         * フォルト経由の復帰では例外ゲートが IF をクリアしたまま longjmp
+         * してくる (exec_longjmp は EFLAGS を復元しない)。呼び出し元は常に
+         * 割り込み有効で動いているので、ここで無条件に開けてよい。 */
+        _enable();
+        /* 畳み (終了 / fault / CTRL+STOP) も park も、戻す作業は
+         * exec_exit / exec_park の側で済んでいる。ここは値を返すだけ。 */
+        if (g_longjmp_reason == EXEC_LJ_PARK) {
+            return g_longjmp_id;      /* app_id (2〜5) — まだ生きている */
+        }
+        return gui ? 0 : exec_exit_status;
+    }
+
+    entry = (ExecEntry)(load_addr + entry_off);
+
+    /* ======== ここから先は「このアプリの文脈」========
+     * CR3 をアプリ PD に載せ、本体を読み込み、argv を積む (I1/I2/I3)。
+     * VFS / kmalloc / ドライバ / ISR はすべて PDE 0 = 全 PD 共有なので、
+     * この間もカーネルは普通に動く。 */
+    if (want_ring3) {
+        paging_load_cr3(ctx->as.pd_phys);
+    } else if (!is_shell) {
+        /* CPL=0 の子は従来どおり identity。固定帯を pgalloc に予約させる。 */
+        exec_cpl0_claim();
+    }
+
+    file_buf = (u8 *)load_base;
+    {
+        /* 読み込みの上限は **実際に物理を張った範囲** で頭打ちにする。
+         * per-app 物理では [sbrk_end, guard_a) は張っていない穴なので、
+         * max_size のまま読ませるとカーネル (CPL=0) が穴に書いて #PF になる
+         * — アプリの fault ではなくカーネルが飛ぶ。
+         * レイアウトの検査が guard_a - code_end >= MEM_EXEC_SBRK_MIN を
+         * 保証しているので、ヘッダ + text はこの範囲に必ず収まる。 */
+        u32 read_max = max_size + OS32X_HDR_V2_SIZE;
+        if (want_ring3 && (sbrk_end - load_base) < read_max) {
+            read_max = sbrk_end - load_base;
+        }
+        sz = vfs_read(resolved, file_buf, (int)read_max);
+    }
+    if (sz <= 0) {
+        if (want_ring3) {
+            return exec_launch_abort(launcher_id, id, EXEC_ERR_NOT_FOUND);
+        }
+        exec_cpl0_release();
+        return EXEC_ERR_NOT_FOUND;
     }
 
     {
         /* ヘッダ分だけ前方へ詰めるオーバーラップコピー。kmemcpy は
-         * オーバーラップ時の動作を保証しない (rep movsd 実装の内部詳細に
-         * 依存していた) ので memmove を使う。 */
+         * オーバーラップ時の動作を保証しないので memmove を使う。 */
         memmove(load_addr, load_addr + code_off, text_sz);
         kmemset(load_addr + text_sz, 0, bss_sz);
     }
-
 
     /* ヒープ・ガードページ設定 */
     if (is_shell) {
         /* シェルのヒープは 2 系統あり、領域を分ける (include/memmap.h 参照):
          *   - newlib の sbrk (malloc / stdio バッファ): BSS 終端 〜 guard_b
-         *   - KAPI mem_alloc (exec_heap): スタック上の MEM_SHELL_HEAP_BASE 〜
-         * かつては両方を BSS 終端から始めていたため互いを上書きし、
-         * `ls > file` の化け・`pipe: out of memory`・double free 警告が出た。 */
+         *   - KAPI mem_alloc (exec_heap): スタック上の MEM_SHELL_HEAP_BASE 〜 */
         exec_heap_base = MEM_SHELL_HEAP_BASE;
         exec_heap_size = MEM_SHELL_HEAP_SIZE;
+        if (heap_sz > 0 && heap_sz < exec_heap_size) exec_heap_size = heap_sz;
         ctx->exec_heap_base = exec_heap_base;
         ctx->exec_heap_size = exec_heap_size;
         kapi->sbrk_heap_limit = guard_b;
     }
 
     if (exec_heap_size > 0) {
-        /* シェルは OS32X ヘッダの heap_size 指定があればサイズを制限
-         * (子プロセスは上のレイアウト確定で heap_size を織り込み済み) */
-        if (is_shell && heap_sz > 0 && heap_sz < exec_heap_size) {
-            exec_heap_size = heap_sz;
-            ctx->exec_heap_size = exec_heap_size;
-        }
-        /* 親 (シェル等) のヒープ使用量を控えてから子のヒープへ切り替える。
-         * 復帰時は exec_heap_restore_state で管理変数だけ戻す */
-        if (exec_nest_level > 0) {
-            exec_heap_save_state(&exec_ctx_stack[exec_nest_level - 1].exec_heap_used);
-        }
         exec_heap_init_at(exec_heap_base, exec_heap_size);
     }
 
     if (!is_shell) {
-        kapi->sbrk_heap_limit = guard_a;
-        ctx->sbrk_heap_limit = guard_a;
-
-        /* ガードページ設定。失敗＝保護なしで走ることを意味するので必ず検知する */
-        if (paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1) != 0 ||
-            paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1) != 0) {
-            kprintf(0xC1, "[exec] guard page setup failed (a=%x b=%x)\n",
-                    guard_a, guard_b);
-        }
-    }
-
-    /* setjmp — 毎回実行 (ネスト対応) */
-    if (exec_setjmp(ctx->jmpbuf) != 0) {
-        /* ======== longjmp復帰ポイント ======== */
-
-        /* フォルト経由の復帰では例外ゲートが IF をクリアしたまま
-         * longjmp してくる (exec_longjmp は EFLAGS を復元しない)。
-         * exec_run の呼び出し元は常に割り込み有効で動いているので、
-         * ここで無条件に開けてよい。 */
-        _enable();
-
-        ctx = &exec_ctx_stack[exec_nest_level];
-
-        /* ガードページ解除 (子プロセスのガードのみ) */
-        if (ctx->guard_a != 0) {
-
-            paging_set_page(ctx->guard_a, ctx->guard_a, PAGE_RW);
-            paging_set_page(ctx->guard_b, ctx->guard_b, PAGE_RW);
-        }
-
-        /* 子プロセスのヒープリセット */
-        if (ctx->exec_heap_base != 0) {
-            exec_heap_reset();
-        }
-
-        /* 子プロセス空間の物理ページ予約を解放する。
-         * ネスト exec (親も子プロセス) の場合は領域がまだ使用中なので、
-         * シェル (Level 1) まで戻ったときだけ解放する。
-         * 動的確保リザーブの穴は最初から予約していないので、そこに
-         * 生きている確保 (V86 バッキング等) を巻き込むことはない。 */
-        if (!is_shell && exec_nest_level == 1) {
-            u32 ca_start, cb_start;
-            int ca_pages, cb_pages;
-            exec_child_claim(&ca_start, &ca_pages, &cb_start, &cb_pages);
-            pgalloc_free_n(ca_start, ca_pages);
-            pgalloc_free_n(cb_start, cb_pages);
-        }
-
-        /* 親のヒープ/sbrk状態を復元 */
-        if (exec_nest_level > 0) {
-            ExecContext *parent = &exec_ctx_stack[exec_nest_level - 1];
-            /* 親が子プロセス (Level 1+) の場合のみ復元 */
-            if (parent->exec_heap_base != 0) {
-                /* 管理変数だけ親の値に戻す。ここで exec_heap_init_at を呼ぶと
-                 * 親ヒープ先頭に空きブロックヘッダを書き直してしまい、親が
-                 * 子の起動前に確保していたブロック (シェルのパイプ用 seg_buf や
-                 * glob 展開文字列) のヘッダが壊れる。free 時の
-                 * "[exec_heap] bad magic feeefeee (double free?)" の正体 */
-                exec_heap_restore_state(parent->exec_heap_base,
-                                        parent->exec_heap_size,
-                                        parent->exec_heap_used);
-                kapi->sbrk_heap_limit = parent->sbrk_heap_limit;
-                paging_set_not_present(parent->guard_a,
-                                       parent->guard_a + PAGE_SIZE - 1);
-                paging_set_not_present(parent->guard_b,
-                                       parent->guard_b + PAGE_SIZE - 1);
+        kapi->sbrk_heap_limit = sbrk_end;
+        if (!want_ring3) {
+            /* CPL=0 の子のガードは master の identity ページ。CPL=3 アプリの
+             * ガードは「アプリ PT に張っていない」= 非 present がそのまま
+             * ガードになるので、master を触らない (I8)。 */
+            if (paging_set_not_present(guard_a, guard_a + PAGE_SIZE - 1) != 0 ||
+                paging_set_not_present(guard_b, guard_b + PAGE_SIZE - 1) != 0) {
+                kprintf(0xC1, "[exec] guard page setup failed (a=%x b=%x)\n",
+                        guard_a, guard_b);
             }
         }
-
-        return exec_exit_status;
     }
-
-    entry = (ExecEntry)(load_addr + entry_off);
-
-    exec_nest_level++;
-    /* ここから先の open / リダイレクト / パイプ確保はこのレベルの所有物。
-     * exec_exit はこのタグを見て自分の分だけ回収する */
-    res_owner_set(exec_nest_level);
 
     {
         char *str_area;
@@ -1105,16 +1283,10 @@ int exec_run(const char *cmdline)
         char *d;
         u32 new_esp;
         u32 u_esp;   /* ring3: iret に渡すユーザ ESP (ダミー retaddr 込み) */
-        /* 呼び出し元 ESP の退避先。
-         *
-         * ローカル変数にしないのは、子プログラムのスタックへ切り替えた後の
-         * 復帰ムーブが %esp/%ebp 相対アドレスでは読めないため (static なら
-         * 絶対アドレスでアクセスされる)。
-         *
-         * 単一の static だとネスト exec で上書きされる: 子 A の実行中に
-         * 孫 B を exec すると B の退避値が A のものを潰し、A の main が
-         * 通常 return したときに壊れた ESP を復元していた。レベル別に持つ。 */
-        static u32 saved_esp_stack[MAX_EXEC_NEST];
+        /* 呼び出し元 ESP の退避先。ローカルにしないのは、子のスタックへ
+         * 切り替えた後の復帰ムーブが %esp/%ebp 相対では読めないため。
+         * ID 別に持つ (単一 static だとネスト exec で上書きされる)。 */
+        static u32 saved_esp_stack[APP_SLOT_COUNT];
 
         stack_top -= (cmd_len + 1);
         stack_top &= ~((u32)STACK_ALIGN_MASK);
@@ -1138,18 +1310,15 @@ int exec_run(const char *cmdline)
             /* クォート対応トークナイザ */
             while (*s && *s != ' ') {
                 if (*s == '"' || *s == '\'') {
-                    /* クォート開始 — 対応する閉じクォートまで取り込む */
                     quote = *s++;
                     while (*s && *s != quote) {
                         if (*s == '\\' && quote == '"' && *(s + 1)) {
-                            /* ダブルクォート内のバックスラッシュエスケープ */
                             s++;
                         }
                         *d++ = *s++;
                     }
                     if (*s == quote) s++;  /* 閉じクォートをスキップ */
                 } else if (*s == '\\' && *(s + 1)) {
-                    /* バックスラッシュエスケープ */
                     s++;
                     *d++ = *s++;
                 } else {
@@ -1161,173 +1330,45 @@ int exec_run(const char *cmdline)
         argv_area[argc] = NULL;
 
         /* ---- 呼び出しフレームを子スタック上に自分で組む ----
-         *
-         * 以前は引数 3 つを asm 内で push しており、しかも "g" 制約で
-         * 渡していた。"g" はメモリオペランドを許すので GCC が
-         * 「-4(%esp)」のような **ESP 相対アドレス**を選ぶことがあり、
-         * その場合 `mov %1, %%esp` でスタックを切り替えた後の push が
-         * 子スタック上の無関係な場所を読む。実際に壊れていなかったのは
-         * レジスタが選ばれていた偶然でしかない。
-         *
-         * 引数を C 側で書き込んでおけば asm は「ESP を差し替えて call」
-         * だけになり、入力は new_esp と entry の 2 本 (どちらも "r") で済む。
-         *
          * ExecEntry は __cdecl (int argc, char **argv, KernelAPI *api) なので
-         * 低位から argc, argv, kapi の順に並べる。
-         * call 時点で ESP を 16 バイト境界に揃えるのは SysV i386 ABI の
-         * 要求 (GCC は SSE スピルでこれを前提にする)。 */
+         * 低位から argc, argv, kapi の順に並べる。call 時点で ESP を 16 バイト
+         * 境界に揃えるのは SysV i386 ABI の要求。 */
         new_esp = (stack_top - 3 * sizeof(u32)) & ~(u32)15;
         ((u32 *)new_esp)[0] = (u32)argc;
         ((u32 *)new_esp)[1] = (u32)argv_area;
         ((u32 *)new_esp)[2] = (u32)kapi;
 
         if (want_ring3) {
-            /* ================= CPL=3 への遷移 (v2 M1c/M1d) ================= */
-            if (paging_addrspace_create_n(&g_ring3_as, g_ring3_band_pdes) != 0) {
-                shell_print("Error: ring3 addrspace create failed\n", ATTR_RED);
-                /* AS は出来ていないので破棄対象なし (第2引数 0)。それ以外の
-                 * 起動途中状態は exec_launch_abort が親の形に戻す。 */
-                return exec_launch_abort(is_shell, (struct addrspace *)0,
-                                         EXEC_ERR_NOMEM);
-            }
-
-            /* --- M1c: 0x400000 帯・ユーザスタック・VRAM・SHM を RW+USER に ---
-             * 共有 PDE (カーネル帯域) には USER を立てない = CPL=3 から不可のまま。 */
-            /* プログラム帯 (code/data/bss/heap): スタック直下まで USER(RW)。
-             * 旧 CPL=0 子はコード帯の後ろにヒープが伸びていたので、CPL=3 でも
-             * ヒープをスタック手前まで使えるよう [0x400000, スタック下端) を覆う
-             * (v2 M3 回帰修正: alloc_demo が 1MB 超で 0x501008 に #PF していた)。 */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                MEM_EXEC_LOAD_ADDR, RING3_HEAP_TOP,
-                PAGE_RW | PTE_USER);
-            /* ヒープ/スタック境界のガードページ (非present, USER なし)。
-             * オーバーラン/アンダーフローを #PF で捕捉する。map_user に flags=0
-             * を渡し present ビットを落とす (identity コピーの present を上書き)。 */
-            paging_addrspace_map_user(&g_ring3_as,
-                RING3_GUARD_BASE, RING3_GUARD_BASE, 0);
-            /* ユーザスタック帯 (ガードの上、0x400000 帯の上端, PD ごと) */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                RING3_STACK_BOTTOM, RING3_USTACK_TOP,
-                PAGE_RW | PTE_USER);
-            /* VRAM (テキスト 0xA0000 + グラフィック 0xA8000) — C2: 全PD共有+USER */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                0xA0000UL, 0xC0000UL, PAGE_RW | PTE_USER);
-            /* SHM (アプリ間データ受け渡し) — C2: 全PD共有+USER */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                (u32)MEM_SHM_BASE, (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE,
-                PAGE_RW | PTE_USER);
-
-            /* --- v2 M3b: CPL=3 から直接触る共有低位メモリ (PDE0) を USER (RW) に ---
-             * いずれもブート後配置の共有領域。VRAM/SHM と同じ要領。境界は
-             * memmap.h の定数を使う ([C4])。まず RW (Unicode/フォントは将来 RO 可)。 */
-            /* フォントキャッシュ (0x01000-0x49FFF): kcg フォントビットマップ直読 */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                (u32)MEM_FONT_CACHE_BASE, (u32)MEM_UNICODE_TABLE_BASE,
-                PAGE_RW | PTE_USER);
-            /* Unicode-JIS 変換表 (0x4A000, 128KB): unicode_to_jis() 直読 */
-            paging_addrspace_map_user_range(&g_ring3_as,
-                (u32)MEM_UNICODE_TABLE_BASE,
-                (u32)MEM_UNICODE_TABLE_BASE + (u32)MEM_UNICODE_TABLE_SIZE,
-                PAGE_RW | PTE_USER);
-            /* GFX バックバッファ: libos32gfx がピクセルを書く先。
-             * 番地はバックエンドに聞く (H2) — 9801 は 0x6A000 + 128KB で
-             * 従来と同じ値、PEGC 256 色は物理末尾から切り出した 300KB、
-             * Cirrus はリニア窓 0x1000000 の中の非表示面 (クライアント面)
-             * 300KB (H3b。カード VRAM なので主記憶の外だが、扱いは同じ)。
-             * 決め打ちにすると 9821 でアプリが自分のバックバッファに触れず
-             * #PF になる。
-             * ここで USER にするのは **クライアント面だけ** — 表示面は
-             * バックエンドが master に supervisor + PCD で張ったまま触らない
-             * (契約 G4: commit 前の描画は表示面に出ない)。
-             * map_user_range ではなく **_keep** を使う: Cirrus のクライアント面は
-             * PCD 付きのデバイス窓で、flags をそのまま書くと PCD が落ちる。
-             * この PTE は共有 PT にあるので、落とすと master 側 = カーネルの
-             * 描画まで巻き添えになり、CPU が書いた画素をキャッシュに残したまま
-             * BLT エンジンが古い VRAM を読む (レビュー #5 ②③)。 */
-            {
-                u32 bb_base = 0, bb_size = 0;
-                /* 9801 の主記憶バックバッファ (0x6A000, 128KB) は **常に** USER に
-                 * する (レビュー #6)。アプリは exec の後に gfx_init を呼ぶが、
-                 * その中でアクセラレータ (Cirrus) の setup が失敗すると
-                 * gfx_select_and_init_backend() は 9801 へ落ち、以後の
-                 * gfx_get_framebuffer() は 0x6A000 を返す。ここを写して
-                 * いないと、フォールバック直後の最初の CPU 描画が #PF になる。
-                 * フォント (〜0x49FFF) / Unicode 表 (〜0x69FFF) と VRAM (0xA0000〜)
-                 * の間にちょうど穴があった。主記憶側のバックバッファなので
-                 * 表示面の隔離 (契約 G4) には触れない。 */
-                paging_addrspace_map_user_range(&g_ring3_as,
-                    (u32)MEM_GFX_BB_BASE,
-                    (u32)MEM_GFX_BB_BASE + (u32)MEM_GFX_BB_SIZE,
-                    PAGE_RW | PTE_USER);
-                /* その上で、いま選ばれているバックエンド固有の面を足す
-                 * (9801 なら同じ範囲を重ねて書くだけで無害)。 */
-                gfx_bb_phys_range(&bb_base, &bb_size);
-                if (bb_size)
-                    paging_addrspace_map_user_keep(&g_ring3_as,
-                        bb_base, bb_base + bb_size, PAGE_RW | PTE_USER);
-            }
-            /* KAPI トランポリンページ (RO+USER, 全PD共有)。この app PD の PDE0 に
-             * USER を伝播させる (VRAM/SHM で既に立つが明示・冪等)。 */
-            paging_addrspace_map_user(&g_ring3_as, ring3_tramp_page,
-                ring3_tramp_page, PAGE_RO | PTE_USER);
-
-            /* --- K3: 共有ライブラリ帯域 (0x400000-0x4FFFFF) ---
-             * .text/.rodata は read-only + USER (master から写っているが
-             * 明示する)、.data/.bss は同じ仮想番地にこのアプリ専用の物理
-             * ページを張る (原本から複製)。未ロードなら何もしない。
-             * ここは 0x500000 からの map_user_range の **後** — 帯が重なって
-             * いないことは memmap.h の定数が保証する。 */
-            if (shlib_addrspace_attach(&g_ring3_as) < 0) {
-                /* per-app data ページが張れない (表満杯 / 物理ページ不足)。
-                 * 黙って CPL=3 へ降りると最初のライブラリ状態アクセスで #PF
-                 * = アプリ fault に見えるので、起動前に NOMEM で戻す
-                 * (レビュー #4 ⑥)。 */
-                shell_print("Error: shlib data attach failed (out of memory)\n", ATTR_RED);
-                return exec_launch_abort(is_shell, &g_ring3_as,
-                                         EXEC_ERR_NOMEM);
-            }
-
             /* --- M2c: CPL=3 アプリには本物の表でなくトランポリン表を渡す ---
-             * crt0/プログラムは実行時スタック渡しの api ポインタを使うだけなので
-             * 無変更。データフィールド (sbrk_heap_limit/shm_base) を本物の表から
-             * トランポリンへ反映してから渡す (CR0.WP=0 で RO ページへ書ける)。 */
-            /* CPL=3 の sbrk 上限は guard_a (exec_heap の直下のガード)。
-             * かつては RING3_HEAP_TOP を渡していたため sbrk が exec_heap の
-             * 領域へ伸びて 2 つのヒープが重なり得た (2026-09-04 修正)。 */
-            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] =
-                guard_a;
-            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] =
-                kapi->shm_base;
+             * CPL=3 の sbrk 上限は guard_a (exec_heap の直下のガード)。 */
+            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 0] = sbrk_end;
+            ((u32 *)ring3_tramp_page)[2 + KAPI_FUNC_COUNT + 1] = kapi->shm_base;
             ((u32 *)new_esp)[2] = ring3_tramp_page;   /* api = トランポリン */
 
-            /* --- crt0 スタック規約合わせ (v2 M2, retaddr ズレ修正) ---
-             * crt0.asm/_start_c は CPL=0 の `call *entry` を前提にし、
-             * [esp]=retaddr, [esp+4]=argc, [esp+8]=argv, [esp+12]=api を読む。
-             * だが ring3 は iret でエントリへ飛ぶため call が無く retaddr が
-             * 積まれず、スタックが 1 スロットずれて argc↔argv↔api が食い違う
-             * (実測: argv[1] に version=0x27 が入り #PF)。iret に渡す ESP を
-             * argc の 1 スロット下にし、そこにダミー retaddr を置いて
-             * call 経路と同一レイアウトに揃える。crt0 は main 後 sys_exit する
-             * ので retaddr へは戻らない (0 でよい)。ダミーは USER 済みの
-             * ユーザスタック帯 (0x7F0000-0x800000) 内。 */
+            /* --- crt0 スタック規約合わせ (retaddr ズレ修正) ---
+             * ring3 は iret でエントリへ飛ぶため call が無く retaddr が
+             * 積まれない。iret に渡す ESP を argc の 1 スロット下にし、
+             * そこにダミー retaddr を置いて call 経路と同一に揃える。 */
             u_esp = new_esp - sizeof(u32);
             ((u32 *)u_esp)[0] = 0;   /* ダミー retaddr */
 
-            g_ring3_active = 1;
+            g_cur_app = ctx;
+        }
 
-            /* 前のアプリ宛に残った CTRL+STOP 要求を持ち越さない (K2 作業 4)。
-             * 持ち越すと、起動したばかりのアプリが最初の syscall で
-             * 身に覚えのない kill を食う。 */
-            g_ring3_abort_req = 0;
+        /* ======== ここで初めて「走っているのはこの ID」になる ======== */
+        if (is_shell) {
+            appslot_shell_commit();
+        } else {
+            appslot_start_commit(id, gui, need_pages);
+        }
+        exec_nest_level = ctx->depth;
 
+        if (want_ring3) {
             /* --- M1d: iret で CPL=3 に降りる ---
-             * v86_entry.asm の iretd フレーム構築 (SS/ESP/EFLAGS/CS/EIP) を流用。
-             * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)
-             * なので CPL=3 は cli/sti/in/out で #GP (M0b で特権命令は除去済み)。
-             * TSS.ESP0 を現在の ESP に設定 (v86_enter と同じ手法): CPL=3 実行中の
-             * 割り込み / int 0x80 のフレームがこの直下に積まれ、exec_run の
-             * setjmp フレームを踏まない。ここから通常 return しない —
-             * 終了は int 0x80 → ring3_syscall_dispatch → longjmp。 */
+             * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)。
+             * TSS.ESP0 を現在の ESP に設定: CPL=3 実行中の割り込み / int 0x80 の
+             * フレームがこの直下に積まれ、setjmp フレームを踏まない。
+             * ここから通常 return しない — 終了は int 0x80 → longjmp。 */
             __asm__ volatile(
                 "cli\n\t"
                 "movl %%esp, %[e0]\n\t"     /* TSS.ESP0 = 現在のカーネル ESP */
@@ -1344,7 +1385,7 @@ int exec_run(const char *cmdline)
                 "pushl %[eip]\n\t"          /* EIP = エントリポイント */
                 "iret\n\t"
                 : [e0] "=m"(kernel_tss.esp0)
-                : [pd]  "r"(g_ring3_as.pd_phys),
+                : [pd]  "r"(ctx->as.pd_phys),
                   [uesp]"r"(u_esp),
                   [eip] "r"((u32)entry),
                   [uds] "i"(USER_DS),
@@ -1358,7 +1399,7 @@ int exec_run(const char *cmdline)
                 "movl %1, %%esp\n\t"
                 "call *%2\n\t"
                 "movl %0, %%esp"
-                : "=m"(saved_esp_stack[exec_nest_level - 1])
+                : "=m"(saved_esp_stack[id])
                 : "r"(new_esp), "r"(entry)
                 : "eax", "ecx", "edx", "cc", "memory"
             );
@@ -1367,4 +1408,149 @@ int exec_run(const char *cmdline)
     }
 
     return EXEC_SUCCESS;
+}
+
+/* ======================================================================== */
+/*  exec_run — 従来どおり「子が終わるまで塞ぐ」起動 (CUI の入れ子はこれ)     */
+/* ======================================================================== */
+int exec_run(const char *cmdline)
+{
+    return exec_launch(cmdline, 0);
+}
+
+/* ======================================================================== */
+/*  exec_start — 塞がない起動 (KAPI v44、D4 / 決裁 D9-5)                     */
+/*                                                                          */
+/*  戻り値: >0 = app_id (2〜5)。最初の OP_WAIT まで進んで park した          */
+/*          0  = park より前に終了した (回収済み、gui_owner_exit 配送済み)   */
+/*          <0 = 起動しなかった (OS32_ERR_INVAL / OS32_ERR_FULL /            */
+/*               EXEC_ERR_NOMEM / EXEC_ERR_NOT_FOUND / EXEC_ERR_INVALID)     */
+/*  owner 1 (シェル帯) からのみ — 判定は gui_register と同じ形 (契約 S2)。    */
+/* ======================================================================== */
+i32 exec_start(const char *cmdline)
+{
+    if (res_owner_get() != APP_ID_SHELL) return OS32_ERR_INVAL;
+    if (cmdline == 0 || cmdline[0] == '\0') return OS32_ERR_INVAL;
+    return exec_launch(cmdline, 1);
+}
+
+/* ======================================================================== */
+/*  exec_park — 走っているアプリを OP_WAIT の中で止め、WM へ戻す (KAPI v44)  */
+/*                                                                          */
+/*  成立すれば **戻らない** (longjmp で exec_start / exec_resume の復帰点へ)。*/
+/*  呼べない文脈 (OP_WAIT 以外の op / 走っているアプリが居ない / CPL=0 の子) */
+/*  では OS32_ERR_INVAL を返して普通に戻り、ring3_park_reject_count が増える。*/
+/*                                                                          */
+/*  park 規約 (D2): 呼んでよいのは gshell の op_wait のループ先頭、wm_cycle  */
+/*  が 1 周を終えた直後・ring::pending を読む前だけ。ここから longjmp する    */
+/*  ので、WM が書きかけの状態を持っていると宙に浮く。                        */
+/* ======================================================================== */
+i32 exec_park(void)
+{
+    int id = appslot_cur();
+    AppSlot *a;
+    u32 k;
+    int rc;
+
+    rc = appslot_park_check();
+    if (rc < 0) return rc;
+
+    a = appslot_get(id);
+    /* CPL=3 のフレームが無ければ止めようがない (CPL=0 の子 / 呼び出し文脈が
+     * syscall の外)。check を通っていても最後にここで弾く。 */
+    if (!a || !g_cur_app || g_cur_app != a || g_cur_frame == 0) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+
+    /* CPL=3 の続き = int80_stub のフレーム 13 語。resume はこれを積み直して
+     * popad; iretd するだけ (D2 の (b): 追加 RAM は 1 アプリ 52B)。 */
+    for (k = 0; k < APP_FRAME_WORDS; k++) a->frame[k] = g_cur_frame[k];
+
+    exec_heap_save_state(&a->exec_heap_used);
+    ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    g_cur_frame = 0;
+
+    /* master へ戻してから状態を切り替える (WM は master の下で走る)。 */
+    paging_load_cr3(paging_kernel_pd_phys());
+    appslot_park_commit();      /* PARKED + 印 + owner 1 へ */
+    exec_restore_context(APP_ID_SHELL);
+
+    g_longjmp_reason = EXEC_LJ_PARK;
+    g_longjmp_id = id;
+    exec_longjmp(a->jmpbuf);    /* 戻らない */
+    return 0;
+}
+
+/* ======================================================================== */
+/*  exec_resume — 止めてあるアプリを 1 本だけ起こす (KAPI v44)               */
+/*                                                                          */
+/*  戻り値: app_id = また park した / 0 = 終了した / <0 = 起こせなかった      */
+/*  wait_ret は OP_WAIT の戻り値 (契約 T3: ring::pending)。保存フレームの     */
+/*  EAX スロットに書くので、アプリから見れば gui_call(OP_WAIT) が普通に        */
+/*  その値を返したように見える。                                             */
+/*                                                                          */
+/*  起こせるのは **OP_WAIT で park された印のあるフレームだけ** (C5/C6)。     */
+/*  印が無ければ OS32_ERR_STALE を返して ring3_resume_bad_frame_count を上げる*/
+/*  — WM の行儀を信じるのではなくカーネルが弾く形 (受入 G7)。                 */
+/* ======================================================================== */
+i32 exec_resume(i32 app_id, i32 wait_ret)
+{
+    AppSlot *a;
+    int rc;
+
+    rc = appslot_resume_check((int)app_id);
+    if (rc < 0) return rc;
+
+    a = appslot_get((int)app_id);
+    if (!a->cpl3 || !a->as.pd_phys) return OS32_ERR_INVAL;
+    a->frame[APP_FRAME_EAX] = (u32)wait_ret;
+
+    if (exec_setjmp(a->jmpbuf) != 0) {
+        /* park / 終了 / fault / kill で戻ってきた。ローカルは当てにしない。 */
+        _enable();
+        if (g_longjmp_reason == EXEC_LJ_PARK) return g_longjmp_id;
+        return 0;
+    }
+
+    appslot_resume_commit((int)app_id);
+    exec_restore_context((int)app_id);
+    /* cli → TSS.ESP0 → CR3 → popad; iretd を割り込み禁止で一続きに。
+     * iretd が保存済み EFLAGS (IF=1) を復元するのでアプリ側の IF は変わらない。 */
+    ring3_resume(a->frame, a->as.pd_phys, &kernel_tss);
+    return 0;   /* 到達しない */
+}
+
+/* ======================================================================== */
+/*  exec_kill — 止めてあるアプリを起こさずに畳む (KAPI v44、決裁 D9-6)       */
+/*                                                                          */
+/*  CTRL+STOP は「いま走っているアプリ」宛にしか立たない (IRQ1 の時点で       */
+/*  カーネルが知っているのはそれだけ) ので、止めてあるアプリを畳む口が別に    */
+/*  要る。これが無いと resume されないまま固まったアプリを永久に畳めない。    */
+/*  owner 1 (WM top-level) からのみ。走っている本人には OS32_ERR_STALE。      */
+/* ======================================================================== */
+i32 exec_kill(i32 app_id)
+{
+    AppSlot *a;
+    int rc = appslot_kill_check((int)app_id);
+    if (rc < 0) return rc;
+
+    a = appslot_get((int)app_id);
+    /* 走っていないので CR3 は master のまま。owner も 1 のまま動かさない
+     * — 回収は全部 ID を明示して呼ぶ (D3)。 */
+    exec_reclaim_owned((int)app_id);
+    if (!a->cpl3) exec_cpl0_release();
+    exec_teardown_app(a);
+    appslot_reclaim((int)app_id);
+    /* 生存アプリの集合が変わる瞬間 = transition。G7 の switch ではない。 */
+    ring3_transition_count++;
+    return 0;
+}
+
+/* ======================================================================== */
+/*  exec_app_state — 0=空き / 1=走っている / 2=park 中 (KAPI v44、任意)      */
+/* ======================================================================== */
+i32 exec_app_state(i32 app_id)
+{
+    return appslot_state((int)app_id);
 }

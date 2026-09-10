@@ -62,6 +62,11 @@ int80_stub:
         ;; EFLAGS (IF=1) を復元するので、ユーザ側の IF は変わらない。
         cli
 
+        ;; 以下は ring3_resume と共有する出口 (票 K5b の P4)。
+        ;; esp -> [pushad 8 語][EIP][CS][EFLAGS][userESP][userSS]
+
+global ring3_iret_to_user
+ring3_iret_to_user:
         popad                           ;; eax = 戻り値 (dispatcher が frame[7] に格納)
 
         ;; --- IRETD_USER: CPL=3 へ戻るならユーザセグメントを復元 ---
@@ -79,6 +84,40 @@ int80_stub:
         pop     eax
 .do_iret:
         iretd
+
+;; ============================================================
+;; void __cdecl ring3_resume(const u32 *frame, u32 pd_phys, void *tss)
+;;
+;; 票 docs/tasks/gui/v13/TASK_K5_multiapp.md の D2 (b) / P4。
+;; exec_park が AppSlot へ写した 13 語 (pushad + iret 分) をカーネルスタックへ
+;; 積み直し、CR3 をそのアプリの PD に載せて CPL=3 の続きへ戻る。**戻らない**。
+;;
+;; cli → TSS.ESP0 → CR3 → 積む → popad; iretd を割り込み禁止で一続きに行う
+;; (exec.c の iret ブロックと同じ作法)。cli の後 iretd までに IRQ は 1 つも
+;; 入らないので、TSS.ESP0 を書き替えてから CPL=3 に降りるまでの窓は無い。
+;; iretd が保存済み EFLAGS (IF=1) を復元するのでアプリ側の IF は変わらない。
+;;
+;; frame はカーネル .bss (PDE 0 = 全 PD 共有) にあるので、CR3 を載せ替えた
+;; 後でも読める。DS はカーネルデータのまま (C から呼ばれる)。
+;; ============================================================
+global ring3_resume
+ring3_resume:
+        cli
+        mov     esi, [esp + 4]          ;; frame (13 語)
+        mov     eax, [esp + 8]          ;; pd_phys
+        mov     edx, [esp + 12]         ;; &kernel_tss
+        mov     ecx, esp
+        ;; TSS.ESP0 = 現在のカーネル ESP。offset 4 は kernel/tss.c の
+        ;; STATIC_ASSERT(tss_esp0_at_offset_4) が固定している
+        ;; (v86_entry.asm と同じ書き方)。
+        mov     [edx + 4], ecx
+        mov     cr3, eax                ;; アプリ PD へ切替
+        sub     esp, 13 * 4             ;; フレーム置き場
+        mov     edi, esp
+        mov     ecx, 13
+        cld
+        rep     movsd                   ;; [esi] -> [edi] を 13 語
+        jmp     ring3_iret_to_user      ;; popad; iretd (戻らない)
 
 ;; ============================================================
 ;; u32 __cdecl kapi_invoke(void *wrapfn, const void *args_src, u32 nbytes)

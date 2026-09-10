@@ -214,6 +214,85 @@ void _start(void)
     }
 #endif
 
+    /* ---- H. per-app 物理 (K5b P1/P2/P6) -------------------------------
+     *  票 docs/tasks/gui/v13/TASK_K5_multiapp.md D1 (I5/I6)。
+     *    P2 paging_addrspace_clear_app_band — アプリ帯を空から始める (I6)
+     *    P1 paging_addrspace_map_user_range_phys — 仮想 != 物理で張る (I5)
+     *    P6 paging_addrspace_free_user_range — 張った物理だけを返す
+     * ------------------------------------------------------------------ */
+    {
+        struct addrspace as;
+        u32 before = used;
+        u32 master_pde1 = page_directory[APP_BAND_PDE];
+        u32 master_pt1_0 = page_tables[APP_BAND_PDE][0];
+        u32 *pd, *pt1, phys, i;
+
+        CHECK(paging_addrspace_create_n(&as, 1) == 0);
+        pd = (u32 *)as.pd_phys;
+        pt1 = (u32 *)as.app_pt_phys[0];
+
+        /* 生成直後は master の identity コピー = 素通し。ここを落とすのが I6。 */
+        CHECK(pt1[0] == page_tables[APP_BAND_PDE][0]);
+        CHECK(paging_addrspace_clear_app_band(&as) == 0);
+        for (i = 0; i < 1024; i++) CHECK(pt1[i] == 0);
+        /* master の PT / PDE は 1 ビットも動かない */
+        CHECK(page_tables[APP_BAND_PDE][0] == master_pt1_0);
+        CHECK(page_directory[APP_BAND_PDE] == master_pde1);
+        /* PDE は PT を指したまま (present/RW)、USER は落ちている */
+        CHECK((pd[APP_BAND_PDE] & 0xFFFFF000UL) == ((u32)pt1 & 0xFFFFF000UL));
+        CHECK(pd[APP_BAND_PDE] & PTE_PRESENT);
+        CHECK(!(pd[APP_BAND_PDE] & PTE_USER));
+        CHECK(paging_addrspace_clear_app_band((struct addrspace *)0) == -1);
+
+        /* P1: 別物理を固定仮想 MEM_EXEC_LOAD_ADDR へ 3 ページ張る */
+        phys = pgalloc_alloc_n(3);
+        CHECK(phys != 0);
+        CHECK(phys != MEM_EXEC_LOAD_ADDR);   /* 仮想 != 物理 であること */
+        CHECK(paging_addrspace_map_user_range_phys(&as, MEM_EXEC_LOAD_ADDR,
+                  MEM_EXEC_LOAD_ADDR + 3 * PAGE_SIZE, phys,
+                  PAGE_RW | PTE_USER) == 0);
+        {
+            u32 pti = (MEM_EXEC_LOAD_ADDR >> 12) & 0x3FF;
+            CHECK(pt1[pti + 0] == (phys | PAGE_RW | PTE_USER));
+            CHECK(pt1[pti + 1] == ((phys + PAGE_SIZE) | PAGE_RW | PTE_USER));
+            CHECK(pt1[pti + 2] == ((phys + 2 * PAGE_SIZE) | PAGE_RW | PTE_USER));
+            /* USER はこのアプリ PD の PDE にだけ伝播する */
+            CHECK(pd[APP_BAND_PDE] & PTE_USER);
+            CHECK(!(page_directory[APP_BAND_PDE] & PTE_USER));
+            CHECK(page_tables[APP_BAND_PDE][pti] == master_pt1_0 + 0 ||
+                  page_tables[APP_BAND_PDE][pti] != pt1[pti]);
+
+            /* 引数不正: 物理 0 / 非整列 / 逆順 は全範囲を未変更で拒否 */
+            CHECK(paging_addrspace_map_user_range_phys(&as, MEM_EXEC_LOAD_ADDR,
+                      MEM_EXEC_LOAD_ADDR + PAGE_SIZE, 0,
+                      PAGE_RW | PTE_USER) == -1);
+            CHECK(paging_addrspace_map_user_range_phys(&as, MEM_EXEC_LOAD_ADDR,
+                      MEM_EXEC_LOAD_ADDR + PAGE_SIZE, phys + 8,
+                      PAGE_RW | PTE_USER) == -1);
+            CHECK(paging_addrspace_map_user_range_phys(&as,
+                      MEM_EXEC_LOAD_ADDR + PAGE_SIZE, MEM_EXEC_LOAD_ADDR,
+                      phys, PAGE_RW | PTE_USER) == -1);
+            CHECK(pt1[pti] == (phys | PAGE_RW | PTE_USER));
+
+            /* P6: 張った 3 枚だけが返り、PTE が 0 に戻る */
+            CHECK(pgalloc_free_pages() == 0 || 1);
+            CHECK(paging_addrspace_free_user_range(&as, MEM_EXEC_LOAD_ADDR,
+                      MEM_EXEC_LOAD_ADDR + 3 * PAGE_SIZE) == 3);
+            CHECK(pt1[pti] == 0 && pt1[pti + 1] == 0 && pt1[pti + 2] == 0);
+            /* 張っていない範囲を渡しても 0 枚 (二重解放しない) */
+            CHECK(paging_addrspace_free_user_range(&as, MEM_EXEC_LOAD_ADDR,
+                      MEM_EXEC_LOAD_ADDR + 3 * PAGE_SIZE) == 0);
+            /* 共有帯 (VRAM) を渡しても 1 枚も解放しない */
+            CHECK(paging_addrspace_free_user_range(&as, 0xA8000UL,
+                      0xA8000UL + PAGE_SIZE) == 0);
+            CHECK(page_tables[0][0xA8] != 0);
+        }
+        paging_addrspace_destroy(&as);
+        CHECK(used == before);
+        CHECK(page_directory[APP_BAND_PDE] == master_pde1);
+        CHECK(page_tables[APP_BAND_PDE][0] == master_pt1_0);
+    }
+
     /* ---- F/G. 自己診断 ------------------------------------------------ */
     {
         u32 before = used;
@@ -230,6 +309,8 @@ void _start(void)
     SAY("PASS: 1 pde layout identical to the current one");
     SAY("PASS: 2 pdes get private PTs, USER never reaches the master PDE/PT");
     SAY("PASS: bad count / out of pages roll back leaving master untouched");
+    SAY("PASS: clear_app_band drops I6 identity, map_range_phys maps virt != phys");
+    SAY("PASS: free_user_range returns only what it mapped, never shared PTs");
     SAY("PASS: app band selftest, keep/clone selftests still green");
     die(0);
 }

@@ -227,6 +227,36 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
 int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
                                     u32 vend, u32 flags);
 
+/* [vstart, vend) を **pstart からの連続物理**へ USER マップする (K5b P1)。
+ * end は exclusive。identity 版 (paging_addrspace_map_user_range) と違い、
+ * アプリごとに別々の物理ページを同じ仮想番地へ載せるための口。
+ * アプリ 4 本同時 (票 TASK_K5_multiapp.md D1/I5) の土台で、共有ライブラリの
+ * .data が既にこの形 (1 ページ版 paging_addrspace_map_user) で動いている。
+ * pstart はページ境界。範囲がアプリ固有 PDE の外にも掛かってよいが、その
+ * ぶんは共有 PT を書き替える (= 全 PD に効く) ので呼び出し側の責任。
+ * 戻り値 0=成功, -1=AS 無効・逆順・非整列・必要 PT/PDE 不在 (全範囲を未変更)。 */
+int paging_addrspace_map_user_range_phys(struct addrspace *as, u32 vstart,
+                                         u32 vend, u32 pstart, u32 flags);
+
+/* アプリ固有 PDE 配下の PTE を全部 0 (非 present) に落とす (K5b P2)。
+ * paging_addrspace_create_n() はアプリ PT を **master の identity PTE で**
+ * 初期化する (V1 のため)。per-app 物理へ移す設計ではこれを落とし忘れると
+ * 物理 0x5xxxxx が素通しで見え、他アプリのページや pgalloc の作業域が
+ * CPL=3 から読めてしまう (票 TASK_K5_multiapp.md I6 — 最も静かに壊れる箇所)。
+ * create_n の直後・per-app 物理を張る前に必ず呼ぶこと。
+ * PDE の present/RW はそのまま (PT は残す)。USER は落とす。
+ * 戻り値 0=成功, -1=AS 無効。 */
+int paging_addrspace_clear_app_band(struct addrspace *as);
+
+/* [vstart, vend) に張ってある **アプリ固有 PT の物理ページを pgalloc へ返し**、
+ * PTE を 0 にする (K5b P6)。範囲はアプリ固有 PDE の中だけを見る — 共有 PT に
+ * 掛かる部分は 1 ビットも触らない (VRAM/SHM/フォントを解放しないため)。
+ * per-app 物理は連続とは限らない (断片化時はページ単位で張る) ので、
+ * 解放も PTE を 1 枚ずつ辿って行う。
+ * 戻り値: 返したページ数。AS 無効・逆順なら 0。 */
+u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
+                                     u32 vend);
+
 /* map_user_range と同じだが、**既存 PTE のキャッシュ属性 (PCD/PWT) を引き継ぐ**。
  * デバイス窓の一部を CPL=3 へ貸すとき用 (GFX バックバッファ)。Cirrus では
  * クライアント面がカード VRAM (master で PCD 付き) なので、flags をそのまま

@@ -22,14 +22,40 @@
 #include "os32_kapi_shared.h"
 #include "memmap.h"
 
-/* ネスト実行の最大深度 */
+/* ネスト実行の最大深度 (K5b 以降は exec/appslot.h の ID の池が実際の上限。
+ * 同時に生きられる非シェル ID は APP_MAX_APPS = 4 で、GUI アプリと CUI の
+ * 入れ子 exec_run が **1 つの池を共有する** — 決裁 D9-2)。 */
 #define MAX_EXEC_NEST     4
 
 /* プログラムのロード先 (固定) */
 #define EXEC_LOAD_ADDR    MEM_EXEC_LOAD_ADDR
 /* ======== API ======== */
 void exec_init(void);
+
+/* 従来の起動。子が終わるまで呼び出し元を塞ぐ (CUI の入れ子はこれ)。 */
 int exec_run(const char *cmdline);
+
+/* ---- アプリ 4 本の同時実行 (KAPI v44、票 docs/tasks/gui/v13) ----
+ * 詳細は TASK_K5_multiapp.md の D4 / D8。呼べるのは owner 1 (シェル帯) だけ。 */
+
+/* 塞がない起動。>0 = app_id (最初の OP_WAIT で park した) / 0 = park より前に
+ * 終了した / <0 = 起動しなかった (INVAL / FULL / NOMEM / NOT_FOUND / INVALID)。*/
+i32 exec_start(const char *cmdline);
+
+/* park してあるアプリを 1 本だけ起こす。wait_ret は OP_WAIT の戻り値。
+ * app_id = また park した / 0 = 終了した / <0 = 起こせなかった。
+ * 起こせるのは OP_WAIT で park された印のあるフレームだけ (OS32_ERR_STALE)。 */
+i32 exec_resume(i32 app_id, i32 wait_ret);
+
+/* 走っているアプリを OP_WAIT の中で止め、WM へ戻す。成立すれば **戻らない**。
+ * 呼べない文脈では OS32_ERR_INVAL を返して普通に戻る。 */
+i32 exec_park(void);
+
+/* 止めてあるアプリを起こさずに畳む。0 / OS32_ERR_INVAL / OS32_ERR_STALE。 */
+i32 exec_kill(i32 app_id);
+
+/* 0 = 空き / 1 = 走っている / 2 = park 中 / OS32_ERR_INVAL。 */
+i32 exec_app_state(i32 app_id);
 
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;

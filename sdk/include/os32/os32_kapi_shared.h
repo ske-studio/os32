@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      42   /* GUI v1.1: gui_call / gui_register / gfx_stats / gfx_lease_palette / sys_switch_shell / kbd_dropped_count / kbd_trygetrawkey / ime_feed_key / ime_set_render (2026-09-06 に v41 → v42 へ確定、ネットワーク Host Services は v43) */
+#define KAPI_VERSION      44   /* GUI v1.3 K5b: exec_start / exec_resume / exec_park / exec_kill / exec_app_state / snd_focus (アプリ 4 本の同時実行。v43 はネットワーク Host Services に予約済みなので飛ばす) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

@@ -178,9 +178,15 @@ extern u32 __cdecl wrap_kbd_dropped_count(void);
 extern int __cdecl wrap_kbd_trygetrawkey(void);
 extern int __cdecl wrap_ime_feed_key(int keydata);
 extern void __cdecl wrap_ime_set_render(void *table);
+extern i32 __cdecl wrap_exec_start(const char *cmdline);
+extern i32 __cdecl wrap_exec_resume(i32 app_id, i32 wait_ret);
+extern i32 __cdecl wrap_exec_park(void);
+extern i32 __cdecl wrap_exec_kill(i32 app_id);
+extern i32 __cdecl wrap_exec_app_state(i32 app_id);
+extern i32 __cdecl wrap_snd_focus(int app_id);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 42;
+kapi->version = 44;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -362,5 +368,11 @@ kapi->version = 42;
     kapi->kbd_trygetrawkey = wrap_kbd_trygetrawkey;
     kapi->ime_feed_key = wrap_ime_feed_key;
     kapi->ime_set_render = wrap_ime_set_render;
+    kapi->exec_start = wrap_exec_start;
+    kapi->exec_resume = wrap_exec_resume;
+    kapi->exec_park = wrap_exec_park;
+    kapi->exec_kill = wrap_exec_kill;
+    kapi->exec_app_state = wrap_exec_app_state;
+    kapi->snd_focus = wrap_snd_focus;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;
