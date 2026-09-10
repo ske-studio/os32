@@ -457,8 +457,12 @@ u32 vfs_block_size(void) {
 /* stat の st_dev をマウント単位で決める。FS ドライバは st_dev を埋めない
  * (ext2/iso9660 は 0 固定、hostdrv/fatfs は kmemset のまま) ので、VFS が
  * 正典として上書きする。値は VFS_MOUNT_DEV_ENCODE() + 1 — +1 は「不明」を
- * 表す 0 と衝突させないため。同じ (FS, 種別, unit) の二重マウントは
- * vfs_mount() が VFS_ERR_EXIST で断るので、生きているマウントの間で一意。
+ * 表す 0 と衝突させないため。vfs_mount() が断る二重マウントの鍵は
+ * (FS, 種別, unit) で、この値は (種別, unit) だけから作るので、**同じ unit を
+ * 別の FS ドライバで**マウントした 2 つ (例: 同じ hd の ext2 と FAT) は同じ
+ * st_dev になる。一意なのは「同じ FS ドライバのマウント同士」の間。filer の
+ * 同一判定は st_ino != 0 のときだけ st_dev/st_ino を見るので、st_ino を
+ * 埋めない FAT/hostdrv とは衝突しない (独立レビュー 2026-09-10 の訂正)。
  *
  * 限界: 同じ物理ディスク上の別パーティションは区別しない。ext2 は
  * ext2_find_partition() が最初のブート可能エントリしか選ばず、同じ
