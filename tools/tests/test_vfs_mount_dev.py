@@ -10,7 +10,8 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CASES = ["encode", "ext2_rejects_non_hd", "boot_sequence_has_one_ext2",
-         "duplicate_device_refused"]
+         "duplicate_device_refused", "stat_dev_identifies_mount",
+         "stat_dev_on_synth_root"]
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wno-unused-parameter", "-Wno-sign-compare",
          "-Wdeclaration-after-statement", "-D__cdecl="]

@@ -454,6 +454,35 @@ u32 vfs_block_size(void) {
     return (mnt && mnt->ops->block_size) ? mnt->ops->block_size(mnt->fs_ctx) : 0;
 }
 
+/* stat の st_dev をマウント単位で決める。FS ドライバは st_dev を埋めない
+ * (ext2/iso9660 は 0 固定、hostdrv/fatfs は kmemset のまま) ので、VFS が
+ * 正典として上書きする。値は VFS_MOUNT_DEV_ENCODE() + 1 — +1 は「不明」を
+ * 表す 0 と衝突させないため。同じ (FS, 種別, unit) の二重マウントは
+ * vfs_mount() が VFS_ERR_EXIST で断るので、生きているマウントの間で一意。
+ *
+ * 限界: 同じ物理ディスク上の別パーティションは区別しない。ext2 は
+ * ext2_find_partition() が最初のブート可能エントリしか選ばず、同じ
+ * hd0 を 2 度マウントすることもできないため、そもそも同時に見えない。 */
+static u32 vfs_mount_dev_of(const MountPoint *mnt)
+{
+    return (u32)VFS_MOUNT_DEV_ENCODE(mnt->dev_type, mnt->dev_id) + 1U;
+}
+
+static u32 vfs_dev_of_resolved(const char *resolved)
+{
+    MountPoint *mnt = vfs_find_mount(resolved, (const char **)0);
+    return mnt ? vfs_mount_dev_of(mnt) : 0U;
+}
+
+u32 vfs_path_dev(const char *path)
+{
+    char resolved[VFS_MAX_PATH];
+
+    if (!path) return 0U;
+    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    return vfs_dev_of_resolved(resolved);
+}
+
 /* マウントルート ("/") の stat 合成。FatFs の f_stat はルートに
  * FR_INVALID_NAME を返すなど、FS ドライバはルートを stat できないことがある */
 static void vfs_synth_root_stat(OS32_Stat *buf)
@@ -473,6 +502,7 @@ int vfs_stat(const char *path, OS32_Stat *buf)
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     void *fs_ctx;
     VfsOps *ops;
+    u32 dev;
     int rc;
 
     if (!buf) return VFS_ERR_INVAL;
@@ -481,15 +511,24 @@ int vfs_stat(const char *path, OS32_Stat *buf)
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
 
     if (!ops) return VFS_ERR_NOMOUNT;
+    dev = vfs_dev_of_resolved(resolved);
     if (!ops->stat) {
-        if (vfs_rel_is_root(rel_path)) { vfs_synth_root_stat(buf); return VFS_OK; }
+        if (vfs_rel_is_root(rel_path)) {
+            vfs_synth_root_stat(buf);
+            buf->st_dev = dev;
+            return VFS_OK;
+        }
         return VFS_ERR_NOMOUNT;
     }
     rc = ops->stat(fs_ctx, rel_path, buf);
     if (rc != VFS_OK && vfs_rel_is_root(rel_path)) {
         vfs_synth_root_stat(buf);
+        buf->st_dev = dev;
         return VFS_OK;
     }
+    /* FS が入れた st_dev (どれも 0) は VFS が上書きする。別デバイスで
+     * inode 番号が一致しても (st_dev, st_ino) が衝突しないようにするため */
+    if (rc == VFS_OK) buf->st_dev = dev;
     return rc;
 }
 

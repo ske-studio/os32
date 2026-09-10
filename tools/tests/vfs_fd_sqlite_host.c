@@ -16,6 +16,8 @@ void vfs_resolve_path(const char *in, char *out, int size)
 VfsOps *vfs_route(const char *path, char *out, int size, void **ctx)
 { probes++; str_cpy(out, path, size); *ctx = &mock_ops; return &mock_ops; }
 int vfs_path_kind(const char *path) { probes++; return VFS_KIND_FILE; }
+/* fs/vfs.c 側の実装 (マウント単位の st_dev)。ここでは固定値で足りる */
+u32 vfs_path_dev(const char *path) { return 1; }
 static int mock_size(void *ctx, const char *path, u32 *size)
 { probes++; *size = 8; return size_rc; }
 static int mock_write(void *ctx, const char *path, const void *buf, u32 size)
