@@ -99,7 +99,7 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 
 | # | 事項 | 重さ | 決裁 |
 |---|---|---|---|
-| A1 | **`--cpl0` の子 × 生きている CPL=3 アプリ**: `exec_cpl0_claim()` は帯 `[0x500000, mem_end)` を identity で丸ごと `pgalloc_mark_used`、`release` で丸ごと free。K5b-K 以後は CPL=3 アプリの per-app 物理も同じ pgalloc から取るので、GUI アプリが park 中に `--cpl0` の子を起動すると (a) 子がアプリの物理を上書き、(b) 解放時に生きているアプリのページまで free。gshell 配下でしか到達しない | **P1 相当** (受入前に決着) | ユーザー |
+| A1 | **`--cpl0` の子 × 生きている CPL=3 アプリ**: `exec_cpl0_claim()` は帯 `[0x500000, mem_end)` を identity で丸ごと `pgalloc_mark_used`、`release` で丸ごと free。K5b-K 以後は CPL=3 アプリの per-app 物理も同じ pgalloc から取るので、GUI アプリが park 中に `--cpl0` の子を起動すると (a) 子がアプリの物理を上書き、(b) 解放時に生きているアプリのページまで free。gshell 配下でしか到達しない | **P1 相当** (受入前に決着) | ユーザー → **実装済み** (コミット SHA は PM が入れる) |
 | A2 | 入れ子 `exec_run` の上限が `MAX_EXEC_NEST`(=4) から ID の池 (2〜5) に変わった。GUI 4 本が生きていると CUI の入れ子は `OS32_ERR_FULL` (設計どおり)。`exec.h:28` の `MAX_EXEC_NEST` は死に定数 | 低 (掃除) | PM |
 | A3 | `EXEC_DYN_RESERVE` の穴は CPL=0 の子のためだけに残り、V86 バッキングと per-app 物理が同じ pgalloc を食い合う。sbrk 段 1 (収まるなら張る) と組むと、アプリ起動直後の `v86` が以前は通った所で落ちうる | 中 (G8 の v86 で観測) | PM/テスター |
 | A4 | `resolved` / `hdrbuf` が関数 static で全段共有。ヘッダ先読みと本体読み込みの間に他の exec が挟まると親の起動を静かに壊す (現状はその窓に何も入らない) | 低 (注記) | PM |
@@ -109,6 +109,7 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 使えば足りる。実装は小さく、機構は増やさない。→ 起動修正の再配備・G8 の結果を見てからコーダーへ
 (ホスト試験: 生存アプリあり → 拒否、なし → 従来どおり、RED→GREEN)。
 
+<<<<<<< HEAD
 ## 実機受入 (2026-09-11、`b86abf8` = K5b-K + 起動修正 + sbrk 二段構え、15MB 構成、テスター実行 / PM 判定)
 
 | 項目 | obs | 判定 |
@@ -121,4 +122,12 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 | カウンタ | `exec_sbrk_tier_last=1` (段 1)、`ring3_transition_count=16`、`ring3_switch_count=0` (W 未実装)、`park_reject=0`、`resume_bad_frame=0`、`appslot_reclaim_count=8`、`fault_kill_count=1` | 整合 |
 
 未実施: G1〜G7 / G9 / G10 (W レーン待ち)、G6 の 8MB 構成、A1 (`--cpl0` 拒否) の実機。
+=======
+**実装 (2026-09-11、コミット SHA は PM が入れる)**: `appslot_cpl0_admit(is_shell)` を
+`exec/appslot.{c,h}` に足し、`exec_launch` の `want_ring3 == 0` の枝 (シェルを除く) で
+`exec_cpl0_claim()` **より前**に呼んで、`appslot_live() > 0` なら `OS32_ERR_FULL` を返す。
+claim も alloc も 1 つも行わないので AppSlot・pgalloc・資源の所有者はどれも動かない。
+ホスト試験は `tools/tests/multiapp_impl_host.c` のケース 19 (26 検査)、記録は
+`tools/tests/k5b_kernel_tdd.md` 回 6。**ゲスト未検証** (テスターの再配備待ち)。
+>>>>>>> 78b347d (fix(exec): CPL=3 アプリ生存中は --cpl0 の子を拒否する (A1、ユーザー決裁 2026-09-11))
 

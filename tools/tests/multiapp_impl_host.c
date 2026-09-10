@@ -64,6 +64,7 @@ typedef struct {
     int  derived_ready[APP_SLOT_COUNT];
     int  turn_used[APP_SLOT_COUNT];
     u32  free_pages;
+    int  cpl0_children;               /* exec/exec.c の g_cpl0_children */
     int  last_run;
     int  focus;
     int  input_streak;
@@ -90,6 +91,7 @@ static void ma_init(u32 free_pages)
         for (k = 0; k < MA_RES_KINDS; k++) H.res[i][k] = 0;
     }
     H.free_pages = free_pages;
+    H.cpl0_children = 0;
     H.last_run = 0;
     H.focus = 0;
     H.input_streak = 0;
@@ -132,6 +134,49 @@ static int ma_start(u32 pages, int gui)
     H.turn_used[id] = 1;
     H.last_run = id;
     H.input_streak = 0;
+    return id;
+}
+
+/* ---- --cpl0 の子 (exec/exec.c の exec_cpl0_claim / exec_cpl0_release) ----
+ * 実物は帯 [MEM_EXEC_LOAD_ADDR, mem_end) を **丸ごと** pgalloc_mark_used し、
+ * 最後の 1 本が終わったときに丸ごと free する。効くのは「丸ごと」という点
+ * だけなので、ハーネスでは枚数を 1 つの定数で代表させる。 */
+#define MA_CPL0_BAND_PAGES 512
+
+static void ma_cpl0_claim(void)
+{
+    if (H.cpl0_children++ > 0) return;
+    H.free_pages -= MA_CPL0_BAND_PAGES;
+}
+
+static void ma_cpl0_release(void)
+{
+    if (H.cpl0_children <= 0) return;
+    if (--H.cpl0_children > 0) return;
+    H.free_pages += MA_CPL0_BAND_PAGES;
+}
+
+/* exec_launch の CPL=0 経路をその**順番のまま**なぞる (決裁 2026-09-11):
+ *   池の admit → want_ring3 の判定 → cpl0 の admit → claim → commit
+ * 拒否は claim より前でなければならない (claim も alloc もしないこと)。 */
+static int ma_start_cpl0(int is_shell)
+{
+    int id;
+    if (is_shell) {
+        /* exec_launch の is_shell 経路: 池も枚数勘定も帯の claim も通らない */
+        if (appslot_cpl0_admit(1) < 0) return OS32_ERR_FULL;
+        appslot_shell_commit();
+        return APP_ID_SHELL;
+    }
+    id = appslot_start_admit(0, 0, 0);       /* 池だけ。状態は変えない */
+    if (id < 0) return id;
+    if (appslot_launch_is_app(0, OS32X_FLAG_FORCE_CPL0) != 0)
+        return OS32_ERR_INVAL;               /* --cpl0 はアプリ帯を使わない */
+    if (appslot_cpl0_admit(0) < 0) return OS32_ERR_FULL;
+    ma_cpl0_claim();
+    appslot_start_commit(id, 0, 0);
+    H.turn_used[id] = 1;
+    H.last_run = id;
     return id;
 }
 
@@ -190,6 +235,14 @@ static int ma_exit(int status)
     H.free_pages += appslot_reclaim(id);
     appslot_switch_to(target);
     return 0;
+}
+
+/* exec_exit の !cpl3 経路 (exec/exec.c: `if (!a->cpl3) exec_cpl0_release();`) */
+static int ma_exit_cpl0(void)
+{
+    int rc = ma_exit(0);
+    if (rc == 0) ma_cpl0_release();
+    return rc;
 }
 
 static int ma_fault(void) { return ma_exit(-1); }
@@ -864,6 +917,123 @@ static void case_shell_never_takes_app_band(void)
           "18m 載せ替えは空きも池も動かさない");
 }
 
+/* ---- 19. CPL=3 アプリが生きている間は --cpl0 の子を立てない ----
+ * 申し送り A1 / 決裁 2026-09-11。--cpl0 の子は exec_cpl0_claim() で
+ * アプリ帯 [0x500000, mem_end) を identity で丸ごと pgalloc_mark_used し、
+ * exec_cpl0_release() で丸ごと free する。K5b-K 以後は CPL=3 アプリの
+ * per-app 物理も同じ pgalloc から取るので、park 中のアプリが 1 本でも居る
+ * ところへ --cpl0 の子を立てると、生きているアプリの物理を上書きし、
+ * その子の終了で他人のページを解放する。枚数で刻む機構は増やさず、
+ * **生存アプリが 1 本でも居たら exec_run の段階で拒否**する。
+ * 拒否は exec_cpl0_claim より前 — claim も alloc も 1 つも行わない。 */
+static void case_cpl0_child_needs_no_live_apps(void)
+{
+    u32 free0;
+    int owner0;
+    int r;
+
+    /* (a) 生存アプリなし = 従来どおり立つ。帯を丸ごと claim する。 */
+    ma_init(4096);
+    check(appslot_cpl0_admit(0) == 0,
+          "19a 生存アプリが 0 本なら --cpl0 の子は通る");
+    check(ma_start_cpl0(0) == APP_ID_MIN,
+          "19b 生存アプリなしの --cpl0 の子は従来どおり ID 2 で立つ");
+    check(H.cpl0_children == 1 && H.free_pages == 4096 - MA_CPL0_BAND_PAGES,
+          "19c 立った --cpl0 の子は帯を丸ごと claim する");
+    check(ma_exit_cpl0() == 0 && H.cpl0_children == 0 &&
+          H.free_pages == 4096,
+          "19d 終了で帯は丸ごと返り、池も空く");
+    check(appslot_live() == 0 && appslot_cur() == APP_ID_SHELL,
+          "19e --cpl0 の子は 1 本も残さない");
+
+    /* (b) 走行中のアプリが 1 本 = 拒否。何も動かない。 */
+    ma_init(4096);
+    check(ma_start(100, 1) == 2, "19f 下ごしらえ: GUI アプリ 1 本が走る");
+    free0 = H.free_pages;
+    owner0 = res_owner_get();
+    r = ma_start_cpl0(0);
+    check(r == OS32_ERR_FULL,
+          "19g 走行中のアプリが 1 本でも居れば --cpl0 の子は ERR_FULL");
+    check(appslot_live() == 1 && appslot_get(2) != 0 &&
+          appslot_get(2)->state == APP_STATE_RUNNING &&
+          appslot_get(3) == 0,
+          "19h 拒否で AppSlot は 1 つも変わらない");
+    check(H.free_pages == free0 && H.cpl0_children == 0,
+          "19i 拒否は claim も alloc もしない (帯を押さえない)");
+    check(res_owner_get() == owner0 && appslot_cur() == 2,
+          "19j 拒否で資源の所有者も現在の ID も動かない");
+    check(appslot_alloc_id() == 3,
+          "19k 拒否は池を消費しない (次の空きは 3 のまま)");
+
+    /* (c) park 中のアプリが 1 本 = 同じく拒否 (走行中かどうかは問わない)。 */
+    ma_init(4096);
+    ma_start(100, 1);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    check(appslot_cur() == APP_ID_SHELL && appslot_live() == 1,
+          "19l 下ごしらえ: GUI アプリ 1 本が park 中で WM top-level");
+    free0 = H.free_pages;
+    /* && で短絡させない (RED でも後ろが素通りしてしまう) */
+    r = appslot_cpl0_admit(0);
+    check(r == OS32_ERR_FULL,
+          "19m park 中のアプリが 1 本でも居れば判定で弾かれる");
+    r = ma_start_cpl0(0);
+    check(r == OS32_ERR_FULL,
+          "19n park 中のアプリが 1 本でも居れば --cpl0 の子は ERR_FULL");
+    check(appslot_live() == 1 && appslot_get(2) != 0 &&
+          appslot_get(2)->state == APP_STATE_PARKED &&
+          appslot_get(2)->parked_from_wait == 1 && appslot_get(3) == 0,
+          "19o park 中のアプリは印ごと無傷で、池も空いたまま");
+    check(H.free_pages == free0 && H.cpl0_children == 0,
+          "19p park 中でも拒否は帯を押さえない");
+
+    /* (d) 4 本 (満杯) でも同じ拒否。池が尽きる前に判定でも弾かれる。 */
+    ma_init(4096);
+    fill_four(100);
+    free0 = H.free_pages;
+    r = appslot_cpl0_admit(0);
+    check(appslot_live() == 4 && r == OS32_ERR_FULL,
+          "19q 4 本生きていれば --cpl0 の判定でも弾かれる");
+    /* 4 本のときは池も尽きているので ma_start_cpl0 の戻りは同じ
+     * OS32_ERR_FULL。判定そのものは 1 つ上の 19q が押さえている。 */
+    r = ma_start_cpl0(0);
+    check(r == OS32_ERR_FULL && H.free_pages == free0 &&
+          H.cpl0_children == 0,
+          "19r 4 本のときの拒否も帯を押さえない");
+
+    /* (e) 全部畳めば元どおり立つ。「閉じてから使え」が成り立つこと。 */
+    ma_resume(2); ma_exit(0);
+    ma_resume(3); ma_exit(0);
+    ma_resume(4); ma_exit(0);
+    ma_resume(5); ma_exit(0);
+    check(appslot_live() == 0, "19s 下ごしらえ: GUI アプリを全部閉じた");
+    check(ma_start_cpl0(0) == APP_ID_MIN,
+          "19t アプリを全部閉じれば --cpl0 の子は立つ");
+    check(H.cpl0_children == 1, "19u そのときは帯を claim する");
+    ma_exit_cpl0();
+
+    /* (f) シェル (exec ネスト段 0) は対象外 — CUI shell / gshell の載せ替えは
+     *     アプリが生きていても通らなければならない (K5a 設計 D7)。 */
+    ma_init(4096);
+    ma_start(100, 1);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    free0 = H.free_pages;
+    check(appslot_cpl0_admit(1) == 0,
+          "19v シェルは --cpl0 の判定の対象外 (アプリが生きていても通る)");
+    check(ma_start_cpl0(1) == APP_ID_SHELL && H.cpl0_children == 0 &&
+          H.free_pages == free0,
+          "19w シェルの起動は帯も枚数も動かさない");
+    check(appslot_live() == 1 && appslot_get(2) != 0,
+          "19x シェルの載せ替えで park 中のアプリは消えない");
+
+    /* (g) CUI の入れ子 exec_run (--cpl0 でない子) は従来どおり通る。 */
+    ma_init(4096);
+    check(ma_start(100, 0) == 2, "19y --cpl0 でない CUI の子は従来どおり立つ");
+    check(ma_start(100, 0) == 3,
+          "19z その入れ子 (アプリ帯の CPL=3) も従来どおり立つ");
+}
+
 int main(void)
 {
     failures = 0;
@@ -887,6 +1057,7 @@ int main(void)
     case_cross_round_bound();
     case_resume_needs_wait_mark();
     case_shell_never_takes_app_band();
+    case_cpl0_child_needs_no_live_apps();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

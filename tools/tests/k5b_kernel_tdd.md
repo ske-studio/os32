@@ -426,3 +426,123 @@ K5b-K で登録されていなかった `test_multiapp_impl.py` / `test_owner_re
 - ヘッダ先読みの宛先が 108 バイトのままである点は変えていない。溢れは FS 側で
   塞いだので安全だが、他の FS ドライバが同じ癖を持ち込まない保証はコードには無い
   (`fatfs` の `f_read` と `iso9660` / `hostdrv` は確認済みで、いずれも指定長を守る)。
+
+---
+
+# 追記: 回 6 (ケース 19) — CPL=3 アプリ生存中は `--cpl0` の子を拒否 (申し送り A1)
+
+対象票: [`docs/tasks/gui/v13/TASK_K5B_kernel.md`](../../docs/tasks/gui/v13/TASK_K5B_kernel.md) 末尾「申し送り A1」/ **ユーザー決裁 2026-09-11**
+
+| 回 | 対象 | RED | GREEN |
+|---|---|---|---|
+| 6 | `--cpl0` の子 × 生きている CPL=3 アプリ | `appslot_cpl0_admit()` から生存アプリの判定を落とす (実装前 = 素通し) と 26 検査中 **10 検査が FAIL** | `tools/tests/test_multiapp_impl.py` 137 検査 ALL PASS |
+
+## 何が壊れていたか
+
+`--cpl0` の子 (`OS32X_FLAG_FORCE_CPL0`) は `exec/exec.c` の `exec_cpl0_claim()` で
+アプリ帯 `[MEM_EXEC_LOAD_ADDR, mem_end)` を identity で**丸ごと** `pgalloc_mark_used` し、
+`exec_cpl0_release()` で丸ごと `pgalloc_free_n` する。K5b-K 以後は CPL=3 アプリの
+per-app 物理も同じ pgalloc から取るので、GUI アプリが park 中に `--cpl0` の子を立てると
+
+- (a) 子が生きているアプリの物理を上書きし、
+- (b) 子の終了で生きているアプリのページまで free する。
+
+## 直したもの
+
+1. `exec/appslot.{c,h}` — `appslot_cpl0_admit(int is_shell)` を追加。
+   `is_shell` は対象外 (シェル帯はアプリ帯を使わない)、それ以外は
+   `appslot_live() > 0` なら `OS32_ERR_FULL`。**状態は 1 つも変えない**
+   (`appslot_launch_is_app` / `appslot_start_admit` と同じ「判定だけ」の流儀)。
+2. `exec/exec.c` — `exec_launch` の `want_ring3 == 0` の枝 (= シェル or `--cpl0` の子) に
+   `else if (appslot_cpl0_admit(is_shell) < 0)` を置き、`OS32_ERR_FULL` を返す。
+   位置は `want_ring3` を決めた直後 = **`exec_cpl0_claim()` より前**で、
+   `paging_addrspace_create_n` / `exec_heap_save_state` / `ring3_band_set` の
+   どれよりも手前。claim も alloc も 1 つも行わないので `exec_restore_band` も要らない。
+
+戻り値は `OS32_ERR_FULL` (`sdk/include/os32/os32_kapi_shared.h:311`、「スロット / 資源が満杯」)。
+専用番号は増やしていない。`exec_launch` の既存の拒否と流儀を揃えてある —
+ID の池が尽きたときの `appslot_start_admit` も `OS32_ERR_FULL`、物理不足は
+`EXEC_ERR_NOMEM` (`exec_status_t`)、ヘッダ不正は `EXEC_ERR_INVALID`。`exec_run` は
+`exec_launch` の戻り値をそのまま返すので、CUI シェル側の負値の扱いは変わらない。
+
+## RED の作り方 (実際に走らせた)
+
+```bash
+# exec/appslot.c の appslot_cpl0_admit() から判定行を外す (= 実装前の素通し)
+sed -i 's/    if (appslot_live() > 0) return OS32_ERR_FULL;//' exec/appslot.c
+python3 -B tools/tests/test_multiapp_impl.py
+```
+
+```
+  FAIL 19g 走行中のアプリが 1 本でも居れば --cpl0 の子は ERR_FULL
+  FAIL 19h 拒否で AppSlot は 1 つも変わらない
+  FAIL 19i 拒否は claim も alloc もしない (帯を押さえない)
+  FAIL 19j 拒否で資源の所有者も現在の ID も動かない
+  FAIL 19k 拒否は池を消費しない (次の空きは 3 のまま)
+  FAIL 19m park 中のアプリが 1 本でも居れば判定で弾かれる
+  FAIL 19n park 中のアプリが 1 本でも居れば --cpl0 の子は ERR_FULL
+  FAIL 19o park 中のアプリは印ごと無傷で、池も空いたまま
+  FAIL 19p park 中でも拒否は帯を押さえない
+  FAIL 19q 4 本生きていれば --cpl0 の判定でも弾かれる
+FAILURES
+```
+
+RED では実際に「生きているアプリが居るのに `--cpl0` の子が立ち、帯 512 枚を claim して
+池の ID 3 を消費する」ところまで進む — 症状 (a)(b) の再現そのもの。
+
+**GREEN**: `python3 -B tools/tests/test_multiapp_impl.py` → EXIT=0、`ALL PASS` (137 検査)。
+
+## 追加した検査 (ケース 19、26 検査)
+
+ハーネス側に `exec/exec.c` の CPL=0 経路を**順番のまま**写した
+`ma_start_cpl0()` / `ma_cpl0_claim()` / `ma_cpl0_release()` / `ma_exit_cpl0()` を置き、
+「池の admit → `want_ring3` の判定 → cpl0 の admit → claim → commit」を通す。
+拒否が claim より前にあることは、`H.free_pages` と `H.cpl0_children` が動かないことで見る。
+
+| 節 | 性質 |
+|---|---|
+| 19a-e | 生存アプリ 0 本: 従来どおり ID 2 で立ち、帯を丸ごと claim / 終了で丸ごと返る |
+| 19f-k | **走行中**のアプリ 1 本: `OS32_ERR_FULL`。AppSlot・空きページ・`cpl0_children`・資源の所有者・現在の ID・ID の池がどれも動かない |
+| 19l-p | **park 中**のアプリ 1 本: 同じく `OS32_ERR_FULL`。park の印 (`parked_from_wait`) ごと無傷 |
+| 19q-r | 4 本 (満杯) でも判定で弾かれる (`appslot_cpl0_admit` 単体で確認。`ma_start_cpl0` の戻りは池の枯渇と同じ `OS32_ERR_FULL`) |
+| 19s-u | 全部閉じれば再び立つ (「GUI のアプリを閉じてから使えば足りる」が成り立つ) |
+| 19v-x | **シェル (exec ネスト段 0) は対象外** — アプリが park 中でも `shell.bin` / `gshell.bin` の載せ替えは通り、帯も枚数も池も動かない |
+| 19y-z | `--cpl0` **でない** CUI の入れ子 `exec_run` は従来どおり立つ (この変更で塞がっていない) |
+
+## 実行コマンド
+
+```bash
+python3 -B tools/tests/test_multiapp_impl.py     # ケース 19 を追加 (137 検査)
+make kernel                                      # EXIT=0
+python3 -B tools/check_constraints.py            # EXIT=0
+```
+
+## この追記で**測っていないこと** ([V4])
+
+- **ゲストは未検証**。NP21/W では 1 度も動かしていない (コーダーはエミュレータ禁止)。
+  テスターの再配備待ち。`kernel.map` は動いている (`appslot_cpl0_admit` = 0x0012abf4)。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない。通したのは
+  `make kernel` と `test_multiapp_impl` / `test_multiapp_model` / `test_owner_reclaim` /
+  `test_sbrk_tier` / `tools/check_constraints.py`。
+- `make kernel` の警告: **`exec/exec.c` と `exec/appslot.c` からは 1 件も出ていない**。
+  フルビルドのログには既存の警告 (`include/pc98.h` の `TVRAM_BPR` 再定義、
+  `kernel/v86_bios.c` の `-Warray-bounds`、`kernel/console.c` の暗黙宣言など) が
+  36 件残っているが、いずれも本変更の前からあるもので触っていない。
+- **`--cpl0` で作られている在庫バイナリは 1 つも無い** (下記)。したがって「アプリを
+  閉じてから使え」の実害はいまのところゼロだが、これは実機で確かめていない。
+
+## `mkos32x --cpl0` は今どこで使われているか (依頼の列挙)
+
+`--cpl0` を渡しているビルド規則は **リポジトリにも submodule にも 1 つも無い**。
+
+| 場所 | 内容 |
+|---|---|
+| `sdk/mkos32x.py:190` | `--cpl0` → `OS32X_FLAG_FORCE_CPL0` (0x0004) をヘッダの `flags` に立てる。**唯一の生成側** |
+| `build/programs.mk` / `userland/*/Makefile` | `--cpl0` を渡している行は無い (`ring3_hello` / `ring3_fault` / `hello_r3` / `faultprobe_r3` はいずれも CPL=3 側の検証用) |
+| `apps/` (submodule) | `deploy.yaml` / `Makefile` / `app.conf` を含め `cpl0` の記述なし |
+| `game/` (submodule) | 同上、記述なし |
+| 消費側 | `exec/appslot.c:113` `appslot_launch_is_app()` (`want_ring3` を落とす) と `kernel/shlib.c:181` (CPL=0 プログラムは shlib の master をそのまま共有) |
+
+つまり `--cpl0` は現在「手で `sdk/mkos32x.py --cpl0` を叩いたときだけ立つエスケープ
+ハッチ」で、標準の配備物には 1 本も無い。gshell 配下でこの拒否に当たるのは、その手製
+バイナリを GUI アプリが生きている間に起動したときだけ。

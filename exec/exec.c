@@ -1063,6 +1063,14 @@ static int exec_launch(const char *cmdline, int gui_arg)
         ring3_band_set(paging_app_band_pdes(code_end_est, heap_sz,
                                             ring3_band_ram_top()));
         stack_top = RING3_USTACK_TOP;
+    } else if (appslot_cpl0_admit(is_shell) < 0) {
+        /* --cpl0 の子はアプリ帯を丸ごと identity で押さえる (D7)。生きている
+         * CPL=3 アプリの per-app 物理を上書きし、終了時に他人のページを
+         * 解放してしまうので、1 本でも居たら起動しない (決裁 2026-09-11)。
+         * exec_cpl0_claim() より前 — claim も alloc もまだ何もしていない。 */
+        shell_print("Error: close GUI apps before running a --cpl0 program\n",
+                    ATTR_RED);
+        return OS32_ERR_FULL;
     }
 
     if (!is_shell) {

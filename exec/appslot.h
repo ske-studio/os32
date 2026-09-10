@@ -116,6 +116,22 @@ int appslot_alloc_id(void);
  * hdr_flags は OS32X ヘッダの flags (OS32X_FLAG_FORCE_CPL0 を見る)。 */
 int appslot_launch_is_app(int is_shell, u32 hdr_flags);
 
+/* --cpl0 の子 (アプリ帯を identity で丸ごと押さえる CPL=0 の子) を起動して
+ * よいか。**状態は 1 つも変えない**。
+ *
+ * 決裁 2026-09-11 (申し送り A1): --cpl0 の子は exec_cpl0_claim() で
+ * [MEM_EXEC_LOAD_ADDR, mem_end) を丸ごと pgalloc_mark_used し、終了時に
+ * 丸ごと free する。K5b-K 以後は CPL=3 アプリの per-app 物理も同じ pgalloc
+ * から取るので、生きているアプリ (走行中 / park 中) が 1 本でも居ると、
+ * その物理を上書きし、終了時に他人のページを解放してしまう。
+ * 枚数で刻む機構は増やさず、**生存アプリが 1 本でも居たら拒否**する
+ * (特権が要る例外用途なので、GUI のアプリを閉じてから使えば足りる)。
+ *
+ * 戻り値: 0 = 起動してよい / OS32_ERR_FULL = 生存アプリが居るので不可。
+ * シェル (exec ネスト段 0) はそもそもアプリ帯を使わないので対象外 —
+ * 呼び出し側が appslot_launch_is_app() と同じく is_shell を渡す。 */
+int appslot_cpl0_admit(int is_shell);
+
 /* 起動してよいかを判定する。**状態は 1 つも変えない**。
  *   gui=1 (exec_start): WM の top-level からだけ (契約 S2)
  *   gui=0 (exec_run):   走っているアプリからも通る (決裁 D9-8)

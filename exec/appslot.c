@@ -114,6 +114,16 @@ int appslot_launch_is_app(int is_shell, u32 hdr_flags)
     return 1;
 }
 
+/* --cpl0 の子は帯を丸ごと押さえる (exec_cpl0_claim)。生きているアプリの
+ * per-app 物理と正面衝突するので、1 本でも居たら起動そのものを断る
+ * (決裁 2026-09-11)。ここは判定だけで、claim も alloc もまだ行わない。 */
+int appslot_cpl0_admit(int is_shell)
+{
+    if (is_shell) return 0;             /* シェル帯はアプリ帯を使わない */
+    if (appslot_live() > 0) return OS32_ERR_FULL;
+    return 0;
+}
+
 int appslot_start_admit(int gui, u32 pages, u32 free_pages)
 {
     int id;
