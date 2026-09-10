@@ -26,6 +26,21 @@
 #define VFS_MAX_OPEN_FILES 16
 #define VFS_MNTPATH_MAX    16
 
+/* デバイス種別と、ops->mount() へ渡すデバイス指定のエンコード。
+ * FS ドライバは必ず VFS_MOUNT_DEV_TYPE() で種別を確かめてから
+ * VFS_MOUNT_DEV_ID() を使うこと。下位バイトだけを見ると、別種別の
+ * 同一 unit 番号 (fd0 と hd0 等) を取り違えて同じ実デバイスを
+ * 二重マウントする (2026-09-10 の ext2 スーパーブロック巻き戻し)。 */
+#define VFS_DEV_HD      0
+#define VFS_DEV_FD      1
+#define VFS_DEV_SERIAL  2
+#define VFS_DEV_CD      3
+#define VFS_DEV_HOSTDRV 4
+
+#define VFS_MOUNT_DEV_ENCODE(t, i) ((((t) & 0xFF) << 8) | ((i) & 0xFF))
+#define VFS_MOUNT_DEV_TYPE(x)      (((x) >> 8) & 0xFF)
+#define VFS_MOUNT_DEV_ID(x)        ((x) & 0xFF)
+
 /* エラーコード */
 /* 値の定義元は sdk/include/os32/os32_kapi_shared.h の OS32_ERR_* (SSoT)。
  * 外部プログラムも同じ値を見るので、ここで独自の番号を振らないこと */

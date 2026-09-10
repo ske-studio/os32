@@ -137,6 +137,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   rewrites `system.cfg`. → §4-23
 - `ext2_g_aux` is the bitmap scratch buffer — never keep an indirect table or data there across a free/alloc
   (files >12KB got cross-linked on overwrite until 2026-09-06). → §4-24
+- A filesystem driver's `mount(dev_id)` gets `(dev_type << 8) | unit` — check the type before
+  building a device name, or `fd0` opens `hd0` and the same partition gets mounted twice. → §4-30
 - "GUI feels slow" → measure first: read `gfx_counters` around the keystroke to see whether a present
   happened at all, then sample `/api/status` `eip` to find where the CPU is. → §4-25
 - Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26

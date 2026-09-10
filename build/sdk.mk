@@ -148,12 +148,17 @@ check-db-owned-host:
 check-vfs-fd-sqlite-host:
 	python3 tools/tests/test_vfs_fd_sqlite.py
 
+# fs/vfs.c + fs/ext2_vfs.c の mount 経路。fd0 が hd0 に化けて同じ
+# パーティションを二重マウントする回帰 (2026-09-10) を止める。
+check-vfs-mount-dev-host:
+	python3 -B tools/tests/test_vfs_mount_dev.py
+
 check-sqlite-groups-host:
 	python3 tools/tests/test_sqlite_groups.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-sqlite-groups-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check

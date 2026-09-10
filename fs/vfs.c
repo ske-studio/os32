@@ -82,13 +82,16 @@ void vfs_resolve_path(const char *input, char *output, int out_size)
 
     p = 0;
     while (tmp[p] != '\0') {
+        int start, len;
+        char c;
+
         if (tmp[p] == '/') { p++; continue; }
-        
-        int start = p;
+
+        start = p;
         while (tmp[p] != '/' && tmp[p] != '\0') p++;
-        
-        int len = p - start;
-        char c = tmp[p];
+
+        len = p - start;
+        c = tmp[p];
         tmp[p] = '\0';
         
         if (len == 1 && tmp[start] == '.') {
@@ -131,11 +134,7 @@ void vfs_register_fs(VfsOps *ops)
 
 /* ======== VFSグローバル状態 ======== */
 
-#define VFS_DEV_HD      0
-#define VFS_DEV_FD      1
-#define VFS_DEV_SERIAL  2
-#define VFS_DEV_CD      3
-#define VFS_DEV_HOSTDRV 4
+/* VFS_DEV_* と VFS_MOUNT_DEV_* は fs/vfs.h が正典 (FS ドライバも参照する)。 */
 
 typedef struct {
     int in_use;
@@ -265,11 +264,19 @@ int vfs_mount(const char *prefix, const char *dev_name, const char *fstype)
     }
     if (!ops) return VFS_ERR_INVAL;
 
-    /* dev_typeをdev_idの上位バイトにエンコード
-     * FatFS等のマルチデバイス対応FSが HD/FD を区別するために使用。
-     * 既存FSドライバ (ext2等) は dev_id & 0xFF のみ参照するので互換。
-     * 形式: (dev_type << 8) | (dev_id & 0xFF) */
-    fs_ctx = ops->mount((dev_type << 8) | (dev_id & 0xFF));
+    /* 同じ実デバイスを二重マウントさせない。ext2 は 1 デバイスにつき
+     * 1 コンテキストしか整合しない — 2 つ目のコンテキストはマウント時の
+     * スーパーブロックを抱えたまま vfs_sync() で書き戻し、1 つ目が書いた
+     * 正しい空き数を巻き戻す (2026-09-10)。 */
+    for (i = 0; i < VFS_MAX_FS; i++) {
+        if (mounts[i].in_use && mounts[i].ops == ops &&
+            mounts[i].dev_type == dev_type && mounts[i].dev_id == dev_id)
+            return VFS_ERR_EXIST;
+    }
+
+    /* dev_type を dev_id の上位バイトにエンコードして渡す。FS ドライバは
+     * VFS_MOUNT_DEV_TYPE() で自分が扱える種別かを必ず確かめること。 */
+    fs_ctx = ops->mount(VFS_MOUNT_DEV_ENCODE(dev_type, dev_id));
     if (!fs_ctx) return VFS_ERR_IO;
 
     slot = -1;

@@ -413,6 +413,46 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   回帰は `tools/tests/test_nhd_deploy_failure.py` (`make check-tools-host` に登録)。
   **それでもサイズ照合はやめない** — 失敗の形は ENOSPC だけではない。
 
+### 4-30. `/fd0` が hd0 に化けて ext2 を二重マウントし、スーパーブロックを巻き戻していた (2026-09-10、修正済み)
+
+- **現象**: きれいな ext2 に 106KB のファイルを 1 個 `cp` して `sync` するだけで、
+  ホスト側 `e2fsck -fn` が必ず `Free blocks count wrong for group #0 (4097, counted=3991)` /
+  `Free inodes count wrong for group #0 (1761, counted=1760)`。ずれはちょうど
+  ファイル 1 個分。**強制終了とは無関係** (`CloseMainWindow` の通常終了でも同じ)。
+  ビットマップ側は常に正しい。
+- **切り分け**: `mounts[0].fs_ctx` の `free_blocks_count` (ctx+52) は
+  cp 前 91386 → cp 後 91280 (−106) と**メモリ上は正しい**。一方 `sync` 後の
+  イメージ `836096+1024+12` は 91386 のまま。**ディスク上だけが巻き戻る**。
+- **踏んだ落とし穴**: `ext2_write_super_raw` にブレークを置いたら 0 ヒットだったので
+  「sync がスーパーブロックを書いていない」と判断した。**誤り** —
+  `ext2_write_super_raw` は `ext2_sync` に**インライン展開**されていた
+  (`i386-elf-objdump -d` で確認)。書き込み自体は走っていた。
+  **static でない関数でもインライン化される。ブレーク 0 ヒットを未実行の証拠にしない。**
+- **真因**: `vfs_sync()` から `ext2_vfs_sync` が **2 回**呼ばれていた。マウント表を実機
+  メモリから読むと `mounts[1] prefix=/fd0 dev=fd0` の `Ext2Ctx` が `base_lba=1632`、
+  `dev` ポインタまで `/` と同一。`vfs_mount()` は
+  `ops->mount((dev_type << 8) | dev_id)` と種別を上位バイトに載せて渡すが、
+  ext2 は下位バイトしか見ていなかったので `fd0` (=`0x100`) が
+  `ide_drive_present(0x100 & 3)` → hd0、`ext2_dev_for` → `"hd0"`、
+  `ext2_find_partition` → `drive_info[0]` と**すべて hd0 に化けていた**。
+  ブート時の自動マウントループ (`kernel/kernel.c`) が root 以外の全ブロック
+  デバイスに ext2 を試すので、`/fd0` として 2 つ目の `Ext2Ctx` が必ずできる。
+  `vfs_sync()` は全マウントを回すため、`mounts[0]` が正しい空き数を書いた直後に
+  `mounts[1]` が**マウント時点のスナップショット**を同じセクタへ書き戻す。
+  ビットマップはこの経路で触らないので真値が残り、「counted=」不一致になる。
+- **修正**: `fs/vfs.h` に `VFS_DEV_*` と `VFS_MOUNT_DEV_ENCODE/TYPE/ID` を公開し、
+  `ext2_vfs_mount` は `VFS_DEV_HD` 以外を ext2 本体に届く前に拒否。
+  `iso9660_mount` も同じ取りこぼし (`'0' + (char)dev_id`) があったので CD 限定に。
+  さらに `vfs_mount()` が同じ (ops, 種別, unit) の二重マウントを `VFS_ERR_EXIST` で
+  断る網をクラスごと張った。回帰は `tools/tests/test_vfs_mount_dev.py`
+  (`make check-vfs-mount-dev-host`)、経緯は `tools/tests/vfs_mount_dev_tdd.md`。
+- **実機確認**: 新カーネル配備後、マウント表は `/` と `/host` のみ (`/fd0` が消えた)。
+  438KB のファイルを `cp` + `sync` → 通常終了 → `e2fsck -fn` が **RC=0 クリーン**。
+  コピーは md5 一致。
+- **教訓**: 「FS ドライバは下位バイトしか見ないので互換」というコメントが
+  `fs/vfs.c` にそのまま書いてあった。**呼び出し側が広げたエンコードは、
+  受け側全部を数えて確かめる**。片方が無視すると、別デバイスが同じ実体に化ける。
+
 ---
 
 ## §5. デバッグ道具箱
