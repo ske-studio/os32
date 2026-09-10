@@ -137,6 +137,7 @@ check-tools-host:
 	python3 -B -m unittest discover -s tools/tests -p 'test_np21w_*.py'
 	python3 -B tools/tests/test_nhd_deploy_failure.py
 	python3 -B tools/tests/test_filer_normalize.py
+	python3 -B tools/tests/test_gui_button_dispatch.py
 	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
 
 check-t5b-host:

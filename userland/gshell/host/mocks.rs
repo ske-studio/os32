@@ -192,12 +192,47 @@ unsafe extern "C" fn get_palette(_: i32, r: *mut u8, g: *mut u8, b: *mut u8) {
     b.write(0);
 }
 unsafe extern "C" fn render(_: *mut u8) {}
+/// テストが積む生キー (`kbd_trygetrawkey` が 1 件ずつ返す)。空なら -1。
+pub static RAWKEYS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// テストが積むカーネル FEP (`ime_feed_key`) の返り値。空なら 0x100 (Pass)。
+pub static IME_SCRIPT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+unsafe extern "C" fn raw_key() -> i32 {
+    let mut q = RAWKEYS.lock().unwrap();
+    if q.is_empty() {
+        -1
+    } else {
+        q.remove(0)
+    }
+}
+unsafe extern "C" fn ime_feed(_keydata: i32) -> i32 {
+    let mut q = IME_SCRIPT.lock().unwrap();
+    if q.is_empty() {
+        0x100
+    } else {
+        q.remove(0)
+    }
+}
+unsafe extern "C" fn ime_active() -> i32 {
+    1
+}
+/// FEP を on にして、`ime_feed_key` に `script` を仕込む。
+pub fn fep_script(script: &[i32]) {
+    unsafe {
+        (*os32api::api_ptr()).ime_is_active = ime_active;
+        (*os32api::api_ptr()).ime_feed_key = ime_feed;
+    }
+    *IME_SCRIPT.lock().unwrap() = script.to_vec();
+}
+pub fn push_rawkeys(keys: &[i32]) {
+    RAWKEYS.lock().unwrap().extend_from_slice(keys);
+}
+
 pub fn init() {
     let mut a = os32api::mock_api();
     a.get_tick = zero;
     a.sys_time = zero;
     a.kbd_dropped_count = zero;
-    a.kbd_trygetrawkey = no_key;
+    a.kbd_trygetrawkey = raw_key;
     a.mouse_poll = mouse;
     a.gfx_init = nothing;
     a.gfx_shutdown = nothing;
@@ -212,6 +247,8 @@ pub fn init() {
     a.mem_free = free;
     a.gfx_add_dirty_rect = dirty;
     a.gfx_present_dirty = nothing;
+    RAWKEYS.lock().unwrap().clear();
+    IME_SCRIPT.lock().unwrap().clear();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);
 }

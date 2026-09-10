@@ -1180,3 +1180,84 @@ fn heap_scope_initializes_valid_cells_and_repeated_close_frees_once() {
     );
     assert_eq!(h.frees, 20);
 }
+
+/// Enter 連打で、FEP が確定した文字が Input dialog の結果から抜けないこと。
+///
+/// 確定 Enter と決定 Enter が**同じ吸い出し周期**に入ると、`fep::flush_text`
+/// が周期末尾のままでは、確定文字が field に入る前にダイアログが閉じる。
+/// 結果は空になり、残った確定文字は `Text` として背後のアプリへ流れる。
+#[cfg(not(t5b_core_test))]
+#[test]
+fn double_enter_keeps_fep_commit_in_the_input_dialog_result() {
+    use crate::{fep, input, mocks, modal, slot, wm};
+    use os32api::gui::proto::{GuiEvent, GUI_EV_TEXT, GUI_RING_CAPACITY};
+    const SC_RETURN: i32 = 0x1C;
+    const DOWN: i32 = 1 << 8;
+
+    /* リングを直接読んで、アプリへ渡った `Text` の中身を集める。 */
+    fn text_events(st: &wm::GuiState, slot_i: usize) -> Vec<u8> {
+        let h = slot::read_header(st, slot_i);
+        let base = slot::ring_ptr(st, slot_i);
+        let mut out = Vec::new();
+        let mut i = h.ring_head;
+        while i != h.ring_tail {
+            let ev: GuiEvent = unsafe {
+                core::ptr::read_unaligned(
+                    base.add((i as usize % GUI_RING_CAPACITY) * 16) as *const GuiEvent,
+                )
+            };
+            if ev.kind == GUI_EV_TEXT {
+                let n = (ev.sub & 0x7F) as usize;
+                let n = if n > 8 { 8 } else { n };
+                out.extend_from_slice(&ev.payload[..n]);
+            }
+            i = i.wrapping_add(1);
+        }
+        out
+    }
+
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = wm::GuiState::NEW;
+    st.shm_base = shm.base();
+    st.slots[0].used = true;
+    st.slots[0].owner = 2;
+    slot::init_header(&st, 0);
+    let mut w = wm::Win::EMPTY;
+    w.used = true;
+    w.visible = true;
+    w.owner = 2;
+    w.gen = 1;
+    w.w = 600;
+    w.h = 370;
+    st.windows[0] = w;
+    st.zorder[0] = 0;
+    st.z_count = 1;
+    *mocks::MOUSE.lock().unwrap() = (0, 0, 0);
+
+    /* 1 回目の Enter で "ab" を確定し、2 回目は FEP が素通しする。 */
+    mocks::fep_script(&[0x61, 0x62, 0x00, 0x100]);
+    fep::install();
+    modal::open_wm_input(&mut st, b"Run\0", modal::WM_PURPOSE_FILE_LAUNCH);
+    assert!(modal::is_open() && modal::is_input());
+
+    /* 両方の Enter を**同じ周期**に積む。 */
+    mocks::push_rawkeys(&[SC_RETURN | DOWN, SC_RETURN | DOWN]);
+    input::capture(&mut st, input::Ctx::Wait);
+
+    assert!(!modal::is_open(), "2 回目の Enter でダイアログが閉じていない");
+    assert!(
+        st.launch_pending,
+        "確定文字が field に入る前に閉じた (結果が空)"
+    );
+    assert_eq!(
+        &st.launch_path[..st.launch_path_len],
+        b"ab",
+        "結果から確定文字が抜けた"
+    );
+    assert!(
+        text_events(&st, 0).is_empty(),
+        "確定文字がダイアログを素通りしてアプリへ流れた: {:?}",
+        text_events(&st, 0)
+    );
+}

@@ -28,6 +28,9 @@ use os32api::gui::proto::{
 use os32api::gui::stub::AppVTable;
 use os32api::gui::types::{Rect, Style};
 
+/* drivers/mouse.h の MOUSE_BTN_*。`GuiEvtButton.button` に載る値 (契約 D4)。 */
+const MOUSE_BTN_LEFT: u8 = 0x01;
+
 /* ================================================================ */
 /*  Ui / App                                                        */
 /*                                                                  */
@@ -266,13 +269,19 @@ fn dispatch(app: &VApp, ui: &mut Ui, ev: &GuiEvent) {
         }
         GUI_EV_BUTTON => {
             let b = ev.button();
-            let i = slot.unwrap();
-            let out = if ev.sub != 0 {
-                widget::on_button_down(i, b.x as i32, b.y as i32)
-            } else {
-                widget::on_button_up(i, b.x as i32, b.y as i32)
-            };
-            emit(app, ui, &out);
+            /* ウィジェット操作は**左ボタンだけ**。WM は契約 D4 で右ボタンも
+             * 前面窓のクライアントへ配るので、種別を見ないと右クリックで
+             * on_click やチェック切替が起きる。右ボタンが要るアプリは
+             * `on_raw` (この match より前に必ず呼ばれる) で受ける。 */
+            if b.button == MOUSE_BTN_LEFT {
+                let i = slot.unwrap();
+                let out = if ev.sub != 0 {
+                    widget::on_button_down(i, b.x as i32, b.y as i32)
+                } else {
+                    widget::on_button_up(i, b.x as i32, b.y as i32)
+                };
+                emit(app, ui, &out);
+            }
         }
         GUI_EV_TIMER => {
             /* 単発は WM が消す (契約 U5)。クライアント側の台帳は不要。 */

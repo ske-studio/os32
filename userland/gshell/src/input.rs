@@ -321,6 +321,11 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
                 if modal::is_input() && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
                     continue;
                 }
+                /* 確定した文字は**次の打鍵を処理する前に** field へ入れる。
+                 * flush が周期末尾のままだと、Enter 連打で確定 Enter と決定
+                 * Enter が同じ吸い出し周期に入ったとき、確定文字が field に
+                 * 入る前にダイアログが閉じて結果から抜ける。 */
+                fep::flush_text(st);
                 modal::on_key(st, scan, ch, mods);
             }
             continue;
@@ -353,6 +358,10 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
         if down && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
             continue;
         }
+
+        /* 同じ理由 (モーダル側の注記)。ここでは確定文字の `Text` を、この
+         * 打鍵の `Key` / `Text` より**先に**リングへ積んで順序を保つ。 */
+        fep::flush_text(st);
 
         let t = match focus_target(st) {
             Some(t) => t,
