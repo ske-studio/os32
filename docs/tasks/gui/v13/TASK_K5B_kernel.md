@@ -109,3 +109,16 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 使えば足りる。実装は小さく、機構は増やさない。→ 起動修正の再配備・G8 の結果を見てからコーダーへ
 (ホスト試験: 生存アプリあり → 拒否、なし → 従来どおり、RED→GREEN)。
 
+## 実機受入 (2026-09-11、`b86abf8` = K5b-K + 起動修正 + sbrk 二段構え、15MB 構成、テスター実行 / PM 判定)
+
+| 項目 | obs | 判定 |
+|---|---|---|
+| 全体ゲート | `make clean` / `all` / `external` / `check` すべて `exit=0` | 合格 |
+| 配備 | `os32-cycle deploy` exit=0、`vmkernel.lz4` 453,523 B 一致、`ver` = **API v44** Build Sep 11 07:43 | 合格 (新カーネル起動) |
+| G8 回帰 6 本 | kselftest 44/0、klibc 49/0、alloc_demo 全通過、ring3_fault → kill 後 `ver` 生存、pipe 29/4、screenshot | 合格 |
+| G8 v86 | `v86 -t` → `result : OK` | 合格 |
+| GUI アプリ 1 本 (台本 36 手) | `os32gui` → Run `gui_bench` → 窓が出る (スクショ) → クリック後 `CLICK n = 2` → ESC → CUI 復帰 | 合格 (**per-app 物理ページで CPL=3 アプリが動く**) |
+| カウンタ | `exec_sbrk_tier_last=1` (段 1)、`ring3_transition_count=16`、`ring3_switch_count=0` (W 未実装)、`park_reject=0`、`resume_bad_frame=0`、`appslot_reclaim_count=8`、`fault_kill_count=1` | 整合 |
+
+未実施: G1〜G7 / G9 / G10 (W レーン待ち)、G6 の 8MB 構成、A1 (`--cpl0` 拒否) の実機。
+
