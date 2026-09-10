@@ -185,3 +185,109 @@ check-multiapp-impl-host:
   D5 の見積表は仮置きのままで、8MB で GUI アプリが 1 本立つか (受入 G6) は実機の話。
 - `pgalloc` の断片化。3 領域は連続で取れなければページ単位に倒すようにしたが、
   実際にどちらの経路を通るかは実機でしか分からない。
+
+---
+
+# 追記: 回 4 — sbrk 物理の二段構え (ユーザー決裁 2026-09-11)
+
+対象票: [`docs/tasks/gui/v13/TASK_K5B_kernel.md`](../../docs/tasks/gui/v13/TASK_K5B_kernel.md) 作業 8
+決裁: `docs/tasks/gui/v13/TASK_K5_multiapp.md` 末尾の決裁表「sbrk は二段構え (2026-09-11)」
+
+| 回 | 対象 | RED | GREEN |
+|---|---|---|---|
+| 4 | sbrk 物理の二段構え | 段の判定を K5b-K の「常に最低分」へ戻すと 4 検査が落ちる / 枚数の勘定を外すと 2 検査が落ちる | `tools/tests/test_sbrk_tier.py` 27 検査 ALL PASS |
+
+## 何を変えたか
+
+K5b-K (`38266a7`) は per-app 物理にしたとき、`heap_size` 未指定の CPL=3
+プログラムの sbrk に張る物理を最低分 `MEM_EXEC_SBRK_MIN` (256KB) へ固定した。
+identity だった頃は帯の残りぜんぶ (≒1.4MB) が黙って sbrk に使えたので、
+`malloc` を多用する CUI プログラム (`less` 等) が割を食う。決裁は二段構え:
+
+- **段 1 (従来式)** — 3 領域 (本体+sbrk / exec_heap / スタック) + PD + アプリ PT を
+  「sbrk 上端 = `guard_a`」で見積もった総ページ数が `pgalloc_free_pages()` に
+  収まるなら、`sbrk_end = guard_a`。K5b-K 以前とまったく同じ範囲を張る。
+- **段 2 (最低分)** — 収まらなければ `sbrk_end = code_end + MEM_EXEC_SBRK_MIN`。
+- 段 2 でも収まらなければ `appslot_start_admit()` が `EXEC_ERR_NOMEM`。既存の経路で、
+  切り詰めもスワップもしない。
+- `heap_size` を明示したプログラムは**この分岐に入らない** (K5b-K のまま最低分)。
+  要求した `exec_heap` を必ず渡すのが先で、sbrk を伸ばす余地はそこに無い。
+- CUI (`exec_run` の入れ子) と GUI (`exec_start`) はどちらも `exec_launch()` の
+  同じ場所を通るので、規則は 1 つ。
+
+判定は `exec/exec.c` の 2 関数に切り出した:
+
+```c
+static u32 exec_ring3_pages(u32 load_base, u32 sbrk_end, u32 exec_heap_size,
+                            u32 band_pdes);
+static int exec_sbrk_pick_tier(u32 load_base, u32 code_end, u32 guard_a,
+                               u32 exec_heap_size, u32 band_pdes,
+                               u32 free_pages, u32 *sbrk_end);
+```
+
+`exec_ring3_pages()` は D5 の勘定式そのもの
+(`(sbrk_end-load)/4K + exec_heap/4K + stack/4K + 1 + band_pdes`) で、
+勘定の場所 (`appslot_start_admit` の直前) と段の判定が**同じ 1 本の式**を見る。
+
+## どちらの段で走ったか (観測点)
+
+KAPI にはしない。`fault_kill_count` と同じカーネルシンボルで、`emu_read_mem` で読む:
+
+```c
+volatile u32 exec_sbrk_tier_last;      /* 直近の CPL=3 起動が採った段 (1 or 2) */
+volatile u32 exec_sbrk_tier_count[2];  /* [0] = 段 1 の累計、[1] = 段 2 の累計 */
+```
+
+数えるのは 3 領域を実際に張り終えた起動だけ (`app_map_region` が 3 本とも
+成功した直後)。途中で失敗した起動は数に入らない。番地は毎ビルドの
+`build/out/kernel.map` を見ること (固定値を控えない → `POLICY_DEBUG` §2)。
+
+## 試験 (`tools/tests/test_sbrk_tier.py` + `sbrk_tier_host.c`)
+
+`test_pgalloc_model.py` が `exec_child_claim` を切り出すのと同じ流儀で、
+**`exec/exec.c` の当該 2 関数をテキストのまま切り出して**ホストへ差し込み、
+`exec/appslot.c` と一緒に ILP32 freestanding でコンパイルして走らせる。
+並行して書いた別式ではなく、出荷するコードそのものを見ている。
+レイアウト (`code_end` / `guard_a` / `exec_heap_size`) は `exec_launch()` と
+同じ式でハーネスが 1 つ組む (帯 1 枚、text+bss = 64KB)。
+
+3 性質 = 27 検査:
+
+| 節 | 性質 |
+|---|---|
+| case 1 (8 検査) | 空きが十分 → 段 1。`sbrk_end == guard_a` で、最低分より広い |
+| case 2 (8 検査) | 空きが 1 ページ足りない → 段 2。`sbrk_end == code_end + 256KB` ちょうど。帯の残りが最低分より狭い縁では `guard_a` で頭打ちにし、その場合は従来式と同じものを張ったので段 1 と数える |
+| case 3 (11 検査) | 段 2 でも足りない → `EXEC_ERR_NOMEM`。生存アプリ数・現在のアプリ・資源の所有者・既存 2 本の `state` と `pages` がどれも変わらない。段 1 の枚数では拒否される空きで段 2 の枚数なら立つ (= 二段構えが効く場面) |
+
+### RED の作り方 (2 通り、どちらも実際に走らせた)
+
+RED 用のハーネスは置いていない。`exec/exec.c` / `exec/appslot.c` を一時的に
+K5b-K の状態へ戻して同じ試験を回す。
+
+1. `exec_sbrk_pick_tier()` の本体から段 1 の判定を落とし、常に
+   `*sbrk_end = code_end + MEM_EXEC_SBRK_MIN` を返す (= K5b-K の挙動)。
+   → `1c` `1d` `1e` `1f` の 4 検査が FAIL、EXIT≠0。
+2. `appslot_start_admit()` の `if (free_pages != 0 && pages > free_pages)` を外す。
+   → `3d` `3j` の 2 検査が FAIL、EXIT=1。
+
+どちらも戻して GREEN (27 検査 ALL PASS、`EXIT=0`) を確認した。
+
+### 実行コマンド
+
+```bash
+python3 -B tools/tests/test_sbrk_tier.py    # 回 4 (新規)
+```
+
+`build/sdk.mk` は票の指示どおり触っていない。`check-memory-host` の並びに
+足すのは PM の担当。
+
+## この追記で**測っていないこと** ([V4])
+
+- **ゲストは未検証**。NP21/W では 1 度も動かしていない。8MB 構成で GUI アプリを
+  立てたときに実際どちらの段になるか、`less` の `malloc` が段 1 で楽になるかは
+  実機の話 (受入 G6 と併せてテスターの担当)。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない。
+  ここで通したのは `make kernel` (EXIT=0) と上の 1 本だけ。
+- 段 1 は「収まるなら張る」ので、空きをほぼ使い切る起動を許す。その直後の
+  V86 バッキングや PT の動的確保が痩せる可能性は残る (決裁どおりの実装で、
+  余白は取っていない)。実機で足りなくなるようなら余白の議論は改めて。

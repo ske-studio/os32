@@ -758,6 +758,7 @@ RED→GREEN の記録は
 | D9-1 | (b) syscall フレーム保存 + 単一カーネルスタック |
 | D9-2 | 所有者 ID の池は GUI と CUI で共有 (1 池 4 本) |
 | D9-3 | `heap_size = 0` の既定は変えない。**8MB は「GUI アプリが 1 本立つ」が要件**で、複数は本体メモリ依存。入らなければ拒否 (受入 G6) |
+| sbrk は二段構え (2026-09-11) | `heap_size = 0` の CPL=3 プログラムの sbrk 物理は、空きが足りれば従来式 (帯の残り = `guard_a` まで)、足りなければ最低分 `MEM_EXEC_SBRK_MIN` (256KB)。段 2 でも入らなければ従来どおり拒否。`heap_size` 明示時は変えない。採った段は `exec_sbrk_tier_last` / `exec_sbrk_tier_count[2]` で読む (KAPI にしない) |
 | D9-4 | **`snd_cleanup_owned` ではなく、音の排他**: フォーカス追従で止める・復元する、同時には鳴らさない (受入 G10)。設計は K5b-K で YM2203 (FM3+SSG3) の状態退避・復元として具体化する |
 | D9-5 | `exec_start(cmdline) → app_id / 0 / 負` |
 | D9-6 | `exec_kill(app_id)` を切る |

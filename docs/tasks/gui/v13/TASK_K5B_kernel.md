@@ -50,6 +50,14 @@ K5a の設計 (D0〜D11) をカーネルに実装し、**gshell (W レーン) �
 8. **メモリ勘定** (D5、決裁 D9-3): `heap_size = 0` の既定は変えない。入らなければ `EXEC_ERR_NOMEM` /
    `OS32_ERR_FULL` で拒否し、既存アプリには触らない (スワップしない)。8MB で GUI アプリが 1 本立つ
    ことは受入 G6 で確かめる (実機は PM/テスター)。
+   - **sbrk 物理は二段構え** (決裁 2026-09-11)。`heap_size = 0` の CPL=3 プログラムは、3 領域を
+     従来式 (sbrk 上端 = `guard_a`) で見積もって `pgalloc` の空きに収まるなら段 1 = 従来どおり張り、
+     収まらなければ段 2 = 最低分 `MEM_EXEC_SBRK_MIN` (256KB) に落とす。段 2 でも入らなければ従来どおり拒否。
+   - `heap_size` を明示したプログラムの挙動は変えない (最低分のまま)。CUI (`exec_run`) と GUI
+     (`exec_start`) は `exec_launch()` の同じ場所を通るので規則は 1 つ。判定は `exec_sbrk_pick_tier()`。
+   - どちらの段で走ったかは `exec_sbrk_tier_last` / `exec_sbrk_tier_count[2]` (KAPI にせず
+     `fault_kill_count` と同じカーネルシンボル)。試験は `tools/tests/test_sbrk_tier.py`、記録は
+     `tools/tests/k5b_kernel_tdd.md` 回 4。
 
 ## ホスト試験 (実装と同じコミットで)
 
