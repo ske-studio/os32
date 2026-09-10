@@ -488,6 +488,20 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             if down_edge {
                 let _ = modal::on_button(st, mx, my);
             }
+            /* 契約 U4 は**新しい入力**の宛先を決める規則で、モーダルが開く前の
+             * 押下と対になる離しは、その押下を受けたアプリのもの。ここで
+             * 捕捉を返さないと、アプリ内で押したまま自分でダイアログを開いた
+             * 場合 (OP_MODAL_OPEN) に離しが永久に届かない: prev_buttons だけ
+             * 進むので up_edge は二度と立たず、ウィジェットは armed のまま、
+             * 捕捉も残って次の無関係な離しが古い相手へ飛ぶ (レビュー #4 [P2])。
+             * 捕捉が無ければ何も配らないので、モーダル中に始まった押下・離しは
+             * 今までどおりダイアログだけのものになる。 */
+            if up_edge {
+                release_capture(st, mx, my, MOUSE_BTN_LEFT);
+            }
+            if rup_edge {
+                release_capture(st, mx, my, MOUSE_BTN_RIGHT);
+            }
             st.prev_buttons = btn;
         }
         return;
