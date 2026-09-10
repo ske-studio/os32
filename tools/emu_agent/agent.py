@@ -71,7 +71,7 @@ MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98",
                 "check-memory-host", "check-privileged", "check-sqlite-groups-host",
                 "check-t5a-host", "check-gshell-host", "check-term-model",
                 "check-term-render", "check-tools-host", "check-vfs-fd-sqlite-host",
-                "check-vfs-mount-dev-host")
+                "check-vfs-mount-dev-host", "check-multiapp-model-host")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")
 WAIT_MAX = 60

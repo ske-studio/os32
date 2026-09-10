@@ -93,3 +93,365 @@ KAPI 追加候補の一覧 (名前・引数・戻り値・エラー)。**実装�
 ## この票に含めないもの
 
 端末アプリ本体、console の差し込み口、入力統合 (K6 以降)。設定レジストリ (S0)。
+
+## 設計 (K5a、2026-09-10)
+
+> 段階 K5a の成果物。**コードは 1 行も変えていない** — `kernel/` `exec/` `kapi/`
+> `include/memmap.h` `sdk/kapi.json` はすべて読取専用で扱った。版数 ([ABI3]) は決めない。
+> 添付: `tools/tests/multiapp_model_host.c` / `test_multiapp_model.py` /
+> [`multiapp_model_tdd.md`](../../../../tools/tests/multiapp_model_tdd.md)。
+> 行番号はすべて 2026-09-10 の `feat/gui` (`23147da`) 時点のもの。
+
+### D0. 全体の形
+
+```
+   [WM top-level]  gshell の standalone_loop (lib.rs:183)  owner = 1
+        |  exec_start(path)                    ^  exec_park()  (アプリの OP_WAIT の中から)
+        v                                      |
+   [アプリ ID k]  CPL=3 で走る  ------ gui_call(OP_WAIT) ------> WM が「他に起こす相手が居る」
+        ^                                                        と判断したら park
+        |  exec_resume(k, wait_ret)
+   [WM top-level]  次に起こす 1 本を選ぶ (イベントの届いた窓の owner)
+```
+
+- **走っているアプリは常に 1 本**。残りは `OP_WAIT` の中で止まっている (= 保存された
+  CPL=3 フレームとして AppSlot に横たわっている)。
+- カーネルは「誰を次に起こすか」を決めない。決めるのは WM で、根拠はイベントの
+  届いた窓の owner。**スケジューラは存在しない**。
+- `OP_WAIT` 以外で PD が変わる経路を作らない (契約 T2a、受入 G7)。
+
+この形をホストで動かせる状態機械にしたものが `tools/tests/multiapp_model_host.c` で、
+以下の D3/D4/D6 の規則はそこで 60 個の検査として固定してある。
+
+### D1. identity 前提の全列挙と、仮想≠物理で成り立つ形
+
+いまは「アプリの仮想 = 物理」なので、同じ仮想 0x500000 に 4 本は置けない。
+per-app 物理へ移すために触ることになる箇所は次の 14 か所ですべて。
+
+| # | identity を前提にしている箇所 | 根拠 | 仮想≠物理での形 |
+|---|---|---|---|
+| I1 | ローダの読み込み先が `file_buf = (u8 *)load_base` で、そこへ `vfs_read` | `exec/exec.c:804-809` | AS を作り per-app 物理を 0x500000〜へ写した**後で CR3 をそのアプリ PD に載せてから読む**。VFS / kmalloc / ドライバ / ISR はすべて PDE 0 = 全 PD 共有 (`kernel/paging.h:138`) なので、この間もカーネルは普通に動く |
+| I2 | ヘッダ分の前詰め `memmove` と bss の `kmemset` | `exec/exec.c:985-986` | 同上 (CR3 = アプリ PD の下で行う) |
+| I3 | argv/argc/api をアプリのスタックへ**仮想番地で直書き** (`str_area` `argv_area` `new_esp` `u_esp`) | `exec/exec.c:1119-1182, 1313-1314` | 同上 |
+| I4 | 物理ページの確保が固定帯 `[0x500000, mem_end)` (`exec_child_claim` → `pgalloc_mark_used`)、解放も同じ式 | `exec/exec.c:369-384, 976-978, 1060-1066` | 廃止。アプリごとに `pgalloc_alloc_n()` で**必要な枚数だけ** 3 本の連続領域 (本体+sbrk / exec_heap / ユーザスタック) を取り、AppSlot に `(phys, pages)` を 3 組記録して終了時に `pgalloc_free_n`。`EXEC_DYN_RESERVE` の穴 (`exec.c:115-126`) は「子が全部持っていくから空けておく」ための細工なので、**役目を終えて消える** |
+| I5 | `paging_addrspace_map_user_range()` が **phys = virt 固定** (`pfn << PAGE_SHIFT` を 2 回渡す) | `kernel/paging.c:741-743` | 物理ベースを取る版を足す (D8 の P1)。1 ページ版 `paging_addrspace_map_user()` は既に phys 引数を持つ (`kernel/paging.h:221-222`)。共有ライブラリの .data がこの機構で既に動いている (`kernel/shlib.c:240-245`) |
+| I6 | `paging_addrspace_create_n()` がアプリ PT を **master の identity PTE で初期化**する | `kernel/paging.c:634-642` | 作った直後にアプリ帯 `[0x400000, 帯上端)` の PTE を**全部 0 (非 present) に落としてから** per-app 物理で張り直す。**落とし忘れると物理 0x5xxxxx が素通しで見える** (= 他アプリのページや pgalloc の作業域が CPL=3 から読める)。ここが本設計で最も静かに壊れる箇所 |
+| I7 | `exec_heap` の base が仮想番地で、実体は静的 `KHeap` 1 個 | `exec/exec_heap.c:15`、`kernel/kmalloc.h:16-21` | 番地はアプリ仮想のままでよい。`mem_alloc` は wrap の中 = **そのアプリの CR3 の下**でしか呼ばれない (`exec.c:672` の `kapi_invoke` は CR3 = アプリ PD で走る) ので、そのまま解決する。KHeap の 4 変数を AppSlot に持ち、切替のたびに save/restore する — 既存の `exec_heap_save_state()` / `exec_heap_restore_state()` (`exec_heap.c:51-71`) がそのまま使える |
+| I8 | `exec_exit` と longjmp 復帰が `exec_heap_reset()` と `paging_set_page(guard_a/guard_b, ..., PAGE_RW)` を呼ぶ | `exec/exec.c:511-517, 1044-1053`、`exec.c:452-461` | どちらも **master CR3 に戻した後**に走る (`kapi_sys_exit` は `exec.c:575` で先に master へ戻す) ので、per-app では**別物理を叩く**。`exec_heap_reset` はページごと返すので不要、guard の present 戻しもアプリ PT ごと破棄するので不要。**両方削る** |
+| I9 | sbrk 上限がトランポリンページの単一グローバル `sbrk_heap_limit` | `exec/exec.c:1297-1298`、`sdk/crt/syscalls.c:140-144` | トランポリンページはカーネル .bss (PDE 0、全 PD 共有 RO+USER、`exec.c:109`) なので per-app にはできない。しかし**走るのは常に 1 本**なので、`exec_start` / `exec_resume` の中でそのアプリの `guard_a` を書き込めばよい (いま launch 時に 1 回書いているのを切替ごとに書くだけ)。アプリ側の `heap_ptr` は自分の .bss にあるので (`syscalls.c:128`) 既に per-app |
+| I10 | `ring3_ptr_ok` の許可範囲が `g_ring3_band_top` 由来 (`RING3_HEAP_TOP` / `RING3_STACK_BOTTOM`) | `exec/exec.c:176-211, 339-354` | 帯上端と枚数を AppSlot に持ち、切替時に `ring3_band_set()` 相当で差し替える。`g_ring3_as` `g_ring3_active` も同じ扱い (`exec.c:213-214`) |
+| I11 | shlib の .data 原本コピーが**物理番地直書き** (`kmemcpy((void *)phys, (const void *)g_data_master, ...)`) | `kernel/shlib.c:236-238` | `g_data_master` は共有ライブラリ帯の末尾 = **アプリ固有 PDE の中** (`include/memmap.h:298-299`) なので、アプリ CR3 の下では別物を指す。**attach は master CR3 の下で済ませてから CR3 を載せ替える** — 順序だけが要件で、`shlib.c` 自体は無改造。`SHLIB_MAX_ATTACH` は既に 4 (`shlib.c:54`) で 4 本ぶん足りる |
+| I12 | `sdk/link/app.ld` の `. = 0x500000;` | `sdk/link/app.ld:8` | **変更不要**。全アプリが同じ仮想番地に載るのが目的そのもの。`mkos32x` の `load_addr` 照合 (`exec.c:854-872`) もそのまま |
+| I13 | `include/memmap.h` の `MEM_APP_BAND_*` / `MEM_EXEC_*` | `include/memmap.h:271-278, 328-330` | **変更不要**。1 本のときの仮想レイアウトを 1 バイトも動かさない (回帰ゼロ) |
+| I14 | `exec_ctx_stack[MAX_EXEC_NEST]` が「段のスタック」で、長さ 4 | `exec/exec.h:26`、`exec/exec.c:153` | 「段のスタック」から「**ID で引く表**」へ。非シェル ID は 2〜5 の 4 本なので、シェル (ID 1) と合わせて**長さ 5 以上が要る** — 今の 4 では ID 5 が入らない |
+
+**結論**: 仮想レイアウト (`app.ld` / `memmap.h` / `RING3_*` の式) は一切動かさない。
+動くのは「物理をどこから取るか」(I4) と「アプリ PT に何を書くか」(I5/I6)、
+そして「カーネル側の *現在のアプリ* を表す変数を切替のたびに入れ替える」(I7/I9/I10) の 3 点。
+
+#### 起動時の順序 (ここだけは順番が意味を持つ)
+
+1. AppSlot を確保し ID を決める (D3)
+2. ヘッダを読むために**まず master CR3 のまま**先頭 1 ページぶんを読む
+   — `OS32Header` の `text_size` / `bss_size` / `heap_size` が無いと必要枚数が決まらない
+3. 必要枚数を算出 → `pgalloc_alloc_n()` × 3 → 足りなければ `EXEC_ERR_NOMEM` で**拒否**
+4. `paging_addrspace_create_n()` → **アプリ帯の PTE を全部落とす** (I6) → per-app 物理で張り直す
+   (本体+sbrk / exec_heap / スタック)。guard は張らない (非 present のまま = ガードになる)
+5. **master CR3 のまま** `shlib_addrspace_attach()` (I11)
+6. VRAM / SHM / フォント / Unicode 表 / GFX バックバッファ / トランポリンを USER で張る
+   (`exec.c:1212-1272` のまま。すべて PDE 0・PDE 3+ の共有帯なので per-app 化と無関係)
+7. `paging_load_cr3(as.pd_phys)` → 本体を読み込み・bss クリア・argv 構築 (I1/I2/I3)
+8. トランポリンの `sbrk_heap_limit` にこのアプリの `guard_a` を書く (I9)
+9. `res_owner_set(id)` → TSS.ESP0 = 現在のカーネル ESP → `iret`
+
+手順 2 の「先頭 1 ページだけ先に読む」は現行に無い動き
+(`exec.c:809` はいきなり全部読む)。**現行のように全部読んでから枚数を決めることは
+できない** — 読む先の物理がまだ無いため。K5b の実装で最初に効いてくる差分。
+
+### D2. 切替機構 — (a) と (b) の比較、および推奨
+
+| 観点 | (a) アプリごとのカーネルスタック (4 × 16KB) | (b) syscall フレームだけ保存 (単一カーネルスタック) |
+|---|---|---|
+| 追加で要る RAM | **64KB 固定** (8MB 構成では小型アプリ 0.1 本分) | **1 アプリ 52B** (pushad 8 語 + iret 5 語)。4 本で 208B |
+| 切替の実体 | `ESP` を差し替え + `CR3` + `TSS.ESP0`。切替先の C の呼び出しフレームの続きへ return する | 保存フレームを**いまのカーネルスタックへ書き戻して** `popad; iretd` — `int80_stub:65-81` の末尾がそのまま使える |
+| `OP_WAIT` の扱い | WM のハンドラの中で止まったまま待てる (戻ってこられる) | WM のハンドラから**抜ける** (longjmp)。`OP_WAIT` の戻り値は resume 側が決めて保存フレームの EAX に書く |
+| WM に課す規約 | 特になし | **`exec_park()` を呼んでよい地点を op_wait のループ先頭 1 点に固定**する必要がある (途中で抜けると WM 状態が中途半端になる)。契約 S8 (X4 の bounded-work) と同じ性質の規約 |
+| ISR ネストの見積 | カーネルスタックが 4 本に割れるので、`include/memmap.h:106-108` の「リング 3 を入れたらスタック量を measure し直せ」を**スタックごとに**やり直すことになる | 従来どおり 1 本 (16KB, `MEM_KSTACK_BASE`)。見積の前提が動かない |
+| 壊れたときの現れ方 | ESP を間違えると別アプリのカーネルスタックを静かに踏む | フレームを間違えれば即 #GP/#PF → `ring3_fault_kill` でそのアプリだけ死ぬ |
+| 既存コードへの改造 | `int80_stub` は無改造だが、V86 (`v86_entry.asm` が `TSS.ESP0` をオフセット直書き、`kernel/tss.c:12-16`) と CPL=0 の入れ子 exec が「どのスタックの上か」を意識し始める | `int80_stub` の末尾を `ring3_resume(frame *)` として切り出して再利用。V86 も CPL=0 入れ子も従来どおり |
+| プリエンプションへの足場 | **なる** | ならない |
+
+**推奨: (b)**。決め手は最後の 2 行。本票の「同時」の定義はプリエンプションの足場も
+作らないことなので、(a) の唯一の長所 (割込み文脈からでも切替えられる) は要らない。
+そのうえで (b) は追加 RAM が 3 桁少なく、V86 と CPL=0 入れ子と ISR ネストの前提を
+1 つも動かさない。
+
+#### 切替を呼ぶ場所
+
+| 遷移 | 呼ぶ主体 | 実体 |
+|---|---|---|
+| park (アプリ → WM top-level) | **gshell の `op_wait`** (`userland/gshell/src/handler.rs:368-390` のループ先頭) が新 KAPI `exec_park()` を呼ぶ | 現フレーム (`ring3_syscall_dispatch` が受け取った `frame`、`exec.c:606`) を AppSlot へ写し、`ring3_in_syscall = 0`、`res_owner_set(1)`、CR3 を master へ、`exec_longjmp` で `exec_start` / `exec_resume` の setjmp 点へ |
+| resume (WM top-level → アプリ) | **gshell の top-level** (`lib.rs:183-202` の周期) が `exec_resume(id, wait_ret)` を呼ぶ | setjmp → AppSlot の per-app 変数を復元 (I7/I9/I10) → `cli` → `TSS.ESP0 = 現 ESP` → `CR3 = as.pd_phys` → 保存フレームを積んで `popad; iretd` |
+
+**カーネルの `gui_call` 出口では切り替えない。** カーネルは op の意味を知らない
+(`kernel/gui.c:37-38`) ので、「他に起こす相手が居るか」を判断できるのは WM だけ。
+判断を WM に置き、機構だけをカーネルに置く。
+
+#### IF (割込み許可) の扱い
+
+- `int80_stub` は入口で `sti` (`kernel/ring3_entry.asm:50`)、出口で `cli`
+  (`同:63`) してから `popad; iretd`。**この対は動かさない**。
+- `exec_park()` はディスパッチャの奥 (IF=1) から呼ばれ、`exec_longjmp` は EFLAGS を
+  復元しない。よって longjmp 先も IF=1 のまま。ただし**fault 経由の復帰は例外ゲートで
+  IF=0 のまま来る**ので、`exec_start` / `exec_resume` の setjmp 復帰点は
+  `exec_run` と同じく無条件に `_enable()` する (`exec/exec.c:1035-1039` と同じ理由・同じ形)。
+- `exec_resume` の CPL=3 復帰は `cli` → `TSS.ESP0` → `CR3` → `iretd` を**割込み禁止で
+  一続きに**行う (`exec.c:1331-1353` の既存ブロックと同じ作法)。`iretd` が保存済み
+  EFLAGS (IF=1) を復元するので、アプリ側の IF は変わらない。
+- **切替中の IRQ**: `cli` の前は普通に入る。`cli` の後は `iretd` までの間に 1 つも
+  入らないので、`TSS.ESP0` を書き替えてから CPL=3 に降りるまでの窓は存在しない。
+  IRQ ハンドラはすべて PDE 0 (全 PD 共有) にあるので、CR3 がどのアプリ PD でも動く
+  — これは今 CPL=3 アプリが走っている間に既に成立している事実。
+- **`hlt` はカーネル側に残す**。park したアプリは `sys_halt` を呼んでいない
+  (WM のループを抜けた) ので、待つのは WM top-level の周期 (`lib.rs:198`) だけ。
+  CPL=3 の KAPI 呼び出しが IF=1 で走る前提 (`ring3_entry.asm:44-49`、既知の落とし穴
+  §4-19) は変わらない。
+
+#### (b) の弱点と、それを塞ぐ規約
+
+`exec_park()` は WM のハンドラの途中から longjmp するので、その時点で WM が
+書きかけの状態を持っていると宙に浮く。塞ぎ方は**呼べる地点を 1 点に固定する**こと:
+
+> **park 規約**: `exec_park()` を呼んでよいのは `op_wait` のループ先頭、
+> `wm_cycle()` が 1 周を終えた直後・`ring::pending` を読む前だけ。
+> それ以外の op / X1 / X2 / X4 からは呼ばない。
+
+これは契約 S8 (X4 の bounded-work) と同じ性質の規約で、K5b で契約へ書き足す。
+
+### D3. 所有者 ID
+
+- **意味を変える**: `res_owner_set/get` (`fs/fd_redirect.c:19-22`) の値を
+  「exec のネスト段」から「**アプリ ID**」にする。1 = シェル帯 (CUI シェル / gshell、
+  `kernel/gui.h:26` の `GUI_SHELL_OWNER` と同じ値)、2〜5 = アプリ。
+- **配り方**: 空き ID は**必ず小さい方から**。これで CUI の入れ子 `exec_run` は
+  シェルから 2, 3, 4 と並び、**段 = ID** という従来の見え方がそのまま残る
+  (模型ケース 8a)。GUI アプリと CUI の入れ子は**同じ 1 つの池**を使うので、
+  GUI 4 本のときは入れ子の 5 本目も `ERR_FULL` (模型ケース 8h)。
+- **誰が set するか**: `exec_start` が新 ID へ、`exec_park` が 1 へ、
+  `exec_resume` が対象 ID へ、`exec_exit` / `ring3_fault_kill` / `exec_kill` が
+  1 (または CUI の親 ID) へ。set する箇所は現行の 3 か所
+  (`exec.c:448, 557, 1097`) の置き換えで、増えるのは park/resume の 2 つだけ。
+- **配列長**: `exec_ctx_stack[MAX_EXEC_NEST=4]` は ID 5 を持てない。
+  ID で引く表にして**長さ 5 以上**にする (I14)。
+
+#### `*_owned(id)` の回収 — 現状の全列挙と、アプリ単位で閉じるか
+
+`exec_exit` の回収の並び (`exec/exec.c:531-553`) をそのまま棚卸しした。
+
+| 回収 | 現状 | アプリ単位で閉じるか |
+|---|---|---|
+| `fd_redirect_reset_owned(owner)` (`exec.c:531`) | `fs/fd_redirect.c:129-138`。owner 一致のものだけ戻す | **閉じる**。ただし表は FD 0/1/2 の **3 本しかない** (`fd_redirect.c:16`) ので、2 本のアプリが同時に stdout をリダイレクトすることはできない。GUI アプリはリダイレクトしないので v1.3 では実害なし — **限界として明記** |
+| `vfs_close_owned(owner)` (`exec.c:536`) | `fs/vfs_fd.c:222-232`。owner 一致・protect でない FD だけ閉じる。タグは open 時 (`vfs_fd.c:139`) | **閉じる**。無改造 |
+| `pipe_free_owned(owner)` (`exec.c:539`) | `fs/pipe_buffer.c:49-57`。タグは alloc 時 (`同:42`) | **閉じる**。無改造 |
+| `shm_cleanup_all()` (`exec.c:542`) | `kernel/shm.c:195-202`。**所有者を見ずに全ブロックを解放する** (GUI 予約ブロックだけ除外) | **閉じない**。アプリ A の終了がアプリ B の `shm_alloc` を巻き上げる。**`shm_free_owned(id)` が要る** (ブロックに owner を持たせる。1 バイト × 16) |
+| `snd_cleanup()` (`exec.c:545`) | `kernel/snd_engine.c:737-745`。`bgm_persist` でなければ BGM を止める。**所有者の概念が無い** | **閉じない**。アプリ A の終了がアプリ B の BGM を止める。決裁事項 (D9-4) |
+| `db_cleanup_all()` (`exec.c:548`) | `kapi/kapi_db.c:472-479`。**所有者を見ない**。ただし `db_cleanup_owned(int owner)` が **既に隣にある** (`同:462-470`、タグは `同:215`) | **呼び先を替えるだけで閉じる**。`db_cleanup_owned(id)` へ |
+| `gui_owner_exit(owner)` (`exec.c:553`) | `kernel/gui.c:71-91` → WM の `reclaim_owner` (`wm.rs:700-737`) が窓・タイマ・スロットを owner で回収 | **閉じる**。無改造。タイマは WM 側の表 (`wm.rs:721-728`) にあり、カーネルにタイマ所有権は無い |
+
+**要る変更は 3 つだけ**: `shm_free_owned` の新設、`db_cleanup_all` → `db_cleanup_owned`、
+`snd_cleanup` の扱い (D9-4)。残り 4 つは既にアプリ単位で閉じている。
+
+### D4. 起動・切替・終了の経路
+
+#### 起動 (塞がない)
+
+`exec_run` は**そのまま残す** (CUI の入れ子はこれを使い続ける)。並べて
+`exec_start(cmdline)` を切る。違いは**どこで setjmp するか**の 1 点だけ:
+
+| | `exec_run` (現行、塞ぐ) | `exec_start` (新、塞がない) |
+|---|---|---|
+| setjmp を置く場所 | 自分のフレーム (`exec.c:1032`)。longjmp するのは**子の終了時** (`exec_exit` → `exec.c:559`) | 自分のフレーム。longjmp するのは**子の最初の `exec_park()`**、または終了時 |
+| 呼び出し元へ戻る条件 | 子が終わったとき | 子が最初に `OP_WAIT` に入って WM が park を決めたとき、または子が終わったとき |
+| 戻り値 | `exec_exit_status` | park したなら **app_id (2〜5)**、park より前に終わったなら **0**、失敗なら負 |
+
+`ExecContext.jmpbuf` (`exec.c:137`) の**役割は変わらない** — 「この段/この ID の
+呼び出し元へ帰る点」のまま。変わるのは (i) 置き場所が段のスタックから ID の表へ
+(I14)、(ii) longjmp を打つ契機に park が 1 つ増える、の 2 つ。
+`exec_launch_abort()` (`exec.c:432-492`) の巻き戻し 5 段も、対象が
+「段」から「ID」に変わるだけで構成は同じ (ただし I8 のとおり (2) ガード戻しと
+(3) ヒープリセットは不要になり、(4) が `pgalloc_free_n` × 3 になる)。
+
+#### 4 つの畳み方 — どれも「その ID だけ畳んで WM へ戻る」
+
+| 経路 | 入口 | 畳む手順 | WM への戻り |
+|---|---|---|---|
+| 正常終了 | `kapi_sys_exit` (`exec.c:568-584`) | master CR3 → `shlib_addrspace_detach` → `paging_addrspace_destroy` → **その ID の 3 本の物理を `pgalloc_free_n`** → D3 の回収 7 種を `id` で → AppSlot を空に | `exec_longjmp(AppSlot[id].jmpbuf)` → `exec_start`/`exec_resume` の復帰点 → gshell top-level |
+| fault | `ring3_fault_kill` (`exec.c:701-714`)。#PF/#GP のフレームが CS.RPL=3、または範囲外 slot (`exec.c:628-630`)、またはポインタ早期検証 (`exec.c:656-658`) | 同上 + `fault_kill_count++` | 同上 |
+| CTRL+STOP | `ring3_abort_request` (`exec.c:263-268`) を IRQ1 が呼び (`drivers/kbd.c:234-237`)、`ring3_abort_check` が syscall 入口 (`exec.c:619`) / 出口 (`exec.c:686`) / IRQ1 スタブ (`kernel/isr_stub.asm:507-519`) で畳む | 同上 + `ring3_abort_count++` | 同上 |
+| 起動失敗 | `exec_start` の中 (ファイル無し・ヘッダ不正・`ERR_NOMEM`・`ERR_FULL`) | `exec_launch_abort` 相当。**CR3 は載せ替えない / 回収は回さない / owner は 1 のまま** (模型ケース 10) | 普通に `exec_start` が負値を返す (longjmp しない) |
+
+**CTRL+STOP の宛先**: 要求 `g_ring3_abort_req` (`exec.c:251`) は
+「**いま走っているアプリ**」宛にしか立たない — IRQ1 の時点でカーネルが知っているのは
+それだけだから (模型ケース 9a/9b)。止めてあるアプリには届かない。したがって
+**止めてあるアプリを畳む口が別に要る**: `exec_kill(app_id)` (D8)。これが無いと、
+resume されないまま固まったアプリを永久に畳めない。フォーカスと CTRL+STOP の
+対応づけ (T6「フォーカス窓のアプリ宛」) は WM の仕事 — WM がフォーカス窓の owner を
+見て、それが走っている本人なら何もしない (カーネルの要求がそのまま効く)、
+別の ID なら `exec_kill(その ID)` を呼ぶ。
+
+**`gui_owner_exit(id)` の呼び位置は変えない** (`exec.c:553`)。畳む 3 経路すべてが
+`exec_exit` を通るので、WM は 1 か所で回収できる。
+
+### D5. メモリの勘定
+
+#### 1 本あたりの物理ページ (per-app、4KB 単位)
+
+```
+  ceil((text_size + bss_size)/4K)      本体 + data + bss
++ MEM_EXEC_SBRK_MIN / 4K = 64          sbrk 最低分 (256KB, memmap.h:328)
++ 0                                    guard_a (非 present)
++ ceil(heap_size / 4K)                 exec_heap (最低 16 = 64KB, memmap.h:329)
++ 0                                    guard_b (非 present)
++ MEM_EXEC_STACK_SIZE / 4K = 64        ユーザスタック (256KB, memmap.h:330)
++ 1                                    PD
++ band_pdes (1 または 2)               アプリ PT
++ shlib の .data/.bss 複製ページ       (shlib.c:230。libos32gui.shlib の実測が要る)
+```
+
+**仮想**レイアウトは 1 本のときと同じ。物理は上の合計だけで、
+現行のように `[0x500000, mem_end)` を丸ごと押さえることはしない (I4)。
+
+#### 配れる物理の総量
+
+`pgalloc` の管理域は `[PGALLOC_BASE = 0x400000, sys_usable_mem_end())`
+(`kernel/pgalloc.h:22`、`kernel/sys.c:155-159`) で、共有ライブラリ帯
+`0x400000-0x4FFFFF` は `shlib_init` が予約済み。よってアプリに配れるのは
+`[0x500000, sys_usable_mem_end())`。
+
+| 構成 | `sys_usable_mem_end()` | アプリに配れる物理 |
+|---|---|---|
+| 8MB (CUI) | 0x800000 | 0x300000 = **3.00MB = 768 ページ** |
+| 9MB | 0x900000 | 0x400000 = **4.00MB = 1024 ページ** |
+| 15MB (PEGC) | 0xF00000 − 予約 0x4B000 (`sys_reserve_top(307200)`) = 0xEB5000 | 0x9B5000 = **9.71MB = 2485 ページ** |
+
+**per-app 物理にすると 15MB 構成で 0xC00000 より上の RAM が初めて使える。**
+仮想のアプリ帯は `MEM_APP_BAND_MAX_TOP = 0xC00000` (`memmap.h:276-278`) で頭打ちだが、
+**物理**は master が 32MB まで identity で持っている
+(`PAGING_BOOT_MAP_SIZE`、`kernel/paging.h:45-52`) ので、0xC00000〜0xEB5000 の
+約 3MB をアプリのページとして配れる。identity のままでは絶対に届かない領域。
+
+#### gshell + アプリ n 本の見積
+
+前提 (**どれも未実測。K5b で測り直すこと**):
+本体 (text+bss) 128KB = 32 ページ、shlib の .data 複製 8 ページ、`band_pdes` = 1。
+`gshell` 自身はシェル帯 0x300000-0x3FFFFF に常駐するので、この表の外
+(`MEMORY_BUDGET.md` の実測で text 103,206B / data 49,796B / bss 17,924B)。
+
+| heap_size | 1 本の物理 | 8MB (768p) | 9MB (1024p) | 15MB (2485p) |
+|---|---:|---|---|---|
+| **既定 (`heap_size = 0` → 空きの折半)** = 約 1.18MB / 303p | 471p = 1.84MB | **1 本** (2 本目は `ERR_NOMEM`) | **2 本** | **4 本** (1884p、残 601p) |
+| **256KB 明示** / 64p | 234p = 936KB | **3 本** (702p、残 66p) | **4 本** (936p、残 88p) | **4 本** (余裕) |
+| **64KB 明示** (`MEM_EXEC_HEAP_MIN`) / 16p | 186p = 744KB | **4 本** (744p、残 24p — 実質ぎりぎり) | **4 本** (残 280p) | **4 本** (余裕) |
+
+**この表からの帰結 (K5b の作業に直結)**: いまの `build/app.conf` は GUI アプリの
+`heap_size` を全部 **0 (= 空きの折半)** にしている (`gui_demo` `gui_bench`
+`v12_api_test` `filer` `lease_test`、`build/app.conf` の GUI v1.1 節)。
+このままだと 8MB では 1 本しか立たない。**GUI アプリは `app.conf` に実際に使う量を
+明示する**のが 4 本を成立させる条件。折半の既定そのものを変えると CUI の 1 本実行が
+動くので、**既定式は変えず app.conf 側で明示する**ことを推奨 (D9-3)。
+
+入らないときは**拒否**する。切り詰めない、スワップしない
+(2026-09-10 ユーザー方針、`exec/exec.c:929-941` が既にこの形)。
+拒否は `ERR_NOMEM` (物理が足りない) と `ERR_FULL` (ID / SHM スロットが尽きた) を
+区別する — 前者は「もっと小さいアプリなら入る」、後者は「何をしても 5 本目は無理」。
+
+**未確認**: `pgalloc` のメタデータと workspace が上の「配れる物理」から何ページ
+引くか (`kernel/sys.c:72-106` のモデル経路)、`libos32gui.shlib` の `.data`/`.bss`
+ページ数、実際の GUI アプリの text+bss。この worktree にはビルド生成物が無く、
+配備もエミュレータも禁止範囲なので測っていない。
+
+### D6. SHM スロットと所有者 ID
+
+- 割当は**カーネルではなく WM**。アプリが `gui_call(OP_INIT)` を呼び、
+  `alloc_slot(owner)` (`userland/gshell/src/wm.rs:641-656`) が空きスロットを
+  小さい順に配る。満杯は `OS32_ERR_FULL` (`handler.rs:188-191`)。
+  **この実装は既に 4 スロット対応で、変更不要**。
+- 対応は **owner (= アプリ ID) ↔ スロット番号** の 1 対 1。
+  `slot_of_owner` (`wm.rs:630-639`) が引き、`reclaim_owner` (`wm.rs:729-736`) が
+  終了時に空ける。park / resume ではスロットは動かない (模型ケース 6c)。
+- 番地は `MEM_SHM_GUI_BASE + slot × GUI_SLOT_SIZE`
+  (`include/memmap.h:200-203`、ブロック 12〜15 を `shm.c:77-81` が予約済み)。
+  カーネルはスロット番号を知らないままでよい。
+- **5 本目**: 実際には ID の池 (4 本) が先に尽きるので `exec_start` が `ERR_FULL` を
+  返し、`OP_INIT` まで到達しない。スロット側の `ERR_FULL` は二重の安全網として残す。
+- **可視性**: SHM は全 PD 共有 + USER なので、アプリは他アプリのスロットを読める。
+  契約 T2a が v1 の割り切りとして明記した点で、**本設計では変えない**
+  (per-app 物理を SHM にも広げる話は T2a の注記どおり後日)。
+
+### D7. 変えないもの と、壊れない根拠
+
+| 変えないもの | 根拠 |
+|---|---|
+| `shell.bin` の入れ子 `exec_run` | `exec_run` は残す。`exec_start` は別関数。ID の配り方が「小さい方から」なので段 = ID が保たれ (模型ケース 8a-8g)、`exec_exit` は親が生きていればその段へ戻る (同 8d/8e)。**仮想レイアウトは 1 バイトも動かない** (I12/I13) ので、子から見た番地・ヒープ量・スタック量は現行と同一 |
+| v86 | V86 は `TSS.ESP0` をオフセット直書きで更新する (`kernel/tss.c:12-16`)。(b) を選ぶとカーネルスタックは 1 本のままなので、この前提が動かない。V86 バッキング RAM の 640KB 連続確保 (`exec.c:118-125`) は、アプリが `[0x500000, mem_end)` を丸ごと押さえなくなる (I4) ので**むしろ取りやすくなる** |
+| `sys_switch_shell` (T9) | `kernel/gui.c:108-119`。owner 1 からのみ。ID の意味が「段」から「アプリ ID」に変わってもシェル帯は常に 1 なので判定はそのまま。切替は「全アプリが畳まれた後に gshell 自身が exit する」ときにしか起きない (`lib.rs:296` → `switch_cui`) |
+| `mkos32x --cpl0` の例外扱い | `OS32X_FLAG_FORCE_CPL0` の判定 (`exec.c:887`) は `want_ring3` を落とすだけ。CPL=0 で走るプログラムは AS を作らず identity のまま (`exec.c:1355-1364`) — per-app 物理は `want_ring3` の側にしか入れない |
+| `gui_call` / `gui_register` / `gui_owner_exit` の署名 | `kernel/gui.h:29-37`。owner の**値の意味**が変わるだけで型も呼び位置も同じ |
+| SHM の GUI 予約 (ブロック 12〜15) | `kernel/shm.c:25-33, 77-81`、`memmap.h:200-203` |
+| `int80_stub` の `sti`/`cli` 対 | `kernel/ring3_entry.asm:50, 63`。(b) では末尾の `popad; iretd` を resume でも使うだけで、対は動かさない (D2) |
+
+### D8. KAPI 追加候補 (末尾追記のみ [ABI2]、版数は PM が決める [ABI3])
+
+`sdk/kapi.json` は**編集していない**。現行 180 スロット・version 42。
+以下は候補の一覧で、確定は PM。
+
+| 名前 | 引数 | 戻り値 | エラー |
+|---|---|---|---|
+| `exec_start` | `const char *cmdline` | `i32`: **>0** = app_id (2〜5) で最初の `OP_WAIT` まで進んで park した / **0** = park より前に終了した (回収済み、`gui_owner_exit` 配送済み) / **<0** = 起動しなかった | `OS32_ERR_INVAL` (呼び出し元が owner 1 でない — 契約 S2)、`OS32_ERR_FULL` (ID の池が尽きた)、`EXEC_ERR_NOMEM` (物理が足りない)、`EXEC_ERR_NOT_FOUND`、`EXEC_ERR_INVALID` (OS32X ヘッダ / load_addr 不一致) |
+| `exec_resume` | `i32 app_id, i32 wait_ret` | `i32`: **app_id** = また park した / **0** = 終了した / **<0** | `OS32_ERR_INVAL` (owner 1 でない / 未知の ID)、`OS32_ERR_STALE` (畳まれた後の ID)、`OS32_ERR_FULL` は返さない |
+| `exec_park` | `void` | **戻らない** (longjmp)。呼べない文脈では `OS32_ERR_INVAL` を返して普通に戻る | `OS32_ERR_INVAL` (owner 1 でない / いま走っているアプリが居ない) |
+| `exec_kill` | `i32 app_id` | `i32`: 0 = 畳んだ / <0 | `OS32_ERR_INVAL` (owner 1 でない / 未知の ID)、`OS32_ERR_STALE` (走っている本人 — CTRL+STOP 経路を使う) |
+| `exec_app_state` *(任意)* | `i32 app_id` | `i32`: 0 = 空き / 1 = 走っている / 2 = park 中 | `OS32_ERR_INVAL` |
+
+`exec_start` / `exec_resume` / `exec_kill` は **owner 1 (シェル帯) からのみ**。
+判定は `gui_register` と同じ形 (`kernel/gui.c:47-49`)。
+`exec_park` も owner 判定は同じ (呼ぶのは WM のハンドラで、その時点の owner は
+アプリ ID なので、**「走っているアプリが居ること」を条件にする**点だけ違う)。
+
+#### KAPI ではない追加 (カーネル内部)
+
+| P# | 何 | 場所 |
+|---|---|---|
+| P1 | `paging_addrspace_map_user_range_phys(as, vstart, vend, pstart, flags)` — `[vstart, vend)` を `pstart` からの連続物理へ USER で張る。既存の identity 版 (`paging.c:752-756`) は残す | `kernel/paging.{h,c}` |
+| P2 | `paging_addrspace_clear_app_band(as)` — アプリ固有 PDE の PTE を全部 0 にする (I6)。これを忘れると identity が素通しで残る | `kernel/paging.{h,c}` |
+| P3 | `shm_free_owned(int owner)` + `ShmBlock.owner` (D3) | `kernel/shm.{h,c}` |
+| P4 | `ring3_resume(u32 *frame)` — `int80_stub` 末尾 (`ring3_entry.asm:65-81`) を関数として切り出したもの | `kernel/ring3_entry.asm` |
+| P5 | `exec_exit` の `db_cleanup_all()` を `db_cleanup_owned(id)` へ (呼び先の差し替えのみ、実体は `kapi_db.c:462` に既存) | `exec/exec.c:548` |
+
+P1/P2 は `paging_app_band_selftest()` (`kernel/paging.h:258-267` / `kernel/paging.c:893-` の系列) に
+検査項目として足せる — ハードウェアに依存しないので `make check` のホスト試験
+(`test_app_band_pde.py`) でも見られる。
+
+### D9. 決裁が要る分岐 (PM / ユーザー)
+
+| # | 分岐 | 推奨 | 理由 | 代案 |
+|---|---|---|---|---|
+| 1 | 切替機構 (a) 専用カーネルスタック / (b) syscall フレーム保存 | **(b)** | 追加 RAM が 64KB → 208B。ISR ネストと V86 の `TSS.ESP0` 前提が動かない。プリエンプションの足場を作らないという票の決めと一致 | (a)。将来プリエンプションを入れるなら (a) が土台になるが、v2.0 で改めて設計する方が安い |
+| 2 | 所有者 ID の池を GUI と CUI で共有するか | **共有する (1 池 4 本)** | 「同時に生きているアプリは 4 本まで」が 1 つの規則で言い切れ、回収も 1 つの ID 空間で閉じる。CUI の段 = ID の互換も保てる | GUI 用 4 本と CUI ネスト用を別枠にする。4 + 4 = 8 本ぶんの資源表が要り、8MB では絶対に入らない |
+| 3 | `heap_size = 0` (空きの折半) の既定を GUI モードで変えるか | **変えない。`app.conf` で明示する** | 既定式を変えると CUI の 1 本実行のヒープ量が動く (回帰)。GUI アプリ 5 本の `app.conf` 行を直す方が影響が閉じている | GUI モードのときだけ上限 (例 256KB) をかける。挙動が 2 系統になり、どちらで走ったか分からない不具合が出やすい |
+| 4 | `snd_cleanup()` (`exec.c:545`) の扱い | **サウンドに owner を持たせて `snd_cleanup_owned(id)` にする** | 現状は所有者を見ないので、アプリ A の終了がアプリ B の BGM を止める (4 本同時では実際に起きる) | (i) 現状維持 + 限界として明記、(ii) GUI モードでは `snd_cleanup` を呼ばない。どちらも「音が勝手に止まる/止まらない」が残る |
+| 5 | 塞がない起動の名前と戻り値 | **`exec_start(cmdline) → app_id / 0 / 負`** | `exec_run` と対で読める。「0 = もう終わっている」を返り値で表せば、WM は `gui_owner_exit` と突き合わせずに済む | `exec_spawn` (票の初版の語。PM が撤回済み)、あるいは `exec_run` に flags 引数を足す (KAPI の既存スロットは変えられない [ABI2] ので新スロットになる点は同じ) |
+| 6 | `exec_kill(app_id)` を切るか | **切る** | CTRL+STOP は走っているアプリ宛にしか立たない (`exec.c:265`)。止めてあるアプリを畳む口が無いと、resume されないアプリを永久に畳めない (受入 G4 が「フォーカス窓のアプリ」を対象にする以上、フォーカスが別 ID にあるときに要る) | 切らない。代わりに「畳みたい ID を必ず一度 resume してから CTRL+STOP を効かせる」— 固まったアプリには resume が返ってこないので破綻する |
+| 7 | park するのは「他に起こす相手が居るとき」だけか、`OP_WAIT` のたび毎回か | **他に起こす相手が居るときだけ** | アプリが 1 本のときの挙動が現行とビット単位で同じになる (回帰ゼロ)。毎回 park すると 1 本でも `OP_WAIT` ごとに CR3 が 2 回動く | 毎回 park。Win3.1 の GetMessage に厳密に近く公平だが、単独アプリの常用経路が遅くなる |
+| 8 | `exec_run` (塞ぐ方) を CPL=3 アプリからも呼べるままにするか | **呼べるまま。ID を池から取る** | 現行の振る舞い (アプリが子を起動して待つ) を落とさない。池が共有なので 5 本目は自然に `ERR_FULL` (模型ケース 8h/11e) | GUI モードでは `exec_run` を `OS32_ERR_INVAL` で塞ぐ。既存アプリの回帰になり得る |
+
+### D10. この設計で**測っていない**こと (K5b への申し送り、[V4])
+
+- `libos32gui.shlib` の `.data`/`.bss` ページ数、GUI アプリの text+bss、
+  `pgalloc` メタデータのページ数 — D5 の表はこれらを仮置きした算術で、実測ではない。
+- `pgalloc_alloc_n()` は**連続**ページを返す。4 本ぶんを取ったり返したりしたときの
+  断片化で、3 本目・4 本目の 256KB スタック (64 ページ連続) が取れなくなる可能性は
+  測っていない。取れなければ `ERR_NOMEM` で拒否されるので静かには壊れないが、
+  「入るはずが入らない」は起こり得る。ページ単位で張れば連続は不要になる
+  (per-app 物理の副産物) ので、K5b で断片化が出たらそちらへ倒せる。
+- ゲスト実機 (NP21/W) では何も動かしていない。受入は K5b の G1〜G8。
