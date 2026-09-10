@@ -139,12 +139,6 @@ fn compute_vis(st: &GuiState, index: usize) -> (RectSet, bool) {
         z += 1;
     }
 
-    // Fixed resident display sits above EVERY app, regardless of app Z/focus.
-    // Subtraction retains only proven pieces on overflow: never full fallback.
-    let (next, ok) = region_subtract_rect(&region, crate::terminal::rect(st));
-    region = next;
-    capped |= !ok;
-
     /* モーダルダイアログは WM 自身の窓で Z 順の最前面 (契約 U4)。ここで穴を
      * 開けておくと、下のアプリはダイアログの下を描かず、閉じたときに露出分の
      * `Paint` を受け取る (入れ子ループを作らずに再描画が回る)。

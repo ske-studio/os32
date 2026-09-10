@@ -468,7 +468,8 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   クリックが **Shut Down** に当たり、確認 Yes でゲストが `System halted` になった
   (リセットで復旧、NHD は無傷)。`gui_gate.py` は `startmenu.rs` の `ROOT_ITEMS` /
   `ITEM_H` / `BORDER` と `taskbar.rs` の `TASKBAR_H` から計算する形に直した。
-  **項目を足したら `START_MENU_ITEMS` も更新する。**
+  **項目を足したら `START_MENU_ITEMS` も更新する。** (2026-09-10 の T5b 撤去で
+  "Display fixture" は消え、項目は 5 行に戻した。)
 - 観測は `gui_bench` の `CLICK n` (text VRAM) が便利。`on_raw` で `Button` を数えるので、
   WM がアプリへ配ったかそのものが見える。1 クリック = +2 (押下+解放)。
 

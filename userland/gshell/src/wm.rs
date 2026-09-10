@@ -864,12 +864,6 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
         }
         z2 += 1;
     }
-    // Chrome writes whole decorations, not merely `clip`. Recompose the
-    // ENTIRE resident panel and upper WM overlays after those actual writes.
-    // Do not pretend `clip` bounded chrome's write footprint.
-    if recompose_panel(st) {
-        return;
-    }
     /* モーダルダイアログは WM 自身の窓なので、クロームの最後に直接描く
      * (契約 U8 / U4)。可視領域の計算でも「上にある窓」として扱われる。 */
     modal::draw(st, clip);
@@ -877,33 +871,6 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
      * 引いてあるので、アプリの Paint / COMMIT がここへ来ることは無い。 */
     taskbar::draw(st, clip);
     startmenu::draw(st, clip);
-}
-
-/// Repair the full panel after an un-clipped chrome/drag write. Caller has
-/// hidden the software cursor. Glyph work is forbidden in X4; no X4 caller.
-/// All upper overlays are recomposed over their full actual write rectangles,
-/// including FEP; queue exactly these repaired areas, not just requested clip.
-pub fn recompose_panel(st: &GuiState) -> bool {
-    let panel = crate::terminal::rect(st);
-    if panel.is_empty() {
-        return false;
-    }
-    crate::terminal::draw(st, panel);
-    let whole = Rect::new(0, 0, st.screen_w, st.screen_h);
-    modal::draw(st, whole);
-    taskbar::draw(st, whole);
-    startmenu::draw(st, whole);
-    fep::redraw_now(st);
-    for r in [
-        panel,
-        modal::rect(),
-        taskbar::rect(st),
-        startmenu::rect(),
-        fep::rect(),
-    ] {
-        queue_present(st, r);
-    }
-    true
 }
 
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
@@ -954,7 +921,6 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     if dragging {
         let f = st.drag_frame;
         chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
-        recompose_panel(st);
         queue_present(st, f);
     }
 

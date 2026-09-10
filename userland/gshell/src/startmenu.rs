@@ -59,8 +59,7 @@ const IT_FILEMAN: usize = 1;
 const IT_RUN: usize = 2;
 const IT_CUI: usize = 3;
 const IT_HALT: usize = 4;
-const IT_DISPLAY: usize = 5;
-const ROOT_ITEMS: usize = 6;
+const ROOT_ITEMS: usize = 5;
 
 /* context メニューの項目。 */
 const CT_FILEMAN: usize = 0;
@@ -503,12 +502,6 @@ fn activate(st: &mut GuiState) -> bool {
                 modal::open_wm_input(st, b"Run: absolute path\0", modal::WM_PURPOSE_RUN);
                 true
             }
-            IT_DISPLAY => {
-                close(st);
-                // Display-only flag, never a SessionAction or nested launch.
-                let _ = crate::terminal::request_open();
-                true
-            }
             IT_CUI => {
                 close(st);
                 /* 契約 S6: 確認 (Yes/No) を経てからでないと CUI へ落とさない。 */
@@ -658,7 +651,6 @@ fn item_label(mm: &Menu, idx: usize, buf: &mut [u8; NAME_LEN + 1]) -> *const u8 
             IT_FILEMAN => b"File Manager\0".as_ptr(),
             IT_RUN => b"Run...\0".as_ptr(),
             IT_CUI => b"CUI mode\0".as_ptr(),
-            IT_DISPLAY => b"Display fixture\0".as_ptr(),
             _ => b"Shut Down\0".as_ptr(),
         },
         KIND_CTX => match idx {

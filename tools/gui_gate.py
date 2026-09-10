@@ -135,8 +135,8 @@ class Shots:
 # ---------------------------------------------------------------------------
 #  v1.2 の座標 (W3 が報告した値。ax/ay 換算は Mouse が行う)
 #  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
-#  Start menu 行 r: start_row(H, r) — 項目数から導く (下の注記)。v1.3 の順は
-#    Programs / File Manager / Run... / CUI mode / Shut Down / Display fixture
+#  Start menu 行 r: start_row(H, r) — 項目数から導く (下の注記)。順は
+#    Programs / File Manager / Run... / CUI mode / Shut Down
 #  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
 # ---------------------------------------------------------------------------
 def tb(h):
@@ -144,12 +144,13 @@ def tb(h):
 
 
 # Start メニューはタスクバーから**上へ**伸びるので、項目数が増えると全行が上へ
-# ずれる。v1.3 (T5a) で "Display fixture" が足されて 5 → 6 行になり、5 行前提の
-# 固定値 (H-107+18r) は行 r が r+1 に当たっていた (2026-09-10: 「CUI mode」の
-# クリックが Shut Down に当たりゲストが halt)。項目数は
+# ずれる。固定値 (H-107+18r) を使っていた頃は、項目が 1 行増えただけで行 r が
+# r+1 に当たっていた (2026-09-10: 「CUI mode」のクリックが Shut Down に当たり
+# ゲストが halt)。以後は項目数から導く。T5b 撤去で 5 行に戻した (2026-09-10)。
+# 項目数は
 # userland/gshell/src/startmenu.rs の ROOT_ITEMS、行高 ITEM_H=18、枠 BORDER=2、
 # taskbar.rs の TASKBAR_H=24 と一致させること。
-START_MENU_ITEMS = 6
+START_MENU_ITEMS = 5
 START_MENU_ITEM_H = 18
 START_MENU_BORDER = 2
 TASKBAR_H = 24

@@ -105,13 +105,18 @@ pub unsafe extern "C" fn kcg_draw_utf8(x: i32, y: i32, s: *const u8, fg: u8, bg:
     }
     xx - x
 }
+/* lib/utf8.c の unicode_to_ank と同じ対応。全角は 0 (= FEP のセル幅判定が
+ * 2 桁扱いにする)。以前は libos32term_render::ank を借りていたが、gshell は
+ * もう T4/T5R に依存しないのでここへ写した。 */
 #[no_mangle]
 pub extern "C" fn unicode_to_ank(cp: u32) -> u8 {
-    libos32term_render::ank(char::from_u32(cp).unwrap_or('?')).unwrap_or(0)
-}
-#[no_mangle]
-pub extern "C" fn unicode_to_jis(_: u32) -> u16 {
-    0x467c
+    match cp {
+        n @ 0x20..=0x7e => n as u8,
+        0xa5 => 0x5c,
+        n @ 0xff61..=0xff9f => (n - 0xff61 + 0xa1) as u8,
+        n @ 0xff01..=0xff5e => (n - 0xff01 + 0x21) as u8,
+        _ => 0,
+    }
 }
 unsafe extern "C" fn ank(_: u8, p: *mut u8) {
     READS.fetch_add(1, Ordering::SeqCst);
@@ -125,16 +130,11 @@ unsafe extern "C" fn alloc(n: u32) -> *mut u8 {
     ALLOCS.fetch_add(1, Ordering::SeqCst);
     std::alloc::alloc(std::alloc::Layout::from_size_align(n as usize, 4).unwrap())
 }
-unsafe extern "C" fn free(p: *mut u8) {
+/* 数えるだけ。gshell 側に mem_alloc を呼ぶ経路がもう無く、確保長を控えて
+ * いないので、ここで dealloc すると layout 不一致になる。試験プロセスは
+ * 短命なので意図的に leak させる。 */
+unsafe extern "C" fn free(_p: *mut u8) {
     FREES.fetch_add(1, Ordering::SeqCst);
-    std::alloc::dealloc(
-        p,
-        std::alloc::Layout::from_size_align(
-            40 * 64 * 2 * std::mem::size_of::<libos32term::model::Cell>(),
-            4,
-        )
-        .unwrap(),
-    );
 }
 unsafe extern "C" fn zero() -> u32 {
     0
