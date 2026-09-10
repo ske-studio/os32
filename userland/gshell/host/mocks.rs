@@ -148,7 +148,7 @@ unsafe extern "C" fn no_key() -> i32 {
 unsafe extern "C" fn nothing() {}
 unsafe extern "C" fn dirty(_: i32, _: i32, _: i32, _: i32) {}
 unsafe extern "C" fn mouse(p: *mut u8) {
-    let (x, y, b) = *MOUSE.lock().unwrap();
+    let (x, y, b) = *lk(&MOUSE);
     std::ptr::write_bytes(p, 0, 10);
     p.cast::<i16>().write(x);
     p.add(2).cast::<i16>().write(y);
@@ -197,7 +197,7 @@ pub static RAWKEYS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// テストが積むカーネル FEP (`ime_feed_key`) の返り値。空なら 0x100 (Pass)。
 pub static IME_SCRIPT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 unsafe extern "C" fn raw_key() -> i32 {
-    let mut q = RAWKEYS.lock().unwrap();
+    let mut q = lk(&RAWKEYS);
     if q.is_empty() {
         -1
     } else {
@@ -205,7 +205,7 @@ unsafe extern "C" fn raw_key() -> i32 {
     }
 }
 unsafe extern "C" fn ime_feed(_keydata: i32) -> i32 {
-    let mut q = IME_SCRIPT.lock().unwrap();
+    let mut q = lk(&IME_SCRIPT);
     if q.is_empty() {
         0x100
     } else {
@@ -221,10 +221,101 @@ pub fn fep_script(script: &[i32]) {
         (*os32api::api_ptr()).ime_is_active = ime_active;
         (*os32api::api_ptr()).ime_feed_key = ime_feed;
     }
-    *IME_SCRIPT.lock().unwrap() = script.to_vec();
+    *lk(&IME_SCRIPT) = script.to_vec();
 }
 pub fn push_rawkeys(keys: &[i32]) {
-    RAWKEYS.lock().unwrap().extend_from_slice(keys);
+    lk(&RAWKEYS).extend_from_slice(keys);
+}
+
+/* ================================================================ */
+/*  K5b-W: アプリ 4 本の同時実行 (KAPI v44) の差し替え                */
+/*                                                                  */
+/*  `exec_park` はゲストでは longjmp して**戻らない**。ホストでは戻る */
+/*  しかないので、呼ばれた回数だけを数えて `PARK_RET` を返す。        */
+/*  制御の流れ (park → top-level → resume) はカーネルの領分で、       */
+/*  `tools/tests/multiapp_impl_host.c` が実物の AppSlot で検査済み。  */
+/*  ここで押さえるのは **WM の判断** (誰を起こすか / いつ譲るか)。    */
+/* ================================================================ */
+
+/// `exec_park` が呼ばれた回数。
+pub static PARKS: AtomicUsize = AtomicUsize::new(0);
+/// `exec_park` の戻り値 (既定 `OS32_ERR_INVAL` = 譲れなかった)。
+pub static PARK_RET: Mutex<i32> = Mutex::new(-1);
+/// `exec_resume(app_id, wait_ret)` の呼び出し列。
+pub static RESUMES: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+/// `exec_resume` の戻り値の台本 (先頭から 1 件ずつ。空なら app_id = また park)。
+pub static RESUME_SCRIPT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `exec_start(cmdline)` の呼び出し列 (パス文字列)。
+pub static STARTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// `exec_start` の戻り値の台本 (空なら 2 = app_id 2 が park した)。
+pub static START_SCRIPT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `exec_kill(app_id)` の呼び出し列。
+pub static KILLS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `snd_focus(app_id)` の呼び出し列。
+pub static SND_FOCUS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// 中毒 (panic 中に掴んでいた) した Mutex でも読めるようにする。検査が
+/// `assert!(*X.lock().unwrap() == ..)` で落ちると次の試験まで巻き添えになる。
+fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `snd_focus` へ渡した owner の列 (複製。ロックを持ったまま assert しない)。
+pub fn snd_focus_calls() -> Vec<i32> {
+    lk(&SND_FOCUS).clone()
+}
+/// `exec_resume(app_id, wait_ret)` の呼び出し列 (複製)。
+pub fn resume_calls() -> Vec<(i32, i32)> {
+    lk(&RESUMES).clone()
+}
+/// `exec_kill(app_id)` の呼び出し列 (複製)。
+pub fn kill_calls() -> Vec<i32> {
+    lk(&KILLS).clone()
+}
+/// `exec_start(cmdline)` の呼び出し列 (複製)。
+pub fn start_calls() -> Vec<Vec<u8>> {
+    lk(&STARTS).clone()
+}
+
+unsafe extern "C" fn exec_park() -> u32 {
+    PARKS.fetch_add(1, Ordering::SeqCst);
+    *lk(&PARK_RET) as u32
+}
+unsafe extern "C" fn exec_resume(app_id: u32, wait_ret: u32) -> u32 {
+    RESUMES
+        .lock()
+        .unwrap()
+        .push((app_id as i32, wait_ret as i32));
+    let mut q = lk(&RESUME_SCRIPT);
+    if q.is_empty() {
+        app_id
+    } else {
+        q.remove(0) as u32
+    }
+}
+unsafe extern "C" fn exec_start(cmdline: *const u8) -> u32 {
+    let mut n = 0;
+    while *cmdline.add(n) != 0 && n < 256 {
+        n += 1;
+    }
+    STARTS
+        .lock()
+        .unwrap()
+        .push(std::slice::from_raw_parts(cmdline, n).to_vec());
+    let mut q = lk(&START_SCRIPT);
+    if q.is_empty() {
+        2
+    } else {
+        q.remove(0) as u32
+    }
+}
+unsafe extern "C" fn exec_kill(app_id: u32) -> u32 {
+    lk(&KILLS).push(app_id as i32);
+    0
+}
+unsafe extern "C" fn snd_focus(app_id: i32) -> u32 {
+    lk(&SND_FOCUS).push(app_id);
+    0
 }
 
 pub fn init() {
@@ -247,8 +338,24 @@ pub fn init() {
     a.mem_free = free;
     a.gfx_add_dirty_rect = dirty;
     a.gfx_present_dirty = nothing;
-    RAWKEYS.lock().unwrap().clear();
-    IME_SCRIPT.lock().unwrap().clear();
+    /* `op_wait` / 単独ループの待ち。ホストでは何もしない (時計は get_tick 側)。 */
+    a.sys_halt = nothing;
+    a.exec_park = exec_park;
+    a.exec_resume = exec_resume;
+    a.exec_start = exec_start;
+    a.exec_kill = exec_kill;
+    a.snd_focus = snd_focus;
+    lk(&RAWKEYS).clear();
+    lk(&IME_SCRIPT).clear();
+    PARKS.store(0, Ordering::SeqCst);
+    *lk(&PARK_RET) = -1;
+    lk(&RESUMES).clear();
+    lk(&RESUME_SCRIPT).clear();
+    lk(&STARTS).clear();
+    lk(&START_SCRIPT).clear();
+    lk(&KILLS).clear();
+    lk(&SND_FOCUS).clear();
+    crate::multiapp::reset();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);
 }

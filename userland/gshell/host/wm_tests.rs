@@ -597,3 +597,773 @@ fn new_press_during_modal_is_not_forwarded_to_the_app() {
     modal::on_key(&mut st, 0, 0x1b, 0);
     assert!(!modal::is_open());
 }
+
+/* ================================================================ */
+/*  K5b-W — アプリ 4 本の同時実行 (票 TASK_K5B_gshell.md)            */
+/*                                                                  */
+/*  規則の正典は K5a 設計 D11-3 / D11-3a、模型は                     */
+/*  `tools/tests/multiapp_model_host.c` のケース 12〜16 (84 検査)。   */
+/*  ここは**同じ性質**を、模型の `MaState` ではなく実物の             */
+/*  `GuiState` + `multiapp` の状態に対して検査する。                  */
+/*                                                                  */
+/*  `input_ready` / `derived_ready` は模型では試験が直接立てていたが、 */
+/*  実物は WM 状態から算出するので、試験は「リングにイベントを積む」  */
+/*  「`configure_pending` を立てる」という**実物の材料**で作る。      */
+/* ================================================================ */
+
+/// アプリ 4 本 (owner 2〜5) がスロット 0〜3 と窓を 1 枚ずつ持つ状態。
+/// Z 順は 0,1,2,3 なので最前面 = 窓 3 = owner 5 (`front_owner()`)。
+fn four_app_state(shm: &crate::mocks::Shm) -> crate::wm::GuiState {
+    use crate::{slot, wm};
+    let mut st = wm::GuiState::NEW;
+    st.shm_base = shm.base();
+    let mut k = 0usize;
+    while k < 4 {
+        let owner = 2 + k as i32;
+        st.slots[k].used = true;
+        st.slots[k].owner = owner;
+        slot::init_header(&st, k);
+        let mut w = wm::Win::EMPTY;
+        w.used = true;
+        w.visible = true;
+        w.owner = owner;
+        w.gen = 1;
+        w.x = 10 + 140 * k as i32;
+        w.y = 10;
+        w.w = 100;
+        w.h = 80;
+        st.windows[k] = w;
+        st.zorder[k] = k;
+        k += 1;
+    }
+    st.z_count = 4;
+    st
+}
+
+/// `multiapp` の表に 4 本を載せる (`exec_start` が 4 回成功した後と同じ形)。
+fn seed_four_apps() {
+    use crate::multiapp;
+    let mut id = 2;
+    while id <= 5 {
+        multiapp::on_start(id);
+        id += 1;
+    }
+}
+
+/// 入力群 (未読の待ち行列型) を作る / 消す。実物のリングを使う。
+fn set_input_ready(st: &mut crate::wm::GuiState, id: i32, on: bool) {
+    use crate::{ring, slot};
+    use os32api::gui::proto::GUI_EV_CLOSE;
+    let s = st.slot_of_owner(id).expect("スロットが無い");
+    if on {
+        if crate::multiapp::input_ready(st, id) {
+            return;
+        }
+        let ev = ring::ev_simple(GUI_EV_CLOSE, 0, 0);
+        assert!(ring::append(st, s, &ev), "リングへ積めない");
+    } else {
+        let mut h = slot::read_header(st, s);
+        h.ring_head = h.ring_tail;
+        slot::write_header(st, s, &h);
+    }
+}
+
+/// 導出群 (`Configure` 未通知) を作る / 消す。
+fn set_derived_ready(st: &mut crate::wm::GuiState, id: i32, on: bool) {
+    let i = (id - 2) as usize;
+    st.windows[i].configure_pending = on;
+}
+
+/// フォーカス (= 最前面の可視窓の owner) をこの ID にする。
+fn focus_app(st: &mut crate::wm::GuiState, id: i32) {
+    st.bring_to_front((id - 2) as usize);
+    assert_eq!(st.front_owner(), id, "フォーカスが動いていない");
+}
+
+/// 「park して次の 1 本を起こす」1 回ぶん。**判断は実物**
+/// (`should_park` / `pick` / `mark_resumed`) で、ここが模すのは
+/// カーネルの制御の流れ (longjmp と `ring3_resume`) だけ。
+/// 戻り値は新しく走り出した ID (park しなかったら `cur` のまま、
+/// 起こす相手が居なければ 0 = WM top-level)。
+fn sched_step(st: &mut crate::wm::GuiState, cur: i32) -> i32 {
+    use crate::multiapp;
+    if !multiapp::should_park(st, cur) {
+        return cur;
+    }
+    multiapp::note_parked(cur, None);
+    let k = multiapp::pick(st);
+    if k == 0 {
+        return 0;
+    }
+    multiapp::mark_resumed(k);
+    k
+}
+
+/* ---- ケース 12 相当: 同時 ready の選択規則 (D11-3 の (2)) ---- */
+#[test]
+fn pick_follows_the_frozen_rule_focus_then_input_then_derived() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+
+    /* 12a フォーカス窓の owner が入力群に居れば、それを最優先。 */
+    set_input_ready(&mut st, 3, true);
+    set_input_ready(&mut st, 5, true);
+    focus_app(&mut st, 5);
+    multiapp::set_last_run(2);
+    assert_eq!(multiapp::pick(&st), 5, "12a 入力群のフォーカスを選ばない");
+
+    /* 12b フォーカスが入力群に居なければ last_run+1 から ID 昇順に巡回。 */
+    focus_app(&mut st, 2); /* 2 は ready でない */
+    multiapp::set_last_run(3); /* 巡回は 4 → 5 → 2 → 3 */
+    assert_eq!(multiapp::pick(&st), 5, "12b 入力群のラウンドロビンが違う");
+
+    /* 12c 入力群が空なら導出群を同じ巡回で。 */
+    set_input_ready(&mut st, 3, false);
+    set_input_ready(&mut st, 5, false);
+    set_derived_ready(&mut st, 2, true);
+    set_derived_ready(&mut st, 4, true);
+    focus_app(&mut st, 2);
+    multiapp::set_last_run(2); /* 巡回は 3 → 4 → 5 → 2 */
+    assert_eq!(multiapp::pick(&st), 4, "12c 導出群のラウンドロビンが違う");
+
+    /* 12d 導出群ではフォーカスを優先しない (優先していれば 4 になる)。 */
+    focus_app(&mut st, 4);
+    multiapp::set_last_run(4); /* 巡回は 5 → 2 → 3 → 4 */
+    assert_eq!(multiapp::pick(&st), 2, "12d 導出群でフォーカスを優先した");
+
+    /* 12e 入力は導出より必ず先。 */
+    set_input_ready(&mut st, 5, true);
+    focus_app(&mut st, 2);
+    multiapp::set_last_run(4);
+    assert_eq!(multiapp::pick(&st), 5, "12e 入力群が導出群より後になった");
+
+    /* 12f 誰も ready でなければ起こさない。 */
+    set_derived_ready(&mut st, 2, false);
+    set_derived_ready(&mut st, 4, false);
+    set_input_ready(&mut st, 5, false);
+    assert_eq!(multiapp::pick(&st), 0, "12f ready ゼロで誰かを起こした");
+}
+
+/* ---- ケース 13 相当: 走っているアプリが譲るか (D11-3 の (1)) ---- */
+#[test]
+fn should_park_matches_the_five_frozen_branches() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+    multiapp::mark_resumed(2); /* ID 2 が走っている */
+
+    /* 13a 自分に入力があれば park しない (打鍵の連続を取りこぼさない)。 */
+    set_input_ready(&mut st, 2, true);
+    set_input_ready(&mut st, 4, true);
+    assert!(!multiapp::should_park(&st, 2), "13a 自分の入力で譲った");
+    assert_eq!(multiapp::input_streak(), 1, "13a 据え置きが数えられていない");
+
+    /* 13b 他に ready が居なければ park しない (1 本のときの回帰ゼロ)。 */
+    set_input_ready(&mut st, 2, false);
+    set_derived_ready(&mut st, 2, true);
+    set_input_ready(&mut st, 4, false);
+    assert!(!multiapp::should_park(&st, 2), "13b 相手が居ないのに譲った");
+
+    /* 13c 他に入力があれば、導出だけの自分は譲る。 */
+    set_input_ready(&mut st, 4, true);
+    assert!(multiapp::should_park(&st, 2), "13c 他の入力に譲らない");
+
+    /* 13d 他も導出だけなら巡回のために譲る。 */
+    set_input_ready(&mut st, 4, false);
+    set_derived_ready(&mut st, 4, true);
+    assert!(multiapp::should_park(&st, 2), "13d 導出どうしで譲らない");
+
+    /* 13e 自分が ready でなければ譲る。 */
+    set_derived_ready(&mut st, 2, false);
+    assert!(multiapp::should_park(&st, 2), "13e ready でないのに譲らない");
+
+    /* 13f (実物だけの分岐) WM が握っていない ID は park できない。 */
+    assert!(!multiapp::should_park(&st, 1), "13f シェル帯を park しようとした");
+    multiapp::on_owner_exit(3);
+    assert!(!multiapp::should_park(&st, 3), "13f 未追跡の ID を park しようとした");
+}
+
+/* ---- ケース 14 相当: 導出群だけの 4 本が 1 周で全員走る ---- */
+#[test]
+fn derived_only_apps_each_get_exactly_one_turn_per_round() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+    let mut id = 2;
+    while id <= 5 {
+        set_derived_ready(&mut st, id, true);
+        id += 1;
+    }
+    focus_app(&mut st, 2); /* フォーカス固定。飢餓の原因にならないこと */
+    multiapp::set_last_run(0);
+
+    let mut order = [0i32; 4];
+    let mut k = 0;
+    while k < 4 {
+        let picked = multiapp::pick(&st);
+        assert!(picked >= 2 && picked <= 5, "14a {k} 周目に 1 本選べない");
+        order[k] = picked;
+        multiapp::mark_resumed(picked);
+        multiapp::note_parked(picked, None);
+        k += 1;
+    }
+    assert_eq!(order, [2, 3, 4, 5], "14b 巡回が ID 昇順でない: {order:?}");
+    let mut seen = [0u8; 4];
+    for o in order.iter() {
+        seen[(*o - 2) as usize] += 1;
+    }
+    assert_eq!(seen, [1, 1, 1, 1], "14c 4 周で全員 1 回ずつにならない");
+    assert_eq!(multiapp::pick(&st), 2, "14d 1 周したら先頭へ戻らない");
+}
+
+/* ---- ケース 15 相当: 自作入力で park を回避できない (反例 1) ----
+ *  レビュアーの反例。アプリが自分の窓 2 枚へ交互に `set_focus()` すると
+ *  `emit_focus_change` が旧窓と新窓の**両方の owner** へ `Focus` を流すので、
+ *  そのアプリ自身に待ち行列型が湧き続ける (人間の入力は要らない)。
+ *  「入力群は有限」では飢餓を止められず、止めるのは `INPUT_STREAK_MAX`。 */
+#[test]
+fn an_app_feeding_itself_focus_events_cannot_starve_another() {
+    use crate::{mocks, multiapp, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    /* N = 2 (ID 2 と 3 だけ)。窓とスロットも 2 本に絞る。 */
+    st.windows[2] = wm::Win::EMPTY;
+    st.windows[3] = wm::Win::EMPTY;
+    st.z_count = 2;
+    st.slots[2] = wm::Slot::EMPTY;
+    st.slots[3] = wm::Slot::EMPTY;
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+
+    /* A (=2) は自分で湧かせた入力を持ち続ける。B (=3) は Paint 待ち。 */
+    set_input_ready(&mut st, 2, true);
+    set_derived_ready(&mut st, 3, true);
+    focus_app(&mut st, 2); /* A がフォーカスを握ったまま */
+    multiapp::mark_resumed(2);
+
+    let mut cur = 2;
+    let mut b_at = 0u32;
+    let mut parks = 0u32;
+    let mut i = 0u32;
+    while i < 200 {
+        let before = cur;
+        cur = sched_step(&mut st, cur);
+        assert_ne!(cur, 0, "15a 譲ったのに起こす相手が居ない");
+        if cur != before {
+            parks += 1;
+        }
+        if cur == 3 && b_at == 0 {
+            b_at = i + 1;
+        }
+        i += 1;
+    }
+    assert!(parks > 0, "15a 自作入力を続けると park が 1 度も起きない");
+    assert!(b_at > 0, "15b Paint 待ちの B が走らない (飢餓)");
+    /* N=2 の上限 = (2N-2)x(STREAK+1) = 10 に**ちょうど**届く (式がタイト)。 */
+    assert_eq!(b_at, 10, "15c N=2 の上限 (10) と実測がずれた");
+    assert!(b_at <= multiapp::STARVE_BOUND, "15d 定数の上限を超えた");
+}
+
+/* ---- ケース 16 相当: ラウンドをまたぐ待ちの上限 (反例 2) ---- */
+fn run_cross_round(focus_id: i32) -> u32 {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+    let mut id = 2;
+    while id <= 5 {
+        set_input_ready(&mut st, id, true);
+        id += 1;
+    }
+    focus_app(&mut st, 2);
+    let k = multiapp::pick(&st);
+    assert_eq!(k, 2, "16 前提: ラウンド先頭で A が選ばれる");
+    multiapp::mark_resumed(2);
+    /* A は入力を消費して Paint だけ残す = 以後ずっと導出群。
+     * B/C/D は入力 ready を維持する (消費しない)。 */
+    set_input_ready(&mut st, 2, false);
+    set_derived_ready(&mut st, 2, true);
+    focus_app(&mut st, focus_id);
+
+    let mut cur = 2;
+    let mut n = 0u32;
+    while n < 200 {
+        /* n = 0 が「A が park する OP_WAIT」= 起算点 (D11-3a の前提 1)。 */
+        cur = sched_step(&mut st, cur);
+        assert_ne!(cur, 0, "16 譲ったのに起こす相手が居ない");
+        if cur == 2 {
+            return n;
+        }
+        n += 1;
+    }
+    0
+}
+
+#[test]
+fn a_derived_only_app_runs_within_the_re_derived_bound_across_rounds() {
+    use crate::multiapp;
+    let a2 = run_cross_round(2);
+    let a3 = run_cross_round(3);
+    let a5 = run_cross_round(5);
+    assert!(a2 > 0, "16a 導出群の A が走らない (無限待ち)");
+    assert!(a2 <= multiapp::STARVE_BOUND, "16b A が上限 (30) を超えた: {a2}");
+    assert_eq!(
+        a2,
+        multiapp::STARVE_BOUND,
+        "16c 上限が緩い (この構成はちょうど 30 に届くはず)"
+    );
+    assert!(a3 > 0 && a3 <= multiapp::STARVE_BOUND, "16d フォーカス B で超過: {a3}");
+    assert!(a5 > 0 && a5 <= multiapp::STARVE_BOUND, "16e フォーカス D で超過: {a5}");
+}
+
+/* ---- 票の追加検査 1: 5 本目は ERR_FULL (契約 T2a、受入 G3) ---- */
+#[test]
+fn the_fifth_app_gets_err_full_from_op_init_and_the_four_survive() {
+    use crate::{handler, mocks, wm};
+    use os32api::gui::proto::{GUI_OP_INIT, GUI_SLOT_MAX, OS32_ERR_FULL};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    {
+        let st = wm::g();
+        *st = wm::GuiState::NEW;
+        st.shm_base = shm.base();
+        st.inited = true;
+    }
+
+    let mut k = 0;
+    while k < GUI_SLOT_MAX {
+        let owner = 2 + k as i32;
+        assert_eq!(
+            handler::gshell_gui_handler(GUI_OP_INIT, 0, owner),
+            k as i32,
+            "{owner} にスロット {k} が配られない"
+        );
+        k += 1;
+    }
+    assert_eq!(
+        handler::gshell_gui_handler(GUI_OP_INIT, 0, 6),
+        OS32_ERR_FULL,
+        "5 本目が ERR_FULL でない"
+    );
+    /* 既存 4 本は無事 (T2a「5 本目は起動できない」= 4 本は動き続ける)。 */
+    let st = wm::g();
+    let mut k = 0;
+    while k < GUI_SLOT_MAX {
+        assert!(st.slots[k].used, "5 本目の拒否で既存スロットが壊れた");
+        assert_eq!(st.slots[k].owner, 2 + k as i32);
+        k += 1;
+    }
+    st.inited = false;
+}
+
+/* ---- 票の追加検査 2: 終了で 1 本分だけ回収 (契約 T4 / U8、受入 G2) ---- */
+#[test]
+fn owner_exit_reclaims_exactly_one_app_worth_of_state() {
+    use crate::{handler, mocks, multiapp, timer, wm};
+    use os32api::gui::proto::GUI_OP_OWNER_EXIT;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = four_app_state(&shm);
+        g.inited = true;
+    }
+    seed_four_apps();
+    /* 4 本ともタイマを 1 本ずつ持つ (U5)。 */
+    let mut id = 2;
+    while id <= 5 {
+        let g = wm::g();
+        let wi = (id - 2) as usize;
+        let win = g.windows[wi].id(wi);
+        assert_eq!(timer::set(g, id, win, 1, 5, true, 0), 0, "タイマが張れない");
+        id += 1;
+    }
+
+    /* ID 3 だけ畳む。 */
+    assert_eq!(handler::gshell_gui_handler(GUI_OP_OWNER_EXIT, 0, 3), 0);
+
+    let g = wm::g();
+    assert!(!multiapp::is_tracked(3), "畳んだ ID が表に残っている");
+    assert_eq!(multiapp::live_count(), 3, "回収が 1 本分でない");
+    assert!(g.slot_of_owner(3).is_none(), "ID 3 のスロットが残った");
+    assert!(!g.windows[1].used, "ID 3 の窓が残った");
+    assert!(!timer::has_expired(g, 3, 1000), "ID 3 のタイマが残った");
+    /* 他の 3 本は 1 バイトも触られない。 */
+    let mut id = 2;
+    while id <= 5 {
+        if id != 3 {
+            assert!(multiapp::is_tracked(id), "ID {id} が巻き添えで消えた");
+            assert!(g.slot_of_owner(id).is_some(), "ID {id} のスロットが消えた");
+            assert!(g.windows[(id - 2) as usize].used, "ID {id} の窓が消えた");
+            assert!(timer::has_expired(g, id, 1000), "ID {id} のタイマが消えた");
+        }
+        id += 1;
+    }
+    g.inited = false;
+}
+
+/* ---- 票の追加検査 3: 切替は `op_wait` の中でだけ ----
+ *  `exec_park` を呼ぶ点も、そこへ入る `maybe_park` を呼ぶ点も 1 か所。
+ *  「呼ばれない経路」は実行時に観測できないので、gshell の全ソースを
+ *  走査して数える (後から別の場所へ足したら落ちる)。 */
+#[test]
+fn exec_park_has_exactly_one_call_site_and_it_is_the_op_wait_loop_head() {
+    let src_dir = std::path::Path::new(file!())
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("src");
+    let mut park_calls = 0;
+    let mut maybe_park_calls = 0;
+    let mut resume_calls = 0;
+    for e in std::fs::read_dir(&src_dir).expect("src が読めない") {
+        let p = e.unwrap().path();
+        if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&p).unwrap();
+        for line in text.lines() {
+            /* コメント行は数えない。 */
+            let t = line.trim_start();
+            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                continue;
+            }
+            if line.contains(".exec_park)(") {
+                park_calls += 1;
+            }
+            if line.contains(".exec_resume)(") {
+                resume_calls += 1;
+            }
+            if line.contains("multiapp::maybe_park(") {
+                maybe_park_calls += 1;
+                assert_eq!(
+                    p.file_name().unwrap(),
+                    "handler.rs",
+                    "maybe_park が handler.rs の外から呼ばれている: {p:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(park_calls, 1, "exec_park の呼び出し点が 1 つでない");
+    assert_eq!(resume_calls, 1, "exec_resume の呼び出し点が 1 つでない");
+    assert_eq!(maybe_park_calls, 1, "maybe_park の呼び出し点が 1 つでない");
+
+    /* その 1 か所が `op_wait` の中で、`wm_cycle` より前 (= ループ先頭) にある。 */
+    let handler = std::fs::read_to_string(src_dir.join("handler.rs")).unwrap();
+    let body = handler
+        .split("fn op_wait(")
+        .nth(1)
+        .expect("op_wait が見つからない");
+    let body = body.split("\nfn ").next().unwrap();
+    let park_at = body.find("multiapp::maybe_park(").expect("op_wait の中に無い");
+    let cycle_at = body.find("wm::wm_cycle(").expect("op_wait に wm_cycle が無い");
+    assert!(
+        park_at < cycle_at,
+        "maybe_park がループ先頭 (wm_cycle の前) に無い"
+    );
+}
+
+/* ---- 票の追加検査 4: 1 本のときは `exec_park` が 0 回 (回帰ゼロ) ---- */
+/// `get_tick` を 1 呼び出しごとに進める (`op_wait` の期限を切るため)。
+static TICKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+unsafe extern "C" fn ticking() -> u32 {
+    TICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `op_wait` を timeout つきで 1 回回す (期限で必ず戻る)。
+fn drive_op_wait(owner: i32, timeout: u32) -> i32 {
+    use crate::handler;
+    use os32api::gui::proto::GUI_OP_WAIT;
+    TICKS.store(0, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        (*os32api::api_ptr()).get_tick = ticking;
+    }
+    handler::gshell_gui_handler(GUI_OP_WAIT, timeout, owner)
+}
+
+#[test]
+fn a_single_app_never_parks_and_keeps_the_old_wm_cycle_halt_loop() {
+    use crate::{mocks, multiapp, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = four_app_state(&shm);
+        /* アプリは 1 本だけ (ID 2)。他の窓とスロットは畳む。 */
+        let mut k = 1;
+        while k < 4 {
+            g.windows[k] = wm::Win::EMPTY;
+            g.slots[k] = wm::Slot::EMPTY;
+            k += 1;
+        }
+        g.z_count = 1;
+        g.inited = true;
+    }
+    multiapp::on_start(2);
+    multiapp::mark_resumed(2);
+
+    drive_op_wait(2, 3);
+    assert_eq!(
+        mocks::PARKS.load(Ordering::SeqCst),
+        0,
+        "アプリが 1 本なのに exec_park を呼んだ (回帰)"
+    );
+    /* 空回りで 0 回になったのではないこと: `wm_cycle` が 1 周でも回れば
+     * 末尾の `sync_snd_focus` がフォーカス (owner 2) を音へ渡している。 */
+    assert_eq!(
+        mocks::snd_focus_calls(),
+        vec![2],
+        "op_wait のループが 1 周も回っていない (試験が空振り)"
+    );
+    wm::g().inited = false;
+}
+
+/* ---- 票の追加検査 5: 2 本目が ready なら `op_wait` の中で譲る ---- */
+#[test]
+fn op_wait_parks_when_another_app_is_ready() {
+    use crate::{mocks, multiapp, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = four_app_state(&shm);
+        let mut k = 2;
+        while k < 4 {
+            g.windows[k] = wm::Win::EMPTY;
+            g.slots[k] = wm::Slot::EMPTY;
+            k += 1;
+        }
+        g.z_count = 2;
+        g.inited = true;
+        g.windows[1].configure_pending = true; /* 相手 (ID 3) だけが ready */
+    }
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    multiapp::mark_resumed(2);
+
+    drive_op_wait(2, 3);
+    assert!(
+        mocks::PARKS.load(Ordering::SeqCst) >= 1,
+        "相手が ready なのに op_wait が譲らなかった"
+    );
+    wm::g().inited = false;
+}
+
+/* ---- 票の追加検査 6: フォーカス切替で `snd_focus` は 1 回だけ ----
+ *  決裁 D9-4 / 受入 G10。同じフォーカスのまま何周回しても呼ばない。 */
+#[test]
+fn snd_focus_is_called_once_per_focus_change() {
+    use crate::{mocks, multiapp, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+
+    multiapp::sync_snd_focus(&st); /* 最前面 = owner 5 */
+    assert_eq!(mocks::snd_focus_calls(), vec![5], "初回が違う");
+    multiapp::sync_snd_focus(&st);
+    multiapp::sync_snd_focus(&st);
+    assert_eq!(
+        mocks::snd_focus_calls().len(),
+        1,
+        "フォーカスが動いていないのに snd_focus を呼んだ"
+    );
+
+    focus_app(&mut st, 2);
+    multiapp::sync_snd_focus(&st);
+    assert_eq!(
+        mocks::snd_focus_calls(),
+        vec![5, 2],
+        "切替のたびに 1 回だけ呼ばれていない"
+    );
+    assert_eq!(multiapp::snd_owner(), 2);
+
+    /* 窓が 1 枚も無くなったら音の所有権はシェル帯 (1) へ戻す。 */
+    let mut k = 0;
+    while k < 4 {
+        st.windows[k] = wm::Win::EMPTY;
+        k += 1;
+    }
+    st.z_count = 0;
+    multiapp::sync_snd_focus(&st);
+    assert_eq!(
+        mocks::snd_focus_calls(),
+        vec![5, 2, 1],
+        "最後の窓が消えても音がアプリのままになっている"
+    );
+}
+
+/* ---- 票の追加検査 7: `LAUNCH` は「1 本増やす」(契約 S2 の読み替え) ---- */
+#[test]
+fn launch_no_longer_quits_the_running_apps_but_switch_cui_still_does() {
+    use crate::{mocks, ring, session, slot, wm};
+    use os32api::gui::proto::{
+        GuiEvent, GUI_EV_QUIT, GUI_RING_CAPACITY, GUI_SESSION_LAUNCH, GUI_SESSION_SWITCH_CUI,
+    };
+
+    fn quit_events(st: &wm::GuiState, slot_i: usize) -> usize {
+        let h = slot::read_header(st, slot_i);
+        let base = slot::ring_ptr(st, slot_i);
+        let mut n = 0;
+        let mut i = h.ring_head;
+        while i != h.ring_tail {
+            let ev: GuiEvent = unsafe {
+                core::ptr::read_unaligned(
+                    base.add((i as usize % GUI_RING_CAPACITY) * 16) as *const GuiEvent,
+                )
+            };
+            if ev.kind == GUI_EV_QUIT {
+                n += 1;
+            }
+            i = i.wrapping_add(1);
+        }
+        n
+    }
+
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+
+    /* LAUNCH: 誰にも Quit を送らない。top-level では即実行してよい。 */
+    let path = b"/usr/bin/gui_demo.bin";
+    assert_eq!(
+        session::request(&mut st, 2, GUI_SESSION_LAUNCH, 0, path, path.len()),
+        0
+    );
+    let mut k = 0;
+    while k < 4 {
+        assert_eq!(quit_events(&st, k), 0, "LAUNCH がスロット {k} を Quit させた");
+        assert_eq!(ring::pending(&st, k), 0);
+        k += 1;
+    }
+    assert!(session::ready_to_run(&st), "LAUNCH がアプリ生存で足止めされた");
+    session::clear();
+
+    /* SWITCH_CUI: GUI ごと畳むので全アプリへ Quit。回収まで実行しない。 */
+    assert_eq!(
+        session::request(&mut st, 2, GUI_SESSION_SWITCH_CUI, 0, b"", 0),
+        0
+    );
+    let mut k = 0;
+    while k < 4 {
+        assert_eq!(quit_events(&st, k), 1, "SWITCH_CUI がスロット {k} へ届いていない");
+        k += 1;
+    }
+    assert!(
+        !session::ready_to_run(&st),
+        "アプリが生きているのに SWITCH_CUI を実行しようとした"
+    );
+    session::clear();
+}
+
+/* ---- 票の追加検査 8: top-level は 1 周に 1 本だけ起こす ---- */
+#[test]
+fn resume_one_wakes_a_single_app_with_the_unread_count_as_the_wait_result() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+    set_input_ready(&mut st, 4, true);
+    focus_app(&mut st, 4);
+
+    assert!(multiapp::resume_one(&mut st), "起こす相手が居るのに起こさない");
+    let calls = mocks::resume_calls();
+    assert_eq!(calls.len(), 1, "1 周で 2 本以上起こした: {calls:?}");
+    /* 契約 T3: OP_WAIT の戻り値は未読件数。 */
+    assert_eq!(calls[0], (4, 1), "exec_resume の引数が違う: {calls:?}");
+    assert_eq!(multiapp::last_run(), 4);
+    assert!(multiapp::turn_used(4), "resume で turn が使われていない");
+    assert_eq!(multiapp::running(), 0, "resume から戻ったのに走ったまま");
+
+    /* ready が 1 本も無ければ誰も起こさない (= top-level は sys_halt へ)。 */
+    set_input_ready(&mut st, 4, false);
+    assert!(!multiapp::resume_one(&mut st), "ready ゼロで誰かを起こした");
+    assert_eq!(mocks::resume_calls().len(), 1);
+}
+
+/* ---- 票の追加検査 9: 止めてあるアプリの Quit は `exec_kill` ---- */
+#[test]
+fn a_parked_app_is_folded_with_exec_kill_from_the_top_level() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    seed_four_apps();
+
+    multiapp::request_kill(4);
+    assert!(multiapp::resume_one(&mut st), "kill 予約が実行されない");
+    assert_eq!(mocks::kill_calls(), vec![4], "exec_kill の相手が違う");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "kill する相手を起こしてしまった"
+    );
+    assert!(!multiapp::is_tracked(4), "kill した ID が表に残った");
+    assert_eq!(multiapp::live_count(), 3, "kill が 1 本分でない");
+}
+
+/* ---- 票の追加検査 10: 起動したてのアプリは最初の `OP_WAIT` で譲れる ----
+ *  `exec_start` は「アプリが最初に park する」まで戻らない (決裁 D9-5)。
+ *  park の判断は WM の表を見るが、**その表に載る id は `exec_start` の
+ *  戻り値**なので、起動中のアプリはまだ表に居ない。ここを「未追跡だから
+ *  譲らない」で弾くと `exec_start` が永久に戻らず、
+ *    - 2 本目以降が park できない = 1 本目が二度と起こされない
+ *    - top-level へ戻れないので 3 本目の `LAUNCH` も実行できない
+ *  という固まり方をする。起動が進行中の間だけ、走っている ID を表へ迎える。 */
+#[test]
+fn a_just_launched_app_can_park_on_its_first_op_wait() {
+    use crate::{mocks, multiapp, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = four_app_state(&shm);
+    /* 生きているのは A (=2) だけ。B (=3) はこれから起動する。 */
+    st.windows[2] = wm::Win::EMPTY;
+    st.windows[3] = wm::Win::EMPTY;
+    st.z_count = 2;
+    st.slots[2] = wm::Slot::EMPTY;
+    st.slots[3] = wm::Slot::EMPTY;
+    multiapp::on_start(2);
+    set_derived_ready(&mut st, 2, true); /* A は Paint 待ちで park 中 */
+
+    /* 起動中 (`exec_start` を呼んでから戻るまで)。B の最初の OP_WAIT。 */
+    multiapp::begin_start();
+    assert!(
+        multiapp::should_park(&st, 3),
+        "起動したてのアプリが最初の OP_WAIT で譲れない (exec_start が戻らない)"
+    );
+    assert!(multiapp::is_tracked(3), "起動したてのアプリが表に載らない");
+    multiapp::note_parked(3, None);
+    multiapp::end_start(3);
+    assert_eq!(multiapp::live_count(), 2, "起動で 1 本増えていない");
+    assert_eq!(multiapp::running(), 0, "park したのに走ったままになっている");
+
+    /* 対照群 1: 起動中でない未追跡 ID (CUI の入れ子の子) は譲らない。
+     * カーネルの `appslot_park_check` も `!a->gui` で弾く側。 */
+    multiapp::on_owner_exit(3);
+    assert!(
+        !multiapp::should_park(&st, 3),
+        "起動中でない未追跡 ID を park しようとした"
+    );
+
+    /* 対照群 2: 1 本目の起動 (他に ready が居ない) では譲らない = 回帰ゼロ。
+     * `exec_start` が従来の `exec_run` と同じく終了まで塞ぐのが正しい。 */
+    multiapp::reset();
+    set_derived_ready(&mut st, 2, false);
+    multiapp::begin_start();
+    assert!(
+        !multiapp::should_park(&st, 2),
+        "1 本目の起動で譲った (相手が居ないのに CR3 が動く = 回帰)"
+    );
+}

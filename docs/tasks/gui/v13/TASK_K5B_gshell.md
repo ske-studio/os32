@@ -59,3 +59,142 @@ ID 昇順の巡回) に従って `exec_park` / `exec_resume`、終了・fault・
 
 [K5 §K5b の G1〜G10](TASK_K5_multiapp.md#段階-k5b--実装-k5a-凍結後に発注)。観測は `gui_bench` の `CLICK n`
 (tvram) とカーネルシンボル (`ring3_switch_count` 等) を `emu_read_mem` で。
+
+---
+
+## 実装 (W レーン、2026-09-11)
+
+`userland/gshell/src/multiapp.rs` を新設し、規則 (D11-3) と park / resume / 音の排他を
+そこ 1 か所に集めた。`libos32gui` (C レーン) と `kernel` / `exec` / `kapi` /
+`sdk/rust/os32api` の生成物は 1 バイトも触っていない。
+
+| 票の作業 | 実装 |
+|---|---|
+| 1 スロット割当 | **既存で足りた**。`GuiState::alloc_slot` は元から 0〜3 を配り、`op_init` が空き無しで `OS32_ERR_FULL` を返す。`gui_owner_exit` の `reclaim_owner` もスロットを返す。足したのは `multiapp::on_owner_exit(id)` (譲り合いの表からその ID を落とす) だけ |
+| 2 起動 | `run_program` の `exec_run` → `exec_start`。`>0` = `multiapp::on_start(id)` で表へ、`0` = 何もしない、`<0` = モーダル (`ERR_FULL` は「Too many programs (4 max)」と別文言) |
+| 3 譲り合い | `handler::op_wait` のループ先頭 1 点から `multiapp::maybe_park(st, owner, deadline)`。top-level (`lib.rs` の単独ループ) が `multiapp::resume_one(st)` |
+| 4 終了・fault・kill | 4 経路すべてカーネルの `gui_owner_exit` を通るので `GUI_OP_OWNER_EXIT` の 1 か所で回収。止めてあるアプリを畳む口は `multiapp::request_kill(id)` → top-level の `exec_kill` |
+| 5 音の排他 | `multiapp::sync_snd_focus(st)` を `wm_cycle` の末尾 (X3 と単独ループ) から。フォーカスが動いた回だけ `snd_focus(new_owner)` を 1 回 |
+| 6 可視・描画 | **既存で足りた** (`visible.rs` の露出計算は owner を見ずに Z 順だけで働く)。契約は変えていない |
+| 7 ホスト試験 | `host/wm_tests.rs` に 15 本追加 (計 27 本)。RED→GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_gshell_tdd.md) |
+
+`build/app.conf` の gshell 行の要求 KAPI 版を **42 → 44** に上げた
+(`make check-kapi-version` は v44 で一致、ビルドの `OS32X: gshell.bin ... api>=44`)。
+
+### 起床条件の実物 (D11-1 の棚卸し → `multiapp.rs`)
+
+| 群 | 実物 |
+|---|---|
+| 入力 `input_ready(k)` | `ring::pending(slot_of(k)) > 0` / `session::quit_pending(slot)` (S5 の sticky Quit。`session.rs` に覗き口を足した) |
+| 導出 `derived_ready(k)` | `timer::has_expired(k)` / `Win::configure_pending` / `damage::has_deliverable_paint` / **park 時に控えた `OP_WAIT` の期限** |
+
+最後の 1 つは設計に無かった穴。カーネルの park は syscall フレームしか保存しないので、
+`gui_call(OP_WAIT, timeout)` で待っていたアプリを park すると、**その期限を誰も持っていない**。
+`multiapp::note_parked(id, deadline)` が WM 側で控え、`derived_ready` が見る (resume で消す)。
+
+## S2 の読み替え (契約 V12-S §S2 → 4 本前提)
+
+v1.2 の S2 は「別アプリ起動 = 今のアプリを Quit して置き換える」だった。
+4 本同時になったので、**`LAUNCH` は「1 本増やす」**に変わる。契約文そのものは
+v1.3 の CONTRACTS 側で PM が更新する前提で、実装は次のとおり:
+
+| S2 の手順 | v1.2 | v1.3 (この実装) |
+|---|---|---|
+| 1. `LAUNCH(path)` を私有状態へ | 同じ | 同じ (`session::request`) |
+| 2. 現 owner へ `Quit{REPLACE_APP}` | **配る** | **配らない**。`arm_quit` を呼ぶのは `SWITCH_CUI` / `SHUTDOWN` だけ |
+| 3. 現 app が終了し `exec_run` が top-level へ戻る | 塞ぐ `exec_run` の性質 | **走っているアプリが `op_wait` で park して top-level へ戻る** |
+| 4. top-level が pending path を見て起動 | 同じ | 同じ。ただし `exec_start` なので既存の 4 本はそのまま生きる |
+
+top-level のゲートも分けた (`session::ready_to_run`):
+
+- `LAUNCH` … 他のアプリが生きていても実行してよい (増やすだけ)。
+- `SWITCH_CUI` / `SHUTDOWN` … GUI そのものを畳むので、従来どおり `owner_active` が
+  偽になる (全アプリ回収済み) まで実行しない。
+
+`GUI_QUIT_REASON_REPLACE_APP` は**誰も送らなくなった**。定数は残してある (T5 の末尾追記のみ)。
+
+### D11-3 の規則に 1 行だけ足した (要 PM 確認)
+
+`should_park` の先頭に「**top-level にしか出来ない仕事があるなら譲る**」を置いた
+(`session::ready_to_run(st) || st.launch_pending`)。理由:
+
+- `exec_start` は WM top-level からしか呼べない (契約 S2 / カーネルの `appslot_start_admit`)。
+- top-level へ戻る道は park だけ。
+- したがってこの 1 行が無いと、**アプリが 1 本走っている間は 2 本目を永久に起動できない**
+  (1 本目は「他に ready が居ない」ので park せず、`exec_start` は塞いだまま)。
+
+有界性 (D11-3a) は壊れない — 起動要求は有限個の事象で、消費されれば条件は消える。
+模型 (`ma_should_park`) には無い分岐なので、模型を追随させるかは PM の判断。
+
+### 実装で塞いだ穴: 起動したてのアプリは表に居ない
+
+`exec_start` は「アプリが最初に park する」まで戻らない (決裁 D9-5) が、**表に載る id は
+その戻り値そのもの**なので、起動中のアプリは譲り合いの表に居ない。「未追跡なら譲らない」で
+弾くと `exec_start` が永久に戻らず、
+
+- 2 本目 B が park できない ⇒ **1 本目 A は二度と `exec_resume` されない** (画面が止まる)
+- top-level へ戻れない ⇒ 3 本目の `LAUNCH` も実行できない
+
+という固まり方になる。`run_program` が `exec_start` を `multiapp::begin_start()` /
+`end_start(rc)` で挟み、その間だけ `should_park` が走っている ID を表へ迎える
+(`adopt_running`)。1 本目の起動では「他に ready が居ない」ので譲らない = 回帰ゼロは保たれる。
+検査は `a_just_launched_app_can_park_on_its_first_op_wait` (回 4 / 回 5)。
+
+限界: 起動中に「起動したアプリの CUI 入れ子の子」が `OP_INIT` を済ませて `OP_WAIT` へ入ると
+そちらを迎えてしまう。カーネルが `!a->gui` で park を拒むので実害は
+**`ring3_park_reject_count` が 1 増える**ことだけ (受入 G7 でこのカウンタを見るときの注意)。
+
+## 決裁が要る点 (推奨付き)
+
+### A1. CTRL+STOP の宛先は WM 側では付け替えられない (T6 / D4 のずれ)
+
+D4 は「WM がフォーカス窓の owner を見て、走っている本人でなければ `exec_kill(その ID)`」
+と書いているが、**カーネルは IRQ1 の時点で走っているアプリの `AppSlot.abort_req` を
+無条件に立てる** (`drivers/kbd.c:235` → `ring3_abort_request` → `appslot_abort_request`)。
+WM 側にそれを取り消す口は無い。フォーカスが別アプリのときに `exec_kill` を足すと
+**2 本死ぬ** (走っている本人 + フォーカスの相手)。
+
+- **実装したこと**: フォーカス窓の owner が走っている本人のときだけ `op_wait` を抜ける
+  (`multiapp::abort_targets_current`)。別アプリなら打鍵を飲むだけで何もしない。
+  アプリが 1 本のときは常に本人なので**現行と同じ**(回帰ゼロ)。
+- **残る穴**: 走っているアプリの `abort_req` は立ったままなので、そのアプリが次に
+  syscall を出した時点で畳まれる (= 意図しない 1 本が死ぬ)。
+- **推奨**: カーネル側に「要求を降ろす / 宛先を差し替える」口を 1 つ足す
+  (`exec_abort_clear()` か、`exec_kill` を走っている本人にも効かせる) — K レーンの小票。
+  それまでは実機で「フォーカスが別アプリのときの CTRL+STOP」を受入対象にしない。
+
+### A2. 生成 Rust 束縛が `i32` を `u32` として吐く
+
+`sdk/kapi_rust_gen.py` の `TYPE_MAP` に `"i32"` が無く、未知型は既定の `"u32"` へ落ちる
+(`c_type_to_rust` の末尾)。K5b-K が `kapi.json` に `"ret": "i32"` / `"i32 app_id"` で
+書いたので、`kapi_generated.rs` は
+
+```rust
+pub exec_start: unsafe extern "C" fn(cmdline: *const u8) -> u32,
+pub exec_resume: unsafe extern "C" fn(app_id: u32, wait_ret: u32) -> u32,
+```
+
+になっている。ABI (EAX の i32) は正しいので、W レーンは呼び出し側で `as i32` /
+`as u32` を挟んで凌いだ (生成物は手で触っていない、[ABI1])。
+
+- **推奨**: `TYPE_MAP` に `"i32": "i32"` (と `"i32 *": "*mut i32"`) を足して再生成。
+  ABI は変わらないので版数は据え置きでよい。**`sdk/` は W レーンの排他外**なので手を付けていない。
+
+### A3. `SWITCH_CUI` / `SHUTDOWN` に応答しないアプリの打ち切り
+
+4 本のうち 1 本でも `Quit` を無視すると `owner_active` が偽にならず、GUI を畳めない。
+v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛先が選べない。
+`exec_kill` を使った打ち切り (「Quit を配って N 周待っても残っていたら畳む」) は
+**新しい方針**なので実装していない。
+
+- **推奨**: v1.3 の受入で困ったら、`multiapp::request_kill` はもう在るので
+  「SessionAction が pending のまま `resume_one` を M 周まわしても本数が減らない ⇒ 畳む」
+  を足すだけで済む。M の値は決裁事項。
+
+## 未確認 ([V4])
+
+- **ゲスト未検証**。受入 G1〜G7 / G9 / G10 は PM とテスターの領分。ここまでは
+  `make check-gshell-host` (26 本 GREEN) と `make ... gshell` が通っただけ。
+- `exec_park` はホストでは戻ってくるので、「park の後に WM の状態が宙に浮かないこと」は
+  試験できていない (呼び出し点が 1 点であることはソース走査で押さえた)。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない (テスター担当)。

@@ -1,0 +1,660 @@
+//! multiapp.rs — GUI アプリ 4 本の同時実行、WM (gshell) 側 (票 K5b-W)。
+//!
+//! カーネル (K5b-K、KAPI v44) が持つのは**機構だけ** — `exec_start` /
+//! `exec_park` / `exec_resume` / `exec_kill` と「park は `OP_WAIT` 由来の
+//! フレームからだけ、resume は印のあるフレームだけ」というゲート。
+//! **誰を次に起こすかを決めるのはここ** (設計 D11-5: カーネルは順番を決めない)。
+//!
+//! ```text
+//!   top-level (lib.rs の単独ループ、owner 1)
+//!     ├ exec_start(path)  ── アプリが最初に park するまで戻らない
+//!     └ resume_one()      ── pick() で 1 本選んで exec_resume(id, wait_ret)
+//!
+//!   アプリの gui_call(OP_WAIT) の中 (handler.rs の op_wait)
+//!     └ maybe_park()      ── should_park() が真なら exec_park() (戻らない)
+//! ```
+//!
+//! `exec_park` を呼ぶ点は [`maybe_park`] の 1 か所だけで、そこは
+//! `op_wait` のループ先頭 = WM の 1 周が終わって状態が整っている地点。
+//! ここから longjmp するので、書きかけの WM 状態があると宙に浮く。
+//!
+//! 規則 (D11-3) は `tools/tests/multiapp_model_host.c` の `ma_should_park` /
+//! `ma_pick` と 1 対 1 に対応させてある:
+//!
+//! | 模型 | ここ |
+//! |---|---|
+//! | `MA_INPUT_STREAK_MAX` | [`INPUT_STREAK_MAX`] |
+//! | `MA_STARVE_BOUND` | [`STARVE_BOUND`] |
+//! | `ma_should_park` | [`should_park`] |
+//! | `ma_pick` / `ma_pick_group` / `ma_round_remaining` | [`pick`] / [`pick_group`] / [`round_remaining`] |
+//! | `ma_resume` の `turn_used` / `last_run` / `input_streak` | [`mark_resumed`] |
+//! | `ma_launch` の同上 | [`on_start`] |
+//!
+//! `input_ready` / `derived_ready` は模型では試験が直接立てていたが、ここは
+//! **実物の WM 状態から算出する** (D11-1 の棚卸しをそのまま写した)。
+
+use crate::wm::GuiState;
+use crate::{damage, ring, session, timer};
+use os32api::gui::proto::GUI_MAX_WINDOWS;
+
+/* ================================================================ */
+/*  定数 (カーネル exec/appslot.h と同じ値)                          */
+/* ================================================================ */
+
+/// シェル帯 (CUI シェル / gshell)。`kernel/gui.h` の `GUI_SHELL_OWNER` と同値。
+pub const APP_ID_SHELL: i32 = 1;
+/// 同時に生きる非シェル ID の本数 (`APP_MAX_APPS`)。
+pub const MAX_APPS: usize = 4;
+pub const APP_ID_MIN: i32 = 2;
+pub const APP_ID_MAX: i32 = APP_ID_MIN + MAX_APPS as i32 - 1;
+
+/// 走っているアプリが「自分に入力がある」を理由に turn を据え置ける**連続**
+/// `OP_WAIT` 回数 (D11-3)。値を `MAX_APPS` に合わせたのは「アプリの数だけは
+/// 続けて持てる」という説明できる線を引くためで、それ以上の意味は無い
+/// (D11-7: 打鍵の連続を取りこぼさない最小値は未実測。G9 で決め直してよい)。
+pub const INPUT_STREAK_MAX: u32 = MAX_APPS as u32;
+
+/// ready なアプリが park した `OP_WAIT` から再開までに待つ最悪回数
+/// (D11-3a、`MA_STARVE_BOUND` と同じ式)。前提 3 つ付きの上界で、
+/// ケース 15 (`N`=2 → 10) と 16 (`N`=4 → 30) がちょうど届く。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub const STARVE_BOUND: u32 = (2 * MAX_APPS as u32 - 2) * (INPUT_STREAK_MAX + 1);
+
+/* ================================================================ */
+/*  状態 (WM の私有。カーネルは 1 つも持たない — D11-5)              */
+/* ================================================================ */
+
+#[derive(Clone, Copy)]
+struct App {
+    /// この ID を `exec_start` で立てて、まだ `gui_owner_exit` を受けていない。
+    alive: bool,
+    /// このラウンドで turn を 1 回使った (D11-3 の有界性)。
+    turn_used: bool,
+    /// park した `OP_WAIT` の期限 (D11-1 の「`OP_WAIT` の期限が来た」)。
+    /// カーネルも他のアプリも持てないので WM が控える。resume で消す。
+    has_deadline: bool,
+    deadline: u32,
+    /// top-level で `exec_kill` する予約 (止めてあるアプリを畳む、D4)。
+    kill_req: bool,
+}
+
+impl App {
+    const NEW: App = App {
+        alive: false,
+        turn_used: false,
+        has_deadline: false,
+        deadline: 0,
+        kill_req: false,
+    };
+}
+
+pub struct Multi {
+    apps: [App; MAX_APPS],
+    /// 直前に走ったアプリ ID (巡回の起点)。0 = 無し。**resume 側で進める**
+    /// (D11-7 の最後: 模型が resume 側なので実装も揃える)。
+    last_run: i32,
+    /// 入力優先で turn を据え置いた連続回数。
+    input_streak: u32,
+    /// いま走っているアプリ ID (0 = WM top-level)。`pick` はこれが 0 の
+    /// ときしか選ばない — 走っている本人を「起こす」ことはできない。
+    running: i32,
+    /// 直前に `snd_focus` へ渡した owner。同じ値なら呼ばない (G10 の「1 回だけ」)。
+    snd_owner: i32,
+    /// `exec_start` を呼んでから戻るまで。**起動したてのアプリはまだ表に
+    /// 居ない** (表に載る id は `exec_start` の戻り値そのもの) ので、この間だけ
+    /// 走っている ID を表へ迎える ([`should_park`] の adopt)。
+    pending_start: bool,
+}
+
+impl Multi {
+    const NEW: Multi = Multi {
+        apps: [App::NEW; MAX_APPS],
+        last_run: 0,
+        input_streak: 0,
+        running: 0,
+        snd_owner: APP_ID_SHELL,
+        pending_start: false,
+    };
+}
+
+struct MultiCell(core::cell::UnsafeCell<Multi>);
+unsafe impl Sync for MultiCell {}
+static MULTI: MultiCell = MultiCell(core::cell::UnsafeCell::new(Multi::NEW));
+
+#[inline]
+fn m() -> &'static mut Multi {
+    unsafe { &mut *MULTI.0.get() }
+}
+
+/// ID → 表の添字。シェル帯 / 範囲外は `None`。
+#[inline]
+fn idx(id: i32) -> Option<usize> {
+    if id < APP_ID_MIN || id > APP_ID_MAX {
+        None
+    } else {
+        Some((id - APP_ID_MIN) as usize)
+    }
+}
+
+/// この ID を WM が握っているか (= `exec_start` で立てた GUI アプリ)。
+/// CUI の入れ子の子 (`exec_run` で立った) はここに載らない — park できない
+/// ので譲り合いの対象にしない (カーネルの `appslot_park_check` と同じ線)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn is_tracked(id: i32) -> bool {
+    match idx(id) {
+        Some(i) => m().apps[i].alive,
+        None => false,
+    }
+}
+
+/// 生きているアプリの本数。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn live_count() -> usize {
+    let mm = m();
+    let mut n = 0;
+    let mut i = 0;
+    while i < MAX_APPS {
+        if mm.apps[i].alive {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// 全部忘れる (ホスト試験の前処理。ゲストでは使わない)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn reset() {
+    *m() = Multi::NEW;
+}
+
+/* ================================================================ */
+/*  生存の出入り                                                     */
+/* ================================================================ */
+
+/// `exec_start` が `>0` を返した (アプリが最初の `OP_WAIT` で park した)。
+/// 模型 `ma_launch` と同じく turn を 1 つ使った状態で表に載せる — 立った
+/// 直後に走っているので、そのラウンドの追加 turn にはならない (D11-3a)。
+pub fn on_start(id: i32) {
+    adopt_running(id);
+    m().running = 0; /* もう park 済み (exec_start が戻ったのがその証拠) */
+}
+
+/// 起動したてのアプリを表に載せる (まだ `exec_start` は戻っていない = 走っている)。
+/// 模型 `ma_launch` と同じく turn を 1 つ使った状態にする — 立った直後に走って
+/// いるので、そのラウンドの追加 turn にはならない (D11-3a)。
+fn adopt_running(id: i32) {
+    let i = match idx(id) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    mm.apps[i] = App::NEW;
+    mm.apps[i].alive = true;
+    mm.apps[i].turn_used = true;
+    mm.last_run = id;
+    mm.input_streak = 0;
+    mm.running = id;
+}
+
+/// `exec_start` を呼ぶ**直前**に立てる。`exec_start` は「アプリが最初に park
+/// する」まで戻らない (決裁 D9-5) ので、その間に走っている ID は表に載っていない。
+/// この印が無いと [`should_park`] が「未追跡だから譲らない」で弾いてしまい、
+/// **2 本目以降が永久に park できず `exec_start` が戻らない** (= 1 本目が二度と
+/// 起こされない / top-level へ戻れないので次の `LAUNCH` も実行できない)。
+///
+/// 限界: この間に「起動したアプリの CUI 入れ子の子」が `OP_INIT` まで済ませて
+/// `OP_WAIT` に入ると、そちらを迎えてしまう。カーネルは `!a->gui` で park を
+/// 拒む (`appslot_park_check`) ので実害は `ring3_park_reject_count` が 1 増える
+/// ことだけで、その ID は `gui_owner_exit` で表から落ちる。
+pub fn begin_start() {
+    m().pending_start = true;
+}
+
+/// `exec_start` が戻った。`rc > 0` = park 済みの app_id、`0` = park 前に終了、
+/// `< 0` = 起動しなかった。
+pub fn end_start(rc: i32) {
+    let mm = m();
+    mm.pending_start = false;
+    if rc > 0 {
+        /* 普通は `should_park` の adopt で既に載っている。載っていない
+         * (park が WM 以外の理由で成立した) ときのための保険。 */
+        if idx(rc).map_or(false, |i| !mm.apps[i].alive) {
+            on_start(rc);
+        }
+        m().running = 0; /* park 済み = 走っていない */
+    } else {
+        /* 0 = 終了済み (回収は `gui_owner_exit` 経由で済んでいる)、
+         * 負 = 何も立っていない。adopt の残骸があれば落とす。 */
+        mm.running = 0;
+    }
+}
+
+/// `GUI_OP_OWNER_EXIT` (正常終了 / fault / CTRL+STOP / `exec_kill` のどれでも
+/// カーネルはここを通る)。**その ID の 1 本分だけ**を表から落とす。
+pub fn on_owner_exit(id: i32) {
+    let i = match idx(id) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    mm.apps[i] = App::NEW;
+    if mm.running == id {
+        mm.running = 0;
+    }
+    if mm.last_run == id {
+        /* 巡回の起点は残しておいてよい (ID は空きになるので飛ばされる)。
+         * ただし表を消したあとに同じ ID が再利用されたとき、直前に走った
+         * 扱いになると 1 個ずれるので落とす。 */
+        mm.last_run = 0;
+    }
+}
+
+/// 止めてあるアプリを top-level で畳む予約 (D4 の「止めてあるアプリの Quit」)。
+pub fn request_kill(id: i32) {
+    if let Some(i) = idx(id) {
+        if m().apps[i].alive {
+            m().apps[i].kill_req = true;
+        }
+    }
+}
+
+/* ================================================================ */
+/*  起床条件 (D11-1 の棚卸しを実物から算出)                          */
+/* ================================================================ */
+
+/// 入力群: 未読の待ち行列型がリングにある、または sticky Quit が積めずに
+/// 残っている (契約 T3 / S5)。
+pub fn input_ready(st: &GuiState, id: i32) -> bool {
+    match st.slot_of_owner(id) {
+        Some(s) => ring::pending(st, s) > 0 || session::quit_pending(s),
+        None => false,
+    }
+}
+
+/// 導出群: `ready` かつ入力群でない (期限切れ Timer / `Configure` 未通知 /
+/// 配送できる `Paint` / park した `OP_WAIT` の期限)。
+pub fn derived_ready(st: &GuiState, id: i32) -> bool {
+    if idx(id).is_none() {
+        return false;
+    }
+    if input_ready(st, id) {
+        return false;
+    }
+    if timer::has_expired(st, id, st.now) {
+        return true;
+    }
+    /* park した時点の `OP_WAIT` の期限。カーネルは持っていない (park は
+     * syscall フレームだけを保存する) ので、WM が控えて自分で見る。 */
+    if let Some(i) = idx(id) {
+        let a = &m().apps[i];
+        if a.has_deadline && st.now.wrapping_sub(a.deadline) < 0x8000_0000 {
+            return true;
+        }
+    }
+    let mut w = 0;
+    while w < GUI_MAX_WINDOWS {
+        let win = &st.windows[w];
+        if win.used && win.owner == id {
+            if win.configure_pending {
+                return true;
+            }
+            if damage::has_deliverable_paint(win) {
+                return true;
+            }
+        }
+        w += 1;
+    }
+    false
+}
+
+#[inline]
+fn ready(st: &GuiState, id: i32) -> bool {
+    input_ready(st, id) || derived_ready(st, id)
+}
+
+/* ================================================================ */
+/*  D11-3 (2) — 次に起こす 1 本                                      */
+/* ================================================================ */
+
+/// park 中で、このラウンドの turn を使っていない ready の本数。
+fn round_remaining(st: &GuiState) -> usize {
+    let mm = m();
+    let mut n = 0;
+    let mut i = 0;
+    while i < MAX_APPS {
+        let id = APP_ID_MIN + i as i32;
+        if mm.apps[i].alive && !mm.apps[i].turn_used && id != mm.running && ready(st, id) {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// 群の中を `last_run` の次から ID 昇順に巡り、最初の 1 本 (0 = 無し)。
+fn pick_group(st: &GuiState, want_input: bool) -> i32 {
+    let mm = m();
+    let start = if mm.last_run >= APP_ID_MIN && mm.last_run <= APP_ID_MAX {
+        (mm.last_run - APP_ID_MIN + 1) as usize
+    } else {
+        0
+    };
+    let mut n = 0;
+    while n < MAX_APPS {
+        let i = (start + n) % MAX_APPS;
+        let id = APP_ID_MIN + i as i32;
+        n += 1;
+        if !mm.apps[i].alive || mm.apps[i].turn_used || id == mm.running {
+            continue;
+        }
+        if want_input {
+            if input_ready(st, id) {
+                return id;
+            }
+        } else if derived_ready(st, id) {
+            return id;
+        }
+    }
+    0
+}
+
+/// 次に起こす 1 本 (0 = 誰も起こさない)。**WM top-level が使う。**
+///
+/// ラウンドの turn が尽きたら全員ぶんを配り直す (= 新しいラウンド)。
+/// フォーカスの近道も `!turn_used` を条件にしているので、ラウンド内の**順**が
+/// 変わるだけで turn の**数**は変わらない (D11-3a)。
+pub fn pick(st: &GuiState) -> i32 {
+    if round_remaining(st) == 0 {
+        let mm = m();
+        let mut i = 0;
+        while i < MAX_APPS {
+            mm.apps[i].turn_used = false;
+            i += 1;
+        }
+        if round_remaining(st) == 0 {
+            return 0; /* ready が 1 本も無い */
+        }
+    }
+    /* (1) 入力群にフォーカス窓の owner が居れば最優先 (応答性)。 */
+    let f = st.front_owner();
+    if let Some(i) = idx(f) {
+        let mm = m();
+        if mm.apps[i].alive && !mm.apps[i].turn_used && f != mm.running && input_ready(st, f) {
+            return f;
+        }
+    }
+    /* (2) 入力群を巡回 → (3) 空なら導出群を巡回。 */
+    let k = pick_group(st, true);
+    if k != 0 {
+        return k;
+    }
+    pick_group(st, false)
+}
+
+/// 選んだ 1 本を「走り出した」ことにする (模型 `ma_resume` と同じ 3 つ)。
+pub fn mark_resumed(id: i32) {
+    let i = match idx(id) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    mm.apps[i].turn_used = true;
+    mm.apps[i].has_deadline = false;
+    mm.last_run = id;
+    mm.input_streak = 0;
+    mm.running = id;
+}
+
+/* ================================================================ */
+/*  D11-3 (1) — 走っているアプリが譲るか                             */
+/* ================================================================ */
+
+/// `op_wait` の中で park すべきか。**判定の順序が肝**で、「他に ready が
+/// 居るか」を先に見る (1 本しか居なければ `input_streak` は伸びず park も
+/// 起きない = 回帰ゼロ)。
+///
+/// 模型 `ma_should_park` に 1 行だけ足してある: **top-level にしか出来ない
+/// 仕事 (`LAUNCH` / デバッグ経路の起動予約) があるときも譲る**。
+/// `exec_start` は WM top-level からしか呼べず (契約 S2、カーネルの
+/// `appslot_start_admit`)、走っているアプリが park しない限り top-level へ
+/// 戻る道が無いので、これが無いと 2 本目が永久に起動できない。
+/// 起動要求は有限個の事象なので D11-3a の上界は変わらない。
+pub fn should_park(st: &GuiState, cur: i32) -> bool {
+    let i = match idx(cur) {
+        Some(i) => i,
+        None => return false, /* シェル帯 / 範囲外 */
+    };
+    let mm = m();
+    if !mm.apps[i].alive {
+        /* 起動が進行中なら、これは `exec_start` で立てたばかりのアプリ。
+         * 表に載せて譲り合いの対象にする (載せないと park できず
+         * `exec_start` が永久に戻らない)。それ以外の未追跡 ID
+         * (CUI の入れ子の子) は譲らない — カーネルも `!a->gui` で拒む。 */
+        if !mm.pending_start {
+            return false;
+        }
+        adopt_running(cur);
+    }
+    /* (a) top-level の仕事 (契約 S2 の 4 本前提の読み替え)。 */
+    if session::ready_to_run(st) || st.launch_pending {
+        return true;
+    }
+    /* (b) D11-3 (1) の 3 行。 */
+    let mut other_ready = false;
+    let mut k = 0;
+    while k < MAX_APPS {
+        let id = APP_ID_MIN + k as i32;
+        if mm.apps[k].alive && id != cur && ready(st, id) {
+            other_ready = true;
+        }
+        k += 1;
+    }
+    if !other_ready {
+        return false;
+    }
+    if input_ready(st, cur) && mm.input_streak < INPUT_STREAK_MAX {
+        mm.input_streak += 1;
+        return false;
+    }
+    true
+}
+
+/// **`exec_park` を呼ぶ唯一の点** (`handler::op_wait` のループ先頭から)。
+///
+/// 成立すればこの関数も `op_wait` も戻らず、`exec_start` / `exec_resume` の
+/// 復帰点 = WM top-level へ抜ける。戻ってきたのは park できない文脈
+/// (`OP_WAIT` 以外の op / CUI の入れ子の子 / CPL=0 の子) で、カーネルが
+/// `ring3_park_reject_count` を上げて `OS32_ERR_INVAL` を返した場合だけ。
+/// そのときは普通の待ちを続ける。
+pub fn maybe_park(st: &mut GuiState, cur: i32, deadline: Option<u32>) {
+    if !should_park(st, cur) {
+        return;
+    }
+    note_parked(cur, deadline);
+    /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
+     * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので戻す。 */
+    let rc = unsafe { (os32api::api().exec_park)() as i32 };
+    /* ここへ来たのは park が成立しなかったとき (`OS32_ERR_INVAL`)。 */
+    undo_park(cur);
+    let _ = rc;
+}
+
+/// park したことにする (WM 側の状態遷移だけ)。`exec_park` を呼ぶ**直前**に
+/// 通る点で、[`maybe_park`] とホスト試験の周回ドライバが共有する。
+pub fn note_parked(cur: i32, deadline: Option<u32>) {
+    let i = match idx(cur) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    /* park 中の `OP_WAIT` の期限は WM が持つ (D11-1)。カーネルは syscall
+     * フレームしか保存しないので、これを控えないと timeout 付きで待って
+     * いたアプリが二度と起きない。 */
+    mm.apps[i].has_deadline = deadline.is_some();
+    mm.apps[i].deadline = match deadline {
+        Some(d) => d,
+        None => 0,
+    };
+    mm.running = 0;
+}
+
+/// park が成立しなかったときに [`note_parked`] を巻き戻す。
+fn undo_park(cur: i32) {
+    let i = match idx(cur) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    mm.apps[i].has_deadline = false;
+    mm.running = cur;
+}
+
+/* ================================================================ */
+/*  top-level (lib.rs の単独ループ)                                  */
+/* ================================================================ */
+
+/// 止めてあるアプリを 1 本だけ起こす。戻り値 `true` = 何かした
+/// (= `sys_halt` せずに次の周へ)。
+///
+/// **`exec_resume` を呼ぶ唯一の点**。呼べるのは WM top-level だけで
+/// (カーネルの `appslot_resume_check`)、印の無いフレームは `OS32_ERR_STALE`。
+pub fn resume_one(st: &mut GuiState) -> bool {
+    if drain_kills() {
+        return true;
+    }
+    let k = pick(st);
+    if k == 0 {
+        return false;
+    }
+    /* 契約 T3: `OP_WAIT` の戻り値は未読件数。 */
+    let wait_ret = match st.slot_of_owner(k) {
+        Some(s) => ring::pending(st, s) as i32,
+        None => {
+            /* スロットが無い = `OP_INIT` 前か回収済み。起こす相手ではない。 */
+            forget(k);
+            return true;
+        }
+    };
+    mark_resumed(k);
+    let rc = unsafe { (os32api::api().exec_resume)(k as u32, wait_ret as u32) as i32 };
+    m().running = 0;
+    if rc < 0 {
+        /* 起こせない (印無し / 状態違い)。放置すると永久に固まるので、
+         * 「止めてあるアプリを畳む」口 (D4) をそのまま使って畳む。 */
+        request_kill(k);
+        drain_kills();
+        forget(k);
+    }
+    /* rc == 0 は終了 (回収は `gui_owner_exit` 経由で済んでいる)、
+     * rc > 0 はまた park した。どちらも次の周で選び直す。 */
+    true
+}
+
+/// 予約されている `exec_kill` を 1 件だけ実行する (`true` = 実行した)。
+fn drain_kills() -> bool {
+    let mm = m();
+    let mut i = 0;
+    while i < MAX_APPS {
+        if mm.apps[i].alive && mm.apps[i].kill_req {
+            let id = APP_ID_MIN + i as i32;
+            mm.apps[i].kill_req = false;
+            let rc = unsafe { (os32api::api().exec_kill)(id as u32) as i32 };
+            if rc < 0 {
+                /* 走っている本人 (`OS32_ERR_STALE`) など。予約は落としたまま。 */
+                return true;
+            }
+            forget(id);
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 表から 1 本落とす (`gui_owner_exit` が来なかった経路の保険)。
+fn forget(id: i32) {
+    on_owner_exit(id);
+}
+
+/* ================================================================ */
+/*  音の排他 (決裁 D9-4、受入 G10)                                   */
+/* ================================================================ */
+
+/// フォーカス (= 最前面の可視窓の owner) が変わっていたら `snd_focus` を
+/// 1 回だけ呼ぶ。**KAPI を呼ぶので X1 からは呼ばない** (契約 T8) —
+/// 呼ぶのは `wm_cycle` の末尾 (X3 と単独ループ) だけ。
+pub fn sync_snd_focus(st: &GuiState) {
+    let f = st.front_owner();
+    /* 窓が 1 枚も無ければ音の所有権はシェル帯へ戻す。 */
+    let target = if f == 0 { APP_ID_SHELL } else { f };
+    let mm = m();
+    if target == mm.snd_owner {
+        return;
+    }
+    mm.snd_owner = target;
+    unsafe {
+        (os32api::api().snd_focus)(target);
+    }
+}
+
+/// いま `snd_focus` に渡してある owner (試験と診断用)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn snd_owner() -> i32 {
+    m().snd_owner
+}
+
+/* ================================================================ */
+/*  CTRL+STOP の宛先 (契約 T6 / D4)                                  */
+/* ================================================================ */
+
+/// CTRL+STOP を**いま走っているアプリ**へ効かせてよいか。
+///
+/// T6 の宛先はフォーカス窓のアプリ。カーネルは IRQ1 の時点で「走っている
+/// アプリ」にしか要求を立てられないので (`appslot_abort_request`)、
+/// フォーカスが別のアプリなら WM は待ちを抜けない = 走っている側を畳ませない。
+pub fn abort_targets_current(st: &GuiState, cur: i32) -> bool {
+    let f = st.front_owner();
+    f == 0 || f == cur
+}
+
+/* ================================================================ */
+/*  試験と診断のための覗き口                                         */
+/*                                                                  */
+/*  規則そのものは 1 つも持たない。模型 (`multiapp_model_host.c`) の  */
+/*  試験が `MaState` の欄を直接読み書きしていたのと同じ役割で、      */
+/*  ホスト試験が同じ検査を実物の状態に対して書けるようにするだけ。   */
+/* ================================================================ */
+
+/// 巡回の起点 (`last_run`)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn last_run() -> i32 {
+    m().last_run
+}
+
+/// **試験専用**: 巡回の起点を直接置く (模型の `st.last_run = n` と同じ)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn set_last_run(id: i32) {
+    m().last_run = id;
+}
+
+/// このラウンドで turn を使ったか。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn turn_used(id: i32) -> bool {
+    match idx(id) {
+        Some(i) => m().apps[i].turn_used,
+        None => false,
+    }
+}
+
+/// 入力優先で turn を据え置いた連続回数。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn input_streak() -> u32 {
+    m().input_streak
+}
+
+/// いま走っているアプリ ID (0 = WM top-level)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn running() -> i32 {
+    m().running
+}

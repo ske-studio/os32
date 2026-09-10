@@ -1,0 +1,194 @@
+# K5b-W — gshell 側 (アプリ 4 本の同時実行) の RED → GREEN 記録
+
+> 票: [`docs/tasks/gui/v13/TASK_K5B_gshell.md`](../../docs/tasks/gui/v13/TASK_K5B_gshell.md) /
+> 規則の正典: [K5a 設計 D11-3 / D11-3a](../../docs/tasks/gui/v13/TASK_K5_multiapp.md) /
+> 模型: [`multiapp_model_host.c`](multiapp_model_host.c) (ケース 12〜16、84 検査) と
+> [`multiapp_model_tdd.md`](multiapp_model_tdd.md)
+>
+> 試験は `userland/gshell/host/wm_tests.rs` (実物の `GuiState` + `multiapp` に対して)、
+> 走らせるのは `make check-gshell-host` (= `userland/gshell/host/integration.py`)。
+
+## 基点
+
+`0ac10d6` (feat/gui の先端。K5b-K の KAPI v44、起動修正 `8eb7eed`、sbrk 二段構え `7f5a819` を含む)。
+
+| 回 | 状態 | 検査数 |
+|---|---|---:|
+| 0 | 着手前の回帰 (既存の WM 試験だけ) | 12 passed / 0 failed |
+| 5 | 最終 | **27 passed / 0 failed** (旧 12 + 新 15) |
+
+## 回 1 — RED
+
+**やったこと**: 票の試験 (模型ケース 12〜16 相当 + 票の追加検査 9 本) を先に書き、
+`userland/gshell/src/multiapp.rs` は**枠だけ**置いた。規則を持つ 5 本の中身は
+`TODO(K5b-W)` で、次を返すだけ:
+
+| 関数 | RED での中身 |
+|---|---|
+| `input_ready` | `false` |
+| `derived_ready` | `false` |
+| `pick` | `0` (誰も起こさない) |
+| `should_park` | `false` (誰も譲らない) |
+| `sync_snd_focus` | 何もしない |
+
+配線 (`op_wait` のループ先頭からの `maybe_park`、`GUI_OP_OWNER_EXIT` からの
+`on_owner_exit`、`run_program` の `exec_start`、top-level の `resume_one`、
+`session::ready_to_run`、`build/app.conf` の KAPI 44) は入れてある。
+
+**結果**: `26 tests: 17 passed / 9 failed`。
+
+```
+FAILED  pick_follows_the_frozen_rule_focus_then_input_then_derived
+        12a 入力群のフォーカスを選ばない  left: 0  right: 5
+FAILED  should_park_matches_the_five_frozen_branches
+        13a 据え置きが数えられていない    left: 0  right: 1
+FAILED  derived_only_apps_each_get_exactly_one_turn_per_round        (14a 1 本も選べない)
+FAILED  an_app_feeding_itself_focus_events_cannot_starve_another     (15a park が 1 度も起きない)
+FAILED  a_derived_only_app_runs_within_the_re_derived_bound_across_rounds
+        16 前提: ラウンド先頭で A が選ばれる  left: 0  right: 2
+FAILED  resume_one_wakes_a_single_app_with_the_unread_count_as_the_wait_result
+FAILED  op_wait_parks_when_another_app_is_ready                      (相手が ready でも譲らない)
+FAILED  a_single_app_never_parks_and_keeps_the_old_wm_cycle_halt_loop
+        op_wait のループが 1 周も回っていない (試験が空振り)  left: []  right: [2]
+FAILED  snd_focus_is_called_once_per_focus_change
+        初回が違う  left: []  right: [5]
+```
+
+既存 12 本は 12/12 のまま GREEN。RED で落ちていない新規 5 本
+(`the_fifth_app_gets_err_full...` / `owner_exit_reclaims_exactly_one...` /
+`a_parked_app_is_folded_with_exec_kill...` / `exec_park_has_exactly_one_call_site...` /
+`launch_no_longer_quits...`) は、規則ではなく**配線と既存の WM 実装**を押さえる検査
+(スロット割当は元から 0〜3 を配る、回収は `reclaim_owner` が owner で閉じている、等)。
+規則が空でも通るのが正しい — RED の対象は D11 の規則そのもの。
+
+**RED の途中で直した試験側の 2 件** (規則とは無関係):
+
+1. `mocks::init()` が `sys_halt` を差し替えていなかった。`op_wait` の待ちが
+   「unmocked KAPI reached」で **abort** し (`extern "C"` の panic は巻き戻せない)、
+   試験プロセスごと落ちていた。`nothing` を挿した。
+2. `assert!(*MUTEX.lock().unwrap() == ..)` がガードを握ったまま落ちるので、
+   RED の失敗が Mutex を中毒させて**次の試験まで巻き添え**にしていた
+   (既存の `taskbar_press_release_...` まで FAILED になった)。
+   `mocks` 側に複製を返す覗き口 (`snd_focus_calls()` 等) を足し、`init()` の
+   ロックを `unwrap_or_else(|e| e.into_inner())` に変えた。
+
+## 回 2 — GREEN
+
+**やったこと**: `multiapp.rs` の 5 本を D11-3 のとおりに書いた。模型との対応:
+
+| 模型 (`multiapp_model_host.c`) | 実物 (`userland/gshell/src/multiapp.rs`) |
+|---|---|
+| `MA_INPUT_STREAK_MAX` = 4 | `INPUT_STREAK_MAX` |
+| `MA_STARVE_BOUND` = `(2N−2)×(STREAK+1)` = 30 | `STARVE_BOUND` |
+| `ma_should_park` | `should_park` |
+| `ma_pick` / `ma_pick_group` / `ma_round_remaining` | `pick` / `pick_group` / `round_remaining` |
+| `ma_resume` の `turn_used` / `last_run` / `input_streak` | `mark_resumed` |
+| `ma_launch` の同上 | `on_start` |
+| 試験が直接立てていた `input_ready` / `derived_ready` | **実物の WM 状態から算出** (D11-1 の棚卸し) |
+
+`input_ready` / `derived_ready` の材料はすべて実物:
+
+| 群 | 材料 |
+|---|---|
+| 入力 | `ring::pending(slot)` / `session::quit_pending(slot)` |
+| 導出 | `timer::has_expired` / `Win::configure_pending` / `damage::has_deliverable_paint` / **park 時に控えた `OP_WAIT` の期限** |
+
+**結果**: `26 tests: 26 passed / 0 failed`。上限の等号検査
+
+- 15c `b_at == 10` (`N`=2、反例 1 = 自分の 2 窓へ交互に `set_focus`)
+- 16c `a2 == 30` (`N`=4、反例 2 = ラウンドまたぎ)
+
+も一発で通った = 規則が模型と 1 対 1 で写っている (どちらかがずれていれば
+等号検査が落ちる)。
+
+## 回 3 — 後始末 (GREEN 維持)
+
+ゲスト向けビルドで `dead_code` が 11 件出た (`STARVE_BOUND` と覗き口 9 本、
+`request_kill`)。`request_kill` は `resume_one` の失敗経路 (`exec_resume < 0`)
+から実際に使う 1 本道へ寄せ、残りは「試験・診断用 (ゲストからは呼ばない)」と
+書いて `#[allow(dead_code)]`。
+
+```
+make CROSS_DIR=... gshell
+  OS32X: gshell.bin (text=156924, bss=17964, heap=1048576, load=0x300000, api>=44)
+make check-gshell-host   → 26 passed / 0 failed
+```
+
+## 回 4 — RED (自己レビューで見つけた固まり方)
+
+**気付いたこと**: `should_park` は WM の表を見て「未追跡の ID は譲らない」と決めるが、
+**表に載る id は `exec_start` の戻り値そのもの**なので、起動したてのアプリはまだ表に居ない。
+`exec_start` は「アプリが最初に park する」まで戻らない (決裁 D9-5) ので、これは
+
+```
+top-level ── exec_start(B) ──▶ B が OP_WAIT へ ──▶ should_park(B) = false (未追跡)
+   ▲                                                      │
+   └──────────── 永久に戻らない ◀────────── B は park しない
+```
+
+という固まり方になる。結果として
+
+- 2 本目 B は park できない ⇒ **1 本目 A は二度と `exec_resume` されない** (画面が止まる)
+- top-level へ戻れない ⇒ 3 本目の `LAUNCH` も実行できない
+
+回 1〜3 の試験はどれも `on_start` を先に呼んでから `should_park` を見ていたので、
+この経路を 1 本も通っていなかった。
+
+**足した検査**: `a_just_launched_app_can_park_on_its_first_op_wait`
+
+| 検査 | 内容 |
+|---|---|
+| a | 起動中 (`begin_start`) なら、未追跡の走っている ID でも譲れる |
+| b | 譲るときに表へ載る (`is_tracked`) / `end_start` で本数が 1 増える |
+| c | 対照群: 起動中でない未追跡 ID (CUI の入れ子の子) は譲らない |
+| d | 対照群: **1 本目の起動では譲らない** (相手が居ない = 回帰ゼロ) |
+
+**結果** (`begin_start` / `end_start` を「何もしない」で置いた状態):
+`27 tests: 26 passed / 1 failed` — 新しい 1 本だけが a で落ちる。
+
+## 回 5 — GREEN
+
+`Multi.pending_start` (「`exec_start` を呼んでから戻るまで」) を足し、
+`should_park` の先頭で「未追跡 かつ 起動中」なら `adopt_running(cur)` して
+表へ迎えるようにした。`run_program` が `exec_start` を `begin_start()` /
+`end_start(rc)` で挟む。
+
+**結果**: `27 tests: 27 passed / 0 failed`。ゲスト向けビルドも警告なし。
+
+```
+make CROSS_DIR=... gshell
+  OS32X: gshell.bin (text=156896, bss=17964, heap=1048576, load=0x300000, api>=44)
+make check-gshell-host   → 27 passed / 0 failed
+make check-kapi-version  → KAPI バージョン一致: v44 (4 箇所)
+```
+
+**限界 (残した)**: 起動中に「起動したアプリの CUI 入れ子の子」が `OP_INIT` まで
+済ませて `OP_WAIT` に入ると、そちらを迎えてしまう。カーネルが `!a->gui` で park を
+拒む (`appslot_park_check`) ので実害は `ring3_park_reject_count` が 1 増えることだけで、
+その ID は `gui_owner_exit` で表から落ちる。受入 G7 でこのカウンタを見るときの注意。
+
+## 検査の対応表 (票の要求 → 試験)
+
+| 票の要求 | 試験 |
+|---|---|
+| 模型 16 ケース 84 検査と同じ性質 | `pick_follows_the_frozen_rule_...` (12a〜12f) / `should_park_matches_the_five_frozen_branches` (13a〜13f) / `derived_only_apps_each_get_exactly_one_turn_per_round` (14a〜14d) / `an_app_feeding_itself_focus_events_cannot_starve_another` (15a〜15d) / `a_derived_only_app_runs_within_the_re_derived_bound_across_rounds` (16a〜16e) |
+| 5 本目 `ERR_FULL` | `the_fifth_app_gets_err_full_from_op_init_and_the_four_survive` |
+| 終了で 1 本分だけ回収 | `owner_exit_reclaims_exactly_one_app_worth_of_state` |
+| 切替は `op_wait` の中でだけ (`exec_park` の呼び出し点 1 点) | `exec_park_has_exactly_one_call_site_and_it_is_the_op_wait_loop_head` (ソース走査。`exec_park` / `exec_resume` / `maybe_park` が各 1 点、`maybe_park` は `handler.rs` の `op_wait` の中で `wm_cycle` より前) |
+| 1 本のときは `exec_park` 0 回 | `a_single_app_never_parks_and_keeps_the_old_wm_cycle_halt_loop` (空振り防止に「`wm_cycle` が 1 周は回った」も同時に検査) |
+| 自分の 2 窓で `set_focus` を交互に呼ぶアプリが他を飢えさせない (最悪 30 以内) | 15b/15c/15d (`N`=2 で 10、定数上限 30 の内側) と 16 系 |
+| フォーカス切替で `snd_focus` が 1 回だけ | `snd_focus_is_called_once_per_focus_change` |
+| (票の S2 読み替え) `LAUNCH` は 1 本増やす | `launch_no_longer_quits_the_running_apps_but_switch_cui_still_does` |
+| (D11-3 の (2)) top-level は 1 周に 1 本だけ起こす | `resume_one_wakes_a_single_app_with_the_unread_count_as_the_wait_result` |
+| (D4) 止めてあるアプリの Quit は `exec_kill` | `a_parked_app_is_folded_with_exec_kill_from_the_top_level` |
+| (D9-5) 起動したてのアプリが最初の `OP_WAIT` で譲れる = `exec_start` が戻る | `a_just_launched_app_can_park_on_its_first_op_wait` (回 4 で見つけた固まり方の回帰) |
+
+## この試験で**測っていないこと** ([V4])
+
+- **ゲスト未検証**。受入 G1〜G7 / G9 / G10 は PM とテスターの領分。ここはホストの
+  ロジック試験だけで、CR3 の載せ替え・longjmp・`ring3_resume` は 1 度も走っていない
+  (そちらはカーネル側の `tools/tests/multiapp_impl_host.c` と実機受入)。
+- `exec_park` はホストでは**戻ってくる** (ゲストでは longjmp して戻らない)。
+  したがって「park の後 WM の状態が宙に浮かないこと」は検査できていない。
+- 操作感 (クリックから窓が反応するまでの ticks)、`INPUT_STREAK_MAX = 4` が
+  打鍵の連続を取りこぼさない最小値かどうか (D11-7 の申し送りのまま)。

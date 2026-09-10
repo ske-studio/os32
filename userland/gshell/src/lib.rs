@@ -34,6 +34,7 @@
 //! | `modal.rs`   | モーダルと標準ダイアログ (U4)。入れ子ループなし |
 //! | `timer.rs`   | アプリタイマ 8 本 (U5) |
 //! | `handler.rs` | `gui_call` ハンドラ (op → 関数表)。X1 / X2 / X3 |
+//! | `multiapp.rs` | アプリ 4 本の譲り合い (D11)。park / resume / 音の排他 |
 //! | `pump.rs`    | syscall 境界ポンプ (X4) |
 //! | `reqs.rs`    | 要求 / 応答構造体 (C `os32_gui_shared.h` の写し) |
 
@@ -51,6 +52,7 @@ mod handler;
 mod input;
 mod lease;
 mod modal;
+mod multiapp;
 mod pump;
 mod reqs;
 mod ring;
@@ -64,7 +66,7 @@ mod wm;
 
 use os32api::gfx;
 use os32api::gui::proto::{
-    GUI_MODAL_OK, GUI_SESSION_LAUNCH, GUI_SESSION_SHUTDOWN, GUI_SESSION_SWITCH_CUI,
+    GUI_MODAL_OK, GUI_SESSION_LAUNCH, GUI_SESSION_SHUTDOWN, GUI_SESSION_SWITCH_CUI, OS32_ERR_FULL,
 };
 use os32api::KernelAPI;
 
@@ -186,11 +188,20 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             launch_app(st);
         }
         /* SessionAction のトップレベル handoff (契約 §7)。`launch_app` から
-         * 戻った直後と、アプリが居ないときの周回でここを通る。**WM の文脈
-         * (X1/X3/X4) からは絶対に来ない** = 入れ子 exec_run にならない。 */
-        if session::pending_action() != 0 && !session::owner_active(st) && !session_handoff(st) {
+         * 戻った直後と、park で戻った周回でここを通る。**WM の文脈
+         * (X1/X3/X4) からは絶対に来ない** = 入れ子 exec_run にならない。
+         *
+         * K5b-W: `LAUNCH` は「1 本増やす」なので他のアプリが生きていても
+         * 実行してよい。`SWITCH_CUI` / `SHUTDOWN` だけが全回収を待つ
+         * (判定は `session::ready_to_run`、契約 S2 の読み替え)。 */
+        if session::ready_to_run(st) && !session_handoff(st) {
             /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
             return false;
+        }
+        /* 止めてあるアプリのうち 1 本を起こす (D11-3 の (2))。起こす相手が
+         * 居る間は halt しない — halt すると次の PIT まで誰も進めない。 */
+        if multiapp::resume_one(st) {
+            continue;
         }
         /* 待ちは sys_halt のみ (get_tick スピン禁止)。 */
         unsafe { (os32api::api().sys_halt)() };
@@ -221,25 +232,43 @@ fn launch_app(st: &mut wm::GuiState) {
     run_program(st, &path);
 }
 
-/// 外部プログラムを 1 本走らせる。戻ってくるまでこの関数は返らない
-/// (その間 WM はアプリの `gui_call` の中でだけ走る = 契約 T8)。
-/// 終了時にカーネルが `gui_owner_exit` を呼ぶので、窓は自動で回収される。
+/// 外部プログラムを 1 本**増やす** (K5b-W、決裁 D9-5)。
+///
+/// `exec_start` は塞がない起動で、戻ってくる条件は 2 つ:
+///
+/// | 戻り値 | 意味 | ここでやること |
+/// |---|---|---|
+/// | `> 0` | app_id。最初の `OP_WAIT` まで進んで park した | 譲り合いの表に載せる |
+/// | `0` | park より前に終了した (回収済み、`gui_owner_exit` 配送済み) | 何もしない |
+/// | `< 0` | 起動しなかった (`ERR_FULL` = 5 本目 / `ERR_NOMEM` / 見つからない) | 呼び出し元がエラー表示 |
+///
+/// アプリが 1 本しか居ない間は誰も park しない (D11-3 の (1) の 1 行目) ので、
+/// `exec_start` は従来の `exec_run` と同じく**アプリが終わるまで戻らない** —
+/// これが「1 本のときは回帰ゼロ」の実体。
 ///
 /// `path` は**この関数の呼び出し元が用意した NUL 終端の私有バッファ**
-/// (契約 §7.1 の 3)。戻り値は `exec_run` の返り値。
+/// (契約 §7.1 の 3)。
 fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
     cursor::hide(st);
     /* 前のアプリ宛の CTRL+STOP を持ち越さない (カーネル側 g_ring3_abort_req と同じ扱い)。 */
     st.abort_seen = false;
     /* フルスクリーン GFX プログラムに備えてパレット全体を退避する (契約 G6/G8)。 */
     let saved = wm::save_palette();
+    /* `exec_start` は「アプリが最初に park する」まで戻らない。その間、走って
+     * いる ID はまだ分かっていない (戻り値そのものなので) ので、譲り合いの表に
+     * 「起動が進行中」の印を立てておく (`multiapp::begin_start` の注記)。 */
+    multiapp::begin_start();
     let rc = unsafe {
         let a = os32api::api();
-        let r = (a.exec_run)(path.as_ptr());
+        /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
+         * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので、
+         * ここで戻す。生成物は手で触らない ([ABI1])。 */
+        let r = (a.exec_start)(path.as_ptr()) as i32;
         /* アプリがフルスクリーン GFX を使って抜けた場合に備えて描画モードを戻す。 */
         (a.gfx_init)();
         r
     };
+    multiapp::end_start(rc);
     /* 退避しておいた 16 色をそのまま戻し、念のためシステム色を入れ直してから、
      * まだ生きているリースがあれば再適用する。 */
     wm::restore_palette(&saved);
@@ -280,13 +309,16 @@ fn session_handoff(st: &mut wm::GuiState) -> bool {
                 buf[i] = path[i];
                 i += 1;
             }
-            if run_program(st, &buf) < 0 {
-                modal::open_wm_message(
-                    st,
-                    GUI_MODAL_OK,
-                    b"Launch failed (not found or not executable)\0",
-                    modal::WM_PURPOSE_NOTIFY,
-                );
+            /* K5b-W: 5 本目は `ERR_FULL` で起動されない (受入 G3)。既存の
+             * 4 本は無事なので、そのことが分かる文言を出す。 */
+            let rc = run_program(st, &buf);
+            if rc < 0 {
+                let msg: &[u8] = if rc == OS32_ERR_FULL {
+                    b"Too many programs (4 max) - close one first\0"
+                } else {
+                    b"Launch failed (not found, not executable, or out of memory)\0"
+                };
+                modal::open_wm_message(st, GUI_MODAL_OK, msg, modal::WM_PURPOSE_NOTIFY);
             }
             true
         }

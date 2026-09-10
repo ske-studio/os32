@@ -958,6 +958,10 @@ pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
         fep::pre_cycle(st);
         flush_screen_dirty(st);
         fep::post_cycle(st);
+        /* 音はフォーカスに追従して排他 (決裁 D9-4、受入 G10)。KAPI を呼ぶので
+         * X1 では行わない (契約 T8) — X3 と単独ループの周期だけ。フォーカスが
+         * 動いていなければ何もしない。 */
+        crate::multiapp::sync_snd_focus(st);
     }
 }
 
