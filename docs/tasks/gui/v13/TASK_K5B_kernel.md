@@ -73,3 +73,14 @@ K5a の設計 (D0〜D11) をカーネルに実装し、**gshell (W レーン) �
 
 [K5 §K5b の G1〜G10](TASK_K5_multiapp.md#段階-k5b--実装-k5a-凍結後に発注)。K レーン単体では G7 (カウンタと印)、
 G8 (CUI 回帰: `shell.bin` の入れ子 exec、v86、regress 6 本) を先に見る。G1〜G6 / G9 / G10 は K5b-W と合わせて。
+
+## 実機初回起動 (2026-09-11) — 差し戻し
+
+`38266a7` を 15MB 構成の NP21/W にテスターが配備。kselftest 44/0 は通るが、常駐シェルの
+読み込みで `FATAL: shell.bin load failed` (`kernel/kernel.c:582`)、直後に `14000` (出所未特定)、
+EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86・GUI 台本は**未実施**。
+ゲストは配備前のバックアップへ戻した。見当: is_shell 経路が per-app 物理化 / 新しい
+`EXEC_ERR_NOMEM` 判定に巻き込まれている (`git show 38266a7 -- exec/exec.c` の 1045/1090 行付近)。
+コーダーへ差し戻し (ホスト試験に「シェル起動は per-app 経路を通らない」を追加させる)。
+`ring3_resume` の実機検証は、この修正の再配備後が最初になる。
+
