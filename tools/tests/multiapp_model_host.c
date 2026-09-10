@@ -22,8 +22,9 @@
  *       exec_run は従来どおり走っているアプリからも通る。
  *    R6 同時に ready が複数居るときの選択は決定的で、かつ**有界** (票 D11):
  *       turn は 1 ラウンドにつきアプリごと 1 回、入力優先の据え置きは連続
- *       MA_INPUT_STREAK_MAX 回まで。ready なアプリは必ず MA_STARVE_BOUND 回の
- *       OP_WAIT 以内に走る。順は 入力群 > 導出群、入力群の中はフォーカス優先、
+ *       MA_INPUT_STREAK_MAX 回まで。ready なアプリは park した OP_WAIT から
+ *       MA_STARVE_BOUND 回の OP_WAIT 以内に走る (ラウンドをまたぐ待ちを含む)。
+ *       順は 入力群 > 導出群、入力群の中はフォーカス優先、
  *       それ以外は last_run の次から ID 昇順の巡回。
  *
  *  C89 ([C1])。libc も OS32 のヘッダも使わない (-nostdlib で直接走る)。
@@ -72,10 +73,22 @@ typedef unsigned int   u32;
  * 説明できる線を引くため (それ以上の意味は無い)。 */
 #define MA_INPUT_STREAK_MAX  MA_MAX_APPS
 
-/* 1 本の turn は最大 (据え置き MA_INPUT_STREAK_MAX 回 + park 1 回) の OP_WAIT。
- * turn は 1 ラウンドにつきアプリごと 1 回しか回ってこない (turn_used) ので、
- * ready なアプリは必ずこの回数以内に走る。 */
-#define MA_STARVE_BOUND (MA_MAX_APPS * (MA_INPUT_STREAK_MAX + 1))
+/* ready なアプリが「自分が park した OP_WAIT」から再開までに待つ最悪回数。
+ * 独立レビュー 2026-09-10 [P2] (2 回目) で再導出した (旧: MA_MAX_APPS × ...)。
+ *
+ *   1 turn                     ≤ MA_INPUT_STREAK_MAX + 1 回の OP_WAIT
+ *                                (据え置き上限 + park する 1 回)
+ *   現ラウンドの残り           ≤ N - 1 turn   (自分の turn_used は立っている)
+ *   次ラウンドで自分より先     ≤ N - 1 turn   (turn_used が 2 回目を止める)
+ *   ⇒ (2N - 2) × (STREAK_MAX + 1)
+ *
+ * 前提: 起算点はそのアプリが park した OP_WAIT、その後ずっと ready、
+ * その間アプリ集合が変わらない (起動・終了・kill が無い)。N = 生きている
+ * アプリ数で、定数は最大値 MA_MAX_APPS = 4 で取る ⇒ 6 × 5 = 30。
+ * ケース 15 (N=2 → 2×5=10) と ケース 16 (N=4 → 30) はどちらもこの式に
+ * ちょうど届く = 上界であると同時にタイト。 */
+#define MA_STARVE_BOUND \
+    ((2 * MA_MAX_APPS - 2) * (MA_INPUT_STREAK_MAX + 1))
 
 /* gui_call の op。模型が区別するのは「OP_WAIT かどうか」だけ。 */
 #define MA_OP_WAIT   1
@@ -962,8 +975,75 @@ static void case_self_input_cannot_starve(void)
     }
     check(parks > 0, "15a 自作入力を続けても park は必ず起きる");
     check(b_ran, "15b Paint 待ちの B が走る (飢餓しない)");
+    /* 15c 上限の式は生きているアプリ数 N に依る。ここは N=2 なので
+     *     (2N-2) x (STREAK_MAX+1) = 2 x 5 = 10 にちょうど届く。
+     *     定数 MA_STARVE_BOUND は最大値 (N=4 の 30) なので、その内側でもある。 */
+    check(b_ran && b_at == (2 * 2 - 2) * (MA_INPUT_STREAK_MAX + 1),
+          "15c B は N=2 の上限 (10 回) にちょうど届く");
     check(b_ran && b_at <= MA_STARVE_BOUND,
-          "15c B は規則から導いた上限 (MA_STARVE_BOUND) 以内に走る");
+          "15d B は定数の上限 (MA_STARVE_BOUND) の内側");
+}
+
+/* ---- 16. ラウンドをまたぐ待ちの上限 ----
+ *  独立レビュー 2026-09-10 [P2] (2 回目) の反例。無限待ちは回 12 で消えたが、
+ *  「1 ラウンドは最大 MA_MAX_APPS turn」から「任意の時点から 1 ラウンドぶんで
+ *  再開できる」は導けない。自分が park した時点では
+ *    (i)  現ラウンドの残り (自分以外の未使用 turn) ≤ N-1 turn
+ *    (ii) 次ラウンドで自分より先に選ばれる分            ≤ N-1 turn
+ *  の**両方**が待ち時間になる。導出群の A は、入力群を維持する B/C/D に
+ *  2 ラウンド続けて先を越される。 */
+static int run_cross_round(int focus_id) NOINST;
+static int run_cross_round(int focus_id)
+{
+    MaState st;
+    int i, n, k;
+    ma_init(&st, 4096);
+    for (i = 0; i < 4; i++) {
+        ma_start(&st, 100, 1);
+        ma_gui_call(&st, MA_OP_WAIT);
+        ma_park(&st);
+    }
+    /* 4 本とも入力 ready。フォーカスを A に置いてラウンド先頭で A を走らせる。 */
+    for (i = MA_ID_MIN; i <= MA_ID_MAX; i++) ma_set_ready(&st, i, 1, 0);
+    st.focus = MA_ID_MIN;
+    k = ma_pick(&st);
+    if (k != MA_ID_MIN) return -1;
+    ma_resume(&st, k);
+    /* A は入力を消費し、Paint だけ残す = 以後ずっと導出群で ready。
+     * B/C/D は入力 ready を維持し続ける (消費しない)。 */
+    ma_set_ready(&st, MA_ID_MIN, 0, 1);
+    st.focus = focus_id;
+    /* n = 0 が「A が park する OP_WAIT」= 起算点。 */
+    for (n = 0; n < 200; n++) {
+        ma_gui_call(&st, MA_OP_WAIT);
+        if (ma_should_park(&st)) {
+            ma_park(&st);
+            k = ma_pick(&st);
+            if (k <= 0) return -2;
+            ma_resume(&st, k);
+            if (k == MA_ID_MIN) return n;   /* A が走った */
+        } else {
+            ma_gui_return(&st);
+        }
+    }
+    return 0;                               /* 200 回まわしても走らなかった */
+}
+
+static void case_cross_round_bound(void) NOINST;
+static void case_cross_round_bound(void)
+{
+    int a2, a3, a5;
+    a2 = run_cross_round(MA_ID_MIN);        /* フォーカス = A */
+    a3 = run_cross_round(MA_ID_MIN + 1);    /* フォーカス = B */
+    a5 = run_cross_round(MA_ID_MAX);        /* フォーカス = D */
+    check(a2 > 0, "16a 導出群の A は必ず走る (無限待ちにならない)");
+    check(a2 <= MA_STARVE_BOUND, "16b A は再導出した上限以内に走る");
+    check(a2 == MA_STARVE_BOUND,
+          "16c 上限は緩くない (この構成でちょうど上限に届く)");
+    check(a3 > 0 && a3 <= MA_STARVE_BOUND,
+          "16d フォーカスが B でも上限を超えない");
+    check(a5 > 0 && a5 <= MA_STARVE_BOUND,
+          "16e フォーカスが D でも上限を超えない");
 }
 
 int main(void) NOINST;
@@ -986,6 +1066,7 @@ int main(void)
     case_park_decision();
     case_no_starvation();
     case_self_input_cannot_starve();
+    case_cross_round_bound();
     if (failures) {
         report("FAILURES\n");
         die(1);
