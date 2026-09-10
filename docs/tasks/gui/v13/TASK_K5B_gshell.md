@@ -1,6 +1,15 @@
 # K5b-W: アプリ 4 本の同時実行 — gshell (WM) 側の実装
 
-> 発行: PM (2026-09-11、**草案**。K5b-K の最終 KAPI 署名を受けて確定する) / レーン: W (Rust、gshell)
+> 発行: PM (2026-09-11。K5b-K の最終署名で**確定**) / レーン: W (Rust、gshell)
+>
+> **K5b-K が足した KAPI v44 (スロット 180〜185、`sdk/rust/os32api/src/kapi_generated.rs` に生成済み)**:
+> `exec_start(cmdline) -> i32` (>0 = app_id で最初の OP_WAIT まで進んで park 済み / 0 = park 前に終了・回収済み / <0)、
+> `exec_resume(app_id, wait_ret) -> i32` (app_id = また park / 0 = 終了 / <0。印なしフレームは `OS32_ERR_STALE`)、
+> `exec_park() -> i32` (成立すれば戻らない。OP_WAIT 以外の op からは `OS32_ERR_INVAL` を返して戻る)、
+> `exec_kill(app_id) -> i32` (走っている本人は `OS32_ERR_STALE` — CTRL+STOP 経路)、
+> `exec_app_state(app_id) -> i32` (0 空き / 1 走行 / 2 park)、`snd_focus(app_id) -> i32`。
+> すべて owner 1 (シェル帯) からのみ。**gshell の `build/app.conf` の要求 KAPI 版を 44 に上げるのは W レーン。**
+> カーネルの制約: CUI の入れ子の子 (`exec_run` で立った) は park できない (WM へ戻れないため)。
 > 前提: [K5b-K](TASK_K5B_kernel.md) の KAPI v44 と機構が本家に入っていること / 設計: [K5a §設計 D0〜D11](TASK_K5_multiapp.md)、決裁 (2026-09-11)
 > 排他: `userland/gshell/**`、`userland/gshell/host/**`。`sdk/rust/os32api` の生成物は K5b-K の再生成結果を**そのまま使う** (手で触らない)。
 > **触らない**: `kernel/**` `exec/**` `kapi/**` `sdk/kapi.json`、`libos32gui` (C レーン)。
