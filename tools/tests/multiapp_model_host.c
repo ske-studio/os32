@@ -10,7 +10,7 @@
  *  K5b で kernel/multiapp.c を書くときは、この模型の遷移表がそのまま仕様に
  *  なる — 名前と規則を写して、実体 (addrspace / setjmp / pgalloc) を足す。
  *
- *  模型が持つ 5 つの規則 (票 §K5a の 3/4/5/6 に対応):
+ *  模型が持つ 6 つの規則 (票 §K5a の 3/4/5/6 に対応):
  *    R1 ID は 1 = シェル帯、2..5 = アプリ。同時に生きられる非シェル ID は 4 本、
  *       5 本目は ERR_FULL。GUI アプリでも CUI の入れ子 exec でも同じ 1 つの池。
  *    R2 走っているのは常に 1 本。park (OP_WAIT の中) → WM 復帰 → resume で
@@ -20,6 +20,8 @@
  *    R4 終了 (exit / fault / kill) はその ID の資源だけを回収する。
  *    R5 GUI アプリの起動は WM の top-level からだけ (契約 S2)。CUI の入れ子
  *       exec_run は従来どおり走っているアプリからも通る。
+ *    R6 同時に ready が複数居るときの選択は決定的 (票 D11): 入力群 > 導出群、
+ *       入力群の中はフォーカス優先、それ以外は last_run の次から ID 昇順の巡回。
  *
  *  C89 ([C1])。libc も OS32 のヘッダも使わない (-nostdlib で直接走る)。
  * ======================================================================== */
@@ -73,6 +75,8 @@ typedef struct {
     int  in_op_wait;           /* いま gui_call(OP_WAIT) の中に居るか */
     int  abort_req;            /* CTRL+STOP 要求 (この ID 宛) */
     int  gui;                  /* GUI アプリ (スロットを持つ) か */
+    int  input_ready;          /* 未読の待ち行列型 / sticky Quit がある (D11) */
+    int  derived_ready;        /* 期限切れ Timer / Configure / 配送できる Paint */
 } MaApp;
 
 typedef struct {
@@ -85,6 +89,8 @@ typedef struct {
     int   last_reclaim_id;
     int   exited_id;           /* 直前に畳んだ ID (gui_owner_exit の引数) */
     int   exit_status;
+    int   last_run;            /* 直前に走った ID (D11 の巡回の起点)。0 = 無し */
+    int   focus;               /* 最前面窓の owner (gshell の front_owner()) */
 } MaState;
 
 static void ma_zero(void *p, u32 n) NOINST;
@@ -179,6 +185,7 @@ static int ma_start(MaState *st, u32 pages, int gui)
     /* ここで iret = アプリ PD を CR3 に載せる (票 §K5a-2)。 */
     st->cur = id;
     st->owner = id;
+    st->last_run = id;
     st->pd_switches++;
     return id;
 }
@@ -189,6 +196,86 @@ static int ma_live(const MaState *st)
     int i, n = 0;
     for (i = 0; i < MA_MAX_APPS; i++) if (st->app[i].state != MA_FREE) n++;
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/*  D11: 同時 ready の選択規則                                          */
+/*                                                                     */
+/*  起床の理由は 2 群に分ける (契約 T3):                                */
+/*    入力群 input_ready  = 未読の待ち行列型 / sticky Quit (契約 S5)     */
+/*    導出群 derived_ready= 期限切れ Timer / Configure 未通知 /          */
+/*                          配送できる Paint / OP_WAIT の timeout        */
+/*  実物ではどちらも WM が毎周期そのつど計算する (handler.rs の          */
+/*  wake_ready + session::quit[])。模型では試験が直接立てる。            */
+/* ------------------------------------------------------------------ */
+static void ma_set_ready(MaState *st, int id, int input, int derived) NOINST;
+static void ma_set_ready(MaState *st, int id, int input, int derived)
+{
+    MaApp *a = ma_app(st, id);
+    if (!a) return;
+    a->input_ready = input;
+    a->derived_ready = derived;
+}
+
+/* 群の中を last_run の次から ID 昇順に巡り、最初の 1 本を返す (0 = 無し)。
+ * 巡回にするのは飢餓を作らないため — 種別で全順序をつけると、Paint しか
+ * 無いアプリが repeat タイマ持ちのアプリに永久に負ける。 */
+static int ma_pick_group(const MaState *st, int want_input) NOINST;
+static int ma_pick_group(const MaState *st, int want_input)
+{
+    int start, n, i;
+    start = (st->last_run >= MA_ID_MIN && st->last_run <= MA_ID_MAX) ?
+            (st->last_run - MA_ID_MIN + 1) : 0;
+    for (n = 0; n < MA_MAX_APPS; n++) {
+        i = (start + n) % MA_MAX_APPS;
+        if (st->app[i].state != MA_PARKED) continue;
+        if (want_input) {
+            if (st->app[i].input_ready) return MA_ID_MIN + i;
+        } else {
+            if (!st->app[i].input_ready && st->app[i].derived_ready)
+                return MA_ID_MIN + i;
+        }
+    }
+    return 0;
+}
+
+/* 次に起こす 1 本 (0 = 誰も起こさない)。WM top-level が使う。 */
+static int ma_pick(const MaState *st) NOINST;
+static int ma_pick(const MaState *st)
+{
+    int f, k;
+    if (st->cur != MA_SHELL_ID) return 0;   /* 走っている間は選ばない */
+    /* (1) 入力群にフォーカス窓の owner が居れば、それを最優先。
+     *     入力の宛先は元々フォーカス窓の owner なので、ここが効くのは
+     *     フォーカス切替直後の Focus や WM 発の Close/Quit のときだけ。 */
+    f = st->focus;
+    if (f >= MA_ID_MIN && f <= MA_ID_MAX) {
+        const MaApp *a = &st->app[f - MA_ID_MIN];
+        if (a->state == MA_PARKED && a->input_ready) return f;
+    }
+    /* (2) 入力群を巡回 → (3) 空なら導出群を巡回 */
+    k = ma_pick_group(st, 1);
+    if (k) return k;
+    return ma_pick_group(st, 0);
+}
+
+/* 走っているアプリが OP_WAIT の中で park すべきか。
+ * 自分に入力があれば戻る / 他に ready が居なければ戻る (1 本のときの回帰ゼロ) /
+ * それ以外は譲る。 */
+static int ma_should_park(const MaState *st) NOINST;
+static int ma_should_park(const MaState *st)
+{
+    const MaApp *a;
+    int i;
+    if (st->cur < MA_ID_MIN || st->cur > MA_ID_MAX) return 0;
+    a = &st->app[st->cur - MA_ID_MIN];
+    if (a->state != MA_RUNNING) return 0;
+    if (a->input_ready) return 0;
+    for (i = 0; i < MA_MAX_APPS; i++) {
+        if (st->app[i].state == MA_PARKED &&
+            (st->app[i].input_ready || st->app[i].derived_ready)) return 1;
+    }
+    return 0;
 }
 
 /* gui_call の入口。模型が区別するのは「OP_WAIT かどうか」だけ。 */
@@ -243,6 +330,7 @@ static int ma_resume(MaState *st, int id)
     a->in_op_wait = 0;   /* OP_WAIT はここで戻る (戻り値は WM が決める) */
     st->cur = id;
     st->owner = id;
+    st->last_run = id;
     st->pd_switches++;
     return MA_OK;
 }
@@ -677,6 +765,114 @@ static void case_gui_start_only_from_toplevel(void)
           "11e CUI の入れ子 exec_run は従来どおり通る");
 }
 
+/* ---- 12. 同時 ready の選択規則 (D11) ---- */
+static void case_pick_rule(void) NOINST;
+static void case_pick_rule(void)
+{
+    MaState st;
+    ma_init(&st, 4096);
+    fill_four(&st, 100);
+
+    /* 12a フォーカス窓の owner が入力群にいれば、それを最優先 */
+    ma_set_ready(&st, 3, 1, 0);
+    ma_set_ready(&st, 5, 1, 0);
+    st.focus = 5;
+    st.last_run = 2;
+    check(ma_pick(&st) == 5, "12a 入力群にフォーカスが居ればフォーカスを選ぶ");
+
+    /* 12b フォーカスが入力群に居なければ last_run+1 から ID 昇順に巡回 */
+    st.focus = 2;              /* ID 2 は ready でない */
+    st.last_run = 3;           /* 巡回は 4 → 5 → 2 → 3 */
+    check(ma_pick(&st) == 5, "12b 入力群はラウンドロビン (last_run の次から)");
+
+    /* 12c 入力群が空なら導出群を同じ巡回で */
+    ma_set_ready(&st, 3, 0, 0);
+    ma_set_ready(&st, 5, 0, 0);
+    ma_set_ready(&st, 2, 0, 1);
+    ma_set_ready(&st, 4, 0, 1);
+    st.focus = 2;
+    st.last_run = 2;           /* 巡回は 3 → 4 → 5 → 2 */
+    check(ma_pick(&st) == 4, "12c 導出群もラウンドロビン");
+    /* 12d 導出群ではフォーカスを優先しない: フォーカス (4) が導出群に居ても、
+     *     巡回の順が先の 2 が選ばれる (優先していれば 4 になる)。 */
+    st.focus = 4;
+    st.last_run = 4;           /* 巡回は 5 → 2 → 3 → 4 */
+    check(ma_pick(&st) == 2, "12d 導出群ではフォーカスを優先しない");
+
+    /* 12e 入力は導出より必ず先 */
+    ma_set_ready(&st, 5, 1, 0);
+    st.focus = 2;
+    st.last_run = 4;
+    check(ma_pick(&st) == 5, "12e 入力群は導出群より先");
+
+    /* 12f 誰も ready でなければ起こさない */
+    ma_set_ready(&st, 2, 0, 0);
+    ma_set_ready(&st, 4, 0, 0);
+    ma_set_ready(&st, 5, 0, 0);
+    check(ma_pick(&st) == 0, "12f ready が 1 本も無ければ誰も起こさない");
+}
+
+/* ---- 13. 走っているアプリが park すべきか (D11 (1)) ---- */
+static void case_park_decision(void) NOINST;
+static void case_park_decision(void)
+{
+    MaState st;
+    ma_init(&st, 4096);
+    fill_four(&st, 100);
+    ma_resume(&st, 2);
+    ma_gui_call(&st, MA_OP_WAIT);
+
+    ma_set_ready(&st, 2, 1, 0);
+    ma_set_ready(&st, 4, 1, 0);
+    check(ma_should_park(&st) == 0, "13a 自分に入力があれば park しない");
+
+    ma_set_ready(&st, 2, 0, 1);
+    ma_set_ready(&st, 4, 0, 0);
+    check(ma_should_park(&st) == 0,
+          "13b 他に ready が居なければ park しない (1 本のときの回帰ゼロ)");
+
+    ma_set_ready(&st, 4, 1, 0);
+    check(ma_should_park(&st) == 1, "13c 他に入力があれば導出だけの自分は譲る");
+
+    ma_set_ready(&st, 4, 0, 1);
+    check(ma_should_park(&st) == 1, "13d 他も導出だけなら巡回のため譲る");
+
+    ma_set_ready(&st, 2, 0, 0);
+    check(ma_should_park(&st) == 1, "13e 自分が ready でなければ譲る");
+}
+
+/* ---- 14. 飢餓が起きない (導出群だけの 4 本が 1 周で全員走る) ---- */
+static void case_no_starvation(void) NOINST;
+static void case_no_starvation(void)
+{
+    MaState st;
+    int seen[MA_MAX_APPS];
+    int order[4];
+    int i, k;
+    ma_init(&st, 4096);
+    fill_four(&st, 100);
+    for (i = 0; i < MA_MAX_APPS; i++) seen[i] = 0;
+    for (i = MA_ID_MIN; i <= MA_ID_MAX; i++) ma_set_ready(&st, i, 0, 1);
+    st.focus = 2;               /* フォーカスは固定。飢餓の原因にならないこと */
+    st.last_run = 0;            /* まだ誰も走っていない */
+
+    for (k = 0; k < 4; k++) {
+        int id = ma_pick(&st);
+        order[k] = id;
+        if (id < MA_ID_MIN || id > MA_ID_MAX) { fail("14a 4 周とも 1 本選べる"); return; }
+        seen[id - MA_ID_MIN]++;
+        ma_resume(&st, id);     /* last_run が進む */
+        ma_gui_call(&st, MA_OP_WAIT);
+        ma_park(&st);
+    }
+    ok("14a 4 周とも 1 本選べる");
+    check(order[0] == 2 && order[1] == 3 && order[2] == 4 && order[3] == 5,
+          "14b 巡回の順は ID 昇順 (2,3,4,5)");
+    check(seen[0] == 1 && seen[1] == 1 && seen[2] == 1 && seen[3] == 1,
+          "14c 4 周で全員がちょうど 1 回ずつ走る (飢餓なし)");
+    check(ma_pick(&st) == 2, "14d 1 周したら先頭へ戻る");
+}
+
 int main(void) NOINST;
 int main(void)
 {
@@ -693,6 +889,9 @@ int main(void)
     case_abort_targets_running();
     case_failed_start_is_clean();
     case_gui_start_only_from_toplevel();
+    case_pick_rule();
+    case_park_decision();
+    case_no_starvation();
     if (failures) {
         report("FAILURES\n");
         die(1);

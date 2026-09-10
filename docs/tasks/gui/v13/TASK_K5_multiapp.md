@@ -121,6 +121,29 @@ KAPI 追加候補の一覧 (名前・引数・戻り値・エラー)。**実装�
   届いた窓の owner。**スケジューラは存在しない**。
 - `OP_WAIT` 以外で PD が変わる経路を作らない (契約 T2a、受入 G7)。
 
+**「`OP_WAIT` でだけ切り替える」の対象** (独立レビュー 2026-09-10 の指摘 2)。
+この規則が縛るのは **生存アプリ間の実行切替** — すでに立ち上がっている 2 本の間で
+「どちらが走るか」が入れ替わること、つまり `exec_park()` と `exec_resume()` の対だけ。
+`exec_start()` の `iret` (新しいアプリを立てて初めて CR3 を載せる)、正常終了 /
+fault / `exec_kill()` で master へ戻す CR3 遷移は、**生存アプリの集合そのものが
+変わる瞬間**であって切替ではない。これらは `OP_WAIT` の外で起きるのが正しく、
+G7 の失敗扱いにしてはならない。したがってカーネルのカウンタも 2 本に分ける
+(D8 の C1 / C2):
+
+| カウンタ | 何を数えるか | G7 での扱い |
+|---|---|---|
+| `ring3_switch_count` | `exec_resume()` が成功した回数 = **park してある生存アプリを起こした回数** | **これが G7 の対象**。`OP_WAIT` の外で増えたら失敗 |
+| `ring3_transition_count` | `exec_start()` の `iret` と、終了 / fault / `exec_kill()` の master 復帰 | 別勘定。増えても G7 の失敗ではない |
+
+G7 を「カウンタで証明できる」ようにするには、`ring3_switch_count` が増える経路が
+`exec_resume()` 1 本しか無く、その前提である park が `OP_WAIT` の中でしか成立しない
+ことをカーネル自身が保証する必要がある。カーネルは `gui_call(op, arg)` の `op` を
+見ている (`kernel/gui.c:32-38`) ので、ハンドラを呼ぶ間だけ現在の op を控えておき、
+`exec_park()` が `op != GUI_OP_WAIT` なら `OS32_ERR_INVAL` を返して
+`ring3_park_reject_count` を上げる — WM の行儀を信じるのではなく**カーネルが弾く**。
+ホストモデルの R3 (`ma_gui_call` が `in_op_wait` を立て、`ma_park` がそれを見る)
+はこの形をそのまま写したもの。
+
 この形をホストで動かせる状態機械にしたものが `tools/tests/multiapp_model_host.c` で、
 以下の D3/D4/D6 の規則はそこで 60 個の検査として固定してある。
 
@@ -413,6 +436,7 @@ resume されないまま固まったアプリを永久に畳めない。フォ�
 | `exec_park` | `void` | **戻らない** (longjmp)。呼べない文脈では `OS32_ERR_INVAL` を返して普通に戻る | `OS32_ERR_INVAL` (owner 1 でない / いま走っているアプリが居ない) |
 | `exec_kill` | `i32 app_id` | `i32`: 0 = 畳んだ / <0 | `OS32_ERR_INVAL` (owner 1 でない / 未知の ID)、`OS32_ERR_STALE` (走っている本人 — CTRL+STOP 経路を使う) |
 | `exec_app_state` *(任意)* | `i32 app_id` | `i32`: 0 = 空き / 1 = 走っている / 2 = park 中 | `OS32_ERR_INVAL` |
+| `exec_counters` *(任意)* | `void *out` (`{u32 switch_count; u32 transition_count; u32 park_reject_count; u32 live_apps;}`) | `i32` 0 / `OS32_ERR_INVAL` | 受入 G7 をゲストから読むための口。カーネルシンボルを `emu_read_mem` で直接読めば足りるので、KAPI にするかは PM 判断 |
 
 `exec_start` / `exec_resume` / `exec_kill` は **owner 1 (シェル帯) からのみ**。
 判定は `gui_register` と同じ形 (`kernel/gui.c:47-49`)。
@@ -428,6 +452,10 @@ resume されないまま固まったアプリを永久に畳めない。フォ�
 | P3 | `shm_free_owned(int owner)` + `ShmBlock.owner` (D3) | `kernel/shm.{h,c}` |
 | P4 | `ring3_resume(u32 *frame)` — `int80_stub` 末尾 (`ring3_entry.asm:65-81`) を関数として切り出したもの | `kernel/ring3_entry.asm` |
 | P5 | `exec_exit` の `db_cleanup_all()` を `db_cleanup_owned(id)` へ (呼び先の差し替えのみ、実体は `kapi_db.c:462` に既存) | `exec/exec.c:548` |
+| C1 | `volatile u32 ring3_switch_count` — `exec_resume()` の成功回数 (= 生存アプリ間の実行切替)。**受入 G7 が数えるのはこれ** | `exec/exec.c` (`fault_kill_count` / `ring3_abort_count` と同じくカーネルシンボルとして公開。PM の V4 検証が `emu_read_mem` で読む) |
+| C2 | `volatile u32 ring3_transition_count` — `exec_start()` の `iret` と、終了 / fault / `exec_kill()` の master 復帰。G7 とは別勘定 | 同上 |
+| C3 | `volatile u32 ring3_park_reject_count` — `exec_park()` を `OP_WAIT` 以外の op から呼ばれて弾いた回数。0 でなければ WM の規約違反 | 同上 |
+| C4 | `g_cur_gui_op` — `gui_call` がハンドラを呼ぶ間だけ現在の op を控える (`kernel/gui.c:32-38`)。C3 の判定に使う | `kernel/gui.c` |
 
 P1/P2 は `paging_app_band_selftest()` (`kernel/paging.h:258-267` / `kernel/paging.c:893-` の系列) に
 検査項目として足せる — ハードウェアに依存しないので `make check` のホスト試験
@@ -455,4 +483,129 @@ P1/P2 は `paging_app_band_selftest()` (`kernel/paging.h:258-267` / `kernel/pagi
   測っていない。取れなければ `ERR_NOMEM` で拒否されるので静かには壊れないが、
   「入るはずが入らない」は起こり得る。ページ単位で張れば連続は不要になる
   (per-app 物理の副産物) ので、K5b で断片化が出たらそちらへ倒せる。
-- ゲスト実機 (NP21/W) では何も動かしていない。受入は K5b の G1〜G8。
+- ゲスト実機 (NP21/W) では何も動かしていない。受入は K5b の G1〜G9。
+
+### D11. 同時 ready の選択規則 (独立レビュー 2026-09-10 の指摘 1、受入 G9)
+
+D0〜D10 は「切替の**機構**」を決めたが、**複数のアプリが同時に待ち解除条件を
+満たしたとき誰を起こすか**を決めていなかった。ここで決める。
+**プリエンプションは足さない** — 決めるのは「park してある中から次の 1 本を選ぶ順」だけで、
+選ばれたアプリは自分が次に `OP_WAIT` に入るまで走り切る。
+
+#### D11-1. 起床条件の棚卸し (実物のどこにあるか)
+
+いま `OP_WAIT` を抜ける条件は `wake_ready()`
+(`userland/gshell/src/handler.rs:396-417`) と `op_wait` の期限計算
+(`同:355-390`) にある。sticky Quit だけがそこに現れない (リングへ積めた時点で
+未読になるが、満杯だと `quit_pending` として WM 側に残る) ので足す。
+
+| 条件 | 実物 | 契約 |
+|---|---|---|
+| 未読の待ち行列型がリングにある (`Key` `Text` `Button` `Pointer` `Focus` `Close` `Modal` `Quit` `Palette`) | `ring::pending(st, slot) > 0` (`handler.rs:397`、`ring.rs:22-25`) | T3 |
+| sticky Quit が積めずに残っている | `session::quit[slot].pending` (`session.rs:217-237`)。**満杯でも捨てない・`dropped` に加算しない** | S5 |
+| 期限切れタイマがある | `timer::has_expired(st, owner, now)` (`timer.rs:99-109`) | U5 |
+| `Configure` が未通知 | `w.configure_pending` (`handler.rs:407`) | T3 (導出型) |
+| 配送できる `Paint` がある (dirty ∩ 可視領域 ≠ 空) | `damage::has_deliverable_paint(w)` (`handler.rs:410`) | T3 / G4 |
+| `OP_WAIT` の期限が来た | `deadline` = min(timeout, `timer::next_deadline_owner`) (`handler.rs:359-366, 381-387`) | T3 / U5 |
+
+#### D11-2. 2 群に分ける
+
+契約 T3 は待ち行列型 (発生時にリングへ入る) と導出型 (WM の状態から `OP_POLL` の
+ときに作る) を区別している。この線をそのまま使う。
+
+- **入力群** `input_ready(k)`: 未読の待ち行列型がある、または sticky Quit が pending。
+  **源はユーザーの打鍵・クリックか WM の決定**で、有限。
+- **導出群** `derived_ready(k)`: `ready(k)` かつ入力群でない
+  (期限切れ Timer / `Configure` 未通知 / 配送できる `Paint` / `OP_WAIT` の timeout)。
+  **源は状態と時間**で、repeat タイマやアニメーションでは**無限に湧き続ける**。
+
+この非対称が規則の根拠になる: 入力群を先に走らせても飢餓は起きない (有限だから)
+が、導出群の**中**に順位をつけると飢餓が起きる (無限に湧く側が勝ち続ける)。
+
+#### D11-3. 規則 (これを採る)
+
+`focus` = 最前面窓の owner (`wm.rs:556-561` の `front_owner()`。契約 U1 の
+フォーカスは最前面窓と同一 — `set_focus` が `bring_to_front` する、`wm.rs:969-985`)。
+`last_run` = 直前に走ったアプリ ID (WM が持つ。カーネルは関与しない)。
+
+**(1) 走っているアプリ A の `op_wait` の中で** — park するかどうか
+
+| 状態 | 動作 |
+|---|---|
+| `input_ready(A)` | **戻る** (park しない)。自分宛の打鍵・クリックが最速で届く |
+| 上以外で、park 中に `ready` が 1 本も無い | **戻るか眠る** (現行の `wm_cycle` + `sys_halt` ループのまま)。**アプリが 1 本のときはここしか通らない = 回帰ゼロ** |
+| 上以外 (自分は導出だけ、または ready でない。かつ他に ready が居る) | `exec_park()` |
+
+**(2) WM top-level で次の 1 本を選ぶ**
+
+```
+I = { k : park 中 かつ input_ready(k) }
+D = { k : park 中 かつ derived_ready(k) }
+
+I ≠ ∅ :  focus ∈ I         → focus
+         それ以外           → I を last_run+1 から ID 昇順に巡回した最初の 1 本
+I = ∅ ∧ D ≠ ∅              → D を last_run+1 から ID 昇順に巡回した最初の 1 本
+I = ∅ ∧ D = ∅              → 誰も起こさない (wm_cycle + sys_halt)
+```
+
+**(3)** 選んだ `k` を `exec_resume(k, wait_ret)`。`wait_ret` は契約 T3 のとおり
+`ring::pending(slot_of(k))` (アプリの `OP_WAIT` の戻り値 = 未読件数)。
+
+規則は **状態と `last_run` から一意に決まる** (巡回は ID の全順序なので同点が無い)。
+`last_run` は WM の私有状態で、park/resume のたびに更新する。
+
+#### D11-4. なぜこの形か / 退けた案
+
+| 案 | 退ける理由 |
+|---|---|
+| **フォーカス最優先 (無条件)** | 飢餓。フォーカス窓のアプリが repeat タイマ (`timer.rs:125-127`) で 10ms ごとに ready になると、他の 3 本が永久に走れない。フォーカスを効かせるのは**入力群の中だけ**に限る |
+| **種別の全順序** (入力 > Quit > 期限切れ > Timer > Paint) | 導出型の**中**に順位をつけると、`Paint` しか持たないアプリが Timer 持ちに永久に負ける (同じ飢餓)。契約 T3 は「アプリから見て待ち行列型と導出型の区別は無い」と書いており、**導出型の中の順位は契約が要求していない** |
+| **純ラウンドロビン (群分けなし)** | 決定的で飢餓も無いが、クリックの応答が他 3 本の周回ぶん遅れる。入力/導出の 2 群に分けるだけで応答性が戻り、飢餓も出ない |
+| **期限の近い順 (EDF)** | tick 粒度が 10ms (`PIT_HZ = 100`、`include/memmap.h:347`) なので同時刻が普通に起き、結局 tie-break が要る。巡回より複雑で得るものが無い |
+| **`OP_WAIT` のたび毎回 park してから選び直す** | 公平だが、アプリ 1 本のときも `OP_WAIT` ごとに CR3 が 2 回動く (回帰)。(1) の 2 行目で「他に ready が居なければ park しない」と決めたのはこのため (D9-7 と同じ判断) |
+
+**フォーカスを入力群の中だけで効かせるのが安全な理由**: 入力イベントの宛先は
+そもそもフォーカス窓の owner なので (`Key`/`Text` はフォーカス窓へ、`Button`/`Pointer`
+はヒットした窓へ)、`I` に focus 以外が入るのは
+(i) フォーカス切替直後に旧フォーカスへも `Focus` が飛んだとき
+(`input::emit_focus_change`、`wm.rs:983`)、
+(ii) WM が別アプリへ `Close` / sticky `Quit` を送ったとき (`session.rs:187-201`)
+くらいしかない。そのとき focus を先に走らせるのが操作感として自然で、
+入力は有限なので飢餓にならない。
+
+#### D11-5. WM とカーネルの分担
+
+- **規則はすべて WM (gshell) 側**。`I` / `D` の判定材料 (リング・タイマ・dirty・
+  可視領域・`quit_pending`) は全部 WM の私有状態で、カーネルは 1 つも持っていない。
+- **カーネルが持つのは機構だけ**: `exec_park()` / `exec_resume(id, wait_ret)` と、
+  「park は `OP_WAIT` の中でしか成立しない」というゲート (D0 の C3/C4)。
+  `last_run` も WM が持つ — カーネルに置くと「カーネルが順番を決めている」ように
+  見えてしまい、スケジューラを持たないという決めがぼやける。
+- したがって K5b の発注は **W レーン (gshell) に D11-3 の規則**、
+  **K レーン (カーネル) に D0/D2/D8 の機構とカウンタ**、と割れる。
+
+#### D11-6. ホストモデルでの固定
+
+`tools/tests/multiapp_model_host.c` にケース 12〜14 (計 15 検査) として入れた。
+`input_ready` / `derived_ready` は WM が毎周期計算するもので、模型では試験が直接
+立てる (**「何が ready か」ではなく「ready が複数あるときの選び方」だけ**を固定する)。
+
+| ケース | 見るもの |
+|---|---|
+| 12 | 入力群のフォーカス最優先 / 入力群の巡回 / 導出群の巡回 / **導出群ではフォーカスを優先しない** / 入力は導出より先 / ready ゼロなら誰も起こさない |
+| 13 | park 判定 5 通り (自分に入力→戻る / 他に ready 無し→戻る / 他に入力→譲る / 他も導出→譲る / 自分が ready でない→譲る) |
+| 14 | 飢餓なし — 導出群だけの 4 本が 2,3,4,5 の順にちょうど 1 回ずつ走り、1 周したら先頭へ戻る |
+
+RED→GREEN の記録は
+[`tools/tests/multiapp_model_tdd.md`](../../../../tools/tests/multiapp_model_tdd.md) の
+回 9 (RED、残 8) → 回 10 (GREEN、75 検査 ALL PASS)。
+
+#### D11-7. この規則で**測っていないこと**
+
+- 実際の操作感 (クリックしてから窓が反応するまでの ticks)。ゲスト未検証。
+- `I` が常に非空になり続ける入力の流し込み方 (キーリピートの連打など) で
+  導出群が待たされる上限。入力は人間由来で有限、という前提に寄りかかっている。
+  破れるとすれば `Pointer` の連続移動だが、これは WM が最新 1 件へ畳む (契約 T3、
+  `ring.rs:56-63`) ので溜まらない。**それでも上限は測っていない**。
+- `last_run` を park 側で進めるか resume 側で進めるかで、1 周の順が 1 個ずれる。
+  模型は resume 側 (走り出した時点) で進めている。実装もそれに揃えること。
