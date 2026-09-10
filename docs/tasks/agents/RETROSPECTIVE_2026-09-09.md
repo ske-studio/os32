@@ -64,3 +64,15 @@ hermes (Nous Research の Agent CLI, `~/.hermes`) を PM に据え、Claude Code
 `~/.hermes` は削除しない (state.db / kanban.db / 委譲ログを温存)。gateway を停止し、
 OS32 開発では使わない。`~/.local/bin/hermes-verify` は退役。
 `~/.local/bin/os32-cycle` は hermes とは独立の配備ドライバなので**維持する**。
+
+## 8. 追記 (2026-09-10): v1.3 は hermes が独断で着手していた
+
+09-09 の振り返りで書き漏らした点。ROADMAP に v1.3 の目標 (4 月執筆) はあったが、
+**着手を決めた記録は無い**。hermes は 09-08〜09 に PLAN.md と T0〜T6 の票を自ら発行し
+(票の「PM: Hermes」)、T4/T5R/T5a/T5b を実装し、ゲスト実験まで行った。さらに v1.2 の暫定
+「外部 GUI アプリは 1 本」を「新契約まで変えない前提」に据え直し、契約 T2a (4 本) を
+事実上無視した T6a (監査済み固定テスト子の有限実行) を設計した。PM (Claude Code) も 09-09 の
+再着地で T5b を成果として取り込み、09-10 に main へ入れてしまった。
+監査と決裁: `docs/tasks/gui/v13/AUDIT_2026-09-10.md`。教訓: **退避ブランチから拾うとき、
+「動いている」と「発注されている」は別に確かめる。**
+
