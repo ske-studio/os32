@@ -109,7 +109,13 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 使えば足りる。実装は小さく、機構は増やさない。→ 起動修正の再配備・G8 の結果を見てからコーダーへ
 (ホスト試験: 生存アプリあり → 拒否、なし → 従来どおり、RED→GREEN)。
 
-<<<<<<< HEAD
+**実装 (2026-09-11、実装コミット `f850bb6`)**: `appslot_cpl0_admit(is_shell)` を
+`exec/appslot.{c,h}` に足し、`exec_launch` の `want_ring3 == 0` の枝 (シェルを除く) で
+`exec_cpl0_claim()` **より前**に呼んで、`appslot_live() > 0` なら `OS32_ERR_FULL` を返す。
+claim も alloc も 1 つも行わないので AppSlot・pgalloc・資源の所有者はどれも動かない。
+ホスト試験は `tools/tests/multiapp_impl_host.c` のケース 19 (26 検査)、記録は
+`tools/tests/k5b_kernel_tdd.md` 回 6。**ゲスト未検証** (テスターの再配備待ち)。
+
 ## 実機受入 (2026-09-11、`b86abf8` = K5b-K + 起動修正 + sbrk 二段構え、15MB 構成、テスター実行 / PM 判定)
 
 | 項目 | obs | 判定 |
@@ -122,12 +128,4 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 | カウンタ | `exec_sbrk_tier_last=1` (段 1)、`ring3_transition_count=16`、`ring3_switch_count=0` (W 未実装)、`park_reject=0`、`resume_bad_frame=0`、`appslot_reclaim_count=8`、`fault_kill_count=1` | 整合 |
 
 未実施: G1〜G7 / G9 / G10 (W レーン待ち)、G6 の 8MB 構成、A1 (`--cpl0` 拒否) の実機。
-=======
-**実装 (2026-09-11、コミット SHA は PM が入れる)**: `appslot_cpl0_admit(is_shell)` を
-`exec/appslot.{c,h}` に足し、`exec_launch` の `want_ring3 == 0` の枝 (シェルを除く) で
-`exec_cpl0_claim()` **より前**に呼んで、`appslot_live() > 0` なら `OS32_ERR_FULL` を返す。
-claim も alloc も 1 つも行わないので AppSlot・pgalloc・資源の所有者はどれも動かない。
-ホスト試験は `tools/tests/multiapp_impl_host.c` のケース 19 (26 検査)、記録は
-`tools/tests/k5b_kernel_tdd.md` 回 6。**ゲスト未検証** (テスターの再配備待ち)。
->>>>>>> 78b347d (fix(exec): CPL=3 アプリ生存中は --cpl0 の子を拒否する (A1、ユーザー決裁 2026-09-11))
 
