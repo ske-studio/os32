@@ -134,6 +134,7 @@ check-memory-host:
 	python3 -B tools/tests/test_highram_stage.py
 	python3 -B tools/tests/test_memory_boot.py
 	python3 -B tools/tests/test_device_reservation.py
+	python3 -B tools/tests/test_sbrk_tier.py
 
 check-boot-splash-host:
 	python3 -B tools/tests/test_boot_splash_native.py
