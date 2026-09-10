@@ -274,7 +274,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - `hotdeploy` は CUI で rshell が生きているときだけ効く (`hotdeploy_poll` は `kbd_trygetchar` から)。gshell 中や
   `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す。**GUI から CUI へ戻る経路は
   Start → "CUI mode" → 確認ダイアログ Yes だけ** (G5 で ESC の即時切替は撤去。契約 S6 / 票 W3 §4.1) —
-  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82,H-107+54) →
+  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82, `start_row(H,3)` — 項目数から導く。§4-31) →
   Yes (410,H/2+11) → 約 6 秒待ち → `abs=off` → `rshell`)。その後 SHIFT+SPACE → `ime off` → `rshell`。
   この経路は `/etc/system.cfg` に `GUI=0` を永続化するので、GUI 自動起動へ戻すときは `os32gui`
   (その場で GUI へ入る) か cfg の `GUI=1` 書き戻しを使う。
@@ -452,6 +452,25 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **教訓**: 「FS ドライバは下位バイトしか見ないので互換」というコメントが
   `fs/vfs.c` にそのまま書いてあった。**呼び出し側が広げたエンコードは、
   受け側全部を数えて確かめる**。片方が無視すると、別デバイスが同じ実体に化ける。
+
+### 4-31. `gui_gate.py` で GUI を叩くときの 2 つの罠 (2026-09-10、修正済み)
+
+- **rshell を抜けてから `/api/key` の text を打つ。** rshell は `kbd_trygetchar` の
+  生読みで、入力が途切れるたびに 1 コマンドとして実行する。4 文字ずつ送る
+  `key(text="os32gui")` は `os32` / `gui` という別々のコマンドになり、GUI には入らない
+  (画面に `os32: command not found` / `gui: command not found` が並ぶ)。先に
+  `key(seq="ESC")` で `[Remote shell closed]` を出してから `enter_gshell()`。
+  `leave_gshell()` は末尾で `rshell` を打って復旧するので、**台本側で二重に打たない**
+  (GUI 内で打つとターミナルが rshell を起動し、以後の打鍵を全部食う)。
+- **Start メニューの行座標は項目数から導く。** メニューはタスクバーから上へ伸びるので、
+  v1.3 (T5a) で "Display fixture" が足されて 5 → 6 行になった時点で全行が 18px 上がり、
+  5 行前提の固定値 `H-107+18r` は行 r が r+1 に当たっていた。「CUI mode」(r=3) の
+  クリックが **Shut Down** に当たり、確認 Yes でゲストが `System halted` になった
+  (リセットで復旧、NHD は無傷)。`gui_gate.py` は `startmenu.rs` の `ROOT_ITEMS` /
+  `ITEM_H` / `BORDER` と `taskbar.rs` の `TASKBAR_H` から計算する形に直した。
+  **項目を足したら `START_MENU_ITEMS` も更新する。**
+- 観測は `gui_bench` の `CLICK n` (text VRAM) が便利。`on_raw` で `Button` を数えるので、
+  WM がアプリへ配ったかそのものが見える。1 クリック = +2 (押下+解放)。
 
 ---
 

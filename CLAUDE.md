@@ -151,6 +151,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - 9MB 構成で `v86 -t` が `#PF addr=0 EIP=0` で死ぬ (8MB / 15MB は無事、未解決)。 → §4-28
 - 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
   突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
+- `gui_gate.py` で GUI を叩くときは rshell を ESC で抜けてから `/api/key`、Start メニューの行は
+  `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 
