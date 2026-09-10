@@ -942,8 +942,15 @@ impl CopyJob {
         }
     }
 
-    /// 中断 (Quit / 終了時)。fd を残さない (§10)。
+    /// 中断 (ESC / 閉じる / Session Quit / タイマが張れない)。fd を残さず、
+    /// **自分が作った出力も消す** (§6 の partial cleanup)。読み書きエラーの
+    /// [`fail`] だけが消していると、中断では途中まで書いたファイルが正常な
+    /// ファイルとして残る。
+    ///
+    /// 消すのは**進行中だった場合だけ**。`finish` / `fail` の後や 2 回目の
+    /// `abort` では `active` が false なので、成功したコピーは消さない。
     pub fn abort(&mut self) {
+        let was_active = self.active;
         if self.src_fd >= 0 || self.dst_fd >= 0 {
             close(self.src_fd);
             close(self.dst_fd);
@@ -951,5 +958,10 @@ impl CopyJob {
             self.dst_fd = -1;
         }
         self.active = false;
+        if was_active && self.created && self.dst_len > 0 {
+            let mut p = [0u8; PATH_CAP];
+            p[..self.dst_len + 1].copy_from_slice(&self.dst[..self.dst_len + 1]);
+            let _ = unlink(&p);
+        }
     }
 }

@@ -346,6 +346,9 @@ pub struct Modal {
     /* ---- ファイル選択 ---- */
     names: [[u8; NAME_LEN]; MAX_ENTRIES],
     is_dir: [bool; MAX_ENTRIES],
+    /// 名前が `NAME_LEN` に収まらず切り詰めた行。表示はするが**選べない**
+    /// (契約 M1: 切り詰めた別値を返さない)。
+    too_long: [bool; MAX_ENTRIES],
     nentries: usize,
     cursor: usize,
     scroll: usize,
@@ -389,6 +392,7 @@ impl Modal {
         focus_btn: 0,
         names: [[0; NAME_LEN]; MAX_ENTRIES],
         is_dir: [false; MAX_ENTRIES],
+        too_long: [false; MAX_ENTRIES],
         nentries: 0,
         cursor: 0,
         scroll: 0,
@@ -1349,8 +1353,21 @@ extern "C" fn ls_cb(entry: *const DirEntryExt, _ctx: *mut u8) {
         m.names[m.nentries][i] = e.name[i];
         i += 1;
     }
+    /* 収まらなかった = 表示用に切り詰めた。この行は選択できない
+     * (契約 M1「切り詰めて別値として返してはならない」)。 */
+    let truncated = e.name[NAME_LEN - 1] != 0;
+    if truncated {
+        /* 表示が □ にならないよう、末尾の不完全な UTF-8 列を落とす (§4-27)。 */
+        while i > 0 && (m.names[m.nentries][i - 1] & 0xC0) == 0x80 {
+            i -= 1;
+        }
+        if i > 0 && (m.names[m.nentries][i - 1] & 0x80) != 0 {
+            i -= 1;
+        }
+    }
     m.names[m.nentries][i] = 0;
     m.is_dir[m.nentries] = e.ftype == FILE_TYPE_DIR;
+    m.too_long[m.nentries] = truncated;
     m.nentries += 1;
 }
 
@@ -1424,8 +1441,9 @@ fn enter_dir(st: &mut GuiState) {
             m.cwd_len = n;
         } else {
             /* W4 §5: 255B を超える path は作らない (作っても中の file が
-             * Open できず、切り詰めた別 path を返すのは禁止)。 */
-            if selection_len(m) > VALUE_MAX {
+             * Open できず、切り詰めた別 path を返すのは禁止)。
+             * 名前自体が切り詰まっている行も同じ理由で降りられない。 */
+            if m.too_long[m.cursor] || selection_len(m) > VALUE_MAX {
                 return;
             }
             let mut n = m.cwd_len;
@@ -1451,6 +1469,13 @@ fn enter_dir(st: &mut GuiState) {
 /// 255B を超えるなら**何も書かず false** (W4 §5: 切り詰めた別 path を返さない)。
 fn build_selection() -> bool {
     let m = state();
+    /* 名前が切り詰まっている行は、実在しない path か同じ接頭辞の別 file に
+     * なるので返さない (契約 M1)。 */
+    if m.cursor < MAX_ENTRIES && m.too_long[m.cursor] {
+        m.sel_len = 0;
+        m.sel[0] = 0;
+        return false;
+    }
     if selection_len(m) > VALUE_MAX {
         m.sel_len = 0;
         m.sel[0] = 0;
