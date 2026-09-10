@@ -1,0 +1,75 @@
+# K5b-K: アプリ 4 本の同時実行 — カーネル側の実装 (KAPI v44)
+
+> 発行: PM (2026-09-11) / レーン: K (C89、カーネル背骨) / 前提: [K5 決裁](TASK_K5_multiapp.md#決裁-2026-09-11ユーザーレビュアー枯渇のため-pm-の材料提示に基づく) 済み、設計は [K5a §設計 D0〜D11](TASK_K5_multiapp.md)
+> 契約: T2, T2a, T3, T4, U8 / 版数: **v44** ([KAPI_SPEC §3-2](../../../KAPI_SPEC.md) に予約済み)
+> 排他: `kernel/**` `exec/**` `kapi/**` `fs/fd_redirect.c` (所有者 ID) `include/memmap.h` `sdk/kapi.json` + 生成物、`tools/tests/` の新規。
+> **触らない**: `userland/gshell/**` (W レーン、K5b-W)、`drivers/**` の I/O 手順、`v86`、`shell.bin`。
+
+## ゴール
+
+K5a の設計 (D0〜D11) をカーネルに実装し、**gshell (W レーン) が K5b-W で使える KAPI と機構**を
+揃える。同時に生きる GUI アプリは最大 4 本、動くのは常に 1 本、切替は `OP_WAIT` で park された
+フレームからの resume だけ。プリエンプションは足さない (決裁 D9-1/7)。
+
+## 作業 (設計の項番と対応)
+
+1. **物理ページとアドレス** (D1、I1〜I14): アプリごとに `pgalloc_alloc_n()` で 3 領域 (本体+sbrk /
+   exec_heap / ユーザスタック) を取り、固定仮想 0x500000〜へ写す。`paging_addrspace_map_user_range_phys`
+   (P1) と `paging_addrspace_clear_app_band` (P2) を足し、**I6 (アプリ PT が master の identity PTE で
+   初期化される) を必ず落とす**。`EXEC_DYN_RESERVE` の穴は役目を終えるので撤去。identity 前提の
+   14 か所を全部直し、仮想レイアウト (`app.ld` / `memmap.h` の RING3_*) は動かさない。
+2. **AppSlot と切替** (D2、決裁 (b)): `exec_ctx_stack` のスタックに加えて **アプリ ID 2〜5 の表** (AppSlot)
+   を持ち、`OP_WAIT` の syscall フレーム (pushad + iret 分) と CR3、exec_heap 状態、guard を保存する。
+   単一カーネルスタックのまま。`ring3_resume(frame)` (P4) は `int80_stub` 末尾を切り出す。
+   IF の扱いは `int80_stub` の注記 (`sti` で入り `cli` で出る) を崩さない。
+3. **所有者 ID** (D3、決裁 D9-2): `cur_res_owner` を「ネスト段」から「ID (1 = シェル、2〜5 = アプリ)」へ。
+   GUI と CUI で 1 池。`fd_redirect_reset_owned` / `vfs_close_owned` / `pipe_free_owned` / `gui_owner_exit` は
+   ID で閉じることを確認し、`shm_free_owned` (P3) を足し、`db_cleanup_all` → `db_cleanup_owned(id)` (P5)。
+   CUI (`shell.bin` の入れ子 `exec_run`) では段 = ID になる互換を保つ。`MAX_EXEC_NEST=4` では ID 5 が
+   入らないので表の大きさを見直す。
+4. **KAPI v44** (D8、決裁 D9-5/6/8): `exec_start(cmdline) → app_id / 0 / 負`、`exec_resume(app_id, wait_ret)`、
+   `exec_park()` (戻らない。`OP_WAIT` 以外の op から呼ばれたら `OS32_ERR_INVAL` を返して C3 を増やす)、
+   `exec_kill(app_id)`、任意で `exec_app_state(app_id)`。**owner 1 からのみ** (`gui_register` と同じ判定)。
+   `exec_run` は CPL=3 から呼べるまま (ID は池から。5 本目は `ERR_FULL`)。追加は**末尾追記のみ**
+   [ABI2]、`sdk/kapi.json` を編集して再生成、版数 42 → 44 は **スキル `os32-kapi-add` の手順で** [ABI1]〜[ABI3]
+   (v43 はネットワークに予約済みで飛ばす)。`make clean` → `make all`、`make external` も回す。
+5. **印とカウンタ** (D0 / C1〜C6、受入 G7): `AppSlot.parked_from_wait` (park 時に `g_cur_gui_op == GUI_OP_WAIT`
+   のときだけ立てる)、`exec_resume` は印のあるフレームだけを起こし、無ければ `ring3_resume_bad_frame_count`
+   を増やして `OS32_ERR_INVAL`。`ring3_switch_count` (resume 成功)、`ring3_transition_count` (start の iret、
+   終了 / fault / kill の master 復帰)、`ring3_park_reject_count`。すべて `fault_kill_count` と同じ
+   カーネルシンボル (KAPI にしない)。
+6. **終了・fault・CTRL+STOP・起動失敗** (D4): それぞれで**その ID だけ**畳んで WM (owner 1 の top-level) へ
+   戻る。`ring3_fault_kill` の「master CR3 復帰 → AS 破棄 → longjmp」を ID 単位に。CTRL+STOP は走っている
+   アプリ宛 (`exec.c:265`) のまま。止まっているアプリは `exec_kill` で畳む。
+7. **音の排他** (決裁 D9-4、受入 G10): 音は**フォーカスに追従して排他**。カーネルは「音の所有者」を 1 つ持ち、
+   W レーンがフォーカス切替時に呼ぶ口 `snd_focus(app_id)` (KAPI か内部関数かは設計で決めて PM に報告) で、
+   それまでの所有者の音を止めて状態 (BGM の MML と再生位置、persist、master) を AppSlot に退避し、新しい
+   所有者に退避済みの状態があれば復元する。同時には鳴らさない。終了時はその ID の状態だけ捨てる。
+   `snd_cleanup()` (`exec.c:545`) の呼び先を ID 単位に。`kernel/snd_engine.h` の既存 API を読んで、
+   退避できる最小の状態を決める (YM2203 のレジスタ影像を持つか、MML の再生位置で足りるか)。
+8. **メモリ勘定** (D5、決裁 D9-3): `heap_size = 0` の既定は変えない。入らなければ `EXEC_ERR_NOMEM` /
+   `OS32_ERR_FULL` で拒否し、既存アプリには触らない (スワップしない)。8MB で GUI アプリが 1 本立つ
+   ことは受入 G6 で確かめる (実機は PM/テスター)。
+
+## ホスト試験 (実装と同じコミットで)
+
+- `tools/tests/test_app_band_pde.py` / `paging_app_band_selftest()` に P1/P2 の検査 (仮想≠物理の写像、
+  アプリ帯の PTE が空から始まること = I6)。
+- 所有者 ID の回収: `tools/tests/test_vfs_fd_sqlite.py` 系の作法で、ID 2 と 3 が開いた FD / redirect /
+  pipe / shm / db を ID 2 の終了で **2 の分だけ**回収すること。
+- AppSlot と印: `tools/tests/multiapp_model_host.c` の状態機械を**実物の AppSlot 管理コード**に差し替えて
+  同じ 84 検査が通ること (モデルは設計、これは実装の検査)。印なし resume の拒否 (C6) を負例で。
+- 新挙動ごとに RED→GREEN を `tools/tests/k5b_kernel_tdd.md` に記録。`make check` への登録は PM。
+
+## 完了条件
+
+- `make clean && make all && make external && make check` が EXIT=0 (`CROSS_DIR=/home/hight/opt/cross` が要る場合あり)。
+- `sdk/kapi.json` の version が 44、生成物と `KAPI_VERSION` が一致 (`check-kapi-version`)。
+- 上記ホスト試験がすべて GREEN で、RED の記録がある。
+- 変更ファイル一覧、KAPI 追加の最終署名、`snd_focus` の形 (KAPI か内部か)、既知の未確認を ROLES §5 の書式で報告。
+- **配備・コミット・push・エミュレータ・ローカル AI・`*.ini` は禁止。** ゲスト受入 (G1〜G10) は PM とテスターが行う。
+
+## 受入 (ゲスト、PM/テスター)
+
+[K5 §K5b の G1〜G10](TASK_K5_multiapp.md#段階-k5b--実装-k5a-凍結後に発注)。K レーン単体では G7 (カウンタと印)、
+G8 (CUI 回帰: `shell.bin` の入れ子 exec、v86、regress 6 本) を先に見る。G1〜G6 / G9 / G10 は K5b-W と合わせて。
