@@ -473,6 +473,25 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - 観測は `gui_bench` の `CLICK n` (text VRAM) が便利。`on_raw` で `Button` を数えるので、
   WM がアプリへ配ったかそのものが見える。1 クリック = +2 (押下+解放)。
 
+### 4-32. `ext2_read_file` は端数ブロックでも 1KB 書いていた — 小さな static バッファへ読むと隣を潰す (2026-09-11、修正済み)
+
+- **現象**: K5b-K (アプリ 4 本) の新カーネルが初回起動で `FATAL: shell.bin load failed`
+  (`kernel/kernel.c:582`)。kselftest は 44/0 で通り、`[DBG] NOMEM:` も出ない。画面 2 行目の
+  `14000` は `kernel/shlib.c:191` のロード報告 `@414000` が 80 桁で折り返した尻尾で、無関係。
+- **原因**: `fs/ext2_file.c:34` の `ext2_read_file()` が端数ブロックでも `ext2_read_block()` で
+  **1024 バイト**を宛先へ書いていた (`max_size` で `remaining` は頭打ちにするが、書き込み長は
+  頭打ちにしていない)。K5b-K 前は exec がファイル全体をロード番地へ読んでいたので無害。
+  K5b-K がヘッダを `static u8 hdrbuf[108]` へ先読みするようにした瞬間、隣の `.bss` の
+  `resolved[]` (解決済みパス) がファイルの中身で塗り潰され、本体の `vfs_read(resolved, …)` が
+  ゴミのパスを引いて `EXEC_ERR_NOT_FOUND` になった。
+- **修正**: 端数ブロックは `ext2_g_blk` を中継して `to_copy` だけ写す (`ext2_read_stream` と同じ)。
+  回帰は `tools/tests/test_ext2_read_bound.py` (`max_size=108` で溢れ / `resolved[] clobbered` を
+  RED で捉える)。
+- **教訓**: (1) **FS の read が「要求長ちょうど」しか書かないと仮定しない** — 小さな static
+  バッファへ読むときは `kernel.map` で隣に何が居るかを見る。(2) PM の見当 (NOMEM 経路) は
+  外れていた。実機の画面に `[DBG] NOMEM:` が無い時点で除外できたはず — **症状にある/ない
+  出力で経路を先に絞る**。(3) `ext2_g_aux` はビットマップ用 (§4-24) なので中継に使わない。
+
 ---
 
 ## §5. デバッグ道具箱
