@@ -20,8 +20,11 @@
  *    R4 終了 (exit / fault / kill) はその ID の資源だけを回収する。
  *    R5 GUI アプリの起動は WM の top-level からだけ (契約 S2)。CUI の入れ子
  *       exec_run は従来どおり走っているアプリからも通る。
- *    R6 同時に ready が複数居るときの選択は決定的 (票 D11): 入力群 > 導出群、
- *       入力群の中はフォーカス優先、それ以外は last_run の次から ID 昇順の巡回。
+ *    R6 同時に ready が複数居るときの選択は決定的で、かつ**有界** (票 D11):
+ *       turn は 1 ラウンドにつきアプリごと 1 回、入力優先の据え置きは連続
+ *       MA_INPUT_STREAK_MAX 回まで。ready なアプリは必ず MA_STARVE_BOUND 回の
+ *       OP_WAIT 以内に走る。順は 入力群 > 導出群、入力群の中はフォーカス優先、
+ *       それ以外は last_run の次から ID 昇順の巡回。
  *
  *  C89 ([C1])。libc も OS32 のヘッダも使わない (-nostdlib で直接走る)。
  * ======================================================================== */
@@ -61,6 +64,19 @@ typedef unsigned int   u32;
 #define MA_RUNNING  1
 #define MA_PARKED   2
 
+/* D11 (2026-09-10 の差し戻し): 入力優先を**連続で**適用してよい OP_WAIT の回数。
+ * これを超えたら、自分に入力が湧き続けていても譲る。入力の源が人間とは限らない
+ * (アプリが自分の 2 窓へ交互に set_focus すると Focus が自分に湧き続ける:
+ *  userland/gshell/src/wm.rs:969-985 → input.rs:855-872) ので、上限が要る。
+ * 値を MA_MAX_APPS と同じにしたのは「アプリの数だけは続けて持てる」という
+ * 説明できる線を引くため (それ以上の意味は無い)。 */
+#define MA_INPUT_STREAK_MAX  MA_MAX_APPS
+
+/* 1 本の turn は最大 (据え置き MA_INPUT_STREAK_MAX 回 + park 1 回) の OP_WAIT。
+ * turn は 1 ラウンドにつきアプリごと 1 回しか回ってこない (turn_used) ので、
+ * ready なアプリは必ずこの回数以内に走る。 */
+#define MA_STARVE_BOUND (MA_MAX_APPS * (MA_INPUT_STREAK_MAX + 1))
+
 /* gui_call の op。模型が区別するのは「OP_WAIT かどうか」だけ。 */
 #define MA_OP_WAIT   1
 #define MA_OP_POLL   2
@@ -77,6 +93,7 @@ typedef struct {
     int  gui;                  /* GUI アプリ (スロットを持つ) か */
     int  input_ready;          /* 未読の待ち行列型 / sticky Quit がある (D11) */
     int  derived_ready;        /* 期限切れ Timer / Configure / 配送できる Paint */
+    int  turn_used;            /* このラウンドで turn を 1 回使った (D11 の有界性) */
 } MaApp;
 
 typedef struct {
@@ -91,6 +108,7 @@ typedef struct {
     int   exit_status;
     int   last_run;            /* 直前に走った ID (D11 の巡回の起点)。0 = 無し */
     int   focus;               /* 最前面窓の owner (gshell の front_owner()) */
+    int   input_streak;        /* 入力優先で turn を据え置いた連続 OP_WAIT 回数 */
 } MaState;
 
 static void ma_zero(void *p, u32 n) NOINST;
@@ -183,9 +201,11 @@ static int ma_start(MaState *st, u32 pages, int gui)
     st->free_pages -= pages;
 
     /* ここで iret = アプリ PD を CR3 に載せる (票 §K5a-2)。 */
+    a->turn_used = 1;              /* このラウンドの turn を使った */
     st->cur = id;
     st->owner = id;
     st->last_run = id;
+    st->input_streak = 0;
     st->pd_switches++;
     return id;
 }
@@ -217,9 +237,24 @@ static void ma_set_ready(MaState *st, int id, int input, int derived)
     a->derived_ready = derived;
 }
 
+/* park 中で、この turn を使っていない ready を数える (ラウンドの残り)。 */
+static int ma_round_remaining(const MaState *st) NOINST;
+static int ma_round_remaining(const MaState *st)
+{
+    int i, n = 0;
+    for (i = 0; i < MA_MAX_APPS; i++) {
+        const MaApp *a = &st->app[i];
+        if (a->state == MA_PARKED && !a->turn_used &&
+            (a->input_ready || a->derived_ready)) n++;
+    }
+    return n;
+}
+
 /* 群の中を last_run の次から ID 昇順に巡り、最初の 1 本を返す (0 = 無し)。
- * 巡回にするのは飢餓を作らないため — 種別で全順序をつけると、Paint しか
- * 無いアプリが repeat タイマ持ちのアプリに永久に負ける。 */
+ * 候補は「このラウンドで turn を使っていない」park 中のアプリだけ。
+ * turn を 1 ラウンド 1 回に絞るのが飢餓を止める仕掛けで、巡回はその中の
+ * 順を決定的にするためのもの。種別で全順序をつけないのは、Paint しか無い
+ * アプリが repeat タイマ持ちに永久に負けるのを避けるため。 */
 static int ma_pick_group(const MaState *st, int want_input) NOINST;
 static int ma_pick_group(const MaState *st, int want_input)
 {
@@ -227,31 +262,39 @@ static int ma_pick_group(const MaState *st, int want_input)
     start = (st->last_run >= MA_ID_MIN && st->last_run <= MA_ID_MAX) ?
             (st->last_run - MA_ID_MIN + 1) : 0;
     for (n = 0; n < MA_MAX_APPS; n++) {
+        const MaApp *a;
         i = (start + n) % MA_MAX_APPS;
-        if (st->app[i].state != MA_PARKED) continue;
+        a = &st->app[i];
+        if (a->state != MA_PARKED || a->turn_used) continue;
         if (want_input) {
-            if (st->app[i].input_ready) return MA_ID_MIN + i;
+            if (a->input_ready) return MA_ID_MIN + i;
         } else {
-            if (!st->app[i].input_ready && st->app[i].derived_ready)
-                return MA_ID_MIN + i;
+            if (!a->input_ready && a->derived_ready) return MA_ID_MIN + i;
         }
     }
     return 0;
 }
 
-/* 次に起こす 1 本 (0 = 誰も起こさない)。WM top-level が使う。 */
-static int ma_pick(const MaState *st) NOINST;
-static int ma_pick(const MaState *st)
+/* 次に起こす 1 本 (0 = 誰も起こさない)。WM top-level が使う。
+ * ラウンドの turn が尽きたら全員ぶんを配り直す (= 新しいラウンド)。 */
+static int ma_pick(MaState *st) NOINST;
+static int ma_pick(MaState *st)
 {
-    int f, k;
+    int f, k, i;
     if (st->cur != MA_SHELL_ID) return 0;   /* 走っている間は選ばない */
+
+    if (ma_round_remaining(st) == 0) {
+        for (i = 0; i < MA_MAX_APPS; i++) st->app[i].turn_used = 0;
+        if (ma_round_remaining(st) == 0) return 0;   /* ready が 1 本も無い */
+    }
+
     /* (1) 入力群にフォーカス窓の owner が居れば、それを最優先。
-     *     入力の宛先は元々フォーカス窓の owner なので、ここが効くのは
-     *     フォーカス切替直後の Focus や WM 発の Close/Quit のときだけ。 */
+     *     turn を使い切っていれば飛ばす — フォーカスを握ったままのアプリが
+     *     ラウンドを独占できないようにする (差し戻しの反例)。 */
     f = st->focus;
     if (f >= MA_ID_MIN && f <= MA_ID_MAX) {
         const MaApp *a = &st->app[f - MA_ID_MIN];
-        if (a->state == MA_PARKED && a->input_ready) return f;
+        if (a->state == MA_PARKED && !a->turn_used && a->input_ready) return f;
     }
     /* (2) 入力群を巡回 → (3) 空なら導出群を巡回 */
     k = ma_pick_group(st, 1);
@@ -260,22 +303,30 @@ static int ma_pick(const MaState *st)
 }
 
 /* 走っているアプリが OP_WAIT の中で park すべきか。
- * 自分に入力があれば戻る / 他に ready が居なければ戻る (1 本のときの回帰ゼロ) /
- * それ以外は譲る。 */
-static int ma_should_park(const MaState *st) NOINST;
-static int ma_should_park(const MaState *st)
+ *   - 他に ready が 1 本も無い          → 戻る (1 本のときの回帰ゼロ)
+ *   - 自分に入力があり、据え置きが上限未満 → 戻る (打鍵の連続を取りこぼさない)
+ *   - それ以外                          → 譲る
+ * 2 行目に上限を置いたのが差し戻しの修正点。入力の源は人間とは限らず
+ * (自分の 2 窓へ交互に set_focus すれば自分で湧かせられる)、上限が無いと
+ * 他のアプリの turn が永久に回ってこない。 */
+static int ma_should_park(MaState *st) NOINST;
+static int ma_should_park(MaState *st)
 {
-    const MaApp *a;
-    int i;
+    MaApp *a;
+    int i, other_ready = 0;
     if (st->cur < MA_ID_MIN || st->cur > MA_ID_MAX) return 0;
     a = &st->app[st->cur - MA_ID_MIN];
     if (a->state != MA_RUNNING) return 0;
-    if (a->input_ready) return 0;
     for (i = 0; i < MA_MAX_APPS; i++) {
         if (st->app[i].state == MA_PARKED &&
-            (st->app[i].input_ready || st->app[i].derived_ready)) return 1;
+            (st->app[i].input_ready || st->app[i].derived_ready)) other_ready = 1;
     }
-    return 0;
+    if (!other_ready) return 0;
+    if (a->input_ready && st->input_streak < MA_INPUT_STREAK_MAX) {
+        st->input_streak++;
+        return 0;
+    }
+    return 1;
 }
 
 /* gui_call の入口。模型が区別するのは「OP_WAIT かどうか」だけ。 */
@@ -328,9 +379,11 @@ static int ma_resume(MaState *st, int id)
     if (a->state != MA_PARKED) return MA_ERR_STATE;
     a->state = MA_RUNNING;
     a->in_op_wait = 0;   /* OP_WAIT はここで戻る (戻り値は WM が決める) */
+    a->turn_used = 1;              /* このラウンドの turn を使った */
     st->cur = id;
     st->owner = id;
     st->last_run = id;
+    st->input_streak = 0;
     st->pd_switches++;
     return MA_OK;
 }
@@ -873,6 +926,46 @@ static void case_no_starvation(void)
     check(ma_pick(&st) == 2, "14d 1 周したら先頭へ戻る");
 }
 
+/* ---- 15. 自作入力で park を回避できないこと ----
+ *  独立レビュー 2026-09-10 [P2] の反例。アプリ A が自分の窓 2 枚へ交互に
+ *  set_focus() すると、`emit_focus_change` が **両窓の owner** へ Focus を流す
+ *  (userland/gshell/src/input.rs:855-872) ため、A 自身に待ち行列型が湧き続ける。
+ *  「入力群は人間由来だから有限」は成立しない。 */
+#define MA_STARVE_LIMIT 200
+static void case_self_input_cannot_starve(void) NOINST;
+static void case_self_input_cannot_starve(void)
+{
+    MaState st;
+    int i, b_ran = 0, b_at = 0, parks = 0;
+    ma_init(&st, 4096);
+    /* A = ID 2 (毎周 自分に Focus を湧かせる)、B = ID 3 (Paint 待ちで park 中)。 */
+    ma_start(&st, 100, 1); ma_gui_call(&st, MA_OP_WAIT); ma_park(&st);
+    ma_start(&st, 100, 1); ma_gui_call(&st, MA_OP_WAIT); ma_park(&st);
+    ma_set_ready(&st, 3, 0, 1);          /* B は導出型 (Paint) で ready */
+    st.focus = 2;                        /* A がフォーカスを握ったまま */
+    ma_resume(&st, 2);
+
+    for (i = 0; i < MA_STARVE_LIMIT; i++) {
+        ma_gui_call(&st, MA_OP_WAIT);
+        ma_set_ready(&st, 2, 1, 0);      /* A が自分で湧かせた Focus */
+        if (ma_should_park(&st)) {
+            int k;
+            ma_park(&st);
+            parks++;
+            k = ma_pick(&st);
+            if (k <= 0) { fail("15a 自作入力を続けても park は必ず起きる"); return; }
+            ma_resume(&st, k);
+        } else {
+            ma_gui_return(&st);
+        }
+        if (st.cur == 3 && !b_ran) { b_ran = 1; b_at = i + 1; }
+    }
+    check(parks > 0, "15a 自作入力を続けても park は必ず起きる");
+    check(b_ran, "15b Paint 待ちの B が走る (飢餓しない)");
+    check(b_ran && b_at <= MA_STARVE_BOUND,
+          "15c B は規則から導いた上限 (MA_STARVE_BOUND) 以内に走る");
+}
+
 int main(void) NOINST;
 int main(void)
 {
@@ -892,6 +985,7 @@ int main(void)
     case_pick_rule();
     case_park_decision();
     case_no_starvation();
+    case_self_input_cannot_starve();
     if (failures) {
         report("FAILURES\n");
         die(1);
