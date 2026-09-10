@@ -811,6 +811,59 @@ static void case_resume_needs_wait_mark(void)
     }
 }
 
+/* ---- 18. シェル帯 (ID 1) は per-app 経路に巻き込まれない ----
+ * 2026-09-11 の差し戻し (実機初回起動で「FATAL: shell.bin load failed」) で
+ * 立てた境界。shell.bin も gshell.bin も exec ネスト段 0 = ID 1 で、
+ * 0x300000 の MEM_SHELL_* 帯に identity で載る CPL=0 プログラム。
+ * pgalloc の空きがどれだけ少なくても、per-app 物理・ID の池・枚数勘定の
+ * どれにも掛からずに起動できなければならない (K5a 設計 D7「変えないもの」)。
+ * 判定の実体は exec/appslot.c の appslot_launch_is_app() で、
+ * exec_launch の want_ring3 はこれをそのまま使う。 */
+static void case_shell_never_takes_app_band(void)
+{
+    AppSlot *sh;
+
+    /* (a) 帯の判定 — シェルは flags に関わらずアプリ帯を使わない */
+    check(appslot_launch_is_app(1, 0) == 0,
+          "18a shell.bin (ネスト段 0) はアプリ帯を使わない");
+    check(appslot_launch_is_app(1, OS32X_FLAG_FORCE_CPL0) == 0,
+          "18b gshell.bin も同じ経路 — --cpl0 の有無で変わらない");
+    check(appslot_launch_is_app(0, 0) == 1,
+          "18c 子プログラムは従来どおりアプリ帯 (CPL=3)");
+    check(appslot_launch_is_app(0, OS32X_FLAG_FORCE_CPL0) == 0,
+          "18d --cpl0 の子は従来どおり identity (アプリ帯ではない)");
+
+    /* (b) 物理が尽きていてもシェルは立つ。同じ空きでアプリは弾かれる。 */
+    ma_init(1);          /* 空き 1 枚。0 は admit の「勘定しない」合図なので使わない */
+    check(ma_start(64, 1) == EXEC_ERR_NOMEM,
+          "18e 空き 1 枚では GUI アプリの起動は ERR_NOMEM");
+    appslot_shell_commit();          /* exec_launch の is_shell 経路はこれだけ */
+    sh = appslot_get(APP_ID_SHELL);
+    check(sh != 0 && sh->state == APP_STATE_RUNNING &&
+          appslot_cur() == APP_ID_SHELL,
+          "18f 同じ空きでもシェルは起動する (枚数勘定を通らない)");
+    check(sh->depth == 1 && sh->cpl3 == 0,
+          "18g シェルは段 1 の CPL=0 (アプリ PD を持たない)");
+    check(H.free_pages == 1,
+          "18h シェルの起動は空きページを 1 枚も動かさない");
+    check(appslot_live() == 0,
+          "18i シェルは非シェル ID の池を消費しない");
+    check(appslot_alloc_id() == APP_ID_MIN,
+          "18j 池は手つかず — 次のアプリは ID 2 から");
+    check(res_owner_get() == APP_ID_SHELL,
+          "18k 資源の所有者はシェル帯 (owner 1) のまま");
+
+    /* (c) gshell ⇔ CUI shell の載せ替え (sys_switch_shell / K4 の起動ループ)
+     *     を繰り返しても、同じ ID 1 に留まり池も空きも動かない。 */
+    appslot_shell_commit();
+    appslot_shell_commit();
+    check(appslot_cur() == APP_ID_SHELL && appslot_live() == 0 &&
+          appslot_get(APP_ID_SHELL)->depth == 1,
+          "18l 載せ替えを繰り返しても ID 1 / 段 1 のまま");
+    check(H.free_pages == 1 && appslot_alloc_id() == APP_ID_MIN,
+          "18m 載せ替えは空きも池も動かさない");
+}
+
 int main(void)
 {
     failures = 0;
@@ -833,6 +886,7 @@ int main(void)
     case_self_input_cannot_starve();
     case_cross_round_bound();
     case_resume_needs_wait_mark();
+    case_shell_never_takes_app_band();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

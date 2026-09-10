@@ -291,3 +291,138 @@ python3 -B tools/tests/test_sbrk_tier.py    # 回 4 (新規)
 - 段 1 は「収まるなら張る」ので、空きをほぼ使い切る起動を許す。その直後の
   V86 バッキングや PT の動的確保が痩せる可能性は残る (決裁どおりの実装で、
   余白は取っていない)。実機で足りなくなるようなら余白の議論は改めて。
+
+---
+
+# 追記: 回 5 (節 R) — 実機初回起動の差し戻し「FATAL: shell.bin load failed」
+
+対象票: [`docs/tasks/gui/v13/TASK_K5B_kernel.md`](../../docs/tasks/gui/v13/TASK_K5B_kernel.md) (差し戻し 2026-09-11)
+実機の観測 (PM、NP21/W、15MB 構成): `kselftest_pass=44 kselftest_fail=0` でカーネルは
+起動しているのに、text VRAM 1 行目が `FATAL: shell.bin load failed` + shlib のロード
+報告、EIP = `kernel_main+0xd4c` (`kernel/kernel.c:582` の停止ループ)。
+
+| 回 | 対象 | RED | GREEN |
+|---|---|---|---|
+| 5 | `ext2_read_file()` が `max_size` を越えて書く | 実装前の `fs/ext2_file.c` に戻すと 4 検査中 3 検査が FAIL (`resolved[]` が読んだファイルの中身で潰れる) | `tools/tests/test_ext2_read_bound.py` 4 検査 ALL PASS |
+| 5' | シェル帯 (ID 1) が per-app 経路に入らない | — (境界を固定する追加検査。K5b-K でも GREEN) | `tools/tests/test_multiapp_impl.py` ケース 18 (13 検査) ALL PASS |
+
+## 原因 (推測ではなく実ソースと `kernel.map` で確定)
+
+`fs/ext2_file.c:34` (K5b-K 前からある行) —
+
+```c
+ret = ext2_read_block(ctx, phys, &dst[total_read]);   /* 端数ブロックでも 1KB 書く */
+```
+
+`ext2_read_block()` は `dev_blk_read_lba` を 512B × 2 回呼ぶだけで、**`to_copy` に
+関係なく必ず `EXT2_BLOCK_SIZE` = 1024 バイト書く**。`ext2_read_file()` は
+`remaining` を `max_size` で頭打ちにしているが、書き込みの長さは頭打ちにしていない。
+`max_size` が 1KB の倍数でない呼び出しは最大 1023 バイト溢れる。
+
+K5b-K 前は exec が「ファイル全体をロード番地へ」読んでいたので、溢れ先は
+そのプログラム自身の帯の中で無害だった。K5b-K が D1 の手順 2 のためにヘッダを
+**先読み**するようにし (`exec/exec.c:996`)、宛先を
+
+```c
+static u8 hdrbuf[OS32X_HDR_V2_SIZE + 64];   /* = 108 バイト、カーネル .bss */
+```
+
+に変えた瞬間に顕在化した。`build/out/kernel.elf` の `.bss` は
+
+```
+00150900 0000006c b hdrbuf.2      <- ここへ 1024 バイト書かれる
+00150980 00000100 b resolved.3    <- 解決済みパス。まるごと潰れる
+00150a80 00000018 b g_exit_jmpbuf
+00150ab4 00000004 b ring3_tramp_page
+00150ac0 00002000 b ring3_tramp_raw   <- 先頭 0x240 バイトまで潰れる
+```
+
+で、`hdrbuf` の 108 バイトの直後に **`resolved[]` (解決済みパス) が居た**。
+ヘッダ先読みが `resolved` をファイルの中身で塗り潰し、続く本体読み込み
+`vfs_read(resolved, file_buf, read_max)` (`exec/exec.c:1298`) がゴミのパスを
+引くので `sz <= 0` → **`EXEC_ERR_NOT_FOUND`**。`/sys/shell.bin` も FDD
+フォールバック (`SYS_SHELL_BIN_FDD` は同じ綴り) も同じところで落ちるため、
+`kernel/kernel.c:582` の `FATAL: shell.bin load failed` に落ちる。
+`EXEC_ERR_NOMEM` の経路 (`[DBG] NOMEM: ...`) は**通っていない** — 画面に
+その行が 1 つも出ていないことと符合する。
+
+`14000` (実機の 2 行目) は別物ではなく、`kernel/shlib.c:191` の
+
+```
+[shlib] /sys/lib/libos32gui.shlib v1 loaded: 101 funcs, text 20 pg, data 4 pg @414000
+```
+
+が 80 桁で折り返した尻尾 (`@4` が桁 78-79、`14000` が次行)。`FATAL:` の 28 文字が
+桁 0-27 を上書きしたので `shlib v1 loaded:` から見えている。**デバッグ出力ではなく
+正規のロード報告なので残す**。
+
+## 直したもの
+
+1. `fs/ext2_file.c` — 端数ブロックは `ext2_g_blk` を中継して `to_copy` だけ写す
+   (`ext2_read_stream` が前からやっている約束と同じ。`ext2_g_aux` は `ext2_bmap`
+   が使うので不可 — gotcha §4-24)。ブロック境界ちょうどの読みは経路が変わらない。
+2. `exec/exec.c` — 読み込み失敗時の `exec_cpl0_release()` を `!is_shell` で囲った。
+   claim しているのは CPL=0 の**子**だけで、シェルは通っていない (現状は
+   `g_cpl0_children <= 0` の門で無害だが、左右が揃っていなかった)。
+3. `exec/appslot.c` / `.h` — `appslot_launch_is_app(is_shell, hdr_flags)` を足し、
+   `exec_launch` の `want_ring3` をこれに置き換えた。シェル帯とアプリ帯の
+   分かれ道が 1 か所になり、ホストで押さえられる (ケース 18)。
+
+`is_shell` 経路の物理配置は **K5b-K でも既に元のまま**だった (PM の見当は外れ):
+`MEM_SHELL_LOAD_ADDR` / `MEM_SHELL_MAX_SIZE` / `MEM_SHELL_STACK_TOP` /
+`kapi->sbrk_heap_limit = guard_b`、`appslot_start_admit` も
+`paging_addrspace_create_n` も `exec_cpl0_claim` も通らない。ここは変えていない。
+
+## RED の作り方 (実際に走らせた)
+
+```bash
+git show HEAD:fs/ext2_file.c > fs/ext2_file.c     # K5b-K 時点へ戻す
+python3 -B tools/tests/test_ext2_read_bound.py
+```
+
+```
+FAIL overrun: max_size=108 wrote past +108 (offset +108)          EXIT bound_header=1
+FAIL overrun: max_size=65536 wrote past +1500 (offset +1500)      EXIT bound_tail=1
+  R3 block-aligned reads unchanged                                EXIT bound_aligned=0
+FAIL: resolved[] clobbered: "()*+,-./0123456789:;<=>?@ABC..."     EXIT exec_bss_neighbour=1
+SUMMARY 1/4 PASS
+```
+
+R4 の FAIL 文字列が実機の症状そのもの — `resolved[]` が読んだブロックの中身で
+潰れている。直してから `SUMMARY 4/4 PASS`。
+
+## 追加した検査
+
+| 節 | 性質 |
+|---|---|
+| R1 | `max_size` が 1KB の倍数でない読み (exec のヘッダ先読みと同じ 108 バイト) が `max_size` を 1 バイトも越えない |
+| R2 | ファイル末尾が端数ブロック (1500 / 1 / 1025 バイト) でも、返した長さより先を書かない |
+| R3 | ブロック境界ちょうどの読みは従来どおり (経路を変えていない) |
+| R4 | 108 バイトのヘッダバッファの直後に解決済みパスを置いた **実機と同じ並び**で、パスが生き残る |
+| 18a-d | `appslot_launch_is_app()`: シェルは `flags` に関わらずアプリ帯を使わない / 子は従来どおり (`--cpl0` は identity) |
+| 18e-k | 空き 1 枚 (GUI アプリは `EXEC_ERR_NOMEM`) でもシェルは起動し、空きページ・ID の池・資源の所有者をどれも動かさない |
+| 18l-m | gshell ⇔ CUI shell の載せ替えを繰り返しても ID 1 / 段 1 のまま |
+
+## 実行コマンド
+
+```bash
+python3 -B tools/tests/test_ext2_read_bound.py     # 回 5 (新規、4 検査)
+python3 -B tools/tests/test_multiapp_impl.py       # ケース 18 を追加 (111 検査)
+```
+
+`build/sdk.mk` に `test_ext2_read_bound.py` (`check-vfs-mount-dev-host`) と、
+K5b-K で登録されていなかった `test_multiapp_impl.py` / `test_owner_reclaim.py`
+(`check-multiapp-model-host`) を足した。不要なら PM が外す。
+
+## この追記で**測っていないこと** ([V4])
+
+- **ゲストは未検証**。NP21/W では 1 度も動かしていない。実機の初回起動が直ったか
+  どうかはテスターの再配備待ち。`kernel.map` の番地は動いている
+  (`hdrbuf.2` = 0x150900 → 0x150aa0)、kselftest の読み出しは新しい地図で。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない。
+  通したのは `make kernel` (-Wall 警告ゼロ)、`tools/check_constraints.py` (EXIT=0)、
+  および `test_ext2_read_bound` / `test_multiapp_impl` / `test_owner_reclaim` /
+  `test_sbrk_tier` / `test_app_band_pde` / `test_vfs_mount_dev` の 6 本。
+- ヘッダ先読みの宛先が 108 バイトのままである点は変えていない。溢れは FS 側で
+  塞いだので安全だが、他の FS ドライバが同じ癖を持ち込まない保証はコードには無い
+  (`fatfs` の `f_read` と `iso9660` / `hostdrv` は確認済みで、いずれも指定長を守る)。

@@ -124,6 +124,8 @@ check-t5a-host:
 # 正しさは何も言わない (実装は K5b)。docs/tasks/gui/v13/TASK_K5_multiapp.md §設計。
 check-multiapp-model-host:
 	python3 -B tools/tests/test_multiapp_model.py
+	python3 -B tools/tests/test_multiapp_impl.py
+	python3 -B tools/tests/test_owner_reclaim.py
 
 check-memory-host:
 	python3 -B tools/tests/test_physmem.py
@@ -160,6 +162,7 @@ check-vfs-fd-sqlite-host:
 # パーティションを二重マウントする回帰 (2026-09-10) を止める。
 check-vfs-mount-dev-host:
 	python3 -B tools/tests/test_vfs_mount_dev.py
+	python3 -B tools/tests/test_ext2_read_bound.py
 
 check-sqlite-groups-host:
 	python3 tools/tests/test_sqlite_groups.py

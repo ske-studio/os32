@@ -28,11 +28,25 @@ int ext2_read_file(Ext2Ctx *ctx, u32 ino, void *buf, u32 max_size)
         to_copy = remaining;
         if (to_copy > EXT2_BLOCK_SIZE) to_copy = EXT2_BLOCK_SIZE;
 
-        /* 宛先バッファに直接読み込み — ext2_g_auxを経由しない。
-         * ext2_bmapが間接ブロック参照でext2_g_auxを使うため、
-         * ここでext2_g_auxに読むとバッファ競合が発生する。 */
-        ret = ext2_read_block(ctx, phys, &dst[total_read]);
-        if (ret != 0) return EXT2_ERR_IO;
+        if (to_copy == EXT2_BLOCK_SIZE) {
+            /* 宛先バッファに直接読み込み — ext2_g_auxを経由しない。
+             * ext2_bmapが間接ブロック参照でext2_g_auxを使うため、
+             * ここでext2_g_auxに読むとバッファ競合が発生する。 */
+            ret = ext2_read_block(ctx, phys, &dst[total_read]);
+            if (ret != 0) return EXT2_ERR_IO;
+        } else {
+            /* 端数ブロック。ext2_read_block は to_copy に関係なく **必ず
+             * 1KB 書く** ので、宛先へ直接読むと max_size を超えて溢れる。
+             * 呼び出し側が「ヘッダだけ」のような小さいバッファを渡すと、
+             * その先のカーネル .bss を静かに壊す (2026-09-11: exec の
+             * ヘッダ先読み 108 バイトが隣の resolved[] / トランポリンごと
+             * 潰し、shell.bin の読み込みが NOT_FOUND になった)。
+             * 中間バッファは ext2_g_blk — ext2_g_aux は上の ext2_bmap が
+             * 使うので不可 (ext2_read_stream と同じ約束、gotcha §4-24)。 */
+            ret = ext2_read_block(ctx, phys, ext2_g_blk);
+            if (ret != 0) return EXT2_ERR_IO;
+            kmemcpy(&dst[total_read], ext2_g_blk, to_copy);
+        }
 
         total_read += to_copy;
         remaining -= to_copy;

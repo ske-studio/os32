@@ -1057,7 +1057,7 @@ static int exec_launch(const char *cmdline, int gui_arg)
     /* v2 M3a: ring3 をデフォルト化。シェルは CPL=0 のまま。それ以外の全
      * プログラムを CPL=3 で起動する。稀に CPL=3 で動かせないものは
      * OS32X_FLAG_FORCE_CPL0 (mkos32x --cpl0) で CPL=0 に落とす。 */
-    want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_FORCE_CPL0) == 0);
+    want_ring3 = appslot_launch_is_app(is_shell, hdr->flags);
     if (want_ring3) {
         u32 code_end_est = PAGE_ALIGN_UP(load_base + text_sz + bss_sz);
         ring3_band_set(paging_app_band_pdes(code_end_est, heap_sz,
@@ -1301,7 +1301,10 @@ static int exec_launch(const char *cmdline, int gui_arg)
         if (want_ring3) {
             return exec_launch_abort(launcher_id, id, EXEC_ERR_NOT_FOUND);
         }
-        exec_cpl0_release();
+        /* claim したのは CPL=0 の**子**だけ (シェルは identity の常駐帯で、
+         * exec_cpl0_claim を通っていない)。左右を揃えないと、シェルの
+         * 読み込み失敗が子の本数勘定を触る。 */
+        if (!is_shell) exec_cpl0_release();
         return EXEC_ERR_NOT_FOUND;
     }
 

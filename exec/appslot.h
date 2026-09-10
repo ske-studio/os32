@@ -105,6 +105,17 @@ int appslot_live(void);
 int appslot_alloc_id(void);
 
 /* ---- 起動 (D4) -------------------------------------------------------- */
+/* この起動が **アプリ帯 (CPL=3、per-app 物理、0x500000〜)** を使うか。
+ * 1 = アプリ帯 / 0 = そうでない (シェル帯の常駐 CPL=0、または --cpl0 の子)。
+ *
+ * is_shell (= exec ネスト段 0) は shell.bin でも gshell.bin でも **必ず 0**。
+ * 常駐シェルは 0x300000 の MEM_SHELL_* 帯に identity で載る CPL=0 プログラム
+ * で、per-app 物理化・ID の池・枚数勘定のどれにも掛からない (K5a 設計 D7
+ * 「変えないもの」)。2026-09-11 の差し戻しで、この境界をホストで押さえる
+ * ようにした (tools/tests/multiapp_impl_host.c ケース 18)。
+ * hdr_flags は OS32X ヘッダの flags (OS32X_FLAG_FORCE_CPL0 を見る)。 */
+int appslot_launch_is_app(int is_shell, u32 hdr_flags);
+
 /* 起動してよいかを判定する。**状態は 1 つも変えない**。
  *   gui=1 (exec_start): WM の top-level からだけ (契約 S2)
  *   gui=0 (exec_run):   走っているアプリからも通る (決裁 D9-8)

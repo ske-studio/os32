@@ -102,6 +102,18 @@ int appslot_alloc_id(void)
 /* ======================================================================== */
 /*  起動 (D4)                                                               */
 /* ======================================================================== */
+
+/* アプリ帯を使うのは「シェルでない」かつ「--cpl0 でない」ものだけ。
+ * ここが exec_launch の want_ring3 と ID の池の唯一の分かれ道 (宣言側の
+ * 注記を参照)。判定材料はヘッダの flags だけで、物理の空きは見ない —
+ * シェルの起動が pgalloc の空きに左右されてはいけないため。 */
+int appslot_launch_is_app(int is_shell, u32 hdr_flags)
+{
+    if (is_shell) return 0;
+    if (hdr_flags & OS32X_FLAG_FORCE_CPL0) return 0;
+    return 1;
+}
+
 int appslot_start_admit(int gui, u32 pages, u32 free_pages)
 {
     int id;
