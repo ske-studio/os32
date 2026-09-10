@@ -1,373 +1,179 @@
 # CLAUDE.md — AI コーディングアシスタント向けガイダンス
 
-このファイルは AI コーディングアシスタント (Claude Code, Gemini, Hermes 等) が
-このリポジトリで作業する際の共通ガイダンスです。**プロジェクト固有の「指示」は
-すべてここに集約する** — 規則、日常コマンド、作業別の参照先、短い落とし穴の注意。
-分散させると必ず片方が腐る (ビルドターゲット一覧が 4 箇所に散り、`dp-` 廃止のとき
-3 箇所が取り残された前例がある)。一方で**技術情報の本文はここに置かない**: 番地・
-KAPI 表・ファイル地図・障害の経緯は `docs/INDEX.md`「情報単位ごとの正典」の表が指す
-1 か所だけを更新し、ここには要約と参照を置く (2026-09-05)。
+AI コーディングアシスタント共通の入口。**置くのは指示と参照だけ**で、
+番地・KAPI 表・ファイル地図・障害の経緯といった技術情報の本文は置かない。更新先は
+[`docs/INDEX.md`](docs/INDEX.md) 冒頭の「情報単位ごとの正典」表が 1 か所に決めている。
 
-Claude Code は本ファイルを自動で読み込む。他のツールから使う場合は、それぞれの
-設定でこのファイルを指すこと。
+## 体制
 
----
+PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
+レビュアー = **ユーザー経由**、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
+役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
+承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大・
+**独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で報告して渡す。
 
 ## Project Overview
 
-OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 series machines, built with a GCC i386-elf cross-compiler and NASM. The kernel runs in protected mode at physical address 0x100000 (1MB). External programs are loaded at 0x500000 (0x400000–0x4FFFFF is the shared-library band, GUI v1.1 K3).
+OS32 is a 32-bit bare-metal OS for NEC PC-9801/9821 machines, built with an i386-elf GCC
+cross-compiler and NASM. The kernel runs in protected mode at physical 0x100000; external
+programs load at 0x500000 and run at CPL=3 in their own page directory.
 
 ## Build Commands
 
-The full target list lives in `docs/08_build.md`; what follows is the
-subset you need day to day.
+Full target list and compiler flags: [`docs/08_build.md`](docs/08_build.md#ビルドターゲット) §8-4 / §8-2.
+Which build and which verification a change actually needs: skill **`os32-build-verify`**.
 
 ```bash
-# Full build (kernel + programs + disk images)
-make all
-
-# Kernel only (+ SQLite)
-make kernel
-
-# All external programs
-make programs
-
-# Individual binary hot-deploy (build + place into the running guest, no reboot).
-# Userland only; the kernel and /sys need a full NHD deploy.
-make hotdeploy FILE=userland/cmds/wc.bin
-
-# Deploy to HostDrv (C:\os32 on Windows host, no reboot)
-make deploy
-
-# Deploy kernel to NHD (requires NP21/W restart)
-make deploy-kernel
-
-# Write bootloader to NHD boot sector
-make deploy-boot
-
-# Clean all build artifacts
-make clean
+make all / kernel / programs              # build (SDK and images come with `all`)
+make external                             # apps/ + game/ — after any KAPI or SDK library change
+make check                                # KAPI version, manifests, constraint IDs, GUI proto, etc.
+make clean                                # required after a KAPI struct change ([ABI3])
+make deploy                               # HostDrv (C:\os32) — no reboot, not verification ([V1])
+# userland delivery: make deploy (host -> C:\os32) then `hsync` in the guest
+#   hsync skips /sys (running shell + shlibs) unless you name it: `hsync sys`
+make deploy-kernel / deploy-boot          # NHD / boot area — stop NP21/W first ([D1])
 ```
 
-After any kernel change, always run `make kernel` and verify zero errors before deploying.
+Which of the three deploy paths a change needs: [`docs/08_build.md`](docs/08_build.md#配備3経路) §8-4.
 
-**Remote testing** (after NP21/W is running):
-```bash
-curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"  # run a shell command over serial
-curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ls"
-curl -X POST http://127.0.0.1:8025/api/key -d "seq=SPACE"       # inject a key event
-curl -X POST http://127.0.0.1:8025/api/key --data-urlencode "seq=SHIFT+SPACE" # FEP on/off (+ は必ず URL エンコード)
-curl -X POST http://127.0.0.1:8025/api/mouse -d "ax=32818&ay=32851&btn=1&hold=80" # クリック: ax=px*65535/639, ay=py*65535/(H-1) (OS32 はシームレス絶対座標)。btn=1/0 でドラッグ、abs=off で人間に返す
-curl      http://127.0.0.1:8025/api/tvram                       # screen contents as UTF-8 text
-curl      http://127.0.0.1:8025/api/screenshot                  # capture the emulator window
-```
-`/api/cmd` can only send whole command lines; use `/api/key` for anything that reads raw
-keystrokes (FEP conversion, the editor, games). The debug server is **built into
-`np21x64w.exe`** (the ai-debug fork) and is switched on with `aidebug=true` / `aidbport=8025`
-in `np21x64w.ini` — no external relay process is involved. Richer inspection (registers,
-memory, disassembly, breakpoints, trace) is available through `tools/np21w_mcp/`.
+### Talking to the guest (NP21/W)
 
-## Compiler & Flags
-
-| Target | Compiler | Key Flags |
-|--------|----------|-----------|
-| Kernel | i386-elf-gcc | `-std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector -O2` |
-| SQLite | i386-elf-gcc | `-Os -ffunction-sections -fdata-sections` (size-optimized) |
-| External programs | i386-elf-gcc | Same base flags, linked with `sdk/link/app.ld` |
-| ASM | NASM | `-f elf32` (kernel), `-f bin` (boot sectors) |
-
-The cross-compiler lives at `$CROSS_DIR/` (default `/usr/local/cross`). The build config is in `build/config.mk`.
+The debug HTTP server is built into `np21x64w.exe` (the ai-debug fork), enabled with `aidebug=true` /
+`aidbport=8025` in `np21x64w.ini` — no relay process. Endpoints `/api/cmd` `/api/key` `/api/mouse`
+`/api/tvram` `/api/screenshot`; the curl recipes, the `ax/ay` formula and the URL-encoding trap are in
+[`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md) §5. Registers, memory, disassembly, breakpoints and
+tracing go through `tools/np21w_mcp/`. Chasing a failure on the emulator: skill **`os32-emu-debug`**.
 
 ## Project Constraints
 
-Violating any of these either breaks the OS or makes verification meaningless.
-The lines below are the whole rule; the reasoning and the detail live in
-[`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md), which is the **normative source**.
-`make check` verifies this list has not drifted from it.
+規則の正典は [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) — 理由と詳細はそこにある。ここは規則行だけで、
+ずれは `make check` (`tools/check_constraints.py`) が ID で検出する。
+[D1]〜[D3] の一部の操作には `.claude/settings.json` の `ask` / `deny` も設定している。
+これは包括的な保護ではない。NP21/W の停止確認や別コマンド経由の操作にも正典の規則を適用する。
 
-**C / ABI**
-
-- **[C1]** C89 (GNU89) mandatory — no `//` comments, declarations at block start
-  only, no C99 features (`_Bool`, VLAs, `restrict`).
-- **[C2]** Inside the kernel use `kstrncpy` / `kstrncat` / `kstrlen` / `kstrcmp`
-  from `lib/kstring.h`, never the libc equivalents.
-- **[C3]** KernelAPI functions exposed to external programs must have `__cdecl`
-  wrappers in `kapi/`. The kernel uses System V i386 ABI internally.
+- **[C1]** C89 (GNU89) only — no `//` comments, declarations at block start, no C99 features.
+- **[C2]** In the kernel use `kstrncpy` / `kstrncat` / `kstrlen` / `kstrcmp` (`lib/kstring.h`), never libc.
+- **[C3]** Functions exposed to external programs need `__cdecl` wrappers in `kapi/`.
 - **[C4]** No hardcoded constants — follow the three-layer constant scheme.
-
-**Hardware**
-
-- **[HW1]** Never use EGC / GRCG / GDC drawing commands. All pixel writes go
-  through the CPU directly to VRAM at `0xA8000`.
+- **[HW1]** Never use EGC / GRCG / GDC drawing commands. The CPU writes straight to VRAM at `0xA8000`.
 - **[HW2]** DMA buffers must not straddle a 64KB boundary.
-
-**KernelAPI (ABI)**
-
-- **[ABI1]** `sdk/kapi.json` is the single source of truth. Never hand-edit the
-  generated files.
-- **[ABI2]** Append entries only. Never reorder or delete an existing slot.
-- **[ABI3]** After a KAPI change, bump the version and run `make clean` →
-  `make all`. An incremental build breaks silently.
-
-**Verification**
-
-- **[V1]** `make deploy` (HostDrv) alone is not verification — PATH prefers the
-  NHD's `/usr/bin`, so an old binary runs silently and looks like a pass.
+- **[ABI1]** `sdk/kapi.json` is the single source of truth. Never hand-edit the generated files.
+- **[ABI2]** Append KAPI entries only. Never reorder or delete an existing slot.
+- **[ABI3]** After a KAPI change, bump the version and run `make clean` → `make all`.
+- **[V1]** `make deploy` (HostDrv) alone is not verification — PATH prefers the NHD's `/usr/bin`.
 - **[V2]** Register every launchable binary in its own layer's `deploy.yaml`.
-- **[V3]** Do not shorten the curl timeout for remote execution (15s minimum,
-  60s+ for long-running programs).
-- **[V4]** Report failures and skipped steps as they happened. Never present
-  something unverified as a pass.
-
-**Destructive operations**
-
+- **[V3]** Do not shorten the curl timeout for remote execution (15s minimum, 60s+ for long runs).
+- **[V4]** Report failures and skipped steps as they happened. Never present something unverified as a pass.
 - **[D1]** Never deploy to the NHD while NP21/W is running. Stop → deploy → start.
-- **[D2]** Get approval before irreversible operations (overwriting NHD or disk
-  image masters, `rm -rf`, `git reset --hard`, editing `*.ini`).
+- **[D2]** Get approval before irreversible operations (overwriting the NHD or image masters,
+  `rm -rf`, `git reset --hard`, editing `*.ini`).
 - **[D3]** Never put the contents of `.env`, API keys or passwords in output.
 
 ## Architecture
 
-### Memory Layout
+**Memory layout** — definitions in `include/memmap.h`, the explanation in
+[`docs/02_memory.md`](docs/02_memory.md) §2-1. Bands only:
 
-```
-0x00000–0x00FFF   NULL guard (not present)
-0x01000–0x9FFFF   Conventional memory. Font cache 0x01000, Unicode table
-                  0x4A000 (128KB), GFX backbuffer 0x6A000. Also the window
-                  handed to the V86 guest (MS-DOS gets the full 640KB).
-0x8C000–0x8CFFF   Hot-deploy control block (MEM_HOTDEPLOY_DESC)
-0xA0000–0xEFFFF   VRAM (text + graphics planes)
-0xF0000–0xFFFFF   BIOS ROM
-0x100000–0x1FAFFF Kernel band: binary (.text/.data/.bss) + heap + KAPI + SHM (256KB)
-0x1FB000–0x1FBFFF Kernel stack guard (not present)
-0x1FC000–0x1FFFFC Kernel stack (16KB)
-0x200000–0x2FFFFF SQLite band (1MB): code + BSS + alternate stack (128KB)
-0x300000–0x3FFFFF Shell band (1MB): resident binary + guard 0x375000 + stack
-0x400000–0x4FFFFF Shared library band (libos32gui.shlib, K3): .text read-only shared by
-                  every PD, .data/.bss duplicated per app; original kept at the band's end
-0x500000–         External program band: code+bss, then newlib sbrk, guard page,
-                  KAPI exec_heap directly below the stack guard (no fixed 1MB cap
-                  since 2026-09-04; sbrk/exec_heap split by OS32X heap_size or 50/50)
-(top 256KB)       Hot-deploy staging window — carved out of physical memory
-                  by sys_usable_mem_end(); exec and pgalloc must avoid it
-```
+| Band | Contents |
+|---|---|
+| `0x00000–0x9FFFF` | Conventional — font cache, Unicode table (0x4A000), GFX backbuffer (0x6A000), hot-deploy block (0x8C000), autoplay mailbox (0x90000). Handed whole to the V86 guest |
+| `0xA0000–0xFFFFF` | VRAM (text + graphics planes) and BIOS ROM |
+| `0x100000–0x2FFFFF` | Kernel (binary + heap + KAPI + SHM, guard, 16KB stack at 0x1FC000), then SQLite from 0x200000 |
+| `0x300000–0x4FFFFF` | Resident shell (two heaps: newlib sbrk, exec_heap at 0x380000), then the shared-library band — `libos32gui.shlib` `.text` is shared across PDs, `.data`/`.bss` per app |
+| `0x500000–` | External programs: code+bss → sbrk → guard → exec_heap → stack |
+| top (256KB+) | Hot-deploy staging, carved out by `sys_usable_mem_end()`; a PEGC/Cirrus 8bpp backbuffer adds ~300KB below it via `sys_reserve_top()`. exec and pgalloc must avoid the whole reservation |
 
-Authoritative definitions live in `include/memmap.h`. The kernel stack moved
-from conventional memory to 0x1FC000 so the V86 guest could be handed the
-full 640KB — do not reintroduce the old 0x90000 assumption.
+**Subsystem map** — which file does what and which spec section covers it:
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) §2; the task-to-entry-point table is §1.
+Three facts that matter on almost every change:
 
-### Subsystem map
+- External programs run at CPL=3 with their own page directory, so a bad pointer kills only the
+  app (`fault_kill_count`). The resident shell and `mkos32x --cpl0` binaries are the exceptions.
+- SQLite lives in the kernel at 0x200000 with one fixed 384KB MEMSYS5 pool shared by every
+  connection (the FEP dictionary included). Close connections at the end of `*_init()`.
+- `exec_exit()` reclaims FDs / redirects / pipe buffers **by owner** (exec nest level).
+  Kernel-resident FDs need `vfs_fd_set_protect(fd, 1)`; returning to a parent uses
+  `exec_heap_restore_state()`, never `exec_heap_init_at()`.
 
-Which file does what, and which spec section covers it, lives in
-`docs/DEVELOPMENT.md` §2 (kernel / exec+KAPI / drivers / fs / gfx+SQLite+boot /
-userland). Start there before touching an unfamiliar subsystem; the per-part specs are
-`docs/01_system.md` – `docs/10_notes.md`. Facts you need on almost every task:
+**KernelAPI** — adding or changing one: skill **`os32-kapi-add`**; the procedure's canon is
+[`docs/KAPI_SPEC.md`](docs/KAPI_SPEC.md) §3-1 and the rules are [ABI1]–[ABI3]. The struct,
+`__cdecl` wrappers, init table and Rust bindings are all generated from `sdk/kapi.json`.
 
-- External programs run at **CPL=3** with their own page directory; bad pointers kill
-  only the app (`fault_kill_count`). The shell (resident at 0x300000) and binaries built
-  with `mkos32x --cpl0` are the unprotected exceptions. Model: `docs/09_exec.md`.
-- SQLite lives in the kernel at 0x200000 with a fixed 384KB MEMSYS5 pool shared by every
-  connection (including the FEP dictionary). Close connections at the end of `*_init()`.
-- `exec_exit()` reclaims FDs / redirects / pipe buffers **by owner** (exec nest level);
-  kernel-resident FDs must be protected with `vfs_fd_set_protect(fd, 1)`. On return to
-  the parent use `exec_heap_restore_state()`, never `exec_heap_init_at()`.
+**External programs** — OS32X flat ELF binaries linked with `sdk/link/app.ld` and entered through
+`sdk/crt/crt0.asm`; `main()` must be the **first function** in the source file. In-tree sources are
+under `userland/`: `shell/` (resident at 0x300000), `cmds/` (18 commands), `system/`, `tests/`,
+`rust/` (no_std Cargo workspace), `lib/` (`libos32*`, statically linked). Standard apps and the
+board-game RPG are submodules (`apps/`, `game/`) built by `make external` — rebuild them after any
+KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 
-### KernelAPI (`kapi/` + `include/`)
-
-The KernelAPI is the ABI between the kernel and external programs:
-
-- **`sdk/include/os32/os32_kapi_shared.h`** — Single source of truth: `KernelAPI` struct layout, `KAPI_VERSION`, shared types. Both kernel and programs include this.
-- **`sdk/include/os32/os32_kapi_generated.h`** — Generated accessor macros.
-- **`kapi/kapi_generated.c`** — `__cdecl` wrappers (auto-generated from `sdk/kapi.json`).
-- **`kapi/kapi_sys.c`** — System call wrappers.
-- **`kapi/kapi_db.c`** — SQLite DB API wrappers.
-- **`exec/exec_kapi_init.inc`** — KernelAPI table initialization (included by `exec/exec.c`).
-
-**To add a KernelAPI function** — `sdk/kapi.json` is the single source of truth and the
-wrappers/struct/init are all generated from it. Never hand-edit the generated files:
-
-1. Append the entry to the **end** of the `api` array in `sdk/kapi.json` (append-only —
-   never reorder or remove existing slots; that breaks the ABI for already-built binaries).
-   Add any needed header to `includes` / prototype to `externs` in the same file.
-2. Bump `"version"` in `sdk/kapi.json` **and** `KAPI_VERSION` in
-   `sdk/include/os32/os32_kapi_shared.h` (they must match).
-3. Regenerate and confirm the tree is in sync:
-   ```bash
-   python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py
-   git diff --stat   # only the intended additions should appear
-   ```
-   This rewrites `sdk/include/os32/os32_kapi_generated.h`, `sdk/include/os32/os32_kapi_slots.h`
-   (`KAPI_SLOT_*` = int 0x80 のスロット番号、型非依存), `kapi/kapi_generated.c`,
-   `exec/exec_kapi_init.inc`, and `sdk/rust/os32api/src/kapi_generated.rs`.
-   GitHub Actions (`.github/workflows/check.yml`) が生成物と kapi.json の一致を検査する。
-4. Implement the target function in the kernel (or give the entry a `target` /
-   inline `body` in the JSON).
-5. Update `docs/KAPI_SPEC.md`, and bump the required version in `build/app.conf`
-   for any program that depends on the new call.
-
-Data fields (plain values rather than function pointers) go in `data_fields`; the generator
-emits `kapi-><field> = 0;` and the value must be assigned at runtime in `exec_init()`.
-
-### External Programs (`userland/`)
-
-Programs are OS32X flat ELF binaries linked with `sdk/link/app.ld`, starting with `sdk/crt/crt0.asm`. The `main()` function must be the **first function** in the source file; helpers go after `main()` with forward declarations.
-
-#### Directory Structure
-
-`userland/` builds inside the OS tree. 標準アプリとゲームは別リポジトリに
-分離済み — SDK だけでビルドし、このリポジトリの成果物には含まれない:
-
-- **`ske-studio/os32-apps`** — edit / mdview / mgxview / ui_demo / vbzview /
-  vdpview / ekakiuta / raster / gfx_demo / demo1 / spr_test / hello32
-- **`ske-studio/os32-game`** — 対戦スゴロク RPG (`app/`, `lib/`, `assets/`, `data/`)
-
-どちらも **git submodule** として `apps/` と `game/` に置き (2026-09-04)、`make sdk` で
-生成した `build/sdk/` を指してビルドする:
-
-```bash
-git submodule update --init          # 初回 / clone 直後
-make external                        # apps + game (make apps / make game で個別)
-```
-
-検証した組み合わせは submodule のポインタとして os32 のコミットに残る。KAPI を
-動かしたら `make external` で両方を再ビルドし、ポインタを更新してコミットする。
-**SDK のライブラリ (libos32gfx 等) を変えたときも同様** — アプリは静的リンクなので、
-古い .bin は新しいバックエンド (PEGC の PACKED8 等) で #PF する (2026-09-06 hello32 で実測)。
-`apps/deploy.yaml` と `game/deploy.yaml` は配備マニフェストに統合される
-(`tools/deploy_manifests.py`)。emu_agent の `make` は `apps` / `game` / `external` を
-許可リストに含む。
-
-ゲームエンジンのライブラリ (chem / board / ai / battle / econ / event / inv /
-map / rpg / text / turn) は os32-game リポジトリが自前のソースからビルドする。
-このリポジトリの `build/libs.mk` は userland/lib の 14 ライブラリだけを扱う。
-
-| Directory | Content |
-|-----------|---------|
-| `userland/shell/` | System shell (resident at 0x300000, modular: 12+ source files) |
-| `userland/cmds/` | CLI commands: `grep`, `less`, `sort`, `diff`, `find`, `wc`, `hexdump`, `man`, etc. (18 commands) |
-| `userland/system/` | System utilities: `hsync` (HostDrv sync), `install`, `cdinst`, `sndctl`, `lz4` |
-| `userland/tests/` | Test/demo programs (36 sources including per-library test suites) |
-| `userland/rust/` | Rust programs (Cargo workspace: `alloc_demo`, `hello_gfx`, etc.) |
-| `userland/lib/` | User-space libraries (map: `docs/DEVELOPMENT.md` §2) |
-
-Shell modules and the per-library descriptions are in `docs/DEVELOPMENT.md` §2
-(userland). Rule for libraries: statically linked, `libos32*` prefix, Rust crates are
-`no_std` with no external crates (v2 CONTRACTS C8).
-
-### Graphics
-
-All pixel writes go through CPU directly to VRAM at `0xA8000` — see **[HW1]**. Flow: draw to
-backbuffer → `gfx_present()` → VRAM with automatic page flip (no VSYNC wait). Modes, page flip,
-and the gfx/libos32gfx split: `docs/05_drivers.md` §5-5. The 9821 backends (PEGC, Cirrus) are
-planned via the HAL in `docs/tasks/gui/DESIGN.md`.
-
-### Deploy Workflow
-
-Three deployment paths:
-1. **HostDrv** (`make deploy`): Copies build artifacts to `C:\os32` (Windows). Guest OS reads files via `/host` mount. No reboot required. Fast iteration path.
-2. **NHD** (`make deploy-kernel`): Syncs HostDrv, then writes the whole tree (kernel + programs + data) into the NHD ext2 image. **Requires NP21/W to be stopped first** and restarted afterwards.
-3. **Boot sector** (`make deploy-boot`): Writes `boot/loader_hdd.bin` to the NHD boot area (LBA 2–17). Only needed when the loader itself changed.
-
-Deployment manifests are split by owning layer (`build/core.yaml`,
-`userland/deploy.yaml`); the list
-and the merge live in `tools/deploy_manifests.py`. Environment variables: `HOSTDRV_DIR` (default `/mnt/c/os32`), `NP21W_DIR` (default `/tmp/np21w`).
-
-Build artifacts land in `build/out/` (gitignored), not the repository root.
+**Graphics** — CPU writes to VRAM at `0xA8000` ([HW1]): draw into the backbuffer, then
+`gfx_present()` flips the page. Modes and the gfx / libos32gfx split:
+[`docs/05_drivers.md`](docs/05_drivers.md) §5-5.
 
 ## ⚠️ Known Gotchas
 
-Short form only. The history, symptoms and verification for each item are in
-`docs/POLICY_DEBUG.md` §4 (section numbers below); update the story there, not here.
+短い注意だけ。症状・経緯・検証はリンク先の節にある (§ 番号だけの行は [`docs/POLICY_DEBUG.md`](docs/POLICY_DEBUG.md))。
 
-- **Boot-time kernel selftest** (`kernel/kselftest.c`) runs every boot and prints failing
-  items in red; read `kselftest_pass` / `kselftest_fail` with `emu_read_mem`. Add a case
-  whenever you touch a kstring / kmalloc / kprintf primitive — `userland/tests/klibc_test`
-  links newlib and does not cover the kernel side.
-- **Fonts**: bake with `tools/gen_font16.py` (baseline-anchored, never shrink vertically,
-  judge at 1x). Gothic for 16x16 kanji. → §4-10
-- **Kanji in external programs**: call `utf8_set_jis_table_ready(1)` yourself, but only after
-  verifying a few known Unicode→JIS pairs; otherwise every kanji renders as □. → §4-11
-- **Japanese text width**: 3 bytes per char in UTF-8, 2 columns (16px) on screen; `char buf[64]`
-  overflows easily. Truncate only on UTF-8 boundaries.
-- **Physical 0x90000** is the auto-play mailbox (game writes a state block each frame, host reads
-  `GET /api/mem?addr=0x90000&space=phys`). Changing the layout means updating
-  `tools/autoplay/driver.py` `read_mailbox()` and EXPORT_VERSION. Layout: `docs/02_memory.md`.
-- **Binaries missing from deploy.yaml go stale on the NHD** and can hang rshell after a KAPI
-  change ([V2]). `make deploy*` now prunes them via `tools/prune_stale.py`
-  (`NO_PRUNE=1` to list only). → §4-12
-- **HostDrv deploy never overrides `/usr/bin`** — the NHD binary runs instead ([V1]).
-  Verify library/test changes with a full NHD deploy.
-- **SQLite pool exhaustion** shows up as `-2` from `db_query`; always print
-  `db_last_error()` when diagnosing, and use `dbq` to inspect a DB on the target. → §4-13
-- **`mui_pump_input()` eats the keyboard queue**; apps that read keys themselves must pass
-  the char via `mui_pump_input_ch(ctx, ch)`. → §4-14
-- **Resource ownership on exit** (owner tags, protected FDs, `exec_heap_restore_state`): see the
-  Subsystem map above. → §4-15, spec `docs/10_notes.md` §10-9
-- **The shell has two heaps** (newlib sbrk below `MEM_SHELL_GUARD`, KAPI exec_heap at
-  `MEM_SHELL_HEAP_BASE` 0x380000); `kernel/paging.c` must keep 0x380000–0x3FFFFF present. → §4-16
-- **Never touch the FS from a `sys_ls` callback without a private buffer** — `ext2_list_dir`
-  copies each block first because a writing callback clobbers `ext2_g_aux`. FatFs / HostDrv
-  list_dir are not audited.
-- **`ext2_g_aux` is the bitmap scratch buffer**: `ext2_free_block`/alloc reload the bitmap into it,
-  so never keep an indirect table or data there across a free/alloc (files >12KB got cross-linked
-  on overwrite until 2026-09-06). → §4-24
-- **VFS error codes are `OS32_ERR_*`** (`os32_kapi_shared.h`); FS drivers translate at the
-  boundary (`ext2_to_vfs_err`). `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs.
-- **NHD work image is `build/nhd/os32.nhd`** (auto-pulled from Windows when missing, NP21/W
-  stopped). Do not trust "配備完了" — confirm with kselftest at the new kernel.map address or the
-  `os32-cycle deploy` size check. → §4-17
-- **Text GDC cursor** is controlled only by CSRFORM's DC bit; use `console_hw_cursor_enable()` /
-  `console_hw_cursor_sync()`. → §4-18
-- **CPL=3 KAPI calls run with IF=1** (`int80_stub` does `sti` after the segment reload and
-  `cli` before `iretd`). A `hlt`-waiting wrap hanging with `tick_count` frozen means that
-  pair was broken; the exit must stay IF=0 or an IRQ leaves DS=KERNEL_DS for CPL=3. → §4-19
-- **Boot loaders**: PM transition stays inlined in `boot/loader_fat.asm`; `boot_fat.asm` is
-  `.8086` (no immediate shifts); the IPL may call INT 1Bh at most 4 times on NP21/W.
-  → `docs/10_notes.md` §10-2, §10-3
-- **Apps under gshell attach, never `gfx_init`**: `libos32gfx_attach()` owns the PACKED8 detection
-  (`gfx_packed`); a separate attach path that skips it draws no kanji on PEGC/Cirrus. → §4-20
-- **Cirrus linear window is mapped once and kept across shutdown** (supervisor+PCD in master, client
-  300KB promoted per app PD before the app's `gfx_init`); re-init must reset the relay flag. → §4-21
-- **gshell X4 must not consume WM-owned button edges** (`wm_owns_edge`): drag release, title bar,
-  close box, back windows stay for X3. → §4-22
-- **"GUI feels slow" → measure before theorising**: read `gfx_counters` (`/api/mem`) around the
-  keystroke to see whether a present happened at all, then sample `/api/status` `eip` to find where the
-  CPU is (app / shlib / gshell / kernel). A per-pixel `fill_solid` cost 1.3 s per pane on 2026-09-07;
-  the wake path was innocent. → §4-25
-- **GUI verification on NP21/W**: `/api/key` needs `--data-urlencode` for `SHIFT+SPACE`; `/api/mouse`
-  uses `ax/ay` (seamless); deploy rewrites `system.cfg` (test with `/api/reset`); hotdeploy only from
-  CUI+rshell; self-contained tests exit with `KAPI_SLOT_SYS_EXIT`. → §4-23
-
-## Source Tree
-
-The directory tree is maintained in one place: `docs/08_build.md` §8-3. Top level:
-`boot/` `kernel/` `exec/` `fs/` `drivers/` `gfx/` `kapi/` `lib/` `include/` (kernel side),
-`userland/` (built against the SDK), `apps/` `game/` (submodules), `sdk/`, `tools/`, `build/`
-(artifacts in `build/out/`, work NHD in `build/nhd/`), `assets/`, `docs/` (`docs/hw/` is the
-gitignored hardware mirror).
+- Boot-time kselftest: read `kselftest_pass` / `kselftest_fail` at the **new** `kernel.map` address, and
+  add a case whenever you touch a kstring / kmalloc / kprintf primitive. → §2
+- Fonts: bake with `tools/gen_font16.py` (baseline-anchored, never shrink vertically, judge at 1x). → §4-10
+- Kanji in external programs: call `utf8_set_jis_table_ready(1)` yourself, but only after checking a few
+  known Unicode→JIS pairs — otherwise every kanji renders as □. → §4-11
+- Binaries missing from `deploy.yaml` go stale on the NHD and can hang rshell ([V2]); `make deploy*` prunes
+  them via `tools/prune_stale.py` (`NO_PRUNE=1` lists only). → §4-12
+- SQLite pool exhaustion shows up as `-2` from `db_query`; always print `db_last_error()`. → §4-13
+- `mui_pump_input()` eats the keyboard queue; apps reading keys themselves pass the char via `mui_pump_input_ch()`. → §4-14
+- Resource ownership on exit: owner tags, protected FDs, `exec_heap_restore_state`. → §4-15, `docs/10_notes.md` §10-9
+- The shell has two heaps, so `kernel/paging.c` must keep 0x380000–0x3FFFFF present. → §4-16
+- NHD work image is `build/nhd/os32.nhd` (auto-pulled when missing, NP21/W stopped). Do not trust a
+  「配備完了」 line — confirm with kselftest or the `os32-cycle deploy` size check. → §4-17
+- The text GDC cursor is controlled only by CSRFORM's DC bit (`console_hw_cursor_enable()` / `_sync()`). → §4-18
+- CPL=3 KAPI calls run with IF=1; a `hlt`-waiting wrap hanging with `tick_count` frozen means the
+  `sti`/`cli` pair in `int80_stub` broke — the exit must stay IF=0. → §4-19
+- GUI internals: apps under gshell call `libos32gfx_attach()` (never `gfx_init` — attach owns the PACKED8
+  detection), the Cirrus linear window is mapped once and kept across shutdown (re-init resets the relay
+  flag), and gshell X4 must not consume WM-owned button edges (`wm_owns_edge`). → §4-20〜§4-22
+- GUI verification on NP21/W: `--data-urlencode` for `SHIFT+SPACE`, `/api/mouse` uses `ax/ay`, deploy
+  rewrites `system.cfg`. → §4-23
+- `ext2_g_aux` is the bitmap scratch buffer — never keep an indirect table or data there across a free/alloc
+  (files >12KB got cross-linked on overwrite until 2026-09-06). → §4-24
+- A filesystem driver's `mount(dev_id)` gets `(dev_type << 8) | unit` — check the type before
+  building a device name, or `fd0` opens `hd0` and the same partition gets mounted twice. → §4-30
+- "GUI feels slow" → measure first: read `gfx_counters` around the keystroke to see whether a present
+  happened at all, then sample `/api/status` `eip` to find where the CPU is. → §4-25
+- Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26
+- Japanese text is 3 bytes per char and 2 columns wide; `char buf[64]` overflows easily, and truncation
+  must land on a UTF-8 boundary. → §4-27
+- Boot loaders: the PM transition stays inlined in `boot/loader_fat.asm`, `boot_fat.asm` is `.8086` (no
+  immediate shifts), the IPL may call INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
+- Physical 0x90000 is the auto-play mailbox: a layout change means updating `game/tools/autoplay/driver.py`
+  `read_mailbox()` and `EXPORT_VERSION` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
+- 9MB 構成で `v86 -t` が `#PF addr=0 EIP=0` で死ぬ (8MB / 15MB は無事、未解決)。 → §4-28
+- 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
+  突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
+- `gui_gate.py` で GUI を叩くときは rshell を ESC で抜けてから `/api/key`、Start メニューの行は
+  `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
+- VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
+  directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 
 ## Documentation
 
-| Document | Content |
-|----------|---------|
-| `docs/INDEX.md` | Document index. Its first table, **情報単位ごとの正典**, says which file to update for each kind of fact |
-| `docs/01_system.md` ~ `docs/10_notes.md` | Kernel technical spec (10 parts) |
-| `docs/KAPI_SPEC.md` | KernelAPI spec (current: **v42**, 180 functions + 2 data fields) |
-| `docs/DEVELOPMENT.md` | Development guide: task → what to read / touch / verify, and the file map (file → role → spec section) |
-| `docs/POLICY_DEV.md` | Coding policy, build rules |
-| `docs/POLICY_DEBUG.md` | Debug procedures, binary deployment checklist, **§4 lessons (the long form of Known Gotchas)** |
-| `docs/ROADMAP.md` | Release roadmap (v1.1 GUI shell~) |
-| `docs/tasks/fep/` | FEP (Japanese input) detailed design, P1–P7 |
-| `docs/tasks/gui/` | GUI shell v1.x: `DESIGN.md` (design record), `API_CONTRACTS.md` (frozen 2026-09-04), `TASKS.md` + `TASK_*.md` (lane tickets H/K/W/C, gates G1–G5) |
-| `docs/tasks/game/` | Board-game RPG port plan + engine extension plan |
-| `docs/tasks/wintree_port/` | Record of the feat/vdm work-tree port |
-| `/home/hight/np21w-src/docs/` | **NP21/W ai-debug fork** (AI-native emulator debugging: embedded HTTP debug server + MCP). Plan, build setup, architecture. WSL repo is the source of truth; build and deploy from WSL with `make build && make deploy` (mirrors to Windows and drives MSBuild) |
+ソースツリーの図は [`docs/08_build.md`](docs/08_build.md) §8-3 が正典。
 
-For PC-9800 hardware specs, read the local mirror `docs/hw/` (`PC9800Bible/` = PC-9801
-Bible, `undocumented/` = UNDOCUMENTED 9801/9821 Vol.2 `io_*.md`). The source of truth is
-`C:\WATCOM\docs\` (`/mnt/c/WATCOM/docs/`); refresh the mirror with `tools/sync_hwdocs.sh`.
-**The mirror is copyrighted material and is gitignored (`/docs/hw/`) — never commit it.**
-The reverse direction exists too: `make docs-win` (`tools/sync_docs_to_win.sh`) mirrors this
-repository's `docs/` + `README.md` + `CLAUDE.md` to `C:\WATCOM\docs\os32\` for reading from
-Windows. That copy is read-only output — edit the files here, never there.
-When the two books disagree, UNDOCUMENTED wins (see `docs/INDEX.md`).
+| Document | Content |
+|---|---|
+| [`docs/INDEX.md`](docs/INDEX.md) | 索引。冒頭の「情報単位ごとの正典」表が**更新先を 1 か所に決める**。§1〜§10 の技術仕様と `docs/tasks/` の領域別設計もここから辿る |
+| [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) | 制約規則の正典 ([C1]〜[D3] の理由と詳細) |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 作業別の参照先 (§1) とファイル地図 (§2) — 未知のサブシステムはここから |
+| [`docs/KAPI_SPEC.md`](docs/KAPI_SPEC.md) | KernelAPI 仕様と追加手順 (§3-1) |
+| [`docs/POLICY_DEV.md`](docs/POLICY_DEV.md) / [`POLICY_DEBUG.md`](docs/POLICY_DEBUG.md) | 開発規約 / デバッグ (反映確認 §2、教訓集 §4、道具箱 §5) |
+| [`docs/ROADMAP.md`](docs/ROADMAP.md) | リリース計画 (v1.x GUI シェル〜) |
+| `docs/hw/` | PC-9800 ハード資料のミラー (`tools/sync_hwdocs.sh`)。**著作権物・gitignore・コミット禁止**。Bible と矛盾したら UNDOCUMENTED を採る |
+| `/home/hight/np21w-src/docs/` | NP21/W ai-debug フォーク。WSL 側が正で、`make build && make deploy` で Windows にミラーされる |
+
+`make docs-win` はこのリポジトリの `docs/` + `README.md` + `CLAUDE.md` を
+`C:\WATCOM\docs\os32\` に書き出す (読み取り専用の出力。編集はここ側で行う)。
+
+スキル: **`os32-build-verify`** (ビルド・配備・検証の選択)、**`os32-emu-debug`** (エミュレータ上の障害調査)、
+**`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)、
+**`os32-local-ai`** (ビルド・試験・配備をローカル AI に実行させる)。

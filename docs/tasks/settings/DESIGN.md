@@ -1,6 +1,9 @@
 # 設定レジストリ (settings.db) — 設計書 初版
 
 > 発行: PM (2026-09-06) / 状態: **計画** (v1.3 で実装、v1.2 は触らない)
+> **実装ゲート保留**: 静的監査で readonly/no-create、transaction、4KB blob、通常配備との衝突を検出。
+> 以下は未凍結の設計案。S1/S2着手前に [v1.3 PLAN の S0](../gui/v13/PLAN.md) を完了する。
+> 「KAPI追加なし」は未成立の目標であり、通常NHD配備へのsettings.db登録は承認されていない。
 > 関連: [../gui/v12/CONTRACTS.md](../gui/v12/CONTRACTS.md) (S6 の `system.cfg` 更新)、
 > [../sqlite/00_INDEX.md](../sqlite/00_INDEX.md) (カーネル内 SQLite)、[../../02_memory.md](../../02_memory.md)
 > (SQLite 帯 0x200000、MEMSYS5 384KB)、[../../KAPI_SPEC.md](../../KAPI_SPEC.md) (`db_*` v42)
@@ -160,11 +163,11 @@ gshell 起動
 | 項目 | 見るもの |
 |---|---|
 | プール | FEP 辞書が常駐した状態で `cfg_open` → 数十件の get → close を繰り返し、`db_mem_used()` が戻ること (§4-13 の -2 が出ない) |
-| ジャーナル | `SQLITE_OMIT_WAL` なので DELETE ジャーナル。ext2 上で `commit` の途中で NP21/W を `taskkill` して次回起動で DB が開けること (壊れるなら `PRAGMA journal_mode=MEMORY` + 明示 `sync` の組合せを試す) |
+| ジャーナル | DELETE ジャーナルの回復・書込み順序・syncエラー伝播を確認する。強制終了試験は別途承認した使い捨てイメージのみ。MEMORY journal + 後置syncはクラッシュ回復の代替にしない |
 | 同期 | `os32_sqlite_vfs.c` の xSync が ext2 の書き戻しを待つか。待たないなら `cfg_commit` の後に `sys_sync` 相当を呼ぶ |
 | 速度 | 386 相当で `cfg_open` + 20 件 get + close の時間 (tick)。gshell 起動が体感で遅れないこと |
 | 大きさ | ページサイズ 1KB / 数百件で DB が 64KB 以内に収まること (FDD の媒体にも載る) |
-| 8MB 機 | SQLite 帯は固定なので影響なし。確認だけ |
+| メモリ | 固定 SQLite プールでも FEP・設定 DB の共存時のピークと OOM・回収を実測する。CUI 最低 8MB を GUI の受入ゲートにしない。必要 RAM と開発方針は [02_memory.md](../../02_memory.md) に従う |
 
 ---
 
@@ -220,4 +223,5 @@ tar c /hd0/backup/etc.tar /etc/settings.json /etc/system.cfg /etc/profile   # �
 | S5 | PM / 検証 | §6 の実測、リカバリの実走 (壊した DB → FDD ブート → 復元 → GUI 復帰)、3 バックエンド回帰。`export` → 壊す → `import` の往復も |
 | S6 | C | `tar` コマンド。**自作せず既製の単一ファイル実装を vendor する** (方針「車輪の再発明を避ける」): 第一候補 **microtar** (rxi、MIT、約 500 行、ustar の読み書き、I/O はコールバックなので KAPI の `sys_open/read/write` に差し替えるだけ)。GNU tar は不可 (gnulib + autotools、fork/exec で圧縮子を呼ぶ、数万行、GPL)。busybox tar (GPLv2) は MIT の本体と混ぜない。`lz4` と組み合わせて `etc.tar.lz4`。ホストの `tarfile` で読めることを確認 |
 
-順序: S1 → S2 → (S3 ∥ S4 ∥ S6) → S5。v1.4 の設定アプリはこの上に載る。
+順序: **S0 (非破壊DB契約の確定)** → 必要な基盤修正 → S1 → S2 → (S3 ∥ S4 ∥ S6) → S5。
+S1のNHD登録は新規インストールと通常更新を分離するまで保留。v1.4 の設定アプリはこの上に載る。

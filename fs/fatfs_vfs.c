@@ -494,15 +494,13 @@ static void *fatfs_vfs_mount(int dev_id)
     int dev_type;
     int drv_num;
 
-    /* VFSからのエンコード: (dev_type << 8) | drv_num
-     * dev_type=0 (VFS_DEV_HD) → HDD → pdrv=1
-     * dev_type=1 (VFS_DEV_FD) → FDD → pdrv=0
-     */
-    dev_type = (dev_id >> 8) & 0xFF;
-    drv_num  = dev_id & 0xFF;
+    /* VFS からのエンコード (fs/vfs.h)。
+     * VFS_DEV_HD → HDD → pdrv=1 / VFS_DEV_FD → FDD → pdrv=0 */
+    dev_type = VFS_MOUNT_DEV_TYPE(dev_id);
+    drv_num  = VFS_MOUNT_DEV_ID(dev_id);
 
     /* FDD/HDD 以外 (CD, hostdrv等) は対象外 */
-    if (dev_type != 0 && dev_type != 1) return (void *)0;
+    if (dev_type != VFS_DEV_HD && dev_type != VFS_DEV_FD) return (void *)0;
 
     /* pdrv 占有チェック: diskio のドライブ選択を書き換える前に判定する */
     if (pdrv_busy[dev_type == 1 ? 0 : 1]) return (void *)0;

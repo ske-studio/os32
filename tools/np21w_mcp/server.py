@@ -230,28 +230,20 @@ def tool_put_file(args):
     The bytes go straight into guest memory over /api/deploy; the guest
     kernel agent writes the file when the shell is next responsive.
     """
-    import sys as _sys
-    _sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))))
-    from hotdeploy import push
-
-    local = args["local_path"]
-    if not os.path.isfile(local):
-        return tool_error("local file not found: %s" % local)
-    try:
-        ok = push(local, args.get("guest_path"))
-    except SystemExit as e:
-        return tool_error(str(e))
-    if not ok:
-        return tool_error("the guest did not accept the file")
-    return {"ok": True, "local_path": local,
-            "guest_path": args.get("guest_path") or "(resolved from manifests)",
-            "bytes": os.path.getsize(local)}
+    del args
+    return tool_error(
+        "retired 2026-09-09: the hotdeploy staging window was removed. "
+        "Use `make deploy` (host -> C:\\os32) then `hsync` in the guest "
+        "(/host -> /, sys excluded unless named). "
+        "See docs/tasks/hotdeploy/DESIGN.md")
 
 
 def tool_deploy_status(args):
-    """Report the guest-side file-placement agent state."""
-    return _json(emu.get("/api/deploy"))
+    """Retired with the hotdeploy window (2026-09-09)."""
+    del args
+    return tool_error(
+        "retired 2026-09-09: no guest-side file-placement agent any more. "
+        "Delivery is `make deploy` + guest `hsync`.")
 
 
 def tool_disasm(args):

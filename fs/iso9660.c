@@ -220,10 +220,14 @@ static void *iso9660_mount(int dev_id)
     Device *dev;
     char devname[8];
 
+    /* iso9660 は CD 専用。種別を確かめずに下位バイトだけで "cd%d" を
+     * 組み立てると、fd0/hd0 が cd0 として開かれる。 */
+    if (VFS_MOUNT_DEV_TYPE(dev_id) != VFS_DEV_CD) return (void *)0;
+
     /* デバイス名を構築: "cd0", "cd1", ... */
     devname[0] = 'c';
     devname[1] = 'd';
-    devname[2] = '0' + (char)dev_id;
+    devname[2] = '0' + (char)VFS_MOUNT_DEV_ID(dev_id);
     devname[3] = '\0';
 
     dev = dev_find(devname);

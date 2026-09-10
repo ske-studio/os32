@@ -160,16 +160,23 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
 /*  がここを参照して master PD へ戻し AS を破棄する。                        */
 /* ======================================================================== */
 
-/* リング3 ユーザスタック: アプリ帯 (APP_BAND_PDE) の上端に置く (M1_RING3 §5)。
- * プログラム (code + sbrk + exec_heap) は MEM_EXEC_LOAD_ADDR からスタック
- * ガード直下まで (レイアウトは include/memmap.h の子プロセス帯の説明を参照)。
- * K3 でロードアドレスが 1MB 上がったが、**帯の上端は動かさない** —
- * MEM_EXEC_LOAD_ADDR から導くと PDE 1 の外 (0x900000) へ出てしまうため、
- * 帯そのものの定数 MEM_APP_BAND_TOP を使う。 */
-#define RING3_USTACK_TOP     MEM_APP_BAND_TOP                   /* 0x800000 (帯上端, exclusive) */
+/* リング3 ユーザスタック: アプリ帯 (APP_BAND_PDE から始まる帯) の上端に置く
+ * (M1_RING3 §5)。プログラム (code + sbrk + exec_heap) は MEM_EXEC_LOAD_ADDR
+ * からスタックガード直下まで (レイアウトは include/memmap.h の子プロセス帯の
+ * 説明を参照)。K3 でロードアドレスが 1MB 上がったが、**帯の上端は
+ * MEM_EXEC_LOAD_ADDR から導かない** — 帯そのものの定数から導く。
+ *
+ * 2026-09-10 (票 docs/tasks/memory/APP_BAND_PDE.md): 帯の上端は固定ではなく
+ * 「アプリ固有 PDE の枚数 × 4MB」。枚数は exec_run がヘッダの heap_size から
+ * 決める (paging_app_band_pdes)。heap_size を指定しないプログラムは必ず
+ * 1 枚 = 従来と完全に同じレイアウトになる。
+ *
+ * RING3_USTACK_TOP 以下は**実行時の値**を返すマクロ。定数式が要る文脈
+ * (配列長・static 初期化子・case ラベル) では使えないので注意。 */
+#define RING3_USTACK_TOP     g_ring3_band_top
 /* ユーザスタックサイズ。旧 CPL=0 子プロセスの MEM_EXEC_STACK_SIZE (256KB) に
  * 合わせる (ring3 デフォルト化での深いスタック使用の回帰を避ける)。
- * スタック帯 [0x7C0000, 0x800000) は PDE1 内・プログラム帯 (0x500000-) と
+ * スタック帯 [上端-256KB, 上端) はプログラム帯 (0x500000-) と
  * 共有ライブラリ帯 (0x400000-0x4FFFFF) より十分上。 */
 #define RING3_USTACK_SIZE    MEM_EXEC_STACK_SIZE
 
@@ -177,9 +184,31 @@ static ExecContext exec_ctx_stack[MAX_EXEC_NEST];
  * ヒープのオーバーラン / スタックのアンダーフローがガード(非present)に当たり
  * #PF → ring3_fault_kill でアプリのみ kill。相互の静かな破壊を防ぐ。 */
 #define RING3_GUARD_SIZE     PAGE_SIZE
-#define RING3_STACK_BOTTOM   (RING3_USTACK_TOP - RING3_USTACK_SIZE)     /* 0x7C0000 */
-#define RING3_GUARD_BASE     (RING3_STACK_BOTTOM - RING3_GUARD_SIZE)    /* 0x7BF000 */
-#define RING3_HEAP_TOP       RING3_GUARD_BASE                           /* heap 上限=ガード直下 */
+#define RING3_STACK_BOTTOM   (RING3_USTACK_TOP - RING3_USTACK_SIZE)
+#define RING3_GUARD_BASE     (RING3_STACK_BOTTOM - RING3_GUARD_SIZE)
+#define RING3_HEAP_TOP       RING3_GUARD_BASE   /* heap 上限=ガード直下 */
+
+/* 帯を最大まで伸ばしたときの上端 / ヒープ上限 (定数)。
+ * ファイル読み込みの上限を決めるのに使う — 実際の枚数はヘッダを読むまで
+ * 決まらないので、読み込み段階では最大側で見積もる。 */
+#define RING3_USTACK_TOP_MAX MEM_APP_BAND_MAX_TOP
+#define RING3_HEAP_TOP_MAX   (RING3_USTACK_TOP_MAX - RING3_USTACK_SIZE - \
+                              RING3_GUARD_SIZE)
+
+/* 現在の (= いま起動中/実行中の) CPL=3 アプリのアプリ帯上端。
+ * 既定は 1 枚ぶん = MEM_APP_BAND_TOP で、CPL=3 アプリが居ない間は必ずこの値。
+ * ring3_ptr_ok / argv 積み / USER 写像がすべてここを見るので、
+ * 起動失敗・fault kill・正常終了のいずれでも必ず既定へ戻すこと。 */
+static u32 g_ring3_band_top = MEM_APP_BAND_TOP;
+static u32 g_ring3_band_pdes = 1;
+
+static void ring3_band_set(u32 pdes)
+{
+    if (pdes < 1) pdes = 1;
+    if (pdes > MEM_APP_BAND_MAX_PDES) pdes = MEM_APP_BAND_MAX_PDES;
+    g_ring3_band_pdes = pdes;
+    g_ring3_band_top = MEM_APP_BAND_BASE + pdes * MEM_APP_BAND_PDE_SIZE;
+}
 
 static struct addrspace g_ring3_as;
 static volatile int g_ring3_active = 0;
@@ -355,6 +384,23 @@ static void exec_child_claim(u32 *a_start, int *a_pages,
 }
 
 /* ======================================================================== */
+/*  ring3_band_ram_top — アプリ帯を伸ばしてよい物理上限                      */
+/*                                                                          */
+/*  子プロセスの claim 範囲 A の末尾。そこまでは exec_child_claim が          */
+/*  pgalloc に予約させるので、帯を伸ばしてもアプリのヒープと pgalloc の       */
+/*  動的確保 (V86 バッキング・PD/PT) が同じページを二重に使うことがない。     */
+/*  8MB 構成では帯 1 枚ぶんにも届かないが、paging_app_band_pdes() が          */
+/*  最低 1 枚を返すので従来の挙動 (帯 = 0x400000-0x7FFFFF) は変わらない。     */
+/* ======================================================================== */
+static u32 ring3_band_ram_top(void)
+{
+    u32 a_start, b_start;
+    int a_pages, b_pages;
+    exec_child_claim(&a_start, &a_pages, &b_start, &b_pages);
+    return a_start + (u32)a_pages * PAGE_SIZE;
+}
+
+/* ======================================================================== */
 /*  exec_launch_abort — 起動途中で失敗したときの唯一の巻き戻し口 (レビュー   */
 /*                      #5 ④)                                               */
 /*                                                                          */
@@ -393,6 +439,9 @@ static int exec_launch_abort(int is_shell, struct addrspace *as, int status)
     if (as != 0) {
         paging_addrspace_destroy(as);
     }
+    /* 広げたアプリ帯を既定 (1 枚) へ戻す。RING3_* マクロがこの値を見るので、
+     * 戻し忘れると次に起動する CPL=3 アプリが実在しない帯を前提に走る。 */
+    ring3_band_set(1);
 
     /* (1) 親レベルへ戻す (exec_exit の末尾と同じ順序) */
     exec_nest_level--;
@@ -528,6 +577,7 @@ void __cdecl kapi_sys_exit(int status)
         shlib_addrspace_detach(&g_ring3_as);
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
+        ring3_band_set(1);   /* アプリ帯を既定 (1 枚) へ戻す */
     }
     ring3_in_syscall = 0;   /* syscall(sys_exit) を抜ける — ガードを下ろす */
     exec_exit(status);
@@ -657,6 +707,7 @@ void ring3_fault_kill(void)
         shlib_addrspace_detach(&g_ring3_as);
         paging_addrspace_destroy(&g_ring3_as);
         g_ring3_active = 0;
+        ring3_band_set(1);   /* アプリ帯を既定 (1 枚) へ戻す */
     }
     ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
     exec_fault_recover();   /* longjmp するので戻らない */
@@ -737,7 +788,13 @@ int exec_run(const char *cmdline)
             (guard_b - MEM_EXEC_LOAD_ADDR) > EXEC_DYN_RESERVE * 2) {
             heap_top_cpl0 = guard_b - EXEC_DYN_RESERVE;
         }
-        read_top = (heap_top_cpl0 < RING3_HEAP_TOP) ? heap_top_cpl0 : RING3_HEAP_TOP;
+        /* CPL=3 側は帯の枚数がヘッダを読むまで決まらないので、ここでは
+         * **最大枚数** で見積もる (読み込みの上限であってレイアウトではない)。
+         * heap_top_cpl0 が実 RAM から導かれているので、伸ばしすぎて実 RAM の
+         * 外へ読むことはない。8MB 構成では heap_top_cpl0 の方が小さく、
+         * 従来と同じ値になる。 */
+        read_top = (heap_top_cpl0 < RING3_HEAP_TOP_MAX) ?
+                   heap_top_cpl0 : RING3_HEAP_TOP_MAX;
         max_size = read_top - load_base - MEM_EXEC_SBRK_MIN - PAGE_SIZE - MEM_EXEC_HEAP_MIN;
         guard_a = 0;
         exec_heap_base = 0;
@@ -829,7 +886,15 @@ int exec_run(const char *cmdline)
      * (原則は修正で対応。エスケープハッチ)。 */
     want_ring3 = (!is_shell) && ((hdr->flags & OS32X_FLAG_FORCE_CPL0) == 0);
     if (want_ring3) {
-        /* ユーザスタックを 0x400000 帯 (PD ごと) の上端へ移す。argv は
+        /* アプリ帯の枚数を決める (票 docs/tasks/memory/APP_BAND_PDE.md)。
+         * heap_size 指定が 1 枚に収まらないときだけ 4MB 単位で伸ばす。
+         * 指定なし (heap_size == 0) なら必ず 1 枚 = 従来と同じレイアウト。
+         * ここから先の early return では必ず ring3_band_set(1) で戻すこと
+         * (RING3_* マクロが g_ring3_band_top を見ているため)。 */
+        u32 code_end_est = PAGE_ALIGN_UP(load_base + text_sz + bss_sz);
+        ring3_band_set(paging_app_band_pdes(code_end_est, heap_sz,
+                                            ring3_band_ram_top()));
+        /* ユーザスタックをアプリ帯 (PD ごと) の上端へ移す。argv は
          * この後この stack_top を使って積まれるので、ここで差し替える。 */
         stack_top = RING3_USTACK_TOP;
     }
@@ -853,6 +918,7 @@ int exec_run(const char *cmdline)
             shell_print(" max=", 0xE1);
             shell_print_dec((heap_top > load_base + need) ? heap_top - need - load_base : 0, 0xE1);
             shell_print("\n", 0xE1);
+            ring3_band_set(1);   /* 広げた帯を既定へ戻す (起動しない) */
             return EXEC_ERR_NOMEM;
         }
         /* sbrk 最低分とガードを除いた残りを exec_heap と sbrk 追加分で分ける */
@@ -860,7 +926,19 @@ int exec_run(const char *cmdline)
         if (heap_sz > 0) {
             exec_heap_size = (heap_sz + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
             if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
-            if (exec_heap_size > avail) exec_heap_size = avail;
+            /* 要求に足りないときは**黙って切り詰めず拒否する** (2026-09-10 方針)。
+             * スワップを持たない以上、渡せない量を渡せたことにしてはいけない。
+             * 切り詰めると、アプリは足りないと知らないまま走り出し、後の
+             * mem_alloc が途中で失敗する。ここで落として要求量と空きを見せる。 */
+            if (exec_heap_size > avail) {
+                shell_print("[DBG] NOMEM: heap request=", 0xE1);
+                shell_print_dec(heap_sz, 0xE1);
+                shell_print(" avail=", 0xE1);
+                shell_print_dec(avail, 0xE1);
+                shell_print("\n", 0xE1);
+                ring3_band_set(1);   /* 広げた帯を既定へ戻す (起動しない) */
+                return EXEC_ERR_NOMEM;
+            }
         } else {
             exec_heap_size = (avail / 2) & ~(PAGE_SIZE - 1);
             if (exec_heap_size < MEM_EXEC_HEAP_MIN) exec_heap_size = MEM_EXEC_HEAP_MIN;
@@ -1105,7 +1183,7 @@ int exec_run(const char *cmdline)
 
         if (want_ring3) {
             /* ================= CPL=3 への遷移 (v2 M1c/M1d) ================= */
-            if (paging_addrspace_create(&g_ring3_as) != 0) {
+            if (paging_addrspace_create_n(&g_ring3_as, g_ring3_band_pdes) != 0) {
                 shell_print("Error: ring3 addrspace create failed\n", ATTR_RED);
                 /* AS は出来ていないので破棄対象なし (第2引数 0)。それ以外の
                  * 起動途中状態は exec_launch_abort が親の形に戻す。 */

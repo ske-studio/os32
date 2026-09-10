@@ -26,7 +26,7 @@ tools/np21w_mcp/np21w_client.py を流用する (curl.exe フォールバック�
   {"action":"done","report":"..."}     終了。report は人間向けの報告
 ホスト側 (ビルド/配備。許可リスト方式で自由なシェルは与えない):
   {"action":"make","target":"kernel"}  make <target> (kernel/kernel-lgy98/kernel-lgy98-link/kernel-nolgy98/check-net-m2/check-net-m2-cpl3/check-net-m4/check-net-l0/check-net-l1/check-net-l2/check-net-l3/programs/sdk/all/check/clean/apps/game/external)
-  {"action":"hotdeploy","file":"userland/cmds/wc.bin"}  再起動なしで 1 バイナリ差し替え
+  {"action":"cmd","cmd":"hsync"}       配備後にゲスト側で /host -> / を同期 (sys は除く)
   {"action":"deploy"}                  os32-cycle deploy (停止→NHD 配備→起動→ver)
 """
 
@@ -61,8 +61,17 @@ BUILD_OBS_LIMIT = 2400
 
 ROOT = os.environ.get("OS32_ROOT", os.path.abspath(os.path.join(HERE, "..", "..")))
 OS32_CYCLE = os.environ.get("OS32_CYCLE", os.path.expanduser("~/.local/bin/os32-cycle"))
-MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "check-net-l2", "check-net-l3", "programs", "sdk", "all", "check", "check-gui-proto", "clean", "deploy",
-                "apps", "game", "external", "gshell")
+MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98", "check-net-m2", "check-net-m2-cpl3", "check-net-m4", "check-net-l0", "check-net-l1", "check-net-l2", "check-net-l3", "programs", "sdk", "all", "check", "clean", "deploy",
+                "apps", "game", "external", "gshell",
+                # `make check` の個別ターゲット。いずれもホスト側の読み取り専用試験で、
+                # 落ちた 1 本だけを回し直すのに要る。build/sdk.mk に足したら
+                # ここにも足す (2026-09-09: 落ちていて回し直せなかった)。
+                "check-boot-splash-host", "check-constraints", "check-db-owned-host",
+                "check-gui-proto", "check-kapi-version", "check-manifests",
+                "check-memory-host", "check-privileged", "check-sqlite-groups-host",
+                "check-t5a-host", "check-t5b-host", "check-term-model",
+                "check-term-render", "check-tools-host", "check-vfs-fd-sqlite-host",
+                "check-vfs-mount-dev-host")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")
 WAIT_MAX = 60
@@ -91,8 +100,7 @@ Actions:
 {"action":"selftest"}                            read the kernel self-test counters (kselftest_pass / kselftest_fail)
 {"action":"done","report":"<what you found>"}    finish the task and report
 Host-side build actions (they run on the development PC, not on OS32):
-{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル、以後の deploy も有効のまま), kernel-nolgy98 (無効に戻す), check-net-m2 (LAN の M2 試験、実機が LAN 有効で起動中のこと), check-net-m2-cpl3 (同じ試験を CPL3 プログラム (less) 常駐中に回す), check-net-m4 (リング飽和での自己回復), programs, sdk, all, check, clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
-{"action":"hotdeploy","file":"userland/cmds/wc.bin"}  rebuild that one program and place it into the running OS32 without reboot
+{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル、以後の deploy も有効のまま), kernel-nolgy98 (無効に戻す), check-net-m2 (LAN の M2 試験、実機が LAN 有効で起動中のこと), check-net-m2-cpl3 (同じ試験を CPL3 プログラム (less) 常駐中に回す), check-net-m4 (リング飽和での自己回復), programs, sdk, all, check, any single check-* subtarget from build/sdk.mk (e.g. check-memory-host, check-t5b-host, check-constraints), clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
 {"action":"deploy"}                              full deploy: stop emulator, write NHD, restart, wait for OS32 (takes minutes)
 
 Rules:
@@ -101,7 +109,7 @@ Rules:
 - Read the observation you get back before deciding the next action.
 - When the task is complete, reply with "done" and quote the relevant output in the report.
 - If something fails twice, stop with "done" and report the failure honestly.
-- For make/hotdeploy/deploy: do not interpret the log. Quote the "exit=" line and the "RESULT:" line verbatim in your report, plus any line containing "error".
+- For make/deploy: do not interpret the log. Quote the "exit=" line and the "RESULT:" line verbatim in your report, plus any line containing "error".
 - Never run "make clean" unless the task explicitly asks for it.
 - DOS/V86 sessions: start them with "cmd_nowait" (a normal "cmd" would hang), then "wait" ~20 seconds, read "tvram" until the DOS prompt "A>" appears, type with {"action":"key","text":"dir"} followed by {"action":"key","seq":"ENTER"}, read "tvram" again, and leave DOS with {"action":"key","seq":"CTRL+STOP"}. Afterwards confirm OS32 is back with "cmd" ver."""
 
@@ -227,16 +235,6 @@ def act_make(a):
     return _host_run(["make", "-C", ROOT, target], MAKE_TIMEOUT)
 
 
-def act_hotdeploy(a):
-    f = str(a.get("file", "")).strip()
-    if not f or f.startswith("/") or ".." in f or not f.endswith(".bin"):
-        return "error: file must be a repo-relative path to a .bin (e.g. userland/cmds/wc.bin)"
-    src = os.path.splitext(os.path.join(ROOT, f))[0] + ".c"
-    if not os.path.exists(src) and not os.path.exists(os.path.join(ROOT, f)):
-        return "error: no such program: %s" % f
-    return _host_run(["make", "-C", ROOT, "hotdeploy", "FILE=" + f], MAKE_TIMEOUT)
-
-
 def act_deploy(_):
     if not os.path.exists(OS32_CYCLE):
         return "error: os32-cycle not found at %s" % OS32_CYCLE
@@ -246,7 +244,7 @@ def act_deploy(_):
 ACTIONS = {"cmd": act_cmd, "key": act_key, "tvram": act_tvram, "status": act_status,
            "cmd_nowait": act_cmd_nowait, "wait": act_wait, "screenshot": act_screenshot,
            "selftest": act_selftest,
-           "make": act_make, "hotdeploy": act_hotdeploy, "deploy": act_deploy}
+           "make": act_make, "deploy": act_deploy}
 
 
 # ---------------------------------------------------------------------------
@@ -374,13 +372,13 @@ def run(task, model, max_steps, session):
 
         fn = ACTIONS.get(kind)
         if fn is None:
-            obs = "Unknown action '%s'. Valid: cmd, key, tvram, status, cmd_nowait, wait, screenshot, selftest, make, hotdeploy, deploy, done." % kind
+            obs = "Unknown action '%s'. Valid: cmd, key, tvram, status, cmd_nowait, wait, screenshot, selftest, make, deploy, done." % kind
         else:
             try:
                 obs = fn(action)
             except Exception as e:  # noqa: BLE001 — 実機側の失敗はそのまま観測として返す
                 obs = "error: %s" % e
-        if kind not in ("make", "hotdeploy", "deploy"):
+        if kind not in ("make", "deploy"):
             obs = clip(obs)
         if obs_failed(obs):
             fails += 1

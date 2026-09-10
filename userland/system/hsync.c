@@ -8,10 +8,16 @@
 /*  ファイルサイズが異なるもののみコピーし、同一サイズはスキップする。        */
 /*                                                                          */
 /*  使い方:                                                                 */
-/*    hsync              — /host 配下全体を / に同期                        */
+/*    hsync              — /host 配下を / に同期 (**sys は除く**)           */
 /*    hsync bin           — /host/bin/ → /bin/ のみ同期                    */
-/*    hsync -f            — サイズ無関係に全上書き                          */
+/*    hsync -f            — サイズ無関係に全上書き (sys は除く)             */
+/*    hsync sys           — /sys を明示指定したときだけ同期する             */
 /*    hsync -f sys        — /host/sys/ を強制同期                          */
+/*                                                                          */
+/*  **既定で sys を外す理由**: /sys には稼働中の常駐シェル (shell.bin)、     */
+/*  共有ライブラリ (lib/)、unicode.bin、フォントが入っている。走っている     */
+/*  ものを背後から差し替えると、次の exec まで実体と食い違う。入れ替えたい   */
+/*  ときは `hsync sys` と明示する (2026-09-09、ホットデプロイ撤去に伴い)。   */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -28,6 +34,8 @@ static int g_copied;
 static int g_skipped;
 static int g_errors;
 static int g_force;
+/* サブディレクトリに sys が明示されたか (既定の全体同期では外す) */
+static int g_want_sys;
 
 /* ======== 文字列ユーティリティ ======== */
 
@@ -138,6 +146,16 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             if (fl.names[i][1] == '.' && fl.names[i][2] == '\0') continue;
         }
 
+        /* ルート直下の sys は既定で飛ばす (稼働中のシェル・共有ライブラリ)。
+         * depth==0 だけで見るので /host/usr/sys のような別階層は対象外。
+         * 入れ替えたいときは `hsync sys` と明示する。 */
+        if (depth == 0 && !g_want_sys &&
+            fl.names[i][0] == 's' && fl.names[i][1] == 'y' &&
+            fl.names[i][2] == 's' && fl.names[i][3] == '\0') {
+            g_skipped++;
+            continue;
+        }
+
         /* パス構築 */
         str_cpy(src_path, src_dir);
         if (src_path[str_len(src_path) - 1] != '/') str_cat(src_path, "/");
@@ -208,9 +226,13 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
             api->kprintf(ATTR_WHITE, "Usage: hsync [-f] [dir]\n");
             api->kprintf(ATTR_WHITE, "  -f     Force overwrite\n");
             api->kprintf(ATTR_WHITE, "  dir    Sync specific dir only\n");
+            api->kprintf(ATTR_WHITE, "  (sys is skipped unless named: running shell/libs)\n");
             return;
         } else {
             subdir = argv[i];
+            /* 明示指定なら sys でも同期する (既定の全体同期では外す) */
+            if (subdir[0] == 's' && subdir[1] == 'y' &&
+                subdir[2] == 's' && subdir[3] == '\0') g_want_sys = 1;
         }
     }
 

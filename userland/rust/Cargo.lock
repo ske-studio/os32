@@ -95,6 +95,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libos32term"
+version = "0.1.0"
+
+[[package]]
+name = "libos32term_render"
+version = "0.1.0"
+dependencies = [
+ "libos32term",
+]
+
+[[package]]
 name = "math_test_rs"
 version = "0.1.0"
 dependencies = [
@@ -109,6 +120,16 @@ version = "0.1.0"
 [[package]]
 name = "os32api"
 version = "0.1.0"
+
+[[package]]
+name = "t5a_display"
+version = "0.1.0"
+dependencies = [
+ "libos32gui_stub",
+ "libos32term",
+ "libos32term_render",
+ "os32api",
+]
 
 [[package]]
 name = "ttf-parser"

@@ -30,6 +30,17 @@ Linuxライクなコマンド体系を実現する。動的マウントに対応
 
 パス解決: `vfs_resolve_path()` が相対パスをcwd基準で絶対パスに変換する。
 
+**エラー規約**: VFS 層が返すのは `OS32_ERR_*` (`sdk/include/os32/os32_kapi_shared.h` が正典)。
+FS ドライバは自前のエラーを**境界で翻訳**する (ext2 は `ext2_to_vfs_err`)。生の errno や
+ドライバ固有の負値を VFS の外へ漏らさない。
+
+**型の検査は VFS 側で行う**: `vfs_open` はディレクトリを開くことを拒否し、
+`vfs_chdir` はディレクトリ以外を拒否する。これは FS ドライバ内部の型検査を禁止するものではない。
+
+コールバック方式の `sys_ls` では、共有スクラッチを使う FS 操作の再入に注意する。
+ext2 は走査ブロックの私有バッファで対策済み。FatFs / HostDrv の監査状況と呼び出し側の
+注意は [POLICY_DEBUG.md §4-26](POLICY_DEBUG.md) を参照。
+
 ### §6-2 ext2 ファイルシステム (ext2_super.c / ext2_inode.c / ext2_dir.c / ext2_file.c / ext2_fmt.c / ext2_vfs.c)
 
 IDE HDD上のLinux ext2ファイルシステムを読み書きする。パーティション開始位置は PC-98 パーティションテーブル (LBA 1) を `ext2_find_partition()` で解釈して動的に決定する (現行 NHD イメージではシリンダ12 = LBA 1632 開始。詳細は [NHD_FORMAT.md](NHD_FORMAT.md))。マルチインスタンス方式 (Ext2Ctx) により、複数デバイスの同時ext2マウントが可能。ext2フォーマット (`ext2_format`) によるmkfs相当の機能も備える。

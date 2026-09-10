@@ -25,9 +25,8 @@
 #include "boot_splash.h"
 #include "cpu_calibrate.h"
 #include "paging.h"
-#include "pgalloc.h"
+#include "memory_boot.h"
 #include "shlib.h"
-#include "hotdeploy.h"
 #include "shm.h"
 #include "utf8.h"
 #include "kselftest.h"
@@ -369,13 +368,13 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     }
 
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
-    pgalloc_init(mem_kb);
+    if (!memory_boot_init(mem_kb)) {
+        kprintf(0x07, "[MEM] bootstrap/stage failed; boot halted\n");
+        for (;;) { __asm__ volatile("cli; hlt"); }
+    }
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
-
-    /* ホットデプロイ制御ブロック初期化 (ホストが番地を読むので早めに) */
-    hotdeploy_init();
 
     /* カーネル内プリミティブの自己診断。
      * 外部プログラムの klibc_test は newlib 側を試すだけで、カーネルが
@@ -488,6 +487,17 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* ブートスプラッシュ表示 (カーネル内蔵) */
     boot_splash();
+
+    /* splash は PC98 を強制するので probe を走らせない。バックエンドの選択と
+     * probe のキャッシュ温めはここで 1 回だけ、**カーネル文脈 (master PD)** で
+     * 行う。PEGC の probe は BIOS ワークエリア 0x045C / 0x0597 を読み、そこは
+     * アプリ PD に写像が無いので、初回 probe をアプリに繰り延べると CPL=3 で
+     * #PF が起きてアプリが死ぬ (2026-09-09 に gdi_test で実測)。さらに
+     * PEGC のバックバッファは主記憶の物理末尾側から取る予約なので、アプリが
+     * 走っている時点ではそのスタック/ヒープに阻まれて必ず失敗する
+     * (Cirrus の面はカード VRAM のリニア窓内で、予約は使わない)。
+     * init まで済ませたら表示はテキストへ戻る。 */
+    gfx_prepare_backend();
 
     /* 共有ライブラリ (0x400000 帯) を常駐させる — シェルを載せる **前** に
      * 1 回だけ (票 K3)。ここより後だと pgalloc が帯域のページを配ってしまう。

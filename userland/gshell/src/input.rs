@@ -144,12 +144,82 @@ pub struct Target {
     pub coy: i32,
 }
 
+/* ================================================================ */
+/*  ボタンの捕捉 (押下の配送先を離しまで保つ)                        */
+/* ================================================================ */
+
+/// 押下をアプリへ配った相手。対になる離しは**どこで離しても同じ相手へ**返す。
+///
+/// 契約 D1 の「タスクバー領域の入力をアプリへ配送しない」は、押していない
+/// ボタンの離しがアプリへ飛ぶのを防ぐための規則なので、**対になる離しには
+/// 掛けない**。掛けるとアプリ側のドラッグ状態やウィジェットの armed が
+/// 解除されず、押されたままの表示が残る。
+#[derive(Clone, Copy)]
+struct Capture {
+    active: bool,
+    slot: usize,
+    win_id: u32,
+    cox: i32,
+    coy: i32,
+}
+
+impl Capture {
+    const NONE: Capture = Capture {
+        active: false,
+        slot: 0,
+        win_id: 0,
+        cox: 0,
+        coy: 0,
+    };
+}
+
+struct CapCell(core::cell::UnsafeCell<[Capture; 2]>);
+unsafe impl Sync for CapCell {}
+static CAPTURE: CapCell = CapCell(core::cell::UnsafeCell::new([Capture::NONE; 2]));
+
+#[inline]
+fn cap(button: u8) -> &'static mut Capture {
+    let i = if button == MOUSE_BTN_RIGHT { 1 } else { 0 };
+    unsafe { &mut (*CAPTURE.0.get())[i] }
+}
+
+/// 捕捉している離しを配る。配ったら true。
+///
+/// 捕捉が無い = その押下をアプリへ配っていない (WM が処理した / 握り潰した)
+/// ので、離しも配らない。
+fn release_capture(st: &mut GuiState, mx: i32, my: i32, button: u8) -> bool {
+    let c = *cap(button);
+    *cap(button) = Capture::NONE;
+    if !c.active {
+        return false;
+    }
+    /* 捕捉した窓がもう無ければ捨てる。 */
+    if st.win_by_id(c.win_id).is_none() {
+        return false;
+    }
+    let ev = ring::ev_button(
+        false,
+        c.win_id,
+        (mx - c.cox) as i16,
+        (my - c.coy) as i16,
+        button,
+        next_serial(st, c.slot),
+    );
+    ring::append(st, c.slot, &ev);
+    true
+}
+
 pub fn focus_target(st: &GuiState) -> Option<Target> {
     let index = st.front_index()?;
     let owner = st.windows[index].owner;
     let slot = st.slot_of_owner(owner)?;
     let (cox, coy) = st.windows[index].client_origin();
-    Some(Target { slot, win_id: st.windows[index].id(index), cox, coy })
+    Some(Target {
+        slot,
+        win_id: st.windows[index].id(index),
+        cox,
+        coy,
+    })
 }
 
 /* ================================================================ */
@@ -316,6 +386,11 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
                 if modal::is_input() && fep::feed(st, scan, ch, mods) == fep::Fed::Consumed {
                     continue;
                 }
+                /* 確定した文字は**次の打鍵を処理する前に** field へ入れる。
+                 * flush が周期末尾のままだと、Enter 連打で確定 Enter と決定
+                 * Enter が同じ吸い出し周期に入ったとき、確定文字が field に
+                 * 入る前にダイアログが閉じて結果から抜ける。 */
+                fep::flush_text(st);
                 modal::on_key(st, scan, ch, mods);
             }
             continue;
@@ -349,6 +424,10 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
             continue;
         }
 
+        /* 同じ理由 (モーダル側の注記)。ここでは確定文字の `Text` を、この
+         * 打鍵の `Key` / `Text` より**先に**リングへ積んで順序を保つ。 */
+        fep::flush_text(st);
+
         let t = match focus_target(st) {
             Some(t) => t,
             None => continue,
@@ -373,7 +452,14 @@ fn capture_keyboard(st: &mut GuiState, ctx: Ctx) {
 }
 
 fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
-    let mut mi = MouseInfo { x: 0, y: 0, dx: 0, dy: 0, buttons: 0, mode: 0 };
+    let mut mi = MouseInfo {
+        x: 0,
+        y: 0,
+        dx: 0,
+        dy: 0,
+        buttons: 0,
+        mode: 0,
+    };
     unsafe {
         (os32api::api().mouse_poll)(&mut mi as *mut MouseInfo as *mut u8);
     }
@@ -391,6 +477,7 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
 
     /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
     if modal::is_open() {
+        crate::terminal::release_buttons(btn);
         if moved {
             cursor::move_to(st, mx, my);
         }
@@ -404,6 +491,16 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             }
             st.prev_buttons = btn;
         }
+        return;
+    }
+
+    // Resident display input never reaches the app ring. X4 is allowed only
+    // bounded private flags/capture bookkeeping, never model edits or glyphs.
+    if crate::terminal::mouse(st, mx, my, btn, st.prev_buttons) {
+        if moved {
+            cursor::move_to(st, mx, my);
+        }
+        st.prev_buttons = btn;
         return;
     }
 
@@ -457,15 +554,17 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
         if hold_l || hold_r {
             return;
         }
+        /* 離しは X3 と同じく捕捉経由で返す。ここで直接配ると捕捉が残り、
+         * 次の無関係な離しが古い相手へ飛ぶ。 */
         if down_edge {
             forward_button(st, mx, my, MOUSE_BTN_LEFT, true);
         } else if up_edge {
-            forward_button(st, mx, my, MOUSE_BTN_LEFT, false);
+            release_capture(st, mx, my, MOUSE_BTN_LEFT);
         }
         if rdown_edge {
             forward_button(st, mx, my, MOUSE_BTN_RIGHT, true);
         } else if rup_edge {
-            forward_button(st, mx, my, MOUSE_BTN_RIGHT, false);
+            release_capture(st, mx, my, MOUSE_BTN_RIGHT);
         }
         if moved && !down_edge && !up_edge && !rdown_edge && !rup_edge {
             /* X3 と同じ理由で `moved` が要る (上のコメント)。 */
@@ -511,7 +610,9 @@ fn wm_owns_edge(st: &GuiState, mx: i32, my: i32, down_edge: bool, button: u8) ->
         return true;
     }
     if button == MOUSE_BTN_RIGHT {
-        return false; /* 前面窓の中の右押下はアプリへ */
+        /* 契約 D4: 前面窓でも**クライアント上だけ**がアプリの領分。
+         * タイトルバー / 枠は WM が握り潰す ([`wm_right_down`] と同じ判定)。 */
+        return !st.windows[idx].client_rect_screen().contains(mx, my);
     }
     let w = st.windows[idx];
     if w.has_close() && w.close_rect().contains(mx, my) {
@@ -570,6 +671,7 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_frame = w.outer();
         cursor::hide(st);
         crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
+        wm::recompose_panel(st);
         queue_frame_edges(st, w.outer());
         cursor::show(st);
         let cr = cursor::rect(st);
@@ -605,13 +707,14 @@ fn wm_button_up(st: &mut GuiState, mx: i32, my: i32) {
         emit_configure(st, idx);
         return;
     }
-    /* メニュー中とタスクバー上の離しはアプリへ配送しない (契約 D1)。
-     * メニューの押下で閉じた直後の離しも捨てる (押していないボタンの
-     * 離しがアプリへ飛ぶのを防ぐ)。 */
-    if startmenu::take_swallow_up() || startmenu::is_open() || taskbar::hit(st, mx, my) {
-        return;
-    }
-    forward_button(st, mx, my, MOUSE_BTN_LEFT, false);
+    /* メニューの押下で閉じた直後の離しを捨てる旗は、ここで必ず消費する。
+     * (その押下はアプリへ配っていないので捕捉も無く、下も何もしない。) */
+    startmenu::take_swallow_up();
+    /* 押下をアプリへ配っていたなら、**どこで離しても**同じ相手へ返す。
+     * タスクバーの上で離しても取りこぼさない (押されたままの表示が残る)。
+     * 捕捉が無い = その押下を配っていない = 離しも配らない (契約 D1 の
+     * 「押していないボタンの離しを作らない」はこちらで担保される)。 */
+    release_capture(st, mx, my, MOUSE_BTN_LEFT);
 }
 
 /* ---- 右ボタン (契約 D4 / W3 §4.2) ---- */
@@ -649,18 +752,20 @@ fn wm_right_down(st: &mut GuiState, mx: i32, my: i32) {
         emit_focus_change(st, old_front, new_front);
         return;
     }
+    /* 契約 D4: 配るのは**前面窓のクライアント上**だけ。hit_window は外形
+     * (タイトルバー・枠を含む) なので、ここで client 矩形を見ないと
+     * 負のクライアント座標がアプリへ届く。タイトルバー / 枠の右クリックは
+     * WM が握り潰す (対になる離しも捕捉が無いので配らない)。 */
+    if !st.windows[idx].client_rect_screen().contains(mx, my) {
+        return;
+    }
     forward_button(st, mx, my, MOUSE_BTN_RIGHT, true);
 }
 
 fn wm_right_up(st: &mut GuiState, mx: i32, my: i32) {
-    if startmenu::take_swallow_up()
-        || startmenu::is_open()
-        || st.drag_index >= 0
-        || taskbar::hit(st, mx, my)
-    {
-        return;
-    }
-    forward_button(st, mx, my, MOUSE_BTN_RIGHT, false);
+    /* 左と同じ (`wm_button_up` の注記)。 */
+    startmenu::take_swallow_up();
+    release_capture(st, mx, my, MOUSE_BTN_RIGHT);
 }
 
 fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
@@ -688,6 +793,7 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
         new_frame.h,
         crate::lease::mono(st),
     );
+    wm::recompose_panel(st);
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
@@ -702,6 +808,10 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
 /* ---- アプリへの配送 ---- */
 
 fn forward_pointer(st: &mut GuiState, mx: i32, my: i32, btn: u8) {
+    // Even a WM-owned drag must not send hover events through the fixed panel.
+    if crate::terminal::rect(st).contains(mx, my) {
+        return;
+    }
     /* WM の領分 (メニュー / タスクバー) の上ではアプリへ動きも配らない
      * (契約 D1「taskbar 領域の入力をアプリへ配送しない」)。 */
     if startmenu::is_open() || taskbar::hit(st, mx, my) {
@@ -725,6 +835,16 @@ fn forward_button(st: &mut GuiState, mx: i32, my: i32, button: u8, down: bool) {
         Some(t) => t,
         None => return,
     };
+    if down {
+        /* 対になる離しは、どこで離してもこの相手へ返す。 */
+        *cap(button) = Capture {
+            active: true,
+            slot: t.slot,
+            win_id: t.win_id,
+            cox: t.cox,
+            coy: t.coy,
+        };
+    }
     let cx = (mx - t.cox) as i16;
     let cy = (my - t.coy) as i16;
     let serial = next_serial(st, t.slot);
@@ -766,7 +886,12 @@ pub fn emit_configure(st: &mut GuiState, index: usize) {
     let id = w.id(index);
     let (cw, ch) = w.client_size();
     let (cox, coy) = w.client_origin();
-    let rect = GuiRect16 { x: cox as i16, y: coy as i16, w: cw as i16, h: ch as i16 };
+    let rect = GuiRect16 {
+        x: cox as i16,
+        y: coy as i16,
+        w: cw as i16,
+        h: ch as i16,
+    };
     if let Some(slot) = st.slot_of_owner(owner) {
         let ev = ring::ev_rect(GUI_EV_CONFIGURE, id, rect);
         if ring::append(st, slot, &ev) {

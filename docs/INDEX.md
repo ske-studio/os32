@@ -12,14 +12,15 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 情報単位 | 正典 (ここだけ更新) | 参照側 (要約 + リンクのみ) |
 |---|---|---|
 | 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md / SOUL.md (ID 参照、`make check` が照合) |
+| エージェント運用体制 (役割・起動・規約) | [tasks/agents/ROLES.md](tasks/agents/ROLES.md) (現行のみ) | CLAUDE.md (4 行 + リンク)。過去の経緯は [tasks/agents/RETROSPECTIVE_2026-09-09.md](tasks/agents/RETROSPECTIVE_2026-09-09.md) 側に置き、入口からは辿らせない |
 | 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) (説明) | CLAUDE.md「Memory Layout」(要約図) |
-| KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README / CLAUDE.md の版番号 (`make check` が照合) |
-| KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | CLAUDE.md (AI 入口の写し。両方直す) |
+| KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README.md / このファイル / KAPI_SPEC.md の版番号 (`tools/check_kapi_version.py` が照合。CLAUDE.md は版数を持たない) |
+| KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | スキル `.claude/skills/os32-kapi-add` と CLAUDE.md (どちらもポインタのみ) |
 | KAPI 版番号・エラー番号の予約 (未実装の先取り調停) | [KAPI_SPEC.md §3-2](KAPI_SPEC.md) | 各計画 (GUI TASK_K1、network LINK_PLAN) は参照 |
 | エラーコード | `os32_kapi_shared.h` の `OS32_ERR_*` | 各 FS は境界で翻訳 |
 | GUI 共有プロトコル (op / イベント / 構造体 / SHM 配置) | `sdk/include/os32/os32_gui_shared.h` (C が正典) → [tasks/gui/API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) (契約) | `sdk/rust/os32api/src/gui/proto.rs` は写し (`tools/check_gui_proto.py` = `make check-gui-proto` が照合)、[tasks/gui/PROTO_LAYOUT.md](tasks/gui/PROTO_LAYOUT.md) |
-| ビルドターゲット・ツール | [08_build.md](08_build.md) | CLAUDE.md「Build Commands」(日常分のみ) |
-| 配備 3 経路の使い分け | CLAUDE.md「Deploy Workflow」 | [POLICY_DEV.md §4](POLICY_DEV.md) (表のみ)、[08 §8-4](08_build.md) (ツール) |
+| ビルドターゲット・ツール・コンパイラフラグ | [08_build.md](08_build.md) (フラグの実体は `build/config.mk`) | CLAUDE.md「Build Commands」(日常分のみ) |
+| 配備 3 経路の使い分け | [08_build.md §8-4](08_build.md#配備3経路) | [POLICY_DEV.md §4](POLICY_DEV.md) (表のみ)、CLAUDE.md (1 行)、スキル `os32-build-verify` |
 | ディレクトリ木 | [08_build.md §8-3](08_build.md) | CLAUDE.md / INDEX は参照のみ |
 | ファイル → 役割 → 仕様の対応 | [DEVELOPMENT.md §2](DEVELOPMENT.md) | — |
 | 作業別の参照先 | [DEVELOPMENT.md §1](DEVELOPMENT.md) | — |
@@ -31,6 +32,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | プログラムの一覧 | 各層の `deploy.yaml` (機械可読の正典)、コマンドは [07_shell.md §7-1](07_shell.md) | 09_exec / INDEX に表を持たない |
 | LAN の設計・進捗 | ドライバ = [tasks/network/PLAN.md](tasks/network/PLAN.md)、リンク層と Host Services = [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | 05_drivers / DEVELOPMENT は要約 + リンク |
 | 設定の置き場 (system.cfg の残すキー、settings.db のスキーマ / API / リカバリ) | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) (計画、v1.3) | ROADMAP は 1 行 |
+| アプリ帯の広さ (1 アプリに渡せる量) | [tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md) (実装票。実装済み・ゲスト検証は未) | 02_memory.md は方針と帯の表 |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
 ## カーネル技術仕様書 (§1-§10)

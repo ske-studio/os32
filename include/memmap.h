@@ -249,15 +249,39 @@ extern u32 __sqlite_end;
 #define MEM_SHELL_BAND_END    0x3FFFFFUL  /* シェル帯域終端 */
 
 /* ====================================================================== */
-/*  アプリ帯域 (APP_BAND_PDE = PDE 1, 0x400000-0x7FFFFF)                    */
+/*  アプリ帯域 (先頭は APP_BAND_PDE = PDE 1, 0x400000-)                     */
 /*                                                                          */
-/*  この 4MB だけが「PD ごと」の帯域 (kernel/paging.h の CONTRACTS C2)。     */
-/*  先頭 1MB を共有ライブラリに、残りを外部プログラム本体とユーザスタックに   */
-/*  割り当てる。PDE 単位で切り替わるので、境界を PDE をまたぐ位置へ動かして   */
-/*  はならない (paging.c の STATIC_ASSERT が検査する)。                      */
+/*  ここだけが「PD ごと」の帯域 (kernel/paging.h の CONTRACTS C2)。          */
+/*  先頭 1MB を共有ライブラリに、残りを外部プログラム本体・ヒープ・          */
+/*  ユーザスタックに割り当てる。PDE 単位で切り替わるので、境界を PDE を      */
+/*  またぐ位置へ動かしてはならない (paging.c の STATIC_ASSERT が検査する)。  */
+/*                                                                          */
+/*  2026-09-10 (票 docs/tasks/memory/APP_BAND_PDE.md): 1 枚 (4MB) 固定を     */
+/*  やめ、**要求量に応じて 4MB 単位で増やせる**ようにした。                  */
+/*                                                                          */
+/*    MEM_APP_BAND_TOP      既定 (1 枚) の上端。ここまでは従来と同一で、     */
+/*                          heap_size を明示しないプログラムは必ずこの形。   */
+/*    MEM_APP_BAND_MAX_TOP  最大枚数まで伸ばしたときの上端 (exclusive)。     */
+/*                                                                          */
+/*  最大枚数の根拠 (票 §4-1): デバイス窓とぶつからない範囲。PEGC のリニア窓  */
+/*  が MEM_APP_BAND_DEVICE_FLOOR (= include/pegc.h の PEGC_LINEAR_BASE) に   */
+/*  あり、そこは PDE 3 (0xC00000-0xFFFFFF) の中なので、アプリ帯を伸ばせる    */
+/*  のは PDE 1〜2 (0x400000-0xBFFFFF) まで。                                 */
 /* ====================================================================== */
 #define MEM_APP_BAND_BASE     0x400000UL  /* PDE 1 の先頭 */
-#define MEM_APP_BAND_TOP      0x800000UL  /* PDE 1 の上端 (exclusive) */
+#define MEM_APP_BAND_PDE_SIZE 0x400000UL  /* PDE 1 枚 = 4MB */
+#define MEM_APP_BAND_MAX_PDES 2UL         /* 最大枚数 (PDE 1〜2) */
+#define MEM_APP_BAND_TOP      (MEM_APP_BAND_BASE + MEM_APP_BAND_PDE_SIZE)
+                                          /* 0x800000: 既定 (1 枚) の上端 */
+#define MEM_APP_BAND_MAX_TOP  (MEM_APP_BAND_BASE + \
+                               MEM_APP_BAND_MAX_PDES * MEM_APP_BAND_PDE_SIZE)
+                                          /* 0xC00000: 最大まで伸ばした上端 */
+
+/* アプリ帯を伸ばしてよい絶対の天井。9821 の PEGC リニア窓 (16MB システム
+ * 空間の先頭) がここに出るので、帯がこれ以上へ伸びると窓を USER で踏む。
+ * 値の正典は include/pegc.h の PEGC_LINEAR_BASE で、一致は
+ * gfx/backend_pegc.c の STATIC_ASSERT が検査する ([C4] 三層定数)。 */
+#define MEM_APP_BAND_DEVICE_FLOOR 0x00F00000UL
 
 /* ====================================================================== */
 /*  共有ライブラリ帯域 (0x400000-0x4FFFFF, 1MB)  — GUI v1.1 K3              */
@@ -306,20 +330,16 @@ extern u32 __sqlite_end;
 #define MEM_EXEC_STACK_SIZE   0x40000UL          /* スタックサイズ 256KB (-O0 SQLite対応) */
 
 /* ====================================================================== */
-/*  ホットデプロイ用ステージング領域 (物理末尾から予約)                      */
-/*                                                                          */
-/*  ホストが NP21/W 内蔵 aidebug の /api/deploy で直接書き込む窓。          */
-/*  カーネル帯域にもシェル帯域にも入れず、物理メモリの末尾を削って確保する。 */
-/*  子プロセスのスタックは mem_end から下へ伸びるので、exec と pgalloc は   */
-/*  sys_usable_mem_end() を使ってこの分を避けること。                       */
-/*  設計: docs/tasks/hotdeploy/DESIGN.md                                    */
+/*  ホットデプロイ窓は撤去 (2026-09-09)                                    */
+/*                                                                        */
+/*  物理末尾の 256KB を予約してホストから 1 バイナリを流し込む仕組みは     */
+/*  廃止した。窓 [末尾-256KB, 末尾) は CPL=3 スタック帯と同じ範囲で、      */
+/*  8MB 構成ではアプリ帯と必ず衝突していた                                 */
+/*  (docs/tasks/gui/DESIGN.md §9.3 の「9.6MB 構成以上が実質の下限」)。      */
+/*  ユーザーランドの配送は HostDrv (Windows の C:\os32 → ゲストの /host)   */
+/*  に一本化し、ゲスト側で /usr/bin へ写す。カーネルは NHD 配備のまま。    */
+/*  経緯: docs/tasks/hotdeploy/DESIGN.md                                   */
 /* ====================================================================== */
-#define MEM_HOTDEPLOY_SIZE    0x040000UL  /* 256KB (最大バイナリ game.bin 118KB) */
-
-/* 制御ブロック: GFXバックバッファ末尾より後、自動プレイ用メールボックス
- * (0x90000) より前の空き。カーネルがブート時に magic と番地を書く。 */
-#define MEM_HOTDEPLOY_DESC    0x8C000UL
-#define MEM_HOTDEPLOY_DESC_SZ 0x001000UL  /* 4KB */
 
 /* ====================================================================== */
 /*  タイマー設定                                                            */

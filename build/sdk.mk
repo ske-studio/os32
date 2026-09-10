@@ -105,9 +105,62 @@ check-privileged:
 check-gui-proto:
 	@python3 tools/check_gui_proto.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto
+# 独立端末モデルのホスト試験。guest用Cargo設定を避けるためrootから実行。
+# ゲストクロスリンク・描画・CUI統合の検証ではない。
+check-term-model:
+	cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+	cargo check --manifest-path userland/libos32term/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
+
+# 純粋描画アダプタ。人工glyphによるホスト試験であり実ROM描画の検証ではない。
+check-term-render:
+	cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+	cargo check --manifest-path userland/libos32term_render/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
+
+# T5aの純粋状態・座標・所有権試験。guest.rsの実行は含まない。
+check-t5a-host:
+	cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+
+check-memory-host:
+	python3 -B tools/tests/test_physmem.py
+	python3 -B tools/tests/test_paging_bounds.py
+	python3 -B tools/tests/test_app_band_pde.py
+	python3 -B tools/tests/test_pgalloc_model.py
+	python3 -B tools/tests/test_pgalloc_range.py
+	python3 -B tools/tests/test_highram_stage.py
+	python3 -B tools/tests/test_memory_boot.py
+	python3 -B tools/tests/test_device_reservation.py
+
+check-boot-splash-host:
+	python3 -B tools/tests/test_boot_splash_native.py
+
+check-tools-host:
+	python3 -B -m unittest discover -s tools/tests -p 'test_np21w_*.py'
+	python3 -B tools/tests/test_nhd_deploy_failure.py
+	python3 -B tools/tests/test_filer_normalize.py
+	python3 -B tools/tests/test_filer_copy_abort.py
+	python3 -B tools/tests/test_gui_button_dispatch.py
+	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
+
+check-t5b-host:
+	python3 userland/gshell/host/integration.py
+
+check-db-owned-host:
+	python3 -B -m unittest discover -s tools/tests -p 'test_kapi_db_owned.py'
+
+check-vfs-fd-sqlite-host:
+	python3 tools/tests/test_vfs_fd_sqlite.py
+
+# fs/vfs.c + fs/ext2_vfs.c の mount 経路。fd0 が hd0 に化けて同じ
+# パーティションを二重マウントする回帰 (2026-09-10) を止める。
+check-vfs-mount-dev-host:
+	python3 -B tools/tests/test_vfs_mount_dev.py
+
+check-sqlite-groups-host:
+	python3 tools/tests/test_sqlite_groups.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-t5b-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check

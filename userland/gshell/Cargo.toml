@@ -6,8 +6,8 @@
 # 登録する (0x300000 リンク = app_sys.ld、crt0 + libos32gfx とリンク)。
 #
 # 依存の鉄則 (TASKS §6 / v2 C8):
-#   - 外部クレート (crates.io) は一切追加しない。in-repo の os32api のみ。
-#   - no_std / panic=abort。状態は固定長配列 (alloc 不使用)。
+#   - 外部クレート (crates.io) は一切追加しない。in-repo の os32api / T4 / T5R のみ。
+#   - no_std / panic=abort。固定容量。T5b Cell は親 mem_alloc の scoped 領域 (alloc 不使用)。
 #   - 描画は libos32gfx を FFI (os32api::gfx) で呼ぶ。Rust で再実装しない。
 [package]
 name = "gshell"
@@ -24,10 +24,15 @@ crate-type = ["staticlib"]
 # (os32api::gui::proto) / libos32gfx の extern "C" 宣言 / panic_handler /
 # global_allocator を単一実体で供給する。
 os32api = { path = "../../sdk/rust/os32api" }
+libos32term = { path = "../libos32term" }
+libos32term_render = { path = "../libos32term_render" }
 
 # gshell 自身を独立ワークスペースにして userland/rust の workspace に
 # 吸われないようにする (userland/rust は別ディレクトリツリー)。
 [workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(t5b_core_test)"] }
 
 [profile.release]
 opt-level = 2

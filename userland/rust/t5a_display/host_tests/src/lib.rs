@@ -1,0 +1,16 @@
+#[path = "../../src/boundary.rs"]
+pub mod boundary;
+#[path = "../../src/input.rs"]
+pub mod input;
+#[path = "../../src/paint.rs"]
+pub mod paint;
+#[path = "../../src/session.rs"]
+pub mod session;
+#[path = "../../src/state.rs"]
+pub mod state;
+#[path = "../../src/status.rs"]
+pub mod status;
+#[path = "../../src/storage.rs"]
+pub mod storage;
+#[path = "../../src/view.rs"]
+pub mod view;

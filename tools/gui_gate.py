@@ -135,21 +135,42 @@ class Shots:
 # ---------------------------------------------------------------------------
 #  v1.2 の座標 (W3 が報告した値。ax/ay 換算は Mouse が行う)
 #  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
-#  Start menu 行 r: (82, H-107+18r) = Programs / File Manager / Run... / CUI mode / Shut Down
+#  Start menu 行 r: start_row(H, r) — 項目数から導く (下の注記)。v1.3 の順は
+#    Programs / File Manager / Run... / CUI mode / Shut Down / Display fixture
 #  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
 # ---------------------------------------------------------------------------
 def tb(h):
     return h - 12
 
 
+# Start メニューはタスクバーから**上へ**伸びるので、項目数が増えると全行が上へ
+# ずれる。v1.3 (T5a) で "Display fixture" が足されて 5 → 6 行になり、5 行前提の
+# 固定値 (H-107+18r) は行 r が r+1 に当たっていた (2026-09-10: 「CUI mode」の
+# クリックが Shut Down に当たりゲストが halt)。項目数は
+# userland/gshell/src/startmenu.rs の ROOT_ITEMS、行高 ITEM_H=18、枠 BORDER=2、
+# taskbar.rs の TASKBAR_H=24 と一致させること。
+START_MENU_ITEMS = 6
+START_MENU_ITEM_H = 18
+START_MENU_BORDER = 2
+TASKBAR_H = 24
+
+
 def start_row(h, r):
-    return (82, h - 107 + 18 * r)
+    top = h - TASKBAR_H - (START_MENU_ITEMS * START_MENU_ITEM_H + START_MENU_BORDER * 2)
+    return (82, top + START_MENU_BORDER + START_MENU_ITEM_H * r + START_MENU_ITEM_H // 2)
 
 
 def enter_gshell():
+    """CUI (rshell を抜けた状態) から `os32gui` で GUI へ入る。
+
+    **rshell が有効なまま呼ばない。** rshell は `kbd_trygetchar` の生読みで、入力が
+    途切れるたびに 1 コマンドとして実行するので、4 文字ずつの text が
+    `os32` / `gui` という別々のコマンドになる (memory os32-fep-testing)。先に
+    `key(seq="ESC")` で抜けること。text と RETURN の間は少し待つ (打鍵の取りこぼし避け)。"""
     key(text="os32gui")
+    time.sleep(1.0)
     key(seq="RETURN")
-    time.sleep(6)
+    time.sleep(7)
 
 
 def run_dialog(mouse, path):

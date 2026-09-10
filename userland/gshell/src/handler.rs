@@ -289,7 +289,7 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
     /* (a) 配送候補 = dirty ∩ 可視領域。**起床判定と同じ関数**を使う
      * (`damage::has_deliverable_paint` もこれを通る。両者が食い違うと
      * 「起こされないと配れない / 配れないと起きられない」で止まる)。 */
-    let (cand, ncand) = damage::deliverable_cand(&st.windows[idx]);
+    let (cand, ncand, cand_capped) = damage::deliverable_cand(&st.windows[idx]);
 
     /* (b) リングへ流す。空きが尽きたらそこで止める (残りは dirty のまま)。 */
     let mut delivered = [false; MAX_VIS];
@@ -315,7 +315,13 @@ fn emit_paints_win(st: &mut GuiState, idx: usize, slot_no: usize) {
      * 空にならない原因になる (実測: dirty が空になる周が 1 度も無かった)。
      * 隠れていた場所が後で出てきたときは `recompute_and_expose` が露出分を
      * dirty に足し直すので、描き落としにはならない (契約 G4)。 */
-    let authoritative = !st.windows[idx].vis_capped && !st.windows[idx].vis.is_empty();
+    /* `cand_capped` のときは「候補に無い = 不可視」と言えない。候補配列が
+     * 16 で埋まって**まだ見ていない dirty** が残っているだけかもしれず、
+     * そこを捨てると可視なのに描かれない (レビュー指摘 P2、2026-09-10)。
+     * 打ち切られた周は 1 つも捨てず、次の周に回す。 */
+    let authoritative = !st.windows[idx].vis_capped
+        && !st.windows[idx].vis.is_empty()
+        && !cand_capped;
     let mut new_dirty = RectSet::EMPTY;
     let mut d = 0;
     while d < dirty.len {

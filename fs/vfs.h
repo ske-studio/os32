@@ -26,6 +26,21 @@
 #define VFS_MAX_OPEN_FILES 16
 #define VFS_MNTPATH_MAX    16
 
+/* デバイス種別と、ops->mount() へ渡すデバイス指定のエンコード。
+ * FS ドライバは必ず VFS_MOUNT_DEV_TYPE() で種別を確かめてから
+ * VFS_MOUNT_DEV_ID() を使うこと。下位バイトだけを見ると、別種別の
+ * 同一 unit 番号 (fd0 と hd0 等) を取り違えて同じ実デバイスを
+ * 二重マウントする (2026-09-10 の ext2 スーパーブロック巻き戻し)。 */
+#define VFS_DEV_HD      0
+#define VFS_DEV_FD      1
+#define VFS_DEV_SERIAL  2
+#define VFS_DEV_CD      3
+#define VFS_DEV_HOSTDRV 4
+
+#define VFS_MOUNT_DEV_ENCODE(t, i) ((((t) & 0xFF) << 8) | ((i) & 0xFF))
+#define VFS_MOUNT_DEV_TYPE(x)      (((x) >> 8) & 0xFF)
+#define VFS_MOUNT_DEV_ID(x)        ((x) & 0xFF)
+
 /* エラーコード */
 /* 値の定義元は sdk/include/os32/os32_kapi_shared.h の OS32_ERR_* (SSoT)。
  * 外部プログラムも同じ値を見るので、ここで独自の番号を振らないこと */
@@ -133,6 +148,39 @@ u32  vfs_get_size(int fd);
 int  vfs_isatty(int fd);
 int  vfs_fd_set_protect(int fd, int on);
 int  vfs_fd_is_protected(int fd);
+
+/* Kernel-internal FD leases; not a KAPI/SDK interface. */
+#define VFS_FD_GENERATION_MAX 0xffffffffUL
+#define VFS_FD_GENERIC 0
+#define VFS_FD_SQLITE  1
+typedef struct {
+    int group_index;
+    u32 generation;
+} VfsSqliteCookie;
+typedef struct {
+    int fd;
+    u32 generation;
+    VfsSqliteCookie cookie;
+} VfsSqliteLease;
+int vfs_open_sqlite(const char *path, int mode, int owner,
+                    const VfsSqliteCookie *cookie, int sqlite_flags,
+                    VfsSqliteLease *out);
+/* open returns VFS_OK and fills out only on success; owner >= 0,
+ * cookie index >= 0 and generation != 0. The caller must validate group
+ * state/identity (including rejecting future opens after quarantine).
+ * FD generations never wrap, even across GENERIC reuse. No owner mutation.
+ * All functions require the existing non-reentrant VFS calling discipline. */
+
+/* Validation is read-only and performs no I/O. Close verifies the lease,
+ * rejects quarantine and releases only the table entry (no backend close).
+ * Neither function modifies the caller's lease. Failures return INVAL. */
+int vfs_close_sqlite(const VfsSqliteLease *lease);
+int vfs_validate_sqlite(const VfsSqliteLease *lease);
+/* Count includes quarantined live members. Quarantine marks only matching
+ * live members, is sticky/idempotent, and returns OK; NULL returns INVAL.
+ * No group registry, group generation allocator or quarantine reset here. */
+int vfs_count_sqlite(const VfsSqliteCookie *cookie);
+int vfs_quarantine_sqlite(const VfsSqliteCookie *cookie);
 
 /* ファイル情報 */
 int  vfs_stat(const char *path, OS32_Stat *buf);

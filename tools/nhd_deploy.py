@@ -573,6 +573,22 @@ def resolve_files_from_entry(entry):
     return results
 
 
+def remove_partial(dest_file):
+    """コピーに失敗した宛先を消す。
+
+    `cp` は書き込み前に宛先を切り詰めるので、失敗すると**壊れた中身の
+    ファイルが残る**。残すとゲストは「存在するが壊れた成果物」を掴み、
+    起動しない理由が見えなくなる (2026-09-10 の /boot/vmkernel.lz4 が
+    446,464 B に切り詰められた件、POLICY_DEBUG §4-29)。
+    消しておけば NOT FOUND で失敗が見える。消せなくても報告だけして進む
+    (失敗は呼び出し側が total_failed で拾う)。"""
+    result = subprocess.run(['sudo', 'rm', '-f', dest_file],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print("  Warning: 壊れた {} を消せなかった: {}".format(
+            dest_file, result.stderr.strip()))
+
+
 def do_sync(tag_filter=None):
     """deploy.yaml に基づくフルデプロイ
 
@@ -624,6 +640,7 @@ def do_sync(tag_filter=None):
     files = fs.get('files', [])
     total_copied = 0
     total_size = 0
+    total_failed = 0
 
     for entry in files:
         entry_tags = entry.get('tags', [])
@@ -657,6 +674,8 @@ def do_sync(tag_filter=None):
                 print("  Error: {} -> {}: {}".format(
                     os.path.basename(host_abs), guest_path,
                     result.stderr.strip()))
+                total_failed += 1
+                remove_partial(dest_file)
                 continue
 
             size = os.path.getsize(host_abs)
@@ -668,6 +687,13 @@ def do_sync(tag_filter=None):
     subprocess.run(['sync'], capture_output=True)
 
     print("\n" + "=" * 55)
+    if total_failed:
+        print("  失敗! {} ファイルをコピーできなかった "
+              "({} ファイル {:,} bytes は成功)".format(
+                  total_failed, total_copied, total_size))
+        print("  配備は完了していない。ゲストの成果物は古いままか消えている。")
+        print("=" * 55)
+        return False
     print("  完了! {} ファイル ({:,} bytes)".format(total_copied, total_size))
     print("=" * 55)
     return True
@@ -696,6 +722,7 @@ def do_sync_from_hostdrv():
 
     total_copied = 0
     total_size = 0
+    total_failed = 0
 
     for dirpath, dirnames, filenames in os.walk(hostdrv_dir):
         # HostDrvルートからの相対パス
@@ -724,6 +751,8 @@ def do_sync_from_hostdrv():
             if result.returncode != 0:
                 print("  Error: {} -> {}: {}".format(
                     fname, guest_path, result.stderr.strip()))
+                total_failed += 1
+                remove_partial(dest_path)
                 continue
 
             size = os.path.getsize(src_path)
@@ -734,6 +763,12 @@ def do_sync_from_hostdrv():
     subprocess.run(['sync'], capture_output=True)
 
     print("\n" + "=" * 55)
+    if total_failed:
+        print("  失敗! {} ファイルをコピーできなかった "
+              "({} ファイル {:,} bytes は成功)".format(
+                  total_failed, total_copied, total_size))
+        print("=" * 55)
+        return False
     print("  完了! {} ファイル ({:,} bytes)".format(total_copied, total_size))
     print("=" * 55)
     return True
@@ -796,21 +831,18 @@ def resolve_guest_path(host_file):
 
 
 def do_push(local_path, remote_name=None, resolve=False):
-    """ホットデプロイ (再起動不要) — tools/hotdeploy.py に委譲
+    """廃止 (2026-09-09)。ホットデプロイの窓を撤去した。
 
-    旧実装は名前付きパイプ経由で rshell の `upload` コマンドへ hex を
-    流し込んでいたが、`upload` はゲスト側で削除済みで常に失敗していた。
-    現在は NP21/W 内蔵 aidebug の POST /api/mem でステージングバッファへ
-    直接書き、rshell の `hotdeploy` でファイル化する。
-    設計: docs/tasks/hotdeploy/DESIGN.md
+    物理末尾の 256KB 予約は CPL=3 スタック帯と同じ範囲で、8MB 構成では
+    アプリと必ず衝突していた。配送は HostDrv に一本化:
+      make deploy       (ホスト -> C:/os32)
+      ゲストで hsync    (/host → / 、既定で sys は除く)
+    経緯: docs/tasks/hotdeploy/DESIGN.md
     """
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from hotdeploy import push
-
-    guest = None
-    if not resolve and remote_name:
-        guest = remote_name if remote_name.startswith('/') else '/' + remote_name
-    return push(local_path, guest)
+    del local_path, remote_name, resolve
+    print("push は廃止されました (2026-09-09)。", file=sys.stderr)
+    print("  make deploy → ゲストで hsync を使ってください。", file=sys.stderr)
+    return False
 
 
 
@@ -939,7 +971,8 @@ def main():
             sys.exit(1)
 
     elif cmd == 'sync-from-hostdrv':
-        do_sync_from_hostdrv()
+        if do_sync_from_hostdrv() is False:
+            sys.exit(1)
 
     elif cmd == 'push':
         # --resolve オプションをパース

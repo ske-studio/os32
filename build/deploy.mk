@@ -47,21 +47,19 @@ prune-stale:
 prune-stale-delete:
 	$(PRUNE_STALE) both --delete
 
-# hotdeploy: 個別バイナリのビルド → ホットデプロイ (再起動不要)
-#   例: make hotdeploy FILE=apps/hello32/hello32.bin
-#       make hotdeploy FILE=userland/shell.bin
-#   配備先はマニフェストから解決する。GUEST= で明示指定もできる。
-#
-#   旧 `dp-%` パターンルールは GNU make の仕様上成立していなかった。
-#   ターゲットパターンにスラッシュが無い場合、make はディレクトリ部を
-#   除いたファイル名だけを照合するため `dp-apps/x/x` はどの規則にも当たらない。
+# hotdeploy: 廃止 (2026-09-09)。物理末尾に 256KB の窓を予約する仕組みだったが、
+#   その窓は CPL=3 スタック帯と同じ範囲で、8MB 構成ではアプリと必ず衝突していた。
+#   ユーザーランドの配送は HostDrv に一本化した:
+#       make deploy            (ホスト → C:\os32)
+#       ゲストで hsync         (/host → / 、既定で sys は除く)
+#   カーネルも /host/boot/vmkernel.lz4 として運べる (次回起動から有効)。
+#   IPL/ブートセクタだけは NHD 書き込み (deploy-boot) が要る。
 hotdeploy:
-	@test -n "$(FILE)" || { \
-	  echo "usage: make hotdeploy FILE=<path/to/x.bin> [GUEST=/usr/bin/x.bin]"; \
-	  exit 1; }
-	$(MAKE) $(FILE)
-	@echo "=== Hot Deploy: $(FILE) ==="
-	python3 tools/hotdeploy.py $(FILE) $(GUEST)
+	@echo "make hotdeploy は廃止 (2026-09-09)。"
+	@echo "  1) make deploy      # ホスト → C:\\os32"
+	@echo "  2) ゲストで hsync   # /host -> / (sys は 'hsync sys' で明示)"
+	@echo "経緯: docs/tasks/hotdeploy/DESIGN.md"
+	@exit 1
 
 # nhd-mount: NHDのext2パーティションをマウント
 nhd-mount:

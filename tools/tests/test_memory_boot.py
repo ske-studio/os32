@@ -1,0 +1,70 @@
+"""Boot adapter against real ILP32 sys/pgalloc/paging, no emulator."""
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+class MemoryBoot(unittest.TestCase):
+    def run_case(self, case='legacy', kb=8192):
+        with tempfile.TemporaryDirectory(prefix='os32-memory-boot-') as tmp:
+            d = pathlib.Path(tmp)
+            for unit in ('paging', 'pgalloc', 'sys'):
+                s = (ROOT / f'kernel/{unit}.c').read_text()
+                s = s.replace('irq_save()', 'host_irq_save()').replace('irq_restore(flags)', 'host_irq_restore(flags)')
+                s = s.replace('__asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));', 'cr3_val = host_cr3;')
+                for name in ('cr3_val', 'pd_phys'):
+                    s = s.replace(f'__asm__ volatile("mov %0, %%cr3" : : "r"({name}) : "memory");', f'host_cr3 = {name};')
+                s = s.replace('__asm__ volatile("mov %%cr0, %0" : "=r"(cr0_val));', 'cr0_val = 0;')
+                s = s.replace('__asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");', '(void)cr0_val;')
+                (d / f'{unit}_host_source.c').write_text(s)
+            kernel = (ROOT / 'kernel/kernel.c').read_text()
+            start = kernel.index('    if (!memory_boot_init(mem_kb))')
+            end = kernel.index('    shm_init();', start) + len('    shm_init();')
+            gate = kernel[start:end].replace('for (;;) { __asm__ volatile("cli; hlt"); }', 'host_failstop();')
+            (d / 'kernel_boot_gate.c').write_text(
+                'static void __attribute__((unused)) host_kernel_boot(u32 mem_kb) {\n'
+                '#define kprintf(...) ((void)0)\n#define shm_init() die(7)\n' + gate +
+                '\n#undef kprintf\n#undef shm_init\n}\n')
+            adapter = ROOT / 'kernel/memory_boot.c'
+            (d / 'memory_boot_host_source.c').write_text(adapter.read_text() if adapter.exists() else '')
+            cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', f'-DTEST_{case.upper()}', f'-DTEST_KB={kb}UL']
+            cmd += ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
+            subprocess.run(cmd + [str(ROOT / 'tools/tests/memory_boot_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
+            subprocess.run([str(d / 'test')], check=True, timeout=20)
+
+    def test_huge_hint_no_promotion(self):
+        self.run_case('online', 0xffffffff)
+
+    def test_no_fallback_after_bootstrap_or_stage_failure(self):
+        for case in ('bootstrap_fail', 'stage_fail'):
+            with self.subTest(case=case):
+                self.run_case(case, 16384)
+
+    def test_actual_pte_verification_before_write(self):
+        for case in ('metadata_pte', 'workspace_pte'):
+            with self.subTest(case=case):
+                self.run_case(case, 16384)
+
+    def test_kernel_boot_order_and_failstop(self):
+        s = (ROOT / 'kernel/kernel.c').read_text()
+        gate = 'if (!memory_boot_init(mem_kb))'
+        self.assertIn(gate, s)
+        start = s.index(gate)
+        downstream = min(s.index(f'{name}();') for name in
+                         ('shm_init', 'kselftest_run', 'shlib_init'))
+        self.assertLess(s.index('paging_init(mem_kb);'), start)
+        self.assertLess(start, downstream)
+        self.assertNotIn('pgalloc_init(mem_kb)', s)
+        self.assertIn('for (;;) { __asm__ volatile("cli; hlt"); }', s[start:downstream])
+        self.assertIn('kernel/memory_boot.c', (ROOT / 'build/kernel.mk').read_text())
+
+    def test_16m_safe_tail_online(self):
+        self.run_case('online', 16384)
+
+    def test_8m_legacy_preinit(self):
+        self.run_case()
+
+if __name__ == '__main__':
+    unittest.main()

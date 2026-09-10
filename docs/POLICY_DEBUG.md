@@ -49,6 +49,16 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 > ⚠️ **教訓**: デバッグ出力が反映されない = 「コードのバグ」ではなく「バイナリが古い」可能性を**最初に**排除すること。これはプロジェクト開始以来、何度も繰り返された最も時間を浪費する問題である。
 
+### カーネルの到達確認は kselftest で行う
+
+`kernel/kselftest.c` のブート時セルフテストは毎回走り、失敗項目を赤で表示する。
+画面を見ない場合は `kselftest_pass` / `kselftest_fail` を `emu_read_mem` (または
+`/api/mem`) で読む。**番地は新しい `build/out/kernel.map` から引くこと** —
+古い map の番地で読んだ値や、初期化前のゼロ値を合格と判定しない。
+
+- `kstring` / `kmalloc` / `kprintf` のプリミティブを触ったら、kselftest に項目を足す。
+- `userland/tests/klibc_test` は newlib をリンクするので、カーネル側の検証にはならない。
+
 ---
 
 ## §3. 仮説の提示と検証プロセス
@@ -264,7 +274,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - `hotdeploy` は CUI で rshell が生きているときだけ効く (`hotdeploy_poll` は `kbd_trygetchar` から)。gshell 中や
   `ime on` 中 (`/api/key` の文字が FEP に吸われる) は先に CUI へ戻す。**GUI から CUI へ戻る経路は
   Start → "CUI mode" → 確認ダイアログ Yes だけ** (G5 で ESC の即時切替は撤去。契約 S6 / 票 W3 §4.1) —
-  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82,H-107+54) →
+  `tools/gui_gate.py` の `leave_gshell()` がその手順 (Start (30,H-12) → 行 3 (82, `start_row(H,3)` — 項目数から導く。§4-31) →
   Yes (410,H/2+11) → 約 6 秒待ち → `abs=off` → `rshell`)。その後 SHIFT+SPACE → `ime off` → `rshell`。
   この経路は `/etc/system.cfg` に `GUI=0` を永続化するので、GUI 自動起動へ戻すときは `os32gui`
   (その場で GUI へ入る) か cfg の `GUI=1` 書き戻しを使う。
@@ -294,7 +304,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   12KB (直接ブロック 12 本) を超えるファイルの上書き / 削除のたびに起きていた。
 - **対策**: 表を `ext2_g_blk` (単一間接) と `ext2_g_dat` (二重間接の内側) に置く (`fs/ext2_inode.c`)。
   **規則**: `ext2_g_aux` はビットマップ用。解放・割り当てを呼ぶ経路で表やデータを `g_aux` に置かない
-  (§4 の `sys_ls` コールバックの注意と同じ根)。
+  (§4-26 の `sys_ls` コールバックの注意と同じ根)。
 - **診断の手順**: ゲストの `hexdump` でファイル先頭をホストのビルドと比べる → 差分の位置がヘッダなら
   ローダの `entry` を疑う → `/api/regs` / breakpoint で `_start` に届かないことを確認。NHD の健全性は
   `dd skip=1633` で ext2 部分を切り出して `e2fsck -fn` (読み取り専用)。**ゲストが壊した内容は Windows 側の
@@ -328,6 +338,140 @@ NP21/W 上でコード変更が反映されていないように見える場合�
   0x4xxxxx (shlib) / 0x3xxxxx (gshell) / 0x1xxxxx (カーネル idle) のどこに居るかを数える。
   ③ shlib / アプリなら `i386-elf-nm -n` でシンボルに落とす。起床経路のカウンタはそのあと。
 
+### 4-26. `sys_ls` のコールバックから FS を触ると一覧が崩れる
+
+- **原因**: `ext2_list_dir` のコールバックの中で書き込み系の FS 操作をすると、
+  共有スクラッチ `ext2_g_aux` が上書きされ、一覧の途中から別の内容を読む (§4-24 と同じ根)。
+- **対策**: `ext2_list_dir` は各ブロックを先に私有バッファへコピーしてからコールバックを呼ぶ。
+  呼ぶ側も、コールバック内では名前を自分のバッファに集めるだけにし、FS は戻ってから触る。
+- **未監査**: FatFs / HostDrv の `list_dir` は同型の問題を抱えていないか確かめていない。
+
+---
+
+### 4-27. 日本語テキストの幅と切り詰め
+
+- **現象**: `char buf[64]` のつもりで組んだ行が溢れる、切った末尾が □ になる。
+- **原因**: UTF-8 の漢字・仮名は **1 文字 3 バイト**、画面では **2 桁 (16px)**。
+  バイト数と桁数と文字数が全部違うので、どれを数えているのかを変数名で区別する。
+- **対策**: バッファは桁数 × 3 + 1 で取る。切り詰めるときは **UTF-8 の先頭バイト境界でだけ**切る
+  (続きバイト `0x80〜0xBF` の途中で切らない)。
+
+---
+
+### 4-28. 9MB 構成で `v86 -t` が落ちる (未解決、2026-09-10)
+
+- **現象**: 物理 9MB (`ExMemory=8`) で `v86 -t` が
+  `[ring3] #PF (CPL=3 / syscall) addr=0x00000000 EIP=0x00000000 -> kill app` で死ぬ。
+  **8MB と 15MB では通る**。バックエンド (pc98 / pegc) には依存しない。
+- **観測**: 落ちた後に `backing_phys` を読むと **0**。`v86_mem_setup()` は
+  `pgalloc_alloc_n(V86_BACKING_PAGES)` = 159 ページの連続確保に失敗すると `-2` を返すが、
+  0 番地へ飛んでいるので**呼び出し側が戻り値を見ていない疑いがある**。
+  ただし `backing_phys` は起動時も 0 なので、setup に到達する前に落ちた可能性も残る
+  (どちらかは切り分けていない)。
+- **アイドル時の pgalloc (9MB)**: `limit_pfn=generic_end=2304`、`total_pages=1278`、
+  `used_pages=256` (shlib 帯)。空きは 1022 ページあり、159 は十分に見える。
+  アプリ実行中は `exec_child_claim` が a=[0x500000,0x7BD000) と b=[0x8BD000,0x8FE000) を
+  取り、残る A/B 穴は [0x7BD000, 0x8BD000) の 256 ページ。**なぜここから 159 が
+  取れないのかは未解明**。
+- **撤回した推測**: 「A/B 穴が 0x800000 (アプリ固有 PDE の境界) をまたぐのが原因」と
+  一度書いたが筋が悪い。V86 のバッキングは**物理**ページで、写像先はゲスト線形
+  0x1000-0x9FFFF = PDE 0 (`kernel/v86_mem.c` の `paging_map_range`)。バッキングの
+  物理位置が PDE 1 の境界をまたぐかどうかはこの写像に影響しない。
+- **窓の撤去とは無関係と考えている**が、旧カーネルでの再現はしていない。
+- **次に見るべき所**: 失敗時の `pgalloc_free_pages()` / `used_pages` と、
+  `alloc_n_pfn` が実際に走査した範囲。`v86` コマンドが CPL=0 か CPL=3 かで
+  `exec` のレイアウトが変わるので、そこも確認する。
+- **影響**: PEGC GUI の下限として 9MB を採る場合にぶつかる。CUI 8MB と 15MB は無事。
+
+---
+
+### 4-29. NHD 満杯を `make deploy-nhd` が黙って通していた (2026-09-10、修正済み)
+
+- **現象**: 配備は「完了! 183 ファイル」「Done! (199.9 MB copied)」と出て **exit 0**。
+  だが NHD の `/boot/vmkernel.lz4` が **446,464 B に切り詰められて**いて、
+  手元の成果物 (448,812 B) と一致しない。ゲストは古いカーネルで動き続ける。
+- **本当のエラー**: 出力の途中に 1 行だけ出ている。grep しないと流れる。
+  `Error: vmkernel.lz4 -> /boot/vmkernel.lz4: cp: error writing ...: No space left on device`
+- **`df` が嘘をつく**: 「69M 空き / 63% 使用」と出るのに ENOSPC。
+  `e2fsck -fn` で `Free blocks count wrong (80315, counted=2)` — スーパーブロックの
+  空きブロック数が壊れていた。修復後の実数は **203,931 / 203,932 ブロック使用**。
+- **満杯の原因**: NHD ルート直下にホスト側のディスクイメージが入っていた
+  (`dos5hd.nhd` / `dos5hdmaster.nhd` で 82MB、`Ys*.D88/NFD`・`dos5*.fdi`・
+  `fd98_2hd.img`・`os32_serial_log.txt` で約 10MB)。原本は `C:\os32` にあり
+  ゲストからは `/host` で見えるので、NHD 側は重複。削除して 92MB 空けた。
+- **対処**: `sudo losetup -f --show --offset 836096 build/nhd/os32.nhd` で
+  ループを張り `sudo e2fsck -fy <loop>` で修復 → 不要ファイルを削除 → 再配備。
+- **教訓**: 配備の成否を「完了/Done の文言」で判断しない ([V4])。
+  **必ずゲストの `ls -l /boot/vmkernel.lz4` と手元の `stat -c%s` を突き合わせる**。
+  `os32-cycle deploy` はこの照合を持つが、`make deploy-nhd` を直接叩くと素通りする。
+- **修正済み (2026-09-10)**: `nhd_deploy.py` の `do_sync` / `do_sync_from_hostdrv` が
+  失敗を数えるようにし、1 件でも失敗したら `False` を返す (末尾は「完了!」ではなく
+  「失敗! N ファイルをコピーできなかった」)。`sync-from-hostdrv` は戻り値すら
+  見ていなかったので `sys.exit(1)` を足した。あわせて**失敗した宛先を消す**
+  (`remove_partial`) — `cp` は書き込み前に宛先を切り詰めるので、残すとゲストが
+  「存在するが壊れた成果物」を掴む。消えていれば NOT FOUND で失敗が見える。
+  回帰は `tools/tests/test_nhd_deploy_failure.py` (`make check-tools-host` に登録)。
+  **それでもサイズ照合はやめない** — 失敗の形は ENOSPC だけではない。
+
+### 4-30. `/fd0` が hd0 に化けて ext2 を二重マウントし、スーパーブロックを巻き戻していた (2026-09-10、修正済み)
+
+- **現象**: きれいな ext2 に 106KB のファイルを 1 個 `cp` して `sync` するだけで、
+  ホスト側 `e2fsck -fn` が必ず `Free blocks count wrong for group #0 (4097, counted=3991)` /
+  `Free inodes count wrong for group #0 (1761, counted=1760)`。ずれはちょうど
+  ファイル 1 個分。**強制終了とは無関係** (`CloseMainWindow` の通常終了でも同じ)。
+  ビットマップ側は常に正しい。
+- **切り分け**: `mounts[0].fs_ctx` の `free_blocks_count` (ctx+52) は
+  cp 前 91386 → cp 後 91280 (−106) と**メモリ上は正しい**。一方 `sync` 後の
+  イメージ `836096+1024+12` は 91386 のまま。**ディスク上だけが巻き戻る**。
+- **踏んだ落とし穴**: `ext2_write_super_raw` にブレークを置いたら 0 ヒットだったので
+  「sync がスーパーブロックを書いていない」と判断した。**誤り** —
+  `ext2_write_super_raw` は `ext2_sync` に**インライン展開**されていた
+  (`i386-elf-objdump -d` で確認)。書き込み自体は走っていた。
+  **static でない関数でもインライン化される。ブレーク 0 ヒットを未実行の証拠にしない。**
+- **真因**: `vfs_sync()` から `ext2_vfs_sync` が **2 回**呼ばれていた。マウント表を実機
+  メモリから読むと `mounts[1] prefix=/fd0 dev=fd0` の `Ext2Ctx` が `base_lba=1632`、
+  `dev` ポインタまで `/` と同一。`vfs_mount()` は
+  `ops->mount((dev_type << 8) | dev_id)` と種別を上位バイトに載せて渡すが、
+  ext2 は下位バイトしか見ていなかったので `fd0` (=`0x100`) が
+  `ide_drive_present(0x100 & 3)` → hd0、`ext2_dev_for` → `"hd0"`、
+  `ext2_find_partition` → `drive_info[0]` と**すべて hd0 に化けていた**。
+  ブート時の自動マウントループ (`kernel/kernel.c`) が root 以外の全ブロック
+  デバイスに ext2 を試すので、`/fd0` として 2 つ目の `Ext2Ctx` が必ずできる。
+  `vfs_sync()` は全マウントを回すため、`mounts[0]` が正しい空き数を書いた直後に
+  `mounts[1]` が**マウント時点のスナップショット**を同じセクタへ書き戻す。
+  ビットマップはこの経路で触らないので真値が残り、「counted=」不一致になる。
+- **修正**: `fs/vfs.h` に `VFS_DEV_*` と `VFS_MOUNT_DEV_ENCODE/TYPE/ID` を公開し、
+  `ext2_vfs_mount` は `VFS_DEV_HD` 以外を ext2 本体に届く前に拒否。
+  `iso9660_mount` も同じ取りこぼし (`'0' + (char)dev_id`) があったので CD 限定に。
+  さらに `vfs_mount()` が同じ (ops, 種別, unit) の二重マウントを `VFS_ERR_EXIST` で
+  断る網をクラスごと張った。回帰は `tools/tests/test_vfs_mount_dev.py`
+  (`make check-vfs-mount-dev-host`)、経緯は `tools/tests/vfs_mount_dev_tdd.md`。
+- **実機確認**: 新カーネル配備後、マウント表は `/` と `/host` のみ (`/fd0` が消えた)。
+  438KB のファイルを `cp` + `sync` → 通常終了 → `e2fsck -fn` が **RC=0 クリーン**。
+  コピーは md5 一致。
+- **教訓**: 「FS ドライバは下位バイトしか見ないので互換」というコメントが
+  `fs/vfs.c` にそのまま書いてあった。**呼び出し側が広げたエンコードは、
+  受け側全部を数えて確かめる**。片方が無視すると、別デバイスが同じ実体に化ける。
+
+### 4-31. `gui_gate.py` で GUI を叩くときの 2 つの罠 (2026-09-10、修正済み)
+
+- **rshell を抜けてから `/api/key` の text を打つ。** rshell は `kbd_trygetchar` の
+  生読みで、入力が途切れるたびに 1 コマンドとして実行する。4 文字ずつ送る
+  `key(text="os32gui")` は `os32` / `gui` という別々のコマンドになり、GUI には入らない
+  (画面に `os32: command not found` / `gui: command not found` が並ぶ)。先に
+  `key(seq="ESC")` で `[Remote shell closed]` を出してから `enter_gshell()`。
+  `leave_gshell()` は末尾で `rshell` を打って復旧するので、**台本側で二重に打たない**
+  (GUI 内で打つとターミナルが rshell を起動し、以後の打鍵を全部食う)。
+- **Start メニューの行座標は項目数から導く。** メニューはタスクバーから上へ伸びるので、
+  v1.3 (T5a) で "Display fixture" が足されて 5 → 6 行になった時点で全行が 18px 上がり、
+  5 行前提の固定値 `H-107+18r` は行 r が r+1 に当たっていた。「CUI mode」(r=3) の
+  クリックが **Shut Down** に当たり、確認 Yes でゲストが `System halted` になった
+  (リセットで復旧、NHD は無傷)。`gui_gate.py` は `startmenu.rs` の `ROOT_ITEMS` /
+  `ITEM_H` / `BORDER` と `taskbar.rs` の `TASKBAR_H` から計算する形に直した。
+  **項目を足したら `START_MENU_ITEMS` も更新する。**
+- 観測は `gui_bench` の `CLICK n` (text VRAM) が便利。`on_raw` で `Button` を数えるので、
+  WM がアプリへ配ったかそのものが見える。1 クリック = +2 (押下+解放)。
+
 ---
 
 ## §5. デバッグ道具箱
@@ -348,8 +492,15 @@ NP21/W (ai-debug フォーク) は内蔵のデバッグ HTTP サーバを持つ�
 外部の中継プロセスは不要。
 
 ```bash
-# コマンド実行
+# コマンド実行 (行単位。生の打鍵を読む相手には届かない)
 curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"
+
+# キーイベントの注入 (FEP 変換、エディタ、ゲームなど)
+curl -X POST http://127.0.0.1:8025/api/key -d "seq=SPACE"
+curl -X POST http://127.0.0.1:8025/api/key --data-urlencode "seq=SHIFT+SPACE"   # FEP on/off
+
+# マウス (OS32 はシームレス絶対座標)。ax = px*65535/639, ay = py*65535/(H-1)
+curl -X POST http://127.0.0.1:8025/api/mouse -d "ax=32818&ay=32851&btn=1&hold=80"
 
 # 画面テキスト (UTF-8) — 画面判定はこちらの方が速い
 curl -s http://127.0.0.1:8025/api/tvram
@@ -357,6 +508,11 @@ curl -s http://127.0.0.1:8025/api/tvram
 # スクリーンショット取得
 curl -s http://127.0.0.1:8025/api/screenshot > screenshot.png
 ```
+
+- `+` を含む `seq` は `--data-urlencode` を使う (`-d` だと `+` が空白になる)。
+- `btn=1` / `btn=0` でドラッグ、`abs=off` で人間にマウスを返す。
+- `-m` は短くしない ([V3]、最低 15 秒、長いプログラムは 60 秒以上)。
+- GUI 検証の罠は §4-23 にまとめてある。
 
 > WSL からの `127.0.0.1:8025` が届かない環境 (NAT モード + ファイアウォール) では、
 > Windows 側の curl (`/mnt/c/Windows/System32/curl.exe`) を使うか、
