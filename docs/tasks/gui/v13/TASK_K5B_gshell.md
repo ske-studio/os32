@@ -273,3 +273,12 @@ RED → GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_
 **未確認 ([V4])**: **ゲスト未検証** (テスターの再配備待ち)。回したのは
 `make gshell` (Rust 警告 0) と `make check-gshell-host` (29 passed) だけで、
 全体ゲートは回していない。
+
+### 受入 G3 の前半 (2026-09-11、`f164805`、15MB、テスター台本 66 手)
+
+`gui_bench` → `gui_demo` → `filer` は起動 (3 本同時、タスクバーに 4 窓ボタン)、**4 本目 (`v12_api_test`) は
+「Launch failed (not found, not executable, or out of memory)」のモーダル** (`ring3_transition_count = 3`、
+`fault_kill_count = 0`、`reclaim = 0`)。原因は未確定だが D5 の見積どおり `EXEC_ERR_NOMEM` が最有力
+(`heap_size = 0` の折半で 1 本目が大きく取る)。**15MB でも既定のままでは 3 本**。5 本目拒否 (G3 後半) は
+4 本が立たないと検査できない → GUI テストアプリの `heap_size` を `build/app.conf` で明示するかはユーザー決裁。
+
