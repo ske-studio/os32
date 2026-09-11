@@ -223,7 +223,7 @@ v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛�
 | **G3** 5 本目 (32MB、K6-RAM `f6ec520` + `ram-32mb`) | `gui_bench` → `gui_demo` → `filer` → `v12_api_test` の 4 本が立ちタスクバー 5 ボタン (`step66`)。5 本目 `t5a_display` は「Too many programs (4 max) - close one first」で拒否、4 本は無事 (`g3b_after_return.png`)、`ring3_switch_count` 9 → 15、`fault_kill_count` 0。Start → CUI mode で 4 本とも畳まれ `appslot_reclaim_count` 4 (A3 の経路)、CUI 復帰 | **合格** (描画不良 W-3 は別記) |
 | **G6** 8MB | `ram-8mb` で `gui_demo` を Run → 「Launch failed (… out of memory)」、`ring3_transition_count` 0。CUI から `gui_demo` を実行すると `[shlib] no memory for 4 data pages` / `Error: shlib data attach failed (out of memory)`、`exec_sbrk_tier_last` 1 (3 領域は張れた後に共有ライブラリ .data 4 ページが取れない) | 不合格 → K7 |
 | **G6** 8MB 再試験 (K7 `8cc13d8` 配備、vmkernel 454,351 B) | `gui_demo` が立つ (Widgets / Help 完全描画、`exec_sbrk_tier_last` 2、`ring3_transition_count` 1、`used_pages` 256 → 711)。2 本目 `gui_bench` は「Launch failed (… out of memory)」で拒否され `gui_demo` は無事 (`used_pages` 711 のまま、`fault_kill_count` 0)。Start → CUI mode で回収 | **合格** |
-| G9 | 未実施 (G3 台本 `scratchpad/g3a.json` / `g3b.json` は K6-RAM の上限撤廃待ち。G6 は 8MB ini [D2]。G9 は 2 本以上が同時 ready になる観測手段が要る) | — |
+| G9 | **ユーザー決裁 2026-09-12: 設計 D11 のホスト模型 (`test_multiapp_model.py` 92 検査 + `test_multiapp_impl.py`) を受入とし、実機 G9 は観測手段 (2 本以上を同時 ready にする端末アプリ等) が揃ってから追う**。K5b の受入はこれで完了 (G3 台本 `scratchpad/g3a.json` / `g3b.json` は K6-RAM の上限撤廃待ち。G6 は 8MB ini [D2]。G9 は 2 本以上が同時 ready になる観測手段が要る) | — |
 
 証跡: `build/out/gui_gate/k5b_g1/*.png`、`tools/emu_agent/logs/playbook-20260911-135944-*`、G4 は `playbook-20260911-182823-*/shots/step{38,42,46}.png`、G5 は `playbook-20260911-224427-*`、G10 は `playbook-20260911-2236*〜2240*` (台本 `g10a` / `g10b1`〜`b4`、音は PM が `/api/sound` を 3 回ずつ採取)。
 
