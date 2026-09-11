@@ -15,7 +15,9 @@
 | 回 | 状態 | 検査数 |
 |---|---|---:|
 | 0 | 着手前の回帰 (既存の WM 試験だけ) | 12 passed / 0 failed |
-| 5 | 最終 | **27 passed / 0 failed** (旧 12 + 新 15) |
+| 5 | 最終 (K5b-W 本体) | **27 passed / 0 failed** (旧 12 + 新 15) |
+| 6 | 追補 W-1 の RED | 27 passed / 2 failed |
+| 7 | 追補 W-1 の GREEN | **29 passed / 0 failed** (27 + 新 2) |
 
 ## 回 1 — RED
 
@@ -192,3 +194,100 @@ make check-kapi-version  → KAPI バージョン一致: v44 (4 箇所)
   したがって「park の後 WM の状態が宙に浮かないこと」は検査できていない。
 - 操作感 (クリックから窓が反応するまでの ticks)、`INPUT_STREAK_MAX = 4` が
   打鍵の連続を取りこぼさない最小値かどうか (D11-7 の申し送りのまま)。
+
+---
+
+# 追補 — 不具合 W-1 (park 中のアプリの露出領域が再描画されない)
+
+> 発見: 2026-09-11 の実機受入 (`f164805`、15MB 構成、証跡 `build/out/gui_gate/k5b_g1/*.png`)。
+> 票の記載は [`TASK_K5B_gshell.md` の「不具合 W-1」](../../docs/tasks/gui/v13/TASK_K5B_gshell.md)。
+> 基点: `d56fda2` (feat/gui の先端)。
+
+## 観測 (PM)
+
+1. `gui_bench` 単独 → 窓全面が描かれる。
+2. Run で `gui_demo` を起動 → `gui_bench` の**露出部分が黒**になり、15 秒待っても黒のまま。
+   その間 `ring3_switch_count` は動かない (= park 中の `gui_bench` が誰にも起こされていない)。
+3. 露出部をクリックして前面化 → `switch` 3 → 7、`gui_bench` は**隠れていた上半分だけ**描き、
+   下半分は黒のまま。
+
+## 回 6 — RED
+
+**足した検査** (`userland/gshell/host/wm_tests.rs`、計 29 本):
+
+| 検査 | 内容 |
+|---|---|
+| `a_parked_app_is_not_left_black_when_another_app_is_launched` | park 中の A (1 窓、dirty 無し) の上に B の窓がある状態で 2 本目を起動 (`exec_start` → 3)。**A のクライアント面の画が残っている**か、残っていないなら**全面 dirty で描き直させる**か、どちらかは成り立つこと。後者なら `derived_ready(2)` が真で `pick == 2` (= top-level が起こす相手になる) |
+| `a_running_app_yields_to_a_parked_app_that_has_a_deliverable_paint` | (1) A に配送できる `Paint` がある間は走っている B が `OP_WAIT` で譲る (`should_park(3)`)、(2) A を起こして `OP_POLL` させると `Paint` が配られ**配送できる dirty は残らない** (B に隠れた分だけが残る = 契約 G4)、(3) B の窓を閉じると A の露出部が dirty になり、また `pick == 2` |
+
+**モックを 1 つ実物に寄せた**: `host/mocks.rs` の `gfx_init` は「何もしない」だったが、
+ゲストの `gfx_init` (`gfx/gfx_core.c`) は **VRAM の両ページをゼロクリアする**。
+そこまで模さないと「画が消えたのに描き直させない」不具合がホストで観測できず、
+検査が空振りする。呼ばれた回数 (`mocks::GFX_INITS`) も数える。
+
+**結果**: `29 tests: 27 passed / 2 failed` — 新しい 2 本だけが落ちる。
+
+```
+W-1: 起動で A の画が消えた (gfx_init 1 回) のに描き直させない (dirty len=0)
+```
+
+## 原因 (実ソース)
+
+`userland/gshell/src/lib.rs` の `run_program`:
+
+```rust
+let r = (a.exec_start)(path.as_ptr()) as i32;
+/* アプリがフルスクリーン GFX を使って抜けた場合に備えて描画モードを戻す。 */
+(a.gfx_init)();          /* ← VRAM の両ページをゼロクリアする */
+```
+
+- 塞ぐ `exec_run` の時代、ここへ戻るのは**アプリが終わったとき**だけだったので、
+  `gfx_init` が消すのは死んだアプリの画だけで実害が無かった。
+- `exec_start` は**アプリが最初に park した時点で戻る** (決裁 D9-5)。同じことをすると
+  **生きているアプリのクライアント面まで消える**。
+- WM はクライアント面を持たない (契約 G4) ので、消した画を取り戻す道は
+  「本人に `Paint` を出して描き直させる」しかない。ところが**遮蔽は露出を生まない**ので
+  直後の `visible::recompute_and_expose` は dirty を 1 つも足さない
+  (`exposed = new_vis − old_vis`、B が被さった A では空)。
+- 結果 `damage::has_deliverable_paint(A)` が偽 → `multiapp::derived_ready(A)` が偽 →
+  `pick` が A を選ばない → `exec_resume` が呼ばれない (= `switch_count` が動かない)。
+- 観測 3 (クリックで上半分だけ描く) も同じ式で説明がつく: 前面化の
+  `recompute_and_expose` が足す dirty は `new_vis − old_vis` = **B に隠れていた分だけ**で、
+  元から見えていた下半分は dirty にならない。
+
+PM の見当 (a)。(b) と (c) は外れ — `gui_demo` は `OP_WAIT` に入るし、`Paint` は
+そもそも積まれていない (dirty が空なので発行されない)。
+
+## 回 7 — GREEN
+
+**最小の修正** (`lib.rs` の `run_program`、`damage.rs` に 1 関数):
+
+1. `gfx_init()` を呼ぶのは **`rc <= 0` のときだけ** にした。`rc > 0` は
+   「アプリが最初の `OP_WAIT` まで進んで park した」= WM に attach 済みの GUI アプリで、
+   フルスクリーン GFX で抜けたわけではない (gshell 配下のアプリは `libos32gfx_attach`
+   を使い `gfx_init` を呼ばない — gotcha §4-20。`libos32gfx_attach` 自体は画を消さない)。
+   復帰処理が要らない以上、画を消す理由も無い。
+2. それでも消すとき (`rc <= 0` = 起動失敗 / park 前に終了) のために
+   `damage::invalidate_all_clients(st)` を足した。生きている全ウィンドウを全面 dirty に
+   するので、park 中のアプリも導出群の ready に入り top-level の `pick` が起こす。
+
+D11 の規則 (`INPUT_STREAK_MAX` / `turn_used` / フォーカス優先 / 上界 30) は**触っていない**。
+規則は正しく働いており、材料 (`dirty`) が失われていたのが原因なので、直したのは材料の側。
+
+**結果**: `29 tests: 29 passed / 0 failed` (既存 27 本は維持)。
+
+```
+make CROSS_DIR=... gshell
+  OS32X: gshell.bin (text=157056, bss=17964, heap=1048576, load=0x300000, api>=44)
+  (Rust の警告 0。ld の 2 件は既存のツールチェーン警告)
+make check-gshell-host   → 29 passed / 0 failed
+```
+
+## この追補で**測っていないこと** ([V4])
+
+- **ゲスト未検証**。G1 の完全合格 (`gui_bench` の露出部が起動後も描かれたまま) は
+  テスターの再配備待ち。ホストで押さえたのは「WM が画を消さない / 消したら描き直させる」
+  という判断だけで、実機の VRAM は 1 バイトも見ていない。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない (テスター担当)。
+- 観測 3 の「クリック後に上半分だけ描く」は、上の式で説明はついたが**実機では未再現**
+  (ホスト試験は起動直後の状態までしか作っていない)。

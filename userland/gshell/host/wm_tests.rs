@@ -1367,3 +1367,208 @@ fn a_just_launched_app_can_park_on_its_first_op_wait() {
         "1 本目の起動で譲った (相手が居ないのに CR3 が動く = 回帰)"
     );
 }
+
+/* ================================================================ */
+/*  不具合 W-1 (2026-09-11 の実機受入で発見)                          */
+/*  park 中のアプリの露出領域が再描画されない                        */
+/* ================================================================ */
+
+/// 検査用: `set` のどれか 1 枚が `r` を丸ごと含むか。
+fn covers(set: &crate::wm::RectSet, r: crate::wm::Rect) -> bool {
+    let mut i = 0;
+    while i < set.len {
+        let s = set.rects[i];
+        if s.x <= r.x && s.y <= r.y && s.right() >= r.right() && s.bottom() >= r.bottom() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 検査用: A (owner 2、窓 index 0) と B (owner 3、窓 index 1、A の上半分を覆う)
+/// を張った状態を `wm::g()` に置く。
+fn two_app_overlap_state(shm: &crate::mocks::Shm) {
+    use crate::{slot, wm};
+    let g = wm::g();
+    *g = one_window_state(shm); /* A = owner 2、窓 index 0、slot 0 */
+    g.inited = true;
+    /* B の受け皿。窓は「起動中に作られた」ことにして先に張る
+     * (`exec_start` のモックは窓を作れない)。A の上半分だけを覆う。 */
+    g.slots[1].used = true;
+    g.slots[1].owner = 3;
+    slot::init_header(g, 1);
+    let mut b = wm::Win::EMPTY;
+    b.used = true;
+    b.visible = true;
+    b.owner = 3;
+    b.gen = 1;
+    b.x = 40;
+    b.y = 40;
+    b.w = 400;
+    b.h = 120;
+    g.windows[1] = b;
+    g.zorder[1] = 1; /* B が前面 */
+    g.z_count = 2;
+}
+
+/// A (park 中、1 窓) の上に B の窓が開くと、A の**露出部**が黒いまま残る
+/// (実機 `gui_bench` + `gui_demo`、`ring3_switch_count` が動かない)。
+///
+/// 仕掛けは `run_program` の `gfx_init()`。`gfx/gfx_core.c` の `gfx_init` は
+/// **VRAM の両ページをゼロクリアする**。`exec_run` の時代はアプリが終わって
+/// からしか戻らなかったので消えるのは死んだアプリの画だけだったが、
+/// `exec_start` は park した時点で戻る = **生きているアプリのクライアント面
+/// まで消える**。WM はクライアント面を持たない (契約 G4) ので、消したら本人に
+/// 描き直させるしか無い。ところが遮蔽は露出を生まないので
+/// `recompute_and_expose` は dirty を 1 つも足さず、`derived_ready` が偽の
+/// まま = `pick` が A を選ばない = 誰も `exec_resume` しない。
+///
+/// 検査は「画が残っている」か「全面 dirty で描き直させる」かの**どちらかは
+/// 成り立つ**こと。どちらでもないのが W-1 の状態。
+#[test]
+fn a_parked_app_is_not_left_black_when_another_app_is_launched() {
+    use crate::{mocks, multiapp, visible, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    two_app_overlap_state(&shm);
+    multiapp::on_start(2);
+
+    /* A は全面を描き終えて COMMIT 済み = dirty 無しで park している。 */
+    visible::recompute_and_expose(wm::g());
+    wm::g().windows[0].dirty.clear();
+    wm::g().windows[0].configure_pending = false;
+    multiapp::note_parked(2, None);
+    assert!(
+        !multiapp::derived_ready(wm::g(), 2),
+        "前提が崩れている: A が最初から ready"
+    );
+
+    /* A のクライアント面に目印を塗る (= アプリが描いた画)。露出部の標本は
+     * B に覆われない下側から取る。 */
+    let cr = wm::g().windows[0].client_rect_screen();
+    let (sx, sy) = (cr.x + 8, cr.bottom() - 8);
+    assert!(
+        !wm::g().windows[1].outer().contains(sx, sy),
+        "標本点が B に隠れている (試験の geometry が違う)"
+    );
+    unsafe { os32api::gfx::gfx_fill_rect(cr.x, cr.y, cr.w, cr.h, 7) };
+    assert_eq!(mocks::gfx_get_pixel(sx, sy), 7);
+
+    /* B を起動する (`exec_start` は park 済みの app_id 3 を返す)。 */
+    *mocks::START_SCRIPT.lock().unwrap() = vec![3];
+    let mut path = [0u8; 256];
+    let p = b"/usr/bin/gui_demo.bin\0";
+    path[..p.len()].copy_from_slice(p);
+    let rc = crate::run_program(wm::g(), &path);
+    assert_eq!(rc, 3, "exec_start の戻り値を取り違えている");
+    assert_eq!(multiapp::live_count(), 2, "起動で 1 本増えていない");
+
+    /* (1) 画が残っているか、残っていないなら全面 dirty で描き直させるか。 */
+    let kept = mocks::gfx_get_pixel(sx, sy) == 7;
+    let (cw, ch) = wm::g().windows[0].client_size();
+    let repaint = covers(&wm::g().windows[0].dirty, crate::wm::Rect::new(0, 0, cw, ch));
+    assert!(
+        kept || repaint,
+        "W-1: 起動で A の画が消えた (gfx_init {} 回) のに描き直させない (dirty len={})",
+        mocks::GFX_INITS.load(Ordering::SeqCst),
+        wm::g().windows[0].dirty.len
+    );
+
+    /* (2) 描き直しが要るなら、A は導出群の ready = top-level が起こす相手。 */
+    if !kept {
+        assert!(
+            multiapp::derived_ready(wm::g(), 2),
+            "W-1: 描き直しが要るのに A が ready にならない (誰も起こさない)"
+        );
+        assert_eq!(multiapp::pick(wm::g()), 2, "W-1: top-level が A を選ばない");
+    }
+    wm::g().inited = false;
+}
+
+/// 走っている B は、park 中の A に配送できる `Paint` がある間は `OP_WAIT` で
+/// 譲る。譲らないと A は永久に描き直せない (D11-3 の (1))。
+/// 併せて「A が `Paint` を消費したら dirty が残らない」「B の窓を閉じたら
+/// A の露出部が dirty になり、また A が選ばれる」も見る。
+#[test]
+fn a_running_app_yields_to_a_parked_app_that_has_a_deliverable_paint() {
+    use crate::{handler, mocks, multiapp, visible, wm};
+    use os32api::gui::proto::{GuiEvent, GUI_EV_PAINT, GUI_OP_POLL, GUI_RING_CAPACITY};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    two_app_overlap_state(&shm);
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    visible::recompute_and_expose(wm::g());
+    wm::g().windows[0].dirty.clear();
+    wm::g().windows[0].configure_pending = false;
+    wm::g().windows[1].dirty.clear();
+    wm::g().windows[1].configure_pending = false;
+    multiapp::note_parked(2, None);
+    multiapp::mark_resumed(3); /* B が走っている */
+
+    /* (1) A に配送できる Paint がある = B は譲る。 */
+    crate::damage::set_dirty_full(&mut wm::g().windows[0]);
+    assert!(
+        multiapp::derived_ready(wm::g(), 2),
+        "露出部に dirty があるのに A が ready でない"
+    );
+    assert!(
+        multiapp::should_park(wm::g(), 3),
+        "A に配送できる Paint があるのに B が譲らない"
+    );
+
+    /* (2) A を起こして `OP_POLL` させると Paint が配られ、dirty は残らない。 */
+    assert_eq!(multiapp::pick(wm::g()), 2, "top-level が A を選ばない");
+    multiapp::mark_resumed(2);
+    let n = handler::gshell_gui_handler(GUI_OP_POLL, 0, 2);
+    assert!(n > 0, "OP_POLL が Paint を 1 件も返さない");
+    /* 残ってよいのは **B に隠れている分だけ** (契約 G4: 隠れた場所は露出する
+     * まで dirty のまま)。配送できる分が残っていたら配り落としている。 */
+    assert!(
+        !crate::damage::has_deliverable_paint(&wm::g().windows[0]),
+        "Paint を配ったのに配送できる dirty が残った (len={})",
+        wm::g().windows[0].dirty.len
+    );
+    /* 配られたのが Paint であること。 */
+    let mut seen = false;
+    {
+        let h = crate::slot::read_header(wm::g(), 0);
+        let base = crate::slot::ring_ptr(wm::g(), 0);
+        let mut i = h.ring_head;
+        while i != h.ring_tail {
+            let ev: GuiEvent = unsafe {
+                core::ptr::read_unaligned(
+                    base.add((i as usize % GUI_RING_CAPACITY) * 16) as *const GuiEvent,
+                )
+            };
+            if ev.kind == GUI_EV_PAINT {
+                seen = true;
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+    assert!(seen, "配られたイベントに Paint が無い");
+    set_input_ready(wm::g(), 2, false); /* アプリが読み切った */
+    assert!(
+        !multiapp::derived_ready(wm::g(), 2),
+        "Paint を消費したのに A がまだ ready"
+    );
+
+    /* (3) B の窓を閉じると A の露出部が dirty になり、また A が選ばれる。 */
+    multiapp::note_parked(2, None);
+    multiapp::mark_resumed(3);
+    let bid = wm::g().windows[1].id(1);
+    assert_eq!(wm::destroy_window(wm::g(), 3, bid), 0, "B の窓を閉じられない");
+    assert!(
+        multiapp::derived_ready(wm::g(), 2),
+        "B の窓を閉じたのに A の露出部が dirty にならない"
+    );
+    assert!(
+        multiapp::should_park(wm::g(), 3),
+        "露出した A を描かせるために B が譲らない"
+    );
+    assert_eq!(multiapp::pick(wm::g()), 2, "露出した A が選ばれない");
+    wm::g().inited = false;
+}

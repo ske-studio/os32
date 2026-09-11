@@ -277,6 +277,18 @@ pub fn start_calls() -> Vec<Vec<u8>> {
     lk(&STARTS).clone()
 }
 
+/// `gfx_init` が呼ばれた回数。
+pub static GFX_INITS: AtomicUsize = AtomicUsize::new(0);
+
+/// ゲストの `gfx_init` (`gfx/gfx_core.c`) は **VRAM の両ページをゼロクリア
+/// する**。「消えたのに描き直させない」不具合 (W-1) をホストで再現するには
+/// そこまで模す必要がある — 何もしない代用だと、画が消えたことを試験が
+/// 観測できず検査が空振りする。
+unsafe extern "C" fn gfx_init() {
+    GFX_INITS.fetch_add(1, Ordering::SeqCst);
+    clear(0);
+}
+
 unsafe extern "C" fn exec_park() -> u32 {
     PARKS.fetch_add(1, Ordering::SeqCst);
     *lk(&PARK_RET) as u32
@@ -325,7 +337,7 @@ pub fn init() {
     a.kbd_dropped_count = zero;
     a.kbd_trygetrawkey = raw_key;
     a.mouse_poll = mouse;
-    a.gfx_init = nothing;
+    a.gfx_init = gfx_init;
     a.gfx_shutdown = nothing;
     a.tvram_clear = nothing;
     a.gfx_set_palette = palette;
@@ -347,6 +359,7 @@ pub fn init() {
     a.snd_focus = snd_focus;
     lk(&RAWKEYS).clear();
     lk(&IME_SCRIPT).clear();
+    GFX_INITS.store(0, Ordering::SeqCst);
     PARKS.store(0, Ordering::SeqCst);
     *lk(&PARK_RET) = -1;
     lk(&RESUMES).clear();

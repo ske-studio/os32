@@ -258,17 +258,32 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
      * いる ID はまだ分かっていない (戻り値そのものなので) ので、譲り合いの表に
      * 「起動が進行中」の印を立てておく (`multiapp::begin_start` の注記)。 */
     multiapp::begin_start();
-    let rc = unsafe {
-        let a = os32api::api();
-        /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
-         * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので、
-         * ここで戻す。生成物は手で触らない ([ABI1])。 */
-        let r = (a.exec_start)(path.as_ptr()) as i32;
-        /* アプリがフルスクリーン GFX を使って抜けた場合に備えて描画モードを戻す。 */
-        (a.gfx_init)();
-        r
-    };
+    /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
+     * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので、ここで戻す。
+     * 生成物は手で触らない ([ABI1])。 */
+    let rc = unsafe { (os32api::api().exec_start)(path.as_ptr()) as i32 };
     multiapp::end_start(rc);
+    /* 描画モードの復帰は **アプリが抜けたときだけ** (不具合 W-1、2026-09-11)。
+     *
+     * `gfx_init` は VRAM の両ページをゼロクリアする (`gfx/gfx_core.c`)。
+     * 塞ぐ `exec_run` の時代はアプリが**終わってから**しか戻らなかったので、
+     * 消えるのは死んだアプリの画だけだった。`exec_start` は park した時点で
+     * 戻る (決裁 D9-5) ので、同じことをすると**生きているアプリのクライアント
+     * 面まで消える**。WM はクライアント面を持たない (契約 G4) ので、消したら
+     * 本人に描き直させるしか無いが、遮蔽は露出を生まないので
+     * `recompute_and_expose` は dirty を 1 つも足さない = `derived_ready` が
+     * 偽のまま = 誰も `exec_resume` しない = 露出部が黒のまま残る。
+     *
+     * `rc > 0` は「アプリが最初の `OP_WAIT` まで進んで park した」= WM に
+     * attach 済みの GUI アプリで、フルスクリーン GFX で抜けたわけではない
+     * (契約 T1 / gotcha §4-20: gshell 配下のアプリは `libos32gui_attach` を
+     * 使い `gfx_init` を呼ばない)。復帰処理は要らない。 */
+    if rc <= 0 {
+        unsafe { (os32api::api().gfx_init)() };
+        /* 画を消した以上、生き残っているアプリには全面を描き直させる
+         * (W-1 の後半: 起動の失敗 / 即終了でも同じ穴が開く)。 */
+        damage::invalidate_all_clients(st);
+    }
     /* 退避しておいた 16 色をそのまま戻し、念のためシステム色を入れ直してから、
      * まだ生きているリースがあれば再適用する。 */
     wm::restore_palette(&saved);

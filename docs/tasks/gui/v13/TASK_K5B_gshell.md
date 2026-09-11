@@ -236,3 +236,40 @@ v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛�
   (c) Paint が配送されたが park の間に落ちて再発行されない、のどれか。W レーンで host 試験
   (`wm_tests.rs`) から先に再現する。
 
+#### W-1 の原因と修正 (W レーン、2026-09-11)
+
+**原因**: `userland/gshell/src/lib.rs` の `run_program` が `exec_start` の直後に呼ぶ
+`gfx_init()`。`gfx/gfx_core.c` の `gfx_init` は **VRAM の両ページをゼロクリアする**。
+塞ぐ `exec_run` の時代はアプリが**終わってから**しか戻らなかったので消えるのは死んだ
+アプリの画だけだったが、`exec_start` は park した時点で戻る (決裁 D9-5) ので
+**生きているアプリのクライアント面まで消える**。WM はクライアント面を持たない (契約 G4)
+ので描き直させるしか無いが、**遮蔽は露出を生まない** (`exposed = new_vis − old_vis` が空)
+ため `visible::recompute_and_expose` は dirty を 1 つも足さず、
+`damage::has_deliverable_paint` → `multiapp::derived_ready` が偽のまま =
+`pick` が A を選ばない = `exec_resume` が呼ばれない (`ring3_switch_count` が動かない)。
+
+観測 3 (クリックで上半分だけ描く) も同じ式で説明がつく — 前面化で足される dirty は
+`new_vis − old_vis` = **隠れていた分だけ**で、元から見えていた下半分は dirty にならない。
+
+見当は (a) が当たり。(b)(c) は外れ (`gui_demo` は `OP_WAIT` に入るし、`Paint` は
+そもそも dirty が空なので発行されていない)。
+
+**修正** (最小。D11 の規則は 1 行も触っていない — 規則は正しく働いており、
+材料である `dirty` が失われていたので直したのは材料の側):
+
+| # | 修正 |
+|---|---|
+| 1 | `gfx_init()` を呼ぶのは **`rc <= 0` のときだけ**。`rc > 0` は WM に attach 済みの GUI アプリが park しただけで、フルスクリーン GFX から戻す必要が無い (gshell 配下のアプリは `libos32gfx_attach` を使い `gfx_init` を呼ばない。`libos32gfx_attach` 自体は画を消さない) |
+| 2 | それでも消すとき (`rc <= 0` = 起動失敗 / park 前に終了) のために `damage::invalidate_all_clients(st)` を新設。生きている全ウィンドウを全面 dirty にするので、park 中のアプリも導出群の ready に入り top-level の `pick` が起こす |
+
+**試験**: `host/wm_tests.rs` に 2 本追加 (計 29 本)。
+`a_parked_app_is_not_left_black_when_another_app_is_launched` /
+`a_running_app_yields_to_a_parked_app_that_has_a_deliverable_paint`。
+併せて `host/mocks.rs` の `gfx_init` を実物に寄せた (「何もしない」→ 画素を消す +
+回数を数える) — そこまで模さないと不具合がホストで観測できず検査が空振りする。
+RED → GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_gshell_tdd.md) の
+「追補 — 不具合 W-1」。
+
+**未確認 ([V4])**: **ゲスト未検証** (テスターの再配備待ち)。回したのは
+`make gshell` (Rust 警告 0) と `make check-gshell-host` (29 passed) だけで、
+全体ゲートは回していない。
