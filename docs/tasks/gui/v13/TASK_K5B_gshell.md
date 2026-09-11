@@ -208,3 +208,31 @@ v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛�
 | A3 | `SWITCH_CUI` / `SHUTDOWN` で Quit に応答しないアプリは **Quit 配送後 N 周 (約 3 秒相当) 待って `exec_kill`** で畳む。確認ダイアログが既に「保存していない内容は失われます」と警告している | W 追随 (`multiapp::request_kill` は既存) |
 | D11-3 追加 | 「`LAUNCH` 保留なら譲る」は PM 受入済み (`363da1e`) | 模型への追随は別途小票 |
 
+## 実機受入 (2026-09-11、`f164805` = K + W、15MB 構成、テスター台本 + PM 観測)
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| ゲート / 配備 | `make clean/all/external/check` exit=0、`os32-cycle deploy` exit=0 (`vmkernel` 453,619 B)、`ver` = API v44 Build 08:39 | 合格 |
+| G8 回帰 6 本 | 全通過 (obs 確認) | 合格 |
+| **G1** 2 本同時 | `gui_bench` → Run `gui_demo`: 両方の窓が出てタスクバーに 3 窓ボタン (`step38`) | **合格** |
+| **G2** 片方を閉じる | `gui_demo` を ESC で閉じても `gui_bench` が残り、クリックで `CLICK n = 2` | **合格** |
+| **G7** 切替点 | `ring3_switch_count` 5 → 7 (クリックで resume)、`ring3_resume_bad_frame_count = 0`、`ring3_park_reject_count = 0`、`transition` は起動/終了の回数どおり | **合格** |
+| G3 / G4 / G5 / G6 / G9 / G10 | 未実施 (G3 台本は用意済み `scratchpad/g3.json`。G4 は K5c 待ち。G6 は 8MB ini [D2]) | — |
+
+証跡: `build/out/gui_gate/k5b_g1/*.png`、`tools/emu_agent/logs/playbook-20260911-135944-*`。
+
+### 不具合 W-1: park 中のアプリの露出領域が再描画されない (要修正、G1 の完全合格を阻む)
+
+- **観測** (PM、`gui_gate`): `gui_bench` 単独では窓全面 (item 00〜06、明るい背景) が描かれる (`a_bench_only`)。
+  `gui_demo` を起動すると Widgets / Help の下に隠れた部分以外の **露出部分が黒**になり、
+  3 秒後も 15 秒後も黒のまま (`b_both_3s` / `c_both_15s`)。その間 `ring3_switch_count` は 3 のまま
+  (= park 中の `gui_bench` へ Paint が届いて resume される経路が働いていない)。
+- 露出部をクリックして前面化すると `switch` は 3 → 7 と増え、`gui_bench` は**上半分 (Widgets に
+  隠れていた分) だけ**描き、**下半分は黒のまま** (`d_after_click_bench_bottom`)。= 起動直後に失われた
+  Paint が再発行されない。
+- 見当 (確定ではない): `gui_demo` 起動時の `visible::recompute_and_expose` が `gui_bench` の露出を
+  dirty にした後、park 中の `gui_bench` に対して (a) `derived_ready` (`damage::has_deliverable_paint`) が
+  真にならない、(b) 真でも走っている `gui_demo` が `OP_WAIT` に入っていない (ポーリング) ので譲る機会が無い、
+  (c) Paint が配送されたが park の間に落ちて再発行されない、のどれか。W レーンで host 試験
+  (`wm_tests.rs`) から先に再現する。
+
