@@ -38,7 +38,7 @@ class ExMemory(unittest.TestCase):
         self.assertEqual((back, diff), (RAW, ['EXMEMORY: 7 -> 16']))
 
     def test_rejects_unproven_sizes(self):
-        for value in ('0', '1', '13', '32', '', '16 ', '0x10'):
+        for value in ('0', '1', '13', '32', '128', '', '16 ', '0x10'):
             with self.assertRaises(ini.IniError):
                 ini.transform(RAW, {'EXMEMORY': value})
 

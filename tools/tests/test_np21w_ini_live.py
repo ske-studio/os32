@@ -543,12 +543,21 @@ class ReceiptAndPathBoundaries(unittest.TestCase):
         self.assertIn(b'USEPEGCP=false', small)
         back, diff = live.transform(small, live.OPERATIONS['ram-15mb'])
         self.assertEqual((back, diff), (RAW, ['EXMEMORY: 7 -> 16']))
+        # ExMemory >= 16 では 16MB システム空間の 1MB が抜けるので、ゲストの
+        # 報告量 + 1 を書く (32MB -> 33、128MB -> 129)。
+        big, diff = live.transform(RAW, live.OPERATIONS['ram-32mb'])
+        self.assertEqual(diff, ['EXMEMORY: 16 -> 33'])
+        huge, diff = live.transform(big, live.OPERATIONS['ram-128mb'])
+        self.assertEqual(diff, ['EXMEMORY: 33 -> 129'])
+        back, diff = live.transform(huge, live.OPERATIONS['ram-15mb'])
+        self.assertEqual((back, diff), (RAW, ['EXMEMORY: 129 -> 16']))
 
     def test_receipt_bound_covers_signature_escaping_and_restart_metadata(self):
         import json
         starts = {'cirrus-on': RAW, 'cirrus-off': NEW,
                   'pegc-on': RAW, 'pegc-off': PEGC_ON,
-                  'ram-8mb': RAW, 'ram-9mb': RAW, 'ram-15mb': RAM_8MB}
+                  'ram-8mb': RAW, 'ram-9mb': RAW, 'ram-15mb': RAM_8MB,
+                  'ram-32mb': RAW, 'ram-128mb': RAW}
         for operation in live.OPERATIONS:
             raw = starts[operation]
             candidate, diff = live.transform(raw, live.OPERATIONS[operation])

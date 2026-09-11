@@ -29,9 +29,15 @@ OPERATIONS = {'cirrus-on': {'USEGD5430': 'true', 'GD5430TYPE': '91'},
               # 新モデルを諦めて pgalloc_init へ落ちる legacy 経路を通すための
               # 構成。GUI の最低要件ではない (INSTALL.md / docs/02_memory.md /
               # tasks/gui/DESIGN.md)。16 はゲスト 15360KB = 15MB (実測)。
+              # NP21/W は 0xF00000〜0xFFFFFF (16MB システム空間) を RAM にしない
+              # ので、ExMemory >= 16 では使える拡張メモリ = ExMemory - 1 MB
+              # (np21w-src mem/memory.c、bios.c:241 の 0x401/0x594)。
+              # 32MB / 128MB はゲストが報告する量で命名する (33 / 129)。
               'ram-8mb': {'EXMEMORY': '7'},
               'ram-9mb': {'EXMEMORY': '8'},
-              'ram-15mb': {'EXMEMORY': '16'}}
+              'ram-15mb': {'EXMEMORY': '16'},
+              'ram-32mb': {'EXMEMORY': '33'},
+              'ram-128mb': {'EXMEMORY': '129'}}
 SIGNATURE_LIMIT = 256  # FileIdentity.Read: seven decimal integers + separators.
 SIGNATURE_JSON_BYTES = 12 * SIGNATURE_LIMIT  # Escaped UTF-16 surrogate pair per character.
 PROCESS_ID_MAX = 2147483647  # Query casts ProcessId to signed Int32.

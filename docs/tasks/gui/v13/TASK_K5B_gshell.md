@@ -217,9 +217,10 @@ v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛�
 | **G1** 2 本同時 | `gui_bench` → Run `gui_demo`: 両方の窓が出てタスクバーに 3 窓ボタン (`step38`) | **合格** |
 | **G2** 片方を閉じる | `gui_demo` を ESC で閉じても `gui_bench` が残り、クリックで `CLICK n = 2` | **合格** |
 | **G7** 切替点 | `ring3_switch_count` 5 → 7 (クリックで resume)、`ring3_resume_bad_frame_count = 0`、`ring3_park_reject_count = 0`、`transition` は起動/終了の回数どおり | **合格** |
-| G3 / G4 / G5 / G6 / G9 / G10 | 未実施 (G3 台本は用意済み `scratchpad/g3.json`。G4 は K5c 待ち。G6 は 8MB ini [D2]) | — |
+| **G4** CTRL+STOP はフォーカス窓だけ (K5c、`8d5ba3b` API v45) | `gui_bench` → Run `gui_demo` で 3 窓 (`step38`)。CTRL+STOP で `gui_demo` (Widgets / Help) だけ畳まれ `gui_bench` が残る (`step42`、タスクバー 1 本)。クリックで `CLICK n = 2` (`step46`)。ESC で CUI 復帰 (`grph_disp=0`)。`appslot_reclaim_count` 2、`ring3_resume_bad_frame_count` 0、`fault_kill_count` 0 | **合格** |
+| G3 / G5 / G6 / G9 / G10 | 未実施 (G3 台本 `scratchpad/g3a.json` / `g3b.json` は K6-RAM の上限撤廃待ち。G6 は 8MB ini [D2]) | — |
 
-証跡: `build/out/gui_gate/k5b_g1/*.png`、`tools/emu_agent/logs/playbook-20260911-135944-*`。
+証跡: `build/out/gui_gate/k5b_g1/*.png`、`tools/emu_agent/logs/playbook-20260911-135944-*`、G4 は `playbook-20260911-182823-*/shots/step{38,42,46}.png`。
 
 ### 不具合 W-1: park 中のアプリの露出領域が再描画されない (要修正、G1 の完全合格を阻む)
 
