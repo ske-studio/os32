@@ -250,7 +250,7 @@ filesystem:
     - host: userland/tests/v12_api_test.bin
       guest: /usr/bin/
       tags: [programs]
-    # --- T5a 固定テキスト表示試験 ---
+    # --- 端末アプリ (K6C-A: con_sink を吸って端末窓に描く) ---
     - host: userland/tests/t5a_display.bin
       guest: /usr/bin/
       tags: [programs]

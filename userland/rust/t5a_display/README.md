@@ -1,4 +1,39 @@
-# T5a 固定fixture表示アプリ（実装提出、ゲスト受入待ち）
+# t5a_display — 端末アプリ（con_sink 表示、ゲスト受入待ち）
+
+> **2026-09-12 (票 K6C-A)**: 固定 fixture 表示アプリを **端末アプリ** に作り替えた。
+> 以下「K6C-A の差分」より下の節は T5a 提出時点の記述で、`guest.rs` に関する部分
+> （二窓構成、キー 1〜5 での fixture 切替、ゲスト操作台本）は**もう当たらない**。
+> `state.rs` / `view.rs` / `paint.rs` / `boundary.rs` / `storage.rs` の記述は有効。
+
+## K6C-A の差分
+
+- `sink.rs`（新規）: `con_sink` のワイヤ形式（`CON_SINK_REC_PRINT/CLEAR/CURSOR`）を
+  レコード列へ解く純パーサ。`no_std`・KAPI 非依存で、ホスト試験の対象。
+  空 / len 0 / 未知 type / 上限超えの len / 3 バイト UTF-8 / バッファ末尾ちょうどで
+  終わるレコード / 途中で切れたレコードを試験する。
+- `state.rs`: `Fixture::Live`（空で始まり sink の出力だけが入る）と `feed_live` /
+  `place` / `place_cursor` を追加。既存 fixture の挙動と試験は変えていない。
+- `session.rs`: `apply(Record)` を追加。`CLEAR` と「画面が埋まったら畳む」を
+  `select(Fixture::Live)` の 1 経路にまとめ、畳んだ回数 (`wraps`) と捨てた文字
+  (`lost`)、無視した `CURSOR` を呼び側へ返す。
+  T4 モデルはスクロールしないので、**畳まないと 64 行で端末が死ぬ**。
+- `status.rs`: `SinkStatus`（読んだバイト / レコード数 / `dropped` / `ring` /
+  形式違反 / `wraps` / `lost` / 最後のエラー）と Live 用の状態行。
+  `dropped` と読み手拒否は必ず状態行に出す。
+- `guest.rs`: fixture 供給を sink 供給へ置換。**待ちは GetMessage 方式のまま**で、
+  吸い出しは 100ms（`Timer::repeating`、10 tick）の反復タイマの中だけ。busy loop は無い。
+  1 周あたり 8KB を上限に、1KB の私有バッファ（`>= CON_SINK_REC_MAX` = 203）で
+  空になるまで `con_sink_read` する。`OS32_ERR_EXIST`（読み手は先客）は状態行に
+  出したまま次の周も試し、それ以外の負値は以後読まない。末尾追従を既定にし、
+  `j` `k` `g` で解け `e` で戻る。T5a の cover 窓は落とした（端末に余分な窓は要らない）。
+- `build/app.conf`: `userland/tests/t5a_display` を **KAPI 46** で登録。
+
+ホスト検査: `cargo check --release -p t5a_display` と host テスト 32 件が通る。
+**`make` / 配備 / エミュレータ実行は未実施**（コーダーの範囲外）。
+
+---
+
+# （以下 T5a 提出時点の記述）
 
 編集範囲はこの新規ディレクトリのみ。既存workspace/build/deploy、共有クレート、
 共有docsは変更していない。staticlibのmanifestには追加の`[workspace]`を置かない。

@@ -14,6 +14,9 @@ pub const NORMAL: &[u8] =
 pub const CONTROLS: &[u8] = b"invalid:\xff\nTAB:a\tb\nBS:ab\x08Z\nCR:old\rNEW\n";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fixture {
+    /// con_sink から吸った出力だけが入る空の画面 (票 K6C-A §2-4)。
+    /// ゲストはこれで始まり、固定 fixture はホスト試験の中だけで使う。
+    Live,
     Normal,
     Exact,
     Full,
@@ -33,6 +36,17 @@ pub enum Movement {
     Down,
     Last,
 }
+/// `Display::feed_live` の結果。`error` が立っているときだけ `rest` /
+/// `pending` に中身がある。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LiveFeed<'b> {
+    /// まだ入っていない生バイト。
+    pub rest: &'b [u8],
+    /// 復号は済んだが書けなかった文字 (先頭から詰まっている)。
+    pub pending: [Option<char>; 2],
+    pub error: Option<Error>,
+}
+
 pub struct Display<'a> {
     pub terminal: Terminal<'a>,
     pub fixture: Fixture,
@@ -56,6 +70,11 @@ impl<'a> Display<'a> {
             total: 0,
             stop: Stop::Complete,
         };
+        if fixture == Fixture::Live {
+            /* 空で始める。finish() も呼ばない — 以後 feed_live() が続きを
+             * 流すので、ここで復号器を締めてはいけない。 */
+            return Ok(state);
+        }
         if fixture == Fixture::Normal {
             state.feed(NORMAL);
             state.feed(CONTROLS);
@@ -93,6 +112,49 @@ impl<'a> Display<'a> {
             Movement::Down => self.top.saturating_add(1).min(last),
         };
     }
+    /// con_sink から来た PRINT 本体を流す (Live 用)。
+    ///
+    /// 固定 fixture 用の `feed` と違い、**一度止まっても諦めない**:
+    /// 画面が埋まった (`Error::Full`) ときは未消費の残りと未描画の文字を
+    /// 返し、呼び側 (`Session::apply`) が画面を畳んでから続きを入れる。
+    pub fn feed_live<'b>(&mut self, bytes: &'b [u8]) -> LiveFeed<'b> {
+        self.total += bytes.len();
+        let report = self.terminal.feed(bytes);
+        self.consumed += report.consumed;
+        match report.error {
+            None => {
+                self.stop = Stop::Complete;
+                LiveFeed {
+                    rest: &[],
+                    pending: [None; 2],
+                    error: None,
+                }
+            }
+            Some(error) => {
+                self.stop = Stop::Feed(error);
+                LiveFeed {
+                    /* consumed は「受け取った」バイト数。最後の 1 文字は
+                     * 復号できても書けずに pending に残っているので、
+                     * バイトではなく文字として持ち帰る (二重復号を避ける)。 */
+                    rest: &bytes[report.consumed.min(bytes.len())..],
+                    pending: self.terminal.pending(),
+                    error: Some(error),
+                }
+            }
+        }
+    }
+
+    /// 復号を経由せずに 1 文字だけ置く (畳んだ直後の pending の戻し用)。
+    pub fn place(&mut self, ch: char) -> Result<(), Error> {
+        self.terminal.model_mut().write_char(ch)
+    }
+
+    /// CURSOR レコードの適用。モデルの外 (未到達の行など) なら何もしない。
+    /// 端末の見た目より、すでに描いた内容を壊さないことを優先する。
+    pub fn place_cursor(&mut self, x: usize, y: usize) -> bool {
+        self.terminal.model_mut().set_cursor(x, y).is_ok()
+    }
+
     fn feed(&mut self, bytes: &[u8]) {
         self.total += bytes.len();
         if self.stop != Stop::Complete {

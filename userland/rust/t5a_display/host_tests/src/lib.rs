@@ -6,6 +6,8 @@ pub mod input;
 pub mod paint;
 #[path = "../../src/session.rs"]
 pub mod session;
+#[path = "../../src/sink.rs"]
+pub mod sink;
 #[path = "../../src/state.rs"]
 pub mod state;
 #[path = "../../src/status.rs"]

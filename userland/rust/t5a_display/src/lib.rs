@@ -6,6 +6,7 @@ mod guest;
 mod input;
 mod paint;
 mod session;
+mod sink;
 mod state;
 mod status;
 mod storage;

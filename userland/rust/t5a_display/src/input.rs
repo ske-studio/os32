@@ -3,6 +3,9 @@ use crate::state::{Fixture, Movement};
 pub enum Action {
     None,
     Quit,
+    /// fixture の切り替え。ゲスト (live) は捨て、ホスト試験だけが中身を読む
+    /// — 票 §2-4「ゲストは sink だけ」。
+    #[allow(dead_code)]
     Select(Fixture),
     Move(Movement),
 }
