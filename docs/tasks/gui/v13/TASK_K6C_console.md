@@ -83,3 +83,13 @@ CPL=3 からのポインタは既存のディスパッチャ検証 (アプリ帯
   `build/app.conf` の `userland/shell` を 7 → 46 に上げた (gshell は 45 のまま)。
 - **未確認**: 実機・`make` は未実施。割込み文脈からの同時書き込みはホストでは
   再現していない (錠は空に差し替え)。受入 C1〜C4 は全部これから。
+
+## 6. 実機受入の記録 (PM / テスター、2026-09-12、`d381000` 配備、vmkernel 457,062 B、API v46)
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| ゲート | `make clean/all/external/check` exit=0 ([ABI3]) | 合格 |
+| **C1** | regress 6 本 obs 全通過、`v86 -t` result OK、rshell 従来どおり、`gui_demo` 起動 → Start → CUI mode 復帰、`con_sink_drop_count` 0 | **合格** |
+| **C2** | kselftest **44 → 50** (fail 0) | **合格** |
+| `mem` | `RAM : 16384 KB (16 MB) usable (15-16MB system space excluded)` が `Physical : 17408 KB` の下に出る (K6-RAM 決裁 (2)) | 合格 |
+| C3 / C4 | 読み手のいる CPL=3 アプリが無いので未実施 → **K6C-A の A4 で見る** | — |
