@@ -18,6 +18,7 @@
 #include "shm.h"
 #include "gui.h"
 #include "snd_engine.h"
+#include "con_sink.h"
 #include "kapi_db.h"
 #include "gdt.h"
 #include "tss.h"
@@ -672,6 +673,11 @@ static void exec_reclaim_owned(int id)
      * サーフェス・タイマ・スロットを回収する。畳む 3 経路すべてが
      * ここを通るので、WM は 1 か所で回収できる。 */
     gui_owner_exit(id);
+    /* (8) console シンクの読み手 (票 K6C)。読み手は 1 本だけなので、畳んだ
+     * のがその 1 本なら所有を返す — 返さないと次の端末アプリが永久に
+     * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、
+     * 次の読み手が拾えばよい)。 */
+    con_sink_owner_exit(id);
 }
 
 /* ======================================================================== */

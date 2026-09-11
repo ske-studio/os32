@@ -1,5 +1,5 @@
 {
-  "version": 45,
+  "version": 46,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -44,7 +44,9 @@
     "kapi_db.h",
     "loop_dev.h",
     "v86.h",
-    "gui.h"
+    "gui.h",
+    "con_sink.h",
+    "memory_boot.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1320,6 +1322,28 @@
       "name": "exec_abort_clear",
       "ret": "i32",
       "args": []
+    },
+    {
+      "name": "con_sink_read",
+      "ret": "i32",
+      "args": [
+        "void *buf",
+        "u32 cap"
+      ]
+    },
+    {
+      "name": "con_sink_stat",
+      "ret": "i32",
+      "args": [
+        "u32 *pending",
+        "u32 *dropped"
+      ]
+    },
+    {
+      "name": "sys_ram_kb",
+      "ret": "u32",
+      "args": [],
+      "target": "memory_boot_ram_kb"
     }
   ]
 }

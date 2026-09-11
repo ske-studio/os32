@@ -12,6 +12,8 @@
 #include "io.h"
 #include "pc98.h"
 #include "kprintf.h"
+#include "kstring.h"
+#include "con_sink.h"
 
 /* V86 セッション中の画面描画抑止 (kernel/v86.c)。
  * セッション中は低位 640KB がゲスト用バッキング RAM に差し替わっており、
@@ -83,6 +85,7 @@ void tvram_clear(void)
     }
     cursor_x = 0;
     cursor_y = 0;
+    con_sink_push_clear();      /* 票 K6C: 画面クリアの経路 (CLEAR レコード) */
     console_hw_cursor_sync();
 }
 
@@ -206,6 +209,7 @@ static void putchar_raw(char ch, u8 color)
 /* 1文字出力 */
 void shell_putchar(char ch, u8 color)
 {
+    con_sink_push_print(&ch, 1, color);
     putchar_raw(ch, color);
     console_hw_cursor_sync();
 }
@@ -214,6 +218,10 @@ void shell_putchar(char ch, u8 color)
 void shell_print(const char *str, u8 color)
 {
     int render = !v86_is_active();
+    /* 票 K6C: 描画抑止 (v86) や rshell 複写とは無関係にシンクへ積む。
+     * shell_print_dec / shell_print_hex32 はここへ落ちるので、あちらに
+     * 差し込みは要らない (二重に積むことになる)。 */
+    con_sink_push_print(str, kstrlen(str), color);
     while (*str) {
         if (render) putchar_raw(*str, color);
         if (rshell_active) serial_putchar(*str);
@@ -251,6 +259,7 @@ void shell_print_utf8(const char *utf8_str, u8 color)
 {
     const u8 *p = (const u8 *)utf8_str;
 
+    con_sink_push_print(utf8_str, kstrlen(utf8_str), color);
     if (rshell_active) {
         const char *s = utf8_str;
         while (*s) serial_putchar(*s++);
@@ -324,6 +333,7 @@ void console_write(const char *buf, u32 size, u8 color)
     const u8 *p = (const u8 *)buf;
     u32 remaining = size;
 
+    con_sink_push_print(buf, size, color);
     if (rshell_active) {
         u32 i;
         for (i = 0; i < size; i++) serial_putchar(buf[i]);
@@ -415,6 +425,7 @@ void console_set_cursor(int x, int y)
 {
     cursor_x = x;
     cursor_y = y;
+    con_sink_push_cursor(x, y);     /* 票 K6C: CURSOR レコード */
     console_hw_cursor_enable();
 }
 
@@ -442,6 +453,10 @@ void console_hw_cursor_enable(void)
  * V86 セッション中は GDC をゲストが握っているので触らない。 */
 void console_text_gdc_stop(void)
 {
+    /* 票 K6C §2-3: GUI へ入るときにシンクを空で始める。v86 のガードより
+     * **前**に置く — GDC を触らない場合でも「テキスト面が見えない」ことは
+     * 変わらないので、溜め始める側は抑止しない。 */
+    con_sink_enable();
     if (v86_is_active()) return;
     outp(GDC_TEXT_CMD, GDC_CMD_CSRFORM);
     outp(GDC_TEXT_PARAM, (u8)(GDC_TEXT_LINES_PER_ROW - 1));   /* DC=0 → 非表示 */
@@ -453,6 +468,10 @@ void console_text_gdc_stop(void)
  * console_hw_cursor_enable() と同じだが、GUI からの復帰を明示するための別名。 */
 void console_text_gdc_start(void)
 {
+    /* 票 K6C §2-3: CUI へ戻るときは溜まっているものを捨てる (テキスト VRAM が
+     * 再び正になるので、リングの中身はもう誰も描き直さない)。読み手の所有は
+     * ここでは返さない — 返すのは exec_exit / exec_kill の owner 回収だけ。 */
+    con_sink_disable();
     console_hw_cursor_enable();
 }
 

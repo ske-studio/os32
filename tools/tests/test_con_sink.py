@@ -1,0 +1,44 @@
+"""K6C: console シンクのリングを実物の kernel/con_sink.c で確かめる。
+
+票:   docs/tasks/gui/v13/TASK_K6C_console.md §2 (設計 3 点 + レコード形式)
+記録: tools/tests/con_sink_tdd.md
+
+test_multiapp_model.py と同じ様式 — ホスト ILP32 GNU89 で走らせたあと、
+同じソースがカーネルと同じフラグの i386-elf-gcc -Werror でも通ることを
+別に見る ([C1] C89/GNU89)。Make・エミュレータ・libc は使わない。
+
+ホスト側だけ -DCON_SINK_NO_IRQ_LOCK を付ける: CPL=3 では cli/popfl を
+実行できないため。クロス側は付けないので、include/io.h を使う本番の経路も
+同じ試験の中でコンパイルされる。
+"""
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
+         "-fno-stack-protector", "-Wall", "-Wextra", "-Werror",
+         "-Wdeclaration-after-statement"]
+INCLUDES = ["-I" + str(ROOT / p)
+            for p in ("include", "kernel", "lib", "sdk/include/os32")]
+HOST_SRC = ROOT / "tools/tests/con_sink_host.c"
+KERNEL_SRC = ROOT / "kernel/con_sink.c"
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(prefix="os32-con-sink-") as tmp:
+        tmp = pathlib.Path(tmp)
+        exe = tmp / "con-sink"
+        subprocess.run(["gcc", *FLAGS, "-O0", "-DCON_SINK_NO_IRQ_LOCK",
+                        "-D__KERNEL_BUILD__", *INCLUDES,
+                        "-nostdlib", "-static", "-no-pie",
+                        str(HOST_SRC), "-o", str(exe)], cwd=ROOT, check=True)
+        print("HOST ILP32 GNU89 COMPILE PASS", flush=True)
+        rc = subprocess.run([str(exe)], cwd=ROOT, timeout=30).returncode
+        # 本番の割込み禁止区間 (include/io.h) を含む形でクロスコンパイル
+        subprocess.run(["i386-elf-gcc", *FLAGS, "-D__KERNEL_BUILD__",
+                        *INCLUDES, "-O2", "-c", str(KERNEL_SRC),
+                        "-o", str(tmp / "con_sink.o")], cwd=ROOT, check=True)
+        print("TARGET i386-elf GNU89 -Werror COMPILE PASS", flush=True)
+        print("EXIT con_sink_host=%d" % rc, flush=True)
+        sys.exit(rc)

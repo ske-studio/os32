@@ -49,6 +49,23 @@ T4のCellはhost試験でsize 8B / align 4Bと確認（x86_64-unknown-linux-gnu�
 `userland/libos32term/tests/model.rs` の `cell_host_layout_measurement` が根拠。
 上の8B仮定とは一致するが、guest実寸・Rust ABI保証・ゲスト確保成功を意味しない。
 
+## カーネル帯の静的計上 (K6C、2026-09-12)
+
+`kernel/con_sink.c` の console シンク。`kmalloc` せず **カーネル .bss の静的配列**なので、
+シェル帯・アプリ帯・exec_heap のどれも減らさない (上の T1 案の算術とは別勘定)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| リング `g_ring[]` | 8192 B | `CON_SINK_RING_SIZE` (`include/con_sink.h`、票 §2-1 の決定) |
+| 自己診断の作業域 `g_self_buf` + `g_self_src` | 403 B | `CON_SINK_REC_MAX` (203) + `CON_SINK_PRINT_MAX` (200) |
+| head / tail / count / enabled / reader / drop_count | 24 B | `u32` × 4 + `int` × 2 |
+| **合計** | **8619 B** | |
+
+`i386-elf-gcc -O2 -c kernel/con_sink.c` の実測は text 2937 B / data 4 B / **bss 8672 B**
+(整列込み。`con_sink_drop_count` は `.data`)。カーネル全体を
+リンクしての実測とゲストの空き容量は未測定 (`make` は未実施)。端末アプリ側の受け皿
+(K6C-A) はここには含まない。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。
