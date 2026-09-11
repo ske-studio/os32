@@ -306,5 +306,5 @@ RED → GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_
   (WM は消せない) に背面窓の枠 1px が落ちていた。**修正**: 各窓の可視外形 (外形 − 前面窓の外形) の断片ごとに
   `chrome::draw_window_chrome(.., clip)` で描き、全プリミティブとタイトル文字 (セル単位) をクリップ。
   ホスト試験 `host/wm_composite_tests.rs` 3 本 (RED 2 → GREEN、`check-gshell-host` 37 passed)。**実機未確認**
-  (32MB で G3 の 4 本起動を再実行して確認する)。同族の未修正: ドラッグ枠 `draw_drag_outline` はクリップ無し
+  → **実機確認済み (2026-09-12、32MB、`36ccf15` + K7 `8cc13d8` 配備)**: 同じ 4 本起動で File Manager に線は出ない (`scratchpad/w3_4apps.png`)。同族の未修正: ドラッグ枠 `draw_drag_outline` はクリップ無し
   (他窓のクライアント面を横切ると 1px の軌跡が残りうる、再現手順外)。可視外形が 16 矩形を超えると枠が欠ける側に倒す。
