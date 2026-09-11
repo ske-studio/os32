@@ -1572,3 +1572,243 @@ fn a_running_app_yields_to_a_parked_app_that_has_a_deliverable_paint() {
     assert_eq!(multiapp::pick(wm::g()), 2, "露出した A が選ばれない");
     wm::g().inited = false;
 }
+
+/* ================================================================ */
+/*  W-2 — K5c への追随 (ユーザー決裁 2026-09-11 A1 / A3)             */
+/*                                                                  */
+/*  A1: CTRL+STOP の宛先はフォーカス窓のアプリ (契約 T6)。カーネルは  */
+/*      IRQ1 で「走っているアプリ」にしか要求を立てられないので、     */
+/*      フォーカスが別のアプリなら WM が `exec_abort_clear` で本人の  */
+/*      要求を降ろし、フォーカス窓の ID を `exec_kill` で畳む。       */
+/*      どちらも owner 1 (top-level) からしか呼べない (K5c) ので、    */
+/*      `op_wait` の中では**予約するだけ**で、park で top-level へ    */
+/*      戻ったところで実行する。                                     */
+/*  A3: `SWITCH_CUI` / `SHUTDOWN` で Quit に応答しないアプリは        */
+/*      `QUIT_GRACE_CYCLES` 周待ってから畳む。                       */
+/* ================================================================ */
+
+/// アプリ 2 本 (owner 2, 3) をグローバルの `GuiState` に載せる。
+/// Z 順は 0,1 なので最前面 = 窓 1 = owner 3。
+fn two_app_global(shm: &crate::mocks::Shm) {
+    use crate::{multiapp, wm};
+    let g = wm::g();
+    *g = four_app_state(shm);
+    let mut k = 2;
+    while k < 4 {
+        g.windows[k] = wm::Win::EMPTY;
+        g.slots[k] = wm::Slot::EMPTY;
+        k += 1;
+    }
+    g.z_count = 2;
+    g.inited = true;
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    multiapp::mark_resumed(2); /* 走っているのは 2 */
+}
+
+/* ---- (a) フォーカスが本人なら abort は取り消さない ---- */
+#[test]
+fn ctrl_stop_with_focus_on_the_running_app_keeps_the_kernel_abort() {
+    use crate::{mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    focus_app(wm::g(), 2); /* フォーカス = 走っている本人 */
+    wm::g().abort_seen = true;
+
+    drive_op_wait(2, 3);
+
+    assert_eq!(
+        mocks::abort_clear_calls(),
+        0,
+        "フォーカスが本人なのに exec_abort_clear を呼んだ (本人が畳まれない)"
+    );
+    assert!(
+        mocks::kill_calls().is_empty(),
+        "フォーカスが本人なのに exec_kill を予約した: {:?}",
+        mocks::kill_calls()
+    );
+    assert!(
+        !multiapp::pending_top_level_work(),
+        "top-level の予約が残った (フォーカス = 本人は現行どおりのはず)"
+    );
+    wm::g().inited = false;
+}
+
+/* ---- (b) フォーカスが別アプリなら取り消し + フォーカス窓を kill ---- */
+#[test]
+fn ctrl_stop_with_focus_on_another_app_clears_the_abort_and_kills_the_focused_one() {
+    use crate::{mocks, multiapp, session, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    focus_app(wm::g(), 3); /* フォーカス = 別のアプリ */
+    wm::g().abort_seen = true;
+
+    drive_op_wait(2, 3);
+
+    /* `op_wait` の中では owner がアプリ ID なので KAPI は呼べない (K5c)。 */
+    assert_eq!(
+        mocks::abort_clear_calls(),
+        0,
+        "op_wait の中から exec_abort_clear を呼んだ (owner 1 でないので ERR_INVAL)"
+    );
+    assert!(
+        multiapp::pending_top_level_work(),
+        "取り消しと kill が top-level へ持ち越されていない"
+    );
+    /* 持ち越すには top-level へ戻る = 譲るしかない。 */
+    assert!(
+        mocks::PARKS.load(Ordering::SeqCst) >= 1,
+        "予約を積んだのに top-level へ戻ろうとしていない (永久に実行されない)"
+    );
+
+    /* top-level の 1 周 (単独ループの `resume_one`)。 */
+    assert!(multiapp::resume_one(wm::g()), "top-level が予約を実行しない");
+    assert_eq!(
+        mocks::abort_clear_calls(),
+        1,
+        "exec_abort_clear がちょうど 1 回でない"
+    );
+    assert_eq!(
+        mocks::kill_calls(),
+        vec![3],
+        "畳む相手がフォーカス窓の owner でない"
+    );
+    assert!(multiapp::is_tracked(2), "走っている本人まで畳んでしまった");
+    assert!(!multiapp::is_tracked(3), "kill した ID が表に残った");
+    wm::g().inited = false;
+}
+
+/* ---- (c) SWITCH_CUI: Quit に応答しないアプリは N 周後に畳む ---- */
+#[test]
+fn switch_cui_folds_an_app_that_ignores_quit_after_the_grace_cycles() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+
+    /* 全アプリへ Quit を配る (契約 S5)。 */
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+    assert_eq!(
+        session::quit_grace_left(),
+        session::QUIT_GRACE_CYCLES,
+        "Quit を配ったのに猶予が始まっていない"
+    );
+
+    /* アプリ 3 は Quit に応じて終了した (回収は `gui_owner_exit` 経由)。 */
+    wm::g().reclaim_owner(3);
+    session::reclaim_owner(3);
+    multiapp::on_owner_exit(3);
+
+    /* アプリ 2 は Quit を無視して待ち続ける。N-1 周ではまだ畳まない。 */
+    let mut n = 0;
+    while n < session::QUIT_GRACE_CYCLES - 1 {
+        session::x3_cycle(wm::g());
+        n += 1;
+    }
+    assert!(
+        !multiapp::pending_top_level_work(),
+        "猶予が切れる前に畳もうとした ({n} 周)"
+    );
+
+    /* N 周目で打ち切り。 */
+    session::x3_cycle(wm::g());
+    assert!(
+        multiapp::pending_top_level_work(),
+        "N 周待っても応答しないアプリが畳まれない (SWITCH_CUI が永久に成立しない)"
+    );
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(
+        mocks::kill_calls(),
+        vec![2],
+        "応答したアプリまで畳んだ / 相手が違う"
+    );
+    assert_eq!(multiapp::live_count(), 0, "全回収になっていない");
+    wm::g().inited = false;
+}
+
+/* ---- (c') 全員が応答したら誰も畳まない ---- */
+#[test]
+fn switch_cui_kills_nobody_when_every_app_answers_the_quit() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+
+    let mut id = 2;
+    while id <= 3 {
+        wm::g().reclaim_owner(id);
+        session::reclaim_owner(id);
+        multiapp::on_owner_exit(id);
+        id += 1;
+    }
+    let mut n = 0;
+    while n < session::QUIT_GRACE_CYCLES + 2 {
+        session::x3_cycle(wm::g());
+        n += 1;
+    }
+    assert_eq!(
+        session::quit_grace_left(),
+        0,
+        "全員が応答したのに猶予が走り続けている"
+    );
+    assert!(
+        mocks::kill_calls().is_empty(),
+        "応答したアプリを畳んだ: {:?}",
+        mocks::kill_calls()
+    );
+    assert!(session::ready_to_run(wm::g()), "全回収なのに SWITCH_CUI が実行できない");
+    wm::g().inited = false;
+}
+
+/* ---- (d) 1 本のときは現行と同じ経路 (kill 0 回) ---- */
+#[test]
+fn a_single_app_keeps_the_old_ctrl_stop_path() {
+    use crate::{mocks, multiapp, session, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = four_app_state(&shm);
+        let mut k = 1;
+        while k < 4 {
+            g.windows[k] = wm::Win::EMPTY;
+            g.slots[k] = wm::Slot::EMPTY;
+            k += 1;
+        }
+        g.z_count = 1;
+        g.inited = true;
+        g.abort_seen = true;
+    }
+    multiapp::on_start(2);
+    multiapp::mark_resumed(2);
+
+    drive_op_wait(2, 3);
+
+    /* 1 本しか居なければ「フォーカス = 本人」なので、抜けてカーネルに
+     * 畳ませる現行の経路そのまま。KAPI は 1 つも増えない。 */
+    assert_eq!(mocks::abort_clear_calls(), 0, "1 本なのに exec_abort_clear を呼んだ");
+    assert!(
+        mocks::kill_calls().is_empty(),
+        "1 本なのに exec_kill を呼んだ: {:?}",
+        mocks::kill_calls()
+    );
+    assert_eq!(
+        mocks::PARKS.load(Ordering::SeqCst),
+        0,
+        "1 本なのに exec_park を呼んだ (回帰)"
+    );
+    assert!(!multiapp::pending_top_level_work(), "1 本なのに予約が積まれた");
+    wm::g().inited = false;
+}

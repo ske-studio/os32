@@ -18,6 +18,8 @@
 | 5 | 最終 (K5b-W 本体) | **27 passed / 0 failed** (旧 12 + 新 15) |
 | 6 | 追補 W-1 の RED | 27 passed / 2 failed |
 | 7 | 追補 W-1 の GREEN | **29 passed / 0 failed** (27 + 新 2) |
+| 8 | 追補 W-2 (K5c 追随、決裁 A1 / A3) の RED | 32 passed / 2 failed |
+| 9 | 追補 W-2 の GREEN | **34 passed / 0 failed** (29 + 新 5) |
 
 ## 回 1 — RED
 
@@ -291,3 +293,131 @@ make check-gshell-host   → 29 passed / 0 failed
 - 全体ゲート (`make all` / `make external` / `make check`) は回していない (テスター担当)。
 - 観測 3 の「クリック後に上半分だけ描く」は、上の式で説明はついたが**実機では未再現**
   (ホスト試験は起動直後の状態までしか作っていない)。
+
+# 追補 W-2 — K5c への追随 (ユーザー決裁 2026-09-11 A1 / A3)
+
+> 票の末尾「決裁」: [`docs/tasks/gui/v13/TASK_K5B_gshell.md`](../../docs/tasks/gui/v13/TASK_K5B_gshell.md)
+> 前提: K5c (`exec_abort_clear` = KAPI v45、Rust 生成器の `i32`) を取り込んだ上で作業。
+
+## 直したこと 3 つ
+
+1. **型の追随 (A2 の余波)**: K5c で `exec_start` / `exec_resume` / `exec_park` /
+   `exec_kill` / `exec_app_state` / `snd_focus` の Rust 束縛が `i32` になった。
+   `multiapp.rs` の `exec_resume(k as u32, wait_ret as u32)` / `exec_kill(id as u32)` が
+   E0308。`as u32` と、対になっていた `as i32` の往復キャストを 4 か所
+   (`multiapp.rs` の park / resume / kill、`lib.rs` の `exec_start`) から落とした。
+   挙動不変 — ABI は前から EAX の `i32`。
+2. **A1: CTRL+STOP はフォーカス窓のアプリ宛** (契約 T6)。
+3. **A3: `SWITCH_CUI` / `SHUTDOWN` で Quit に応答しないアプリの打ち切り**。
+
+## A1 の形 — 「取り消したい」も予約として持ち越す
+
+カーネルは IRQ1 で「いま走っているアプリ」にしか abort を立てられない
+(`appslot_abort_request`)。契約 T6 の宛先はフォーカス窓のアプリなので、
+フォーカスが別のアプリなら走っている本人の要求を降ろす必要がある。
+
+ところが K5c の注記どおり **`exec_abort_clear` も `exec_kill` も owner 1
+(= WM top-level) からしか呼べない**。`op_wait` ハンドラの中では owner が
+アプリ ID なので `OS32_ERR_INVAL` になる。そこで:
+
+```text
+  op_wait の中 (owner = アプリ ID)
+    st.abort_seen かつ フォーカス ≠ 本人
+      └ multiapp::redirect_abort()  ── abort_clear_req = true / request_kill(フォーカス)
+  should_park の (a)
+    └ has_top_level_work() が真 → 譲る (= exec_park)
+  top-level (owner 1、lib.rs の単独ループ → multiapp::resume_one)
+    └ drain_top_level()  ── (1) exec_abort_clear()  (2) exec_kill(id) を 1 本
+```
+
+`should_park` の (a) に予約を足したのが肝で、これが無いと **アプリが 1 本のとき**
+(誰も ready でないので (b) の `other_ready` が偽) に top-level へ戻る道が無く、
+付け替えも打ち切りも永久に実行されない。
+
+`drain_top_level` は**取り消しを畳むより先に**行う。逆にすると `exec_kill` の
+間に走っている本人が syscall の出口を通って巻き添えで死ぬ。
+
+1 本しか居ないときは「フォーカス = 本人」なので `abort_targets_current` が真、
+= これまでどおり待ちを抜けてカーネルに畳ませる (回帰ゼロ)。
+
+## A3 の形 — 定数の根拠
+
+`session.rs` に `QUIT_GRACE_CYCLES = 300`。`arm_quit` (= `SWITCH_CUI` /
+`SHUTDOWN` のときだけ呼ばれる) で猶予を仕掛け、`session::x3_cycle`
+(`wm::wm_cycle` が 1 周に 1 回呼ぶ) で 1 ずつ減らす。0 になったら
+`multiapp::request_kill_all()`。
+
+根拠: 待っている間の WM の 1 周は `op_wait` の待ちループも単独ループも
+「`wm_cycle` → `sys_halt`」で、`sys_halt` は PIT (100Hz = 10ms) で必ず起きる。
+1 周 = 10ms なので **300 周 ≒ 3 秒**。アプリが走り続けている間は `sys_halt` を
+通らないぶん 1 周が短くなるだけなので、3 秒はこの待ちの**上界**になる。
+
+順序は決裁どおり「全アプリへ Quit → 待ち → 残りを kill → 全回収 →
+SessionAction 実行」。最後の 2 つは既存の `ready_to_run`
+(`!owner_active` = 全回収の確認) と top-level の `resume_one` が担う。
+Quit に応じたアプリは `gui_owner_exit` で `multiapp` の表から落ちているので
+`request_kill_all` の対象に入らない = 畳まれない。確認ダイアログが既に
+「保存していない内容は失われます」と警告しているので追加の UI は無し。
+
+## 回 8 — RED
+
+`userland/gshell/host/mocks.rs` に `exec_abort_clear` の差し替え
+(`ABORT_CLEARS` の回数記録) を足し、束縛を `i32` 版へ直した上で、
+`wm_tests.rs` に 5 本追加。実装側は**空実装**
+(`multiapp::pending_top_level_work` → `false`、`session::QUIT_GRACE_CYCLES` の
+定数だけ置いて `quit_grace_left` → `0`) で走らせた。
+
+| 新しい試験 | RED |
+|---|---|
+| (a) `ctrl_stop_with_focus_on_the_running_app_keeps_the_kernel_abort` | pass (回帰の見張り。空実装でも通るのが正しい) |
+| (b) `ctrl_stop_with_focus_on_another_app_clears_the_abort_and_kills_the_focused_one` | **FAIL** 「取り消しと kill が top-level へ持ち越されていない」 |
+| (c) `switch_cui_folds_an_app_that_ignores_quit_after_the_grace_cycles` | **FAIL** 「Quit を配ったのに猶予が始まっていない」 |
+| (c') `switch_cui_kills_nobody_when_every_app_answers_the_quit` | pass (対照群。空実装でも通るのが正しい) |
+| (d) `a_single_app_keeps_the_old_ctrl_stop_path` | pass (回帰の見張り) |
+
+```
+make check-gshell-host → 32 passed / 2 failed
+```
+
+(a) / (c') / (d) が RED で落ちないのは意図したとおり — この 3 本は
+「**増やした経路が 1 本のときの挙動を変えていない**」ことの見張りなので、
+何もしない実装でも通る。落ちる側 (b) / (c) が新しい振る舞いを釘付けにする。
+
+## 回 9 — GREEN
+
+実装は 4 ファイル:
+
+| ファイル | 足したもの |
+|---|---|
+| `multiapp.rs` | `abort_clear_req`、`redirect_abort` / `request_kill_all` / `has_top_level_work`、`drain_kills` → `drain_top_level`、`should_park` の (a) に予約を追加 |
+| `handler.rs` | `op_wait` の CTRL+STOP 分岐で、宛先が別アプリなら `redirect_abort` |
+| `session.rs` | `QUIT_GRACE_CYCLES` / `quit_grace`、`arm_quit` で仕掛け、`x3_cycle` で `tick_quit_grace` |
+| `host/mocks.rs` | `exec_abort_clear` の差し替えと `ABORT_CLEARS`、v45 の `i32` 束縛 |
+
+D11 の規則 (`INPUT_STREAK_MAX` / `turn_used` / フォーカス優先 / 上界 30) は
+**1 行も触っていない**。`should_park` に足したのは (a) の「top-level にしか
+出来ない仕事」の項で、起動要求と同じく**有限個の事象**なので D11-3a の上界は
+変わらない。
+
+**結果**: `34 tests: 34 passed / 0 failed` (既存 29 本は維持)。
+
+```
+make CROSS_DIR=... gshell
+  OS32X: gshell.bin (text=157056, bss=17964, heap=1048576, load=0x300000, api>=45)
+  (Rust の警告 0。ld の 2 件は既存のツールチェーン警告)
+make check-gshell-host   → 34 passed / 0 failed
+make check-kapi-version  → v45 一致 (4 箇所)
+make kernel              → EXIT=0
+```
+
+## この追補で**測っていないこと** ([V4])
+
+- **ゲスト未検証**。CTRL+STOP の付け替え (A1) も Quit 無視の打ち切り (A3) も、
+  実機で押したところは 1 回も見ていない。ホストで押さえたのは
+  「WM が誰に何を予約し、top-level で何を呼ぶか」という判断だけ。
+- `exec_abort_clear` が**実際に owner 1 からしか通らない**ことと、降ろした後に
+  本人が生き延びることはカーネル側の領分 (`tools/tests/multiapp_impl_host.c`
+  ケース 20 が実物の `AppSlot` で検査済み、K5c)。ホストのモックは回数を数えるだけ。
+- `QUIT_GRACE_CYCLES = 300` が実機で何秒になるかは**未実測**。PIT 100Hz から
+  換算した上界で、忙しいときは短くなる。3 秒が体感として妥当かは実機の判断待ち。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない (テスター担当)。

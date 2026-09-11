@@ -104,6 +104,10 @@ pub struct Multi {
     /// 居ない** (表に載る id は `exec_start` の戻り値そのもの) ので、この間だけ
     /// 走っている ID を表へ迎える ([`should_park`] の adopt)。
     pending_start: bool,
+    /// top-level で `exec_abort_clear` する予約 (決裁 A1)。CTRL+STOP の宛先が
+    /// フォーカス窓の**別の**アプリだったとき、走っている本人が負っている
+    /// 要求を降ろす。KAPI は owner 1 からしか通らない (K5c) ので予約にする。
+    abort_clear_req: bool,
 }
 
 impl Multi {
@@ -114,6 +118,7 @@ impl Multi {
         running: 0,
         snd_owner: APP_ID_SHELL,
         pending_start: false,
+        abort_clear_req: false,
     };
 }
 
@@ -257,6 +262,67 @@ pub fn request_kill(id: i32) {
             m().apps[i].kill_req = true;
         }
     }
+}
+
+/// 生きているアプリ全部に `exec_kill` を予約する (決裁 A3 の「残りを kill」)。
+/// 戻り値は予約した本数。Quit に応答した本は `gui_owner_exit` で表から落ちて
+/// いるので、ここには残らない = 畳まれない。
+pub fn request_kill_all() -> usize {
+    let mm = m();
+    let mut n = 0;
+    let mut i = 0;
+    while i < MAX_APPS {
+        if mm.apps[i].alive {
+            mm.apps[i].kill_req = true;
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// top-level (owner 1) でしか実行できない予約が溜まっているか。
+///
+/// `exec_abort_clear` も `exec_kill` も owner 1 からしか通らない (K5c の注記。
+/// `op_wait` の中は owner = アプリ ID なので `OS32_ERR_INVAL`)。予約が溜まって
+/// いる間は走っているアプリに譲らせて top-level へ戻す — [`should_park`] の (a)。
+/// ゲストの判断は [`should_park`] の中で `has_top_level_work` を直に見るので、
+/// この公開版を呼ぶのは試験だけ。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn pending_top_level_work() -> bool {
+    has_top_level_work(m())
+}
+
+fn has_top_level_work(mm: &Multi) -> bool {
+    if mm.abort_clear_req {
+        return true;
+    }
+    let mut i = 0;
+    while i < MAX_APPS {
+        if mm.apps[i].alive && mm.apps[i].kill_req {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// CTRL+STOP の宛先がフォーカス窓の**別の**アプリだったとき (契約 T6、決裁 A1)。
+///
+/// カーネルは IRQ1 で「いま走っているアプリ」にしか要求を立てられないので、
+/// そのままにすると**意図しない 1 本が死ぬ**。走っている本人の要求を降ろし
+/// (`exec_abort_clear`)、フォーカス窓の owner を畳む (`exec_kill`)。どちらも
+/// owner 1 からしか呼べないので、ここでは**予約するだけ**。
+/// [`should_park`] が予約を見て譲らせ、top-level の [`drain_top_level`] が実行する。
+pub fn redirect_abort(st: &GuiState, cur: i32) {
+    let f = st.front_owner();
+    if f == 0 || f == cur {
+        return; /* 呼ぶ側 (`abort_targets_current`) が弾いている経路 */
+    }
+    m().abort_clear_req = true;
+    /* フォーカス窓の owner が WM の握るアプリでなければ (シェル帯の窓など)
+     * 畳む相手は居ない。取り消しだけ行う = 誰も死なない。 */
+    request_kill(f);
 }
 
 /* ================================================================ */
@@ -436,8 +502,12 @@ pub fn should_park(st: &GuiState, cur: i32) -> bool {
         }
         adopt_running(cur);
     }
-    /* (a) top-level の仕事 (契約 S2 の 4 本前提の読み替え)。 */
-    if session::ready_to_run(st) || st.launch_pending {
+    /* (a) top-level の仕事 (契約 S2 の 4 本前提の読み替え)。
+     * `exec_abort_clear` / `exec_kill` の予約 (決裁 A1 / A3) も owner 1 から
+     * しか実行できないので、ここに含める。含めないと**アプリが 1 本のとき**
+     * (誰も ready でないので下の (b) が偽) に top-level へ戻る道が無く、
+     * CTRL+STOP の付け替えも Quit 無視の打ち切りも永久に実行されない。 */
+    if session::ready_to_run(st) || st.launch_pending || has_top_level_work(mm) {
         return true;
     }
     /* (b) D11-3 (1) の 3 行。 */
@@ -472,9 +542,9 @@ pub fn maybe_park(st: &mut GuiState, cur: i32, deadline: Option<u32>) {
         return;
     }
     note_parked(cur, deadline);
-    /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
-     * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので戻す。 */
-    let rc = unsafe { (os32api::api().exec_park)() as i32 };
+    /* KAPI v45 (K5c) で生成器の TYPE_MAP に "i32" が入ったので、束縛はもう
+     * `i32` を返す。u32 経由の往復は要らない。 */
+    let rc = unsafe { (os32api::api().exec_park)() };
     /* ここへ来たのは park が成立しなかったとき (`OS32_ERR_INVAL`)。 */
     undo_park(cur);
     let _ = rc;
@@ -520,7 +590,7 @@ fn undo_park(cur: i32) {
 /// **`exec_resume` を呼ぶ唯一の点**。呼べるのは WM top-level だけで
 /// (カーネルの `appslot_resume_check`)、印の無いフレームは `OS32_ERR_STALE`。
 pub fn resume_one(st: &mut GuiState) -> bool {
-    if drain_kills() {
+    if drain_top_level() {
         return true;
     }
     let k = pick(st);
@@ -537,13 +607,13 @@ pub fn resume_one(st: &mut GuiState) -> bool {
         }
     };
     mark_resumed(k);
-    let rc = unsafe { (os32api::api().exec_resume)(k as u32, wait_ret as u32) as i32 };
+    let rc = unsafe { (os32api::api().exec_resume)(k, wait_ret) };
     m().running = 0;
     if rc < 0 {
         /* 起こせない (印無し / 状態違い)。放置すると永久に固まるので、
          * 「止めてあるアプリを畳む」口 (D4) をそのまま使って畳む。 */
         request_kill(k);
-        drain_kills();
+        drain_top_level();
         forget(k);
     }
     /* rc == 0 は終了 (回収は `gui_owner_exit` 経由で済んでいる)、
@@ -551,15 +621,27 @@ pub fn resume_one(st: &mut GuiState) -> bool {
     true
 }
 
-/// 予約されている `exec_kill` を 1 件だけ実行する (`true` = 実行した)。
-fn drain_kills() -> bool {
+/// top-level (owner 1) でしか実行できない予約を片付ける (`true` = 何かした)。
+///
+/// 順序が肝: **CTRL+STOP の取り消しを畳むより先に**行う (決裁 A1)。逆にすると
+/// `exec_kill` の間に走っている本人が syscall の出口を通って巻き添えで死ぬ。
+/// `exec_kill` は 1 周に 1 本だけ — 呼ぶ側 (`resume_one`) が次の周でまた来る。
+fn drain_top_level() -> bool {
     let mm = m();
+    let mut did = false;
+    if mm.abort_clear_req {
+        mm.abort_clear_req = false;
+        unsafe {
+            (os32api::api().exec_abort_clear)();
+        }
+        did = true;
+    }
     let mut i = 0;
     while i < MAX_APPS {
         if mm.apps[i].alive && mm.apps[i].kill_req {
             let id = APP_ID_MIN + i as i32;
             mm.apps[i].kill_req = false;
-            let rc = unsafe { (os32api::api().exec_kill)(id as u32) as i32 };
+            let rc = unsafe { (os32api::api().exec_kill)(id) };
             if rc < 0 {
                 /* 走っている本人 (`OS32_ERR_STALE`) など。予約は落としたまま。 */
                 return true;
@@ -569,7 +651,7 @@ fn drain_kills() -> bool {
         }
         i += 1;
     }
-    false
+    did
 }
 
 /// 表から 1 本落とす (`gui_owner_exit` が来なかった経路の保険)。

@@ -258,10 +258,9 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
      * いる ID はまだ分かっていない (戻り値そのものなので) ので、譲り合いの表に
      * 「起動が進行中」の印を立てておく (`multiapp::begin_start` の注記)。 */
     multiapp::begin_start();
-    /* 生成物の Rust 束縛は `i32` を u32 として吐く (sdk/kapi_rust_gen.py の
-     * TYPE_MAP に "i32" が無い)。ABI は EAX の i32 のままなので、ここで戻す。
-     * 生成物は手で触らない ([ABI1])。 */
-    let rc = unsafe { (os32api::api().exec_start)(path.as_ptr()) as i32 };
+    /* KAPI v45 (K5c) で生成器が `i32` を吐くようになったので、u32 経由の
+     * 往復は要らない。生成物は手で触らない ([ABI1])。 */
+    let rc = unsafe { (os32api::api().exec_start)(path.as_ptr()) };
     multiapp::end_start(rc);
     /* 描画モードの復帰は **アプリが抜けたときだけ** (不具合 W-1、2026-09-11)。
      *

@@ -253,6 +253,8 @@ pub static START_SCRIPT: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 pub static KILLS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// `snd_focus(app_id)` の呼び出し列。
 pub static SND_FOCUS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `exec_abort_clear()` が呼ばれた回数 (KAPI v45、決裁 A1)。
+pub static ABORT_CLEARS: AtomicUsize = AtomicUsize::new(0);
 
 /// 中毒 (panic 中に掴んでいた) した Mutex でも読めるようにする。検査が
 /// `assert!(*X.lock().unwrap() == ..)` で落ちると次の試験まで巻き添えになる。
@@ -276,6 +278,10 @@ pub fn kill_calls() -> Vec<i32> {
 pub fn start_calls() -> Vec<Vec<u8>> {
     lk(&STARTS).clone()
 }
+/// `exec_abort_clear()` が呼ばれた回数。
+pub fn abort_clear_calls() -> usize {
+    ABORT_CLEARS.load(Ordering::SeqCst)
+}
 
 /// `gfx_init` が呼ばれた回数。
 pub static GFX_INITS: AtomicUsize = AtomicUsize::new(0);
@@ -289,44 +295,46 @@ unsafe extern "C" fn gfx_init() {
     clear(0);
 }
 
-unsafe extern "C" fn exec_park() -> u32 {
+unsafe extern "C" fn exec_park() -> i32 {
     PARKS.fetch_add(1, Ordering::SeqCst);
-    *lk(&PARK_RET) as u32
+    *lk(&PARK_RET)
 }
-unsafe extern "C" fn exec_resume(app_id: u32, wait_ret: u32) -> u32 {
-    RESUMES
-        .lock()
-        .unwrap()
-        .push((app_id as i32, wait_ret as i32));
+unsafe extern "C" fn exec_resume(app_id: i32, wait_ret: i32) -> i32 {
+    lk(&RESUMES).push((app_id, wait_ret));
     let mut q = lk(&RESUME_SCRIPT);
     if q.is_empty() {
         app_id
     } else {
-        q.remove(0) as u32
+        q.remove(0)
     }
 }
-unsafe extern "C" fn exec_start(cmdline: *const u8) -> u32 {
+unsafe extern "C" fn exec_start(cmdline: *const u8) -> i32 {
     let mut n = 0;
     while *cmdline.add(n) != 0 && n < 256 {
         n += 1;
     }
-    STARTS
-        .lock()
-        .unwrap()
-        .push(std::slice::from_raw_parts(cmdline, n).to_vec());
+    lk(&STARTS).push(std::slice::from_raw_parts(cmdline, n).to_vec());
     let mut q = lk(&START_SCRIPT);
     if q.is_empty() {
         2
     } else {
-        q.remove(0) as u32
+        q.remove(0)
     }
 }
-unsafe extern "C" fn exec_kill(app_id: u32) -> u32 {
-    lk(&KILLS).push(app_id as i32);
+unsafe extern "C" fn exec_kill(app_id: i32) -> i32 {
+    lk(&KILLS).push(app_id);
     0
 }
-unsafe extern "C" fn snd_focus(app_id: i32) -> u32 {
+unsafe extern "C" fn snd_focus(app_id: i32) -> i32 {
     lk(&SND_FOCUS).push(app_id);
+    0
+}
+/* KAPI v45 (K5c、決裁 A1)。owner 1 (WM top-level) からしか呼べないので、
+ * ゲストでは `op_wait` の中から呼ぶと `OS32_ERR_INVAL`。ここは回数を数える
+ * だけ — 「どこから呼んだか」はカーネル側の領分
+ * (`tools/tests/multiapp_impl_host.c` ケース 20 が実物の AppSlot で検査済み)。 */
+unsafe extern "C" fn exec_abort_clear() -> i32 {
+    ABORT_CLEARS.fetch_add(1, Ordering::SeqCst);
     0
 }
 
@@ -356,6 +364,7 @@ pub fn init() {
     a.exec_resume = exec_resume;
     a.exec_start = exec_start;
     a.exec_kill = exec_kill;
+    a.exec_abort_clear = exec_abort_clear;
     a.snd_focus = snd_focus;
     lk(&RAWKEYS).clear();
     lk(&IME_SCRIPT).clear();
@@ -368,6 +377,7 @@ pub fn init() {
     lk(&START_SCRIPT).clear();
     lk(&KILLS).clear();
     lk(&SND_FOCUS).clear();
+    ABORT_CLEARS.store(0, Ordering::SeqCst);
     crate::multiapp::reset();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);

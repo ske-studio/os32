@@ -34,6 +34,19 @@ use os32api::gui::proto::{
 /// LAUNCH の絶対パスに載る最大バイト数 (契約 S4 の `GuiString`)。
 pub const PATH_MAX: usize = 255;
 
+/// `Quit` を配ってから応答しないアプリを打ち切るまでの **WM の周回数**
+/// (決裁 A3、2026-09-11)。
+///
+/// 根拠: 待っている間の WM の 1 周は `op_wait` の待ちループも単独ループも
+/// 「`wm_cycle` → `sys_halt`」で、`sys_halt` は PIT (100Hz = 10ms) で必ず
+/// 起きる。つまり 1 周 = 10ms なので **300 周 ≒ 3 秒**。アプリが走り続けて
+/// いる間は `sys_halt` を通らないぶん 1 周が短くなるだけなので、3 秒は
+/// この待ちの**上界** (最悪でも 3 秒で畳む) になる。
+///
+/// 確認ダイアログが既に「保存していない内容は失われます」と警告しているので、
+/// 打ち切りに追加の UI は要らない。
+pub const QUIT_GRACE_CYCLES: u32 = 300;
+
 /* ================================================================ */
 /*  状態                                                             */
 /* ================================================================ */
@@ -59,6 +72,9 @@ pub struct Session {
     path: [u8; PATH_MAX + 1],
     path_len: usize,
     quit: [QuitPend; GUI_SLOT_MAX],
+    /// `Quit` を配ってから打ち切るまでに残っている WM の周回数
+    /// (0 = 猶予を数えていない)。[`QUIT_GRACE_CYCLES`] から減る。
+    quit_grace: u32,
 }
 
 impl Session {
@@ -67,6 +83,7 @@ impl Session {
         path: [0; PATH_MAX + 1],
         path_len: 0,
         quit: [QuitPend::NEW; GUI_SLOT_MAX],
+        quit_grace: 0,
     };
 }
 
@@ -91,6 +108,13 @@ pub fn clear() {
     st.action = 0;
     st.path_len = 0;
     st.path[0] = 0;
+    st.quit_grace = 0;
+}
+
+/// 打ち切りまでに残っている周回数 (試験と診断用。0 = 数えていない)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub fn quit_grace_left() -> u32 {
+    s().quit_grace
 }
 
 /// 保留中の LAUNCH パスを NUL 終端で `out` へ写す。戻り値はバイト数
@@ -204,7 +228,29 @@ fn arm_quit(st: &mut GuiState, reason: u8) {
         }
         i += 1;
     }
+    /* 決裁 A3: ここから猶予を数え始める。順序は
+     * 「全アプリへ Quit → 待ち → 残りを kill → 全回収 → SessionAction 実行」。
+     * 最後の 2 つは `ready_to_run` (全回収の確認) と top-level の
+     * `multiapp::resume_one` (予約の実行) が担う。 */
+    s().quit_grace = QUIT_GRACE_CYCLES;
     retry_all(st);
+}
+
+/// 猶予を 1 周ぶん進める (決裁 A3)。切れたら生きているアプリ全部に
+/// `exec_kill` を予約する — 実行は top-level (`multiapp::resume_one`)。
+fn tick_quit_grace(st: &GuiState) {
+    if s().quit_grace == 0 {
+        return;
+    }
+    /* action を実行した / 全員が Quit に応じて回収された。数える必要はない。 */
+    if s().action == 0 || !owner_active(st) {
+        s().quit_grace = 0;
+        return;
+    }
+    s().quit_grace -= 1;
+    if s().quit_grace == 0 {
+        crate::multiapp::request_kill_all();
+    }
 }
 
 /// この owner が持つ最前面の窓 id (無ければ 0)。
@@ -258,10 +304,10 @@ fn retry_all(st: &mut GuiState) {
     }
 }
 
-/// X3 の周期ごとに呼ぶ再試行 (契約 S5)。
-#[inline]
+/// X3 の周期ごとに呼ぶ再試行 (契約 S5) と、`Quit` の猶予の歩進 (決裁 A3)。
 pub fn x3_cycle(st: &mut GuiState) {
     retry_all(st);
+    tick_quit_grace(st);
 }
 
 /// owner が回収された (正常終了 / CTRL+STOP / fault kill)。

@@ -390,6 +390,12 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
             if multiapp::abort_targets_current(st, owner) {
                 break;
             }
+            /* 宛先はフォーカス窓の**別の**アプリ (決裁 A1)。走っている本人が
+             * 負っている要求を降ろし、フォーカス窓の owner を畳む — どちらも
+             * owner 1 (WM top-level) からしか呼べない (K5c) ので、ここでは
+             * 予約だけ積む。`should_park` がこの予約を見て譲らせ、park で
+             * top-level へ戻ったところで両方が実行される。 */
+            multiapp::redirect_abort(st, owner);
         }
         if wake_ready(st, owner, slot_no) {
             break;
