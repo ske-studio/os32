@@ -184,9 +184,10 @@ extern i32 __cdecl wrap_exec_park(void);
 extern i32 __cdecl wrap_exec_kill(i32 app_id);
 extern i32 __cdecl wrap_exec_app_state(i32 app_id);
 extern i32 __cdecl wrap_snd_focus(int app_id);
+extern i32 __cdecl wrap_exec_abort_clear(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 44;
+kapi->version = 45;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -374,5 +375,6 @@ kapi->version = 44;
     kapi->exec_kill = wrap_exec_kill;
     kapi->exec_app_state = wrap_exec_app_state;
     kapi->snd_focus = wrap_snd_focus;
+    kapi->exec_abort_clear = wrap_exec_abort_clear;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

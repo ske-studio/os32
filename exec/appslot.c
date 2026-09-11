@@ -332,6 +332,33 @@ int appslot_abort_request(void)
     return 1;
 }
 
+/* ======================================================================== */
+/*  appslot_abort_clear — CTRL+STOP の要求を降ろす (KAPI v45、決裁 A1)       */
+/*                                                                          */
+/*  IRQ1 は宛先を選べないので「いま走っているアプリ」に無条件で立てる        */
+/*  (appslot_abort_request)。契約 T6 の宛先はフォーカス窓のアプリなので、    */
+/*  別アプリが走っていたときは WM がこれで要求を降ろし、フォーカス窓の ID を */
+/*  exec_kill で畳む。降ろさないと「意図しない 1 本が次の syscall で死ぬ」。 */
+/*                                                                          */
+/*  要求を負えるのは走っている 1 本だけなので対象は高々 1 本。ただし WM が   */
+/*  top-level (owner 1) へ戻るのは park の後なので、そのときスロットの状態は */
+/*  PARKED になっている — 状態では絞らず「要求を負っている ID」で探す。      */
+/*  降ろすのは abort_req だけで、state / in_op_wait / parked_from_wait と    */
+/*  他の ID のスロットには触らない。                                         */
+/* ======================================================================== */
+int appslot_abort_clear(void)
+{
+    int i;
+
+    /* gui_register と同じ判定: シェル帯 (owner 1) からのみ。 */
+    if (res_owner_get() != APP_ID_SHELL) return OS32_ERR_INVAL;
+
+    for (i = APP_ID_MIN; i <= APP_ID_MAX; i++) {
+        if (g_slot[i].state != APP_STATE_FREE) g_slot[i].abort_req = 0;
+    }
+    return 0;
+}
+
 int appslot_state(int id)
 {
     AppSlot *a;

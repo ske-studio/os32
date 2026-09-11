@@ -42,7 +42,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[186];
+volatile u32 kapi_hits[187];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -234,6 +234,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* exec_kill */
     4,  /* exec_app_state */
     4,  /* snd_focus */
+    0,  /* exec_abort_clear */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -425,6 +426,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* exec_kill */
     0x0000,  /* exec_app_state */
     0x0000,  /* snd_focus */
+    0x0000,  /* exec_abort_clear */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1535,5 +1537,11 @@ i32 __cdecl wrap_snd_focus(int app_id)
 {
     KAPI_HIT(185);
     return snd_focus(app_id);
+}
+
+i32 __cdecl wrap_exec_abort_clear(void)
+{
+    KAPI_HIT(186);
+    return exec_abort_clear();
 }
 

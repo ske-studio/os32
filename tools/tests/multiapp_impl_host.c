@@ -252,6 +252,12 @@ static int ma_abort_request(void)
     return appslot_abort_request() ? 0 : OS32_ERR_INVAL;
 }
 
+/* KAPI v45 exec_abort_clear の実体 (決裁 A1)。owner は呼ぶ側の文脈のまま。 */
+static int ma_abort_clear(void)
+{
+    return appslot_abort_clear();
+}
+
 static int ma_abort_check(void)
 {
     AppSlot *a = appslot_get(appslot_cur());
@@ -1034,6 +1040,85 @@ static void case_cpl0_child_needs_no_live_apps(void)
           "19z その入れ子 (アプリ帯の CPL=3) も従来どおり立つ");
 }
 
+/* ---- 20. CTRL+STOP の要求を降ろす (KAPI v45 exec_abort_clear、決裁 A1) ----
+ *
+ * IRQ1 は宛先を選べず「いま走っているアプリ」に立てるが、契約 T6 の宛先は
+ * フォーカス窓のアプリ。WM は本人の要求をこれで降ろしてからフォーカス窓の
+ * ID を exec_kill で畳む。降ろせないと本人が次の安全地点で畳まれ、
+ * 「意図しない 1 本が死ぬ」(票 K5b-W の A1 が書いた残る穴)。
+ */
+static void case_abort_clear(void)
+{
+    int owner0;
+    int r;
+
+    /* (a) owner 1 以外からは降ろせない (gui_register と同じ判定)。
+     *     && で短絡させない (RED でも後ろが素通りしてしまう)。 */
+    ma_init(4096);
+    fill_four(100);
+    ma_resume(3);
+    ma_abort_request();
+    check(appslot_get(3) != 0 && appslot_get(3)->abort_req == 1,
+          "20a 下ごしらえ: 走っている 3 に CTRL+STOP が立つ");
+    owner0 = res_owner_get();
+    r = ma_abort_clear();
+    check(owner0 == 3, "20b 下ごしらえ: owner は走っているアプリ");
+    check(r == OS32_ERR_INVAL, "20c owner 1 以外からは OS32_ERR_INVAL");
+    check(appslot_get(3) != 0 && appslot_get(3)->abort_req == 1,
+          "20d 弾かれた呼び出しは要求を降ろさない");
+
+    /* (b) park で WM top-level (owner 1) へ戻れば降ろせる。要求は park して
+     *     も残るので、状態 (RUNNING/PARKED) では対象を絞らない。 */
+    ma_gui_call(MA_OP_WAIT);
+    r = ma_park();
+    check(r == 0 && res_owner_get() == APP_ID_SHELL,
+          "20e 下ごしらえ: park して WM top-level へ戻る");
+    check(appslot_get(3) != 0 && appslot_get(3)->abort_req == 1,
+          "20f 要求は park をまたいで残る");
+    r = ma_abort_clear();
+    check(r == 0, "20g owner 1 からは 0");
+    check(appslot_get(3) != 0 && appslot_get(3)->abort_req == 0,
+          "20h 要求が降りている");
+
+    /* (c) 降ろすだけ — 他の ID にも、対象の ID の他の欄にも触らない。 */
+    check(appslot_live() == 4 && appslot_reclaim_count == 0,
+          "20i 降ろすだけで 1 本も畳まない");
+    check(appslot_get(2) != 0 && appslot_get(2)->state == APP_STATE_PARKED &&
+          appslot_get(2)->parked_from_wait == 1,
+          "20j 別の ID は印ごと無傷");
+    check(appslot_get(5) != 0 && appslot_get(5)->state == APP_STATE_PARKED &&
+          appslot_get(5)->parked_from_wait == 1,
+          "20k 別の ID は印ごと無傷 (末尾も)");
+    check(appslot_get(3)->state == APP_STATE_PARKED &&
+          appslot_get(3)->parked_from_wait == 1,
+          "20l 対象の ID も abort_req 以外は動かない");
+
+    /* (d) 降ろした後は次の安全地点で畳まれない (A1 の残る穴がふさがる)。 */
+    r = ma_resume(3);
+    check(r == 0, "20m 下ごしらえ: 3 を起こし直す");
+    r = ma_abort_check();
+    check(r == 0, "20n 降ろした後の安全地点は畳まない");
+    check(appslot_live() == 4 && appslot_get(3) != 0 &&
+          appslot_reclaim_count == 0,
+          "20o 意図しない 1 本が死なない");
+
+    /* (e) 要求が無ければ何も起きない (二度目も 0)。 */
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    r = ma_abort_clear();
+    check(r == 0, "20p 要求が無くても 0");
+    check(appslot_live() == 4 && appslot_reclaim_count == 0,
+          "20q 要求が無いときは 1 本も動かさない");
+
+    /* (f) 走っているアプリが 1 本も居ないときも 0 で、何も起きない。 */
+    ma_init(4096);
+    r = ma_abort_clear();
+    check(r == 0, "20r アプリが 1 本も居なければ 0");
+    check(appslot_live() == 0 && appslot_cur() == APP_ID_SHELL &&
+          appslot_reclaim_count == 0,
+          "20s 居なければ何も起きない");
+}
+
 int main(void)
 {
     failures = 0;
@@ -1058,6 +1143,7 @@ int main(void)
     case_resume_needs_wait_mark();
     case_shell_never_takes_app_band();
     case_cpl0_child_needs_no_live_apps();
+    case_abort_clear();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

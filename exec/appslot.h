@@ -182,6 +182,15 @@ int appslot_kill_check(int id);
 /* CTRL+STOP: 走っているアプリにだけ要求を立てる (D4)。1=立った。 */
 int appslot_abort_request(void);
 
+/* CTRL+STOP の要求を降ろす (KAPI v45 exec_abort_clear の実体、決裁 A1)。
+ * 呼べるのは owner 1 (シェル帯 = WM) だけ — それ以外は OS32_ERR_INVAL。
+ * IRQ1 は「いま走っているアプリ」に無条件で立てるが、契約 T6 の宛先は
+ * **フォーカス窓のアプリ**。別アプリが走っていたら WM がここで降ろし、
+ * フォーカス窓の ID を exec_kill で畳む。対象は要求を負っている高々 1 本
+ * (立てられるのは走っている 1 本だけなので) で、他の ID の状態は動かさない。
+ * 戻り値: 0 = 降ろした / 要求が無かった、OS32_ERR_INVAL = owner 1 でない。 */
+int appslot_abort_clear(void);
+
 /* KAPI exec_app_state の実体: 0=空き / 1=走っている / 2=park 中 / 負=不正。 */
 int appslot_state(int id);
 

@@ -1,5 +1,5 @@
 {
-  "version": 44,
+  "version": 45,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1315,6 +1315,11 @@
       "name": "snd_focus",
       "ret": "i32",
       "args": ["int app_id"]
+    },
+    {
+      "name": "exec_abort_clear",
+      "ret": "i32",
+      "args": []
     }
   ]
 }

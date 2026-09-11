@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      44   /* GUI v1.3 K5b: exec_start / exec_resume / exec_park / exec_kill / exec_app_state / snd_focus (アプリ 4 本の同時実行。v43 はネットワーク Host Services に予約済みなので飛ばす) */
+#define KAPI_VERSION      45   /* GUI v1.3 K5c: exec_abort_clear (CTRL+STOP の宛先をフォーカス窓のアプリへ — 決裁 A1)。v44 = exec_start / exec_resume / exec_park / exec_kill / exec_app_state / snd_focus (アプリ 4 本の同時実行。v43 はネットワーク Host Services に予約済みなので飛ばした) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

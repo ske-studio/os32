@@ -57,6 +57,10 @@ i32 exec_kill(i32 app_id);
 /* 0 = 空き / 1 = 走っている / 2 = park 中 / OS32_ERR_INVAL。 */
 i32 exec_app_state(i32 app_id);
 
+/* CTRL+STOP (IRQ1 が走っているアプリに立てた要求) を降ろす (KAPI v45、A1)。
+ * 0 = 降ろした / 要求が無かった、OS32_ERR_INVAL = owner 1 以外。 */
+i32 exec_abort_clear(void);
+
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
 

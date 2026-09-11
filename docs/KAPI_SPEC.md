@@ -1,4 +1,4 @@
-# KernelAPI v44 仕様書
+# KernelAPI v45 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -86,6 +86,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v42 | **実装済み (2026-09-06)** | GUI v1.1: `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2)。開発中は v41 と呼んでいたが、ime_* の追記を機に main マージ前に **v42 として確定** (2026-09-06 ユーザー承諾)。v41 の成果物は存在しない (main 未リリース) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
 | v43 | 予約 (未実装のまま据え置き) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 | v44 | **実装済み (2026-09-11、K5b-K)** | GUI v1.3 K5: アプリ 4 本の同時実行 (契約 T2a、GetMessage 方式) `exec_start` / `exec_resume` / `exec_park` / `exec_kill` / `exec_app_state` と、フォーカス追従の音の排他 `snd_focus`。owner 1 (シェル帯) 専用。カウンタはカーネルシンボル (KAPI にしない)。v43 はネットワークに予約済みなので**飛ばした** | [tasks/gui/v13/TASK_K5_multiapp.md §D8](tasks/gui/v13/TASK_K5_multiapp.md)、[TASK_K5B_kernel](tasks/gui/v13/TASK_K5B_kernel.md) |
+| v45 | **実装済み (2026-09-11、K5c)** | GUI v1.3 K5: `exec_abort_clear` — CTRL+STOP の宛先を**フォーカス窓のアプリ**にする (契約 T6、決裁 A1)。IRQ1 は走っているアプリにしか要求を立てられないので、WM が本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` する。owner 1 (シェル帯) 専用 | [tasks/gui/v13/TASK_K5B_gshell.md §決裁](tasks/gui/v13/TASK_K5B_gshell.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -378,6 +379,23 @@ CPU 実装へフォールバックする。設計: `docs/tasks/gui/API_CONTRACTS
 `ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
 FEP 対応版にあたる (エディタ等のメインループから使う)。
 
+### CTRL+STOP の宛先切り替え (v45)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x2F0 | exec_abort_clear | `i32(void)` |
+
+- `exec_abort_clear()`: IRQ1 が立てた CTRL+STOP の要求を降ろす。**owner 1 (シェル帯) からのみ**で、
+  それ以外は `OS32_ERR_INVAL`。0 = 降ろした / 要求が無かった。
+  IRQ1 の時点でカーネルが知っているのは「いま走っているアプリ」だけなので要求はそこに立つが、
+  契約 T6 の宛先は**フォーカス窓のアプリ**。WM (gshell) はフォーカス窓の owner が走っている本人で
+  なければ、これで本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` で畳む。降ろさないと
+  本人が次の syscall 境界 (`ring3_abort_check`) で畳まれ、**意図しない 1 本が死ぬ**。
+  要求を負えるのは走っている 1 本だけなので対象は高々 1 本で、`abort_req` 以外
+  (`state` / `in_op_wait` / `parked_from_wait`) と他の ID のスロットには触らない。
+  WM が top-level (owner 1) に戻るのは park の後なので、対象のスロットは PARKED になっている
+  ことがある — 状態では絞らない。
+
 ### データフィールド (構造体末尾)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
@@ -385,8 +403,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2F0 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2F4 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2F4 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2F8 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

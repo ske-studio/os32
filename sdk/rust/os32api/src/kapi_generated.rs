@@ -189,19 +189,20 @@ pub struct KernelAPI {
     /* idx 179 */ pub kbd_trygetrawkey: unsafe extern "C" fn() -> i32,
     /* idx 180 */ pub ime_feed_key: unsafe extern "C" fn(keydata: i32) -> i32,
     /* idx 181 */ pub ime_set_render: unsafe extern "C" fn(table: *mut u8),
-    /* idx 182 */ pub exec_start: unsafe extern "C" fn(cmdline: *const u8) -> u32,
-    /* idx 183 */ pub exec_resume: unsafe extern "C" fn(app_id: u32, wait_ret: u32) -> u32,
-    /* idx 184 */ pub exec_park: unsafe extern "C" fn() -> u32,
-    /* idx 185 */ pub exec_kill: unsafe extern "C" fn(app_id: u32) -> u32,
-    /* idx 186 */ pub exec_app_state: unsafe extern "C" fn(app_id: u32) -> u32,
-    /* idx 187 */ pub snd_focus: unsafe extern "C" fn(app_id: i32) -> u32,
+    /* idx 182 */ pub exec_start: unsafe extern "C" fn(cmdline: *const u8) -> i32,
+    /* idx 183 */ pub exec_resume: unsafe extern "C" fn(app_id: i32, wait_ret: i32) -> i32,
+    /* idx 184 */ pub exec_park: unsafe extern "C" fn() -> i32,
+    /* idx 185 */ pub exec_kill: unsafe extern "C" fn(app_id: i32) -> i32,
+    /* idx 186 */ pub exec_app_state: unsafe extern "C" fn(app_id: i32) -> i32,
+    /* idx 187 */ pub snd_focus: unsafe extern "C" fn(app_id: i32) -> i32,
+    /* idx 188 */ pub exec_abort_clear: unsafe extern "C" fn() -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 44;
+pub const KAPI_VERSION: u32 = 45;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

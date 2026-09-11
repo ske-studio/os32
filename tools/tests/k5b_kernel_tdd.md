@@ -546,3 +546,111 @@ python3 -B tools/check_constraints.py            # EXIT=0
 つまり `--cpl0` は現在「手で `sdk/mkos32x.py --cpl0` を叩いたときだけ立つエスケープ
 ハッチ」で、標準の配備物には 1 本も無い。gshell 配下でこの拒否に当たるのは、その手製
 バイナリを GUI アプリが生きている間に起動したときだけ。
+
+---
+
+# 追記: 回 7 (ケース 20) — `exec_abort_clear` で CTRL+STOP の宛先を付け替える (KAPI v45)
+
+対象票: [`docs/tasks/gui/v13/TASK_K5B_gshell.md`](../../docs/tasks/gui/v13/TASK_K5B_gshell.md)
+「決裁が要る点 A1」/ **ユーザー決裁 2026-09-11 の A1**
+
+| 回 | 対象 | RED | GREEN |
+|---|---|---|---|
+| 7 | CTRL+STOP の要求を降ろす口 (契約 T6) | (a) `appslot_abort_clear()` を消した実装前の `exec/appslot.c` では**ハーネスがコンパイルできない** (`gcc -Werror` が非ゼロ終了) / (b) 空実装 (`return 0;` だけ) にすると 20 検査中 **4 検査が FAIL** (20c / 20h / 20o / 20q) | `tools/tests/test_multiapp_impl.py` 156 検査 ALL PASS |
+
+## 何が足りていなかったか
+
+CTRL+STOP は IRQ1 (`drivers/kbd.c:235` → `ring3_abort_request` → `appslot_abort_request`)
+の時点で **走っているアプリ** の `AppSlot.abort_req` を無条件に立てる。IRQ1 の時点で
+カーネルが知っているのはそれだけだからで、宛先は選べない。ところが契約 T6 の宛先は
+**フォーカス窓のアプリ**。4 本同時実行では両者が食い違い、WM (gshell) がフォーカス窓の
+ID を `exec_kill` で畳むと、走っている本人の `abort_req` が立ったままなので
+
+1. フォーカス窓のアプリ … `exec_kill` で畳まれる
+2. 走っている本人 … 次の syscall 境界 (`ring3_syscall_dispatch` 入口の
+   `ring3_abort_check`) で畳まれる
+
+と **2 本死ぬ**。K5b-W は「フォーカス窓の owner が走っている本人のときだけ効かせる」で
+凌いでいた (`multiapp::abort_targets_current`) が、それでも「走っている本人の要求が
+立ったまま残る」穴は閉じていない (票 K5b-W の A1「残る穴」)。
+
+## 直したもの
+
+| 場所 | 変更 |
+|---|---|
+| `sdk/kapi.json` | 末尾にスロット 186 `exec_abort_clear` を追記 ([ABI2])、`version` 44 → 45 |
+| `sdk/include/os32/os32_kapi_shared.h` | `KAPI_VERSION` 45 |
+| `exec/appslot.c` / `.h` | `int appslot_abort_clear(void)` — 実体。owner 1 以外は `OS32_ERR_INVAL` |
+| `exec/exec.c` / `.h` | `i32 exec_abort_clear(void)` — KAPI の口。`appslot_abort_clear()` へ委譲 |
+| `build/app.conf` | `userland/gshell` の要求 KAPI 版 44 → 45 (他の行は触っていない) |
+| `docs/KAPI_SPEC.md` | 表題 v45、§3-2 の予約表に v45 の行、§4 に `0x2F0 exec_abort_clear` とデータフィールドのオフセット繰り下げ (0x2F4 / 0x2F8) |
+
+**最終署名**: `i32 exec_abort_clear(void)`
+
+- `res_owner_get() != APP_ID_SHELL` (= `gui_register` と同じ判定) → `OS32_ERR_INVAL`。
+- それ以外は、要求を負っているアプリの `abort_req` を降ろして **0**。要求が無ければ
+  何もせず 0 (走っているアプリが 1 本も居ないときも 0)。
+- 触るのは `abort_req` **だけ**。`state` / `in_op_wait` / `parked_from_wait` / ページ /
+  資源の所有者 / 現在の ID はどれも動かさず、1 本も畳まない。
+- 要求を負えるのは「走っている 1 本」だけなので対象は高々 1 本。ただし **WM が
+  top-level (owner 1) に戻るのは park の後**なので、そのときスロットの状態は
+  `APP_STATE_PARKED` になっている — 状態では絞らず「要求を負っている ID」で探す
+  (ケース 20e/20f がこの順序を固定している)。
+
+**WM 側 (W レーン) の使い方**: フォーカス窓の owner が走っている本人でなければ、
+`exec_abort_clear()` で本人の要求を降ろしてから `exec_kill(フォーカス窓の ID)`。
+どちらも WM top-level (owner 1) から呼ぶ — `exec_kill` の `appslot_kill_check` が
+`g_cur == APP_ID_SHELL` を要求するので、もともと呼べるのはそこだけ。
+
+## RED の作り方 (実際に走らせた)
+
+```bash
+# (a) 実装前 = 関数が無い状態。ハーネスがビルドできない。
+#     exec/appslot.c から appslot_abort_clear() の定義を丸ごと削って
+python3 -B tools/tests/test_multiapp_impl.py
+#  → subprocess.CalledProcessError: gcc ... returned non-zero exit status 1
+
+# (b) 口だけ在って中身が無い状態 (`return 0;` のみ、owner の判定も無し)
+python3 -B tools/tests/test_multiapp_impl.py
+#  → FAIL 20c owner 1 以外からは OS32_ERR_INVAL
+#     FAIL 20h 要求が降りている
+#     FAIL 20o 意図しない 1 本が死なない
+#     FAIL 20q 要求が無いときは 1 本も動かさない
+#     FAILURES
+```
+
+(b) の 20o が落ちるのが A1 の本体 —「降ろせないので、次の安全地点で
+**意図しない 1 本が死ぬ**」がそのまま検査に出る。
+
+## 追加した検査 (ケース 20、19 検査)
+
+| 検査 | 内容 |
+|---|---|
+| 20a-b | 下ごしらえ: 4 本のうち 3 を起こし、CTRL+STOP を 3 に立てる (owner = 3) |
+| 20c-d | **owner 1 以外からは `OS32_ERR_INVAL`** で、要求も降りない (`gui_register` と同じ判定) |
+| 20e-f | park で WM top-level (owner 1) へ戻る。要求は **park をまたいで残る** |
+| 20g-h | owner 1 から呼ぶと 0 を返し、`abort_req` が降りている |
+| 20i-l | 降ろすだけ — 1 本も畳まず、別の ID (2 と 5) も対象の ID も `state` / `parked_from_wait` は無傷 |
+| 20m-o | 起こし直して安全地点を通しても畳まれない (**A1 の残る穴がふさがる**) |
+| 20p-q | 要求が無いときに呼んでも 0 で、1 本も動かさない |
+| 20r-s | アプリが 1 本も居なくても 0 で、何も起きない |
+
+## 実行コマンド
+
+```bash
+python3 sdk/gen_kapi.py && python3 sdk/kapi_rust_gen.py   # 再生成 ([ABI1])
+python3 tools/check_kapi_version.py               # EXIT=0 (v45、関数表も一致)
+python3 -B tools/tests/test_multiapp_impl.py      # ケース 20 を追加 (156 検査) ALL PASS
+make kernel                                       # EXIT=0、-Wall の警告 0
+```
+
+## この追記で**測っていないこと** ([V4])
+
+- **ゲストは未検証**。NP21/W では 1 度も動かしていない (コーダーはエミュレータ禁止)。
+  「フォーカスが別アプリのときの CTRL+STOP でフォーカス窓だけが死ぬ」は実機の受入待ち。
+- 全体ゲート (`make all` / `make external` / `make check`) は回していない (テスター担当)。
+  通したのは `make kernel` と `check_kapi_version` / `test_multiapp_impl`。
+  [ABI3] の `make clean` → `make all` も**回していない** (KernelAPI 構造体が伸びたので
+  テスターが回す必要がある)。
+- W レーン (gshell) はまだ `exec_abort_clear` を呼んでいない。`build/app.conf` の要求版を
+  45 に上げただけで、`userland/gshell` のコードには 1 バイトも触っていない。
