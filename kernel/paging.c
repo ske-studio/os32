@@ -87,16 +87,12 @@ STATIC_ASSERT(MEM_APP_BAND_MAX_TOP <= MEM_APP_BAND_DEVICE_FLOOR,
 STATIC_ASSERT(MEM_APP_BAND_MAX_TOP <= PAGING_BOOT_MAP_SIZE,
               app_band_within_bootstrap_map);
 
-/* H3b: 「実 RAM の上限」と「ページテーブルの守備範囲」の関係。
- *   - 実 RAM 上限は守備範囲の内側 (でないと恒等マップの穴ができる)。
- *   - どちらも 4MB (= 1 PDE) の倍数。端数があると RAM 上限が PT の途中に
- *     落ち、pgalloc とページテーブルの境界がずれる。
- *   - 守備範囲が実 RAM 上限より広い = 16MB 超にデバイス窓を張る余地がある
- *     (これが H3b の目的そのもの)。 */
+/* K6-RAM (2026-09-11): 「実 RAM の上限」という概念は OS 側に持たない。
+ * 静的 bootstrap PT が覆う守備範囲 (PAGING_BOOT_MAP_SIZE) は
+ * **paging_init が恒等マップを張れる範囲**でしかなく、それを超える RAM は
+ * pgalloc_stage_online が paging_map_phys で動的 PT を足して張る。
+ * 守備範囲は 4MB (= 1 PDE) の倍数であること。 */
 STATIC_ASSERT(PAGING_PFN_COUNT == PDE_COUNT * PTE_COUNT, full_pfn_space);
-STATIC_ASSERT(PAGING_RAM_LIMIT <= PAGING_BOOT_MAP_SIZE, ram_limit_within_map);
-STATIC_ASSERT((PAGING_RAM_LIMIT % (PTE_COUNT * PAGE_SIZE)) == 0,
-              ram_limit_pde_aligned);
 STATIC_ASSERT((PAGING_BOOT_MAP_SIZE % (PTE_COUNT * PAGE_SIZE)) == 0,
               map_size_pde_aligned);
 /* ======== ページテーブル (BSS配置, 4096バイトアライン必須) ======== */
@@ -117,6 +113,8 @@ static u32 *page_tables[PAGING_PT_COUNT];
 
 static int pg_enabled = 0;
 static u32 live_addrspaces;
+/* paging_init が実際に恒等マップした範囲の上端 PFN (exclusive)。 */
+static u32 boot_identity_end;
 
 /* 4096バイト境界に切り上げ */
 static u32 *align4096(void *p)
@@ -149,13 +147,13 @@ void paging_init(u32 mem_kb)
     /* 一度だけ初期化する。動的 PT / live AS / 現在 CR3 を破壊しない。 */
     if (pg_enabled) return;
 
-    /* プローブされた実メモリ量を「OS32 が RAM として面倒を見る上限」で頭打ちに
-     * する (H3b)。従来はページテーブルが 16MB ぶんしか無かったので自然に
-     * 16MB 止まりだったが、守備範囲を 32MB に広げた今は明示的に切る必要がある。
-     * 16MB 超はデバイス窓のための空き番地であって RAM ではない。
+    /* ここで頭打ちにするのは **静的 bootstrap PT が覆う範囲** であって
+     * 「OS32 が RAM として面倒を見る上限」ではない (K6-RAM)。これより上の
+     * RAM は pgalloc_stage_online が paging_map_phys で張る。
      * mem_kb * 1024 の桁あふれ (mem_kb > 4194303) もこれで防げる。 */
-    if (mem_kb > PAGING_RAM_LIMIT / 1024) mem_kb = PAGING_RAM_LIMIT / 1024;
+    if (mem_kb > PAGING_BOOT_MAP_SIZE / 1024) mem_kb = PAGING_BOOT_MAP_SIZE / 1024;
     max_mem_bytes = mem_kb * 1024;
+    boot_identity_end = max_mem_bytes / PAGE_SIZE;
 
     /* アライン済みポインタを取得 (先頭だけ上げれば以降は 4KB 刻みで乗る) */
     page_directory = align4096(pd_raw);
@@ -272,6 +270,11 @@ void paging_reclaim_conventional(void)
 /* ======================================================================== */
 /* 1 ページ設定の共通部 (TLB フラッシュなし)。
  * paging_set_page と paging_map_range から使う。 */
+u32 paging_boot_identity_end(void)
+{
+    return boot_identity_end;
+}
+
 /* APP 帯を避け、master から安全に書ける RAM だけを PT に使う。 */
 int paging_boot_context(void)
 {

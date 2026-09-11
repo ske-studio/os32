@@ -34,6 +34,11 @@ void _start(void)
     __asm__ volatile("int $0x80" : "=a"(result) : "a"(90), "b"(args) : "memory");
     CHECK(result == 0x400000);
     paging_init(16384);
+    /* K6-RAM: paging_init が張るのは「ブート窓の内側 x 検出量」だけで、
+     * RAM の上限ではない。16MiB 報告ならそこまで (従来と同じ)。 */
+    CHECK(paging_boot_identity_end() == 16384UL * 1024 / PAGE_SIZE);
+    CHECK(paging_is_present(PAGING_BOOT_MAP_SIZE / 2 - PAGE_SIZE));
+    CHECK(!paging_is_present(PAGING_BOOT_MAP_SIZE / 2));
     CHECK(!paging_is_present(0xFFFFFFFFUL));
     CHECK(paging_set_page(0xFFFFF000UL, 0, PAGE_RW) == -1);
     CHECK(used == 0);

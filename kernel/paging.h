@@ -37,12 +37,14 @@
 /* Phase 1: full 32-bit addressability, expressed as PFNs, never a wrapped
  * 4GiB exclusive byte address. Eight bootstrap PTs remain static; the other
  * PDEs start absent and acquire one zeroed PT only when explicitly mapped.
- * Bootstrap RAM mapping remains clamped to 16MiB. Dynamic PT backing scans
+ * paging_init's identity covers min(detected RAM, PAGING_BOOT_MAP_SIZE): the
+ * static bootstrap window, NOT a RAM ceiling (K6-RAM, 2026-09-11). RAM above
+ * that window is mapped later by pgalloc_stage_online through paging_map_phys
+ * with PTs taken from the boot workspace. Dynamic PT backing scans
  * to pgalloc_limit_pfn(), not the eligible count: only known master shared
  * tables with identity supervisor RW, cacheable PTEs qualify. New PTs still
  * require master CR3 and no live address spaces; no high RAM is auto-mapped.
  * No optional device guard policy is introduced here. */
-#define PAGING_RAM_LIMIT (16UL * 1024UL * 1024UL)
 #define PAGING_PFN_COUNT 1048576UL
 #define PAGING_PT_COUNT PDE_COUNT
 #define PAGING_BOOT_PT_COUNT 8
@@ -66,6 +68,11 @@ int paging_boot_context(void);
  * PTE A/D and PDE USER (when PTE is supervisor) do not weaken this contract. */
 int paging_verify_identity(u32 first_pfn, u32 pages, void *identity);
 void paging_init(u32 mem_kb);
+/* End PFN (exclusive) of the identity paging_init actually established, i.e.
+ * min(detected RAM, PAGING_BOOT_MAP_SIZE) in pages; 0 before paging_init.
+ * It is the boundary between "already mapped, must only be verified" and
+ * "must be mapped now", never a limit on how much RAM may be admitted. */
+u32 paging_boot_identity_end(void);
 
 /* 指定ページの属性を変更。
  * flags に PTE_USER を含めると PDE 側にも USER を伝播させる

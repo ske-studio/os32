@@ -86,7 +86,7 @@ static void basic(void)
     u32 before;
     CHECK(sizeof(u32) == 4 && sizeof(int) == 4);
     CHECK(pgalloc_alloc_n_range != 0);
-    pgalloc_init(PAGING_RAM_LIMIT / 1024);
+    pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
     before = pgalloc_free_pages();
     CHECK(pgalloc_alloc_n_range(2, lo, lo + 2 * PAGE_SIZE) == lo);
     CHECK(pgalloc_free_pages() == before - 2);
@@ -103,7 +103,7 @@ static void irq_atomic(void)
     int enabled;
 
     for (enabled = 1; enabled >= 0; enabled--) {
-        pgalloc_init(PAGING_RAM_LIMIT / 1024);
+        pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
         initial = 0x45U | (enabled ? TEST_IF : 0);
         test_flags = initial;
         saves = restores = 0;
@@ -180,7 +180,7 @@ static void boundaries(void)
     u32 end;
     int enabled;
     for (enabled = 0; enabled <= 1; enabled++) {
-        pgalloc_init(PAGING_RAM_LIMIT / 1024);
+        pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
         end = pgalloc_limit_pfn() * PAGE_SIZE;
         test_flags = 0x45U | (enabled ? TEST_IF : 0);
         pgalloc_mark_used(lo + PAGE_SIZE, 1);
@@ -215,7 +215,7 @@ static void fragmentation(void)
 {
     u32 lo = MEM_APP_BAND_TOP + 29 * PAGE_SIZE;
     u32 end = lo + 8 * PAGE_SIZE;
-    pgalloc_init(PAGING_RAM_LIMIT / 1024);
+    pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
     pgalloc_mark_used(lo + PAGE_SIZE, 1);
     pgalloc_mark_used(lo + 4 * PAGE_SIZE, 1);
     range_expect(3, lo, end, lo + 5 * PAGE_SIZE);
@@ -236,7 +236,7 @@ static void exhaustive(void)
     u32 expected;
     for (mask = 0; mask < 256; mask++) {
         for (n = 1; n <= 9; n++) {
-            pgalloc_init(PAGING_RAM_LIMIT / 1024);
+            pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
             for (j = 0; j < 8; j++) {
                 if (mask & (1U << j)) pgalloc_mark_used(lo + j * PAGE_SIZE, 1);
             }
@@ -261,7 +261,7 @@ static void generic_regression(void)
 {
     u32 count, base = PGALLOC_BASE;
     pgalloc_init(0xffffffffUL);
-    count = (PAGING_RAM_LIMIT - base) / PAGE_SIZE;
+    count = (MEM_HIGH_RAM_BASE - base) / PAGE_SIZE;
     CHECK(pgalloc_total_pages() == count && pgalloc_free_pages() == count);
     CHECK(pgalloc_alloc_n(0) == 0 && pgalloc_alloc_n(-1) == 0);
     CHECK(pgalloc_alloc_n(2147483647) == 0);

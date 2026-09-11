@@ -67,3 +67,116 @@ ini の変更 (`ExMemory`) は [D2]。PM がスキル `os32-emu-config` の手�
 ## この票に含めないもの
 
 アプリ帯の仮想レイアウト変更、KAPI の追加、K5b の gshell 側。
+
+---
+
+## 実装メモ (コーダー、2026-09-11) — 決めたことと根拠
+
+### A. 検出方式: BIOS ワークエリア **0594h** を採る (ローダのプローブは伸ばさない)
+
+| 番地 | 型 | 意味 | 上限 |
+|---|---|---|---|
+| `0401h` | BYTE | `100000h`〜`FFFFFFh` の使用可能プロテクトモードメモリ、**128KB 単位** | `70h` (= 14MB)。「16MB システム空間を使用しない」設定のときだけ `78h` (= 15MB) |
+| `0594h` | **WORD** | `1000000h` 以降の使用可能プロテクトモードメモリ、**MB 単位** | 機種依存 (PC-H98 / PC-9821Af 以降 / PC-9801BA2・BS2・BX2・BA3・BX3・BX4) |
+
+正典は `docs/hw/undocumented/memsys.md` (0401h / 0594h の項)。**0594h はバイトではなく
+ワード**で、NP21/W も `STOREINTELWORD` で 2 バイト書く (`np21w-src/src/bios/bios.c:241-248`)。
+
+プローブを 16MB 超へ伸ばさなかった理由 (R1 の答え):
+
+- ローダは `esi < 01000000h` で止まる (`boot/loader_fat.asm:276-278`、`loader_hdd.asm:285-287`)
+  ので、16MB 超は現状まったく見えない。
+- `F00000h`〜`FFFFFFh` は PC-98 の「16MB システム空間」で、**RAM ではない**:
+  `F00000-F7FFFF` PEGC の 512KB リニア窓 / `F80000-F9FFFF` オープンバス /
+  `FA0000-FFFFFF` は **`A0000h`〜`FFFFFh` のミラー** (テキスト・グラフィック VRAM と BIOS ROM)。
+  書き込みプローブをここへ通すと VRAM を壊す。避けて数えるには結局ハードウェアの知識が要り、
+  その知識はすでに BIOS ワークエリアに置いてある。
+- I/O `043Bh` bit2 の「16MB 空間を通常メモリにする」設定は NP21/W が未実装 (読み書きのみのスタブ、
+  `src/io/necio.c:15-23`) なので、エミュレータ上でこの穴が RAM になることは無い。
+- ローダ (`.8086` の `boot_fat.asm`、PM 遷移がインラインの `loader_fat.asm`) に触らずに済む。
+
+**申告は鵜呑みにしない。** `memory_boot_detect()` が 1MB ごとに 1 ダブルワードを書いて
+(1) 24bit アドレスラップで低位を壊していないか (壊したら 1 語を復元して打ち切り)
+(2) 読み戻しが一致するか
+を見て、さらに 2 巡目で別名 (エイリアス) を弾く。**確認が通った連続分だけ**が
+`PHYSMEM_SOURCE_MACHINE` として登録される。ローダの申告 `mem_kb` だけでは
+高位 RAM は 1 ページも昇格しない (`test_memory_boot.py` が常時検査)。
+
+### B. NP21/W の `ExMemory` → ゲストが見る RAM
+
+ini キー `ExMemory` は **MB 単位**。既定 13、`Release|x64` (= `make build` の構成) は
+`SUPPORT_LARGE_MEMORY` 付きで UINT16 / 最大 **4000** (`src/win9x/ini.cpp:476-480`,
+`src/win9x/compiler.h:231-235`, `src/pccore.c:122,309-319`)。
+DIPSW3-8 (`dipsw[2] & 0x80`) を立てると拡張メモリは丸ごと無効。
+
+`CPU_EXTLIMIT16 = min(size + 100000h, F00000h)` (`src/i386c/ia32/ia32.c:155-157`) なので、
+**低位 RAM は必ず `EFFFFFh` で終わる**。`ExMemory >= 15` では要求のうち 1MB がそのまま失われる。
+
+| `ExMemory` | 16MB 未満の RAM | 16MB 以上の RAM | 使える拡張 RAM | `0401h` | `0594h` |
+|---|---|---|---|---|---|
+| 0 | `100000-10FFFF` (HMA のみ) | — | 64KB | 0 | 0 |
+| 7 | `100000-7FFFFF` | — | 7MB | 56 | 0 |
+| 13 (既定) | `100000-DFFFFF` | — | 13MB | 104 | 0 |
+| 14 | `100000-EFFFFF` | — | 14MB | 112 | 0 |
+| 15 | `100000-EFFFFF` | なし | 14MB (**1MB 損**) | 112 | 0 |
+| 16 | `100000-EFFFFF` | `1000000-10FFFFF` | 15MB | 112 | 1 |
+| **32** | 〃 | `1000000-20FFFFF` | 31MB | 112 | 17 |
+| 63 | 〃 | `1000000-3FFFFFF` | 62MB | 112 | 48 |
+| **128** | 〃 | `1000000-80FFFFF` | 127MB | 112 | 113 |
+| 230 | 〃 | `1000000-E6FFFFF` | 229MB | 112 | 215 |
+| 4000 (最大) | 〃 | `1000000-FA0FFFFF` | 3999MB | 112 | 3985 |
+
+受入 M1 (32MB 相当) は `ExMemory = 32`、M2 (128MB) は `ExMemory = 128`。
+OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** なので、
+`ExMemory = 32` なら `0x2100000 / 1024 = 33792`、`= 128` なら `0x8100000 / 1024 = 132096`。
+(`ExMemory` は 16MB を起点に数えるため 1MB ぶん上に出る。穴は `physmem` のモデル側に出る。)
+
+### C. 表 (bitmap + 恒等 PT) の動的確保 — どこから取るか
+
+置ける場所は **`[MEM_APP_BAND_MAX_TOP, MEM_SYSTEM_SPACE_BASE)` = `0xC00000`〜`0xEFFFFF` (3MB)**
+に限られる。理由は 2 つとも既存の不変条件:
+
+1. 下限 `MEM_APP_BAND_MAX_TOP`: 2 枚 PDE まで伸びたアプリが master のページテーブルを
+   USER で恒等マップして任意物理を書けてしまう (`pgalloc.c` `init_model` の `ws_first` 検査)。
+2. 上限 `MEM_SYSTEM_SPACE_BASE`: legacy アリーナ (`physmem_legacy_end`) の上端。
+   その上は RAM ではない穴。
+
+順序 (`memory_boot_init`):
+
+1. `physmem_bootstrap_legacy()` で低位を組む → `top = physmem_legacy_end()` (15MB)。
+2. 検出済みの高位 RAM を `memory_boot_high_fit()` で「表が置ける量」に丸める。
+3. `[15MB,16MB)` を RESERVED、`[MEM_PHYS_MMIO_TOP, 4GB)` を MMIO、
+   `[16MB, N)` を `PHYSMEM_SOURCE_MACHINE` の RAM として登録。**どれか 1 つでも失敗したら
+   モデル不変で fail-stop** (静かに切り詰めない)。
+4. `pgalloc_metadata_bytes()` が bitmap 2 面のページ数を、
+   `memory_boot_workspace_pages()` が恒等 PT の枚数 + 予備 1 枚を返す。
+5. 配置は上から `metadata = [top-md, top)`、`workspace = [top-md-ws, top-md)`。
+   どちらも `physmem_reserve_ram` で一般確保から永久に外れる。
+6. `pgalloc_stage_online()` が `paging_boot_identity_end()` を境に、
+   **下は「すでに恒等である」ことを検証するだけ** (ブート時の保護属性を上書きしない)、
+   **上は `paging_map_phys()` で今から張る** (PT は workspace から取る)。
+
+規模: 32MB → 表 2 ページ / 128MB → 27 ページ (bitmap 2 + PT 24 + 予備 1) /
+約 2.8GB で 3MB の帯を使い切る。
+
+### D. 決裁事項 (PM / ユーザー判断)
+
+1. **約 2.8GB で頭打ちになる。** C の置き場所 (3MB) が表で埋まるため。人為的な定数ではないが
+   「4GB まで」を厳密に満たしたい場合は、恒等 PT を高位 RAM 自身から段階的に取る
+   (4MB 張る → そこを PT 置き場にする、の梯子) 改修が要る。`reserve_table()` /
+   `pgalloc_alloc_pt()` の信頼境界に手を入れる話なので、この票の範囲では見送った。
+   NP21/W の GUI プリセット最大は 1024MB、実機 9821 は 128MB なので実害は無い。
+2. **`sys_mem_kb` の意味を「RAM の上端アドレス / 1024」に確定した** (穴を含む)。
+   受入 M1/M2 で読む値は B 表の右端の計算どおりになる。別の定義 (実 RAM の合計) を
+   採るなら `kernel.map` を読む側と揃える必要がある。
+3. **`0594h` を書かない機種では 16MB 超が見えない。** ワークエリアを持たない古い機種
+   (PC-9801 の初期型など) は従来どおり 15MB 止まり。プローブを伸ばす代替案は A のとおり
+   VRAM 破壊の危険があるので採らなかった。
+4. **Cirrus (WAB Xe10) のリニア窓と高位 RAM は同じ `01000000h` を奪い合う。**
+   `cirrus_win_usable()` が「実 RAM がそこまで届いていたら窓を開かない」で既に守っているが、
+   4GB 構成で `sys_get_mem_kb() * 1024` が桁あふれして判定が裏返るので KB のまま比べるよう直した。
+   結果として **16MB 超を積むと Cirrus バックエンドは窓を開けず、PEGC へ落ちる**
+   (PEGC のリニア窓は `F00000h` = システム空間の中なので高位 RAM と無関係、常に使える)。
+   受入 M1/M2/M4 を 9821 + Cirrus 構成で回すと「32MB にしたら Cirrus が消えた」に見えるので注意。
+   本筋の解は窓を RAM の上へ動かすこと (`WAB_XE10_LINEARWIN_SEL` は `dat << 24` の `dat`
+   なので `0x20` = 512MB 等を選べる) だが、gfx レーンの話なのでこの票では触っていない。

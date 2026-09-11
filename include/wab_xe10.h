@@ -151,8 +151,8 @@
 /*  値は dat<<24 = **16MB 単位**なので最小でも 01000000h。かつては OS32 の     */
 /*  ページテーブルの守備範囲 (16MB) の外だったので使えなかったが、票 H3b で    */
 /*  PAGING_MAP_SIZE を 32MB へ広げた (16MB〜32MB は既定 Not-Present で、       */
-/*  paging_map_phys() が窓だけを張る)。kernel/paging.h の PAGING_RAM_LIMIT /  */
-/*  PAGING_MAP_SIZE の注記を参照。                                            */
+/*  paging_map_phys() が窓だけを張る)。kernel/paging.h の                      */
+/*  PAGING_BOOT_MAP_SIZE / PAGING_MAP_SIZE の注記を参照。                      */
 /*                                                                          */
 /*  ⚠ **窓を閉じる書き込みは NP21/W では効かない**: cirrusvga_ofab case 0x02   */
 /*  は `if(dat!=0x00 && dat!=0xff)` で 00h/FFh を捨てるので、一度開いた窓は    */
@@ -163,7 +163,7 @@
 #define WAB_XE10_LINEARWIN_SIZE  0x00200000UL /* 2MB ([N] VRAMWINDOW_SIZE) */
 
 /* OS32 が使うリニア窓。dat = 01h → 01000000h (16MB ちょうど)。
- * 実 RAM の管理上限 (PAGING_RAM_LIMIT = 16MB) の直上で、RAM とは重ならない
+ * PC-98 の 15-16MB システム空間 (MEM_SYSTEM_SPACE_*) の直上で、RAM とは重ならない
  * (重なる構成では backend_cirrus の probe が窓を拒否する)。 */
 #define WAB_XE10_LINEARWIN_SEL   0x01
 #define WAB_XE10_LINEARWIN_OFF   0x00        /* 窓を閉じる値 (NP21/W は無視) */

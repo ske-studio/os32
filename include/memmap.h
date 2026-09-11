@@ -284,6 +284,28 @@ extern u32 __sqlite_end;
 #define MEM_APP_BAND_DEVICE_FLOOR 0x00F00000UL
 
 /* ====================================================================== */
+/*  物理 RAM の地図 (K6-RAM, 2026-09-11)                                    */
+/*                                                                          */
+/*  OS 側に人為的な RAM 上限は持たない。上限は 32bit x86 のアーキテクチャ    */
+/*  (PAE なし = 物理 4GB = PHYSMEM_MAX_PFN) だけで、そこから「RAM に         */
+/*  ならない領域」を予約として引いた残りが実効の上限になる。                 */
+/*                                                                          */
+/*    [MEM_SYSTEM_SPACE_BASE, MEM_SYSTEM_SPACE_END)                         */
+/*        PC-98 の 15〜16MB システム空間。9821 の PEGC リニア窓             */
+/*        (include/pegc.h PEGC_LINEAR_BASE) がここに出るので、ローダの      */
+/*        書き込みプローブが通っても RAM として配ってはならない。           */
+/*    [MEM_HIGH_RAM_BASE, ...)                                              */
+/*        16MB 以上に載る実 RAM。検出量ぶんだけ pgalloc の池に入る。        */
+/*    [MEM_PHYS_MMIO_TOP, 4GB)                                              */
+/*        32bit 空間の最上位。BIOS ROM ミラーと PCI 機の MMIO 窓が          */
+/*        居る帯で、RAM にはならない (Win32 の実効 ≈3.2GB と同じ理由)。     */
+/* ====================================================================== */
+#define MEM_SYSTEM_SPACE_BASE MEM_APP_BAND_DEVICE_FLOOR /* 0x00F00000 (15MB) */
+#define MEM_SYSTEM_SPACE_END  0x01000000UL              /* 16MB */
+#define MEM_HIGH_RAM_BASE     MEM_SYSTEM_SPACE_END      /* 16MB */
+#define MEM_PHYS_MMIO_TOP     0xFF000000UL              /* 4GB - 16MB */
+
+/* ====================================================================== */
 /*  共有ライブラリ帯域 (0x400000-0x4FFFFF, 1MB)  — GUI v1.1 K3              */
 /*                                                                          */
 /*  固定アドレス常駐の位置依存ライブラリ (再配置なし、ロードアドレスは 1 つ)。 */

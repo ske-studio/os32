@@ -54,11 +54,23 @@ class MemoryBoot(unittest.TestCase):
         start = s.index(gate)
         downstream = min(s.index(f'{name}();') for name in
                          ('shm_init', 'kselftest_run', 'shlib_init'))
+        # K6-RAM: detection decides the paging extent and the table sizes, so it
+        # must run before paging_init, which must run before the model gate.
+        self.assertLess(s.index('mem_kb = memory_boot_detect(mem_kb);'),
+                        s.index('paging_init(mem_kb);'))
         self.assertLess(s.index('paging_init(mem_kb);'), start)
         self.assertLess(start, downstream)
         self.assertNotIn('pgalloc_init(mem_kb)', s)
         self.assertIn('for (;;) { __asm__ volatile("cli; hlt"); }', s[start:downstream])
         self.assertIn('kernel/memory_boot.c', (ROOT / 'build/kernel.mk').read_text())
+
+    def test_table_sizing_has_no_artificial_ceiling(self):
+        self.run_case('tables')
+
+    def test_high_ram_above_16m(self):
+        for kb in (32768, 131072):
+            with self.subTest(kb=kb):
+                self.run_case('high', kb)
 
     def test_16m_safe_tail_online(self):
         self.run_case('online', 16384)

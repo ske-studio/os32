@@ -18,6 +18,7 @@ class PhysmemTests(unittest.TestCase):
             src = pathlib.Path(tmp) / 'test.c'
             exe = pathlib.Path(tmp) / 'test'
             src.write_text('''#include "physmem.h"
+#include "memmap.h"
 #include "pegc.h"
 #include "wab_xe10.h"
 #define CHECK(x) do { if (!(x)) return __LINE__; } while (0)
@@ -286,6 +287,40 @@ void _start(void) {
     CHECK(!physmem_find(&m, guard, xe_end, 1, 1, &pfn));
     CHECK(!physmem_reserve_ram(&m, xe, xe_end));
     CHECK(physmem_find(&m, xe_end, PHYSMEM_MAX_PFN, 1, 1, &pfn) && pfn == xe_end);
+''')
+
+
+    def test_high_ram_has_no_artificial_ceiling(self):
+        # K6-RAM: the only ceiling is the architecture (4GiB). Everything that
+        # is subtracted must be a named device reservation, never a clamp.
+        self.run_c('''
+    struct physmem m;
+    u32 count, hole, high, top;
+    hole = MEM_SYSTEM_SPACE_BASE / PHYSMEM_PAGE_SIZE;
+    high = MEM_HIGH_RAM_BASE / PHYSMEM_PAGE_SIZE;
+    top = MEM_PHYS_MMIO_TOP / PHYSMEM_PAGE_SIZE;
+    CHECK(hole == 0xF00 && high == 0x1000 && top == 0xFF000);
+    /* 15MiB admitted by the old loader; the arena stops below the hole. */
+    physmem_bootstrap_legacy(&m, 15360);
+    CHECK(physmem_legacy_end(&m) == hole);
+    CHECK(physmem_exclude(&m, hole, high, PHYSMEM_RESERVED));
+    CHECK(physmem_exclude(&m, top, PHYSMEM_MAX_PFN, PHYSMEM_MMIO));
+    /* 128MiB machine. MACHINE is the authoritative detector source. */
+    CHECK(physmem_add_trusted(&m, high, 0x8000, PHYSMEM_SOURCE_MACHINE));
+    CHECK(physmem_count(&m, hole, high, PHYSMEM_RAM, &count) && count == 0);
+    CHECK(physmem_count(&m, hole, high, PHYSMEM_RESERVED, &count));
+    CHECK(count == high - hole);
+    CHECK(physmem_count(&m, high, PHYSMEM_MAX_PFN, PHYSMEM_RAM, &count));
+    CHECK(count == 0x8000 - high);
+    /* The legacy arena is unaffected by high RAM (exec layout is unchanged). */
+    CHECK(physmem_legacy_end(&m) == hole);
+    /* 4GiB machine: nothing is truncated except the top MMIO band. */
+    CHECK(physmem_add_trusted(&m, high, top, PHYSMEM_SOURCE_MACHINE));
+    CHECK(physmem_count(&m, 0, PHYSMEM_MAX_PFN, PHYSMEM_RAM, &count));
+    CHECK(count == (hole - MEM_APP_BAND_BASE / PHYSMEM_PAGE_SIZE) + (top - high));
+    CHECK(physmem_count(&m, top, PHYSMEM_MAX_PFN, PHYSMEM_MMIO, &count));
+    CHECK(count == PHYSMEM_MAX_PFN - top);
+    CHECK(physmem_legacy_end(&m) == hole);
 ''')
 
 
