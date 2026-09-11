@@ -188,7 +188,10 @@ OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** な�
 
 | 受入 | 構成 | obs | 判定 |
 |---|---|---|---|
+| 註 | — | `np21w_ini_live.py ram-32mb --live-apply` は初回「unsupported or mismatched explicit process/config identity」で拒否 (os32-cycle が ini 引数なしで起動していたため)。ini を引数に付けて起動し直してから適用。適用後に「Windows executor cleanup timeout」と出たが ini は書き換わり再起動も成功 (ExMemory=33 を読み戻して確認) | — |
 | ゲート | `f6ec520` | `make clean/all/external/check` exit=0 (テスター 22:48〜22:50) | 合格 |
 | 配備 | 15MB (`ExMemory 16`) | NHD バックアップ後 `os32-cycle deploy` exit=0、`vmkernel.lz4` 454,203 B 一致、`ver` Build 22:49 / API v45 | 合格 |
 | **M3** 15MB 回帰 | 同 | kselftest 44 / 0、regress 6 本 obs 全通過 (klibc 49/0、alloc_demo、ring3_fault kill → ver、パイプ、screenshot)、`v86 -t` result OK、`gui_demo` 1 本起動 (Widgets / Help 描画) → CUI 復帰、`fault_generation` 0。`sys_mem_kb` = 17408 (= 0x1100000 / 1024、新定義どおり) | **合格** |
-| M1 / M2 / M4 / M5 | 32MB / 128MB | 未実施 — ini 変更 ([D2]) の承認待ち (`ram-32mb` / `ram-128mb`) | — |
+| **M1** 32MB | `ram-32mb` (ExMemory 33、ユーザー承認 [D2]) | `mem` = 34816 KB、`sys_mem_kb` 34816、kselftest 44 / 0、`v86 -t` OK、`limit_pfn` 8704 (= 0x2200000 / 4KB、15MB では 15MB 止まりだった)、`total_pages` 7421 / `used_pages` 3344 (4 本起動時) | **合格** |
+| **M4** G3 | 同 | GUI アプリ 4 本が立ち、5 本目は「Too many programs (4 max)」で拒否 (TASK_K5B_gshell.md G3) | **合格** |
+| M2 / M5 | 128MB | 未実施 (次) | — |

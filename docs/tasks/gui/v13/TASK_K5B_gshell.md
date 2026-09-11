@@ -220,7 +220,8 @@ v1.2 は「CTRL+STOP で回収」が逃げ道だったが、A1 のとおり宛�
 | **G4** CTRL+STOP はフォーカス窓だけ (K5c、`8d5ba3b` API v45) | `gui_bench` → Run `gui_demo` で 3 窓 (`step38`)。CTRL+STOP で `gui_demo` (Widgets / Help) だけ畳まれ `gui_bench` が残る (`step42`、タスクバー 1 本)。クリックで `CLICK n = 2` (`step46`)。ESC で CUI 復帰 (`grph_disp=0`)。`appslot_reclaim_count` 2、`ring3_resume_bad_frame_count` 0、`fault_kill_count` 0 | **合格** |
 | **G10** 音の排他 (`9ee3ce0` の gui_demo BGM、HostDrv → `hsync`) | `gui_demo` 単独で Enable sound → `/api/sound` `keyreg` `f0..`、`peak` 9165、`fm_playing` 進行 (鳴る)。`gui_bench` 起動でフォーカス移動 → `keyreg` `00..`、`peak` 0、`fm_playing` 783 で停止 (止まる)。タスクバー `Widgets` で戻す → `f0..` / 進行 (復元)。ESC で `gui_demo` 終了 → 停止、`gui_bench` 生存 (`g10b4.png`)。`fault_generation` 0 | **合格** |
 | **G5** fault するアプリを混ぜる | `gui_bench` 起動後に Run `/usr/bin/ring3_fault.bin` → 窓は出ず `fault_kill_count` 0 → 1 (`kernel.map` 0x150a74)、`gui_bench` は残りクリックで `CLICK n = 2` (`step39` / `step43`)、`fault_generation` 0 | **合格** |
-| G3 / G6 / G9 | 未実施 (G3 台本 `scratchpad/g3a.json` / `g3b.json` は K6-RAM の上限撤廃待ち。G6 は 8MB ini [D2]。G9 は 2 本以上が同時 ready になる観測手段が要る) | — |
+| **G3** 5 本目 (32MB、K6-RAM `f6ec520` + `ram-32mb`) | `gui_bench` → `gui_demo` → `filer` → `v12_api_test` の 4 本が立ちタスクバー 5 ボタン (`step66`)。5 本目 `t5a_display` は「Too many programs (4 max) - close one first」で拒否、4 本は無事 (`g3b_after_return.png`)、`ring3_switch_count` 9 → 15、`fault_kill_count` 0。Start → CUI mode で 4 本とも畳まれ `appslot_reclaim_count` 4 (A3 の経路)、CUI 復帰 | **合格** (描画不良 W-3 は別記) |
+| G6 / G9 | 未実施 (G3 台本 `scratchpad/g3a.json` / `g3b.json` は K6-RAM の上限撤廃待ち。G6 は 8MB ini [D2]。G9 は 2 本以上が同時 ready になる観測手段が要る) | — |
 
 証跡: `build/out/gui_gate/k5b_g1/*.png`、`tools/emu_agent/logs/playbook-20260911-135944-*`、G4 は `playbook-20260911-182823-*/shots/step{38,42,46}.png`、G5 は `playbook-20260911-224427-*`、G10 は `playbook-20260911-2236*〜2240*` (台本 `g10a` / `g10b1`〜`b4`、音は PM が `/api/sound` を 3 回ずつ採取)。
 
@@ -291,3 +292,11 @@ RED → GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_
 露出部をクリックして前面化: 全面 (item 00〜06) が描かれる (`c_after_click_bench`)。`switch` 3 → 7。
 → **W-1 解消、G1 完全合格**。証跡: `build/out/gui_gate/k5b_w1/*.png`。
 
+### 不具合 W-3: 3 本目以降で前面窓のクライアント面に後ろの窓の枠線が残る (G3 で観測、要修正)
+
+- **観測** (PM、32MB、4 本起動直後): File Manager (3 本目) のリスト面とステータス行に、後ろの `gui_bench` の右辺
+  (x≈443) が縦線、`Help` の下辺 (y=245) が x≈490〜583 で横線として黒 1px で描き込まれる (`scratchpad/g3_4apps_later.png`、
+  拡大 `g3_crop.png`)。前面の v12 api test は正常。
+- File Manager のタイトルをクリックして前面化すると消える (`g3_filer_front.png`) → 描画順 / クリップの問題で内容は無事。
+- 2〜3 窓 (G1 / G4) では出ていない。G3 の合否 (5 本目拒否・4 本生存) には影響しないが、契約 (WM はクライアント面を持たない、
+  枠は可視領域にクリップ) に反するので W レーンの小票で直す (コーダー発注 2026-09-11)。
