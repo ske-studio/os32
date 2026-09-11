@@ -126,7 +126,10 @@ DIPSW3-8 (`dipsw[2] & 0x80`) を立てると拡張メモリは丸ごと無効。
 | 230 | 〃 | `1000000-E6FFFFF` | 229MB | 112 | 215 |
 | 4000 (最大) | 〃 | `1000000-FA0FFFFF` | 3999MB | 112 | 3985 |
 
-受入 M1 (32MB 相当) は `ExMemory = 32`、M2 (128MB) は `ExMemory = 128`。
+受入 M1 (32MB 相当) は `ExMemory = 32`、M2 (128MB) は `ExMemory = 128` (コーダー案)。
+**PM 註 (2026-09-11)**: ini プリセット (`tools/np21w_ini_live.py`) は**ゲストが使える拡張メモリ量で命名**し、
+`ram-32mb` = `ExMemory 33`、`ram-128mb` = `ExMemory 129` (16 以上は 16MB システム空間の 1MB が抜けるため +1)。
+この場合 `sys_mem_kb` は 33 → `0x2200000 / 1024 = 34816`、129 → `0x8200000 / 1024 = 133120`。
 OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** なので、
 `ExMemory = 32` なら `0x2100000 / 1024 = 33792`、`= 128` なら `0x8100000 / 1024 = 132096`。
 (`ExMemory` は 16MB を起点に数えるため 1MB ぶん上に出る。穴は `physmem` のモデル側に出る。)
@@ -180,3 +183,12 @@ OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** な�
    受入 M1/M2/M4 を 9821 + Cirrus 構成で回すと「32MB にしたら Cirrus が消えた」に見えるので注意。
    本筋の解は窓を RAM の上へ動かすこと (`WAB_XE10_LINEARWIN_SEL` は `dat << 24` の `dat`
    なので `0x20` = 512MB 等を選べる) だが、gfx レーンの話なのでこの票では触っていない。
+
+## 実機受入の記録 (PM / テスター)
+
+| 受入 | 構成 | obs | 判定 |
+|---|---|---|---|
+| ゲート | `f6ec520` | `make clean/all/external/check` exit=0 (テスター 22:48〜22:50) | 合格 |
+| 配備 | 15MB (`ExMemory 16`) | NHD バックアップ後 `os32-cycle deploy` exit=0、`vmkernel.lz4` 454,203 B 一致、`ver` Build 22:49 / API v45 | 合格 |
+| **M3** 15MB 回帰 | 同 | kselftest 44 / 0、regress 6 本 obs 全通過 (klibc 49/0、alloc_demo、ring3_fault kill → ver、パイプ、screenshot)、`v86 -t` result OK、`gui_demo` 1 本起動 (Widgets / Help 描画) → CUI 復帰、`fault_generation` 0。`sys_mem_kb` = 17408 (= 0x1100000 / 1024、新定義どおり) | **合格** |
+| M1 / M2 / M4 / M5 | 32MB / 128MB | 未実施 — ini 変更 ([D2]) の承認待ち (`ram-32mb` / `ram-128mb`) | — |
