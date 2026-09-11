@@ -183,6 +183,7 @@ impl App for Demo {
         if w == self.cb {
             let msg: &[u8] = if on { b"sound: ON" } else { b"sound: OFF" };
             let _ = widget::set_text(self.lbl_cb, msg);
+            set_bgm(on);
         }
     }
 
@@ -222,6 +223,26 @@ impl App for Demo {
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, _ch: u8, _mods: u8, down: bool) {
         if down && scan == SCAN_ESC {
             ui.quit();
+        }
+    }
+}
+
+/* ================================================================ */
+/*  BGM (受入 G10 の観測手段)                                        */
+/* ================================================================ */
+
+/* `[...]` が無限ループなので、止めるまで鳴り続ける。フォーカスが外れたとき
+ * に止まる / 戻ったとき鳴り直すのは WM 側 (音のフォーカス排他) の領分。 */
+static BGM_MML: &[u8] = b"T120 O4 L8 [CEGE DFAF]\0";
+
+/// チェックボックスに合わせて BGM を鳴らす / 止める。
+fn set_bgm(on: bool) {
+    unsafe {
+        let a = os32api::api();
+        if on {
+            (a.snd_bgm_play)(BGM_MML.as_ptr());
+        } else {
+            (a.snd_bgm_stop)();
         }
     }
 }
