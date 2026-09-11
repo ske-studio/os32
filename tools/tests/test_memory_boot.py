@@ -7,7 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 class MemoryBoot(unittest.TestCase):
-    def run_case(self, case='legacy', kb=8192):
+    def run_case(self, case='legacy', kb=8192, defines=()):
         with tempfile.TemporaryDirectory(prefix='os32-memory-boot-') as tmp:
             d = pathlib.Path(tmp)
             for unit in ('paging', 'pgalloc', 'sys'):
@@ -29,7 +29,7 @@ class MemoryBoot(unittest.TestCase):
                 '\n#undef kprintf\n#undef shm_init\n}\n')
             adapter = ROOT / 'kernel/memory_boot.c'
             (d / 'memory_boot_host_source.c').write_text(adapter.read_text() if adapter.exists() else '')
-            cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', f'-DTEST_{case.upper()}', f'-DTEST_KB={kb}UL']
+            cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', f'-DTEST_{case.upper()}', f'-DTEST_KB={kb}UL'] + list(defines)
             cmd += ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
             subprocess.run(cmd + [str(ROOT / 'tools/tests/memory_boot_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
             subprocess.run([str(d / 'test')], check=True, timeout=20)
@@ -77,6 +77,15 @@ class MemoryBoot(unittest.TestCase):
 
     def test_8m_legacy_preinit(self):
         self.run_case()
+
+    def test_ram_kb_is_the_registered_total_not_the_top(self):
+        # K6-RAM decision (2). (top-of-RAM KiB from the detector, real RAM KiB).
+        # 15MiB (NP21/W ExMemory 16): RAM is [0,15MiB) + [16MiB,17MiB).
+        # 32MiB (ExMemory 33):        RAM is [0,15MiB) + [16MiB,33MiB).
+        # 8MiB  (legacy path):        no hole below the top, so both agree.
+        for kb, expect in ((17408, 16384), (33792, 32768), (8192, 8192)):
+            with self.subTest(kb=kb):
+                self.run_case('ramkb', kb, (f'-DTEST_RAM_KB_EXPECT={expect}UL',))
 
 if __name__ == '__main__':
     unittest.main()

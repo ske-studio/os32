@@ -133,12 +133,41 @@ void _start(void)
     host_kernel_boot(TEST_KB);
     CHECK(0);
 #endif
-#ifdef TEST_HIGH
+#if defined(TEST_HIGH) || defined(TEST_RAMKB)
     /* The detector is the only source of a high attestation; the host cannot
      * touch the BIOS work area, so stand in for it with the same value. */
-    boot_high_end = TEST_KB / (PAGE_SIZE / 1024UL);
+    if (TEST_KB > MEM_HIGH_RAM_BASE / 1024UL)
+        boot_high_end = TEST_KB / (PAGE_SIZE / 1024UL);
 #endif
+    /* K6-RAM (2): 未初期化のうちは「実 RAM 合計」を名乗らない。 */
+    CHECK(!memory_boot_ram_kb());
     CHECK(memory_boot_init(TEST_KB));
+#ifdef TEST_RAMKB
+    /* K6-RAM 決裁 (2) — 実 RAM 合計は「登録した span の合計」であって、
+     * 上端 (sys_mem_kb) ではない。差は 15-16MiB のシステム空間ちょうど。 */
+    {
+        u32 low, high, mb;
+        low = MEMORY_BOOT_LEGACY_END / 1024UL;      /* 低位 RAM の上端 = 15MiB */
+        high = MEM_HIGH_RAM_BASE / PAGE_SIZE;
+        mb = MEM_1MB / PAGE_SIZE;
+        /* 上端は生の申告のまま。定義は変えない (K6-RAM)。 */
+        CHECK(sys_mem_kb == TEST_KB);
+        CHECK(memory_boot_ram_kb() == TEST_RAM_KB_EXPECT);
+        CHECK(memory_boot_ram_kb() <= sys_mem_kb);
+        /* 合計そのものを 3 例で固定する (span の足し算、引き算の特例なし) */
+        /* 15MiB 構成 (ExMemory 16): 上端 17MiB、低位 15MiB + 高位 1MiB */
+        CHECK(memory_boot_sum_kb(low, high + mb) == 16384UL);
+        /* 32MiB 構成 (ExMemory 33): 上端 33MiB、低位 15MiB + 高位 17MiB */
+        CHECK(memory_boot_sum_kb(low, high + 17UL * mb) == 32768UL);
+        /* 8MiB (legacy 経路): 高位無し。上端と一致する */
+        CHECK(memory_boot_sum_kb(8192UL, 0) == 8192UL);
+        /* 高位帯に届かない申告は 1 ページも足さない */
+        CHECK(memory_boot_sum_kb(8192UL, high) == 8192UL);
+        CHECK(memory_boot_sum_kb(8192UL, MEM_SYSTEM_SPACE_BASE / PAGE_SIZE) == 8192UL);
+        CHECK(host_if == 0x202U);
+        die(0);
+    }
+#endif
 #ifdef TEST_HIGH
     /* K6-RAM: 16MiB 超を検出量ぶんそのまま池に入れる。人為的な上限は無く、
      * 引かれてよいのは名前の付いたデバイス予約だけ。 */
@@ -149,6 +178,8 @@ void _start(void)
         limit = pgalloc_limit_pfn();
         CHECK(pgalloc_model_state() == PGALLOC_ONLINE);
         CHECK(limit == TEST_KB / (PAGE_SIZE / 1024));
+        /* 実 RAM 合計は上端ちょうど 1MiB 下 = 15-16MiB の穴のぶん (K6-RAM (2)) */
+        CHECK(memory_boot_ram_kb() == TEST_KB - MEM_1MB / 1024UL);
         /* M5: 15-16MiB の穴は RAM として配られない */
         CHECK(physmem_count(&device_boot_map, hole, high, PHYSMEM_RESERVED, &count));
         CHECK(count == high - hole);
@@ -183,6 +214,8 @@ void _start(void)
     CHECK(legacy_calls == 1 && !bootstrap_calls && !stage_calls);
     CHECK(initialized && !model_mode && !sys_model_staged);
     CHECK(sys_usable_mem_end() == TEST_KB * 1024);
+    /* 8MiB 構成では上端と実 RAM 合計が一致する (穴が上端より上にある) */
+    CHECK(memory_boot_ram_kb() == TEST_KB && sys_mem_kb == TEST_KB);
 #else
     CHECK(pgalloc_model_state() == PGALLOC_ONLINE);
     CHECK(sys_usable_mem_end() == 0xEFE000);
