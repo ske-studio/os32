@@ -22,10 +22,10 @@
 #include "os32_kapi_shared.h"
 #include "memmap.h"
 
-/* ネスト実行の最大深度 (K5b 以降は exec/appslot.h の ID の池が実際の上限。
+/* ネスト実行の上限は exec/appslot.h の ID の池 (APP_ID_MIN..APP_ID_MAX)。
  * 同時に生きられる非シェル ID は APP_MAX_APPS = 4 で、GUI アプリと CUI の
- * 入れ子 exec_run が **1 つの池を共有する** — 決裁 D9-2)。 */
-#define MAX_EXEC_NEST     4
+ * 入れ子 exec_run が **1 つの池を共有する** — 決裁 D9-2。
+ * 旧 MAX_EXEC_NEST は K5b で参照が消えたため削除した (2026-09-11)。 */
 
 /* プログラムのロード先 (固定) */
 #define EXEC_LOAD_ADDR    MEM_EXEC_LOAD_ADDR

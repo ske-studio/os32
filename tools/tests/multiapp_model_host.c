@@ -26,6 +26,8 @@
  *       MA_STARVE_BOUND 回の OP_WAIT 以内に走る (ラウンドをまたぐ待ちを含む)。
  *       順は 入力群 > 導出群、入力群の中はフォーカス優先、
  *       それ以外は last_run の次から ID 昇順の巡回。
+ *       ただし top-level にしか出来ない仕事 (LAUNCH の保留 = launch_pending)
+ *       があるときは、他の条件より先に譲る (票 D11-3、PM 受入 2026-09-11)。
  *
  *  C89 ([C1])。libc も OS32 のヘッダも使わない (-nostdlib で直接走る)。
  * ======================================================================== */
@@ -122,6 +124,7 @@ typedef struct {
     int   last_run;            /* 直前に走った ID (D11 の巡回の起点)。0 = 無し */
     int   focus;               /* 最前面窓の owner (gshell の front_owner()) */
     int   input_streak;        /* 入力優先で turn を据え置いた連続 OP_WAIT 回数 */
+    int   launch_pending;      /* top-level でしか出来ない起動要求が保留中 (D11-3) */
 } MaState;
 
 static void ma_zero(void *p, u32 n) NOINST;
@@ -316,12 +319,21 @@ static int ma_pick(MaState *st)
 }
 
 /* 走っているアプリが OP_WAIT の中で park すべきか。
+ *   - top-level にしか出来ない仕事が保留     → 譲る (下記)
  *   - 他に ready が 1 本も無い          → 戻る (1 本のときの回帰ゼロ)
  *   - 自分に入力があり、据え置きが上限未満 → 戻る (打鍵の連続を取りこぼさない)
  *   - それ以外                          → 譲る
- * 2 行目に上限を置いたのが差し戻しの修正点。入力の源は人間とは限らず
+ * 3 行目に上限を置いたのが差し戻しの修正点。入力の源は人間とは限らず
  * (自分の 2 窓へ交互に set_focus すれば自分で湧かせられる)、上限が無いと
- * 他のアプリの turn が永久に回ってこない。 */
+ * 他のアプリの turn が永久に回ってこない。
+ *
+ * 1 行目は PM 受入 2026-09-11 (K5b-W からの提案) で足した分岐。GUI アプリの
+ * 起動は WM の top-level からしか通らず (R5 / 契約 S2)、top-level へ戻る道は
+ * park だけなので、これが無いとアプリが 1 本走っている間は 2 本目が永久に
+ * 立たない (2 行目に当たって譲らない)。起動要求は有限個の事象で、消費されれば
+ * 条件も消えるため D11-3a の上界は変わらない (ケース 17g / 17h)。
+ * 実装側は userland/gshell/src/multiapp.rs の should_park の
+ * `st.launch_pending || has_top_level_work(mm)`。 */
 static int ma_should_park(MaState *st) NOINST;
 static int ma_should_park(MaState *st)
 {
@@ -330,6 +342,8 @@ static int ma_should_park(MaState *st)
     if (st->cur < MA_ID_MIN || st->cur > MA_ID_MAX) return 0;
     a = &st->app[st->cur - MA_ID_MIN];
     if (a->state != MA_RUNNING) return 0;
+    /* (a) top-level にしか出来ない仕事 (LAUNCH の保留)。据え置きより先に見る。 */
+    if (st->launch_pending) return 1;
     for (i = 0; i < MA_MAX_APPS; i++) {
         if (st->app[i].state == MA_PARKED &&
             (st->app[i].input_ready || st->app[i].derived_ready)) other_ready = 1;
@@ -992,8 +1006,8 @@ static void case_self_input_cannot_starve(void)
  *    (ii) 次ラウンドで自分より先に選ばれる分            ≤ N-1 turn
  *  の**両方**が待ち時間になる。導出群の A は、入力群を維持する B/C/D に
  *  2 ラウンド続けて先を越される。 */
-static int run_cross_round(int focus_id) NOINST;
-static int run_cross_round(int focus_id)
+static int run_cross_round(int focus_id, int launch_mode) NOINST;
+static int run_cross_round(int focus_id, int launch_mode)
 {
     MaState st;
     int i, n, k;
@@ -1013,11 +1027,15 @@ static int run_cross_round(int focus_id)
      * B/C/D は入力 ready を維持し続ける (消費しない)。 */
     ma_set_ready(&st, MA_ID_MIN, 0, 1);
     st.focus = focus_id;
+    /* launch_mode: 0 = 保留なし / 1 = 最初の park で top-level が消費 /
+     *              2 = ずっと保留のまま (上界が崩れないことを見る)。 */
+    st.launch_pending = (launch_mode != 0);
     /* n = 0 が「A が park する OP_WAIT」= 起算点。 */
     for (n = 0; n < 200; n++) {
         ma_gui_call(&st, MA_OP_WAIT);
         if (ma_should_park(&st)) {
             ma_park(&st);
+            if (launch_mode == 1) st.launch_pending = 0;   /* top-level が消費した */
             k = ma_pick(&st);
             if (k <= 0) return -2;
             ma_resume(&st, k);
@@ -1033,9 +1051,9 @@ static void case_cross_round_bound(void) NOINST;
 static void case_cross_round_bound(void)
 {
     int a2, a3, a5;
-    a2 = run_cross_round(MA_ID_MIN);        /* フォーカス = A */
-    a3 = run_cross_round(MA_ID_MIN + 1);    /* フォーカス = B */
-    a5 = run_cross_round(MA_ID_MAX);        /* フォーカス = D */
+    a2 = run_cross_round(MA_ID_MIN, 0);        /* フォーカス = A */
+    a3 = run_cross_round(MA_ID_MIN + 1, 0);    /* フォーカス = B */
+    a5 = run_cross_round(MA_ID_MAX, 0);        /* フォーカス = D */
     check(a2 > 0, "16a 導出群の A は必ず走る (無限待ちにならない)");
     check(a2 <= MA_STARVE_BOUND, "16b A は再導出した上限以内に走る");
     check(a2 == MA_STARVE_BOUND,
@@ -1044,6 +1062,55 @@ static void case_cross_round_bound(void)
           "16d フォーカスが B でも上限を超えない");
     check(a5 > 0 && a5 <= MA_STARVE_BOUND,
           "16e フォーカスが D でも上限を超えない");
+}
+
+/* ---- 17. top-level にしか出来ない仕事 (LAUNCH の保留) があれば譲る ----
+ *  PM 受入 2026-09-11 (K5b-W からの提案、票 D11-3)。`exec_start` は WM の
+ *  top-level からしか呼べず (契約 S2 = ケース 11)、走っているアプリが park
+ *  しない限り top-level へ戻る道は無い。したがってこの分岐が無いと、アプリが
+ *  1 本走っている間は 2 本目を**永久に**起動できない (ケース 13b の「他に
+ *  ready が居なければ park しない」に当たって譲らないため)。
+ *  起動要求は有限個の事象で、消費されれば条件も消えるので、D11-3a の上界
+ *  (30 = (2N−2) × (STREAK_MAX+1)) は変わらない — 17g / 17h で見る。 */
+static void case_launch_pending_parks(void) NOINST;
+static void case_launch_pending_parks(void)
+{
+    MaState st;
+    int streak_before, n_none, n_consumed, n_held;
+    ma_init(&st, 4096);
+    fill_four(&st, 100);
+    ma_resume(&st, 2);
+    ma_gui_call(&st, MA_OP_WAIT);
+
+    /* 自分だけが ready = 従来なら「他に ready が居ない」で譲らない場面。 */
+    ma_set_ready(&st, 2, 1, 0);
+    check(ma_should_park(&st) == 0,
+          "17a 保留が無ければ従来どおり park しない (他に ready が居ない)");
+    st.launch_pending = 1;
+    check(ma_should_park(&st) == 1,
+          "17b LAUNCH が保留なら、他に ready が居なくても譲る");
+    st.launch_pending = 0;
+    check(ma_should_park(&st) == 0, "17c 保留が消えれば従来どおりに戻る");
+
+    /* 入力の据え置き (input_streak) より保留が先であること。 */
+    ma_set_ready(&st, 4, 1, 0);          /* 他にも入力群が居る */
+    st.input_streak = 0;
+    check(ma_should_park(&st) == 0 && st.input_streak == 1,
+          "17d 保留が無ければ自分の入力を据え置く (従来 = 13a)");
+    st.launch_pending = 1;
+    streak_before = st.input_streak;
+    check(ma_should_park(&st) == 1, "17e 保留は入力の据え置きより先に効く");
+    check(st.input_streak == streak_before,
+          "17f 保留での park は据え置きの数え (input_streak) を動かさない");
+
+    /* D11-3a の上界。ケース 16 と同じ構成で保留の有無だけを変える。 */
+    n_none     = run_cross_round(MA_ID_MIN, 0);
+    n_consumed = run_cross_round(MA_ID_MIN, 1);
+    n_held     = run_cross_round(MA_ID_MIN, 2);
+    check(n_consumed == n_none && n_none == MA_STARVE_BOUND,
+          "17g 保留が 1 回で消費されれば待ち回数は従来と同じ (= 30)");
+    check(n_held > 0 && n_held <= MA_STARVE_BOUND,
+          "17h 保留が続いても D11-3a の上界 (30) を超えない");
 }
 
 int main(void) NOINST;
@@ -1067,6 +1134,7 @@ int main(void)
     case_no_starvation();
     case_self_input_cannot_starve();
     case_cross_round_bound();
+    case_launch_pending_parks();
     if (failures) {
         report("FAILURES\n");
         die(1);

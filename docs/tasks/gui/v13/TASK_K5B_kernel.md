@@ -100,7 +100,7 @@ EIP `kernel_main+0xd4c` で停止。rshell が上がらないため回帰・v86�
 | # | 事項 | 重さ | 決裁 |
 |---|---|---|---|
 | A1 | **`--cpl0` の子 × 生きている CPL=3 アプリ**: `exec_cpl0_claim()` は帯 `[0x500000, mem_end)` を identity で丸ごと `pgalloc_mark_used`、`release` で丸ごと free。K5b-K 以後は CPL=3 アプリの per-app 物理も同じ pgalloc から取るので、GUI アプリが park 中に `--cpl0` の子を起動すると (a) 子がアプリの物理を上書き、(b) 解放時に生きているアプリのページまで free。gshell 配下でしか到達しない | **P1 相当** (受入前に決着) | ユーザー → **実装済み** (コミット SHA は PM が入れる) |
-| A2 | 入れ子 `exec_run` の上限が `MAX_EXEC_NEST`(=4) から ID の池 (2〜5) に変わった。GUI 4 本が生きていると CUI の入れ子は `OS32_ERR_FULL` (設計どおり)。`exec.h:28` の `MAX_EXEC_NEST` は死に定数 | 低 (掃除) | PM |
+| A2 | 入れ子 `exec_run` の上限が `MAX_EXEC_NEST`(=4) から ID の池 (2〜5) に変わった。GUI 4 本が生きていると CUI の入れ子は `OS32_ERR_FULL` (設計どおり)。`exec.h:28` の `MAX_EXEC_NEST` は死に定数 (**掃除済み** 2026-09-11) | 低 (掃除) | PM |
 | A3 | `EXEC_DYN_RESERVE` の穴は CPL=0 の子のためだけに残り、V86 バッキングと per-app 物理が同じ pgalloc を食い合う。sbrk 段 1 (収まるなら張る) と組むと、アプリ起動直後の `v86` が以前は通った所で落ちうる | 中 (G8 の v86 で観測) | PM/テスター |
 | A4 | `resolved` / `hdrbuf` が関数 static で全段共有。ヘッダ先読みと本体読み込みの間に他の exec が挟まると親の起動を静かに壊す (現状はその窓に何も入らない) | 低 (注記) | PM |
 
