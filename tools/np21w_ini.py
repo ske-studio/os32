@@ -46,7 +46,7 @@ import uuid
 # 8MB は CUI の最低動作環境であって GUI の最低要件ではない
 # (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md)。
 ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',),
-           'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '8', '16')}
+           'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '8', '16', '33', '129')}
 SECTION = b'nekoproject21'
 LIMIT = 4 * 1024 * 1024
 

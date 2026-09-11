@@ -54,7 +54,7 @@ NP21/W の `initsave` は `s_IniItems[]` 表を丸ごと書くので、このエ
 |---|---|---|
 | `cirrus-on` / `cirrus-off` | `USEGD5430` (+ `GD5430TYPE=91` 維持) | TASK_H3_cirrus §0 |
 | `pegc-on` / `pegc-off` | `USEPEGCP` のみ | `win9x/ini.cpp:687` が `np2cfg.usepegcplane` に束縛し、`io/pegc.c:375` が `pegc.enable` に写す。`mem/memvga.c` が PEGC の VRAM 経路ごとに見る |
-| `ram-8mb` / `ram-15mb` | `ExMemory` のみ (7 / 16) | `win9x/ini.cpp:477` (`PFTYPE_UINT16`、MB 単位)。ブートローダが 1MB から 512KB 刻みで実測する (`boot/loader_fat.asm:248`)。**8MB は CUI の最低動作環境**で `memory_boot` の legacy フォールバックを通す構成。**GUI の最低要件ではない** (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md) |
+| `ram-8mb` / `ram-15mb` / `ram-32mb` / `ram-128mb` | `ExMemory` のみ (7 / 16 / 33 / 129。16 以上は 16MB システム空間の 1MB が抜けるのでゲスト報告量 + 1) | `win9x/ini.cpp:477` (`PFTYPE_UINT16`、MB 単位)。ブートローダが 1MB から 512KB 刻みで実測する (`boot/loader_fat.asm:248`)。**8MB は CUI の最低動作環境**で `memory_boot` の legacy フォールバックを通す構成。**GUI の最低要件ではない** (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md) |
 
 **`pc_model` は PEGC の gate ではない。** OS32 の `pegc_probe()` が見るのは BIOS
 ワークエリア 0x045C bit6 と 0x0597 bit2 で、2026-09-09 の実測では `pc_model=VX` の

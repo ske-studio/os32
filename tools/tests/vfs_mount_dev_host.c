@@ -33,6 +33,12 @@ void ext2_unmount(Ext2Ctx *ctx) { ctx->mounted = 0; }
 int ext2_is_mounted_ctx(Ext2Ctx *ctx) { return ctx->mounted; }
 int ext2_sync(Ext2Ctx *ctx) { (void)ctx; ext2_sync_calls++; return EXT2_OK; }
 
+/* stat 経路の境界。stub_ino != 0 のとき「どのデバイスでも、どのパスでも
+ * 同じ inode 番号」を返す — 別ディスクで inode が衝突した状況の再現。
+ * stub_inode_rc != 0 なら read_inode を落として stat の合成経路へ回す。 */
+static u32 stub_ino;
+static int stub_inode_rc;
+
 int ext2_create(Ext2Ctx *c, u32 d, const char *n, const void *b, u32 s)
 { (void)c; (void)d; (void)n; (void)b; (void)s; return -1; }
 int ext2_find_entry(Ext2Ctx *c, u32 d, const char *n, u32 *o, u8 *t)
@@ -42,13 +48,27 @@ int ext2_get_size_ino(Ext2Ctx *c, u32 i, u32 *s)
 int ext2_list_dir(Ext2Ctx *c, u32 d, ext2_dir_callback cb, void *u)
 { (void)c; (void)d; (void)cb; (void)u; return -1; }
 int ext2_lookup(Ext2Ctx *c, const char *p, u32 *i)
-{ (void)c; (void)p; (void)i; return -1; }
+{
+    (void)c; (void)p;
+    if (!stub_ino) return -1;
+    *i = stub_ino;
+    return 0;
+}
 int ext2_mkdir(Ext2Ctx *c, u32 d, const char *n)
 { (void)c; (void)d; (void)n; return -1; }
 int ext2_read_file(Ext2Ctx *c, u32 i, void *b, u32 m)
 { (void)c; (void)i; (void)b; (void)m; return -1; }
 int ext2_read_inode(Ext2Ctx *c, u32 i, Ext2Inode *o)
-{ (void)c; (void)i; (void)o; return -1; }
+{
+    (void)c;
+    if (!stub_ino || stub_inode_rc != 0) return -1;
+    memset(o, 0, sizeof(*o));
+    o->mode = 0100644;   /* 通常ファイル */
+    o->links_count = 1;
+    o->size = 4;
+    (void)i;
+    return 0;
+}
 int ext2_read_stream(Ext2Ctx *c, u32 i, void *b, u32 s, u32 o)
 { (void)c; (void)i; (void)b; (void)s; (void)o; return -1; }
 int ext2_rmdir(Ext2Ctx *c, u32 d, const char *n)
@@ -97,6 +117,8 @@ static void reset(void)
     ext2_mount_calls = 0;
     ext2_sync_calls = 0;
     ext2_mount_rc = EXT2_OK;
+    stub_ino = 0;
+    stub_inode_rc = 0;
     ext2_init();
     CHECK(num_fs == 1);
 }
@@ -166,6 +188,59 @@ static void duplicate_device_refused(void)
     CHECK(ext2_sync_calls == 2);
 }
 
+/* 別デバイスで inode 番号が衝突しても stat の (st_dev, st_ino) は衝突しない。
+ * FS ドライバは st_dev を埋めない (ext2/iso9660 は 0 固定) ので、VFS が
+ * マウント単位の値を上書きしないと、filer の同一ファイル判定が別ディスクの
+ * 別ファイルを「同じファイル」と見て正当な上書きコピーを拒む。 */
+static void stat_dev_identifies_mount(void)
+{
+    OS32_Stat a, b, c;
+
+    reset();
+    stub_ino = 12;
+    CHECK(vfs_mount("/", "hd0", "ext2") == VFS_OK);
+    CHECK(vfs_mount("/hd1", "hd1", "ext2") == VFS_OK);
+
+    CHECK(vfs_stat("/a", &a) == VFS_OK);
+    CHECK(vfs_stat("/hd1/a", &b) == VFS_OK);
+    CHECK(vfs_stat("/b", &c) == VFS_OK);
+
+    /* 前提: inode 番号は等しい (これが衝突の種) */
+    CHECK(a.st_ino == 12 && b.st_ino == 12 && c.st_ino == 12);
+    /* 修正前はどれも 0 で、a と b が「同じファイル」に見えた */
+    CHECK(a.st_dev != 0 && b.st_dev != 0 && c.st_dev != 0);
+    CHECK(a.st_dev != b.st_dev);   /* 別デバイス → 別ファイル */
+    CHECK(a.st_dev == c.st_dev);   /* 同一マウント内の 2 パスは同値 */
+    /* 値はマウントのデバイス指定 + 1 (0 は「不明」に予約) */
+    CHECK(a.st_dev == (u32)VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 0) + 1U);
+    CHECK(b.st_dev == (u32)VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 1) + 1U);
+}
+
+/* マウントルートの合成 stat も同じ規則で埋める (FS が stat を落とす経路)。 */
+static void stat_dev_on_synth_root(void)
+{
+    OS32_Stat r0, r1;
+
+    reset();
+    stub_ino = 12;
+    stub_inode_rc = -1;            /* ext2 の stat を失敗させる */
+    CHECK(vfs_mount("/", "hd0", "ext2") == VFS_OK);
+    CHECK(vfs_mount("/hd1", "hd1", "ext2") == VFS_OK);
+
+    CHECK(vfs_stat("/", &r0) == VFS_OK);
+    CHECK(vfs_stat("/hd1", &r1) == VFS_OK);
+    CHECK(r0.st_dev == (u32)VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 0) + 1U);
+    CHECK(r1.st_dev == (u32)VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 1) + 1U);
+    CHECK(r0.st_dev != r1.st_dev);
+    /* マウントの下のパスはそのマウントの値 ("/hd1/..." は hd1 側) */
+    CHECK(vfs_path_dev("/hd1/deep/x") == r1.st_dev);
+    CHECK(vfs_path_dev("/deep/x") == r0.st_dev);
+
+    /* どこにもマウントが無ければ 0 (「不明」) */
+    reset();
+    CHECK(vfs_path_dev("/x") == 0);
+}
+
 int main(int argc, char **argv)
 {
     const char *c = argc > 1 ? argv[1] : "";
@@ -173,6 +248,8 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "ext2_rejects_non_hd")) ext2_rejects_non_hd();
     else if (!strcmp(c, "boot_sequence_has_one_ext2")) boot_sequence_has_one_ext2();
     else if (!strcmp(c, "duplicate_device_refused")) duplicate_device_refused();
+    else if (!strcmp(c, "stat_dev_identifies_mount")) stat_dev_identifies_mount();
+    else if (!strcmp(c, "stat_dev_on_synth_root")) stat_dev_on_synth_root();
     else { fprintf(stderr, "unknown case: %s\n", c); return 2; }
     return 0;
 }

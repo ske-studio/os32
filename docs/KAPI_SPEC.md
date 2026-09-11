@@ -1,4 +1,4 @@
-# KernelAPI v42 仕様書
+# KernelAPI v45 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -17,7 +17,7 @@
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
 | 現在のバージョン | **41** |
-| 合計エントリ数 | **184** (ヘッダ2 + 関数ポインタ180 + データフィールド2) |
+| 合計エントリ数 | **190** (ヘッダ2 + 関数ポインタ186 + データフィールド2) |
 
 ---
 
@@ -84,7 +84,9 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
 | v42 | **実装済み (2026-09-06)** | GUI v1.1: `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2)。開発中は v41 と呼んでいたが、ime_* の追記を機に main マージ前に **v42 として確定** (2026-09-06 ユーザー承諾)。v41 の成果物は存在しない (main 未リリース) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
-| v43 | 予約 (GUI の次) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
+| v43 | 予約 (未実装のまま据え置き) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
+| v44 | **実装済み (2026-09-11、K5b-K)** | GUI v1.3 K5: アプリ 4 本の同時実行 (契約 T2a、GetMessage 方式) `exec_start` / `exec_resume` / `exec_park` / `exec_kill` / `exec_app_state` と、フォーカス追従の音の排他 `snd_focus`。owner 1 (シェル帯) 専用。カウンタはカーネルシンボル (KAPI にしない)。v43 はネットワークに予約済みなので**飛ばした** | [tasks/gui/v13/TASK_K5_multiapp.md §D8](tasks/gui/v13/TASK_K5_multiapp.md)、[TASK_K5B_kernel](tasks/gui/v13/TASK_K5B_kernel.md) |
+| v45 | **実装済み (2026-09-11、K5c)** | GUI v1.3 K5: `exec_abort_clear` — CTRL+STOP の宛先を**フォーカス窓のアプリ**にする (契約 T6、決裁 A1)。IRQ1 は走っているアプリにしか要求を立てられないので、WM が本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` する。owner 1 (シェル帯) 専用 | [tasks/gui/v13/TASK_K5B_gshell.md §決裁](tasks/gui/v13/TASK_K5B_gshell.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -324,6 +326,44 @@ V86 ゲストを起動する。MS-DOS 5.00A の起動確認に使う。
 | 0x2D0 | ime_feed_key | `int(int keydata)` |
 | 0x2D4 | ime_set_render | `void(void *table)` |
 
+### アプリ 4 本の同時実行 + 音の排他 (v44)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x2D8 | exec_start | `i32(const char *cmdline)` |
+| 0x2DC | exec_resume | `i32(i32 app_id, i32 wait_ret)` |
+| 0x2E0 | exec_park | `i32(void)` |
+| 0x2E4 | exec_kill | `i32(i32 app_id)` |
+| 0x2E8 | exec_app_state | `i32(i32 app_id)` |
+| 0x2EC | snd_focus | `i32(int app_id)` |
+
+いずれも **owner 1 (シェル帯 = gshell / CUI シェル) からのみ**。判定は `gui_register` と同じ形で、
+それ以外からは `OS32_ERR_INVAL`。設計の正典は
+[tasks/gui/v13/TASK_K5_multiapp.md](tasks/gui/v13/TASK_K5_multiapp.md) の D0〜D11。
+
+- `exec_start(cmdline)`: **塞がない起動**。>0 = app_id (2〜5) で最初の `gui_call(OP_WAIT)` まで
+  進んで park した / 0 = park より前に終了した (回収済み・`gui_owner_exit` 配送済み) /
+  <0 = 起動しなかった (`OS32_ERR_FULL` = ID の池が尽きた、`EXEC_ERR_NOMEM` = 物理が足りない、
+  `EXEC_ERR_NOT_FOUND`、`EXEC_ERR_INVALID`)。従来の `exec_run` は残り、CUI の入れ子はそのまま。
+- `exec_resume(app_id, wait_ret)`: park してあるアプリを 1 本だけ起こす。`wait_ret` は
+  `OP_WAIT` の戻り値としてアプリに渡る。戻り値は app_id (また park した) / 0 (終了した) / <0。
+  起こせるのは **`OP_WAIT` で park された印のあるフレームだけ**で、印が無ければ
+  `OS32_ERR_STALE` を返し `ring3_resume_bad_frame_count` が増える (受入 G7)。
+- `exec_park()`: 走っているアプリを `OP_WAIT` の中で止め WM へ戻す。成立すれば **戻らない**。
+  呼べない文脈 (他の op / 走っているアプリが居ない / CUI の入れ子の子) では `OS32_ERR_INVAL` を
+  返して普通に戻り、`ring3_park_reject_count` が増える。呼んでよいのは gshell の `op_wait` の
+  ループ先頭 1 点だけ (park 規約)。
+- `exec_kill(app_id)`: 止めてあるアプリを起こさずに畳む。走っている本人は `OS32_ERR_STALE`
+  (そちらは CTRL+STOP の経路)。
+- `exec_app_state(app_id)`: 0 = 空き / 1 = 走っている / 2 = park 中。
+- `snd_focus(app_id)`: 音の所有者をフォーカス窓の owner に合わせる。それまでの所有者の BGM を
+  退避して止め、移った先に退避があれば復元する。**同時には鳴らさない**。フォーカスの無い
+  所有者の `snd_bgm_play` は鳴らさず退避に積むだけ、SE は捨てる。
+
+受入 G7 のカウンタ (`ring3_switch_count` / `ring3_transition_count` / `ring3_park_reject_count` /
+`ring3_resume_bad_frame_count`) は **KAPI ではなくカーネルシンボル**で、`fault_kill_count` と
+同じく `kernel.map` の番地を `emu_read_mem` で読む。
+
 - `kbd_trygetrawkey`: 戻り値 `keycode | down<<8 | mods<<9` (mods = そのイベント時点の `SHIFT_*`、GUI モード中のみ記録)、無ければ -1。WM (gshell) が Key down/up を作る。
 - `ime_feed_key(keydata)`: WM が打鍵 `(scancode<<8)|ascii` を FEP に通す (GUI 中はカーネルが cooked に積まないため)。負 = 確定文字列の続きだけ。戻り値: <0 消費 / >=0x100 素通り / 0x1B ESC 素通り / 1..0xFF 確定 UTF-8 の 1 バイト (W2)。
 - `ime_set_render(table)`: FEP の描画バックエンド (`IME_Render` 関数表) を差し替える。NULL で TVRAM 版へ戻す。gshell が GFX 版を渡す (W2)。
@@ -339,6 +379,23 @@ CPU 実装へフォールバックする。設計: `docs/tasks/gui/API_CONTRACTS
 `ime_trygetkey` は FEP を通したノンブロッキングのキー取得で、`kbd_trygetkey` の
 FEP 対応版にあたる (エディタ等のメインループから使う)。
 
+### CTRL+STOP の宛先切り替え (v45)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x2F0 | exec_abort_clear | `i32(void)` |
+
+- `exec_abort_clear()`: IRQ1 が立てた CTRL+STOP の要求を降ろす。**owner 1 (シェル帯) からのみ**で、
+  それ以外は `OS32_ERR_INVAL`。0 = 降ろした / 要求が無かった。
+  IRQ1 の時点でカーネルが知っているのは「いま走っているアプリ」だけなので要求はそこに立つが、
+  契約 T6 の宛先は**フォーカス窓のアプリ**。WM (gshell) はフォーカス窓の owner が走っている本人で
+  なければ、これで本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` で畳む。降ろさないと
+  本人が次の syscall 境界 (`ring3_abort_check`) で畳まれ、**意図しない 1 本が死ぬ**。
+  要求を負えるのは走っている 1 本だけなので対象は高々 1 本で、`abort_req` 以外
+  (`state` / `in_op_wait` / `parked_from_wait`) と他の ID のスロットには触らない。
+  WM が top-level (owner 1) に戻るのは park の後なので、対象のスロットは PARKED になっている
+  ことがある — 状態では絞らない。
+
 ### データフィールド (構造体末尾)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
@@ -346,8 +403,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2D8 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2DC | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x2F4 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x2F8 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

@@ -42,7 +42,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[180];
+volatile u32 kapi_hits[187];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -228,6 +228,13 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     0,  /* kbd_trygetrawkey */
     4,  /* ime_feed_key */
     4,  /* ime_set_render */
+    4,  /* exec_start */
+    8,  /* exec_resume */
+    0,  /* exec_park */
+    4,  /* exec_kill */
+    4,  /* exec_app_state */
+    4,  /* snd_focus */
+    0,  /* exec_abort_clear */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -413,6 +420,13 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* kbd_trygetrawkey */
     0x0000,  /* ime_feed_key */
     0x0001,  /* ime_set_render: table */
+    0x0001,  /* exec_start: cmdline */
+    0x0000,  /* exec_resume */
+    0x0000,  /* exec_park */
+    0x0000,  /* exec_kill */
+    0x0000,  /* exec_app_state */
+    0x0000,  /* snd_focus */
+    0x0000,  /* exec_abort_clear */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1487,5 +1501,47 @@ void __cdecl wrap_ime_set_render(void *table)
 {
     KAPI_HIT(179);
     ime_set_render(table);
+}
+
+i32 __cdecl wrap_exec_start(const char *cmdline)
+{
+    KAPI_HIT(180);
+    return exec_start(cmdline);
+}
+
+i32 __cdecl wrap_exec_resume(i32 app_id, i32 wait_ret)
+{
+    KAPI_HIT(181);
+    return exec_resume(app_id, wait_ret);
+}
+
+i32 __cdecl wrap_exec_park(void)
+{
+    KAPI_HIT(182);
+    return exec_park();
+}
+
+i32 __cdecl wrap_exec_kill(i32 app_id)
+{
+    KAPI_HIT(183);
+    return exec_kill(app_id);
+}
+
+i32 __cdecl wrap_exec_app_state(i32 app_id)
+{
+    KAPI_HIT(184);
+    return exec_app_state(app_id);
+}
+
+i32 __cdecl wrap_snd_focus(int app_id)
+{
+    KAPI_HIT(185);
+    return snd_focus(app_id);
+}
+
+i32 __cdecl wrap_exec_abort_clear(void)
+{
+    KAPI_HIT(186);
+    return exec_abort_clear();
 }
 

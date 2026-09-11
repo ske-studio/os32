@@ -153,6 +153,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
 - `gui_gate.py` で GUI を叩くときは rshell を ESC で抜けてから `/api/key`、Start メニューの行は
   `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
+- `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
+  要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 

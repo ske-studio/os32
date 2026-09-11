@@ -17,7 +17,7 @@ KernelAPIポインタを引数として実行する。
 | アドレス空間 | プログラムごとに PD。カーネル帯 0x100000〜0x3FFFFF は全 PD 共有・非 USER。USER にするのは下の「Ring3 の USER 写像」の範囲だけ |
 | 共有ライブラリ | 0x400000〜0x4FFFFF に `/sys/lib/libos32gui.shlib` が常駐 (`kernel/shlib.c`)。.text はアプリ間で共有 (RO+USER)、.data/.bss はアプリ PD ごとに複製 (`shlib_addrspace_attach`、失敗は `EXEC_ERR_NOMEM`)。アプリは stub (ジャンプ表への薄いスタブ) を静的リンクし、版は先頭 4KB の `OS32ShlibHeader` で照合 |
 | ヒープ | [本体][newlib sbrk (最低 256KB)][ガード][exec_heap] を**ロード時に動的に決める** (固定 1MB 上限は 2026-09-04 に撤廃)。exec_heap の大きさは OS32X ヘッダ `heap_size` (`mkos32x --heap`) があればそれ、0 なら空きを sbrk と折半。実行中の拡張は無い |
-| ネスト実行 | 最大 4 段 (`MAX_EXEC_NEST`)。Level 0 = カーネル、1 = シェル、2+ = アプリ。**子が終了すると親に戻る** (親の exec_heap は `exec_heap_restore_state()` で復元) |
+| ネスト実行 | 最大 4 段 (ID の池 `exec/appslot.h` の `APP_MAX_APPS`)。Level 0 = カーネル、1 = シェル、2+ = アプリ。**子が終了すると親に戻る** (親の exec_heap は `exec_heap_restore_state()` で復元) |
 | 資源の所有者 | FD / リダイレクト / パイプは `res_owner_get()` (= ネスト段) でタグ付け、終了段の分だけ回収 ([10 §10-9](10_notes.md)) |
 | 不正ポインタ | ディスパッチャがアプリ帯 / SHM / VRAM の範囲で早期検証。検証しきれないものは「ring3 syscall 実行中フォールトガード」が捕捉し、**アプリだけ kill** (`fault_kill_count`)。設計: [tasks/v2/](tasks/v2/PLAN.md) |
 | プログラム専用スタック | CPL=3: アプリ帯の上端から 256KB + その直下にガード 1 ページ。帯 1 枚 (既定) なら 0x7C0000〜0x7FFFFF / ガード 0x7BF000、2 枚なら 0xBC0000〜0xBFFFFF / ガード 0xBBF000 ([tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md))。CPL=0: mem_end 付近 |

@@ -852,7 +852,17 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
     if hit_hint {
         desktop::draw_hint(st);
     }
-    /* クローム: clip に掛かる窓を背面→前面で描き直す。 */
+    /* クローム: clip に掛かる窓を背面→前面で描き直す。
+     *
+     * 枠は **その窓の可視な外形 (外形 − 前面窓の外形)** で切って描く。切らずに
+     * 描くと背面窓の右辺・下辺の 1px が前面窓のクライアント面に落ち、WM は
+     * クライアント面を持たないので消せない (W-3、2026-09-11: File Manager の
+     * リスト面を gui_bench の右辺と Help の下辺が貫いた)。
+     *
+     * `clip` との交差は取らない。装飾は clip より広く書くが、書く先は自分の
+     * 外形の中だけなので他の窓・下地を壊さない。逆に clip で切ると、部分損傷の
+     * 周に**文字セルの一部だけ**が塗り直されて字が欠ける (`kcg_draw_utf8` に
+     * クリップが無く、セル単位でしか描けないため)。 */
     let mono = lease::mono(st);
     let mut z2 = 0;
     while z2 < st.z_count {
@@ -860,15 +870,26 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
         let w = &st.windows[idx];
         if w.used && w.visible && w.outer().intersects(&clip) {
             let active = z2 + 1 == st.z_count;
-            chrome::draw_window_chrome(w, active, mono);
+            let mut frame = RectSet::EMPTY;
+            frame.push(w.outer());
+            let mut za = z2 + 1;
+            while za < st.z_count {
+                let above = &st.windows[st.zorder[za]];
+                if above.used && above.visible {
+                    /* 容量超過で断片を捨てても「描かない」側に倒れるだけ
+                     * (compute_vis と同じ方針)。上書き事故より欠けを採る。 */
+                    let (next, _ok) = visible::region_subtract_rect(&frame, above.outer());
+                    frame = next;
+                }
+                za += 1;
+            }
+            let mut f = 0;
+            while f < frame.len {
+                chrome::draw_window_chrome(w, active, mono, frame.rects[f]);
+                f += 1;
+            }
         }
         z2 += 1;
-    }
-    // Chrome writes whole decorations, not merely `clip`. Recompose the
-    // ENTIRE resident panel and upper WM overlays after those actual writes.
-    // Do not pretend `clip` bounded chrome's write footprint.
-    if recompose_panel(st) {
-        return;
     }
     /* モーダルダイアログは WM 自身の窓なので、クロームの最後に直接描く
      * (契約 U8 / U4)。可視領域の計算でも「上にある窓」として扱われる。 */
@@ -877,33 +898,6 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
      * 引いてあるので、アプリの Paint / COMMIT がここへ来ることは無い。 */
     taskbar::draw(st, clip);
     startmenu::draw(st, clip);
-}
-
-/// Repair the full panel after an un-clipped chrome/drag write. Caller has
-/// hidden the software cursor. Glyph work is forbidden in X4; no X4 caller.
-/// All upper overlays are recomposed over their full actual write rectangles,
-/// including FEP; queue exactly these repaired areas, not just requested clip.
-pub fn recompose_panel(st: &GuiState) -> bool {
-    let panel = crate::terminal::rect(st);
-    if panel.is_empty() {
-        return false;
-    }
-    crate::terminal::draw(st, panel);
-    let whole = Rect::new(0, 0, st.screen_w, st.screen_h);
-    modal::draw(st, whole);
-    taskbar::draw(st, whole);
-    startmenu::draw(st, whole);
-    fep::redraw_now(st);
-    for r in [
-        panel,
-        modal::rect(),
-        taskbar::rect(st),
-        startmenu::rect(),
-        fep::rect(),
-    ] {
-        queue_present(st, r);
-    }
-    true
 }
 
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
@@ -954,7 +948,6 @@ pub fn flush_screen_dirty(st: &mut GuiState) {
     if dragging {
         let f = st.drag_frame;
         chrome::draw_drag_outline(f.x, f.y, f.w, f.h, lease::mono(st));
-        recompose_panel(st);
         queue_present(st, f);
     }
 
@@ -992,6 +985,10 @@ pub fn wm_cycle(st: &mut GuiState, ctx: input::Ctx) {
         fep::pre_cycle(st);
         flush_screen_dirty(st);
         fep::post_cycle(st);
+        /* 音はフォーカスに追従して排他 (決裁 D9-4、受入 G10)。KAPI を呼ぶので
+         * X1 では行わない (契約 T8) — X3 と単独ループの周期だけ。フォーカスが
+         * 動いていなければ何もしない。 */
+        crate::multiapp::sync_snd_focus(st);
     }
 }
 
@@ -1351,3 +1348,8 @@ pub fn restore_palette(p: &[u8; 48]) {
         i += 1;
     }
 }
+
+/* 合成器のホスト試験 (`host/integration.py` でだけ組む)。 */
+#[cfg(test)]
+#[path = "../host/wm_composite_tests.rs"]
+mod wm_composite_tests;

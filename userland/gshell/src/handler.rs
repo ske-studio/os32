@@ -19,8 +19,8 @@
 
 use crate::wm::{self, GuiState, Rect, RectSet, MAX_DMG, MAX_VIS};
 use crate::{
-    cursor, damage, fep, input, lease, modal, reqs, ring, session, slot, startmenu, taskbar, timer,
-    visible,
+    cursor, damage, fep, input, lease, modal, multiapp, reqs, ring, session, slot, startmenu,
+    taskbar, timer, visible,
 };
 use os32api::gui::proto::{
     GuiRect16, GuiReqModalResult, GuiReqSession, GuiRespModalResult, GuiString, GuiWinSpec,
@@ -56,6 +56,10 @@ pub extern "C" fn gshell_gui_handler(op: u32, arg: u32, owner: i32) -> i32 {
          * 正常 exit / CTRL+STOP / fault kill のいずれでも失わない)。 */
         session::reclaim_owner(owner);
         st.reclaim_owner(owner);
+        /* K5b-W: 譲り合いの表からもこの ID の 1 本分だけ落とす (T4 / U8)。
+         * 4 つの畳み方 (exit / fault / CTRL+STOP / exec_kill) はすべて
+         * カーネルの `gui_owner_exit` を通るので、回収はここ 1 か所で足りる。 */
+        multiapp::on_owner_exit(owner);
         visible::recompute_and_expose(st);
         return 0;
     }
@@ -366,14 +370,32 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
     }
 
     loop {
+        /* (0) 譲り合い (D11-3 の (1))。**`exec_park` を呼ぶ唯一の点**で、
+         * ここは WM の 1 周が終わって状態が整っている地点 (前の周の
+         * `wm_cycle` の直後、`ring::pending` を読む前)。park が成立すると
+         * この関数は戻らず、WM top-level が別のアプリを起こす。
+         * 起こす相手が居ないとき (= アプリが 1 本のとき) は何もしないので、
+         * 下のループは従来どおり `wm_cycle` + `sys_halt` のまま回る。 */
+        multiapp::maybe_park(st, owner, deadline);
+
         /* WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップ present。 */
         wm::wm_cycle(st, input::Ctx::Wait);
 
         /* CTRL+STOP (契約 T6): 待ちを抜けてアプリへ戻す。戻った syscall の出口で
-         * カーネルが畳む (exec.c)。ここで待ち続けると永遠に畳めない。 */
+         * カーネルが畳む (exec.c)。ここで待ち続けると永遠に畳めない。
+         * 宛先は**フォーカス窓のアプリ**なので、フォーカスが別のアプリに
+         * あるときは抜けない (D4: 走っている本人でなければ何もしない)。 */
         if st.abort_seen {
             st.abort_seen = false;
-            break;
+            if multiapp::abort_targets_current(st, owner) {
+                break;
+            }
+            /* 宛先はフォーカス窓の**別の**アプリ (決裁 A1)。走っている本人が
+             * 負っている要求を降ろし、フォーカス窓の owner を畳む — どちらも
+             * owner 1 (WM top-level) からしか呼べない (K5c) ので、ここでは
+             * 予約だけ積む。`should_park` がこの予約を見て譲らせ、park で
+             * top-level へ戻ったところで両方が実行される。 */
+            multiapp::redirect_abort(st, owner);
         }
         if wake_ready(st, owner, slot_no) {
             break;

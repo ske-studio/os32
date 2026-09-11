@@ -7,7 +7,11 @@
 #include "io.h"
 
 /* Old boot has no metadata provider yet. Small, kernel-owned compatibility
- * backing only; it does not set the capacity of the model-based allocator. */
+ * backing only; it does not set the capacity of the model-based allocator.
+ * PHYSMEM_LEGACY_MAX_PFN bounds the OLD LOADER's reportable extent and the
+ * contiguous legacy arena, never total RAM (K6-RAM): the model path sizes its
+ * metadata from the detected limit and its workspace bitmap stays indexed by
+ * arena PFNs, which init_model keeps below PHYSMEM_LEGACY_MAX_PFN. */
 #define LEGACY_WORDS ((PHYSMEM_LEGACY_MAX_PFN + 31) / 32)
 static u32 legacy_metadata[LEGACY_WORDS * 2];
 static u32 *eligible, *bitmap;
@@ -187,19 +191,25 @@ void pgalloc_free_pt(u32 phys)
 
 /* Boot fail-stop contract: individual maps roll back, earlier successful
  * ranges may remain mapped on failure. No allocation is published then.
- * Iterate the frozen bitmap, never a caller-mutated model or byte end. */
+ * Iterate the frozen bitmap, never a caller-mutated model or byte end.
+ * The split is paging_init's actual identity extent, not a RAM ceiling
+ * (K6-RAM): below it every eligible page must ALREADY be identity mapped —
+ * remapping there would silently undo boot protections — and above it each
+ * eligible run is mapped now, taking new PTs from the boot workspace. */
 int pgalloc_stage_online(void)
 {
-    u32 p, first;
+    u32 p, first, boot_end;
     unsigned int flags;
     int ok;
     flags = irq_save();
     ok = 0;
     if (!model_mode || online || !workspace_first || !paging_boot_context()) goto done;
-    for (p = 0; p < limit_pfn && p < PHYSMEM_LEGACY_MAX_PFN; p++)
+    boot_end = paging_boot_identity_end();
+    if (!boot_end) goto done;
+    for (p = 0; p < limit_pfn && p < boot_end; p++)
         if (bit(eligible, p) &&
             !paging_verify_identity(p, 1, (void *)(p * PAGE_SIZE))) goto done;
-    p = PHYSMEM_LEGACY_MAX_PFN;
+    p = boot_end;
     while (p < limit_pfn) {
         if (!bit(eligible, p)) { p++; continue; }
         first = p;

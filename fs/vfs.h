@@ -183,6 +183,11 @@ int vfs_count_sqlite(const VfsSqliteCookie *cookie);
 int vfs_quarantine_sqlite(const VfsSqliteCookie *cookie);
 
 /* ファイル情報 */
+/* stat が返す st_dev。FS ドライバは埋めないので VFS が正典
+ * (VFS_MOUNT_DEV_ENCODE() + 1、未マウントは 0)。同一ファイル判定で
+ * (st_dev, st_ino) の組を使う側が、別デバイスの同じ inode 番号を
+ * 取り違えないようにするための値 */
+u32  vfs_path_dev(const char *path);
 int  vfs_stat(const char *path, OS32_Stat *buf);
 int  vfs_fstat(int fd, OS32_Stat *buf);
 /* メタデータ */

@@ -69,9 +69,9 @@ MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98",
                 "check-boot-splash-host", "check-constraints", "check-db-owned-host",
                 "check-gui-proto", "check-kapi-version", "check-manifests",
                 "check-memory-host", "check-privileged", "check-sqlite-groups-host",
-                "check-t5a-host", "check-t5b-host", "check-term-model",
+                "check-t5a-host", "check-gshell-host", "check-term-model",
                 "check-term-render", "check-tools-host", "check-vfs-fd-sqlite-host",
-                "check-vfs-mount-dev-host")
+                "check-vfs-mount-dev-host", "check-multiapp-model-host")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
 SELFTEST_SYMS = ("kselftest_pass", "kselftest_fail")
 WAIT_MAX = 60
@@ -100,7 +100,7 @@ Actions:
 {"action":"selftest"}                            read the kernel self-test counters (kselftest_pass / kselftest_fail)
 {"action":"done","report":"<what you found>"}    finish the task and report
 Host-side build actions (they run on the development PC, not on OS32):
-{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル、以後の deploy も有効のまま), kernel-nolgy98 (無効に戻す), check-net-m2 (LAN の M2 試験、実機が LAN 有効で起動中のこと), check-net-m2-cpl3 (同じ試験を CPL3 プログラム (less) 常駐中に回す), check-net-m4 (リング飽和での自己回復), programs, sdk, all, check, any single check-* subtarget from build/sdk.mk (e.g. check-memory-host, check-t5b-host, check-constraints), clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
+{"action":"make","target":"kernel"}              run `make <target>`; target is one of kernel, kernel-lgy98 (LAN 有効カーネル、以後の deploy も有効のまま), kernel-nolgy98 (無効に戻す), check-net-m2 (LAN の M2 試験、実機が LAN 有効で起動中のこと), check-net-m2-cpl3 (同じ試験を CPL3 プログラム (less) 常駐中に回す), check-net-m4 (リング飽和での自己回復), programs, sdk, all, check, any single check-* subtarget from build/sdk.mk (e.g. check-memory-host, check-gshell-host, check-constraints), clean, deploy, apps, game, external (apps/game = the external submodule repos under apps/ and game/; external = both; deploy = HostDrv sync only, NOT a verification)
 {"action":"deploy"}                              full deploy: stop emulator, write NHD, restart, wait for OS32 (takes minutes)
 
 Rules:

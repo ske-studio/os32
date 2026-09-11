@@ -79,6 +79,39 @@ void _start(void)
     paging_init(TEST_KB);
     sys_mem_kb = TEST_KB;
     CHECK(memory_boot_init != 0);
+    /* 巨大なヒント単独では高位 RAM は 1 ページも昇格しない。 */
+    CHECK(!boot_high_end);
+#ifdef TEST_TABLES
+    /* 表 (bitmap 2 面 + 恒等 PT の workspace) の大きさは検出量から出る。
+     * 人為的な上限は無く、置ける場所 — アプリ帯の最大上端から legacy
+     * アリーナ上端までの低位 RAM — の広さだけが覆える量を決める。 */
+    {
+        u32 top, room, fit, huge;
+        top = MEM_SYSTEM_SPACE_BASE / PAGE_SIZE;      /* 15MiB: アリーナ上端 */
+        room = top - MEM_APP_BAND_MAX_TOP / PAGE_SIZE;
+        /* 32MiB / 128MiB は丸ごと通る (切り詰め無し)。 */
+        CHECK(memory_boot_high_fit(0x2000, top) == 0x2000);
+        CHECK(memory_boot_table_pages(0x2000) <= room);
+        CHECK(memory_boot_workspace_pages(0x2000) == MEMORY_BOOT_WORKSPACE_PAGES);
+        CHECK(memory_boot_high_fit(0x8000, top) == 0x8000);
+        CHECK(memory_boot_table_pages(0x8000) <= room);
+        CHECK(memory_boot_workspace_pages(0x8000) == MEMORY_BOOT_WORKSPACE_PAGES +
+              0x8000 / PTE_COUNT - PAGING_BOOT_PT_COUNT);
+        /* 4GiB 相当 (上端は最上位の ROM/MMIO 帯)。 */
+        huge = MEM_PHYS_MMIO_TOP / PAGE_SIZE;
+        fit = memory_boot_high_fit(huge, top);
+        CHECK(fit > MEM_HIGH_RAM_BASE / PAGE_SIZE && fit <= huge);
+        /* 表は RAM の外に出ない。かつ置ける限りは目一杯まで取る。 */
+        CHECK(memory_boot_table_pages(fit) <= room);
+        CHECK(memory_boot_table_pages(fit + PTE_COUNT) > room);
+        /* 2GiB 超を覆える = 人為的に小さい上限は残っていない。 */
+        CHECK(fit > 0x80000);
+        /* 置き場所が無い構成は 0 (legacy へ落ちる)。でっち上げはしない。 */
+        CHECK(memory_boot_high_fit(huge, MEM_APP_BAND_MAX_TOP / PAGE_SIZE) == 0);
+        CHECK(host_if == 0x202U);
+        die(0);
+    }
+#endif
 /* 15MiB clamp なので legacy 上端は 0xF00。窓の撤去 (2026-09-09) で
  * metadata が 0xEFF、workspace が 0xEFE に上がった (旧: 0xEBF / 0xEBE)。 */
 #if defined(TEST_METADATA_PTE) || defined(TEST_WORKSPACE_PTE)
@@ -100,7 +133,52 @@ void _start(void)
     host_kernel_boot(TEST_KB);
     CHECK(0);
 #endif
+#ifdef TEST_HIGH
+    /* The detector is the only source of a high attestation; the host cannot
+     * touch the BIOS work area, so stand in for it with the same value. */
+    boot_high_end = TEST_KB / (PAGE_SIZE / 1024UL);
+#endif
     CHECK(memory_boot_init(TEST_KB));
+#ifdef TEST_HIGH
+    /* K6-RAM: 16MiB 超を検出量ぶんそのまま池に入れる。人為的な上限は無く、
+     * 引かれてよいのは名前の付いたデバイス予約だけ。 */
+    {
+        u32 p, i, hole, high, arena, limit;
+        hole = MEM_SYSTEM_SPACE_BASE / PAGE_SIZE;
+        high = MEM_HIGH_RAM_BASE / PAGE_SIZE;
+        limit = pgalloc_limit_pfn();
+        CHECK(pgalloc_model_state() == PGALLOC_ONLINE);
+        CHECK(limit == TEST_KB / (PAGE_SIZE / 1024));
+        /* M5: 15-16MiB の穴は RAM として配られない */
+        CHECK(physmem_count(&device_boot_map, hole, high, PHYSMEM_RESERVED, &count));
+        CHECK(count == high - hole);
+        p = 99;
+        CHECK(!pgalloc_alloc_n_pfn(1, hole, high, &p) && p == 99);
+        /* 最上位の ROM / PCI MMIO 帯も RAM ではない */
+        CHECK(physmem_count(&device_boot_map, MEM_PHYS_MMIO_TOP / PAGE_SIZE,
+                            PHYSMEM_MAX_PFN, PHYSMEM_MMIO, &count));
+        CHECK(count == PHYSMEM_MAX_PFN - MEM_PHYS_MMIO_TOP / PAGE_SIZE);
+        /* 検出量の最終ページまで配れる (切り詰めが無いことの証明) */
+        CHECK(pgalloc_alloc_n_pfn(1, limit - 1, limit, &p) && p == limit - 1);
+        CHECK(pgalloc_free_n_pfn(p, 1));
+        arena = workspace_first - MEM_APP_BAND_BASE / PAGE_SIZE;
+        CHECK(pgalloc_total_pages() > arena);
+        /* 連続アリーナ (exec のレイアウト) と表の置き場所は不変 */
+        CHECK(sys_usable_mem_end() == workspace_first * PAGE_SIZE);
+        CHECK((u32)eligible == workspace_end * PAGE_SIZE);
+        CHECK((u32)eligible >= MEM_APP_BAND_MAX_TOP);
+        CHECK((u32)eligible < MEM_SYSTEM_SPACE_BASE);
+        CHECK(workspace_first >= MEM_APP_BAND_MAX_TOP / PAGE_SIZE);
+        CHECK(workspace_end <= MEM_SYSTEM_SPACE_BASE / PAGE_SIZE);
+        /* ブート窓より上の identity PT は workspace (RAM) から動的に取る */
+        for (i = PAGING_BOOT_PT_COUNT; i < limit / PTE_COUNT; i++) {
+            CHECK((u32)page_tables[i] >= workspace_first * PAGE_SIZE);
+            CHECK((u32)page_tables[i] < workspace_end * PAGE_SIZE);
+        }
+        CHECK(host_if == 0x202U);
+        die(0);
+    }
+#endif
 #ifdef TEST_LEGACY
     CHECK(legacy_calls == 1 && !bootstrap_calls && !stage_calls);
     CHECK(initialized && !model_mode && !sys_model_staged);

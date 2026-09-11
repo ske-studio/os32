@@ -9,12 +9,17 @@
 #include "snd_engine.h"
 #include "fm.h"
 #include "io.h"
+#include "os32_kapi_shared.h"   /* OS32_ERR_* */
 
 /* ======================================================================== */
 /*  外部参照                                                                */
 /* ======================================================================== */
 
 extern volatile u32 tick_count;
+
+/* res_owner_get() は fs/fd_redirect.c。kernel/ は -Ifs を持たないので
+ * kernel/gui.c と同じ流儀で extern 宣言する (票 K5 の D9-4)。 */
+extern int res_owner_get(void);
 
 /* ======================================================================== */
 /*  内部定義                                                                */
@@ -93,6 +98,26 @@ typedef struct {
 } SndEngine;
 
 static SndEngine g_snd;
+
+/* ======================================================================== */
+/*  音の所有権 (決裁 D9-4、受入 G10)                                        */
+/*                                                                          */
+/*  退避するのは「もう一度同じ曲を同じ位置から鳴らし直せる最小の状態」:      */
+/*  パース済みノート列 + 再生位置 + ループ位置 + persist。next_tick は        */
+/*  復元時に snd_bgm_start_note が tick_count から張り直すので持たない。      */
+/*  SE と借用状態は最大 255 tick (2.55 秒) の一時状態なので捨てる。          */
+/*  YM2203 のレジスタ影像も持たない — 復元は opn_init + 現在ノートの再発音。  */
+/* ======================================================================== */
+typedef struct {
+    int         valid;        /* この所有者に退避された BGM がある */
+    SndBGMTrack bgm;          /* notes / num_notes / pos / loop_pos / playing */
+    int         bgm_persist;
+} SndOwnerState;
+
+/* 添字 = 所有者 ID (0 は使わない)。1 = シェル帯、2〜5 = アプリ。 */
+static SndOwnerState g_snd_saved[SND_OWNER_MAX];
+/* いま音を出してよい所有者。既定はシェル帯 (CUI では常にここ)。 */
+static int g_snd_owner = 1;
 
 /* ======================================================================== */
 /*  SSG ノート→Period 変換                                                 */
@@ -636,6 +661,22 @@ void snd_bgm_play(const char *mml)
     int num;
     unsigned int flags;
     int persist;
+    int owner = res_owner_get();
+
+    /* フォーカスが無い所有者の BGM は鳴らさず、その所有者の退避へ積むだけ
+     * (排他: 同時には鳴らさない)。フォーカスが移ってきたら鳴り出す。 */
+    if (owner > 0 && owner < SND_OWNER_MAX && owner != g_snd_owner) {
+        SndOwnerState *sv = &g_snd_saved[owner];
+        if (*mml == '"') mml++;
+        num = snd_mml_parse(mml, sv->bgm.notes, SND_MAX_NOTES, &loop_pos);
+        sv->bgm.num_notes = num;
+        sv->bgm.pos = 0;
+        sv->bgm.loop_pos = loop_pos;
+        sv->bgm.playing = 1;
+        sv->bgm.next_tick = 0;
+        sv->valid = 1;
+        return;
+    }
 
     /* 再生中なら停止。以降 playing=0 なので ISR は bgm を触らない。
      * snd_bgm_stop() は persist もクリアするが、呼び出し側は
@@ -694,8 +735,11 @@ void snd_se_play(int se_id)
 {
     SndSE_Def *def;
     unsigned int flags;
+    int owner = res_owner_get();
     if (se_id < 0 || se_id >= SND_SE_MAX) return;
     if (!g_snd.master_enable) return;
+    /* 排他: フォーカスの無い所有者の SE は捨てる (一時状態なので退避しない) */
+    if (owner > 0 && owner < SND_OWNER_MAX && owner != g_snd_owner) return;
 
     def = &g_snd.se_table[se_id];
     if (def->duration == 0) return;  /* 未定義 */
@@ -714,7 +758,9 @@ void snd_se_play(int se_id)
 void snd_se_play_raw(int note, int duration_ticks, int tone)
 {
     unsigned int flags;
+    int owner = res_owner_get();
     if (!g_snd.master_enable) return;
+    if (owner > 0 && owner < SND_OWNER_MAX && owner != g_snd_owner) return;
     if (duration_ticks < 1) duration_ticks = 1;
     if (duration_ticks > 255) duration_ticks = 255;
 
@@ -746,7 +792,100 @@ void snd_cleanup(void)
 
 void snd_bgm_set_persist(int persist)
 {
+    int owner = res_owner_get();
+    if (owner > 0 && owner < SND_OWNER_MAX && owner != g_snd_owner) {
+        g_snd_saved[owner].bgm_persist = persist;
+        return;
+    }
     g_snd.bgm_persist = persist;
+}
+
+/* ======================================================================== */
+/*  snd_focus — 音の所有者をフォーカスに追従させる (決裁 D9-4、受入 G10)     */
+/* ======================================================================== */
+i32 snd_focus(int app_id)
+{
+    unsigned int flags;
+    SndOwnerState *sv;
+
+    if (app_id <= 0 || app_id >= SND_OWNER_MAX) return OS32_ERR_INVAL;
+    if (app_id == g_snd_owner) return 0;
+
+    flags = irq_save();
+
+    /* 1. いまの所有者の BGM を退避して止める。ISR (snd_tick) と競合させない
+     *    ため playing=0 を先に落とす。 */
+    sv = &g_snd_saved[g_snd_owner];
+    g_snd.bgm.playing = 0;
+    sv->bgm = g_snd.bgm;              /* ノート列 + pos + loop_pos をまるごと */
+    sv->bgm.playing = g_snd.bgm.num_notes > 0 ? 1 : 0;
+    sv->bgm_persist = g_snd.bgm_persist;
+    sv->valid = (g_snd.bgm.num_notes > 0);
+
+    g_snd.fm_se.active = 0;
+    g_snd.ssg_se.active = 0;
+    g_snd.fm_borrow.borrowed = 0;
+    g_snd.ssg_borrow.borrowed = 0;
+    fm_all_off();
+    ssg_all_off();
+
+    /* 2. 移った先に退避済みの BGM があれば復元 (無ければ無音のまま) */
+    g_snd_owner = app_id;
+    sv = &g_snd_saved[app_id];
+    g_snd.bgm.num_notes = 0;
+    g_snd.bgm.pos = 0;
+    g_snd.bgm.loop_pos = -1;
+    g_snd.bgm_persist = 0;
+    if (sv->valid && sv->bgm.playing && sv->bgm.num_notes > 0) {
+        g_snd.bgm = sv->bgm;
+        g_snd.bgm_persist = sv->bgm_persist;
+        g_snd.bgm.playing = 1;
+        if (g_snd.master_enable) {
+            opn_init();
+            ssg_mixer(0x38);
+            /* いまのノートを鳴らし直す (next_tick は tick_count から張り直る) */
+            snd_bgm_start_note(&g_snd.bgm);
+        }
+    }
+
+    irq_restore(flags);
+    return 0;
+}
+
+int snd_focus_owner(void) { return g_snd_owner; }
+
+/* ======================================================================== */
+/*  snd_owner_exit — その ID の音の状態だけを捨てる (exec_exit / exec_kill)  */
+/* ======================================================================== */
+void snd_owner_exit(int owner)
+{
+    unsigned int flags;
+
+    if (owner <= 0 || owner >= SND_OWNER_MAX) return;
+
+    flags = irq_save();
+    g_snd_saved[owner].valid = 0;
+    g_snd_saved[owner].bgm.num_notes = 0;
+    g_snd_saved[owner].bgm.playing = 0;
+    g_snd_saved[owner].bgm_persist = 0;
+
+    if (owner == g_snd_owner) {
+        /* 鳴っているのがこの ID。persist が立っていなければ止める
+         * (従来の snd_cleanup と同じ判断を ID 単位で行う)。 */
+        if (!g_snd.bgm_persist) {
+            g_snd.bgm.playing = 0;
+            g_snd.bgm.num_notes = 0;
+            g_snd.fm_borrow.borrowed = 0;
+            g_snd.ssg_borrow.borrowed = 0;
+            g_snd.fm_se.active = 0;
+            g_snd.ssg_se.active = 0;
+            fm_all_off();
+            ssg_all_off();
+        }
+        /* 所有権はシェル帯へ戻す。次のフォーカスで WM が snd_focus を呼ぶ。 */
+        if (owner != 1) g_snd_owner = 1;
+    }
+    irq_restore(flags);
 }
 
 int snd_bgm_get_persist(void)

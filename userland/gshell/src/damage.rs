@@ -4,7 +4,8 @@
 //! 既存 dirty と重なる/隣接するものを結合する (既存 `gfx_add_dirty_rect` と同じ規則、
 //! 上限 8/ウィンドウ)。上限を超える場合は外接矩形へ潰す (過剰申告は安全側)。
 
-use crate::wm::{Rect, RectSet, Win, DAMAGE_SNAP, MAX_DMG, MAX_VIS};
+use crate::wm::{GuiState, Rect, RectSet, Win, DAMAGE_SNAP, MAX_DMG, MAX_VIS};
+use os32api::gui::proto::GUI_MAX_WINDOWS;
 
 /// 32px グリッドへ拡張する。
 fn snap32(r: Rect) -> Rect {
@@ -69,6 +70,23 @@ pub fn set_dirty_full(win: &mut Win) {
     win.dirty.clear();
     if cw > 0 && ch > 0 {
         win.dirty.push(Rect::new(0, 0, cw, ch));
+    }
+}
+
+/// 生きている全ウィンドウを全面 dirty にする (不具合 W-1)。
+///
+/// バックバッファを WM が丸ごと捨てたとき (`gfx_init` は VRAM の両ページを
+/// ゼロクリアする) に使う。**クライアント面を持っているのはアプリだけ**
+/// (契約 G4) なので、消した画を取り戻す道は「本人に `Paint` を出して描き
+/// 直させる」しかない。park 中のアプリも `damage::has_deliverable_paint` が
+/// 真になって導出群の ready に入り、top-level の `multiapp::pick` が起こす。
+pub fn invalidate_all_clients(st: &mut GuiState) {
+    let mut i = 0;
+    while i < GUI_MAX_WINDOWS {
+        if st.windows[i].used {
+            set_dirty_full(&mut st.windows[i]);
+        }
+        i += 1;
     }
 }
 

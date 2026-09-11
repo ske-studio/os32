@@ -37,12 +37,14 @@
 /* Phase 1: full 32-bit addressability, expressed as PFNs, never a wrapped
  * 4GiB exclusive byte address. Eight bootstrap PTs remain static; the other
  * PDEs start absent and acquire one zeroed PT only when explicitly mapped.
- * Bootstrap RAM mapping remains clamped to 16MiB. Dynamic PT backing scans
+ * paging_init's identity covers min(detected RAM, PAGING_BOOT_MAP_SIZE): the
+ * static bootstrap window, NOT a RAM ceiling (K6-RAM, 2026-09-11). RAM above
+ * that window is mapped later by pgalloc_stage_online through paging_map_phys
+ * with PTs taken from the boot workspace. Dynamic PT backing scans
  * to pgalloc_limit_pfn(), not the eligible count: only known master shared
  * tables with identity supervisor RW, cacheable PTEs qualify. New PTs still
  * require master CR3 and no live address spaces; no high RAM is auto-mapped.
  * No optional device guard policy is introduced here. */
-#define PAGING_RAM_LIMIT (16UL * 1024UL * 1024UL)
 #define PAGING_PFN_COUNT 1048576UL
 #define PAGING_PT_COUNT PDE_COUNT
 #define PAGING_BOOT_PT_COUNT 8
@@ -66,6 +68,11 @@ int paging_boot_context(void);
  * PTE A/D and PDE USER (when PTE is supervisor) do not weaken this contract. */
 int paging_verify_identity(u32 first_pfn, u32 pages, void *identity);
 void paging_init(u32 mem_kb);
+/* End PFN (exclusive) of the identity paging_init actually established, i.e.
+ * min(detected RAM, PAGING_BOOT_MAP_SIZE) in pages; 0 before paging_init.
+ * It is the boundary between "already mapped, must only be verified" and
+ * "must be mapped now", never a limit on how much RAM may be admitted. */
+u32 paging_boot_identity_end(void);
 
 /* 指定ページの属性を変更。
  * flags に PTE_USER を含めると PDE 側にも USER を伝播させる
@@ -226,6 +233,36 @@ int paging_addrspace_map_user(struct addrspace *as, u32 virt, u32 phys,
  * 戻り値 0=成功, -1=AS 無効・逆順・必要 PT/PDE 不在 (全範囲を未変更)。 */
 int paging_addrspace_map_user_range(struct addrspace *as, u32 vstart,
                                     u32 vend, u32 flags);
+
+/* [vstart, vend) を **pstart からの連続物理**へ USER マップする (K5b P1)。
+ * end は exclusive。identity 版 (paging_addrspace_map_user_range) と違い、
+ * アプリごとに別々の物理ページを同じ仮想番地へ載せるための口。
+ * アプリ 4 本同時 (票 TASK_K5_multiapp.md D1/I5) の土台で、共有ライブラリの
+ * .data が既にこの形 (1 ページ版 paging_addrspace_map_user) で動いている。
+ * pstart はページ境界。範囲がアプリ固有 PDE の外にも掛かってよいが、その
+ * ぶんは共有 PT を書き替える (= 全 PD に効く) ので呼び出し側の責任。
+ * 戻り値 0=成功, -1=AS 無効・逆順・非整列・必要 PT/PDE 不在 (全範囲を未変更)。 */
+int paging_addrspace_map_user_range_phys(struct addrspace *as, u32 vstart,
+                                         u32 vend, u32 pstart, u32 flags);
+
+/* アプリ固有 PDE 配下の PTE を全部 0 (非 present) に落とす (K5b P2)。
+ * paging_addrspace_create_n() はアプリ PT を **master の identity PTE で**
+ * 初期化する (V1 のため)。per-app 物理へ移す設計ではこれを落とし忘れると
+ * 物理 0x5xxxxx が素通しで見え、他アプリのページや pgalloc の作業域が
+ * CPL=3 から読めてしまう (票 TASK_K5_multiapp.md I6 — 最も静かに壊れる箇所)。
+ * create_n の直後・per-app 物理を張る前に必ず呼ぶこと。
+ * PDE の present/RW はそのまま (PT は残す)。USER は落とす。
+ * 戻り値 0=成功, -1=AS 無効。 */
+int paging_addrspace_clear_app_band(struct addrspace *as);
+
+/* [vstart, vend) に張ってある **アプリ固有 PT の物理ページを pgalloc へ返し**、
+ * PTE を 0 にする (K5b P6)。範囲はアプリ固有 PDE の中だけを見る — 共有 PT に
+ * 掛かる部分は 1 ビットも触らない (VRAM/SHM/フォントを解放しないため)。
+ * per-app 物理は連続とは限らない (断片化時はページ単位で張る) ので、
+ * 解放も PTE を 1 枚ずつ辿って行う。
+ * 戻り値: 返したページ数。AS 無効・逆順なら 0。 */
+u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
+                                     u32 vend);
 
 /* map_user_range と同じだが、**既存 PTE のキャッシュ属性 (PCD/PWT) を引き継ぐ**。
  * デバイス窓の一部を CPL=3 へ貸すとき用 (GFX バックバッファ)。Cirrus では

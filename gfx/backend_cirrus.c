@@ -23,7 +23,7 @@
 /*  CPU 描画 (gshell / gdi_test) は Cirrus では #PF していた。               */
 /*  H3b で 0FABh レジスタ 02h の **2MB リニア窓** (§4) を採用し、            */
 /*  カーネルのページテーブルを 32MB へ広げて (kernel/paging.h の             */
-/*  PAGING_RAM_LIMIT / PAGING_MAP_SIZE) 01000000h に張れるようにした。       */
+/*  PAGING_BOOT_MAP_SIZE) 01000000h に張れるようにした。       */
 /*  以後 CPU 直書きはすべてこの窓越しで、バンク切替は使わない。              */
 /*    01000000h + 000000h  表示面      (CPL=3 へは見せない)                  */
 /*    01000000h + 04B000h  クライアント面 = bb_base、300KB                   */
@@ -183,8 +183,10 @@ static int cirrus_win_usable(u32 base, u32 size)
 {
     if (size == 0) return 0;
     /* 実 RAM がそこまで届いているなら窓を開いてはいけない (自分の RAM を
-     * 隠してしまう)。sys_get_mem_kb() は頭打ちされていない生の申告値。 */
-    if (sys_get_mem_kb() * 1024UL > base) return 0;
+     * 隠してしまう)。sys_get_mem_kb() は頭打ちされていない生の申告値で、
+     * K6-RAM 以後は 16MB 超も入るので **KB のまま**比べる
+     * (* 1024 は 4GB 構成で桁あふれして判定が裏返る)。 */
+    if (sys_get_mem_kb() > base / 1024UL) return 0;
     /* ページテーブルの守備範囲に末尾まで収まること。 */
     if (base > PAGING_MAP_SIZE) return 0;
     return (size <= PAGING_MAP_SIZE - base);

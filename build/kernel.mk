@@ -20,7 +20,7 @@ C_KERNEL = \
     gfx/gfx_core.c gfx/gfx_vram.c gfx/gfx_scroll.c gfx/palette.c gfx/backend_pc98.c gfx/backend_pegc.c gfx/backend_cirrus.c \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
-    exec/exec.c exec/exec_heap.c \
+    exec/exec.c exec/exec_heap.c exec/appslot.c \
     kapi/kapi_generated.c kapi/kapi_db.c kapi/kapi_sys.c \
     lib/path.c lib/utf8.c lib/kprintf.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c lib/crc32.c
 

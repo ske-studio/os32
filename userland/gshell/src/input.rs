@@ -477,7 +477,6 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
 
     /* ---- モーダル中は宛先をダイアログに限定する (契約 U4) ---- */
     if modal::is_open() {
-        crate::terminal::release_buttons(btn);
         if moved {
             cursor::move_to(st, mx, my);
         }
@@ -489,18 +488,22 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
             if down_edge {
                 let _ = modal::on_button(st, mx, my);
             }
+            /* 契約 U4 は**新しい入力**の宛先を決める規則で、モーダルが開く前の
+             * 押下と対になる離しは、その押下を受けたアプリのもの。ここで
+             * 捕捉を返さないと、アプリ内で押したまま自分でダイアログを開いた
+             * 場合 (OP_MODAL_OPEN) に離しが永久に届かない: prev_buttons だけ
+             * 進むので up_edge は二度と立たず、ウィジェットは armed のまま、
+             * 捕捉も残って次の無関係な離しが古い相手へ飛ぶ (レビュー #4 [P2])。
+             * 捕捉が無ければ何も配らないので、モーダル中に始まった押下・離しは
+             * 今までどおりダイアログだけのものになる。 */
+            if up_edge {
+                release_capture(st, mx, my, MOUSE_BTN_LEFT);
+            }
+            if rup_edge {
+                release_capture(st, mx, my, MOUSE_BTN_RIGHT);
+            }
             st.prev_buttons = btn;
         }
-        return;
-    }
-
-    // Resident display input never reaches the app ring. X4 is allowed only
-    // bounded private flags/capture bookkeeping, never model edits or glyphs.
-    if crate::terminal::mouse(st, mx, my, btn, st.prev_buttons) {
-        if moved {
-            cursor::move_to(st, mx, my);
-        }
-        st.prev_buttons = btn;
         return;
     }
 
@@ -671,7 +674,6 @@ fn wm_button_down(st: &mut GuiState, mx: i32, my: i32) {
         st.drag_frame = w.outer();
         cursor::hide(st);
         crate::chrome::draw_drag_outline(w.x, w.y, w.w, w.h, crate::lease::mono(st));
-        wm::recompose_panel(st);
         queue_frame_edges(st, w.outer());
         cursor::show(st);
         let cr = cursor::rect(st);
@@ -793,7 +795,6 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
         new_frame.h,
         crate::lease::mono(st),
     );
-    wm::recompose_panel(st);
     st.cursor.x = st.mouse_x;
     st.cursor.y = st.mouse_y;
     cursor::show(st);
@@ -808,10 +809,6 @@ fn update_drag(st: &mut GuiState, mx: i32, my: i32) {
 /* ---- アプリへの配送 ---- */
 
 fn forward_pointer(st: &mut GuiState, mx: i32, my: i32, btn: u8) {
-    // Even a WM-owned drag must not send hover events through the fixed panel.
-    if crate::terminal::rect(st).contains(mx, my) {
-        return;
-    }
     /* WM の領分 (メニュー / タスクバー) の上ではアプリへ動きも配らない
      * (契約 D1「taskbar 領域の入力をアプリへ配送しない」)。 */
     if startmenu::is_open() || taskbar::hit(st, mx, my) {
@@ -934,3 +931,7 @@ fn erase_frame_edges(st: &mut GuiState, f: Rect) {
         wm::composite_rect(st, *e);
     }
 }
+
+#[cfg(test)]
+#[path = "../host/wm_tests.rs"]
+mod tests;

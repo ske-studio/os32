@@ -119,10 +119,13 @@ __sqlite_end(align) -     128KB    SQLite代替スタック                     
 > 2026-09-03 に exec_heap を 0x380000 (旧 NP ギャップ) へ分離した。
 > PTE に USER は立てないので CPL=3 のアプリからは見えない。
 
-[ ページング (H3b 2026-09-06) ]
-恒等マップの守備範囲は 32MB (PAGING_MAP_SIZE、PT 8 枚 = +16KB BSS)。実 RAM として扱うのは
-従来どおり 16MB まで (PAGING_RAM_LIMIT: pgalloc / sys_usable_mem_end / ホットデプロイ窓は不変)。
-16MB〜32MB は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
+[ ページング (H3b 2026-09-06 / K6-RAM 2026-09-11) ]
+静的 PT (bootstrap) の守備範囲は 32MB (PAGING_BOOT_MAP_SIZE = PAGING_MAP_SIZE、PT 8 枚 = +16KB BSS)。
+**実 RAM の人為的な上限は無い** (K6-RAM で PAGING_RAM_LIMIT を撤廃)。paging_init が恒等で張るのは
+min(検出量, 32MB) — その上端が paging_boot_identity_end() — で、それより上の RAM は
+pgalloc_stage_online() が paging_map_phys() で張り、PT はブート workspace から動的に取る。
+15〜16MB (F00000h-FFFFFFh) は PC-98 のシステム空間で RAM にはしない (MEM_SYSTEM_SPACE_*)。
+16MB 超で RAM が載っていない範囲は既定 Not-Present で、必要な範囲だけ paging_map_phys() で張る:
 0x00F00000 - 0x00F4AFFF          PEGC のリニア窓 (H2、9821 で PEGC 有効時のみ)  supervisor + PCD
 0x01000000 - 0x011FFFFF          WAB (Cirrus Xe10) の 2MB リニア窓 (H3b、Cirrus 有効時のみ) supervisor + PCD
   +000000h 表示面 / +04B000h クライアント面 (300KB) / +096000h 塗りパターン

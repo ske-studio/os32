@@ -39,6 +39,12 @@ u32 shlib_version(void);
 /* .text/.rodata の終端 (exclusive)。未ロードなら MEM_SHLIB_BASE。 */
 u32 shlib_text_end(void);
 
+/* attach 1 回あたり pgalloc から取る .data/.bss の複製ページ数。未ロードなら 0。
+ * exec が「3 領域の外で per-app に取るページ」を勘定するのに使う (K7)。
+ * ここを通さずに exec 側で枚数を決め打ちすると、ライブラリの .data が
+ * 太ったときに黙って 8MB 構成の起動が落ちる。 */
+u32 shlib_data_pages(void);
+
 /* ring3 アドレス空間にライブラリを張る (paging_addrspace_create の直後)。
  *   - .text/.rodata を read-only + USER で
  *   - .data/.bss は原本から複製した専用の物理ページを同じ仮想番地に

@@ -43,6 +43,7 @@ typedef struct {
     int mode;
     VfsOps *ops;
     void *fs_ctx;       /* FSドライバ固有のインスタンスコンテキスト */
+    u32 dev;            /* open 時のマウント (vfs_path_dev)。fstat の st_dev */
     int protect;        /* 1=カーネル常駐FD (exec_exitの自動クローズ対象外) */
     int owner;          /* GENERIC: current owner; SQLITE: explicit owner */
     int lifetime;
@@ -122,6 +123,7 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     open_files[fd].mode = mode;
     open_files[fd].ops = ops;
     open_files[fd].fs_ctx = fs_ctx;
+    open_files[fd].dev = vfs_path_dev(resolved);
     open_files[fd].protect = 0;
     open_files[fd].owner = owner;
     open_files[fd].lifetime = cookie ? VFS_FD_SQLITE : VFS_FD_GENERIC;
@@ -409,8 +411,15 @@ int vfs_fstat(int fd, OS32_Stat *buf)
     if (!open_files[fd].ops || !open_files[fd].ops->stat) {
         return VFS_ERR_NOMOUNT;
     }
-    
-    return open_files[fd].ops->stat(open_files[fd].fs_ctx, open_files[fd].path, buf);
+
+    {
+        /* vfs_stat と同じ規則で st_dev を上書きする (FS 側は 0 固定)。
+         * stat と fstat で値が食い違うと同一ファイル判定が壊れる */
+        int rc = open_files[fd].ops->stat(open_files[fd].fs_ctx,
+                                          open_files[fd].path, buf);
+        if (rc == VFS_OK) buf->st_dev = open_files[fd].dev;
+        return rc;
+    }
 }
 
 /* レガシー shell_print 互換ラッパー (Phase 2) */

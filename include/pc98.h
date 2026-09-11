@@ -287,6 +287,17 @@
 /* ====================================================================== */
 /*  BIOS ROM — PC9800Bible §4-2                                           */
 /* ====================================================================== */
+/* BIOS ワークエリア: メモリ容量 (正典 docs/hw/undocumented/memsys.md)。
+ *   0401h  BYTE  100000h〜FFFFFFh の使用可能プロテクトモードメモリ、128KB 単位。
+ *                最大 70h (= 14MB)。「16MB システム空間を使用しない」設定の
+ *                ときだけ 78h (= 15MB) になる。
+ *   0594h  WORD  1000000h 以降の使用可能プロテクトモードメモリ、MB 単位。
+ *                PC-H98 / PC-9821Af 以降 / PC-9801BA2・BS2・BX2・BA3・BX3・BX4。
+ *                16MB 超対応の HIMEM.SYS を組むと 0 に潰されるが、OS32 は
+ *                DOS を通さずに起動するので影響を受けない。 */
+#define BIOS_WORK_MEM_128KB  0x00000401UL  /* BYTE: 15MB までの容量 */
+#define BIOS_WORK_MEM_HIGH_MB 0x00000594UL /* WORD: 16MB 超の容量 (MB) */
+
 #define BIOS_ROM_BASE        0x000E8000UL  /* BIOS ROM先頭 */
 #define BIOS_ROM_END         0x00100000UL  /* BIOS ROM末端 (1MB) */
 

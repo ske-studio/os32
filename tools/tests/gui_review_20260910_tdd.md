@@ -78,9 +78,11 @@ GREEN: `SUMMARY PASS` (12 項目)。
 確定文字の `Text` がこの打鍵の `Key`/`Text` より先にリングへ積まれ、
 順序も保たれる。
 
-**試験**: `userland/gshell/host/terminal_tests.rs` の
+**試験**: `userland/gshell/host/wm_tests.rs` の
 `double_enter_keeps_fep_commit_in_the_input_dialog_result`
-(`make check-t5b-host` = `host/integration.py`)。
+(`make check-gshell-host` = `host/integration.py`)。
+記録当時の置き場は `host/terminal_tests.rs` / `make check-t5b-host` で、
+T5b 撤去 (2026-09-10) のときに現在の名前へ移した。
 実物の `input.rs` / `fep.rs` / `modal.rs` を、モックした KAPI
 (`ime_feed_key` / `ime_is_active` / `kbd_trygetrawkey`) の上で動かす**挙動試験**。
 

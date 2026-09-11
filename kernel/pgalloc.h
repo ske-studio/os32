@@ -71,7 +71,9 @@ int pgalloc_reserve_pfn(u32 first, u32 end);
 u32 pgalloc_limit_pfn(void);
 
 /* Legacy one-shot initialization after paging_init. Repeated calls are no-op.
- * Small kernel-owned backing, same PFN core; reported >16MiB stays UNKNOWN. */
+ * Small kernel-owned backing, same PFN core; this fallback alone never admits
+ * RAM above the old loader's reportable extent (PHYSMEM_LEGACY_MAX_PFN).
+ * High RAM reaches the pool only through the model path (K6-RAM). */
 void pgalloc_init(u32 mem_kb);
 
 /* 1ページ(4KB)確保。戻り値: 物理アドレス, 0=失敗 */

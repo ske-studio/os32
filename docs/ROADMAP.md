@@ -164,7 +164,9 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ### v1.3 — 「ターミナル統合とCUI抽象化」
 
-着手計画・実装前ゲート: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)。現状は静的調査済み、契約未凍結・実装未着手。
+着手計画: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)、監査と決裁: [AUDIT_2026-09-10](tasks/gui/v13/AUDIT_2026-09-10.md)。
+2026-09-10 決裁: **GUI アプリ 4 本の同時実行 (契約 T2a) を v1.3 の最初に置く** ([K5](tasks/gui/v13/TASK_K5_multiapp.md))。
+端末は外部アプリ。hermes 期の T5b (常駐パネル) は撤去、T6a (有限実行) は破棄。
 
 **ゴール**: GUI desktop 上で CUI command が実行でき、既存 CUI program との互換性を確保する。
 
@@ -172,7 +174,8 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 | 作業 | カテゴリ | 備考 |
 |------|---------|------|
-| ターミナルウィンドウ | app | lconsole統合、KCG fontでGVRAM描画 |
+| **GUI アプリ 4 本の同時実行** | kernel / GUI | 契約 T2/T2a。PD 切替は `OP_WAIT` の中だけ、5 本目は `ERR_FULL`、資源回収はアプリ単位。[K5](tasks/gui/v13/TASK_K5_multiapp.md)。端末と CUI 子の同居の土台 |
+| ターミナルウィンドウ | app | **外部アプリ**。libos32term (セルモデル) + libos32term_render (厳密 clip) を Paint に接続 |
 | CUI program output redirect | kernel | console_write -> terminal window virtual console |
 | full-screen GFX program | GUI | exec_run後にGUI全体再描画 |
 | shell script | terminal | terminal内 script engine |
@@ -217,7 +220,9 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ### 協調型マルチタスク
 
-v1.x は single foreground app だが、v2.0 では timer interrupt を利用した協調型 multi-task を検討する。
+**協調型の複数アプリ (最大 4 本、PD 切替、譲り合いは `OP_WAIT` だけ) は契約 T2a のとおり v1.3 で実装する**
+(2026-09-10 決裁。以前ここに「v1.x は single foreground app」とあったのは v1.2 の暫定を指していた)。
+v2.0 では timer interrupt を利用したプリエンプティブ寄りの multi-task を検討する。
 
 - window / process の独立実行
 - v1.x `gui_call` + SHM event ring を拡張した IPC

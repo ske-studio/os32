@@ -99,7 +99,14 @@ extern u32 sys_mem_kb;
 void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 {
     char tmp[16];
-    int mb = mem_kb / 1024;
+    int mb;
+    /* ローダの 512KB プローブは 16MB 手前までしか見ない (その先は PC-98 の
+     * 16MB システム空間で、書き込みプローブが VRAM を壊す)。16MB 超は BIOS
+     * ワークエリア 0594h を正典に、1MB ごとの再確認を通して足す (K6-RAM)。
+     * **paging_init より前** に済ませる: ページングを張る範囲も pgalloc の
+     * 表の大きさも、ここで決まった量から導かれる。 */
+    mem_kb = memory_boot_detect(mem_kb);
+    mb = mem_kb / 1024;
     sys_mem_kb = mem_kb;
     
     tvram_clear();
@@ -109,12 +116,16 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     
     /* メモリ量表示 (例: " (16MB)") */
     {
-        int d10 = (mb / 10) % 10;
-        int d1  = mb % 10;
+        int i, digit, scale = 1000, seen = 0;
         tmp[0] = ' '; tmp[1] = '(';
-        tmp[2] = d10 ? ('0' + d10) : ' '; /* 先行ゼロ抑制 */
-        tmp[3] = '0' + d1;
-        tmp[4] = 'M'; tmp[5] = 'B'; tmp[6] = ')'; tmp[7] = '\0';
+        /* 16MB 上限を撤廃したので 4 桁ぶん取る (先行ゼロ抑制)。 */
+        for (i = 0; i < 4; i++) {
+            digit = (mb / scale) % 10;
+            if (digit) seen = 1;
+            tmp[2 + i] = (seen || i == 3) ? (char)('0' + digit) : ' ';
+            scale /= 10;
+        }
+        tmp[6] = 'M'; tmp[7] = 'B'; tmp[8] = ')'; tmp[9] = '\0';
     }
     tvram_print(24, 0, tmp, TATTR_CYAN);
 

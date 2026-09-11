@@ -104,3 +104,96 @@ SUMMARY 4/4 PASS
 - 実デバイス・実イメージ・エミュレータに触れない。`ext2_mount()` 本体と
   `kzalloc`/`kmemset`/`kstr*` は境界としてホスト側の同義実装に差し替えている。
 - ゲスト上での `e2fsck -fn` クリーンは別途 [V1]/[V4] に従って実機で確認する。
+
+
+---
+
+# 追記 (2026-09-10): [P2] 別ディスクのファイルを「同じファイル」と誤判定する
+
+## 症状 (独立レビュー 第 4 回)
+
+`userland/rust/filer/src/lib.rs` の同一ファイル判定は
+`sst.st_ino != 0 && sst.st_dev == stbuf.st_dev && sst.st_ino == stbuf.st_ino`。
+ところが `st_dev` を埋める FS ドライバが 1 つも無い — `fs/ext2_vfs.c` と
+`fs/iso9660.c` は `st_dev = 0` 固定、`fs/hostdrvfs.c` と `fs/fatfs_vfs.c` は
+`kmemset` のまま。よって **hd0 と hd1 で inode 番号が一致すると、別ディスクの
+別ファイルが「同じファイル」になり、正当な上書きコピーまで拒まれる**。
+ext2 の inode 番号は FS 内でしか一意でないので、12 (lost+found の次) のような
+若い番号は別ディスクで普通に衝突する。
+
+## 直し方
+
+FS ごとではなく **VFS 層で一括して埋める**。`VFS_MOUNT_DEV_ENCODE(dev_type, dev_id) + 1`
+を `st_dev` に使う (非 0)。
+
+**訂正 (独立レビュー 2026-09-10)**: 二重マウント拒否の鍵は `(ops, dev_type, dev_id)`、
+`st_dev` の識別値は `(dev_type, dev_id)` なので、「全マウント間で一意」の証明にはならない。
+同じ hd を ext2 と FAT で別ドライバからマウントする経路は現行にもあり、その 2 つは同じ
+`st_dev` になる。一意なのは**同じ FS ドライバのマウント同士**。FAT は `st_ino = 0` で
+filer はパス比較へ落ちるため、今回の誤判定 (同 inode の別 ext2) の再発経路にはならない。
+FS 側の `st_dev = 0` はそのままでよい (VFS が正典として上書きする)。
+`OS32_Stat` の定義も filer の判定も変えない。
+
+## RED (修正前 — `buf->st_dev = dev;` を `(void)dev;` に潰して再現)
+
+```
+COMPILE GNU89 -Werror PASS
+EXIT encode=0
+EXIT ext2_rejects_non_hd=0
+EXIT boot_sequence_has_one_ext2=0
+EXIT duplicate_device_refused=0
+FAIL stat_dev_identifies_mount:211: a.st_dev != 0 && b.st_dev != 0 && c.st_dev != 0
+EXIT stat_dev_identifies_mount=1
+FAIL stat_dev_on_synth_root:232: r0.st_dev == (u32)VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 0) + 1U
+EXIT stat_dev_on_synth_root=1
+SUMMARY 4/6 PASS
+```
+
+## GREEN (修正後)
+
+```
+COMPILE GNU89 -Werror PASS
+EXIT encode=0
+EXIT ext2_rejects_non_hd=0
+EXIT boot_sequence_has_one_ext2=0
+EXIT duplicate_device_refused=0
+EXIT stat_dev_identifies_mount=0
+EXIT stat_dev_on_synth_root=0
+SUMMARY 6/6 PASS
+```
+
+## 追加したケース
+
+- `stat_dev_identifies_mount` — ext2 スタブを「どのデバイスでも inode 12」に
+  して `/` = hd0、`/hd1` = hd1 をマウント。`vfs_stat("/a")` と
+  `vfs_stat("/hd1/a")` は `st_ino` が等しく、`st_dev` は**異なり、どちらも非 0**。
+  同一マウント内の 2 パス (`/a` と `/b`) は `st_dev` が等しい。
+- `stat_dev_on_synth_root` — FS の `stat` を失敗させ、マウントルートの
+  合成 stat (`vfs_synth_root_stat`) を通す経路でも `st_dev` が入ること。
+  マウントが 1 つも無ければ `vfs_path_dev()` は 0 を返すことも確かめる。
+
+## 修正 (2 回目)
+
+- `fs/vfs.c` — `vfs_mount_dev_of()` / `vfs_dev_of_resolved()` / 公開の
+  `vfs_path_dev()` を追加。`vfs_stat()` は成功時 (合成ルートを含む) に
+  `buf->st_dev` を上書きする。
+- `fs/vfs.h` — `vfs_path_dev()` を宣言。
+- `fs/vfs_fd.c` — `open` 時のマウントを `VfsFile.dev` に控え、`vfs_fstat()` も
+  同じ値を入れる。`stat` と `fstat` で `st_dev` が食い違うと同じ誤判定が戻る。
+- `userland/rust/filer` は**変更しない** (同一ファイル保護は維持。hostdrv の
+  `st_ino = 0` は従来どおりパス比較へ落ちる)。
+
+## 既知の限界
+
+- **同じ物理ディスク上の別パーティションは区別しない。**
+  `fs/ext2_super.c:131` の `ext2_find_partition()` は PC-98 パーティション
+  テーブルの最初のブート可能エントリ (`bootable & 0x80`) を見つけた時点で
+  `break` するので、1 台の hd につき 1 パーティションしか触れない。さらに
+  `vfs_mount()` が同じ `(ops, dev_type, dev_id)` の二重マウントを断るため、
+  同一ディスクの 2 パーティションは**同じ FS ドライバでは**同時にマウントできない
+  (ext2 + FAT のように別ドライバなら可能で、その場合は `st_dev` が同じになる — 上の訂正)。
+  将来パーティション選択を足すときは `st_dev` にもパーティション番号を
+  混ぜること。
+- `st_dev` の値はマウント順ではなくデバイス指定から決まるので再マウントで
+  変わらないが、**永続的な識別子ではない** (unit 番号が変われば変わる)。
+- ホスト試験のみ。実機 (NP21/W) 未検証。

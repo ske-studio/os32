@@ -25,6 +25,7 @@ TYPE_MAP = {
     "u16":             "u16",
     "u32":             "u32",
     "i16":             "i16",
+    "i32":             "i32",
     "char":            "u8",
     "os_time_t":       "u32",
     "const char *":    "*const u8",
@@ -35,6 +36,7 @@ TYPE_MAP = {
     "const u8 *":      "*const u8",
     "u16 *":           "*mut u16",
     "int *":           "*mut i32",
+    "i32 *":           "*mut i32",
     "u32 *":           "*mut u32",
     "OS32_Stat *":     "*mut u8",
 }
