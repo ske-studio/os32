@@ -282,3 +282,9 @@ RED → GREEN は [`tools/tests/k5b_gshell_tdd.md`](../../../../tools/tests/k5b_
 (`heap_size = 0` の折半で 1 本目が大きく取る)。**15MB でも既定のままでは 3 本**。5 本目拒否 (G3 後半) は
 4 本が立たないと検査できない → GUI テストアプリの `heap_size` を `build/app.conf` で明示するかはユーザー決裁。
 
+### W-1 の実機確認 (2026-09-11 17:43、`3f29460` を配備、15MB、PM 観測 `gui_gate`)
+
+`gui_bench` → `gui_demo` 起動 +3 秒: gui_bench の露出部 (item 03〜06) が**描かれたまま** (`b_both_3s`)。
+露出部をクリックして前面化: 全面 (item 00〜06) が描かれる (`c_after_click_bench`)。`switch` 3 → 7。
+→ **W-1 解消、G1 完全合格**。証跡: `build/out/gui_gate/k5b_w1/*.png`。
+
