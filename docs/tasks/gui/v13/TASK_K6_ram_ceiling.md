@@ -194,4 +194,6 @@ OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** な�
 | **M3** 15MB 回帰 | 同 | kselftest 44 / 0、regress 6 本 obs 全通過 (klibc 49/0、alloc_demo、ring3_fault kill → ver、パイプ、screenshot)、`v86 -t` result OK、`gui_demo` 1 本起動 (Widgets / Help 描画) → CUI 復帰、`fault_generation` 0。`sys_mem_kb` = 17408 (= 0x1100000 / 1024、新定義どおり) | **合格** |
 | **M1** 32MB | `ram-32mb` (ExMemory 33、ユーザー承認 [D2]) | `mem` = 34816 KB、`sys_mem_kb` 34816、kselftest 44 / 0、`v86 -t` OK、`limit_pfn` 8704 (= 0x2200000 / 4KB、15MB では 15MB 止まりだった)、`total_pages` 7421 / `used_pages` 3344 (4 本起動時) | **合格** |
 | **M4** G3 | 同 | GUI アプリ 4 本が立ち、5 本目は「Too many programs (4 max)」で拒否 (TASK_K5B_gshell.md G3) | **合格** |
-| M2 / M5 | 128MB | 未実施 (次) | — |
+| **M2** 128MB | `ram-128mb` (ExMemory 129) | `mem` = 133120 KB、`sys_mem_kb` 133120、kselftest 44 / 0、`v86 -t` OK、`limit_pfn` 33280 (= 0x8200000 / 4KB)、`total_pages` 31971 / `used_pages` 256 (起動直後)、`gui_demo` 1 本起動 (`used_pages` 1028) → CUI 復帰。人為的な上限には当たらない | **合格** |
+| **M5** 15〜16MB の穴 | 128MB | `eligible` ビットマップ (0x00EFD000) を直接読み: PFN 0xF00〜0xFFF は **0 / 256**、0xE00〜0xEFF は 227 / 256 (上端の予約分だけ欠ける)、0x1000〜 と 0x8000〜 は 256 / 256。`used` も 0xF00〜0xFFF は 0 / 256 | **合格** |
+| 8MB 回帰 | `ram-8mb` (ExMemory 7) | `mem` = 8192 KB、kselftest 44 / 0、legacy 経路 (`limit_pfn 2048 / total_pages 1024 / used 256`)。**GUI アプリは立たない (G6 不合格 → K7)** | CUI は合格 |
