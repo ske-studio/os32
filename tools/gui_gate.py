@@ -203,10 +203,17 @@ def leave_gshell(mouse, shots=None, shot_name=None):
     mouse.click(410, mouse.h // 2 + 11)
     time.sleep(6)
     mouse.off()
-    key(text="rshell")
-    key(seq="RETURN")
-    time.sleep(2)
+    # CUI シェルは起動時に自動で rshell へ入る。その上から `rshell` を手打ちすると
+    # rshell が 2 段重なり、次の ESC は内側の 1 段しか閉じないので、以降の
+    # `/api/key` の text が外側の rshell に食われて GUI へ入れなくなる
+    # (2026-09-11: リセット直後の台本だけ成功し、leave 後の台本が全滅した原因)。
+    # `ver` が通るなら rshell は既に生きているので打たない。
     out = _cmd_raw("ver", 20)
+    if "OS32" not in out:
+        key(text="rshell")
+        key(seq="RETURN")
+        time.sleep(2)
+        out = _cmd_raw("ver", 20)
     ok = "OS32" in out
     print("  CUI back: %s" % ("ok" if ok else "NG (rshell?)"))
     return ok
