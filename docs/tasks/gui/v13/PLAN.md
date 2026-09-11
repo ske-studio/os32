@@ -5,7 +5,8 @@
 **端末の形は B = 契約 T2a (GUI アプリ 4 本) を v1.3 の最初に実装し、端末は外部アプリ**。
 最初の票は [K5 (4 アプリ同時実行)](TASK_K5_multiapp.md)。以下の旧記述は経緯として残す。
 **2026-09-11**: K5a の設計を決裁 (D9 の 8 分岐 + D11、票末尾の「決裁」)。KAPI **v44** を予約。
-[K5b-K (カーネル)](TASK_K5B_kernel.md) を発注中、[K5b-W (gshell)](TASK_K5B_gshell.md) は草案 (K の署名待ち)。
+[K5b-K (カーネル)](TASK_K5B_kernel.md) と [K5b-W (gshell)](TASK_K5B_gshell.md) は実装済み・実機受入中 (G1/G2/G7 合格、G3 は RAM 上限待ち)。
+**[K6-RAM (物理 RAM 上限 16MB → 32MB 以上、目標 128MB)](TASK_K6_ram_ceiling.md)** を 2026-09-11 に決裁・発行 (G3/G6 の前提)。
 レビュアー (ChatGPT) は枯渇し、以後の合否はユーザーが PM の材料で判断する。
 
 T5b 撤去 (2026-09-10、`1c98613`) で消えた被覆: 「上位 UI (メニュー / モーダル / タスクバー / FEP)
