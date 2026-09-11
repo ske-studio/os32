@@ -1,6 +1,6 @@
 # K6C-A — 端末アプリ: con_sink を吸って Paint する (外部アプリ)
 
-状態: **発行 (2026-09-12、PM)**。前提: [K6C (K 側)](TASK_K6C_console.md) `d381000` 配備済み (KAPI v46、C1/C2 合格)。
+状態: **受入済み (2026-09-12、`abef34f`)**。前提: [K6C (K 側)](TASK_K6C_console.md) `d381000` 配備済み (KAPI v46、C1/C2 合格)。
 親: [PLAN.md](PLAN.md) §1 (決裁 B: K5 → K6 console → **端末アプリ** → K7 入力統合 …)。
 ユーザー決裁: **端末は外部アプリ**、gshell は端末を持たない。
 
@@ -50,3 +50,17 @@ GUI モード中にカーネル / CUI コマンドが出す出力は、K6C で�
 - 入力の受け取り (K7)、CUI コマンドの起動 (次段)。gshell の変更。カーネル / KAPI の変更 (必要なら止まって報告)。
 - 配備・コミット・push・エミュレータ・ローカル AI・ini・.env・`make` は禁止 (コーダー)。ホスト試験 (crate の host テスト、
   `cargo check`) は可。
+
+## 5. 実機受入の記録 (PM / テスター、2026-09-12、`abef34f` を HostDrv → `hsync`、t5a_display.bin 28,648 B、15MB、API v46)
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| **A1** | gshell → Run `/usr/bin/t5a_display.bin` で端末窓 (`Terminal (con_sink)`、状態行 `LIVE reading in=0B rec=0 …`) が出る | **合格** |
+| **A2** | Run `/etc/system.cfg` (OS32X でない) → exec の `Error: invalid OS32X binary` が端末窓に出る (`in=31B rec=1`、リングは `g_count` 0 まで吸われた)。`con_sink_drop_count` 0 | **合格** |
+| A2 註 | `ring3_fault.bin` を Run しても `[ring3] #PF … kill app` は出ない: 例外ハンドラは `serial_puts_polled` / TVRAM 直書き (`kernel/isr_handlers.c`、コンソール状態が壊れていても動く自己完結経路) で console.c を通らない。設計どおりだが、GUI 中の障害表示としては欲しいので**追随の小票候補** (fault 文脈から `con_sink_push_print` を安全に呼べるか要検討) | — |
+| A3 | 通常操作 (起動 / 拒否 / 2 本目 / 終了) を通して `dropped` 0、`con_sink_drop_count` 0。故意のあふれは生成手段が無く未実施 | 部分合格 (あふれの実機は未実施、ホスト試験 `test_con_sink` のあふれケースで担保) |
+| **A4** (= C3 / C4) | 端末 2 本目を Run → 状態行 `LIVE busy rc=-5` (`OS32_ERR_EXIST`)。タスクバーで 1 本目にフォーカスして ESC → 2 本目が `LIVE reading` に変わり、カーネルの `g_reader` は 2 → 3、`appslot_reclaim_count` +1 | **合格** |
+| **A5** | Start → CUI mode で端末が畳まれ `g_reader` -1 / `g_enabled` 0 / `g_count` 0、regress 6 本 obs 全通過 (kselftest 50 / 0) | **合格** |
+
+**判定 (PM、2026-09-12)**: A1 / A2 / A4 / A5 合格、A3 は部分 (あふれの実機生成手段なし)。**K6C-A 受入済み**。
+追随候補: (1) 例外ハンドラの障害表示をシンクにも流す、(2) `CURSOR` (80×25 座標) を 40×64 モデルへ写す、(3) 色属性。

@@ -1,6 +1,6 @@
 # K6C — console の差し込み口 (GUI モード中のカーネル出力を端末モデルへ)
 
-状態: **発行 (2026-09-12、PM)**。決裁 B の順序 (K5 → **K6 console** → K7 入力統合 → 端末アプリ) の 2 段目。
+状態: **受入済み (2026-09-12、`d381000`、C1〜C4 合格)**。決裁 B の順序 (K5 → **K6 console** → K7 入力統合 → 端末アプリ) の 2 段目。
 親: [PLAN.md](PLAN.md) §1。前提: K5b (GUI アプリ 4 本、`759d5bb` で main)。
 ユーザー決裁: **端末は外部アプリ** (2026-09-10)。gshell は端末を持たない。
 
@@ -92,4 +92,4 @@ CPL=3 からのポインタは既存のディスパッチャ検証 (アプリ帯
 | **C1** | regress 6 本 obs 全通過、`v86 -t` result OK、rshell 従来どおり、`gui_demo` 起動 → Start → CUI mode 復帰、`con_sink_drop_count` 0 | **合格** |
 | **C2** | kselftest **44 → 50** (fail 0) | **合格** |
 | `mem` | `RAM : 16384 KB (16 MB) usable (15-16MB system space excluded)` が `Physical : 17408 KB` の下に出る (K6-RAM 決裁 (2)) | 合格 |
-| C3 / C4 | 読み手のいる CPL=3 アプリが無いので未実施 → **K6C-A の A4 で見る** | — |
+| **C3 / C4** | K6C-A の A4 で確認: 2 本目は `ERR_EXIST` (busy)、1 本目の ESC で読み手が移る (`g_reader` 2 → 3) | **合格** |
