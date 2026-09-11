@@ -129,3 +129,10 @@ claim も alloc も 1 つも行わないので AppSlot・pgalloc・資源の所�
 
 未実施: G1〜G7 / G9 / G10 (W レーン待ち)、G6 の 8MB 構成、A1 (`--cpl0` 拒否) の実機。
 
+## K7 (8MB の shlib data NOMEM、2026-09-11)
+
+原因: `exec_ring3_pages()` が 3 領域 + PD + アプリ PT しか数えず、その後に同じ pgalloc から取る
+**付随ページ** (共有ライブラリの `.data/.bss` 複製 4 枚) を勘定に入れていなかった。8MB の空き 768 に
+段 1 の枚数が **ちょうど 768** で収まり、段 1 を採ると空きが 0 → `shlib_addrspace_attach()` が失敗
+(`exec_sbrk_tier_last = 1`)。修正: `shlib_data_pages()` を足し、`exec_ring3_extra_pages()` を
+`exec_ring3_pages()` に加算 — 段 1 / 段 2 の判定と `appslot_start_admit()` の両方に効く (8MB は段 2 へ倒れる)。

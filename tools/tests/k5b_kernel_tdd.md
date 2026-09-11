@@ -654,3 +654,103 @@ make kernel                                       # EXIT=0、-Wall の警告 0
   テスターが回す必要がある)。
 - W レーン (gshell) はまだ `exec_abort_clear` を呼んでいない。`build/app.conf` の要求版を
   45 に上げただけで、`userland/gshell` のコードには 1 バイトも触っていない。
+
+---
+
+# 追記: 回 8 (ケース 4) — 3 領域の外で取る付随ページを勘定に入れる (K7)
+
+票: [`docs/tasks/gui/v13/TASK_K5B_kernel.md`](../../docs/tasks/gui/v13/TASK_K5B_kernel.md) 「K7」
+
+## 何が壊れていたか
+
+PM 実測 (2026-09-11、NP21/W 8MB = `ExMemory 7`)。`gui_demo` の起動が
+
+```
+[shlib] no memory for 4 data pages
+Error: shlib data attach failed (out of memory)
+```
+
+で落ち、`exec_sbrk_tier_last = 1` (= 段 1 を採っていた)。
+
+`exec_ring3_pages()` が数えていたのは **3 領域 (本体+sbrk / exec_heap / スタック) + PD + アプリ PT**
+だけで、その直後に同じ pgalloc から取る `shlib_addrspace_attach()` の `.data/.bss` 複製 (4 ページ) が
+入っていなかった。8MB のアプリ帯の空きは
+
+```
+(MEM_APP_BAND_TOP - MEM_EXEC_LOAD_ADDR) / PAGE_SIZE = (0x800000 - 0x500000) / 4096 = 768
+```
+
+で、段 1 の枚数は
+
+```
+(RING3_HEAP_TOP - MEM_EXEC_LOAD_ADDR)/4096 - 1  (= 703 - 1、ガード 1 枚を除いた本体+sbrk+exec_heap)
++ RING3_USTACK_SIZE/4096 (= 64) + 1 (PD) + 1 (アプリ PT) = 768
+```
+
+= **空きとちょうど同じ**。段 1 が通ってしまい、3 領域を張り終えた時点で空きが 0、次の 4 ページが
+取れなかった。`code_end` に依らず 768 になるので、8MB では shlib を使う CPL=3 アプリが必ずこうなる。
+
+## 直したもの
+
+| 場所 | 変更 |
+|---|---|
+| `kernel/shlib.{c,h}` | `shlib_data_pages()` — attach 1 回あたりの `.data/.bss` ページ数 (未ロードなら 0) |
+| `exec/exec.c` | `exec_ring3_extra_pages()` を追加し、`exec_ring3_pages()` の合計に足す |
+
+足す場所を `exec_ring3_pages()` 1 か所にしたので、`exec_sbrk_pick_tier()` の段 1 判定・段 2 の枚数・
+`appslot_start_admit()` に渡す `need_pages`・`AppSlot.pages` のすべてに同時に効く。段 2 も同じ式なので、
+sbrk を削って作った空きを使い切らない。shlib 未ロード (CUI だけの機械) では 0 なので K7 以前と同じ。
+
+## RED の作り方 (実際に走らせた)
+
+`tools/tests/sbrk_tier_host.c` にケース 4 を足し、`exec_ring3_extra_pages()` を **実装する前**に走らせる
+(ホスト側の `shlib_data_pages()` スタブは在るが、切り出した `exec_ring3_pages()` がまだ呼ばない):
+
+```
+  FAIL 4b 付随ページはそのまま枚数に足される
+  FAIL 4c 付随ページを足すと段 1 は 8MB の空きを超える
+  FAIL 4d だから段 1 を選ばず段 2 へ倒す (K7 の本体)
+  FAIL 4e 段 2 の sbrk 上端は従来どおり code_end + 最低分
+  FAIL 4i 段 1 の枚数 (付随込み) なら admit は NOMEM
+  FAILURES
+```
+
+このとき `4a` (段 1 の枚数 == 768) は **ok** で、不具合の算術そのものが試験に出ている。
+
+## 追加した検査 (ケース 4、12 検査)
+
+| 検査 | 内容 |
+|---|---|
+| 4a | 8MB の空き 768 に段 1 の 3 領域 + PD + PT が**ちょうど**収まる (不具合の正体) |
+| 4b-4c | 付随 4 ページはそのまま枚数に足され、段 1 は 768 を超える |
+| 4d-4e | だから段 1 を選ばず段 2 へ倒れ、sbrk 上端は `code_end + MEM_EXEC_SBRK_MIN` |
+| 4f-4g | 段 2 は付随込みでも収まり、3 領域の後に 4 ページが残る |
+| 4h-4i | `appslot_start_admit` は段 2 の枚数なら ID を返し、段 1 の枚数なら `EXEC_ERR_NOMEM` |
+| 4j | 付随ページを含めても収まる空き (15MB 以上) なら従来どおり段 1 |
+| 4k-4l | shlib 未ロードなら枚数も段の選択も K7 以前と同じ (回帰なし) |
+
+判定関数は `test_sbrk_tier.py` が `exec/exec.c` から**テキストのまま**切り出す流儀のまま
+(`WANTED` に `exec_ring3_extra_pages` を追加)。並行して書いた別式ではなく出荷するコードを見る。
+
+## 実行コマンド
+
+```bash
+python3 -B tools/tests/test_sbrk_tier.py       # ケース 4 を追加 (39 検査) ALL PASS
+python3 -B tools/tests/test_multiapp_impl.py   # ALL PASS (回帰なし)
+python3 -B tools/tests/test_multiapp_model.py  # ALL PASS
+python3 -B tools/tests/test_owner_reclaim.py   # OK
+python3 -B tools/tests/test_pgalloc_model.py   # OK
+python3 -B tools/tests/test_app_band_pde.py    # PASS
+python3 -B tools/tests/test_paging_bounds.py   # PASS
+python3 -B tools/tests/test_memory_boot.py     # OK
+i386-elf-gcc <カーネルフラグ> -Wextra -c exec/exec.c kernel/shlib.c   # 警告 0
+```
+
+## この追記で**測っていないこと** ([V4])
+
+- **ゲストは未検証**。NP21/W では 1 度も動かしていない (コーダーはエミュレータ禁止)。
+  8MB で `gui_demo` が実際に立つこと (受入 G6) は実機待ち。
+- `make` を 1 度も回していない (コーダー禁止)。通したのは上のホスト試験と、
+  `exec/exec.c` / `kernel/shlib.c` を単体でクロスコンパイラに通したことだけ。
+- 段 2 へ倒れた分だけ 8MB のアプリの sbrk は 256KB に固定される。その狭さで
+  `gui_demo` が足りるかは実機でしか分からない。

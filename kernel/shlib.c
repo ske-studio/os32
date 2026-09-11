@@ -197,6 +197,7 @@ int shlib_init(void)
 int shlib_loaded(void) { return g_loaded; }
 u32 shlib_version(void) { return g_loaded ? g_version : 0; }
 u32 shlib_text_end(void) { return g_text_end; }
+u32 shlib_data_pages(void) { return g_loaded ? g_data_pages : 0; }
 
 /* ======================================================================== */
 /*  shlib_addrspace_attach — アプリ PD にライブラリを張る                    */

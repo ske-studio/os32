@@ -3,7 +3,8 @@
 票:   docs/tasks/gui/v13/TASK_K5B_kernel.md (作業 8)
 記録: tools/tests/k5b_kernel_tdd.md (回 4)
 
-exec/exec.c の判定関数 (exec_ring3_pages / exec_sbrk_pick_tier) を
+exec/exec.c の判定関数 (exec_ring3_extra_pages / exec_ring3_pages /
+exec_sbrk_pick_tier) を
 **テキストのまま切り出して** ホストへ差し込み、exec/appslot.c と一緒に
 ILP32 freestanding でコンパイルして走らせる。tools/tests/test_pgalloc_model.py
 が exec_child_claim を切り出すのと同じ流儀で、並行して書いた別式ではなく
@@ -26,7 +27,8 @@ INC = [str(ROOT / p) for p in ("include", "kernel", "lib", "exec",
 SRC = ROOT / "tools/tests/sbrk_tier_host.c"
 
 # 切り出す対象。名前と「開き括弧まで」で挟み、本体は最初の行頭 '}' まで。
-WANTED = ("static u32 exec_ring3_pages(",
+WANTED = ("static u32 exec_ring3_extra_pages(",
+          "static u32 exec_ring3_pages(",
           "static int exec_sbrk_pick_tier(")
 
 

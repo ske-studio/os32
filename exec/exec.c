@@ -468,22 +468,44 @@ static void exec_cpl0_release(void)
 /*  そこで二段構えにする:                                                    */
 /*    段 1 = 従来式。sbrk 上端を guard_a まで伸ばす ([code_end, guard_a) 全部)*/
 /*    段 2 = 最低分。sbrk 上端を code_end + MEM_EXEC_SBRK_MIN に落とす        */
-/*  段 1 で 3 領域 (本体+sbrk / exec_heap / スタック) + PD + アプリ PT が     */
-/*  pgalloc の空きに収まるなら段 1、収まらなければ段 2。段 2 でも収まらない   */
-/*  ときは呼び出し側が EXEC_ERR_NOMEM を返す (切り詰めない・スワップしない)。 */
+/*  段 1 で 3 領域 (本体+sbrk / exec_heap / スタック) + PD + アプリ PT +      */
+/*  付随ページ (exec_ring3_extra_pages) が pgalloc の空きに収まるなら段 1、   */
+/*  収まらなければ段 2。段 2 でも収まらないときは呼び出し側が                 */
+/*  EXEC_ERR_NOMEM を返す (切り詰めない・スワップしない)。段 2 でも付随       */
+/*  ページは同じ式に入っているので、sbrk を削って作った空きを使い切らない。   */
 /*                                                                          */
 /*  heap_size を明示したプログラムはこの分岐に入らない (K5b-K のまま最低分)。 */
 /*  要求した exec_heap を必ず渡すのが先で、sbrk を伸ばす余地はそこに無い。    */
 /*  どちらの段で走ったかは exec_sbrk_tier_last / exec_sbrk_tier_count[] で    */
 /*  後から読める (KAPI にはしない。fault_kill_count と同じカーネルシンボル)。 */
 /* ======================================================================== */
+/* 3 領域 (本体+sbrk / exec_heap / スタック) の **外** で、この 1 本のために
+ * 同じ pgalloc から取るページ数 (K7、2026-09-11)。
+ *
+ * いまは共有ライブラリの .data/.bss 複製 (shlib_addrspace_attach) だけ。
+ * PD とアプリ PT は paging_addrspace_create_n が取るが、それは
+ * exec_ring3_pages が別に数えている (1 + band_pdes)。GFX のバックバッファは
+ * 全アプリ共有 (gfx_bb_phys_range) で per-app には取らないので入らない。
+ *
+ * K7 の実測 (8MB 構成、PM 2026-09-11): アプリ帯の空き 768 ページに対し、
+ * 段 1 の 3 領域 + PD + PT が **ちょうど** 768。ここを 0 と見なしていたため
+ * 段 1 が空きを使い切り、直後の shlib の 4 ページが取れずに gui_demo が
+ * 「shlib data attach failed (out of memory)」で立たなかった。
+ * 付随ページを増やすときは必ずここに足すこと — 増やした先で pgalloc から
+ * 取るだけだと、勘定に乗らないまま同じ形で落ちる。 */
+static u32 exec_ring3_extra_pages(void)
+{
+    return shlib_data_pages();
+}
+
 static u32 exec_ring3_pages(u32 load_base, u32 sbrk_end, u32 exec_heap_size,
                             u32 band_pdes)
 {
     return (sbrk_end - load_base) / PAGE_SIZE       /* 本体 + sbrk */
          + exec_heap_size / PAGE_SIZE               /* exec_heap */
          + RING3_USTACK_SIZE / PAGE_SIZE            /* ユーザスタック */
-         + 1 + band_pdes;                           /* PD + アプリ PT */
+         + 1 + band_pdes                            /* PD + アプリ PT */
+         + exec_ring3_extra_pages();                /* shlib の .data 複製 */
 }
 
 /* 選んだ段 (1 or 2) を返し、*sbrk_end に sbrk の上端を書く。 */

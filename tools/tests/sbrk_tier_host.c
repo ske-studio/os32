@@ -6,13 +6,16 @@
  *  実行:   python3 -B tools/tests/test_sbrk_tier.py
  *  記録:   tools/tests/k5b_kernel_tdd.md (回 4)
  *
- *  試験するのは 3 つの性質:
+ *  試験するのは 4 つの性質:
  *    (1) 空きが十分 → 段 1。sbrk 上端は従来式 (K5b-K 以前) と同じ guard_a。
  *    (2) 空きが少ない → 段 2。sbrk 上端は code_end + MEM_EXEC_SBRK_MIN。
  *    (3) 段 2 でも足りない → 起動を拒否し、既に走っているアプリに触らない。
+ *    (4) 3 領域の外で取る付随ページ (共有ライブラリの .data 複製) も
+ *        勘定に入れる (K7、2026-09-11)。
  *
- *  (1)(2) は **実物の判定関数** exec/exec.c の exec_sbrk_pick_tier() /
- *  exec_ring3_pages() を試験ドライバが切り出してここへ差し込んで回す
+ *  (1)(2)(4) は **実物の判定関数** exec/exec.c の exec_sbrk_pick_tier() /
+ *  exec_ring3_pages() / exec_ring3_extra_pages() を試験ドライバが切り出して
+ *  ここへ差し込んで回す
  *  (tools/tests/test_pgalloc_model.py が exec_child_claim を切り出すのと
  *  同じ流儀。並行して書いた別式ではなく、出荷するコードそのものを見る)。
  *  (3) は実物の exec/appslot.c をそのままコンパイルして回す。
@@ -32,7 +35,14 @@ int  res_owner_get(void)      { return host_owner; }
 
 #include "appslot.c"
 
-/* exec/exec.c から切り出した本物の 2 関数 + RING3_USTACK_SIZE の定義。
+/* 共有ライブラリの .data/.bss 複製ページ数 (kernel/shlib.c の実物の口)。
+ * ホストでは値を差し替えられるようにして、未ロード (0) と 4 ページの
+ * 両方を回す。exec_ring3_extra_pages() がこれを呼ぶ (K7)。 */
+static u32 host_shlib_pages = 0;
+u32 shlib_data_pages(void);
+u32 shlib_data_pages(void) { return host_shlib_pages; }
+
+/* exec/exec.c から切り出した本物の判定関数 + RING3_USTACK_SIZE の定義。
  * 中身は tools/tests/test_sbrk_tier.py が生成する (実物のテキストそのまま)。 */
 #include "exec_sbrk_tier.inc"
 
@@ -247,6 +257,82 @@ static void case_nomem_leaves_others(void)
     }
 }
 
+/* ====================================================================== */
+/*  性質 4 — 3 領域の外で per-app に取る付随ページ (K7)                    */
+/*                                                                        */
+/*  8MB 構成 (CUI の最低動作環境) のアプリ帯の空きは                       */
+/*    (MEM_APP_BAND_TOP - MEM_EXEC_LOAD_ADDR) / PAGE_SIZE = 768 ページ。   */
+/*  段 1 の 3 領域 + PD + アプリ PT はここへ **ちょうど** 収まる            */
+/*  (帯 768 - ガード 2 + PD 1 + PT 1)。よって段 1 を採ると空きが 0 になり、 */
+/*  直後の shlib_addrspace_attach() の 4 ページが取れず、gui_demo が        */
+/*  「shlib data attach failed (out of memory)」で立たなかった              */
+/*  (PM 実測 2026-09-11、exec_sbrk_tier_last = 1)。                        */
+/*  3 領域の後に同じ pgalloc から取る付随ページを勘定に入れれば段 2 へ倒れ、 */
+/*  4 ページが残る。                                                       */
+/* ====================================================================== */
+
+/* 共有ライブラリ libos32gui.shlib の .data/.bss ページ数 (実測 2026-09-11)。*/
+#define K7_SHLIB_DATA_PAGES  4
+
+static void case_extra_pages_k7(void)
+{
+    Layout L;
+    u32 free_8mb, need_hi_bare, need_hi, need_lo, sbrk_end;
+    int t, id;
+
+    report("case 4: 付随ページ (shlib data) を勘定に入れる (K7)\n");
+    (void)layout_make(&L, 0x10000UL, 1);
+    free_8mb = (MEM_APP_BAND_TOP - MEM_EXEC_LOAD_ADDR) / PAGE_SIZE;
+
+    host_shlib_pages = 0;
+    need_hi_bare = pages_at(&L, L.guard_a);
+    check(need_hi_bare == free_8mb,
+          "4a 8MB の空きに段 1 の 3 領域 + PD + PT はちょうど収まる");
+
+    host_shlib_pages = K7_SHLIB_DATA_PAGES;
+    need_hi = pages_at(&L, L.guard_a);
+    check(need_hi == need_hi_bare + K7_SHLIB_DATA_PAGES,
+          "4b 付随ページはそのまま枚数に足される");
+    check(need_hi > free_8mb, "4c 付随ページを足すと段 1 は 8MB の空きを超える");
+
+    sbrk_end = 0;
+    t = exec_sbrk_pick_tier(L.load_base, L.code_end, L.guard_a,
+                            L.exec_heap_size, L.band_pdes, free_8mb, &sbrk_end);
+    check(t == 2, "4d だから段 1 を選ばず段 2 へ倒す (K7 の本体)");
+    check(sbrk_end == L.code_end + MEM_EXEC_SBRK_MIN,
+          "4e 段 2 の sbrk 上端は従来どおり code_end + 最低分");
+
+    need_lo = pages_at(&L, sbrk_end);
+    check(need_lo <= free_8mb, "4f 段 2 は付随ページ込みでも空きに収まる");
+    host_shlib_pages = 0;
+    check(pages_at(&L, sbrk_end) + K7_SHLIB_DATA_PAGES <= free_8mb,
+          "4g 段 2 の 3 領域 + PD + PT の後に shlib の 4 ページが残る");
+    host_shlib_pages = K7_SHLIB_DATA_PAGES;
+
+    appslot_init();
+    id = appslot_start_admit(1, need_lo, free_8mb);
+    check(id == 2, "4h 段 2 の枚数なら GUI アプリが 1 本立つ (受入 G6)");
+    check(appslot_start_admit(1, need_hi, free_8mb) == EXEC_ERR_NOMEM,
+          "4i 段 1 の枚数 (付随込み) なら admit は NOMEM");
+
+    /* 付随ページを含めても収まる空き = 段 1 のまま (15MB 以上の構成)。 */
+    sbrk_end = 0;
+    t = exec_sbrk_pick_tier(L.load_base, L.code_end, L.guard_a,
+                            L.exec_heap_size, L.band_pdes, need_hi, &sbrk_end);
+    check(t == 1 && sbrk_end == L.guard_a,
+          "4j 付随ページを含めて収まるなら従来どおり段 1");
+
+    /* 未ロード (CUI しかない機械) では 1 ページも増えない。 */
+    host_shlib_pages = 0;
+    check(pages_at(&L, L.guard_a) == need_hi_bare,
+          "4k shlib 未ロードなら枚数は K7 以前と同じ");
+    sbrk_end = 0;
+    t = exec_sbrk_pick_tier(L.load_base, L.code_end, L.guard_a,
+                            L.exec_heap_size, L.band_pdes, free_8mb, &sbrk_end);
+    check(t == 1 && sbrk_end == L.guard_a,
+          "4l shlib 未ロードなら 8MB でも段 1 のまま (回帰なし)");
+}
+
 int main(void)
 {
     failures = 0;
@@ -255,7 +341,8 @@ int main(void)
     case_tier1_when_free();
     case_tier2_when_tight();
     case_nomem_leaves_others();
-    if (checks < 22) {
+    case_extra_pages_k7();
+    if (checks < 34) {
         report("TOO FEW CHECKS\n");
         die(1);
     }
