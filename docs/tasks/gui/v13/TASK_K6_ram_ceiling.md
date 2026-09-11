@@ -1,15 +1,22 @@
-# K6-RAM: 物理 RAM の上限を 16MB から引き上げる (32MB 以上、目標 128MB)
+# K6-RAM: 物理 RAM の人為的な上限 (16MB) を撤廃する — 上限はアーキテクチャ (4GB) だけ
 
 > 発行: PM (2026-09-11) / レーン: K (C89、カーネル背骨 + ブートローダ) / 前提: ユーザー決裁 (2026-09-11)
-> 「RAM 上限を上げる K 票を先に (32MB 以上)」。K5b の受入 G3/G6 (4 本同時、5 本目拒否) がこれに依存する。
+> 「OS で制限する必要は基本的に無い。Win32 の上限くらいに」。K5b の受入 G3/G6 (4 本同時、5 本目拒否) がこれに依存する。
+>
+> **方針 (ユーザー、2026-09-11)**: 上限は 32bit x86 のアーキテクチャ (PAE なし = 物理 4GB) だけ。Win32 の
+> 実効 ≈3.2GB は 4GB からデバイスの MMIO / PCI 窓 / BIOS ROM の分を引いた値で、OS が絞っていたのではない。
+> OS32 も同じ: **人為的な clamp を持たず、検出した RAM の量に応じて表 (pgalloc の bitmap、identity の PT) を
+> 動的に取る**。RAM にならない領域 (15〜16MB の PEGC 窓、4GB 最上位の BIOS ROM ミラー / PCI 機の MMIO) は
+> 予約として除外する。実質の上限は機体 / NP21/W が積める量。
 > 排他: `boot/loader_hdd.asm` `boot/loader_fat.asm` `kernel/physmem.{c,h}` `kernel/pgalloc.{c,h}` `kernel/paging.{c,h}`
 > `kernel/memory_boot.c` `include/memmap.h` `tools/tests/` の該当ホスト試験。`exec/**` `kapi/**` は触らない (K5b の領分)。
 
 ## ゴール
 
-プロジェクト目標「P100 / 32MB で超快適」(memory `os32-project-purpose-ceiling`) に向け、**16MB 超の物理 RAM を
-検出して pgalloc の池に入れる**。まず 32MB で受入、NP21/W で 128MB まで動くことを確かめる。
-アプリ帯の仮想レイアウト (`app.ld` / `MEM_*`) は動かさない — 増えるのは per-app 物理 (K5b-K) の供給源だけ。
+**16MB 超の物理 RAM を検出して pgalloc の池に入れる。人為的な上限定数 (16MB / 32MB / 128MB) は持たない** —
+上限は `PHYSMEM_MAX_PFN` (= 1M ページ = 4GB、既存) だけ。受入は 32MB と 128MB で行い、NP21/W が積める最大でも
+起動することを確かめる。アプリ帯の仮想レイアウト (`app.ld` / `MEM_*`) は動かさない — 増えるのは per-app 物理
+(K5b-K) の供給源だけ。
 
 ## 現状の事実 (2026-09-11、PM が静的確認)
 
@@ -30,11 +37,14 @@
    どちらを採るかはソースと `docs/hw/` で根拠を出す。NP21/W の `ExMemory` の意味 (`/home/hight/np21w-src/src/mem.c` /
    `pccore.c`) も確認し、ini の値 → ゲストが見る MB 数の対応表を票に書く。
 2. **physmem**: 16MB clamp を撤廃し、RAM の範囲を **[1MB, 15MB) + [16MB, N)** として登録 (15〜16MB は `PHYSMEM_RESERVED` /
-   デバイス)。`PHYSMEM_LEGACY_MAX_PFN` の意味を「legacy 経路の上限」から切り離すか、新しい上限定数 (例 `PHYSMEM_RAM_MAX_PFN`
-   = 128MB) を足す。`physmem_bootstrap_legacy` / モデル経路 (`memory_boot.c`) の両方。
-3. **pgalloc**: bitmap と範囲検査を新上限に。128MB = 32768 ページ = 4KB の bitmap (現 512B)。
-4. **paging**: `PAGING_RAM_LIMIT` を新上限に。identity の PT 枚数 (128MB = 32 枚 = 128KB) の置き場と、
-   `paging_addrspace_create_n` が PDE をコピーする範囲を確認。カーネルの識別 PDE 0 (全 PD 共有) の前提を壊さない。
+   デバイス、4GB 最上位の ROM / MMIO も予約)。`PHYSMEM_LEGACY_MAX_PFN` は「旧ローダ互換の下限保証」の意味だけに
+   縮め、**新しい上限定数は足さない** (上限は `PHYSMEM_MAX_PFN` のみ)。`physmem_bootstrap_legacy` / モデル経路
+   (`memory_boot.c`) の両方。
+3. **pgalloc**: bitmap を静的 16MB 分から**検出量に応じた動的確保**へ (4GB なら 128KB。RAM の先頭側から取る)。
+   範囲検査は `PHYSMEM_MAX_PFN`。
+4. **paging**: `PAGING_RAM_LIMIT` (32MB) を撤廃し、identity の PT を検出量ぶんだけ RAM から動的に取る
+   (4GB なら 1024 枚 = 4MB — これも RAM から)。`paging_addrspace_create_n` が PDE をコピーする範囲を確認。
+   カーネルの識別 PDE 0 (全 PD 共有) と、カーネル自身が使う低位 (0〜3MB) の前提を壊さない。
 5. **memmap / 予約**: `sys_usable_mem_end()` / `sys_reserve_top()` (PEGC バックバッファ、メモリ末尾の 1MB 予約は
    ユーザー方針で可) が 16MB 超でも整合すること。`v86` のバッキング (`EXEC_DYN_RESERVE` の穴、低位メモリ) は不変。
 6. **ホスト試験**: `test_physmem.py` / `test_pgalloc_model.py` / `test_paging_bounds.py` / `test_memory_boot.py` に
@@ -46,7 +56,7 @@
 | ID | 試験 | 合格条件 |
 |---|---|---|
 | M1 | NP21/W `ExMemory` を 32MB 相当にして起動 | `ver`/kselftest 通過、`sys_mem_kb` (= `kernel.map` の番地) が 32MB 相当、pgalloc の空きページが増えている |
-| M2 | 同 128MB | 同上 (上限定数どおり)。それ以上は切り捨てて起動する |
+| M2 | 同 128MB、および NP21/W が積める最大 | 同上。人為的な上限に当たらない (切り捨てはデバイス予約だけ) |
 | M3 | 15MB 構成の回帰 | regress 6 本、v86 -t、GUI アプリ 1 本 (K5b の G8 と同じ) が従来どおり |
 | M4 | K5b の G3 | 32MB 以上で GUI アプリ 4 本が立ち、5 本目が `ERR_FULL` で拒否される (`heap_size = 0` の既定のまま) |
 | M5 | 15〜16MB の穴 | 128MB でも `0xF00000〜0xFFFFFF` が RAM として配られない (pgalloc の範囲検査で証明) |
