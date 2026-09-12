@@ -1,6 +1,6 @@
 # K7 — 入力統合: GUI 中の `kbd_getchar` を端末アプリの打鍵で満たす (設計草案)
 
-状態: **独立レビュー通過 (2026-09-12、ユーザー経由)。§5 の反映を加えて K7-K を発注。**
+状態: **受入済み (2026-09-12)** — K `c6a775d` / A `c37d6e3` / W `df1df96` + W2 `ffed0e5`。I1 / I2 (ASCII) / I3 / I4 (15MB) / I5 合格。未実施: I2 の FEP 経由の日本語、I4 の 8MB。
 親: [PLAN.md](PLAN.md) §1 (決裁 B: K5 → K6 console → 端末アプリ → **K7 入力統合** → 既存 CUI コマンドを端末で流す)。
 前提: K5b (協調型 4 本、`exec_park` / `exec_resume`)、K6C (con_sink、端末アプリ `t5a_display`)。
 
@@ -132,5 +132,6 @@
 | **I2** 打鍵が届く | 同 | 端末窓にフォーカスして `abc` + Enter → `got 0x61 'a'` / `0x62 'b'` / `0x63 'c'` / `0x0D` が端末窓に戻る (`in=141B rec=20`)。`ring3_switch_count` 8、`ring3_resume_bad_frame_count` 0、`fault_kill_count` 0 | **合格** (ASCII。FEP 経由の日本語は未実施) |
 | **I5** 切替点 | 同 | `ring3_resume_bad_frame_count` 0 / `ring3_park_reject_count` 0 のまま、負例は kselftest (`test_resume_mark` 6 項) | **合格** |
 | I3 CTRL+STOP | 同 | kbd_echo は窓を持たないので CTRL+STOP (フォーカス窓宛) の対象にならない。Start → CUI mode の畳み込みで CUI に復帰 (回帰 6/6) するが、**ID 3 (kbd_echo) が `APP_STATE_WAIT_KEY` のまま AppSlot に残る** (`g_slot[3]`: state 3 / gui 1 / cpl3 1 / parked_from_kbd 1、`appslot_reclaim_count` は端末の 1 だけ)。原因は K7-W 申し送り 1 (`owner_active` がスロットと窓しか見ない) | **不合格 → K7-W2** (gshell の畳み込みでスロット無しの被追跡アプリを `exec_kill`) |
-| 不具合候補 | 同 | GUI 中の `kprintf` がテキスト VRAM にも描かれ、画面左上に残像 (`kbd_echo: type keys…`) が出る (`text_disp` 1)。シンク有効中は console.c の描画を抑止すべき | **K6C-2** (発注済み) |
+| **I3** 再試験 (K7-W2 `ffed0e5` + K6C-2 `253057d` 配備、vmkernel 459,467 B、kselftest 63 / 0) | 15MB | 端末 + kbd_echo (WAIT_KEY) の状態で Start → CUI mode → `g_slot[2]` / `[3]` とも state 0、`appslot_reclaim_count` 2 (`last_reclaim_id` 3)、CUI 復帰後のテキスト面はクリア済み、regress 6 本 obs 全通過 | **合格** |
+| 不具合候補 | 同 | GUI 中の `kprintf` がテキスト VRAM にも描かれ、画面左上に残像 (`kbd_echo: type keys…`) が出る (`text_disp` 1)。シンク有効中は console.c の描画を抑止すべき → K6C-2 `253057d` で修正、再試験で残像なし (`scratchpad/i2b.png`) | 修正済み |
 
