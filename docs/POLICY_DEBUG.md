@@ -593,3 +593,14 @@ curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイ�
 ---
 
 *OS32 Debug Policy — Created: 2026-04-18*
+
+### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
+
+- **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
+  `/boot/vmkernel.lz4` `/bin/gshell.bin` `/usr/bin/t5a_display.bin` が**数世代前**のものに戻った (サイズが手元のビルドと不一致)。
+- **原因**: `hsync` は `/host` (HostDrv = `C:\os32`) → `/` の差分コピーで、HostDrv は `make deploy` を回したときの状態のまま。
+  NHD 配備 (`make deploy-nhd` / `os32-cycle deploy`) は HostDrv を更新しないので、その後に `hsync` すると HostDrv の古いビルドが「差分」として NHD に戻る。
+- **規則**: `hsync` / `hsync sys` の**直前に必ず `make deploy`** (HostDrv 同期) を回す。HostDrv へ手で置いた試験ファイルも同じ経路で運ぶ。
+  実行後はゲストの `ls -l` と手元のサイズを突き合わせる ([V4]、§4-29 と同じ)。
+- **PM の作業上の罠 (同日)**: この節を書くときに引用なしのヒアドキュメントを使い、本文のバッククォートがシェルで実行された。
+  文書をスクリプトで書くときは `<<'EOF'` (引用付き) にする。
