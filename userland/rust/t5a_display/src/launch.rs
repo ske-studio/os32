@@ -214,18 +214,23 @@ impl Attach {
     ///
     /// - `0`: 取消が積まれた。接続モードのまま `DONE` を待つ (子には注がない)。
     /// - `OS32_ERR_AGAIN`: WM がまだ取っていない。次のタイマで再試行。
-    /// - それ以外 (`OS32_ERR_STALE` = 既に `DONE` / `FAILED`、不一致): 待っても
-    ///   来ないのでプロンプトへ戻す。
+    /// - それ以外 (`OS32_ERR_STALE` = **もう `DONE` / `FAILED` になっている**、
+    ///   または不一致): **token は捨てない**。K の契約 (`include/launch.h`) では
+    ///   完了した表は `launch_poll` が消費して初めて `IDLE` に戻るので、ここで
+    ///   プロンプトへ戻ると誰も消費せず、同じ端末の次の `launch_req` が
+    ///   `OS32_ERR_FULL` で固着する (実装レビュー往復 1/3 の blocker)。取消待ちの
+    ///   まま次のタイマで poll を続け、`DONE` / `FAILED` を消費してから戻る。
+    ///   本当に不一致なら poll が負を返すので [`Outcome::Lost`] で戻る。
     pub fn cancelled(&mut self, rc: i32) -> Step {
-        if rc == 0 {
-            self.cancel = Cancel::Armed;
-            Step::Redraw
-        } else if rc == ERR_AGAIN {
+        if rc == ERR_AGAIN {
+            /* WM がまだ取っていない。次の poll でもう一度出す。 */
             self.cancel = Cancel::Retry;
-            Step::Redraw
         } else {
-            Step::Finish(Outcome::Done)
+            /* 0 (取消が積まれた) も STALE (もう完了している) も、あとは
+             * `launch_poll` が `DONE` / `FAILED` を渡すのを待つだけ。 */
+            self.cancel = Cancel::Armed;
         }
+        Step::Redraw
     }
 }
 
@@ -326,10 +331,192 @@ mod tests {
     }
 
     #[test]
-    fn stale_cancel_returns_to_the_prompt() {
-        /* D9: DONE / FAILED 済みへの取消は STALE。待っても来ないので戻る。 */
+    fn stale_cancel_keeps_the_token_and_waits_for_the_poll() {
+        /* D9 + 実装レビュー往復 1/3 の blocker: `STALE` = 「もう完了している」
+         * であって「表が空いた」ではない。token を捨てず、取消待ちのまま
+         * 次の poll で `DONE` を消費する。 */
         let mut a = Attach::new(44);
         assert!(a.escape());
-        assert_eq!(a.cancelled(ERR_STALE), Step::Finish(Outcome::Done));
+        assert_eq!(a.cancelled(ERR_STALE), Step::Redraw);
+        assert_eq!(a.cancel, Cancel::Armed);
+        assert_eq!(a.token, 44, "token は捨てない");
+        assert_eq!(a.poll(0, ST_DONE), Step::Finish(Outcome::Done));
+        /* 不一致の token なら poll が負を返すので、そこで戻る。 */
+        let mut a = Attach::new(45);
+        assert!(a.escape());
+        assert_eq!(a.cancelled(ERR_STALE), Step::Redraw);
+        assert_eq!(a.poll(ERR_STALE, 0), Step::Finish(Outcome::Lost(ERR_STALE)));
+    }
+
+    /* ============================================================ */
+    /*  カーネルの要求表の写し (include/launch.h / §1a の契約)       */
+    /*                                                              */
+    /*  Codex の反例「ESC の STALE で表が残り、以後の launch_req が  */
+    /*  FULL に固着する」を端末側だけでは再現できない (表の寿命が    */
+    /*  見えない) ので、契約のうち **完了は launch_poll が消費して   */
+    /*  初めて IDLE に戻る** ところを写した最小の模型を置く。        */
+    /* ============================================================ */
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Row {
+        Idle,
+        Pending,
+        Taken,
+        Running(i32),
+        /* 取消 (KILL) が積まれた。child は保持される。 */
+        Killing(i32),
+        Done,
+        Failed(i32),
+    }
+
+    struct Table {
+        row: Row,
+        token: i32,
+        next: i32,
+    }
+
+    impl Table {
+        fn new() -> Self {
+            Self {
+                row: Row::Idle,
+                token: 0,
+                next: 100,
+            }
+        }
+        /// `launch_req`: 自分の表が IDLE でなければ `OS32_ERR_FULL`。
+        fn req(&mut self) -> i32 {
+            if self.row != Row::Idle {
+                return ERR_FULL;
+            }
+            self.row = Row::Pending;
+            self.token = self.next;
+            self.next += 1;
+            self.token
+        }
+        /// WM の `launch_take` + `launch_report(rc > 0)`。
+        fn start(&mut self, child: i32) {
+            assert_eq!(self.row, Row::Pending);
+            self.row = Row::Taken;
+            self.row = Row::Running(child);
+        }
+        /// WM の `launch_report(rc < 0)`: 起動できなかった。
+        fn fail(&mut self, rc: i32) {
+            assert_eq!(self.row, Row::Pending);
+            self.row = Row::Failed(rc);
+        }
+        /// 子の回収通知 (`launch_owner_exit`): `DONE` になるが **IDLE ではない**。
+        fn child_exit(&mut self) {
+            self.row = match self.row {
+                Row::Running(_) | Row::Killing(_) => Row::Done,
+                other => other,
+            };
+        }
+        /// `launch_poll`: 完了を 1 度だけ渡し、渡した時点で IDLE に戻す。
+        fn poll(&mut self, token: i32) -> (i32, i32) {
+            if token != self.token || self.row == Row::Idle {
+                return (ERR_STALE, 0);
+            }
+            match self.row {
+                Row::Pending => (0, ST_PENDING),
+                Row::Taken => (0, ST_TAKEN),
+                Row::Running(c) | Row::Killing(c) => (0, ST_RUNNING + c),
+                Row::Done => {
+                    self.row = Row::Idle;
+                    (0, ST_DONE)
+                }
+                Row::Failed(rc) => {
+                    self.row = Row::Idle;
+                    (0, ST_FAILED + (-rc))
+                }
+                Row::Idle => (ERR_STALE, 0),
+            }
+        }
+        /// `launch_cancel`: `RUNNING` だけが通る。完了済みは `STALE`。
+        fn cancel(&mut self, token: i32) -> i32 {
+            if token != self.token {
+                return ERR_STALE;
+            }
+            match self.row {
+                Row::Pending | Row::Taken => ERR_AGAIN,
+                Row::Running(c) => {
+                    self.row = Row::Killing(c);
+                    0
+                }
+                _ => ERR_STALE,
+            }
+        }
+    }
+
+    /// タイマ 1 周ぶん (`guest.rs::poll_launch` と同じ順序)。
+    fn tick(table: &mut Table, attach: &mut Attach) -> Step {
+        let (rc, status) = table.poll(attach.token);
+        let step = attach.poll(rc, status);
+        if step == Step::Retry {
+            let rc = table.cancel(attach.token);
+            return attach.cancelled(rc);
+        }
+        step
+    }
+
+    #[test]
+    fn escape_after_the_child_already_exited_does_not_wedge_the_table() {
+        /* 反例そのもの: 子が終わった直後 (poll より前) の ESC。 */
+        let mut t = Table::new();
+        let token = t.req();
+        assert!(token > 0);
+        t.start(3);
+        let mut a = Attach::new(token);
+        assert_eq!(tick(&mut t, &mut a), Step::Redraw);
+        assert_eq!(a.child, 3);
+        /* 子が終了。まだ誰も poll していないので表は DONE のまま。 */
+        t.child_exit();
+        /* ここで ESC。`launch_cancel` は STALE を返す。 */
+        assert!(a.escape());
+        assert_eq!(a.cancelled(t.cancel(a.token)), Step::Redraw);
+        /* この時点で表はまだ空いていない — token を捨てていたら誰も消費せず、
+         * 次の `launch_req` は永久に FULL (Codex の blocker)。 */
+        assert_eq!(t.req(), ERR_FULL, "完了は poll が消費して初めて空く");
+        /* 次のタイマで DONE を消費してプロンプトへ。 */
+        assert_eq!(tick(&mut t, &mut a), Step::Finish(Outcome::Done));
+        /* 表が空いたので次の起動が通る。 */
+        let next = t.req();
+        assert!(next > 0, "ESC のあとも起動できる (FULL に固着しない)");
+        assert_ne!(next, token);
+    }
+
+    #[test]
+    fn a_failed_launch_also_frees_the_table_only_through_the_poll() {
+        /* `FAILED` も完了なので、消費するまで表は空かない (D4 / §1a)。 */
+        let mut t = Table::new();
+        let token = t.req();
+        let mut a = Attach::new(token);
+        t.fail(-2);
+        assert_eq!(t.req(), ERR_FULL);
+        assert_eq!(tick(&mut t, &mut a), Step::Finish(Outcome::Failed(-2)));
+        assert!(t.req() > 0, "FAILED を消費した後は起動できる");
+    }
+
+    #[test]
+    fn escape_while_pending_retries_until_the_kill_is_queued() {
+        /* AGAIN → 再試行 → RUNNING で通る → 回収通知 → DONE を消費。 */
+        let mut t = Table::new();
+        let token = t.req();
+        let mut a = Attach::new(token);
+        assert!(a.escape());
+        assert_eq!(a.cancelled(t.cancel(token)), Step::Redraw);
+        assert_eq!(a.cancel, Cancel::Retry);
+        /* PENDING のあいだは毎周やり直す (表はまだ取られていない)。 */
+        assert_eq!(tick(&mut t, &mut a), Step::Redraw);
+        assert_eq!(a.cancel, Cancel::Retry);
+        t.start(4);
+        /* RUNNING になった周で取消が積まれる。 */
+        assert_eq!(tick(&mut t, &mut a), Step::Redraw);
+        assert_eq!(a.cancel, Cancel::Armed);
+        assert_eq!(a.child, 4);
+        /* WM が畳むまでは RUNNING のまま (何も起きない)。 */
+        assert_eq!(tick(&mut t, &mut a), Step::Idle);
+        t.child_exit();
+        assert_eq!(tick(&mut t, &mut a), Step::Finish(Outcome::Done));
+        assert!(t.req() > 0);
     }
 }

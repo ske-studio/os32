@@ -380,6 +380,8 @@ impl DisplayApp<'_> {
 
     /// 接続モードで ESC を受けた (票 T9 D9)。`launch_cancel` を 1 回だけ出し、
     /// 接続モードのまま `DONE` を待つ (連打は `Attach` の印がまとめる)。
+    /// `OS32_ERR_STALE` (もう完了している) でも **token は捨てない** — 完了は
+    /// `launch_poll` が消費して初めて表が空く (`include/launch.h`)。
     fn escape(&mut self, ui: &mut Ui) {
         let Some(mut attach) = self.attach else {
             /* 表を持っていないのに接続モードに居る = 取りこぼし。固まらない
@@ -396,9 +398,12 @@ impl DisplayApp<'_> {
         let step = self.cancel(&mut attach);
         self.attach = Some(attach);
         match step {
+            /* `cancelled` はここへ来ない (`STALE` でも token を捨てず poll を
+             * 続ける)。来たとしても固まらないよう畳む。 */
             Step::Finish(outcome) => self.finish(outcome),
             /* 票 D9: 取消を出しても接続モードのまま (`Next::Stay`)。最下行が
-             * `[cancelling …]` に変わり、プロンプトへは `DONE` を見てから。 */
+             * `[cancelling …]` に変わり、プロンプトへは `DONE` を見てから
+             * (`STALE` = もう完了している場合も、消費するのは `launch_poll`)。 */
             _ => {
                 if prompt::step(self.mode, Event::CancelRequested) == Next::Prompt {
                     self.finish(Outcome::Done);

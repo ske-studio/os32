@@ -172,6 +172,41 @@ $ python3 -B tools/check_constraints.py
 `cargo clippy -p t5a_display` は**この票より前から**落ちる
 (`storage.rs:22` の `clippy::mut_from_ref` が deny)。今回足した / 触った
 `launch.rs` `prompt.rs` `guest.rs` には clippy の指摘は 1 件も無い。
+## A-5. 実装レビュー往復 1/3 の blocker (A、2026-09-13)
+
+指摘: **ESC の `STALE` 経路で要求表が残り、以後の起動が `FULL` に固着する**。
+反例 = 子が終了 → 次の 100ms poll より先に ESC → `launch_cancel` が `OS32_ERR_STALE`
+→ 旧実装は `Step::Finish` で token を捨ててプロンプトへ。K の契約
+(`include/launch.h`) では **完了した表は `launch_poll` が消費して初めて `IDLE`**
+なので、以後その表は誰にも消費されず、同じ端末の `launch_req` が常に `FULL`。
+
+直し: `Attach::cancelled()` は `STALE` でも token を捨てず `Cancel::Armed` に
+して `Step::Redraw` を返す (「`STALE` = もう完了している = 消費だけ残っている」と
+読む)。接続モードのまま次のタイマで `launch_poll` を続け、`DONE` / `FAILED` を
+消費した時点でプロンプトへ。本当に不一致なら poll が負を返して `Lost` で戻る
+(その場合の表は既に `IDLE`)。
+
+試験: 端末側だけでは表の寿命が見えないので、`launch.rs` の試験に**カーネルの
+要求表の最小の写し** (`Table`: `req` / `start` / `fail` / `child_exit` / `poll` /
+`cancel`、完了は poll が消費して初めて `IDLE`) を置き、`tick()` で
+`guest.rs::poll_launch` と同じ順序を回した。
+
+| 埋め戻した欠陥 | 落ちた検査 |
+|---|---|
+| `cancelled(STALE)` を `Step::Finish(Done)` に戻す (レビュー前の実装) | `escape_after_the_child_already_exited_does_not_wedge_the_table` `stale_cancel_keeps_the_token_and_waits_for_the_poll` |
+
+足した / 直した検査 (48 → 59 → **62**):
+
+| 検査 | 見るもの |
+|---|---|
+| `stale_cancel_keeps_the_token_and_waits_for_the_poll` | `STALE` でも token を保つ → 次の poll が `DONE` を消費して戻る。token 不一致なら poll の負で `Lost` |
+| `escape_after_the_child_already_exited_does_not_wedge_the_table` | 反例そのもの。ESC の直後は `req()` が `FULL`、poll で `DONE` を消費した後は**次の起動が通る** |
+| `a_failed_launch_also_frees_the_table_only_through_the_poll` | `FAILED` も消費して初めて表が空く |
+| `escape_while_pending_retries_until_the_kill_is_queued` | `AGAIN` → 再試行 → `RUNNING` で取消が積まれる → 回収通知 → `DONE` を消費 (模型ごしの通し) |
+
+実行: `62 passed; 0 failed`、`cargo check --release -p t5a_display` 警告 0、
+`python3 -B tools/check_constraints.py` OK。`make` / 配備 / 実機は**未実施** ([V4])。
+
 ## 6. W 節 — WM (gshell) 側の RED → GREEN (2026-09-13)
 
 票: §1 D3 (2)(3)(4) / D5 / D8、§10 non-blocker 2 / 4。

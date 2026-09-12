@@ -209,7 +209,7 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - D4: `Record::Exit` は `session.apply` に渡すだけ (表示のみ)。`prompt::Event::Exit` は遷移表から削除し
   `Done` / `Failed` / `CancelRequested` に置き換えた。`exit` / 端末終了時の取消は**出さない** (孤児は
   カーネルの `launch_owner_exit` が回収、§10 non-blocker 1)。
-- 検証はホストのみ: host 試験 48 → **59** (RED→GREEN の記録は `tools/tests/t9_tdd.md` §A)、
+- 検証はホストのみ: host 試験 48 → **62** (RED→GREEN の記録は `tools/tests/t9_tdd.md` §A)、
   `cargo check --release -p t5a_display`、`check_constraints.py`。`make` / 配備 / 実機は未実施 ([V4])。
 
 ## 16. Codex 実装レビュー (W / A / S、2026-09-13) — 往復 1/3: Request changes → 各レーンへ差し戻し
@@ -221,3 +221,7 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - **S blocker 2**: `source` 内の `exit` が行ループを止めない (`goto loop` で永久)。→ 各行の前に exit の印を見て資源を解放して抜ける。
 - ゲート (テスター): `make clean` / `all` (72s) / `external` exit=0、`make check` は check-manifests §1c (`docs/07_shell.md` に内蔵 `exit` が無い) で exit=2 → S へ。
 - non-blocker: A の STALE 試験は次回起動を見ていない、W の unsafe に SAFETY 注記、S の t9_tdd に RED 記録が無い、CUI 直起動時の `launch_req failed (-9)` の連発、UTF-8 の BS (既存)。
+- 実装レビュー往復 1/3 の blocker 修正 (2026-09-13): ESC の `launch_cancel` が `OS32_ERR_STALE` を
+  返しても **token を捨てない** — 完了した表は `launch_poll` が消費して初めて `IDLE` に戻る
+  (`include/launch.h`) ので、捨てると以後 `launch_req` が `FULL` で固着する。取消待ちのまま poll を
+  続け、`DONE` / `FAILED` を消費してからプロンプトへ戻す (host 試験にカーネル要求表の写しを置いて確認)。
