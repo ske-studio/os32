@@ -1,6 +1,6 @@
 # T8 — full-screen GFX 復帰: 端末から起動した GFX プログラムが全画面を使い、終了で GUI に戻る
 
-状態: **決裁済み (2026-09-12、ユーザー): D1a 十分 / D2 落とす / D3 OK / D4 採用 / D5〜D7 OK。K / ビルド系 / W の 3 票を発注。**
+状態: **受入 F1 前半 / F2〜F7 合格 (2026-09-12、K `f19dd00` + `5911d80`、B `d73ceea`、W `732b07d` + `a5bdca7`)。残は F1 後半 (ポーリング型の yield、ユーザー判断待ち) と PEGC 構成。**
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → K7 → T7 → **full-screen GFX 復帰** → shell script → 設定 S0〜)。
 前提: K5b (協調型 4 本)、K6C / K7 (端末、con_sink、kbd 待ちの park)、T7 (端末からの起動)。すべて main `3b7677b`。
 
@@ -128,3 +128,8 @@
 | **F5** 再試験 (T8-2 `5911d80` + `a5bdca7` 配備、vmkernel 461,075 B、kselftest 67 / 0) | 端末に `v86` + Enter → `cui only: v86` (`v86.bin` の flags 0x10)、起動しない (`appslot_reclaim_count` 不変) | **合格** |
 | **F6** 再試験 | `gfx_noflag` → `Error: gfx_init without GFX declaration -> kill app` が端末に出て畳まれる (`gfx_init_reject_count` 1、`last_reclaim_id` 3)、GUI は無事、`EXIT` でプロンプト復帰 | **合格** |
 | **F2 / F4** | 端末 + `gui_demo` (Widgets / Help) を出した状態で端末に `blit_test` + Enter → 全画面 (`g_gfx_owner` 4、WM は描かない)。ベンチ終了 → プログラムの `libos32gfx_shutdown` で所有者が 1 に戻り WM が `gfx_init` + 全面再描画 (デスクトップ / Help / 端末枠)。`kbd_getchar` の park に Space → `Done. Press any key.` まで端末に流れプロンプト復帰、`appslot_last_reclaim_id` 4、`fault_kill_count` 0。Widgets 窓は端末窓の下に隠れているだけ (Z 順) | **合格** |
+| **F7** | Start → CUI mode で畳まれ (`g_gfx_owner` 1)、CUI から `v86 -t` result OK (CUI では拒否されない)、regress 6 本 obs 全通過 (kselftest 67 / 0)。PEGC / Cirrus 構成の F1 は未実施 | **合格** (15MB / pc98) |
+
+**判定 (PM、2026-09-12)**: F1 前半 / F2 / F3 / F4 / F5 / F6 / F7 合格。**残: F1 後半 = `kbd_trygetchar` をポーリングする GFX プログラム
+(`gfx200_test` の FPS 計測、`gfx_demo200` / `rotate_test` / `demo_tile`) は GUI 中に WM へ制御を返さず、端末からキーを注入できない
+(CTRL+STOP でしか止まらない)。ユーザー判断待ち (協調的な yield を `kbd_trygetchar` に入れるか、仕様とするか)。**
