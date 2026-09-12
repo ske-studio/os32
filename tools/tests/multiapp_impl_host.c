@@ -285,6 +285,40 @@ static int ma_resume_kbd(int id)
     return 0;
 }
 
+/* ---- T8 §7 D8: 第 3 の park 点 (GUI 中のポーリング型の協調 yield) ------ */
+/* K7 の 2 本と同じ扱い。表 (appslot.c) は実物で、exec/exec.c の
+ * exec_park_poll / exec_resume の **poll 分岐だけ** をここに写す。写した分は
+ * 3 行 — 印を見て注入リングから 1 バイト取り、空なら **-1 (キーなし)** を
+ * EAX に入れる (WAIT_KEY と違い、空でも起こす)。
+ * now_tick は drivers/kbd.c が tick_count から渡す値の差し替え。 */
+static int ma_park_poll(u32 now_tick)
+{
+    int rc = appslot_park_poll_check(now_tick);
+    if (rc < 0) return rc;
+    appslot_park_poll_commit();
+    return 0;
+}
+
+static int ma_resume_poll(int id)
+{
+    AppSlot *a;
+    u8 ch;
+    int rc = appslot_resume_check(id);
+    if (rc < 0) return rc;
+    a = appslot_get(id);
+    if (a->parked_from_poll) {
+        ch = 0;
+        if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
+        else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
+    } else {
+        a->frame[APP_FRAME_EAX] = 0;
+    }
+    appslot_resume_commit(id);
+    H.turn_used[id] = 1;
+    H.last_run = id;
+    return 0;
+}
+
 static int ma_res_add(int kind, int n)
 {
     int owner = res_owner_get();
@@ -1487,6 +1521,143 @@ static void case_cui_only_and_reject_kill(void)
     check(appslot_live() == 0, "21r 畳んだ後は 1 本も残らない");
 }
 
+/* ======================================================================== */
+/*  ケース 22 — ポーリング型の協調 yield (票 T8 §7 D8、2026-09-12)           */
+/*                                                                          */
+/*  GUI 中に kbd_trygetchar が回っているだけのプログラム (gfx200_test の FPS  */
+/*  段) は、K7 の park 点 (WAIT_KEY = キーが来るまで起こさない) では譲れない  */
+/*  — 「無ければ -1」で戻る約束を破ってしまう。そこで **1 周だけ** 譲る第 3   */
+/*  の park 点を足した。ここで固定するのは 5 つ:                              */
+/*    (a) park すると WAIT_POLL + 印 + cur はシェル帯 (exec_app_state は 4)   */
+/*    (b) 注入が空でも resume は通り、EAX に **-1** が入る (WAIT_KEY との差)  */
+/*    (c) 注入があれば 1 バイトだけ EAX に入る                                */
+/*    (d) **前回の譲りから tick が進んでいなければ park しない** (10ms に     */
+/*        1 回まで)。弾き数 ring3_park_reject_count には載らない              */
+/*    (e) 譲り中のアプリは exec_kill で畳める / 印なしの resume は STALE      */
+/* ======================================================================== */
+static void case_poll_yield(void)
+{
+    int id;
+    AppSlot *a;
+    u32 sw0, bad0, rej0, yield0, kbdpark0;
+    u32 t = 1000;
+
+    ma_init(4096);
+    kbd_inject_discard();
+    appslot_poll_yield_reset();
+    host_reader = 2;
+    id = ma_start(100, 1);
+    check(id == APP_ID_MIN, "22a GUI アプリが 1 本走る");
+    sw0 = ring3_switch_count;
+    bad0 = ring3_resume_bad_frame_count;
+    rej0 = ring3_park_reject_count;
+    yield0 = ring3_poll_yield_count;
+    kbdpark0 = ring3_kbd_park_count;
+
+    /* (a) OP_WAIT の外でも、tick が進んでいれば 1 周だけ譲れる */
+    check(ma_park_poll(t) == 0, "22b tick が進んでいれば譲れる");
+    check(ring3_poll_yield_count == yield0 + 1,
+          "22c ring3_poll_yield_count が増える");
+    check(ring3_park_reject_count == rej0, "22d 正常な譲りは弾き数に載らない");
+    check(ring3_kbd_park_count == kbdpark0, "22e WAIT_KEY の勘定とは別");
+    a = appslot_get(id);
+    check(a->state == APP_STATE_WAIT_POLL && a->parked_from_poll == 1,
+          "22f WAIT_POLL + ポーリング由来の印");
+    check(a->parked_from_wait == 0 && a->parked_from_kbd == 0,
+          "22g 他の 2 つの印は立たない");
+    check(appslot_cur() == APP_ID_SHELL && res_owner_get() == APP_ID_SHELL,
+          "22h cur と owner はシェル帯 (WM top-level) へ戻る");
+    check(appslot_state(id) == APP_STATE_WAIT_POLL,
+          "22i exec_app_state は 4 を返す");
+
+    /* (b) 注入が空でも起こす。EAX は -1 (キーなし) */
+    check(kbd_inject_pending() == 0, "22j 注入リングは空");
+    check(ma_resume_poll(id) == 0, "22k 空でも resume は通る (WAIT_KEY との差)");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)(i32)-1,
+          "22l EAX には -1 (キーなし) が入る");
+    check(ring3_switch_count == sw0 + 1, "22m 成功は switch_count を 1 増やす");
+    check(appslot_get(id)->parked_from_poll == 0,
+          "22n 起こした時点で印は消える");
+    check(appslot_get(id)->state == APP_STATE_RUNNING, "22o 走っている状態へ戻る");
+
+    /* (d) 同じ tick では 2 度譲らない。弾き数にも載らない */
+    rej0 = ring3_park_reject_count;
+    yield0 = ring3_poll_yield_count;
+    check(ma_park_poll(t) == OS32_ERR_AGAIN,
+          "22p 同じ tick では譲らない (10ms に 1 回まで)");
+    check(ring3_poll_yield_count == yield0, "22q 譲っていないので数えない");
+    check(ring3_park_reject_count == rej0,
+          "22r 間引きは違反ではないので弾き数に載らない");
+    check(appslot_get(id)->state == APP_STATE_RUNNING &&
+          appslot_cur() == id, "22s 走ったまま (park していない)");
+
+    /* (c) tick が進み、注入があれば 1 バイトだけ EAX に入る */
+    t++;
+    check(ma_park_poll(t) == 0, "22t tick が 1 つ進めばまた譲れる");
+    res_owner_set(2);                      /* 端末アプリ (読み手) から注ぐ */
+    check(kbd_inject((const u8 *)"ab", 2) == 2, "22u 端末アプリが 2 バイト注ぐ");
+    res_owner_set(APP_ID_SHELL);           /* resume を呼ぶのは WM */
+    check(ma_resume_poll(id) == 0, "22v 注入があっても resume は通る");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'a',
+          "22w EAX には最初の 1 バイトだけが入る");
+    check(kbd_inject_pending() == 1, "22x 残りは 1 バイト (まとめて渡さない)");
+
+    /* (e) 印なしの resume は STALE / 譲り中でも畳める */
+    t++;
+    check(ma_park_poll(t) == 0, "22y もう一度譲れる");
+    a = appslot_get(id);
+    a->parked_from_poll = 0;
+    a->parked_from_kbd = 1;                /* kbd の印だけに見せる */
+    check(ma_resume_poll(id) == OS32_ERR_STALE,
+          "22z WAIT_POLL を kbd の印では起こせない");
+    check(ring3_resume_bad_frame_count == bad0 + 1,
+          "22A 印の取り違えは bad_frame_count に載る");
+    check(appslot_kill_check(id) == 0,
+          "22B 譲り中のアプリは exec_kill で畳める");
+    a->parked_from_kbd = 0;
+    a->parked_from_poll = 1;
+    check(ma_resume_poll(id) == 0, "22C 印を戻せば起こせる (残りの 'b')");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'b',
+          "22D 2 バイト目が次の resume で届く");
+    check(kbd_inject_pending() == 0, "22E 注入リングは空に戻る");
+
+    /* 走っている本人は kill できない / CUI の入れ子の子は譲れない */
+    check(appslot_kill_check(id) == OS32_ERR_INVAL,
+          "22F 走っている間は exec_kill を呼べない");
+    {
+        u32 rej1;
+        int child;
+        t++;
+        child = ma_start(10, 0);
+        check(child > 0, "22G CUI の入れ子の子が立つ");
+        rej1 = ring3_park_reject_count;
+        check(ma_park_poll(t) == OS32_ERR_INVAL,
+              "22H CUI の入れ子の子はポーリングでも譲れない");
+        check(ring3_park_reject_count == rej1 + 1,
+              "22I その拒否は park_reject_count に載る");
+        ma_exit(0);
+    }
+    ma_exit(0);
+    t++;
+    check(appslot_cur() == APP_ID_SHELL, "22J 畳んだら WM top-level へ戻る");
+    rej0 = ring3_park_reject_count;
+    check(ma_park_poll(t) == OS32_ERR_INVAL,
+          "22K シェル帯 (WM top-level) からの譲りは弾かれる");
+    check(ring3_park_reject_count == rej0 + 1, "22L その拒否は弾き数に載る");
+
+    /* (f) 間引きは表の検査より**先**で、控えは弾かれた試みでも進む。
+     * ポーリングは秒間数万回来るので、譲れない文脈の連打で
+     * ring3_park_reject_count が跳ね上がってはいけない。 */
+    check(ma_park_poll(t) == OS32_ERR_AGAIN,
+          "22M 同じ tick の連打は間引きで止まる (間引きは表の検査より先)");
+    check(ring3_park_reject_count == rej0 + 1,
+          "22N 弾き数も tick ごと 1 回まで");
+
+    /* 控えの巻き戻し: reset で「次の 1 回」が必ず通る */
+    appslot_poll_yield_reset();
+    kbd_inject_discard();
+}
+
 int main(void)
 {
     failures = 0;
@@ -1515,6 +1686,7 @@ int main(void)
     case_wait_key();
     case_gfx_screen_owner();
     case_cui_only_and_reject_kill();
+    case_poll_yield();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

@@ -209,3 +209,137 @@ TARGET i386-elf GNU89 -Werror COMPILE PASS
   (§1 / §2 / §3 はビルド成果物を要求するので未実行)。
 - 実機 (NP21/W) の受入 F5 / F6 再試験。配備・エミュレータ操作も禁止。
 - gshell / 端末側の入口判定 (`classify` に `cui` を足す) は別票 T8-2W。
+
+---
+
+# T8-3 K (ポーリング型の協調 yield、カーネル) — 追記 2026-09-12
+
+票: [TASK_T8_fullscreen_gfx.md](../../docs/tasks/gui/v13/TASK_T8_fullscreen_gfx.md) §7 D8 (受入 F8)
+実装: `exec/appslot.c` + `exec/appslot.h` (状態 `APP_STATE_WAIT_POLL` = 4、印 `parked_from_poll`、
+`appslot_park_poll_check/commit`、`appslot_poll_yield_reset`、カウンタ `ring3_poll_yield_count`) /
+`exec/exec.c` + `exec/exec.h` (`exec_park_poll` と `exec_resume` の poll 分岐) /
+`drivers/kbd.c` (`kbd_trygetchar` / `kbd_trygetkey` の GUI 分岐) / `kernel/kselftest.c`
+試験: `multiapp_impl_host.c` ケース 22 (`python3 -B tools/tests/test_multiapp_impl.py`)
+**KAPI は 1 本も増やしていない** (v48 のまま。`kbd_trygetchar` / `kbd_trygetkey` の中身だけが変わる)。
+
+## なぜ第 3 の park 点が要るのか
+
+K7 の park 点 (`WAIT_KEY`) は `kbd_getchar` / `kbd_getkey` = **塞ぐ**呼び出し用で、
+「注入リングに文字が来るまで起こさない」(空の `exec_resume` は `OS32_ERR_AGAIN`)。
+ところが `gfx200_test` の FPS 段のような描画ループは `kbd_trygetchar` で **回し続ける** —
+「無ければ -1」で戻る約束なので `WAIT_KEY` では止められず、K7 の後も GUI 中は
+CPU を独占したままになる (票 §7 の F1 後半)。
+
+そこで **1 周だけ譲る** park 点を足した。`WAIT_POLL` は WM から見て「常に ready、
+ただし優先度は最下位」で、WM は次の周に必ず起こす。そのとき `exec_resume` は
+注入リングに文字があればその 1 バイトを、空なら **EAX = -1 (キーなし)** を書く。
+アプリからは `kbd_trygetchar()` が普通に戻ったように見える。
+
+## tick の間引き — なぜ「控えは check 側で進める」のか
+
+ポーリングは秒間数万回来るので、譲りには **PIT tick の間引き** (100Hz = 10ms に 1 回まで) が要る。
+実装で 1 か所迷ったのが控え (`g_poll_last_tick`) を進める位置で、**成立 (commit) のときだけ**
+進めると、表の側で弾かれる文脈 (GUI 中の CUI 入れ子 `exec_run` の子) が回すたびに
+`ring3_park_reject_count` が跳ね上がる (間引きが効かない)。
+なので順番を「**間引き → 表の検査**」に固定し、控えは **弾かれた試みでも** 進めるようにした。
+走っているアプリは常に 1 本なので、弾かれた試みが「譲れたはずの誰か」の枠を食うことはない
+(弾かれる文脈はそもそも譲れない)。この順番だけを見る検査が 22M / 22N。
+
+`now_tick` を**引数で受ける**のは 2 つの理由: `exec/appslot.c` はハードウェアを知らない規約と、
+ホストで tick を差し替えられるようにするため (`drivers/kbd.c` が `tick_count` を読んで渡す)。
+
+## `kbd_has_key` に譲りを入れなかった理由
+
+同じノンブロッキング系だが **同型ではない**。`kbd_trygetchar` / `kbd_trygetkey` は
+「値か -1」を返すので `exec_resume` が EAX に書く値とそのまま噛み合うが、`kbd_has_key` は
+真偽を返す — 1 バイトを EAX に書けば「真を返しつつその 1 バイトを落とす」ことになる。
+`kbd_has_key` は **KAPI に無く** (CPL=3 から呼べない)、いま呼び手も 0 なので、
+GUI 中に注入リングを見る枝だけ足して (従来は常に 0 を返していた) 譲りは入れていない。
+
+## 試験の区分 — `multiapp_impl_host.c` ケース 22 (37 チェック)
+
+| 検査 | 何を固定したか |
+|---|---|
+| 22a〜22e | tick が進んでいれば `OP_WAIT` の外でも譲れる。`ring3_poll_yield_count` が増え、**弾き数にも `ring3_kbd_park_count` にも載らない** |
+| 22f〜22i | `WAIT_POLL` + 印 `parked_from_poll` のみ。`cur` / owner はシェル帯へ戻り、`exec_app_state` は **4** |
+| 22j〜22o | **注入が空でも resume は通り、EAX に -1 が入る** (`WAIT_KEY` の `OS32_ERR_AGAIN` との差)。印は消え、状態は RUNNING へ |
+| 22p〜22s | **同じ tick では 2 度譲らない** (10ms に 1 回まで)。譲っていないので数えず、弾き数にも載せず、アプリは走ったまま |
+| 22t〜22x | tick が 1 つ進めばまた譲れる。注入があれば **1 バイトだけ** EAX に入り、残りはリングに残る |
+| 22y〜22E | 印の取り違え (`parked_from_kbd` で `WAIT_POLL` を起こす) は `OS32_ERR_STALE` で `bad_frame_count` に載る。譲り中のアプリは `exec_kill` で畳める |
+| 22F〜22I | 走っている本人は kill できない。GUI 中でも **CUI の入れ子 `exec_run` の子は譲れない** (弾き数に載る) |
+| 22J〜22N | シェル帯 (WM top-level) からの譲りは弾かれる。**同じ tick の連打は間引きで止まり、弾き数も tick ごと 1 回まで** |
+
+## RED → GREEN
+
+最初の RED はコンパイルエラー — `feat/gui` の `exec/appslot.{c,h}` (cfd2768) を
+`-I` で先に置いてケース 22 をビルドすると、`appslot_park_poll_check` / `appslot_park_poll_commit` /
+`appslot_poll_yield_reset` / `ring3_poll_yield_count` / `APP_STATE_WAIT_POLL` /
+`AppSlot.parked_from_poll` が未定義で落ちる (7 種)。
+
+そこから実装を 1 か所ずつ「ありそうな間違い」に差し替えて、試験が**その間違いだけ**を
+捕まえることを見た。差し替えは scratchpad のコピーだけで、作業ツリーには書き戻していない。
+
+| # | 差し替え | 落ちた検査 |
+|---|---|---|
+| R1 | 間引きを外す (`now_tick` を見ない) | 22p / 22q / 22s / 22t / 22M / 22N |
+| R2 | `check` で控え (`g_poll_last_tick`) を進めない | 22p / 22q / 22s / 22t / 22M / 22N |
+| R3 | 印 `parked_from_poll` を立てない | 22f / 22k / 22l / 22m / 22o / 22s / 22t / 22v / 22w / 22x / 22y / 22A / 22D / 22E |
+| R4 | `resume_check` の `WAIT_POLL` の枝で印を見ない | 22z / 22A / 22B / 22C / 22D / 22E |
+| R5 | `kill_check` が `WAIT_POLL` を畳ませない | 22B |
+| R6 | `appslot_state` が 4 を返さない (2 に丸める) | 22i |
+| R7 | 間引きを表の検査の**後**に置く | 22M / 22N |
+
+R7 は最初の版の試験では **捕まえられなかった** — 22p/22r は `cur` が譲れるアプリのままなので、
+順番を入れ替えても間引きが先に効いてしまう。順番だけを見る 22M / 22N (譲れない文脈の連打)
+を足して捕まるようにした。R3 が 14 件も落とすのは、印を立てないと `resume_check` が
+`OS32_ERR_STALE` を返し、以後の park / resume の連鎖が全部ずれるため。
+
+## GREEN の実測
+
+```
+$ python3 -B tools/tests/test_multiapp_impl.py
+HOST ILP32 GNU89 COMPILE PASS
+...
+  ok   22L その拒否は弾き数に載る
+  ok   22M 同じ tick の連打は間引きで止まる (間引きは表の検査より先)
+  ok   22N 弾き数も tick ごと 1 回まで
+ALL PASS
+TARGET i386-elf GNU89 -Werror COMPILE PASS
+```
+
+276 チェック (ケース 21 までの 239 + ケース 22 の 37)、失敗 0。
+`test_multiapp_model.py` / `test_kbd_inject.py` / `test_con_sink.py` / `test_owner_reclaim.py` /
+`test_boot_splash_native.py` / `tools/check_constraints.py` も通した (巻き込みなし)。
+
+カーネル側 3 本はカーネルと同じフラグで単体コンパイルして確かめた ([C1]、`-Wall -Wextra` 無警告):
+
+```
+$ i386-elf-gcc -std=gnu89 -m32 -march=i386 -ffreestanding ... -O2 -Wall -Wextra -D__KERNEL_BUILD__ \
+    -c drivers/kbd.c exec/exec.c exec/appslot.c kernel/kselftest.c
+(4 本とも警告 0)
+```
+
+## kselftest (ブート時、実機)
+
+`appslot_resume_mark_selftest()` に 2 項追加 (`kernel/kselftest.c` の `test_resume_mark`):
+
+- `resume needs the poll mark (WAIT_POLL)` — ビット 6。`WAIT_POLL` を `parked_from_wait` /
+  `parked_from_kbd` の印では起こせず `OS32_ERR_STALE` + `bad_frame_count`、
+  `parked_from_poll` を立てれば通る。譲り中のアプリは `kill_check` が通す
+- `poll yield is throttled to one PIT tick` — ビット 7。同じ tick の 2 度目は `OS32_ERR_AGAIN` で
+  弾き数に載らず、tick が進めば間引きを抜けて表 (`cur` = シェル帯) の側で弾かれ、
+  その連打はまた間引きで止まる (= 順番が「間引き → 表」で控えが check 側)
+
+ビット 4 (`exec_app_state`) にも `WAIT_POLL` → 4 を足した。借りるスロット・`cur` / owner・
+カウンタ・控えは丸ごと保存して戻す (既存の作法どおり)。
+**この 2 項はまだ実機で踏んでいない** — `make` もエミュレータも使っていない ([V4])。
+
+## 未実施
+
+- `make` (clean ビルド / `make check` / `make external`)、配備、エミュレータ操作 — コーダーの禁止事項。
+  `tools/check_constraints.py` は単体で走らせて通した。
+- 実機 (NP21/W) の受入 F8 (`gfx200_test` の FPS 段で Space → 自分で終了、`ring3_poll_yield_count` が
+  秒数 × ≤100 で増える、譲りあり / なしの相対性能)。
+- WM (gshell) 側 = `WAIT_POLL` を「常に ready、優先度は最下位」で起こす分は別票 T8-3 W。
+  カーネルだけを入れて gshell が 4 を知らないと、譲ったアプリが二度と起きない
+  (`app_state` が 4 を返しても `ready_to_run` が偽) — **K と W は同時に入れること**。

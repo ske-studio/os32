@@ -31,6 +31,7 @@ volatile u32 ring3_transition_count = 0;
 volatile u32 ring3_park_reject_count = 0;
 volatile u32 ring3_resume_bad_frame_count = 0;
 volatile u32 ring3_kbd_park_count = 0;
+volatile u32 ring3_poll_yield_count = 0;
 volatile u32 appslot_reclaim_count = 0;
 volatile int appslot_last_reclaim_id = 0;
 volatile u32 gfx_init_reject_count = 0;
@@ -48,6 +49,14 @@ static int g_cur = APP_ID_SHELL;
  * アプリへのコールバック経路を作らない) ので 1 本で足りる。 */
 static int g_cur_op_is_wait = 0;
 
+/* ポーリング型 yield (票 T8 §7 D8) の間引き: 最後に譲った PIT tick。
+ * 「前回の譲りから tick が進んでいる」ときだけ譲る = 100Hz なので 10ms に
+ * 1 回まで。表全体で 1 語 — 走っているアプリは常に 1 本なので、スロット
+ * ごとに持つ意味がない。比較を `!=` にしてあるのは u32 の一周
+ * (100Hz で 497 日) を跨いでも止まらないため (`>` だと一周の瞬間に
+ * 譲りが永久に止まる)。 */
+static u32 g_poll_last_tick = 0;
+
 static void slot_zero(AppSlot *a)
 {
     u8 *b = (u8 *)a;
@@ -58,6 +67,9 @@ static void slot_zero(AppSlot *a)
 void appslot_init(void)
 {
     int i;
+
+    /* GUI セッションを跨いで古い tick を引きずらない (票 T8 D8)。 */
+    g_poll_last_tick = 0;
     for (i = 0; i < APP_SLOT_COUNT; i++) {
         slot_zero(&g_slot[i]);
         g_slot[i].state = APP_STATE_FREE;
@@ -179,6 +191,7 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->abort_req = 0;
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
+    a->parked_from_poll = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -198,6 +211,7 @@ void appslot_shell_commit(void)
     a->abort_req = 0;
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
+    a->parked_from_poll = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     res_owner_set(APP_ID_SHELL);
@@ -307,6 +321,64 @@ void appslot_park_kbd_commit(void)
     ring3_kbd_park_count++;
 }
 
+/* ---- 第 3 の park 点: ポーリング型の協調 yield (票 T8 §7 D8) ----------- */
+/* park_kbd_check との違いは **PIT tick の間引き** を先に見ること。呼び手は
+ * kbd_trygetchar / kbd_trygetkey で、描画ループから秒間数万回来る。間引きが
+ * 無いと譲りだけで CPU を食い、間引きを表の検査の**後**に置くと、譲れない
+ * 文脈 (CUI の入れ子の子) が回すたびに ring3_park_reject_count が跳ね上がる。
+ * だから順番は「間引き → 表」で固定し、控えも間引きの側で進める
+ * (ホスト試験ケース 22 の 22M / 22N がこの順番だけを見る)。 */
+int appslot_park_poll_check(u32 now_tick)
+{
+    AppSlot *a;
+
+    /* 間引き (10ms に 1 回まで)。控えるのは **成立ではなく試み** で、表の側で
+     * 弾かれた試みもここで止める — 譲れない文脈 (CUI の入れ子 exec_run の子)
+     * が秒間数万回ポーリングしても ring3_park_reject_count が跳ね上がらない
+     * ようにするため。走るアプリは常に 1 本なので、弾かれた試みが「譲れた
+     * はずの誰か」の枠を食うことはない (弾かれる文脈はそもそも譲れない)。
+     * 間引き自体は違反ではないので弾き数には載せない。 */
+    if (now_tick == g_poll_last_tick) return OS32_ERR_AGAIN;
+    g_poll_last_tick = now_tick;
+
+    if (g_cur < APP_ID_MIN || g_cur > APP_ID_MAX) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    a = appslot_get(g_cur);
+    if (!a || a->state != APP_STATE_RUNNING) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    /* CUI の入れ子 exec_run の子は譲れない (park_kbd_check と同じ理由:
+     * longjmp の行き先が親アプリの中の exec_run フレームになる)。 */
+    if (!a->gui) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    return 0;
+}
+
+void appslot_park_poll_commit(void)
+{
+    AppSlot *a = appslot_get(g_cur);
+    if (!a) return;
+    a->parked_from_poll = 1;      /* 「ポーリング由来」の印 (T8 D8) */
+    a->in_op_wait = 0;
+    a->state = APP_STATE_WAIT_POLL;
+    g_cur_op_is_wait = 0;
+    g_cur = APP_ID_SHELL;
+    res_owner_set(APP_ID_SHELL);
+    /* 控え (g_poll_last_tick) を進めるのは check の側 — 弾かれた試みも
+     * 間引きたいので、成立した分だけでは足りない。 */
+    ring3_poll_yield_count++;
+}
+
+void appslot_poll_yield_reset(void)
+{
+    g_poll_last_tick = 0;
+}
+
 int appslot_resume_check(int id)
 {
     AppSlot *a;
@@ -326,6 +398,16 @@ int appslot_resume_check(int id)
         }
         return 0;
     }
+    /* ポーリング型の譲り (T8 D8)。起こす条件は WAIT_KEY と違って
+     * 「注入リングに文字がある」ではない — WM は次の周に必ず起こし、
+     * 空なら exec_resume が EAX に -1 を書く。ここで見るのは印だけ。 */
+    if (a->state == APP_STATE_WAIT_POLL) {
+        if (!a->parked_from_poll) {
+            ring3_resume_bad_frame_count++;
+            return OS32_ERR_STALE;
+        }
+        return 0;
+    }
     if (a->state != APP_STATE_PARKED) return OS32_ERR_INVAL;
     if (!a->parked_from_wait) {
         ring3_resume_bad_frame_count++;
@@ -338,8 +420,9 @@ void appslot_resume_commit(int id)
 {
     AppSlot *a = appslot_get(id);
     if (!a) return;
-    a->parked_from_wait = 0;      /* 印は 1 回きり (両方の park 点で) */
+    a->parked_from_wait = 0;      /* 印は 1 回きり (3 つの park 点すべてで) */
     a->parked_from_kbd = 0;
+    a->parked_from_poll = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -393,9 +476,11 @@ int appslot_kill_check(int id)
     a = appslot_get(id);
     if (!a) return OS32_ERR_INVAL;
     /* 走っている本人は CTRL+STOP の経路で畳む (D4)。止めてある側は
-     * OP_WAIT 由来 (PARKED) でも kbd 待ち (WAIT_KEY) でも畳める — 鍵待ちの
-     * アプリを永久に畳めないと CTRL+STOP の逃げ道が無くなる (票 K7 D5)。 */
-    if (a->state != APP_STATE_PARKED && a->state != APP_STATE_WAIT_KEY) {
+     * OP_WAIT 由来 (PARKED) でも kbd 待ち (WAIT_KEY) でもポーリングの譲り
+     * (WAIT_POLL) でも畳める — 止めてあるアプリを永久に畳めないと
+     * CTRL+STOP の逃げ道が無くなる (票 K7 D5 / T8 D8)。 */
+    if (a->state != APP_STATE_PARKED && a->state != APP_STATE_WAIT_KEY &&
+        a->state != APP_STATE_WAIT_POLL) {
         return OS32_ERR_STALE;
     }
     return 0;
@@ -447,6 +532,9 @@ int appslot_state(int id)
     if (a->state == APP_STATE_RUNNING) return 1;
     /* 3 = kbd 待ち (票 K7 §5 指摘 C の値の追加)。2 の意味は動かさない。 */
     if (a->state == APP_STATE_WAIT_KEY) return APP_STATE_WAIT_KEY;
+    /* 4 = ポーリングの譲り (票 T8 D8)。WM は「常に ready、優先度は最下位」
+     * として扱う — 3 と違い、注入リングが空でも起こしてよい。 */
+    if (a->state == APP_STATE_WAIT_POLL) return APP_STATE_WAIT_POLL;
     return 2;
 }
 
@@ -512,9 +600,10 @@ void appslot_gfx_owner_exit(int id)
 /* ======================================================================== */
 /*  appslot_resume_mark_selftest — 「印の無い resume は拒否」の負例 (I5)     */
 /*                                                                          */
-/*  票 K7 の受入 I5 の半分。park 点が 2 つになったので、C6 の規則             */
+/*  票 K7 の受入 I5 の半分。park 点が 3 つになったので、C6 の規則             */
 /*  (「その状態に対応する印が立っているフレームだけ起こせる」) が            */
-/*  PARKED と WAIT_KEY の**両方**に効いていることをブート時に踏む。          */
+/*  PARKED / WAIT_KEY / WAIT_POLL の**すべて**に効いていることと、D8 の     */
+/*  tick の間引きが弾き数より先に効くことをブート時に踏む。                 */
 /*                                                                          */
 /*  空きスロット (APP_ID_MAX) を一時的に借りる。kselftest_run は exec_init   */
 /*  より前に走るので g_slot は全部 FREE だが、順序に頼らず借りた中身と        */
@@ -562,15 +651,51 @@ u32 appslot_resume_mark_selftest(void)
     g_slot[id].state = APP_STATE_RUNNING;
     if (appslot_kill_check(id) != OS32_ERR_STALE) bad |= 1u << 3;
 
-    /* (4) exec_app_state は 3 を返す (既存の 0/1/2 は不変) */
+    /* (4) exec_app_state は 3 / 4 を返す (既存の 0/1/2 は不変) */
     g_slot[id].state = APP_STATE_WAIT_KEY;
     if (appslot_state(id) != APP_STATE_WAIT_KEY) bad |= 1u << 4;
+    g_slot[id].state = APP_STATE_WAIT_POLL;
+    if (appslot_state(id) != APP_STATE_WAIT_POLL) bad |= 1u << 4;
     g_slot[id].state = APP_STATE_RUNNING;
     if (appslot_state(id) != 1) bad |= 1u << 4;
     g_slot[id].state = APP_STATE_PARKED;
     if (appslot_state(id) != 2) bad |= 1u << 4;
     g_slot[id].state = APP_STATE_FREE;
     if (appslot_state(id) != 0) bad |= 1u << 4;
+
+    /* (6) 第 3 の park 点 (票 T8 §7 D8): 印 parked_from_poll が要る。
+     * OP_WAIT / kbd の印では起こせない。畳むのは WAIT_KEY と同じく可 (D5)。 */
+    g_slot[id].state = APP_STATE_WAIT_POLL;
+    g_slot[id].parked_from_wait = 1;
+    g_slot[id].parked_from_kbd = 1;
+    g_slot[id].parked_from_poll = 0;
+    if (appslot_resume_check(id) != OS32_ERR_STALE) bad |= 1u << 6;
+    if (ring3_resume_bad_frame_count != saved_badframe + 3) bad |= 1u << 6;
+    g_slot[id].parked_from_poll = 1;
+    if (appslot_resume_check(id) != 0) bad |= 1u << 6;
+    if (appslot_kill_check(id) != 0) bad |= 1u << 6;
+
+    /* (7) tick の間引き (D8): 同じ tick では 2 度譲らない。間引きは表の検査
+     * より**先**に効くので、弾き数 ring3_park_reject_count に載らない。
+     * tick が進めば間引きは通り、表 (cur = シェル帯) の側で弾かれる。 */
+    {
+        u32 saved_reject = ring3_park_reject_count;
+        u32 saved_tick   = g_poll_last_tick;
+        u32 saved_yield  = ring3_poll_yield_count;
+
+        g_poll_last_tick = 0x1234;
+        if (appslot_park_poll_check(0x1234) != OS32_ERR_AGAIN) bad |= 1u << 7;
+        if (ring3_park_reject_count != saved_reject) bad |= 1u << 7;
+        if (appslot_park_poll_check(0x1235) != OS32_ERR_INVAL) bad |= 1u << 7;
+        if (ring3_park_reject_count != saved_reject + 1) bad |= 1u << 7;
+        /* 弾かれた試みも控えを進める = 同じ tick の連打は弾き数に載らない */
+        if (appslot_park_poll_check(0x1235) != OS32_ERR_AGAIN) bad |= 1u << 7;
+        if (ring3_park_reject_count != saved_reject + 1) bad |= 1u << 7;
+        if (ring3_poll_yield_count != saved_yield) bad |= 1u << 7;
+
+        ring3_park_reject_count = saved_reject;
+        g_poll_last_tick = saved_tick;
+    }
 
     /* 後始末: 借りたスロットも観測点も元に戻す (検査は 1 回も起こさない) */
     g_slot[id] = saved;

@@ -156,3 +156,13 @@
   386 で 1% 前後、tick 制限により busy-wait でも最大 100 回/秒 = 386 で 3〜4%。キー到達の遅れは最大 tick 1 つ + WM 1 周 ≈ 11ms。
 - **受入 F8**: 端末から `gfx200_test` → FPS 段で Space を打つ → プログラムが自分で終了して GUI 復帰 (CTRL+STOP を使わない)。`ring3_poll_yield_count` が
   FPS 段の秒数 × ≤100 で増える。FPS 表示の譲りあり / なし比較 (NP21/W 上の相対値、期待 1% 未満)。`gfx_demo200` / `rotate_test` / `demo_tile` も端末から終了できる。
+
+### 実装メモ (T8-3 K、2026-09-12)
+
+- K 側実装済み: 状態 `APP_STATE_WAIT_POLL` (= 4) / 印 `parked_from_poll` / `appslot_park_poll_check(now_tick)` +
+  `_commit()` + `appslot_poll_yield_reset()` / `exec_park_poll(now_tick)` / `exec_resume` の poll 分岐 (空なら EAX = -1) /
+  `kbd_trygetchar` + `kbd_trygetkey` の GUI 分岐 / カウンタ `ring3_poll_yield_count`。**KAPI は増やしていない (v48 のまま)**。
+- 間引きの控えは **`check` 側で進める** (成立時だけだと、譲れない文脈のポーリングで `ring3_park_reject_count` が跳ねる)。順番は「間引き → 表」。
+  `kbd_has_key` は真偽を返すので resume の EAX と噛み合わず、KAPI にも無いため譲りは入れていない (注入リングを見る枝だけ追加)。
+- 試験: ホスト TDD ケース 22 (37 検査、RED 7 通り) + kselftest 2 項 → [`tools/tests/t8_tdd.md`](../../../../tools/tests/t8_tdd.md) の「T8-3 K」節。`make` / 実機は未実施 ([V4])。
+- **K だけでは動かない**: gshell が 4 を知らないと `slot_of_owner` が `None` の譲りを `forget` し、譲ったアプリが二度と起きない (`multiapp.rs:735`)。T8-3 W と同時に入れること。

@@ -45,6 +45,14 @@
  * 起きる (exec_resume が EAX へ入れる。§5 の指摘 B)。値の追加なので
  * exec_app_state の既存の 0/1/2 は 1 つも動かない (§5 の指摘 C)。 */
 #define APP_STATE_WAIT_KEY 3
+/* GUI 中の**ポーリング型**の協調 yield = **第 3 の park 点** (票 T8 §7 D8)。
+ * kbd_trygetchar / kbd_trygetkey は「無ければ -1」で戻る約束なので、
+ * WAIT_KEY のように「キーが来るまで起こさない」わけにいかない —
+ * 譲るのは **1 周だけ**で、WM は次の周に必ず起こし、そのとき注入リングが
+ * 空なら EAX に -1 (キーなし) を書く。だから WAIT_POLL は WM から見て
+ * **常に ready** (ただし優先度は最下位)。
+ * 値の追加なので exec_app_state の既存の 0/1/2/3 は 1 つも動かない。 */
+#define APP_STATE_WAIT_POLL 4
 
 /* int80_stub が積むフレームの語数 ([0..7]=pushad, [8]=EIP [9]=CS
  * [10]=EFLAGS [11]=userESP [12]=userSS)。ring3_entry.asm と同期。 */
@@ -62,6 +70,7 @@ typedef struct {
     int  abort_req;           /* CTRL+STOP 要求 (この ID 宛) */
     int  parked_from_wait;    /* park したフレームの「OP_WAIT 由来」の印 (C5) */
     int  parked_from_kbd;     /* park したフレームの「kbd 待ち由来」の印 (K7 D1) */
+    int  parked_from_poll;    /* park したフレームの「ポーリング由来」の印 (T8 D8) */
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -99,6 +108,9 @@ extern volatile u32 ring3_park_reject_count;       /* C3 OP_WAIT 外の park */
 extern volatile u32 ring3_resume_bad_frame_count;  /* C6 印無しフレームの resume */
 /* GUI 中の kbd 待ちで park した回数 (票 K7 の受入 I1: 止まらずに譲れたか)。 */
 extern volatile u32 ring3_kbd_park_count;
+/* GUI 中のポーリング型 yield で 1 周だけ譲った回数 (票 T8 §7 D8 の受入 F8:
+ * 「FPS 段の秒数 × 100 以下」で増えるか = tick の間引きが効いているか)。 */
+extern volatile u32 ring3_poll_yield_count;
 /* 回収の回数と直前の対象 (試験と診断用。G2/G5 の「1 本分だけ」を数える) */
 extern volatile u32 appslot_reclaim_count;
 extern volatile int appslot_last_reclaim_id;
@@ -218,12 +230,43 @@ int appslot_park_kbd_check(void);
  * cur をシェル帯へ戻す。ring3_kbd_park_count++。 */
 void appslot_park_kbd_commit(void);
 
+/* ---- 第 3 の park 点: ポーリング型の協調 yield (票 T8 §7 D8) ----------- */
+/* GUI 中に注入リングが空のまま kbd_trygetchar / kbd_trygetkey が回っている
+ * とき、**1 周だけ** WM へ譲ってよいか。park_kbd_check との違いは 1 つ —
+ * **PIT tick の間引き** (10ms に 1 回まで) を持つこと。busy-wait のループから
+ * 呼ばれるので、間引きが無いと譲りだけで CPU を食い潰す。
+ *
+ *   now_tick : 呼び手 (drivers/kbd.c) が渡す PIT の tick (100Hz)。
+ *              **引数で受ける**のは (a) この表がハードウェアを知らない規約と
+ *              (b) ホスト試験 (tools/tests/multiapp_impl_host.c ケース 22) で
+ *              tick を差し替えられるようにするため。
+ *
+ * 戻り値: 0 = 譲ってよい / OS32_ERR_AGAIN = 前回の試みから tick が進んで
+ *         いない (**弾き数に載せない** — 正常な間引きであって違反ではない) /
+ *         OS32_ERR_INVAL = 表の側で不可 (ring3_park_reject_count++)。
+ * 順番は「間引き → 表」で、控えは **間引きの側が進める** (弾かれた試みも
+ * 数える)。逆にすると CUI の入れ子の子が回すたびに
+ * ring3_park_reject_count が跳ね上がる (ポーリングは秒間数万回来る)。
+ * **この関数は控えを進めるので純関数ではない** (park_check / park_kbd_check が
+ * 弾き数を進めるのと同じ扱い)。
+ *
+ * kbd_gui_mode / CPL=3 フレームの有無は R1 と同じく呼び手側 (drivers/kbd.c と
+ * exec/exec.c) が見る。 */
+int appslot_park_poll_check(u32 now_tick);
+/* ポーリング型の park を成立させる。印 parked_from_poll を立て、WAIT_POLL に
+ * して cur をシェル帯へ戻す。ring3_poll_yield_count++ (控えは check が進めた
+ * ままにする)。 */
+void appslot_park_poll_commit(void);
+/* 間引きの控えを 0 に戻す (GUI セッションの切替 = appslot_init /
+ * kbd_set_gui_mode から)。 */
+void appslot_poll_yield_reset(void);
+
 /* resume してよいか。WM top-level からだけ、印のあるフレームだけ。
- * PARKED は parked_from_wait、WAIT_KEY は parked_from_kbd を要求する。
- * 印が無ければ ring3_resume_bad_frame_count++ して OS32_ERR_STALE
- * (拒否は両方の park 点に効く)。 */
+ * PARKED は parked_from_wait、WAIT_KEY は parked_from_kbd、WAIT_POLL は
+ * parked_from_poll を要求する。印が無ければ ring3_resume_bad_frame_count++
+ * して OS32_ERR_STALE (拒否は 3 つの park 点すべてに効く)。 */
 int appslot_resume_check(int id);
-/* resume を成立させる (CR3 を載せる直前)。印 (両方) を消し
+/* resume を成立させる (CR3 を載せる直前)。印 (3 つとも) を消し
  * ring3_switch_count++。 */
 void appslot_resume_commit(int id);
 
@@ -252,8 +295,9 @@ int appslot_abort_request(void);
 int appslot_abort_clear(void);
 
 /* KAPI exec_app_state の実体:
- *   0=空き / 1=走っている / 2=park 中 (OP_WAIT) / 3=kbd 待ち / 負=不正。
- * 3 は K7 の追加。既存の 0〜2 の意味は 1 つも動かない (票 §5 の指摘 C)。 */
+ *   0=空き / 1=走っている / 2=park 中 (OP_WAIT) / 3=kbd 待ち /
+ *   4=ポーリング譲り中 / 負=不正。
+ * 3 は K7 の、4 は T8 D8 の追加。既存の 0〜3 の意味は 1 つも動かない。 */
 int appslot_state(int id);
 
 /* ---- 画面の所有者 (票 T8 D1 / D1a) ------------------------------------ */
@@ -293,7 +337,8 @@ void appslot_gfx_owner_exit(int id);
 
 /* ---- 自己診断 (kernel/kselftest.c) ------------------------------------- */
 /* 「印の無いフレームは resume できない」(票 K7 受入 I5 / K5b の C6) の負例を
- * ブート時に踏む。空きスロットを一時的に借りて、PARKED / WAIT_KEY の両方で
+ * ブート時に踏む。空きスロットを一時的に借りて、PARKED / WAIT_KEY /
+ * WAIT_POLL の 3 つで
  * 印なし → OS32_ERR_STALE、印あり → 0 を確かめ、借りたスロットと
  * カウンタ・cur・owner を元に戻す。ビット 0..n が落ちた項目 (0 = 全部通った)。
  * 呼ぶのは exec_init() の前後どちらでもよい (触った状態は必ず戻す)。 */

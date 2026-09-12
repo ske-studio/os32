@@ -46,6 +46,21 @@ extern void ring3_abort_request(void);
  * drivers/ は -Iexec を持たないので irq_enable と同じ流儀で extern 宣言する。 */
 extern int exec_park_kbd(void);
 
+/* 外部: 第 3 の park 点 (exec/exec.c、票 T8 §7 D8)。GUI モードで注入リングが
+ * 空のとき、**1 周だけ** WM へ譲る。成立すれば戻らない (longjmp)。
+ * 0 = 譲れなかった (間引き中 / CPL=0 の呼び手 / syscall の外 / CUI の入れ子の
+ * 子) → 呼び手はそのまま -1 を返す。 */
+extern int exec_park_poll(u32 now_tick);
+
+/* 外部: PIT の tick (kernel/idt.c、100Hz)。D8 の間引き「10ms に 1 回まで」を
+ * 数えるのに読むだけ。drivers/ は -Ikernel を持たないので irq_enable と
+ * 同じ流儀で extern 宣言する。 */
+extern volatile u32 tick_count;
+
+/* 外部: D8 の間引きの控えを 0 に戻す (exec/appslot.c)。GUI セッションの
+ * 境界で、cooked / raw / 注入リングを空にするのと同じ扱いで呼ぶ。 */
+extern void appslot_poll_yield_reset(void);
+
 /* ======== シフトキー状態 ========
  * **書き込むのは kbd_irq_handler (IRQ1 ISR) だけ**。ISR は割り込みゲート
  * 経由で IF=0 のまま走り自身に再入しないので、ここでの |= / &= / ^= は
@@ -335,6 +350,13 @@ void kbd_init(void)
 
 int kbd_has_key(void)
 {
+    /* GUI 中の cooked リング (kbd_buf) は常に空なので、注入リングを見る
+     * (kbd_gui_mode の説明)。**譲らない**のが D8 との違い: この関数は KAPI に
+     * 無く CPL=3 から呼べないうえ、戻り値が「値か -1」ではなく真偽なので、
+     * exec_resume が EAX に書く -1 / 1 バイトのどちらとも噛み合わない
+     * (1 バイトを書けば、真を返しつつその 1 バイトを落とすことになる)。
+     * ポーリングで譲りたい呼び手は kbd_trygetchar / kbd_trygetkey を使う。 */
+    if (kbd_gui_mode) return kbd_inject_pending() > 0;
     return kbd_count > 0;
 }
 
@@ -352,9 +374,19 @@ int kbd_trygetchar(void)
 {
     u16 entry;
 
-    /* 票 §5 R1: ノンブロッキング版は park しない。GUI 中は注入リングだけを
-     * 見て、無ければ -1 (cooked リングは GUI 中は空のまま)。 */
-    if (kbd_gui_mode) return kbd_gui_trygetbyte();
+    /* GUI 中は注入リングだけを見る (cooked リングは GUI 中は空のまま)。
+     * 空のときは票 T8 §7 D8 の **ポーリング型の協調 yield**: 前回の譲りから
+     * PIT tick が進んでいれば 1 周だけ WM へ譲る。成立すれば戻らず、WM が
+     * 起こすとき exec_resume が EAX に「注入の 1 バイト」か「-1 (キーなし)」を
+     * 入れるので、アプリからは kbd_trygetchar() が普通に戻ったように見える。
+     * 間引き中 / 譲れない文脈なら従来どおり即 -1 (K7 §5 R1 の「park しない」は
+     * 「キーが来るまで止めない」の意味で、1 周の譲りはそれを破らない)。 */
+    if (kbd_gui_mode) {
+        int ch = kbd_gui_trygetbyte();
+        if (ch >= 0) return ch;
+        (void)exec_park_poll(tick_count);
+        return -1;
+    }
 
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -456,6 +488,17 @@ int kbd_trygetkey(void)
 {
     u16 entry;
 
+    /* GUI 中は kbd_trygetchar と同型 (値か -1)。下位 8bit だけが意味を持ち、
+     * スキャンコードは 0 (票 K7 D7 — 端末経由の打鍵にスキャンコードは無い)
+     * ので、注入リングの 1 バイトがそのままキーコードになる。空なら
+     * D8 のポーリング型 yield を 1 周だけ試し、譲れなければ -1。 */
+    if (kbd_gui_mode) {
+        int ch = kbd_gui_trygetbyte();
+        if (ch >= 0) return ch;
+        (void)exec_park_poll(tick_count);
+        return -1;
+    }
+
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
         int sch;
@@ -537,6 +580,9 @@ void kbd_set_gui_mode(int on)
     kbd_raw_tail  = 0;
     kbd_raw_count = 0;
     irq_restore(flags);
+    /* ポーリング型 yield の間引き (票 T8 §7 D8) もセッションの境界で戻す。
+     * 錠の外で呼ぶ — 触るのは exec/appslot.c の 1 語で、IRQ1 は見ない。 */
+    appslot_poll_yield_reset();
 }
 
 /* 待ち行列が満杯で捨てた打鍵の累計を返す (契約 T3、GUI v1.1 の KAPI)。 */

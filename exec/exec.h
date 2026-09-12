@@ -45,9 +45,12 @@ i32 exec_start(const char *cmdline);
 /* park してあるアプリを 1 本だけ起こす。wait_ret は OP_WAIT の戻り値。
  * app_id = また park した / 0 = 終了した / <0 = 起こせなかった。
  * 起こせるのは印のあるフレームだけ (OS32_ERR_STALE): OP_WAIT 由来なら
- * parked_from_wait、kbd 待ち (WAIT_KEY) 由来なら parked_from_kbd。
+ * parked_from_wait、kbd 待ち (WAIT_KEY) 由来なら parked_from_kbd、
+ * ポーリングの譲り (WAIT_POLL) 由来なら parked_from_poll。
  * kbd 待ちの側は wait_ret を**使わず**、注入リングの 1 バイトを EAX に
- * 入れる。リングが空なら起こさず OS32_ERR_AGAIN (票 K7 §5 の指摘 B)。 */
+ * 入れる。リングが空なら起こさず OS32_ERR_AGAIN (票 K7 §5 の指摘 B)。
+ * ポーリングの側も wait_ret を使わないが、空でも **EAX = -1 で起こす**
+ * (1 周だけの譲りなので、次の周に必ず戻す。票 T8 §7 D8)。 */
 i32 exec_resume(i32 app_id, i32 wait_ret);
 
 /* 走っているアプリを OP_WAIT の中で止め、WM へ戻す。成立すれば **戻らない**。
@@ -59,11 +62,19 @@ i32 exec_park(void);
  * 成立すれば **戻らない**。0 = 止められなかった (呼び手は hlt 待ちへ)。 */
 int exec_park_kbd(void);
 
+/* 第 3 の park 点 (票 T8 §7 D8): GUI 中に注入リングが空で、前回の譲りから
+ * PIT tick が進んでいるとき、走っている CPL=3 アプリを WAIT_POLL で止めて
+ * **1 周だけ** WM へ譲る。drivers/kbd.c の kbd_trygetchar / kbd_trygetkey
+ * から、now_tick に tick_count を渡して呼ぶ。成立すれば **戻らない**。
+ * 0 = 譲れなかった (呼び手はそのまま -1 を返す)。 */
+int exec_park_poll(u32 now_tick);
+
 /* 止めてあるアプリを起こさずに畳む。0 / OS32_ERR_INVAL / OS32_ERR_STALE。 */
 i32 exec_kill(i32 app_id);
 
 /* 0 = 空き / 1 = 走っている / 2 = park 中 (OP_WAIT) / 3 = kbd 待ち /
- * OS32_ERR_INVAL。3 は K7 の追加で、既存の 0〜2 の意味は動かない。 */
+ * 4 = ポーリングの譲り / OS32_ERR_INVAL。3 は K7 の、4 は T8 D8 の追加で、
+ * 既存の 0〜3 の意味は動かない。 */
 i32 exec_app_state(i32 app_id);
 
 /* CTRL+STOP (IRQ1 が走っているアプリに立てた要求) を降ろす (KAPI v45、A1)。

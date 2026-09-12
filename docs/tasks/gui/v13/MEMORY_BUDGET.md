@@ -112,6 +112,33 @@ KAPI スロットが 1 本増えた分 `KernelAPI` 構造体が 4 B 伸びる (1
 票 §2 の見積り (「所有者 1 語 + カウンタ 1 語」= 8 B) との差 52 B は、宣言ビットを起動時に
 控える欄 (`hdr_flags` 24 B) と整列 (28 B) — 決裁 D1a を入れた分。
 
+## カーネル帯の静的計上 (T8-3 K、2026-09-12)
+
+ポーリング型の協調 yield (票 T8 §7 D8)。増えたのは `AppSlot` の印 1 語と、間引きの控え
+1 語、カウンタ 1 語だけ。どれも `kmalloc` せず **カーネル .bss の静的領域**なので、
+シェル帯・アプリ帯・exec_heap のどれも減らさない。測定は `i386-elf-gcc -O2 -c` +
+`i386-elf-size` / `i386-elf-nm -S` を `feat/gui` cfd2768 版と並べたもの
+(カーネル全体のリンクとゲストの空き容量は未測定 — `make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| 印 `AppSlot.parked_from_poll` (4 B × 6 スロット) | 24 B | `g_slot` が 0x438 → **0x450** |
+| 間引きの控え `g_poll_last_tick` | 0 B (実質) | `static u32`。`g_slot` 手前の整列の隙間に入る |
+| カウンタ `ring3_poll_yield_count` | 0 B (実質) | 同上。KAPI にはしない (kernel.map から `emu_read_mem` で読む) |
+| **合計 (静的)** | **24 B** | `appslot.o` の .bss 1144 → **1168 B** |
+
+`appslot.o` の実測は text 3474 → **4131 B** (+657 B: `appslot_park_poll_check/commit` +
+`appslot_poll_yield_reset` + `resume_check` / `kill_check` / `appslot_state` の枝 +
+自己診断 2 項)、data 8 B で不変。`exec/exec.c` (`exec_park_poll` + `exec_resume` の poll 分岐) と
+`drivers/kbd.c` (`kbd_trygetchar` / `kbd_trygetkey` / `kbd_has_key` の GUI 分岐) は
+**静的領域を 1 バイトも増やさない** — cfd2768 版と並べた実測で
+`exec.o` は text 11037 → 11325 B (+288)・data 12 B・**bss 8708 B で不変**、
+`kbd.o` は text 2530 → 2650 B (+120)・data 0 B・**bss 208 B で不変**。
+
+票 §7 の見積り (「印 1 語 + tick 1 語」) との差は、印がシェル帯と ID 0 を含む 6 スロット分
+あることと、控え・カウンタが既存の整列の隙間に収まったこと。KAPI は 1 本も増えていない
+(v48 のまま — `kbd_trygetchar` / `kbd_trygetkey` の中身だけが変わる)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

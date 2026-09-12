@@ -1688,6 +1688,64 @@ int exec_park_kbd(void)
 }
 
 /* ======================================================================== */
+/*  exec_park_poll — ポーリング型の協調 yield (第 3 の park 点、票 T8 §7 D8) */
+/*                                                                          */
+/*  drivers/kbd.c の kbd_trygetchar / kbd_trygetkey が、GUI モードで注入     */
+/*  リングが空のときに呼ぶ。**1 周だけ** WM へ譲る park で、手順は           */
+/*  exec_park_kbd と 1 行も違わない (フレーム 13 語を写して master へ戻り、   */
+/*  WM の待っている復帰点へ longjmp する)。違うのは 2 つだけ:                */
+/*                                                                          */
+/*    - 印 / 状態が parked_from_poll / WAIT_POLL であること                  */
+/*    - **PIT tick の間引き** (10ms に 1 回まで) が掛かること。描画ループの   */
+/*      busy-wait から秒間数万回来るので、間引きが無いと譲りだけで CPU を    */
+/*      食う。tick は呼び手 (drivers/kbd.c が tick_count を読む) から渡す。   */
+/*                                                                          */
+/*  起こすのは WM で、そのとき exec_resume は注入リングに文字があればそれを、 */
+/*  空なら **-1 (キーなし)** を EAX に入れる。アプリからは                    */
+/*  kbd_trygetchar() が普通に戻ったように見える。                            */
+/*                                                                          */
+/*  戻り値 0 = 譲れなかった。呼び手はそのまま -1 を返す (従来どおり)。        */
+/*  「譲れなかった」の大半は間引きと CPL=0 の呼び手で、どちらも異常では      */
+/*  ないので数えない (数えるのは appslot 側の表の検査で弾かれた分だけ)。      */
+/* ======================================================================== */
+int exec_park_poll(u32 now_tick)
+{
+    int id;
+    AppSlot *a;
+    u32 k;
+
+    /* R1 (exec_park_kbd と同じ): CPL=3 のアプリが syscall の中に居るときだけ。
+     * ここは数えない — 間引きより前に置いて、CPL=0 の呼び手 (常駐シェル) が
+     * tick の枠を食わないようにする。 */
+    if (!g_cur_app || !g_cur_app->cpl3 || g_cur_frame == 0) return 0;
+
+    id = appslot_cur();
+    /* 間引き (tick) → 表の検査。順番は appslot_park_poll_check の中で固定。 */
+    if (appslot_park_poll_check(now_tick) < 0) return 0;
+
+    a = appslot_get(id);
+    if (!a || g_cur_app != a) {
+        ring3_park_reject_count++;
+        return 0;
+    }
+
+    for (k = 0; k < APP_FRAME_WORDS; k++) a->frame[k] = g_cur_frame[k];
+
+    exec_heap_save_state(&a->exec_heap_used);
+    ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    g_cur_frame = 0;
+
+    paging_load_cr3(paging_kernel_pd_phys());
+    appslot_park_poll_commit();          /* WAIT_POLL + 印 + owner 1 へ */
+    exec_restore_context(APP_ID_SHELL);
+
+    g_longjmp_reason = EXEC_LJ_PARK;
+    g_longjmp_id = id;
+    exec_longjmp(a->jmpbuf);    /* 戻らない */
+    return 0;
+}
+
+/* ======================================================================== */
 /*  exec_resume — 止めてあるアプリを 1 本だけ起こす (KAPI v44)               */
 /*                                                                          */
 /*  戻り値: app_id = また park した / 0 = 終了した / <0 = 起こせなかった      */
@@ -1710,7 +1768,15 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
 
     a = appslot_get((int)app_id);
     if (!a->cpl3 || !a->as.pd_phys) return OS32_ERR_INVAL;
-    if (a->parked_from_kbd) {
+    if (a->parked_from_poll) {
+        /* 票 T8 §7 D8: ポーリング型は **1 周だけ**の譲りなので、注入リングが
+         * 空でも起こす (WAIT_KEY と違って OS32_ERR_AGAIN を返さない)。
+         * 空なら EAX = -1 = 「キーなし」で、アプリの kbd_trygetchar() は
+         * 普通に -1 を返したように見える。WM が渡した wait_ret は使わない。 */
+        ch = 0;
+        if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
+        else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
+    } else if (a->parked_from_kbd) {
         /* 票 §5 の指摘 B: 文字の取り出しはここで完結する (WM 側に取り出し用
          * の KAPI は作らない)。WM が渡した wait_ret は**使わない**。
          * 空なら起こさず OS32_ERR_AGAIN — 印も状態も残るので、WM は次の周で
