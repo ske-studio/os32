@@ -14,7 +14,8 @@ T9 (sh.bin = 常駐シェルの CPL=3 ビルド) の実装レビュー (Codex、
 | I2 | HostDrv (`st_ino` 0) で `cp /host/a /host/./a` が原本を切り詰める → パス正規化 | `6aed6d2` |
 | I3 | `dd cd0` が 1024B 確保で 2048B 受ける | `6aed6d2` |
 | I4 | `wildcard_match` の指数的バックトラック → 反復型 (往復 9 で C-1 回帰、修正中) | `6aed6d2` |
-| I-1〜I-6 | `ide` の `IdeInfo` 不一致 / `env_expand` の打ち切り / `fs_join_path` の切り詰め / `cp -r` の 31B 名 / `dd hd0` のセクタ長 / `dd` の write 戻り値 | (往復 9 の対応、着地予定) |
+| I-1〜I-6 | `ide` の `IdeInfo` 不一致 / `env_expand` の打ち切り / `fs_join_path` の切り詰め / `cp -r` の 31B 名 / `dd hd0` のセクタ長 / `dd` の write 戻り値 | `ecaba37` |
+| C-1 | I4 の反復型 `wildcard_match` が `*` を含む名前を落とす回帰 | `0c44364` |
 
 ## 未修正 (non-blocker、別作業)
 
@@ -33,3 +34,6 @@ T9 (sh.bin = 常駐シェルの CPL=3 ビルド) の実装レビュー (Codex、
 - `sys_ls` コールバック内の KAPI 再入 (CPL=0 で int 0x80) — **カーネル側**。`find.bin` が CPL=3 で `[Process crashed]`。sh.bin は写し取りで回避 (T9 B2)。
 - カーネル帯ポインタを CPL=3 に返す KAPI 5 本 (`vfs_devname` / `path_get_drive` / `path_get_cwd` / `db_column_text` / `db_last_error`) — **カーネル側**。`sys_getcwd` は T9 R1 で `ring3_user_str` の写しに。
 - `losetup` 後の退場で loop スロットが回収済み FD を保持 (`drivers/loop_dev.c:928`) — **カーネル側**。sh.bin では `losetup` / `dd loN` を cui only に。
+- `source` の 255B 超の行が切断されて実行される (`cmd_script.c:121`、`env_expand` の検知より前)。
+- ファイル名補完が 126B で名前を切る (`ui.c:210`)。
+- `cat -n` が読み込み区切りを行末として扱い余分な番号付き空行を出す (`cmd_file.c:353`)。
