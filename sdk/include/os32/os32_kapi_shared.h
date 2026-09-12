@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      48   /* GUI v1.3 T8: gfx_screen_owner (画面の所有者 = gfx_init を呼んだ CPL=3 アプリ。回収で WM へ戻る)。v47 = GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
+#define KAPI_VERSION      49   /* GUI v1.3 T9 shell script: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield (GUI 中は注入リングを 読まずに WAIT_POLL で譲る)。v48 = T8: gfx_screen_owner (画面の所有者)。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -127,6 +127,12 @@ typedef enum {
  * OS32_ERR_INVAL で断り、CUI からは従来どおり通す。FORCE_CPL0 とは独立 —
  * v86.bin は CPL=3 なので FORCE_CPL0 では捕まらなかった (受入 F5)。 */
 #define OS32X_FLAG_CUI_ONLY 0x0010
+/* 起動要求を出せる宣言 (mkos32x --launcher、app.conf 4 列目 `launcher`、票 T9 D3)。
+ * GUI 中の CPL=3 アプリは入れ子 exec_run を使えないので、外部プログラムの起動は
+ * カーネルの要求表 (launch_req) 経由で WM に頼む。その口を叩けるのはこの宣言を
+ * 持つバイナリだけ — 認証ではなく協調的な宣言で、任意のアプリが端末経由の
+ * 非同期起動を使えてしまう穴を塞ぐためのもの (票 §5 blocker 2)。 */
+#define OS32X_FLAG_LAUNCHER 0x0020
 
 typedef struct {
     u32 magic;            /* 0x00: OS32X_MAGIC */
@@ -362,6 +368,45 @@ typedef void (*DirCallback)(const DirEntry_Ext *entry, void *ctx);
 /* レコード 1 本の最大バイト数。con_sink_read() の cap はこれ以上でなければ
  * ならない (小さいと先頭レコードが永久に取り出せず読み手が止まるため)。 */
 #define CON_SINK_REC_MAX     (CON_SINK_HDR_PRINT + CON_SINK_PRINT_MAX)
+
+/* ======================================================================== */
+/*  起動要求表 (KAPI v49、票 T9 D3 / §1a)                                    */
+/*                                                                          */
+/*  GUI 中の CPL=3 アプリ (端末・sh) は入れ子 exec_run を使えない (子が park  */
+/*  できず協調型全体が止まる) ので、外部プログラムの起動と kill を **カーネル  */
+/*  の要求表** に載せ、owner 1 (WM) が top-level で取りに来る。               */
+/*                                                                          */
+/*  表は要求者 ID ごとに 1 本 (ID 2〜5 の 4 本)。欄は「配送状態」(phase /     */
+/*  kind) と「子の所有」(child) を分けてあり、取消や要求者の退場の途中でも    */
+/*  child は消えない。照合は **token** で行う (要求者 ID は再利用されうる)。  */
+/*                                                                          */
+/*    launch_req    要求者 (宣言 LAUNCHER) → token                           */
+/*    launch_pending 誰でも → PENDING の本数 (WM の should_park の材料)       */
+/*    launch_take   owner 1 → token + kind + cmdline / 畳む ID               */
+/*    launch_report owner 1 → 起動結果 (rc) を表へ返す                        */
+/*    launch_poll   要求者 → status (下の LAUNCH_ST_*)                        */
+/*    launch_cancel 要求者 → RUNNING を KILL(child) の PENDING へ             */
+/*    launch_child  誰でも → その ID の表が所有する子 (連鎖の次)             */
+/* ======================================================================== */
+
+/* cmdline の欄 (NUL 込み)。launch_take の cap はこれ以上でなければならない。 */
+#define LAUNCH_CMDLINE_MAX   256
+
+/* launch_take が書く kind */
+#define LAUNCH_KIND_NONE     0
+#define LAUNCH_KIND_LAUNCH   1    /* buf に cmdline */
+#define LAUNCH_KIND_KILL     2    /* arg = 畳む ID */
+
+/* launch_poll が書く status。RUNNING は下位に子 ID、FAILED は下位に -rc。 */
+#define LAUNCH_ST_PENDING    0x000
+#define LAUNCH_ST_TAKEN      0x001
+#define LAUNCH_ST_RUNNING    0x100   /* + child */
+#define LAUNCH_ST_DONE       0x200
+#define LAUNCH_ST_FAILED     0x300   /* + (-rc) */
+
+/* token は 32bit の全体単調増加カウンタ。0 と負は使わない。ここに達したら
+ * launch_req は OS32_ERR_FULL を返す (1 要求 1 token なので事実上到達しない)。 */
+#define LAUNCH_TOKEN_MAX     0x7FFFFFFF
 
 /* コンソール属性色 */
 #define ATTR_WHITE   0xE1

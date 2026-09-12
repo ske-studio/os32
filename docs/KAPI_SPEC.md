@@ -1,4 +1,4 @@
-# KernelAPI v48 仕様書
+# KernelAPI v49 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -90,7 +90,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v46 | **実装済み (2026-09-12、K6C)** | GUI v1.3 K6C: console シンク `con_sink_read` / `con_sink_stat` — GUI モード中のカーネル出力をリングに溜め、端末アプリ (外部) が吸う。読み手は 1 本 (owner 回収)。同じ追記で `sys_ram_kb` (K6-RAM 決裁 (2): 起動時に登録した実 RAM の合計 KB) も足した | [tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md)、[TASK_K6_ram_ceiling.md](tasks/gui/v13/TASK_K6_ram_ceiling.md) |
 | v47 | **実装済み (2026-09-12、K7-K)** | GUI v1.3 K7 入力統合: `kbd_inject` (con_sink の読み手専用、UTF-8 を 256B の注入リングへ) / `kbd_inject_pending` (未読バイト数、誰でも可)。GUI 中の `kbd_getchar` / `kbd_getkey` は第 2 の park 点 (`APP_STATE_WAIT_KEY`) になり、`exec_resume` が注入リングから 1 バイトを EAX に入れる。同じ追記でエラー番号 -14 `OS32_ERR_AGAIN` を取った | [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
 | v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
-| v49 | **予約 (2026-09-12、T9 第 2 版)** | GUI v1.3 T9 shell script: `launch_req` (宣言 `LAUNCHER` を持つ CPL=3 アプリの起動要求、要求者はカーネルが記録) / `launch_take` / `launch_report` (owner 1 = WM 専用、Run と同じ規則で `exec_start` し結果を返す) / `launch_poll` (要求者だけ、PENDING / RUNNING / DONE / FAILED) / `sys_yield` (GUI 中は注入リングを触らずに WAIT_POLL で 1 周譲る) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
+| v49 | **実装済み (2026-09-12、T9-K)** | GUI v1.3 T9 shell script: 起動要求表 8 本 — `launch_req` / `launch_pending` / `launch_take` / `launch_report` / `launch_poll` / `launch_cancel` / `launch_child` と `sys_yield`。GUI 中の CPL=3 は入れ子 `exec_run` を使えないので、外部プログラムの起動と kill をカーネルの表に載せ owner 1 (WM) が仲介する。同じ追記で `exec_kill` を「id と子孫を末尾から回収」に固定した (D8) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -509,6 +509,55 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - `gfx_init` を呼ばずに VRAM へ直接書く CPL=3 プログラムは「行儀の悪いプログラム」として扱い、
   カーネルは守らない。WM の present を捨てる保険 (D2) は落とした (2026-09-12 ユーザー決裁)。
 
+
+### 起動要求表 (v49)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x30C | launch_req | `i32(const char *cmdline)` |
+| 0x310 | launch_pending | `i32(void)` |
+| 0x314 | launch_take | `i32(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg)` |
+| 0x318 | launch_report | `i32(i32 token, i32 rc)` |
+| 0x31C | launch_poll | `i32(i32 token, i32 *status)` |
+| 0x320 | launch_cancel | `i32(i32 token)` |
+| 0x324 | launch_child | `i32(i32 id)` |
+| 0x328 | sys_yield | `i32(void)` |
+
+GUI 中の CPL=3 アプリは入れ子 `exec_run` を使えない (子が park できず、協調型の全体が止まる)。
+そこで「外部プログラムを起動したい」と「この子を畳みたい」を**カーネルの表**に載せ、
+owner 1 (WM) が top-level で取りに来て `exec_start` / `exec_kill` を実行し、結果を表へ返す。
+票 [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) §1 D3 / §1a。実体は `exec/launch.c`。
+
+表は **要求者 ID ごとに 1 本** (ID 2〜5 の 4 本)。欄は「配送状態」(`phase` / `kind`) と
+「子の所有」(`child`) を分けてあり、取消や要求者の退場の途中でも `child` は消えない。
+照合は要求者 ID ではなく **`token`** (32bit の全体単調増加、0 と負は使わない) で行う
+— ID は再利用されるので、古い要求の poll / cancel が新しい住人の表に当たってしまう。
+
+共通の規則: 出力ポインタは NULL 可 (書かない)。失敗時は出力を 1 つも書かない。
+CPL=3 のポインタは既存のディスパッチャが範囲検証する。
+
+| 名前 | 権限 | 規則 |
+|---|---|---|
+| `launch_req` | 宣言 `OS32X_FLAG_LAUNCHER` を持つ CPL=3 | 要求者は `res_owner_get()` で記録。cmdline は NUL 終端 1〜255B (空 / 超過 → `OS32_ERR_INVAL`)。GUI 外 (`con_sink` 無効) / 入れ子 `exec_run` の子 (`gui == 0` の非シェル) → `OS32_ERR_INVAL`。自分の表が IDLE でない (孤児回収中を含む) → `OS32_ERR_FULL`。戻り値 = token (> 0) |
+| `launch_pending` | 誰でも | `PENDING` の要求数。WM は `should_park` の材料にする (0 なら何もしない) |
+| `launch_take` | owner 1 | `cap < 256` → `OS32_ERR_INVAL`。要求者 ID 昇順に `PENDING` を 1 本 `TAKEN` にして token を返す (無ければ 0)。`kind` = 1 LAUNCH (buf に cmdline) / 2 KILL (`arg` = 畳む ID)。`requester` は孤児回収の表なら -1 |
+| `launch_report` | owner 1 | `TAKEN` 以外 → `OS32_ERR_STALE`。LAUNCH: `rc > 0` は生きている非シェル ID でなければ `OS32_ERR_INVAL` → `child = rc`, `RUNNING`; `rc == 0` → `DONE`; `rc < 0` → `FAILED(rc)`。KILL: `rc` は無視 (`DONE` は `child` の回収通知で付くので、通常は先に付いていて `STALE` が返る — WM は再試行せず正常として扱う) |
+| `launch_poll` | 要求者 | `status`: `0` PENDING / `1` TAKEN / `0x100 + child` RUNNING / `0x200` DONE / `0x300 + (-rc)` FAILED。`DONE` / `FAILED` を渡した時点で表は IDLE に戻る (再 poll は `OS32_ERR_STALE`) |
+| `launch_cancel` | 要求者 | `RUNNING` → `kind = KILL(child)`, `PENDING` (child は保持); `PENDING` / `TAKEN` → `OS32_ERR_AGAIN` (呼び手は次のタイマで再試行); `DONE` / `FAILED` / 不一致 → `OS32_ERR_STALE` |
+| `launch_child` | 誰でも | その ID の表が所有する子 (phase を問わず)。不正 ID → 0。WM が CTRL+STOP の宛先を連鎖の末尾へ解決するのに使う |
+| `sys_yield` | CPL=3 | GUI 中は **必ず** `WAIT_POLL` に park する (tick の間引きなし)。印は専用の `parked_from_yield` で、resume は**注入リングを読まず** EAX = 0 — 読むと、譲っている側が子宛の 1 バイトを吸って捨てる。park できない文脈 (CUI / CPL=0 / syscall の外 / 入れ子の子) では `hlt` 1 回して 0 |
+
+**回収通知**: `exec_reclaim_owned(x)` の中 (`con_sink_owner_exit` と同じ位置) で、`child == x` の表を
+`DONE` + `child = 0` に、`requester == x` の表を孤児回収 (`KILL(child)` の `PENDING`、`requester` は -1)
+にする。子を持たない要求者の退場は表をそのまま解放する。孤児の表は誰も poll しないので、完了したら
+`DONE` ではなく **IDLE** に落とす (落とさないと同じ ID の次の住人が永久に `OS32_ERR_FULL` を食う)。
+通知が使うのは **ID だけ** — 正常終了は AppSlot を解放した後、`exec_kill` は前にここへ来るため。
+
+**`exec_kill` の連鎖 (D8)**: `exec_kill(id)` は「**id とその子孫** (表の `child` を末尾まで辿ったもの) を
+**末尾から** 回収」に固定した。途中の 1 本だけを畳むと残りが孤児になり、WM の `forget` と
+`launch_cancel` の `DONE` も壊れる。CTRL+STOP のように 1 本だけ止めたいときは、WM が
+`launch_child()` で末尾を解決してその ID を渡す (末尾は子孫を持たないので 1 本だけ畳まれる)。
+
 ### データフィールド (構造体末尾)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
@@ -516,8 +565,8 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x30C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x310 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x32C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x330 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

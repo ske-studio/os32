@@ -26,6 +26,7 @@
 #include "console.h"
 #include "kbd_inject.h"
 #include "appslot.h"
+#include "launch.h"
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -404,6 +405,9 @@ static void test_resume_mark(void)
     /* 票 T8 §7 D8 (第 3 の park 点 = ポーリング型の 1 周だけの譲り) */
     check((bad & (1u << 6)) == 0, "resume needs the poll mark (WAIT_POLL)");
     check((bad & (1u << 7)) == 0, "poll yield is throttled to one PIT tick");
+    /* 票 T9 D5 (第 4 の park 点 = 明示的な譲り)。印から「EAX に何を入れるか」
+     * が導けないと、sh が譲っている間に子宛の打鍵を吸って捨てる。 */
+    check((bad & (1u << 8)) == 0, "resume needs the yield mark, and reads no key");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -419,6 +423,21 @@ static void test_gfx_owner(void)
     check((bad & (1u << 0)) == 0, "gfx owner moves on claim, returns on exit");
     check((bad & (1u << 1)) == 0, "gfx claim without OS32X_FLAG_GFX is refused");
     check((bad & (1u << 2)) == 0, "OS32X_FLAG_CUI_ONLY refused only from GUI");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  起動要求表 (票 T9 D3 の受入): GUI 中の外部プログラム起動は端末 / sh から */
+/*  カーネルの表を通って WM へ渡る。ここが壊れたとき実機で見えるのは         */
+/*  「sh> から何も起動しない」「プロンプトに戻らない」「2 回目以降が         */
+/*  ERR_FULL」だけで原因が遠いので、遷移の骨だけをブート時に踏む。          */
+/*  ホスト試験 (tools/tests/test_launch.py) と同じ形。                       */
+/* ------------------------------------------------------------------------ */
+static void test_launch(void)
+{
+    u32 bad = launch_selftest();
+    check((bad & (1u << 0)) == 0, "launch: child exit marks DONE and clears child");
+    check((bad & (1u << 1)) == 0, "launch: a finished row is handed over once");
+    check((bad & (1u << 2)) == 0, "launch: requester exit becomes an orphan KILL");
 }
 
 int kselftest_run(void)
@@ -439,6 +458,7 @@ int kselftest_run(void)
     test_kbd_inject();
     test_resume_mark();
     test_gfx_owner();
+    test_launch();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

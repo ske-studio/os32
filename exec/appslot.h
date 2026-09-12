@@ -71,6 +71,11 @@ typedef struct {
     int  parked_from_wait;    /* park したフレームの「OP_WAIT 由来」の印 (C5) */
     int  parked_from_kbd;     /* park したフレームの「kbd 待ち由来」の印 (K7 D1) */
     int  parked_from_poll;    /* park したフレームの「ポーリング由来」の印 (T8 D8) */
+    /* 明示的な譲り sys_yield 由来の印 (票 T9 D5)。状態は WAIT_POLL のままで、
+     * 違うのは resume のときに **注入リングを読まない** こと — 読むと、sh が
+     * 譲っている間に届いた「子宛の 1 バイト」を吸って捨ててしまう
+     * (票 §6 blocker 1)。欄の追加なので exec_app_state の 0〜4 は動かない。 */
+    int  parked_from_yield;
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -111,6 +116,9 @@ extern volatile u32 ring3_kbd_park_count;
 /* GUI 中のポーリング型 yield で 1 周だけ譲った回数 (票 T8 §7 D8 の受入 F8:
  * 「FPS 段の秒数 × 100 以下」で増えるか = tick の間引きが効いているか)。 */
 extern volatile u32 ring3_poll_yield_count;
+/* GUI 中に sys_yield で明示的に譲った回数 (票 T9 D5 の観測点)。tick の
+ * 間引きが無い park 点なので、ポーリングの譲りとは別に数える。 */
+extern volatile u32 ring3_yield_count;
 /* 回収の回数と直前の対象 (試験と診断用。G2/G5 の「1 本分だけ」を数える) */
 extern volatile u32 appslot_reclaim_count;
 extern volatile int appslot_last_reclaim_id;
@@ -261,9 +269,26 @@ void appslot_park_poll_commit(void);
  * kbd_set_gui_mode から)。 */
 void appslot_poll_yield_reset(void);
 
+/* ---- 第 4 の park 点: 明示的な譲り sys_yield (票 T9 D5) --------------- */
+/* park_poll_check との違いは 2 つ: **PIT tick の間引きを掛けない** (明示的な
+ * 譲りは呼び手の意思で、描画ループの busy-wait とは違う) ことと、印が
+ * parked_from_yield になること。状態は WAIT_POLL のまま (WM から見れば
+ * 「常に ready、優先度は最下位」で、起こし方の規則を増やさない)。
+ * ダメなら ring3_park_reject_count++ して負を返す (呼び手は hlt 1 回へ)。 */
+int appslot_park_yield_check(void);
+void appslot_park_yield_commit(void);
+
+/* resume のとき EAX に何を入れるか。印から導くので、対応表は 1 か所
+ * (exec_resume が switch するだけ)。id が起こせない状態なら負。 */
+#define APP_RESUME_SRC_WAIT   0   /* WM が渡す wait_ret */
+#define APP_RESUME_SRC_KBD    1   /* 注入リングの 1 バイト。空なら起こさない */
+#define APP_RESUME_SRC_POLL   2   /* 注入リングの 1 バイト。空なら -1 で起こす */
+#define APP_RESUME_SRC_YIELD  3   /* 注入リングを**読まず** 0 (票 T9 D5) */
+int appslot_resume_source(int id);
+
 /* resume してよいか。WM top-level からだけ、印のあるフレームだけ。
  * PARKED は parked_from_wait、WAIT_KEY は parked_from_kbd、WAIT_POLL は
- * parked_from_poll を要求する。印が無ければ ring3_resume_bad_frame_count++
+ * parked_from_poll **または** parked_from_yield (票 T9 D5) を要求する。印が無ければ ring3_resume_bad_frame_count++
  * して OS32_ERR_STALE (拒否は 3 つの park 点すべてに効く)。 */
 int appslot_resume_check(int id);
 /* resume を成立させる (CR3 を載せる直前)。印 (3 つとも) を消し

@@ -69,7 +69,17 @@ int exec_park_kbd(void);
  * 0 = 譲れなかった (呼び手はそのまま -1 を返す)。 */
 int exec_park_poll(u32 now_tick);
 
-/* 止めてあるアプリを起こさずに畳む。0 / OS32_ERR_INVAL / OS32_ERR_STALE。 */
+/* 第 4 の park 点 (票 T9 D5、KAPI v49 sys_yield): 明示的な譲り。GUI 中は
+ * tick の間引き無しで **必ず** WAIT_POLL へ park し、印 parked_from_yield を
+ * 立てる (起こすとき注入リングを読まず EAX = 0)。成立すれば **戻らない**。
+ * park できない文脈 (CUI / CPL=0 / syscall の外 / 入れ子の子) では `hlt` を
+ * 1 回して 0 を返す。 */
+i32 exec_sys_yield(void);
+
+/* 止めてあるアプリを起こさずに畳む。0 / OS32_ERR_INVAL / OS32_ERR_STALE。
+ * 票 T9 D8: **id とその子孫** (起動要求表の child を末尾まで辿ったもの) を
+ * **末尾から** 畳む。CTRL+STOP のように 1 本だけ止めたいときは、WM が
+ * launch_child() で末尾を解決してその ID を渡す。 */
 i32 exec_kill(i32 app_id);
 
 /* 0 = 空き / 1 = 走っている / 2 = park 中 (OP_WAIT) / 3 = kbd 待ち /

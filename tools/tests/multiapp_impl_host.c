@@ -44,6 +44,22 @@ static int host_reader = 2;
 int con_sink_reader_get(void) { return host_reader; }
 #include "kbd_inject.c"
 
+/* T9: 起動要求表も **実物** (exec/launch.c) をそのまま取り込む。要るのは
+ * GUI 判定と kstrncpy だけ (表そのものの検査は tools/tests/launch_host.c)。
+ * ここで見るのは exec_kill の連鎖 (D8) と sys_yield の resume (D5) — 表と
+ * AppSlot が噛み合う所。 */
+static int host_gui = 1;
+int con_sink_is_enabled(void) { return host_gui; }
+char *kstrncpy(char *dst, const char *src, u32 n)
+{
+    u32 i = 0;
+    if (n == 0) return dst;
+    while (i + 1 < n && src[i] != '\0') { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+    return dst;
+}
+#include "launch.c"
+
 /* ---- 試験ハーネス ----------------------------------------------------- */
 
 #define MA_SLOT_MAX   4              /* = include/memmap.h の GUI_SLOT_MAX */
@@ -306,12 +322,20 @@ static int ma_resume_poll(int id)
     int rc = appslot_resume_check(id);
     if (rc < 0) return rc;
     a = appslot_get(id);
-    if (a->parked_from_poll) {
+    /* exec/exec.c の exec_resume と同じく、EAX の出所は印から導く。
+     * 明示的な譲り (T9 D5) は注入リングを読まず 0 を入れる。 */
+    switch (appslot_resume_source(id)) {
+    case APP_RESUME_SRC_YIELD:
+        a->frame[APP_FRAME_EAX] = 0;
+        break;
+    case APP_RESUME_SRC_POLL:
         ch = 0;
         if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
         else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
-    } else {
+        break;
+    default:
         a->frame[APP_FRAME_EAX] = 0;
+        break;
     }
     appslot_resume_commit(id);
     H.turn_used[id] = 1;
@@ -335,6 +359,8 @@ static int ma_res_add(int kind, int n)
 static void ma_reclaim_res(int id)
 {
     int k;
+    /* exec/exec.c の exec_reclaim_owned (9b)。ID だけを使う (票 T9 D3)。 */
+    launch_owner_exit(id);
     appslot_gfx_owner_exit(id);
     for (k = 0; k < MA_RES_KINDS; k++) H.res[id][k] = 0;
     H.slot[id] = -1;
@@ -391,6 +417,45 @@ static int ma_kill(int id)
     if (rc < 0) return rc;
     ma_reclaim_res(id);
     H.free_pages += appslot_reclaim(id);
+    return 0;
+}
+
+/* 第 4 の park 点 (票 T9 D5)。exec/exec.c の exec_sys_yield の表の部分。 */
+static int ma_park_yield(void)
+{
+    int rc = appslot_park_yield_check();
+    if (rc < 0) return rc;
+    appslot_park_yield_commit();
+    return 0;
+}
+
+/* exec/exec.c の exec_kill (票 T9 D8) の**連鎖の部分をそのまま写した**形
+ * (exec.c はカーネル一式を引くのでホストへ #include できない)。畳む 1 本分は
+ * 既存の ma_kill と同じ手順 (回収 → スロット返却)。順番が効く: 末尾から
+ * 畳まないと、各段の回収通知が親の表を DONE にする前に親が消える。 */
+static int ma_kill_order[APP_SLOT_COUNT];
+static int ma_kill_order_n;
+
+static int ma_kill_chain(int head)
+{
+    int chain[APP_MAX_APPS];
+    int n, i;
+    int rc = appslot_kill_check(head);
+    if (rc < 0) return rc;
+    ma_kill_order_n = 0;
+    n = launch_chain(head, chain, APP_MAX_APPS);
+    if (n <= 0) {
+        ma_kill_order[ma_kill_order_n++] = head;
+        ma_reclaim_res(head);
+        H.free_pages += appslot_reclaim(head);
+        return 0;
+    }
+    for (i = n - 1; i >= 0; i--) {
+        if (chain[i] != head && appslot_kill_check(chain[i]) < 0) continue;
+        ma_kill_order[ma_kill_order_n++] = chain[i];
+        ma_reclaim_res(chain[i]);
+        H.free_pages += appslot_reclaim(chain[i]);
+    }
     return 0;
 }
 
@@ -1658,6 +1723,127 @@ static void case_poll_yield(void)
     kbd_inject_discard();
 }
 
+/* ========================================================================
+ *  23. 明示的な譲り sys_yield (票 T9 D5) と exec_kill の連鎖 (票 T9 D8)
+ *
+ *  ここで見るのは「表 (launch) と AppSlot が噛み合うところ」だけ:
+ *    - sys_yield の park は WAIT_POLL のまま印だけが違い、resume は
+ *      **注入リングを読まない** (sh が子宛の打鍵を吸って捨てない)。
+ *    - exec_kill は要求表の連鎖を末尾から畳み、各段の回収通知が親の表を
+ *      DONE + child = 0 にする。CTRL+STOP は末尾 1 本だけ。
+ *  表そのものの遷移は tools/tests/launch_host.c の担当。
+ * ======================================================================== */
+static void case_yield_and_kill_chain(void)
+{
+    int term, sh, child;
+    AppSlot *a;
+    u32 yield0, poll0;
+    i32 t_term, t_sh;
+    char buf[LAUNCH_CMDLINE_MAX];
+
+    ma_init(4096);
+    kbd_inject_discard();
+    appslot_poll_yield_reset();
+    launch_init();
+    host_gui = 1;
+
+    term = ma_start_gfx(100, 1, (u32)OS32X_FLAG_LAUNCHER);
+    check(term == APP_ID_MIN, "23a 端末 (宣言 LAUNCHER) が立つ");
+    host_reader = term;                      /* con_sink の読み手 = 端末 */
+    t_term = launch_req("sh");
+    check(t_term > 0, "23b 端末が sh の起動を要求できる");
+
+    yield0 = ring3_yield_count;
+    poll0 = ring3_poll_yield_count;
+    check(ma_park_yield() == 0, "23c sys_yield は tick の間引き無しで譲れる");
+    check(ring3_yield_count == yield0 + 1, "23d ring3_yield_count が増える");
+    check(ring3_poll_yield_count == poll0, "23e ポーリングの勘定とは別");
+    a = appslot_get(term);
+    check(a->state == APP_STATE_WAIT_POLL, "23f 状態は WAIT_POLL のまま");
+    check(a->parked_from_yield == 1 && a->parked_from_poll == 0,
+          "23g 印は parked_from_yield だけ");
+    check(a->parked_from_wait == 0 && a->parked_from_kbd == 0,
+          "23h 他の印は立たない");
+    check(appslot_state(term) == APP_STATE_WAIT_POLL,
+          "23i exec_app_state は 4 のまま (値を増やさない)");
+    check(appslot_cur() == APP_ID_SHELL && res_owner_get() == APP_ID_SHELL,
+          "23j WM top-level へ戻る");
+
+    /* 譲っている間に届いた打鍵は子のもの。resume で吸ってはいけない
+     * (票 §6 blocker 1 = parked_from_yield を足した理由そのもの)。 */
+    res_owner_set(term);
+    check(kbd_inject((const u8 *)"ab", 2) == 2, "23k 読み手が 2 バイト注ぐ");
+    res_owner_set(APP_ID_SHELL);
+    check(kbd_inject_pending() == 2, "23l 注入リングに 2 バイト");
+    check(ma_resume_poll(term) == 0, "23m 譲りからの resume は通る");
+    check(appslot_get(term)->frame[APP_FRAME_EAX] == 0,
+          "23n EAX は 0 (sys_yield が普通に戻ったように見える)");
+    check(kbd_inject_pending() == 2,
+          "23o 注入リングは不変 (子宛の打鍵を吸わない)");
+    check(appslot_get(term)->parked_from_yield == 0, "23p 印は 1 回きり");
+    kbd_inject_discard();
+
+    /* WM が要求を取り、sh を起動して結果を返す (端末 -> sh -> 子) */
+    check(ma_park_yield() == 0, "23q 端末はもう一度譲る");
+    check(launch_pending() == 1, "23r WM から見て要求が 1 本");
+    check(launch_take(buf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == t_term,
+          "23s WM が top-level で取る");
+    sh = ma_start_gfx(100, 1, (u32)OS32X_FLAG_LAUNCHER);
+    check(sh > 0, "23t sh が立つ");
+    t_sh = launch_req("kbd_echo");
+    check(t_sh > t_term, "23u sh も自分の表から要求できる");
+    check(ma_park_yield() == 0, "23v sh が譲る");
+    check(launch_report(t_term, sh) == 0, "23w WM が子 ID を表へ返す");
+    check(launch_take(buf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == t_sh,
+          "23x 次は sh の要求");
+    child = ma_start_gfx(100, 1, 0);
+    check(child > 0, "23y 子が立つ");
+    check(ma_park_yield() == 0, "23z 子が譲る");
+    check(launch_report(t_sh, child) == 0, "23A 子の ID も表へ返る");
+
+    check(launch_child((i32)term) == (i32)sh, "23B 端末の子は sh");
+    check(launch_child((i32)sh) == (i32)child, "23C sh の子は 子");
+    check(launch_child((i32)child) == 0, "23D 子が連鎖の末尾");
+
+    /* CTRL+STOP: WM は launch_child で末尾を解決し、その 1 本だけ畳む */
+    check(ma_kill_chain(child) == 0, "23E 末尾を畳む");
+    check(ma_kill_order_n == 1 && ma_kill_order[0] == child,
+          "23F 末尾は子孫を持たないので 1 本だけ");
+    check(appslot_state(child) == 0, "23G 子は FREE");
+    check(launch_child((i32)sh) == 0, "23H 回収通知で sh の表は child = 0");
+    check(launch_child((i32)term) == (i32)sh, "23I 端末の表は sh のまま");
+
+    /* exec_kill(id) は id と子孫を **末尾から** 畳む (票 D8) */
+    check(ma_kill_chain(term) == 0, "23J 端末を畳むと子孫ごと");
+    check(ma_kill_order_n == 2, "23K 連鎖の 2 本を畳んだ");
+    check(ma_kill_order[0] == sh && ma_kill_order[1] == term,
+          "23L 末尾 (sh) から順に畳む");
+    check(appslot_state(sh) == 0 && appslot_state(term) == 0,
+          "23M どちらも FREE");
+    check(launch_pending() == 0, "23N 孤児回収は残らない");
+    check(launch_child((i32)term) == 0 && launch_child((i32)sh) == 0,
+          "23O 表は全部 IDLE (ERR_FULL で固着しない)");
+
+    /* 譲れない文脈: CUI の入れ子の子と WM top-level */
+    {
+        u32 rej0 = ring3_park_reject_count;
+        check(ma_park_yield() == OS32_ERR_INVAL,
+              "23P シェル帯 (WM top-level) からは譲れない");
+        check(ring3_park_reject_count == rej0 + 1, "23Q その拒否は弾き数に載る");
+        term = ma_start_gfx(10, 0, (u32)OS32X_FLAG_LAUNCHER);  /* 入れ子の子 */
+        check(term > 0, "23R CUI の入れ子の子が立つ");
+        check(launch_req("ls") == OS32_ERR_INVAL,
+              "23S 入れ子の子からの launch_req は断る");
+        check(ma_park_yield() == OS32_ERR_INVAL,
+              "23T 入れ子の子は sys_yield でも譲れない");
+        check(ring3_park_reject_count == rej0 + 2, "23U その拒否も弾き数に載る");
+        ma_exit(0);
+    }
+    host_reader = 2;
+    kbd_inject_discard();
+    launch_init();
+}
+
 int main(void)
 {
     failures = 0;
@@ -1687,6 +1873,7 @@ int main(void)
     case_gfx_screen_owner();
     case_cui_only_and_reject_kill();
     case_poll_yield();
+    case_yield_and_kill_chain();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

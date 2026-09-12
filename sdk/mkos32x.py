@@ -16,7 +16,7 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --cpl0         CPL=0 強制フラグを設定 (ring3 デフォルト化後のエスケープ, v2 M3)
     --shlib        共有ライブラリフラグを設定 (MEM_SHLIB_BASE 常駐, GUI v1.1 K3)
     --cui-only     CUI 専用フラグを設定 (GUI からの起動を断る, 票 T8-2)
-    --launcher     起動要求者フラグを設定 (launch_req を許す, 票 T9 D1a)
+    --launcher     起動要求 (launch_req) を出してよい宣言 (票 T9 D3)
     --load ADDR    リンク時のロードアドレス (--elf 指定時は ELF の .text から自動)
 """
 
@@ -154,7 +154,7 @@ def main():
         print("  --cpl0        CPL=0 強制フラグ設定")
         print("  --shlib       共有ライブラリフラグ設定")
         print("  --cui-only    CUI 専用フラグ設定 (GUI から起動しない)")
-        print("  --launcher    起動要求者フラグ設定 (launch_req を許す)")
+        print("  --launcher    起動要求フラグ設定 (launch_req を呼べる, 票 T9)")
         print("  --load ADDR   ロードアドレス (--elf があれば自動検出)")
         sys.exit(1)
 

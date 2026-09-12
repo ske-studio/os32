@@ -198,11 +198,19 @@ typedef struct {
     i32 (__cdecl *kbd_inject)(const u8 *utf8, u32 len);
     u32 (__cdecl *kbd_inject_pending)(void);
     i32 (__cdecl *gfx_screen_owner)(void);
+    i32 (__cdecl *launch_req)(const char *cmdline);
+    i32 (__cdecl *launch_pending)(void);
+    i32 (__cdecl *launch_take)(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg);
+    i32 (__cdecl *launch_report)(i32 token, i32 rc);
+    i32 (__cdecl *launch_poll)(i32 token, i32 *status);
+    i32 (__cdecl *launch_cancel)(i32 token);
+    i32 (__cdecl *launch_child)(i32 id);
+    i32 (__cdecl *sys_yield)(void);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
-#define KAPI_FUNC_COUNT 193
+#define KAPI_FUNC_COUNT 201
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

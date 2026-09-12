@@ -133,3 +133,21 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
 - `build/app.conf`: `userland/sh 49 0 launcher` / `t5a_display 49 0 launcher` / `gshell 49`。`tools/check_manifests.py` は `launcher` を書式として許すだけ (呼び出しとの突き合わせは KAPI v49 着地後)。
 - `programs:` に `sh`、`clean-programs` で `sh_obj/` と `userland/sh.{elf,raw,bin}` を掃除。`userland/deploy.yaml` に `/bin/sh.bin` (tags `programs`)。
 - 未実施: 実ビルド・配備・実機 ([V4])。検証は `make -n sh` / `make -n programs` の dry-run と `check_gfx_flag()` / `check_constraints.py` の直接実行まで。`make check-manifests` の §2 は `userland/sh.bin` が実在してから通る。
+
+## 12. 実装メモ (K、2026-09-12、着地 feat/gui)
+
+- 要求表は `exec/launch.c` + `include/launch.h` (添字 = 要求者 ID、照合は token)。ワイヤ側の定数
+  (`LAUNCH_KIND_*` / `LAUNCH_ST_*` / `LAUNCH_CMDLINE_MAX` / `LAUNCH_TOKEN_MAX`) と
+  `OS32X_FLAG_LAUNCHER 0x0020` は `sdk/include/os32/os32_kapi_shared.h` が正典 ([C4])。
+- KAPI v49 = 8 本、スロット 193〜200 (`0x30C`〜`0x328`)。`sys_yield` の実体は `exec_sys_yield`。
+  データフィールドは `0x32C` / `0x330` へ移った (`docs/KAPI_SPEC.md` の v49 節が正典)。
+- D8: `exec_kill` は `launch_chain()` で末尾まで辿り、**末尾から** `exec_kill_one` を回す。
+  CTRL+STOP は WM が `launch_child()` で末尾を解決して渡す (末尾は 1 本だけ畳まれる)。
+- D5: 第 4 の park 点。印 `parked_from_yield`、状態は `WAIT_POLL` のまま、間引きなし。
+  「印 → EAX の出所」の対応表は `appslot_resume_source()` に閉じた (`exec_resume` は分岐するだけ)。
+- §10 non-blocker 1 / 2 は実装済み: 回収通知で `DONE` + `child = 0`、孤児の完了は `IDLE`、
+  子を持たない要求者の退場も解放、KILL 後の `launch_report` は `STALE` (WM は正常扱い)。
+- ホスト TDD: `tools/tests/test_launch.py` (新規、`make check-launch-host`) と
+  `test_multiapp_impl.py` ケース 23。記録は `tools/tests/t9_tdd.md`。kselftest に 3 項。
+- **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
+  ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。

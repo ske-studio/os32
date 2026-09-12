@@ -32,6 +32,7 @@ volatile u32 ring3_park_reject_count = 0;
 volatile u32 ring3_resume_bad_frame_count = 0;
 volatile u32 ring3_kbd_park_count = 0;
 volatile u32 ring3_poll_yield_count = 0;
+volatile u32 ring3_yield_count = 0;
 volatile u32 appslot_reclaim_count = 0;
 volatile int appslot_last_reclaim_id = 0;
 volatile u32 gfx_init_reject_count = 0;
@@ -192,6 +193,7 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -212,6 +214,7 @@ void appslot_shell_commit(void)
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     res_owner_set(APP_ID_SHELL);
@@ -379,6 +382,46 @@ void appslot_poll_yield_reset(void)
     g_poll_last_tick = 0;
 }
 
+/* ---- 第 4 の park 点: 明示的な譲り sys_yield (票 T9 D5) --------------- */
+/* park_poll_check との違いは **間引きを掛けない** こと。sys_yield は
+ * 「いま譲る」と書いた呼び手の意思で、kbd_trygetchar の busy-wait とは
+ * 性質が違う (sh は launch_poll の合間に 1 回ずつしか呼ばない)。間引くと
+ * 同じ tick の中で sh が回り続け、譲りが成立しないまま CPU を食う。 */
+int appslot_park_yield_check(void)
+{
+    AppSlot *a;
+
+    if (g_cur < APP_ID_MIN || g_cur > APP_ID_MAX) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    a = appslot_get(g_cur);
+    if (!a || a->state != APP_STATE_RUNNING) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    /* CUI の入れ子 exec_run の子は譲れない (park_kbd_check と同じ理由:
+     * longjmp の行き先が親アプリの中の exec_run フレームになる)。 */
+    if (!a->gui) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    return 0;
+}
+
+void appslot_park_yield_commit(void)
+{
+    AppSlot *a = appslot_get(g_cur);
+    if (!a) return;
+    a->parked_from_yield = 1;     /* 「明示的な譲り由来」の印 (T9 D5) */
+    a->in_op_wait = 0;
+    a->state = APP_STATE_WAIT_POLL;
+    g_cur_op_is_wait = 0;
+    g_cur = APP_ID_SHELL;
+    res_owner_set(APP_ID_SHELL);
+    ring3_yield_count++;
+}
+
 int appslot_resume_check(int id)
 {
     AppSlot *a;
@@ -402,7 +445,10 @@ int appslot_resume_check(int id)
      * 「注入リングに文字がある」ではない — WM は次の周に必ず起こし、
      * 空なら exec_resume が EAX に -1 を書く。ここで見るのは印だけ。 */
     if (a->state == APP_STATE_WAIT_POLL) {
-        if (!a->parked_from_poll) {
+        /* WAIT_POLL には 2 つの由来がある (票 T9 D5)。どちらの印も無ければ
+         * 起こさない — 規則は park 点が増えても 1 つ: 「その状態に対応する
+         * 印が立っているフレームだけ」。 */
+        if (!a->parked_from_poll && !a->parked_from_yield) {
             ring3_resume_bad_frame_count++;
             return OS32_ERR_STALE;
         }
@@ -416,6 +462,23 @@ int appslot_resume_check(int id)
     return 0;
 }
 
+/* resume のとき EAX に何を入れるかを印から導く (票 T9 D5)。印と「どこから
+ * 値を取るか」の対応表をここ 1 か所に閉じると、exec_resume 側は
+ * ハードウェア (注入リング / フレーム) の操作だけになる。 */
+int appslot_resume_source(int id)
+{
+    AppSlot *a = appslot_get(id);
+    if (!a) return OS32_ERR_INVAL;
+    if (a->state == APP_STATE_WAIT_KEY)  return APP_RESUME_SRC_KBD;
+    if (a->state == APP_STATE_WAIT_POLL) {
+        /* 明示的な譲りは注入リングを読まない — 読むと、譲っている sh が
+         * 子宛の 1 バイトを吸って捨てる (票 §6 blocker 1)。 */
+        if (a->parked_from_yield) return APP_RESUME_SRC_YIELD;
+        return APP_RESUME_SRC_POLL;
+    }
+    return APP_RESUME_SRC_WAIT;
+}
+
 void appslot_resume_commit(int id)
 {
     AppSlot *a = appslot_get(id);
@@ -423,6 +486,7 @@ void appslot_resume_commit(int id)
     a->parked_from_wait = 0;      /* 印は 1 回きり (3 つの park 点すべてで) */
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -674,6 +738,25 @@ u32 appslot_resume_mark_selftest(void)
     g_slot[id].parked_from_poll = 1;
     if (appslot_resume_check(id) != 0) bad |= 1u << 6;
     if (appslot_kill_check(id) != 0) bad |= 1u << 6;
+
+    /* (8) 第 4 の park 点 (票 T9 D5): 明示的な譲り。状態は WAIT_POLL のまま
+     * だが、印が parked_from_yield なら resume は注入リングを読まない。
+     * 印が 1 つも無ければ起こせないのは他の park 点と同じ。 */
+    g_slot[id].state = APP_STATE_WAIT_POLL;
+    g_slot[id].parked_from_poll = 0;
+    g_slot[id].parked_from_yield = 0;
+    if (appslot_resume_check(id) != OS32_ERR_STALE) bad |= 1u << 8;
+    if (ring3_resume_bad_frame_count != saved_badframe + 4) bad |= 1u << 8;
+    g_slot[id].parked_from_yield = 1;
+    if (appslot_resume_check(id) != 0) bad |= 1u << 8;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_YIELD) bad |= 1u << 8;
+    g_slot[id].parked_from_poll = 1;
+    g_slot[id].parked_from_yield = 0;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_POLL) bad |= 1u << 8;
+    g_slot[id].state = APP_STATE_WAIT_KEY;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_KBD) bad |= 1u << 8;
+    g_slot[id].state = APP_STATE_PARKED;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_WAIT) bad |= 1u << 8;
 
     /* (7) tick の間引き (D8): 同じ tick では 2 度譲らない。間引きは表の検査
      * より**先**に効くので、弾き数 ring3_park_reject_count に載らない。

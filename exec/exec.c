@@ -20,6 +20,7 @@
 #include "snd_engine.h"
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
+#include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
 #include "kapi_db.h"
 #include "gdt.h"
 #include "tss.h"
@@ -62,6 +63,8 @@ void exec_init(void) {
     /* アプリ ID の表を空にし、シェル帯 (ID 1) を走っている状態にする。
      * res_owner_set(1) もここで行われる (票 K5 の D3)。 */
     appslot_init();
+    /* 起動要求表 (票 T9 D3) も空から始める。 */
+    launch_init();
 #include "exec_kapi_init.inc"
     /* 共有メモリ先頭アドレスを公開する。
      * MEM_SHM_BASE はカーネルの __bss_end 由来で可変のため、
@@ -689,6 +692,14 @@ static void exec_reclaim_owned(int id)
         con_sink_reader_get() != id) {
         con_sink_push_exit(id);
     }
+    /* (9b) 起動要求表 (票 T9 D3)。**ID だけを使う** — 正常終了は AppSlot を
+     * 解放した後、exec_kill は解放の前にここへ来るので、スロットの欄を読むと
+     * 経路ごとに違うものが見える。
+     *   child == id の表  : その要求は終わった (DONE + child = 0)
+     *   requester == id の表: 要求者が退場した。子が残っていれば「孤児回収」
+     *     (KILL の PENDING) として WM の top-level に渡す — カーネルはここから
+     *     kill しない (回収文脈では CR3 も段も動かせない)。 */
+    launch_owner_exit(id);
     /* (10) console シンクの読み手 (票 K6C)。読み手は 1 本だけなので、畳んだ
      * のがその 1 本なら所有を返す — 返さないと次の端末アプリが永久に
      * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、
@@ -1746,6 +1757,63 @@ int exec_park_poll(u32 now_tick)
 }
 
 /* ======================================================================== */
+/*  exec_sys_yield — 明示的な譲り (第 4 の park 点、KAPI v49 sys_yield、D5)  */
+/*                                                                          */
+/*  「いま譲る」と書いた呼び手 (sh の sh_launch が launch_poll の合間に 1 回  */
+/*  ずつ呼ぶ) のための park 点。exec_park_poll と手順は 1 行も違わないが、    */
+/*  違うのは 2 つ:                                                          */
+/*                                                                          */
+/*    - **PIT tick の間引きを掛けない**。間引きは描画ループの busy-wait 用で、*/
+/*      明示的な譲りに掛けると、同じ tick の中で sh が回り続けて子が走れない。*/
+/*    - 印が parked_from_yield で、起こすとき exec_resume は **注入リングを   */
+/*      読まず** EAX = 0 を入れる。読むと、sh が譲っている間に届いた子宛の    */
+/*      1 バイトを sh が吸って捨てる (票 §6 blocker 1)。                     */
+/*                                                                          */
+/*  状態は WAIT_POLL のまま (WM から見た起こし方の規則を増やさない)。        */
+/*  GUI 中は **必ず** park する (tick 制限なし)。park できない文脈            */
+/*  (CUI / CPL=0 / syscall の外 / 入れ子 exec_run の子) では `hlt` 1 回して    */
+/*  0 で戻る — 呼び手から見れば「譲った」で同じ。                             */
+/* ======================================================================== */
+i32 exec_sys_yield(void)
+{
+    int id;
+    AppSlot *a;
+    u32 k;
+
+    /* CUI 中は協調型の相手 (WM) が居ない。従来どおり 1 回 hlt して戻る。 */
+    if (!con_sink_is_enabled()) { _halt(); return 0; }
+
+    /* R1 (exec_park_kbd / exec_park_poll と同じ): CPL=3 のアプリが syscall の
+     * 中に居るときだけ。CPL=0 の呼び手はここで落ちる。 */
+    if (!g_cur_app || !g_cur_app->cpl3 || g_cur_frame == 0) { _halt(); return 0; }
+
+    id = appslot_cur();
+    if (appslot_park_yield_check() < 0) { _halt(); return 0; }
+
+    a = appslot_get(id);
+    if (!a || g_cur_app != a) {
+        ring3_park_reject_count++;
+        _halt();
+        return 0;
+    }
+
+    for (k = 0; k < APP_FRAME_WORDS; k++) a->frame[k] = g_cur_frame[k];
+
+    exec_heap_save_state(&a->exec_heap_used);
+    ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    g_cur_frame = 0;
+
+    paging_load_cr3(paging_kernel_pd_phys());
+    appslot_park_yield_commit();         /* WAIT_POLL + 印 + owner 1 へ */
+    exec_restore_context(APP_ID_SHELL);
+
+    g_longjmp_reason = EXEC_LJ_PARK;
+    g_longjmp_id = id;
+    exec_longjmp(a->jmpbuf);    /* 戻らない */
+    return 0;
+}
+
+/* ======================================================================== */
 /*  exec_resume — 止めてあるアプリを 1 本だけ起こす (KAPI v44)               */
 /*                                                                          */
 /*  戻り値: app_id = また park した / 0 = 終了した / <0 = 起こせなかった      */
@@ -1761,6 +1829,7 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
 {
     AppSlot *a;
     int rc;
+    int src;
     u8 ch;
 
     rc = appslot_resume_check((int)app_id);
@@ -1768,7 +1837,13 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
 
     a = appslot_get((int)app_id);
     if (!a->cpl3 || !a->as.pd_phys) return OS32_ERR_INVAL;
-    if (a->parked_from_poll) {
+    src = appslot_resume_source((int)app_id);
+    if (src == APP_RESUME_SRC_YIELD) {
+        /* 票 T9 D5: 明示的な譲り (sys_yield) は **注入リングを読まない**。
+         * 読むと、sh が譲っている間に届いた子宛の 1 バイトを吸って捨てる
+         * (票 §6 blocker 1)。アプリからは sys_yield() が 0 を返して見える。 */
+        a->frame[APP_FRAME_EAX] = 0;
+    } else if (src == APP_RESUME_SRC_POLL) {
         /* 票 T8 §7 D8: ポーリング型は **1 周だけ**の譲りなので、注入リングが
          * 空でも起こす (WAIT_KEY と違って OS32_ERR_AGAIN を返さない)。
          * 空なら EAX = -1 = 「キーなし」で、アプリの kbd_trygetchar() は
@@ -1776,7 +1851,7 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
         ch = 0;
         if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
         else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
-    } else if (a->parked_from_kbd) {
+    } else if (src == APP_RESUME_SRC_KBD) {
         /* 票 §5 の指摘 B: 文字の取り出しはここで完結する (WM 側に取り出し用
          * の KAPI は作らない)。WM が渡した wait_ret は**使わない**。
          * 空なら起こさず OS32_ERR_AGAIN — 印も状態も残るので、WM は次の周で
@@ -1810,22 +1885,45 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
 /*  カーネルが知っているのはそれだけ) ので、止めてあるアプリを畳む口が別に    */
 /*  要る。これが無いと resume されないまま固まったアプリを永久に畳めない。    */
 /*  owner 1 (WM top-level) からのみ。走っている本人には OS32_ERR_STALE。      */
+/*                                                                          */
+/*  票 T9 D8 以後、畳むのは **id とその子孫** (起動要求表の child を末尾まで   */
+/*  辿ったもの) で、順番は **末尾から**。1 本分の手順が exec_kill_one。        */
 /* ======================================================================== */
+static void exec_kill_one(int id)
+{
+    AppSlot *a = appslot_get(id);
+    if (!a) return;
+    /* 走っていないので CR3 は master のまま。owner も 1 のまま動かさない
+     * — 回収は全部 ID を明示して呼ぶ (D3)。 */
+    exec_reclaim_owned(id);
+    if (!a->cpl3) exec_cpl0_release();
+    exec_teardown_app(a);
+    appslot_reclaim(id);
+    /* 生存アプリの集合が変わる瞬間 = transition。G7 の switch ではない。 */
+    ring3_transition_count++;
+}
+
 i32 exec_kill(i32 app_id)
 {
-    AppSlot *a;
+    int chain[APP_MAX_APPS];
+    int n;
+    int i;
     int rc = appslot_kill_check((int)app_id);
     if (rc < 0) return rc;
 
-    a = appslot_get((int)app_id);
-    /* 走っていないので CR3 は master のまま。owner も 1 のまま動かさない
-     * — 回収は全部 ID を明示して呼ぶ (D3)。 */
-    exec_reclaim_owned((int)app_id);
-    if (!a->cpl3) exec_cpl0_release();
-    exec_teardown_app(a);
-    appslot_reclaim((int)app_id);
-    /* 生存アプリの集合が変わる瞬間 = transition。G7 の switch ではない。 */
-    ring3_transition_count++;
+    /* 票 T9 D8: 「id とその子孫を末尾から回収」に固定する。端末 → sh → 子の
+     * ように要求表が連鎖しているとき、途中の 1 本だけを畳むと残りが孤児に
+     * なる (WM の forget と CANCEL の DONE も壊れる — 票 §9 blocker 2)。
+     * 末尾から畳むのは、各段の回収通知が親の表を DONE + child = 0 に
+     * するため — 先に親を畳むと、まだ生きている子が誰の表にも載らなくなる。*/
+    n = launch_chain((int)app_id, chain, APP_MAX_APPS);
+    if (n <= 0) { exec_kill_one((int)app_id); return 0; }
+    for (i = n - 1; i >= 0; i--) {
+        /* 末尾側が既に畳まれている / 走っている本人だった場合は飛ばす
+         * (先頭 app_id は上で検査済み)。 */
+        if (chain[i] != (int)app_id && appslot_kill_check(chain[i]) < 0) continue;
+        exec_kill_one(chain[i]);
+    }
     return 0;
 }
 

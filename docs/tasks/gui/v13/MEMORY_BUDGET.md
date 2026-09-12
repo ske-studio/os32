@@ -139,6 +139,39 @@ KAPI スロットが 1 本増えた分 `KernelAPI` 構造体が 4 B 伸びる (1
 あることと、控え・カウンタが既存の整列の隙間に収まったこと。KAPI は 1 本も増えていない
 (v48 のまま — `kbd_trygetchar` / `kbd_trygetkey` の中身だけが変わる)。
 
+## カーネル帯の静的計上 (T9-K、2026-09-12)
+
+`exec/launch.c` の起動要求表 (票 T9 D3) と、`AppSlot` に増えた印 `parked_from_yield` (D5)。
+どれも `kmalloc` せず **カーネルの .data / .bss の静的領域**なので、シェル帯・アプリ帯・
+exec_heap のどれも減らさない。測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を
+基準版 (feat/gui `d301324`) と並べたもの (カーネル全体のリンクとゲストの空き容量は未測定 —
+`make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| 要求表 `g_req[]` | 1704 B | 1 本 284 B (`requester` / `child` / `phase` / `kind` / `token` / `rc` / `arg` の `int` 7 個 + `cmdline[256]`) × `APP_SLOT_COUNT` (6) |
+| token の種 `g_next_token` | 4 B | `.data` (初期値 1) |
+| 診断カウンタ `launch_req_count` / `launch_orphan_count` | 8 B | KAPI にはしない (kernel.map から `emu_read_mem`) |
+| 整列込みの実測 `launch.o` | **.bss 1736 B / .data 4 B** | text 2900 B (KAPI 7 本 + 連鎖 + 回収通知 + 自己診断) |
+| 印 `parked_from_yield` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `appslot.o` の .bss 1168 → **1192 B** |
+| カウンタ `ring3_yield_count` | 0 B (実質) | 既存の整列の隙間に入る |
+| **合計 (静的)** | **1764 B** | 1736 + 4 + 24 |
+
+票 §1 メモリの見積り (「要求表 4 本 ≈ 1.1KB + 印 1 語 × 5」) との差は 2 つ:
+
+- 表は使う 4 本 (ID 2〜5) で 1136 B = 見積りどおり。実測の 1704 B との差 568 B は、
+  添字を **ID そのもの**にするために ID 0 と 1 の枠も持っているため (`parked_from_kbd` が
+  6 スロット分あるのと同じ理由)。ずらすと「表 = ID」が読めなくなり、回収通知と連鎖の
+  照合が 1 段増える。
+- `token` / `rc` / `arg` の 3 欄が見積りに無かった (12 B × 6)。`token` は §9 blocker 4 の
+  32bit 化、`rc` は FAILED の値、`arg` は KILL の宛先で、どれも落とせない。
+
+text の増分は `launch.o` 2900 B + `appslot.o` 4131 → **4579 B** (+448: `park_yield_check/commit` +
+`resume_source` + `resume_check` の枝 + 自己診断 1 項) + `exec.o` 11325 → **11765 B**
+(+440: `exec_sys_yield` + `exec_kill` の連鎖 + `exec_resume` の印分岐 + 回収通知 1 行)。
+`exec.o` の **.bss は 8708 B で不変**、`.data` も 12 B で不変。
+KAPI は 8 本増えて v49 (`KernelAPI` 構造体が 32 B 伸びる — 関数ポインタ 8 個)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

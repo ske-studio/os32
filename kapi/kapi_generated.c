@@ -35,6 +35,7 @@
 #include "con_sink.h"
 #include "kbd_inject.h"
 #include "memory_boot.h"
+#include "launch.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -45,7 +46,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[193];
+volatile u32 kapi_hits[201];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -244,6 +245,14 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     8,  /* kbd_inject */
     0,  /* kbd_inject_pending */
     0,  /* gfx_screen_owner */
+    4,  /* launch_req */
+    0,  /* launch_pending */
+    20,  /* launch_take */
+    8,  /* launch_report */
+    8,  /* launch_poll */
+    4,  /* launch_cancel */
+    4,  /* launch_child */
+    0,  /* sys_yield */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -442,6 +451,14 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0001,  /* kbd_inject: utf8 */
     0x0000,  /* kbd_inject_pending */
     0x0000,  /* gfx_screen_owner */
+    0x0001,  /* launch_req: cmdline */
+    0x0000,  /* launch_pending */
+    0x001D,  /* launch_take: buf,requester,kind,arg */
+    0x0000,  /* launch_report */
+    0x0002,  /* launch_poll: status */
+    0x0000,  /* launch_cancel */
+    0x0000,  /* launch_child */
+    0x0000,  /* sys_yield */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1594,5 +1611,53 @@ i32 __cdecl wrap_gfx_screen_owner(void)
 {
     KAPI_HIT(192);
     return gfx_screen_owner();
+}
+
+i32 __cdecl wrap_launch_req(const char *cmdline)
+{
+    KAPI_HIT(193);
+    return launch_req(cmdline);
+}
+
+i32 __cdecl wrap_launch_pending(void)
+{
+    KAPI_HIT(194);
+    return launch_pending();
+}
+
+i32 __cdecl wrap_launch_take(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg)
+{
+    KAPI_HIT(195);
+    return launch_take(buf, cap, requester, kind, arg);
+}
+
+i32 __cdecl wrap_launch_report(i32 token, i32 rc)
+{
+    KAPI_HIT(196);
+    return launch_report(token, rc);
+}
+
+i32 __cdecl wrap_launch_poll(i32 token, i32 *status)
+{
+    KAPI_HIT(197);
+    return launch_poll(token, status);
+}
+
+i32 __cdecl wrap_launch_cancel(i32 token)
+{
+    KAPI_HIT(198);
+    return launch_cancel(token);
+}
+
+i32 __cdecl wrap_launch_child(i32 id)
+{
+    KAPI_HIT(199);
+    return launch_child(id);
+}
+
+i32 __cdecl wrap_sys_yield(void)
+{
+    KAPI_HIT(200);
+    return exec_sys_yield();
 }
 
