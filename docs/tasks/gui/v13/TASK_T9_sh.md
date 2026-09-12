@@ -253,3 +253,6 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 
 **往復 3/3 (S `96e756f`): Request changes** — 往復 1・2 の 4 件は修正済みと確認。新たな blocker 1 件: GUI 端末で行末 BS が文字を消さない (端末の BS は非破壊のカーソル移動。`echo abc` → BS×2 → `x` で画面は `echo axc`、バッファは `echo ax`)。→ `\b` + 空白 + `\b` の破壊的消去を SHELL_AS_APP で出す修正をコーダーが準備中。**3 往復を使い切ったため着地の可否はユーザー判断 (ROLES §5)**。
 ゲート (テスター、`96e756f`): `make all` / `external` / `check` すべて exit=0。sh.bin 61,232 B、shell.bin 65,680 B (不変)、gshell.bin 169,968 B、t5a_display.bin 38,640 B、kernel.bin 222,520 B。
+
+**往復 4 (S `3374438`、ユーザー承認の追加往復): Request changes** — 往復 3 の BS は修正済みと確認。新規 blocker 1 件: 40 桁端末で折り返しをまたいだ行末 BS が前行へ戻れない (端末モデル `model.rs` の BS は行頭で止まる) → `sh> echo ` + 36 文字以上で BS×2 → `x` とすると画面とバッファが 1 文字ずれる。**ユーザー決裁 (2026-09-13): 端末モデル側 (`libos32term`) で「行頭の BS は前行の末尾へ」と直し (A レーン)、Codex 5 往復目の後に配備**。
+ゲート (テスター、`3374438`): `make all` / `external` / `check` すべて exit=0。
