@@ -44,6 +44,7 @@
 | `ring3_entry.asm` | `int 0x80` の入口 (`int80_stub`: セグメント復元後 `sti`、出口 `cli`)、`kapi_invoke` | [09](09_exec.md)、[POLICY_DEBUG §4-19](POLICY_DEBUG.md) |
 | `console.c` | TVRAM 出力、スクロール予約 (`tvram_set_scroll_reserve`)、GDC カーソル | [05 §5-9](05_drivers.md) 周辺、[POLICY_DEBUG §4-18](POLICY_DEBUG.md) |
 | `con_sink.c` | console シンク — GUI モード中のカーネル出力を 8KB のリングに溜め、端末アプリが `con_sink_read` (KAPI v46) で吸う | [KAPI_SPEC v46 節](KAPI_SPEC.md)、[tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md) |
+| `kbd_inject.c` | 打鍵の注入リング (256B) — GUI モード中、端末アプリが `kbd_inject` (KAPI v47) で注ぎ、`kbd_getchar` は第 2 の park 点になる。注げるのは con_sink の読み手だけ | [KAPI_SPEC v47 節](KAPI_SPEC.md)、[tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
 | `snd_engine.c` | FM/SSG シーケンサ (タイマ IRQ 駆動) | [05 §5-3](05_drivers.md) |
 | `v86*.c` | V86 モニタ、仮想 PIC、キー所有権、脱出キー | [tasks/v86v2/](tasks/v86v2/README.md) |
 | `kselftest.c` | ブート時セルフテスト (kstring / kmalloc / kprintf)。プリミティブを触ったら項目を足す | [POLICY_DEBUG §2](POLICY_DEBUG.md) |

@@ -249,6 +249,13 @@ i32 con_sink_read(void *buf, u32 cap)
     return (i32)written;
 }
 
+/* いまの読み手 (票 K7 §5 R2)。kernel/kbd_inject.c が「注入してよいのは
+ * 読み手だけ」を照合するのに使う。錠は要らない (int 1 語の読み)。 */
+int con_sink_reader_get(void)
+{
+    return g_reader;
+}
+
 i32 con_sink_stat(u32 *pending, u32 *dropped)
 {
     unsigned int f = con_sink_lock();

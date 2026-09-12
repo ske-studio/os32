@@ -45,6 +45,11 @@ void con_sink_push_cursor(int x, int y);
 i32 con_sink_read(void *buf, u32 cap);
 /* con_sink_stat: 溜まっているバイト数と捨てた回数。所有権は要らない。 */
 i32 con_sink_stat(u32 *pending, u32 *dropped);
+/* con_sink_reader_get: いまの読み手の所有者 ID (居なければ
+ * CON_SINK_NO_READER)。KAPI にはしない — カーネル内で「注入してよいのは
+ * 読み手だけ」を照合する kernel/kbd_inject.c のためだけの公開 (票 K7 §5 R2)。
+ * 権限の表を 2 つ持たないための唯一の口で、所有を**動かす**口ではない。 */
+int con_sink_reader_get(void);
 
 /* --- 回収 (exec_reclaim_owned から) -------------------------------------- */
 void con_sink_owner_exit(int id);

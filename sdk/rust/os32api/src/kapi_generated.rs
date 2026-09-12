@@ -199,13 +199,15 @@ pub struct KernelAPI {
     /* idx 189 */ pub con_sink_read: unsafe extern "C" fn(buf: *mut u8, cap: u32) -> i32,
     /* idx 190 */ pub con_sink_stat: unsafe extern "C" fn(pending: *mut u32, dropped: *mut u32) -> i32,
     /* idx 191 */ pub sys_ram_kb: unsafe extern "C" fn() -> u32,
+    /* idx 192 */ pub kbd_inject: unsafe extern "C" fn(utf8: *const u8, len: u32) -> i32,
+    /* idx 193 */ pub kbd_inject_pending: unsafe extern "C" fn() -> u32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 46;
+pub const KAPI_VERSION: u32 = 47;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

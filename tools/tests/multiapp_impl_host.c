@@ -36,6 +36,14 @@ int  res_owner_get(void)      { return host_owner; }
 
 #include "appslot.c"
 
+/* K7: 注入リングは **実物** (kernel/kbd_inject.c) をそのまま取り込む。
+ * 権限の照合相手だけハーネスが持つ (con_sink はここでは要らない —
+ * 「読み手だけが注げる」は tools/tests/kbd_inject_host.c が本物の
+ * kernel/con_sink.c と組んで見ている)。 */
+static int host_reader = 2;
+int con_sink_reader_get(void) { return host_reader; }
+#include "kbd_inject.c"
+
 /* ---- 試験ハーネス ----------------------------------------------------- */
 
 #define MA_SLOT_MAX   4              /* = include/memmap.h の GUI_SLOT_MAX */
@@ -199,6 +207,40 @@ static int ma_resume(int id)
     H.turn_used[id] = 1;
     H.last_run = id;
     H.input_streak = 0;
+    return 0;
+}
+
+/* ---- K7: 第 2 の park 点 (GUI 中の kbd 待ち) --------------------------- */
+/* 表 (appslot.c) は実物。CR3 / フレーム / longjmp を持つ exec/exec.c は
+ * ホストに持ち込めないので、exec_park_kbd / exec_resume の **kbd 分岐だけ**
+ * をここに写す (ケース 12〜16 が gshell の選択規則を写しているのと同じ扱い)。
+ * 写した部分は 3 行 — 印を見て注入リングから 1 バイト取り、EAX に入れ、
+ * 空なら OS32_ERR_AGAIN で起こさない (票 §5 の指摘 B)。 */
+static int ma_park_kbd(void)
+{
+    int rc = appslot_park_kbd_check();
+    if (rc < 0) return rc;
+    appslot_park_kbd_commit();
+    return 0;
+}
+
+static int ma_resume_kbd(int id)
+{
+    AppSlot *a;
+    u8 ch;
+    int rc = appslot_resume_check(id);
+    if (rc < 0) return rc;
+    a = appslot_get(id);
+    if (a->parked_from_kbd) {
+        ch = 0;
+        if (!kbd_inject_take(&ch)) return OS32_ERR_AGAIN;   /* 印は残す */
+        a->frame[APP_FRAME_EAX] = (u32)ch;
+    } else {
+        a->frame[APP_FRAME_EAX] = 0;
+    }
+    appslot_resume_commit(id);
+    H.turn_used[id] = 1;
+    H.last_run = id;
     return 0;
 }
 
@@ -1119,6 +1161,106 @@ static void case_abort_clear(void)
           "20s 居なければ何も起きない");
 }
 
+/* ---- 19. GUI 中の kbd 待ち = 第 2 の park 点 (票 K7 D1 / D5 / §5 B) ----
+ * K5b までの park 点は gui_call(OP_WAIT) の 1 つだけだった。K7 で
+ * kbd_getchar / kbd_getkey が 2 つ目になり、状態 WAIT_KEY と印
+ * parked_from_kbd が増える。ここで固定するのは 4 つ:
+ *   (a) park すると WAIT_KEY + 印 + cur はシェル帯 (exec_app_state は 3)
+ *   (b) 注入が空なら resume は OS32_ERR_AGAIN で、印も状態もそのまま
+ *       (WM はその周を譲ってもう一度試せる)
+ *   (c) 注入があれば resume が通り、**1 バイトだけ** EAX に入る
+ *   (d) 印の取り違え (OP_WAIT の印で WAIT_KEY を起こす) は STALE、
+ *       鍵待ちのアプリは exec_kill で畳める (D5) */
+static void case_wait_key(void)
+{
+    int id;
+    AppSlot *a;
+    u32 sw0, bad0, rej0, park0;
+
+    ma_init(4096);
+    kbd_inject_discard();
+    host_reader = 2;
+    id = ma_start(100, 1);
+    check(id == APP_ID_MIN, "19a GUI アプリが 1 本走る");
+    sw0 = ring3_switch_count;
+    bad0 = ring3_resume_bad_frame_count;
+    rej0 = ring3_park_reject_count;
+    park0 = ring3_kbd_park_count;
+
+    /* (a) OP_WAIT の中でなくても park できる — 呼び手は kbd の syscall */
+    check(ma_park_kbd() == 0, "19b OP_WAIT の外でも kbd 待ちなら park できる");
+    check(ring3_kbd_park_count == park0 + 1,
+          "19c ring3_kbd_park_count が増える");
+    check(ring3_park_reject_count == rej0, "19d 正常な park は弾き数に載らない");
+    a = appslot_get(id);
+    check(a->state == APP_STATE_WAIT_KEY && a->parked_from_kbd == 1,
+          "19e WAIT_KEY + kbd 由来の印");
+    check(a->parked_from_wait == 0, "19f OP_WAIT の印は立たない");
+    check(appslot_cur() == APP_ID_SHELL && res_owner_get() == APP_ID_SHELL,
+          "19g cur と owner はシェル帯 (WM top-level) へ戻る");
+    check(appslot_state(id) == APP_STATE_WAIT_KEY,
+          "19h exec_app_state は 3 を返す");
+
+    /* (b) 注入が空なら起こせない。印も状態も動かない */
+    check(kbd_inject_pending() == 0, "19i 注入リングは空");
+    check(ma_resume_kbd(id) == OS32_ERR_AGAIN,
+          "19j 空の resume は OS32_ERR_AGAIN");
+    check(ring3_switch_count == sw0, "19k 拒否は switch_count を増やさない");
+    check(ring3_resume_bad_frame_count == bad0,
+          "19l 空は「印なし」ではないので bad_frame_count も増えない");
+    check(appslot_get(id)->state == APP_STATE_WAIT_KEY &&
+          appslot_get(id)->parked_from_kbd == 1,
+          "19m 印も状態もそのまま (次の周でもう一度試せる)");
+
+    /* (c) 注入があれば 1 バイトだけ EAX に入る */
+    res_owner_set(2);                      /* 端末アプリ (読み手) から注ぐ */
+    check(kbd_inject((const u8 *)"ab", 2) == 2, "19n 端末アプリが 2 バイト注ぐ");
+    res_owner_set(APP_ID_SHELL);           /* resume を呼ぶのは WM */
+    check(ma_resume_kbd(id) == 0, "19o 注入があれば起こせる");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'a',
+          "19p EAX には最初の 1 バイトだけが入る");
+    check(kbd_inject_pending() == 1, "19q 残りは 1 バイト (まとめて渡さない)");
+    check(ring3_switch_count == sw0 + 1, "19r 成功は switch_count を 1 増やす");
+    check(appslot_get(id)->parked_from_kbd == 0,
+          "19s 起こした時点で印は消える");
+
+    /* (d) 印の取り違えと kill */
+    check(ma_park_kbd() == 0, "19t もう一度 kbd 待ちで park できる");
+    a = appslot_get(id);
+    a->parked_from_kbd = 0;
+    a->parked_from_wait = 1;               /* OP_WAIT の印だけに見せる */
+    check(ma_resume_kbd(id) == OS32_ERR_STALE,
+          "19u WAIT_KEY を OP_WAIT の印では起こせない");
+    check(ring3_resume_bad_frame_count == bad0 + 1,
+          "19v 印の取り違えは bad_frame_count に載る");
+    check(appslot_kill_check(id) == 0,
+          "19w 鍵待ちのアプリは exec_kill で畳める (D5)");
+    a->parked_from_kbd = 1;
+    check(ma_resume_kbd(id) == 0, "19x 印を戻せば起こせる (残りの 'b')");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'b',
+          "19y 2 バイト目が次の resume で届く");
+    check(kbd_inject_pending() == 0, "19z 注入リングは空に戻る");
+
+    /* 走っている本人は kill できない / CUI の入れ子の子は park できない */
+    check(appslot_kill_check(id) == OS32_ERR_INVAL,
+          "19A 走っている間は exec_kill を呼べない (畳むのは CTRL+STOP)");
+    {
+        u32 rej1 = ring3_park_reject_count;
+        int child = ma_start(10, 0);
+        check(child > 0, "19B CUI の入れ子の子が立つ");
+        check(ma_park_kbd() == OS32_ERR_INVAL,
+              "19C CUI の入れ子の子は kbd 待ちでも park できない");
+        check(ring3_park_reject_count == rej1 + 1,
+              "19D その拒否は park_reject_count に載る");
+        ma_exit(0);
+    }
+    ma_exit(0);
+    check(appslot_cur() == APP_ID_SHELL, "19E 畳んだら WM top-level へ戻る");
+    check(ma_park_kbd() == OS32_ERR_INVAL,
+          "19F シェル帯 (WM top-level) からの park は弾かれる");
+    kbd_inject_discard();
+}
+
 int main(void)
 {
     failures = 0;
@@ -1144,6 +1286,7 @@ int main(void)
     case_shell_never_takes_app_band();
     case_cpl0_child_needs_no_live_apps();
     case_abort_clear();
+    case_wait_key();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

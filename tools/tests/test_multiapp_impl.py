@@ -6,7 +6,10 @@ Log:    tools/tests/k5b_kernel_tdd.md
 K5a's tools/tests/multiapp_model_host.c hand-wrote the state machine as a
 model. This harness compiles the shipped kernel source instead
 (exec/appslot.c, included verbatim by multiapp_impl_host.c) and runs the same
-numbered checks against it, plus case 17 for the OP_WAIT mark (C5/C6).
+numbered checks against it, plus case 17 for the OP_WAIT mark (C5/C6) and
+case 19 for K7's second park point (WAIT_KEY / parked_from_kbd), which also
+pulls in kernel/kbd_inject.c verbatim.  -DKBD_INJECT_NO_IRQ_LOCK swaps that
+unit's cli/popfl for an empty lock: CPL=3 cannot execute them.
 
 Same shape as test_multiapp_model.py / test_pgalloc_range.py: build ILP32
 freestanding, run it, then prove the same source compiles with the cross
@@ -30,6 +33,7 @@ if __name__ == "__main__":
         tmp = pathlib.Path(tmp)
         exe = tmp / "multiapp-impl"
         subprocess.run(["gcc", *FLAGS, "-O0", "-nostdlib", "-static", "-no-pie",
+                        "-DKBD_INJECT_NO_IRQ_LOCK",
                         *includes, str(SRC), "-o", str(exe)],
                        cwd=ROOT, check=True)
         print("HOST ILP32 GNU89 COMPILE PASS", flush=True)

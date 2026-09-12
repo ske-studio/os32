@@ -21,6 +21,8 @@
 #include "kmalloc.h"
 #include "paging.h"
 #include "con_sink.h"
+#include "kbd_inject.h"
+#include "appslot.h"
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -332,6 +334,38 @@ static void test_con_sink(void)
     check((bad & (1u << 5)) == 0, "con_sink single reader (owner reclaim)");
 }
 
+/* ------------------------------------------------------------------------ */
+/*  打鍵の注入リングと「印の無い resume は拒否」(票 K7 の受入 I5)            */
+/*                                                                          */
+/*  GUI 中の kbd_getchar は第 2 の park 点になった。壊れたときに実機で見える */
+/*  のは「端末に打っても文字が出ない」か「GUI ごと固まる」だけで、原因が     */
+/*  遠い。ブート時に踏むのは 2 つ:                                           */
+/*    (1) 256B の環 — 積んだ順に 1 バイトずつ出る (UTF-8 の並びを変えない)、 */
+/*        あふれは新しい方を捨てる、破棄で空、読み手未確立の注入は拒否。     */
+/*    (2) 印の無いフレームは起こせない (C6 の規則が PARKED と WAIT_KEY の    */
+/*        両方に効く)。resume の切替点が緩むとフレームが宙に浮く。           */
+/* ------------------------------------------------------------------------ */
+static void test_kbd_inject(void)
+{
+    u32 bad = kbd_inject_selftest();
+    check((bad & (1u << 0)) == 0, "kbd_inject refuses with no con_sink reader");
+    check((bad & (1u << 1)) == 0, "kbd_inject keeps UTF-8 byte order (FIFO)");
+    check((bad & (1u << 2)) == 0, "kbd_inject take on empty ring returns 0");
+    check((bad & (1u << 3)) == 0, "kbd_inject overflow drops the newest byte");
+    check((bad & (1u << 4)) == 0, "kbd_inject discard empties the ring");
+}
+
+static void test_resume_mark(void)
+{
+    u32 bad = appslot_resume_mark_selftest();
+    check((bad & (1u << 0)) == 0, "resume refuses a free slot");
+    check((bad & (1u << 1)) == 0, "resume needs the OP_WAIT mark (PARKED)");
+    check((bad & (1u << 2)) == 0, "resume needs the kbd mark (WAIT_KEY)");
+    check((bad & (1u << 3)) == 0, "kill folds WAIT_KEY but not a running app");
+    check((bad & (1u << 4)) == 0, "exec_app_state adds 3 without moving 0/1/2");
+    check((bad & (1u << 5)) == 0, "refused resume never counts as a switch");
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -346,6 +380,8 @@ int kselftest_run(void)
     test_map_user_keep();
     test_app_band_pde();
     test_con_sink();
+    test_kbd_inject();
+    test_resume_mark();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

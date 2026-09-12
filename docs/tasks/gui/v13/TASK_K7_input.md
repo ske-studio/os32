@@ -82,3 +82,19 @@
   矢印は範囲外) を `kbd_inject` へ。戻り値が負なら状態行に出す。
 - ローカルエコーはしない (CUI プログラム側の出力が con_sink 経由で戻る)。
 - `build/app.conf` の t5a_display を KAPI 47 に。ホスト試験: キー → バイト列の変換表 (境界: 空 TEXT、多バイト、Enter)。
+
+## 7. 実装メモ (K) — K7-K 着地、2026-09-12
+
+- 注入リング `kernel/kbd_inject.c` (256B 静的)。あふれは **新しい方**を捨てる (打鍵は順序が
+  意味を持ち、古い方を捨てると打った頭が欠ける)。捨てた数は戻り値 (< `len`) と
+  `kbd_inject_drop_count`。権限は `con_sink_reader_get()` (新設、KAPI にしない) で照合。
+- 第 2 の park 点は `exec_park_kbd()` (exec.c) + `appslot_park_kbd_check/commit`。R1 の条件の
+  うち `kbd_gui_mode` は kbd.c、`g_cur_app && cpl3 && g_cur_frame` は exec.c が見る。
+  **CPL=0 / フレーム無しは数えない** (正常な hlt 落ち)。数えるのは CUI 入れ子の子だけ。
+- `exec_resume` が空の注入で返す負値は **-14 `OS32_ERR_AGAIN`** を新設した (既存に該当なし)。
+  KAPI_SPEC §3-2 のネットワーク予約を -15 以降へ 1 つ下げた (ネットワークは未使用)。
+- 決めたこと 2 つ (未レビュー): ① `kbd_trygetkey` と `kbd_has_key` は票が挙げていないので
+  **無変更** — GUI 中は常に -1 / 0 を返す (注入リングを見ない)。端末経由で使う予定が
+  出たら K7-W/A の前に足す。② 印は `parked_from_kbd` を新設し `parked_from_wait` と併存
+  (取り違えは `STALE` + `bad_frame_count`)。
+- 未確認: 実機 (受入 I1〜I5) は 1 つも未実施。`make` も配備も行っていない ([V4])。

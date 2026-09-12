@@ -14,6 +14,7 @@
 #include "kprintf.h"
 #include "kstring.h"
 #include "con_sink.h"
+#include "kbd_inject.h"
 
 /* V86 セッション中の画面描画抑止 (kernel/v86.c)。
  * セッション中は低位 640KB がゲスト用バッキング RAM に差し替わっており、
@@ -472,6 +473,9 @@ void console_text_gdc_start(void)
      * 再び正になるので、リングの中身はもう誰も描き直さない)。読み手の所有は
      * ここでは返さない — 返すのは exec_exit / exec_kill の owner 回収だけ。 */
     con_sink_disable();
+    /* 票 K7 D5: 注入リングも捨てる。CUI では打鍵が IRQ1 の cooked リングから
+     * 来るので、GUI 中に注がれた残りをシェルのプロンプトへ流し込まない。 */
+    kbd_inject_discard();
     console_hw_cursor_enable();
 }
 

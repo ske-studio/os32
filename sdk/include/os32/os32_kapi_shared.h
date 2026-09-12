@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      46   /* GUI v1.3 K6C: con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う)。v45 = exec_abort_clear (CTRL+STOP の宛先をフォーカス窓のアプリへ — 決裁 A1) */
+#define KAPI_VERSION      47   /* GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -309,6 +309,9 @@ typedef struct {
 #define OS32_ERR_STALE     -11  /* 破棄済み / generation 不一致のハンドル (契約 T4) */
 #define OS32_ERR_VERSION   -12  /* proto_version が WM より新しい (契約 T5) */
 #define OS32_ERR_FULL      -13  /* スロット / 資源が満杯 (契約 T2a) */
+/* GUI v1.3 K7 (KAPI v47)。KAPI_SPEC §3-2 の予約を 1 つ進め、ネットワークは
+ * -15 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
+#define OS32_ERR_AGAIN     -14  /* いまは無い / 後でもう一度 (kbd 待ちの resume) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

@@ -1,5 +1,5 @@
 {
-  "version": 46,
+  "version": 47,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -46,6 +46,7 @@
     "v86.h",
     "gui.h",
     "con_sink.h",
+    "kbd_inject.h",
     "memory_boot.h"
   ],
   "externs": [
@@ -1344,6 +1345,19 @@
       "ret": "u32",
       "args": [],
       "target": "memory_boot_ram_kb"
+    },
+    {
+      "name": "kbd_inject",
+      "ret": "i32",
+      "args": [
+        "const u8 *utf8",
+        "u32 len"
+      ]
+    },
+    {
+      "name": "kbd_inject_pending",
+      "ret": "u32",
+      "args": []
     }
   ]
 }
