@@ -42,6 +42,16 @@
 /* ======== 初期化・終了 ======== */
 void gfx_init(void);       /* 640x400x16初期化 + バックバッファ確保 */
 void gfx_init_200(void);   /* 640x200x16初期化 (縦はHWが2倍表示) */
+/* KAPI スロット gfx_init / gfx_init_200 の実体 (票 T8 D1 / D1a)。
+ * 画面の所有者を確かめてから本体を呼ぶ「門」で、sdk/kapi.json の
+ * "target" がここを指す。GUI 中に宣言 (OS32X_FLAG_GFX) の無い CPL=3 が
+ * 呼んだときは **何もしない** (戻り型は void のまま。拒否の数は
+ * カーネルシンボル gfx_init_reject_count)。カーネル内部から画面を
+ * 立て直すときは従来どおり gfx_init() を直接呼ぶ。 */
+void gfx_kapi_init(void);
+void gfx_kapi_init_200(void);
+/* 画面の所有者 (KAPI v48)。1 = シェル帯 (WM) / 2〜5 = アプリ。誰でも呼べる。 */
+i32  gfx_screen_owner(void);
 void gfx_shutdown(void);   /* テキスト復帰 */
 int  gfx_get_height(void); /* 現在のGFX高さ (200 or 400) を返す */
 

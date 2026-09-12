@@ -2028,3 +2028,513 @@ fn switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit() {
     );
     wm::g().inited = false;
 }
+
+/* ================================================================ */
+/*  票 T8-3 W — ポーリング型の協調 yield (§7 D8)                     */
+/*                                                                  */
+/*  GUI 中に `kbd_trygetchar` を回す全画面 GFX プログラムは、カーネル */
+/*  が第 3 の park 点で 1 周だけ止める (`APP_STATE_WAIT_POLL` = 4)。  */
+/*  WM 側の規則は「**常に ready、ただし優先度は最下位**」— 入力群 /   */
+/*  導出群 / `LAUNCH` 保留のどれも無い周にだけ起こす (複数なら ID     */
+/*  昇順)。スロットが無くても `WAIT_KEY` と同じく forget しない。     */
+/* ================================================================ */
+
+/// `exec_app_state` が返す第 3 の park 点 (カーネル側は別票 T8-3 K)。
+const ST_WAIT_POLL: i32 = 4;
+
+/// ID 2 = GUI アプリ (スロット 0 + 窓 1 枚、park 中)、ID 3 = 端末から起動した
+/// 全画面 GFX (スロット無し、ポーリングで譲った) の状態を作る。
+fn one_gui_app_and_a_polling_app(shm: &crate::mocks::Shm) -> crate::wm::GuiState {
+    use crate::{mocks, multiapp, session};
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let st = one_gui_app_state(shm);
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_kbd_pending(0);
+    st
+}
+
+/* ---- T8-3 W 検査 1: スロット無しでも forget せず、空いた周に起こす ---- */
+#[test]
+fn a_slotless_polling_app_is_never_forgotten_and_runs_on_an_idle_round() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+
+    /* ポーリングは入力群でも導出群でもない (= D11 の数えには入らない)。 */
+    assert!(!multiapp::input_ready(&st, 3), "WAIT_POLL が入力群に入った");
+    assert!(!multiapp::derived_ready(&st, 3), "WAIT_POLL が導出群に入った");
+
+    /* ID 2 に起床の理由が無い = 誰も ready でない周 → ここで起こす。 */
+    assert_eq!(multiapp::pick(&st), 3, "空いた周に WAIT_POLL を起こさない");
+    assert!(multiapp::resume_one(&mut st), "起こす相手が居るのに何もしない");
+    /* 値はカーネルが -1 (キー無し) か 1 バイトで上書きするので WM は 0。 */
+    assert_eq!(mocks::resume_calls(), vec![(3, 0)], "exec_resume の引数が違う");
+    /* 票 K7 指摘 A と同じ: スロットが無いからといって落としてはならない。 */
+    assert!(multiapp::is_tracked(3), "WAIT_POLL のアプリを forget した");
+    assert!(mocks::kill_calls().is_empty(), "WAIT_POLL のアプリを畳んだ");
+}
+
+/* ---- T8-3 W 検査 2: 優先度は最下位 ---- */
+#[test]
+fn a_polling_app_is_picked_only_when_nothing_else_is_ready() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+
+    /* (1) 入力群が 1 本でも居れば、その周は選ばない。 */
+    set_input_ready(&mut st, 2, true);
+    assert_eq!(multiapp::pick(&st), 2, "入力群より WAIT_POLL を先に選んだ");
+    set_input_ready(&mut st, 2, false);
+
+    /* (2) 導出群 (`Configure` 未通知) でも同じ。 */
+    set_derived_ready(&mut st, 2, true);
+    assert_eq!(multiapp::pick(&st), 2, "導出群より WAIT_POLL を先に選んだ");
+    set_derived_ready(&mut st, 2, false);
+
+    /* (3) `LAUNCH` 保留の周も WM の番 (top-level の仕事が先)。 */
+    st.launch_pending = true;
+    assert_eq!(multiapp::pick(&st), 0, "LAUNCH 保留の周に WAIT_POLL を選んだ");
+    st.launch_pending = false;
+
+    /* (4) どれも無い周にだけ降りてくる。 */
+    assert_eq!(multiapp::pick(&st), 3, "空いた周に WAIT_POLL を選ばない");
+}
+
+/* ---- T8-3 W 検査 3: 複数なら ID 昇順、全画面中でも同じ ---- */
+#[test]
+fn polling_apps_are_picked_in_ascending_id_order_even_in_fullscreen() {
+    use crate::{fullscreen, mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let st = one_gui_app_and_a_polling_app(&shm);
+    multiapp::on_start(4);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_app_state(4, ST_WAIT_POLL);
+    /* 巡回なら 4 から始まる起点を置く — ID 昇順なら 3 が選ばれる。 */
+    multiapp::set_last_run(3);
+    assert_eq!(multiapp::pick(&st), 3, "ポーリングが複数のとき ID 昇順でない");
+
+    /* 全画面モード中も同じ (譲ってくるのは所有者の全画面プログラム本人)。 */
+    fullscreen::arm(&[0u8; 48]);
+    assert!(fullscreen::active(), "全画面モードに入っていない");
+    assert_eq!(multiapp::pick(&st), 3, "全画面中に WAIT_POLL を起こさない");
+    fullscreen::reset();
+}
+
+/* ---- T8-3 W 検査 4 (実機 F8 不合格の修正): ポーリングは「譲る理由」 ----
+ *  PM 実測 2026-09-12: 端末 (ID 2) が `op_wait` の中に居ると、WM の 1 周は
+ *  `wm_cycle` + `sys_halt` で、**`pick` を呼ぶ点 (WM top-level) へ行けない**。
+ *  `WAIT_POLL` を「譲る理由」に数えないと端末は park せず、ポーリングの
+ *  1 本は永久に起きない (画面は FPS: 0 で凍結、`ring3_poll_yield_count` 1)。
+ *  「最下位」は `pick` の側 (検査 2) で守るので、ここで譲っても順は変わらない。 */
+#[test]
+fn a_polling_app_makes_the_running_app_yield_so_the_wm_can_resume_it() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+    /* ID 2 (端末) が走っている。ready なアプリは 1 本も無い。 */
+    multiapp::mark_resumed(2);
+    assert!(
+        multiapp::should_park(&st, 2),
+        "WAIT_POLL が居るのに譲らない = op_wait の中で halt し続ける"
+    );
+    /* 譲って top-level へ戻れば、最下位の 1 本が起きる (halt ではなく resume)。 */
+    multiapp::note_parked(2, None);
+    assert_eq!(multiapp::pick(&st), 3, "top-level に戻っても WAIT_POLL を選ばない");
+    assert!(multiapp::resume_one(&mut st), "halt になった (resume されない)");
+    assert_eq!(mocks::resume_calls(), vec![(3, 0)], "exec_resume の引数が違う");
+}
+
+/* ---- T8-3 W 検査 5: 据え置き (`input_streak`) は従来どおり効く ---- */
+#[test]
+fn a_polling_app_does_not_break_the_input_streak_deferral() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+    /* ID 2 に未読の待ち行列型があり、走っている。 */
+    set_input_ready(&mut st, 2, true);
+    multiapp::mark_resumed(2); /* `input_streak` を 0 に戻す */
+    let mut n = 0;
+    while n < 4 {
+        assert!(
+            !multiapp::should_park(&st, 2),
+            "自分の入力の据え置き ({n} 回目) を WAIT_POLL が打ち切った"
+        );
+        n += 1;
+    }
+    assert!(
+        multiapp::should_park(&st, 2),
+        "据え置きの上限 (4) を超えても WAIT_POLL に譲らない"
+    );
+}
+
+/* ---- T8-3 W 検査 6: 畳み (K7-W2) は `WAIT_POLL` にもそのまま効く ----
+ *  `session` 側の述語 (`is_slotless` / `slotless_live` /
+ *  `request_kill_slotless`) は**状態を見ない** (生きている & スロット無し)
+ *  ので、第 3 の park 点が増えても 1 行も変えなくてよい。その確認。 */
+#[test]
+fn switch_cui_also_kills_a_slotless_polling_app() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = one_gui_app_state(&shm);
+        g.inited = true;
+    }
+    multiapp::on_start(2); /* 端末: スロット 0 + 窓 1 枚 */
+    multiapp::on_start(3); /* 端末から起動した全画面 GFX: スロットも窓も無い */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_kbd_pending(0);
+
+    assert!(multiapp::slotless_live(wm::g()), "WAIT_POLL の 1 本を数えていない");
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+    assert!(
+        multiapp::pending_top_level_work(),
+        "Quit を配れない WAIT_POLL の kill が予約されていない"
+    );
+
+    wm::g().reclaim_owner(2);
+    session::reclaim_owner(2);
+    multiapp::on_owner_exit(2);
+    assert!(
+        !session::ready_to_run(wm::g()),
+        "WAIT_POLL の 1 本を残したまま CUI へ切り替えようとした"
+    );
+    /* 予約の実行が先 — 「最下位で起こす」より `drain_top_level` が勝つ。 */
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が違う");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "畳む相手を起こしてしまった: {:?}",
+        mocks::resume_calls()
+    );
+    assert_eq!(multiapp::live_count(), 0, "全回収になっていない");
+    wm::g().inited = false;
+}
+
+/* ---- T8-3 W 検査 7 (実機の復旧で判明): `exec_kill` の後も復帰する ----
+ *  PM 実測 2026-09-12: park 中 (`WAIT_POLL`) の全画面アプリに CTRL+STOP を
+ *  送ると `exec_kill` で畳まれ `g_gfx_owner` は 1 に戻るのに、**WM は全画面
+ *  モードのまま `sys_halt` で待ち続け画面が凍った**。所有者の問い合わせ
+ *  (`after_exec`) が `exec_start` / `exec_resume` の直後にしか無く、
+ *  `exec_kill` の経路と「誰も ready でない → halt」の周回を通らないため。
+ *  全画面中は入力もタイマも実質止まるので、自力では二度と復帰しない。 */
+#[test]
+fn killing_the_fullscreen_owner_restores_the_screen_on_the_next_round() {
+    use crate::{fullscreen, mocks, multiapp, wm};
+    use std::sync::atomic::Ordering;
+    mocks::init();
+    crate::session::clear();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = one_gui_app_state(&shm);
+        g.inited = true;
+    }
+    multiapp::on_start(2); /* 端末 */
+    multiapp::on_start(3); /* 全画面 GFX (ポーリングで park 中) */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_kbd_pending(0);
+    /* 所有者は ID 3 = 全画面モード。 */
+    mocks::set_screen_owner(3);
+    assert!(crate::after_exec(wm::g()), "全画面モードに入っていない");
+    assert!(fullscreen::active());
+
+    /* CTRL+STOP → 宛先は所有者 (D4d)。owner 1 からしか呼べないので予約だけ。 */
+    multiapp::request_kill(3);
+    let inits = mocks::GFX_INITS.load(Ordering::SeqCst);
+
+    /* top-level の 1 周: `exec_kill` が通り、カーネルが所有者を 1 に戻す。 */
+    mocks::set_screen_owner(1);
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が違う");
+    /* ここで復帰まで済んでいなければ、誰も ready でない = 永久に halt。 */
+    assert!(
+        !fullscreen::active(),
+        "所有者を畳んだのに全画面モードのまま (画面が凍る)"
+    );
+    assert_eq!(
+        mocks::GFX_INITS.load(Ordering::SeqCst),
+        inits + 1,
+        "復帰の gfx_init を呼んでいない"
+    );
+    wm::g().inited = false;
+}
+
+/* ---- T8-3 W 検査 8: 復帰は top-level の仕事なので `op_wait` からは譲る ----
+ *  `op_wait` の中は `res_owner_get()` がアプリ ID で、そこで `gfx_init` を
+ *  呼ぶと `appslot_gfx_claim_check` が「宣言の無いアプリの要求」と見て
+ *  **その端末を畳む**。だから復帰は呼ばず、park して top-level へ返す。 */
+#[test]
+fn a_pending_fullscreen_restore_makes_the_running_app_yield() {
+    use crate::{fullscreen, mocks, multiapp, wm};
+    mocks::init();
+    crate::session::clear();
+    let shm = mocks::Shm::new();
+    let st = one_gui_app_state(&shm);
+    multiapp::on_start(2);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_kbd_pending(0);
+    /* 全画面モードに入ったまま、所有者だけが WM に戻っている。 */
+    fullscreen::arm(&[0u8; 48]);
+    mocks::set_screen_owner(1);
+    multiapp::mark_resumed(2); /* ID 2 が `op_wait` の中で走っている */
+
+    let inits = mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        multiapp::should_park(&st, 2),
+        "復帰が要るのに譲らない = op_wait の中で永久に halt する"
+    );
+    assert_eq!(
+        mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst),
+        inits,
+        "op_wait の文脈で gfx_init を呼んだ (端末が畳まれる)"
+    );
+    fullscreen::reset();
+    wm::g().inited = false;
+}
+
+/* ================================================================ */
+/*  全画面 GFX (票 T8 D4)                                            */
+/*                                                                  */
+/*  画面の所有者はカーネルが持つ (`gfx_screen_owner`、KAPI v48)。      */
+/*  ここで試すのは WM の規律 — 所有者 ≠ 1 の間は描かない、戻ったら     */
+/*  復帰する、CTRL+STOP の宛先、入口 (OS32X ヘッダ) の判定。          */
+/* ================================================================ */
+
+/// 全画面 GFX プログラムを 1 本起動して park させた状態を作る。
+/// 戻り値は `run_program` の戻り値 (= app_id)。
+fn launch_fullscreen(st: &mut crate::wm::GuiState, path: &[u8]) -> i32 {
+    use crate::mocks;
+    /* 起動するのは `--gfx` 宣言つきのプログラム。 */
+    mocks::set_file(&mocks::os32x_header(crate::os32x::FLAG_GFX));
+    /* park した (rc = 3) 後、画面は ID 3 のもの。 */
+    *mocks::START_SCRIPT.lock().unwrap() = vec![3];
+    mocks::set_screen_owner(3);
+    let mut buf = [0u8; 256];
+    buf[..path.len()].copy_from_slice(path);
+    crate::run_program(st, &buf)
+}
+
+/* ---- (a) 所有者 ≠ 1 の間は 1 画素も出さない ---- */
+#[test]
+fn the_wm_draws_nothing_while_another_app_owns_the_screen() {
+    use crate::{fullscreen, mocks, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+
+    let rc = launch_fullscreen(g, b"/usr/bin/gfx200_test.bin\0");
+    assert_eq!(rc, 3, "park した全画面プログラムの app_id が返っていない");
+    assert!(
+        fullscreen::active() && fullscreen::owner() == 3,
+        "所有者 ≠ 1 なのに全画面モードに入っていない (owner={})",
+        fullscreen::owner()
+    );
+
+    /* ここから先は WM の描画を全部試す — 1 つでも VRAM へ出たら失格。 */
+    let before = mocks::present_counts();
+    let pixels = mocks::pixels();
+    wm::composite_full(g);
+    wm::composite_rect(g, wm::Rect::new(0, 0, 320, 200));
+    wm::present_rect(g, wm::Rect::new(0, 0, 320, 200));
+    wm::flush_present();
+    g.dirty_screen(wm::Rect::new(0, 0, 640, 400));
+    wm::flush_screen_dirty(g);
+    /* WM の 1 周まるごと (FEP の描画・タスクバーの時計・カーソルを含む)。 */
+    wm::wm_cycle(g, crate::input::Ctx::Standalone);
+    assert_eq!(
+        mocks::present_counts(),
+        before,
+        "全画面 GFX 中に WM が present した (プログラムの画を壊す)"
+    );
+    assert!(
+        mocks::pixels() == pixels,
+        "全画面 GFX 中に WM がバックバッファへ描いた"
+    );
+
+    /* マウスは誰にも配らない (タスクバー / Start / 窓を含めて無視)。 */
+    let ui_before = (crate::startmenu::is_open(), crate::modal::is_open());
+    let front_before = g.front_owner();
+    *mocks::MOUSE.lock().unwrap() = (5, 5, 1); /* タスクバーではなく窓の上を押す */
+    crate::input::capture(g, crate::input::Ctx::Standalone);
+    assert_eq!(
+        (crate::startmenu::is_open(), crate::modal::is_open()),
+        ui_before,
+        "全画面 GFX 中のクリックが WM の UI を開閉した"
+    );
+    assert_eq!(
+        g.front_owner(),
+        front_before,
+        "全画面 GFX 中のクリックがフォーカスを動かした"
+    );
+    assert!(mocks::pixels() == pixels, "全画面 GFX 中にカーソルを描いた");
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- (b) 所有者が 1 に戻ったら復帰する ---- */
+#[test]
+fn the_screen_comes_back_when_the_owner_returns_to_the_wm() {
+    use crate::{fullscreen, mocks, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    /* 復帰でパレットを戻せるよう、入る前の 16 色を控えさせる。 */
+    unsafe { (os32api::api().gfx_set_palette)(1, 0xF, 0, 0) };
+
+    launch_fullscreen(g, b"/usr/bin/gfx200_test.bin\0");
+    assert!(fullscreen::active());
+    /* プログラムがパレットを壊し、窓の dirty も消えた状態にしておく。 */
+    unsafe { (os32api::api().gfx_set_palette)(1, 0, 0, 0xF) };
+    let mut i = 0;
+    while i < 2 {
+        g.windows[i].dirty = wm::RectSet::EMPTY;
+        i += 1;
+    }
+    let inits = mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst);
+
+    /* プログラムが抜けてカーネルが所有者を WM に戻した。 */
+    mocks::set_screen_owner(1);
+    assert!(
+        !crate::after_exec(g),
+        "所有者が 1 に戻ったのに全画面モードのまま"
+    );
+    assert!(!fullscreen::active() && fullscreen::owner() == 0);
+    assert_eq!(
+        mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst),
+        inits + 1,
+        "復帰で gfx_init を呼んでいない (バックエンドが戻らない)"
+    );
+    /* 全クライアントに全面を描き直させる (W-1: 露出は dirty を生まない)。 */
+    let mut k = 0;
+    while k < 2 {
+        assert!(
+            g.windows[k].dirty.len > 0,
+            "復帰で窓 {} が invalidate されていない",
+            k
+        );
+        k += 1;
+    }
+    /* パレットは入る時点の控えに戻る (その後に G6 のシステム色が入るので、
+     * 見るのは `gfx_set_palette` の呼び出し列)。 */
+    assert!(
+        mocks::palette_sets().contains(&(1, 0xF, 0, 0)),
+        "復帰で入る時点の 16 色を戻していない: {:?}",
+        mocks::palette_sets()
+    );
+    /* 全面を出し直した (門が開いている)。 */
+    assert!(
+        mocks::present_counts().1 >= 1,
+        "復帰で全面 present をしていない"
+    );
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- (d) CTRL+STOP は所有者宛 ---- */
+#[test]
+fn ctrl_stop_targets_the_screen_owner_while_full_screen() {
+    use crate::{fullscreen, mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    let g = wm::g();
+    focus_app(g, 2); /* フォーカス窓 = 端末 (ID 2) */
+    /* 画面を持っているのは端末が起動した ID 3。 */
+    mocks::set_screen_owner(3);
+    assert!(crate::after_exec(g), "所有者 3 を見て全画面モードに入らない");
+    assert_eq!(fullscreen::owner(), 3);
+
+    /* 走っているのは端末 (2)。宛先は所有者 (3) なので本人は畳まれない。 */
+    assert!(
+        !multiapp::abort_targets_current(g, 2),
+        "全画面中の CTRL+STOP がフォーカス窓 (端末) に向いた"
+    );
+    /* top-level (単独ループ) の 1 周で振り替える。 */
+    multiapp::redirect_abort(g, 0);
+    assert!(multiapp::pending_top_level_work(), "予約が積まれていない");
+    assert!(multiapp::resume_one(g), "top-level が予約を実行しない");
+    assert_eq!(mocks::abort_clear_calls(), 1, "exec_abort_clear が 1 回でない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が画面の所有者でない");
+    assert!(!multiapp::is_tracked(3), "kill した所有者が表に残った");
+    assert!(multiapp::is_tracked(2), "端末まで畳んでしまった");
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- 入口 (D4): OS32X ヘッダの宣言で起動を決める ---- */
+#[test]
+fn the_entry_refuses_cpl0_programs_and_arms_full_screen_for_gfx() {
+    use crate::{fullscreen, mocks, modal, os32x, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+
+    /* (1) `--cpl0` (v86) は起動しない。理由をモーダルで出す。 */
+    mocks::set_file(&mocks::os32x_header(os32x::FLAG_FORCE_CPL0));
+    let mut buf = [0u8; 256];
+    let p = b"/usr/bin/v86.bin\0";
+    buf[..p.len()].copy_from_slice(p);
+    let rc = crate::run_program(g, &buf);
+    assert!(
+        mocks::start_calls().is_empty(),
+        "CPL=0 強制のプログラムを GUI から起動した: {:?}",
+        mocks::start_calls()
+    );
+    assert_eq!(rc, 0, "断った起動が `Launch failed` を誘発する戻り値になった");
+    assert!(modal::is_open(), "`cui only:` を出していない");
+    assert!(
+        !fullscreen::active(),
+        "起動しなかったのに全画面モードへ入った"
+    );
+    assert!(
+        mocks::open_calls().iter().any(|c| c == b"/usr/bin/v86.bin"),
+        "入口が OS32X ヘッダを読んでいない: {:?}",
+        mocks::open_calls()
+    );
+    /* 次の試験へ持ち越さない (モーダルは大域)。 */
+    modal::state().used = false;
+
+    /* (2) `--gfx` は `exec_start` の**前**に印が立つ (所有者が付くまでの隙間)。 */
+    mocks::init();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    launch_fullscreen(g, b"/usr/bin/blit_test.bin\0");
+    assert_eq!(mocks::start_calls().len(), 1, "宣言つきは起動する");
+    assert!(fullscreen::active(), "宣言を見て全画面モードに入らない");
+
+    /* (3) どちらも無いプログラムは従来どおり (印も立たない)。 */
+    mocks::init();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    mocks::set_file(&mocks::os32x_header(0x0002 /* RING3 だけ */));
+    let mut buf = [0u8; 256];
+    let p = b"/usr/bin/gui_demo.bin\0";
+    buf[..p.len()].copy_from_slice(p);
+    assert_eq!(crate::run_program(g, &buf), 2, "普通のアプリが起動しない");
+    assert!(!fullscreen::active(), "宣言の無いアプリで全画面モードに入った");
+    g.inited = false;
+    fullscreen::reset();
+}

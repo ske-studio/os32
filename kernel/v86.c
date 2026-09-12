@@ -21,6 +21,40 @@
 /* setjmp/longjmp (kernel/setjmp.asm) — セッションからの脱出に使う */
 #include "ksetjmp.h"
 
+/* 票 T8-2: GUI 中は V86 に入らない (下の v86_gui_refuse を参照)。 */
+#include "con_sink.h"
+#include "console.h"
+#include "os32_kapi_shared.h"
+
+/* exec/ は -Iexec を持たない翻訳単位が多いので、gfx/gfx_core.c と同じ流儀で
+ * extern 宣言する (走っているアプリに CTRL+STOP と同じ畳み要求を立てる)。 */
+extern int appslot_abort_request(void);
+
+/* GUI 中に v86_* KAPI を断った回数 (PM が emu_read_mem で読む)。 */
+volatile u32 v86_gui_reject_count = 0;
+
+/* ======================================================================== */
+/*  v86_gui_refuse — GUI 中の V86 入場を断り、呼び手を畳む (票 T8-2)         */
+/*                                                                          */
+/*  ユーザー決裁 2026-09-12「v86 / VDM は GUI から起動禁止 (CUI 専用)」の     */
+/*  最後の砦。表の砦は宣言ビット OS32X_FLAG_CUI_ONLY (app.conf の `cui`) を   */
+/*  見る exec_start 側だが、古い v86.bin が NHD に残っていると素通りする。    */
+/*                                                                          */
+/*  V86 は低位メモリを張り替え BIOS とテキスト VRAM を丸ごと使うので、断って  */
+/*  戻り値 -1 を渡すだけでは足りない (受入 F6 と同じ理屈で、断られたことを    */
+/*  知らないプログラムがそのまま画面を触りうる)。gfx_init の門と揃えて、      */
+/*  abort_req を立て syscall 出口の ring3_abort_check() に畳ませる。          */
+/*  CUI 中 (con_sink 無効) は 0 を返して従来どおり通す。                     */
+/* ======================================================================== */
+static int v86_gui_refuse(void)
+{
+    if (!con_sink_is_enabled()) return 0;
+    v86_gui_reject_count++;
+    shell_print("Error: v86 is cui only - run this from CUI mode\n", ATTR_RED);
+    appslot_abort_request();
+    return 1;
+}
+
 static u32 v86_jmpbuf[6];
 static volatile int v86_active = 0;
 static volatile enum v86_exit_reason v86_exit_reason = V86_EXIT_NONE;
@@ -584,6 +618,8 @@ int v86_smoke_test(void)
     int reason;
     u32 i;
 
+    if (v86_gui_refuse()) return -1;    /* 票 T8-2 */
+
     if (v86_mem_setup() != 0) {
         v86_smoke_result = 0x8001;
         return -1;
@@ -692,6 +728,8 @@ int v86_disk_test(const char *path)
     int reason;
     u16 cyls; u8 heads, spt; u16 bps; u32 total;
 
+    if (v86_gui_refuse()) return -1;    /* 票 T8-2 */
+
     v86_disk_result = 0xFFFFFFFFUL;
     v86_disk_marker = 0;
     v86_disk_cmp    = 0;
@@ -789,6 +827,8 @@ int v86_boot2(const char *path, const char *second)
 {
     struct v86_context ctx;
     int reason;
+
+    if (v86_gui_refuse()) return -1;    /* 票 T8-2 */
 
     if (v86_bios_attach_disk(path) != 0) {
         return -1;

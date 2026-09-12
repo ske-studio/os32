@@ -46,6 +46,17 @@ static void outp(unsigned int port, unsigned int value)
     if (port == GDC_GFX_CMD && value == GDC_CMD_START) starts++;
 }
 void *kmemset(void *dst, int val, u32 n) { return memset(dst, val, n); }
+/* 票 T8 の門 (gfx_kapi_init / gfx_kapi_init_200 / gfx_screen_owner) が引く
+ * カーネル側の 3 本。このハーネスが見るのはバックエンドの選択と 9801 の
+ * ライフサイクルで、画面の所有者は対象外 (そちらは
+ * tools/tests/multiapp_impl_host.c ケース 20 が実物の exec/appslot.c で見る)。
+ * なので「CUI 中 / 誰も所有していない」= 門が素通しになる値を返す。 */
+int con_sink_is_enabled(void) { return 0; }
+int appslot_gfx_claim(int gui_mode) { (void)gui_mode; return 0; }
+int appslot_gfx_owner(void) { return 1; }   /* APP_ID_SHELL = GFX_OWNER_WM */
+/* 票 T8-2 で門が拒否の理由を端末へ出すようになった (claim が常に通る上の
+ * スタブでは呼ばれないが、リンクには要る)。 */
+void shell_print(const char *str, u8 color) { (void)str; (void)color; }
 void palette_init(void) { }
 void palette_set(int idx, u8 r, u8 g, u8 b)
 { (void)idx; (void)r; (void)g; (void)b; }

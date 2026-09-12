@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      47   /* GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
+#define KAPI_VERSION      48   /* GUI v1.3 T8: gfx_screen_owner (画面の所有者 = gfx_init を呼んだ CPL=3 アプリ。回収で WM へ戻る)。v47 = GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -121,6 +121,12 @@ typedef enum {
 #define OS32X_FLAG_RING3  0x0002        /* CPL=3 (リング3) で実行する (v2 M1) */
 #define OS32X_FLAG_FORCE_CPL0 0x0004    /* CPL=0 強制 (ring3 デフォルト化後のエスケープハッチ, v2 M3) */
 #define OS32X_FLAG_SHLIB  0x0008        /* 共有ライブラリ (MEM_SHLIB_BASE 常駐、GUI v1.1 K3/C3) */
+/* CUI 専用 (mkos32x --cui-only、app.conf 4 列目 `cui`、票 T8-2)。
+ * V86 / VDM のように「CPL=3 のプログラムだが KAPI の向こうで画面と BIOS を
+ * 丸ごと持っていく」ものに立てる。GUI (con_sink 有効) からの exec_start は
+ * OS32_ERR_INVAL で断り、CUI からは従来どおり通す。FORCE_CPL0 とは独立 —
+ * v86.bin は CPL=3 なので FORCE_CPL0 では捕まらなかった (受入 F5)。 */
+#define OS32X_FLAG_CUI_ONLY 0x0010
 
 typedef struct {
     u32 magic;            /* 0x00: OS32X_MAGIC */

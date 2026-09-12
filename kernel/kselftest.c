@@ -378,8 +378,9 @@ static void test_con_sink_render_gate(void)
 /*  遠い。ブート時に踏むのは 2 つ:                                           */
 /*    (1) 256B の環 — 積んだ順に 1 バイトずつ出る (UTF-8 の並びを変えない)、 */
 /*        あふれは新しい方を捨てる、破棄で空、読み手未確立の注入は拒否。     */
-/*    (2) 印の無いフレームは起こせない (C6 の規則が PARKED と WAIT_KEY の    */
-/*        両方に効く)。resume の切替点が緩むとフレームが宙に浮く。           */
+/*    (2) 印の無いフレームは起こせない (C6 の規則が PARKED / WAIT_KEY /      */
+/*        WAIT_POLL の 3 つに効く)。resume の切替点が緩むとフレームが宙に    */
+/*        浮く。D8 の tick の間引きが表の検査より先に効くことも見る。        */
 /* ------------------------------------------------------------------------ */
 static void test_kbd_inject(void)
 {
@@ -398,8 +399,26 @@ static void test_resume_mark(void)
     check((bad & (1u << 1)) == 0, "resume needs the OP_WAIT mark (PARKED)");
     check((bad & (1u << 2)) == 0, "resume needs the kbd mark (WAIT_KEY)");
     check((bad & (1u << 3)) == 0, "kill folds WAIT_KEY but not a running app");
-    check((bad & (1u << 4)) == 0, "exec_app_state adds 3 without moving 0/1/2");
+    check((bad & (1u << 4)) == 0, "exec_app_state adds 3/4 without moving 0/1/2");
     check((bad & (1u << 5)) == 0, "refused resume never counts as a switch");
+    /* 票 T8 §7 D8 (第 3 の park 点 = ポーリング型の 1 周だけの譲り) */
+    check((bad & (1u << 6)) == 0, "resume needs the poll mark (WAIT_POLL)");
+    check((bad & (1u << 7)) == 0, "poll yield is throttled to one PIT tick");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  画面の所有者 (票 T8 D1 / D1a)                                            */
+/*                                                                          */
+/*  全画面 GFX の持ち主は 1 つで、gfx_init で移り、回収で WM へ戻る。ここが  */
+/*  緩むと「プログラムが抜けたのに GUI が戻らない」「宣言していないプログラム */
+/*  が黙って画面を壊す」の両方が起きる。                                     */
+/* ------------------------------------------------------------------------ */
+static void test_gfx_owner(void)
+{
+    u32 bad = appslot_gfx_owner_selftest();
+    check((bad & (1u << 0)) == 0, "gfx owner moves on claim, returns on exit");
+    check((bad & (1u << 1)) == 0, "gfx claim without OS32X_FLAG_GFX is refused");
+    check((bad & (1u << 2)) == 0, "OS32X_FLAG_CUI_ONLY refused only from GUI");
 }
 
 int kselftest_run(void)
@@ -419,6 +438,7 @@ int kselftest_run(void)
     test_con_sink_render_gate();
     test_kbd_inject();
     test_resume_mark();
+    test_gfx_owner();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

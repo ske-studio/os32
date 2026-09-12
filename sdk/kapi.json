@@ -1,5 +1,5 @@
 {
-  "version": 47,
+  "version": 48,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -60,12 +60,14 @@
     {
       "name": "gfx_init",
       "ret": "void",
-      "args": []
+      "args": [],
+      "target": "gfx_kapi_init"
     },
     {
       "name": "gfx_init_200",
       "ret": "void",
-      "args": []
+      "args": [],
+      "target": "gfx_kapi_init_200"
     },
     {
       "name": "gfx_shutdown",
@@ -1357,6 +1359,11 @@
     {
       "name": "kbd_inject_pending",
       "ret": "u32",
+      "args": []
+    },
+    {
+      "name": "gfx_screen_owner",
+      "ret": "i32",
       "args": []
     }
   ]

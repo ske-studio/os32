@@ -217,6 +217,28 @@ impl DisplayApp<'_> {
         true
     }
 
+    /// OS32X ヘッダの宣言 (票 T8 D7)。開けない / 読めないものは
+    /// [`prompt::Kind::Plain`] = 「止めない」に倒す (判定は `prompt::classify`)。
+    fn header_kind(path: &prompt::Path) -> prompt::Kind {
+        let mut hdr = [0u8; prompt::OS32X_HDR_SIZE];
+        // SAFETY: libos32gui::init initialized os32api. The pointer is to a
+        // private NUL-terminated buffer and sys_open only reads it (mode 0 =
+        // O_RDONLY); hdr is a private buffer of exactly the length passed.
+        let fd = unsafe { (os32api::api().sys_open)(path.as_ptr(), 0) };
+        if fd < 0 {
+            return prompt::Kind::Plain;
+        }
+        let n = unsafe {
+            (os32api::api().sys_read)(fd, hdr.as_mut_ptr(), prompt::OS32X_HDR_SIZE as u32)
+        };
+        // SAFETY: fd came from the sys_open above and is not used afterwards.
+        unsafe { (os32api::api().sys_close)(fd) };
+        if n < prompt::OS32X_HDR_SIZE as i32 {
+            return prompt::Kind::Plain;
+        }
+        prompt::classify(&hdr)
+    }
+
     /// Enter で行を確定する (票 E3 / E5)。
     fn confirm(&mut self, ui: &mut Ui) {
         /* 行は Copy で持ち出す — 以後 self を触っても借りが残らない。 */
@@ -246,6 +268,15 @@ impl DisplayApp<'_> {
             self.line.clear();
             return;
         };
+        /* 入口 (票 T8 D7): OS32X ヘッダを読み、VRAM を直接触る CPL=0 プログラム
+         * (v86 / VDM = `mkos32x --cpl0`) は GUI から起動しない。カーネルも GUI 中は
+         * `OS32_ERR_INVAL` で拒むが、ここで止めれば接続モードにも入らずに済む。 */
+        if Self::header_kind(path) == prompt::Kind::CuiOnly {
+            /* ローカル出力。con_sink は通らない (票 E3)。 */
+            self.echo(&prompt::message(b"cui only: ", name));
+            self.line.clear();
+            return;
+        }
         let Some(cmd) = prompt::command_line(path, args) else {
             self.echo(&prompt::message(b"command line too long: ", name));
             self.line.clear();

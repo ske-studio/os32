@@ -190,9 +190,10 @@ extern i32 __cdecl wrap_con_sink_stat(u32 *pending, u32 *dropped);
 extern u32 __cdecl wrap_sys_ram_kb(void);
 extern i32 __cdecl wrap_kbd_inject(const u8 *utf8, u32 len);
 extern u32 __cdecl wrap_kbd_inject_pending(void);
+extern i32 __cdecl wrap_gfx_screen_owner(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 47;
+kapi->version = 48;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -386,5 +387,6 @@ kapi->version = 47;
     kapi->sys_ram_kb = wrap_sys_ram_kb;
     kapi->kbd_inject = wrap_kbd_inject;
     kapi->kbd_inject_pending = wrap_kbd_inject_pending;
+    kapi->gfx_screen_owner = wrap_gfx_screen_owner;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

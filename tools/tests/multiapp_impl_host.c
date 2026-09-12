@@ -145,6 +145,19 @@ static int ma_start(u32 pages, int gui)
     return id;
 }
 
+/* exec_launch が起動時にスロットへ書く 2 つ (ctx->cpl3 = 1 / ctx->hdr_flags =
+ * hdr->flags) を、立てたあとに写す。票 T8 の判定材料はこの 2 つだけ。 */
+static int ma_start_gfx(u32 pages, int gui, u32 hdr_flags)
+{
+    int id = ma_start(pages, gui);
+    AppSlot *a;
+    if (id < 0) return id;
+    a = appslot_at(id);
+    a->cpl3 = 1;
+    a->hdr_flags = hdr_flags;
+    return id;
+}
+
 /* ---- --cpl0 の子 (exec/exec.c の exec_cpl0_claim / exec_cpl0_release) ----
  * 実物は帯 [MEM_EXEC_LOAD_ADDR, mem_end) を **丸ごと** pgalloc_mark_used し、
  * 最後の 1 本が終わったときに丸ごと free する。効くのは「丸ごと」という点
@@ -167,22 +180,50 @@ static void ma_cpl0_release(void)
 /* exec_launch の CPL=0 経路をその**順番のまま**なぞる (決裁 2026-09-11):
  *   池の admit → want_ring3 の判定 → cpl0 の admit → claim → commit
  * 拒否は claim より前でなければならない (claim も alloc もしないこと)。 */
-static int ma_start_cpl0(int is_shell)
+/* gui は exec_launch の gui_arg (0 = CUI の exec_run / 1 = GUI の exec_start)。
+ * 票 T8 D1 で「GUI からの --cpl0 は常に拒否」が入ったので、拒否の戻り値を
+ * 潰さずそのまま返す (以前は一律 OS32_ERR_FULL に丸めていた)。 */
+static int ma_start_cpl0_gui(int is_shell, int gui)
 {
     int id;
+    int rc;
     if (is_shell) {
         /* exec_launch の is_shell 経路: 池も枚数勘定も帯の claim も通らない */
-        if (appslot_cpl0_admit(1) < 0) return OS32_ERR_FULL;
+        rc = appslot_cpl0_admit(1, gui);
+        if (rc < 0) return rc;
         appslot_shell_commit();
         return APP_ID_SHELL;
     }
-    id = appslot_start_admit(0, 0, 0);       /* 池だけ。状態は変えない */
+    id = appslot_start_admit(gui, 0, 0);     /* 池だけ。状態は変えない */
     if (id < 0) return id;
     if (appslot_launch_is_app(0, OS32X_FLAG_FORCE_CPL0) != 0)
         return OS32_ERR_INVAL;               /* --cpl0 はアプリ帯を使わない */
-    if (appslot_cpl0_admit(0) < 0) return OS32_ERR_FULL;
+    rc = appslot_cpl0_admit(0, gui);
+    if (rc < 0) return rc;
     ma_cpl0_claim();
-    appslot_start_commit(id, 0, 0);
+    appslot_start_commit(id, gui, 0);
+    H.turn_used[id] = 1;
+    H.last_run = id;
+    return id;
+}
+
+static int ma_start_cpl0(int is_shell) { return ma_start_cpl0_gui(is_shell, 0); }
+
+/* ---- CUI 専用の宣言 (票 T8-2) — exec_launch の順番のまま ----------------
+ *   池の admit (状態は変えない) → ヘッダ読み → cui_only の admit → 起動。
+ * 拒否は池の消費より後・commit より前でなければならない (池も帯も動かさない
+ * こと)。宣言以外は普通の CPL=3 アプリなので --cpl0 の枝は通らない。 */
+static int ma_start_cui_only(int gui)
+{
+    int id = appslot_start_admit(gui, 0, 0);     /* 池だけ。状態は変えない */
+    AppSlot *a;
+    if (id < 0) return id;
+    if (appslot_cui_only_admit(gui, OS32X_FLAG_CUI_ONLY) < 0)
+        return OS32_ERR_INVAL;
+    appslot_start_commit(id, gui, 0);
+    a = appslot_at(id);
+    a->cpl3 = 1;
+    a->hdr_flags = OS32X_FLAG_CUI_ONLY;
     H.turn_used[id] = 1;
     H.last_run = id;
     return id;
@@ -244,6 +285,40 @@ static int ma_resume_kbd(int id)
     return 0;
 }
 
+/* ---- T8 §7 D8: 第 3 の park 点 (GUI 中のポーリング型の協調 yield) ------ */
+/* K7 の 2 本と同じ扱い。表 (appslot.c) は実物で、exec/exec.c の
+ * exec_park_poll / exec_resume の **poll 分岐だけ** をここに写す。写した分は
+ * 3 行 — 印を見て注入リングから 1 バイト取り、空なら **-1 (キーなし)** を
+ * EAX に入れる (WAIT_KEY と違い、空でも起こす)。
+ * now_tick は drivers/kbd.c が tick_count から渡す値の差し替え。 */
+static int ma_park_poll(u32 now_tick)
+{
+    int rc = appslot_park_poll_check(now_tick);
+    if (rc < 0) return rc;
+    appslot_park_poll_commit();
+    return 0;
+}
+
+static int ma_resume_poll(int id)
+{
+    AppSlot *a;
+    u8 ch;
+    int rc = appslot_resume_check(id);
+    if (rc < 0) return rc;
+    a = appslot_get(id);
+    if (a->parked_from_poll) {
+        ch = 0;
+        if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
+        else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
+    } else {
+        a->frame[APP_FRAME_EAX] = 0;
+    }
+    appslot_resume_commit(id);
+    H.turn_used[id] = 1;
+    H.last_run = id;
+    return 0;
+}
+
 static int ma_res_add(int kind, int n)
 {
     int owner = res_owner_get();
@@ -255,10 +330,12 @@ static int ma_res_add(int kind, int n)
 
 /* 実物の回収の並び (exec_exit): fd_redirect_reset_owned / vfs_close_owned /
  * pipe_free_owned / shm_free_owned / db_cleanup_owned / gui_owner_exit —
- * 全部この 1 つの ID で呼ぶ。ハーネスは「その ID の分だけ消える」を数える。 */
+ * 全部この 1 つの ID で呼ぶ。ハーネスは「その ID の分だけ消える」を数える。
+ * 票 T8 D1 で (11) 画面の所有者が並びの末尾に加わった。こちらは実物を呼ぶ。 */
 static void ma_reclaim_res(int id)
 {
     int k;
+    appslot_gfx_owner_exit(id);
     for (k = 0; k < MA_RES_KINDS; k++) H.res[id][k] = 0;
     H.slot[id] = -1;
     H.input_ready[id] = 0;
@@ -982,7 +1059,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
 
     /* (a) 生存アプリなし = 従来どおり立つ。帯を丸ごと claim する。 */
     ma_init(4096);
-    check(appslot_cpl0_admit(0) == 0,
+    check(appslot_cpl0_admit(0, 0) == 0,
           "19a 生存アプリが 0 本なら --cpl0 の子は通る");
     check(ma_start_cpl0(0) == APP_ID_MIN,
           "19b 生存アプリなしの --cpl0 の子は従来どおり ID 2 で立つ");
@@ -1022,7 +1099,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
           "19l 下ごしらえ: GUI アプリ 1 本が park 中で WM top-level");
     free0 = H.free_pages;
     /* && で短絡させない (RED でも後ろが素通りしてしまう) */
-    r = appslot_cpl0_admit(0);
+    r = appslot_cpl0_admit(0, 0);
     check(r == OS32_ERR_FULL,
           "19m park 中のアプリが 1 本でも居れば判定で弾かれる");
     r = ma_start_cpl0(0);
@@ -1039,7 +1116,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
     ma_init(4096);
     fill_four(100);
     free0 = H.free_pages;
-    r = appslot_cpl0_admit(0);
+    r = appslot_cpl0_admit(0, 0);
     check(appslot_live() == 4 && r == OS32_ERR_FULL,
           "19q 4 本生きていれば --cpl0 の判定でも弾かれる");
     /* 4 本のときは池も尽きているので ma_start_cpl0 の戻りは同じ
@@ -1067,7 +1144,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
     ma_gui_call(MA_OP_WAIT);
     ma_park();
     free0 = H.free_pages;
-    check(appslot_cpl0_admit(1) == 0,
+    check(appslot_cpl0_admit(1, 0) == 0,
           "19v シェルは --cpl0 の判定の対象外 (アプリが生きていても通る)");
     check(ma_start_cpl0(1) == APP_ID_SHELL && H.cpl0_children == 0 &&
           H.free_pages == free0,
@@ -1261,6 +1338,326 @@ static void case_wait_key(void)
     kbd_inject_discard();
 }
 
+
+/* ======================================================================== */
+/*  ケース 20 — 画面の所有者 (票 T8 D1 / D1a / D3、2026-09-12)               */
+/*                                                                          */
+/*  全画面 GFX プログラムが gshell 配下で走ると、画面の持ち主が 1 本に決まり  */
+/*  ((a) 遷移)、宣言していないプログラムは画面を取れず ((b) 拒否)、VRAM を    */
+/*  直接触る --cpl0 は GUI から起動できない ((c))。3 つとも実物の            */
+/*  exec/appslot.c を叩く。                                                  */
+/* ======================================================================== */
+static void case_gfx_screen_owner(void)
+{
+    int id, other;
+    u32 rej0;
+
+    /* --- (a) 遷移: gfx_init で取り、回収で WM へ戻る ------------------- */
+    ma_init(4096);
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20a 起動直後の画面の所有者は WM (1)");
+
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    check(id == APP_ID_MIN, "20b 下ごしらえ: 宣言付きの GFX アプリが 1 本立つ");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20c 起動しただけでは画面は WM のまま (gfx_init を呼んでいない)");
+
+    check(appslot_gfx_claim(0) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20d CUI 中 (con_sink 無効) は所有者を触らない");
+
+    check(appslot_gfx_claim(1) == 0, "20e GUI 中の gfx_init は通る");
+    check(appslot_gfx_owner() == id,
+          "20f 画面の所有者は gfx_init を呼んだアプリへ移る");
+
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == id,
+          "20g 同じアプリが二度呼んでも所有者は変わらない");
+
+    appslot_gfx_owner_exit(GFX_OWNER_WM);
+    check(appslot_gfx_owner() == id,
+          "20h 他人 (WM) の回収では所有者は戻らない");
+
+    check(ma_exit(0) == 0, "20i アプリが終了する");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20j 所有者の回収で画面は WM へ戻る (D1)");
+
+    /* kill (CTRL+STOP / exec_kill) でも同じ経路を通る。 */
+    ma_init(4096);
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    appslot_gfx_claim(1);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    check(appslot_gfx_owner() == id,
+          "20k park しただけでは画面はアプリのまま (WM は上書きしない)");
+    check(ma_kill(id) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20l exec_kill で畳んでも画面は WM へ戻る");
+
+    /* 2 本目が取った画面は、1 本目の回収では戻らない。 */
+    ma_init(4096);
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    other = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    check(other == APP_ID_MIN + 1, "20m 下ごしらえ: 2 本目の GFX アプリ");
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == other,
+          "20n 2 本目が gfx_init を呼べば画面は 2 本目のもの");
+    ma_exit(0);
+    check(appslot_gfx_owner() == GFX_OWNER_WM, "20o 2 本目の回収で WM へ戻る");
+    check(ma_resume(id) == 0, "20p 1 本目を起こす");
+    ma_exit(0);
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20q 画面を持っていない 1 本目の回収では所有者は動かない");
+
+    /* --- (b) 宣言なしの拒否 (D1a) --------------------------------------- */
+    ma_init(4096);
+    rej0 = gfx_init_reject_count;
+    id = ma_start_gfx(100, 1, 0);        /* app.conf に gfx 列が無いプログラム */
+    check(id == APP_ID_MIN, "20r 下ごしらえ: 宣言の無いアプリが 1 本立つ");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL,
+          "20s GUI 中に宣言の無い CPL=3 が gfx_init を呼べば ERR_INVAL");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20t 拒否で画面は WM のまま (gfx_init は呼ばれない)");
+    check(gfx_init_reject_count == rej0 + 1,
+          "20u 拒否は gfx_init_reject_count に載る");
+    check(appslot_gfx_claim(0) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20v CUI 中は宣言が無くても従来どおり通る");
+    check(gfx_init_reject_count == rej0 + 1,
+          "20w CUI 中の素通しは拒否として数えない");
+
+    /* CPL=0 の子 (--cpl0) は宣言の有無に関わらず所有者を取らない。 */
+    appslot_at(id)->cpl3 = 0;
+    appslot_at(id)->hdr_flags = OS32X_FLAG_GFX;
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20x CPL=0 の子は画面の所有者にならない");
+    ma_exit(0);
+
+    /* WM 自身 (シェル帯、owner 1) の復帰の gfx_init は素通し。 */
+    check(appslot_cur() == APP_ID_SHELL, "20y WM top-level へ戻っている");
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20z WM の復帰の gfx_init は所有者を動かさない");
+
+    /* --- (c) --cpl0 は GUI から起動できない (D1) ------------------------ */
+    ma_init(4096);
+    check(appslot_cpl0_admit(0, 1) == OS32_ERR_INVAL,
+          "20A 生存アプリが 0 本でも GUI からの --cpl0 は ERR_INVAL");
+    check(ma_start_cpl0_gui(0, 1) == OS32_ERR_INVAL,
+          "20B exec_start 経路の --cpl0 は起動しない");
+    check(appslot_live() == 0 && H.cpl0_children == 0 &&
+          H.free_pages == 4096,
+          "20C 拒否は池も帯も 1 つも動かさない");
+    check(appslot_alloc_id() == APP_ID_MIN,
+          "20D 拒否は池を消費しない");
+    check(ma_start_cpl0_gui(0, 0) == APP_ID_MIN,
+          "20E CUI (exec_run) 経路は従来どおり通る");
+    check(H.cpl0_children == 1, "20F CUI からは帯を claim する");
+    ma_exit_cpl0();
+
+    /* シェル (ネスト段 0) の載せ替えは gui に関わらず対象外。 */
+    check(appslot_cpl0_admit(1, 1) == 0,
+          "20G シェル帯の載せ替えは GUI 判定の対象外");
+}
+
+
+/* ======================================================================== */
+/*  ケース 21 — CUI 専用の宣言と「拒否は畳む」 (票 T8-2、2026-09-12)         */
+/*                                                                          */
+/*  受入 F5 の不合格から。T8 の砦は OS32X_FLAG_FORCE_CPL0 だけだったが、      */
+/*  `userland/cmds/v86.bin` の flags は 0x0 — v86 は CPL=3 のプログラムで、   */
+/*  V86 へは KAPI (v86_*) を通してカーネル側から入る。宣言ビット              */
+/*  OS32X_FLAG_CUI_ONLY を 1 つ足して GUI からの起動そのものを断つ。          */
+/*                                                                          */
+/*  受入 F6 の実測から。宣言の無い gfx_init を「断って続行させる」と、        */
+/*  プログラムは失敗を知らないまま描画 KAPI と VRAM 直書きで描き続け GUI を   */
+/*  壊した。拒否 = そのアプリを畳む (abort_req → syscall 出口)。             */
+/* ======================================================================== */
+static void case_cui_only_and_reject_kill(void)
+{
+    int id;
+    u32 rej0;
+
+    /* --- (a) 純関数: GUI からだけ断る ---------------------------------- */
+    check(appslot_cui_only_admit(1, OS32X_FLAG_CUI_ONLY) == OS32_ERR_INVAL,
+          "21a GUI からの CUI 専用プログラムは ERR_INVAL");
+    check(appslot_cui_only_admit(0, OS32X_FLAG_CUI_ONLY) == 0,
+          "21b CUI (exec_run) からは従来どおり通る");
+    check(appslot_cui_only_admit(1, 0) == 0,
+          "21c 宣言の無いプログラムは GUI からでも通る");
+    check(appslot_cui_only_admit(1, (u32)(OS32X_FLAG_CUI_ONLY |
+                                          OS32X_FLAG_GFX)) == OS32_ERR_INVAL,
+          "21d 他のビットと混ざっていても宣言を見る");
+    check(appslot_cui_only_admit(1, OS32X_FLAG_FORCE_CPL0) == 0,
+          "21e FORCE_CPL0 は別の砦 (v86.bin は flags 0x0 で素通りしていた = F5)");
+
+    /* --- (b) exec_start 経路 (GUI) は起動しない、CUI は通る ------------- */
+    ma_init(4096);
+    check(ma_start_cui_only(1) == OS32_ERR_INVAL,
+          "21f exec_start 経路の CUI 専用プログラムは起動しない");
+    check(appslot_live() == 0 && H.free_pages == 4096,
+          "21g 拒否は池も枚数も 1 つも動かさない");
+    check(appslot_alloc_id() == APP_ID_MIN, "21h 拒否は池を消費しない");
+    check(ma_start_cui_only(0) == APP_ID_MIN,
+          "21i CUI (exec_run) 経路は従来どおり通る");
+    check(appslot_live() == 1, "21j 通れば 1 本立つ");
+    ma_exit(0);
+
+    /* --- (c) gfx_init の拒否はアプリを畳む (受入 F6 の実測) ------------- */
+    ma_init(4096);
+    rej0 = gfx_init_reject_count;
+    id = ma_start_gfx(100, 1, 0);        /* 宣言の無い CPL=3 */
+    check(id == APP_ID_MIN, "21k 下ごしらえ: 宣言の無いアプリが 1 本立つ");
+    check(appslot_at(id)->abort_req == 0, "21l 起動直後は畳む要求は無い");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL,
+          "21m GUI 中の宣言なしの gfx_init は拒否される");
+    check(appslot_at(id)->abort_req == 1,
+          "21n 拒否したアプリは abort_req を負う (syscall 出口で畳まれる)");
+    check(gfx_init_reject_count == rej0 + 1,
+          "21o 数えるのは gfx_init_reject_count のまま (専用カウンタは増やさない)");
+    appslot_at(id)->abort_req = 0;
+    check(appslot_gfx_claim(0) == 0 && appslot_at(id)->abort_req == 0,
+          "21p CUI 中の素通しは畳まない");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL &&
+          appslot_at(id)->abort_req == 1,
+          "21q 二度目の拒否でも畳む要求は立つ");
+    ma_exit(0);
+    check(appslot_live() == 0, "21r 畳んだ後は 1 本も残らない");
+}
+
+/* ======================================================================== */
+/*  ケース 22 — ポーリング型の協調 yield (票 T8 §7 D8、2026-09-12)           */
+/*                                                                          */
+/*  GUI 中に kbd_trygetchar が回っているだけのプログラム (gfx200_test の FPS  */
+/*  段) は、K7 の park 点 (WAIT_KEY = キーが来るまで起こさない) では譲れない  */
+/*  — 「無ければ -1」で戻る約束を破ってしまう。そこで **1 周だけ** 譲る第 3   */
+/*  の park 点を足した。ここで固定するのは 5 つ:                              */
+/*    (a) park すると WAIT_POLL + 印 + cur はシェル帯 (exec_app_state は 4)   */
+/*    (b) 注入が空でも resume は通り、EAX に **-1** が入る (WAIT_KEY との差)  */
+/*    (c) 注入があれば 1 バイトだけ EAX に入る                                */
+/*    (d) **前回の譲りから tick が進んでいなければ park しない** (10ms に     */
+/*        1 回まで)。弾き数 ring3_park_reject_count には載らない              */
+/*    (e) 譲り中のアプリは exec_kill で畳める / 印なしの resume は STALE      */
+/* ======================================================================== */
+static void case_poll_yield(void)
+{
+    int id;
+    AppSlot *a;
+    u32 sw0, bad0, rej0, yield0, kbdpark0;
+    u32 t = 1000;
+
+    ma_init(4096);
+    kbd_inject_discard();
+    appslot_poll_yield_reset();
+    host_reader = 2;
+    id = ma_start(100, 1);
+    check(id == APP_ID_MIN, "22a GUI アプリが 1 本走る");
+    sw0 = ring3_switch_count;
+    bad0 = ring3_resume_bad_frame_count;
+    rej0 = ring3_park_reject_count;
+    yield0 = ring3_poll_yield_count;
+    kbdpark0 = ring3_kbd_park_count;
+
+    /* (a) OP_WAIT の外でも、tick が進んでいれば 1 周だけ譲れる */
+    check(ma_park_poll(t) == 0, "22b tick が進んでいれば譲れる");
+    check(ring3_poll_yield_count == yield0 + 1,
+          "22c ring3_poll_yield_count が増える");
+    check(ring3_park_reject_count == rej0, "22d 正常な譲りは弾き数に載らない");
+    check(ring3_kbd_park_count == kbdpark0, "22e WAIT_KEY の勘定とは別");
+    a = appslot_get(id);
+    check(a->state == APP_STATE_WAIT_POLL && a->parked_from_poll == 1,
+          "22f WAIT_POLL + ポーリング由来の印");
+    check(a->parked_from_wait == 0 && a->parked_from_kbd == 0,
+          "22g 他の 2 つの印は立たない");
+    check(appslot_cur() == APP_ID_SHELL && res_owner_get() == APP_ID_SHELL,
+          "22h cur と owner はシェル帯 (WM top-level) へ戻る");
+    check(appslot_state(id) == APP_STATE_WAIT_POLL,
+          "22i exec_app_state は 4 を返す");
+
+    /* (b) 注入が空でも起こす。EAX は -1 (キーなし) */
+    check(kbd_inject_pending() == 0, "22j 注入リングは空");
+    check(ma_resume_poll(id) == 0, "22k 空でも resume は通る (WAIT_KEY との差)");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)(i32)-1,
+          "22l EAX には -1 (キーなし) が入る");
+    check(ring3_switch_count == sw0 + 1, "22m 成功は switch_count を 1 増やす");
+    check(appslot_get(id)->parked_from_poll == 0,
+          "22n 起こした時点で印は消える");
+    check(appslot_get(id)->state == APP_STATE_RUNNING, "22o 走っている状態へ戻る");
+
+    /* (d) 同じ tick では 2 度譲らない。弾き数にも載らない */
+    rej0 = ring3_park_reject_count;
+    yield0 = ring3_poll_yield_count;
+    check(ma_park_poll(t) == OS32_ERR_AGAIN,
+          "22p 同じ tick では譲らない (10ms に 1 回まで)");
+    check(ring3_poll_yield_count == yield0, "22q 譲っていないので数えない");
+    check(ring3_park_reject_count == rej0,
+          "22r 間引きは違反ではないので弾き数に載らない");
+    check(appslot_get(id)->state == APP_STATE_RUNNING &&
+          appslot_cur() == id, "22s 走ったまま (park していない)");
+
+    /* (c) tick が進み、注入があれば 1 バイトだけ EAX に入る */
+    t++;
+    check(ma_park_poll(t) == 0, "22t tick が 1 つ進めばまた譲れる");
+    res_owner_set(2);                      /* 端末アプリ (読み手) から注ぐ */
+    check(kbd_inject((const u8 *)"ab", 2) == 2, "22u 端末アプリが 2 バイト注ぐ");
+    res_owner_set(APP_ID_SHELL);           /* resume を呼ぶのは WM */
+    check(ma_resume_poll(id) == 0, "22v 注入があっても resume は通る");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'a',
+          "22w EAX には最初の 1 バイトだけが入る");
+    check(kbd_inject_pending() == 1, "22x 残りは 1 バイト (まとめて渡さない)");
+
+    /* (e) 印なしの resume は STALE / 譲り中でも畳める */
+    t++;
+    check(ma_park_poll(t) == 0, "22y もう一度譲れる");
+    a = appslot_get(id);
+    a->parked_from_poll = 0;
+    a->parked_from_kbd = 1;                /* kbd の印だけに見せる */
+    check(ma_resume_poll(id) == OS32_ERR_STALE,
+          "22z WAIT_POLL を kbd の印では起こせない");
+    check(ring3_resume_bad_frame_count == bad0 + 1,
+          "22A 印の取り違えは bad_frame_count に載る");
+    check(appslot_kill_check(id) == 0,
+          "22B 譲り中のアプリは exec_kill で畳める");
+    a->parked_from_kbd = 0;
+    a->parked_from_poll = 1;
+    check(ma_resume_poll(id) == 0, "22C 印を戻せば起こせる (残りの 'b')");
+    check(appslot_get(id)->frame[APP_FRAME_EAX] == (u32)'b',
+          "22D 2 バイト目が次の resume で届く");
+    check(kbd_inject_pending() == 0, "22E 注入リングは空に戻る");
+
+    /* 走っている本人は kill できない / CUI の入れ子の子は譲れない */
+    check(appslot_kill_check(id) == OS32_ERR_INVAL,
+          "22F 走っている間は exec_kill を呼べない");
+    {
+        u32 rej1;
+        int child;
+        t++;
+        child = ma_start(10, 0);
+        check(child > 0, "22G CUI の入れ子の子が立つ");
+        rej1 = ring3_park_reject_count;
+        check(ma_park_poll(t) == OS32_ERR_INVAL,
+              "22H CUI の入れ子の子はポーリングでも譲れない");
+        check(ring3_park_reject_count == rej1 + 1,
+              "22I その拒否は park_reject_count に載る");
+        ma_exit(0);
+    }
+    ma_exit(0);
+    t++;
+    check(appslot_cur() == APP_ID_SHELL, "22J 畳んだら WM top-level へ戻る");
+    rej0 = ring3_park_reject_count;
+    check(ma_park_poll(t) == OS32_ERR_INVAL,
+          "22K シェル帯 (WM top-level) からの譲りは弾かれる");
+    check(ring3_park_reject_count == rej0 + 1, "22L その拒否は弾き数に載る");
+
+    /* (f) 間引きは表の検査より**先**で、控えは弾かれた試みでも進む。
+     * ポーリングは秒間数万回来るので、譲れない文脈の連打で
+     * ring3_park_reject_count が跳ね上がってはいけない。 */
+    check(ma_park_poll(t) == OS32_ERR_AGAIN,
+          "22M 同じ tick の連打は間引きで止まる (間引きは表の検査より先)");
+    check(ring3_park_reject_count == rej0 + 1,
+          "22N 弾き数も tick ごと 1 回まで");
+
+    /* 控えの巻き戻し: reset で「次の 1 回」が必ず通る */
+    appslot_poll_yield_reset();
+    kbd_inject_discard();
+}
+
 int main(void)
 {
     failures = 0;
@@ -1287,6 +1684,9 @@ int main(void)
     case_cpl0_child_needs_no_live_apps();
     case_abort_clear();
     case_wait_key();
+    case_gfx_screen_owner();
+    case_cui_only_and_reject_kill();
+    case_poll_yield();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

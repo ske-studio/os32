@@ -1,4 +1,4 @@
-# KernelAPI v47 仕様書
+# KernelAPI v48 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -89,6 +89,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v45 | **実装済み (2026-09-11、K5c)** | GUI v1.3 K5: `exec_abort_clear` — CTRL+STOP の宛先を**フォーカス窓のアプリ**にする (契約 T6、決裁 A1)。IRQ1 は走っているアプリにしか要求を立てられないので、WM が本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` する。owner 1 (シェル帯) 専用 | [tasks/gui/v13/TASK_K5B_gshell.md §決裁](tasks/gui/v13/TASK_K5B_gshell.md) |
 | v46 | **実装済み (2026-09-12、K6C)** | GUI v1.3 K6C: console シンク `con_sink_read` / `con_sink_stat` — GUI モード中のカーネル出力をリングに溜め、端末アプリ (外部) が吸う。読み手は 1 本 (owner 回収)。同じ追記で `sys_ram_kb` (K6-RAM 決裁 (2): 起動時に登録した実 RAM の合計 KB) も足した | [tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md)、[TASK_K6_ram_ceiling.md](tasks/gui/v13/TASK_K6_ram_ceiling.md) |
 | v47 | **実装済み (2026-09-12、K7-K)** | GUI v1.3 K7 入力統合: `kbd_inject` (con_sink の読み手専用、UTF-8 を 256B の注入リングへ) / `kbd_inject_pending` (未読バイト数、誰でも可)。GUI 中の `kbd_getchar` / `kbd_getkey` は第 2 の park 点 (`APP_STATE_WAIT_KEY`) になり、`exec_resume` が注入リングから 1 バイトを EAX に入れる。同じ追記でエラー番号 -14 `OS32_ERR_AGAIN` を取った | [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
+| v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -477,6 +478,36 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   こちらは数えない (15MB 機が 17408 KB を名乗る問題。K6-RAM 決裁 (2))。RAM が 15MB より
   下で止まる機械では両者が一致する。実体は `kernel/memory_boot.c` の `memory_boot_ram_kb()`。
 
+### 画面の所有者 (v48)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x308 | gfx_screen_owner | `i32(void)` |
+
+全画面 GFX は「1 枚の画面を丸ごと持っていく」操作なので、**持ち主をカーネルが 1 つだけ覚える**。
+票 [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) §2 の D1 / D1a / D3。
+
+- `gfx_screen_owner()`: いま画面を握っている ID。**1 = シェル帯 (WM)** / 2〜5 = アプリ。
+  誰でも呼べる (所有権は要らない)。WM (gshell) は `exec_start` / `exec_resume` から戻った
+  直後にこれを見て、1 以外なら全画面モードに入り (合成も present もしない)、1 に戻っていれば
+  復帰の描き直しに入る。実体は `exec/appslot.c` の `g_gfx_owner`。
+- **取る**のは `gfx_init` / `gfx_init_200` の KAPI ラッパだけ。GUI 中 (console シンクが有効な間)
+  に CPL=3 の非シェルが呼ぶと、所有者がその ID へ移る。CUI 中は所有者を触らない (常に 1) —
+  gshell が居らず、全画面は従来どおり誰でも取れる。gshell 配下の GUI アプリは
+  `libos32gfx_attach()` で取り付くだけで `gfx_init` を呼ばないので、所有者にはならない。
+- **返す**のは回収 (`exec_reclaim_owned`) だけ。正常終了 / `exec_kill` / fault / CTRL+STOP の
+  どの経路で畳まれても、所有者がその ID なら 1 (WM) へ戻る。FD / SHM / DB / GUI 窓と同じ並び。
+- **宣言なしは断る (D1a)**: GUI 中に `OS32X_FLAG_GFX` (`mkos32x --gfx`) の立っていない CPL=3 が
+  `gfx_init` / `gfx_init_200` を呼んだら、**本体を呼ばずに何もしない**。`gfx_init` は `void` なので
+  戻り値では知らせられない — 断った回数はカーネルシンボル `gfx_init_reject_count` に積む
+  (KAPI にはしない)。CUI 中は従来どおり何でも通す。
+- **`--cpl0` は GUI から起動させない (D1)**: `OS32X_FLAG_FORCE_CPL0` のプログラム (v86 / VDM 系) は
+  VRAM を直接触るので、画面の所有者の外側で画面を壊す。`exec_start` (GUI 経路) は生存アプリの
+  有無に関わらず `OS32_ERR_INVAL` で断る。CUI の `exec_run` は従来どおり (生存アプリが 1 本でも
+  居れば `OS32_ERR_FULL`、居なければ通す)。
+- `gfx_init` を呼ばずに VRAM へ直接書く CPL=3 プログラムは「行儀の悪いプログラム」として扱い、
+  カーネルは守らない。WM の present を捨てる保険 (D2) は落とした (2026-09-12 ユーザー決裁)。
+
 ### データフィールド (構造体末尾)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
@@ -484,8 +515,8 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x308 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x30C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x30C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x310 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

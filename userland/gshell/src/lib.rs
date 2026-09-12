@@ -35,6 +35,8 @@
 //! | `timer.rs`   | アプリタイマ 8 本 (U5) |
 //! | `handler.rs` | `gui_call` ハンドラ (op → 関数表)。X1 / X2 / X3 |
 //! | `multiapp.rs` | アプリ 4 本の譲り合い (D11)。park / resume / 音の排他 |
+//! | `fullscreen.rs` | 全画面 GFX (T8 D4)。所有者 ≠ WM の間は描かない |
+//! | `os32x.rs`   | OS32X ヘッダの宣言ビット (T8 D4 の入口: cpl0 拒否 / gfx 宣言) |
 //! | `pump.rs`    | syscall 境界ポンプ (X4) |
 //! | `reqs.rs`    | 要求 / 応答構造体 (C `os32_gui_shared.h` の写し) |
 
@@ -48,11 +50,13 @@ mod damage;
 mod desktop;
 mod fep;
 mod ffi;
+mod fullscreen;
 mod handler;
 mod input;
 mod lease;
 mod modal;
 mod multiapp;
+mod os32x;
 mod pump;
 mod reqs;
 mod ring;
@@ -72,6 +76,11 @@ use os32api::KernelAPI;
 
 /// 「CUI へ」で戻る先 (契約 T9)。
 static CUI_SHELL: &[u8] = b"/sys/shell.bin\0";
+
+/// [`run_program`] が入口 (票 T8 D4) で起動を断ったときの戻り値。
+/// `0` = 「起動しなかったがエラー表示は済んでいる」— `rc < 0` の一般エラー
+/// (`Launch failed ...`) を呼ぶ側に出させないため、`0` (park 前に終了) と同じ扱い。
+const RUN_REFUSED: i32 = 0;
 
 /// 起動設定 (`GUI=0/1`)。CUI へ戻すときにここを書き換える (契約 S6 の 4)。
 /// 正典は `include/config.h` の `SYS_SYSTEM_CFG`。
@@ -183,6 +192,15 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 fn standalone_loop(st: &mut wm::GuiState) -> bool {
     while !st.quit {
         wm::wm_cycle(st, input::Ctx::Standalone);
+        /* 全画面中の CTRL+STOP は**所有者宛** (票 T8 D4d)。全画面プログラムが
+         * `kbd_getchar` で park していると、待ちの中で畳む X3 の分岐
+         * (`handler.rs` の `abort_seen`) を誰も通らない — top-level に居る WM が
+         * ここで宛先 (`multiapp::abort_target` = 所有者) へ振り替える。
+         * 全画面でないときは従来どおり X3 の分岐に任せる (誤爆を足さない)。 */
+        if fullscreen::active() && st.abort_seen {
+            st.abort_seen = false;
+            multiapp::redirect_abort(st, 0);
+        }
         if st.launch_pending {
             st.launch_pending = false;
             launch_app(st);
@@ -198,8 +216,21 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
             return false;
         }
+        /* 全画面の後始末の保険 (票 T8-3、PM 実測 2026-09-12)。所有者が
+         * `exec_kill` / fault で畳まれた経路は `exec_start` / `exec_resume` の
+         * 復帰点を通らないので、所有者の問い合わせが 1 度も走らないことが
+         * ある。全画面中は入力もタイマも実質止まる = 誰も ready にならない
+         * ので、そのまま下の `sys_halt` へ落ちると画面が凍ったまま永久に
+         * 待つ。**全画面中だけ** KAPI 1 本 (`gfx_screen_owner`) で見る。
+         * ここは top-level (owner 1) なので復帰の `gfx_init` を呼んでよい。 */
+        if fullscreen::active() {
+            after_exec(st);
+        }
         /* 止めてあるアプリのうち 1 本を起こす (D11-3 の (2))。起こす相手が
-         * 居る間は halt しない — halt すると次の PIT まで誰も進めない。 */
+         * 居る間は halt しない — halt すると次の PIT まで誰も進めない。
+         * ポーリングで譲った 1 本 (`WAIT_POLL`) もここで起きる (D8 の最下位:
+         * `resume_one` → `pick` → `pick_poll`) ので、この `sys_halt` の側に
+         * 別の判断は要らない。 */
         if multiapp::resume_one(st) {
             continue;
         }
@@ -242,6 +273,9 @@ fn launch_app(st: &mut wm::GuiState) {
 /// | `0` | park より前に終了した (回収済み、`gui_owner_exit` 配送済み) | 何もしない |
 /// | `< 0` | 起動しなかった (`ERR_FULL` = 5 本目 / `ERR_NOMEM` / 見つからない) | 呼び出し元がエラー表示 |
 ///
+/// 入口で断った CPL=0 プログラム (票 T8 D4) は [`RUN_REFUSED`] = `0` を返す —
+/// 理由 (`cui only: <名>`) はここで出したので、呼ぶ側は何も足さない。
+///
 /// アプリが 1 本しか居ない間は誰も park しない (D11-3 の (1) の 1 行目) ので、
 /// `exec_start` は従来の `exec_run` と同じく**アプリが終わるまで戻らない** —
 /// これが「1 本のときは回帰ゼロ」の実体。
@@ -254,6 +288,18 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
     st.abort_seen = false;
     /* フルスクリーン GFX プログラムに備えてパレット全体を退避する (契約 G6/G8)。 */
     let saved = wm::save_palette();
+    /* 入口 (票 T8 D4): OS32X ヘッダの宣言を見る。`--cpl0` は GUI から起動せず
+     * 理由を出す (カーネルの `OS32_ERR_INVAL` が最後の砦)。`--gfx` は
+     * `exec_start` の前に全画面モードの印を立てる — 所有者が付くまでの隙間に
+     * WM が上書きしないため (所有者の問い合わせと二重)。 */
+    match os32x::classify_path(path) {
+        os32x::Kind::CuiOnly => {
+            notify_cui_only(st, path);
+            return RUN_REFUSED;
+        }
+        os32x::Kind::FullScreen => fullscreen::arm(&saved),
+        os32x::Kind::Plain => {}
+    }
     /* `exec_start` は「アプリが最初に park する」まで戻らない。その間、走って
      * いる ID はまだ分かっていない (戻り値そのものなので) ので、譲り合いの表に
      * 「起動が進行中」の印を立てておく (`multiapp::begin_start` の注記)。 */
@@ -262,6 +308,19 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
      * 往復は要らない。生成物は手で触らない ([ABI1])。 */
     let rc = unsafe { (os32api::api().exec_start)(path.as_ptr()) };
     multiapp::end_start(rc);
+    /* 所有者の問い合わせ (票 T8 D3/D4)。全画面に入った / 戻ったはここで決まる。
+     * `rc > 0` (park した) でも全画面はありうる — K7 以降、GFX プログラムは
+     * `kbd_getchar` で park するので `exec_start` は走り切る前に戻る。 */
+    match fullscreen::observe() {
+        /* 画面はプログラムのもの。WM は 1 画素も出さない (門は `wm` 側)。 */
+        fullscreen::Change::Fullscreen => return rc,
+        /* 所有者が WM に戻った = プログラムが抜けた。`rc <= 0` と同じ復帰。 */
+        fullscreen::Change::Restored => {
+            restore_screen(st, &fullscreen::palette());
+            return rc;
+        }
+        fullscreen::Change::None => {}
+    }
     /* 描画モードの復帰は **アプリが抜けたときだけ** (不具合 W-1、2026-09-11)。
      *
      * `gfx_init` は VRAM の両ページをゼロクリアする (`gfx/gfx_core.c`)。
@@ -273,24 +332,81 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
      * `recompute_and_expose` は dirty を 1 つも足さない = `derived_ready` が
      * 偽のまま = 誰も `exec_resume` しない = 露出部が黒のまま残る。
      *
-     * `rc > 0` は「アプリが最初の `OP_WAIT` まで進んで park した」= WM に
-     * attach 済みの GUI アプリで、フルスクリーン GFX で抜けたわけではない
-     * (契約 T1 / gotcha §4-20: gshell 配下のアプリは `libos32gui_attach` を
-     * 使い `gfx_init` を呼ばない)。復帰処理は要らない。 */
+     * ここへ来る `rc > 0` は「アプリが最初の `OP_WAIT` まで進んで park した」
+     * = WM に attach 済みの GUI アプリ (画面は取っていない、上の問い合わせで
+     * 確認済み。契約 T1 / gotcha §4-20)。復帰処理は要らない。 */
     if rc <= 0 {
-        unsafe { (os32api::api().gfx_init)() };
-        /* 画を消した以上、生き残っているアプリには全面を描き直させる
-         * (W-1 の後半: 起動の失敗 / 即終了でも同じ穴が開く)。 */
-        damage::invalidate_all_clients(st);
+        restore_screen(st, &saved);
+        return rc;
     }
     /* 退避しておいた 16 色をそのまま戻し、念のためシステム色を入れ直してから、
      * まだ生きているリースがあれば再適用する。 */
-    wm::restore_palette(&saved);
+    repaint_full(st, &saved);
+    rc
+}
+
+/// 画面を WM の手に戻す (票 T8 D4 の復帰、および不具合 W-1 の `rc <= 0` の枝)。
+///
+/// `gfx_init` は VRAM の両ページをゼロクリアする (`gfx/gfx_core.c`) ので、
+/// **消した以上は生き残っているアプリ全部に全面を描き直させる**
+/// (`invalidate_all_clients`)。遮蔽は露出を生まないので
+/// `recompute_and_expose` だけでは dirty が 1 つも増えず、露出部が黒のまま残る。
+///
+/// 呼ぶのは 2 か所だけ:
+///
+/// - `exec_start` が `rc <= 0` (起動しなかった / park より前に終わった) で戻った
+/// - 全画面 GFX プログラムが抜けて所有者が WM (1) に戻った (`exec_start` /
+///   `exec_resume` のどちらから戻った直後でも)
+fn restore_screen(st: &mut wm::GuiState, saved: &[u8; 48]) {
+    unsafe { (os32api::api().gfx_init)() };
+    damage::invalidate_all_clients(st);
+    repaint_full(st, saved);
+}
+
+/// パレットとリースを戻し、露出を配り直して全面を合成する (`gfx_init` は伴わない)。
+fn repaint_full(st: &mut wm::GuiState, saved: &[u8; 48]) {
+    wm::restore_palette(saved);
     wm::install_system_palette();
     lease::reapply(st);
     visible::recompute_and_expose(st);
     wm::composite_full(st);
-    rc
+}
+
+/// `exec_start` / `exec_resume` から戻った直後の所有者の問い合わせ (票 T8 D3/D4)。
+///
+/// 戻り値 `true` = 全画面中 (WM は描かない)。所有者が WM に戻っていれば
+/// [`restore_screen`] まで済ませて `false` を返す。`exec_resume` の側
+/// (`multiapp::resume_one`) からはこれを呼ぶ。
+pub(crate) fn after_exec(st: &mut wm::GuiState) -> bool {
+    match fullscreen::observe() {
+        fullscreen::Change::Fullscreen => true,
+        fullscreen::Change::Restored => {
+            restore_screen(st, &fullscreen::palette());
+            false
+        }
+        fullscreen::Change::None => false,
+    }
+}
+
+/// `cui only: <名>` (票 T8 D4 の入口)。VRAM を直接触る CPL=0 プログラムは
+/// CUI に降りてから実行してもらう。
+fn notify_cui_only(st: &mut wm::GuiState, path: &[u8; 256]) {
+    const HEAD: &[u8] = b"cui only: ";
+    let mut msg = [0u8; 96];
+    let mut n = 0;
+    while n < HEAD.len() {
+        msg[n] = HEAD[n];
+        n += 1;
+    }
+    let name = os32x::basename(path);
+    let mut i = 0;
+    while i < name.len() && n < msg.len() - 1 {
+        msg[n] = name[i];
+        n += 1;
+        i += 1;
+    }
+    msg[n] = 0;
+    modal::open_wm_message(st, GUI_MODAL_OK, &msg[..=n], modal::WM_PURPOSE_NOTIFY);
 }
 
 /* ================================================================ */

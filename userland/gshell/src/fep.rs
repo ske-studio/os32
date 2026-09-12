@@ -682,6 +682,11 @@ pub fn pre_cycle(st: &mut GuiState) {
 
 /// 周の尻で呼ぶ: 実際に画素を置いて present する (X3 の描画)。
 pub fn post_cycle(st: &mut GuiState) {
+    /* 全画面 GFX 中は画素を置かない (票 T8 D4a)。`pending_draw` は落とさない —
+     * 復帰した最初の周期で未確定行と候補窓を描き直す。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     {
         let f = state();
         if !f.pending_draw {

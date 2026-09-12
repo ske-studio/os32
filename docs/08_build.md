@@ -224,6 +224,39 @@ python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base 
 - `make packages` ターゲットで自動実行 (定義: `tools/package_defs.yaml`)
 - `make iso` で `genisoimage` を使用しISOイメージを生成
 
+#### `build/app.conf` (OS32X ヘッダ設定)
+
+`sdk/mkos32x.py` に渡す引数をプログラムごとに決めるデータファイル。`build/programs.mk` の
+`userland/%.bin` ルールが `awk` で引き、キーはリポジトリルートからの拡張子なしパス
+(例: `userland/tests/blit_test`)。`#` 始まりはコメント、行が無いプログラムは既定値。
+
+| 列 | 意味 | 省略時 |
+|---|---|---|
+| 1 | プログラム名 (キー) | — |
+| 2 | 要求 KAPI バージョン (`--api`) | 7 |
+| 3 | ヒープサイズ (`--heap`)。`0` で mkos32x の既定 | 0 |
+| 4 | `gfx` = 全画面 GFX の宣言 (`--gfx` → `OS32X_FLAG_GFX` = 0x0001)<br>`cui` = CUI 専用の宣言 (`--cui-only` → `OS32X_FLAG_CUI_ONLY` = 0x0010) | 無し |
+
+4 列目は宣言ビットで、`gfx` と `cui` のどちらか 1 つ (または省略)。
+
+`gfx` は「このプログラムは画面を丸ごと取る」という宣言 (票 T8 D1a)。`gfx_init` /
+`gfx_init_200` を呼ぶプログラム — 直接でも `tilemap_init` のようにライブラリ経由でも — に立てる。
+`libos32gfx_attach` だけで gshell の面に取り付く GUI アプリには立てない。立て忘れると GUI 中の
+起動で画面の所有権を取れず、WM が上書きするか カーネルが `gfx_init` を蹴る (蹴られたアプリは
+そのまま畳まれる — 断っただけでは描画 KAPI で描き続けて GUI を壊すため)。
+
+`cui` は「GUI から起動してはいけない」という宣言 (票 T8-2)。`v86_selftest` / `v86_disktest` /
+`v86_boot` / `v86_boot2` を呼ぶ V86 / VDM 系に立てる。これらは CPL=3 のプログラムだが KAPI の
+向こうで低位メモリ・BIOS・テキスト VRAM を丸ごと使うので、`--cpl0` の砦では捕まらない
+(`userland/cmds/v86.bin` の flags は 0x0 だった = 受入 F5 の不合格)。GUI からの `exec_start` は
+`OS32_ERR_INVAL` で断り、CUI からは従来どおり通す。グラフィック VRAM を直接書く検証用
+バイナリ (`ring3_hello` / `ring3_fault` / `ring3_guard`) は app.conf を持たないので
+`build/programs.mk` の explicit ルールで `--cui-only` を付けている。
+
+どちらも `make check-manifests` がソースの呼び出しと突き合わせて検出する (§2b)。
+`apps/` `game/` は staged SDK 側でそれぞれの `Makefile` が `mkos32x` を呼ぶので、
+そちらの GFX プログラムには各リポジトリで `--gfx` を付ける。
+
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 
 OS32 の外部プログラムをビルドするためには、標準Cライブラリ (`newlib` - `libc.a`) と GCCライブラリ (`libgcc.a`) を含んだ `i386-elf` クロスコンパイラ環境が必要です。

@@ -45,7 +45,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[192];
+volatile u32 kapi_hits[193];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -243,6 +243,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     0,  /* sys_ram_kb */
     8,  /* kbd_inject */
     0,  /* kbd_inject_pending */
+    0,  /* gfx_screen_owner */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -440,18 +441,19 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* sys_ram_kb */
     0x0001,  /* kbd_inject: utf8 */
     0x0000,  /* kbd_inject_pending */
+    0x0000,  /* gfx_screen_owner */
 };
 
 void __cdecl wrap_gfx_init(void)
 {
     KAPI_HIT(0);
-    gfx_init();
+    gfx_kapi_init();
 }
 
 void __cdecl wrap_gfx_init_200(void)
 {
     KAPI_HIT(1);
-    gfx_init_200();
+    gfx_kapi_init_200();
 }
 
 void __cdecl wrap_gfx_shutdown(void)
@@ -1586,5 +1588,11 @@ u32 __cdecl wrap_kbd_inject_pending(void)
 {
     KAPI_HIT(191);
     return kbd_inject_pending();
+}
+
+i32 __cdecl wrap_gfx_screen_owner(void)
+{
+    KAPI_HIT(192);
+    return gfx_screen_owner();
 }
 
