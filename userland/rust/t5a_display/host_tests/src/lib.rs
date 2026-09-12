@@ -4,6 +4,8 @@ pub mod boundary;
 pub mod inject;
 #[path = "../../src/input.rs"]
 pub mod input;
+#[path = "../../src/launch.rs"]
+pub mod launch;
 #[path = "../../src/paint.rs"]
 pub mod paint;
 #[path = "../../src/prompt.rs"]

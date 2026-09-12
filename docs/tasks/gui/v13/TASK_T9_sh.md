@@ -165,3 +165,21 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
 blocker 3 件 (すべて `exec/launch.c` の §1a 逸脱): (1) `launch_take` が `buf == NULL` を INVAL にしていた → NULL 可、(2) `launch_cancel` の要求者不一致が INVAL → STALE、(3) `launch_report(KILL)` が TAKEN のまま来ると `child = 0` + DONE にしていた → 印だけ消して RUNNING に戻す (child 保持、DONE は回収通知だけ)。
 non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達しない、cmdline の NUL より先の未マップページは既存ディスパッチャと同じ扱い (呼び手の fault kill)、ホスト試験は `exec.c` の転記ハーネス。
 `launch_poll` の不一致は INVAL のまま (§1a は cancel だけ STALE と規定)。
+
+**往復 2/3 (`dc8405e`): Approve** — 3 件の修正を確認、新たな blocker なし。non-blocker は前回と同じ 3 点。
+## 15. 実装メモ (A、2026-09-13)
+
+- 端末の起動は `session_launch` → **`launch_req(cmd)`** (`guest.rs:launch`)。token は受理した時点で
+  必ず控える (落とすと誰も poll せず表が `ERR_FULL` で固着する)。`ERR_FULL` は従来どおり `busy` で
+  行を残し、他の負は `launch_req failed (rc)` を出してプロンプトのまま。
+- 要求表の読み方と取消の進み具合は新設の純粋モジュール `userland/rust/t5a_display/src/launch.rs`
+  (`Phase` / `Attach` / `Step` / `Outcome`)。KAPI を呼ぶのは `guest.rs` だけ。
+- 既存の 100ms タイマ (`TIMER_SINK`) の周で `launch_poll` を 1 回。`RUNNING` で子 ID を控えて
+  最下行が `[running id=N] ESC=cancel`、`DONE` / `FAILED` / 負の `rc` / 未知の status はプロンプトへ。
+- D9: 接続モードの ESC = `launch_cancel` 1 回 (`Attach` の印で連打をまとめる)。`AGAIN` は次のタイマで
+  自動再試行し、`0` の後は `[cancelling id=N] wait` のまま `DONE` を待つ。`STALE` は即プロンプト。
+- D4: `Record::Exit` は `session.apply` に渡すだけ (表示のみ)。`prompt::Event::Exit` は遷移表から削除し
+  `Done` / `Failed` / `CancelRequested` に置き換えた。`exit` / 端末終了時の取消は**出さない** (孤児は
+  カーネルの `launch_owner_exit` が回収、§10 non-blocker 1)。
+- 検証はホストのみ: host 試験 48 → **59** (RED→GREEN の記録は `tools/tests/t9_tdd.md` §A)、
+  `cargo check --release -p t5a_display`、`check_constraints.py`。`make` / 配備 / 実機は未実施 ([V4])。

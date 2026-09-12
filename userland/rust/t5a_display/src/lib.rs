@@ -5,6 +5,7 @@ mod boundary;
 mod guest;
 mod inject;
 mod input;
+mod launch;
 mod paint;
 mod prompt;
 mod session;

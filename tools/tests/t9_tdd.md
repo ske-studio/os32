@@ -102,3 +102,73 @@ TARGET i386-elf GNU89 -Werror COMPILE PASS
 
 `tools/check_kapi_version.py` と `tools/check_constraints.py` も通した。
 `make` (clean build / `make check` 全体 / `make external`) と実機は未実施。
+
+# A. 端末 (t5a_display) の要求表切り替え — ホスト TDD の記録
+
+票: [TASK_T9_sh.md](../../docs/tasks/gui/v13/TASK_T9_sh.md) §1 D4 / D9、§1a の ABI 表。
+実行: `make check-t5a-host` (= `cargo test --manifest-path
+userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline`)。
+実機・エミュレータ・`make` は**未実施** ([V4])。
+
+## A-1. 何を実物で回すか
+
+`host_tests/src/lib.rs` が `#[path]` で端末の純粋モジュールをそのまま取り込む。
+今回足したのは `src/launch.rs` (要求表の読み方と取消の進み具合) で、KAPI を呼ぶ
+`guest.rs` は**ホストでは動かない** — `launch_req` / `launch_poll` / `launch_cancel` の
+呼び出しと戻り値の配線は実機でしか確かめられない。ここで固定したのは
+「返ってきた値をどう読むか」と「次に何をするか」。
+
+試験数は 48 → **59** (`launch.rs` 8 本、`prompt.rs` に接続モードの最下行と
+`message_rc` の 2 本、既存の遷移表 1 本を D4 / D9 の形へ書き換え)。
+
+## A-2. RED → GREEN
+
+`launch.rs` を書いた後に試験を書いたため初回から GREEN だった。**試験が仕様を
+捕まえているか**を別に確かめるため、票が実際に指摘した壊れ方を 1 つずつ埋めて
+RED を確認し、戻して GREEN に戻した (K の §2 と同じやり方)。
+
+| 埋めた欠陥 | 落ちた検査 | 対応する票の指摘 |
+|---|---|---|
+| `phase()` が `FAILED` を `Done` に倒す | `status_decodes_into_the_abi_phases` `a_failed_launch_carries_the_negative_rc_back` | §1a (`0x300 + (-rc)`)、D4 の `launch failed (rc)` |
+| `poll` が負の `rc` と未知の status を `Idle` にする | `a_negative_poll_returns_to_the_prompt_instead_of_hanging` | D4 (異常系でも固まらない) |
+| `cancelled(AGAIN)` を `Armed` にする (再試行しない) | `again_retries_the_cancel_on_the_next_timer` | D9 (`OS32_ERR_AGAIN` は次のタイマで自動再試行) |
+| `RUNNING` の周に取消の再試行を出さない | `again_retries_the_cancel_on_the_next_timer` | D9 (`RUNNING` になって初めて `KILL(child)` が通る) |
+| `step(Attached, Escape)` を `Next::Prompt` に戻す (第 4 版の「ESC で子を残す」) | `mode_transitions_follow_the_ticket` | D9 (ESC = `launch_cancel`、`DONE` を待つ) |
+
+戻した後の最終状態は `59 passed; 0 failed`。
+
+## A-3. 検査の並び (`src/launch.rs`)
+
+| 検査 | 見るもの |
+|---|---|
+| `status_decodes_into_the_abi_phases` | `PENDING` / `TAKEN` / `RUNNING + child` / `DONE` / `FAILED + (-rc)`、未知の値と負の status は `Unknown` |
+| `a_short_lived_child_is_done_on_the_first_poll` | 短命な子 (`rc == 0` → `DONE`) を最初の poll で受ける (§5 blocker 1) |
+| `running_then_done_walks_the_child_id_into_the_status_row` | `PENDING` → `TAKEN` → `RUNNING(3)` (子 ID が分かった周だけ描き直す) → `DONE` |
+| `a_failed_launch_carries_the_negative_rc_back` | `FAILED` は元の負の `rc` でプロンプトへ |
+| `a_negative_poll_returns_to_the_prompt_instead_of_hanging` | `OS32_ERR_STALE` / 未知の status でも接続モードに居座らない |
+| `escape_cancels_once_and_waits_for_done` | ESC → `cancel` 0 → 接続モードのまま `DONE` を待つ。2 度目の ESC は出さない |
+| `again_retries_the_cancel_on_the_next_timer` | `AGAIN` → 次の poll で再試行 → `RUNNING` で通る → `DONE` |
+| `stale_cancel_returns_to_the_prompt` | `STALE` (もう `DONE` / `FAILED`) はそのままプロンプトへ |
+
+`prompt.rs` 側は `attached_row_names_the_child_and_offers_cancel` (最下行が
+`[running id=3] ESC=cancel` / `[cancelling id=3] wait`)、`message_rc_prints_the_
+negative_return_value`、`mode_transitions_follow_the_ticket` (`Done` / `Failed` /
+`CancelRequested`、`Exit` は遷移表から外れた)。
+
+## A-4. 実行 (2026-09-13)
+
+```
+$ cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml \
+      --target x86_64-unknown-linux-gnu --offline
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo check --release -p t5a_display      # userland/rust workspace
+    Finished `release` profile [optimized] target(s)
+
+$ python3 -B tools/check_constraints.py
+制約チェック OK — 規則 16 件、参照側 CLAUDE.md
+```
+
+`cargo clippy -p t5a_display` は**この票より前から**落ちる
+(`storage.rs:22` の `clippy::mut_from_ref` が deny)。今回足した / 触った
+`launch.rs` `prompt.rs` `guest.rs` には clippy の指摘は 1 件も無い。
