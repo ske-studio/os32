@@ -375,6 +375,14 @@ volatile u32 ring3_abort_count = 0;
 /* ======================================================================== */
 void ring3_abort_request(void)
 {
+    /* 票 T9 §12 S6: GUI 中は宛先 (フォーカス窓の連鎖の末尾、D8) を知って
+     * いるのは WM だけなので、カーネルは立てない — 要求は raw リング経由で
+     * WM へ届き、WM が exec_abort_clear → exec_kill(末尾) を実行する
+     * (決裁 A1)。立てると「そのとき走っていた slot」= WAIT_POLL の sh や
+     * 100ms タイマの端末が巻き込まれる (受入 S6 の 2 回目)。
+     * 例外は暴走 (APP_RUNAWAY_TICKS 以上 WM へ戻っていない) だけ。
+     * CUI 中は 1 バイトも変えない (K2 の唯一の逃げ道)。 */
+    if (!appslot_abort_admit(con_sink_is_enabled(), tick_count)) return;
     appslot_abort_request();
 }
 
@@ -1607,6 +1615,8 @@ static int exec_launch(const char *cmdline, int gui_arg)
             appslot_shell_commit();
         } else {
             appslot_start_commit(id, gui, need_pages);
+            /* 暴走判定の起点 (票 T9 §12 S6)。 */
+            appslot_mark_scheduled(id, tick_count);
         }
         exec_nest_level = ctx->depth;
 
@@ -1952,6 +1962,7 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
     }
 
     appslot_resume_commit((int)app_id);
+    appslot_mark_scheduled((int)app_id, tick_count);   /* 票 T9 §12 S6 */
     exec_restore_context((int)app_id);
     /* cli → TSS.ESP0 → CR3 → popad; iretd を割り込み禁止で一続きに。
      * iretd が保存済み EFLAGS (IF=1) を復元するのでアプリ側の IF は変わらない。 */

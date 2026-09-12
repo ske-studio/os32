@@ -192,6 +192,24 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   `vfs_close_owned` 1 か所に寄せた (`fd_redirect_close_state` は削除)。ホスト試験の偽 VFS に
   **owner タグと FD ごとの `vfs_close` 呼び出し回数**を持たせ、`vfs_close_owned` の偽物を
   `ma_reclaim_res` の (2) に置いて `24B2` / `24J2`「`vfs_close` は 1 回だけ」で押さえた。
+- **受入 S6 (CTRL+STOP の連鎖) の差し戻しを修正** (2026-09-13): 2 回目の CTRL+STOP で sh と
+  端末が両方消えたのは、IRQ1 の `ring3_abort_request()` → `appslot_abort_request()` が
+  **そのとき走っていた slot** に `abort_req` を立てる K2 の経路。T9 で sh が `WAIT_POLL` で
+  毎 tick 回り端末も 100ms タイマで回るようになったため、IRQ1 が落ちた先は D8 の宛先
+  (フォーカス窓の連鎖の末尾、WM が `launch_child` で解決) と**無関係なアプリ**になる。
+  → **GUI 中 (`con_sink_is_enabled()`) はカーネルが立てない**。要求は raw リング経由で WM に
+  届き、WM が `exec_abort_clear` → `exec_kill(末尾)` を実行する (決裁 A1 / D8) — つまり
+  D8 の「宛先は WM が決める」を、IRQ1 の側でも守らせる形にした。判定は純関数
+  `appslot_abort_admit(gui_mode, now_tick)` (`exec/appslot.c`) に閉じ、`exec.c` は
+  `con_sink_is_enabled()` と `tick_count` を渡すだけ。
+  **暴走の逃げ道は残す**: `AppSlot.last_resume_tick` (start / resume で `appslot_mark_scheduled`)
+  から `APP_RUNAWAY_TICKS` (200 = 2 秒) 以上 WM へ戻っていなければ GUI 中でも立てる —
+  KAPI を呼ばない計算ループは協調型で WM が制御を取り戻せない唯一のケース。
+  CUI (K2) は 1 バイトも変えていない。`ring3_abort_check()` と IRQ1 スタブは**触っていない** —
+  gfx 拒否 (T8 D1a) と V86 の脱出は `appslot_abort_request()` の直呼びで、あちらは
+  「WM / カーネルが宛先を決めた」kill なので GUI 中も従来どおり効く必要があるため
+  (PM 案の「`ring3_abort_check` も GUI 中は何もしない」は D1a を壊すので採らなかった)。
+  試験は `test_multiapp_impl.py` ケース 25 (25 検査) と kselftest 1 項 (4 検査)。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 

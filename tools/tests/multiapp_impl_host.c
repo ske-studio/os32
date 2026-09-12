@@ -472,6 +472,17 @@ static int ma_abort_request(void)
     return appslot_abort_request() ? 0 : OS32_ERR_INVAL;
 }
 
+/* exec/exec.c の ring3_abort_request (IRQ1 の ISR から呼ばれる) を**そのまま
+ * 写した**形 (exec.c はカーネル一式を引くのでホストへ #include できない)。
+ * GUI 判定 (con_sink_is_enabled) と tick (tick_count) は呼び出し側が渡す。
+ * 上の ma_abort_request はこの関門を通らない直呼び = gfx 拒否 (T8 D1a) と
+ * V86 の脱出の経路。 */
+static int ma_irq_abort_request(int gui_mode, u32 now_tick)
+{
+    if (!appslot_abort_admit(gui_mode, now_tick)) return 0;
+    return appslot_abort_request();
+}
+
 /* KAPI v45 exec_abort_clear の実体 (決裁 A1)。owner は呼ぶ側の文脈のまま。 */
 static int ma_abort_clear(void)
 {
@@ -2038,6 +2049,80 @@ static void case_redirect_context(void)
     check(fd_is_redirected(1) == 0, "24J 表はコンソールへ戻る");
 }
 
+/* ========================================================================
+ *  25. GUI 中の CTRL+STOP は WM が宛先を決める (票 T9 §12 S6)
+ *
+ *  実機の反例 (feat/gui dc2f78d): 端末 (2) -> sh (3) -> kbd_echo (4) の連鎖で
+ *  端末にフォーカスを置いて CTRL+STOP を 2 回打つと、2 回目で **sh と端末が
+ *  両方消えた** (`ring3_abort_count` +1)。T9 で sh が WAIT_POLL で毎 tick
+ *  回り端末も 100ms タイマで回るので、IRQ1 が落ちた先は宛先 (連鎖の末尾、
+ *  D8) と無関係なアプリになる。GUI 中はカーネルが立てない。
+ * ======================================================================== */
+static void case_abort_admit(void)
+{
+    int a2, a3;
+
+    report("25 GUI 中の CTRL+STOP はカーネルが宛先を決めない\n");
+
+    /* 端末 (2) と sh (3) を立てて、sh が走っている状態にする */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25a 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    check(ma_park_yield() == 0, "25b 端末が譲る");
+    a3 = ma_start(100, 1);
+    check(a3 == APP_ID_MIN + 1, "25c sh が立つ");
+    appslot_mark_scheduled(a3, 1000);
+
+    /* (a) GUI 中: 走っている sh に IRQ1 の要求は載らない */
+    check(ma_irq_abort_request(1, 1000) == 0,
+          "25d GUI 中の IRQ1 は要求を立てない");
+    check(appslot_get(a3)->abort_req == 0, "25e sh に abort_req が立たない");
+    check(ma_abort_check() == 0 && appslot_get(a3) != 0,
+          "25f syscall 出口でも畳まれない");
+    check(appslot_live() == 2, "25g 生存アプリは減らない (端末も無事)");
+
+    /* (b) GUI 中でも暴走 (2 秒 WM へ戻らない) は畳む */
+    check(ma_irq_abort_request(1, 1000 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25h 境界の 1 つ手前ではまだ立てない");
+    check(ma_irq_abort_request(1, 1000 + APP_RUNAWAY_TICKS) == 1,
+          "25i APP_RUNAWAY_TICKS 以上 WM へ戻っていなければ立てる");
+    check(appslot_get(a3)->abort_req == 1, "25j 暴走したアプリに載る");
+    check(ma_abort_check() == 0, "25k 次の安全地点で畳まれる");
+    check(appslot_get(a3) == 0 && appslot_get(a2) != 0,
+          "25l 畳まれるのは暴走した 1 本だけ (端末は無事)");
+    check(appslot_cur() == APP_ID_SHELL, "25m 畳んだあと WM top-level へ戻る");
+
+    /* (c) resume で起点が更新される = 譲っている限り暴走にならない */
+    check(ma_resume_poll(a2) == 0, "25n 端末を起こす");
+    appslot_mark_scheduled(a2, 5000);          /* exec_resume の直後 */
+    check(ma_irq_abort_request(1, 5000 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25o 起点が進むので暴走にならない");
+    check(appslot_get(a2)->abort_req == 0, "25p 端末に abort_req は立たない");
+
+    /* (d) gfx 拒否 / V86 の直呼びは GUI 中でも立つ (関門を通らない) */
+    check(ma_abort_request() == 0, "25q 直呼び (gfx 拒否 / V86) は GUI 中も立つ");
+    check(appslot_get(a2)->abort_req == 1, "25r その要求は載る");
+    appslot_get(a2)->abort_req = 0;
+
+    /* (e) WM (シェル帯) が走っているときは立てない */
+    check(ma_park_yield() == 0, "25s 端末が譲る (cur = シェル帯)");
+    check(ma_irq_abort_request(1, 99999) == 0,
+          "25t WM top-level への IRQ1 は誰にも載せない");
+    check(ma_irq_abort_request(0, 99999) == 0, "25u CUI でも同じ");
+
+    /* --- CUI 中は 1 バイトも変えない (K2 の逃げ道) --------------------- */
+    ma_init(4096);
+    a2 = ma_start(100, 0);                     /* CUI の入れ子 exec_run の子 */
+    check(a2 == APP_ID_MIN, "25v CUI で子が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    check(ma_irq_abort_request(0, 1000) == 1,
+          "25w CUI 中は tick を問わず従来どおり立てる");
+    check(appslot_get(a2)->abort_req == 1, "25x 走っている子に載る");
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25y 次の安全地点で畳まれる (K2 の逃げ道は健在)");
+}
+
 int main(void)
 {
     failures = 0;
@@ -2069,6 +2154,7 @@ int main(void)
     case_poll_yield();
     case_yield_and_kill_chain();
     case_redirect_context();
+    case_abort_admit();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

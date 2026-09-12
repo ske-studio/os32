@@ -54,6 +54,13 @@
  * 値の追加なので exec_app_state の既存の 0/1/2/3 は 1 つも動かない。 */
 #define APP_STATE_WAIT_POLL 4
 
+/* 暴走 (KAPI を呼ばない計算ループ) の逃げ道 (票 T9 §12 S6)。GUI 中の IRQ1 は
+ * 「走っている ID が最後に走り出してからこの tick 数以上、WM へ戻っていない」
+ * ときだけ CTRL+STOP を立てる。PIT は 100Hz なので 200 = 2 秒。
+ * 協調型では、生きているアプリは毎 tick 前後で WM へ戻る (OP_WAIT / kbd 待ち /
+ * ポーリングの譲り / sys_yield のどれか) ので、2 秒戻らない = 戻れない。 */
+#define APP_RUNAWAY_TICKS  200
+
 /* int80_stub が積むフレームの語数 ([0..7]=pushad, [8]=EIP [9]=CS
  * [10]=EFLAGS [11]=userESP [12]=userSS)。ring3_entry.asm と同期。 */
 #define APP_FRAME_WORDS    13
@@ -76,6 +83,12 @@ typedef struct {
      * 譲っている間に届いた「子宛の 1 バイト」を吸って捨ててしまう
      * (票 §6 blocker 1)。欄の追加なので exec_app_state の 0〜4 は動かない。 */
     int  parked_from_yield;
+    /* この ID を最後に走らせた PIT tick (票 T9 §12 S6)。exec.c が
+     * start / resume の直後に appslot_mark_scheduled で控える。GUI 中の
+     * CTRL+STOP は WM が宛先を決める (D8) ので、カーネルが IRQ1 で畳むのは
+     * 「ここから APP_RUNAWAY_TICKS 以上 WM へ戻っていない」= 協調型が
+     * 壊れている 1 例外だけ。 */
+    u32  last_resume_tick;
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -310,6 +323,24 @@ int appslot_kill_check(int id);
 /* CTRL+STOP: 走っているアプリにだけ要求を立てる (D4)。1=立った。 */
 int appslot_abort_request(void);
 
+/* IRQ1 由来の CTRL+STOP を「いま走っているアプリ」に立ててよいか (**純関数**
+ * — 状態を 1 つも変えない)。票 T9 §12 S6。
+ *   gui_mode : con_sink_is_enabled() (1 = GUI 中 / 0 = CUI 中)
+ *   now_tick : tick_count
+ * CUI 中は常に 1 (K2 の逃げ道はそのまま)。GUI 中は **0** — 宛先は
+ * 「フォーカス窓の連鎖の末尾」(D8) で、それを知っているのは WM だけだから。
+ * IRQ1 が「そのとき走っていた slot」に立てると、WAIT_POLL の sh や 100ms
+ * タイマの端末が巻き込まれる (受入 S6 の 2 回目で端末まで消えた)。
+ * 例外は暴走だけ: 最後に走り出してから APP_RUNAWAY_TICKS 以上 WM へ戻って
+ * いなければ 1 (協調型で WM が制御を取り戻せない唯一のケース)。 */
+int appslot_abort_admit(int gui_mode, u32 now_tick);
+
+/* この ID を走らせた時刻を控える (暴走判定の起点)。exec.c が
+ * appslot_start_commit / appslot_resume_commit の直後に tick_count を渡す。
+ * tick は引数で受ける — この表はハードウェアを読まない (park_poll_check と
+ * 同じ流儀)。 */
+void appslot_mark_scheduled(int id, u32 now_tick);
+
 /* CTRL+STOP の要求を降ろす (KAPI v45 exec_abort_clear の実体、決裁 A1)。
  * 呼べるのは owner 1 (シェル帯 = WM) だけ — それ以外は OS32_ERR_INVAL。
  * IRQ1 は「いま走っているアプリ」に無条件で立てるが、契約 T6 の宛先は
@@ -373,5 +404,10 @@ u32 appslot_resume_mark_selftest(void);
  * 「GUI 中の宣言なしは拒否」(D1a) をブート時に踏む。借りたスロット・
  * 所有者・カウンタは必ず元へ戻す。ビット 0..n が落ちた項目 (0 = 全通過)。 */
 u32 appslot_gfx_owner_selftest(void);
+
+/* 「GUI 中の CTRL+STOP はカーネルが宛先を決めない、ただし暴走は畳む」
+ * (票 T9 §12 S6) をブート時に踏む。借りたスロット・cur・owner は必ず元へ
+ * 戻す。ビット 0..n が落ちた項目 (0 = 全通過)。 */
+u32 appslot_abort_admit_selftest(void);
 
 #endif /* __APPSLOT_H */

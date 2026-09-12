@@ -193,6 +193,24 @@ KAPI は 8 本増えて v49 (`KernelAPI` 構造体が 32 B 伸びる — 関数�
 shell_commit / reclaim の呼び出し)。切替のコストは構造体コピー 84 B × 2 (退避 + 復元) で、
 park / resume ごとに 1 回。`exec.o` は 1 行も変わらない (呼ぶのは `appslot.c` の中だけ)。
 
+## カーネル帯の静的計上 (T9 §12 S6、2026-09-13)
+
+GUI 中の CTRL+STOP を WM に任せる判定 (票 §12 S6) で `AppSlot` に増えた欄
+`last_resume_tick` (`u32`)。`kmalloc` せずカーネル .bss の静的領域で、シェル帯・アプリ帯・
+exec_heap のどれも減らさない。
+
+測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を基準版
+(feat/gui `67b512e`) と並べたもの (カーネル全体のリンクは未測定 — `make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| `last_resume_tick` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `g_slot` が `0x468` → **`0x480`** |
+| `appslot.o` の .bss 合計 | **1720 B で不変** | 増えた 24 B は `g_slot` と `g_redir` の間の詰め物に収まった (`g_redir` は `0x4C0` のまま) |
+| 判定 `appslot_abort_admit` / `appslot_mark_scheduled` / 自己診断 | 0 B (静的領域なし) | text 4967 → **5087 B** (+120) |
+
+`exec.c` は静的領域を 1 バイトも増やさない (`ring3_abort_request` の 1 行と
+`appslot_mark_scheduled` の呼び出し 2 か所)。KAPI も増えていない (v49 のまま)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

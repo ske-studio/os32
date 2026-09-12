@@ -170,6 +170,38 @@ owner タグ**で取ったものなので、`exec_reclaim_owned` の (2) `vfs_cl
 同じケースに足した。枠の後始末は close 回数では見えないので、`g_redir[]` を
 直に見る検査にしてある (ハーネスは `appslot.c` をそのまま取り込んでいる)。
 
+## 4f. 受入 S6 の差し戻し (CTRL+STOP の連鎖、2026-09-13)
+
+実機 (feat/gui `dc2f78d` の gshell、カーネル `ecaba37`) で、端末 (ID 2) → sh (ID 3) →
+kbd_echo (ID 4) の連鎖に CTRL+STOP を 2 回打つと **sh と端末が両方消えた**
+(`ring3_abort_count` 0 → 1、`fault_kill_count` 0 → 2)。原因は IRQ1 の
+`ring3_abort_request()` が「そのとき走っていた slot」に `abort_req` を立てる K2 の経路で、
+T9 以後は sh が `WAIT_POLL` で毎 tick、端末が 100ms タイマで回るため、IRQ1 の落ち先が
+D8 の宛先 (連鎖の末尾) と無関係になる。
+
+判定を純関数 `appslot_abort_admit(gui_mode, now_tick)` に切り出したので、ホストで
+そのまま踏める。ケース 25 は 25 検査:
+
+| 番号 | 見るもの |
+|---|---|
+| 25d〜25g | GUI 中の IRQ1 は要求を立てない。`abort_req` は 0 のままで、syscall 出口でも畳まれず、端末も sh も生き残る (**実機の反例そのもの**) |
+| 25h〜25m | 暴走の逃げ道: `APP_RUNAWAY_TICKS` の 1 つ手前では立てず、到達したら立てて畳む。畳まれるのはその 1 本だけ |
+| 25n〜25p | `appslot_mark_scheduled` で起点が進むので、譲っている限り暴走にならない |
+| 25q〜25r | gfx 拒否 (T8 D1a) と V86 の脱出は `appslot_abort_request()` の直呼びで、関門を通らず GUI 中も立つ |
+| 25s〜25u | WM (シェル帯) が走っているときは GUI / CUI どちらでも誰にも載せない |
+| 25v〜25y | **CUI は 1 バイトも変えない** — tick を問わず立ち、次の安全地点で畳まれる (K2 の逃げ道) |
+
+RED は 2 方向から確認した (実際の出力):
+
+| 戻したところ | 落ちた検査 |
+|---|---|
+| GUI 判定を外す (修正前 = 常に立てる) | `25d` `25e` `25f` `25g` `25i` |
+| 暴走の逃げ道を落とす (GUI 中は常に立てない) | `25i` `25j` `25l` `25m` `25n` `25r` |
+
+ブート時は `appslot_abort_admit_selftest()` (4 検査) を `kselftest_run()` から踏む。
+`tick` が一周する境界 (`0xFFFFFF00` + 200) も自己診断の側で見ている — u32 の引き算なので
+差で判定すれば正しく出る。
+
 ## 5. 最終実行 (2026-09-12)
 
 ```

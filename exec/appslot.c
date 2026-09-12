@@ -227,6 +227,7 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
+    a->last_resume_tick = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -248,6 +249,7 @@ void appslot_shell_commit(void)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
+    a->last_resume_tick = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     /* シェル帯を載せ替えた (shell.bin ⇄ gshell.bin)。前の住人の枠は
@@ -533,6 +535,7 @@ void appslot_resume_commit(int id)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
+    a->last_resume_tick = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -611,6 +614,47 @@ int appslot_abort_request(void)
     if (!a || g_cur < APP_ID_MIN || a->state != APP_STATE_RUNNING) return 0;
     a->abort_req = 1;
     return 1;
+}
+
+/* ---- IRQ1 由来の CTRL+STOP を立ててよいか (票 T9 §12 S6) --------------- */
+/* GUI 配下では宛先が「フォーカス窓の連鎖の末尾」(D8) に変わった。それを
+ * 解決できるのは窓の所有者を知っている WM だけで、IRQ1 は「そのとき走って
+ * いた slot」しか知らない。T9 で sh が WAIT_POLL で毎 tick 回り、端末も
+ * 100ms タイマで回るようになったので、IRQ1 が落ちた先はほぼ常に**宛先と
+ * 無関係なアプリ**になる (受入 S6: 2 回目の CTRL+STOP で端末まで畳まれ、
+ * ring3_abort_count が +1 した)。だから GUI 中はカーネルが立てない —
+ * 要求は raw リング経由で WM に届き、WM が exec_abort_clear → 末尾を
+ * exec_kill する (決裁 A1 / D8)。
+ *
+ * 残す例外は 1 つだけ: **暴走**。KAPI を呼ばない計算ループに入ったアプリは
+ * WM へ戻らないので、WM は制御を取り戻せず CTRL+STOP も届かない。
+ * 「最後に走り出してから APP_RUNAWAY_TICKS 以上 WM へ戻っていない」なら
+ * 協調型が壊れているので、従来どおり IRQ1 が畳む。
+ *
+ * gfx 拒否 (appslot_gfx_claim) と V86 の脱出は appslot_abort_request() を
+ * 直に呼ぶ — あちらは「WM / カーネルが宛先を決めた」kill なので、この関門は
+ * 通らない (GUI 中でも従来どおり効く)。 */
+int appslot_abort_admit(int gui_mode, u32 now_tick)
+{
+    AppSlot *a;
+
+    if (!gui_mode) return 1;              /* CUI は 1 バイトも変えない (K2) */
+
+    a = appslot_get(g_cur);
+    if (!a || g_cur < APP_ID_MIN) return 0;          /* WM / シェル帯 */
+    if (a->state != APP_STATE_RUNNING) return 0;
+    /* u32 の引き算なので tick が一周しても正しい差が出る。 */
+    if ((u32)(now_tick - a->last_resume_tick) >= (u32)APP_RUNAWAY_TICKS) {
+        return 1;
+    }
+    return 0;
+}
+
+void appslot_mark_scheduled(int id, u32 now_tick)
+{
+    AppSlot *a = appslot_get(id);
+    if (!a) return;
+    a->last_resume_tick = now_tick;
 }
 
 /* ======================================================================== */
@@ -855,6 +899,56 @@ u32 appslot_resume_mark_selftest(void)
 /*  空きスロット (APP_ID_MAX) を一時的に借りる。借りた中身・cur・owner・      */
 /*  所有者・カウンタは丸ごと保存して戻す。                                   */
 /* ======================================================================== */
+/* ======================================================================== */
+/*  GUI 中の CTRL+STOP は WM が宛先を決める (票 T9 §12 S6)                   */
+/*                                                                          */
+/*  壊れたときに実機で見えるのは「CTRL+STOP で関係ないアプリ (端末) まで     */
+/*  消える」か「暴走したアプリを畳めない」だけで、原因が遠い。借りた         */
+/*  スロットと cur / owner は必ず元へ戻す。ビット 0..n が落ちた項目。        */
+/* ======================================================================== */
+u32 appslot_abort_admit_selftest(void)
+{
+    u32 bad = 0;
+    int id = APP_ID_MAX;
+    AppSlot saved;
+    int saved_cur = g_cur;
+    int saved_owner = res_owner_get();
+
+    saved = g_slot[id];
+    slot_zero(&g_slot[id]);
+    g_slot[id].state = APP_STATE_RUNNING;
+    g_slot[id].cpl3 = 1;
+    g_slot[id].last_resume_tick = 1000;
+    g_cur = id;
+
+    /* (0) CUI 中は従来どおり立てる (K2 の逃げ道を 1 バイトも変えない) */
+    if (appslot_abort_admit(0, 1000) != 1) bad |= 1u << 0;
+    if (appslot_abort_admit(0, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 0;
+
+    /* (1) GUI 中は立てない — 宛先は WM が launch_child で解決する (D8) */
+    if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 1;
+    if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS - 1) != 0) bad |= 1u << 1;
+
+    /* (2) 暴走だけは GUI 中でも立てる (tick が一周しても差で見る) */
+    if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 2;
+    g_slot[id].last_resume_tick = 0xFFFFFF00UL;
+    if (appslot_abort_admit(1, 0xFFFFFF00UL + APP_RUNAWAY_TICKS) != 1) {
+        bad |= 1u << 2;
+    }
+    if (appslot_abort_admit(1, 0xFFFFFF00UL + 1u) != 0) bad |= 1u << 2;
+
+    /* (3) WM (シェル帯) が走っているときは GUI 中も CUI 中も立てない
+     * — CUI では appslot_abort_request 側が弾く (従来どおり)。 */
+    g_cur = APP_ID_SHELL;
+    if (appslot_abort_admit(1, 0) != 0) bad |= 1u << 3;
+    if (appslot_abort_request() != 0) bad |= 1u << 3;
+
+    g_slot[id] = saved;
+    g_cur = saved_cur;
+    res_owner_set(saved_owner);
+    return bad;
+}
+
 u32 appslot_gfx_owner_selftest(void)
 {
     u32 bad = 0;
