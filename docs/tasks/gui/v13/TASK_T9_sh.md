@@ -167,6 +167,25 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 `launch_poll` の不一致は INVAL のまま (§1a は cancel だけ STALE と規定)。
 
 **往復 2/3 (`dc8405e`): Approve** — 3 件の修正を確認、新たな blocker なし。non-blocker は前回と同じ 3 点。
+## 14. 実装メモ (W、2026-09-13)
+
+- 起動口は単独ループ (`lib.rs` `standalone_loop`) の `session_handoff` の**直後**、
+  `multiapp::resume_one` (park 判定) の**前**。`exec_start` / `exec_resume` から戻った後で、
+  WM が owner 1 で走っている唯一の地点 — `launch_take` / `launch_report` / `exec_kill` はここだけ。
+- `drain_launch_requests` (`lib.rs`) は `launch_pending() > 0` の間 `launch_take` を回し、
+  LAUNCH は `run_program`、KILL / 孤児 (`LAUNCH_REQ_ORPHAN`) は `multiapp::kill_for_request`
+  (= `exec_kill` → `FREE` を全部 `forget`、D8)。`launch_report` の `STALE` は再試行しない (§10 2)。
+  要求表経由の失敗はモーダルを出さない (`session_launch` の経路は無変更)。
+- D5 の巡回と「同じ tick に 1 回」は `multiapp::pick_poll` + `Multi` の `poll_last` /
+  `poll_tick` / `poll_woken` (票の「`GuiState` に持つ」から変更 — 同種の控えが `Multi` にある)。
+  印は `mark_resumed` で付けるので `pick` を 2 度呼んでも答えは変わらない。
+- `abort_target` は `launch_child` を末尾まで辿る (`chain_tail`、環で止まる)。
+  `abort_targets_current` は末尾 == cur のときだけ真 — ただし**宛先なし (`f == 0`) は従来どおり真**
+  (偽にすると窓が 1 枚も無い周の CTRL+STOP がどこにも届かない)。
+- 検証はホストのみ: `make check-gshell-host` 65 passed (T9-W 9 本追加、RED 7 → GREEN)、
+  `check_constraints.py` / `check_gui_proto.py` / C 側 3 本の回帰。記録は `tools/tests/t9_tdd.md` §6。
+  **`make` / 配備 / 実機は未実施** ([V4])。`cargo clippy` は着手前から `lib.rs:127` で落ちる (追加分は 0)。
+
 ## 15. 実装メモ (A、2026-09-13)
 
 - 端末の起動は `session_launch` → **`launch_req(cmd)`** (`guest.rs:launch`)。token は受理した時点で

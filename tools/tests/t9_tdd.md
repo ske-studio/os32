@@ -1,4 +1,4 @@
-# T9-K ホスト TDD の記録 (起動要求表 + sys_yield + exec_kill の連鎖)
+# T9 ホスト TDD の記録 (K = 起動要求表 / W = WM 側の仲介)
 
 票: [docs/tasks/gui/v13/TASK_T9_sh.md](../../docs/tasks/gui/v13/TASK_T9_sh.md) §1 D3 / D5 / D8、
 §1a の ABI 表、§10 の non-blocker 1 / 2。
@@ -172,3 +172,46 @@ $ python3 -B tools/check_constraints.py
 `cargo clippy -p t5a_display` は**この票より前から**落ちる
 (`storage.rs:22` の `clippy::mut_from_ref` が deny)。今回足した / 触った
 `launch.rs` `prompt.rs` `guest.rs` には clippy の指摘は 1 件も無い。
+## 6. W 節 — WM (gshell) 側の RED → GREEN (2026-09-13)
+
+票: §1 D3 (2)(3)(4) / D5 / D8、§10 non-blocker 2 / 4。
+実行: `make check-gshell-host` (= `python3 userland/gshell/host/integration.py`)。
+検査は `userland/gshell/host/wm_tests.rs` の末尾「票 T9-W」節に 9 本追加した。
+KAPI の代用は `userland/gshell/host/mocks.rs` (`launch_pending` / `launch_take` /
+`launch_report` / `launch_child`、`get_tick`、`exec_kill` が `FREE` に落とす ID)。
+**表そのものの遷移は実物で検査済み** (§3 の `launch_host.c`) なので、W の検査が
+見るのは「WM が いつ・何を・どの順で 渡したか」だけ。
+
+RED は「検査を先に書き、`drain_launch_requests` を `false` を返すだけの仮実装に
+した状態」で取った。9 本中 **7 本が RED** (残り 2 本 = `session_launch` の
+モーダル維持と連鎖の環は、仮実装でもたまたま通る負例側の検査)。
+
+| 検査 | 見るもの | RED |
+|---|---|---|
+| 1 `a_taken_launch_goes_through_run_program_and_reports_the_child` | LAUNCH は `run_program` (`begin_start`/`end_start`/全画面判定) を通り、戻りをそのまま `launch_report` へ。モーダルを出さない | ✔ |
+| 2 `a_failed_launch_is_reported_without_a_wm_modal` | `rc < 0` は `FAILED(rc)` として返すだけ (D3 (3)) | ✔ |
+| 3 `a_taken_kill_folds_the_chain_and_forgets_every_freed_id` | KILL → `exec_kill(arg)` → `FREE` を**全部** forget (D8)。`launch_report` の `OS32_ERR_STALE` を再試行しない (§10 2) | ✔ |
+| 4 `the_session_launch_path_still_shows_the_failure_modal` | Start → Run... は従来どおりモーダル (回帰) | — |
+| 5 `a_pending_launch_request_makes_the_running_app_yield` | `should_park` の (a) に `launch_pending` (D3 (2)) | ✔ |
+| 6 `a_pending_launch_request_stops_the_wm_from_resuming_a_polling_app` | 要求のある周は WM の番 (`pick_poll` の門) | ✔ |
+| 7 `polling_apps_are_woken_in_rotation_and_only_once_per_tick` | `WAIT_POLL` 群は巡回、同じ tick に 2 回起こさない、tick が進めば再開 (D5) | ✔ |
+| 8 `ctrl_stop_is_redirected_to_the_tail_of_the_launch_chain` | 宛先は連鎖の末尾。`abort_targets_current` は末尾 == cur のときだけ真 (D8) | ✔ |
+| 9 `a_cycle_in_the_launch_chain_does_not_hang_the_ctrl_stop_lookup` | 環でも止まる | — |
+
+GREEN 後の最終実行 (`--test-threads=1`): `65 passed; 0 failed` (追加前は 56)。
+`python3 -B tools/check_constraints.py` (規則 16 件 OK)、`python3 tools/check_gui_proto.py`
+(定数 105 / 構造体 31 一致)、`test_launch.py` / `test_multiapp_impl.py` /
+`test_multiapp_model.py` (C 側の回帰、ALL PASS) も通した。
+`cargo check --release` (`userland/gshell`、i686-os32-none) は警告 0。
+`cargo clippy` は**着手前から** `src/lib.rs:127` (`main` の生ポインタ) で
+`deny` に当たって落ちる — 29 件の警告も含めて追加分は 1 件も無い。
+
+**未実施** ([V4]): `make` (全ターゲット)、配備、エミュレータ、実機。
+
+### 模型との差 (報告済み)
+
+D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順を決めない) なので、
+`tools/tests/multiapp_model_host.c` の `ma_pick_poll` は T8 の「ID 昇順」のまま
+残してある (ケース 19p)。`multiapp.rs` の `pick_poll` とはこの 1 点だけ 1 対 1 で
+なくなった — 模型側に tick を持ち込むと K レーンが着地させた
+`multiapp_impl_host.c` のケース 19 / 22 / 23 を巻き込むため。

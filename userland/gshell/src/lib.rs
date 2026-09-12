@@ -216,6 +216,12 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
             return false;
         }
+        /* 起動要求表 (KAPI v49、票 T9 D3 (3)(4))。`session_handoff` と**同じ
+         * 地点** = `exec_start` / `exec_resume` から戻った後、park 判定
+         * (`multiapp::resume_one`) の前で、WM が自分の文脈 (owner 1) で走って
+         * いる唯一の場所。`launch_take` / `launch_report` / `exec_kill` は
+         * どれもここでしか通らない。 */
+        drain_launch_requests(st);
         /* 全画面の後始末の保険 (票 T8-3、PM 実測 2026-09-12)。所有者が
          * `exec_kill` / fault で畳まれた経路は `exec_start` / `exec_resume` の
          * 復帰点を通らないので、所有者の問い合わせが 1 度も走らないことが
@@ -459,6 +465,80 @@ fn session_handoff(st: &mut wm::GuiState) -> bool {
             true
         }
     }
+}
+
+/// 起動要求表 (KAPI v49) を 1 周ぶん捌く (票 T9 §1 D3 (3)(4)、§10 non-blocker 4)。
+///
+/// **呼べるのは単独ループ (top-level) だけ** — `launch_take` / `launch_report` /
+/// `exec_kill` はどれも owner 1 専用で (`res_owner_get()` が `op_wait` の中では
+/// アプリ ID になる)、`exec_start` に至っては WM top-level からしか通らない
+/// (契約 S2)。走っているアプリは [`multiapp::should_park`] の (a) が
+/// `launch_pending()` を見て譲るので、要求が積まれれば必ずここへ来る。
+///
+/// | `kind` | ここでやること |
+/// |---|---|
+/// | `LAUNCH` | [`run_program`] を通す (`begin_start` / `end_start`、全画面の判定と復帰)。戻り (子 ID / 0 / 負) を**そのまま** `launch_report` へ |
+/// | `KILL` | [`multiapp::kill_for_request`] (`exec_kill` は子孫ごと末尾から畳む) → `launch_report(token, 0)` |
+///
+/// 2 つの約束:
+///
+/// - **失敗しても WM はモーダルを出さない**。要求者が `launch_poll` で
+///   `FAILED(rc)` を受けて自分の画面に出す (D3 (3))。WM が割り込むと、端末の
+///   プロンプトの前に WM のダイアログが乗る。Start → Run... の
+///   `GUI_SESSION_LAUNCH` は従来どおり ([`session_handoff`])。
+/// - **`launch_report` の `OS32_ERR_STALE` は正常** (§10 non-blocker 2)。KILL は
+///   「take → `exec_kill` → 子の回収通知で `DONE` → report」の順になるので、
+///   report が届くときには `TAKEN` ではない。再試行しない。
+///
+/// 戻り値 `true` = 1 件以上捌いた。
+fn drain_launch_requests(st: &mut wm::GuiState) -> bool {
+    let mut did = false;
+    let mut guard = 0;
+    /* 1 周で捌くのは要求表の本数ぶん (要求者 ID ごとに 1 本 = 4) まで。
+     * `launch_take` が 0 を返さない壊れ方をしても単独ループを止めない。 */
+    while guard < multiapp::MAX_APPS {
+        guard += 1;
+        if unsafe { (os32api::api().launch_pending)() } <= 0 {
+            break;
+        }
+        /* `cap` は `LAUNCH_CMDLINE_MAX` 以上でなければ `OS32_ERR_INVAL` (§1a)。
+         * カーネルは `kstrncpy` で NUL 終端して書くので、`run_program` の
+         * 「NUL 終端の私有バッファ」(契約 §7.1 の 3) をそのまま満たす。 */
+        let mut buf = [0u8; multiapp::LAUNCH_CMDLINE_MAX];
+        let mut requester: i32 = 0;
+        let mut kind: i32 = 0;
+        let mut arg: i32 = 0;
+        let token = unsafe {
+            (os32api::api().launch_take)(
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut requester,
+                &mut kind,
+                &mut arg,
+            )
+        };
+        if token <= 0 {
+            break; /* 0 = 無し、負 = 取りに来られない文脈 (どちらも次の周へ) */
+        }
+        did = true;
+        /* 孤児回収 (要求者が退場済み) の表も `kind` は KILL だが、票 D3 (4) の
+         * 「`LAUNCH_REQ_ORPHAN` も KILL として同じに扱う」を明示で読めるように
+         * 印そのものも見る — 起動だけは要求者が生きている表に限る。 */
+        let orphan = requester == multiapp::LAUNCH_REQ_ORPHAN;
+        if kind == multiapp::LAUNCH_KIND_LAUNCH && !orphan {
+            let rc = run_program(st, &buf);
+            unsafe { (os32api::api().launch_report)(token, rc) };
+            continue;
+        }
+        if kind == multiapp::LAUNCH_KIND_KILL || orphan {
+            multiapp::kill_for_request(arg);
+        }
+        /* 知らない `kind` (表が壊れた) もここへ落として報告だけする — 表を
+         * `TAKEN` のまま残すと、その要求者は二度と `launch_req` できない。
+         * 回収通知で先に `DONE` になっていれば `OS32_ERR_STALE` で、正常。 */
+        unsafe { (os32api::api().launch_report)(token, 0) };
+    }
+    did
 }
 
 /// CUI へ戻す (契約 S6 の 1〜6)。cfg 更新に失敗したら**切替を実行せず**
