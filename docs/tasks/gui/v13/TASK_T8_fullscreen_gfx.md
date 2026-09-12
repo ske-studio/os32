@@ -96,6 +96,19 @@
 - `classify` を `FORCE_CPL0 | CUI_ONLY` の OR に変えた (gshell `src/os32x.rs`、端末 `t5a_display/src/prompt.rs`)。表示は従来どおり `cui only: <名>`。
 - `OS32X_FLAG_CUI_ONLY` (0x0010) は K/B が `os32_kapi_shared.h` へ足すまで各 crate にリテラルで持つ (コメントで T8-2 を指す)。
 - ホスト試験に「`CUI_ONLY` 単独」「`CUI_ONLY | GFX`」を追加し RED → GREEN を確認 (gshell 48 pass / 端末 49 pass)。**`make`・配備・実機は未実施** ([V4])。
+## 4a. 実装メモ (T8-2 K/B、2026-09-12)
+
+- 宣言ビット `OS32X_FLAG_CUI_ONLY` = 0x0010 (`--cui-only` / app.conf 4 列目 `cui`)。立てたのは
+  `userland/cmds/v86` と、グラフィック VRAM を直書きする `ring3_hello` / `ring3_fault` / `ring3_guard`
+  (この 3 本は app.conf を持たないので `build/programs.mk` の explicit ルール側)。
+- 砦は 2 枚: 純関数 `appslot_cui_only_admit(gui, hdr_flags)` を `exec_launch` の帯・池を動かす前に置いて
+  GUI からの起動を断ち、古いバイナリ用に `v86_smoke_test` / `v86_disk_test` / `v86_boot2` (= `v86_boot`) が
+  GUI 中は `v86_gui_refuse()` で `-1` (`v86_gui_reject_count`)。CUI は両方とも無変更。KAPI は無改版。
+- **拒否 = そのアプリを畳む** (受入 F6 の実測: 断って続行させると描画 KAPI と VRAM 直書きで GUI が壊れた)。
+  `gfx_init` の門と `v86_*` の門は `shell_print` で理由を出し `appslot_abort_request()` で `abort_req` を立て、
+  syscall 出口の `ring3_abort_check()` に畳ませる。数は `gfx_init_reject_count` / `v86_gui_reject_count` のまま。
+- ホスト試験は `multiapp_impl_host.c` ケース 21 (18 検査、RED→GREEN 4 通り) → `tools/tests/t8_tdd.md`。
+  kselftest に 1 項追加。**`make`・配備・実機は未実施** ([V4]) — 受入 F5 / F6 の再試験は PM / テスターへ。
 
 ## 5. 範囲外
 

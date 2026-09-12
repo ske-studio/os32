@@ -121,6 +121,12 @@ typedef enum {
 #define OS32X_FLAG_RING3  0x0002        /* CPL=3 (リング3) で実行する (v2 M1) */
 #define OS32X_FLAG_FORCE_CPL0 0x0004    /* CPL=0 強制 (ring3 デフォルト化後のエスケープハッチ, v2 M3) */
 #define OS32X_FLAG_SHLIB  0x0008        /* 共有ライブラリ (MEM_SHLIB_BASE 常駐、GUI v1.1 K3/C3) */
+/* CUI 専用 (mkos32x --cui-only、app.conf 4 列目 `cui`、票 T8-2)。
+ * V86 / VDM のように「CPL=3 のプログラムだが KAPI の向こうで画面と BIOS を
+ * 丸ごと持っていく」ものに立てる。GUI (con_sink 有効) からの exec_start は
+ * OS32_ERR_INVAL で断り、CUI からは従来どおり通す。FORCE_CPL0 とは独立 —
+ * v86.bin は CPL=3 なので FORCE_CPL0 では捕まらなかった (受入 F5)。 */
+#define OS32X_FLAG_CUI_ONLY 0x0010
 
 typedef struct {
     u32 magic;            /* 0x00: OS32X_MAGIC */

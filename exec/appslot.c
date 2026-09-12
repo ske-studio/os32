@@ -137,6 +137,15 @@ int appslot_cpl0_admit(int is_shell, int gui)
     return 0;
 }
 
+/* CUI 専用の宣言 (票 T8-2)。v86 は CPL=3 なので --cpl0 の網には掛からない —
+ * 宣言ビットを見る枝をここに 1 本足して、GUI からの起動だけを断つ。 */
+int appslot_cui_only_admit(int gui, u32 hdr_flags)
+{
+    if (!gui) return 0;                          /* CUI は従来どおり */
+    if (hdr_flags & OS32X_FLAG_CUI_ONLY) return OS32_ERR_INVAL;
+    return 0;
+}
+
 int appslot_start_admit(int gui, u32 pages, u32 free_pages)
 {
     int id;
@@ -478,6 +487,15 @@ int appslot_gfx_claim(int gui_mode)
                                     a ? a->hdr_flags : 0);
     if (r < 0) {
         gfx_init_reject_count++;
+        /* 票 T8-2 (PM 実測 2026-09-12、受入 F6): 拒否して **続行させる**と、
+         * プログラムは gfx_init が失敗したことを知らないまま描画 KAPI と
+         * VRAM 直書きで描き続け、GUI を壊す (reject 2 回の後に FPS 計測の絵が
+         * 上 200 ラインへ出た)。拒否 = そのアプリを畳む。
+         * 走っている本人なので exec_kill は使えない — K5c の CTRL+STOP と
+         * 同じく abort_req を立て、syscall 出口の ring3_abort_check() に
+         * 畳ませる。数えるのは gfx_init_reject_count のまま (専用カウンタは
+         * 増やさない)。 */
+        appslot_abort_request();
         return r;
     }
     if (r > 0) g_gfx_owner = r;
@@ -611,8 +629,18 @@ u32 appslot_gfx_owner_selftest(void)
     if (appslot_gfx_claim(1) != OS32_ERR_INVAL) bad |= 1u << 1;
     if (g_gfx_owner != GFX_OWNER_WM) bad |= 1u << 1;
     if (gfx_init_reject_count != saved_reject + 1) bad |= 1u << 1;
+    /* 票 T8-2: 拒否したアプリは syscall 出口で畳まれる (abort_req が立つ)。 */
+    if (!g_slot[id].abort_req) bad |= 1u << 1;
+    g_slot[id].abort_req = 0;
     if (appslot_gfx_claim(0) != 0) bad |= 1u << 1;     /* CUI 中は通す */
     if (gfx_init_reject_count != saved_reject + 1) bad |= 1u << 1;
+    if (g_slot[id].abort_req) bad |= 1u << 1;          /* 素通しは畳まない */
+
+    /* (2) CUI 専用の宣言 (票 T8-2): GUI からの起動だけを断つ。 */
+    if (appslot_cui_only_admit(1, OS32X_FLAG_CUI_ONLY) != OS32_ERR_INVAL)
+        bad |= 1u << 2;
+    if (appslot_cui_only_admit(0, OS32X_FLAG_CUI_ONLY) != 0) bad |= 1u << 2;
+    if (appslot_cui_only_admit(1, 0) != 0) bad |= 1u << 2;
 
     /* 後始末 */
     g_slot[id] = saved;

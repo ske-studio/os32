@@ -121,3 +121,91 @@ TARGET i386-elf GNU89 -Werror COMPILE PASS
   `tools/check_kapi_version.py` と `tools/check_constraints.py` は単体で走らせて通した。
   `tools/check_manifests.py` / `tools/check_privileged.py` はビルド成果物を要求するので未実行。
 - 実機 (NP21/W) の受入 F1〜F7。配備・エミュレータ操作も禁止。
+
+---
+
+# T8-2 (CUI 専用の宣言 + 「拒否は畳む」、カーネル + ビルド系) — 追記 2026-09-12
+
+票: [TASK_T8_fullscreen_gfx.md](../../docs/tasks/gui/v13/TASK_T8_fullscreen_gfx.md) §6 の F5 / F1 後半
+実装: `sdk/include/os32/os32_kapi_shared.h` (`OS32X_FLAG_CUI_ONLY` = 0x0010) / `sdk/mkos32x.py`
+(`--cui-only`) / `build/programs.mk` + `build/app.conf` (4 列目 `gfx`|`cui`) /
+`tools/check_manifests.py` §2b / `exec/appslot.c` + `exec/appslot.h` (`appslot_cui_only_admit`、
+拒否で `abort_req`) / `exec/exec.c` (`exec_launch` の砦) / `gfx/gfx_core.c` (門の文言) /
+`kernel/v86.c` (`v86_gui_refuse`) / `kernel/kselftest.c`
+試験: `multiapp_impl_host.c` ケース 21 (`python3 -B tools/tests/test_multiapp_impl.py`)
+
+## なぜ 2 つ足したのか
+
+**F5 の不合格**: T8 は「GUI から V86 / VDM を起動させない」を `OS32X_FLAG_FORCE_CPL0` で
+判定したが、`userland/cmds/v86.bin` の flags は **0x0**。v86 は CPL=3 のプログラムで、V86 へは
+KAPI (`v86_selftest` / `v86_disktest` / `v86_boot` / `v86_boot2`) を通してカーネル側から入る。
+CPL で判定する砦では原理的に捕まらないので、**宣言ビットを 1 つ増やした**。
+
+**F6 の実測**: 宣言の無い `gfx_init` を「断って続行させる」と、プログラムは失敗を知らないまま
+描画 KAPI と VRAM 直書きで描き続け、`gfx_init_reject_count` が 2 になった後に FPS 計測の絵が
+上 200 ラインへ出た。**拒否 = そのアプリを畳む**に変えた。走っている本人なので `exec_kill` は
+使えず、K5c の CTRL+STOP と同じく `abort_req` を立てて syscall 出口の `ring3_abort_check()` に
+畳ませる (専用カウンタは増やさず `gfx_init_reject_count` / `v86_gui_reject_count` のまま)。
+`ring3_abort_count` と `fault_kill_count` は畳む経路が同じなので一緒に増える (F3 と同じ註)。
+
+## 試験の区分 — `multiapp_impl_host.c` ケース 21 (18 チェック)
+
+| 検査 | 何を固定したか |
+|---|---|
+| 21a〜21c | 純関数 `appslot_cui_only_admit`: GUI からの宣言付きだけ `OS32_ERR_INVAL`。CUI は通り、宣言なしは GUI でも通る |
+| 21d | 他のビット (`OS32X_FLAG_GFX`) と混ざっていても宣言を見る |
+| 21e | **`FORCE_CPL0` では捕まらない** — F5 の不合格そのもの (v86.bin の flags は 0x0) |
+| 21f〜21h | `exec_start` 経路 (池の admit → ヘッダ読み → cui_only の admit の順) で起動しない。拒否は池も枚数も 1 つも動かさない |
+| 21i〜21j | CUI (`exec_run`) 経路は従来どおり通り、1 本立つ |
+| 21k〜21o | 宣言の無い `gfx_init` の拒否で **`abort_req` が立つ** (= syscall 出口で畳まれる)。数は `gfx_init_reject_count` のまま |
+| 21p〜21r | CUI 中の素通しは畳まない。二度目の拒否でも要求は立つ |
+
+## RED → GREEN
+
+| # | 差し替え | 落ちた検査 |
+|---|---|---|
+| R1 | `appslot_cui_only_admit` が `gui` を見ない (`(void)gui;` にして常に断る) | 21b / 21i / 21j |
+| R2 | `appslot_cui_only_admit` が常に 0 を返す (宣言を見ない) | 21a / 21d / 21f / 21g / 21h / 21i / 21j |
+| R3 | 拒否で `appslot_abort_request()` を呼ばない (断るだけ = T8 のまま) | 21n / 21q |
+| R4 | 畳む位置を間違える (`claim` の判定の前に立てて素通しも畳む) | 21p |
+
+R2 で 21i / 21j も落ちるのは、`ma_start_cui_only(1)` が通ってしまい GUI 側で 1 本立ち、
+続く CUI の起動が池と `appslot_start_admit` の S2 判定に掛かるため (拒否と素通しが同じ枝)。
+
+`--cui-only` の焼き込みは `sdk/mkos32x.py` を単体で実行して確かめた
+(`--api 38 --cui-only` → ヘッダ offset 0x0C が `0x0010`)。
+`tools/check_manifests.py` の §2b は関数を直接呼んで RED を 2 通り確かめた
+(app.conf から `cui` を外す → `v86_* KAPI を呼ぶのに 'cui' が無い`、
+4 列目を `cuix` にする → 書式 NG)。
+
+## GREEN の実測
+
+```
+$ python3 -B tools/tests/test_multiapp_impl.py
+HOST ILP32 GNU89 COMPILE PASS
+...
+  ok   21r 畳んだ後は 1 本も残らない
+ALL PASS
+TARGET i386-elf GNU89 -Werror COMPILE PASS
+```
+
+239 チェック (ケース 20 までの 221 + ケース 21 の 18)、失敗 0。
+巻き込みで `tools/tests/boot_splash_native_host.c` に `shell_print` のスタブを 1 本足した
+(門が拒否の理由を端末へ出すようになったため。カーネル本体は変えていない)。
+`test_boot_splash_native.py` / `test_con_sink.py` / `test_multiapp_model.py` /
+`test_kbd_inject.py` / `test_owner_reclaim.py` / `tools/check_constraints.py` も通した。
+
+## kselftest
+
+`test_gfx_owner()` に 1 項追加 —
+`OS32X_FLAG_CUI_ONLY refused only from GUI` (`appslot_gfx_owner_selftest()` のビット 2)。
+ビット 1 の側にも「拒否したアプリに `abort_req` が立つ / 素通しでは立たない」を足した。
+**実機ではまだ踏んでいない** ([V4])。
+
+## 未実施
+
+- `make` (clean ビルド / `make check` / `make external`) — コーダーの禁止事項。
+  `tools/check_constraints.py` と `tools/check_manifests.py` の §2b は単体で走らせて通した
+  (§1 / §2 / §3 はビルド成果物を要求するので未実行)。
+- 実機 (NP21/W) の受入 F5 / F6 再試験。配備・エミュレータ操作も禁止。
+- gshell / 端末側の入口判定 (`classify` に `cui` を足す) は別票 T8-2W。

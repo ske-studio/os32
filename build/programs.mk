@@ -137,6 +137,11 @@ userland/tests/faultprobe.elf: sdk/link/app.ld $(CRT0_OBJ) $(FAULTPROBE_OBJ)
 
 faultprobe: $(CRT0_OBJ) userland/tests/faultprobe.bin
 
+# --- ring3_hello / ring3_fault / ring3_guard (CPL=3 検証用) ---
+# 3 本ともグラフィック VRAM 0xA8000 に機械可読マーカーを直接書くが、
+# --cui-only (票 T8-2) は**立てない** (PM 判断 2026-09-12): ring3_fault は
+# GUI 中の fault 隔離 (K5b 受入 G5) の観測手段で、GUI から起動できる必要がある。
+# マーカーは数バイトで WM の画面を実用上壊さない。
 # --- ring3_hello (CPL=3 検証用最小プログラム, v2 M1) ---
 # crt0 を link しない自己完結バイナリ (独自 _start)。標準 crt0 は
 # kapi->sys_exit() 等カーネル関数ポインタを呼ぶが、M2 トランポリン前は CPL=3
@@ -306,22 +311,26 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # build/app.conf のキーはリポジトリルートからの拡張子なしパス
 # (例: userland/cmds/wc)。キーが実在するターゲットと
 # 一致しているかは make check-app-conf で検査できる。
-# 列: 名前 APIバージョン ヒープサイズ [gfx]
+# 列: 名前 APIバージョン ヒープサイズ [gfx|cui]
 #   4 列目 gfx = 全画面 GFX を使う宣言 (OS32X_FLAG_GFX、mkos32x --gfx)。
 #   省略 = 無し。gfx_init / gfx_init_200 を呼ぶプログラムに立てる (票 T8 D1a)。
-#   立て忘れは make check-manifests が検出する。
+#   4 列目 cui = CUI 専用の宣言 (OS32X_FLAG_CUI_ONLY、mkos32x --cui-only)。
+#   KAPI の向こうで画面と BIOS を丸ごと持っていくもの (v86 / VDM) に立てる。
+#   GUI からの exec_start はこれを OS32_ERR_INVAL で断る (票 T8-2)。
+#   どちらも立て忘れは make check-manifests が検出する。
 userland/%.raw: userland/%.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/%.bin: userland/%.raw userland/%.elf
 	@_api=$$(awk '$$1 == "userland/$*" { print $$2 }' build/app.conf); \
 	_heap=$$(awk '$$1 == "userland/$*" { print $$3 }' build/app.conf); \
-	_gfx=$$(awk '$$1 == "userland/$*" { print $$4 }' build/app.conf); \
+	_decl=$$(awk '$$1 == "userland/$*" { print $$4 }' build/app.conf); \
 	_api=$${_api:-7}; \
 	_heap=$${_heap:-0}; \
 	_opts=""; \
 	if [ "$$_heap" != "0" ]; then _opts="$$_opts --heap $$_heap"; fi; \
-	if [ "$$_gfx" = "gfx" ]; then _opts="$$_opts --gfx"; fi; \
+	if [ "$$_decl" = "gfx" ]; then _opts="$$_opts --gfx"; fi; \
+	if [ "$$_decl" = "cui" ]; then _opts="$$_opts --cui-only"; fi; \
 	python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api $$_opts
 
 # === ヘルパーツール ===

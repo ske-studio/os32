@@ -21,6 +21,10 @@ check_manifests.py — 配備マニフェストと app.conf の参照先を検�
    → OS32X_FLAG_GFX が立たず、GUI 中の起動で画面の所有権を取れない
      (票 T8 D1a)。4 列目の書式エラーも同じ節で見る。
 
+5. V86 (v86_* KAPI) を呼ぶのに app.conf に `cui` の宣言が無い
+   → OS32X_FLAG_CUI_ONLY が立たず、GUI から起動できてしまう
+     (票 T8-2、受入 F5 の不合格そのもの)。同じ節で見る。
+
 先に make all を通してから実行すること。
 """
 
@@ -187,20 +191,32 @@ def check_app_conf(bins):
 
 
 # ---------------------------------------------------------------------------
-# 4. 全画面 GFX の宣言ビット (OS32X_FLAG_GFX、票 T8 D1a)
+# 4. 宣言ビット (app.conf の 4 列目 = mkos32x のフラグ)
 #
-# app.conf の 4 列目 `gfx` が mkos32x --gfx になる。立て忘れると GUI 中に
-# gfx_init がカーネルに蹴られる (ERR_INVAL) か、WM が全画面に入らずに
-# プログラムの画面を上書きする。どちらも「静かに壊れる」ので機械で見る。
+#   `gfx` → --gfx      (OS32X_FLAG_GFX、票 T8 D1a)
+#   `cui` → --cui-only (OS32X_FLAG_CUI_ONLY、票 T8-2)
 #
-# 除外リストは持たない。判定はソースが gfx_init 系を呼ぶかどうかだけで、
-# ライブラリ経由 (tilemap_init → libos32gfx_init) も呼び出しグラフを
+# gfx を立て忘れると GUI 中に gfx_init がカーネルに蹴られ (ERR_INVAL でアプリ
+# ごと畳まれる) か、WM が全画面に入らずにプログラムの画面を上書きする。
+# cui を立て忘れると v86 / VDM が GUI から起動でき、画面と BIOS を丸ごと
+# 持っていかれて WM が復帰できない (受入 F5 の不合格)。どちらも「静かに
+# 壊れる」ので機械で見る。
+#
+# 除外リストは持たない。判定はソースが gfx_init 系 / v86_* を呼ぶかどうか
+# だけで、ライブラリ経由 (tilemap_init → libos32gfx_init) も呼び出しグラフを
 # userland/lib から作って追う。
 # ---------------------------------------------------------------------------
 
 GFX_INIT_SEED = ("libos32gfx_init", "gfx_init", "gfx_init_200")
-GFX_COL = 3          # app.conf の 4 列目 (0 始まり)
+DECL_COL = 3         # app.conf の 4 列目 (0 始まり)
+GFX_COL = DECL_COL   # 旧名 (参照が残っている間の互換)
 GFX_MARK = "gfx"
+CUI_MARK = "cui"
+DECL_MARKS = (GFX_MARK, CUI_MARK)
+
+# V86 へ入る KAPI (sdk/kapi.json)。カーネル側で低位メモリを張り替え BIOS と
+# テキスト VRAM を丸ごと使うので、これを呼ぶプログラムは CUI 専用。
+V86_KAPI_SEED = ("v86_selftest", "v86_disktest", "v86_boot", "v86_boot2")
 
 
 def _strip_comments(text):
@@ -259,10 +275,10 @@ def _c_functions(text):
     return funcs
 
 
-def _gfx_call_names():
-    """gfx_init 系に到達する関数名の集合 (userland/lib で不動点まで広げる)。"""
+def _call_names(seed):
+    """seed に到達する関数名の集合 (userland/lib で不動点まで広げる)。"""
     import re
-    names = set(GFX_INIT_SEED)
+    names = set(seed)
     lib_funcs = []
     for path in sorted(glob.glob("userland/lib/**/*.c", recursive=True)):
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -281,7 +297,15 @@ def _gfx_call_names():
     return names
 
 
-def _calls_gfx(paths, names):
+def _gfx_call_names():
+    return _call_names(GFX_INIT_SEED)
+
+
+def _v86_call_names():
+    return _call_names(V86_KAPI_SEED)
+
+
+def _calls_any(paths, names):
     import re
     pats = [re.compile(r'\b%s\s*\(' % re.escape(n)) for n in names]
     # Rust の `(a.gfx_init)()` 形式 (KAPI 構造体のフィールド呼び出し)
@@ -346,30 +370,39 @@ def read_app_conf():
     return conf
 
 
+def _declared(conf, key, mark):
+    return (key in conf and len(conf[key][1]) > DECL_COL
+            and conf[key][1][DECL_COL] == mark)
+
+
 def check_gfx_flag():
-    """戻り値: (列の書式エラー, 宣言漏れ, 余分な宣言)"""
+    """戻り値: (列の書式エラー, gfx 漏れ, gfx 余分, cui 漏れ, cui 余分)"""
     conf = read_app_conf()
 
+    why = "4 列目は 'gfx' / 'cui' か省略のみ"
     bad_col = []
     for key, (lineno, cols) in sorted(conf.items()):
-        if len(cols) > GFX_COL + 1:
-            bad_col.append((lineno, key, " ".join(cols[GFX_COL:]),
-                            "4 列目は 'gfx' か省略のみ"))
-        elif len(cols) == GFX_COL + 1 and cols[GFX_COL] != GFX_MARK:
-            bad_col.append((lineno, key, cols[GFX_COL],
-                            "4 列目は 'gfx' か省略のみ"))
+        if len(cols) > DECL_COL + 1:
+            bad_col.append((lineno, key, " ".join(cols[DECL_COL:]), why))
+        elif len(cols) == DECL_COL + 1 and cols[DECL_COL] not in DECL_MARKS:
+            bad_col.append((lineno, key, cols[DECL_COL], why))
 
-    names = _gfx_call_names()
+    gfx_names = _gfx_call_names()
+    v86_names = _v86_call_names()
     missing, extra = [], []
+    cui_missing, cui_extra = [], []
     for key, srcs in sorted(program_units().items()):
-        declared = (key in conf and len(conf[key][1]) > GFX_COL
-                    and conf[key][1][GFX_COL] == GFX_MARK)
-        calls = _calls_gfx(srcs, names)
-        if calls and not declared:
+        calls_gfx = _calls_any(srcs, gfx_names)
+        calls_v86 = _calls_any(srcs, v86_names)
+        if calls_gfx and not _declared(conf, key, GFX_MARK):
             missing.append(key)
-        elif declared and not calls:
+        elif _declared(conf, key, GFX_MARK) and not calls_gfx:
             extra.append(key)
-    return bad_col, missing, extra
+        if calls_v86 and not _declared(conf, key, CUI_MARK):
+            cui_missing.append(key)
+        elif _declared(conf, key, CUI_MARK) and not calls_v86:
+            cui_extra.append(key)
+    return bad_col, missing, extra, cui_missing, cui_extra
 
 
 def check_undeployed(bins):
@@ -437,8 +470,9 @@ def main():
     else:
         print("  なし")
 
-    bad_col, gfx_missing, gfx_extra = check_gfx_flag()
-    print("== 2b. 全画面 GFX の宣言ビット (app.conf の 4 列目) ==")
+    (bad_col, gfx_missing, gfx_extra,
+     cui_missing, cui_extra) = check_gfx_flag()
+    print("== 2b. 宣言ビット (app.conf の 4 列目 gfx / cui) ==")
     if bad_col:
         rc = 1
         for lineno, key, col, why in bad_col:
@@ -449,11 +483,21 @@ def main():
         for key in gfx_missing:
             print("  [NG] {:44s} gfx_init 系を呼ぶのに app.conf に 'gfx' が無い"
                   .format(key))
+    if cui_missing:
+        rc = 1
+        for key in cui_missing:
+            print("  [NG] {:44s} v86_* KAPI を呼ぶのに app.conf に 'cui' が無い"
+                  .format(key))
     if gfx_extra:
         for key in gfx_extra:
             print("  [--] {:44s} 'gfx' 宣言があるが gfx_init 系の呼び出しが"
                   "見当たらない".format(key))
-    if not bad_col and not gfx_missing and not gfx_extra:
+    if cui_extra:
+        for key in cui_extra:
+            print("  [--] {:44s} 'cui' 宣言があるが v86_* KAPI の呼び出しが"
+                  "見当たらない".format(key))
+    if not bad_col and not gfx_missing and not gfx_extra and not cui_missing \
+            and not cui_extra:
         print("  なし")
 
     undeployed = check_undeployed(bins)

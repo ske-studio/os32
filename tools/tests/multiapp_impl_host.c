@@ -209,6 +209,26 @@ static int ma_start_cpl0_gui(int is_shell, int gui)
 
 static int ma_start_cpl0(int is_shell) { return ma_start_cpl0_gui(is_shell, 0); }
 
+/* ---- CUI 専用の宣言 (票 T8-2) — exec_launch の順番のまま ----------------
+ *   池の admit (状態は変えない) → ヘッダ読み → cui_only の admit → 起動。
+ * 拒否は池の消費より後・commit より前でなければならない (池も帯も動かさない
+ * こと)。宣言以外は普通の CPL=3 アプリなので --cpl0 の枝は通らない。 */
+static int ma_start_cui_only(int gui)
+{
+    int id = appslot_start_admit(gui, 0, 0);     /* 池だけ。状態は変えない */
+    AppSlot *a;
+    if (id < 0) return id;
+    if (appslot_cui_only_admit(gui, OS32X_FLAG_CUI_ONLY) < 0)
+        return OS32_ERR_INVAL;
+    appslot_start_commit(id, gui, 0);
+    a = appslot_at(id);
+    a->cpl3 = 1;
+    a->hdr_flags = OS32X_FLAG_CUI_ONLY;
+    H.turn_used[id] = 1;
+    H.last_run = id;
+    return id;
+}
+
 static void ma_gui_call(int op) { appslot_gui_op_enter(op == MA_OP_WAIT); }
 static void ma_gui_return(void) { appslot_gui_op_leave(); }
 
@@ -1402,6 +1422,71 @@ static void case_gfx_screen_owner(void)
           "20G シェル帯の載せ替えは GUI 判定の対象外");
 }
 
+
+/* ======================================================================== */
+/*  ケース 21 — CUI 専用の宣言と「拒否は畳む」 (票 T8-2、2026-09-12)         */
+/*                                                                          */
+/*  受入 F5 の不合格から。T8 の砦は OS32X_FLAG_FORCE_CPL0 だけだったが、      */
+/*  `userland/cmds/v86.bin` の flags は 0x0 — v86 は CPL=3 のプログラムで、   */
+/*  V86 へは KAPI (v86_*) を通してカーネル側から入る。宣言ビット              */
+/*  OS32X_FLAG_CUI_ONLY を 1 つ足して GUI からの起動そのものを断つ。          */
+/*                                                                          */
+/*  受入 F6 の実測から。宣言の無い gfx_init を「断って続行させる」と、        */
+/*  プログラムは失敗を知らないまま描画 KAPI と VRAM 直書きで描き続け GUI を   */
+/*  壊した。拒否 = そのアプリを畳む (abort_req → syscall 出口)。             */
+/* ======================================================================== */
+static void case_cui_only_and_reject_kill(void)
+{
+    int id;
+    u32 rej0;
+
+    /* --- (a) 純関数: GUI からだけ断る ---------------------------------- */
+    check(appslot_cui_only_admit(1, OS32X_FLAG_CUI_ONLY) == OS32_ERR_INVAL,
+          "21a GUI からの CUI 専用プログラムは ERR_INVAL");
+    check(appslot_cui_only_admit(0, OS32X_FLAG_CUI_ONLY) == 0,
+          "21b CUI (exec_run) からは従来どおり通る");
+    check(appslot_cui_only_admit(1, 0) == 0,
+          "21c 宣言の無いプログラムは GUI からでも通る");
+    check(appslot_cui_only_admit(1, (u32)(OS32X_FLAG_CUI_ONLY |
+                                          OS32X_FLAG_GFX)) == OS32_ERR_INVAL,
+          "21d 他のビットと混ざっていても宣言を見る");
+    check(appslot_cui_only_admit(1, OS32X_FLAG_FORCE_CPL0) == 0,
+          "21e FORCE_CPL0 は別の砦 (v86.bin は flags 0x0 で素通りしていた = F5)");
+
+    /* --- (b) exec_start 経路 (GUI) は起動しない、CUI は通る ------------- */
+    ma_init(4096);
+    check(ma_start_cui_only(1) == OS32_ERR_INVAL,
+          "21f exec_start 経路の CUI 専用プログラムは起動しない");
+    check(appslot_live() == 0 && H.free_pages == 4096,
+          "21g 拒否は池も枚数も 1 つも動かさない");
+    check(appslot_alloc_id() == APP_ID_MIN, "21h 拒否は池を消費しない");
+    check(ma_start_cui_only(0) == APP_ID_MIN,
+          "21i CUI (exec_run) 経路は従来どおり通る");
+    check(appslot_live() == 1, "21j 通れば 1 本立つ");
+    ma_exit(0);
+
+    /* --- (c) gfx_init の拒否はアプリを畳む (受入 F6 の実測) ------------- */
+    ma_init(4096);
+    rej0 = gfx_init_reject_count;
+    id = ma_start_gfx(100, 1, 0);        /* 宣言の無い CPL=3 */
+    check(id == APP_ID_MIN, "21k 下ごしらえ: 宣言の無いアプリが 1 本立つ");
+    check(appslot_at(id)->abort_req == 0, "21l 起動直後は畳む要求は無い");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL,
+          "21m GUI 中の宣言なしの gfx_init は拒否される");
+    check(appslot_at(id)->abort_req == 1,
+          "21n 拒否したアプリは abort_req を負う (syscall 出口で畳まれる)");
+    check(gfx_init_reject_count == rej0 + 1,
+          "21o 数えるのは gfx_init_reject_count のまま (専用カウンタは増やさない)");
+    appslot_at(id)->abort_req = 0;
+    check(appslot_gfx_claim(0) == 0 && appslot_at(id)->abort_req == 0,
+          "21p CUI 中の素通しは畳まない");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL &&
+          appslot_at(id)->abort_req == 1,
+          "21q 二度目の拒否でも畳む要求は立つ");
+    ma_exit(0);
+    check(appslot_live() == 0, "21r 畳んだ後は 1 本も残らない");
+}
+
 int main(void)
 {
     failures = 0;
@@ -1429,6 +1514,7 @@ int main(void)
     case_abort_clear();
     case_wait_key();
     case_gfx_screen_owner();
+    case_cui_only_and_reject_kill();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

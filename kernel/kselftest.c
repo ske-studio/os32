@@ -414,6 +414,7 @@ static void test_gfx_owner(void)
     u32 bad = appslot_gfx_owner_selftest();
     check((bad & (1u << 0)) == 0, "gfx owner moves on claim, returns on exit");
     check((bad & (1u << 1)) == 0, "gfx claim without OS32X_FLAG_GFX is refused");
+    check((bad & (1u << 2)) == 0, "OS32X_FLAG_CUI_ONLY refused only from GUI");
 }
 
 int kselftest_run(void)

@@ -1103,6 +1103,18 @@ static int exec_launch(const char *cmdline, int gui_arg)
     heap_sz   = hdr->heap_size;
     entry_off = hdr->entry_offset;
 
+    /* ---- CUI 専用の宣言 (票 T8-2、受入 F5 の不合格を受けて) ----
+     * `--cpl0` の砦 (下) は CPL=0 のプログラムしか捕まえない。v86.bin は
+     * flags 0x0 の **CPL=3** プログラムで、V86 へは KAPI (v86_*) を通して
+     * カーネル側から入るので素通りしていた。OS32X_FLAG_CUI_ONLY
+     * (mkos32x --cui-only / app.conf の 4 列目 `cui`) を見て、GUI からの
+     * 起動 (exec_start) だけをここで断つ。CUI の exec_run は無変更。
+     * 帯も池もまだ 1 つも動かしていない位置に置くこと。 */
+    if (!is_shell && appslot_cui_only_admit(gui, hdr->flags) < 0) {
+        shell_print("Error: cui only - run this from CUI mode\n", ATTR_RED);
+        return OS32_ERR_INVAL;
+    }
+
     /* v2 M3a: ring3 をデフォルト化。シェルは CPL=0 のまま。それ以外の全
      * プログラムを CPL=3 で起動する。稀に CPL=3 で動かせないものは
      * OS32X_FLAG_FORCE_CPL0 (mkos32x --cpl0) で CPL=0 に落とす。 */

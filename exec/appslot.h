@@ -159,6 +159,22 @@ int appslot_launch_is_app(int is_shell, u32 hdr_flags);
  * 呼び出し側が appslot_launch_is_app() と同じく is_shell を渡す。 */
 int appslot_cpl0_admit(int is_shell, int gui);
 
+/* CUI 専用の宣言 (OS32X_FLAG_CUI_ONLY、mkos32x --cui-only / app.conf 4 列目
+ * `cui`) を持つプログラムを起動してよいか。**純関数 — 状態は 1 つも変えない**。
+ *
+ * 票 T8-2 (受入 F5 の不合格を受けて、2026-09-12)。T8 D1 の砦は
+ * appslot_cpl0_admit だけだったが、`userland/cmds/v86.bin` の flags は 0x0 —
+ * v86 は **CPL=3 のプログラム**で、V86 へは KAPI (v86_selftest / v86_disktest /
+ * v86_boot / v86_boot2) を通してカーネル側から入る。FORCE_CPL0 では捕まらない
+ * ので、宣言ビットを 1 つ増やして GUI からの起動そのものを断つ。
+ *
+ *   gui       : exec_launch の gui_arg (1 = exec_start / 0 = CUI の exec_run)
+ *   hdr_flags : OS32X ヘッダの flags
+ * 戻り値: 0 = 起動してよい / OS32_ERR_INVAL = GUI からは不可。
+ * シェル (ネスト段 0) は宣言を持たないので is_shell は要らない。CUI 中は
+ * 宣言があっても素通し (「CUI に降りてから実行する」が決裁の趣旨)。 */
+int appslot_cui_only_admit(int gui, u32 hdr_flags);
+
 /* 起動してよいかを判定する。**状態は 1 つも変えない**。
  *   gui=1 (exec_start): WM の top-level からだけ (契約 S2)
  *   gui=0 (exec_run):   走っているアプリからも通る (決裁 D9-8)
@@ -262,7 +278,11 @@ int appslot_gfx_claim_check(int gui_mode, int caller, int cpl3, u32 hdr_flags);
 /* 上を「いま走っている ID」に対して適用し、結果を反映する。
  * 通れば 0 (所有者を取った場合も 0)、拒否なら OS32_ERR_INVAL を返して
  * gfx_init_reject_count++ する。gui_mode は呼び出し側が con_sink に聞く
- * (exec/ は -Iinclude を持つが、判定材料をこの表に閉じるため引数で受ける)。 */
+ * (exec/ は -Iinclude を持つが、判定材料をこの表に閉じるため引数で受ける)。
+ *
+ * 票 T8-2: 拒否は **そのアプリを畳む** — appslot_abort_request() で abort_req
+ * を立て、syscall 出口の ring3_abort_check() に畳ませる。拒否して続行させると
+ * 描画 KAPI と VRAM 直書きで GUI を壊すことが実測で分かったため (受入 F6)。 */
 int appslot_gfx_claim(int gui_mode);
 
 /* 画面の所有者 (KAPI v48 gfx_screen_owner の実体)。誰でも呼べる。 */

@@ -15,6 +15,7 @@ mkos32x.py - フラットバイナリに OS32X ヘッダを付加する
     --ring3        CPL=3 (リング3) フラグを設定 (v2 M1)
     --cpl0         CPL=0 強制フラグを設定 (ring3 デフォルト化後のエスケープ, v2 M3)
     --shlib        共有ライブラリフラグを設定 (MEM_SHLIB_BASE 常駐, GUI v1.1 K3)
+    --cui-only     CUI 専用フラグを設定 (GUI からの起動を断る, 票 T8-2)
     --load ADDR    リンク時のロードアドレス (--elf 指定時は ELF の .text から自動)
 """
 
@@ -33,6 +34,7 @@ OS32X_FLAG_GFX = 0x0001
 OS32X_FLAG_RING3 = 0x0002
 OS32X_FLAG_FORCE_CPL0 = 0x0004
 OS32X_FLAG_SHLIB = 0x0008
+OS32X_FLAG_CUI_ONLY = 0x0010
 
 
 import subprocess
@@ -149,6 +151,7 @@ def main():
         print("  --ring3       CPL=3 リング3フラグ設定")
         print("  --cpl0        CPL=0 強制フラグ設定")
         print("  --shlib       共有ライブラリフラグ設定")
+        print("  --cui-only    CUI 専用フラグ設定 (GUI から起動しない)")
         print("  --load ADDR   ロードアドレス (--elf があれば自動検出)")
         sys.exit(1)
 
@@ -192,6 +195,9 @@ def main():
             i += 1
         elif sys.argv[i] == '--shlib':
             flags |= OS32X_FLAG_SHLIB
+            i += 1
+        elif sys.argv[i] == '--cui-only':
+            flags |= OS32X_FLAG_CUI_ONLY
             i += 1
         elif sys.argv[i] == '--load' and i + 1 < len(sys.argv):
             load_addr = int(sys.argv[i + 1], 0)
