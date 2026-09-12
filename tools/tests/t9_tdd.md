@@ -375,3 +375,37 @@ KernelAPI 表 (出力 4 本・ヒープ・疑似ファイル・コンソール�
 どちらも戻すと全 19 項目 `ALL PASS`、`TARGET i386-elf GNU89 COMPILE PASS`。
 実機・エミュレータ・`make` は**未実施** ([V4]) — 端末上の見え方 (受入 S5) は
 PM の実機確認に委ねる。
+
+### 往復 2/3 の追加 (2026-09-13)
+
+**画面カーソルの位置** (再レビュー blocker 2)。CUI 直起動の `hel` → LEFT → TAB は
+内容を変えないので写しは `hel` のままだが、画面カーソルは 1 つ左にある。写しに
+`sh_drawn_pos` を持たせる前は差分だけ出て `hep ` に化けた:
+
+```
+       got "p " want "\nsh> help "
+  FAIL 3a 差分ではなく行を作り直す
+       got "d" want "\nsh> abcd"
+  FAIL 3e その次も延長せず作り直す
+```
+
+`sh_drawn_pos == sh_drawn_len` を延長の条件に足し、`redraw_line` が自分の置いた
+カーソル位置を写しへ残すようにすると `ALL PASS`。ui.c の LEFT / RIGHT / HOME でも
+`sh_drop_drawn()` して次回を作り直しに倒してある (ケース 3f)。
+
+**ハーネスの `goto` オフセット** (non-blocker)。`cmd + 7` は `goto loop` を `op` と
+読んでいて、ラベルが見つからず `script_abort_flag` で止まっていた — つまり巻き戻し
+からの脱出を検査できていなかった。`cmd + 5` に直すと、`sh_exit_flag` の判定を外した
+RED で本当に回り続けることが見える:
+
+```
+       got "echo a|exit|goto loop|goto loop|… (15 回)" (走りすぎ) want "echo a|exit"
+  FAIL 5b ラベルも goto も走らない
+```
+
+全 25 項目 `ALL PASS`。
+
+**起動時の profile 内の `exit`** (再レビュー blocker 1) は `shell_run` の行ループの
+入口に判定を移して直したが、ループ自体が `sh_getkey` と絡むのでホストへは持ち込んで
+いない。ケース 4c (`source` から戻った時点で印が立っている) までが試験の範囲で、
+「入口で見て抜ける」ことは実機確認 (受入 S5) に委ねる。

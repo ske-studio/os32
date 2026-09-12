@@ -41,8 +41,9 @@
  * sh_drop_drawn() は行の作り直しを強制する (候補一覧を挟んだ後など)。
  * 常駐では両方とも消える — redraw_line も写しも常駐には無い。 */
 #ifdef SHELL_AS_APP
-#define sh_mark_drawn(buf, len)  sh_set_drawn((buf), (len))
-#define sh_drop_drawn()          sh_set_drawn((const char *)0, -1)
+/* 直接印字の後は画面カーソルも行末にある (追加・行末 BS しか通らない) */
+#define sh_mark_drawn(buf, len)  sh_set_drawn((buf), (len), (len))
+#define sh_drop_drawn()          sh_set_drawn((const char *)0, -1, -1)
 #else
 #define sh_mark_drawn(buf, len)  ((void)0)
 #define sh_drop_drawn()          ((void)0)
@@ -545,6 +546,12 @@ void shell_run(void) {
 #endif
 
     for (;;) {
+#ifdef SHELL_AS_APP
+        /* D2(d): `exit` の印はプロンプトを出す**前**に見る。/etc/profile や
+         * $HOME/.profile の中の `exit` でも、入力待ちに入らずここで終わる
+         * (前の行の実行が立てた印もここで拾うので、ループ末尾では見ない)。 */
+        if (sh_exit_flag) break;
+#endif
         show_prompt();
         cmd_pos = cmd_len = cmd_buf[0] = prev_draw_len = 0;
         sh_mark_drawn(cmd_buf, 0);
@@ -585,14 +592,20 @@ void shell_run(void) {
                 }
                 continue;
             }
+            /* LEFT / RIGHT / HOME は内容を変えずに**画面カーソルだけ**動かす。
+             * 写しは内容しか見ていないので、そのままだと次の TAB 補完が
+             * 「行末への延長」と誤判定する (`hel` → LEFT → TAB で `hep `)。
+             * 追従させるより捨てて次回を行の作り直しに倒す方が安全 — 経路を
+             * 1 つ見落としても表示が壊れない。GUI 中はスキャンコードが来ない
+             * のでここは通らず、CUI 直起動のときだけ効く。 */
             if ((key >> 8) == 0x3B) { /* LEFT */
-                if (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } continue;
+                if (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); sh_drop_drawn(); } continue;
             }
             if ((key >> 8) == 0x3C) { /* RIGHT */
-                if (cmd_pos < cmd_len) { g_api->shell_putchar(cmd_buf[cmd_pos], ATTR_WHITE); cmd_pos++; } continue;
+                if (cmd_pos < cmd_len) { g_api->shell_putchar(cmd_buf[cmd_pos], ATTR_WHITE); cmd_pos++; sh_drop_drawn(); } continue;
             }
             if ((key >> 8) == 0x3E) { /* HOME */
-                while (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } continue;
+                while (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } sh_drop_drawn(); continue;
             }
             if ((key >> 8) == 0x39) { /* DEL */
                 if (cmd_pos < cmd_len) {
@@ -684,12 +697,8 @@ void shell_run(void) {
         if (cmd_len > 0) hist_add(cmd_buf);
         execute_command(cmd_buf);
         if (hist_dirty) hist_save();
-#ifdef SHELL_AS_APP
-        /* D2(d): `exit` が立てた印。ここで抜けると main が 0 を返して
-         * sh.bin が終わり、端末は launch_poll の DONE でプロンプトへ戻る。
-         * 常駐シェルには exit を登録していない (抜けても起動ループが
-         * すぐ載せ直すだけなので意味が無い)。 */
-        if (sh_exit_flag) break;
-#endif
+        /* `exit` の印はループの入口で見る (起動時の profile も拾うため)。
+         * 抜けると main が 0 を返して sh.bin が終わり、端末は launch_poll の
+         * DONE でプロンプトへ戻る。常駐シェルには exit を登録していない。 */
     }
 }

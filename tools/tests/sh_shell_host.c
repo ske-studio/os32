@@ -316,7 +316,10 @@ void execute_command(const char *cmd)
         char label[TRACE_LINE];
         char *argv[3];
         int n = 0;
-        while (cmd[7 + n] && n < TRACE_LINE - 1) { label[n] = cmd[7 + n]; n++; }
+        /* "goto " は 5 バイト ("source " が 7)。7 のままだと `goto loop` を
+         * `op` と読み、ラベルが見つからず script_abort_flag で止まってしまう
+         * ので、巻き戻しからの exit 脱出を検査できていなかった。 */
+        while (cmd[5 + n] && n < TRACE_LINE - 1) { label[n] = cmd[5 + n]; n++; }
         label[n] = '\0';
         argv[0] = (char *)"goto";
         argv[1] = label;
@@ -352,7 +355,7 @@ static void case_redraw_extend(void)
     report("1 redraw_line: 純粋な延長は差分バイトだけ (TAB 補完)\n");
 
     /* いま画面に "sh> l" が出ている状態から "ls" へ補完された */
-    sh_set_drawn("l", 1);
+    sh_set_drawn("l", 1, 1);
     out_reset();
     g_cursor_calls = 0;
     redraw_line("ls", 2, 2);
@@ -372,7 +375,7 @@ static void case_redraw_rebuild(void)
     report("2 redraw_line: 延長でなければ行を作り直す\n");
 
     /* 履歴で丸ごと別の行に差し替わった */
-    sh_set_drawn("ls -la", 6);
+    sh_set_drawn("ls -la", 6, 6);
     out_reset();
     g_cursor_calls = 0;
     redraw_line("cat", 3, 3);
@@ -380,47 +383,85 @@ static void case_redraw_rebuild(void)
     check(g_cursor_calls == 0, "2a' 作り直しも座標を引かない");
 
     /* 短くなる向き (BS) も作り直し */
-    sh_set_drawn("cat", 3);
+    sh_set_drawn("cat", 3, 3);
     out_reset();
     redraw_line("ca", 2, 2);
     check(out_is("\\nsh> ca"), "2b 縮む側も作り直す");
 
     /* 候補一覧を挟んだ後は延長でも作り直す */
-    sh_set_drawn("ls", 2);
+    sh_set_drawn("ls", 2, 2);
     /* ui.c の sh_drop_drawn() の中身 (行が流れた印) */
-    sh_set_drawn((const char *)0, -1);
+    sh_set_drawn((const char *)0, -1, -1);
     out_reset();
     redraw_line("ls", 2, 2);
     check(out_is("\\nsh> ls"), "2c 行が流れた印のあとは必ず作り直す");
 
     /* カーソルが行末より前なら BS で戻す (端末の BS は消さずに左へ) */
-    sh_set_drawn("abc", 3);
+    sh_set_drawn("abc", 3, 3);
     out_reset();
     redraw_line("abd", 3, 1);
     check(out_is("\\nsh> abd\\b\\b"), "2d 行末より前は BS で戻す");
 }
 
 /* ========================================================================
- *  2. source 中の exit (blocker 2 / D2(d))
+ *  3. 画面カーソルが行末に無いときは延長しない (再レビュー blocker 2)
+ *
+ *  CUI 直起動の `hel` -> LEFT -> TAB。LEFT は内容を変えないので写しは `hel`
+ *  のままだが、画面カーソルは 1 つ左にある。内容の前方一致だけで「延長」と
+ *  判定して差分 `p ` を出すと、画面は `hep ` (CUI の BS は消す) でバッファは
+ *  `help ` という食い違いになる。
+ * ======================================================================== */
+static void case_redraw_cursor_not_at_end(void)
+{
+    report("3 画面カーソルが行末に無ければ延長しない (hel -> LEFT -> TAB)\n");
+
+    /* 補完後に redraw_line が写しへ残したカーソル位置をそのまま使う経路 */
+    sh_set_drawn("hel", 3, 2);              /* LEFT で 1 つ左に居る */
+    out_reset();
+    g_cursor_calls = 0;
+    redraw_line("help ", 5, 5);             /* TAB 補完の結果 */
+    check(out_is("\\nsh> help "), "3a 差分ではなく行を作り直す");
+    check(g_cursor_calls == 0,   "3b 作り直しも座標を引かない");
+    check(sh_drawn_pos == 5,     "3c 写しのカーソルは新しい行末へ");
+
+    /* 行末より前で redraw した直後の TAB も同じ (BS で戻した状態が残る) */
+    sh_set_drawn("abc", 3, 3);
+    out_reset();
+    redraw_line("abc", 3, 1);               /* 行末より前へ戻す */
+    check(sh_drawn_pos == 1,     "3d redraw はカーソル位置も写しへ残す");
+    out_reset();
+    redraw_line("abcd", 4, 4);              /* ここで延長したら壊れる */
+    check(out_is("\\nsh> abcd"), "3e その次も延長せず作り直す");
+
+    /* ui.c の LEFT / RIGHT / HOME が呼ぶ sh_drop_drawn() の効き目 */
+    sh_set_drawn("hel", 3, 3);
+    sh_set_drawn((const char *)0, -1, -1);
+    out_reset();
+    redraw_line("help ", 5, 5);
+    check(out_is("\\nsh> help "), "3f 写しを捨てた後も作り直す");
+}
+
+/* ========================================================================
+ *  4. source 中の exit (往復 1 の blocker 2 / D2(d))
  * ======================================================================== */
 static void case_exit_stops_rest(void)
 {
-    report("3 source: exit の次の行は走らない\n");
+    report("4 source: exit の次の行は走らない\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
     out_reset();
     file_add("/a.sh", "echo 1\nexit\necho 2\n");
 
-    check(script_source_file("/a.sh") == 0, "3a source は 0 で戻る");
-    check(trace_is("echo 1|exit"),          "3b exit の後は実行しない");
-    check(sh_exit_flag == 1,                "3c 印は立ったまま (ui.c が見る)");
-    check(g_open_leak == 0,                 "3d FD を開いたままにしない");
+    check(script_source_file("/a.sh") == 0, "4a source は 0 で戻る");
+    check(trace_is("echo 1|exit"),          "4b exit の後は実行しない");
+    check(sh_exit_flag == 1,                "4c 印は立ったまま (shell_run の入口が見る)");
+    check(g_open_leak == 0,                 "4d FD を開いたままにしない");
 }
 
 static void case_exit_breaks_goto_loop(void)
 {
-    report("4 source: goto の無限ループでも exit で抜ける\n");
+    report("5 source: goto の無限ループでも exit で抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -428,13 +469,13 @@ static void case_exit_breaks_goto_loop(void)
     /* exit が無ければ :loop <- goto loop で永久に回る */
     file_add("/b.sh", "echo a\nexit\n:loop\ngoto loop\n");
 
-    check(script_source_file("/b.sh") == 0, "4a source は戻ってくる");
-    check(trace_is("echo a|exit"),          "4b ラベルも goto も走らない");
+    check(script_source_file("/b.sh") == 0, "5a source は戻ってくる");
+    check(trace_is("echo a|exit"),          "5b ラベルも goto も走らない");
 }
 
 static void case_exit_unwinds_nested(void)
 {
-    report("5 source: ネストした source の外側も抜ける\n");
+    report("6 source: ネストした source の外側も抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -442,9 +483,9 @@ static void case_exit_unwinds_nested(void)
     file_add("/outer.sh", "source /inner.sh\necho outer2\n");
     file_add("/inner.sh", "exit\necho inner2\n");
 
-    check(script_source_file("/outer.sh") == 0, "5a 外側の source も 0 で戻る");
-    check(trace_is("source /inner.sh|exit"),    "5b 内側も外側も後続を止める");
-    check(g_open_leak == 0,                     "5c どの段でも FD を残さない");
+    check(script_source_file("/outer.sh") == 0, "6a 外側の source も 0 で戻る");
+    check(trace_is("source /inner.sh|exit"),    "6b 内側も外側も後続を止める");
+    check(g_open_leak == 0,                     "6c どの段でも FD を残さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -454,6 +495,7 @@ void _start(void)
     build_api();
     case_redraw_extend();
     case_redraw_rebuild();
+    case_redraw_cursor_not_at_end();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();
     case_exit_unwinds_nested();

@@ -183,6 +183,11 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - check-manifests: `docs/07_shell.md` の基本コマンド表に `exit` と「`sh.bin` のみ」の注記を追加 (§1c は「なし」)。non-blocker も対応 — GUI 外の `launch_req` INVAL は `sh: external programs need the GUI terminal` を**1 度だけ**出して次の PATH 候補へ回す (起動が通れば印を寝かせる)。UTF-8 の BS は既存問題として触っていない。
 - 試験: `check-sh-shell-host` を新設 (`check` / `.PHONY` 登録、19 項目、RED → GREEN を `t9_tdd.md` に記録)。`check-sh-launch-host` は 36 項目へ増え、こちらも RED を採り直した。常駐の `.o` は 12 本中 11 本が `f753f2d` とバイト一致、`cmd_base.o` の差は `__TIME__` 1 バイトのみ。
 
+### 13b. 実装レビュー (往復 2/3) の修正 (S、2026-09-13)
+
+- blocker 1: `exit` の印を `shell_run` の行ループの**入口** (最初の `show_prompt` と `sh_getkey` の前) で見るようにし、ループ末尾の判定は外した。これで起動時の `/etc/profile` / `$HOME/.profile` 内の `exit` でも入力待ちに入らずそのまま終わる。
+- blocker 2: 行の写しに**画面カーソルのバイト位置** `sh_drawn_pos` を足し、差分印字は「前方一致 かつ 新カーソルが行末 かつ **描画済みカーソルも行末**」のときだけにした。`redraw_line` は自分が置いたカーソル位置を写しへ残す。加えて内容を変えずにカーソルだけ動かす LEFT / RIGHT / HOME は `sh_drop_drawn()` で写しを捨て、次回を行の作り直しに倒す (経路の見落としで表示が壊れないように)。non-blocker のハーネス `goto` オフセットも `cmd + 5` へ直し、RED で本当に無限ループになることを確認した。
+
 ## 14. 実装メモ (W、2026-09-13)
 
 - 起動口は単独ループ (`lib.rs` `standalone_loop`) の `session_handoff` の**直後**、

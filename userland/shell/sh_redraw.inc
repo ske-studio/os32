@@ -26,17 +26,24 @@
  * ======================================================================== */
 
 /* いま画面に出ている入力行の写し。sh_drawn_len < 0 は「行が壊れている
- * (候補一覧を挟んだ等) ので必ず作り直す」の印。 */
+ * (候補一覧を挟んだ、カーソルを動かした等) ので必ず作り直す」の印。
+ * sh_drawn_pos は**画面カーソルがどのバイト位置にあるか**。差分印字は
+ * 画面カーソルが行末にあるときしか成り立たないので、内容の前方一致だけで
+ * なくこれも見る (CUI 直起動で `hel` → LEFT → TAB としたとき、写しは
+ * `hel` のままでも画面カーソルは 1 つ左にあり、差分だけ出すと `hep ` に
+ * なってしまう)。 */
 static char sh_drawn[CMD_BUF_SIZE];
 static int  sh_drawn_len = 0;
+static int  sh_drawn_pos = 0;
 
-static void sh_set_drawn(const char *buf, int len)
+static void sh_set_drawn(const char *buf, int len, int pos)
 {
     int i;
-    if (len < 0 || !buf) { sh_drawn_len = -1; return; }
+    if (len < 0 || !buf) { sh_drawn_len = -1; sh_drawn_pos = -1; return; }
     if (len > CMD_BUF_SIZE - 1) len = CMD_BUF_SIZE - 1;
     for (i = 0; i < len; i++) sh_drawn[i] = buf[i];
     sh_drawn_len = len;
+    sh_drawn_pos = (pos < 0 || pos > len) ? len : pos;
 }
 
 /* buf[from, to) をそのまま印字する (shell_print_utf8 は NUL 終端を取る) */
@@ -65,7 +72,10 @@ static void sh_cursor_back(const char *buf, int cursor, int len)
 static void redraw_line(const char *buf, int len, int cursor)
 {
     int i;
-    int extend = (sh_drawn_len >= 0 && len >= sh_drawn_len && cursor == len);
+    /* 差分だけ足せるのは「画面カーソルが行末にあり、いまの行がその純粋な
+     * 延長で、新しいカーソルも行末」のときだけ。 */
+    int extend = (sh_drawn_len >= 0 && sh_drawn_pos == sh_drawn_len &&
+                  len >= sh_drawn_len && cursor == len);
 
     if (extend) {
         for (i = 0; i < sh_drawn_len; i++) {
@@ -82,6 +92,6 @@ static void redraw_line(const char *buf, int len, int cursor)
         sh_cursor_back(buf, cursor, len);
     }
 
-    sh_set_drawn(buf, len);
+    sh_set_drawn(buf, len, cursor);
     prev_draw_len = len;
 }
