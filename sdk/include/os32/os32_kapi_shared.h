@@ -338,6 +338,7 @@ typedef void (*DirCallback)(const DirEntry_Ext *entry, void *ctx);
 /*    PRINT  : [type=1][color u8][len u8][UTF-8 バイト列 len 個]             */
 /*    CLEAR  : [type=2]                                                      */
 /*    CURSOR : [type=3][x u8][y u8]                                          */
+/*    EXIT   : [type=4][id u8]        — gshell 配下の子が畳まれた (票 T7 E1) */
 /*                                                                          */
 /*  改行 / CR / TAB は PRINT のバイトとして流れる (端末モデルが解釈する)。   */
 /*  スクロールはレコードにしない (行の追加に畳む)。                          */
@@ -345,11 +346,13 @@ typedef void (*DirCallback)(const DirEntry_Ext *entry, void *ctx);
 #define CON_SINK_REC_PRINT   1
 #define CON_SINK_REC_CLEAR   2
 #define CON_SINK_REC_CURSOR  3
+#define CON_SINK_REC_EXIT    4
 
 #define CON_SINK_PRINT_MAX   200  /* PRINT 1 本が運ぶ UTF-8 バイト数の上限 */
 #define CON_SINK_HDR_PRINT   3    /* type + color + len */
 #define CON_SINK_HDR_CLEAR   1    /* type */
 #define CON_SINK_HDR_CURSOR  3    /* type + x + y */
+#define CON_SINK_HDR_EXIT    2    /* type + id */
 /* レコード 1 本の最大バイト数。con_sink_read() の cap はこれ以上でなければ
  * ならない (小さいと先頭レコードが永久に取り出せず読み手が止まるため)。 */
 #define CON_SINK_REC_MAX     (CON_SINK_HDR_PRINT + CON_SINK_PRINT_MAX)

@@ -74,6 +74,9 @@ static u32 ring_rec_size(void)
     if (type == (u8)CON_SINK_REC_CURSOR) {
         return (u32)CON_SINK_HDR_CURSOR;
     }
+    if (type == (u8)CON_SINK_REC_EXIT) {
+        return (u32)CON_SINK_HDR_EXIT;
+    }
     return (u32)CON_SINK_HDR_CLEAR;
 }
 
@@ -189,6 +192,24 @@ void con_sink_push_clear(void)
     f = con_sink_lock();
     if (g_enabled && ring_reserve((u32)CON_SINK_HDR_CLEAR)) {
         ring_put((u8)CON_SINK_REC_CLEAR);
+    }
+    con_sink_unlock(f);
+}
+
+/* 子アプリが畳まれたことを端末へ知らせる (票 T7 E1)。exec_reclaim_owned の
+ * 並びから、正常終了 / exec_kill / fault の 3 経路すべてで通る。id は
+ * AppSlot の ID で 1..APPSLOT_MAX なので u8 に収まるが、payload の形を
+ * 崩さないようここで飽和させる。 */
+void con_sink_push_exit(int id)
+{
+    unsigned int f;
+    if (!g_enabled) return;
+    if (id < 0) id = 0;
+    if (id > 255) id = 255;
+    f = con_sink_lock();
+    if (g_enabled && ring_reserve((u32)CON_SINK_HDR_EXIT)) {
+        ring_put((u8)CON_SINK_REC_EXIT);
+        ring_put((u8)id);
     }
     con_sink_unlock(f);
 }
@@ -375,6 +396,34 @@ u32 con_sink_selftest(void)
     if (con_sink_read(g_self_buf, (u32)CON_SINK_REC_MAX) != 0) bad |= 1u << 5;
     con_sink_owner_exit(3);
     res_owner_set(saved_owner);
+
+    /* (6) EXIT レコード (票 T7 E1)。型から長さが導けないと、あふれたとき
+     * バイト単位で捨てて環が半端な位置から読まれる — だから境界を見る。 */
+    con_sink_enable();
+    con_sink_push_exit(6);
+    con_sink_push_cursor(1, 2);
+    n = con_sink_read(g_self_buf, (u32)CON_SINK_REC_MAX);
+    if (n != (i32)((u32)CON_SINK_HDR_EXIT + (u32)CON_SINK_HDR_CURSOR) ||
+        g_self_buf[0] != (u8)CON_SINK_REC_EXIT ||
+        g_self_buf[1] != 6 ||
+        g_self_buf[2] != (u8)CON_SINK_REC_CURSOR ||
+        g_self_buf[3] != 1 || g_self_buf[4] != 2) {
+        bad |= 1u << 6;
+    }
+    con_sink_drop_count = 0;
+    for (i = 0; i < (u32)CON_SINK_RING_SIZE; i++) con_sink_push_exit(7);
+    con_sink_stat(&pending, &dropped0);
+    if (pending > (u32)CON_SINK_RING_SIZE ||
+        pending % (u32)CON_SINK_HDR_EXIT != 0) {
+        bad |= 1u << 6;
+    }
+    n = con_sink_read(g_self_buf, (u32)CON_SINK_REC_MAX);
+    if (n <= 0 || n % (i32)CON_SINK_HDR_EXIT != 0 ||
+        g_self_buf[0] != (u8)CON_SINK_REC_EXIT ||
+        g_self_buf[(u32)CON_SINK_HDR_EXIT] != (u8)CON_SINK_REC_EXIT) {
+        bad |= 1u << 6;
+    }
+    con_sink_owner_exit(saved_owner);
 
     /* 後始末: CUI に戻す (ブートの続きはテキスト面が正)。 */
     con_sink_disable();

@@ -8,8 +8,9 @@ use crate::{
     boundary, inject,
     input::{self, Action},
     paint,
+    prompt::{self, Decision, Event, Mode, Next},
     session::Session,
-    sink::{self, Stop as SinkStop},
+    sink::{self, Record, Stop as SinkStop},
     state::{Fixture, Movement},
     status::{self, SinkStatus},
     storage::Storage,
@@ -71,6 +72,9 @@ pub fn run(api: *mut KernelAPI) -> i32 {
         runs: 0,
         paint_error: false,
         reader: false,
+        /* 端末はプロンプトから始まる (子はまだいない)。 */
+        mode: Mode::Prompt,
+        line: prompt::Line::new(),
     };
     /* 票 §5 R2: **イベントループ (とタイマ) に入る前に** con_sink_read を 1 回
      * 呼び、読み手権限を確立する。`kbd_inject` はこれを済ませた者しか受け付け
@@ -104,7 +108,7 @@ fn build_window() -> GuiResult<Window> {
     let plan = boundary::windows(info.width as i64, info.height as i64).ok_or(GuiErr::INVAL)?;
     let rect = gui_rect(plan[0]).ok_or(GuiErr::INVAL)?;
     Window::create(&WindowSpec::new(
-        b"Terminal (con_sink) ESC / UP DOWN ROLL",
+        b"Terminal  Enter=run  exit/ESC=quit  UP DOWN ROLL",
         rect,
     ))
 }
@@ -142,6 +146,10 @@ struct DisplayApp<'a> {
     /// 後から反転させない (票 §6「失敗は状態行 busy のまま注入もしない」)。
     /// 偽なら打鍵は捨てる。
     reader: bool,
+    /// 打鍵の行き先 (票 T7 E4)。`Prompt` のあいだは 1 バイトも注入しない。
+    mode: Mode,
+    /// プロンプトで編集中の行 (票 T7 E2)。
+    line: prompt::Line,
 }
 
 impl DisplayApp<'_> {
@@ -157,6 +165,126 @@ impl DisplayApp<'_> {
             if w.invalidate_all().is_err() {
                 self.fail(ui);
             }
+        }
+    }
+
+    /// 最下行だけ描き直す (票 E2)。打鍵のたびに全面を投げると 64 行ぶんの
+    /// 描画が走り、協調型なので他のアプリまで待たせる (CLAUDE.md §4-25)。
+    fn repaint_prompt(&mut self, ui: &mut Ui) {
+        let Some(layout) = self.layout() else {
+            self.repaint(ui);
+            return;
+        };
+        if let Some(w) = self.window.as_ref() {
+            let (cw, _) = w.client_size();
+            let rect = Rect::new(0, layout.prompt_y() as i16, cw, CELL_HEIGHT as i16);
+            if w.invalidate(rect).is_err() {
+                self.fail(ui);
+            }
+        }
+    }
+
+    /// 端末が自分で出す 1 行を出力領域へ入れる (票 E3、con_sink は通らない)。
+    /// 行の途中なら先に改行する — 子の出力に食い込ませない。
+    fn echo(&mut self, msg: &prompt::Msg) {
+        if self.session.display().terminal.model().state().cursor.0 != 0 {
+            let _ = self.session.apply(Record::Print {
+                color: 0,
+                bytes: b"\n",
+            });
+        }
+        let _ = self.session.apply(Record::Print {
+            color: 0,
+            bytes: msg.bytes(),
+        });
+        self.follow = true;
+    }
+
+    /// 候補パスが開けるか (票 E3 の存在確認)。`vfs_open` はディレクトリを
+    /// 拒むので、`/usr` のようなパスは「無い」と同じ扱いになる。
+    fn exists(path: &prompt::Path) -> bool {
+        // SAFETY: libos32gui::init initialized os32api. The pointer is to a
+        // private NUL-terminated buffer and sys_open only reads it (mode 0 =
+        // O_RDONLY, sdk/rust/os32api/src/lib.rs fs::O_RDONLY).
+        let fd = unsafe { (os32api::api().sys_open)(path.as_ptr(), 0) };
+        if fd < 0 {
+            return false;
+        }
+        // SAFETY: fd came from the sys_open above and is not used afterwards.
+        unsafe {
+            (os32api::api().sys_close)(fd);
+        }
+        true
+    }
+
+    /// Enter で行を確定する (票 E3 / E5)。
+    fn confirm(&mut self, ui: &mut Ui) {
+        /* 行は Copy で持ち出す — 以後 self を触っても借りが残らない。 */
+        let line = self.line;
+        match prompt::decide(line.as_bytes()) {
+            /* 空行はプロンプトを出し直すだけ (票 E5)。 */
+            Decision::Empty => self.line.clear(),
+            /* `exit` は ESC と同じく端末自身の終了 (票 E5)。 */
+            Decision::Exit => {
+                self.fail(ui);
+                return;
+            }
+            Decision::Run { name, args } => self.launch(&line, name, args),
+        }
+        self.repaint(ui);
+    }
+
+    /// 候補を順に探し、見つかった絶対パスで gshell に起動を頼む (票 E3 / E4)。
+    fn launch(&mut self, echo: &prompt::Line, name: &[u8], args: &[u8]) {
+        /* 打った行は出力領域に残す — 接続モードではプロンプトが消えるので、
+         * 何を走らせたのか分からなくなる。 */
+        self.echo(&prompt::message(prompt::PREFIX, echo.as_bytes()));
+        let candidates = prompt::candidates(name);
+        let Some(path) = candidates.as_slice().iter().find(|p| Self::exists(p)) else {
+            /* ローカル出力。con_sink は通らない (票 E3)。 */
+            self.echo(&prompt::message(b"command not found: ", name));
+            self.line.clear();
+            return;
+        };
+        let Some(cmd) = prompt::command_line(path, args) else {
+            self.echo(&prompt::message(b"command line too long: ", name));
+            self.line.clear();
+            return;
+        };
+        match libos32gui::session_launch(cmd.as_bytes()) {
+            Ok(()) => {
+                /* 受理された = 子が 1 本増える (K5b-W: 要求元は畳まれない)。
+                 * 打鍵の行き先を子へ移す。 */
+                if prompt::step(self.mode, Event::Launched) == Next::Attached {
+                    self.mode = Mode::Attached;
+                }
+                self.line.clear();
+            }
+            /* 別の LAUNCH が pending。行は残して打ち直せるようにする (票 E3)。 */
+            Err(e) if e.code() == GuiErr::FULL.code() => self.echo(&prompt::message(b"busy", b"")),
+            /* それ以外は直らない要求。行は消す (gshell はモーダルも出す)。 */
+            Err(e) => {
+                self.echo(&prompt::message(b"launch failed: ", e.name()));
+                self.line.clear();
+            }
+        }
+    }
+
+    /// 表示の操作 (スクロール) と終了。注入とは無関係。
+    fn navigate(&mut self, ui: &mut Ui, action: Action) {
+        match action {
+            Action::Quit => self.fail(ui),
+            /* fixture の切り替えは live では意味を持たない (受け取った出力を
+             * 捨てることになる)。ホスト試験だけが Select を使う。 */
+            Action::Select(_) => {}
+            Action::Move(movement) => {
+                if let Some(layout) = self.layout() {
+                    self.follow = matches!(movement, Movement::Last);
+                    self.session.move_top(movement, layout.body_rows());
+                    self.repaint(ui);
+                }
+            }
+            Action::None => {}
         }
     }
 
@@ -199,6 +327,16 @@ impl DisplayApp<'_> {
              * 借りる先が別のフィールドなので同時に持てる。 */
             for record in it.by_ref() {
                 self.sink.records += 1;
+                if let Record::Exit(_) = record {
+                    /* 票 E1 / E4: 子が回収された。どの ID が自分の子かは
+                     * 持たないので、接続モードなら無条件でプロンプトへ戻る。
+                     * プロンプトで受けた EXIT は捨てる (step が Stay)。 */
+                    if prompt::step(self.mode, Event::Exit) == Next::Prompt {
+                        self.mode = Mode::Prompt;
+                        self.line.clear();
+                    }
+                    continue;
+                }
                 match self.session.apply(record) {
                     Ok(a) => {
                         self.sink.wraps += a.wraps;
@@ -276,7 +414,7 @@ impl App for DisplayApp<'_> {
         }
         if self.follow {
             if let Some(layout) = self.layout() {
-                self.session.move_top(Movement::Last, layout.rows());
+                self.session.move_top(Movement::Last, layout.body_rows());
             }
         }
         self.repaint(ui);
@@ -294,21 +432,66 @@ impl App for DisplayApp<'_> {
             return;
         }
         let text = ev.text();
-        if self.inject(&inject::from_text(ev.sub, &text.utf8)) {
+        let bytes = inject::from_text(ev.sub, &text.utf8);
+        if self.mode == Mode::Prompt {
+            /* 票 E2: プロンプト表示中は注入せず、行にそのまま足す (FEP の
+             * 確定文字も同じ経路)。入り切らなければ黙って捨てる。 */
+            let before = self.line.len();
+            self.line.push(bytes.as_slice());
+            if self.line.len() != before {
+                self.repaint_prompt(ui);
+            }
+            return;
+        }
+        if self.inject(&bytes) {
             self.repaint(ui);
         }
     }
 
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, ch: u8, _mods: u8, down: bool) {
         if down && scan == libos32gui::widget::SCAN_ESC {
-            self.fail(ui);
+            /* 票 E4: プロンプトの ESC は従来どおり自分の終了。接続モードの
+             * ESC は**プロンプトへ戻るだけ** — 子には注がず、自分も終わらない
+             * (起動失敗でモーダルが出たときの唯一の戻り道)。 */
+            match prompt::step(self.mode, Event::Escape) {
+                Next::Quit => self.fail(ui),
+                Next::Prompt => {
+                    self.mode = Mode::Prompt;
+                    self.line.clear();
+                    self.repaint(ui);
+                }
+                _ => {}
+            }
             return;
         }
         if ui.is_quitting() {
             return;
         }
-        /* 制御キー (Enter / BS / TAB) だけ注ぐ。印字可能キーと FEP の確定文字は
-         * GUI_EV_TEXT で来るので、ここで注ぐと 1 打鍵が 2 バイトになる。 */
+        if self.mode == Mode::Prompt {
+            /* 票 E2: プロンプト表示中は 1 バイトも注入しない。 */
+            if down {
+                match scan & 0x7F {
+                    inject::SCAN_RETURN => {
+                        self.confirm(ui);
+                        return;
+                    }
+                    inject::SCAN_BS => {
+                        if self.line.backspace() {
+                            self.repaint_prompt(ui);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            /* 印字可能 ASCII と FEP の確定文字は GUI_EV_TEXT で来る (on_raw)。
+             * ここでも拾うと 1 打鍵が 2 文字になる。残りは表示の操作だけ。 */
+            self.navigate(ui, input::nav(scan, down));
+            return;
+        }
+        /* 接続モード。制御キー (Enter / BS / TAB) だけ注ぐ。印字可能キーと
+         * FEP の確定文字は GUI_EV_TEXT で来るので、ここで注ぐと 1 打鍵が
+         * 2 バイトになる。 */
         if self.inject(&inject::from_key(scan, down)) {
             self.repaint(ui);
         }
@@ -320,20 +503,7 @@ impl App for DisplayApp<'_> {
             Action::None if !self.reader => input::key(ch, down),
             other => other,
         };
-        match action {
-            Action::Quit => self.fail(ui),
-            /* fixture の切り替えは live では意味を持たない (受け取った出力を
-             * 捨てることになる)。ホスト試験だけが Select を使う。 */
-            Action::Select(_) => {}
-            Action::Move(movement) => {
-                if let Some(layout) = self.layout() {
-                    self.follow = matches!(movement, Movement::Last);
-                    self.session.move_top(movement, layout.rows());
-                    self.repaint(ui);
-                }
-            }
-            Action::None => {}
-        }
+        self.navigate(ui, action);
     }
 
     fn on_close(&mut self, ui: &mut Ui, window: u32) {
@@ -409,6 +579,22 @@ impl App for DisplayApp<'_> {
                         Style::new(GUI_COLOR_TEXT, GUI_COLOR_EDIT_BG),
                     );
                 }
+                /* 票 E2: 最下行は端末のもの。背景ごと描き直す — BS で縮んだ
+                 * 残りが消えないと、消したはずの文字が見えたままになる。 */
+                let row = prompt::row(self.mode, &self.line, layout.prompt_cols());
+                let y = layout.prompt_y() as i32;
+                gapi::fill_rect(
+                    surface,
+                    Rect::new(0, y as i16, cw, CELL_HEIGHT as i16),
+                    Style::new(GUI_COLOR_TEXT, GUI_COLOR_EDIT_BG),
+                );
+                gapi::text(
+                    surface,
+                    MARGIN as i32,
+                    y,
+                    row.bytes(),
+                    Style::new(GUI_COLOR_TEXT, GUI_COLOR_EDIT_BG),
+                );
                 self.runs = stats.runs;
             }
             Err(_) => {
