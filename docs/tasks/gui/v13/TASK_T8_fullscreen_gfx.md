@@ -190,3 +190,6 @@
 
 **判定 (PM、2026-09-12)**: F1〜F8 合格。**T8 受入済み** (K `f19dd00` `5911d80` `74f8015`、B `d73ceea` + submodule、W `732b07d` `a5bdca7` `e6a04ef` `097cd43`)。
 未実施: PEGC / Cirrus 構成 (§3-4)、8MB。譲りの性能: NP21/W 上で FPS 8 → 8 (相対劣化は観測できず)。
+| 8MB (`ram-8mb`、pc98) | 端末を立てた後は 2 本目が NOMEM で入らない (T7 の 8MB と同じ) ため、端末からの全画面起動は 8MB では試験できない。CUI から `gfx200_test` を直接走らせる経路は従来どおり | 仕様どおり |
+| PEGC 構成 | `gfxmode pegc` + リセットでも `hal_test` は pc98 のまま — K6-RAM 以後 `sys_mem_kb` が RAM 上端 (15MB 構成で 17MB) になり、`backend_pegc.c:219` の「上端 > 0xF00000 なら不可」が常に落ちる (15〜16MB は RAM でない穴なのに)。**K6-3 `1a559a0` で修正** (probe は「線形窓 15〜16MB に RAM が無いか」で判定) | K6 回帰 → 修正済み |
+| **PEGC 構成 F1** (K6-3 配備、vmkernel 461,795 B、kselftest 69 / 0、`gfxmode pegc`) | GUI が 640×480 で上がる (`scrn_ymax` 480)。端末から `gfx200_test` → PEGC のネイティブ画面の上部に 200 ライン試験のパターン、Space で FPS 段 (FPS 6、`ring3_poll_yield_count` 49)、Space で自力終了 → **480 ラインの GUI と端末 (プロンプト、`completed.`) が復帰**、`g_gfx_owner` 1、`fault_kill_count` 0 | **合格** |

@@ -470,6 +470,20 @@ done:
     return ok;
 }
 
+int pgalloc_range_has_ram(u32 first, u32 end)
+{
+    u32 pages;
+    unsigned int flags;
+    int has;
+    flags = irq_save();
+    has = 1;
+    if (initialized &&
+        physmem_count(&device_boot_map, first, end, PHYSMEM_RAM, &pages))
+        has = pages != 0;
+    irq_restore(flags);
+    return has;
+}
+
 u32 pgalloc_total_pages(void) { return total_pages; }
 u32 pgalloc_free_pages(void) { return total_pages - used_pages; }
 u32 pgalloc_limit_pfn(void) { return limit_pfn; }

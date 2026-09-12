@@ -156,6 +156,9 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
 - `hsync` は HostDrv (`C:\\os32`) の内容で NHD を上書きする。NHD 配備の後に `hsync` するときは**先に `make deploy`** で HostDrv を最新にする (古いカーネル / gshell に戻った前例)。 → §4-33
+- Device windows: never decide one from the RAM **ceiling** (`sys_get_mem_kb`) — since K6-RAM that is the
+  top-of-RAM address, and a 15MB machine tops out at 17MB. Ask the physical map for that range
+  (`pgalloc_range_has_ram`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 
