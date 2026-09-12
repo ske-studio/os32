@@ -73,6 +73,11 @@ typedef unsigned int   u32;
 /* 第 2 の park 点 = kbd 待ち (票 K7 D1)。exec/appslot.h の APP_STATE_WAIT_KEY
  * と同値で、exec_app_state もこの 3 を返す (既存の 0/1/2 の意味は動かない)。 */
 #define MA_WAIT_KEY 3
+/* 第 3 の park 点 = ポーリング型の協調 yield (票 T8 §7 D8)。GUI 中に
+ * kbd_trygetchar / kbd_trygetkey / kbd_has_key を回す全画面 GFX プログラムを
+ * 1 周だけ WM へ譲らせる印。exec/appslot.h の APP_STATE_WAIT_POLL と同値で、
+ * 足すのは別票 T8-3 K (既存の 0〜3 の意味は動かない)。 */
+#define MA_WAIT_POLL 4
 
 /* D11 (2026-09-10 の差し戻し): 入力優先を**連続で**適用してよい OP_WAIT の回数。
  * これを超えたら、自分に入力が湧き続けていても譲る。入力の源が人間とは限らない
@@ -324,6 +329,22 @@ static int ma_pick_group(const MaState *st, int want_input)
     return 0;
 }
 
+/* ポーリング群 (票 T8 §7 D8) — **最下位**の 1 本 (0 = 無し)。
+ * WAIT_POLL は「常に ready」だが、ここを呼ぶのは入力群も導出群も空の周だけ
+ * (ma_pick の中の 1 か所)。last_run の巡回には乗せず **ID 昇順**で選ぶ:
+ * ラウンドの turn を数えないので巡回の公平さは要らず、決定的な順だけが要る。
+ * top-level にしか出来ない仕事 (LAUNCH の保留) がある周は WM の番なので譲らない。 */
+static int ma_pick_poll(const MaState *st) NOINST;
+static int ma_pick_poll(const MaState *st)
+{
+    int i;
+    if (st->launch_pending) return 0;
+    for (i = 0; i < MA_MAX_APPS; i++) {
+        if (st->app[i].state == MA_WAIT_POLL) return MA_ID_MIN + i;
+    }
+    return 0;
+}
+
 /* 次に起こす 1 本 (0 = 誰も起こさない)。WM top-level が使う。
  * ラウンドの turn が尽きたら全員ぶんを配り直す (= 新しいラウンド)。 */
 static int ma_pick(MaState *st) NOINST;
@@ -334,7 +355,9 @@ static int ma_pick(MaState *st)
 
     if (ma_round_remaining(st) == 0) {
         for (i = 0; i < MA_MAX_APPS; i++) st->app[i].turn_used = 0;
-        if (ma_round_remaining(st) == 0) return 0;   /* ready が 1 本も無い */
+        /* ready が 1 本も無い周。ここだけがポーリング群へ降りる口 (D8 の
+         * 「最下位」) で、ラウンドにも上界 (MA_STARVE_BOUND) にも数えない。 */
+        if (ma_round_remaining(st) == 0) return ma_pick_poll(st);
     }
 
     /* (1) 入力群にフォーカス窓の owner が居れば、それを最優先。
@@ -446,6 +469,26 @@ static int ma_park_kbd(MaState *st)
 }
 
 /* ------------------------------------------------------------------ */
+/*  park (第 3 の点) — ポーリング型の協調 yield (票 T8 §7 D8)          */
+/*                                                                     */
+/*  kbd_trygetchar が「キー無し」を返す前に 1 周だけ WM へ譲る。GUI 中 / */
+/*  注入リングが空 / 前回の譲りから tick が進んだ、の 3 条件はカーネル   */
+/*  側 (別票 T8-3 K) の判断で、模型が写すのは「リングに文字があるなら    */
+/*  譲らない」だけ。OP_WAIT の中である必要は無い。                       */
+/* ------------------------------------------------------------------ */
+static int ma_park_poll(MaState *st) NOINST;
+static int ma_park_poll(MaState *st)
+{
+    MaApp *a = ma_app(st, st->cur);
+    if (!a || a->state != MA_RUNNING) return MA_ERR_STATE;
+    if (st->kbd_pending > 0) return MA_ERR_STATE;   /* 文字があるなら止めない */
+    a->state = MA_WAIT_POLL;
+    st->cur = MA_SHELL_ID;
+    st->owner = MA_SHELL_ID;
+    return MA_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /*  resume — 止めてあるアプリを 1 本だけ起こす (GetMessage 方式)         */
 /*  WM top-level からしか呼べない = 走っているアプリの横取りは無い。     */
 /* ------------------------------------------------------------------ */
@@ -461,6 +504,11 @@ static int ma_resume(MaState *st, int id)
          * を残したまま AGAIN で拒み、WM にその周を譲らせる。 */
         if (st->kbd_pending == 0) return MA_ERR_AGAIN;
         st->kbd_pending--;
+    } else if (a->state == MA_WAIT_POLL) {
+        /* 票 T8 §7 D8: 印を見てカーネルが EAX を上書きする — 文字があれば
+         * 1 バイト、無ければ -1 (キー無し)。**空でも拒まない** (AGAIN は
+         * 鍵待ちだけ) ので、ポーリングは必ず 1 周で戻れる。 */
+        if (st->kbd_pending > 0) st->kbd_pending--;
     } else if (a->state != MA_PARKED) {
         return MA_ERR_STATE;
     }
@@ -1243,6 +1291,80 @@ static void case_wait_key_joins_the_round(void)
     check(ma_live(&st) == 1, "18r 畳んだのは 1 本だけ");
 }
 
+/* ------------------------------------------------------------------ */
+/*  ケース 19 (票 T8 §7 D8) — ポーリング型の協調 yield は「最下位」     */
+/*                                                                     */
+/*  GUI 中に kbd_trygetchar をポーリングする全画面 GFX プログラムは     */
+/*  第 3 の park 点 (MA_WAIT_POLL) で 1 周だけ WM へ譲る。**常に        */
+/*  ready** だが優先度は最下位 — 入力群 / 導出群 / LAUNCH 保留の        */
+/*  どれも無い周にしか選ばない (複数居れば ID 昇順)。D11 の規則と       */
+/*  上界 (30) は不変で、そのために ma_ready は WAIT_POLL を数えない。   */
+/* ------------------------------------------------------------------ */
+static void case_poll_yield_is_lowest_priority(void) NOINST;
+static void case_poll_yield_is_lowest_priority(void)
+{
+    MaState st;
+    int id;
+
+    ma_init(&st, 4096);
+    ma_start(&st, 100, 1);                 /* ID 2 = GUI アプリ (スロット 0) */
+    ma_gui_call(&st, MA_OP_WAIT);
+    ma_park(&st);
+    id = ma_start(&st, 100, 0);            /* ID 3 = 端末から起動した全画面 GFX */
+    check(id == MA_ID_MIN + 1 && st.app[1].slot == -1,
+          "19a スロットを持たない全画面 GFX が立つ");
+
+    /* (1) 第 3 の park 点。OP_WAIT の中に居なくても止まる。 */
+    check(ma_park_poll(&st) == MA_OK, "19b ポーリングは第 3 の park 点");
+    check(st.app[1].state == MA_WAIT_POLL && st.cur == MA_SHELL_ID,
+          "19c park すると WAIT_POLL になり top-level へ戻る");
+
+    /* (2) 他が ready な周は選ばれない (最下位)。 */
+    ma_set_ready(&st, 2, 1, 0);
+    check(ma_pick(&st) == MA_ID_MIN, "19d 入力群が居る周は WAIT_POLL を選ばない");
+    st.app[0].turn_used = 0;
+    ma_set_ready(&st, 2, 0, 1);
+    check(ma_pick(&st) == MA_ID_MIN, "19e 導出群が居る周も WAIT_POLL を選ばない");
+
+    /* (3) 誰も ready でない周にだけ起こす。 */
+    st.app[0].turn_used = 0;
+    ma_set_ready(&st, 2, 0, 0);
+    check(ma_pick(&st) == MA_ID_MIN + 1,
+          "19f 他に ready が無ければ WAIT_POLL を選ぶ");
+
+    /* (4) top-level にしか出来ない仕事 (LAUNCH の保留) がある周も譲らない。 */
+    st.launch_pending = 1;
+    check(ma_pick(&st) == 0, "19g LAUNCH 保留の周は WAIT_POLL を選ばない");
+    st.launch_pending = 0;
+
+    /* (5) 起こせる。注入リングが空でも AGAIN にならない (D8: EAX = -1)。 */
+    st.kbd_pending = 0;
+    check(ma_resume(&st, MA_ID_MIN + 1) == MA_OK,
+          "19h 空の注入でも WAIT_POLL は起こせる");
+    check(st.app[1].state == MA_RUNNING && st.cur == MA_ID_MIN + 1,
+          "19i resume で走り出す");
+
+    /* (6) 走っている本人は WAIT_POLL を「起こせる 1 本」と数えない
+     *     (数えると D11-3a の上界が変わる)。ID 2 を直接ポーリング中にする。 */
+    st.app[0].state = MA_WAIT_POLL;
+    ma_gui_call(&st, MA_OP_WAIT);
+    check(ma_should_park(&st) == 0,
+          "19j WAIT_POLL だけなら走っている本人は譲らない");
+    st.app[0].state = MA_PARKED;
+    ma_set_ready(&st, 2, 1, 0);
+    check(ma_should_park(&st) == 1, "19k 入力群が居れば従来どおり譲る");
+
+    /* (7) 複数のポーリングは ID 昇順 (last_run の巡回には乗せない)。 */
+    ma_set_ready(&st, 2, 0, 0);
+    st.app[0].state = MA_WAIT_POLL;
+    check(ma_park_poll(&st) == MA_OK, "19l 走っている本人もまた譲る");
+    st.last_run = MA_ID_MIN;               /* 巡回なら 3 から。ID 昇順なら 2 */
+    st.focus = 0;
+    st.app[0].turn_used = 0;
+    st.app[1].turn_used = 0;
+    check(ma_pick(&st) == MA_ID_MIN, "19m ポーリングが複数なら ID 昇順");
+}
+
 int main(void) NOINST;
 int main(void)
 {
@@ -1266,6 +1388,7 @@ int main(void)
     case_cross_round_bound();
     case_launch_pending_parks();
     case_wait_key_joins_the_round();
+    case_poll_yield_is_lowest_priority();
     if (failures) {
         report("FAILURES\n");
         die(1);

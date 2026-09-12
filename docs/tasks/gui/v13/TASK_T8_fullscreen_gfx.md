@@ -110,6 +110,16 @@
 - ホスト試験は `multiapp_impl_host.c` ケース 21 (18 検査、RED→GREEN 4 通り) → `tools/tests/t8_tdd.md`。
   kselftest に 1 項追加。**`make`・配備・実機は未実施** ([V4]) — 受入 F5 / F6 の再試験は PM / テスターへ。
 
+## 4a. 実装メモ (T8-3 W、2026-09-12)
+
+- `APP_STATE_WAIT_POLL` = 4 は `multiapp.rs` にリテラルで持つ (`exec/appslot.h` へ足すのは T8-3 K)。規則は
+  `poll_ready` (常に ready) + `pick_poll` (**`pick` が入力群も導出群も空と判定した周だけ**、ID 昇順、`LAUNCH` 保留 /
+  `SessionAction` / kill 予約がある周は譲らない)。`ready` には入れない = D11-3a の上界 (30) も `should_park` も不変。
+- スロット無しでも forget しない (`resume_one` の `WAIT_KEY` 分岐に並べ、`exec_resume(k, 0)`)。全画面中も同判断。
+  K7-W2 の畳み (`is_slotless` / `request_kill_slotless`) は状態を見ない述語なので `session.rs` は**無変更で効く**。
+- 検査: 模型 `multiapp_model_host.c` ケース 19 (13 検査、RED→GREEN)、gshell `wm_tests.rs` T8-3 W 5 本 (53 pass)。
+  **`make`・配備・実機は未実施** ([V4]) — 受入 F8 は PM / テスターへ。
+
 ## 5. 範囲外
 
 - shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。

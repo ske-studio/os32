@@ -37,6 +37,12 @@
 //! CUI プログラムは `APP_STATE_WAIT_KEY` で、起床の理由は注入リングの
 //! 未読だけ ([`key_ready`] / 模型の `ma_key_ready`)。規則そのもの (D11-3)
 //! と上界 (30) は 1 つも変えていない。
+//!
+//! 票 T8 §7 D8 で park 点が 3 つになった。`kbd_trygetchar` をポーリングする
+//! 全画面 GFX プログラムは `APP_STATE_WAIT_POLL` で、**常に ready だが
+//! 優先度は最下位** ([`poll_ready`] / [`pick_poll`] / 模型の `ma_pick_poll`)。
+//! 入力群も導出群も空の周にしか選ばないので、ここでも D11-3 の規則と
+//! 上界 (30) は動かない (最下位 = 他が ready な周は候補にならない)。
 
 use crate::wm::GuiState;
 use crate::{damage, ring, session, timer};
@@ -61,6 +67,15 @@ pub const APP_STATE_PARKED: i32 = 2;
 /// (票 K7 §5 指摘 C: 値の追加は互換)。GUI 中に `kbd_getchar` を呼んだ
 /// CUI プログラムはここで止まる — 第 2 の park 点 (票 K7 D1)。
 pub const APP_STATE_WAIT_KEY: i32 = 3;
+/// `exec_app_state` が返す「ポーリングの協調 yield で止めてある」
+/// (`APP_STATE_WAIT_POLL`、票 T8 §7 D8)。GUI 中に `kbd_trygetchar` /
+/// `kbd_trygetkey` / `kbd_has_key` を回す全画面 GFX プログラムを、カーネルが
+/// tick に 1 回だけ止めて WM に譲らせる第 3 の park 点。
+///
+/// **カーネル側 (`exec/appslot.h` の定義と park / resume) は別票 T8-3 K** で、
+/// そこに入るまでヘッダに無いのでここはリテラル 4 を持つ (入った後も同値。
+/// 既存の 0〜3 の意味は動かないので値の追加は互換 — 票 K7 §5 指摘 C と同じ)。
+pub const APP_STATE_WAIT_POLL: i32 = 4;
 
 /// 走っているアプリが「自分に入力がある」を理由に turn を据え置ける**連続**
 /// `OP_WAIT` 回数 (D11-3)。値を `MAX_APPS` に合わせたのは「アプリの数だけは
@@ -474,6 +489,20 @@ pub fn derived_ready(st: &GuiState, id: i32) -> bool {
     false
 }
 
+/// ポーリング群 (票 T8 §7 D8): 協調 yield で止まっている (`WAIT_POLL`)。
+///
+/// 起床の理由は要らない — **常に ready** で、譲った 1 周が終われば必ず戻す
+/// (戻さないと全画面 GFX プログラムが二度と進まない)。そのかわり優先度は
+/// **最下位**で、[`pick`] は入力群も導出群も空の周にしか [`pick_poll`] を
+/// 呼ばない。だから [`ready`] には**入れない** — 入れると走っているアプリが
+/// 「他に ready が居る」で譲り続け、D11-3a の上界 (30) の前提が変わる。
+pub fn poll_ready(id: i32) -> bool {
+    if idx(id).is_none() {
+        return false;
+    }
+    app_state(id) == APP_STATE_WAIT_POLL
+}
+
 #[inline]
 fn ready(st: &GuiState, id: i32) -> bool {
     input_ready(st, id) || derived_ready(st, id)
@@ -525,11 +554,38 @@ fn pick_group(st: &GuiState, want_input: bool) -> i32 {
     0
 }
 
+/// ポーリング群の 1 本 (0 = 無し、票 T8 §7 D8)。**最下位** — 呼ぶのは
+/// [`pick`] の中の 1 か所、入力群も導出群も空の周だけ。
+///
+/// `last_run` の巡回には乗せず **ID 昇順**で選ぶ: ラウンドの turn を数えない
+/// (最下位なので他が ready な周は候補にすらならない) ので巡回の公平さは要らず、
+/// 決定的な順だけが要る。top-level にしか出来ない仕事 (`LAUNCH` 保留 /
+/// 実行できる `SessionAction` / `exec_kill` の予約) がある周は WM の番なので
+/// 譲らない — [`should_park`] の (a) と同じ 3 つ。
+fn pick_poll(st: &GuiState) -> i32 {
+    let mm = m();
+    if session::ready_to_run(st) || st.launch_pending || has_top_level_work(mm) {
+        return 0;
+    }
+    let mut i = 0;
+    while i < MAX_APPS {
+        let id = APP_ID_MIN + i as i32;
+        if mm.apps[i].alive && id != mm.running && poll_ready(id) {
+            return id;
+        }
+        i += 1;
+    }
+    0
+}
+
 /// 次に起こす 1 本 (0 = 誰も起こさない)。**WM top-level が使う。**
 ///
 /// ラウンドの turn が尽きたら全員ぶんを配り直す (= 新しいラウンド)。
 /// フォーカスの近道も `!turn_used` を条件にしているので、ラウンド内の**順**が
 /// 変わるだけで turn の**数**は変わらない (D11-3a)。
+///
+/// 全画面モード中 (`fullscreen::active()`) も判断は 1 つも変わらない — 譲って
+/// くるのは所有者の全画面プログラム本人で、WM は描かないだけ (票 T8 D4)。
 pub fn pick(st: &GuiState) -> i32 {
     if round_remaining(st) == 0 {
         let mm = m();
@@ -539,7 +595,9 @@ pub fn pick(st: &GuiState) -> i32 {
             i += 1;
         }
         if round_remaining(st) == 0 {
-            return 0; /* ready が 1 本も無い */
+            /* ready が 1 本も無い周。**ここだけ**がポーリング群へ降りる口で
+             * (D8 の「最下位」)、ラウンドにも上界 (30) にも数えない。 */
+            return pick_poll(st);
         }
     }
     /* (1) 入力群にフォーカス窓の owner が居れば最優先 (応答性)。 */
@@ -732,11 +790,16 @@ pub fn resume_one(st: &mut GuiState) -> bool {
              * すると打鍵待ちのまま二度と起こされない。
              * `wait_ret` はカーネルが注入リングの 1 バイトで上書きする
              * (指摘 B: 取り出し用の KAPI は作らない) ので 0 を渡す。 */
-            if app_state(k) != APP_STATE_WAIT_KEY {
+            let s = app_state(k);
+            if s != APP_STATE_WAIT_KEY && s != APP_STATE_WAIT_POLL {
                 /* `OP_INIT` 前か回収済み。起こす相手ではない。 */
                 forget(k);
                 return true;
             }
+            /* 票 T8 §7 D8: ポーリングで譲った全画面 GFX プログラムも同じ形
+             * (端末から起動するのでスロットを持たない)。`wait_ret` はカーネル
+             * が印を見て上書きする — 注入リングに文字があれば 1 バイト、
+             * 無ければ -1 (キー無し)。だから鍵待ちと違って空でも拒まれない。 */
             0
         }
     };

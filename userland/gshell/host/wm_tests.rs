@@ -2030,6 +2030,171 @@ fn switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit() {
 }
 
 /* ================================================================ */
+/*  票 T8-3 W — ポーリング型の協調 yield (§7 D8)                     */
+/*                                                                  */
+/*  GUI 中に `kbd_trygetchar` を回す全画面 GFX プログラムは、カーネル */
+/*  が第 3 の park 点で 1 周だけ止める (`APP_STATE_WAIT_POLL` = 4)。  */
+/*  WM 側の規則は「**常に ready、ただし優先度は最下位**」— 入力群 /   */
+/*  導出群 / `LAUNCH` 保留のどれも無い周にだけ起こす (複数なら ID     */
+/*  昇順)。スロットが無くても `WAIT_KEY` と同じく forget しない。     */
+/* ================================================================ */
+
+/// `exec_app_state` が返す第 3 の park 点 (カーネル側は別票 T8-3 K)。
+const ST_WAIT_POLL: i32 = 4;
+
+/// ID 2 = GUI アプリ (スロット 0 + 窓 1 枚、park 中)、ID 3 = 端末から起動した
+/// 全画面 GFX (スロット無し、ポーリングで譲った) の状態を作る。
+fn one_gui_app_and_a_polling_app(shm: &crate::mocks::Shm) -> crate::wm::GuiState {
+    use crate::{mocks, multiapp, session};
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let st = one_gui_app_state(shm);
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_kbd_pending(0);
+    st
+}
+
+/* ---- T8-3 W 検査 1: スロット無しでも forget せず、空いた周に起こす ---- */
+#[test]
+fn a_slotless_polling_app_is_never_forgotten_and_runs_on_an_idle_round() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+
+    /* ポーリングは入力群でも導出群でもない (= D11 の数えには入らない)。 */
+    assert!(!multiapp::input_ready(&st, 3), "WAIT_POLL が入力群に入った");
+    assert!(!multiapp::derived_ready(&st, 3), "WAIT_POLL が導出群に入った");
+
+    /* ID 2 に起床の理由が無い = 誰も ready でない周 → ここで起こす。 */
+    assert_eq!(multiapp::pick(&st), 3, "空いた周に WAIT_POLL を起こさない");
+    assert!(multiapp::resume_one(&mut st), "起こす相手が居るのに何もしない");
+    /* 値はカーネルが -1 (キー無し) か 1 バイトで上書きするので WM は 0。 */
+    assert_eq!(mocks::resume_calls(), vec![(3, 0)], "exec_resume の引数が違う");
+    /* 票 K7 指摘 A と同じ: スロットが無いからといって落としてはならない。 */
+    assert!(multiapp::is_tracked(3), "WAIT_POLL のアプリを forget した");
+    assert!(mocks::kill_calls().is_empty(), "WAIT_POLL のアプリを畳んだ");
+}
+
+/* ---- T8-3 W 検査 2: 優先度は最下位 ---- */
+#[test]
+fn a_polling_app_is_picked_only_when_nothing_else_is_ready() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+
+    /* (1) 入力群が 1 本でも居れば、その周は選ばない。 */
+    set_input_ready(&mut st, 2, true);
+    assert_eq!(multiapp::pick(&st), 2, "入力群より WAIT_POLL を先に選んだ");
+    set_input_ready(&mut st, 2, false);
+
+    /* (2) 導出群 (`Configure` 未通知) でも同じ。 */
+    set_derived_ready(&mut st, 2, true);
+    assert_eq!(multiapp::pick(&st), 2, "導出群より WAIT_POLL を先に選んだ");
+    set_derived_ready(&mut st, 2, false);
+
+    /* (3) `LAUNCH` 保留の周も WM の番 (top-level の仕事が先)。 */
+    st.launch_pending = true;
+    assert_eq!(multiapp::pick(&st), 0, "LAUNCH 保留の周に WAIT_POLL を選んだ");
+    st.launch_pending = false;
+
+    /* (4) どれも無い周にだけ降りてくる。 */
+    assert_eq!(multiapp::pick(&st), 3, "空いた周に WAIT_POLL を選ばない");
+}
+
+/* ---- T8-3 W 検査 3: 複数なら ID 昇順、全画面中でも同じ ---- */
+#[test]
+fn polling_apps_are_picked_in_ascending_id_order_even_in_fullscreen() {
+    use crate::{fullscreen, mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let st = one_gui_app_and_a_polling_app(&shm);
+    multiapp::on_start(4);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_app_state(4, ST_WAIT_POLL);
+    /* 巡回なら 4 から始まる起点を置く — ID 昇順なら 3 が選ばれる。 */
+    multiapp::set_last_run(3);
+    assert_eq!(multiapp::pick(&st), 3, "ポーリングが複数のとき ID 昇順でない");
+
+    /* 全画面モード中も同じ (譲ってくるのは所有者の全画面プログラム本人)。 */
+    fullscreen::arm(&[0u8; 48]);
+    assert!(fullscreen::active(), "全画面モードに入っていない");
+    assert_eq!(multiapp::pick(&st), 3, "全画面中に WAIT_POLL を起こさない");
+    fullscreen::reset();
+}
+
+/* ---- T8-3 W 検査 4: D11 のラウンドと上界は不変 ---- */
+#[test]
+fn a_polling_app_does_not_make_the_running_app_yield() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let st = one_gui_app_and_a_polling_app(&shm);
+    /* ID 2 が走っていて、止まっているのはポーリングの ID 3 だけ。 */
+    multiapp::mark_resumed(2);
+    assert!(
+        !multiapp::should_park(&st, 2),
+        "WAIT_POLL を「起こせる 1 本」と数えて譲らせた (D11-3a の上界が変わる)"
+    );
+    /* 同じ 1 本が鍵待ち (WAIT_KEY) で注入を持っていれば従来どおり譲る。
+     * = 「数えない」のは WAIT_POLL だけで、票 K7 の規則は回帰していない。 */
+    mocks::set_app_state(3, ST_WAIT_KEY);
+    mocks::set_kbd_pending(1);
+    assert!(multiapp::should_park(&st, 2), "鍵待ちが起きられるのに譲らない");
+}
+
+/* ---- T8-3 W 検査 5: 畳み (K7-W2) は `WAIT_POLL` にもそのまま効く ----
+ *  `session` 側の述語 (`is_slotless` / `slotless_live` /
+ *  `request_kill_slotless`) は**状態を見ない** (生きている & スロット無し)
+ *  ので、第 3 の park 点が増えても 1 行も変えなくてよい。その確認。 */
+#[test]
+fn switch_cui_also_kills_a_slotless_polling_app() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = one_gui_app_state(&shm);
+        g.inited = true;
+    }
+    multiapp::on_start(2); /* 端末: スロット 0 + 窓 1 枚 */
+    multiapp::on_start(3); /* 端末から起動した全画面 GFX: スロットも窓も無い */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_kbd_pending(0);
+
+    assert!(multiapp::slotless_live(wm::g()), "WAIT_POLL の 1 本を数えていない");
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+    assert!(
+        multiapp::pending_top_level_work(),
+        "Quit を配れない WAIT_POLL の kill が予約されていない"
+    );
+
+    wm::g().reclaim_owner(2);
+    session::reclaim_owner(2);
+    multiapp::on_owner_exit(2);
+    assert!(
+        !session::ready_to_run(wm::g()),
+        "WAIT_POLL の 1 本を残したまま CUI へ切り替えようとした"
+    );
+    /* 予約の実行が先 — 「最下位で起こす」より `drain_top_level` が勝つ。 */
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が違う");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "畳む相手を起こしてしまった: {:?}",
+        mocks::resume_calls()
+    );
+    assert_eq!(multiapp::live_count(), 0, "全回収になっていない");
+    wm::g().inited = false;
+}
+
+/* ================================================================ */
 /*  全画面 GFX (票 T8 D4)                                            */
 /*                                                                  */
 /*  画面の所有者はカーネルが持つ (`gfx_screen_owner`、KAPI v48)。      */
