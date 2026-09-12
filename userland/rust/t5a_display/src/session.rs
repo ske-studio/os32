@@ -54,6 +54,10 @@ impl<'a> Session<'a> {
         let mut out = Applied::default();
         match record {
             Record::Clear => self.select(Fixture::Live)?,
+            /* 票 T7 E1 の EXIT は画面を持たない。モード (接続 → プロンプト)
+             * は guest.rs が決めるので、ここでは何もしない — 出力領域に
+             * 勝手な行を足さない。 */
+            Record::Exit(_) => {}
             Record::Cursor { x, y } => {
                 if !self.live_mut().place_cursor(x as usize, y as usize) {
                     out.ignored_cursor += 1;

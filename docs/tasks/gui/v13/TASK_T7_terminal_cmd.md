@@ -56,3 +56,12 @@ v1.3 の「GUI 上の CUI 実行」の縦切りをここで完成させる (shel
 
 - gshell の変更。常駐シェルの内蔵コマンドの端末からの実行。shell script。full-screen GFX の子 (次段)。
 - 配備・コミット・push・エミュレータ・ローカル AI・ini・.env・`make` は禁止 (コーダー)。ホスト試験は必須。
+
+## 5. 実装メモ (A) — E2〜E5 完了 (2026-09-12、コーダー)
+
+- `userland/rust/t5a_display/src/prompt.rs` (新規、純関数) に行編集 / 行の解釈 / 候補パス / モード遷移を切り出し、
+  `sink.rs` は `EXIT` (type 4、`[type][id]`、K 側の `CON_SINK_REC_EXIT` と一致) を `Record::Exit(id)` として解く。
+- `view.rs` の最下行をプロンプト行に確保 (`body_rows() = rows() - 1`)。con_sink の出力 64 行の領域とは分けた。
+- `guest.rs`: プロンプト中は 1 バイトも注入せず、Enter で `sys_open`/`sys_close` の存在確認 → `session_launch`。
+  `ERR_FULL` は `busy` で行を残し、`EXIT` / 接続モードの ESC でプロンプトへ戻る (ESC は子に注がない)。
+- 検査は `cargo check --release -p t5a_display` と host テスト 48 件 (36 → 48) のみ。**`make` / 配備 / 実機は未実施** ([V4])。

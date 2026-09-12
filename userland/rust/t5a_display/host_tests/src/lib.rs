@@ -6,6 +6,8 @@ pub mod inject;
 pub mod input;
 #[path = "../../src/paint.rs"]
 pub mod paint;
+#[path = "../../src/prompt.rs"]
+pub mod prompt;
 #[path = "../../src/session.rs"]
 pub mod session;
 #[path = "../../src/sink.rs"]

@@ -45,7 +45,30 @@
 - `input.rs`: 表示操作を注入しないスキャンコード（UP/DOWN/ROLLUP/ROLLDOWN/HOME）へ移した `nav()`。
   読み手を取れているあいだ ASCII の `j k g e q` は解釈しない（票に無い判断、要レビュー）。
 
-ホスト検査: `cargo check --release -p t5a_display` と host テスト 36 件が通る。
+## T7-A の差分（票 TASK_T7_terminal_cmd.md §2 E2〜E5）
+
+- `prompt.rs`（新規）: プロンプト行の編集（印字可能 ASCII / `GUI_EV_TEXT` の UTF-8 / BS、
+  多バイト文字を割らない）、確定した行の解釈（空行 / `exit` / 名前 + 引数）、候補パス
+  （`/` 始まりはそのまま、名前は `/usr/bin/<名>.bin` → `/bin/<名>.bin`。すでに `.bin` なら
+  重ねない）、`session_launch` へ渡す値の組み立て、モード遷移 `step()` の純関数。
+  `no_std`・KAPI 非依存でホスト試験の対象。
+- `sink.rs`: `EXIT`（type **4**、`[type][id u8]`、票 E1）を `Record::Exit(id)` として解く。
+  カーネル側が `CON_SINK_REC_EXIT` / `CON_SINK_HDR_EXIT` を足すまではここの定義が唯一。
+  `CON_SINK_REC_MAX` は不変（PRINT が最長のまま）。
+- `view.rs`: 最下行を端末のもの（プロンプト行）として確保。出力は `body_rows()` = `rows() - 1`
+  で、`view()` の高さも clip 下端も `prompt_y()` で止まる。窓の最小高さは出力 1 行 + プロンプト行。
+- `guest.rs`: `Mode::Prompt` / `Mode::Attached`。プロンプト中は**1 バイトも注入しない**（打鍵は
+  行に入る）。Enter で候補を `sys_open` → `sys_close` で存在確認し、見つかった絶対パス + 引数を
+  `session_launch` へ。見つからなければ `command not found: <名>` をローカル出力（con_sink は
+  通らない）、`ERR_FULL` は `busy` を出して**行を残す**。受理されたら接続モードへ移り、打鍵は
+  K7-A の経路で `kbd_inject`。`EXIT` を受けたらプロンプトへ戻る（ID は照合しない）。
+  接続モードの ESC は**プロンプトへ戻るだけ**（子には注がない）、プロンプトの ESC と `exit` は
+  従来どおり端末自身の終了。打鍵ごとの描き直しはプロンプト行だけ `invalidate`。
+- 票に無い判断（要レビュー）: 確定した行を `> <行>` として出力領域にも残す（接続モードでは
+  プロンプトが消えるため）。接続モード中の最下行に `[running] ESC=prompt` を出す。
+  プロンプト表示中は ASCII の表示操作（`j k g e q`）を解釈しない（その打鍵は行に入る）。
+
+ホスト検査: `cargo check --release -p t5a_display` と host テスト 48 件（T7-A で 36 → 48）が通る。
 **`make` / 配備 / エミュレータ実行は未実施**（コーダーの範囲外）。
 
 ---
