@@ -90,6 +90,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v46 | **実装済み (2026-09-12、K6C)** | GUI v1.3 K6C: console シンク `con_sink_read` / `con_sink_stat` — GUI モード中のカーネル出力をリングに溜め、端末アプリ (外部) が吸う。読み手は 1 本 (owner 回収)。同じ追記で `sys_ram_kb` (K6-RAM 決裁 (2): 起動時に登録した実 RAM の合計 KB) も足した | [tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md)、[TASK_K6_ram_ceiling.md](tasks/gui/v13/TASK_K6_ram_ceiling.md) |
 | v47 | **実装済み (2026-09-12、K7-K)** | GUI v1.3 K7 入力統合: `kbd_inject` (con_sink の読み手専用、UTF-8 を 256B の注入リングへ) / `kbd_inject_pending` (未読バイト数、誰でも可)。GUI 中の `kbd_getchar` / `kbd_getkey` は第 2 の park 点 (`APP_STATE_WAIT_KEY`) になり、`exec_resume` が注入リングから 1 バイトを EAX に入れる。同じ追記でエラー番号 -14 `OS32_ERR_AGAIN` を取った | [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
 | v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
+| v49 | **予約 (2026-09-12、T9)** | GUI v1.3 T9 shell script: `sys_yield` (GUI 中は注入リングを触らずに WAIT_POLL で 1 周譲る、CUI は hlt 1 回)。`sh.bin` (常駐シェルの CPL=3 ビルド) が外部プログラムの終了を待つのに使う | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
