@@ -17,7 +17,7 @@ static void release_io_buf(void)
 }
 
 static int do_copy_file(const char *cmd_name, const char *src, const char *dst) {
-    int fd_in, fd_out, sz;
+    int fd_in, fd_out, sz, rc;
 
     if (fs_same_file(src, dst)) {
         g_api->kprintf(ATTR_RED, "%s: '%s' and '%s' are the same file\n",
@@ -44,23 +44,29 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
         return -1;
     }
 
+    /* R6: read / write の失敗をここで拾って**負**を返す。0 を返していたころ、
+     * 別 FS への mv (do_move_file) が「コピーできた」と読んで sys_unlink(src)
+     * まで走り、中途半端な複製だけを残して原本を消していた。 */
+    rc = 0;
     while (1) {
         sz = g_api->sys_read(fd_in, io_buf, IO_BUF_SIZE);
         if (sz < 0) {
             g_api->kprintf(ATTR_RED, "%s: read failed %s\n", cmd_name, src);
+            rc = -1;
             break;
         }
         if (sz == 0) break; /* EOF */
 
         if (g_api->sys_write(fd_out, io_buf, sz) != sz) {
             g_api->kprintf(ATTR_RED, "%s: write failed %s\n", cmd_name, dst);
+            rc = -1;
             break;
         }
     }
 
     g_api->sys_close(fd_in);
     g_api->sys_close(fd_out);
-    return 0;
+    return rc;
 }
 
 /* 再帰コピー: エントリ収集方式 */
