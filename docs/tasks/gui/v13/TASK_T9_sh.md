@@ -267,6 +267,13 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
   集合の一括消去をやめたので、選んでから再開するまでに PIT が進んでも 2 回起こさない。
   追加した unsafe には SAFETY コメント。試験は 68 passed (T9-W 12 本、RED 2 → GREEN)。
 
+- **実機受入 S6 不合格の修正 (2026-09-13)**: `abort_seen` を見る点が `handler.rs` の
+  `op_wait` と全画面の top-level しか無く、**`WAIT_POLL` のアプリが居るウィンドウモード**
+  (端末が `should_park` で park し WM が単独ループに居る周) の CTRL+STOP が捨てられていた。
+  `standalone_loop` の分岐を `top_level_abort()` に括り、全画面は従来の `redirect_abort` 予約、
+  ウィンドウモードは `multiapp::abort_at_top_level()` が `exec_abort_clear` → `exec_kill(末尾)`
+  → `forget_freed` をその場で実行する (予約が立っている周は二重にしない)。試験 71 passed。
+
 ## 15. 実装メモ (A、2026-09-13)
 
 - 端末の起動は `session_launch` → **`launch_req(cmd)`** (`guest.rs:launch`)。token は受理した時点で
@@ -323,17 +330,3 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 対応: C-1 + I-1〜I-6 は S (継承は別コミット)、二重 close は K。往復 10 (最終) の判定基準は「T9 由来 + T9 の修正が持ち込んだ回帰」とし、継承バグは別票 (`docs/tasks/shell/INHERITED_BUGS.md`、往復 6〜9 の non-blocker を含む) に切る。
 
 **往復 10 (`ecaba37`、追加 3/3 = 最終): Approve** — T9 由来の blocker なし、T9 の修正が持ち込んだ回帰なし (C-1 / I-1〜I-6 / 二重 close の修正を確認、R1 の写し場 0x97c〜、R2 の印、C-1 の照合を重点確認)。継承 3 件 (`source` の 255B 切断、補完の 126B、`cat -n` の区切り) は台帳へ。ゲート (`ecaba37`): `make all` / `external` / `check` exit=0、vmkernel.lz4 465,581 B、sh.bin 65,360 B、shell.bin 67,312 B (継承修正で +1.6KB、S7 例外)、gshell.bin 169,968 B、t5a_display.bin 38,640 B。**配備へ**。
-
-## 17. 実機受入の記録 (PM / テスター、2026-09-13、feat/gui `ecaba37` を NHD 配備、vmkernel 465,581 B、sh.bin 65,360 B、shell.bin 67,312 B、gshell.bin 169,968 B、t5a_display.bin 38,640 B、15MB pc98、API v49、Build Sep 13 08:18、kselftest 76 / 0)
-
-配備手順: NP21/W 停止 → `make nhd-pull` (テスター) → バックアップ `os32.nhd.bak-t9-20260913-082539` → `os32-cycle deploy` (テスター、vmkernel サイズ一致) → `make deploy` (HostDrv、テスター) → `ver` / `ls -l` でサイズ照合。
-
-| 受入 | obs | 判定 |
-|---|---|---|
-| **S1** | 端末で `sh` → バナー `OS32 External Shell Started` と `sh> ` (`[running id=3]`)。`ls /` `pwd` (`/`) `env` `cat /etc/system.cfg` (`GFX=pc98` `GUI=0`) `cd /usr` → `pwd` = `/usr/` (CPL=3 の `sys_getcwd` 写し R1 が動作) | **合格** |
-| **S2** | `sh> kbd_echo` → 子が起動しバナー、`abc` → `got 0x61 'a'` …、`q` → `bye` → **`sh> ` に復帰** | **合格** |
-| **S3** | `sh> source /test/hello.sh` → `hello from sh script` / `pwd` / `klibc_test` (49 passed) / `after external` / `env` / `script done` → `sh> ` | **合格** |
-| **S4** | `os32gui` / `filer` / `rshell` / `play cde` → いずれも `sh: cui only` | **合格** |
-| **S5** | `exit` → 端末プロンプト `> `。`sh` → ESC → `> ` (launch_cancel、DONE 消費)。再度 `sh` → `sh> ` (FULL にならない) → `exit` | **合格** |
-| **S6** | 端末 → sh → kbd_echo で CTRL+STOP ×3 → **何も畳まれない** (kbd_echo 生存、`ring3_abort_count` 0)。原因: sh が WAIT_POLL に居る間 WM はウィンドウモードの top-level で回り、そこに `abort_seen` を消費する経路が無い (handler.rs:388 は op_wait 内、lib.rs:205 は全画面のみ) → **W へ差し戻し** | **不合格 (修正中)** |
-| **S7** | Start → CUI mode: 端末 + sh + kbd_echo が生きた状態から `appslot_reclaim_count` 5 → 8 (`last_reclaim_id` 2 = 端末が最後 = 末尾から)、CUI シェル応答 (`ver` API v49)、regress 6 本 (テスター、obs は §17 の下)、常駐 `shell.bin` は継承修正 (R6/R7/I1〜I6/C-1) 以外の .o がバイト一致 (S の突合)、`SHELL_AS_APP` の `exec_run` 参照 0 件。regress 6 本 obs 全通過 (kselftest 76/0、klibc_test 49/0、alloc_demo all passed、ring3_fault → `ver` 応答、`echo abc \| wc -c` = 4、screenshot 128,118 B)、`v86 -t` OK | **合格** |

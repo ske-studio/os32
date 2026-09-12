@@ -2892,3 +2892,128 @@ fn a_tick_boundary_between_pick_and_resume_does_not_allow_a_second_wake() {
     mocks::set_tick(102);
     assert_eq!(multiapp::pick(&st), 3, "次の tick で起こし直さない");
 }
+
+/* ================================================================ */
+/*  票 T9-W — 実機受入 S6 不合格の修正 (2026-09-13)                  */
+/*                                                                  */
+/*  端末 (2) → `sh` (3、`sys_yield` で `WAIT_POLL`) → `kbd_echo`     */
+/*  (4、`WAIT_KEY`) の連鎖。`sh` が譲っている間、端末は               */
+/*  `should_park` で park しているので **WM は `standalone_loop`     */
+/*  (top-level、ウィンドウモード)** で回る。`abort_seen` を見る点が   */
+/*  `handler.rs` (op_wait の中) と `lib.rs` の全画面分岐しか無く、    */
+/*  この周の CTRL+STOP は捨てられていた (実機で 3 回送っても          */
+/*  `ring3_abort_count` = 0、何も畳まれない)。                        */
+/* ================================================================ */
+
+/// `exec_app_state` が返す「kbd 待ち」(`APP_STATE_WAIT_KEY`)。
+const ST_WAIT_KEY_T9: i32 = 3;
+
+/// 端末 (2、窓つき) → sh (3、`WAIT_POLL`) → 子 (4、`WAIT_KEY`) の連鎖を作る。
+fn terminal_sh_child_chain(shm: &crate::mocks::Shm) -> &'static mut crate::wm::GuiState {
+    use crate::{mocks, multiapp, session, wm};
+    session::clear();
+    two_app_global(shm);
+    let g = wm::g();
+    focus_app(g, 2); /* フォーカス窓 = 端末 */
+    multiapp::on_start(4);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_POLL);
+    mocks::set_app_state(4, ST_WAIT_KEY_T9);
+    mocks::set_launch_child(2, 3);
+    mocks::set_launch_child(3, 4);
+    g
+}
+
+/* ---- T9-W 検査 13: ウィンドウモードの top-level でも末尾を畳む ---- */
+#[test]
+fn ctrl_stop_at_the_window_mode_top_level_folds_the_tail_of_the_chain() {
+    use crate::{fullscreen, mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = terminal_sh_child_chain(&shm);
+    assert!(!fullscreen::active(), "ウィンドウモードの前提が崩れている");
+
+    /* 1 回目: 連鎖の末尾 = 子 (4) だけを畳む。 */
+    g.abort_seen = true;
+    mocks::set_kill_frees(&[4]);
+    assert_eq!(
+        crate::top_level_abort(g),
+        4,
+        "ウィンドウモードの top-level で CTRL+STOP が捨てられた (受入 S6)"
+    );
+    assert!(!g.abort_seen, "`abort_seen` を降ろしていない (次の周で二重に効く)");
+    assert_eq!(mocks::kill_calls(), vec![4], "畳む相手が連鎖の末尾でない");
+    assert_eq!(
+        mocks::abort_clear_calls(),
+        1,
+        "WM に載った要求を降ろしていない (次の syscall で WM が畳まれる)"
+    );
+    assert!(!multiapp::is_tracked(4), "畳んだ末尾が表に残った");
+    assert!(
+        multiapp::is_tracked(2) && multiapp::is_tracked(3),
+        "端末 / sh まで巻き添えで畳んだ"
+    );
+
+    /* 2 回目: 子の回収通知で `launch_child(3)` は 0 になっている = 末尾は sh。 */
+    mocks::set_launch_child(3, 0);
+    g.abort_seen = true;
+    mocks::set_kill_frees(&[3]);
+    assert_eq!(crate::top_level_abort(g), 3, "2 回目で次の末尾 (sh) を畳まない");
+    assert_eq!(mocks::kill_calls(), vec![4, 3], "畳んだ順が連鎖の末尾からでない");
+    assert!(!multiapp::is_tracked(3), "畳んだ sh が表に残った");
+    assert!(multiapp::is_tracked(2), "端末まで畳んだ");
+    g.inited = false;
+}
+
+/* ---- T9-W 検査 14: `redirect_abort` の予約と二重にしない ----
+ *  `op_wait` の中で見た周は `handler.rs` が `redirect_abort` で予約を積み、
+ *  同じ 1 周の `resume_one` → `drain_top_level` が実行する。予約が立って
+ *  いる間に top-level が直接畳むと、連鎖の末尾を 2 本ぶん畳んでしまう。 */
+#[test]
+fn a_pending_redirect_reservation_is_not_executed_twice_at_top_level() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = terminal_sh_child_chain(&shm);
+
+    /* 端末 (2) が走っている周に `handler.rs` が予約を積んだ状態。 */
+    multiapp::redirect_abort(g, 2);
+    assert!(multiapp::pending_top_level_work(), "予約が積まれていない");
+
+    g.abort_seen = true;
+    assert_eq!(crate::top_level_abort(g), 0, "予約があるのに top-level が直接畳んだ");
+    assert!(!g.abort_seen, "`abort_seen` を降ろしていない");
+    assert!(mocks::kill_calls().is_empty(), "予約と直接実行で 2 回畳んだ");
+    assert_eq!(mocks::abort_clear_calls(), 0, "予約の実行前に要求を降ろした");
+
+    /* 予約は従来どおり `drain_top_level` が実行する (末尾 1 本)。 */
+    mocks::set_kill_frees(&[4]);
+    assert!(multiapp::resume_one(g), "top-level が予約を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![4], "予約の実行で畳む相手が違う");
+    assert_eq!(mocks::abort_clear_calls(), 1);
+    g.inited = false;
+}
+
+/* ---- T9-W 検査 15: 宛先が居なければ要求を降ろすだけ ----
+ *  窓もスロットも全画面の所有者も無い周 (`abort_target` = 0)。何も畳まず、
+ *  WM に載ったかもしれない要求だけ降ろす — 降ろさないと次に WM が syscall の
+ *  出口を通ったときに WM 自身が畳まれる。 */
+#[test]
+fn ctrl_stop_with_no_target_only_clears_the_request() {
+    use crate::{mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = wm::GuiState::NEW; /* 窓もスロットも無い */
+    g.shm_base = shm.base();
+    g.inited = true;
+    assert_eq!(multiapp::abort_target(g), 0, "宛先が居ない前提が崩れている");
+
+    g.abort_seen = true;
+    assert_eq!(crate::top_level_abort(g), 0, "宛先が無いのに何かを畳んだ");
+    assert!(!g.abort_seen, "`abort_seen` を降ろしていない");
+    assert!(mocks::kill_calls().is_empty(), "宛先が無いのに `exec_kill` した");
+    assert_eq!(mocks::abort_clear_calls(), 1, "要求を降ろしていない");
+    g.inited = false;
+}

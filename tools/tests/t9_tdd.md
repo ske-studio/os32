@@ -361,6 +361,36 @@ GREEN 後の最終実行 (`--test-threads=1`): `65 passed; 0 failed` (追加前�
 `check_constraints.py` / `check_gui_proto.py` も通した。追加した unsafe 呼び出しには
 SAFETY コメントを 1 つずつ付けた (non-blocker)。
 
+### 実機受入 S6 不合格の修正 (2026-09-13) — RED → GREEN
+
+現象 (実機 `ecaba37`、API v49): 端末 (2) → `sh` (3、`sys_yield` の `WAIT_POLL`) →
+`kbd_echo` (4、`WAIT_KEY`) の連鎖で CTRL+STOP を 3 回送っても何も畳まれない
+(`ring3_abort_count` = 0、`ring3_yield_count` 11141 = WM は毎 tick 単独ループを回っている)。
+
+原因: `abort_seen` を消費する点が `handler.rs` の `op_wait` (アプリの中で WM が回る周) と
+`lib.rs` の**全画面**分岐しか無かった。`sh` が譲っている間は `should_park` が端末を park
+させるので WM は `standalone_loop` (ウィンドウモード) に居り、そこに経路が無い。
+IRQ1 の `appslot_abort_request()` は `g_cur` がシェル帯だと何も立てない (= `ring3_abort_count`
+が増えない) ので、raw リング由来の `abort_seen` だけが唯一の手がかりだった。
+
+RED は `top_level_abort()` を「従来の全画面分岐だけ」の仮実装にして取った (3 本とも RED)。
+
+| 検査 | 見るもの | RED の見え方 |
+|---|---|---|
+| 13 `ctrl_stop_at_the_window_mode_top_level_folds_the_tail_of_the_chain` | ウィンドウモードの top-level で末尾 (4) だけ畳む → 2 回目は次の末尾 (3) | 戻り値 0 / `exec_kill` 0 回 |
+| 14 `a_pending_redirect_reservation_is_not_executed_twice_at_top_level` | `redirect_abort` の予約がある周は直接畳まない (予約は `drain_top_level` が実行) | `abort_seen` が降りない |
+| 15 `ctrl_stop_with_no_target_only_clears_the_request` | 宛先 0 なら `exec_abort_clear` だけ | `abort_clear_calls` 0 |
+
+直し方: `standalone_loop` の分岐を `top_level_abort()` に括り、全画面は従来の
+`redirect_abort` 予約のまま (実機 T8 F8 で通っている形)、ウィンドウモードは
+`multiapp::abort_at_top_level()` が **owner 1 の文脈でその場で**
+`exec_abort_clear()` → `exec_kill(abort_target())` → `forget_freed()` を実行する。
+予約にせず直接実行なのは、`request_kill` が「WM の表に載っている ID」にしか積めず、
+連鎖の末尾が表から落ちていると CTRL+STOP が黙って消えるため。
+
+最終実行: `71 passed; 0 failed`。`cargo check --release` 警告 0、
+`check_constraints.py` / `check_gui_proto.py` も通した。実機再試験は PM / テスター側 ([V4])。
+
 ### 模型との差 (報告済み)
 
 D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順を決めない) なので、
