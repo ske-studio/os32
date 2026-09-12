@@ -122,6 +122,10 @@ filesystem:
     - host: userland/tests/input_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- kbd_echo (票 K7 の I1/I2/I3 — 打鍵を 1 バイトずつ表示する CUI 試験) ---
+    - host: userland/tests/kbd_echo.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/asset_test.bin
       guest: /usr/bin/
       tags: [programs]
