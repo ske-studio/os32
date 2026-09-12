@@ -32,6 +32,7 @@
 | 6 discard on CUI | `con_sink_disable()` で捨てる / 無効中は積まない / 再入場は空から |
 | 7 single reader | 最初に読んだ所有者が持つ。2 本目は `OS32_ERR_EXIST` で、そのときリングは動かない。`con_sink_owner_exit(持ち主)` の後だけ次の 1 本が読み手になれる (受入 C4)。CUI 往復では所有は動かない。`stat` は所有が要らない |
 | 8 selftest | `con_sink_selftest()` (実機の kselftest がブート時に呼ぶもの) がホストでもビットマスク 0 |
+| 10 EXIT record | **票 T7 E1 (2026-09-12 追記)**。`EXIT` = `[4][id]`。無効中は積まない / 前後のレコードと混ざっても端数が出ない / あふれは `EXIT` も**レコード単位**で捨てる / 積むのは「非シェル・シンク有効・読み手以外」の退場だけ |
 
 ## RED → GREEN
 
@@ -107,6 +108,36 @@ FAILURES
 EXIT con_sink_host=1
 ```
 
+### R6 — `ring_rec_size()` が type 4 を知らない (票 T7 E1、2026-09-12)
+
+`EXIT` の分岐を落とすと、先頭バイトが 4 のレコードが `CLEAR` (1 バイト) として扱われる。
+**読み出したバイト列は同じ**になる (2 バイトが 1 バイト × 2 本として出るだけ) ので、
+形が崩れるのはあふれたときだけ — 捨てる単位がレコードからバイトにずれる。
+
+```
+  FAIL 10o 先頭は必ず EXIT レコードの先頭
+  FAIL 10o3 捨てたのは EXIT 102 本 (レコード単位、バイト単位ではない)
+FAILURES
+EXIT con_sink_host=1
+```
+
+10o3 は `EXIT` で満杯にした環へ最長 `PRINT` (203B) を入れる形。レコード単位なら
+102 本、バイト単位なら 203 本捨てる。境界の実装差がバイト列に出ない以上、
+あふれの**本数**を見るのがこの間違いを捕まえる唯一の口だった。
+
+### R7 — 所有を返した後で「読み手本人か」を判定する (票 T7 E1)
+
+`exec_reclaim_owned` の並びを写した `reclaim_con_sink()` で、`con_sink_owner_exit(id)` を
+`con_sink_push_exit` より**前**に動かす。`g_reader` が `CON_SINK_NO_READER` になった後なので
+`con_sink_reader_get() != id` が常に真になり、端末自身の退場でも `EXIT` を積んでしまう。
+
+```
+  FAIL 10t 読み手本人の退場では積まない
+  FAIL 10v 読み手不在でも積む (次の読み手が拾う — リングは捨てない)
+FAILURES
+EXIT con_sink_host=1
+```
+
 ### GREEN (最終)
 
 ```
@@ -120,12 +151,32 @@ TARGET i386-elf GNU89 -Werror COMPILE PASS
 EXIT con_sink_host=0
 ```
 
+T7 E1 を足した後 (2026-09-12):
+
+```
+10 EXIT record (T7 E1)
+  ok   10a 無効中の EXIT は溜まらない
+  ...
+  ok   10w CUI モード中 (無効) は子の退場でも積まない
+ALL PASS
+HOST ILP32 GNU89 COMPILE PASS / TARGET i386-elf GNU89 -Werror COMPILE PASS
+EXIT con_sink_host=0
+```
+
 ## この試験が言わないこと
 
 - **実機のことは何も言わない。** 割込み文脈からの実際の同時書き込み (IRQ0/IRQ1 が
   `kprintf` する形) はホストでは再現していない。錠は空に差し替えてあり、見ているのは
   「錠の中でしか状態を動かさない」というソースの形だけ。ブート時の
-  `con_sink_selftest()` (kselftest 6 ケース) も同じ単一文脈での確認にとどまる。
+  `con_sink_selftest()` (kselftest 7 ケース — T7 E1 で `EXIT` のビット 6 を足した) も
+  同じ単一文脈での確認にとどまる。
 - KAPI 経由 (CPL=3 の `int 0x80`、ディスパッチャのポインタ検証) は通っていない — 受入 C3。
+- **`EXIT` を積む側の実物 (`exec/exec.c` の `exec_reclaim_owned`) は通っていない。**
+  `exec.c` はカーネル一式を引くのでホストへ持ち込めず、`con_sink_host.c` の
+  `reclaim_con_sink()` は同じ 3 行を**写した**もの。ずれたら試験は気付かない
+  (気付くのは受入 T1)。3 経路 (正常終了 / `exec_kill` / fault) が
+  `exec_reclaim_owned` を通ることも、ここではなく `exec.c` の読みで確かめた。
+- 端末側のパーサ (`t5a_display/src/sink.rs`) は別票 (E4)。**いまは未知 type で
+  `Stop::Unknown` して解析を止める**ので、E4 が入るまで `EXIT` は端末を固める。
 - `kernel/console.c` の 6 入口からの差し込みが漏れていないかは、ここでは見ていない
   (差し込み先はホストに持ち込めない TVRAM / GDC と混ざっている)。受入 C1 / C2 の担当。

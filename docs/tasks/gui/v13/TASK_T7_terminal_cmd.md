@@ -31,6 +31,17 @@ v1.3 の「GUI 上の CUI 実行」の縦切りをここで完成させる (shel
 | E5 | 空行 Enter はプロンプトを再表示するだけ。`exit` はプロンプトから端末自身を終了 (ESC と同じ)。それ以外の内蔵コマンドは作らない (シェルの内蔵コマンド `ls` `cat` 等は常駐シェル内蔵なので端末からは**まだ**呼べない — 次段の「shell script」で `sh -c` 相当を検討) | A |
 | E6 | gshell は変更しない。カーネルは E1 だけ | — |
 
+## 2-1. 実装メモ (K) — E1 完了 (2026-09-12、コーダー)
+
+- `CON_SINK_REC_EXIT 4` / `CON_SINK_HDR_EXIT 2` を `os32_kapi_shared.h` に追記 (既存 type と
+  `CON_SINK_REC_MAX` は不変)、`con_sink_push_exit(int id)` と `ring_rec_size()` の type 4 を実装。
+- 積むのは `exec_reclaim_owned()` の (9) だけ — 正常終了 (`exec_exit`)、`exec_kill`、fault
+  (`ring3_fault_kill` → `exec_fault_recover` → `exec_exit`) の 3 経路すべてがここを通る。
+  `id != APP_ID_SHELL` かつシンク有効かつ `con_sink_reader_get() != id` のときだけ積み、
+  判定は `con_sink_owner_exit()` で所有を返す**前**に置いた (後だと端末自身の退場でも積む)。
+- **A 側の前提**: `t5a_display/src/sink.rs` は未知 type で `Stop::Unknown` して解析を止めるので、
+  E4 で `REC_EXIT` を足すまで端末は最初の `EXIT` で固まる。E1 単独では受入 T1 は通らない。
+
 ## 3. 受入 (ゲスト、PM / テスター)
 
 | ID | 試験 | 合格条件 |

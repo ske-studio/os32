@@ -39,8 +39,13 @@ K6C-A として K 着地後に別票。K7 (入力統合: `kbd_getchar` ← GUI �
 | `PRINT` | `color u8`, `len u8`, UTF-8 バイト列 (最長 200、超えたら分割) | `shell_print*` / `console_write` / `kprintf` |
 | `CLEAR` | なし | 画面クリアの経路 |
 | `CURSOR` | `x u8`, `y u8` | `console_set_cursor` |
+| `EXIT` | `id u8` | `exec_reclaim_owned` (票 T7 E1、2026-09-12 追加) — gshell 配下の子が畳まれた。正常終了 / `exec_kill` / fault の 3 経路すべてが通る |
 
 改行 / CR は `PRINT` のバイトとして流す (端末モデルが解釈する)。スクロールはレコードにしない。
+
+`EXIT` を積まないのは 3 つ: シェル自身 (`APP_ID_SHELL`) の終了、CUI モード中 (シンク無効)、
+**読み手本人の退場** (受け取る相手がもう居ない)。読み手の照合に `con_sink_reader_get()` を使うので、
+`con_sink_owner_exit()` で所有を返す**前**に判定する。
 
 KAPI v46 (末尾追記、owner 制限は下記):
 

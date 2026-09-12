@@ -335,6 +335,7 @@ static void test_con_sink(void)
     check((bad & (1u << 3)) == 0, "con_sink overflow drops the oldest record");
     check((bad & (1u << 4)) == 0, "con_sink discards on return to CUI");
     check((bad & (1u << 5)) == 0, "con_sink single reader (owner reclaim)");
+    check((bad & (1u << 6)) == 0, "con_sink EXIT record (child exit, T7 E1)");
 }
 
 /* ------------------------------------------------------------------------ */

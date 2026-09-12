@@ -162,6 +162,20 @@ static u32 drain(void)
     return total;
 }
 
+/* exec/exec.c の exec_reclaim_owned (9) の con_sink 部分を**そのまま写した**
+ * 形 (exec.c はカーネル一式を引くのでホストへ #include できない)。順序が
+ * 効く: con_sink_owner_exit で読み手が消えた後に判定すると、端末自身の
+ * 退場でも EXIT を積んでしまう (受け取る相手はもう居ない)。 */
+#define HOST_APP_ID_SHELL 1
+static void reclaim_con_sink(int id)
+{
+    if (id != HOST_APP_ID_SHELL && con_sink_is_enabled() &&
+        con_sink_reader_get() != id) {
+        con_sink_push_exit(id);
+    }
+    con_sink_owner_exit(id);
+}
+
 /* 試験ごとに空・無効・読み手なしから始める。 */
 static void reset_all(void)
 {
@@ -610,6 +624,144 @@ static void case_console_render_gate(void)
     g_v86 = 0;
 }
 
+/* ======================================================================== */
+/*  10. EXIT レコード (票 T7 E1) — 子の終了を端末へ知らせる                  */
+/* ======================================================================== */
+static void case_exit_record(void)
+{
+    i32 n;
+    u32 i;
+    u32 fit;
+    u32 dropped_before;
+
+    reset_all();
+    report("10 EXIT record (T7 E1)\n");
+
+    /* --- 積む / 読む -------------------------------------------------- */
+    con_sink_push_exit(5);
+    check(pending_now() == 0, "10a 無効中の EXIT は溜まらない");
+    con_sink_enable();
+    con_sink_push_exit(5);
+    check(pending_now() == (u32)CON_SINK_HDR_EXIT, "10b EXIT は type+id の 2B");
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n == (i32)CON_SINK_HDR_EXIT && out[0] == (u8)CON_SINK_REC_EXIT &&
+          out[1] == 5, "10c [type=4][id]");
+    check(pending_now() == 0, "10d 読んだ分は消える");
+
+    /* --- レコード境界: EXIT を挟んでも前後のレコードが齧られない -------- */
+    for (i = 0; i < (u32)CON_SINK_PRINT_MAX; i++) src[i] = (u8)('a' + (i & 15));
+    con_sink_push_print("bye\n", 4, 7);
+    con_sink_push_exit(9);
+    con_sink_push_cursor(7, 8);
+    check(pending_now() ==
+          (u32)CON_SINK_HDR_PRINT + 4u + (u32)CON_SINK_HDR_EXIT +
+          (u32)CON_SINK_HDR_CURSOR,
+          "10e EXIT の長さが型から導ける (前後と合わせて端数が出ない)");
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX * 2u);
+    check(n == (i32)((u32)CON_SINK_HDR_PRINT + 4u + (u32)CON_SINK_HDR_EXIT +
+                     (u32)CON_SINK_HDR_CURSOR), "10f 3 本まとめて出る");
+    check(out[0] == (u8)CON_SINK_REC_PRINT &&
+          out[(u32)CON_SINK_HDR_PRINT + 4u] == (u8)CON_SINK_REC_EXIT &&
+          out[(u32)CON_SINK_HDR_PRINT + 4u + 1u] == 9 &&
+          out[(u32)CON_SINK_HDR_PRINT + 4u + (u32)CON_SINK_HDR_EXIT] ==
+              (u8)CON_SINK_REC_CURSOR,
+          "10g EXIT の直後に次のレコードの頭が来る");
+    check(pending_now() == 0, "10h 端数が残らない");
+
+    /* 最長レコードの直後に置いても、1 本ずつ切り出せる */
+    con_sink_push_print((const char *)src, (u32)CON_SINK_PRINT_MAX, 3);
+    con_sink_push_exit(2);
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n == (i32)CON_SINK_REC_MAX, "10i cap 1 本ぶんでは PRINT だけ");
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n == (i32)CON_SINK_HDR_EXIT && out[0] == (u8)CON_SINK_REC_EXIT &&
+          out[1] == 2, "10j 次の読みで EXIT が丸ごと出る");
+
+    /* --- あふれ: EXIT も「古い方をレコード単位で」の対象 ---------------- */
+    reset_all();
+    con_sink_enable();
+    fit = (u32)CON_SINK_RING_SIZE / (u32)CON_SINK_REC_MAX;
+    for (i = 0; i < fit; i++) {
+        con_sink_push_print((const char *)src, (u32)CON_SINK_PRINT_MAX,
+                            (u8)(i + 1));
+    }
+    /* 40 本 = 8120B なので 72B 余る。EXIT (2B) で隙間を埋め切ってから 1 本
+     * 足すと、初めて最古の PRINT が 1 本まるごと消える。 */
+    while ((u32)CON_SINK_RING_SIZE - pending_now() >= (u32)CON_SINK_HDR_EXIT) {
+        con_sink_push_exit(10);
+    }
+    dropped_before = dropped_now();
+    check(dropped_before == 0 && pending_now() == (u32)CON_SINK_RING_SIZE,
+          "10k 容量内では EXIT を足しても捨てない (隙間ちょうどで満杯)");
+    con_sink_push_exit(11);
+    check(dropped_now() == dropped_before + 1u,
+          "10l あふれた EXIT は古い PRINT を 1 本だけ捨てて入る");
+    check(pending_now() <= (u32)CON_SINK_RING_SIZE, "10m 容量を超えない");
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n == (i32)CON_SINK_REC_MAX && out[1] == 2,
+          "10m2 残った先頭は 2 本目 (最古が消えた)");
+
+    /* EXIT だけでリングを埋めても端数は出ない */
+    reset_all();
+    con_sink_enable();
+    con_sink_drop_count = 0;
+    for (i = 0; i < (u32)CON_SINK_RING_SIZE; i++) con_sink_push_exit((int)(i & 255));
+    check(pending_now() % (u32)CON_SINK_HDR_EXIT == 0 &&
+          pending_now() <= (u32)CON_SINK_RING_SIZE,
+          "10n EXIT だけで埋めても端数が残らない");
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n > 0 && n % (i32)CON_SINK_HDR_EXIT == 0 &&
+          out[0] == (u8)CON_SINK_REC_EXIT &&
+          out[(u32)CON_SINK_HDR_EXIT] == (u8)CON_SINK_REC_EXIT,
+          "10o 先頭は必ず EXIT レコードの先頭");
+    /* EXIT で満杯の環へ最長 PRINT を入れる。捨てるのが**レコード単位**なら
+     * 203B ぶん = 102 本。型ごとの長さを知らない実装だと 1B ずつ 203 本
+     * 捨てるので、ここで差が出る。 */
+    drain();
+    con_sink_drop_count = 0;
+    while ((u32)CON_SINK_RING_SIZE - pending_now() >= (u32)CON_SINK_HDR_EXIT) {
+        con_sink_push_exit(12);
+    }
+    check(con_sink_drop_count == 0 && pending_now() == (u32)CON_SINK_RING_SIZE,
+          "10o2 EXIT だけで環が満杯になる");
+    con_sink_push_print((const char *)src, (u32)CON_SINK_PRINT_MAX, 1);
+    check(con_sink_drop_count ==
+          ((u32)CON_SINK_REC_MAX + (u32)CON_SINK_HDR_EXIT - 1u) /
+              (u32)CON_SINK_HDR_EXIT,
+          "10o3 捨てたのは EXIT 102 本 (レコード単位、バイト単位ではない)");
+
+    /* --- 誰の退場で積むか (exec_reclaim_owned の順序) ------------------- */
+    reset_all();
+    con_sink_enable();
+    g_owner = 4;                       /* 端末アプリが読み手になる */
+    check(con_sink_read(out, (u32)CON_SINK_REC_MAX) == 0, "10p 端末が読み手");
+    check(con_sink_reader_get() == 4, "10q 読み手は ID 4");
+
+    reclaim_con_sink(6);               /* 子が正常終了 / kill / fault */
+    n = con_sink_read(out, (u32)CON_SINK_REC_MAX);
+    check(n == (i32)CON_SINK_HDR_EXIT && out[1] == 6,
+          "10r 非シェルの子の退場で EXIT が積まれる");
+
+    reclaim_con_sink(HOST_APP_ID_SHELL);
+    check(pending_now() == 0, "10s gshell (ID 1) の退場では積まない");
+
+    reclaim_con_sink(4);               /* 読み手本人 (端末) の退場 */
+    check(pending_now() == 0, "10t 読み手本人の退場では積まない");
+    check(con_sink_reader_get() == CON_SINK_NO_READER,
+          "10u 読み手本人の退場で所有は返る");
+
+    /* 読み手が居ない (端末がもう畳まれた) ときは、子の退場でも積まない */
+    reclaim_con_sink(7);
+    check(pending_now() == (u32)CON_SINK_HDR_EXIT,
+          "10v 読み手不在でも積む (次の読み手が拾う — リングは捨てない)");
+
+    /* CUI に戻っていれば (シンク無効) 積まない */
+    reset_all();
+    reclaim_con_sink(6);
+    check(pending_now() == 0 && con_sink_is_enabled() == 0,
+          "10w CUI モード中 (無効) は子の退場でも積まない");
+}
+
 int main(void)
 {
     failures = 0;
@@ -623,6 +775,7 @@ int main(void)
     case_single_reader();
     case_selftest_agrees();
     case_console_render_gate();
+    case_exit_record();
     if (failures) {
         report("FAILURES\n");
         die(1);

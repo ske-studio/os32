@@ -36,6 +36,10 @@ int  con_sink_is_enabled(void);
 void con_sink_push_print(const char *buf, u32 len, u8 color);
 void con_sink_push_clear(void);
 void con_sink_push_cursor(int x, int y);
+/* con_sink_push_exit: 子アプリが畳まれた (票 T7 E1)。積むのは exec.c の
+ * exec_reclaim_owned だけ — 「読み手本人の退場では積まない」の判定も
+ * そちら側 (所有を返す前でないと照合できないため)。 */
+void con_sink_push_exit(int id);
 
 /* --- 読む側 (KAPI v46 の実体) ------------------------------------------- */
 /* con_sink_read: レコード境界で切って buf へ写す。戻り値 = 書いたバイト数
