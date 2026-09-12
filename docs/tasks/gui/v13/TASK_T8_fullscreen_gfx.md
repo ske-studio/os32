@@ -166,3 +166,4 @@
   `kbd_has_key` は真偽を返すので resume の EAX と噛み合わず、KAPI にも無いため譲りは入れていない (注入リングを見る枝だけ追加)。
 - 試験: ホスト TDD ケース 22 (37 検査、RED 7 通り) + kselftest 2 項 → [`tools/tests/t8_tdd.md`](../../../../tools/tests/t8_tdd.md) の「T8-3 K」節。`make` / 実機は未実施 ([V4])。
 - **K だけでは動かない**: gshell が 4 を知らないと `slot_of_owner` が `None` の譲りを `forget` し、譲ったアプリが二度と起きない (`multiapp.rs:735`)。T8-3 W と同時に入れること。
+| **F8** (T8-3 K `74f8015` + W `e6a04ef` 配備、vmkernel 461,706 B、kselftest 69 / 0) | 端末から `gfx200_test` → Space で FPS 段へ → 最初の `kbd_trygetchar` で `WAIT_POLL` (state 4、`parked_from_poll` 1、`ring3_poll_yield_count` 1) に park した後、**WM が起こさない** (画面は `FPS: 0` で凍結、WM は `sys_halt` で待つ)。原因: gshell は入力群 / 導出群に ready が無いと `pick()` を呼ばず halt するので、`pick()` の降り口の `pick_poll` に到達しない。CTRL+STOP (所有者宛) で復旧 | **不合格 → T8-3 W 追加修正** (halt の前に `WAIT_POLL` を起こす) |
