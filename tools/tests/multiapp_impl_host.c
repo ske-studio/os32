@@ -145,6 +145,19 @@ static int ma_start(u32 pages, int gui)
     return id;
 }
 
+/* exec_launch が起動時にスロットへ書く 2 つ (ctx->cpl3 = 1 / ctx->hdr_flags =
+ * hdr->flags) を、立てたあとに写す。票 T8 の判定材料はこの 2 つだけ。 */
+static int ma_start_gfx(u32 pages, int gui, u32 hdr_flags)
+{
+    int id = ma_start(pages, gui);
+    AppSlot *a;
+    if (id < 0) return id;
+    a = appslot_at(id);
+    a->cpl3 = 1;
+    a->hdr_flags = hdr_flags;
+    return id;
+}
+
 /* ---- --cpl0 の子 (exec/exec.c の exec_cpl0_claim / exec_cpl0_release) ----
  * 実物は帯 [MEM_EXEC_LOAD_ADDR, mem_end) を **丸ごと** pgalloc_mark_used し、
  * 最後の 1 本が終わったときに丸ごと free する。効くのは「丸ごと」という点
@@ -167,26 +180,34 @@ static void ma_cpl0_release(void)
 /* exec_launch の CPL=0 経路をその**順番のまま**なぞる (決裁 2026-09-11):
  *   池の admit → want_ring3 の判定 → cpl0 の admit → claim → commit
  * 拒否は claim より前でなければならない (claim も alloc もしないこと)。 */
-static int ma_start_cpl0(int is_shell)
+/* gui は exec_launch の gui_arg (0 = CUI の exec_run / 1 = GUI の exec_start)。
+ * 票 T8 D1 で「GUI からの --cpl0 は常に拒否」が入ったので、拒否の戻り値を
+ * 潰さずそのまま返す (以前は一律 OS32_ERR_FULL に丸めていた)。 */
+static int ma_start_cpl0_gui(int is_shell, int gui)
 {
     int id;
+    int rc;
     if (is_shell) {
         /* exec_launch の is_shell 経路: 池も枚数勘定も帯の claim も通らない */
-        if (appslot_cpl0_admit(1) < 0) return OS32_ERR_FULL;
+        rc = appslot_cpl0_admit(1, gui);
+        if (rc < 0) return rc;
         appslot_shell_commit();
         return APP_ID_SHELL;
     }
-    id = appslot_start_admit(0, 0, 0);       /* 池だけ。状態は変えない */
+    id = appslot_start_admit(gui, 0, 0);     /* 池だけ。状態は変えない */
     if (id < 0) return id;
     if (appslot_launch_is_app(0, OS32X_FLAG_FORCE_CPL0) != 0)
         return OS32_ERR_INVAL;               /* --cpl0 はアプリ帯を使わない */
-    if (appslot_cpl0_admit(0) < 0) return OS32_ERR_FULL;
+    rc = appslot_cpl0_admit(0, gui);
+    if (rc < 0) return rc;
     ma_cpl0_claim();
-    appslot_start_commit(id, 0, 0);
+    appslot_start_commit(id, gui, 0);
     H.turn_used[id] = 1;
     H.last_run = id;
     return id;
 }
+
+static int ma_start_cpl0(int is_shell) { return ma_start_cpl0_gui(is_shell, 0); }
 
 static void ma_gui_call(int op) { appslot_gui_op_enter(op == MA_OP_WAIT); }
 static void ma_gui_return(void) { appslot_gui_op_leave(); }
@@ -255,10 +276,12 @@ static int ma_res_add(int kind, int n)
 
 /* 実物の回収の並び (exec_exit): fd_redirect_reset_owned / vfs_close_owned /
  * pipe_free_owned / shm_free_owned / db_cleanup_owned / gui_owner_exit —
- * 全部この 1 つの ID で呼ぶ。ハーネスは「その ID の分だけ消える」を数える。 */
+ * 全部この 1 つの ID で呼ぶ。ハーネスは「その ID の分だけ消える」を数える。
+ * 票 T8 D1 で (11) 画面の所有者が並びの末尾に加わった。こちらは実物を呼ぶ。 */
 static void ma_reclaim_res(int id)
 {
     int k;
+    appslot_gfx_owner_exit(id);
     for (k = 0; k < MA_RES_KINDS; k++) H.res[id][k] = 0;
     H.slot[id] = -1;
     H.input_ready[id] = 0;
@@ -982,7 +1005,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
 
     /* (a) 生存アプリなし = 従来どおり立つ。帯を丸ごと claim する。 */
     ma_init(4096);
-    check(appslot_cpl0_admit(0) == 0,
+    check(appslot_cpl0_admit(0, 0) == 0,
           "19a 生存アプリが 0 本なら --cpl0 の子は通る");
     check(ma_start_cpl0(0) == APP_ID_MIN,
           "19b 生存アプリなしの --cpl0 の子は従来どおり ID 2 で立つ");
@@ -1022,7 +1045,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
           "19l 下ごしらえ: GUI アプリ 1 本が park 中で WM top-level");
     free0 = H.free_pages;
     /* && で短絡させない (RED でも後ろが素通りしてしまう) */
-    r = appslot_cpl0_admit(0);
+    r = appslot_cpl0_admit(0, 0);
     check(r == OS32_ERR_FULL,
           "19m park 中のアプリが 1 本でも居れば判定で弾かれる");
     r = ma_start_cpl0(0);
@@ -1039,7 +1062,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
     ma_init(4096);
     fill_four(100);
     free0 = H.free_pages;
-    r = appslot_cpl0_admit(0);
+    r = appslot_cpl0_admit(0, 0);
     check(appslot_live() == 4 && r == OS32_ERR_FULL,
           "19q 4 本生きていれば --cpl0 の判定でも弾かれる");
     /* 4 本のときは池も尽きているので ma_start_cpl0 の戻りは同じ
@@ -1067,7 +1090,7 @@ static void case_cpl0_child_needs_no_live_apps(void)
     ma_gui_call(MA_OP_WAIT);
     ma_park();
     free0 = H.free_pages;
-    check(appslot_cpl0_admit(1) == 0,
+    check(appslot_cpl0_admit(1, 0) == 0,
           "19v シェルは --cpl0 の判定の対象外 (アプリが生きていても通る)");
     check(ma_start_cpl0(1) == APP_ID_SHELL && H.cpl0_children == 0 &&
           H.free_pages == free0,
@@ -1261,6 +1284,124 @@ static void case_wait_key(void)
     kbd_inject_discard();
 }
 
+
+/* ======================================================================== */
+/*  ケース 20 — 画面の所有者 (票 T8 D1 / D1a / D3、2026-09-12)               */
+/*                                                                          */
+/*  全画面 GFX プログラムが gshell 配下で走ると、画面の持ち主が 1 本に決まり  */
+/*  ((a) 遷移)、宣言していないプログラムは画面を取れず ((b) 拒否)、VRAM を    */
+/*  直接触る --cpl0 は GUI から起動できない ((c))。3 つとも実物の            */
+/*  exec/appslot.c を叩く。                                                  */
+/* ======================================================================== */
+static void case_gfx_screen_owner(void)
+{
+    int id, other;
+    u32 rej0;
+
+    /* --- (a) 遷移: gfx_init で取り、回収で WM へ戻る ------------------- */
+    ma_init(4096);
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20a 起動直後の画面の所有者は WM (1)");
+
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    check(id == APP_ID_MIN, "20b 下ごしらえ: 宣言付きの GFX アプリが 1 本立つ");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20c 起動しただけでは画面は WM のまま (gfx_init を呼んでいない)");
+
+    check(appslot_gfx_claim(0) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20d CUI 中 (con_sink 無効) は所有者を触らない");
+
+    check(appslot_gfx_claim(1) == 0, "20e GUI 中の gfx_init は通る");
+    check(appslot_gfx_owner() == id,
+          "20f 画面の所有者は gfx_init を呼んだアプリへ移る");
+
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == id,
+          "20g 同じアプリが二度呼んでも所有者は変わらない");
+
+    appslot_gfx_owner_exit(GFX_OWNER_WM);
+    check(appslot_gfx_owner() == id,
+          "20h 他人 (WM) の回収では所有者は戻らない");
+
+    check(ma_exit(0) == 0, "20i アプリが終了する");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20j 所有者の回収で画面は WM へ戻る (D1)");
+
+    /* kill (CTRL+STOP / exec_kill) でも同じ経路を通る。 */
+    ma_init(4096);
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    appslot_gfx_claim(1);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    check(appslot_gfx_owner() == id,
+          "20k park しただけでは画面はアプリのまま (WM は上書きしない)");
+    check(ma_kill(id) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20l exec_kill で畳んでも画面は WM へ戻る");
+
+    /* 2 本目が取った画面は、1 本目の回収では戻らない。 */
+    ma_init(4096);
+    id = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    ma_gui_call(MA_OP_WAIT);
+    ma_park();
+    other = ma_start_gfx(100, 1, OS32X_FLAG_GFX);
+    check(other == APP_ID_MIN + 1, "20m 下ごしらえ: 2 本目の GFX アプリ");
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == other,
+          "20n 2 本目が gfx_init を呼べば画面は 2 本目のもの");
+    ma_exit(0);
+    check(appslot_gfx_owner() == GFX_OWNER_WM, "20o 2 本目の回収で WM へ戻る");
+    check(ma_resume(id) == 0, "20p 1 本目を起こす");
+    ma_exit(0);
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20q 画面を持っていない 1 本目の回収では所有者は動かない");
+
+    /* --- (b) 宣言なしの拒否 (D1a) --------------------------------------- */
+    ma_init(4096);
+    rej0 = gfx_init_reject_count;
+    id = ma_start_gfx(100, 1, 0);        /* app.conf に gfx 列が無いプログラム */
+    check(id == APP_ID_MIN, "20r 下ごしらえ: 宣言の無いアプリが 1 本立つ");
+    check(appslot_gfx_claim(1) == OS32_ERR_INVAL,
+          "20s GUI 中に宣言の無い CPL=3 が gfx_init を呼べば ERR_INVAL");
+    check(appslot_gfx_owner() == GFX_OWNER_WM,
+          "20t 拒否で画面は WM のまま (gfx_init は呼ばれない)");
+    check(gfx_init_reject_count == rej0 + 1,
+          "20u 拒否は gfx_init_reject_count に載る");
+    check(appslot_gfx_claim(0) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20v CUI 中は宣言が無くても従来どおり通る");
+    check(gfx_init_reject_count == rej0 + 1,
+          "20w CUI 中の素通しは拒否として数えない");
+
+    /* CPL=0 の子 (--cpl0) は宣言の有無に関わらず所有者を取らない。 */
+    appslot_at(id)->cpl3 = 0;
+    appslot_at(id)->hdr_flags = OS32X_FLAG_GFX;
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20x CPL=0 の子は画面の所有者にならない");
+    ma_exit(0);
+
+    /* WM 自身 (シェル帯、owner 1) の復帰の gfx_init は素通し。 */
+    check(appslot_cur() == APP_ID_SHELL, "20y WM top-level へ戻っている");
+    check(appslot_gfx_claim(1) == 0 && appslot_gfx_owner() == GFX_OWNER_WM,
+          "20z WM の復帰の gfx_init は所有者を動かさない");
+
+    /* --- (c) --cpl0 は GUI から起動できない (D1) ------------------------ */
+    ma_init(4096);
+    check(appslot_cpl0_admit(0, 1) == OS32_ERR_INVAL,
+          "20A 生存アプリが 0 本でも GUI からの --cpl0 は ERR_INVAL");
+    check(ma_start_cpl0_gui(0, 1) == OS32_ERR_INVAL,
+          "20B exec_start 経路の --cpl0 は起動しない");
+    check(appslot_live() == 0 && H.cpl0_children == 0 &&
+          H.free_pages == 4096,
+          "20C 拒否は池も帯も 1 つも動かさない");
+    check(appslot_alloc_id() == APP_ID_MIN,
+          "20D 拒否は池を消費しない");
+    check(ma_start_cpl0_gui(0, 0) == APP_ID_MIN,
+          "20E CUI (exec_run) 経路は従来どおり通る");
+    check(H.cpl0_children == 1, "20F CUI からは帯を claim する");
+    ma_exit_cpl0();
+
+    /* シェル (ネスト段 0) の載せ替えは gui に関わらず対象外。 */
+    check(appslot_cpl0_admit(1, 1) == 0,
+          "20G シェル帯の載せ替えは GUI 判定の対象外");
+}
+
 int main(void)
 {
     failures = 0;
@@ -1287,6 +1428,7 @@ int main(void)
     case_cpl0_child_needs_no_live_apps();
     case_abort_clear();
     case_wait_key();
+    case_gfx_screen_owner();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

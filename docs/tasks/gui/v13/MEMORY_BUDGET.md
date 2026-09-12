@@ -89,6 +89,29 @@ T4のCellはhost試験でsize 8B / align 4Bと確認（x86_64-unknown-linux-gnu�
 `kbd_inject_selftest()` は受け皿の静的配列を持たない (`inj_push` を 1 バイトずつ呼ぶ) —
 `con_sink_selftest` が 403 B の作業域を持つのと違い、256 B に収めた意味を消さないため。
 
+## カーネル帯の静的計上 (T8-K、2026-09-12)
+
+画面の所有者 (票 T8 D1) と、`AppSlot` に増えたヘッダ flags の欄 (D1a)。どれも `kmalloc` せず
+**カーネルの .data / .bss の静的領域**なので、シェル帯・アプリ帯・exec_heap のどれも減らさない。
+測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を HEAD 版と並べたもの
+(カーネル全体のリンクとゲストの空き容量は未測定 — `make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| 所有者 `g_gfx_owner` | 4 B (.data) | `exec/appslot.c`。初期値 `GFX_OWNER_WM` = 1 なので .bss ではなく .data |
+| カウンタ `gfx_init_reject_count` | 4 B (.bss) | 同上。KAPI にはしない (kernel.map から読む) |
+| 欄 `AppSlot.hdr_flags` (4 B × 6 スロット) | 24 B | `g_slot` が 0x420 → 0x438 |
+| 整列で増えた分 | 28 B | `g_slot` の先頭が 0x20 → 0x40 へ寄った (`appslot.o` .bss 1088 → **1144** = +56 B) |
+| **合計 (静的)** | **60 B** | .data +4 B / .bss +56 B |
+
+`appslot.o` の実測は text 2617 → **3355 B** (+738 B: 判定 3 本 + 回収 + 自己診断
+`appslot_gfx_owner_selftest`)、data 4 → 8 B、bss 1088 → 1144 B。
+`gfx/gfx_core.c` 側は門 2 本と `gfx_screen_owner` (どれも 3 行以下) で、静的領域は増えない。
+KAPI スロットが 1 本増えた分 `KernelAPI` 構造体が 4 B 伸びる (192 → 193 関数)。
+
+票 §2 の見積り (「所有者 1 語 + カウンタ 1 語」= 8 B) との差 52 B は、宣言ビットを起動時に
+控える欄 (`hdr_flags` 24 B) と整列 (28 B) — 決裁 D1a を入れた分。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

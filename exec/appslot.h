@@ -81,6 +81,13 @@ typedef struct {
     u32  band_pdes;
     struct addrspace as;
     u32  pages;               /* この ID が握っている物理ページ数 (D5) */
+
+    /* 起動した OS32X ヘッダの flags (票 T8 D1a)。exec_launch が写す。
+     * 見るのは OS32X_FLAG_GFX (全画面 GFX を使う宣言) だけで、
+     * OS32X_FLAG_FORCE_CPL0 の判定は起動前 (appslot_launch_is_app /
+     * appslot_cpl0_admit) に済んでいる。構造体の末尾に足すので、
+     * 旧 ExecContext 由来の欄の並びは 1 バイトも動かない (I12/I13)。 */
+    u32  hdr_flags;
 } AppSlot;
 
 /* ---- 受入 G7 のカウンタ (D8 の C1/C2/C3/C6) --------------------------- */
@@ -95,6 +102,10 @@ extern volatile u32 ring3_kbd_park_count;
 /* 回収の回数と直前の対象 (試験と診断用。G2/G5 の「1 本分だけ」を数える) */
 extern volatile u32 appslot_reclaim_count;
 extern volatile int appslot_last_reclaim_id;
+/* GUI 中に「宣言 (OS32X_FLAG_GFX) の無い CPL=3 が gfx_init を呼んだ」ので
+ * 断った回数 (票 T8 D1a の受入 F6)。KAPI にはしない — kernel.map の番地を
+ * emu_read_mem で読む。 */
+extern volatile u32 gfx_init_reject_count;
 
 /* ---- 表の操作 -------------------------------------------------------- */
 
@@ -136,10 +147,17 @@ int appslot_launch_is_app(int is_shell, u32 hdr_flags);
  * 枚数で刻む機構は増やさず、**生存アプリが 1 本でも居たら拒否**する
  * (特権が要る例外用途なので、GUI のアプリを閉じてから使えば足りる)。
  *
- * 戻り値: 0 = 起動してよい / OS32_ERR_FULL = 生存アプリが居るので不可。
+ * 決裁 2026-09-12 (票 T8 D1): --cpl0 のプログラムは VRAM を直接触るので、
+ * **GUI からの起動 (gui=1 = exec_start) は生存アプリの有無に関わらず拒否**
+ * する。GUI 中に画面を丸ごと持っていかれると WM が復帰できない (画面の所有者
+ * は gfx_init を呼ぶ CPL=3 アプリしか取らない)。CUI の exec_run (gui=0) は
+ * 従来どおり「生存アプリが居なければ通す」のまま。
+ *
+ * 戻り値: 0 = 起動してよい / OS32_ERR_INVAL = GUI からは不可 (T8 D1) /
+ *         OS32_ERR_FULL = 生存アプリが居るので不可。
  * シェル (exec ネスト段 0) はそもそもアプリ帯を使わないので対象外 —
  * 呼び出し側が appslot_launch_is_app() と同じく is_shell を渡す。 */
-int appslot_cpl0_admit(int is_shell);
+int appslot_cpl0_admit(int is_shell, int gui);
 
 /* 起動してよいかを判定する。**状態は 1 つも変えない**。
  *   gui=1 (exec_start): WM の top-level からだけ (契約 S2)
@@ -222,6 +240,37 @@ int appslot_abort_clear(void);
  * 3 は K7 の追加。既存の 0〜2 の意味は 1 つも動かない (票 §5 の指摘 C)。 */
 int appslot_state(int id);
 
+/* ---- 画面の所有者 (票 T8 D1 / D1a) ------------------------------------ */
+/* 全画面 GFX を握っている ID。1 = シェル帯 (WM) / 2〜5 = アプリ。
+ * gfx_init / gfx_init_200 の KAPI ラッパ (gfx/gfx_core.c) が取り、
+ * その ID の回収 (exec_reclaim_owned) で 1 に戻る。CUI 中 (con_sink 無効)
+ * は誰も取らないので常に 1。GFX 側に置かないのは、判定材料 (走っている ID /
+ * CPL / ヘッダ flags) が全部この表にあり、ホストで試験できるため。 */
+#define GFX_OWNER_WM     APP_ID_SHELL
+
+/* gfx_init / gfx_init_200 が呼ばれたときの判定 (**純関数** — 状態を 1 つも
+ * 変えない)。ホスト試験はここを直接叩く。
+ *   gui_mode  : con_sink_is_enabled() (1 = GUI 中 / 0 = CUI 中)
+ *   caller    : res_owner_get() — 呼び手の ID
+ *   cpl3      : 呼び手が CPL=3 で走っているか
+ *   hdr_flags : 呼び手の OS32X ヘッダ flags
+ * 戻り値: >0 = その ID を所有者にして gfx_init を通す
+ *          0 = 所有者は触らずに通す (CUI 中 / WM 自身 / CPL=0 の子)
+ *         OS32_ERR_INVAL = 宣言が無いので拒否 (D1a。gfx_init を呼ばない) */
+int appslot_gfx_claim_check(int gui_mode, int caller, int cpl3, u32 hdr_flags);
+
+/* 上を「いま走っている ID」に対して適用し、結果を反映する。
+ * 通れば 0 (所有者を取った場合も 0)、拒否なら OS32_ERR_INVAL を返して
+ * gfx_init_reject_count++ する。gui_mode は呼び出し側が con_sink に聞く
+ * (exec/ は -Iinclude を持つが、判定材料をこの表に閉じるため引数で受ける)。 */
+int appslot_gfx_claim(int gui_mode);
+
+/* 画面の所有者 (KAPI v48 gfx_screen_owner の実体)。誰でも呼べる。 */
+int appslot_gfx_owner(void);
+
+/* 回収 (exec_reclaim_owned から)。所有者がこの ID なら WM へ戻す。 */
+void appslot_gfx_owner_exit(int id);
+
 /* ---- 自己診断 (kernel/kselftest.c) ------------------------------------- */
 /* 「印の無いフレームは resume できない」(票 K7 受入 I5 / K5b の C6) の負例を
  * ブート時に踏む。空きスロットを一時的に借りて、PARKED / WAIT_KEY の両方で
@@ -229,5 +278,10 @@ int appslot_state(int id);
  * カウンタ・cur・owner を元に戻す。ビット 0..n が落ちた項目 (0 = 全部通った)。
  * 呼ぶのは exec_init() の前後どちらでもよい (触った状態は必ず戻す)。 */
 u32 appslot_resume_mark_selftest(void);
+
+/* 「画面の所有者は gfx_init で移り、回収で WM へ戻る」(票 T8 D1) と
+ * 「GUI 中の宣言なしは拒否」(D1a) をブート時に踏む。借りたスロット・
+ * 所有者・カウンタは必ず元へ戻す。ビット 0..n が落ちた項目 (0 = 全通過)。 */
+u32 appslot_gfx_owner_selftest(void);
 
 #endif /* __APPSLOT_H */

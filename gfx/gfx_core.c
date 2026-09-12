@@ -2,6 +2,13 @@
 #include "gfx_hal.h"
 #include "os32_kapi_shared.h"
 #include "kstring.h"
+#include "con_sink.h"     /* con_sink_is_enabled — GUI 中かどうか (票 T8) */
+
+/* 画面の所有者の表は exec/appslot.c にある (判定材料が AppSlot にあり、
+ * ホストで試験できるため)。gfx/ は -Iexec を持たないので、kernel/con_sink.c
+ * が res_owner_get を引くのと同じ流儀で extern 宣言する。 */
+extern int appslot_gfx_claim(int gui_mode);
+extern int appslot_gfx_owner(void);
 
 /* ======================================================================== */
 /*  バックバッファ (拡張メモリ固定アドレス, 128KB)                          */
@@ -431,6 +438,35 @@ void gfx_init_200(void)
 
     /* 表示出力を有効化 (9801 の enter は空)。バックエンドの選択は先頭で済み。 */
     if (g_backend && g_backend->enter) g_backend->enter();
+}
+
+/* ======================================================================== */
+/*  KAPI の門 — 画面の所有者 (票 T8 D1 / D1a)                                */
+/*                                                                          */
+/*  sdk/kapi.json のスロット gfx_init / gfx_init_200 はここを指す。外部       */
+/*  プログラムが画面を丸ごと取る唯一の入口なので、所有権の移動もここ 1 か所。 */
+/*  カーネル内部 (ブート、WM の復帰) は gfx_init() を直接呼ぶので門を通らない。*/
+/*                                                                          */
+/*  GUI 中 (con_sink 有効) に宣言 (mkos32x --gfx = OS32X_FLAG_GFX) の無い     */
+/*  CPL=3 が呼んだら **本体を呼ばない**。gfx_init は void なので戻り値では    */
+/*  知らせられない — 数は gfx_init_reject_count (カーネルシンボル) で見る。   */
+/*  CUI 中は従来どおり素通し。                                               */
+/* ======================================================================== */
+void gfx_kapi_init(void)
+{
+    if (appslot_gfx_claim(con_sink_is_enabled()) < 0) return;
+    gfx_init();
+}
+
+void gfx_kapi_init_200(void)
+{
+    if (appslot_gfx_claim(con_sink_is_enabled()) < 0) return;
+    gfx_init_200();
+}
+
+i32 gfx_screen_owner(void)
+{
+    return (i32)appslot_gfx_owner();
 }
 
 void gfx_shutdown(void)

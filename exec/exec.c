@@ -694,6 +694,11 @@ static void exec_reclaim_owned(int id)
      * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、
      * 次の読み手が拾えばよい)。 */
     con_sink_owner_exit(id);
+    /* (11) 画面の所有者 (票 T8 D1)。全画面 GFX を握ったまま畳まれた
+     * (正常終了 / kill / fault / CTRL+STOP のどれでも) ら WM へ返す。
+     * WM は exec_start / exec_resume から戻った直後に gfx_screen_owner()
+     * を見て、1 に戻っていれば復帰の描き直しに入る。 */
+    appslot_gfx_owner_exit(id);
 }
 
 /* ======================================================================== */
@@ -1107,14 +1112,25 @@ static int exec_launch(const char *cmdline, int gui_arg)
         ring3_band_set(paging_app_band_pdes(code_end_est, heap_sz,
                                             ring3_band_ram_top()));
         stack_top = RING3_USTACK_TOP;
-    } else if (appslot_cpl0_admit(is_shell) < 0) {
+    } else {
         /* --cpl0 の子はアプリ帯を丸ごと identity で押さえる (D7)。生きている
          * CPL=3 アプリの per-app 物理を上書きし、終了時に他人のページを
          * 解放してしまうので、1 本でも居たら起動しない (決裁 2026-09-11)。
+         * さらに票 T8 D1 で「GUI からの起動 (exec_start) は生存アプリの
+         * 有無に関わらず断る」— VRAM を直接触るので画面の所有者の外側で
+         * 画面を壊す。CUI の exec_run は従来どおり。
          * exec_cpl0_claim() より前 — claim も alloc もまだ何もしていない。 */
-        shell_print("Error: close GUI apps before running a --cpl0 program\n",
-                    ATTR_RED);
-        return OS32_ERR_FULL;
+        int cpl0_rc = appslot_cpl0_admit(is_shell, gui);
+        if (cpl0_rc < 0) {
+            if (cpl0_rc == OS32_ERR_INVAL) {
+                shell_print("Error: cui only - run this from CUI mode\n",
+                            ATTR_RED);
+            } else {
+                shell_print("Error: close GUI apps before running a --cpl0 program\n",
+                            ATTR_RED);
+            }
+            return cpl0_rc;
+        }
     }
 
     if (!is_shell) {
@@ -1222,6 +1238,9 @@ static int exec_launch(const char *cmdline, int gui_arg)
     ctx->exec_heap_used = 0;
     ctx->sbrk_heap_limit = is_shell ? guard_b : sbrk_end;
     ctx->cpl3 = 0;
+    /* 票 T8 D1a: 全画面 GFX の宣言 (OS32X_FLAG_GFX) を見るのは gfx_init を
+     * 呼ばれた瞬間なので、起動時にヘッダの flags を控えておく。 */
+    ctx->hdr_flags = hdr->flags;
     ctx->band_top = g_ring3_band_top;
     ctx->band_pdes = g_ring3_band_pdes;
     ctx->pages = need_pages;

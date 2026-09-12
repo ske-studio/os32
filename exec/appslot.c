@@ -33,6 +33,12 @@ volatile u32 ring3_resume_bad_frame_count = 0;
 volatile u32 ring3_kbd_park_count = 0;
 volatile u32 appslot_reclaim_count = 0;
 volatile int appslot_last_reclaim_id = 0;
+volatile u32 gfx_init_reject_count = 0;
+
+/* 画面の所有者 (票 T8 D1)。初期値は WM。CUI 中は誰も取らないのでここに
+ * 留まる。static にしないのは kernel.map から emu_read_mem で読むため
+ * (fault_kill_count と同じ流儀)。 */
+volatile int g_gfx_owner = GFX_OWNER_WM;
 
 static AppSlot g_slot[APP_SLOT_COUNT];
 static int g_cur = APP_ID_SHELL;
@@ -62,6 +68,7 @@ void appslot_init(void)
     g_slot[APP_ID_SHELL].depth = 1;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
+    g_gfx_owner = GFX_OWNER_WM;   /* 画面は WM のもの (票 T8 D1) */
     res_owner_set(APP_ID_SHELL);
 }
 
@@ -117,10 +124,15 @@ int appslot_launch_is_app(int is_shell, u32 hdr_flags)
 
 /* --cpl0 の子は帯を丸ごと押さえる (exec_cpl0_claim)。生きているアプリの
  * per-app 物理と正面衝突するので、1 本でも居たら起動そのものを断る
- * (決裁 2026-09-11)。ここは判定だけで、claim も alloc もまだ行わない。 */
-int appslot_cpl0_admit(int is_shell)
+ * (決裁 2026-09-11)。ここは判定だけで、claim も alloc もまだ行わない。
+ *
+ * 票 T8 D1 でこの条件を広げた: GUI からの起動 (gui=1) は生存アプリの有無に
+ * 関わらず断る。--cpl0 は VRAM を直接触る (v86 / VDM) ので、GUI 中に走ると
+ * 画面の所有者 (D1) の外側で画面を壊し、WM が復帰する手がかりを失う。 */
+int appslot_cpl0_admit(int is_shell, int gui)
 {
     if (is_shell) return 0;             /* シェル帯はアプリ帯を使わない */
+    if (gui) return OS32_ERR_INVAL;     /* GUI からは常に不可 (T8 D1) */
     if (appslot_live() > 0) return OS32_ERR_FULL;
     return 0;
 }
@@ -430,6 +442,56 @@ int appslot_state(int id)
 }
 
 /* ======================================================================== */
+/*  画面の所有者 (票 T8 D1 / D1a)                                            */
+/*                                                                          */
+/*  全画面 GFX は「1 枚の画面を丸ごと持っていく」操作なので、持ち主を        */
+/*  カーネルが 1 つだけ覚える。取るのは gfx_init / gfx_init_200 の KAPI      */
+/*  ラッパ (gfx/gfx_core.c) だけで、返すのは回収 (exec_reclaim_owned) だけ。 */
+/*                                                                          */
+/*  判定を純関数に切り出してあるのは、材料 (GUI 中か / 呼び手の ID / CPL /   */
+/*  ヘッダの宣言ビット) が全部この表にあり、ホストでそのまま試験できるため   */
+/*  (tools/tests/multiapp_impl_host.c ケース 20)。                           */
+/* ======================================================================== */
+int appslot_gfx_claim_check(int gui_mode, int caller, int cpl3, u32 hdr_flags)
+{
+    /* CUI 中 (con_sink 無効) は所有者を触らない。gshell は居らず、
+     * 全画面は従来どおり誰でも取れる (票 D1a「CUI 中は何でも通す」)。 */
+    if (!gui_mode) return 0;
+    /* WM 自身 (シェル帯) と、表に無い ID は素通し。復帰の gfx_init は
+     * ここを通る。 */
+    if (caller < APP_ID_MIN || caller > APP_ID_MAX) return 0;
+    /* CPL=0 の子 (--cpl0) は所有者を取らない。GUI からの起動は
+     * appslot_cpl0_admit が既に断っているので、ここへは来ない。 */
+    if (!cpl3) return 0;
+    /* 宣言 (mkos32x --gfx) が無ければ画面を渡さない (D1a)。黙って
+     * 画面を壊させるより、gfx_init を呼ばずに断る。 */
+    if ((hdr_flags & OS32X_FLAG_GFX) == 0) return OS32_ERR_INVAL;
+    return caller;
+}
+
+int appslot_gfx_claim(int gui_mode)
+{
+    int caller = res_owner_get();
+    AppSlot *a = appslot_get(caller);
+    int r = appslot_gfx_claim_check(gui_mode, caller,
+                                    a ? a->cpl3 : 0,
+                                    a ? a->hdr_flags : 0);
+    if (r < 0) {
+        gfx_init_reject_count++;
+        return r;
+    }
+    if (r > 0) g_gfx_owner = r;
+    return 0;
+}
+
+int appslot_gfx_owner(void) { return g_gfx_owner; }
+
+void appslot_gfx_owner_exit(int id)
+{
+    if (g_gfx_owner == id) g_gfx_owner = GFX_OWNER_WM;
+}
+
+/* ======================================================================== */
 /*  appslot_resume_mark_selftest — 「印の無い resume は拒否」の負例 (I5)     */
 /*                                                                          */
 /*  票 K7 の受入 I5 の半分。park 点が 2 つになったので、C6 の規則             */
@@ -498,5 +560,65 @@ u32 appslot_resume_mark_selftest(void)
     res_owner_set(saved_owner);
     ring3_resume_bad_frame_count = saved_badframe;
     if (ring3_switch_count != saved_switch) bad |= 1u << 5;
+    return bad;
+}
+
+/* ======================================================================== */
+/*  appslot_gfx_owner_selftest — 画面の所有者の遷移 (票 T8 D1 / D1a)         */
+/*                                                                          */
+/*  ブート時に踏むのは 2 つ:                                                 */
+/*    (0) 遷移: 宣言のある CPL=3 アプリの gfx_init で所有者がその ID へ移り、 */
+/*        回収 (appslot_gfx_owner_exit) で WM (1) へ戻る。CUI 中 (gui_mode   */
+/*        = 0) は 1 のまま動かない。                                         */
+/*    (1) 拒否: GUI 中に宣言の無い CPL=3 が呼んだら OS32_ERR_INVAL で、       */
+/*        所有者は動かず gfx_init_reject_count だけが 1 増える。              */
+/*                                                                          */
+/*  空きスロット (APP_ID_MAX) を一時的に借りる。借りた中身・cur・owner・      */
+/*  所有者・カウンタは丸ごと保存して戻す。                                   */
+/* ======================================================================== */
+u32 appslot_gfx_owner_selftest(void)
+{
+    u32 bad = 0;
+    int id = APP_ID_MAX;
+    AppSlot saved;
+    int saved_cur = g_cur;
+    int saved_owner = res_owner_get();
+    int saved_gfx = g_gfx_owner;
+    u32 saved_reject = gfx_init_reject_count;
+
+    saved = g_slot[id];
+    slot_zero(&g_slot[id]);
+    g_slot[id].state = APP_STATE_RUNNING;
+    g_slot[id].cpl3 = 1;
+    g_slot[id].gui = 1;
+    g_cur = id;
+    res_owner_set(id);
+    g_gfx_owner = GFX_OWNER_WM;
+
+    /* (0) 遷移: 宣言ありなら取り、回収で WM へ戻る。CUI 中は動かない。 */
+    g_slot[id].hdr_flags = OS32X_FLAG_GFX;
+    if (appslot_gfx_claim(0) != 0) bad |= 1u << 0;
+    if (g_gfx_owner != GFX_OWNER_WM) bad |= 1u << 0;   /* CUI は触らない */
+    if (appslot_gfx_claim(1) != 0) bad |= 1u << 0;
+    if (g_gfx_owner != id) bad |= 1u << 0;
+    appslot_gfx_owner_exit(GFX_OWNER_WM);              /* 他人の回収では戻らない */
+    if (g_gfx_owner != id) bad |= 1u << 0;
+    appslot_gfx_owner_exit(id);
+    if (g_gfx_owner != GFX_OWNER_WM) bad |= 1u << 0;
+
+    /* (1) 拒否: GUI 中の宣言なしは ERR_INVAL。所有者は動かず、数だけ増える。 */
+    g_slot[id].hdr_flags = 0;
+    if (appslot_gfx_claim(1) != OS32_ERR_INVAL) bad |= 1u << 1;
+    if (g_gfx_owner != GFX_OWNER_WM) bad |= 1u << 1;
+    if (gfx_init_reject_count != saved_reject + 1) bad |= 1u << 1;
+    if (appslot_gfx_claim(0) != 0) bad |= 1u << 1;     /* CUI 中は通す */
+    if (gfx_init_reject_count != saved_reject + 1) bad |= 1u << 1;
+
+    /* 後始末 */
+    g_slot[id] = saved;
+    g_cur = saved_cur;
+    res_owner_set(saved_owner);
+    g_gfx_owner = saved_gfx;
+    gfx_init_reject_count = saved_reject;
     return bad;
 }

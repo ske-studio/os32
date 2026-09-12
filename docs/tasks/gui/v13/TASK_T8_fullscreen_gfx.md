@@ -68,6 +68,15 @@
 - 票の候補のうち `mgx_test` `asset_demo` は gfx を呼ばないので立てず、逆に票が GUI 側に挙げた `gdi_test` は `libos32gfx_init` を直接呼ぶ単独 GFX なので立てた (`programs.mk` の注記どおり)。`demo_tile` / `tile_bench` は `tilemap_init` 経由。
 - `tools/check_manifests.py` に §2b を追加: 4 列目の書式と「gfx_init 系を呼ぶのに宣言が無い」を検出。除外リストは持たず、`userland/lib` の呼び出しグラフを不動点まで辿る (コメントは除去)。宣言だけあって呼ばないものは `[--]` の警告。
 - `gshell` にも宣言を立てた: シェル帯の WM 自身が復帰時に `gfx_init` を呼ぶので、K が「宣言の無い CPL=3」で弾く実装にした場合に GUI 復帰が死ぬのを避ける。`apps/` `game/` は submodule 未チェックアウトのため未対応 (各リポジトリ側で `--gfx`)。
+## 4a. 実装メモ (K、2026-09-12)
+
+- 所有者の表は `exec/appslot.c` (`g_gfx_owner` / `gfx_init_reject_count`)。判定材料 (走っている ID /
+  `cpl3` / OS32X `hdr_flags`) が全部 AppSlot にあり、純関数 `appslot_gfx_claim_check()` としてホストで試験できるため。
+- KAPI の門は `sdk/kapi.json` の `"target"` で `gfx_init` / `gfx_init_200` → `gfx_kapi_init(_200)`
+  (`gfx/gfx_core.c`)。戻り型は `void` のまま、生成物は手で触っていない ([ABI1])。**KAPI v48 = `gfx_screen_owner` (スロット 192 / offset 0x308)**。
+- D1 の cpl0 拒否は `appslot_cpl0_admit(is_shell, gui)` に `gui` を足して広げた (K5b A1)。CUI の `exec_run` は無変更。
+- ホスト試験は `tools/tests/multiapp_impl_host.c` ケース 20 (33 検査、RED→GREEN 5 通り) → `tools/tests/t8_tdd.md`。
+  kselftest に 2 項 (`test_gfx_owner`)。**`make`・配備・実機は未実施** ([V4]) — 受入 F1〜F7 は PM / テスターへ。
 
 ## 5. 範囲外
 

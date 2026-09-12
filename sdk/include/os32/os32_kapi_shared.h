@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      47   /* GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
+#define KAPI_VERSION      48   /* GUI v1.3 T8: gfx_screen_owner (画面の所有者 = gfx_init を呼んだ CPL=3 アプリ。回収で WM へ戻る)。v47 = GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
