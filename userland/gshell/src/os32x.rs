@@ -5,8 +5,9 @@
 //! | 宣言 | 入口の扱い |
 //! |---|---|
 //! | `FORCE_CPL0` (`--cpl0`) | **起動しない** (`cui only: <名>`)。VRAM を直接触る v86 / VDM 系 |
+//! | `CUI_ONLY` (`--cui-only`) | **起動しない** (同上)。CPL=3 のまま V86 へ入る `v86.bin` はこちら |
 //! | `FLAG_GFX` (`--gfx`) | `exec_start` の前に全画面モードの印を立てる (所有者の問い合わせと二重) |
-//! | どちらも無い | いつもどおり |
+//! | どれも無い | いつもどおり |
 //!
 //! カーネルの拒否 (`appslot_cpl0_admit` / `gfx_kapi_init`、票 T8 D1) が最後の砦で、
 //! ここはユーザーに理由を見せるための前段。判定そのものは [`classify`] という
@@ -23,6 +24,14 @@ pub const HDR_SIZE: usize = 40;
 pub const FLAG_GFX: u32 = 0x0001;
 /// `OS32X_FLAG_FORCE_CPL0` — CPL=0 強制 (v86 / VDM)。GUI からは起動しない。
 pub const FLAG_FORCE_CPL0: u32 = 0x0004;
+/// `OS32X_FLAG_CUI_ONLY` — CUI 専用の宣言。GUI からは起動しない。
+///
+/// `v86.bin` は `--cpl0` ではなく **flags 0x0 の CPL=3 プログラム**で、V86 へは
+/// KAPI 越しに入る (受入 F5 不合格の原因)。`FORCE_CPL0` だけを見る判定では
+/// 素通りするので、この宣言を別に持つ。値はリテラル — 票 T8-2 の K/B が
+/// `OS32X_FLAG_CUI_ONLY 0x0010` を `sdk/include/os32/os32_kapi_shared.h` へ
+/// 足したら、そちらが正典になる。
+pub const FLAG_CUI_ONLY: u32 = 0x0010;
 
 /// ヘッダ内の位置 (`OS32Header`)。
 const OFF_MAGIC: usize = 0x00;
@@ -54,7 +63,7 @@ fn le32(b: &[u8], off: usize) -> u32 {
 /// 倒す。ここで弾いても意味が無い (カーネルが `EXEC_ERR_INVALID` を返す) 上に、
 /// 立てない側へ倒せば既存の起動経路は 1 つも変わらない。
 ///
-/// `FORCE_CPL0` は `FLAG_GFX` より強い — v86 の一部は両方立てている。
+/// `FORCE_CPL0` / `CUI_ONLY` は `FLAG_GFX` より強い — v86 の一部は両方立てている。
 pub fn classify(hdr: &[u8]) -> Kind {
     if hdr.len() < HDR_SIZE {
         return Kind::Plain;
@@ -63,7 +72,7 @@ pub fn classify(hdr: &[u8]) -> Kind {
         return Kind::Plain;
     }
     let flags = le32(hdr, OFF_FLAGS);
-    if flags & FLAG_FORCE_CPL0 != 0 {
+    if flags & (FLAG_FORCE_CPL0 | FLAG_CUI_ONLY) != 0 {
         Kind::CuiOnly
     } else if flags & FLAG_GFX != 0 {
         Kind::FullScreen
@@ -136,6 +145,20 @@ mod tests {
         assert_eq!(classify(&hdr(FLAG_FORCE_CPL0)), Kind::CuiOnly);
         /* v86 は --gfx と --cpl0 が両方立ちうる。CPL=0 が勝つ。 */
         assert_eq!(classify(&hdr(FLAG_GFX | FLAG_FORCE_CPL0)), Kind::CuiOnly);
+        /* 票 T8-2: v86.bin は CPL=3 (flags に FORCE_CPL0 が無い) なので
+         * CUI_ONLY 単独でも起動しない。 */
+        assert_eq!(
+            classify(&hdr(FLAG_CUI_ONLY)),
+            Kind::CuiOnly,
+            "CUI_ONLY だけでも cui only"
+        );
+        assert_eq!(classify(&hdr(FLAG_CUI_ONLY | 0x0002)), Kind::CuiOnly);
+        /* CUI_ONLY は FLAG_GFX より強い (全画面モードへ入れない)。 */
+        assert_eq!(
+            classify(&hdr(FLAG_GFX | FLAG_CUI_ONLY)),
+            Kind::CuiOnly,
+            "CUI_ONLY が GFX に勝つ"
+        );
         /* 読めなかった / OS32X でない / 短い → 立てない側へ倒す。 */
         assert_eq!(classify(&[]), Kind::Plain);
         assert_eq!(classify(&hdr(FLAG_FORCE_CPL0)[..39]), Kind::Plain);

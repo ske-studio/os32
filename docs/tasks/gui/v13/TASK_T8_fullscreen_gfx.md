@@ -91,6 +91,12 @@
 - ホスト試験は gshell 4 本 + `os32x` 2 本 (48 pass、実装を外すと RED を確認)、端末 1 本 (49 pass)。`app.conf` の gshell を KAPI 48 に。
   **`make`・配備・実機は未実施** ([V4]) — 受入 F1〜F7 は PM / テスターへ。
 
+## 4a. 実装メモ (T8-2 W/A、2026-09-12)
+
+- `classify` を `FORCE_CPL0 | CUI_ONLY` の OR に変えた (gshell `src/os32x.rs`、端末 `t5a_display/src/prompt.rs`)。表示は従来どおり `cui only: <名>`。
+- `OS32X_FLAG_CUI_ONLY` (0x0010) は K/B が `os32_kapi_shared.h` へ足すまで各 crate にリテラルで持つ (コメントで T8-2 を指す)。
+- ホスト試験に「`CUI_ONLY` 単独」「`CUI_ONLY | GFX`」を追加し RED → GREEN を確認 (gshell 48 pass / 端末 49 pass)。**`make`・配備・実機は未実施** ([V4])。
+
 ## 5. 範囲外
 
 - shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。

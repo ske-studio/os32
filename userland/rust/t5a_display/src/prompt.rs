@@ -473,6 +473,13 @@ pub const OS32X_HDR_SIZE: usize = 40;
 pub const OS32X_FLAG_GFX: u32 = 0x0001;
 /// `OS32X_FLAG_FORCE_CPL0` — CPL=0 強制。GUI からは起動しない。
 pub const OS32X_FLAG_FORCE_CPL0: u32 = 0x0004;
+/// `OS32X_FLAG_CUI_ONLY` — CUI 専用の宣言。GUI からは起動しない。
+///
+/// `v86.bin` は `--cpl0` ではなく **flags 0x0 の CPL=3 プログラム**で、V86 へは
+/// KAPI 越しに入る (受入 F5 不合格の原因)。値はリテラル — 票 T8-2 の K/B が
+/// `OS32X_FLAG_CUI_ONLY 0x0010` を `sdk/include/os32/os32_kapi_shared.h` へ
+/// 足したら、そちらが正典になる。
+pub const OS32X_FLAG_CUI_ONLY: u32 = 0x0010;
 
 /// 起動してよいか (票 T8 D4 / D7)。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -496,7 +503,7 @@ fn le32(b: &[u8], off: usize) -> u32 {
 ///
 /// 読めなかった / OS32X でない / 短い ものは [`Kind::Plain`] に倒す —
 /// 立てない側へ倒せば既存の起動経路は 1 つも変わらない (`session_launch` の
-/// 失敗として従来どおり出る)。`FORCE_CPL0` は `FLAG_GFX` より強い。
+/// 失敗として従来どおり出る)。`FORCE_CPL0` / `CUI_ONLY` は `FLAG_GFX` より強い。
 pub fn classify(hdr: &[u8]) -> Kind {
     if hdr.len() < OS32X_HDR_SIZE {
         return Kind::Plain;
@@ -505,7 +512,7 @@ pub fn classify(hdr: &[u8]) -> Kind {
         return Kind::Plain;
     }
     let flags = le32(hdr, 12);
-    if flags & OS32X_FLAG_FORCE_CPL0 != 0 {
+    if flags & (OS32X_FLAG_FORCE_CPL0 | OS32X_FLAG_CUI_ONLY) != 0 {
         Kind::CuiOnly
     } else if flags & OS32X_FLAG_GFX != 0 {
         Kind::FullScreen
@@ -539,6 +546,23 @@ mod tests {
         assert_eq!(
             classify(&os32x_header(OS32X_FLAG_GFX | OS32X_FLAG_FORCE_CPL0)),
             Kind::CuiOnly
+        );
+        /* 票 T8-2: v86.bin は CPL=3 (FORCE_CPL0 が無い) なので CUI_ONLY
+         * 単独でも起動しない。 */
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_CUI_ONLY)),
+            Kind::CuiOnly,
+            "CUI_ONLY だけでも cui only"
+        );
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_CUI_ONLY | 0x0002 /* RING3 */)),
+            Kind::CuiOnly
+        );
+        /* CUI_ONLY は FLAG_GFX より強い。 */
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_GFX | OS32X_FLAG_CUI_ONLY)),
+            Kind::CuiOnly,
+            "CUI_ONLY が GFX に勝つ"
         );
         /* 全画面 GFX は起動する (画面は gshell が譲る)。 */
         assert_eq!(classify(&os32x_header(OS32X_FLAG_GFX)), Kind::FullScreen);
