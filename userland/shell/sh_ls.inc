@@ -20,7 +20,9 @@
  * FL_MAX_ENTRIES と同じ「一覧は上限つき」の作法。溢れた分は数だけ数えて
  * 呼び手が「(... N more)」を出す。 */
 #define SH_LS_MAX       128
-#define SH_LS_NAME_MAX  128
+/* R3: DirEntry_Ext.name と同じ幅。128B だった頃は 127B で無言に切っていて、
+ * 一覧にも glob にも**存在しない短縮名**が出た。同じ幅なら切れない。 */
+#define SH_LS_NAME_MAX  OS32_MAX_PATH
 
 typedef struct {
     char name[SH_LS_NAME_MAX];
@@ -30,12 +32,23 @@ typedef struct {
 
 static ShLsEntry sh_ls_buf[SH_LS_MAX];
 static int sh_ls_count;      /* 写し取った数 (<= SH_LS_MAX) */
-static int sh_ls_total;      /* 実際に来た数 (溢れた分も数える) */
+static int sh_ls_total;      /* ふるいを通った数 (溢れた分も数える) */
+
+/* R4: 写す前のふるい。**純関数だけ**を渡すこと (コールバックの中なので
+ * KAPI は呼べない)。glob は「一致したものだけ」を写したい — 列挙順の先頭
+ * 128 件で切ると、不一致が先に並ぶディレクトリで一致を取り逃がす。 */
+static int (*sh_ls_filter)(const char *name);
 
 void sh_ls_reset(void)
 {
     sh_ls_count = 0;
     sh_ls_total = 0;
+    sh_ls_filter = (int (*)(const char *))0;
+}
+
+void sh_ls_set_filter(int (*f)(const char *name))
+{
+    sh_ls_filter = f;
 }
 
 /* sys_ls のコールバック。**KAPI を 1 つも呼ばない**のがこの関数の仕事。 */
@@ -43,6 +56,8 @@ void sh_ls_collect_cb(const DirEntry_Ext *entry, void *ctx)
 {
     int i;
     (void)ctx;
+
+    if (sh_ls_filter && !sh_ls_filter(entry->name)) return;
 
     sh_ls_total++;
     if (sh_ls_count >= SH_LS_MAX) return;

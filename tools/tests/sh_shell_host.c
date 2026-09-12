@@ -43,6 +43,30 @@ unsigned long strlen(const char *s)
     return n;
 }
 
+void *memcpy(void *d, const void *s, unsigned long n)
+{
+    unsigned long i;
+    for (i = 0; i < n; i++) ((char *)d)[i] = ((const char *)s)[i];
+    return d;
+}
+
+char *strncpy(char *d, const char *s, unsigned long n)
+{
+    unsigned long i = 0;
+    while (i < n && s[i]) { d[i] = s[i]; i++; }
+    while (i < n) d[i++] = '\0';
+    return d;
+}
+
+char *strncat(char *d, const char *s, unsigned long n)
+{
+    unsigned long i = 0, j = 0;
+    while (d[i]) i++;
+    while (j < n && s[j]) { d[i + j] = s[j]; j++; }
+    d[i + j] = '\0';
+    return d;
+}
+
 /* ---- 最小の報告系 (libc 無し) ------------------------------------------ */
 
 static void die(int code)
@@ -112,6 +136,34 @@ static int out_is(const char *want)
     return 0;
 }
 
+/* cmd_file.c が使う printf。書式は %s / %d / %u だけ扱えれば足りる。 */
+int printf(const char *fmt, ...)
+{
+    __builtin_va_list ap;
+    const char *p = fmt;
+
+    __builtin_va_start(ap, fmt);
+    while (*p) {
+        if (p[0] == '%' && (p[1] == 's' || p[1] == 'd' || p[1] == 'u')) {
+            if (p[1] == 's') out_str(__builtin_va_arg(ap, const char *));
+            else { (void)__builtin_va_arg(ap, int); out_byte('#'); }
+            p += 2;
+        } else {
+            out_byte(*p++);
+        }
+    }
+    __builtin_va_end(ap);
+    return 0;
+}
+
+/* 否定版 (期待どおり一致しないだけなので診断は出さない) */
+static int out_is_not(const char *unwanted)
+{
+    char shown[OUT_CAP];
+    out_escaped(shown, OUT_CAP);
+    return strcmp(shown, unwanted) != 0;
+}
+
 /* ---- ごく小さなヒープと疑似ファイル ------------------------------------ */
 
 #define POOL_SIZE  (128 * 1024)
@@ -124,6 +176,9 @@ static unsigned long g_pool_used;
 static struct { const char *path; const char *body; } g_files[FILE_MAX];
 static int g_file_count;
 static int g_open_fd;          /* いま開いている疑似ファイルの添字 + 1 */
+static int g_read_pos;         /* いま開いているファイルの読み位置 */
+static int g_read_fail;        /* 1 = sys_read が失敗を返す (R6) */
+static int g_write_fail;       /* 1 = sys_write が短く返す (R6) */
 static int g_open_leak;        /* close されずに次の open が来たら 1 */
 
 static void files_reset(void)
@@ -131,6 +186,9 @@ static void files_reset(void)
     g_file_count = 0;
     g_open_fd = 0;
     g_open_leak = 0;
+    g_read_pos = 0;
+    g_read_fail = 0;
+    g_write_fail = 0;
     g_pool_used = 0;
 }
 
@@ -204,13 +262,27 @@ static int __cdecl h_sys_open(const char *path, int flags)
     int i;
     (void)flags;
     if (g_open_fd) g_open_leak = 1;
+    g_read_pos = 0;
     for (i = 0; i < g_file_count; i++) {
         if (strcmp(g_files[i].path, path) == 0) {
             g_open_fd = i + 1;
             return i + 1;
         }
     }
+    /* 未知のパスは「新規作成できた」ことにする (cp / mv の宛先) */
+    if (flags != KAPI_O_RDONLY) {
+        file_add(path, "");
+        g_open_fd = g_file_count;
+        return g_file_count;
+    }
     return -1;
+}
+
+static int __cdecl h_sys_write(int fd, const void *buf, u32 size)
+{
+    (void)fd; (void)buf;
+    if (g_write_fail) return 0;      /* 短く書けた = 失敗 */
+    return (int)size;
 }
 
 static int __cdecl h_sys_read(int fd, void *buf, u32 size)
@@ -218,13 +290,30 @@ static int __cdecl h_sys_read(int fd, void *buf, u32 size)
     const char *src;
     char *dst = (char *)buf;
     int n = 0;
+    if (g_read_fail) return -1;
     if (fd <= 0 || fd > g_file_count) return -1;
-    src = g_files[fd - 1].body;
+    src = g_files[fd - 1].body + g_read_pos;
     while (src[n] && (u32)n < size) { dst[n] = src[n]; n++; }
+    g_read_pos += n;       /* 次の read は EOF (0) — コピーのループが終わる */
     return n;
 }
 
 static void __cdecl h_sys_close(int fd) { (void)fd; g_open_fd = 0; }
+
+static int __cdecl h_sys_stat(const char *path, OS32_Stat *st)
+{
+    int i;
+    if (!st) return -1;
+    for (i = 0; i < (int)sizeof(OS32_Stat); i++) ((u8 *)st)[i] = 0;
+    for (i = 0; i < g_file_count; i++) {
+        if (strcmp(g_files[i].path, path) == 0) {
+            st->st_size = (u32)strlen(g_files[i].body);
+            return 0;
+        }
+    }
+    return OS32_ERR_NOTFOUND;
+}
+static int __cdecl h_sys_ls(const char *path, void *cb, void *ctx);
 static int __cdecl h_sys_isatty(int fd) { g_kapi_calls++; (void)fd; return 1; }
 
 /* sh_launch がパイプ判定を抜けた先で NULL を踏まないための最小の受け皿。
@@ -273,6 +362,9 @@ static void build_api(void)
     g_fake.mem_free = h_mem_free;
     g_fake.sys_open = h_sys_open;
     g_fake.sys_read = h_sys_read;
+    g_fake.sys_write = h_sys_write;
+    g_fake.sys_ls = h_sys_ls;
+    g_fake.sys_stat = h_sys_stat;
     g_fake.sys_close = h_sys_close;
     g_fake.sys_isatty = h_sys_isatty;
     g_fake.launch_req = h_launch_req;
@@ -297,14 +389,18 @@ static void show_prompt(void) { out_str("sh> "); }
 #include "../../userland/shell/sh_pipe.inc"
 #include "../../userland/shell/sh_ls.inc"
 #include "../../userland/shell/sh_launch.inc"
+#include "../../userland/shell/sh_args.inc"
 
 /* ---- 実物のスクリプトエンジン ------------------------------------------ */
 
 #include "../../userland/shell/cmd_script.c"
+#include "../../userland/shell/cmd_fs_shared.c"
+#include "../../userland/shell/cmd_file.c"
 
 /* ---- シェルの他モジュールの代わり -------------------------------------- */
 
 void shell_register_cmds(const ShellCmd *cmds) { (void)cmds; }
+void shell_print_help(const char *cmd_name) { (void)cmd_name; }
 void env_set(const char *name, const char *value) { (void)name; (void)value; }
 
 int env_expand(const char *src, char *dst, int max)
@@ -660,26 +756,219 @@ static void case_ask_backspace(void)
 }
 
 /* ========================================================================
- *  9. source 中の exit (往復 1 の blocker 2 / D2(d))
+ *  9. リダイレクトを張ったまま外部は起こさない (往復 7 の R2)
+ *
+ *  内蔵 `exec` / `if` / `time` / 外部行を含む `source` は、execute_single の
+ *  事前判定を通った**後**にリダイレクトを張ってから sh_launch へ来る。
+ * ======================================================================== */
+static void case_redirect_blocks_launch(void)
+{
+    int rc;
+
+    report("9 リダイレクト中は sh_launch が断る (exec cmd > file)\n");
+    sh_redirect_clear();
+    out_reset();
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(rc == EXEC_ERR_NOT_FOUND || rc == EXEC_ERR_GENERAL,
+                                      "9a 印が下りていれば素通し");
+
+    sh_redirect_mark();
+    out_reset();
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(rc < 0,                     "9b 印が立っていれば負を返す");
+    check(out_is("sh: redirect to external command is not supported\\n"),
+                                      "9c 理由を出す");
+    sh_redirect_clear();
+    out_reset();
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(out_is_not("sh: redirect to external command is not supported\\n"),
+                                      "9d reset_all_redirects で印が下りる");
+}
+
+/* ========================================================================
+ *  10. 写しの名前は 255B まで切れない (往復 7 の R3)
+ * ======================================================================== */
+static void case_ls_long_name(void)
+{
+    DirEntry_Ext e;
+    DirEntry_Ext got;
+    int i, ok;
+
+    report("10 写しは 255B の名前を切らない\n");
+    for (i = 0; i < OS32_MAX_PATH - 1; i++) e.name[i] = 'n';
+    e.name[OS32_MAX_PATH - 1] = '\0';
+    e.size = 7;
+    e.type = OS32_FILE_TYPE_FILE;
+
+    sh_ls_reset();
+    sh_ls_collect_cb(&e, (void *)0);
+    got.name[0] = 'x';
+    sh_ls_fill(0, &got);
+
+    ok = 1;
+    for (i = 0; i < OS32_MAX_PATH - 1; i++) if (got.name[i] != 'n') ok = 0;
+    if (got.name[OS32_MAX_PATH - 1] != '\0') ok = 0;
+    check(ok,                          "10a 255 バイトそのまま写る");
+    check((int)strlen(got.name) == OS32_MAX_PATH - 1,
+                                       "10b 長さも変わらない");
+    sh_ls_reset();
+}
+
+/* ========================================================================
+ *  11. glob の上限は「一致した数」に掛かる (往復 7 の R4)
+ *
+ *  不一致が先に並ぶディレクトリで列挙順の先頭 N 件を切ると、末尾の一致を
+ *  取り逃がして `cat /tmp/d/target*` が未展開のまま渡ってしまう。
+ * ======================================================================== */
+static int g_dir_n;                    /* 偽 sys_ls が返すエントリ数 */
+static int g_dir_match_tail;           /* 末尾の何件を "target*" にするか */
+
+static int __cdecl h_sys_ls(const char *path, void *cb, void *ctx)
+{
+    DirEntry_Ext e;
+    DirCallback f = (DirCallback)cb;
+    int i, k;
+
+    (void)path;
+    for (i = 0; i < g_dir_n; i++) {
+        const char *base = (i >= g_dir_n - g_dir_match_tail) ? "target" : "other";
+        k = 0;
+        while (base[k]) { e.name[k] = base[k]; k++; }
+        e.name[k++] = (char)('0' + (i % 10));
+        e.name[k++] = (char)('0' + ((i / 10) % 10));
+        e.name[k] = '\0';
+        e.size = (u32)i;
+        e.type = OS32_FILE_TYPE_FILE;
+        f(&e, ctx);
+    }
+    return 0;
+}
+
+static void case_glob_matches_only(void)
+{
+    static char line[64];
+    static char *argv[MAX_ARGS];
+    static char *alloc[MAX_ARGS];
+    int argc = 0, nalloc = 0, i;
+
+    report("11 glob の上限は一致した数に掛かる\n");
+
+    /* 先頭に不一致 200 件、末尾に一致 1 件 */
+    g_dir_n = 201;
+    g_dir_match_tail = 1;
+    sh_glob_failed = 0;
+    out_reset();
+    { const char *src = "cat target*"; i = 0;
+      while (src[i]) { line[i] = src[i]; i++; } line[i] = '\0'; }
+    parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+
+    check(sh_glob_failed == 0,        "11a 諦めていない");
+    check(argc == 2,                  "11b cat + 一致 1 件に展開される");
+    {
+        int star = 0;
+        if (argc == 2) { for (i = 0; argv[1][i]; i++) if (argv[1][i] == '*') star = 1; }
+        check(argc == 2 && !star && argv[1][0] == 't',
+              "11c 未展開の target* ではなく実体名に化けている");
+    }
+    for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+
+    /* 一致が写し取りの上限を超えたら行ごと捨てる */
+    g_dir_n = SH_LS_MAX + 5;
+    g_dir_match_tail = SH_LS_MAX + 5;
+    sh_glob_failed = 0;
+    argc = 0; nalloc = 0;
+    out_reset();
+    { const char *src = "cat target*"; i = 0;
+      while (src[i]) { line[i] = src[i]; i++; } line[i] = '\0'; }
+    parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+
+    check(sh_glob_failed == 1,        "11d 多すぎたら印を立てる");
+    check(out_is("sh: glob: too many matches\\n"), "11e 理由を出す");
+    for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+    sh_glob_failed = 0;
+    g_dir_n = 0;
+    g_dir_match_tail = 0;
+}
+
+/* ========================================================================
+ *  12. argv[] の 1 つ手前で止める (往復 7 の R7、常駐にも効く)
+ * ======================================================================== */
+static void case_argv_bound(void)
+{
+    static char line[MAX_ARGS * 4 + 16];
+    static char *argv[MAX_ARGS];
+    static char guard[16];
+    int argc = 0, nalloc = 0;
+    int i, n = 0, ok;
+    static char *alloc[MAX_ARGS];
+
+    report("12 argv[] は max_args - 1 個までしか詰めない\n");
+
+    for (i = 0; i < (int)sizeof(guard); i++) guard[i] = (char)0x5A;
+    for (i = 0; i < MAX_ARGS; i++) argv[i] = (char *)0xDEADBEEF;
+
+    { const char *c = "echo"; while (*c) line[n++] = *c++; }
+    for (i = 0; i < MAX_ARGS + 8; i++) { line[n++] = ' '; line[n++] = 'a'; }
+    line[n] = '\0';
+
+    parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+
+    check(argc <= MAX_ARGS - 1,       "12a 格納は max_args - 1 個まで");
+    check(argv[MAX_ARGS - 1] == (char *)0xDEADBEEF,
+                                      "12b 最後の枠は NUL 終端用に空いている");
+    ok = 1;
+    for (i = 0; i < (int)sizeof(guard); i++) if (guard[i] != (char)0x5A) ok = 0;
+    check(ok,                         "12c 隣の static を壊していない");
+    for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+}
+
+/* ========================================================================
+ *  13. コピーの失敗は負を返す (往復 7 の R6、常駐にも効く)
+ * ======================================================================== */
+static void case_copy_failure(void)
+{
+    int rc;
+
+    report("13 read / write が失敗したら do_copy_file は負を返す\n");
+    files_reset();
+    file_add("/src.txt", "hello");
+    out_reset();
+
+    g_write_fail = 1;
+    rc = do_copy_file("mv", "/src.txt", "/dst.txt");
+    check(rc < 0,                     "13a write 失敗で負 (mv は原本を消さない)");
+    g_write_fail = 0;
+
+    g_read_fail = 1;
+    rc = do_copy_file("cp", "/src.txt", "/dst.txt");
+    check(rc < 0,                     "13b read 失敗でも負");
+    g_read_fail = 0;
+
+    rc = do_copy_file("cp", "/src.txt", "/dst.txt");
+    check(rc == 0,                    "13c 成功なら 0");
+}
+
+/* ========================================================================
+ *  14. source 中の exit (往復 1 の blocker 2 / D2(d))
  * ======================================================================== */
 static void case_exit_stops_rest(void)
 {
-    report("9 source: exit の次の行は走らない\n");
+    report("14 source: exit の次の行は走らない\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
     out_reset();
     file_add("/a.sh", "echo 1\nexit\necho 2\n");
 
-    check(script_source_file("/a.sh") == 0, "9a source は 0 で戻る");
-    check(trace_is("echo 1|exit"),          "9b exit の後は実行しない");
-    check(sh_exit_flag == 1,                "9c 印は立ったまま (shell_run の入口が見る)");
-    check(g_open_leak == 0,                 "9d FD を開いたままにしない");
+    check(script_source_file("/a.sh") == 0, "14a source は 0 で戻る");
+    check(trace_is("echo 1|exit"),          "14b exit の後は実行しない");
+    check(sh_exit_flag == 1,                "14c 印は立ったまま (shell_run の入口が見る)");
+    check(g_open_leak == 0,                 "14d FD を開いたままにしない");
 }
 
 static void case_exit_breaks_goto_loop(void)
 {
-    report("10 source: goto の無限ループでも exit で抜ける\n");
+    report("15 source: goto の無限ループでも exit で抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -687,13 +976,13 @@ static void case_exit_breaks_goto_loop(void)
     /* exit が無ければ :loop <- goto loop で永久に回る */
     file_add("/b.sh", "echo a\nexit\n:loop\ngoto loop\n");
 
-    check(script_source_file("/b.sh") == 0, "10a source は戻ってくる");
-    check(trace_is("echo a|exit"),          "10b ラベルも goto も走らない");
+    check(script_source_file("/b.sh") == 0, "15a source は戻ってくる");
+    check(trace_is("echo a|exit"),          "15b ラベルも goto も走らない");
 }
 
 static void case_exit_unwinds_nested(void)
 {
-    report("11 source: ネストした source の外側も抜ける\n");
+    report("16 source: ネストした source の外側も抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -701,9 +990,9 @@ static void case_exit_unwinds_nested(void)
     file_add("/outer.sh", "source /inner.sh\necho outer2\n");
     file_add("/inner.sh", "exit\necho inner2\n");
 
-    check(script_source_file("/outer.sh") == 0, "11a 外側の source も 0 で戻る");
-    check(trace_is("source /inner.sh|exit"),    "11b 内側も外側も後続を止める");
-    check(g_open_leak == 0,                     "11c どの段でも FD を残さない");
+    check(script_source_file("/outer.sh") == 0, "16a 外側の source も 0 で戻る");
+    check(trace_is("source /inner.sh|exit"),    "16b 内側も外側も後続を止める");
+    check(g_open_leak == 0,                     "16c どの段でも FD を残さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -719,6 +1008,11 @@ void _start(void)
     case_ls_callback_no_kapi();
     case_pipe_blocks_launch();
     case_ask_backspace();
+    case_redirect_blocks_launch();
+    case_ls_long_name();
+    case_glob_matches_only();
+    case_argv_bound();
+    case_copy_failure();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();
     case_exit_unwinds_nested();

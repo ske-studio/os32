@@ -199,6 +199,11 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 ### 13b. 実装レビュー (往復 2/3) の修正 (S、2026-09-13)
 
 - blocker 1: `exit` の印を `shell_run` の行ループの**入口** (最初の `show_prompt` と `sh_getkey` の前) で見るようにし、ループ末尾の判定は外した。これで起動時の `/etc/profile` / `$HOME/.profile` 内の `exit` でも入力待ちに入らずそのまま終わる。
+- (往復 7) R2: 内蔵 `exec` / `if` / `time` / 外部行を含む `source` は事前判定を通った**後**にリダイレクトを張ってから外部へ行ける。`apply_redirects` で立て `reset_all_redirects` で下ろす印 `sh_redirect_active` を `sh_launch` の入口で見て断る (B4 のパイプ深度と同じ作法)。事前判定は残した。
+- (往復 7) R3: `sh_ls.inc` の写しの名前幅を `OS32_MAX_PATH` (256B) に。128B では 127B で無言に切れて、一覧にも glob にも**存在しない短縮名**が出ていた。同じ幅なので切断そのものが起きない (UTF-8 の境界問題も消える)。`.bss` は 128 件 × 264B ≈ 33KB — 件数は据え置き (`ls` の一覧としてこの上限は `TAB_MAX_MATCHES` / `FL_MAX_ENTRIES` と同じ作法)。
+- (往復 7) R4: 写し取りに**純関数のふるい** (`sh_ls_set_filter`) を足し、glob はコールバック内で `wildcard_match` を通ったものだけを写す。列挙順の先頭 N 件で切ると不一致が先に並ぶディレクトリで一致を取り逃がした。一致が上限を超えたら `sh: glob: too many matches` を出して**行ごと捨てる** (一部だけ展開して実行しない)。`ls` 側は件数通知のまま。
+- (往復 7) R5: `losetup` と `dd loN` を `sh: cui only` の一覧に追加。ループ枠 (`drivers/loop_dev.c` の `loop_slots`) は sh が退場しても残り、backing FD だけ回収されて FD 番号の再利用で別ファイルを向く。カーネル側の本修正は別票。
+- (往復 7) **R6 / R7 は常駐にも効くので別コミット (S7 の例外)**。R7: `argv[]` への格納を `max_args - 1` までに (`apply_redirects` が最後に `argv[argc]` へ NUL を置くので 1 つ溢れて隣の static を壊していた)。R6: `do_copy_file` が read / write の失敗で**負**を返す (0 を返していたため別 FS の `mv` が `sys_unlink(src)` して原本を失った)。
 - (往復 6) B2: CPL=3 では `sys_ls` のコールバックから KAPI (int 0x80) を呼ぶと落ちる (実機で `find /etc -name filetypes` が crash、`du /etc` は正常)。`sh_ls.inc` の写し取りコールバック (KAPI を 1 つも呼ばない、上限 128 件・溢れは `(... N more)`) を挟み、`sys_ls` が戻ってから内蔵 `ls` の `vfs_ls_cb` と glob の `glob_cb` へ流す。常駐はマクロで従来どおり直接コールバック。
 - (往復 6) B3: リダイレクト表は全アプリ共有で read/write/reset が owner を見ないので、外部コマンドに掛けると親のファイルへ入り親の FD を閉じる。`execute_single` が**リダイレクトを張る前**に `sh_has_redirect()` && `!sh_name_is_builtin()` を見て `sh: redirect to external command is not supported` で行を捨てる。
 - (往復 6) B4: 先頭語だけの事前判定は `exec /bin/sh.bin | echo tail` を通すので、**最終起動口** `sh_launch` の入口で入れ子カウンタ `sh_pipeline_depth` を見て断る (段ループが `sh_pipeline_enter/leave` で増減)。事前判定は残した。

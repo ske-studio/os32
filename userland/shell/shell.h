@@ -102,12 +102,20 @@ int sh_launch(const char *cmdline);
  * 最終起動口で確かめれば経路を問わず捕まえられる)。 */
 void sh_pipeline_enter(void);
 void sh_pipeline_leave(void);
+/* R2: sh がリダイレクトを張っている間だけ立てる印。apply_redirects で立て、
+ * reset_all_redirects で下ろす。sh_launch の入口で見て外部起動を断る —
+ * 内蔵の `exec` / `if` / `time` / `source` はリダイレクトを張った**後**に
+ * 外部へ行けてしまい、事前判定 (execute_single) をすり抜けるため。 */
+void sh_redirect_mark(void);
+void sh_redirect_clear(void);
 /* exit コマンド (D2(d)) が立てる。shell_run() の外側ループが見て抜ける。 */
 extern int sh_exit_flag;
 #else
 #define sh_launch(cmdline)  (g_api->exec_run(cmdline))
-#define sh_pipeline_enter() ((void)0)
-#define sh_pipeline_leave() ((void)0)
+#define sh_pipeline_enter()  ((void)0)
+#define sh_pipeline_leave()  ((void)0)
+#define sh_redirect_mark()   ((void)0)
+#define sh_redirect_clear()  ((void)0)
 #endif
 
 /* ------------------------------------------------------------------------ */
@@ -119,6 +127,9 @@ extern int sh_exit_flag;
 /* ------------------------------------------------------------------------ */
 #ifdef SHELL_AS_APP
 void sh_ls_reset(void);
+void sh_ls_set_filter(int (*f)(const char *name));
+/* R4: 一致が多すぎて glob を諦めた行の印 (execute_single が見て捨てる) */
+extern int sh_glob_failed;
 void sh_ls_collect_cb(const DirEntry_Ext *entry, void *ctx);
 int  sh_ls_count_get(void);
 int  sh_ls_dropped(void);

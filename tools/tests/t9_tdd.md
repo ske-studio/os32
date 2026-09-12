@@ -503,6 +503,39 @@ RED (依存なし): make -n sh の `-c userland/shell/ui.c` 0 行
 GREEN (依存あり): 1 行
 ```
 
+### 往復 7 の追加 (2026-09-13、R2 / R3 / R4 / R6 / R7)
+
+`main.c` の引数分解と glob を `sh_args.inc` へ切り出し (中身は 1 行も変えて
+いないので常駐の `.o` は不変)、`cmd_fs_shared.c` / `cmd_file.c` もハーネスへ
+取り込んだ。`<stdio.h>` は python 側が置く薄いシム (`printf` だけ)。
+直す前の形へ戻した RED:
+
+```
+       got "" want "sh: redirect to external command is not supported\n"
+  FAIL 9c 理由を出す                    (R2: sh_launch の判定を外した)
+  FAIL 10a 255 バイトそのまま写る        (R3: 写しの名前幅を 128B に戻した)
+  FAIL 10b 長さも変わらない
+  FAIL 11c 未展開の target* ではなく実体名に化けている   (R4: ふるいを外した)
+  FAIL 11d 多すぎたら印を立てる
+  FAIL 11e 理由を出す
+  FAIL 12a 格納は max_args - 1 個まで     (R7: 上限を max_args に戻した)
+  FAIL 12b 最後の枠は NUL 終端用に空いている
+  FAIL 13a write 失敗で負 (mv は原本を消さない)          (R6: 0 を返す形に)
+  FAIL 13b read 失敗でも負
+```
+
+11c の RED は「不一致 200 件 + 末尾に一致 1 件」で、ふるいが無いと先頭 128 件で
+切れて一致を取り逃がし、`cat target*` が**未展開のまま**渡る。`argv[1]` に `*`
+が残ることで見ている (先頭 2 文字だけを見ていた最初の書き方では、リテラルの
+`target*` も `ta` で始まるため通ってしまった)。
+
+戻すと全 60 項目 `ALL PASS`。
+
+**常駐 `.o` の突合** (`1cdeaa1` 比較): R6 / R7 を一時的に戻した状態では
+`cmd_base.o` (`__TIME__`) 以外すべて一致 — つまり R2〜R5 と `sh_args.inc` の
+切り出しは常駐に 1 バイトも影響していない。R6 / R7 を入れると
+`cmd_file.o` と `main.o` が変わる (仕様どおり、S7 の例外)。
+
 **ホストに載せていないもの** (実機確認 = 受入 S5 に委ねる): B3 の判定
 (`sh_has_redirect` / `sh_name_is_builtin`) と B6 の段ループの `sh_exit_flag`、
 B4 の事前判定は、いずれも `main.c` の static で `g_cmds` の登録表と `main()`

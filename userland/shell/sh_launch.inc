@@ -41,6 +41,15 @@ void sh_pipeline_leave(void)
     if (sh_pipeline_depth > 0) sh_pipeline_depth--;
 }
 
+/* R2: いま sh が標準 FD にリダイレクトを張っているか。リダイレクト表は全
+ * アプリ共有で read/write/reset が owner を見ないので、張ったまま外部を
+ * 起こすと子の出力が親のファイルへ入り、子の reset が親の FD を閉じる。
+ * `sys_reset_redirect` は表を丸ごと戻すので真偽値で足りる。 */
+static int sh_redirect_active = 0;
+
+void sh_redirect_mark(void)  { sh_redirect_active = 1; }
+void sh_redirect_clear(void) { sh_redirect_active = 0; }
+
 static void sh_launch_name(const char *cmdline, char *out, int max)
 {
     int i = 0;
@@ -67,6 +76,15 @@ int sh_launch(const char *cmdline)
     if (sh_pipeline_depth > 0) {
         g_api->kprintf(ATTR_RED, "%s",
                        "sh: pipe to external command is not supported\n");
+        return EXEC_ERR_GENERAL;
+    }
+
+    /* R2: 内蔵 `exec` / `if` / `time` / 外部行を含む `source` は、
+     * execute_single の事前判定を通った**後**にリダイレクトを張ってから
+     * ここへ来る。最終起動口でもう一度見る。 */
+    if (sh_redirect_active) {
+        g_api->kprintf(ATTR_RED, "%s",
+                       "sh: redirect to external command is not supported\n");
         return EXEC_ERR_GENERAL;
     }
 

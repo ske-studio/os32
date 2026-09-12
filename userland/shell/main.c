@@ -103,196 +103,7 @@ void shell_print_help(const char *cmd_name)
 
 /* ======================================================================== */
 /* ======================================================================== */
-int wildcard_match(const char *pattern, const char *str) {
-    while (*pattern && *str) {
-        if (*pattern == '*') {
-            while (*pattern == '*') pattern++; 
-            if (!*pattern) return 1; 
-            while (*str) {
-                if (wildcard_match(pattern, str)) return 1;
-                str++;
-            }
-            return 0;
-        } else if (*pattern == '?') { 
-            pattern++; str++;
-        } else if (*pattern == *str) {
-            pattern++; str++;
-        } else {
-            return 0;
-        }
-    }
-    while (*pattern == '*') pattern++;
-    return (*pattern == '\0' && *str == '\0');
-}
-
-/* B2: CPL=3 では sys_ls のコールバックから KAPI を呼べない。glob_cb は
- * mem_alloc を呼ぶので、SHELL_AS_APP では写し取り (sh_ls_collect_cb) を
- * 挟んで sys_ls が戻ってから glob_cb へ流す。常駐はマクロがそのまま
- * g_api->sys_ls(dir_path, glob_cb, ctx) に展開される (.o は不変)。 */
-struct GlobCtx {
-    char **argv;
-    int *argc;
-    int max_args;
-    const char *pattern;
-    const char *dir_prefix;
-    int matched_any;
-    char **allocated_strings;
-    int *alloc_count;
-};
-
-static void glob_cb(const DirEntry_Ext *entry, void *c) {
-    struct GlobCtx *ctx = (struct GlobCtx *)c;
-    int dirlen, namelen, i;
-    char *full;
-
-    if (entry->name[0] == '.' && (entry->name[1]=='\0' || (entry->name[1]=='.' && entry->name[2]=='\0'))) return;
-
-    if (*(ctx->argc) < ctx->max_args && wildcard_match(ctx->pattern, entry->name)) {
-        dirlen = strlen(ctx->dir_prefix);
-        namelen = strlen(entry->name);
-        full = (char *)g_api->mem_alloc(dirlen + namelen + 1);
-        if (!full) return;
-
-        for (i = 0; i < dirlen; i++) full[i] = ctx->dir_prefix[i];
-        for (i = 0; i < namelen; i++) full[dirlen + i] = entry->name[i];
-        full[dirlen + namelen] = '\0';
-        
-        ctx->argv[*(ctx->argc)] = full;
-        *(ctx->argc) += 1;
-        ctx->matched_any = 1;
-        
-        if (*(ctx->alloc_count) < ctx->max_args) {
-            ctx->allocated_strings[*(ctx->alloc_count)] = full;
-            *(ctx->alloc_count) += 1;
-        }
-    }
-}
-
-#ifdef SHELL_AS_APP
-/* 写し取ってから glob_cb へ流す (コールバック内で mem_alloc しない) */
-static void sh_glob_run(const char *dir_path, struct GlobCtx *ctx)
-{
-    int i, n;
-    DirEntry_Ext e;
-
-    sh_ls_reset();
-    g_api->sys_ls(dir_path, sh_ls_collect_cb, (void *)0);
-    n = sh_ls_count_get();
-    for (i = 0; i < n; i++) {
-        sh_ls_fill(i, &e);
-        glob_cb(&e, ctx);
-    }
-}
-#else
-#define sh_glob_run(dir_path, ctx)  (g_api->sys_ls((dir_path), glob_cb, (ctx)))
-#endif
-
-void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args, char **allocated_strings, int *alloc_count) {
-    int argc = 0;
-    char *p = cmd_line;
-
-    *alloc_count = 0;
-
-    while (*p && argc < max_args) {
-        char *start, *out;
-        int has_star = 0;
-        char quote = 0;
-
-        while (*p == ' ') p++;
-        if (!*p) break;
-        start = p;
-        out = p;   /* インプレースでクォート除去 (out <= p 常に成立) */
-
-        while (*p) {
-            if (quote) {
-                /* クォート内 */
-                if (*p == quote) {
-                    /* クォート終了 — クォート文字自体は出力しない */
-                    quote = 0;
-                    p++;
-                } else if (*p == '\\' && quote == '"' && *(p + 1)) {
-                    /* ダブルクォート内のバックスラッシュエスケープ */
-                    p++;
-                    *out++ = *p++;
-                } else {
-                    /* シングルクォート内は全てリテラル */
-                    *out++ = *p++;
-                }
-            } else {
-                /* クォート外 */
-                if (*p == ' ') break;
-                if (*p == '"' || *p == '\'') {
-                    /* クォート開始 — クォート文字自体は出力しない */
-                    quote = *p++;
-                } else if (*p == '\\' && *(p + 1)) {
-                    /* バックスラッシュエスケープ */
-                    p++;
-                    *out++ = *p++;
-                } else {
-                    /* クォート外の * のみ glob 対象 */
-                    if (*p == '*') has_star = 1;
-                    *out++ = *p++;
-                }
-            }
-        }
-        /* p は空白か文字列末尾を指している */
-        if (*p == ' ') p++;
-        *out = '\0';
-
-        if (has_star) {
-            char *last_slash = (char *)0;
-            char *q = start;
-            char dir_path[PATH_MAX_LEN];
-            char pattern[256];
-            struct GlobCtx ctx;
-
-            while (*q) {
-                if (*q == '/' || *q == '\\') last_slash = q;
-                q++;
-            }
-
-            if (last_slash) {
-                int dirlen = last_slash - start + 1;
-                int i;
-                for (i = 0; i < dirlen && i < PATH_MAX_LEN - 1; i++) dir_path[i] = start[i];
-                dir_path[i] = '\0';
-                
-                {
-                    int patlen = 0;
-                    char *pat_ptr = last_slash + 1;
-                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                    pattern[patlen] = '\0';
-                }
-            } else {
-                dir_path[0] = '.'; dir_path[1] = '\0';
-                {
-                    int patlen = 0;
-                    char *pat_ptr = start;
-                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                    pattern[patlen] = '\0';
-                }
-            }
-
-            ctx.argv = argv;
-            ctx.argc = &argc;
-            ctx.max_args = max_args;
-            ctx.pattern = pattern;
-            ctx.dir_prefix = last_slash ? dir_path : "";
-            ctx.matched_any = 0;
-            ctx.allocated_strings = allocated_strings;
-            ctx.alloc_count = alloc_count;
-
-            sh_glob_run(dir_path, &ctx);
-
-            if (!ctx.matched_any) {
-                argv[argc++] = start;
-            }
-        } else {
-            argv[argc++] = start;
-        }
-    }
-    *argc_out = argc;
-}
+#include "sh_args.inc"
 
 /* ======================================================================== */
 /*  PATH管理                                                                */
@@ -428,10 +239,23 @@ static int try_exec_from_path(const char *name_buf, int argc, char **argv)
 /* D2(b): カーソル位置に依存する TUI / シリアル前提のコマンドは sh.bin では
  * 動かせない。内蔵コマンドの表を引く手前で弾く。`filer` の起動経路
  * (fl_exec_program) もここで到達しなくなる。 */
-static int sh_is_cui_only(const char *name)
+static int sh_is_cui_only(int argc, char **argv)
 {
-    return str_eq(name, "os32gui") || str_eq(name, "rshell") ||
-           str_eq(name, "filer");
+    const char *name = argv[0];
+
+    if (str_eq(name, "os32gui") || str_eq(name, "rshell") ||
+        str_eq(name, "filer")) return 1;
+
+    /* R5: ループデバイスの枠 (drivers/loop_dev.c の loop_slots) は sh が
+     * 退場しても残り、backing FD だけが owner 回収で閉じる。その後 FD 番号が
+     * 再利用されると枠が別ファイルを向く。カーネル側の本修正は別票なので、
+     * sh.bin では枠を作る / 使う経路をまとめて断る。 */
+    if (str_eq(name, "losetup")) return 1;
+    if (str_eq(name, "dd") && argc > 1) {
+        const char *d = argv[1];
+        if (d[0] == 'l' && d[1] == 'o' && d[2] >= '0' && d[2] <= '9') return 1;
+    }
+    return 0;
 }
 #endif
 
@@ -440,7 +264,7 @@ static void run_cmd_internal(int argc, char **argv) {
     char name_buf[PATH_MAX_LEN];
 
 #ifdef SHELL_AS_APP
-    if (sh_is_cui_only(argv[0])) {
+    if (sh_is_cui_only(argc, argv)) {
         g_api->kprintf(ATTR_RED, "%s", "sh: cui only\n");
         return;
     }
@@ -553,6 +377,7 @@ static int apply_redirects(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
                 return -1;
             }
+            sh_redirect_mark();
             continue;
         }
 
@@ -571,6 +396,7 @@ static int apply_redirects(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
                 return -1;
             }
+            sh_redirect_mark();
             continue;
         }
 
@@ -589,6 +415,7 @@ static int apply_redirects(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
                 return -1;
             }
+            sh_redirect_mark();
             continue;
         }
 
@@ -613,6 +440,7 @@ static int apply_redirects(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "redirect: cannot open %s\n", target);
                 return -1;
             }
+            sh_redirect_mark();
             continue;
         }
 
@@ -635,6 +463,7 @@ static void reset_all_redirects(void)
     g_api->sys_reset_redirect(0);
     g_api->sys_reset_redirect(1);
     g_api->sys_reset_redirect(2);
+    sh_redirect_clear();
 }
 
 #ifdef SHELL_AS_APP
@@ -707,7 +536,18 @@ static void execute_single(const char *cmd)
     *p = '\0';
 
     parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS, allocated_strings, &alloc_count);
-    
+
+#ifdef SHELL_AS_APP
+    /* R4: 一致が多すぎて glob を諦めた行は、一部だけ展開して実行しない */
+    if (sh_glob_failed) {
+        sh_glob_failed = 0;
+        for (j = 0; j < alloc_count; j++) {
+            g_api->mem_free(allocated_strings[j]);
+        }
+        return;
+    }
+#endif
+
     if (argc > 0) {
 #ifdef SHELL_AS_APP
         /* B3: 標準 FD のリダイレクト表は全アプリ共有で read/write/reset が
