@@ -111,3 +111,4 @@ tools/emu_agent/logs/
 /docs/hw/
 .claude/settings.local.json
 .claude/worktrees/
+.codex/
