@@ -1,6 +1,6 @@
 # T9 — shell script: 常駐シェルの内蔵コマンドとスクリプトを端末から (設計草案)
 
-状態: **設計草案 第 6 版 (2026-09-12、PM) — 第 5 版の Codex レビューで blocker 4 件 (§9、kill の連鎖と token)。D3 / D8 / D9 / §1a を書き換えて再レビュー待ち (Codex 往復 2/3 済み、次が最後)。実装は発注していない。**
+状態: **独立レビュー通過 (第 6 版、Codex 3 往復目で Approve、2026-09-12、§10)。non-blocker 4 件は実装要件に取り込み済み。K / ビルド系 → S / W / A の順で発注。**
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → T7 → T8 → **shell script** → 設定 S0〜)。
 前提: K6C / K7 / T7 / T8 (端末、con_sink、kbd 待ちと poll の park、全画面)。すべて main `a9aa0e4`。
 
@@ -117,3 +117,11 @@ blocker 4 件、いずれも PM が妥当と判断して第 6 版に反映:
 4. 8bit 世代の token が 255 回で周回 → 32bit 全体単調増加、token で照合、枯渇は拒否。
 
 non-blocker: KAPI は 8 本に統一、NULL 出力と失敗時の規則、回収通知は ID だけ (正常終了は AppSlot 解放後、kill は前)、clean build 双方で SHA-256 比較。
+
+## 10. Codex レビュー 第 6 版 (2026-09-12) — **Approve** (往復 3/3)
+
+blocker なし。non-blocker 4 件は実装要件として各票に入れる:
+1. **要求表の回収完了処理** (K): 子の回収通知で `DONE` と同時に `child = 0`。孤児回収 (要求者退場) の完了時は poll を待たず `IDLE`。子を持たない要求者の退場も表を解放。再利用 ID への誤連鎖と `ERR_FULL` 固着を防ぐ。
+2. **KILL 後の `launch_report`** (K / W): `launch_take` → `exec_kill(child)` → 回収通知で `DONE` → `launch_report` の順になると `TAKEN` でないので `STALE` を返す。WM はこれを再試行せず正常として扱い、カーネルは回収通知で取得済み情報も掃除する (ABI は変えない)。
+3. **sh の行入力** (S): `shell_run` の `ime_getkey` (FEP を通る) ではなく、`SHELL_AS_APP` では **`kbd_getkey` / `kbd_getchar` の注入入力に統一** (FEP 確定は gshell 側で済んでいる。UTF-8 の後続バイトも同じ経路)。二重処理の疑いを消す。
+4. **WM の新しい起動口** (W): `launch_take` の LAUNCH は `run_program` (`begin_start` / `end_start`、全画面判定・復帰) を通す。`exec_start` の直呼びはしない。
