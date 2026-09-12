@@ -540,10 +540,10 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 |---|---|---|
 | `launch_req` | 宣言 `OS32X_FLAG_LAUNCHER` を持つ CPL=3 | 要求者は `res_owner_get()` で記録。cmdline は NUL 終端 1〜255B (空 / 超過 → `OS32_ERR_INVAL`)。GUI 外 (`con_sink` 無効) / 入れ子 `exec_run` の子 (`gui == 0` の非シェル) → `OS32_ERR_INVAL`。自分の表が IDLE でない (孤児回収中を含む) → `OS32_ERR_FULL`。戻り値 = token (> 0) |
 | `launch_pending` | 誰でも | `PENDING` の要求数。WM は `should_park` の材料にする (0 なら何もしない) |
-| `launch_take` | owner 1 | `cap < 256` → `OS32_ERR_INVAL`。要求者 ID 昇順に `PENDING` を 1 本 `TAKEN` にして token を返す (無ければ 0)。`kind` = 1 LAUNCH (buf に cmdline) / 2 KILL (`arg` = 畳む ID)。`requester` は孤児回収の表なら -1 |
-| `launch_report` | owner 1 | `TAKEN` 以外 → `OS32_ERR_STALE`。LAUNCH: `rc > 0` は生きている非シェル ID でなければ `OS32_ERR_INVAL` → `child = rc`, `RUNNING`; `rc == 0` → `DONE`; `rc < 0` → `FAILED(rc)`。KILL: `rc` は無視 (`DONE` は `child` の回収通知で付くので、通常は先に付いていて `STALE` が返る — WM は再試行せず正常として扱う) |
+| `launch_take` | owner 1 | `buf` も出力なので **NULL 可** (cmdline のコピーだけ飛ばす)。`cap` を見るのは `buf` が非 NULL のときだけで、そのとき `cap < 256` → `OS32_ERR_INVAL`。要求者 ID 昇順に `PENDING` を 1 本 `TAKEN` にして token を返す (無ければ 0)。`kind` = 1 LAUNCH (buf に cmdline) / 2 KILL (`arg` = 畳む ID)。`requester` は孤児回収の表なら -1 |
+| `launch_report` | owner 1 | `TAKEN` 以外 → `OS32_ERR_STALE`。LAUNCH: `rc > 0` は生きている非シェル ID でなければ `OS32_ERR_INVAL` → `child = rc`, `RUNNING`; `rc == 0` → `DONE`; `rc < 0` → `FAILED(rc)`。KILL: `rc` は無視。**取得済みの印を消して `RUNNING` に戻すだけ**で `child` は落とさない (落とすと生きている子の所有が表から消え、以後の退場でも回収されない)。`DONE` を付けるのは常に `child` の回収通知なので、正常な順序では先に付いていて `STALE` が返る — WM は再試行せず正常として扱う |
 | `launch_poll` | 要求者 | `status`: `0` PENDING / `1` TAKEN / `0x100 + child` RUNNING / `0x200` DONE / `0x300 + (-rc)` FAILED。`DONE` / `FAILED` を渡した時点で表は IDLE に戻る (再 poll は `OS32_ERR_STALE`) |
-| `launch_cancel` | 要求者 | `RUNNING` → `kind = KILL(child)`, `PENDING` (child は保持); `PENDING` / `TAKEN` → `OS32_ERR_AGAIN` (呼び手は次のタイマで再試行); `DONE` / `FAILED` / 不一致 → `OS32_ERR_STALE` |
+| `launch_cancel` | 要求者 | `RUNNING` → `kind = KILL(child)`, `PENDING` (child は保持); `PENDING` / `TAKEN` → `OS32_ERR_AGAIN` (**これだけが「次のタイマで再試行」の合図**); `DONE` / `FAILED` / 要求者の不一致 (別 ID からの cancel、孤児回収中の表を再利用 ID が指した旧 token) → `OS32_ERR_STALE` |
 | `launch_child` | 誰でも | その ID の表が所有する子 (phase を問わず)。不正 ID → 0。WM が CTRL+STOP の宛先を連鎖の末尾へ解決するのに使う |
 | `sys_yield` | CPL=3 | GUI 中は **必ず** `WAIT_POLL` に park する (tick の間引きなし)。印は専用の `parked_from_yield` で、resume は**注入リングを読まず** EAX = 0 — 読むと、譲っている側が子宛の 1 バイトを吸って捨てる。park できない文脈 (CUI / CPL=0 / syscall の外 / 入れ子の子) では `hlt` 1 回して 0 |
 

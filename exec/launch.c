@@ -183,7 +183,11 @@ i32 launch_take(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg)
     int i;
 
     if (res_owner_get() != APP_ID_SHELL) return OS32_ERR_INVAL;
-    if (buf == 0 || cap < (u32)LAUNCH_CMDLINE_MAX) return OS32_ERR_INVAL;
+    /* §1a 共通契約「出力ポインタは NULL 可 (書かない)」。buf も出力なので、
+     * NULL は断らずに cmdline のコピーだけ飛ばす (KILL の要求のように
+     * cmdline が要らない取り方を WM に許す)。cap を見るのは **buf が非 NULL の
+     * とき**だけ — NULL に対して cap を問うのは意味がない。 */
+    if (buf != 0 && cap < (u32)LAUNCH_CMDLINE_MAX) return OS32_ERR_INVAL;
 
     for (i = APP_ID_MIN; i <= APP_ID_MAX; i++) {   /* 要求者 ID 昇順 */
         if (g_req[i].phase == LAUNCH_PHASE_PENDING) { r = &g_req[i]; break; }
@@ -191,7 +195,7 @@ i32 launch_take(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg)
     if (r == 0) return 0;                          /* 無し (失敗ではない) */
 
     r->phase = LAUNCH_PHASE_TAKEN;
-    kstrncpy(buf, r->cmdline, cap);
+    if (buf) kstrncpy(buf, r->cmdline, cap);
     if (requester) *requester = (i32)r->requester;
     if (kind)      *kind = (i32)r->kind;
     if (arg)       *arg = (i32)r->arg;
@@ -214,10 +218,15 @@ i32 launch_report(i32 token, i32 rc)
     if (r->phase != LAUNCH_PHASE_TAKEN) return OS32_ERR_STALE;
 
     if (r->kind == LAUNCH_KIND_KILL) {
-        /* 畳めなかった / 既に居なかった場合の後始末。child は回収通知が
-         * 消す (通知が来ていればここは STALE で返っている)。 */
-        r->child = 0;
-        row_finish(r, LAUNCH_PHASE_DONE, 0);
+        /* 正常な順序では、ここへ来る前に child の回収通知が DONE を付けて
+         * いる (= 上で STALE を返している)。TAKEN のまま来たということは
+         * **子がまだ回収されていない** ので、DONE にしてはいけない —
+         * child を落とすと「生きている子の所有が誰の表からも消え、以後の
+         * 退場でも回収されない」孤児ができる。ここで消すのは取得済みの印
+         * (TAKEN) だけで、表は child を持ったまま RUNNING に戻る。
+         * 要求者がもう一度 cancel すれば KILL(child) が再び PENDING になる
+         * だけで害はない。DONE を付けるのは常に launch_owner_exit。 */
+        r->phase = LAUNCH_PHASE_RUNNING;
         return 0;
     }
 
@@ -274,7 +283,11 @@ i32 launch_cancel(i32 token)
     LaunchReq *r = row_by_token(token);
 
     if (r == 0) return OS32_ERR_STALE;
-    if (r->requester != res_owner_get()) return OS32_ERR_INVAL;
+    /* §1a: 「DONE / FAILED / **不一致** → STALE」。要求者が違うのは、別 ID が
+     * 他人の token を投げたか、孤児回収中の表を再利用 ID が自分のものと
+     * 取り違えたか — どちらも呼び手から見れば「その token はもう自分のもの
+     * ではない」で、端末は再試行せずプロンプトへ戻る (D9)。 */
+    if (r->requester != res_owner_get()) return OS32_ERR_STALE;
 
     if (r->phase == LAUNCH_PHASE_RUNNING) {
         /* child は保持したまま「畳んでくれ」に置き換える (I3)。 */

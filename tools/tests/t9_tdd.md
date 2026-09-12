@@ -64,6 +64,22 @@ GUI 判定 (`con_sink_is_enabled`)、`kstrncpy`。スロットは実物の `AppS
 対応表そのものは `appslot_resume_source()` として実物に置いたので、写しているのは
 「どこから値を取るか」ではなく「取った値をフレームへ書く」手順だけ。
 
+## 4b. Codex 実装レビュー 往復 1/3 の修正 (2026-09-13)
+
+blocker 3 件はいずれも `exec/launch.c` の §1a からの逸脱。直したあと、**3 点を元に戻すと
+RED になる**ことを確認してから GREEN に戻した (下の「落ちた検査」は実際の出力)。
+
+| 直したところ | 落ちた検査 (戻したとき) |
+|---|---|
+| `launch_take` が `buf == NULL` を `INVAL` にしていた | `2b2` `2b3` |
+| `launch_cancel` の要求者不一致が `INVAL` だった | `4c` `5h2` |
+| `launch_report(KILL)` が `TAKEN` のまま来たとき `child = 0` + `DONE` にしていた | `9e` `9f` `9h` `9i` `9j` `9l` `9o` `9p` |
+
+3 つ目のために**ケース 9** を足した: `RUNNING` → `cancel` → `take` → `report(0)` (回収通知より
+先) → poll は `RUNNING(child)` のまま → `owner_exit(child)` → poll が `DONE`。さらに
+「report が先に来た後で要求者が退場しても、子の所有が残っているので孤児回収に載る」
+(`9o` `9p`) — `child` を落としていた版ではこの子が誰にも回収されなくなる。
+
 ## 5. 最終実行 (2026-09-12)
 
 ```

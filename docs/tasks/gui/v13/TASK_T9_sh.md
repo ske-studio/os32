@@ -149,5 +149,19 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   子を持たない要求者の退場も解放、KILL 後の `launch_report` は `STALE` (WM は正常扱い)。
 - ホスト TDD: `tools/tests/test_launch.py` (新規、`make check-launch-host`) と
   `test_multiapp_impl.py` ケース 23。記録は `tools/tests/t9_tdd.md`。kselftest に 3 項。
+- **Codex 実装レビュー 往復 1/3 の blocker 3 件を修正** (2026-09-13、いずれも §1a からの逸脱):
+  (1) `launch_take` は `buf == NULL` を断らない — 共通契約「出力ポインタは NULL 可」に従い
+  cmdline のコピーだけ飛ばす (`cap` を見るのは `buf` が非 NULL のときだけ)。
+  (2) `launch_cancel` の要求者不一致は `INVAL` ではなく **`OS32_ERR_STALE`** (§1a「不一致 → STALE」)。
+  `AGAIN` だけが再試行の合図、という端末側 (D9) の読み分けを壊さないため。
+  (3) `launch_report(KILL)` が `TAKEN` のまま来ても `child` を落とさず、印だけ消して `RUNNING` へ
+  戻す。`DONE` を付けるのは常に回収通知 — 落とすと「生きている子の所有が表から消え、以後の
+  退場でも回収されない」孤児ができた。試験は `2b2`/`2b3`・`4c`・`5h2` とケース 9 (16 検査) を追加。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
+
+### 12a. Codex 実装レビュー (K 側、2026-09-13、`codex exec -s read-only`) — 往復 1/3: Request changes → 修正済み
+
+blocker 3 件 (すべて `exec/launch.c` の §1a 逸脱): (1) `launch_take` が `buf == NULL` を INVAL にしていた → NULL 可、(2) `launch_cancel` の要求者不一致が INVAL → STALE、(3) `launch_report(KILL)` が TAKEN のまま来ると `child = 0` + DONE にしていた → 印だけ消して RUNNING に戻す (child 保持、DONE は回収通知だけ)。
+non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達しない、cmdline の NUL より先の未マップページは既存ディスパッチャと同じ扱い (呼び手の fault kill)、ホスト試験は `exec.c` の転記ハーネス。
+`launch_poll` の不一致は INVAL のまま (§1a は cancel だけ STALE と規定)。

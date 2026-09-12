@@ -62,16 +62,21 @@ i32 launch_req(const char *cmdline);
 i32 launch_pending(void);
 
 /* PENDING を 1 本取って TAKEN にする。owner 1 専用、要求者 ID 昇順。
- * 戻り値 = token / 0 (無し) / 負。cap < LAUNCH_CMDLINE_MAX は INVAL。
- * 出力ポインタは NULL 可。失敗時は 1 つも書かない。
+ * 戻り値 = token / 0 (無し) / 負。**出力ポインタは buf を含めて NULL 可**
+ * (書かないだけ)。cap を見るのは buf が非 NULL のときだけで、そのとき
+ * cap < LAUNCH_CMDLINE_MAX は INVAL。失敗時は 1 つも書かない。
  * requester には孤児回収の表なら LAUNCH_REQ_ORPHAN が入る。 */
 i32 launch_take(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg);
 
 /* 結果を表へ返す。owner 1 専用。TAKEN 以外は OS32_ERR_STALE。
  *   LAUNCH: rc > 0 → child = rc, RUNNING (生きている非シェル ID でなければ
  *           OS32_ERR_INVAL) / rc == 0 → DONE / rc < 0 → FAILED(rc)
- *   KILL  : rc は無視。TAKEN の印を消すだけ (DONE は child の回収通知で付く
- *           ので、通常は先に DONE になっていて STALE が返る — 票 §10 2)。 */
+ *   KILL  : rc は無視。**取得済みの印 (TAKEN) を消して RUNNING へ戻すだけ**
+ *           で、child は落とさない — 落とすと「生きている子の所有が誰の表
+ *           からも消え、以後の退場でも回収されない」孤児ができる。DONE を
+ *           付けるのは常に child の回収通知 (launch_owner_exit) なので、
+ *           正常な順序では先に DONE になっていて STALE が返る (票 §12 2)。
+ *           要求者が再度 cancel すれば KILL(child) がまた PENDING になる。 */
 i32 launch_report(i32 token, i32 rc);
 
 /* 要求者だけが自分の要求の状態を読む。status は LAUNCH_ST_*。
@@ -79,7 +84,9 @@ i32 launch_report(i32 token, i32 rc);
 i32 launch_poll(i32 token, i32 *status);
 
 /* 要求者だけが取り消す。RUNNING → KILL(child) の PENDING (child は保持)。
- * PENDING / TAKEN → OS32_ERR_AGAIN、DONE / FAILED / 不一致 → OS32_ERR_STALE。*/
+ * PENDING / TAKEN → OS32_ERR_AGAIN、DONE / FAILED / **要求者の不一致**
+ * (別 ID からの cancel、孤児回収中の表を再利用 ID が指した旧 token) →
+ * OS32_ERR_STALE。AGAIN だけが「次のタイマで再試行」の合図。 */
 i32 launch_cancel(i32 token);
 
 /* その ID の表が所有する子 (phase を問わず)。誰でも。不正 ID は 0。

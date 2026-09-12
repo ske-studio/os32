@@ -205,7 +205,12 @@ static void case_launch_running(void)
           "2a take は owner 1 専用");
     res_owner_set(APP_ID_SHELL);
     check(launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX - 1, 0, 0, 0) == OS32_ERR_INVAL,
-          "2b cap < LAUNCH_CMDLINE_MAX は断る");
+          "2b cap < LAUNCH_CMDLINE_MAX は断る (buf が非 NULL のとき)");
+    check(launch_take(0, 0, 0, 0, 0) == token,
+          "2b2 buf = NULL は断らない (§1a: 出力ポインタは NULL 可)");
+    check(launch_take(0, 0, 0, 0, 0) == 0,
+          "2b3 その take は成立している (表は TAKEN へ動いた)");
+    g_req[APP_ID_MIN].phase = LAUNCH_PHASE_PENDING;   /* 2c 以降のために戻す */
     check(launch_pending() == 1, "2c 断った take は表を動かさない");
 
     got = launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, &requester, &kind, &arg);
@@ -301,7 +306,8 @@ static void case_cancel(void)
     (void)launch_report(token, (i32)(APP_ID_MIN + 2));
 
     res_owner_set(APP_ID_MIN + 1);
-    check(launch_cancel(token) == OS32_ERR_INVAL, "4c cancel は要求者だけ");
+    check(launch_cancel(token) == OS32_ERR_STALE,
+          "4c 要求者でない ID からの cancel は STALE (§1a: 不一致 → STALE)");
     res_owner_set(APP_ID_SHELL);
 
     check(cancel_from(APP_ID_MIN, token) == 0, "4d RUNNING への cancel は通る");
@@ -369,6 +375,8 @@ static void case_orphan(void)
     }
     check(poll_from(APP_ID_MIN, token, 0) == OS32_ERR_INVAL,
           "5h 再利用 ID は孤児の表を poll できない (照合は token)");
+    check(cancel_from(APP_ID_MIN, token) == OS32_ERR_STALE,
+          "5h2 再利用 ID からの旧 token の cancel は STALE (再試行させない)");
 
     kill_app(APP_ID_MIN + 2);
     launch_owner_exit(APP_ID_MIN + 2);
@@ -491,6 +499,75 @@ static void case_selftest(void)
     check(launch_pending() == 0, "8d 自己診断は表を空にして戻る");
 }
 
+/* ========================================================================
+ *  9. KILL の report が回収通知より **先** に来たとき (順序の反例)
+ *
+ *  正常な順序は「take → exec_kill(child) → 回収通知で DONE → report は STALE」
+ *  (ケース 4)。WM が exec_kill を呼べなかった / 呼ぶ前に report した場合は
+ *  表が TAKEN のまま届く。ここで DONE + child = 0 にすると、**生きている子の
+ *  所有が誰の表からも消え、その子はもう誰にも回収されない** (Codex 実装
+ *  レビュー 往復 1/3 の blocker 3)。取得済みの印だけ消して RUNNING に戻す。
+ * ======================================================================== */
+static void case_kill_report_before_reclaim(void)
+{
+    i32 token, st;
+
+    reset_all();
+    report("9 KILL の report が回収通知より先に来ても child を落とさない\n");
+
+    token = req_from(APP_ID_MIN, "sh");
+    (void)launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0);
+    make_app(APP_ID_MIN + 2, 1, 0);
+    (void)launch_report(token, (i32)(APP_ID_MIN + 2));
+    check(poll_from(APP_ID_MIN, token, &st) == 0 &&
+          st == (i32)LAUNCH_ST_RUNNING + (i32)(APP_ID_MIN + 2),
+          "9a RUNNING(child) から始める");
+
+    check(cancel_from(APP_ID_MIN, token) == 0, "9b 要求者が取り消す");
+    check(launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == token,
+          "9c WM が KILL を取る");
+
+    /* WM が exec_kill を終える前に (あるいは畳めずに) report した */
+    check(launch_report(token, 0) == 0, "9d TAKEN のままの report は通る");
+    check(launch_child((i32)APP_ID_MIN) == (i32)(APP_ID_MIN + 2),
+          "9e child は落ちない (生きている子の所有を手放さない)");
+    check(poll_from(APP_ID_MIN, token, &st) == 0 &&
+          st == (i32)LAUNCH_ST_RUNNING + (i32)(APP_ID_MIN + 2),
+          "9f 表は RUNNING(child) に戻る (DONE にしない)");
+    check(launch_pending() == 0, "9g 取得済みの印は消えている");
+
+    /* もう一度 cancel すれば KILL(child) がまた PENDING になるだけ */
+    check(cancel_from(APP_ID_MIN, token) == 0, "9h 再度の cancel も通る");
+    check(launch_pending() == 1, "9i KILL(child) がまた並ぶ");
+    check(launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == token,
+          "9j WM がもう一度取る");
+
+    /* 今度は本当に畳めた: DONE を付けるのは必ず回収通知 */
+    kill_app(APP_ID_MIN + 2);
+    launch_owner_exit(APP_ID_MIN + 2);
+    check(launch_child((i32)APP_ID_MIN) == 0, "9k 回収通知で child = 0");
+    check(poll_from(APP_ID_MIN, token, &st) == 0 && st == (i32)LAUNCH_ST_DONE,
+          "9l DONE は回収通知だけが付ける");
+    check(launch_report(token, 0) == OS32_ERR_STALE,
+          "9m 解放後の report は STALE");
+    check(req_from(APP_ID_MIN, "ls") > 0, "9n ERR_FULL で固着しない");
+
+    /* 要求者が先に退場しても、生きている子は孤児回収に載る (所有が残るため) */
+    reset_all();
+    token = req_from(APP_ID_MIN, "sh");
+    (void)launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0);
+    make_app(APP_ID_MIN + 2, 1, 0);
+    (void)launch_report(token, (i32)(APP_ID_MIN + 2));
+    (void)cancel_from(APP_ID_MIN, token);
+    (void)launch_take(takebuf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0);
+    (void)launch_report(token, 0);            /* 回収より先の report */
+    kill_app(APP_ID_MIN);
+    launch_owner_exit(APP_ID_MIN);            /* 要求者が退場 */
+    check(launch_pending() == 1, "9o 要求者の退場で孤児回収が並ぶ");
+    check(launch_child((i32)APP_ID_MIN) == (i32)(APP_ID_MIN + 2),
+          "9p 子の所有が残っているので回収できる");
+}
+
 int main(void)
 {
     failures = 0;
@@ -503,6 +580,7 @@ int main(void)
     case_token();
     case_chain();
     case_selftest();
+    case_kill_report_before_reclaim();
     if (failures) {
         report("FAILURES\n");
         die(1);
