@@ -1,6 +1,6 @@
 # T7 — 既存 CUI コマンドを端末で実際に流す
 
-状態: **発行 (2026-09-12、PM)**。決裁 B の順序 (K5 → K6 console → 端末アプリ → K7 入力統合 → **CUI コマンドを端末で流す**) の 5 段目。
+状態: **受入済み (2026-09-12、K `7a6b124` / A `ce0406b`)**。決裁 B の順序 (K5 → K6 console → 端末アプリ → K7 入力統合 → **CUI コマンドを端末で流す**) の 5 段目。
 前提: K6C (con_sink、端末アプリ `t5a_display`)、K7 (kbd 待ちの park、`kbd_inject`)。すべて feat/gui `474f9ce` に着地・受入済み。
 
 ## 0. 目的
@@ -65,3 +65,16 @@ v1.3 の「GUI 上の CUI 実行」の縦切りをここで完成させる (shel
 - `guest.rs`: プロンプト中は 1 バイトも注入せず、Enter で `sys_open`/`sys_close` の存在確認 → `session_launch`。
   `ERR_FULL` は `busy` で行を残し、`EXIT` / 接続モードの ESC でプロンプトへ戻る (ESC は子に注がない)。
 - 検査は `cargo check --release -p t5a_display` と host テスト 48 件 (36 → 48) のみ。**`make` / 配備 / 実機は未実施** ([V4])。
+
+## 6. 実機受入の記録 (PM / テスター、2026-09-12、K `7a6b124` + A `ce0406b` を NHD 配備、vmkernel 460,206 B、t5a_display 37,548 B、15MB、API v47、kselftest 64 / 0)
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| **T1** | プロンプトに `kbd_echo` + Enter → `> kbd_echo` のエコーと子のバナー、最下行 `[running] ESC=prompt`。`abc` → `got 0x61 'a'` … 、`q` → `bye` の直後にプロンプト `> _` へ復帰 (`EXIT` レコード、`appslot_last_reclaim_id` 3)。`ring3_kbd_park_count` 3 | **合格** |
+| **T2** | `klibc_test` + Enter → 出力が流れ (画面 1 回折り返し `wrap=1`)、`=== Result: 49 passed, 0 failed ===` の後にプロンプト復帰。`dropped` 0、`in=1749B rec=86` | **合格** |
+| **T3** | `nosuch` + Enter → `command not found: nosuch`、プロンプトのまま | **合格** |
+| **T4** | `/etc/system.cfg` + Enter → exec の `Error: invalid OS32X binary` が端末に出て gshell の「Launch failed」モーダル → OK → ESC でプロンプト復帰 | **合格** |
+| **T5** | Start → CUI mode で端末が畳まれ `g_slot[2]` / `[3]` とも state 0、`v86 -t` OK、regress 6 本 obs 全通過 (kselftest 64 / 0) | **合格** |
+
+**判定 (PM、2026-09-12)**: T1〜T5 合格、**T7 受入済み**。GUI 上で CUI コマンドを起動し、出力を見て、打鍵を渡し、終了で戻る縦切りが通った。
+残: 常駐シェルの内蔵コマンド (`ls` `cat` 等) は端末から呼べない (次段の shell script / `sh -c` 相当で扱う)、FEP 経由の日本語入力、8MB。
