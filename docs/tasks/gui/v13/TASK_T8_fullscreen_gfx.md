@@ -1,6 +1,6 @@
-# T8 — full-screen GFX 復帰: 端末から起動した GFX プログラムが全画面を使い、終了で GUI に戻る (設計草案)
+# T8 — full-screen GFX 復帰: 端末から起動した GFX プログラムが全画面を使い、終了で GUI に戻る
 
-状態: **設計草案 (2026-09-12、PM) — 独立レビュー待ち。実装は発注していない。**
+状態: **設計 (2026-09-12、PM)。ユーザー決裁 (同日) を反映済み — 独立レビューの残点は §3。K / W / ビルド系の 3 票に分けて発注する。**
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → K7 → T7 → **full-screen GFX 復帰** → shell script → 設定 S0〜)。
 前提: K5b (協調型 4 本)、K6C / K7 (端末、con_sink、kbd 待ちの park)、T7 (端末からの起動)。すべて main `3b7677b`。
 
@@ -8,48 +8,60 @@
 
 - GFX プログラム (`gfx200_test` / `blit_test` / `tile_bench` / `gfx_demo200` など) は `libos32gfx_init(api)` → KAPI `gfx_init` /
   `gfx_init_200` で **画面を丸ごと取る** (`gfx/gfx_core.c:341`: バックエンド再選択、両ページの VRAM ゼロクリア、パレット初期化)。
-  gshell 配下の GUI アプリは `libos32gfx_attach` で取り付くだけで `gfx_init` を呼ばない (gotcha §4-20) — つまり
-  **「CPL=3 の非シェルが `gfx_init` を呼ぶ」= 全画面を取りに来た**、という区別が既にある。
+  gshell 配下の GUI アプリは `libos32gfx_attach` で取り付くだけで `gfx_init` を呼ばない (gotcha §4-20)。
 - `exec_start` は「最初の park」まで戻らない (`exec/exec.c:1548`)。K7 以前は GFX プログラムが `kbd_getchar` で `hlt` に入り
-  **走り切るまで戻らなかった**ので、画面はプログラムのもので、抜けたら gshell が `rc <= 0` の枝 (`userland/gshell/src/lib.rs:281`)
-  で `gfx_init` + `invalidate_all_clients` + `composite_full` を行い GUI が戻った (v1.2 の LAUNCH 経路、監査 (e))。
-- **K7 の後**: `kbd_getchar` で park する (`WAIT_KEY`) ので `exec_start` は `rc > 0` で戻り、gshell は普通に合成・present を続ける →
-  **GFX プログラムの画面を WM が上書きする**。逆にプログラムが resume して描くと WM の画面を壊す。どちらが正か決まっていない。
-  さらに `rc > 0` の枝は復帰処理をしない (W-1 の理由でそれが正しい) ので、プログラムが抜けても GUI は戻らない。
-- 端末 (T7) から起動した場合、打鍵は端末 → `kbd_inject` → resume で届く (画面がどちらのものでも入力経路は同じ)。
+  走り切るまで戻らなかったので、抜けた後に gshell の `rc <= 0` の枝 (`userland/gshell/src/lib.rs:281`) が `gfx_init` +
+  `invalidate_all_clients` + `composite_full` で GUI を戻した。
+- **K7 の後**: `kbd_getchar` で park する (`WAIT_KEY`) ので `exec_start` は `rc > 0` で戻り、gshell が合成・present を続けて
+  **GFX プログラムの画面を上書きする**。`rc > 0` の枝は復帰処理をしない (W-1) ので、プログラムが抜けても GUI は戻らない。
+- OS32X ヘッダには **`OS32X_FLAG_GFX` (0x0001、`mkos32x --gfx`) が既にある**が、いまは誰も立てず、カーネルも見ていない。
+  `OS32X_FLAG_FORCE_CPL0` (0x0004、`--cpl0`) は v86 / VDM 系の CPL=0 プログラムに付いていて `appslot_launch_is_app` が見ている。
 
-## 1. 設計 (PM 案、レビュー対象)
+## 1. ユーザー決裁 (2026-09-12)
 
-| # | 決定 | 根拠 |
+- **VRAM を直接触る系 (v86 / VDM = `--cpl0`) は GUI からの直接実行を禁止**し、CUI に降りてから実行させる。
+  VRAM を触らない DOS 的な CUI プログラム (CPL=3、出力は console.c 経由) は制限しない。
+- **ユーザーランドは全部ビルドし直してよい** → ヘッダの宣言ビットを使う。
+- 実装コストが高ければ「CUI のみの機能」で構わない (→ 下記のとおり低コストなので GUI からの全画面を実装する)。
+
+## 2. 設計 (決裁反映後)
+
+| # | 決定 | 担当 |
 |---|---|---|
-| D1 | **画面の所有者をカーネルが 1 つ持つ** (`g_gfx_owner`: 0 = 誰も / 1 = シェル帯 (WM) / 2〜5 = アプリ)。CPL=3 の非シェル ID が `gfx_init` / `gfx_init_200` を呼んだら所有者をその ID にする (呼び手は `res_owner_get()` で分かる)。その ID の回収 (`exec_reclaim_owned`: 正常終了 / kill / fault / CTRL+STOP) で所有者を WM (1) に戻す | 「gfx_init を呼んだ」が全画面の合図であることは既存の区別 (§4-20) と一致。WM が exec の状態から推定するより 1 箇所で確実 |
-| D2 | **所有者がアプリの間、WM からの present を捨てる** (`gfx_present` / `gfx_present_dirty` / `gfx_present_rect` の KAPI ラッパで `res_owner_get() == 1 && g_gfx_owner > 1` なら何もしない、`gfx_counters` に捨てた回数を積む)。WM の描画関数 (バックバッファへの描き込み) は止めない — バックバッファは WM のものなので壊れない | WM の規律だけに頼らず、カーネルで「画面はいまアプリのもの」を守る。捨てた回数はデバッグの手がかり |
-| D3 | **KAPI v48**: `gfx_screen_owner(void) -> i32` (誰でも呼べる、値は D1)。WM は OP_WAIT の周期 (`exec_start` / `exec_resume` から戻った直後) にこれを見て**全画面モード**に入る / 抜ける | 状態の問い合わせ 1 本で済む。con_sink の EXIT は端末しか読めないので使わない |
-| D4 | **gshell の全画面モード**: 所有者 ≠ WM の間は (a) 合成・present をしない (D2 の二重防御)、(b) 入力はいつもどおりフォーカス窓 (= 端末) へ配る (端末が `kbd_inject` する、K7 の経路)、(c) マウスはタスクバー / Start を含めて**無視**する (画面に何も無い)、(d) **CTRL+STOP はフォーカス窓ではなく画面の所有者宛**にする (`exec_abort_clear` → `exec_kill(owner)`、K5c の分岐に 1 条件足す)。所有者が WM に戻ったら **`gfx_init` → パレット復元 → `install_system_palette` → `lease::reapply` → `invalidate_all_clients` → `composite_full`** (いまの `rc <= 0` の枝と同じ手順を関数にして、`rc <= 0` のときと「全画面モードから抜けたとき」の両方から呼ぶ) | 抜けたときの手順は v1.2 から実績がある (W-1 で入口だけ狭めた)。全画面中に窓を動かしても意味が無いので入力は端末だけで足りる |
-| D5 | **モード (200 ライン / PEGC 480 ライン / Cirrus) の復元**: 復帰の `gfx_init` は WM が最初に選んだバックエンドで立ち上げ直す (`gfx_select_and_init_backend` はそのたびに選ぶ)。プログラムが `gfx_init_200` にしていても WM の `gfx_init` で 400 ラインに戻る。Cirrus のリレーは §4-21 の「窓を畳まず再 init」の作法どおり | 既存の `gfx_init` の性質に乗る。新しい復元経路は作らない |
-| D6 | **プログラム側は無変更**: `gfx_init` を呼ぶ既存の GFX プログラムがそのまま全画面で動く。`libos32gfx_attach` を使う GUI アプリは所有者を取らない | ユーザーランドの互換を守る |
-| D7 | 端末 (T7-A) は無変更。全画面中も接続モードのまま打鍵を注入し、EXIT でプロンプトへ戻る (画面は D4 が戻す) | — |
+| D1 | **画面の所有者をカーネルが 1 つ持つ** (`g_gfx_owner`: 1 = シェル帯 (WM) / 2〜5 = アプリ)。CPL=3 の非シェル ID が `gfx_init` / `gfx_init_200` を呼んだら所有者をその ID にし、その ID の回収 (`exec_reclaim_owned`: 正常終了 / kill / fault / CTRL+STOP) で WM に戻す。**GUI 中 (con_sink 有効中) の `exec_start` は `OS32X_FLAG_FORCE_CPL0` のプログラムを `OS32_ERR_INVAL` で拒否** (CUI 専用。K5b A1 の「CPL=3 アプリが生きていたら拒否」を「GUI からは常に拒否」に広げる)。`gfx_init` を呼ばずに VRAM へ直接書く CPL=3 プログラムは「行儀の悪いプログラム」として扱い、守らない | K |
+| D1a | **宣言ビット**: `OS32X_FLAG_GFX` を「全画面 GFX を使う」の宣言として使う。`build/app.conf` に 4 列目 `gfx` (省略 = 無し) を足し、`mkos32x` が `--gfx` を付ける。全画面を使う既存プログラム (`gfx200_test` / `blit_test` / `blit_test2` / `tile_bench` / `gfx_demo200` / `demo_tile` / `rotate_test` / `mgx_test` / `hello_gfx` 系 / `apps/` `game/` の GFX 物 — `libos32gfx_init` / `gfx_init` を呼ぶもの) に立てる。`tools/check_manifests.py` で「`gfx_init` を呼ぶのに宣言が無い」を検出できるなら足す (少なくとも app.conf の列の検査)。**カーネルは GUI 中に宣言の無い CPL=3 が `gfx_init` を呼んだら `OS32_ERR_INVAL` で拒否** (黙って画面を壊さない)。CUI 中は従来どおり何でも通す | ビルド系 + K |
+| D2 | (保険) 所有者がアプリの間、WM からの `gfx_present` / `gfx_present_dirty` / `gfx_present_rect` をカーネルが捨て、捨てた回数を `gfx_counters` に積む (比較 1 つ)。**必須ではない** — D1 / D1a で画面を取れるのが宣言済みの `gfx_init` 呼び手だけになるので、残る危険は WM の規律違反だけ。実装は K 票に含めるが、レビューで不要と判断されれば落とす | K |
+| D3 | **KAPI v48**: `gfx_screen_owner(void) -> i32` (誰でも呼べる、値は D1)。WM は `exec_start` / `exec_resume` から戻った直後にこれを見て全画面モードに入る / 抜ける | K |
+| D4 | **gshell の全画面モード**: 所有者 ≠ WM の間は (a) 合成・present をしない、(b) 入力はいつもどおりフォーカス窓 (= 端末) へ配る (端末が `kbd_inject`)、(c) マウスはタスクバー / Start を含めて無視、(d) **CTRL+STOP は所有者宛** (`exec_abort_clear` → `exec_kill(owner)`、K5c の分岐に 1 条件)。所有者が WM に戻ったら **`gfx_init` → パレット復元 → `install_system_palette` → `lease::reapply` → `invalidate_all_clients` → `composite_full`** (いまの `rc <= 0` の枝を関数にして両方から呼ぶ)。**入口の追加**: Run ダイアログ / 端末からの起動前に OS32X ヘッダを読み (`sys_open` + 40B 読み)、`FORCE_CPL0` なら `cui only: <名>` を出して起動しない (カーネルの拒否は最後の砦)。`FLAG_GFX` なら起動直後から全画面モードに入る (所有者の問い合わせと二重) | W (+ 端末 A は入口だけ) |
+| D5 | **復帰は WM の `gfx_init` 任せ**: 復帰の `gfx_init` は WM が最初に選んだバックエンドで立ち上げ直す。プログラムが `gfx_init_200` にしていても 400 ラインに戻る。Cirrus のリレーは §4-21 の作法どおり | — |
+| D6 | **プログラム側のコード変更は無し** (宣言ビットは app.conf / 再ビルドで付く)。GUI アプリ (`libos32gfx_attach`) は所有者を取らない | ビルド系 |
+| D7 | 端末 (T7-A) は入口 (D4 の `cui only`) 以外は無変更。全画面中も接続モードで打鍵を注入し、EXIT でプロンプトへ | A |
 
-メモリ: 所有者 1 語 + カウンタ 1 語。`MEMORY_BUDGET.md` に計上。KAPI v48 は `gfx_screen_owner` の 1 本 (KAPI_SPEC §3-2 に予約)。
+メモリ: 所有者 1 語 + カウンタ 1 語。`MEMORY_BUDGET.md` に計上。KAPI v48 は `gfx_screen_owner` の 1 本 (KAPI_SPEC §3-2 に予約済み)。
 
-## 2. 受入 (ゲスト、PM / テスター)
+将来 (この票の範囲外、記録のみ): VDM のコンソール出力を con_sink に流せば「文字だけの DOS プログラムを端末窓で」も可能になる。
+宣言ビットは Start メニューの一覧や `ls` の表示 (種別) にも使える。
+
+## 3. 独立レビューの残点
+
+1. D1a の「宣言の無い CPL=3 の `gfx_init` を GUI 中は拒否」で、既存プログラムの取りこぼし (宣言し忘れ) は `check_manifests` で網を張るが、それで十分か。
+2. D2 を保険として残すか落とすか。
+3. D4(d) CTRL+STOP の宛先を所有者に切り替える例外 (K5c の「フォーカス窓宛」に対する)。
+4. D5 の Cirrus / PEGC 480 ライン構成の復帰 (§4-21 の再 init の罠) — 受入 F6 で実測する。
+
+## 4. 受入 (ゲスト、PM / テスター)
 
 | ID | 試験 | 合格条件 |
 |---|---|---|
-| F1 | 200 ライン | 端末に `gfx200_test` + Enter → 画面全体がテストパターン (WM が上書きしない、スクリーンショット)。端末経由でキーを打つ → プログラムが `gfx_shutdown` / `gfx_init` を通って終了 → **デスクトップ・端末窓・他の窓が全面再描画され、パレットが戻る** (スクリーンショット)。`gfx_screen_owner` は 3 → 1 |
-| F2 | 400 ライン | `blit_test` または `tile_bench` で同じ。捨てた present の回数 (`gfx_counters`) が全画面中だけ増える |
+| F1 | 200 ライン | 端末に `gfx200_test` + Enter → 画面全体がテストパターン (WM が上書きしない)。端末経由でキーを打つ → プログラムが終了 → **デスクトップ・端末窓・他の窓が全面再描画され、パレットが戻る**。`gfx_screen_owner` は 3 → 1 |
+| F2 | 400 ライン | `blit_test` または `tile_bench` で同じ。D2 を残すなら捨てた present の回数が全画面中だけ増える |
 | F3 | CTRL+STOP | 全画面中に CTRL+STOP → プログラムだけ畳まれ (`appslot_reclaim_count` +1、`fault_kill_count` 不変)、GUI が戻る |
-| F4 | 共存 | 端末のほかに `gui_demo` を出した状態で F1 → 復帰後に `gui_demo` の窓も描き直されている (W-1 の露出と同じ観点) |
-| F5 | 回帰 | regress 6 本、v86 -t、CUI から直接 `gfx200_test` (所有者の仕組みは GUI 中だけ効く)、Start → CUI mode |
+| F4 | 共存 | 端末のほかに `gui_demo` を出した状態で F1 → 復帰後に `gui_demo` の窓も描き直されている |
+| F5 | CUI 専用の拒否 | 端末に `v86` + Enter → `cui only: v86` で起動しない。Run ダイアログからも同じ。CUI からは従来どおり `v86 -t` が通る |
+| F6 | 宣言なし | 宣言ビットを外した試験バイナリ (テスト用に 1 本、`app.conf` で `gfx` 無し) を GUI 中に起動 → `gfx_init` が `ERR_INVAL` で画面は無事。CUI 中は動く |
+| F7 | 回帰 | regress 6 本、v86 -t、Start → CUI mode。可能なら PEGC 構成で F1 (§3-4) |
 
-## 3. レビューで見てほしい点
+## 5. 範囲外
 
-1. D1「`gfx_init` を呼んだら所有者」で足りるか — `gfx_init` を呼ばずに VRAM (0xA8000〜) へ直接書く CPL=3 プログラムは所有者にならず WM に上書きされる (それは「行儀の悪いプログラム」として許容するか、VRAM 写像の時点で所有者にするか)。
-2. D2 で WM の present をカーネルが捨てることの是非 (WM の規律 D4(a) だけで十分か。二重防御が「WM が黙って描けない」原因調査を難しくしないか — カウンタで補う案)。
-3. D4(d) CTRL+STOP の宛先を所有者に切り替える点 (K5c の「フォーカス窓宛」の例外になる)。
-4. D5 の「復帰は WM の `gfx_init` 任せ」で Cirrus / PEGC の 480 ライン構成が本当に戻るか (§4-21 の再 init の罠)。
-
-## 4. 範囲外
-
-- shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。
+- shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。
 - 配備・コミット・push・エミュレータ・ローカル AI・ini・.env・`make` は禁止 (コーダー)。
