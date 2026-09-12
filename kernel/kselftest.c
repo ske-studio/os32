@@ -27,6 +27,7 @@
 #include "kbd_inject.h"
 #include "appslot.h"
 #include "launch.h"
+#include "exec.h"
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -438,6 +439,37 @@ static void test_launch(void)
     check((bad & (1u << 0)) == 0, "launch: child exit marks DONE and clears child");
     check((bad & (1u << 1)) == 0, "launch: a finished row is handed over once");
     check((bad & (1u << 2)) == 0, "launch: requester exit becomes an orphan KILL");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  KAPI が CPL=3 へ返す文字列の置き場 (票 T9 §12 R1)                       */
+/*                                                                          */
+/*  sys_getcwd はカーネル帯の static cwd をそのまま返していた。カーネル帯は  */
+/*  USER ビット無しで張られるので、CPL=3 の sh.bin が `cd` / `pwd` で戻り値  */
+/*  を読んだ瞬間に #PF → fault kill になる (実機で見えるのは「cd したら      */
+/*  シェルが落ちる」だけ)。写し先はトランポリンページ (RO+USER) の空き。     */
+/*  ここで踏むのは「その番地がページに収まり、PTE に USER が立っていて、     */
+/*  CPL=0 の呼び手には従来どおり static cwd が返る」の 3 つ。                */
+/* ------------------------------------------------------------------------ */
+static void test_tramp_user_str(void)
+{
+    u32 bad = exec_tramp_user_selftest();
+    check((bad & (1u << 0)) == 0, "getcwd scratch fits after the KAPI stubs");
+    check((bad & (1u << 1)) == 0, "getcwd scratch page is present and USER");
+    check((bad & (1u << 2)) == 0, "sys_getcwd copies only for CPL=3 callers");
+}
+
+int kselftest_run_post_exec(void)
+{
+    int before = ksel_fail;
+
+    test_tramp_user_str();
+
+    if (ksel_fail != before) {
+        kprintf(0xC1, "[selftest] %d FAILED after exec_init\n",
+                ksel_fail - before);
+    }
+    return ksel_fail - before;
 }
 
 int kselftest_run(void)

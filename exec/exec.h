@@ -91,6 +91,18 @@ i32 exec_app_state(i32 app_id);
  * 0 = 降ろした / 要求が無かった、OS32_ERR_INVAL = owner 1 以外。 */
 i32 exec_abort_clear(void);
 
+/* KAPI sys_getcwd の実体 (票 T9 §12 R1)。CPL=3 の呼び手には
+ * トランポリンページ内の写しを、CPL=0 の呼び手には fs/vfs.c の static cwd を
+ * 返す。カーネル帯には USER ビットが無いので、写さずに返すと CPL=3 側が
+ * 読んだ瞬間に #PF → fault kill になる。sdk/kapi.json の target をこれに
+ * 差し替えてあるだけで、スロット・引数・戻り型は不変 ([ABI2])。 */
+const char *vfs_cwd_user(void);
+
+/* 上の写し場の番地とページ属性をブート時に踏む (票 T9 §12 R1)。
+ * kselftest_run() は exec_init() より前に走るので、この項だけ
+ * kselftest_run_post_exec() から呼ぶ。0 = 全部通った。 */
+u32 exec_tramp_user_selftest(void);
+
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
 

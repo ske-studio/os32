@@ -264,7 +264,7 @@
       "name": "sys_getcwd",
       "ret": "const char *",
       "args": [],
-      "target": "vfs_cwd"
+      "target": "vfs_cwd_user"
     },
     {
       "name": "vfs_devname",

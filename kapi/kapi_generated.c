@@ -632,7 +632,7 @@ int __cdecl wrap_sys_chdir(const char *path)
 const char * __cdecl wrap_sys_getcwd(void)
 {
     KAPI_HIT(29);
-    return vfs_cwd();
+    return vfs_cwd_user();
 }
 
 const char * __cdecl wrap_vfs_devname(const char *prefix)

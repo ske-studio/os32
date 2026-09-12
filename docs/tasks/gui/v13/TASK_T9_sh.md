@@ -157,6 +157,19 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   (3) `launch_report(KILL)` が `TAKEN` のまま来ても `child` を落とさず、印だけ消して `RUNNING` へ
   戻す。`DONE` を付けるのは常に回収通知 — 落とすと「生きている子の所有が表から消え、以後の
   退場でも回収されない」孤児ができた。試験は `2b2`/`2b3`・`4c`・`5h2` とケース 9 (16 検査) を追加。
+- **Codex 網羅レビュー 往復 7 の blocker R1 を修正** (2026-09-13): `sys_getcwd` が返していた
+  `fs/vfs.c` の static `cwd` は**カーネル帯 = USER ビット無し** (`kernel/paging.c` は
+  `phys | PAGE_RW` で張る。RO+USER なのは KAPI トランポリンページの 1 枚だけ) なので、
+  CPL=3 の `cd` / `pwd` / `apps/edit` が戻り値を読むと #PF → fault kill になっていた。
+  → `sdk/kapi.json` の target を `vfs_cwd` → **`vfs_cwd_user`** (`exec/exec.c`) に差し替え、
+  `ring3_in_syscall` なら**トランポリンページの空き** (表 + スタブの後ろ、`RING3_USTR_OFF`、
+  `exec/ring3_str.h`) へ写してそのポインタを返す。CPL=0 の呼び手には従来どおり static `cwd`。
+  **スロット・引数・戻り型は不変なので [ABI2] の範囲内、KAPI の版は上げていない** — 外から
+  見える約束が 1 つも動かず、上げると既存バイナリの `min_api_ver` が一斉に足りなくなるため。
+  写しは呼ばれるたびに上書き (`docs/KAPI_SPEC.md` の関数表の前に注記)。写し場がページに
+  収まることは `STATIC_ASSERT` で固定 (KAPI が増えたらビルドが落ちる)。
+  試験: `tools/tests/test_ring3_str.py` (新規、`make check-ring3-str-host`) 4 ケース 20 検査と、
+  `kselftest_run_post_exec()` の 3 項 (`kselftest_run()` は `exec_init()` より前に走るため別口)。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 

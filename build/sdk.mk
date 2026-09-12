@@ -185,6 +185,13 @@ check-kbd-inject-host:
 check-launch-host:
 	python3 -B tools/tests/test_launch.py
 
+# exec/ring3_str.c — KAPI が CPL=3 へ **返す** 文字列の置き場 (票 T9 §12 R1)。
+# カーネル帯には USER ビットが無いので、sys_getcwd がそのまま返すと CPL=3 の
+# 呼び手が #PF で畳まれる。写し先 (トランポリンページの空き) の番地の式と
+# 経路の分岐をホストで踏む。記録は tools/tests/t9_tdd.md。
+check-ring3-str-host:
+	python3 -B tools/tests/test_ring3_str.py
+
 # userland/shell/sh_launch.inc の起動待ち (票 T9 D3a)。実物のソースを
 # tools/tests/sh_launch_host.c がそのまま #include し、KernelAPI の
 # launch_req / launch_poll / sys_yield / kprintf を差し替えて DONE / FAILED /
@@ -200,9 +207,9 @@ check-sh-launch-host:
 check-sh-shell-host:
 	python3 -B tools/tests/test_sh_shell.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check

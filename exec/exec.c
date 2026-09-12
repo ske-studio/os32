@@ -21,6 +21,7 @@
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
+#include "ring3_str.h"   /* T9 §12 R1: KAPI が CPL=3 へ返す文字列の置き場 */
 #include "kapi_db.h"
 #include "gdt.h"
 #include "tss.h"
@@ -75,6 +76,12 @@ void exec_init(void) {
     ring3_trampoline_init();
 }
 
+/* 写し場 (票 T9 §12 R1) はスタブの後ろに置く。KAPI が増えて 1 ページに
+ * 収まらなくなったら **ここでビルドが落ちる** — 実機では「cd の直後に
+ * pwd が化ける」としか見えないので、静的に止める。 */
+STATIC_ASSERT(RING3_USTR_OFF + RING3_USTR_CAP <= (u32)PAGE_SIZE,
+              ring3_ustr_fits_in_trampoline_page);
+
 /* ======================================================================== */
 /*  ring3_trampoline_init — トランポリンページの構築 (v2 M2b)               */
 /* ======================================================================== */
@@ -82,7 +89,7 @@ static void ring3_trampoline_init(void)
 {
     u32 page = ((u32)ring3_tramp_raw + PAGE_SIZE - 1) & ~(u32)(PAGE_SIZE - 1);
     u32 *tbl = (u32 *)page;
-    u32 stub_base = (page + sizeof(KernelAPI) + 3u) & ~3u; /* 全 struct の後ろ */
+    u32 stub_base = page + RING3_USTR_STUB_OFF;   /* 全 struct の後ろ */
     u32 i;
 
     ring3_tramp_page = page;
@@ -253,6 +260,80 @@ volatile u32 exec_sbrk_tier_count[2] = { 0, 0 };
  * ような静的に検証できないポインタ deref もこれで捕捉でき [ABI4] を塞ぐ。
  * 非 static (isr_handlers.c が extern で参照)。 */
 volatile int ring3_in_syscall = 0;
+
+/* ======================================================================== */
+/*  vfs_cwd_user — sys_getcwd の実体 (票 T9 §12 R1、KAPI の追加はしない)     */
+/*                                                                          */
+/*  `sdk/kapi.json` の `sys_getcwd` の target を `vfs_cwd` からこれに差し    */
+/*  替えてある。スロット番号も引数も戻り型も変わらないので [ABI2] の範囲内で、*/
+/*  KAPI の版も上げない (外から見える約束が 1 つも動かないため — 版を上げると */
+/*  既存バイナリの min_api_ver が一斉に足りなくなる副作用の方が大きい)。     */
+/*                                                                          */
+/*  CPL=3 の呼び手には **トランポリンページ内の写し** を返す。カーネル帯の    */
+/*  static `cwd` は USER ビットが無く、読んだ瞬間に #PF → fault kill になる  */
+/*  (sh.bin の `cd` / `pwd`、apps/edit がこれを踏んでいた)。                 */
+/*  写しは呼ばれるたびに上書きする — 呼び手は次の KAPI 呼び出しより前に      */
+/*  読み切ること (docs/KAPI_SPEC.md の sys_getcwd の行に注記)。              */
+/* ======================================================================== */
+const char *vfs_cwd_user(void)
+{
+    char *scratch = 0;
+    if (ring3_tramp_page != 0) {
+        scratch = (char *)(ring3_tramp_page + RING3_USTR_OFF);
+    }
+    return ring3_user_str(ring3_in_syscall, scratch, RING3_USTR_CAP,
+                          vfs_cwd());
+}
+
+/* ======================================================================== */
+/*  exec_tramp_user_selftest — 写し場の番地とページ属性 (票 T9 §12 R1)       */
+/*                                                                          */
+/*  kselftest_run() は exec_init() より **前** に走るのでトランポリンページが */
+/*  まだ無い。この項だけ kselftest_run_post_exec() から呼ぶ。                */
+/*  ビット 0..n が落ちた項目 (0 = 全部通った)。                              */
+/* ======================================================================== */
+u32 exec_tramp_user_selftest(void)
+{
+    u32 bad = 0;
+    u32 addr;
+    u32 flags;
+    const char *before;
+    int saved = ring3_in_syscall;
+
+    if (ring3_tramp_page == 0) return 1u;    /* exec_init より前 */
+    addr = ring3_tramp_page + RING3_USTR_OFF;
+
+    /* (0) 写し場は同じ 1 ページの中に収まっている (末尾の 1 バイトまで) */
+    if (((addr + RING3_USTR_CAP - 1u) & ~(u32)(PAGE_SIZE - 1)) !=
+        ring3_tramp_page) {
+        bad |= 1u << 0;
+    }
+    /* スタブの領域と重ならない */
+    if (addr < ring3_tramp_page + RING3_USTR_STUB_OFF +
+               (u32)KAPI_FUNC_COUNT * 8u) {
+        bad |= 1u << 0;
+    }
+
+    /* (1) CPL=3 から読める = PTE に PRESENT と USER。無ければ cd / pwd が
+     * #PF で畳まれる (この blocker そのもの)。 */
+    flags = paging_pte_flags(addr);
+    if ((flags & PTE_PRESENT) == 0) bad |= 1u << 1;
+    if ((flags & PTE_USER) == 0)    bad |= 1u << 1;
+
+    /* (2) CPL=0 の呼び手には static cwd がそのまま返り、CPL=3 の呼び手には
+     * 写しが返る (中身は同じ)。ガードは必ず元へ戻す。 */
+    ring3_in_syscall = 0;
+    before = vfs_cwd_user();
+    if (before != vfs_cwd()) bad |= 1u << 2;
+    ring3_in_syscall = 1;
+    before = vfs_cwd_user();
+    if (before != (const char *)addr) bad |= 1u << 2;
+    if (kstrcmp(before, vfs_cwd()) != 0) bad |= 1u << 2;
+    ring3_in_syscall = saved;
+
+    return bad;
+}
+
 
 /* ======================================================================== */
 /*  GUI 入力ポンプと強制脱出 (K2 / 契約 T6・T8 の X4)                        */
