@@ -64,3 +64,21 @@
 
 発注の分割: **K7-K** (カーネル + KAPI v47 + kselftest + ホスト TDD) → 着地後に **K7-W** (gshell: A / C の WM 側) と
 **K7-A** (端末アプリ: R2 の規約、`GUI_EV_TEXT` / `GUI_EV_KEY` → `kbd_inject`)。受入 I1〜I5 は 3 票が揃ってから。
+
+## 6. K7-W / K7-A の発注内容 (K7-K 着地後に出す)
+
+**K7-W (gshell、`userland/gshell/src/multiapp.rs` ほか)**
+- `exec_app_state` の新値 `APP_STATE_WAIT_KEY` を模型 (`session` / `multiapp`) に足す。`ready_to_run` は
+  「`WAIT_KEY` かつ `kbd_inject_pending() > 0`」で真 (指摘 C)。
+- `slot_of_owner(k)` が `None` でも状態が `WAIT_KEY` なら `forget(k)` せず `exec_resume(k, 0)` (指摘 A)。
+  resume が「空」で拒否されたら (K の専用負値) その周は譲る (streak に数えない)。
+- D11 の規則・上限 (30) は不変。ホスト試験 `host/wm_tests.rs` / `test_multiapp_model.py` に RED→GREEN
+  (スロット無しの `WAIT_KEY` アプリが forget されない / pending 0 なら起こさない / pending > 0 で resume される)。
+- `build/app.conf` の gshell を KAPI 47 に。
+
+**K7-A (端末アプリ、`userland/rust/t5a_display`)**
+- イベントループに入る前に `con_sink_read` を 1 回呼び読み手権限を確立 (R2)。失敗 (`ERR_EXIST`) は状態行 busy のまま注入もしない。
+- `GUI_EV_TEXT` の UTF-8 と、`GUI_EV_KEY` のうち制御キー (Enter → `\n` または `\r`、BS、TAB、ESC は自分の終了に使うので注入しない、
+  矢印は範囲外) を `kbd_inject` へ。戻り値が負なら状態行に出す。
+- ローカルエコーはしない (CUI プログラム側の出力が con_sink 経由で戻る)。
+- `build/app.conf` の t5a_display を KAPI 47 に。ホスト試験: キー → バイト列の変換表 (境界: 空 TEXT、多バイト、Enter)。
