@@ -232,3 +232,5 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
   返しても **token を捨てない** — 完了した表は `launch_poll` が消費して初めて `IDLE` に戻る
   (`include/launch.h`) ので、捨てると以後 `launch_req` が `FULL` で固着する。取消待ちのまま poll を
   続け、`DONE` / `FAILED` を消費してからプロンプトへ戻す (host 試験にカーネル要求表の写しを置いて確認)。
+
+**往復 2/3 (W `25e3c46` / A `ba8e540`): Approve** — 3 件の修正を確認、新たな blocker なし。non-blocker: W の mock が NULL 出力を拒否し INVAL を -2 にしている (実契約は NULL 可 / -9)、A の試験模型が取消直後を RUNNING で返す (実契約は PENDING → TAKEN)。いずれも実装の挙動には影響しない。S は別途 (往復 1 の blocker 2 件を修正中)。
