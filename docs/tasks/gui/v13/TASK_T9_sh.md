@@ -211,3 +211,13 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
   カーネルの `launch_owner_exit` が回収、§10 non-blocker 1)。
 - 検証はホストのみ: host 試験 48 → **59** (RED→GREEN の記録は `tools/tests/t9_tdd.md` §A)、
   `cargo check --release -p t5a_display`、`check_constraints.py`。`make` / 配備 / 実機は未実施 ([V4])。
+
+## 16. Codex 実装レビュー (W / A / S、2026-09-13) — 往復 1/3: Request changes → 各レーンへ差し戻し
+
+- **A blocker**: ESC → `launch_cancel` が STALE のとき token を捨ててプロンプトへ戻ると、DONE / FAILED の表が poll で消費されず IDLE に戻らない → 以後の `launch_req` が FULL に固着。→ STALE でも poll で完了を消費してから戻る。
+- **W blocker 1**: `run_program` の `cui only` 拒否 (`RUN_REFUSED = 0`) をそのまま `launch_report(token, 0)` すると要求者に DONE が届く。→ 要求表経由の拒否は負の rc、モーダルは出さない。
+- **W blocker 2**: pick 時の tick で「起こし済み」を記録すると、pick と再開の間に tick が進んだとき同 tick に 2 回起こせる。→ 実際に起こした tick を ID ごとに記録する。
+- **S blocker 1**: TAB 補完後の `redraw_line()` が `console_get_cursor` に依存し、GUI 中 (K6C-2 で座標が進まない) は入力位置が戻らない。→ SHELL_AS_APP では座標に依存しない再描画。
+- **S blocker 2**: `source` 内の `exit` が行ループを止めない (`goto loop` で永久)。→ 各行の前に exit の印を見て資源を解放して抜ける。
+- ゲート (テスター): `make clean` / `all` (72s) / `external` exit=0、`make check` は check-manifests §1c (`docs/07_shell.md` に内蔵 `exit` が無い) で exit=2 → S へ。
+- non-blocker: A の STALE 試験は次回起動を見ていない、W の unsafe に SAFETY 注記、S の t9_tdd に RED 記録が無い、CUI 直起動時の `launch_req failed (-9)` の連発、UTF-8 の BS (既存)。
