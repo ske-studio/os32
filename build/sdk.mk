@@ -193,9 +193,16 @@ check-launch-host:
 check-sh-launch-host:
 	python3 -B tools/tests/test_sh_launch.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-multiapp-model-host
+# userland/shell/sh_redraw.inc の行再描画 (実装レビュー blocker 1 — GUI 中は
+# コンソール座標が動かない) と userland/shell/cmd_script.c の source 中 exit
+# (blocker 2 / D2(d))。どちらも実物のソースを tools/tests/sh_shell_host.c が
+# そのまま #include する。記録は tools/tests/t9_tdd.md。
+check-sh-shell-host:
+	python3 -B tools/tests/test_sh_shell.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-multiapp-model-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check

@@ -170,6 +170,16 @@ static void script_exec(void)
         const char *line = script_lines[script_current_line];
         const char *p = skip_spaces(line);
 
+#ifdef SHELL_AS_APP
+        /* D2(d): source 中の `exit` はその場で打ち切る。**各行の前**に見るので
+         * goto がここへ巻き戻しても回り続けず、ラベル行でも抜ける。ネストした
+         * source は内側がこれで戻り、script_source_file が script_lines を
+         * 解放してコンテキストを戻した先で外側もまた同じ判定で抜ける。
+         * 常駐では sh_exit_flag が存在しない (`exit` を登録していない) ので
+         * この判定ごと消える。 */
+        if (sh_exit_flag) break;
+#endif
+
         /* ラベル行 (:LABEL) はスキップ */
         if (*p == ':') {
             script_current_line++;

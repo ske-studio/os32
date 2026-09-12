@@ -174,7 +174,14 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - 票に無い判断 2 つ: ①`gfx_shutdown` を `sh_gfx_restore()` にして `SHELL_AS_APP` では**呼ばない** (所有者検査が無く、CPL=3 の sh が呼ぶと GUI の表示ごと止まる)。②`FAILED` が `NOT_FOUND`/`GENERAL` のときは印字しない (PATH 候補の数だけ同じ行が出る)。
 - 常駐の回帰: `dee101b` の `userland/shell/` を同じフラグでコンパイルして `.o` を突合、12 本中 11 本バイト一致、`cmd_base.o` の差は `__TIME__` の 1〜2 バイトのみ。**`cmd_ver` が `__DATE__`/`__TIME__` を埋めるので `shell.bin` の SHA-256 はそもそも再現しない** — S7 はここを除いた比較に。
 - 未実施: `make` 全般・リンク・配備・実機 ([V4])。通したのは両フラグの単体コンパイル、`check-sh-launch-host` (新規、`check`/`.PHONY` 登録、28 項目 ALL PASS、記録 `tools/tests/t9_tdd.md`)、`check_constraints.py`。
-- 残る穴 (W/A へ): ①`try_exec` 2b は相対名 (`ls.bin`) を `launch_req` へ渡すので、`run_program` が要求者でなく WM の cwd で解決すると当たらない。②リダイレクト/パイプは sh 自身の FD に掛かるため `sh> ls > f` は外部コマンドに効かない。③`exit` の印は行ループ末尾でしか見ないので `run` 中のスクリプトは最後まで流れる。
+- 残る穴 (W/A へ): ①`try_exec` 2b は相対名 (`ls.bin`) を `launch_req` へ渡すので、`run_program` が要求者でなく WM の cwd で解決すると当たらない。②リダイレクト/パイプは sh 自身の FD に掛かるため `sh> ls > f` は外部コマンドに効かない。
+
+### 13a. 実装レビュー (往復 1/3) の修正 (S、2026-09-13)
+
+- blocker 1: `SHELL_AS_APP` の `redraw_line` を `userland/shell/sh_redraw.inc` に分け、**コンソール座標を一切引かない**形にした。いま出ている行の写し (`sh_drawn`) を持ち、純粋な延長なら差分バイトだけ、それ以外は `\n` + プロンプト + 行全体、行末より前は桁数ぶんの BS で戻す。`shell_run` が直接印字する 3 か所 (ASCII / UTF-8 追加、行末 BS) と候補一覧の後にも `sh_mark_drawn` / `sh_drop_drawn` で写しを合わせる (常駐では両マクロとも空)。
+- blocker 2: `cmd_script.c` の `script_exec` が**各行の前に** `sh_exit_flag` を見て抜ける (`#ifdef SHELL_AS_APP`)。`goto` の巻き戻しでも毎行通り、ネストした `source` は内側から順に戻って `script_source_file` が各段で解放する。行ループ末尾の判定 (ui.c) はそのまま。→ §13 の「残る穴 ③」は解消。
+- check-manifests: `docs/07_shell.md` の基本コマンド表に `exit` と「`sh.bin` のみ」の注記を追加 (§1c は「なし」)。non-blocker も対応 — GUI 外の `launch_req` INVAL は `sh: external programs need the GUI terminal` を**1 度だけ**出して次の PATH 候補へ回す (起動が通れば印を寝かせる)。UTF-8 の BS は既存問題として触っていない。
+- 試験: `check-sh-shell-host` を新設 (`check` / `.PHONY` 登録、19 項目、RED → GREEN を `t9_tdd.md` に記録)。`check-sh-launch-host` は 36 項目へ増え、こちらも RED を採り直した。常駐の `.o` は 12 本中 11 本が `f753f2d` とバイト一致、`cmd_base.o` の差は `__TIME__` 1 バイトのみ。
 
 ## 14. 実装メモ (W、2026-09-13)
 

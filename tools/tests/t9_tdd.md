@@ -297,6 +297,81 @@ D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順
 | FULL | `launch_req` が `-13` | `-1`、`sh: ls: busy`、poll も yield もしない |
 | 禁止 | `kbd_getchar` / `kbd_trygetchar` / `ime_getkey` に印 | 全経路で 1 度も呼ばれない |
 
-`launch_req` のその他の失敗 (`-9`) も `launch_req failed (rc)` で 1 本見ている。
-実行結果は全 28 項目 `ALL PASS`、`TARGET i386-elf GNU89 -Werror COMPILE PASS`。
-実機・エミュレータ・`make` は**未実施** ([V4])。
+`launch_req` のその他の失敗 (`-10`) は `launch_req failed (rc)`、GUI 外の `-9` は
+**1 行だけ**出して次の PATH 候補へ回す (`sh: external programs need the GUI terminal`)。
+実行結果は全 36 項目 `ALL PASS`、`TARGET i386-elf GNU89 -Werror COMPILE PASS`。
+
+### RED (2026-09-13 追記)
+
+第 1 版では GREEN しか記録していなかったので、直す前の形に戻して落ちることを
+採った。`sh_launch.inc` の `sys_yield` の直後に `kbd_trygetchar()` を挟み、
+`FAILED` の判定を `if (0)` にすると:
+
+```
+  FAIL 1g 待ちの間 kbd/ime を呼ばない
+  FAIL 2a status の -rc をそのまま返す
+  FAIL 2b FAILED を見たらやめる
+  FAIL 3a NOMEM を返す
+  FAIL 3b 名前は cmdline の先頭語
+```
+
+戻すと `ALL PASS`。禁止 (kbd を覗かない) も経路 (FAILED) も、台本を通すだけでは
+なく**外すと落ちる**ことを確かめてある。
+
+---
+
+# T9-S ホスト TDD の記録 2 (行再描画と source 中の exit)
+
+票: [TASK_T9_sh.md](../../docs/tasks/gui/v13/TASK_T9_sh.md) §1 D2(d) と
+実装レビュー (往復 1/3) の blocker 1 / 2。
+実行: `make check-sh-shell-host` (= `python3 -B tools/tests/test_sh_shell.py`)。
+
+`tools/tests/sh_shell_host.c` が `userland/shell/sh_redraw.inc` と
+`userland/shell/cmd_script.c` を**そのまま** `#include` する。差し替えるのは
+KernelAPI 表 (出力 4 本・ヒープ・疑似ファイル・コンソール座標の呼び出し数え) と、
+シェルの他モジュールが出す `execute_command` / `env_*` / `shell_register_cmds` だけ。
+
+| 見るもの | 期待 |
+|---|---|
+| 延長 (TAB 補完) | 増えたバイトだけ印字、改行なし、座標 KAPI を 1 度も引かない |
+| 非延長 (履歴・BS・候補一覧の後) | `\n` + プロンプト + 行全体、座標 KAPI なし |
+| 行末より前のカーソル | 桁数ぶんの BS (端末の BS は消さずに 1 セル左) |
+| `exit` の次の行 | 走らない、FD を残さない |
+| `exit` のあとの `goto` ループ | ラベルも `goto` も走らず戻ってくる |
+| ネストした `source` | 内側で `exit` → 外側の後続も走らない |
+
+### RED → GREEN
+
+**blocker 1** — `sh_redraw.inc` を修正前 (常駐と同じ座標依存の `redraw_line`) に
+戻すと、同じ試験が落ちる:
+
+```
+       got "sh> lssh> " want "s"
+  FAIL 1a 増えた 1 バイトだけを印字する
+  FAIL 1c 変化なしなら無音
+  FAIL 1d console_set/get_cursor を 1 度も引かない
+       got "sh> catsh> " want "\nsh> cat"
+  FAIL 2a 改行 + プロンプト + 行全体
+  FAIL 2a' 作り直しも座標を引かない
+       got "sh> ca sh> " want "\nsh> ca"
+  FAIL 2b 縮む側も作り直す
+```
+
+**blocker 2** — `cmd_script.c` の `#ifdef SHELL_AS_APP if (sh_exit_flag) break;` を
+外すと:
+
+```
+       got "echo 1|exit|echo 2" want "echo 1|exit"
+  FAIL 3b exit の後は実行しない
+       got "echo a|exit|goto loop" want "echo a|exit"
+  FAIL 4b ラベルも goto も走らない
+       got "source /inner.sh|exit|echo inner2|echo outer2" want "source /inner.sh|exit"
+  FAIL 5b 内側も外側も後続を止める
+```
+
+(4b の RED で `goto loop` が 1 回で止まっているのはハーネスの記録上限 16 行の
+おかげで、実物では `:loop` ← `goto loop` が永久に回る。)
+
+どちらも戻すと全 19 項目 `ALL PASS`、`TARGET i386-elf GNU89 COMPILE PASS`。
+実機・エミュレータ・`make` は**未実施** ([V4]) — 端末上の見え方 (受入 S5) は
+PM の実機確認に委ねる。

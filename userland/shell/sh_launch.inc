@@ -25,6 +25,11 @@
 /* ======================================================================== */
 #define SH_LAUNCH_NAME_MAX 64
 
+/* GUI 外 (CUI から sh.bin を直に起動した等) を 1 度だけ報せるための印。
+ * launch_req は GUI 外では毎回 OS32_ERR_INVAL を返すので、素直に報告すると
+ * PATH 候補の数だけ同じ行が出る。起動が通ったら寝かせ直す。 */
+static int sh_launch_nogui = 0;
+
 static void sh_launch_name(const char *cmdline, char *out, int max)
 {
     int i = 0;
@@ -46,6 +51,16 @@ int sh_launch(const char *cmdline)
 
     token = g_api->launch_req(cmdline);
     if (token <= 0) {
+        if (token == OS32_ERR_INVAL) {
+            /* GUI 外。1 度だけ理由を出し、あとは黙って次の PATH 候補へ回す
+             * (最後は run_cmd_internal の "command not found" で閉じる)。 */
+            if (!sh_launch_nogui) {
+                sh_launch_nogui = 1;
+                g_api->kprintf(ATTR_RED, "%s",
+                               "sh: external programs need the GUI terminal\n");
+            }
+            return EXEC_ERR_NOT_FOUND;
+        }
         if (token == OS32_ERR_FULL)
             g_api->kprintf(ATTR_RED, "sh: %s: busy\n", name);
         else
@@ -53,6 +68,7 @@ int sh_launch(const char *cmdline)
                            name, (int)token);
         return EXEC_ERR_GENERAL;
     }
+    sh_launch_nogui = 0;   /* 通った — 次に GUI 外へ落ちたらまた報せる */
 
     for (;;) {
         /* 明示的な譲り。GUI 中は必ず WAIT_POLL へ park し、その間に WM が

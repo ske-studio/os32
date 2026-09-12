@@ -322,16 +322,48 @@ static void case_req_other(void)
     int rc;
 
     reset_harness();
-    report("6 launch_req が INVAL — launch_req failed (rc)\n");
-    g_script.req_rc = OS32_ERR_INVAL;
+    report("6 launch_req が NOSYS — launch_req failed (rc)\n");
+    g_script.req_rc = OS32_ERR_NOSYS;
     script_poll(0, 0, LAUNCH_ST_DONE);
 
     rc = sh_launch("kbd_echo");
 
     check(rc == EXEC_ERR_GENERAL,                   "6a 負を返す");
     check(g_polls == 0,                             "6b poll しない");
-    check(str_eq(g_msg, "sh: kbd_echo: launch_req failed (-9)\n"),
+    check(str_eq(g_msg, "sh: kbd_echo: launch_req failed (-10)\n"),
                                                     "6c rc つきで報告する");
+}
+
+/* GUI 外 (CUI から直に起動) — PATH 候補の数だけ同じ行を出さない */
+static void case_req_nogui(void)
+{
+    int rc;
+
+    reset_harness();
+    sh_launch_nogui = 0;
+    report("7 launch_req が INVAL — GUI 外は 1 行だけ、あとは黙る\n");
+    g_script.req_rc = OS32_ERR_INVAL;
+    script_poll(0, 0, LAUNCH_ST_DONE);
+
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(rc == EXEC_ERR_NOT_FOUND,                 "7a 次の候補へ回す値を返す");
+    check(str_eq(g_msg, "sh: external programs need the GUI terminal\n"),
+                                                    "7b 理由を 1 行だけ出す");
+    check(g_polls == 0,                             "7c poll しない");
+
+    /* 2 本目以降の PATH 候補 */
+    g_msg[0] = '\0';
+    g_msg_len = 0;
+    rc = sh_launch("/usr/bin/kbd_echo.bin");
+    check(rc == EXEC_ERR_NOT_FOUND,                 "7d 2 本目も次の候補へ");
+    check(g_msg[0] == '\0',                         "7e 2 本目は黙る");
+
+    /* 起動が通れば印は寝る (次に GUI 外へ落ちたらまた報せる) */
+    reset_harness();
+    g_script.req_rc = 5;
+    script_poll(0, 0, LAUNCH_ST_DONE);
+    (void)sh_launch("ls");
+    check(sh_launch_nogui == 0,                     "7f 通ったら印を寝かせる");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -345,6 +377,7 @@ void _start(void)
     case_stale();
     case_full();
     case_req_other();
+    case_req_nogui();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }
