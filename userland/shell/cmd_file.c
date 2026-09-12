@@ -73,14 +73,20 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
 #define MAX_COPY_ENTRIES 64
 #define MAX_COPY_DEPTH   8
 
+/* I-4: 名前幅は DirEntry_Ext.name と同じ。31B で切っていたころは 32 文字
+ * 以上のファイルがコピーされず、切り詰めが衝突すると別ファイルを繰り返し
+ * コピーしていた。1 段ぶん 64 × 260B ≈ 16.6KB になるので、**スタックには
+ * 置かず** mem_alloc から取る (常駐シェルのスタックは 40KB で、深さ 8 の
+ * 再帰に積むと溢れる)。 */
 struct copy_entry {
-    char name[32];
+    char name[OS32_MAX_PATH];
     int  is_dir;   /* 1=ディレクトリ, 0=ファイル */
 };
 
 /* 収集用バッファ (スタック節約のため static) */
 static struct copy_entry g_copy_entries[MAX_COPY_ENTRIES];
 static int g_copy_count;
+static int g_copy_over;    /* I-4: 上限を超えた (中止する) */
 
 /* sys_ls コールバック: エントリを収集するだけ */
 static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
@@ -93,10 +99,10 @@ static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
         (entry->name[1] == '\0' || (entry->name[1] == '.' && entry->name[2] == '\0')))
         return;
 
-    if (g_copy_count >= MAX_COPY_ENTRIES) return;
+    if (g_copy_count >= MAX_COPY_ENTRIES) { g_copy_over = 1; return; }
 
     nlen = strlen(entry->name);
-    if (nlen >= 31) nlen = 31;
+    if (nlen >= OS32_MAX_PATH - 1) nlen = OS32_MAX_PATH - 1;
     memcpy(g_copy_entries[g_copy_count].name, entry->name, nlen);
     g_copy_entries[g_copy_count].name[nlen] = '\0';
     g_copy_entries[g_copy_count].is_dir = (entry->type == OS32_FILE_TYPE_DIR) ? 1 : 0;
@@ -106,12 +112,20 @@ static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
 /* ディレクトリの再帰コピー (collect-then-copy) */
 static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
 {
-    /* ローカルにコピーしてから再帰 (static バッファを再帰で上書き対策) */
-    struct copy_entry local_entries[MAX_COPY_ENTRIES];
+    /* 収集表の写し。再帰で g_copy_entries が上書きされるので 1 段ごとに
+     * 自分のぶんを持つ。I-4 で 1 段 16.6KB になったのでヒープから取る。 */
+    struct copy_entry *local_entries;
     int local_count, i;
 
     if (depth >= MAX_COPY_DEPTH) {
         g_api->kprintf(ATTR_RED, "cp: max depth exceeded: %s\n", src);
+        return;
+    }
+
+    local_entries = (struct copy_entry *)
+        g_api->mem_alloc(sizeof(struct copy_entry) * MAX_COPY_ENTRIES);
+    if (!local_entries) {
+        g_api->kprintf(ATTR_RED, "%s", "cp: out of memory\n");
         return;
     }
 
@@ -120,9 +134,15 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
 
     /* エントリを全て収集 (static バッファに) */
     g_copy_count = 0;
+    g_copy_over = 0;
     g_api->sys_ls(src, collect_entries_cb, (void *)0);
+    if (g_copy_over) {
+        g_api->kprintf(ATTR_RED, "cp -r: too many entries in '%s' (max %d)\n",
+                       src, MAX_COPY_ENTRIES);
+        g_api->mem_free(local_entries);
+        return;
+    }
 
-    /* ローカルにコピー (再帰で g_copy_entries が上書きされるため) */
     local_count = g_copy_count;
     for (i = 0; i < local_count; i++) {
         local_entries[i] = g_copy_entries[i];
@@ -133,8 +153,13 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
         char src_path[PATH_MAX_LEN];
         char dst_path[PATH_MAX_LEN];
 
-        fs_join_path(src_path, src, local_entries[i].name);
-        fs_join_path(dst_path, dst, local_entries[i].name);
+        /* I-3: 収まらない綴りは黙って切り詰めず飛ばす (別の宛先を潰さない) */
+        if (fs_join_path(src_path, src, local_entries[i].name) < 0 ||
+            fs_join_path(dst_path, dst, local_entries[i].name) < 0) {
+            g_api->kprintf(ATTR_RED, "cp: path too long: %s\n",
+                           local_entries[i].name);
+            continue;
+        }
 
         if (local_entries[i].is_dir) {
             do_copy_recursive_impl(src_path, dst_path, depth + 1);
@@ -142,6 +167,7 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
             do_copy_file("cp", src_path, dst_path);
         }
     }
+    g_api->mem_free(local_entries);
 }
 
 static void do_copy_recursive(const char *src, const char *dst)
@@ -200,7 +226,10 @@ static void cmd_cp(int argc, char **argv)
             /* 再帰コピー */
             if (is_dest_dir) {
                 char dpath[PATH_MAX_LEN];
-                fs_join_path(dpath, dst, get_basename(src));
+                if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
+                    g_api->kprintf(ATTR_RED, "cp: path too long: %s\n", src);
+                    continue;
+                }
                 do_copy_recursive(src, dpath);
             } else {
                 do_copy_recursive(src, dst);
@@ -208,7 +237,10 @@ static void cmd_cp(int argc, char **argv)
         } else {
             if (is_dest_dir) {
                 char dpath[PATH_MAX_LEN];
-                fs_join_path(dpath, dst, get_basename(src));
+                if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
+                    g_api->kprintf(ATTR_RED, "cp: path too long: %s\n", src);
+                    continue;
+                }
                 do_copy_file("cp", src, dpath);
             } else {
                 do_copy_file("cp", src, dst);
@@ -279,7 +311,10 @@ static void cmd_mv(int argc, char **argv)
 
         if (is_dest_dir) {
             char dpath[PATH_MAX_LEN];
-            fs_join_path(dpath, dst, get_basename(src));
+            if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
+                g_api->kprintf(ATTR_RED, "mv: path too long: %s\n", src);
+                continue;
+            }
             do_move_one(src, dpath);
         } else {
             do_move_one(src, dst);

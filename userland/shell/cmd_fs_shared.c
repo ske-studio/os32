@@ -195,18 +195,28 @@ void fs_append_basename(char *dst_path, const char *src_path)
 /* ======================================================================== */
 /*  fs_join_path — dir_path と name を結合して dst_path に格納                */
 /* ======================================================================== */
-void fs_join_path(char *dst_path, const char *dir_path, const char *name)
+/* I-3: 戻り値 0 = OK / **-1 = 収まらない**。以前は黙って切り詰めていたので、
+ * 長い名前の mv が別の宛先 (`D/abcd` 等) を上書きして元を削除していた。
+ * 呼び手は負を見たら `path too long` で中止すること。 */
+int fs_join_path(char *dst_path, const char *dir_path, const char *name)
 {
-    int dlen;
+    int dlen, nlen;
+
+    dlen = strlen(dir_path);
+    nlen = strlen(name);
+    if (dlen > PATH_MAX_LEN - 1) { dst_path[0] = '\0'; return -1; }
 
     strncpy(dst_path, dir_path, PATH_MAX_LEN - 1);
     dst_path[PATH_MAX_LEN - 1] = '\0';
-    dlen = strlen(dst_path);
-    if (dlen > 0 && dst_path[dlen - 1] != '/' && dlen < PATH_MAX_LEN - 1) {
+    if (dlen > 0 && dst_path[dlen - 1] != '/') {
+        if (dlen + 1 > PATH_MAX_LEN - 1) { dst_path[0] = '\0'; return -1; }
         dst_path[dlen] = '/';
         dst_path[dlen + 1] = '\0';
+        dlen++;
     }
-    strncat(dst_path, name, PATH_MAX_LEN - strlen(dst_path) - 1);
+    if (dlen + nlen > PATH_MAX_LEN - 1) { dst_path[0] = '\0'; return -1; }
+    strncat(dst_path, name, PATH_MAX_LEN - dlen - 1);
+    return 0;
 }
 
 /* ======================================================================== */

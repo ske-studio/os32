@@ -643,7 +643,11 @@ void execute_command(const char *cmd)
     if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
 
     /* $VAR / ~ 展開 */
-    env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
+    /* I-2: 展開しきれない行は**切れたまま実行しない** */
+    if (env_expand(cmd, expanded_buf, CMD_BUF_SIZE) < 0) {
+        g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
+        return;
+    }
     src = expanded_buf;
 
     /* パイプの有無を判定 */

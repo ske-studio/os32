@@ -221,11 +221,15 @@ static void cmd_dd(int argc, char **argv)
             }
             bps = (u32)dummy_bps;
         } else {
-            /* I3: ATAPI (cd) は 1 セクタ 2048B を書く (drivers/atapi.c)。
-             * 1024B しか確保していなかったので dev_blk_read が 1KB 溢れていた。
-             * dev_get_info はセクタ長を返さないので、名前で見分ける。 */
+            /* I3 / I-5: dev_blk_read が 1 セクタで書く長さはデバイス種別ごとに
+             * 違う (cd = ATAPI 2048B、hd = IDE の物理 512B、fd = FDC 1024B)。
+             * `dev_get_info` はセクタ長を返さないので**名前の先頭で見分ける**
+             * — KAPI がセクタ長を返すようになったらそちらへ寄せること。
+             * 足りない確保のまま読むと dev_blk_read がヒープを踏む。 */
             if (dev_name[0] == 'c' && dev_name[1] == 'd')
                 bps = SYS_CDROM_SECTOR_SIZE;
+            else if (dev_name[0] == 'h' && dev_name[1] == 'd')
+                bps = SYS_HDD_SECTOR_SIZE;
             else
                 bps = SYS_BLOCK_SECTOR_SIZE;
         }
@@ -268,8 +272,20 @@ static void cmd_dd(int argc, char **argv)
                 { u8 *z = (u8 *)buf; u32 k; for (k = 0; k < bps; k++) z[k] = 0; }
                 err_count++;
             }
-            g_api->sys_write(fd, buf, bps);
-            total_bytes += bps;
+            /* I-6: 短い書き込み / 失敗を見逃さない。以前は要求長を無条件に
+             * 足していたので、書けていなくても `wrote N bytes` と出た。 */
+            {
+                int w = g_api->sys_write(fd, buf, bps);
+                if (w < 0 || (u32)w != bps) {
+                    g_api->kprintf(ATTR_RED,
+                        "dd: write failed at sector %d (wrote %u bytes)\n",
+                        lba + i, total_bytes);
+                    g_api->sys_close(fd);
+                    g_api->mem_free(buf);
+                    return;
+                }
+                total_bytes += (u32)w;
+            }
         }
         g_api->sys_close(fd);
         if (err_count > 0)

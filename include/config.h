@@ -50,8 +50,9 @@
 /*  外部プログラム (シェルの dd 等) が読む口をここに置く。値を変えるときは    */
 /*  必ず drivers 側と一緒に見ること。                                        */
 /* ====================================================================== */
-#define SYS_CDROM_SECTOR_SIZE 2048    /* = ATAPI_SECTOR_SIZE */
-#define SYS_BLOCK_SECTOR_SIZE 1024    /* = FDC_SECTOR_SIZE (IDE/FDD/loop 既定) */
+#define SYS_CDROM_SECTOR_SIZE 2048    /* = ATAPI_SECTOR_SIZE (cd*) */
+#define SYS_HDD_SECTOR_SIZE   512     /* IDE の物理セクタ (hd*) */
+#define SYS_BLOCK_SECTOR_SIZE 1024    /* = FDC_SECTOR_SIZE (fd* ほか既定) */
 
 /* ====================================================================== */
 /*  LAN (LGY-98, docs/tasks/network/PLAN.md)                                */

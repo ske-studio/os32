@@ -91,10 +91,14 @@ void env_unset(const char *name)
 }
 
 /* $VAR / ${VAR} / ~ 展開 */
+/* I-2: 戻り値 0 / 1 = 展開の有無、**負 = 収まらなかった**。以前は 4095B で
+ * 黙って打ち切っていたので、`${PAD}` を並べた行で末尾の宛先が落ちたまま
+ * 実行されていた。呼び手は負を見たら行ごと捨てること。 */
 int env_expand(const char *src, char *dst, int max)
 {
     int si = 0, di = 0;
     int expanded = 0;
+    int truncated = 0;
 
     while (src[si] && di < max - 1) {
         if (src[si] == '~' && (si == 0 || src[si - 1] == ' ') &&
@@ -103,6 +107,7 @@ int env_expand(const char *src, char *dst, int max)
             const char *home = env_get("HOME");
             if (home) {
                 while (*home && di < max - 1) dst[di++] = *home++;
+                if (*home) truncated = 1;
                 expanded = 1;
             } else {
                 dst[di++] = '~';
@@ -141,6 +146,7 @@ int env_expand(const char *src, char *dst, int max)
             val = env_get(var_name);
             if (val) {
                 while (*val && di < max - 1) dst[di++] = *val++;
+                if (*val) truncated = 1;
                 expanded = 1;
             }
             /* 変数が見つからない場合は空文字に展開 (UNIXの慣習) */
@@ -149,6 +155,7 @@ int env_expand(const char *src, char *dst, int max)
         }
     }
     dst[di] = '\0';
+    if (truncated || src[si] != '\0') return -1;
     return expanded;
 }
 

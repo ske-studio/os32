@@ -434,20 +434,13 @@ static void show_prompt(void) { out_str("sh> "); }
 #include "../../userland/shell/cmd_fs_shared.c"
 #include "../../userland/shell/cmd_file.c"
 #include "../../userland/shell/cmd_mnt.c"
+#include "../../userland/shell/cmd_env.c"
+#include "../../userland/shell/cmd_sys.c"
 
 /* ---- シェルの他モジュールの代わり -------------------------------------- */
 
 void shell_register_cmds(const ShellCmd *cmds) { (void)cmds; }
 void shell_print_help(const char *cmd_name) { (void)cmd_name; }
-void env_set(const char *name, const char *value) { (void)name; (void)value; }
-
-int env_expand(const char *src, char *dst, int max)
-{
-    int i = 0;
-    while (src[i] && i < max - 1) { dst[i] = src[i]; i++; }
-    dst[i] = '\0';
-    return i;
-}
 
 /* 実行した行の記録。source / goto / exit だけ意味を持たせ、他は記録のみ。 */
 #define TRACE_MAX   16
@@ -1045,7 +1038,7 @@ static void case_sector_and_wildcard(void)
         check(g_last_alloc == SYS_CDROM_SECTOR_SIZE,
               "12''b 確保長は 2048B");
 
-        argv[1] = (char *)"hd0";
+        argv[1] = (char *)"fd0";
         files_reset();
         out_reset();
         g_blk_sector = SYS_BLOCK_SECTOR_SIZE;
@@ -1053,7 +1046,7 @@ static void case_sector_and_wildcard(void)
         g_blk_written = 0;
         cmd_dd(5, argv);
         check(g_last_alloc == SYS_BLOCK_SECTOR_SIZE,
-              "12''b' cd 以外は 1024B のまま");
+              "12''b' fd は 1024B のまま (hd は I-5 で 512B)");
     }
 
     /* I4: 病的パターン。再帰版はここで事実上停止した。 */
@@ -1078,6 +1071,127 @@ static void case_sector_and_wildcard(void)
     check(wildcard_match("*", "") == 1,             "12''i * は空にも当たる");
     check(wildcard_match("", "x") == 0,             "12''j 空パターンは空だけ");
     check(wildcard_match("t*t*t", "target_t") == 1, "12''k 複数の * が戻れる");
+}
+
+/* ========================================================================
+ *  12'''. 往復 9 — C-1 (glob の '*' 優先) と I-1〜I-6
+ * ======================================================================== */
+static void case_star_precedence(void)
+{
+    report("12''' パターンの '*' は通常文字の比較より先に見る (C-1)\n");
+
+    check(wildcard_match("*", "*dest") == 1,   "C1a * は * で始まる名前にも当たる");
+    check(wildcard_match("*d*", "*dest") == 1, "C1b 途中に * があっても当たる");
+    check(wildcard_match("a*", "*dest") == 0,  "C1c 先頭が違えば当たらない");
+    check(wildcard_match("*t", "*dest") == 1,  "C1d 末尾一致");
+    check(wildcard_match("**", "*") == 1,      "C1e 連続 * も当たる");
+
+    /* 旧版と同じ 8 ケース (意味を変えていないこと) */
+    check(wildcard_match("*.bin", "ls.bin") == 1,   "C1f *.bin が当たる");
+    check(wildcard_match("*.bin", "ls.txt") == 0,   "C1g 拡張子違いは外れる");
+    check(wildcard_match("a*b", "ab") == 1,         "C1h * は 0 文字でもよい");
+    check(wildcard_match("a?c", "abc") == 1,        "C1i ? は 1 文字");
+    check(wildcard_match("a?c", "ac") == 0,         "C1j ? は 0 文字に当たらない");
+    check(wildcard_match("*", "") == 1,             "C1k * は空にも当たる");
+    check(wildcard_match("", "x") == 0,             "C1l 空パターンは空だけ");
+    check(wildcard_match("t*t*t", "target_t") == 1, "C1m 複数の * が戻れる");
+}
+
+static void case_inherited_9(void)
+{
+    static char line[8192];
+    static char out[4096];
+    char joined[PATH_MAX_LEN];
+    char longname[PATH_MAX_LEN];
+    DirEntry_Ext e;
+    int i, n;
+
+    report("12'''' I-1〜I-6\n");
+
+    /* I-1: shell 側 IdeInfo はカーネル定義 (96B) と同じ大きさ */
+    check(sizeof(IdeInfo) == 96, "I1 IdeInfo は 96B (phys_sector_size を含む)");
+
+    /* I-2: 展開しきれない行は負。ENV_VALUE_MAX (256) いっぱいの値を
+     * いくつも並べて、受け皿 (ここでは 512B) に収まらない形を作る。 */
+    env_init();
+    for (i = 0; i < 200; i++) line[i] = 'P';
+    line[200] = '\0';
+    env_set("PAD", line);
+
+    n = 0;
+    { const char *c = "echo "; while (*c) line[n++] = *c++; }
+    for (i = 0; i < 8; i++) { const char *c = "${PAD}"; while (*c) line[n++] = *c++; }
+    line[n] = '\0';
+    check(env_expand(line, out, 512) < 0,
+                                       "I2 展開が受け皿に収まらなければ負");
+
+    /* 素の行が受け皿より長い場合も負 */
+    for (i = 0; i < 600; i++) line[i] = 'q';
+    line[600] = '\0';
+    check(env_expand(line, out, 512) < 0,
+                                       "I2' 展開なしでも長すぎれば負");
+    check(env_expand("echo hi", out, 512) >= 0 && strcmp(out, "echo hi") == 0,
+                                       "I2'' 収まる行は非負で中身も同じ");
+
+    /* I-3: fs_join_path は溢れたら負 */
+    for (i = 0; i < PATH_MAX_LEN - 2; i++) longname[i] = 'x';
+    longname[PATH_MAX_LEN - 2] = '\0';
+    check(fs_join_path(joined, "/d", longname) < 0,
+                                       "I3 収まらない結合は負を返す");
+    check(fs_join_path(joined, "/d", "abc") == 0 &&
+          strcmp(joined, "/d/abc") == 0,
+                                       "I3' 収まる結合は 0 と正しい綴り");
+
+    /* I-4: 収集表は 32 文字以上の名前も写す */
+    g_copy_count = 0;
+    g_copy_over = 0;
+    for (i = 0; i < 40; i++) e.name[i] = 'n';
+    e.name[40] = '\0';
+    e.size = 0;
+    e.type = OS32_FILE_TYPE_FILE;
+    collect_entries_cb(&e, (void *)0);
+    check(g_copy_count == 1 && strlen(g_copy_entries[0].name) == 40,
+                                       "I4 40 文字の名前が切れずに写る");
+    g_copy_count = 0;
+
+    /* I-5: dd のセクタ長はデバイス種別ごと */
+    {
+        char *argv[6];
+        argv[0] = (char *)"dd";
+        argv[2] = (char *)"lba=0";
+        argv[3] = (char *)"count=1";
+        argv[4] = (char *)0;
+
+        argv[1] = (char *)"hd0";
+        files_reset(); out_reset();
+        g_blk_sector = SYS_HDD_SECTOR_SIZE; g_last_alloc = 0;
+        cmd_dd(4, argv);
+        check(g_last_alloc == SYS_HDD_SECTOR_SIZE, "I5 hd0 は 512B");
+
+        argv[1] = (char *)"fd0";
+        files_reset(); out_reset();
+        g_blk_sector = SYS_BLOCK_SECTOR_SIZE; g_last_alloc = 0;
+        cmd_dd(4, argv);
+        check(g_last_alloc == SYS_BLOCK_SECTOR_SIZE, "I5' fd0 は 1024B");
+
+        argv[1] = (char *)"cd0";
+        files_reset(); out_reset();
+        g_blk_sector = SYS_CDROM_SECTOR_SIZE; g_last_alloc = 0;
+        cmd_dd(4, argv);
+        check(g_last_alloc == SYS_CDROM_SECTOR_SIZE, "I5'' cd0 は 2048B");
+
+        /* I-6: 書き込み失敗は中止して実書き込み量を出す */
+        argv[1] = (char *)"hd0";
+        argv[4] = (char *)"file=/dd.out";
+        argv[5] = (char *)0;
+        files_reset(); out_reset();
+        g_blk_sector = SYS_HDD_SECTOR_SIZE;
+        g_write_fail = 1;
+        cmd_dd(5, argv);
+        g_write_fail = 0;
+        check(out_is("dd: write failed at sector # (wrote # bytes)\\n"),
+                                       "I6 write 失敗で中止して報せる");
+    }
 }
 
 /* ========================================================================
@@ -1172,6 +1286,8 @@ void _start(void)
     case_argv_bound();
     case_path_normalize();
     case_sector_and_wildcard();
+    case_star_precedence();
+    case_inherited_9();
     case_copy_failure();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();

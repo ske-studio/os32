@@ -636,6 +636,33 @@ rc=124 (124 = timeout: 20 秒たっても返らない)
 T2 の拒否そのもの (`sh_is_cui_only`) は `main.c` の static なのでホストへは
 持ち込んでいない (B3 / B6 と同じ理由)。
 
+### 往復 9 の追加 (2026-09-13、C-1 と I-1〜I-6)
+
+`cmd_env.c` / `cmd_sys.c` もハーネスへ取り込み、`env_set` / `env_expand` の
+スタブは実物に置き換えた。直す前の形へ戻した RED:
+
+```
+  FAIL C1a * は * で始まる名前にも当たる      (C-1: '*' を通常文字の後ろに戻した)
+  FAIL C1d 末尾一致
+  FAIL I1 IdeInfo は 96B (phys_sector_size を含む)
+  FAIL I2 展開が受け皿に収まらなければ負
+  FAIL I2' 展開なしでも長すぎれば負
+  FAIL I3 収まらない結合は負を返す
+  FAIL I4 40 文字の名前が切れずに写る
+  FAIL I5 hd0 は 512B
+       got "dd: wrote # bytes -> /dd.out\n" want "dd: write failed at sector # (wrote # bytes)\n"
+  FAIL I6 write 失敗で中止して報せる
+```
+
+C-1 の RED は旧版で通っていた 8 ケース (C1f〜C1m) を**巻き込まない** — 落ちるのは
+`*` で始まる名前に関する 2 本だけで、回帰の範囲と一致する。戻すと全 102 項目
+`ALL PASS`。
+
+**常駐 `.o` の突合** (`3f919a5` 比較): 変わるのは `main.o` (C-1 / I-2 の呼び手)、
+`cmd_sys.o` (I-1)、`cmd_env.o` (I-2)、`cmd_fs_shared.o` (I-3)、`cmd_file.o`
+(I-3 / I-4)、`cmd_mnt.o` (I-5 / I-6)。`cmd_base.o` の差は `__TIME__` 1 バイト。
+C-1 は回帰修正なので常駐にも入るのが正しい。
+
 **ホストに載せていないもの** (実機確認 = 受入 S5 に委ねる): B3 の判定
 (`sh_has_redirect` / `sh_name_is_builtin`) と B6 の段ループの `sh_exit_flag`、
 B4 の事前判定は、いずれも `main.c` の static で `g_cmds` の登録表と `main()`

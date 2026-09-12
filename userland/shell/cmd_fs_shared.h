@@ -39,7 +39,8 @@ const char *get_basename(const char *path);
 void fs_append_basename(char *dst_path, const char *src_path);
 
 /* dir_path と name を結合 */
-void fs_join_path(char *dst_path, const char *dir_path, const char *name);
+/* I-3: 0 = OK / -1 = PATH_MAX_LEN に収まらない (呼び手は中止すること) */
+int fs_join_path(char *dst_path, const char *dir_path, const char *name);
 
 /* コマンド文字列から2引数を取り出す */
 int fs_parse_two_args(const char *cmd, int skip, char *arg1, char *arg2);
