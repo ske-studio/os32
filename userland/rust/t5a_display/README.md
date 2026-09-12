@@ -26,9 +26,26 @@
   空になるまで `con_sink_read` する。`OS32_ERR_EXIST`（読み手は先客）は状態行に
   出したまま次の周も試し、それ以外の負値は以後読まない。末尾追従を既定にし、
   `j` `k` `g` で解け `e` で戻る。T5a の cover 窓は落とした（端末に余分な窓は要らない）。
-- `build/app.conf`: `userland/tests/t5a_display` を **KAPI 46** で登録。
+- `build/app.conf`: `userland/tests/t5a_display` を **KAPI 47** で登録（K7-A で 46 → 47）。
 
-ホスト検査: `cargo check --release -p t5a_display` と host テスト 32 件が通る。
+## K7-A の差分（票 TASK_K7_input.md §5 R2 / §6）
+
+- `inject.rs`（新規）: 打鍵 → 注入バイト列の純変換。`no_std`・KAPI 非依存でホスト試験の対象。
+  `GUI_EV_TEXT` は `sub` の下位 7 bit を長さとして payload をそのまま渡す（FEP の確定文字を含む）。
+  `GUI_EV_KEY` は押下の制御キーだけ: **Enter → 0x0D**、BS → 0x08、TAB → 0x09。
+  ESC は端末自身の終了に使うので注がず、矢印・ファンクション・印字可能キーも注がない
+  （印字可能は gshell が KEY と TEXT を**両方**積むため、KEY 側で注ぐと二重になる）。
+  Enter を `\n` にしない根拠は `inject.rs` 冒頭と票 §8。
+- `guest.rs`: **タイマ登録の前**に `con_sink_read` を 1 回呼んで読み手権限を確立する（R2）。
+  `OS32_ERR_EXIST`（先客）なら `reader = false` のまま — 状態行は busy、以後の打鍵は**捨てる**
+  （この判定は一度きりで反転させない）。注入は `on_raw`（TEXT）と `on_key`（制御キー）から。
+  **ローカルエコーはしない**（CUI 側の出力が con_sink 経由で戻る）。
+- `status.rs`: `kbd_inject` の負の戻り値（`inject rc=N`）と、あふれで消えたバイト数
+  （`injdrop=N`、`0 <= rc < len` の差）を状態行 1 行目に足す。描き直すのは値が変わった周だけ。
+- `input.rs`: 表示操作を注入しないスキャンコード（UP/DOWN/ROLLUP/ROLLDOWN/HOME）へ移した `nav()`。
+  読み手を取れているあいだ ASCII の `j k g e q` は解釈しない（票に無い判断、要レビュー）。
+
+ホスト検査: `cargo check --release -p t5a_display` と host テスト 36 件が通る。
 **`make` / 配備 / エミュレータ実行は未実施**（コーダーの範囲外）。
 
 ---

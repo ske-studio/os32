@@ -9,6 +9,31 @@ pub enum Action {
     Select(Fixture),
     Move(Movement),
 }
+/* drivers/kbd.c のスキャンコード (libos32gui::widget::SCAN_* と同じ値)。
+ * ここに並べるのは `inject::from_key` が**注がない**キーだけ — 注ぐキーに
+ * 表示操作を重ねると、CUI プログラムへ渡した打鍵で画面が動いてしまう
+ * (票 K7 §6「矢印・ファンクションは範囲外」)。 */
+pub const SCAN_ROLLUP: u8 = 0x36;
+pub const SCAN_ROLLDOWN: u8 = 0x37;
+pub const SCAN_UP: u8 = 0x3A;
+pub const SCAN_DOWN: u8 = 0x3D;
+pub const SCAN_HOME: u8 = 0x3E;
+
+/// スキャンコードによる表示操作。注入が生きているあいだはこちらだけを使う
+/// (ASCII の割り当ては CUI プログラムのものになるため)。
+pub fn nav(scan: u8, down: bool) -> Action {
+    if !down {
+        return Action::None;
+    }
+    match scan & 0x7F {
+        SCAN_UP => Action::Move(Movement::Up),
+        SCAN_DOWN => Action::Move(Movement::Down),
+        SCAN_ROLLUP | SCAN_HOME => Action::Move(Movement::First),
+        SCAN_ROLLDOWN => Action::Move(Movement::Last),
+        _ => Action::None,
+    }
+}
+
 pub fn key(ch: u8, down: bool) -> Action {
     if !down {
         return Action::None;
@@ -46,5 +71,38 @@ mod tests {
             assert!(matches!(key(*ch, false), Action::None));
         }
         assert!(matches!(key(0, true), Action::None));
+    }
+
+    #[test]
+    fn nav_uses_only_keys_that_are_never_injected() {
+        assert!(matches!(nav(SCAN_UP, true), Action::Move(Movement::Up)));
+        assert!(matches!(nav(SCAN_DOWN, true), Action::Move(Movement::Down)));
+        assert!(matches!(
+            nav(SCAN_HOME, true),
+            Action::Move(Movement::First)
+        ));
+        assert!(matches!(
+            nav(SCAN_ROLLUP, true),
+            Action::Move(Movement::First)
+        ));
+        assert!(matches!(
+            nav(SCAN_ROLLDOWN, true),
+            Action::Move(Movement::Last)
+        ));
+        /* 離しは効かない。 */
+        for scan in [SCAN_UP, SCAN_DOWN, SCAN_HOME, SCAN_ROLLUP, SCAN_ROLLDOWN] {
+            assert!(matches!(nav(scan, false), Action::None));
+            /* 表示操作に使うキーは 1 バイトも注がない (二重作用を作らない)。 */
+            assert!(crate::inject::from_key(scan, true).is_empty());
+        }
+        /* 注入するキーと ESC は表示を動かさない。 */
+        for scan in [
+            crate::inject::SCAN_RETURN,
+            crate::inject::SCAN_BS,
+            crate::inject::SCAN_TAB,
+            crate::inject::SCAN_ESC,
+        ] {
+            assert!(matches!(nav(scan, true), Action::None));
+        }
     }
 }

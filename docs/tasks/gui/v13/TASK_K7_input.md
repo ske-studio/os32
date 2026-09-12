@@ -99,11 +99,13 @@
   (取り違えは `STALE` + `bad_frame_count`)。
 - 未確認: 実機 (受入 I1〜I5) は 1 つも未実施。`make` も配備も行っていない ([V4])。
 
-## 7. 実機受入の記録 (PM / テスター)
+## 8. 実装メモ (A) — K7-A 着地、2026-09-12
 
-| 受入 | 構成 | obs | 判定 |
-|---|---|---|---|
-| ゲート | K7-K `c6a775d` | `make clean/all/external/check` exit=0 ([ABI3]) | 合格 |
-| 配備 | 15MB | NHD バックアップ後 `os32-cycle deploy` exit=0、vmkernel 459,388 B 一致、`ver` API v47 Build 10:31 | 合格 |
-| **I4** (CUI 側) | 15MB | kselftest **50 → 61** (fail 0、注入 5 + 印の負例 6 = I5 の kselftest 分)、`v86 -t` OK、regress 6 本 obs 全通過 (CUI の `kbd_getchar` は従来どおり)。8MB は未実施 | **合格** (15MB) |
-| I1 / I2 / I3 / I5 (実機) | — | K7-W / K7-A 着地後 | — |
+- **Enter は `\r` (0x0D)**。§6 の「`\n` または `\r`」は `\r` を採る: `drivers/kbd.c:108`
+  の keymap が 0x0D で、常駐シェルの行入力 (`userland/shell/ui.c:497`) は 0x0D **だけ**を
+  行末に見る。両対応の呼び手 (`cmd_script.c` の `read`、`cmds/less.c`、`lib/filer`) も通る。
+- 変換は `userland/rust/t5a_display/src/inject.rs` (`no_std` 純関数、host 4 件)。
+  印字可能キーは `GUI_EV_KEY` から注がない — gshell が KEY と TEXT を両方積む (`input.rs:436-450`)。
+- **表示操作を矢印 / ROLL / HOME へ移した (票に無い判断、要レビュー)**: 読み手を取れた端末で
+  ASCII の `j k g e q` を横取りすると、CUI プログラムへ渡した打鍵で画面が動き `q` で端末が落ちる。
+- 実機・`make` は未実施 ([V4])。

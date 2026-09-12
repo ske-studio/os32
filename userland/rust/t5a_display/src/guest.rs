@@ -5,7 +5,7 @@
 //! 反復タイマの中だけで行う。ここに busy loop は無い — 協調型なので回し
 //! 続けると他のアプリが飢える。
 use crate::{
-    boundary,
+    boundary, inject,
     input::{self, Action},
     paint,
     session::Session,
@@ -17,7 +17,7 @@ use crate::{
 };
 use libos32gui::gapi::{
     self,
-    proto::{GUI_COLOR_EDIT_BG, GUI_COLOR_TEXT},
+    proto::{GuiEvent, GUI_COLOR_EDIT_BG, GUI_COLOR_TEXT, GUI_EV_TEXT},
     types::{Rect, Style, SurfaceId},
 };
 use libos32gui::{App, GuiErr, GuiResult, Timer, Ui, Window, WindowSpec};
@@ -61,22 +61,38 @@ pub fn run(api: *mut KernelAPI) -> i32 {
         Ok(s) => s,
         Err(_) => return GuiErr::INVAL.code(),
     };
-    /* タイマが張れなければ何も吸えない。同期で回す代案は取らない
-     * (協調型なので他のアプリが止まる)。 */
-    let timer = match Timer::repeating(&window, TIMER_SINK, TIMER_TICKS) {
-        Ok(t) => t,
-        Err(e) => return e.code(),
-    };
     let mut app = DisplayApp {
         window: Some(window),
-        _timer: Some(timer),
+        _timer: None,
         session,
         buf: [0; SINK_BUF],
         sink: SinkStatus::default(),
         follow: true,
         runs: 0,
         paint_error: false,
+        reader: false,
     };
+    /* 票 §5 R2: **イベントループ (とタイマ) に入る前に** con_sink_read を 1 回
+     * 呼び、読み手権限を確立する。`kbd_inject` はこれを済ませた者しか受け付け
+     * ない (kernel/kbd_inject.c の con_sink_reader_get 照合)。先客がいれば
+     * OS32_ERR_EXIST が返り、以後この端末は**注入しない** — 打鍵は捨て、
+     * 状態行は busy のままにする。ここで読めたレコードは捨てずに画面へ入れる。 */
+    let _ = app.pump();
+    app.reader = app.sink.error.is_none();
+
+    /* タイマが張れなければ何も吸えない。同期で回す代案は取らない
+     * (協調型なので他のアプリが止まる)。 */
+    let timer = {
+        let w = match app.window.as_ref() {
+            Some(w) => w,
+            None => return GuiErr::INVAL.code(),
+        };
+        match Timer::repeating(w, TIMER_SINK, TIMER_TICKS) {
+            Ok(t) => t,
+            Err(e) => return e.code(),
+        }
+    };
+    app._timer = Some(timer);
     match libos32gui::run(&mut app) {
         Ok(()) => 0,
         Err(e) => e.code(),
@@ -87,7 +103,10 @@ fn build_window() -> GuiResult<Window> {
     let info = gapi::screen_info();
     let plan = boundary::windows(info.width as i64, info.height as i64).ok_or(GuiErr::INVAL)?;
     let rect = gui_rect(plan[0]).ok_or(GuiErr::INVAL)?;
-    Window::create(&WindowSpec::new(b"Terminal (con_sink)  j k g e / q", rect))
+    Window::create(&WindowSpec::new(
+        b"Terminal (con_sink) ESC / UP DOWN ROLL",
+        rect,
+    ))
 }
 
 fn gui_rect(r: PixelRect) -> Option<Rect> {
@@ -115,10 +134,14 @@ struct DisplayApp<'a> {
     /// con_sink_read の行き先。毎周スタックに 1KB 積まないよう持ち回す。
     buf: [u8; SINK_BUF],
     sink: SinkStatus,
-    /// 末尾追従。スクロール操作で切れ、`e` (Last) で戻る。
+    /// 末尾追従。スクロール操作で切れ、末尾へ戻る操作で復活する。
     follow: bool,
     runs: u64,
     paint_error: bool,
+    /// 票 §5 R2 の読み手権限を起動時に取れたか。**一度きりの判定**で、
+    /// 後から反転させない (票 §6「失敗は状態行 busy のまま注入もしない」)。
+    /// 偽なら打鍵は捨てる。
+    reader: bool,
 }
 
 impl DisplayApp<'_> {
@@ -196,6 +219,32 @@ impl DisplayApp<'_> {
         changed
     }
 
+    /// 注入リングへ 1 回分積む (票 §5 R2 / §6 K7-A)。読み手になれていなければ
+    /// **何もしない** — その打鍵は捨てる。戻り値は「状態行を描き直すか」。
+    fn inject(&mut self, bytes: &inject::Bytes) -> bool {
+        if !self.reader || bytes.is_empty() {
+            return false;
+        }
+        let len = bytes.len();
+        // SAFETY: libos32gui::init initialized os32api. The pointer is to a
+        // private buffer with exactly `len` readable bytes and the kernel only
+        // reads it (kapi_generated.rs: kbd_inject(*const u8, u32) -> i32).
+        let rc = unsafe { (os32api::api().kbd_inject)(bytes.as_slice().as_ptr(), len as u32) };
+        let error = if rc < 0 { Some(rc) } else { None };
+        /* 0 <= rc < len は注入リングのあふれ = 消えた打鍵。累計で数える。 */
+        let short = if rc >= 0 && (rc as usize) < len {
+            (len - rc as usize) as u32
+        } else {
+            0
+        };
+        /* 描き直すのは状態が**変わった**ときだけ。同じ失敗のたびに全面
+         * invalidate すると、打鍵のたびに他のアプリを待たせる (pump と同じ理由)。 */
+        let changed = self.sink.inject_error != error || short != 0;
+        self.sink.inject_error = error;
+        self.sink.inject_short = self.sink.inject_short.saturating_add(short);
+        changed
+    }
+
     /// 溜まり具合と取りこぼしを読む (所有権は要らない)。
     fn refresh_stat(&mut self) -> bool {
         let mut ring: u32 = 0;
@@ -233,6 +282,23 @@ impl App for DisplayApp<'_> {
         self.repaint(ui);
     }
 
+    /// `GUI_EV_TEXT` はここにしか来ない (libos32gui はウィジェットへしか
+    /// 配らない、`app.rs:257-262`)。FEP の確定文字を含む UTF-8 をそのまま
+    /// 注入リングへ渡す (票 §1 D4)。**ローカルエコーはしない** — CUI
+    /// プログラム側の出力が con_sink 経由で戻ってくる。
+    fn on_raw(&mut self, ui: &mut Ui, ev: &GuiEvent) {
+        if ev.kind != GUI_EV_TEXT || ui.is_quitting() {
+            return;
+        }
+        if self.window.as_ref().map(Window::id) != Some(ev.window) {
+            return;
+        }
+        let text = ev.text();
+        if self.inject(&inject::from_text(ev.sub, &text.utf8)) {
+            self.repaint(ui);
+        }
+    }
+
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, ch: u8, _mods: u8, down: bool) {
         if down && scan == libos32gui::widget::SCAN_ESC {
             self.fail(ui);
@@ -241,7 +307,20 @@ impl App for DisplayApp<'_> {
         if ui.is_quitting() {
             return;
         }
-        match input::key(ch, down) {
+        /* 制御キー (Enter / BS / TAB) だけ注ぐ。印字可能キーと FEP の確定文字は
+         * GUI_EV_TEXT で来るので、ここで注ぐと 1 打鍵が 2 バイトになる。 */
+        if self.inject(&inject::from_key(scan, down)) {
+            self.repaint(ui);
+        }
+        /* 表示の操作。注入が生きているあいだ ASCII の割り当て (j k g e q) は
+         * 使わない — その打鍵は CUI プログラムのものだから。代わりに注入しない
+         * キー (矢印 / ROLL / HOME) を使う。busy で始まった端末は表示専用なので
+         * 従来どおり ASCII でも操作できる。 */
+        let action = match input::nav(scan, down) {
+            Action::None if !self.reader => input::key(ch, down),
+            other => other,
+        };
+        match action {
             Action::Quit => self.fail(ui),
             /* fixture の切り替えは live では意味を持たない (受け取った出力を
              * 捨てることになる)。ホスト試験だけが Select を使う。 */

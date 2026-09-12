@@ -45,6 +45,11 @@ pub struct SinkStatus {
     pub error: Option<i32>,
     /// これ以上読まない (直らない失敗)。
     pub stopped: bool,
+    /// `kbd_inject` の最後の負の戻り値 (票 §6 K7-A:「戻り値が負なら状態行に出す」)。
+    pub inject_error: Option<i32>,
+    /// 注入リングがあふれて積めなかったバイト数 (`rc < len` の差)。
+    /// 打鍵が消えたことを黙らせない (票 K6C-A §2-2 と同じ理由)。
+    pub inject_short: u32,
 }
 
 /// Live (con_sink) 用の状態行。fixture 用とは別物なので分けてある。
@@ -65,6 +70,14 @@ fn live_lines(s: &Display<'_>, runs: u64, paint_error: bool, k: &SinkStatus) -> 
         }
     } else {
         write!(out[0], "LIVE reading").unwrap();
+    }
+    /* 注入側の失敗は読み出し側の行に足す (行数を増やすと本文が 1 行減る)。
+     * 入り切らなければ黙って落とす — 状態行の失敗で panic させない。 */
+    if let Some(rc) = k.inject_error {
+        let _ = write!(out[0], " inject rc={}", rc);
+    }
+    if k.inject_short != 0 {
+        let _ = write!(out[0], " injdrop={}", k.inject_short);
     }
     write!(out[1], "in={}B rec={}", k.bytes, k.records).unwrap();
     write!(out[2], "dropped={} ring={}B", k.dropped, k.ring).unwrap();
@@ -174,6 +187,8 @@ mod tests {
             lost: 3,
             error: None,
             stopped: false,
+            inject_error: None,
+            inject_short: 0,
         };
         let l = lines(&s, 9, false, &k);
         assert_eq!(l[0].bytes(), b"LIVE reading");
@@ -194,5 +209,32 @@ mod tests {
         );
         /* Paint の失敗はすべてに優先する。 */
         assert_eq!(lines(&s, 0, true, &k)[0].bytes(), b"PAINT ERROR");
+    }
+
+    #[test]
+    fn live_status_reports_injection_failures() {
+        let mut cells = [BLANK; CAPACITY];
+        let s = Display::load(&mut cells, Fixture::Live).unwrap();
+        let mut k = SinkStatus::default();
+        /* 何も起きていなければ読み出し側の行はそのまま。 */
+        assert_eq!(lines(&s, 0, false, &k)[0].bytes(), b"LIVE reading");
+        /* 負の戻り値は必ず出す (票 §6 K7-A)。 */
+        k.inject_error = Some(crate::sink::ERR_EXIST);
+        assert_eq!(
+            lines(&s, 0, false, &k)[0].bytes(),
+            b"LIVE reading inject rc=-5"
+        );
+        /* あふれで消えた打鍵も出す。 */
+        k.inject_short = 12;
+        assert_eq!(
+            lines(&s, 0, false, &k)[0].bytes(),
+            b"LIVE reading inject rc=-5 injdrop=12"
+        );
+        /* 読めていない理由と同居できる。 */
+        k.error = Some(crate::sink::ERR_EXIST);
+        assert_eq!(
+            lines(&s, 0, false, &k)[0].bytes(),
+            b"LIVE busy rc=-5 inject rc=-5 injdrop=12"
+        );
     }
 }

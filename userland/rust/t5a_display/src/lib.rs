@@ -3,6 +3,7 @@
 
 mod boundary;
 mod guest;
+mod inject;
 mod input;
 mod paint;
 mod session;

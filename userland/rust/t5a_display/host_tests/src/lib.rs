@@ -1,5 +1,7 @@
 #[path = "../../src/boundary.rs"]
 pub mod boundary;
+#[path = "../../src/inject.rs"]
+pub mod inject;
 #[path = "../../src/input.rs"]
 pub mod input;
 #[path = "../../src/paint.rs"]
