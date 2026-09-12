@@ -98,3 +98,12 @@
   出たら K7-W/A の前に足す。② 印は `parked_from_kbd` を新設し `parked_from_wait` と併存
   (取り違えは `STALE` + `bad_frame_count`)。
 - 未確認: 実機 (受入 I1〜I5) は 1 つも未実施。`make` も配備も行っていない ([V4])。
+
+## 7. 実機受入の記録 (PM / テスター)
+
+| 受入 | 構成 | obs | 判定 |
+|---|---|---|---|
+| ゲート | K7-K `c6a775d` | `make clean/all/external/check` exit=0 ([ABI3]) | 合格 |
+| 配備 | 15MB | NHD バックアップ後 `os32-cycle deploy` exit=0、vmkernel 459,388 B 一致、`ver` API v47 Build 10:31 | 合格 |
+| **I4** (CUI 側) | 15MB | kselftest **50 → 61** (fail 0、注入 5 + 印の負例 6 = I5 の kselftest 分)、`v86 -t` OK、regress 6 本 obs 全通過 (CUI の `kbd_getchar` は従来どおり)。8MB は未実施 | **合格** (15MB) |
+| I1 / I2 / I3 / I5 (実機) | — | K7-W / K7-A 着地後 | — |
