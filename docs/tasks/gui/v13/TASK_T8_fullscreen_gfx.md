@@ -95,3 +95,13 @@
 
 - shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。
 - 配備・コミット・push・エミュレータ・ローカル AI・ini・.env・`make` は禁止 (コーダー)。
+
+## 6. 実機受入の記録 (PM / テスター、2026-09-12、K `f19dd00` + B `d73ceea` + W `732b07d` を NHD 配備、vmkernel 460,792 B、gshell 166,568 B、API v48、kselftest 66 / 0、15MB)
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| **F1** 前半 | 端末に `gfx200_test` + Enter → 200 ライン (400 ライン画面に縦 2 倍) のテストパターンが全画面に出て WM は上書きしない (`g_gfx_owner` 3)。端末経由の Space で `kbd_getchar` の park から復帰し次段 (FPS 計測) へ | **合格** |
+| **F1** 後半 | FPS 計測ループが `kbd_trygetchar()` をポーリングしており、GUI 中は park しない (K7 R1 どおり) ため **WM に制御が戻らず端末からキーを注入できない**。プログラムは終了せず、CTRL+STOP でしか抜けられない | **不合格 (設計の穴 → §7 判断待ち)** |
+| **F3** | 全画面中 (ポーリング中) に CTRL+STOP → 所有者だけ畳まれ (`appslot_last_reclaim_id` 3、`g_gfx_owner` 1)、デスクトップ・端末窓・プロンプト (`EXIT` レコード) まで復帰。**`fault_kill_count` が +1** (走行中のアプリへの abort は `exec_exit(EXEC_ERR_FAULT)` 経由で fault 扱い。park 中の kill は増えない) | **合格** (カウンタの註付き) |
+| **F5** | 端末に `v86` + Enter → **起動してしまう** (使い方を表示して終了)。`v86.bin` の flags は 0x0 = CPL=3 プログラムで、V86 へは KAPI `v86_*` で入る。`FORCE_CPL0` の判定では捕まらない | **不合格 → T8-2** (`OS32X_FLAG_CUI_ONLY` 0x0010 を app.conf `cui` で立て、入口判定 + `exec_start` 拒否 + `v86_*` KAPI の GUI 中拒否) |
+| 事故 | F6 の準備で CUI から `hsync` を実行 → HostDrv の古いビルドで NHD が戻った (§4-33)。`make deploy` → `hsync` で復旧、サイズ照合済み | — |
