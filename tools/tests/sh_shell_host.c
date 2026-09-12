@@ -442,26 +442,68 @@ static void case_redraw_cursor_not_at_end(void)
 }
 
 /* ========================================================================
- *  4. source 中の exit (往復 1 の blocker 2 / D2(d))
+ *  4. 行末 BS は画面からも消す (往復 3 の blocker)
+ *
+ *  端末の BS はカーソルを 1 セル左へ動かすだけでセルを消さない
+ *  (libos32term の model.rs)。BS だけを出して短縮後の写しを確定すると、
+ *  `echo abc` -> BS BS -> `x` で画面 `echo axc` / バッファ `echo ax` と
+ *  食い違う。BS + 空白 + BS で消してから写しを確定する。
+ * ======================================================================== */
+static void case_backspace_erases(void)
+{
+    char line[8];
+
+    report("4 行末 BS は BS + 空白 + BS で画面からも消す\n");
+
+    /* abc -> BS -> BS -> x */
+    line[0] = 'a'; line[1] = 'b'; line[2] = 'c'; line[3] = '\0';
+    sh_set_drawn(line, 3, 3);
+    out_reset();
+    g_cursor_calls = 0;
+
+    sh_backspace_tail(line, 2);             /* 'c' を消す */
+    check(sh_drawn_len == 2 && sh_drawn_pos == 2, "4a 写しは縮んで末尾に居る");
+    sh_backspace_tail(line, 1);             /* 'b' を消す */
+
+    /* ここから先は ui.c の直接印字 (行末への 1 文字追加) と同じ */
+    line[1] = 'x'; line[2] = '\0';
+    g_api->shell_putchar('x', ATTR_WHITE);
+    sh_set_drawn(line, 2, 2);
+
+    check(out_is("\\b \\b\\b \\bx"), "4b 出力は BS 空白 BS の 2 回 + 'x'");
+    check(sh_drawn_len == 2 && sh_drawn[0] == 'a' && sh_drawn[1] == 'x',
+                                            "4c 写しは ax");
+    check(g_cursor_calls == 0,              "4d 座標 KAPI を引かない");
+
+    /* 3 バイト列の先頭 (全角) は 2 セルぶん */
+    line[0] = (char)0xE3; line[1] = '\0';
+    sh_set_drawn(line, 1, 1);
+    out_reset();
+    sh_backspace_tail(line, 0);
+    check(out_is("\\b\\b  \\b\\b"),   "4e 全角の先頭は 2 セルぶん消す");
+}
+
+/* ========================================================================
+ *  5. source 中の exit (往復 1 の blocker 2 / D2(d))
  * ======================================================================== */
 static void case_exit_stops_rest(void)
 {
-    report("4 source: exit の次の行は走らない\n");
+    report("5 source: exit の次の行は走らない\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
     out_reset();
     file_add("/a.sh", "echo 1\nexit\necho 2\n");
 
-    check(script_source_file("/a.sh") == 0, "4a source は 0 で戻る");
-    check(trace_is("echo 1|exit"),          "4b exit の後は実行しない");
-    check(sh_exit_flag == 1,                "4c 印は立ったまま (shell_run の入口が見る)");
-    check(g_open_leak == 0,                 "4d FD を開いたままにしない");
+    check(script_source_file("/a.sh") == 0, "5a source は 0 で戻る");
+    check(trace_is("echo 1|exit"),          "5b exit の後は実行しない");
+    check(sh_exit_flag == 1,                "5c 印は立ったまま (shell_run の入口が見る)");
+    check(g_open_leak == 0,                 "5d FD を開いたままにしない");
 }
 
 static void case_exit_breaks_goto_loop(void)
 {
-    report("5 source: goto の無限ループでも exit で抜ける\n");
+    report("6 source: goto の無限ループでも exit で抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -469,13 +511,13 @@ static void case_exit_breaks_goto_loop(void)
     /* exit が無ければ :loop <- goto loop で永久に回る */
     file_add("/b.sh", "echo a\nexit\n:loop\ngoto loop\n");
 
-    check(script_source_file("/b.sh") == 0, "5a source は戻ってくる");
-    check(trace_is("echo a|exit"),          "5b ラベルも goto も走らない");
+    check(script_source_file("/b.sh") == 0, "6a source は戻ってくる");
+    check(trace_is("echo a|exit"),          "6b ラベルも goto も走らない");
 }
 
 static void case_exit_unwinds_nested(void)
 {
-    report("6 source: ネストした source の外側も抜ける\n");
+    report("7 source: ネストした source の外側も抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -483,9 +525,9 @@ static void case_exit_unwinds_nested(void)
     file_add("/outer.sh", "source /inner.sh\necho outer2\n");
     file_add("/inner.sh", "exit\necho inner2\n");
 
-    check(script_source_file("/outer.sh") == 0, "6a 外側の source も 0 で戻る");
-    check(trace_is("source /inner.sh|exit"),    "6b 内側も外側も後続を止める");
-    check(g_open_leak == 0,                     "6c どの段でも FD を残さない");
+    check(script_source_file("/outer.sh") == 0, "7a 外側の source も 0 で戻る");
+    check(trace_is("source /inner.sh|exit"),    "7b 内側も外側も後続を止める");
+    check(g_open_leak == 0,                     "7c どの段でも FD を残さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -496,6 +538,7 @@ void _start(void)
     case_redraw_extend();
     case_redraw_rebuild();
     case_redraw_cursor_not_at_end();
+    case_backspace_erases();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();
     case_exit_unwinds_nested();

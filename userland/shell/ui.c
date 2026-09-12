@@ -564,9 +564,17 @@ void shell_run(void) {
             if ((key & 0xFF) == 0x08) {
                 if (cmd_pos > 0) {
                     if (cmd_pos == cmd_len) {
+#ifdef SHELL_AS_APP
+                        /* 端末の BS はセルを消さないので BS + 空白 + BS。
+                         * 写しの確定も sh_backspace_tail の中で行う。 */
+                        cmd_pos--; cmd_len--;
+                        sh_backspace_tail(cmd_buf, cmd_len);
+                        prev_draw_len = cmd_len;
+#else
                         cmd_pos--; cmd_len--; cmd_buf[cmd_len] = 0;
                         g_api->shell_putchar(0x08, ATTR_WHITE); prev_draw_len = cmd_len;
                         sh_mark_drawn(cmd_buf, cmd_len);
+#endif
                     } else {
                         int i; for (i = cmd_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i+1];
                         cmd_len--; cmd_pos--; cmd_buf[cmd_len] = 0; redraw_line(cmd_buf, cmd_len, cmd_pos);
