@@ -133,3 +133,16 @@
 **判定 (PM、2026-09-12)**: F1 前半 / F2 / F3 / F4 / F5 / F6 / F7 合格。**残: F1 後半 = `kbd_trygetchar` をポーリングする GFX プログラム
 (`gfx200_test` の FPS 計測、`gfx_demo200` / `rotate_test` / `demo_tile`) は GUI 中に WM へ制御を返さず、端末からキーを注入できない
 (CTRL+STOP でしか止まらない)。ユーザー判断待ち (協調的な yield を `kbd_trygetchar` に入れるか、仕様とするか)。**
+
+## 7. D8 ポーリング型の協調 yield (ユーザー承認 2026-09-12) — T8-3 として K / W を発注
+
+- **決定**: GUI 中 (`con_sink` 有効)、注入リングが空、**前回の譲りから PIT tick が進んでいる** (10ms に 1 回まで) の 3 条件が揃ったとき、
+  `kbd_trygetchar` (と `kbd_trygetkey` / `kbd_has_key` の同型) は **1 周だけ WM へ譲る**: `exec_park` と同じ手順で止め、状態 `APP_STATE_WAIT_POLL` (= 4)、
+  印 `parked_from_poll`。`exec_resume` は印を見て EAX に **-1** (キーなし) を書く — 注入リングに文字があれば `WAIT_KEY` と同じく 1 バイトを書く。
+  条件が揃わなければ従来どおり即 -1 (park しない)。CUI は無変更。カウンタ `ring3_poll_yield_count`。
+- **WM (gshell)**: `WAIT_POLL` は **常に ready、ただし優先度は最下位** (入力群 / Paint / Timer / Quit のどれも無ければ起こす。ID 昇順)。
+  `slot_of_owner` が `None` でも forget しない (`WAIT_KEY` と同じ分岐)。D11 の上界は「最下位」なので不変 (他が ready な周は数えない)。
+- **性能見積もり** (PM、命令数から): 譲り 1 回 ≈ 386DX-33 で 10〜15k サイクル (0.3〜0.45ms)、P100 で 5〜6k (0.05ms)。描画ループ 1 フレーム 1 回なら
+  386 で 1% 前後、tick 制限により busy-wait でも最大 100 回/秒 = 386 で 3〜4%。キー到達の遅れは最大 tick 1 つ + WM 1 周 ≈ 11ms。
+- **受入 F8**: 端末から `gfx200_test` → FPS 段で Space を打つ → プログラムが自分で終了して GUI 復帰 (CTRL+STOP を使わない)。`ring3_poll_yield_count` が
+  FPS 段の秒数 × ≤100 で増える。FPS 表示の譲りあり / なし比較 (NP21/W 上の相対値、期待 1% 未満)。`gfx_demo200` / `rotate_test` / `demo_tile` も端末から終了できる。
