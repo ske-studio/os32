@@ -289,6 +289,33 @@ static void generic_regression(void)
     CHECK(pgalloc_free_pages() == count);
 }
 
+/* K6-3: デバイス窓の可否は「RAM の上端」ではなく「窓に RAM が登録されて
+ * いるか」で決める。上端で決めた旧条件は、上端が窓より上に出る構成
+ * (K6-RAM 以後の 15MB 機: 上端 17MB、穴 15-16MB) で誤判定した。 */
+static void device_window_ram(void)
+{
+    u32 lo = MEM_SYSTEM_SPACE_BASE / PAGE_SIZE;
+    u32 hi = MEM_HIGH_RAM_BASE / PAGE_SIZE;
+
+    /* 8MiB: RAM が窓まで届かない = 窓は空いている (K6 以前と同じ判定)。 */
+    pgalloc_init(8192);
+    CHECK(!pgalloc_range_has_ram(lo, hi));
+    CHECK(pgalloc_limit_pfn() * PAGE_SIZE <= MEM_SYSTEM_SPACE_BASE);
+
+    /* 16MiB を丸ごと RAM にした構成 (legacy 経路): 窓が RAM = 張れない。 */
+    pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
+    CHECK(pgalloc_range_has_ram(lo, hi));
+    /* 1 ページでも RAM が重なれば真 (部分一致で見落とさない)。 */
+    CHECK(pgalloc_range_has_ram(hi - 1, hi));
+    /* 窓の外 (高位側) には RAM は無い。 */
+    CHECK(!pgalloc_range_has_ram(hi, hi + 1));
+    /* 範囲異常・未初期化は保守的に真 (窓を張らせない)。 */
+    CHECK(pgalloc_range_has_ram(hi, lo));
+    initialized = 0;
+    CHECK(pgalloc_range_has_ram(lo, hi));
+    pgalloc_init(MEM_HIGH_RAM_BASE / 1024);
+}
+
 void _start(void)
 {
     basic();
@@ -303,5 +330,7 @@ void _start(void)
     output("PASS exhaustive 8-page occupancy x n=1..9\n");
     generic_regression();
     output("PASS generic alloc/free/mark/init regression\n");
+    device_window_ram();
+    output("PASS device window RAM query (K6-3)\n");
     finish(0);
 }

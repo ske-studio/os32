@@ -604,3 +604,28 @@ curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイ�
   実行後はゲストの `ls -l` と手元のサイズを突き合わせる ([V4]、§4-29 と同じ)。
 - **PM の作業上の罠 (同日)**: この節を書くときに引用なしのヒアドキュメントを使い、本文のバッククォートがシェルで実行された。
   文書をスクリプトで書くときは `<<'EOF'` (引用付き) にする。
+
+### 4-34. RAM の**上端**でデバイス窓の可否を決めない — K6 以後は「穴」の有無で決める (2026-09-12、修正済み)
+
+- **症状**: 15MB 構成 (NP21/W `ExMemory 16`) + `gfxmode pegc` + リセットで、`hal_test` が
+  `backend pc98 (planar 4bpp)` のまま。`sys_top_reserved` = 0。BIOS の PEGC ビット
+  (0x045C bit6 = 0x40、0x0597 bit2 = 0x84) は立っているので、機種判別 (probe 段 1) は通っている。
+- **原因**: `gfx/backend_pegc.c` の probe 段 2 が `sys_get_mem_kb() * 1024 > PEGC_LINEAR_BASE` で
+  「自分の RAM が窓に届いているか」を見ていた。K6-RAM (`f6ec520`, 2026-09-11) で `sys_mem_kb` の
+  定義が「**RAM の上端アドレス / 1024**」に変わり、15MB 機でも高位 RAM (16-17MB) のぶん 17408 を
+  返す。窓 `[0xF00000, 0x1000000)` は K6 の検出器が **RAM にしない穴** (`MEMORY_BOOT_LEGACY_END`
+  クランプ + `PHYSMEM_RESERVED`) なのに、上端で見たせいで「RAM が届いている」と誤判定し、
+  9801 プレーナへ落ちていた。K6 以前は上端が 0xF00000 だったのでたまたま通っていた。
+- **修正**: 判定を「窓に RAM が登録されているか」に変える。`kernel/pgalloc.c` に
+  `pgalloc_range_has_ram(first, end)` (PFN 半開、ブート時に凍結した物理地図を `physmem_count` で
+  見るだけの問い合わせ) を足し、probe 段 2 は
+  `pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE, MEM_HIGH_RAM_BASE / PAGE_SIZE)` で決める。
+  8MB (legacy 経路) は窓まで RAM が届かないので従来どおり真。
+- **教訓**: (1) **「上端 > 窓」は「窓が RAM」ではない** — 穴のある物理地図では上端は窓の可否を
+  答えない。デバイス窓の可否は必ず**その範囲**を物理地図に問い合わせる。
+  (2) 同じ型の誤判定が `gfx/backend_cirrus.c` の `cirrus_win_usable()` に残っている
+  (`sys_get_mem_kb() > base / 1024`、窓は 0xF60000 と 0x1000000)。**高位 RAM がある構成では
+  リニア窓 0x1000000 が常に不可になる**。Cirrus レーン再開時に同じ口で直す (K6-RAM 決裁 (4) で
+  この票の対象外)。(3) 定義を変えた関数 (`sys_mem_kb`) は、**呼び出し側の意味**まで洗う。
+- **回帰**: `tools/tests/test_memory_boot.py::test_ram_kb_is_the_registered_total_not_the_top`
+  (17408 / 33792 / 8192 の 3 構成) と `tools/tests/test_pgalloc_range.py` の `device_window_ram`。

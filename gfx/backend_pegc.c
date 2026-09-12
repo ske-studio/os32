@@ -186,8 +186,8 @@ static void pegc_tvram_clear(int row0, int row1)
 /*  段取り (どれか 1 つでも落ちたら 0 を返し、H1 の 9801 実装に落ちる):      */
 /*    1. BIOS ワークエリアの機種判別 2 バイト。9801 はここで確実に落ちる     */
 /*       ので、以降のポート叩きは 9801 では一切走らない = 回帰ゼロ。         */
-/*    2. リニア窓 F00000h が「張れる」か。OS32 の RAM が 16MB システム空間に */
-/*       食い込んでいたら (= 043Bh bit2=1 の 16MB 構成) 使ってはいけない。   */
+/*    2. リニア窓 F00000h が「張れる」か。16MB システム空間に OS32 の RAM が */
+/*       登録されていたら (= 043Bh bit2=1 の 16MB 構成) 使ってはいけない。   */
 /*       ページングの管理上限 (16MB) に収まることも見る。                     */
 /*    3. 043Bh bit2 を読む (診断用)。PC-9801-61 型 SIMM 機ではこのポートは   */
 /*       SIMM ソケットステータスなので、これだけでは決めない。書き込みもしない。*/
@@ -213,10 +213,18 @@ static int pegc_probe(void)
     if (!(bios_flag(PEGC_BIOS_MODE_FLAG) & PEGC_BIOS_MODE_EXTGFX)) return 0;
 
     /* --- 2. リニア窓が張れるか --- */
-    /* OS32 の RAM が F00000h に届いているなら、そこは 16MB システム空間では
-     * なく通常 RAM (043Bh bit2=1 の構成)。PEGC VRAM は F00000h には出ないし、
-     * 張ったら自分の RAM を潰す。8MB 構成では届かないので通る。 */
-    if (sys_get_mem_kb() * 1024UL > PEGC_LINEAR_BASE) return 0;
+    /* 15-16MB のシステム空間に OS32 が RAM を登録しているなら、そこは通常
+     * RAM (043Bh bit2=1 の構成)。PEGC VRAM は F00000h には出ないし、張ったら
+     * 自分の RAM を潰す。
+     * **RAM の上端 (sys_get_mem_kb) では決めない** — K6-RAM (2026-09-11) で
+     * 上端の定義が「RAM の上端アドレス / 1024」になり、15MB 構成 (ExMemory
+     * 16) でも高位 RAM 16-17MB のぶん 17408 になる。上端で見ると窓が空いて
+     * いるのに 9801 へ落ちた。見るべきは上端ではなく「窓に RAM が登録されて
+     * いるか」で、検出器は 15-16MB を RAM にしない (memory_boot.c の
+     * MEMORY_BOOT_LEGACY_END クランプ + PHYSMEM_RESERVED)。
+     * 8MB 構成は窓まで RAM が届かないので従来どおり通る。 */
+    if (pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE,
+                              MEM_HIGH_RAM_BASE / PAGE_SIZE)) return 0;
     /* ページングは先頭 16MB しか PT を持たない。窓の末尾まで入ること。 */
     if (PEGC_LINEAR_BASE + (u32)PEGC_FB_SIZE_480 > PAGING_MAP_SIZE) return 0;
 

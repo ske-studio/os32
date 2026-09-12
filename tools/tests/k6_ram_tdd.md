@@ -81,3 +81,59 @@ HEAD (`8d5ba3b`) でも同じく出る既存のもので、この票の変更と
   書き込み確認、24bit ラップ判定)。ホストでは 0x594 も物理 0 も触れないので、
   ここは受入 M1/M2 (NP21/W) でしか確かめられない。
 - 16MB 超を実際に張った後のアプリ起動 (M4) と 15MB 構成の回帰 (M3)。
+
+---
+
+## 6. K6-3: PEGC の probe が 15MB 構成で 9801 に落ちる回帰 (2026-09-12)
+
+PM 実測: 15MB (`ExMemory 16`) + `gfxmode pegc` + リセットで `hal_test` が
+`backend pc98 (planar 4bpp)`、`sys_top_reserved` = 0。BIOS の PEGC ビットは立っている。
+原因は `gfx/backend_pegc.c` の probe 段 2 `sys_get_mem_kb() * 1024 > PEGC_LINEAR_BASE` —
+K6-RAM で上端の定義が「RAM の上端 / 1024」になり、15MB 機でも 17408 を返すようになったため。
+
+### RED → GREEN
+
+- 新しい口: `kernel/pgalloc.c` の `pgalloc_range_has_ram(first, end)` (PFN 半開)。
+  ブート時に凍結した物理地図 `device_boot_map` を既存の `physmem_count(... PHYSMEM_RAM ...)` で
+  見るだけで、状態は変えない。未初期化・範囲異常は保守的に真 (窓を張らせない)。
+  `eligible` ビットマップではなく地図を見るので、他所の永久予約で `eligible` が落ちた RAM も
+  「RAM あり」のまま数える。
+- `tools/tests/memory_boot_host.c` の `TEST_RAMKB` (実構成そのもの、17408 / 33792 / 8192) に
+  `CHECK(!pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE, high))` と
+  「旧条件 (上端 > 窓) は高位 RAM のある構成でだけ真になる」の対比を追加。
+  **RED の確認**: `pgalloc_range_has_ram` を一時的に旧規則 (`limit_pfn > end - 1`) に差し替えると
+  `FAIL !pgalloc_range_has_ram(...)` が **17408 と 33792 だけ**で出て、8192 は通る
+  (= 回帰の形が一致)。差し戻して GREEN。
+- `tools/tests/pgalloc_range_host.c` に `device_window_ram()`:
+  8MiB → 窓に RAM 無し (真)、16MiB 丸ごと RAM の legacy モデル → 窓が RAM (偽)、
+  部分一致 1 ページ (`[hi-1, hi)`) でも真、窓の外は無し、逆順範囲と未初期化は保守的に真。
+- `gfx/backend_pegc.c` は probe 段 2 を
+  `pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE, MEM_HIGH_RAM_BASE / PAGE_SIZE)` に置換。
+  `backend_pegc.c` はホストへ持ち込めない (probe が `_out` / `_in` で実ポートを叩き、
+  `boot_splash_native_host.c` が直リンクしているのは `gfx_core.c` だけ) ので、
+  判定はカーネル側の純粋な問い合わせに切り出してそちらを検査した。
+
+### 実行結果 (2026-09-12)
+
+| 試験 | 結果 |
+|---|---|
+| `tools/tests/test_memory_boot.py` | PASS (9) — 旧規則では 2 件 RED |
+| `tools/tests/test_pgalloc_range.py` | PASS (`device_window_ram` 追加) |
+| `tools/tests/test_physmem.py` | PASS (9) |
+| `tools/tests/test_pgalloc_model.py` | PASS (12) |
+| `tools/tests/test_highram_stage.py` | PASS (9) |
+| `tools/tests/test_device_reservation.py` | PASS (8) |
+| `tools/tests/test_paging_bounds.py` / `test_app_band_pde.py` | PASS |
+| `tools/tests/test_boot_splash_native.py` | PASS (2) |
+| `python3 tools/check_constraints.py` | EXIT=0 |
+| i386-elf-gcc `-Wall -Wextra` (`gfx/backend_pegc.c` / `kernel/pgalloc.c`) | 警告ゼロ |
+
+### ホスト試験で**証明していない**こと
+
+- 実機 (NP21/W) の PEGC 復帰そのもの。`hal_test` が `backend pegc` を出すか、
+  `sys_top_reserved` が 300KB になるかは PM / テスターの受入でしか確かめられない。
+- `make` は一度も回していない (コーダーの禁止事項)。目標コンパイルは変更した 2 ファイルの
+  単体 `i386-elf-gcc -c` のみ。
+- `gfx/backend_cirrus.c` の `cirrus_win_usable()` は**この票では直していない**。同じ型の
+  誤判定なので、**高位 RAM がある構成ではリニア窓 0x1000000 が常に不可になる**
+  (K6-RAM 決裁 (4)、Cirrus レーン再開時)。

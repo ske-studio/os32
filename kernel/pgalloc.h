@@ -107,6 +107,16 @@ void pgalloc_free_n(u32 phys_addr, int n);
  * 永久予約には pgalloc_reserve_pfn を明示的に使う。 */
 void pgalloc_mark_used(u32 phys_start, int page_count);
 
+/* デバイス窓 [first, end) (PFN 半開) に「RAM として登録された物理ページ」が
+ * 1 枚でもあるか。1 = ある (= そこへデバイス窓を張ってはいけない)。
+ * ブート時に凍結した物理地図を physmem_count で見るだけで、状態は変えない。
+ * 未初期化・範囲異常は保守的に 1 (RAM あり扱い) を返す。
+ * **RAM の上端で窓の可否を決めてはならない** (K6-RAM 以後、上端と「RAM に
+ * ならない番地」は一致しない。15MB 機の上端は 17MB で、穴は 15-16MB)。
+ * eligible ビットマップではなく地図を見るので、他所の永久予約で
+ * eligible が落ちた RAM も「RAM あり」のまま数える。 */
+int  pgalloc_range_has_ram(u32 first, u32 end);
+
 /* eligible union / eligible minus allocated。上端は limit_pfn() を使う。
  * BASE + total_pages * PAGE_SIZE からアドレス上端を復元してはならない。 */
 u32  pgalloc_total_pages(void);

@@ -164,6 +164,17 @@ void _start(void)
         /* 高位帯に届かない申告は 1 ページも足さない */
         CHECK(memory_boot_sum_kb(8192UL, high) == 8192UL);
         CHECK(memory_boot_sum_kb(8192UL, MEM_SYSTEM_SPACE_BASE / PAGE_SIZE) == 8192UL);
+        /* K6-3: デバイス窓 (PEGC のリニア窓 = 15-16MiB のシステム空間) の
+         * 可否は「RAM の上端」ではなく「窓に RAM が登録されているか」。
+         * 15MiB / 32MiB 構成では上端が窓より上に出るが、窓は穴のままなので
+         * 窓は張れる。8MiB は上端が窓より下で、やはり張れる。 */
+        CHECK(!pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE, high));
+        /* 旧条件は「上端 > 窓」。高位 RAM のある構成でだけ真になり、正しい
+         * 判定と食い違う = これが 2026-09-12 の回帰そのもの。 */
+        if (TEST_KB > MEM_HIGH_RAM_BASE / 1024UL)
+            CHECK(sys_mem_kb * 1024UL > MEM_SYSTEM_SPACE_BASE);
+        else
+            CHECK(sys_mem_kb * 1024UL <= MEM_SYSTEM_SPACE_BASE);
         CHECK(host_if == 0x202U);
         die(0);
     }
