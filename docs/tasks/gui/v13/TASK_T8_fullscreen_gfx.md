@@ -105,3 +105,4 @@
 | **F3** | 全画面中 (ポーリング中) に CTRL+STOP → 所有者だけ畳まれ (`appslot_last_reclaim_id` 3、`g_gfx_owner` 1)、デスクトップ・端末窓・プロンプト (`EXIT` レコード) まで復帰。**`fault_kill_count` が +1** (走行中のアプリへの abort は `exec_exit(EXEC_ERR_FAULT)` 経由で fault 扱い。park 中の kill は増えない) | **合格** (カウンタの註付き) |
 | **F5** | 端末に `v86` + Enter → **起動してしまう** (使い方を表示して終了)。`v86.bin` の flags は 0x0 = CPL=3 プログラムで、V86 へは KAPI `v86_*` で入る。`FORCE_CPL0` の判定では捕まらない | **不合格 → T8-2** (`OS32X_FLAG_CUI_ONLY` 0x0010 を app.conf `cui` で立て、入口判定 + `exec_start` 拒否 + `v86_*` KAPI の GUI 中拒否) |
 | 事故 | F6 の準備で CUI から `hsync` を実行 → HostDrv の古いビルドで NHD が戻った (§4-33)。`make deploy` → `hsync` で復旧、サイズ照合済み | — |
+| **F6** | `gfx200_test` の flags ビットを落とした `gfx_noflag.bin` を端末から起動 → `gfx_init` / `gfx_init_200` は拒否 (`gfx_init_reject_count` 2、`g_gfx_owner` 1 のまま) されたが、**プログラムは続行して描画 KAPI で VRAM を描き、GUI を壊した** (上 200 ラインに FPS 計測の絵、CTRL+STOP で復旧) | **不合格 → T8-2 K に追加: 拒否 = そのアプリを畳む** (`v86_*` の GUI 中拒否も同じ) |
