@@ -87,6 +87,18 @@ TARGET i386-elf GNU89 -Werror COMPILE PASS
 
 221 チェック (K7 までの 188 + ケース 20 の 33)、失敗 0。
 
+## 巻き込み — `boot_splash_native_host.c` (2026-09-12、f19dd00 の後)
+
+`make check` の `check-boot-splash-host` が `undefined reference to 'con_sink_is_enabled'` /
+`appslot_gfx_claim` / `appslot_gfx_owner` で落ちた。このハーネスは `gfx/gfx_core.c` を
+**ホストで直リンク**するので、T8 で門 (`gfx_kapi_init` / `gfx_kapi_init_200` /
+`gfx_screen_owner`) が増えた分だけ未定義参照が増える。
+
+直したのは試験側だけ (`tools/tests/boot_splash_native_host.c` にスタブ 3 本)。このハーネスが
+見るのはバックエンドの選択と 9801 のライフサイクルで、画面の所有者は対象外 — 所有者は
+ケース 20 が実物の `exec/appslot.c` で見る。なので「CUI 中 / 誰も所有していない」=
+門が素通しになる値 (`0` / `0` / `1`) を返すだけにした。**カーネル本体は 1 行も変えていない。**
+
 ## kselftest (ブート時、実機)
 
 `kernel/kselftest.c` の `test_gfx_owner()` が `appslot_gfx_owner_selftest()` を呼び、2 項を見る:
