@@ -123,5 +123,9 @@
 | ゲート | K7-K `c6a775d` | `make clean/all/external/check` exit=0 ([ABI3]) | 合格 |
 | 配備 | 15MB | NHD バックアップ後 `os32-cycle deploy` exit=0、vmkernel 459,388 B 一致、`ver` API v47 Build 10:31 | 合格 |
 | **I4** (CUI 側) | 15MB | kselftest **50 → 61** (fail 0、注入 5 + 印の負例 6 = I5 の kselftest 分)、`v86 -t` OK、regress 6 本 obs 全通過 (CUI の `kbd_getchar` は従来どおり)。8MB は未実施 | **合格** (15MB) |
-| I1 / I2 / I3 / I5 (実機) | — | K7-W / K7-A 着地後 | — |
+| **I1** 止まらない | 15MB、W `df1df96` + A `c37d6e3` (HostDrv → hsync、gshell 162,472 B) | 端末を出して Run `kbd_echo.bin` → `kbd_echo: type keys, 'q' to quit` が端末窓に出て gshell は動き続ける (`ring3_kbd_park_count` 1 → 4、クリック / Start が効く) | **合格** |
+| **I2** 打鍵が届く | 同 | 端末窓にフォーカスして `abc` + Enter → `got 0x61 'a'` / `0x62 'b'` / `0x63 'c'` / `0x0D` が端末窓に戻る (`in=141B rec=20`)。`ring3_switch_count` 8、`ring3_resume_bad_frame_count` 0、`fault_kill_count` 0 | **合格** (ASCII。FEP 経由の日本語は未実施) |
+| **I5** 切替点 | 同 | `ring3_resume_bad_frame_count` 0 / `ring3_park_reject_count` 0 のまま、負例は kselftest (`test_resume_mark` 6 項) | **合格** |
+| I3 CTRL+STOP | 同 | kbd_echo は窓を持たないので CTRL+STOP (フォーカス窓宛) の対象にならない。Start → CUI mode の畳み込みで CUI に復帰 (回帰 6/6) するが、**ID 3 (kbd_echo) が `APP_STATE_WAIT_KEY` のまま AppSlot に残る** (`g_slot[3]`: state 3 / gui 1 / cpl3 1 / parked_from_kbd 1、`appslot_reclaim_count` は端末の 1 だけ)。原因は K7-W 申し送り 1 (`owner_active` がスロットと窓しか見ない) | **不合格 → K7-W2** (gshell の畳み込みでスロット無しの被追跡アプリを `exec_kill`) |
+| 不具合候補 | 同 | GUI 中の `kprintf` がテキスト VRAM にも描かれ、画面左上に残像 (`kbd_echo: type keys…`) が出る (`text_disp` 1)。シンク有効中は console.c の描画を抑止すべき | **K6C-2** (発注済み) |
 
