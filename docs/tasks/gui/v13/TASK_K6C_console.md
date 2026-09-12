@@ -93,3 +93,12 @@ CPL=3 からのポインタは既存のディスパッチャ検証 (アプリ帯
 | **C2** | kselftest **44 → 50** (fail 0) | **合格** |
 | `mem` | `RAM : 16384 KB (16 MB) usable (15-16MB system space excluded)` が `Physical : 17408 KB` の下に出る (K6-RAM 決裁 (2)) | 合格 |
 | **C3 / C4** | K6C-A の A4 で確認: 2 本目は `ERR_EXIST` (busy)、1 本目の ESC で読み手が移る (`g_reader` 2 → 3) | **合格** |
+
+## K6C-2 — GUI 中の二重表示 (テキスト面の残像、2026-09-12)
+
+- 症状: シンク有効中も `console.c` がテキスト VRAM に描き続け、gshell の GFX 画面に残像 (`text_disp`=1)。
+- 修正: `console_render_allowed()` = `!v86_is_active() && !con_sink_is_enabled()` を `shell_print` /
+  `shell_print_utf8` / `console_write` / `shell_putchar` に、`con_sink_is_enabled()` を `tvram_clear` /
+  `console_set_cursor` に。抑止中は `cursor_x/y` も進めない。GUI 入場の追加処理は不要 (`gfx_init` が既にテキスト面を消す)。
+- CUI 復帰は `console_text_gdc_start()` が GUI から戻ったときだけ `tvram_clear()` し、画面と論理位置 (0,0) を揃える。
+- 検査: `tools/tests/test_con_sink.py` 9a〜9p (修正前は 8 件 FAIL)、kselftest 2 項追加。実機・`make` は未実施。

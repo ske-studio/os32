@@ -38,6 +38,21 @@ int rshell_active = 0;
 static int cursor_x = 0;
 static int cursor_y = 0;
 
+/* テキスト面へ描いてよいか。描かないのは 2 つの場合:
+ *   - V86 セッション中 (上の extern のとおり、画面はゲストのもの)。
+ *   - GUI モード中 = con_sink 有効 (console_text_gdc_stop 以降)。gshell が
+ *     全画面 GFX を握っている間、テキスト面は gfx_init が一度消したまま
+ *     誰も描き直さない。そこへ CUI プログラムの出力を書くと、表示されたままの
+ *     テキスト面 (text_disp=1) の画素がグラフィックの上に残る (票 K6C-2、
+ *     PM 実測 2026-09-12)。シンクへ積むのは端末アプリの仕事なので従来どおり、
+ *     描くほうだけを止める。
+ * 抑止中は論理カーソル (cursor_x/y) も進めない — 画面が凍っているのに
+ * 論理位置だけ進むと、CUI 復帰時に食い違う。 */
+static int console_render_allowed(void)
+{
+    return !v86_is_active() && !con_sink_is_enabled();
+}
+
 /* GDC (テキスト) のハードウェアカーソルを論理カーソルへ追従させる。
  * 以前は console_set_cursor() (シェルの行編集) だけが CSRW を出していたので、
  * 通常出力やスクロールで論理位置が進んでもハードウェアカーソルは最後に
@@ -79,6 +94,10 @@ void tvram_clear(void)
     volatile u16 *text = (volatile u16 *)TVRAM_TEXT;
     volatile u8  *attr;
     int i;
+    con_sink_push_clear();      /* 票 K6C: 画面クリアの経路 (CLEAR レコード) */
+    /* 票 K6C-2: GUI 中はテキスト面を消さない (消す相手が見えていない上に、
+     * 論理カーソルだけ 0,0 に戻ると凍っている画面と食い違う)。 */
+    if (con_sink_is_enabled()) return;
     for (i = 0; i < TVRAM_COLS * TVRAM_ROWS; i++) {
         text[i] = 0x0020;
         attr = (volatile u8 *)(TVRAM_ATTR + (u32)i * 2);
@@ -86,7 +105,6 @@ void tvram_clear(void)
     }
     cursor_x = 0;
     cursor_y = 0;
-    con_sink_push_clear();      /* 票 K6C: 画面クリアの経路 (CLEAR レコード) */
     console_hw_cursor_sync();
 }
 
@@ -211,6 +229,7 @@ static void putchar_raw(char ch, u8 color)
 void shell_putchar(char ch, u8 color)
 {
     con_sink_push_print(&ch, 1, color);
+    if (!console_render_allowed()) return;   /* 票 K6C-2 / V86: 描画抑止 */
     putchar_raw(ch, color);
     console_hw_cursor_sync();
 }
@@ -218,7 +237,7 @@ void shell_putchar(char ch, u8 color)
 /* 文字列表示 */
 void shell_print(const char *str, u8 color)
 {
-    int render = !v86_is_active();
+    int render = console_render_allowed();
     /* 票 K6C: 描画抑止 (v86) や rshell 複写とは無関係にシンクへ積む。
      * shell_print_dec / shell_print_hex32 はここへ落ちるので、あちらに
      * 差し込みは要らない (二重に積むことになる)。 */
@@ -265,7 +284,8 @@ void shell_print_utf8(const char *utf8_str, u8 color)
         const char *s = utf8_str;
         while (*s) serial_putchar(*s++);
     }
-    if (v86_is_active()) return;    /* 描画抑止 (シリアルには出した) */
+    /* 描画抑止 (シリアルとシンクには出した)。票 K6C-2 で GUI 中も含む。 */
+    if (!console_render_allowed()) return;
     while (*p) {
         utf8_decode_t dec;
         u32 cp;
@@ -340,7 +360,8 @@ void console_write(const char *buf, u32 size, u8 color)
         for (i = 0; i < size; i++) serial_putchar(buf[i]);
     }
 
-    if (v86_is_active()) return;    /* 描画抑止 (シリアルには出した) */
+    /* 描画抑止 (シリアルとシンクには出した)。票 K6C-2 で GUI 中も含む。 */
+    if (!console_render_allowed()) return;
 
     while (remaining > 0) {
         utf8_decode_t dec;
@@ -424,9 +445,13 @@ int console_get_cursor_x(void) { return cursor_x; }
 int console_get_cursor_y(void) { return cursor_y; }
 void console_set_cursor(int x, int y)
 {
+    con_sink_push_cursor(x, y);     /* 票 K6C: CURSOR レコード */
+    /* 票 K6C-2: GUI 中は論理位置も GDC も動かさない。ここで
+     * console_hw_cursor_enable() を通すと、console_text_gdc_stop() で消した
+     * テキストカーソルが GFX 画面の上でまた点滅しはじめる。 */
+    if (con_sink_is_enabled()) return;
     cursor_x = x;
     cursor_y = y;
-    con_sink_push_cursor(x, y);     /* 票 K6C: CURSOR レコード */
     console_hw_cursor_enable();
 }
 
@@ -469,6 +494,7 @@ void console_text_gdc_stop(void)
  * console_hw_cursor_enable() と同じだが、GUI からの復帰を明示するための別名。 */
 void console_text_gdc_start(void)
 {
+    int was_gui = con_sink_is_enabled();
     /* 票 K6C §2-3: CUI へ戻るときは溜まっているものを捨てる (テキスト VRAM が
      * 再び正になるので、リングの中身はもう誰も描き直さない)。読み手の所有は
      * ここでは返さない — 返すのは exec_exit / exec_kill の owner 回収だけ。 */
@@ -476,6 +502,11 @@ void console_text_gdc_start(void)
     /* 票 K7 D5: 注入リングも捨てる。CUI では打鍵が IRQ1 の cooked リングから
      * 来るので、GUI 中に注がれた残りをシェルのプロンプトへ流し込まない。 */
     kbd_inject_discard();
+    /* 票 K6C-2: GUI 中はテキスト面も cursor_x/y も凍らせていた。テキスト面が
+     * 再び正になる今ここで一度消すと、画面と論理位置 (0,0) が必ず一致する。
+     * 消すのは GUI から戻ったときだけ — 起動直後の CUI では kernel.c の
+     * ブートメッセージが残ってよい (従来どおり)。 */
+    if (was_gui) tvram_clear();
     console_hw_cursor_enable();
 }
 

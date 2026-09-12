@@ -25,6 +25,84 @@ void res_owner_set(int owner) { g_owner = owner; }
 /* 実物。CON_SINK_NO_IRQ_LOCK は test_con_sink.py が -D で渡す。 */
 #include "con_sink.c"
 
+/* ======================================================================== */
+/*  kernel/console.c も**実物のまま**取り込む (K6C-2)                        */
+/*                                                                          */
+/*  「シンク有効中は描画関数が TVRAM に触らない」を見るために要るのは 2 つ:  */
+/*    - テキスト VRAM: tvram.h の TVRAM_BASE / TVRAM_ATTR はただの番地       */
+/*      マクロなので、ホスト配列へ差し替えられる (console.c は                */
+/*      `#define TVRAM_TEXT TVRAM_BASE` で使うだけ)。                        */
+/*    - I/O ポート: CPL=3 では outb が撃てないので、記録するだけの            */
+/*      host_outp に差し替える (GDC を触ったかどうかも検査になる)。          */
+/*  console.c に元からある警告 2 件 (未使用変数・符号比較) はこの票の         */
+/*  範囲外なので pragma で黙らせる。番地マクロ以外はカーネルと同じソース。    */
+/* ======================================================================== */
+
+#include "tvram.h"
+#undef TVRAM_BPR            /* pc98.h が 160 で再定義する (-Werror 回避) */
+#include "pc98.h"
+#include "io.h"
+#include "utf8.h"
+
+/* テキスト面の代わり。u16 で持つのはアラインのため (console.c は u16 で書く) */
+static u16 g_text_plane[TVRAM_ROWS * TVRAM_BPR / 2];
+static u16 g_attr_plane[TVRAM_ROWS * TVRAM_BPR / 2];
+
+/* GDC へ出した OUT の本数。GUI 中にカーソルが動かないことの検査に使う。 */
+static u32 g_port_writes;
+static void host_outp(unsigned int port, unsigned int value)
+{
+    (void)port; (void)value;
+    g_port_writes++;
+}
+
+/* console.c が引く外部シンボル (カーネル側の本物の代わり) */
+static int g_v86;
+int v86_is_active(void) { return g_v86; }
+void serial_putchar(char c) { (void)c; }
+void kbd_inject_discard(void) { }
+
+u32 kstrlen(const char *s)
+{
+    u32 n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+int kutoa_dec(u32 val, char *buf, int bufsz)
+{
+    if (bufsz < 2) return 0;
+    buf[0] = (char)('0' + (int)(val % 10));
+    buf[1] = '\0';
+    return 1;
+}
+
+/* UTF-8 の最小デコーダ。この票が見るのは「描いたか描かなかったか」なので、
+ * ASCII だけ通れば足りる (漢字表はカーネルの 0x4A000 に居る)。 */
+utf8_decode_t utf8_decode(const u8 *src_p)
+{
+    utf8_decode_t d;
+    d.codepoint = (u32)src_p[0];
+    d.bytes_used = 1;
+    return d;
+}
+u8  unicode_to_ank(u32 cp) { return (cp < 0x80) ? (u8)cp : (u8)0; }
+u16 unicode_to_jis(u32 cp) { (void)cp; return 0; }
+
+void console_hw_cursor_enable(void);    /* console.c の中で前方参照される */
+
+#undef TVRAM_BASE
+#define TVRAM_BASE  ((u32)(unsigned long)g_text_plane)
+#undef TVRAM_ATTR
+#define TVRAM_ATTR  ((u32)(unsigned long)g_attr_plane)
+#define outp(p, v)  host_outp((p), (v))
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#include "console.c"
+#pragma GCC diagnostic pop
+
 /* ---- 最小の報告系 (libc 無し) ------------------------------------------ */
 
 static void die(int code)
@@ -419,6 +497,119 @@ static void case_selftest_agrees(void)
     check(res_owner_get() == 0, "8d 所有者タグを元に戻す");
 }
 
+/* ======================================================================== */
+/*  9. console.c の描画抑止 (K6C-2)                                          */
+/*                                                                          */
+/*  GUI モード中 (シンク有効) に CUI プログラムが出力すると、K6C のシンクに  */
+/*  積まれると同時にテキスト VRAM にも描かれ、GFX 画面の上に残像が出ていた。 */
+/*  描く側だけを止め、積む側と論理カーソルの整合は保つ。                     */
+/* ======================================================================== */
+
+#define PLANE_CELLS   (TVRAM_COLS * TVRAM_ROWS)
+#define PLANE_PITCH   (TVRAM_BPR / 2)
+
+static void plane_mark(void)
+{
+    int i;
+    for (i = 0; i < PLANE_CELLS; i++) {
+        g_text_plane[i] = 0x5A5A;
+        g_attr_plane[i] = 0xA5A5;
+    }
+}
+
+static int plane_untouched(void)
+{
+    int i;
+    for (i = 0; i < PLANE_CELLS; i++) {
+        if (g_text_plane[i] != 0x5A5A) return 0;
+        if (g_attr_plane[i] != 0xA5A5) return 0;
+    }
+    return 1;
+}
+
+static int plane_all_blank(void)
+{
+    int i;
+    for (i = 0; i < PLANE_CELLS; i++) {
+        if (g_text_plane[i] != 0x0020) return 0;
+    }
+    return 1;
+}
+
+static u16 cell(int x, int y)
+{
+    return g_text_plane[y * PLANE_PITCH + x];
+}
+
+static void case_console_render_gate(void)
+{
+    int cx, cy;
+
+    reset_all();
+    g_v86 = 0;
+    report("9 console.c drawing gate (K6C-2)\n");
+
+    /* --- CUI (シンク無効): 従来どおり描く --------------------------------- */
+    console_set_cursor(0, 0);
+    plane_mark();
+    g_port_writes = 0;
+    shell_print("AB", 7);
+    check(cell(0, 0) == (u16)'A' && cell(1, 0) == (u16)'B',
+          "9a CUI では TVRAM に描く");
+    check(console_get_cursor_x() == 2 && console_get_cursor_y() == 0,
+          "9b CUI ではカーソルが進む");
+    check(g_port_writes > 0, "9c CUI では GDC へカーソルを送る");
+
+    /* --- GUI へ (console_text_gdc_stop がシンクを有効にする) -------------- */
+    console_text_gdc_stop();
+    check(con_sink_is_enabled() == 1, "9d GUI へ入るとシンクが有効");
+
+    plane_mark();
+    g_port_writes = 0;
+    cx = console_get_cursor_x();
+    cy = console_get_cursor_y();
+
+    shell_print("XY", 7);
+    shell_print_utf8("Z", 7);
+    console_write("W", 1, 7);
+    shell_putchar('Q', 7);
+    shell_print_dec(5, 7);
+    shell_print_hex32(0x1234, 7);
+
+    check(plane_untouched(), "9e GUI 中はどの出力経路も TVRAM に触らない");
+    check(console_get_cursor_x() == cx && console_get_cursor_y() == cy,
+          "9f GUI 中は論理カーソルを進めない");
+    check(g_port_writes == 0, "9g GUI 中は GDC を触らない");
+    check(pending_now() > 0, "9h GUI 中もシンクには積む");
+
+    /* --- GUI 中の tvram_clear / console_set_cursor ------------------------ */
+    plane_mark();
+    g_port_writes = 0;
+    tvram_clear();
+    check(plane_untouched(), "9i GUI 中の tvram_clear はテキスト面を消さない");
+    console_set_cursor(10, 5);
+    check(console_get_cursor_x() == cx && console_get_cursor_y() == cy,
+          "9j GUI 中の console_set_cursor は論理位置を動かさない");
+    check(g_port_writes == 0, "9k GUI 中は CSRFORM/CSRW を出さない");
+    check(pending_now() > 0, "9l CLEAR / CURSOR はシンクに積まれている");
+
+    /* --- CUI 復帰: 画面と論理位置が必ず一致する --------------------------- */
+    console_text_gdc_start();
+    check(con_sink_is_enabled() == 0, "9m CUI 復帰でシンクは無効");
+    check(plane_all_blank(), "9n CUI 復帰でテキスト面を消す");
+    check(console_get_cursor_x() == 0 && console_get_cursor_y() == 0,
+          "9o CUI 復帰で論理位置は 0,0 (画面と一致)");
+
+    /* --- V86 セッション中も描かない (従来の抑止を壊していない) ------------ */
+    plane_mark();
+    g_v86 = 1;
+    shell_print("v86", 7);
+    console_write("v", 1, 7);
+    shell_putchar('v', 7);
+    check(plane_untouched(), "9p V86 中も TVRAM に触らない");
+    g_v86 = 0;
+}
+
 int main(void)
 {
     failures = 0;
@@ -431,6 +622,7 @@ int main(void)
     case_discard_on_cui();
     case_single_reader();
     case_selftest_agrees();
+    case_console_render_gate();
     if (failures) {
         report("FAILURES\n");
         die(1);
