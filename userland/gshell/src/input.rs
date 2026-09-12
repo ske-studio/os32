@@ -463,6 +463,16 @@ fn capture_mouse(st: &mut GuiState, ctx: Ctx) {
     unsafe {
         (os32api::api().mouse_poll)(&mut mi as *mut MouseInfo as *mut u8);
     }
+    /* 全画面 GFX 中はマウスを**誰にも配らない** (票 T8 D4c: タスクバー /
+     * Start / 窓を含めて無視)。位置と押下だけ同期しておき、復帰した最初の
+     * 周期で古いエッジが「クリック」に化けるのを防ぐ。カーソルも描かない
+     * (画面はプログラムのもの)。 */
+    if crate::fullscreen::active() {
+        st.mouse_x = mi.x as i32;
+        st.mouse_y = mi.y as i32;
+        st.prev_buttons = mi.buttons;
+        return;
+    }
     let mx = mi.x as i32;
     let my = mi.y as i32;
     let moved = mx != st.mouse_x || my != st.mouse_y;

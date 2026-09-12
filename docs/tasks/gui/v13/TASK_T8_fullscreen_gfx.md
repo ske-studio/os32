@@ -78,6 +78,19 @@
 - ホスト試験は `tools/tests/multiapp_impl_host.c` ケース 20 (33 検査、RED→GREEN 5 通り) → `tools/tests/t8_tdd.md`。
   kselftest に 2 項 (`test_gfx_owner`)。**`make`・配備・実機は未実施** ([V4]) — 受入 F1〜F7 は PM / テスターへ。
 
+## 4a. 実装メモ (W、2026-09-12)
+
+- 全画面モード = `userland/gshell/src/fullscreen.rs` (印 / 所有者 / 入る時点のパレット)。門は `wm::composite_rect`
+  `composite_full` `queue_present` `flush_present` `flush_screen_dirty`・`input::capture_mouse`・`cursor::show` `move_to`・
+  `fep::post_cycle` の入口 1 条件ずつ (dirty は溜める)。
+- 入口 = `os32x.rs` の純関数 `classify` (cpl0 > gfx > 無し) + `sys_open` 40B 読み。`run_program` が cpl0 を `cui only: <名>` で断り
+  (戻り値 0 = `RUN_REFUSED`)、gfx は `exec_start` 前に `arm`。所有者の問い合わせは `after_exec` (`exec_start` / `exec_resume` 直後)。
+- 復帰 = `lib.rs::restore_screen` (`gfx_init` → `invalidate_all_clients` → パレット → `install_system_palette` → `lease::reapply` →
+  露出 → `composite_full`)。`rc <= 0` の既存経路も同じ関数。CTRL+STOP の宛先は `multiapp::abort_target` (全画面中は所有者)。
+- 端末 (D7) は `prompt::classify` (同じ判定の写し。共有ライブラリは増やさない) で `FORCE_CPL0` を `cui only: <名>` にして起動しない。
+- ホスト試験は gshell 4 本 + `os32x` 2 本 (48 pass、実装を外すと RED を確認)、端末 1 本 (49 pass)。`app.conf` の gshell を KAPI 48 に。
+  **`make`・配備・実機は未実施** ([V4]) — 受入 F1〜F7 は PM / テスターへ。
+
 ## 5. 範囲外
 
 - shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。

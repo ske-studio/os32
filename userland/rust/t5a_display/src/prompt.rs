@@ -13,6 +13,8 @@
 //!   見つかったパスと残りの引数を [`command_line`] が `session_launch` の値へ。
 //! - E4 接続モード: [`step`] が `Mode` の遷移だけを決める (副作用は guest 側)。
 //! - E5 空行 / `exit`: [`Decision::Empty`] / [`Decision::Exit`]。
+//! - T8 D7 入口: [`classify`] が OS32X ヘッダの宣言ビットを読み、`--cpl0` の
+//!   プログラム (v86 / VDM) は起動しない (`cui only: <名>`)。読み出しは `guest.rs`。
 
 /// 編集中の行が持てるバイト数。`command_line` が 255B に収まるよう
 /// `PATH_MAX` より小さく取る。
@@ -451,9 +453,110 @@ pub fn step(mode: Mode, event: Event) -> Next {
     }
 }
 
+/* ================================================================ */
+/*  OS32X ヘッダの宣言ビット (票 T8 D7 の入口)                        */
+/*                                                                  */
+/*  VRAM を直接触る CPL=0 プログラム (v86 / VDM = `mkos32x --cpl0`)   */
+/*  は GUI からは起動しない。カーネルも GUI 中は `OS32_ERR_INVAL` で   */
+/*  拒むが、端末はその前に理由 (`cui only: <名>`) を出して接続モード    */
+/*  にも入らない。                                                    */
+/*                                                                  */
+/*  同じ判定は gshell (`userland/gshell/src/os32x.rs`) にもある。      */
+/*  共有ライブラリを 1 本増やすより、この 20 行の写しの方が安い。       */
+/* ================================================================ */
+
+/// `OS32X_MAGIC` (`sdk/include/os32/os32_kapi_shared.h`)。'OS32' の LE。
+pub const OS32X_MAGIC: u32 = 0x4F53_3332;
+/// v1 ヘッダのサイズ (`OS32X_HDR_V1_SIZE`)。読むのはこの 40B だけ。
+pub const OS32X_HDR_SIZE: usize = 40;
+/// `OS32X_FLAG_GFX` — 全画面 GFX を使う宣言 (端末は起動を止めない)。
+pub const OS32X_FLAG_GFX: u32 = 0x0001;
+/// `OS32X_FLAG_FORCE_CPL0` — CPL=0 強制。GUI からは起動しない。
+pub const OS32X_FLAG_FORCE_CPL0: u32 = 0x0004;
+
+/// 起動してよいか (票 T8 D4 / D7)。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Kind {
+    /// ふつうの CPL=3 プログラム。
+    Plain,
+    /// 全画面 GFX の宣言つき。端末は起動する (画面は gshell が譲る)。
+    FullScreen,
+    /// CPL=0 強制。GUI からは起動しない。
+    CuiOnly,
+}
+
+fn le32(b: &[u8], off: usize) -> u32 {
+    (b[off] as u32)
+        | ((b[off + 1] as u32) << 8)
+        | ((b[off + 2] as u32) << 16)
+        | ((b[off + 3] as u32) << 24)
+}
+
+/// **純関数**: OS32X ヘッダの先頭 40B → 起動の可否。
+///
+/// 読めなかった / OS32X でない / 短い ものは [`Kind::Plain`] に倒す —
+/// 立てない側へ倒せば既存の起動経路は 1 つも変わらない (`session_launch` の
+/// 失敗として従来どおり出る)。`FORCE_CPL0` は `FLAG_GFX` より強い。
+pub fn classify(hdr: &[u8]) -> Kind {
+    if hdr.len() < OS32X_HDR_SIZE {
+        return Kind::Plain;
+    }
+    if le32(hdr, 0) != OS32X_MAGIC || (le32(hdr, 4) as usize) < OS32X_HDR_SIZE {
+        return Kind::Plain;
+    }
+    let flags = le32(hdr, 12);
+    if flags & OS32X_FLAG_FORCE_CPL0 != 0 {
+        Kind::CuiOnly
+    } else if flags & OS32X_FLAG_GFX != 0 {
+        Kind::FullScreen
+    } else {
+        Kind::Plain
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn os32x_header(flags: u32) -> [u8; OS32X_HDR_SIZE] {
+        let mut h = [0u8; OS32X_HDR_SIZE];
+        h[0..4].copy_from_slice(&OS32X_MAGIC.to_le_bytes());
+        h[4..8].copy_from_slice(&(OS32X_HDR_SIZE as u32).to_le_bytes());
+        h[8..12].copy_from_slice(&2u32.to_le_bytes());
+        h[12..16].copy_from_slice(&flags.to_le_bytes());
+        h
+    }
+
+    /// 票 T8 D7: 起動前に読む OS32X ヘッダの判定 (cpl0 / gfx / どちらも無し)。
+    #[test]
+    fn os32x_flags_decide_whether_the_terminal_launches() {
+        /* CPL=0 強制 (v86 / VDM) は起動しない。 */
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_FORCE_CPL0)),
+            Kind::CuiOnly
+        );
+        /* 両方立っていても CPL=0 が勝つ。 */
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_GFX | OS32X_FLAG_FORCE_CPL0)),
+            Kind::CuiOnly
+        );
+        /* 全画面 GFX は起動する (画面は gshell が譲る)。 */
+        assert_eq!(classify(&os32x_header(OS32X_FLAG_GFX)), Kind::FullScreen);
+        /* 宣言の無い CUI プログラムは従来どおり。 */
+        assert_eq!(classify(&os32x_header(0x0002 /* RING3 */)), Kind::Plain);
+        /* 読めなかった / OS32X でない / 短い → 止めない側へ倒す。 */
+        assert_eq!(classify(&[]), Kind::Plain);
+        assert_eq!(
+            classify(&os32x_header(OS32X_FLAG_FORCE_CPL0)[..39]),
+            Kind::Plain
+        );
+        let mut bad = os32x_header(OS32X_FLAG_FORCE_CPL0);
+        bad[0] ^= 0xFF;
+        assert_eq!(classify(&bad), Kind::Plain, "magic 違いは触らない");
+        let mut short_hdr = os32x_header(OS32X_FLAG_FORCE_CPL0);
+        short_hdr[4] = 8;
+        assert_eq!(classify(&short_hdr), Kind::Plain, "header_size が小さい");
+    }
 
     fn line_of(s: &str) -> Line {
         let mut l = Line::new();

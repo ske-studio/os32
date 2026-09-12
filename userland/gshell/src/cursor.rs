@@ -73,6 +73,11 @@ fn on_screen(st: &GuiState, px: i32, py: i32) -> bool {
 
 /// 下地を退避してカーソルを描く。既に出ていれば何もしない。
 pub fn show(st: &mut GuiState) {
+    /* 全画面 GFX 中は画面を持っていない (票 T8 D4a)。復帰の `composite_full` が
+     * 描き直す (そのときは門が開いている)。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     if st.cursor.shown {
         return;
     }
@@ -136,6 +141,11 @@ pub fn discard(st: &mut GuiState) {
 /// カーソルを (x,y) へ動かす。バックバッファの更新と present までを行う
 /// (X3 / X4 のどちらからでも呼べる最小の描画)。動きが無ければ何もしない。
 pub fn move_to(st: &mut GuiState, x: i32, y: i32) {
+    /* 全画面 GFX 中は画面を持っていない (票 T8 D4a)。present は門で止まるが、
+     * バックバッファへの画素書き込み自体を行わない。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     if st.cursor.shown && st.cursor.x == x && st.cursor.y == y {
         return;
     }

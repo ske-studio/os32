@@ -378,7 +378,7 @@ fn has_top_level_work(mm: &Multi) -> bool {
 /// owner 1 からしか呼べないので、ここでは**予約するだけ**。
 /// [`should_park`] が予約を見て譲らせ、top-level の [`drain_top_level`] が実行する。
 pub fn redirect_abort(st: &GuiState, cur: i32) {
-    let f = st.front_owner();
+    let f = abort_target(st);
     if f == 0 || f == cur {
         return; /* 呼ぶ側 (`abort_targets_current`) が弾いている経路 */
     }
@@ -744,6 +744,11 @@ pub fn resume_one(st: &mut GuiState) -> bool {
     mark_resumed(k);
     let rc = unsafe { (os32api::api().exec_resume)(k, wait_ret) };
     m().running = 0;
+    /* 所有者の問い合わせ (票 T8 D3/D4)。全画面 GFX プログラムが `gfx_init` を
+     * 呼んだ / 抜けたのは `exec_resume` から戻った直後にしか分からない。
+     * 戻っていれば `after_exec` が復帰 (`gfx_init` → パレット → 全面再合成) まで
+     * 済ませる。全画面中は WM が描かないだけで、譲り合いの判断は変わらない。 */
+    crate::after_exec(st);
     if rc == OS32_ERR_AGAIN {
         /* 注入リングが空だった (指摘 B: カーネルは印を残したまま拒む)。
          * 畳まずに**その周は譲る** — turn も巡回の起点も据え置きの数えも
@@ -839,8 +844,21 @@ pub fn snd_owner() -> i32 {
 /// アプリ」にしか要求を立てられないので (`appslot_abort_request`)、
 /// フォーカスが別のアプリなら WM は待ちを抜けない = 走っている側を畳ませない。
 pub fn abort_targets_current(st: &GuiState, cur: i32) -> bool {
-    let f = st.front_owner();
+    let f = abort_target(st);
     f == 0 || f == cur
+}
+
+/// CTRL+STOP の宛先 (0 = 宛先なし)。
+///
+/// ふだんは**フォーカス窓のアプリ** (契約 T6)。**全画面 GFX 中だけは画面の
+/// 所有者** (票 T8 D4d) — 画面を持っているプログラムは窓を持たないので、
+/// フォーカス窓 (端末) を畳んでしまうと「見えている方」が残ってしまう。
+fn abort_target(st: &GuiState) -> i32 {
+    let owner = crate::fullscreen::owner();
+    if owner != 0 {
+        return owner;
+    }
+    st.front_owner()
 }
 
 /* ================================================================ */

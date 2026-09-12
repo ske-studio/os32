@@ -795,6 +795,10 @@ pub fn clamp_to_work_area(st: &GuiState, x: i32, y: i32, w: i32, h: i32) -> (i32
 /// 1 回」を守るため、WM は矩形を `gfx_add_dirty_rect` で積み、最後に
 /// [`flush_present`] を 1 回だけ呼ぶ。
 pub fn queue_present(st: &GuiState, r: Rect) {
+    /* 全画面 GFX 中は画面を持っていない (票 T8 D4a)。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     let clip = r.intersect(&Rect::new(0, 0, st.screen_w, st.screen_h));
     if clip.is_empty() {
         return;
@@ -807,6 +811,10 @@ pub fn queue_present(st: &GuiState, r: Rect) {
 /// 積んだ矩形をまとめて VRAM へ転送する (`commits` += 1)。積んだものが
 /// 無ければカーネル側で早期 return する (commits は増えない)。
 pub fn flush_present() {
+    /* 全画面 GFX 中は画面を持っていない (票 T8 D4a)。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     unsafe {
         (os32api::api().gfx_present_dirty)();
     }
@@ -822,6 +830,11 @@ pub fn present_rect(st: &GuiState, r: Rect) {
 /// クライアント面は「窓の外形 − 内側」ではなく **窓の外形を chrome が描く枠のみ**
 /// を触り、内側 (アプリ描画) は残す。デスクトップは「矩形 − 全窓外形」に塗る。
 pub fn composite_rect(st: &GuiState, r: Rect) {
+    /* 全画面 GFX 中は 1 画素も書かない (票 T8 D4a)。dirty は溜めておき、
+     * 復帰の `composite_full` / `flush_screen_dirty` でまとめて出す。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     let clip = r.intersect(&Rect::new(0, 0, st.screen_w, st.screen_h));
     if clip.is_empty() {
         return;
@@ -903,6 +916,11 @@ pub fn composite_rect(st: &GuiState, r: Rect) {
 /// 画面全体を合成して present する (起動時・フルスクリーン GFX からの復帰)。
 /// **全画面 present は WM だけ** (契約 G4)。カーソルは描き直す。
 pub fn composite_full(st: &mut GuiState) {
+    /* 全画面 GFX 中は 1 画素も書かない (票 T8 D4a)。復帰は所有者が 1 に
+     * 戻ってから (`crate::restore_screen`)。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     let whole = Rect::new(0, 0, st.screen_w, st.screen_h);
     cursor::discard(st); /* 下地は全部塗り替わる */
     composite_rect(st, whole);
@@ -917,6 +935,12 @@ pub fn composite_full(st: &mut GuiState) {
 /// WM が溜めた画面損傷 (デスクトップ + クローム) を合成して present し、クリアする。
 /// アプリのクライアント面 (COMMIT) とは独立。commit は 1 回にまとめる。
 pub fn flush_screen_dirty(st: &mut GuiState) {
+    /* 全画面 GFX 中は画面を持っていない (票 T8 D4a)。**dirty は落とさずに溜める**
+     * (復帰の `composite_full` がまとめて片付ける)。ここで先に戻るのは、下の
+     * `fep::redraw_now` / ドラッグ枠が合成の門を通らずに画素を置くため。 */
+    if crate::fullscreen::active() {
+        return;
+    }
     let dragging = st.drag_index >= 0;
     if st.screen_dirty.is_empty() && !dragging {
         return;

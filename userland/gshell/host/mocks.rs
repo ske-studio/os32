@@ -146,7 +146,12 @@ unsafe extern "C" fn no_key() -> i32 {
     -1
 }
 unsafe extern "C" fn nothing() {}
-unsafe extern "C" fn dirty(_: i32, _: i32, _: i32, _: i32) {}
+unsafe extern "C" fn dirty(_: i32, _: i32, _: i32, _: i32) {
+    DIRTY_RECTS.fetch_add(1, Ordering::SeqCst);
+}
+unsafe extern "C" fn present_dirty() {
+    PRESENTS.fetch_add(1, Ordering::SeqCst);
+}
 unsafe extern "C" fn mouse(p: *mut u8) {
     let (x, y, b) = *lk(&MOUSE);
     std::ptr::write_bytes(p, 0, 10);
@@ -185,11 +190,29 @@ impl Drop for Shm {
         }
     }
 }
-unsafe extern "C" fn palette(_: i32, _: u8, _: u8, _: u8) {}
-unsafe extern "C" fn get_palette(_: i32, r: *mut u8, g: *mut u8, b: *mut u8) {
-    r.write(0);
-    g.write(0);
-    b.write(0);
+/// いま入っている 16 色 (`gfx_set_palette` / `gfx_get_palette` の実体)。
+pub static PALETTE: Mutex<[u8; 48]> = Mutex::new([0; 48]);
+/// `gfx_set_palette(i, r, g, b)` の呼び出し列 (退避→復元の順序の観測点)。
+pub static PALETTE_SETS: Mutex<Vec<(i32, u8, u8, u8)>> = Mutex::new(Vec::new());
+unsafe extern "C" fn palette(i: i32, r: u8, g: u8, b: u8) {
+    lk(&PALETTE_SETS).push((i, r, g, b));
+    if (0..16).contains(&i) {
+        let mut p = lk(&PALETTE);
+        p[i as usize * 3] = r;
+        p[i as usize * 3 + 1] = g;
+        p[i as usize * 3 + 2] = b;
+    }
+}
+unsafe extern "C" fn get_palette(i: i32, r: *mut u8, g: *mut u8, b: *mut u8) {
+    let p = *lk(&PALETTE);
+    let k = if (0..16).contains(&i) { i as usize } else { 0 };
+    r.write(p[k * 3]);
+    g.write(p[k * 3 + 1]);
+    b.write(p[k * 3 + 2]);
+}
+/// `gfx_set_palette` の呼び出し列 (複製)。
+pub fn palette_sets() -> Vec<(i32, u8, u8, u8)> {
+    lk(&PALETTE_SETS).clone()
 }
 unsafe extern "C" fn render(_: *mut u8) {}
 /// テストが積む生キー (`kbd_trygetrawkey` が 1 件ずつ返す)。空なら -1。
@@ -289,6 +312,72 @@ pub fn abort_clear_calls() -> usize {
 
 /// `gfx_init` が呼ばれた回数。
 pub static GFX_INITS: AtomicUsize = AtomicUsize::new(0);
+/// `gfx_add_dirty_rect` に積まれた矩形の数 (票 T8 D4a の「描かない」の観測点)。
+pub static DIRTY_RECTS: AtomicUsize = AtomicUsize::new(0);
+/// `gfx_present_dirty` が呼ばれた回数。
+pub static PRESENTS: AtomicUsize = AtomicUsize::new(0);
+/// `gfx_screen_owner()` が返す画面の所有者 (KAPI v48。1 = WM、2〜5 = アプリ)。
+pub static SCREEN_OWNER: AtomicUsize = AtomicUsize::new(1);
+/// `sys_open` が開ける「ファイル」の中身 (空 = 開けない)。OS32X ヘッダ用。
+pub static FILE_BYTES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+/// `sys_open` に渡ったパスの列 (入口がヘッダを読んだことの観測点)。
+pub static OPENS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// 開いている `fd` の読み出し位置 (単一 fd を前提にした最小の模型)。
+static FILE_POS: AtomicUsize = AtomicUsize::new(0);
+
+/// 画面の所有者を置く (1 = WM、2〜5 = アプリ)。
+pub fn set_screen_owner(id: i32) {
+    SCREEN_OWNER.store(id as usize, Ordering::SeqCst);
+}
+/// `gfx_add_dirty_rect` / `gfx_present_dirty` の回数 (積んだ矩形数, present 数)。
+pub fn present_counts() -> (usize, usize) {
+    (
+        DIRTY_RECTS.load(Ordering::SeqCst),
+        PRESENTS.load(Ordering::SeqCst),
+    )
+}
+/// 次に `sys_open` で開けるファイルの中身を置く (空 = 開けない)。
+pub fn set_file(bytes: &[u8]) {
+    *lk(&FILE_BYTES) = bytes.to_vec();
+}
+/// OS32X ヘッダ 40B を組み立てる (`sdk/include/os32/os32_kapi_shared.h`)。
+pub fn os32x_header(flags: u32) -> Vec<u8> {
+    let mut h = vec![0u8; 40];
+    h[0..4].copy_from_slice(&0x4F53_3332u32.to_le_bytes());
+    h[4..8].copy_from_slice(&40u32.to_le_bytes());
+    h[8..12].copy_from_slice(&2u32.to_le_bytes());
+    h[12..16].copy_from_slice(&flags.to_le_bytes());
+    h
+}
+/// `sys_open` に渡ったパスの列 (複製)。
+pub fn open_calls() -> Vec<Vec<u8>> {
+    lk(&OPENS).clone()
+}
+
+unsafe extern "C" fn screen_owner() -> i32 {
+    SCREEN_OWNER.load(Ordering::SeqCst) as i32
+}
+unsafe extern "C" fn sys_open(path: *const u8, _mode: i32) -> i32 {
+    let mut n = 0;
+    while *path.add(n) != 0 && n < 256 {
+        n += 1;
+    }
+    lk(&OPENS).push(std::slice::from_raw_parts(path, n).to_vec());
+    if lk(&FILE_BYTES).is_empty() {
+        return -1;
+    }
+    FILE_POS.store(0, Ordering::SeqCst);
+    7
+}
+unsafe extern "C" fn sys_read(_fd: i32, buf: *mut u8, size: u32) -> i32 {
+    let f = lk(&FILE_BYTES);
+    let pos = FILE_POS.load(Ordering::SeqCst);
+    let n = core::cmp::min(size as usize, f.len().saturating_sub(pos));
+    std::ptr::copy_nonoverlapping(f.as_ptr().add(pos), buf, n);
+    FILE_POS.store(pos + n, Ordering::SeqCst);
+    n as i32
+}
+unsafe extern "C" fn sys_close(_fd: i32) {}
 
 /// ゲストの `gfx_init` (`gfx/gfx_core.c`) は **VRAM の両ページをゼロクリア
 /// する**。「消えたのに描き直させない」不具合 (W-1) をホストで再現するには
@@ -382,7 +471,12 @@ pub fn init() {
     a.mem_alloc = alloc;
     a.mem_free = free;
     a.gfx_add_dirty_rect = dirty;
-    a.gfx_present_dirty = nothing;
+    a.gfx_present_dirty = present_dirty;
+    /* 票 T8: 画面の所有者 (KAPI v48) と OS32X ヘッダの読み取り。 */
+    a.gfx_screen_owner = screen_owner;
+    a.sys_open = sys_open;
+    a.sys_read = sys_read;
+    a.sys_close = sys_close;
     /* `op_wait` / 単独ループの待ち。ホストでは何もしない (時計は get_tick 側)。 */
     a.sys_halt = nothing;
     a.exec_park = exec_park;
@@ -396,6 +490,15 @@ pub fn init() {
     lk(&RAWKEYS).clear();
     lk(&IME_SCRIPT).clear();
     GFX_INITS.store(0, Ordering::SeqCst);
+    DIRTY_RECTS.store(0, Ordering::SeqCst);
+    PRESENTS.store(0, Ordering::SeqCst);
+    SCREEN_OWNER.store(1, Ordering::SeqCst);
+    FILE_POS.store(0, Ordering::SeqCst);
+    lk(&FILE_BYTES).clear();
+    lk(&OPENS).clear();
+    *lk(&PALETTE) = [0; 48];
+    lk(&PALETTE_SETS).clear();
+    crate::fullscreen::reset();
     PARKS.store(0, Ordering::SeqCst);
     *lk(&PARK_RET) = -1;
     lk(&RESUMES).clear();

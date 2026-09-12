@@ -2028,3 +2028,236 @@ fn switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit() {
     );
     wm::g().inited = false;
 }
+
+/* ================================================================ */
+/*  全画面 GFX (票 T8 D4)                                            */
+/*                                                                  */
+/*  画面の所有者はカーネルが持つ (`gfx_screen_owner`、KAPI v48)。      */
+/*  ここで試すのは WM の規律 — 所有者 ≠ 1 の間は描かない、戻ったら     */
+/*  復帰する、CTRL+STOP の宛先、入口 (OS32X ヘッダ) の判定。          */
+/* ================================================================ */
+
+/// 全画面 GFX プログラムを 1 本起動して park させた状態を作る。
+/// 戻り値は `run_program` の戻り値 (= app_id)。
+fn launch_fullscreen(st: &mut crate::wm::GuiState, path: &[u8]) -> i32 {
+    use crate::mocks;
+    /* 起動するのは `--gfx` 宣言つきのプログラム。 */
+    mocks::set_file(&mocks::os32x_header(crate::os32x::FLAG_GFX));
+    /* park した (rc = 3) 後、画面は ID 3 のもの。 */
+    *mocks::START_SCRIPT.lock().unwrap() = vec![3];
+    mocks::set_screen_owner(3);
+    let mut buf = [0u8; 256];
+    buf[..path.len()].copy_from_slice(path);
+    crate::run_program(st, &buf)
+}
+
+/* ---- (a) 所有者 ≠ 1 の間は 1 画素も出さない ---- */
+#[test]
+fn the_wm_draws_nothing_while_another_app_owns_the_screen() {
+    use crate::{fullscreen, mocks, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+
+    let rc = launch_fullscreen(g, b"/usr/bin/gfx200_test.bin\0");
+    assert_eq!(rc, 3, "park した全画面プログラムの app_id が返っていない");
+    assert!(
+        fullscreen::active() && fullscreen::owner() == 3,
+        "所有者 ≠ 1 なのに全画面モードに入っていない (owner={})",
+        fullscreen::owner()
+    );
+
+    /* ここから先は WM の描画を全部試す — 1 つでも VRAM へ出たら失格。 */
+    let before = mocks::present_counts();
+    let pixels = mocks::pixels();
+    wm::composite_full(g);
+    wm::composite_rect(g, wm::Rect::new(0, 0, 320, 200));
+    wm::present_rect(g, wm::Rect::new(0, 0, 320, 200));
+    wm::flush_present();
+    g.dirty_screen(wm::Rect::new(0, 0, 640, 400));
+    wm::flush_screen_dirty(g);
+    /* WM の 1 周まるごと (FEP の描画・タスクバーの時計・カーソルを含む)。 */
+    wm::wm_cycle(g, crate::input::Ctx::Standalone);
+    assert_eq!(
+        mocks::present_counts(),
+        before,
+        "全画面 GFX 中に WM が present した (プログラムの画を壊す)"
+    );
+    assert!(
+        mocks::pixels() == pixels,
+        "全画面 GFX 中に WM がバックバッファへ描いた"
+    );
+
+    /* マウスは誰にも配らない (タスクバー / Start / 窓を含めて無視)。 */
+    let ui_before = (crate::startmenu::is_open(), crate::modal::is_open());
+    let front_before = g.front_owner();
+    *mocks::MOUSE.lock().unwrap() = (5, 5, 1); /* タスクバーではなく窓の上を押す */
+    crate::input::capture(g, crate::input::Ctx::Standalone);
+    assert_eq!(
+        (crate::startmenu::is_open(), crate::modal::is_open()),
+        ui_before,
+        "全画面 GFX 中のクリックが WM の UI を開閉した"
+    );
+    assert_eq!(
+        g.front_owner(),
+        front_before,
+        "全画面 GFX 中のクリックがフォーカスを動かした"
+    );
+    assert!(mocks::pixels() == pixels, "全画面 GFX 中にカーソルを描いた");
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- (b) 所有者が 1 に戻ったら復帰する ---- */
+#[test]
+fn the_screen_comes_back_when_the_owner_returns_to_the_wm() {
+    use crate::{fullscreen, mocks, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    /* 復帰でパレットを戻せるよう、入る前の 16 色を控えさせる。 */
+    unsafe { (os32api::api().gfx_set_palette)(1, 0xF, 0, 0) };
+
+    launch_fullscreen(g, b"/usr/bin/gfx200_test.bin\0");
+    assert!(fullscreen::active());
+    /* プログラムがパレットを壊し、窓の dirty も消えた状態にしておく。 */
+    unsafe { (os32api::api().gfx_set_palette)(1, 0, 0, 0xF) };
+    let mut i = 0;
+    while i < 2 {
+        g.windows[i].dirty = wm::RectSet::EMPTY;
+        i += 1;
+    }
+    let inits = mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst);
+
+    /* プログラムが抜けてカーネルが所有者を WM に戻した。 */
+    mocks::set_screen_owner(1);
+    assert!(
+        !crate::after_exec(g),
+        "所有者が 1 に戻ったのに全画面モードのまま"
+    );
+    assert!(!fullscreen::active() && fullscreen::owner() == 0);
+    assert_eq!(
+        mocks::GFX_INITS.load(std::sync::atomic::Ordering::SeqCst),
+        inits + 1,
+        "復帰で gfx_init を呼んでいない (バックエンドが戻らない)"
+    );
+    /* 全クライアントに全面を描き直させる (W-1: 露出は dirty を生まない)。 */
+    let mut k = 0;
+    while k < 2 {
+        assert!(
+            g.windows[k].dirty.len > 0,
+            "復帰で窓 {} が invalidate されていない",
+            k
+        );
+        k += 1;
+    }
+    /* パレットは入る時点の控えに戻る (その後に G6 のシステム色が入るので、
+     * 見るのは `gfx_set_palette` の呼び出し列)。 */
+    assert!(
+        mocks::palette_sets().contains(&(1, 0xF, 0, 0)),
+        "復帰で入る時点の 16 色を戻していない: {:?}",
+        mocks::palette_sets()
+    );
+    /* 全面を出し直した (門が開いている)。 */
+    assert!(
+        mocks::present_counts().1 >= 1,
+        "復帰で全面 present をしていない"
+    );
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- (d) CTRL+STOP は所有者宛 ---- */
+#[test]
+fn ctrl_stop_targets_the_screen_owner_while_full_screen() {
+    use crate::{fullscreen, mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    let g = wm::g();
+    focus_app(g, 2); /* フォーカス窓 = 端末 (ID 2) */
+    /* 画面を持っているのは端末が起動した ID 3。 */
+    mocks::set_screen_owner(3);
+    assert!(crate::after_exec(g), "所有者 3 を見て全画面モードに入らない");
+    assert_eq!(fullscreen::owner(), 3);
+
+    /* 走っているのは端末 (2)。宛先は所有者 (3) なので本人は畳まれない。 */
+    assert!(
+        !multiapp::abort_targets_current(g, 2),
+        "全画面中の CTRL+STOP がフォーカス窓 (端末) に向いた"
+    );
+    /* top-level (単独ループ) の 1 周で振り替える。 */
+    multiapp::redirect_abort(g, 0);
+    assert!(multiapp::pending_top_level_work(), "予約が積まれていない");
+    assert!(multiapp::resume_one(g), "top-level が予約を実行しない");
+    assert_eq!(mocks::abort_clear_calls(), 1, "exec_abort_clear が 1 回でない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が画面の所有者でない");
+    assert!(!multiapp::is_tracked(3), "kill した所有者が表に残った");
+    assert!(multiapp::is_tracked(2), "端末まで畳んでしまった");
+    g.inited = false;
+    fullscreen::reset();
+}
+
+/* ---- 入口 (D4): OS32X ヘッダの宣言で起動を決める ---- */
+#[test]
+fn the_entry_refuses_cpl0_programs_and_arms_full_screen_for_gfx() {
+    use crate::{fullscreen, mocks, modal, os32x, wm};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+
+    /* (1) `--cpl0` (v86) は起動しない。理由をモーダルで出す。 */
+    mocks::set_file(&mocks::os32x_header(os32x::FLAG_FORCE_CPL0));
+    let mut buf = [0u8; 256];
+    let p = b"/usr/bin/v86.bin\0";
+    buf[..p.len()].copy_from_slice(p);
+    let rc = crate::run_program(g, &buf);
+    assert!(
+        mocks::start_calls().is_empty(),
+        "CPL=0 強制のプログラムを GUI から起動した: {:?}",
+        mocks::start_calls()
+    );
+    assert_eq!(rc, 0, "断った起動が `Launch failed` を誘発する戻り値になった");
+    assert!(modal::is_open(), "`cui only:` を出していない");
+    assert!(
+        !fullscreen::active(),
+        "起動しなかったのに全画面モードへ入った"
+    );
+    assert!(
+        mocks::open_calls().iter().any(|c| c == b"/usr/bin/v86.bin"),
+        "入口が OS32X ヘッダを読んでいない: {:?}",
+        mocks::open_calls()
+    );
+    /* 次の試験へ持ち越さない (モーダルは大域)。 */
+    modal::state().used = false;
+
+    /* (2) `--gfx` は `exec_start` の**前**に印が立つ (所有者が付くまでの隙間)。 */
+    mocks::init();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    launch_fullscreen(g, b"/usr/bin/blit_test.bin\0");
+    assert_eq!(mocks::start_calls().len(), 1, "宣言つきは起動する");
+    assert!(fullscreen::active(), "宣言を見て全画面モードに入らない");
+
+    /* (3) どちらも無いプログラムは従来どおり (印も立たない)。 */
+    mocks::init();
+    let g = wm::g();
+    *g = four_app_state(&shm);
+    g.inited = true;
+    mocks::set_file(&mocks::os32x_header(0x0002 /* RING3 だけ */));
+    let mut buf = [0u8; 256];
+    let p = b"/usr/bin/gui_demo.bin\0";
+    buf[..p.len()].copy_from_slice(p);
+    assert_eq!(crate::run_program(g, &buf), 2, "普通のアプリが起動しない");
+    assert!(!fullscreen::active(), "宣言の無いアプリで全画面モードに入った");
+    g.inited = false;
+    fullscreen::reset();
+}
