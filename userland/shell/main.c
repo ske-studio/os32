@@ -11,6 +11,8 @@ KernelAPI *g_api;
 #ifdef SHELL_AS_APP
 /* D2(d): 内蔵 `exit` が立て、shell_run() の外側ループが見て抜ける */
 int sh_exit_flag = 0;
+/* B2: sys_ls の写し取り。glob (このファイル) と ls (cmd_dir.c) が使う。 */
+#include "sh_ls.inc"
 #endif
 
 static ShellCmd g_cmds[MAX_CMDS];
@@ -123,6 +125,10 @@ int wildcard_match(const char *pattern, const char *str) {
     return (*pattern == '\0' && *str == '\0');
 }
 
+/* B2: CPL=3 では sys_ls のコールバックから KAPI を呼べない。glob_cb は
+ * mem_alloc を呼ぶので、SHELL_AS_APP では写し取り (sh_ls_collect_cb) を
+ * 挟んで sys_ls が戻ってから glob_cb へ流す。常駐はマクロがそのまま
+ * g_api->sys_ls(dir_path, glob_cb, ctx) に展開される (.o は不変)。 */
 struct GlobCtx {
     char **argv;
     int *argc;
@@ -161,6 +167,25 @@ static void glob_cb(const DirEntry_Ext *entry, void *c) {
         }
     }
 }
+
+#ifdef SHELL_AS_APP
+/* 写し取ってから glob_cb へ流す (コールバック内で mem_alloc しない) */
+static void sh_glob_run(const char *dir_path, struct GlobCtx *ctx)
+{
+    int i, n;
+    DirEntry_Ext e;
+
+    sh_ls_reset();
+    g_api->sys_ls(dir_path, sh_ls_collect_cb, (void *)0);
+    n = sh_ls_count_get();
+    for (i = 0; i < n; i++) {
+        sh_ls_fill(i, &e);
+        glob_cb(&e, ctx);
+    }
+}
+#else
+#define sh_glob_run(dir_path, ctx)  (g_api->sys_ls((dir_path), glob_cb, (ctx)))
+#endif
 
 void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args, char **allocated_strings, int *alloc_count) {
     int argc = 0;
@@ -257,7 +282,7 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
             ctx.allocated_strings = allocated_strings;
             ctx.alloc_count = alloc_count;
 
-            g_api->sys_ls(dir_path, glob_cb, &ctx);
+            sh_glob_run(dir_path, &ctx);
 
             if (!ctx.matched_any) {
                 argv[argc++] = start;
@@ -612,6 +637,55 @@ static void reset_all_redirects(void)
     g_api->sys_reset_redirect(2);
 }
 
+#ifdef SHELL_AS_APP
+/* そのコマンド名が内蔵コマンド (または .bat / .sh スクリプト) か。
+ * 外部コマンドは要求表経由で WM が起こす**別アプリ**になるので、sh 自身の
+ * FD に掛けたリダイレクト / パイプは届かない。 */
+static int sh_name_is_builtin(const char *name)
+{
+    int j;
+    if (name[0] == '\0') return 1;   /* 空段は execute_single が黙って捨てる */
+    if (has_ext(name, ".bat") || has_ext(name, ".sh")) return 1;
+    for (j = 0; j < g_cmd_count; j++) {
+        if (str_eq(name, g_cmds[j].name)) return 1;
+    }
+    return 0;
+}
+
+/* パイプの 1 段 (split_pipeline が前後の空白を落とした文字列) の先頭語を見る */
+static int sh_stage_is_builtin(const char *seg)
+{
+    char name[PATH_MAX_LEN];
+    int n = 0;
+
+    while (*seg == ' ') seg++;
+    while (*seg && *seg != ' ' && *seg != '<' && *seg != '>' &&
+           n < PATH_MAX_LEN - 1) {
+        name[n++] = *seg++;
+    }
+    name[n] = '\0';
+    return sh_name_is_builtin(name);
+}
+
+/* argv にリダイレクト演算子が混じっているか (apply_redirects が見る形と同じ)。
+ * リダイレクトを**張る前**に呼ぶこと — 張ってしまうと、外部段を断った後も
+ * 親のリダイレクト表を子が閉じる余地が残る (表は全アプリ共有)。 */
+static int sh_has_redirect(int argc, char **argv)
+{
+    int i;
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '>' || a[0] == '<') return 1;
+        if (a[0] == '2' && a[1] == '>') {
+            /* "2>&1" は apply_redirects が黙って捨てるだけ (FD を開かない) */
+            if (a[2] == '&' && a[3] == '1') continue;
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 /* ======================================================================== */
 /*  コマンド実行エンジン (単一コマンド)                                       */
 /* ======================================================================== */
@@ -635,6 +709,20 @@ static void execute_single(const char *cmd)
     parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS, allocated_strings, &alloc_count);
     
     if (argc > 0) {
+#ifdef SHELL_AS_APP
+        /* B3: 標準 FD のリダイレクト表は全アプリ共有で read/write/reset が
+         * owner を見ないので、外部コマンド (別アプリ) に掛けると出力が親の
+         * ファイルへ入り、子の reset が親の FD を閉じる。リダイレクトを
+         * **張る前**に断る。内蔵コマンドは sh 自身の文脈で完結するので従来どおり。 */
+        if (sh_has_redirect(argc, argv) && !sh_name_is_builtin(argv[0])) {
+            g_api->kprintf(ATTR_RED, "%s",
+                           "sh: redirect to external command is not supported\n");
+            for (j = 0; j < alloc_count; j++) {
+                g_api->mem_free(allocated_strings[j]);
+            }
+            return;
+        }
+#endif
         /* リダイレクト演算子の解析・適用 */
         argc = apply_redirects(argc, argv);
         if (argc > 0) {
@@ -687,31 +775,6 @@ static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_
     return count;
 }
 
-#ifdef SHELL_AS_APP
-/* パイプの 1 段が内蔵コマンド (または .bat / .sh スクリプト) か。
- * 外部コマンドは要求表経由で WM が起こす**別アプリ**になるので、sh 自身の
- * FD に掛けたリダイレクトは届かない。黙って壊れるより行ごと断る。
- * seg は split_pipeline が前後の空白を落とした 1 段ぶん。 */
-static int sh_stage_is_builtin(const char *seg)
-{
-    char name[PATH_MAX_LEN];
-    int n = 0;
-    int j;
-
-    while (*seg == ' ') seg++;
-    while (*seg && *seg != ' ' && *seg != '<' && *seg != '>' &&
-           n < PATH_MAX_LEN - 1) {
-        name[n++] = *seg++;
-    }
-    name[n] = '\0';
-    if (n == 0) return 1;            /* 空段は execute_single が黙って捨てる */
-    if (has_ext(name, ".bat") || has_ext(name, ".sh")) return 1;
-    for (j = 0; j < g_cmd_count; j++) {
-        if (str_eq(name, g_cmds[j].name)) return 1;
-    }
-    return 0;
-}
-#endif
 
 /* ======================================================================== */
 /*  公開API: execute_command                                                 */
@@ -799,9 +862,16 @@ void execute_command(const char *cmd)
                 }
             }
 
+            sh_pipeline_enter();
             for (i = 0; i < stage_count; i++) {
                 int is_first = (i == 0);
                 int is_last = (i == stage_count - 1);
+
+#ifdef SHELL_AS_APP
+                /* B6: 段の途中で `exit` が立ったらそこで打ち切る
+                 * (`exit | ask "wait: " V` が入力待ちに入らないように) */
+                if (sh_exit_flag) break;
+#endif
 
                 /* stdin のリダイレクト (最初以外) */
                 if (!is_first && prev_buf >= 0) {
@@ -844,6 +914,8 @@ void execute_command(const char *cmd)
                     prev_buf = cur_buf;
                 }
             }
+
+            sh_pipeline_leave();
 
             /* パイプバッファを解放 */
             for (ai = 0; ai < num_alloc; ai++) {

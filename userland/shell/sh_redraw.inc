@@ -80,15 +80,21 @@ static void sh_cursor_back(const char *buf, int cursor, int len)
  *  経路は SHELL_AS_APP だけ (常駐の BS は 1 バイトも変えていない)。
  *
  *  消した後はカーソルが新しい行末に来るので、写しもそこで確定する。 */
-static void sh_backspace_tail(char *buf, int new_len)
+/* sh_erase_cells — 消したバイト 1 つぶんを画面から消す (B5 で公開)
+ * 3 バイト列の先頭は 2 セル。cmd_script.c の `ask` も同じものを使う。 */
+void sh_erase_cells(char removed)
 {
-    int cells = ((((u8)buf[new_len]) & 0xF0) == 0xE0) ? 2 : 1;
+    int cells = ((((u8)removed) & 0xF0) == 0xE0) ? 2 : 1;
     int i;
 
     for (i = 0; i < cells; i++) g_api->shell_putchar(0x08, ATTR_WHITE);
     for (i = 0; i < cells; i++) g_api->shell_putchar(' ', ATTR_WHITE);
     for (i = 0; i < cells; i++) g_api->shell_putchar(0x08, ATTR_WHITE);
+}
 
+static void sh_backspace_tail(char *buf, int new_len)
+{
+    sh_erase_cells(buf[new_len]);
     buf[new_len] = '\0';
     sh_set_drawn(buf, new_len, new_len);
 }

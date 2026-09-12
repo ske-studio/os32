@@ -145,11 +145,16 @@ static void file_add(const char *path, const char *body)
 
 /* ---- 差し替える KernelAPI の中身 --------------------------------------- */
 
+/* B2: sys_ls のコールバック内で KAPI が呼ばれたら数える。生の int 0x80 の
+ * 再入は CPL=3 で落ちるので、ホストでは「呼んだかどうか」だけを見る。 */
+static int g_kapi_calls;
+
 static void __cdecl h_kprintf(u8 attr, const char *fmt, ...)
 {
     __builtin_va_list ap;
     const char *p = fmt;
     (void)attr;
+    g_kapi_calls++;
     __builtin_va_start(ap, fmt);
     while (*p) {
         if (p[0] == '%' && p[1] == 's') {
@@ -166,9 +171,15 @@ static void __cdecl h_kprintf(u8 attr, const char *fmt, ...)
     __builtin_va_end(ap);
 }
 
-static void __cdecl h_shell_putchar(char c, u8 attr) { (void)attr; out_byte(c); }
+static void __cdecl h_shell_putchar(char c, u8 attr)
+{
+    g_kapi_calls++;
+    (void)attr;
+    out_byte(c);
+}
 static void __cdecl h_shell_print_utf8(const char *s, u8 attr)
 {
+    g_kapi_calls++;
     (void)attr;
     out_str(s);
 }
@@ -177,6 +188,8 @@ static void *__cdecl h_mem_alloc(u32 size)
 {
     char *p;
     unsigned long n = (unsigned long)size;
+
+    g_kapi_calls++;
     n = (n + 7UL) & ~7UL;
     if (g_pool_used + n > (unsigned long)POOL_SIZE) return (void *)0;
     p = g_pool + g_pool_used;
@@ -184,7 +197,7 @@ static void *__cdecl h_mem_alloc(u32 size)
     return (void *)p;
 }
 
-static void __cdecl h_mem_free(void *p) { (void)p; }
+static void __cdecl h_mem_free(void *p) { g_kapi_calls++; (void)p; }
 
 static int __cdecl h_sys_open(const char *path, int flags)
 {
@@ -212,6 +225,24 @@ static int __cdecl h_sys_read(int fd, void *buf, u32 size)
 }
 
 static void __cdecl h_sys_close(int fd) { (void)fd; g_open_fd = 0; }
+static int __cdecl h_sys_isatty(int fd) { g_kapi_calls++; (void)fd; return 1; }
+
+/* sh_launch がパイプ判定を抜けた先で NULL を踏まないための最小の受け皿。
+ * GUI 外を模して INVAL を返す (この試験では起動そのものは見ない —
+ * 起動の 4 経路は tools/tests/sh_launch_host.c の担当)。 */
+static i32 __cdecl h_launch_req(const char *cmdline)
+{
+    (void)cmdline;
+    g_kapi_calls++;
+    return OS32_ERR_INVAL;
+}
+static i32 __cdecl h_launch_poll(i32 token, i32 *status)
+{
+    (void)token;
+    if (status) *status = LAUNCH_ST_DONE;
+    return 0;
+}
+static i32 __cdecl h_sys_yield(void) { return 0; }
 static int __cdecl h_kbd_trygetkey(void) { return -1; }
 static int __cdecl h_kbd_getchar(void)   { return 0x0D; }
 
@@ -243,6 +274,10 @@ static void build_api(void)
     g_fake.sys_open = h_sys_open;
     g_fake.sys_read = h_sys_read;
     g_fake.sys_close = h_sys_close;
+    g_fake.sys_isatty = h_sys_isatty;
+    g_fake.launch_req = h_launch_req;
+    g_fake.launch_poll = h_launch_poll;
+    g_fake.sys_yield = h_sys_yield;
     g_fake.kbd_trygetkey = h_kbd_trygetkey;
     g_fake.kbd_getchar = h_kbd_getchar;
     g_fake.console_get_cursor_x = h_console_get_cursor_x;
@@ -260,6 +295,8 @@ static void show_prompt(void) { out_str("sh> "); }
 
 #include "../../userland/shell/sh_redraw.inc"
 #include "../../userland/shell/sh_pipe.inc"
+#include "../../userland/shell/sh_ls.inc"
+#include "../../userland/shell/sh_launch.inc"
 
 /* ---- 実物のスクリプトエンジン ------------------------------------------ */
 
@@ -534,26 +571,115 @@ static void case_pipe_buffers(void)
 }
 
 /* ========================================================================
- *  6. source 中の exit (往復 1 の blocker 2 / D2(d))
+ *  6. sys_ls のコールバックは KAPI を呼ばない (往復 6 の B2)
+ *
+ *  CPL=3 で sys_ls のコールバックから int 0x80 を再入すると落ちる
+ *  (実機で `find /etc -name filetypes` が [Process crashed])。sh の内蔵 ls と
+ *  glob 展開はコールバックを写し取りだけにして、戻ってから処理する。
+ * ======================================================================== */
+static void case_ls_callback_no_kapi(void)
+{
+    DirEntry_Ext e;
+    DirEntry_Ext got;
+    int i;
+
+    report("6 sys_ls のコールバックは KAPI を呼ばない\n");
+    sh_ls_reset();
+    g_kapi_calls = 0;
+
+    /* SH_LS_MAX を 2 つ超える件数を流す */
+    for (i = 0; i < SH_LS_MAX + 2; i++) {
+        int n = 0;
+        e.name[n++] = 'f';
+        e.name[n++] = (char)('0' + (i % 10));
+        e.name[n] = '\0';
+        e.size = (u32)i;
+        e.type = (i == 0) ? OS32_FILE_TYPE_DIR : OS32_FILE_TYPE_FILE;
+        sh_ls_collect_cb(&e, (void *)0);
+    }
+
+    check(g_kapi_calls == 0,          "6a コールバック内の KAPI 呼び出しは 0 回");
+    check(sh_ls_count_get() == SH_LS_MAX, "6b 上限まで写す");
+    check(sh_ls_dropped() == 2,       "6c 溢れた分は数だけ数える");
+
+    /* 写しから元の形に戻せる (呼び手は既存のコールバックへ流せる) */
+    got.name[0] = '\0';
+    got.size = 0xFFFFFFFFu;
+    got.type = 0;
+    sh_ls_fill(1, &got);
+    check(got.name[0] == 'f' && got.name[1] == '1' && got.name[2] == '\0' &&
+          got.size == 1 && got.type == OS32_FILE_TYPE_FILE,
+                                      "6d 名前 / サイズ / 種別を写している");
+
+    sh_ls_reset();
+    check(sh_ls_count_get() == 0 && sh_ls_dropped() == 0,
+                                      "6e reset で空になる");
+}
+
+/* ========================================================================
+ *  7. パイプの中から外部プログラムは起動しない (往復 6 の B4)
+ *
+ *  先頭語だけの事前判定は `exec /bin/sh.bin | echo tail` を通してしまうので、
+ *  最終起動口 (sh_launch) で確かめる。
+ * ======================================================================== */
+static void case_pipe_blocks_launch(void)
+{
+    int rc;
+
+    report("7 パイプ実行中は sh_launch が断る\n");
+    out_reset();
+    sh_pipeline_enter();
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(rc < 0,                     "7a 負を返す");
+    check(out_is("sh: pipe to external command is not supported\\n"),
+                                      "7b 理由を出す");
+    sh_pipeline_leave();
+
+    /* 入れ子 (source 経由のパイプ) も数えているので、1 段抜けても残る */
+    out_reset();
+    sh_pipeline_enter();
+    sh_pipeline_enter();
+    sh_pipeline_leave();
+    rc = sh_launch("/bin/kbd_echo.bin");
+    check(rc < 0,                     "7c 入れ子は数えるので外側でもまだ断る");
+    sh_pipeline_leave();
+}
+
+/* ========================================================================
+ *  8. ask の行末 BS も画面から消す (往復 6 の B5)
+ * ======================================================================== */
+static void case_ask_backspace(void)
+{
+    report("8 ask の BS も BS + 空白 + BS\n");
+    out_reset();
+    sh_erase_cells('c');
+    check(out_is("\\b \\b"),        "8a 半角は 1 セル");
+    out_reset();
+    sh_erase_cells((char)0xE3);
+    check(out_is("\\b\\b  \\b\\b"), "8b 3 バイト列の先頭は 2 セル");
+}
+
+/* ========================================================================
+ *  9. source 中の exit (往復 1 の blocker 2 / D2(d))
  * ======================================================================== */
 static void case_exit_stops_rest(void)
 {
-    report("6 source: exit の次の行は走らない\n");
+    report("9 source: exit の次の行は走らない\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
     out_reset();
     file_add("/a.sh", "echo 1\nexit\necho 2\n");
 
-    check(script_source_file("/a.sh") == 0, "6a source は 0 で戻る");
-    check(trace_is("echo 1|exit"),          "6b exit の後は実行しない");
-    check(sh_exit_flag == 1,                "6c 印は立ったまま (shell_run の入口が見る)");
-    check(g_open_leak == 0,                 "6d FD を開いたままにしない");
+    check(script_source_file("/a.sh") == 0, "9a source は 0 で戻る");
+    check(trace_is("echo 1|exit"),          "9b exit の後は実行しない");
+    check(sh_exit_flag == 1,                "9c 印は立ったまま (shell_run の入口が見る)");
+    check(g_open_leak == 0,                 "9d FD を開いたままにしない");
 }
 
 static void case_exit_breaks_goto_loop(void)
 {
-    report("7 source: goto の無限ループでも exit で抜ける\n");
+    report("10 source: goto の無限ループでも exit で抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -561,13 +687,13 @@ static void case_exit_breaks_goto_loop(void)
     /* exit が無ければ :loop <- goto loop で永久に回る */
     file_add("/b.sh", "echo a\nexit\n:loop\ngoto loop\n");
 
-    check(script_source_file("/b.sh") == 0, "7a source は戻ってくる");
-    check(trace_is("echo a|exit"),          "7b ラベルも goto も走らない");
+    check(script_source_file("/b.sh") == 0, "10a source は戻ってくる");
+    check(trace_is("echo a|exit"),          "10b ラベルも goto も走らない");
 }
 
 static void case_exit_unwinds_nested(void)
 {
-    report("8 source: ネストした source の外側も抜ける\n");
+    report("11 source: ネストした source の外側も抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -575,9 +701,9 @@ static void case_exit_unwinds_nested(void)
     file_add("/outer.sh", "source /inner.sh\necho outer2\n");
     file_add("/inner.sh", "exit\necho inner2\n");
 
-    check(script_source_file("/outer.sh") == 0, "8a 外側の source も 0 で戻る");
-    check(trace_is("source /inner.sh|exit"),    "8b 内側も外側も後続を止める");
-    check(g_open_leak == 0,                     "8c どの段でも FD を残さない");
+    check(script_source_file("/outer.sh") == 0, "11a 外側の source も 0 で戻る");
+    check(trace_is("source /inner.sh|exit"),    "11b 内側も外側も後続を止める");
+    check(g_open_leak == 0,                     "11c どの段でも FD を残さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -590,6 +716,9 @@ void _start(void)
     case_redraw_cursor_not_at_end();
     case_backspace_erases();
     case_pipe_buffers();
+    case_ls_callback_no_kapi();
+    case_pipe_blocks_launch();
+    case_ask_backspace();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();
     case_exit_unwinds_nested();

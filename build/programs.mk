@@ -30,7 +30,13 @@ userland/lib/rt/dbgserial.o: userland/lib/rt/dbgserial.c userland/lib/rt/dbgseri
 SHELL_SRC = $(wildcard userland/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
-userland/shell/%.o: userland/shell/%.c
+# ヘッダと .inc の明示依存 (B7)。Makefile の DEPFILES は boot/kernel/... しか
+# 走査しないので userland の .d は読まれない。sh_launch.inc / sh_pipe.inc /
+# sh_redraw.inc を直しても .o が作り直されないと、直したつもりの sh.bin が
+# 出来上がる。常駐側にも同じ依存を足す (レシピは変えないので .o は不変)。
+SHELL_DEPS = userland/shell/shell.h $(wildcard userland/shell/*.inc)
+
+userland/shell/%.o: userland/shell/%.c $(SHELL_DEPS)
 	$(CC) $(PROGRAM_FLAGS) -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 
 userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
@@ -47,7 +53,7 @@ userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OB
 SH_OBJDIR = userland/shell/sh_obj
 SH_OBJ = $(patsubst userland/shell/%.c,$(SH_OBJDIR)/%.o,$(SHELL_SRC))
 
-$(SH_OBJDIR)/%.o: userland/shell/%.c
+$(SH_OBJDIR)/%.o: userland/shell/%.c $(SHELL_DEPS)
 	@mkdir -p $(SH_OBJDIR)
 	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 

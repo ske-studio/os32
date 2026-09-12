@@ -309,7 +309,14 @@ static void cmd_ask(int argc, char **argv)
             /* バックスペース */
             if (len > 0) {
                 len--;
+#ifdef SHELL_AS_APP
+                /* B5: 端末の BS は 1 セル左へ動くだけでセルを消さないので、
+                 * BS + 空白 + BS で上書きする (ui.c の行編集と同じ扱い)。
+                 * 常駐は console が BS で消すので従来どおり。 */
+                sh_erase_cells(input[len]);
+#else
                 g_api->shell_putchar(0x08, ATTR_WHITE);
+#endif
             }
             continue;
         }

@@ -96,10 +96,42 @@ const char *shell_get_path(void);
 /* ------------------------------------------------------------------------ */
 #ifdef SHELL_AS_APP
 int sh_launch(const char *cmdline);
+/* B4: パイプの段を回している間だけ立てる入れ子カウンタ。sh_launch の入口で
+ * 見て、外部プログラムの起動を断る (先頭語だけの事前判定では
+ * `exec /bin/sh.bin | echo tail` や `source x.sh | echo tail` を通してしまう。
+ * 最終起動口で確かめれば経路を問わず捕まえられる)。 */
+void sh_pipeline_enter(void);
+void sh_pipeline_leave(void);
 /* exit コマンド (D2(d)) が立てる。shell_run() の外側ループが見て抜ける。 */
 extern int sh_exit_flag;
 #else
-#define sh_launch(cmdline) (g_api->exec_run(cmdline))
+#define sh_launch(cmdline)  (g_api->exec_run(cmdline))
+#define sh_pipeline_enter() ((void)0)
+#define sh_pipeline_leave() ((void)0)
+#endif
+
+/* ------------------------------------------------------------------------ */
+/*  B2: sys_ls のコールバックからは KAPI を呼ばない (SHELL_AS_APP)           */
+/*                                                                          */
+/*  CPL=3 で `sys_ls` のコールバックから KAPI (int 0x80) を呼ぶと落ちる      */
+/*  (カーネル側の欠陥、別票)。名前と種別を写すだけのコールバックを使い、     */
+/*  `sys_ls` が戻ってから表示 / mem_alloc を行う。実体は sh_ls.inc。         */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+void sh_ls_reset(void);
+void sh_ls_collect_cb(const DirEntry_Ext *entry, void *ctx);
+int  sh_ls_count_get(void);
+int  sh_ls_dropped(void);
+void sh_ls_fill(int i, DirEntry_Ext *out);
+#endif
+
+/* B5: 行末の 1 文字を画面からも消す (端末の BS は 1 セル左へ動くだけ)。
+ * ui.c の行編集と cmd_script.c の `ask` が共有する。実体は sh_redraw.inc。
+ * 常駐 (CUI) では console が BS で消すので何もしない。 */
+#ifdef SHELL_AS_APP
+void sh_erase_cells(char removed);
+#else
+#define sh_erase_cells(removed) ((void)0)
 #endif
 
 /* ------------------------------------------------------------------------ */

@@ -450,3 +450,30 @@ RED で本当に回り続けることが見える:
 外部段が混じるパイプを断る `sh_stage_is_builtin()` は `main.c` の static で、
 `g_cmds` の登録表と `main()` (newlib) に依存するためホストへは持ち込んでいない。
 ここは実機確認 (受入 S5) に委ねる。
+
+### 往復 6 の追加 (2026-09-13、B2 / B4 / B5)
+
+`sh_ls.inc` と `sh_launch.inc` もハーネスへ取り込み、偽 KAPI の**全ハンドラに
+呼び出しカウンタ**を仕込んだ。直す前の形へ戻した RED:
+
+| 戻したもの | 落ちる項目 |
+|---|---|
+| B2: `sh_ls_collect_cb` の中で `sys_isatty` を呼ぶ (旧 `vfs_ls_cb` / `glob_cb` と同じ形) | `FAIL 6a コールバック内の KAPI 呼び出しは 0 回` |
+| B4: `sh_launch` 入口のパイプ判定を `if (0)` に | `got "sh: external programs need the GUI terminal\n" want "sh: pipe to external command is not supported\n"` → `FAIL 7b` |
+| B5: `sh_erase_cells` を BS 1 回だけに | `got "\b" want "\b \b"` → `FAIL 8a` / `FAIL 8b` |
+
+戻すと全 46 項目 `ALL PASS`。
+
+**B7 (増分ビルド)** は `make -n` の dry-run で見た (`make` の実行は禁止)。
+`sh_obj/ui.o` を古い時刻に、`sh_redraw.inc` を新しい時刻にしてから:
+
+```
+RED (依存なし): make -n sh の `-c userland/shell/ui.c` 0 行
+GREEN (依存あり): 1 行
+```
+
+**ホストに載せていないもの** (実機確認 = 受入 S5 に委ねる): B3 の判定
+(`sh_has_redirect` / `sh_name_is_builtin`) と B6 の段ループの `sh_exit_flag`、
+B4 の事前判定は、いずれも `main.c` の static で `g_cmds` の登録表と `main()`
+(newlib) に依存するため 1 翻訳単位へ持ち込めない。B4 は**最終起動口**側
+(ケース 7) で押さえてあるので、事前判定をすり抜けても捕まる。

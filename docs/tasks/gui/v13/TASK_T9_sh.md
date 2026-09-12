@@ -186,6 +186,12 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 ### 13b. 実装レビュー (往復 2/3) の修正 (S、2026-09-13)
 
 - blocker 1: `exit` の印を `shell_run` の行ループの**入口** (最初の `show_prompt` と `sh_getkey` の前) で見るようにし、ループ末尾の判定は外した。これで起動時の `/etc/profile` / `$HOME/.profile` 内の `exit` でも入力待ちに入らずそのまま終わる。
+- (往復 6) B2: CPL=3 では `sys_ls` のコールバックから KAPI (int 0x80) を呼ぶと落ちる (実機で `find /etc -name filetypes` が crash、`du /etc` は正常)。`sh_ls.inc` の写し取りコールバック (KAPI を 1 つも呼ばない、上限 128 件・溢れは `(... N more)`) を挟み、`sys_ls` が戻ってから内蔵 `ls` の `vfs_ls_cb` と glob の `glob_cb` へ流す。常駐はマクロで従来どおり直接コールバック。
+- (往復 6) B3: リダイレクト表は全アプリ共有で read/write/reset が owner を見ないので、外部コマンドに掛けると親のファイルへ入り親の FD を閉じる。`execute_single` が**リダイレクトを張る前**に `sh_has_redirect()` && `!sh_name_is_builtin()` を見て `sh: redirect to external command is not supported` で行を捨てる。
+- (往復 6) B4: 先頭語だけの事前判定は `exec /bin/sh.bin | echo tail` を通すので、**最終起動口** `sh_launch` の入口で入れ子カウンタ `sh_pipeline_depth` を見て断る (段ループが `sh_pipeline_enter/leave` で増減)。事前判定は残した。
+- (往復 6) B5: `ask` (cmd_script.c) の行末 BS も `sh_erase_cells()` (`\b` + 空白 + `\b`、3 バイト列の先頭は 2 セル) を使う。`sh_backspace_tail` と実装を共有。
+- (往復 6) B6: パイプの段ループが各段の前に `sh_exit_flag` を見る (`exit | ask "wait: " V` で入力待ちに入らない)。
+- (往復 6) B7: `build/programs.mk` の常駐 / sh 両方の `.o` 規則に `SHELL_DEPS`(= `shell.h` + `$(wildcard userland/shell/*.inc)`) を足した。Makefile の `DEPFILES` は `boot kernel drivers gfx fs exec kapi lib programs sdk` しか走査せず **userland の `.d` は読まれない**。`make -n sh` の dry-run で確認 — `.inc` だけ新しくした状態で、依存なしは再コンパイル 0 行、依存ありは `sh_obj/ui.o` 1 行。
 - (往復 5) blocker: 内蔵コマンドのパイプが `sys_pipe_get_buf()` の**カーネル帯**ポインタを `sys_redirect_fd_buf()` へ渡し、`ring3_ptr_ok` (exec/exec.c) の早期検証で CPL=3 の sh ごと畳まれていた (`sh> echo a | cat`)。確保・取得・解放を `sh_pipe_alloc` / `sh_pipe_get_buf` / `sh_pipe_free` の 3 本に包み、`SHELL_AS_APP` では sh 自身の `.bss` (`sh_pipe.inc`、2 枠 × `PIPE_BUF_SIZE` = 128KB) から配る。常駐側はマクロで `g_api->sys_pipe_*` にそのまま展開 (`.o` はバイト一致)。
 - (往復 5) 外部段が混じるパイプは `sh_stage_is_builtin()` が段ごとに見て `sh: pipe to external command is not supported` を 1 行出して行を捨てる (外部は要求表経由の別アプリなので sh の FD に掛けたリダイレクトが届かない)。判定は候補パス解決より前、`split_pipeline` の直後。
 - (往復 3) blocker: 行末 BS を**破壊的**にした。端末の BS はカーソルを 1 セル左へ動かすだけでセルを消さない (`libos32term` の `model.rs`) ので、BS だけ出して短縮後の写しを確定すると `echo abc` → BS×2 → `x` が画面 `echo axc` / バッファ `echo ax` と食い違う。`sh_backspace_tail()` (sh_redraw.inc) が `\b` + 空白 + `\b` を出して写しまで確定する (3 バイト列の先頭は 2 セルぶん)。CUI の BS は console が消すので常駐側は 1 バイトも変えていない。
@@ -263,8 +269,3 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 
 **往復 5 (S `3374438` + 端末 `17870ea`): Request changes** — 折り返し BS は解消と確認。新規 blocker 1 件 (領域が変わった): 内蔵コマンドのパイプ `sh> echo a | cat` で、`sys_pipe_get_buf` が返すカーネル帯 (kmalloc) のポインタを `sys_redirect_fd_buf` に渡すため CPL=3 の早期ポインタ検証 (`ring3_ptr_ok`) が sh を fault kill する。常駐 CPL=0 では通っていた経路。→ SHELL_AS_APP ではパイプバッファを sh 自身のメモリから取る修正をコーダーが準備中、**着地可否はユーザー判断**。
 ゲート (テスター、`17870ea`): `make all` / `external` / `check` すべて exit=0。
-
-**往復 6 (S `a7d8ca4`、網羅性を要求): Request changes — blocker 7 件を一度に列挙** (経路 (a)〜(h) の見た / 見ていないの表つき)。B1 `sys_getcwd` のカーネル帯ポインタを CPL=3 で読む (`cd` / `pwd`)、B2 `sys_ls` コールバック内の KAPI 再入が CPL=0 のまま int 0x80 を通る (`ls /`)、B3 標準 FD のリダイレクト表が全アプリ共有 (`exec /bin/sh.bin > /tmp/out` で子が親の出力先を使い閉じる)、B4 内蔵名の後ろの外部段をパイプ判定が通す (`exec x | echo`)、B5 `ask` の BS が非破壊、B6 パイプ段ループが exit の印を見ない (`exit | ask`)、B7 `.inc` の変更を増分ビルドが拾わない。non-blocker: 注入リング満杯後の次キー欠落、内蔵 `cat` は stdin を読まない (既存)、複合内蔵のリダイレクトはネストを保存しない (既存)、255B 超の起動要求の誤表示、ホスト試験の範囲。
-PM 判定: **B1 / B2 は既存の CPL=3 プログラムが同じ使い方をしている** (`apps/edit/command.c:73` の `sys_getcwd`、`userland/cmds/find.c` の `find_cb` は `printf` と入れ子 `sys_ls` を呼ぶ) ので実機で裏取り、B3〜B7 は S へ (worktree で準備)。
-ゲート (テスター、`a7d8ca4`): `make all` / `external` / `check` すべて exit=0。sh.bin 62,256 B。
-裏取り結果: **B1 は誤指摘** — カーネル帯 (PDE0) は全 PD 共有の RO+USER (`exec/exec.c:115`)、`apps/edit/command.c:73` が同じ使い方で動いている (S1 の `pwd` で実機確認)。**B2 は実機で再現** — 現行ビルド (v48) で `find /etc -name filetypes` (CPL=3、`find_cb` が printf) が `[Process crashed]`、`du /etc` (コールバックで KAPI を呼ばない) は正常。既存のカーネル欠陥 (`kernel/ring3_entry.asm` の int80 は CPL=3 由来のフレームだけを想定し、CPL=0 で走るコールバックからの int 0x80 は `frame[11]` を user ESP と誤読) で、T9 では S 側 (SHELL_AS_APP の `ls` / glob のコールバックは静的バッファへ写すだけ、§4-26 の作法) で回避し、**カーネル側 (CPL=0 由来の int 0x80 を frame の CS で見分ける、または CPL=3 コールバックのトランポリン) は残件として別票** (find.bin の CPL=3 クラッシュも同根)。

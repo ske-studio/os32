@@ -30,6 +30,17 @@
  * PATH 候補の数だけ同じ行が出る。起動が通ったら寝かせ直す。 */
 static int sh_launch_nogui = 0;
 
+/* B4: パイプの段を回している間だけ立つ入れ子カウンタ。execute_command の
+ * パイプライン経路が段ループの前後で増減させる (source / exec 経由の入れ子
+ * パイプもあるので真偽値ではなく数える)。 */
+static int sh_pipeline_depth = 0;
+
+void sh_pipeline_enter(void) { sh_pipeline_depth++; }
+void sh_pipeline_leave(void)
+{
+    if (sh_pipeline_depth > 0) sh_pipeline_depth--;
+}
+
 static void sh_launch_name(const char *cmdline, char *out, int max)
 {
     int i = 0;
@@ -48,6 +59,16 @@ int sh_launch(const char *cmdline)
     i32 token, st, rc;
 
     sh_launch_name(cmdline, name, SH_LAUNCH_NAME_MAX);
+
+    /* B4: パイプの中から外部プログラムへは行けない。要求表経由で WM が
+     * 起こすのは**別アプリ**で、sh の FD に掛けたパイプは届かないため、
+     * 起動すると黙って出力が落ちる。先頭語の事前判定 (sh_stage_is_builtin)
+     * をすり抜けた経路もここで捕まる。 */
+    if (sh_pipeline_depth > 0) {
+        g_api->kprintf(ATTR_RED, "%s",
+                       "sh: pipe to external command is not supported\n");
+        return EXEC_ERR_GENERAL;
+    }
 
     token = g_api->launch_req(cmdline);
     if (token <= 0) {
