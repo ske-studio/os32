@@ -21,10 +21,19 @@ typedef struct {
 static void cmd_mem(int argc, char **argv)
 {
     u32 pmem_kb;
+    u32 ram_kb;
     (void)argc; (void)argv;
     pmem_kb = g_api->sys_get_mem_kb();
+    /* sys_get_mem_kb は RAM 上端アドレス / 1024 なので、PC-98 の 15-16MB
+     * システム空間を RAM として数えてしまう (15MB 機が 17408 KB を名乗る)。
+     * sys_ram_kb (KAPI v46) は起動時に実際に登録した span の合計。RAM が
+     * 15MB より下で止まる機械では両者が一致する。 */
+    ram_kb = g_api->sys_ram_kb();
     g_api->kprintf(ATTR_CYAN, "%s", "Memory Info:\n");
     g_api->kprintf(ATTR_WHITE, "  Physical : %u KB (%u MB)\n", pmem_kb, pmem_kb / 1024);
+    g_api->kprintf(ATTR_WHITE,
+                   "  RAM      : %u KB (%u MB)  usable (15-16MB system space excluded)\n",
+                   ram_kb, ram_kb / 1024);
     g_api->kprintf(ATTR_WHITE, "  Paging   : %s\n",
                    g_api->paging_enabled() ? "ENABLED" : "DISABLED");
     g_api->kprintf(ATTR_WHITE, "  Heap Tot : %u B, Used: %u B, Free: %u B\n",

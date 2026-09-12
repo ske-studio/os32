@@ -1,24 +1,43 @@
 //! Guest-only glue. Host tests never call KAPI or the shared GUI library.
+//!
+//! 票 K6C-A: fixture 供給を **con_sink 供給**に置き換えた端末窓。待ちは
+//! GetMessage 方式 (`libos32gui::run` の U3 ループ) のままで、吸い出しは
+//! 反復タイマの中だけで行う。ここに busy loop は無い — 協調型なので回し
+//! 続けると他のアプリが飢える。
 use crate::{
-    boundary,
+    boundary, inject,
     input::{self, Action},
     paint,
     session::Session,
-    state::Fixture,
-    status,
+    sink::{self, Stop as SinkStop},
+    state::{Fixture, Movement},
+    status::{self, SinkStatus},
     storage::Storage,
     view::{Layout, MARGIN},
 };
 use libos32gui::gapi::{
     self,
-    proto::{GUI_COLOR_EDIT_BG, GUI_COLOR_TEXT},
+    proto::{GuiEvent, GUI_COLOR_EDIT_BG, GUI_COLOR_TEXT, GUI_EV_TEXT},
     types::{Rect, Style, SurfaceId},
 };
-use libos32gui::{App, GuiErr, GuiResult, Ui, Window, WindowSpec};
+use libos32gui::{App, GuiErr, GuiResult, Timer, Ui, Window, WindowSpec};
 use libos32term_render::{Glyphs, Rect as PixelRect, Sink, CELL_HEIGHT, CELL_WIDTH};
 use os32api::KernelAPI;
 
 static STORAGE: Storage = Storage::new();
+
+/// 吸い出しタイマ。10ms 刻みなので 10 = 100ms (票 §1)。
+const TIMER_SINK: u8 = 1;
+const TIMER_TICKS: u16 = 10;
+
+/// con_sink_read へ渡す私有バッファ。`cap >= CON_SINK_REC_MAX` (203) が
+/// KAPI の要求で、下回ると `OS32_ERR_INVAL`。1KB あれば 1 回で 5 本以上入る。
+const SINK_BUF: usize = 1024;
+const _: () = assert!(SINK_BUF >= sink::REC_MAX);
+
+/// タイマ 1 周で吸う上限 (票 §2-1)。リングは 8KB なので 1 周で汲み切れる。
+/// 上限を置くのは、際限なく読み続けて Paint と他アプリを待たせないため。
+const SINK_BUDGET: usize = 8 * 1024;
 
 pub fn run(api: *mut KernelAPI) -> i32 {
     if api.is_null() {
@@ -33,48 +52,63 @@ pub fn run(api: *mut KernelAPI) -> i32 {
     if let Err(e) = libos32gui::init(api) {
         return e.code();
     }
-    let windows = match Windows::build() {
+    let window = match build_window() {
         Ok(w) => w,
         Err(e) => return e.code(),
     };
-    let session = match Session::new(cells, Fixture::Normal) {
+    /* 空の画面で始める。以後は con_sink のレコードだけが入る (票 §2-4)。 */
+    let session = match Session::new(cells, Fixture::Live) {
         Ok(s) => s,
         Err(_) => return GuiErr::INVAL.code(),
     };
     let mut app = DisplayApp {
-        windows,
+        window: Some(window),
+        _timer: None,
         session,
+        buf: [0; SINK_BUF],
+        sink: SinkStatus::default(),
+        follow: true,
         runs: 0,
         paint_error: false,
+        reader: false,
     };
+    /* 票 §5 R2: **イベントループ (とタイマ) に入る前に** con_sink_read を 1 回
+     * 呼び、読み手権限を確立する。`kbd_inject` はこれを済ませた者しか受け付け
+     * ない (kernel/kbd_inject.c の con_sink_reader_get 照合)。先客がいれば
+     * OS32_ERR_EXIST が返り、以後この端末は**注入しない** — 打鍵は捨て、
+     * 状態行は busy のままにする。ここで読めたレコードは捨てずに画面へ入れる。 */
+    let _ = app.pump();
+    app.reader = app.sink.error.is_none();
+
+    /* タイマが張れなければ何も吸えない。同期で回す代案は取らない
+     * (協調型なので他のアプリが止まる)。 */
+    let timer = {
+        let w = match app.window.as_ref() {
+            Some(w) => w,
+            None => return GuiErr::INVAL.code(),
+        };
+        match Timer::repeating(w, TIMER_SINK, TIMER_TICKS) {
+            Ok(t) => t,
+            Err(e) => return e.code(),
+        }
+    };
+    app._timer = Some(timer);
     match libos32gui::run(&mut app) {
         Ok(()) => 0,
         Err(e) => e.code(),
     }
 }
 
-struct Windows {
-    main: Option<Window>,
-    cover: Option<Window>,
+fn build_window() -> GuiResult<Window> {
+    let info = gapi::screen_info();
+    let plan = boundary::windows(info.width as i64, info.height as i64).ok_or(GuiErr::INVAL)?;
+    let rect = gui_rect(plan[0]).ok_or(GuiErr::INVAL)?;
+    Window::create(&WindowSpec::new(
+        b"Terminal (con_sink) ESC / UP DOWN ROLL",
+        rect,
+    ))
 }
-impl Windows {
-    fn build() -> GuiResult<Self> {
-        let info = gapi::screen_info();
-        let plan = boundary::windows(info.width as i64, info.height as i64).ok_or(GuiErr::INVAL)?;
-        // Validate both conversions before the first window creation.
-        let first = gui_rect(plan[0]).ok_or(GuiErr::INVAL)?;
-        let second = gui_rect(plan[1]).ok_or(GuiErr::INVAL)?;
-        let main = Window::create(&WindowSpec::new(b"T5a 1-5 fixture / j k g e / q", first))?;
-        let cover = Window::create(&WindowSpec::new(b"T5a cover: drag me", second))?;
-        // Cover starts in front, deliberately occluding the display. Either
-        // window accepts keys. Ownership remains here across fixture switches.
-        cover.set_focus()?;
-        Ok(Self {
-            main: Some(main),
-            cover: Some(cover),
-        })
-    }
-}
+
 fn gui_rect(r: PixelRect) -> Option<Rect> {
     Some(Rect::new(
         i16::try_from(r.x0).ok()?,
@@ -93,21 +127,178 @@ fn pixels(r: Rect) -> PixelRect {
 }
 
 struct DisplayApp<'a> {
-    windows: Windows,
+    window: Option<Window>,
+    /// 持っているだけ。`Drop` が `kill_timer` を出す。
+    _timer: Option<Timer>,
     session: Session<'a>,
+    /// con_sink_read の行き先。毎周スタックに 1KB 積まないよう持ち回す。
+    buf: [u8; SINK_BUF],
+    sink: SinkStatus,
+    /// 末尾追従。スクロール操作で切れ、末尾へ戻る操作で復活する。
+    follow: bool,
     runs: u64,
     paint_error: bool,
+    /// 票 §5 R2 の読み手権限を起動時に取れたか。**一度きりの判定**で、
+    /// 後から反転させない (票 §6「失敗は状態行 busy のまま注入もしない」)。
+    /// 偽なら打鍵は捨てる。
+    reader: bool,
 }
+
 impl DisplayApp<'_> {
     fn layout(&self) -> Option<Layout> {
-        let (w, h) = self.windows.main.as_ref()?.client_size();
+        let (w, h) = self.window.as_ref()?.client_size();
         Layout::new(w as i64, h as i64)
     }
     fn fail(&mut self, ui: &mut Ui) {
         ui.quit();
     }
+    fn repaint(&mut self, ui: &mut Ui) {
+        if let Some(w) = self.window.as_ref() {
+            if w.invalidate_all().is_err() {
+                self.fail(ui);
+            }
+        }
+    }
+
+    /// リングを空になるまで (1 周の予算まで) 吸って T4 モデルへ流す。
+    /// 戻り値は「描き直す必要があるか」。
+    fn pump(&mut self) -> bool {
+        let mut changed = false;
+        let mut budget = SINK_BUDGET;
+        while !self.sink.stopped && budget >= SINK_BUF {
+            // SAFETY: libos32gui::init initialized os32api. buf is a private,
+            // writable SINK_BUF-byte array and cap matches its true length.
+            let rc =
+                unsafe { (os32api::api().con_sink_read)(self.buf.as_mut_ptr(), SINK_BUF as u32) };
+            if rc < 0 {
+                /* 黙って諦めない: 理由を状態行に出す。読み手拒否だけは先客が
+                 * 畳めば直るので次の周も試す (票 §3 A4)。
+                 * 描き直すのは理由が**変わった**ときだけ — 同じ拒否のたびに
+                 * 全面 invalidate すると 10Hz で他のアプリを待たせる。 */
+                let first = self.sink.error != Some(rc);
+                self.sink.error = Some(rc);
+                self.sink.stopped = !sink::retryable(rc);
+                return changed || first;
+            }
+            if rc == 0 {
+                if self.sink.error.is_some() {
+                    /* 読めるようになった (先客が終わった)。 */
+                    self.sink.error = None;
+                    changed = true;
+                }
+                break;
+            }
+            let n = (rc as usize).min(SINK_BUF);
+            self.sink.error = None;
+            self.sink.bytes += n as u64;
+            budget -= n;
+            changed = true;
+
+            let mut it = sink::records(&self.buf[..n]);
+            /* `it` は self.buf を、apply は self.session と self.sink を触る。
+             * 借りる先が別のフィールドなので同時に持てる。 */
+            for record in it.by_ref() {
+                self.sink.records += 1;
+                match self.session.apply(record) {
+                    Ok(a) => {
+                        self.sink.wraps += a.wraps;
+                        self.sink.lost += a.lost;
+                    }
+                    Err(_) => {
+                        /* モデルを作り直せない = 画面を持てない。以後読まない。 */
+                        self.sink.stopped = true;
+                        self.sink.error = Some(sink::ERR_INVAL);
+                        break;
+                    }
+                }
+            }
+            if it.stop() != SinkStop::Done {
+                self.sink.malformed += it.discarded() as u32;
+            }
+        }
+        changed
+    }
+
+    /// 注入リングへ 1 回分積む (票 §5 R2 / §6 K7-A)。読み手になれていなければ
+    /// **何もしない** — その打鍵は捨てる。戻り値は「状態行を描き直すか」。
+    fn inject(&mut self, bytes: &inject::Bytes) -> bool {
+        if !self.reader || bytes.is_empty() {
+            return false;
+        }
+        let len = bytes.len();
+        // SAFETY: libos32gui::init initialized os32api. The pointer is to a
+        // private buffer with exactly `len` readable bytes and the kernel only
+        // reads it (kapi_generated.rs: kbd_inject(*const u8, u32) -> i32).
+        let rc = unsafe { (os32api::api().kbd_inject)(bytes.as_slice().as_ptr(), len as u32) };
+        let error = if rc < 0 { Some(rc) } else { None };
+        /* 0 <= rc < len は注入リングのあふれ = 消えた打鍵。累計で数える。 */
+        let short = if rc >= 0 && (rc as usize) < len {
+            (len - rc as usize) as u32
+        } else {
+            0
+        };
+        /* 描き直すのは状態が**変わった**ときだけ。同じ失敗のたびに全面
+         * invalidate すると、打鍵のたびに他のアプリを待たせる (pump と同じ理由)。 */
+        let changed = self.sink.inject_error != error || short != 0;
+        self.sink.inject_error = error;
+        self.sink.inject_short = self.sink.inject_short.saturating_add(short);
+        changed
+    }
+
+    /// 溜まり具合と取りこぼしを読む (所有権は要らない)。
+    fn refresh_stat(&mut self) -> bool {
+        let mut ring: u32 = 0;
+        let mut dropped: u32 = 0;
+        // SAFETY: initialized KAPI; both pointers are to local u32s.
+        unsafe {
+            (os32api::api().con_sink_stat)(&mut ring, &mut dropped);
+        }
+        /* 描き直しを迫るのは dropped が増えたときだけ (票 §2-2)。ring は
+         * 読めていない間ずっと動くので、これで描き直すと 10Hz で回り続ける。
+         * 値は毎周更新してあるので、次の Paint で最新が出る。 */
+        let changed = dropped != self.sink.dropped;
+        self.sink.ring = ring;
+        self.sink.dropped = dropped;
+        changed
+    }
 }
+
 impl App for DisplayApp<'_> {
+    fn on_timer(&mut self, ui: &mut Ui, _window: u32, id: u8) {
+        if id != TIMER_SINK || ui.is_quitting() {
+            return;
+        }
+        let mut changed = self.pump();
+        /* dropped が増えたら状態行に出す (票 §2-2)。増えた周は必ず描き直す。 */
+        changed |= self.refresh_stat();
+        if !changed {
+            return;
+        }
+        if self.follow {
+            if let Some(layout) = self.layout() {
+                self.session.move_top(Movement::Last, layout.rows());
+            }
+        }
+        self.repaint(ui);
+    }
+
+    /// `GUI_EV_TEXT` はここにしか来ない (libos32gui はウィジェットへしか
+    /// 配らない、`app.rs:257-262`)。FEP の確定文字を含む UTF-8 をそのまま
+    /// 注入リングへ渡す (票 §1 D4)。**ローカルエコーはしない** — CUI
+    /// プログラム側の出力が con_sink 経由で戻ってくる。
+    fn on_raw(&mut self, ui: &mut Ui, ev: &GuiEvent) {
+        if ev.kind != GUI_EV_TEXT || ui.is_quitting() {
+            return;
+        }
+        if self.window.as_ref().map(Window::id) != Some(ev.window) {
+            return;
+        }
+        let text = ev.text();
+        if self.inject(&inject::from_text(ev.sub, &text.utf8)) {
+            self.repaint(ui);
+        }
+    }
+
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, ch: u8, _mods: u8, down: bool) {
         if down && scan == libos32gui::widget::SCAN_ESC {
             self.fail(ui);
@@ -116,56 +307,48 @@ impl App for DisplayApp<'_> {
         if ui.is_quitting() {
             return;
         }
-        match input::key(ch, down) {
+        /* 制御キー (Enter / BS / TAB) だけ注ぐ。印字可能キーと FEP の確定文字は
+         * GUI_EV_TEXT で来るので、ここで注ぐと 1 打鍵が 2 バイトになる。 */
+        if self.inject(&inject::from_key(scan, down)) {
+            self.repaint(ui);
+        }
+        /* 表示の操作。注入が生きているあいだ ASCII の割り当て (j k g e q) は
+         * 使わない — その打鍵は CUI プログラムのものだから。代わりに注入しない
+         * キー (矢印 / ROLL / HOME) を使う。busy で始まった端末は表示専用なので
+         * 従来どおり ASCII でも操作できる。 */
+        let action = match input::nav(scan, down) {
+            Action::None if !self.reader => input::key(ch, down),
+            other => other,
+        };
+        match action {
             Action::Quit => self.fail(ui),
-            Action::Select(fixture) => {
-                if let Some(w) = self.windows.main.as_ref() {
-                    if self.session.select(fixture).is_err() {
-                        self.fail(ui);
-                        return;
-                    }
-                    self.runs = 0;
-                    self.paint_error = false;
-                    if w.invalidate_all().is_err() {
-                        self.fail(ui);
-                    }
-                }
-            }
+            /* fixture の切り替えは live では意味を持たない (受け取った出力を
+             * 捨てることになる)。ホスト試験だけが Select を使う。 */
+            Action::Select(_) => {}
             Action::Move(movement) => {
                 if let Some(layout) = self.layout() {
+                    self.follow = matches!(movement, Movement::Last);
                     self.session.move_top(movement, layout.rows());
-                    if let Some(w) = self.windows.main.as_ref() {
-                        if w.invalidate_all().is_err() {
-                            self.fail(ui);
-                        }
-                    }
+                    self.repaint(ui);
                 }
             }
             Action::None => {}
         }
     }
+
     fn on_close(&mut self, ui: &mut Ui, window: u32) {
-        if self.windows.main.as_ref().map(Window::id) == Some(window) {
-            self.windows.main = None;
-        }
-        if self.windows.cover.as_ref().map(Window::id) == Some(window) {
-            self.windows.cover = None;
-        }
-        if self.windows.main.is_none() && self.windows.cover.is_none() {
+        if self.window.as_ref().map(Window::id) == Some(window) {
+            self.window = None;
             self.fail(ui);
         }
     }
+
     fn on_quit(&mut self, ui: &mut Ui, _reason: u8) {
         self.fail(ui);
     }
+
     fn on_paint(&mut self, _ui: &mut Ui, window: u32, surface: SurfaceId, rect: Rect) {
-        let is_main = self.windows.main.as_ref().map(Window::id) == Some(window);
-        let owner = if is_main {
-            self.windows.main.as_ref()
-        } else {
-            self.windows.cover.as_ref().filter(|w| w.id() == window)
-        };
-        let Some(owner) = owner else {
+        let Some(owner) = self.window.as_ref().filter(|w| w.id() == window) else {
             return;
         };
         if owner.surface() != surface {
@@ -179,24 +362,9 @@ impl App for DisplayApp<'_> {
             _ => return,
         };
         let (cw, ch) = owner.client_size();
-        if !is_main {
-            // Small ASCII help; GUI base clip and client surface clip remain active.
-            if cw > 0 && ch as i64 >= CELL_HEIGHT {
-                let text = b"1-5 fixture  q quit";
-                let count = text.len().min(cw as usize / CELL_WIDTH as usize);
-                gapi::text(
-                    surface,
-                    0,
-                    0,
-                    &text[..count],
-                    Style::new(GUI_COLOR_TEXT, GUI_COLOR_EDIT_BG),
-                );
-            }
-            return;
-        }
         let Some(layout) = Layout::new(cw as i64, ch as i64) else {
             self.paint_error = true;
-            let _ = owner.set_title(b"T5a: client too small");
+            let _ = owner.set_title(b"Terminal: client too small");
             return;
         };
         // This sink can only be constructed in this callback and never escapes.
@@ -224,7 +392,12 @@ impl App for DisplayApp<'_> {
             &mut sink,
         ) {
             Ok(stats) => {
-                let lines = status::lines(self.session.display(), self.runs, self.paint_error);
+                let lines = status::lines(
+                    self.session.display(),
+                    self.runs,
+                    self.paint_error,
+                    &self.sink,
+                );
                 let max_chars = ((cw as i64 - 2 * MARGIN) / CELL_WIDTH) as usize;
                 for (row, line) in lines.iter().enumerate() {
                     let bytes = line.bytes();
@@ -240,7 +413,7 @@ impl App for DisplayApp<'_> {
             }
             Err(_) => {
                 self.paint_error = true;
-                let _ = owner.set_title(b"T5a: PAINT RANGE/RENDER ERROR");
+                let _ = owner.set_title(b"Terminal: PAINT RANGE/RENDER ERROR");
             }
         }
     }

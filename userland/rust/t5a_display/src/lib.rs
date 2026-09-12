@@ -3,9 +3,11 @@
 
 mod boundary;
 mod guest;
+mod inject;
 mod input;
 mod paint;
 mod session;
+mod sink;
 mod state;
 mod status;
 mod storage;

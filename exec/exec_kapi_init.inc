@@ -185,9 +185,14 @@ extern i32 __cdecl wrap_exec_kill(i32 app_id);
 extern i32 __cdecl wrap_exec_app_state(i32 app_id);
 extern i32 __cdecl wrap_snd_focus(int app_id);
 extern i32 __cdecl wrap_exec_abort_clear(void);
+extern i32 __cdecl wrap_con_sink_read(void *buf, u32 cap);
+extern i32 __cdecl wrap_con_sink_stat(u32 *pending, u32 *dropped);
+extern u32 __cdecl wrap_sys_ram_kb(void);
+extern i32 __cdecl wrap_kbd_inject(const u8 *utf8, u32 len);
+extern u32 __cdecl wrap_kbd_inject_pending(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 45;
+kapi->version = 47;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -376,5 +381,10 @@ kapi->version = 45;
     kapi->exec_app_state = wrap_exec_app_state;
     kapi->snd_focus = wrap_snd_focus;
     kapi->exec_abort_clear = wrap_exec_abort_clear;
+    kapi->con_sink_read = wrap_con_sink_read;
+    kapi->con_sink_stat = wrap_con_sink_stat;
+    kapi->sys_ram_kb = wrap_sys_ram_kb;
+    kapi->kbd_inject = wrap_kbd_inject;
+    kapi->kbd_inject_pending = wrap_kbd_inject_pending;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

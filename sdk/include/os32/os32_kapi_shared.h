@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      45   /* GUI v1.3 K5c: exec_abort_clear (CTRL+STOP の宛先をフォーカス窓のアプリへ — 決裁 A1)。v44 = exec_start / exec_resume / exec_park / exec_kill / exec_app_state / snd_focus (アプリ 4 本の同時実行。v43 はネットワーク Host Services に予約済みなので飛ばした) */
+#define KAPI_VERSION      47   /* GUI v1.3 K7: kbd_inject / kbd_inject_pending (GUI 中の打鍵を端末アプリが注ぎ、kbd_getchar は第 2 の park 点になる)。v46 = con_sink_read / con_sink_stat (GUI モード中のカーネル出力をリングに溜め、端末アプリが吸う) */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -309,6 +309,9 @@ typedef struct {
 #define OS32_ERR_STALE     -11  /* 破棄済み / generation 不一致のハンドル (契約 T4) */
 #define OS32_ERR_VERSION   -12  /* proto_version が WM より新しい (契約 T5) */
 #define OS32_ERR_FULL      -13  /* スロット / 資源が満杯 (契約 T2a) */
+/* GUI v1.3 K7 (KAPI v47)。KAPI_SPEC §3-2 の予約を 1 つ進め、ネットワークは
+ * -15 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
+#define OS32_ERR_AGAIN     -14  /* いまは無い / 後でもう一度 (kbd 待ちの resume) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1
@@ -323,6 +326,33 @@ typedef struct {
 
 /* DirEntry_Ext コールバック型 */
 typedef void (*DirCallback)(const DirEntry_Ext *entry, void *ctx);
+
+/* ======================================================================== */
+/*  console シンク (KAPI v46、票 K6C)                                        */
+/*                                                                          */
+/*  GUI モード中、カーネル / CUI コマンドが console.c の入口へ書いた出力は    */
+/*  テキスト VRAM (非表示) に消える。これをカーネル内のリングに **レコード**  */
+/*  として溜め、端末アプリが con_sink_read() で吸って Paint する。            */
+/*                                                                          */
+/*  ワイヤ形式 (先頭 1 バイトが型、残りは型ごと。詰め物・整列は無い):        */
+/*    PRINT  : [type=1][color u8][len u8][UTF-8 バイト列 len 個]             */
+/*    CLEAR  : [type=2]                                                      */
+/*    CURSOR : [type=3][x u8][y u8]                                          */
+/*                                                                          */
+/*  改行 / CR / TAB は PRINT のバイトとして流れる (端末モデルが解釈する)。   */
+/*  スクロールはレコードにしない (行の追加に畳む)。                          */
+/* ======================================================================== */
+#define CON_SINK_REC_PRINT   1
+#define CON_SINK_REC_CLEAR   2
+#define CON_SINK_REC_CURSOR  3
+
+#define CON_SINK_PRINT_MAX   200  /* PRINT 1 本が運ぶ UTF-8 バイト数の上限 */
+#define CON_SINK_HDR_PRINT   3    /* type + color + len */
+#define CON_SINK_HDR_CLEAR   1    /* type */
+#define CON_SINK_HDR_CURSOR  3    /* type + x + y */
+/* レコード 1 本の最大バイト数。con_sink_read() の cap はこれ以上でなければ
+ * ならない (小さいと先頭レコードが永久に取り出せず読み手が止まるため)。 */
+#define CON_SINK_REC_MAX     (CON_SINK_HDR_PRINT + CON_SINK_PRINT_MAX)
 
 /* コンソール属性色 */
 #define ATTR_WHITE   0xE1

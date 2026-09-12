@@ -36,6 +36,9 @@ static struct physmem boot_memory;
  * MEM_HIGH_RAM_BASE; 0 until then. The loader's mem_kb is a hint and on its
  * own never promotes a single high page — only a verified attestation does. */
 static u32 boot_high_end;
+/* 実 RAM の合計 (KB)。memory_boot_init が最後に確定させる。0 = 未初期化。
+ * 上端 (sys_mem_kb) との差が「RAM にならない番地」= 15-16MB システム空間。 */
+static u32 boot_ram_kb;
 
 /* ======================================================================== */
 /*  memory_boot_detect — 16MB 超の物理 RAM を数える                          */
@@ -159,6 +162,23 @@ static int memory_boot_add_high(u32 high_end)
                                high_end, PHYSMEM_SOURCE_MACHINE);
 }
 
+/* 登録した span の合計 (KB)。低位は [0, admitted_kb)、高位は
+ * [MEM_HIGH_RAM_BASE, high_end)。15-16MB のシステム空間はどちらの span にも
+ * 入らないので、ここで自然に落ちる (引き算の特例は書かない)。
+ * high_end が高位帯に届いていなければ高位は 0 ページ。 */
+static u32 memory_boot_sum_kb(u32 admitted_kb, u32 high_end)
+{
+    u32 base;
+    base = MEM_HIGH_RAM_BASE / PAGE_SIZE;
+    if (high_end <= base) return admitted_kb;
+    return admitted_kb + (high_end - base) * (PAGE_SIZE / 1024UL);
+}
+
+u32 memory_boot_ram_kb(void)
+{
+    return boot_ram_kb;
+}
+
 int memory_boot_init(u32 mem_kb)
 {
     struct pgalloc_layout layout;
@@ -173,6 +193,7 @@ int memory_boot_init(u32 mem_kb)
     high_end = boot_high_end > MEM_HIGH_RAM_BASE / PAGE_SIZE ?
                memory_boot_high_fit(boot_high_end, top) : 0;
     if (high_end && !memory_boot_add_high(high_end)) return 0;
+    boot_ram_kb = memory_boot_sum_kb(admitted_kb, high_end);
     layout.capacity = pgalloc_metadata_bytes(&boot_memory);
     pages = layout.capacity / PAGE_SIZE;
     ws_pages = memory_boot_workspace_pages(high_end);
@@ -184,6 +205,9 @@ int memory_boot_init(u32 mem_kb)
      * by a two-PDE app and let it rewrite shared page tables. */
     if (!pages || top < pages + ws_pages ||
         top - pages - ws_pages < MEM_APP_BAND_MAX_TOP / PAGE_SIZE) {
+        /* legacy の池は PHYSMEM_LEGACY_MAX_PFN までしか見ないので、ここへ
+         * 落ちた構成では高位 RAM は 1 ページも登録されない。報告も戻す。 */
+        boot_ram_kb = memory_boot_sum_kb(admitted_kb, 0);
         pgalloc_init(mem_kb);
         return 1;
     }

@@ -1,11 +1,15 @@
 #[path = "../../src/boundary.rs"]
 pub mod boundary;
+#[path = "../../src/inject.rs"]
+pub mod inject;
 #[path = "../../src/input.rs"]
 pub mod input;
 #[path = "../../src/paint.rs"]
 pub mod paint;
 #[path = "../../src/session.rs"]
 pub mod session;
+#[path = "../../src/sink.rs"]
+pub mod sink;
 #[path = "../../src/state.rs"]
 pub mod state;
 #[path = "../../src/status.rs"]

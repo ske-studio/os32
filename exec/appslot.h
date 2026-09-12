@@ -39,6 +39,12 @@
 #define APP_STATE_FREE     0
 #define APP_STATE_RUNNING  1
 #define APP_STATE_PARKED   2
+/* GUI 中の kbd 待ち = **第 2 の park 点** (票 K7 §1 D1)。PARKED と同じく
+ * 「フレームを保存して WM へ戻した」状態だが、起こす条件が違う:
+ * PARKED は WM が渡す wait_ret で起き、WAIT_KEY は**注入リングの 1 バイト**で
+ * 起きる (exec_resume が EAX へ入れる。§5 の指摘 B)。値の追加なので
+ * exec_app_state の既存の 0/1/2 は 1 つも動かない (§5 の指摘 C)。 */
+#define APP_STATE_WAIT_KEY 3
 
 /* int80_stub が積むフレームの語数 ([0..7]=pushad, [8]=EIP [9]=CS
  * [10]=EFLAGS [11]=userESP [12]=userSS)。ring3_entry.asm と同期。 */
@@ -55,6 +61,7 @@ typedef struct {
     int  in_op_wait;          /* いま gui_call(OP_WAIT) の中に居る (C4) */
     int  abort_req;           /* CTRL+STOP 要求 (この ID 宛) */
     int  parked_from_wait;    /* park したフレームの「OP_WAIT 由来」の印 (C5) */
+    int  parked_from_kbd;     /* park したフレームの「kbd 待ち由来」の印 (K7 D1) */
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -83,6 +90,8 @@ extern volatile u32 ring3_switch_count;            /* C1 resume 成功回数 */
 extern volatile u32 ring3_transition_count;        /* C2 start/終了の CR3 遷移 */
 extern volatile u32 ring3_park_reject_count;       /* C3 OP_WAIT 外の park */
 extern volatile u32 ring3_resume_bad_frame_count;  /* C6 印無しフレームの resume */
+/* GUI 中の kbd 待ちで park した回数 (票 K7 の受入 I1: 止まらずに譲れたか)。 */
+extern volatile u32 ring3_kbd_park_count;
 /* 回収の回数と直前の対象 (試験と診断用。G2/G5 の「1 本分だけ」を数える) */
 extern volatile u32 appslot_reclaim_count;
 extern volatile int appslot_last_reclaim_id;
@@ -161,10 +170,27 @@ int appslot_park_check(void);
  * 印 parked_from_wait を立て、PARKED にして cur をシェル帯へ戻す。 */
 void appslot_park_commit(void);
 
+/* GUI 中の kbd 待ち (第 2 の park 点、票 K7 D1) で park してよいか。
+ * park_check との違いは「OP_WAIT の中」を要求しないことだけ — 呼び出しの
+ * 文脈が gui_call ではなく kbd_getchar / kbd_getkey の syscall だから。
+ * 走っているのが塞がない起動 (gui=1) のアプリであることは同じく要る
+ * (CUI の入れ子 exec_run の子を park すると WM へ戻れない、D4 と同じ理由)。
+ * ダメなら ring3_park_reject_count++ して負を返す。
+ *
+ * kbd_gui_mode / CPL=3 フレームの有無は **ドライバとカーネル側の条件** (R1)
+ * なので、ここでは見ない (exec/exec.c と drivers/kbd.c が見る)。 */
+int appslot_park_kbd_check(void);
+/* kbd 待ちの park を成立させる。印 parked_from_kbd を立て、WAIT_KEY にして
+ * cur をシェル帯へ戻す。ring3_kbd_park_count++。 */
+void appslot_park_kbd_commit(void);
+
 /* resume してよいか。WM top-level からだけ、印のあるフレームだけ。
- * 印が無ければ ring3_resume_bad_frame_count++ して OS32_ERR_STALE。 */
+ * PARKED は parked_from_wait、WAIT_KEY は parked_from_kbd を要求する。
+ * 印が無ければ ring3_resume_bad_frame_count++ して OS32_ERR_STALE
+ * (拒否は両方の park 点に効く)。 */
 int appslot_resume_check(int id);
-/* resume を成立させる (CR3 を載せる直前)。印を消し ring3_switch_count++。 */
+/* resume を成立させる (CR3 を載せる直前)。印 (両方) を消し
+ * ring3_switch_count++。 */
 void appslot_resume_commit(int id);
 
 /* ---- 終了・kill (D4) -------------------------------------------------- */
@@ -191,7 +217,17 @@ int appslot_abort_request(void);
  * 戻り値: 0 = 降ろした / 要求が無かった、OS32_ERR_INVAL = owner 1 でない。 */
 int appslot_abort_clear(void);
 
-/* KAPI exec_app_state の実体: 0=空き / 1=走っている / 2=park 中 / 負=不正。 */
+/* KAPI exec_app_state の実体:
+ *   0=空き / 1=走っている / 2=park 中 (OP_WAIT) / 3=kbd 待ち / 負=不正。
+ * 3 は K7 の追加。既存の 0〜2 の意味は 1 つも動かない (票 §5 の指摘 C)。 */
 int appslot_state(int id);
+
+/* ---- 自己診断 (kernel/kselftest.c) ------------------------------------- */
+/* 「印の無いフレームは resume できない」(票 K7 受入 I5 / K5b の C6) の負例を
+ * ブート時に踏む。空きスロットを一時的に借りて、PARKED / WAIT_KEY の両方で
+ * 印なし → OS32_ERR_STALE、印あり → 0 を確かめ、借りたスロットと
+ * カウンタ・cur・owner を元に戻す。ビット 0..n が落ちた項目 (0 = 全部通った)。
+ * 呼ぶのは exec_init() の前後どちらでもよい (触った状態は必ず戻す)。 */
+u32 appslot_resume_mark_selftest(void);
 
 #endif /* __APPSLOT_H */

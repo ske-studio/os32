@@ -16,6 +16,7 @@
 #include "kbd.h"
 #include "io.h"
 #include "serial.h"
+#include "kbd_inject.h"   /* K7: GUI 中の打鍵は注入リングから来る */
 
 extern volatile int exec_nest_level;  /* exec/exec.c */
 
@@ -37,6 +38,13 @@ extern int rshell_active;
  * (割り込まれた文脈が CPL=3 のとき) か次の syscall 入口。drivers/ は
  * -Iexec を持たないので irq_enable と同じ流儀で extern 宣言する。 */
 extern void ring3_abort_request(void);
+
+/* 外部: 第 2 の park 点 (exec/exec.c、票 K7 D1)。GUI モードで注入リングが
+ * 空のとき、走っている CPL=3 アプリを WAIT_KEY で止めて WM へ戻す。
+ * 成立すれば **戻らない** (longjmp)。0 = 止められなかった (CPL=0 の呼び手 /
+ * syscall の外 / CUI の入れ子の子) → 従来の hlt 待ちへ落ちる。
+ * drivers/ は -Iexec を持たないので irq_enable と同じ流儀で extern 宣言する。 */
+extern int exec_park_kbd(void);
 
 /* ======== シフトキー状態 ========
  * **書き込むのは kbd_irq_handler (IRQ1 ISR) だけ**。ISR は割り込みゲート
@@ -330,9 +338,23 @@ int kbd_has_key(void)
     return kbd_count > 0;
 }
 
+/* GUI モード中の 1 バイト取り出し (票 K7 D2)。GUI 中の IRQ1 は cooked リング
+ * に積まないので、打鍵は端末アプリが kbd_inject() で注ぐ注入リングから来る。
+ * 取れたら 0..255、無ければ -1。 */
+static int kbd_gui_trygetbyte(void)
+{
+    u8 b = 0;
+    if (!kbd_inject_take(&b)) return -1;
+    return (int)b;
+}
+
 int kbd_trygetchar(void)
 {
     u16 entry;
+
+    /* 票 §5 R1: ノンブロッキング版は park しない。GUI 中は注入リングだけを
+     * 見て、無ければ -1 (cooked リングは GUI 中は空のまま)。 */
+    if (kbd_gui_mode) return kbd_gui_trygetbyte();
 
     /* rshellモード: シリアル入力もチェック */
     if (rshell_active) {
@@ -348,10 +370,36 @@ int kbd_trygetchar(void)
     return (int)(entry & 0xFF);
 }
 
+/* GUI モード中のブロッキング待ち (票 K7 D1 / §5 R1)。
+ *
+ *   1. 注入リングに文字があれば即返す (UTF-8 の続きバイトを含む)。
+ *   2. 無ければ **第 2 の park 点**として exec_park_kbd() を試す。成立すれば
+ *      戻らない — WM が起こすとき exec_resume が注入リングの 1 バイトを EAX に
+ *      入れるので、アプリからは kbd_getchar() が普通に値を返したように見える。
+ *   3. park できない文脈 (CPL=0 の呼び手 / syscall の外 / CUI の入れ子の子)
+ *      だけ、従来どおり `hlt` で待つ。
+ *
+ *  `hlt` ループを GUI 中の CPL=3 アプリに残すと、syscall の中で止まったまま
+ *  協調型の全体 (gshell と他の 3 本) が動かなくなる (票 §0)。 */
+static int kbd_gui_getbyte(void)
+{
+    for (;;) {
+        int ch = kbd_gui_trygetbyte();
+        if (ch >= 0) return ch;
+        /* 成立すれば戻らない。戻ってきたのは止められなかったときだけ。 */
+        (void)exec_park_kbd();
+        __asm__ volatile("hlt");
+    }
+}
+
 int kbd_getchar(void)
 {
     u16 entry;
     u32 timeout_ticks;
+
+    /* GUI 中は注入リングだけを見る。CUI モード (kbd_gui_mode == 0) の経路は
+     * rshell のタイムアウトを含めて 1 行も変えない (票 D6)。 */
+    if (kbd_gui_mode) return kbd_gui_getbyte();
 
     /* rshellモード: KBD_TIMEOUT_TICKS タイムアウト (デフォルト300 ticks @ 100Hz) */
     timeout_ticks = rshell_active ? KBD_TIMEOUT_TICKS : 0;
@@ -385,10 +433,15 @@ int kbd_getchar(void)
     }
 }
 
-/* u16キーコードを返す (上位=スキャンコード, 下位=ASCII) */
+/* u16キーコードを返す (上位=スキャンコード, 下位=ASCII)。
+ * GUI 中は下位 8bit だけが意味を持ち、スキャンコードは 0 (票 D7) —
+ * 端末経由で届く打鍵にはスキャンコードが無い。 */
 int kbd_getkey(void)
 {
     u16 entry;
+
+    if (kbd_gui_mode) return kbd_gui_getbyte();
+
     while (kbd_count == 0) {
         __asm__ volatile("hlt");
     }

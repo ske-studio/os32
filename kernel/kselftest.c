@@ -20,6 +20,12 @@
 #include "kprintf.h"
 #include "kmalloc.h"
 #include "paging.h"
+#include "con_sink.h"
+#include "pc98.h"
+#include "tvram.h"
+#include "console.h"
+#include "kbd_inject.h"
+#include "appslot.h"
 
 /* 結果はホストから読めるようにグローバルにする。
  * ブート時の出力はスプラッシュで流れてしまい、rshell も未起動なので
@@ -313,6 +319,88 @@ static void test_app_band_pde(void)
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/*  console シンクのリング (票 K6C の受入 C2): GUI モード中のカーネル出力を  */
+/*  溜める 8KB の環。レコード境界で切ること・あふれで **古い方**を捨てる     */
+/*  こと・CUI 復帰で捨てること・読み手が 1 本であることが崩れると、端末      */
+/*  アプリには「出力が出ない」か「途中で化ける」としか見えず原因が遠い。      */
+/*  ホスト試験 (tools/tests/test_con_sink.py) と同じ形をブート時にも踏む。    */
+/* ------------------------------------------------------------------------ */
+static void test_con_sink(void)
+{
+    u32 bad = con_sink_selftest();
+    check((bad & (1u << 0)) == 0, "con_sink push/read (record round-trip)");
+    check((bad & (1u << 1)) == 0, "con_sink CLEAR / CURSOR records");
+    check((bad & (1u << 2)) == 0, "con_sink read cuts on a record boundary");
+    check((bad & (1u << 3)) == 0, "con_sink overflow drops the oldest record");
+    check((bad & (1u << 4)) == 0, "con_sink discards on return to CUI");
+    check((bad & (1u << 5)) == 0, "con_sink single reader (owner reclaim)");
+}
+
+/* ------------------------------------------------------------------------ */
+/*  GUI モード中の描画抑止 (票 K6C-2)                                        */
+/*                                                                          */
+/*  シンクが有効なあいだ console.c が従来どおりテキスト VRAM にも描いていた  */
+/*  ので、gshell の GFX 画面の上に CUI プログラムの出力が残像として重なって  */
+/*  いた (PM 実測 2026-09-12、K7 受入 I2)。実機で見えるのは「左上に古い文字」 */
+/*  だけで、シンク側は正常に見えるため原因が遠い。ここで毎回踏む。           */
+/*  con_sink_enable/disable を直に使う (console_text_gdc_start はブート画面を */
+/*  消してしまう)。 */
+/* ------------------------------------------------------------------------ */
+static void test_con_sink_render_gate(void)
+{
+    int sx = console_get_cursor_x();
+    int sy = console_get_cursor_y();
+    int x  = TVRAM_COLS - 1;
+    int y  = TVRAM_ROWS - 1;
+    u16 before = 0;
+    u16 after = 0;
+    u8  attr = 0;
+
+    tvram_readchar_at(x, y, &before, &attr);
+    console_set_cursor(x, y);
+    con_sink_enable();
+    shell_print("Z", TATTR_WHITE);
+    tvram_readchar_at(x, y, &after, &attr);
+    check(after == before, "console: GUI mode does not draw to text VRAM");
+    check(console_get_cursor_x() == x && console_get_cursor_y() == y,
+          "console: GUI mode does not advance the logical cursor");
+    con_sink_disable();
+    console_set_cursor(sx, sy);
+}
+
+/* ------------------------------------------------------------------------ */
+/*  打鍵の注入リングと「印の無い resume は拒否」(票 K7 の受入 I5)            */
+/*                                                                          */
+/*  GUI 中の kbd_getchar は第 2 の park 点になった。壊れたときに実機で見える */
+/*  のは「端末に打っても文字が出ない」か「GUI ごと固まる」だけで、原因が     */
+/*  遠い。ブート時に踏むのは 2 つ:                                           */
+/*    (1) 256B の環 — 積んだ順に 1 バイトずつ出る (UTF-8 の並びを変えない)、 */
+/*        あふれは新しい方を捨てる、破棄で空、読み手未確立の注入は拒否。     */
+/*    (2) 印の無いフレームは起こせない (C6 の規則が PARKED と WAIT_KEY の    */
+/*        両方に効く)。resume の切替点が緩むとフレームが宙に浮く。           */
+/* ------------------------------------------------------------------------ */
+static void test_kbd_inject(void)
+{
+    u32 bad = kbd_inject_selftest();
+    check((bad & (1u << 0)) == 0, "kbd_inject refuses with no con_sink reader");
+    check((bad & (1u << 1)) == 0, "kbd_inject keeps UTF-8 byte order (FIFO)");
+    check((bad & (1u << 2)) == 0, "kbd_inject take on empty ring returns 0");
+    check((bad & (1u << 3)) == 0, "kbd_inject overflow drops the newest byte");
+    check((bad & (1u << 4)) == 0, "kbd_inject discard empties the ring");
+}
+
+static void test_resume_mark(void)
+{
+    u32 bad = appslot_resume_mark_selftest();
+    check((bad & (1u << 0)) == 0, "resume refuses a free slot");
+    check((bad & (1u << 1)) == 0, "resume needs the OP_WAIT mark (PARKED)");
+    check((bad & (1u << 2)) == 0, "resume needs the kbd mark (WAIT_KEY)");
+    check((bad & (1u << 3)) == 0, "kill folds WAIT_KEY but not a running app");
+    check((bad & (1u << 4)) == 0, "exec_app_state adds 3 without moving 0/1/2");
+    check((bad & (1u << 5)) == 0, "refused resume never counts as a switch");
+}
+
 int kselftest_run(void)
 {
     ksel_pass = 0;
@@ -326,6 +414,10 @@ int kselftest_run(void)
     test_ring3_pd();
     test_map_user_keep();
     test_app_band_pde();
+    test_con_sink();
+    test_con_sink_render_gate();
+    test_kbd_inject();
+    test_resume_mark();
 
     if (ksel_fail == 0) {
         kprintf(0xA1, "[selftest] %d/%d passed\n", ksel_pass, ksel_pass);

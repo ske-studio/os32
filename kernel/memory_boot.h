@@ -14,4 +14,16 @@ int memory_boot_init(u32 mem_kb);
  * reported or confirmed. There is no artificial ceiling here; the reported
  * extent is only bounded by the top-of-4GiB ROM/MMIO band. */
 u32 memory_boot_detect(u32 mem_kb);
+
+/* KiB of physical RAM actually registered at boot: the sum of the spans this
+ * unit handed to the allocator model, i.e. [0, min(top, 15MiB)) plus the
+ * confirmed [MEM_HIGH_RAM_BASE, high end). 0 before memory_boot_init.
+ * This is NOT memory_boot_detect / sys_get_mem_kb, which are the top-of-RAM
+ * address / 1024 (K6-RAM): that number counts the PC-98 15-16MiB system space
+ * as if it were RAM, so a 15MiB machine reports 17408 KiB. The two agree on
+ * machines whose RAM stops below 15MiB. Like every conventional RAM size, the
+ * 640KiB-1MiB VRAM/ROM window inside the first megabyte is still counted; only
+ * the hole BETWEEN two RAM bands is taken out. Boot-time value, never updated
+ * afterwards; device reservations do not reduce it. */
+u32 memory_boot_ram_kb(void);
 #endif

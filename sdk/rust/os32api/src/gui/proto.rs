@@ -169,6 +169,9 @@ pub const OS32_ERR_NOSYS: i32 = -10;
 pub const OS32_ERR_STALE: i32 = -11;
 pub const OS32_ERR_VERSION: i32 = -12;
 pub const OS32_ERR_FULL: i32 = -13;
+/// 「いまは無い / 後でもう一度」。`exec_resume` が鍵待ちのアプリを注入リング
+/// が空のまま起こそうとしたときだけ返す (票 K7 §5 指摘 B、KAPI v47)。
+pub const OS32_ERR_AGAIN: i32 = -14;
 
 /* ======================================================================== */
 /*  スロット内レイアウト (1 スロット = 16KB) — 契約 T2 / PROTO_LAYOUT         */

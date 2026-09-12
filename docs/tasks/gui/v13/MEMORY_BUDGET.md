@@ -49,6 +49,46 @@ T4のCellはhost試験でsize 8B / align 4Bと確認（x86_64-unknown-linux-gnu�
 `userland/libos32term/tests/model.rs` の `cell_host_layout_measurement` が根拠。
 上の8B仮定とは一致するが、guest実寸・Rust ABI保証・ゲスト確保成功を意味しない。
 
+## カーネル帯の静的計上 (K6C、2026-09-12)
+
+`kernel/con_sink.c` の console シンク。`kmalloc` せず **カーネル .bss の静的配列**なので、
+シェル帯・アプリ帯・exec_heap のどれも減らさない (上の T1 案の算術とは別勘定)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| リング `g_ring[]` | 8192 B | `CON_SINK_RING_SIZE` (`include/con_sink.h`、票 §2-1 の決定) |
+| 自己診断の作業域 `g_self_buf` + `g_self_src` | 403 B | `CON_SINK_REC_MAX` (203) + `CON_SINK_PRINT_MAX` (200) |
+| head / tail / count / enabled / reader / drop_count | 24 B | `u32` × 4 + `int` × 2 |
+| **合計** | **8619 B** | |
+
+`i386-elf-gcc -O2 -c kernel/con_sink.c` の実測は text 2937 B / data 4 B / **bss 8672 B**
+(整列込み。`con_sink_drop_count` は `.data`)。カーネル全体を
+リンクしての実測とゲストの空き容量は未測定 (`make` は未実施)。端末アプリ側の受け皿
+(K6C-A) はここには含まない。
+
+## カーネル帯の静的計上 (K7-K、2026-09-12)
+
+`kernel/kbd_inject.c` の注入リングと、`AppSlot` に増えた印。どちらも `kmalloc` せず
+**カーネル .bss の静的領域**なので、シェル帯・アプリ帯・exec_heap のどれも減らさない。
+測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` (カーネル全体のリンクと
+ゲストの空き容量は未測定 — `make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| 注入リング `g_inj_ring[]` | 256 B | `KBD_INJECT_RING_SIZE` (`include/kbd_inject.h`、票 §1 メモリ) |
+| head / tail / count / drop_count | 16 B | `u32` × 4 |
+| 整列込みの実測 `kbd_inject.o` .bss | **288 B** | text 1489 B / data 0 B |
+| 印 `parked_from_kbd` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `g_slot` が 0x408 → 0x420 |
+| カウンタ `ring3_kbd_park_count` | 0 B (実質) | 既存の整列の隙間に入り、`appslot.o` の .bss は 1064 → 1088 B = **+24 B** |
+| **合計** | **312 B** | 288 + 24 |
+
+票 §1 の見積り (「注入リング 256B + AppSlot の印 1 語 × 5」= 276 B) との差は 36 B:
+リングの head/tail/count/drop_count の 16 B (整列で +16 B) と、印がシェル帯を含む
+6 スロット分 (ID 0 と 1 も表にある) であることによる 4 B。
+
+`kbd_inject_selftest()` は受け皿の静的配列を持たない (`inj_push` を 1 バイトずつ呼ぶ) —
+`con_sink_selftest` が 403 B の作業域を持つのと違い、256 B に収めた意味を消さないため。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

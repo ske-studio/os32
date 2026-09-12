@@ -30,6 +30,7 @@ volatile u32 ring3_switch_count = 0;
 volatile u32 ring3_transition_count = 0;
 volatile u32 ring3_park_reject_count = 0;
 volatile u32 ring3_resume_bad_frame_count = 0;
+volatile u32 ring3_kbd_park_count = 0;
 volatile u32 appslot_reclaim_count = 0;
 volatile int appslot_last_reclaim_id = 0;
 
@@ -156,6 +157,7 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->in_op_wait = 0;
     a->abort_req = 0;
     a->parked_from_wait = 0;
+    a->parked_from_kbd = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -174,6 +176,7 @@ void appslot_shell_commit(void)
     a->in_op_wait = 0;
     a->abort_req = 0;
     a->parked_from_wait = 0;
+    a->parked_from_kbd = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     res_owner_set(APP_ID_SHELL);
@@ -242,6 +245,47 @@ void appslot_park_commit(void)
     res_owner_set(APP_ID_SHELL);
 }
 
+/* ---- 第 2 の park 点: GUI 中の kbd 待ち (票 K7 D1) --------------------- */
+/* park_check との違いは「いま gui_call(OP_WAIT) の中か」を要求しないこと
+ * だけ。ここへ来るのは kbd_getchar / kbd_getkey の syscall の中で、WM の
+ * コールバックではないため。GUI モードと CPL=3 フレームの有無 (票 §5 R1) は
+ * drivers/kbd.c と exec/exec.c が見る — この表はハードウェアを知らない。 */
+int appslot_park_kbd_check(void)
+{
+    AppSlot *a;
+
+    if (g_cur < APP_ID_MIN || g_cur > APP_ID_MAX) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    a = appslot_get(g_cur);
+    if (!a || a->state != APP_STATE_RUNNING) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    /* CUI の入れ子 exec_run の子は park できない (D4 と同じ理由: longjmp の
+     * 行き先が親アプリの中の exec_run フレームになり WM へ戻れない)。
+     * 呼び手は拒否されたら従来の hlt 待ちへ落ちる。 */
+    if (!a->gui) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    return 0;
+}
+
+void appslot_park_kbd_commit(void)
+{
+    AppSlot *a = appslot_get(g_cur);
+    if (!a) return;
+    a->parked_from_kbd = 1;       /* 「kbd 待ち由来」の印 (K7 D1) */
+    a->in_op_wait = 0;
+    a->state = APP_STATE_WAIT_KEY;
+    g_cur_op_is_wait = 0;
+    g_cur = APP_ID_SHELL;
+    res_owner_set(APP_ID_SHELL);
+    ring3_kbd_park_count++;
+}
+
 int appslot_resume_check(int id)
 {
     AppSlot *a;
@@ -251,8 +295,17 @@ int appslot_resume_check(int id)
     if (res_owner_get() != APP_ID_SHELL) return OS32_ERR_INVAL;
     a = appslot_get(id);
     if (!a) return OS32_ERR_INVAL;                  /* 未知 / 畳まれた ID */
+    /* 印の無いフレームは起こさない (C6)。ここが受入 G7 / K7 の I5 の合否
+     * そのもので、park 点が 2 つになっても規則は 1 つ — 「その状態に対応する
+     * 印が立っているフレームだけ」。 */
+    if (a->state == APP_STATE_WAIT_KEY) {
+        if (!a->parked_from_kbd) {
+            ring3_resume_bad_frame_count++;
+            return OS32_ERR_STALE;
+        }
+        return 0;
+    }
     if (a->state != APP_STATE_PARKED) return OS32_ERR_INVAL;
-    /* 印の無いフレームは起こさない (C6)。ここが受入 G7 の合否そのもの。 */
     if (!a->parked_from_wait) {
         ring3_resume_bad_frame_count++;
         return OS32_ERR_STALE;
@@ -264,7 +317,8 @@ void appslot_resume_commit(int id)
 {
     AppSlot *a = appslot_get(id);
     if (!a) return;
-    a->parked_from_wait = 0;      /* 印は 1 回きり */
+    a->parked_from_wait = 0;      /* 印は 1 回きり (両方の park 点で) */
+    a->parked_from_kbd = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -317,8 +371,12 @@ int appslot_kill_check(int id)
     if (res_owner_get() != APP_ID_SHELL) return OS32_ERR_INVAL;
     a = appslot_get(id);
     if (!a) return OS32_ERR_INVAL;
-    /* 走っている本人は CTRL+STOP の経路で畳む (D4)。 */
-    if (a->state != APP_STATE_PARKED) return OS32_ERR_STALE;
+    /* 走っている本人は CTRL+STOP の経路で畳む (D4)。止めてある側は
+     * OP_WAIT 由来 (PARKED) でも kbd 待ち (WAIT_KEY) でも畳める — 鍵待ちの
+     * アプリを永久に畳めないと CTRL+STOP の逃げ道が無くなる (票 K7 D5)。 */
+    if (a->state != APP_STATE_PARKED && a->state != APP_STATE_WAIT_KEY) {
+        return OS32_ERR_STALE;
+    }
     return 0;
 }
 
@@ -365,5 +423,80 @@ int appslot_state(int id)
     if (id < APP_ID_MIN || id > APP_ID_MAX) return OS32_ERR_INVAL;
     a = &g_slot[id];
     if (a->state == APP_STATE_FREE) return 0;
-    return (a->state == APP_STATE_RUNNING) ? 1 : 2;
+    if (a->state == APP_STATE_RUNNING) return 1;
+    /* 3 = kbd 待ち (票 K7 §5 指摘 C の値の追加)。2 の意味は動かさない。 */
+    if (a->state == APP_STATE_WAIT_KEY) return APP_STATE_WAIT_KEY;
+    return 2;
+}
+
+/* ======================================================================== */
+/*  appslot_resume_mark_selftest — 「印の無い resume は拒否」の負例 (I5)     */
+/*                                                                          */
+/*  票 K7 の受入 I5 の半分。park 点が 2 つになったので、C6 の規則             */
+/*  (「その状態に対応する印が立っているフレームだけ起こせる」) が            */
+/*  PARKED と WAIT_KEY の**両方**に効いていることをブート時に踏む。          */
+/*                                                                          */
+/*  空きスロット (APP_ID_MAX) を一時的に借りる。kselftest_run は exec_init   */
+/*  より前に走るので g_slot は全部 FREE だが、順序に頼らず借りた中身と        */
+/*  cur / owner / カウンタを丸ごと保存して戻す。                             */
+/* ======================================================================== */
+u32 appslot_resume_mark_selftest(void)
+{
+    u32 bad = 0;
+    int id = APP_ID_MAX;
+    AppSlot saved;
+    int saved_cur = g_cur;
+    int saved_owner = res_owner_get();
+    u32 saved_badframe = ring3_resume_bad_frame_count;
+    u32 saved_switch = ring3_switch_count;
+
+    saved = g_slot[id];
+    g_cur = APP_ID_SHELL;
+    res_owner_set(APP_ID_SHELL);
+    slot_zero(&g_slot[id]);
+
+    /* (0) 空きスロットは起こせない */
+    g_slot[id].state = APP_STATE_FREE;
+    if (appslot_resume_check(id) != OS32_ERR_INVAL) bad |= 1u << 0;
+
+    /* (1) OP_WAIT 由来: 印が無ければ STALE、あれば 0 */
+    g_slot[id].state = APP_STATE_PARKED;
+    g_slot[id].parked_from_wait = 0;
+    g_slot[id].parked_from_kbd = 0;
+    if (appslot_resume_check(id) != OS32_ERR_STALE) bad |= 1u << 1;
+    if (ring3_resume_bad_frame_count != saved_badframe + 1) bad |= 1u << 1;
+    g_slot[id].parked_from_wait = 1;
+    if (appslot_resume_check(id) != 0) bad |= 1u << 1;
+
+    /* (2) kbd 待ち: kbd の印が要る。OP_WAIT の印では起こせない */
+    g_slot[id].state = APP_STATE_WAIT_KEY;
+    g_slot[id].parked_from_wait = 1;
+    g_slot[id].parked_from_kbd = 0;
+    if (appslot_resume_check(id) != OS32_ERR_STALE) bad |= 1u << 2;
+    if (ring3_resume_bad_frame_count != saved_badframe + 2) bad |= 1u << 2;
+    g_slot[id].parked_from_kbd = 1;
+    if (appslot_resume_check(id) != 0) bad |= 1u << 2;
+
+    /* (3) 鍵待ちは畳める (D5)、走っている本人は畳めない */
+    if (appslot_kill_check(id) != 0) bad |= 1u << 3;
+    g_slot[id].state = APP_STATE_RUNNING;
+    if (appslot_kill_check(id) != OS32_ERR_STALE) bad |= 1u << 3;
+
+    /* (4) exec_app_state は 3 を返す (既存の 0/1/2 は不変) */
+    g_slot[id].state = APP_STATE_WAIT_KEY;
+    if (appslot_state(id) != APP_STATE_WAIT_KEY) bad |= 1u << 4;
+    g_slot[id].state = APP_STATE_RUNNING;
+    if (appslot_state(id) != 1) bad |= 1u << 4;
+    g_slot[id].state = APP_STATE_PARKED;
+    if (appslot_state(id) != 2) bad |= 1u << 4;
+    g_slot[id].state = APP_STATE_FREE;
+    if (appslot_state(id) != 0) bad |= 1u << 4;
+
+    /* 後始末: 借りたスロットも観測点も元に戻す (検査は 1 回も起こさない) */
+    g_slot[id] = saved;
+    g_cur = saved_cur;
+    res_owner_set(saved_owner);
+    ring3_resume_bad_frame_count = saved_badframe;
+    if (ring3_switch_count != saved_switch) bad |= 1u << 5;
+    return bad;
 }

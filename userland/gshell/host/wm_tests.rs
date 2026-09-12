@@ -640,6 +640,31 @@ fn four_app_state(shm: &crate::mocks::Shm) -> crate::wm::GuiState {
     st
 }
 
+/// GUI アプリ 1 本 (owner 2、スロット 0 と窓 1 枚) だけの状態。票 K7 の
+/// 「端末から起動した CUI アプリ」は `OP_INIT` を通らないのでスロットも窓も
+/// 持たない — 表 (`multiapp`) にだけ載る本を作るための土台。
+fn one_gui_app_state(shm: &crate::mocks::Shm) -> crate::wm::GuiState {
+    use crate::{slot, wm};
+    let mut st = wm::GuiState::NEW;
+    st.shm_base = shm.base();
+    st.slots[0].used = true;
+    st.slots[0].owner = 2;
+    slot::init_header(&st, 0);
+    let mut w = wm::Win::EMPTY;
+    w.used = true;
+    w.visible = true;
+    w.owner = 2;
+    w.gen = 1;
+    w.x = 10;
+    w.y = 10;
+    w.w = 100;
+    w.h = 80;
+    st.windows[0] = w;
+    st.zorder[0] = 0;
+    st.z_count = 1;
+    st
+}
+
 /// `multiapp` の表に 4 本を載せる (`exec_start` が 4 回成功した後と同じ形)。
 fn seed_four_apps() {
     use crate::multiapp;
@@ -1810,5 +1835,196 @@ fn a_single_app_keeps_the_old_ctrl_stop_path() {
         "1 本なのに exec_park を呼んだ (回帰)"
     );
     assert!(!multiapp::pending_top_level_work(), "1 本なのに予約が積まれた");
+    wm::g().inited = false;
+}
+
+/* ================================================================ */
+/*  票 K7-W — 鍵待ち (WAIT_KEY) の CUI アプリ (指摘 A / C)           */
+/*                                                                  */
+/*  端末アプリ経由で走る CUI プログラムは `OP_INIT` を通らないので   */
+/*  スロットも窓も持たない。止まる理由は `kbd_getchar` の待ち        */
+/*  (`APP_STATE_WAIT_KEY`) だけで、起こしてよいかは注入リングの      */
+/*  未読バイト数 (`kbd_inject_pending`) が決める。                   */
+/* ================================================================ */
+
+/// カーネル `exec/appslot.h` の `APP_STATE_*` (`exec_app_state` の答え)。
+const ST_PARKED: i32 = 2;
+const ST_WAIT_KEY: i32 = 3;
+
+/* ---- K7-W 検査 1: pending 0 では起こさず、しかし忘れもしない ---- */
+#[test]
+fn a_slotless_app_waiting_for_a_key_is_never_forgotten() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_state(&shm);
+    multiapp::on_start(2); /* GUI アプリ (スロット 0) */
+    multiapp::on_start(3); /* 端末から起動した CUI (スロット無し) */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_KEY);
+
+    /* 注入リングが空 = 起床の理由が無い (指摘 C)。 */
+    mocks::set_kbd_pending(0);
+    assert!(!multiapp::input_ready(&st, 3), "pending 0 なのに入力群になった");
+    assert_eq!(multiapp::pick(&st), 0, "pending 0 の WAIT_KEY を選んだ");
+    assert!(!multiapp::resume_one(&mut st), "pending 0 で誰かを起こした");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "pending 0 で exec_resume を呼んだ: {:?}",
+        mocks::resume_calls()
+    );
+    /* 指摘 A: スロットが無いからといって表から落としてはならない。 */
+    assert!(multiapp::is_tracked(3), "鍵待ちのアプリを forget してしまった");
+    assert!(mocks::kill_calls().is_empty(), "鍵待ちのアプリを畳んでしまった");
+}
+
+/* ---- K7-W 検査 2: pending > 0 なら入力群として選ばれ resume される ---- */
+#[test]
+fn a_slotless_app_waiting_for_a_key_is_resumed_when_a_byte_is_injected() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_state(&shm);
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_KEY);
+    mocks::set_kbd_pending(1);
+
+    assert!(multiapp::input_ready(&st, 3), "注入があるのに入力群でない");
+    assert_eq!(multiapp::pick(&st), 3, "注入があるのに WAIT_KEY を選ばない");
+    assert!(multiapp::resume_one(&mut st), "起こす相手が居るのに起こさない");
+    let calls = mocks::resume_calls();
+    assert_eq!(calls.len(), 1, "1 周で 2 本以上起こした: {calls:?}");
+    /* 指摘 B: 文字はカーネルが `wait_ret` を上書きして渡すので WM は 0。 */
+    assert_eq!(calls[0], (3, 0), "exec_resume の引数が違う: {calls:?}");
+    assert!(multiapp::is_tracked(3), "resume したのに表から落ちた");
+    assert!(mocks::kill_calls().is_empty(), "resume できたのに畳んだ");
+}
+
+/* ---- K7-W 検査 3: `OS32_ERR_AGAIN` はその周を譲るだけ ---- */
+#[test]
+fn an_again_from_exec_resume_yields_the_round_without_folding_the_app() {
+    use crate::{mocks, multiapp};
+    use os32api::gui::proto::OS32_ERR_AGAIN;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_state(&shm);
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_KEY);
+    mocks::set_kbd_pending(1);
+    *mocks::RESUME_SCRIPT.lock().unwrap() = vec![OS32_ERR_AGAIN];
+    let last_before = multiapp::last_run();
+
+    assert!(multiapp::resume_one(&mut st), "AGAIN の周が「何もしない」になった");
+    assert_eq!(mocks::resume_calls(), vec![(3, 0)], "resume を呼んでいない");
+    /* 負値だからといって「起こせない本」として畳んではならない。 */
+    assert!(mocks::kill_calls().is_empty(), "AGAIN で exec_kill を呼んだ");
+    assert!(multiapp::is_tracked(3), "AGAIN で表から落とした");
+    /* 譲るだけ = turn も巡回の起点も動かさない (streak に数えない)。 */
+    assert!(!multiapp::turn_used(3), "AGAIN が turn を使った");
+    assert_eq!(multiapp::last_run(), last_before, "AGAIN が巡回の起点を動かした");
+    assert_eq!(multiapp::running(), 0, "AGAIN から戻ったのに走ったまま");
+}
+
+/* ---- K7-W 検査 4: 鍵待ちでないスロット無しは従来どおり忘れる ---- */
+#[test]
+fn a_slotless_app_that_is_not_waiting_for_a_key_is_still_forgotten() {
+    use crate::{mocks, multiapp};
+    use crate::wm;
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_state(&shm);
+    /* owner 3 の窓だけがあってスロットは無い (`OP_INIT` 前 / 回収済み)。
+     * `Configure` 未通知で導出群に入るので `pick` が選ぶ。 */
+    let mut w = wm::Win::EMPTY;
+    w.used = true;
+    w.visible = true;
+    w.owner = 3;
+    w.gen = 1;
+    w.x = 200;
+    w.y = 10;
+    w.w = 100;
+    w.h = 80;
+    w.configure_pending = true;
+    st.windows[1] = w;
+    st.zorder[1] = 1;
+    st.z_count = 2;
+    multiapp::on_start(2);
+    multiapp::on_start(3);
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_PARKED); /* 鍵待ちではない */
+    mocks::set_kbd_pending(0);
+
+    assert!(multiapp::derived_ready(&st, 3), "導出群になっていない");
+    assert_eq!(multiapp::pick(&st), 3, "導出群の 1 本を選ばない");
+    assert!(multiapp::resume_one(&mut st), "1 周で何もしなかった");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "スロットの無い非鍵待ちを起こした: {:?}",
+        mocks::resume_calls()
+    );
+    assert!(!multiapp::is_tracked(3), "スロットの無い非鍵待ちが表に残った");
+}
+
+/* ---- K7-W 検査 5 (受入 I3): スロット無しの鍵待ちは SWITCH_CUI で畳む ----
+ *  端末 (`t5a_display`) と、そこから起動した窓無しの CUI プログラム
+ *  (`kbd_getchar` で `WAIT_KEY` に park) が生きている状態で CUI へ戻ると、
+ *  端末は畳まれるのに CUI プログラムだけ AppSlot に残っていた
+ *  (PM 実測 2026-09-12)。`Quit` はスロットのリングにしか積めないので、
+ *  この 1 本は待っても自分から終われない = 即 `exec_kill` するしかない。 */
+#[test]
+fn switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = one_gui_app_state(&shm);
+        g.inited = true;
+    }
+    multiapp::on_start(2); /* 端末: スロット 0 + 窓 1 枚 */
+    multiapp::on_start(3); /* 端末から起動した CUI: スロットも窓も無い */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_KEY);
+    mocks::set_kbd_pending(0); /* 打鍵待ちのまま (起こす理由が無い) */
+
+    /* Start → CUI mode → Yes。 */
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+    /* 配る先の無い 1 本は猶予を待たずに畳む予約が入る (決裁 A3 の外)。 */
+    assert!(
+        multiapp::pending_top_level_work(),
+        "Quit を配れない 1 本の kill が予約されていない"
+    );
+
+    /* 端末は Quit に応じて終了した。残るのは表の中の ID 3 だけ。 */
+    wm::g().reclaim_owner(2);
+    session::reclaim_owner(2);
+    multiapp::on_owner_exit(2);
+
+    /* ここで成立させてしまうと ID 3 の AppSlot と物理ページが漏れる。 */
+    assert!(
+        !session::ready_to_run(wm::g()),
+        "スロット無しの被追跡アプリを残したまま CUI へ切り替えようとした"
+    );
+
+    /* top-level の 1 周で畳む。 */
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が違う");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "畳む相手を起こしてしまった: {:?}",
+        mocks::resume_calls()
+    );
+    assert!(!multiapp::is_tracked(3), "kill した ID が表に残った");
+    assert_eq!(multiapp::live_count(), 0, "全回収になっていない");
+    assert!(
+        session::ready_to_run(wm::g()),
+        "全回収なのに SWITCH_CUI が実行できない"
+    );
     wm::g().inited = false;
 }

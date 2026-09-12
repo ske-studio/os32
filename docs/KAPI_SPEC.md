@@ -1,4 +1,4 @@
-# KernelAPI v45 仕様書
+# KernelAPI v47 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **41** |
-| 合計エントリ数 | **190** (ヘッダ2 + 関数ポインタ186 + データフィールド2) |
+| 現在のバージョン | **47** |
+| 合計エントリ数 | **196** (ヘッダ2 + 関数ポインタ192 + データフィールド2) |
 
 ---
 
@@ -87,15 +87,20 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v43 | 予約 (未実装のまま据え置き) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
 | v44 | **実装済み (2026-09-11、K5b-K)** | GUI v1.3 K5: アプリ 4 本の同時実行 (契約 T2a、GetMessage 方式) `exec_start` / `exec_resume` / `exec_park` / `exec_kill` / `exec_app_state` と、フォーカス追従の音の排他 `snd_focus`。owner 1 (シェル帯) 専用。カウンタはカーネルシンボル (KAPI にしない)。v43 はネットワークに予約済みなので**飛ばした** | [tasks/gui/v13/TASK_K5_multiapp.md §D8](tasks/gui/v13/TASK_K5_multiapp.md)、[TASK_K5B_kernel](tasks/gui/v13/TASK_K5B_kernel.md) |
 | v45 | **実装済み (2026-09-11、K5c)** | GUI v1.3 K5: `exec_abort_clear` — CTRL+STOP の宛先を**フォーカス窓のアプリ**にする (契約 T6、決裁 A1)。IRQ1 は走っているアプリにしか要求を立てられないので、WM が本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` する。owner 1 (シェル帯) 専用 | [tasks/gui/v13/TASK_K5B_gshell.md §決裁](tasks/gui/v13/TASK_K5B_gshell.md) |
+| v46 | **実装済み (2026-09-12、K6C)** | GUI v1.3 K6C: console シンク `con_sink_read` / `con_sink_stat` — GUI モード中のカーネル出力をリングに溜め、端末アプリ (外部) が吸う。読み手は 1 本 (owner 回収)。同じ追記で `sys_ram_kb` (K6-RAM 決裁 (2): 起動時に登録した実 RAM の合計 KB) も足した | [tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md)、[TASK_K6_ram_ceiling.md](tasks/gui/v13/TASK_K6_ram_ceiling.md) |
+| v47 | **実装済み (2026-09-12、K7-K)** | GUI v1.3 K7 入力統合: `kbd_inject` (con_sink の読み手専用、UTF-8 を 256B の注入リングへ) / `kbd_inject_pending` (未読バイト数、誰でも可)。GUI 中の `kbd_getchar` / `kbd_getkey` は第 2 の park 点 (`APP_STATE_WAIT_KEY`) になり、`exec_resume` が注入リングから 1 バイトを EAX に入れる。同じ追記でエラー番号 -14 `OS32_ERR_AGAIN` を取った | [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
 先に実装した側が実際の版番号を確定し、後発は次版へずらす。
 
 **エラー番号の予約** (`os32_kapi_shared.h`、現在 -1〜-10): GUI (K1) が **-11 `STALE` /
--12 `VERSION` / -13 `FULL`** を取る。ネットワーク Host Services は既存の -1〜-10 に写像し
-(送信失敗→`IO` -1、引数不正→`INVAL` -9、未対応→`NOSYS` -10 等)、固有の番号が要るときだけ
-**-14 以降**を使う (GUI の -11〜-13 を避ける)。
+-12 `VERSION` / -13 `FULL`**、GUI v1.3 K7 (v47) が **-14 `AGAIN`** (「いまは無い / 後で
+もう一度」— 注入リングが空のときの `exec_resume`) を取る。ネットワーク Host Services は
+既存の -1〜-10 に写像し (送信失敗→`IO` -1、引数不正→`INVAL` -9、未対応→`NOSYS` -10 等)、
+固有の番号が要るときだけ **-15 以降**を使う (GUI の -11〜-14 を避ける)。
+ネットワーク側はまだ 1 つも番号を使っていないので、K7 が -14 を取り開始点を 1 つ下げた
+(2026-09-12)。
 
 ---
 
@@ -396,6 +401,82 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
   WM が top-level (owner 1) に戻るのは park の後なので、対象のスロットは PARKED になっている
   ことがある — 状態では絞らない。
 
+### console シンクと実 RAM 量 (v46)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x2F4 | con_sink_read | `i32(void *buf, u32 cap)` |
+| 0x2F8 | con_sink_stat | `i32(u32 *pending, u32 *dropped)` |
+| 0x2FC | sys_ram_kb | `u32(void)` |
+
+### 打鍵の注入 (v47)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x300 | kbd_inject | `i32(const u8 *utf8, u32 len)` |
+| 0x304 | kbd_inject_pending | `u32(void)` |
+
+GUI モード中 (gshell が全画面 GFX を握っている間) は IRQ1 が cooked リングに積まないので、
+CUI プログラムが `kbd_getchar()` を呼ぶとカーネルの `hlt` ループに入って**戻らない** —
+syscall の中なので `exec_park` も起きず、協調型の全体が止まる。v47 はこれを 2 つで解く。
+票 [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) §1 / §5。
+
+- `kbd_inject(utf8, len)`: UTF-8 のバイト列をカーネルの**注入リング (256B、静的)** へ積み、
+  積んだバイト数を返す。呼べるのは **con_sink の読み手** (= 端末アプリ) だけで、読み手が
+  未確立か別の所有者なら `OS32_ERR_EXIST`、`utf8 == NULL` は `OS32_ERR_INVAL`。
+  端末アプリはイベントループに入る前に `con_sink_read` を 1 回呼んで読み手権限を確立する
+  規約 (票 §5 R2)。あふれは con_sink と逆で **新しい方を捨てる** — 打鍵は順序が意味を持ち、
+  古い方を捨てると打った文字列の頭が欠ける。捨てた分は戻り値 (< `len`) で分かり、累計は
+  カーネルシンボル `kbd_inject_drop_count` にも積む (KAPI にはしない)。
+- `kbd_inject_pending()`: 未読バイト数。所有権は要らない — WM (gshell) が
+  「`exec_app_state` が 3 (`WAIT_KEY`) かつ `kbd_inject_pending() > 0`」で起こす相手を選ぶ。
+- GUI 中の `kbd_getchar` / `kbd_getkey` / `kbd_trygetchar` は**この注入リングだけ**を見る。
+  `kbd_getchar` / `kbd_getkey` は空のとき **第 2 の park 点**として止まり
+  (`APP_STATE_WAIT_KEY` + 印 `parked_from_kbd`)、`exec_resume` が注入リングの 1 バイトを
+  保存フレームの EAX に入れて起こす (WM の `wait_ret` は使わない)。リングが空のままの
+  `exec_resume` は `OS32_ERR_AGAIN` で、印も状態も残る。
+  `kbd_getkey` の GUI 中の戻り値は下位 8bit だけが意味を持つ (スキャンコードは 0)。
+- **CUI モード (`kbd_gui_mode == 0`) は 1 行も変わらない** — rshell のタイムアウト経路を
+  含めて従来どおり cooked リング + `hlt`。
+- 注入リングは CUI 復帰 (`console_text_gdc_start`) と読み手の退場
+  (`exec_reclaim_owned` → `kbd_inject_owner_exit`) で捨てる。
+
+GUI モード中 (gshell が全画面 GFX を握っている間) は、カーネルと CUI コマンドが
+`kernel/console.c` の入口へ書いた出力はテキスト VRAM に描かれて見えないまま消える。
+v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、端末アプリ (外部、K6C-A) が
+吸って描けるようにする。有効化の API は無い — `console_text_gdc_stop()` (GUI 入場) で
+空から溜め始め、`console_text_gdc_start()` (CUI 復帰) で捨てる。票
+[tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md) §2。
+
+- **レコード形式** (`os32_kapi_shared.h` の `CON_SINK_*` が正典)。先頭 1 バイトが型で、
+  残りは型ごと。詰め物も整列も無い:
+
+  | type | ワイヤ | 発生源 |
+  |---|---|---|
+  | `CON_SINK_REC_PRINT` (1) | `[1][color u8][len u8][UTF-8 len バイト]` | `shell_putchar` / `shell_print` / `shell_print_utf8` / `console_write` / `kprintf` |
+  | `CON_SINK_REC_CLEAR` (2) | `[2]` | `tvram_clear()` |
+  | `CON_SINK_REC_CURSOR` (3) | `[3][x u8][y u8]` | `console_set_cursor()` |
+
+  改行 / CR / TAB は `PRINT` のバイトとして流れる (端末モデルが解釈する)。スクロールは
+  レコードにしない。`PRINT` 1 本は `CON_SINK_PRINT_MAX` (200) バイトまでで、長い出力は
+  **UTF-8 の切れ目で**分割される。レコード 1 本の最大は `CON_SINK_REC_MAX` = 203。
+
+- `con_sink_read(buf, cap)`: 溜まっているレコードを**境界で切って** `buf` へ写し、
+  書いたバイト数を返す (0 = 空)。`cap` は `CON_SINK_REC_MAX` 以上でなければならず、
+  足りなければ `OS32_ERR_INVAL` (0 を返すと「空」と区別できず読み手が止まる)。
+  **読み手は 1 本だけ**で、最初に読んだ所有者が持つ。別の所有者からは `OS32_ERR_EXIST`。
+  所有は `exec_exit` / `exec_kill` の owner 回収 (`con_sink_owner_exit`) でだけ返る —
+  CUI 往復では動かない。
+- `con_sink_stat(pending, dropped)`: 溜まっているバイト数と、あふれで捨てたレコード数。
+  常に 0 を返す。所有権は要らない (誰でも覗ける)。CPL=3 からは NULL を渡せない
+  (ディスパッチャのポインタ検証で kill される)。
+- あふれは**古い方をレコード単位で捨てる**。捨てた回数はカーネルシンボル
+  `con_sink_drop_count` にも積む (KAPI にはしない)。
+- `sys_ram_kb()`: 起動時に実際に登録した物理 RAM span の合計 (KB)。`sys_get_mem_kb()` は
+  RAM 上端アドレス / 1024 なので PC-98 の 15-16MB システム空間を RAM として数えるが、
+  こちらは数えない (15MB 機が 17408 KB を名乗る問題。K6-RAM 決裁 (2))。RAM が 15MB より
+  下で止まる機械では両者が一致する。実体は `kernel/memory_boot.c` の `memory_boot_ram_kb()`。
+
 ### データフィールド (構造体末尾)
 
 関数ポインタではなく値を持つフィールド。ジェネレータは `kapi-><field> = 0;` を
@@ -403,8 +484,8 @@ FEP 対応版にあたる (エディタ等のメインループから使う)。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x2F4 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x2F8 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x308 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x30C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

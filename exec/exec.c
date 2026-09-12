@@ -18,6 +18,8 @@
 #include "shm.h"
 #include "gui.h"
 #include "snd_engine.h"
+#include "con_sink.h"
+#include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "kapi_db.h"
 #include "gdt.h"
 #include "tss.h"
@@ -672,6 +674,15 @@ static void exec_reclaim_owned(int id)
      * サーフェス・タイマ・スロットを回収する。畳む 3 経路すべてが
      * ここを通るので、WM は 1 か所で回収できる。 */
     gui_owner_exit(id);
+    /* (8) 打鍵の注入リング (票 K7 D5)。注ぎ手は con_sink の読み手 1 本なので、
+     * 畳んだのがその 1 本なら溜まっている打鍵を捨てる。**con_sink の所有を
+     * 返す前**に呼ぶこと — 照合に g_reader を使うため。 */
+    kbd_inject_owner_exit(id);
+    /* (9) console シンクの読み手 (票 K6C)。読み手は 1 本だけなので、畳んだ
+     * のがその 1 本なら所有を返す — 返さないと次の端末アプリが永久に
+     * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、
+     * 次の読み手が拾えばよい)。 */
+    con_sink_owner_exit(id);
 }
 
 /* ======================================================================== */
@@ -1585,6 +1596,56 @@ i32 exec_park(void)
 }
 
 /* ======================================================================== */
+/*  exec_park_kbd — GUI 中の kbd 待ちで止める (第 2 の park 点、票 K7 D1)    */
+/*                                                                          */
+/*  drivers/kbd.c の kbd_getchar / kbd_getkey が、GUI モードで注入リングが    */
+/*  空のときに呼ぶ。成立すれば **戻らない** (exec_park と同じ longjmp)。      */
+/*  起こすのは WM で、そのとき exec_resume が注入リングの 1 バイトを EAX へ   */
+/*  入れるので、アプリからは kbd_getchar() が普通に値を返したように見える。   */
+/*                                                                          */
+/*  戻り値 0 = park できなかった。呼び手は従来の `hlt` 待ちへ落ちる。         */
+/*  「できなかった」の大半は CPL=0 の呼び手 (常駐シェル) や syscall の外で、  */
+/*  これは異常ではないので数えない (票 §5 R1 の条件)。数えるのは CPL=3 の     */
+/*  フレームを持ちながら表の側で弾かれた場合だけ                             */
+/*  (= CUI の入れ子 exec_run の子。ring3_park_reject_count)。                */
+/* ======================================================================== */
+int exec_park_kbd(void)
+{
+    int id;
+    AppSlot *a;
+    u32 k;
+
+    /* 票 §5 R1: CPL=3 のアプリが syscall の中に居るときだけ止められる。 */
+    if (!g_cur_app || !g_cur_app->cpl3 || g_cur_frame == 0) return 0;
+
+    id = appslot_cur();
+    if (appslot_park_kbd_check() < 0) return 0;
+
+    a = appslot_get(id);
+    if (!a || g_cur_app != a) {
+        ring3_park_reject_count++;
+        return 0;
+    }
+
+    /* 以降は exec_park と 1 行も変えない (D2 の (b): フレーム 13 語を写して
+     * master へ戻り、WM の待っている復帰点へ longjmp する)。 */
+    for (k = 0; k < APP_FRAME_WORDS; k++) a->frame[k] = g_cur_frame[k];
+
+    exec_heap_save_state(&a->exec_heap_used);
+    ring3_in_syscall = 0;       /* この syscall はここで終わる */
+    g_cur_frame = 0;
+
+    paging_load_cr3(paging_kernel_pd_phys());
+    appslot_park_kbd_commit();  /* WAIT_KEY + 印 + owner 1 へ */
+    exec_restore_context(APP_ID_SHELL);
+
+    g_longjmp_reason = EXEC_LJ_PARK;
+    g_longjmp_id = id;
+    exec_longjmp(a->jmpbuf);    /* 戻らない */
+    return 0;
+}
+
+/* ======================================================================== */
 /*  exec_resume — 止めてあるアプリを 1 本だけ起こす (KAPI v44)               */
 /*                                                                          */
 /*  戻り値: app_id = また park した / 0 = 終了した / <0 = 起こせなかった      */
@@ -1600,13 +1661,24 @@ i32 exec_resume(i32 app_id, i32 wait_ret)
 {
     AppSlot *a;
     int rc;
+    u8 ch;
 
     rc = appslot_resume_check((int)app_id);
     if (rc < 0) return rc;
 
     a = appslot_get((int)app_id);
     if (!a->cpl3 || !a->as.pd_phys) return OS32_ERR_INVAL;
-    a->frame[APP_FRAME_EAX] = (u32)wait_ret;
+    if (a->parked_from_kbd) {
+        /* 票 §5 の指摘 B: 文字の取り出しはここで完結する (WM 側に取り出し用
+         * の KAPI は作らない)。WM が渡した wait_ret は**使わない**。
+         * 空なら起こさず OS32_ERR_AGAIN — 印も状態も残るので、WM は次の周で
+         * もう一度試せばよい (その周は譲る = streak に数えない)。 */
+        ch = 0;
+        if (!kbd_inject_take(&ch)) return OS32_ERR_AGAIN;
+        a->frame[APP_FRAME_EAX] = (u32)ch;
+    } else {
+        a->frame[APP_FRAME_EAX] = (u32)wait_ret;
+    }
 
     if (exec_setjmp(a->jmpbuf) != 0) {
         /* park / 終了 / fault / kill で戻ってきた。ローカルは当てにしない。 */

@@ -24,7 +24,9 @@
  *       turn は 1 ラウンドにつきアプリごと 1 回、入力優先の据え置きは連続
  *       MA_INPUT_STREAK_MAX 回まで。ready なアプリは park した OP_WAIT から
  *       MA_STARVE_BOUND 回の OP_WAIT 以内に走る (ラウンドをまたぐ待ちを含む)。
- *       順は 入力群 > 導出群、入力群の中はフォーカス優先、
+ *       鍵待ち (MA_WAIT_KEY) は注入リングに未読があるときだけ ready で、
+       入力群として扱う (票 K7 D3)。
+       順は 入力群 > 導出群、入力群の中はフォーカス優先、
  *       それ以外は last_run の次から ID 昇順の巡回。
  *       ただし top-level にしか出来ない仕事 (LAUNCH の保留 = launch_pending)
  *       があるときは、他の条件より先に譲る (票 D11-3、PM 受入 2026-09-11)。
@@ -61,11 +63,16 @@ typedef unsigned int   u32;
 #define MA_ERR_NOMEM  (-2)
 #define MA_ERR_FULL   (-3)
 #define MA_ERR_STATE  (-4)
+/* 注入リングが空のまま鍵待ちを起こそうとした (= OS32_ERR_AGAIN、票 K7 指摘 B)。 */
+#define MA_ERR_AGAIN  (-5)
 
 /* アプリの状態 */
 #define MA_FREE     0
 #define MA_RUNNING  1
 #define MA_PARKED   2
+/* 第 2 の park 点 = kbd 待ち (票 K7 D1)。exec/appslot.h の APP_STATE_WAIT_KEY
+ * と同値で、exec_app_state もこの 3 を返す (既存の 0/1/2 の意味は動かない)。 */
+#define MA_WAIT_KEY 3
 
 /* D11 (2026-09-10 の差し戻し): 入力優先を**連続で**適用してよい OP_WAIT の回数。
  * これを超えたら、自分に入力が湧き続けていても譲る。入力の源が人間とは限らない
@@ -125,6 +132,7 @@ typedef struct {
     int   focus;               /* 最前面窓の owner (gshell の front_owner()) */
     int   input_streak;        /* 入力優先で turn を据え置いた連続 OP_WAIT 回数 */
     int   launch_pending;      /* top-level でしか出来ない起動要求が保留中 (D11-3) */
+    u32   kbd_pending;         /* 注入リング (kbd_inject) の未読バイト数 (K7 D2/D3) */
 } MaState;
 
 static void ma_zero(void *p, u32 n) NOINST;
@@ -253,15 +261,40 @@ static void ma_set_ready(MaState *st, int id, int input, int derived)
     a->derived_ready = derived;
 }
 
-/* park 中で、この turn を使っていない ready を数える (ラウンドの残り)。 */
+/* 鍵待ち (票 K7 D3): 止まっている理由が kbd なら、起床の理由は
+ * 「注入リングに未読がある」ことだけ。スロットを持たないので
+ * input_ready / derived_ready はどちらも立たない。 */
+static int ma_key_ready(const MaState *st, const MaApp *a) NOINST;
+static int ma_key_ready(const MaState *st, const MaApp *a)
+{
+    return a->state == MA_WAIT_KEY && st->kbd_pending > 0;
+}
+
+/* 入力群か (D11-1 の 1 群目)。鍵待ちは打鍵そのものなので入力群に入れる。 */
+static int ma_input_group(const MaState *st, const MaApp *a) NOINST;
+static int ma_input_group(const MaState *st, const MaApp *a)
+{
+    if (a->state == MA_WAIT_KEY) return ma_key_ready(st, a);
+    return a->state == MA_PARKED && a->input_ready;
+}
+
+/* 起こせるか (止まっていて、起床の理由がある)。 */
+static int ma_ready(const MaState *st, const MaApp *a) NOINST;
+static int ma_ready(const MaState *st, const MaApp *a)
+{
+    if (a->state == MA_WAIT_KEY) return ma_key_ready(st, a);
+    if (a->state != MA_PARKED) return 0;
+    return a->input_ready || a->derived_ready;
+}
+
+/* 止まっていて、この turn を使っていない ready を数える (ラウンドの残り)。 */
 static int ma_round_remaining(const MaState *st) NOINST;
 static int ma_round_remaining(const MaState *st)
 {
     int i, n = 0;
     for (i = 0; i < MA_MAX_APPS; i++) {
         const MaApp *a = &st->app[i];
-        if (a->state == MA_PARKED && !a->turn_used &&
-            (a->input_ready || a->derived_ready)) n++;
+        if (!a->turn_used && ma_ready(st, a)) n++;
     }
     return n;
 }
@@ -281,11 +314,11 @@ static int ma_pick_group(const MaState *st, int want_input)
         const MaApp *a;
         i = (start + n) % MA_MAX_APPS;
         a = &st->app[i];
-        if (a->state != MA_PARKED || a->turn_used) continue;
+        if (a->turn_used || !ma_ready(st, a)) continue;
         if (want_input) {
-            if (a->input_ready) return MA_ID_MIN + i;
+            if (ma_input_group(st, a)) return MA_ID_MIN + i;
         } else {
-            if (!a->input_ready && a->derived_ready) return MA_ID_MIN + i;
+            if (!ma_input_group(st, a)) return MA_ID_MIN + i;
         }
     }
     return 0;
@@ -310,7 +343,7 @@ static int ma_pick(MaState *st)
     f = st->focus;
     if (f >= MA_ID_MIN && f <= MA_ID_MAX) {
         const MaApp *a = &st->app[f - MA_ID_MIN];
-        if (a->state == MA_PARKED && !a->turn_used && a->input_ready) return f;
+        if (!a->turn_used && ma_input_group(st, a)) return f;
     }
     /* (2) 入力群を巡回 → (3) 空なら導出群を巡回 */
     k = ma_pick_group(st, 1);
@@ -345,8 +378,9 @@ static int ma_should_park(MaState *st)
     /* (a) top-level にしか出来ない仕事 (LAUNCH の保留)。据え置きより先に見る。 */
     if (st->launch_pending) return 1;
     for (i = 0; i < MA_MAX_APPS; i++) {
-        if (st->app[i].state == MA_PARKED &&
-            (st->app[i].input_ready || st->app[i].derived_ready)) other_ready = 1;
+        /* 鍵待ちも「起こせる 1 本」として数える (票 K7 D3)。自分は
+         * MA_RUNNING なので ma_ready が 0 を返す = 数に入らない。 */
+        if (ma_ready(st, &st->app[i])) other_ready = 1;
     }
     if (!other_ready) return 0;
     if (a->input_ready && st->input_streak < MA_INPUT_STREAK_MAX) {
@@ -393,6 +427,25 @@ static int ma_park(MaState *st)
 }
 
 /* ------------------------------------------------------------------ */
+/*  park (第 2 の点) — GUI 中の kbd_getchar で cooked が空 (票 K7 D1)   */
+/*                                                                     */
+/*  OP_WAIT の中である必要は無く、スロットを持たない CUI の入れ子の子   */
+/*  (gui = 0) でも通る。注入リングに文字が残っているなら park しない    */
+/*  (指摘 R1: 続きバイトをそのまま返す)。                               */
+/* ------------------------------------------------------------------ */
+static int ma_park_kbd(MaState *st) NOINST;
+static int ma_park_kbd(MaState *st)
+{
+    MaApp *a = ma_app(st, st->cur);
+    if (!a || a->state != MA_RUNNING) return MA_ERR_STATE;
+    if (st->kbd_pending > 0) return MA_ERR_STATE;   /* 文字があるなら止めない */
+    a->state = MA_WAIT_KEY;
+    st->cur = MA_SHELL_ID;
+    st->owner = MA_SHELL_ID;
+    return MA_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /*  resume — 止めてあるアプリを 1 本だけ起こす (GetMessage 方式)         */
 /*  WM top-level からしか呼べない = 走っているアプリの横取りは無い。     */
 /* ------------------------------------------------------------------ */
@@ -403,7 +456,14 @@ static int ma_resume(MaState *st, int id)
     if (st->cur != MA_SHELL_ID) return MA_ERR_STATE;
     a = ma_app(st, id);
     if (!a) return MA_ERR_INVAL;
-    if (a->state != MA_PARKED) return MA_ERR_STATE;
+    if (a->state == MA_WAIT_KEY) {
+        /* 指摘 B: 文字の取り出しはカーネル側で完結する。空なら印 (WAIT_KEY)
+         * を残したまま AGAIN で拒み、WM にその周を譲らせる。 */
+        if (st->kbd_pending == 0) return MA_ERR_AGAIN;
+        st->kbd_pending--;
+    } else if (a->state != MA_PARKED) {
+        return MA_ERR_STATE;
+    }
     a->state = MA_RUNNING;
     a->in_op_wait = 0;   /* OP_WAIT はここで戻る (戻り値は WM が決める) */
     a->turn_used = 1;              /* このラウンドの turn を使った */
@@ -511,7 +571,8 @@ static int ma_kill(MaState *st, int id)
     if (st->cur != MA_SHELL_ID) return MA_ERR_STATE;
     a = ma_app(st, id);
     if (!a) return MA_ERR_INVAL;
-    if (a->state != MA_PARKED) return MA_ERR_STATE;
+    /* 指摘 D (D5): 鍵待ちのまま畳める (exec/appslot.c の resume/kill と同じ線)。 */
+    if (a->state != MA_PARKED && a->state != MA_WAIT_KEY) return MA_ERR_STATE;
     ma_reclaim(st, id);
     return MA_OK;
 }
@@ -1113,6 +1174,75 @@ static void case_launch_pending_parks(void)
           "17h 保留が続いても D11-3a の上界 (30) を超えない");
 }
 
+
+/* ---- 18. 鍵待ち (WAIT_KEY) が譲り合いに加わる (票 K7 D3 / 指摘 A・C) ----
+ *  端末アプリが `kbd_inject` で積んだバイトが起床の理由になる。鍵待ちで
+ *  止まるのはスロットを持たない CUI の入れ子の子なので input_ready /
+ *  derived_ready はどちらも立たない — **注入リングの未読が唯一の ready
+ *  条件**になる (指摘 C)。D11 の規則 (ラウンドの turn・ID 昇順の巡回・
+ *  入力優先の上限) と上界 (30) は 1 つも変えない。 */
+static void case_wait_key_joins_the_round(void) NOINST;
+static void case_wait_key_joins_the_round(void)
+{
+    MaState st;
+    int id, i;
+
+    ma_init(&st, 4096);
+    ma_start(&st, 100, 1);                 /* ID 2 = GUI アプリ (スロット 0) */
+    ma_gui_call(&st, MA_OP_WAIT);
+    ma_park(&st);
+    id = ma_start(&st, 100, 0);            /* ID 3 = CUI (スロット無し) */
+    check(id == MA_ID_MIN + 1 && st.app[1].slot == -1,
+          "18a スロットを持たない CUI の入れ子の子が立つ");
+
+    /* (1) 第 2 の park 点。OP_WAIT の中に居なくても止まる (D1)。 */
+    check(st.app[1].in_op_wait == 0, "18b OP_WAIT の中には居ない");
+    check(ma_park_kbd(&st) == MA_OK, "18c kbd 待ちは第 2 の park 点");
+    check(st.app[1].state == MA_WAIT_KEY && st.cur == MA_SHELL_ID,
+          "18d park すると WAIT_KEY になり top-level へ戻る");
+
+    /* (2) 注入リングが空なら起こさない。resume も AGAIN で拒む (指摘 B/C)。 */
+    st.kbd_pending = 0;
+    ma_set_ready(&st, 2, 0, 0);
+    check(ma_pick(&st) == 0, "18e pending 0 の WAIT_KEY は選ばれない");
+    check(ma_resume(&st, MA_ID_MIN + 1) == MA_ERR_AGAIN,
+          "18f 空の注入で起こそうとすると AGAIN");
+    check(st.app[1].state == MA_WAIT_KEY, "18g AGAIN でも印は残る");
+    check(st.app[1].turn_used == 0, "18h AGAIN は turn を使わない");
+
+    /* (3) 1 バイト積めば入力群として選ばれ、resume が 1 バイト取り出す。 */
+    st.kbd_pending = 1;
+    check(ma_pick(&st) == MA_ID_MIN + 1, "18i pending > 0 で WAIT_KEY を選ぶ");
+    check(ma_resume(&st, MA_ID_MIN + 1) == MA_OK, "18j 鍵待ちを起こせる");
+    check(st.kbd_pending == 0, "18k resume が 1 バイト取り出す");
+    check(st.app[1].state == MA_RUNNING && st.cur == MA_ID_MIN + 1,
+          "18l resume で走り出す");
+
+    /* (4) 入力群の中の順は D11 のまま (last_run の次から ID 昇順)。 */
+    check(ma_park_kbd(&st) == MA_OK, "18m また鍵待ちに入る");
+    st.kbd_pending = 1;
+    ma_set_ready(&st, 2, 1, 0);            /* ID 2 も入力群 */
+    st.last_run = MA_ID_MIN + 1;           /* 直前は 3 → 巡回は 2 から */
+    st.focus = 0;
+    for (i = 0; i < MA_MAX_APPS; i++) st.app[i].turn_used = 0;
+    check(ma_pick(&st) == MA_ID_MIN, "18n 巡回の順は WAIT_KEY でも変わらない");
+
+    /* (5) 走っているアプリは「鍵待ちが起きられる」を ready として数える。 */
+    ma_resume(&st, MA_ID_MIN);
+    ma_gui_call(&st, MA_OP_WAIT);
+    ma_set_ready(&st, 2, 0, 0);
+    check(ma_should_park(&st) == 1,
+          "18o 鍵待ちが起きられるなら走っている本人は譲る");
+    st.kbd_pending = 0;
+    check(ma_should_park(&st) == 0,
+          "18p 注入が空なら従来どおり譲らない (他に ready が居ない)");
+
+    /* (6) 鍵待ちのまま畳める (D5 / 指摘 D)。 */
+    ma_park(&st);
+    check(ma_kill(&st, MA_ID_MIN + 1) == MA_OK, "18q 鍵待ちを kill で畳める");
+    check(ma_live(&st) == 1, "18r 畳んだのは 1 本だけ");
+}
+
 int main(void) NOINST;
 int main(void)
 {
@@ -1135,6 +1265,7 @@ int main(void)
     case_self_input_cannot_starve();
     case_cross_round_bound();
     case_launch_pending_parks();
+    case_wait_key_joins_the_round();
     if (failures) {
         report("FAILURES\n");
         die(1);

@@ -44,17 +44,26 @@ i32 exec_start(const char *cmdline);
 
 /* park してあるアプリを 1 本だけ起こす。wait_ret は OP_WAIT の戻り値。
  * app_id = また park した / 0 = 終了した / <0 = 起こせなかった。
- * 起こせるのは OP_WAIT で park された印のあるフレームだけ (OS32_ERR_STALE)。 */
+ * 起こせるのは印のあるフレームだけ (OS32_ERR_STALE): OP_WAIT 由来なら
+ * parked_from_wait、kbd 待ち (WAIT_KEY) 由来なら parked_from_kbd。
+ * kbd 待ちの側は wait_ret を**使わず**、注入リングの 1 バイトを EAX に
+ * 入れる。リングが空なら起こさず OS32_ERR_AGAIN (票 K7 §5 の指摘 B)。 */
 i32 exec_resume(i32 app_id, i32 wait_ret);
 
 /* 走っているアプリを OP_WAIT の中で止め、WM へ戻す。成立すれば **戻らない**。
  * 呼べない文脈では OS32_ERR_INVAL を返して普通に戻る。 */
 i32 exec_park(void);
 
+/* 第 2 の park 点 (票 K7 D1): GUI 中に kbd が空のとき、走っている CPL=3 の
+ * アプリを WAIT_KEY で止めて WM へ戻す。drivers/kbd.c から呼ぶ。
+ * 成立すれば **戻らない**。0 = 止められなかった (呼び手は hlt 待ちへ)。 */
+int exec_park_kbd(void);
+
 /* 止めてあるアプリを起こさずに畳む。0 / OS32_ERR_INVAL / OS32_ERR_STALE。 */
 i32 exec_kill(i32 app_id);
 
-/* 0 = 空き / 1 = 走っている / 2 = park 中 / OS32_ERR_INVAL。 */
+/* 0 = 空き / 1 = 走っている / 2 = park 中 (OP_WAIT) / 3 = kbd 待ち /
+ * OS32_ERR_INVAL。3 は K7 の追加で、既存の 0〜2 の意味は動かない。 */
 i32 exec_app_state(i32 app_id);
 
 /* CTRL+STOP (IRQ1 が走っているアプリに立てた要求) を降ろす (KAPI v45、A1)。

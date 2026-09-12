@@ -4,7 +4,7 @@
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS = $(wildcard userland/cmds/*.c)
-C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c, $(wildcard userland/tests/*.c))
+C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/kbd_echo.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c, $(wildcard userland/tests/*.c))
 C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_TESTS) $(C_SYSTEM)
@@ -250,6 +250,8 @@ $(eval $(call DEFINE_TEST,asset_demo,$$(LIBASSET_OBJ),$$(INC_libos32asset),userl
 $(eval $(call DEFINE_TEST,ecs_test,$$(LIBECS_OBJ) $$(LIBMATH_OBJ),$$(INC_libos32ecs),userland/tests))
 $(eval $(call DEFINE_TEST,save_test,$$(LIBSAVE_OBJ),$$(INC_libos32save),userland/tests))
 $(eval $(call DEFINE_TEST,mgx_test,$$(LIBMGX_OBJ),$$(INC_libos32mgx),userland/tests))
+# kbd_echo — KAPI だけで動く CUI キー入力エコー (票 K7 の I1/I2/I3 観測手段)
+$(eval $(call DEFINE_TEST,kbd_echo,,,userland/tests))
 
 # === 標準アプリ ===
 # アプリは apps/Makefile が SDK 経由でビルドする。ここでは定義を持たない。
@@ -422,7 +424,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
+programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
@@ -447,7 +449,7 @@ clean-programs: clean-rust
 .PHONY: programs programs_base game lz4_cmd cdinst bench bench_scale2x faultprobe
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
-.PHONY: input_test
+.PHONY: input_test kbd_echo
 .PHONY: asset_test asset_demo ecs_test text_demo
 .PHONY: inv_test
 .PHONY: save_test

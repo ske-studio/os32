@@ -32,6 +32,9 @@
 #include "loop_dev.h"
 #include "v86.h"
 #include "gui.h"
+#include "con_sink.h"
+#include "kbd_inject.h"
+#include "memory_boot.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
@@ -42,7 +45,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[187];
+volatile u32 kapi_hits[192];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -235,6 +238,11 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* exec_app_state */
     4,  /* snd_focus */
     0,  /* exec_abort_clear */
+    8,  /* con_sink_read */
+    8,  /* con_sink_stat */
+    0,  /* sys_ram_kb */
+    8,  /* kbd_inject */
+    0,  /* kbd_inject_pending */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -427,6 +435,11 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* exec_app_state */
     0x0000,  /* snd_focus */
     0x0000,  /* exec_abort_clear */
+    0x0001,  /* con_sink_read: buf */
+    0x0003,  /* con_sink_stat: pending,dropped */
+    0x0000,  /* sys_ram_kb */
+    0x0001,  /* kbd_inject: utf8 */
+    0x0000,  /* kbd_inject_pending */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1543,5 +1556,35 @@ i32 __cdecl wrap_exec_abort_clear(void)
 {
     KAPI_HIT(186);
     return exec_abort_clear();
+}
+
+i32 __cdecl wrap_con_sink_read(void *buf, u32 cap)
+{
+    KAPI_HIT(187);
+    return con_sink_read(buf, cap);
+}
+
+i32 __cdecl wrap_con_sink_stat(u32 *pending, u32 *dropped)
+{
+    KAPI_HIT(188);
+    return con_sink_stat(pending, dropped);
+}
+
+u32 __cdecl wrap_sys_ram_kb(void)
+{
+    KAPI_HIT(189);
+    return memory_boot_ram_kb();
+}
+
+i32 __cdecl wrap_kbd_inject(const u8 *utf8, u32 len)
+{
+    KAPI_HIT(190);
+    return kbd_inject(utf8, len);
+}
+
+u32 __cdecl wrap_kbd_inject_pending(void)
+{
+    KAPI_HIT(191);
+    return kbd_inject_pending();
 }
 

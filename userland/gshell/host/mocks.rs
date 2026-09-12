@@ -255,6 +255,10 @@ pub static KILLS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 pub static SND_FOCUS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// `exec_abort_clear()` が呼ばれた回数 (KAPI v45、決裁 A1)。
 pub static ABORT_CLEARS: AtomicUsize = AtomicUsize::new(0);
+/// `kbd_inject_pending()` が返す未読バイト数 (KAPI v47、票 K7 指摘 C)。
+pub static KBD_PENDING: AtomicUsize = AtomicUsize::new(0);
+/// `exec_app_state(app_id)` が返す状態。添字 = app_id、既定は 2 (`PARKED`)。
+pub static APP_STATE: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
 /// 中毒 (panic 中に掴んでいた) した Mutex でも読めるようにする。検査が
 /// `assert!(*X.lock().unwrap() == ..)` で落ちると次の試験まで巻き添えになる。
@@ -337,6 +341,27 @@ unsafe extern "C" fn exec_abort_clear() -> i32 {
     ABORT_CLEARS.fetch_add(1, Ordering::SeqCst);
     0
 }
+/* KAPI v47 (K7)。注入リングはカーネルの持ち物なので、ここは試験が置いた
+ * 「未読バイト数」と「その ID の状態」をそのまま返すだけ — 注入と取り出しの
+ * 実体は `tools/tests/kbd_inject_host.c` が実物で検査済み。 */
+unsafe extern "C" fn kbd_inject_pending() -> u32 {
+    KBD_PENDING.load(Ordering::SeqCst) as u32
+}
+unsafe extern "C" fn exec_app_state(app_id: i32) -> i32 {
+    lk(&APP_STATE).get(app_id as usize).copied().unwrap_or(2)
+}
+/// 注入リングの未読バイト数を置く (0 = 空)。
+pub fn set_kbd_pending(n: u32) {
+    KBD_PENDING.store(n as usize, Ordering::SeqCst);
+}
+/// `exec_app_state(app_id)` の答えを置く (3 = `APP_STATE_WAIT_KEY`)。
+pub fn set_app_state(app_id: i32, state: i32) {
+    let mut v = lk(&APP_STATE);
+    if v.len() <= app_id as usize {
+        v.resize(app_id as usize + 1, 2);
+    }
+    v[app_id as usize] = state;
+}
 
 pub fn init() {
     let mut a = os32api::mock_api();
@@ -366,6 +391,8 @@ pub fn init() {
     a.exec_kill = exec_kill;
     a.exec_abort_clear = exec_abort_clear;
     a.snd_focus = snd_focus;
+    a.kbd_inject_pending = kbd_inject_pending;
+    a.exec_app_state = exec_app_state;
     lk(&RAWKEYS).clear();
     lk(&IME_SCRIPT).clear();
     GFX_INITS.store(0, Ordering::SeqCst);
@@ -378,6 +405,8 @@ pub fn init() {
     lk(&KILLS).clear();
     lk(&SND_FOCUS).clear();
     ABORT_CLEARS.store(0, Ordering::SeqCst);
+    KBD_PENDING.store(0, Ordering::SeqCst);
+    lk(&APP_STATE).clear();
     crate::multiapp::reset();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);
