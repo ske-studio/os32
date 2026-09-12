@@ -311,8 +311,8 @@ static void fl_action_parent(void)
 static void fl_exec_program(const char *cmdline)
 {
     g_api->tvram_clear();
-    g_api->exec_run(cmdline);
-    g_api->gfx_shutdown();
+    sh_launch(cmdline);
+    sh_gfx_restore();
     fl_scan_dir();
 }
 

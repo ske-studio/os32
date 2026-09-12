@@ -65,7 +65,7 @@
 | S4 | 拒否 | `sh> os32gui` / `filer` / `rshell` → `sh: cui only` |
 | S5 | 終了 | `exit` で `sh` が終わり端末のプロンプト `> ` に戻る。接続モードの ESC は `launch_cancel` で sh (と孫) を畳んでからプロンプトへ (D9)。その後の起動要求が `ERR_FULL` にならない |
 | S6 | CTRL+STOP | 端末にフォーカスがある状態で子が走っている最中に CTRL+STOP → 連鎖の末尾 (子) だけが畳まれ `sh> ` に戻る (D8)。もう 1 回で sh が畳まれ端末のプロンプトへ |
-| S7 | 回帰 | regress 6 本、CUI の `shell.bin` は変更前後で **SHA-256 一致** (同一ツールチェーン、双方 clean build)、`SHELL_AS_APP` ビルドの `exec_run` 参照 0 件 (nm)、Start → CUI mode (sh と子が生きていても D8 で畳まれる) |
+| S7 | 回帰 | regress 6 本、CUI の常駐 `shell.bin` は変更前後で**同一** — `cmd_ver` が `__DATE__` / `__TIME__` を埋めるため SHA-256 は再現しないので、同一フラグの `SHELL_OBJ` 12 本のうち `cmd_base.o` 以外がバイト一致し、`cmd_base.o` の差が `__TIME__` 文字列だけであること (S の実装メモ、着地時に PM が clean build で再確認)。`SHELL_AS_APP` ビルドの `exec_run` 参照 0 件、Start → CUI mode (sh と子が生きていても D8 で畳まれる) |
 
 ## 3. レビューで見てほしい点 (第 6 版)
 
@@ -167,6 +167,15 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 `launch_poll` の不一致は INVAL のまま (§1a は cancel だけ STALE と規定)。
 
 **往復 2/3 (`dc8405e`): Approve** — 3 件の修正を確認、新たな blocker なし。non-blocker は前回と同じ 3 点。
+## 13. 実装メモ (S、2026-09-13)
+
+- D2 は全て `#ifdef SHELL_AS_APP`: (a) `shell_rshell_init` と `shell_run` の `serial_init`+`rshell`、(b) `run_cmd_internal` の頭で `os32gui`/`rshell`/`filer` を `sh: cui only`、(c) `.sh_history` (`HIST_FILE_ROOM` も広げた — 旧 `max - 12` では 1 バイト溢れる)、(d) 内蔵 `exit` が `sh_exit_flag` を立て `shell_run` が抜ける、(e) `sh> `。§10-3 の行入力は `kbd_getkey` (`ime_getkey` と同じ u16 形式なので行編集の変換は不要)。
+- D3a: `exec_run` は `shell.h` の `#define sh_launch(c) (g_api->exec_run(c))` **1 か所だけ**になり `grep exec_run userland/shell/*.c` は 0 件。`SHELL_AS_APP` の実体は `userland/shell/sh_launch.inc` (`.c` にすると wildcard の `SHELL_SRC` 経由で常駐にも空の `.o` が混ざる)。
+- 票に無い判断 2 つ: ①`gfx_shutdown` を `sh_gfx_restore()` にして `SHELL_AS_APP` では**呼ばない** (所有者検査が無く、CPL=3 の sh が呼ぶと GUI の表示ごと止まる)。②`FAILED` が `NOT_FOUND`/`GENERAL` のときは印字しない (PATH 候補の数だけ同じ行が出る)。
+- 常駐の回帰: `dee101b` の `userland/shell/` を同じフラグでコンパイルして `.o` を突合、12 本中 11 本バイト一致、`cmd_base.o` の差は `__TIME__` の 1〜2 バイトのみ。**`cmd_ver` が `__DATE__`/`__TIME__` を埋めるので `shell.bin` の SHA-256 はそもそも再現しない** — S7 はここを除いた比較に。
+- 未実施: `make` 全般・リンク・配備・実機 ([V4])。通したのは両フラグの単体コンパイル、`check-sh-launch-host` (新規、`check`/`.PHONY` 登録、28 項目 ALL PASS、記録 `tools/tests/t9_tdd.md`)、`check_constraints.py`。
+- 残る穴 (W/A へ): ①`try_exec` 2b は相対名 (`ls.bin`) を `launch_req` へ渡すので、`run_program` が要求者でなく WM の cwd で解決すると当たらない。②リダイレクト/パイプは sh 自身の FD に掛かるため `sh> ls > f` は外部コマンドに効かない。③`exit` の印は行ループ末尾でしか見ないので `run` 中のスクリプトは最後まで流れる。
+
 ## 14. 実装メモ (W、2026-09-13)
 
 - 起動口は単独ループ (`lib.rs` `standalone_loop`) の `session_handoff` の**直後**、

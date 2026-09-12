@@ -8,6 +8,11 @@
 
 KernelAPI *g_api;
 
+#ifdef SHELL_AS_APP
+/* D2(d): 内蔵 `exit` が立て、shell_run() の外側ループが見て抜ける */
+int sh_exit_flag = 0;
+#endif
+
 static ShellCmd g_cmds[MAX_CMDS];
 static int g_cmd_count = 0;
 
@@ -35,7 +40,11 @@ int main(int argc, char **argv, KernelAPI *api)
     shell_cmd_dir_init();
     shell_cmd_mnt_init();
     shell_cmd_sys_init();
+#ifndef SHELL_AS_APP
+    /* D2(a): sh.bin はシリアル / rshell を持たない。登録もしないので
+     * `serial` `terminal` `rshell` `send` … は最初から表に載らない。 */
     shell_rshell_init();
+#endif
     shell_cmd_env_init();
     shell_cmd_script_init();
     shell_cmd_filer_init();
@@ -339,8 +348,14 @@ static int try_exec(const char *bin_path, int argc, char **argv)
     }
     *p = '\0';
 
-    return g_api->exec_run(cmd_buf);
+    return sh_launch(cmd_buf);
 }
+
+#ifdef SHELL_AS_APP
+/* sh_launch の実体。ホスト TDD が同じソースを #include できるように
+ * 別ファイルにしてある (tools/tests/sh_launch_host.c)。 */
+#include "sh_launch.inc"
+#endif /* SHELL_AS_APP */
 
 /* ======================================================================== */
 /*  try_exec_from_path — PATH環境変数を走査してコマンドを検索・実行           */
@@ -382,9 +397,27 @@ static int try_exec_from_path(const char *name_buf, int argc, char **argv)
     return EXEC_ERR_NOT_FOUND;
 }
 
+#ifdef SHELL_AS_APP
+/* D2(b): カーソル位置に依存する TUI / シリアル前提のコマンドは sh.bin では
+ * 動かせない。内蔵コマンドの表を引く手前で弾く。`filer` の起動経路
+ * (fl_exec_program) もここで到達しなくなる。 */
+static int sh_is_cui_only(const char *name)
+{
+    return str_eq(name, "os32gui") || str_eq(name, "rshell") ||
+           str_eq(name, "filer");
+}
+#endif
+
 static void run_cmd_internal(int argc, char **argv) {
     int j, rc;
     char name_buf[PATH_MAX_LEN];
+
+#ifdef SHELL_AS_APP
+    if (sh_is_cui_only(argv[0])) {
+        g_api->kprintf(ATTR_RED, "%s", "sh: cui only\n");
+        return;
+    }
+#endif
 
     if (argc > 1 && (str_eq(argv[1], "-h") || str_eq(argv[1], "--help") || str_eq(argv[1], "/?"))) {
         shell_print_help(argv[0]);
@@ -418,7 +451,7 @@ static void run_cmd_internal(int argc, char **argv) {
     /* 2a. パスにスラッシュが含まれる場合 → 直接実行 */
     if (has_slash(argv[0])) {
         rc = try_exec(name_buf, argc, argv);
-        g_api->gfx_shutdown();
+        sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
             g_api->kprintf(ATTR_GREEN, "%s", "\n");
         } else if (rc == EXEC_ERR_FAULT) {
@@ -432,7 +465,7 @@ static void run_cmd_internal(int argc, char **argv) {
     /* 2b. カレントディレクトリで試行 */
     rc = try_exec(name_buf, argc, argv);
     if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-        g_api->gfx_shutdown();
+        sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
             g_api->kprintf(ATTR_GREEN, "%s", "\n");
         } else if (rc == EXEC_ERR_FAULT) {
@@ -444,7 +477,7 @@ static void run_cmd_internal(int argc, char **argv) {
     /* 2c. PATH内の各ディレクトリで試行 */
     rc = try_exec_from_path(name_buf, argc, argv);
     if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-        g_api->gfx_shutdown();
+        sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
             g_api->kprintf(ATTR_GREEN, "%s", "\n");
         } else if (rc == EXEC_ERR_FAULT) {

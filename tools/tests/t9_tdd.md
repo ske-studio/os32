@@ -215,3 +215,25 @@ D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順
 残してある (ケース 19p)。`multiapp.rs` の `pick_poll` とはこの 1 点だけ 1 対 1 で
 なくなった — 模型側に tick を持ち込むと K レーンが着地させた
 `multiapp_impl_host.c` のケース 19 / 22 / 23 を巻き込むため。
+---
+
+# T9-S ホスト TDD の記録 (sh.bin の起動待ち)
+
+票: [TASK_T9_sh.md](../../docs/tasks/gui/v13/TASK_T9_sh.md) §1 D3a。
+実行: `make check-sh-launch-host` (= `python3 -B tools/tests/test_sh_launch.py`)。
+
+`tools/tests/sh_launch_host.c` が `userland/shell/sh_launch.inc` を**そのまま**
+`#include` し、KernelAPI の `launch_req` / `launch_poll` / `sys_yield` / `kprintf`
+だけを差し替える。見るのは 4 経路と 1 つの禁止:
+
+| 経路 | 台本 | 期待 |
+|---|---|---|
+| DONE | PENDING → TAKEN → RUNNING → DONE | `0`、poll ごとに 1 回譲る、印字なし |
+| FAILED | `0x300 + 3` (NOT_FOUND) / `0x300 + 4` (NOMEM) | `-3` は黙って返す (PATH 走査が続く)、`-4` は `sh: <名>: launch failed (-4)` |
+| STALE | `launch_poll` が `-11` | 抜けて `-1`、`launch_poll failed (-11)` |
+| FULL | `launch_req` が `-13` | `-1`、`sh: ls: busy`、poll も yield もしない |
+| 禁止 | `kbd_getchar` / `kbd_trygetchar` / `ime_getkey` に印 | 全経路で 1 度も呼ばれない |
+
+`launch_req` のその他の失敗 (`-9`) も `launch_req failed (rc)` で 1 本見ている。
+実行結果は全 28 項目 `ALL PASS`、`TARGET i386-elf GNU89 -Werror COMPILE PASS`。
+実機・エミュレータ・`make` は**未実施** ([V4])。

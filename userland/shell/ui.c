@@ -7,6 +7,34 @@
 
 #define HIST_SIZE    16
 
+/* ------------------------------------------------------------------------ */
+/*  行入力のキー源 (票 §10 non-blocker 3)                                    */
+/*                                                                          */
+/*  常駐は FEP を通す ime_getkey。sh.bin は端末の子なので FEP の確定は        */
+/*  gshell 側で済んでおり、二重に通すと確定済み UTF-8 をもう一度食う。        */
+/*  kbd_getkey は同じ u16 形式 (上位=スキャンコード / 下位=ASCII) を返し、    */
+/*  GUI 中は注入リングの 1 バイト (スキャンコード 0) を WAIT_KEY で park      */
+/*  しながら渡す — UTF-8 の後続バイトも同じ経路なので下の行編集はそのまま     */
+/*  動く (矢印などスキャンコードを要する枝は端末経由では最初から来ない)。     */
+/*  常駐側の展開は以前と同一トークン。                                        */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+#define sh_getkey() (g_api->kbd_getkey())
+#else
+#define sh_getkey() (g_api->ime_getkey())
+#endif
+
+/* 履歴ファイル名。常駐の ~/.history を sh.bin が壊さないよう別名 (D2(c))。
+ * HIST_FILE_ROOM は hist_build_path が HOME をコピーするときに残す余白
+ * ("/" + 名前 + NUL) で、名前を長くしたら必ず一緒に広げること。 */
+#ifdef SHELL_AS_APP
+#define HIST_FILE_NAME  ".sh_history"
+#define HIST_FILE_ROOM  16
+#else
+#define HIST_FILE_NAME  ".history"
+#define HIST_FILE_ROOM  12
+#endif
+
 static char hist_buf[HIST_SIZE][HIST_LINE_MAX];
 static int  hist_count = 0;
 static int  hist_idx   = 0;
@@ -28,10 +56,15 @@ static void hist_add(const char *s) {
 }
 
 static void show_prompt(void) {
+#ifdef SHELL_AS_APP
+    /* D2(e): 常駐 (OS32:/path$) と見分けが付くように短い固定プロンプト */
+    g_api->kprintf(ATTR_WHITE, "%s", "sh> ");
+#else
     g_api->kprintf(ATTR_GREEN, "OS32");
     g_api->kprintf(ATTR_GREEN, ":");
     g_api->kprintf(ATTR_CYAN, "%s", g_api->sys_getcwd());
     g_api->kprintf(ATTR_WHITE, "$ ");
+#endif
 }
 
 static void redraw_line(const char *buf, int len, int cursor) {
@@ -355,9 +388,9 @@ static int hist_build_path(char *path, int max)
 
     if (!home) return -1;
     h = home;
-    while (*h && pi < max - 12) path[pi++] = *h++;
+    while (*h && pi < max - HIST_FILE_ROOM) path[pi++] = *h++;
     if (pi > 0 && path[pi - 1] != '/') path[pi++] = '/';
-    fn = ".history";
+    fn = HIST_FILE_NAME;
     while (*fn) path[pi++] = *fn++;
     path[pi] = '\0';
     return 0;
@@ -482,9 +515,13 @@ void shell_run(void) {
     /* 履歴ファイル読み込み */
     hist_load();
 
-    /* 初期化時に自動シリアル＆rshell開始 */
+#ifndef SHELL_AS_APP
+    /* 初期化時に自動シリアル＆rshell開始
+     * D2(a): sh.bin では呼ばない。シリアルを初期化すると rshell_active の
+     * タイムアウト (kbd_getchar が一定時間でスペースを返す) まで巻き込む。 */
     g_api->serial_init(SYS_SERIAL_BAUD);
     execute_command("rshell");
+#endif
 
     for (;;) {
         show_prompt();
@@ -492,7 +529,7 @@ void shell_run(void) {
         hist_idx = hist_count;
 
         for (;;) {
-            key = g_api->ime_getkey();
+            key = sh_getkey();
 
             if ((key & 0xFF) == 0x0D) { g_api->shell_putchar('\n', ATTR_WHITE); break; }
             if ((key & 0xFF) == 0x08) {
@@ -570,7 +607,7 @@ void shell_run(void) {
                         else expect = 1;
                         /* 後続バイトを読み取る */
                         while (utf8_len < expect) {
-                            int nk = g_api->ime_getkey();
+                            int nk = sh_getkey();
                             u8 nb = (u8)(nk & 0xFF);
                             if ((nb & 0xC0) != 0x80) break;
                             utf8_tmp[utf8_len++] = (char)nb;
@@ -617,5 +654,12 @@ void shell_run(void) {
         if (cmd_len > 0) hist_add(cmd_buf);
         execute_command(cmd_buf);
         if (hist_dirty) hist_save();
+#ifdef SHELL_AS_APP
+        /* D2(d): `exit` が立てた印。ここで抜けると main が 0 を返して
+         * sh.bin が終わり、端末は launch_poll の DONE でプロンプトへ戻る。
+         * 常駐シェルには exit を登録していない (抜けても起動ループが
+         * すぐ載せ直すだけなので意味が無い)。 */
+        if (sh_exit_flag) break;
+#endif
     }
 }

@@ -140,6 +140,16 @@ static void cmd_time(int argc, char **argv)
                    elapsed_ms / 1000, elapsed_ms % 1000);
 }
 
+#ifdef SHELL_AS_APP
+/* exit — sh.bin (端末の子) を終わらせる (D2(d))。常駐シェルには登録しない:
+ * 抜けてもカーネルの起動ループが同じものを載せ直すだけで意味が無い。 */
+static void cmd_exit(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    sh_exit_flag = 1;
+}
+#endif
+
 /* 登録用テーブル */
 static const ShellCmd base_cmds[] = {
     { "help",   cmd_help,   "[cmd]", "Show help" },
@@ -154,6 +164,9 @@ static const ShellCmd base_cmds[] = {
     { "uptime", cmd_uptime, "",      "Show sys uptime" },
     { "np2",    cmd_np2,    "",      "Detect NP21/W emulator" },
     { "time",   cmd_time,   "CMD",   "Measure command time" },
+#ifdef SHELL_AS_APP
+    { "exit",   cmd_exit,   "",      "Leave this shell" },
+#endif
     { (const char *)0, 0, 0, 0 }
 };
 

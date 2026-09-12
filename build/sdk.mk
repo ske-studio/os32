@@ -185,9 +185,17 @@ check-kbd-inject-host:
 check-launch-host:
 	python3 -B tools/tests/test_launch.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-multiapp-model-host
+# userland/shell/sh_launch.inc の起動待ち (票 T9 D3a)。実物のソースを
+# tools/tests/sh_launch_host.c がそのまま #include し、KernelAPI の
+# launch_req / launch_poll / sys_yield / kprintf を差し替えて DONE / FAILED /
+# STALE / FULL の 4 経路と「待ちの間 kbd_* / ime_* を呼ばない」を見る。
+# 同じソースが i386-elf-gcc -Werror でも通ることも別に見る。記録は t9_tdd.md。
+check-sh-launch-host:
+	python3 -B tools/tests/test_sh_launch.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-multiapp-model-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-multiapp-model-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-sh-launch-host check-multiapp-model-host check

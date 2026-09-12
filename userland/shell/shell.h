@@ -81,6 +81,41 @@ int  env_expand(const char *src, char *dst, int max);
 /* PATH検索 (main.c) */
 const char *shell_get_path(void);
 
+/* ------------------------------------------------------------------------ */
+/*  sh_launch — 外部プログラムの唯一の起動口 (票 T9 D3a)                     */
+/*                                                                          */
+/*  常駐 shell.bin (SHELL_AS_APP 未定義) は従来どおり入れ子 exec_run。        */
+/*  マクロなので展開後のトークンは以前の g_api->exec_run(...) と同一で、      */
+/*  常駐のコード生成は 1 バイトも変わらない (受入 S7 の SHA-256 一致)。       */
+/*                                                                          */
+/*  sh.bin (SHELL_AS_APP) は入れ子 exec_run を使えない — その子は park でき   */
+/*  ず協調型 GUI 全体が止まる (K5b D9-8)。代わりにカーネルの要求表に載せ、     */
+/*  WM に起動してもらって sys_yield で譲りながら launch_poll で待つ。         */
+/*  実体は sh_launch.inc (main.c が #include)。exec_run への参照はこのヘッダ  */
+/*  の #else 側 1 か所だけ。                                                  */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+int sh_launch(const char *cmdline);
+/* exit コマンド (D2(d)) が立てる。shell_run() の外側ループが見て抜ける。 */
+extern int sh_exit_flag;
+#else
+#define sh_launch(cmdline) (g_api->exec_run(cmdline))
+#endif
+
+/* ------------------------------------------------------------------------ */
+/*  sh_gfx_restore — 子がグラフィクスを使った後の後始末                      */
+/*                                                                          */
+/*  CUI では子が VRAM を握ったまま戻ることがあるので表示をテキストへ戻す。   */
+/*  GUI 中に画面を持っているのは WM で、CPL=3 の sh.bin が gfx_shutdown を    */
+/*  呼ぶと (所有者検査が無いので) GUI ごと表示が止まる。だから sh.bin では    */
+/*  何もしない。常駐側の展開は以前の g_api->gfx_shutdown() と同一トークン。  */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+#define sh_gfx_restore() ((void)0)
+#else
+#define sh_gfx_restore() (g_api->gfx_shutdown())
+#endif
+
 /* スクリプトエンジン (cmd_script.c) */
 int script_source_file(const char *path);
 
