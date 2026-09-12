@@ -352,9 +352,11 @@ static int try_exec(const char *bin_path, int argc, char **argv)
 }
 
 #ifdef SHELL_AS_APP
-/* sh_launch の実体。ホスト TDD が同じソースを #include できるように
- * 別ファイルにしてある (tools/tests/sh_launch_host.c)。 */
+/* sh_launch / パイプバッファの実体。ホスト TDD が同じソースを #include
+ * できるように別ファイルにしてある (tools/tests/sh_launch_host.c,
+ * tools/tests/sh_shell_host.c)。 */
 #include "sh_launch.inc"
+#include "sh_pipe.inc"
 #endif /* SHELL_AS_APP */
 
 /* ======================================================================== */
@@ -685,6 +687,32 @@ static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_
     return count;
 }
 
+#ifdef SHELL_AS_APP
+/* パイプの 1 段が内蔵コマンド (または .bat / .sh スクリプト) か。
+ * 外部コマンドは要求表経由で WM が起こす**別アプリ**になるので、sh 自身の
+ * FD に掛けたリダイレクトは届かない。黙って壊れるより行ごと断る。
+ * seg は split_pipeline が前後の空白を落とした 1 段ぶん。 */
+static int sh_stage_is_builtin(const char *seg)
+{
+    char name[PATH_MAX_LEN];
+    int n = 0;
+    int j;
+
+    while (*seg == ' ') seg++;
+    while (*seg && *seg != ' ' && *seg != '<' && *seg != '>' &&
+           n < PATH_MAX_LEN - 1) {
+        name[n++] = *seg++;
+    }
+    name[n] = '\0';
+    if (n == 0) return 1;            /* 空段は execute_single が黙って捨てる */
+    if (has_ext(name, ".bat") || has_ext(name, ".sh")) return 1;
+    for (j = 0; j < g_cmd_count; j++) {
+        if (str_eq(name, g_cmds[j].name)) return 1;
+    }
+    return 0;
+}
+#endif
+
 /* ======================================================================== */
 /*  公開API: execute_command                                                 */
 /* ======================================================================== */
@@ -735,6 +763,18 @@ void execute_command(const char *cmd)
             return;
         }
 
+#ifdef SHELL_AS_APP
+        /* 外部段が 1 つでもあれば、その段の出力は sh の FD を通らない */
+        for (i = 0; i < stage_count; i++) {
+            if (!sh_stage_is_builtin(seg_buf + i * CMD_BUF_SIZE)) {
+                g_api->kprintf(ATTR_RED, "%s",
+                               "sh: pipe to external command is not supported\n");
+                g_api->mem_free(seg_buf);
+                return;
+            }
+        }
+#endif
+
         /* バッファID: 交互使用 (0, 1, 0, 1, ...) */
         prev_buf = -1;
         {
@@ -744,14 +784,14 @@ void execute_command(const char *cmd)
             int num_alloc = (stage_count > 2) ? 2 : 1;
             int ai;
             for (ai = 0; ai < num_alloc; ai++) {
-                alloc_buf[ai] = g_api->sys_pipe_alloc();
+                alloc_buf[ai] = sh_pipe_alloc();
                 if (alloc_buf[ai] < 0) {
                     g_api->kprintf(ATTR_RED, "%s", "pipe: buffer alloc failed\n");
                     /* 確保済みを解放 */
                     {
                         int aj;
                         for (aj = 0; aj < ai; aj++) {
-                            g_api->sys_pipe_free(alloc_buf[aj]);
+                            sh_pipe_free(alloc_buf[aj]);
                         }
                     }
                     g_api->mem_free(seg_buf);
@@ -765,7 +805,7 @@ void execute_command(const char *cmd)
 
                 /* stdin のリダイレクト (最初以外) */
                 if (!is_first && prev_buf >= 0) {
-                    u8 *buf = g_api->sys_pipe_get_buf(prev_buf);
+                    u8 *buf = sh_pipe_get_buf(prev_buf);
                     /* バッファが消えていたら黙って続けない。以前はここが NULL
                      * (前段の exec_exit がパイプを回収していた) でも続行し、
                      * 次段が stdin をキーボードから読んでハングした */
@@ -779,7 +819,7 @@ void execute_command(const char *cmd)
                 if (!is_last) {
                     cur_buf = alloc_buf[i % num_alloc];
                     {
-                        u8 *buf = g_api->sys_pipe_get_buf(cur_buf);
+                        u8 *buf = sh_pipe_get_buf(cur_buf);
                         if (!buf || g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0) < 0) {
                             g_api->kprintf(ATTR_RED, "%s", "pipe: stdout buffer lost\n");
                             reset_all_redirects();
@@ -807,7 +847,7 @@ void execute_command(const char *cmd)
 
             /* パイプバッファを解放 */
             for (ai = 0; ai < num_alloc; ai++) {
-                g_api->sys_pipe_free(alloc_buf[ai]);
+                sh_pipe_free(alloc_buf[ai]);
             }
         }
         g_api->mem_free(seg_buf);

@@ -103,6 +103,25 @@ extern int sh_exit_flag;
 #endif
 
 /* ------------------------------------------------------------------------ */
+/*  パイプバッファの出どころ (Codex 往復 5 の blocker)                       */
+/*                                                                          */
+/*  常駐 (CPL=0) はカーネルの `sys_pipe_*` をそのまま使う — マクロなので      */
+/*  展開後のトークンは以前と同一で、常駐のコード生成は変わらない。           */
+/*  sh.bin (CPL=3) はカーネル帯のポインタを `sys_redirect_fd_buf` へ渡せない */
+/*  (`ring3_ptr_ok` に落ちて fault kill) ので、sh 自身の .bss から配る。      */
+/*  実体は sh_pipe.inc (main.c が #include)。                                */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+int  sh_pipe_alloc(void);
+u8  *sh_pipe_get_buf(int slot);
+void sh_pipe_free(int slot);
+#else
+#define sh_pipe_alloc()        (g_api->sys_pipe_alloc())
+#define sh_pipe_get_buf(slot)  (g_api->sys_pipe_get_buf(slot))
+#define sh_pipe_free(slot)     (g_api->sys_pipe_free(slot))
+#endif
+
+/* ------------------------------------------------------------------------ */
 /*  sh_gfx_restore — 子がグラフィクスを使った後の後始末                      */
 /*                                                                          */
 /*  CUI では子が VRAM を握ったまま戻ることがあるので表示をテキストへ戻す。   */

@@ -259,6 +259,7 @@ static int prev_draw_len = 0;
 static void show_prompt(void) { out_str("sh> "); }
 
 #include "../../userland/shell/sh_redraw.inc"
+#include "../../userland/shell/sh_pipe.inc"
 
 /* ---- 実物のスクリプトエンジン ------------------------------------------ */
 
@@ -484,26 +485,75 @@ static void case_backspace_erases(void)
 }
 
 /* ========================================================================
- *  5. source 中の exit (往復 1 の blocker 2 / D2(d))
+ *  5. パイプバッファは sh 自身の .bss から配る (往復 5 の blocker)
+ *
+ *  `sys_pipe_get_buf()` が返すのはカーネル帯 (fs/pipe_buffer.c の kmalloc)
+ *  で、それを `sys_redirect_fd_buf()` へ渡すと `ring3_ptr_ok` に落ちて
+ *  CPL=3 の sh が畳まれる (`sh> echo a | cat`)。返るポインタが sh の静的
+ *  配列の中にあること、解放後に再確保できること、上限を超えたら失敗する
+ *  ことを見る。
+ * ======================================================================== */
+static void case_pipe_buffers(void)
+{
+    int a, b, c;
+    u8 *pa, *pb;
+    u8 *pool_lo = &sh_pipe_pool[0][0];
+    u8 *pool_hi = &sh_pipe_pool[SH_PIPE_SLOTS - 1][PIPE_BUF_SIZE - 1];
+
+    report("5 パイプバッファは sh の .bss から (カーネル帯を渡さない)\n");
+
+    a = sh_pipe_alloc();
+    b = sh_pipe_alloc();
+    check(a >= 0 && b >= 0 && a != b, "5a 2 本を別々に確保できる");
+
+    pa = sh_pipe_get_buf(a);
+    pb = sh_pipe_get_buf(b);
+    check(pa >= pool_lo && pa <= pool_hi,
+                                      "5b 返るのは sh の静的配列の中");
+    check(pb >= pool_lo && pb <= pool_hi && pb != pa,
+                                      "5c 2 本目も配列内で別の番地");
+
+    /* 上限超過 */
+    c = sh_pipe_alloc();
+    check(c < 0,                      "5d 上限を超えたら負を返す");
+    check(sh_pipe_get_buf(c) == (u8 *)0,
+                                      "5e 無効なスロットは NULL");
+
+    /* 解放後に再確保できる */
+    sh_pipe_free(a);
+    check(sh_pipe_get_buf(a) == (u8 *)0, "5f 解放した枠は NULL になる");
+    c = sh_pipe_alloc();
+    check(c == a && sh_pipe_get_buf(c) == pa,
+                                      "5g 解放後に同じ枠を再確保できる");
+
+    sh_pipe_free(b);
+    sh_pipe_free(c);
+    check(sh_pipe_alloc() >= 0,       "5h 全部返せばまた確保できる");
+    sh_pipe_free(0);
+    sh_pipe_free(1);
+}
+
+/* ========================================================================
+ *  6. source 中の exit (往復 1 の blocker 2 / D2(d))
  * ======================================================================== */
 static void case_exit_stops_rest(void)
 {
-    report("5 source: exit の次の行は走らない\n");
+    report("6 source: exit の次の行は走らない\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
     out_reset();
     file_add("/a.sh", "echo 1\nexit\necho 2\n");
 
-    check(script_source_file("/a.sh") == 0, "5a source は 0 で戻る");
-    check(trace_is("echo 1|exit"),          "5b exit の後は実行しない");
-    check(sh_exit_flag == 1,                "5c 印は立ったまま (shell_run の入口が見る)");
-    check(g_open_leak == 0,                 "5d FD を開いたままにしない");
+    check(script_source_file("/a.sh") == 0, "6a source は 0 で戻る");
+    check(trace_is("echo 1|exit"),          "6b exit の後は実行しない");
+    check(sh_exit_flag == 1,                "6c 印は立ったまま (shell_run の入口が見る)");
+    check(g_open_leak == 0,                 "6d FD を開いたままにしない");
 }
 
 static void case_exit_breaks_goto_loop(void)
 {
-    report("6 source: goto の無限ループでも exit で抜ける\n");
+    report("7 source: goto の無限ループでも exit で抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -511,13 +561,13 @@ static void case_exit_breaks_goto_loop(void)
     /* exit が無ければ :loop <- goto loop で永久に回る */
     file_add("/b.sh", "echo a\nexit\n:loop\ngoto loop\n");
 
-    check(script_source_file("/b.sh") == 0, "6a source は戻ってくる");
-    check(trace_is("echo a|exit"),          "6b ラベルも goto も走らない");
+    check(script_source_file("/b.sh") == 0, "7a source は戻ってくる");
+    check(trace_is("echo a|exit"),          "7b ラベルも goto も走らない");
 }
 
 static void case_exit_unwinds_nested(void)
 {
-    report("7 source: ネストした source の外側も抜ける\n");
+    report("8 source: ネストした source の外側も抜ける\n");
     sh_exit_flag = 0;
     files_reset();
     trace_reset();
@@ -525,9 +575,9 @@ static void case_exit_unwinds_nested(void)
     file_add("/outer.sh", "source /inner.sh\necho outer2\n");
     file_add("/inner.sh", "exit\necho inner2\n");
 
-    check(script_source_file("/outer.sh") == 0, "7a 外側の source も 0 で戻る");
-    check(trace_is("source /inner.sh|exit"),    "7b 内側も外側も後続を止める");
-    check(g_open_leak == 0,                     "7c どの段でも FD を残さない");
+    check(script_source_file("/outer.sh") == 0, "8a 外側の source も 0 で戻る");
+    check(trace_is("source /inner.sh|exit"),    "8b 内側も外側も後続を止める");
+    check(g_open_leak == 0,                     "8c どの段でも FD を残さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -539,6 +589,7 @@ void _start(void)
     case_redraw_rebuild();
     case_redraw_cursor_not_at_end();
     case_backspace_erases();
+    case_pipe_buffers();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();
     case_exit_unwinds_nested();

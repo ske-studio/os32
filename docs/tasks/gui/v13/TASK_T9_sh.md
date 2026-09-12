@@ -186,6 +186,8 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 ### 13b. 実装レビュー (往復 2/3) の修正 (S、2026-09-13)
 
 - blocker 1: `exit` の印を `shell_run` の行ループの**入口** (最初の `show_prompt` と `sh_getkey` の前) で見るようにし、ループ末尾の判定は外した。これで起動時の `/etc/profile` / `$HOME/.profile` 内の `exit` でも入力待ちに入らずそのまま終わる。
+- (往復 5) blocker: 内蔵コマンドのパイプが `sys_pipe_get_buf()` の**カーネル帯**ポインタを `sys_redirect_fd_buf()` へ渡し、`ring3_ptr_ok` (exec/exec.c) の早期検証で CPL=3 の sh ごと畳まれていた (`sh> echo a | cat`)。確保・取得・解放を `sh_pipe_alloc` / `sh_pipe_get_buf` / `sh_pipe_free` の 3 本に包み、`SHELL_AS_APP` では sh 自身の `.bss` (`sh_pipe.inc`、2 枠 × `PIPE_BUF_SIZE` = 128KB) から配る。常駐側はマクロで `g_api->sys_pipe_*` にそのまま展開 (`.o` はバイト一致)。
+- (往復 5) 外部段が混じるパイプは `sh_stage_is_builtin()` が段ごとに見て `sh: pipe to external command is not supported` を 1 行出して行を捨てる (外部は要求表経由の別アプリなので sh の FD に掛けたリダイレクトが届かない)。判定は候補パス解決より前、`split_pipeline` の直後。
 - (往復 3) blocker: 行末 BS を**破壊的**にした。端末の BS はカーソルを 1 セル左へ動かすだけでセルを消さない (`libos32term` の `model.rs`) ので、BS だけ出して短縮後の写しを確定すると `echo abc` → BS×2 → `x` が画面 `echo axc` / バッファ `echo ax` と食い違う。`sh_backspace_tail()` (sh_redraw.inc) が `\b` + 空白 + `\b` を出して写しまで確定する (3 バイト列の先頭は 2 セルぶん)。CUI の BS は console が消すので常駐側は 1 バイトも変えていない。
 - blocker 2: 行の写しに**画面カーソルのバイト位置** `sh_drawn_pos` を足し、差分印字は「前方一致 かつ 新カーソルが行末 かつ **描画済みカーソルも行末**」のときだけにした。`redraw_line` は自分が置いたカーソル位置を写しへ残す。加えて内容を変えずにカーソルだけ動かす LEFT / RIGHT / HOME は `sh_drop_drawn()` で写しを捨て、次回を行の作り直しに倒す (経路の見落としで表示が壊れないように)。non-blocker のハーネス `goto` オフセットも `cmd + 5` へ直し、RED で本当に無限ループになることを確認した。
 
