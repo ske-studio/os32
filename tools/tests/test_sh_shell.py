@@ -39,10 +39,17 @@ char *strncat(char *d, const char *s, unsigned long n);
 #endif
 """
 
-STDIO_SHIM = """/* テスト用の薄い <stdio.h>。cmd_file.c が使うのは printf だけ。 */
+STDIO_SHIM = """/* テスト用の薄い <stdio.h>。cmd_file.c / cmd_mnt.c が使うのは printf だけ。 */
 #ifndef OS32_TEST_STDIO_H
 #define OS32_TEST_STDIO_H
 int printf(const char *fmt, ...);
+#endif
+"""
+
+STDLIB_SHIM = """/* テスト用の薄い <stdlib.h>。cmd_mnt.c が使うのは atoi だけ。 */
+#ifndef OS32_TEST_STDLIB_H
+#define OS32_TEST_STDLIB_H
+int atoi(const char *s);
 #endif
 """
 
@@ -52,6 +59,7 @@ if __name__ == "__main__":
         tmp = pathlib.Path(tmp)
         (tmp / "string.h").write_text(STRING_SHIM)
         (tmp / "stdio.h").write_text(STDIO_SHIM)
+        (tmp / "stdlib.h").write_text(STDLIB_SHIM)
         shim = ["-I" + str(tmp)]
         exe = tmp / "sh_shell"
         subprocess.run(["gcc", *BASE, "-O0", *shim, *INCLUDES,

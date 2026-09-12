@@ -19,6 +19,7 @@
  * ======================================================================== */
 
 #include "shell.h"
+#include "config.h"
 
 /* ---- libc の代わり (str_eq などが引く分だけ) ---------------------------- */
 
@@ -56,6 +57,15 @@ char *strncpy(char *d, const char *s, unsigned long n)
     while (i < n && s[i]) { d[i] = s[i]; i++; }
     while (i < n) d[i++] = '\0';
     return d;
+}
+
+int atoi(const char *s)
+{
+    int v = 0, neg = 0;
+    while (*s == ' ') s++;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
 }
 
 char *strncat(char *d, const char *s, unsigned long n)
@@ -137,6 +147,27 @@ static int out_is(const char *want)
 }
 
 /* cmd_file.c が使う printf。書式は %s / %d / %u だけ扱えれば足りる。 */
+/* 書式を 1 つ読んで可変引数を**必ず 1 つ**消費する。%u / %X / %c を読み
+ * 飛ばしていたころは引数の並びがずれ、後続の %s が数値をポインタとして
+ * 参照して落ちた (cmd_mnt.c の dd が "%u ... %s" を出す)。 */
+static void fmt_run(const char **pp, __builtin_va_list *ap)
+{
+    const char *p = *pp;
+
+    p++;                                   /* '%' の次へ */
+    if (*p == '%') { out_byte('%'); *pp = p + 1; return; }
+    while (*p == '-' || *p == '+' || *p == ' ' || *p == '0' || *p == '#') p++;
+    while (*p >= '0' && *p <= '9') p++;
+    while (*p == 'l' || *p == 'h') p++;
+    if (*p == 's') {
+        out_str(__builtin_va_arg(*ap, const char *));
+    } else if (*p) {
+        (void)__builtin_va_arg(*ap, int);
+        out_byte('#');
+    }
+    *pp = *p ? p + 1 : p;
+}
+
 int printf(const char *fmt, ...)
 {
     __builtin_va_list ap;
@@ -144,13 +175,8 @@ int printf(const char *fmt, ...)
 
     __builtin_va_start(ap, fmt);
     while (*p) {
-        if (p[0] == '%' && (p[1] == 's' || p[1] == 'd' || p[1] == 'u')) {
-            if (p[1] == 's') out_str(__builtin_va_arg(ap, const char *));
-            else { (void)__builtin_va_arg(ap, int); out_byte('#'); }
-            p += 2;
-        } else {
-            out_byte(*p++);
-        }
+        if (*p == '%') fmt_run(&p, &ap);
+        else out_byte(*p++);
     }
     __builtin_va_end(ap);
     return 0;
@@ -176,6 +202,9 @@ static unsigned long g_pool_used;
 static struct { const char *path; const char *body; } g_files[FILE_MAX];
 static int g_file_count;
 static int g_open_fd;          /* いま開いている疑似ファイルの添字 + 1 */
+static u32 g_last_alloc;       /* 直近の mem_alloc の要求サイズ (I3) */
+static u32 g_blk_written;      /* dev_blk_read が書いたバイト数 (I3) */
+static u32 g_blk_sector;       /* dev_blk_read が 1 セクタで書く長さ */
 static int g_read_pos;         /* いま開いているファイルの読み位置 */
 static int g_read_fail;        /* 1 = sys_read が失敗を返す (R6) */
 static int g_write_fail;       /* 1 = sys_write が短く返す (R6) */
@@ -215,16 +244,8 @@ static void __cdecl h_kprintf(u8 attr, const char *fmt, ...)
     g_kapi_calls++;
     __builtin_va_start(ap, fmt);
     while (*p) {
-        if (p[0] == '%' && p[1] == 's') {
-            out_str(__builtin_va_arg(ap, const char *));
-            p += 2;
-        } else if (p[0] == '%' && p[1] == 'd') {
-            (void)__builtin_va_arg(ap, int);
-            out_byte('#');
-            p += 2;
-        } else {
-            out_byte(*p++);
-        }
+        if (*p == '%') fmt_run(&p, &ap);
+        else out_byte(*p++);
     }
     __builtin_va_end(ap);
 }
@@ -252,6 +273,7 @@ static void *__cdecl h_mem_alloc(u32 size)
     if (g_pool_used + n > (unsigned long)POOL_SIZE) return (void *)0;
     p = g_pool + g_pool_used;
     g_pool_used += n;
+    g_last_alloc = size;
     return (void *)p;
 }
 
@@ -315,6 +337,19 @@ static int __cdecl h_sys_stat(const char *path, OS32_Stat *st)
 }
 static int __cdecl h_sys_ls(const char *path, void *cb, void *ctx);
 static int __cdecl h_sys_isatty(int fd) { g_kapi_calls++; (void)fd; return 1; }
+static const char *__cdecl h_sys_getcwd(void) { return "/cwd"; }
+
+/* I3: ATAPI と同じく 1 セクタ g_blk_sector バイトを書く。確保が足りなければ
+ * プールの隣を汚すので、直後の番人バイトで溢れを見る。 */
+static int __cdecl h_dev_blk_read(const char *dev, u32 lba, int count, void *buf)
+{
+    u32 i, n;
+    (void)dev; (void)lba;
+    n = (u32)count * g_blk_sector;
+    for (i = 0; i < n; i++) ((u8 *)buf)[i] = (u8)0xCC;
+    g_blk_written = n;
+    return 0;
+}
 
 /* sh_launch がパイプ判定を抜けた先で NULL を踏まないための最小の受け皿。
  * GUI 外を模して INVAL を返す (この試験では起動そのものは見ない —
@@ -367,6 +402,8 @@ static void build_api(void)
     g_fake.sys_stat = h_sys_stat;
     g_fake.sys_close = h_sys_close;
     g_fake.sys_isatty = h_sys_isatty;
+    g_fake.sys_getcwd = h_sys_getcwd;
+    g_fake.dev_blk_read = h_dev_blk_read;
     g_fake.launch_req = h_launch_req;
     g_fake.launch_poll = h_launch_poll;
     g_fake.sys_yield = h_sys_yield;
@@ -396,6 +433,7 @@ static void show_prompt(void) { out_str("sh> "); }
 #include "../../userland/shell/cmd_script.c"
 #include "../../userland/shell/cmd_fs_shared.c"
 #include "../../userland/shell/cmd_file.c"
+#include "../../userland/shell/cmd_mnt.c"
 
 /* ---- シェルの他モジュールの代わり -------------------------------------- */
 
@@ -782,7 +820,8 @@ static void case_redirect_blocks_launch(void)
     out_reset();
     rc = sh_launch("/bin/kbd_echo.bin");
     check(out_is_not("sh: redirect to external command is not supported\\n"),
-                                      "9d reset_all_redirects で印が下りる");
+                                      "9d sh_redirect_clear で印が下りる"
+                                      " (reset_all_redirects が呼ぶ)");
 }
 
 /* ========================================================================
@@ -899,7 +938,7 @@ static void case_argv_bound(void)
     static char *argv[MAX_ARGS];
     static char guard[16];
     int argc = 0, nalloc = 0;
-    int i, n = 0, ok;
+    int i, n = 0, ok, rc;
     static char *alloc[MAX_ARGS];
 
     report("12 argv[] は max_args - 1 個までしか詰めない\n");
@@ -911,15 +950,134 @@ static void case_argv_bound(void)
     for (i = 0; i < MAX_ARGS + 8; i++) { line[n++] = ' '; line[n++] = 'a'; }
     line[n] = '\0';
 
-    parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+    out_reset();
+    rc = parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
 
-    check(argc <= MAX_ARGS - 1,       "12a 格納は max_args - 1 個まで");
+    check(rc < 0,                     "12a 多すぎる行は負を返す (I1)");
+    check(out_is("sh: too many arguments\\n"), "12b 理由を出す");
+    check(argc <= MAX_ARGS - 1,       "12c 格納は max_args - 1 個まで (R7)");
     check(argv[MAX_ARGS - 1] == (char *)0xDEADBEEF,
-                                      "12b 最後の枠は NUL 終端用に空いている");
+                                      "12d 最後の枠は NUL 終端用に空いている");
     ok = 1;
     for (i = 0; i < (int)sizeof(guard); i++) if (guard[i] != (char)0x5A) ok = 0;
-    check(ok,                         "12c 隣の static を壊していない");
+    check(ok,                         "12e 隣の static を壊していない");
     for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+
+    /* 上限に収まる行はそのまま通る */
+    n = 0;
+    { const char *c = "echo a b c"; while (*c) line[n++] = *c++; }
+    line[n] = '\0';
+    argc = 0; nalloc = 0;
+    out_reset();
+    rc = parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+    check(rc == 0 && argc == 4,       "12f 普通の行は 0 を返す");
+    for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+
+    /* 複数 glob の**合計**が上限を超えても捨てる */
+    g_dir_n = SH_LS_MAX;
+    g_dir_match_tail = SH_LS_MAX;
+    n = 0;
+    { const char *c = "cat target* target* target*"; while (*c) line[n++] = *c++; }
+    line[n] = '\0';
+    argc = 0; nalloc = 0;
+    sh_glob_failed = 0;
+    out_reset();
+    rc = parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
+    check(rc < 0,                     "12g glob の合計超過も行ごと捨てる");
+    for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+    sh_glob_failed = 0;
+    g_dir_n = 0;
+    g_dir_match_tail = 0;
+}
+
+/* ========================================================================
+ *  12b. 同一ファイル判定は綴りを畳んでから (往復 8 の I2)
+ * ======================================================================== */
+static void case_path_normalize(void)
+{
+    char out[PATH_MAX_LEN];
+
+    report("12' 同一ファイル判定は . / .. / // を畳んでから\n");
+
+    check(sh_path_normalize("/host/./a", out, PATH_MAX_LEN) == 0 &&
+          strcmp(out, "/host/a") == 0,        "12'a /host/./a -> /host/a");
+    check(sh_path_normalize("/a/../b", out, PATH_MAX_LEN) == 0 &&
+          strcmp(out, "/b") == 0,             "12'b /a/../b -> /b");
+    check(sh_path_normalize("//x///y//", out, PATH_MAX_LEN) == 0 &&
+          strcmp(out, "/x/y") == 0,           "12'c 連続 / を畳む");
+    check(sh_path_normalize("/../..", out, PATH_MAX_LEN) == 0 &&
+          strcmp(out, "/") == 0,              "12'd ルートより上へは行かない");
+    check(sh_path_normalize("rel/f", out, PATH_MAX_LEN) == 0 &&
+          strcmp(out, "/cwd/rel/f") == 0,     "12'e 相対は cwd を前置");
+
+    files_reset();
+    check(fs_same_file("/host/a", "/host/./a") == 1,
+                                              "12'f 畳めば同一と分かる");
+    check(fs_same_file("/host/a", "/host/b") == 0,
+                                              "12'g 別ファイルは非同一");
+}
+
+/* ========================================================================
+ *  12c. dd のセクタ長 (往復 8 の I3) と wildcard の停止性 (I4)
+ * ======================================================================== */
+static void case_sector_and_wildcard(void)
+{
+    report("12'' dd のセクタ長と wildcard の停止性\n");
+
+    /* 実物の cmd_dd を回して、確保した長さが ATAPI の 1 セクタに足りるか */
+    {
+        char *argv[6];
+        argv[0] = (char *)"dd";
+        argv[1] = (char *)"cd0";
+        argv[2] = (char *)"lba=0";
+        argv[3] = (char *)"count=1";
+        argv[4] = (char *)"file=/dd.out";
+        argv[5] = (char *)0;
+
+        files_reset();
+        out_reset();
+        g_blk_sector = SYS_CDROM_SECTOR_SIZE;
+        g_last_alloc = 0;
+        g_blk_written = 0;
+        cmd_dd(5, argv);
+        check(g_last_alloc >= g_blk_written,
+              "12''a cd0 は ATAPI の 1 セクタぶん確保する");
+        check(g_last_alloc == SYS_CDROM_SECTOR_SIZE,
+              "12''b 確保長は 2048B");
+
+        argv[1] = (char *)"hd0";
+        files_reset();
+        out_reset();
+        g_blk_sector = SYS_BLOCK_SECTOR_SIZE;
+        g_last_alloc = 0;
+        g_blk_written = 0;
+        cmd_dd(5, argv);
+        check(g_last_alloc == SYS_BLOCK_SECTOR_SIZE,
+              "12''b' cd 以外は 1024B のまま");
+    }
+
+    /* I4: 病的パターン。再帰版はここで事実上停止した。 */
+    {
+        static char pat[64];
+        static char name[64];
+        int i, n = 0;
+        for (i = 0; i < 20; i++) { pat[n++] = '*'; pat[n++] = 'a'; }
+        pat[n++] = 'b';
+        pat[n] = '\0';
+        for (i = 0; i < 40; i++) name[i] = 'a';
+        name[40] = '\0';
+        check(wildcard_match(pat, name) == 0, "12''c 病的パターンが即座に不一致");
+    }
+
+    /* 既存の意味は変えていない */
+    check(wildcard_match("*.bin", "ls.bin") == 1,   "12''d *.bin が当たる");
+    check(wildcard_match("*.bin", "ls.txt") == 0,   "12''e 拡張子違いは外れる");
+    check(wildcard_match("a*b", "ab") == 1,         "12''f * は 0 文字でもよい");
+    check(wildcard_match("a?c", "abc") == 1,        "12''g ? は 1 文字");
+    check(wildcard_match("a?c", "ac") == 0,         "12''h ? は 0 文字に当たらない");
+    check(wildcard_match("*", "") == 1,             "12''i * は空にも当たる");
+    check(wildcard_match("", "x") == 0,             "12''j 空パターンは空だけ");
+    check(wildcard_match("t*t*t", "target_t") == 1, "12''k 複数の * が戻れる");
 }
 
 /* ========================================================================
@@ -1012,6 +1170,8 @@ void _start(void)
     case_ls_long_name();
     case_glob_matches_only();
     case_argv_bound();
+    case_path_normalize();
+    case_sector_and_wildcard();
     case_copy_failure();
     case_exit_stops_rest();
     case_exit_breaks_goto_loop();

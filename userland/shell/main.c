@@ -251,6 +251,11 @@ static int sh_is_cui_only(int argc, char **argv)
      * 再利用されると枠が別ファイルを向く。カーネル側の本修正は別票なので、
      * sh.bin では枠を作る / 使う経路をまとめて断る。 */
     if (str_eq(name, "losetup")) return 1;
+
+    /* T2: `play` は drivers/fm.c の io_wait で**同期に**鳴らし終わるまで
+     * CPL=0 で待つ。GUI 中は協調型全体が止まり、CTRL+STOP でも回収できない
+     * (`C` を 100 個で 22 秒)。`beep` は一瞬なので残す。 */
+    if (str_eq(name, "play")) return 1;
     if (str_eq(name, "dd") && argc > 1) {
         const char *d = argv[1];
         if (d[0] == 'l' && d[1] == 'o' && d[2] >= '0' && d[2] <= '9') return 1;
@@ -535,7 +540,17 @@ static void execute_single(const char *cmd)
     while (*src) { *p++ = *src++; }
     *p = '\0';
 
-    parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS, allocated_strings, &alloc_count);
+    /* I1: 引数が多すぎる行は一部だけ実行せず丸ごと捨てる */
+    if (parse_args_and_glob(tmp_buf, argv, &argc, MAX_ARGS,
+                            allocated_strings, &alloc_count) < 0) {
+#ifdef SHELL_AS_APP
+        sh_glob_failed = 0;
+#endif
+        for (j = 0; j < alloc_count; j++) {
+            g_api->mem_free(allocated_strings[j]);
+        }
+        return;
+    }
 
 #ifdef SHELL_AS_APP
     /* R4: 一致が多すぎて glob を諦めた行は、一部だけ展開して実行しない */
