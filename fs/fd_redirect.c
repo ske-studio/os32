@@ -270,19 +270,6 @@ void fd_redirect_clear_state(FdRedirectState *st)
     for (fd = 0; fd < FD_REDIRECT_SLOTS; fd++) redir_entry_clear(&st->fd[fd]);
 }
 
-void fd_redirect_close_state(FdRedirectState *st)
-{
-    int fd;
-    if (!st) return;
-    for (fd = 0; fd < FD_REDIRECT_SLOTS; fd++) {
-        if (st->fd[fd].target_type == FD_TARGET_FILE &&
-            st->fd[fd].file_fd >= 0) {
-            vfs_close(st->fd[fd].file_fd);
-        }
-        redir_entry_clear(&st->fd[fd]);
-    }
-}
-
 int fd_redirect_state_active(const FdRedirectState *st, int fd)
 {
     if (!st || fd < 0 || fd >= FD_REDIRECT_SLOTS) return 0;

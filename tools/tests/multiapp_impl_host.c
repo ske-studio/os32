@@ -34,11 +34,14 @@
  * VFS はこの票の対象外なので、ファイル FD だけ最小の偽物を置く —
  * 見たいのは「どの表に書き込みが入ったか」と「閉じたか」だけ。 */
 #include "vfs.h"
+#include "fd_redirect.h"   /* res_owner_get (偽 vfs_open の owner タグ用) */
 
 #define HOST_VFS_MAX_FD 8
 static int  host_fd_open[HOST_VFS_MAX_FD];
+static int  host_fd_owner[HOST_VFS_MAX_FD];   /* vfs_fd.c の owner タグ相当 */
 static u32  host_fd_written[HOST_VFS_MAX_FD];
-static int  host_fd_closes;
+static int  host_fd_closes;                   /* 実際に閉じた回数 */
+static int  host_fd_close_calls[HOST_VFS_MAX_FD];  /* FD ごとの vfs_close 呼び出し */
 static int  host_next_fd;
 
 int vfs_open(const char *path, int mode)
@@ -46,6 +49,10 @@ int vfs_open(const char *path, int mode)
     (void)path; (void)mode;
     if (host_next_fd >= HOST_VFS_MAX_FD) return -1;
     host_fd_open[host_next_fd] = 1;
+    /* 実物の vfs_fd.c と同じく、開いた時点の所有者で FD をタグ付けする。
+     * リダイレクトの file_fd もこれで **その ID のもの**になるので、
+     * 回収は vfs_close_owned(id) が担う (票 §12 T1、往復 9 の指摘)。 */
+    host_fd_owner[host_next_fd] = res_owner_get();
     host_fd_written[host_next_fd] = 0;
     return host_next_fd++;
 }
@@ -53,9 +60,24 @@ int vfs_open(const char *path, int mode)
 void vfs_close(int fd)
 {
     if (fd < 0 || fd >= HOST_VFS_MAX_FD) return;
-    /* 二重 close はここで分かる (試験が数える)。 */
+    /* **呼ばれた回数**と**実際に閉じた回数**を別に数える。二重 close は
+     * 「閉じた回数」には出ない (2 回目は in_use が落ちている) ので、
+     * 呼び出し回数で見ないと往復 9 の指摘が捕まえられない。 */
+    host_fd_close_calls[fd]++;
     if (host_fd_open[fd]) host_fd_closes++;
     host_fd_open[fd] = 0;
+}
+
+/* fs/vfs_fd.c の vfs_close_owned の偽物 (exec_reclaim_owned の (2))。
+ * 実物と同じく「その owner が開いた、まだ開いている FD」を閉じる。 */
+static void host_vfs_close_owned(int owner)
+{
+    int fd;
+    for (fd = 0; fd < HOST_VFS_MAX_FD; fd++) {
+        if (!host_fd_open[fd]) continue;
+        if (host_fd_owner[fd] != owner) continue;
+        vfs_close(fd);
+    }
 }
 
 int vfs_seek(int fd, int offset, int whence)
@@ -405,9 +427,13 @@ static int ma_res_add(int kind, int n)
 static void ma_reclaim_res(int id)
 {
     int k;
-    /* exec/exec.c の exec_reclaim_owned (1)。いまの表からその ID のものを
-     * 外す (park したまま畳まれた分は appslot_reclaim が枠から閉じる)。 */
+    /* exec/exec.c の exec_reclaim_owned (1)。いまの表からその ID のものを外す。 */
     fd_redirect_reset_owned(id);
+    /* exec/exec.c の exec_reclaim_owned (2) vfs_close_owned。park したまま
+     * 畳まれた ID のリダイレクトの file_fd は「いまの表」に無いが、FD 自体は
+     * その ID の owner タグを持っているのでここで閉じる (票 §12 T1)。
+     * appslot_reclaim は枠を **空にするだけ** — 閉じると二重 close になる。 */
+    host_vfs_close_owned(id);
     /* exec/exec.c の exec_reclaim_owned (9b)。ID だけを使う (票 T9 D3)。 */
     launch_owner_exit(id);
     appslot_gfx_owner_exit(id);
@@ -1909,7 +1935,9 @@ static void host_reset_files(void)
     int i;
     for (i = 0; i < HOST_VFS_MAX_FD; i++) {
         host_fd_open[i] = 0;
+        host_fd_owner[i] = 0;
         host_fd_written[i] = 0;
+        host_fd_close_calls[i] = 0;
     }
     host_fd_closes = 0;
     host_next_fd = 0;
@@ -1980,11 +2008,18 @@ static void case_redirect_context(void)
           "24y 張ってから park する");
     check(ma_park_yield() == 0, "24z park");
     closes0 = host_fd_closes;
+    check(host_fd_owner[0] == a2, "24A0 file_fd はその ID の owner タグを持つ");
     check(ma_kill(a2) == 0, "24A park 中のアプリを畳む");
     check(host_fd_closes == closes0 + 1,
-          "24B 枠の中のファイルが閉じられる (いまの表には無い)");
+          "24B 枠の中のファイルが閉じられる (vfs_close_owned が閉じる)");
+    check(host_fd_close_calls[0] == 1,
+          "24B2 vfs_close は 1 回しか呼ばれない (枠からは閉じない。往復 9)");
     check(host_fd_open[0] == 0, "24C ファイルは開いたままにならない");
     check(fd_is_redirected(1) == 0, "24D WM の表は触らない");
+    /* 枠は空に戻す。閉じるのは vfs_close_owned なので close 回数では
+     * 見えない — 「再利用 ID へ古い表を渡さない」を直に見る。 */
+    check(fd_redirect_state_active(&g_redir[a2], 1) == 0,
+          "24D2 畳んだ ID の枠は空に戻る (再利用 ID へ古い表を渡さない)");
 
     /* --- 走ったまま終わった ID は二重 close にならない ------------------ */
     ma_init(4096);
@@ -1997,7 +2032,9 @@ static void case_redirect_context(void)
     closes0 = host_fd_closes;
     check(ma_exit(0) == 0, "24H 走ったまま終わる");
     check(host_fd_closes == closes0 + 1,
-          "24I 閉じるのは 1 回だけ (枠は resume で空になっている)");
+          "24I 閉じるのは 1 回だけ (いまの表から外すときに閉じる)");
+    check(host_fd_close_calls[0] == 1,
+          "24J2 こちらも vfs_close は 1 回だけ (枠は resume で空)");
     check(fd_is_redirected(1) == 0, "24J 表はコンソールへ戻る");
 }
 

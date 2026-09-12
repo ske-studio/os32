@@ -551,12 +551,13 @@ u32 appslot_reclaim(int id)
     u32 pages;
     if (!a || id == APP_ID_SHELL) return 0;
     pages = a->pages;
-    /* 票 T9 §12 T1: park したまま畳まれた ID のリダイレクトは **枠の中**に
-     * しか無い (いまの表は WM のもの) ので、exec_reclaim_owned の
-     * fd_redirect_reset_owned では閉じられない。ここで閉じて空にする。
-     * 走ったまま終わった ID の枠は resume のときに空にしてあるので、
-     * 同じ file_fd を二度閉じることはない。 */
-    fd_redirect_close_state(&g_redir[id]);
+    /* 票 T9 §12 T1: 枠は **閉じずに空にするだけ**。枠の中の file_fd は
+     * fd_redirect_to_file の vfs_open がこの ID の owner タグを付けて取った
+     * ものなので、park したまま畳まれても exec_reclaim_owned の
+     * vfs_close_owned(id) が閉じる (往復 9 の non-blocker: ここで閉じると
+     * その後 vfs_close_owned が同じ FD をもう一度閉じていた)。
+     * バッファ型の枠に FD は無く、バッファ自体は pipe_free_owned が返す。 */
+    fd_redirect_clear_state(&g_redir[id]);
     slot_zero(a);
     a->state = APP_STATE_FREE;
     appslot_reclaim_count++;

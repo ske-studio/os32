@@ -119,13 +119,12 @@ void fd_redirect_save(FdRedirectState *out);
  * 呼んだ後の in は「空になったもの」として扱う (fd_redirect_clear_state)。 */
 void fd_redirect_restore(const FdRedirectState *in);
 
-/* 枠を空 (全部コンソール) にする。**閉じない** — 所有が別へ移った後に使う。 */
+/* 枠を空 (全部コンソール) にする。**閉じない**。回収のときもこれを使う —
+ * 枠の中の file_fd は fd_redirect_to_file の vfs_open がその ID の owner
+ * タグを付けて取ったものなので、park したまま畳まれても
+ * exec_reclaim_owned の (2) vfs_close_owned(id) が閉じる。ここで閉じると
+ * 同じ FD に vfs_close が 2 回掛かる (Codex 網羅レビュー 往復 9 の指摘)。 */
 void fd_redirect_clear_state(FdRedirectState *st);
-
-/* 枠の中のファイルを閉じて空にする (回収用)。畳まれた ID の表が
- * 「退避されたまま」のとき、生きているのは枠の中だけなので、
- * fd_redirect_reset_owned (いまの表を見る) では閉じられない。 */
-void fd_redirect_close_state(FdRedirectState *st);
 
 /* 枠の fd がリダイレクト中か (1/0)。自己診断とホスト試験のための問い合わせ。 */
 int fd_redirect_state_active(const FdRedirectState *st, int fd);

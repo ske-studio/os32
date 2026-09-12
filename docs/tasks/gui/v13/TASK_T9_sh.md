@@ -177,11 +177,21 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   (sh の**仮想**番地) なので別アプリの `sys_write(1)` がその番地を**別 CR3 で解決して書く**
   (反例 2)。→ 表を **ID ごとの枠** (`exec/appslot.c` の `g_redir[APP_SLOT_COUNT]`、504 B) にし、
   park (4 か所) で走っていた ID の枠へ**移し**、resume で戻す。ID 1 (WM / 常駐シェル) の枠も
-  同じ表に置く。持ち替えは**コピーではなく移動** — 同じ `file_fd` を 2 か所が持つと回収で
-  二重 close になるため (`fd_redirect_save` / `_restore` / `_clear_state` を `fs/fd_redirect.c` に追加)。
-  park したまま畳まれた ID のファイルは「いまの表」に無いので、`appslot_reclaim` が
-  `fd_redirect_close_state()` で枠から閉じる (走ったまま終わった ID の枠は resume で空なので
-  二重 close にならない)。試験は `test_multiapp_impl.py` ケース 24 (36 検査)。
+  同じ表に置く。持ち替えは**コピーではなく移動** — 枠と「いまの表」の両方に同じ欄が残ると、
+  次のアプリが同じ FD を張ったときの `fd_redirect_reset` が**他人のファイルを閉じる**
+  (`fd_redirect_save` / `_restore` / `_clear_state` を `fs/fd_redirect.c` に追加)。
+  park したまま畳まれた ID のリダイレクトは「いまの表」に無いが、その `file_fd` は
+  `fd_redirect_to_file` の `vfs_open` が**その ID の owner タグ**で取ったものなので、
+  `exec_reclaim_owned` の (2) `vfs_close_owned(id)` が閉じる。`appslot_reclaim` は枠を
+  **空にするだけ** (`fd_redirect_clear_state`)。試験は `test_multiapp_impl.py` ケース 24。
+- **Codex 網羅レビュー 往復 9 の non-blocker を修正** (2026-09-13): 上の初版は
+  `appslot_reclaim` が `fd_redirect_close_state()` で枠から閉じており、その後
+  `vfs_close_owned(id)` が同じ `file_fd` にもう一度 `vfs_close` を掛けていた (いまの
+  `vfs_close` と回収順では FD 再利用が挟まる反例は無いが、「二重 close なし」の説明が
+  不正確だった)。→ 枠は `fd_redirect_clear_state()` で空にするだけにし、閉じるのは
+  `vfs_close_owned` 1 か所に寄せた (`fd_redirect_close_state` は削除)。ホスト試験の偽 VFS に
+  **owner タグと FD ごとの `vfs_close` 呼び出し回数**を持たせ、`vfs_close_owned` の偽物を
+  `ma_reclaim_res` の (2) に置いて `24B2` / `24J2`「`vfs_close` は 1 回だけ」で押さえた。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 

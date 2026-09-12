@@ -128,19 +128,47 @@ park で走っていた ID の枠へ移し resume で戻す。
 | 24a〜24i | sh が stdout をファイルへ → park → **いまの表はコンソールへ戻る** → WM が別アプリを起動 → その stdout はコンソールで、sh の `/tmp/out` は増えない (**反例 1**) |
 | 24j〜24m | resume で sh の表が戻り、続きが同じファイルへ入る |
 | 24n〜24x | パイプバッファ版: park でバッファも枠へ移り、別アプリの `sys_write(1)` は sh の .bss を書かない (**反例 2**)。sh の `buf_len` は resume 後も不変 |
-| 24y〜24D | park したまま `exec_kill` → 枠の中のファイルが閉じられ、WM の表は触られない |
-| 24E〜24J | 走ったまま終了 → 閉じるのは 1 回だけ (枠は resume で空になっている = 二重 close しない) |
+| 24y〜24D2 | park したまま `exec_kill` → `vfs_close_owned(id)` が枠の背後の `file_fd` を閉じ、WM の表は触られない。`24B2` で **`vfs_close` の呼び出しが 1 回だけ**、`24D2` で枠が空に戻る |
+| 24E〜24J | 走ったまま終了 → いまの表から外すときに 1 回だけ閉じる (`24J2` も呼び出し回数 1) |
 
 RED は「修正を戻すと落ちる」形で確認した (実際の出力):
 
 | 戻したところ | 落ちた検査 |
 |---|---|
 | park / resume の持ち替え (`redir_switch_out` / `_in`) を効かなくする | `24f` `24h` `24i` `24m` `24r` `24t` `24u` `24x` |
-| `appslot_reclaim` の `fd_redirect_close_state()` を外す | `24B` `24C` |
+| `appslot_reclaim` の枠の後始末 (`fd_redirect_clear_state`) を外す | `24D2` |
 
 `exec/appslot.c` が `fd_redirect.h` を引くようになったので、`appslot.c` を取り込む
 他のハーネス (`launch_host.c` / `sbrk_tier_host.c`) には空の錠 (4 本) を置き、
 それぞれの runner の include に `fs` を足した。
+
+## 4e. Codex 網羅レビュー 往復 9 の non-blocker (2026-09-13)
+
+4d の初版は `appslot_reclaim` が `fd_redirect_close_state()` で枠の `file_fd` を
+閉じていたが、その `file_fd` は `fd_redirect_to_file` の `vfs_open` が **その ID の
+owner タグ**で取ったものなので、`exec_reclaim_owned` の (2) `vfs_close_owned(id)`
+(`exec/exec.c:746`) が先に同じ FD を閉じている。つまり park 中 kill では同じ FD に
+`vfs_close` が 2 回掛かっていた (いまの `vfs_close` と回収順では間に FD 再利用が
+入る反例は無いが、「二重 close しない」という説明が実態と違った)。
+
+→ 枠は **閉じずに空にするだけ** (`fd_redirect_clear_state`) にし、閉じるのは
+`vfs_close_owned` の 1 か所へ寄せた。`fd_redirect_close_state` は削除。
+
+ホスト側がこれを見られなかったのは、偽 VFS に owner タグが無く、
+`ma_reclaim_res` が実物の `vfs_close_owned` に当たるものを呼んでいなかったため。
+偽 VFS に `host_fd_owner[]` と **FD ごとの `vfs_close` 呼び出し回数**
+(`host_fd_close_calls[]`) を足し、`host_vfs_close_owned()` を `ma_reclaim_res` の
+(2) に置いた。「閉じた回数」だけでは 2 回目が `in_use` 落ちで数えられないので、
+**呼び出し回数**で見るのが要点。
+
+| 戻したところ | 落ちた検査 |
+|---|---|
+| `appslot_reclaim` を `fd_redirect_close_state()` に戻す | `24B2` |
+
+`24A0` (file_fd に ID の owner タグが付く)、`24J2` (走ったまま終了でも呼び出し
+1 回)、`24D2` (畳んだ ID の枠が空に戻る = 再利用 ID へ古い表を渡さない) も
+同じケースに足した。枠の後始末は close 回数では見えないので、`g_redir[]` を
+直に見る検査にしてある (ハーネスは `appslot.c` をそのまま取り込んでいる)。
 
 ## 5. 最終実行 (2026-09-12)
 

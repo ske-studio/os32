@@ -44,7 +44,6 @@ char *kstrncpy(char *dst, const char *src, u32 n)
 void fd_redirect_save(FdRedirectState *out)         { (void)out; }
 void fd_redirect_restore(const FdRedirectState *in) { (void)in; }
 void fd_redirect_clear_state(FdRedirectState *st)   { (void)st; }
-void fd_redirect_close_state(FdRedirectState *st)   { (void)st; }
 
 /* 実物。appslot.c が先 (launch.c が AppSlot を引く)。 */
 #include "appslot.c"

@@ -40,7 +40,6 @@ int  res_owner_get(void)      { return host_owner; }
 void fd_redirect_save(FdRedirectState *out)         { (void)out; }
 void fd_redirect_restore(const FdRedirectState *in) { (void)in; }
 void fd_redirect_clear_state(FdRedirectState *st)   { (void)st; }
-void fd_redirect_close_state(FdRedirectState *st)   { (void)st; }
 
 #include "appslot.c"
 
