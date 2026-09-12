@@ -125,3 +125,5 @@
 | **F5** | 端末に `v86` + Enter → **起動してしまう** (使い方を表示して終了)。`v86.bin` の flags は 0x0 = CPL=3 プログラムで、V86 へは KAPI `v86_*` で入る。`FORCE_CPL0` の判定では捕まらない | **不合格 → T8-2** (`OS32X_FLAG_CUI_ONLY` 0x0010 を app.conf `cui` で立て、入口判定 + `exec_start` 拒否 + `v86_*` KAPI の GUI 中拒否) |
 | 事故 | F6 の準備で CUI から `hsync` を実行 → HostDrv の古いビルドで NHD が戻った (§4-33)。`make deploy` → `hsync` で復旧、サイズ照合済み | — |
 | **F6** | `gfx200_test` の flags ビットを落とした `gfx_noflag.bin` を端末から起動 → `gfx_init` / `gfx_init_200` は拒否 (`gfx_init_reject_count` 2、`g_gfx_owner` 1 のまま) されたが、**プログラムは続行して描画 KAPI で VRAM を描き、GUI を壊した** (上 200 ラインに FPS 計測の絵、CTRL+STOP で復旧) | **不合格 → T8-2 K に追加: 拒否 = そのアプリを畳む** (`v86_*` の GUI 中拒否も同じ) |
+| **F5** 再試験 (T8-2 `5911d80` + `a5bdca7` 配備、vmkernel 461,075 B、kselftest 67 / 0) | 端末に `v86` + Enter → `cui only: v86` (`v86.bin` の flags 0x10)、起動しない (`appslot_reclaim_count` 不変) | **合格** |
+| **F6** 再試験 | `gfx_noflag` → `Error: gfx_init without GFX declaration -> kill app` が端末に出て畳まれる (`gfx_init_reject_count` 1、`last_reclaim_id` 3)、GUI は無事、`EXIT` でプロンプト復帰 | **合格** |
