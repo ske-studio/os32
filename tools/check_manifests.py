@@ -193,8 +193,9 @@ def check_app_conf(bins):
 # ---------------------------------------------------------------------------
 # 4. 宣言ビット (app.conf の 4 列目 = mkos32x のフラグ)
 #
-#   `gfx` → --gfx      (OS32X_FLAG_GFX、票 T8 D1a)
-#   `cui` → --cui-only (OS32X_FLAG_CUI_ONLY、票 T8-2)
+#   `gfx`      → --gfx       (OS32X_FLAG_GFX、票 T8 D1a)
+#   `cui`      → --cui-only  (OS32X_FLAG_CUI_ONLY、票 T8-2)
+#   `launcher` → --launcher  (OS32X_FLAG_LAUNCHER、票 T9 D1a)
 #
 # gfx を立て忘れると GUI 中に gfx_init がカーネルに蹴られ (ERR_INVAL でアプリ
 # ごと畳まれる) か、WM が全画面に入らずにプログラムの画面を上書きする。
@@ -212,7 +213,11 @@ DECL_COL = 3         # app.conf の 4 列目 (0 始まり)
 GFX_COL = DECL_COL   # 旧名 (参照が残っている間の互換)
 GFX_MARK = "gfx"
 CUI_MARK = "cui"
-DECL_MARKS = (GFX_MARK, CUI_MARK)
+# launcher は「launch_req で WM に起動を頼む」という宣言 (票 T9 D1a)。gfx / cui と
+# 違い、呼び出しの有無との突き合わせはまだしない (KAPI v49 の launch_req が
+# 着地するまで種を持てない)。書式として許すところまで。
+LAUNCHER_MARK = "launcher"
+DECL_MARKS = (GFX_MARK, CUI_MARK, LAUNCHER_MARK)
 
 # V86 へ入る KAPI (sdk/kapi.json)。カーネル側で低位メモリを張り替え BIOS と
 # テキスト VRAM を丸ごと使うので、これを呼ぶプログラムは CUI 専用。
@@ -350,6 +355,8 @@ def program_units():
             units[sub.rstrip("/")] = srcs
     units.update(_rust_program_units())
     for key, pat in (("userland/shell", "userland/shell/*.c"),
+                     # sh は同じソースの CPL=3 版 (-DSHELL_AS_APP、票 T9 D1)
+                     ("userland/sh", "userland/shell/*.c"),
                      ("userland/gshell", "userland/gshell/src/**/*.rs")):
         srcs = glob.glob(pat, recursive=True)
         if srcs:
@@ -379,7 +386,7 @@ def check_gfx_flag():
     """戻り値: (列の書式エラー, gfx 漏れ, gfx 余分, cui 漏れ, cui 余分)"""
     conf = read_app_conf()
 
-    why = "4 列目は 'gfx' / 'cui' か省略のみ"
+    why = "4 列目は 'gfx' / 'cui' / 'launcher' か省略のみ"
     bad_col = []
     for key, (lineno, cols) in sorted(conf.items()):
         if len(cols) > DECL_COL + 1:
@@ -472,7 +479,7 @@ def main():
 
     (bad_col, gfx_missing, gfx_extra,
      cui_missing, cui_extra) = check_gfx_flag()
-    print("== 2b. 宣言ビット (app.conf の 4 列目 gfx / cui) ==")
+    print("== 2b. 宣言ビット (app.conf の 4 列目 gfx / cui / launcher) ==")
     if bad_col:
         rc = 1
         for lineno, key, col, why in bad_col:

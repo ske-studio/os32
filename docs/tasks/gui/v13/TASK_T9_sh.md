@@ -125,3 +125,11 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
 2. **KILL 後の `launch_report`** (K / W): `launch_take` → `exec_kill(child)` → 回収通知で `DONE` → `launch_report` の順になると `TAKEN` でないので `STALE` を返す。WM はこれを再試行せず正常として扱い、カーネルは回収通知で取得済み情報も掃除する (ABI は変えない)。
 3. **sh の行入力** (S): `shell_run` の `ime_getkey` (FEP を通る) ではなく、`SHELL_AS_APP` では **`kbd_getkey` / `kbd_getchar` の注入入力に統一** (FEP 確定は gshell 側で済んでいる。UTF-8 の後続バイトも同じ経路)。二重処理の疑いを消す。
 4. **WM の新しい起動口** (W): `launch_take` の LAUNCH は `run_program` (`begin_start` / `end_start`、全画面判定・復帰) を通す。`exec_start` の直呼びはしない。
+
+## 11. 実装メモ (ビルド系、D1 / D1a、2026-09-12)
+
+- `build/programs.mk`: `SH_OBJDIR = userland/shell/sh_obj`、`SH_OBJ` を `-DSHELL_AS_APP` でそこへ吐き、`userland/sh.elf` は `PROGRAM_LDFLAGS` (= `app.ld` 0x500000) + `FILER_DRAW_OBJ` + `-los32save`。常駐の `SHELL_OBJ` / `userland/shell.elf` は 1 文字も変えていない (S7 の SHA-256 一致の根拠)。
+- 4 列目 `launcher` → `--launcher` を `userland/%.bin` レシピに追加。`sdk/mkos32x.py` に `OS32X_FLAG_LAUNCHER = 0x0020` と `--launcher` (票 K と重複したら同内容なので片方を捨てる)。
+- `build/app.conf`: `userland/sh 49 0 launcher` / `t5a_display 49 0 launcher` / `gshell 49`。`tools/check_manifests.py` は `launcher` を書式として許すだけ (呼び出しとの突き合わせは KAPI v49 着地後)。
+- `programs:` に `sh`、`clean-programs` で `sh_obj/` と `userland/sh.{elf,raw,bin}` を掃除。`userland/deploy.yaml` に `/bin/sh.bin` (tags `programs`)。
+- 未実施: 実ビルド・配備・実機 ([V4])。検証は `make -n sh` / `make -n programs` の dry-run と `check_gfx_flag()` / `check_constraints.py` の直接実行まで。`make check-manifests` の §2 は `userland/sh.bin` が実在してから通る。

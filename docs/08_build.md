@@ -235,9 +235,9 @@ python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base 
 | 1 | プログラム名 (キー) | — |
 | 2 | 要求 KAPI バージョン (`--api`) | 7 |
 | 3 | ヒープサイズ (`--heap`)。`0` で mkos32x の既定 | 0 |
-| 4 | `gfx` = 全画面 GFX の宣言 (`--gfx` → `OS32X_FLAG_GFX` = 0x0001)<br>`cui` = CUI 専用の宣言 (`--cui-only` → `OS32X_FLAG_CUI_ONLY` = 0x0010) | 無し |
+| 4 | `gfx` = 全画面 GFX の宣言 (`--gfx` → `OS32X_FLAG_GFX` = 0x0001)<br>`cui` = CUI 専用の宣言 (`--cui-only` → `OS32X_FLAG_CUI_ONLY` = 0x0010)<br>`launcher` = 起動要求者の宣言 (`--launcher` → `OS32X_FLAG_LAUNCHER` = 0x0020) | 無し |
 
-4 列目は宣言ビットで、`gfx` と `cui` のどちらか 1 つ (または省略)。
+4 列目は宣言ビットで、`gfx` / `cui` / `launcher` のどれか 1 つ (または省略)。
 
 `gfx` は「このプログラムは画面を丸ごと取る」という宣言 (票 T8 D1a)。`gfx_init` /
 `gfx_init_200` を呼ぶプログラム — 直接でも `tilemap_init` のようにライブラリ経由でも — に立てる。
@@ -253,7 +253,14 @@ python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base 
 バイナリ (`ring3_hello` / `ring3_fault` / `ring3_guard`) は app.conf を持たないので
 `build/programs.mk` の explicit ルールで `--cui-only` を付けている。
 
-どちらも `make check-manifests` がソースの呼び出しと突き合わせて検出する (§2b)。
+`launcher` は「このプログラムは `launch_req` で WM に外部プログラムの起動を頼む」という宣言
+(票 T9 D1a)。カーネルの要求表はこの宣言を持たない CPL=3 からの `launch_req` を `OS32_ERR_INVAL`
+で断る (認証ではなく協調的な宣言)。端末 (`userland/tests/t5a_display`) と
+`userland/sh` — 常駐シェルと同じソースを `-DSHELL_AS_APP` で 0x500000 にリンクした CPL=3 版 — に
+立てる。GUI アプリの通常の起動経路 (`session_launch`) はこの宣言と無関係。
+
+`gfx` / `cui` は `make check-manifests` がソースの呼び出しと突き合わせて検出する (§2b)。
+`launcher` は同じ §2b が書式 (4 列目に置けるのは 3 つの印か省略) だけを見る。
 `apps/` `game/` は staged SDK 側でそれぞれの `Makefile` が `mkos32x` を呼ぶので、
 そちらの GFX プログラムには各リポジトリで `--gfx` を付ける。
 
