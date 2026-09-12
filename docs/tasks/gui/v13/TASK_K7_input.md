@@ -109,3 +109,19 @@
 - **表示操作を矢印 / ROLL / HOME へ移した (票に無い判断、要レビュー)**: 読み手を取れた端末で
   ASCII の `j k g e q` を横取りすると、CUI プログラムへ渡した打鍵で画面が動き `q` で端末が落ちる。
 - 実機・`make` は未実施 ([V4])。
+## 9. 実装メモ (W) — K7-W 着地、2026-09-12
+
+- 鍵待ちは **入力群**に入れた (`multiapp::key_ready` = `kbd_inject_pending() > 0 && exec_app_state(id) == 3`)。
+  `kbd_inject_pending` を先に見るので、空のとき KAPI は 1 本で済む。D11 の規則と上界 (30) は不変。
+- 指摘 A: `slot_of_owner` が `None` でも `WAIT_KEY` なら `forget` せず `exec_resume(k, 0)`。
+  `OS32_ERR_AGAIN` (-14) はその周を譲るだけ (`save_turn` / `restore_turn` で turn・`last_run`・`input_streak` を巻き戻す)。
+- 未着手: `session::owner_active` はスロットと窓しか見ないので、鍵待ちの CUI が生きたまま SHUTDOWN / SWITCH_CUI が通る (票外)。
+## 10. 実機受入の記録 (PM / テスター)
+
+| 受入 | 構成 | obs | 判定 |
+|---|---|---|---|
+| ゲート | K7-K `c6a775d` | `make clean/all/external/check` exit=0 ([ABI3]) | 合格 |
+| 配備 | 15MB | NHD バックアップ後 `os32-cycle deploy` exit=0、vmkernel 459,388 B 一致、`ver` API v47 Build 10:31 | 合格 |
+| **I4** (CUI 側) | 15MB | kselftest **50 → 61** (fail 0、注入 5 + 印の負例 6 = I5 の kselftest 分)、`v86 -t` OK、regress 6 本 obs 全通過 (CUI の `kbd_getchar` は従来どおり)。8MB は未実施 | **合格** (15MB) |
+| I1 / I2 / I3 / I5 (実機) | — | K7-W / K7-A 着地後 | — |
+

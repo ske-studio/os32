@@ -32,10 +32,15 @@
 //!
 //! `input_ready` / `derived_ready` は模型では試験が直接立てていたが、ここは
 //! **実物の WM 状態から算出する** (D11-1 の棚卸しをそのまま写した)。
+//!
+//! 票 K7 (KAPI v47) で park 点が 2 つになった。`kbd_getchar` で止まった
+//! CUI プログラムは `APP_STATE_WAIT_KEY` で、起床の理由は注入リングの
+//! 未読だけ ([`key_ready`] / 模型の `ma_key_ready`)。規則そのもの (D11-3)
+//! と上界 (30) は 1 つも変えていない。
 
 use crate::wm::GuiState;
 use crate::{damage, ring, session, timer};
-use os32api::gui::proto::GUI_MAX_WINDOWS;
+use os32api::gui::proto::{GUI_MAX_WINDOWS, OS32_ERR_AGAIN};
 
 /* ================================================================ */
 /*  定数 (カーネル exec/appslot.h と同じ値)                          */
@@ -47,6 +52,15 @@ pub const APP_ID_SHELL: i32 = 1;
 pub const MAX_APPS: usize = 4;
 pub const APP_ID_MIN: i32 = 2;
 pub const APP_ID_MAX: i32 = APP_ID_MIN + MAX_APPS as i32 - 1;
+
+/// `exec_app_state` が返す「止めてある」(`APP_STATE_PARKED`)。
+#[allow(dead_code)] /* 試験・診断用 (ゲストからは呼ばない) */
+pub const APP_STATE_PARKED: i32 = 2;
+/// `exec_app_state` が返す「kbd 待ち」(`APP_STATE_WAIT_KEY`、KAPI v47)。
+/// カーネル `exec/appslot.h` と同じ値で、**既存の 0/1/2 の意味は動かない**
+/// (票 K7 §5 指摘 C: 値の追加は互換)。GUI 中に `kbd_getchar` を呼んだ
+/// CUI プログラムはここで止まる — 第 2 の park 点 (票 K7 D1)。
+pub const APP_STATE_WAIT_KEY: i32 = 3;
 
 /// 走っているアプリが「自分に入力がある」を理由に turn を据え置ける**連続**
 /// `OP_WAIT` 回数 (D11-3)。値を `MAX_APPS` に合わせたのは「アプリの数だけは
@@ -329,9 +343,46 @@ pub fn redirect_abort(st: &GuiState, cur: i32) {
 /*  起床条件 (D11-1 の棚卸しを実物から算出)                          */
 /* ================================================================ */
 
-/// 入力群: 未読の待ち行列型がリングにある、または sticky Quit が積めずに
-/// 残っている (契約 T3 / S5)。
+/// 注入リング (`kbd_inject`) の未読バイト数 (KAPI v47、誰でも呼べる)。
+#[inline]
+fn kbd_pending() -> u32 {
+    unsafe { (os32api::api().kbd_inject_pending)() }
+}
+
+/// カーネルが持つこの ID の状態 (`exec_app_state`)。
+#[inline]
+fn app_state(id: i32) -> i32 {
+    unsafe { (os32api::api().exec_app_state)(id) }
+}
+
+/// 鍵待ち群: `kbd_getchar` で止まっていて (`WAIT_KEY`)、注入リングに
+/// 未読がある (票 K7 §5 指摘 C の `ready_to_run`)。
+///
+/// ここで止まるのは**端末から起動した CUI プログラム**で、`OP_INIT` を
+/// 通らないのでスロットも窓も持たない — [`input_ready`] / [`derived_ready`]
+/// の材料が 1 つも無く、注入リングの未読だけが唯一の起床の理由になる。
+///
+/// **`kbd_inject_pending` を先に見る**。空 (= ふだん) なら KAPI 1 本で
+/// 終わり、`exec_app_state` は文字があるときしか呼ばない。
+pub fn key_ready(id: i32) -> bool {
+    if idx(id).is_none() {
+        return false;
+    }
+    if kbd_pending() == 0 {
+        return false;
+    }
+    app_state(id) == APP_STATE_WAIT_KEY
+}
+
+/// 入力群: 未読の待ち行列型がリングにある、sticky Quit が積めずに残って
+/// いる (契約 T3 / S5)、または鍵待ちに注入が届いている (票 K7 D3)。
+///
+/// 打鍵は入力そのものなので鍵待ちも**入力群**に入れる。選択規則 (D11-3:
+/// ID 昇順の巡回、入力優先の据え置き上限 4、ラウンドの turn) は不変。
 pub fn input_ready(st: &GuiState, id: i32) -> bool {
+    if key_ready(id) {
+        return true;
+    }
     match st.slot_of_owner(id) {
         Some(s) => ring::pending(st, s) > 0 || session::quit_pending(s),
         None => false,
@@ -472,6 +523,31 @@ pub fn mark_resumed(id: i32) {
     mm.running = id;
 }
 
+/// [`resume_one`] が `OS32_ERR_AGAIN` で巻き戻すための控え
+/// (この 1 本のラウンド状態 + 巡回の起点 + 据え置きの数え)。
+fn save_turn(id: i32) -> Option<(App, i32, u32)> {
+    let i = idx(id)?;
+    let mm = m();
+    Some((mm.apps[i], mm.last_run, mm.input_streak))
+}
+
+/// [`save_turn`] の控えを戻す (`running` は top-level = 0 のまま)。
+fn restore_turn(id: i32, saved: Option<(App, i32, u32)>) {
+    let (app, last_run, streak) = match saved {
+        Some(v) => v,
+        None => return,
+    };
+    let i = match idx(id) {
+        Some(i) => i,
+        None => return,
+    };
+    let mm = m();
+    mm.apps[i] = app;
+    mm.last_run = last_run;
+    mm.input_streak = streak;
+    mm.running = 0;
+}
+
 /* ================================================================ */
 /*  D11-3 (1) — 走っているアプリが譲るか                             */
 /* ================================================================ */
@@ -601,14 +677,32 @@ pub fn resume_one(st: &mut GuiState) -> bool {
     let wait_ret = match st.slot_of_owner(k) {
         Some(s) => ring::pending(st, s) as i32,
         None => {
-            /* スロットが無い = `OP_INIT` 前か回収済み。起こす相手ではない。 */
-            forget(k);
-            return true;
+            /* スロットが無くても、鍵待ち (`WAIT_KEY`) なら起こす相手
+             * (票 K7 §5 指摘 A)。端末から起動した CUI プログラムは
+             * `OP_INIT` を通らないのでスロットを持たず、ここで `forget`
+             * すると打鍵待ちのまま二度と起こされない。
+             * `wait_ret` はカーネルが注入リングの 1 バイトで上書きする
+             * (指摘 B: 取り出し用の KAPI は作らない) ので 0 を渡す。 */
+            if app_state(k) != APP_STATE_WAIT_KEY {
+                /* `OP_INIT` 前か回収済み。起こす相手ではない。 */
+                forget(k);
+                return true;
+            }
+            0
         }
     };
+    let saved = save_turn(k);
     mark_resumed(k);
     let rc = unsafe { (os32api::api().exec_resume)(k, wait_ret) };
     m().running = 0;
+    if rc == OS32_ERR_AGAIN {
+        /* 注入リングが空だった (指摘 B: カーネルは印を残したまま拒む)。
+         * 畳まずに**その周は譲る** — turn も巡回の起点も据え置きの数えも
+         * 動かさないので、D11 のラウンドと上界 (30) は変わらない。
+         * 次の周は `key_ready` が偽になるので選び直しは空振りしない。 */
+        restore_turn(k, saved);
+        return true;
+    }
     if rc < 0 {
         /* 起こせない (印無し / 状態違い)。放置すると永久に固まるので、
          * 「止めてあるアプリを畳む」口 (D4) をそのまま使って畳む。 */
