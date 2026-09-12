@@ -306,19 +306,23 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # build/app.conf のキーはリポジトリルートからの拡張子なしパス
 # (例: userland/cmds/wc)。キーが実在するターゲットと
 # 一致しているかは make check-app-conf で検査できる。
+# 列: 名前 APIバージョン ヒープサイズ [gfx]
+#   4 列目 gfx = 全画面 GFX を使う宣言 (OS32X_FLAG_GFX、mkos32x --gfx)。
+#   省略 = 無し。gfx_init / gfx_init_200 を呼ぶプログラムに立てる (票 T8 D1a)。
+#   立て忘れは make check-manifests が検出する。
 userland/%.raw: userland/%.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/%.bin: userland/%.raw userland/%.elf
 	@_api=$$(awk '$$1 == "userland/$*" { print $$2 }' build/app.conf); \
 	_heap=$$(awk '$$1 == "userland/$*" { print $$3 }' build/app.conf); \
+	_gfx=$$(awk '$$1 == "userland/$*" { print $$4 }' build/app.conf); \
 	_api=$${_api:-7}; \
 	_heap=$${_heap:-0}; \
-	if [ "$$_heap" != "0" ]; then \
-		python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api --heap $$_heap; \
-	else \
-		python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api; \
-	fi
+	_opts=""; \
+	if [ "$$_heap" != "0" ]; then _opts="$$_opts --heap $$_heap"; fi; \
+	if [ "$$_gfx" = "gfx" ]; then _opts="$$_opts --gfx"; fi; \
+	python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api $$_opts
 
 # === ヘルパーツール ===
 unicode_bin:

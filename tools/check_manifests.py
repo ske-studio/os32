@@ -17,6 +17,10 @@ check_manifests.py — 配備マニフェストと app.conf の参照先を検�
 3. ビルドされるのに配備定義に載っていないバイナリ
    → 実機に届かない。
 
+4. 全画面 GFX (gfx_init 系) を呼ぶのに app.conf に `gfx` の宣言が無い
+   → OS32X_FLAG_GFX が立たず、GUI 中の起動で画面の所有権を取れない
+     (票 T8 D1a)。4 列目の書式エラーも同じ節で見る。
+
 先に make all を通してから実行すること。
 """
 
@@ -182,6 +186,192 @@ def check_app_conf(bins):
     return bad
 
 
+# ---------------------------------------------------------------------------
+# 4. 全画面 GFX の宣言ビット (OS32X_FLAG_GFX、票 T8 D1a)
+#
+# app.conf の 4 列目 `gfx` が mkos32x --gfx になる。立て忘れると GUI 中に
+# gfx_init がカーネルに蹴られる (ERR_INVAL) か、WM が全画面に入らずに
+# プログラムの画面を上書きする。どちらも「静かに壊れる」ので機械で見る。
+#
+# 除外リストは持たない。判定はソースが gfx_init 系を呼ぶかどうかだけで、
+# ライブラリ経由 (tilemap_init → libos32gfx_init) も呼び出しグラフを
+# userland/lib から作って追う。
+# ---------------------------------------------------------------------------
+
+GFX_INIT_SEED = ("libos32gfx_init", "gfx_init", "gfx_init_200")
+GFX_COL = 3          # app.conf の 4 列目 (0 始まり)
+GFX_MARK = "gfx"
+
+
+def _strip_comments(text):
+    """C / Rust のコメントを潰す (行数は保つ)。
+
+    コメントの中の `gfx_init()` を呼び出しと読むと libos32gfx_attach
+    (「gfx_init() は呼ばない」と書いてある) まで巻き込む。
+    """
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '/' and i + 1 < n and text[i + 1] == '*':
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == '\n' else ' ' for ch in text[i:j]))
+            i = j
+        elif c == '/' and i + 1 < n and text[i + 1] == '/':
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(' ' * (j - i))
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _c_functions(text):
+    """トップレベルの関数定義を (名前, 本文) で返す (雑だが十分)。"""
+    import re
+    funcs = []
+    depth = 0
+    start = 0
+    name = None
+    pend_start = 0
+    for i, ch in enumerate(text):
+        if ch == '{':
+            if depth == 0:
+                head = text[pend_start:i]
+                m = None
+                for m in re.finditer(r'([A-Za-z_]\w*)\s*\(', head):
+                    pass
+                name = m.group(1) if m else None
+                start = i
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth <= 0:
+                depth = 0
+                if name:
+                    funcs.append((name, text[start:i]))
+                name = None
+                pend_start = i + 1
+    return funcs
+
+
+def _gfx_call_names():
+    """gfx_init 系に到達する関数名の集合 (userland/lib で不動点まで広げる)。"""
+    import re
+    names = set(GFX_INIT_SEED)
+    lib_funcs = []
+    for path in sorted(glob.glob("userland/lib/**/*.c", recursive=True)):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lib_funcs.extend(_c_functions(_strip_comments(f.read())))
+    changed = True
+    while changed:
+        changed = False
+        for fname, body in lib_funcs:
+            if fname in names:
+                continue
+            for n in names:
+                if re.search(r'\b%s\s*\(' % re.escape(n), body):
+                    names.add(fname)
+                    changed = True
+                    break
+    return names
+
+
+def _calls_gfx(paths, names):
+    import re
+    pats = [re.compile(r'\b%s\s*\(' % re.escape(n)) for n in names]
+    # Rust の `(a.gfx_init)()` 形式 (KAPI 構造体のフィールド呼び出し)
+    rust_pats = [re.compile(r'\b%s\s*\)' % re.escape(n)) for n in names]
+    for p in paths:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            src = _strip_comments(f.read())
+        use = pats + (rust_pats if p.endswith(".rs") else [])
+        for pat in use:
+            if pat.search(src):
+                return True
+    return False
+
+
+def _rust_program_units():
+    """build/programs.mk の DEFINE_RUST_PROGRAM 登録から crate → 出力先を読む。"""
+    import re
+    units = {}
+    mk = "build/programs.mk"
+    if not os.path.isfile(mk):
+        return units
+    with open(mk, encoding="utf-8") as f:
+        for m in re.finditer(r'DEFINE_RUST_PROGRAM,([A-Za-z0-9_]+),([^,)]+)',
+                             f.read()):
+            crate, outdir = m.group(1), m.group(2).strip()
+            srcs = glob.glob("userland/rust/%s/src/**/*.rs" % crate,
+                             recursive=True)
+            if srcs:
+                units["%s/%s" % (outdir, crate)] = srcs
+    return units
+
+
+def program_units():
+    """app.conf のキー → そのプログラムのソース一覧。"""
+    units = {}
+    for d in ("userland/cmds", "userland/tests", "userland/system"):
+        for p in glob.glob(d + "/*.c"):
+            units[p[:-2]] = [p]
+    for sub in glob.glob("userland/tests/*/"):
+        srcs = glob.glob(sub + "**/*.c", recursive=True)
+        if srcs:
+            units[sub.rstrip("/")] = srcs
+    units.update(_rust_program_units())
+    for key, pat in (("userland/shell", "userland/shell/*.c"),
+                     ("userland/gshell", "userland/gshell/src/**/*.rs")):
+        srcs = glob.glob(pat, recursive=True)
+        if srcs:
+            units[key] = srcs
+    return units
+
+
+def read_app_conf():
+    """キー → (行番号, 列リスト)"""
+    conf = {}
+    with open(APP_CONF, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            cols = s.split()
+            conf[cols[0]] = (lineno, cols)
+    return conf
+
+
+def check_gfx_flag():
+    """戻り値: (列の書式エラー, 宣言漏れ, 余分な宣言)"""
+    conf = read_app_conf()
+
+    bad_col = []
+    for key, (lineno, cols) in sorted(conf.items()):
+        if len(cols) > GFX_COL + 1:
+            bad_col.append((lineno, key, " ".join(cols[GFX_COL:]),
+                            "4 列目は 'gfx' か省略のみ"))
+        elif len(cols) == GFX_COL + 1 and cols[GFX_COL] != GFX_MARK:
+            bad_col.append((lineno, key, cols[GFX_COL],
+                            "4 列目は 'gfx' か省略のみ"))
+
+    names = _gfx_call_names()
+    missing, extra = [], []
+    for key, srcs in sorted(program_units().items()):
+        declared = (key in conf and len(conf[key][1]) > GFX_COL
+                    and conf[key][1][GFX_COL] == GFX_MARK)
+        calls = _calls_gfx(srcs, names)
+        if calls and not declared:
+            missing.append(key)
+        elif declared and not calls:
+            extra.append(key)
+    return bad_col, missing, extra
+
+
 def check_undeployed(bins):
     deployed = set()
     for path in DEPLOY_MANIFESTS:
@@ -245,6 +435,25 @@ def main():
             print("  [NG] {}:{}  '{}' に対応する .bin がない".format(
                 APP_CONF, lineno, key))
     else:
+        print("  なし")
+
+    bad_col, gfx_missing, gfx_extra = check_gfx_flag()
+    print("== 2b. 全画面 GFX の宣言ビット (app.conf の 4 列目) ==")
+    if bad_col:
+        rc = 1
+        for lineno, key, col, why in bad_col:
+            print("  [NG] {}:{}  '{}' の 4 列目 '{}'  ({})".format(
+                APP_CONF, lineno, key, col, why))
+    if gfx_missing:
+        rc = 1
+        for key in gfx_missing:
+            print("  [NG] {:44s} gfx_init 系を呼ぶのに app.conf に 'gfx' が無い"
+                  .format(key))
+    if gfx_extra:
+        for key in gfx_extra:
+            print("  [--] {:44s} 'gfx' 宣言があるが gfx_init 系の呼び出しが"
+                  "見当たらない".format(key))
+    if not bad_col and not gfx_missing and not gfx_extra:
         print("  なし")
 
     undeployed = check_undeployed(bins)

@@ -61,6 +61,14 @@
 | F6 | 宣言なし | 宣言ビットを外した試験バイナリ (テスト用に 1 本、`app.conf` で `gfx` 無し) を GUI 中に起動 → `gfx_init` が `ERR_INVAL` で画面は無事。CUI 中は動く |
 | F7 | 回帰 | regress 6 本、v86 -t、Start → CUI mode。可能なら PEGC 構成で F1 (§3-4) |
 
+## 4a. 実装メモ (ビルド系、2026-09-12)
+
+- `build/app.conf` に 4 列目 `gfx` (省略 = 無し) を追加。`build/programs.mk` の `userland/%.bin` が `--gfx` を付ける。`sdk/mkos32x.py` は無変更 (`--gfx` = 0x0001 を単体実行で確認)。
+- 立てた 14 本 = `gshell` / `bench` / `bench_scale2x` / `blit_test` / `blit_test2` / `demo_tile` / `font_test` / `gdi_test` / `gfx200_test` / `gfx_demo200` / `hal_test` / `hello_gfx` / `rotate_test` / `tile_bench`。`hal_test` `gdi_test` は行が無かったので `7 0 gfx` で新設。
+- 票の候補のうち `mgx_test` `asset_demo` は gfx を呼ばないので立てず、逆に票が GUI 側に挙げた `gdi_test` は `libos32gfx_init` を直接呼ぶ単独 GFX なので立てた (`programs.mk` の注記どおり)。`demo_tile` / `tile_bench` は `tilemap_init` 経由。
+- `tools/check_manifests.py` に §2b を追加: 4 列目の書式と「gfx_init 系を呼ぶのに宣言が無い」を検出。除外リストは持たず、`userland/lib` の呼び出しグラフを不動点まで辿る (コメントは除去)。宣言だけあって呼ばないものは `[--]` の警告。
+- `gshell` にも宣言を立てた: シェル帯の WM 自身が復帰時に `gfx_init` を呼ぶので、K が「宣言の無い CPL=3」で弾く実装にした場合に GUI 復帰が死ぬのを避ける。`apps/` `game/` は submodule 未チェックアウトのため未対応 (各リポジトリ側で `--gfx`)。
+
 ## 5. 範囲外
 
 - shell script、設定 S0〜。全画面プログラムと GUI アプリの同時描画 (排他が仕様)。VDM の端末化。
