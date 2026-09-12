@@ -216,8 +216,21 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
             return false;
         }
+        /* 全画面の後始末の保険 (票 T8-3、PM 実測 2026-09-12)。所有者が
+         * `exec_kill` / fault で畳まれた経路は `exec_start` / `exec_resume` の
+         * 復帰点を通らないので、所有者の問い合わせが 1 度も走らないことが
+         * ある。全画面中は入力もタイマも実質止まる = 誰も ready にならない
+         * ので、そのまま下の `sys_halt` へ落ちると画面が凍ったまま永久に
+         * 待つ。**全画面中だけ** KAPI 1 本 (`gfx_screen_owner`) で見る。
+         * ここは top-level (owner 1) なので復帰の `gfx_init` を呼んでよい。 */
+        if fullscreen::active() {
+            after_exec(st);
+        }
         /* 止めてあるアプリのうち 1 本を起こす (D11-3 の (2))。起こす相手が
-         * 居る間は halt しない — halt すると次の PIT まで誰も進めない。 */
+         * 居る間は halt しない — halt すると次の PIT まで誰も進めない。
+         * ポーリングで譲った 1 本 (`WAIT_POLL`) もここで起きる (D8 の最下位:
+         * `resume_one` → `pick` → `pick_poll`) ので、この `sys_halt` の側に
+         * 別の判断は要らない。 */
         if multiapp::resume_one(st) {
             continue;
         }

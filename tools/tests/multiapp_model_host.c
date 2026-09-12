@@ -345,6 +345,19 @@ static int ma_pick_poll(const MaState *st)
     return 0;
 }
 
+/* 自分 (st->cur) 以外にポーリングで譲った 1 本が居るか (票 T8 §7 D8)。
+ * ma_ready とは別に持つ: 順を決めるのは ma_pick (poll は最下位) で、
+ * こちらが決めるのは「走っているアプリが top-level へ戻る道を開けるか」だけ。 */
+static int ma_poll_live(const MaState *st) NOINST;
+static int ma_poll_live(const MaState *st)
+{
+    int i;
+    for (i = 0; i < MA_MAX_APPS; i++) {
+        if (st->cur != MA_ID_MIN + i && st->app[i].state == MA_WAIT_POLL) return 1;
+    }
+    return 0;
+}
+
 /* 次に起こす 1 本 (0 = 誰も起こさない)。WM top-level が使う。
  * ラウンドの turn が尽きたら全員ぶんを配り直す (= 新しいラウンド)。 */
 static int ma_pick(MaState *st) NOINST;
@@ -405,7 +418,15 @@ static int ma_should_park(MaState *st)
          * MA_RUNNING なので ma_ready が 0 を返す = 数に入らない。 */
         if (ma_ready(st, &st->app[i])) other_ready = 1;
     }
-    if (!other_ready) return 0;
+    /* 票 T8 §7 D8 (PM 実測 2026-09-12、受入 F8 不合格の修正): ready が 1 本も
+     * 無くても、ポーリングで譲った 1 本 (MA_WAIT_POLL) が居るなら譲る。
+     * 実物では走っているアプリが park しない限り op_wait の中を
+     * 「wm_cycle + sys_halt」で回るだけで、ma_pick_poll を呼ぶ点
+     * (= WM top-level) へ行けない = ポーリングの 1 本が永久に起きない。
+     * **「最下位」は ma_pick の側で決まる**ので、ここに足しても起こす順は
+     * 変わらない (変わるのは top-level へ戻る道が開くかどうかだけ)。
+     * 譲りが増えるだけなので MA_STARVE_BOUND は伸びない。 */
+    if (!other_ready && !ma_poll_live(st)) return 0;
     if (a->input_ready && st->input_streak < MA_INPUT_STREAK_MAX) {
         st->input_streak++;
         return 0;
@@ -1344,25 +1365,36 @@ static void case_poll_yield_is_lowest_priority(void)
     check(st.app[1].state == MA_RUNNING && st.cur == MA_ID_MIN + 1,
           "19i resume で走り出す");
 
-    /* (6) 走っている本人は WAIT_POLL を「起こせる 1 本」と数えない
-     *     (数えると D11-3a の上界が変わる)。ID 2 を直接ポーリング中にする。 */
+    /* (6) 走っている本人は「ポーリングが居る」だけで譲る (実機 F8 の修正)。
+     *     譲らないと op_wait の中を回るだけで ma_pick_poll へ行けない。
+     *     ID 2 を直接ポーリング中にする。 */
     st.app[0].state = MA_WAIT_POLL;
     ma_gui_call(&st, MA_OP_WAIT);
-    check(ma_should_park(&st) == 0,
-          "19j WAIT_POLL だけなら走っている本人は譲らない");
+    check(ma_should_park(&st) == 1,
+          "19j WAIT_POLL が居るなら走っている本人は譲る");
+    /* 据え置き (input_streak) は ready のときと同じに効く。 */
+    st.input_streak = 0;
+    st.app[1].input_ready = 1;
+    check(ma_should_park(&st) == 0, "19k 自分の入力は据え置ける");
+    st.input_streak = MA_INPUT_STREAK_MAX;
+    check(ma_should_park(&st) == 1, "19l 据え置きの上限を超えたら譲る");
+    st.app[1].input_ready = 0;
+    /* ポーリングが 1 本も居なければ従来どおり譲らない (回帰ゼロ)。 */
     st.app[0].state = MA_PARKED;
+    ma_set_ready(&st, 2, 0, 0);
+    check(ma_should_park(&st) == 0, "19m 誰も居なければ従来どおり譲らない");
     ma_set_ready(&st, 2, 1, 0);
-    check(ma_should_park(&st) == 1, "19k 入力群が居れば従来どおり譲る");
+    check(ma_should_park(&st) == 1, "19n 入力群が居れば従来どおり譲る");
 
     /* (7) 複数のポーリングは ID 昇順 (last_run の巡回には乗せない)。 */
     ma_set_ready(&st, 2, 0, 0);
     st.app[0].state = MA_WAIT_POLL;
-    check(ma_park_poll(&st) == MA_OK, "19l 走っている本人もまた譲る");
+    check(ma_park_poll(&st) == MA_OK, "19o 走っている本人もまた譲る");
     st.last_run = MA_ID_MIN;               /* 巡回なら 3 から。ID 昇順なら 2 */
     st.focus = 0;
     st.app[0].turn_used = 0;
     st.app[1].turn_used = 0;
-    check(ma_pick(&st) == MA_ID_MIN, "19m ポーリングが複数なら ID 昇順");
+    check(ma_pick(&st) == MA_ID_MIN, "19p ポーリングが複数なら ID 昇順");
 }
 
 int main(void) NOINST;

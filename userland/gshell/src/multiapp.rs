@@ -508,6 +508,47 @@ fn ready(st: &GuiState, id: i32) -> bool {
     input_ready(st, id) || derived_ready(st, id)
 }
 
+/// 自分以外にポーリングで譲った 1 本 (`WAIT_POLL`) が居るか (票 T8 §7 D8)。
+///
+/// [`ready`] とは別に持つ: **順**を決めるのは [`pick`] (poll は最下位) で、
+/// こちらが決めるのは「走っているアプリが top-level へ戻る道を開けるか」
+/// だけ。`op_wait` の中は `wm_cycle` + `sys_halt` を回るだけで
+/// [`pick_poll`] を呼ぶ点 (= WM top-level) へ行けないので、これが無いと
+/// ポーリングの 1 本は永久に起きない (PM 実測 2026-09-12、受入 F8 不合格)。
+fn poll_live(cur: i32) -> bool {
+    let mm = m();
+    let mut i = 0;
+    while i < MAX_APPS {
+        let id = APP_ID_MIN + i as i32;
+        if mm.apps[i].alive && id != cur && poll_ready(id) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// 全画面の後始末が top-level 待ちか (票 T8-3、PM 実測 2026-09-12)。
+///
+/// 所有者が WM (`APP_ID_SHELL`) に戻っているのに WM がまだ全画面モードの
+/// まま = 復帰 (`gfx_init` → 全面再合成) が要る。`exec_kill` / fault で
+/// 畳まれた経路は `exec_start` / `exec_resume` の直後を通らないので、
+/// `crate::after_exec` の問い合わせが 1 度も走らない。
+///
+/// **復帰は top-level でしかできない**: `op_wait` の中は `res_owner_get()` が
+/// アプリ ID なので、そこで `gfx_init` を呼ぶと `appslot_gfx_claim_check` が
+/// 「宣言の無いアプリの要求」と見て**その端末を畳む**。だから park して戻す。
+/// 全画面中は入力もタイマも実質止まり誰も ready にならないので、これが
+/// 無いと `sys_halt` で永久に待つ (画面は凍ったまま)。
+///
+/// KAPI は全画面中だけ 1 本 (`fullscreen::active()` で短絡する)。
+fn fullscreen_restore_pending() -> bool {
+    if !crate::fullscreen::active() {
+        return false;
+    }
+    unsafe { (os32api::api().gfx_screen_owner)() == APP_ID_SHELL }
+}
+
 /* ================================================================ */
 /*  D11-3 (2) — 次に起こす 1 本                                      */
 /* ================================================================ */
@@ -669,6 +710,11 @@ fn restore_turn(id: i32, saved: Option<(App, i32, u32)>) {
 /// `appslot_start_admit`)、走っているアプリが park しない限り top-level へ
 /// 戻る道が無いので、これが無いと 2 本目が永久に起動できない。
 /// 起動要求は有限個の事象なので D11-3a の上界は変わらない。
+///
+/// 票 T8-3 で譲る理由が 2 つ増えた。どちらも「top-level へ戻る道」の話で、
+/// 起こす**順** (D11-3 の (2)) は 1 つも動かない:
+/// [`poll_live`] (ポーリングで譲った 1 本を [`pick_poll`] に起こさせる) と
+/// [`fullscreen_restore_pending`] (全画面の復帰は top-level の仕事)。
 pub fn should_park(st: &GuiState, cur: i32) -> bool {
     let i = match idx(cur) {
         Some(i) => i,
@@ -690,7 +736,11 @@ pub fn should_park(st: &GuiState, cur: i32) -> bool {
      * しか実行できないので、ここに含める。含めないと**アプリが 1 本のとき**
      * (誰も ready でないので下の (b) が偽) に top-level へ戻る道が無く、
      * CTRL+STOP の付け替えも Quit 無視の打ち切りも永久に実行されない。 */
-    if session::ready_to_run(st) || st.launch_pending || has_top_level_work(mm) {
+    if session::ready_to_run(st)
+        || st.launch_pending
+        || has_top_level_work(mm)
+        || fullscreen_restore_pending()
+    {
         return true;
     }
     /* (b) D11-3 (1) の 3 行。 */
@@ -703,7 +753,13 @@ pub fn should_park(st: &GuiState, cur: i32) -> bool {
         }
         k += 1;
     }
-    if !other_ready {
+    /* 票 T8 §7 D8 (PM 実測 2026-09-12、受入 F8): ready が 1 本も無くても、
+     * ポーリングで譲った 1 本が居るなら譲る。**「最下位」は [`pick`] の側で
+     * 決まる**ので、ここに足しても起こす順は変わらない — 変わるのは
+     * 「top-level へ戻る道が開くか」だけ。据え置き (`input_streak`) は
+     * ready のときと同じに効かせる (自分の打鍵を取りこぼさない)。
+     * 譲りが増えるだけなので D11-3a の上界 (30) は伸びない。 */
+    if !other_ready && !poll_live(cur) {
         return false;
     }
     if input_ready(st, cur) && mm.input_streak < INPUT_STREAK_MAX {
@@ -774,6 +830,15 @@ fn undo_park(cur: i32) {
 /// (カーネルの `appslot_resume_check`)、印の無いフレームは `OS32_ERR_STALE`。
 pub fn resume_one(st: &mut GuiState) -> bool {
     if drain_top_level() {
+        /* 票 T8-3 (PM 実測 2026-09-12): 畳んだ相手が全画面の所有者だったかも
+         * しれない。`exec_kill` は `exec_start` / `exec_resume` の復帰点を
+         * 通らないので、ここで問い合わせないと WM が全画面モードのまま残り、
+         * 画面が凍ったまま `sys_halt` で待ち続ける。ここは top-level =
+         * owner 1 なので `gfx_init` を呼んでよい ([`fullscreen_restore_pending`]
+         * の註)。全画面中だけ (KAPI 1 本)。 */
+        if crate::fullscreen::active() {
+            crate::after_exec(st);
+        }
         return true;
     }
     let k = pick(st);

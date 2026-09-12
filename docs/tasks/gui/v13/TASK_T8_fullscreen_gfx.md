@@ -117,8 +117,24 @@
   `SessionAction` / kill 予約がある周は譲らない)。`ready` には入れない = D11-3a の上界 (30) も `should_park` も不変。
 - スロット無しでも forget しない (`resume_one` の `WAIT_KEY` 分岐に並べ、`exec_resume(k, 0)`)。全画面中も同判断。
   K7-W2 の畳み (`is_slotless` / `request_kill_slotless`) は状態を見ない述語なので `session.rs` は**無変更で効く**。
-- 検査: 模型 `multiapp_model_host.c` ケース 19 (13 検査、RED→GREEN)、gshell `wm_tests.rs` T8-3 W 5 本 (53 pass)。
-  **`make`・配備・実機は未実施** ([V4]) — 受入 F8 は PM / テスターへ。
+- 検査: 模型 `multiapp_model_host.c` ケース 19、gshell `wm_tests.rs` T8-3 W。**`make`・配備・実機は未実施** ([V4])。
+
+## 4a. 実装メモ (T8-3 W 追加修正、2026-09-12 — F8 不合格 + 復旧時の凍結)
+
+- **F8 不合格の原因は `pick` ではなく `should_park`**。端末が `op_wait` の中に居ると WM の 1 周は
+  `wm_cycle` + `sys_halt` で、`pick_poll` を呼ぶ点 (= top-level) へ行けない。`WAIT_POLL` を「譲る理由」に
+  数えていなかったので端末は park せず、ポーリングの 1 本は永久に起きない。→ `poll_live(cur)` を
+  `should_park` の (b) に足した (`if !other_ready && !poll_live(cur) { return false; }`)。**「最下位」は
+  `pick` の側で守る**ので起こす順は不変、据え置き (`input_streak`) も従来どおり効く。上界 (30) は譲りが
+  増えるだけなので伸びない。lib.rs の `sys_halt` 側は `resume_one` → `pick` → `pick_poll` が既に通るので不要。
+- **CTRL+STOP で畳んだ後の凍結**: 所有者の問い合わせ (`after_exec`) が `exec_start` / `exec_resume` の
+  直後にしか無く、`exec_kill` の経路を通らなかった。→ (1) `resume_one` の `drain_top_level` 成功直後、
+  (2) 単独ループの `resume_one` / `sys_halt` の直前、どちらも**全画面中だけ** `after_exec` (KAPI 1 本)。
+  `op_wait` の中では**呼ばない** — そこは `res_owner_get()` がアプリ ID なので `gfx_init` を呼ぶと
+  `appslot_gfx_claim_check` が「宣言の無いアプリ」と見て**端末を畳む**。代わりに `should_park` の (a) に
+  `fullscreen_restore_pending()` (全画面中 && `gfx_screen_owner()==1`) を足して park させ、top-level に返す。
+- 検査: 模型ケース 19 を 16 検査に (19j〜19n を新規則へ)、gshell に T8-3 W 検査 4/5/7/8 を追加 (**56 pass**、
+  4 通りの RED を実測)。**`make`・配備・実機は未実施** ([V4]) — F8 / F3 の再試験は PM / テスターへ。
 
 ## 5. 範囲外
 
