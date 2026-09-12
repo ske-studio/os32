@@ -205,7 +205,7 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - 既存の 100ms タイマ (`TIMER_SINK`) の周で `launch_poll` を 1 回。`RUNNING` で子 ID を控えて
   最下行が `[running id=N] ESC=cancel`、`DONE` / `FAILED` / 負の `rc` / 未知の status はプロンプトへ。
 - D9: 接続モードの ESC = `launch_cancel` 1 回 (`Attach` の印で連打をまとめる)。`AGAIN` は次のタイマで
-  自動再試行し、`0` の後は `[cancelling id=N] wait` のまま `DONE` を待つ。`STALE` は即プロンプト。
+  自動再試行し、`0` の後は `[cancelling id=N] wait` のまま `DONE` を待つ。`STALE` (もう完了している) でも token は捨てず、次の poll で `DONE` / `FAILED` を消費してからプロンプトへ (Codex 往復 1 の blocker: 捨てると表が IDLE に戻らず以後 `ERR_FULL`)。
 - D4: `Record::Exit` は `session.apply` に渡すだけ (表示のみ)。`prompt::Event::Exit` は遷移表から削除し
   `Done` / `Failed` / `CancelRequested` に置き換えた。`exit` / 端末終了時の取消は**出さない** (孤児は
   カーネルの `launch_owner_exit` が回収、§10 non-blocker 1)。
