@@ -1,6 +1,6 @@
 # T9 — shell script: 常駐シェルの内蔵コマンドとスクリプトを端末から (設計草案)
 
-状態: **設計草案 第 3 版 (2026-09-12、PM) — 第 2 版の再レビューで blocker 2 件 (§5)。D4 / D5 を書き換えて再レビュー待ち。実装は発注していない。**
+状態: **設計草案 第 4 版 (2026-09-12、PM) — 第 3 版の再レビューで blocker 1 件 (§7)。D3 / D4 を書き換えて再レビュー待ち。実装は発注していない。**
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → T7 → T8 → **shell script** → 設定 S0〜)。
 前提: K6C / K7 / T7 / T8 (端末、con_sink、kbd 待ちと poll の park、全画面)。すべて main `a9aa0e4`。
 
@@ -27,14 +27,14 @@
 |---|---|---|
 | D1 | `build/programs.mk` に `userland/sh.bin` を足す: `SHELL_SRC` + crt0 を `sdk/link/app.ld` (0x500000) でリンク、`-DSHELL_AS_APP`。`build/app.conf` に `userland/sh` (KAPI は shell と同じ、heap は `mem` 相当の既定)、`userland/deploy.yaml` に `/bin/sh.bin`。`shell.bin` (常駐) は無変更で同じソース | ビルド系 |
 | D2 | `SHELL_AS_APP` の条件分岐 (`userland/shell/*.c`): (a) `shell_rshell_init()` を呼ばない (シリアル / `rshell_active` のタイムアウトを触らない)、(b) `os32gui` `rshell` `filer` (TUI、カーソル位置依存) は `sh: cui only` で拒否、(c) 履歴ファイルは `~/.sh_history` 相当の別名 (常駐の履歴を壊さない)、(d) `exit` で `shell_run()` を抜けて 0 で終了、(e) プロンプトは `sh> ` (どちらで打っているか分かるように) | S (シェル) |
-| D3 | **外部プログラムの起動はカーネル仲介の明示プロトコル** (KAPI v49、末尾追記 5 本): (1) `launch_req(const char *cmdline) -> i32 token / 負`: 呼び手は **OS32X 宣言 `OS32X_FLAG_LAUNCHER` (0x0020、app.conf 4 列目 `launcher`) を持つ CPL=3 アプリ**だけ (`sh.bin` に立てる)。カーネルは要求表 (1 本、要求者 ID + cmdline ≤255B + 状態) に積み、要求者を `res_owner_get()` で記録する (呼び手の自己申告ではない)。既に pending なら `OS32_ERR_FULL`。(2) `launch_take(char *buf, u32 cap, i32 *requester) -> token / 0` と (3) `launch_report(token, i32 rc)`: **owner 1 (WM) 専用**。WM は OP_WAIT の周期で `launch_take` を見て、あれば **既存の `run_program` (Run ダイアログと同じ入口: `cui only` / 宣言 / 4 本上限の規則を通す)** で `exec_start` し、その戻り `rc` を `launch_report` で返す。カーネルは `rc > 0` (park した子) なら **子 ID を要求表に確定**し、その ID の `exec_reclaim_owned` で状態を `DONE` に、`rc == 0` (park 前に終了した短命な子) は **即 `DONE`**、`rc < 0` は `FAILED(rc)`。(4) `launch_poll(token, i32 *status) -> 0`: 要求者が状態を読む (`PENDING` / `RUNNING(child id)` / `DONE` / `FAILED(rc)`)。`DONE` / `FAILED` を読んだら表は解放。(5) `sys_yield` (D5)。**要求者以外の `launch_poll` は `OS32_ERR_INVAL`**。要求者が先に畳まれたら表は `exec_reclaim_owned` で捨てる (子は残る = 端末が畳む) | K |
+| D3 | **外部プログラムの起動はカーネル仲介の明示プロトコル** (KAPI v49、末尾追記 5 本)。**要求表は要求者 ID ごとに 1 本 (ID 2〜5 の 4 本)** で、con_sink のリングには載せない (あふれで消えない)。(1) `launch_req(const char *cmdline) -> i32 token / 負`: 呼び手は **OS32X 宣言 `OS32X_FLAG_LAUNCHER` (0x0020、app.conf 4 列目 `launcher`) を持つ CPL=3 アプリ** (`sh.bin` と **端末 `t5a_display`** に立てる)。カーネルは要求者を `res_owner_get()` で記録し (自己申告ではない)、その要求者の表が空でなければ `OS32_ERR_FULL`。(2) `launch_take(char *buf, u32 cap, i32 *requester) -> token / 0` と (3) `launch_report(token, i32 rc)`: **owner 1 (WM) 専用**。WM は OP_WAIT の周期で `launch_take` を見て (要求者 ID 昇順に 1 本ずつ)、あれば **既存の `run_program` (Run ダイアログと同じ入口: `cui only` / 宣言 / 4 本上限の規則)** で `exec_start` し、その戻り `rc` を `launch_report` で返す。カーネルは `rc > 0` (park した子) なら **子 ID を表に確定** (`RUNNING(id)`) し、その ID の `exec_reclaim_owned` で `DONE` に、`rc == 0` (park 前に終了した短命な子) は **即 `DONE`**、`rc < 0` は `FAILED(rc)`。(4) `launch_poll(token, i32 *status) -> 0`: **要求者だけ**が読める (`PENDING` / `RUNNING(child id)` / `DONE` / `FAILED(rc)`)。`DONE` / `FAILED` を読んだら表は解放。要求者が先に畳まれたら表は `exec_reclaim_owned` で捨てる (子は残る)。(5) `sys_yield` (D5) | K |
 | D3a | **`sh` 側** (`try_exec()` `main.c:296`、`SHELL_AS_APP` 時): 候補パス (`/usr/bin/<名>.bin` → `/bin/<名>.bin`、既存の探索) を解決して `launch_req(絶対パス + 引数)`。`FAILED` は `sh: <名>: launch failed (rc)`。待ちは **`sys_yield()` → `launch_poll()` の繰り返し**で、`kbd_getchar` / `kbd_trygetchar` は呼ばない (子の打鍵を横取りしない)。`DONE` で `sh> ` に戻る | S |
-| D4 | **端末 (T7-A) は自分が起動した子の ID を確定して待つ**: カーネルは **`START` レコード (type 5、payload `id u8`、`CON_SINK_REC_START` / `CON_SINK_HDR_START` 2 バイト)** を、シンク有効中にアプリが起動確定 (`appslot_start_commit`) したとき con_sink に積む (EXIT と対)。端末は `session_launch` を出した直後を「起動待ち」とし、**次に来た `START id` をその子の ID** として記憶する (gshell は SessionAction を 1 本ずつしか受けず、起動待ちの間に他の要求は `ERR_FULL` になるので対応は一意)。接続モードは **その ID の `EXIT` を受けたときだけ**プロンプトへ戻る。他 ID の `START` / `EXIT` (sh が起動した孫、Start メニューから起動した GUI アプリ) は無視。短命な子 (`rc == 0`) は `START` → `EXIT` が連続して来るのでそのまま戻る。起動失敗 (`START` が来ない) は従来どおり ESC でプロンプトへ。`exec_app_state` の走査は使わない | K (START レコード) + A |
+| D4 | **端末 (T7-A) も同じ要求表で起動する**: T7 の E3 (候補パスの解決) の後、`session_launch` の代わりに **`launch_req(絶対パス + 引数)`** を出し、接続モードに入る。既存の 100ms タイマで `launch_poll(token)` を読み、`RUNNING(id)` で子 ID を知り、**`DONE` でプロンプトへ戻る** (短命な子は最初の poll で `DONE`)。`FAILED(rc)` は `launch failed (rc)` を出してプロンプトへ (gshell のモーダルは従来どおり出る)。`EXIT` レコードは表示用にとどめ、モード判定には使わない (あふれで消えても影響なし)。`START` レコードは**設けない**。`session_launch` は端末から使わなくなる (libos32gui の口は残す)。孫 (sh が起動した子) は sh の表で追われ、端末の表は sh の `DONE` まで `RUNNING` のまま | A (+ K は D3 の表) |
 | D5 | **KAPI v49 `sys_yield(void)`**: GUI 中 (con_sink 有効) は `kbd_trygetchar` と同じ tick 制限 (共有の控え) で park するが、**印は専用の `parked_from_yield`** (状態は `WAIT_POLL` = 4 のまま — WM の扱いは同じ最下位)。`exec_resume` は印が `parked_from_yield` なら **注入リングを読まず EAX = 0** で起こす (`parked_from_poll` のときだけ `kbd_inject_take`)。`resume_check` の印対応表に `WAIT_POLL` → {`parked_from_poll`, `parked_from_yield`} を足す。CUI 中は `hlt` 1 回。カウンタ `ring3_yield_count` | K |
 | D6 | スクリプト (`run file`): 各行は `execute_command()` なので内蔵はそのまま、外部行は D3 で端末経由。`$VAR` 展開・`if`/`goto` 等の既存機能はそのまま | — |
 | D7 | 8MB では `sh` (段 2、数百ページ) + 子は入らない (T7 の 8MB と同じ、仕様どおり)。15MB 以上が対象 | — |
 
-メモリ: `sh.bin` ≈ 66KB + 既定ヒープ、要求表 1 本 (ID 2 語 + 状態 + cmdline 256B)、印 1 語 × 5。con_sink のレコード型に `START` (5) を追加 (`REC_MAX` 不変)。KAPI v49 は `launch_req` / `launch_take` / `launch_report` / `launch_poll` / `sys_yield` の 5 本 (KAPI_SPEC §3-2 の予約を更新)。宣言ビット `OS32X_FLAG_LAUNCHER` 0x0020 (T8 の `gfx` / `cui` と同じ仕組み、app.conf `launcher`)。
+メモリ: `sh.bin` ≈ 66KB + 既定ヒープ、要求表 4 本 (要求者 / 子 ID / 状態 / cmdline 256B ≈ 1.1KB)、印 1 語 × 5。con_sink のレコード型は増やさない。KAPI v49 は `launch_req` / `launch_take` / `launch_report` / `launch_poll` / `sys_yield` の 5 本 (KAPI_SPEC §3-2 の予約を更新)。宣言ビット `OS32X_FLAG_LAUNCHER` 0x0020 (T8 の `gfx` / `cui` と同じ仕組み、app.conf `launcher`)。
 
 ## 2. 受入 (ゲスト、PM / テスター)
 
@@ -48,12 +48,12 @@
 | S6 | CTRL+STOP | 子が走っている最中の CTRL+STOP は子だけを畳み、`sh> ` に戻る |
 | S7 | 回帰 | regress 6 本、CUI の `shell.bin` は無変更 (同じソースなので `SHELL_AS_APP` 無しのビルドの同一性をサイズで確認)、Start → CUI mode |
 
-## 3. レビューで見てほしい点 (第 3 版)
+## 3. レビューで見てほしい点 (第 4 版)
 
 1. **同じソースの二重ビルド** (D1/D2) で常駐シェルを壊さない担保 — `#ifdef` の範囲を最小にし、`shell.bin` のサイズ / ハッシュが変わらないことを受入 S7 に入れる。
-2. **D3 の権限**: 起動要求を出せるのは宣言 `LAUNCHER` を持つアプリだけ (= `sh.bin`)。実際の `exec_start` は WM が Run と同じ規則で行う。
-3. **D4 の子 ID 確定**: 「`session_launch` の直後に来た最初の `START`」を子とする。gshell の SessionAction が 1 本ずつ (`ERR_FULL`) なので対応は一意のはずだが、Start メニュー (WM 自身の `set_wm_launch`) と端末の要求が同じ周に重なる場合の順序を W で確認する (WM 内蔵の起動も同じ pending 1 本を使うので重ならない、が前提)。
-4. **D5**: `sys_yield` と `kbd_trygetchar` の tick 制限を共有する点、`WAIT_POLL` の印を 2 種に分ける点 (状態は増やさない)。
+2. **D3 の権限と表**: 起動要求を出せるのは宣言 `LAUNCHER` を持つアプリ (`sh.bin`、`t5a_display`) だけ。表は要求者 ID ごとに 1 本で、状態は con_sink のリングに依存しない。
+3. **D4**: 端末の起動を `session_launch` から `launch_req` に切り替える点 (Run ダイアログ / Start メニューは従来どおり `set_wm_launch`)。WM 側は `launch_take` の処理を SessionAction の `LAUNCH` と同じ `run_program` に合流させ、同じ周に両方あるときは SessionAction を先にする。
+4. **D5**: `sys_yield` と `kbd_trygetchar` の tick 制限を共有する点、`WAIT_POLL` の印を 2 種に分ける点。
 
 ## 5. 独立レビュー第 1 版 (2026-09-12) — Request changes
 
@@ -71,3 +71,8 @@
 
 - 設定レジストリ (S0〜)。端末の複数化。`filer` の端末化 (カーソル位置レコードの解釈)。
 - 配備・コミット・push・エミュレータ・ローカル AI・ini・.env・`make` は禁止 (コーダー)。
+
+## 7. 独立レビュー第 3 版 (2026-09-12) — Request changes
+
+- blocker: 第 3 版 D4 の `START` レコードは con_sink の drop-oldest リングに載るため、**子が `exec_start` の戻り前に 8KB 超を出力すると `START` が捨てられ、端末は子 ID を永久に確定できない** (短命な大量出力なら `EXIT` だけ見える)。→ 第 4 版: `START` を廃止し、端末も要求表 (`launch_req` / `launch_poll`) で子 ID と `DONE` を問い合わせる (D3 の表を要求者 ID ごとに 4 本へ、D4)。制御情報はリングに載せない。
+- `parked_from_yield` と「sh 自身の ID を追う」方向は妥当と判定。
