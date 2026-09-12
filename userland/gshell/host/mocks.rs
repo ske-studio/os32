@@ -300,6 +300,8 @@ pub static LAUNCH_CHILD: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 pub static KILL_FREES: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 /// `get_tick()` が返す tick (D5 の「同じ tick に 2 回起こさない」の観測点)。
 pub static TICK: AtomicUsize = AtomicUsize::new(0);
+/// `get_tick()` が呼び出しごとに返す列 (空なら `TICK` をそのまま返す)。
+pub static TICK_SCRIPT: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// 積まれている起動要求の本数を置く。
 pub fn set_launch_pending(n: usize) {
@@ -338,8 +340,20 @@ pub fn set_kill_frees(ids: &[i32]) {
 pub fn set_tick(t: u32) {
     TICK.store(t as usize, Ordering::SeqCst);
 }
+/// `get_tick()` を**呼び出しごとに**この列で返す (尽きたら最後の値のまま)。
+/// 「選んでから再開するまでの間に PIT が進む」= tick 境界をまたぐ周を作る。
+pub fn set_tick_script(ticks: &[u32]) {
+    *lk(&TICK_SCRIPT) = ticks.to_vec();
+}
 
 unsafe extern "C" fn get_tick() -> u32 {
+    let mut q = lk(&TICK_SCRIPT);
+    if !q.is_empty() {
+        let t = q.remove(0);
+        /* 最後の 1 つはそのまま居座る (以後の呼び出しはこの値)。 */
+        TICK.store(t as usize, Ordering::SeqCst);
+        return t;
+    }
     TICK.load(Ordering::SeqCst) as u32
 }
 unsafe extern "C" fn launch_pending() -> i32 {
@@ -628,6 +642,7 @@ pub fn init() {
     LAUNCH_PENDING.store(0, Ordering::SeqCst);
     TAKES.store(0, Ordering::SeqCst);
     TICK.store(0, Ordering::SeqCst);
+    lk(&TICK_SCRIPT).clear();
     lk(&TAKE_SCRIPT).clear();
     lk(&REPORTS).clear();
     *lk(&REPORT_RET) = 0;

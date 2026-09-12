@@ -194,6 +194,13 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 - 検証はホストのみ: `make check-gshell-host` 65 passed (T9-W 9 本追加、RED 7 → GREEN)、
   `check_constraints.py` / `check_gui_proto.py` / C 側 3 本の回帰。記録は `tools/tests/t9_tdd.md` §6。
   **`make` / 配備 / 実機は未実施** ([V4])。`cargo clippy` は着手前から `lib.rs:127` で落ちる (追加分は 0)。
+- **実装レビュー 1 の blocker 2 件を修正 (2026-09-13)**: (1) `run_program` に依頼元
+  (`LaunchVia::Wm` / `Table`) を渡すようにし、要求表経由の入口の拒否 (`cui only`) は
+  モーダルを出さず **`OS32_ERR_INVAL` (負)** を返す — `RUN_REFUSED` = 0 のままだと表が `DONE` に
+  なり、要求者が「起動して正常終了した」と読む。(2) 「起こした tick」は `pick` 時ではなく
+  `mark_resumed` が `get_tick` を読んだ時刻を **1 本ごと** (`App::poll_tick`) に持つ形へ。
+  集合の一括消去をやめたので、選んでから再開するまでに PIT が進んでも 2 回起こさない。
+  追加した unsafe には SAFETY コメント。試験は 68 passed (T9-W 12 本、RED 2 → GREEN)。
 
 ## 15. 実装メモ (A、2026-09-13)
 

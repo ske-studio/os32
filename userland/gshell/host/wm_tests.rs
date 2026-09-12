@@ -1486,7 +1486,7 @@ fn a_parked_app_is_not_left_black_when_another_app_is_launched() {
     let mut path = [0u8; 256];
     let p = b"/usr/bin/gui_demo.bin\0";
     path[..p.len()].copy_from_slice(p);
-    let rc = crate::run_program(wm::g(), &path);
+    let rc = crate::run_program(wm::g(), &path, crate::LaunchVia::Wm);
     assert_eq!(rc, 3, "exec_start の戻り値を取り違えている");
     assert_eq!(multiapp::live_count(), 2, "起動で 1 本増えていない");
 
@@ -2329,7 +2329,7 @@ fn launch_fullscreen(st: &mut crate::wm::GuiState, path: &[u8]) -> i32 {
     mocks::set_screen_owner(3);
     let mut buf = [0u8; 256];
     buf[..path.len()].copy_from_slice(path);
-    crate::run_program(st, &buf)
+    crate::run_program(st, &buf, crate::LaunchVia::Wm)
 }
 
 /* ---- (a) 所有者 ≠ 1 の間は 1 画素も出さない ---- */
@@ -2499,7 +2499,7 @@ fn the_entry_refuses_cpl0_programs_and_arms_full_screen_for_gfx() {
     let mut buf = [0u8; 256];
     let p = b"/usr/bin/v86.bin\0";
     buf[..p.len()].copy_from_slice(p);
-    let rc = crate::run_program(g, &buf);
+    let rc = crate::run_program(g, &buf, crate::LaunchVia::Wm);
     assert!(
         mocks::start_calls().is_empty(),
         "CPL=0 強制のプログラムを GUI から起動した: {:?}",
@@ -2537,7 +2537,7 @@ fn the_entry_refuses_cpl0_programs_and_arms_full_screen_for_gfx() {
     let mut buf = [0u8; 256];
     let p = b"/usr/bin/gui_demo.bin\0";
     buf[..p.len()].copy_from_slice(p);
-    assert_eq!(crate::run_program(g, &buf), 2, "普通のアプリが起動しない");
+    assert_eq!(crate::run_program(g, &buf, crate::LaunchVia::Wm), 2, "普通のアプリが起動しない");
     assert!(!fullscreen::active(), "宣言の無いアプリで全画面モードに入った");
     g.inited = false;
     fullscreen::reset();
@@ -2803,4 +2803,92 @@ fn a_cycle_in_the_launch_chain_does_not_hang_the_ctrl_stop_lookup() {
     let t = multiapp::abort_target(g);
     assert!(t == 2 || t == 3, "環のある表で宛先が壊れた: {t}");
     g.inited = false;
+}
+
+/* ================================================================ */
+/*  票 T9-W — 実装レビュー 第 1 版 (2026-09-13) の blocker 2 件      */
+/* ================================================================ */
+
+/* ---- T9-W 検査 10 (blocker 1): 入口の拒否は `DONE` ではなく `FAILED` ----
+ *  反例: 端末の中の `sh` で `exec /usr/bin/v86.bin`。`run_program` は
+ *  `cui only:` を出して `RUN_REFUSED` = 0 を返す。そのまま
+ *  `launch_report(token, 0)` へ渡すと表は `DONE` になり、`sh` は
+ *  「起動して正常終了した」と読んでしまう (何も起きていないのに)。
+ *  要求表経由ではモーダルも出さない — 出すのは要求者 (`sh`) の仕事。 */
+#[test]
+fn a_cui_only_program_from_the_launch_table_is_reported_as_a_failure() {
+    use crate::{mocks, modal};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm_at_top_level(&shm);
+    /* `OS32X_FLAG_CUI_ONLY` = 0x0010 (`os32x.rs` の `FLAG_CUI_ONLY`)。 */
+    mocks::set_file(&mocks::os32x_header(0x0010));
+    mocks::push_take(11, LK_LAUNCH, 0, b"/usr/bin/v86.bin");
+
+    assert!(crate::drain_launch_requests(g));
+
+    assert!(
+        mocks::start_calls().is_empty(),
+        "CUI 専用プログラムを GUI から起動した: {:?}",
+        mocks::start_calls()
+    );
+    let r = mocks::report_calls();
+    assert_eq!(r.len(), 1, "報告が 1 件でない: {r:?}");
+    assert_eq!(r[0].0, 11, "別の token へ報告した");
+    assert!(
+        r[0].1 < 0,
+        "入口の拒否を `DONE` (rc = 0 = 正常終了) として報告した: {r:?}"
+    );
+    assert!(!modal::is_open(), "要求表経由の拒否で WM がモーダルを出した");
+    g.inited = false;
+}
+
+/* ---- T9-W 検査 11 (blocker 1 の裏): WM の経路は従来どおりモーダル ---- */
+#[test]
+fn a_cui_only_program_from_the_start_menu_still_opens_the_modal() {
+    use crate::{mocks, modal, session};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let g = wm_at_top_level(&shm);
+    mocks::set_file(&mocks::os32x_header(0x0010));
+    assert_eq!(session::set_wm_launch(g, b"/usr/bin/v86.bin\0"), 0);
+
+    assert!(crate::session_handoff(g));
+
+    assert!(mocks::start_calls().is_empty(), "CUI 専用を起動した");
+    assert!(modal::is_open(), "Start → Run... で `cui only:` を出していない");
+    assert!(mocks::report_calls().is_empty(), "WM の経路が要求表へ報告した");
+    modal::state().used = false;
+    g.inited = false;
+}
+
+/* ---- T9-W 検査 12 (blocker 2): tick 境界をまたいでも 2 回起こさない ----
+ *  反例: tick N で `pick` が sh を選ぶ → 再開する前に PIT が N+1 へ進む →
+ *  「起こし済み」を N の集合へ記録 → 次の `pick` は tick が変わったので
+ *  集合を捨てる → **同じ N+1 のうちに sh をもう一度**起こす (子が飢える)。
+ *  記録は「選んだ時刻」ではなく **実際に再開した時刻** に紐づける。 */
+#[test]
+fn a_tick_boundary_between_pick_and_resume_does_not_allow_a_second_wake() {
+    use crate::{mocks, multiapp};
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_gui_app_and_a_polling_app(&shm);
+    /* `resume_one` の中で: 1 回目 = `pick` (tick 100)、2 回目 = 再開の記録
+     * (tick 101 = 選んでから PIT が 1 つ進んだ)。以後は 101 のまま。 */
+    mocks::set_tick_script(&[100, 101]);
+
+    assert!(multiapp::resume_one(&mut st), "起こす相手が居るのに何もしない");
+    assert_eq!(mocks::resume_calls(), vec![(3, 0)], "起こした相手が違う");
+
+    /* 実際に走ったのは tick 101。同じ 101 の周でもう一度起こしてはいけない
+     * (起こす相手が居ない = 単独ループは `sys_halt` で次の tick を待つ)。 */
+    assert_eq!(
+        multiapp::pick(&st),
+        0,
+        "tick 境界をまたいで同じ 1 本を同じ tick に 2 回起こした"
+    );
+
+    /* tick が進めば当然また起こす。 */
+    mocks::set_tick(102);
+    assert_eq!(multiapp::pick(&st), 3, "次の tick で起こし直さない");
 }

@@ -243,6 +243,34 @@ GREEN 後の最終実行 (`--test-threads=1`): `65 passed; 0 failed` (追加前�
 
 **未実施** ([V4]): `make` (全ターゲット)、配備、エミュレータ、実機。
 
+### 実装レビュー 第 1 版 (2026-09-13) の blocker 2 件 — RED → GREEN
+
+検査を先に書き、`run_program` に `via` 引数だけ足して**振る舞いは元のまま**にした
+状態で RED を取った (2 本とも RED)。
+
+| 検査 | 反例 | RED の見え方 |
+|---|---|---|
+| 10 `a_cui_only_program_from_the_launch_table_is_reported_as_a_failure` | 端末の `sh` で `exec /usr/bin/v86.bin` → 入口が拒否 → `RUN_REFUSED` = 0 → 表が `DONE` | `入口の拒否を DONE (rc = 0 = 正常終了) として報告した: [(11, 0)]` |
+| 11 `a_cui_only_program_from_the_start_menu_still_opens_the_modal` | 上の裏 (Start → Run... は従来どおりモーダル、表へ報告しない) | — (回帰側、最初から GREEN) |
+| 12 `a_tick_boundary_between_pick_and_resume_does_not_allow_a_second_wake` | tick N で `pick` → 再開前に PIT が N+1 → 記録は N の集合 → 次の `pick` が集合を捨てて同じ N+1 に 2 回目 | `pick` が 0 でなく 3 を返す |
+
+検査 12 の tick 境界は `mocks::set_tick_script(&[100, 101])` で作る
+(`get_tick` を呼び出しごとに進める = `pick` は 100、`mark_resumed` は 101 を見る)。
+
+直し方:
+
+- **blocker 1**: `run_program(st, path, via)` に依頼元 `LaunchVia::{Wm, Table}` を足し、
+  `Table` の入口の拒否は `OS32_ERR_INVAL` (負) を返してモーダルを出さない。
+  `RUN_REFUSED` は `Wm` 経路だけの戻り値になった。
+- **blocker 2**: 「この tick で起こし済み」を `Multi` のビット集合 (一括消去) から
+  `App::poll_tick` / `poll_tick_valid` (**1 本ごと**、消去なし) へ。記録は `mark_resumed` が
+  `get_tick` を読んだ時刻 = 実際に再開した tick。`pick_poll` は
+  `poll_tick_valid && poll_tick == now` の相手だけ飛ばす。
+
+最終実行: `68 passed; 0 failed` (T9-W は 12 本)。`cargo check --release` 警告 0、
+`check_constraints.py` / `check_gui_proto.py` も通した。追加した unsafe 呼び出しには
+SAFETY コメントを 1 つずつ付けた (non-blocker)。
+
 ### 模型との差 (報告済み)
 
 D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順を決めない) なので、

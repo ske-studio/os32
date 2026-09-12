@@ -133,6 +133,14 @@ struct App {
     deadline: u32,
     /// top-level で `exec_kill` する予約 (止めてあるアプリを畳む、D4)。
     kill_req: bool,
+    /// **この 1 本を最後にポーリング群から起こした tick** (票 T9 D5、
+    /// 実装レビュー 1 の blocker 2)。`pick` の時刻ではなく
+    /// [`mark_resumed`] が `get_tick` を読んだ時刻 = **実際に再開した tick**
+    /// を持つ。選んでから再開するまでに PIT が進んでも、記録はその周に
+    /// 紐づくので、同じ tick の 2 回目が通らない。
+    poll_tick: u32,
+    /// [`App::poll_tick`] が有効か (tick 0 と「まだ起こしていない」を分ける)。
+    poll_tick_valid: bool,
 }
 
 impl App {
@@ -142,6 +150,8 @@ impl App {
         has_deadline: false,
         deadline: 0,
         kill_req: false,
+        poll_tick: 0,
+        poll_tick_valid: false,
     };
 }
 
@@ -175,12 +185,6 @@ pub struct Multi {
     /// (最下位なので他が ready な周は候補にならない) ので、入力群 / 導出群の
     /// 巡回と起点を共有すると互いの順を乱す。
     poll_last: i32,
-    /// `poll_woken` が指している tick (`get_tick`)。
-    poll_tick: u32,
-    /// `poll_tick` が有効か (tick 0 と「まだ数えていない」を分ける)。
-    poll_tick_valid: bool,
-    /// この tick で起こし済みの添字のビット集合 (`MAX_APPS` = 4 本)。
-    poll_woken: u8,
     /// 直前の [`pick`] が**ポーリング群から**選んだ ID (0 = それ以外)。
     /// [`mark_resumed`] が「この起床を tick の数えに載せるか」を決める材料で、
     /// [`pick`] の入口で必ず 0 に戻すので前の周の残骸は効かない。
@@ -197,9 +201,6 @@ impl Multi {
         pending_start: false,
         abort_clear_req: false,
         poll_last: 0,
-        poll_tick: 0,
-        poll_tick_valid: false,
-        poll_woken: 0,
         poll_choice: 0,
     };
 }
@@ -343,7 +344,8 @@ pub fn on_owner_exit(id: i32) {
     if mm.poll_choice == id {
         mm.poll_choice = 0;
     }
-    mm.poll_woken &= !(1u8 << i);
+    /* 「最後に起こした tick」は `App::NEW` で一緒に落ちている (上の 1 行)。
+     * 再利用された同じ ID が 1 tick 飛ばされないための後始末。 */
 }
 
 /// 止めてあるアプリを top-level で畳む予約 (D4 の「止めてあるアプリの Quit」)。
@@ -488,6 +490,8 @@ fn app_state(id: i32) -> i32 {
 /// [`should_park`] の (a) と [`pick_poll`] の門で直に見る。
 #[inline]
 fn launch_work_pending() -> bool {
+    /* SAFETY: KAPI の関数表は `os32_init` が入口で据えた有効なポインタ。
+     * 引数も戻りもポインタを持たず、`launch_pending` は誰でも呼べる。 */
     unsafe { (os32api::api().launch_pending)() > 0 }
 }
 
@@ -496,6 +500,7 @@ fn launch_work_pending() -> bool {
 /// ここで回して待つことはしない ([V3] の get_tick スピン禁止と同じ線)。
 #[inline]
 fn tick_now() -> u32 {
+    /* SAFETY: 同上。`get_tick` は引数なし・戻りは値。 */
     unsafe { (os32api::api().get_tick)() }
 }
 
@@ -686,12 +691,14 @@ fn pick_group(st: &GuiState, want_input: bool) -> i32 {
 /// 子の `kbd_trygetchar` が同時に `WAIT_POLL` のとき若い方だけが走り続ける):
 ///
 /// 1. **巡回**: 前回起こした ID ([`Multi::poll_last`]) の次から探す。
-/// 2. **同じ tick に同じアプリを 2 回起こさない**: `get_tick` が変わるまで
-///    「起こし済み」の集合を持つ。起こせる相手が全員起こし済みなら 0 を返し、
-///    呼ぶ側 (単独ループ) が `sys_halt` で次の tick を待つ。
+/// 2. **同じ tick に同じアプリを 2 回起こさない**: 1 本ごとに
+///    [`App::poll_tick`] (最後に起こした tick) を持ち、それが今の tick と
+///    同じ相手は飛ばす。起こせる相手が全員起こし済みなら 0 を返し、呼ぶ側
+///    (単独ループ) が `sys_halt` で次の tick を待つ。
 ///
 /// 印を付けるのは [`mark_resumed`] (実際に `exec_resume` する直前) なので、
-/// `pick` を 2 度呼んでも答えは変わらない。
+/// `pick` を 2 度呼んでも答えは変わらず、**選んでから再開するまでに PIT が
+/// 進んでも**記録は実際に走った tick に付く (実装レビュー 1 の blocker 2)。
 fn pick_poll(st: &GuiState) -> i32 {
     let mm = m();
     if session::ready_to_run(st)
@@ -701,13 +708,11 @@ fn pick_poll(st: &GuiState) -> i32 {
     {
         return 0;
     }
-    /* tick が変わったら「この tick で起こし済み」を捨てる。 */
+    /* 「この tick で起こし済み」は **1 本ごと**に持つ (実装レビュー 1 の
+     * blocker 2)。集合を一括で捨てる形だと、選んだ tick と実際に再開した
+     * tick がずれた周で消去が 1 回よけいに走り、同じ 1 本が同じ tick に
+     * 2 回走れてしまう。 */
     let now = tick_now();
-    if !mm.poll_tick_valid || mm.poll_tick != now {
-        mm.poll_tick = now;
-        mm.poll_tick_valid = true;
-        mm.poll_woken = 0;
-    }
     let start = if mm.poll_last >= APP_ID_MIN && mm.poll_last <= APP_ID_MAX {
         (mm.poll_last - APP_ID_MIN + 1) as usize
     } else {
@@ -721,7 +726,7 @@ fn pick_poll(st: &GuiState) -> i32 {
         if !mm.apps[i].alive || id == mm.running {
             continue;
         }
-        if mm.poll_woken & (1u8 << i) != 0 {
+        if mm.apps[i].poll_tick_valid && mm.apps[i].poll_tick == now {
             continue; /* この tick では走り終えている */
         }
         if poll_ready(id) {
@@ -790,7 +795,10 @@ pub fn mark_resumed(id: i32) {
     if mm.poll_choice == id {
         mm.poll_choice = 0;
         mm.poll_last = id;
-        mm.poll_woken |= 1u8 << i;
+        /* **ここで** tick を読む (実装レビュー 1 の blocker 2)。`pick` の
+         * 時点ではなく、実際に `exec_resume` する直前の tick に紐づける。 */
+        mm.apps[i].poll_tick = tick_now();
+        mm.apps[i].poll_tick_valid = true;
     }
 }
 
@@ -1090,6 +1098,8 @@ pub fn forget_freed() {
 /// 畳んだ後に `FREE` になった ID を全部表から落とす (D8)。戻り値は
 /// `exec_kill` の rc (KILL の `launch_report` は rc を見ないので参考値)。
 pub fn kill_for_request(id: i32) -> i32 {
+    /* SAFETY: 同上。`exec_kill` は ID (値) だけを取る。呼べるのは owner 1 =
+     * WM top-level で、そうでなければカーネルが `OS32_ERR_INVAL` で断る。 */
     let rc = unsafe { (os32api::api().exec_kill)(id) };
     forget_freed();
     rc
@@ -1177,6 +1187,8 @@ fn chain_tail(head: i32) -> i32 {
         }
         seen[n] = cur;
         n += 1;
+        /* SAFETY: 同上。`launch_child` は ID (値) を取り ID を返すだけで、
+         * 不正な ID には 0 を返す (§1a)。 */
         let next = unsafe { (os32api::api().launch_child)(cur) };
         if next == 0 || next == cur {
             return cur;
