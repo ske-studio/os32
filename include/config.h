@@ -43,6 +43,17 @@
 #define SYS_SERIAL_BAUD       38400
 
 /* ====================================================================== */
+/*  ブロックデバイスのセクタ長 (ユーザーランドから見える値)                  */
+/*                                                                          */
+/*  drivers 側の正典は ATAPI_SECTOR_SIZE (drivers/atapi.h) と               */
+/*  FDC_SECTOR_SIZE (drivers/fdc.h)。どちらもカーネル内部ヘッダなので、      */
+/*  外部プログラム (シェルの dd 等) が読む口をここに置く。値を変えるときは    */
+/*  必ず drivers 側と一緒に見ること。                                        */
+/* ====================================================================== */
+#define SYS_CDROM_SECTOR_SIZE 2048    /* = ATAPI_SECTOR_SIZE */
+#define SYS_BLOCK_SECTOR_SIZE 1024    /* = FDC_SECTOR_SIZE (IDE/FDD/loop 既定) */
+
+/* ====================================================================== */
 /*  LAN (LGY-98, docs/tasks/network/PLAN.md)                                */
 /*                                                                          */
 /*  BASE 0 = 無効 (既定)。有効化はビルド時: make kernel-lgy98 (戻すのは        */

@@ -59,11 +59,82 @@ int fs_path_kind(const char *path)
 /*  `cp a a` は src を開いた後に dst を O_TRUNC で開くので a が 0 バイトに、  */
 /*  `mv a a` はコピー後に unlink するので a が消えていた。                    */
 /* ======================================================================== */
+/* ======================================================================== */
+/*  sh_path_normalize — `.` / `..` / 連続 `/` を畳む (I2)                     */
+/*                                                                          */
+/*  相対パスは sys_getcwd() を前置してから畳む。純関数 (FS を引かない) なので */
+/*  結果は「同じ綴りなら同じファイル」の**十分条件**にしか使わない —          */
+/*  シンボリックリンクやマウント越しの別名は st_ino の比較が拾う。            */
+/*  戻り値: 0 = OK / -1 = 収まらない                                         */
+/* ======================================================================== */
+int sh_path_normalize(const char *in, char *out, int max)
+{
+    char tmp[PATH_MAX_LEN * 2];
+    int n = 0;
+    int i, seg_start;
+
+    if (!in || !out || max < 2) return -1;
+
+    if (in[0] != '/') {
+        const char *cwd = g_api->sys_getcwd();
+        if (cwd) {
+            while (*cwd && n < (int)sizeof(tmp) - 2) tmp[n++] = *cwd++;
+        }
+        if (n == 0 || tmp[n - 1] != '/') {
+            if (n < (int)sizeof(tmp) - 2) tmp[n++] = '/';
+        }
+    }
+    while (*in && n < (int)sizeof(tmp) - 1) tmp[n++] = *in++;
+    tmp[n] = '\0';
+
+    /* 先頭は必ず '/' */
+    out[0] = '/';
+    out[1] = '\0';
+    seg_start = 1;
+
+    i = 0;
+    while (tmp[i]) {
+        int sl, sn;
+        while (tmp[i] == '/') i++;
+        sl = i;
+        while (tmp[i] && tmp[i] != '/') i++;
+        sn = i - sl;
+        if (sn == 0) continue;
+        if (sn == 1 && tmp[sl] == '.') continue;
+        if (sn == 2 && tmp[sl] == '.' && tmp[sl + 1] == '.') {
+            /* 1 段戻る (ルートより上へは行かない) */
+            while (seg_start > 1 && out[seg_start - 1] != '/') seg_start--;
+            if (seg_start > 1) seg_start--;      /* 区切りの '/' も落とす */
+            if (seg_start < 1) seg_start = 1;
+            out[seg_start] = '\0';
+            continue;
+        }
+        if (seg_start > 1) {
+            if (seg_start + 1 >= max) return -1;
+            out[seg_start++] = '/';
+        }
+        if (seg_start + sn >= max) return -1;
+        { int k; for (k = 0; k < sn; k++) out[seg_start++] = tmp[sl + k]; }
+        out[seg_start] = '\0';
+    }
+    return 0;
+}
+
 int fs_same_file(const char *a, const char *b)
 {
     OS32_Stat sa, sb;
+    char na[PATH_MAX_LEN];
+    char nb[PATH_MAX_LEN];
 
     if (strcmp(a, b) == 0) return 1;
+
+    /* I2: 綴りを畳んでから比べる。HostDrv のように st_ino を返さない FS では
+     * 下の ino 比較が効かず、`cp /host/a /host/./a` が自己上書き判定を
+     * すり抜けて O_TRUNC で原本を消していた。 */
+    if (sh_path_normalize(a, na, PATH_MAX_LEN) == 0 &&
+        sh_path_normalize(b, nb, PATH_MAX_LEN) == 0 &&
+        strcmp(na, nb) == 0) return 1;
+
     if (g_api->sys_stat(a, &sa) != 0) return 0;
     if (g_api->sys_stat(b, &sb) != 0) return 0;
     /* hostdrv 等 inode を返さない FS (st_ino=0) は比較できないので文字列一致のみ */

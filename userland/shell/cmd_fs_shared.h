@@ -23,6 +23,9 @@ int fs_path_kind(const char *path);
 /* 2 つのパスが同じファイルを指すか (文字列一致 or stat の dev/ino 一致) */
 int fs_same_file(const char *a, const char *b);
 
+/* I2: `.` / `..` / 連続 `/` を畳む (相対パスは cwd を前置)。0 = OK / -1 = 溢れ */
+int sh_path_normalize(const char *in, char *out, int max);
+
 /* OS32_ERR_* → 人間向けメッセージ */
 const char *fs_strerror(int rc);
 

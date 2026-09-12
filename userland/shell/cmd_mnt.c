@@ -1,5 +1,6 @@
 #include "cmd_fs_shared.h"
 #include "shell.h"
+#include "config.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -175,6 +176,11 @@ static void cmd_dd(int argc, char **argv)
     u32  dummy_total;
     int  noerr, err_count;
 
+    /* I3 (non-blocker): 下の「lba+count が総数を超えるか」の判定で読むので
+     * ループ経路以外でも必ず初期化しておく (以前は未初期化のスタック値)。 */
+    dummy_total = 0;
+    dummy_bps = 0;
+
     if (argc < 4) {
         g_api->kprintf(ATTR_WHITE,
             "Usage: dd <dev> lba=<N> count=<M> [file=<path>] [noerr]\n"
@@ -215,7 +221,13 @@ static void cmd_dd(int argc, char **argv)
             }
             bps = (u32)dummy_bps;
         } else {
-            bps = 1024;
+            /* I3: ATAPI (cd) は 1 セクタ 2048B を書く (drivers/atapi.c)。
+             * 1024B しか確保していなかったので dev_blk_read が 1KB 溢れていた。
+             * dev_get_info はセクタ長を返さないので、名前で見分ける。 */
+            if (dev_name[0] == 'c' && dev_name[1] == 'd')
+                bps = SYS_CDROM_SECTOR_SIZE;
+            else
+                bps = SYS_BLOCK_SECTOR_SIZE;
         }
     }
 

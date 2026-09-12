@@ -12,26 +12,33 @@
  *  R7 (argv[] の 1 つ手前で止める) を見る。
  * ======================================================================== */
 
+/* I4: 反復型。以前は '*' ごとに残りを再帰で総当たりしていたので、
+ * `*a*a*a…` のようなパターンが `aaaa…` に当たると指数的にバックトラックして
+ * 事実上停止した。R4 以降これは sys_ls の (CPL=0) コールバックの中で回るので、
+ * 止まると GUI ごと固まる。最後の '*' の位置と対応する名前位置だけを覚えて
+ * 1 段戻る標準形にする — O(n×m)。'?' と末尾 '*' の意味は変えていない。 */
 int wildcard_match(const char *pattern, const char *str) {
-    while (*pattern && *str) {
-        if (*pattern == '*') {
-            while (*pattern == '*') pattern++; 
-            if (!*pattern) return 1; 
-            while (*str) {
-                if (wildcard_match(pattern, str)) return 1;
-                str++;
-            }
-            return 0;
-        } else if (*pattern == '?') { 
-            pattern++; str++;
-        } else if (*pattern == *str) {
-            pattern++; str++;
+    const char *star = (const char *)0;   /* 直近の '*' の**次**の文字 */
+    const char *mark = (const char *)0;   /* その '*' が飲んだ次の名前位置 */
+
+    while (*str) {
+        if (*pattern == '?' || (*pattern != '\0' && *pattern == *str)) {
+            pattern++;
+            str++;
+        } else if (*pattern == '*') {
+            while (*pattern == '*') pattern++;
+            if (!*pattern) return 1;       /* 末尾の '*' は残り全部に当たる */
+            star = pattern;
+            mark = str;
+        } else if (star) {
+            pattern = star;                /* 1 段だけ戻して '*' に 1 文字飲ませる */
+            str = ++mark;
         } else {
             return 0;
         }
     }
     while (*pattern == '*') pattern++;
-    return (*pattern == '\0' && *str == '\0');
+    return (*pattern == '\0');
 }
 
 /* B2: CPL=3 では sys_ls のコールバックから KAPI を呼べない。glob_cb は
@@ -45,6 +52,7 @@ struct GlobCtx {
     const char *pattern;
     const char *dir_prefix;
     int matched_any;
+    int overflow;              /* I1: 詰めきれなかった (行ごと捨てる) */
     char **allocated_strings;
     int *alloc_count;
 };
@@ -58,8 +66,14 @@ static void glob_cb(const DirEntry_Ext *entry, void *c) {
 
     /* R7: argv[] は max_args 個。apply_redirects が最後に argv[argc] へ NUL を
      * 置くので、**格納は max_args - 1 個まで**にしないと 1 つ溢れて隣の
-     * static (tmp_buf) を壊す (`echo` に 255 個の引数で到達した)。 */
-    if (*(ctx->argc) < ctx->max_args - 1 && wildcard_match(ctx->pattern, entry->name)) {
+     * static (tmp_buf) を壊す (`echo` に 255 個の引数で到達した)。
+     * I1: 入りきらないものは**黙って捨てない** — 印を立てて行ごと捨てる。 */
+    if (!wildcard_match(ctx->pattern, entry->name)) return;
+    if (*(ctx->argc) >= ctx->max_args - 1) {
+        ctx->overflow = 1;
+        return;
+    }
+    {
         dirlen = strlen(ctx->dir_prefix);
         namelen = strlen(entry->name);
         full = (char *)g_api->mem_alloc(dirlen + namelen + 1);
@@ -123,14 +137,17 @@ static int sh_glob_run(const char *dir_path, struct GlobCtx *ctx)
 int sh_glob_failed = 0;
 #endif
 
-void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args, char **allocated_strings, int *alloc_count) {
+/* I1: 戻り値 0 = OK / -1 = 引数が多すぎるので**行ごと捨てる**。以前は黙って
+ * 切り捨てていて、`cp` + 253 個 + `/wrong` + `/intended` で最後の宛先が消え、
+ * `/wrong/s` を上書きしていた (複数 glob の合計超過も同じ)。 */
+int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args, char **allocated_strings, int *alloc_count) {
     int argc = 0;
     char *p = cmd_line;
 
     *alloc_count = 0;
 
     /* R7: argv[argc] への NUL 終端ぶんを 1 つ残す (上の glob_cb と同じ理由) */
-    while (*p && argc < max_args - 1) {
+    while (*p) {
         char *start, *out;
         int has_star = 0;
         char quote = 0;
@@ -216,6 +233,7 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
             ctx.pattern = pattern;
             ctx.dir_prefix = last_slash ? dir_path : "";
             ctx.matched_any = 0;
+            ctx.overflow = 0;
             ctx.allocated_strings = allocated_strings;
             ctx.alloc_count = alloc_count;
 
@@ -223,18 +241,34 @@ void parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_arg
             if (sh_glob_run(dir_path, &ctx) < 0) {
                 sh_glob_failed = 1;
                 *argc_out = 0;
-                return;
+                return -1;
             }
 #else
             g_api->sys_ls(dir_path, glob_cb, &ctx);
 #endif
 
+            if (ctx.overflow) {
+                g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                *argc_out = argc;
+                return -1;
+            }
             if (!ctx.matched_any) {
+                if (argc >= max_args - 1) {
+                    g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                    *argc_out = argc;
+                    return -1;
+                }
                 argv[argc++] = start;
             }
         } else {
+            if (argc >= max_args - 1) {
+                g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                *argc_out = argc;
+                return -1;
+            }
             argv[argc++] = start;
         }
     }
     *argc_out = argc;
+    return 0;
 }
