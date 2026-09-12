@@ -1646,3 +1646,81 @@ exit: 0
 クレート外生成を伴うため今回も未実施。guest実寸・クロスリンク・ゲスト試験は未検証。
 共有ファイル・docs・buildの編集、外部依存追加、配備、エミュレータ、他エージェント、
 .env/credential/docs/hw読取、commit/pushは行っていない。
+
+
+## 2026-09-13 折り返しをまたぐ BS (票 T9 実装レビュー 往復 4 の S blocker)
+
+書込範囲は `userland/libos32term` のみ (`src/model.rs` の `\x08` 分岐と
+`tests/model.rs`)。40 桁の端末で `sh> echo ` + 36 文字以上を打って行が折り返すと、
+行末の BS が x == 0 で止まって前の行へ戻らず、sh の `sh_backspace_tail`
+(`\b` + 空白 + `\b`) が前行末の文字を消せずに画面とバッファが 1 文字ずれた。
+ユーザー決裁 (2026-09-13) で **端末モデル側で直す** — sh は端末の幅を知らなくて済む。
+
+本体を変更する前に、契約を書いた試験 3 件の RED を実行確認した (コンパイル成功)。
+
+```text
+cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline --test model
+exit: 101
+21 passed; 3 failed
+
+backspace_at_column_zero_erases_across_the_wrap:
+  assertion left == right failed: left (0, 1), right (39, 0)
+backspace_across_the_wrap_skips_a_wide_half:
+  assertion left == right failed: left (0, 1), right (38, 0)
+backspace_after_a_newline_also_reaches_the_previous_row_end:
+  assertion left == right failed: left (0, 1), right (0, 0)
+```
+
+最小実装: `write_inner` の `\x08` で `x == 0 && y > 0` のとき `y -= 1` して
+`x = cols - 1` へ置く。`Continuation` を飛ばす既存の 1 段 (`x > 0` のときだけ
+`x -= 1`) は分岐の外へ出して両経路で共有した。`x > 0` の既存挙動 (1 セル左、
+全角の右半分なら先頭へ) は変えていない。戻り先は `put` の折り返し
+(`width > cols - x` で `x = 0, y += 1`) の出所そのものなので、
+「空白を書いて BS」で前行末が消え、書き込みは再び pending wrap (x == cols) に戻る。
+
+**判断と根拠** (票の「折り返し継続の印が無ければ単純な形でよい」): モデルは行が
+折り返しで続いているかを覚えていない (`State` は cursor / retained_rows / limit
+だけ)。印を足すには行ごとの旗が要り、`cells` は呼び手が渡すスライスなので置き場が無い。
+そこで `y > 0` なら一律に前行末へ戻す形にした。代償は「明示的な改行の直後の BS も
+前行末に載る」ことだが、**BS 単体では 1 文字も消さない** (カーソルを動かすだけ) ため、
+その位置へ続けて書く呼び手がいない限り表示は変わらない。端末 (`t5a_display`) は
+プロンプト行の編集にしか BS を使わず、sh は自分が今書いた文字の上でしか
+`\b` 空白 `\b` を出さない。この契約変更に合わせ、旧試験
+`backspace_at_new_line_does_not_enter_previous_row` は
+`backspace_after_a_newline_also_reaches_the_previous_row_end` として書き直した
+(試験本文に理由を書いてある)。
+
+足した試験 (model 21 → 24 件):
+
+| 試験 | 見るもの |
+|---|---|
+| `backspace_at_column_zero_erases_across_the_wrap` | 40 桁で 41 文字目が折り返した後、BS で `(39, 0)` へ戻り、空白で前行末が消え、続く `x` がそこへ載る |
+| `backspace_across_the_wrap_skips_a_wide_half` | 前行末が `Continuation` なら全角の先頭 `(38, 0)` へ戻り、空白が両半分を消す |
+| `backspace_at_the_first_column_of_the_first_row_stays` | `y == 0` の `x == 0` は動かない (連打しても `(0, 0)`) |
+| `backspace_after_a_newline_also_reaches_the_previous_row_end` | 上の判断を固定 (印が無いので改行直後も前行末へ) |
+
+GREEN と最終検査:
+
+```text
+cargo test --manifest-path userland/libos32term/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+exit: 0
+clip: 7 passed; model: 24 passed; stream: 8 passed; utf8: 8 passed  (0 failed)
+cargo check --manifest-path userland/libos32term/Cargo.toml --lib --target x86_64-unknown-linux-gnu --offline
+exit: 0
+cargo fmt --manifest-path userland/libos32term/Cargo.toml -- --check
+exit: 0
+```
+
+下流の回帰 (このクレートを取り込む側):
+
+```text
+cargo test --manifest-path userland/rust/t5a_display/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+exit: 0   62 passed; 0 failed
+cargo test --manifest-path userland/libos32term_render/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+exit: 0   39 passed; 0 failed
+cargo check --release -p t5a_display   (userland/rust workspace)   exit: 0 警告 0
+python3 -B tools/check_constraints.py  exit: 0
+```
+
+残事項: `make` (全ターゲット)・配備・エミュレータ・commit は禁止のため未実施 ([V4])。
+ゲスト実機での「折り返した行の BS」の確認は PM / テスターへ。
