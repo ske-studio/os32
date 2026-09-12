@@ -18,24 +18,29 @@
  * 止まると GUI ごと固まる。最後の '*' の位置と対応する名前位置だけを覚えて
  * 1 段戻る標準形にする — O(n×m)。'?' と末尾 '*' の意味は変えていない。 */
 int wildcard_match(const char *pattern, const char *str) {
-    const char *star = (const char *)0;   /* 直近の '*' の**次**の文字 */
+    const char *star = (const char *)0;   /* 直近の '*' そのものの位置 */
     const char *mark = (const char *)0;   /* その '*' が飲んだ次の名前位置 */
 
     while (*str) {
+        /* C-1: パターン側の '*' を**通常文字の比較より先に**見ること。
+         * 後に置くと `*` と `*dest` で '*' 同士が通常文字として消費され、
+         * `cp SRC DIR/` + アスタリスクが `*dest` を展開から落とした。 */
+        if (*pattern == '*') {
+            star = pattern++;
+            mark = str;
+            continue;
+        }
         if (*pattern == '?' || (*pattern != '\0' && *pattern == *str)) {
             pattern++;
             str++;
-        } else if (*pattern == '*') {
-            while (*pattern == '*') pattern++;
-            if (!*pattern) return 1;       /* 末尾の '*' は残り全部に当たる */
-            star = pattern;
-            mark = str;
-        } else if (star) {
-            pattern = star;                /* 1 段だけ戻して '*' に 1 文字飲ませる */
-            str = ++mark;
-        } else {
-            return 0;
+            continue;
         }
+        if (star) {
+            pattern = star + 1;            /* 1 段だけ戻して '*' に 1 文字飲ませる */
+            str = ++mark;
+            continue;
+        }
+        return 0;
     }
     while (*pattern == '*') pattern++;
     return (*pattern == '\0');
