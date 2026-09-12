@@ -1,6 +1,6 @@
 # T8 — full-screen GFX 復帰: 端末から起動した GFX プログラムが全画面を使い、終了で GUI に戻る
 
-状態: **受入 F1 前半 / F2〜F7 合格 (2026-09-12、K `f19dd00` + `5911d80`、B `d73ceea`、W `732b07d` + `a5bdca7`)。残は F1 後半 (ポーリング型の yield、ユーザー判断待ち) と PEGC 構成。**
+状態: **受入済み (2026-09-12、F1〜F8)**。残は PEGC / Cirrus 構成の確認のみ。
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → K7 → T7 → **full-screen GFX 復帰** → shell script → 設定 S0〜)。
 前提: K5b (協調型 4 本)、K6C / K7 (端末、con_sink、kbd 待ちの park)、T7 (端末からの起動)。すべて main `3b7677b`。
 
@@ -184,3 +184,9 @@
 - **K だけでは動かない**: gshell が 4 を知らないと `slot_of_owner` が `None` の譲りを `forget` し、譲ったアプリが二度と起きない (`multiapp.rs:735`)。T8-3 W と同時に入れること。
 | **F8** (T8-3 K `74f8015` + W `e6a04ef` 配備、vmkernel 461,706 B、kselftest 69 / 0) | 端末から `gfx200_test` → Space で FPS 段へ → 最初の `kbd_trygetchar` で `WAIT_POLL` (state 4、`parked_from_poll` 1、`ring3_poll_yield_count` 1) に park した後、**WM が起こさない** (画面は `FPS: 0` で凍結、WM は `sys_halt` で待つ)。原因: gshell は入力群 / 導出群に ready が無いと `pick()` を呼ばず halt するので、`pick()` の降り口の `pick_poll` に到達しない。CTRL+STOP (所有者宛) で復旧 | **不合格 → T8-3 W 追加修正** (halt の前に `WAIT_POLL` を起こす) |
 | F8 の復旧で発見 | park 中 (`WAIT_POLL`) の所有者アプリへ CTRL+STOP → WM の `exec_kill(owner)` で畳まれ `g_gfx_owner` は 1 に戻るが、**WM は全画面モードから抜けず** (`after_exec` が exec_start / exec_resume の直後にしか無い)、誰も ready でないので `sys_halt` のまま画面が凍る (マウス・Start 不可、`/api/reset` で復旧)。F3 が通ったのはアプリが走行中で abort が exec_resume の戻りに乗ったため | **不合格 → T8-3 W 追加修正 (2)**: kill 直後と halt 直前にも所有者を見て復帰 |
+| **F8** 再試験 (W 追加修正 `097cd43`、gshell 167,368 B を HostDrv → hsync) | 端末から `gfx200_test` → Space で FPS 段 → **FPS: 8 (譲りなしのときと同じ)**、`ring3_poll_yield_count` 126 (約 15 秒、フレームごとに 1 回 ≈ 8/s、tick 制限 100/s の内側)。Space で FPS 段が自力終了し `GFX 200-line mode test completed.` が端末に出てプロンプト復帰 (`last_reclaim_id` 3、`fault_kill_count` 0、`park_reject` 0) | **合格** |
+| **F3** 再試験 (ポーリング中) | FPS 段 (WAIT_POLL と走行を tick ごとに往復) で CTRL+STOP → 所有者だけ畳まれ (`last_reclaim_id` 3)、デスクトップ・端末・プロンプトまで復帰 (kill 直後の所有者確認が効いた)。`fault_kill_count` +1 は abort 経路の註どおり | **合格** |
+| **F7** 再試験 | Start → CUI mode、`v86 -t` result OK、regress 6 本 obs 全通過 (kselftest 69 / 0、API v48 Build 19:39) | **合格** |
+
+**判定 (PM、2026-09-12)**: F1〜F8 合格。**T8 受入済み** (K `f19dd00` `5911d80` `74f8015`、B `d73ceea` + submodule、W `732b07d` `a5bdca7` `e6a04ef` `097cd43`)。
+未実施: PEGC / Cirrus 構成 (§3-4)、8MB。譲りの性能: NP21/W 上で FPS 8 → 8 (相対劣化は観測できず)。
