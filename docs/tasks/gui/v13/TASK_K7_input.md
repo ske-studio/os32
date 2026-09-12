@@ -1,6 +1,6 @@
 # K7 — 入力統合: GUI 中の `kbd_getchar` を端末アプリの打鍵で満たす (設計草案)
 
-状態: **設計草案 (2026-09-12、PM) — 独立レビュー待ち。実装は発注していない。**
+状態: **独立レビュー通過 (2026-09-12、ユーザー経由)。§5 の反映を加えて K7-K を発注。**
 親: [PLAN.md](PLAN.md) §1 (決裁 B: K5 → K6 console → 端末アプリ → **K7 入力統合** → 既存 CUI コマンドを端末で流す)。
 前提: K5b (協調型 4 本、`exec_park` / `exec_resume`)、K6C (con_sink、端末アプリ `t5a_display`)。
 
@@ -47,3 +47,20 @@
 
 - 端末から CUI コマンドを起動する UI (次段「既存 CUI コマンドを端末で実際に流す」)。full-screen GFX 復帰。shell script。
 - `kbd_getkey` のスキャンコード完全再現。
+
+## 5. 独立レビュー (2026-09-12) の回答と反映 — 実装はこの節を優先する
+
+§3 の 3 点はいずれも **妥当** (① GUI 中だけ分岐する境界は正しい、② 注入権限は con_sink の読み手で必要十分、
+③ 注入リングの共有は v1.3 の範囲で承認。将来は pty 化)。加えて実コードの精査で出た 4 点を決定事項に足す:
+
+| # | 反映 | 対象 |
+|---|---|---|
+| R1 (①) | park の条件は **`kbd_gui_mode && g_cur_app && a->cpl3 && g_cur_frame != 0`**。`kbd_trygetchar` (`kbd.c:333-349`、ノンブロッキング) は park せず注入リングを見て無ければ -1。注入リングに文字があれば park せず即返す (UTF-8 の続きバイトを含む) | K |
+| R2 (②) | 端末アプリは**イベントループに入る前に `con_sink_read` を 1 回呼んで読み手権限を確立**する規約。`g_reader == CON_SINK_NO_READER` の段階の `kbd_inject` は `OS32_ERR_EXIST` で拒否 | A (規約)、K (拒否) |
+| A | gshell `multiapp.rs:601-608` の `slot_of_owner(k)` が `None` → `forget(k)` する経路は、**CUI アプリ (スロット無し) が `WAIT_KEY` のとき forget してはならない**。状態が `WAIT_KEY` なら `exec_resume(k, 0)` を呼ぶ分岐を足す (`wait_ret` はカーネルが上書きする、下記 B) | W |
+| B | **文字の取り出しはカーネルの `exec_resume` で完結**: `parked_from_kbd` の印を見て注入リングから 1 バイト取り、`a->frame[APP_FRAME_EAX]` に入れる。WM 側に取り出し用 KAPI は作らない。空なら resume を拒否 (`OS32_ERR_AGAIN` 相当、印は残す) | K |
+| C | WM が「注入リングに文字がある」ことを知る手段: **`con_sink_stat` は拡張しない (append-only)**。KAPI v47 は **`kbd_inject(const u8 *utf8, u32 len)`** (読み手専用、戻り = 積んだバイト数 / 負 = エラー) と **`kbd_inject_pending(void)`** (未読バイト数、誰でも可) の **2 本**。`exec_app_state` は新しい値 `APP_STATE_WAIT_KEY` を返す (値の追加は互換)。WM の `ready_to_run` は「`WAIT_KEY` かつ `kbd_inject_pending() > 0`」で真 | K (v47)、W |
+| D | `exec/appslot.c:321` の `if (a->state != APP_STATE_PARKED) return OS32_ERR_STALE;` を **`WAIT_KEY` も許す**ように広げ、`exec_kill` で鍵待ちのアプリを畳めるようにする (D5) | K |
+
+発注の分割: **K7-K** (カーネル + KAPI v47 + kselftest + ホスト TDD) → 着地後に **K7-W** (gshell: A / C の WM 側) と
+**K7-A** (端末アプリ: R2 の規約、`GUI_EV_TEXT` / `GUI_EV_KEY` → `kbd_inject`)。受入 I1〜I5 は 3 票が揃ってから。
