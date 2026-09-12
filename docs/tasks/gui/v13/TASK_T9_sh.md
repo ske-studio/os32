@@ -263,3 +263,7 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 
 **往復 5 (S `3374438` + 端末 `17870ea`): Request changes** — 折り返し BS は解消と確認。新規 blocker 1 件 (領域が変わった): 内蔵コマンドのパイプ `sh> echo a | cat` で、`sys_pipe_get_buf` が返すカーネル帯 (kmalloc) のポインタを `sys_redirect_fd_buf` に渡すため CPL=3 の早期ポインタ検証 (`ring3_ptr_ok`) が sh を fault kill する。常駐 CPL=0 では通っていた経路。→ SHELL_AS_APP ではパイプバッファを sh 自身のメモリから取る修正をコーダーが準備中、**着地可否はユーザー判断**。
 ゲート (テスター、`17870ea`): `make all` / `external` / `check` すべて exit=0。
+
+**往復 6 (S `a7d8ca4`、網羅性を要求): Request changes — blocker 7 件を一度に列挙** (経路 (a)〜(h) の見た / 見ていないの表つき)。B1 `sys_getcwd` のカーネル帯ポインタを CPL=3 で読む (`cd` / `pwd`)、B2 `sys_ls` コールバック内の KAPI 再入が CPL=0 のまま int 0x80 を通る (`ls /`)、B3 標準 FD のリダイレクト表が全アプリ共有 (`exec /bin/sh.bin > /tmp/out` で子が親の出力先を使い閉じる)、B4 内蔵名の後ろの外部段をパイプ判定が通す (`exec x | echo`)、B5 `ask` の BS が非破壊、B6 パイプ段ループが exit の印を見ない (`exit | ask`)、B7 `.inc` の変更を増分ビルドが拾わない。non-blocker: 注入リング満杯後の次キー欠落、内蔵 `cat` は stdin を読まない (既存)、複合内蔵のリダイレクトはネストを保存しない (既存)、255B 超の起動要求の誤表示、ホスト試験の範囲。
+PM 判定: **B1 / B2 は既存の CPL=3 プログラムが同じ使い方をしている** (`apps/edit/command.c:73` の `sys_getcwd`、`userland/cmds/find.c` の `find_cb` は `printf` と入れ子 `sys_ls` を呼ぶ) ので実機で裏取り、B3〜B7 は S へ (worktree で準備)。
+ゲート (テスター、`a7d8ca4`): `make all` / `external` / `check` すべて exit=0。sh.bin 62,256 B。
