@@ -278,6 +278,55 @@ pub fn request_kill(id: i32) {
     }
 }
 
+/// この添字の 1 本が「生きているのにスロットを持たない」か。
+///
+/// **KAPI (`exec_app_state`) を見ない**。この判定の呼び出し元には X1 が
+/// 含まれる (`session::request` = op 66) ので、契約 T8 で KAPI を呼べない。
+/// 被追跡かつスロット無しなら状態は `WAIT_KEY` / `PARKED` / 起動途中の
+/// どれかで、**どれも `Quit` を積む先 (スロットのリング) が無い**点は同じ。
+#[inline]
+fn is_slotless(st: &GuiState, i: usize) -> bool {
+    m().apps[i].alive && st.slot_of_owner(APP_ID_MIN + i as i32).is_none()
+}
+
+/// スロットを持たない被追跡アプリが 1 本でも生きているか (票 K7 受入 I3)。
+///
+/// 端末から起動した CUI プログラム (`kbd_getchar` で `APP_STATE_WAIT_KEY` に
+/// park) は `OP_INIT` を通らないのでスロットも窓も持たない。
+/// [`session::owner_active`] がスロットと窓しか見ないと、この 1 本を残したまま
+/// `SWITCH_CUI` / `SHUTDOWN` が成立し、AppSlot と per-app の物理ページが漏れる。
+pub fn slotless_live(st: &GuiState) -> bool {
+    let mut i = 0;
+    while i < MAX_APPS {
+        if is_slotless(st, i) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// スロットを持たない被追跡アプリ全部に `exec_kill` を予約する (票 K7 受入 I3)。
+/// 戻り値は新しく予約した本数。
+///
+/// 決裁 A3 の「`Quit` を配ってから `QUIT_GRACE_CYCLES` 周待って kill」は
+/// **配れる相手** (= スロットのある GUI アプリ) の話。スロットが無い 1 本には
+/// `Quit` を積む先が無いので待っても何も起きない — 猶予を待たずに畳む。
+/// 実行は top-level の [`drain_top_level`] で、成功した ID はそこで
+/// [`forget`] される。
+pub fn request_kill_slotless(st: &GuiState) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < MAX_APPS {
+        if is_slotless(st, i) && !m().apps[i].kill_req {
+            m().apps[i].kill_req = true;
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
 /// 生きているアプリ全部に `exec_kill` を予約する (決裁 A3 の「残りを kill」)。
 /// 戻り値は予約した本数。Quit に応答した本は `gui_owner_exit` で表から落ちて
 /// いるので、ここには残らない = 畳まれない。

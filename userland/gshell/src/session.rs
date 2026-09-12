@@ -228,6 +228,13 @@ fn arm_quit(st: &mut GuiState, reason: u8) {
         }
         i += 1;
     }
+    /* 票 K7 受入 I3: スロットを持たない被追跡アプリ (端末から起動した CUI
+     * プログラム。`kbd_getchar` で `WAIT_KEY` に park 中) には `Quit` を積む
+     * 先が無いので、上の輪は 1 本も触れていない。待っても自分から終われない
+     * ので**猶予を待たずに** `exec_kill` を予約する (実行は top-level の
+     * `multiapp::drain_top_level`)。これが無いとスロットと per-app の物理
+     * ページを漏らしたまま CUI へ戻る。 */
+    crate::multiapp::request_kill_slotless(st);
     /* 決裁 A3: ここから猶予を数え始める。順序は
      * 「全アプリへ Quit → 待ち → 残りを kill → 全回収 → SessionAction 実行」。
      * 最後の 2 つは `ready_to_run` (全回収の確認) と top-level の
@@ -307,6 +314,16 @@ fn retry_all(st: &mut GuiState) {
 /// X3 の周期ごとに呼ぶ再試行 (契約 S5) と、`Quit` の猶予の歩進 (決裁 A3)。
 pub fn x3_cycle(st: &mut GuiState) {
     retry_all(st);
+    /* 票 K7 受入 I3: 畳む action が保留の間は、スロット無しの被追跡アプリの
+     * kill 予約を毎周入れ直す (予約済みなら何もしない)。`drain_top_level` は
+     * `exec_kill` が失敗しても予約を落とすので、入れ直さないと `owner_active`
+     * が永久に真のまま = CUI へ戻れない、になりうる。 */
+    match s().action {
+        GUI_SESSION_SWITCH_CUI | GUI_SESSION_SHUTDOWN => {
+            crate::multiapp::request_kill_slotless(st);
+        }
+        _ => {}
+    }
     tick_quit_grace(st);
 }
 
@@ -348,8 +365,13 @@ pub fn ready_to_run(st: &GuiState) -> bool {
     }
 }
 
-/// まだ外部アプリが生きているか (窓かスロットが残っている)。
+/// まだ外部アプリが生きているか (窓・スロット・**スロット無しの被追跡アプリ**)。
 /// SessionAction の実行は「回収済み」を確認してからでなければならない (§7.1)。
+///
+/// 票 K7 受入 I3: 窓もスロットも持たない CUI プログラム (端末から起動して
+/// `kbd_getchar` で `WAIT_KEY` に park 中) は `multiapp` の表にしか現れない。
+/// ここで数えないと、その 1 本を残したまま `SWITCH_CUI` / `SHUTDOWN` が成立し、
+/// AppSlot と per-app の物理ページが漏れる (次に GUI へ入ると 3 本しか立たない)。
 pub fn owner_active(st: &GuiState) -> bool {
     let mut i = 0;
     while i < GUI_SLOT_MAX {
@@ -365,5 +387,5 @@ pub fn owner_active(st: &GuiState) -> bool {
         }
         w += 1;
     }
-    false
+    crate::multiapp::slotless_live(st)
 }

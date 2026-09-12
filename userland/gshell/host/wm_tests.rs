@@ -1968,3 +1968,63 @@ fn a_slotless_app_that_is_not_waiting_for_a_key_is_still_forgotten() {
     );
     assert!(!multiapp::is_tracked(3), "スロットの無い非鍵待ちが表に残った");
 }
+
+/* ---- K7-W 検査 5 (受入 I3): スロット無しの鍵待ちは SWITCH_CUI で畳む ----
+ *  端末 (`t5a_display`) と、そこから起動した窓無しの CUI プログラム
+ *  (`kbd_getchar` で `WAIT_KEY` に park) が生きている状態で CUI へ戻ると、
+ *  端末は畳まれるのに CUI プログラムだけ AppSlot に残っていた
+ *  (PM 実測 2026-09-12)。`Quit` はスロットのリングにしか積めないので、
+ *  この 1 本は待っても自分から終われない = 即 `exec_kill` するしかない。 */
+#[test]
+fn switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit() {
+    use crate::{mocks, multiapp, session, wm};
+    use os32api::gui::proto::GUI_SESSION_SWITCH_CUI;
+    mocks::init();
+    session::clear(); /* 前の試験の SessionAction を持ち越さない */
+    let shm = mocks::Shm::new();
+    {
+        let g = wm::g();
+        *g = one_gui_app_state(&shm);
+        g.inited = true;
+    }
+    multiapp::on_start(2); /* 端末: スロット 0 + 窓 1 枚 */
+    multiapp::on_start(3); /* 端末から起動した CUI: スロットも窓も無い */
+    mocks::set_app_state(2, ST_PARKED);
+    mocks::set_app_state(3, ST_WAIT_KEY);
+    mocks::set_kbd_pending(0); /* 打鍵待ちのまま (起こす理由が無い) */
+
+    /* Start → CUI mode → Yes。 */
+    assert_eq!(session::set_wm(wm::g(), GUI_SESSION_SWITCH_CUI, b"\0"), 0);
+    /* 配る先の無い 1 本は猶予を待たずに畳む予約が入る (決裁 A3 の外)。 */
+    assert!(
+        multiapp::pending_top_level_work(),
+        "Quit を配れない 1 本の kill が予約されていない"
+    );
+
+    /* 端末は Quit に応じて終了した。残るのは表の中の ID 3 だけ。 */
+    wm::g().reclaim_owner(2);
+    session::reclaim_owner(2);
+    multiapp::on_owner_exit(2);
+
+    /* ここで成立させてしまうと ID 3 の AppSlot と物理ページが漏れる。 */
+    assert!(
+        !session::ready_to_run(wm::g()),
+        "スロット無しの被追跡アプリを残したまま CUI へ切り替えようとした"
+    );
+
+    /* top-level の 1 周で畳む。 */
+    assert!(multiapp::resume_one(wm::g()), "top-level が kill を実行しない");
+    assert_eq!(mocks::kill_calls(), vec![3], "畳む相手が違う");
+    assert!(
+        mocks::resume_calls().is_empty(),
+        "畳む相手を起こしてしまった: {:?}",
+        mocks::resume_calls()
+    );
+    assert!(!multiapp::is_tracked(3), "kill した ID が表に残った");
+    assert_eq!(multiapp::live_count(), 0, "全回収になっていない");
+    assert!(
+        session::ready_to_run(wm::g()),
+        "全回収なのに SWITCH_CUI が実行できない"
+    );
+    wm::g().inited = false;
+}

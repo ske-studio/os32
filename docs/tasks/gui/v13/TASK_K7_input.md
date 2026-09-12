@@ -115,7 +115,12 @@
   `kbd_inject_pending` を先に見るので、空のとき KAPI は 1 本で済む。D11 の規則と上界 (30) は不変。
 - 指摘 A: `slot_of_owner` が `None` でも `WAIT_KEY` なら `forget` せず `exec_resume(k, 0)`。
   `OS32_ERR_AGAIN` (-14) はその周を譲るだけ (`save_turn` / `restore_turn` で turn・`last_run`・`input_streak` を巻き戻す)。
-- 未着手: `session::owner_active` はスロットと窓しか見ないので、鍵待ちの CUI が生きたまま SHUTDOWN / SWITCH_CUI が通る (票外)。
+- ~~未着手: `session::owner_active` はスロットと窓しか見ないので、鍵待ちの CUI が生きたまま SHUTDOWN / SWITCH_CUI が通る (票外)。~~
+  → **K7-W2 (2026-09-12、受入 I3 の不具合) で修正**。`owner_active` に `multiapp::slotless_live` (被追跡かつ `slot_of_owner` が `None`) を足し、
+  `arm_quit` と `session::x3_cycle` が `multiapp::request_kill_slotless` を予約する — `Quit` を積む先 (スロットのリング) が無い 1 本は
+  決裁 A3 の猶予を待たず、top-level の `drain_top_level` で `exec_kill` + `forget`。判定は KAPI を呼ばない
+  (`arm_quit` の呼び元に X1 = op 66 が居るため、契約 T8)。ホスト試験は `wm_tests.rs` の
+  `switch_cui_kills_a_slotless_key_waiting_app_that_cannot_be_sent_a_quit` (41 → 42 本)。実機・`make` は未実施 ([V4])。
 ## 10. 実機受入の記録 (PM / テスター)
 
 | 受入 | 構成 | obs | 判定 |
