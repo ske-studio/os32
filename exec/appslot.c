@@ -14,6 +14,7 @@
 
 #include "appslot.h"
 #include "os32_kapi_shared.h"   /* OS32_ERR_* / EXEC_ERR_* */
+#include "fd_redirect.h"       /* T9 §12 T1: リダイレクト表を ID の文脈にする */
 
 /* res_owner_set/get は fs/fd_redirect.c。exec/ は -Ifs を持たないので
  * kernel/gui.c と同じ流儀で extern 宣言する。 */
@@ -25,6 +26,35 @@ extern int  res_owner_get(void);
  * gui.h を include すると exec/ が -Ikernel に依存するので値で固定する。 */
 STATIC_ASSERT(APP_ID_SHELL == 1, appslot_shell_id_is_gui_shell_owner);
 STATIC_ASSERT(APP_ID_MAX < APP_SLOT_COUNT, appslot_table_holds_id_max);
+
+/* 標準 FD のリダイレクト表 (fs/fd_redirect.c) の **ID ごとの枠** (票 T9 §12 T1)。
+ * 表は FD 0/1/2 の 3 本しかなく全アプリ共有だったので、park してある sh の
+ * `> /tmp/out` に別アプリの printf が入り、パイプ中なら sh の .bss (別 CR3 で
+ * 解決される仮想番地) を別アプリが書いていた。park で走っていた ID の枠へ
+ * 移し、resume で戻す。添字 = ID で、ID 1 (WM / 常駐シェル) の枠も同じ表に
+ * 置く — 走っているのは常に 1 本なので、生きている表は「いまの表」1 つだけ。
+ *
+ * 境界: ID 1 が stdio を張ったまま exec_start することは無い (gshell は
+ * stdio を張らず、常駐シェルは入れ子 exec_run で park しない)。もし張れば
+ * その枠は子の枠へ移り、子の回収で閉じられる — 表が FD ごとに 1 本しかない
+ * という元からの限界 (D3) と同じ性質の話。 */
+static FdRedirectState g_redir[APP_SLOT_COUNT];
+
+/* 走っている id が譲る: いまの表を id の枠へ移し、WM の枠を表へ戻す。 */
+static void redir_switch_out(int id)
+{
+    fd_redirect_save(&g_redir[id]);
+    fd_redirect_restore(&g_redir[APP_ID_SHELL]);
+    fd_redirect_clear_state(&g_redir[APP_ID_SHELL]);   /* 所有は表へ移った */
+}
+
+/* id を起こす: いまの表 (WM のもの) を WM の枠へ移し、id の枠を表へ戻す。 */
+static void redir_switch_in(int id)
+{
+    fd_redirect_save(&g_redir[APP_ID_SHELL]);
+    fd_redirect_restore(&g_redir[id]);
+    fd_redirect_clear_state(&g_redir[id]);             /* 所有は表へ移った */
+}
 
 volatile u32 ring3_switch_count = 0;
 volatile u32 ring3_transition_count = 0;
@@ -82,6 +112,9 @@ void appslot_init(void)
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     g_gfx_owner = GFX_OWNER_WM;   /* 画面は WM のもの (票 T8 D1) */
+    /* リダイレクトの枠も空から (票 T9 §12 T1)。いまの表は fd_redirect_init
+     * が別に空にする — ここで閉じると、まだ生きている FD を横から閉じる。 */
+    for (i = 0; i < APP_SLOT_COUNT; i++) fd_redirect_clear_state(&g_redir[i]);
     res_owner_set(APP_ID_SHELL);
 }
 
@@ -217,6 +250,9 @@ void appslot_shell_commit(void)
     a->parked_from_yield = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
+    /* シェル帯を載せ替えた (shell.bin ⇄ gshell.bin)。前の住人の枠は
+     * その ID 1 の退場で回収済みなので、枠だけ空に戻す (票 T9 §12 T1)。 */
+    fd_redirect_clear_state(&g_redir[APP_ID_SHELL]);
     res_owner_set(APP_ID_SHELL);
 }
 
@@ -275,6 +311,8 @@ void appslot_park_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_wait = 1;      /* 「OP_WAIT 由来」の印 (C5) */
     a->in_op_wait = 0;
     a->state = APP_STATE_PARKED;
@@ -315,6 +353,8 @@ void appslot_park_kbd_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_kbd = 1;       /* 「kbd 待ち由来」の印 (K7 D1) */
     a->in_op_wait = 0;
     a->state = APP_STATE_WAIT_KEY;
@@ -366,6 +406,8 @@ void appslot_park_poll_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_poll = 1;      /* 「ポーリング由来」の印 (T8 D8) */
     a->in_op_wait = 0;
     a->state = APP_STATE_WAIT_POLL;
@@ -413,6 +455,8 @@ void appslot_park_yield_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_yield = 1;     /* 「明示的な譲り由来」の印 (T9 D5) */
     a->in_op_wait = 0;
     a->state = APP_STATE_WAIT_POLL;
@@ -483,6 +527,8 @@ void appslot_resume_commit(int id)
 {
     AppSlot *a = appslot_get(id);
     if (!a) return;
+    /* 票 T9 §12 T1: この ID が park 前に持っていた表へ戻す。 */
+    redir_switch_in(id);
     a->parked_from_wait = 0;      /* 印は 1 回きり (3 つの park 点すべてで) */
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
@@ -505,6 +551,12 @@ u32 appslot_reclaim(int id)
     u32 pages;
     if (!a || id == APP_ID_SHELL) return 0;
     pages = a->pages;
+    /* 票 T9 §12 T1: park したまま畳まれた ID のリダイレクトは **枠の中**に
+     * しか無い (いまの表は WM のもの) ので、exec_reclaim_owned の
+     * fd_redirect_reset_owned では閉じられない。ここで閉じて空にする。
+     * 走ったまま終わった ID の枠は resume のときに空にしてあるので、
+     * 同じ file_fd を二度閉じることはない。 */
+    fd_redirect_close_state(&g_redir[id]);
     slot_zero(a);
     a->state = APP_STATE_FREE;
     appslot_reclaim_count++;

@@ -37,6 +37,15 @@ char *kstrncpy(char *dst, const char *src, u32 n)
     return dst;
 }
 
+/* appslot.c が引く (票 T9 §12 T1: リダイレクト表を ID の文脈にする)。
+ * この票の対象外なので空の錠にする — 表そのものは実物の fs/fd_redirect.c と
+ * 組んで tools/tests/multiapp_impl_host.c のケース 24 が見ている。 */
+#include "fd_redirect.h"
+void fd_redirect_save(FdRedirectState *out)         { (void)out; }
+void fd_redirect_restore(const FdRedirectState *in) { (void)in; }
+void fd_redirect_clear_state(FdRedirectState *st)   { (void)st; }
+void fd_redirect_close_state(FdRedirectState *st)   { (void)st; }
+
 /* 実物。appslot.c が先 (launch.c が AppSlot を引く)。 */
 #include "appslot.c"
 #include "launch.c"

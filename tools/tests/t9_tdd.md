@@ -111,6 +111,37 @@ RED になる**ことを確認してから GREEN に戻した (下の「落ち�
 無いため、この項だけ `kernel/kernel.c` が `exec_init()` の直後に別口で回す。
 **この 3 項は実機でしか踏めない (未実施)。**
 
+## 4d. Codex 網羅レビュー 往復 8 の T1 (2026-09-13)
+
+標準 FD のリダイレクト表 (`fs/fd_redirect.c`) が全アプリ共有で、park/resume でも
+切り替わらなかった。表を **ID ごとの枠** (`exec/appslot.c` の `g_redir[]`) にして、
+park で走っていた ID の枠へ移し resume で戻す。
+
+`tools/tests/multiapp_impl_host.c` は **実物の `fs/fd_redirect.c` を取り込む**ように
+した (`res_owner_set/get` の実体もそちらへ移り、所有者タグが本物になる)。VFS は
+この票の対象外なので `vfs_open` / `vfs_close` / `vfs_seek` / `vfs_read_fd` /
+`vfs_write_fd` だけ最小の偽物を置き、「どの表に書き込みが入ったか」「何回閉じたか」を
+数える。ケース 24 は 36 検査:
+
+| 番号 | 見るもの |
+|---|---|
+| 24a〜24i | sh が stdout をファイルへ → park → **いまの表はコンソールへ戻る** → WM が別アプリを起動 → その stdout はコンソールで、sh の `/tmp/out` は増えない (**反例 1**) |
+| 24j〜24m | resume で sh の表が戻り、続きが同じファイルへ入る |
+| 24n〜24x | パイプバッファ版: park でバッファも枠へ移り、別アプリの `sys_write(1)` は sh の .bss を書かない (**反例 2**)。sh の `buf_len` は resume 後も不変 |
+| 24y〜24D | park したまま `exec_kill` → 枠の中のファイルが閉じられ、WM の表は触られない |
+| 24E〜24J | 走ったまま終了 → 閉じるのは 1 回だけ (枠は resume で空になっている = 二重 close しない) |
+
+RED は「修正を戻すと落ちる」形で確認した (実際の出力):
+
+| 戻したところ | 落ちた検査 |
+|---|---|
+| park / resume の持ち替え (`redir_switch_out` / `_in`) を効かなくする | `24f` `24h` `24i` `24m` `24r` `24t` `24u` `24x` |
+| `appslot_reclaim` の `fd_redirect_close_state()` を外す | `24B` `24C` |
+
+`exec/appslot.c` が `fd_redirect.h` を引くようになったので、`appslot.c` を取り込む
+他のハーネス (`launch_host.c` / `sbrk_tier_host.c`) には空の錠 (4 本) を置き、
+それぞれの runner の include に `fs` を足した。
+
 ## 5. 最終実行 (2026-09-12)
 
 ```

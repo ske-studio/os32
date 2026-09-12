@@ -170,6 +170,18 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   収まることは `STATIC_ASSERT` で固定 (KAPI が増えたらビルドが落ちる)。
   試験: `tools/tests/test_ring3_str.py` (新規、`make check-ring3-str-host`) 4 ケース 20 検査と、
   `kselftest_run_post_exec()` の 3 項 (`kselftest_run()` は `exec_init()` より前に走るため別口)。
+- **Codex 網羅レビュー 往復 8 の blocker T1 を修正** (2026-09-13): 標準 FD のリダイレクト表
+  (`fs/fd_redirect.c`) は FD 0/1/2 の 3 本しかなく**全アプリ共有**で、park/resume でも
+  切り替わらなかった。park してある sh の `> /tmp/out` が生きたままなので、WM の Start → Run で
+  起動した別アプリの `printf` がそこへ入り (反例 1)、パイプ中なら stdout が sh の .bss
+  (sh の**仮想**番地) なので別アプリの `sys_write(1)` がその番地を**別 CR3 で解決して書く**
+  (反例 2)。→ 表を **ID ごとの枠** (`exec/appslot.c` の `g_redir[APP_SLOT_COUNT]`、504 B) にし、
+  park (4 か所) で走っていた ID の枠へ**移し**、resume で戻す。ID 1 (WM / 常駐シェル) の枠も
+  同じ表に置く。持ち替えは**コピーではなく移動** — 同じ `file_fd` を 2 か所が持つと回収で
+  二重 close になるため (`fd_redirect_save` / `_restore` / `_clear_state` を `fs/fd_redirect.c` に追加)。
+  park したまま畳まれた ID のファイルは「いまの表」に無いので、`appslot_reclaim` が
+  `fd_redirect_close_state()` で枠から閉じる (走ったまま終わった ID の枠は resume で空なので
+  二重 close にならない)。試験は `test_multiapp_impl.py` ケース 24 (36 検査)。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 

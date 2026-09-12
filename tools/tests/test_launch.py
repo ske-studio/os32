@@ -21,7 +21,7 @@ FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
          "-fno-stack-protector", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement"]
 INCLUDES = ["-I" + str(ROOT / p)
-            for p in ("include", "kernel", "lib", "exec", "sdk/include/os32")]
+            for p in ("include", "kernel", "lib", "exec", "fs", "sdk/include/os32")]
 HOST_SRC = ROOT / "tools/tests/launch_host.c"
 KERNEL_SRC = ROOT / "exec/launch.c"
 

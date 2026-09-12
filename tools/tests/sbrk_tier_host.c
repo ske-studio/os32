@@ -33,6 +33,15 @@ static int host_owner = 1;
 void res_owner_set(int owner) { host_owner = owner; }
 int  res_owner_get(void)      { return host_owner; }
 
+/* appslot.c が引く (票 T9 §12 T1: リダイレクト表を ID の文脈にする)。
+ * この票の対象外なので空の錠にする — 表そのものは実物の fs/fd_redirect.c と
+ * 組んで tools/tests/multiapp_impl_host.c のケース 24 が見ている。 */
+#include "fd_redirect.h"
+void fd_redirect_save(FdRedirectState *out)         { (void)out; }
+void fd_redirect_restore(const FdRedirectState *in) { (void)in; }
+void fd_redirect_clear_state(FdRedirectState *st)   { (void)st; }
+void fd_redirect_close_state(FdRedirectState *st)   { (void)st; }
+
 #include "appslot.c"
 
 /* 共有ライブラリの .data/.bss 複製ページ数 (kernel/shlib.c の実物の口)。

@@ -27,12 +27,58 @@
 #include "types.h"
 
 /* ---- 実物のカーネルコード (ハードウェアには一切触らない部分) ---------- */
-extern void res_owner_set(int owner);
-extern int  res_owner_get(void);
-static int host_owner = 1;
-static int host_owner_sets = 0;
-void res_owner_set(int owner) { host_owner = owner; host_owner_sets++; }
-int  res_owner_get(void)      { return host_owner; }
+/* T9 §12 T1: 標準 FD のリダイレクト表も **実物** (fs/fd_redirect.c) を
+ * そのまま取り込む。park / resume で ID ごとに持ち替わることを、模型では
+ * なく実物の表で見るため。res_owner_set/get の実体もこちらにあるので、
+ * ハーネス側の写しは持たない (所有者タグが本物になる)。
+ * VFS はこの票の対象外なので、ファイル FD だけ最小の偽物を置く —
+ * 見たいのは「どの表に書き込みが入ったか」と「閉じたか」だけ。 */
+#include "vfs.h"
+
+#define HOST_VFS_MAX_FD 8
+static int  host_fd_open[HOST_VFS_MAX_FD];
+static u32  host_fd_written[HOST_VFS_MAX_FD];
+static int  host_fd_closes;
+static int  host_next_fd;
+
+int vfs_open(const char *path, int mode)
+{
+    (void)path; (void)mode;
+    if (host_next_fd >= HOST_VFS_MAX_FD) return -1;
+    host_fd_open[host_next_fd] = 1;
+    host_fd_written[host_next_fd] = 0;
+    return host_next_fd++;
+}
+
+void vfs_close(int fd)
+{
+    if (fd < 0 || fd >= HOST_VFS_MAX_FD) return;
+    /* 二重 close はここで分かる (試験が数える)。 */
+    if (host_fd_open[fd]) host_fd_closes++;
+    host_fd_open[fd] = 0;
+}
+
+int vfs_seek(int fd, int offset, int whence)
+{
+    (void)fd; (void)offset; (void)whence;
+    return 0;
+}
+
+int vfs_read_fd(int fd, void *buf, u32 size)
+{
+    (void)fd; (void)buf; (void)size;
+    return 0;
+}
+
+int vfs_write_fd(int fd, const void *buf, u32 size)
+{
+    (void)buf;
+    if (fd < 0 || fd >= HOST_VFS_MAX_FD || !host_fd_open[fd]) return -1;
+    host_fd_written[fd] += size;
+    return (int)size;
+}
+
+#include "fd_redirect.c"
 
 #include "appslot.c"
 
@@ -359,6 +405,9 @@ static int ma_res_add(int kind, int n)
 static void ma_reclaim_res(int id)
 {
     int k;
+    /* exec/exec.c の exec_reclaim_owned (1)。いまの表からその ID のものを
+     * 外す (park したまま畳まれた分は appslot_reclaim が枠から閉じる)。 */
+    fd_redirect_reset_owned(id);
     /* exec/exec.c の exec_reclaim_owned (9b)。ID だけを使う (票 T9 D3)。 */
     launch_owner_exit(id);
     appslot_gfx_owner_exit(id);
@@ -1844,6 +1893,114 @@ static void case_yield_and_kill_chain(void)
     launch_init();
 }
 
+/* ========================================================================
+ *  24. 標準 FD のリダイレクト表は ID の文脈 (票 T9 §12 T1)
+ *
+ *  表 (fs/fd_redirect.c) は FD 0/1/2 の 3 本しかなく全アプリ共有だった。
+ *  park してある sh のリダイレクトが生きたままなので:
+ *    反例 1: WM の Start → Run で起動した別アプリの printf が sh の
+ *            `> /tmp/out` に入る
+ *    反例 2: パイプ中は stdout が sh の .bss (sh の**仮想**番地) なので、
+ *            別アプリの sys_write(1) がその番地を別 CR3 で解決して書く
+ *  park で走っていた ID の枠へ移し、resume で戻す。
+ * ======================================================================== */
+static void host_reset_files(void)
+{
+    int i;
+    for (i = 0; i < HOST_VFS_MAX_FD; i++) {
+        host_fd_open[i] = 0;
+        host_fd_written[i] = 0;
+    }
+    host_fd_closes = 0;
+    host_next_fd = 0;
+}
+
+static void case_redirect_context(void)
+{
+    static u8 pipebuf[16];
+    int a2, a3;
+    int closes0;
+    u32 i;
+
+    report("24 リダイレクト表は ID の文脈 (park/resume で持ち替える)\n");
+
+    /* --- 反例 1: 別アプリの stdout が sh のファイルへ入らない ---------- */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+
+    a2 = ma_start_gfx(100, 1, 0);                  /* sh 相当 */
+    check(a2 == APP_ID_MIN, "24a sh が立つ");
+    check(fd_redirect_to_file(1, "/tmp/out", FD_REDIR_WRITE) == 0,
+          "24b sh が stdout をファイルへ張る");
+    check(fd_redirect_write(1, "hello", 5) == 5, "24c sh の printf がファイルへ");
+    check(host_fd_written[0] == 5, "24d ファイルに 5 バイト");
+
+    check(ma_park_yield() == 0, "24e sh が park する (ask の WAIT_KEY 相当)");
+    check(fd_is_redirected(1) == 0,
+          "24f park でいまの表はコンソールへ戻る (枠へ移した)");
+
+    a3 = ma_start_gfx(100, 1, 0);                  /* WM の Start -> Run */
+    check(a3 > 0 && a3 != a2, "24g WM が別アプリを起動する");
+    check(fd_redirect_write(1, "XXXX", 4) == -1,
+          "24h 別アプリの stdout はコンソール (リダイレクトされていない)");
+    check(host_fd_written[0] == 5,
+          "24i 別アプリの printf は sh の /tmp/out に入らない (反例 1)");
+
+    check(ma_park_yield() == 0, "24j 別アプリも譲る");
+    check(ma_resume_poll(a2) == 0, "24k sh を起こす");
+    check(fd_is_redirected(1) == 1, "24l resume で sh の表が戻る");
+    check(fd_redirect_write(1, "!", 1) == 1 && host_fd_written[0] == 6,
+          "24m 続きは同じファイルへ入る");
+
+    /* --- 反例 2: パイプ中のバッファ (sh の .bss) を他人が書かない ------ */
+    for (i = 0; i < 16; i++) pipebuf[i] = 0;
+    check(fd_redirect_to_buffer(1, pipebuf, 16u, 0) == 0,
+          "24n sh が stdout をパイプバッファへ張る");
+    check(fd_redirect_write(1, "ab", 2) == 2, "24o sh がバッファへ 2 バイト");
+    check(fd_redirect_get_buf_len(1) == 2, "24p sys_redirect_get_buf_len が 2");
+
+    check(ma_park_yield() == 0, "24q sh が park する");
+    check(fd_is_redirected(1) == 0, "24r バッファも枠へ移る");
+    check(ma_resume_poll(a3) == 0, "24s 別アプリを起こす");
+    check(fd_redirect_write(1, "ZZZZ", 4) == -1,
+          "24t 別アプリの stdout は sh のバッファを指さない");
+    check(pipebuf[2] == 0,
+          "24u sh の .bss は書かれない (別 CR3 の番地を書かない。反例 2)");
+    check(ma_park_yield() == 0, "24v 別アプリが譲る");
+    check(ma_resume_poll(a2) == 0, "24w sh を起こす");
+    check(fd_redirect_get_buf_len(1) == 2, "24x sh のバッファ長は 2 のまま");
+
+    /* --- 回収: park したまま畳まれた ID は枠の中を閉じる ---------------- */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+    a2 = ma_start_gfx(100, 1, 0);
+    check(fd_redirect_to_file(1, "/tmp/out", FD_REDIR_WRITE) == 0,
+          "24y 張ってから park する");
+    check(ma_park_yield() == 0, "24z park");
+    closes0 = host_fd_closes;
+    check(ma_kill(a2) == 0, "24A park 中のアプリを畳む");
+    check(host_fd_closes == closes0 + 1,
+          "24B 枠の中のファイルが閉じられる (いまの表には無い)");
+    check(host_fd_open[0] == 0, "24C ファイルは開いたままにならない");
+    check(fd_is_redirected(1) == 0, "24D WM の表は触らない");
+
+    /* --- 走ったまま終わった ID は二重 close にならない ------------------ */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+    a2 = ma_start_gfx(100, 1, 0);
+    check(fd_redirect_to_file(1, "/tmp/o2", FD_REDIR_WRITE) == 0, "24E 張る");
+    check(ma_park_yield() == 0, "24F 一度譲る (枠へ移る)");
+    check(ma_resume_poll(a2) == 0, "24G 起こす (枠から戻る)");
+    closes0 = host_fd_closes;
+    check(ma_exit(0) == 0, "24H 走ったまま終わる");
+    check(host_fd_closes == closes0 + 1,
+          "24I 閉じるのは 1 回だけ (枠は resume で空になっている)");
+    check(fd_is_redirected(1) == 0, "24J 表はコンソールへ戻る");
+}
+
 int main(void)
 {
     failures = 0;
@@ -1874,6 +2031,7 @@ int main(void)
     case_cui_only_and_reject_kill();
     case_poll_yield();
     case_yield_and_kill_chain();
+    case_redirect_context();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

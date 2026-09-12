@@ -86,4 +86,48 @@ int fd_redirect_write(int fd, const void *buf, u32 size);
 /* パイプバッファの書き込み済みデータ長を取得 */
 u32 fd_redirect_get_buf_len(int fd);
 
+/* ======================================================================== */
+/*  アプリ ID ごとの退避枠 (票 T9 §12 T1、Codex 網羅レビュー 往復 8)         */
+/*                                                                          */
+/*  この表は FD 0/1/2 の 3 本しかなく、**全アプリで 1 つ**だった。GUI で     */
+/*  アプリが同時に生きるようになると、park してある sh のリダイレクトが      */
+/*  そのまま生きているので:                                                  */
+/*                                                                          */
+/*    - WM の Start → Run で別アプリを起動すると、その printf (sys_write(1)) */
+/*      が **sh の `> /tmp/out`** に入る (反例 1)                            */
+/*    - パイプ中なら stdout は sh の .bss (sh の**仮想**番地) なので、別     */
+/*      アプリの sys_write(1) がその番地を**別アプリの CR3** で解決して書く   */
+/*      → 別アプリの領域破壊か fault (反例 2)                                */
+/*                                                                          */
+/*  そこで表そのものを「走っている ID の文脈」にする。exec/appslot.c の      */
+/*  park / resume が **持ち替える** (コピーではなく移す — 同じ file_fd を    */
+/*  2 か所が持つと二重 close になる)。                                       */
+/* ======================================================================== */
+
+#define FD_REDIRECT_SLOTS  3    /* FD 0/1/2 */
+
+typedef struct {
+    FdRedirect fd[FD_REDIRECT_SLOTS];
+} FdRedirectState;
+
+/* いまの表を out へ **移す** (out へ写し、いまの表はコンソールへ戻す)。
+ * ファイルは閉じない — 所有ごと out へ移るだけ。 */
+void fd_redirect_save(FdRedirectState *out);
+
+/* in をいまの表へ **移す** (上書き)。呼ぶ前に必ず fd_redirect_save で
+ * いまの表を退避しておくこと (しないと生きている file_fd を取りこぼす)。
+ * 呼んだ後の in は「空になったもの」として扱う (fd_redirect_clear_state)。 */
+void fd_redirect_restore(const FdRedirectState *in);
+
+/* 枠を空 (全部コンソール) にする。**閉じない** — 所有が別へ移った後に使う。 */
+void fd_redirect_clear_state(FdRedirectState *st);
+
+/* 枠の中のファイルを閉じて空にする (回収用)。畳まれた ID の表が
+ * 「退避されたまま」のとき、生きているのは枠の中だけなので、
+ * fd_redirect_reset_owned (いまの表を見る) では閉じられない。 */
+void fd_redirect_close_state(FdRedirectState *st);
+
+/* 枠の fd がリダイレクト中か (1/0)。自己診断とホスト試験のための問い合わせ。 */
+int fd_redirect_state_active(const FdRedirectState *st, int fd);
+
 #endif /* FD_REDIRECT_H */

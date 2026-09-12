@@ -172,6 +172,27 @@ text の増分は `launch.o` 2900 B + `appslot.o` 4131 → **4579 B** (+448: `pa
 `exec.o` の **.bss は 8708 B で不変**、`.data` も 12 B で不変。
 KAPI は 8 本増えて v49 (`KernelAPI` 構造体が 32 B 伸びる — 関数ポインタ 8 個)。
 
+## カーネル帯の静的計上 (T9 §12 T1、2026-09-13)
+
+標準 FD のリダイレクト表 (`fs/fd_redirect.c`) を **アプリ ID ごとの文脈** にしたぶん。
+枠は `exec/appslot.c` の `static FdRedirectState g_redir[APP_SLOT_COUNT]` (カーネル .bss、
+`kmalloc` しない)。測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を
+基準版 (feat/gui `9f1d77a`) と並べたもの (カーネル全体のリンクとゲストの空き容量は未測定 —
+`make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| `FdRedirect` 1 本 | 28 B | `target_type` / `file_fd` / `owner` の `int` 3 個 + `buffer` ポインタ + `buf_capacity` / `buf_pos` / `buf_len` の `u32` 3 個 |
+| `FdRedirectState` (FD 0/1/2) | 84 B | 28 × `FD_REDIRECT_SLOTS` (3) |
+| 枠 `g_redir[]` | **504 B** | 84 × `APP_SLOT_COUNT` (6)。`i386-elf-nm -S` の実測 `0x1F8` |
+| 整列込みの実測 `appslot.o` の .bss | 1192 → **1720 B** (+528) | 504 + `g_slot` の後ろの詰め物 24 B |
+| `fd_redirect.o` | .bss 116 B で**不変** | text 1289 → 1676 B (+387: save/restore/clear/close/state_active の 5 本) |
+| **合計 (静的)** | **528 B** | すべて `appslot.o` の .bss |
+
+`appslot.o` の text は 4579 → **4967 B** (+388: 持ち替え 2 本 + park 4 か所と resume / init /
+shell_commit / reclaim の呼び出し)。切替のコストは構造体コピー 84 B × 2 (退避 + 復元) で、
+park / resume ごとに 1 回。`exec.o` は 1 行も変わらない (呼ぶのは `appslot.c` の中だけ)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。
