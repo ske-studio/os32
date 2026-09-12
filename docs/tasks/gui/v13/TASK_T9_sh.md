@@ -61,7 +61,7 @@
 |---|---|---|
 | S1 | 内蔵 | 端末で `sh` → `sh> ` → `ls /` `cat /etc/system.cfg` `cd /usr` `pwd` `env` の出力が端末に出る |
 | S2 | 外部 | `sh> kbd_echo` → 子が端末経由で起動し打鍵が届き、`q` で戻ると **`sh> ` に戻る** (`sh` は待っている間 `WAIT_POLL` で譲り、子は `WAIT_KEY`) |
-| S3 | スクリプト | `run /test/hello.sh` (内蔵 + 外部の混在、無ければ用意) が最後まで流れる |
+| S3 | スクリプト | `source /test/hello.sh` (`userland/tests/data/hello.sh`、内蔵 `echo` `pwd` `env` + 外部 `klibc_test` の混在) が最後まで流れ `script done` で `sh> ` に戻る |
 | S4 | 拒否 | `sh> os32gui` / `filer` / `rshell` → `sh: cui only` |
 | S5 | 終了 | `exit` で `sh` が終わり端末のプロンプト `> ` に戻る。接続モードの ESC は `launch_cancel` で sh (と孫) を畳んでからプロンプトへ (D9)。その後の起動要求が `ERR_FULL` にならない |
 | S6 | CTRL+STOP | 端末にフォーカスがある状態で子が走っている最中に CTRL+STOP → 連鎖の末尾 (子) だけが畳まれ `sh> ` に戻る (D8)。もう 1 回で sh が畳まれ端末のプロンプトへ |

@@ -225,6 +225,9 @@ filesystem:
     - host: userland/tests/data/test_script.bat
       guest: /home/user/test_script.bat
       tags: [test]
+    - host: userland/tests/data/hello.sh
+      guest: /test/hello.sh
+      tags: [test]
     # --- MGX 漫画サンプルページ (tools/img2mgx.py で生成) ---
     - host: "assets/manga/*.MGX"
       guest: /data/manga/
