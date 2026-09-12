@@ -206,3 +206,5 @@ OS32 が報告する `sys_mem_kb` は **RAM の上端アドレス / 1024** な�
 - `gfx/backend_pegc.c` の probe 段 2 が `sys_get_mem_kb() * 1024 > PEGC_LINEAR_BASE` で窓の可否を決めていた。K6-RAM 決裁 (2) で上端の定義が「RAM の上端 / 1024」になったため、15MB 構成 (`ExMemory 16`) でも 17408 になり、**穴** (`[0xF00000, 0x1000000)` = RAM にしない 15-16MB システム空間) が空いているのに 9801 プレーナへ落ちていた (`hal_test` が `backend pc98 (planar 4bpp)`、`sys_top_reserved` = 0)。
 - 修正: `kernel/pgalloc.c` に `pgalloc_range_has_ram(first, end)` (PFN 半開、ブート時の物理地図を `physmem_count` で見る問い合わせ) を足し、probe 段 2 を `pgalloc_range_has_ram(MEM_SYSTEM_SPACE_BASE / PAGE_SIZE, MEM_HIGH_RAM_BASE / PAGE_SIZE)` に置換。8MB (legacy 経路) は従来どおり通る。ホスト TDD は `tools/tests/test_memory_boot.py` (17408 / 33792 / 8192) と `test_pgalloc_range.py` の `device_window_ram` で RED→GREEN 済み、実機は未検証。
 - 決裁 (4) の `cirrus_win_usable()` は同じ誤判定の型 (上端で窓を決める) を残したまま = **高位 RAM がある構成ではリニア窓 0x1000000 が常に不可**。この票では触らず、Cirrus レーン再開時に同じ口 (`pgalloc_range_has_ram`) で直す。
+
+**K6-3 の実機確認 (2026-09-12)**: 15MB 構成で `gfxmode pegc` → GUI が 480 ラインで上がり、全画面 GFX → 復帰 (T8 F1) も通る。Cirrus 側の同型の判定 (`cirrus_win_usable`) は決裁 (4) どおり Cirrus レーン再開時に直す。
