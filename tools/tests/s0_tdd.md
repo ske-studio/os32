@@ -101,7 +101,6 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
 - bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
   symlink / 別マウントだけを `check_root_etc` が止める)。
 
-## T.`)。
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
 
@@ -113,6 +112,7 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
 既存システムには tsv を通常配備する (TASK_S0 §3)。カーネル・KAPI・配備スクリプトは触らない。
 
 試験: `python3 -B tools/tests/test_mk_settings_db.py` (38 件)。ホストのみ。エミュレータ・配備・`make`
+試験: `python3 -B tools/tests/test_mk_settings_db.py` (43 件)。ホストのみ。エミュレータ・配備・`make`
 (dry-run `-n` を除く) は実行していない。
 
 ### 実行済み RED → GREEN
@@ -130,6 +130,41 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
    非ゼロ終了」に変更、`build/assets.mk` に `$(BUILD_OUT)/settings.db` (FORCE 依存) を追加、
    `build/image.mk` の FDD / `packages` に結線、`build/core_packages.yaml` の `minimal` に
    `/etc/settings.db` を追加 → 38 件すべて PASS。
+**証拠を 2 つに分ける**: (a) 反例で落ちるところを実際に見た試験と、(b) 実装が先にあって
+「今 通っている」だけの回帰試験。どちらなのかを書き分ける。
+
+#### (a) 反例による RED (実装前、または実装を一時的に緩めて確認した)
+
+| 試験 | RED の症状 | 直したもの |
+|---|---|---|
+| `BuildWiring` 3 件 | 結線が無い (assets.mk / image.mk / core_packages.yaml) | ビルド統合 |
+| `MkpkgMissingFile.test_missing_file_is_error` | `exit 0` + `MINIMAL.PKG: 0 files, 43 bytes` | mkpkg: 欠損をエラーに |
+| `test_glob_without_match_is_error` / `test_later_package_empty_glob_writes_nothing` | 0 件の glob を `no files, skipping` で飛ばし、正常側の `.PKG` を書いて `exit 0` | mkpkg: 展開 0 件も欠損 |
+| `test_missing_defs_is_error` | 存在しない `--defs` を黙って無視して `exit 0` | mkpkg: 欠けた定義をエラーに |
+| `RealPackageDefs.test_every_registered_glob_matches_something` | リポジトリ自身の登録に 0 件の glob が 3 つ (`assets/images/*.vbz` `*.vdp` `assets/manga/*.mgx`) → 厳格化した mkpkg では `make iso` が落ちる | `userland/package_defs.yaml` の死んだ 3 行をコメント化 |
+| `Rejects.test_int32_overflow` | 範囲検査を外すと `2147483648` を**受理**する | int32 の範囲検査 |
+| `Rejects.test_duplicate_key` | 重複検査を外すと `sqlite3.IntegrityError: UNIQUE constraint failed` の Traceback (理由が `path:line:` の形で出ない) | 重複検査 |
+| `Rejects.test_cr_rejected` | CR 検査を外すと `text` 値の末尾 CR (`x\r`) がそのまま DB に入る。`int` 行は字句規則が拾ってしまうので、CR 規則だけが捕まえる反例 (text 行・コメント行) を試験に足した | CR 検査 |
+
+- mkpkg の 4 件: 修正前の `tools/mkpkg.py` (feat/gui 6360618) に戻して `MkpkgMissingFile` を実行 →
+  `Ran 7 tests, FAILED (failures=3)` と上表の症状を確認し、修正版へ戻した。
+- tsv の 3 件: `tools/mk_settings_db.py` の当該検査を一時的に外して `Rejects` を実行 →
+  `Ran 18 tests, FAILED (failures=3)`。確認後に元へ戻し (着地版との差分が空であることを確認)、
+  全件 GREEN を再確認した。
+- `RealPackageDefs` は `userland/package_defs.yaml` を戻して単独実行 → 0 件の 3 パターンを
+  列挙して FAILED を確認し、コメント化した版へ戻した。
+- `Rejects.test_text_255_boundary` は 1 回目に試験側の欠陥で落ちた (1 メソッド内で出力名 `out.db` を
+  使い回し、直前の成功ビルドの残骸を「失敗なのに DB を作っている」と誤判定)。出力名を毎回変えて修正。
+
+#### (b) 回帰試験 (実装を先に書いたので反例 RED を経ていない)
+
+決定性 6 件、スキーマ 5 件、その他の規則違反の拒否 (不正 UTF-8 / NUL / key・scope 規則 / 列数 /
+type / int の字句 / text 255B / blob の hex) と境界値の受理、`RealDefaults` 2 件。
+これらは「今 通っている」以上のことは言えない。
+
+#### GREEN
+
+`Ran 43 tests — OK`。
 
 ### 見たもの (合格の中身)
 
@@ -144,6 +179,10 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
   blob 4096B) は受理。末尾の空欄は NULL ではなく空の text として入る。
 - **mkpkg**: 欠損 = 非ゼロ + `ERROR: <path> not found (package '<name>')`、途中まで書いた `.PKG` を
   残さない。glob が 0 件なのは欠損扱いにしない (parser は変えていない)。
+- **mkpkg**: 欠損 = 非ゼロ + `ERROR: <理由> (package '<name>')`。欠損は 3 種 — 登録ファイルが無い /
+  glob の展開が 0 件 / `--defs` のファイルが無い。いずれも**全パッケージを先に解決してから**まとめて
+  報告し、`.PKG` を 1 つも書かずに落ちる (後半のパッケージが欠損しても前半の `.PKG` を残さない)。
+  簡易 parser は変えず、展開結果だけを見ている。
 - **dry-run** (`make -n all` / `-n iso` / `-n images/os32_boot.d88`): `mk_settings_db.py` は 1 回だけ
   走り、`mkfat12.py` / `mkpkg.py` より前。`packages` の依存に結んだ既存入力
   (`programs` / `boot` / `vmkernel.lz4` / `unicode_bin` / `assets/fep.db`) も mkpkg より前に生成される。
@@ -156,6 +195,7 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
   smoke ビルドで FAT12 に 3 KB / 3 クラスタとして載ることまで確認した。
 - 新規インストールでの seed (FDD の `install.bin` が `/kernel.bin` を要求する既存不整合、B10) は
   S3 の受入。本票では「媒体に入っている」までしか言えない。
+
 票 [docs/tasks/settings/TASK_S0.md](../../docs/tasks/settings/TASK_S0.md)。
 本書は **S0-K (KAPI v50 / `shm_write_row` の境界 / exec 回収順序)** 分。
 S0-D (配備保護) と S0-T (初期値 tsv) は別票が同じファイルに節を足す。
@@ -170,7 +210,9 @@ python3 tools/tests/test_vfs_fd_sqlite.py
 python3 tools/tests/test_sqlite_groups.py
 ```
 
-## 1. 何を実物で組んだか (S0-K)
+## K. KAPI v50 / 境界検査 / 回収順序 (S0-K、2026-09-13)
+
+### 1. 何を実物で組んだか (S0-K)
 
 `tools/tests/kapi_db_v50_host.c` は **実 `kapi/kapi_db.c` + 実 `lib/sqlite3/sqlite3.c`
 + 実 `lib/sqlite3/os32_sqlite_vfs.c` + 実 `fs/vfs_fd.c` + RAM バックエンド**
@@ -182,7 +224,7 @@ python3 tools/tests/test_sqlite_groups.py
   実物の帯判定は `exec/exec.c` にあり、CPL=3 の受入 (`userland/tests/db_v50_test.c`) が踏む。
 - `MEM_SHM_BASE` — 試験側の配列へ向け、16KB の **後ろに 256B の番兵**を置く。
 
-## 2. RED → GREEN
+### 2. RED → GREEN
 
 | # | 対象 | RED (実際に落としたもの) | GREEN |
 |---|---|---|---|
@@ -191,7 +233,7 @@ python3 tools/tests/test_sqlite_groups.py
 | 3 | exec 回収順序 (§1c) | `db_cleanup_owned` を元の (6) の位置へ戻す → `AssertionError: exec_reclaim_owned: db_cleanup_owned は vfs_close_owned より先` | 先頭へ移して PASS |
 | 4 | 回収順序の**観測できる差** | `order_old` (FD を先に閉じる) で **後始末がバックエンドに届いた回数 = 2** | `order_new` (DB が先) で **21**。rollback の journal 読み戻しは生きた FD 越しにしか起きない |
 
-## 3. ケース一覧 (`test_kapi_db_v50.py`)
+### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
 | ケース | 見るもの |
 |---|---|
@@ -204,7 +246,7 @@ python3 tools/tests/test_sqlite_groups.py
 | `owner_isolation` | 子 owner の回収で親の接続と実行中 stmt が無事 |
 | `order_new` / `order_old` | 上の RED → GREEN の 4 |
 
-## 4. ホストでは踏めなかったもの ([V4])
+### 4. ホストでは踏めなかったもの ([V4])
 
 - **1364 列を超える行**での descriptor 領域のはみ出し。SQL は NUL 込み 1024B が上限なので
   そこまで列を並べた statement を作れない。純関数 `shm_row_fits_n` の算術だけで覆ってある。

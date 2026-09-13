@@ -9,6 +9,7 @@
 
 実ファイルは temp dir だけ。エミュレータも配備も触らない。
 """
+import glob
 import hashlib
 import os
 import pathlib
@@ -257,6 +258,9 @@ class Rejects(TempCase):
 
     def test_cr_rejected(self):
         self.assertRejected(b"gshell\ta\tint\t1\r\n", 'CR')
+        # text の値に付いた CR は他の規則では落ちない (CR 規則だけが捕まえる)
+        self.assertRejected(b"gshell\ta\ttext\tx\r\n", 'CR')
+        self.assertRejected(b"# comment\r\ngshell\ta\ttext\tx\n", 'CR')
 
     def test_text_255_boundary(self):
         res, _ = self.build("gshell\ta\ttext\t%s\n" % ('x' * 255))
@@ -340,18 +344,72 @@ class MkpkgMissingFile(TempCase):
             encoding='utf-8')
         return p
 
-    def _run(self, defs):
-        out = self.dir / 'packages'
-        return subprocess.run(
-            [sys.executable, '-B', str(MKPKG), '--defs', str(defs),
-             '--output', str(out), '--base', str(self.dir)],
-            capture_output=True, text=True)
+    def _run(self, *defs):
+        self.out = self.dir / 'packages'
+        cmd = [sys.executable, '-B', str(MKPKG)]
+        for d in defs:
+            cmd += ['--defs', str(d)]
+        cmd += ['--output', str(self.out), '--base', str(self.dir)]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def pkgs_written(self):
+        if not self.out.is_dir():
+            return []
+        return sorted(p.name for p in self.out.iterdir())
+
+    def _two_packages(self, second_host):
+        """1 つ目は揃っている / 2 つ目が欠損、の定義を書く。"""
+        (self.dir / 'build' / 'out').mkdir(parents=True, exist_ok=True)
+        (self.dir / 'build' / 'out' / 'vmkernel.lz4').write_bytes(b'K' * 32)
+        p = self.dir / 'defs.yaml'
+        p.write_text(
+            "minimal:\n"
+            "  type: package\n"
+            "  version: 1\n"
+            "  lzss: false\n"
+            "  files:\n"
+            "    - host: build/out/vmkernel.lz4\n"
+            "      guest: /boot/vmkernel.lz4\n"
+            "append:\n"
+            "  type: package\n"
+            "  version: 1\n"
+            "  lzss: false\n"
+            "  files:\n"
+            "    - host: \"%s\"\n"
+            "      guest: /data/\n" % second_host, encoding='utf-8')
+        return p
 
     def test_missing_file_is_error(self):
         res = self._run(self._defs('build/out/settings.db'))
         self.assertNotEqual(res.returncode, 0,
                             '欠損が素通りしている: %s' % res.stdout)
         self.assertIn('settings.db', res.stdout + res.stderr)
+
+    def test_later_package_missing_writes_nothing(self):
+        """後半のパッケージが欠損したら、前半の .PKG も書かない。"""
+        res = self._run(self._two_packages('build/out/settings.db'))
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(self.pkgs_written(), [],
+                         '欠損があるのに .PKG を書いている')
+
+    def test_later_package_empty_glob_writes_nothing(self):
+        """0 件の glob も欠損。正常側の .PKG を書いて成功にしない。"""
+        res = self._run(self._two_packages('build/out/settings*.db'))
+        self.assertNotEqual(res.returncode, 0,
+                            '0 件の glob が素通りしている: %s' % res.stdout)
+        self.assertEqual(self.pkgs_written(), [],
+                         '欠損があるのに .PKG を書いている')
+
+    def test_missing_defs_is_error(self):
+        """存在しない --defs を黙って無視しない (定義ごと落ちる)。"""
+        ok = self._defs('build/out/settings.db')
+        (self.dir / 'build' / 'out').mkdir(parents=True, exist_ok=True)
+        (self.dir / 'build' / 'out' / 'settings.db').write_bytes(b'DB')
+        res = self._run(ok, self.dir / 'nosuch.yaml')
+        self.assertNotEqual(res.returncode, 0,
+                            '欠けた --defs が素通りしている: %s' % res.stdout)
+        self.assertIn('nosuch.yaml', res.stdout + res.stderr)
+        self.assertEqual(self.pkgs_written(), [])
 
     def test_present_file_is_ok(self):
         (self.dir / 'build' / 'out').mkdir(parents=True)
@@ -360,8 +418,7 @@ class MkpkgMissingFile(TempCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue((self.dir / 'packages' / 'MINIMAL.PKG').is_file())
 
-    def test_glob_without_match_is_not_an_error(self):
-        """glob は 0 件でも欠損ではない (parser を変えないため)。"""
+    def _glob_defs(self):
         p = self.dir / 'defs.yaml'
         p.write_text(
             "append:\n"
@@ -371,8 +428,22 @@ class MkpkgMissingFile(TempCase):
             "  files:\n"
             "    - host: \"assets/images/*.vbz\"\n"
             "      guest: /data/images/\n", encoding='utf-8')
-        res = self._run(p)
+        return p
+
+    def test_glob_without_match_is_error(self):
+        """0 件の glob は「登録したのに入らなかった」なのでエラー。"""
+        res = self._run(self._glob_defs())
+        self.assertNotEqual(res.returncode, 0,
+                            '0 件の glob が素通りしている: %s' % res.stdout)
+        self.assertIn('*.vbz', res.stdout + res.stderr)
+        self.assertEqual(self.pkgs_written(), [])
+
+    def test_glob_with_match_is_ok(self):
+        (self.dir / 'assets' / 'images').mkdir(parents=True)
+        (self.dir / 'assets' / 'images' / 'a.vbz').write_bytes(b'VBZ')
+        res = self._run(self._glob_defs())
         self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self.pkgs_written(), ['APPEND.PKG'])
 
 
 def read_mk(name):
@@ -390,6 +461,31 @@ def mk_prereqs(text, target):
     """target: の前提条件 (継続行を畳んだ 1 行) を返す。"""
     body = text.split('\n' + target + ':', 1)[1]
     return body.split('\n', 1)[0]
+
+
+class RealPackageDefs(unittest.TestCase):
+    """リポジトリ自身のパッケージ定義が厳格化した mkpkg と噛み合うか。
+
+    glob の 0 件がエラーになったので、定義側に「今は 1 つも無いパターン」が
+    残っていると `make iso` が落ちる。それをビルドではなくここで先に見つける。
+    """
+
+    def test_every_registered_glob_matches_something(self):
+        sys.path.insert(0, str(ROOT / 'tools'))
+        import mkpkg
+        defs = mkpkg.merge_package_defs([
+            str(ROOT / 'build' / 'core_packages.yaml'),
+            str(ROOT / 'userland' / 'package_defs.yaml')])
+        empty = []
+        for pkg_name, pdef in defs.items():
+            for fdef in pdef.get('files', []):
+                host = fdef.get('host', '')
+                if '*' not in host:
+                    continue
+                if not glob.glob(str(ROOT / host)):
+                    empty.append('%s: %s' % (pkg_name, host))
+        self.assertEqual(empty, [],
+                         '0 件の glob が登録されている (make iso が落ちる)')
 
 
 class BuildWiring(unittest.TestCase):

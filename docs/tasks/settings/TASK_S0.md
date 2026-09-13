@@ -121,3 +121,16 @@
 - `exec_reclaim_owned` は DB を先頭へ (他の相対順は不変)。回収順の差はホストで観測済み: 後始末がバックエンドに届いた回数が 新 21 / 旧 2。戻り値はどちらも成功なので**回数で**見る (VFS の I/O 失敗握り潰しは票 F3a のまま)。
 - ホスト TDD は `tools/tests/kapi_db_v50_host.c` + `test_kapi_db_v50.py` (9 件、実 SQLite + 実 VFS + RAM backend)。RED→GREEN は `tools/tests/s0_tdd.md`。既存 5 本回帰済み。
 - **未実施**: `make` 全般・配備・エミュレータ・ゲスト試験 (K1 / K2)。`build/app.conf` / `userland/deploy.yaml` / `build/sdk.mk` は PM 登録待ち (登録行は報告に記載)。
+
+## 9. 実装メモ (T、2026-09-13)
+
+- `assets/settings/defaults.tsv` (3 行 + 書式コメント)、`tools/mk_settings_db.py`、試験 `tools/tests/test_mk_settings_db.py` (42 件)、記録 `tools/tests/s0_tdd.md` §T。
+- 空行 / コメントの判定は **行頭だけ** (`line == ""` か `#` 始まり) で、行全体を strip しない。S2 の C 側 reader が同じ規則を素直に書けるようにした。
+- `meta.created` は epoch を UTC の ISO 8601 (`1970-01-01T00:00:00Z`) にした文字列。決定性は「内容 + epoch」だけで決まり、mtime は読まない。挿入は (scope, key) 順に固定し、最後に `VACUUM` + `PRAGMA user_version=1` で自由ページを落とす。実物は 3KB / freelist 0。
+- `build/assets.mk`: `SETTINGS_DB = $(BUILD_OUT)/settings.db` を FORCE 依存で生成。通常配備の対象ではないので `ASSETS_DEPLOYED` には入れず、`ASSETS_ALL` (→ `clean-assets` / `clean`) と `all:` への追加依存、媒体ターゲットから引く。`FORCE` は `build/programs.mk` の既存を使う。
+- `build/image.mk`: FDD に `/etc/settings.db=`、`packages` の依存を `programs boot $(BUILD_OUT)/vmkernel.lz4 unicode_bin $(BUILD_OUT)/settings.db assets/fep.db` に。`assets/fep.db` は userland 層の NORMAL が要求する既存入力で、mkpkg を厳格化した以上これも結ぶ必要がある。
+- `tools/mkpkg.py`: 欠損は一律エラー。全パッケージのファイルを**先に**解決して欠損を集め、1 つも `.PKG` を書かずに非ゼロ終了する (途中まで書いた媒体を残さない)。
+- 副作用の注意: これまで欠損は warning だったので、`deploy.yaml` ではなく `package_defs.yaml` 側に「作られていない登録ファイル」があると `make iso` が**落ちるようになる**。現行の登録 38 件はすべて `programs` / `boot` / assets の成果物で、`make -n packages` で mkpkg より前に生成されることを確認済み。
+- 未実施: ゲスト受入 T1 (媒体を mount して一覧、`sqlite3` で読む)、`make` 実行。B10 の FDD インストーラ不整合は S3。
+- **レビュー往復 1 の B10 [P2] 反映** (2026-09-13): 「一律エラー」に残っていた 2 つの例外を塞いだ — 存在しない `--defs` を黙って無視していたのと、glob の展開が 0 件でも成功にしていたのをどちらもエラーにした (簡易 parser は変えず、展開結果だけを見る)。反例 (正常なパッケージ + 0 件 glob のパッケージ) で `.PKG` を 1 つも書かないことを試験に固定し、代表 3 規則 (int32 超過 / 重複キー / CR) は実装を一時的に緩めて反例 RED を採り直した (`s0_tdd.md` §T は「反例 RED」と「回帰試験」を分けて記録)。試験は 43 件。
+- その副作用: リポジトリ自身の登録に 0 件の glob が 3 つあり (`assets/images/*.vbz` / `*.vdp` — ディレクトリ自体が無い、`assets/manga/*.mgx` — 実体は大文字の `.MGX` だけ)、そのままでは `make iso` が落ちる。`userland/package_defs.yaml` の APPEND から該当 3 行をコメント化した (素材を戻すとき復活させる旨を併記)。同じ食い違いをビルドではなく試験で先に捕まえる `RealPackageDefs` を追加。**この 1 ファイルは他レーンの持ち物なので、PM の判断で差し戻してよい** (その場合は 3 行を消すか素材を置くかのどちらかが要る)。
