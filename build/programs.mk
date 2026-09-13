@@ -353,13 +353,14 @@ userland/tests/bench/%.elf: userland/tests/bench/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/bench/$*.o -lc -lgcc
 
 userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
-
-# .inc を #include する system プログラムの明示依存 (2026-09-14: install_recover.inc を直しても
-# install.bin が再ビルドされず、古いバイナリを配備した。.d は Makefile 末尾の -include の対象外)。
-userland/system/install.elf: userland/system/install_recover.inc
-userland/system/hsync.elf: userland/system/hsync_protect.inc
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/system/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/system/$*.o -lc -lgcc
+
+# .inc を #include する system プログラムの明示依存 (レシピ無し = 上のパターン規則に前提だけ足す)。
+# 2026-09-14: install_recover.inc を直しても install.bin が再ビルドされず古いバイナリを配備した
+# (userland の .d は Makefile 末尾の -include の対象外)。
+userland/system/install.elf: userland/system/install_recover.inc
+userland/system/hsync.elf: userland/system/hsync_protect.inc
 
 # === ELF → RAW → OS32X BIN 変換 ===
 # ユーザーランドぶん。ゲームは game/Makefile が自前で持つ。
