@@ -147,3 +147,9 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | C2 | **合格**: `--scope gshell` で `user note` が残る、`--merge` で既存が消えない |
 | C3 | **合格**: 版 2 ヘッダ → `newer backup: schema_version 2`、不正 key → `bad line 3: key`、いずれも DB 不変 |
 | C7 | **合格**: `v:null` を含む JSON (HostDrv 経由 `/host/s3_null.json`) を import → `cfg list` に `app:demo title text (unset)`、blob `blob:4` → export → `"v":null` / `"AAECAw=="` → import で一致、`cfg get app:demo icon` = `00010203` |
+
+### 9c. FDD ブートの受入 (1 回目、`e1f6791`) — **I2 で不合格 → S3-K**
+- FDD ブート (`np21x64w.exe os32_boot.d88`、ini 変更なし) は成立: root = FAT (`LOADER.BIN` / `VMKRNL.LZ4` / `SYS` / `BIN` / `SBIN` / `ETC`)、`/hd0/etc` に壊した `settings.db` (1406 B) が見える。
+- `install --recover-settings hd0` → **`master unreadable`** で終了 1 (対象には触っていない = 契約どおり)。FDD の `cfg status` も `ERROR sqlite=10` (IOERR)。
+- 原因 (PM の切り分け): FDD は FAT で `FF_USE_LFN 0`。v50 の open 前検査が `settings.db-journal` を `vfs_stat` すると 8.3 に収まらない名前で `f_stat` が `FR_INVALID_NAME` → `VFS_ERR_INVAL` → 「NOTFOUND 以外は IOERR」。実機: `ls -l /etc/settings.db-journal` = `Invalid argument`、`ls -l /etc/nosuch` = `No such file`。**S0-K の設計時に FAT (FDD ブート) で v50 を通す検証が無かった** (S0-T の T1 は「媒体に入っている」まで)。
+- 直し (S3-K): `fatfs_vfs_stat` で `FR_INVALID_NAME` → `NOTFOUND` (そのボリュームに存在しえない名前は存在しない)。カーネル変更なので `deploy-nhd` + FDD イメージ再生成 (同じ vmkernel.lz4) が要る。
