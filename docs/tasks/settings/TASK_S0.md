@@ -197,3 +197,4 @@
 ## 11. 実機受入の記録 (PM / テスター、2026-09-13)
 
 配備 1 回目 (feat/gui `4554a10`、vmkernel 470,305 B): NP21/W 停止 → `nhd-pull` (stamp `os32.nhd.pulled` 261 B) → バックアップ `os32.nhd.bak-s0-20260913-140849` → `os32-cycle deploy` → **`make deploy-nhd` が D0 の前提検査で失敗**: `配備ツリーを辿れない: [Errno 13] Permission denied: '/tmp/os32/lost+found'` (ext2 標準の root 所有 700 のディレクトリを非 root の `os.walk` が読めない)。NHD は未変更、HostDrv の `make deploy` は exit=0。→ D へ: ルート直下の `lost+found` (ディレクトリ、名前一致) だけ走査から外す。
+配備 3 回目 (feat/gui `18682d4`、K2 の切り分け計器入り、vmkernel 470,718 B): `db_v50_test` は `6/8 passed` で **RO / RW とも既存 DB の open が 21 (MISUSE)**、`last_error=invalid handle`。計器: `ring3_range_reject_count` 4、`_last` **5 = 非 present**、`_addr` 0x50140e、`_page` 0x501000 (アプリ自身の .rodata)、`_heap_top` 0x7bf000、`fault_kill_count` 0 → **`paging_addrspace_pte_flags(AppSlot.as, page)` が実際に有効な PD/PT を見ていない** (走っているコードの隣のページを非 present と判定)。→ K へ: 検査は CR3 に載っている PD を歩く形に。
