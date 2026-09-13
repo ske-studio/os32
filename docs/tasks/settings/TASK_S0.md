@@ -194,3 +194,10 @@
 ## 11. 実機受入の記録 (PM / テスター、2026-09-13)
 
 配備 1 回目 (feat/gui `4554a10`、vmkernel 470,305 B): NP21/W 停止 → `nhd-pull` (stamp `os32.nhd.pulled` 261 B) → バックアップ `os32.nhd.bak-s0-20260913-140849` → `os32-cycle deploy` → **`make deploy-nhd` が D0 の前提検査で失敗**: `配備ツリーを辿れない: [Errno 13] Permission denied: '/tmp/os32/lost+found'` (ext2 標準の root 所有 700 のディレクトリを非 root の `os.walk` が読めない)。NHD は未変更、HostDrv の `make deploy` は exit=0。→ D へ: ルート直下の `lost+found` (ディレクトリ、名前一致) だけ走査から外す。
+配備 2 回目 (feat/gui `16bb298`、`lost+found` 除外後): `make check` exit=0 → `os32-cycle deploy` OK (vmkernel 470,329 B 一致) → `make deploy` exit=0 → ゲスト `ver` API v50、`/etc/settings.tsv` 1,405 B、`db_v50_test.bin` 6,899 B、`hsync.bin` 8,608 B、`/etc/settings.db` は**存在しない** (通常配備で作られない)、kselftest 87 / 0。
+
+| 受入 | obs | 判定 |
+|---|---|---|
+| **K1** | `make clean` + `clean-external` → `all` → `external` → `check` exit=0 (`a383619`)、その後の差分は `make all` / `check` で通過、配備・kselftest 87/0、regress は D1 の後に | 合格 (regress 待ち) |
+| **K2** | `db_v50_test`: `5/6 passed, aborted` — **`RW open of an existing db` が失敗 (open failure code = 21 = SQLITE_MISUSE)**。RO の no-create (`/etc/nosuch.db` が作られない) は合格、`fault_kill_count` 0。ホスト試験では通る経路なのでカーネル SQLite の構成差が疑わしい → K へ差し戻し | **不合格 (調査中)** |
+| **T1** | テスターで `make images/os32_boot.d88` → FAT12 を読み `/ETC/SETTINGS.DB` 3,072 B、sha256 がホストの `build/out/settings.db` と一致、`sqlite3` で 3 行 / schema_version 1。CD パッケージは `packages` 依存で同じ生成物 | **合格** (新規インストールでの seed は S3) |
