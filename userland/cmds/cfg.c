@@ -581,8 +581,30 @@ static int same_file(const char *a, const char *b)
     rb = api->sys_stat(b, &sb);
     if (rb == OS32_ERR_NOTFOUND) return 0;
     if (rb != 0) return -1;
-    if (sa.st_ino == 0 && sb.st_ino == 0) return 0;   /* inode を持たない FS */
-    return (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) ? 1 : 0;
+    if (sa.st_dev != sb.st_dev) return 0;             /* 別デバイス = 別物 */
+    /* inode を供給しない FS (FAT は `fs/fatfs_vfs.c` が st_ino を 0 のまま
+     * 返す) では同一性を確かめられない。「別物」に丸めると `/ETC/SETTINGS.DB`
+     * のような別名で DB 自身を O_TRUNC で潰せる (往復 3 の B1)。
+     * 判定できないなら **書かない**。 */
+    if (sa.st_ino == 0 || sb.st_ino == 0) return -1;
+    return sa.st_ino == sb.st_ino ? 1 : 0;
+}
+
+/* ASCII の大小を無視した一致。FAT は大文字小文字を区別しないので、
+ * 正規化した名前の完全一致だけでは別名を捕まえられない。 */
+static int s_ieq(const char *a, const char *b)
+{
+    int i = 0, ca, cb;
+    if (!a || !b) return 0;
+    for (;;) {
+        ca = (unsigned char)a[i];
+        cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+        if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+        if (ca != cb) return 0;
+        if (ca == 0) return 1;
+        i++;
+    }
 }
 
 /* 0 = 書いてよい / -1 = 設定 DB 側のファイル */
@@ -592,6 +614,7 @@ static int output_allowed(const char *path, char *norm, int cap)
     if (norm_path(path, norm, cap) != 0) return -1;
     for (i = 0; PROTECTED_PATHS[i]; i++) {
         if (s_eq(norm, PROTECTED_PATHS[i])) return -1;
+        if (s_ieq(norm, PROTECTED_PATHS[i])) return -1;   /* FAT の別名 (B1) */
         if (same_file(norm, PROTECTED_PATHS[i]) != 0) return -1;  /* 不明も拒否 */
     }
     return 0;

@@ -759,7 +759,11 @@ static int reject_write(CfgDb *db, int rc)
  * txn を素通しすると「A だけ commit される」(往復 2 の 2)。 */
 static int can_write(CfgDb *db, const char *scope, const char *key)
 {
-    if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
+    if (!db || !db->in_use) return OS32_ERR_INVAL;
+    /* 列挙の callback からの書き込みも拒否するが、実行中の txn は failed に
+     * する (往復 3 の B2)。ここでは SQL を流さない — 巻き戻しは callback が
+     * 戻った後、外側の commit / close が行う。 */
+    if (db->in_enum) return reject_write(db, OS32_ERR_INVAL);
     if (db->txn == 2) return OS32_ERR_INVAL;         /* 既に failed */
     if (!writable_now(db)) return reject_write(db, OS32_ERR_INVAL);
     if (db->txn != 1) return OS32_ERR_INVAL;         /* txn 外は拒否 */

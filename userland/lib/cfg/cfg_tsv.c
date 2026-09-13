@@ -92,11 +92,17 @@ static int read_field(TsvIn *in, char *buf, int cap, int *len, int *over, int *n
         if (c == TSV_IOERR) return TSV_IOERR;
         if (c == TSV_EOF || c == '\t' || c == '\n') break;
         if (c == 0) *nul = 1;
-        if (n < cap - 1) buf[n] = (char)c;
-        else *over = 1;
-        n++;
+        if (n < cap - 1) {
+            buf[n] = (char)c;
+            n++;
+        } else {
+            /* 上限を越えたらカウンタを **飽和** させる。数え続けると
+             * 2GB 級の入力で `int` が溢れ、`buf[n]` が負の添字になる
+             * (往復 3 の B5)。UTF-8 / CR の検査は区切りまで続ける。 */
+            *over = 1;
+        }
     }
-    buf[(n < cap) ? n : cap - 1] = '\0';
+    buf[n] = '\0';
     *len = n;
     return c;
 }

@@ -51,6 +51,7 @@ int vfs_rm(const char *path) { probes++; return fixture_rm(host_resolve(path)); 
 /* stat の障害注入。`stat_fail_on` は部分一致、`stat_fail_exact` は完全一致で、
  * `stat_fail_skip` 回だけ素通ししてから失敗させる (cfg_init の入口検査を
  * 通したうえで、後段の stat だけを落とすため)。 */
+static int inj_no_ino;            /* 1 = st_ino を供給しない FS の模型 */
 static const char *stat_fail_on;
 static const char *stat_fail_exact;
 static int stat_fail_skip;
@@ -71,8 +72,10 @@ int vfs_stat(const char *path, OS32_Stat *st)
         st->st_size = f->size;
         st->st_nlink = 1;
         st->st_dev = 1;
-        /* fixture の並び順を inode 代わりにする (同一性の判定に使う)。 */
-        st->st_ino = (u32)(f - fixture_files) + 1u;
+        /* fixture の並び順を inode 代わりにする (同一性の判定に使う)。
+         * `inj_no_ino` は FAT (`fs/fatfs_vfs.c` は st_ino を 0 のまま返す)
+         * の模型 — inode を供給しない FS。 */
+        if (!inj_no_ino) st->st_ino = (u32)(f - fixture_files) + 1u;
     }
     return 0;
 }
@@ -320,6 +323,7 @@ static void reset_all(void)
     memset(fixture_files, 0, sizeof(fixture_files));
     memset(hostfd, 0, sizeof(hostfd));
     for (i = 0; i < VFS_MAX_OPEN_FILES; i++) open_files[i].in_use = 0;
+    inj_no_ino = 0;
     stat_fail_on = NULL;
     stat_fail_exact = NULL;
     stat_fail_skip = 0;
@@ -2091,6 +2095,239 @@ static void c_r2_alias(void)
 }
 
 /* ========================================================================= */
+/*  実装レビュー 往復 3 の blocker (s2_tdd.md §C3)                           */
+/* ========================================================================= */
+
+/* B1: inode を供給しない FS (FAT) では同一性を判定できない → 書かない */
+static void c_r3_fat(void)
+{
+    u32 before;
+
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(cfg_init(NULL) == 0);
+    before = fixture_find(CFG_DB_PATH, 0)->size;
+
+    /* 大文字の別名 (FAT は大小を区別しない) は名前だけで断る */
+    CHECK(ran("export", "/ETC/SETTINGS.DB", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("refusing to write"));
+    CHECK(fixture_find("/ETC/SETTINGS.DB", 0) == NULL);
+    CHECK(fixture_find(CFG_DB_PATH, 0)->size == before);
+    CHECK(ran("export", "/Etc/Settings.DB-Journal", NULL, NULL, NULL) == 1);
+
+    /* inode が無い FS では、既存ファイルへの上書きは判定不能として断る */
+    put_file("/out.json", "old");
+    inj_no_ino = 1;
+    CHECK(ran("export", "/out.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("refusing to write"));
+    CHECK(fixture_find("/out.json", 0)->size == 3);   /* 触っていない */
+    /* 新しい名前 (まだ無い) は NOTFOUND で「別物」と分かるので書ける */
+    CHECK(ran("export", "/new.json", NULL, NULL, NULL) == 0);
+    CHECK(fixture_find("/new.json", 0) != NULL);
+    inj_no_ino = 0;
+
+    /* inode がある FS なら既存ファイルにも書ける */
+    CHECK(ran("export", "/out.json", NULL, NULL, NULL) == 0);
+    CHECK(fixture_find("/out.json", 0)->size > 3);
+}
+
+/* B2: 列挙 callback からの set/delete 拒否も txn を failed にする */
+static CfgDb *ew_db;
+static int ew_set_rc;
+static int ew_del_rc;
+
+static int ew_cb(const char *key, int type, void *ctx)
+{
+    (void)key; (void)type; (void)ctx;
+    ew_set_rc = cfg_set_int(ew_db, "gshell", "b", 2);
+    ew_del_rc = cfg_delete(ew_db, "gshell", "a");
+    return 0;
+}
+
+static void c_r3_enum_write(void)
+{
+    CfgDb *db;
+
+    make_good_db();
+    CHECK(cfg_open(&db, 1) == 0);
+    CHECK(cfg_begin(db) == 0);
+    CHECK(cfg_set_int(db, "gshell", "a", 1) == 0);       /* A は通る */
+    ew_db = db;
+    CHECK(cfg_enum(db, "gshell", NULL, ew_cb, NULL) == 1);
+    CHECK(ew_set_rc == OS32_ERR_INVAL);                  /* 再入は拒否 */
+    CHECK(ew_del_rc == OS32_ERR_INVAL);
+    CHECK(db->txn == 2);                                 /* failed になった */
+    CHECK(cfg_commit(db) == OS32_ERR_IO);
+    CHECK(cfg_close(db) == 0);
+    /* A も残らない */
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);
+    CHECK(cfg_close(db) == 0);
+}
+
+/* B3: 縮小前に type の値域を見る (列挙も cfg_get_info と同じ判定) */
+static int seen_type;
+static int type_cb(const char *key, int type, void *ctx)
+{
+    (void)key; (void)ctx;
+    seen_type = type;
+    return 0;
+}
+
+static void c_r3_enum_type(void)
+{
+    CfgDb *db;
+
+    make_good_db();
+    /* type = 2^32 は SHM で 0 (int) に化ける */
+    exec_on_db("INSERT INTO settings VALUES('gshell','t4',4294967296,7,NULL,NULL)");
+    seen_type = -99;
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_enum(db, "gshell", NULL, type_cb, NULL) == OS32_ERR_NOSYS);
+    CHECK(seen_type == -99);                     /* callback へ渡っていない */
+    CHECK(cfg_get_info(db, "gshell", "t4") == OS32_ERR_NOSYS);  /* 判定が一致 */
+    CHECK(cfg_close(db) == 0);
+
+    /* 0/1/2 は通る */
+    reset_all();
+    make_good_db();
+    exec_on_db("INSERT INTO settings VALUES('gshell','k',2,NULL,NULL,x'01')");
+    seen_type = -99;
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_enum(db, "gshell", NULL, type_cb, NULL) == 1);
+    CHECK(seen_type == CFG_TYPE_BLOB);
+    CHECK(cfg_close(db) == 0);
+
+    /* list / export は黙って飛ばさず失敗する */
+    reset_all();
+    make_good_db();
+    exec_on_db("INSERT INTO settings VALUES('gshell','t4',4294967296,7,NULL,NULL)");
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("list failed"));
+}
+
+/* B4: ERROR 状態の列挙を「0 件」にしない */
+static void c_r3_enum_err(void)
+{
+    CfgDb *db;
+
+    make_good_db();
+    CHECK(ran("set", "gshell", "a", "int", "1") == 0);
+
+    /* get を落として接続を ERROR にしてから列挙する */
+    CHECK(cfg_open(&db, 0) == 0);
+    inj_prep_fail = "ival";
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);
+    inj_prep_fail = NULL;
+    CHECK(cfg_status(db) == CFG_ERROR);
+    en_n = 0;
+    CHECK(cfg_enum(db, "gshell", NULL, en_cb, NULL) == OS32_ERR_IO);
+    CHECK(en_n == 0);
+    en_scope_n = 0;
+    CHECK(cfg_enum_scopes(db, en_scope_cb, NULL) == OS32_ERR_IO);
+    CHECK(en_scope_n == 0);
+    CHECK(cfg_close(db) == 0);
+
+    /* MISSING は従来どおり 0 件 (fallback) */
+    reset_all();
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_status(db) == CFG_MISSING);
+    CHECK(cfg_enum(db, "gshell", NULL, en_cb, NULL) == 0);
+    CHECK(cfg_enum_scopes(db, en_scope_cb, NULL) == 0);
+    CHECK(cfg_close(db) == 0);
+
+    /* 列挙の bind 失敗も CFG_ERROR にする */
+    reset_all();
+    make_good_db();
+    CHECK(cfg_open(&db, 0) == 0);
+    inj_bind_fail = 1;
+    CHECK(cfg_enum(db, "gshell", NULL, en_cb, NULL) == OS32_ERR_IO);
+    CHECK(cfg_status(db) == CFG_ERROR);
+    inj_bind_fail = 0;
+    CHECK(cfg_close(db) == 0);
+}
+
+/* B5: 過長フィールドでカウンタを飽和させる (int を溢れさせない) */
+#define R3_LONG 2000000
+
+static int long_pos;
+static int long_bad_at;           /* >0 ならその位置に不正 UTF-8 を混ぜる */
+
+static int long_get(void *ctx)
+{
+    (void)ctx;
+    long_pos++;
+    if (long_bad_at > 0 && long_pos == long_bad_at) return 0xFF;
+    if (long_pos <= R3_LONG) return 'a';
+    if (long_pos == R3_LONG + 1) return '\t';
+    if (long_pos == R3_LONG + 2) return 'k';
+    if (long_pos == R3_LONG + 3) return '\t';
+    if (long_pos == R3_LONG + 4) return 'i';
+    if (long_pos == R3_LONG + 5) return 'n';
+    if (long_pos == R3_LONG + 6) return 't';
+    if (long_pos == R3_LONG + 7) return '\t';
+    if (long_pos == R3_LONG + 8) return '1';
+    if (long_pos == R3_LONG + 9) return '\n';
+    return -1;
+}
+
+static void c_r3_tsv_long(void)
+{
+    static CfgTsvRow row;
+    CfgTsvErr err;
+
+    /* 200 万バイトの scope 列。飽和していないと `n` が伸び続け、
+     * 2GB 級の入力で `buf[n]` が負の添字になる (ASan でも踏めない領域)。 */
+    long_pos = 0;
+    long_bad_at = 0;
+    CHECK(cfg_tsv_parse(long_get, NULL, &row,
+                        (int (*)(const CfgTsvRow *, void *))0, NULL, &err) == -1);
+    CHECK(err.code == CFG_TSV_E_SCOPE);
+    CHECK(err.lineno == 1);
+    /* 区切りまで読み切っている (途中で投げ出していない) */
+    CHECK(long_pos >= R3_LONG + 1);
+
+    /* カウンタが **飽和** している = 数え続けていない。ここが伸び続けると
+     * 2GB 級の入力で `int` が溢れ `buf[n]` が負の添字になる (B5)。
+     * 溢れそのものはホストでは踏めないので、飽和の方を固定する。 */
+    {
+        TsvIn in;
+        char buf[CFG_SCOPE_MAX + 1];
+        int len = -1, over = 0, nul = 0, c;
+        long_pos = 0;
+        long_bad_at = 0;
+        in_init(&in, long_get, NULL);
+        c = read_field(&in, buf, (int)sizeof(buf), &len, &over, &nul);
+        CHECK(c == '\t');
+        CHECK(over == 1);
+        CHECK(len == CFG_SCOPE_MAX);            /* 飽和値 (cap - 1) */
+        CHECK(long_pos >= R3_LONG + 1);         /* 区切りまでは読んでいる */
+    }
+
+    /* 超過の後ろでも UTF-8 の検査は続く */
+    long_pos = 0;
+    long_bad_at = R3_LONG - 1;
+    CHECK(cfg_tsv_parse(long_get, NULL, &row,
+                        (int (*)(const CfgTsvRow *, void *))0, NULL, &err) == -1);
+    CHECK(err.code == CFG_TSV_E_UTF8);
+
+    /* 過長の text 列も同じ (値の列でも飽和する) */
+    {
+        static char big[8192];
+        TsvFile f;
+        int n = 0, i;
+        n += sprintf(big + n, "gshell\tk\ttext\t");
+        for (i = 0; i < 4000; i++) big[n++] = 'x';
+        big[n++] = '\n';
+        CHECK(fixture_create(NULL, CFG_TSV_PATH, big, (u32)n) == VFS_OK);
+        CHECK(tsv_open(&f, CFG_TSV_PATH) >= 0);
+        CHECK(cfg_tsv_parse(tsv_getc, &f, &row,
+                            (int (*)(const CfgTsvRow *, void *))0, NULL, &err) == -1);
+        tsv_shut(&f);
+        CHECK(err.code == CFG_TSV_E_VALUE);
+    }
+}
+
+/* ========================================================================= */
 
 int main(int argc, char **argv)
 {
@@ -2137,6 +2374,11 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "r2_wide")) c_r2_wide();
     else if (!strcmp(argv[1], "r2_badval")) c_r2_badval();
     else if (!strcmp(argv[1], "r2_alias")) c_r2_alias();
+    else if (!strcmp(argv[1], "r3_fat")) c_r3_fat();
+    else if (!strcmp(argv[1], "r3_enum_write")) c_r3_enum_write();
+    else if (!strcmp(argv[1], "r3_enum_type")) c_r3_enum_type();
+    else if (!strcmp(argv[1], "r3_enum_err")) c_r3_enum_err();
+    else if (!strcmp(argv[1], "r3_tsv_long")) c_r3_tsv_long();
     else CHECK(0);
 
     canary_check(argv[1]);

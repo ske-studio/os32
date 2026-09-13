@@ -57,6 +57,12 @@ CASES = [
     "r2_wide",         # 5 64bit 整数 / 未知 type を正当値にしない
     "r2_badval",       # 6 保存済み text/blob の境界と埋込み NUL の key
     "r2_alias",        # 7 export 先の stat 障害を「別ファイル」にしない
+    # 実装レビュー 往復 3 の blocker (s2_tdd.md §C3)
+    "r3_fat",          # B1 inode を供給しない FS / 大小を区別しない別名
+    "r3_enum_write",   # B2 列挙 callback からの書き込み拒否も txn を failed に
+    "r3_enum_type",    # B3 列挙も縮小前に type の値域を見る
+    "r3_enum_err",     # B4 ERROR 状態の列挙を 0 件にしない
+    "r3_tsv_long",     # B5 過長フィールドでカウンタを飽和させる
 ]
 
 INC = ["-I" + str(ROOT / p) for p in

@@ -6,11 +6,14 @@
 走らせ方:
 
 ```bash
-python3 -B tools/tests/test_cfg.py                 # 14 ケース + tsv 58 fixture
+python3 -B tools/tests/test_cfg.py                 # 42 ケース + tsv 58 fixture
 python3 -B tools/tests/test_cfg.py --target        # + i386-elf の -Werror コンパイル
 python3 -B tools/tests/test_cfg.py --sanitize      # + ASan
 python3 -B tools/tests/test_cfg.py missing corrupt # ケース指定
 ```
+
+ケースの内訳: §1 の 16 本 (票 §4 の (1)〜(23))、§C の 15 本 (実装レビュー往復 1)、
+§C2 の 7 本 (往復 2)、§C3 の 5 本 (往復 3) = **42 本** + tsv fixture 58 件。
 
 コーダーの範囲はホスト TDD までなので、**ゲスト受入 (票 §5 の C1〜C7) は未実行** ([V4])。
 `make all` / `make check` / 配備 / エミュレータも触っていない。
@@ -261,6 +264,8 @@ check-cfg-host:
 ```
 
 `check:` と `.PHONY:` の並びに `check-cfg-host` を足す。
+
+---
 
 ---
 
