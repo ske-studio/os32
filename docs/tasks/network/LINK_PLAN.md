@@ -1,7 +1,8 @@
 # OS32 リンクプロトコル / Host Services 実装計画
 
 > **L0〜L3 の機構はエミュレータ実装・合格済み (2026-09-05、ブランチ→main)。残るは L3 の
-> KAPI 公開 (KAPI v43、下記) のみ。** 対象は LGY-98 ドライバの上に載る 2 層 ―
+> KAPI 公開のみ。** 版番号は v50 まで進んだので v43 は欠番、KAPI 公開と印刷などの追加サービスは
+> [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) (2026-09-13、v51 で公開する詳細計画) に移した。 対象は LGY-98 ドライバの上に載る 2 層 ―
 > OS32 独自リンクプロトコル (フロー制御つき raw Ethernet) と Host Services
 > (HTTP / File / RPC の要求応答)。この文書を設計・進捗の正典とする。
 > NIC ドライバそのものは [PLAN.md](PLAN.md) (別計画)。実装完了後の現行仕様は

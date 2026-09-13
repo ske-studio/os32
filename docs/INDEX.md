@@ -102,6 +102,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
 | [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 設定レジストリの**着手計画** (PM 縮約案、決裁待ち) — 現状表、S0-K / S0-D / S0-T → S2 → S4 → S5 の順、後回しの一覧 |
 | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ** (計画、v1.3) — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite) の 2 層、初期値はインストール媒体だけが持ちリカバリモードで復元、`libos32cfg` API、SQLite プールとの共存の実測項目 |
+| [tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md) | **Host Services 詳細計画** (2026-09-13、計画) — ネットワーク・印刷・時刻・クリップボードをホストに丸投げ: サービス一覧、KAPI v51 (5 本、非ブロッキング)、印刷のスプール設計、票 N0〜N5、決裁 5 点 |
 | [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | OS32 **リンクプロトコル / Host Services** 計画 — 独自 raw Ethernet、絶対値 WINDOW フロー制御、DATA ストリーミング、HTTP/File/RPC を KAPI で公開（未実装） |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
 | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
