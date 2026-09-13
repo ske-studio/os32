@@ -365,6 +365,11 @@ pub extern "C" fn os32gui_shlib_init(api: *mut KernelAPI) -> i32 {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
     os32api::os32_init(api);
+    /* C の libos32cfg (`cfg_backend.c`) が見る `kapi` を供給する。shlib には
+     * crt0 が無いので、アプリの .bin にある `sdk/crt/crt0_c.c` の実体は届かない
+     * (libos32gfx の `attach` と同じ理屈)。これより前に表 101..=104 を呼ばれても
+     * NULL を辿らないよう、wrapper 側にも門がある。 */
+    crate::cfgro::set_kapi(api as *mut core::ffi::c_void);
     client::attach_gfx();
     0
 }

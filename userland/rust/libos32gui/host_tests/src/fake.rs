@@ -60,8 +60,13 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 /* ---------------- 試験から使う口 ---------------- */
 
 /// 仕込みと記録を白紙に戻す。各試験の先頭で呼ぶ。
+///
+/// ついでに wrapper の「`shlib_init` 前の門」を開ける (`kapi` を非 NULL に
+/// しておく)。**init 前の分岐は別プロセスの `tests/init_gate.rs`** で見る —
+/// `kapi` はスレッドをまたぐ 1 語なので、並列試験の中で NULL に戻せない。
 pub fn reset() {
     with(|s| *s = State::default());
+    crate::cfgro::set_kapi(unsafe { (&raw mut DUMMY_DB) as *mut std::ffi::c_void });
 }
 
 pub fn set_open_rc(rc: i32) {

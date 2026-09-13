@@ -267,7 +267,7 @@ check-cfg-host:
 | | |
 |---|---|
 | 実装 | `userland/rust/libos32gui/src/cfgro.rs` (表 101..=104 の実体) |
-| 試験 | `userland/rust/libos32gui/host_tests/` (`src/lib.rs` = 28 本、`src/fake.rs` = C の贋物) |
+| 試験 | `userland/rust/libos32gui/host_tests/` (`src/lib.rs` = 28 本、`tests/init_gate.rs` = 1 本、`src/fake.rs` = C の贋物) |
 | 実行 | `cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline` |
 
 `src/lib.rs` が `#[path = "../../src/cfgro.rs"]` で**実装そのもの**を取り込み、
@@ -278,8 +278,11 @@ check-cfg-host:
 **呼び順 (`Call` の列) と引数を記録**し、試験が仕込んだ戻り値を返すだけ。
 
 `cargo test` は試験ごとに別スレッドで走るので、贋物の状態は `thread_local!`。
+ただし `kapi` (下の W29) は**プロセスに 1 語**なので、init 前の分岐だけは
+cargo が別バイナリ = 別プロセスにする `tests/init_gate.rs` に置いた
+(`src/lib.rs` 側は `fake::reset()` が毎回 init 済みにする)。
 
-### 固定した分岐 (28 本)
+### 固定した分岐 (29 本)
 
 | # | 試験 | 固定した振る舞い |
 |---|---|---|
@@ -311,6 +314,44 @@ check-cfg-host:
 | W26 | set close 失敗 | commit 済みでも `ERR_IO` (握りつぶさない) |
 | W27 | set + close 失敗 | set のコード (直前の失敗を優先) |
 | W28 | set key 不正 | 空 key / 64B key / 埋め込み NUL → `INVAL`。**DB を開かない** |
+| W29 | `shlib_init` 前の呼び出し (`tests/init_gate.rs`、別プロセス) | get_int = def / get_text・set_* = `ERR_INVAL`。**`cfg_open` を呼ばず `out` にも触らない**。`set_kapi` の後はふつうに読める |
+
+### 追記 (2026-09-13、着地後のリンク失敗の修正)
+
+着地した `6aa8b7a` の `make all` が shlib のリンクで落ちた:
+
+```text
+libos32cfg.a(cfg_backend.o): undefined reference to `kapi' (be_db_open_existing 等)
+```
+
+`cfg_backend.c` の `extern KernelAPI *kapi;` は**アプリの .bin では
+`sdk/crt/crt0_c.c` が定義する**が、**shlib には crt0 が無い**。libos32gfx が
+`libos32gfx_attach(api)` で自前に持つのと同じ構図なので、shlib 側で実体を出す:
+
+- `cfgro.rs` に `#[no_mangle] pub static mut kapi: *mut c_void = null_mut();`
+  (os32api に依存させないため型は不透明ポインタ)。
+- `os32gui_shlib_init(api)` が `os32api::os32_init(api)` の直後に
+  `cfgro::set_kapi(api as *mut c_void)`。
+- C 側 (`cfg_backend.c`) は**変えていない** (アプリ側では crt0 の `kapi` がそのまま)。
+
+shlib の `.data` / `.bss` はアプリごとの物理ページ (K3) なので、この 1 語も
+アプリごとに別。リンク後の実配置で確認した:
+
+```text
+$ i386-elf-objdump -t userland/libos32gui.elf | grep -w kapi
+00419e48 g     O .bss   00000004 kapi          ← data_vaddr 0x416000 + 4 ページの中
+```
+
+`shlib_init` 前に表 101..=104 を呼ばれると C の backend が NULL を辿るので、
+wrapper 4 本に門を足した (W29):
+
+| 呼び出し | `kapi` が NULL のとき |
+|---|---|
+| `os32gui_cfg_get_int` | `def` |
+| `os32gui_cfg_get_text` | `ERR_INVAL` (`out` に触らない) |
+| `os32gui_cfg_set_int` / `set_text` | `ERR_INVAL` (scope が正しくても通さない) |
+
+いずれも **`cfg_open` を呼ばない**。
 
 ### RED
 
@@ -344,7 +385,10 @@ w27_set_earlier_failure_wins_over_close   直前の失敗を優先        left: 
 
 ```text
 running 28 tests
-test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 1 test          (tests/init_gate.rs — W29)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
 ### 併せて通した検査
@@ -361,17 +405,22 @@ $ cd userland/rust && cargo build --release -p libos32gui -p libos32gui_stub -p 
     Finished `release` profile [optimized] target(s)
 ```
 
-### まだ通っていないもの ([V4])
-
-`make userland/libos32gui.elf` (shlib のリンク) は **`cfg_*` 9 本が undefined で止まる**。
-S2-C の `libos32cfg.a` と、`build/programs.mk` のリンク行 (下の「PM が登録する行」) が
-揃うまでは想定どおりの失敗で、それ以外の未解決シンボルは出ていない。
+### shlib のリンク (2026-09-13 に通った)
 
 ```text
-i386-elf-ld: ... undefined reference to `cfg_open'
-i386-elf-ld: ... undefined reference to `cfg_get_int' / `cfg_get_text'
-i386-elf-ld: ... undefined reference to `cfg_begin' / `cfg_set_int' / `cfg_set_text'
-i386-elf-ld: ... undefined reference to `cfg_commit' / `cfg_rollback' / `cfg_close'
+$ CROSS_DIR=/home/hight/opt/cross make userland/libos32gui.elf userland/libos32gui.shlib
+i386-elf-ld ... --start-group libos32gfx.a libos32math.a libos32cfg.a liblibos32gui.a --end-group -lc -lgcc
+  mkshlib: 番号表 OK (105 本, version=1)
+  SHLIB: libos32gui.shlib (nfunc=105, version=1, text_pages=22,
+         data_vaddr=0x416000, data_pages=4, raw=105504, bss=596)
 ```
 
-ゲスト上の確認 (票 §5 の C5 相当) は**していない**。
+`CROSS_DIR` を渡しているのは、この作業環境のクロス一式が
+`/home/hight/opt/cross` にあり `build/config.mk` の既定 (`/usr/local/cross`) と
+違うため (S2 の変更とは無関係)。
+
+### まだ通っていないもの ([V4])
+
+`make all` / `make check` の全体ゲートと**ゲスト上の確認 (票 §5 の C1〜C7) は
+していない**。W レーンで通したのは上の targeted make と `make check-shlib` /
+`check-gui-proto` / `check-gui-host` だけ。

@@ -76,6 +76,37 @@ pub struct CfgDb {
     _opaque: [u8; 0],
 }
 
+/* ---------------------------------------------------------------- */
+/*  `kapi` — C 側 (cfg_backend.c) が見る KernelAPI ポインタ           */
+/*                                                                  */
+/*  アプリの .bin では `sdk/crt/crt0_c.c` が定義するが、**shlib には  */
+/*  crt0 が無い**。libos32gfx が `libos32gfx_attach(api)` で自前に持つ */
+/*  のと同じ理屈で、shlib 側はここで実体を供給する。                  */
+/*                                                                  */
+/*  shlib の `.data` / `.bss` はアプリごとの物理ページ (K3) なので、   */
+/*  この 1 語もアプリごとに別。`os32gui_shlib_init(api)` が入れる。    */
+/* ---------------------------------------------------------------- */
+
+/// `cfg_backend.c` の `extern KernelAPI *kapi;` の実体 (shlib 側)。
+///
+/// 型は不透明ポインタで持つ (このファイルを os32api に依存させないため)。
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+pub static mut kapi: *mut core::ffi::c_void = core::ptr::null_mut();
+
+/// `os32gui_shlib_init` から KAPI を渡す。
+#[inline]
+pub fn set_kapi(api: *mut core::ffi::c_void) {
+    unsafe { kapi = api };
+}
+
+/// `shlib_init` が済んでいるか。**済む前に `cfg_*` を呼ぶと NULL 参照**なので、
+/// wrapper は必ずここを通してから open する。
+#[inline]
+pub fn kapi_ready() -> bool {
+    unsafe { !kapi.is_null() }
+}
+
 extern "C" {
     /* `const char *` は i386 では `*const u8` と同じ ABI。 */
     pub fn cfg_open(out: *mut *mut CfgDb, writable: i32) -> i32;
@@ -257,6 +288,10 @@ pub extern "C" fn os32gui_cfg_get_int(
     key_len: u32,
     def: i32,
 ) -> i32 {
+    if !kapi_ready() {
+        /* `shlib_init` 前 — C の backend は NULL の kapi を辿ってしまう。 */
+        return def;
+    }
     let mut sbuf = [0u8; CFG_NAME_CAP];
     let mut kbuf = [0u8; CFG_NAME_CAP];
     if !copy_cstr(unsafe { slice(scope, scope_len) }, &mut sbuf)
@@ -286,7 +321,7 @@ pub extern "C" fn os32gui_cfg_get_text(
     out: *mut u8,
     cap: u32,
 ) -> i32 {
-    if out.is_null() || cap == 0 || cap > i32::MAX as u32 {
+    if !kapi_ready() || out.is_null() || cap == 0 || cap > i32::MAX as u32 {
         return ERR_INVAL;
     }
     let mut sbuf = [0u8; CFG_NAME_CAP];
@@ -346,6 +381,9 @@ pub extern "C" fn os32gui_cfg_set_int(
     key_len: u32,
     v: i32,
 ) -> i32 {
+    if !kapi_ready() {
+        return ERR_INVAL;
+    }
     let sc = unsafe { slice(scope, scope_len) };
     if !scope_is_app(sc) {
         return ERR_PERM;
@@ -379,6 +417,9 @@ pub extern "C" fn os32gui_cfg_set_text(
     s: *const u8,
     s_len: u32,
 ) -> i32 {
+    if !kapi_ready() {
+        return ERR_INVAL;
+    }
     let sc = unsafe { slice(scope, scope_len) };
     if !scope_is_app(sc) {
         return ERR_PERM;
