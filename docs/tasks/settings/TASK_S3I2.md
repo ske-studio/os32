@@ -92,3 +92,10 @@
 ### 7c. 受入の準備 (2026-09-14)
 - `mk_blank_nhd.py --out <NP21W_DIR>/os32_fresh.nhd --size-mb 200` → `C=3011 capacity=209661952` (ファイル 209,662,464 B = 作業 NHD と同じ大きさ)。
 - trial の dry-run: `--baseline` は **Windows 表記** (`<dir>\np21x64w.ini`) で渡す (WSL パスだと `path_key` が拒否し、CLI は理由を出さず `invalid setup` になる — 票 §2a の実装細部。スキル文書に追記)。稼働中 NP21/W の PID / 生成時刻を `Get-CimInstance Win32_Process` で取り、`hdd=os32_fresh.nhd, fdd_eject, fdd_arg=os32_boot.d88` の計画が束縛できることを確認。`--execute` はユーザーの [D2] 承認待ち。
+
+### 7d. 受入 (使い捨て NHD `os32_fresh.nhd`、2026-09-14、ユーザー承認「実行自体は承認」)
+| ID | 結果 |
+|---|---|
+| F1 | **合格 (機能)**: trial (`hdd=os32_fresh.nhd, fdd_eject, fdd_arg=os32_boot.d88`) が作業 NHD の NP21/W を通常終了 → 原本 ini は不変 (trial ini は `HDD1FILE` の 1 行だけ差) → `"exe" "/i<trial ini>" "<d88>"` で起動。ゲストは FDD ブート (`LOADER.BIN` / `VMKRNL.LZ4`)、`/hd0` は未マウント (空 HDD)。**ツールは start 段の identity 検査で失敗を返した** (exe の大小文字比較と created の精度) → `b2416a5` で修正、F3 で実証 |
+| F2 | **合格**: `install` → `[y/N]` に `y` → `[1/3]` IPL (geom 8/17) / PT (end cyl 3010) / LOADER 2707 B、`[2/3] Format OK`、`[3/3]` `vmkernel.lz4 -> /boot (470687 bytes)`、`/sys` `/bin` `/sbin` `/etc` が**小文字**で写る (`/bin/CFG.BIN -> /hd0/bin/cfg.bin` 等)、`/etc` は `settings.db` だけ (profile 無し)、`Installation complete`。`/hd0` に boot / sys / bin / sbin / etc / usr / data / home / tmp |
+| 教訓 | install の確認は `[y/N]` (小文字 y)。受入の道具 (`fdd_run2.py`) は `[Y/N]` しか見ておらず 1 回目は `N` で中止した (DB / HDD への影響なし) |
