@@ -100,6 +100,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | ドキュメント | 内容 |
 |-------------|------|
 | [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
+| [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) | S2 (設計) — `libos32cfg` の API と契約の実装写し、`cfg` コマンド、明示 `cfg init` (tsv → DB、欠損時だけ)、libos32gui 末尾追記、受入 C1〜C7 |
 | [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 設定レジストリの**着手計画** (PM 縮約案、決裁待ち) — 現状表、S0-K / S0-D / S0-T → S2 → S4 → S5 の順、後回しの一覧 |
 | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ** (計画、v1.3) — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite) の 2 層、初期値はインストール媒体だけが持ちリカバリモードで復元、`libos32cfg` API、SQLite プールとの共存の実測項目 |
 | [tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md) | **Host Services 詳細計画** (2026-09-13、計画) — ネットワーク・印刷・時刻・クリップボードをホストに丸投げ: サービス一覧、KAPI v51 (5 本、非ブロッキング)、印刷のスプール設計、票 N0〜N5、決裁 5 点 |
