@@ -203,3 +203,8 @@
 
 配備 1 回目 (feat/gui `4554a10`、vmkernel 470,305 B): NP21/W 停止 → `nhd-pull` (stamp `os32.nhd.pulled` 261 B) → バックアップ `os32.nhd.bak-s0-20260913-140849` → `os32-cycle deploy` → **`make deploy-nhd` が D0 の前提検査で失敗**: `配備ツリーを辿れない: [Errno 13] Permission denied: '/tmp/os32/lost+found'` (ext2 標準の root 所有 700 のディレクトリを非 root の `os.walk` が読めない)。NHD は未変更、HostDrv の `make deploy` は exit=0。→ D へ: ルート直下の `lost+found` (ディレクトリ、名前一致) だけ走査から外す。
 配備 3 回目 (feat/gui `18682d4`、K2 の切り分け計器入り、vmkernel 470,718 B): `db_v50_test` は `6/8 passed` で **RO / RW とも既存 DB の open が 21 (MISUSE)**、`last_error=invalid handle`。計器: `ring3_range_reject_count` 4、`_last` **5 = 非 present**、`_addr` 0x50140e、`_page` 0x501000 (アプリ自身の .rodata)、`_heap_top` 0x7bf000、`fault_kill_count` 0 → **`paging_addrspace_pte_flags(AppSlot.as, page)` が実際に有効な PD/PT を見ていない** (走っているコードの隣のページを非 present と判定)。→ K へ: 検査は CR3 に載っている PD を歩く形に。
+
+配備 4 回目 (feat/gui `8162a2c`、方針 B = PTE 検査撤去、vmkernel 470,756 B): 順序は **NP21/W 停止 (PM、taskkill) → `nhd-pull` (テスター、stamp 15:14) → `os32-cycle deploy` (テスター、ゲストの vmkernel サイズ一致) → `make deploy` (HostDrv) → kselftest 87 / 0**。先に走らせた `nhd-pull` は NP21/W が NHD をロックしていて `Permission denied` で失敗し stamp が消えた (仕様どおり) — **pull は停止後に行う**。
+- **K2 合格**: `db_v50_test` = `PASS 41/41` (`open failure code = 14` = CANTOPEN、`/etc/nosuch.db` は作られず `/etc` は filetypes / system.cfg / settings.tsv のまま、fixture `/tmp/db_v50.db` 6144 B)。計器: `ring3_range_reject_count` **2** (`_last` = 4 BAND、`_addr` 0x7fffff、`_page` 0x800000 = K2 の**意図した**「許可帯末尾 -1 から 2B」の拒否 2 回)、`fault_kill_count` 0。
+- **K1 再確認**: regress 6 / 6 (`s0k4reg`)、kselftest 87 / 0。
+- **S0 の受入は D1 (a / b / c1 / c2)、T1、K1、K2 のすべてが合格**。§1 の「guard をまたぐ範囲が -1」は「kill される」に改めたので、その項は K2 から外れている (別プログラムでの確認は S0 の範囲外、票 §7 の「残る懸念」)。

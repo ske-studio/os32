@@ -690,3 +690,8 @@ AS では、アプリ PT の物理番地がアプリ PD の下で**別の物理*
 - `PDE.PS` (4MB ページ) の経路。この OS は一度も 4MB ページを張らないので
   ホストでも実機でも作れない。`paging_current_pte_flags` は**明示的に**
   非 present 扱いで断る (安全側) というコードとコメントだけがある。
+
+### 5. 実機の結果 (PM / テスター、2026-09-13、配備 4 回目 `8162a2c`)
+
+- `db_v50_test` PASS 41/41。`ring3_range_reject_count` = 2 (どちらも BAND = 4、0x7fffff の帯末尾またぎ = 試験が意図した拒否)。`fault_kill_count` = 0。kselftest 87 / 0、regress 6 / 6。
+- 方針 B (帯 + 長さのみ) で実機の open が MISUSE を返す症状は消えた。§4 の「ホストでは踏めなかったもの」のうち、帯内の非 present ページの kill は本票では踏んでいない。
