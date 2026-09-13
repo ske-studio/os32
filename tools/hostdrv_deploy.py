@@ -83,7 +83,7 @@ def guard_root():
     symlink / 別マウント / 通常ファイルでも成功で終わっていた (往復 2 の 8)。
     """
     try:
-        protect.check_root_etc(HOSTDRV_DIR)
+        protect.check_tree(HOSTDRV_DIR)
     except protect.ProtectError as exc:
         print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
         return False
@@ -314,20 +314,15 @@ def _clean_tree(path):
     keep = False
     for name in sorted(os.listdir(path)):
         full = os.path.join(path, name)
-        islink = os.path.islink(full)
-        # 1) 保護判定が最初 (symlink でもディレクトリでも、消す前に必ず見る)。
-        #    symlink は「リンクを外すだけ」なので専用の判定を使う。
-        if islink:
-            protected = protect.is_protected_symlink(HOSTDRV_DIR, full)
-        else:
-            protected = protect.is_protected(HOSTDRV_DIR, full)
-        if protected:
+        # 1) symlink は入口の check_tree で拒否済み。競合などで現れたら
+        #    「未対応の配置」として中止する (中間リンクを無判定で外さない)。
+        if os.path.islink(full):
+            raise protect.ProtectError(
+                '配備ツリーに symlink がある: {} (配備を中止する)'.format(full))
+        # 2) 保護判定が最初 (ディレクトリでも消す前に必ず見る)
+        if protect.is_protected(HOSTDRV_DIR, full):
             protect.protect_log(protect.guest_path_of(HOSTDRV_DIR, full))
             keep = True
-            continue
-        # 2) symlink は辿らずにリンクだけ消す
-        if islink:
-            os.remove(full)
             continue
         # 3) ディレクトリは降りてから、空になったときだけ rmdir
         if os.path.isdir(full):
@@ -352,8 +347,9 @@ def do_clean():
         return True
 
     try:
-        # <root>/etc がすり替わっていれば clean も拒否する (往復 1 の B3)。
-        protect.check_root_etc(HOSTDRV_DIR)
+        # <root>/etc がすり替わっている / ツリーに symlink があれば clean も
+        # 拒否する (往復 1 の B3、往復 3 の PM 方針)。
+        protect.check_tree(HOSTDRV_DIR)
         kept = _clean_tree(HOSTDRV_DIR)
     except protect.ProtectError as exc:
         print("Error: 保護判定に失敗したので clean を中止: {}".format(exc),

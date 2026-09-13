@@ -205,7 +205,7 @@ def guard_root(root=None):
     """
     root = root if root is not None else MOUNT_POINT
     try:
-        protect.check_root_etc(root)
+        protect.check_tree(root)
     except protect.ProtectError as exc:
         print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
         return False
@@ -255,7 +255,7 @@ def ensure_dir(guest_dir, root=None):
     for path in chain:
         if os.path.isdir(path):
             continue
-        result = subprocess.run(['sudo', 'mkdir', '-p', path],
+        result = subprocess.run(['sudo', 'mkdir', '-p', '--', path],
                                 capture_output=True, text=True)
         if result.returncode != 0:
             print("Error: mkdir {} 失敗: {}".format(
@@ -466,7 +466,7 @@ def do_copy(src_files, dest_dir='/', rename=None):
             skipped += 1
             continue
         result = subprocess.run(
-            ['sudo', 'cp', src, dest_path],
+            ['sudo', 'cp', '--', os.path.abspath(src), dest_path],
             capture_output=True, text=True
         )
         if result.returncode != 0:
@@ -516,7 +516,7 @@ def do_ls(path='/'):
         print("Error: {} not found".format(path), file=sys.stderr)
         return False
     result = subprocess.run(
-        ['ls', '-la', target],
+        ['ls', '-la', '--', target],
         capture_output=True, text=True
     )
     print(result.stdout)
@@ -538,7 +538,7 @@ def do_rm(filename):
     if not os.path.exists(target):
         print("Error: {} not found".format(filename), file=sys.stderr)
         return False
-    result = subprocess.run(['sudo', 'rm', target],
+    result = subprocess.run(['sudo', 'rm', '--', target],
                             capture_output=True, text=True)
     if result.returncode != 0:
         print("Error: {} を消せなかった: {}".format(
@@ -863,7 +863,7 @@ def remove_partial(dest_file):
         print("  Warning: {} の保護判定に失敗したので消さない: {}".format(
             dest_file, exc))
         return
-    result = subprocess.run(['sudo', 'rm', '-f', dest_file],
+    result = subprocess.run(['sudo', 'rm', '-f', '--', dest_file],
                             capture_output=True, text=True)
     if result.returncode != 0:
         print("  Warning: 壊れた {} を消せなかった: {}".format(
@@ -967,7 +967,7 @@ def do_sync(tag_filter=None):
 
             # ファイルコピー (確定した**ファイルパス**だけを cp に渡す)
             result = subprocess.run(
-                ['sudo', 'cp', host_abs, dest_file],
+                ['sudo', 'cp', '--', os.path.abspath(host_abs), dest_file],
                 capture_output=True, text=True
             )
             if result.returncode != 0:
@@ -1085,7 +1085,7 @@ def do_sync_from_hostdrv():
                 continue
 
             result = subprocess.run(
-                ['sudo', 'cp', src_path, dest_path],
+                ['sudo', 'cp', '--', os.path.abspath(src_path), dest_path],
                 capture_output=True, text=True
             )
             if result.returncode != 0:

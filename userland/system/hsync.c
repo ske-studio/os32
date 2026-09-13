@@ -89,12 +89,17 @@ static int str_cmp(const char *a, const char *b)
 
 /* ======== ファイルリスト ======== */
 
+/* 名前の保持幅。FileList はスタックに載る (MAX_FILES x NAME_CAP x 深さ) ので
+ * 無闇に広げられない。収まらない名前は**切り詰めずにエラー**にする (下記)。 */
+#define NAME_CAP 64
+
 typedef struct {
-    char names[MAX_FILES][64];
+    char names[MAX_FILES][NAME_CAP];
     u8   types[MAX_FILES];
     u32  sizes[MAX_FILES];
     int  count;
     int  dropped;      /* MAX_FILES を越えて捨てたエントリ数 */
+    int  truncated;    /* NAME_CAP に収まらず取り込めなかったエントリ数 */
 } FileList;
 
 static void ls_cb(const DirEntry_Ext *entry, void *ctx)
@@ -103,8 +108,14 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
     int i;
     if (fl->count >= MAX_FILES) { fl->dropped++; return; }
 
+    if (!hsp_name_fits(entry->name, NAME_CAP)) {
+        /* 切り詰めた名前でコピーすると**別のファイル**を作って成功と出る
+         * (往復 3 の D6)。取り込まずに数えて、呼び手がエラーにする。 */
+        fl->truncated++;
+        return;
+    }
     i = 0;
-    while (entry->name[i] && i < 63) {
+    while (entry->name[i]) {
         fl->names[fl->count][i] = entry->name[i];
         i++;
     }
@@ -290,6 +301,7 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
 
     fl.count = 0;
     fl.dropped = 0;
+    fl.truncated = 0;
     rc = api->sys_ls(src_dir, ls_cb, &fl);
     if (rc != 0) {
         api->kprintf(ATTR_RED, "  FAIL: ls %s (err=%d)\n", src_dir, rc);
@@ -299,6 +311,12 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
     if (fl.dropped) {
         api->kprintf(ATTR_RED, "  FAIL: %s のエントリが %d 件を越えた (+%d)\n",
                      src_dir, MAX_FILES, fl.dropped);
+        g_errors++;
+    }
+    if (fl.truncated) {
+        api->kprintf(ATTR_RED,
+                     "  FAIL: %s に %d 文字を越える名前が %d 件 (コピーしない)\n",
+                     src_dir, NAME_CAP - 1, fl.truncated);
         g_errors++;
     }
 

@@ -112,8 +112,10 @@ int main(void)
     printf("== 長いパスの連結 (往復 2 の 5) ==\n");
     {
         /* `hsync ./././...etc` 相当。連結が容量を越えたら**判定より前に**
-         * 止まる必要がある。純関数側は「正規化できない = 保護側」に倒す。 */
-        char longp[HSP_MAX_PATH * 2];
+         * 止まる必要がある。純関数側は「正規化できない = 保護側」に倒す。
+         * バッファは "a/" x HSP_MAX_PATH + "x" + NUL = 2*HSP_MAX_PATH+2 必要
+         * (2 倍では 2 バイト足りずに試験自身が溢れていた)。 */
+        static char longp[HSP_MAX_PATH * 2 + 16];
         int n;
         longp[0] = '\0';
         for (n = 0; n < HSP_MAX_PATH; n++) strcat(longp, "a/");
@@ -121,6 +123,28 @@ int main(void)
         check(hsp_normalize(longp, joined, (int)sizeof(joined)) == 0,
               "容量を越える正規化は失敗する");
         check(hsp_path_protected(longp), "正規化できないものは保護側");
+    }
+
+    printf("== 名前の長さ (往復 3 の D6) ==\n");
+    {
+        /* ls_cb は名前を NAME_CAP(64) のバッファに写す。切り詰めて写すと
+         * **別のファイル**を作って「成功」と出るので、収まらないものは
+         * 取り込まずにエラーへ回す。 */
+        char name[128];
+        int n;
+
+        check(hsp_name_fits("sh.bin", 64), "普通の名前");
+        check(hsp_name_fits("", 64), "空文字");
+        for (n = 0; n < 63; n++) name[n] = 'a';
+        name[63] = '\0';
+        check(hsp_name_fits(name, 64), "63 文字ちょうどは収まる");
+        name[63] = 'a';
+        name[64] = '\0';
+        check(!hsp_name_fits(name, 64), "64 文字は収まらない");
+        for (n = 0; n < 127; n++) name[n] = 'b';
+        name[127] = '\0';
+        check(!hsp_name_fits(name, 64), "127 文字は収まらない");
+        check(!hsp_name_fits(0, 64), "NULL");
     }
 
     printf("== -f の subdir 連結 (hsync.c:254 相当) ==\n");

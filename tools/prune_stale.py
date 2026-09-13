@@ -18,7 +18,9 @@
 一覧の最後に必ず 1 行 `RESULT: ...` を出す (os32-cycle / emu_agent が拾う)。
 """
 
+import errno
 import os
+import stat
 import sys
 import glob
 import time
@@ -55,17 +57,36 @@ def wanted_guest_paths():
 
 
 def find_stale(root, want):
-    """root 配下の PRUNE_DIRS 直下にある *.bin でマニフェストに無いもの"""
+    """root 配下の PRUNE_DIRS 直下にある *.bin でマニフェストに無いもの
+
+    候補の判定は `os.lstat` で行う。`os.path.isdir` / `isfile` は EACCES / EIO を
+    **False に丸める**ので、読めないディレクトリの中身が「候補 0 件」になって
+    「掃除済み」と報告されていた (往復 3 の D5)。ENOENT (競合で消えた) だけ
+    読み飛ばし、それ以外の OSError は上へ投げて非ゼロにする。
+    symlink はツリー全体の前提検査 (check_tree) が既に拒否している。
+    """
     stale = []
     for d in PRUNE_DIRS:
         dp = os.path.join(root, d) if d else root
-        if not os.path.isdir(dp):
+        try:
+            st = os.lstat(dp)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        if not stat.S_ISDIR(st.st_mode):
             continue
         for f in sorted(os.listdir(dp)):
             if not f.endswith(EXT):
                 continue
             p = os.path.join(dp, f)
-            if not os.path.isfile(p):
+            try:
+                st = os.lstat(p)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    continue
+                raise
+            if not stat.S_ISREG(st.st_mode):
                 continue
             gp = '/' + (d + '/' if d else '') + f
             if gp not in want:
@@ -98,7 +119,15 @@ def hostdrv_root():
 
 
 def is_protected(root, path):
-    """消す直前の保護判定。判定できなければ例外を上に投げて失敗にする。"""
+    """消す直前の保護判定。判定できなければ例外を上に投げて失敗にする。
+
+    自身だけでなく**祖先**も見る (`/etc/settings.db/` がディレクトリのとき
+    その中の残骸を消さない、往復 3 の D1 後半)。
+    """
+    anc = protect.protected_ancestor(root, path)
+    if anc is not None:
+        protect.protect_log(anc)
+        return True
     if protect.is_protected(root, path):
         protect.protect_log(protect.guest_path_of(root, path))
         return True
@@ -112,11 +141,15 @@ def prune_hostdrv(want, delete):
         return None
     # stale が 0 件でも <root>/etc の異常で止める (往復 2 の 8)
     try:
-        protect.check_root_etc(root)
+        protect.check_tree(root)
     except protect.ProtectError as exc:
         print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
         return None
-    stale = find_stale(root, want)
+    try:
+        stale = find_stale(root, want)
+    except OSError as exc:
+        print("Error: 候補を集められない: {}".format(exc), file=sys.stderr)
+        return None
     show('hostdrv ' + root, stale)
     if not delete:
         return len(stale)
@@ -147,11 +180,15 @@ def prune_nhd(want, delete):
         return None
     root = nhd_deploy.MOUNT_POINT
     try:
-        protect.check_root_etc(root)
+        protect.check_tree(root)
     except protect.ProtectError as exc:
         print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
         return None
-    stale = find_stale(root, want)
+    try:
+        stale = find_stale(root, want)
+    except OSError as exc:
+        print("Error: 候補を集められない: {}".format(exc), file=sys.stderr)
+        return None
     show('nhd ' + nhd_deploy.NHD_LOCAL, stale)
     if not delete:
         return len(stale)
@@ -163,7 +200,7 @@ def prune_nhd(want, delete):
         except protect.ProtectError as exc:
             print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
             return None
-        result = subprocess.run(['sudo', 'rm', '-f', p],
+        result = subprocess.run(['sudo', 'rm', '-f', '--', p],
                                 capture_output=True, text=True)
         if result.returncode != 0:
             print("Error: {} を消せなかった: {}".format(

@@ -851,11 +851,12 @@ class ReviewB3Clean(Base):
     """B3: clean のディレクトリ処理に無判定削除があった。"""
 
     def test_symlink_named_protected_is_not_removed(self):
+        """保護対象名の symlink があれば clean 全体を拒否する (往復 3)。"""
         target = self.root / 'elsewhere'
         target.mkdir()
         link = self.hostdrv / 'etc' / 'settings.db'
         os.symlink(str(target), str(link))
-        self.assertIs(hd.do_clean(), True)
+        self.assertIs(hd.do_clean(), False)
         self.assertTrue(os.path.islink(str(link)),
                         'clean が保護対象名の symlink を消した')
 
@@ -879,12 +880,18 @@ class ReviewB3Clean(Base):
                         'bottom-up が保護ディレクトリの中身を先に消した')
         self.assertFalse((self.hostdrv / 'top.bin').exists())
 
-    def test_unrelated_symlink_is_removed(self):
+    def test_unrelated_symlink_also_refuses_clean(self):
+        """無関係な symlink でも「未対応の配置」として拒否する (往復 3)。
+
+        中間 symlink を無判定で外す道を残さないための全体拒否。
+        """
         (self.hostdrv / 'bin').mkdir()
         os.symlink(str(self.root / 'nowhere'),
                    str(self.hostdrv / 'bin' / 'link'))
-        self.assertIs(hd.do_clean(), True)
-        self.assertFalse((self.hostdrv / 'bin').exists())
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'x')
+        self.assertIs(hd.do_clean(), False)
+        self.assertTrue((self.hostdrv / 'bin' / 'sh.bin').exists(),
+                        '拒否したのに消していた')
 
 
 class ReviewB4EntryCheck(Base):
@@ -1113,13 +1120,13 @@ class Review2DoubleFill(Base):
         self.assertNoProtectedWrites()
 
     def test_copy_cli_cannot_reach_db_through_symlink(self):
-        """`copy --dest /bin <settings.db>` は別名規則で除外される。
+        """`copy --dest /bin <settings.db>` も届かない。
 
-        こちらは宛先のファイル名まで決まっているので、realpath が
-        `/etc/settings.db` に落ちて名前規則が拾う = 除外 (成功)。
+        往復 3 以降はツリーに symlink があるだけで入口の `check_tree` が
+        配備全体を拒否する (= 非ゼロ)。DB は当然無傷。
         """
         digest = sha256(self.db)
-        self.assertIs(nd.do_copy([str(self.src)], dest_dir='/bin'), True)
+        self.assertIs(nd.do_copy([str(self.src)], dest_dir='/bin'), False)
         self.assertDbIntact(digest)
         self.assertNoProtectedWrites()
 
@@ -1281,6 +1288,181 @@ class Review2WalkPruning(Base):
         self.assertDbIntact(digest)
         self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(), b'NEWBIN')
         self.assertNoProtectedWrites()
+
+
+# ======================================================================
+#  Codex 実装レビュー 往復 3 の反例 (D1〜D6)
+#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.8)
+# ======================================================================
+class Review3TreeSymlink(Base):
+    """D1 / D2: 配備ツリーに symlink があれば配備全体を拒否する (PM 方針)。"""
+
+    def test_check_tree_rejects_file_symlink(self):
+        os.symlink(str(self.src_bin), str(self.mount / 'bin' / 'link.bin'))
+        with self.assertRaises(protect.ProtectError):
+            protect.check_tree(str(self.mount))
+
+    def test_check_tree_rejects_dir_symlink(self):
+        (self.mount / 'usr').mkdir()
+        os.symlink(str(self.mount / 'usr'), str(self.mount / 'bin' / 'u'))
+        with self.assertRaises(protect.ProtectError):
+            protect.check_tree(str(self.mount))
+
+    def test_check_tree_rejects_dangling_symlink(self):
+        os.symlink(str(self.root / 'nowhere'), str(self.mount / 'bin' / 'd'))
+        with self.assertRaises(protect.ProtectError):
+            protect.check_tree(str(self.mount))
+
+    def test_check_tree_passes_on_plain_tree(self):
+        protect.check_tree(str(self.mount))
+        protect.check_tree(str(self.hostdrv))
+
+    def test_sync_refuses_when_tree_has_symlink(self):
+        digest = sha256(self.db)
+        os.symlink(str(self.src_bin), str(self.mount / 'bin' / 'link.bin'))
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['core']}])
+        self.pairs({'build/sh.bin': [(str(self.src_bin), '/bin/sh.bin')]})
+        self.assertIs(nd.do_sync(), False)
+        self.assertDbIntact(digest)
+        self.assertFalse((self.mount / 'bin' / 'sh.bin').exists())
+
+    def test_hostdrv_sync_refuses_when_tree_has_symlink(self):
+        os.symlink(str(self.src_bin), str(self.hostdrv / 'etc' / 'l.bin'))
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['core']}])
+        self.pairs({'build/sh.bin': [(str(self.src_bin), '/bin/sh.bin')]})
+        self.assertIs(hd.do_sync(), False)
+
+    def test_prune_refuses_when_tree_has_symlink(self):
+        os.symlink(str(self.src_bin), str(self.hostdrv / 'etc' / 'l.bin'))
+        self._patch(ps, 'hostdrv_root', lambda: str(self.hostdrv))
+        self.assertIsNone(ps.prune_hostdrv(set(), True))
+
+    def test_rm_refuses_when_tree_has_symlink(self):
+        os.symlink(str(self.src_bin), str(self.mount / 'bin' / 'link.bin'))
+        (self.mount / 'bin' / 'old.bin').write_bytes(b'x')
+        self.assertIs(nd.do_rm('/bin/old.bin'), False)
+        self.assertTrue((self.mount / 'bin' / 'old.bin').exists())
+
+
+class Review3CpOptionInjection(Base):
+    """D3: source 名が cp のオプションに解釈される。"""
+
+    def test_option_like_source_name(self):
+        digest = sha256(self.db)
+        evil = self.root / '--target-directory=target'
+        evil.write_bytes(b'EVIL')
+        ok = nd.do_copy([str(evil)], dest_dir='/bin')
+        self.assertIs(ok, True)
+        self.assertDbIntact(digest)
+        # cp の operand は必ず `--` の後、source は絶対パス
+        for cmd in self.fake.calls:
+            argv = cmd[1:] if cmd[0] == 'sudo' else cmd
+            if argv and argv[0] in ('cp', 'rm', 'mkdir'):
+                self.assertIn('--', argv, 'operand 区切りが無い: %r' % (cmd,))
+                idx = argv.index('--')
+                for operand in argv[idx + 1:]:
+                    self.assertTrue(operand.startswith('/'),
+                                    'operand が絶対パスでない: %r' % (cmd,))
+
+    def test_relative_source_is_absolutised(self):
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['core']}])
+        rel = os.path.relpath(str(self.src_bin), os.getcwd())
+        self.pairs({'build/sh.bin': [(rel, '/bin/sh.bin')]})
+        self.assertIs(nd.do_sync(), True)
+        for cmd in self.fake.calls:
+            argv = cmd[1:] if cmd[0] == 'sudo' else cmd
+            if argv and argv[0] == 'cp':
+                self.assertEqual(argv[1], '--')
+                self.assertTrue(argv[2].startswith('/'))
+
+
+class Review3ProtectedDirCompletion(Base):
+    """D4: 保護対象名のディレクトリへ補完したときは「成功除外」。"""
+
+    def setUp(self):
+        super(Review3ProtectedDirCompletion, self).setUp()
+        self.db.unlink()
+        self.journal.unlink()
+        (self.mount / 'etc' / 'settings.db').mkdir()
+        (self.mount / 'etc' / 'settings.db' / 'keep').write_bytes(b'KEEP')
+
+    def test_resolve_dest_returns_protected_dir(self):
+        dest = protect.resolve_dest(str(self.mount), '/etc', str(self.src_db))
+        self.assertEqual(dest, str(self.mount / 'etc' / 'settings.db'))
+        self.assertTrue(protect.is_protected(str(self.mount), dest))
+
+    def test_manifest_guest_etc_is_skipped_not_failed(self):
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/settings.db', 'guest': '/etc',
+                        'tags': ['core']}])
+        self.pairs({'build/settings.db': [(str(self.src_db), '/etc')]})
+        self.assertIs(nd.do_sync(), True)       # 除外は成功 (非ゼロにしない)
+        self.assertEqual(
+            (self.mount / 'etc' / 'settings.db' / 'keep').read_bytes(), b'KEEP')
+        self.assertNoProtectedWrites()
+
+    def test_hostdrv_guest_etc_is_skipped_not_failed(self):
+        (self.hostdrv / 'etc' / 'settings.db').mkdir()
+        self.manifest([{'host': 'build/settings.db', 'guest': '/etc',
+                        'tags': ['core']}])
+        self.pairs({'build/settings.db': [(str(self.src_db), '/etc')]})
+        self.assertIs(hd.do_sync(), True)
+        self.assertTrue((self.hostdrv / 'etc' / 'settings.db').is_dir())
+
+    def test_unprotected_dir_completion_still_fails(self):
+        """保護対象でないディレクトリへ落ちるのは従来どおり拒否。"""
+        (self.mount / 'bin' / 'sh.bin').mkdir()
+        with self.assertRaises(protect.ProtectError):
+            protect.resolve_dest(str(self.mount), '/bin', str(self.src_bin))
+
+
+class Review3PruneStat(Base):
+    """D5: prune の候補収集で EACCES を不存在扱いにしない。"""
+
+    def test_unreadable_prune_dir_is_an_error(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        (self.mount / 'sbin').mkdir()
+        (self.mount / 'sbin' / 'old.bin').write_bytes(b'x')
+        os.chmod(str(self.mount / 'sbin'), 0o000)
+        try:
+            with self.assertRaises(OSError):
+                ps.find_stale(str(self.mount), set())
+            self._patch(nd, 'ensure_local_nhd', lambda: True)
+            self.assertIsNone(ps.prune_nhd(set(), True))
+        finally:
+            os.chmod(str(self.mount / 'sbin'), 0o755)
+
+    def test_find_stale_skips_directories(self):
+        (self.mount / 'bin' / 'dir.bin').mkdir()
+        (self.mount / 'bin' / 'real.bin').write_bytes(b'x')
+        found = [gp for gp, _p in ps.find_stale(str(self.mount), set())]
+        self.assertIn('/bin/real.bin', found)
+        self.assertNotIn('/bin/dir.bin', found)
+
+    def test_missing_prune_dir_is_not_an_error(self):
+        found = ps.find_stale(str(self.mount), set())
+        self.assertEqual(found, [])
+
+    def test_prune_keeps_entries_under_protected_ancestor(self):
+        self.db.unlink()
+        self.journal.unlink()
+        (self.mount / 'etc' / 'settings.db').mkdir()
+        junk = self.mount / 'etc' / 'settings.db' / 'old.bin'
+        junk.write_bytes(b'x')
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self._patch(ps, 'find_stale',
+                    lambda r, w: [('/etc/settings.db/old.bin', str(junk))])
+        self.assertEqual(ps.prune_nhd(set(), True), 0)
+        self.assertTrue(junk.exists(), '保護祖先の下を消した')
 
 
 # ======================================================================

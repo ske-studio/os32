@@ -139,6 +139,22 @@ static int hsp_name_protected(const char *norm)
     return hsp_is_protected_basename(base);
 }
 
+/* 名前が cap バイト (NUL 込み) のバッファに収まるか。
+ * 戻り値 1 = 収まる / 0 = 収まらない。
+ * 切り詰めた名前で写すと**別のファイル**を作って「成功」と出るので、
+ * 呼び手は 0 のときエラーにすること (往復 3 の D6)。 */
+static int hsp_name_fits(const char *name, int cap)
+{
+    int i = 0;
+
+    if (!name || cap < 1) return 0;
+    while (name[i]) {
+        i++;
+        if (i > cap - 1) return 0;
+    }
+    return 1;
+}
+
 /* 正規化済みパスの**祖先**に保護対象が居るか (path 自身は見ない)。
  * `/etc/settings.db/sub` のような宛先は、最終要素だけ見ても素通りする
  * (親が `/etc/settings.db` なので名前規則に当たらない、往復 2 の 2)。 */

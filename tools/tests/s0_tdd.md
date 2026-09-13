@@ -101,6 +101,8 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
 - `sudo` / ループマウントの実挙動は模擬。sudoers や ext2 の振る舞いは何も言わない。
 - bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
   symlink / 別マウント / 通常ファイルだけを `check_root_etc` が止める)。
+- 往復 3 以降、配備ツリーに symlink があれば配備全体を拒否する (`check_tree`)。
+  **symlink を含むツリーへ安全に配備できるとは言っていない** — 止めているだけ。
 
 ### D.6 実装レビュー 往復 1 の blocker 9 件 (2026-09-13、着地 `2c35f7c` に対して)
 
@@ -128,10 +130,6 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
 なら中へ」にし、`cp` / `rm` / `mkdir` の宛先が temp の外なら **AssertionError**
 (隔離の保証)、`ManifestEntryPoints` で resolver を差し替えずに manifest の入口
 (file / glob / tag) を通し、`do_copy` の `Done!` と prune の件数から保護除外を除いた。
-- `hsync` の inode 比較 (実体規則) はホストでは踏んでいない。
-- `sudo` / ループマウントの実挙動は模擬。sudoers や ext2 の振る舞いは何も言わない。
-- bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
-  symlink / 別マウントだけを `check_root_etc` が止める)。
 
 ### D.7 実装レビュー 往復 2 の blocker 9 件 (2026-09-13、着地 `10bc6ae` に対して)
 
@@ -156,6 +154,37 @@ GREEN: Ran 103 tests — OK
 
 non-blocker も同時に: `hsync` の `MAX_FILES` (128) / `MAX_DEPTH` (8) の打ち切りを
 エラーとして報告 (件数つき)、この節の末尾に残っていた §D.5 の重複 3 行を除去。
+
+### D.8 実装レビュー 往復 3 の 6 件 (2026-09-13、着地 `ef0bd60` に対して)
+
+**方針が変わった**: symlink の迷路を 1 件ずつ塞ぐのをやめ、**配備ツリー
+(HostDrv ルート / マウントした NHD ツリー) に symlink が 1 つでもあれば
+「未対応の配置」として配備全体を拒否する** (`check_tree`、PM 案・ユーザー未決裁)。
+OS32 の ext2 に symlink を作る手段は無く、HostDrv は Windows のフォルダなので、
+運用上の制約として成り立つ。これで往復 1〜3 の blocker の大半 (補完後の再補完、
+解決後の祖先、中間リンクの削除、リンク越しの別名) が**到達不能**になる。
+`is_protected_symlink` (symlink の削除許可) は撤回した。
+
+```
+RED  : Ran 121 tests — FAILED (failures=12, errors=6)     103 passed
+GREEN: Ran 121 tests — OK
+```
+
+| # | 反例 / 変更 | 試験 |
+|---|---|---|
+| D1 / D2 | 解決後の祖先・中間 symlink の削除。**symlink 無しでも成立する変種は無い** (symlink が無ければ realpath == 字句パスなので `protected_ancestor` が既に覆う。ディレクトリへの hardlink は作れない)。念のため prune にも `protected_ancestor` を当てた | `Review3TreeSymlink` 8 件 + `Review3PruneStat.test_prune_keeps_entries_under_protected_ancestor` |
+| D3 | source 名 `--target-directory=target` が `cp` のオプションに解釈され、判定外へ書けた | `Review3CpOptionInjection` 2 件。`cp` / `rm` / `mkdir` / `ls` の operand は必ず `--` の後、source は `os.path.abspath` で絶対化 |
+| D4 | `<root>/etc/settings.db/` が既存ディレクトリだと、再補完禁止の `ProtectError` が名前判定より先に出て**非ゼロ**になった | `Review3ProtectedDirCompletion` 4 件。補完後が**保護対象名**なら再補完せず「成功除外」、保護対象でないディレクトリは従来どおり拒否 |
+| D5 | `os.path.isdir` / `isfile` が EACCES を False に丸め、読めないディレクトリの候補が消えて「0 件で掃除済み」になった | `Review3PruneStat` 4 件。候補収集は `os.lstat`、ENOENT 以外の `OSError` は非ゼロ |
+| D6 | `ls_cb` が名前を 63 文字で切り詰め、**別名のファイル**を作って成功と出た | `hsync_protect_host.c` の「名前の長さ」6 件。純関数 `hsp_name_fits` に切り出し、収まらない項目は取り込まずにエラーへ数える (`NAME_CAP` は 64 のまま = 静的配列の増分なし) |
+
+non-blocker: `hsync_protect_host.c` の長いパス試験が自分のバッファ (1024B に
+`"a/"`×512 + NUL = 1026B) を越えていたのを直した。
+
+**hsync 本体の回帰証拠は純関数までである**。`ls_cb` / `sync_directory` /
+`scan_protected_entities` の分岐 (切り詰め・打ち切り・I/O 失敗・inode 比較) は
+ホストでは走らせていない — 見ているのは `hsp_*` の純関数と、同じソースが
+i386-elf-gcc + PROGRAM_FLAGS で通ることだけ ([V4])。
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
 

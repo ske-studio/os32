@@ -23,8 +23,13 @@ NHD へ写す」「マニフェストに無い物を消す」の 3 系統があ�
 (EACCES / EIO / ELOOP / 解決失敗) は保護側に倒し、ProtectError で**配備全体を失敗**
 させる (往復 3 の 3)。判断できないまま書くほうが危ない。
 
-`<root>/etc` 自体が symlink または別マウントなら配備全体を拒否する。bind mount の
-別名はツールでは検出しきれないので運用で禁止し、ここで最低限止める。
+`<root>/etc` 自体が symlink / 別マウント / 通常ファイルなら配備全体を拒否する。
+さらに **配備ツリーに symlink が 1 つでもあれば拒否** する (`check_tree`、往復 3 の
+PM 方針)。symlink を許すと「最終パス」の意味が組み合わせ爆発し (補完後の再補完、
+解決後の祖先、中間リンクの削除、リンク越しの別名)、レビューの blocker はほぼ全部
+その形だった。OS32 の ext2 に symlink を作る手段は無く、HostDrv は Windows の
+フォルダなので、ツリーに symlink が現れること自体が「未対応の配置」。
+bind mount の別名はツールでは検出しきれないので運用で禁止する。
 
 標準ライブラリのみ。実配備・sudo・mount は一切行わない (判定と印字だけ)。
 """
@@ -141,11 +146,13 @@ def resolve_dest(root, guest_path, host_src=None):
         if not _inside(root_abs, dest_abs):
             raise ProtectError(
                 '配備先 {!r} が root {!r} の外にある'.format(dest_abs, root_abs))
-    # 補完は 1 回まで。補完した先がまた (symlink 越しに) ディレクトリだと
-    # cp / copy2 がもう一度 basename を補うので、そこで拒否する
-    # (`<root>/bin/settings.db -> ../etc` のような仕掛け、往復 2 の 1)。
-    # コピー関数には「ディレクトリでないことを確認済み」のパスだけを渡す。
+    # 補完は 1 回まで。補完した先がまだディレクトリだと cp / copy2 がもう一度
+    # basename を補う (往復 2 の 1)。ただし**保護対象名のディレクトリ**なら
+    # 名前規則だけで答えが出る — そこは「判定できない失敗」ではなく
+    # 「書かずに成功除外」にする (往復 3 の D4)。
     if host_src is not None and os.path.isdir(dest_abs):
+        if name_is_protected(guest_path_of(root_abs, dest_abs)):
+            return dest_abs             # is_protected が True を返す = 除外
         raise ProtectError(
             '配備先 {!r} がディレクトリを指している '
             '(cp / copy2 が中へ書いてしまう)'.format(dest_abs))
@@ -321,28 +328,38 @@ def protected_ancestor(root, dest):
     return None
 
 
-def is_protected_symlink(root, dest):
-    """**symlink そのもの**を消す / 置き換える直前の判定 (辿った先へは書かない)。
+def check_tree(root):
+    """配備ツリー全体に **symlink が 1 つも無い**ことを確かめる (前提検査)。
 
-    `os.remove(link)` はリンクを外すだけでターゲットに触らないので、root の外を
-    指すリンクは「保護対象ではない」= 普通に消してよい。`is_protected` は書き込み
-    経路のために root 外への解決を拒否するので、削除にはこちらを使う。
-    名前規則と、root 内に解決できるときの実体規則は同じに当てる (往復 1 の B3)。
+    symlink を許すと「最終パス」の意味が組み合わせ爆発する: 補完後の再補完、
+    解決後の祖先、中間リンクの削除、リンク越しの別名 — 往復 1〜3 の blocker は
+    ほとんどがこの形だった。OS32 の ext2 に symlink を作る手段は無く、HostDrv は
+    Windows のフォルダなので、**配備ツリーに symlink が現れること自体が
+    「未対応の配置」**。見つけたら配備全体を拒否する (PM 方針、往復 3)。
+
+    `<root>/etc` 単体の検査 (check_root_etc) より重いので、判定ごとではなく
+    **サブコマンドの入口で 1 回**だけ呼ぶこと。
     """
     check_root_etc(root)
-    guest = guest_path_of(root, dest)
-    if name_is_protected(guest):
-        return True
-    real_root = os.path.realpath(os.path.abspath(root))
-    real_dest = os.path.realpath(os.path.abspath(dest))
-    if not _inside(real_root, real_dest):
-        return False
-    if name_is_protected(guest_path_of(real_root, real_dest)):
-        return True
-    st = _stat_or_none(dest)            # 辿った先 (dangling なら ENOENT)
-    if st is None:
-        return False
-    return (st.st_dev, st.st_ino) in _protected_identities(root)
+    root_abs = os.path.abspath(root)
+    if os.path.islink(root_abs):
+        raise ProtectError(
+            '配備先 {} 自体が symlink。配備を中止する'.format(root_abs))
+
+    errors = []
+    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False,
+                                                onerror=errors.append):
+        if errors:
+            break
+        for name in list(dirnames) + list(filenames):
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                raise ProtectError(
+                    '配備ツリーに symlink がある: {} '
+                    '(未対応の配置。配備を中止する)'.format(full))
+    if errors:
+        raise ProtectError(
+            '配備ツリーを辿れない: {}'.format(errors[0]))
 
 
 def protect_log(path, stream=None):
