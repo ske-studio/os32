@@ -182,3 +182,7 @@
 | K (`769e1fc`) | 往復 3 (最終): Request changes | 1 件: `vfs_resolve_path` が cwd 連結後に切り詰めてから正規化するため、`./`×122 + `a/../b.db` で `/tmp/b` (別 DB) を RW で開ける → resolve 前に長さ超過を検知して CANTOPEN。non-blocker: B3 の `len == 0` + NOMEM と TEXT 側、journal_mode の非 DELETE 拒否試験、static `probe` 264B の計上、KAPI_SPEC 概要の版更新、再 prepare は末尾 PRAGMA の副作用を残す (契約外)。**3 往復を使い切ったのでユーザー判断** (修正は準備中) |
 | K (`c24f058`) / D (`a383619`) | 最終往復 (ユーザー承認、K+D 合同): Request changes | K 1 件 (P1): パスの深さ 32 成分超で `vfs_resolve_path` が成分を捨て、その後の `..` が別 DB (`/b.db`) に到達 → 入口で成分数も検査して CANTOPEN。D 1 件 (P2): hsync が失敗時も `Done:` ラベル → 成否でラベルを分ける。non-blocker: K の試験自身の範囲外読み、s0_tdd の旧記述。修正は準備中、**着地とその後 (再往復か配備か) はユーザー判断**。ゲート (`a383619`): clean + clean-external → all → external → check すべて exit=0、vmkernel.lz4 470,181 B |
 | K (`a70df4f`) / D (`68d08c7`) | 追加往復 (ユーザー承認): **Approve** | K・D とも追加 blocker なし。non-blocker: ホスト試験の保証範囲 (K のポインタ判定は模型、hsync は純関数中心)、D1 / K1 / K2 は受入で。ゲート (`a70df4f`): `make all` / `external` / `check` exit=0、vmkernel.lz4 470,305 B。**配備へ** |
+
+## 11. 実機受入の記録 (PM / テスター、2026-09-13)
+
+配備 1 回目 (feat/gui `4554a10`、vmkernel 470,305 B): NP21/W 停止 → `nhd-pull` (stamp `os32.nhd.pulled` 261 B) → バックアップ `os32.nhd.bak-s0-20260913-140849` → `os32-cycle deploy` → **`make deploy-nhd` が D0 の前提検査で失敗**: `配備ツリーを辿れない: [Errno 13] Permission denied: '/tmp/os32/lost+found'` (ext2 標準の root 所有 700 のディレクトリを非 root の `os.walk` が読めない)。NHD は未変更、HostDrv の `make deploy` は exit=0。→ D へ: ルート直下の `lost+found` (ディレクトリ、名前一致) だけ走査から外す。
