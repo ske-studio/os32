@@ -1243,59 +1243,64 @@ static int do_import(const CfgArgs *a)
         out_str("\n");
         return rc == CFG_IMPORT_OK ? 0 : 1;
     }
+    /* 失敗の文言。改行は付けない — 後始末の失敗を同じ行の尾に足すため。 */
     switch (rc) {
     case CFG_IMPORT_E_STATUS:
         out_str("cannot import: ");
         out_str(status_name(info.status));
-        out_str("\n");
-        if (info.status == CFG_MISSING)
-            out_str("settings.db missing: run 'cfg init'\n");
         break;
     case CFG_IMPORT_E_VERSION:
         out_str("newer backup: schema_version ");
         out_num(info.version);
-        out_str("\n");
         break;
     case CFG_IMPORT_E_LINE:
         out_str("bad line ");
         out_num(info.lineno);
         out_str(": ");
         out_str(cfg_import_detail_name(info.detail));
-        out_str("\n");
         break;
     case CFG_IMPORT_E_DUP:
         out_str("duplicate record at line ");
         out_num(info.lineno);
-        out_str("\n");
         break;
     case CFG_IMPORT_E_MANY:
-        out_str("too many records\n");
+        out_str("too many records");
         break;
     case CFG_IMPORT_E_LONG:
         out_str("line ");
         out_num(info.lineno);
-        out_str(" too long\n");
+        out_str(" too long");
         break;
     case CFG_IMPORT_E_HEADER:
-        out_str("not a settings backup\n");
+        out_str("not a settings backup");
         break;
     case CFG_IMPORT_E_OPEN:
-        out_str("cannot open the import file\n");
+        out_str("cannot open the import file");
         break;
     case CFG_IMPORT_E_IO:
-        out_str("read failed\n");
+        out_str("read failed");
         break;
     case CFG_IMPORT_E_CHANGED:
-        out_str("input changed during import\n");
+        out_str("input changed during import");
         break;
     case CFG_IMPORT_E_ARG:
-        out_str("bad scope\n");
+        out_str("bad scope");
         break;
     default:
         out_str("import failed (");
         out_num(info.detail);
-        out_str(")\n");
+        out_str(")");
         break;
     }
+    /* rollback / close が失敗していたら「1 行も残らない」とは言えない。
+     * 原因の文言を残したまま別欄で出す (レビュー往復 1 の B4)。 */
+    if (info.cleanup != 0) {
+        out_str(" (rollback/close failed ");
+        out_num(info.cleanup);
+        out_str(")");
+    }
+    out_str("\n");
+    if (rc == CFG_IMPORT_E_STATUS && info.status == CFG_MISSING)
+        out_str("settings.db missing: run 'cfg init'\n");
     return 1;
 }

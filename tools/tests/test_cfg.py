@@ -75,6 +75,7 @@ CASES = [
     "s3_reject",       # MISSING / CORRUPT / 版 / 壊れた行 / 重複 / 長すぎ
     "s3_fail",         # 途中失敗の rollback、hash 衝突、commit 後の close 失敗
     "s3_gen",          # 8192 受理 / 8193 拒否、巡回の間の差し替え
+    "s3_bulk",         # 8192 件を実 SQLite に 1 transaction で書き切る
 ]
 
 INC = ["-I" + str(ROOT / p) for p in

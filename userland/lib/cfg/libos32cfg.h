@@ -179,6 +179,11 @@ typedef struct {
     int detail;    /* 行の理由 / OS32_ERR_* / SQLite / close コード */
     int status;    /* CFG_IMPORT_E_STATUS のときの CFG_* */
     int version;   /* ヘッダの schema_version */
+    /* **この呼び出しの中で** cfg_close が失敗したときの最初のコード
+     * (0 = 後片付けは成功、または close していない)。commit 前の失敗では
+     * rollback がここに出る = 「1 行も残らない」保証が**成立していない**
+     * ことを呼び手が判別できる (レビュー往復 1 の B4)。 */
+    int cleanup;
 } CfgImportInfo;
 
 /* scope が NULL なら全 scope。merge が 0 なら置換 (対象 scope を先に削除)。

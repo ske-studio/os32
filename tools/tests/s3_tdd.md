@@ -336,7 +336,7 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
 先に立てると `cfg_open` の中の RO→RW 切り替えの close を巻き込み、open 自体が `CFG_ERROR` に
 なって狙った段に届かない (既存 `open_close_fail` が固定している挙動)。
 
-## C-1. ケース (7 本 / 214 CHECK)
+## C-1. ケース (8 本 / 269 CHECK)
 
 | ケース | CHECK | 見ているもの |
 |---|---|---|

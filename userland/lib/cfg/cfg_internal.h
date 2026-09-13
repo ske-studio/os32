@@ -166,7 +166,9 @@ int cfg_tsv_parse(int (*get)(void *ctx), void *gctx, CfgTsvRow *row,
 
 typedef struct {
     char          scope[CFG_SCOPE_MAX + 1];
+    int           slen;
     char          key[CFG_KEY_MAX + 1];
+    int           klen;
     int           type;                       /* CFG_TYPE_* (宣言型) */
     int           is_null;                    /* 1 = "v":null */
     int           ival;
@@ -174,10 +176,30 @@ typedef struct {
     int           tlen;
     unsigned char bval[CFG_BLOB_MAX];
     int           blen;
+    /* **意味**の傷 (構文解析は通ったが上限 / 値域を外れた)。cfg_json_check
+     * が読む。対象外の scope の行はここを見ない = 構文検証だけになる。 */
+    int           scope_over;                 /* 63B を超えた (中身は切れている) */
+    int           scope_nul;
+    int           key_over;
+    int           key_nul;
+    int           val_over;                   /* text 255B / blob 4096B 超過 */
+    int           val_nul;
+    int           val_range;                  /* int32 の範囲外 */
 } CfgJsonRow;
 
-/* line は長さ付き (埋め込み NUL も行の一部として見る)。CFG_JSON_* を返す。 */
+/* line は長さ付き (埋め込み NUL も行の一部として見る)。CFG_JSON_* を返す。
+ *
+ * `cfg_json_record` は **構文だけ** を見る (骨組み・キーの順・エスケープ・
+ * base64 の形・数字の並び)。上限や値域は `row` の傷として控えるだけで、
+ * 拒否はしない — `--scope` の対象外の行を「構文検証だけ」で通すため (票 §2)。
+ * `cfg_json_check` が**対象行にだけ**かける意味の検証 (名前の規則と長さ、
+ * UTF-8、NUL、text / blob の上限、int32 の範囲)。
+ * `cfg_json_scope_usable` は scope を丸ごと復号できた (= 対象かどうかを
+ * 文字列で判定してよい) かどうか。切り詰めた scope を比べると、63B の
+ * 対象名に前半が一致する長い scope を取り違える。 */
 int cfg_json_header(const char *line, int len, int *version_out);
 int cfg_json_record(const char *line, int len, CfgJsonRow *row);
+int cfg_json_check(const CfgJsonRow *row);
+int cfg_json_scope_usable(const CfgJsonRow *row);
 
 #endif /* CFG_INTERNAL_H */

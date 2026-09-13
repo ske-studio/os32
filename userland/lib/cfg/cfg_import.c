@@ -198,7 +198,8 @@ static int imp_tab_add(ImpIn *in, u32 off, const CfgJsonRow *r)
         if (imp_seek(in, imp_tab[idx]) != 0) return IMP_ERR_IO;
         rc = imp_read_line(in, imp_back, &len, (u32 *)0);
         if (rc != IMP_LINE) return IMP_ERR_IO;
-        if (cfg_json_record(imp_back, len, &imp_back_row) != CFG_JSON_OK)
+        if (cfg_json_record(imp_back, len, &imp_back_row) != CFG_JSON_OK ||
+            !cfg_json_scope_usable(&imp_back_row))
             return IMP_ERR_IO;               /* 一度受理した行が読めない */
         if (imp_seek(in, cur) != 0) return IMP_ERR_IO;
         if (imp_streq(imp_back_row.scope, r->scope) &&
@@ -271,6 +272,9 @@ static int imp_pass(const char *path, const char *scope, CfgDb *db,
             return (rc == IMP_ERR_LONG) ? CFG_IMPORT_E_LONG : CFG_IMPORT_E_IO;
         }
         lineno++;
+        /* 構文はすべての行に、意味 (上限 / 値域 / 名前の規則) は**対象行に
+         * だけ**かける。混ぜると `--scope gshell` の import が、関係の無い
+         * `user` 行の 256B text で落ちる (往復 1 の B3)。 */
         rc = cfg_json_record(imp_line, len, &imp_row);
         if (rc != CFG_JSON_OK) {
             imp_finish(&in);
@@ -278,8 +282,15 @@ static int imp_pass(const char *path, const char *scope, CfgDb *db,
             info->detail = rc;
             return CFG_IMPORT_E_LINE;
         }
-        /* 対象外の scope は構文検証だけ (値も重複も件数も見ない、B10)。 */
-        if (scope && !imp_streq(imp_row.scope, scope)) continue;
+        if (scope && (!cfg_json_scope_usable(&imp_row) ||
+                      !imp_streq(imp_row.scope, scope))) continue;
+        rc = cfg_json_check(&imp_row);
+        if (rc != CFG_JSON_OK) {
+            imp_finish(&in);
+            info->lineno = lineno;
+            info->detail = rc;
+            return CFG_IMPORT_E_LINE;
+        }
         if (rows >= CFG_IMPORT_MAX_ROWS) {
             imp_finish(&in);
             info->lineno = lineno;
@@ -309,6 +320,18 @@ static int imp_pass(const char *path, const char *scope, CfgDb *db,
 /*  本体                                                               */
 /* ------------------------------------------------------------------ */
 
+/* 失敗の経路で使う close。**この呼び出しの中で**失敗したときだけ
+ * `info->cleanup` に残す (前回の診断を拾わない)。rollback が成立して
+ * いなければ「1 行も残らない」とは言えないので、必ず呼び手まで運ぶ。 */
+static void imp_close(CfgDb *db, CfgImportInfo *info)
+{
+    int code;
+    if (cfg_close(db) != 0) {
+        code = cfg_last_close_error();
+        info->cleanup = code ? code : -1;
+    }
+}
+
 int cfg_import_file(const char *path, const char *scope, int merge,
                     CfgImportInfo *info)
 {
@@ -322,6 +345,7 @@ int cfg_import_file(const char *path, const char *scope, int merge,
     info->detail = 0;
     info->status = CFG_OK;
     info->version = 0;
+    info->cleanup = 0;
 
     if (!path || !path[0]) return CFG_IMPORT_E_ARG;
     if (scope && (!cfg_i_valid_scope(scope) ||
@@ -339,18 +363,18 @@ int cfg_import_file(const char *path, const char *scope, int merge,
     }
     if (cfg_status(db) != CFG_OK) {
         info->status = cfg_status(db);
-        cfg_close(db);
+        imp_close(db, info);
         return CFG_IMPORT_E_STATUS;
     }
     if (cfg_begin(db) != 0) {
         info->detail = cfg_last_sqlite(db);
-        cfg_close(db);
+        imp_close(db, info);
         return CFG_IMPORT_E_WRITE;
     }
     /* 置換は対象 scope (NULL = 全部) を先に消す。--merge は消さない。 */
     if (!merge && cfg_delete_scope(db, scope) != 0) {
         info->detail = cfg_last_sqlite(db);
-        cfg_close(db);                       /* rollback して閉じる */
+        imp_close(db, info);                 /* rollback して閉じる */
         return CFG_IMPORT_E_WRITE;
     }
 
@@ -359,12 +383,12 @@ int cfg_import_file(const char *path, const char *scope, int merge,
     if (rc == CFG_IMPORT_OK && (rows2 != rows1 || ver2 != ver1))
         rc = CFG_IMPORT_E_CHANGED;
     if (rc != CFG_IMPORT_OK) {
-        cfg_close(db);                       /* 未 commit は rollback */
+        imp_close(db, info);                 /* 未 commit は rollback */
         return rc;
     }
     if (cfg_commit(db) != 0) {
         info->detail = cfg_last_sqlite(db);
-        cfg_close(db);
+        imp_close(db, info);
         return CFG_IMPORT_E_WRITE;
     }
     info->rows = rows1;

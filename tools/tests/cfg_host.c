@@ -2892,9 +2892,18 @@ static void c_s5_pool(void)
 
 static CfgJsonRow jr;
 
-static int jrec(const char *line)
+/* 構文だけ (対象外の scope の行にかかるのはこれだけ) */
+static int jsyn(const char *line)
 {
     return cfg_json_record(line, (int)strlen(line), &jr);
+}
+
+/* 構文 + 意味 (対象行にかかる分) */
+static int jrec(const char *line)
+{
+    int rc = cfg_json_record(line, (int)strlen(line), &jr);
+    if (rc != CFG_JSON_OK) return rc;
+    return cfg_json_check(&jr);
 }
 
 static int jhdr(const char *line, int *v)
@@ -3104,6 +3113,52 @@ static void c_s3_json(void)
     strcat(big, "AAAAAAAA\"}");
     CHECK(jrec(big) == CFG_JSON_E_VALUE);
 
+    /* ---- base64 の未使用ビットは 0 でなければならない (正準形) ---- */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AB==\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAB=\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AA==\"}")
+          == CFG_JSON_OK && jr.blen == 1 && jr.bval[0] == 0x00);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAA=\"}")
+          == CFG_JSON_OK && jr.blen == 2);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"/w==\"}")
+          == CFG_JSON_OK && jr.blen == 1 && jr.bval[0] == 0xFF);
+
+    /* ---- 構文と意味の切り分け (往復 1 の B3) ----
+     * 上限 / 値域 / 名前の規則は `cfg_json_check` の側。構文解析は通る。 */
+    CHECK(jsyn("{\"scope\":\"SYSTEM\",\"key\":\"a\",\"type\":0,\"v\":5}")
+          == CFG_JSON_OK);
+    CHECK(jsyn("{\"scope\":\"gshell\",\"key\":\"Bad\",\"type\":0,\"v\":5}")
+          == CFG_JSON_OK);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":2147483648}")
+          == CFG_JSON_OK && jr.val_range);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u0000\"}")
+          == CFG_JSON_OK && jr.val_nul);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\xff\"}")
+          == CFG_JSON_OK);
+    /* 構文そのものの違反は「対象外」でも拒否される */
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":01}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AB==\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\b\"}")
+          == CFG_JSON_E_SYNTAX);
+    /* 切り詰めた scope は対象判定に使えない (63B の対象名と取り違えない) */
+    strcpy(big, "{\"scope\":\"app:");
+    for (i = 0; i < 59; i++) strcat(big, "n");
+    CHECK((int)strlen(big) == 14 + 59);
+    strcat(big, "extra\",\"key\":\"a\",\"type\":0,\"v\":1}");
+    CHECK(jsyn(big) == CFG_JSON_OK);
+    CHECK(jr.scope_over && !cfg_json_scope_usable(&jr));
+    CHECK(jrec(big) == CFG_JSON_E_SCOPE);
+    /* 255B / 4096B ちょうどは意味の検証も通る */
+    strcpy(big, "{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"");
+    for (i = 0; i < 256; i++) strcat(big, "x");
+    strcat(big, "\"}");
+    CHECK(jsyn(big) == CFG_JSON_OK && jr.val_over);
+    CHECK(jrec(big) == CFG_JSON_E_VALUE);
+
     /* ---- v:null は宣言型を保つ ---- */
     CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":null}")
           == CFG_JSON_OK && jr.is_null && jr.type == CFG_TYPE_TEXT);
@@ -3246,6 +3301,63 @@ static void c_s3_scope(void)
     /* 無効な scope は入口で断る (DB を触らない) */
     CHECK(ran("import", "/b.json", "--scope", "BAD", NULL) == 1);
     CHECK(cap_has("bad scope"));
+
+    /* --- 往復 1 の B3: 対象外の scope の行は**構文検証だけ** --- */
+    reset_all();
+    s3_seed();
+    CHECK(ran("set", "user", "keep", "int", "4") == 0);
+    snap_the_list();
+    {
+        static char buf[8192];
+        int i;
+        strcpy(buf, "{\"schema_version\":1,\"exported\":\"0\"}\n"
+                    "{\"scope\":\"gshell\",\"key\":\"desktop/color\","
+                    "\"type\":0,\"v\":7}\n"
+                    /* 値域外の int / 大文字 scope / 64B key / 不正 UTF-8 /
+                     * \u0000 — どれも `user` 側なので無視されるべき */
+                    "{\"scope\":\"user\",\"key\":\"a\","
+                    "\"type\":0,\"v\":2147483648}\n"
+                    "{\"scope\":\"SYSTEM\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+                    "{\"scope\":\"user\",\"key\":\"Bad\",\"type\":0,\"v\":1}\n"
+                    "{\"scope\":\"user\",\"key\":\"b\",\"type\":1,"
+                    "\"v\":\"\\u0000\"}\n"
+                    "{\"scope\":\"user\",\"key\":\"c\",\"type\":1,\"v\":\"");
+        /* 構文は正しいが 256B の text (票 §2 の反例そのもの) */
+        for (i = 0; i < 256; i++) strcat(buf, "x");
+        strcat(buf, "\"}\n");
+        put_file("/mix.json", buf);
+    }
+    CHECK(ran("import", "/mix.json", "--scope", "gshell", NULL) == 0);
+    CHECK(cap_has("imported 1 records (gshell), replaced\n"));
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("7\n"));
+    CHECK(ran("get", "user", "keep", NULL, NULL) == 0);
+    CHECK(cap_has("4\n"));                    /* scope 外は 1 行も動かない */
+    /* 同じファイルを全 scope で取り込もうとすると、その行で止まる */
+    CHECK(ran("import", "/mix.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("bad line 3: range"));
+    /* 構文そのものの違反なら対象外の scope でも止まる */
+    put_file("/badsyn.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":01}\n");
+    CHECK(ran("import", "/badsyn.json", "--scope", "gshell", NULL) == 1);
+    CHECK(cap_has("bad line 3: value"));
+    /* 63B の対象 scope に前半が一致する長い scope を取り違えない */
+    {
+        static char buf[8192];
+        char target[80];
+        int i;
+        strcpy(target, "app:");
+        for (i = 0; i < 59; i++) strcat(target, "n");
+        strcpy(buf, "{\"schema_version\":1,\"exported\":\"0\"}\n{\"scope\":\"");
+        strcat(buf, target);
+        strcat(buf, "extra\",\"key\":\"a\",\"type\":0,\"v\":1}\n");
+        put_file("/pfx.json", buf);
+        CHECK(ran("import", "/pfx.json", "--scope", target, NULL) == 0);
+        CHECK(cap_has(" records ("));
+        CHECK(cap_has("imported 0 records ("));   /* 対象は 0 件 */
+    }
 }
 
 /* --- (C4) 引数解釈 ---------------------------------------------------- */
@@ -3398,6 +3510,52 @@ static void c_s3_fail(void)
     CHECK(ran("get", "user", "adp", NULL, NULL) == 0);
     CHECK(cap_has("2\n"));
 
+    /* --- 往復 1 の B4: commit 前の失敗で rollback も落ちたら別欄で出す --- */
+    reset_all();
+    s3_seed();
+    snap_the_list();
+    put_file("/small.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"user\",\"key\":\"b\",\"type\":0,\"v\":2}\n");
+    inj_fread_fail_at = 3;                        /* 2 巡目の最初の read */
+    inj_exec_match[0] = "ROLLBACK";               /* 後始末も落とす */
+    inj_exec_sub[0] = "SELECT 1 FROM no_such_table_for_tdd";
+    CHECK(ran("import", "/small.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("read failed (rollback/close failed "));
+    inj_fread_fail_at = 0;
+    inj_fread_n = 0;
+    inj_exec_match[0] = NULL;
+    inj_exec_sub[0] = NULL;
+    /* rollback が成功する通常の経路では尾は付かない */
+    inj_fread_fail_at = 3;
+    CHECK(ran("import", "/small.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("read failed\n"));
+    CHECK(!cap_has("rollback/close failed"));
+    inj_fread_fail_at = 0;
+    inj_fread_n = 0;
+    CHECK(list_matches());                        /* SQLite の close が巻き戻す */
+
+    /* status 拒否の経路でも同じ尾が付く。0 バイトの DB だと接続を掴む前に
+     * 落ちて close する相手がいないので、**開けるが meta が 0 行**の DB
+     * (= CORRUPT、接続は生きている) を使う。 */
+    reset_all();
+    {
+        static const char *bad[] = {
+            "CREATE TABLE meta (schema_version INTEGER NOT NULL, created TEXT)",
+            "CREATE TABLE settings (scope TEXT, key TEXT, type INTEGER,"
+            " ival INTEGER, tval TEXT, bval BLOB, PRIMARY KEY (scope,key))"
+            " WITHOUT ROWID",
+            NULL
+        };
+        raw_db(CFG_DB_PATH, bad);
+    }
+    put_file("/x.json", "{\"schema_version\":1,\"exported\":\"0\"}\n");
+    inj_close_fail = SQLITE_IOERR;
+    CHECK(ran("import", "/x.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cannot import: CORRUPT (rollback/close failed "));
+    inj_close_fail = 0;
+
     /* --- commit の後の close 失敗は「更新済み」と出して終了 1 --- */
     reset_all();
     s3_seed();
@@ -3462,6 +3620,32 @@ static void c_s3_gen(void)
     CHECK(list_matches());
 }
 
+/* --- (C8) 8192 件を実 SQLite に書き切る (往復 1 の non-blocker) -------- */
+static void c_s3_bulk(void)
+{
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(cfg_init(NULL) == 0);
+    gen_path = "/gen.json";
+    gen_rows = CFG_IMPORT_MAX_ROWS;
+    /* 384KB の MEMSYS5 プール (実 os32_sqlite_vfs.c) の上で、8192 行を
+     * **1 つの transaction**で書き切れるか。置換なので全削除 + 8192 INSERT。*/
+    CHECK(ran("import", "/gen.json", "--scope", "user", NULL) == 0);
+    CHECK(cap_has("imported 8192 records (user), replaced\n"));
+    CHECK(cap_yields_open == 0);
+    /* 中身が本当に入っている (先頭 / 末尾 / 途中) */
+    CHECK(ran("get", "user", "k0000", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+    CHECK(ran("get", "user", "k8191", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+    CHECK(ran("get", "user", "k4096", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+    CHECK(ran("get", "user", "k8192", NULL, NULL) == 0);
+    CHECK(cap_has("(not set)"));
+    /* gshell (tsv の 3 件) は触られていない */
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+}
+
 /* ========================================================================= */
 
 int main(int argc, char **argv)
@@ -3524,6 +3708,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "s3_reject")) c_s3_reject();
     else if (!strcmp(argv[1], "s3_fail")) c_s3_fail();
     else if (!strcmp(argv[1], "s3_gen")) c_s3_gen();
+    else if (!strcmp(argv[1], "s3_bulk")) c_s3_bulk();
     else CHECK(0);
 
     canary_check(argv[1]);
