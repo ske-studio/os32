@@ -46,6 +46,8 @@ typedef struct CfgBackend {
     int (*sys_unlink)(const char *path);
     int (*sys_open)(const char *path, int mode);
     int (*sys_read)(int fd, void *buf, u32 size);
+    /* import の重複検出で先行行を読み直す (票 S3 §2)。 */
+    int (*sys_lseek)(int fd, int offset, int whence);
     void (*sys_close)(int fd);
     u32 (*get_tick)(void);
 } CfgBackend;
@@ -139,5 +141,43 @@ typedef struct { int code; int lineno; } CfgTsvErr;
 int cfg_tsv_parse(int (*get)(void *ctx), void *gctx, CfgTsvRow *row,
                   int (*emit)(const CfgTsvRow *r, void *ctx), void *ectx,
                   CfgTsvErr *err);
+
+
+/* ---- JSON reader (cfg_json.c、純関数、票 S3 §2) ------------------------ */
+/*  `cfg export` が書く形**だけ**を読む。汎用 JSON ではない (DESIGN §6b):
+ *    1 行目  {"schema_version":N,"exported":"..."}
+ *    以降    {"scope":"…","key":"…","type":0|1|2,"v":<int>|"<text>"|"<b64>"|null}
+ *  キー順は固定、空白は許さない、エスケープは writer が出す 6 種だけ
+ *  (`\"` `\\` `\n` `\r` `\t` `\uXXXX`。`\u` は BMP のみでサロゲートは拒否)。
+ *  数値は int32 の正準形 (先頭ゼロ・`+`・`-0` は拒否)。                     */
+#define CFG_JSON_OK        0
+#define CFG_JSON_E_SYNTAX  1    /* 骨組みが違う / 余分な文字 */
+#define CFG_JSON_E_SCOPE   2
+#define CFG_JSON_E_KEY     3
+#define CFG_JSON_E_TYPE    4
+#define CFG_JSON_E_VALUE   5    /* 値の形 / 上限超過 / base64 */
+#define CFG_JSON_E_RANGE   6    /* int32 の範囲外 */
+#define CFG_JSON_E_UTF8    7    /* 不正 UTF-8 / `\u` のサロゲート */
+#define CFG_JSON_E_NUL     8    /* 文字列に NUL (`\u0000`) */
+#define CFG_JSON_E_VERSION 9    /* ヘッダの版が自分より新しい */
+
+/* 行バッファ。writer の最長行は blob 4096B の 5,627B (+ LF + NUL = 5,629B)。*/
+#define CFG_JSON_LINE_MAX  6144
+
+typedef struct {
+    char          scope[CFG_SCOPE_MAX + 1];
+    char          key[CFG_KEY_MAX + 1];
+    int           type;                       /* CFG_TYPE_* (宣言型) */
+    int           is_null;                    /* 1 = "v":null */
+    int           ival;
+    char          tval[CFG_TEXT_MAX + 1];
+    int           tlen;
+    unsigned char bval[CFG_BLOB_MAX];
+    int           blen;
+} CfgJsonRow;
+
+/* line は長さ付き (埋め込み NUL も行の一部として見る)。CFG_JSON_* を返す。 */
+int cfg_json_header(const char *line, int len, int *version_out);
+int cfg_json_record(const char *line, int len, CfgJsonRow *row);
 
 #endif /* CFG_INTERNAL_H */

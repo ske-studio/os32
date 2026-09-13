@@ -30,6 +30,7 @@ static int be_rename(const char *a, const char *b)    { return kapi->sys_rename(
 static int be_unlink(const char *p)                   { return kapi->sys_unlink(p); }
 static int be_open(const char *p, int m)              { return kapi->sys_open(p, m); }
 static int be_read(int fd, void *b, u32 n)            { return kapi->sys_read(fd, b, n); }
+static int be_lseek(int fd, int off, int wh)          { return kapi->sys_lseek(fd, off, wh); }
 static void be_close_fd(int fd)                       { kapi->sys_close(fd); }
 static u32 be_tick(void)                              { return kapi->get_tick(); }
 
@@ -52,6 +53,7 @@ static const CfgBackend cfg_kapi_backend = {
     be_unlink,
     be_open,
     be_read,
+    be_lseek,
     be_close_fd,
     be_tick
 };

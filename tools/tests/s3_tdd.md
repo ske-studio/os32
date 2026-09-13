@@ -292,3 +292,112 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
   検査は meta + 全行走査 + バイト一致までで、索引や自由ページの健全性は見ていない。
 - ext2 の rename が実際にどの中途半端で止まるかは注入した 2 形 (両名残存 / 置換先 unlink 後の
   新名追加失敗) だけ。実 FS での再現は受入 I6 の領分。
+
+---
+
+## C-0. 組み方
+
+| | |
+|---|---|
+| 対象 (1) | `userland/lib/cfg/cfg_json.c` (新規) — export の形だけを読む純関数 `cfg_json_header` / `cfg_json_record`。行バッファ 6,144B |
+| 対象 (2) | `userland/lib/cfg/cfg_import.c` (新規) — 2 巡・重複表・単一トランザクション (`cfg_import_file`) |
+| 対象 (3) | `userland/lib/cfg/libos32cfg.c` — 追加 2 本 `cfg_delete_scope` / `cfg_set_null` |
+| 対象 (4) | `userland/cmds/cfg.c` — `import` 副指令 (引数解釈と文言だけ) |
+| ハーネス | 既存の `tools/tests/cfg_host.c` をそのまま拡張。実 SQLite + 実 `os32_sqlite_vfs.c` + 実 `kapi_db.c` + 実 `libos32cfg` + 実 `cfg.c`。**贋物は KAPI 境界と障害注入だけ** |
+| 足した贋物 | `be_fseek` (`CfgBackend.sys_lseek`)、`inj_seek_fail` / `inj_fread_fail_at` / `inj_close_after_commit`、生成入力 `gen_*` |
+
+**生成入力 (`gen_*`)**: 8,192 件の JSON は約 392KB あって `FixtureFile` (128KB) に入らないので、
+`gen_path` に一致した open だけ**その場で組み立てる**仮想ファイルにした。行長が固定
+(ヘッダ 36B / レコード 46B) なので `lseek` の当たり先も算術で出る。`gen_rows2` / `gen_dup` /
+`gen_ver2` は **2 回目以降の open** にだけ効く = 「巡回の間にホスト側が差し替える」経路そのもの
+(票 §2 / 往復 2 の R7)。
+
+**commit 後の close 失敗**は `be_exec` が `COMMIT` を実行した**直後**に `inj_close_fail` を立てる。
+先に立てると `cfg_open` の中の RO→RW 切り替えの close を巻き込み、open 自体が `CFG_ERROR` に
+なって狙った段に届かない (既存 `open_close_fail` が固定している挙動)。
+
+## C-1. ケース (7 本 / 214 CHECK)
+
+| ケース | CHECK | 見ているもの |
+|---|---|---|
+| `s3_json` | 79 | reader 単体。ヘッダ (版 1 受理 / 2 は `E_VERSION` で**実値を返す** / 0 は拒否 / 空白 / 尻尾 / レコードをヘッダに渡す)、骨組み (順序違い・空白・余分なキー・閉じ忘れ・二重 `}`)、型 (`3` / `"0"` / 2 桁)、scope と key (大文字・`app:` 空・末尾 `/`・63B 受理 / 64B 拒否)、int32 の境界と正準形 (`+1` / `01` / `-0` / 空を拒否、`INT_MIN` で符号あふれを踏まない)、エスケープ 6 種の往復、`\uXXXX` (BMP / `U+0000` = `E_NUL` / サロゲート = `E_UTF8` / 非 hex)、writer が出さない `\b` `\/`、生の制御文字・不正 UTF-8・途中で切れた UTF-8、生の 4 バイト UTF-8 は通す、text 255B 受理 / 256B 拒否、**最長行 1,693B と 5,627B**、base64 (空・`AP8=` = `00 FF`・4 の倍数でない・詰めの位置・詰めの後の本体・エスケープ混入・4096B 超)、`v:null` が宣言型を保つ |
+| `s3_roundtrip` | 15 | **実 writer の出力を import に通す**。CR を含む text / 全制御文字 255B text / 空 blob / `00`・`FF` を含む blob / 4096B blob / `v:null` / `app:` scope を入れた DB を export → 壊す → import (置換) → `cfg list` が一致 → **export し直すとバイト単位で一致**。接続を持ったままの yield が 0 |
+| `s3_scope` | 29 | `--scope` の削除範囲 (対象 scope の余分な行だけ消える) と **scope 外の値の不変**、`--merge` が消さないこと (全 scope / 単一 scope)、NULL 行が `(unset)` で戻ること、無効な scope は DB を触らずに拒否 |
+| `s3_args` | 12 | 引数解釈 (旗の有無・順序、`--scope` の値欠け、二重 `--merge`、未知の旗、path が旗、path 無し) と usage 行 |
+| `s3_reject` | 25 | MISSING / CORRUPT で `cannot import: <status>`、版 2 の拒否、ヘッダ無し、壊れた行 (`bad line 3: key`)、無いファイル、重複 (`duplicate record at line 3`)、`--scope` で対象外なら重複も無視、行が長すぎ (`line 2 too long`)。**どれも DB が 1 行も変わらない** |
+| `s3_fail` | 22 | 3 件目の set で落として置換の削除ごと巻き戻る、2 巡目の read 失敗で rollback、`lseek` が使えないと重複検出ができないので失敗、**hash が衝突する別物 2 件は両方受理**、commit 後の close 失敗は `imported … (close failed <code>)` + 終了 1 で**値は更新済み** |
+| `s3_gen` | 15 | 8,192 件は検証を通る (DB が MISSING なので書く前で止まる) / 8,193 件は `too many records`、**巡回の間の差し替え**で件数違い = `input changed during import`、重複の注入 = `duplicate record at line 5`、版の注入 = `newer backup: schema_version 2` — いずれも rollback して `cfg list` が一致 |
+
+## C-2. RED → GREEN
+
+RED は 3 段で採った。
+
+**(a) API が無い (リンク段)** — `cfg_host.c` に `cfg_json.c` / `cfg_import.c` を載せる前:
+
+```
+ld: undefined reference to `cfg_import_file'
+ld: undefined reference to `cfg_import_detail_name'
+```
+
+**(b) 実装だけを「未実装」に戻す** — `tools/tests/` は一切いじらず、`cfg_cmd_parse` の
+`import` 枝を外し (S2 と同じ「副指令として知らない」状態)、reader の `\r` エスケープを
+拒否に戻して 7 本を通した:
+
+```
+FAIL c_s3_json:2997: jrec("…\"v\":\"q\\\"w\\\\e\\nr\\rt\\ty\"}") == CFG_JSON_OK
+FAIL c_s3_roundtrip:3191: ran("import", "/b.json", NULL, NULL, NULL) == 0
+FAIL c_s3_scope:3216:     ran("import", "/b.json", "--scope", "gshell", NULL) == 0
+FAIL c_s3_args:3267:      cfg_cmd_parse(n, av, &a) == 0
+FAIL c_s3_reject:3297:    cap_has("cannot import: MISSING")
+FAIL c_s3_fail:3364:      cap_has("import failed (")
+FAIL c_s3_gen:3424:       cap_has("cannot import: MISSING")
+SUMMARY 0/7 PASS
+```
+
+実装を戻すと `SUMMARY 7/7 PASS`、全体で `SUMMARY 52/52 PASS` + `TSV PARITY 58/58`。
+
+**(c) 書いた直後に落ちた 5 件** — どちらが違うかを決めた記録:
+
+| RED | 原因 | GREEN |
+|---|---|---|
+| `jhdr("{\"schema_version\": 1,…")` が `E_SYNTAX` でない | 空白は**数値の位置**に出るので reader は `E_VALUE` を返す。レコードの空白 (`{"scope":"gshell", "key":…`) は `E_SYNTAX` のまま | 試験の期待を `E_VALUE` に直した (どちらもヘッダとしては拒否) |
+| `strlen(big) == 1693` が合わない (1,572) | 票の「最長 text 行 1,695B」は **scope 63B / key 63B** 前提。`user` / `a` では届かない | 試験を `app:` + 59B / 63B の名前で組み直した |
+| `strlen(big) == 5627` が合わない | 同上 (blob 4096B の行も名前が 63B / 63B 前提) | 同上 |
+| `s3_fail`: `inj_seek_fail` を立てても import が成功する | 用意した衝突ペア (`user`/`qh` と `user`/`2a`) は **8192 スロット**用。表を 16384 に広げたので衝突しない | FNV-1a を 16383 で畳んで取り直した (`user`/`89` と `user`/`adp`) |
+| `s3_gen`: 8,192 件が `MISSING` に届かず拒否される | 生成側が値を `%04d` で書いていた。reader は **正準形しか受けない** (先頭ゼロは `E_VALUE`) ので全行が不正 | 生成側の値を `1` 固定に (GEN_REC 49 → 46)。**reader の仕様どおりの拒否**だったので実装は直していない |
+
+## C-3. 実装で票からずらした点
+
+1. **重複表を 8192 スロット (32KB) → 16384 スロット (64KB)**。票 §2 は「8192 個の表 (32KB)」だが、
+   件数上限 (8192) と同数だと上限いっぱいの入力で表が**満杯**になり、線形探査の塊が育って
+   「先行行の読み直し」が **561,944 回**に膨らむ (実測、`k%04d` の 8192 件)。1 回が
+   `lseek` + `read` + 行の再解析なので、ゲストでは止まって見える。半分の詰まり方
+   (16384 スロット) なら **3,007 回**。表の作りも判定 (衝突 → 読み直して文字列比較) も票の
+   ままで、定数だけを変えた。
+2. **`cfg_delete_scope` / `cfg_set_null` を `libos32cfg.c` に置いた**。票の「触るファイル」には
+   無いが、この 2 本は set / delete と**同じ前提検査** (txn の中だけ・失敗で failed・列挙中は
+   拒否・名前は bind) を持つ必要がある。`cfg_import.c` に書くと契約の写しが 2 つになるので、
+   `can_write` を `can_write_gate` (名前を見ない段) と `can_write` に割って共有した。
+   既存の呼び出し経路と挙動は変えていない。
+3. **ヘッダの空白は `E_VALUE`**。票は「空白は許さない」までで理由の番号を決めていない。
+   数値の位置に出た空白なので `E_VALUE`、構造の位置なら `E_SYNTAX`。どちらもヘッダとしては拒否。
+4. **`cfg_import_detail_name()` を公開ヘッダに 1 本足した**。`cfg.c` は `libos32cfg.h` しか
+   見ないので、行の失敗理由 (`CFG_JSON_E_*` は `cfg_internal.h`) を文言にするために要る。
+5. **`v:null` 以外の値は正準形だけを受ける** (`+1` / `01` / `-0` を拒否)。票は「数値は int32」
+   としか書いていないが、reader の役目は「writer が出す形だけを読む」なので `fmt_int` が
+   出さない形は拒否に倒した。
+
+## C-4. 踏めていないもの ([V4])
+
+- **ゲスト受入 C1〜C7 (票 §4) は未実行**。配備もエミュレータ操作もしていない。
+  C7 の「`v:null` を import して `(unset)` を作る」はホスト (`s3_roundtrip` / `s3_scope`) までで、
+  ゲストでは踏んでいない。
+- `build/app.conf` / `build/image.mk` / `userland/deploy.yaml` は PM の持ち物なので触っていない。
+  本票で新しい実行ファイルは増えない (`cfg.bin` は登録済み、`cfg_import.o` / `cfg_json.o` は
+  `DEFINE_LIB` の wildcard が拾う)。
+- `make all` / `make check` は未実行。
+- **8,192 件の書き込みは試していない**。`s3_gen` は DB が MISSING の状態で検証だけを通す。
+  8,192 行の transaction が SQLite の 384KB MEMSYS5 プールに収まるかは未確認。
+- `cfg_import.c` の静的領域は約 **85KB** (重複表 64KB + 行バッファ 6KB×2 + `CfgJsonRow` 4.4KB×2)。
+  `cfg_import.o` を引くのは `cfg.bin` だけなので `libos32gui.shlib` や読むだけのアプリには
+  乗らない (アーカイブのメンバ単位のリンク) — ただし**リンク後の実測はしていない**。

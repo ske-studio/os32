@@ -103,6 +103,11 @@ static const char *inj_prep_fail; /* 部分一致した SQL の prepare_only を
 static int inj_bind_fail;         /* != 0 = db_bind_text を失敗させる */
 static int inj_rename_mode;       /* 0=普通 1=新名あり旧名残る 2=何も起きない
                                      3=旧名は消えたが失敗を返す */
+/* S3-C: import の入力側の注入 */
+static int inj_seek_fail;         /* != 0 = sys_lseek が失敗する */
+static int inj_fread_fail_at;     /* n 回目の sys_read を失敗させる (0 = しない) */
+static int inj_fread_n;
+static int inj_close_after_commit;/* COMMIT の直後に db_close を壊す */
 /* db_exec の差し替え (最大 2 組)。本物の SQLite に別の SQL を流して
  * **実在する診断コード**を作る — 単に -1 を返すと last_sqlite が 0 のままで
  * 「診断が保たれたか」を試験できない。 */
@@ -152,12 +157,19 @@ static int be_close(int h)
 }
 static int be_exec(int h, const char *s)
 {
-    int i;
+    int i, rc;
     for (i = 0; i < INJ_EXEC_SUBS; i++) {
         if (inj_exec_match[i] && strstr(s, inj_exec_match[i]))
             return kapi_db_exec(h, inj_exec_sub[i]);
     }
-    return kapi_db_exec(h, s);
+    rc = kapi_db_exec(h, s);
+    /* S3-C: **commit の後に**だけ close を壊す。cfg_open の中の
+     * RO -> RW 切り替えを巻き込むと open 自体が ERROR になってしまう。 */
+    if (inj_close_after_commit && !strcmp(s, "COMMIT")) {
+        inj_close_fail = inj_close_after_commit;
+        inj_close_after_commit = 0;
+    }
+    return rc;
 }
 static int be_step(int h)                         { return kapi_db_step(h); }
 static int be_finalize(int h)                     { return kapi_db_finalize(h); }
@@ -182,6 +194,108 @@ static int be_rename(const char *o, const char *n)
 
 static int be_unlink(const char *p) { return vfs_rm(p); }
 
+/* ---- S3-C: 生成入力 (fixture の 128KB に入らない件数の JSON) ----------- */
+/*  8192 件の JSON は 360KB あって FixtureFile に収まらないので、`gen_path`
+ *  に一致する open だけ**その場で組み立てる**仮想ファイルにする。行長は
+ *  固定なので lseek の当たり先も算術で出せる。`gen_rows2` / `gen_dup` /
+ *  `gen_ver2` は **2 回目以降の open** にだけ効く = 巡回の間の差し替え。 */
+#define GEN_REC 46
+#define GENFD_BASE 300
+#define GENFD_MAX 2
+
+static const char *gen_path;      /* NULL = 無効 */
+static int gen_rows;              /* 1 巡目の件数 */
+static int gen_rows2;             /* 2 巡目の件数 (0 = 同じ) */
+static int gen_dup;               /* 2 巡目: この行を 1 行目と同じ key にする */
+static int gen_ver2;              /* 2 巡目のヘッダ版 (0 = 1 のまま) */
+static int gen_opens;
+static struct { int used; int rows; int dup; int ver; u32 off; } genfd[GENFD_MAX];
+
+static int gen_is_fd(int fd)
+{
+    return fd >= GENFD_BASE && fd < GENFD_BASE + GENFD_MAX;
+}
+
+static int gen_hdr(int ver, char *out)
+{
+    sprintf(out, "{\"schema_version\":%d,\"exported\":\"0\"}\n", ver);
+    return (int)strlen(out);
+}
+
+static void gen_rec(int idx, int dup, char *out)
+{
+    int k = (dup && idx == dup) ? 0 : idx;
+    /* 値は常に 1 — writer の fmt_int は先頭ゼロを出さないので `%04d` の値は
+     * reader が正しく弾く。行長を固定したいのは key 側だけ。 */
+    sprintf(out, "{\"scope\":\"user\",\"key\":\"k%04d\",\"type\":0,\"v\":1}\n", k);
+    CHECK((int)strlen(out) == GEN_REC);
+}
+
+static int gen_open(void)
+{
+    int i;
+    for (i = 0; i < GENFD_MAX; i++) {
+        if (!genfd[i].used) {
+            gen_opens++;
+            genfd[i].used = 1;
+            genfd[i].off = 0;
+            if (gen_opens >= 2) {
+                genfd[i].rows = gen_rows2 ? gen_rows2 : gen_rows;
+                genfd[i].dup = gen_dup;
+                genfd[i].ver = gen_ver2 ? gen_ver2 : 1;
+            } else {
+                genfd[i].rows = gen_rows;
+                genfd[i].dup = 0;
+                genfd[i].ver = 1;
+            }
+            return GENFD_BASE + i;
+        }
+    }
+    return OS32_ERR_NOSPC;
+}
+
+static void gen_close(int fd) { genfd[fd - GENFD_BASE].used = 0; }
+
+static int gen_seek(int fd, int off, int whence)
+{
+    int i = fd - GENFD_BASE;
+    long n;
+    if (!genfd[i].used) return OS32_ERR_INVAL;
+    if (inj_seek_fail) return OS32_ERR_IO;
+    if (whence == SEEK_SET) n = off;
+    else if (whence == SEEK_CUR) n = (long)genfd[i].off + off;
+    else n = off;
+    if (n < 0) return OS32_ERR_INVAL;
+    genfd[i].off = (u32)n;
+    return (int)n;
+}
+
+static int gen_read(int fd, unsigned char *buf, u32 size)
+{
+    int i = fd - GENFD_BASE, hlen, idx, pos;
+    u32 n = 0, off;
+    char hdr[64], rec[80];
+    int built = -1;
+
+    if (!genfd[i].used) return OS32_ERR_INVAL;
+    hlen = gen_hdr(genfd[i].ver, hdr);
+    while (n < size) {
+        off = genfd[i].off;
+        if (off < (u32)hlen) {
+            buf[n] = (unsigned char)hdr[off];
+        } else {
+            idx = (int)((off - (u32)hlen) / GEN_REC);
+            pos = (int)((off - (u32)hlen) % GEN_REC);
+            if (idx >= genfd[i].rows) break;
+            if (built != idx) { gen_rec(idx, genfd[i].dup, rec); built = idx; }
+            buf[n] = (unsigned char)rec[pos];
+        }
+        genfd[i].off++;
+        n++;
+    }
+    return (int)n;
+}
+
 /* tsv 読み出し用の最小 FD 表 (fixture の上、読み取り専用)。 */
 #define HOSTFD_MAX 4
 static struct { int used; FixtureFile *f; u32 off; } hostfd[HOSTFD_MAX];
@@ -189,8 +303,10 @@ static struct { int used; FixtureFile *f; u32 off; } hostfd[HOSTFD_MAX];
 static int be_fopen(const char *p, int mode)
 {
     int i;
-    FixtureFile *f = fixture_find(host_resolve(p), 0);
+    FixtureFile *f;
     (void)mode;
+    if (gen_path && !strcmp(host_resolve(p), gen_path)) return gen_open();
+    f = fixture_find(host_resolve(p), 0);
     if (!f) return OS32_ERR_NOTFOUND;
     for (i = 0; i < HOSTFD_MAX; i++) {
         if (!hostfd[i].used) {
@@ -207,6 +323,9 @@ static int be_fread(int fd, void *buf, u32 size)
 {
     int i = fd - 100;
     u32 n;
+    if (inj_fread_fail_at && ++inj_fread_n == inj_fread_fail_at)
+        return OS32_ERR_IO;
+    if (gen_is_fd(fd)) return gen_read(fd, (unsigned char *)buf, size);
     if (i < 0 || i >= HOSTFD_MAX || !hostfd[i].used) return OS32_ERR_INVAL;
     if (hostfd[i].off >= hostfd[i].f->size) return 0;
     n = hostfd[i].f->size - hostfd[i].off;
@@ -216,9 +335,25 @@ static int be_fread(int fd, void *buf, u32 size)
     return (int)n;
 }
 
+static int be_fseek(int fd, int off, int whence)
+{
+    int i = fd - 100;
+    long n;
+    if (gen_is_fd(fd)) return gen_seek(fd, off, whence);
+    if (i < 0 || i >= HOSTFD_MAX || !hostfd[i].used) return OS32_ERR_INVAL;
+    if (inj_seek_fail) return OS32_ERR_IO;
+    if (whence == SEEK_SET) n = off;
+    else if (whence == SEEK_CUR) n = (long)hostfd[i].off + off;
+    else n = (long)hostfd[i].f->size + off;
+    if (n < 0) return OS32_ERR_INVAL;
+    hostfd[i].off = (u32)n;
+    return (int)n;
+}
+
 static void be_fclose(int fd)
 {
     int i = fd - 100;
+    if (gen_is_fd(fd)) { gen_close(fd); return; }
     if (i >= 0 && i < HOSTFD_MAX) hostfd[i].used = 0;
 }
 
@@ -229,7 +364,7 @@ static const CfgBackend host_backend = {
     be_open_existing, be_prepare_only, be_bind_int, be_bind_text, be_bind_blob,
     be_bind_null, be_error_code, be_open, be_close, be_exec, be_step,
     be_finalize, be_shm, be_stat, be_rename, be_unlink, be_fopen, be_fread,
-    be_fclose, be_tick
+    be_fseek, be_fclose, be_tick
 };
 
 const CfgBackend *cfg_backend_platform(void) { return &host_backend; }
@@ -242,6 +377,8 @@ const CfgBackend *cfg_backend_platform(void) { return &host_backend; }
 #include "../../userland/lib/cfg/cfg_enum.c"
 #include "../../userland/lib/cfg/cfg_tsv.c"
 #include "../../userland/lib/cfg/cfg_init.c"
+#include "../../userland/lib/cfg/cfg_json.c"
+#include "../../userland/lib/cfg/cfg_import.c"
 
 /* cfg コマンドは main を差し替えて丸ごと載せる (出力は捕まえる)。 */
 static char cap_out[65536];
@@ -359,6 +496,17 @@ static void reset_all(void)
     memset(inj_exec_match, 0, sizeof(inj_exec_match));
     memset(inj_exec_sub, 0, sizeof(inj_exec_sub));
     inj_rename_mode = 0;
+    inj_seek_fail = 0;
+    inj_fread_fail_at = 0;
+    inj_fread_n = 0;
+    inj_close_after_commit = 0;
+    gen_path = NULL;
+    gen_rows = 0;
+    gen_rows2 = 0;
+    gen_dup = 0;
+    gen_ver2 = 0;
+    gen_opens = 0;
+    memset(genfd, 0, sizeof(genfd));
     host_cwd = "/";
     resolve_cwd = "";
     resolve_owner = current_owner = 2;
@@ -2737,6 +2885,583 @@ static void c_s5_pool(void)
     CHECK(cap_u32_after("pool ") > (long)kapi_db_mem_used());
 }
 
+
+/* ========================================================================= */
+/*  票 S3-C §2 — `cfg import` (記録は tools/tests/s3_tdd.md §C)              */
+/* ========================================================================= */
+
+static CfgJsonRow jr;
+
+static int jrec(const char *line)
+{
+    return cfg_json_record(line, (int)strlen(line), &jr);
+}
+
+static int jhdr(const char *line, int *v)
+{
+    return cfg_json_header(line, (int)strlen(line), v);
+}
+
+/* --- (C1) reader 単体の受理 / 拒否 ---------------------------------- */
+static void c_s3_json(void)
+{
+    static char big[CFG_JSON_LINE_MAX * 2];
+    static unsigned char raw[CFG_BLOB_MAX];
+    int v = 0, i, n;
+
+    /* ---- ヘッダ ---- */
+    CHECK(jhdr("{\"schema_version\":1,\"exported\":\"7\"}", &v) == CFG_JSON_OK);
+    CHECK(v == 1);
+    CHECK(jhdr("{\"schema_version\":2,\"exported\":\"7\"}", &v) ==
+          CFG_JSON_E_VERSION);
+    CHECK(v == 2);                                  /* 文言に出す実値 */
+    CHECK(jhdr("{\"schema_version\":0,\"exported\":\"7\"}", &v) ==
+          CFG_JSON_E_VALUE);
+    CHECK(jhdr("{\"schema_version\":1}", &v) == CFG_JSON_E_SYNTAX);
+    CHECK(jhdr("{\"schema_version\": 1,\"exported\":\"7\"}", &v) ==
+          CFG_JSON_E_VALUE);        /* 空白 (数値の位置なので E_VALUE) */
+    CHECK(jhdr("{\"schema_version\":1,\"exported\":\"7\"} ", &v) ==
+          CFG_JSON_E_SYNTAX);                       /* 余分な尻尾 */
+    CHECK(jhdr("", &v) == CFG_JSON_E_SYNTAX);
+    CHECK(jhdr("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":1}", &v) ==
+          CFG_JSON_E_SYNTAX);                       /* レコードはヘッダでない */
+
+    /* ---- 骨組み ---- */
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":5}")
+          == CFG_JSON_OK);
+    CHECK(jr.type == CFG_TYPE_INT && jr.ival == 5 && !jr.is_null);
+    CHECK(!strcmp(jr.scope, "gshell") && !strcmp(jr.key, "a"));
+    /* 順序違い / 空白 / 余分なキー / 尻尾 */
+    CHECK(jrec("{\"key\":\"a\",\"scope\":\"gshell\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"gshell\", \"key\":\"a\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":5,\"x\":1}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":5}}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":5")
+          == CFG_JSON_E_SYNTAX);
+
+    /* ---- 型 ---- */
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":3,\"v\":5}")
+          == CFG_JSON_E_TYPE);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":\"0\",\"v\":5}")
+          == CFG_JSON_E_TYPE);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a\",\"type\":10,\"v\":5}")
+          == CFG_JSON_E_SYNTAX);                    /* 2 桁 = ,"v": が来ない */
+
+    /* ---- scope / key ---- */
+    CHECK(jrec("{\"scope\":\"SYSTEM\",\"key\":\"a\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_SCOPE);
+    CHECK(jrec("{\"scope\":\"app:\",\"key\":\"a\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_SCOPE);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"Bad\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_KEY);
+    CHECK(jrec("{\"scope\":\"gshell\",\"key\":\"a/\",\"type\":0,\"v\":5}")
+          == CFG_JSON_E_KEY);
+    /* 63B は受理、64B は拒否 (上限は復号後に見る) */
+    strcpy(big, "{\"scope\":\"gshell\",\"key\":\"");
+    for (i = 0; i < 63; i++) strcat(big, "a");
+    strcat(big, "\",\"type\":0,\"v\":5}");
+    CHECK(jrec(big) == CFG_JSON_OK);
+    strcpy(big, "{\"scope\":\"gshell\",\"key\":\"");
+    for (i = 0; i < 64; i++) strcat(big, "a");
+    strcat(big, "\",\"type\":0,\"v\":5}");
+    CHECK(jrec(big) == CFG_JSON_E_KEY);
+
+    /* ---- int の境界 ---- */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":2147483647}")
+          == CFG_JSON_OK && jr.ival == 2147483647);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":-2147483648}")
+          == CFG_JSON_OK && jr.ival == (-2147483647 - 1));
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":2147483648}")
+          == CFG_JSON_E_RANGE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":-2147483649}")
+          == CFG_JSON_E_RANGE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":+1}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":01}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":-0}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":0}")
+          == CFG_JSON_OK && jr.ival == 0);
+
+    /* ---- エスケープ 6 種 ---- */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,"
+               "\"v\":\"q\\\"w\\\\e\\nr\\rt\\ty\"") == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,"
+               "\"v\":\"q\\\"w\\\\e\\nr\\rt\\ty\"}") == CFG_JSON_OK);
+    CHECK(jr.tlen == 11);
+    CHECK(!memcmp(jr.tval, "q\"w\\e\nr\rt\ty", 11));
+    /* \uXXXX は BMP だけ。サロゲートと \u0000 は拒否 */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u0041\"}")
+          == CFG_JSON_OK && jr.tlen == 1 && jr.tval[0] == 'A');
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u00e3\"}")
+          == CFG_JSON_OK && jr.tlen == 2);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u3042\"}")
+          == CFG_JSON_OK && jr.tlen == 3 &&
+          !memcmp(jr.tval, "\xe3\x81\x82", 3));
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u001f\"}")
+          == CFG_JSON_OK && jr.tlen == 1 && jr.tval[0] == 0x1F);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u0000\"}")
+          == CFG_JSON_E_NUL);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\ud800\"}")
+          == CFG_JSON_E_UTF8);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\udfff\"}")
+          == CFG_JSON_E_UTF8);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\u00g0\"}")
+          == CFG_JSON_E_SYNTAX);
+    /* writer が出さないエスケープ */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\b\"}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\/\"}")
+          == CFG_JSON_E_SYNTAX);
+    /* 生の制御文字と不正 UTF-8 */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\x01\"}")
+          == CFG_JSON_E_SYNTAX);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\xff\"}")
+          == CFG_JSON_E_UTF8);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\xe3\x81\"}")
+          == CFG_JSON_E_UTF8);
+    /* 4 バイト UTF-8 は生で通す (writer が生で出す) */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,"
+               "\"v\":\"\xf0\x9f\x98\x80\"}") == CFG_JSON_OK && jr.tlen == 4);
+
+    /* ---- text の上限 (255B / 256B) ---- */
+    strcpy(big, "{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"");
+    for (i = 0; i < 255; i++) strcat(big, "x");
+    strcat(big, "\"}");
+    CHECK(jrec(big) == CFG_JSON_OK && jr.tlen == 255);
+    strcpy(big, "{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"");
+    for (i = 0; i < 256; i++) strcat(big, "x");
+    strcat(big, "\"}");
+    CHECK(jrec(big) == CFG_JSON_E_VALUE);
+
+    /* ---- 名前も値も最長の text 行 (1,693B + LF + NUL = 1,695B) ----
+     * scope 63B (`app:` + 59) / key 63B / 全制御文字 255B の `\u00XX`。 */
+    strcpy(big, "{\"scope\":\"app:");
+    for (i = 0; i < 59; i++) strcat(big, "n");
+    strcat(big, "\",\"key\":\"");
+    for (i = 0; i < 63; i++) strcat(big, "k");
+    strcat(big, "\",\"type\":1,\"v\":\"");
+    for (i = 0; i < 255; i++) strcat(big, "\\u0001");
+    strcat(big, "\"}");
+    CHECK((int)strlen(big) == 1693);
+    CHECK(jrec(big) == CFG_JSON_OK && jr.tlen == 255);
+
+    /* ---- blob (base64) ---- */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"\"}")
+          == CFG_JSON_OK && jr.blen == 0);          /* 空 blob */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AP8=\"}")
+          == CFG_JSON_OK && jr.blen == 2 &&
+          jr.bval[0] == 0x00 && jr.bval[1] == 0xFF);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAAA\"}")
+          == CFG_JSON_OK && jr.blen == 3);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAA\"}")
+          == CFG_JSON_E_VALUE);                     /* 4 の倍数でない */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"A===\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"====\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"A?==\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AA==AA==\"}")
+          == CFG_JSON_E_VALUE);                     /* 詰めの後に本体 */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"\\u0041A==\"}")
+          == CFG_JSON_E_VALUE);                     /* blob にエスケープは無い */
+    /* blob に UTF-8 / NUL の検査はかけない (00 / FF を含む列が通る) */
+    for (i = 0; i < 6; i++) raw[i] = (unsigned char)(i & 1 ? 0xFF : 0x00);
+    {
+        char b6[16], line[128];
+        n = fmt_b64(b6, (int)sizeof(b6), raw, 6);
+        CHECK(n == 8);
+        sprintf(line, "{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"%s\"}",
+                b6);
+        CHECK(jrec(line) == CFG_JSON_OK && jr.blen == 6);
+        CHECK(jr.bval[0] == 0x00 && jr.bval[1] == 0xFF);
+    }
+
+    /* ---- 最長行 (名前 63B/63B + blob 4096B = 5,627B + LF + NUL = 5,629B) -- */
+    for (i = 0; i < CFG_BLOB_MAX; i++) raw[i] = (unsigned char)(i & 0xFF);
+    strcpy(big, "{\"scope\":\"app:");
+    for (i = 0; i < 59; i++) strcat(big, "n");
+    strcat(big, "\",\"key\":\"");
+    for (i = 0; i < 63; i++) strcat(big, "k");
+    strcat(big, "\",\"type\":2,\"v\":\"");
+    n = (int)strlen(big);
+    CHECK(n == 161);
+    CHECK(fmt_b64(big + n, (int)sizeof(big) - n, raw, CFG_BLOB_MAX) == 5464);
+    strcat(big, "\"}");
+    CHECK((int)strlen(big) == 5627);
+    CHECK(jrec(big) == CFG_JSON_OK && jr.blen == CFG_BLOB_MAX);
+    CHECK(!memcmp(jr.bval, raw, CFG_BLOB_MAX));
+    /* 4096B を越える base64 は上限超過 */
+    big[strlen(big) - 6] = '\0';                  /* 末尾の 1 組と `"}` を外す */
+    strcat(big, "AAAAAAAA\"}");
+    CHECK(jrec(big) == CFG_JSON_E_VALUE);
+
+    /* ---- v:null は宣言型を保つ ---- */
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":null}")
+          == CFG_JSON_OK && jr.is_null && jr.type == CFG_TYPE_TEXT);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":null}")
+          == CFG_JSON_OK && jr.is_null && jr.type == CFG_TYPE_BLOB);
+    CHECK(jrec("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":nul}")
+          == CFG_JSON_E_VALUE);
+}
+
+/* --- 下ごしらえ: 往復に使う値を入れた DB ---------------------------- */
+static void s3_seed(void)
+{
+    CfgDb *db;
+    static unsigned char blob[CFG_BLOB_MAX];
+    static char ctl[CFG_TEXT_MAX + 1];
+    int i;
+
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(cfg_init(NULL) == 0);
+    for (i = 0; i < CFG_TEXT_MAX; i++) ctl[i] = (char)(1 + (i % 31));
+    ctl[CFG_TEXT_MAX] = '\0';
+    for (i = 0; i < CFG_BLOB_MAX; i++) blob[i] = (unsigned char)(i * 7);
+    CHECK(cfg_open(&db, 1) == 0);
+    CHECK(cfg_status(db) == CFG_OK);
+    CHECK(cfg_begin(db) == 0);
+    CHECK(cfg_set_text(db, "gshell", "t/cr", "a\rb") == 0);
+    CHECK(cfg_set_text(db, "gshell", "t/ctl", ctl) == 0);
+    CHECK(cfg_set_blob(db, "gshell", "b/empty", "", 0) == 0);
+    CHECK(cfg_set_blob(db, "gshell", "b/bytes", "\x00\xff\x01\xfe", 4) == 0);
+    CHECK(cfg_set_blob(db, "gshell", "b/big", blob, CFG_BLOB_MAX) == 0);
+    CHECK(cfg_set_null(db, "user", "n/null", CFG_TYPE_TEXT) == 0);
+    CHECK(cfg_set_int(db, "app:demo", "x", 7) == 0);
+    CHECK(cfg_commit(db) == 0);
+    CHECK(cfg_close(db) == 0);
+}
+
+static char snap_a[FIXTURE_BYTES];
+static u32  snap_a_len;
+static char snap_list[65536];
+static int  snap_list_len;
+
+static void snap_file(const char *path, char *out, u32 *len)
+{
+    FixtureFile *f = fixture_find(path, 0);
+    CHECK(f != NULL);
+    memcpy(out, f->data, f->size);
+    *len = f->size;
+}
+
+static void snap_the_list(void)
+{
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 0);
+    CHECK(cap_len < (int)sizeof(snap_list));
+    memcpy(snap_list, cap_out, (size_t)cap_len);
+    snap_list_len = cap_len;
+}
+
+static int list_matches(void)
+{
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 0);
+    return cap_len == snap_list_len && !memcmp(cap_out, snap_list, (size_t)cap_len);
+}
+
+/* --- (C2) 実 writer の出力を import に通す往復 ----------------------- */
+static void c_s3_roundtrip(void)
+{
+    FixtureFile *f;
+
+    s3_seed();
+    CHECK(ran("export", "/b.json", NULL, NULL, NULL) == 0);
+    CHECK(cap_has("cfg: exported 10 records"));
+    snap_file("/b.json", snap_a, &snap_a_len);
+    /* 最長行 (blob 4096B) が実際に出ている */
+    CHECK(snap_a_len > 5627);
+    snap_the_list();
+
+    /* 値を壊す — 変更 / 削除 / 追加 */
+    CHECK(ran("set", "gshell", "desktop/color", "int", "99") == 0);
+    CHECK(ran("del", "user", "n/null", NULL, NULL) == 0);
+    CHECK(ran("set", "user", "extra", "int", "1") == 0);
+    CHECK(!list_matches());
+
+    /* 置換で戻る */
+    CHECK(ran("import", "/b.json", NULL, NULL, NULL) == 0);
+    CHECK(cap_has("imported 10 records (all scopes), replaced\n"));
+    CHECK(list_matches());
+
+    /* export し直すとバイト単位で一致する (CR / 制御文字 / 00・FF / 空 blob /
+     * NULL 行 / 4096B blob がすべて往復した) */
+    CHECK(ran("export", "/c.json", NULL, NULL, NULL) == 0);
+    f = fixture_find("/c.json", 0);
+    CHECK(f != NULL);
+    CHECK(f->size == snap_a_len);
+    CHECK(!memcmp(f->data, snap_a, snap_a_len));
+
+    /* 接続を持ったままの yield は無い (票 §7 の直列化) */
+    CHECK(cap_yields_open == 0);
+}
+
+/* --- (C3) --scope / --merge ----------------------------------------- */
+static void c_s3_scope(void)
+{
+    s3_seed();
+    CHECK(ran("export", "/b.json", NULL, NULL, NULL) == 0);
+
+    /* gshell を壊し、scope 外にも値を置く */
+    CHECK(ran("set", "gshell", "desktop/color", "int", "42") == 0);
+    CHECK(ran("set", "user", "extra", "int", "5") == 0);
+    CHECK(ran("import", "/b.json", "--scope", "gshell", NULL) == 0);
+    CHECK(cap_has("imported 8 records (gshell), replaced\n"));
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));                       /* gshell は戻った */
+    CHECK(ran("get", "user", "extra", NULL, NULL) == 0);
+    CHECK(cap_has("5\n"));                       /* scope 外の値は不変 */
+
+    /* 置換は対象 scope の**余分な行だけ**を消す */
+    CHECK(ran("set", "gshell", "junk", "int", "3") == 0);
+    CHECK(ran("import", "/b.json", "--scope", "gshell", NULL) == 0);
+    CHECK(ran("get", "gshell", "junk", NULL, NULL) == 0);
+    CHECK(cap_has("(not set)"));
+    CHECK(ran("get", "user", "extra", NULL, NULL) == 0);
+    CHECK(cap_has("5\n"));
+
+    /* --merge は消さない */
+    CHECK(ran("set", "user", "extra", "int", "9") == 0);
+    CHECK(ran("del", "user", "n/null", NULL, NULL) == 0);
+    CHECK(ran("import", "/b.json", "--scope", "user", "--merge") == 0);
+    CHECK(cap_has("imported 1 records (user), merged\n"));
+    CHECK(ran("get", "user", "extra", NULL, NULL) == 0);
+    CHECK(cap_has("9\n"));                       /* merge は既存を消さない */
+    CHECK(ran("list", "user", NULL, NULL, NULL) == 0);
+    CHECK(cap_has("user\tn/null\ttext\t(unset)"));  /* NULL 行が戻った */
+
+    /* 全 scope の --merge も消さない */
+    CHECK(ran("import", "/b.json", "--merge", NULL, NULL) == 0);
+    CHECK(cap_has("imported 10 records (all scopes), merged\n"));
+    CHECK(ran("get", "user", "extra", NULL, NULL) == 0);
+    CHECK(cap_has("9\n"));
+
+    /* 無効な scope は入口で断る (DB を触らない) */
+    CHECK(ran("import", "/b.json", "--scope", "BAD", NULL) == 1);
+    CHECK(cap_has("bad scope"));
+}
+
+/* --- (C4) 引数解釈 ---------------------------------------------------- */
+static void c_s3_args(void)
+{
+    CfgArgs a;
+    char *av[6];
+    int n;
+
+    av[0] = (char *)"cfg";
+    av[1] = (char *)"import";
+    av[2] = (char *)"/b.json";
+    av[3] = (char *)"--scope";
+    av[4] = (char *)"gshell";
+    av[5] = (char *)"--merge";
+    for (n = 3; n <= 6; n++) {
+        if (n == 4) continue;                     /* --scope に値が無い形 */
+        CHECK(cfg_cmd_parse(n, av, &a) == 0);
+        CHECK(a.cmd == CFG_CMD_IMPORT);
+        CHECK(!strcmp(a.path, "/b.json"));
+        CHECK(a.merge == (n == 6));
+        CHECK((a.scope != NULL) == (n >= 5));
+    }
+    CHECK(cfg_cmd_parse(4, av, &a) == -1);        /* --scope の値が無い */
+    av[3] = (char *)"--merge";
+    av[4] = (char *)"--merge";
+    CHECK(cfg_cmd_parse(5, av, &a) == -1);        /* 二重 --merge */
+    av[3] = (char *)"--bogus";
+    CHECK(cfg_cmd_parse(4, av, &a) == -1);
+    av[2] = (char *)"--scope";
+    CHECK(cfg_cmd_parse(3, av, &a) == -1);        /* path が旗 */
+    CHECK(cfg_cmd_parse(2, av, &a) == -1);        /* path 無し */
+    /* usage に載っている */
+    CHECK(ran("import", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cfg import <file> [--scope <scope>] [--merge]"));
+}
+
+/* --- (C5) 状態と拒否 -------------------------------------------------- */
+static void c_s3_reject(void)
+{
+    static const char HDR[] = "{\"schema_version\":1,\"exported\":\"0\"}\n";
+    static char buf[CFG_JSON_LINE_MAX * 2];
+    int i;
+
+    /* MISSING — 検証は通るが書けない */
+    put_file("/x.json", HDR);
+    CHECK(ran("import", "/x.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cannot import: MISSING"));
+    CHECK(cap_has("settings.db missing: run 'cfg init'"));
+    CHECK(fixture_find(CFG_DB_PATH, 0) == NULL);
+
+    /* CORRUPT (0 バイト) */
+    CHECK(fixture_find(CFG_DB_PATH, 1) != NULL);
+    CHECK(ran("import", "/x.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cannot import: CORRUPT"));
+
+    /* 版が新しいバックアップ — DB を開く前に断る */
+    reset_all();
+    s3_seed();
+    put_file("/v2.json", "{\"schema_version\":2,\"exported\":\"0\"}\n");
+    snap_the_list();
+    CHECK(ran("import", "/v2.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("newer backup: schema_version 2"));
+    CHECK(list_matches());
+
+    /* ヘッダが無い / 壊れた行 / 無いファイル */
+    put_file("/bad1.json", "hello\n");
+    CHECK(ran("import", "/bad1.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("not a settings backup"));
+    put_file("/bad2.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"gshell\",\"key\":\"Bad\",\"type\":0,\"v\":1}\n");
+    CHECK(ran("import", "/bad2.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("bad line 3: key"));
+    CHECK(list_matches());                        /* 1 行も書いていない */
+    CHECK(ran("import", "/nosuch.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cannot open the import file"));
+
+    /* 重複 (fixture の中の 2 行) */
+    put_file("/dup.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"gshell\",\"key\":\"a\",\"type\":0,\"v\":2}\n");
+    CHECK(ran("import", "/dup.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("duplicate record at line 3"));
+    CHECK(list_matches());
+    /* --scope で対象外なら重複も無視 (構文検証だけ) */
+    CHECK(ran("import", "/dup.json", "--scope", "user", NULL) == 0);
+    CHECK(cap_has("imported 0 records (user), replaced\n"));
+
+    /* 行が長すぎる */
+    reset_all();
+    s3_seed();
+    snap_the_list();
+    strcpy(buf, "{\"schema_version\":1,\"exported\":\"0\"}\n{\"scope\":\"user\",");
+    for (i = (int)strlen(buf); i < CFG_JSON_LINE_MAX + 100; i++) buf[i] = 'x';
+    buf[i] = '\0';
+    put_file("/long.json", buf);
+    CHECK(ran("import", "/long.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("line 2 too long"));
+    CHECK(list_matches());
+}
+
+/* --- (C6) 途中失敗 / 巡回の間の差し替え / close 失敗 ------------------ */
+static void c_s3_fail(void)
+{
+    /* --- set が途中で失敗したら 1 行も残らない --- */
+    s3_seed();
+    CHECK(ran("export", "/b.json", NULL, NULL, NULL) == 0);
+    snap_the_list();
+    inj_prep_fail = "INSERT OR REPLACE";
+    inj_prep_skip = 2;                            /* 3 件目の set で落ちる */
+    CHECK(ran("import", "/b.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("import failed ("));
+    inj_prep_fail = NULL;
+    inj_prep_skip = 0;
+    CHECK(list_matches());                        /* 削除も巻き戻っている */
+
+    /* --- 2 巡目の read が落ちたら rollback ---
+     * 512B 未満の入力なら 1 巡目の read は 2 回 (本体 + EOF) で終わるので、
+     * 3 回目 = 2 巡目の最初の read。削除は済んでいる段で落ちる。 */
+    put_file("/small.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"user\",\"key\":\"b\",\"type\":0,\"v\":2}\n");
+    inj_fread_fail_at = 3;
+    CHECK(ran("import", "/small.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("read failed"));
+    inj_fread_fail_at = 0;
+    inj_fread_n = 0;
+    CHECK(list_matches());
+
+    /* --- lseek が使えなければ重複検出ができない = 失敗 --- */
+    put_file("/coll.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"user\",\"key\":\"89\",\"type\":0,\"v\":1}\n"
+             "{\"scope\":\"user\",\"key\":\"adp\",\"type\":0,\"v\":2}\n");
+    inj_seek_fail = 1;
+    CHECK(ran("import", "/coll.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("read failed"));
+    inj_seek_fail = 0;
+    CHECK(list_matches());
+
+    /* --- hash が衝突する別物 2 件は両方とも受理される --- */
+    CHECK(ran("import", "/coll.json", NULL, NULL, NULL) == 0);
+    CHECK(cap_has("imported 2 records (all scopes), replaced\n"));
+    CHECK(ran("get", "user", "89", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+    CHECK(ran("get", "user", "adp", NULL, NULL) == 0);
+    CHECK(cap_has("2\n"));
+
+    /* --- commit の後の close 失敗は「更新済み」と出して終了 1 --- */
+    reset_all();
+    s3_seed();
+    CHECK(ran("export", "/b.json", NULL, NULL, NULL) == 0);
+    CHECK(ran("set", "gshell", "desktop/color", "int", "77") == 0);
+    inj_close_after_commit = SQLITE_IOERR;
+    CHECK(ran("import", "/b.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("imported 10 records (all scopes), replaced (close failed "));
+    inj_close_fail = 0;
+    inj_close_after_commit = 0;
+    /* commit は通っているので値は戻っている */
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("1\n"));
+}
+
+/* --- (C7) 生成入力: 件数上限と巡回の間の差し替え --------------------- */
+static void c_s3_gen(void)
+{
+    /* --- 8192 件は受理 (DB が MISSING なので書く前で止まる) --- */
+    gen_path = "/gen.json";
+    gen_rows = CFG_IMPORT_MAX_ROWS;
+    CHECK(ran("import", "/gen.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("cannot import: MISSING"));     /* 検証は通った */
+
+    /* --- 8193 件は検証で断る --- */
+    reset_all();
+    gen_path = "/gen.json";
+    gen_rows = CFG_IMPORT_MAX_ROWS + 1;
+    CHECK(ran("import", "/gen.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("too many records"));
+
+    /* --- 素の通し (5 件) --- */
+    reset_all();
+    s3_seed();
+    gen_path = "/gen.json";
+    gen_rows = 5;
+    CHECK(ran("import", "/gen.json", "--scope", "user", NULL) == 0);
+    CHECK(cap_has("imported 5 records (user), replaced\n"));
+    snap_the_list();
+
+    /* --- 2 巡目で件数が変わる --- */
+    gen_opens = 0;
+    gen_rows2 = 6;
+    CHECK(ran("import", "/gen.json", "--scope", "user", NULL) == 1);
+    CHECK(cap_has("input changed during import"));
+    CHECK(list_matches());
+
+    /* --- 2 巡目に重複が現れる --- */
+    gen_opens = 0;
+    gen_rows2 = 0;
+    gen_dup = 3;
+    CHECK(ran("import", "/gen.json", "--scope", "user", NULL) == 1);
+    CHECK(cap_has("duplicate record at line 5"));   /* 0 起点の 3 行目 = 4 件目 */
+    CHECK(list_matches());
+
+    /* --- 2 巡目のヘッダの版が上がる --- */
+    gen_opens = 0;
+    gen_dup = 0;
+    gen_ver2 = 2;
+    CHECK(ran("import", "/gen.json", "--scope", "user", NULL) == 1);
+    CHECK(cap_has("newer backup: schema_version 2"));
+    CHECK(list_matches());
+}
+
 /* ========================================================================= */
 
 int main(int argc, char **argv)
@@ -2792,6 +3517,13 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "s5_pure")) c_s5_pure();
     else if (!strcmp(argv[1], "s5_bench")) c_s5_bench();
     else if (!strcmp(argv[1], "s5_pool")) c_s5_pool();
+    else if (!strcmp(argv[1], "s3_json")) c_s3_json();
+    else if (!strcmp(argv[1], "s3_roundtrip")) c_s3_roundtrip();
+    else if (!strcmp(argv[1], "s3_scope")) c_s3_scope();
+    else if (!strcmp(argv[1], "s3_args")) c_s3_args();
+    else if (!strcmp(argv[1], "s3_reject")) c_s3_reject();
+    else if (!strcmp(argv[1], "s3_fail")) c_s3_fail();
+    else if (!strcmp(argv[1], "s3_gen")) c_s3_gen();
     else CHECK(0);
 
     canary_check(argv[1]);

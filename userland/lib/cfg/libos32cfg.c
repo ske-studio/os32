@@ -742,6 +742,14 @@ static const char SQL_SET[] =
     " VALUES(?,?,?,?,?,?)";
 static const char SQL_DEL[] =
     "DELETE FROM settings WHERE scope=? AND key=?";
+/* S3 (`cfg import` の置換と `v:null`)。scope は必ず bind する。 */
+static const char SQL_DEL_SCOPE[] =
+    "DELETE FROM settings WHERE scope=?";
+static const char SQL_DEL_ALL[] =
+    "DELETE FROM settings";
+static const char SQL_SET_NULL[] =
+    "INSERT OR REPLACE INTO settings(scope,key,type,ival,tval,bval)"
+    " VALUES(?,?,?,NULL,NULL,NULL)";
 
 /* 実行中の txn の中で set / delete が**どんな理由で**断られても、その txn は
  * failed にする。FOUNDATION §2-3 の「set 失敗で transaction を failed 状態に
@@ -757,7 +765,7 @@ static int reject_write(CfgDb *db, int rc)
  * **前提検査の失敗も** 実行中の txn を failed にする。get の途中で接続が
  * CFG_ERROR になると `writable_now` が false になり、そこで返した INVAL が
  * txn を素通しすると「A だけ commit される」(往復 2 の 2)。 */
-static int can_write(CfgDb *db, const char *scope, const char *key)
+static int can_write_gate(CfgDb *db)
 {
     if (!db || !db->in_use) return OS32_ERR_INVAL;
     /* 列挙の callback からの書き込みも拒否するが、実行中の txn は failed に
@@ -767,6 +775,13 @@ static int can_write(CfgDb *db, const char *scope, const char *key)
     if (db->txn == 2) return OS32_ERR_INVAL;         /* 既に failed */
     if (!writable_now(db)) return reject_write(db, OS32_ERR_INVAL);
     if (db->txn != 1) return OS32_ERR_INVAL;         /* txn 外は拒否 */
+    return 0;
+}
+
+static int can_write(CfgDb *db, const char *scope, const char *key)
+{
+    int rc = can_write_gate(db);
+    if (rc != 0) return rc;
     if (!cfg_i_valid_scope(scope) || !cfg_i_valid_key(key))
         return reject_write(db, OS32_ERR_INVAL);
     if (cfg_i_utf8_check(scope, cfg_strlen(scope)) != 0)
@@ -866,6 +881,68 @@ int cfg_delete(CfgDb *db, const char *scope, const char *key)
     if (cfg_i_prepare(db, SQL_DEL) != 0) { db->txn = 2; return OS32_ERR_IO; }
     if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
         b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    if (b->db_step(db->handle) != DB_STATUS_DONE) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    b->db_finalize(db->handle);
+    return 0;
+}
+
+/* ======================================================================== */
+/*  S3: scope 単位の削除と「宣言型つき NULL 行」                             */
+/*                                                                          */
+/*  `cfg import` の置換 (対象 scope を消してから入れ直す) と、export の      */
+/*  `"v":null` を往復させるためだけの 2 本。契約は set / delete と同じ:      */
+/*  txn の中でだけ、失敗で txn を failed、名前は bind、列挙中は拒否。        */
+/* ======================================================================== */
+
+int cfg_delete_scope(CfgDb *db, const char *scope)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc = can_write_gate(db);
+
+    if (rc != 0) return rc;
+    if (scope) {
+        if (!cfg_i_valid_scope(scope)) return reject_write(db, OS32_ERR_INVAL);
+        if (cfg_i_utf8_check(scope, cfg_strlen(scope)) != 0)
+            return reject_write(db, OS32_ERR_INVAL);
+    }
+    if (cfg_i_prepare(db, scope ? SQL_DEL_SCOPE : SQL_DEL_ALL) != 0) {
+        db->txn = 2;
+        return OS32_ERR_IO;
+    }
+    if (scope && b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    if (b->db_step(db->handle) != DB_STATUS_DONE) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    b->db_finalize(db->handle);
+    return 0;
+}
+
+int cfg_set_null(CfgDb *db, const char *scope, const char *key, int type)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc = can_write(db, scope, key);
+
+    if (rc != 0) return rc;
+    if (type != CFG_TYPE_INT && type != CFG_TYPE_TEXT && type != CFG_TYPE_BLOB)
+        return reject_write(db, OS32_ERR_INVAL);
+    if (cfg_i_prepare(db, SQL_SET_NULL) != 0) { db->txn = 2; return OS32_ERR_IO; }
+    if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
+        b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0 ||
+        b->db_bind_int(db->handle, 3, type) != 0) {
         set_failed(db);
         b->db_finalize(db->handle);
         return OS32_ERR_IO;
