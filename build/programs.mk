@@ -326,6 +326,15 @@ userland/cmds/%.elf: userland/cmds/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/cmds/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/$*.o -lc -lgcc
 
+# cfg — 設定レジストリの CUI (libos32cfg を静的リンク、票 S2-C)。既定の
+# cmds/%.elf パターンはライブラリを引けないので明示規則。
+userland/cmds/cfg.o: userland/cmds/cfg.c userland/lib/cfg/libos32cfg.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32cfg) -c $< -o $@
+
+userland/cmds/cfg.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/cfg.o $(LIBCFG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/cfg.o \
+	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
+
 userland/tests/%.elf: userland/tests/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/tests/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/$*.o -lc -lgcc
@@ -441,11 +450,11 @@ SHLIB_GUI_LIB = $(RUST_TARGET_DIR)/liblibos32gui.a
 $(SHLIB_GUI_LIB): FORCE $(RUST_KAPI_RS)
 	cd $(RUST_PROGRAMS_DIR) && cargo build --release -p libos32gui
 
-userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ)
+userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ) $(LIBCFG_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/shlib.ld -nostdlib --nmagic --gc-sections \
 		--allow-multiple-definition -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib \
 		-L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ \
-		$(LGRP_BEG) $(GFX_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
+		$(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
 
 userland/libos32gui.raw: userland/libos32gui.elf
 	$(OBJCOPY) -O binary $< $@

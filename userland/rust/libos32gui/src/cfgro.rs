@@ -1,0 +1,405 @@
+//! cfgro.rs — 設定レジストリ (`/etc/settings.db`) への **OS 側で完結する** 窓口。
+//!
+//! 票 `docs/tasks/settings/TASK_S2.md` §3 (ユーザー決裁 2026-09-13、2 回目)。
+//!
+//! ```text
+//!   アプリ ──(ジャンプ表 101..=104)──> ここ ──(extern "C")──> libos32cfg.a (C)
+//! ```
+//!
+//! 鉄則 (票 §3):
+//! - **`CfgDb` も接続も呼び手に渡さない**。1 呼び出しの中で
+//!   get: `cfg_open(&db,0)` → `cfg_get_*` → `cfg_close`
+//!   set: `cfg_open(&db,1)` → `cfg_begin` → `cfg_set_*` → `cfg_commit`
+//!        (失敗なら `cfg_rollback`) → `cfg_close`
+//!   を完結させる。間に yield する呼び出しを置かない (協調型なので、これで
+//!   接続は構造的に同時 1 本になる = FOUNDATION §2-4 の直列化)。
+//! - **set は `app:[a-z0-9_]+` scope だけ**。`system` / `gshell` / `user` は
+//!   S4 の設定 UI と `cfg` コマンドの領分なので拒否する。get は全 scope 可。
+//! - 文字列は表の他のエントリと同じ **ptr + len** で受け、ここで private な
+//!   NUL 終端バッファへ写してから C へ渡す (C 側は `const char *`)。
+//!   呼び手が NUL を付け忘れても走査が飛ばない。
+//!
+//! **限界 (票 §3 に明記)**: 「自分の `app:` scope にしか書けない」束縛は無い。
+//! アプリが自分の ID / 名前を知る KAPI が無いため、別アプリの `app:` scope にも
+//! 書ける。scope を wrapper が取らない版へ寄せるかは S4 / S5 で決める。
+//!
+//! このファイルは **クレート内の他のモジュールに依存しない**。ホスト TDD
+//! (`userland/rust/libos32gui/host_tests`) が `#[path]` で直に取り込み、
+//! `cfg_*` の贋物を並べて分岐を固定するため。
+#![allow(dead_code)]
+
+/* ================================================================ */
+/*  エラー番号 (正典: sdk/include/os32/os32_kapi_shared.h)            */
+/*                                                                  */
+/*  ここは自己完結のための写し。`shlib.rs` に os32api::gui::proto と  */
+/*  一致することを見る const assert を置いてある (ずれたらビルドが    */
+/*  止まる)。                                                        */
+/* ================================================================ */
+
+/// 入出力エラー。`cfg_close` が失敗したときに返す (`OS32_ERR_IO`)。
+pub const ERR_IO: i32 = -1;
+/// 値が無い (`OS32_ERR_NOTFOUND`)。`cfg_get_text` の素通し。
+pub const ERR_NOTFOUND: i32 = -2;
+/// 引数不正 (`OS32_ERR_INVAL`)。
+pub const ERR_INVAL: i32 = -9;
+
+/// scope 違反 (「OS32_ERR_PERM 相当」、票 §3)。
+///
+/// OS32 の `OS32_ERR_*` に **PERM は無い** (-1〜-14 が埋まり -15 以降は
+/// ネットワーク予約)。新しい番号を勝手に取らない ([ABI2] と同じ精神) ので、
+/// ここでは `ERR_INVAL` を充てる。番号を足すかは PM の決裁事項。
+pub const ERR_PERM: i32 = ERR_INVAL;
+
+/* ================================================================ */
+/*  上限 (正典: 票 §1-3 の値の上限)                                   */
+/* ================================================================ */
+
+/// scope / key の最大バイト数 (NUL を除く)。
+pub const CFG_NAME_MAX: usize = 63;
+/// scope / key を写す private バッファ (NUL 込み)。
+pub const CFG_NAME_CAP: usize = CFG_NAME_MAX + 1;
+/// text 値の最大バイト数 (NUL を除く)。
+pub const CFG_TEXT_MAX: usize = 255;
+/// text 値を写す private バッファ (NUL 込み)。
+pub const CFG_TEXT_CAP: usize = CFG_TEXT_MAX + 1;
+
+/* ================================================================ */
+/*  libos32cfg (C, userland/lib/cfg/libos32cfg.h) への宣言           */
+/*                                                                  */
+/*  実体は S2-C レーンが並行実装中。リンクは PM が build/programs.mk  */
+/*  の shlib 規則に libos32cfg.a を足してから通る。                   */
+/* ================================================================ */
+
+/// C の `CfgDb` (不透明)。中身はライブラリ側にしかない。
+#[repr(C)]
+pub struct CfgDb {
+    _opaque: [u8; 0],
+}
+
+extern "C" {
+    /* `const char *` は i386 では `*const u8` と同じ ABI。 */
+    pub fn cfg_open(out: *mut *mut CfgDb, writable: i32) -> i32;
+    pub fn cfg_close(db: *mut CfgDb) -> i32;
+    pub fn cfg_get_int(db: *mut CfgDb, scope: *const u8, key: *const u8, def: i32) -> i32;
+    pub fn cfg_get_text(
+        db: *mut CfgDb,
+        scope: *const u8,
+        key: *const u8,
+        out: *mut u8,
+        cap: i32,
+    ) -> i32;
+    pub fn cfg_begin(db: *mut CfgDb) -> i32;
+    pub fn cfg_set_int(db: *mut CfgDb, scope: *const u8, key: *const u8, v: i32) -> i32;
+    pub fn cfg_set_text(db: *mut CfgDb, scope: *const u8, key: *const u8, s: *const u8) -> i32;
+    pub fn cfg_commit(db: *mut CfgDb) -> i32;
+    pub fn cfg_rollback(db: *mut CfgDb) -> i32;
+}
+
+/* ================================================================ */
+/*  純粋部 — 分岐表と検査 (ホスト TDD がここを直接叩く)               */
+/* ================================================================ */
+
+/// `ptr` + `len` を `&[u8]` に戻す (NULL / 0 は空スライス)。
+///
+/// # Safety
+/// `ptr` が非 NULL なら `len` バイト読めること。
+#[inline]
+unsafe fn slice<'a>(ptr: *const u8, len: u32) -> &'a [u8] {
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(ptr, len as usize)
+    }
+}
+
+/// `src` を NUL 終端して `dst` へ写す。
+///
+/// 空・`dst` に入らない (NUL の 1 バイトを含めて)・埋め込み NUL は `false`。
+/// 空を拒むのは scope / key が空の設定を作らせないため (票 §1-3)。
+pub fn copy_cstr(src: &[u8], dst: &mut [u8]) -> bool {
+    if src.is_empty() || src.len() >= dst.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == 0 {
+            return false;
+        }
+        dst[i] = src[i];
+        i += 1;
+    }
+    dst[i] = 0;
+    true
+}
+
+/// text 値を NUL 終端して写す。**空値は許す** (票 §1-2: 空 text は長さ 0 の値で
+/// NULL とは区別する)。埋め込み NUL と長すぎる値は `false`。
+pub fn copy_value(src: &[u8], dst: &mut [u8]) -> bool {
+    if src.len() >= dst.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == 0 {
+            return false;
+        }
+        dst[i] = src[i];
+        i += 1;
+    }
+    dst[i] = 0;
+    true
+}
+
+/// set が受け付ける scope か (`app:[a-z0-9_]+`、票 §3)。
+///
+/// `system` / `gshell` / `user` はここで落ちる。長さは `CFG_NAME_MAX` まで。
+pub fn scope_is_app(scope: &[u8]) -> bool {
+    const PREFIX: &[u8] = b"app:";
+    if scope.len() <= PREFIX.len() || scope.len() > CFG_NAME_MAX {
+        return false;
+    }
+    let mut i = 0;
+    while i < PREFIX.len() {
+        if scope[i] != PREFIX[i] {
+            return false;
+        }
+        i += 1;
+    }
+    while i < scope.len() {
+        let c = scope[i];
+        let ok = (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'_';
+        if !ok {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// `os32gui_cfg_get_int` の分岐表。
+///
+/// open 失敗 / close 失敗のどちらでも `def`。`cfg_get_int` 自身は値か `def` しか
+/// 返さない (負値も正当な設定値なので、失敗を戻り値で区別しない)。
+#[inline]
+pub fn fold_get_int(open_rc: i32, value: i32, close_rc: i32, def: i32) -> i32 {
+    if open_rc < 0 || close_rc < 0 {
+        def
+    } else {
+        value
+    }
+}
+
+/// `os32gui_cfg_get_text` の分岐表。
+///
+/// **直前の失敗を優先** (票 §3): open が負ならその値、`cfg_get_text` が負
+/// (`NOTFOUND` / `NOSPC` / `INVAL`) ならそのまま、どちらも成功して close だけ
+/// 失敗したら `ERR_IO`。成功なら長さ。
+#[inline]
+pub fn fold_get_text(open_rc: i32, get_rc: i32, close_rc: i32) -> i32 {
+    if open_rc < 0 {
+        return open_rc;
+    }
+    if get_rc < 0 {
+        return get_rc;
+    }
+    if close_rc < 0 {
+        return ERR_IO;
+    }
+    get_rc
+}
+
+/// `os32gui_cfg_set_*` の分岐表。
+///
+/// `work_rc` は begin / set / commit のうち**最初に失敗した**コード (すべて成功
+/// なら 0)。**直前の失敗を優先** (票 §3): open → work → close の順に見る。
+/// MISSING / CORRUPT / VERSION は `cfg_begin` が `INVAL` を返すのでここに乗る。
+#[inline]
+pub fn fold_set(open_rc: i32, work_rc: i32, close_rc: i32) -> i32 {
+    if open_rc < 0 {
+        return open_rc;
+    }
+    if work_rc < 0 {
+        return work_rc;
+    }
+    if close_rc < 0 {
+        return ERR_IO;
+    }
+    0
+}
+
+/* ================================================================ */
+/*  101..=104: ジャンプ表のエントリ                                   */
+/* ================================================================ */
+
+/// RO で開く。`0` 以上なら `db` は非 NULL であることまで見る。
+///
+/// # Safety
+/// `cfg_open` を呼ぶ。
+#[inline]
+unsafe fn open_checked(db: *mut *mut CfgDb, writable: i32) -> i32 {
+    let rc = cfg_open(db, writable);
+    if rc >= 0 && (*db).is_null() {
+        /* 0 を返しながら NULL を置くのはライブラリの契約違反。閉じる相手が
+         * 無いのでここで打ち切る。 */
+        return ERR_IO;
+    }
+    rc
+}
+
+/// `os32gui_cfg_get_int(scope, key, def)` — 1 呼び出しで open → get → close。
+///
+/// 戻り: 設定値。open 失敗 / 未設定 / close 失敗のどれでも `def` (票 §3)。
+#[no_mangle]
+pub extern "C" fn os32gui_cfg_get_int(
+    scope: *const u8,
+    scope_len: u32,
+    key: *const u8,
+    key_len: u32,
+    def: i32,
+) -> i32 {
+    let mut sbuf = [0u8; CFG_NAME_CAP];
+    let mut kbuf = [0u8; CFG_NAME_CAP];
+    if !copy_cstr(unsafe { slice(scope, scope_len) }, &mut sbuf)
+        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
+    {
+        return def;
+    }
+    let mut db: *mut CfgDb = core::ptr::null_mut();
+    let orc = unsafe { open_checked(&mut db, 0) };
+    if orc < 0 {
+        return fold_get_int(orc, def, 0, def);
+    }
+    let v = unsafe { cfg_get_int(db, sbuf.as_ptr(), kbuf.as_ptr(), def) };
+    let crc = unsafe { cfg_close(db) };
+    fold_get_int(orc, v, crc, def)
+}
+
+/// `os32gui_cfg_get_text(scope, key, out, cap)` — 1 呼び出しで open → get → close。
+///
+/// 戻り: 長さ (NUL を除く) / 負。`cap` は NUL を含む `out` の大きさ。
+#[no_mangle]
+pub extern "C" fn os32gui_cfg_get_text(
+    scope: *const u8,
+    scope_len: u32,
+    key: *const u8,
+    key_len: u32,
+    out: *mut u8,
+    cap: u32,
+) -> i32 {
+    if out.is_null() || cap == 0 || cap > i32::MAX as u32 {
+        return ERR_INVAL;
+    }
+    let mut sbuf = [0u8; CFG_NAME_CAP];
+    let mut kbuf = [0u8; CFG_NAME_CAP];
+    if !copy_cstr(unsafe { slice(scope, scope_len) }, &mut sbuf)
+        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
+    {
+        return ERR_INVAL;
+    }
+    let mut db: *mut CfgDb = core::ptr::null_mut();
+    let orc = unsafe { open_checked(&mut db, 0) };
+    if orc < 0 {
+        return fold_get_text(orc, 0, 0);
+    }
+    let n = unsafe { cfg_get_text(db, sbuf.as_ptr(), kbuf.as_ptr(), out, cap as i32) };
+    let crc = unsafe { cfg_close(db) };
+    fold_get_text(orc, n, crc)
+}
+
+/// begin → set → commit / rollback を 1 つの txn で閉じ、最初の失敗コードを返す。
+///
+/// `db` は `cfg_open(.., 1)` が成功して返した接続であること (呼び出しは
+/// このファイルの中だけ)。`set` は `cfg_set_*` を 1 本呼ぶ。
+fn write_txn<F>(db: *mut CfgDb, set: F) -> i32
+where
+    F: FnOnce(*mut CfgDb) -> i32,
+{
+    let brc = unsafe { cfg_begin(db) };
+    if brc < 0 {
+        /* BEGIN していないので rollback しない (MISSING / CORRUPT / VERSION
+         * と読み専用接続はここで INVAL)。 */
+        return brc;
+    }
+    let src = set(db);
+    if src < 0 {
+        unsafe { cfg_rollback(db) };
+        return src;
+    }
+    let crc = unsafe { cfg_commit(db) };
+    if crc < 0 {
+        /* 失敗コードは rollback を実行する**前**の値 (票 §1-4)。 */
+        unsafe { cfg_rollback(db) };
+        return crc;
+    }
+    0
+}
+
+/// `os32gui_cfg_set_int(scope, key, v)` — 1 呼び出しで open → begin → set →
+/// commit → close。`app:[a-z0-9_]+` scope のみ。
+///
+/// 戻り: 0 / 負 (票 §3)。
+#[no_mangle]
+pub extern "C" fn os32gui_cfg_set_int(
+    scope: *const u8,
+    scope_len: u32,
+    key: *const u8,
+    key_len: u32,
+    v: i32,
+) -> i32 {
+    let sc = unsafe { slice(scope, scope_len) };
+    if !scope_is_app(sc) {
+        return ERR_PERM;
+    }
+    let mut sbuf = [0u8; CFG_NAME_CAP];
+    let mut kbuf = [0u8; CFG_NAME_CAP];
+    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf) {
+        return ERR_INVAL;
+    }
+    let mut db: *mut CfgDb = core::ptr::null_mut();
+    let orc = unsafe { open_checked(&mut db, 1) };
+    if orc < 0 {
+        return fold_set(orc, 0, 0);
+    }
+    let work = write_txn(db, |d| unsafe {
+        cfg_set_int(d, sbuf.as_ptr(), kbuf.as_ptr(), v)
+    });
+    let crc = unsafe { cfg_close(db) };
+    fold_set(orc, work, crc)
+}
+
+/// `os32gui_cfg_set_text(scope, key, s)` — `set_int` と同じ道筋の text 版。
+///
+/// `s` は ptr + len。空値は許す (NULL とは違う値として入る)。
+#[no_mangle]
+pub extern "C" fn os32gui_cfg_set_text(
+    scope: *const u8,
+    scope_len: u32,
+    key: *const u8,
+    key_len: u32,
+    s: *const u8,
+    s_len: u32,
+) -> i32 {
+    let sc = unsafe { slice(scope, scope_len) };
+    if !scope_is_app(sc) {
+        return ERR_PERM;
+    }
+    let mut sbuf = [0u8; CFG_NAME_CAP];
+    let mut kbuf = [0u8; CFG_NAME_CAP];
+    let mut vbuf = [0u8; CFG_TEXT_CAP];
+    if !copy_cstr(sc, &mut sbuf)
+        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
+        || !copy_value(unsafe { slice(s, s_len) }, &mut vbuf)
+    {
+        return ERR_INVAL;
+    }
+    let mut db: *mut CfgDb = core::ptr::null_mut();
+    let orc = unsafe { open_checked(&mut db, 1) };
+    if orc < 0 {
+        return fold_set(orc, 0, 0);
+    }
+    let work = write_txn(db, |d| unsafe {
+        cfg_set_text(d, sbuf.as_ptr(), kbuf.as_ptr(), vbuf.as_ptr())
+    });
+    let crc = unsafe { cfg_close(db) };
+    fold_set(orc, work, crc)
+}

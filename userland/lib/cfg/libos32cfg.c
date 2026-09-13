@@ -1,0 +1,726 @@
+/* ======================================================================== */
+/*  LIBOS32CFG.C — 設定レジストリの中核 (open / close / get / txn / set)     */
+/*                                                                          */
+/*  票 docs/tasks/settings/TASK_S2.md §1。C89 [C1]。malloc しない。          */
+/*  列挙は cfg_enum.c、生成は cfg_init.c、tsv reader は cfg_tsv.c に分けて    */
+/*  ある — 読むだけのアプリが列挙 / 生成の作業領域を背負わないため。          */
+/* ======================================================================== */
+
+#include "cfg_internal.h"
+
+/* ======================================================================== */
+/*  KAPI 境界                                                                */
+/* ======================================================================== */
+
+static const CfgBackend *g_backend;
+
+void cfg_set_backend(const CfgBackend *b)
+{
+    g_backend = b;
+}
+
+const CfgBackend *cfg_backend(void)
+{
+    if (!g_backend) g_backend = cfg_backend_platform();
+    return g_backend;
+}
+
+/* ======================================================================== */
+/*  状態 (1 プロセス 1 接続、静的 1 本)                                      */
+/* ======================================================================== */
+
+static CfgDb g_db;
+static int g_close_error;
+
+void cfg_i_set_close_error(int code)
+{
+    g_close_error = code;
+}
+
+int cfg_last_close_error(void)
+{
+    return g_close_error;
+}
+
+int cfg_status(const CfgDb *db)
+{
+    if (!db) return CFG_ERROR;
+    return db->status;
+}
+
+int cfg_schema_version(const CfgDb *db)
+{
+    if (!db) return 0;
+    return db->schema_version;
+}
+
+int cfg_last_sqlite(const CfgDb *db)
+{
+    if (!db) return 0;
+    return db->last_sqlite;
+}
+
+/* ======================================================================== */
+/*  文字列と UTF-8                                                           */
+/* ======================================================================== */
+
+static int cfg_strlen(const char *s)
+{
+    int n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+int cfg_i_len_ok(const char *s, int max)
+{
+    int n;
+    if (!s) return 0;
+    for (n = 0; s[n]; n++) {
+        if (n >= max) return 0;
+    }
+    return n > 0;
+}
+
+static int name_char(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+int cfg_i_valid_scope(const char *s)
+{
+    int i;
+    if (!cfg_i_len_ok(s, CFG_SCOPE_MAX)) return 0;
+    if (s[0] == 's' && s[1] == 'y' && s[2] == 's' && s[3] == 't' &&
+        s[4] == 'e' && s[5] == 'm' && s[6] == '\0') return 1;
+    if (s[0] == 'g' && s[1] == 's' && s[2] == 'h' && s[3] == 'e' &&
+        s[4] == 'l' && s[5] == 'l' && s[6] == '\0') return 1;
+    if (s[0] == 'u' && s[1] == 's' && s[2] == 'e' && s[3] == 'r' &&
+        s[4] == '\0') return 1;
+    if (!(s[0] == 'a' && s[1] == 'p' && s[2] == 'p' && s[3] == ':')) return 0;
+    if (!s[4]) return 0;
+    for (i = 4; s[i]; i++) {
+        if (!name_char((unsigned char)s[i])) return 0;
+    }
+    return 1;
+}
+
+int cfg_i_valid_key(const char *s)
+{
+    int i, seg = 0;
+    if (!cfg_i_len_ok(s, CFG_KEY_MAX)) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '/') {
+            if (seg == 0) return 0;
+            seg = 0;
+            continue;
+        }
+        if (!name_char((unsigned char)s[i])) return 0;
+        seg++;
+    }
+    return seg > 0;
+}
+
+void cfg_i_u8_reset(CfgU8 *s)
+{
+    s->need = 0;
+    s->cp = 0;
+    s->lo = 0;
+}
+
+int cfg_i_u8_byte(CfgU8 *s, int b)
+{
+    b &= 0xFF;
+    if (s->need > 0) {
+        if (b < 0x80 || b > 0xBF) return -1;
+        s->cp = (s->cp << 6) | (u32)(b & 0x3F);
+        s->need--;
+        if (s->need == 0) {
+            if (s->cp < s->lo) return -1;                    /* 冗長符号 */
+            if (s->cp >= 0xD800UL && s->cp <= 0xDFFFUL) return -1;
+            if (s->cp > 0x10FFFFUL) return -1;
+        }
+        return 0;
+    }
+    if (b < 0x80) return 0;
+    if (b < 0xC2) return -1;            /* 継続バイト単独 / C0 C1 */
+    if (b < 0xE0) { s->need = 1; s->cp = (u32)(b & 0x1F); s->lo = 0x80UL; return 0; }
+    if (b < 0xF0) { s->need = 2; s->cp = (u32)(b & 0x0F); s->lo = 0x800UL; return 0; }
+    if (b < 0xF5) { s->need = 3; s->cp = (u32)(b & 0x07); s->lo = 0x10000UL; return 0; }
+    return -1;
+}
+
+int cfg_i_u8_done(const CfgU8 *s)
+{
+    return s->need == 0;
+}
+
+int cfg_i_utf8_check(const void *p, int n)
+{
+    const unsigned char *q = (const unsigned char *)p;
+    CfgU8 st;
+    int i;
+    if (n < 0) return -1;
+    if (n > 0 && !q) return -1;
+    cfg_i_u8_reset(&st);
+    for (i = 0; i < n; i++) {
+        if (cfg_i_u8_byte(&st, q[i]) != 0) return -1;
+    }
+    return cfg_i_u8_done(&st) ? 0 : -1;
+}
+
+/* ======================================================================== */
+/*  SHM の列 (libos32db と同じ読み方)                                        */
+/* ======================================================================== */
+
+static DB_ColumnInfo *col_info(int col)
+{
+    unsigned char *shm = cfg_backend()->shm();
+    DB_ResultHeader *hdr = (DB_ResultHeader *)shm;
+    if (!shm) return (DB_ColumnInfo *)0;
+    if (col < 0 || col >= (int)hdr->column_count) return (DB_ColumnInfo *)0;
+    return (DB_ColumnInfo *)(shm + sizeof(DB_ResultHeader)
+                             + (u32)col * sizeof(DB_ColumnInfo));
+}
+
+int cfg_i_col_count(void)
+{
+    unsigned char *shm = cfg_backend()->shm();
+    if (!shm) return 0;
+    return (int)((DB_ResultHeader *)shm)->column_count;
+}
+
+int cfg_i_col_type(int col)
+{
+    DB_ColumnInfo *info = col_info(col);
+    return info ? (int)info->type : DB_TYPE_NULL;
+}
+
+int cfg_i_col_len(int col)
+{
+    DB_ColumnInfo *info = col_info(col);
+    return info ? (int)info->length : 0;
+}
+
+i32 cfg_i_col_int(int col)
+{
+    DB_ColumnInfo *info = col_info(col);
+    if (!info || info->type != DB_TYPE_INT || info->data_offset == 0) return 0;
+    return *(i32 *)(cfg_backend()->shm() + info->data_offset);
+}
+
+const void *cfg_i_col_ptr(int col)
+{
+    DB_ColumnInfo *info = col_info(col);
+    if (!info || info->data_offset == 0) return (const void *)0;
+    return (const void *)(cfg_backend()->shm() + info->data_offset);
+}
+
+/* ======================================================================== */
+/*  SQL の下働き                                                             */
+/* ======================================================================== */
+
+void cfg_i_note(CfgDb *db)
+{
+    if (db->handle >= 0) db->last_sqlite = cfg_backend()->db_error_code(db->handle);
+}
+
+int cfg_i_exec(CfgDb *db, const char *sql)
+{
+    if (db->handle < 0) return -1;
+    if (cfg_backend()->db_exec(db->handle, sql) != 0) {
+        cfg_i_note(db);
+        return -1;
+    }
+    return 0;
+}
+
+int cfg_i_prepare(CfgDb *db, const char *sql)
+{
+    if (db->handle < 0) return -1;
+    if (cfg_backend()->db_prepare_only(db->handle, sql) != 0) {
+        cfg_i_note(db);
+        return -1;
+    }
+    return 0;
+}
+
+/* ======================================================================== */
+/*  schema 検査 (票 §1-1b) — 表全体を 1 本の SQL で見る                      */
+/* ======================================================================== */
+
+static const char SQL_SCHEMA[] =
+    "SELECT COUNT(*), MIN(typeof(schema_version)), MAX(typeof(schema_version)),"
+    " MIN(schema_version), MAX(schema_version),"
+    " MIN(schema_version BETWEEN 1 AND 2147483647) FROM meta";
+
+static int is_integer_typeof(int col)
+{
+    const char *s = (const char *)cfg_i_col_ptr(col);
+    if (cfg_i_col_type(col) != DB_TYPE_TEXT || !s) return 0;
+    return s[0] == 'i' && s[1] == 'n' && s[2] == 't' && s[3] == 'e' &&
+           s[4] == 'g' && s[5] == 'e' && s[6] == 'r' && s[7] == '\0';
+}
+
+int cfg_i_schema_check(CfgDb *db, int *version_out)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc, count, lo, hi, in_range, ver;
+
+    *version_out = 0;
+    if (db->handle < 0) return CFG_ERROR;
+    if (b->db_prepare_only(db->handle, SQL_SCHEMA) != 0) {
+        cfg_i_note(db);
+        /* 「meta 表が無い」だけが SQLITE_ERROR。IOERR / NOMEM / BUSY は
+         * 表の欠落と区別して ERROR にする (票 §1-1b、往復 3)。 */
+        if (CFG_SQLITE_PRIMARY(db->last_sqlite) == CFG_SQLITE_ERROR)
+            return CFG_CORRUPT;
+        return CFG_ERROR;
+    }
+    rc = b->db_step(db->handle);
+    if (rc != DB_STATUS_ROW) {
+        cfg_i_note(db);
+        b->db_finalize(db->handle);
+        return CFG_ERROR;
+    }
+    count = (int)cfg_i_col_int(0);
+    lo = (int)cfg_i_col_int(3);
+    hi = (int)cfg_i_col_int(4);
+    in_range = (cfg_i_col_type(5) == DB_TYPE_INT) ? (int)cfg_i_col_int(5) : 0;
+    ver = lo;
+    if (count != 1 || !is_integer_typeof(1) || !is_integer_typeof(2) ||
+        lo != hi || in_range != 1 ||
+        cfg_i_col_type(3) != DB_TYPE_INT || cfg_i_col_type(4) != DB_TYPE_INT) {
+        b->db_finalize(db->handle);
+        return CFG_CORRUPT;
+    }
+    b->db_finalize(db->handle);
+    *version_out = ver;
+    if (ver > CFG_SCHEMA_VERSION) return CFG_VERSION;
+    return CFG_OK;
+}
+
+/* ======================================================================== */
+/*  cfg_open / cfg_close                                                     */
+/* ======================================================================== */
+
+static int map_open_failure(CfgDb *db)
+{
+    const CfgBackend *b = cfg_backend();
+    int code = b->db_error_code(-1);
+    OS32_Stat st;
+
+    db->last_sqlite = code;
+    if (code == CFG_SQLITE_BUSY_RECOVERY) return CFG_CORRUPT;   /* hot journal */
+    switch (CFG_SQLITE_PRIMARY(code)) {
+    case CFG_SQLITE_CANTOPEN:
+        /* 「無い」と「KAPI / 下位層が断った」を stat で分ける (票 §1-1a)。 */
+        if (b->sys_stat(CFG_DB_PATH, &st) == OS32_ERR_NOTFOUND) return CFG_MISSING;
+        return CFG_ERROR;
+    case CFG_SQLITE_NOTADB:
+    case CFG_SQLITE_CORRUPT:
+        return CFG_CORRUPT;
+    default:
+        return CFG_ERROR;
+    }
+}
+
+int cfg_open(CfgDb **out, int writable)
+{
+    const CfgBackend *b;
+    CfgDb *db = &g_db;
+    int st, ver;
+
+    if (!out) return OS32_ERR_INVAL;
+    *out = (CfgDb *)0;
+    if (db->in_use) return OS32_ERR_INVAL;      /* 1 プロセス 1 接続 */
+    b = cfg_backend();
+    if (!b) return OS32_ERR_INVAL;
+
+    db->in_use = 1;
+    db->handle = -1;
+    db->want_write = writable ? 1 : 0;
+    db->rw = 0;
+    db->status = CFG_OK;
+    db->schema_version = 0;
+    db->last_sqlite = 0;
+    db->txn = 0;
+    db->in_enum = 0;
+
+    /* (a) 必ず RO で開いて検査する。 */
+    db->handle = b->db_open_existing(CFG_DB_PATH, 0);
+    if (db->handle < 0) {
+        db->handle = -1;
+        db->status = map_open_failure(db);
+        *out = db;
+        return 0;
+    }
+    st = cfg_i_schema_check(db, &ver);
+    db->status = st;
+    db->schema_version = ver;
+    if (st == CFG_CORRUPT || st == CFG_ERROR) {
+        b->db_close(db->handle);
+        db->handle = -1;
+        *out = db;
+        return 0;
+    }
+    /* (c) RW へ切り替えるのは RO 検査が CFG_OK のときだけ。 */
+    if (writable && st == CFG_OK) {
+        if (b->db_close(db->handle) != 0) {
+            cfg_i_note(db);
+            db->handle = -1;
+            db->status = CFG_ERROR;
+            *out = db;
+            return 0;
+        }
+        db->handle = b->db_open_existing(CFG_DB_PATH, 1);
+        if (db->handle < 0) {
+            db->handle = -1;
+            db->status = map_open_failure(db);
+            if (db->status == CFG_OK) db->status = CFG_ERROR;
+            *out = db;
+            return 0;
+        }
+        st = cfg_i_schema_check(db, &ver);
+        if (st != CFG_OK || ver != db->schema_version) {
+            b->db_close(db->handle);
+            db->handle = -1;
+            db->status = (st == CFG_CORRUPT) ? CFG_CORRUPT : CFG_ERROR;
+            db->schema_version = ver;
+            *out = db;
+            return 0;
+        }
+        db->rw = 1;
+    }
+    /* (d) open は BEGIN しない。 */
+    *out = db;
+    return 0;
+}
+
+int cfg_close(CfgDb *db)
+{
+    const CfgBackend *b = cfg_backend();
+    int first = 0, saved, code;
+
+    if (!db || !db->in_use) return OS32_ERR_INVAL;
+    if (db->in_enum) return OS32_ERR_INVAL;
+    if (db->handle >= 0) {
+        if (db->txn != 0) {
+            /* 成功した ROLLBACK は診断を 0 に戻す。先に保存する (票 §1-4)。*/
+            saved = db->last_sqlite;
+            if (b->db_exec(db->handle, "ROLLBACK") != 0) {
+                cfg_i_note(db);
+                first = db->last_sqlite ? db->last_sqlite : -1;
+            } else {
+                db->last_sqlite = saved;
+            }
+            db->txn = 0;
+        }
+        if (b->db_close(db->handle) != 0) {
+            code = b->db_error_code(db->handle);
+            if (!first) first = code ? code : -1;
+            db->last_sqlite = code ? code : db->last_sqlite;
+        }
+        db->handle = -1;
+    }
+    db->in_use = 0;
+    db->rw = 0;
+    g_close_error = first;
+    return first ? OS32_ERR_IO : 0;
+}
+
+/* ======================================================================== */
+/*  読み                                                                     */
+/* ======================================================================== */
+
+static const char SQL_GET[] =
+    "SELECT type, ival, tval, bval FROM settings WHERE scope=? AND key=?";
+
+/* 使える接続か (get 用): 状態 OK か VERSION なら読める。 */
+static int readable(CfgDb *db)
+{
+    if (!db || !db->in_use || db->in_enum) return 0;
+    if (db->handle < 0) return 0;
+    return db->status == CFG_OK || db->status == CFG_VERSION;
+}
+
+static int names_ok(const char *scope, const char *key)
+{
+    /* 読みでは長さだけを見る。DB の中身を規則で切り捨てない
+     * (規則の強制は set / delete 側、票 §1-3)。 */
+    return cfg_i_len_ok(scope, CFG_SCOPE_MAX) && cfg_i_len_ok(key, CFG_KEY_MAX);
+}
+
+/* 1 行を取りに行く。DB_STATUS_ROW なら列が SHM に載っている。
+ * 呼び手は読み終えたら cfg_get_finish() を必ず呼ぶ。 */
+static int get_row(CfgDb *db, const char *scope, const char *key)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc;
+
+    if (cfg_i_prepare(db, SQL_GET) != 0) { db->status = CFG_ERROR; return -1; }
+    if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
+        b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0) {
+        cfg_i_note(db);
+        b->db_finalize(db->handle);
+        return -1;
+    }
+    rc = b->db_step(db->handle);
+    if (rc == DB_STATUS_ERROR) {
+        cfg_i_note(db);
+        b->db_finalize(db->handle);
+        db->status = CFG_ERROR;
+        return -1;
+    }
+    if (rc != DB_STATUS_ROW) {
+        b->db_finalize(db->handle);
+        return 0;
+    }
+    return 1;
+}
+
+static void get_finish(CfgDb *db)
+{
+    cfg_backend()->db_finalize(db->handle);
+}
+
+int cfg_get_int(CfgDb *db, const char *scope, const char *key, int def)
+{
+    int v;
+    if (!names_ok(scope, key)) return def;
+    if (!readable(db)) return def;
+    if (get_row(db, scope, key) != 1) return def;
+    if (cfg_i_col_type(0) != DB_TYPE_INT ||
+        (int)cfg_i_col_int(0) != CFG_TYPE_INT ||
+        cfg_i_col_type(1) != DB_TYPE_INT) {
+        get_finish(db);
+        return def;
+    }
+    v = (int)cfg_i_col_int(1);
+    get_finish(db);
+    return v;
+}
+
+/* text (col 2) / blob (col 3) の共通取り出し。 */
+static int get_value(CfgDb *db, const char *scope, const char *key,
+                     int want_type, int col, int shm_type,
+                     void *out, int cap, int add_nul)
+{
+    const unsigned char *src;
+    unsigned char *dst = (unsigned char *)out;
+    int len, i, rc;
+
+    if (!names_ok(scope, key) || !out || cap < 0) return OS32_ERR_INVAL;
+    if (!readable(db)) return OS32_ERR_NOTFOUND;
+    rc = get_row(db, scope, key);
+    if (rc < 0) return OS32_ERR_NOTFOUND;
+    if (rc == 0) return OS32_ERR_NOTFOUND;
+    if (cfg_i_col_type(0) != DB_TYPE_INT ||
+        (int)cfg_i_col_int(0) != want_type) {
+        get_finish(db);
+        return OS32_ERR_NOTFOUND;
+    }
+    /* NULL と空値を区別する (S0_FOUNDATION §2-5)。NULL は未設定扱い。 */
+    if (cfg_i_col_type(col) != shm_type) {
+        get_finish(db);
+        return OS32_ERR_NOTFOUND;
+    }
+    len = cfg_i_col_len(col);
+    if (len < 0) { get_finish(db); return OS32_ERR_NOTFOUND; }
+    if (len > cap - (add_nul ? 1 : 0)) {
+        get_finish(db);
+        return OS32_ERR_NOSPC;              /* out は 1 バイトも書かない */
+    }
+    src = (const unsigned char *)cfg_i_col_ptr(col);
+    if (!src && len > 0) {
+        cfg_i_note(db);
+        get_finish(db);
+        db->status = CFG_ERROR;
+        return OS32_ERR_IO;
+    }
+    for (i = 0; i < len; i++) dst[i] = src[i];   /* SHM から即コピー */
+    if (add_nul) dst[len] = 0;
+    get_finish(db);
+    return len;
+}
+
+int cfg_get_text(CfgDb *db, const char *scope, const char *key,
+                 char *out, int cap)
+{
+    return get_value(db, scope, key, CFG_TYPE_TEXT, 2, DB_TYPE_TEXT,
+                     out, cap, 1);
+}
+
+int cfg_get_blob(CfgDb *db, const char *scope, const char *key,
+                 void *out, int cap)
+{
+    return get_value(db, scope, key, CFG_TYPE_BLOB, 3, DB_TYPE_BLOB,
+                     out, cap, 0);
+}
+
+/* ======================================================================== */
+/*  トランザクションと書き                                                   */
+/* ======================================================================== */
+
+static int writable_now(CfgDb *db)
+{
+    if (!db || !db->in_use || db->in_enum) return 0;
+    if (!db->rw || db->handle < 0) return 0;
+    return db->status == CFG_OK;
+}
+
+int cfg_begin(CfgDb *db)
+{
+    if (!writable_now(db)) return OS32_ERR_INVAL;
+    if (db->txn != 0) return OS32_ERR_INVAL;
+    if (cfg_i_exec(db, "BEGIN IMMEDIATE") != 0) return OS32_ERR_IO;
+    db->txn = 1;
+    return 0;
+}
+
+int cfg_rollback(CfgDb *db)
+{
+    int saved;
+    if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
+    if (db->txn == 0 || db->handle < 0) return OS32_ERR_INVAL;
+    saved = db->last_sqlite;
+    if (cfg_i_exec(db, "ROLLBACK") != 0) { db->txn = 0; return OS32_ERR_IO; }
+    db->last_sqlite = saved;
+    db->txn = 0;
+    return 0;
+}
+
+int cfg_commit(CfgDb *db)
+{
+    if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
+    if (db->txn == 0 || db->handle < 0) return OS32_ERR_INVAL;
+    if (db->txn == 2) {                      /* failed — commit は拒否 */
+        cfg_rollback(db);
+        return OS32_ERR_IO;
+    }
+    if (cfg_i_exec(db, "COMMIT") != 0) {
+        cfg_rollback(db);
+        return OS32_ERR_IO;
+    }
+    db->txn = 0;
+    return 0;
+}
+
+static const char SQL_SET[] =
+    "INSERT OR REPLACE INTO settings(scope,key,type,ival,tval,bval)"
+    " VALUES(?,?,?,?,?,?)";
+static const char SQL_DEL[] =
+    "DELETE FROM settings WHERE scope=? AND key=?";
+
+/* set / delete の共通前提。0 = 進んでよい。 */
+static int can_write(CfgDb *db, const char *scope, const char *key)
+{
+    if (!writable_now(db)) return OS32_ERR_INVAL;
+    if (db->txn != 1) return OS32_ERR_INVAL;         /* txn 外は拒否 */
+    if (!cfg_i_valid_scope(scope) || !cfg_i_valid_key(key)) return OS32_ERR_INVAL;
+    if (cfg_i_utf8_check(scope, cfg_strlen(scope)) != 0) return OS32_ERR_INVAL;
+    if (cfg_i_utf8_check(key, cfg_strlen(key)) != 0) return OS32_ERR_INVAL;
+    return 0;
+}
+
+static void set_failed(CfgDb *db)
+{
+    cfg_i_note(db);
+    db->txn = 2;
+}
+
+static int set_value(CfgDb *db, const char *scope, const char *key, int type,
+                  int iv, const char *tv, int tlen,
+                  const void *bv, int blen)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc;
+    /* 空の text / blob も NULL ではなく「空値」として入れる (票 §1-2)。
+     * 長さ 0 でも非 NULL のポインタを渡す。 */
+    static const char empty[1] = { 0 };
+
+    if (cfg_i_prepare(db, SQL_SET) != 0) { db->txn = 2; return OS32_ERR_IO; }
+    if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
+        b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0 ||
+        b->db_bind_int(db->handle, 3, type) != 0) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    rc = (type == CFG_TYPE_INT) ? b->db_bind_int(db->handle, 4, iv)
+                                : b->db_bind_null(db->handle, 4);
+    if (rc == 0) {
+        rc = (type == CFG_TYPE_TEXT)
+             ? b->db_bind_text(db->handle, 5, tv ? tv : empty, tlen)
+             : b->db_bind_null(db->handle, 5);
+    }
+    if (rc == 0) {
+        rc = (type == CFG_TYPE_BLOB)
+             ? b->db_bind_blob(db->handle, 6, bv ? bv : (const void *)empty, blen)
+             : b->db_bind_null(db->handle, 6);
+    }
+    if (rc != 0) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    if (b->db_step(db->handle) != DB_STATUS_DONE) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    b->db_finalize(db->handle);
+    return 0;
+}
+
+int cfg_set_int(CfgDb *db, const char *scope, const char *key, int v)
+{
+    int rc = can_write(db, scope, key);
+    if (rc != 0) return rc;
+    return set_value(db, scope, key, CFG_TYPE_INT, v, (const char *)0, 0,
+                  (const void *)0, 0);
+}
+
+int cfg_set_text(CfgDb *db, const char *scope, const char *key, const char *s)
+{
+    int rc = can_write(db, scope, key);
+    int n;
+    if (rc != 0) return rc;
+    if (!s) return OS32_ERR_INVAL;
+    /* 上限を超えるかどうかを数える段で打ち切る (長い文字列を走り切らない)。*/
+    for (n = 0; s[n]; n++) {
+        if (n >= CFG_TEXT_MAX) return OS32_ERR_INVAL;
+    }
+    if (cfg_i_utf8_check(s, n) != 0) return OS32_ERR_INVAL;
+    return set_value(db, scope, key, CFG_TYPE_TEXT, 0, s, n, (const void *)0, 0);
+}
+
+int cfg_set_blob(CfgDb *db, const char *scope, const char *key,
+                 const void *p, int n)
+{
+    int rc = can_write(db, scope, key);
+    if (rc != 0) return rc;
+    if (n < 0 || n > CFG_BLOB_MAX) return OS32_ERR_INVAL;
+    if (n > 0 && !p) return OS32_ERR_INVAL;
+    return set_value(db, scope, key, CFG_TYPE_BLOB, 0, (const char *)0, 0, p, n);
+}
+
+int cfg_delete(CfgDb *db, const char *scope, const char *key)
+{
+    const CfgBackend *b = cfg_backend();
+    int rc = can_write(db, scope, key);
+    if (rc != 0) return rc;
+    if (cfg_i_prepare(db, SQL_DEL) != 0) { db->txn = 2; return OS32_ERR_IO; }
+    if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
+        b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    if (b->db_step(db->handle) != DB_STATUS_DONE) {
+        set_failed(db);
+        b->db_finalize(db->handle);
+        return OS32_ERR_IO;
+    }
+    b->db_finalize(db->handle);
+    return 0;
+}
