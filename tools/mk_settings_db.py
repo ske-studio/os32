@@ -216,7 +216,7 @@ def format_created(epoch):
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch))
 
 
-def write_db(rows, out_path, epoch):
+def write_db(rows, out_path, epoch, schema_version=SCHEMA_VERSION):
     """rows を DESIGN §3 のスキーマで書き出す (決定的)。"""
     for suffix in ('', '-journal', '-wal', '-shm'):
         p = out_path + suffix
@@ -245,7 +245,7 @@ def write_db(rows, out_path, epoch):
                     'bval BLOB, '
                     'PRIMARY KEY (scope, key)) WITHOUT ROWID')
         cur.execute('INSERT INTO meta (schema_version, created) VALUES (?, ?)',
-                    (SCHEMA_VERSION, format_created(epoch)))
+                    (schema_version, format_created(epoch)))
         # 書き込み順を (scope, key) で固定する = 同じ内容なら同じページ像。
         for scope, key, tcode, ival, tval, bval in sorted(
                 rows, key=lambda r: (r[0], r[1])):
@@ -258,7 +258,7 @@ def write_db(rows, out_path, epoch):
         # VACUUM で自由ページと挿入順の痕跡を落とす (user_version は
         # VACUUM をまたいで保たれるが、念のため後で入れ直す)。
         cur.execute('VACUUM')
-        cur.execute('PRAGMA user_version=%d' % SCHEMA_VERSION)
+        cur.execute('PRAGMA user_version=%d' % schema_version)
         cur.close()
     finally:
         conn.close()
@@ -277,6 +277,10 @@ def main(argv=None):
     parser.add_argument('--epoch', type=int, default=None,
                         help='meta.created に使う UNIX 時刻 '
                              '(既定: SOURCE_DATE_EPOCH、無ければ 0)')
+    parser.add_argument('--schema-version', type=int, default=SCHEMA_VERSION,
+                        help='meta.schema_version に入れる版 (既定 %d)。'
+                             '**試験 fixture 専用** (S4 の VERSION 受入 G5): '
+                             '媒体マスタは既定のまま' % SCHEMA_VERSION)
     args = parser.parse_args(argv)
 
     try:
@@ -294,7 +298,7 @@ def main(argv=None):
         sys.stderr.write('mk_settings_db: %s\n' % e)
         return 1
 
-    write_db(rows, args.out, epoch)
+    write_db(rows, args.out, epoch, args.schema_version)
     sys.stdout.write('mk_settings_db: %s -> %s (%d 件, created=%s)\n'
                      % (args.tsv, args.out, len(rows), format_created(epoch)))
     return 0
