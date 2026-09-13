@@ -49,6 +49,14 @@ CASES = [
     "long_scope",      # ⑭ list の scope を切り詰めない
     "intmin",          # ⑰ INT_MIN の解析で signed overflow を踏まない
     "tsv_many",        # ⑯ 63B の名前が並んでも受理、重複は PRIMARY KEY
+    # 実装レビュー 往復 2 の blocker (s2_tdd.md §C2)
+    "r2_int_fail",     # 1 整数取得だけの失敗を 0 として出さない
+    "r2_txn_error",    # 2 ERROR 状態での set 拒否も txn を failed に
+    "r2_close_diag",   # 3 close の失敗が操作診断を上書きしない
+    "r2_null_type",    # 4 NULL の export が宣言型を保つ
+    "r2_wide",         # 5 64bit 整数 / 未知 type を正当値にしない
+    "r2_badval",       # 6 保存済み text/blob の境界と埋込み NUL の key
+    "r2_alias",        # 7 export 先の stat 障害を「別ファイル」にしない
 ]
 
 INC = ["-I" + str(ROOT / p) for p in

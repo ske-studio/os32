@@ -108,11 +108,16 @@ static const char *inj_exec_match[INJ_EXEC_SUBS];
 static const char *inj_exec_sub[INJ_EXEC_SUBS];
 
 static int be_open_existing(const char *p, int w) { return kapi_db_open_existing(p, w); }
+static int inj_prep_skip;         /* 一致しても最初の N 回は素通しさせる */
 static int be_prepare_only(int h, const char *s)
 {
     if (inj_prep_fail && strstr(s, inj_prep_fail)) {
-        /* 実在しない表を引かせて、本物の SQLite の失敗と診断を作る。 */
-        return kapi_db_prepare_only(h, "SELECT 1 FROM no_such_table_for_tdd");
+        if (inj_prep_skip > 0) {
+            inj_prep_skip--;
+        } else {
+            /* 実在しない表を引かせて、本物の SQLite の失敗と診断を作る。 */
+            return kapi_db_prepare_only(h, "SELECT 1 FROM no_such_table_for_tdd");
+        }
     }
     return kapi_db_prepare_only(h, s);
 }
@@ -321,6 +326,7 @@ static void reset_all(void)
     stat_fail_rc = OS32_ERR_IO;
     inj_close_fail = 0;
     inj_prep_fail = NULL;
+    inj_prep_skip = 0;
     inj_bind_fail = 0;
     inj_write_fail = 0;
     inj_short_write = 0;
@@ -1454,12 +1460,12 @@ static void c_nullval(void)
 
     raw_db(CFG_DB_PATH, rows);
     CHECK(cfg_open(&db, 0) == 0);
-    CHECK(cfg_get_type(db, "gshell", "tn") == CFG_TYPE_NULL);
-    CHECK(cfg_get_type(db, "gshell", "in") == CFG_TYPE_NULL);
-    CHECK(cfg_get_type(db, "gshell", "bn") == CFG_TYPE_NULL);
-    CHECK(cfg_get_type(db, "gshell", "te") == CFG_TYPE_TEXT);
-    CHECK(cfg_get_type(db, "gshell", "odd") == OS32_ERR_NOSYS);
-    CHECK(cfg_get_type(db, "gshell", "nosuch") == OS32_ERR_NOTFOUND);
+    CHECK(cfg_get_info(db, "gshell", "tn") == (CFG_TYPE_TEXT | CFG_INFO_NULL));
+    CHECK(cfg_get_info(db, "gshell", "in") == (CFG_TYPE_INT | CFG_INFO_NULL));
+    CHECK(cfg_get_info(db, "gshell", "bn") == (CFG_TYPE_BLOB | CFG_INFO_NULL));
+    CHECK(cfg_get_info(db, "gshell", "te") == CFG_TYPE_TEXT);
+    CHECK(cfg_get_info(db, "gshell", "odd") == OS32_ERR_NOSYS);
+    CHECK(cfg_get_info(db, "gshell", "nosuch") == OS32_ERR_NOTFOUND);
     CHECK(cfg_close(db) == 0);
 
     /* get は既定値を出す (空 text や 0 にしない) */
@@ -1484,8 +1490,10 @@ static void c_nullval(void)
     f = fixture_find("/n.json", 0);
     CHECK(f != NULL);
     f->data[f->size] = '\0';
-    CHECK(strstr((char *)f->data, "\"key\":\"tn\",\"type\":3,\"v\":null"));
-    CHECK(strstr((char *)f->data, "\"key\":\"in\",\"type\":3,\"v\":null"));
+    /* 宣言型は保ったまま値だけ null (往復 2 の 4) */
+    CHECK(strstr((char *)f->data, "\"key\":\"tn\",\"type\":1,\"v\":null"));
+    CHECK(strstr((char *)f->data, "\"key\":\"in\",\"type\":0,\"v\":null"));
+    CHECK(strstr((char *)f->data, "\"key\":\"bn\",\"type\":2,\"v\":null"));
     CHECK(strstr((char *)f->data, "\"key\":\"te\",\"type\":1,\"v\":\"\""));
 }
 
@@ -1593,7 +1601,7 @@ static void c_bind_fail(void)
     CHECK(cfg_status(db) == CFG_ERROR);       /* 未設定と取り違えない */
     CHECK(cfg_last_sqlite(db) != 0);
     /* 一度 ERROR になった接続は以後も「無い」ではなく障害を返す */
-    CHECK(cfg_get_type(db, "gshell", "a") == OS32_ERR_IO);
+    CHECK(cfg_get_info(db, "gshell", "a") == OS32_ERR_IO);
     CHECK(cfg_get_int(db, "gshell", "a", 42) == 42);
     inj_bind_fail = 0;
     CHECK(cfg_close(db) == 0);
@@ -1633,7 +1641,7 @@ static void c_get_many(void)
     /* 列挙は NOSPC でも、単一 key の照会は実値を返す */
     CHECK(cfg_open(&db, 0) == 0);
     CHECK(cfg_enum(db, "user", "a", en_cb, NULL) == OS32_ERR_NOSPC);
-    CHECK(cfg_get_type(db, "user", "a") == CFG_TYPE_INT);
+    CHECK(cfg_get_info(db, "user", "a") == CFG_TYPE_INT);
     CHECK(cfg_get_int(db, "user", "a", 99) == 77);
     CHECK(cfg_close(db) == 0);
 
@@ -1655,7 +1663,7 @@ static int en_cb_get(const char *key, int type, void *ctx)
     (void)key; (void)type; (void)ctx;
     reenter_get_rc_text = cfg_get_text(reenter_db, "gshell", "t", buf, 64);
     reenter_get_rc_blob = cfg_get_blob(reenter_db, "gshell", "t", bb, 64);
-    reenter_get_rc_type = cfg_get_type(reenter_db, "gshell", "t");
+    reenter_get_rc_type = cfg_get_info(reenter_db, "gshell", "t");
     return 0;
 }
 
@@ -1785,6 +1793,304 @@ static void c_tsv_many(void)
 }
 
 /* ========================================================================= */
+/*  実装レビュー 往復 2 の blocker (s2_tdd.md §C2)                           */
+/* ========================================================================= */
+
+/* scope / key / tval を **bind で** 入れる (埋込み NUL や不正 UTF-8 の行は
+ * SQL リテラルでは作れない。SQLITE_OMIT_CAST なので CAST も使えない)。 */
+static void insert_text_row(const char *scope, int slen, const char *key,
+                            int klen, const char *tval, int tlen)
+{
+    int h = kapi_db_open_existing(CFG_DB_PATH, 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_prepare_only(h,
+          "INSERT INTO settings VALUES(?,?,1,NULL,?,NULL)") == 0);
+    CHECK(kapi_db_bind_text(h, 1, scope, slen) == 0);
+    CHECK(kapi_db_bind_text(h, 2, key, klen) == 0);
+    CHECK(kapi_db_bind_text(h, 3, tval, tlen) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_DONE);
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+static void exec_on_db(const char *sql)
+{
+    int h = kapi_db_open_existing(CFG_DB_PATH, 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_exec(h, sql) == 0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* 1. 整数取得**だけ**が落ちたときに 0 を成功として出さない */
+static void c_r2_int_fail(void)
+{
+    CfgDb *db;
+    int v = 0;
+
+    make_good_db();
+    CHECK(ran("set", "gshell", "n", "int", "5") == 0);
+
+    /* 型照会 (1 回目の SQL_GET) は通し、値取得 (2 回目) だけを落とす */
+    CHECK(cfg_open(&db, 0) == 0);
+    inj_prep_fail = "ival";
+    inj_prep_skip = 1;
+    CHECK(cfg_get_info(db, "gshell", "n") == CFG_TYPE_INT);
+    CHECK(cfg_read_int(db, "gshell", "n", &v) == OS32_ERR_IO);
+    CHECK(cfg_status(db) == CFG_ERROR);
+    inj_prep_fail = NULL;
+    CHECK(cfg_close(db) == 0);
+
+    /* list は 0 を出さずに失敗する */
+    inj_prep_fail = "ival";
+    inj_prep_skip = 1;
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("list failed"));
+    CHECK(!cap_has("int\t0"));
+    inj_prep_fail = NULL;
+
+    /* export も同じ。偽の 0 を書いたファイルを残さない */
+    inj_prep_fail = "ival";
+    inj_prep_skip = 1;             /* 型照会 (info) は通し、値取得で落とす */
+    CHECK(ran("export", "/i.json", NULL, NULL, NULL) == 1);
+    CHECK(fixture_find("/i.json", 0) == NULL);
+    inj_prep_fail = NULL;
+
+    /* get も 0 を表示しない */
+    inj_prep_fail = "ival";
+    inj_prep_skip = 1;
+    CHECK(ran("get", "gshell", "n", "9", NULL) == 1);
+    CHECK(cap_has("get failed"));
+    CHECK(!cap_has("\n0\n"));
+    inj_prep_fail = NULL;
+}
+
+/* 2. 接続が ERROR になった後の set 拒否も txn を failed にする */
+static void c_r2_txn_error(void)
+{
+    CfgDb *db;
+
+    make_good_db();
+    CHECK(cfg_open(&db, 1) == 0);
+    CHECK(cfg_begin(db) == 0);
+    CHECK(cfg_set_int(db, "gshell", "a", 1) == 0);       /* A は通る */
+    /* 途中の get が落ちて接続が ERROR になる */
+    inj_prep_fail = "ival";
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);
+    inj_prep_fail = NULL;
+    CHECK(cfg_status(db) == CFG_ERROR);
+    /* 次の set は writable_now の前提で断られるが、txn は failed になる */
+    CHECK(cfg_set_int(db, "gshell", "b", 2) == OS32_ERR_INVAL);
+    CHECK(db->txn == 2);
+    CHECK(cfg_commit(db) == OS32_ERR_IO);
+    CHECK(cfg_close(db) == 0);
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);     /* A も残らない */
+    CHECK(cfg_close(db) == 0);
+
+    /* set を挟まずに commit しても、ERROR 状態なら拒否する */
+    reset_all();
+    make_good_db();
+    CHECK(cfg_open(&db, 1) == 0);
+    CHECK(cfg_begin(db) == 0);
+    CHECK(cfg_set_int(db, "gshell", "a", 1) == 0);
+    inj_prep_fail = "ival";
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);
+    inj_prep_fail = NULL;
+    CHECK(cfg_commit(db) == OS32_ERR_IO);
+    CHECK(cfg_close(db) == 0);
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_get_int(db, "gshell", "a", -1) == -1);
+    CHECK(cfg_close(db) == 0);
+}
+
+/* 3. close の失敗が、保存済みの操作診断を上書きしない */
+static void c_r2_close_diag(void)
+{
+    CfgDb *db;
+    int op_code;
+
+    make_good_db();
+    CHECK(cfg_open(&db, 1) == 0);
+    CHECK(cfg_begin(db) == 0);
+    inj_prep_fail = "INSERT OR REPLACE";
+    CHECK(cfg_set_int(db, "gshell", "a", 1) == OS32_ERR_IO);
+    inj_prep_fail = NULL;
+    op_code = cfg_last_sqlite(db);
+    CHECK(CFG_SQLITE_PRIMARY(op_code) == CFG_SQLITE_ERROR);
+
+    inj_close_fail = SQLITE_IOERR;
+    CHECK(cfg_close(db) == OS32_ERR_IO);
+    CHECK(cfg_last_close_error() != 0);
+    CHECK(cfg_last_sqlite(db) == op_code);     /* 元の原因が残っている */
+    inj_close_fail = 0;
+
+    /* drop_handle (open の途中で捨てる接続) も同じ */
+    reset_all();
+    {
+        static const char *notab[] = { "CREATE TABLE t(x)", NULL };
+        raw_db(CFG_DB_PATH, notab);           /* meta 表が無い = CORRUPT */
+    }
+    inj_close_fail = SQLITE_IOERR;
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_status(db) == CFG_CORRUPT);
+    op_code = cfg_last_sqlite(db);
+    CHECK(CFG_SQLITE_PRIMARY(op_code) == CFG_SQLITE_ERROR);   /* no such table */
+    CHECK(cfg_close(db) == OS32_ERR_IO);
+    CHECK(cfg_last_close_error() != 0);
+    CHECK(cfg_last_sqlite(db) == op_code);     /* 元の原因が残っている */
+}
+
+/* 4. NULL の export が宣言型を保つ */
+static void c_r2_null_type(void)
+{
+    static const char *rows[] = {
+        "CREATE TABLE meta (schema_version INTEGER NOT NULL, created TEXT)",
+        "CREATE TABLE settings (scope TEXT NOT NULL, key TEXT NOT NULL,"
+        " type INTEGER NOT NULL, ival INTEGER, tval TEXT, bval BLOB,"
+        " PRIMARY KEY (scope, key)) WITHOUT ROWID",
+        "INSERT INTO meta VALUES (1, '0')",
+        "INSERT INTO settings VALUES ('gshell','i',0,NULL,NULL,NULL)",
+        "INSERT INTO settings VALUES ('gshell','t',1,NULL,NULL,NULL)",
+        "INSERT INTO settings VALUES ('gshell','b',2,NULL,NULL,NULL)",
+        NULL
+    };
+    FixtureFile *f;
+
+    raw_db(CFG_DB_PATH, rows);
+    CHECK(ran("export", "/t.json", NULL, NULL, NULL) == 0);
+    f = fixture_find("/t.json", 0);
+    CHECK(f != NULL);
+    f->data[f->size] = '\0';
+    CHECK(strstr((char *)f->data, "\"key\":\"b\",\"type\":2,\"v\":null"));
+    CHECK(strstr((char *)f->data, "\"key\":\"i\",\"type\":0,\"v\":null"));
+    CHECK(strstr((char *)f->data, "\"key\":\"t\",\"type\":1,\"v\":null"));
+    CHECK(!strstr((char *)f->data, "\"type\":3"));
+    /* list も宣言型を出す */
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 0);
+    CHECK(cap_has("gshell\ti\tint\t(unset)"));
+    CHECK(cap_has("gshell\tt\ttext\t(unset)"));
+    CHECK(cap_has("gshell\tb\tblob\t(unset)"));
+}
+
+/* 5. 64bit 整数 / 未知 type が SHM で 32bit 化された後に正当値にならない */
+static void c_r2_wide(void)
+{
+    CfgDb *db;
+    int v = 0;
+
+    make_good_db();
+    /* ival = 2^32+1 は SHM で 1 に化ける */
+    exec_on_db("INSERT INTO settings VALUES('gshell','big',0,4294967297,NULL,NULL)");
+    /* type = 2^32 は SHM で 0 (int) に化ける */
+    exec_on_db("INSERT INTO settings VALUES('gshell','t4',4294967296,7,NULL,NULL)");
+    /* 下限・上限の外側 */
+    exec_on_db("INSERT INTO settings VALUES('gshell','lo',0,-2147483649,NULL,NULL)");
+    exec_on_db("INSERT INTO settings VALUES('gshell','hi',0,2147483648,NULL,NULL)");
+    /* 境界そのものは通る */
+    exec_on_db("INSERT INTO settings VALUES('gshell','ok',0,-2147483648,NULL,NULL)");
+    /* 宣言と違う型の値 (tval TEXT の列に blob が入っている) */
+    exec_on_db("INSERT INTO settings VALUES('gshell','mix',1,NULL,x'01',NULL)");
+    /* 宣言型の値だけが NULL なら「未設定」扱い (他の列の残骸は見ない) */
+    exec_on_db("INSERT INTO settings VALUES('gshell','tn',1,NULL,NULL,x'01')");
+
+    CHECK(cfg_open(&db, 0) == 0);
+    CHECK(cfg_get_info(db, "gshell", "big") == OS32_ERR_NOSYS);
+    CHECK(cfg_read_int(db, "gshell", "big", &v) == OS32_ERR_NOSYS);
+    CHECK(cfg_get_int(db, "gshell", "big", 99) == 99);     /* 1 を返さない */
+    CHECK(cfg_get_info(db, "gshell", "t4") == OS32_ERR_NOSYS);
+    CHECK(cfg_get_int(db, "gshell", "t4", 99) == 99);
+    CHECK(cfg_get_info(db, "gshell", "lo") == OS32_ERR_NOSYS);
+    CHECK(cfg_get_info(db, "gshell", "hi") == OS32_ERR_NOSYS);
+    CHECK(cfg_get_info(db, "gshell", "ok") == CFG_TYPE_INT);
+    CHECK(cfg_get_int(db, "gshell", "ok", 99) == -2147483647 - 1);
+    CHECK(cfg_get_info(db, "gshell", "mix") == OS32_ERR_NOSYS);
+    CHECK(cfg_get_info(db, "gshell", "tn") == (CFG_TYPE_TEXT | CFG_INFO_NULL));
+    /* 契約外の行を読んでも接続は壊れない (他の key は読める) */
+    CHECK(cfg_status(db) == CFG_OK);
+    CHECK(cfg_close(db) == 0);
+
+    /* list / export は黙って飛ばさず失敗する */
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("list failed"));
+    CHECK(ran("export", "/w.json", NULL, NULL, NULL) == 1);
+    CHECK(fixture_find("/w.json", 0) == NULL);
+}
+
+/* 6. 保存済みの text / blob の境界と、埋込み NUL の key */
+static void c_r2_badval(void)
+{
+    CfgDb *db;
+    char buf[512];
+    unsigned char bb[CFG_BLOB_MAX + 8];
+    int n;
+
+    make_good_db();
+    /* 256B の text (hex(zeroblob(128)) = '0' が 256 文字) */
+    exec_on_db("INSERT INTO settings VALUES('gshell','t256',1,NULL,"
+               "hex(zeroblob(128)),NULL)");
+    /* 4097B の blob */
+    exec_on_db("INSERT INTO settings VALUES('gshell','b4097',2,NULL,NULL,"
+               "zeroblob(4097))");
+    /* 不正 UTF-8 と埋込み NUL の text (bind で作る) */
+    insert_text_row("gshell", 6, "bad", 3, "\xff", 1);
+    insert_text_row("gshell", 6, "nul", 3, "a\0b", 3);
+    /* 境界ちょうどは通る */
+    exec_on_db("INSERT INTO settings VALUES('gshell','t255',1,NULL,"
+               "substr(hex(zeroblob(128)),1,255),NULL)");
+    exec_on_db("INSERT INTO settings VALUES('gshell','b4096',2,NULL,NULL,"
+               "zeroblob(4096))");
+
+    CHECK(cfg_open(&db, 0) == 0);
+    memset(buf, 'Z', sizeof(buf));
+    CHECK(cfg_get_text(db, "gshell", "t256", buf, 512) == OS32_ERR_NOSYS);
+    CHECK(buf[0] == 'Z');                       /* out を触らない */
+    CHECK(cfg_get_text(db, "gshell", "bad", buf, 512) == OS32_ERR_NOSYS);
+    CHECK(buf[0] == 'Z');
+    CHECK(cfg_get_text(db, "gshell", "nul", buf, 512) == OS32_ERR_NOSYS);
+    CHECK(buf[0] == 'Z');
+    memset(bb, 'Z', sizeof(bb));
+    CHECK(cfg_get_blob(db, "gshell", "b4097", bb, (int)sizeof(bb)) == OS32_ERR_NOSYS);
+    CHECK(bb[0] == 'Z');
+    /* 境界ちょうどは読める */
+    n = cfg_get_text(db, "gshell", "t255", buf, 512);
+    CHECK(n == CFG_TEXT_MAX);
+    CHECK(cfg_get_blob(db, "gshell", "b4096", bb, (int)sizeof(bb)) == CFG_BLOB_MAX);
+    CHECK(cfg_status(db) == CFG_OK);
+    CHECK(cfg_close(db) == 0);
+
+    /* 埋込み NUL の key は列挙で別名に化かさず、障害にする */
+    reset_all();
+    make_good_db();
+    insert_text_row("gshell", 6, "a", 1, "x", 1);
+    insert_text_row("gshell", 6, "a\0b", 3, "y", 1);
+    CHECK(cfg_open(&db, 0) == 0);
+    en_n = 0;
+    CHECK(cfg_enum(db, "gshell", NULL, en_cb, NULL) == OS32_ERR_IO);
+    CHECK(cfg_close(db) == 0);
+    /* list は 1 行黙って落とすのではなく失敗する */
+    CHECK(ran("list", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("list failed"));
+}
+
+/* 7. export 先の同一性検査が stat 障害を「別ファイル」にしない */
+static void c_r2_alias(void)
+{
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(cfg_init(NULL) == 0);
+
+    /* 出力先の stat だけが IOERR。open は成功する状況 */
+    stat_fail_exact = "/etc/alias.db";
+    CHECK(ran("export", "/etc/alias.db", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("refusing to write"));
+    CHECK(fixture_find("/etc/alias.db", 0) == NULL);   /* 開いてもいない */
+    stat_fail_exact = NULL;
+
+    /* 障害が無ければ普通に書ける */
+    CHECK(ran("export", "/etc/alias.db", NULL, NULL, NULL) == 0);
+    CHECK(fixture_find("/etc/alias.db", 0) != NULL);
+}
+
+/* ========================================================================= */
 
 int main(int argc, char **argv)
 {
@@ -1824,6 +2130,13 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "long_scope")) c_long_scope();
     else if (!strcmp(argv[1], "intmin")) c_intmin();
     else if (!strcmp(argv[1], "tsv_many")) c_tsv_many();
+    else if (!strcmp(argv[1], "r2_int_fail")) c_r2_int_fail();
+    else if (!strcmp(argv[1], "r2_txn_error")) c_r2_txn_error();
+    else if (!strcmp(argv[1], "r2_close_diag")) c_r2_close_diag();
+    else if (!strcmp(argv[1], "r2_null_type")) c_r2_null_type();
+    else if (!strcmp(argv[1], "r2_wide")) c_r2_wide();
+    else if (!strcmp(argv[1], "r2_badval")) c_r2_badval();
+    else if (!strcmp(argv[1], "r2_alias")) c_r2_alias();
     else CHECK(0);
 
     canary_check(argv[1]);

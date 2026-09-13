@@ -21,10 +21,18 @@ static char e_keys[CFG_ENUM_MAX][CFG_KEY_MAX + 1];
 static int  e_types[CFG_ENUM_MAX];
 static char e_scopes[CFG_SCOPES_MAX][CFG_SCOPE_MAX + 1];
 
+/* 列挙名を private 配列へ写す。**別名に化かさない** のが要点 (往復 2 の 6):
+ * 埋込み NUL があると C 文字列にした時点で `a` と `a\0b` が同じになり、
+ * list / export の再開位置の判定で片方が黙って落ちる。長さ超過・不正 UTF-8 も
+ * 同じく「行を落とす」のではなく障害として返す。 */
 static int copy_name(char *dst, int cap, const char *src, int len)
 {
     int i;
     if (!src || len < 0 || len >= cap) return -1;
+    for (i = 0; i < len; i++) {
+        if (src[i] == 0) return -1;               /* 埋込み NUL */
+    }
+    if (cfg_i_utf8_check(src, len) != 0) return -1;
     for (i = 0; i < len; i++) dst[i] = src[i];
     dst[len] = '\0';
     return 0;

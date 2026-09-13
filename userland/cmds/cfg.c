@@ -569,13 +569,20 @@ static int norm_path(const char *in, char *out, int cap)
 }
 
 /* 既に在るファイル同士の同一性 (ハードリンクや別名でも同じ inode を指す)。 */
+/* 1 = 同じ / 0 = 違う / -1 = 判定不能。stat の I/O 障害を「別ファイル」に
+ * 丸めると、DB を指す別名を O_TRUNC で潰せる (往復 2 の 7)。 */
 static int same_file(const char *a, const char *b)
 {
     OS32_Stat sa, sb;
-    if (api->sys_stat(a, &sa) != 0) return 0;
-    if (api->sys_stat(b, &sb) != 0) return 0;
+    int ra = api->sys_stat(a, &sa);
+    int rb;
+    if (ra == OS32_ERR_NOTFOUND) return 0;       /* まだ無い = 別物 */
+    if (ra != 0) return -1;
+    rb = api->sys_stat(b, &sb);
+    if (rb == OS32_ERR_NOTFOUND) return 0;
+    if (rb != 0) return -1;
     if (sa.st_ino == 0 && sb.st_ino == 0) return 0;   /* inode を持たない FS */
-    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+    return (sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino) ? 1 : 0;
 }
 
 /* 0 = 書いてよい / -1 = 設定 DB 側のファイル */
@@ -585,7 +592,7 @@ static int output_allowed(const char *path, char *norm, int cap)
     if (norm_path(path, norm, cap) != 0) return -1;
     for (i = 0; PROTECTED_PATHS[i]; i++) {
         if (s_eq(norm, PROTECTED_PATHS[i])) return -1;
-        if (same_file(norm, PROTECTED_PATHS[i])) return -1;
+        if (same_file(norm, PROTECTED_PATHS[i]) != 0) return -1;  /* 不明も拒否 */
     }
     return 0;
 }
@@ -662,27 +669,36 @@ static char v_hex[CFG_BLOB_MAX * 2 + 1];
 static int do_get(const CfgArgs *a)
 {
     CfgDb *db;
-    int st, rc = 0, have = 0, bad = 0, iv = 0, blen = 0, tlen = 0, kind = -1;
+    int st, rc = 0, have = 0, bad = 0, iv = 0, blen = 0, tlen = 0;
+    int kind = -1, info;
 
     if (cfg_open(&db, 0) != 0) { out_str("cfg: cannot open\n"); return 1; }
     st = cfg_status(db);
     if (st == CFG_OK || st == CFG_VERSION) {
         /* 完全一致の 1 行照会で型を引く。前方一致の列挙だと同じ scope に
          * 257 件あるだけで NOSPC になり、実値があるのに既定値を出す (⑪)。 */
-        kind = cfg_get_type(db, a->scope, a->key);
-        if (kind == CFG_TYPE_INT) {
-            iv = cfg_get_int(db, a->scope, a->key, 0);
-            have = 1;
-        } else if (kind == CFG_TYPE_TEXT) {
-            tlen = cfg_get_text(db, a->scope, a->key, v_text, (int)sizeof(v_text));
-            if (tlen >= 0) have = 1; else bad = 1;
-        } else if (kind == CFG_TYPE_BLOB) {
-            blen = cfg_get_blob(db, a->scope, a->key, v_blob, (int)sizeof(v_blob));
-            if (blen >= 0) have = 1; else bad = 1;
-        } else if (kind == CFG_TYPE_NULL || kind == OS32_ERR_NOTFOUND) {
-            /* 未設定 (値の列が NULL の行も「無い」扱い、⑥) */
+        info = cfg_get_info(db, a->scope, a->key);
+        if (info == OS32_ERR_NOTFOUND) {
+            /* 未設定 */
+        } else if (info < 0) {
+            bad = 1;                       /* 障害 / 契約外の保存値 */
+        } else if (CFG_INFO_IS_NULL(info)) {
+            /* 行はあるが値が NULL — 未設定扱い (⑥) */
         } else {
-            bad = 1;                       /* 障害 / 認識できない type 列 */
+            kind = CFG_INFO_TYPE(info);
+            if (kind == CFG_TYPE_INT) {
+                /* 値の取得だけが落ちることもある。0 を成功にしない (往復 2 の 1)。*/
+                if (cfg_read_int(db, a->scope, a->key, &iv) == 0) have = 1;
+                else bad = 1;
+            } else if (kind == CFG_TYPE_TEXT) {
+                tlen = cfg_get_text(db, a->scope, a->key, v_text,
+                                    (int)sizeof(v_text));
+                if (tlen >= 0) have = 1; else bad = 1;
+            } else {
+                blen = cfg_get_blob(db, a->scope, a->key, v_blob,
+                                    (int)sizeof(v_blob));
+                if (blen >= 0) have = 1; else bad = 1;
+            }
         }
     }
     if (bad || cfg_status(db) == CFG_ERROR) rc = 1;
@@ -775,26 +791,28 @@ static int do_set(const CfgArgs *a, int del)
 static int emit_row(CfgDb *db, const char *scope, const char *key, int *kind_io)
 {
     char row[CFG_ROW_MAX];
-    int o = 0, n, i, kind;
+    int o = 0, n, i, kind, iv, info;
 
-    kind = cfg_get_type(db, scope, key);
-    *kind_io = kind;
-    if (kind < 0) return -1;                 /* 障害 / 認識できない type */
+    info = cfg_get_info(db, scope, key);
+    *kind_io = info;
+    if (info < 0) return -1;                 /* 障害 / 契約外の保存値 */
+    kind = CFG_INFO_TYPE(info);
 
     for (i = 0; scope[i] && o < CFG_ROW_MAX - 8; i++) row[o++] = scope[i];
     row[o++] = '\t';
     for (i = 0; key[i] && o < CFG_ROW_MAX - 8; i++) row[o++] = key[i];
     row[o++] = '\t';
-    if (kind == CFG_TYPE_NULL) {
-        for (i = 0; "null\t(unset)"[i] && o < CFG_ROW_MAX - 2; i++)
-            row[o++] = "null\t(unset)"[i];
+    for (i = 0; type_name(kind)[i] && o < CFG_ROW_MAX - 8; i++)
+        row[o++] = type_name(kind)[i];
+    row[o++] = '\t';
+    if (CFG_INFO_IS_NULL(info)) {
+        for (i = 0; "(unset)"[i] && o < CFG_ROW_MAX - 2; i++)
+            row[o++] = "(unset)"[i];
     } else {
-        for (i = 0; type_name(kind)[i] && o < CFG_ROW_MAX - 8; i++)
-            row[o++] = type_name(kind)[i];
-        row[o++] = '\t';
         if (kind == CFG_TYPE_INT) {
-            /* 値の NULL は上で CFG_TYPE_NULL になっているので def は届かない。*/
-            n = fmt_int(row + o, CFG_ROW_MAX - o - 2, cfg_get_int(db, scope, key, 0));
+            /* 値の取得だけが落ちることもある (往復 2 の 1)。0 で埋めない。 */
+            if (cfg_read_int(db, scope, key, &iv) != 0) return -1;
+            n = fmt_int(row + o, CFG_ROW_MAX - o - 2, iv);
             if (n < 0) return -1;
             o += n;
         } else if (kind == CFG_TYPE_TEXT) {
@@ -946,10 +964,13 @@ static int x_lit(int *o, const char *s)
  * 戻り: 長さ / -1 = 値の取得か整形に失敗 (⑤⑥: 0 や空値で埋めない)。 */
 static int export_row(CfgDb *db, const char *scope, const char *key)
 {
-    int o = 0, n, m, kind;
+    int o = 0, n, m, kind, iv, info;
 
-    kind = cfg_get_type(db, scope, key);
-    if (kind < 0) return -1;
+    info = cfg_get_info(db, scope, key);
+    if (info < 0) return -1;
+    /* 型は **宣言型 (0/1/2) のまま**。NULL は値の側で表す (往復 2 の 4) —
+     * バックアップから元の型を復元できなくなるため。 */
+    kind = CFG_INFO_TYPE(info);
 
     if (x_lit(&o, "{\"scope\":\"") != 0) return -1;
     n = fmt_json_str(x_line + o, CFG_LINE_MAX - o, scope, s_len(scope));
@@ -964,11 +985,12 @@ static int export_row(CfgDb *db, const char *scope, const char *key)
     if (n < 0) return -1;
     o += n;
     if (x_lit(&o, ",\"v\":") != 0) return -1;
-    if (kind == CFG_TYPE_NULL) {
+    if (CFG_INFO_IS_NULL(info)) {
         /* 行はあるが値の列が NULL。空値と取り違えられない形で書く (⑥)。 */
         if (x_lit(&o, "null") != 0) return -1;
     } else if (kind == CFG_TYPE_INT) {
-        n = fmt_int(x_line + o, CFG_LINE_MAX - o, cfg_get_int(db, scope, key, 0));
+        if (cfg_read_int(db, scope, key, &iv) != 0) return -1;
+        n = fmt_int(x_line + o, CFG_LINE_MAX - o, iv);
         if (n < 0) return -1;
         o += n;
     } else if (kind == CFG_TYPE_TEXT) {

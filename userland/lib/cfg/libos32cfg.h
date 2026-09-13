@@ -40,9 +40,12 @@
 #define CFG_TYPE_INT   0
 #define CFG_TYPE_TEXT  1
 #define CFG_TYPE_BLOB  2
-/* DB に格納される型ではなく `cfg_get_type` の戻りだけに現れる印。
- * 行はあるが値の列が NULL = 「未設定」と「空値」を呼び手が区別するため。 */
-#define CFG_TYPE_NULL  3
+/* `cfg_get_info` の戻りに立つ印。**DB に格納される型ではない**。
+ * 行はあるが値の列が NULL = 「未設定」と「空値」を呼び手が区別するため、
+ * 宣言型 (0/1/2) は保ったままこのビットだけを足す。 */
+#define CFG_INFO_NULL  0x10
+#define CFG_INFO_TYPE(x)  ((x) & 0x0F)
+#define CFG_INFO_IS_NULL(x) (((x) & CFG_INFO_NULL) != 0)
 
 /* ---- 場所と版 ([C4] 定数はここが管理元) -------------------------------- */
 #define CFG_DB_PATH             "/etc/settings.db"
@@ -90,13 +93,18 @@ int   cfg_last_sqlite(const CfgDb *db);
 
 /* ---- 読み -------------------------------------------------------------- */
 /* 1 行の完全一致照会で「その key に何が入っているか」を返す。
- * 戻り: CFG_TYPE_INT / TEXT / BLOB = 値がある (その型で get できる)
- *       CFG_TYPE_NULL              = 行はあるが値の列が NULL (未設定扱い)
- *       OS32_ERR_NOTFOUND          = 行が無い
- *       OS32_ERR_NOSYS             = 行はあるが type 列が 0/1/2 でない
- *       他の負 (IO / INVAL)        = 障害。cfg_status も CFG_ERROR になる
+ * 戻り (0 以上): 下位 4bit が **宣言型** (CFG_TYPE_INT / TEXT / BLOB)。
+ *                値の列が NULL なら CFG_INFO_NULL が立つ (宣言型は保つ)。
+ * 負: OS32_ERR_NOTFOUND = 行が無い
+ *     OS32_ERR_NOSYS    = 行はあるが契約外 (type 列が 0/1/2 でない、
+ *                         int が int32 の範囲外、値の型が宣言と違う)
+ *     OS32_ERR_IO       = 障害 (cfg_status も CFG_ERROR)
+ *     OS32_ERR_INVAL    = 引数不正 / 列挙 callback からの再入
  * 値の有無と障害を区別したい呼び手 (cfg コマンドの get / list / export) 用。*/
-int   cfg_get_type(CfgDb *db, const char *scope, const char *key);
+int   cfg_get_info(CfgDb *db, const char *scope, const char *key);
+/* 成否を返す int 取得。0 = 取れた (*out に値) / 負 = 上と同じ写像。
+ * 「取れなかった」と「0 が入っていた」を区別する必要がある呼び手はこちら。 */
+int   cfg_read_int(CfgDb *db, const char *scope, const char *key, int *out);
 int   cfg_get_int (CfgDb *db, const char *scope, const char *key, int def);
 /* 戻り: 長さ (NUL 除く) / 負: OS32_ERR_NOTFOUND (無い) /
  *       OS32_ERR_NOSPC (cap 不足: out は書かない) / OS32_ERR_INVAL */

@@ -349,7 +349,8 @@ static void drop_handle(CfgDb *db)
     if (b->db_close(db->handle) != 0) {
         code = b->db_error_code(db->handle);
         if (!db->orphan_close) db->orphan_close = code ? code : -1;
-        db->last_sqlite = code ? code : db->last_sqlite;
+        /* close の診断で **元の操作診断を上書きしない** (往復 2 の 3)。 */
+        if (!db->last_sqlite) db->last_sqlite = code;
     }
     db->handle = -1;
 }
@@ -454,7 +455,9 @@ int cfg_close(CfgDb *db)
         if (b->db_close(db->handle) != 0) {
             code = b->db_error_code(db->handle);
             if (!first) first = code ? code : -1;
-            db->last_sqlite = code ? code : db->last_sqlite;
+            if (!db->cleanup_sqlite) db->cleanup_sqlite = code ? code : -1;
+            /* close の診断は close 欄へ。操作の原因は残す (往復 2 の 3)。 */
+            if (!db->last_sqlite) db->last_sqlite = code;
         }
         db->handle = -1;
     }
@@ -468,8 +471,18 @@ int cfg_close(CfgDb *db)
 /*  読み                                                                     */
 /* ======================================================================== */
 
+/* 保存済みの値の検査は **SQL 側でも** 行う。SHM は整数を 32bit に落とすので、
+ * `ival=4294967297` や `type=4294967296` は C まで来た時点で正当値に化ける
+ * (往復 2 の 5)。縮小の前に SQLite に判定させ、その結果を受け取る。
+ *   col0 = 正規化した宣言型 (0/1/2) か -1 (契約外)
+ *   col1 = ival の状態 (0 = NULL / 1 = int32 の範囲内 / -1 = 契約外)
+ *   col2..4 = 生の ival / tval / bval */
 static const char SQL_GET[] =
-    "SELECT type, ival, tval, bval FROM settings WHERE scope=? AND key=?";
+    "SELECT CASE WHEN typeof(type)='integer' AND type>=0 AND type<=2"
+    " THEN type ELSE -1 END,"
+    "CASE WHEN ival IS NULL THEN 0 WHEN typeof(ival)='integer'"
+    " AND ival>=-2147483648 AND ival<=2147483647 THEN 1 ELSE -1 END,"
+    "ival,tval,bval FROM settings WHERE scope=? AND key=?";
 
 /* 使える接続か (get 用): 状態 OK か VERSION なら読める。
  * **再入 (enum の callback の中) は「読めない」とは別物** なので分けて見る
@@ -494,7 +507,7 @@ static int names_ok(const char *scope, const char *key)
 }
 
 /* 1 行を取りに行く。DB_STATUS_ROW なら列が SHM に載っている。
- * 呼び手は読み終えたら cfg_get_finish() を必ず呼ぶ。 */
+ * 呼び手は読み終えたら get_finish() を必ず呼ぶ。 */
 static int get_row(CfgDb *db, const char *scope, const char *key)
 {
     const CfgBackend *b = cfg_backend();
@@ -528,21 +541,9 @@ static void get_finish(CfgDb *db)
     cfg_backend()->db_finalize(db->handle);
 }
 
-/* 値の列 (ival / tval / bval) が SHM で NULL でないか。 */
-static int value_present(int declared)
+/* 共通の入口検査。0 = 進んでよい / 負 = そのまま返す値。 */
+static int read_ready(CfgDb *db, const char *scope, const char *key)
 {
-    switch (declared) {
-    case CFG_TYPE_INT:  return cfg_i_col_type(1) == DB_TYPE_INT;
-    case CFG_TYPE_TEXT: return cfg_i_col_type(2) == DB_TYPE_TEXT;
-    case CFG_TYPE_BLOB: return cfg_i_col_type(3) == DB_TYPE_BLOB;
-    default:            return 0;
-    }
-}
-
-int cfg_get_type(CfgDb *db, const char *scope, const char *key)
-{
-    int declared, rc;
-
     if (reentered(db)) return OS32_ERR_INVAL;
     if (!names_ok(scope, key)) return OS32_ERR_INVAL;
     if (!db || !db->in_use) return OS32_ERR_INVAL;
@@ -550,70 +551,90 @@ int cfg_get_type(CfgDb *db, const char *scope, const char *key)
         /* 障害で読めないのと「無い」を混ぜない (⑤)。 */
         return db->status == CFG_ERROR ? OS32_ERR_IO : OS32_ERR_NOTFOUND;
     }
+    return 0;
+}
+
+/* 行を読み込み、宣言型と「値が NULL か」を返す。0 を返したときだけ行は
+ * **読み込まれたまま** (呼び手が get_finish を呼ぶ)。負のときは始末済み。 */
+static int load_row(CfgDb *db, const char *scope, const char *key,
+                    int *type_out, int *null_out)
+{
+    int rc, t, state, ct;
+
+    rc = read_ready(db, scope, key);
+    if (rc != 0) return rc;
     rc = get_row(db, scope, key);
-    if (rc < 0) return OS32_ERR_IO;                /* 障害 (status は ERROR) */
+    if (rc < 0) return OS32_ERR_IO;
     if (rc == 0) return OS32_ERR_NOTFOUND;
+
     if (cfg_i_col_type(0) != DB_TYPE_INT) { get_finish(db); return OS32_ERR_NOSYS; }
-    declared = (int)cfg_i_col_int(0);
-    if (declared != CFG_TYPE_INT && declared != CFG_TYPE_TEXT &&
-        declared != CFG_TYPE_BLOB) {
+    t = (int)cfg_i_col_int(0);
+    if (t != CFG_TYPE_INT && t != CFG_TYPE_TEXT && t != CFG_TYPE_BLOB) {
         get_finish(db);
-        return OS32_ERR_NOSYS;                     /* 認識できない type 列 */
+        return OS32_ERR_NOSYS;          /* 契約外 / 未知の type 列 */
     }
-    if (!value_present(declared)) { get_finish(db); return CFG_TYPE_NULL; }
+    if (t == CFG_TYPE_INT) {
+        if (cfg_i_col_type(1) != DB_TYPE_INT) { get_finish(db); return OS32_ERR_NOSYS; }
+        state = (int)cfg_i_col_int(1);
+        if (state == 0) *null_out = 1;
+        else if (state == 1) *null_out = 0;
+        else { get_finish(db); return OS32_ERR_NOSYS; }   /* int32 の範囲外 */
+    } else {
+        ct = cfg_i_col_type(t == CFG_TYPE_TEXT ? 3 : 4);
+        if (ct == DB_TYPE_NULL) *null_out = 1;
+        else if (ct == (t == CFG_TYPE_TEXT ? DB_TYPE_TEXT : DB_TYPE_BLOB)) *null_out = 0;
+        else { get_finish(db); return OS32_ERR_NOSYS; }   /* 宣言と違う型 */
+    }
+    *type_out = t;
+    return 0;
+}
+
+int cfg_get_info(CfgDb *db, const char *scope, const char *key)
+{
+    int t = 0, isnull = 0, rc = load_row(db, scope, key, &t, &isnull);
+    if (rc != 0) return rc;
     get_finish(db);
-    return declared;
+    return t | (isnull ? CFG_INFO_NULL : 0);
+}
+
+int cfg_read_int(CfgDb *db, const char *scope, const char *key, int *out)
+{
+    int t = 0, isnull = 0, rc;
+    if (!out) return OS32_ERR_INVAL;
+    rc = load_row(db, scope, key, &t, &isnull);
+    if (rc != 0) return rc;
+    if (t != CFG_TYPE_INT || isnull) { get_finish(db); return OS32_ERR_NOTFOUND; }
+    *out = (int)cfg_i_col_int(2);
+    get_finish(db);
+    return 0;
 }
 
 int cfg_get_int(CfgDb *db, const char *scope, const char *key, int def)
 {
     int v;
-    if (!names_ok(scope, key)) return def;
-    if (!readable(db)) return def;
-    if (get_row(db, scope, key) != 1) return def;
-    if (cfg_i_col_type(0) != DB_TYPE_INT ||
-        (int)cfg_i_col_int(0) != CFG_TYPE_INT ||
-        cfg_i_col_type(1) != DB_TYPE_INT) {
-        get_finish(db);
-        return def;
-    }
-    v = (int)cfg_i_col_int(1);
-    get_finish(db);
-    return v;
+    return cfg_read_int(db, scope, key, &v) == 0 ? v : def;
 }
 
-/* text (col 2) / blob (col 3) の共通取り出し。 */
+/* text (col 3) / blob (col 4) の共通取り出し。
+ * 保存済みの値にも契約の上限・UTF-8・埋込み NUL を当て、**out を 1 バイトも
+ * 書く前に**断る (往復 2 の 6)。書き手側の検査では既存 DB / VERSION /
+ * 手で壊された行は覆えない。 */
 static int get_value(CfgDb *db, const char *scope, const char *key,
-                     int want_type, int col, int shm_type,
-                     void *out, int cap, int add_nul)
+                     int want_type, int col, void *out, int cap, int is_text)
 {
     const unsigned char *src;
     unsigned char *dst = (unsigned char *)out;
-    int len, i, rc;
+    int len, i, t = 0, isnull = 0, rc;
 
-    /* 再入は「未設定」ではなく引数不正 (⑫)。 */
-    if (reentered(db)) return OS32_ERR_INVAL;
-    if (!names_ok(scope, key) || !out || cap < 0) return OS32_ERR_INVAL;
-    if (!readable(db))
-        return (db && db->status == CFG_ERROR) ? OS32_ERR_IO : OS32_ERR_NOTFOUND;
-    rc = get_row(db, scope, key);
-    if (rc < 0) return OS32_ERR_IO;         /* 障害を未設定と混ぜない (⑤) */
-    if (rc == 0) return OS32_ERR_NOTFOUND;
-    if (cfg_i_col_type(0) != DB_TYPE_INT ||
-        (int)cfg_i_col_int(0) != want_type) {
-        get_finish(db);
-        return OS32_ERR_NOTFOUND;
-    }
-    /* NULL と空値を区別する (S0_FOUNDATION §2-5)。NULL は未設定扱い。 */
-    if (cfg_i_col_type(col) != shm_type) {
-        get_finish(db);
-        return OS32_ERR_NOTFOUND;
-    }
+    if (!out || cap < 0) return OS32_ERR_INVAL;
+    rc = load_row(db, scope, key, &t, &isnull);
+    if (rc != 0) return rc;
+    if (t != want_type || isnull) { get_finish(db); return OS32_ERR_NOTFOUND; }
+
     len = cfg_i_col_len(col);
-    if (len < 0) { get_finish(db); return OS32_ERR_NOTFOUND; }
-    if (len > cap - (add_nul ? 1 : 0)) {
+    if (len < 0 || len > (is_text ? CFG_TEXT_MAX : CFG_BLOB_MAX)) {
         get_finish(db);
-        return OS32_ERR_NOSPC;              /* out は 1 バイトも書かない */
+        return OS32_ERR_NOSYS;              /* 契約の上限を超えた保存値 */
     }
     src = (const unsigned char *)cfg_i_col_ptr(col);
     if (!src && len > 0) {
@@ -622,8 +643,21 @@ static int get_value(CfgDb *db, const char *scope, const char *key,
         db->status = CFG_ERROR;
         return OS32_ERR_IO;
     }
+    if (is_text) {
+        for (i = 0; i < len; i++) {
+            if (src[i] == 0) { get_finish(db); return OS32_ERR_NOSYS; }
+        }
+        if (cfg_i_utf8_check(src, len) != 0) {
+            get_finish(db);
+            return OS32_ERR_NOSYS;          /* 不正 UTF-8 の保存値 */
+        }
+    }
+    if (len > cap - (is_text ? 1 : 0)) {
+        get_finish(db);
+        return OS32_ERR_NOSPC;              /* out は 1 バイトも書かない */
+    }
     for (i = 0; i < len; i++) dst[i] = src[i];   /* SHM から即コピー */
-    if (add_nul) dst[len] = 0;
+    if (is_text) dst[len] = 0;
     get_finish(db);
     return len;
 }
@@ -631,15 +665,13 @@ static int get_value(CfgDb *db, const char *scope, const char *key,
 int cfg_get_text(CfgDb *db, const char *scope, const char *key,
                  char *out, int cap)
 {
-    return get_value(db, scope, key, CFG_TYPE_TEXT, 2, DB_TYPE_TEXT,
-                     out, cap, 1);
+    return get_value(db, scope, key, CFG_TYPE_TEXT, 3, out, cap, 1);
 }
 
 int cfg_get_blob(CfgDb *db, const char *scope, const char *key,
                  void *out, int cap)
 {
-    return get_value(db, scope, key, CFG_TYPE_BLOB, 3, DB_TYPE_BLOB,
-                     out, cap, 0);
+    return get_value(db, scope, key, CFG_TYPE_BLOB, 4, out, cap, 0);
 }
 
 /* ======================================================================== */
@@ -690,7 +722,9 @@ int cfg_commit(CfgDb *db)
     int saved;
     if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
     if (db->txn == 0 || db->handle < 0) return OS32_ERR_INVAL;
-    if (db->txn == 2) {                      /* failed — commit は拒否 */
+    /* failed、または途中で接続が壊れたときは commit を拒否して rollback。 */
+    if (db->txn == 2 || db->status != CFG_OK) {
+        db->txn = 2;
         cleanup_rollback(db, db->last_sqlite);
         return OS32_ERR_IO;
     }
@@ -719,10 +753,15 @@ static int reject_write(CfgDb *db, int rc)
     return rc;
 }
 
-/* set / delete の共通前提。0 = 進んでよい。 */
+/* set / delete の共通前提。0 = 進んでよい。
+ * **前提検査の失敗も** 実行中の txn を failed にする。get の途中で接続が
+ * CFG_ERROR になると `writable_now` が false になり、そこで返した INVAL が
+ * txn を素通しすると「A だけ commit される」(往復 2 の 2)。 */
 static int can_write(CfgDb *db, const char *scope, const char *key)
 {
-    if (!writable_now(db)) return OS32_ERR_INVAL;
+    if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
+    if (db->txn == 2) return OS32_ERR_INVAL;         /* 既に failed */
+    if (!writable_now(db)) return reject_write(db, OS32_ERR_INVAL);
     if (db->txn != 1) return OS32_ERR_INVAL;         /* txn 外は拒否 */
     if (!cfg_i_valid_scope(scope) || !cfg_i_valid_key(key))
         return reject_write(db, OS32_ERR_INVAL);

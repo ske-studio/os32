@@ -117,9 +117,10 @@ CR、コメント中の不正 UTF-8、末尾空欄、最大 blob 行、63B key�
 - 誤りが複数あるときに**どれを報告するか**が違う。Python は CR → UTF-8 → 行の規則の順に
   ファイル全体を見るので、行 2 の規則違反と行 9 の CR があれば CR を報告する。C はストリーム順に
   最初に出会ったものを報告する。**accept / reject の判定は一致**するので、試験はそこだけを固定した。
-- 重複 `(scope, key)` の検出に使える控えは `CFG_ENUM_MAX` (256) 行 / `CFG_TSV_POOL_BYTES`
-  (6144B) まで。超えると `CFG_TSV_E_TOOMANY` で拒否する (Python は上限なし)。
-  設定レジストリは数百件想定なので実害は無いが、上限であることは明示しておく。
+- 重複 `(scope, key)` は reader では見ない。流し込み先の `settings` が
+  `PRIMARY KEY (scope, key)` なので、素の `INSERT` が `SQLITE_CONSTRAINT` で弾く
+  (レビュー往復 1 の ⑯)。行数にも名前の長さにも上限が無く、判定は Python と一致する。
+  **突き合わせの単位は reader 単体ではなく `cfg_init`** (その tsv で DB が作れるか)。
 
 ---
 
@@ -150,13 +151,16 @@ CR、コメント中の不正 UTF-8、末尾空欄、最大 blob 行、63B key�
     `cfg list` は 8KB の溜め場が一杯になったら **DB を閉じて吐き出し、開き直して続きから**
     出す (列挙は `(scope, key)` 順なので最後に出した組より後だけを出せば再開できる)。
     これで「open〜close の間に yield しない」を崩さずに件数の上限も作らない。
-11. **`cfg export` はファイルへ直接書く** (`sys_write`)。con_sink を通らないので yield は要らず、
-    4096B blob の base64 (5464 文字) も溜めずに流せる。標準出力へ出すのは要約 1 行だけ。
+11. **`cfg export` も DB を閉じてから書く**。list と同じ再開の仕組みで、溜め場が
+    一杯になったら DB を閉じて出力ファイルへ流し、開き直して続きを書く
+    (レビュー往復 1 の non-blocker)。標準出力へ出すのは要約 1 行だけ。
+    途中で落ちたら出力ファイルを消す (中途半端なバックアップを残さない)。
 12. **終了コード**: `status` は `CFG_OK` のときだけ 0。`get` は既定値を使ったときも
     「(not set)」のときも 0 (`CFG_ERROR` と close 失敗だけ 1)。`set` / `del` は
     MISSING / CORRUPT / VERSION / ERROR で 1。`export` は MISSING / CORRUPT で 1。
-13. **`cfg get` の型引き**は `cfg_enum(scope, prefix=key)` で 1 回だけ引き、完全一致した行の
-    type を見てから型付きの get を 1 回呼ぶ。型を総当たりしない。
+13. **`cfg get` の型引き**は `cfg_get_info()` の**完全一致 1 行照会**。列挙は使わない
+    (レビュー往復 1 の ⑪: 同じ scope に 257 件あるだけで NOSPC になっていた)。
+    型が分かってから `cfg_read_int` / `cfg_get_text` / `cfg_get_blob` を 1 回呼ぶ。
 
 ---
 
@@ -196,7 +200,7 @@ CR、コメント中の不正 UTF-8、末尾空欄、最大 blob 行、63B key�
 | `cfg_last_init_reason(void)` を**追加**した (票 §1 の一覧に無い) | `cfg` コマンドが `already exists` / `needs recovery: journal present` / `needs recovery: stale .new` / `init failed: close` / `needs recovery: rename left both names` を出し分けるには理由が要る。`OS32_ERR_*` は新規番号を取らない規則 (票 §1-8) なので既存番号に写像すると 5 通りが潰れる。**§1 の既存シグネチャは 1 つも変えていない** (S2-W が依存する `cfg_get_*` を含む) |
 | `libos32cfg` を 5 つの翻訳単位に分けた | 票は「`userland/lib/cfg/`」としか言っていない。`cfg_enum` の 19KB と `cfg_init` の 11KB の bss を、読むだけのアプリ (S2-W / gshell) に背負わせないため |
 | `cfg list` が blob を `blob:<n>` としか出さない | 票 §2 は「blob は hex を出す」を `get` について書いている。`list` で 8192 文字を並べると con_sink を溢れさせるので長さだけにした |
-| tsv の重複検出に 256 行 / 6144B の上限がある | C 側で全行の `(scope,key)` を覚える必要があるため。Python 側に上限は無い |
+| tsv の重複検出を reader ではなく `settings` の PRIMARY KEY に任せた | C 側で全行の `(scope,key)` を覚えると 32KB 級の bss が要る。DB に任せれば正確で上限も無い (レビュー往復 1 の ⑯) |
 
 ---
 
@@ -257,6 +261,8 @@ check-cfg-host:
 ```
 
 `check:` と `.PHONY:` の並びに `check-cfg-host` を足す。
+
+---
 
 ---
 
