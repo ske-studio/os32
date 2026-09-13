@@ -110,3 +110,26 @@ pub fn load(prev_close_error: i32) -> GuiCfg   /* cfg_open(&db, 0) → cfg_get_i
 | 第 2 版 | Request changes | 2 件: R1 予約から消費までにアプリのモーダルが開くと Settings / 通知が消える (`open_wm` は枠が塞がっていると拒否) → 開けなかった要求 / 通知を保持して枠が空いた周回で再試行、`open_wm` の戻り値を見る、R2 16 色リース中の Settings がシステム色を使う → `draw_list` と同じ 2 色分岐、見本は数値のみ。non-blocker: §5 の矛盾 ((5)/(11)、(12))、G4/G5 は編集してから OK、Save の予約に変更マスクと再読込値、get 後の status |
 | 第 1 版 | Request changes | 7 件: B1 WM purpose だけでは top-level に移らない (アプリ `OP_WAIT` 中の Settings が handler 文脈で DB に触る) → 予約 + should_park + standalone_loop で消費、B2 commit 成功 + close 失敗を未反映にすると DB と画面がずれる → 適用して別通知、B3 起動時通知が無く kprintf は CUI に残らない → WM 通知 + 端末 / 状態行で採取、B4 可変幅時計の縮小で旧矩形が残る → 和集合、B5 gui_gate の行番号は定数だけでは追従しない → 項目名定数、B6 hsync は settings.db を保護するので VERSION fixture を置けない → 別名で配備して guest cp、B7 gshell の要求 KAPI 49 のまま → 50。non-blocker: close 診断の保持と文言、FFI 集約の根拠、ホストハーネスの接続、UI の値の 3 区別 |
 
+## 10. 実装と受入の記録 (PM、2026-09-13)
+
+### 10a. 着地
+- `261b59e` S4-W (settings.rs、lib.rs、modal.rs、startmenu.rs、desktop.rs、taskbar.rs、multiapp.rs、wm.rs、`os32api::cfg`、host 93/93、libos32gui host_tests 35/35) + PM 登録 (programs.mk の gshell.elf に libos32cfg.a、app.conf の gshell 50、gui_gate.py の 6 項目 + `ROW_*`)。`0922061` fixture (`--schema-version`、`/etc/settings.v2.fixture`)。`make all` / `check` exit 0。
+- 配備 (S4 1 回目、`261b59e`、gshell.bin 193,620 B、vmkernel 470,756 B、kselftest 87 / 0、stamp 18:44)。
+
+### 10b. ゲスト受入 (配備 1 回目)
+| ID | 結果 |
+|---|---|
+| G1 | **合格**: CUI で color 3 / clock_24h 0 → `os32gui`: デスクトップ色 3 (灰)、時計 `6:46 PM`、Start に `Settings...` (6 項目)、端末 (con_sink) に `gshell: cfg OK color=3 clock24=0 load=24t` (`g1_desk.png` / `g1_menu.png` / `g1_term.png`) |
+| G2 | **合格**: Settings... (`Desktop color : 3` + 色見本、`Clock : 12h`、状態行 `settings.db: OK load 24t save 0t`) → → ×2、↓、SPACE → `5` / `24h` → RETURN: 即座に黄 (色 5) と `18:47`。再表示で `save 59t`。CUI で `cfg get` = 5 / 1 |
+| G3 | **合格**: 編集後 ESC → 不変。無編集 OK → 端末に `gshell: cfg write skipped`、不変。**gui_demo (2 窓) を開いたまま** Start → Settings... → → → OK: 12 → 13 が保存され CUI で 13 (`Ctx::Wait` からの予約 → top-level 消費、`g3b_*.png`)。モーダル枠の競合 (R1) はゲストでは未再現 (ホスト試験 §5(16)) |
+| G4 | **合格**: `rm /etc/settings.db` → `os32gui`: 起動時通知 `Settings: MISSING - defaults in use. Run 'cfg init' in CUI.`、既定色 (12) と `HH:MM`。Settings... で編集して OK → `cannot save: MISSING`。DB は作られない |
+| G5 | **合格**: `cp /etc/settings.v2.fixture /etc/settings.db` → `cfg status` = `VERSION schema_version 2` → `os32gui`: 通知 `Settings: VERSION 2 (read only)`、編集 OK → `cannot save: VERSION`。後始末 `rm` → `cfg init` → OK 1 |
+| G6 | **合格**: `leave_gshell` (`ROW_CUI` = 4) が全台本で CUI mode に当たり復帰、halt に当たっていない |
+| G7 | 記録: `load 24t` (起動時、open + 2 get + close)、`save 59t` (open RW + begin + 2 set + commit + close)。S5 の材料 |
+
+受入中の教訓: 台本は `gui_gate.py` の `ROW_*` を使う。`ime on` の後は `SHIFT+SPACE` で FEP を切ってから打つ (S2 と同じ)。
+
+### 10c. Codex 実装レビュー
+| 対象 | 判定 | 要旨 |
+|---|---|---|
+| `261b59e` (往復 1) | Request changes | 3 件: B1 読み込み途中で ERROR になっても先に読めた値を適用 (ERROR は両キー既定値に)、B2 リース中の説明文 48 文字が 360px の枠外に描かれる、B3 状態行の連結 (78 文字) が枠外へ。non-blocker: `open_wm_settings` の戻り値、ホスト試験の不足、gui_gate.py:198 のコメント。DB の呼び出し元は `main` の load と `standalone_loop` の consume の 2 か所だけであることを確認 |

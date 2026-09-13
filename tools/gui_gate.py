@@ -195,7 +195,7 @@ def run_dialog(mouse, path):
 
 
 def leave_gshell(mouse, shots=None, shot_name=None):
-    """Start → "CUI mode" (行 3) → 確認ダイアログ Yes で CUI へ戻り、rshell を復旧する。
+    """Start → "CUI mode" (`ROW_CUI`、S4 で 6 項目化) → 確認ダイアログ Yes で CUI へ戻り、rshell を復旧する。
 
     G5 で ESC の即時切替は製品から撤去したので、**これが唯一の CUI 復帰経路**
     (契約 S6 / 票 W3 §4.1〜4.2)。`shots` と `shot_name` を渡すと、Yes を押す前の
