@@ -54,6 +54,7 @@ static int out_err;
 /* --- 純関数 (ホスト TDD が直接呼ぶ) --- */
 static int cfg_cmd_parse(int argc, char **argv, CfgArgs *out);
 static int fmt_int(char *buf, int cap, int v);
+static int fmt_u32(char *buf, int cap, u32 v);
 static int fmt_hex(char *buf, int cap, const unsigned char *p, int n);
 static int parse_hex(const char *s, unsigned char *out, int cap);
 static int fmt_b64(char *buf, int cap, const unsigned char *p, int n);
@@ -66,6 +67,7 @@ static int parse_int(const char *s, int *out);
 static void out_reset(void);
 static int  out_put(const char *p, int n);
 static int  out_str(const char *s);
+static int  out_unum(u32 v);
 static int  out_flush_console(void);
 static int  norm_path(const char *in, char *out, int cap);
 
@@ -238,6 +240,22 @@ static int fmt_int(char *buf, int cap, int v)
     while (u) { tmp[n++] = (char)('0' + (int)(u % 10UL)); u /= 10UL; }
     if (n + neg >= cap) return -1;
     if (neg) buf[i++] = '-';
+    while (n) buf[i++] = tmp[--n];
+    buf[i] = '\0';
+    return i;
+}
+
+/* 符号なし 10 進 (KAPI の u32 をそのまま出す。fmt_int に通すと 2GB 超が
+ * 負に化ける)。戻り: 長さ / -1 = 溜め場が足りない。 */
+static int fmt_u32(char *buf, int cap, u32 v)
+{
+    char tmp[12];
+    int n = 0, i = 0;
+
+    if (cap < 2) return -1;
+    if (v == 0) tmp[n++] = '0';
+    while (v) { tmp[n++] = (char)('0' + (int)(v % 10UL)); v /= 10UL; }
+    if (n >= cap) return -1;
     while (n) buf[i++] = tmp[--n];
     buf[i] = '\0';
     return i;
@@ -424,6 +442,14 @@ static int out_num(int v)
 {
     char tmp[16];
     int n = fmt_int(tmp, (int)sizeof(tmp), v);
+    if (n < 0) { out_err = 1; return -1; }
+    return out_put(tmp, n);
+}
+
+static int out_unum(u32 v)
+{
+    char tmp[16];
+    int n = fmt_u32(tmp, (int)sizeof(tmp), v);
     if (n < 0) { out_err = 1; return -1; }
     return out_put(tmp, n);
 }
@@ -676,6 +702,14 @@ static int do_status(void)
         out_str(" sqlite=");
         out_num(cfg_last_sqlite(db));
     }
+    /* SQLite の MEMSYS5 プールの使用量 (票 S5-C(2)、DESIGN §6 のプール)。
+     * **接続を持っている間**の値なので、`cfg status` の 1 行で「この DB を
+     * 開くのに何バイト要るか」が分かる。close の後だと素の値に戻ってしまう。
+     * 状態に関わらず必ず末尾に付ける — MISSING でも FEP 辞書などの常駐分が
+     * 読めるようにするため (受入 C2 の文言はこの追記を許す)。 */
+    out_str(" pool ");
+    out_unum(api->db_mem_used());
+    out_str(" B");
     out_str("\n");
     rc = (st == CFG_OK) ? 0 : 1;
     return close_note(db, rc);

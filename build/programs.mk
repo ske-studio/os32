@@ -335,6 +335,15 @@ userland/cmds/cfg.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/cfg.o $(LIBCFG_
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/cfg.o \
 	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
 
+# cfg_bench — 設定レジストリの計測 (票 S5-C、libos32cfg を静的リンク)。明示規則は
+# 既定の tests/%.elf パターンに優先する。
+userland/tests/cfg_bench.o: userland/tests/cfg_bench.c userland/lib/cfg/libos32cfg.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32cfg) -c $< -o $@
+
+userland/tests/cfg_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/cfg_bench.o $(LIBCFG_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/cfg_bench.o \
+	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
+
 userland/tests/%.elf: userland/tests/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/tests/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/$*.o -lc -lgcc

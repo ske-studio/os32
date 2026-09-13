@@ -296,7 +296,15 @@ static void host_close_w(int fd)
     if (i >= 0 && i < HOSTFD_MAX) hostfd[i].used = 0;
 }
 static i32 host_yield(void) { cap_yields++; return 0; }
-static u32 host_gettick(void) { return host_tick; }
+/* S5: cfg_bench は tick の**差**を測る。既定の step は 0 なので S2 までの
+ * 試験の見え方は変わらない。cfg_bench の試験だけが step を立てる。 */
+static u32 host_tick_step;
+static u32 host_gettick(void)
+{
+    u32 now = host_tick;
+    host_tick += host_tick_step;
+    return now;
+}
 static int host_unlink(const char *p) { return vfs_rm(p); }
 static int host_stat(const char *p, OS32_Stat *st) { return vfs_stat(p, st); }
 static const char *host_cwd = "/";
@@ -306,6 +314,12 @@ static KernelAPI host_api;
 
 #define main cfg_main
 #include "../../userland/cmds/cfg.c"
+#undef main
+
+/* 計測プログラムも同じ土台に載せる (票 S5-C)。純関数を直接叩けるよう、
+ * 静的関数の名前は cfg.c と重ならない bn_ / bo_ 接頭辞にしてある。 */
+#define main bench_main
+#include "../../userland/tests/cfg_bench.c"
 #undef main
 
 /* ========================================================================= */
@@ -359,6 +373,9 @@ static void reset_all(void)
     host_api.sys_stat = host_stat;
     host_api.sys_getcwd = host_getcwd;
     host_api.get_tick = host_gettick;
+    host_api.db_mem_used = kapi_db_mem_used;   /* 実 sqlite3_memory_used */
+    host_api.version = 50;
+    host_tick_step = 0;
 }
 
 static void canary_check(const char *where)
@@ -1176,7 +1193,7 @@ static void c_cmd(void)
     put_file(CFG_TSV_PATH, TSV_OK_TEXT);
     CHECK(ran("init", NULL, NULL, NULL, NULL) == 0);
     CHECK(ran("status", NULL, NULL, NULL, NULL) == 0);
-    CHECK(cap_has("OK schema_version 1"));
+    CHECK(cap_has("OK schema_version 1 pool "));
     CHECK(ran("list", NULL, NULL, NULL, NULL) == 0);
     CHECK(cap_has("gshell\tdesktop/color\tint\t1"));
     CHECK(cap_has("gshell\ttaskbar/clock_24h\tint\t1"));
@@ -2327,6 +2344,298 @@ static void c_r3_tsv_long(void)
     }
 }
 
+
+/* ========================================================================= */
+/*  S5-C (1) cfg_bench — 集計・引数・整形の純関数                             */
+/* ========================================================================= */
+static void c_s5_pure(void)
+{
+    BnArgs a;
+    BnStats st;
+    char buf[BN_SUM_MAX];
+    char small[8];
+    int v;
+
+    /* ---- 引数 ---- */
+    {
+        char *av0[] = { "cfg_bench" };
+        char *av1[] = { "cfg_bench", "7" };
+        char *av2[] = { "cfg_bench", "7", "3" };
+        char *aw0[] = { "cfg_bench", "-w" };
+        char *aw1[] = { "cfg_bench", "-w", "5" };
+        char *bad1[] = { "cfg_bench", "0" };
+        char *bad2[] = { "cfg_bench", "-x" };
+        char *bad3[] = { "cfg_bench", "-" };
+        char *bad4[] = { "cfg_bench", "7", "3", "9" };
+        char *bad5[] = { "cfg_bench", "1x" };
+        char *bad6[] = { "cfg_bench", "" };
+        char *bad7[] = { "cfg_bench", "-w", "5", "5" };
+        char *bad8[] = { "cfg_bench", "-w", "0" };
+        char *bad9[] = { "cfg_bench", "7", "0" };
+
+        CHECK(bn_args(1, av0, &a) == 0 && !a.write_mode && a.n == 50 && a.m == 20);
+        CHECK(bn_args(2, av1, &a) == 0 && !a.write_mode && a.n == 7 && a.m == 20);
+        CHECK(bn_args(3, av2, &a) == 0 && a.n == 7 && a.m == 3);
+        CHECK(bn_args(2, aw0, &a) == 0 && a.write_mode && a.n == 20);
+        CHECK(bn_args(3, aw1, &a) == 0 && a.write_mode && a.n == 5);
+        CHECK(bn_args(2, bad1, &a) == -1);
+        CHECK(bn_args(2, bad2, &a) == -1);
+        CHECK(bn_args(2, bad3, &a) == -1);
+        CHECK(bn_args(4, bad4, &a) == -1);
+        CHECK(bn_args(2, bad5, &a) == -1);
+        CHECK(bn_args(2, bad6, &a) == -1);
+        CHECK(bn_args(4, bad7, &a) == -1);
+        CHECK(bn_args(3, bad8, &a) == -1);
+        CHECK(bn_args(3, bad9, &a) == -1);
+    }
+    /* 上限を越えた桁でも int の桁あふれを踏まない */
+    CHECK(bn_parse_u32("4294967295", 1, BN_MAX_N, &v) == -1);
+    CHECK(bn_parse_u32("99999999999999999999", 1, BN_MAX_N, &v) == -1);
+    CHECK(bn_parse_u32("0000012", 1, BN_MAX_N, &v) == 0 && v == 12);
+    CHECK(bn_parse_u32("1000000", 1, BN_MAX_N, &v) == 0 && v == 1000000);
+    CHECK(bn_parse_u32("1000001", 1, BN_MAX_N, &v) == -1);
+    CHECK(bn_parse_u32("+1", 1, BN_MAX_N, &v) == -1);
+    CHECK(bn_parse_u32("-1", 1, BN_MAX_N, &v) == -1);
+
+    /* ---- 引く先の巡回: 4 件に 1 件が「無いキー」、残りは 3 キーの巡回 ---- */
+    {
+        static const int want[12] = { 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3 };
+        int j, miss = 0, seen[BN_KEYS];
+        for (j = 0; j < BN_KEYS; j++) seen[j] = 0;
+        for (j = 0; j < 12; j++) CHECK(bn_pick(j) == want[j]);
+        for (j = 0; j < 20; j++) {
+            int w = bn_pick(j);
+            CHECK(w >= 0 && w <= BN_PICK_MISS);
+            if (w == BN_PICK_MISS) miss++; else seen[w]++;
+        }
+        CHECK(miss == 5);                      /* 20 件のうち 4 件に 1 件 */
+        CHECK(seen[0] == 5 && seen[1] == 5 && seen[2] == 5);
+    }
+    CHECK(!strcmp(bn_key_of(BN_PICK_COLOR), "desktop/color"));
+    CHECK(!strcmp(bn_key_of(BN_PICK_WALL), "desktop/wallpaper"));
+    CHECK(!strcmp(bn_key_of(BN_PICK_CLOCK), "taskbar/clock_24h"));
+    CHECK(!strcmp(bn_key_of(BN_PICK_MISS), "nosuch/key"));
+
+    /* ---- 失敗の数え方: NOTFOUND は数えない ---- */
+    CHECK(bn_get_failed(0) == 0);
+    CHECK(bn_get_failed(5) == 0);                       /* text の長さ */
+    CHECK(bn_get_failed(OS32_ERR_NOTFOUND) == 0);
+    CHECK(bn_get_failed(OS32_ERR_IO) == 1);
+    CHECK(bn_get_failed(OS32_ERR_NOSYS) == 1);
+    CHECK(bn_get_failed(OS32_ERR_INVAL) == 1);
+
+    /* ---- 何回目に 1 行出すか ---- */
+    CHECK(bn_should_log(0, 50) == 0);
+    CHECK(bn_should_log(8, 50) == 0);
+    CHECK(bn_should_log(9, 50) == 1);                   /* 10 回目 */
+    CHECK(bn_should_log(19, 50) == 1);
+    CHECK(bn_should_log(49, 50) == 1);                  /* 最終回 */
+    CHECK(bn_should_log(2, 3) == 1);                    /* n < 10 でも 1 行 */
+    CHECK(bn_should_log(1, 3) == 0);
+
+    /* ---- 集計 ---- */
+    bn_reset(&st, 1000);
+    CHECK(st.n == 0 && st.pool_start == 1000 && st.pool_peak == 1000 &&
+          st.pool_end == 1000 && st.failures == 0);
+    CHECK(bn_avg(&st) == 0);
+    bn_sample(&st, 5, 4000, 1000);
+    CHECK(st.t_min == 5 && st.t_max == 5 && bn_avg(&st) == 5);
+    bn_sample(&st, 2, 9000, 1200);
+    bn_sample(&st, 9, 3000, 1000);
+    CHECK(st.n == 3);
+    CHECK(st.t_min == 2 && st.t_max == 9 && st.t_sum == 16);
+    CHECK(bn_avg(&st) == 5);                            /* 16/3 = 5.33 → 5 */
+    CHECK(st.pool_peak == 9000);                        /* open 中の最大 */
+    CHECK(st.pool_end == 1000);                         /* 最後の close 後 */
+    /* close 後の方が大きい回があればピークはそちらを採る */
+    bn_sample(&st, 1, 100, 12000);
+    CHECK(st.pool_peak == 12000 && st.pool_end == 12000);
+    /* 四捨五入 (切り捨てではない) */
+    bn_reset(&st, 0);
+    bn_sample(&st, 1, 0, 0);
+    bn_sample(&st, 2, 0, 0);
+    CHECK(st.t_sum == 3 && bn_avg(&st) == 2);           /* 1.5 → 2 */
+
+    /* ---- 整形 ---- */
+    CHECK(bn_iter_line(buf, (int)sizeof(buf), 10, 3, 123456) > 0);
+    CHECK(!strcmp(buf, "iter 10 ticks 3 pool 123456 B\n"));
+    CHECK(bn_iter_line(small, (int)sizeof(small), 10, 3, 123456) == -1);
+
+    bn_reset(&st, 4096);
+    bn_sample(&st, 2, 200704, 4096);
+    bn_sample(&st, 9, 200704, 4096);
+    st.failures = 0;
+    CHECK(bn_summary(buf, (int)sizeof(buf), &st, CFG_OK) > 0);
+    CHECK(!strcmp(buf,
+                  "ticks min 2 max 9 avg 6 total 11 n 2\n"
+                  "pool start 4096 peak 200704 end 4096 B\n"
+                  "status 0 OK\n"
+                  "failures 0\n"));
+    st.failures = 3;
+    CHECK(bn_summary(buf, (int)sizeof(buf), &st, CFG_CORRUPT) > 0);
+    CHECK(strstr(buf, "status 2 CORRUPT\n") != NULL);
+    CHECK(strstr(buf, "failures 3\n") != NULL);
+    CHECK(bn_summary(small, (int)sizeof(small), &st, CFG_OK) == -1);
+    CHECK(!strcmp(bn_status_name(CFG_MISSING), "MISSING"));
+    CHECK(!strcmp(bn_status_name(CFG_VERSION), "VERSION"));
+    CHECK(!strcmp(bn_status_name(CFG_ERROR), "ERROR"));
+    /* u32 の上端が負に化けない。数字だけが溢れる幅でも 1 バイトも書かない
+     * (bo_str の検査に隠れない大きさをわざと選ぶ)。 */
+    {
+        BnOut o;
+        bo_init(&o, buf, (int)sizeof(buf));
+        bo_u32(&o, 4294967295u);
+        CHECK(bo_end(&o) == 10 && !strcmp(buf, "4294967295"));
+
+        memset(small, 0x7F, sizeof(small));
+        bo_init(&o, small, 4);
+        bo_u32(&o, 12345);                       /* 5 桁 + NUL > 4 */
+        CHECK(bo_end(&o) == -1);
+        CHECK(small[4] == 0x7F && small[5] == 0x7F);  /* 越えて書いていない */
+        bo_init(&o, small, 4);
+        bo_u32(&o, 123);                         /* 3 桁 + NUL = 4 は入る */
+        CHECK(bo_end(&o) == 3 && !strcmp(small, "123"));
+    }
+}
+
+/* ========================================================================= */
+/*  S5-C (1) cfg_bench — 通し (実 DB の上で。open〜close の間に yield しない) */
+/* ========================================================================= */
+static int benched(const char *a1, const char *a2)
+{
+    char *av[3];
+    int n = 1;
+    av[0] = (char *)"cfg_bench";
+    if (a1) av[n++] = (char *)a1;
+    if (a2) av[n++] = (char *)a2;
+    cap_len = 0;
+    cap_yields = 0;
+    memset(&g_db, 0, sizeof(g_db));
+    return bench_main(n, av, &host_api);
+}
+
+/* cap_out の中の "<key>" に続く 10 進数。無ければ -1。 */
+static long cap_u32_after(const char *key)
+{
+    const char *p;
+    long v = 0;
+    cap_out[cap_len] = '\0';
+    p = strstr(cap_out, key);
+    if (!p) return -1;
+    p += strlen(key);
+    if (*p < '0' || *p > '9') return -1;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return v;
+}
+
+static void c_s5_bench(void)
+{
+    long start, peak, end;
+
+    /* ---- DB が無いとき: MISSING を数え、終了コードは 1 ---- */
+    host_tick_step = 1;
+    CHECK(benched("2", "4") == 1);
+    CHECK(cap_has("cfg_bench read n 2 m 4\n"));
+    CHECK(cap_has("status 1 MISSING\n"));
+    CHECK(cap_u32_after("failures ") == 2);   /* 1 回につき status != OK が 1 */
+    CHECK(cap_yields == 0);
+
+    /* ---- 実 DB の上を 3 回 x 8 件 ---- */
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(cfg_init(NULL) == 0);
+    host_tick_step = 1;
+    CHECK(benched("3", "8") == 0);
+    CHECK(cap_has("cfg_bench read n 3 m 8\n"));
+    CHECK(cap_has("status 0 OK\n"));
+    CHECK(cap_has("failures 0\n"));
+    CHECK(cap_has("iter 3 ticks "));          /* 最終回は必ず 1 行出る */
+    CHECK(!cap_has("iter 1 ticks "));         /* 10 回に満たない回は出さない */
+    /* **open 〜 close の間に yield しない** (票 §7 の直列化の契約)。
+     * cfg_bench は sys_yield を一度も呼ばない。 */
+    CHECK(cap_yields == 0);
+    /* tick は毎回進む (get_tick を窓の前後で 1 回ずつ = 差は 1 以上) */
+    CHECK(cap_u32_after("ticks min ") >= 1);
+    /* プールは開いている間に膨らみ、閉じたら戻る (受入 M1) */
+    start = cap_u32_after("pool start ");
+    peak = cap_u32_after(" peak ");
+    end = cap_u32_after(" end ");
+    CHECK(start >= 0 && peak >= 0 && end >= 0);
+    CHECK(peak > start);
+    CHECK(end == start);
+
+    /* ---- 10 回以上なら 10 回ごとの行が出る ---- */
+    host_tick_step = 2;
+    CHECK(benched("11", "4") == 0);
+    CHECK(cap_has("iter 10 ticks "));
+    CHECK(cap_has("iter 11 ticks "));
+    CHECK(!cap_has("iter 9 ticks "));
+    CHECK(cap_u32_after("ticks min ") >= 2);
+    CHECK(cap_yields == 0);
+
+    /* ---- 書き ---- */
+    host_tick_step = 1;
+    CHECK(benched("-w", "2") == 0);
+    CHECK(cap_has("cfg_bench write n 2\n"));
+    CHECK(cap_has("status 0 OK\n"));
+    CHECK(cap_has("failures 0\n"));
+    CHECK(cap_has("iter 2 ticks "));
+    CHECK(cap_yields == 0);
+    CHECK(cap_u32_after(" end ") == cap_u32_after("pool start "));
+    CHECK(cap_u32_after(" peak ") > cap_u32_after("pool start "));
+    {   /* 最後の i (= n-1 = 1) が書き戻っている */
+        CfgDb *db;
+        CHECK(cfg_open(&db, 0) == 0);
+        CHECK(cfg_get_int(db, "app:bench", "counter", -1) == 1);
+        CHECK(cfg_close(db) == 0);
+    }
+
+    /* ---- 引数が不正なら usage と終了コード 1 ---- */
+    CHECK(benched("-x", NULL) == 1);
+    CHECK(cap_has("usage: cfg_bench"));
+    CHECK(cap_yields == 0);
+
+    /* ---- 出力が書けなければ終了コード 1 ---- */
+    inj_write_fail = 1;
+    CHECK(benched("1", "2") == 1);
+    inj_write_fail = 0;
+
+    /* ---- 古いカーネルは断る ---- */
+    host_api.version = 49;
+    CHECK(benched("1", "2") == 1);
+    CHECK(cap_has("older than KAPI v50"));
+    host_api.version = 50;
+}
+
+/* ========================================================================= */
+/*  S5-C (2) cfg status の pool 表示                                         */
+/* ========================================================================= */
+static void c_s5_pool(void)
+{
+    char buf[16];
+
+    /* ---- 符号なし整形 (u32 を fmt_int に通すと 2GB 超が負に化ける) ---- */
+    CHECK(fmt_u32(buf, (int)sizeof(buf), 0) == 1 && !strcmp(buf, "0"));
+    CHECK(fmt_u32(buf, (int)sizeof(buf), 12345) == 5 && !strcmp(buf, "12345"));
+    CHECK(fmt_u32(buf, (int)sizeof(buf), 4294967295u) == 10 &&
+          !strcmp(buf, "4294967295"));
+    CHECK(fmt_u32(buf, 3, 12345) == -1);
+    CHECK(fmt_u32(buf, 1, 0) == -1);
+
+    /* ---- MISSING でも pool は出る ---- */
+    CHECK(ran("status", NULL, NULL, NULL, NULL) == 1);
+    CHECK(cap_has("MISSING pool "));
+    CHECK(cap_has(" B\n"));
+
+    /* ---- OK のときは schema_version の後ろ ---- */
+    put_file(CFG_TSV_PATH, TSV_OK_TEXT);
+    CHECK(ran("init", NULL, NULL, NULL, NULL) == 0);
+    CHECK(ran("status", NULL, NULL, NULL, NULL) == 0);
+    CHECK(cap_has("OK schema_version 1 pool "));
+    CHECK(cap_has(" B\n"));
+    /* **接続を持っている間**の値なので、閉じた後の素の値より大きい */
+    CHECK(cap_u32_after("pool ") > (long)kapi_db_mem_used());
+}
+
 /* ========================================================================= */
 
 int main(int argc, char **argv)
@@ -2379,6 +2688,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "r3_enum_type")) c_r3_enum_type();
     else if (!strcmp(argv[1], "r3_enum_err")) c_r3_enum_err();
     else if (!strcmp(argv[1], "r3_tsv_long")) c_r3_tsv_long();
+    else if (!strcmp(argv[1], "s5_pure")) c_s5_pure();
+    else if (!strcmp(argv[1], "s5_bench")) c_s5_bench();
+    else if (!strcmp(argv[1], "s5_pool")) c_s5_pool();
     else CHECK(0);
 
     canary_check(argv[1]);

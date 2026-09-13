@@ -63,6 +63,10 @@ CASES = [
     "r3_enum_type",    # B3 列挙も縮小前に type の値域を見る
     "r3_enum_err",     # B4 ERROR 状態の列挙を 0 件にしない
     "r3_tsv_long",     # B5 過長フィールドでカウンタを飽和させる
+    # 票 S5-C (記録は tools/tests/s5_tdd.md)
+    "s5_pure",         # cfg_bench の引数 / 巡回 / 失敗の数え方 / 集計 / 整形
+    "s5_bench",        # cfg_bench の通し (実 DB、yield なし、pool の戻り)
+    "s5_pool",         # cfg status の ` pool <n> B`
 ]
 
 INC = ["-I" + str(ROOT / p) for p in
@@ -182,7 +186,8 @@ def target_compile(tmp):
              "-Iuserland/lib", "-I/usr/local/cross/i386-elf/include"]
     srcs = ["userland/lib/cfg/libos32cfg.c", "userland/lib/cfg/cfg_enum.c",
             "userland/lib/cfg/cfg_tsv.c", "userland/lib/cfg/cfg_init.c",
-            "userland/lib/cfg/cfg_backend.c", "userland/cmds/cfg.c"]
+            "userland/lib/cfg/cfg_backend.c", "userland/cmds/cfg.c",
+            "userland/tests/cfg_bench.c"]
     for src in srcs:
         extra = ["-Iuserland/lib/cfg"] if src.startswith("userland/lib") else []
         subprocess.run(["i386-elf-gcc", *flags, *extra, "-c", src,
