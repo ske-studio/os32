@@ -1,6 +1,6 @@
 # S5 — 設定レジストリの実測と受入 (DESIGN §6)、S4 の残件
 
-状態: **第 1 版 (実測票。コードは小さく 2 点、Codex レビューはその 2 点だけ)**。前提: S0 / S2 / S4 完了 (main `9d455e0`)。
+状態: **実測完了 (2026-09-13)、R2 (PEGC / Cirrus) はユーザー決裁待ち** — S5-C `5ccf6b8` + `e1b4828` (Codex 往復 1 で 4 件 → 往復 2 で Approve)、S5-W `7a8ad16` (指摘なし)、M1〜M6 / R1 / R3 / R4 は §6。前提: S0 / S2 / S4 完了 (main `9d455e0`)。
 正典: [DESIGN.md](DESIGN.md) §6 (実測項目)、[S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §2 (S5 = 実測と受入、PM / テスター)、[TASK_S2.md](TASK_S2.md) §8 (C7 の pool 復帰が未計測: `db_test` が継承バグで落ちる)、[TASK_S4.md](TASK_S4.md) 状態行の残件 4 件。
 規約: コーダーは worktree + ホスト TDD のみ。PM は測定の観測と判定、テスターが make / 配備。ini は [D2] (§3 R2 参照)。
 
@@ -60,3 +60,7 @@ Codex (枯渇時は Fable 5.1 サブエージェント、ROLES §5) に S5-C (`c
 - **R3 (ゲスト、2026-09-13)**: regress 6 / 6 (`s5reg`)、kselftest 87 / 0。
 - **R1 (ゲスト、2026-09-13、9801 `GFX=pc98`)**: `gui_gate.py v11` / `v12g1` / `v12g4` すべて RESULT OK、各台本の `CUI back: ok` (6 項目の Start メニューで `ROW_CUI` が CUI mode に当たる)、`system.cfg: GUI=0`。S4 の G2 は配備 2 回目 (TASK_S4 §10d) で確認済み。
 - **M5 (ホスト、2026-09-13)**: 合成 tsv 300 件 (int 100 / text 96B 100 / blob 64B 100、scope `app:bench`) → `mk_settings_db.py` → **29,696 B** (page 1KB)。64KB 以内で合格。
+- **再測 (ゲスト、2026-09-13、配備 `e1b4828` = 往復 1 の 4 件反映後、cfg_bench.bin 16,060 B)**: CUI `cfg_bench 20 20` FEP 無し 114〜115 tick、pool 0 → 24,832 → 0。FEP 常駐 113〜114 tick、pool 38,784 → 63,616 → 38,784。`-w 10` 58〜59 tick、peak 64,640。**GUI 端末 (t5a_display) で `cfg_bench 10 20`** (M6 の GUI 分): 114〜115 tick、pool 38,784 → 63,616 → 38,784、failures 0、出力は 1KB ごとの yield で端末に全行届く (`s5_gui_bench.png`)。数値は修正前と同じ (出力の yield は計測窓の外)。
+- **R4**: gshell host 96 / 96 (S21 TAB を含む)、cfg host 45 / 45 (signed-overflow sanitizer 込み)。
+- **Codex**: S5-C 往復 1 = Request changes 4 件 (cfg_bench の signed overflow、status の採取位置、集計幅、GUI 端末で出力が消える) → `e1b4828` → 往復 2 = **Approve**。S5-W は指摘なし。
+- **R2 (PEGC / Cirrus)**: 未実施。現在の NP21/W は 9801 モデル (`hal_test` = `pc98 (planar 4bpp)`) で、9821 への ini 変更は [D2]。ユーザー決裁待ち (提案: v1.4 の描画系の票でまとめて行う)。

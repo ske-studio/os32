@@ -158,16 +158,16 @@ gshell 起動
 
 ---
 
-## 6. SQLite との共存で実測する項目 (実装前の宿題)
+## 6. SQLite との共存で実測する項目 — **実測済み (2026-09-13、TASK_S5 §6)**
 
-| 項目 | 見るもの |
-|---|---|
-| プール | FEP 辞書が常駐した状態で `cfg_open` → 数十件の get → close を繰り返し、`db_mem_used()` が戻ること (§4-13 の -2 が出ない) |
-| ジャーナル | DELETE ジャーナルの回復・書込み順序・syncエラー伝播を確認する。強制終了試験は別途承認した使い捨てイメージのみ。MEMORY journal + 後置syncはクラッシュ回復の代替にしない |
-| 同期 | `os32_sqlite_vfs.c` の xSync が ext2 の書き戻しを待つか。待たないなら `cfg_commit` の後に `sys_sync` 相当を呼ぶ |
-| 速度 | 386 相当で `cfg_open` + 20 件 get + close の時間 (tick)。gshell 起動が体感で遅れないこと |
-| 大きさ | ページサイズ 1KB / 数百件で DB が 64KB 以内に収まること (FDD の媒体にも載る) |
-| メモリ | 固定 SQLite プールでも FEP・設定 DB の共存時のピークと OOM・回収を実測する。CUI 最低 8MB を GUI の受入ゲートにしない。必要 RAM と開発方針は [02_memory.md](../../02_memory.md) に従う |
+| 項目 | 見るもの | 実測 (NP21/W 15MB pc98、tick = 1/100 秒の相対値) |
+|---|---|---|
+| プール | FEP 辞書が常駐した状態で `cfg_open` → 数十件の get → close を繰り返し、`db_mem_used()` が戻ること (§4-13 の -2 が出ない) | **戻る**: 20 回 × 20 get で 38,784 → peak 63,616 → 38,784 B、失敗 0 (`cfg_bench`) |
+| ジャーナル | DELETE ジャーナルの回復・書込み順序・syncエラー伝播を確認する。強制終了試験は別途承認した使い捨てイメージのみ。MEMORY journal + 後置syncはクラッシュ回復の代替にしない | hot journal は自動回復せず `CORRUPT sqlite=261` (S2 の契約)、消せば復帰。強制終了試験は S3 の領分 |
+| 同期 | `os32_sqlite_vfs.c` の xSync が ext2 の書き戻しを待つか。待たないなら `cfg_commit` の後に `sys_sync` 相当を呼ぶ | ext2 は write-through (`ext2_write_block` → デバイス)、xSync = `vfs_sync` は super / GD を書く。set → ハードリセット → get で保持。**追加の sync 不要** |
+| 速度 | 386 相当で `cfg_open` + 20 件 get + close の時間 (tick)。gshell 起動が体感で遅れないこと | open + 20 get + close = **114 tick**、write 1 回 (open RW + begin + set + commit + close) = **59 tick**、gshell 起動の load = 24 tick、Settings の save = 59 tick |
+| 大きさ | ページサイズ 1KB / 数百件で DB が 64KB 以内に収まること (FDD の媒体にも載る) | 300 件で **29,696 B** |
+| メモリ | 固定 SQLite プールでも FEP・設定 DB の共存時のピークと OOM・回収を実測する。CUI 最低 8MB を GUI の受入ゲートにしない。必要 RAM と開発方針は [02_memory.md](../../02_memory.md) に従う | 共存ピーク **64,640 B** / 384KB、OOM なし、GUI 端末からも同値 |
 
 ---
 
