@@ -109,6 +109,7 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 
 - **接続の直列化**: 「アプリが触ると同時接続になるのか」という問いに対する答えは「はい — 2 つのプロセスがそれぞれ接続を持った状態 (例: アプリの RW と gshell) が同時接続」。決裁は **設定の読み書きは OS 経由だけ** (1 回目「アプリは読みだけ」→ 2 回目「アプリの設定値の書き込みも OS 経由で出来るように」)。アプリは libos32gui の wrapper (§3、1 呼び出しで open → 操作 → close を OS 側コードが完結、`app:` scope だけ書ける) を使い、DB を直接開く API は公開しない。gshell の設定 UI / `cfg` コマンド / wrapper のどれも open〜close を yield なしで 1 回の実行に収めるので接続は構造的に同時 1 本 (§1-1 (c))。KAPI 側の門 (v51) は作らない。
 - **3 往復で未承認**: 第 4 版のまま実装に進み、往復 3 の 2 件 (B1 `.new` 残骸は消さない、B2 export の版は実値) は実装レビューで併せて確認する (選択 3.b)。
+- **実装レビューも 3 往復で未承認** (2026-09-13): 残 5 件は一意の直し方で C コーダーが修正中。ユーザーの決裁事項: 修正を着地したうえで (a) Codex にもう 1 往復 (確認のみ) するか、(b) 修正着地 + ゲスト再確認で S2 完了とするか。
 
 ## 8. 実装と受入の記録 (PM、2026-09-13)
 
@@ -150,3 +151,4 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 |---|---|---|
 | `6aa8b7a` (往復 1) | Request changes | 17 件: ① shlib の `kapi` 未定義 (着地時に判明、`799b05e` で修正済み)、② init の stat 失敗を不存在扱い、③ export の出力先が DB 自身、④ 検証失敗の set で txn が failed にならない、⑤ list/export が取得障害を成功扱い、⑥ NULL を実値に変換、⑦ 破損 DB が ERROR、⑧ rollback 失敗で診断消失、⑨ open 内部 close の失敗が消える、⑩ get の bind 失敗、⑪ get が前方一致 enum で型を取る (257 件で既定値)、⑫ enum 再入の get_text が NOTFOUND、⑬ 出力の満杯 / short write、⑭ 64B scope の切り詰め、⑮ wrapper の ptr+len 検証順 (`8d0247e`)、⑯ tsv 重複控えの容量、⑰ INT_MIN の signed overflow。non-blocker: 配備先は `/bin/cfg.bin` (票の `/usr/bin` と差 → **票を `/bin` に改める**)、C 側 GUI wrapper 定義は無い (Rust 側の表が正典、票を改める)、export は DB を開いたまま書く |
 | `a1889c0` (往復 2) | Request changes | 17 件中 12 修正・5 部分。残 7 件 (すべて C): 1 整数取得だけの失敗を 0 で出す (⑤残)、2 ERROR 状態で拒否した set が txn を failed にしない (④残)、3 close 自身の失敗が操作診断を上書き (⑧残)、4 NULL の export が type=3 で宣言型を失う (⑥の新規)、5 保存済み 64bit 整数 / 未知 type が SHM で 32bit 化された後に正当値扱い、6 読み出し値の境界 (256B / 4097B / 不正 UTF-8 / 埋込み NUL、列挙 key の NUL で 1 行欠落)、7 export 先の同一性検査が stat 障害を「別ファイル」扱い (③残)。non-blocker: fake.rs の `static mut kapi` 競合 (W)、s2_tdd の旧記述。B1 / B2 は適合 |
+| `21a6d19` (往復 3 = 最終) | Request changes | 往復 1 の 15 件 + 往復 2 の 4 件は修正確認。残 5 件 (すべて C): B1 inode の無い FS (FAT ルート) で export 先の同一性が「別物」になり DB を潰せる、B2 enum callback からの set 拒否が txn を failed にしない、B3 enum の type に縮小前の値域検査が無い、B4 ERROR 状態の enum が 0 件を返す、B5 tsv の過長フィールドで int カウンタが overflow。non-blocker: shlib の `--api 42` (v50 依存になった)、s2_tdd の件数表記。**3 往復で Approve に至らず → ユーザー決裁 (§7)** |
