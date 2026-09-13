@@ -132,24 +132,33 @@ EOF stream_id  // ストリーム終端
 
 ## 4. フレーム形式 (raw Ethernet, 独自 EtherType)
 
+**正典は `docs/tasks/network/TASK_N0.md` §1b (ワイヤ v2、2026-09-14)**。ここは要約で、
+食い違ったら N0 が勝つ。v1 (12B ヘッダ、`stream_id` 無し、L0〜L3 で合格) は N1 で v2 に
+置き換え、合格実績は v2 で取り直す。
+
 - P2P なので ARP は不要。OS32 の MAC と Host Agent の MAC は HELLO で交換して
-  以後固定する。EtherType は未使用値を 1 つ選ぶ (実装時に確定、experimental 帯)。
-- リンクヘッダ (Ethernet ペイロード先頭): `type(u8)` opcode、`flags(u8)`、
-  `epoch(u16)`、`seq(u32)`、`ack_seq(u32)`、`length(u16)` … 詳細は着手時に凍結。
-- 制御フレーム (WINDOW / ACK / HELLO) は小さく、60B へ padding して送る。
+  以後固定する。EtherType は 0x88B5 (experimental 帯)。
+- リンクヘッダ **20B、明示的に直列化 (LE アクセサ、C 構造体の padding に依存しない)**:
+  `op(u8)` `flags(u8)` `epoch(u16)` `seq(u32)` `ack(u32)` `length(u16)` `rid(u32)` `sess(u16)`。
+  `sess` = OS32 の起動ごとのセッション ID (全フレーム)、`epoch` = HELLO ごとの世代、
+  `rid` = 要求 ID (epoch 内で単調増加、0 は使わない)。HELLO 以外は `sess` と `epoch` が
+  控えと一致するフレームだけ受け付ける (両端とも)。
+- 制御フレーム (WINDOW / ACK / STATUS / RELEASE / HELLO) は小さく、60B へ padding して送る。
 
-| opcode | 向き | 用途 |
+| op | 向き | 用途 |
 |---|---|---|
-| HELLO | 双方向 | MAC / epoch / 初期 WINDOW / 能力交換、再同期 |
-| REQUEST | OS32 → Host | HTTP_GET / OPEN / CONNECT など (request_id) |
-| RESPONSE | Host → OS32 | 要求の結果ヘッダ (status, stream_id) |
-| DATA | 主に Host → OS32 | ストリームのペイロード (stream_id, seq) |
-| EOF | Host → OS32 | ストリーム終端 |
-| ACK | OS32 → Host | ack_seq まで受信・処理済み |
-| WINDOW | OS32 → Host | 絶対値 credit の広告 (§2-1) |
+| HELLO (1) | 双方向 | `seq` = OS32 の nonce、payload = Agent 世代 (`agent u16`)。MAC / epoch / sess の交換、再同期 |
+| REQUEST (2) | OS32 → Host | 要求行 (`rid`、`seq` = 0)。本文が要る要求は要求行に宣言長 |
+| WDATA (8) | OS32 → Host | 要求本文 (`rid`、`seq` = 1〜、REQUEST と同じ seq 空間) |
+| RESPONSE (3) | Host → OS32 | 要求の結果 (`rid`、本文 6B 固定 = `status u16` + `length u32`)。102 = 処理中、410 = 墓標、503 = 受付枠無し |
+| STATUS (9) | OS32 → Host | `rid` の結果の再提示 / 生存確認の要求 |
+| RELEASE (10) | OS32 → Host | ハンドルを閉じた通知 (Agent はその `rid` を捨てて ACK) |
+| DATA (4) / EOF (5) | Host → OS32 | 応答本文のストリーム (`rid`、`seq` = 1〜)。WINDOW を受けた `rid` だけ |
+| ACK (6) | 双方向 | `rid` + `ack` = 順序どおり受けた最終 seq (累積) |
+| WINDOW (7) | OS32 → Host | 絶対値 credit の広告 (§2-1) と配送開始の許可 |
 
-OS32 → Host のデータ (REQUEST 本文など) はホストに余裕があるのでフロー制御を
-簡略化してよい (非対称、§2)。
+OS32 → Host のデータ (WDATA) は 1 本ずつ ACK を待って送る (ホストに余裕があるので
+credit は無いが、stop-and-wait で順序と重複排除を単純にする — 非対称、§2)。
 
 ## 5. 開発順序
 
