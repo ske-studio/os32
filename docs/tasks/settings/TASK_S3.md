@@ -161,4 +161,6 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | I2 | **合格**: 壊した DB (1406 B) → recover → 表示 (`master: schema_version 1, 3 keys` / `settings.db: present 1406 B` / 承認文) → `Y` → `recovered: schema_version 1, 3 keys, sync=0, reopen=ok, close=ok`。`settings.db` = 3072 B (マスタ)、`.bak` = 1406 B、印 `phase=done orig=present journal=absent size=1406` |
 | I4 | **合格**: 壊した DB + 偽 journal → 表示に `hot journal present - will be backed up as .bak-journal and removed before switch` → `Y` → `.bak` 1406 + `.bak-journal` 1406、`settings.db-journal` は無い、DB = マスタ、印 `journal=present` |
 | I7 | **合格**: I4 の後に `--revert-settings hd0` → 表示 (`settings.db: present 3072 B`、印 `orig=present journal=present`) → `Y` → `reverted: orig=present, sync=0`。`settings.db` = 1406 (元)、`settings.db-journal` = 1406 (元)、`.failed` = 3072 (マスタ)、`.bak*` は残る |
-| I5 / I3 | 実行中 (次の追記) |
+| I5 | **合格**: `N` → 何も変わらない (直後の recover の表示が同じ状態を示す) |
+| I3 | **合格**: `rm /hd0/etc/settings.db` → recover → 印 `orig=missing journal=absent`、DB = マスタ、`.bak` は作られない → `--revert-settings` → `reverted: orig=missing, sync=0`、`settings.db` は**消えて欠損に戻る** (`.failed` = 3072 にマスタの写し)。最後にもう一度 recover してマスタを置いた (`.failed` は残る、印 `phase=done`) |
+| I6 | ホスト TDD のみ (14 ケース、後退 17 種検出)。往復 1 の B1 / B2 / B5 の複合ケースは修正後に追加 |
