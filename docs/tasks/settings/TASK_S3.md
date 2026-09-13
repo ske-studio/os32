@@ -130,3 +130,9 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | 第 3 版 | Request changes | 5 件: B1 印の rename 失敗で確定印を壊す → 印は直接書いて読み戻す、B2 最終 rename の `.new` だけの枝で元 DB が消えている (置換先 unlink 後の新名追加失敗) → 写しから本体も復元、失敗は `phase=failed` で門、B3 現在の本体が欠損すると revert が止まる → PRESENT / ABSENT で分岐、B4 close 失敗後に同じ起動で rm / 上書きすると隔離接続の対象 → 再起動を明示の前提、B5 回復ファイルが通常配備から保護されない → S3-D で名前を追加。**3 往復で Approve に至らず → ユーザー決裁** |
 | 第 2 版 | Request changes | 7 件: R1 restore_pair の部分失敗後の再実行で元 journal を消す、R2 検証 close 失敗後の revert が入口で停止、R3 元欠損の切替後失敗を欠損に戻せない、R4 `.failed` が同一性検査から漏れる、R5 revert が現在の journal を旧 DB に付ける、R6 `/hd0` に別ドライブが刺さっていても対象にする、R7 2 巡の間に入力が差し替わると未検証の重複を書く。→ 第 3 版: 退避 / 復帰を rename ではなく「コピー + バイト比較」に組み替え (元の対は最終切替まで不変、両名 / 分離の状態が生まれない)、10 名の同一性検査、印 `recover-state` で元の欠損を記録、revert は現在の対を `.failed*` に写してから戻す、対象デバイスは st_dev で確認、import は 2 巡目も全検証 |
 | 第 1 版 | Request changes | 11 件: B1 `/hd0` マウント有無の判定が逆 → root の st_dev で FDD を判定し `/hd0` は別に mount、B2 両名残存の後の再実行で `.bak` unlink が本体を壊す → 事前に 6 名の同一性検査、B3 既存 `.new` を自分の生成物扱い + `.new-journal` で RO open が BUSY → 残骸があれば停止、B4 失敗時に DB と journal が分離 → 状態機械 + `restore_pair()`、B5 長さ + meta + 件数では内容一致を保証しない → バイト比較 + 全行走査 (integrity_check は OMIT)、B6 切替後失敗の復帰手順と close 失敗 → `--revert-settings` と close 記録、B7 reader が `\r` を拒否 → 許可、B8 4096 件上限 → 8192 + hash 重複検出、B9 NULL 行を捨てると list が一致しない → `cfg_set_null`、B10 `--scope` が削除だけ限定 → 抽出も限定、B11 FDD の cfg import は HDD 復元の代替にならない → 正式手順 C6。non-blocker: 最長行 5,629B、`cfg_delete_scope` の契約、2 巡の失敗保証の文言、三値 stat、容量の判定法、受入イメージの決裁、S3-I2 の残ゲート |
+
+## 9. 実装と受入の記録 (PM、2026-09-13)
+
+### 9a. 着地
+- `b1ceac6` PM: install の要求 KAPI 50、FDD の最小コマンドに `cfg`。
+- `6332dac` S3-D: `PROTECTED_BASENAMES` / `hsp_protected_names` 5 → 11 名、`hsync.c` の `HS_MAX_PROT` 16 → 24 (票外の付随変更: リカバリ途中の `/etc` は 9 名 + wal/shm = 11 名になりうるので、実在名の収集上限 16 だと別名が 5 つで通常同期が止まる。表の件数 11 を Python / C の両試験で固定)。ホスト 164 / 114 (RED 21 / 39 → GREEN)。
