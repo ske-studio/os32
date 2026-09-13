@@ -166,4 +166,10 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | I6 | ホスト TDD のみ (14 ケース、後退 17 種検出)。往復 1 の B1 / B2 / B5 の複合ケースは修正後に追加 |
 | C5 | **合格**: FDD ブートの `cfg status` = `OK schema_version 1 pool 24768 B` (S3-K の後。マスタの検査に限定) |
 | C6 | **合格**: HDD ブートに戻して `cfg status` OK、`/etc` は `settings.db` 3072 + `.failed` + 印。壊す前に取った `/tmp/b.json` を `cfg set` で変えた後に import → export 時点の値に戻る。`os32gui` は起動時通知なしで通常のデスクトップ (`s3_gui_after.png`) |
-| C4 | 未実施 (GUI 端末からの import。往復 2 の配備で) |
+| C4 | **合格** (配備 2 回目、`5f2ee25`): GUI 端末で `cfg import /tmp/b.json` → `imported 3 records (all scopes), replaced`、`cfg list` が戻る (`s3_c4_term.png`)。CUI の `cfg get` = 12 |
+
+### 9e. Codex 実装レビュー
+| 対象 | 判定 | 要旨 |
+|---|---|---|
+| `6332dac` + `c2a1cdd` + `e1f6791` (往復 1) | Request changes | 5 件: B1 `.new` の検証失敗と close 失敗の複合で `.new` を消す、B2 revert の journal 復元失敗で journal を消す、B3 `--scope` 外の値の不正で対象まで拒否、B4 commit 前の rollback/close 失敗が CLI に出ない、B5 複数行の壊れた印を `done` と受理。non-blocker: base64 の未使用ビット、印の size の wrap、案内の統一、8192 件の実書込み未検証、試験網羅。設計の残 1 件 (`phase=reverting`) は「防いでいる」と確認 |
+| `7b26058` (I) + `5f2ee25` (C) + `b2a1580` (K) (往復 2) | (実施中) | |
