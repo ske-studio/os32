@@ -367,6 +367,8 @@ class TrialTests(Images):
         self.assertEqual(len(calls), 1)
 
     def test_generated_ps_is_narrow_normal_close_and_explicit_launch(self):
+        """**生成されるコード文字列の検査だけ**。CheckFile が Windows 上で実際に
+        ディレクトリを拒否することの実証ではない (PowerShell は動かしていない)。"""
         ps = trial.PS_SERVER
         for required in ['CloseMainWindow()', 'WaitForExit(10000)', 'AssertAbsent',
                          '$handle = $p.Handle', 'CreateNew', '$plan.trial', '$plan.cwd',

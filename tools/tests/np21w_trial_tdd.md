@@ -183,3 +183,11 @@ RED→GREEN の実出力は [`s3i2_tdd.md`](s3i2_tdd.md) §T。実 ini・実プ�
 - PowerShell に `CheckFile` (`CheckPath` + `PSIsContainer` 拒否) を足し、`preflight` と
   `start` で `$plan.hdd_path` / `$plan.fdd_arg` を検査する (`.nhd` 名のディレクトリ対策)。
 - 反例と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 1。実 ini・実プロセスは未検証 [V4]。
+
+## 2026-09-14 追記 3 — 実装レビュー往復 2
+
+- `_bound_image()` の説明を実装に合わせた (名前一致 + ホスト側が通常ファイルまで。
+  Windows 表記とホスト側の対応は `make_plan()` の `resolve_image()` が決める)。
+- `test_generated_ps_is_narrow_...` は **PowerShell のコード文字列の検査だけ**であり、
+  `CheckFile` が Windows 上でディレクトリを実際に拒否することの実証ではない (未実施 [V4])。
+- ini CLI の絶対パス迂回の直し (名前だけ受ける) は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 2。

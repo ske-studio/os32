@@ -149,7 +149,8 @@ def resolve_image(name, extension):
 
 def _path_value(key, value):
     """書き込む literal を返す。HDD1FILE は**解決済みの絶対パス**で受ける
-    (名前からの展開は resolve_image、つまり計画時か CLI でだけ行う)。"""
+    (名前からの展開は resolve_image ひとつだけ = 計画時か CLI の入口)。
+    ここは純粋な構文検査で、ホスト側の存在は見ない (見る側は resolve_image)。"""
     extension = ALLOWED_PATHS[key]
     if not extension:
         if value != '':
@@ -429,8 +430,10 @@ def main(argv=None):
                 if not sep or key in changes:
                     raise IniError('invalid or repeated assignment')
                 extension = ALLOWED_PATHS.get(key)
-                if extension and not re.match(r'[A-Za-z]:\\', value):
-                    # 名前で受けたときだけ NP21W_DIR で解決する (絶対パスはそのまま)。
+                if extension:
+                    # CLI が受けるのは NP21W_DIR 直下の**名前だけ**。絶対パスを
+                    # そのまま通すと存在・通常ファイル・配置先の検査を迂回できた
+                    # (往復 2 の blocker)。展開点は resolve_image() ひとつに保つ。
                     value = resolve_image(value, extension)[1]
                 changes[key] = value
             _changes(changes)

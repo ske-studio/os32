@@ -80,8 +80,10 @@ PLAN_FIELDS = ('exe', 'baseline', 'cwd', 'pid', 'created', 'hdd', 'hdd_host',
 
 
 def _bound_image(name, host, windows, extension):
-    """束縛済みの (名前, ホスト側パス, Windows 絶対パス) が同じ 1 つの通常
-    ファイルを指していることを、**環境変数を読まずに**確かめる (往復 1 の B2)。"""
+    """束縛済みの (名前, ホスト側パス, Windows 絶対パス) を**環境変数を読まずに**
+    検査する: 3 者の名前が一致し、ホスト側が通常ファイル (非 symlink) であること。
+    Windows 表記とホスト側が同じ実体であることまでは見ない — その対応は
+    `make_plan()` の `resolve_image()` が解決した時点で決まる (往復 1 の B2)。"""
     image_name(name, extension)
     windows_path(windows)
     if (type(host) is not str or not host.startswith('/') or

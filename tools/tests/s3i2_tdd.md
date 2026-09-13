@@ -289,3 +289,40 @@ dry-run では計画に `hdd_host` / `hdd_path` / `fdd_arg_host` が載り exit 
 
 実 ini・実プロセス・実 NP21/W では相変わらず未検証。PowerShell の `CheckFile` (`PSIsContainer`)、
 `/i<ini>` 起動、HDD ブートはすべて受入 (§3 F1〜F6) と `--windows-parser` での確認が要る。
+
+## §T 往復 2 — ini CLI の絶対パス入力 (blocker 1 件)
+
+往復 1 で「CLI は名前でも絶対パスでも受ける」としたのが穴だった。絶対パスは
+`resolve_image()` を通らないので、**存在 / 通常ファイル / `NP21W_DIR` 内**の検査を
+まるごと迂回して `prepare` が成功し、`--apply` では未検査の値が `prepared.bin` に残った
+(trial の `CheckFile` はこの経路を通らない)。
+
+直し: **CLI が受けるのは名前だけ**。`ALLOWED_PATHS` の拡張子を持つキーは必ず
+`resolve_image()` を通す (絶対パスは `image_name()` が `unsupported image name` で拒否)。
+`transform()` は束縛済みパスだけを扱う純粋関数のまま。
+
+### 反例 → 直し (ホストで実際に踏んだ)
+
+`/tmp/.../scratchpad/cli_counterexample.py` (temp dir、`NP21W_DIR` 未設定、実 ini 無し):
+
+| `--set HDD1FILE=` | 着地版 (`a80f7b0`) | 直し後 |
+|---|---|---|
+| `C:\Trial\missing.nhd` (不存在) | exit 0 / `HDD1FILE: set -> C:\Trial\missing.nhd` | exit 2 `unsupported image name` |
+| `C:\Trial\as_dir.nhd` (ディレクトリ) | exit 0 / 同上 | exit 2 |
+| `C:\Somewhere Else\other.nhd` (配置先外) | exit 0 / 同上 | exit 2 |
+| `os32_fresh.nhd` (名前) | exit 2 (`NP21W_DIR` 未設定で fail closed) | 同左 |
+
+| 段階 | 実出力 | 内容 |
+|---|---|---|
+| RED | `test_np21w_ini.py`: `Ran 49 tests` / `FAILED (failures=7)` | 着地版に新 CLI 試験 (絶対パスの不存在 / ディレクトリ / symlink / 配置先外 / ドライブ直下 / 解決済みパス、`--apply` が未検査値を保存しないこと) |
+| GREEN | `discover -p 'test_np21w*.py'` → `Ran 125 tests` / `OK (skipped=2)`、`test_mk_blank_nhd.py` → `Ran 13` / `OK` | ini 49 (+2)、trial 21、transport 8 |
+
+### non-blocker も反映
+
+- `_bound_image()` の説明を実装に合わせた: 名前一致 + ホスト側が通常ファイル (非 symlink) までで、
+  Windows 表記とホスト側が同じ実体であることは `make_plan()` の `resolve_image()` の解決時に決まる。
+- `test_generated_ps_is_narrow_...` に「**生成されるコード文字列の検査だけ**で、`CheckFile` が
+  Windows 上で実際にディレクトリを拒否することの実証ではない」と明記した。
+- `_path_value()` の説明にも「ここは純粋な構文検査で、ホスト側の存在は resolve_image が見る」を追記。
+
+実 ini・実プロセス・実 NP21/W は引き続き未検証 ([V4])。

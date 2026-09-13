@@ -489,19 +489,48 @@ class PathFields(unittest.TestCase):
                     ini.resolve_image('os32_fresh.nhd', '.nhd')
                 self.assertNotIn(self.dir, str(caught.exception))
 
-    def test_cli_resolves_a_name_and_accepts_a_resolved_path(self):
+    def cli(self, value, *extra):
         source = Path(self.dir) / 'synthetic.snapshot'
         source.write_bytes(PATHS_RAW)
-        for value in ('os32_fresh.nhd', FRESH):
-            out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = ini.main(['prepare', str(source), '--set', 'HDD1FILE=' + value,
-                                 '--set', 'FDD1FILE=', '--set', 'FDD2FILE='])
-            self.assertEqual(code, 0)
-            self.assertNotIn('DO_NOT_PRINT', out.getvalue() + err.getvalue())
-            self.assertEqual(out.getvalue(),
-                             'HDD1FILE: set -> %s\nFDD1FILE: set -> empty\n' % FRESH)
-            self.assertEqual(source.read_bytes(), PATHS_RAW)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ini.main(['prepare', str(source), '--set', 'HDD1FILE=' + value,
+                             '--set', 'FDD1FILE=', '--set', 'FDD2FILE='] + list(extra))
+        self.assertNotIn('DO_NOT_PRINT', out.getvalue() + err.getvalue())
+        self.assertEqual(source.read_bytes(), PATHS_RAW)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_resolves_a_name_through_resolve_image(self):
+        code, out, _ = self.cli('os32_fresh.nhd')
+        self.assertEqual(code, 0)
+        self.assertEqual(out, 'HDD1FILE: set -> %s\nFDD1FILE: set -> empty\n' % FRESH)
+
+    def test_cli_refuses_an_absolute_path_and_every_bypass_it_allowed(self):
+        """絶対パス入力は resolve_image() を通らず、存在 / 通常ファイル /
+        NP21W_DIR 内の検査を丸ごと迂回できた (往復 2 の blocker)。"""
+        os.mkdir(os.path.join(self.dir, 'as_dir.nhd'))
+        os.symlink(os.path.join(self.dir, 'os32_fresh.nhd'),
+                   os.path.join(self.dir, 'as_link.nhd'))
+        for value in (FRESH, WIN_DIR + '\\missing.nhd', WIN_DIR + '\\as_dir.nhd',
+                      WIN_DIR + '\\as_link.nhd', 'C:\\Somewhere Else\\other.nhd',
+                      'C:\\os32_fresh.nhd', 'as_dir.nhd', 'as_link.nhd', 'missing.nhd'):
+            with self.subTest(value=value):
+                code, out, err = self.cli(value)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertTrue(err.startswith('error: '), err)
+                self.assertNotIn(value, out)
+
+    def test_cli_apply_cannot_store_an_unchecked_path(self):
+        bundle = Path(self.dir) / 'bundles'
+        bundle.mkdir()
+        code, _, _ = self.cli(WIN_DIR + '\\missing.nhd', '--output', str(bundle), '--apply')
+        self.assertEqual(code, 2)
+        self.assertEqual(list(bundle.iterdir()), [])
+        code, _, _ = self.cli('os32_fresh.nhd', '--output', str(bundle), '--apply')
+        self.assertEqual(code, 0)
+        prepared, = bundle.glob('np21w-offline-*/prepared.bin')
+        self.assertIn(('HDD1FILE=' + FRESH).encode('ascii'), prepared.read_bytes())
 
 
 if __name__ == '__main__':
