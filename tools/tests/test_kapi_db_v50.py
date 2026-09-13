@@ -17,7 +17,10 @@ CASES = ["open_existing", "prepare_only", "binds", "error_code", "shm_bound",
          "user_range", "owner_isolation", "order_new", "order_old",
          # 実装レビュー 往復 1 の blocker 6 件 + TRANSIENT (s0_tdd.md §K)
          "shm_exact", "stat_faults", "journal_mode", "step_no_stmt",
-         "path_len", "sql_tail", "transient"]
+         "path_len", "transient",
+         # 実装レビュー 往復 2 の blocker 4 件 (s0_tdd.md §K)
+         "sql_tail_sqlite", "prepare_replaces", "materialize_fail",
+         "resolve_len"]
 INC = ["-I" + str(ROOT / p) for p in
        ("include", "fs", "drivers", "sdk/include/os32", "lib", "lib/sqlite3")]
 CONFIG = str(ROOT / "lib/sqlite3/os32_sqlite_config.h")

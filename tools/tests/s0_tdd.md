@@ -261,19 +261,24 @@ python3 tools/tests/test_sqlite_groups.py
 `tools/tests/kapi_db_v50_host.c` は **実 `kapi/kapi_db.c` + 実 `lib/sqlite3/sqlite3.c`
 + 実 `lib/sqlite3/os32_sqlite_vfs.c` + 実 `fs/vfs_fd.c` + RAM バックエンド**
 (`sqlite_groups_backend.h`) を組む。ホストのファイルシステムには触らない。
-模型にしたのは 2 つだけ:
-模型は 4 つ:
+模型は次の 6 つ。それ以外はすべて実物を組む:
 
 - `ring3_user_range_ok` — 許可帯と PTE はカーネルの番地とページテーブルに依存する。
   ホストでは 1 本の帯 + 1 枚の「非 present なページ」に見立てた等価な判定を置く。
   実物の帯判定は `exec/exec.c` にあり、CPL=3 の受入 (`userland/tests/db_v50_test.c`) が踏む。
 - `MEM_SHM_BASE` — 試験側の配列へ向け、16KB の **後ろに 256B の番兵**を置く。
-- `vfs_stat` — RAM の fixture を見る試験側の実装。障害注入の口
-  (`stat_fail_on` / `stat_fail_rc`) を持つ。**実物の `fs/vfs.c` ではない**ので、
-  path 正規化の切り詰めそのものは再現しない (長さの判定だけを固定している)。
-- `vfs_resolve_path` / `vfs_route` — `vfs_fd_sqlite_host.c` の入れ替えなしのコピー。
-  正規化も mount 解決もしない。だから「255B の path で journal 名が切り詰められる」は
-  **長さの規則**として試験し、切り詰めの実挙動は `fs/vfs.c` の読みに拠っている。
+- `vfs_stat` / `vfs_rm` — RAM の fixture を見る試験側の実装。実物と同じく
+  **中で `vfs_resolve_path` を呼ぶ**ので、相対名 + cwd の連結と切り詰めは再現する。
+  障害注入の口 (`stat_fail_on` / `stat_fail_rc`) を持つ。
+- `vfs_resolve_path` / `vfs_route` — `vfs_fd_sqlite_host.c` のもの。cwd の連結と
+  `VFS_MAX_PATH` での切り詰めはするが、`.` / `..` / 連続 `/` の正規化と mount 解決は
+  しない。だから B4 の反例は **長さと連結**の規則として試験している。
+- `sqlite3_column_blob` / `sqlite3_column_text` — この **1 対だけ** 差し替えて
+  「長さはあるのにポインタが返らない」(確保の失敗) を決定的に作る。実 SQLite では
+  ホストの潤沢なメモリのせいで `sqlite3_step` の方が先に落ち、この形にできない
+  (実機の MEMSYS5 384KB では accessor 側で起きうる)。
+- ホストの `u32` / `i32` は `include/types.h` のとおり `unsigned long` / `long` で、
+  ホストでは **64bit**。32bit の折り返しに依る判定はホスト幅で踏み直している。
 
 ### 2. RED → GREEN
 
@@ -296,13 +301,32 @@ python3 tools/tests/test_sqlite_groups.py
 | 3 | RW open の schema / I/O 障害が一律 CANTOPEN | `journal_mode` | `db_journal_mode_check` の戻りを `SQLITE_CANTOPEN` に潰す → `FAIL journal_mode:642: kapi_db_error_code(-1) == SQLITE_NOTADB` |
 | 4 | stmt が無い `db_step` の DONE で診断が 0 に戻らない | `step_no_stmt` | 早期 DONE の `slot_note` を外す → `FAIL step_no_stmt:665: kapi_db_error_code(h) == SQLITE_OK` |
 | 5 | 255B の path で本体を journal と誤認 | `path_len` | `journal_buf` を `VFS_MAX_PATH + 8` に戻す → `FAIL path_len:694: kapi_db_open_existing(longp, 0) == -1` (248B の path が通ってしまう) |
-| 6 | 末尾の `\f` を複数 statement と誤判定 | `sql_tail` | `sql_is_space` から `\f` を外す → `FAIL sql_tail:711: sql_is_space('\f') && sql_is_space('\r')`、続けて `"SELECT 1;\f "` が拒否される |
+| 6 | 末尾の `\f` を複数 statement と誤判定 | (当時の) `sql_tail` | `sql_is_space` から `\f` を外す → `FAIL sql_tail:711: sql_is_space('\f') && sql_is_space('\r')`、続けて `"SELECT 1;\f "` が拒否される |
 
-**6 の訂正**: SQLite の空白は「6 文字」ではなく、トークナイザ (`aiClass` の
-`CC_SPACE`) では **5 文字** — space / `\t` / `\n` / `\f` / `\r`。`0x0B` (`\v`) は
-`sqlite3Isspace` では空白だが `aiClass` では `CC_ILLEGAL` で、`"SELECT 1\v"` は
-prepare 自体が落ちる。したがって `\v` は末尾でも空白に数えない (数えると
-「SQLite が読めない末尾」を通してしまう)。`sql_tail` がこの両方を固定している。
+**6 は往復 2 でやり直した**。自前の空白表は 5 文字でも 6 文字でもずれる
+(下の 2c の B1)。判定そのものを SQLite に委ねたので `sql_is_space` /
+`sql_tail_is_blank` は消え、当時の `sql_tail` ケースは `sql_tail_sqlite` に置き換えた。
+
+### 2c. 実装レビュー 往復 2 (Codex、`77d61b3`) の blocker 4 件 — RED → GREEN
+
+| # | blocker | ケース | RED |
+|---|---|---|---|
+| B1 | 末尾判定が SQLite のトークナイザと一致しない | `sql_tail_sqlite` | 往復 1 の自前判定に戻す → `FAIL sql_tail_sqlite:766: kapi_db_prepare_only(h, "SELECT 1; \v") == 0` |
+| B2 | 入力検証で拒否すると旧 stmt が bind 可能なまま残る | `prepare_replaces` | finalize を引数検証の後ろへ戻す → `FAIL prepare_replaces:829: kapi_db_column_int(h, 0) == 0` (拒否された prepare の後の step が前の INSERT を実行) |
+| B3 | 列値の実体化が失敗しても欠落 ROW を成功で返す | `materialize_fail` | 長さだけ見る形に戻す → `FAIL materialize_fail:879: kapi_db_step(h) == DB_STATUS_ERROR` |
+| B4 | journal 名の容量検査に cwd が含まれない | `resolve_len` | 解決をやめて入力名のまま検査する → `FAIL resolve_len:948: kapi_db_error_code(-1) == SQLITE_CANTOPEN` (251B の cwd で journal 名が切り詰められ本体に当たり `BUSY_RECOVERY`) |
+
+**B1 の中身**: SQLite のトークナイザは CC_SPACE の run に入った**後**を
+`sqlite3Isspace()` (6 文字、`\v` を含む) で走査するので `"; \v"` は受理するが、
+`"\v"` で**始まる**末尾は `CC_ILLEGAL`。UTF-8 BOM は TK_SPACE。閉じていない
+`/*` は空白にならない。自前の表ではこの 3 つを同時に写せないので、
+`sql_tail_check` は **pzTail をもう一度 `sqlite3_prepare_v2` に渡し**、
+「rc == OK かつ stmt が NULL」だけを単一 statement と認める。
+
+**B3 の限界**: ホストの実 SQLite では `sqlite3_step` の方が先に NOMEM で落ちるため、
+「step は通ったが accessor が NULL」という形を実メモリ圧では作れない
+(`materialize_fail` の (c) がその経路)。決定的に踏むために
+`sqlite3_column_blob` / `sqlite3_column_text` の **1 対だけ** を差し替えている。
 
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
@@ -317,17 +341,16 @@ prepare 自体が落ちる。したがって `\v` は末尾でも空白に数え
 | `owner_isolation` | 子 owner の回収で親の接続と実行中 stmt が無事 |
 | `order_new` / `order_old` | 上の RED → GREEN の 4 |
 
-### 4. ホストでは踏めなかったもの ([V4])
-
-- **1364 列を超える行**での descriptor 領域のはみ出し。SQL は NUL 込み 1024B が上限なので
-  そこまで列を並べた statement を作れない。純関数 `shm_row_fits_n` の算術だけで覆ってある。
 | `shm_exact` | 1 列の行で TEXT `room - 1` / BLOB `room` が**書ける** (`data_offset != 0`、長さ一致)、+1 は `-1` + `TOOBIG`、番兵は 4 とも無傷 |
 | `stat_faults` | journal / 本体の stat が NOTFOUND 以外で落ちたら `IOERR` で断り **SQLite を呼ばない** (バックエンド呼び出し回数で確認)、NOTFOUND だけが `CANTOPEN` |
 | `journal_mode` | 非空の非 DB を RW で開くと `NOTADB` (CANTOPEN に潰れない)、正常な DB では `db_journal_mode_check` が `SQLITE_OK` |
 | `step_no_stmt` | prepare_only 失敗の後の `db_step` が DONE を返したら診断が 0 に戻る |
 | `path_len` | `<path>-journal` が `VFS_MAX_PATH` に収まる 247B は開ける、248B は本体があっても `CANTOPEN` |
-| `sql_tail` | `sql_is_space` が SQLite のトークナイザと同じ 5 文字、`\v` は不可 (prepare も落ちる)、`\f` 混じりの末尾は可・`;` の後に statement があれば不可 |
 | `transient` | 同じスクラッチを 2 本目の bind で上書きしてから step しても 1 本目の値が残る (`SQLITE_TRANSIENT`) |
+| `sql_tail_sqlite` | SQLite が受理する末尾 (`; \v` / BOM / `-- c` / `/* c */` / `;;` / `\f\r\n\t`) は通り、読めない末尾 (`/*` 未閉じ、先頭 `\v`) と 2 本目の statement は拒否。拒否のあと stmt が残らない |
+| `prepare_replaces` | 空 SQL / 上限超過 / NULL / tail あり のどれで拒否しても旧 stmt は消えており、続く `db_step` は DONE で**何も実行しない** |
+| `materialize_fail` | (a) 収まる BLOB は取れる (b) accessor が値を返せないとき ERROR + `NOMEM` + 部分 ROW なし + stmt は生存 (c) MEMSYS5 を締めて step 側で落ちても同じく部分 ROW なし |
+| `resolve_len` | (a) cwd 251B で journal 名が切り詰められ本体に衝突する形でも `CANTOPEN` (b) 解決名 248B は `CANTOPEN` (c) 247B は開ける (d) SQLite には解決後の絶対名だけが渡る |
 
 ### 4. ホストでは踏めなかったもの ([V4])
 
@@ -348,6 +371,12 @@ prepare 自体が落ちる。したがって `\v` は末尾でも空白に数え
   K2 の PTE 検査ケースは実装レビュー 往復 1 の指摘で、**許可帯の外**を指す番地から
   **許可帯の中の未マップページ** (`kapi->sbrk_heap_limit` = guard_a の先頭) へ
   置き換えた — 前者は `ring3_ptr_ok` だけで落ちるので PTE 検査を消しても通ってしまう。
+- **実メモリ圧での「step は通ったが accessor が失敗」**。ホストの実 SQLite では
+  `sqlite3_step` の方が先に NOMEM で落ちる (`materialize_fail` の (c) で確認)。
+  実機の MEMSYS5 (384KB) で accessor 側が落ちる形は、accessor を 1 対だけ
+  差し替えた (b) で決定的に踏んでいる。
+- `vfs_resolve_path` の **正規化** (`.` / `..` / 連続 `/`) と mount 解決。模型は
+  cwd の連結と切り詰めまでしかしない。B4 の判定は長さの規則として固定してある。
 - `PDE.PS` (4MB ページ) の経路。この OS は一度も 4MB ページを張らないので
   ホストでも実機でも作れない。`paging_addrspace_pte_flags` は**明示的に**
   非 present 扱いで断る (安全側) というコードとコメントだけがある。

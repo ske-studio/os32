@@ -41,12 +41,19 @@ static char path_copy_buf[PATH_COPY_BUF_SIZE];
 static char text_copy_buf[DB_BIND_TEXT_MAX + 1];
 static u8   blob_copy_buf[DB_BIND_BLOB_MAX];
 
+/* v50: 呼び手の path を **解決した絶対名**。相対名のまま検査すると cwd の
+ * 長さが勘定に入らない (Codex 往復 2 の B4: 251B の cwd + "f.db" は入力 4B で
+ * 検査を通るのに、実 VFS が連結して 256B に切り詰めるので本体と journal の
+ * 解決名が同じになり BUSY_RECOVERY になる)。stat も open もこの名前で行う
+ * — SQLite に相対名を渡さないので、transaction 中に cwd が動いても
+ * journal の削除先が変わらない。 */
+static char abs_path_buf[VFS_MAX_PATH];
+
 /* `<path>-journal` を組み立てる場所。**下位層の容量に合わせる**:
  * fs/vfs.c の vfs_resolve_path は VFS_MAX_PATH (= OS32_MAX_PATH = 256B) の
  * 作業バッファで正規化するので、それを超える名前は静かに切り詰められて
- * **本体を指してしまう** (255B の path だと journal の stat が本体に当たり
- * BUSY_RECOVERY になる)。SQLite 側の mxPathname も 256。したがって
- * `<path>-journal` が NUL 込み 256B に収まらない path は open の前に断る。 */
+ * **本体を指してしまう**。SQLite 側の mxPathname も 256。したがって
+ * `<絶対名>-journal` が NUL 込み 256B に収まらない path は open の前に断る。 */
 #define DB_JOURNAL_SUFFIX "-journal"
 static char journal_buf[VFS_MAX_PATH];
 
@@ -162,42 +169,34 @@ static int db_user_str_copy(const char *src, char *dst, u32 cap)
 }
 
 /* prepare_only の pzTail が「次の statement を含まない」か (票 §1a)。
- * 空白・行コメント (--)・ブロックコメント・空の区切り (;) だけなら真。 */
-static int sql_is_space(char c)
+ *
+ * 自前の空白 / コメント表は **必ず SQLite とずれる** (Codex 往復 2 の B1):
+ * トークナイザの先頭判定は 5 文字だが続きの走査は `sqlite3Isspace()` (6 文字、
+ * `\v` を含む) で回るし、UTF-8 BOM は TK_SPACE として読み飛ばされるし、
+ * 閉じていないブロックコメントは SQLite 側では空白にならない。
+ * そこで **判定そのものを SQLite にさせる**: 末尾をもう一度 prepare して
+ *   - rc == SQLITE_OK かつ stmt が NULL → 末尾は空白 / コメントだけ = 単一
+ *   - stmt が返る                        → 次の statement がある = 拒否
+ *   - rc != SQLITE_OK                    → SQLite が読めない末尾 = 拒否
+ * 戻り値: SQLITE_OK = 単一 statement / それ以外 = 拒否する理由のコード。 */
+static int sql_tail_check(sqlite3 *db, const char *tail)
 {
-    /* SQLite の**トークナイザ**が空白と認める 5 文字 (aiClass の CC_SPACE):
-     * space / \t / \n / \f / \r。ここが狭いと、SQLite が読み飛ばした末尾を
-     * 「次の statement」と誤判定する (\f がそれだった)。
-     * 0x0B (\v) は sqlite3Isspace では空白だが aiClass では CC_ILLEGAL —
-     * SQLite 自身が statement の中でも外でも受け付けないので、ここでも
-     * 空白に数えない (数えると「SQLite は読めない末尾」を通してしまう)。 */
-    return c == ' ' || c == '\t' || c == '\n' ||
-           c == '\f' || c == '\r';
-}
+    sqlite3_stmt *extra = (sqlite3_stmt *)0;
+    int rc, code;
 
-static int sql_tail_is_blank(const char *t)
-{
-    if (!t) return 1;
-    while (*t) {
-        if (sql_is_space(*t) || *t == ';') {
-            t++;
-            continue;
-        }
-        if (t[0] == '-' && t[1] == '-') {
-            t += 2;
-            while (*t && *t != '\n') t++;
-            continue;
-        }
-        if (t[0] == '/' && t[1] == '*') {
-            t += 2;
-            while (*t && !(t[0] == '*' && t[1] == '/')) t++;
-            if (!*t) return 1;            /* 閉じていない = 以降は SQL ではない */
-            t += 2;
-            continue;
-        }
-        return 0;                         /* 次の statement がある */
+    if (!tail || !*tail) return SQLITE_OK;
+    rc = sqlite3_prepare_v2(db, tail, -1, &extra, 0);
+    if (rc != SQLITE_OK) {
+        code = sqlite3_extended_errcode(db);
+        if (code == SQLITE_OK) code = rc;
+        if (extra) sqlite3_finalize(extra);
+        return code;
     }
-    return 1;
+    if (extra) {
+        sqlite3_finalize(extra);
+        return SQLITE_MISUSE;             /* 2 本目の statement */
+    }
+    return SQLITE_OK;
 }
 
 /* ======================================================================== */
@@ -257,38 +256,63 @@ static int shm_row_fits_n(int ncol, u32 payload)
     return 1;
 }
 
-static int shm_row_fits(sqlite3_stmt *stmt, int ncol)
+/* 行を書く前の 1 巡目 (Codex 往復 2 の B3)。ここで **列値を実体化** し、
+ *   - 16KB に収まるか
+ *   - 実体化そのものが失敗していないか (MEMSYS5 プールは 384KB しかない。
+ *     `sqlite3_column_blob/text` が NULL を返す・`sqlite3_errcode` が NOMEM に
+ *     なる = 値が取れていない。長さだけ見て書くと data_offset = 0 の
+ *     **欠落 ROW を成功として**返してしまう)
+ * を確かめる。2 巡目 (shm_write_row) の accessor は SQLite の中で
+ * キャッシュ済みの値を返すので、確保は増えない。
+ * 戻り値: SQLITE_OK = 書いてよい / SQLITE_TOOBIG = 溢れる /
+ *         その他 = 実体化の失敗コード (NOMEM 等)。 */
+static int shm_row_check(sqlite3 *db, sqlite3_stmt *stmt, int ncol)
 {
     u32 payload = 0;
     int i;
 
-    if (!shm_row_fits_n(ncol, 0)) return 0;   /* descriptor だけで溢れる列数 */
+    if (!shm_row_fits_n(ncol, 0)) return SQLITE_TOOBIG;  /* descriptor で溢れる */
     for (i = 0; i < ncol; i++) {
         u32 add;
         int len;
+        const void *p;
         switch (sqlite3_column_type(stmt, i)) {
         case SQLITE_INTEGER:
         case SQLITE_FLOAT:
             add = 4u;
             break;
         case SQLITE_TEXT:
-            len = sqlite3_column_bytes(stmt, i);
-            if (len < 0) return 0;
-            add = (u32)len + 1u;          /* 終端 NUL の分 */
-            break;
         case SQLITE_BLOB:
+            if (sqlite3_column_type(stmt, i) == SQLITE_TEXT)
+                p = (const void *)sqlite3_column_text(stmt, i);
+            else
+                p = sqlite3_column_blob(stmt, i);
             len = sqlite3_column_bytes(stmt, i);
-            if (len < 0) return 0;
+            /* 実体化の失敗: ポインタが無いのに長さがある、または SQLite が
+             * NOMEM を立てた。0 バイトの値は NULL ポインタでも正当。 */
+            if ((!p && len > 0) ||
+                (db && sqlite3_errcode(db) == SQLITE_NOMEM)) {
+                int code = db ? sqlite3_extended_errcode(db) : SQLITE_NOMEM;
+                /* 直前の step が ROW / DONE を返していると errcode はそれを
+                 * 映したまま。値が取れなかった理由の説明にならないので
+                 * NOMEM (確保の失敗) に寄せる。 */
+                if (code == SQLITE_OK || code == SQLITE_ROW ||
+                    code == SQLITE_DONE) code = SQLITE_NOMEM;
+                return code;
+            }
+            if (len < 0) return SQLITE_TOOBIG;
             add = (u32)len;
+            if (sqlite3_column_type(stmt, i) == SQLITE_TEXT)
+                add += 1u;                 /* 終端 NUL の分 */
             break;
         default:
             add = 0u;                      /* NULL は payload を持たない */
             break;
         }
-        if (add > (u32)DB_SHM_BLOCK_SIZE - payload) return 0;  /* 加算 overflow */
+        if (add > (u32)DB_SHM_BLOCK_SIZE - payload) return SQLITE_TOOBIG;
         payload += add;
     }
-    return shm_row_fits_n(ncol, payload);
+    return shm_row_fits_n(ncol, payload) ? SQLITE_OK : SQLITE_TOOBIG;
 }
 
 /* ======================================================================== */
@@ -310,13 +334,18 @@ static int shm_write_row(DbSlot *slot)
     }
 
     ncol = sqlite3_column_count(slot->active_stmt);
-    /* v50 (票 §1b): 収まらない行は **1 バイトも書かず** に失敗させる。
-     * 部分 ROW も返さない — 呼び手が「取れた」と誤解しないため。
+    /* v50 (票 §1b): 収まらない行と **実体化に失敗した行** は 1 バイトも書かず
+     * に失敗させる。部分 ROW も返さない — 呼び手が「取れた」と誤解しないため。
      * stmt は生かしたまま返す (finalize は呼び手の db_finalize / db_close)。 */
-    if (!shm_row_fits(slot->active_stmt, ncol)) {
-        slot_note(slot, SQLITE_TOOBIG);
-        shm_write_error_text("row exceeds the 16KB result block");
-        return DB_STATUS_ERROR;
+    {
+        int chk = shm_row_check(slot->db, slot->active_stmt, ncol);
+        if (chk != SQLITE_OK) {
+            slot_note(slot, chk);
+            shm_write_error_text(chk == SQLITE_TOOBIG
+                                 ? "row exceeds the 16KB result block"
+                                 : "column value could not be materialized");
+            return DB_STATUS_ERROR;
+        }
     }
     hdr->status = DB_STATUS_ROW;
     hdr->column_count = (i32)ncol;
@@ -793,13 +822,21 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
         return -1;
     }
 
+    /* (0) 以降はすべて **解決後の絶対名** で扱う (Codex 往復 2 の B4)。 */
+    abs_path_buf[0] = '\0';
+    vfs_resolve_path(path_copy_buf, abs_path_buf, (int)sizeof(abs_path_buf));
+    if (abs_path_buf[0] == '\0') {
+        open_fail_set(SQLITE_CANTOPEN);
+        return -1;
+    }
+
     /* (1) 本体が存在し size > 0 か。**SQLite を呼ぶ前**に見る (Codex 往復 2 の 1:
      * SQLite の hasHotJournal は RO でも 0 ページの DB に付随する journal を
      * 消してしまうので、その手前で止める = 副作用ゼロ)。
      * stat の失敗は「確定した不存在 (NOTFOUND)」と「それ以外」を分ける —
      * I/O 障害を不存在と同じ扱いにすると、journal の有無が分からないまま
      * SQLite に進むことになる。 */
-    rc = vfs_stat(path_copy_buf, &st);
+    rc = vfs_stat(abs_path_buf, &st);
     if (rc != 0) {
         open_fail_set(rc == OS32_ERR_NOTFOUND ? SQLITE_CANTOPEN : SQLITE_IOERR);
         return -1;
@@ -810,7 +847,7 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
     }
     /* (2) hot journal があれば RO / RW とも失敗。回復は S3 の明示操作。
      * 「無い」と言い切れるのは NOTFOUND のときだけ。 */
-    if (!db_journal_name(path_copy_buf)) {
+    if (!db_journal_name(abs_path_buf)) {
         open_fail_set(SQLITE_CANTOPEN);      /* path too long (下位層の容量) */
         return -1;
     }
@@ -843,7 +880,7 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
 
     /* CREATE も URI も付けない。vfs は既定の "os32"。 */
     flags = writable ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY;
-    rc = sqlite3_open_v2(path_copy_buf, &db, flags, (const char *)0);
+    rc = sqlite3_open_v2(abs_path_buf, &db, flags, (const char *)0);
     db_slots[i].db = db;
     if (rc != SQLITE_OK) {
         slot_save_error(&db_slots[i], rc);
@@ -883,25 +920,29 @@ int __cdecl kapi_db_prepare_only(int handle, const char *sql)
     DbSlot *slot = slot_get(handle);
     sqlite3_stmt *stmt = (sqlite3_stmt *)0;
     const char *tail = (const char *)0;
-    int rc;
+    int rc, tail_rc;
 
     if (!slot) {
         shm_write_error((DbSlot *)0);
         return -1;
     }
+
+    /* **入口で必ず**旧 stmt を捨てる (Codex 往復 2 の B2)。§1a の「旧 stmt は
+     * finalize して置換」は拒否理由に依らない — 引数検査で弾いたときに旧 stmt を
+     * 残すと、bind 済みの前の statement が次の db_step で実行されてしまう
+     * (呼び手からは「prepare は失敗したのに INSERT が走った」に見える)。 */
+    if (slot->active_stmt) {
+        slot_note_teardown(slot, sqlite3_finalize(slot->active_stmt));
+        slot->active_stmt = (sqlite3_stmt *)0;
+    }
+    slot->bindable = 0;
+
     if (!db_user_str_copy(sql, sql_copy_buf, SQL_COPY_BUF_SIZE) ||
         sql_copy_buf[0] == '\0') {
         slot_note(slot, SQLITE_MISUSE);
         shm_write_error_text("sql is empty, unterminated or over the limit");
         return -1;
     }
-
-    /* 旧 stmt は finalize して置換する。 */
-    if (slot->active_stmt) {
-        slot_note_teardown(slot, sqlite3_finalize(slot->active_stmt));
-        slot->active_stmt = (sqlite3_stmt *)0;
-    }
-    slot->bindable = 0;
 
     rc = sqlite3_prepare_v2(slot->db, sql_copy_buf, -1, &stmt, &tail);
     if (rc != SQLITE_OK || !stmt) {
@@ -910,10 +951,11 @@ int __cdecl kapi_db_prepare_only(int handle, const char *sql)
         shm_write_error(slot);
         return -1;
     }
-    /* 次の statement が続いていれば拒否 (末尾の空白 / コメント / ; は可)。 */
-    if (!sql_tail_is_blank(tail)) {
+    /* 末尾に何かあるかは SQLite に判定させる (単一 statement の契約)。 */
+    tail_rc = sql_tail_check(slot->db, tail);
+    if (tail_rc != SQLITE_OK) {
         sqlite3_finalize(stmt);
-        slot_note(slot, SQLITE_MISUSE);
+        slot_note(slot, tail_rc);
         shm_write_error_text("only a single statement is allowed");
         return -1;
     }
@@ -1034,12 +1076,22 @@ u32 db_v50_selftest(void)
     if (db_user_range_ok((const void *)0, 1u)) bad |= 1u << 2;
     if (db_user_range_ok((const void *)0xFFFFFF00UL, 0x200u)) bad |= 1u << 2;
 
-    /* (3) 単一 statement の判定 (末尾の空白 / コメント / ; は可) */
-    if (!sql_tail_is_blank("")) bad |= 1u << 3;
-    if (!sql_tail_is_blank("  \t\r\n")) bad |= 1u << 3;
-    if (!sql_tail_is_blank(" -- trailing")) bad |= 1u << 3;
-    if (!sql_tail_is_blank(" /* c */ ;")) bad |= 1u << 3;
-    if (sql_tail_is_blank(" SELECT 2")) bad |= 1u << 3;
+    /* (3) journal 名の容量規則 (票 §1a / Codex 往復 2 の B4)。
+     * 末尾判定は SQLite 自身にさせるので接続が要る = ブート時には踏めない。
+     * ここで踏むのは接続の要らない「下位層の path 容量」の方。
+     * `<絶対名>-journal` が NUL 込み VFS_MAX_PATH に収まる長さが境界。 */
+    {
+        static char probe[VFS_MAX_PATH + 8];
+        u32 fit = (u32)VFS_MAX_PATH - 1u - ((u32)sizeof(DB_JOURNAL_SUFFIX) - 1u);
+        u32 k;
+        for (k = 0; k < (u32)sizeof(probe); k++) probe[k] = 'a';
+        probe[0] = '/';
+        probe[fit] = '\0';
+        if (!db_journal_name(probe)) bad |= 1u << 3;
+        probe[fit] = 'a';
+        probe[fit + 1u] = '\0';
+        if (db_journal_name(probe)) bad |= 1u << 3;
+    }
 
     /* (4) owner 別の欄が ID の池 (1 = シェル帯 .. 5) を覆っている */
     if (DB_OWNER_SLOTS < 6) bad |= 1u << 4;

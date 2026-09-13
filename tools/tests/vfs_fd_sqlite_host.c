@@ -12,11 +12,26 @@ static int current_owner = 2, owner_sets, probes, size_rc, write_rc;
  * (vfs_open_sqlite が広域 owner を動かさないことの確認)。S0-K の
  * kapi_db_v50_host.c だけが owner を渡り歩くのでここも一緒に動かす。 */
 static int resolve_owner = 2;
+/* 相対名に前置する cwd (末尾 '/' 込み)。fs/vfs.c の vfs_resolve_path は
+ * cwd + input を VFS_MAX_PATH の作業バッファで連結して**切り詰める**ので、
+ * 「入力は短いが解決名は上限」という形を作れる。F2a/F2b は "" のまま。 */
+static const char *resolve_cwd = "";
 static VfsOps mock_ops;
 int res_owner_get(void) { return current_owner; }
 void res_owner_set(int owner) { owner_sets++; current_owner = owner; }
 void vfs_resolve_path(const char *in, char *out, int size)
-{ probes++; CHECK(current_owner == resolve_owner); str_cpy(out, in, size); }
+{
+    probes++;
+    CHECK(current_owner == resolve_owner);
+    if (in && in[0] != '/' && resolve_cwd[0]) {
+        int used;
+        str_cpy(out, resolve_cwd, size);
+        used = (int)strlen(out);
+        str_cpy(out + used, in, size - used);   /* 上限で切り詰める */
+        return;
+    }
+    str_cpy(out, in, size);
+}
 VfsOps *vfs_route(const char *path, char *out, int size, void **ctx)
 { probes++; str_cpy(out, path, size); *ctx = &mock_ops; return &mock_ops; }
 int vfs_path_kind(const char *path) { probes++; return VFS_KIND_FILE; }

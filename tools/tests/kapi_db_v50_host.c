@@ -38,17 +38,27 @@ volatile u32 tick_count;
 u32 sys_time(void) { return 0; }
 void kprintf(u8 color, const char *fmt, ...) { (void)color; (void)fmt; }
 int vfs_sync(void) { probes++; return 0; }
-int vfs_rm(const char *path) { probes++; return fixture_rm(path); }
+/* fs/vfs.c の vfs_stat / vfs_rm は中で vfs_resolve_path を呼ぶ。相対名と
+ * cwd の連結・**切り詰め**はそこで起きるので、模型も同じ順で呼ぶ。 */
+static const char *host_resolve(const char *path)
+{
+    static char resolved[VFS_MAX_PATH];
+    vfs_resolve_path(path, resolved, (int)sizeof(resolved));
+    return resolved;
+}
+int vfs_rm(const char *path) { probes++; return fixture_rm(host_resolve(path)); }
 /* stat の障害注入 (blocker 2)。`stat_fail_on` に部分一致する path の stat が
  * `stat_fail_rc` を返す。実 FS では EACCES / EIO / ELOOP がこの形で来る。 */
 static const char *stat_fail_on;
 static int stat_fail_rc = OS32_ERR_IO;
+static int stat_calls;
 int vfs_stat(const char *path, OS32_Stat *st)
 {
     FixtureFile *f;
     probes++;
+    stat_calls++;
     if (stat_fail_on && strstr(path, stat_fail_on)) return stat_fail_rc;
-    f = fixture_find(path, 0);
+    f = fixture_find(host_resolve(path), 0);
     if (!f) return OS32_ERR_NOTFOUND;
     if (st) { memset(st, 0, sizeof(*st)); st->st_size = f->size; }
     return 0;
@@ -85,7 +95,21 @@ int ring3_user_range_ok(u32 p, u32 len)
 /* SHM の置き場。末尾に番兵を置いて「16KB を 1 バイトも越えない」を見る。 */
 #define SHM_CANARY 256
 static unsigned char test_shm[DB_SHM_BLOCK_SIZE + SHM_CANARY];
+
+/* 列値の実体化の境界 (往復 2 の B3)。SQLite は確保に失敗すると accessor で
+ * NULL を返す。実機の MEMSYS5 (384KB) ではこれが起きうるが、ホストでは
+ * `sqlite3_step` の方が先に落ちて同じ形を作れない。**その 1 本だけ**を
+ * 差し替えて、長さはあるのにポインタが無い状態を決定的に作る。 */
+static int fail_column_ptr;
+static const void *host_column_blob(sqlite3_stmt *st, int i)
+{ return fail_column_ptr ? (const void *)0 : sqlite3_column_blob(st, i); }
+static const unsigned char *host_column_text(sqlite3_stmt *st, int i)
+{ return fail_column_ptr ? (const unsigned char *)0 : sqlite3_column_text(st, i); }
+#define sqlite3_column_blob host_column_blob
+#define sqlite3_column_text host_column_text
 #include "../../kapi/kapi_db.c"
+#undef sqlite3_column_blob
+#undef sqlite3_column_text
 
 static int cases_run;
 
@@ -100,6 +124,10 @@ static void reset_all(void)
     host_cpl3 = 0;
     stat_fail_on = NULL;
     stat_fail_rc = OS32_ERR_IO;
+    stat_calls = 0;
+    resolve_cwd = "";
+    fail_column_ptr = 0;
+    sqlite3_hard_heap_limit64(0);
     resolve_owner = current_owner = 2;
     fixture_init();
 }
@@ -606,19 +634,19 @@ static void stat_faults(void)
     /* journal の stat が I/O で落ちたら「journal 無し」と言い切れない。
      * SQLite を呼ばずに IOERR で断る (バックエンドへの I/O が増えない)。 */
     stat_fail_on = "-journal";
-    before = probes;
+    before = stat_calls;
     CHECK(kapi_db_open_existing("/f.db", 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
-    CHECK(probes == before + 2);           /* 本体 + journal の stat だけ */
+    CHECK(stat_calls == before + 2);       /* 本体 + journal の stat だけ */
     CHECK(kapi_db_open_existing("/f.db", 1) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
 
     /* 本体の stat も同じ: NOTFOUND だけが「不存在」。 */
     stat_fail_on = "/f.db";
-    before = probes;
+    before = stat_calls;
     CHECK(kapi_db_open_existing("/f.db", 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
-    CHECK(probes == before + 1);
+    CHECK(stat_calls == before + 1);
     stat_fail_rc = OS32_ERR_NOTFOUND;
     CHECK(kapi_db_open_existing("/f.db", 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);   /* 確定した不存在 */
@@ -697,36 +725,6 @@ static void path_len(void)
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
 }
 
-/* ---- 14. 末尾の空白は SQLite と同じ 6 文字 (実装レビュー K6) ------------ */
-static void sql_tail(void)
-{
-    int h;
-
-    make_db("/t.db", "CREATE TABLE t(x)");
-    h = kapi_db_open_existing("/t.db", 1);
-    CHECK(h >= 0);
-
-    /* SQLite のトークナイザ (aiClass の CC_SPACE) と同じ 5 文字。 */
-    CHECK(sql_is_space(' ') && sql_is_space('\t') && sql_is_space('\n'));
-    CHECK(sql_is_space('\f') && sql_is_space('\r'));
-    CHECK(!sql_is_space('x') && !sql_is_space('\0'));
-    /* 0x0B (\v) は aiClass では CC_ILLEGAL。SQLite 自身が statement の中でも
-     * 受け付けない (prepare が落ちる) ので、末尾でも空白に数えない。 */
-    CHECK(!sql_is_space('\v'));
-    CHECK(kapi_db_prepare_only(h, "SELECT 1\v") == -1);
-    CHECK(kapi_db_prepare_only(h, "SELECT 1;\v") == -1);
-
-    CHECK(kapi_db_prepare_only(h, "SELECT 1 \f") == 0);
-    CHECK(kapi_db_prepare_only(h, "SELECT 1\f\r\n\t ") == 0);
-    CHECK(kapi_db_prepare_only(h, "SELECT 1;\f ") == 0);
-    CHECK(kapi_db_prepare_only(h, "SELECT 1 \f-- tail") == 0);
-    /* 区切りの後ろに次の statement があれば、間が \f でも拒否する
-     * (\f を空白と認めない実装は prepare の tail を読み違えて**通して**いた)。 */
-    CHECK(kapi_db_prepare_only(h, "SELECT 1;\f SELECT 2") == -1);
-    CHECK(kapi_db_error_code(h) == SQLITE_MISUSE);
-    CHECK(kapi_db_close(h) == 0);
-}
-
 /* ---- 15. SQLITE_TRANSIENT: スクラッチを上書きしても値が残る ------------- */
 static void transient(void)
 {
@@ -751,6 +749,242 @@ static void transient(void)
     CHECK(kapi_db_close(h) == 0);
 }
 
+/* ---- 16. 末尾判定は SQLite と 1 対 1 か (往復 2 の B1) ------------------ */
+/*  自前の空白 / コメント表は必ずずれる。`\v` (トークナイザの続き走査は
+ *  sqlite3Isspace = 6 文字)、UTF-8 BOM (TK_SPACE)、閉じていないブロック
+ *  コメント (SQLite は空白にしない) の 3 つが反例。SQLite 自身に
+ *  末尾をもう一度 prepare させれば、判定は定義上 1 対 1 になる。           */
+static void sql_tail_sqlite(void)
+{
+    int h;
+
+    make_db("/ts.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/ts.db", 1);
+    CHECK(h >= 0);
+
+    /* SQLite が受理する末尾は wrap も受理する */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; \v") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\357\273\277") == 0);   /* UTF-8 BOM */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; -- comment") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; /* c */") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;;") == 0);            /* 空 statement */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\f\r\n\t ") == 0);
+
+    /* SQLite が読めない末尾は拒否する (閉じていないブロックコメント) */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;/*") == -1);
+    CHECK(kapi_db_error_code(h) != SQLITE_OK);
+    /* 2 本目の statement は拒否 */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; SELECT 2") == -1);
+    CHECK(kapi_db_error_code(h) == SQLITE_MISUSE);
+    /* 末尾が \v で**始まる**と SQLite のトークナイザは TK_ILLEGAL にする
+     * (CC_SPACE の run に入ってからの続きだけが sqlite3Isspace = \v を含む)。
+     * 自前の表ではこの非対称を写せない。拒否理由のコードは SQLite のもの。 */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\v SELECT 2") == -1);
+    CHECK(kapi_db_error_code(h) != SQLITE_OK);
+    CHECK(kapi_db_error_code(h) != SQLITE_MISUSE);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; \v SELECT 2") == -1);
+    CHECK(kapi_db_error_code(h) == SQLITE_MISUSE);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\v") == -1);   /* 先頭 \v は不可 */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; \v") == 0);   /* 空白の続きなら可 */
+
+    /* 判定は本体の prepare と同じ接続で行う = SQLite の規則そのもの。
+     * 拒否したあとに stmt が残っていないこと (B2 と同じ規則)。 */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; SELECT 2") == -1);
+    CHECK(kapi_db_step(h) == DB_STATUS_DONE);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 17. 拒否した prepare が旧 stmt を残さない (往復 2 の B2) ----------- */
+static void prepare_replaces(void)
+{
+    static char big[DB_SQL_MAX_BYTES + 64];
+    int h, mode;
+
+    make_db("/pr.db", "CREATE TABLE t(x)");
+    memset(big, ' ', sizeof(big));
+    memcpy(big, "SELECT 1", 8);
+    big[DB_SQL_MAX_BYTES] = '\0';        /* NUL 込み 1025B = 上限超過 */
+
+    for (mode = 0; mode < 3; mode++) {
+        h = kapi_db_open_existing("/pr.db", 1);
+        CHECK(h >= 0);
+        CHECK(kapi_db_exec(h, "DELETE FROM t") == 0);
+
+        /* 積んで bind まで済ませた INSERT がある状態で… */
+        CHECK(kapi_db_prepare_only(h, "INSERT INTO t VALUES(?)") == 0);
+        CHECK(kapi_db_bind_int(h, 1, 42) == 0);
+
+        /* …引数検証で弾かれる prepare を出す (空 / 上限超過 / NULL)。 */
+        if (mode == 0) CHECK(kapi_db_prepare_only(h, "") == -1);
+        else if (mode == 1) CHECK(kapi_db_prepare_only(h, big) == -1);
+        else CHECK(kapi_db_prepare_only(h, (const char *)0) == -1);
+        CHECK(kapi_db_error_code(h) == SQLITE_MISUSE);
+
+        /* 旧 stmt は捨てられているので step は何も実行しない。 */
+        CHECK(kapi_db_step(h) == DB_STATUS_DONE);
+        CHECK(kapi_db_bind_int(h, 1, 1) == -1);      /* bind もできない */
+
+        CHECK(kapi_db_prepare_only(h, "SELECT count(*) FROM t") == 0);
+        CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+        CHECK(kapi_db_column_int(h, 0) == 0);        /* INSERT は走っていない */
+        CHECK(kapi_db_finalize(h) == 0);
+        CHECK(kapi_db_close(h) == 0);
+    }
+
+    /* 単一 statement の拒否 (tail あり) でも同じ */
+    h = kapi_db_open_existing("/pr.db", 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_prepare_only(h, "INSERT INTO t VALUES(?)") == 0);
+    CHECK(kapi_db_bind_int(h, 1, 7) == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1; SELECT 2") == -1);
+    CHECK(kapi_db_step(h) == DB_STATUS_DONE);
+    CHECK(kapi_db_prepare_only(h, "SELECT count(*) FROM t") == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(kapi_db_column_int(h, 0) == 0);
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 18. 実体化の失敗を ROW にしない (往復 2 の B3) --------------------- */
+/*  16KB に収まる長さでも、SQLite が値を組み立てるメモリを取れなければ
+ *  accessor は NULL を返す。長さだけ見て書くと data_offset = 0 の
+ *  「成功した欠落 ROW」になる。hard heap limit で確保を失敗させて踏む。   */
+static void materialize_fail(void)
+{
+    int room = (int)DB_SHM_BLOCK_SIZE - (int)sizeof(DB_ResultHeader)
+               - (int)sizeof(DB_ColumnInfo);
+    DB_ColumnInfo *info = (DB_ColumnInfo *)(test_shm + sizeof(DB_ResultHeader));
+    char sql[128];
+    sqlite3_int64 used;
+    int h, code;
+
+    make_db("/m.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/m.db", 1);
+    CHECK(h >= 0);
+
+    /* (a) 対照: 限界なしなら「収まる BLOB」はちゃんと取れる。 */
+    sprintf(sql, "SELECT zeroblob(%d)", room);
+    CHECK(kapi_db_prepare_only(h, sql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(info->data_offset != 0);
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* (b) **本命**: step は通ったのに accessor が値を返せない形。
+     * 長さ (sqlite3_column_bytes) は生きているので、長さだけを見る実装は
+     * 「収まる行」と判断し、payload を書かないまま ROW を成功として返す。 */
+    CHECK(kapi_db_exec(h, "INSERT INTO t VALUES(zeroblob(100))") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT x FROM t") == 0);
+    memset(test_shm, 0, sizeof(test_shm));
+    fail_column_ptr = 1;
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    fail_column_ptr = 0;
+    code = kapi_db_error_code(h);
+    printf("MATERIALIZE ptr code=%d status=%d cols=%d stmt=%d\n", code,
+           (int)((DB_ResultHeader *)test_shm)->status,
+           (int)((DB_ResultHeader *)test_shm)->column_count,
+           db_slots[h].active_stmt != 0);
+    CHECK(code == SQLITE_NOMEM);   /* 「値が取れなかった」の説明になる */
+    /* 部分 ROW を公開していない。stmt は生きたまま (呼び手が finalize する)。 */
+    CHECK(((DB_ResultHeader *)test_shm)->status == DB_STATUS_ERROR);
+    CHECK(((DB_ResultHeader *)test_shm)->column_count == 0);
+    CHECK(db_slots[h].active_stmt != 0);
+    canary_check("materialize_fail ptr");
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* (c) 実機に近い側: MEMSYS5 を締めると **step の方が先に**落ちる。
+     * どこで落ちても「部分 ROW を返さない」は同じでなければならない。 */
+    CHECK(kapi_db_prepare_only(h, "SELECT zeroblob(200000)") == 0);
+    used = sqlite3_memory_used();
+    sqlite3_hard_heap_limit64(used + 32768);    /* 戻り値は直前の上限 */
+    CHECK(sqlite3_hard_heap_limit64(-1) == used + 32768);
+    memset(test_shm, 0, sizeof(test_shm));
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    code = kapi_db_error_code(h);
+    printf("MATERIALIZE limit code=%d\n", code);
+    CHECK(code == SQLITE_NOMEM || (code & 0xFF) == SQLITE_NOMEM);
+    CHECK(((DB_ResultHeader *)test_shm)->status == DB_STATUS_ERROR);
+    CHECK(((DB_ResultHeader *)test_shm)->column_count == 0);
+    canary_check("materialize_fail limit");
+    sqlite3_hard_heap_limit64(0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 19. journal 名の容量は **解決後** で見る (往復 2 の B4) ------------ */
+/*  入力が 4B でも、cwd を連結した解決名は上限まで伸びる。fs/vfs.c は
+ *  VFS_MAX_PATH の作業バッファで連結して **切り詰める** ので、cwd が 251B
+ *  (末尾 '/' 込み) だと `f.db-journal` の解決名が 255B に切られて
+ *  `<cwd>f.db` = 本体とまったく同じ名前になる。相対名の長さだけを見る実装は
+ *  健全な DB を BUSY_RECOVERY として断る。                                  */
+static void build_cwd(char *cwd, u32 len)
+{
+    u32 k;
+    for (k = 0; k < len; k++) cwd[k] = 'c';
+    cwd[0] = '/';
+    cwd[len - 1u] = '/';
+    cwd[len] = '\0';
+}
+
+static void resolve_len(void)
+{
+    static char cwd[VFS_MAX_PATH + 16];
+    static char abs_name[VFS_MAX_PATH + 16];
+    u32 cap = (u32)VFS_MAX_PATH - 1u;           /* 解決名の文字数上限 (255) */
+    u32 fit = cap - 8u;                         /* journal を足せる上限 (247) */
+    int h;
+
+    /* (a) 本体の解決名が上限ちょうど = journal 名が切り詰められて衝突する形 */
+    build_cwd(cwd, cap - 4u);                   /* 251B、末尾 '/' */
+    strcpy(abs_name, cwd);
+    strcat(abs_name, "f.db");
+    CHECK(strlen(abs_name) == cap);
+    /* 中身は問わない (GREEN は SQLite を呼ぶ前に断る)。legacy kapi_db_open は
+     * path を 254B で切るので、ここは fixture に直接置く。 */
+    CHECK(fixture_create(NULL, abs_name, "db", 2) == VFS_OK);
+    resolve_cwd = cwd;
+    /* 模型でも本当に衝突することを見せる (これが旧実装の BUSY_RECOVERY の元) */
+    CHECK(fixture_find(host_resolve("f.db-journal"), 0) ==
+          fixture_find(abs_name, 0));
+    CHECK(kapi_db_open_existing("f.db", 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);   /* BUSY_RECOVERY でない */
+    CHECK(kapi_db_open_existing("f.db", 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    resolve_cwd = "";
+
+    /* (b) 解決名が 248B = journal が入らない → CANTOPEN */
+    build_cwd(cwd, fit + 1u - 4u);
+    strcpy(abs_name, cwd);
+    strcat(abs_name, "f.db");
+    CHECK(strlen(abs_name) == fit + 1u);
+    CHECK(fixture_create(NULL, abs_name, "db", 2) == VFS_OK);
+    resolve_cwd = cwd;
+    CHECK(kapi_db_open_existing("f.db", 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    resolve_cwd = "";
+
+    /* (c) 解決名が 247B = ちょうど入る → 開ける */
+    build_cwd(cwd, fit - 4u);
+    strcpy(abs_name, cwd);
+    strcat(abs_name, "f.db");
+    CHECK(strlen(abs_name) == fit);
+    make_db(abs_name, "CREATE TABLE t(x)");
+    resolve_cwd = cwd;
+    h = kapi_db_open_existing("f.db", 0);
+    CHECK(h >= 0);
+    CHECK(kapi_db_close(h) == 0);
+    resolve_cwd = "";
+
+    /* (d) 相対名は SQLite に渡らない — 解決した絶対名で open している。 */
+    make_db("/sub/rel.db", "CREATE TABLE t(x)");
+    resolve_cwd = "/sub/";
+    h = kapi_db_open_existing("rel.db", 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_exec(h, "INSERT INTO t VALUES(1)") == 0);
+    CHECK(kapi_db_close(h) == 0);
+    resolve_cwd = "";
+    CHECK(fixture_find("/sub/rel.db", 0) != NULL);
+    CHECK(fixture_find("rel.db", 0) == NULL);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -770,8 +1004,11 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "journal_mode")) journal_mode();
     else if (!strcmp(argv[1], "step_no_stmt")) step_no_stmt();
     else if (!strcmp(argv[1], "path_len")) path_len();
-    else if (!strcmp(argv[1], "sql_tail")) sql_tail();
     else if (!strcmp(argv[1], "transient")) transient();
+    else if (!strcmp(argv[1], "sql_tail_sqlite")) sql_tail_sqlite();
+    else if (!strcmp(argv[1], "prepare_replaces")) prepare_replaces();
+    else if (!strcmp(argv[1], "materialize_fail")) materialize_fail();
+    else if (!strcmp(argv[1], "resolve_len")) resolve_len();
     else if (!strncmp(argv[1], "order_", 6)) reclaim_order(argv[1] + 6);
     else CHECK(0);
 

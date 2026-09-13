@@ -119,12 +119,6 @@
 - **前提検査と削除経路** (B3 / B4 / B6): `check_root_etc` を `is_protected` の**入口で必ず 1 回**通し、`<root>/etc` が symlink / 別マウント / 通常ファイルなら配備全体を拒否 (clean も)。`_clean_tree` は top-down で「判定 → symlink → ディレクトリ → ファイル」の順に見て保護ディレクトリへ降りない (symlink 自体の削除は `is_protected_symlink`)。`mkdir` の rc、`os.walk(onerror=)`、`rmdir` の失敗をすべて非ゼロにし、prune の件数は実際に消した数にした。
 - **来歴と hsync** (B8 / B5): `pull` / `ensure_local_nhd` は**入口で** stamp を消し、`do_mount()` まで全部成功した最後にだけ書く。`hsync` は `/etc` を `sys_ls` で列挙し、大文字小文字を無視して一致する実在名を全部 stat する (`/etc/SETTINGS.DB` + hardlink の取りこぼしを塞ぐ)。`OS32_ERR_NOTFOUND` 以外の stat 失敗は同期を中止する。試験は `tools/tests/s0_tdd.md` §D.6 (86 件、RED 29 失敗 → GREEN 全通過)。
 
-### 8b. 実装レビュー 往復 2 の修正 (D、2026-09-13)
-
-- **最終パスと祖先** (1 / 2): `resolve_dest` の basename 補完は**1 回まで**で、補完後がまだディレクトリなら `ProtectError` (`<root>/bin/settings.db -> ../etc` のような二重補完を塞ぐ)。新設 `protected_ancestor` を `check_dest` が **stat より先に**当て、保護祖先を含む宛先は「書かずに成功除外」。ゲスト側も `hsp_ancestor_protected` で同じ規則 (`/etc/settings.db/sub`)。
-- **入口・走査・来歴** (6〜9): 各サブコマンドの入口で `check_root_etc` を 1 回 (対象 0 件の `sync --tag` / `prune --delete` でも止まる)。`os.walk` は親の `dirnames` から保護対象を in-place で外して降りない (読めない `etc/settings.db/` で CLI が落ちない)。stamp は tmp → fsync → rename の原子的書き込みで、失敗すれば tmp も既存も消して非ゼロ。`.pulled` が非オブジェクトなら「壊れている」を返して `--force` に届かせる。
-- **hsync** (3 / 4 / 5): 保護対象一覧が `HS_MAX_PROT` (16) を越えたら同期を拒否。`sys_read` の負値 / `sys_ls` / `sys_mkdir` / `sys_stat` / `vfs_sync` の失敗と、`MAX_FILES` / `MAX_DEPTH` の打ち切りを全部エラーに数え、`main` を `int` にして終了コードへ載せた。無検査の `str_cpy` / `str_cat` を撤去し、連結は容量付き (`str_ncpy` / `str_ncat`) だけ — 溢れたら判定より前に「path too long」で失敗。試験は `tools/tests/s0_tdd.md` §D.7 (103 件、RED 12 失敗 → GREEN 全通過)。
-
 ## 7. 実装メモ (K、2026-09-13)
 
 - v50 の 7 本は `sdk/kapi.json` 末尾に slot 201〜207 (0x32C〜0x344)、data_fields は 0x348 / 0x34C へ移動。生成物は generator 出力のまま (手編集なし)。
@@ -136,6 +130,9 @@
 - **実装レビュー 往復 1 の blocker 6 件を修正** (2026-09-13): SHM の事前検査と writer の境界条件を一致 (ちょうど収まる TEXT/BLOB は書く)、stat は NOTFOUND だけを不存在とし他は `SQLITE_IOERR`、`PRAGMA journal_mode` の照会失敗 (拡張コード) と非 DELETE (`CANTOPEN`) を分離、stmt 無しの `db_step` の DONE でも診断を 0 に、`<path>-journal` が `VFS_MAX_PATH` に収まらない path は open 前に `CANTOPEN`、末尾の空白を SQLite のトークナイザと同じ 5 文字に。
 - non-blocker も同時に: K2 の PTE ケースを「許可帯内の未マップページ (`sbrk_heap_limit`)」へ、`SQLITE_TRANSIENT` の試験をホストと K2 に、`PDE.PS` を `paging_addrspace_pte_flags` で明示拒否、`s0_tdd.md` §K の模型と列数上限の記述を実態へ。
 - 反例 7 ケースを `test_kapi_db_v50.py` に常設 (計 16 ケース)。6 件すべて実装を 1 件ずつ戻して RED を採取済み (`s0_tdd.md` §K 2b)。
+- **実装レビュー 往復 2 の blocker 4 件を修正** (2026-09-13): 末尾判定を自前の表から **SQLite への再 prepare** に替え (`sql_tail_check`、`\v` / UTF-8 BOM / 未閉じ `/*` の 3 つが自前では写せない)、`db_prepare_only` は**入口で必ず**旧 stmt を finalize してから引数検証し、列値の**実体化の失敗** (accessor が NULL / `SQLITE_NOMEM`) を欠落 ROW にせず ERROR にし、path は先に `vfs_resolve_path` で**絶対名へ解決**してから容量検査 / stat / open を行う (cwd を勘定に入れる。相対名を SQLite に渡さない)。
+- 反例 4 ケース (`sql_tail_sqlite` / `prepare_replaces` / `materialize_fail` / `resolve_len`) を常設し (計 19 ケース)、4 件すべて実装を戻して RED を採取 (`s0_tdd.md` §K 2c)。往復 1 の `sql_tail` は判定を SQLite に委ねたので `sql_tail_sqlite` に統合した。
+- kselftest のビット 3 は「末尾判定」(接続が要るのでブート時に踏めない) から「journal 名が `VFS_MAX_PATH` に収まるか」へ差し替え。`MEMORY_BUDGET.md` の K の数値は **K1 の clean build 後に再測**が要る (注記済み)。
 - **未実施**: `make` 全般・配備・エミュレータ・ゲスト試験 (K1 / K2)。`build/app.conf` / `userland/deploy.yaml` / `build/sdk.mk` は PM 登録待ち (登録行は報告に記載)。
 
 ## 9. 実装メモ (T、2026-09-13)
@@ -162,4 +159,3 @@
 ゲート (`08b4879`、テスター): `make clean` + `clean-external` → `all` (74s) → `external` → `check` (42s) すべて exit=0。vmkernel.lz4 469,605 B、settings.db 3,072 B、db_v50_test.bin 6,319 B。
 | D (`10bc6ae`) / T (`2adcb2e`) | 往復 2: Request changes | D 9 件: 補完後のパスが symlink でディレクトリを指すと cp が再補完、最終パスの祖先保護の欠けと除外の失敗扱い、hsync の保護一覧 16 件超、hsync の read / ls / mkdir / sync 失敗と void main、hsync のパス連結の容量、stamp 書き込み失敗、`.pulled` が非オブジェクト、0 件操作で `check_root_etc` が呼ばれない、os.walk が保護ディレクトリの中を先に読む。T 1 件: 先頭ゼロ 4301 桁の int を Python の桁数制限で拒否 |
 | K (`77d61b3`) | 往復 2: Request changes | 4 件: 末尾トークン判定が SQLite と不一致 (`\v` の続き、BOM、`/*` 末尾) → pzTail を再 prepare して SQLite に判定させる、入力検証で拒否した prepare が旧 stmt を bind 可能なまま残す → 入口で必ず finalize、列値の実体化 NOMEM で欠落 ROW を成功扱い → ERROR、journal 名の容量検査に cwd が含まれない (相対 path) → 解決後の絶対名で検査。T (`f2ac51c`) は往復 2 の 1 件を修正済み |
-| D (`ef0bd60`) / T (`f2ac51c`) | 往復 3 (最終): D Request changes / **T 追加なし (Approve 相当)** | D 6 件: symlink 解決後の祖先が保護されない、DB 参照に要る中間 symlink を clean / rm で消せる、CLI の source 名が cp のオプションに解釈される (`--target-directory=`)、保護ディレクトリの補完時の例外が失敗扱い、prune の候補収集で EACCES / EIO が不存在扱い、hsync が 63 文字超の名前を切り詰めて別名でコピー。**ユーザー決裁 (2026-09-13): PM 案で着地し Codex に追加 1 往復** — PM 案: 配備ツリー内の symlink は「未対応」として配備全体を拒否 (D1 / D2 / D4 の類を到達不能に)、D3 は `--` と絶対パス、D5 は lstat で ENOENT 以外を失敗、D6 は切り詰めを検出してエラー |

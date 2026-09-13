@@ -558,18 +558,23 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   診断は欠損 (stat が **NOTFOUND**) = `SQLITE_CANTOPEN`、0 バイト = `SQLITE_NOTADB`、
   journal あり = `SQLITE_BUSY_RECOVERY`。stat が NOTFOUND 以外で落ちたときは
   「journal の有無が分からない」ので `SQLITE_IOERR` で断る (不存在と同じ扱いにしない)。
-  `<path>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
-  `mxPathname` も 256) に収まらない path も、journal の stat が**本体に当たる**ので
-  open の前に `SQLITE_CANTOPEN` で断る。RW は `PRAGMA journal_mode` が `delete` で
+  path は先に `vfs_resolve_path` で**絶対名へ解決**し、stat も open もその名前で行う
+  (相対名を SQLite に渡さないので、transaction 中に cwd が動いても journal の削除先が
+  変わらない)。`<絶対名>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
+  `mxPathname` も 256) に収まらないときは、journal の stat が切り詰められて**本体に
+  当たる**ので open の前に `SQLITE_CANTOPEN` で断る。RW は `PRAGMA journal_mode` が `delete` で
   あることを照会だけで確かめ、**照会の失敗** (`SQLITE_NOTADB` / `IOERR` / `NOMEM` 等 —
   拡張コードを finalize の前に控える) と **照会は通ったが DELETE でない**
   (`SQLITE_CANTOPEN`) を区別して close し失敗する。失敗コードは **owner 別**の
   「直前 open 失敗」欄に残り `db_error_code(-1)` で読める。戻り値は handle / -1。
 - `db_prepare_only`: SQL は NUL 込み `DB_SQL_MAX_BYTES` (1024B) 以内。超過は
   **切り捨てず拒否**する。単一の非空 statement のみ (末尾の空白 / コメント / `;` は可、
-  次の statement があれば `sqlite3_prepare_v2` の `pzTail` で見て拒否。末尾の空白は
-  SQLite のトークナイザと同じ 5 文字 — space / `\t` / `\n` / `\f` / `\r`)。**step しない**ので、
-  SELECT の先頭行も DML も進まない。同じ handle の旧 stmt は finalize して置換する。
+  次の statement があるかは `sqlite3_prepare_v2` の `pzTail` を**もう一度 prepare** して
+  見る — stmt が返らなければ末尾は空白 / コメントだけ。空白やコメントの規則を自前で
+  持たないので、判定は SQLite と 1 対 1 になる)。**step しない**ので、SELECT の先頭行も
+  DML も進まない。同じ handle の旧 stmt は **拒否理由に依らず入口で** finalize して
+  置換する (引数不正で断ったときに前の statement が残ると、次の `db_step` がそれを
+  実行してしまう)。
 - `db_bind_*`: prepare_only の後・**最初の step の前**だけ。`index` は 1-based。
   `text` は 0〜`DB_BIND_TEXT_MAX` (255) B、`blob` は 0〜`DB_BIND_BLOB_MAX` (4096) B。
   負・超過・NULL ポインタは拒否 (NULL 値は `db_bind_null`)。0B でも非 NULL の空値。
@@ -587,7 +592,9 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   present + USER であること (`ring3_user_range_ok`)。CPL=0 の直呼び (常駐シェル /
   gshell) は帯も PTE も見ない。`db_step` / `db_prepare` の 1 行が 16KB の結果ブロック
   (header + 全列 descriptor + payload) に収まらないときは、範囲外書き込みも部分 ROW も
-  返さず `-1` で失敗し、`db_error_code` に `SQLITE_TOOBIG` が残る。
+  返さず `-1` で失敗し、`db_error_code` に `SQLITE_TOOBIG` が残る。列値の**実体化**が
+  失敗した (accessor が値を返せない / `SQLITE_NOMEM`) ときも同じく `-1` で、部分 ROW を
+  SHM に公開しない。
 
 GUI 中の CPL=3 アプリは入れ子 `exec_run` を使えない (子が park できず、協調型の全体が止まる)。
 そこで「外部プログラムを起動したい」と「この子を畳みたい」を**カーネルの表**に載せ、

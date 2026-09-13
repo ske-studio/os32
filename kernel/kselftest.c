@@ -507,7 +507,7 @@ static void test_db_v50(void)
     check((bad & (1u << 0)) == 0, "KAPI v50: 7 new db slots appended at 201..207");
     check((bad & (1u << 1)) == 0, "db row: 16KB block bound counts descriptors");
     check((bad & (1u << 2)) == 0, "db ptr: NULL and length overflow refused");
-    check((bad & (1u << 3)) == 0, "db sql: a second statement is refused");
+    check((bad & (1u << 3)) == 0, "db path: journal name fits the VFS capacity");
     check((bad & (1u << 4)) == 0, "db diag: one open-failure slot per owner ID");
     /* owner 別の欄が ID の池を覆っているか (kapi_db.h の DB_OWNER_SLOTS)。 */
     check(DB_OWNER_SLOTS >= APP_SLOT_COUNT,
