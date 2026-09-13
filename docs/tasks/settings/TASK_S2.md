@@ -1,6 +1,6 @@
 # S2 — `libos32cfg` (設定レジストリのクライアント)、`cfg` コマンド、`cfg init`
 
-状態: **設計 第 4 版 (往復 3 の 2 件 + non-blocker を反映。3 往復で Approve に至らず、§7 の 2 件をユーザー決裁待ち)**。前提: S0-K (KAPI v50、`8bfe...`〜`a70df4f`)、S0-T (`/etc/settings.tsv` を通常配備、生成 DB は媒体だけ)、S0-D (通常配備は `/etc/settings.db*` を触らない)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3 (2 = 明示 `cfg init`、4 = S4 の最初の消費者は数キー)。
+状態: **完了 (2026-09-13)** — 実装 `6aa8b7a`〜`e325fe4`、Codex 実装レビュー 3 往復 + 追加 1 往復で Approve、ゲスト受入 C1〜C7 (配備 4 回目 `e325fe4`、§8f)。残: C3 の 255/256B 境界と C7 の pool 復帰はゲストで踏めず (ホスト試験 / S5)。設計: 第 5 版 (ユーザー決裁 2026-09-13: 設定の読み書きはアプリも OS 経由 (libos32gui の 1 呼び出し完結 wrapper) で行い、アプリが DB を直接開く経路は無い)。前提: S0-K (KAPI v50、`8bfe...`〜`a70df4f`)、S0-T (`/etc/settings.tsv` を通常配備、生成 DB は媒体だけ)、S0-D (通常配備は `/etc/settings.db*` を触らない)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3 (2 = 明示 `cfg init`、4 = S4 の最初の消費者は数キー)。
 契約の正典: [S0_FOUNDATION.md](S0_FOUNDATION.md) §2 (非破壊 / transaction / 値の上限)、[DESIGN.md](DESIGN.md) §3 (スキーマ) / §4 (API) / §5 (起動時の振る舞い)。本票はそれを実装単位に切る。
 規約: [C1] C89、外部プログラムは newlib 可、[V2] deploy.yaml、コーダーは worktree + ホスト TDD のみ。
 
@@ -9,8 +9,8 @@
 | 票 | 範囲 | レーン | 触るファイル |
 |---|---|---|---|
 | **S2-C** | `userland/lib/cfg/` = `libos32cfg` (静的、C89)、`userland/cmds/cfg.c`、ホスト TDD | C | `userland/lib/cfg/*`、`userland/cmds/cfg.c`、`tools/tests/` (libs.mk / programs.mk は PM) |
-| **S2-W** | libos32gui の末尾追記 (cfg_* を GUI アプリへ公開、次の空きエントリから) | W | `userland/rust/libos32gui/src/*` (ffi / lib の表)、`sdk/rust/os32api` の宣言、`tools/check_gui_proto.py` の期待値 |
-| 共有 (PM) | `userland/deploy.yaml` (`/usr/bin/cfg.bin`)、`build/app.conf` (`userland/cmds/cfg 50 0`)、`build/sdk.mk` (check 登録、SDK 配布ヘッダ一覧に `libos32cfg.h`)、**`build/programs.mk`** (`cfg.bin` のリンクに `-los32cfg`、shlib のリンクに `libos32cfg.a`)、**`build/libs.mk`** (`DEFINE_LIB,libos32cfg` + `INC_libos32cfg` + `ALL_LIB_ARCHIVES`)、`tools/emu_agent/agent.py` (B12) | PM (C / W が必要行を報告) | — |
+| **S2-W** | libos32gui の末尾追記 (cfg get / set を **OS 側で完結する wrapper** として GUI アプリへ公開、次の空きエントリから) | W | `userland/rust/libos32gui/src/*` (ffi / lib の表)、`sdk/rust/os32api` の宣言、`tools/check_gui_proto.py` の期待値 |
+| 共有 (PM) | `userland/deploy.yaml` (`userland/cmds/*.bin` の glob で **`/bin/cfg.bin`**、追加行なし)、`build/app.conf` (`userland/cmds/cfg 50 0`)、`build/sdk.mk` (check 登録、SDK 配布ヘッダ一覧に `libos32cfg.h`)、**`build/programs.mk`** (`cfg.bin` のリンクに `-los32cfg`、shlib のリンクに `libos32cfg.a`)、**`build/libs.mk`** (`DEFINE_LIB,libos32cfg` + `INC_libos32cfg` + `ALL_LIB_ARCHIVES`)、`tools/emu_agent/agent.py` (B12) | PM (C / W が必要行を報告) | — |
 
 S2-C と S2-W は独立 (W は C の公開ヘッダに依存するので、C の `libos32cfg.h` を先に固定してから W を出す — ヘッダは本票 §1 で確定)。
 
@@ -47,7 +47,7 @@ int   cfg_init(const char *tsv_path);       /* `cfg init` の実体。DB の場�
 ```
 
 規則 (S0_FOUNDATION §2 を実装に写す):
-1. **open (B1 / B3 / B4)**: 必ず **RO で開いて検査してから** RW に切り替える。(a) `db_open_existing("/etc/settings.db", 0)`。失敗は `db_error_code(-1)` を写像: CANTOPEN **かつ `sys_stat` が NOTFOUND** → MISSING、CANTOPEN で stat が成功 (長さ / 深さ / journal 名の容量超過など KAPI 側の拒否) → ERROR、NOTADB / CORRUPT → CORRUPT、BUSY_RECOVERY (hot journal) → CORRUPT (自動回復しない)、IOERR / 他 → ERROR。(b) schema 検査は 1 本の SQL (**WHERE 無し = 表全体**、往復 2 の 2): `SELECT COUNT(*), MIN(typeof(schema_version)), MAX(typeof(schema_version)), MIN(schema_version), MAX(schema_version), MIN(schema_version BETWEEN 1 AND 2147483647) FROM meta` を prepare-only + step し、**count == 1、両 typeof == 'integer'、min == max、範囲内 == 1** でなければ CORRUPT (0 行・複数行 (正常行との混在を含む)・不正型・範囲外・2^32+1 はすべて CORRUPT)。`meta` 表が無い (prepare の `db_error_code` が SQLITE_ERROR = 「no such table」) → CORRUPT。prepare の失敗が IOERR / NOMEM / BUSY 等なら §1 の定義どおり **ERROR** (表欠落と区別する、往復 3 non-blocker)。版が `CFG_SCHEMA_VERSION` (1) より大きければ **VERSION**、小さい (0 は BETWEEN で弾かれる) は無い。(c) writable=1 で **RO 検査が CFG_OK のときだけ** RO を close → `db_open_existing(..., 1)` → **同じ schema 検査をもう一度** (不一致なら close して ERROR)。VERSION / CORRUPT / MISSING では RW に切り替えず、VERSION は RO 接続を**保持**して読める状態のまま (往復 2 の 3)。RO 検査 → RW 切替の直列化 (FOUNDATION §2-4) は SQLite の lock が os32 VFS で no-op (F3b 後回し) なので**ライブラリでは実現できない**。→ **§7 のユーザー決裁**: v1 は「settings.db に触る接続は同時に 1 本 (gshell は起動時の読みだけ、書くのは `cfg` コマンドと設定変更時、同時に走らせない)」を**上位契約 (FOUNDATION §2-4) の v1 例外として決裁**する。決裁されなければ、カーネルに単一接続の門 (別 KAPI、v51) を足す票を先に切る。(d) open は **BEGIN しない**。MISSING / CORRUPT / VERSION でも `cfg_open` は 0 を返す (呼び手を分岐させない)。**VERSION は読める状態**: get / enum は認識できる列 (`settings` の 6 列) をそのまま読み、set / begin だけ拒否 (`OS32_ERR_INVAL`)。MISSING / CORRUPT は get が既定値 (NOTFOUND)、set / begin は拒否。
+1. **open (B1 / B3 / B4)**: 必ず **RO で開いて検査してから** RW に切り替える。(a) `db_open_existing("/etc/settings.db", 0)`。失敗は `db_error_code(-1)` を写像: CANTOPEN **かつ `sys_stat` が NOTFOUND** → MISSING、CANTOPEN で stat が成功 (長さ / 深さ / journal 名の容量超過など KAPI 側の拒否) → ERROR、NOTADB / CORRUPT → CORRUPT、BUSY_RECOVERY (hot journal) → CORRUPT (自動回復しない)、IOERR / 他 → ERROR。(b) schema 検査は 1 本の SQL (**WHERE 無し = 表全体**、往復 2 の 2): `SELECT COUNT(*), MIN(typeof(schema_version)), MAX(typeof(schema_version)), MIN(schema_version), MAX(schema_version), MIN(schema_version BETWEEN 1 AND 2147483647) FROM meta` を prepare-only + step し、**count == 1、両 typeof == 'integer'、min == max、範囲内 == 1** でなければ CORRUPT (0 行・複数行 (正常行との混在を含む)・不正型・範囲外・2^32+1 はすべて CORRUPT)。`meta` 表が無い (prepare の `db_error_code` が SQLITE_ERROR = 「no such table」) → CORRUPT。prepare の失敗が IOERR / NOMEM / BUSY 等なら §1 の定義どおり **ERROR** (表欠落と区別する、往復 3 non-blocker)。版が `CFG_SCHEMA_VERSION` (1) より大きければ **VERSION**、小さい (0 は BETWEEN で弾かれる) は無い。(c) writable=1 で **RO 検査が CFG_OK のときだけ** RO を close → `db_open_existing(..., 1)` → **同じ schema 検査をもう一度** (不一致なら close して ERROR)。VERSION / CORRUPT / MISSING では RW に切り替えず、VERSION は RO 接続を**保持**して読める状態のまま (往復 2 の 3)。RO 検査 → RW 切替の直列化 (FOUNDATION §2-4) は SQLite の lock が os32 VFS で no-op (F3b 後回し) なので**ライブラリでは実現できない**。→ **ユーザー決裁 (2026-09-13、§7)**: **設定の読み書きは OS 経由だけ** — gshell の設定 UI (S4)、`cfg` コマンド、そしてアプリには libos32gui の wrapper (S2-W: get / set とも **1 呼び出しの中で open → 操作 → commit → close** を OS 側のコードが完結させ、`CfgDb` も接続もアプリに渡さない。アプリが書けるのは `app:` scope だけ)。どの経路も open〜close を **1 回の実行の中で、間に yield せずに**終える。協調型ではその間に他のプロセスは走らないので、**接続は構造的に同時 1 本**になり、FOUNDATION §2-4 の直列化はこの規則で満たす (v1 では KAPI 側の門は作らない)。(d) open は **BEGIN しない**。MISSING / CORRUPT / VERSION でも `cfg_open` は 0 を返す (呼び手を分岐させない)。**VERSION は読める状態**: get / enum は認識できる列 (`settings` の 6 列) をそのまま読み、set / begin だけ拒否 (`OS32_ERR_INVAL`)。MISSING / CORRUPT は get が既定値 (NOTFOUND)、set / begin は拒否。
 2. **get**: `SELECT type, ival, tval, bval FROM settings WHERE scope=? AND key=?` を prepare-only + bind (`db_bind_text`) + step (DONE で自動 finalize、次回は再 prepare)。型が違えば NOTFOUND 扱い。text / blob は SHM の row から private バッファへ**即コピー** (次の DB 操作で無効)。cap 不足は NOSPC で out を書かない。NULL と空 text / blob は**区別する** (FOUNDATION §2-5、往復 2 の 5): 型が text/blob で値が NULL (SHM の型情報が NULL) → `OS32_ERR_NOTFOUND` (未設定扱い)、空値 → 長さ 0 を返す。tsv の空 text は空値として格納する (NULL にしない)。get 失敗 (I/O) は `cfg_status` を ERROR にし既定値を返す。
 3. **set / delete**: `cfg_begin` の後だけ (txn 外は INVAL)。set は `INSERT OR REPLACE INTO settings(scope,key,type,ival,tval,bval) VALUES(?,?,?,?,?,?)`、delete は `DELETE FROM settings WHERE scope=? AND key=?` (単一 statement)、いずれも bind。set 失敗で txn を failed にし、`cfg_commit` は拒否して rollback。値の上限: scope / key 63B、text 255B、blob 4096B、key `[a-z0-9_]+(/[a-z0-9_]+)*`、scope `system` / `gshell` / `user` / `app:[a-z0-9_]+` (S0-T と同じ規則を C で)。不正 UTF-8 を拒否。**C の文字列 API では終端 NUL より後の埋め込み NUL は検査できない** (長さ付きは blob だけ) と明記。
 4. **begin / commit / rollback / close (B5)**: `cfg_begin` = `BEGIN IMMEDIATE` (writable で OK 状態のときだけ)。commit / rollback は単一 statement。**失敗コードは rollback を実行する前に保存** (成功した `ROLLBACK` は診断を 0 に戻すため)。`cfg_close` は未 commit なら rollback → `db_close`。rollback / close が失敗したら **最初の失敗コードを `cfg_last_close_error()` に残し、負を返す**; KAPI 側の slot は隔離 (F1) されているので再 close しない。CfgDb は 1 プロセス 1 本の静的領域 (malloc しない) なので、失敗後も `cfg_last_sqlite` / `cfg_schema_version` は読める。
@@ -69,9 +69,13 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 ```
 - GUI 配下 (端末) でも動く (KAPI だけ、TUI なし)。4096B blob の hex は 8192 文字で con_sink (8KB、古い出力を捨てる `kernel/con_sink.c`) を超えるので、`get` / `list` / `export` の出力は **DB を閉じた後** (直列化を崩さない) に 1KB ごとに `sys_yield` を挟んで書く (端末が読み出す時間を作る。往復 3 non-blocker)。終了コード: 成功 0、`get` で default を使ったときも 0 (値は出す)、MISSING / CORRUPT / VERSION で書けないとき 1、CFG_ERROR 1 (`status` は `ERROR sqlite=<code>` を出す)、close 失敗 1 (`close failed (<code>)`)。`list` / `export` の scope 上限 32 超は `too many scopes` で 1。`export` の 1 行目はヘッダ `{"schema_version":<cfg_schema_version() の実値>,"exported":"<tick>"}` (VERSION 状態なら実値 = 認識版より大きい値がそのまま入る。固定の 1 を書かない、往復 3 の B2。DESIGN §6b の「新しい版のバックアップは復元時に拒否」がこれで成立する)。MISSING / CORRUPT の `export` は `cannot export: <status>` で 1 (ヘッダも書かない)。MISSING のときは `settings.db missing: run 'cfg init'` を出す (DESIGN §2 の文言は S3 のリカバリ用に残す)。
 
-## 3. libos32gui への末尾追記 (S2-W)
+## 3. libos32gui への末尾追記 (S2-W) — OS 側で完結する wrapper (決裁 2026-09-13、2 回目で set を追加)
 
-- ジャンプ表は `tools/mkshlib.py --check` が `.long os32gui_*` を抽出して本数を照合する (B11)。よって表に載せる名前は **`os32gui_cfg_open` … の wrapper** (Rust の `#[no_mangle] extern "C"` か C の thin wrapper) にし、実体の `cfg_*` (C、`libos32cfg.a` を shlib にリンク) を呼ぶ。追加は末尾 10 本: `cfg_open` / `cfg_close` / `cfg_status` / `cfg_schema_version` / `cfg_get_int` / `cfg_get_text` / `cfg_set_int` / `cfg_set_text` / `cfg_begin` / `cfg_commit` (+ `cfg_rollback` で 11 本)。既存エントリは不変。表の実体は `userland/rust/libos32gui/src/shlib.rs` (現在 101 本) と SDK stub `sdk/rust/os32api/src/gui/stub.rs`、本数定数は両方を 112 に更新し、`mkshlib.py --check` が通ること (`check_gui_proto.py` は C/Rust の共有定数・構造体の検査で表の本数は見ない)。
+- アプリに公開するのは末尾 **4 本**: `os32gui_cfg_get_int(scope, key, def)` / `os32gui_cfg_get_text(scope, key, out, cap)` / `os32gui_cfg_set_int(scope, key, v)` / `os32gui_cfg_set_text(scope, key, s)`。get は 1 呼び出しの中で `cfg_open(&db, 0)` → `cfg_get_*` → `cfg_close`、set は `cfg_open(&db, 1)` → `cfg_begin` → `cfg_set_*` → `cfg_commit` (失敗なら `cfg_rollback`) → `cfg_close` を**完結**させ、`CfgDb` も接続も呼び手に渡さない (アプリが DB を直接開く API は公開しない = 「設定の読み書きは OS 経由」)。間に yield する呼び出しを置かない。
+- **scope の規則 (OS 側の方針)**: set は scope が `app:[a-z0-9_]+` のときだけ受け付け、`system` / `gshell` / `user` への set は `OS32_ERR_PERM` 相当で拒否 (それらは S4 の設定 UI と `cfg` コマンドの領分)。get は全 scope 可。自分の名前への束縛 (別アプリの `app:` scope に書けないこと) は**本票では保証しない** — アプリが自分の ID / 名前を知る KAPI が無い (kapi.json に self 系が無い) ので、S4 か S5 で「自分の scope を OS が決める」形 (wrapper が scope を取らない版) に寄せるかを決める。票にこの限界を明記する。
+- 戻り値: get_int は open 失敗 / NOTFOUND / close 失敗のどれでも def。get_text は長さ / 負 (open が負ならその値、NOTFOUND / NOSPC / INVAL はそのまま、close 失敗は `OS32_ERR_IO` 相当)。set_* は 0 / 負 (open 失敗はその値、MISSING / CORRUPT / VERSION は `OS32_ERR_INVAL` (set が拒否される)、set / commit の失敗コード、close 失敗は `OS32_ERR_IO` 相当 — 直前の失敗を優先)。MISSING / CORRUPT / VERSION でも get は規則どおり (既定値 / NOTFOUND)。
+- ジャンプ表は `tools/mkshlib.py --check` が `.long os32gui_*` を抽出して本数を照合する (B11)。表に載せる名前は wrapper (Rust の `#[no_mangle] extern "C"` か C の thin wrapper) で、実体の `cfg_*` (C、`libos32cfg.a` を shlib にリンク) を呼ぶ。既存エントリは不変。表の実体は `userland/rust/libos32gui/src/shlib.rs` (現在 101 本) と SDK stub `sdk/rust/os32api/src/gui/stub.rs`、本数定数は両方を **105** に更新し、`mkshlib.py --check` が通ること (`check_gui_proto.py` は C/Rust の共有定数・構造体の検査で表の本数は見ない)。SDK の C ヘッダ (`sdk/include/os32/` の GUI 呼び出し表) にも 4 本を足す。
+- gshell 自身 (設定 UI、S4) は shlib 経由ではなく `libos32cfg.a` を直接リンクして RW で使う (S4 の票)。本票では gshell に書き込み経路を足さない。
 - リンク: `build/programs.mk` の shlib 規則に `libos32cfg.a` を足す (PM の共有所有、W が必要行を報告)。C の静的ライブラリを shlib に混ぜる既存例は libos32gfx。
 
 ## 4. ホスト TDD (`tools/tests/`)
@@ -101,7 +105,60 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 6. tsv reader の C 実装と Python 生成ツールの規則一致 (同じ fixture)。
 7. 往復 1 の 12 件の反映: RO 検査 → RW、CANTOPEN + stat NOTFOUND、meta の 1 行 / integer / 範囲、VERSION は読める、close の戻り値と診断、substr 前方一致、journal 残存の拒否、`.new` の残骸と隔離、rename 失敗後の両名検査、enum_scopes と schema_version、os32gui_cfg_* wrapper と mkshlib --check、programs.mk / libs.mk の所有。
 
-## 7. ユーザー判断が要る点 (往復 2 の 4)
+## 7. ユーザー決裁 (2026-09-13)
 
-- **接続の直列化の v1 例外**: FOUNDATION §2-4 は「schema 検査から RW 切替までを接続直列化で守る」とするが、SQLite の lock は os32 VFS で no-op (F3b 後回し) で、ライブラリからは直列化できない。提案: **v1 は「settings.db に触る接続は同時に 1 本」を運用契約にする** (gshell は起動時の読みだけ、書くのは `cfg` コマンドと設定アプリの OK 時、同時に走らせない。協調型で 1 本の KAPI 呼び出し中に別アプリは走らないので、open〜close を 1 つのイベント処理内で終える限り交互実行は起きない)。決裁されればこの票の §1-1 (c) のとおり、否なら v51 で「単一接続の門」KAPI を先に切る。
-- **往復 3 で Approve に至らなかった**: ROLES §5 の規則 (3 往復) により、往復 3 の 2 件 (B1 `.new` 残骸は消さない、B2 export の版は実値) は第 4 版に反映済みで、**もう 1 往復 (第 4 版の確認) を行うか、第 4 版で実装に進むか**をユーザーが決める。
+- **接続の直列化**: 「アプリが触ると同時接続になるのか」という問いに対する答えは「はい — 2 つのプロセスがそれぞれ接続を持った状態 (例: アプリの RW と gshell) が同時接続」。決裁は **設定の読み書きは OS 経由だけ** (1 回目「アプリは読みだけ」→ 2 回目「アプリの設定値の書き込みも OS 経由で出来るように」)。アプリは libos32gui の wrapper (§3、1 呼び出しで open → 操作 → close を OS 側コードが完結、`app:` scope だけ書ける) を使い、DB を直接開く API は公開しない。gshell の設定 UI / `cfg` コマンド / wrapper のどれも open〜close を yield なしで 1 回の実行に収めるので接続は構造的に同時 1 本 (§1-1 (c))。KAPI 側の門 (v51) は作らない。
+- **3 往復で未承認**: 第 4 版のまま実装に進み、往復 3 の 2 件 (B1 `.new` 残骸は消さない、B2 export の版は実値) は実装レビューで併せて確認する (選択 3.b)。
+- **実装レビューも 3 往復で未承認** (2026-09-13): 残 5 件は一意の直し方で C コーダーが修正中。ユーザーの決裁事項: 修正を着地したうえで (a) Codex にもう 1 往復 (確認のみ) するか、(b) 修正着地 + ゲスト再確認で S2 完了とするか。
+
+## 8. 実装と受入の記録 (PM、2026-09-13)
+
+### 8a. 着地
+- `6aa8b7a` S2-C + S2-W + PM 登録。`799b05e` shlib 側で `kapi` を供給 (着地後の `make all` が `libos32gui.elf` のリンクで `kapi` 未定義 — crt0 の無い shlib に `cfg_backend.c` の extern が解決されなかった)。`26cda04` docs (07_shell.md / CLAUDE.md の件数)。`8d0247e` W の ⑮。
+- 配備 (S2 1 回目、`799b05e`、vmkernel 470,756 B): 停止 → `nhd-pull` (stamp 16:18) → `os32-cycle deploy` → `make deploy` → kselftest 87 / 0。
+
+### 8b. ゲスト受入 (配備 1 回目)
+| ID | 結果 |
+|---|---|
+| C1 | **合格**: `cfg status` → `MISSING`、`/etc` に settings.db は作られない |
+| C2 | **合格**: `cfg init` → `created /etc/settings.db` (3072 B)、`cfg status` → `OK schema_version 1`、`cfg list` に tsv の 3 行、再 `cfg init` → `already exists` |
+| C3 | **一部**: `cfg set gshell desktop/color int 5` → `get` = 5、無い key の default (42) が出る。**255 / 256B の境界はゲストでは未確認** — `/api/cmd` 経由の rshell 行が 255B を超える引数で崩れ (複数行に分割されて `command not found`、応答がずれる)、`user t255` / `t256` に 103B の断片が入った。境界はホスト TDD (`c_limits`) で担保、ゲストは端末 (C5) かファイル経由の手段が要る |
+| C4 | **合格**: `cfg export /tmp/s.json` → 3 records、`wc -l` = 4 (= 3 + ヘッダ)、ヘッダ `{"schema_version":1,"exported":"6650"}` |
+| C5 / C6 / C7 | 配備 2 回目で実施 (下) |
+
+### 8d. ゲスト受入 (配備 2 回目、`a1889c0`: 往復 1 の ②〜⑭⑯⑰ + ⑮ + kapi、vmkernel 470,756 B、cfg.bin 28,604 B、kselftest 87 / 0、stamp 16:44)
+| ID | 結果 |
+|---|---|
+| C5 | **合格**: GUI (`os32gui`) → Start → Run... → `/usr/bin/t5a_display.bin` の端末で `cfg list` が全レコード (gshell 3 行、system、user の 2 行) を表示、`cfg set gshell desktop/color int 7` → `cfg get` = 7、`cfg status` = `OK schema_version 1` (画面 `c5_list.png` / `c5_set.png`)。端末を ESC で閉じ Start → CUI mode で戻った後、CUI の `cfg get` も 7 |
+| C6 | **合格**: 配備 2 回目 (`deploy-nhd` + `make deploy` + ゲストで `hsync` = 0 copied / 219 skipped / 0 protected) の後も `desktop/color` = 5 (当時の値)、`system x` = 1、`settings.db` 3072 B のまま |
+| C7 | **一部**: FEP 辞書常駐 (`ime on`) で `cfg get` 1 回 = 約 50 tick (0.5 秒、`/api/cmd` の往復と rshell の表示を含む)。50 回連続でも `cfg status` OK。**pool の戻り (`db_mem_used`) は未計測** — 唯一の表示手段 `db_test` (Test 9) が Test 5 で落ちる (`db_last_error` がカーネル帯のポインタを CPL=3 に返す、台帳 INHERITED_BUGS.md 記載の継承バグ、S2 とは無関係)。S5 で計測手段 (`cfg status` に `db_mem_used` を出す等) を用意する |
+
+### 8e. ゲスト受入 (配備 3 回目、`21a6d19` = 往復 2 の 7 件、cfg.bin 29,500 B、kselftest 87 / 0、stamp 17:09)
+| ID | 結果 |
+|---|---|
+| C1 | **合格** (`rm /etc/settings.db` 後 `cfg status` = MISSING、作られない) |
+| C2 | **合格** (`cfg init` → OK schema_version 1、tsv の 3 行、再 init = already exists) |
+| C3 | set/get/default 合格 (7 / 42)。255/256B の境界はゲストでは踏めない (8b と同じ) |
+| C4 | **合格** (6 records → 7 行、ヘッダ実版、空 text は `"v":""`)。**export 先が DB 自身 / journal は `refusing to write the settings database itself` で拒否** (往復 1 の ③) |
+| C5 | **合格** (端末で list / set 7 / get 7 / status OK、CUI に戻って 7) |
+| C6 | **合格** (配備 3 回目の前後で値と settings.db を保持、hsync は 8d と同じ) |
+| C7 | FEP 常駐で `cfg get` 1 回 = 53 tick (API 往復込み)。pool は 8d のとおり未計測 |
+
+### 8f. ゲスト受入 (配備 4 回目、`e325fe4` + `c9570e0` = 往復 3 の B1〜B5 + shlib --api 50、vmkernel 470,758 B、cfg.bin 29,628 B、kselftest 87 / 0、stamp 17:24)
+| ID | 結果 |
+|---|---|
+| C1 / C2 | **合格** (rm → MISSING → init → OK、3 行、set 7 → get 7) |
+| C4 | **合格** (3 records → 4 行)。`cfg export /ETC/SETTINGS.DB` (大小違いの別名) も `refusing to write the settings database itself` (往復 3 の B1) |
+| C5 | **合格** (端末で list / set 7 / get 7 / status OK、CUI に戻って 7) |
+| C6 | **合格** (配備の前後で値 7 と settings.db を保持) |
+| C3 / C7 | 8e と同じ (境界と pool はゲストで踏めない) |
+
+受入中の教訓: (1) `/api/cmd` 経由の rshell 行は 255B 超の引数で崩れる (C3 の境界はゲストで踏めない)。(2) `ime on` のまま `/api/key` で打つと FEP がローマ字を変換する (`os32gui` → `お32ぐい`)。`SHIFT+SPACE` (urlencode) で切ってから台本を回す。
+
+### 8c. Codex 実装レビュー
+| 対象 | 判定 | 要旨 |
+|---|---|---|
+| `6aa8b7a` (往復 1) | Request changes | 17 件: ① shlib の `kapi` 未定義 (着地時に判明、`799b05e` で修正済み)、② init の stat 失敗を不存在扱い、③ export の出力先が DB 自身、④ 検証失敗の set で txn が failed にならない、⑤ list/export が取得障害を成功扱い、⑥ NULL を実値に変換、⑦ 破損 DB が ERROR、⑧ rollback 失敗で診断消失、⑨ open 内部 close の失敗が消える、⑩ get の bind 失敗、⑪ get が前方一致 enum で型を取る (257 件で既定値)、⑫ enum 再入の get_text が NOTFOUND、⑬ 出力の満杯 / short write、⑭ 64B scope の切り詰め、⑮ wrapper の ptr+len 検証順 (`8d0247e`)、⑯ tsv 重複控えの容量、⑰ INT_MIN の signed overflow。non-blocker: 配備先は `/bin/cfg.bin` (票の `/usr/bin` と差 → **票を `/bin` に改める**)、C 側 GUI wrapper 定義は無い (Rust 側の表が正典、票を改める)、export は DB を開いたまま書く |
+| `a1889c0` (往復 2) | Request changes | 17 件中 12 修正・5 部分。残 7 件 (すべて C): 1 整数取得だけの失敗を 0 で出す (⑤残)、2 ERROR 状態で拒否した set が txn を failed にしない (④残)、3 close 自身の失敗が操作診断を上書き (⑧残)、4 NULL の export が type=3 で宣言型を失う (⑥の新規)、5 保存済み 64bit 整数 / 未知 type が SHM で 32bit 化された後に正当値扱い、6 読み出し値の境界 (256B / 4097B / 不正 UTF-8 / 埋込み NUL、列挙 key の NUL で 1 行欠落)、7 export 先の同一性検査が stat 障害を「別ファイル」扱い (③残)。non-blocker: fake.rs の `static mut kapi` 競合 (W)、s2_tdd の旧記述。B1 / B2 は適合 |
+| `21a6d19` (往復 3 = 最終) | Request changes | 往復 1 の 15 件 + 往復 2 の 4 件は修正確認。残 5 件 (すべて C): B1 inode の無い FS (FAT ルート) で export 先の同一性が「別物」になり DB を潰せる、B2 enum callback からの set 拒否が txn を failed にしない、B3 enum の type に縮小前の値域検査が無い、B4 ERROR 状態の enum が 0 件を返す、B5 tsv の過長フィールドで int カウンタが overflow。non-blocker: shlib の `--api 42` (v50 依存になった)、s2_tdd の件数表記。**3 往復で Approve に至らず → ユーザー決裁 (§7、「1」= 着地 + 追加 1 往復)** |
+| `e325fe4` + `c9570e0` (追加往復、確認のみ) | **Approve** | B1〜B5 の修正確認、修正が持ち込んだ新規 blocker なし、設計残件 B1 / B2 も実装で確認。範囲外 (wrapper 4 本、往復 1 の 17 件の全体再監査) は再レビューしていない旨を明記 |

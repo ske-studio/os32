@@ -43,6 +43,11 @@ pub mod icon;
 pub mod modal;
 pub mod session;
 
+/* ---- v1.3 設定レジストリ (票 S2 §3) ----
+ * 表 101..=104。open〜close を 1 呼び出しで閉じるので、アプリ側に `CfgDb` は
+ * 出さない。実体は C の libos32cfg.a。 */
+pub mod cfgro;
+
 /* ---- 共有ライブラリの先頭ページ (票 C3) ----
  * `.shlib_hdr` に 32B ヘッダ + ジャンプ表を置き、公開関数を `extern "C"` で
  * 出す。アプリはこの表を通してだけライブラリに入る (`libos32gui_stub`)。 */

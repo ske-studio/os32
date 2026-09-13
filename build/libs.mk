@@ -28,6 +28,8 @@ INC_libos32snd      = -Iuserland/lib/snd
 INC_libos32mgx      = -Iuserland/lib/mgx -Ilib/zlib
 # ランタイム小物 (pkg, dbgserial)。"rt/xxx.h" 形式で引くので -Iuserland/lib。
 INC_libos32rt       = -Iuserland/lib
+# 設定レジストリ (/etc/settings.db) のクライアント。KAPI の共有ヘッダだけで完結 (票 S2-C)
+INC_libos32cfg      = -Iuserland/lib/cfg
 
 # 描画層
 INC_libos32gfx      = -Iuserland/lib/gfx $(INC_libos32math)
@@ -149,6 +151,10 @@ LIBASSET_OBJ = $(LIBDIR)/libos32asset.a
 
 # libos32ecs — ECS ゲームオブジェクト管理
 $(eval $(call DEFINE_LIB,libos32ecs,userland/lib/ecs,,))
+
+# libos32cfg — 設定レジストリのクライアント (票 S2-C)。cfg.bin と libos32gui.shlib がリンクする
+$(eval $(call DEFINE_LIB,libos32cfg,userland/lib/cfg,,))
+LIBCFG_OBJ = $(LIBDIR)/libos32cfg.a
 LIBECS_OBJ = $(LIBDIR)/libos32ecs.a
 
 # libos32save — セーブデータ管理 (DB不要)
@@ -265,7 +271,8 @@ ALL_LIB_ARCHIVES = $(LIBDIR)/libos32math.a \
                    $(LIBDIR)/libos32md.a \
                    $(LIBDIR)/libos32tilemap.a \
                    $(LIBDIR)/libos32input.a \
-                   $(LIBDIR)/libos32ecs.a
+                   $(LIBDIR)/libos32ecs.a \
+                   $(LIBDIR)/libos32cfg.a
 
 libs: $(ALL_LIB_ARCHIVES)
 
@@ -282,5 +289,6 @@ clean-libs:
 	rm -f userland/lib/md/*.o userland/lib/filer/*.o
 	rm -f userland/lib/save/*.o
 	rm -f userland/lib/mgx/*.o lib/zlib/*.o
+	rm -f userland/lib/cfg/*.o
 
 .PHONY: libs clean-libs

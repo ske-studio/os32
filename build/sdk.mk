@@ -10,7 +10,7 @@ SDK_OUT = build/sdk
 
 # 公開ヘッダを SDK に載せるプラットフォームライブラリ。
 # rt/ は "rt/dbgserial.h" 形式で引くので別扱い (下のルール参照)。
-SDK_LIB_HEADER_DIRS = math gfx db ui input asset snd tilemap md filer mgx save ecs
+SDK_LIB_HEADER_DIRS = math gfx db ui input asset snd tilemap md filer mgx save ecs cfg
 
 # kapi.json の version が KAPI バージョンの唯一の情報源。
 # ヘッダ・Rust バインディング・ドキュメントはすべてここから導出する。
@@ -218,9 +218,17 @@ check-settings-protect-host:
 check-db-v50-host:
 	python3 -B tools/tests/test_kapi_db_v50.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host
+# libos32cfg / cfg コマンドのホスト TDD (票 S2-C)。実 SQLite + 実 kapi_db.c + RAM backend。
+check-cfg-host:
+	python3 -B tools/tests/test_cfg.py
+
+# libos32gui の os32gui_cfg_* wrapper の分岐 (票 S2-W)。C の実体は贋物。
+check-gui-host:
+	cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check

@@ -188,7 +188,7 @@ core::arch::global_asm!(
 __os32_shlib_header:
     .long   0x42494C53                  /* 0x00 magic  'SLIB'            */
     .long   1                           /* 0x04 version = GUI_PROTO_VERSION */
-    .long   101                         /* 0x08 nfunc                    */
+    .long   105                         /* 0x08 nfunc                    */
     .long   __shlib_data_start          /* 0x0C data_vaddr               */
     .long   __shlib_data_pages          /* 0x10 data_pages               */
     .long   __shlib_text_pages          /* 0x14 text_pages               */
@@ -296,9 +296,27 @@ __os32_shlib_header:
     .long   os32gui_input_open                  /* 98 */
     .long   os32gui_session_request             /* 99 */
     .long   os32gui_draw_icon16                 /* 100 */
+    .long   os32gui_cfg_get_int                 /* 101 */
+    .long   os32gui_cfg_get_text                /* 102 */
+    .long   os32gui_cfg_set_int                 /* 103 */
+    .long   os32gui_cfg_set_text                /* 104 */
     .text
 "#
 );
+
+/* ================================================================ */
+/*  101..=104: 設定レジストリ (票 S2 §3、決裁 2026-09-13)             */
+/*                                                                  */
+/*  実体は `crate::cfgro` (`#[no_mangle] extern "C"`) で、そこから C  */
+/*  の libos32cfg.a を呼ぶ。ここに再掲しないのは、あのモジュールが     */
+/*  クレートの他の部分に依存せず、ホスト TDD が `#[path]` で直に取り  */
+/*  込めるようにしてあるため。                                        */
+/*                                                                  */
+/*  エラー番号の写しが os32api とずれていないことをビルド時に見る。   */
+/* ================================================================ */
+const _: () = assert!(crate::cfgro::ERR_INVAL == os32api::gui::proto::OS32_ERR_INVAL);
+const _: () = assert!(crate::cfgro::ERR_IO == os32api::gui::proto::OS32_ERR_IO);
+const _: () = assert!(crate::cfgro::ERR_NOTFOUND == os32api::gui::proto::OS32_ERR_NOTFOUND);
 
 /* ================================================================ */
 /*  小道具                                                           */
@@ -347,6 +365,11 @@ pub extern "C" fn os32gui_shlib_init(api: *mut KernelAPI) -> i32 {
         return os32api::gui::proto::OS32_ERR_INVAL;
     }
     os32api::os32_init(api);
+    /* C の libos32cfg (`cfg_backend.c`) が見る `kapi` を供給する。shlib には
+     * crt0 が無いので、アプリの .bin にある `sdk/crt/crt0_c.c` の実体は届かない
+     * (libos32gfx の `attach` と同じ理屈)。これより前に表 101..=104 を呼ばれても
+     * NULL を辿らないよう、wrapper 側にも門がある。 */
+    crate::cfgro::set_kapi(api as *mut core::ffi::c_void);
     client::attach_gfx();
     0
 }

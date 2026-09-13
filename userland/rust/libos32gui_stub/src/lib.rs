@@ -33,6 +33,9 @@ pub mod icon;
 pub mod modal;
 pub mod session;
 
+/* ---- v1.3 設定レジストリ (票 S2 §3)。表 101..=104 ---- */
+pub mod cfg;
+
 /// ジャンプ表のエントリを取り出して呼ぶ。
 ///
 /// `$idx` は `os32api::gui::stub::E_*`、`$ty` はそのエントリの

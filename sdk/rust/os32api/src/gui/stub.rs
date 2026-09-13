@@ -223,8 +223,17 @@ pub const E_INPUT_OPEN: usize = 98;
 pub const E_SESSION_REQUEST: usize = 99;
 pub const E_DRAW_ICON16: usize = 100;
 
+/* --- 101..=104: v1.3 設定レジストリ (票 S2 §3、決裁 2026-09-13) ---
+ *
+ * open〜close を wrapper の中で閉じるので `CfgDb` はアプリに出ない。
+ * set は `app:[a-z0-9_]+` scope だけが通る (get は全 scope)。 */
+pub const E_CFG_GET_INT: usize = 101;
+pub const E_CFG_GET_TEXT: usize = 102;
+pub const E_CFG_SET_INT: usize = 103;
+pub const E_CFG_SET_TEXT: usize = 104;
+
 /// ジャンプ表の本数 (末尾追記のたびに増やす)。
-pub const SHLIB_NFUNC: usize = 101;
+pub const SHLIB_NFUNC: usize = 105;
 
 const _: () = assert!(SHLIB_NFUNC <= OS32_SHLIB_MAX_FUNC);
 

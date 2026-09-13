@@ -164,6 +164,8 @@ pub const GUI_HDR_FLAG_OVERFLOW: u16 = 0x0001;
 /* ======================================================================== */
 /*  エラー番号 (os32_kapi_shared.h / PROTO_LAYOUT)                            */
 /* ======================================================================== */
+pub const OS32_ERR_IO: i32 = -1;
+pub const OS32_ERR_NOTFOUND: i32 = -2;
 pub const OS32_ERR_INVAL: i32 = -9; /* = ERR_ARG */
 pub const OS32_ERR_NOSYS: i32 = -10;
 pub const OS32_ERR_STALE: i32 = -11;
