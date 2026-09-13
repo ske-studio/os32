@@ -33,6 +33,12 @@ Linuxライクなコマンド体系を実現する。動的マウントに対応
 **エラー規約**: VFS 層が返すのは `OS32_ERR_*` (`sdk/include/os32/os32_kapi_shared.h` が正典)。
 FS ドライバは自前のエラーを**境界で翻訳**する (ext2 は `ext2_to_vfs_err`)。生の errno や
 ドライバ固有の負値を VFS の外へ漏らさない。
+**存在確認の入口 (`stat` / `get_size`) は「そのボリュームに存在しえない名前」も NOTFOUND に写す**:
+FatFs は `FF_USE_LFN 0` なので 8.3 に収まらない名前 (`settings.db-journal` など) に
+`FR_INVALID_NAME` を返すが、`fatfs_vfs.c` の `ff_stat_to_vfs` がこれを `OS32_ERR_NOTFOUND` にする
+(`open` / `read` / `write` 系は `OS32_ERR_INVAL` のまま — 呼び手の誤りの診断を残す)。
+KAPI v50 の hot journal 検査が NOTFOUND 以外を `SQLITE_IOERR` と断じるため、
+FDD ブート (root = FAT) で `db_open_existing` が落ちていた。
 
 **型の検査は VFS 側で行う**: `vfs_open` はディレクトリを開くことを拒否し、
 `vfs_chdir` はディレクトリ以外を拒否する。これは FS ドライバ内部の型検査を禁止するものではない。

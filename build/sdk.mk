@@ -164,6 +164,7 @@ check-vfs-fd-sqlite-host:
 check-vfs-mount-dev-host:
 	python3 -B tools/tests/test_vfs_mount_dev.py
 	python3 -B tools/tests/test_ext2_read_bound.py
+	python3 -B tools/tests/test_fatfs_stat.py
 
 check-sqlite-groups-host:
 	python3 tools/tests/test_sqlite_groups.py

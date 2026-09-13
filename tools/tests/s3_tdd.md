@@ -401,3 +401,100 @@ SUMMARY 0/7 PASS
 - `cfg_import.c` の静的領域は約 **85KB** (重複表 64KB + 行バッファ 6KB×2 + `CfgJsonRow` 4.4KB×2)。
   `cfg_import.o` を引くのは `cfg.bin` だけなので `libos32gui.shlib` や読むだけのアプリには
   乗らない (アーカイブのメンバ単位のリンク) — ただし**リンク後の実測はしていない**。
+
+---
+
+## K-0. 何を直したか、なぜ要るか
+
+S3 の実機受入 (FDD ブート、root = FAT) で
+`db_open_existing("/etc/settings.db", 0)` が `SQLITE_IOERR` (10) で落ちた。
+
+KAPI v50 は open の手前で hot journal の有無を `vfs_stat("<path>-journal")` で見て、
+**NOTFOUND 以外は IOERR** と断じる (`kapi/kapi_db.c`)。「無い」と言い切れるのは NOTFOUND の
+ときだけ、という設計なので、この判断そのものは正しい。問題は FAT 側で、
+`fs/fatfs/ffconf.h` は `FF_USE_LFN 0` なので `settings.db-journal` は 8.3 に収まらず、
+`f_stat` が `FR_INVALID_NAME` を返す。これを `ff_to_vfs` が `VFS_ERR_INVAL` に写していた。
+
+実機で見えていた区別:
+
+| 問い | 実機の `ls -l` | 直す前の VFS |
+|---|---|---|
+| `/etc/settings.db-journal` (8.3 に収まらない) | `Invalid argument` | `VFS_ERR_INVAL` |
+| `/etc/nosuch` (収まるが無い) | `No such file` | `VFS_ERR_NOTFOUND` |
+
+**そのボリュームに存在しえない名前は、stat の意味では「存在しない」**。
+`fs/fatfs_vfs.c` に `ff_stat_to_vfs()` を足し、`fatfs_vfs_stat` と `fatfs_vfs_get_size`
+(どちらも「在るか」を問う入口) だけがこれを通る。`FR_INVALID_NAME` → `VFS_ERR_NOTFOUND`、
+それ以外は `ff_to_vfs` へ委譲。**open / read / write / unlink / mkdir / rename / list は
+`ff_to_vfs` のまま** — 呼び手が不正な名前を渡したときの診断を潰さないため。
+
+## K-1. 試験の範囲と遮断
+
+`tools/tests/fatfs_stat_host.c` が**実物の `fs/fatfs_vfs.c` をそのまま `#include`** し、
+境界だけを贋物に差し替える。
+
+| 差し替えたもの | 何を貰うか |
+|---|---|
+| `f_stat` | 「次に返す `FRESULT`」と `FILINFO`、渡された FatFs パスを控える |
+| `f_open` / `f_unlink` / `f_mkdir` / `f_rename` / `f_opendir` | 「次に返す `FRESULT`」(INVAL 据え置きの確認用) |
+| `f_read` / `f_write` / `f_lseek` / `f_close` / `f_closedir` / `f_readdir` | 成功で素通り |
+| `f_mount` / `f_getfree` | 呼ばれない前提 (`FR_NOT_READY` / `FR_INT_ERR`) |
+| `ide_get_info` / `dev_find` / `dev_blk_read_lba` / `diskio_set_*` | mount 経路だけが使う。試験は mount を通さず `FatFsCtx` を直接組む |
+| `kzalloc` / `kfree` / `kprintf` / `kmemset` / `kstrncpy` / `kstrncat` / `kstrlen` | ホストの同義実装 |
+
+実デバイス・実イメージ・実 FatFs・実 SQLite には一切触らない。
+コンパイルは `gcc -std=gnu89 -Wall -Wextra -Werror -Wdeclaration-after-statement` ([C1])。
+
+ケース (7 本):
+
+| ケース | 見るもの |
+|---|---|
+| `stat_invalid_name_is_notfound` | `FR_INVALID_NAME` → `VFS_ERR_NOTFOUND`。組み立てたパスが `0:/etc/settings.db-journal` であること |
+| `stat_missing_is_notfound` | `FR_NO_FILE` / `FR_NO_PATH` → `VFS_ERR_NOTFOUND` (元からの挙動を固定) |
+| `stat_disk_err_is_io` | `FR_DISK_ERR` / `FR_NOT_READY` / `FR_NO_FILESYSTEM` → `VFS_ERR_IO`。**I/O 障害は不存在に化けない** |
+| `stat_ok_fills_size_mode` | 正常時の `st_size` と `st_mode` (通常 `0100644` / `AM_DIR` `0040755` / `AM_RDO` `0100444`)、`buf == NULL` は `VFS_ERR_INVAL` のまま |
+| `get_size_invalid_name_is_notfound` | `get_size` も同じ写像。`FR_DISK_ERR` は IO のまま |
+| `open_paths_keep_inval` | `read` / `write` / `read_stream` / `write_stream` / `unlink` / `mkdir` / `rename` / `list` の `FR_INVALID_NAME` は `VFS_ERR_INVAL` 据え置き |
+| `v50_journal_probe_on_8_3` | v50 の順序の再現 — 本体 stat が OK (`st_size` 8192) で、続く journal 名の stat が NOTFOUND (INVAL ではない) |
+
+## K-2. RED → GREEN
+
+`ff_stat_to_vfs` を入れる前 (`fatfs_vfs_stat` / `fatfs_vfs_get_size` が `ff_to_vfs` を呼ぶ状態):
+
+```
+COMPILE GNU89 -Werror PASS
+FAIL case_stat_invalid_name_is_notfound:151: ... == VFS_ERR_NOTFOUND
+EXIT stat_invalid_name_is_notfound=1
+EXIT stat_missing_is_notfound=0
+EXIT stat_disk_err_is_io=0
+EXIT stat_ok_fills_size_mode=0
+FAIL case_get_size_invalid_name_is_notfound:228: ... == VFS_ERR_NOTFOUND
+EXIT get_size_invalid_name_is_notfound=1
+EXIT open_paths_keep_inval=0
+FAIL case_v50_journal_probe_on_8_3:282: rc == VFS_ERR_NOTFOUND
+EXIT v50_journal_probe_on_8_3=1
+SUMMARY 4/7 PASS
+```
+
+落ちた 3 本は写像を要求する側、通った 4 本は**壊していないこと**を見張る側 (不存在 / I/O 障害 /
+正常時の値 / open 系の INVAL)。`ff_stat_to_vfs` を足した後:
+
+```
+COMPILE GNU89 -Werror PASS
+SUMMARY 7/7 PASS
+```
+
+`ff_stat_to_vfs` を `return ff_to_vfs(fr);` だけに潰すと上の RED に戻る (この写像しか
+3 本を通せない)。逆に `ff_to_vfs` の `FR_INVALID_NAME` 自体を NOTFOUND に変えると
+`open_paths_keep_inval` が落ちる — 範囲を stat 系に閉じ込めていることが試験で留まる。
+
+## K-3. この試験が言えないこと ([V4])
+
+- **実機 (FDD ブート) では踏んでいない**。配備もエミュレータ操作もしていない。
+  `db_open_existing("/etc/settings.db", 0)` が通るようになったかは未確認。
+- 実 FatFs (`fs/fatfs/ff.c`) が 8.3 に収まらない名前で本当に `FR_INVALID_NAME` を返すことは
+  **贋物で仮定している**。根拠は実機の `ls -l /etc/settings.db-journal` = `Invalid argument`
+  (受入時の観測) と `ffconf.h` の `FF_USE_LFN 0` であって、この試験の中では確かめていない。
+- HostDrv (`fs/hostdrvfs.c`) と iso9660 の stat は見ていない。本件は FAT だけの写像。
+- `make all` / `make check` は未実行。`fs/fatfs_vfs.c` の単体クロスコンパイル
+  (`i386-elf-gcc -Wall -Wextra -Werror`) だけ通した。
