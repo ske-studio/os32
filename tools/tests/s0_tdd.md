@@ -496,9 +496,8 @@ RO open の時点で成立していなければならない):
 
 **ホスト側で分かったこと**:
 
-- `paging_addrspace_pte_flags` は**シロ**。`tools/tests/paging_bounds_host.c` に
-  exec と同じ順序 (`create_n` → `clear_app_band` → per-app 物理を USER で張る)
-  を組む項を足し、実 `kernel/paging.c` で PRESENT + USER が返ることを確認した。
+- `paging_addrspace_pte_flags` は**シロに見えた**が、それは模型の組み方が
+  実配置と同じになっていたから (2g で訂正)。実機ではここが犯人だった。
 - **穴**: それまでのケースは全部 `host_cpl3 = 0` (= CPL=0 の直呼び) で走っていて、
   `db_user_str_copy` → `ring3_user_range_ok` の経路が **1 度も踏まれていなかった**。
   新ケース `cpl3_paths` で塞いだ (下の表)。実機と同じ形の拒否も踏む。
@@ -518,6 +517,61 @@ RO open の時点で成立していなければならない):
 `db_v50_test.c` は失敗のたびに `db_error_code(-1)` と `db_last_error()` を出し、
 土台 DB の `sys_stat` の size と **RO open の可否** も先に出すようにした
 (RW 固有の段 = `journal_mode` の照会を切り分けるため)。
+
+### 2g. 実機 K2 の原因 (2026-09-13、計器版 `18682d4`) — 控えから PT を選んでいた
+
+計器を入れた版を配備して得た値:
+
+```
+  open failure code = 21
+  fixture /tmp/db_v50.db stat=0 size=2048
+  FAIL: RO open of an existing db    open_fail=21 last_error=invalid handle
+  FAIL: RW open of an existing db    open_fail=21 last_error=invalid handle
+ring3_range_reject_count = 4   _last = 5 (非 present)
+_addr = 0x50140e   _page = 0x501000   _heap_top = 0x7bf000   fault_kill_count = 0
+```
+
+2f の消去法どおり **path のポインタ検証**が犯人で、しかも理由は
+「アプリ自身の .rodata (ロード先 0x500000 の次のページ) が非 present」。
+その番地は CPL=3 のアプリが走っている最中のコードの隣で、カーネルは同じ
+CR3 で読めている (`db_open` の `kstrncpy` も `kprintf` も通っている)。
+
+**なぜ `as` 経由がずれたか**: `paging_addrspace_pte_flags` は PDE が指す PT を
+辿らず、`struct addrspace` の**控え**から PT を選んでいた:
+
+```c
+if (pdi >= as->app_pde && pdi < as->app_pde + as->app_pde_count)
+    pt = (u32 *)as->app_pt_phys[pdi - as->app_pde];   /* 控え */
+else
+    pt = page_tables[pdi];                            /* master の PT */
+```
+
+これは「exec がどの PT を使ったか」の**別勘定**で、MMU が実際に辿る表
+(CR3 → PDE → PDE が指す PT) とは独立に外れうる。外れた先が master の PT
+(`page_tables[APP_BAND_PDE]`) なら、アプリ帯は `clear_app_band` と per-app 物理化
+の後なので **USER も present も持たない** — 観測された「非 present」そのもの。
+
+**直し**: `paging_current_pte_flags(virt)` を新設し、**MMU と同じ辿り方**をする
+(`paging_current_cr3()` → `PD[pdi]` → PS なら拒否 → `PDE & 0xFFFFF000` が指す PT
+→ `PT[pti]`、返すのは PDE と PTE の論理積)。控えを一切見ないので、
+exec がどう張ろうと答は MMU と一致する。`paging_addrspace_pte_flags` は
+**削除**し、`ring3_user_range_ok` から `AppSlot.as` への依存も外した。
+
+**ホスト試験の訂正**: `tools/tests/paging_bounds_host.c` の項を、exec の実配置を
+写した fixture (`create_n` → `clear_app_band` → per-app 物理 3 領域 → shlib 相当の
+RO+USER) に置き換え、**`host_cr3 = as.pd_phys` にしてから** `paging_current_pte_flags`
+で歩く形にした。決め手の 1 行は「**PDE が指す PT だけを差し替えると答が変わる**」:
+控えから選ぶ実装はここで古い PT を読み続ける。
+
+| RED | 実際に落としたもの |
+|---|---|
+| PT の選び方を控え (`page_tables[pdi]`) に戻す | `FAIL: (flags & (PTE_PRESENT \| PTE_USER)) == (PTE_PRESENT \| PTE_USER)` — 実機とまったく同じ「.rodata が非 present」 |
+
+**もう 1 件 (診断文言)**: `db_v50_test.c` が `db_last_error(0)` を読んでいた。
+これは **slot の状態**を返す口なので、open が slot を掴む前に失敗すると
+必ず "invalid handle" になる。open 失敗の理由は SHM の
+`DB_ResultHeader.error_offset` の先にあるので、試験側を
+`shm_base` から読む `shm_error()` に直した。
 
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
@@ -558,7 +612,7 @@ RO open の時点で成立していなければならない):
 - **rollback が本体ファイルを縮めること**。`os32 SQLite VFS` の `xTruncate` はまだ
   no-op 成功 (票 F3a が未実施) なので、どちらの回収順でもサイズは戻らない。
   だから順序の判定は「戻り値が成功か」ではなく「後始末がバックエンドに届いたか」で行う。
-- 許可帯と PTE の**実物**の判定 (`ring3_ptr_ok` / `paging_addrspace_pte_flags`)。
+- 許可帯と PTE の**実物**の判定 (`ring3_ptr_ok` / `paging_current_pte_flags`)。
   ホストにページテーブルが無い。CPL=3 の受入 `userland/tests/db_v50_test.c` (K2) と
   ブート時の `kselftest` が実機側の担当で、**どちらもまだ実行していない**
   (コーダーは `make`・配備・エミュレータを行わない)。
@@ -577,5 +631,5 @@ RO open の時点で成立していなければならない):
   `vfs_resolve_path` の方は fs/vfs.c から移植してあるので、切り詰めも深さ超過も
   実物と同じ形で踏めている (`resolve_truncate` / `resolve_depth`)。
 - `PDE.PS` (4MB ページ) の経路。この OS は一度も 4MB ページを張らないので
-  ホストでも実機でも作れない。`paging_addrspace_pte_flags` は**明示的に**
+  ホストでも実機でも作れない。`paging_current_pte_flags` は**明示的に**
   非 present 扱いで断る (安全側) というコードとコメントだけがある。

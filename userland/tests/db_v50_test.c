@@ -35,6 +35,20 @@ static int passed;
 static int failed;
 static KernelAPI *g;
 
+/* KAPI が SHM に書いたエラー文。`db_last_error()` は **slot の状態**を返す口で、
+ * open が slot を掴む前に失敗したときは "invalid handle" にしかならない
+ * (実機 K2 の 2 つ目の観測がこれ)。open 失敗の理由は SHM の
+ * DB_ResultHeader.error_offset の先にある。 */
+static const char *shm_error(void)
+{
+    const DB_ResultHeader *hdr;
+    if (!g || g->shm_base == 0) return "(no shm)";
+    hdr = (const DB_ResultHeader *)g->shm_base;
+    if (hdr->status != DB_STATUS_ERROR || hdr->error_offset <= 0)
+        return "(no error text)";
+    return (const char *)(g->shm_base + (u32)hdr->error_offset);
+}
+
 /* 文字列比較 (newlib を引かずに済ませる。C89)。 */
 static int same(const char *a, const char *b)
 {
@@ -52,8 +66,8 @@ static void ok(int cond, const char *name)
         /* 失敗したその場で診断を出す。実機は 1 回走らせるのに配備が要るので、
          * 「-1 だった」だけ持ち帰っても次の一手が決まらない。owner 別の
          * 「直前 open 失敗」コードと、SHM に残っているエラー文を並べる。 */
-        g->kprintf(0x06, "        open_fail=%d last_error=%s\n",
-                   g->db_error_code(-1), g->db_last_error(0));
+        g->kprintf(0x06, "        open_fail=%d shm_error=%s\n",
+                   g->db_error_code(-1), shm_error());
     }
 }
 

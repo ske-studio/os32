@@ -181,40 +181,88 @@ void _start(void)
         CHECK(live_addrspaces == 0 && used == before - 2);
     }
     {
-        /* 票 S0-K: paging_addrspace_pte_flags は「呼び手の PD で見た実効権限」
-         * を返す。exec が CPL=3 アプリを作るときと **同じ順序** (create_n →
-         * clear_app_band → per-app 物理を USER で張る) で組み立て、
-         * KAPI のポインタ検証 (ring3_user_range_ok) が見る 2 ビットを確かめる。
-         * 実機 K2 の「db_open_existing が MISUSE」はここが 0 を返すと起きる。 */
+        /* 票 S0-K / 実機 K2 (2026-09-13): KAPI のポインタ検証が見る 2 ビット。
+         * **exec が実機で作るのと同じ順序** で AS を組み、CR3 に載せてから
+         * `paging_current_pte_flags` で歩く:
+         *   create_n → clear_app_band → app_map_region 相当 (per-app 物理を
+         *   USER で 3 領域) → shlib_addrspace_attach 相当 (帯の下側を RO+USER)
+         * 以前ここは `paging_addrspace_pte_flags(&as, v)` を呼んでいて、
+         * **控え (as->app_pt_phys[]) から PT を選んでいた**。控えと実配置が
+         * ずれると健全なページを非 present と誤判定する — 実機はまさにそれで、
+         * .rodata の 0x501000 が「非 present」と出た。MMU と同じ辿り方
+         * (CR3 → PDE → PDE が指す PT) なら控えが何であれ答は一致する。 */
         struct addrspace as;
-        u32 code = 0x500000, phys = 0x900000;
-        u32 flags;
+        u32 code = 0x500000, sbrk_end = 0x520000;
+        u32 heap = 0x600000, heap_end = 0x610000;
+        u32 stack = 0x7C0000, stack_top = 0x800000;
+        u32 saved_cr3 = host_cr3;
+        u32 flags, other_pt;
+
         CHECK(paging_addrspace_create_n(&as, 1) == 0);
         CHECK(as.app_pde == APP_BAND_PDE && as.app_pde_count == 1);
         CHECK(paging_addrspace_clear_app_band(&as) == 0);
-        /* clear 直後は帯全体が非 present = 検証は必ず落ちる */
-        CHECK(paging_addrspace_pte_flags(&as, code) == 0);
-        CHECK(paging_addrspace_map_user_range_phys(&as, code, code + 0x2000,
-                                                   phys, PAGE_RW | PTE_USER) == 0);
-        flags = paging_addrspace_pte_flags(&as, code);
+        CHECK(paging_addrspace_map_user_range_phys(&as, code, sbrk_end,
+                                                   0x900000, PAGE_RW | PTE_USER) == 0);
+        CHECK(paging_addrspace_map_user_range_phys(&as, heap, heap_end,
+                                                   0x980000, PAGE_RW | PTE_USER) == 0);
+        CHECK(paging_addrspace_map_user_range_phys(&as, stack, stack_top,
+                                                   0x9A0000, PAGE_RW | PTE_USER) == 0);
+        /* shlib 相当: 帯の下側 (0x400000-) を RO + USER で張り直す */
+        CHECK(paging_addrspace_map_user_range(&as, MEM_SHLIB_BASE,
+                                              MEM_SHLIB_BASE + 0x2000,
+                                              PAGE_RO | PTE_USER) == 0);
+
+        /* ---- ここから「いま効いている表」を歩く (syscall 中と同じ状態) ---- */
+        host_cr3 = as.pd_phys;
+        /* 実機で落ちた番地と同じ形 = ロード先の **次のページ** の .rodata */
+        flags = paging_current_pte_flags(code + 0x140E);
         CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        flags = paging_addrspace_pte_flags(&as, code + 0x1FFF);
+        flags = paging_current_pte_flags(code);
         CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        /* 張っていない隣 (= sbrk 上限より上 / guard) は非 present */
-        CHECK(paging_addrspace_pte_flags(&as, code + 0x2000) == 0);
-        /* PDE にだけ USER が伝播し master は supervisor のまま */
-        CHECK(((u32 *)as.pd_phys)[APP_BAND_PDE] & PTE_USER);
-        CHECK(!(page_directory[APP_BAND_PDE] & PTE_USER));
-        /* 共有帯 (VRAM) も同じ口で見える */
-        CHECK(paging_addrspace_map_user_range(&as, 0xA0000UL, 0xA1000UL,
-                                              PAGE_RW | PTE_USER) == 0);
-        flags = paging_addrspace_pte_flags(&as, 0xA0000UL);
+        flags = paging_current_pte_flags(sbrk_end - 1);
         CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        /* 引数の縁 */
-        CHECK(paging_addrspace_pte_flags(0, code) == 0);
-        as.app_pde_count = 0;
-        CHECK(paging_addrspace_pte_flags(&as, code) == 0);
-        as.app_pde_count = 1;
+        flags = paging_current_pte_flags(stack_top - 1);
+        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        flags = paging_current_pte_flags(MEM_SHLIB_BASE);
+        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        CHECK(!(flags & PTE_RW));                 /* shlib text は RO */
+        /* 張っていない隙間 (sbrk 上限〜heap、= guard) は非 present */
+        CHECK(paging_current_pte_flags(sbrk_end) == 0);
+        CHECK(paging_current_pte_flags(heap_end) == 0);
+
+        /* **控えではなく PDE を辿っている** ことの証拠: PDE の指す PT だけを
+         * 別の (全部 0 の) PT に差し替えると答が変わる。控えから選ぶ実装は
+         * ここで古い PT を読み続けてしまう (実機 K2 の壊れ方)。 */
+        other_pt = pgalloc_alloc_page();
+        CHECK(other_pt != 0);
+        {
+            u32 *zero = (u32 *)other_pt;
+            int z;
+            for (z = 0; z < PTE_COUNT; z++) zero[z] = 0;
+        }
+        {
+            u32 *pd = (u32 *)as.pd_phys;
+            u32 saved_pde = pd[APP_BAND_PDE];
+            pd[APP_BAND_PDE] = (other_pt & 0xFFFFF000UL) |
+                               (saved_pde & 0xFFFu);
+            CHECK(paging_current_pte_flags(code + 0x140E) == 0);
+            pd[APP_BAND_PDE] = saved_pde;
+            CHECK((paging_current_pte_flags(code + 0x140E) &
+                   (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        }
+        /* PDE.PS は明示的に拒否 (この OS は 4MB ページを張らない) */
+        {
+            u32 *pd = (u32 *)as.pd_phys;
+            u32 saved_pde = pd[APP_BAND_PDE];
+            pd[APP_BAND_PDE] = saved_pde | PTE_PS;
+            CHECK(paging_current_pte_flags(code) == 0);
+            pd[APP_BAND_PDE] = saved_pde;
+        }
+        pgalloc_free_page(other_pt);
+
+        host_cr3 = saved_cr3;
+        /* master に戻すと同じ番地はアプリ帯の USER 写像を持たない */
+        CHECK(!(paging_current_pte_flags(code + 0x140E) & PTE_USER));
         paging_addrspace_destroy(&as);
     }
     SAY("PASS: one-shot init preserves dynamic PT, live AS, CR3, allocator");

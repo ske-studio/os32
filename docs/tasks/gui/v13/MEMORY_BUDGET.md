@@ -233,7 +233,7 @@ exec_heap のどれも減らさない。
 |---|---:|---:|---|
 | `kapi_db.o` | 3309 → **7927** (+4618) | 3520 → **8256** (+4736) | 検証済みコピー先の静的スクラッチ (blob 4096 + text 256 + journal 256) と `DbSlot` の 3 欄 × 8 + owner 別 open 失敗欄 6 |
 | `exec.o` | 12321 → **12465** (+144) | 8708 で不変 | `ring3_user_range_ok` のみ (回収順の入れ替えは 0 B) |
-| `paging.o` | 5328 → **5464** (+136) | 49215 で不変 | `paging_addrspace_pte_flags` のみ (`PDE.PS` の明示拒否を含む) |
+| `paging.o` | 5328 → **5464** (+136) | 49215 で不変 | `paging_current_pte_flags` のみ (`PDE.PS` の明示拒否を含む。2026-09-13 に `paging_addrspace_pte_flags` から置き換え) |
 
 合計 +4898 B text / +4736 B .bss (≈ 9.4KB、すべてカーネル帯の静的領域)。
 実装レビュー 往復 1 の修正ぶんは text +280 B / .bss **-32 B** (journal スクラッチを

@@ -594,7 +594,8 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   `handle = -1` は呼び手 owner の直前 open 失敗。取得しても消えない。
 - CPL=3 の呼び手が渡すポインタは、ディスパッチャの早期検証 (先頭番地だけ) に加えて
   wrap 側が**範囲まで**検査する: 各ページが許可帯にあり、かつ**呼び手の PD** で
-  present + USER であること (`ring3_user_range_ok`)。CPL=0 の直呼び (常駐シェル /
+  present + USER であること (`ring3_user_range_ok` → `paging_current_pte_flags`:
+  CR3 → PDE → PDE が指す PT と **MMU と同じ順**で辿る)。CPL=0 の直呼び (常駐シェル /
   gshell) は帯も PTE も見ない。`db_step` / `db_prepare` の 1 行が 16KB の結果ブロック
   (header + 全列 descriptor + payload) に収まらないときは、範囲外書き込みも部分 ROW も
   返さず `-1` で失敗し、`db_error_code` に `SQLITE_TOOBIG` が残る。列値の**実体化**が

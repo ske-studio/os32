@@ -484,9 +484,11 @@ int ring3_ptr_ok(u32 p)
 /*      gshell の直呼び (CPL=0、ディスパッチャを通らない) は素通し。          */
 /*    - 許可帯の中でも guard ページや未マップ (sbrk 上限〜guard) は非 present。*/
 /*      そこをカーネルが写すと #PF になり、CPL=3 由来なので呼び手が畳まれる。 */
-/*      だから帯だけでなく **呼び手の PD の PTE** も見る (syscall 中も CR3 は */
-/*      アプリの PD のまま = AppSlot.as)。master の page_tables[] はアプリ帯の */
-/*      USER 写像を持たないので paging_pte_flags() は使わない。               */
+/*      だから帯だけでなく **いま効いている表の PTE** も見る (syscall 中も     */
+/*      CR3 はアプリの PD のまま)。master の page_tables[] はアプリ帯の USER   */
+/*      写像を持たないので paging_pte_flags() は使わない。**AppSlot.as の控え  */
+/*      からも辿らない** — 控えと実配置がずれて健全な .rodata を非 present と  */
+/*      誤判定した (実機 K2、2026-09-13)。MMU と同じく CR3 → PDE → PT を辿る。*/
 /* ======================================================================== */
 /* ---- 検証が断った理由の観測点 (実機 K2 の切り分け、2026-09-13) ----------
  * KAPI にはしない。fault_kill_count と同じくカーネルシンボルとして公開し、
@@ -516,7 +518,6 @@ static int ring3_range_refuse(u32 why, u32 p, u32 page)
 int ring3_user_range_ok(u32 p, u32 len)
 {
     u32 page, last_page;
-    struct addrspace *as;
 
     if (!ring3_in_syscall) return 1;      /* CPL=0 の直呼び */
     if (p == 0) return ring3_range_refuse(RING3_RANGE_NULL, p, 0);
@@ -524,14 +525,13 @@ int ring3_user_range_ok(u32 p, u32 len)
     if (p + len < p) return ring3_range_refuse(RING3_RANGE_OVERFLOW, p, 0);
     if (!g_cur_app)
         return ring3_range_refuse(RING3_RANGE_NO_APP, p, 0);
-    as = &g_cur_app->as;
 
     last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
     for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
         u32 flags;
         if (page == 0 || !ring3_ptr_ok(page))
             return ring3_range_refuse(RING3_RANGE_BAND, p, page);
-        flags = paging_addrspace_pte_flags(as, page);
+        flags = paging_current_pte_flags(page);
         if ((flags & (u32)(PTE_PRESENT | PTE_USER)) !=
             (u32)(PTE_PRESENT | PTE_USER))
             return ring3_range_refuse(

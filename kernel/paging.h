@@ -280,13 +280,15 @@ u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
 int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
                                    u32 vend, u32 flags);
 
-/* その AS (= 呼び手のページディレクトリ) で virt を見たときの実効フラグ
- * (票 S0-K §1a、Codex 往復 3 の 1)。master の page_tables[] を引く
- * paging_pte_flags() と違い、アプリ固有 PDE 配下の PT は **その AS からしか
- * 見えない** ので、KAPI がユーザポインタを写す前の present + USER 判定には
- * こちらを使う。戻り値は PDE と PTE の論理積の下位 12 ビット (実効権限)。
+/* **いま CR3 に載っている表**で virt を見たときの実効フラグ (票 S0-K §1a)。
+ * master の page_tables[] を引く paging_pte_flags() と違い、アプリ固有 PDE
+ * 配下の PT は走っているアプリの PD からしか見えないので、KAPI がユーザ
+ * ポインタを写す前の present + USER 判定にはこちらを使う。
+ * **MMU と同じく PDE が指す PT を辿る** — `struct addrspace` の控えから PT を
+ * 選ぶ実装は実配置とずれて健全なページを非 present と誤判定した (実機 K2、
+ * 2026-09-13)。戻り値は PDE と PTE の論理積の下位 12 ビット (実効権限)。
  * ページが無ければ 0。**読むだけ**で表は 1 ビットも動かさない。 */
-u32 paging_addrspace_pte_flags(struct addrspace *as, u32 virt);
+u32 paging_current_pte_flags(u32 virt);
 
 /* PD 複製の自己診断 (V1)。CPL=0 のまま:
  *   1. アプリ AS を作る
