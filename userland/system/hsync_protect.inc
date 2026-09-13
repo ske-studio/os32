@@ -21,13 +21,28 @@
 #endif
 #define HSP_MAX_DEPTH 32
 
-/* 保護対象のベース名。末尾は番兵 */
+/* 保護対象のベース名。末尾は番兵。
+ *
+ * `.bak` 以降はリカバリ (`install --recover-settings` / `--revert-settings`)
+ * が /etc に作る 7 名 (票 docs/tasks/settings/TASK_S3.md §1b の 9 名から本体
+ * `settings.db` と `settings.db-journal` を除いたもの、S3-D / 往復 3 の B5)。
+ * `.bak` + `.bak-journal` は切替前の元の対の**唯一の写し**、`.recover-state`
+ * は phase の印なので、通常同期が 1 つでも掴むと「元へ戻す」経路そのものが
+ * 消える。`.new*` / `.failed*` は他人の生成物で、hsync が作ることも消すことも
+ * しない。表の件数は hsync.c の HS_MAX_PROT (現在 24、実在名の収集上限) に
+ * 余裕を残すこと — 大文字小文字違いの別名の分だけ実在名は表より増える。 */
 static const char *hsp_protected_names[] = {
     "settings.db",
     "settings.db-journal",
     "settings.db-wal",
     "settings.db-shm",
     "settings.db.bak",
+    "settings.db.bak-journal",
+    "settings.db.failed",
+    "settings.db.failed-journal",
+    "settings.db.new",
+    "settings.db.new-journal",
+    "settings.db.recover-state",
     0
 };
 

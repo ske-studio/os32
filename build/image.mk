@@ -4,7 +4,8 @@
 
 # FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
-FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep diff du cal man sndctl
+# cfg は票 S3 (リカバリ後に FDD 自身のマスタを cfg status で確認する用途。HDD の DB には使えない)
+FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep diff du cal man sndctl cfg
 images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin $(BUILD_OUT)/settings.db
 	@mkdir -p images
 	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="

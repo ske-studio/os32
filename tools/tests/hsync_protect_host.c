@@ -174,6 +174,105 @@ int main(void)
     strcat(joined, "../etc/settings.db");
     check(hsp_path_protected(joined), "'..' 混じりは保護側へ倒す");
 
+    printf("== S3-D リカバリ生成物の名前 (票 TASK_S3 §0、往復 3 の B5) ==\n");
+    /* `install --recover-settings` / `--revert-settings` が /hd0/etc に作る
+     * 7 名 (票 §1b の 9 名から本体 `settings.db` と `settings.db-journal` を
+     * 除いたもの)。`.bak` / `.bak-journal` は元の対の**唯一の写し**、
+     * `.recover-state` は phase の印なので、通常同期 (hsync) が 1 つでも
+     * 掴むと「元へ戻す」経路そのものが消える。`.new*` / `.failed*` も
+     * 他人の生成物で、配備が触ってよいものではない。 */
+    {
+        static const char *rec[] = {
+            "settings.db.bak",
+            "settings.db.bak-journal",
+            "settings.db.failed",
+            "settings.db.failed-journal",
+            "settings.db.new",
+            "settings.db.new-journal",
+            "settings.db.recover-state",
+            0
+        };
+        char path[HSP_MAX_PATH];
+        char upper[HSP_MAX_PATH];
+        int i;
+        int k;
+
+        for (i = 0; rec[i]; i++) {
+            /* 名前規則: /etc/<name> */
+            strcpy(path, "/etc/");
+            strcat(path, rec[i]);
+            check(hsp_path_protected(path), rec[i]);
+
+            /* /etc 列挙の一致判定 (実体規則の入口) */
+            check(hsp_is_protected_basename(rec[i]), rec[i]);
+
+            /* ext2 は大文字小文字を区別する。実在名が大文字でも守る */
+            for (k = 0; rec[i][k]; k++) {
+                int c = rec[i][k];
+                upper[k] = (char)((c >= 'a' && c <= 'z')
+                                  ? c - ('a' - 'A') : c);
+            }
+            upper[k] = '\0';
+            check(hsp_is_protected_basename(upper), "大文字の実在名");
+            strcpy(path, "/etc/");
+            strcat(path, upper);
+            check(hsp_path_protected(path), "大文字の名前規則");
+
+            /* 残骸ディレクトリになっていても中へ書かせない (祖先の保護) */
+            strcpy(path, "/etc/");
+            strcat(path, rec[i]);
+            strcat(path, "/inner");
+            check(hsp_path_protected(path), "祖先が保護対象");
+
+            /* 正規化を挟んでも守る (`./` / `..` / 連続 '/') */
+            strcpy(path, "/etc/./sub/../");
+            strcat(path, rec[i]);
+            check(hsp_path_protected(path), "正規化してから名前規則");
+        }
+    }
+
+    printf("== S3-D 似ているだけの名前は通す ==\n");
+    /* 接頭一致で拾うと通常配備の対象まで止まる。7 名は**完全一致**だけ。 */
+    check(!hsp_path_protected("/etc/settings.db.bak2"), "bak2");
+    check(!hsp_path_protected("/etc/settings.db.new2"), "new2");
+    check(!hsp_path_protected("/etc/settings.db.recover"), "recover");
+    check(!hsp_path_protected("/etc/settings.db.recover-st"), "recover-st");
+    check(!hsp_path_protected("/etc/settings.db.recover-state.old"),
+          "recover-state.old");
+    check(!hsp_path_protected("/etc/settings.db.failed.old"), "failed.old");
+    check(!hsp_path_protected("/etc/settings.dbbak"), "settings.dbbak");
+    check(!hsp_path_protected("/etc/settings.db.bak-journal2"),
+          "bak-journal2");
+    check(!hsp_path_protected("/etc/sub/settings.db.bak"),
+          "親が /etc でなければ対象外");
+    check(!hsp_path_protected("/settings.db.recover-state"),
+          "ルート直下は対象外");
+    check(!hsp_is_protected_basename("settings.db.bak2"), "列挙でも bak2");
+    check(!hsp_is_protected_basename("ettings.db.new"), "部分一致では拾わない");
+
+    printf("== S3-D -f の subdir 連結でもリカバリ生成物を守る ==\n");
+    /* `hsync -f etc` は dst = "/" + "etc" + "/" + name (hsync.c:254 相当) */
+    strcpy(joined, "/");
+    strcat(joined, "etc");
+    strcat(joined, "/");
+    strcat(joined, "settings.db.recover-state");
+    check(hsp_path_protected(joined), "hsync -f etc の下の recover-state");
+    strcpy(joined, "/");
+    strcat(joined, "etc/");
+    strcat(joined, "/settings.db.bak-journal");
+    check(hsp_path_protected(joined), "hsync -f etc/ の bak-journal");
+
+    printf("== S3-D 表の件数と hsync.c の収集上限の結合 ==\n");
+    {
+        /* hsync.c は /etc の**実在名**を HS_MAX_PROT 件まで集め、越えたら
+         * 「守れない」として同期を拒否する。表が伸びると余裕が減るので、
+         * 名前を足すときは HS_MAX_PROT (現在 24) を必ず見直すこと。
+         * リカバリ途中の /etc は票 TASK_S3 §1b の 9 名 + wal/shm = 11 名。 */
+        int n = 0;
+        while (hsp_protected_names[n]) n++;
+        check(n == 11, "保護対象は 11 名 (本体 2 + wal/shm 2 + リカバリ 7)");
+    }
+
     printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

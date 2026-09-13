@@ -57,6 +57,23 @@ static int ff_to_vfs(FRESULT fr)
 }
 
 
+/* ======== FRESULT → VFSエラー変換 (存在確認の入口だけ) ========
+ * stat / get_size のように「在るか」を問う入口では FR_INVALID_NAME も
+ * NOTFOUND に写す。ffconf.h は FF_USE_LFN 0 なので、8.3 に収まらない名前
+ * (例: "settings.db-journal") は f_stat が FR_INVALID_NAME を返すが、
+ * そのボリュームに**存在しえない名前**は stat の意味では「存在しない」。
+ * KAPI v50 の db_open_existing は hot journal 検査で "<db>-journal" を
+ * vfs_stat し、NOTFOUND 以外を IOERR と断じるため、INVAL のままだと
+ * FDD ブート (root = FAT) で SQLITE_IOERR になっていた (2026-09-13)。
+ * open / read / write 系は INVAL のまま — 呼び手が不正な名前を渡した、
+ * という診断をつぶさないため。 */
+static int ff_stat_to_vfs(FRESULT fr)
+{
+    if (fr == FR_INVALID_NAME) return VFS_ERR_NOTFOUND;
+    return ff_to_vfs(fr);
+}
+
+
 /* ======== パスにボリューム接頭辞を付加 ======== */
 static void ff_make_path(const FatFsCtx *fc, const char *path, char *out, int max)
 {
@@ -214,7 +231,7 @@ static int fatfs_vfs_get_size(void *ctx, const char *path, u32 *size)
 
     ff_make_path(fc, path, fpath, sizeof(fpath));
     fr = f_stat(fpath, &fno);
-    if (fr != FR_OK) return ff_to_vfs(fr);
+    if (fr != FR_OK) return ff_stat_to_vfs(fr);
     *size = fno.fsize;
     return VFS_OK;
 }
@@ -282,7 +299,7 @@ static int fatfs_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
 
     ff_make_path(fc, path, fpath, sizeof(fpath));
     fr = f_stat(fpath, &fno);
-    if (fr != FR_OK) return ff_to_vfs(fr);
+    if (fr != FR_OK) return ff_stat_to_vfs(fr);
 
     kmemset(buf, 0, sizeof(OS32_Stat));
     buf->st_size = fno.fsize;

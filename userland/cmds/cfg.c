@@ -28,6 +28,7 @@
 #define CFG_CMD_STATUS  5
 #define CFG_CMD_INIT    6
 #define CFG_CMD_EXPORT  7
+#define CFG_CMD_IMPORT  8
 
 /* 出力の作業領域 ([C4]) */
 /* 4096B blob の hex は 8192 文字。その 1 行と案内文がまとめて収まる大きさ。 */
@@ -44,7 +45,8 @@ typedef struct {
     const char *value;
     const char *def;      /* get の既定値 (NULL = 省略) */
     const char *prefix;
-    const char *path;     /* init --tsv / export <file> */
+    const char *path;     /* init --tsv / export <file> / import <file> */
+    int merge;            /* import --merge (0 = 置換) */
 } CfgArgs;
 
 static KernelAPI *api;
@@ -78,6 +80,7 @@ static int do_set(const CfgArgs *a, int del);
 static int do_list(const CfgArgs *a);
 static int do_init(const CfgArgs *a);
 static int do_export(const CfgArgs *a);
+static int do_import(const CfgArgs *a);
 static void usage(void);
 
 int main(int argc, char **argv, KernelAPI *kapi_in)
@@ -100,6 +103,7 @@ int main(int argc, char **argv, KernelAPI *kapi_in)
     case CFG_CMD_LIST:   rc = do_list(&a);      break;
     case CFG_CMD_INIT:   rc = do_init(&a);      break;
     case CFG_CMD_EXPORT: rc = do_export(&a);    break;
+    case CFG_CMD_IMPORT: rc = do_import(&a);    break;
     default:             usage(); rc = 1;       break;
     }
     /* 出力の取りこぼし (溢れ / short write) は黙って捨てず終了コードへ。 */
@@ -168,6 +172,7 @@ static int cfg_cmd_parse(int argc, char **argv, CfgArgs *out)
     out->def = (const char *)0;
     out->prefix = (const char *)0;
     out->path = (const char *)0;
+    out->merge = 0;
     if (argc < 2 || !argv) return -1;
     c = argv[1];
 
@@ -219,6 +224,25 @@ static int cfg_cmd_parse(int argc, char **argv, CfgArgs *out)
         if (argc != 3) return -1;
         out->cmd = CFG_CMD_EXPORT;
         out->path = argv[2];
+        return 0;
+    }
+    if (s_eq(c, "import")) {
+        int i;
+        if (argc < 3 || !argv[2] || argv[2][0] == '-') return -1;
+        out->cmd = CFG_CMD_IMPORT;
+        out->path = argv[2];
+        for (i = 3; i < argc; i++) {
+            if (s_eq(argv[i], "--merge")) {
+                if (out->merge) return -1;
+                out->merge = 1;
+            } else if (s_eq(argv[i], "--scope")) {
+                if (out->scope || i + 1 >= argc) return -1;
+                i++;
+                out->scope = argv[i];
+            } else {
+                return -1;
+            }
+        }
         return 0;
     }
     return -1;
@@ -501,6 +525,7 @@ static void usage(void)
     out_str("       cfg status\n");
     out_str("       cfg init [--tsv <path>]\n");
     out_str("       cfg export <file>\n");
+    out_str("       cfg import <file> [--scope <scope>] [--merge]\n");
 }
 
 /* MISSING のときの案内 (DESIGN §2 の文言は S3 のリカバリ用に残す)。 */
@@ -1181,4 +1206,101 @@ static int do_export(const CfgArgs *a)
     out_num(rows);
     out_str(" records\n");
     return 0;
+}
+
+/* ======================================================================== */
+/*  import — 票 S3 §2                                                        */
+/*                                                                          */
+/*  読み取り・検証・2 巡・単一トランザクションは libos32cfg の                */
+/*  `cfg_import_file` が持つ。ここは引数の正規化と文言だけ。                 */
+/* ======================================================================== */
+
+static int do_import(const CfgArgs *a)
+{
+    static char norm[OS32_MAX_PATH];
+    CfgImportInfo info;
+    int rc;
+
+    /* export と同じ正規化 (相対名 / `.` / `..` を絶対名へ)。 */
+    if (norm_path(a->path, norm, (int)sizeof(norm)) != 0) {
+        out_str("cannot open the import file\n");
+        return 1;
+    }
+    rc = cfg_import_file(norm, a->scope, a->merge, &info);
+    if (rc == CFG_IMPORT_OK || rc == CFG_IMPORT_E_CLOSE) {
+        out_str("imported ");
+        out_num(info.rows);
+        out_str(" records (");
+        out_str(a->scope ? a->scope : "all scopes");
+        out_str("), ");
+        out_str(a->merge ? "merged" : "replaced");
+        if (rc == CFG_IMPORT_E_CLOSE) {
+            /* commit は通っている = **更新済み**。隠さずに出して終了 1。 */
+            out_str(" (close failed ");
+            out_num(info.detail);
+            out_str(")");
+        }
+        out_str("\n");
+        return rc == CFG_IMPORT_OK ? 0 : 1;
+    }
+    /* 失敗の文言。改行は付けない — 後始末の失敗を同じ行の尾に足すため。 */
+    switch (rc) {
+    case CFG_IMPORT_E_STATUS:
+        out_str("cannot import: ");
+        out_str(status_name(info.status));
+        break;
+    case CFG_IMPORT_E_VERSION:
+        out_str("newer backup: schema_version ");
+        out_num(info.version);
+        break;
+    case CFG_IMPORT_E_LINE:
+        out_str("bad line ");
+        out_num(info.lineno);
+        out_str(": ");
+        out_str(cfg_import_detail_name(info.detail));
+        break;
+    case CFG_IMPORT_E_DUP:
+        out_str("duplicate record at line ");
+        out_num(info.lineno);
+        break;
+    case CFG_IMPORT_E_MANY:
+        out_str("too many records");
+        break;
+    case CFG_IMPORT_E_LONG:
+        out_str("line ");
+        out_num(info.lineno);
+        out_str(" too long");
+        break;
+    case CFG_IMPORT_E_HEADER:
+        out_str("not a settings backup");
+        break;
+    case CFG_IMPORT_E_OPEN:
+        out_str("cannot open the import file");
+        break;
+    case CFG_IMPORT_E_IO:
+        out_str("read failed");
+        break;
+    case CFG_IMPORT_E_CHANGED:
+        out_str("input changed during import");
+        break;
+    case CFG_IMPORT_E_ARG:
+        out_str("bad scope");
+        break;
+    default:
+        out_str("import failed (");
+        out_num(info.detail);
+        out_str(")");
+        break;
+    }
+    /* rollback / close が失敗していたら「1 行も残らない」とは言えない。
+     * 原因の文言を残したまま別欄で出す (レビュー往復 1 の B4)。 */
+    if (info.cleanup != 0) {
+        out_str(" (rollback/close failed ");
+        out_num(info.cleanup);
+        out_str(")");
+    }
+    out_str("\n");
+    if (rc == CFG_IMPORT_E_STATUS && info.status == CFG_MISSING)
+        out_str("settings.db missing: run 'cfg init'\n");
+    return 1;
 }

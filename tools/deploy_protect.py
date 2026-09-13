@@ -41,12 +41,25 @@ import sys
 
 # 保護対象のベース名 (大文字小文字を区別しない)。
 # WAL / SHM は OS32 が WAL を使う意味ではなく、安全側の巻き取り。
+#
+# `.bak` 以降はリカバリ (`install --recover-settings` / `--revert-settings`)
+# が /etc に作る 7 名 (票 TASK_S3 §1b の 9 名から本体と `-journal` を除いた
+# もの、S3-D / 往復 3 の B5)。`.bak` + `.bak-journal` は切替前の元の対の
+# **唯一の写し**、`.recover-state` は phase の印で、通常配備が 1 つでも
+# 掴むと「元へ戻す」経路そのものが消える。`.new*` / `.failed*` は他人の
+# 生成物なので、配備が作ることも消すこともしない。
 PROTECTED_BASENAMES = frozenset([
     'settings.db',
     'settings.db-journal',
     'settings.db-wal',
     'settings.db-shm',
     'settings.db.bak',
+    'settings.db.bak-journal',
+    'settings.db.failed',
+    'settings.db.failed-journal',
+    'settings.db.new',
+    'settings.db.new-journal',
+    'settings.db.recover-state',
 ])
 
 # 保護対象ディレクトリ (ゲストの絶対パス、小文字)

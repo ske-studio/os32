@@ -138,4 +138,59 @@ int   cfg_enum_scopes(CfgDb *db, int (*fn)(const char *scope, void *ctx),
 int   cfg_init(const char *tsv_path);
 int   cfg_last_init_reason(void);
 
+
+/* ---- scope 単位の削除 / 宣言型つき NULL 行 (S3、`cfg import` が使う) ---- */
+/* `scope` が NULL なら `DELETE FROM settings` (全削除)、非 NULL ならその
+ * scope だけ。set / delete と同じ契約: txn の中でだけ、失敗で txn を failed、
+ * scope は bind (SQL に埋めない)、列挙 callback からの再入は拒否。 */
+int   cfg_delete_scope(CfgDb *db, const char *scope);
+/* 「行はあるが値が NULL」を**宣言型つき**で格納する
+ * (`INSERT OR REPLACE … VALUES(?,?,?,NULL,NULL,NULL)`)。
+ * `cfg list` の `(unset)` と export の `v:null` が往復で保たれる。 */
+int   cfg_set_null(CfgDb *db, const char *scope, const char *key, int type);
+
+/* ---- import (`cfg import` の実体、cfg_import.c) ------------------------ */
+/* 入力は `cfg export` が書いた JSON (1 行目ヘッダ + 1 行 1 レコード)。
+ * **2 巡**する: 1 巡目で対象行を全部検証し (1 行でも不正なら何も書かない)、
+ * 2 巡目はファイルを先頭から読み直して**同じ検証を全行に再適用**しながら
+ * 単一トランザクションで書く。件数 / 版が 1 巡目と食い違えば commit せず
+ * rollback (巡回の間にホスト側で差し替えられた場合)。 */
+#define CFG_IMPORT_OK         0
+#define CFG_IMPORT_E_ARG      1   /* path / scope が不正 */
+#define CFG_IMPORT_E_OPEN     2   /* 入力を開けない */
+#define CFG_IMPORT_E_IO       3   /* read / lseek の失敗 */
+#define CFG_IMPORT_E_HEADER   4   /* 1 行目がヘッダの形でない */
+#define CFG_IMPORT_E_VERSION  5   /* ヘッダの版が新しい (info->version) */
+#define CFG_IMPORT_E_LINE     6   /* 行が規則違反 (info->lineno / detail) */
+#define CFG_IMPORT_E_DUP      7   /* (scope,key) の重複 (info->lineno) */
+#define CFG_IMPORT_E_MANY     8   /* 対象行が上限を超えた */
+#define CFG_IMPORT_E_LONG     9   /* 行が行バッファを超えた (info->lineno) */
+#define CFG_IMPORT_E_STATUS  10   /* MISSING / CORRUPT / VERSION (info->status) */
+#define CFG_IMPORT_E_CHANGED 11   /* 2 巡目が 1 巡目と食い違った */
+#define CFG_IMPORT_E_WRITE   12   /* open / begin / delete / set / commit の失敗 */
+#define CFG_IMPORT_E_CLOSE   13   /* commit 後の close 失敗 = **更新済み** */
+
+/* 現行 export の最大 = 32 scope x 256 key。 */
+#define CFG_IMPORT_MAX_ROWS  8192
+
+typedef struct {
+    int rows;      /* 適用した対象行数 */
+    int lineno;    /* 失敗した行 (1 = ヘッダ、0 = 行に紐づかない) */
+    int detail;    /* 行の理由 / OS32_ERR_* / SQLite / close コード */
+    int status;    /* CFG_IMPORT_E_STATUS のときの CFG_* */
+    int version;   /* ヘッダの schema_version */
+    /* **この呼び出しの中で** cfg_close が失敗したときの最初のコード
+     * (0 = 後片付けは成功、または close していない)。commit 前の失敗では
+     * rollback がここに出る = 「1 行も残らない」保証が**成立していない**
+     * ことを呼び手が判別できる (レビュー往復 1 の B4)。 */
+    int cleanup;
+} CfgImportInfo;
+
+/* scope が NULL なら全 scope。merge が 0 なら置換 (対象 scope を先に削除)。
+ * 戻り: CFG_IMPORT_*。info は NULL 可。 */
+int   cfg_import_file(const char *path, const char *scope, int merge,
+                      CfgImportInfo *info);
+/* CFG_IMPORT_E_LINE の info->detail を短い英語にする ("scope" 等)。 */
+const char *cfg_import_detail_name(int detail);
+
 #endif /* LIBOS32CFG_H */

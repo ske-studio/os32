@@ -67,6 +67,15 @@ CASES = [
     "s5_pure",         # cfg_bench の引数 / 巡回 / 失敗の数え方 / 集計 / 整形
     "s5_bench",        # cfg_bench の通し (実 DB、yield なし、pool の戻り)
     "s5_pool",         # cfg status の ` pool <n> B`
+    # 票 S3-C §2 (記録は tools/tests/s3_tdd.md §C)
+    "s3_json",         # JSON reader 単体の受理 / 拒否 (エスケープ / 境界 / base64)
+    "s3_roundtrip",    # 実 writer の出力を import に通す往復 (CR / 制御 / blob / null)
+    "s3_scope",        # --scope の削除範囲と scope 外の不変、--merge
+    "s3_args",         # import の引数解釈と usage
+    "s3_reject",       # MISSING / CORRUPT / 版 / 壊れた行 / 重複 / 長すぎ
+    "s3_fail",         # 途中失敗の rollback、hash 衝突、commit 後の close 失敗
+    "s3_gen",          # 8192 受理 / 8193 拒否、巡回の間の差し替え
+    "s3_bulk",         # 8192 件を実 SQLite に 1 transaction で書き切る
 ]
 
 INC = ["-I" + str(ROOT / p) for p in
@@ -193,6 +202,7 @@ def target_compile(tmp):
              "-Iuserland/lib", "-I/usr/local/cross/i386-elf/include"]
     srcs = ["userland/lib/cfg/libos32cfg.c", "userland/lib/cfg/cfg_enum.c",
             "userland/lib/cfg/cfg_tsv.c", "userland/lib/cfg/cfg_init.c",
+            "userland/lib/cfg/cfg_json.c", "userland/lib/cfg/cfg_import.c",
             "userland/lib/cfg/cfg_backend.c", "userland/cmds/cfg.c",
             "userland/tests/cfg_bench.c"]
     for src in srcs:
