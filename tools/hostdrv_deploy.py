@@ -76,6 +76,37 @@ def guard_dest(guest_path, host_src=None):
     return dest, 'ok'
 
 
+def ensure_dir(guest_dir):
+    """ゲスト側ディレクトリを**各祖先まで判定してから**作る。
+
+    `os.makedirs` は途中を黙って作るので、最終要素だけ見ても
+    `/etc/settings.db/a` の `settings.db` がディレクトリとして生える
+    (往復 1 の B2)。makedirs の失敗も握り潰さない (往復 1 の B6)。
+
+    Returns: (dest_abs, state) — 'ok' / 'protected' (除外、失敗ではない) / 'error'
+    """
+    try:
+        chain = protect.mkdir_chain(HOSTDRV_DIR, guest_dir)
+    except protect.ProtectedPath as exc:
+        protect.protect_log(exc.guest)
+        return None, 'protected'
+    except protect.ProtectError as exc:
+        print("Error: 配備の保護判定に失敗: {}".format(exc), file=sys.stderr)
+        return None, 'error'
+
+    target = chain[-1] if chain else os.path.abspath(HOSTDRV_DIR)
+    for path in chain:
+        if os.path.isdir(path):
+            continue
+        try:
+            os.mkdir(path)
+        except OSError as exc:
+            print("Error: mkdir {} 失敗: {}".format(path, exc), file=sys.stderr)
+            return None, 'error'
+        print("  mkdir {}".format(protect.guest_path_of(HOSTDRV_DIR, path)))
+    return target, 'ok'
+
+
 def load_deploy_yaml():
     """層ごとの配備定義をマージして返す (tools/deploy_manifests.py に委譲)"""
     return _load_merged()
@@ -141,14 +172,9 @@ def do_sync(tag_filter=None):
     if not tag_filter:
         dirs = fs.get('directories', [])
         for d in dirs:
-            target, state = guard_dest(d)
+            target, state = ensure_dir(d)
             if state == 'error':
                 return False
-            if state == 'protected':
-                continue
-            if not os.path.exists(target):
-                os.makedirs(target, exist_ok=True)
-                print("  mkdir {}".format(d))
 
     # ファイルコピー
     files = fs.get('files', [])
@@ -179,19 +205,21 @@ def do_sync(tag_filter=None):
                 total_protected += 1
                 continue
 
-            # ゲスト側のディレクトリを確保 (保護対象名のディレクトリは作らない)
-            guest_dir = os.path.dirname(
-                guest_path if not guest_path.endswith('/')
-                else guest_path + os.path.basename(host_abs)) or '/'
-            if guest_dir.strip('/'):
-                dest_dir, dstate = guard_dest(guest_dir)
-                if dstate == 'error':
-                    return False
-                if dstate == 'protected':
-                    total_protected += 1
-                    continue
-                if not os.path.exists(dest_dir):
-                    os.makedirs(dest_dir, exist_ok=True)
+            # ゲスト側のディレクトリを確保 (各祖先まで判定してから作る)。
+            # 親は**確定した最終パス**から取る (guest_path の字句ではない)。
+            try:
+                parent = protect.guest_path_of(
+                    HOSTDRV_DIR, os.path.dirname(dest_file))
+            except protect.ProtectError as exc:
+                print("Error: 配備の保護判定に失敗: {}".format(exc),
+                      file=sys.stderr)
+                return False
+            dest_dir, dstate = ensure_dir(parent)
+            if dstate == 'error':
+                return False
+            if dstate == 'protected':
+                total_protected += 1
+                continue
 
             # 同一ファイルならスキップ (サイズ+内容比較)
             if os.path.isfile(dest_file):
@@ -204,10 +232,8 @@ def do_sync(tag_filter=None):
             size = os.path.getsize(host_abs)
             total_size += size
             total_copied += 1
-            disp_path = guest_path
-            if disp_path.endswith('/'):
-                disp_path = disp_path + os.path.basename(host_abs)
-            print("  [{}] {} ({} bytes)".format(tag_label, disp_path, size))
+            print("  [{}] {} ({} bytes)".format(
+                tag_label, protect.guest_path_of(HOSTDRV_DIR, dest_file), size))
 
     print("")
     print("=" * 55)
@@ -257,6 +283,46 @@ def do_diff(tag_filter=None):
     print("変更: {}, 新規: {}, 同一: {}".format(changed, missing, same))
 
 
+def _clean_tree(path):
+    """path の中身を消す。保護対象を 1 つでも抱えていたら True を返す。
+
+    走査は **top-down**。`os.walk(topdown=False)` は保護対象名のディレクトリ
+    (`etc/settings.db/` の残骸) の中身を先に消してしまうし、symlink 分岐を
+    保護判定より前に置くと `etc/settings.db -> どこか` を無判定で unlink する
+    (往復 1 の B3)。判定 → symlink → ディレクトリ → ファイル の順で見る。
+
+    失敗 (EACCES / EIO / ENOSPC) は OSError のまま上へ投げる。「保護対象を
+    抱えているから消せなかった」と混同しない (往復 1 の B6)。
+    """
+    keep = False
+    for name in sorted(os.listdir(path)):
+        full = os.path.join(path, name)
+        islink = os.path.islink(full)
+        # 1) 保護判定が最初 (symlink でもディレクトリでも、消す前に必ず見る)。
+        #    symlink は「リンクを外すだけ」なので専用の判定を使う。
+        if islink:
+            protected = protect.is_protected_symlink(HOSTDRV_DIR, full)
+        else:
+            protected = protect.is_protected(HOSTDRV_DIR, full)
+        if protected:
+            protect.protect_log(protect.guest_path_of(HOSTDRV_DIR, full))
+            keep = True
+            continue
+        # 2) symlink は辿らずにリンクだけ消す
+        if islink:
+            os.remove(full)
+            continue
+        # 3) ディレクトリは降りてから、空になったときだけ rmdir
+        if os.path.isdir(full):
+            if _clean_tree(full):
+                keep = True
+            else:
+                os.rmdir(full)
+            continue
+        os.remove(full)
+    return keep
+
+
 def do_clean():
     """HostDrvディレクトリの中身を削除する (保護対象と、それを含む祖先は残す)
 
@@ -268,30 +334,10 @@ def do_clean():
         print("HostDrvディレクトリが存在しません: {}".format(HOSTDRV_DIR))
         return True
 
-    kept = 0
     try:
-        for dirpath, dirnames, filenames in os.walk(HOSTDRV_DIR, topdown=False):
-            for name in filenames:
-                path = os.path.join(dirpath, name)
-                if protect.is_protected(HOSTDRV_DIR, path):
-                    protect.protect_log(protect.guest_path_of(HOSTDRV_DIR, path))
-                    kept += 1
-                    continue
-                os.remove(path)
-            for name in dirnames:
-                path = os.path.join(dirpath, name)
-                if os.path.islink(path):
-                    os.remove(path)
-                    continue
-                if protect.is_protected(HOSTDRV_DIR, path):
-                    protect.protect_log(protect.guest_path_of(HOSTDRV_DIR, path))
-                    kept += 1
-                    continue
-                try:
-                    os.rmdir(path)
-                except OSError:
-                    # 保護対象を抱えているので空にならない。祖先として残す。
-                    kept += 1
+        # <root>/etc がすり替わっていれば clean も拒否する (往復 1 の B3)。
+        protect.check_root_etc(HOSTDRV_DIR)
+        kept = _clean_tree(HOSTDRV_DIR)
     except protect.ProtectError as exc:
         print("Error: 保護判定に失敗したので clean を中止: {}".format(exc),
               file=sys.stderr)
@@ -301,8 +347,7 @@ def do_clean():
         return False
 
     if kept:
-        print("クリア完了 (保護対象と祖先 {} 件は残した): {}".format(
-            kept, HOSTDRV_DIR))
+        print("クリア完了 (保護対象とその祖先は残した): {}".format(HOSTDRV_DIR))
     else:
         print("クリア完了: {}".format(HOSTDRV_DIR))
     return True

@@ -135,38 +135,93 @@ static int copy_file(const char *src, const char *dst)
 /* ======== 保護対象の判定 ======== */
 
 /* 現に存在する /etc/settings.db* の実体。同期を始める前に 1 度だけ集める
- * (ファイルごとに 5 回 stat すると 16MHz の実機では効く)。 */
-#define HS_MAX_PROT 8
+ * (ファイルごとに何度も stat すると 16MHz の実機では効く)。
+ *
+ * 表の小文字 5 名を決め打ちで stat するだけでは足りない: ext2 は大文字小文字を
+ * 区別するので `/etc/SETTINGS.DB` が本体でも拾えず、そこへの hardlink を
+ * `hsync -f bin` が上書きしてしまう (往復 1 の B5)。/etc を sys_ls で列挙し、
+ * 大文字小文字を無視して一致する**実在名**を全部 stat する。
+ * コールバックの中では FS に触らない (private バッファに写すだけ、§4-26)。 */
+#define HS_MAX_PROT 16
 static u32 g_prot_dev[HS_MAX_PROT];
 static u32 g_prot_ino[HS_MAX_PROT];
 static int g_prot_count;
+static char g_prot_name[HS_MAX_PROT][64];
+static int g_prot_name_count;
+/* 判定できない stat 失敗を踏んだ。同期を中止する印 */
+static int g_abort;
 
-static void scan_protected_entities(void)
+static void prot_scan_cb(const DirEntry_Ext *entry, void *ctx)
+{
+    int i;
+
+    (void)ctx;
+    if (g_prot_name_count >= HS_MAX_PROT) return;
+    if (!hsp_is_protected_basename(entry->name)) return;
+    i = 0;
+    while (entry->name[i] && i < 63) {
+        g_prot_name[g_prot_name_count][i] = entry->name[i];
+        i++;
+    }
+    g_prot_name[g_prot_name_count][i] = '\0';
+    g_prot_name_count++;
+}
+
+/* 0 = ok / -1 = 判定できないので同期を中止 */
+static int scan_protected_entities(void)
 {
     OS32_Stat st;
     char buf[OS32_MAX_PATH];
     int i;
+    int rc;
 
     g_prot_count = 0;
-    for (i = 0; hsp_protected_names[i] && g_prot_count < HS_MAX_PROT; i++) {
-        str_cpy(buf, "/etc/");
-        str_cat(buf, hsp_protected_names[i]);
-        if (api->sys_stat(buf, &st) != 0) continue;   /* 欠損はそのまま */
-        g_prot_dev[g_prot_count] = st.st_dev;
-        g_prot_ino[g_prot_count] = st.st_ino;
-        g_prot_count++;
+    g_prot_name_count = 0;
+
+    rc = api->sys_ls("/etc", prot_scan_cb, 0);
+    if (rc != 0 && rc != OS32_ERR_NOTFOUND) {
+        api->kprintf(ATTR_RED, "Error: /etc を読めない (%d)。中止する\n", rc);
+        return -1;
     }
+
+    for (i = 0; i < g_prot_name_count; i++) {
+        str_cpy(buf, "/etc/");
+        str_cat(buf, g_prot_name[i]);
+        rc = api->sys_stat(buf, &st);
+        if (rc == 0) {
+            g_prot_dev[g_prot_count] = st.st_dev;
+            g_prot_ino[g_prot_count] = st.st_ino;
+            g_prot_count++;
+        } else if (rc != OS32_ERR_NOTFOUND) {
+            /* 読めない = 守れない。書いてから気づくより中止する。 */
+            api->kprintf(ATTR_RED, "Error: stat %s 失敗 (%d)。中止する\n",
+                         buf, rc);
+            return -1;
+        }
+    }
+    return 0;
 }
 
 /* 実体規則: dst_path が現に /etc/settings.db* のどれかと同じ実体 (NHD 上の
- * hardlink) なら真。名前規則 (hsp_path_protected) をすり抜ける別名を塞ぐ。 */
+ * hardlink) なら真。名前規則 (hsp_path_protected) をすり抜ける別名を塞ぐ。
+ * 宛先の stat が「不存在」以外で失べば g_abort を立てる (往復 1 の B5) — 
+ * 読めないまま open すると O_TRUNC で切り詰めてしまう。 */
 static int is_same_as_protected(const char *dst_path)
 {
     OS32_Stat here;
     int i;
+    int rc;
 
     if (g_prot_count == 0) return 0;                  /* 守る実体が無い */
-    if (api->sys_stat(dst_path, &here) != 0) return 0;
+    rc = api->sys_stat(dst_path, &here);
+    if (rc != 0) {
+        if (rc != OS32_ERR_NOTFOUND) {
+            api->kprintf(ATTR_RED, "Error: stat %s 失敗 (%d)。中止する\n",
+                         dst_path, rc);
+            g_abort = 1;
+        }
+        return 0;
+    }
     for (i = 0; i < g_prot_count; i++) {
         if (here.st_dev == g_prot_dev[i] && here.st_ino == g_prot_ino[i])
             return 1;
@@ -196,6 +251,9 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
     for (i = 0; i < fl.count; i++) {
         char src_path[OS32_MAX_PATH];
         char dst_path[OS32_MAX_PATH];
+
+        /* 判定できない stat 失敗を踏んだら、それ以上は書かない */
+        if (g_abort) return;
 
         /* "." と ".." をスキップ */
         if (fl.names[i][0] == '.') {
@@ -232,6 +290,7 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             g_protected++;
             continue;
         }
+        if (g_abort) return;
 
         if (fl.types[i] == OS32_FILE_TYPE_DIR) {
             /* ディレクトリ: 作成して再帰 */
@@ -283,6 +342,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_errors = 0;
     g_force = 0;
     g_protected = 0;
+    g_abort = 0;
 
     /* 引数パース */
     for (i = 1; i < argc; i++) {
@@ -319,8 +379,12 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
-    /* 守るべき実体を 1 度だけ集める (票 S0-D の実体規則) */
-    scan_protected_entities();
+    /* 守るべき実体を 1 度だけ集める (票 S0-D の実体規則)。
+     * 集められなければ守れないので同期そのものを行わない。 */
+    if (scan_protected_entities() != 0) {
+        api->mem_free(file_buf);
+        return;
+    }
 
     /* 同期パス構築。`hsync -f etc` のように subdir で保護対象を直接指されても
      * 書かない (連結後の文字列を字句正規化して判定する)。 */
@@ -329,8 +393,9 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         str_cat(src, subdir);
         str_cpy(dst, "/");
         str_cat(dst, subdir);
-        if (dst_protected(dst)) {
-            api->kprintf(ATTR_YELLOW, "  protected: %s (skipped)\n", dst);
+        if (dst_protected(dst) || g_abort) {
+            if (!g_abort)
+                api->kprintf(ATTR_YELLOW, "  protected: %s (skipped)\n", dst);
             api->mem_free(file_buf);
             return;
         }
@@ -347,6 +412,13 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     /* 同期実行 */
     sync_directory(src, dst, 0);
+
+    if (g_abort) {
+        api->kprintf(ATTR_RED,
+                     "\nAborted: 保護判定に必要な stat が失敗した\n");
+        api->mem_free(file_buf);
+        return;
+    }
 
     /* ファイルシステム同期 */
     api->vfs_sync();

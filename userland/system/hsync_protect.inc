@@ -98,6 +98,19 @@ static int hsp_normalize(const char *in, char *out, int cap)
     return 1;
 }
 
+/* ベース名 1 個が保護対象名かを大文字小文字を無視して見る。
+ * `/etc` を列挙して実在名を拾うときの一致判定 (往復 1 の B5) — 小文字の表と
+ * 突き合わせるだけでは `/etc/SETTINGS.DB` を取りこぼす。 */
+static int hsp_is_protected_basename(const char *name)
+{
+    int i;
+
+    if (!name) return 0;
+    for (i = 0; hsp_protected_names[i]; i++)
+        if (hsp_ieq(name, hsp_protected_names[i])) return 1;
+    return 0;
+}
+
 /* 正規化済みパスに名前規則を当てる (親 /etc + 保護対象名) */
 static int hsp_name_protected(const char *norm)
 {
@@ -123,9 +136,7 @@ static int hsp_name_protected(const char *norm)
     }
     if (!hsp_ieq(dir, "/etc")) return 0;
 
-    for (i = 0; hsp_protected_names[i]; i++)
-        if (hsp_ieq(base, hsp_protected_names[i])) return 1;
-    return 0;
+    return hsp_is_protected_basename(base);
 }
 
 /* 入口: 任意のコピー先 / mkdir 先の文字列が保護対象か。

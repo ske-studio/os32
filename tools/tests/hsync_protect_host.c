@@ -81,6 +81,22 @@ int main(void)
     check(!hsp_path_protected("/bin/sh.bin"), "普通のバイナリ");
     check(!hsp_path_protected("/etc"), "/etc そのものは作ってよい");
 
+    printf("== /etc 列挙の一致判定 (実体規則の入口、往復 1 の B5) ==\n");
+    /* sys_ls が返す**実在名**を大文字小文字を無視して拾えること。
+     * 小文字 5 名を決め打ちで stat するだけでは SETTINGS.DB を取りこぼし、
+     * そこへの hardlink を hsync -f bin が上書きしていた。 */
+    check(hsp_is_protected_basename("settings.db"), "小文字そのまま");
+    check(hsp_is_protected_basename("SETTINGS.DB"), "全部大文字");
+    check(hsp_is_protected_basename("Settings.Db"), "混在");
+    check(hsp_is_protected_basename("SETTINGS.DB-JOURNAL"), "大文字 journal");
+    check(hsp_is_protected_basename("settings.db.BAK"), "大文字 bak");
+    check(hsp_is_protected_basename("settings.db-WAL"), "大文字 wal");
+    check(hsp_is_protected_basename("settings.db-Shm"), "混在 shm");
+    check(!hsp_is_protected_basename("settings.tsv"), "tsv は拾わない");
+    check(!hsp_is_protected_basename("settings.db2"), "接頭一致では拾わない");
+    check(!hsp_is_protected_basename("ettings.db"), "部分一致では拾わない");
+    check(!hsp_is_protected_basename(""), "空文字");
+
     printf("== -f の subdir 連結 (hsync.c:254 相当) ==\n");
     /* `hsync -f etc` は dst = "/" + "etc"、その下に settings.db を作る */
     strcpy(joined, "/");

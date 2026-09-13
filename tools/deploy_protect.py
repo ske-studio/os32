@@ -31,6 +31,7 @@ NHD へ写す」「マニフェストに無い物を消す」の 3 系統があ�
 
 import errno
 import os
+import stat
 import sys
 
 # 保護対象のベース名 (大文字小文字を区別しない)。
@@ -51,6 +52,20 @@ class ProtectError(Exception):
     """保護の判定そのものができなかった / 迂回が見つかった。配備を失敗させる。"""
 
 
+class ProtectedPath(ProtectError):
+    """その道に保護対象が居るので**作らない / 書かない**。
+
+    ProtectError を継承しているので「保護の系が投げた」ことは 1 つの except で
+    受けられるが、呼び出し側は**除外 (成功、ログだけ)** と「判定できない (失敗)」
+    を区別すること (票 §6 往復 1 の B2 / B7)。
+    """
+
+    def __init__(self, guest, message=None):
+        ProtectError.__init__(
+            self, message or '保護対象なので作らない: {}'.format(guest))
+        self.guest = guest
+
+
 # ---------------------------------------------------------------- 字句正規化
 
 def normalize_guest_path(guest_path, host_src=None):
@@ -63,10 +78,9 @@ def normalize_guest_path(guest_path, host_src=None):
     if guest_path is None:
         raise ProtectError('ゲストパスが None')
     p = str(guest_path)
-    if p.endswith('/') or p == '':
-        if host_src is None:
-            raise ProtectError(
-                'ディレクトリ指定 {!r} に対応するソースが無い'.format(guest_path))
+    # `guest: /etc/` のようなディレクトリ指定は、ソースがあれば basename を補う。
+    # ソースが無い (mkdir の判定など) ならディレクトリそのものとして扱う。
+    if (p.endswith('/') or p == '') and host_src is not None:
         p = p + os.path.basename(host_src)
 
     parts = []
@@ -80,8 +94,10 @@ def normalize_guest_path(guest_path, host_src=None):
             parts.pop()
             continue
         parts.append(seg)
+    # `/bin/..` のように root へ戻り切るのは**正当**に '/' (往復 1 の B9)。
+    # 拒否するのは root より上へ出る場合だけ (上の '..' の分岐)。
     if not parts:
-        raise ProtectError('空のゲストパス: {!r}'.format(guest_path))
+        return '/'
     return '/' + '/'.join(parts)
 
 
@@ -95,18 +111,36 @@ def name_is_protected(guest_path):
 
 # ------------------------------------------------------------ 最終パスの確定
 
+def _inside(root_abs, path):
+    return path == root_abs or path.startswith(root_abs + os.sep)
+
+
 def resolve_dest(root, guest_path, host_src=None):
-    """**実際の最終コピー先**をホスト側の絶対パスで確定する。
+    """**実際に操作する最終ファイル名**をホスト側の絶対パスで確定する。
 
     root は配備先のツリー (マウントした NHD / HostDrv のルート)。
     root の外へ出る結果は ProtectError。
+
+    字句の補完 (`guest: /etc/`) だけでは足りない: `cp SRC /etc` も
+    `shutil.copy2(SRC, '/etc')` も、**宛先が既存ディレクトリなら中へ**書く。
+    `--dest / --rename etc` に `settings.db` という名前のソースを渡すと、字句上の
+    宛先 `/etc` は保護対象ではないのに実体は `/etc/settings.db` になる
+    (往復 1 の B1)。ここで実ディレクトリを見て basename を補い、呼び出し側は
+    **この戻り値だけ**を cp / copy2 に渡すこと (ディレクトリを渡さない)。
     """
     guest = normalize_guest_path(guest_path, host_src)
     root_abs = os.path.abspath(root)
     dest_abs = os.path.abspath(os.path.join(root_abs, guest.lstrip('/')))
-    if dest_abs != root_abs and not dest_abs.startswith(root_abs + os.sep):
+    if not _inside(root_abs, dest_abs):
         raise ProtectError(
             '配備先 {!r} が root {!r} の外にある'.format(dest_abs, root_abs))
+    # symlink 越しのディレクトリでも cp / copy2 は中へ書くので isdir で見る
+    # (辿った先が root の外なら下の検査か is_protected の realpath が止める)。
+    if host_src is not None and os.path.isdir(dest_abs):
+        dest_abs = os.path.join(dest_abs, os.path.basename(host_src))
+        if not _inside(root_abs, dest_abs):
+            raise ProtectError(
+                '配備先 {!r} が root {!r} の外にある'.format(dest_abs, root_abs))
     return dest_abs
 
 
@@ -139,8 +173,12 @@ def _stat_or_none(path):
 def check_root_etc(root):
     """<root>/etc が素のディレクトリで root と同じマウントにあることを確かめる。
 
-    symlink / 別マウントなら ProtectError = **配備全体を拒否**。別名の
-    bind mount は検出できないので運用で禁止する (TASK_S0 §2)。
+    symlink / 別マウント / 通常ファイルなら ProtectError = **配備全体を拒否**。
+    別名の bind mount は検出できないので運用で禁止する (TASK_S0 §2)。
+
+    **全操作の前提検査**。名前規則だけで答えが出る経路 (`rm /etc/settings.db`
+    など) でも必ず先に通す — `/etc` がすり替わっていれば、その配備は
+    「保護対象かどうか」以前に信用できない (往復 1 の B4)。
     """
     root_abs = os.path.abspath(root)
     real_root = os.path.realpath(root_abs)
@@ -150,6 +188,9 @@ def check_root_etc(root):
     st_etc = _stat_or_none(etc)
     if st_etc is None:
         return
+    if not stat.S_ISDIR(st_etc.st_mode):
+        raise ProtectError(
+            '{} がディレクトリではない。配備を中止する'.format(etc))
     if os.path.realpath(etc) != etc:
         raise ProtectError('{} が字句と異なる実体を指す。配備を中止する'.format(etc))
     st_root = _stat_or_none(real_root)
@@ -167,8 +208,9 @@ def _protected_identities(root):
     try:
         names = os.listdir(etc)
     except OSError as exc:
-        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
-            return []
+        if exc.errno == errno.ENOENT:
+            return []                   # 確定した不存在だけ「無い」とみなす
+        # ENOTDIR / EACCES / EIO — 判断できないまま書くほうが危ない (往復 1 の B4)
         raise ProtectError('{} を読めない ({})'.format(etc, exc.strerror))
     ids = []
     for name in names:
@@ -186,6 +228,10 @@ def is_protected(root, dest):
     作成 / 切り詰め / 削除 / rename の**直前**に、確定した最終パスで呼ぶこと。
     判定できない状況は ProtectError (= 配備を失敗させる)。
     """
+    # --- (0) 前提検査: <root>/etc がすり替わっていないか。名前規則で即答できる
+    #         経路 (rm /etc/settings.db 等) でも必ず通す (往復 1 の B4)。
+    check_root_etc(root)
+
     guest = guest_path_of(root, dest)
 
     # --- (1) 名前規則: realpath より前。実体が無くても守る。
@@ -193,8 +239,6 @@ def is_protected(root, dest):
         return True
 
     # --- (2) 実体規則
-    check_root_etc(root)
-
     real_root = os.path.realpath(os.path.abspath(root))
     try:
         real_dest = os.path.realpath(os.path.abspath(dest))
@@ -213,6 +257,59 @@ def is_protected(root, dest):
         return False                    # 確定した不存在 = 新規の通常ファイル
     ident = (st.st_dev, st.st_ino)
     return ident in _protected_identities(root)
+
+
+def mkdir_chain(root, guest_dir):
+    """`mkdir -p` / `os.makedirs` が作る**各祖先**を root から順に確定する。
+
+    `-p` / `makedirs` は途中のディレクトリを黙って作るので、最終要素だけを見ても
+    `/etc/settings.db/a` の `settings.db` がディレクトリとして生える
+    (往復 1 の B2)。root から 1 段ずつ判定し、保護対象に当たったら
+    ProtectedPath を投げる (= その道は作らない。除外なので呼び出し側は成功扱い、
+    往復 1 の B7)。
+
+    Returns: 作るべき絶対パスの一覧 (root 自身は含まない、上から順)。
+    """
+    check_root_etc(root)
+    guest = normalize_guest_path(guest_dir)
+    root_abs = os.path.abspath(root)
+    chain = []
+    cur = root_abs
+    for seg in guest.strip('/').split('/'):
+        if not seg:
+            continue
+        cur = os.path.join(cur, seg)
+        if not _inside(root_abs, cur):
+            raise ProtectError(
+                'ディレクトリ {!r} が root {!r} の外にある'.format(cur, root_abs))
+        if is_protected(root_abs, cur):
+            raise ProtectedPath(guest_path_of(root_abs, cur))
+        chain.append(cur)
+    return chain
+
+
+def is_protected_symlink(root, dest):
+    """**symlink そのもの**を消す / 置き換える直前の判定 (辿った先へは書かない)。
+
+    `os.remove(link)` はリンクを外すだけでターゲットに触らないので、root の外を
+    指すリンクは「保護対象ではない」= 普通に消してよい。`is_protected` は書き込み
+    経路のために root 外への解決を拒否するので、削除にはこちらを使う。
+    名前規則と、root 内に解決できるときの実体規則は同じに当てる (往復 1 の B3)。
+    """
+    check_root_etc(root)
+    guest = guest_path_of(root, dest)
+    if name_is_protected(guest):
+        return True
+    real_root = os.path.realpath(os.path.abspath(root))
+    real_dest = os.path.realpath(os.path.abspath(dest))
+    if not _inside(real_root, real_dest):
+        return False
+    if name_is_protected(guest_path_of(real_root, real_dest)):
+        return True
+    st = _stat_or_none(dest)            # 辿った先 (dangling なら ENOENT)
+    if st is None:
+        return False
+    return (st.st_dev, st.st_ino) in _protected_identities(root)
 
 
 def protect_log(path, stream=None):

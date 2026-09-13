@@ -112,6 +112,13 @@
 - 失敗伝播: `run_sync()` を通した `sync`、`cp` / `rm` の戻り値、`do_umount` の sync をすべて非ゼロにし、`main` は各サブコマンドの戻り値を終了コードにする (`sys.exit(0 if main() is not False else 1)`)。保護対象の除外は失敗ではない。
 - ゲスト側は `userland/system/hsync_protect.inc` (純関数: 字句正規化 + 名前規則) を `hsync.c` が include し、`dst_protected()` が名前規則 → `/etc/settings.db*` との inode 比較の順で見る。ディレクトリ作成経路と `-f` の subdir 連結も同じ判定を通る。併せて `dst_dir` が `""` のときに `dst_path[-1]` を読んでいた既存の境界バグを直した。
 - ホスト TDD: `tools/tests/test_deploy_protect.py` (53 件、RED 35 失敗 → GREEN 全通過)、`tools/tests/test_hsync_protect.py` + `hsync_protect_host.c` (28 checks)。記録は `tools/tests/s0_tdd.md` 節 D。配備・エミュレータ・`make` は未実行、D1 受入は未了 ([V4])。
+
+### 8a. 実装レビュー 往復 1 の修正 (D、2026-09-13)
+
+- **最終パスの確定** (B1 / B2 / B9): `resolve_dest` が**実ディレクトリを見て** basename を補い (`cp` / `copy2` は宛先が既存ディレクトリなら中へ書く)、`cp` にはファイルパスだけを渡す。`mkdir -p` / `makedirs` は新設 `mkdir_chain` が root から 1 段ずつ判定して作る (保護対象名の祖先は `ProtectedPath`、除外なので CLI は成功 = B7)。`/bin/..` は `/` として正当に扱う。
+- **前提検査と削除経路** (B3 / B4 / B6): `check_root_etc` を `is_protected` の**入口で必ず 1 回**通し、`<root>/etc` が symlink / 別マウント / 通常ファイルなら配備全体を拒否 (clean も)。`_clean_tree` は top-down で「判定 → symlink → ディレクトリ → ファイル」の順に見て保護ディレクトリへ降りない (symlink 自体の削除は `is_protected_symlink`)。`mkdir` の rc、`os.walk(onerror=)`、`rmdir` の失敗をすべて非ゼロにし、prune の件数は実際に消した数にした。
+- **来歴と hsync** (B8 / B5): `pull` / `ensure_local_nhd` は**入口で** stamp を消し、`do_mount()` まで全部成功した最後にだけ書く。`hsync` は `/etc` を `sys_ls` で列挙し、大文字小文字を無視して一致する実在名を全部 stat する (`/etc/SETTINGS.DB` + hardlink の取りこぼしを塞ぐ)。`OS32_ERR_NOTFOUND` 以外の stat 失敗は同期を中止する。試験は `tools/tests/s0_tdd.md` §D.6 (86 件、RED 29 失敗 → GREEN 全通過)。
+
 ## 7. 実装メモ (K、2026-09-13)
 
 - v50 の 7 本は `sdk/kapi.json` 末尾に slot 201〜207 (0x32C〜0x344)、data_fields は 0x348 / 0x34C へ移動。生成物は generator 出力のまま (手編集なし)。

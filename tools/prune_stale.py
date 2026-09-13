@@ -112,21 +112,24 @@ def prune_hostdrv(want, delete):
         return None
     stale = find_stale(root, want)
     show('hostdrv ' + root, stale)
-    if delete:
-        for gp, p in stale:
-            try:
-                if is_protected(root, p):
-                    continue
-                os.remove(p)
-            except protect.ProtectError as exc:
-                print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
-                return None
-            except OSError as exc:
-                print("Error: {} を消せなかった: {}".format(gp, exc),
-                      file=sys.stderr)
-                return None
-            print("  removed {}".format(gp))
-    return len(stale)
+    if not delete:
+        return len(stale)
+    removed = 0
+    for gp, p in stale:
+        try:
+            if is_protected(root, p):
+                continue          # 除外は失敗ではない。件数にも数えない。
+            os.remove(p)
+        except protect.ProtectError as exc:
+            print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
+            return None
+        except OSError as exc:
+            print("Error: {} を消せなかった: {}".format(gp, exc),
+                  file=sys.stderr)
+            return None
+        print("  removed {}".format(gp))
+        removed += 1
+    return removed
 
 
 def prune_nhd(want, delete):
@@ -139,28 +142,31 @@ def prune_nhd(want, delete):
     root = nhd_deploy.MOUNT_POINT
     stale = find_stale(root, want)
     show('nhd ' + nhd_deploy.NHD_LOCAL, stale)
-    if delete:
-        for gp, p in stale:
-            try:
-                if is_protected(root, p):
-                    continue
-            except protect.ProtectError as exc:
-                print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
-                return None
-            result = subprocess.run(['sudo', 'rm', '-f', p],
-                                    capture_output=True, text=True)
-            if result.returncode != 0:
-                print("Error: {} を消せなかった: {}".format(
-                    gp, (result.stderr or '').strip()), file=sys.stderr)
-                return None
-            print("  removed {}".format(gp))
-        result = subprocess.run(['sync'], capture_output=True, text=True)
-        if result.returncode != 0:
-            print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
-                  file=sys.stderr)
+    if not delete:
+        return len(stale)
+    removed = 0
+    for gp, p in stale:
+        try:
+            if is_protected(root, p):
+                continue          # 除外は失敗ではない。件数にも数えない。
+        except protect.ProtectError as exc:
+            print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
             return None
-        print("  (Windows 側への反映は deploy-nhd の deploy 段。NP21/W 停止中に行うこと)")
-    return len(stale)
+        result = subprocess.run(['sudo', 'rm', '-f', p],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            print("Error: {} を消せなかった: {}".format(
+                gp, (result.stderr or '').strip()), file=sys.stderr)
+            return None
+        print("  removed {}".format(gp))
+        removed += 1
+    result = subprocess.run(['sync'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
+              file=sys.stderr)
+        return None
+    print("  (Windows 側への反映は deploy-nhd の deploy 段。NP21/W 停止中に行うこと)")
+    return removed
 
 
 def main():

@@ -96,10 +96,38 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
 - 実機 / エミュレータでの D1 受入 (HostDrv に意図的に `etc/settings.db` を置いて
   `make deploy` → `hsync -f etc` → 停止 → `pull` → `make deploy-nhd`) は**未実施**。
   コーダーは配備・エミュレータ・`make` を実行しない。
-- `hsync` の inode 比較 (実体規則) はホストでは踏んでいない。
+- `hsync` の inode 比較 (実体規則) はホストでは踏んでいない。純関数に出せる
+  「/etc 列挙の一致判定」(`hsp_is_protected_basename`) までが試験の範囲。
 - `sudo` / ループマウントの実挙動は模擬。sudoers や ext2 の振る舞いは何も言わない。
 - bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
-  symlink / 別マウントだけを `check_root_etc` が止める)。
+  symlink / 別マウント / 通常ファイルだけを `check_root_etc` が止める)。
+
+### D.6 実装レビュー 往復 1 の blocker 9 件 (2026-09-13、着地 `2c35f7c` に対して)
+
+RED は着地版 (`feat/gui` の `tools/deploy_protect.py` / `nhd_deploy.py` /
+`hostdrv_deploy.py` / `prune_stale.py`) に新しい試験だけを当てて取った。
+
+```
+RED  : Ran 86 tests — FAILED (failures=25, errors=4)     57 passed
+GREEN: Ran 86 tests — OK
+```
+
+| # | 反例 (RED で通ってしまっていた道) | 試験 |
+|---|---|---|
+| B1 | 判定後に `cp` / `copy2` が basename を補う。`copy --dest / --rename etc <settings.db>`、manifest の `guest: /etc` (末尾 `/` 無し) が **`/etc/settings.db` を上書き**した | `ReviewB1DirDestination` 5 件。`resolve_dest` が**実ディレクトリを見て**最終ファイル名を確定し、`cp` にディレクトリを渡さないことも見る |
+| B2 | `mkdir -p` / `makedirs` が未判定の祖先を作る (`/etc/settings.db/a` で DB がディレクトリ化) | `ReviewB2MkdirChain` 5 件。`mkdir_chain` が root から 1 段ずつ判定し `ProtectedPath` |
+| B3 | clean の symlink 分岐が保護判定より前、`root/etc` が symlink でも消して成功、保護ディレクトリの中身を bottom-up が先に消す | `ReviewB3Clean` 4 件。top-down + 判定を最初に + `check_root_etc` で拒否 |
+| B4 | 名前規則で即 return する経路が `check_root_etc` を通らない、`etc` が通常ファイルだと `ENOTDIR` を空集合に握り潰す | `ReviewB4EntryCheck` 4 件。前提検査を入口で 1 回、ENOENT 以外は失敗 |
+| B5 | 小文字 5 名しか stat しないので `/etc/SETTINGS.DB` + hardlink を `hsync -f bin` が上書き、stat が EIO でも open して切り詰める | C 側 (D.4 の「/etc 列挙の一致判定」11 件)。`sys_ls` で列挙 → 大文字小文字無視で一致 → 全部 stat、`OS32_ERR_NOTFOUND` 以外は同期中止 |
+| B6 | `mkdir -p` の ENOSPC / `os.walk` の onerror 未指定 / clean の `rmdir` 失敗が成功になる | `ReviewB6FailurePropagation` 4 件 |
+| B7 | 保護対象ディレクトリへの `copy --dest` が exit 1 | `ReviewB2MkdirChain.test_copy_dest_under_protected_ancestor` (除外は成功) |
+| B8 | remote 欠損の早期 return / マウント中拒否 / `do_mount()` 失敗で stamp が残る | `ReviewB8PullStamp` 4 件。入口で消し、**全部成功した最後**に書く |
+| B9 | `--dest /bin/..` (= `/`) を空パスとして拒否 | `ReviewB9RootNormalization` 4 件。parts が空 = `/` は正当、root より上だけ拒否 |
+
+non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛先が既存ディレクトリ
+なら中へ」にし、`cp` / `rm` / `mkdir` の宛先が temp の外なら **AssertionError**
+(隔離の保証)、`ManifestEntryPoints` で resolver を差し替えずに manifest の入口
+(file / glob / tag) を通し、`do_copy` の `Done!` と prune の件数から保護除外を除いた。
 
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
