@@ -88,7 +88,10 @@ class TransportCleanup(unittest.TestCase):
 
     def test_trial_timeout_cli_preserves_verified_process_and_dispose_stage(self):
         # Lifecycle exchanges stay synthetic; dispose uses the real pipe reader.
-        from test_np21w_trial import Transport, EXE, BASE, CWD, CREATED
+        from test_np21w_trial import Transport, EXE, BASE, CWD, CREATED, HDD, image_fixture
+        images = image_fixture()
+        images.__enter__()
+        self.addCleanup(images.__exit__, None, None, None)
         fixture = PipeFixture(trial.PowerShellTransport)
         transports = []
         output = io.StringIO()
@@ -102,7 +105,7 @@ class TransportCleanup(unittest.TestCase):
             with redirect_stdout(output):
                 codes.append(trial.main(
                     ['--exe', EXE, '--baseline', BASE, '--cwd', CWD,
-                     '--pid', '42', '--created', CREATED,
+                     '--pid', '42', '--created', CREATED, '--hdd', HDD, '--fdd-eject',
                      '--execute', '--exclusive-operator'],
                     executor_factory=factory, llm=lambda p, u, m: json.dumps(p)))
         try:
@@ -185,7 +188,10 @@ class TransportCleanup(unittest.TestCase):
                     self.assertTrue(process.stdout.closed)
 
     def test_trial_cli_timeout_preserves_failure_json_and_completed_stages(self):
-        from test_np21w_trial import Transport, EXE, BASE, CWD, CREATED
+        from test_np21w_trial import Transport, EXE, BASE, CWD, CREATED, HDD, image_fixture
+        images = image_fixture()
+        images.__enter__()
+        self.addCleanup(images.__exit__, None, None, None)
         for fail in (None, 1):
             with self.subTest(fail=fail):
                 fixture = PipeFixture(trial.PowerShellTransport)
@@ -201,7 +207,7 @@ class TransportCleanup(unittest.TestCase):
                     with redirect_stdout(output):
                         codes.append(trial.main(
                             ['--exe', EXE, '--baseline', BASE, '--cwd', CWD,
-                             '--pid', '42', '--created', CREATED,
+                             '--pid', '42', '--created', CREATED, '--hdd', HDD, '--fdd-eject',
                              '--execute', '--exclusive-operator'], executor_factory=factory,
                             llm=lambda p, u, m: json.dumps(p)))
                 try:

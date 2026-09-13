@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""One approved Cirrus trial. Default dry-run does not open files or processes.
+"""One approved disk trial. Default dry-run does not open files or processes.
 
-The trusted host selects PID/creation/exe, baseline and cwd. A local LLM must
+The trusted host selects PID/creation/exe, baseline, cwd and the disk set
+(HDD1FILE, FDD detach, optional .d88 launch argument). A local LLM must
 propose exactly the immutable one-step plan before the executor is constructed.
 Normal close may save settings; baseline is NOT proof of previous active ini.
 """
@@ -14,12 +15,15 @@ import sys
 import uuid
 from types import FunctionType
 import np21w_ini_live as live
-from np21w_ini import IniError, LIMIT, SECTION, transform
+from np21w_ini import ALLOWED_PATHS, IniError, LIMIT, SECTION, image_path, transform
 from emu_agent.playbook import strict_object, exact_equal
 
 
-def transform_trial(raw):
-    candidate, diff = transform(raw, {'USEGD5430': 'true', 'GD5430TYPE': '91'})
+def transform_trial(raw, changes):
+    """changes は承認済み計画の変更集合。ini 表に無い e_resume だけ別に扱う。"""
+    if not isinstance(changes, dict) or changes.get('e_resume') != 'false':
+        raise IniError('trial requires an explicit e_resume=false in the plan')
+    candidate, diff = transform(raw, {k: v for k, v in changes.items() if k != 'e_resume'})
     # ini.cpp:848 PFTYPE_BOOL e_resume -> np2oscfg.resume; np2.cpp:4655
     # loads saved VM state when true. Require a known explicit value.
     parts = re.split(b'(\r\n|\r|\n)', candidate)
@@ -60,7 +64,19 @@ def _identity(row):
     return row
 
 
-def make_plan(*, exe, baseline, cwd, pid, created):
+def launch_command(plan):
+    """`exe + /i<trial ini> [+ <d88>]`。np2arg.cpp Np2Arg::Parse は `/i` の直後を
+    ini 名として読み、拡張子で判る `.d88` はディスクとして装着する。"""
+    command = '"' + plan['exe'] + '" "/i' + plan['trial'] + '"'
+    if plan['fdd_arg']:
+        command += ' "' + plan['fdd_arg'] + '"'
+    return command
+
+
+def make_plan(*, exe, baseline, cwd, pid, created, hdd, fdd_eject, fdd_arg=None):
+    """hdd / fdd_arg は NP21W_DIR 直下の名前。計画には hdd は名前のまま、
+    fdd_arg は起動引数に使う絶対パスとして載る。変更集合は明示したキーだけで、
+    Cirrus 系 (USEGD5430 / GD5430TYPE) には触れない (票 S3I2-T)。"""
     for path in (exe, baseline, cwd):
         live.path_key(path)
     _identity(dict(pid=pid, created=created, exe=exe, command='operator selected'))
@@ -68,11 +84,18 @@ def make_plan(*, exe, baseline, cwd, pid, created):
             live.path_key(baseline) != live.path_key(ntpath.splitext(exe)[0] + '.ini') or
             live.path_key(cwd) != live.path_key(ntpath.dirname(exe))):
         raise IniError('require exe-adjacent baseline and explicit exe-directory cwd')
+    if fdd_eject is not True and fdd_eject is not False:
+        raise IniError('explicit fdd_eject decision required')
+    changes = {'HDD1FILE': hdd, 'e_resume': 'false'}
+    if fdd_eject:
+        changes.update({key: '' for key in ALLOWED_PATHS if key.startswith('FDD')})
+    image_path(hdd, ALLOWED_PATHS['HDD1FILE'])
+    argument = image_path(fdd_arg, '.d88') if fdd_arg is not None else None
     trial = ntpath.join(cwd, 'np21w-trial-' + uuid.uuid4().hex + '.ini')
     live.path_key(trial)
-    return dict(action='cirrus-trial', exe=exe, baseline=baseline, cwd=cwd,
+    return dict(action='disk-trial', exe=exe, baseline=baseline, cwd=cwd,
                 pid=pid, created=created, trial=trial,
-                changes={'USEGD5430': 'true', 'GD5430TYPE': '91', 'e_resume': 'false'},
+                hdd=hdd, fdd_eject=fdd_eject, fdd_arg=argument, changes=changes,
                 lifecycle={'close': 'normal-only', 'baseline_read': 'after-verified-exit',
                            'baseline_role': 'operator-chosen-not-active-config-proof',
                            'normal_exit_may_save': True, 'exact_vm_ram_preserved': False,
@@ -81,7 +104,12 @@ def make_plan(*, exe, baseline, cwd, pid, created):
 
 def _validate_plan(plan):
     try:
-        expected = make_plan(**{k: plan[k] for k in ('exe', 'baseline', 'cwd', 'pid', 'created')})
+        argument = plan['fdd_arg']
+        if argument is not None and (type(argument) is not str or not argument):
+            raise IniError('invalid trial launch argument')
+        expected = make_plan(fdd_arg=None if argument is None else ntpath.basename(argument),
+                             **{k: plan[k] for k in ('exe', 'baseline', 'cwd', 'pid',
+                                                     'created', 'hdd', 'fdd_eject')})
         if (type(plan['trial']) is not str or
                 not re.fullmatch(r'np21w-trial-[a-f0-9]{32}\.ini', ntpath.basename(plan['trial'])) or
                 ntpath.dirname(plan['trial']) != plan['cwd']):
@@ -154,14 +182,14 @@ def _run(plan, factory):
             absent()
             before = live.checked_snapshot(call('snapshot'))
             result['stage'] = 'transform'
-            candidate, diff = transform_trial(before['data'])
+            candidate, diff = transform_trial(before['data'], plan['changes'])
             result['diff'] = diff
             absent()
             call('create', expected=before, data=candidate)
             absent()
             call('verify', expected=before, data=candidate)
             started = _identity(call('start', expected=before, data=candidate))
-            command = '"' + plan['exe'] + '" "' + plan['trial'] + '"'
+            command = launch_command(plan)
             if (started['created'] == old['created'] or started['exe'] != plan['exe'] or
                     started['command'] != command):
                 raise IniError('new process identity mismatch')
@@ -209,6 +237,7 @@ try {
      $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($plan.exe))
      if ($drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -ne 'NTFS') { throw 'local NTFS required' }
      if (Test-Path -LiteralPath $plan.trial) { throw 'trial collision' }
+     if ($plan.fdd_arg) { CheckPath $plan.fdd_arg }
     }
     'query' { $value = @(Query) }
     'close' {
@@ -233,10 +262,15 @@ try {
      VerifyTrial $a
      CheckPath $plan.exe
      CheckPath $plan.cwd
+     $arguments = '"/i' + $plan.trial + '"'
+     if ($plan.fdd_arg) {
+      CheckPath $plan.fdd_arg
+      $arguments = $arguments + ' "' + $plan.fdd_arg + '"'
+     }
      $si = [Diagnostics.ProcessStartInfo]::new()
      $si.UseShellExecute = $false
      $si.FileName = $plan.exe
-     $si.Arguments = '"' + $plan.trial + '"'
+     $si.Arguments = $arguments
      $si.WorkingDirectory = $plan.cwd
      $p = [Diagnostics.Process]::Start($si)
      try {
@@ -246,7 +280,7 @@ try {
       if ($rows.Count -ne 1 -or $rows[0].pid -ne $p.Id -or
           $rows[0].created -cne $p.StartTime.ToUniversalTime().ToString('o') -or
           $rows[0].exe -cne $plan.exe -or
-          $rows[0].command -cne ('"' + $plan.exe + '" "' + $plan.trial + '"')) {
+          $rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)) {
        throw 'new identity mismatch'
       }
       $value = $rows[0]
@@ -357,13 +391,21 @@ def main(argv=None, executor_factory=WindowsExecutor, llm=None):
     for key in ('exe', 'baseline', 'cwd', 'created'):
         parser.add_argument('--' + key, required=True)
     parser.add_argument('--pid', required=True, type=int)
+    parser.add_argument('--hdd', required=True, metavar='NAME',
+                        help='HDD1FILE image name directly under NP21W_DIR (*.nhd)')
+    parser.add_argument('--fdd-eject', action='store_true',
+                        help='blank FDD1FILE/FDD2FILE in the trial ini (detach)')
+    parser.add_argument('--fdd-arg', metavar='NAME',
+                        help='optional *.d88 under NP21W_DIR passed as a launch argument')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--exclusive-operator', action='store_true')
     parser.add_argument('--llm-url', default='http://127.0.0.1:1234/v1/chat/completions')
     parser.add_argument('--model', default='local-model', help='operator-selected local model ID')
     args = parser.parse_args(argv)
     try:
-        plan = make_plan(**{k: getattr(args, k) for k in ('exe', 'baseline', 'cwd', 'pid', 'created')})
+        plan = make_plan(**{k: getattr(args, k) for k in ('exe', 'baseline', 'cwd', 'pid',
+                                                         'created', 'hdd', 'fdd_eject',
+                                                         'fdd_arg')})
         if not args.execute:
             print(json.dumps(dict(mode='dry_run', executed=False, plan=plan)))
             return 0

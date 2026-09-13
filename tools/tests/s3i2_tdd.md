@@ -132,3 +132,89 @@ SUMMARY 9/9 PASS
 - `make all` / `make check` / 配備は実行していない (コーダーの範囲外)。
 - `sys_ls` の負が実際に FAT から返るのは S3I2-K (`fatfs_vfs_list`) の修正後。
   ここでは贋物で負を注入して `install` 側の受け口だけを固定した。
+
+---
+
+## §T — ini 道具の `ALLOWED_PATHS` と `mk_blank_nhd.py` (2026-09-14)
+
+対象は `tools/np21w_ini.py`、`tools/np21w_trial.py`、`tools/mk_blank_nhd.py` (新規) と
+その試験のみ。`tools/np21w_ini_live.py` は**変更していない** (作業 NHD を差し替える
+事故を作らないため、票 §2a)。実 ini・実プロセス (NP21/W)・実 `NP21W_DIR`・
+エミュレータ・ネットワーク・`.env` には一切触れていない ([D3]、スキル `os32-emu-config` §0:
+ini の変更権限は PM だけ。ここで作ったのは道具と試験だけで、適用の承認は別)。
+
+### 変更点
+
+| 何 | 内容 |
+|---|---|
+| `np21w_ini.py` | 固定値の `ALLOWED` と別に `ALLOWED_PATHS = {'HDD1FILE': '.nhd', 'FDD1FILE': '', 'FDD2FILE': ''}`。`HDD1FILE` は `NP21W_DIR` 直下の `[A-Za-z0-9_.-]+\.nhd` の**名前**で受け、`wslpath -w` で得た Windows 表記 + `\<name>` へ展開して書く (ホスト側の存在も確認)。`FDD1/2FILE` は**変更後の値は空だけ** = 装着解除で、変更前の値は非空の CP932 パスでも検査せず差し替える。`transform()` の「変更キーがあれば全キーの存在を要求」は 2 表**別々**に適用する |
+| `np21w_trial.py` | 計画に `hdd` (名前) / `fdd_eject` (bool) / `fdd_arg` (`.d88` の絶対パス、任意) を追加。変更集合は `HDD1FILE` (+ `FDD1/2FILE`) と `e_resume=false` **だけ**で、Cirrus 系キーには触れない (`action` も `disk-trial` に改名)。起動は `exe + "/i<trial ini>" [+ "<d88>"]` で、PowerShell 側と Python 側が同じ文字列を照合する |
+| `mk_blank_nhd.py` | `--out` / `--size-mb` (既定 200) / `--force`。H=8 S=17 セクタ長 512 固定、`C = floor(size_mb*1MiB / (8*17*512))`、受付は 1 ≤ C ≤ 65535、512B ヘッダ + 本体 C×8×17×512 B の全ゼロ。表示は `C=<n> capacity=<bytes>` |
+
+`NP21W_DIR` は**環境変数だけ**から読む (`.env` は読まない [D3])。WSL 専用ディレクトリは
+`wslpath -w` が UNC (`\\wsl.localhost\...`) を返すので drive 絶対でないとして拒否される
+(実 `NP21W_DIR` は `/mnt/c/...` = `C:\...`)。
+
+### ソース根拠 (np21w-src、読み取りのみ)
+
+| 根拠 | 意味 |
+|---|---|
+| `src/fdd/sxsihdd.h` NHDHDR | `sig[16] + comment[0x100] + headersize[4] + cylinders[4] + surfaces[2] + sectors[2] + sectorsize[2] + reserved[0xe2]` = 512B。`mk_blank_nhd.header()` のバイト位置はこれ |
+| `src/fdd/sxsihdd.c:13` | `sig_nhd[15] = "T98HDDIMAGE.R0"`。open 時に 15B を `memcmp` する |
+| `src/fdd/sxsihdd.c` (open) | `totals = C * S * H`。実ファイル長をこれに一致させる必要がある |
+| `src/fdd/sxsihdd.c` (書式確認) | `(cylinders == 0) || (cylinders >= 65536)` などで拒否 → C の受付範囲 1..65535 |
+| `src/fdd/newdisk.c` `newdisk_nhd_ex_CHS` | 同じヘッダの生成手順 (headersize = sizeof(nhd) = 512、C/H/S/SS をリトルエンディアン) |
+| `src/win9x/np2arg.cpp` `Np2Arg::Parse` | `/i<ini>` を設定ファイル指定として読み、拡張子で判る `.d88` はディスクとして装着する → 起動コマンドの形 |
+| `src/x11/ini.c:538` | `{"HDD1FILE", INITYPE_STR, np2cfg.sasihdd[0], MAX_PATH}` = IDE 第 1 スロットのパス文字列 |
+
+### 実際の RED → GREEN
+
+```bash
+python3 -B -m unittest discover -s tools/tests -p 'test_np21w_ini.py'    # 2a
+python3 -B -m unittest discover -s tools/tests -p 'test_np21w_trial.py'  # 2a (trial)
+python3 -B tools/tests/test_mk_blank_nhd.py                              # 2b
+```
+
+| 段階 | 実出力 | 内容 |
+|---|---|---|
+| RED (2a ini) | `Ran 40 tests` / `FAILED (errors=11)`、`AttributeError: module 'np21w_ini' has no attribute 'subprocess'` | 旧 `np21w_ini.py` に戻して新試験 `PathFields` を実行。パス表も wslpath 解決も無い |
+| RED (2a trial) | `Ran 19 tests` / `FAILED (errors=18, skipped=1)` | 旧 `np21w_ini.py` + 旧 `np21w_trial.py`。`make_plan()` に `hdd` / `fdd_eject` / `fdd_arg` が無い |
+| RED (2a trial 第 2 段) | `Ran 19 tests` / `FAILED (failures=1, errors=31, skipped=1)` (errors は subTest 単位) | 新 `np21w_ini.py` + 旧 `np21w_trial.py`。`$arguments = '"/i' + $plan.trial + '"'` が PS 本文に無い |
+| RED (2b) | `Ran 13 tests` / `FAILED (failures=1, skipped=12)`、`mk_blank_nhd.py must implement the tested contract` | `tools/mk_blank_nhd.py` 未作成 |
+| GREEN (2a) | `Ran 114 tests` / `OK (skipped=2)` (`-p 'test_np21w_*.py'`) | ini 87 (新規 11) + trial 19 (新規 2) + transport 8。skip は live の Windows fixture と trial の Windows parser |
+| GREEN (2b) | `Ran 13 tests` / `OK` | ヘッダのバイト列、C の計算 (1 / 100 / 200 / 4351 と範囲外)、本体長、`--force`、symlink 拒否、`nhd_deploy.py` の定数一致 |
+
+その他の実施結果:
+
+```bash
+python3 -B tools/mk_blank_nhd.py --out <scratch>/demo.nhd --size-mb 200
+# C=3011 capacity=209661952 / ファイル長 209662464 = 512 + 3011*8*17*512、2 回目は exit 2
+python3 -B tools/np21w_trial.py --help            # exit 0 (--hdd / --fdd-eject / --fdd-arg)
+py_compile.compile(..., doraise=True)             # py_compile: OK (7 files)
+python3 -B -m unittest discover -s tools/tests -p 'test_*.py'
+# Ran 435 tests / errors=1 — 既存の test_paging_bounds.py が import 時に argparse を
+# 走らせるための失敗で、この票の変更とは無関係 (check-tools-host は当該ファイルを
+# discovery しない)
+```
+
+### 未実施 ([V4])
+
+- **実 ini・実プロセス・実 NP21/W では一切検証していない。** `/i<ini>` 起動、`HDD1FILE` を
+  書いた ini での HDD ブート、FDD 装着解除の効き、生成した NHD のゲストからの見え方は
+  すべて PM / テスターの受入 (§3 F1〜F6) で確認する。適用は [D2] の個別承認。
+- `PowerShellParser` の構文検査 (`--windows-parser`) は opt-in のままで未実行。
+- `mk_blank_nhd.py` は本体を `ftruncate` で伸ばす (疎ファイル)。NTFS / drvfs 上での
+  実際の書き込みは未確認。
+
+### PM が登録する行
+
+`build/sdk.mk` の `check-tools-host` は `test_np21w_*.py` を discovery するので 2a は自動で
+入る。2b は名前が合わないので 1 行足す:
+
+```make
+	python3 -B tools/tests/test_mk_blank_nhd.py
+```
+
+`.claude/skills/os32-emu-config/SKILL.md` の「承認済み Cirrus trial」節は、trial が扱うキーが
+Cirrus 2 キー → `HDD1FILE` / `FDD1/2FILE` (+ `e_resume`) に変わり、起動引数も
+`/i<ini>` + 任意の `.d88` になったので PM の更新対象 (ini の文書は PM の担当)。

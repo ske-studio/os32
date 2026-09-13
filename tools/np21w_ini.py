@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import uuid
 
@@ -47,6 +48,20 @@ import uuid
 # (INSTALL.md / docs/02_memory.md / tasks/gui/DESIGN.md)。
 ALLOWED = {'USEGD5430': ('true', 'false'), 'GD5430TYPE': ('91',),
            'USEPEGCP': ('true', 'false'), 'EXMEMORY': ('7', '8', '16', '33', '129')}
+
+# パス値を持つキーは固定値の白リストでは表せないので別表にする (票 S3I2-T)。
+#   HDD1FILE  : IDE 第1スロットのイメージ。値は NP21W_DIR 直下の *.nhd の
+#               「名前」で受け取り、Windows 絶対パスへ展開して書く。
+#   FDD1FILE  : FDD の装着。SVFDFILE=true の構成では装着が ini に保存され
+#   FDD2FILE    次回も再装着されるので、HDD ブートでは空 (装着解除) にする。
+#               変更後の値は空だけを許す。変更前の値は非空の CP932 パスでも
+#               よく、内容を検査せずそのまま空へ差し替える。
+# transform() の「変更キーがあれば全キーの存在を要求」は ALLOWED と
+# ALLOWED_PATHS で別々に適用する。固定値キーだけを触る live 操作が、この新しい
+# キーの存在に依存しないため (逆も同じ)。
+ALLOWED_PATHS = {'HDD1FILE': '.nhd', 'FDD1FILE': '', 'FDD2FILE': ''}
+IMAGE_NAME = re.compile(r'[A-Za-z0-9_.-]+')
+WINDOWS_PATH_UNITS = 240  # np21w_ini_live.path_key と同じ保守的な上限
 SECTION = b'nekoproject21'
 LIMIT = 4 * 1024 * 1024
 
@@ -55,12 +70,72 @@ class IniError(ValueError):
     """A safe, content-free diagnostic suitable for operator output."""
 
 
+def _windows_path(path):
+    """ASCII only, absolute, no device/traversal components. Content-free errors."""
+    if (not isinstance(path, str) or not path.isascii() or
+            len(path) >= WINDOWS_PATH_UNITS or
+            not re.fullmatch(r'[A-Za-z]:\\[^"<>|?*:\x00-\x1f]+', path) or
+            any(p in ('', '.', '..') or p.endswith((' ', '.')) for p in path[3:].split('\\'))):
+        raise IniError('unsupported absolute Windows path')
+    if any(re.fullmatch(r'(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', part, re.I)
+           for part in path[3:].split('\\')):
+        raise IniError('reserved Windows device path')
+    return path
+
+
+def np21w_directory():
+    """(WSL path, Windows path) of NP21W_DIR. Environment only: never reads .env,
+    credentials or any env-loading helper [D3]. wslpath is a pure path query."""
+    directory = os.environ.get('NP21W_DIR')
+    if not isinstance(directory, str) or not directory.startswith('/') or '\0' in directory:
+        raise IniError('explicit absolute NP21W_DIR required for path fields')
+    try:
+        done = subprocess.run(['wslpath', '-w', directory], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=20, check=True)
+        windows = done.stdout.decode('ascii').strip()
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        raise IniError('windows form of NP21W_DIR unavailable') from None
+    while windows.endswith('\\'):
+        windows = windows[:-1]
+    return directory, _windows_path(windows)
+
+
+def image_path(name, extension):
+    """NP21W_DIR 直下の <name> を Windows 絶対パスへ。ホスト側の存在も確かめる。"""
+    if (not isinstance(name, str) or not extension or not name.endswith(extension) or
+            len(name) <= len(extension) or not IMAGE_NAME.fullmatch(name) or
+            name.startswith('.') or '..' in name):
+        raise IniError('unsupported image name')
+    directory, windows = np21w_directory()
+    if not os.path.exists(os.path.join(directory, name)):
+        raise IniError('image not found under NP21W_DIR')
+    return _windows_path(windows + '\\' + name)
+
+
+def _path_value(key, value):
+    extension = ALLOWED_PATHS[key]
+    if not extension:
+        if value != '':
+            raise IniError('only detach (empty value) is supported for this field')
+        return ''
+    return image_path(value, extension)
+
+
 def _changes(changes):
+    """Validate both tables and return {KEY: literal value written to the ini}."""
     if not isinstance(changes, dict) or not changes:
         raise IniError('nonempty allowlisted changes required')
+    resolved = {}
     for key, value in changes.items():
-        if key not in ALLOWED or value not in ALLOWED[key]:
+        if key in ALLOWED:
+            if value not in ALLOWED[key]:
+                raise IniError('unsupported backend field or value')
+            resolved[key] = value
+        elif key in ALLOWED_PATHS:
+            resolved[key] = _path_value(key, value)
+        else:
             raise IniError('unsupported backend field or value')
+    return resolved
 
 
 def transform(raw, changes):
@@ -71,7 +146,9 @@ def transform(raw, changes):
     NUL and ambiguous target section/fields. Require both proven fields even
     when changing one, so a partial/unknown backend configuration fails closed.
     """
-    _changes(changes)
+    resolved = _changes(changes)
+    want_fixed = any(key in ALLOWED for key in changes)
+    want_path = any(key in ALLOWED_PATHS for key in changes)
     if not isinstance(raw, bytes) or len(raw) > LIMIT or b'\0' in raw:
         raise IniError('unsupported snapshot bytes or size')
     if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
@@ -101,27 +178,43 @@ def transform(raw, changes):
         if not match:
             raise IniError('malformed target section assignment')
         key = match[2].decode('ascii').upper()
-        if key not in ALLOWED:
+        fixed = want_fixed and key in ALLOWED
+        path = want_path and key in ALLOWED_PATHS
+        if not fixed and not path:
             continue
         if key in found:
             raise IniError('duplicate backend field')
         token = match[4].rstrip(b' \t')
-        if token not in tuple(v.encode('ascii') for v in ALLOWED[key]):
+        if fixed and token not in tuple(v.encode('ascii') for v in ALLOWED[key]):
             raise IniError('unsupported existing backend value')
+        if path and match[5] is not None:
+            # A path value is opaque CP932, so a ';'/'#' tail cannot be told
+            # apart from a comment. Refuse instead of guessing (fail closed).
+            raise IniError('unsupported separator in path field')
         start = len(bom) + match.start(4)
-        found[key] = (i, start, start + len(token), token.decode('ascii'))
-    if sections != 1 or set(found) != set(ALLOWED):
+        found[key] = (i, start, start + len(token), token)
+    required = (set(ALLOWED) if want_fixed else set()) | (set(ALLOWED_PATHS) if want_path else set())
+    if sections != 1 or set(found) != required:
         raise IniError('missing or duplicate target section/backend fields')
     diff = []
-    for key in ALLOWED:
+    for key in list(ALLOWED) + list(ALLOWED_PATHS):
         if key not in changes:
             continue
         i, start, end, old = found[key]
-        new = changes[key]
-        if old != new:
-            parts[i] = parts[i][:start] + new.encode('ascii') + parts[i][end:]
-            diff.append(f'{key}: {old} -> {new}')
-    return b''.join(parts), diff
+        new = resolved[key].encode('ascii')
+        if old == new:
+            continue
+        parts[i] = parts[i][:start] + new + parts[i][end:]
+        if key in ALLOWED:
+            diff.append(f"{key}: {old.decode('ascii')} -> {resolved[key]}")
+        else:
+            # Never print the previous opaque path; the new one is operator-chosen.
+            diff.append('%s: %s -> %s' % (key, 'set' if old else 'empty',
+                                          resolved[key] or 'empty'))
+    candidate = b''.join(parts)
+    if len(candidate) > LIMIT:
+        raise IniError('result exceeds snapshot limit')
+    return candidate, diff
 
 
 @contextmanager

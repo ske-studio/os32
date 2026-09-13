@@ -144,3 +144,31 @@ URL/モデルはローカル OpenAI 互換サービスの実設定に合わせ�
 `bind_trial(plan, WindowsExecutor, authorized=True, exclusive=True)` の返す callable だけを
 公開する。モデルから受け取る strict JSON は1つの全計画のみ。任意の shell/action registry、
 既存 `emu_agent` への自動登録、別工程の NHD 配備は追加していない。
+
+## 2026-09-14 追記 — 票 S3I2-T: 変更集合を disk 側へ (`hdd` / `fdd_eject` / `fdd_arg`)
+
+trial が扱うキーは **Cirrus 2 キー → `HDD1FILE` (+ `FDD1FILE` / `FDD2FILE`)** に変わった。
+`e_resume=false` の強制と、欠落 / 重複 / 未知値の拒否は**そのまま**で、承認計画にも残る
+(`changes` に `e_resume: 'false'` が入り、`transform_trial(raw, changes)` が要求する)。
+Cirrus 系キーは計画に含めない = **変更集合は明示したキーだけ**なので、baseline の
+`USEGD5430` / `GD5430TYPE` / `ExMemory` が何であっても trial は値を検査せず触らない。
+
+- `make_plan(..., hdd, fdd_eject, fdd_arg=None)`。`hdd` と `fdd_arg` は `NP21W_DIR` 直下の
+  名前で受け、計画には `hdd` = 名前、`fdd_arg` = 起動引数に使う絶対パスとして載る
+  (`action` は `cirrus-trial` → `disk-trial`)。`_validate_plan()` は `fdd_arg` の basename から
+  同じ計画を作り直して照合するので、別ディレクトリの `.d88` は一致しない。
+- 起動コマンドは `"<exe>" "/i<trial ini>"` (+ `" <d88>"` を引用付きで追加)。
+  `launch_command(plan)` が唯一の組み立てで、PowerShell 側の `$arguments` と
+  `$rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)` も同じ形。
+  根拠は `np2arg.cpp` `Np2Arg::Parse` の `case 'i': lpIniFile = &lpArg[2];` と、
+  拡張子で判る `.d88` をディスクとして装着する分岐。`preflight` と `start` で
+  `CheckPath $plan.fdd_arg` (存在 + reparse point 拒否) を通す。
+- 「稼働中プロセスを選んで trial 自身が通常終了 → 終了確認 → 新 ini 作成 → 起動」の
+  流れ、単回 callable、strict JSON の完全一致、kill fallback 無し、restore 無しは不変。
+  `np21w_ini_live.py` には HDD / FDD キーを足していない。
+
+試験は `tools/tests/test_np21w_trial.py` (19 件、新規 2 件 + 既存の書き換え) と
+`tools/tests/test_np21w_ini.py` の `PathFields` (11 件)。`NP21W_DIR` と `wslpath` は
+`image_fixture()` の贋物、イメージの存在確認は temp dir の空ファイル。
+`tools/tests/test_np21w_transport.py` の trial CLI 2 件も同じ fixture と `--hdd` を使う。
+RED→GREEN の実出力は [`s3i2_tdd.md`](s3i2_tdd.md) §T。実 ini・実プロセスは未検証 [V4]。

@@ -149,6 +149,7 @@ check-tools-host:
 	python3 -B tools/tests/test_gui_button_dispatch.py
 	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
 	python3 -B tools/tests/test_mk_settings_db.py
+	python3 -B tools/tests/test_mk_blank_nhd.py
 
 check-gshell-host:
 	python3 userland/gshell/host/integration.py
