@@ -1,6 +1,6 @@
 # S4 — gshell が設定レジストリを読む最初の消費者 + 設定ダイアログ
 
-状態: **設計 第 4 版 = 実装へ (往復 3 で Approve、non-blocker 3 件を反映)**。前提: S2 完了 (`libos32cfg` = `userland/lib/cfg/libos32cfg.h`、KAPI v50、`cfg` コマンド、libos32gui の `os32gui_cfg_*` 4 本、main `e09c458`)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3-4 (最初の消費者は数キー)、§4 (設定の読み書きは OS 経由だけ、接続は同時 1 本、open〜close の間に yield しない)。
+状態: **完了 (2026-09-13)** — 実装 `261b59e` + `35644b5`、Codex 実装レビュー 2 往復で Approve、ゲスト受入 G1〜G7 (配備 1 回目) + 版面変更後の G2 / G4 / G5 とリース中の Settings を配備 2 回目で再確認 (§10d)。残件 (non-blocker、S5 か次の gshell 票で): S20(c) の 2 本目 set 失敗、S18 の mock を get で ERROR 遷移に、S09b/S14 のコメント限定、TAB で Cancel に焦点表示しても RETURN が OK になる表示の不一致。設計: 第 4 版 (往復 3 で Approve)。前提: S2 完了 (`libos32cfg` = `userland/lib/cfg/libos32cfg.h`、KAPI v50、`cfg` コマンド、libos32gui の `os32gui_cfg_*` 4 本、main `e09c458`)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3-4 (最初の消費者は数キー)、§4 (設定の読み書きは OS 経由だけ、接続は同時 1 本、open〜close の間に yield しない)。
 契約の正典: [S0_FOUNDATION.md](S0_FOUNDATION.md) §2、[DESIGN.md](DESIGN.md) §3〜§5、[TASK_S2.md](TASK_S2.md) §1 (API と規則 1〜8)。gshell の契約は docs/tasks/gui/ (S6 = CUI 復帰、S8 = handler の禁止事項、X4 = 描画 callback)。
 規約: gshell は Rust (no_std、`os32api` のみ依存)、[C1] は C 側に、[V2] deploy.yaml、コーダーは worktree + ホスト TDD のみ。
 
@@ -133,3 +133,12 @@ pub fn load(prev_close_error: i32) -> GuiCfg   /* cfg_open(&db, 0) → cfg_get_i
 | 対象 | 判定 | 要旨 |
 |---|---|---|
 | `261b59e` (往復 1) | Request changes | 3 件: B1 読み込み途中で ERROR になっても先に読めた値を適用 (ERROR は両キー既定値に)、B2 リース中の説明文 48 文字が 360px の枠外に描かれる、B3 状態行の連結 (78 文字) が枠外へ。non-blocker: `open_wm_settings` の戻り値、ホスト試験の不足、gui_gate.py:198 のコメント。DB の呼び出し元は `main` の load と `standalone_loop` の consume の 2 か所だけであることを確認 |
+| `35644b5` (往復 2) | **Approve** | B1〜B3 修正確認、新規 blocker なし。DB 呼び出し元は `main` の load と `standalone_loop` の consume だけ (再確認)。non-blocker 4 件 (S20(c) は 2 本目の set 失敗を試していない、S18 の mock は status 呼び出し時に ERROR へ変わる、S09b/S14 は実 park 遷移ではない、TAB で Cancel に焦点表示しても RETURN は OK) は残件として記録 |
+
+### 10d. ゲスト受入 (配備 2 回目、`35644b5`、gshell.bin 193,364 B、kselftest 87 / 0)
+| ID | 結果 |
+|---|---|
+| G2 | **合格**: 3 / 12h → 5 / 24h を OK → 黄 + `19:03`、再表示の状態行は 2 行 (`settings.db: OK` / `load 24t save 59t`) |
+| リース中 | **合格**: `lease_test` (14 色リース) の上で Settings... → 市松背景、2 色の枠、`Desktop color : 5 (preview off: palette leased)` が枠内 (`r2_lease_settings.png`、B2 の反例座標) |
+| G4 | **合格**: MISSING の通知、状態行 `settings.db: MISSING - run 'cfg init' in CUI` / `load 1t save 0t`、編集 OK → `cannot save: MISSING` |
+| G5 | **合格**: VERSION 2 の通知、状態行 `settings.db: VERSION 2 (read only)` / `load 24t save 0t` |
