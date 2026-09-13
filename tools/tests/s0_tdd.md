@@ -466,6 +466,59 @@ python3 tools/tests/test_sqlite_groups.py
 `..` は 1 成分として数え (安全側)、相対名では cwd の成分も足して
 `VFS_MAX_PATH_DEPTH` を超えたら `SQLITE_CANTOPEN`。resolver は変えていない。
 
+### 2f. 実機 K2 の不合格 (2026-09-13、feat/gui `16bb298`) — 切り分けと穴埋め
+
+実機の観測 (NP21/W、API v50、kselftest 87/0、cwd `/`、`fault_kill_count` 0):
+
+```
+> db_v50_test
+db_v50_test: KAPI v50
+  open failure code = 21
+  FAIL: RW open of an existing db
+db_v50_test: 5/6 passed, aborted
+```
+
+**21 = `SQLITE_MISUSE` が出た場所の絞り込み** (消去法。すべて `writable = 0` の
+RO open の時点で成立していなければならない):
+
+| 候補 | 判定 |
+|---|---|
+| `writable` が 0 / 1 以外 (`kapi_db.c:873`) | **除外**。試験は 0 と 1 しか渡さない。2 引数の受け渡しは同じ試験内の `db_exec` / `sys_stat` が成立しているので壊れていない |
+| `vfs_stat` 失敗 (`:908`) | **除外**。CANTOPEN(14) か IOERR(10) にしかならない |
+| 0 バイト (`:912`) | **除外**。NOTADB(26) |
+| hot journal (`:923`) | **除外**。BUSY_RECOVERY(261) |
+| `db_resolve_fits` / journal 名 / 解決結果 (`:890 :896 :918`) | **除外**。すべて CANTOPEN(14) |
+| slot 満杯 (`:936`) | **除外**。FULL(13) |
+| `sqlite3_open_v2` の失敗 (`:955`) | **除外**。ここへ着くには `vfs_stat` が「存在する」と答える必要があるが、同じ試験の assertion 3 (`sys_stat(missing) != 0`、`sys_stat` の target は `vfs_stat` そのもの) が**通っている** = NOTFOUND |
+| `db_journal_mode_check` (`:973`) | **除外**。RW 専用で、RO open では通らない |
+| `db_error_code(-1)` の owner 範囲外 | **除外**。owner を書くのは `exec/appslot.c` だけで、値は ID の池 (0〜5) < `DB_OWNER_SLOTS` (6) |
+| **path のポインタ検証 (`:881` → `db_user_str_copy` → `ring3_user_range_ok`)** | **残るのはこれだけ** |
+
+**ホスト側で分かったこと**:
+
+- `paging_addrspace_pte_flags` は**シロ**。`tools/tests/paging_bounds_host.c` に
+  exec と同じ順序 (`create_n` → `clear_app_band` → per-app 物理を USER で張る)
+  を組む項を足し、実 `kernel/paging.c` で PRESENT + USER が返ることを確認した。
+- **穴**: それまでのケースは全部 `host_cpl3 = 0` (= CPL=0 の直呼び) で走っていて、
+  `db_user_str_copy` → `ring3_user_range_ok` の経路が **1 度も踏まれていなかった**。
+  新ケース `cpl3_paths` で塞いだ (下の表)。実機と同じ形の拒否も踏む。
+
+**次の 1 回で確定させるための計器** (どれも KAPI にしない。`fault_kill_count` と
+同じくカーネルシンボルを `emu_read_mem` で読む):
+
+| シンボル | 意味 |
+|---|---|
+| `ring3_range_reject_count` | 検証が断った回数 (正常系では増えない) |
+| `ring3_range_reject_last` | 理由 1=NULL / 2=overflow / 3=`g_cur_app` が 0 / 4=帯外 / 5=非 present / 6=非 USER |
+| `ring3_range_reject_addr` / `_page` | 断ったポインタとページ |
+| `ring3_range_reject_heap_top` | そのとき `ring3_ptr_ok` が見ていた帯の上端 |
+
+加えて `kapi_db.c` は「ポインタ検証の拒否」と「引数そのものの拒否」で
+**SHM のエラー文を分けた** ので、`db_last_error()` だけでも切り分けられる。
+`db_v50_test.c` は失敗のたびに `db_error_code(-1)` と `db_last_error()` を出し、
+土台 DB の `sys_stat` の size と **RO open の可否** も先に出すようにした
+(RW 固有の段 = `journal_mode` の照会を切り分けるため)。
+
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
 | ケース | 見るもの |
@@ -490,6 +543,7 @@ python3 tools/tests/test_sqlite_groups.py
 | `materialize_fail` | (a) 収まる BLOB は取れる (b) accessor が値を返せないとき ERROR + `NOMEM` + 部分 ROW なし + stmt は生存 (c) MEMSYS5 を締めて step 側で落ちても同じく部分 ROW なし |
 | `resolve_len` | (a) cwd 251B で journal 名が切り詰められ本体に衝突する形でも `CANTOPEN` (b) 解決名 248B は `CANTOPEN` (c) 247B は開ける (d) SQLite には解決後の絶対名だけが渡る |
 | `resolve_truncate` | 模型が実物と同じ順序で `/tmp/b` に化けることを見せたうえで、その入力が `CANTOPEN` で断られる。絶対名の 255 文字 / 256 文字の境界、短い相対名は従来どおり通る |
+| `cpl3_paths` | **CPL=3 の規則を通した** open / prepare。範囲に収まる path / sql は通り、NUL まで届かない範囲は `MISUSE` + 「range check」の診断で断られ、引数そのものの拒否 (`:memory:`) は別の文言になる |
 | `resolve_depth` | 模型が実物と同じ捨て方で `/b.db` に化けることを見せたうえで `CANTOPEN`。`db_path_depth` の数え方 (空 / `.` を除く、`..` は 1)、深さちょうど 32 は開ける・33 は断る、相対名では cwd の成分も数える |
 
 ### 4. ホストでは踏めなかったもの ([V4])

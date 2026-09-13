@@ -124,6 +124,21 @@ int ring3_ptr_ok(u32 p);
  * 戻り値: 1 = 読んでよい / 0 = 拒否 (NULL・overflow・帯外・非 present・非 USER)。 */
 int ring3_user_range_ok(u32 p, u32 len);
 
+/* 断った理由 (ring3_range_reject_last)。実機で KAPI が MISUSE を返したときに
+ * どのサブ条件だったかを 1 回の起動で確定させるための観測点 — KAPI にはせず
+ * カーネルシンボルとして `emu_read_mem` で読む (fault_kill_count と同じ形)。 */
+#define RING3_RANGE_NULL       1   /* p == 0 */
+#define RING3_RANGE_OVERFLOW   2   /* p + len が折り返す */
+#define RING3_RANGE_NO_APP     3   /* ring3_in_syscall なのに g_cur_app が 0 */
+#define RING3_RANGE_BAND       4   /* ring3_ptr_ok の許可帯の外 */
+#define RING3_RANGE_NOPRESENT  5   /* 帯の中だが呼び手の PD で非 present */
+#define RING3_RANGE_NOUSER     6   /* present だが USER が立っていない */
+extern volatile u32 ring3_range_reject_count;
+extern volatile u32 ring3_range_reject_last;
+extern volatile u32 ring3_range_reject_addr;
+extern volatile u32 ring3_range_reject_page;
+extern volatile u32 ring3_range_reject_heap_top;
+
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
 

@@ -49,6 +49,11 @@ static void ok(int cond, const char *name)
     } else {
         failed++;
         g->kprintf(0x41, "  FAIL: %s\n", name);
+        /* 失敗したその場で診断を出す。実機は 1 回走らせるのに配備が要るので、
+         * 「-1 だった」だけ持ち帰っても次の一手が決まらない。owner 別の
+         * 「直前 open 失敗」コードと、SHM に残っているエラー文を並べる。 */
+        g->kprintf(0x06, "        open_fail=%d last_error=%s\n",
+                   g->db_error_code(-1), g->db_last_error(0));
     }
 }
 
@@ -108,6 +113,20 @@ int main(int argc, char **argv, KernelAPI *api)
         api->kprintf(0x41, "db_v50_test: cannot create %s\n", work);
         return 1;
     }
+    /* 土台が本当に「中身のある既存 DB」か。0 バイトだと db_open_existing は
+     * 契約どおり NOTADB で断るので、それを RW open の失敗と読み違えない。 */
+    {
+        OS32_Stat fst;
+        int frc = api->sys_stat(work, &fst);
+        api->kprintf(0x07, "  fixture %s stat=%d size=%d\n",
+                     work, frc, (int)fst.st_size);
+        ok(frc == 0 && fst.st_size > 0, "the fixture db exists and is non-empty");
+    }
+    /* RO でも開けるか (RW 固有の段 = journal_mode の照会を切り分ける)。 */
+    h = api->db_open_existing(work, 0);
+    ok(h >= 0, "RO open of an existing db");
+    if (h >= 0) api->db_close(h);
+
     h = api->db_open_existing(work, 1);
     ok(h >= 0, "RW open of an existing db");
     if (h < 0) {

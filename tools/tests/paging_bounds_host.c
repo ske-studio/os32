@@ -180,6 +180,43 @@ void _start(void)
         paging_addrspace_destroy(&as);
         CHECK(live_addrspaces == 0 && used == before - 2);
     }
+    {
+        /* 票 S0-K: paging_addrspace_pte_flags は「呼び手の PD で見た実効権限」
+         * を返す。exec が CPL=3 アプリを作るときと **同じ順序** (create_n →
+         * clear_app_band → per-app 物理を USER で張る) で組み立て、
+         * KAPI のポインタ検証 (ring3_user_range_ok) が見る 2 ビットを確かめる。
+         * 実機 K2 の「db_open_existing が MISUSE」はここが 0 を返すと起きる。 */
+        struct addrspace as;
+        u32 code = 0x500000, phys = 0x900000;
+        u32 flags;
+        CHECK(paging_addrspace_create_n(&as, 1) == 0);
+        CHECK(as.app_pde == APP_BAND_PDE && as.app_pde_count == 1);
+        CHECK(paging_addrspace_clear_app_band(&as) == 0);
+        /* clear 直後は帯全体が非 present = 検証は必ず落ちる */
+        CHECK(paging_addrspace_pte_flags(&as, code) == 0);
+        CHECK(paging_addrspace_map_user_range_phys(&as, code, code + 0x2000,
+                                                   phys, PAGE_RW | PTE_USER) == 0);
+        flags = paging_addrspace_pte_flags(&as, code);
+        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        flags = paging_addrspace_pte_flags(&as, code + 0x1FFF);
+        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        /* 張っていない隣 (= sbrk 上限より上 / guard) は非 present */
+        CHECK(paging_addrspace_pte_flags(&as, code + 0x2000) == 0);
+        /* PDE にだけ USER が伝播し master は supervisor のまま */
+        CHECK(((u32 *)as.pd_phys)[APP_BAND_PDE] & PTE_USER);
+        CHECK(!(page_directory[APP_BAND_PDE] & PTE_USER));
+        /* 共有帯 (VRAM) も同じ口で見える */
+        CHECK(paging_addrspace_map_user_range(&as, 0xA0000UL, 0xA1000UL,
+                                              PAGE_RW | PTE_USER) == 0);
+        flags = paging_addrspace_pte_flags(&as, 0xA0000UL);
+        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
+        /* 引数の縁 */
+        CHECK(paging_addrspace_pte_flags(0, code) == 0);
+        as.app_pde_count = 0;
+        CHECK(paging_addrspace_pte_flags(&as, code) == 0);
+        as.app_pde_count = 1;
+        paging_addrspace_destroy(&as);
+    }
     SAY("PASS: one-shot init preserves dynamic PT, live AS, CR3, allocator");
     SAY("PASS: final-page, virtual/physical overflow, range preflight");
     SAY("PASS: sparse NP, attribute flags, USER/PCD, user-range preflight");

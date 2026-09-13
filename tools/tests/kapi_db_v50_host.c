@@ -74,15 +74,39 @@ int vfs_stat(const char *path, OS32_Stat *st)
 #define GUARD_PAGE     0x007BF000u
 static int host_cpl3;
 static u32 host_range_calls;
+/* CPL=3 の模型で「読んでよい」実ポインタ範囲 (登録制)。数値の帯
+ * [BAND_LO, BAND_HI) はホストの本物のポインタを覆えないので、
+ * open_existing / prepare_only を CPL=3 の規則で通すにはこちらが要る。 */
+static const char *host_user_lo;
+static const char *host_user_hi;
+static u32 host_range_refused;
 
 int ring3_user_range_ok(u32 p, u32 len)
 {
     u32 page, last;
     host_range_calls++;
     if (!host_cpl3) return 1;
-    if (p == 0) return 0;
+    if (p == 0) { host_range_refused++; return 0; }
     if (len == 0) return 1;
-    if (p + len < p) return 0;
+    if (p + len < p) { host_range_refused++; return 0; }
+    if (host_user_lo) {
+        /* 登録した実ポインタ範囲。ホストの 64bit ポインタを u32 に落とさず
+         * そのまま比べる (kapi_db.c は (u32) に落として渡すので、下位 32bit
+         * が一致する範囲を探す = 試験側で登録した領域だけを許す)。 */
+        const char *q = host_user_lo;
+        while (q < host_user_hi) {
+            if ((u32)(unsigned long)q == p) {
+                if ((unsigned long)(host_user_hi - q) < (unsigned long)len) {
+                    host_range_refused++;
+                    return 0;
+                }
+                return 1;
+            }
+            q++;
+        }
+        host_range_refused++;
+        return 0;
+    }
     last = (p + len - 1u) & ~(HOST_PAGE - 1u);
     for (page = p & ~(HOST_PAGE - 1u); ; page += HOST_PAGE) {
         if (page < BAND_LO || page >= BAND_HI) return 0;
@@ -131,6 +155,9 @@ static void reset_all(void)
     memset(fixture_files, 0, sizeof(fixture_files));
     for (i = 0; i < VFS_MAX_OPEN_FILES; i++) open_files[i].in_use = 0;
     host_cpl3 = 0;
+    host_user_lo = NULL;
+    host_user_hi = NULL;
+    host_range_refused = 0;
     stat_fail_on = NULL;
     stat_fail_rc = OS32_ERR_IO;
     stat_calls = 0;
@@ -1161,6 +1188,64 @@ static void resolve_depth(void)
     resolve_cwd = "";
 }
 
+/* ---- 22. CPL=3 の規則を通した open / prepare (実機 K2 の回帰) ----------- */
+/*  これまでのケースは `host_cpl3 = 0` (= CPL=0 の直呼び) で走っていたので、
+ *  `db_user_str_copy` → `ring3_user_range_ok` の経路が **1 度も踏まれて
+ *  いなかった**。実機 K2 で `db_open_existing` が SQLITE_MISUSE を返した
+ *  (= 検証が path を拒否した) のはこの穴。ここで両側を固定する:
+ *    - 読める範囲に居る path / sql はそのまま通る
+ *    - 1 バイトでも範囲から出る path は **MISUSE** で断られ、診断は
+ *      「引数そのものの拒否」と別の文言になる                               */
+static void cpl3_paths(void)
+{
+    static char upath[64];
+    static char usql[64];
+    int h;
+
+    make_db("/c3.db", "CREATE TABLE t(x)");
+
+    /* (a) 範囲に収まる path は CPL=3 でも開ける */
+    strcpy(upath, "/c3.db");
+    host_user_lo = upath;
+    host_user_hi = upath + sizeof(upath);
+    host_cpl3 = 1;
+    h = kapi_db_open_existing(upath, 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_error_code(-1) == SQLITE_OK);
+    CHECK(host_range_refused == 0);
+
+    /* (b) sql も同じ経路を通る */
+    strcpy(usql, "SELECT 1");
+    host_user_lo = usql;
+    host_user_hi = usql + sizeof(usql);
+    CHECK(kapi_db_prepare_only(h, usql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_close(h) == 0);
+
+    /* (c) NUL まで届かない範囲 = 検証が拒否 → MISUSE。診断の文言で
+     * 「引数の拒否」と見分けられる (実機で db_last_error が切り分けの手)。 */
+    host_user_lo = upath;
+    host_user_hi = upath + 3;            /* "/c3" までしか読めない */
+    CHECK(kapi_db_open_existing(upath, 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_MISUSE);
+    CHECK(host_range_refused > 0);
+    CHECK(strstr((const char *)(test_shm + sizeof(DB_ResultHeader)),
+                 "range check") != NULL);
+
+    /* 引数そのものの拒否は別の文言 */
+    host_user_lo = upath;
+    host_user_hi = upath + sizeof(upath);
+    strcpy(upath, ":memory:");
+    CHECK(kapi_db_open_existing(upath, 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_MISUSE);
+    CHECK(strstr((const char *)(test_shm + sizeof(DB_ResultHeader)),
+                 "range check") == NULL);
+    host_cpl3 = 0;
+    host_user_lo = NULL;
+    host_user_hi = NULL;
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -1187,6 +1272,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "resolve_len")) resolve_len();
     else if (!strcmp(argv[1], "resolve_truncate")) resolve_truncate();
     else if (!strcmp(argv[1], "resolve_depth")) resolve_depth();
+    else if (!strcmp(argv[1], "cpl3_paths")) cpl3_paths();
     else if (!strncmp(argv[1], "order_", 6)) reclaim_order(argv[1] + 6);
     else CHECK(0);
 

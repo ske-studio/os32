@@ -488,25 +488,55 @@ int ring3_ptr_ok(u32 p)
 /*      アプリの PD のまま = AppSlot.as)。master の page_tables[] はアプリ帯の */
 /*      USER 写像を持たないので paging_pte_flags() は使わない。               */
 /* ======================================================================== */
+/* ---- 検証が断った理由の観測点 (実機 K2 の切り分け、2026-09-13) ----------
+ * KAPI にはしない。fault_kill_count と同じくカーネルシンボルとして公開し、
+ * `emu_read_mem` で読む。実機で `db_open_existing` が MISUSE を返したとき、
+ * 「どのサブ条件で断ったか」がここを読むだけで分かる。
+ *   count  : 断った回数
+ *   last   : 直前の理由 (RING3_RANGE_*)
+ *   addr   : 直前に断ったポインタ / ページ
+ *   flags  : そのとき ring3_ptr_ok が見た帯の上端 (RING3_HEAP_TOP)
+ * 正常系では 1 バイトも増えない (断ったときだけ書く)。 */
+volatile u32 ring3_range_reject_count = 0;
+volatile u32 ring3_range_reject_last = 0;
+volatile u32 ring3_range_reject_addr = 0;
+volatile u32 ring3_range_reject_page = 0;
+volatile u32 ring3_range_reject_heap_top = 0;
+
+static int ring3_range_refuse(u32 why, u32 p, u32 page)
+{
+    ring3_range_reject_count++;
+    ring3_range_reject_last = why;
+    ring3_range_reject_addr = p;
+    ring3_range_reject_page = page;
+    ring3_range_reject_heap_top = (u32)RING3_HEAP_TOP;
+    return 0;
+}
+
 int ring3_user_range_ok(u32 p, u32 len)
 {
     u32 page, last_page;
     struct addrspace *as;
 
     if (!ring3_in_syscall) return 1;      /* CPL=0 の直呼び */
-    if (p == 0) return 0;
+    if (p == 0) return ring3_range_refuse(RING3_RANGE_NULL, p, 0);
     if (len == 0) return 1;               /* 0 バイトは読まない */
-    if (p + len < p) return 0;            /* 加算 overflow */
-    if (!g_cur_app) return 0;             /* CPL=3 アプリが居ない = 呼べない */
+    if (p + len < p) return ring3_range_refuse(RING3_RANGE_OVERFLOW, p, 0);
+    if (!g_cur_app)
+        return ring3_range_refuse(RING3_RANGE_NO_APP, p, 0);
     as = &g_cur_app->as;
 
     last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
     for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
         u32 flags;
-        if (page == 0 || !ring3_ptr_ok(page)) return 0;
+        if (page == 0 || !ring3_ptr_ok(page))
+            return ring3_range_refuse(RING3_RANGE_BAND, p, page);
         flags = paging_addrspace_pte_flags(as, page);
         if ((flags & (u32)(PTE_PRESENT | PTE_USER)) !=
-            (u32)(PTE_PRESENT | PTE_USER)) return 0;
+            (u32)(PTE_PRESENT | PTE_USER))
+            return ring3_range_refuse(
+                (flags & (u32)PTE_PRESENT) ? RING3_RANGE_NOUSER
+                                           : RING3_RANGE_NOPRESENT, p, page);
         if (page >= last_page) break;
     }
     return 1;

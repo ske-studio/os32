@@ -873,12 +873,21 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
         open_fail_set(SQLITE_MISUSE);
         return -1;
     }
-    /* 上限内で NUL を探しながら写す。超過は切り捨てず拒否。 */
-    if (!db_user_str_copy(path, path_copy_buf, PATH_COPY_BUF_SIZE) ||
-        path_copy_buf[0] == '\0' ||
+    /* 上限内で NUL を探しながら写す。超過は切り捨てず拒否。
+     * **ポインタ検証の拒否**と**引数そのものの拒否**は契約上どちらも
+     * SQLITE_MISUSE だが、実機で切り分けられないと原因に辿りつけない
+     * (K2 の「21 が返る」がまさにこれ)。SHM のエラー文を分けて
+     * db_last_error() で見分けられるようにする。 */
+    if (!db_user_str_copy(path, path_copy_buf, PATH_COPY_BUF_SIZE)) {
+        open_fail_set(SQLITE_MISUSE);
+        shm_write_error_text("path pointer rejected by the range check");
+        return -1;
+    }
+    if (path_copy_buf[0] == '\0' ||
         db_ieq(path_copy_buf, ":memory:") ||
         kstrncmp(path_copy_buf, "file:", 5) == 0) {
         open_fail_set(SQLITE_MISUSE);
+        shm_write_error_text("path is empty, :memory: or a file: URI");
         return -1;
     }
 
@@ -888,6 +897,7 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
      * 絶対名として返ってくる)。 */
     if (!db_resolve_fits(path_copy_buf)) {
         open_fail_set(SQLITE_CANTOPEN);      /* path too long (解決前の長さ) */
+        shm_write_error_text("path too long or too deep to resolve");
         return -1;
     }
     abs_path_buf[0] = '\0';
@@ -906,10 +916,14 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
     rc = vfs_stat(abs_path_buf, &st);
     if (rc != 0) {
         open_fail_set(rc == OS32_ERR_NOTFOUND ? SQLITE_CANTOPEN : SQLITE_IOERR);
+        shm_write_error_text(rc == OS32_ERR_NOTFOUND
+                             ? "the database file does not exist"
+                             : "stat of the database file failed");
         return -1;
     }
     if (st.st_size == 0) {
         open_fail_set(SQLITE_NOTADB);
+        shm_write_error_text("the database file is 0 bytes");
         return -1;
     }
     /* (2) hot journal があれば RO / RW とも失敗。回復は S3 の明示操作。
@@ -921,10 +935,12 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
     rc = vfs_stat(journal_buf, &st);
     if (rc == 0) {
         open_fail_set(SQLITE_BUSY_RECOVERY);
+        shm_write_error_text("a hot journal is present");
         return -1;
     }
     if (rc != OS32_ERR_NOTFOUND) {
         open_fail_set(SQLITE_IOERR);
+        shm_write_error_text("stat of the journal failed");
         return -1;
     }
 
@@ -1004,10 +1020,14 @@ int __cdecl kapi_db_prepare_only(int handle, const char *sql)
     }
     slot->bindable = 0;
 
-    if (!db_user_str_copy(sql, sql_copy_buf, SQL_COPY_BUF_SIZE) ||
-        sql_copy_buf[0] == '\0') {
+    if (!db_user_str_copy(sql, sql_copy_buf, SQL_COPY_BUF_SIZE)) {
         slot_note(slot, SQLITE_MISUSE);
-        shm_write_error_text("sql is empty, unterminated or over the limit");
+        shm_write_error_text("sql pointer rejected by the range check");
+        return -1;
+    }
+    if (sql_copy_buf[0] == '\0') {
+        slot_note(slot, SQLITE_MISUSE);
+        shm_write_error_text("sql is empty");
         return -1;
     }
 

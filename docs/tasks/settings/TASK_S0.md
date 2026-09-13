@@ -161,6 +161,9 @@
 - **実装レビュー 往復 3 の blocker 1 件を修正** (2026-09-13): `vfs_resolve_path` は作業領域で **切り詰めてから** 正規化するので、溢れた入力は「短い別の絶対名」に化ける (cwd `/tmp` + `"./"×122 + "a/../b.db"` → `/tmp/b`)。resolve の **前** に `kstrlen(cwd) + 1 + kstrlen(path) + 1 <= VFS_MAX_PATH` (絶対名は cwd 抜き) を数えて `SQLITE_CANTOPEN` で断る。`fs/vfs.c` は変更していない。
 - 反例 `resolve_truncate` を常設 (計 20 ケース、RED 採取済み)。ホストの `vfs_resolve_path` 模型を fs/vfs.c と同じ順序 (連結 → 切り詰め → 正規化) に書き直した。non-blocker も同時に: B3 の TEXT 側と「長さ 0 + NOMEM」の枝、`journal_mode` の「照会成功・非 DELETE」、`MEMORY_BUDGET` の static 計上、`KAPI_SPEC` 概要の版 / エントリ数、`s0_tdd` の「リンク失敗は RED ではない」。
 - **最終往復の blocker 1 件を修正** (2026-09-13): `db_resolve_fits` はバイト長だけを見ていたが、`fs/vfs.c` は深さ 32 を超えた成分を捨て、その後ろの `..` が**保持済みの成分**を消す (`("/a"×32) + "/x/.." + ("/.."×31) + "/b.db"` → `/b.db`)。**成分数**の検査 (`db_path_depth`、空と `.` は数えず `..` は 1、相対名は cwd の分も加算) を足して超過は `SQLITE_CANTOPEN`。反例 `resolve_depth` を常設 (計 21 ケース、RED 採取済み)、resolver は変更なし。
+- **実機 K2 の不合格 (2026-09-13)**: 印字された `open failure code = 21` (`SQLITE_MISUSE`) を消去法で追うと、RO open の時点で MISUSE を出せるのは **path のポインタ検証** (`kapi_db.c:881` → `db_user_str_copy` → `ring3_user_range_ok`) だけ。`vfs_stat` 由来 (CANTOPEN/IOERR/NOTADB/BUSY_RECOVERY)・`db_resolve_fits` (CANTOPEN)・`sqlite3_open_v2`・`db_journal_mode_check` (RW 専用)・owner 範囲外は、同じ試験の assertion 3 (`sys_stat(missing) != 0`) と owner の池 (0〜5 < 6) で除外できる。根拠は `s0_tdd.md` §K 2f。
+- `paging_addrspace_pte_flags` は **シロ** (実 `kernel/paging.c` を使う `paging_bounds_host.c` に exec と同じ順序の項を足して確認)。**穴はホスト試験の側**で、それまで全ケースが `host_cpl3 = 0` で走っていたため検証経路が 1 度も踏まれていなかった → 新ケース `cpl3_paths` で塞いだ (計 22 ケース)。
+- 次の 1 回で確定させる計器を入れた: `ring3_range_reject_count / _last / _addr / _page / _heap_top` (カーネルシンボル)、`kapi_db.c` の診断文を「ポインタ検証の拒否」と「引数の拒否」で分離、`db_v50_test.c` が失敗のたびに `db_error_code(-1)` と `db_last_error()`・土台の size・RO open の可否を出す。**根本原因の修正はまだ入っていない** ([V4])。
 - **未実施**: `make` 全般・配備・エミュレータ・ゲスト試験 (K1 / K2)。`build/app.conf` / `userland/deploy.yaml` / `build/sdk.mk` は PM 登録待ち (登録行は報告に記載)。
 
 ## 9. 実装メモ (T、2026-09-13)
@@ -194,15 +197,3 @@
 ## 11. 実機受入の記録 (PM / テスター、2026-09-13)
 
 配備 1 回目 (feat/gui `4554a10`、vmkernel 470,305 B): NP21/W 停止 → `nhd-pull` (stamp `os32.nhd.pulled` 261 B) → バックアップ `os32.nhd.bak-s0-20260913-140849` → `os32-cycle deploy` → **`make deploy-nhd` が D0 の前提検査で失敗**: `配備ツリーを辿れない: [Errno 13] Permission denied: '/tmp/os32/lost+found'` (ext2 標準の root 所有 700 のディレクトリを非 root の `os.walk` が読めない)。NHD は未変更、HostDrv の `make deploy` は exit=0。→ D へ: ルート直下の `lost+found` (ディレクトリ、名前一致) だけ走査から外す。
-配備 2 回目 (feat/gui `16bb298`、`lost+found` 除外後): `make check` exit=0 → `os32-cycle deploy` OK (vmkernel 470,329 B 一致) → `make deploy` exit=0 → ゲスト `ver` API v50、`/etc/settings.tsv` 1,405 B、`db_v50_test.bin` 6,899 B、`hsync.bin` 8,608 B、`/etc/settings.db` は**存在しない** (通常配備で作られない)、kselftest 87 / 0。
-
-| 受入 | obs | 判定 |
-|---|---|---|
-| **K1** | `make clean` + `clean-external` → `all` → `external` → `check` exit=0 (`a383619`)、その後の差分は `make all` / `check` で通過、配備・kselftest 87/0、regress は D1 の後に | 合格 (regress 待ち) |
-| **K2** | `db_v50_test`: `5/6 passed, aborted` — **`RW open of an existing db` が失敗 (open failure code = 21 = SQLITE_MISUSE)**。RO の no-create (`/etc/nosuch.db` が作られない) は合格、`fault_kill_count` 0。ホスト試験では通る経路なのでカーネル SQLite の構成差が疑わしい → K へ差し戻し | **不合格 (調査中)** |
-| **T1** | テスターで `make images/os32_boot.d88` → FAT12 を読み `/ETC/SETTINGS.DB` 3,072 B、sha256 がホストの `build/out/settings.db` と一致、`sqlite3` で 3 行 / schema_version 1。CD パッケージは `packages` 依存で同じ生成物 | **合格** (新規インストールでの seed は S3) |
-| **D1 (a)** | HostDrv `C:\os32\etc\settings.db` に偽の 25B ファイル、ゲストに試験用 `/etc/settings.db` (tsv の複製 1,405 B) を置き、`hsync -f etc` → `protected: /etc/settings.db (skipped)` で 1,405 B のまま (`filetypes` / `settings.tsv` は更新)。停止 → `pull` → `os32-cycle deploy` (sync-from-hostdrv が偽ファイルを見る) → 配備 OK、ゲストの `/etc/settings.db` は 1,405 B / 内容不変 (先頭行が tsv のコメント)、`settings.tsv` は配備される。後片付けで偽ファイルと試験 DB を削除 | **合格** |
-| **D1 (b)** | tsv だけの通常配備 (2 回目の配備): `protected:` は出ず `/etc/settings.tsv` 1,405 B が配備される、`/etc/settings.db` は作られない | **合格** |
-| **D1 (c1)** | stamp (`os32.nhd.pulled`) を退避して `os32-cycle deploy` → `NHD 全体の上書きを中止: 来歴 … が無い (pull していない / 消えた)` で `make deploy-nhd` が Error 1 (prune までは走り 0 件、NHD は書かれない)。案内どおり `pull` で取り直せる | **合格** |
-| **D1 (c2)** | local `os32.nhd` を退避して `os32-cycle deploy` → `ensure_local_nhd` の自動 pull が stamp (261 B) を書いて配備 OK (vmkernel 470,327 B 一致) | **合格** |
-| **K1 (続き)** | `make deploy` exit=0、`ver` API v50、regress 6 本 obs 全通過 (kselftest 87/0、klibc 49/0、alloc_demo、ring3_fault → ver、`echo abc \| wc -c` 4、screenshot) | **合格** |
