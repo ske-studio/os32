@@ -1,6 +1,6 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import`
 
-状態: **設計 第 4 版 (往復 3 の 5 件を反映。3 往復で Approve に至らず → ユーザー決裁: 追加 1 往復か第 4 版で実装か)**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
+状態: **設計 第 4 版、ユーザー決裁 2026-09-13: 追加 1 往復 (確認のみ) を実施中 (1.a)。S3-I2 は別票 (3)。受入イメージは §6**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
 正典: [DESIGN.md](DESIGN.md) §2 (初期値はインストーラだけが持つ、リカバリモード) / §6b (JSON バックアップと `cfg import`)、[S0_FOUNDATION.md](S0_FOUNDATION.md) §6 (**明示リカバリ契約**: 自動分岐なし、表示と承認、元 DB と journal を対で保存、別名へ完全コピー → 検証 → 切替、失敗で元を消さない、原子性は backend で確認できなければ名乗らない、system.cfg 等は触らない、復元後に schema / sync / reopen を記録)、[TASK_S2.md](TASK_S2.md) §1 (規則) / §2 (`cfg export` の JSON 形、import は S3)、[TASK_S0.md](TASK_S0.md) (配備保護: `settings.db*` を通常配備が触らない)。
 規約: [C1] C89、コーダーは worktree + ホスト TDD のみ、[D2] (使い捨てイメージ / ini) はユーザー承認。
 
@@ -118,7 +118,7 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 
 ## 7. 残ゲート (本票で直さない)
 
-- **S3-I2**: 通常インストール (`install` 無印) は `/kernel.bin` を必須とし FDD は `/VMKRNL.LZ4` + `/boot` を収録するので、FDD からの新規インストールが `/etc` コピー (settings.db の seed) まで到達しない (TASK_S0 §3 B10、S0-T の T1 は「媒体に入っている」まで)。修正は install の lz4 カーネル + `/boot` レイアウト対応で、受入には**使い捨て NHD** ([D2]) が要る。本票の後に別票で。
+- **S3-I2 (ユーザー決裁 2026-09-13: 別票にする)**: 通常インストール (`install` 無印) は `/kernel.bin` を必須とし FDD は `/VMKRNL.LZ4` + `/boot` を収録するので、FDD からの新規インストールが `/etc` コピー (settings.db の seed) まで到達しない (TASK_S0 §3 B10、S0-T の T1 は「媒体に入っている」まで)。修正は install の lz4 カーネル + `/boot` レイアウト対応で、受入には**使い捨て NHD** ([D2]) が要る。本票の後に別票で。
 - ジャーナル: DELETE journal の回復・電源断の crash durability (FOUNDATION §6「保証上限」) は未検証のまま (S5 で「set → ハードリセット → 保持」までは確認)。
 
 ## 8. レビュー記録
