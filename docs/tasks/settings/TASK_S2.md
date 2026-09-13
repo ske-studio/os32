@@ -144,6 +144,15 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 | C6 | **合格** (配備 3 回目の前後で値と settings.db を保持、hsync は 8d と同じ) |
 | C7 | FEP 常駐で `cfg get` 1 回 = 53 tick (API 往復込み)。pool は 8d のとおり未計測 |
 
+### 8f. ゲスト受入 (配備 4 回目、`e325fe4` + `c9570e0` = 往復 3 の B1〜B5 + shlib --api 50、vmkernel 470,758 B、cfg.bin 29,628 B、kselftest 87 / 0、stamp 17:24)
+| ID | 結果 |
+|---|---|
+| C1 / C2 | **合格** (rm → MISSING → init → OK、3 行、set 7 → get 7) |
+| C4 | **合格** (3 records → 4 行)。`cfg export /ETC/SETTINGS.DB` (大小違いの別名) も `refusing to write the settings database itself` (往復 3 の B1) |
+| C5 | **合格** (端末で list / set 7 / get 7 / status OK、CUI に戻って 7) |
+| C6 | **合格** (配備の前後で値 7 と settings.db を保持) |
+| C3 / C7 | 8e と同じ (境界と pool はゲストで踏めない) |
+
 受入中の教訓: (1) `/api/cmd` 経由の rshell 行は 255B 超の引数で崩れる (C3 の境界はゲストで踏めない)。(2) `ime on` のまま `/api/key` で打つと FEP がローマ字を変換する (`os32gui` → `お32ぐい`)。`SHIFT+SPACE` (urlencode) で切ってから台本を回す。
 
 ### 8c. Codex 実装レビュー
