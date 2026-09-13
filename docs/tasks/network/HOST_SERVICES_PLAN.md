@@ -26,7 +26,7 @@ OS32 アプリ ── KAPI host_* ── net/link.c (L0〜L3) ── LGY-98 ─�
 ## 2. サービス一覧 (Host Agent が受ける要求)
 
 ワイヤは **TASK_N0 §1b (v2)** が正典。要求は REQUEST フレームの payload (ASCII 行、最大 1400B)、
-応答は RESPONSE (`status u16` + `length u32`、6B 固定 — TIME / PING も同じ) + 本文の DATA
+応答は RESPONSE (`status u16` + `length u32`、6B 固定 — TIME / PING も同じ。業務結果は flags 0 で HTTP ステータスをそのまま載せ、リンクの制御結果は flags bit0 で分ける) + 本文の DATA
 ストリーム (OS32 が WINDOW を送った `rid` だけ流れる)。**OS32 → ホスト方向の本文** (印刷ジョブ、
 CLIP PUT、PUT) は**要求行に宣言長を書き**、WDATA (`rid`、`seq` = 1〜、1 本ずつ ACK 待ち) で送る。
 Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに `rid` が付くので、要求行に

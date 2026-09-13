@@ -140,21 +140,21 @@ EOF stream_id  // ストリーム終端
   以後固定する。EtherType は 0x88B5 (experimental 帯)。
 - リンクヘッダ **20B、明示的に直列化 (LE アクセサ、C 構造体の padding に依存しない)**:
   `op(u8)` `flags(u8)` `epoch(u16)` `seq(u32)` `ack(u32)` `length(u16)` `rid(u32)` `sess(u16)`。
-  `sess` = OS32 の起動ごとのセッション ID (全フレーム)、`epoch` = HELLO ごとの世代、
-  `rid` = 要求 ID (epoch 内で単調増加、0 は使わない)。HELLO 以外は `sess` と `epoch` が
-  控えと一致するフレームだけ受け付ける (両端とも)。
+  `sess` = セッション ID (**Agent が永続カウンタで採番**、全フレーム)、`epoch` = セッション内の
+  再同期世代 (OS32 が +1、周回は新セッション)、`rid` = 要求 ID (セッション内で単調増加、0 は
+  使わない)。HELLO 以外は `sess` と `epoch` が控えと一致するフレームだけ受け付ける (両端とも)。
 - 制御フレーム (WINDOW / ACK / STATUS / RELEASE / HELLO) は小さく、60B へ padding して送る。
 
 | op | 向き | 用途 |
 |---|---|---|
-| HELLO (1) | 双方向 | `seq` = OS32 の nonce、payload = Agent 世代 (`agent u16`)。MAC / epoch / sess の交換、再同期 |
+| HELLO (1) | 双方向 | **3 way** (flags: SYN / SYN-ACK / CONFIRM / ESTABLISHED)。`seq` = OS32 の nonce、`ack` = Agent の nonce、payload = Agent 世代 (`agent u16`)。MAC / epoch / sess の交換、再同期。遅延した HELLO 1 通では切替が起きない |
 | REQUEST (2) | OS32 → Host | 要求行 (`rid`、`seq` = 0)。本文が要る要求は要求行に宣言長 |
 | WDATA (8) | OS32 → Host | 要求本文 (`rid`、`seq` = 1〜、REQUEST と同じ seq 空間) |
-| RESPONSE (3) | Host → OS32 | 要求の結果 (`rid`、本文 6B 固定 = `status u16` + `length u32`)。102 = 処理中、410 = 墓標、503 = 受付枠無し |
+| RESPONSE (3) | Host → OS32 | 要求の結果 (`rid`、本文 6B 固定 = `status u16` + `length u32`)。flags bit0 = 制御結果 (PROCESSING / TOMBSTONE / NO_SLOT)、flags 0 = 業務結果 (HTTP ステータスはそのまま) |
 | STATUS (9) | OS32 → Host | `rid` の結果の再提示 / 生存確認の要求 |
-| RELEASE (10) | OS32 → Host | ハンドルを閉じた通知 (Agent はその `rid` を捨てて ACK) |
+| RELEASE (10) | OS32 → Host | ハンドルを閉じた通知 (Agent はその `rid` を捨てて墓標を残し、flags bit0 の ACK を返す) |
 | DATA (4) / EOF (5) | Host → OS32 | 応答本文のストリーム (`rid`、`seq` = 1〜)。WINDOW を受けた `rid` だけ |
-| ACK (6) | 双方向 | `rid` + `ack` = 順序どおり受けた最終 seq (累積) |
+| ACK (6) | 双方向 | `rid` + `ack` = 順序どおり受けた最終 seq (累積)。flags bit0 = RELEASE への ACK |
 | WINDOW (7) | OS32 → Host | 絶対値 credit の広告 (§2-1) と配送開始の許可 |
 
 OS32 → Host のデータ (WDATA) は 1 本ずつ ACK を待って送る (ホストに余裕があるので
