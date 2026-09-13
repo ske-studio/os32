@@ -150,3 +150,4 @@
 | T (`6360618`) | Request changes | 1 件: mkpkg の `--defs` 不在と 0 件 glob の例外 → `2adcb2e` で修正済み (package_defs.yaml の実体の無い 3 登録をコメント化) |
 | K (`08b4879`) | Request changes | 6 件: SHM 境界ちょうどの部分 ROW、journal の stat 失敗を不存在扱い、RW open の失敗が一律 CANTOPEN、stmt 無しの step で診断が 0 に戻らない、255B path の journal 誤認、`\f` の末尾空白。non-blocker: 再利用後の診断は新接続の値 (票を実装に合わせた)、K2 の PTE 検査ケースの強化、TRANSIENT 試験、PDE_PS、記録の訂正 |
 ゲート (`08b4879`、テスター): `make clean` + `clean-external` → `all` (74s) → `external` → `check` (42s) すべて exit=0。vmkernel.lz4 469,605 B、settings.db 3,072 B、db_v50_test.bin 6,319 B。
+| D (`10bc6ae`) / T (`2adcb2e`) | 往復 2: Request changes | D 9 件: 補完後のパスが symlink でディレクトリを指すと cp が再補完、最終パスの祖先保護の欠けと除外の失敗扱い、hsync の保護一覧 16 件超、hsync の read / ls / mkdir / sync 失敗と void main、hsync のパス連結の容量、stamp 書き込み失敗、`.pulled` が非オブジェクト、0 件操作で `check_root_etc` が呼ばれない、os.walk が保護ディレクトリの中を先に読む。T 1 件: 先頭ゼロ 4301 桁の int を Python の桁数制限で拒否 |
