@@ -27,6 +27,7 @@ const K_CLOCK: &[u8] = b"taskbar/clock_24h";
 
 /* スキャンコード (drivers/kbd.h)。 */
 const SC_ESC: u8 = 0x00;
+const SC_TAB: u8 = 0x0F;
 const SC_RETURN: u8 = 0x1C;
 const SC_SPACE: u8 = 0x34;
 const SC_UP: u8 = 0x3A;
@@ -529,12 +530,18 @@ fn s09_settings_from_an_app_wait_context_parks_and_runs_at_top_level() {
     );
 }
 
-/// 通知だけが残っている状態 (`req = None, notice = Some`) でも、**実際の
-/// スケジューラ経路** (`should_park` → `note_parked` → `pick`) が top-level へ
-/// 制御を返すこと (票 §3 の往復 3 non-blocker 2)。
+/// 通知だけが残っている状態 (`req = None, notice = Some`) でも、スケジューラの
+/// 判断が top-level へ制御を返すこと (票 §3 の往復 3 non-blocker 2)。
 ///
 /// `consume` を直に呼ぶだけの試験にしない — 見たいのは「アプリが `OP_WAIT` に
-/// 戻っても通知を出しに行ける」という**接続**のほう。
+/// 戻っても通知を出しに行ける」という**判断の連なり**のほう。
+///
+/// **限定** (S4 実装レビュー往復 2 の non-blocker): ここで通すのは
+/// `should_park` → `note_parked` → `pick` → `consume` という
+/// **スケジューラ関数を順に直接呼ぶ**筋であって、`handler` → 実 park
+/// (`exec_park`) → `standalone_loop` の**実遷移は通していない**。制御の流れ
+/// そのものはカーネルの領分で、ホストの `exec_park` は longjmp できない
+/// (`mocks.rs` の注記)。実遷移はゲスト受入 (票 §6) の担当。
 #[test]
 fn s09b_notice_only_pending_returns_control_to_top_level_through_the_scheduler() {
     let mut st = bare();
@@ -747,6 +754,11 @@ fn s13_shrinking_clock_dirties_the_union_of_old_and_new() {
 /*  (14) X4 / handler の文脈では cfg_* を 1 本も呼ばない             */
 /* ================================================================ */
 
+/// **限定** (S4 実装レビュー往復 2 の non-blocker): `wm_cycle(Ctx::Pump)` /
+/// `wm_cycle(Ctx::Wait)` と `settings::consume` を**順に直接呼ぶ**試験であり、
+/// `handler` → 実 park (`exec_park`) → `standalone_loop` の**実遷移は通して
+/// いない** (S09b と同じ限定)。ここで固定するのは「どの文脈が DB に触ってよいか」
+/// という判断だけ。
 #[test]
 fn s14_pump_and_handler_contexts_never_touch_the_db() {
     let mut st = bare();
@@ -992,12 +1004,17 @@ fn s18_status_is_sampled_after_the_gets_not_at_open() {
     /* --- 反例 (実装レビュー往復 1 の B1): **1 本目の get は成功して 3 を返し**、
      *     2 本目の prepare / step が I/O で落ちて status が ERROR になる。
      *     先に読めた 3 を採ると「ERROR・defaults in use と通知しながら背景は 3」
-     *     という食い違いが出る。**両キーとも既定へ倒す**のが正。 --- */
+     *     という食い違いが出る。**両キーとも既定へ倒す**のが正。
+     *
+     *     贋物の遷移は **2 本目の `cfg_get_int` を返した後**に起こす
+     *     (`status_after_get`)。`cfg_status` の呼び出し回数で切り替えると
+     *     「status を get より前に採る」退行でも ERROR が返ってしまい、
+     *     この試験が見張るべき順序 (get → status) を取り逃がす。 --- */
     let _st = bare();
     mocks::cfg(|c| {
         c.color = Some(3); /* 1 本目は本物の値が返る */
-        c.status_script = vec![CFG_ERROR];
         c.status = CFG_OK; /* open 直後は OK だった */
+        c.status_after_get = Some((2, CFG_ERROR));
         c.sqlite = 10;
     });
     let c = settings::load(0);
@@ -1197,7 +1214,7 @@ fn s20_remaining_save_branches() {
     );
     assert_eq!(modal_msg(), b"cannot save: MISSING".to_vec());
 
-    /* --- (c) 2 本目の set だけ失敗 (両キー変更) --- */
+    /* --- (c1) 1 本目の set で落ちれば 2 本目は呼ばない (両キー変更) --- */
     let mut st = bare();
     st.cfg.desktop_color = 3;
     st.cfg.clock_24h = true;
@@ -1214,12 +1231,43 @@ fn s20_remaining_save_branches() {
         (3, true),
         "set 失敗で適用値が動いた"
     );
-    /* 1 本目の set で落ちるので 2 本目は呼ばない。 */
     assert_eq!(
         mocks::cfg_calls()[before..],
         [Open(1), Begin, set_int(K_COLOR, 4), Close],
         "set が落ちた後も続けた"
     );
+
+    /* --- (c2) **2 本目**の set だけ失敗 (両キー変更) --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    st.cfg.clock_24h = true;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0); /* color 3 → 4 */
+    modal::on_key(&mut st, SC_DOWN, 0, 0);
+    modal::on_key(&mut st, SC_SPACE, 0, 0); /* clock 24h → 12h */
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    /* 1 本目は通り、2 本目だけ落ちる。 */
+    mocks::cfg(|c| c.set_ret_script = vec![0, -1]);
+    settings::consume(&mut st);
+    assert_eq!(
+        (st.cfg.desktop_color, st.cfg.clock_24h),
+        (3, true),
+        "2 本目の set が落ちたのに適用値が動いた"
+    );
+    /* 2 本とも呼ばれ、**commit せずに** close する (rollback は close の仕事)。 */
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [
+            Open(1),
+            Begin,
+            set_int(K_COLOR, 4),
+            set_int(K_CLOCK, 0),
+            Close
+        ],
+        "2 本目の set が落ちたのに commit した / 呼ぶ本数が違う"
+    );
+    assert_eq!(modal_msg(), b"save failed: set (-1)".to_vec());
 
     /* --- (d) 時計だけの保存 (色は変えない) --- */
     let mut st = bare();
@@ -1284,4 +1332,70 @@ fn s20_remaining_save_branches() {
         [Open(1), Begin, set_int(K_COLOR, 8), Commit, Close]
     );
     assert_eq!(st.cfg.desktop_color, 8, "保存後に適用していない");
+}
+
+/* ================================================================ */
+/*  (21) TAB は焦点表示を動かさない (実装レビュー往復 2 の non-blocker) */
+/* ================================================================ */
+
+/// 設定ダイアログの RETURN は **常に OK** (`settings_key` の `SC_RETURN`)。
+/// TAB で焦点表示だけ Cancel へ動くと、「太枠は Cancel なのに RETURN を押すと
+/// 保存される」という食い違いになる。Input ダイアログ (契約 M4) と同じく
+/// **TAB ではボタン焦点を動かさない**。
+#[test]
+fn s21_tab_never_moves_the_button_focus_in_settings() {
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    open_with(&mut st, 3, 1);
+    assert_eq!(modal::focus_btn(), 0, "開いた直後の焦点が OK でない");
+
+    /* --- TAB を何度打っても焦点は OK のまま (閉じもしない) --- */
+    for i in 0..3 {
+        assert!(
+            !modal::on_key(&mut st, SC_TAB, 0, 0),
+            "TAB {} 回目でダイアログが閉じた",
+            i + 1
+        );
+        assert_eq!(
+            modal::focus_btn(),
+            0,
+            "TAB {} 回目で焦点表示が OK から動いた",
+            i + 1
+        );
+        assert!(modal::is_settings(), "TAB でダイアログが差し替わった");
+    }
+
+    /* --- TAB は編集値にも触らない --- */
+    assert_eq!(modal::settings_values(), (3, true, 0), "TAB が値を動かした");
+
+    /* --- TAB の後の RETURN は OK = 変更を保存する (表示と一致) --- */
+    modal::on_key(&mut st, SC_RIGHT, 0, 0); /* color 3 → 4 */
+    modal::on_key(&mut st, SC_TAB, 0, 0);
+    assert_eq!(modal::focus_btn(), 0, "TAB で焦点表示が動いた");
+    let before = mocks::cfg_calls().len();
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    assert_eq!(modal::focus_btn(), 0, "OK で閉じたのに焦点が OK でない");
+    settings::consume(&mut st);
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [Open(1), Begin, set_int(K_COLOR, 4), Commit, Close],
+        "TAB の後の RETURN が OK として働いていない"
+    );
+    assert_eq!(st.cfg.desktop_color, 4, "保存後に適用していない");
+
+    /* --- ESC は TAB の後でも Cancel (1 バイトも書かない) --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    modal::on_key(&mut st, SC_TAB, 0, 0);
+    let before = mocks::cfg_calls().len();
+    assert!(modal::on_key(&mut st, SC_ESC, 0, 0));
+    settings::consume(&mut st);
+    assert_eq!(
+        mocks::cfg_calls().len(),
+        before,
+        "TAB の後の ESC で DB に触った"
+    );
+    assert_eq!(st.cfg.desktop_color, 3, "ESC で適用値が動いた");
 }

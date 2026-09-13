@@ -488,6 +488,14 @@ pub fn settings_status_lines() -> usize {
     state().set_status_n
 }
 
+/// 焦点表示が当たっているボタンの index (0 = 1 本目 = OK / Yes)。試験の観測点
+/// — 「RETURN が何をするか」と「どのボタンが太枠で描かれるか」が食い違って
+/// いないことを見るのに使う (実装レビュー往復 2 の non-blocker)。
+#[inline]
+pub fn focus_btn() -> usize {
+    state().focus_btn
+}
+
 /// 設定ダイアログの当たり判定 (行 0 / 行 1 / OK / Cancel、画面座標)。
 /// マウス操作の試験と、PM の台本が座標を出すための窓口 (票 S4 §5 の (15))。
 pub fn settings_hit_rects() -> (Rect, Rect, Rect, Rect) {
@@ -1247,7 +1255,8 @@ pub fn on_key(st: &mut GuiState, scan: u8, ch: u8, mods: u32) -> bool {
 
 /* ---------------- 設定ダイアログのキー (票 S4 §3) ---------------- */
 
-/// ↑ / ↓ で行移動、← / → / SPACE で値、RETURN = OK、ESC = Cancel。
+/// ↑ / ↓ で行移動、← / → / SPACE で値、RETURN = OK、ESC = Cancel、
+/// **TAB は何もしない** (焦点表示を動かさない = 表示と RETURN を揃える)。
 /// **入力欄は使わない** (数値入力の検証を持ち込まない)。
 fn settings_key(st: &mut GuiState, scan: u8) -> bool {
     match scan {
@@ -1277,11 +1286,12 @@ fn settings_key(st: &mut GuiState, scan: u8) -> bool {
             false
         }
         SC_TAB => {
-            /* ボタンの焦点だけ動かす (RETURN は常に OK)。 */
-            let m = state();
-            m.focus_btn = (m.focus_btn + 1) % m.nbtn;
-            let band = buttons_band(m);
-            st.dirty_screen(band);
+            /* 設定ダイアログでも **TAB は焦点を動かさない** (S4 実装レビュー
+             * 往復 2 の non-blocker)。動かすと「焦点表示は Cancel なのに
+             * RETURN は OK」という食い違いが出る — ここの RETURN は上の枝で
+             * 常に `MODAL_RESULT_OK` だから。Input ダイアログ (契約 M4) と
+             * 同じ扱いにして、RETURN = OK / ESC = Cancel の契約と表示を
+             * 揃える。ボタンはマウスで押せる。 */
             false
         }
         _ => false,
