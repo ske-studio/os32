@@ -8,7 +8,8 @@
 //! (モーダルと同じ扱い)。
 //!
 //! ```text
-//!   Start (root)          Programs / File Manager / Run... / CUI mode / Shut Down
+//!   Start (root)          Programs / File Manager / Run... / Settings... /
+//!                         CUI mode / Shut Down
 //!   Start (programs)      /usr/bin/*.bin を最大 96 件 (超過は "..." 行)
 //!   Context (右クリック)  File Manager / Run... / Refresh Programs
 //! ```
@@ -53,13 +54,17 @@ const PATH_LEN: usize = 128;
 /// 走査するディレクトリ (契約 D2)。
 static PROG_DIR: &[u8] = b"/usr/bin\0";
 
-/* root メニューの項目。 */
+/* root メニューの項目。**行番号は台本 (`tools/gui_gate.py`) の
+ * `ROW_PROGRAMS` / `ROW_FILEMAN` / `ROW_RUN` / `ROW_SETTINGS` / `ROW_CUI` /
+ * `ROW_HALT`) と 1 対 1**。Settings... を Run... の次に足したので
+ * CUI mode / Shut Down が 1 行下がった (票 S4 §3)。 */
 const IT_PROGRAMS: usize = 0;
 const IT_FILEMAN: usize = 1;
 const IT_RUN: usize = 2;
-const IT_CUI: usize = 3;
-const IT_HALT: usize = 4;
-const ROOT_ITEMS: usize = 5;
+const IT_SETTINGS: usize = 3;
+const IT_CUI: usize = 4;
+const IT_HALT: usize = 5;
+pub const ROOT_ITEMS: usize = 6;
 
 /* context メニューの項目。 */
 const CT_FILEMAN: usize = 0;
@@ -137,6 +142,13 @@ fn m() -> &'static mut Menu {
 #[inline]
 pub fn is_open() -> bool {
     m().kind != KIND_NONE
+}
+
+/// ホスト TDD の初期化 (`mocks::init`)。`static` を跨いで前の試験の
+/// 開きっぱなしが次の試験の合成に写り込まないようにする。
+#[allow(dead_code)]
+pub fn reset() {
+    *m() = Menu::NEW;
 }
 
 /// Start ボタンを沈めて描くか (root / programs のどちらでも押されたまま)。
@@ -502,6 +514,13 @@ fn activate(st: &mut GuiState) -> bool {
                 modal::open_wm_input(st, b"Run: absolute path\0", modal::WM_PURPOSE_RUN);
                 true
             }
+            IT_SETTINGS => {
+                close(st);
+                /* **DB には触らない** — top-level への予約だけ (票 S4 §3 の B1)。
+                 * ここはアプリが `OP_WAIT` 中なら `handler` の文脈で走る。 */
+                crate::settings::request_open();
+                true
+            }
             IT_CUI => {
                 close(st);
                 /* 契約 S6: 確認 (Yes/No) を経てからでないと CUI へ落とさない。 */
@@ -643,16 +662,29 @@ pub fn draw(st: &GuiState, clip: Rect) {
     }
 }
 
+/// root メニューの項目 idx のラベル (**NUL を含まない**)。
+///
+/// `tools/gui_gate.py` の `ROW_*` が指す行の中身を試験から確かめるための窓口
+/// (票 S4 §5 の (7))。行の順が変わると台本が別の項目に当たるので、
+/// 「6 項目・この順」をここで固定する。
+pub fn root_label(idx: usize) -> &'static [u8] {
+    let p = match idx {
+        IT_PROGRAMS => b"Programs\0".as_slice(),
+        IT_FILEMAN => b"File Manager\0".as_slice(),
+        IT_RUN => b"Run...\0".as_slice(),
+        IT_SETTINGS => b"Settings...\0".as_slice(),
+        IT_CUI => b"CUI mode\0".as_slice(),
+        IT_HALT => b"Shut Down\0".as_slice(),
+        _ => b"\0".as_slice(),
+    };
+    &p[..p.len() - 1]
+}
+
 /// 項目 idx のラベル (NUL 終端のポインタ)。Programs は cache から組む。
 fn item_label(mm: &Menu, idx: usize, buf: &mut [u8; NAME_LEN + 1]) -> *const u8 {
     match mm.kind {
-        KIND_ROOT => match idx {
-            IT_PROGRAMS => b"Programs\0".as_ptr(),
-            IT_FILEMAN => b"File Manager\0".as_ptr(),
-            IT_RUN => b"Run...\0".as_ptr(),
-            IT_CUI => b"CUI mode\0".as_ptr(),
-            _ => b"Shut Down\0".as_ptr(),
-        },
+        /* 文字列は [`root_label`] が正典 (試験が見るのと同じ表)。 */
+        KIND_ROOT => root_label(idx).as_ptr(),
         KIND_CTX => match idx {
             CT_FILEMAN => b"File Manager\0".as_ptr(),
             CT_RUN => b"Run...\0".as_ptr(),

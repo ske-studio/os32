@@ -38,6 +38,7 @@ def build(out_dir):
 #[path="{SDK / 'kapi_generated.rs'}"] pub mod kapi_generated;
 pub use kapi_generated::*;
 #[path="{SDK / 'gui/mod.rs'}"] pub mod gui;
+#[path="{SDK / 'cfg.rs'}"] pub mod cfg;
 use core::cell::UnsafeCell;
 '''
         + source[

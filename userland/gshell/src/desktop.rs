@@ -1,7 +1,9 @@
 //! desktop.rs — デスクトップ (背景)。v1.2 でタスクバー。
 //!
 //! `wm::composite_rect` から「どのウィンドウにも覆われていない矩形」ごとに
-//! 呼ばれる。塗るのは背景色 (G6 の `DESKTOP`) だけ。
+//! 呼ばれる。塗るのは背景色だけ — 色は設定レジストリの
+//! `gshell` / `desktop/color` (票 S4 §1、既定は G6 の `DESKTOP` = 12) で、
+//! 起動時に 1 回読んだ適用値 (`GuiState.cfg.desktop_color`) を見る。
 //!
 //! 上部の手引きバー (`OS32 GUI shell ESC:CUI F1..F5`) は **G5 で製品から撤去**
 //! した — `crate::DEBUG_SHORTCUTS` が `false` の間 [`hint_rect`] は空矩形を返し、
@@ -18,7 +20,7 @@
 use crate::lease;
 use crate::wm::{GuiState, Rect};
 use os32api::gfx;
-use os32api::gui::proto::{GUI_COLOR_DESKTOP, GUI_COLOR_TEXT, GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW};
+use os32api::gui::proto::{GUI_COLOR_TEXT, GUI_COLOR_TITLE_TEXT, GUI_COLOR_WINDOW};
 
 /// 手引きの位置 (左上) と占有矩形。ANK 8x16 なので 1 文字 8px。
 const HINT_X: i32 = 8;
@@ -39,8 +41,10 @@ pub fn fill(st: &GuiState, r: Rect) {
         return;
     }
     if !lease::mono(st) {
+        /* 背景色は設定レジストリの `gshell/desktop/color` (票 S4 §1)。
+         * 既定は `GUI_COLOR_DESKTOP` (12) なので、DB が無くても見た目は変わらない。 */
         unsafe {
-            gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, GUI_COLOR_DESKTOP);
+            gfx::gfx_fill_rect(r.x, r.y, r.w, r.h, st.cfg.desktop_color);
         }
         return;
     }
@@ -98,7 +102,7 @@ pub fn draw_hint(st: &GuiState) {
     let (fg, bg) = if lease::mono(st) {
         (GUI_COLOR_WINDOW, GUI_COLOR_TEXT)
     } else {
-        (GUI_COLOR_TITLE_TEXT, GUI_COLOR_DESKTOP)
+        (GUI_COLOR_TITLE_TEXT, st.cfg.desktop_color)
     };
     unsafe {
         gfx::kcg_set_scale(1);

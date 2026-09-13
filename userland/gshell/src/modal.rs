@@ -79,6 +79,13 @@ pub const WM_PURPOSE_CONFIRM_CUI: u8 = 2;
 pub const WM_PURPOSE_CONFIRM_HALT: u8 = 3;
 /// 通知だけ (起動失敗 / cfg 更新失敗)。押しても何も起きない。
 pub const WM_PURPOSE_NOTIFY: u8 = 4;
+/// Start → Settings... の設定ダイアログ (票 S4 §3)。OK は
+/// [`crate::settings::on_ok`] へ渡すだけで、**DB には触らない**。
+pub const WM_PURPOSE_SETTINGS: u8 = 5;
+/// 設定レジストリの通知 (起動時 / 保存結果。票 S4 §2・§3)。
+/// [`WM_PURPOSE_NOTIFY`] と同じく押しても何も起きないが、
+/// `settings` の `notice` 経路から出たものだと分かるように別にしてある。
+pub const WM_PURPOSE_CFG_NOTICE: u8 = 6;
 
 /* ================================================================ */
 /*  ダイアログ種別 / result (正典は sdk/include/os32/os32_gui_shared.h、  */
@@ -375,6 +382,15 @@ pub struct Modal {
     wm_owned: bool,
     /// `wm_owned` のときの用途 (`WM_PURPOSE_*`)。W3 の Start / Run / 確認。
     wm_purpose: u8,
+    /* ---- 設定ダイアログ (票 S4 §3) ---- */
+    /// **編集中の値** (適用値でも再読込値でもない。票 §2 の 3 区別)。
+    set_color: u8,
+    set_clock: bool,
+    /// 選択中の行 (0 = Desktop color、1 = Clock)。
+    set_row: usize,
+    /// 状態行 (開いた周回の `load()` から組んだ本文、NUL 終端)。
+    set_status: [u8; crate::settings::MSG_MAX],
+    set_status_len: usize,
 }
 
 impl Modal {
@@ -409,6 +425,11 @@ impl Modal {
         view_off: 0,
         wm_owned: false,
         wm_purpose: WM_PURPOSE_FILE_LAUNCH,
+        set_color: 0,
+        set_clock: true,
+        set_row: 0,
+        set_status: [0; crate::settings::MSG_MAX],
+        set_status_len: 0,
     };
 }
 
@@ -426,11 +447,55 @@ pub fn is_open() -> bool {
     state().used
 }
 
+/// ホスト TDD の初期化 (`mocks::init`)。モーダルは**プロセスに 1 枚**の
+/// `static` なので、前の試験が開けたまま終わると次の試験の合成に写り込む。
+pub fn reset() {
+    *state() = Modal::NEW;
+    let mut s = 0;
+    while s < GUI_SLOT_MAX {
+        *completed(s) = Completed::NEW;
+        s += 1;
+    }
+}
+
 /// いま開いているのが Input dialog か (input.rs が FEP へ通すかの判定)。
 #[inline]
 pub fn is_input() -> bool {
     let m = state();
     m.used && m.buttons == GUI_MODAL_INPUT
+}
+
+/// いま開いているのが設定ダイアログか (票 S4 §3)。
+#[inline]
+pub fn is_settings() -> bool {
+    let m = state();
+    m.used && m.wm_owned && m.wm_purpose == WM_PURPOSE_SETTINGS
+}
+
+/// いま出ているダイアログの本文 (NUL を含まない)。試験の観測点。
+pub fn msg_bytes() -> &'static [u8] {
+    let m = state();
+    &m.msg[..m.msg_len]
+}
+
+/// 設定ダイアログの当たり判定 (行 0 / 行 1 / OK / Cancel、画面座標)。
+/// マウス操作の試験と、PM の台本が座標を出すための窓口 (票 S4 §5 の (15))。
+pub fn settings_hit_rects() -> (Rect, Rect, Rect, Rect) {
+    let m = state();
+    (
+        set_row_rect(m, 0),
+        set_row_rect(m, 1),
+        button_rect(m, 0),
+        button_rect(m, 1),
+    )
+}
+
+/// 設定ダイアログの編集値 (試験と `finish_wm` から見る)。閉じていても
+/// **最後の値を持っている** — `finish` は `used` を落とすだけで消さないため。
+#[inline]
+pub fn settings_values() -> (u8, bool, usize) {
+    let m = state();
+    (m.set_color, m.set_clock, m.set_row)
 }
 
 /// ダイアログの外形 (画面座標)。閉じていれば空。
@@ -536,8 +601,44 @@ pub fn open_wm_file(st: &mut GuiState, start_dir: &[u8]) {
 
 /// WM 自身の MessageBox (契約 S6 の確認、起動失敗の通知)。
 /// `buttons` は [`GUI_MODAL_OK`] / [`GUI_MODAL_YES_NO`] など。
-pub fn open_wm_message(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) {
-    open_wm(st, buttons, msg, purpose);
+///
+/// **戻り値 `false` = 枠が塞がっていて開けなかった**。`settings` の通知経路は
+/// これを必ず見て、開けなければ `notice` を保持したまま次の周回へ回す
+/// (票 S4 §3 の R1)。
+pub fn open_wm_message(st: &mut GuiState, buttons: u16, msg: &[u8], purpose: u8) -> bool {
+    open_wm(st, buttons, msg, purpose)
+}
+
+/// Start → Settings... の設定ダイアログ (票 S4 §3)。開けたら `true`。
+///
+/// 既存の部品 (list band の 2 行 + OK / Cancel) だけで組む。新しいウィジェットは
+/// 作らない。渡す `cfg` は**開ける周回で読み直した値** = 編集の起点。
+pub fn open_wm_settings(st: &mut GuiState, cfg: &crate::settings::GuiCfg) -> bool {
+    if state().used {
+        return false;
+    }
+    if !open_wm(st, GUI_MODAL_OK_CANCEL, b"\0", WM_PURPOSE_SETTINGS) {
+        return false;
+    }
+    /* `open_wm` が `Modal::NEW` で塗り直すので、編集値と状態行はその**後**に
+     * 入れて、幅を決め直す (状態行の長さで版面が変わる)。 */
+    let mut line = [0u8; crate::settings::MSG_MAX];
+    let n = crate::settings::status_line(cfg, &mut line);
+    let old = state().rect;
+    {
+        let m = state();
+        m.set_color = cfg.desktop_color;
+        m.set_clock = cfg.clock_24h;
+        m.set_row = 0;
+        m.set_status = line;
+        m.set_status_len = n;
+    }
+    layout(st);
+    let r = state().rect;
+    st.dirty_screen(old);
+    st.dirty_screen(r);
+    visible::recompute_and_expose(st);
+    true
 }
 
 /// WM 自身の 1 行入力 (Start → Run...)。prompt は `msg`。
@@ -677,6 +778,16 @@ fn finish_wm(st: &mut GuiState, purpose: u8, result: i16, value: &[u8], vlen: us
                 let _ = session::set_wm(st, GUI_SESSION_SHUTDOWN, b"\0");
             }
         }
+        WM_PURPOSE_SETTINGS => {
+            /* Cancel / ESC は何も書かない (票 S4 §3)。 */
+            if result != MODAL_RESULT_OK {
+                return;
+            }
+            /* **ここでは DB に触らない** — 判定と予約だけ (票 §3)。編集値は
+             * `finish` が `used` を落としただけなので、まだ読める。 */
+            let (color, clock, _row) = settings_values();
+            crate::settings::on_ok(color, clock);
+        }
         _ => {}
     }
 }
@@ -726,6 +837,10 @@ pub fn reclaim_owner(st: &mut GuiState, owner: i32) {
 
 fn layout(st: &GuiState) {
     let m = state();
+    if m.wm_owned && m.wm_purpose == WM_PURPOSE_SETTINGS {
+        layout_settings(st, m);
+        return;
+    }
     let (w, h) = match m.buttons {
         GUI_MODAL_FILE_OPEN => (
             /* タイトル帯 + パス行 + 一覧 LIST_ROWS 行 + ボタン。 */
@@ -768,6 +883,74 @@ fn layout(st: &GuiState) {
 /// メッセージ (prompt) の表示幅。ANK 8px / 全角 16px で数える。
 fn msg_display_width(m: &Modal) -> i32 {
     text_width(&m.msg, m.msg_len, 0, m.msg_len)
+}
+
+/* ================================================================ */
+/*  設定ダイアログ (票 S4 §3) の版面                                  */
+/* ================================================================ */
+
+/// 行数 (0 = Desktop color、1 = Clock)。
+pub const SET_ROWS: usize = 2;
+/// 色見本 (16px 角) の左端を置く桁 (ANK 8px)。行の文字より右。
+const SET_SWATCH_COL: i32 = 8 * 24;
+/// 色見本の 1 辺。
+const SET_SWATCH: i32 = 16;
+/// 版面の最小幅。
+const SET_MIN_W: i32 = 360;
+
+/// 本文 2 行 + 状態行 1 行 + ボタン。幅は**行と状態行の実幅**から決める。
+fn layout_settings(st: &GuiState, m: &mut Modal) {
+    let mut body = SET_SWATCH_COL + SET_SWATCH + 8;
+    let status_w = (m.set_status_len as i32) * 8;
+    if status_w > body {
+        body = status_w;
+    }
+    let mut w = body + PAD * 2 + 4;
+    let min_w = 2 * BTN_W + BTN_GAP + PAD * 2;
+    if w < SET_MIN_W {
+        w = SET_MIN_W;
+    }
+    if w < min_w {
+        w = min_w;
+    }
+    if w > st.screen_w - 16 {
+        w = st.screen_w - 16;
+    }
+    let h = TITLE_H + PAD + LINE_H * (SET_ROWS as i32) + 4 + LINE_H + PAD + BTN_H + PAD;
+    let wa = work_area(st);
+    let x = wa.x + (wa.w - w) / 2;
+    let y = wa.y + (wa.h - h) / 2;
+    m.rect = Rect::new(if x < 0 { 0 } else { x }, if y < 0 { 0 } else { y }, w, h);
+}
+
+/// 設定ダイアログの行 `row` の矩形 (画面座標)。
+fn set_row_rect(m: &Modal, row: usize) -> Rect {
+    Rect::new(
+        m.rect.x + PAD,
+        m.rect.y + TITLE_H + PAD + (row as i32) * LINE_H,
+        m.rect.w - PAD * 2,
+        LINE_H,
+    )
+}
+
+/// 2 行ぶんの帯 (損傷を絞る用)。
+fn set_rows_band(m: &Modal) -> Rect {
+    Rect::new(
+        m.rect.x + 1,
+        m.rect.y + TITLE_H + 1,
+        m.rect.w - 2,
+        PAD + LINE_H * (SET_ROWS as i32),
+    )
+}
+
+/// 状態行の矩形。
+fn set_status_rect(m: &Modal) -> Rect {
+    Rect::new(
+        m.rect.x + PAD,
+        m.rect.y + TITLE_H + PAD + LINE_H * (SET_ROWS as i32) + 4,
+        m.rect.w - PAD * 2,
+        LINE_H,
+    )
 }
 
 /// ボタン i の矩形 (画面座標)。右詰め。
@@ -854,8 +1037,11 @@ fn button_label(buttons: u16, i: usize) -> &'static [u8] {
     }
 }
 
-fn title_label(buttons: u16) -> &'static [u8] {
-    match buttons {
+fn title_label(m: &Modal) -> &'static [u8] {
+    if m.wm_owned && m.wm_purpose == WM_PURPOSE_SETTINGS {
+        return b"Settings\0";
+    }
+    match m.buttons {
         GUI_MODAL_FILE_OPEN => b"Open file\0",
         GUI_MODAL_INPUT => b"Input\0",
         _ => b"Message\0",
@@ -942,6 +1128,9 @@ pub fn on_key(st: &mut GuiState, scan: u8, ch: u8, mods: u32) -> bool {
         return false;
     }
     let buttons = state().buttons;
+    if is_settings() {
+        return settings_key(st, scan);
+    }
     if buttons == GUI_MODAL_INPUT {
         return input_key(st, scan, ch, mods);
     }
@@ -991,6 +1180,81 @@ pub fn on_key(st: &mut GuiState, scan: u8, ch: u8, mods: u32) -> bool {
         _ => {}
     }
     false
+}
+
+/* ---------------- 設定ダイアログのキー (票 S4 §3) ---------------- */
+
+/// ↑ / ↓ で行移動、← / → / SPACE で値、RETURN = OK、ESC = Cancel。
+/// **入力欄は使わない** (数値入力の検証を持ち込まない)。
+fn settings_key(st: &mut GuiState, scan: u8) -> bool {
+    match scan {
+        SC_ESC => {
+            finish(st, MODAL_RESULT_CANCEL);
+            true
+        }
+        SC_RETURN => {
+            state().focus_btn = 0;
+            finish(st, MODAL_RESULT_OK);
+            true
+        }
+        SC_UP => {
+            set_move_row(st, -1);
+            false
+        }
+        SC_DOWN => {
+            set_move_row(st, 1);
+            false
+        }
+        SC_RIGHT | SC_SPACE => {
+            set_bump(st, 1);
+            false
+        }
+        SC_LEFT => {
+            set_bump(st, -1);
+            false
+        }
+        SC_TAB => {
+            /* ボタンの焦点だけ動かす (RETURN は常に OK)。 */
+            let m = state();
+            m.focus_btn = (m.focus_btn + 1) % m.nbtn;
+            let band = buttons_band(m);
+            st.dirty_screen(band);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn set_move_row(st: &mut GuiState, delta: i32) {
+    {
+        let m = state();
+        let mut r = m.set_row as i32 + delta;
+        if r < 0 {
+            r = 0;
+        }
+        if r >= SET_ROWS as i32 {
+            r = SET_ROWS as i32 - 1;
+        }
+        m.set_row = r as usize;
+    }
+    let band = set_rows_band(state());
+    st.dirty_screen(band);
+}
+
+/// 選択中の行の値を `delta` だけ進める (color は 0..15 を循環、clock はトグル)。
+fn set_bump(st: &mut GuiState, delta: i32) {
+    {
+        let m = state();
+        if m.set_row == 0 {
+            let n = crate::settings::COLOR_MAX as i32 + 1;
+            let v = (m.set_color as i32 + delta + n) % n;
+            m.set_color = v as u8;
+        } else {
+            m.set_clock = !m.set_clock;
+        }
+    }
+    let band = set_rows_band(state());
+    st.dirty_screen(band);
 }
 
 /* ---------------- Input dialog のキー (契約 M4 / W4 §6) ---------------- */
@@ -1184,6 +1448,25 @@ pub fn on_button(st: &mut GuiState, mx: i32, my: i32) -> bool {
             return activate(st);
         }
         i += 1;
+    }
+    /* 設定: row クリックで選択、同じ row の再クリックで値を進める (票 S4 §3)。 */
+    if is_settings() {
+        let mut row = 0;
+        while row < SET_ROWS {
+            let rr = set_row_rect(state(), row);
+            if rr.contains(mx, my) {
+                if state().set_row == row {
+                    set_bump(st, 1);
+                } else {
+                    state().set_row = row;
+                    let band = set_rows_band(state());
+                    st.dirty_screen(band);
+                }
+                return false;
+            }
+            row += 1;
+        }
+        return false;
     }
     /* Input: field をクリックしたら caret を移す。 */
     if buttons == GUI_MODAL_INPUT {
@@ -1535,7 +1818,17 @@ pub fn draw(st: &GuiState, clip: Rect) {
         let ttxt = if mono { GUI_COLOR_WINDOW } else { GUI_COLOR_TITLE_TEXT };
         gfx::gfx_fill_rect(tb.x, tb.y, tb.w, tb.h, tcol);
         gfx::kcg_set_scale(1);
-        gfx::kcg_draw_utf8(tb.x + 4, tb.y + 1, title_label(m.buttons).as_ptr(), ttxt, tcol);
+        gfx::kcg_draw_utf8(tb.x + 4, tb.y + 1, title_label(m).as_ptr(), ttxt, tcol);
+    }
+
+    if m.wm_owned && m.wm_purpose == WM_PURPOSE_SETTINGS {
+        draw_settings(m, mono, face);
+        let mut i = 0;
+        while i < m.nbtn {
+            draw_button(m, i, mono, i == m.focus_btn);
+            i += 1;
+        }
+        return;
     }
 
     match m.buttons {
@@ -1600,6 +1893,91 @@ fn draw_list(m: &Modal, mono: bool, face: u8) {
         }
         row += 1;
     }
+}
+
+/// 設定ダイアログ: 2 行 + 状態行。
+///
+/// **16 色リース中 (契約 G8、`lease::mono`) は `draw_list` と同じ 2 色分岐**
+/// (票 S4 §3 の R2): 選択行は `TEXT` / `WINDOW` の反転、色見本は描かず
+/// `(preview off: palette leased)` と数値だけを出す。WM モーダルは前面アプリを
+/// 入れ替えないので、借り手が変えた色がそのまま残っているため。
+fn draw_settings(m: &Modal, mono: bool, face: u8) {
+    unsafe {
+        gfx::kcg_set_scale(1);
+    }
+    let mut row = 0;
+    while row < SET_ROWS {
+        let rr = set_row_rect(m, row);
+        let sel = row == m.set_row;
+        let bg = if !sel {
+            face
+        } else if mono {
+            GUI_COLOR_TEXT
+        } else {
+            GUI_COLOR_SEL_BG
+        };
+        let fg = if !sel {
+            GUI_COLOR_TEXT
+        } else if mono {
+            GUI_COLOR_WINDOW
+        } else {
+            GUI_COLOR_SEL_TEXT
+        };
+        unsafe {
+            gfx::gfx_fill_rect(rr.x, rr.y, rr.w, rr.h, bg);
+        }
+        let mut buf = [0u8; 64];
+        let n = settings_row_text(m, row, mono, &mut buf);
+        unsafe {
+            gfx::kcg_draw_utf8(rr.x + 2, rr.y + 1, buf[..=n].as_ptr(), fg, bg);
+        }
+        /* 色見本は 16 色が使えるときだけ (2 色モードでは数値表記に倒す)。 */
+        if row == 0 && !mono {
+            let sx = rr.x + SET_SWATCH_COL;
+            let sy = rr.y + (LINE_H - SET_SWATCH) / 2;
+            unsafe {
+                gfx::gfx_fill_rect(sx, sy, SET_SWATCH, SET_SWATCH, m.set_color);
+                gfx::gfx_rect(sx, sy, SET_SWATCH, SET_SWATCH, GUI_COLOR_TEXT);
+            }
+        }
+        row += 1;
+    }
+    /* 状態行 (票 §3 / §2 の採取経路 (1))。 */
+    let sr = set_status_rect(m);
+    unsafe {
+        gfx::gfx_fill_rect(sr.x, sr.y, sr.w, sr.h, face);
+        gfx::kcg_draw_utf8(sr.x + 2, sr.y + 1, m.set_status.as_ptr(), GUI_COLOR_TEXT, face);
+    }
+}
+
+/// 行 `row` の本文 (NUL 終端)。戻り値は長さ。
+fn settings_row_text(m: &Modal, row: usize, mono: bool, buf: &mut [u8; 64]) -> usize {
+    let mut n = 0usize;
+    fn put(buf: &mut [u8; 64], n: &mut usize, s: &[u8]) {
+        let mut i = 0;
+        while i < s.len() && s[i] != 0 && *n < 63 {
+            buf[*n] = s[i];
+            *n += 1;
+            i += 1;
+        }
+    }
+    if row == 0 {
+        put(buf, &mut n, b"Desktop color : ");
+        if m.set_color >= 10 {
+            let c = [b'0' + m.set_color / 10];
+            put(buf, &mut n, &c);
+        }
+        let c = [b'0' + m.set_color % 10];
+        put(buf, &mut n, &c);
+        if mono {
+            put(buf, &mut n, b" (preview off: palette leased)");
+        }
+    } else {
+        put(buf, &mut n, b"Clock : ");
+        put(buf, &mut n, if m.set_clock { b"24h" } else { b"12h" });
+    }
+    buf[n] = 0;
+    n
 }
 
 /// Input dialog: prompt + 沈んだ edit field + caret。

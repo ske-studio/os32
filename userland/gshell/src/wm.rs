@@ -454,6 +454,10 @@ pub struct GuiState {
     /// F2 のファイル選択で選んだ実行ファイル (NUL 終端)。0 長なら既定のデモ。
     pub launch_path: [u8; 256],
     pub launch_path_len: usize,
+
+    /// 設定レジストリから読んで**画面に適用済み**の値 (票 S4 §2)。
+    /// 編集中の値 (`modal`) と再読込値 (`settings` の私有状態) とは別物。
+    pub cfg: crate::settings::GuiCfg,
 }
 
 impl GuiState {
@@ -491,6 +495,7 @@ impl GuiState {
         abort_seen: false,
         launch_path: [0; 256],
         launch_path_len: 0,
+        cfg: crate::settings::GuiCfg::NEW,
     };
 }
 

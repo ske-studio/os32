@@ -46,6 +46,12 @@ pub mod session;
 /* ---- v1.3 設定レジストリ (票 S2 §3) ----
  * 表 101..=104。open〜close を 1 呼び出しで閉じるので、アプリ側に `CfgDb` は
  * 出さない。実体は C の libos32cfg.a。 */
+/// `libos32cfg` の ABI 宣言 (票 S4 §4 で `os32api::cfg` へ集約した)。
+///
+/// `cfgro.rs` はこの**別名**だけを見る — os32api を名指ししないので、
+/// ホスト TDD (`host_tests`) は同じ名前で `sdk/rust/os32api/src/cfg.rs` を
+/// `#[path]` 取り込みするだけで `cfgro.rs` をそのまま組める。
+pub use os32api::cfg as cfgabi;
 pub mod cfgro;
 
 /* ---- 共有ライブラリの先頭ページ (票 C3) ----

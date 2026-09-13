@@ -19,6 +19,10 @@ pub use kapi_generated::*;
  * 値の正典は sdk/include/os32/os32_gui_shared.h。 */
 pub mod gui;
 
+/* 設定レジストリ (libos32cfg) の ABI 宣言 (票 S4 §4)。
+ * シグネチャの正典は userland/lib/cfg/libos32cfg.h。`#[link]` は付けない。 */
+pub mod cfg;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::panic::PanicInfo;

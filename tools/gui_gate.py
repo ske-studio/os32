@@ -136,7 +136,7 @@ class Shots:
 #  v1.2 の座標 (W3 が報告した値。ax/ay 換算は Mouse が行う)
 #  taskbar: Start (30,H-12)、窓ボタン #n (110+100n,H-12)、時計 (614,H-12)
 #  Start menu 行 r: start_row(H, r) — 項目数から導く (下の注記)。順は
-#    Programs / File Manager / Run... / CUI mode / Shut Down
+#    Programs / File Manager / Run... / Settings... / CUI mode / Shut Down (S4 で 6 項目)
 #  確認ダイアログ Yes (410, H/2+11) / No (494, H/2+11)、Run... の OK (360, H/2+23)
 # ---------------------------------------------------------------------------
 def tb(h):
@@ -150,7 +150,16 @@ def tb(h):
 # 項目数は
 # userland/gshell/src/startmenu.rs の ROOT_ITEMS、行高 ITEM_H=18、枠 BORDER=2、
 # taskbar.rs の TASKBAR_H=24 と一致させること。
-START_MENU_ITEMS = 5
+START_MENU_ITEMS = 6
+# 項目名 → 行番号 (startmenu.rs の IT_* と同じ順)。呼び出し側は数字ではなくこれを使う
+# (2026-09-13 S4: 6 項目化で「行 3」が Settings に当たった。start_row は座標を導く
+# だけで項目の意味は追従しない)。
+ROW_PROGRAMS = 0
+ROW_FILEMAN = 1
+ROW_RUN = 2
+ROW_SETTINGS = 3
+ROW_CUI = 4
+ROW_HALT = 5
 START_MENU_ITEM_H = 18
 START_MENU_BORDER = 2
 TASKBAR_H = 24
@@ -177,7 +186,7 @@ def enter_gshell():
 def run_dialog(mouse, path):
     """Start → "Run..." (行 2) にパスを打って RETURN。アプリが立ち上がるまで待つ。"""
     mouse.click(30, tb(mouse.h))
-    mouse.click(*start_row(mouse.h, 2))
+    mouse.click(*start_row(mouse.h, ROW_RUN))
     time.sleep(1.5)
     key(text=path)
     time.sleep(1)
@@ -196,7 +205,7 @@ def leave_gshell(mouse, shots=None, shot_name=None):
     `os32gui` で GUI へ入る前提なので、それで構わない (モジュール先頭の注記を参照)。
     """
     mouse.click(30, tb(mouse.h))
-    mouse.click(*start_row(mouse.h, 3))
+    mouse.click(*start_row(mouse.h, ROW_CUI))
     time.sleep(1.5)
     if shots is not None and shot_name:
         shots.take(shot_name)
@@ -272,7 +281,7 @@ def scenario_v12_g1(h, shots):
     m.click(30, tb(h))
     shots.take("g1_2_start_menu")
     print("[g1] Programs page")
-    m.click(*start_row(h, 0))
+    m.click(*start_row(h, ROW_PROGRAMS))
     time.sleep(1.5)
     shots.take("g1_3_programs")
     key(seq="ESC")
@@ -326,7 +335,7 @@ def scenario_v12_g4(h, shots, do_halt=False):
         print("[g4] Shut Down -> halt (NP21/W must be restarted by os32-cycle deploy)")
         enter_gshell()
         m.click(30, tb(h))
-        m.click(*start_row(h, 4))
+        m.click(*start_row(h, ROW_HALT))
         time.sleep(1.5)
         m.click(410, h // 2 + 11)
         time.sleep(4)
