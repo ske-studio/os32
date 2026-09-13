@@ -61,10 +61,15 @@ NP21/W の `initsave` は `s_IniItems[]` 表を丸ごと書くので、このエ
 まま両方立っていた (`0x40` / `0x84`)。`pc_model` は VM/VX の 2 値 (CPU 世代) しか取らない。
 PEGC と Cirrus は独立に選べる (操作が触るキーが重ならない)。
 
-## 承認済み Cirrus trial（通常終了・新規 ini）
+## 承認済み disk trial（通常終了・新規 ini、2026-09-14 に Cirrus trial から改訂）
 
-通常終了後に exe 隣接 baseline をコピーして試す依頼は
-[tools/np21w_trial.py](../../../tools/np21w_trial.py) を使う。
+exe 隣接 baseline をコピーし、**稼働中の NP21/W を trial 自身が通常終了 → 終了確認 → 新 ini 作成 → 起動**する依頼は
+[tools/np21w_trial.py](../../../tools/np21w_trial.py) を使う (票 S3-I2)。trial が扱う変更集合は
+**`HDD1FILE` (`--hdd <name>` = `NP21W_DIR` 直下の `*.nhd`)、`FDD1FILE` / `FDD2FILE` の空化 (`--fdd-eject`)、
+`e_resume=false` の強制**だけで、Cirrus / PEGC / ExMemory は触らない (それらはライブ変更ツールの領分)。
+起動は `"<exe>" "/i<trial ini>" ["<d88>"]` (`--fdd-arg <name>` で `NP21W_DIR` 直下の `.d88` を FDD 引数に付ける)。
+**PM が先に NP21/W を終了しない** (稼働中プロセスの PID / 生成時刻を計画に束縛して trial に終了させる。
+taskkill は ini を書き戻さないので使わない)。使い捨て NHD は `tools/mk_blank_nhd.py --out <NP21W_DIR>/<name>.nhd` で作る。
 既存ライブツールの強制終了・原本置換・restore はこの承認に含めない。
 ホスト限定実装依頼では実プロセス・実 ini・ネットワークに触れない。
 試験・ソース根拠・実行例は [trial TDD 記録](../../../tools/tests/np21w_trial_tdd.md)。
