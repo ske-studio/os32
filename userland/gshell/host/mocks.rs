@@ -433,9 +433,14 @@ pub struct CfgFake {
     pub open_null: bool,
     /// `cfg_status` の答え (既定 `CFG_OK`)。
     pub status: i32,
-    /// `cfg_status` を**呼び出しごとに**この列で返す (尽きたら `status`)。
-    /// 「get の途中で `CFG_ERROR` に変わる」(票 §5 の (18)) を作るのに使う。
-    pub status_script: Vec<i32>,
+    /// **n 本目の `cfg_get_int` を返した後**に [`CfgFake::status`] をこの値へ
+    /// 変える (`Some((n, status))`)。「読んでいる途中の I/O 失敗」(票 §5 の
+    /// (18)) を作るための仕掛け。
+    ///
+    /// 遷移の引き金を `cfg_status` の**呼び出し回数**ではなく **get の進み具合**
+    /// に結び付けてあるのが要点 — status を get より前に採る実装 (取り逃がす
+    /// ほう) は「まだ `CFG_OK`」を読むので、S18 がそこで落ちる。
+    pub status_after_get: Option<(usize, i32)>,
     pub sqlite: i32,
     pub schema: i32,
     /// `desktop/color` の値 (None = 行が無い → `cfg_get_int` は def を返す)。
@@ -444,6 +449,9 @@ pub struct CfgFake {
     pub clock: Option<i32>,
     pub begin_ret: i32,
     pub set_ret: i32,
+    /// `cfg_set_int` を**呼び出しごとに**この列で返す (尽きたら [`CfgFake::set_ret`])。
+    /// 「1 本目は通り、2 本目の set だけ落ちる」(票 §5 の (20)(c)) を作る。
+    pub set_ret_script: Vec<i32>,
     pub commit_ret: i32,
     pub close_ret: i32,
     /// `cfg_last_close_error()` の答え。
@@ -457,13 +465,14 @@ impl CfgFake {
         open_ret: 0,
         open_null: false,
         status: 0, /* CFG_OK */
-        status_script: Vec::new(),
+        status_after_get: None,
         sqlite: 0,
         schema: 1,
         color: None,
         clock: None,
         begin_ret: 0,
         set_ret: 0,
+        set_ret_script: Vec::new(),
         commit_ret: 0,
         close_ret: 0,
         last_close_error: 0,
@@ -523,14 +532,7 @@ pub unsafe extern "C" fn cfg_last_close_error() -> i32 {
 }
 #[no_mangle]
 pub unsafe extern "C" fn cfg_status(_db: *const os32api::cfg::CfgDb) -> i32 {
-    let mut c = lk(&CFG);
-    if c.status_script.is_empty() {
-        c.status
-    } else {
-        let v = c.status_script.remove(0);
-        c.status = v; /* 最後の値が以後の答えとして居座る */
-        v
-    }
+    lk(&CFG).status
 }
 #[no_mangle]
 pub unsafe extern "C" fn cfg_last_sqlite(_db: *const os32api::cfg::CfgDb) -> i32 {
@@ -571,6 +573,19 @@ pub unsafe extern "C" fn cfg_get_int(
     } else {
         None
     };
+    /* 「n 本目の get を返した後に状態が変わる」— 読んでいる途中で prepare /
+     * step が I/O で落ちた、を贋物で作る。数えるのは `cfg_get_int` の
+     * 呼び出し回数 (この 1 件を押した後の値)。 */
+    if let Some((n, s)) = c.status_after_get {
+        let gets = c
+            .calls
+            .iter()
+            .filter(|x| matches!(x, CfgCall::GetInt(_, _)))
+            .count();
+        if gets >= n {
+            c.status = s;
+        }
+    }
     v.unwrap_or(def)
 }
 #[no_mangle]
@@ -589,7 +604,11 @@ pub unsafe extern "C" fn cfg_set_int(
     let (s, k) = (cstr(scope), cstr(key));
     let mut c = lk(&CFG);
     c.calls.push(CfgCall::SetInt(s, k, v));
-    c.set_ret
+    if c.set_ret_script.is_empty() {
+        c.set_ret
+    } else {
+        c.set_ret_script.remove(0)
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn cfg_commit(_db: *mut os32api::cfg::CfgDb) -> i32 {

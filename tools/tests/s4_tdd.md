@@ -134,17 +134,18 @@ tools/check_constraints.py          : 制約チェック OK — 規則 16 件
 | S07b | Settings... の選択 | 予約が立つだけ。**メニューの文脈で `cfg_*` を 1 本も呼ばず、ダイアログも開かない** |
 | S08 | `desktop::fill` | `st.cfg.desktop_color` を塗る (色 3 を入れれば 3)。**2 色モード (リース中) は従来どおり `TEXT` / `WINDOW` の市松だけ** |
 | S09 | アプリが `Ctx::Wait` (B1) | 予約の時点では DB に触らない → `should_park` が真 → top-level の周回で初めて `load()` が走りダイアログが開く → 消費後は `should_park` が偽に戻る |
-| S09b | 通知だけの pending (往復 3 non-blocker 2) | `req = None, notice = Some` でも **実スケジューラ経路** (`should_park` → `note_parked` → `pick`) が top-level へ返す。`pick` は `pick_poll` の門で **0** (誰も起こさない)。そこで通知が出て、出し終われば門が閉じる |
+| S09b | 通知だけの pending (往復 3 non-blocker 2) | `req = None, notice = Some` でも **スケジューラ関数を順に直接呼ぶ**筋 (`should_park` → `note_parked` → `pick` → `consume`) が top-level へ返す。`pick` は `pick_poll` の門で **0** (誰も起こさない)。そこで通知が出て、出し終われば門が閉じる。**`handler` → 実 park → `standalone_loop` の実遷移は通していない** (§ S5 で反映した残件) |
 | S10 | OK は予約だけ | (S04 に統合) `finish_wm` の中の `cfg_*` 呼び出し回数 = 0 |
 | S11 | commit 成功 + close 失敗 (B2) | **適用値を更新して**から `saved, but close failed (-5)`、`close_error` にも残る |
 | S12 | 起動時通知 | OK かつ close 成功なら**出ない** (kprintf の 1 行 `gshell: cfg OK color=12 clock24=1 load=<n>t` は出る) / MISSING・VERSION・ERROR・close 失敗は**1 回だけ**出て、閉じたら二度と出ない / `close_error` は**再 load が成功しても消えない** |
 | S13 | 時計 8 → 7 文字 (B4) | 縮む更新で**旧矩形の左端 8px が dirty に入る** (新矩形だけなら残る) |
-| S14 | X4 / X3 の文脈 | 予約を立てたまま `wm_cycle(Ctx::Pump)` と `wm_cycle(Ctx::Wait)` を回しても `cfg_*` の呼び出しは **0 本**。top-level の消費で初めて 1 回開く |
+| S14 | X4 / X3 の文脈 | 予約を立てたまま `wm_cycle(Ctx::Pump)` と `wm_cycle(Ctx::Wait)` を回しても `cfg_*` の呼び出しは **0 本**。top-level の消費で初めて 1 回開く。S09b と同じく**関数を順に直接呼ぶ**試験で、実 park の遷移は通していない |
 | S15 | マウス | 別の行のクリック = 選択だけ / 同じ行の再クリック = 値が進む / Cancel は書かない / OK は予約が立ち適用まで行く |
 | S16 | モーダル枠の競合 (R1) | アプリの `MODAL_OPEN` は**拒否しない**。枠が塞がっている周回では `Req::Open` を消費せず `load()` もせず、予約が残り `should_park` は真のまま。アプリのモーダルが閉じた次の周回で開き、`load()` はその 1 回だけ |
 | S16b | 保存と通知の分離 (R1) | `Req::Save` は枠が塞がっていても**その周回で** DB 操作と適用まで済ませる。通知だけが `notice` に残り (`open_wm` の戻りを見ている)、アプリのモーダルは潰さない。枠が空いた周回で **1 回だけ**出る |
 | S17 | リース中の描画 (R2) | 設定ダイアログが `TEXT` (0) / `WINDOW` (7) しか置かない。**色見本を描かない** (数値と `(preview off: palette leased)` だけ)。16 色に戻せば見本が出る |
-| S18 | status は get の後 | open 直後 OK → get の途中で `CFG_ERROR` になった DB で、`load()` は **ERROR** と sqlite コードを採り、値は既定へ落とす |
+| S18 | status は get の後 | open 直後 OK → get の途中で `CFG_ERROR` になった DB で、`load()` は **ERROR** と sqlite コードを採り、値は既定へ落とす。遷移の引き金は **2 本目の `cfg_get_int`** (§ S5 で反映した残件) |
+| S21 | TAB は焦点を動かさない (S5 追加) | 設定ダイアログの TAB は焦点表示も編集値も動かさず閉じもしない。TAB の後の RETURN は **OK** (保存まで行く)、ESC は Cancel (1 バイトも書かない) |
 
 libos32gui 側 (`make check-gui-host`) は S2 の 35 本が**宣言の移動後もそのまま通る**ことを
 確認しただけで、ケースは 1 本も足していない (`s2_tdd.md` §W が正典)。
@@ -258,8 +259,8 @@ assertion `left == right` failed: 状態行が 1 本に連結されたまま
 | 件 | 対応 |
 |---|---|
 | `open_wm_settings` の戻り値 | 見るようにした。偽なら `Req::Open` を保持して次の周回で開き直す (通知経路と同じ形)。現状 false に到達する反例は無いが、契約 R1 をコードで表した |
-| ホスト試験の不足 | **S20** を足した: (a) 保存時の `cfg_open` 負、(b) 予約〜消費の間に DB が非 OK へ変わる (`Open(1) → Close` だけで `begin` に進まない)、(c) 両キー変更で 1 本目の set が失敗 (2 本目を呼ばない)、(d) 時計だけの保存、(e) 両キーの保存順 (color → clock)、(f) 適用値と再読込値が違う組合せ (無編集の OK は書かない / 編集すれば再読込値からの差分を書く) |
-| S09b が実スケジューラ全体でない | そのまま。`op_wait` → park → `standalone_loop` の**制御の流れ**はカーネルの領分で、ホストの `exec_park` は longjmp できない (`mocks.rs` の注記どおり)。ここで見るのは WM の判断 (`should_park` / `pick` の門) に留める |
+| ホスト試験の不足 | **S20** を足した: (a) 保存時の `cfg_open` 負、(b) 予約〜消費の間に DB が非 OK へ変わる (`Open(1) → Close` だけで `begin` に進まない)、(c) 両キー変更で set が失敗 (**S5 で (c1) 1 本目 / (c2) 2 本目 に割った**)、(d) 時計だけの保存、(e) 両キーの保存順 (color → clock)、(f) 適用値と再読込値が違う組合せ (無編集の OK は書かない / 編集すれば再読込値からの差分を書く) |
+| S09b が実スケジューラ全体でない | そのまま。`op_wait` → park → `standalone_loop` の**制御の流れ**はカーネルの領分で、ホストの `exec_park` は longjmp できない (`mocks.rs` の注記どおり)。ここで見るのは WM の判断 (`should_park` / `pick` の門) に留める (**S5 でコメントをその範囲に限定した**) |
 | `gui_gate.py:198` の旧記述 | PM の担当ファイルなので触っていない |
 
 ### 再実行 (GREEN)
@@ -273,3 +274,37 @@ tools/check_constraints.py          : 制約チェック OK — 規則 16 件
 
 ゲスト受入は**再実行していない** ([V4])。B2 / B3 は版面の寸法を変えたので、
 G2 / G4 / G5 のスクリーンショット確認は PM / テスターの再実施が要る。
+
+---
+
+## S5 で反映した残件 (票 [`TASK_S5.md`](../../docs/tasks/settings/TASK_S5.md) §0 の S5-W)
+
+S4 の実装レビュー往復 2 で non-blocker として残した 4 件を、票 S5 のレーン W で入れた。
+触ったのは `userland/gshell/src/modal.rs` と `host/{settings_tests.rs, mocks.rs}` だけ。
+
+| # | 残件 | 直し |
+|---|---|---|
+| 1 | S20(c) の見出しが「2 本目の set が失敗」なのに、贋物は `set_ret = -1` で**1 本目**から落ちていた | 贋物に**呼び出し別の戻り値列** `set_ret_script` を足し、(c) を **(c1) 1 本目で落ちる** / **(c2) `[0, -1]` で 2 本目だけ落ちる** の 2 本に割った。(c2) は `Open(1) → Begin → set(color) → set(clock) → Close` = **両方呼んで commit しない**、適用値は不変、文言は `save failed: set (-1)` を固定 |
+| 2 | S18 の贋物は `cfg_status` の**呼び出し回数**で ERROR へ遷移していたので、「status を get より前に採る」退行でも ERROR が返って試験が通ってしまう | 遷移の引き金を **`cfg_get_int` の進み具合**へ移した (`status_after_get: Some((2, CFG_ERROR))`、`status_script` は廃止)。RED 確認: `load()` の status 採取を get の前へ戻すと S18 が `open 直後の status を採っている` で落ちる |
+| 3 | S09b / S14 のコメントが「**実**スケジューラ経路」と読めた | 「**スケジューラ関数を順に直接呼ぶ**試験であり、`handler` → 実 park (`exec_park`) → `standalone_loop` の**実遷移は通していない**」と限定した (ホストの `exec_park` は longjmp できない。実遷移はゲスト受入 §6 の担当)。上の一覧表の S09b / S14 の行も揃えた |
+| 4 | TAB で焦点表示が Cancel に動くのに、RETURN は常に OK だった (表示と動作の食い違い) | `settings_key` の `SC_TAB` を **何もしない**に変えた (Input ダイアログ・契約 M4 と同じ扱い)。ボタンはマウスで押せる。観測点として `modal::focus_btn()` を足し、**S21** で「TAB × 3 の後も焦点は OK / 編集値も動かない / その後の RETURN は OK で保存まで行く / ESC は書かずに閉じる」を固定 |
+
+RED 確認 (直しを外した状態):
+
+```text
+s18 … assertion failed: open 直後の status を採っている (get 後の失敗を取り逃がす)
+s21 … assertion failed: TAB 1 回目で焦点表示が OK から動いた
+s20 … `if work >= 0` を外して必ず commit させると (c1) から落ちる
+```
+
+GREEN:
+
+```text
+userland/gshell/host/integration.py : 96 passed; 0 failed   (95 → +1 = S21)
+cargo build --release (gshell)      : OK (警告 0)
+tools/check_constraints.py          : 制約チェック OK — 規則 16 件
+```
+
+ゲスト受入は**再実行していない** ([V4])。TAB の挙動が変わったので、キーボードだけで
+設定ダイアログを操作する台本 (G2 系) を PM / テスターが 1 度見直す必要がある。
+`make all` / `make check` / 配備 / エミュレータには触っていない (コーダーの範囲外)。
