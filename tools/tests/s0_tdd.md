@@ -338,9 +338,11 @@ python3 tools/tests/test_sqlite_groups.py
 - `vfs_stat` / `vfs_rm` — RAM の fixture を見る試験側の実装。実物と同じく
   **中で `vfs_resolve_path` を呼ぶ**ので、相対名 + cwd の連結と切り詰めは再現する。
   障害注入の口 (`stat_fail_on` / `stat_fail_rc`) を持つ。
-- `vfs_resolve_path` / `vfs_route` — `vfs_fd_sqlite_host.c` のもの。cwd の連結と
-  `VFS_MAX_PATH` での切り詰めはするが、`.` / `..` / 連続 `/` の正規化と mount 解決は
-  しない。だから B4 の反例は **長さと連結**の規則として試験している。
+- `vfs_resolve_path` — `vfs_fd_sqlite_host.c` に **fs/vfs.c:52-121 を移植**した
+  もの。連結 → `VFS_MAX_PATH` での切り詰め → `.` / `..` / 連続 `/` の正規化 →
+  `VFS_MAX_PATH_DEPTH` (32) の成分表、という**順序と上限がそのまま**なので、
+  「切り詰めた末尾が別の絶対名になる」も「溢れた成分が捨てられた後の `..` が
+  保持済みの成分を消す」も再現する。mount 解決 (`vfs_route`) だけは模型のまま。
 - `sqlite3_column_blob` / `sqlite3_column_text` — この **1 対だけ** 差し替えて
   「長さはあるのにポインタが返らない」(確保の失敗) を決定的に作る。実 SQLite では
   ホストの潤沢なメモリのせいで `sqlite3_step` の方が先に落ち、この形にできない
@@ -410,6 +412,20 @@ python3 tools/tests/test_sqlite_groups.py
 ホストの `vfs_resolve_path` 模型は **fs/vfs.c と同じ順序** (連結 → 切り詰め → 正規化)
 に書き直した (`tools/tests/vfs_fd_sqlite_host.c`)。順序が違うとこの反例は作れない。
 
+### 2e. ユーザー承認の最終往復 (Codex、`c24f058`) の blocker 1 件 — RED → GREEN
+
+| # | blocker | ケース | RED |
+|---|---|---|---|
+| 1 | パスの**深さ**超過で別の DB を開ける | `resolve_depth` | `db_resolve_fits` から深さの検査を外す → `FAIL resolve_depth:1124: kapi_db_open_existing(evil, 1) == -1` (`("/a"×32) + "/x/.." + ("/.."×31) + "/b.db"` が `/b.db` に化け、RW handle が返る) |
+
+`fs/vfs.c` の成分表は `VFS_MAX_PATH_DEPTH` (32) 本しかなく、溢れた成分は
+**黙って捨てられる**。捨てられた後ろに `..` があると、それは捨てられた成分では
+なく **保持済みの成分**を 1 つ消す。上の入力は正しくは `/a/b.db` だが `/b.db` に
+なる。長さは 167B なので往復 3 の検査では捕まらない。
+そこで `db_resolve_fits` に **成分数**の検査を足した: 空成分と `.` は数えず、
+`..` は 1 成分として数え (安全側)、相対名では cwd の成分も足して
+`VFS_MAX_PATH_DEPTH` を超えたら `SQLITE_CANTOPEN`。resolver は変えていない。
+
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
 | ケース | 見るもの |
@@ -434,6 +450,7 @@ python3 tools/tests/test_sqlite_groups.py
 | `materialize_fail` | (a) 収まる BLOB は取れる (b) accessor が値を返せないとき ERROR + `NOMEM` + 部分 ROW なし + stmt は生存 (c) MEMSYS5 を締めて step 側で落ちても同じく部分 ROW なし |
 | `resolve_len` | (a) cwd 251B で journal 名が切り詰められ本体に衝突する形でも `CANTOPEN` (b) 解決名 248B は `CANTOPEN` (c) 247B は開ける (d) SQLite には解決後の絶対名だけが渡る |
 | `resolve_truncate` | 模型が実物と同じ順序で `/tmp/b` に化けることを見せたうえで、その入力が `CANTOPEN` で断られる。絶対名の 255 文字 / 256 文字の境界、短い相対名は従来どおり通る |
+| `resolve_depth` | 模型が実物と同じ捨て方で `/b.db` に化けることを見せたうえで `CANTOPEN`。`db_path_depth` の数え方 (空 / `.` を除く、`..` は 1)、深さちょうど 32 は開ける・33 は断る、相対名では cwd の成分も数える |
 
 ### 4. ホストでは踏めなかったもの ([V4])
 
@@ -462,8 +479,9 @@ python3 tools/tests/test_sqlite_groups.py
   `sqlite3_step` の方が先に NOMEM で落ちる (`materialize_fail` の (c) で確認)。
   実機の MEMSYS5 (384KB) で accessor 側が落ちる形は、accessor を 1 対だけ
   差し替えた (b) で決定的に踏んでいる。
-- `vfs_resolve_path` の **正規化** (`.` / `..` / 連続 `/`) と mount 解決。模型は
-  cwd の連結と切り詰めまでしかしない。B4 の判定は長さの規則として固定してある。
+- `vfs_route` の **mount 解決**。模型は path をそのまま 1 つのバックエンドへ渡す。
+  `vfs_resolve_path` の方は fs/vfs.c から移植してあるので、切り詰めも深さ超過も
+  実物と同じ形で踏めている (`resolve_truncate` / `resolve_depth`)。
 - `PDE.PS` (4MB ページ) の経路。この OS は一度も 4MB ページを張らないので
   ホストでも実機でも作れない。`paging_addrspace_pte_flags` は**明示的に**
   非 present 扱いで断る (安全側) というコードとコメントだけがある。

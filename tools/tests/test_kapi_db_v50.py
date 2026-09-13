@@ -22,7 +22,9 @@ CASES = ["open_existing", "prepare_only", "binds", "error_code", "shm_bound",
          "sql_tail_sqlite", "prepare_replaces", "materialize_fail",
          "resolve_len",
          # 実装レビュー 往復 3 の blocker (s0_tdd.md §K 2d)
-         "resolve_truncate"]
+         "resolve_truncate",
+         # ユーザー承認の最終往復 (s0_tdd.md §K 2e)
+         "resolve_depth"]
 INC = ["-I" + str(ROOT / p) for p in
        ("include", "fs", "drivers", "sdk/include/os32", "lib", "lib/sqlite3")]
 CONFIG = str(ROOT / "lib/sqlite3/os32_sqlite_config.h")

@@ -794,29 +794,60 @@ static int db_journal_mode_check(sqlite3 *db)
     return code;
 }
 
-/* resolve の **前** に、fs/vfs.c が作る連結文字列が切り詰められないかを見る
- * (Codex 往復 3)。vfs_resolve_path は VFS_MAX_PATH の作業領域に
- * `cwd + "/" + input` を **strlcat で切り詰めてから** `.` / `..` を畳む。
- * つまり溢れた入力は「短い別の絶対名」に化けて返ってくる:
- *   cwd=/tmp, input="./"×122 + "a/../b.db" → 連結 259B → 255B で切ると
- *   末尾が `a/../b` → 正規化して `/tmp/b` = **要求と違う DB**。
- * 解決結果を見ても切り詰めは分からないので、入口で長さを数えて断る。
- * 正規化で短くなる入力も巻き添えで断る (安全側。呼び手は絶対名を渡せばよい)。
- * 戻り値: 1 = 切り詰めなしで解決できる / 0 = 断る (CANTOPEN, path too long)。 */
+/* `/` 区切りの成分数。空成分と `.` は fs/vfs.c が捨てるので数えない。
+ * `..` は **1 成分として数える** (resolver は畳むが、こちらは安全側)。 */
+static u32 db_path_depth(const char *p)
+{
+    u32 n = 0;
+
+    if (!p) return 0;
+    while (*p) {
+        u32 len = 0;
+        while (*p == '/') p++;
+        if (!*p) break;
+        while (p[len] != '\0' && p[len] != '/') len++;
+        if (!(len == 1u && p[0] == '.')) n++;
+        p += len;
+    }
+    return n;
+}
+
+/* resolve の **前** に、fs/vfs.c の resolver が入力を「別の絶対名」に化け
+ * させないかを見る。化ける口は 2 つあり、どちらも**解決結果からは分からない**:
+ *
+ *  (1) 長さ (Codex 往復 3)。vfs_resolve_path は VFS_MAX_PATH の作業領域に
+ *      `cwd + "/" + input` を **strlcat で切り詰めてから** `.` / `..` を畳む。
+ *      cwd=/tmp, input="./"×122 + "a/../b.db" → 連結 259B → 255B で切ると
+ *      末尾が `a/../b` → 正規化して `/tmp/b` = **要求と違う DB**。
+ *  (2) 深さ (Codex 最終往復)。成分表は VFS_MAX_PATH_DEPTH 本しかなく、
+ *      溢れた成分は**黙って捨てられる**。その後ろの `..` は捨てられた成分
+ *      ではなく **保持済みの成分**を 1 つ消す。
+ *      `("/a"×32) + "/x/.." + ("/.."×31) + "/b.db"` は正しくは `/a/b.db` だが、
+ *      `x` が捨てられた直後の `..` が `a` を消して `/b.db` になる。
+ *
+ * どちらも入口で数えて断る。正規化で短く / 浅くなる入力も巻き添えで断る
+ * (安全側。呼び手は正規化済みの絶対名を渡せばよい)。
+ * 戻り値: 1 = そのまま解決してよい / 0 = 断る (CANTOPEN, path too long)。 */
 static int db_resolve_fits(const char *path)
 {
-    u32 need;
+    const char *cwd;
+    u32 need, depth;
 
     if (!path || !path[0]) return 0;
     if (path[0] == '/') {
         need = kstrlen(path) + 1u;                  /* NUL 込み */
+        depth = db_path_depth(path);
     } else {
-        const char *cwd = vfs_cwd();
+        cwd = vfs_cwd();
+        if (!cwd) cwd = "";
         /* fs/vfs.c は cwd が '/' で終わっていなければ 1 文字足す。常に
          * 足したものとして数える (1 バイト厳しい側に倒す)。 */
-        need = kstrlen(cwd ? cwd : "") + 1u + kstrlen(path) + 1u;
+        need = kstrlen(cwd) + 1u + kstrlen(path) + 1u;
+        depth = db_path_depth(cwd) + db_path_depth(path);
     }
-    return need <= (u32)VFS_MAX_PATH;
+    if (need > (u32)VFS_MAX_PATH) return 0;
+    if (depth > (u32)VFS_MAX_PATH_DEPTH) return 0;
+    return 1;
 }
 
 /* `<path>-journal` を journal_buf に組み立てる。1 = 組み立てた /

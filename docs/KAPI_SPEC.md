@@ -563,7 +563,9 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   変わらない)。ただし `vfs_resolve_path` は作業領域で**切り詰めてから**正規化するので、
   溢れた入力は「短い別の絶対名」として返る。だから解決の**前**に
   `kstrlen(cwd) + 1 + kstrlen(path) + 1` (絶対名は cwd 抜き) が `VFS_MAX_PATH` に
-  収まることを数え、収まらなければ `SQLITE_CANTOPEN` (path too long) で断る。`<絶対名>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
+  収まることと、**成分数**が `VFS_MAX_PATH_DEPTH` (32) を超えないことを数え
+  (resolver は溢れた成分を黙って捨て、その後ろの `..` が保持済みの成分を消す)、
+  どちらかに反すれば `SQLITE_CANTOPEN` (path too long) で断る。`<絶対名>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
   `mxPathname` も 256) に収まらないときは、journal の stat が切り詰められて**本体に
   当たる**ので open の前に `SQLITE_CANTOPEN` で断る。RW は `PRAGMA journal_mode` が `delete` で
   あることを照会だけで確かめ、**照会の失敗** (`SQLITE_NOTADB` / `IOERR` / `NOMEM` 等 —

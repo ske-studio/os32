@@ -1039,6 +1039,7 @@ static void resolve_len(void)
 static void resolve_truncate(void)
 {
     static char evil[VFS_MAX_PATH];
+    static char toolong[VFS_MAX_PATH + 8];
     const char *resolved;
     u32 i, n = 0;
     int h;
@@ -1065,14 +1066,17 @@ static void resolve_truncate(void)
     CHECK(kapi_db_open_existing(evil, 0) == -1);
     CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
 
-    /* 絶対名でも同じ規則 (NUL 込み VFS_MAX_PATH を超えたら断る)。 */
-    memset(evil, 'z', sizeof(evil));
-    evil[0] = '/';
-    evil[VFS_MAX_PATH - 1] = '\0';       /* 255 文字 = ぎりぎり通る長さ */
-    CHECK(db_resolve_fits(evil));
-    evil[VFS_MAX_PATH - 1] = 'z';
-    CHECK(strlen(evil) >= (u32)VFS_MAX_PATH);
-    CHECK(!db_resolve_fits(evil));
+    /* 絶対名でも同じ規則 (NUL 込み VFS_MAX_PATH を超えたら断る)。
+     * 終端は **配列の内側**に置く (上限より大きい器で試す)。 */
+    memset(toolong, 'z', sizeof(toolong));
+    toolong[0] = '/';
+    toolong[VFS_MAX_PATH - 1] = '\0';    /* 255 文字 = ぎりぎり通る長さ */
+    CHECK(strlen(toolong) == (u32)VFS_MAX_PATH - 1u);
+    CHECK(db_resolve_fits(toolong));
+    toolong[VFS_MAX_PATH - 1] = 'z';
+    toolong[VFS_MAX_PATH] = '\0';        /* 256 文字 = 1 バイト超過 */
+    CHECK(strlen(toolong) == (u32)VFS_MAX_PATH);
+    CHECK(!db_resolve_fits(toolong));
 
     /* 短い相対名は従来どおり通る */
     resolve_cwd = "/tmp";
@@ -1080,6 +1084,80 @@ static void resolve_truncate(void)
     h = kapi_db_open_existing("ok.db", 1);
     CHECK(h >= 0);
     CHECK(kapi_db_close(h) == 0);
+    resolve_cwd = "";
+}
+
+/* ---- 21. 深さ超過で別の DB に化ける (最終往復) -------------------------- */
+/*  fs/vfs.c の成分表は VFS_MAX_PATH_DEPTH 本しかなく、溢れた成分は**黙って
+ *  捨てられる**。その後ろの `..` は捨てられた成分ではなく **保持済みの成分**を
+ *  1 つ消すので、`("/a"×32) + "/x/.." + ("/.."×31) + "/b.db"` は正しくは
+ *  `/a/b.db` なのに `/b.db` に化ける。長さ (167B) では捕まらない。          */
+static void resolve_depth(void)
+{
+    static char evil[VFS_MAX_PATH];
+    static char deep[VFS_MAX_PATH];
+    const char *resolved;
+    u32 i, n = 0;
+    int h;
+
+    for (i = 0; i < (u32)VFS_MAX_PATH_DEPTH; i++) {
+        evil[n++] = '/'; evil[n++] = 'a';
+    }
+    memcpy(evil + n, "/x/..", 5); n += 5u;
+    for (i = 0; i < (u32)VFS_MAX_PATH_DEPTH - 1u; i++) {
+        memcpy(evil + n, "/..", 3); n += 3u;
+    }
+    memcpy(evil + n, "/b.db", 5); n += 5u;
+    evil[n] = '\0';
+    CHECK(strlen(evil) == 167);                 /* 長さでは捕まらない */
+
+    make_db("/b.db", "CREATE TABLE decoy(x)");  /* 化けた先の DB */
+
+    /* 模型が実物と同じ捨て方をすることを見せる (ここが `/b.db` でなければ
+     * 反例が成り立っていない)。正しい正規化は `/a/b.db`。 */
+    resolved = host_resolve(evil);
+    printf("DEPTH resolved=%s\n", resolved);
+    CHECK(!strcmp(resolved, "/b.db"));
+    CHECK(fixture_find(resolved, 0) != NULL);
+
+    /* 要求は `/a/.../b.db`。解決名を信じると **別の DB** の handle が返る。 */
+    CHECK(kapi_db_open_existing(evil, 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    CHECK(kapi_db_open_existing(evil, 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+
+    /* 数え方: 空成分と `.` は数えず、`..` は 1 成分として数える。 */
+    CHECK(db_path_depth("/") == 0);
+    CHECK(db_path_depth("///a//b/") == 2);
+    CHECK(db_path_depth("/./a/./b") == 2);
+    CHECK(db_path_depth("/a/../b") == 3);
+    CHECK(db_path_depth("a/b") == 2);
+
+    /* 深さちょうど 32 は通る。33 は断る。 */
+    n = 0;
+    for (i = 0; i < (u32)VFS_MAX_PATH_DEPTH - 1u; i++) {
+        deep[n++] = '/'; deep[n++] = 'd';
+    }
+    memcpy(deep + n, "/t.db", 5); n += 5u;
+    deep[n] = '\0';
+    CHECK(db_path_depth(deep) == (u32)VFS_MAX_PATH_DEPTH);
+    CHECK(db_resolve_fits(deep));
+    make_db(deep, "CREATE TABLE t(x)");
+    h = kapi_db_open_existing(deep, 0);
+    CHECK(h >= 0);
+    CHECK(kapi_db_close(h) == 0);
+
+    memcpy(deep + n, "/u", 2);
+    deep[n + 2u] = '\0';
+    CHECK(db_path_depth(deep) == (u32)VFS_MAX_PATH_DEPTH + 1u);
+    CHECK(!db_resolve_fits(deep));
+    CHECK(kapi_db_open_existing(deep, 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+
+    /* 相対名では cwd の成分も数える。 */
+    resolve_cwd = "/one/two";
+    CHECK(db_resolve_fits("three"));
+    CHECK(!db_resolve_fits(deep + 1));          /* cwd 2 + 深い相対名 */
     resolve_cwd = "";
 }
 
@@ -1108,6 +1186,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "materialize_fail")) materialize_fail();
     else if (!strcmp(argv[1], "resolve_len")) resolve_len();
     else if (!strcmp(argv[1], "resolve_truncate")) resolve_truncate();
+    else if (!strcmp(argv[1], "resolve_depth")) resolve_depth();
     else if (!strncmp(argv[1], "order_", 6)) reclaim_order(argv[1] + 6);
     else CHECK(0);
 
