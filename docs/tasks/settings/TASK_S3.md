@@ -181,4 +181,4 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 |---|---|
 | I2 | **合格** (壊した DB → recover → `recovered: schema_version 1, 3 keys, sync=0, reopen=ok, close=ok`、`.bak` 1406、DB 3072) |
 | I7 | **合格** (`reverted: orig=present, sync=0`、DB 1406 に戻る、`.failed` 3072) → 再 recover でマスタに戻し HDD ブート → `cfg status` OK |
-| B3 の入力 (`--scope gshell` + 対象外の非正準 base64) | 配備 4 回目 (`cedfc6a`) で確認 (次の追記) |
+| B3 の入力 (配備 4 回目 `cedfc6a`、cfg.bin 38,272 B) | **合格**: `cfg import /host/s3_mix.json` (対象外 `user` 行に `"AB=="`) → 全 scope は `bad line 3: value`、`--scope gshell` は `imported 1 records (gshell), replaced` で `desktop/color` = 7。`/tmp/b.json` で既定に戻す。regress 6 / 6、kselftest 87 / 0 |
