@@ -18,6 +18,6 @@
 # だけが持つ。既存システムにはこの tsv を /etc/settings.tsv として通常配備し、
 # DB の生成は `cfg init` (S2) の明示操作だけが行う。
 
-gshell	desktop/color	int	1
+gshell	desktop/color	int	12
 gshell	desktop/wallpaper	text	
 gshell	taskbar/clock_24h	int	1
