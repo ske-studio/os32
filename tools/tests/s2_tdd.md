@@ -280,6 +280,9 @@ check-cfg-host:
 **呼び順 (`Call` の列) と引数を記録**し、試験が仕込んだ戻り値を返すだけ。
 
 `cargo test` は試験ごとに別スレッドで走るので、贋物の状態は `thread_local!`。
+`kapi` (プロセスに 1 語の `static mut`) への書きだけは `fake::reset()` の中の
+`std::sync::Once` で **1 回に畳んで直列化**した — 毎回書くと同じ値でも並列試験
+どうしの競合になる (レビュー往復 2 の non-blocker)。
 ただし `kapi` (下の W29) は**プロセスに 1 語**なので、init 前の分岐だけは
 cargo が別バイナリ = 別プロセスにする `tests/init_gate.rs` に置いた
 (`src/lib.rs` 側は `fake::reset()` が毎回 init 済みにする)。

@@ -7,6 +7,7 @@
 //! 状態は `thread_local!` なので、cargo の並列試験でも試験どうしが混ざらない。
 
 use std::cell::RefCell;
+use std::sync::Once;
 
 /// `cfgro` 側と同じ不透明ハンドル型 (宣言と定義の食い違いを作らない)。
 use crate::cfgro::CfgDb as Db;
@@ -64,9 +65,17 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 /// ついでに wrapper の「`shlib_init` 前の門」を開ける (`kapi` を非 NULL に
 /// しておく)。**init 前の分岐は別プロセスの `tests/init_gate.rs`** で見る —
 /// `kapi` はスレッドをまたぐ 1 語なので、並列試験の中で NULL に戻せない。
+///
+/// `kapi` への書きは [`Once`] で **プロセスに 1 回だけ**にする。毎回書くと、
+/// 同じ値でも並列試験どうしが同期なしで共有 `static mut` を叩く競合になる
+/// (レビュー往復 2 の non-blocker)。`Once` は書きを直列化し、他のスレッドは
+/// その完了を待ってから読む。
 pub fn reset() {
+    static KAPI_ONCE: Once = Once::new();
+    KAPI_ONCE.call_once(|| {
+        crate::cfgro::set_kapi((&raw mut DUMMY_DB) as *mut std::ffi::c_void);
+    });
     with(|s| *s = State::default());
-    crate::cfgro::set_kapi(unsafe { (&raw mut DUMMY_DB) as *mut std::ffi::c_void });
 }
 
 pub fn set_open_rc(rc: i32) {
