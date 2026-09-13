@@ -355,8 +355,19 @@ pub fn load(prev_close_error: i32) -> GuiCfg {
         /* rollback 失敗も含むので「隔離 slot」とは断定しない (票 §2)。 */
         c.close_error = if e != 0 { e } else { crc };
     }
-    c.desktop_color = clamp_color(color);
-    c.clock_24h = clamp_clock(clock);
+    /* **取得値を採るのは status が OK / VERSION のときだけ** (実装レビュー
+     * 往復 1 の B1)。`cfg_get_int` は失敗も未設定も `def` を返すので、
+     * 「1 本目が 3 を返し、2 本目の prepare / step が I/O で落ちた」経路では
+     * 先に読めた 3 だけが本物になる。そのまま採ると
+     * 「ERROR・defaults in use と通知しながら背景は 3」という食い違いが出る。
+     * status は get の後に採ってあるので、ここで一括して既定へ倒せばよい。
+     * VERSION は「読める値をそのまま使う」(票 §2) ので採る。
+     * **診断 (`status` / `sqlite` / `schema_version`) と `close_error` は保つ** —
+     * 通知と状態行はそれを見る。 */
+    if c.status == CFG_OK || c.status == CFG_VERSION {
+        c.desktop_color = clamp_color(color);
+        c.clock_24h = clamp_clock(clock);
+    }
     c.load_ticks = tick().wrapping_sub(t0);
     c
 }
@@ -420,7 +431,15 @@ pub fn consume(st: &mut GuiState) -> bool {
             ss.mask_color = false;
             ss.mask_clock = false;
         }
-        modal::open_wm_settings(st, &cfg);
+        /* **戻り値を見る** (実装レビュー往復 1 の non-blocker)。いまの
+         * `open_wm_settings` は直前の `is_open()` から呼び出しまでに枠を塞ぐ
+         * 処理も yield も無いので偽にはならないが、契約
+         * 「開けなかったものは捨てず保持して再試行する」(票 §3 の R1) を
+         * 通知経路と同じ形で書いておく — 将来この間に何か挟まっても、
+         * 予約が残る限り `pending()` が真 = 次の周回で開き直せる。 */
+        if !modal::open_wm_settings(st, &cfg) {
+            s().req = Some(Req::Open);
+        }
         did = true;
     }
     did
@@ -540,8 +559,22 @@ fn apply(st: &mut GuiState, color: u8, clock_24h: bool) {
 /*  文言                                                             */
 /* ================================================================ */
 
-/// 通知 / 状態行を組む一時バッファの大きさ。
+/// 通知を組む一時バッファの大きさ。
 pub const MSG_MAX: usize = 128;
+
+/* ---- 状態行 (実装レビュー往復 1 の B3) ----
+ *
+ * 1 行に連結すると `settings.db: MISSING - run 'cfg init' in CUI close failed
+ * (5)  load 0t save 0t` = 78 文字 = 624px になり、640px 画面のダイアログ
+ * (上限 624px) の枠外へ描いてしまう (`kcg_draw_utf8` にクリップは無い)。
+ * **状態 / close 診断 / 計測を別の行に分け**、版面の幅と高さを実表示幅から
+ * 出す。 */
+
+/// 状態行 1 本の最大バイト数 (NUL 込み)。最長は
+/// `settings.db: MISSING - run 'cfg init' in CUI` = 44 文字。
+pub const STATUS_LINE_CAP: usize = 64;
+/// 状態行の最大本数 (状態 / close 診断 / 計測)。
+pub const STATUS_LINES_MAX: usize = 3;
 
 /// `CFG_*` → 表示名。
 pub fn status_word(status: i32) -> &'static [u8] {
@@ -664,40 +697,89 @@ pub fn notice_text(n: &Notice, buf: &mut [u8; MSG_MAX]) -> usize {
     len
 }
 
-/// 設定ダイアログの状態行 (票 §3)。戻り値は長さ (`buf[len]` は NUL)。
-pub fn status_line(cfg: &GuiCfg, buf: &mut [u8; MSG_MAX]) -> usize {
-    let mut len = 0usize;
-    put(buf, &mut len, b"settings.db: ");
-    match cfg.status {
-        CFG_OK => put(buf, &mut len, b"OK"),
-        CFG_MISSING => put(buf, &mut len, b"MISSING - run 'cfg init' in CUI"),
-        CFG_CORRUPT => put(buf, &mut len, b"CORRUPT"),
-        CFG_VERSION => {
-            put(buf, &mut len, b"VERSION ");
-            put_i32(buf, &mut len, cfg.schema_version);
-            put(buf, &mut len, b" (read only)");
+/// 設定ダイアログの状態行 (票 §3)。**最大 3 行**に分けて `out` へ NUL 終端で
+/// 書き、実際に書いた本数を返す (実装レビュー往復 1 の B3)。
+///
+/// | 行 | 中身 | いつ |
+/// |---|---|---|
+/// | 0 | `settings.db: <status>` | 常に |
+/// | 1 | `close failed (<code>)` | `close_error != 0` のときだけ |
+/// | 2 | `load <n>t save <n>t` | 常に (受入 G7 の採取経路) |
+pub fn status_lines(
+    cfg: &GuiCfg,
+    out: &mut [[u8; STATUS_LINE_CAP]; STATUS_LINES_MAX],
+) -> usize {
+    let mut n = 0usize;
+
+    /* 1 行目: 状態そのもの。 */
+    {
+        let mut len = 0usize;
+        let b = &mut out[n];
+        putn(b, &mut len, b"settings.db: ");
+        match cfg.status {
+            CFG_OK => putn(b, &mut len, b"OK"),
+            CFG_MISSING => putn(b, &mut len, b"MISSING - run 'cfg init' in CUI"),
+            CFG_CORRUPT => putn(b, &mut len, b"CORRUPT"),
+            CFG_VERSION => {
+                putn(b, &mut len, b"VERSION ");
+                putn_i32(b, &mut len, cfg.schema_version);
+                putn(b, &mut len, b" (read only)");
+            }
+            CFG_ERROR => {
+                putn(b, &mut len, b"ERROR sqlite=");
+                putn_i32(b, &mut len, cfg.sqlite);
+            }
+            _ => {
+                putn(b, &mut len, b"ERROR open=");
+                putn_i32(b, &mut len, cfg.sqlite);
+            }
         }
-        CFG_ERROR => {
-            put(buf, &mut len, b"ERROR sqlite=");
-            put_i32(buf, &mut len, cfg.sqlite);
-        }
-        _ => {
-            put(buf, &mut len, b"ERROR open=");
-            put_i32(buf, &mut len, cfg.sqlite);
-        }
+        b[len] = 0;
+        n += 1;
     }
+
+    /* 2 行目: close の診断 (あるときだけ)。 */
     if cfg.close_error != 0 {
-        put(buf, &mut len, b" close failed (");
-        put_i32(buf, &mut len, cfg.close_error);
-        put(buf, &mut len, b")");
+        let mut len = 0usize;
+        let b = &mut out[n];
+        putn(b, &mut len, b"close failed (");
+        putn_i32(b, &mut len, cfg.close_error);
+        putn(b, &mut len, b")");
+        b[len] = 0;
+        n += 1;
     }
-    put(buf, &mut len, b"  load ");
-    put_i32(buf, &mut len, cfg.load_ticks as i32);
-    put(buf, &mut len, b"t save ");
-    put_i32(buf, &mut len, cfg.save_ticks as i32);
-    put(buf, &mut len, b"t");
-    buf[len] = 0;
-    len
+
+    /* 3 行目: 計測 (S5 の材料、受入 G7)。 */
+    {
+        let mut len = 0usize;
+        let b = &mut out[n];
+        putn(b, &mut len, b"load ");
+        putn_i32(b, &mut len, cfg.load_ticks as i32);
+        putn(b, &mut len, b"t save ");
+        putn_i32(b, &mut len, cfg.save_ticks as i32);
+        putn(b, &mut len, b"t");
+        b[len] = 0;
+        n += 1;
+    }
+    n
+}
+
+/* ---- 状態行用の put (幅の違う buf を扱うので MSG_MAX 版と別にする) ---- */
+
+fn putn(buf: &mut [u8; STATUS_LINE_CAP], n: &mut usize, s: &[u8]) {
+    let mut i = 0;
+    while i < s.len() && s[i] != 0 && *n < STATUS_LINE_CAP - 1 {
+        buf[*n] = s[i];
+        *n += 1;
+        i += 1;
+    }
+}
+
+fn putn_i32(buf: &mut [u8; STATUS_LINE_CAP], n: &mut usize, v: i32) {
+    let mut tmp = [0u8; MSG_MAX];
+    let mut k = 0usize;
+    put_i32(&mut tmp, &mut k, v);
+    putn(buf, n, &tmp[..k]);
 }
 
 /* ================================================================ */

@@ -8,7 +8,7 @@ API は [`TASK_S2.md`](../../docs/tasks/settings/TASK_S2.md) §1 と `userland/l
 走らせ方:
 
 ```bash
-python3 userland/gshell/host/integration.py       # = make check-gshell-host (93 本)
+python3 userland/gshell/host/integration.py       # = make check-gshell-host (95 本)
 cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml \
       --target x86_64-unknown-linux-gnu --offline # = make check-gui-host (35 本)
 ```
@@ -24,7 +24,7 @@ cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml \
 | | |
 |---|---|
 | 実装 | `userland/gshell/src/settings.rs` (新規)、`lib.rs` / `modal.rs` / `startmenu.rs` / `desktop.rs` / `taskbar.rs` / `multiapp.rs` / `wm.rs`、`sdk/rust/os32api/src/cfg.rs` (新規) |
-| 試験 | `userland/gshell/host/settings_tests.rs` (新規、20 関数)、贋物は `host/mocks.rs` |
+| 試験 | `userland/gshell/host/settings_tests.rs` (新規、22 関数)、贋物は `host/mocks.rs` |
 | 実行 | `userland/gshell/host/integration.py` (rustc で組む。cargo ではない) |
 
 `src/settings.rs` の末尾が `#[cfg(test)] #[path = "../host/settings_tests.rs"] mod tests;` で
@@ -174,3 +174,102 @@ libos32gui 側 (`make check-gui-host`) は S2 の 35 本が**宣言の移動後�
   `$(LIBCFG_OBJ)` は PM の担当。`cargo build` は Rust 側だけを組み、
   `cfg_*` は未解決のまま `libgshell.a` に残る)。
 - 実機のパレットリース中の見え方 (R2) は**画素の色番号**までしか見ていない。
+
+
+---
+
+## 5. 実装レビュー往復 1 (Codex、`261b59e`) — blocker 3 件
+
+判定は **Request changes**。3 件とも反例をホストで**先に踏んでから** (RED) 直した (GREEN)。
+反例を踏む手順は「直しだけを一時的に外して試験を走らせる」で、外した状態の出力を下に載せる。
+
+### B1 — 読み込み途中で ERROR になっても先に読めた非既定値を適用する
+
+`settings.rs` の `load()`。`cfg_get_int` は失敗も未設定も `def` を返すので、
+**1 本目 (`desktop/color`) が 3 を返し、2 本目 (`taskbar/clock_24h`) の prepare / step が
+I/O で落ちた**経路では、先に読めた 3 だけが本物になる。そのまま採ると
+「`Settings: ERROR sqlite=<n> - defaults in use` と通知しながら背景は 3」という食い違いが出た。
+
+RED (直しを外した状態、S18):
+
+```text
+assertion `left == right` failed: 途中で ERROR になったのに先に読めた値を適用した (B1)
+  left: 3
+ right: 12
+```
+
+直し: **get 後の status が `CFG_OK` / `CFG_VERSION` のときだけ取得値を採る**。それ以外は
+両キーとも既定へ倒し、**診断 (`status` / `sqlite` / `schema_version`) と `close_error` は保つ**。
+`VERSION` は票 §2 の「読める値をそのまま使う」に従って採る。
+
+S18 を書き直して、1 本目成功・2 本目失敗 / MISSING / CORRUPT / VERSION (値を採る) /
+診断の保持の 5 経路にした。
+
+### B2 — リース中の説明文が枠外へ描かれる
+
+`modal.rs` の `layout_settings` / `settings_row_text`。版面の幅が
+`SET_SWATCH_COL + SET_SWATCH + 8` の固定値だったため、
+`Desktop color : 12 (preview off: palette leased)` (48 文字 = 384px) が
+360px の枠 (x=140〜500) を 36px はみ出した。`kcg_draw_utf8` にクリップは無く、
+はみ出した画素はモーダルの遮蔽にも損傷にも入らない = WM には消せない。
+
+RED (直しを外した状態、S19):
+
+```text
+assertion `left == right` failed: リース中 (B2): 枠外 (500, 145) に描いた (rect = (140, 116, 360, 144))
+```
+
+直し 2 段構え:
+
+1. `layout_settings` が幅を**実表示幅**から出す。行 0 は
+   **常に mono 版 (説明文つき)** と **色の最大桁 (15)** で測る — リースは
+   ダイアログを開いている間に付いたり外れたりするし、色も 9 → 10 で 1 桁伸びるので、
+   そのたびに版面を組み直さずに済ませる。
+2. 最後の砦として `draw_clipped()` を通す。行矩形に入る文字数で切るので、
+   画面幅 (`screen_w - 16`) に収まらない極端な状態でも**枠の外へは 1 画素も出さない**。
+
+### B3 — 長い状態行が幅の上限で切られず全文を枠外へ描く
+
+`modal.rs` の状態行。状態 / close 診断 / 計測を 1 行に連結すると
+`settings.db: MISSING - run 'cfg init' in CUI close failed (5)  load 0t save 0t`
+= 78 文字 = 624px になり、640px 画面のダイアログ (上限 624px) の外へ出ていた。
+
+RED (直しを外した状態、S19):
+
+```text
+assertion `left == right` failed: 状態行が 1 本に連結されたまま
+  left: 1
+ right: 3
+```
+
+直し: `settings::status_line` を **`status_lines()` (最大 3 行)** に替えた。
+
+| 行 | 中身 | いつ |
+|---|---|---|
+| 0 | `settings.db: <status>` | 常に |
+| 1 | `close failed (<code>)` | `close_error != 0` のときだけ |
+| 2 | `load <n>t save <n>t` | 常に (受入 G7 の採取経路) |
+
+`Modal` は `set_status: [[u8; 64]; 3]` + 本数を持ち、`layout_settings` が
+**各行の実幅から幅を、本数から高さを**出す。描画は B2 と同じ `draw_clipped`。
+
+### non-blocker
+
+| 件 | 対応 |
+|---|---|
+| `open_wm_settings` の戻り値 | 見るようにした。偽なら `Req::Open` を保持して次の周回で開き直す (通知経路と同じ形)。現状 false に到達する反例は無いが、契約 R1 をコードで表した |
+| ホスト試験の不足 | **S20** を足した: (a) 保存時の `cfg_open` 負、(b) 予約〜消費の間に DB が非 OK へ変わる (`Open(1) → Close` だけで `begin` に進まない)、(c) 両キー変更で 1 本目の set が失敗 (2 本目を呼ばない)、(d) 時計だけの保存、(e) 両キーの保存順 (color → clock)、(f) 適用値と再読込値が違う組合せ (無編集の OK は書かない / 編集すれば再読込値からの差分を書く) |
+| S09b が実スケジューラ全体でない | そのまま。`op_wait` → park → `standalone_loop` の**制御の流れ**はカーネルの領分で、ホストの `exec_park` は longjmp できない (`mocks.rs` の注記どおり)。ここで見るのは WM の判断 (`should_park` / `pick` の門) に留める |
+| `gui_gate.py:198` の旧記述 | PM の担当ファイルなので触っていない |
+
+### 再実行 (GREEN)
+
+```text
+userland/gshell/host/integration.py : 95 passed; 0 failed
+libos32gui host_tests               : 34 passed + 1 passed
+cargo build (gshell, i686-os32-none): OK (警告 0)
+tools/check_constraints.py          : 制約チェック OK — 規則 16 件
+```
+
+ゲスト受入は**再実行していない** ([V4])。B2 / B3 は版面の寸法を変えたので、
+G2 / G4 / G5 のスクリーンショット確認は PM / テスターの再実施が要る。

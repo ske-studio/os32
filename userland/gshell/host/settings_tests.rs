@@ -989,11 +989,15 @@ fn s17_settings_dialog_in_mono_uses_only_text_and_window() {
 
 #[test]
 fn s18_status_is_sampled_after_the_gets_not_at_open() {
+    /* --- 反例 (実装レビュー往復 1 の B1): **1 本目の get は成功して 3 を返し**、
+     *     2 本目の prepare / step が I/O で落ちて status が ERROR になる。
+     *     先に読めた 3 を採ると「ERROR・defaults in use と通知しながら背景は 3」
+     *     という食い違いが出る。**両キーとも既定へ倒す**のが正。 --- */
     let _st = bare();
-    /* open 直後は OK、get の途中で I/O が壊れて ERROR になった。 */
     mocks::cfg(|c| {
+        c.color = Some(3); /* 1 本目は本物の値が返る */
         c.status_script = vec![CFG_ERROR];
-        c.status = CFG_OK;
+        c.status = CFG_OK; /* open 直後は OK だった */
         c.sqlite = 10;
     });
     let c = settings::load(0);
@@ -1005,6 +1009,279 @@ fn s18_status_is_sampled_after_the_gets_not_at_open() {
     assert_eq!(
         c.desktop_color,
         settings::DEFAULT_DESKTOP_COLOR,
-        "ERROR なのに値を信じた"
+        "途中で ERROR になったのに先に読めた値を適用した (B1)"
     );
+    assert_eq!(
+        c.clock_24h,
+        settings::DEFAULT_CLOCK_24H,
+        "ERROR なのに時計の値を信じた"
+    );
+
+    /* --- MISSING / CORRUPT / open 負でも同じ (両キー既定) --- */
+    for status in [CFG_MISSING, CFG_CORRUPT] {
+        let _st = bare();
+        mocks::cfg(|c| {
+            c.color = Some(3);
+            c.clock = Some(0);
+            c.status = status;
+        });
+        let c = settings::load(0);
+        assert_eq!(
+            (c.desktop_color, c.clock_24h),
+            (settings::DEFAULT_DESKTOP_COLOR, settings::DEFAULT_CLOCK_24H),
+            "status={} で取得値を採った",
+            status
+        );
+    }
+
+    /* --- VERSION は「読める値をそのまま使う」(票 §2) ので採る --- */
+    let _st = bare();
+    mocks::cfg(|c| {
+        c.color = Some(3);
+        c.clock = Some(0);
+        c.status = CFG_VERSION;
+        c.schema = 2;
+    });
+    let c = settings::load(0);
+    assert_eq!(
+        (c.desktop_color, c.clock_24h),
+        (3, false),
+        "VERSION で読める値を捨てた"
+    );
+    assert_eq!(c.schema_version, 2);
+
+    /* --- 診断と close_error は既定へ倒しても保つ --- */
+    let _st = bare();
+    mocks::cfg(|c| {
+        c.color = Some(3);
+        c.status = CFG_ERROR;
+        c.sqlite = 26;
+        c.close_ret = -1;
+        c.last_close_error = -5;
+    });
+    let c = settings::load(0);
+    assert_eq!(c.desktop_color, settings::DEFAULT_DESKTOP_COLOR);
+    assert_eq!(c.status, CFG_ERROR);
+    assert_eq!(c.sqlite, 26, "診断を落とした");
+    assert_eq!(c.close_error, -5, "close 診断を落とした");
+}
+
+/* ================================================================ */
+/*  (19) 版面が文字を枠外へ出さない (実装レビュー往復 1 の B2 / B3)   */
+/* ================================================================ */
+
+/// ダイアログの**外側**に見張り色を敷いて `modal::draw` を通し、1 画素も
+/// 書き換わっていないことを見る。`kcg_draw_utf8` にクリップは無いので、
+/// 版面の幅 / 高さが文字に足りないとここが崩れる。
+fn assert_nothing_outside(st: &wm::GuiState, what: &str) {
+    const SENTINEL: u8 = 200;
+    mocks::clear(SENTINEL);
+    let r = modal::rect();
+    modal::draw(st, r);
+    let px = mocks::pixels();
+    for y in 0..st.screen_h {
+        for x in 0..st.screen_w {
+            if r.contains(x, y) {
+                continue;
+            }
+            assert_eq!(
+                px[y as usize * mocks::W + x as usize],
+                SENTINEL,
+                "{}: 枠外 ({}, {}) に描いた (rect = {:?})",
+                what,
+                x,
+                y,
+                (r.x, r.y, r.w, r.h)
+            );
+        }
+    }
+    /* 空振りでないこと: 枠の中は実際に描かれている。 */
+    assert_ne!(
+        px[(r.y + 1) as usize * mocks::W + (r.x + 1) as usize],
+        SENTINEL,
+        "{}: そもそも描いていない",
+        what
+    );
+}
+
+#[test]
+fn s19_dialog_never_draws_outside_its_frame() {
+    /* --- B2: リース中の説明文 (48 文字 = 384px) が 360px の枠を超えていた --- */
+    let mut st = bare();
+    mocks::cfg(|c| c.color = Some(12));
+    open_settings(&mut st);
+    assert_nothing_outside(&st, "16 色");
+    st.lease_applied = 0x0001_0000;
+    assert_nothing_outside(&st, "リース中 (B2)");
+    /* 開いたまま色を 2 桁へ進めても (9 → 10) 伸びない。 */
+    for _ in 0..4 {
+        modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    }
+    assert_nothing_outside(&st, "リース中 + 色 2 桁");
+    st.lease_applied = 0;
+    assert_nothing_outside(&st, "16 色へ戻した");
+
+    /* --- B3: MISSING + close 失敗 + 計測を 1 行に連結すると 78 文字 = 624px --- */
+    let mut st = bare();
+    mocks::cfg(|c| {
+        c.status = CFG_MISSING;
+        c.close_ret = -1;
+        c.last_close_error = 5;
+    });
+    open_settings(&mut st);
+    assert_nothing_outside(&st, "MISSING + close 失敗 + 計測 (B3)");
+    /* 3 行に分かれていること (状態 / close 診断 / 計測)。 */
+    assert_eq!(
+        modal::settings_status_lines(),
+        3,
+        "状態行が 1 本に連結されたまま"
+    );
+
+    /* --- 桁数の多い診断でも枠外へ出ない --- */
+    let mut st = bare();
+    mocks::cfg(|c| {
+        c.status = CFG_ERROR;
+        c.sqlite = i32::MIN;
+        c.close_ret = -1;
+        c.last_close_error = i32::MIN;
+    });
+    open_settings(&mut st);
+    assert_nothing_outside(&st, "最長の診断");
+}
+
+/* ================================================================ */
+/*  (20) 保存の残りの分岐 (実装レビュー往復 1 の non-blocker)         */
+/* ================================================================ */
+
+/// 色 `base` / 時計 `clock` の DB を読んでダイアログを開く。
+fn open_with(st: &mut wm::GuiState, base: i32, clock: i32) {
+    mocks::cfg(|c| {
+        c.color = Some(base);
+        c.clock = Some(clock);
+    });
+    open_settings(st);
+}
+
+#[test]
+fn s20_remaining_save_branches() {
+    /* --- (a) 保存のときに `cfg_open` が負 --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    mocks::cfg(|c| c.open_ret = -9);
+    settings::consume(&mut st);
+    assert_eq!(st.cfg.desktop_color, 3, "open 負で適用値が動いた");
+    assert_eq!(
+        mocks::cfg_calls().last(),
+        Some(&Open(1)),
+        "開けなかったのに触った"
+    );
+    assert_eq!(modal_msg(), b"save failed: open (-9)".to_vec());
+
+    /* --- (b) 予約から消費までの間に DB が非 OK になった --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    mocks::cfg(|c| c.status = CFG_MISSING); /* CUI で rm された */
+    settings::consume(&mut st);
+    assert_eq!(st.cfg.desktop_color, 3, "非 OK で書いた");
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [Open(1), Close],
+        "非 OK なのに begin / set まで進んだ"
+    );
+    assert_eq!(modal_msg(), b"cannot save: MISSING".to_vec());
+
+    /* --- (c) 2 本目の set だけ失敗 (両キー変更) --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    st.cfg.clock_24h = true;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0); /* color 3 → 4 */
+    modal::on_key(&mut st, SC_DOWN, 0, 0);
+    modal::on_key(&mut st, SC_SPACE, 0, 0); /* clock 24h → 12h */
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    mocks::cfg(|c| c.set_ret = -1);
+    settings::consume(&mut st);
+    assert_eq!(
+        (st.cfg.desktop_color, st.cfg.clock_24h),
+        (3, true),
+        "set 失敗で適用値が動いた"
+    );
+    /* 1 本目の set で落ちるので 2 本目は呼ばない。 */
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [Open(1), Begin, set_int(K_COLOR, 4), Close],
+        "set が落ちた後も続けた"
+    );
+
+    /* --- (d) 時計だけの保存 (色は変えない) --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3;
+    st.cfg.clock_24h = true;
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_DOWN, 0, 0);
+    modal::on_key(&mut st, SC_SPACE, 0, 0);
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    settings::consume(&mut st);
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [Open(1), Begin, set_int(K_CLOCK, 0), Commit, Close],
+        "変えていない色まで書いた"
+    );
+    assert_eq!((st.cfg.desktop_color, st.cfg.clock_24h), (3, false));
+
+    /* --- (e) 両キーの保存は color → clock の順 --- */
+    let mut st = bare();
+    open_with(&mut st, 3, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    modal::on_key(&mut st, SC_DOWN, 0, 0);
+    modal::on_key(&mut st, SC_SPACE, 0, 0);
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    settings::consume(&mut st);
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [
+            Open(1),
+            Begin,
+            set_int(K_COLOR, 4),
+            set_int(K_CLOCK, 0),
+            Commit,
+            Close
+        ],
+        "両キーの set の順が違う"
+    );
+
+    /* --- (f) 適用値と再読込値が違う (CUI で書き換わった後に開いた) --- */
+    let mut st = bare();
+    st.cfg.desktop_color = 3; /* 画面は 3 */
+    open_with(&mut st, 7, 1); /* DB は 7 に変わっていた */
+    assert_eq!(modal::settings_values().0, 7, "編集の起点が再読込値でない");
+    /* 編集せずに OK = 再読込値と同じなので**何も書かない** (画面の 3 とは違う)。 */
+    let opens = mocks::cfg_open_calls();
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    settings::consume(&mut st);
+    assert_eq!(mocks::cfg_open_calls(), opens, "再読込値と同じなのに書いた");
+    assert_eq!(st.cfg.desktop_color, 3, "書いていないのに適用値が動いた");
+    assert!(printed(b"cfg write skipped"));
+
+    /* 1 つ進めて OK すれば、再読込値 7 からの差分として 8 が書かれる。 */
+    open_with(&mut st, 7, 1);
+    modal::on_key(&mut st, SC_RIGHT, 0, 0);
+    assert!(modal::on_key(&mut st, SC_RETURN, 0, 0));
+    let before = mocks::cfg_calls().len();
+    settings::consume(&mut st);
+    assert_eq!(
+        mocks::cfg_calls()[before..],
+        [Open(1), Begin, set_int(K_COLOR, 8), Commit, Close]
+    );
+    assert_eq!(st.cfg.desktop_color, 8, "保存後に適用していない");
 }
