@@ -215,6 +215,11 @@ filesystem:
     - host: assets/settings/defaults.tsv
       guest: /etc/settings.tsv
       tags: [core]
+    # --- 版 2 の試験 fixture (票 S4 G5)。保護対象でない名前で置き、ゲストで
+    #     `cp /etc/settings.v2.fixture /etc/settings.db` して VERSION 状態を作る ---
+    - host: build/out/settings.v2.fixture
+      guest: /etc/settings.v2.fixture
+      tags: [test]
     # --- FEP辞書 (SQLite DB) ---
     - host: assets/fep.db
       guest: /db/fep.db

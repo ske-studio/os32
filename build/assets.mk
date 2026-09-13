@@ -55,6 +55,15 @@ $(SETTINGS_DB): $(SETTINGS_TSV) tools/mk_settings_db.py FORCE
 	@mkdir -p $(dir $@)
 	python3 tools/mk_settings_db.py --tsv $(SETTINGS_TSV) --out $@
 
+# 版 2 の試験 fixture (票 S4 の受入 G5 = VERSION 状態の gshell)。通常配備は
+# /etc/settings.db* を保護してスキップするので、保護対象でない名前で配備し、
+# ゲストで `cp /etc/settings.v2.fixture /etc/settings.db` して使う。
+SETTINGS_V2_FIXTURE = $(BUILD_OUT)/settings.v2.fixture
+
+$(SETTINGS_V2_FIXTURE): $(SETTINGS_TSV) tools/mk_settings_db.py FORCE
+	@mkdir -p $(dir $@)
+	python3 tools/mk_settings_db.py --tsv $(SETTINGS_TSV) --out $@ --schema-version 2
+
 # 配備に必要な最小限。make all はこれに依存する。
 ASSETS_DEPLOYED = $(FONT_DIR)/ipaexg16.kcgfont $(FONT_DIR)/ipaexg_subset.ttf \
                   assets/fep.db
@@ -64,10 +73,10 @@ ASSETS_DEPLOYED = $(FONT_DIR)/ipaexg16.kcgfont $(FONT_DIR)/ipaexg_subset.ttf \
 # には入れず、ここと `all` / 媒体ターゲットから引く。
 ASSETS_ALL = $(ASSETS_DEPLOYED) $(FONT_DIR)/ipaexm_subset.ttf \
              assets/fep_s.db assets/fep_l.db assets/fep.dic \
-             $(SETTINGS_DB)
+             $(SETTINGS_DB) $(SETTINGS_V2_FIXTURE)
 
 # `all` からも直接引く (媒体ターゲットの依存とは別に、単体で必ず出来ていること)。
-all: $(SETTINGS_DB)
+all: $(SETTINGS_DB) $(SETTINGS_V2_FIXTURE)
 
 assets-deployed: $(ASSETS_DEPLOYED)
 	@echo "=== 配備用アセット $(words $(ASSETS_DEPLOYED)) 件 ==="

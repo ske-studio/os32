@@ -66,15 +66,21 @@ pub const CFG_TEXT_CAP: usize = CFG_TEXT_MAX + 1;
 /* ================================================================ */
 /*  libos32cfg (C, userland/lib/cfg/libos32cfg.h) への宣言           */
 /*                                                                  */
-/*  実体は S2-C レーンが並行実装中。リンクは PM が build/programs.mk  */
-/*  の shlib 規則に libos32cfg.a を足してから通る。                   */
+/*  **宣言そのものは `os32api::cfg` に 1 か所**へ寄せた (票 S4 §4)。   */
+/*  gshell も同じ表を使うので、2 か所に置くと片方だけ直ったときに      */
+/*  リンクは通るのに引数がずれる。ここは wrapper が使う 9 本だけを     */
+/*  再公開する — 呼び手 (`crate::shlib` の表 101..=104) と            */
+/*  ホスト TDD (`host_tests/src/fake.rs` の `crate::cfgro::CfgDb`)     */
+/*  から見える名前は S2 のときと 1 つも変わらない。                   */
+/*                                                                  */
+/*  `crate::cfgabi` はクレート直下の別名:                             */
+/*    - 本体 (libos32gui)  `pub use os32api::cfg as cfgabi;`          */
+/*    - ホスト TDD         `#[path = ".../os32api/src/cfg.rs"]`       */
+/*  こうしてあるので、このファイルは **os32api を名指ししない** =      */
+/*  host_tests が os32api を丸ごと組まずに取り込める (S2 と同じ)。     */
 /* ================================================================ */
 
-/// C の `CfgDb` (不透明)。中身はライブラリ側にしかない。
-#[repr(C)]
-pub struct CfgDb {
-    _opaque: [u8; 0],
-}
+pub use crate::cfgabi::CfgDb;
 
 /* ---------------------------------------------------------------- */
 /*  `kapi` — C 側 (cfg_backend.c) が見る KernelAPI ポインタ           */
@@ -107,24 +113,10 @@ pub fn kapi_ready() -> bool {
     unsafe { !kapi.is_null() }
 }
 
-extern "C" {
-    /* `const char *` は i386 では `*const u8` と同じ ABI。 */
-    pub fn cfg_open(out: *mut *mut CfgDb, writable: i32) -> i32;
-    pub fn cfg_close(db: *mut CfgDb) -> i32;
-    pub fn cfg_get_int(db: *mut CfgDb, scope: *const u8, key: *const u8, def: i32) -> i32;
-    pub fn cfg_get_text(
-        db: *mut CfgDb,
-        scope: *const u8,
-        key: *const u8,
-        out: *mut u8,
-        cap: i32,
-    ) -> i32;
-    pub fn cfg_begin(db: *mut CfgDb) -> i32;
-    pub fn cfg_set_int(db: *mut CfgDb, scope: *const u8, key: *const u8, v: i32) -> i32;
-    pub fn cfg_set_text(db: *mut CfgDb, scope: *const u8, key: *const u8, s: *const u8) -> i32;
-    pub fn cfg_commit(db: *mut CfgDb) -> i32;
-    pub fn cfg_rollback(db: *mut CfgDb) -> i32;
-}
+pub use crate::cfgabi::{
+    cfg_begin, cfg_close, cfg_commit, cfg_get_int, cfg_get_text, cfg_open, cfg_rollback,
+    cfg_set_int, cfg_set_text,
+};
 
 /* ================================================================ */
 /*  純粋部 — 分岐表と検査 (ホスト TDD がここを直接叩く)               */

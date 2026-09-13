@@ -19,6 +19,13 @@
 //!
 //! 時計は 1 秒より細かく更新しない。**文字列が変わったときだけ時計矩形を
 //! 損傷にする** (契約 D3: 時計のために全画面 present しない)。
+//!
+//! 表記は設定レジストリの `gshell` / `taskbar/clock_24h` (票 S4 §1) で決まる。
+//! 12 時間表記 (`h:MM AM` / `12:59 PM`) は**文字数が変わる**ので、
+//! [`clock_rect`] の幅は固定値ではなく**いま出ている文字数**から出し、
+//! 幅が変わる更新は **旧矩形 ∪ 新矩形**を損傷にする (票 §1 の B4: 新矩形だけ
+//! だと縮んだときに旧左端の 8px が残る)。窓ボタン帯は時計の左端で切れるので、
+//! 幅が変わった周は帯も描き直す。
 
 use crate::wm::{GuiState, Rect};
 use crate::{chrome, lease, startmenu, visible};
@@ -38,8 +45,12 @@ const PAD: i32 = 2;
 const BTN_H: i32 = 20;
 /// Start ボタンの幅 ("Start" = 5 文字 × 8px + 余白)。
 const START_W: i32 = 56;
-/// 時計の幅 ("HH:MM" = 5 文字 × 8px + 余白)。
-const CLOCK_W: i32 = 48;
+/// 時計の 1 文字の幅 (ANK 8px)。
+const CLOCK_CHAR_W: i32 = 8;
+/// 時計の矩形の左右の余白 (文字数 × 8 に足す)。
+const CLOCK_PAD: i32 = 8;
+/// 時計の文字列の最大長 ("12:59 PM" = 8) と NUL。
+const CLOCK_MAX: usize = 8;
 /// 窓ボタン 1 個の幅と間隔。
 const WBTN_W: i32 = 96;
 const WBTN_GAP: i32 = 4;
@@ -65,10 +76,44 @@ pub fn start_rect(st: &GuiState) -> Rect {
     Rect::new(PAD, st.screen_h - TASKBAR_H + PAD, START_W, BTN_H)
 }
 
-/// 時計 (右詰め)。
+/// 時計 (右詰め)。**幅はいま出ている文字数から** (票 S4 §1)。
 #[inline]
 pub fn clock_rect(st: &GuiState) -> Rect {
-    Rect::new(st.screen_w - PAD - CLOCK_W, st.screen_h - TASKBAR_H + PAD, CLOCK_W, BTN_H)
+    clock_rect_for(st, bar().clock_len)
+}
+
+/// 文字数 `n` のときの時計の矩形 (旧 ∪ 新 を取るために外から長さを渡せる)。
+#[inline]
+pub fn clock_rect_for(st: &GuiState, n: usize) -> Rect {
+    let w = (n as i32) * CLOCK_CHAR_W + CLOCK_PAD;
+    Rect::new(st.screen_w - PAD - w, st.screen_h - TASKBAR_H + PAD, w, BTN_H)
+}
+
+/// いま出ている時計の文字数 (試験の観測点)。
+#[allow(dead_code)]
+#[inline]
+pub fn clock_len() -> usize {
+    bar().clock_len
+}
+
+/// ホスト TDD の初期化 (`mocks::init`)。時計の文字数は `static` なので、
+/// 前の試験の 12h 表記が次の試験の矩形計算に残らないようにする。
+#[allow(dead_code)]
+pub fn reset() {
+    *bar() = Bar::NEW;
+}
+
+/// 表記が変わったので次の [`x3_cycle`] で作り直す (票 S4 §3 の適用)。
+/// 幅が変わるので**いまの矩形**も先に損傷にしておく。
+pub fn invalidate_clock(st: &mut GuiState) {
+    let old = clock_rect(st);
+    st.dirty_screen(old);
+    let band = wbtn_band(st);
+    st.dirty_screen(band);
+    let b = bar();
+    /* 時刻が同じでも必ず作り直させる (表記が変わったので文字列が変わる)。 */
+    b.inited = false;
+    b.force = true;
 }
 
 /// i 番目の窓ボタン。時計に掛かる位置なら空矩形。
@@ -96,8 +141,12 @@ pub fn hit(st: &GuiState, mx: i32, my: i32) -> bool {
 /*  状態 (時計と窓ボタンの前回値。.bss)                               */
 /* ================================================================ */
 struct Bar {
-    /// 直近に作った "HH:MM\0"。
-    clock: [u8; 6],
+    /// 直近に作った文字列 (NUL 終端。"HH:MM" / "12:59 PM")。
+    clock: [u8; CLOCK_MAX + 1],
+    /// その長さ (NUL を除く)。矩形の幅はここから出す。
+    clock_len: usize,
+    /// 表記の切替で「同じ時刻でも作り直す」印 ([`invalidate_clock`])。
+    force: bool,
     /// 次に時計を作り直す tick。
     next_clock: u32,
     /// 前回描いた窓ボタンの署名 (件数と最前面 id)。変化で帯を損傷にする。
@@ -109,7 +158,9 @@ struct Bar {
 
 impl Bar {
     const NEW: Bar = Bar {
-        clock: [b'-', b'-', b':', b'-', b'-', 0],
+        clock: [b'-', b'-', b':', b'-', b'-', 0, 0, 0, 0],
+        clock_len: 5,
+        force: false,
         next_clock: 0,
         sig_n: 0,
         sig_front: 0,
@@ -142,33 +193,84 @@ pub fn x3_cycle(st: &mut GuiState) {
 }
 
 fn tick_clock(st: &mut GuiState) {
-    let b = bar();
-    if b.inited && st.now.wrapping_sub(b.next_clock) >= 0x8000_0000 {
-        return; /* now < next_clock */
+    {
+        let b = bar();
+        if b.inited && st.now.wrapping_sub(b.next_clock) >= 0x8000_0000 {
+            return; /* now < next_clock */
+        }
+        b.next_clock = st.now.wrapping_add(CLOCK_INTERVAL);
+        b.inited = true;
     }
-    b.next_clock = st.now.wrapping_add(CLOCK_INTERVAL);
-    b.inited = true;
     let t = unsafe { (os32api::api().sys_time)() };
-    let mut s = [0u8; 6];
-    format_hhmm(t, &mut s);
-    if s != b.clock {
+    let mut s = [0u8; CLOCK_MAX + 1];
+    let n = format_clock(t, st.cfg.clock_24h, &mut s);
+    let (old_len, same) = {
+        let b = bar();
+        let same = !b.force && b.clock_len == n && b.clock[..n] == s[..n];
+        b.force = false;
+        (b.clock_len, same)
+    };
+    if same {
+        return;
+    }
+    /* **旧矩形を先に**取る (幅が縮むとき、新矩形だけでは旧左端が残る)。 */
+    let old = clock_rect_for(st, old_len);
+    {
+        let b = bar();
         b.clock = s;
-        let cr = clock_rect(st);
-        st.dirty_screen(cr);
+        b.clock_len = n;
+    }
+    let new = clock_rect_for(st, n);
+    st.dirty_screen(old);
+    st.dirty_screen(new);
+    if old_len != n {
+        /* 窓ボタン帯は時計の左端で切れる。幅が変わったら並べ直す。 */
+        let band = wbtn_band(st);
+        st.dirty_screen(band);
     }
 }
 
-/// epoch 秒 → "HH:MM\0"。RTC は現地時刻なので日内秒をそのまま使う。
-fn format_hhmm(epoch: u32, out: &mut [u8; 6]) {
+/// epoch 秒 → 表示文字列 (NUL 終端)。戻り値は長さ (NUL を除く)。
+/// RTC は現地時刻なので日内秒をそのまま使う。
+///
+/// - 24h … `HH:MM` (5 文字、0 詰め)
+/// - 12h … `h:MM AM` / `12:59 PM` (7〜8 文字、**時は空白詰めしない**。票 §1)
+pub fn format_clock(epoch: u32, h24: bool, out: &mut [u8; CLOCK_MAX + 1]) -> usize {
     let sod = epoch % 86400;
     let hh = sod / 3600;
     let mm = (sod % 3600) / 60;
-    out[0] = b'0' + (hh / 10) as u8;
-    out[1] = b'0' + (hh % 10) as u8;
-    out[2] = b':';
-    out[3] = b'0' + (mm / 10) as u8;
-    out[4] = b'0' + (mm % 10) as u8;
-    out[5] = 0;
+    let mut n = 0usize;
+    if h24 {
+        out[n] = b'0' + (hh / 10) as u8;
+        n += 1;
+        out[n] = b'0' + (hh % 10) as u8;
+        n += 1;
+    } else {
+        /* 0 時 = 12 AM、12 時 = 12 PM。 */
+        let h12 = if hh % 12 == 0 { 12 } else { hh % 12 };
+        if h12 >= 10 {
+            out[n] = b'0' + (h12 / 10) as u8;
+            n += 1;
+        }
+        out[n] = b'0' + (h12 % 10) as u8;
+        n += 1;
+    }
+    out[n] = b':';
+    n += 1;
+    out[n] = b'0' + (mm / 10) as u8;
+    n += 1;
+    out[n] = b'0' + (mm % 10) as u8;
+    n += 1;
+    if !h24 {
+        out[n] = b' ';
+        n += 1;
+        out[n] = if hh < 12 { b'A' } else { b'P' };
+        n += 1;
+        out[n] = b'M';
+        n += 1;
+    }
+    out[n] = 0;
+    n
 }
 
 fn tick_buttons(st: &mut GuiState) {

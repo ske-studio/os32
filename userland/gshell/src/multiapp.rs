@@ -271,7 +271,7 @@ pub fn on_start(id: i32) {
 /// 起動したてのアプリを表に載せる (まだ `exec_start` は戻っていない = 走っている)。
 /// 模型 `ma_launch` と同じく turn を 1 つ使った状態にする — 立った直後に走って
 /// いるので、そのラウンドの追加 turn にはならない (D11-3a)。
-fn adopt_running(id: i32) {
+pub fn adopt_running(id: i32) {
     let i = match idx(id) {
         Some(i) => i,
         None => return,
@@ -750,8 +750,8 @@ fn pick_group(st: &GuiState, want_input: bool) -> i32 {
 /// [`pick`] の中の 1 か所、入力群も導出群も空の周だけ。
 ///
 /// top-level にしか出来ない仕事 (`LAUNCH` 保留 / 実行できる `SessionAction` /
-/// `exec_kill` の予約 / **積まれている起動要求**) がある周は WM の番なので
-/// 譲らない — [`should_park`] の (a) と同じ 4 つ。
+/// `exec_kill` の予約 / **積まれている起動要求** / **設定レジストリの予約と
+/// 通知**) がある周は WM の番なので譲らない — [`should_park`] の (a) と同じ。
 ///
 /// **順は票 T9 D5 で 2 つ変わった** (ID 昇順の固定では、sh の `sys_yield` と
 /// 子の `kbd_trygetchar` が同時に `WAIT_POLL` のとき若い方だけが走り続ける):
@@ -771,6 +771,7 @@ fn pick_poll(st: &GuiState) -> i32 {
         || st.launch_pending
         || has_top_level_work(mm)
         || launch_work_pending()
+        || crate::settings::pending()
     {
         return 0;
     }
@@ -916,6 +917,12 @@ fn restore_turn(id: i32, saved: Option<(App, i32, u32)>) {
 /// 票 T9 D3 (2) で 3 つ目 ([`launch_work_pending`])。`launch_take` も owner 1
 /// 専用なので、これが無いと `sh` の起動要求は永久に取りに行かれない。
 /// 起動要求は有限個の事象なので D11-3a の上界は変わらない。
+///
+/// 票 S4 §3 で 4 つ目 ([`crate::settings::pending`])。設定の読み書きは
+/// top-level だけの仕事 (決裁: OS 経由・同時 1 本・yield なし) で、
+/// **予約 (`req`) だけでなく通知 (`notice`) も含める** — 通知はモーダル枠が
+/// 空くまで出せないので、枠が塞がっている間も top-level へ戻る道が要る。
+/// 設定の予約と通知も有限個の事象なので上界は変わらない。
 pub fn should_park(st: &GuiState, cur: i32) -> bool {
     let i = match idx(cur) {
         Some(i) => i,
@@ -942,6 +949,7 @@ pub fn should_park(st: &GuiState, cur: i32) -> bool {
         || has_top_level_work(mm)
         || fullscreen_restore_pending()
         || launch_work_pending()
+        || crate::settings::pending()
     {
         return true;
     }

@@ -81,10 +81,10 @@ GSHELL_LIB = $(GSHELL_DIR)/target/i686-os32-none/release/libgshell.a
 $(GSHELL_LIB): FORCE $(RUST_KAPI_RS)
 	cd $(GSHELL_DIR) && cargo build --release
 
-userland/gshell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(GSHELL_LIB) $(GFX_OBJ)
+userland/gshell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(GSHELL_LIB) $(GFX_OBJ) $(LIBCFG_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections --allow-multiple-definition \
 		-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 \
-		-o $@ $(CRT0_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(GSHELL_LIB) $(LGRP_END) -lc -lgcc
+		-o $@ $(CRT0_OBJ) $(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(GSHELL_LIB) $(LGRP_END) -lc -lgcc
 
 gshell: $(CRT0_OBJ) userland/gshell.bin
 

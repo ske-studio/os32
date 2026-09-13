@@ -400,6 +400,233 @@ unsafe extern "C" fn launch_child(id: i32) -> i32 {
     lk(&LAUNCH_CHILD).get(id as usize).copied().unwrap_or(0)
 }
 
+/* ================================================================ */
+/*  S4-W: 設定レジストリ (libos32cfg) の贋物 (票 S4 §5)              */
+/*                                                                  */
+/*  実 DB も SQLite も出てこない (それは S2-C の `test_cfg.py` の     */
+/*  領分)。ここで押さえるのは **gshell の判断** —                     */
+/*  「いつ開くか / 何を何回どの順で呼ぶか / いつ呼ばないか」。        */
+/* ================================================================ */
+
+/// `cfg_*` の呼び出し 1 件。**純粋な照会 (`cfg_status` / `cfg_last_sqlite` /
+/// `cfg_schema_version` / `cfg_last_close_error`) は数えない** — 見たいのは
+/// DB を動かす操作の順序だから。
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CfgCall {
+    /// `cfg_open(&db, writable)`。
+    Open(i32),
+    /// `cfg_get_int(db, scope, key, def)`。
+    GetInt(Vec<u8>, Vec<u8>),
+    Begin,
+    /// `cfg_set_int(db, scope, key, v)`。
+    SetInt(Vec<u8>, Vec<u8>, i32),
+    Commit,
+    Rollback,
+    Close,
+}
+
+/// 贋物の台本と記録。
+pub struct CfgFake {
+    /// `cfg_open` の戻り値 (負なら開かない)。
+    pub open_ret: i32,
+    /// 0 を返しながら `*out` に NULL を置く (ライブラリの契約違反の再現)。
+    pub open_null: bool,
+    /// `cfg_status` の答え (既定 `CFG_OK`)。
+    pub status: i32,
+    /// `cfg_status` を**呼び出しごとに**この列で返す (尽きたら `status`)。
+    /// 「get の途中で `CFG_ERROR` に変わる」(票 §5 の (18)) を作るのに使う。
+    pub status_script: Vec<i32>,
+    pub sqlite: i32,
+    pub schema: i32,
+    /// `desktop/color` の値 (None = 行が無い → `cfg_get_int` は def を返す)。
+    pub color: Option<i32>,
+    /// `taskbar/clock_24h` の値 (同上)。
+    pub clock: Option<i32>,
+    pub begin_ret: i32,
+    pub set_ret: i32,
+    pub commit_ret: i32,
+    pub close_ret: i32,
+    /// `cfg_last_close_error()` の答え。
+    pub last_close_error: i32,
+    /// 呼び出しの列。
+    pub calls: Vec<CfgCall>,
+}
+
+impl CfgFake {
+    const NEW: CfgFake = CfgFake {
+        open_ret: 0,
+        open_null: false,
+        status: 0, /* CFG_OK */
+        status_script: Vec::new(),
+        sqlite: 0,
+        schema: 1,
+        color: None,
+        clock: None,
+        begin_ret: 0,
+        set_ret: 0,
+        commit_ret: 0,
+        close_ret: 0,
+        last_close_error: 0,
+        calls: Vec::new(),
+    };
+}
+
+pub static CFG: Mutex<CfgFake> = Mutex::new(CfgFake::NEW);
+/// `cfg_open` が返す不透明ハンドルの置き場 (中身は誰も読まない)。
+static CFG_DB: AtomicUsize = AtomicUsize::new(0);
+
+/// 台本を書き換える (`mocks::cfg(|c| c.status = CFG_MISSING)`)。
+pub fn cfg<F: FnOnce(&mut CfgFake)>(f: F) {
+    f(&mut lk(&CFG));
+}
+/// `cfg_*` の呼び出し列 (複製)。
+pub fn cfg_calls() -> Vec<CfgCall> {
+    lk(&CFG).calls.clone()
+}
+/// `cfg_open` が呼ばれた回数 (「呼ばれない」ことの観測点)。
+pub fn cfg_open_calls() -> usize {
+    lk(&CFG)
+        .calls
+        .iter()
+        .filter(|c| matches!(c, CfgCall::Open(_)))
+        .count()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cfg_open(out: *mut *mut os32api::cfg::CfgDb, writable: i32) -> i32 {
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::Open(writable));
+    if c.open_ret < 0 {
+        return c.open_ret;
+    }
+    if !out.is_null() {
+        *out = if c.open_null {
+            core::ptr::null_mut()
+        } else {
+            /* 触られない番地でよいが、NULL でなければ何でもよいわけではない
+             * (実装が `is_null()` を見る)。静的な 1 語を指す。 */
+            CFG_DB.store(1, Ordering::SeqCst);
+            (&CFG_DB as *const AtomicUsize) as *mut os32api::cfg::CfgDb
+        };
+    }
+    c.open_ret
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_close(_db: *mut os32api::cfg::CfgDb) -> i32 {
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::Close);
+    c.close_ret
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_last_close_error() -> i32 {
+    lk(&CFG).last_close_error
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_status(_db: *const os32api::cfg::CfgDb) -> i32 {
+    let mut c = lk(&CFG);
+    if c.status_script.is_empty() {
+        c.status
+    } else {
+        let v = c.status_script.remove(0);
+        c.status = v; /* 最後の値が以後の答えとして居座る */
+        v
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_last_sqlite(_db: *const os32api::cfg::CfgDb) -> i32 {
+    lk(&CFG).sqlite
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_schema_version(_db: *const os32api::cfg::CfgDb) -> i32 {
+    lk(&CFG).schema
+}
+
+unsafe fn cstr(p: *const u8) -> Vec<u8> {
+    if p.is_null() {
+        return Vec::new();
+    }
+    let mut n = 0;
+    while *p.add(n) != 0 && n < 256 {
+        n += 1;
+    }
+    std::slice::from_raw_parts(p, n).to_vec()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cfg_get_int(
+    _db: *mut os32api::cfg::CfgDb,
+    scope: *const u8,
+    key: *const u8,
+    def: i32,
+) -> i32 {
+    let (s, k) = (cstr(scope), cstr(key));
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::GetInt(s, k.clone()));
+    /* 実物と同じ約束: 失敗も未設定も `def` (負値も正当な設定値なので、
+     * 戻り値では区別しない)。 */
+    let v = if k == b"desktop/color" {
+        c.color
+    } else if k == b"taskbar/clock_24h" {
+        c.clock
+    } else {
+        None
+    };
+    v.unwrap_or(def)
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_begin(_db: *mut os32api::cfg::CfgDb) -> i32 {
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::Begin);
+    c.begin_ret
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_set_int(
+    _db: *mut os32api::cfg::CfgDb,
+    scope: *const u8,
+    key: *const u8,
+    v: i32,
+) -> i32 {
+    let (s, k) = (cstr(scope), cstr(key));
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::SetInt(s, k, v));
+    c.set_ret
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_commit(_db: *mut os32api::cfg::CfgDb) -> i32 {
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::Commit);
+    c.commit_ret
+}
+#[no_mangle]
+pub unsafe extern "C" fn cfg_rollback(_db: *mut os32api::cfg::CfgDb) -> i32 {
+    let mut c = lk(&CFG);
+    c.calls.push(CfgCall::Rollback);
+    0
+}
+
+/// `sys_time()` が返す epoch 秒 (時計の整形の観測点、票 S4 §5 の (3)(13))。
+pub static SYS_TIME: AtomicUsize = AtomicUsize::new(0);
+/// `sys_time()` の答えを置く。
+pub fn set_sys_time(t: u32) {
+    SYS_TIME.store(t as usize, Ordering::SeqCst);
+}
+unsafe extern "C" fn sys_time() -> u32 {
+    SYS_TIME.load(Ordering::SeqCst) as u32
+}
+
+/// `kprintf` に渡った 1 行 (`"%s"` の実引数)。
+pub static KPRINTS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+/// `kprintf` の行の列 (複製)。
+pub fn kprint_lines() -> Vec<Vec<u8>> {
+    lk(&KPRINTS).clone()
+}
+/// 可変長の `kprintf` は Rust では定義できない (`c_variadic` は unstable) ので、
+/// **固定 3 引数**で書いて `transmute` で表へ入れる。gshell が渡すのは
+/// `("%s", NUL 終端の 1 本)` だけなので、これで過不足なく読める。
+unsafe extern "C" fn kprintf3(_attr: u8, _fmt: *const u8, arg: *const u8) {
+    lk(&KPRINTS).push(cstr(arg));
+}
+
 /// 中毒 (panic 中に掴んでいた) した Mutex でも読めるようにする。検査が
 /// `assert!(*X.lock().unwrap() == ..)` で落ちると次の試験まで巻き添えになる。
 fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -578,7 +805,7 @@ pub fn set_app_state(app_id: i32, state: i32) {
 pub fn init() {
     let mut a = os32api::mock_api();
     a.get_tick = get_tick;
-    a.sys_time = zero;
+    a.sys_time = sys_time;
     a.kbd_dropped_count = zero;
     a.kbd_trygetrawkey = raw_key;
     a.mouse_poll = mouse;
@@ -648,6 +875,15 @@ pub fn init() {
     *lk(&REPORT_RET) = 0;
     lk(&LAUNCH_CHILD).clear();
     lk(&KILL_FREES).clear();
+    /* 票 S4 (設定レジストリ)。贋物の台本と記録、gshell 側の私有状態を戻す。 */
+    a.kprintf = unsafe { core::mem::transmute::<*const (), _>(kprintf3 as *const ()) };
+    *lk(&CFG) = CfgFake::NEW;
+    lk(&KPRINTS).clear();
+    SYS_TIME.store(0, Ordering::SeqCst);
+    crate::settings::reset();
+    crate::modal::reset();
+    crate::startmenu::reset();
+    crate::taskbar::reset();
     crate::multiapp::reset();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);

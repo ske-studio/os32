@@ -27,6 +27,7 @@
 //! | `taskbar.rs` | タスクバー (Start / 窓ボタン / 時計) と作業領域 (V12-D の D1/D3) |
 //! | `startmenu.rs` | Start メニューと右クリックメニュー (D2 / D4) |
 //! | `session.rs` | SessionAction・sticky Quit・トップレベル handoff (V12-S) |
+//! | `settings.rs` | 設定レジストリ (`/etc/settings.db`) の読み書きと予約 (S4) |
 //! | `cursor.rs`  | マウスカーソル (損傷とは別経路の退避・再描画) |
 //! | `input.rs`   | 入力取り込み → Key / Text / Pointer / Button (T3 / U2a) |
 //! | `fep.rs`     | 日本語入力 (U2a)。cooked 待ち行列 = FEP、未確定行と候補窓 |
@@ -61,6 +62,7 @@ mod pump;
 mod reqs;
 mod ring;
 mod session;
+mod settings;
 mod slot;
 mod startmenu;
 mod taskbar;
@@ -162,8 +164,19 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
         );
     }
 
+    /* 設定レジストリ (票 S4 §2)。**gfx attach の後・最初の合成の前**に 1 回。
+     * DB が無い / 壊れている / 版が新しいときも既定値で起動を続ける
+     * (DESIGN §5 の fallback)。 */
+    st.cfg = settings::load(0);
+
     /* デスクトップ。全画面 present は WM だけ (契約 G4)。 */
     wm::composite_full(st);
+
+    /* 起動時通知 (票 S4 §2 の B3)。**最初の合成の後**に仕込み、実際に出るのは
+     * top-level の最初の周回 (`settings::consume`)。gshell 実行中の `kprintf`
+     * は con_sink に入って CUI 画面には残らないので、WM のメッセージが利用者に
+     * 届く唯一の経路。 */
+    settings::startup_notice(&st.cfg);
 
     /* ---- 単独ループ (契約 T8: アプリが居ないときは gshell が X3 を回す) ---- */
     if !standalone_loop(st) {
@@ -203,6 +216,12 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             st.launch_pending = false;
             launch_app(st);
         }
+        /* 設定レジストリの予約と通知 (票 S4 §3)。**DB に触れるのはここだけ** —
+         * `Req::Open` / `Req::Save` の open 〜 close を 1 周回の中で閉じ、
+         * 間に yield / 合成 / 他イベント処理を挟まない。走っているアプリは
+         * `multiapp::should_park` の (a) が `settings::pending()` を見て譲る
+         * ので、予約が立てば必ずここへ来る。 */
+        settings::consume(st);
         /* SessionAction のトップレベル handoff (契約 §7)。`launch_app` から
          * 戻った直後と、park で戻った周回でここを通る。**WM の文脈
          * (X1/X3/X4) からは絶対に来ない** = 入れ子 exec_run にならない。

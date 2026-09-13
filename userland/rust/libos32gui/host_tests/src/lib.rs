@@ -12,6 +12,12 @@
 //!     begin 失敗で rollback しない、set / commit 失敗で rollback する、
 //!     close 失敗は IO、**直前の失敗を優先**
 
+/// `libos32cfg` の ABI 宣言。本体では `pub use os32api::cfg as cfgabi;` で、
+/// ここでは os32api を丸ごと組まずに**実ファイルを直に**取り込む (票 S4 §4)。
+/// `cfgro.rs` が見るのはどちらでも `crate::cfgabi` の 1 名だけ。
+#[path = "../../../../../sdk/rust/os32api/src/cfg.rs"]
+pub mod cfgabi;
+
 #[path = "../../src/cfgro.rs"]
 pub mod cfgro;
 
