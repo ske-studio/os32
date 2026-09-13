@@ -164,3 +164,6 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | I5 | **合格**: `N` → 何も変わらない (直後の recover の表示が同じ状態を示す) |
 | I3 | **合格**: `rm /hd0/etc/settings.db` → recover → 印 `orig=missing journal=absent`、DB = マスタ、`.bak` は作られない → `--revert-settings` → `reverted: orig=missing, sync=0`、`settings.db` は**消えて欠損に戻る** (`.failed` = 3072 にマスタの写し)。最後にもう一度 recover してマスタを置いた (`.failed` は残る、印 `phase=done`) |
 | I6 | ホスト TDD のみ (14 ケース、後退 17 種検出)。往復 1 の B1 / B2 / B5 の複合ケースは修正後に追加 |
+| C5 | **合格**: FDD ブートの `cfg status` = `OK schema_version 1 pool 24768 B` (S3-K の後。マスタの検査に限定) |
+| C6 | **合格**: HDD ブートに戻して `cfg status` OK、`/etc` は `settings.db` 3072 + `.failed` + 印。壊す前に取った `/tmp/b.json` を `cfg set` で変えた後に import → export 時点の値に戻る。`os32gui` は起動時通知なしで通常のデスクトップ (`s3_gui_after.png`) |
+| C4 | 未実施 (GUI 端末からの import。往復 2 の配備で) |
