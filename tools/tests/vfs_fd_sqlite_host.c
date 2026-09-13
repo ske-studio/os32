@@ -12,25 +12,78 @@ static int current_owner = 2, owner_sets, probes, size_rc, write_rc;
  * (vfs_open_sqlite が広域 owner を動かさないことの確認)。S0-K の
  * kapi_db_v50_host.c だけが owner を渡り歩くのでここも一緒に動かす。 */
 static int resolve_owner = 2;
-/* 相対名に前置する cwd (末尾 '/' 込み)。fs/vfs.c の vfs_resolve_path は
- * cwd + input を VFS_MAX_PATH の作業バッファで連結して**切り詰める**ので、
- * 「入力は短いが解決名は上限」という形を作れる。F2a/F2b は "" のまま。 */
+/* 相対名に前置する cwd。fs/vfs.c の vfs_resolve_path は cwd + "/" + input を
+ * VFS_MAX_PATH の作業バッファで連結して**切り詰めてから** `.` / `..` を畳む
+ * ので、「入力は短いが解決名は上限」「溢れた入力が別の絶対名に化ける」の
+ * どちらも作れる。F2a/F2b は "" のまま (絶対名しか渡さない)。 */
 static const char *resolve_cwd = "";
 static VfsOps mock_ops;
 int res_owner_get(void) { return current_owner; }
 void res_owner_set(int owner) { owner_sets++; current_owner = owner; }
+/* fs/vfs.c:52-121 の vfs_resolve_path の移植。**順序がそのまま**でなければ
+ * 意味が無い: (1) cwd と input を VFS_MAX_PATH の tmp へ strlcpy/strlcat で
+ * 連結し (= 溢れたら切り詰める)、(2) そのあとで `.` / `..` / 連続 `/` を畳む。
+ * 逆順にすると「切り詰められた末尾が `..` を含んでいて別の絶対名になる」
+ * という反例 (Codex 往復 3) が作れない。 */
+const char *vfs_cwd(void) { return resolve_cwd[0] ? resolve_cwd : "/"; }
+
+static void host_strlcat(char *dst, const char *src, int size)
+{
+    int used = (int)strlen(dst);
+    if (used < size - 1) str_cpy(dst + used, src, size - used);
+}
+
 void vfs_resolve_path(const char *in, char *out, int size)
 {
+    char tmp[VFS_MAX_PATH];
+    const char *parts[VFS_MAX_PATH_DEPTH];
+    int num_parts = 0;
+    int i, p, o;
+
     probes++;
     CHECK(current_owner == resolve_owner);
-    if (in && in[0] != '/' && resolve_cwd[0]) {
-        int used;
-        str_cpy(out, resolve_cwd, size);
-        used = (int)strlen(out);
-        str_cpy(out + used, in, size - used);   /* 上限で切り詰める */
-        return;
+    if (!out || size <= 0) return;
+    if (!in || !in[0]) { str_cpy(out, vfs_cwd(), size); return; }
+
+    if (in[0] == '/') {
+        str_cpy(tmp, in, VFS_MAX_PATH);
+    } else {
+        int len;
+        str_cpy(tmp, vfs_cwd(), VFS_MAX_PATH);
+        len = (int)strlen(tmp);
+        if (len > 0 && tmp[len - 1] != '/') host_strlcat(tmp, "/", VFS_MAX_PATH);
+        host_strlcat(tmp, in, VFS_MAX_PATH);   /* ここで切り詰まる */
     }
-    str_cpy(out, in, size);
+
+    p = 0;
+    while (tmp[p] != '\0') {
+        int start, len;
+        char c;
+        if (tmp[p] == '/') { p++; continue; }
+        start = p;
+        while (tmp[p] != '/' && tmp[p] != '\0') p++;
+        len = p - start;
+        c = tmp[p];
+        tmp[p] = '\0';
+        if (len == 1 && tmp[start] == '.') {
+            /* nop */
+        } else if (len == 2 && tmp[start] == '.' && tmp[start + 1] == '.') {
+            if (num_parts > 0) num_parts--;
+        } else {
+            if (num_parts < VFS_MAX_PATH_DEPTH) parts[num_parts++] = &tmp[start];
+        }
+        if (c == '\0') break;
+        p++;
+    }
+
+    out[0] = '/';
+    o = 1;
+    for (i = 0; i < num_parts; i++) {
+        int j = 0;
+        while (parts[i][j] && o < size - 1) out[o++] = parts[i][j++];
+        if (i < num_parts - 1 && o < size - 1) out[o++] = '/';
+    }
+    out[o] = '\0';
 }
 VfsOps *vfs_route(const char *path, char *out, int size, void **ctx)
 { probes++; str_cpy(out, path, size); *ctx = &mock_ops; return &mock_ops; }

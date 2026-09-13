@@ -313,7 +313,7 @@ python3 tools/tests/test_sqlite_groups.py
 
 | # | 対象 | RED (実際に落としたもの) | GREEN |
 |---|---|---|---|
-| 1 | v50 の 7 本そのもの | 実装前は `kapi_db_open_existing` 等が存在せず、`kapi_db_v50_host.c` は **リンクできない** (undefined reference) | 9 ケース全通過 |
+| 1 | v50 の 7 本そのもの | 実装前は `kapi_db_open_existing` 等が存在せず、`kapi_db_v50_host.c` は **リンクできない** (undefined reference)。**これは RED ではない** — 「対象の挙動が assertion で落ちる」ことを見せていないので、下の 2〜4 と 2b/2c/2d の反例が本来の RED。ここは経緯として残す | 9 ケース全通過 |
 | 2 | `shm_write_row` の境界 (§1b) | 境界検査を `if (0 && ...)` で殺す → `FAIL shm_bound:359: kapi_db_step(h) == DB_STATUS_ERROR` (20000B の行が ROW を返す) | 検査を戻して `PASS shm_bound` + 番兵 256B が無傷 |
 | 3 | exec 回収順序 (§1c) | `db_cleanup_owned` を元の (6) の位置へ戻す → `AssertionError: exec_reclaim_owned: db_cleanup_owned は vfs_close_owned より先` | 先頭へ移して PASS |
 | 4 | 回収順序の**観測できる差** | `order_old` (FD を先に閉じる) で **後始末がバックエンドに届いた回数 = 2** | `order_new` (DB が先) で **21**。rollback の journal 読み戻しは生きた FD 越しにしか起きない |
@@ -357,6 +357,20 @@ python3 tools/tests/test_sqlite_groups.py
 (`materialize_fail` の (c) がその経路)。決定的に踏むために
 `sqlite3_column_blob` / `sqlite3_column_text` の **1 対だけ** を差し替えている。
 
+### 2d. 実装レビュー 往復 3 (Codex、`769e1fc`) の blocker 1 件 — RED → GREEN
+
+| # | blocker | ケース | RED |
+|---|---|---|---|
+| 1 | 切り詰め済みの絶対名を信頼して **別の DB** を開ける | `resolve_truncate` | `db_resolve_fits` の検査を外す → `FAIL resolve_truncate:1063: kapi_db_open_existing(evil, 1) == -1` (cwd `/tmp` + `"./"×122 + "a/../b.db"` が `/tmp/b` に化け、RW handle が返る) |
+
+`fs/vfs.c` の `vfs_resolve_path` は VFS_MAX_PATH の作業領域に `cwd + "/" + input` を
+**strlcat で切り詰めてから** `.` / `..` を畳む。だから溢れた入力は「短い別の絶対名」
+として返り、**解決結果を見ても切り詰めは分からない**。そこで resolve の前に
+`kstrlen(cwd) + 1 + kstrlen(path) + 1 <= VFS_MAX_PATH` (絶対名は cwd 抜き) を数えて
+`SQLITE_CANTOPEN` で断る。正規化で短くなる入力も巻き添えで断る (安全側)。
+ホストの `vfs_resolve_path` 模型は **fs/vfs.c と同じ順序** (連結 → 切り詰め → 正規化)
+に書き直した (`tools/tests/vfs_fd_sqlite_host.c`)。順序が違うとこの反例は作れない。
+
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
 | ケース | 見るもの |
@@ -380,6 +394,7 @@ python3 tools/tests/test_sqlite_groups.py
 | `prepare_replaces` | 空 SQL / 上限超過 / NULL / tail あり のどれで拒否しても旧 stmt は消えており、続く `db_step` は DONE で**何も実行しない** |
 | `materialize_fail` | (a) 収まる BLOB は取れる (b) accessor が値を返せないとき ERROR + `NOMEM` + 部分 ROW なし + stmt は生存 (c) MEMSYS5 を締めて step 側で落ちても同じく部分 ROW なし |
 | `resolve_len` | (a) cwd 251B で journal 名が切り詰められ本体に衝突する形でも `CANTOPEN` (b) 解決名 248B は `CANTOPEN` (c) 247B は開ける (d) SQLite には解決後の絶対名だけが渡る |
+| `resolve_truncate` | 模型が実物と同じ順序で `/tmp/b` に化けることを見せたうえで、その入力が `CANTOPEN` で断られる。絶対名の 255 文字 / 256 文字の境界、短い相対名は従来どおり通る |
 
 ### 4. ホストでは踏めなかったもの ([V4])
 
@@ -400,6 +415,10 @@ python3 tools/tests/test_sqlite_groups.py
   K2 の PTE 検査ケースは実装レビュー 往復 1 の指摘で、**許可帯の外**を指す番地から
   **許可帯の中の未マップページ** (`kapi->sbrk_heap_limit` = guard_a の先頭) へ
   置き換えた — 前者は `ring3_ptr_ok` だけで落ちるので PTE 検査を消しても通ってしまう。
+- **「長さ 0 + NOMEM」の枝を実メモリ圧で**。`sqlite3_column_bytes` が 0 を返すのは
+  正当な 0 バイト値と区別できないので根拠は `sqlite3_errcode` だけだが、実 SQLite では
+  そこへ至る前に step が落ちる。`materialize_fail` の (b3) は `sqlite3_errcode` /
+  `sqlite3_extended_errcode` を差し替えて決定的に踏んでいる。
 - **実メモリ圧での「step は通ったが accessor が失敗」**。ホストの実 SQLite では
   `sqlite3_step` の方が先に NOMEM で落ちる (`materialize_fail` の (c) で確認)。
   実機の MEMSYS5 (384KB) で accessor 側が落ちる形は、accessor を 1 対だけ

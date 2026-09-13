@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **47** |
-| 合計エントリ数 | **196** (ヘッダ2 + 関数ポインタ192 + データフィールド2) |
+| 現在のバージョン | **50** |
+| 合計エントリ数 | **212** (ヘッダ2 + 関数ポインタ208 + データフィールド2) |
 
 ---
 
@@ -560,7 +560,10 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   「journal の有無が分からない」ので `SQLITE_IOERR` で断る (不存在と同じ扱いにしない)。
   path は先に `vfs_resolve_path` で**絶対名へ解決**し、stat も open もその名前で行う
   (相対名を SQLite に渡さないので、transaction 中に cwd が動いても journal の削除先が
-  変わらない)。`<絶対名>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
+  変わらない)。ただし `vfs_resolve_path` は作業領域で**切り詰めてから**正規化するので、
+  溢れた入力は「短い別の絶対名」として返る。だから解決の**前**に
+  `kstrlen(cwd) + 1 + kstrlen(path) + 1` (絶対名は cwd 抜き) が `VFS_MAX_PATH` に
+  収まることを数え、収まらなければ `SQLITE_CANTOPEN` (path too long) で断る。`<絶対名>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
   `mxPathname` も 256) に収まらないときは、journal の stat が切り詰められて**本体に
   当たる**ので open の前に `SQLITE_CANTOPEN` で断る。RW は `PRAGMA journal_mode` が `delete` で
   あることを照会だけで確かめ、**照会の失敗** (`SQLITE_NOTADB` / `IOERR` / `NOMEM` 等 —

@@ -64,8 +64,9 @@ int sqlite3_open_v2(const char *path, sqlite3 **out, int flags, const char *vfs)
 }
 int sqlite3_extended_errcode(sqlite3 *db) { return 0; }
 int sqlite3_errcode(sqlite3 *db) { return 0; }
-/* fs/vfs.c の path 正規化。この票 (F1) は相対名を使わないので素通し。
- * 解決の規則そのものは tools/tests/kapi_db_v50_host.c が踏む。 */
+/* fs/vfs.c の cwd と path 正規化。この票 (F1) は絶対名しか使わないので
+ * 素通し。解決の規則そのものは tools/tests/kapi_db_v50_host.c が踏む。 */
+const char *vfs_cwd(void) { return "/"; }
 void vfs_resolve_path(const char *in, char *out, int size)
 {
     int i;

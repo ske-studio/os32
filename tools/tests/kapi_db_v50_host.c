@@ -101,15 +101,24 @@ static unsigned char test_shm[DB_SHM_BLOCK_SIZE + SHM_CANARY];
  * `sqlite3_step` の方が先に落ちて同じ形を作れない。**その 1 本だけ**を
  * 差し替えて、長さはあるのにポインタが無い状態を決定的に作る。 */
 static int fail_column_ptr;
+static int fake_errcode;          /* 0 = 素通し */
 static const void *host_column_blob(sqlite3_stmt *st, int i)
 { return fail_column_ptr ? (const void *)0 : sqlite3_column_blob(st, i); }
 static const unsigned char *host_column_text(sqlite3_stmt *st, int i)
 { return fail_column_ptr ? (const unsigned char *)0 : sqlite3_column_text(st, i); }
+static int host_errcode(sqlite3 *db)
+{ return fake_errcode ? fake_errcode : sqlite3_errcode(db); }
+static int host_ext_errcode(sqlite3 *db)
+{ return fake_errcode ? fake_errcode : sqlite3_extended_errcode(db); }
 #define sqlite3_column_blob host_column_blob
 #define sqlite3_column_text host_column_text
+#define sqlite3_errcode host_errcode
+#define sqlite3_extended_errcode host_ext_errcode
 #include "../../kapi/kapi_db.c"
 #undef sqlite3_column_blob
 #undef sqlite3_column_text
+#undef sqlite3_errcode
+#undef sqlite3_extended_errcode
 
 static int cases_run;
 
@@ -127,6 +136,7 @@ static void reset_all(void)
     stat_calls = 0;
     resolve_cwd = "";
     fail_column_ptr = 0;
+    fake_errcode = 0;
     sqlite3_hard_heap_limit64(0);
     resolve_owner = current_owner = 2;
     fixture_init();
@@ -676,6 +686,12 @@ static void journal_mode(void)
     h = kapi_db_open_existing("/g.db", 1);
     CHECK(h >= 0);
     CHECK(db_journal_mode_check(db_slots[h].db) == SQLITE_OK);
+    /* 照会は通るが DELETE ではない → CANTOPEN (照会の失敗コードと別物)。
+     * 接続の journal_mode を明示的に変えて、その枝だけを踏む。 */
+    CHECK(kapi_db_exec(h, "PRAGMA journal_mode=MEMORY") == 0);
+    CHECK(db_journal_mode_check(db_slots[h].db) == SQLITE_CANTOPEN);
+    CHECK(kapi_db_exec(h, "PRAGMA journal_mode=DELETE") == 0);
+    CHECK(db_journal_mode_check(db_slots[h].db) == SQLITE_OK);
     CHECK(kapi_db_close(h) == 0);
 }
 
@@ -891,6 +907,36 @@ static void materialize_fail(void)
     canary_check("materialize_fail ptr");
     CHECK(kapi_db_finalize(h) == 0);
 
+    /* (b2) TEXT 側も同じ規則 (accessor が値を返せない)。 */
+    CHECK(kapi_db_exec(h, "DELETE FROM t") == 0);
+    CHECK(kapi_db_exec(h, "INSERT INTO t VALUES('abcdefghij')") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT x FROM t") == 0);
+    memset(test_shm, 0, sizeof(test_shm));
+    fail_column_ptr = 1;
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    fail_column_ptr = 0;
+    CHECK(kapi_db_error_code(h) == SQLITE_NOMEM);
+    CHECK(((DB_ResultHeader *)test_shm)->status == DB_STATUS_ERROR);
+    CHECK(((DB_ResultHeader *)test_shm)->column_count == 0);
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* (b3) 長さが 0 に潰れている枝。`sqlite3_column_bytes` は確保に失敗すると
+     * 0 を返すので、ポインタの有無では見分けられない。errcode だけが根拠。
+     * 0 バイトの値そのものは**正当**なので、errcode が NOMEM でなければ通す。 */
+    CHECK(kapi_db_exec(h, "DELETE FROM t") == 0);
+    CHECK(kapi_db_exec(h, "INSERT INTO t VALUES(x'')") == 0);   /* 0B blob */
+    CHECK(kapi_db_prepare_only(h, "SELECT x FROM t") == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);            /* 0B は ROW でよい */
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT x FROM t") == 0);
+    memset(test_shm, 0, sizeof(test_shm));
+    fake_errcode = SQLITE_NOMEM;
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    fake_errcode = 0;
+    CHECK(kapi_db_error_code(h) == SQLITE_NOMEM);
+    CHECK(((DB_ResultHeader *)test_shm)->column_count == 0);
+    CHECK(kapi_db_finalize(h) == 0);
+
     /* (c) 実機に近い側: MEMSYS5 を締めると **step の方が先に**落ちる。
      * どこで落ちても「部分 ROW を返さない」は同じでなければならない。 */
     CHECK(kapi_db_prepare_only(h, "SELECT zeroblob(200000)") == 0);
@@ -985,6 +1031,58 @@ static void resolve_len(void)
     CHECK(fixture_find("rel.db", 0) == NULL);
 }
 
+/* ---- 20. 切り詰め済みの絶対名を信じない (往復 3) ----------------------- */
+/*  fs/vfs.c の vfs_resolve_path は VFS_MAX_PATH の作業領域に cwd と入力を
+ *  連結し、**切り詰めてから** `.` / `..` を畳む。溢れた入力は「短い別の
+ *  絶対名」として返るので、解決結果だけを見ても切り詰めは分からない。
+ *  cwd `/tmp` + `"./" × 122 + "a/../b.db"` は `/tmp/b` に化ける。         */
+static void resolve_truncate(void)
+{
+    static char evil[VFS_MAX_PATH];
+    const char *resolved;
+    u32 i, n = 0;
+    int h;
+
+    for (i = 0; i < 122u; i++) { evil[n++] = '.'; evil[n++] = '/'; }
+    memcpy(evil + n, "a/../b.db", 9);
+    n += 9u;
+    evil[n] = '\0';
+    CHECK(strlen(evil) == 253);          /* NUL 込み 254B = 入口の上限内 */
+
+    make_db("/tmp/b", "CREATE TABLE decoy(x)");        /* 化けた先の DB */
+    resolve_cwd = "/tmp";
+
+    /* 模型が実物と同じ順序 (連結 → 切り詰め → 正規化) であることを見せる。
+     * ここが `/tmp/b` にならなければ反例が成り立っていない。 */
+    resolved = host_resolve(evil);
+    printf("TRUNCATE resolved=%s\n", resolved);
+    CHECK(!strcmp(resolved, "/tmp/b"));
+    CHECK(fixture_find(resolved, 0) != NULL);
+
+    /* 要求は `.../b.db`。解決名を信じると **別の DB** の RW handle を返す。 */
+    CHECK(kapi_db_open_existing(evil, 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    CHECK(kapi_db_open_existing(evil, 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+
+    /* 絶対名でも同じ規則 (NUL 込み VFS_MAX_PATH を超えたら断る)。 */
+    memset(evil, 'z', sizeof(evil));
+    evil[0] = '/';
+    evil[VFS_MAX_PATH - 1] = '\0';       /* 255 文字 = ぎりぎり通る長さ */
+    CHECK(db_resolve_fits(evil));
+    evil[VFS_MAX_PATH - 1] = 'z';
+    CHECK(strlen(evil) >= (u32)VFS_MAX_PATH);
+    CHECK(!db_resolve_fits(evil));
+
+    /* 短い相対名は従来どおり通る */
+    resolve_cwd = "/tmp";
+    make_db("/tmp/ok.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("ok.db", 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_close(h) == 0);
+    resolve_cwd = "";
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -1009,6 +1107,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "prepare_replaces")) prepare_replaces();
     else if (!strcmp(argv[1], "materialize_fail")) materialize_fail();
     else if (!strcmp(argv[1], "resolve_len")) resolve_len();
+    else if (!strcmp(argv[1], "resolve_truncate")) resolve_truncate();
     else if (!strncmp(argv[1], "order_", 6)) reclaim_order(argv[1] + 6);
     else CHECK(0);
 

@@ -288,8 +288,12 @@ static int shm_row_check(sqlite3 *db, sqlite3_stmt *stmt, int ncol)
             else
                 p = sqlite3_column_blob(stmt, i);
             len = sqlite3_column_bytes(stmt, i);
-            /* 実体化の失敗: ポインタが無いのに長さがある、または SQLite が
-             * NOMEM を立てた。0 バイトの値は NULL ポインタでも正当。 */
+            /* 実体化の失敗の 2 つの形:
+             *   (a) ポインタが無いのに長さがある
+             *   (b) 長さが 0 に潰れているが SQLite が NOMEM を立てている
+             *       (`sqlite3_column_bytes` は確保に失敗すると 0 を返す)
+             * 0 バイトの値は NULL ポインタでも正当なので、(b) は errcode で
+             * しか見分けられない。TEXT / BLOB の両方で同じ規則。 */
             if ((!p && len > 0) ||
                 (db && sqlite3_errcode(db) == SQLITE_NOMEM)) {
                 int code = db ? sqlite3_extended_errcode(db) : SQLITE_NOMEM;
@@ -790,6 +794,31 @@ static int db_journal_mode_check(sqlite3 *db)
     return code;
 }
 
+/* resolve の **前** に、fs/vfs.c が作る連結文字列が切り詰められないかを見る
+ * (Codex 往復 3)。vfs_resolve_path は VFS_MAX_PATH の作業領域に
+ * `cwd + "/" + input` を **strlcat で切り詰めてから** `.` / `..` を畳む。
+ * つまり溢れた入力は「短い別の絶対名」に化けて返ってくる:
+ *   cwd=/tmp, input="./"×122 + "a/../b.db" → 連結 259B → 255B で切ると
+ *   末尾が `a/../b` → 正規化して `/tmp/b` = **要求と違う DB**。
+ * 解決結果を見ても切り詰めは分からないので、入口で長さを数えて断る。
+ * 正規化で短くなる入力も巻き添えで断る (安全側。呼び手は絶対名を渡せばよい)。
+ * 戻り値: 1 = 切り詰めなしで解決できる / 0 = 断る (CANTOPEN, path too long)。 */
+static int db_resolve_fits(const char *path)
+{
+    u32 need;
+
+    if (!path || !path[0]) return 0;
+    if (path[0] == '/') {
+        need = kstrlen(path) + 1u;                  /* NUL 込み */
+    } else {
+        const char *cwd = vfs_cwd();
+        /* fs/vfs.c は cwd が '/' で終わっていなければ 1 文字足す。常に
+         * 足したものとして数える (1 バイト厳しい側に倒す)。 */
+        need = kstrlen(cwd ? cwd : "") + 1u + kstrlen(path) + 1u;
+    }
+    return need <= (u32)VFS_MAX_PATH;
+}
+
 /* `<path>-journal` を journal_buf に組み立てる。1 = 組み立てた /
  * 0 = 下位層の path 容量に収まらない (= path too long、呼び手は CANTOPEN)。 */
 static int db_journal_name(const char *path)
@@ -822,7 +851,14 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
         return -1;
     }
 
-    /* (0) 以降はすべて **解決後の絶対名** で扱う (Codex 往復 2 の B4)。 */
+    /* (0) 以降はすべて **解決後の絶対名** で扱う (Codex 往復 2 の B4)。
+     * 解決に渡す前に、下位層の作業領域で切り詰められないことを確かめる
+     * (Codex 往復 3: 切り詰め後に正規化されるので、溢れた入力は別の DB の
+     * 絶対名として返ってくる)。 */
+    if (!db_resolve_fits(path_copy_buf)) {
+        open_fail_set(SQLITE_CANTOPEN);      /* path too long (解決前の長さ) */
+        return -1;
+    }
     abs_path_buf[0] = '\0';
     vfs_resolve_path(path_copy_buf, abs_path_buf, (int)sizeof(abs_path_buf));
     if (abs_path_buf[0] == '\0') {
