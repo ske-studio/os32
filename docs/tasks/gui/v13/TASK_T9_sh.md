@@ -314,6 +314,14 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
   ウィンドウモードは `multiapp::abort_at_top_level()` が `exec_abort_clear` → `exec_kill(末尾)`
   → `forget_freed` をその場で実行する (予約が立っている周は二重にしない)。試験 71 passed。
 
+- **受入 S6 の 3 回目 (本人宛て) が不安定だった件の修正 (2026-09-13)**: `handler.rs` の
+  `abort_targets_current` が真の枝で `break` してカーネルの `abort_req` に任せていたが、IRQ1 が
+  アプリの CPL=3 実行中に着地した周は要求が立たず (暴走ではない) 出口で消える (3 回中 2 回失敗)。
+  **本人宛ても予約に統一** (`multiapp::reserve_abort_self`) し、`should_park` が譲らせて
+  top-level の `drain_top_level` が `exec_abort_clear` → `exec_kill(本人)` → `forget` を実行する。
+  宛先なし (`abort_target` = 0) は取り消しだけ予約。表に載っていない owner (park できない) だけは
+  従来どおり `break` する。CTRL+STOP を押した周だけ 1 本でも park する (押さない周の回帰はゼロ)。
+
 ## 15. 実装メモ (A、2026-09-13)
 
 - 端末の起動は `session_launch` → **`launch_req(cmd)`** (`guest.rs:launch`)。token は受理した時点で

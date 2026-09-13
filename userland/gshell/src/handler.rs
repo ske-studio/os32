@@ -381,21 +381,33 @@ fn op_wait(st: &mut GuiState, owner: i32, slot_no: usize, arg: u32) -> i32 {
         /* WM の 1 周: 入力取り込み → WM 自身の UI → クローム/デスクトップ present。 */
         wm::wm_cycle(st, input::Ctx::Wait);
 
-        /* CTRL+STOP (契約 T6): 待ちを抜けてアプリへ戻す。戻った syscall の出口で
-         * カーネルが畳む (exec.c)。ここで待ち続けると永遠に畳めない。
-         * 宛先は**フォーカス窓のアプリ**なので、フォーカスが別のアプリに
-         * あるときは抜けない (D4: 走っている本人でなければ何もしない)。 */
+        /* CTRL+STOP (契約 T6)。宛先は**フォーカス窓のアプリ** (T9 D8 以降は
+         * そこから要求表の連鎖を辿った末尾)。
+         *
+         * 宛先が本人でも別アプリでも**予約に統一する** (票 T9 受入 S6 の
+         * 3 回目、実機 2026-09-13)。以前は本人宛てなら `break` してアプリを
+         * syscall の出口へ戻し、カーネルの `abort_req` に畳ませていたが、
+         * IRQ1 がアプリの CPL=3 実行中に着地した周は `abort_req` が立たず
+         * (暴走ではないので K が立てない)、出口に何も無くて要求が消える
+         * (3 回中 2 回失敗)。`exec_abort_clear` も `exec_kill` も owner 1
+         * (WM top-level) からしか呼べない (K5c) ので、ここでは予約だけ積み、
+         * `should_park` が譲らせて `drain_top_level` が実行する。 */
         if st.abort_seen {
             st.abort_seen = false;
             if multiapp::abort_targets_current(st, owner) {
-                break;
+                /* 予約は WM の表に載っている ID にしか積めない。載っていない
+                 * = `should_park` も譲らせないので、top-level へ戻る道が無い。
+                 * その 1 本だけは従来どおり出口に任せる (park できない文脈で
+                 * 予約を残すと `has_top_level_work` が立ちっぱなしになる)。 */
+                if !multiapp::is_tracked(owner) {
+                    break;
+                }
+                multiapp::reserve_abort_self(st, owner);
+            } else {
+                /* 宛先はフォーカス窓の**別の**アプリ (決裁 A1)。走っている
+                 * 本人が負っている要求を降ろし、宛先を畳む。 */
+                multiapp::redirect_abort(st, owner);
             }
-            /* 宛先はフォーカス窓の**別の**アプリ (決裁 A1)。走っている本人が
-             * 負っている要求を降ろし、フォーカス窓の owner を畳む — どちらも
-             * owner 1 (WM top-level) からしか呼べない (K5c) ので、ここでは
-             * 予約だけ積む。`should_park` がこの予約を見て譲らせ、park で
-             * top-level へ戻ったところで両方が実行される。 */
-            multiapp::redirect_abort(st, owner);
         }
         if wake_ready(st, owner, slot_no) {
             break;

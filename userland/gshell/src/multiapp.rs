@@ -491,10 +491,41 @@ pub fn abort_at_top_level(st: &GuiState) -> i32 {
     target
 }
 
+/// CTRL+STOP の宛先が**走っている本人** (または宛先なし) だったときの予約
+/// (票 T9 受入 S6 の 3 回目、実機 2026-09-13)。
+///
+/// 以前は `handler.rs` がこの枝で `break` し、アプリを syscall の出口へ戻して
+/// カーネルの `abort_req` に畳ませていた。ところが IRQ1 の着地点で経路が
+/// 分かれる:
+///
+/// | IRQ1 が着地した時点 | カーネルの `abort_req` | 結果 |
+/// |---|---|---|
+/// | アプリが `op_wait` の中 | 立つ | 出口で畳まれる (成功) |
+/// | アプリが自分の処理を CPL=3 で走らせている最中 | **立たない** (暴走ではない) | 出口に要求が無く**消える** |
+///
+/// 実機は 3 回中 2 回が下の行に当たった。**カーネルの要求に頼らず**、
+/// 別アプリ宛て ([`redirect_abort`]) と同じ予約に統一して、top-level の
+/// [`drain_top_level`] が `exec_abort_clear` → `exec_kill` を行う。
+/// `exec_abort_clear` が先なので、上の行で立っていた要求も巻き添えにならない
+/// (決裁 A1 の順序)。`WAIT` で park した GUI アプリを `exec_kill` で畳めるのは
+/// Start → CUI の [`request_kill_all`] と同じ。
+///
+/// 宛先が無い周 (窓が 1 枚も無い = `abort_target` が 0) は**取り消しだけ**
+/// 予約する — 誰も死なないが、カーネルに載ったかもしれない要求は降ろす。
+pub fn reserve_abort_self(st: &GuiState, cur: i32) {
+    m().abort_clear_req = true;
+    if abort_target(st) == cur {
+        request_kill(cur);
+    }
+}
+
 pub fn redirect_abort(st: &GuiState, cur: i32) {
     let f = abort_target(st);
     if f == 0 || f == cur {
-        return; /* 呼ぶ側 (`abort_targets_current`) が弾いている経路 */
+        /* 呼ぶ側 (`abort_targets_current`) が [`reserve_abort_self`] へ
+         * 振り分けている経路。全画面の top-level (`cur` = 0) から来て
+         * `f == 0` のときだけここに落ちる = 宛先も本人も居ない。 */
+        return;
     }
     m().abort_clear_req = true;
     /* フォーカス窓の owner が WM の握るアプリでなければ (シェル帯の窓など)

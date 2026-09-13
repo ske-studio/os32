@@ -479,6 +479,43 @@ RED は `top_level_abort()` を「従来の全画面分岐だけ」の仮実装�
 最終実行: `71 passed; 0 failed`。`cargo check --release` 警告 0、
 `check_constraints.py` / `check_gui_proto.py` も通した。実機再試験は PM / テスター側 ([V4])。
 
+### 受入 S6 の 3 回目 (本人宛て) が不安定だった件の修正 (2026-09-13) — RED → GREEN
+
+現象: 端末 1 本 (GetMessage 型、100ms タイマ) に CTRL+STOP を送る 3 回目が **3 回中 2 回失敗**。
+IRQ1 の着地点で経路が分かれる:
+
+| IRQ1 が着地した時点 | カーネルの `abort_req` | 結果 |
+|---|---|---|
+| 端末が `op_wait` の中 (`in_op_wait` = 1) | 立つ | `break` → syscall 出口で畳まれる (成功した回) |
+| 端末が自分のタイマ処理を CPL=3 で走らせている最中 | **立たない** (暴走ではない) | `break` しても出口に要求が無く**消える** (失敗した回) |
+
+K5b / K5c の G 検査が通っていたのは下の行の窓が小さかっただけで、`abort_seen` (raw リング由来) は
+立っているのに畳む手段が無い、という穴だった。
+
+直し方: `handler.rs` の `abort_targets_current` が真の枝で `break` をやめ、
+**本人宛ても予約に統一**する (`multiapp::reserve_abort_self(st, cur)` =
+`abort_clear_req = true` + 宛先が本人なら `request_kill(cur)`)。次の `maybe_park` が
+`has_top_level_work` で譲らせ、top-level の `drain_top_level` が
+`exec_abort_clear` → `exec_kill(本人)` → `forget` を行う (#2 で sh を畳んだのと同じ経路)。
+宛先が無い周 (`abort_target` = 0) は取り消しだけ予約する。
+**例外**: owner が WM の表に載っていない (= `should_park` が譲らせない = top-level へ戻る道が
+無い) 1 本だけは従来どおり `break` する — 予約を残すと `has_top_level_work` が立ちっぱなしになる。
+
+| 検査 | 見るもの | RED |
+|---|---|---|
+| `ctrl_stop_with_focus_on_the_running_app_keeps_the_kernel_abort` (改訂) | 2 本居て宛先 = 本人 → 予約 → 次の `op_wait` で park → top-level で `exec_abort_clear` 1 回 → `exec_kill(2)` | ✔ (`pending_top_level_work` が偽) |
+| `a_single_app_keeps_the_old_ctrl_stop_path` (改訂) | **1 本でも**同じ (押した周だけ park する) | ✔ (`1 本なのに予約が積まれた`) |
+| 16 `ctrl_stop_in_op_wait_with_no_target_reserves_only_the_clear` | 宛先 0 → `exec_abort_clear` だけ、誰も畳まない | ✔ |
+| 17 `ctrl_stop_in_op_wait_with_a_child_still_folds_the_tail` | 宛先が別 (子あり) は従来どおり連鎖の末尾 | — (回帰側) |
+
+押していない周の「1 本なら park しない」(回帰ゼロ) は
+`a_single_app_never_parks_and_keeps_the_old_wm_cycle_halt_loop` が引き続き見ている。
+全画面の枝 (`lib.rs` → `redirect_abort(st, 0)`) は `cur` = 0 なので影響なし。全画面の所有者が
+`op_wait` から本人宛てで来た場合も同じ予約経路に乗る (`abort_target` = 所有者 = `cur`)。
+
+最終実行: `73 passed; 0 failed`。`cargo check --release` 警告 0、
+`check_constraints.py` / `check_gui_proto.py` も通した。実機再試験は PM / テスター側 ([V4])。
+
 ### 模型との差 (報告済み)
 
 D5 の巡回と tick の間引きは **WM の領分** (D11-5: カーネルは順を決めない) なので、

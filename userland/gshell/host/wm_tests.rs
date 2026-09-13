@@ -1635,6 +1635,7 @@ fn two_app_global(shm: &crate::mocks::Shm) {
 #[test]
 fn ctrl_stop_with_focus_on_the_running_app_keeps_the_kernel_abort() {
     use crate::{mocks, multiapp, session, wm};
+    use std::sync::atomic::Ordering;
     mocks::init();
     session::clear(); /* 前の試験の SessionAction を持ち越さない */
     let shm = mocks::Shm::new();
@@ -1644,20 +1645,38 @@ fn ctrl_stop_with_focus_on_the_running_app_keeps_the_kernel_abort() {
 
     drive_op_wait(2, 3);
 
+    /* `op_wait` の中では owner がアプリ ID なので KAPI は呼べない (K5c)。
+     * **本人宛ても予約に統一した** (実機受入 S6 の 3 回目、2026-09-13):
+     * 以前は `break` してカーネルの `abort_req` に任せていたが、IRQ1 が
+     * CPL=3 の実行中に着地した周は `abort_req` が立たない (暴走ではないので
+     * K が立てない) ため、出口に何も無く**要求が消える** (3 回中 2 回失敗)。 */
     assert_eq!(
         mocks::abort_clear_calls(),
         0,
-        "フォーカスが本人なのに exec_abort_clear を呼んだ (本人が畳まれない)"
+        "op_wait の中から exec_abort_clear を呼んだ (owner 1 でないので ERR_INVAL)"
     );
     assert!(
-        mocks::kill_calls().is_empty(),
-        "フォーカスが本人なのに exec_kill を予約した: {:?}",
-        mocks::kill_calls()
+        multiapp::pending_top_level_work(),
+        "本人宛ての CTRL+STOP を予約していない (カーネルの abort_req 頼みは落ちる)"
     );
+    /* 次の `GetMessage` (= 次の `op_wait`) で予約を見て譲る。 */
+    drive_op_wait(2, 3);
     assert!(
-        !multiapp::pending_top_level_work(),
-        "top-level の予約が残った (フォーカス = 本人は現行どおりのはず)"
+        mocks::PARKS.load(Ordering::SeqCst) >= 1,
+        "予約を積んだのに top-level へ戻ろうとしていない (永久に実行されない)"
     );
+
+    /* top-level の 1 周で「要求を降ろす → 本人を畳む」(決裁 A1 の順序)。 */
+    mocks::set_kill_frees(&[2]);
+    assert!(multiapp::resume_one(wm::g()), "top-level が予約を実行しない");
+    assert_eq!(
+        mocks::abort_clear_calls(),
+        1,
+        "exec_abort_clear がちょうど 1 回でない"
+    );
+    assert_eq!(mocks::kill_calls(), vec![2], "本人を畳んでいない");
+    assert!(!multiapp::is_tracked(2), "畳んだ本人が表に残った");
+    assert!(multiapp::is_tracked(3), "巻き添えで畳んだ");
     wm::g().inited = false;
 }
 
@@ -1795,7 +1814,12 @@ fn switch_cui_kills_nobody_when_every_app_answers_the_quit() {
     wm::g().inited = false;
 }
 
-/* ---- (d) 1 本のときは現行と同じ経路 (kill 0 回) ---- */
+/* ---- (d) 1 本のときも本人宛ては予約に統一する (票 T9 受入 S6 の 3 回目) ----
+ *  実機 2026-09-13: `break` してカーネルの `abort_req` に任せる形は、IRQ1 が
+ *  アプリの CPL=3 実行中に着地した周だと要求が立たず**消える** (3 回中 2 回
+ *  失敗)。**CTRL+STOP を押した周だけ**は 1 本でも park して top-level へ戻す。
+ *  押していない周の「1 本なら park しない」(回帰ゼロ) は
+ *  `a_single_app_never_parks_and_keeps_the_old_wm_cycle_halt_loop` が見ている。 */
 #[test]
 fn a_single_app_keeps_the_old_ctrl_stop_path() {
     use crate::{mocks, multiapp, session, wm};
@@ -1819,22 +1843,33 @@ fn a_single_app_keeps_the_old_ctrl_stop_path() {
     multiapp::on_start(2);
     multiapp::mark_resumed(2);
 
+    /* 1 周目: 「フォーカス = 本人」の枝で予約を積む。KAPI はまだ呼ばない
+     * (`op_wait` の中は owner がアプリ ID なので通らない — K5c)。 */
     drive_op_wait(2, 3);
-
-    /* 1 本しか居なければ「フォーカス = 本人」なので、抜けてカーネルに
-     * 畳ませる現行の経路そのまま。KAPI は 1 つも増えない。 */
-    assert_eq!(mocks::abort_clear_calls(), 0, "1 本なのに exec_abort_clear を呼んだ");
+    assert_eq!(mocks::abort_clear_calls(), 0, "op_wait の中から exec_abort_clear を呼んだ");
     assert!(
         mocks::kill_calls().is_empty(),
-        "1 本なのに exec_kill を呼んだ: {:?}",
+        "op_wait の中から exec_kill を呼んだ: {:?}",
         mocks::kill_calls()
     );
-    assert_eq!(
-        mocks::PARKS.load(Ordering::SeqCst),
-        0,
-        "1 本なのに exec_park を呼んだ (回帰)"
+    assert!(
+        multiapp::pending_top_level_work(),
+        "1 本のときに本人宛ての CTRL+STOP を落とした (実機 S6 の 3 回目)"
     );
-    assert!(!multiapp::pending_top_level_work(), "1 本なのに予約が積まれた");
+
+    /* 次の `GetMessage` (= 次の `op_wait`): 予約を見て譲り、top-level へ戻す。 */
+    drive_op_wait(2, 3);
+    assert!(
+        mocks::PARKS.load(Ordering::SeqCst) >= 1,
+        "予約を積んだのに譲らない (top-level へ戻る道が無い = 永久に実行されない)"
+    );
+
+    /* top-level の 1 周で「要求を降ろす → 本人を畳む」(決裁 A1 の順序)。 */
+    mocks::set_kill_frees(&[2]);
+    assert!(multiapp::resume_one(wm::g()), "top-level が予約を実行しない");
+    assert_eq!(mocks::abort_clear_calls(), 1, "exec_abort_clear がちょうど 1 回でない");
+    assert_eq!(mocks::kill_calls(), vec![2], "本人を畳んでいない");
+    assert!(!multiapp::is_tracked(2), "畳んだ本人が表に残った");
     wm::g().inited = false;
 }
 
@@ -3016,4 +3051,87 @@ fn ctrl_stop_with_no_target_only_clears_the_request() {
     assert!(mocks::kill_calls().is_empty(), "宛先が無いのに `exec_kill` した");
     assert_eq!(mocks::abort_clear_calls(), 1, "要求を降ろしていない");
     g.inited = false;
+}
+
+/* ================================================================ */
+/*  票 T9-W — 受入 S6 の 3 回目 (本人宛て) が不安定だった件の修正    */
+/*                                                                  */
+/*  実機 2026-09-13、3 回中 2 回失敗。IRQ1 の着地点で経路が分かれる: */
+/*  (a) アプリが `op_wait` の中 → カーネルが `abort_req` を立てる →  */
+/*      `break` → syscall 出口で畳まれる (成功した回)               */
+/*  (b) アプリが自分のタイマ処理を CPL=3 で走らせている最中 →        */
+/*      `abort_req` は立たない (暴走ではない) → raw リング経由で     */
+/*      `abort_seen` だけ → `break` しても出口に要求が無く**消える** */
+/*  → 本人宛ても予約に統一し、top-level の `drain_top_level` が      */
+/*    `exec_abort_clear` → `exec_kill(本人)` を行う。                */
+/* ================================================================ */
+
+/* ---- T9-W 検査 16: 宛先が無い周は要求を降ろす予約だけ (誰も死なない) ---- */
+#[test]
+fn ctrl_stop_in_op_wait_with_no_target_reserves_only_the_clear() {
+    use crate::{mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    let g = wm::g();
+    /* 窓を全部畳む = `front_owner()` が 0 = 宛先なし。表の 2 本は生かす。 */
+    g.windows[0] = wm::Win::EMPTY;
+    g.windows[1] = wm::Win::EMPTY;
+    g.z_count = 0;
+    assert_eq!(multiapp::abort_target(g), 0, "宛先が無い前提が崩れている");
+    g.abort_seen = true;
+
+    drive_op_wait(2, 3);
+
+    assert!(
+        multiapp::pending_top_level_work(),
+        "宛先が無くても要求の取り消しは予約しなければならない"
+    );
+    assert!(multiapp::resume_one(wm::g()), "top-level が予約を実行しない");
+    assert_eq!(mocks::abort_clear_calls(), 1, "要求を降ろしていない");
+    assert!(
+        mocks::kill_calls().is_empty(),
+        "宛先が無いのに畳んだ: {:?}",
+        mocks::kill_calls()
+    );
+    assert!(
+        multiapp::is_tracked(2) && multiapp::is_tracked(3),
+        "宛先が無いのに誰かを表から落とした"
+    );
+    wm::g().inited = false;
+}
+
+/* ---- T9-W 検査 17: 宛先が別 (子あり) は従来どおり連鎖の末尾 ---- */
+#[test]
+fn ctrl_stop_in_op_wait_with_a_child_still_folds_the_tail() {
+    use crate::{mocks, multiapp, session, wm};
+    mocks::init();
+    session::clear();
+    let shm = mocks::Shm::new();
+    two_app_global(&shm);
+    let g = wm::g();
+    focus_app(g, 2); /* フォーカス窓 = 端末 (走っている本人でもある) */
+    multiapp::on_start(4);
+    /* 端末 (2) → sh (3) → 子 (4)。宛先は末尾なので**本人ではない**。 */
+    mocks::set_launch_child(2, 3);
+    mocks::set_launch_child(3, 4);
+    assert!(
+        !multiapp::abort_targets_current(g, 2),
+        "子を持つ端末が本人宛てになっている"
+    );
+    g.abort_seen = true;
+
+    drive_op_wait(2, 3);
+
+    assert!(multiapp::pending_top_level_work(), "予約が積まれていない");
+    mocks::set_kill_frees(&[4]);
+    assert!(multiapp::resume_one(wm::g()), "top-level が予約を実行しない");
+    assert_eq!(mocks::abort_clear_calls(), 1, "要求を降ろしていない");
+    assert_eq!(mocks::kill_calls(), vec![4], "畳む相手が連鎖の末尾でない");
+    assert!(
+        multiapp::is_tracked(2) && multiapp::is_tracked(3),
+        "端末 / sh まで巻き添えで畳んだ"
+    );
+    wm::g().inited = false;
 }
