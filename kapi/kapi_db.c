@@ -41,10 +41,14 @@ static char path_copy_buf[PATH_COPY_BUF_SIZE];
 static char text_copy_buf[DB_BIND_TEXT_MAX + 1];
 static u8   blob_copy_buf[DB_BIND_BLOB_MAX];
 
-/* `<path>-journal` を組み立てる場所。path は NUL 込み OS32_MAX_PATH 以内
- * (= 本体 255 バイト) なので、末尾 8 バイト + NUL がちょうど収まる。 */
+/* `<path>-journal` を組み立てる場所。**下位層の容量に合わせる**:
+ * fs/vfs.c の vfs_resolve_path は VFS_MAX_PATH (= OS32_MAX_PATH = 256B) の
+ * 作業バッファで正規化するので、それを超える名前は静かに切り詰められて
+ * **本体を指してしまう** (255B の path だと journal の stat が本体に当たり
+ * BUSY_RECOVERY になる)。SQLite 側の mxPathname も 256。したがって
+ * `<path>-journal` が NUL 込み 256B に収まらない path は open の前に断る。 */
 #define DB_JOURNAL_SUFFIX "-journal"
-static char journal_buf[OS32_MAX_PATH + 8];
+static char journal_buf[VFS_MAX_PATH];
 
 /* ======== DB接続スロット ======== */
 #define DB_ERROR_SIZE 256
@@ -159,11 +163,23 @@ static int db_user_str_copy(const char *src, char *dst, u32 cap)
 
 /* prepare_only の pzTail が「次の statement を含まない」か (票 §1a)。
  * 空白・行コメント (--)・ブロックコメント・空の区切り (;) だけなら真。 */
+static int sql_is_space(char c)
+{
+    /* SQLite の**トークナイザ**が空白と認める 5 文字 (aiClass の CC_SPACE):
+     * space / \t / \n / \f / \r。ここが狭いと、SQLite が読み飛ばした末尾を
+     * 「次の statement」と誤判定する (\f がそれだった)。
+     * 0x0B (\v) は sqlite3Isspace では空白だが aiClass では CC_ILLEGAL —
+     * SQLite 自身が statement の中でも外でも受け付けないので、ここでも
+     * 空白に数えない (数えると「SQLite は読めない末尾」を通してしまう)。 */
+    return c == ' ' || c == '\t' || c == '\n' ||
+           c == '\f' || c == '\r';
+}
+
 static int sql_tail_is_blank(const char *t)
 {
     if (!t) return 1;
     while (*t) {
-        if (*t == ' ' || *t == '\t' || *t == '\r' || *t == '\n' || *t == ';') {
+        if (sql_is_space(*t) || *t == ';') {
             t++;
             continue;
         }
@@ -334,7 +350,11 @@ static int shm_write_row(DbSlot *slot)
             int len = sqlite3_column_bytes(slot->active_stmt, i);
             cols[i].type = DB_TYPE_TEXT;
             cols[i].length = len;
-            if (text && len < remaining - 1) {
+            /* 事前検査 (shm_row_fits) は len + 1 <= remaining を許す。
+             * writer もちょうど収まる行は **書く** — 条件がずれると、
+             * 事前検査を通った行が payload 無し (data_offset = 0) の
+             * 欠落 ROW になり、しかも診断は成功のままになる。 */
+            if (text && len >= 0 && len + 1 <= remaining) {
                 memcpy(DB_SHM_PTR + data_offset, text, (u32)len);
                 DB_SHM_PTR[data_offset + len] = '\0';
                 data_offset += len + 1;
@@ -361,7 +381,8 @@ static int shm_write_row(DbSlot *slot)
             int len = sqlite3_column_bytes(slot->active_stmt, i);
             cols[i].type = DB_TYPE_BLOB;
             cols[i].length = len;
-            if (blob && len < remaining) {
+            /* TEXT と同じ理由で境界ちょうどを含める (事前検査は len <= remaining)。*/
+            if (blob && len >= 0 && len <= remaining) {
                 memcpy(DB_SHM_PTR + data_offset, blob, (u32)len);
                 data_offset += len;
             } else {
@@ -597,6 +618,9 @@ int __cdecl kapi_db_step(int handle)
 
     if (!slot->active_stmt) {
         DB_ResultHeader *hdr = (DB_ResultHeader *)DB_SHM_PTR;
+        /* v50: ここも DONE = 成功したデータ操作。記録しないと、直前の
+         * prepare_only の失敗コードが db_error_code に残り続ける。 */
+        slot_note(slot, SQLITE_OK);
         hdr->status = DB_STATUS_DONE;
         hdr->column_count = 0;
         hdr->error_offset = 0;
@@ -700,27 +724,45 @@ static int db_ieq(const char *a, const char *b)
 }
 
 /* RW 要求のとき DELETE journal が成立しているかを **問い合わせだけ** で見る。
- * `PRAGMA journal_mode` (= を付けない形) は照会で、モードを 1 ビットも変えない。 */
-static int db_journal_mode_is_delete(sqlite3 *db)
+ * `PRAGMA journal_mode` (= を付けない形) は照会で、モードを 1 ビットも変えない。
+ *
+ * 戻り値は診断コード:
+ *   SQLITE_OK        DELETE で確定
+ *   SQLITE_CANTOPEN  照会は通ったが DELETE ではない (要求 mode 不成立)
+ *   その他           照会そのものの失敗 (拡張 result code)。壊れた DB を RW で
+ *                    開くと sqlite3_open_v2 は成功し、schema を読むここで
+ *                    SQLITE_NOTADB / IOERR / NOMEM が出る。boolean に潰すと
+ *                    それが全部 CANTOPEN になって原因が消える。
+ * finalize は診断を差し替えるので、拡張コードは **finalize の前**に控える。 */
+static int db_journal_mode_check(sqlite3 *db)
 {
     sqlite3_stmt *stmt = (sqlite3_stmt *)0;
     const char *mode;
-    int ok = 0;
+    int rc, code;
 
-    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &stmt, 0) != SQLITE_OK ||
-        !stmt) {
+    rc = sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &stmt, 0);
+    if (rc != SQLITE_OK || !stmt) {
+        code = sqlite3_extended_errcode(db);
+        if (code == SQLITE_OK) code = (rc != SQLITE_OK) ? rc : SQLITE_MISUSE;
         if (stmt) sqlite3_finalize(stmt);
-        return 0;
+        return code;
     }
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        mode = (const char *)sqlite3_column_text(stmt, 0);
-        ok = mode != (const char *)0 && db_ieq(mode, "delete");
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_ROW) {
+        code = sqlite3_extended_errcode(db);
+        if (code == SQLITE_OK) code = (rc != SQLITE_DONE) ? rc : SQLITE_NOTADB;
+        sqlite3_finalize(stmt);
+        return code;
     }
+    mode = (const char *)sqlite3_column_text(stmt, 0);
+    code = (mode != (const char *)0 && db_ieq(mode, "delete"))
+           ? SQLITE_OK : SQLITE_CANTOPEN;
     sqlite3_finalize(stmt);
-    return ok;
+    return code;
 }
 
-/* `<path>-journal` を journal_buf に組み立てる。1 = 組み立てた / 0 = 入らない。 */
+/* `<path>-journal` を journal_buf に組み立てる。1 = 組み立てた /
+ * 0 = 下位層の path 容量に収まらない (= path too long、呼び手は CANTOPEN)。 */
 static int db_journal_name(const char *path)
 {
     u32 want = kstrlen(path) + (u32)sizeof(DB_JOURNAL_SUFFIX) - 1u;
@@ -753,22 +795,32 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
 
     /* (1) 本体が存在し size > 0 か。**SQLite を呼ぶ前**に見る (Codex 往復 2 の 1:
      * SQLite の hasHotJournal は RO でも 0 ページの DB に付随する journal を
-     * 消してしまうので、その手前で止める = 副作用ゼロ)。 */
-    if (vfs_stat(path_copy_buf, &st) != 0) {
-        open_fail_set(SQLITE_CANTOPEN);
+     * 消してしまうので、その手前で止める = 副作用ゼロ)。
+     * stat の失敗は「確定した不存在 (NOTFOUND)」と「それ以外」を分ける —
+     * I/O 障害を不存在と同じ扱いにすると、journal の有無が分からないまま
+     * SQLite に進むことになる。 */
+    rc = vfs_stat(path_copy_buf, &st);
+    if (rc != 0) {
+        open_fail_set(rc == OS32_ERR_NOTFOUND ? SQLITE_CANTOPEN : SQLITE_IOERR);
         return -1;
     }
     if (st.st_size == 0) {
         open_fail_set(SQLITE_NOTADB);
         return -1;
     }
-    /* (2) hot journal があれば RO / RW とも失敗。回復は S3 の明示操作。 */
+    /* (2) hot journal があれば RO / RW とも失敗。回復は S3 の明示操作。
+     * 「無い」と言い切れるのは NOTFOUND のときだけ。 */
     if (!db_journal_name(path_copy_buf)) {
-        open_fail_set(SQLITE_CANTOPEN);
+        open_fail_set(SQLITE_CANTOPEN);      /* path too long (下位層の容量) */
         return -1;
     }
-    if (vfs_stat(journal_buf, &st) == 0) {
+    rc = vfs_stat(journal_buf, &st);
+    if (rc == 0) {
         open_fail_set(SQLITE_BUSY_RECOVERY);
+        return -1;
+    }
+    if (rc != OS32_ERR_NOTFOUND) {
+        open_fail_set(SQLITE_IOERR);
         return -1;
     }
 
@@ -806,14 +858,19 @@ int __cdecl kapi_db_open_existing(const char *path, int writable)
     }
 
     /* RW は DELETE journal の成立を確認する。RO では変更 PRAGMA も照会も
-     * 実行しない (FOUNDATION §2-2: RO は元ファイルと journal に触らない)。 */
-    if (writable && !db_journal_mode_is_delete(db)) {
-        db_slots[i].in_use = 1;
-        slot_note(&db_slots[i], SQLITE_CANTOPEN);
-        open_fail_set(SQLITE_CANTOPEN);
-        shm_write_error(&db_slots[i]);
-        kapi_db_close(i);
-        return -1;
+     * 実行しない (FOUNDATION §2-2: RO は元ファイルと journal に触らない)。
+     * 照会の失敗 (NOTADB / IOERR / NOMEM ...) と「照会は通ったが DELETE で
+     * ない」(CANTOPEN) を区別して残す。 */
+    if (writable) {
+        int mode_rc = db_journal_mode_check(db);
+        if (mode_rc != SQLITE_OK) {
+            db_slots[i].in_use = 1;
+            slot_note(&db_slots[i], mode_rc);
+            open_fail_set(mode_rc);
+            shm_write_error(&db_slots[i]);
+            kapi_db_close(i);
+            return -1;
+        }
     }
 
     db_slots[i].in_use = 1;

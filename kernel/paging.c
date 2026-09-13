@@ -553,6 +553,10 @@ u32 paging_addrspace_pte_flags(struct addrspace *as, u32 virt)
     pd = (u32 *)as->pd_phys;
     pde = pd[pdi];
     if (!(pde & PTE_PRESENT)) return 0;
+    /* 4MB ページ (PDE.PS) はこの OS が一度も張らない。もし張られていたら
+     * PDE の下位ビットは PT の物理ではなくページそのものの属性なので、
+     * 下の PT 引きは別物を読む。**非 present 扱いで断る** (安全側)。 */
+    if (pde & PTE_PS) return 0;
 
     if (pdi >= as->app_pde && pdi < as->app_pde + as->app_pde_count) {
         pt = (u32 *)as->app_pt_phys[pdi - as->app_pde];   /* アプリ固有 PT */

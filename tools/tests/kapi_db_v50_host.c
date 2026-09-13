@@ -39,10 +39,16 @@ u32 sys_time(void) { return 0; }
 void kprintf(u8 color, const char *fmt, ...) { (void)color; (void)fmt; }
 int vfs_sync(void) { probes++; return 0; }
 int vfs_rm(const char *path) { probes++; return fixture_rm(path); }
+/* stat の障害注入 (blocker 2)。`stat_fail_on` に部分一致する path の stat が
+ * `stat_fail_rc` を返す。実 FS では EACCES / EIO / ELOOP がこの形で来る。 */
+static const char *stat_fail_on;
+static int stat_fail_rc = OS32_ERR_IO;
 int vfs_stat(const char *path, OS32_Stat *st)
 {
-    FixtureFile *f = fixture_find(path, 0);
+    FixtureFile *f;
     probes++;
+    if (stat_fail_on && strstr(path, stat_fail_on)) return stat_fail_rc;
+    f = fixture_find(path, 0);
     if (!f) return OS32_ERR_NOTFOUND;
     if (st) { memset(st, 0, sizeof(*st)); st->st_size = f->size; }
     return 0;
@@ -92,6 +98,8 @@ static void reset_all(void)
     memset(fixture_files, 0, sizeof(fixture_files));
     for (i = 0; i < VFS_MAX_OPEN_FILES; i++) open_files[i].in_use = 0;
     host_cpl3 = 0;
+    stat_fail_on = NULL;
+    stat_fail_rc = OS32_ERR_IO;
     resolve_owner = current_owner = 2;
     fixture_init();
 }
@@ -530,6 +538,219 @@ static void owner_isolation(void)
     resolve_owner = current_owner = 2;
 }
 
+/* ---- 9. SHM に**ちょうど**収まる TEXT / BLOB (実装レビュー K1) ---------- */
+/*  事前検査 (shm_row_fits) と writer (shm_write_row) の境界条件がずれると、
+ *  事前検査を通った行が payload 無し (data_offset = 0) の ROW になり、
+ *  しかも診断は成功のまま = 欠落に気付けない。1 列の行で両端を踏む。      */
+static void shm_exact(void)
+{
+    int room = (int)DB_SHM_BLOCK_SIZE - (int)sizeof(DB_ResultHeader)
+               - (int)sizeof(DB_ColumnInfo);
+    DB_ColumnInfo *info = (DB_ColumnInfo *)(test_shm + sizeof(DB_ResultHeader));
+    char sql[128];
+    int h, i;
+
+    make_db("/x.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/x.db", 1);
+    CHECK(h >= 0);
+
+    /* TEXT: 書ける最大は room - 1 (終端 NUL の分)。ちょうどは **書ける**。 */
+    sprintf(sql, "SELECT substr(hex(zeroblob(%d)), 1, %d)", room, room - 1);
+    CHECK(kapi_db_prepare_only(h, sql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(info->type == DB_TYPE_TEXT);
+    CHECK((int)info->length == room - 1);
+    CHECK(info->data_offset != 0);                  /* 欠落 ROW ではない */
+    CHECK((int)strlen(kapi_db_column_text(h, 0)) == room - 1);
+    CHECK(kapi_db_error_code(h) == SQLITE_OK);
+    canary_check("shm_exact text fit");
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* TEXT: +1 バイトは事前検査で落ちる (部分 ROW を返さない)。 */
+    sprintf(sql, "SELECT substr(hex(zeroblob(%d)), 1, %d)", room + 2, room);
+    CHECK(kapi_db_prepare_only(h, sql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    CHECK(kapi_db_error_code(h) == SQLITE_TOOBIG);
+    canary_check("shm_exact text over");
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* BLOB: 書ける最大は room ちょうど (終端不要)。 */
+    sprintf(sql, "SELECT zeroblob(%d)", room);
+    CHECK(kapi_db_prepare_only(h, sql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(info->type == DB_TYPE_BLOB);
+    CHECK((int)info->length == room);
+    CHECK(info->data_offset != 0);
+    for (i = 0; i < room; i++)
+        CHECK(test_shm[info->data_offset + i] == 0);
+    canary_check("shm_exact blob fit");
+    CHECK(kapi_db_finalize(h) == 0);
+
+    /* BLOB: +1 は拒否。 */
+    sprintf(sql, "SELECT zeroblob(%d)", room + 1);
+    CHECK(kapi_db_prepare_only(h, sql) == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ERROR);
+    CHECK(kapi_db_error_code(h) == SQLITE_TOOBIG);
+    canary_check("shm_exact blob over");
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 10. stat の I/O 障害を不存在扱いしない (実装レビュー K2) ----------- */
+static void stat_faults(void)
+{
+    int before;
+
+    make_db("/f.db", "CREATE TABLE t(x)");
+
+    /* journal の stat が I/O で落ちたら「journal 無し」と言い切れない。
+     * SQLite を呼ばずに IOERR で断る (バックエンドへの I/O が増えない)。 */
+    stat_fail_on = "-journal";
+    before = probes;
+    CHECK(kapi_db_open_existing("/f.db", 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
+    CHECK(probes == before + 2);           /* 本体 + journal の stat だけ */
+    CHECK(kapi_db_open_existing("/f.db", 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
+
+    /* 本体の stat も同じ: NOTFOUND だけが「不存在」。 */
+    stat_fail_on = "/f.db";
+    before = probes;
+    CHECK(kapi_db_open_existing("/f.db", 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_IOERR);
+    CHECK(probes == before + 1);
+    stat_fail_rc = OS32_ERR_NOTFOUND;
+    CHECK(kapi_db_open_existing("/f.db", 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);   /* 確定した不存在 */
+
+    /* 障害を外せば普通に開く */
+    stat_fail_on = NULL;
+    CHECK(kapi_db_open_existing("/f.db", 0) >= 0);
+}
+
+/* ---- 11. RW open の失敗を一律 CANTOPEN にしない (実装レビュー K3) ------- */
+static void journal_mode(void)
+{
+    static char junk[2048];
+    int h;
+
+    /* 非空だが DB ではないファイル。sqlite3_open_v2 は成功し、schema を読む
+     * `PRAGMA journal_mode` が SQLITE_NOTADB で落ちる。 */
+    memset(junk, 'Z', sizeof(junk));
+    CHECK(fixture_create(NULL, "/junk.db", junk, sizeof(junk)) == VFS_OK);
+    CHECK(kapi_db_open_existing("/junk.db", 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_NOTADB);     /* CANTOPEN ではない */
+    CHECK(kapi_db_error_code(0) == SQLITE_NOTADB);      /* slot にも残る */
+
+    /* 読めるが journal_mode の照会が I/O で落ちる場合も NOTADB / IOERR 系で、
+     * 「照会は通ったが DELETE でない」だけが CANTOPEN。 */
+    make_db("/g.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/g.db", 1);
+    CHECK(h >= 0);
+    CHECK(db_journal_mode_check(db_slots[h].db) == SQLITE_OK);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 12. stmt 無しの step が診断を 0 に戻す (実装レビュー K4) ----------- */
+static void step_no_stmt(void)
+{
+    int h;
+
+    make_db("/n.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/n.db", 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT * FROM missing") == -1);
+    CHECK(kapi_db_error_code(h) != SQLITE_OK);
+    CHECK(kapi_db_step(h) == DB_STATUS_DONE);          /* stmt が無い */
+    CHECK(kapi_db_error_code(h) == SQLITE_OK);         /* 成功したので 0 */
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 13. 下位層の path 容量 (実装レビュー K5) --------------------------- */
+/*  vfs_resolve_path は VFS_MAX_PATH (256B) の作業バッファで正規化するので、
+ *  `<path>-journal` がそこに収まらない path では journal の stat が **本体**
+ *  に当たり、健全な DB が BUSY_RECOVERY に見える。open の前に断ること。     */
+static void path_len(void)
+{
+    static char longp[VFS_MAX_PATH + 16];
+    u32 room = (u32)VFS_MAX_PATH - 1u - 8u;    /* NUL と "-journal" の分 */
+    int h;
+
+    /* ちょうど収まる長さ (247B) は開ける */
+    memset(longp, 'a', sizeof(longp));
+    longp[0] = '/';
+    longp[room] = '\0';
+    CHECK(strlen(longp) == room);
+    make_db(longp, "CREATE TABLE t(x)");
+    h = kapi_db_open_existing(longp, 0);
+    CHECK(h >= 0);
+    CHECK(kapi_db_close(h) == 0);
+
+    /* 1 バイト長いと journal 名が下位層に収まらない → CANTOPEN。
+     * このとき **本体は存在する** ので、旧実装は BUSY_RECOVERY を返していた。 */
+    longp[room] = 'a';
+    longp[room + 1] = '\0';
+    make_db(longp, "CREATE TABLE t(x)");
+    CHECK(kapi_db_open_existing(longp, 0) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+    CHECK(kapi_db_open_existing(longp, 1) == -1);
+    CHECK(kapi_db_error_code(-1) == SQLITE_CANTOPEN);
+}
+
+/* ---- 14. 末尾の空白は SQLite と同じ 6 文字 (実装レビュー K6) ------------ */
+static void sql_tail(void)
+{
+    int h;
+
+    make_db("/t.db", "CREATE TABLE t(x)");
+    h = kapi_db_open_existing("/t.db", 1);
+    CHECK(h >= 0);
+
+    /* SQLite のトークナイザ (aiClass の CC_SPACE) と同じ 5 文字。 */
+    CHECK(sql_is_space(' ') && sql_is_space('\t') && sql_is_space('\n'));
+    CHECK(sql_is_space('\f') && sql_is_space('\r'));
+    CHECK(!sql_is_space('x') && !sql_is_space('\0'));
+    /* 0x0B (\v) は aiClass では CC_ILLEGAL。SQLite 自身が statement の中でも
+     * 受け付けない (prepare が落ちる) ので、末尾でも空白に数えない。 */
+    CHECK(!sql_is_space('\v'));
+    CHECK(kapi_db_prepare_only(h, "SELECT 1\v") == -1);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\v") == -1);
+
+    CHECK(kapi_db_prepare_only(h, "SELECT 1 \f") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1\f\r\n\t ") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\f ") == 0);
+    CHECK(kapi_db_prepare_only(h, "SELECT 1 \f-- tail") == 0);
+    /* 区切りの後ろに次の statement があれば、間が \f でも拒否する
+     * (\f を空白と認めない実装は prepare の tail を読み違えて**通して**いた)。 */
+    CHECK(kapi_db_prepare_only(h, "SELECT 1;\f SELECT 2") == -1);
+    CHECK(kapi_db_error_code(h) == SQLITE_MISUSE);
+    CHECK(kapi_db_close(h) == 0);
+}
+
+/* ---- 15. SQLITE_TRANSIENT: スクラッチを上書きしても値が残る ------------- */
+static void transient(void)
+{
+    int h;
+
+    make_db("/tr.db", "CREATE TABLE t(a,b)");
+    h = kapi_db_open_existing("/tr.db", 1);
+    CHECK(h >= 0);
+    CHECK(kapi_db_prepare_only(h, "INSERT INTO t VALUES(?,?)") == 0);
+    /* 2 本の bind は **同じ** text_copy_buf / blob_copy_buf を使う。
+     * SQLITE_TRANSIENT なので 1 本目の値は SQLite 側に写っていること。 */
+    CHECK(kapi_db_bind_text(h, 1, "first", 5) == 0);
+    CHECK(kapi_db_bind_text(h, 2, "second", 6) == 0);
+    CHECK(!memcmp(text_copy_buf, "second", 6));   /* スクラッチは上書き済み */
+    CHECK(kapi_db_step(h) == DB_STATUS_DONE);
+
+    CHECK(kapi_db_prepare_only(h, "SELECT a, b FROM t") == 0);
+    CHECK(kapi_db_step(h) == DB_STATUS_ROW);
+    CHECK(!strcmp(kapi_db_column_text(h, 0), "first"));
+    CHECK(!strcmp(kapi_db_column_text(h, 1), "second"));
+    CHECK(kapi_db_finalize(h) == 0);
+    CHECK(kapi_db_close(h) == 0);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -544,6 +765,13 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "shm_bound")) shm_bound();
     else if (!strcmp(argv[1], "user_range")) user_range();
     else if (!strcmp(argv[1], "owner_isolation")) owner_isolation();
+    else if (!strcmp(argv[1], "shm_exact")) shm_exact();
+    else if (!strcmp(argv[1], "stat_faults")) stat_faults();
+    else if (!strcmp(argv[1], "journal_mode")) journal_mode();
+    else if (!strcmp(argv[1], "step_no_stmt")) step_no_stmt();
+    else if (!strcmp(argv[1], "path_len")) path_len();
+    else if (!strcmp(argv[1], "sql_tail")) sql_tail();
+    else if (!strcmp(argv[1], "transient")) transient();
     else if (!strncmp(argv[1], "order_", 6)) reclaim_order(argv[1] + 6);
     else CHECK(0);
 

@@ -127,6 +127,9 @@
 - 「close 後は slot **再利用まで**最後の失敗を返す」を実装。**再利用後は新しい接続の値** (成功 open 直後なら 0) になる — handle に世代が無いので「再利用後 MISUSE」は判別できない。一度も開いていない slot と範囲外 handle は `SQLITE_MISUSE`。
 - `exec_reclaim_owned` は DB を先頭へ (他の相対順は不変)。回収順の差はホストで観測済み: 後始末がバックエンドに届いた回数が 新 21 / 旧 2。戻り値はどちらも成功なので**回数で**見る (VFS の I/O 失敗握り潰しは票 F3a のまま)。
 - ホスト TDD は `tools/tests/kapi_db_v50_host.c` + `test_kapi_db_v50.py` (9 件、実 SQLite + 実 VFS + RAM backend)。RED→GREEN は `tools/tests/s0_tdd.md`。既存 5 本回帰済み。
+- **実装レビュー 往復 1 の blocker 6 件を修正** (2026-09-13): SHM の事前検査と writer の境界条件を一致 (ちょうど収まる TEXT/BLOB は書く)、stat は NOTFOUND だけを不存在とし他は `SQLITE_IOERR`、`PRAGMA journal_mode` の照会失敗 (拡張コード) と非 DELETE (`CANTOPEN`) を分離、stmt 無しの `db_step` の DONE でも診断を 0 に、`<path>-journal` が `VFS_MAX_PATH` に収まらない path は open 前に `CANTOPEN`、末尾の空白を SQLite のトークナイザと同じ 5 文字に。
+- non-blocker も同時に: K2 の PTE ケースを「許可帯内の未マップページ (`sbrk_heap_limit`)」へ、`SQLITE_TRANSIENT` の試験をホストと K2 に、`PDE.PS` を `paging_addrspace_pte_flags` で明示拒否、`s0_tdd.md` §K の模型と列数上限の記述を実態へ。
+- 反例 7 ケースを `test_kapi_db_v50.py` に常設 (計 16 ケース)。6 件すべて実装を 1 件ずつ戻して RED を採取済み (`s0_tdd.md` §K 2b)。
 - **未実施**: `make` 全般・配備・エミュレータ・ゲスト試験 (K1 / K2)。`build/app.conf` / `userland/deploy.yaml` / `build/sdk.mk` は PM 登録待ち (登録行は報告に記載)。
 
 ## 9. 実装メモ (T、2026-09-13)

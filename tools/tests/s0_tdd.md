@@ -128,6 +128,10 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
 なら中へ」にし、`cp` / `rm` / `mkdir` の宛先が temp の外なら **AssertionError**
 (隔離の保証)、`ManifestEntryPoints` で resolver を差し替えずに manifest の入口
 (file / glob / tag) を通し、`do_copy` の `Done!` と prune の件数から保護除外を除いた。
+- `hsync` の inode 比較 (実体規則) はホストでは踏んでいない。
+- `sudo` / ループマウントの実挙動は模擬。sudoers や ext2 の振る舞いは何も言わない。
+- bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
+  symlink / 別マウントだけを `check_root_etc` が止める)。
 
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
@@ -246,11 +250,18 @@ python3 tools/tests/test_sqlite_groups.py
 + 実 `lib/sqlite3/os32_sqlite_vfs.c` + 実 `fs/vfs_fd.c` + RAM バックエンド**
 (`sqlite_groups_backend.h`) を組む。ホストのファイルシステムには触らない。
 模型にしたのは 2 つだけ:
+模型は 4 つ:
 
 - `ring3_user_range_ok` — 許可帯と PTE はカーネルの番地とページテーブルに依存する。
   ホストでは 1 本の帯 + 1 枚の「非 present なページ」に見立てた等価な判定を置く。
   実物の帯判定は `exec/exec.c` にあり、CPL=3 の受入 (`userland/tests/db_v50_test.c`) が踏む。
 - `MEM_SHM_BASE` — 試験側の配列へ向け、16KB の **後ろに 256B の番兵**を置く。
+- `vfs_stat` — RAM の fixture を見る試験側の実装。障害注入の口
+  (`stat_fail_on` / `stat_fail_rc`) を持つ。**実物の `fs/vfs.c` ではない**ので、
+  path 正規化の切り詰めそのものは再現しない (長さの判定だけを固定している)。
+- `vfs_resolve_path` / `vfs_route` — `vfs_fd_sqlite_host.c` の入れ替えなしのコピー。
+  正規化も mount 解決もしない。だから「255B の path で journal 名が切り詰められる」は
+  **長さの規則**として試験し、切り詰めの実挙動は `fs/vfs.c` の読みに拠っている。
 
 ### 2. RED → GREEN
 
@@ -260,6 +271,26 @@ python3 tools/tests/test_sqlite_groups.py
 | 2 | `shm_write_row` の境界 (§1b) | 境界検査を `if (0 && ...)` で殺す → `FAIL shm_bound:359: kapi_db_step(h) == DB_STATUS_ERROR` (20000B の行が ROW を返す) | 検査を戻して `PASS shm_bound` + 番兵 256B が無傷 |
 | 3 | exec 回収順序 (§1c) | `db_cleanup_owned` を元の (6) の位置へ戻す → `AssertionError: exec_reclaim_owned: db_cleanup_owned は vfs_close_owned より先` | 先頭へ移して PASS |
 | 4 | 回収順序の**観測できる差** | `order_old` (FD を先に閉じる) で **後始末がバックエンドに届いた回数 = 2** | `order_new` (DB が先) で **21**。rollback の journal 読み戻しは生きた FD 越しにしか起きない |
+
+### 2b. 実装レビュー 往復 1 (Codex、`08b4879`) の blocker 6 件 — RED → GREEN
+
+反例はすべて `test_kapi_db_v50.py` に常設した。RED は **実装を 1 件ずつ元へ戻して**
+採ったもの (実行した `FAIL` 行をそのまま写す)。
+
+| # | blocker | ケース | RED |
+|---|---|---|---|
+| 1 | SHM にちょうど収まる TEXT/BLOB が欠落 ROW になる | `shm_exact` | writer を `len < remaining - 1` / `len < remaining` に戻す → `FAIL shm_exact:563: info->data_offset != 0` (16359B の TEXT が payload 無しの ROW) |
+| 2 | journal の stat 失敗を不存在として SQLite に進む | `stat_faults` | stat の戻り値を NOTFOUND と区別しない実装に戻す → `FAIL stat_faults:610: kapi_db_open_existing("/f.db", 0) == -1` (I/O 障害なのに open が通る) |
+| 3 | RW open の schema / I/O 障害が一律 CANTOPEN | `journal_mode` | `db_journal_mode_check` の戻りを `SQLITE_CANTOPEN` に潰す → `FAIL journal_mode:642: kapi_db_error_code(-1) == SQLITE_NOTADB` |
+| 4 | stmt が無い `db_step` の DONE で診断が 0 に戻らない | `step_no_stmt` | 早期 DONE の `slot_note` を外す → `FAIL step_no_stmt:665: kapi_db_error_code(h) == SQLITE_OK` |
+| 5 | 255B の path で本体を journal と誤認 | `path_len` | `journal_buf` を `VFS_MAX_PATH + 8` に戻す → `FAIL path_len:694: kapi_db_open_existing(longp, 0) == -1` (248B の path が通ってしまう) |
+| 6 | 末尾の `\f` を複数 statement と誤判定 | `sql_tail` | `sql_is_space` から `\f` を外す → `FAIL sql_tail:711: sql_is_space('\f') && sql_is_space('\r')`、続けて `"SELECT 1;\f "` が拒否される |
+
+**6 の訂正**: SQLite の空白は「6 文字」ではなく、トークナイザ (`aiClass` の
+`CC_SPACE`) では **5 文字** — space / `\t` / `\n` / `\f` / `\r`。`0x0B` (`\v`) は
+`sqlite3Isspace` では空白だが `aiClass` では `CC_ILLEGAL` で、`"SELECT 1\v"` は
+prepare 自体が落ちる。したがって `\v` は末尾でも空白に数えない (数えると
+「SQLite が読めない末尾」を通してしまう)。`sql_tail` がこの両方を固定している。
 
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
@@ -278,6 +309,21 @@ python3 tools/tests/test_sqlite_groups.py
 
 - **1364 列を超える行**での descriptor 領域のはみ出し。SQL は NUL 込み 1024B が上限なので
   そこまで列を並べた statement を作れない。純関数 `shm_row_fits_n` の算術だけで覆ってある。
+| `shm_exact` | 1 列の行で TEXT `room - 1` / BLOB `room` が**書ける** (`data_offset != 0`、長さ一致)、+1 は `-1` + `TOOBIG`、番兵は 4 とも無傷 |
+| `stat_faults` | journal / 本体の stat が NOTFOUND 以外で落ちたら `IOERR` で断り **SQLite を呼ばない** (バックエンド呼び出し回数で確認)、NOTFOUND だけが `CANTOPEN` |
+| `journal_mode` | 非空の非 DB を RW で開くと `NOTADB` (CANTOPEN に潰れない)、正常な DB では `db_journal_mode_check` が `SQLITE_OK` |
+| `step_no_stmt` | prepare_only 失敗の後の `db_step` が DONE を返したら診断が 0 に戻る |
+| `path_len` | `<path>-journal` が `VFS_MAX_PATH` に収まる 247B は開ける、248B は本体があっても `CANTOPEN` |
+| `sql_tail` | `sql_is_space` が SQLite のトークナイザと同じ 5 文字、`\v` は不可 (prepare も落ちる)、`\f` 混じりの末尾は可・`;` の後に statement があれば不可 |
+| `transient` | 同じスクラッチを 2 本目の bind で上書きしてから step しても 1 本目の値が残る (`SQLITE_TRANSIENT`) |
+
+### 4. ホストでは踏めなかったもの ([V4])
+
+- **descriptor 領域だけで 16KB を溢れさせる列数の行**。溢れるには
+  `(16384 - 12) / 12 = 1364` 列より多くが要るが、この build の
+  `SQLITE_MAX_COLUMN` は **100** (`lib/sqlite3/os32_sqlite_config.h`) なので
+  実接続では到達できない (SQL の 1024B 上限より前にこちらで止まる)。
+  純関数 `shm_row_fits_n` の算術だけで覆ってある。
 - `p + len` の **32bit** overflow。`include/types.h` の `u32` はホストでは `unsigned long`
   (64bit) なので、ホスト幅の端で同じ経路を踏むように書き換えてある。
 - **rollback が本体ファイルを縮めること**。`os32 SQLite VFS` の `xTruncate` はまだ
@@ -287,3 +333,9 @@ python3 tools/tests/test_sqlite_groups.py
   ホストにページテーブルが無い。CPL=3 の受入 `userland/tests/db_v50_test.c` (K2) と
   ブート時の `kselftest` が実機側の担当で、**どちらもまだ実行していない**
   (コーダーは `make`・配備・エミュレータを行わない)。
+  K2 の PTE 検査ケースは実装レビュー 往復 1 の指摘で、**許可帯の外**を指す番地から
+  **許可帯の中の未マップページ** (`kapi->sbrk_heap_limit` = guard_a の先頭) へ
+  置き換えた — 前者は `ring3_ptr_ok` だけで落ちるので PTE 検査を消しても通ってしまう。
+- `PDE.PS` (4MB ページ) の経路。この OS は一度も 4MB ページを張らないので
+  ホストでも実機でも作れない。`paging_addrspace_pte_flags` は**明示的に**
+  非 present 扱いで断る (安全側) というコードとコメントだけがある。

@@ -555,13 +555,20 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   `:memory:` / `file:` 接頭 / `OS32_MAX_PATH` 超も拒否。open の**前**に `vfs_stat` で
   (1) 本体が存在し size > 0、(2) `<path>-journal` が**無い**ことを確かめ、反すれば
   **SQLite を呼ばずに**失敗する (RO でも hot journal の後始末が走るのを防ぐ)。
-  診断は欠損 = `SQLITE_CANTOPEN`、0 バイト = `SQLITE_NOTADB`、journal あり =
-  `SQLITE_BUSY_RECOVERY`。RW は `PRAGMA journal_mode` が `delete` であることを
-  照会だけで確かめ、不成立なら close して失敗する。失敗コードは **owner 別**の
+  診断は欠損 (stat が **NOTFOUND**) = `SQLITE_CANTOPEN`、0 バイト = `SQLITE_NOTADB`、
+  journal あり = `SQLITE_BUSY_RECOVERY`。stat が NOTFOUND 以外で落ちたときは
+  「journal の有無が分からない」ので `SQLITE_IOERR` で断る (不存在と同じ扱いにしない)。
+  `<path>-journal` が下位層の path 容量 (`VFS_MAX_PATH` = 256B、SQLite の
+  `mxPathname` も 256) に収まらない path も、journal の stat が**本体に当たる**ので
+  open の前に `SQLITE_CANTOPEN` で断る。RW は `PRAGMA journal_mode` が `delete` で
+  あることを照会だけで確かめ、**照会の失敗** (`SQLITE_NOTADB` / `IOERR` / `NOMEM` 等 —
+  拡張コードを finalize の前に控える) と **照会は通ったが DELETE でない**
+  (`SQLITE_CANTOPEN`) を区別して close し失敗する。失敗コードは **owner 別**の
   「直前 open 失敗」欄に残り `db_error_code(-1)` で読める。戻り値は handle / -1。
 - `db_prepare_only`: SQL は NUL 込み `DB_SQL_MAX_BYTES` (1024B) 以内。超過は
   **切り捨てず拒否**する。単一の非空 statement のみ (末尾の空白 / コメント / `;` は可、
-  次の statement があれば `sqlite3_prepare_v2` の `pzTail` で見て拒否)。**step しない**ので、
+  次の statement があれば `sqlite3_prepare_v2` の `pzTail` で見て拒否。末尾の空白は
+  SQLite のトークナイザと同じ 5 文字 — space / `\t` / `\n` / `\f` / `\r`)。**step しない**ので、
   SELECT の先頭行も DML も進まない。同じ handle の旧 stmt は finalize して置換する。
 - `db_bind_*`: prepare_only の後・**最初の step の前**だけ。`index` は 1-based。
   `text` は 0〜`DB_BIND_TEXT_MAX` (255) B、`blob` は 0〜`DB_BIND_BLOB_MAX` (4096) B。
@@ -572,7 +579,8 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   (`db_open_existing` / `db_prepare_only` / `db_bind_*` / `db_step` / `db_exec`) は
   成功で 0 に、失敗でそのコードに更新する。**`db_finalize` / `db_close` は失敗した
   ときだけ**更新する (後片付けが原因診断を消さない)。close 後も slot が再利用される
-  までは同じ値を返す。範囲外 handle / 一度も開かれていない slot は `SQLITE_MISUSE`。
+  までは同じ値を返す (**再利用後は新しい接続の値** — handle に世代が無いので旧利用者を
+  区別しない)。範囲外 handle / 一度も開かれていない slot は `SQLITE_MISUSE`。
   `handle = -1` は呼び手 owner の直前 open 失敗。取得しても消えない。
 - CPL=3 の呼び手が渡すポインタは、ディスパッチャの早期検証 (先頭番地だけ) に加えて
   wrap 側が**範囲まで**検査する: 各ページが許可帯にあり、かつ**呼び手の PD** で

@@ -19,17 +19,28 @@
 
 #include "os32api.h"
 
-/* CPL=3 アプリの許可帯 (exec/exec.c の ring3_ptr_ok)。ヒープ帯とスタック帯の
- * 間にはガードページがあり、帯の上端の先は写像がない。番地は
- * userland/tests/ring3_guard.c と同じ「アプリ固有 PDE 1 枚」の既定配置 —
- * このプログラムは app.conf でヒープを要求しない (0) ので必ず 1 枚になる。 */
+/* CPL=3 アプリの許可帯 (exec/exec.c の ring3_ptr_ok)。番地は
+ * userland/tests/ring3_guard.c と同じ **アプリ固有 PDE 1 枚** の既定配置を
+ * 前提にする — このプログラムは build/app.conf でヒープを要求しない (0) ので
+ * `paging_app_band_pdes` は必ず 1 を返し、帯の上端は MEM_APP_BAND_TOP。 */
 #define BAND_TOP        0x800000UL   /* MEM_APP_BAND_TOP (スタック帯の上端) */
-#define HEAP_TOP        0x7BF000UL   /* ガードページの先頭 = ヒープ帯の上端 */
 #define VRAM_END        0x0C0000UL   /* 許可帯 [0xA0000, 0xC0000) の末尾 */
+/* 「許可帯の中だが非 present」= sbrk 上限のすぐ上 (guard_a)。
+ * ring3_ptr_ok の帯は [0x400000, ガード直下) なので **帯判定では通り**、
+ * 呼び手の PD の PTE 検査でしか弾けない。ここを固定値で書くと帯の外に
+ * なってしまうので、KAPI のデータフィールドから実行時に引く。 */
+#define UNMAPPED(api)   ((api)->sbrk_heap_limit)
 
 static int passed;
 static int failed;
 static KernelAPI *g;
+
+/* 文字列比較 (newlib を引かずに済ませる。C89)。 */
+static int same(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == '\0' && *b == '\0';
+}
 
 static void ok(int cond, const char *name)
 {
@@ -113,8 +124,14 @@ int main(int argc, char **argv, KernelAPI *api)
        "text range crossing the end of a permitted band is refused");
     ok(api->db_bind_text(h, 1, (const char *)(BAND_TOP - 1), 2) < 0,
        "text range crossing the top of the app band is refused");
-    ok(api->db_bind_blob(h, 3, (const void *)(HEAP_TOP - 1), 2) < 0,
-       "blob range crossing the guard page is refused");
+    /* sbrk 上限の 1 バイト手前から 2 バイト = 最後の present なページから
+     * **未マップのページ (guard_a) へまたぐ**。帯の中なので ring3_ptr_ok では
+     * 落ちず、PTE 検査 (paging_addrspace_pte_flags) だけが弾ける。 */
+    ok(UNMAPPED(api) != 0, "sbrk_heap_limit is published to the app");
+    ok(api->db_bind_blob(h, 3, (const void *)(UNMAPPED(api) - 1), 2) < 0,
+       "blob range crossing into the unmapped page above sbrk is refused");
+    ok(api->db_bind_text(h, 1, (const char *)UNMAPPED(api), 1) < 0,
+       "the first unmapped page above sbrk is refused");
     ok(api->db_bind_text(h, 1, "x", -1) < 0, "a negative length is refused");
     ok(api->db_bind_text(h, 1, (const char *)0, 0) < 0,
        "a NULL text pointer is refused (db_bind_null is the way)");
@@ -157,6 +174,20 @@ int main(int argc, char **argv, KernelAPI *api)
         ok(p != 0 && same, "4096B blob roundtrip");
     } else {
         ok(0, "4096B blob roundtrip (no row)");
+    }
+    api->db_finalize(h);
+
+    /* ---- SQLITE_TRANSIENT: スクラッチを上書きしても先の値が残る -------- */
+    /* 2 本の bind_text は**同じ**カーネルスクラッチを使う。SQLite が
+     * 自分で写していなければ 1 本目が 2 本目の値に化ける。 */
+    ok(api->db_prepare_only(h, "SELECT ?, ?") == 0, "prepare_only of SELECT ?,?");
+    ok(api->db_bind_text(h, 1, "first", 5) == 0, "bind_text #1");
+    ok(api->db_bind_text(h, 2, "second", 6) == 0, "bind_text #2 (same scratch)");
+    if (api->db_step(h) == DB_STATUS_ROW) {
+        ok(same(api->db_column_text(h, 0), "first"), "TRANSIENT kept the 1st bind");
+        ok(same(api->db_column_text(h, 1), "second"), "the 2nd bind is intact");
+    } else {
+        ok(0, "TRANSIENT kept the 1st bind (no row)");
     }
     api->db_finalize(h);
 

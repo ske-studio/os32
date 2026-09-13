@@ -14,7 +14,10 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CASES = ["open_existing", "prepare_only", "binds", "error_code", "shm_bound",
-         "user_range", "owner_isolation", "order_new", "order_old"]
+         "user_range", "owner_isolation", "order_new", "order_old",
+         # 実装レビュー 往復 1 の blocker 6 件 + TRANSIENT (s0_tdd.md §K)
+         "shm_exact", "stat_faults", "journal_mode", "step_no_stmt",
+         "path_len", "sql_tail", "transient"]
 INC = ["-I" + str(ROOT / p) for p in
        ("include", "fs", "drivers", "sdk/include/os32", "lib", "lib/sqlite3")]
 CONFIG = str(ROOT / "lib/sqlite3/os32_sqlite_config.h")
