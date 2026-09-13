@@ -22,6 +22,12 @@
 
 #include "os32api.h"
 
+/* コピー先が /etc/settings.db* かを字句で見る純関数 (票 S0-D / D0)。
+ * HostDrv に古い settings.db が残っていても NHD の本体を切り詰めない。
+ * 実体は userland/system/hsync_protect.inc、ホスト試験は
+ * tools/tests/test_hsync_protect.py。 */
+#include "hsync_protect.inc"
+
 #define FILE_BUF_SIZE  (64 * 1024)  /* 64KB */
 #define MAX_FILES      128
 #define MAX_DEPTH      8
@@ -34,6 +40,8 @@ static int g_copied;
 static int g_skipped;
 static int g_errors;
 static int g_force;
+/* 保護対象として除外した件数 */
+static int g_protected;
 /* サブディレクトリに sys が明示されたか (既定の全体同期では外す) */
 static int g_want_sys;
 
@@ -124,6 +132,55 @@ static int copy_file(const char *src, const char *dst)
     return total;
 }
 
+/* ======== 保護対象の判定 ======== */
+
+/* 現に存在する /etc/settings.db* の実体。同期を始める前に 1 度だけ集める
+ * (ファイルごとに 5 回 stat すると 16MHz の実機では効く)。 */
+#define HS_MAX_PROT 8
+static u32 g_prot_dev[HS_MAX_PROT];
+static u32 g_prot_ino[HS_MAX_PROT];
+static int g_prot_count;
+
+static void scan_protected_entities(void)
+{
+    OS32_Stat st;
+    char buf[OS32_MAX_PATH];
+    int i;
+
+    g_prot_count = 0;
+    for (i = 0; hsp_protected_names[i] && g_prot_count < HS_MAX_PROT; i++) {
+        str_cpy(buf, "/etc/");
+        str_cat(buf, hsp_protected_names[i]);
+        if (api->sys_stat(buf, &st) != 0) continue;   /* 欠損はそのまま */
+        g_prot_dev[g_prot_count] = st.st_dev;
+        g_prot_ino[g_prot_count] = st.st_ino;
+        g_prot_count++;
+    }
+}
+
+/* 実体規則: dst_path が現に /etc/settings.db* のどれかと同じ実体 (NHD 上の
+ * hardlink) なら真。名前規則 (hsp_path_protected) をすり抜ける別名を塞ぐ。 */
+static int is_same_as_protected(const char *dst_path)
+{
+    OS32_Stat here;
+    int i;
+
+    if (g_prot_count == 0) return 0;                  /* 守る実体が無い */
+    if (api->sys_stat(dst_path, &here) != 0) return 0;
+    for (i = 0; i < g_prot_count; i++) {
+        if (here.st_dev == g_prot_dev[i] && here.st_ino == g_prot_ino[i])
+            return 1;
+    }
+    return 0;
+}
+
+/* コピー / mkdir の**直前**に通す 1 か所の判定 */
+static int dst_protected(const char *dst_path)
+{
+    if (hsp_path_protected(dst_path)) return 1;
+    return is_same_as_protected(dst_path);
+}
+
 /* ======== ディレクトリ再帰同期 ======== */
 
 static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
@@ -156,14 +213,25 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             continue;
         }
 
-        /* パス構築 */
+        /* パス構築。dst_dir は全体同期のとき "" なので、空文字列で
+         * [-1] を読まないように長さを先に見る。 */
         str_cpy(src_path, src_dir);
-        if (src_path[str_len(src_path) - 1] != '/') str_cat(src_path, "/");
+        if (str_len(src_path) == 0 ||
+            src_path[str_len(src_path) - 1] != '/') str_cat(src_path, "/");
         str_cat(src_path, fl.names[i]);
 
         str_cpy(dst_path, dst_dir);
-        if (dst_path[str_len(dst_path) - 1] != '/') str_cat(dst_path, "/");
+        if (str_len(dst_path) == 0 ||
+            dst_path[str_len(dst_path) - 1] != '/') str_cat(dst_path, "/");
         str_cat(dst_path, fl.names[i]);
+
+        /* /etc/settings.db* は通常配備で作らない・上書きしない (票 S0-D)。
+         * ディレクトリ経路も同じ規則で見る (etc/settings.db/ の残骸を作らない)。 */
+        if (dst_protected(dst_path)) {
+            api->kprintf(ATTR_YELLOW, "  protected: %s (skipped)\n", dst_path);
+            g_protected++;
+            continue;
+        }
 
         if (fl.types[i] == OS32_FILE_TYPE_DIR) {
             /* ディレクトリ: 作成して再帰 */
@@ -214,6 +282,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_skipped = 0;
     g_errors = 0;
     g_force = 0;
+    g_protected = 0;
 
     /* 引数パース */
     for (i = 1; i < argc; i++) {
@@ -250,12 +319,21 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
         return;
     }
 
-    /* 同期パス構築 */
+    /* 守るべき実体を 1 度だけ集める (票 S0-D の実体規則) */
+    scan_protected_entities();
+
+    /* 同期パス構築。`hsync -f etc` のように subdir で保護対象を直接指されても
+     * 書かない (連結後の文字列を字句正規化して判定する)。 */
     if (subdir) {
         str_cpy(src, "/host/");
         str_cat(src, subdir);
         str_cpy(dst, "/");
         str_cat(dst, subdir);
+        if (dst_protected(dst)) {
+            api->kprintf(ATTR_YELLOW, "  protected: %s (skipped)\n", dst);
+            api->mem_free(file_buf);
+            return;
+        }
         api->kprintf(ATTR_CYAN, "hsync: %s -> %s\n", src, dst);
     } else {
         str_cpy(src, "/host");
@@ -274,8 +352,9 @@ void __cdecl main(int argc, char **argv, KernelAPI *_api)
     api->vfs_sync();
 
     /* 結果表示 */
-    api->kprintf(ATTR_WHITE, "\nDone: %d copied, %d skipped, %d errors\n",
-                 g_copied, g_skipped, g_errors);
+    api->kprintf(ATTR_WHITE,
+                 "\nDone: %d copied, %d skipped, %d errors, %d protected\n",
+                 g_copied, g_skipped, g_errors, g_protected);
 
     api->mem_free(file_buf);
 }

@@ -104,13 +104,11 @@
 | 3 (`cffa137`) | Request changes | 5 件: PTE 検査は呼び手の PD、finalize / close は診断を消さない、stat の ENOENT は不存在、mkdir と rmtree、packages の既存入力依存 |
 | 4 版 | 決裁: 実装へ | 5 件を反映。ユーザー決裁 (2026-09-13) で設計の 4 往復目は回さず、K / D / T を同時発注 |
 
-## 9. 実装メモ (T、2026-09-13)
+## 8. 実装メモ (D、2026-09-13)
 
-- `assets/settings/defaults.tsv` (3 行 + 書式コメント)、`tools/mk_settings_db.py`、試験 `tools/tests/test_mk_settings_db.py` (38 件)、記録 `tools/tests/s0_tdd.md` §T。
-- 空行 / コメントの判定は **行頭だけ** (`line == ""` か `#` 始まり) で、行全体を strip しない。S2 の C 側 reader が同じ規則を素直に書けるようにした。
-- `meta.created` は epoch を UTC の ISO 8601 (`1970-01-01T00:00:00Z`) にした文字列。決定性は「内容 + epoch」だけで決まり、mtime は読まない。挿入は (scope, key) 順に固定し、最後に `VACUUM` + `PRAGMA user_version=1` で自由ページを落とす。実物は 3KB / freelist 0。
-- `build/assets.mk`: `SETTINGS_DB = $(BUILD_OUT)/settings.db` を FORCE 依存で生成。通常配備の対象ではないので `ASSETS_DEPLOYED` には入れず、`ASSETS_ALL` (→ `clean-assets` / `clean`) と `all:` への追加依存、媒体ターゲットから引く。`FORCE` は `build/programs.mk` の既存を使う。
-- `build/image.mk`: FDD に `/etc/settings.db=`、`packages` の依存を `programs boot $(BUILD_OUT)/vmkernel.lz4 unicode_bin $(BUILD_OUT)/settings.db assets/fep.db` に。`assets/fep.db` は userland 層の NORMAL が要求する既存入力で、mkpkg を厳格化した以上これも結ぶ必要がある。
-- `tools/mkpkg.py`: 欠損は一律エラー。全パッケージのファイルを**先に**解決して欠損を集め、1 つも `.PKG` を書かずに非ゼロ終了する (途中まで書いた媒体を残さない)。glob が 0 件なのは欠損としない (parser は不変)。
-- 副作用の注意: これまで欠損は warning だったので、`deploy.yaml` ではなく `package_defs.yaml` 側に「作られていない登録ファイル」があると `make iso` が**落ちるようになる**。現行の登録 38 件はすべて `programs` / `boot` / assets の成果物で、`make -n packages` で mkpkg より前に生成されることを確認済み。
-- 未実施: ゲスト受入 T1 (媒体を mount して一覧、`sqlite3` で読む)、`make` 実行。B10 の FDD インストーラ不整合は S3。
+- 新規 `tools/deploy_protect.py` = 2 段判定 (名前規則を realpath の前に → 実体規則の `st_dev`/`st_ino`)、`resolve_dest` / `is_protected` / `check_root_etc` / `protect_log` / `check_dest`。`stat` の失敗は **ENOENT だけ不存在**、他は `ProtectError` で配備全体を失敗させる。
+- 適用点は票 §2 の列挙どおり全部: `nhd_deploy` の `do_sync` (mkdir 含む) / `do_sync_from_hostdrv` (mkdir 含む) / `do_mkdirs` / `do_copy` / `do_copy_all` / `do_rm` / `remove_partial`、`hostdrv_deploy` の `do_sync` (copy2 と mkdir、内容比較より前) / `do_clean` (rmtree をやめエントリごとに削除)、`prune_stale` の `prune_hostdrv` / `prune_nhd`。除外は `protected: <path> (skipped)`。
+- stamp = `<local>.pulled` (JSON: remote_path / size / mtime / **sha256** / local_path)。`pull` と `ensure_local_nhd` の自動 pull が**コピー成功後にだけ**書き、失敗した pull は消す。`deploy` は 3 条件 (local_path 一致 / remote の path・size 一致 / remote 再ハッシュ一致) が揃うときだけ全体を書き、`--force` でだけ通す。**書いた直後に来歴を取り直す** (remote==local になるため。ゲストが走れば hash が変わるので検出目的は保たれる)。
+- 失敗伝播: `run_sync()` を通した `sync`、`cp` / `rm` の戻り値、`do_umount` の sync をすべて非ゼロにし、`main` は各サブコマンドの戻り値を終了コードにする (`sys.exit(0 if main() is not False else 1)`)。保護対象の除外は失敗ではない。
+- ゲスト側は `userland/system/hsync_protect.inc` (純関数: 字句正規化 + 名前規則) を `hsync.c` が include し、`dst_protected()` が名前規則 → `/etc/settings.db*` との inode 比較の順で見る。ディレクトリ作成経路と `-f` の subdir 連結も同じ判定を通る。併せて `dst_dir` が `""` のときに `dst_path[-1]` を読んでいた既存の境界バグを直した。
+- ホスト TDD: `tools/tests/test_deploy_protect.py` (53 件、RED 35 失敗 → GREEN 全通過)、`tools/tests/test_hsync_protect.py` + `hsync_protect_host.c` (28 checks)。記録は `tools/tests/s0_tdd.md` 節 D。配備・エミュレータ・`make` は未実行、D1 受入は未了 ([V4])。

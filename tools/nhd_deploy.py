@@ -26,10 +26,18 @@ NHD_LOCAL が無ければ Windows 側から自動で取り込む (NP21/W 停止�
 
 import sys
 import os
+import errno
+import hashlib
+import json
 import subprocess
 import shutil
 import glob as globmod
 import yaml
+
+# 通常配備が /etc/settings.db* を作らない・上書きしない・消さないための共通判定
+# (票 S0-D / D0)。書く・消す・切り詰める直前に 1 か所で止める。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import deploy_protect as protect
 
 # === パス設定 ===
 # 作業用 NHD (ループマウントして書き込む側)。以前は /tmp/os32.nhd だったが、
@@ -75,6 +83,115 @@ PARTITION_SKIP = NHD_HEADER_SECTORS + HDD_PARTITION_LBA  # 1633
 PARTITION_OFFSET = PARTITION_SKIP * 512  # 836096 バイト (1633 * 512)
 
 
+# === pull の来歴 (stamp) ===
+# NHD 全体のコピー (deploy) はファイル単位の保護では守れない。稼働中のゲストが
+# /etc/settings.db に書いた内容は remote 側にしかなく、古い local を上書きすると
+# 丸ごと消える。そこで pull が「この local はこの remote から取った」来歴を残し、
+# deploy はそれが崩れていないときだけ書く (票 S0-D / TASK_S0 §2、往復 2 の 8)。
+STAMP_SUFFIX = '.pulled'
+
+
+def stamp_path(local_path=None):
+    return (local_path or NHD_LOCAL) + STAMP_SUFFIX
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_pull_stamp(local_path, remote_path):
+    """pull が **コピー成功後にだけ** 呼ぶ。remote の内容 hash まで残す。"""
+    st = os.stat(remote_path)
+    data = {
+        'remote_path': os.path.abspath(remote_path),
+        'remote_size': st.st_size,
+        'remote_mtime': int(st.st_mtime),
+        'remote_sha256': file_sha256(remote_path),
+        'local_path': os.path.abspath(local_path),
+    }
+    with open(stamp_path(local_path), 'w') as f:
+        json.dump(data, f, indent=1, sort_keys=True)
+    return data
+
+
+def remove_pull_stamp(local_path=None):
+    """失敗した pull は来歴を残さない (古い stamp も消す)。"""
+    try:
+        os.remove(stamp_path(local_path))
+    except OSError as exc:
+        if exc.errno != errno.ENOENT:
+            raise
+
+
+def verify_pull_stamp(local_path=None, remote_path=None):
+    """deploy が全体コピーしてよいかを判定する。
+
+    Returns: (ok, reason)  reason は ok=False のときだけ意味がある。
+    """
+    local_path = local_path or NHD_LOCAL
+    remote_path = remote_path or NHD_REMOTE
+    sp = stamp_path(local_path)
+    if not os.path.isfile(sp):
+        return False, '来歴 {} が無い (pull していない / 消えた)'.format(sp)
+    try:
+        with open(sp) as f:
+            data = json.load(f)
+    except (ValueError, OSError) as exc:
+        return False, '来歴 {} を読めない ({})'.format(sp, exc)
+    if data.get('local_path') != os.path.abspath(local_path):
+        return False, '来歴の local_path {!r} が今の {!r} と違う'.format(
+            data.get('local_path'), os.path.abspath(local_path))
+    if data.get('remote_path') != os.path.abspath(remote_path):
+        return False, '来歴の remote_path {!r} が今の {!r} と違う'.format(
+            data.get('remote_path'), os.path.abspath(remote_path))
+    if not os.path.isfile(remote_path):
+        return False, 'remote {} が無い'.format(remote_path)
+    size = os.path.getsize(remote_path)
+    if size != data.get('remote_size'):
+        return False, 'remote のサイズが {} -> {} と変わっている'.format(
+            data.get('remote_size'), size)
+    # mtime を保ったまま中身だけ差し替えられても気づけるよう再ハッシュする。
+    if file_sha256(remote_path) != data.get('remote_sha256'):
+        return False, 'remote の内容が pull 時と違う (ゲストが書いた可能性)'
+    return True, ''
+
+
+def run_sync():
+    """`sync` を実行して成否を返す。失敗を握り潰さない (票 S0-D、往復 2 の 9)。"""
+    result = subprocess.run(['sync'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
+              file=sys.stderr)
+        return False
+    return True
+
+
+def guard_dest(guest_path, host_src=None, root=None):
+    """最終パスを確定して保護判定する (NHD 側の共通入口)。
+
+    Returns: (dest_abs, state)
+      state: 'ok' = 書いてよい / 'protected' = 除外 (失敗ではない)
+             'error' = 判定できない (= 配備を失敗させる)
+    """
+    root = root if root is not None else MOUNT_POINT
+    try:
+        dest, protected = protect.check_dest(root, guest_path, host_src)
+    except protect.ProtectError as exc:
+        print("Error: 配備の保護判定に失敗: {}".format(exc), file=sys.stderr)
+        return None, 'error'
+    if protected:
+        protect.protect_log(guest_path)
+        return dest, 'protected'
+    return dest, 'ok'
+
+
 def is_mounted():
     """マウント済みかチェック"""
     result = subprocess.run(
@@ -107,13 +224,17 @@ def ensure_local_nhd():
         print("Error: {} も見つかりません".format(NHD_REMOTE), file=sys.stderr)
         return False
     os.makedirs(os.path.dirname(NHD_LOCAL), exist_ok=True)
+    remove_pull_stamp()
     try:
         shutil.copy2(NHD_REMOTE, NHD_LOCAL)
-    except PermissionError:
-        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+    except (OSError, PermissionError) as exc:
+        print("Error: NHD を取り込めません: {}".format(exc), file=sys.stderr)
+        print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
         print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        remove_pull_stamp()
         return False
+    write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
     print("  取り込み完了 ({:.1f} MB)".format(os.path.getsize(NHD_LOCAL) / (1024 * 1024)))
     return True
 
@@ -174,8 +295,9 @@ def do_umount():
             print("ループデバイス {} を解放しました".format(loop_dev))
         return True
 
-    # sync
-    subprocess.run(['sync'], capture_output=True)
+    # sync — 失敗をここで握り潰すと「書いたつもり」でイメージを配る
+    if not run_sync():
+        return False
 
     # アンマウント
     result = subprocess.run(
@@ -215,12 +337,17 @@ def do_mkdirs():
     if not ensure_mounted():
         return False
     for d in SYS_DIRS:
-        target = os.path.join(MOUNT_POINT, d)
+        target, state = guard_dest('/' + d)
+        if state == 'error':
+            return False
+        if state == 'protected':
+            continue
         if not os.path.exists(target):
             subprocess.run(['sudo', 'mkdir', '-p', target],
                            capture_output=True)
             print("  mkdir /{}".format(d))
-    subprocess.run(['sync'], capture_output=True)
+    if not run_sync():
+        return False
     print("Done! (system directories created)")
     return True
 
@@ -234,22 +361,39 @@ def do_copy(src_files, dest_dir='/', rename=None):
     if not ensure_mounted():
         return False
 
-    # コピー先ディレクトリの確保
-    dest_base = os.path.join(MOUNT_POINT, dest_dir.lstrip('/'))
+    # コピー先ディレクトリの確保 (保護対象名のディレクトリは作らない)
+    if dest_dir.strip('/'):
+        dest_base, state = guard_dest(dest_dir.rstrip('/'))
+        if state == 'error':
+            return False
+        if state == 'protected':
+            return False
+    else:
+        dest_base = os.path.abspath(MOUNT_POINT)
     if not os.path.exists(dest_base):
         subprocess.run(['sudo', 'mkdir', '-p', dest_base],
                        capture_output=True)
 
     copied = 0
+    failed = 0
+    skipped = 0
+    disp_dir = dest_dir if dest_dir.endswith('/') else dest_dir + '/'
     for src in src_files:
         if not os.path.isfile(src):
             print("Warning: {} not found, skipping".format(src))
+            failed += 1
             continue
         if rename and len(src_files) == 1:
             dest_name = rename
         else:
             dest_name = os.path.basename(src)
-        dest_path = os.path.join(dest_base, dest_name)
+        # CLI からも保護対象は書けない (ホストの道具で settings.db を書く道を作らない)
+        dest_path, state = guard_dest(disp_dir + dest_name, host_src=src)
+        if state == 'error':
+            return False
+        if state == 'protected':
+            skipped += 1
+            continue
         result = subprocess.run(
             ['sudo', 'cp', src, dest_path],
             capture_output=True, text=True
@@ -257,19 +401,26 @@ def do_copy(src_files, dest_dir='/', rename=None):
         if result.returncode != 0:
             print("Error copying {}: {}".format(dest_name, result.stderr.strip()),
                   file=sys.stderr)
+            remove_partial(dest_path)
+            failed += 1
             continue
         size = os.path.getsize(src)
-        disp_dir = dest_dir if dest_dir.endswith('/') else dest_dir + '/'
         print("  {}{} ({} bytes)".format(disp_dir, dest_name, size))
         copied += 1
 
     if copied > 0:
-        subprocess.run(['sync'], capture_output=True)
+        if not run_sync():
+            return False
         print("Done! ({} files copied)".format(copied))
+    elif skipped and not failed:
+        # 保護対象だけを指定された。除外は失敗ではない。
+        print("Done! (0 files copied, {} protected)".format(skipped))
+        return True
     else:
         print("Error: コピーするファイルがありません", file=sys.stderr)
         return False
-    return True
+    # コピーできなかったものがあれば成功と言わない (往復 2 の 9)
+    return failed == 0
 
 
 def do_copy_all(src_dir, ext='.bin', dest_dir='/'):
@@ -287,33 +438,50 @@ def do_copy_all(src_dir, ext='.bin', dest_dir='/'):
 def do_ls(path='/'):
     """ファイル一覧"""
     if not ensure_mounted():
-        return
+        return False
     target = os.path.join(MOUNT_POINT, path.lstrip('/'))
     if not os.path.exists(target):
         print("Error: {} not found".format(path), file=sys.stderr)
-        return
+        return False
     result = subprocess.run(
         ['ls', '-la', target],
         capture_output=True, text=True
     )
     print(result.stdout)
+    return result.returncode == 0
 
 
 def do_rm(filename):
     """ファイル削除 (sudo rm)"""
     if not ensure_mounted():
-        return
-    target = os.path.join(MOUNT_POINT, filename.lstrip('/'))
+        return False
+    target, state = guard_dest(filename)
+    if state == 'error':
+        return False
+    if state == 'protected':
+        # 除外は失敗ではない。ホストの道具で settings.db を消す道を作らない。
+        return True
     if not os.path.exists(target):
         print("Error: {} not found".format(filename), file=sys.stderr)
-        return
-    subprocess.run(['sudo', 'rm', target], capture_output=True)
-    subprocess.run(['sync'], capture_output=True)
+        return False
+    result = subprocess.run(['sudo', 'rm', target],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Error: {} を消せなかった: {}".format(
+            filename, (result.stderr or '').strip()), file=sys.stderr)
+        return False
+    if not run_sync():
+        return False
     print("Removed: {}".format(filename))
+    return True
 
 
-def do_deploy():
-    """アンマウント + NHDをNP21/Wにコピー"""
+def do_deploy(force=False):
+    """アンマウント + NHDをNP21/Wにコピー
+
+    全体コピーなのでファイル単位の保護では守れない。pull が残した来歴
+    (`<local>.pulled`) が崩れていなければだけ書く (票 S0-D、往復 2 の 8)。
+    """
     # まずアンマウント
     if is_mounted():
         if not do_umount():
@@ -322,16 +490,34 @@ def do_deploy():
     if not ensure_local_nhd():
         return False
 
+    ok, reason = verify_pull_stamp()
+    if not ok:
+        if not force:
+            print("Error: NHD 全体の上書きを中止: {}".format(reason),
+                  file=sys.stderr)
+            print("  remote 側 (稼働中のゲストが書いた /etc/settings.db 等) を"
+                  "古い local で潰す恐れがある。", file=sys.stderr)
+            print("  'python3 tools/nhd_deploy.py pull' で取り直すか、"
+                  "承知の上なら deploy --force。", file=sys.stderr)
+            return False
+        print("Warning: 来歴が崩れているが --force なので続行: {}".format(reason))
+
     print("NHDイメージをNP21/Wにコピー中...")
     print("  {} -> {}".format(NHD_LOCAL, NHD_REMOTE))
 
     try:
         shutil.copy2(NHD_LOCAL, NHD_REMOTE)
-    except PermissionError:
-        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+    except (OSError, PermissionError) as exc:
+        print("Error: NHD をコピーできません: {}".format(exc), file=sys.stderr)
+        print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
         print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
         return False
+
+    # 書いた直後は remote == local。来歴を今の remote で取り直しておかないと、
+    # 続けて deploy するだけで「remote が変わった」と誤検出する。ゲストを走らせ
+    # れば remote は変わるので、検出の目的 (ゲストの書き込みを潰さない) は保たれる。
+    write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
 
     size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)
     print("Done! ({:.1f} MB copied)".format(size_mb))
@@ -477,13 +663,18 @@ def do_pull():
     print("NHDイメージを取り込み中 (フォーマットなし)...")
     print("  {} -> {}".format(NHD_REMOTE, NHD_LOCAL))
     os.makedirs(os.path.dirname(NHD_LOCAL), exist_ok=True)
+    # 失敗した pull が古い来歴を残すと、中途半端な local で deploy が通ってしまう。
+    remove_pull_stamp()
     try:
         shutil.copy2(NHD_REMOTE, NHD_LOCAL)
-    except PermissionError:
-        print("Error: NP21/Wがファイルをロックしています。先にkillしてください",
+    except (OSError, PermissionError) as exc:
+        print("Error: NHD を取り込めません: {}".format(exc), file=sys.stderr)
+        print("  NP21/W がロックしている場合は先に kill してください",
               file=sys.stderr)
         print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
+        remove_pull_stamp()
         return False
+    write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
 
     print("完了! ({:.1f} MB)".format(os.path.getsize(NHD_LOCAL) / (1024 * 1024)))
     return do_mount()
@@ -581,7 +772,18 @@ def remove_partial(dest_file):
     起動しない理由が見えなくなる (2026-09-10 の /boot/vmkernel.lz4 が
     446,464 B に切り詰められた件、POLICY_DEBUG §4-29)。
     消しておけば NOT FOUND で失敗が見える。消せなくても報告だけして進む
-    (失敗は呼び出し側が total_failed で拾う)。"""
+    (失敗は呼び出し側が total_failed で拾う)。
+
+    保護対象 (/etc/settings.db*) には触れない。そもそも書いていないので
+    「壊れた宛先」も無い。"""
+    try:
+        if protect.is_protected(MOUNT_POINT, dest_file):
+            protect.protect_log(dest_file)
+            return
+    except protect.ProtectError as exc:
+        print("  Warning: {} の保護判定に失敗したので消さない: {}".format(
+            dest_file, exc))
+        return
     result = subprocess.run(['sudo', 'rm', '-f', dest_file],
                             capture_output=True, text=True)
     if result.returncode != 0:
@@ -630,7 +832,11 @@ def do_sync(tag_filter=None):
         dirs = fs.get('directories', [])
         print("\n[dirs] ディレクトリ構造作成")
         for d in dirs:
-            target = os.path.join(MOUNT_POINT, d.lstrip('/'))
+            target, state = guard_dest(d)
+            if state == 'error':
+                return False
+            if state == 'protected':
+                continue
             if not os.path.exists(target):
                 subprocess.run(['sudo', 'mkdir', '-p', target],
                                capture_output=True)
@@ -641,6 +847,7 @@ def do_sync(tag_filter=None):
     total_copied = 0
     total_size = 0
     total_failed = 0
+    total_protected = 0
 
     for entry in files:
         entry_tags = entry.get('tags', [])
@@ -657,15 +864,29 @@ def do_sync(tag_filter=None):
         print("\n[{}] {} -> {}".format(tag_label, entry['host'], entry['guest']))
 
         for host_abs, guest_path in pairs:
-            # ゲスト側のディレクトリを確保
-            guest_dir = os.path.dirname(guest_path)
-            dest_dir_abs = os.path.join(MOUNT_POINT, guest_dir.lstrip('/'))
-            if not os.path.exists(dest_dir_abs):
-                subprocess.run(['sudo', 'mkdir', '-p', dest_dir_abs],
-                               capture_output=True)
+            # 実コピー直前に最終パスで保護判定する (manifest 直指定 / glob / tag
+            # のどれで来ても同じ 1 か所を通る)
+            dest_file, state = guard_dest(guest_path, host_src=host_abs)
+            if state == 'error':
+                return False
+            if state == 'protected':
+                total_protected += 1
+                continue
+
+            # ゲスト側のディレクトリを確保 (保護対象名のディレクトリは作らない)
+            guest_dir = os.path.dirname(guest_path) or '/'
+            if guest_dir.strip('/'):
+                dest_dir_abs, dstate = guard_dest(guest_dir)
+                if dstate == 'error':
+                    return False
+                if dstate == 'protected':
+                    total_protected += 1
+                    continue
+                if not os.path.exists(dest_dir_abs):
+                    subprocess.run(['sudo', 'mkdir', '-p', dest_dir_abs],
+                                   capture_output=True)
 
             # ファイルコピー
-            dest_file = os.path.join(MOUNT_POINT, guest_path.lstrip('/'))
             result = subprocess.run(
                 ['sudo', 'cp', host_abs, dest_file],
                 capture_output=True, text=True
@@ -683,8 +904,9 @@ def do_sync(tag_filter=None):
             total_copied += 1
             print("  {} ({} bytes)".format(guest_path, size))
 
-    # sync
-    subprocess.run(['sync'], capture_output=True)
+    # sync — 失敗を握り潰すと「書いたつもり」で deploy へ進む
+    if not run_sync():
+        return False
 
     print("\n" + "=" * 55)
     if total_failed:
@@ -694,7 +916,10 @@ def do_sync(tag_filter=None):
         print("  配備は完了していない。ゲストの成果物は古いままか消えている。")
         print("=" * 55)
         return False
-    print("  完了! {} ファイル ({:,} bytes)".format(total_copied, total_size))
+    print("  完了! {} ファイル ({:,} bytes){}".format(
+        total_copied, total_size,
+        "、{} 件は保護対象として除外".format(total_protected)
+        if total_protected else ""))
     print("=" * 55)
     return True
 
@@ -723,6 +948,7 @@ def do_sync_from_hostdrv():
     total_copied = 0
     total_size = 0
     total_failed = 0
+    total_protected = 0
 
     for dirpath, dirnames, filenames in os.walk(hostdrv_dir):
         # HostDrvルートからの相対パス
@@ -730,8 +956,18 @@ def do_sync_from_hostdrv():
         if rel_dir == '.':
             rel_dir = ''
 
-        # NHD側のディレクトリを確保
-        dest_dir = os.path.join(MOUNT_POINT, rel_dir)
+        # NHD側のディレクトリを確保。HostDrv に etc/settings.db/ のような
+        # 残骸ディレクトリがあっても作らない (往復 3 の 4)。
+        if rel_dir:
+            dest_dir, dstate = guard_dest('/' + rel_dir.replace(os.sep, '/'))
+            if dstate == 'error':
+                return False
+            if dstate == 'protected':
+                total_protected += 1
+                dirnames[:] = []
+                continue
+        else:
+            dest_dir = os.path.abspath(MOUNT_POINT)
         if not os.path.exists(dest_dir):
             subprocess.run(['sudo', 'mkdir', '-p', dest_dir],
                            capture_output=True)
@@ -739,10 +975,16 @@ def do_sync_from_hostdrv():
         for fname in sorted(filenames):
             src_path = os.path.join(dirpath, fname)
             if rel_dir:
-                guest_path = '/' + rel_dir + '/' + fname
+                guest_path = '/' + rel_dir.replace(os.sep, '/') + '/' + fname
             else:
                 guest_path = '/' + fname
-            dest_path = os.path.join(dest_dir, fname)
+            # HostDrv に古い etc/settings.db が残っていても NHD の本体を触らない
+            dest_path, state = guard_dest(guest_path, host_src=src_path)
+            if state == 'error':
+                return False
+            if state == 'protected':
+                total_protected += 1
+                continue
 
             result = subprocess.run(
                 ['sudo', 'cp', src_path, dest_path],
@@ -760,7 +1002,8 @@ def do_sync_from_hostdrv():
             total_copied += 1
             print("  {} ({} bytes)".format(guest_path, size))
 
-    subprocess.run(['sync'], capture_output=True)
+    if not run_sync():
+        return False
 
     print("\n" + "=" * 55)
     if total_failed:
@@ -769,7 +1012,10 @@ def do_sync_from_hostdrv():
                   total_failed, total_copied, total_size))
         print("=" * 55)
         return False
-    print("  完了! {} ファイル ({:,} bytes)".format(total_copied, total_size))
+    print("  完了! {} ファイル ({:,} bytes){}".format(
+        total_copied, total_size,
+        "、{} 件は保護対象として除外".format(total_protected)
+        if total_protected else ""))
     print("=" * 55)
     return True
 
@@ -847,6 +1093,11 @@ def do_push(local_path, remote_name=None, resolve=False):
 
 
 def main():
+    """各サブコマンドの戻り値をそのまま終了コードにする (票 S0-D、往復 2 の 9)。
+
+    False を返した操作は失敗。以前は copy / rm / sync の失敗が exit 0 のまま
+    後続 (NHD deploy) へ進み、古い成果物を配っていた。
+    """
     if len(sys.argv) < 2:
         print("NHD ext2 Deploy Tool (mount版)")
         print("")
@@ -861,7 +1112,8 @@ def main():
         print("  setup-dirs             — システムディレクトリを作成")
         print("  ls [path]              — ファイル一覧")
         print("  rm <file>              — ファイル削除")
-        print("  deploy                 — umount + NHDをNP21/Wにコピー")
+        print("  deploy [--force]       — umount + NHDをNP21/Wにコピー")
+        print("  pull                   — NP21/W側NHDを取り込む (来歴を記録)")
         print("  format                 — ext2を再フォーマット (全消去)")
         print("  init                   — Windows側NHDをコピー+フォーマット+マウント")
         print("")
@@ -869,19 +1121,20 @@ def main():
         print("  NHDローカル:  {}".format(NHD_LOCAL))
         print("  NHD NP21/W:   {}".format(NHD_REMOTE))
         print("  マウント:     {}".format(MOUNT_POINT))
+        print("  来歴:         {}".format(stamp_path()))
         print("  deploy defs:  {}".format(", ".join(DEPLOY_MANIFESTS)))
-        return
+        return True
 
     cmd = sys.argv[1]
 
     if cmd == 'mount':
-        do_mount()
+        return do_mount()
 
     elif cmd == 'umount':
-        do_umount()
+        return do_umount()
 
     elif cmd == 'setup-dirs':
-        do_mkdirs()
+        return do_mkdirs()
 
     elif cmd == 'copy':
         # --dest DIR と --rename NAME オプションをパース
@@ -901,8 +1154,8 @@ def main():
                 i += 1
         if not src_files:
             print("Usage: copy [--dest DIR] [--rename NAME] <src_file> [...]")
-            return
-        do_copy(src_files, dest_dir=dest_dir, rename=rename)
+            return False
+        return do_copy(src_files, dest_dir=dest_dir, rename=rename)
 
     elif cmd == 'copy-all':
         # --dest DIR オプションをパース
@@ -918,44 +1171,42 @@ def main():
                 i += 1
         if not args:
             print("Usage: copy-all [--dest DIR] <dir> [extension]")
-            return
+            return False
         src_dir = args[0]
         ext = args[1] if len(args) > 1 else '.bin'
-        do_copy_all(src_dir, ext, dest_dir=dest_dir)
+        return do_copy_all(src_dir, ext, dest_dir=dest_dir)
 
     elif cmd == 'ls':
         path = sys.argv[2] if len(sys.argv) > 2 else '/'
-        do_ls(path)
+        return do_ls(path)
 
     elif cmd == 'rm':
         if len(sys.argv) < 3:
             print("Usage: rm <file>")
-            return
-        do_rm(sys.argv[2])
+            return False
+        return do_rm(sys.argv[2])
 
     elif cmd == 'deploy':
-        if not do_deploy():
-            sys.exit(1)
+        return do_deploy(force='--force' in sys.argv[2:])
 
     elif cmd == 'write-boot':
         if len(sys.argv) < 3:
             print("Usage: write-boot <loader.bin>")
-            return
+            return False
         loader = sys.argv[2]
         if not os.path.isfile(loader):
             print("Error: {} not found".format(loader))
-            return
-        do_write_boot(loader)
+            return False
+        return do_write_boot(loader)
 
     elif cmd == 'format':
-        do_format()
+        return do_format()
 
     elif cmd == 'pull':
-        if not do_pull():
-            sys.exit(1)
+        return do_pull()
 
     elif cmd == 'init':
-        do_init()
+        return do_init()
 
     elif cmd == 'sync':
         # --tag TAG オプションをパース
@@ -967,12 +1218,10 @@ def main():
                 i += 2
             else:
                 i += 1
-        if do_sync(tag_filter=tag_filter) is False:
-            sys.exit(1)
+        return do_sync(tag_filter=tag_filter)
 
     elif cmd == 'sync-from-hostdrv':
-        if do_sync_from_hostdrv() is False:
-            sys.exit(1)
+        return do_sync_from_hostdrv()
 
     elif cmd == 'push':
         # --resolve オプションをパース
@@ -988,14 +1237,14 @@ def main():
                 i += 1
         if not args:
             print("Usage: push [--resolve] <local_file> [guest_name]")
-            return
+            return False
         local_file = args[0]
         guest_name = args[1] if len(args) > 1 else None
-        do_push(local_file, remote_name=guest_name, resolve=resolve)
+        return do_push(local_file, remote_name=guest_name, resolve=resolve)
 
-    else:
-        print("Unknown command: {}".format(cmd))
+    print("Unknown command: {}".format(cmd), file=sys.stderr)
+    return False
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(0 if main() is not False else 1)

@@ -29,6 +29,8 @@ PROJ_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 import deploy_manifests  # noqa: E402
+# 通常配備の settings 保護 (票 S0-D / D0)。掃除も「消す直前」に同じ判定を通す。
+import deploy_protect as protect  # noqa: E402
 
 # 掃除してよいゲスト側ディレクトリ (末尾スラッシュ無し、'' = ルート直下)
 PRUNE_DIRS = ('', 'bin', 'sbin', 'usr/bin', 'sys', 'debug')
@@ -95,6 +97,14 @@ def hostdrv_root():
     return '/mnt/c/os32'
 
 
+def is_protected(root, path):
+    """消す直前の保護判定。判定できなければ例外を上に投げて失敗にする。"""
+    if protect.is_protected(root, path):
+        protect.protect_log(protect.guest_path_of(root, path))
+        return True
+    return False
+
+
 def prune_hostdrv(want, delete):
     root = hostdrv_root()
     if not os.path.isdir(root):
@@ -104,7 +114,17 @@ def prune_hostdrv(want, delete):
     show('hostdrv ' + root, stale)
     if delete:
         for gp, p in stale:
-            os.remove(p)
+            try:
+                if is_protected(root, p):
+                    continue
+                os.remove(p)
+            except protect.ProtectError as exc:
+                print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
+                return None
+            except OSError as exc:
+                print("Error: {} を消せなかった: {}".format(gp, exc),
+                      file=sys.stderr)
+                return None
             print("  removed {}".format(gp))
     return len(stale)
 
@@ -121,9 +141,24 @@ def prune_nhd(want, delete):
     show('nhd ' + nhd_deploy.NHD_LOCAL, stale)
     if delete:
         for gp, p in stale:
-            subprocess.run(['sudo', 'rm', '-f', p], capture_output=True)
+            try:
+                if is_protected(root, p):
+                    continue
+            except protect.ProtectError as exc:
+                print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
+                return None
+            result = subprocess.run(['sudo', 'rm', '-f', p],
+                                    capture_output=True, text=True)
+            if result.returncode != 0:
+                print("Error: {} を消せなかった: {}".format(
+                    gp, (result.stderr or '').strip()), file=sys.stderr)
+                return None
             print("  removed {}".format(gp))
-        subprocess.run(['sync'], capture_output=True)
+        result = subprocess.run(['sync'], capture_output=True, text=True)
+        if result.returncode != 0:
+            print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
+                  file=sys.stderr)
+            return None
         print("  (Windows 側への反映は deploy-nhd の deploy 段。NP21/W 停止中に行うこと)")
     return len(stale)
 
