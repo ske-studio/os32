@@ -57,4 +57,6 @@ Codex (枯渇時は Fable 5.1 サブエージェント、ROLES §5) に S5-C (`c
   - M4: get 1 件あたり約 4.5 tick、open + close で約 20 tick (gshell の起動時 load = 24t と整合)。gshell 起動の目安 (≤ 50t) 内。tick は NP21/W の実行速度 (386 相当ではない) での相対値。
   - M6: FEP 辞書 (約 38.8KB) + 設定 DB (約 25KB) の共存ピーク **64,640 B** / 384KB プール。OOM 無し。GUI 端末での実行は R1 の後に追記。
   - 注: `/api/cmd` は約 30 秒で EOT を待ち切るので、50 回の read (57 秒) は応答がずれる。実測は 20 回以下で回す。
+- **R3 (ゲスト、2026-09-13)**: regress 6 / 6 (`s5reg`)、kselftest 87 / 0。
+- **R1 (ゲスト、2026-09-13、9801 `GFX=pc98`)**: `gui_gate.py v11` / `v12g1` / `v12g4` すべて RESULT OK、各台本の `CUI back: ok` (6 項目の Start メニューで `ROW_CUI` が CUI mode に当たる)、`system.cfg: GUI=0`。S4 の G2 は配備 2 回目 (TASK_S4 §10d) で確認済み。
 - **M5 (ホスト、2026-09-13)**: 合成 tsv 300 件 (int 100 / text 96B 100 / blob 64B 100、scope `app:bench`) → `mk_settings_db.py` → **29,696 B** (page 1KB)。64KB 以内で合格。
