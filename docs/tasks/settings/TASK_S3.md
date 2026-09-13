@@ -1,6 +1,6 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import`
 
-状態: **設計 第 5 版 (追加往復の残 1 件 + non-blocker を反映)。ユーザー決裁: 追加往復は Request changes 1 件 (revert の phase) → 第 5 版で実装に進むか、さらに確認往復かを決裁。S3-I2 は別票 (3)。受入イメージは §6**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
+状態: **設計 第 5 版 = 実装へ (ユーザー決裁 2026-09-13: 第 5 版で実装に進み実装レビューで併せて見る、受入は NHD をバックアップしてから作業 NHD で実走 (ini 不要)、S3-I2 は別票)**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
 正典: [DESIGN.md](DESIGN.md) §2 (初期値はインストーラだけが持つ、リカバリモード) / §6b (JSON バックアップと `cfg import`)、[S0_FOUNDATION.md](S0_FOUNDATION.md) §6 (**明示リカバリ契約**: 自動分岐なし、表示と承認、元 DB と journal を対で保存、別名へ完全コピー → 検証 → 切替、失敗で元を消さない、原子性は backend で確認できなければ名乗らない、system.cfg 等は触らない、復元後に schema / sync / reopen を記録)、[TASK_S2.md](TASK_S2.md) §1 (規則) / §2 (`cfg export` の JSON 形、import は S3)、[TASK_S0.md](TASK_S0.md) (配備保護: `settings.db*` を通常配備が触らない)。
 規約: [C1] C89、コーダーは worktree + ホスト TDD のみ、[D2] (使い捨てイメージ / ini) はユーザー承認。
 
@@ -115,7 +115,7 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 
 ## 6. ユーザー判断が要る点
 
-- **受入イメージ**: FOUNDATION §6 は「承認済み使い捨てイメージ」での受入を求める。本票の提案は「現行の作業 NHD をバックアップしたうえで実走 (置換対象は settings.db だけで `.bak` に元が残る)」。使い捨てイメージ (NHD の複製を NP21/W に別名で刺す = ini 変更 [D2]) にするか、バックアップ済み作業 NHD で行うかを決裁。決裁までは受入を始めない。
+- **受入イメージ (決裁 2026-09-13)**: 作業 NHD をバックアップしたうえで実走する (ini ツールは HDD キー未対応で、recover が触るのは `/hd0/etc/settings.db*` の 9 名だけ)。使い捨てイメージ (ini ツールの HDD キー拡張) は S3-I2 (format が走る) のときに別タスクで。
 
 ## 7. 残ゲート (本票で直さない)
 
