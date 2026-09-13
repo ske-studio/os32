@@ -542,8 +542,19 @@ class TrialTests(Images):
 
     def test_generated_ps_is_narrow_normal_close_and_explicit_launch(self):
         """**生成されるコード文字列の検査だけ**。CheckFile が Windows 上で実際に
-        ディレクトリを拒否することの実証ではない (PowerShell は動かしていない)。"""
+        ディレクトリを拒否すること、`UseShellExecute = $true` が本当にハンドル
+        継承を断つことの実証ではない (PowerShell は動かしていない)。"""
         ps = trial.PS_SERVER
+        # 起動は ShellExecute 経由 = パイプを継承させない (実走 F3、PM 判断 ③)。
+        # リダイレクトを一切しないことが前提なので、指定が現れないことも見る。
+        self.assertIn('$si.UseShellExecute = $true', ps)
+        self.assertNotIn('$si.UseShellExecute = $false', ps)
+        self.assertNotIn('RedirectStandard', ps)
+        self.assertIn('if ($p.HasExited) {', ps)
+        self.assertNotIn('$p.WaitForExit(1000)', ps)
+        # StartTime は ShellExecute 起動では読めないことがあるので保護する。
+        self.assertIn('try { $startUtc = $p.StartTime.ToUniversalTime() } catch', ps)
+        self.assertEqual(ps.count('{') - ps.count('}'), 0, 'unbalanced braces')
         for required in ['CloseMainWindow()', 'WaitForExit(10000)', 'AssertAbsent',
                          '$handle = $p.Handle', 'CreateNew', '$plan.trial', '$plan.cwd',
                          'AssertProcess', 'FileIdentity', 'CheckPath',

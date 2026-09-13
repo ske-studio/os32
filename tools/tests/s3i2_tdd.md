@@ -426,3 +426,43 @@ PS 本体は終了しているので `wait` は成功し、reader だけが残�
 
 PowerShell は走らせていない。`$mismatch` / `$code` / `$startedPid` と `CheckFile` の実動作、
 および上の 3 案の実挙動は次の実走でしか確かめられない。
+
+## §T 継承パイプを断つ (PM 判断 ③、2026-09-14)
+
+実走 F3 で判った「起動した NP21/W が PowerShell の stdout パイプを継承するので
+reader が EOF に届かず dispose が必ず失敗する」問題に対し、PM が **③ = 起動経路を
+`UseShellExecute = $true` に変える** を選択した (①は毎回失敗と出る道具を残す、
+②は「EOF 未到達は失敗」という既存の不変条件を崩すため不採用)。
+
+### 変更 (`'start'` 段だけ)
+
+- `$si.UseShellExecute = $true`。**リダイレクトは一切しない** (`RedirectStandard*` は
+  どこにも現れない)。`bInheritHandles=true` で CreateProcess する経路を通らないので、
+  起動した NP21/W は PowerShell の stdout パイプを継承しない。
+- 起動する **exe・引数 (`"/i<trial ini>"` [+ `"<d88>"`])・作業ディレクトリは不変**。
+  CIM の CommandLine と突き合わせる文字列 (`launch_command()`) も不変。
+- ShellExecute 経由では `$p.Handle` が取れないことがあるので、
+  **同一性の要は `$p.Id`**。生存確認は `WaitForExit(1000)` をやめ
+  `Start-Sleep -Milliseconds 1000` + `$p.HasExited` (ハンドル不要)。
+- `$p.StartTime` も読めないことがあるため `try/catch` で保護し、読めたときだけ
+  CIM の `created` と 2 秒の許容で突き合わせる。読めなければ CIM の行に任せる
+  (Python 側が「古い行と違うこと」を見るので、起動の新しさは担保される)。
+- **`_close_reader` の「EOF 未到達は失敗」と `cleanup:` の印はそのまま**。継承が
+  無くなれば PS 終了で EOF に届き、dispose は成功するはず (実走で確認する)。
+  `test_parent_exit_with_inherited_pipe_still_reports_failure` も無変更。
+
+### ホストで固定できたこと / できないこと
+
+固定したのは **生成されるコード文字列だけ**:
+`$si.UseShellExecute = $true` があり `= $false` と `RedirectStandard` が無いこと、
+`if ($p.HasExited) {` があり `$p.WaitForExit(1000)` が無いこと、
+`try { $startUtc = $p.StartTime.ToUniversalTime() } catch` があること、波括弧の均衡。
+
+**実証していないこと ([V4])**: ShellExecute がハンドル継承を実際に断つか、
+`$p.Id` / `$p.StartTime` / `$p.HasExited` が ShellExecute 起動で期待どおり読めるか、
+その結果 dispose が成功して `ok: true` になるか。**すべて PM の実走待ち**。
+PowerShell 構文検査 (`--windows-parser`) も opt-in のままで未実行。
+
+| 段階 | 実出力 |
+|---|---|
+| GREEN | `discover -p 'test_np21w*.py'` → `Ran 135 tests` / `OK (skipped=2)`、`test_mk_blank_nhd.py` → `Ran 13` / `OK` |

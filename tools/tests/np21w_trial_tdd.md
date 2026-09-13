@@ -214,3 +214,15 @@ stdout ハンドルを継承する**ため reader が EOF に届かない (PS �
 項目名つきに、(3) 起動後の失敗では常に `started_pid` を残すようにした。
 **継承パイプがある限り trial は実走で ok:True を返せない**ので、緩和するか
 `UseShellExecute=$true` にするかは PM / レビュー判断 ([`s3i2_tdd.md`](s3i2_tdd.md) の F3 の節)。
+
+## 2026-09-14 追記 6 — 起動を ShellExecute に (PM 判断 ③)
+
+`'start'` 段だけ `$si.UseShellExecute = $true` (リダイレクト無し) にして、起動した
+NP21/W に PowerShell の stdout パイプを継承させない。exe・引数・作業ディレクトリ・
+`launch_command()` との照合は不変。ShellExecute では `$p.Handle` が取れないことが
+あるので同一性の要は `$p.Id`、生存確認は `Start-Sleep` + `$p.HasExited`、`$p.StartTime`
+は try/catch で保護し読めたときだけ CIM の created と 2 秒の許容で比べる。
+`_close_reader` の「EOF 未到達は失敗」と `cleanup:` の印は**そのまま**維持した
+(継承が無ければ EOF に届いて dispose は成功するはず)。
+ホストで固定できるのは生成コード文字列までで、継承が実際に断たれるか・
+`ok: true` になるかは PM の実走待ち [V4]。詳細は [`s3i2_tdd.md`](s3i2_tdd.md) §T の該当節。

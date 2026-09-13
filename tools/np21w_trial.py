@@ -396,18 +396,25 @@ try {
       CheckFile $plan.fdd_arg
       $arguments = $arguments + ' "' + $plan.fdd_arg + '"'
      }
+     # UseShellExecute = $true (リダイレクトは一切しない): CreateProcess を
+     # bInheritHandles=true で呼ぶ経路を避け、**起動した NP21/W に PowerShell の
+     # stdout パイプを継承させない**。継承すると reader が EOF に届かず、起動が
+     # 成功しても dispose 段が必ず失敗していた (実走 F3、PM 判断 ③)。
+     # 起動する exe・引数・作業ディレクトリは変えない。
      $si = [Diagnostics.ProcessStartInfo]::new()
-     $si.UseShellExecute = $false
+     $si.UseShellExecute = $true
      $si.FileName = $plan.exe
      $si.Arguments = $arguments
      $si.WorkingDirectory = $plan.cwd
      $p = [Diagnostics.Process]::Start($si)
      try {
-      $handle = $p.Handle
+      # ShellExecute 経由では $p.Handle を取れないことがあるので PID を要にする。
+      # 生存確認も WaitForExit ではなく HasExited (ハンドル不要) で行う。
       $startedPid = $p.Id
-      if ($p.WaitForExit(1000)) { $code = 'started process exited'; throw 'started process exited' }
+      Start-Sleep -Milliseconds 1000
+      if ($p.HasExited) { $code = 'started process exited'; throw 'started process exited' }
       $rows = @(Query)
-      # PID はハンドルを握っている間は再利用されないので、これが同一性の要。
+      # PID が同一性の要 (直後に照会するので再利用は実質起こらない)。
       # created は CIM (マイクロ秒) と Process.StartTime (100ns) で最後の桁が
       # 食い違うため、文字列一致ではなく 2 秒の許容で見る。exe は Windows の
       # パスなので大小文字を無視する (CIM は実体の綴りを返す)。
@@ -417,7 +424,11 @@ try {
       else {
        $rowUtc = [DateTime]::Parse($rows[0].created, [Globalization.CultureInfo]::InvariantCulture,
                                    [Globalization.DateTimeStyles]::RoundtripKind)
-       if ([Math]::Abs(($rowUtc - $p.StartTime.ToUniversalTime()).TotalSeconds) -gt 2) { $mismatch += 'created' }
+       # ShellExecute 起動では StartTime が読めないことがある。読めたときだけ
+       # 突き合わせ、読めなければ CIM の行 (Python 側が古い行との差を見る) に任せる。
+       $startUtc = $null
+       try { $startUtc = $p.StartTime.ToUniversalTime() } catch { $startUtc = $null }
+       if ($null -ne $startUtc -and [Math]::Abs(($rowUtc - $startUtc).TotalSeconds) -gt 2) { $mismatch += 'created' }
        if ($rows[0].exe -ine $plan.exe) { $mismatch += 'exe' }
        if ($rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)) { $mismatch += 'command' }
       }
