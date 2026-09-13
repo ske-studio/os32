@@ -144,3 +144,85 @@ URL/モデルはローカル OpenAI 互換サービスの実設定に合わせ�
 `bind_trial(plan, WindowsExecutor, authorized=True, exclusive=True)` の返す callable だけを
 公開する。モデルから受け取る strict JSON は1つの全計画のみ。任意の shell/action registry、
 既存 `emu_agent` への自動登録、別工程の NHD 配備は追加していない。
+
+## 2026-09-14 追記 — 票 S3I2-T: 変更集合を disk 側へ (`hdd` / `fdd_eject` / `fdd_arg`)
+
+trial が扱うキーは **Cirrus 2 キー → `HDD1FILE` (+ `FDD1FILE` / `FDD2FILE`)** に変わった。
+`e_resume=false` の強制と、欠落 / 重複 / 未知値の拒否は**そのまま**で、承認計画にも残る
+(`changes` に `e_resume: 'false'` が入り、`transform_trial(raw, changes)` が要求する)。
+Cirrus 系キーは計画に含めない = **変更集合は明示したキーだけ**なので、baseline の
+`USEGD5430` / `GD5430TYPE` / `ExMemory` が何であっても trial は値を検査せず触らない。
+
+- `make_plan(..., hdd, fdd_eject, fdd_arg=None)`。`hdd` と `fdd_arg` は `NP21W_DIR` 直下の
+  名前で受け、計画には `hdd` = 名前、`fdd_arg` = 起動引数に使う絶対パスとして載る
+  (`action` は `cirrus-trial` → `disk-trial`)。`_validate_plan()` は `fdd_arg` の basename から
+  同じ計画を作り直して照合するので、別ディレクトリの `.d88` は一致しない。
+- 起動コマンドは `"<exe>" "/i<trial ini>"` (+ `" <d88>"` を引用付きで追加)。
+  `launch_command(plan)` が唯一の組み立てで、PowerShell 側の `$arguments` と
+  `$rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)` も同じ形。
+  根拠は `np2arg.cpp` `Np2Arg::Parse` の `case 'i': lpIniFile = &lpArg[2];` と、
+  拡張子で判る `.d88` をディスクとして装着する分岐。`preflight` と `start` で
+  `CheckPath $plan.fdd_arg` (存在 + reparse point 拒否) を通す。
+- 「稼働中プロセスを選んで trial 自身が通常終了 → 終了確認 → 新 ini 作成 → 起動」の
+  流れ、単回 callable、strict JSON の完全一致、kill fallback 無し、restore 無しは不変。
+  `np21w_ini_live.py` には HDD / FDD キーを足していない。
+
+試験は `tools/tests/test_np21w_trial.py` (19 件、新規 2 件 + 既存の書き換え) と
+`tools/tests/test_np21w_ini.py` の `PathFields` (11 件)。`NP21W_DIR` と `wslpath` は
+`image_fixture()` の贋物、イメージの存在確認は temp dir の空ファイル。
+`tools/tests/test_np21w_transport.py` の trial CLI 2 件も同じ fixture と `--hdd` を使う。
+RED→GREEN の実出力は [`s3i2_tdd.md`](s3i2_tdd.md) §T。実 ini・実プロセスは未検証 [V4]。
+
+## 2026-09-14 追記 2 — 実装レビュー往復 1 (B2 / B5)
+
+- 計画に **解決済みパスを束縛**する: `hdd_path` (Windows) / `hdd_host` (ホスト側)、
+  `fdd_arg` (Windows) / `fdd_arg_host`。`changes['HDD1FILE']` も解決済みパス。
+  `NP21W_DIR` を読むのは `make_plan()` の `resolve_image()` だけで、`_validate_plan()` は
+  束縛済みの 3 つ組の整合 (同じ名前・同じディレクトリ・ホスト側が通常ファイル) だけを
+  見る。環境を A → B に変えて同じ JSON を dispatch しても A の HDD のまま。
+- PowerShell に `CheckFile` (`CheckPath` + `PSIsContainer` 拒否) を足し、`preflight` と
+  `start` で `$plan.hdd_path` / `$plan.fdd_arg` を検査する (`.nhd` 名のディレクトリ対策)。
+- 反例と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 1。実 ini・実プロセスは未検証 [V4]。
+
+## 2026-09-14 追記 3 — 実装レビュー往復 2
+
+- `_bound_image()` の説明を実装に合わせた (名前一致 + ホスト側が通常ファイルまで。
+  Windows 表記とホスト側の対応は `make_plan()` の `resolve_image()` が決める)。
+- `test_generated_ps_is_narrow_...` は **PowerShell のコード文字列の検査だけ**であり、
+  `CheckFile` が Windows 上でディレクトリを実際に拒否することの実証ではない (未実施 [V4])。
+- ini CLI の絶対パス迂回の直し (名前だけ受ける) は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 2。
+
+## 2026-09-14 追記 4 — 実走 (受入 F1) で判った start 段の過検査
+
+起動には成功していたのに `stage: start` で失敗していた。原因は 3 つ:
+exe の比較が start 段だけ大小文字を区別していた (CIM は実体の綴りを返す)、
+PowerShell が CIM の `CreationDate` (マイクロ秒) と `Process.StartTime` (100ns) の
+文字列一致を要求していた、そして失敗理由と起動した PID が結果に残らなかった。
+`identity_mismatch()` (Python) と `$mismatch` / `$code` / `$startedPid` (PowerShell) に直し、
+起動後の失敗では `process` か `started_pid` を結果 JSON に残す。停止・復旧はしない。
+詳細と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) の実走 F1 の節。PowerShell は未実行 [V4]。
+
+## 2026-09-14 追記 5 — 実走 (受入 F3) の dispose 段
+
+start 段は通過し `result['process']` も入ったが `stage: dispose` で失敗した。原因は
+`PowerShellTransport.close()` の `_close_reader()`: **起動した NP21/W が PowerShell の
+stdout ハンドルを継承する**ため reader が EOF に届かない (PS 本体は終了 = `wait` は成功)。
+既存の `test_parent_exit_with_inherited_pipe_still_reports_failure` が示すとおり
+「EOF 未到達は失敗」は意図された不変条件なので、**成功には変えていない**。
+代わりに (1) `close()` の失敗へ固定語彙の印 (`cleanup: inherited pipe still open` /
+`cleanup: executor exit timeout`) を付け、(2) 起動確認の揺れを `identity_unstable()` で
+項目名つきに、(3) 起動後の失敗では常に `started_pid` を残すようにした。
+**継承パイプがある限り trial は実走で ok:True を返せない**ので、緩和するか
+`UseShellExecute=$true` にするかは PM / レビュー判断 ([`s3i2_tdd.md`](s3i2_tdd.md) の F3 の節)。
+
+## 2026-09-14 追記 6 — 起動を ShellExecute に (PM 判断 ③)
+
+`'start'` 段だけ `$si.UseShellExecute = $true` (リダイレクト無し) にして、起動した
+NP21/W に PowerShell の stdout パイプを継承させない。exe・引数・作業ディレクトリ・
+`launch_command()` との照合は不変。ShellExecute では `$p.Handle` が取れないことが
+あるので同一性の要は `$p.Id`、生存確認は `Start-Sleep` + `$p.HasExited`、`$p.StartTime`
+は try/catch で保護し読めたときだけ CIM の created と 2 秒の許容で比べる。
+`_close_reader` の「EOF 未到達は失敗」と `cleanup:` の印は**そのまま**維持した
+(継承が無ければ EOF に届いて dispose は成功するはず)。
+ホストで固定できるのは生成コード文字列までで、継承が実際に断たれるか・
+`ok: true` になるかは PM の実走待ち [V4]。詳細は [`s3i2_tdd.md`](s3i2_tdd.md) §T の該当節。

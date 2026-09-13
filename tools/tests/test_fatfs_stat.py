@@ -21,7 +21,11 @@ CASES = ["stat_invalid_name_is_notfound",
          "stat_ok_fills_size_mode",
          "get_size_invalid_name_is_notfound",
          "open_paths_keep_inval",
-         "v50_journal_probe_on_8_3"]
+         "v50_journal_probe_on_8_3",
+         "list_ok_enumerates_all",
+         "list_readdir_error_propagates",
+         "list_opendir_error_propagates",
+         "list_empty_is_ok"]
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wno-unused-parameter", "-Wno-sign-compare",
          "-Wdeclaration-after-statement", "-D__cdecl="]

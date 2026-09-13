@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -294,6 +295,242 @@ class OfflineFiles(unittest.TestCase):
         code, _, _ = self.run_cli(['prepare', str(self.source), '--set',
                                    'USEGD5430=true', '--set', 'USEGD5430=false'])
         self.assertEqual(code, 2)
+
+
+
+
+# --- 票 S3I2-T (2a): ALLOWED_PATHS = HDD1FILE / FDD1FILE / FDD2FILE ---------
+# 実 ini・実プロセス・実 NP21W_DIR には触れない。wslpath は贋物 (-w / -u の
+# 両方)、イメージの存在確認は temp dir の実ファイルで行う。
+WIN_DIR = 'C:\\Fixture Dir'
+CP932_D88 = b'C:\\np21w\\\x93\xfa\x96{\x8c\xea.d88'
+PATHS_RAW = (b'; opaque \x82\xa0\xff\r\n[NekoProject21]\r\n'
+             b' USEGD5430 = false \t; keep\r\nGD5430TYPE=91\nUSEPEGCP=false\nExMemory=16\n'
+             b'HDD1FILE=C:\\np21w\\work.nhd\r\nFDD1FILE=' + CP932_D88 + b'\r\nFDD2FILE=\n'
+             b'private=DO_NOT_PRINT\r\n[other]\r\nHDD1FILE=C:\\elsewhere\\other.nhd')
+EJECT = {'FDD1FILE': '', 'FDD2FILE': ''}
+FRESH = WIN_DIR + '\\os32_fresh.nhd'
+
+
+class WslpathFake:
+    """`wslpath -w` / `-u` の贋物。往復も贋物の表で答える。"""
+
+    def __init__(self, mapping):
+        self.mapping = dict(mapping)
+        self.output = None
+
+    def __call__(self, argv, **kwargs):
+        assert argv[0] == 'wslpath' and argv[1] in ('-w', '-u'), argv
+        if self.output is not None and argv[1] == '-w':
+            text = self.output
+        elif argv[1] == '-w':
+            text = self.mapping[argv[2]]
+        else:
+            back = {v: k for k, v in self.mapping.items()}
+            # 未知の Windows パスも実物同様どこかへ翻訳される (同じ対象とは限らない)。
+            text = back.get(argv[2], '/mnt/c/' + argv[2][3:].replace('\\', '/').lower())
+        return types.SimpleNamespace(returncode=0, stdout=text.encode('cp932') + b'\r\n')
+
+
+@unittest.skipIf(ini is None, 'implementation not yet written (assertion RED)')
+class PathFields(unittest.TestCase):
+    """HDD1FILE / FDD1FILE / FDD2FILE。fail closed / CP932 保持 / 重複拒否は
+    固定値キーと同じ作法で、存在要求だけを ALLOWED と別々に適用する。
+    transform() は**解決済みの絶対パス**だけを受け取り、環境変数を読まない。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = self.temp.name
+        Path(self.dir, 'os32_fresh.nhd').write_bytes(b'')
+        self.wslpath = WslpathFake({self.dir: WIN_DIR})
+        patcher = mock.patch.dict(os.environ, {'NP21W_DIR': self.dir})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        runner = mock.patch.object(ini.subprocess, 'run', side_effect=self.wslpath)
+        runner.start()
+        self.addCleanup(runner.stop)
+
+    def test_resolve_image_returns_the_host_and_windows_pair(self):
+        host, windows = ini.resolve_image('os32_fresh.nhd', '.nhd')
+        self.assertEqual(host, os.path.join(self.dir, 'os32_fresh.nhd'))
+        self.assertEqual(windows, FRESH)
+
+    def test_resolve_rejects_names_outside_the_rule_or_absent_on_the_host(self):
+        for name in ('missing.nhd', 'os32_fresh.NHD', 'os32_fresh',
+                     'sub/os32_fresh.nhd', '..\\os32_fresh.nhd', '../os32_fresh.nhd',
+                     '.nhd', '.hidden.nhd', 'a..b.nhd', '\u65e5\u672c.nhd',
+                     'os32 fresh.nhd', '', FRESH, None, 1):
+            with self.subTest(name=name), self.assertRaises(ini.IniError):
+                ini.resolve_image(name, '.nhd')
+
+    def test_a_directory_or_symlink_is_not_a_disk_image(self):
+        """`.nhd` という名前のディレクトリ / symlink を受理しない (往復 1 の B5)。"""
+        os.mkdir(os.path.join(self.dir, 'as_dir.nhd'))
+        os.symlink(os.path.join(self.dir, 'os32_fresh.nhd'),
+                   os.path.join(self.dir, 'as_link.nhd'))
+        for name in ('as_dir.nhd', 'as_link.nhd'):
+            with self.subTest(name=name), self.assertRaises(ini.IniError):
+                ini.resolve_image(name, '.nhd')
+        self.assertEqual(ini.resolve_image('os32_fresh.nhd', '.nhd')[1], FRESH)
+
+    def test_trailing_space_survives_to_the_windows_check(self):
+        """`.strip()` で末尾空白を落とすと存在確認先と ini の書き先がずれる
+        (往復 1 の B3)。終端改行だけ除去し、空白は windows_path が拒否する。"""
+        for output in ('C:\\Trial ', 'C:\\Trial \\sub'):
+            self.wslpath.output = output
+            with self.subTest(output=output), self.assertRaises(ini.IniError):
+                ini.resolve_image('os32_fresh.nhd', '.nhd')
+
+    def test_conversion_must_round_trip_to_the_same_directory(self):
+        self.wslpath.output = 'C:\\Elsewhere'
+        with self.assertRaises(ini.IniError):
+            ini.resolve_image('os32_fresh.nhd', '.nhd')
+
+    def test_hdd_value_is_the_resolved_absolute_path(self):
+        out, diff = ini.transform(PATHS_RAW, {'HDD1FILE': FRESH})
+        self.assertEqual(diff, ['HDD1FILE: set -> ' + FRESH])
+        self.assertEqual(out, PATHS_RAW.replace(b'HDD1FILE=C:\\np21w\\work.nhd',
+                                                b'HDD1FILE=' + FRESH.encode('ascii'), 1))
+        self.assertIn(b'[other]\r\nHDD1FILE=C:\\elsewhere\\other.nhd', out)
+
+    def test_transform_never_reads_the_environment(self):
+        with mock.patch.object(ini, 'np21w_directory',
+                               side_effect=AssertionError('must not resolve')):
+            self.assertEqual(ini.transform(PATHS_RAW, {'HDD1FILE': FRESH})[1],
+                             ['HDD1FILE: set -> ' + FRESH])
+            self.assertEqual(ini.transform(PATHS_RAW, EJECT)[1], ['FDD1FILE: set -> empty'])
+
+    def test_transform_rejects_unresolved_or_malformed_path_values(self):
+        for value in ('os32_fresh.nhd', WIN_DIR, WIN_DIR + '\\os32_fresh.d88',
+                      WIN_DIR + '\\..\\os32_fresh.nhd', 'C:\\dir\\\u65e5.nhd',
+                      'C:\\dir\\' + 'a' * 240 + '.nhd', None, 1):
+            with self.subTest(value=value), self.assertRaises(ini.IniError):
+                ini.transform(PATHS_RAW, {'HDD1FILE': value})
+
+    def test_semicolon_and_hash_are_refused_on_the_way_out_too(self):
+        """自分が書いた ini を同じ変更で読み直せること (往復 1 の B4)。"""
+        for value in ('C:\\Trial#1\\os32_fresh.nhd', 'C:\\Trial;1\\os32_fresh.nhd'):
+            with self.subTest(value=value), self.assertRaises(ini.IniError):
+                ini.transform(PATHS_RAW, {'HDD1FILE': value})
+        for windows in ('C:\\Trial#1', 'C:\\Trial;1'):
+            self.wslpath.output = windows
+            with self.subTest(windows=windows), self.assertRaises(ini.IniError):
+                ini.resolve_image('os32_fresh.nhd', '.nhd')
+        changes = dict(EJECT, HDD1FILE=FRESH)
+        once = ini.transform(PATHS_RAW, changes)[0]
+        self.assertEqual(ini.transform(once, changes), (once, []))
+
+    def test_fdd_fields_only_detach_and_keep_every_other_byte(self):
+        out, diff = ini.transform(PATHS_RAW, EJECT)
+        self.assertEqual(diff, ['FDD1FILE: set -> empty'])
+        self.assertEqual(out, PATHS_RAW.replace(b'FDD1FILE=' + CP932_D88, b'FDD1FILE=', 1))
+        self.assertNotIn('d88', ''.join(diff))
+        for value in (FRESH, 'os32_boot.d88', ' ', None):
+            with self.subTest(value=value), self.assertRaises(ini.IniError):
+                ini.transform(PATHS_RAW, {'FDD1FILE': value})
+
+    def test_already_detached_is_a_noop_without_a_diff_line(self):
+        out, diff = ini.transform(PATHS_RAW, {'FDD2FILE': ''})
+        self.assertEqual((out, diff), (PATHS_RAW, []))
+
+    def test_duplicate_or_missing_path_field_fails_closed(self):
+        for raw in (PATHS_RAW.replace(b'FDD2FILE=\n', b''),
+                    PATHS_RAW.replace(b'HDD1FILE=C:\\np21w\\work.nhd\r\n', b''),
+                    PATHS_RAW.replace(b'HDD1FILE=', b'HDD1FILE=\nhdd1file=', 1),
+                    PATHS_RAW.replace(b'FDD2FILE=\n', b'FDD2FILE=\nfdd2file=\n'),
+                    PATHS_RAW.replace(b'FDD2FILE=\n', b'FDD2FILE= ; detached\n')):
+            with self.subTest(raw=raw[:32]), self.assertRaises(ini.IniError):
+                ini.transform(raw, EJECT)
+
+    def test_tables_are_required_separately(self):
+        """固定値キーだけの live 操作は新しい必須キーに依存しない (逆も同じ)。"""
+        without_paths = (PATHS_RAW.replace(b'HDD1FILE=C:\\np21w\\work.nhd\r\n', b'')
+                                  .replace(b'FDD1FILE=' + CP932_D88 + b'\r\n', b'')
+                                  .replace(b'FDD2FILE=\n', b''))
+        out, diff = ini.transform(without_paths, {'USEGD5430': 'true'})
+        self.assertEqual(diff, ['USEGD5430: false -> true'])
+        odd_fixed = PATHS_RAW.replace(b'ExMemory=16', b'ExMemory=20')
+        out, diff = ini.transform(odd_fixed, EJECT)
+        self.assertEqual(diff, ['FDD1FILE: set -> empty'])
+        self.assertIn(b'ExMemory=20', out)
+        with self.assertRaises(ini.IniError):
+            ini.transform(odd_fixed, {'USEGD5430': 'true'})
+        with self.assertRaises(ini.IniError):
+            ini.transform(without_paths, EJECT)
+
+    def test_both_tables_can_change_in_one_pass(self):
+        out, diff = ini.transform(PATHS_RAW, dict(EJECT, HDD1FILE=FRESH, USEGD5430='true'))
+        self.assertEqual(diff, ['USEGD5430: false -> true', 'HDD1FILE: set -> ' + FRESH,
+                                'FDD1FILE: set -> empty'])
+        self.assertIn(b' USEGD5430 = true \t; keep', out)
+
+    def test_new_absolute_path_encoding_and_length_are_checked(self):
+        for windows in ('C:\\\u65e5\u672c\u8a9e', 'np21w', '\\\\server\\share',
+                        'C:\\' + 'a' * 240, 'C:\\', 'C:\\nul', 'C:\\dir\\sub.'):
+            self.wslpath.output = windows
+            with self.subTest(windows=windows), self.assertRaises(ini.IniError):
+                ini.resolve_image('os32_fresh.nhd', '.nhd')
+
+    def test_environment_must_name_np21w_dir(self):
+        for value in (None, '', 'relative/dir', 'C:\\np21w'):
+            with self.subTest(value=value):
+                patch = (mock.patch.dict(os.environ, {}, clear=True) if value is None
+                         else mock.patch.dict(os.environ, {'NP21W_DIR': value}))
+                with patch, self.assertRaises(ini.IniError):
+                    ini.resolve_image('os32_fresh.nhd', '.nhd')
+
+    def test_wslpath_failure_is_content_free(self):
+        for failure in (OSError('no wslpath'),
+                        ini.subprocess.CalledProcessError(1, 'wslpath'),
+                        ini.subprocess.TimeoutExpired('wslpath', 20)):
+            with mock.patch.object(ini.subprocess, 'run', side_effect=failure):
+                with self.subTest(failure=failure), self.assertRaises(ini.IniError) as caught:
+                    ini.resolve_image('os32_fresh.nhd', '.nhd')
+                self.assertNotIn(self.dir, str(caught.exception))
+
+    def cli(self, value, *extra):
+        source = Path(self.dir) / 'synthetic.snapshot'
+        source.write_bytes(PATHS_RAW)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ini.main(['prepare', str(source), '--set', 'HDD1FILE=' + value,
+                             '--set', 'FDD1FILE=', '--set', 'FDD2FILE='] + list(extra))
+        self.assertNotIn('DO_NOT_PRINT', out.getvalue() + err.getvalue())
+        self.assertEqual(source.read_bytes(), PATHS_RAW)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_resolves_a_name_through_resolve_image(self):
+        code, out, _ = self.cli('os32_fresh.nhd')
+        self.assertEqual(code, 0)
+        self.assertEqual(out, 'HDD1FILE: set -> %s\nFDD1FILE: set -> empty\n' % FRESH)
+
+    def test_cli_refuses_an_absolute_path_and_every_bypass_it_allowed(self):
+        """絶対パス入力は resolve_image() を通らず、存在 / 通常ファイル /
+        NP21W_DIR 内の検査を丸ごと迂回できた (往復 2 の blocker)。"""
+        os.mkdir(os.path.join(self.dir, 'as_dir.nhd'))
+        os.symlink(os.path.join(self.dir, 'os32_fresh.nhd'),
+                   os.path.join(self.dir, 'as_link.nhd'))
+        for value in (FRESH, WIN_DIR + '\\missing.nhd', WIN_DIR + '\\as_dir.nhd',
+                      WIN_DIR + '\\as_link.nhd', 'C:\\Somewhere Else\\other.nhd',
+                      'C:\\os32_fresh.nhd', 'as_dir.nhd', 'as_link.nhd', 'missing.nhd'):
+            with self.subTest(value=value):
+                code, out, err = self.cli(value)
+                self.assertEqual(code, 2)
+                self.assertEqual(out, '')
+                self.assertTrue(err.startswith('error: '), err)
+                self.assertNotIn(value, out)
+
+    def test_cli_apply_cannot_store_an_unchecked_path(self):
+        bundle = Path(self.dir) / 'bundles'
+        bundle.mkdir()
+        code, _, _ = self.cli(WIN_DIR + '\\missing.nhd', '--output', str(bundle), '--apply')
+        self.assertEqual(code, 2)
+        self.assertEqual(list(bundle.iterdir()), [])
+        code, _, _ = self.cli('os32_fresh.nhd', '--output', str(bundle), '--apply')
+        self.assertEqual(code, 0)
+        prepared, = bundle.glob('np21w-offline-*/prepared.bin')
+        self.assertIn(('HDD1FILE=' + FRESH).encode('ascii'), prepared.read_bytes())
 
 
 if __name__ == '__main__':

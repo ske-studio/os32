@@ -149,6 +149,7 @@ check-tools-host:
 	python3 -B tools/tests/test_gui_button_dispatch.py
 	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
 	python3 -B tools/tests/test_mk_settings_db.py
+	python3 -B tools/tests/test_mk_blank_nhd.py
 
 check-gshell-host:
 	python3 userland/gshell/host/integration.py
@@ -227,13 +228,17 @@ check-cfg-host:
 check-install-recover-host:
 	python3 -B tools/tests/test_install_recover.py
 
+# install (無印) の通常インストール経路のホスト TDD (票 S3I2-I)。実 install.c + KAPI の贋物、--target で IdeInfo 96B の表明。
+check-install-fresh-host:
+	python3 -B tools/tests/test_install_fresh.py --target
+
 # libos32gui の os32gui_cfg_* wrapper の分岐 (票 S2-W)。C の実体は贋物。
 check-gui-host:
 	cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check

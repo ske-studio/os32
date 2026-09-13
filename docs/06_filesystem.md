@@ -40,6 +40,11 @@ FatFs は `FF_USE_LFN 0` なので 8.3 に収まらない名前 (`settings.db-jo
 KAPI v50 の hot journal 検査が NOTFOUND 以外を `SQLITE_IOERR` と断じるため、
 FDD ブート (root = FAT) で `db_open_existing` が落ちていた。
 
+**列挙の途中エラーは負で返す**: `list_dir` は `sys_ls` のコールバックへ渡した項目を取り消さないが、
+途中で読めなくなったら**打ち切って負**を返す (`fatfs_vfs_list` は `f_readdir` の失敗を `ff_to_vfs` で写す)。
+`vfs_ls` はその戻り値をそのまま上へ返すので、呼び手 (`install` の `copy_directory` など) は
+戻り値を検査しないと「欠けたまま成功」になる。
+
 **型の検査は VFS 側で行う**: `vfs_open` はディレクトリを開くことを拒否し、
 `vfs_chdir` はディレクトリ以外を拒否する。これは FS ドライバ内部の型検査を禁止するものではない。
 
