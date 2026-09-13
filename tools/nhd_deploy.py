@@ -107,7 +107,12 @@ def file_sha256(path):
 
 
 def write_pull_stamp(local_path, remote_path):
-    """pull が **コピー成功後にだけ** 呼ぶ。remote の内容 hash まで残す。"""
+    """pull が **全部成功した最後にだけ** 呼ぶ。remote の内容 hash まで残す。
+
+    一時ファイルへ書いて fsync → rename の順に置く。途中で ENOSPC / EIO に
+    なっても「半分書けた来歴」が残らない (往復 2 の 6)。失敗したら一時ファイルも
+    既存の来歴も消して例外を投げる = pull 全体の失敗にする。
+    """
     st = os.stat(remote_path)
     data = {
         'remote_path': os.path.abspath(remote_path),
@@ -116,18 +121,33 @@ def write_pull_stamp(local_path, remote_path):
         'remote_sha256': file_sha256(remote_path),
         'local_path': os.path.abspath(local_path),
     }
-    with open(stamp_path(local_path), 'w') as f:
-        json.dump(data, f, indent=1, sort_keys=True)
+    final = stamp_path(local_path)
+    tmp = final + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, final)
+    except OSError:
+        for path in (tmp, final):
+            try:
+                os.remove(path)
+            except OSError as exc:
+                if exc.errno != errno.ENOENT:
+                    pass                # 消せなくても元の例外を優先する
+        raise
     return data
 
 
 def remove_pull_stamp(local_path=None):
-    """失敗した pull は来歴を残さない (古い stamp も消す)。"""
-    try:
-        os.remove(stamp_path(local_path))
-    except OSError as exc:
-        if exc.errno != errno.ENOENT:
-            raise
+    """失敗した pull は来歴を残さない (古い stamp も書きかけの tmp も消す)。"""
+    for path in (stamp_path(local_path), stamp_path(local_path) + '.tmp'):
+        try:
+            os.remove(path)
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
 
 
 def verify_pull_stamp(local_path=None, remote_path=None):
@@ -145,6 +165,9 @@ def verify_pull_stamp(local_path=None, remote_path=None):
             data = json.load(f)
     except (ValueError, OSError) as exc:
         return False, '来歴 {} を読めない ({})'.format(sp, exc)
+    # `[]` や `null` でも .get で落ちない (--force の判定まで進める、往復 2 の 7)
+    if not isinstance(data, dict):
+        return False, '来歴 {} が壊れている (オブジェクトではない)'.format(sp)
     if data.get('local_path') != os.path.abspath(local_path):
         return False, '来歴の local_path {!r} が今の {!r} と違う'.format(
             data.get('local_path'), os.path.abspath(local_path))
@@ -169,6 +192,22 @@ def run_sync():
     if result.returncode != 0:
         print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
               file=sys.stderr)
+        return False
+    return True
+
+
+def guard_root(root=None):
+    """サブコマンドの**入口**で 1 回だけ通す前提検査。
+
+    対象が 0 件の `sync --tag` や stale の無い `prune --delete` では判定が 1 度も
+    呼ばれないので、`<root>/etc` が symlink / 別マウント / 通常ファイルでも
+    成功で終わっていた (往復 2 の 8)。エントリの有無に依らず必ず見る。
+    """
+    root = root if root is not None else MOUNT_POINT
+    try:
+        protect.check_root_etc(root)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
         return False
     return True
 
@@ -374,6 +413,8 @@ def do_mkdirs():
     """ext2上にシステムディレクトリを作成"""
     if not ensure_mounted():
         return False
+    if not guard_root():
+        return False
     for d in SYS_DIRS:
         target, state = ensure_dir('/' + d)
         if state == 'error':
@@ -391,6 +432,8 @@ def do_copy(src_files, dest_dir='/', rename=None):
     rename:   ファイル名を変更 (単一ファイルのみ有効)
     """
     if not ensure_mounted():
+        return False
+    if not guard_root():
         return False
 
     # コピー先ディレクトリの確保 (各祖先を判定、保護対象名は作らない)
@@ -483,6 +526,8 @@ def do_ls(path='/'):
 def do_rm(filename):
     """ファイル削除 (sudo rm)"""
     if not ensure_mounted():
+        return False
+    if not guard_root():
         return False
     target, state = guard_dest(filename)
     if state == 'error':
@@ -839,7 +884,7 @@ def do_sync(tag_filter=None):
         return False
 
     print("=" * 55)
-    print("  OS32 フルデプロイ (deploy.yaml)")
+    print("  OS32 フルデプロイ (deploy.yaml)")  # guard_root は mount 後 (Phase 2)
     if tag_filter:
         print("  タグフィルタ: {}".format(tag_filter))
     print("=" * 55)
@@ -860,6 +905,9 @@ def do_sync(tag_filter=None):
     fs = cfg.get('filesystem', {})
 
     if not ensure_mounted():
+        return False
+    # 対象 0 件の `sync --tag` でも <root>/etc の異常で止める (往復 2 の 8)
+    if not guard_root():
         return False
 
     if not tag_filter:
@@ -970,6 +1018,8 @@ def do_sync_from_hostdrv():
 
     if not ensure_mounted():
         return False
+    if not guard_root():
+        return False
 
     print("\n" + "=" * 55)
     print("  HostDrv -> NHD ext2 同期")
@@ -991,6 +1041,23 @@ def do_sync_from_hostdrv():
         rel_dir = os.path.relpath(dirpath, hostdrv_dir)
         if rel_dir == '.':
             rel_dir = ''
+
+        # 子ディレクトリのうち保護対象は **降りる前に** dirnames から外す。
+        # 到着してから判定していると、HostDrv の etc/settings.db/ が読めない
+        # ときに os.walk の scandir が先に失敗して CLI ごと落ちていた
+        # (往復 2 の 9)。除外は失敗ではないのでログだけ出す。
+        keep_dirs = []
+        for child in dirnames:
+            child_guest = ('/' + rel_dir.replace(os.sep, '/') + '/' + child
+                           if rel_dir else '/' + child)
+            _unused, cstate = guard_dest(child_guest)
+            if cstate == 'error':
+                return False
+            if cstate == 'protected':
+                total_protected += 1
+                continue
+            keep_dirs.append(child)
+        dirnames[:] = keep_dirs
 
         # NHD側のディレクトリを確保。HostDrv に etc/settings.db/ のような
         # 残骸ディレクトリがあっても作らない (往復 3 の 4、各祖先は B2)。

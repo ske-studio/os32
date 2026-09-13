@@ -1084,6 +1084,206 @@ class ManifestEntryPoints(Base):
 
 
 # ======================================================================
+#  Codex 実装レビュー 往復 2 の blocker 1〜9 の反例
+#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.7)
+# ======================================================================
+class Review2DoubleFill(Base):
+    """1: 補完後のパスが (symlink 越しに) ディレクトリだと cp が再補完する。"""
+
+    def setUp(self):
+        super(Review2DoubleFill, self).setUp()
+        # <root>/bin/settings.db -> ../etc (ディレクトリへの symlink)
+        os.symlink('../etc', str(self.mount / 'bin' / 'settings.db'))
+        self.src = self.root / 'settings.db'
+        self.src.write_bytes(b'HOST-DB')
+
+    def test_resolve_dest_refuses_directory_result(self):
+        with self.assertRaises(protect.ProtectError):
+            protect.resolve_dest(str(self.mount), '/bin', str(self.src))
+
+    def test_manifest_guest_bin_cannot_reach_db(self):
+        digest = sha256(self.db)
+        self.manifest([{'host': 'build/settings.db', 'guest': '/bin',
+                        'tags': ['core']}])
+        self.pairs({'build/settings.db': [(str(self.src), '/bin')]})
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.assertIs(nd.do_sync(), False)       # 判定できないので失敗
+        self.assertDbIntact(digest)
+        self.assertNoProtectedWrites()
+
+    def test_copy_cli_cannot_reach_db_through_symlink(self):
+        """`copy --dest /bin <settings.db>` は別名規則で除外される。
+
+        こちらは宛先のファイル名まで決まっているので、realpath が
+        `/etc/settings.db` に落ちて名前規則が拾う = 除外 (成功)。
+        """
+        digest = sha256(self.db)
+        self.assertIs(nd.do_copy([str(self.src)], dest_dir='/bin'), True)
+        self.assertDbIntact(digest)
+        self.assertNoProtectedWrites()
+
+    def test_resolve_dest_never_returns_a_directory(self):
+        """host_src を渡した resolve_dest はディレクトリを返さない。"""
+        for guest in ('/etc/', '/bin/', '/'):
+            dest = protect.resolve_dest(str(self.mount), guest,
+                                        str(self.src_bin))
+            self.assertFalse(os.path.isdir(dest), guest)
+
+
+class Review2AncestorOnFinalPath(Base):
+    """2: 最終コピー先の**祖先**が保護対象のとき。"""
+
+    def test_protected_ancestor_is_skipped_not_failed(self):
+        self.db.unlink()
+        self.journal.unlink()
+        (self.mount / 'etc' / 'settings.db').mkdir()
+        digest_dir = sorted(os.listdir(str(self.mount / 'etc' / 'settings.db')))
+        ok = nd.do_copy([str(self.src_bin)],
+                        dest_dir='/', rename='etc/settings.db/inner')
+        self.assertIs(ok, True)                  # 除外は成功
+        self.assertEqual(
+            sorted(os.listdir(str(self.mount / 'etc' / 'settings.db'))),
+            digest_dir)
+        self.assertNoProtectedWrites()
+
+    def test_regular_file_ancestor_does_not_fail_with_enotdir(self):
+        """DB が通常ファイルのとき `/etc/settings.db/sub/file` は除外 (失敗ではない)。"""
+        dest = protect.resolve_dest(str(self.mount), '/etc/settings.db/sub/f')
+        self.assertEqual(protect.protected_ancestor(str(self.mount), dest),
+                         '/etc/settings.db')
+        _d, prot = protect.check_dest(str(self.mount), '/etc/settings.db/sub/f')
+        self.assertTrue(prot)
+
+    def test_sync_from_hostdrv_checks_ancestor(self):
+        digest = sha256(self.db)
+        stale = self.hostdrv / 'etc' / 'settings.db'
+        stale.mkdir()
+        (stale / 'inner').write_bytes(b'x')
+        self.assertIs(nd.do_sync_from_hostdrv(), True)
+        self.assertDbIntact(digest)
+        self.assertFalse((self.mount / 'etc' / 'settings.db').is_dir())
+        self.assertNoProtectedWrites()
+
+    def test_normal_ancestor_passes(self):
+        dest = protect.resolve_dest(str(self.mount), '/usr/bin/sh.bin')
+        self.assertIsNone(protect.protected_ancestor(str(self.mount), dest))
+
+
+class Review2StampWrite(Base):
+    """6 / 7: 来歴の書き込み失敗と壊れた JSON。"""
+
+    def setUp(self):
+        super(Review2StampWrite, self).setUp()
+        self.fake.mounted = False
+        self.local = pathlib.Path(nd.NHD_LOCAL)
+        self.remote = pathlib.Path(nd.NHD_REMOTE)
+        self.remote.parent.mkdir(parents=True, exist_ok=True)
+        self.remote.write_bytes(b'REMOTE-IMAGE' * 16)
+        self._patch(nd, 'do_mount', lambda: True)
+
+    def test_stamp_is_written_atomically(self):
+        self.assertIs(nd.do_pull(), True)
+        self.assertTrue(os.path.isfile(nd.stamp_path()))
+        self.assertFalse(os.path.isfile(nd.stamp_path() + '.tmp'),
+                         '一時ファイルが残っている')
+
+    def test_stamp_write_failure_leaves_no_stamp(self):
+        self.assertIs(nd.do_pull(), True)
+        real_open = open
+
+        def boom(path, mode='r', *a, **kw):
+            if str(path).endswith(nd.STAMP_SUFFIX + '.tmp'):
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            return real_open(path, mode, *a, **kw)
+        import builtins
+        self._patch(builtins, 'open', boom)
+        with self.assertRaises(OSError):
+            nd.write_pull_stamp(str(self.local), str(self.remote))
+        self._patch(builtins, 'open', real_open)
+        self.assertFalse(os.path.isfile(nd.stamp_path()),
+                         '書き込みに失敗したのに古い来歴が残った')
+        self.assertFalse(os.path.isfile(nd.stamp_path() + '.tmp'))
+        self.assertIs(nd.do_deploy(), False)
+
+    def test_non_object_stamp_reaches_force(self):
+        self.assertIs(nd.do_pull(), True)
+        for payload in ('[]', 'null', '"x"', '3'):
+            with open(nd.stamp_path(), 'w') as f:
+                f.write(payload)
+            ok, reason = nd.verify_pull_stamp()
+            self.assertIs(ok, False, payload)
+            self.assertIn('壊れている', reason)
+            self.assertIs(nd.do_deploy(), False, payload)
+            self.assertIs(nd.do_deploy(force=True), True, payload)
+
+
+class Review2EntryCheck(Base):
+    """8: 操作対象が 0 件でも不正な <root>/etc を拒否する。"""
+
+    def _break_etc(self, root):
+        shutil.rmtree(str(root / 'etc'))
+        other = self.root / ('conf-' + root.name)
+        other.mkdir()
+        os.symlink(str(other), str(root / 'etc'))
+
+    def test_nhd_sync_with_no_matching_tag(self):
+        self._break_etc(self.mount)
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['userland']}])
+        self.pairs({})
+        self.assertIs(nd.do_sync(tag_filter='nosuchtag'), False)
+
+    def test_hostdrv_sync_with_no_matching_tag(self):
+        self._break_etc(self.hostdrv)
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['userland']}])
+        self.pairs({})
+        self.assertIs(hd.do_sync(tag_filter='nosuchtag'), False)
+
+    def test_prune_with_no_stale_entries(self):
+        self._break_etc(self.hostdrv)
+        self._patch(ps, 'hostdrv_root', lambda: str(self.hostdrv))
+        self._patch(ps, 'find_stale', lambda r, w: [])
+        self.assertIsNone(ps.prune_hostdrv(set(), True))
+
+    def test_prune_nhd_with_no_stale_entries(self):
+        self._break_etc(self.mount)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self._patch(ps, 'find_stale', lambda r, w: [])
+        self.assertIsNone(ps.prune_nhd(set(), True))
+
+    def test_sync_from_hostdrv_with_empty_tree(self):
+        self._break_etc(self.mount)
+        self.assertIs(nd.do_sync_from_hostdrv(), False)
+
+
+class Review2WalkPruning(Base):
+    """9: 保護ディレクトリの中を os.walk が読む前に外す。"""
+
+    def test_unreadable_protected_dir_is_not_descended(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        digest = sha256(self.db)
+        stale = self.hostdrv / 'etc' / 'settings.db'
+        stale.mkdir()
+        (stale / 'inner').write_bytes(b'x')
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'NEWBIN')
+        os.chmod(str(stale), 0o000)
+        try:
+            ok = nd.do_sync_from_hostdrv()
+        finally:
+            os.chmod(str(stale), 0o755)
+        self.assertIs(ok, True, '保護ディレクトリの中を読んで失敗した')
+        self.assertDbIntact(digest)
+        self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(), b'NEWBIN')
+        self.assertNoProtectedWrites()
+
+
+# ======================================================================
 #  (4) main の終了コード
 # ======================================================================
 class MainExit(Base):

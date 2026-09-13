@@ -139,12 +139,34 @@ static int hsp_name_protected(const char *norm)
     return hsp_is_protected_basename(base);
 }
 
-/* 入口: 任意のコピー先 / mkdir 先の文字列が保護対象か。
+/* 正規化済みパスの**祖先**に保護対象が居るか (path 自身は見ない)。
+ * `/etc/settings.db/sub` のような宛先は、最終要素だけ見ても素通りする
+ * (親が `/etc/settings.db` なので名前規則に当たらない、往復 2 の 2)。 */
+static int hsp_ancestor_protected(const char *norm)
+{
+    char prefix[HSP_MAX_PATH];
+    int i;
+
+    for (i = 1; norm[i]; i++) {
+        if (norm[i] != '/') continue;
+        if (i >= HSP_MAX_PATH) return 1;    /* 判定できない = 保護側 */
+        {
+            int k;
+            for (k = 0; k < i; k++) prefix[k] = norm[k];
+            prefix[i] = '\0';
+        }
+        if (hsp_name_protected(prefix)) return 1;
+    }
+    return 0;
+}
+
+/* 入口: 任意のコピー先 / mkdir 先の文字列が保護対象か (自身または祖先)。
  * 正規化できない (異常に長い / root を越える) ものは**保護側**に倒す。 */
 static int hsp_path_protected(const char *path)
 {
     char norm[HSP_MAX_PATH];
 
     if (!hsp_normalize(path, norm, (int)sizeof(norm))) return 1;
-    return hsp_name_protected(norm);
+    if (hsp_name_protected(norm)) return 1;
+    return hsp_ancestor_protected(norm);
 }

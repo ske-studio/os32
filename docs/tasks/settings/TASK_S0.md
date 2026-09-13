@@ -119,6 +119,12 @@
 - **前提検査と削除経路** (B3 / B4 / B6): `check_root_etc` を `is_protected` の**入口で必ず 1 回**通し、`<root>/etc` が symlink / 別マウント / 通常ファイルなら配備全体を拒否 (clean も)。`_clean_tree` は top-down で「判定 → symlink → ディレクトリ → ファイル」の順に見て保護ディレクトリへ降りない (symlink 自体の削除は `is_protected_symlink`)。`mkdir` の rc、`os.walk(onerror=)`、`rmdir` の失敗をすべて非ゼロにし、prune の件数は実際に消した数にした。
 - **来歴と hsync** (B8 / B5): `pull` / `ensure_local_nhd` は**入口で** stamp を消し、`do_mount()` まで全部成功した最後にだけ書く。`hsync` は `/etc` を `sys_ls` で列挙し、大文字小文字を無視して一致する実在名を全部 stat する (`/etc/SETTINGS.DB` + hardlink の取りこぼしを塞ぐ)。`OS32_ERR_NOTFOUND` 以外の stat 失敗は同期を中止する。試験は `tools/tests/s0_tdd.md` §D.6 (86 件、RED 29 失敗 → GREEN 全通過)。
 
+### 8b. 実装レビュー 往復 2 の修正 (D、2026-09-13)
+
+- **最終パスと祖先** (1 / 2): `resolve_dest` の basename 補完は**1 回まで**で、補完後がまだディレクトリなら `ProtectError` (`<root>/bin/settings.db -> ../etc` のような二重補完を塞ぐ)。新設 `protected_ancestor` を `check_dest` が **stat より先に**当て、保護祖先を含む宛先は「書かずに成功除外」。ゲスト側も `hsp_ancestor_protected` で同じ規則 (`/etc/settings.db/sub`)。
+- **入口・走査・来歴** (6〜9): 各サブコマンドの入口で `check_root_etc` を 1 回 (対象 0 件の `sync --tag` / `prune --delete` でも止まる)。`os.walk` は親の `dirnames` から保護対象を in-place で外して降りない (読めない `etc/settings.db/` で CLI が落ちない)。stamp は tmp → fsync → rename の原子的書き込みで、失敗すれば tmp も既存も消して非ゼロ。`.pulled` が非オブジェクトなら「壊れている」を返して `--force` に届かせる。
+- **hsync** (3 / 4 / 5): 保護対象一覧が `HS_MAX_PROT` (16) を越えたら同期を拒否。`sys_read` の負値 / `sys_ls` / `sys_mkdir` / `sys_stat` / `vfs_sync` の失敗と、`MAX_FILES` / `MAX_DEPTH` の打ち切りを全部エラーに数え、`main` を `int` にして終了コードへ載せた。無検査の `str_cpy` / `str_cat` を撤去し、連結は容量付き (`str_ncpy` / `str_ncat`) だけ — 溢れたら判定より前に「path too long」で失敗。試験は `tools/tests/s0_tdd.md` §D.7 (103 件、RED 12 失敗 → GREEN 全通過)。
+
 ## 7. 実装メモ (K、2026-09-13)
 
 - v50 の 7 本は `sdk/kapi.json` 末尾に slot 201〜207 (0x32C〜0x344)、data_fields は 0x348 / 0x34C へ移動。生成物は generator 出力のまま (手編集なし)。

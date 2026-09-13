@@ -97,6 +97,32 @@ int main(void)
     check(!hsp_is_protected_basename("ettings.db"), "部分一致では拾わない");
     check(!hsp_is_protected_basename(""), "空文字");
 
+    printf("== 祖先の保護 (往復 2 の 2) ==\n");
+    /* `/etc/settings.db` がディレクトリのとき、その中への宛先は最終要素だけ
+     * 見ても素通りする (親が /etc ではないので名前規則に当たらない)。 */
+    check(hsp_path_protected("/etc/settings.db/sub"), "保護対象の直下");
+    check(hsp_path_protected("/etc/settings.db/sub/file"), "保護対象の孫");
+    check(hsp_path_protected("/etc/SETTINGS.DB/inner"), "大文字の祖先");
+    check(hsp_path_protected("/etc/settings.db-journal/x"), "journal の直下");
+    check(hsp_path_protected("/etc/./settings.db/../settings.db/x"),
+          "正規化してから祖先を見る");
+    check(!hsp_path_protected("/etc/settings.tsv/x"), "tsv は祖先でも対象外");
+    check(!hsp_path_protected("/etc/sub/settings.db2/x"), "別名の祖先");
+
+    printf("== 長いパスの連結 (往復 2 の 5) ==\n");
+    {
+        /* `hsync ./././...etc` 相当。連結が容量を越えたら**判定より前に**
+         * 止まる必要がある。純関数側は「正規化できない = 保護側」に倒す。 */
+        char longp[HSP_MAX_PATH * 2];
+        int n;
+        longp[0] = '\0';
+        for (n = 0; n < HSP_MAX_PATH; n++) strcat(longp, "a/");
+        strcat(longp, "x");
+        check(hsp_normalize(longp, joined, (int)sizeof(joined)) == 0,
+              "容量を越える正規化は失敗する");
+        check(hsp_path_protected(longp), "正規化できないものは保護側");
+    }
+
     printf("== -f の subdir 連結 (hsync.c:254 相当) ==\n");
     /* `hsync -f etc` は dst = "/" + "etc"、その下に settings.db を作る */
     strcpy(joined, "/");

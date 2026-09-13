@@ -76,6 +76,20 @@ def guard_dest(guest_path, host_src=None):
     return dest, 'ok'
 
 
+def guard_root():
+    """サブコマンドの**入口**で 1 回だけ通す前提検査。
+
+    対象が 0 件の `sync --tag` では判定が 1 度も呼ばれず、`<root>/etc` が
+    symlink / 別マウント / 通常ファイルでも成功で終わっていた (往復 2 の 8)。
+    """
+    try:
+        protect.check_root_etc(HOSTDRV_DIR)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
+        return False
+    return True
+
+
 def ensure_dir(guest_dir):
     """ゲスト側ディレクトリを**各祖先まで判定してから**作る。
 
@@ -158,6 +172,9 @@ def do_sync(tag_filter=None):
     if not os.path.isdir(HOSTDRV_DIR):
         print("HostDrvディレクトリを作成: {}".format(HOSTDRV_DIR))
         os.makedirs(HOSTDRV_DIR, exist_ok=True)
+
+    if not guard_root():
+        return False
 
     print("=" * 55)
     print("  OS32 HostDrv デプロイ")

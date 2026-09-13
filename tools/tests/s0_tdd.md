@@ -133,6 +133,29 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
 - bind mount による `<root>/etc` の別名は原理的に検出できない (運用で禁止し、
   symlink / 別マウントだけを `check_root_etc` が止める)。
 
+### D.7 実装レビュー 往復 2 の blocker 9 件 (2026-09-13、着地 `10bc6ae` に対して)
+
+RED は着地版 (`feat/gui` の 4 ツール) に新しい試験だけを当てて取った。
+
+```
+RED  : Ran 103 tests — FAILED (failures=9, errors=3)     91 passed
+GREEN: Ran 103 tests — OK
+```
+
+| # | 反例 (RED で通ってしまっていた道) | 試験 |
+|---|---|---|
+| 1 | 補完した先がまた (symlink 越しに) ディレクトリだと cp が**もう一度** basename を補う。`<root>/bin/settings.db -> ../etc` を置き、`guest: /bin` + source 名 `settings.db` で `/etc/settings.db` に届いた | `Review2DoubleFill` 4 件。補完は 1 回まで、補完後がディレクトリなら `ProtectError`。「host_src を渡した `resolve_dest` はディレクトリを返さない」も固定 |
+| 2 | 最終パスの**祖先**を見ていない。`/etc/settings.db/` がディレクトリなら中へ書けて、逆に通常ファイルなら `/etc/settings.db/sub/f` の stat が ENOTDIR で「判定できない失敗」になった | `Review2AncestorOnFinalPath` 4 件。`protected_ancestor` を新設し、`check_dest` が **stat より先に**当てて「書かずに成功除外」 |
+| 3 | `/etc` の保護対象が 16 件を越えると 17 件目を黙って捨て、その hardlink を上書きできた | C 側 (D.4)。容量超過は同期を**拒否** (`g_prot_overflow` → エラー終了) |
+| 4 | `sys_read` の負値を EOF 扱いで部分コピーを成功に、`sys_ls` / `mkdir` / `vfs_sync` の失敗を無視、`main` が `void` で終了コードに乗らない | C 側。全部 `g_errors` に数え、`main` は `int` (crt0_c が `sys_exit` へ渡す)。深さ / 件数の打ち切りもエラー |
+| 5 | `src` / `dst` (256B) への連結に容量検査が無く、正規化や判定より前に溢れた | C 側 + `hsync_protect_host.c` の「長いパス」2 件。無検査の `str_cpy` / `str_cat` を撤去し `str_ncpy` / `str_ncat` だけにした |
+| 6 | `json.dump` / close の ENOSPC で書きかけの `.pulled` が残る | `Review2StampWrite` 2 件。tmp へ書いて fsync → rename、失敗時は tmp と既存 stamp を消して例外 |
+| 7 | `.pulled` が `[]` / `null` だと `.get` で例外になり `--force` に届かない | `Review2StampWrite.test_non_object_stamp_reaches_force` |
+| 8 | 対象 0 件の `sync --tag` / stale 0 件の `prune --delete` で判定が一度も呼ばれず、壊れた `<root>/etc` を見逃した | `Review2EntryCheck` 5 件。各サブコマンドの入口で `check_root_etc` を 1 回 |
+| 9 | 読めない `etc/settings.db/` を `os.walk` が先に scandir して CLI ごと失敗した | `Review2WalkPruning` 1 件。親の `dirnames` から保護対象を in-place で外して降りない |
+
+non-blocker も同時に: `hsync` の `MAX_FILES` (128) / `MAX_DEPTH` (8) の打ち切りを
+エラーとして報告 (件数つき)、この節の末尾に残っていた §D.5 の重複 3 行を除去。
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
 
@@ -200,7 +223,6 @@ type / int の字句 / text 255B / blob の hex) と境界値の受理、`RealDe
   8192 文字超 — すべて非ゼロ終了 + 理由 (`path:line:`) で、DB を作らない。境界値 (int32 端、key 63B、
   blob 4096B) は受理。末尾の空欄は NULL ではなく空の text として入る。
 - **mkpkg**: 欠損 = 非ゼロ + `ERROR: <path> not found (package '<name>')`、途中まで書いた `.PKG` を
-  残さない。glob が 0 件なのは欠損扱いにしない (parser は変えていない)。
 - **mkpkg**: 欠損 = 非ゼロ + `ERROR: <理由> (package '<name>')`。欠損は 3 種 — 登録ファイルが無い /
   glob の展開が 0 件 / `--defs` のファイルが無い。いずれも**全パッケージを先に解決してから**まとめて
   報告し、`.PKG` を 1 つも書かずに落ちる (後半のパッケージが欠損しても前半の `.PKG` を残さない)。

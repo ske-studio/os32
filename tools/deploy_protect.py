@@ -141,6 +141,14 @@ def resolve_dest(root, guest_path, host_src=None):
         if not _inside(root_abs, dest_abs):
             raise ProtectError(
                 '配備先 {!r} が root {!r} の外にある'.format(dest_abs, root_abs))
+    # 補完は 1 回まで。補完した先がまた (symlink 越しに) ディレクトリだと
+    # cp / copy2 がもう一度 basename を補うので、そこで拒否する
+    # (`<root>/bin/settings.db -> ../etc` のような仕掛け、往復 2 の 1)。
+    # コピー関数には「ディレクトリでないことを確認済み」のパスだけを渡す。
+    if host_src is not None and os.path.isdir(dest_abs):
+        raise ProtectError(
+            '配備先 {!r} がディレクトリを指している '
+            '(cp / copy2 が中へ書いてしまう)'.format(dest_abs))
     return dest_abs
 
 
@@ -288,6 +296,31 @@ def mkdir_chain(root, guest_dir):
     return chain
 
 
+def protected_ancestor(root, dest):
+    """dest の**祖先**に保護対象が居ればその guest パスを返す (居なければ None)。
+
+    `/etc/settings.db` がディレクトリなら `/etc/settings.db/inner` へのコピーは
+    保護対象の中身を作る。逆に `settings.db` が通常ファイルなら
+    `/etc/settings.db/sub/file` の stat は ENOTDIR で落ちる — どちらも
+    「最終パスだけ」を見ていると取りこぼすので、**stat より先に**祖先を見る
+    (往復 2 の 2)。規則は mkdir_chain と同じ。
+
+    dest 自身は含まない (それは is_protected の仕事)。
+    """
+    root_abs = os.path.abspath(root)
+    guest = guest_path_of(root_abs, dest)
+    segs = [s for s in guest.strip('/').split('/') if s]
+    cur = root_abs
+    for seg in segs[:-1]:
+        cur = os.path.join(cur, seg)
+        if not _inside(root_abs, cur):
+            raise ProtectError(
+                '祖先 {!r} が root {!r} の外にある'.format(cur, root_abs))
+        if is_protected(root_abs, cur):
+            return guest_path_of(root_abs, cur)
+    return None
+
+
 def is_protected_symlink(root, dest):
     """**symlink そのもの**を消す / 置き換える直前の判定 (辿った先へは書かない)。
 
@@ -319,11 +352,20 @@ def protect_log(path, stream=None):
 
 
 def check_dest(root, guest_path, host_src=None):
-    """最終パスの確定と保護判定をまとめて行う。
+    """最終パスの確定と保護判定をまとめて行う (書き込み経路の唯一の入口)。
+
+    順序が肝: 前提検査 → 最終パスの確定 → **祖先** → 最終パス自身。
+    祖先を stat より先に見ないと、`/etc/settings.db/sub/file` のように
+    途中が通常ファイルの宛先が ENOTDIR で「判定できない」失敗になる
+    (往復 2 の 2)。
 
     Returns: (dest_abs, protected)  — ProtectError は呼び出し側で失敗にすること。
     """
+    check_root_etc(root)
     dest = resolve_dest(root, guest_path, host_src)
+    anc = protected_ancestor(root, dest)
+    if anc is not None:
+        return dest, True               # 除外 (失敗ではない)
     return dest, is_protected(root, dest)
 
 

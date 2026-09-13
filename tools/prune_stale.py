@@ -110,6 +110,12 @@ def prune_hostdrv(want, delete):
     if not os.path.isdir(root):
         print("Error: HOSTDRV_DIR {} が無い".format(root), file=sys.stderr)
         return None
+    # stale が 0 件でも <root>/etc の異常で止める (往復 2 の 8)
+    try:
+        protect.check_root_etc(root)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
+        return None
     stale = find_stale(root, want)
     show('hostdrv ' + root, stale)
     if not delete:
@@ -140,6 +146,11 @@ def prune_nhd(want, delete):
         print("Error: NHD をマウントできない", file=sys.stderr)
         return None
     root = nhd_deploy.MOUNT_POINT
+    try:
+        protect.check_root_etc(root)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
+        return None
     stale = find_stale(root, want)
     show('nhd ' + nhd_deploy.NHD_LOCAL, stale)
     if not delete:
