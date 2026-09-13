@@ -172,3 +172,14 @@ Cirrus 系キーは計画に含めない = **変更集合は明示したキー�
 `image_fixture()` の贋物、イメージの存在確認は temp dir の空ファイル。
 `tools/tests/test_np21w_transport.py` の trial CLI 2 件も同じ fixture と `--hdd` を使う。
 RED→GREEN の実出力は [`s3i2_tdd.md`](s3i2_tdd.md) §T。実 ini・実プロセスは未検証 [V4]。
+
+## 2026-09-14 追記 2 — 実装レビュー往復 1 (B2 / B5)
+
+- 計画に **解決済みパスを束縛**する: `hdd_path` (Windows) / `hdd_host` (ホスト側)、
+  `fdd_arg` (Windows) / `fdd_arg_host`。`changes['HDD1FILE']` も解決済みパス。
+  `NP21W_DIR` を読むのは `make_plan()` の `resolve_image()` だけで、`_validate_plan()` は
+  束縛済みの 3 つ組の整合 (同じ名前・同じディレクトリ・ホスト側が通常ファイル) だけを
+  見る。環境を A → B に変えて同じ JSON を dispatch しても A の HDD のまま。
+- PowerShell に `CheckFile` (`CheckPath` + `PSIsContainer` 拒否) を足し、`preflight` と
+  `start` で `$plan.hdd_path` / `$plan.fdd_arg` を検査する (`.nhd` 名のディレクトリ対策)。
+- 反例と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 1。実 ini・実プロセスは未検証 [V4]。

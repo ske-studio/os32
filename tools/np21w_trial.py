@@ -10,12 +10,14 @@ import argparse
 import copy
 import json
 import ntpath
+import os
 import re
 import sys
 import uuid
 from types import FunctionType
 import np21w_ini_live as live
-from np21w_ini import ALLOWED_PATHS, IniError, LIMIT, SECTION, image_path, transform
+from np21w_ini import (ALLOWED_PATHS, IniError, LIMIT, SECTION, image_name,
+                       resolve_image, transform, windows_path)
 from emu_agent.playbook import strict_object, exact_equal
 
 
@@ -73,10 +75,26 @@ def launch_command(plan):
     return command
 
 
-def make_plan(*, exe, baseline, cwd, pid, created, hdd, fdd_eject, fdd_arg=None):
-    """hdd / fdd_arg は NP21W_DIR 直下の名前。計画には hdd は名前のまま、
-    fdd_arg は起動引数に使う絶対パスとして載る。変更集合は明示したキーだけで、
-    Cirrus 系 (USEGD5430 / GD5430TYPE) には触れない (票 S3I2-T)。"""
+PLAN_FIELDS = ('exe', 'baseline', 'cwd', 'pid', 'created', 'hdd', 'hdd_host',
+               'hdd_path', 'fdd_eject', 'fdd_arg', 'fdd_arg_host')
+
+
+def _bound_image(name, host, windows, extension):
+    """束縛済みの (名前, ホスト側パス, Windows 絶対パス) が同じ 1 つの通常
+    ファイルを指していることを、**環境変数を読まずに**確かめる (往復 1 の B2)。"""
+    image_name(name, extension)
+    windows_path(windows)
+    if (type(host) is not str or not host.startswith('/') or
+            windows.rsplit('\\', 1)[-1] != name or os.path.basename(host) != name):
+        raise IniError('bound image paths disagree')
+    if os.path.islink(host) or not os.path.isfile(host):
+        raise IniError('bound image is not a regular file')
+
+
+def _plan(*, exe, baseline, cwd, pid, created, hdd, hdd_host, hdd_path,
+          fdd_eject, fdd_arg, fdd_arg_host, trial=None):
+    """計画の組み立てと、環境に依存しない検査。make_plan と _validate_plan が
+    共有するので、束縛後は NP21W_DIR / wslpath を一切見ない。"""
     for path in (exe, baseline, cwd):
         live.path_key(path)
     _identity(dict(pid=pid, created=created, exe=exe, command='operator selected'))
@@ -86,36 +104,50 @@ def make_plan(*, exe, baseline, cwd, pid, created, hdd, fdd_eject, fdd_arg=None)
         raise IniError('require exe-adjacent baseline and explicit exe-directory cwd')
     if fdd_eject is not True and fdd_eject is not False:
         raise IniError('explicit fdd_eject decision required')
-    changes = {'HDD1FILE': hdd, 'e_resume': 'false'}
+    _bound_image(hdd, hdd_host, hdd_path, ALLOWED_PATHS['HDD1FILE'])
+    if (fdd_arg is None) != (fdd_arg_host is None):
+        raise IniError('invalid trial launch argument')
+    if fdd_arg is not None:
+        _bound_image(ntpath.basename(fdd_arg), fdd_arg_host, fdd_arg, '.d88')
+        if (ntpath.dirname(fdd_arg).lower() != ntpath.dirname(hdd_path).lower() or
+                os.path.dirname(fdd_arg_host) != os.path.dirname(hdd_host)):
+            raise IniError('trial images must share one NP21W_DIR')
+    changes = {'HDD1FILE': hdd_path, 'e_resume': 'false'}
     if fdd_eject:
         changes.update({key: '' for key in ALLOWED_PATHS if key.startswith('FDD')})
-    image_path(hdd, ALLOWED_PATHS['HDD1FILE'])
-    argument = image_path(fdd_arg, '.d88') if fdd_arg is not None else None
-    trial = ntpath.join(cwd, 'np21w-trial-' + uuid.uuid4().hex + '.ini')
+    if trial is None:
+        trial = ntpath.join(cwd, 'np21w-trial-' + uuid.uuid4().hex + '.ini')
     live.path_key(trial)
     return dict(action='disk-trial', exe=exe, baseline=baseline, cwd=cwd,
                 pid=pid, created=created, trial=trial,
-                hdd=hdd, fdd_eject=fdd_eject, fdd_arg=argument, changes=changes,
+                hdd=hdd, hdd_host=hdd_host, hdd_path=hdd_path,
+                fdd_eject=fdd_eject, fdd_arg=fdd_arg, fdd_arg_host=fdd_arg_host,
+                changes=changes,
                 lifecycle={'close': 'normal-only', 'baseline_read': 'after-verified-exit',
                            'baseline_role': 'operator-chosen-not-active-config-proof',
                            'normal_exit_may_save': True, 'exact_vm_ram_preserved': False,
                            'new_ini_and_cwd': 'explicit', 'retry': False, 'restore': False})
 
 
+def make_plan(*, exe, baseline, cwd, pid, created, hdd, fdd_eject, fdd_arg=None):
+    """hdd / fdd_arg は NP21W_DIR 直下の名前。**環境を見るのはここだけ**で、
+    解決した Windows 絶対パスとホスト側パスを計画に束縛する (往復 1 の B2)。
+    変更集合は明示したキーだけで、Cirrus 系には触れない (票 S3I2-T)。"""
+    hdd_host, hdd_path = resolve_image(hdd, ALLOWED_PATHS['HDD1FILE'])
+    fdd_arg_host, argument = (resolve_image(fdd_arg, '.d88') if fdd_arg is not None
+                              else (None, None))
+    return _plan(exe=exe, baseline=baseline, cwd=cwd, pid=pid, created=created,
+                 hdd=hdd, hdd_host=hdd_host, hdd_path=hdd_path, fdd_eject=fdd_eject,
+                 fdd_arg=argument, fdd_arg_host=fdd_arg_host)
+
+
 def _validate_plan(plan):
     try:
-        argument = plan['fdd_arg']
-        if argument is not None and (type(argument) is not str or not argument):
-            raise IniError('invalid trial launch argument')
-        expected = make_plan(fdd_arg=None if argument is None else ntpath.basename(argument),
-                             **{k: plan[k] for k in ('exe', 'baseline', 'cwd', 'pid',
-                                                     'created', 'hdd', 'fdd_eject')})
         if (type(plan['trial']) is not str or
                 not re.fullmatch(r'np21w-trial-[a-f0-9]{32}\.ini', ntpath.basename(plan['trial'])) or
                 ntpath.dirname(plan['trial']) != plan['cwd']):
             raise IniError('invalid unique trial path')
-        live.path_key(plan['trial'])
-        expected['trial'] = plan['trial']
+        expected = _plan(trial=plan['trial'], **{k: plan[k] for k in PLAN_FIELDS})
         if not exact_equal(plan, expected):
             raise IniError('invalid bounded trial plan')
     except (KeyError, TypeError, AttributeError) as exc:
@@ -205,6 +237,11 @@ def _run(plan, factory):
 
 # Reuse only fixed read-only/path/CreateNew helpers, never live stop/replace.
 PS_SERVER = live.PS_SERVER.split('function Bundle($id) {', 1)[0] + r'''
+function CheckFile($path) {
+ CheckPath $path
+ $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+ if ($item.PSIsContainer) { throw 'directory where a disk image is required' }
+}
 function VerifyTrial($a) {
  AssertAbsent
  AssertSnapshot $a.expected
@@ -237,7 +274,8 @@ try {
      $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($plan.exe))
      if ($drive.DriveType -ne [IO.DriveType]::Fixed -or $drive.DriveFormat -ne 'NTFS') { throw 'local NTFS required' }
      if (Test-Path -LiteralPath $plan.trial) { throw 'trial collision' }
-     if ($plan.fdd_arg) { CheckPath $plan.fdd_arg }
+     CheckFile $plan.hdd_path
+     if ($plan.fdd_arg) { CheckFile $plan.fdd_arg }
     }
     'query' { $value = @(Query) }
     'close' {
@@ -263,8 +301,9 @@ try {
      CheckPath $plan.exe
      CheckPath $plan.cwd
      $arguments = '"/i' + $plan.trial + '"'
+     CheckFile $plan.hdd_path
      if ($plan.fdd_arg) {
-      CheckPath $plan.fdd_arg
+      CheckFile $plan.fdd_arg
       $arguments = $arguments + ' "' + $plan.fdd_arg + '"'
      }
      $si = [Diagnostics.ProcessStartInfo]::new()

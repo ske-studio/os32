@@ -70,11 +70,16 @@ class IniError(ValueError):
     """A safe, content-free diagnostic suitable for operator output."""
 
 
-def _windows_path(path):
-    """ASCII only, absolute, no device/traversal components. Content-free errors."""
+def windows_path(path):
+    """ASCII only, absolute, no device/traversal components. Content-free errors.
+
+    `;` と `#` は ini の注釈開始と区別できないので、**書く側でも**拒否する。
+    これを許すと自分で作った ini を同じ変更で読み直せなくなる (往復 1 の B4)。
+    末尾の空白やドットを含む成分もここで落ちる (往復 1 の B3)。
+    """
     if (not isinstance(path, str) or not path.isascii() or
             len(path) >= WINDOWS_PATH_UNITS or
-            not re.fullmatch(r'[A-Za-z]:\\[^"<>|?*:\x00-\x1f]+', path) or
+            not re.fullmatch(r'[A-Za-z]:\\[^"<>|?*:;#\x00-\x1f]+', path) or
             any(p in ('', '.', '..') or p.endswith((' ', '.')) for p in path[3:].split('\\'))):
         raise IniError('unsupported absolute Windows path')
     if any(re.fullmatch(r'(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', part, re.I)
@@ -83,42 +88,76 @@ def _windows_path(path):
     return path
 
 
-def np21w_directory():
-    """(WSL path, Windows path) of NP21W_DIR. Environment only: never reads .env,
-    credentials or any env-loading helper [D3]. wslpath is a pure path query."""
-    directory = os.environ.get('NP21W_DIR')
-    if not isinstance(directory, str) or not directory.startswith('/') or '\0' in directory:
-        raise IniError('explicit absolute NP21W_DIR required for path fields')
-    try:
-        done = subprocess.run(['wslpath', '-w', directory], stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, timeout=20, check=True)
-        windows = done.stdout.decode('ascii').strip()
-    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
-        raise IniError('windows form of NP21W_DIR unavailable') from None
-    while windows.endswith('\\'):
-        windows = windows[:-1]
-    return directory, _windows_path(windows)
-
-
-def image_path(name, extension):
-    """NP21W_DIR 直下の <name> を Windows 絶対パスへ。ホスト側の存在も確かめる。"""
+def image_name(name, extension):
+    """NP21W_DIR 直下に置ける名前だけを通す (パス成分や隠し名は不可)。"""
     if (not isinstance(name, str) or not extension or not name.endswith(extension) or
             len(name) <= len(extension) or not IMAGE_NAME.fullmatch(name) or
             name.startswith('.') or '..' in name):
         raise IniError('unsupported image name')
+    return name
+
+
+def _wslpath(option, path):
+    """1 回の純粋なパス変換。**終端の改行だけ**を取り除き、空白は保持する
+    (往復 1 の B3: .strip() は末尾空白のあるディレクトリを別の対象に変えた)。"""
+    try:
+        done = subprocess.run(['wslpath', option, path], stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=20, check=True)
+        text = done.stdout.decode('ascii')
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        raise IniError('path conversion unavailable') from None
+    if text.endswith('\r\n'):
+        text = text[:-2]
+    elif text.endswith('\n'):
+        text = text[:-1]
+    if not text or '\n' in text or '\r' in text:
+        raise IniError('unsupported path conversion output')
+    return text
+
+
+def np21w_directory():
+    """(WSL path, Windows path) of NP21W_DIR. Environment only: never reads .env,
+    credentials or any env-loading helper [D3]. wslpath is a pure path query.
+
+    変換前後が同じ対象を指すことを `wslpath -u` で往復させて確かめる。
+    """
+    directory = os.environ.get('NP21W_DIR')
+    if (not isinstance(directory, str) or not directory.startswith('/') or
+            '\0' in directory or '\n' in directory or '\r' in directory):
+        raise IniError('explicit absolute NP21W_DIR required for path fields')
+    windows = windows_path(_wslpath('-w', directory))
+    back = _wslpath('-u', windows)
+    if back.rstrip('/') != directory.rstrip('/'):
+        raise IniError('NP21W_DIR does not round-trip through wslpath')
+    return directory, windows
+
+
+def resolve_image(name, extension):
+    """NP21W_DIR 直下の <name> を (ホスト側パス, Windows 絶対パス) へ解決する。
+
+    **環境変数を読むのはここだけ**。呼び手は返った解決済みパスを承認計画に
+    束縛し、実行時に環境から別の対象へ再展開しない (往復 1 の B2)。
+    通常ファイルであることまで見る (同 B5: `.nhd` という名前のディレクトリ)。
+    """
+    image_name(name, extension)
     directory, windows = np21w_directory()
-    if not os.path.exists(os.path.join(directory, name)):
-        raise IniError('image not found under NP21W_DIR')
-    return _windows_path(windows + '\\' + name)
+    host = os.path.join(directory, name)
+    if os.path.islink(host) or not os.path.isfile(host):
+        raise IniError('image is not a regular file under NP21W_DIR')
+    return host, windows_path(windows + '\\' + name)
 
 
 def _path_value(key, value):
+    """書き込む literal を返す。HDD1FILE は**解決済みの絶対パス**で受ける
+    (名前からの展開は resolve_image、つまり計画時か CLI でだけ行う)。"""
     extension = ALLOWED_PATHS[key]
     if not extension:
         if value != '':
             raise IniError('only detach (empty value) is supported for this field')
         return ''
-    return image_path(value, extension)
+    path = windows_path(value)
+    image_name(path.rsplit('\\', 1)[-1], extension)
+    return path
 
 
 def _changes(changes):
@@ -389,6 +428,10 @@ def main(argv=None):
                 key, sep, value = setting.partition('=')
                 if not sep or key in changes:
                     raise IniError('invalid or repeated assignment')
+                extension = ALLOWED_PATHS.get(key)
+                if extension and not re.match(r'[A-Za-z]:\\', value):
+                    # 名前で受けたときだけ NP21W_DIR で解決する (絶対パスはそのまま)。
+                    value = resolve_image(value, extension)[1]
                 changes[key] = value
             _changes(changes)
             if args.apply:

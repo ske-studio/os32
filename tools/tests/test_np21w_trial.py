@@ -37,14 +37,22 @@ def plan(**kw):
 
 
 @contextmanager
-def image_fixture(windows=CWD):
-    """NP21W_DIR とその Windows 表記は贋物。実 ini・実プロセスは触らない。"""
-    with tempfile.TemporaryDirectory() as temp:
+def image_fixture(windows=CWD, temp=None):
+    """NP21W_DIR とその Windows 表記は贋物 (`-w` / `-u` の往復つき)。
+    実 ini・実プロセスは触らない。"""
+    with tempfile.TemporaryDirectory() as fresh:
+        temp = temp or fresh
         for name in (HDD, D88):
             Path(temp, name).write_bytes(b'')
         def fake_wslpath(argv, **kwargs):
-            assert argv[:2] == ['wslpath', '-w'] and argv[2] == temp, argv
-            return types.SimpleNamespace(returncode=0, stdout=windows.encode('ascii'))
+            assert argv[0] == 'wslpath' and argv[1] in ('-w', '-u'), argv
+            if argv[1] == '-w':
+                assert argv[2] == temp, argv
+                text = windows
+            else:
+                assert argv[2] == windows, argv
+                text = temp
+            return types.SimpleNamespace(returncode=0, stdout=text.encode('ascii') + b'\n')
         with mock.patch.dict(os.environ, {'NP21W_DIR': temp}), \
              mock.patch.object(ini.subprocess, 'run', side_effect=fake_wslpath):
             yield temp
@@ -134,12 +142,14 @@ class TrialTests(Images):
                 trial.transform_trial(RAW, bad)
 
     def test_plan_rejects_unsafe_target_and_unknown_setup(self):
+        os.mkdir(os.path.join(self.dir, 'as_dir.nhd'))  # 往復 1 の B5
         for change in [dict(pid=True), dict(created='yesterday'), dict(exe=r'C:\x.exe'),
                        dict(baseline=r'C:\other.ini'), dict(cwd=r'C:\elsewhere'),
                        dict(baseline=r'C:\Trial Fixture\..\np21x64w.ini'),
                        dict(hdd='missing.nhd'), dict(hdd=D88), dict(hdd=None),
                        dict(hdd=CWD + '\\' + HDD), dict(fdd_arg='missing.d88'),
-                       dict(fdd_arg=HDD), dict(fdd_eject='yes'), dict(fdd_eject=1)]:
+                       dict(fdd_arg=HDD), dict(fdd_eject='yes'), dict(fdd_eject=1),
+                       dict(hdd='as_dir.nhd')]:
             args = dict(exe=EXE, baseline=BASE, cwd=CWD, pid=42, created=CREATED,
                         hdd=HDD, fdd_eject=True, fdd_arg=D88)
             args.update(change)
@@ -147,18 +157,59 @@ class TrialTests(Images):
                 trial.make_plan(**args)
         self.assertNotEqual(plan()['trial'], plan()['trial'])
 
-    def test_plan_records_the_disk_set_and_launch_command(self):
+    def test_plan_binds_the_resolved_disk_paths_and_launch_command(self):
         p = plan()
         self.assertEqual((p['hdd'], p['fdd_eject'], p['fdd_arg']),
                          (HDD, True, CWD + '\\' + D88))
-        self.assertEqual(p['changes'], {'HDD1FILE': HDD, 'FDD1FILE': '', 'FDD2FILE': '',
-                                        'e_resume': 'false'})
+        self.assertEqual((p['hdd_path'], p['hdd_host'], p['fdd_arg_host']),
+                         (CWD + '\\' + HDD, os.path.join(self.dir, HDD),
+                          os.path.join(self.dir, D88)))
+        self.assertEqual(p['changes'], {'HDD1FILE': CWD + '\\' + HDD, 'FDD1FILE': '',
+                                        'FDD2FILE': '', 'e_resume': 'false'})
         self.assertEqual(trial.launch_command(p),
                          '"%s" "/i%s" "%s\\%s"' % (EXE, p['trial'], CWD, D88))
         bare = plan(fdd_arg=None, fdd_eject=False)
-        self.assertEqual(bare['changes'], {'HDD1FILE': HDD, 'e_resume': 'false'})
+        self.assertEqual(bare['changes'], {'HDD1FILE': CWD + '\\' + HDD, 'e_resume': 'false'})
+        self.assertIsNone(bare['fdd_arg_host'])
         self.assertEqual(trial.launch_command(bare), '"%s" "/i%s"' % (EXE, bare['trial']))
         self.assertNotIn('.d88', trial.launch_command(bare))
+
+    def test_a_later_environment_change_cannot_move_the_approved_hdd(self):
+        """`NP21W_DIR` を A → B に変えて同じ JSON を dispatch しても、B の同名
+        ファイルには切り替わらない (往復 1 の B2)。"""
+        approved = plan(fdd_arg=None)
+        frozen = json.dumps(approved)
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        with image_fixture(windows=r'C:\Other Fixture', temp=other.name):
+            self.assertEqual(trial.make_plan(exe=EXE, baseline=BASE, cwd=CWD, pid=42,
+                                             created=CREATED, hdd=HDD,
+                                             fdd_eject=True)['hdd_path'],
+                             r'C:\Other Fixture\os32_fresh.nhd')
+            p, t, gate = self.run_bound(json.loads(frozen))
+            self.assertTrue(gate(frozen)['ok'])
+        written = t.files[approved['trial']]
+        self.assertIn(('HDD1FILE=' + CWD + '\\' + HDD).encode('ascii'), written)
+        self.assertNotIn(b'Other Fixture', written)
+
+    def test_bound_paths_must_agree_with_each_other_and_the_host(self):
+        p = plan()
+        for changed in [dict(p, hdd_path=r'C:\Other Fixture\os32_fresh.nhd'),
+                        dict(p, hdd_path=CWD + '\\other.nhd'),
+                        dict(p, hdd_host='/nowhere/' + HDD),
+                        dict(p, hdd_host=os.path.join(self.dir, D88)),
+                        dict(p, hdd_host=self.dir),
+                        dict(p, hdd_host=None), dict(p, hdd_path=None),
+                        dict(p, fdd_arg_host=None),
+                        dict(p, fdd_arg_host=os.path.join(self.dir, HDD)),
+                        dict(p, fdd_arg=r'C:\Other Fixture\os32_boot.d88',
+                             fdd_arg_host=os.path.join(self.dir, D88))]:
+            with self.subTest(changed=changed['hdd_path']), self.assertRaises(IniError):
+                trial.bind_trial(changed, self.fail, authorized=True, exclusive=True)
+        os.remove(os.path.join(self.dir, HDD))
+        os.mkdir(os.path.join(self.dir, HDD))
+        with self.assertRaises(IniError):
+            trial.bind_trial(p, self.fail, authorized=True, exclusive=True)
 
     def test_gate_mismatch_no_executor_construction_single_use(self):
         p = plan()
@@ -321,7 +372,10 @@ class TrialTests(Images):
                          '$handle = $p.Handle', 'CreateNew', '$plan.trial', '$plan.cwd',
                          'AssertProcess', 'FileIdentity', 'CheckPath',
                          "$arguments = '\"/i' + $plan.trial + '\"'",
+                         "if ($item.PSIsContainer) { throw 'directory where a disk image is required' }",
+                         "CheckFile $plan.hdd_path",
                          "if ($plan.fdd_arg) {",
+                         "CheckFile $plan.fdd_arg",
                          "$arguments = $arguments + ' \"' + $plan.fdd_arg + '\"'",
                          "$rows[0].command -cne ('\"' + $plan.exe + '\" ' + $arguments)"]:
             self.assertIn(required, ps)

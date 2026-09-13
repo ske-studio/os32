@@ -248,3 +248,44 @@ python3 -B -m unittest discover -s tools/tests -p 'test_*.py'
 `.claude/skills/os32-emu-config/SKILL.md` の「承認済み Cirrus trial」節は、trial が扱うキーが
 Cirrus 2 キー → `HDD1FILE` / `FDD1/2FILE` (+ `e_resume`) に変わり、起動引数も
 `/i<ini>` + 任意の `.d88` になったので PM の更新対象 (ini の文書は PM の担当)。
+
+## §T 往復 1 — Codex 実装レビューの blocker 4 件 (2026-09-14)
+
+対象は `tools/np21w_ini.py` / `tools/np21w_trial.py` とその試験だけ。`np21w_ini_live.py`、
+`mk_blank_nhd.py` は変更なし。実 ini・実プロセス・実 `NP21W_DIR` には触れていない。
+
+| # | 指摘 | 直し |
+|---|---|---|
+| B2 | 承認計画に HDD の解決済みパスが残らず、`NP21W_DIR` を A→B に変えて同じ JSON を dispatch すると B の同名ファイルで起動する | 計画に **`hdd_path` (Windows) / `hdd_host` (ホスト側)** と `fdd_arg` / **`fdd_arg_host`** を束縛し、`changes['HDD1FILE']` も解決済みパスにした。環境を読むのは `make_plan()` の `resolve_image()` だけで、`_validate_plan()` と `transform()` は**環境を一切見ない** (`_plan()` を両者で共有し、束縛済みの 3 つ組が同じ 1 つの通常ファイルを指すかだけ検査する) |
+| B3 | `wslpath -w` の出力を `.strip()` していたので `NP21W_DIR` の末尾空白が消え、存在確認先と ini の書き先がずれる | `_wslpath()` は**終端の改行だけ**を除去 (空白は保持) し、`windows_path()` が末尾空白の成分を拒否。さらに `wslpath -u` で**往復させ**、同じディレクトリに戻らなければ拒否 |
+| B4 | 新しいパス値に `;` / `#` を許していたので、自分が書いた ini を同じ変更で読み直せない | `windows_path()` の文字集合から `;` `#` を除外 (入口と出口の両方で fail closed)。「1 回変換した出力を同じ変更でもう一度変換しても不変」を試験で固定 |
+| B5 | `os.path.exists()` だけなので `.nhd` / `.d88` という名前の**ディレクトリ**を受理する | `resolve_image()` は `os.path.isfile()` かつ symlink でないことを要求。PowerShell 側にも `CheckFile`(= `CheckPath` + `PSIsContainer` 拒否) を足し、`preflight` と `start` で `$plan.hdd_path` と `$plan.fdd_arg` を検査 |
+
+副作用として `transform()` の `HDD1FILE` は**名前ではなく解決済みの絶対パス**を受け取るようになった
+(`ini.resolve_image(name, ext) -> (host, windows)` が唯一の展開点)。`np21w_ini.py` の CLI
+`--set HDD1FILE=` は名前でも絶対パスでも受け、名前のときだけ解決する。
+
+### 反例 → 直し (ホストで実際に踏んだ)
+
+`/tmp/.../scratchpad/counterexamples.py` (temp dir + 贋 `wslpath`、実 ini / 実プロセス無し):
+
+| | 着地版 (`cd1e136`) | 直し後 |
+|---|---|---|
+| B2 | `plan keys: ['fdd_arg', 'fdd_eject', 'hdd']` / 書かれた値 `HDD1FILE=C:\B Dir\os32_fresh.nhd` (A で承認 → B で dispatch) | `plan keys: [... 'hdd_host', 'hdd_path']` / `HDD1FILE=C:\A Dir\os32_fresh.nhd` |
+| B3 | `resolved: 'C:\Trial\os32_fresh.nhd'` (`C:\Trial ` の空白が消えた) | `IniError: unsupported absolute Windows path` |
+| B4 | 1 回目 `HDD1FILE=C:\Trial#1\os32_fresh.nhd` を出力 → 2 回目 `REFUSED -> unsupported separator in path field` | `IniError: unsupported absolute Windows path` (出力自体を作らない) |
+| B5 | ディレクトリ `os32_fresh.nhd` を受理し `C:\Trial\os32_fresh.nhd` を返す | `IniError: image is not a regular file under NP21W_DIR` |
+
+| 段階 | 実出力 | 内容 |
+|---|---|---|
+| RED | `test_np21w_ini.py`: `Ran 47 tests` / `FAILED (failures=2, errors=41)`、`test_np21w_trial.py`: `Ran 21 tests` / `FAILED (failures=2, errors=3, skipped=1)` | 着地版の道具に新試験を当てた (`resolve_image` 無し、計画に束縛パス無し、`CheckFile` 無し) |
+| GREEN | `python3 -B -m unittest discover -s tools/tests -p 'test_np21w*.py'` → `Ran 123 tests` / `OK (skipped=2)` | ini 47 (+11 → 新規 4: 束縛 / 往復 / 空白 / 通常ファイル)、trial 21 (+2)、transport 8。`test_mk_blank_nhd.py` は `Ran 13` / `OK` のまま |
+
+`python3 -B tools/np21w_trial.py --help` は exit 0。贋 `wslpath` (`-w` / `-u`) を PATH に置いた
+dry-run では計画に `hdd_host` / `hdd_path` / `fdd_arg_host` が載り exit 0、往復しない贋物では
+`stage: approval` で exit 2 (fail closed) を確認した。
+
+### 未実施 ([V4])
+
+実 ini・実プロセス・実 NP21/W では相変わらず未検証。PowerShell の `CheckFile` (`PSIsContainer`)、
+`/i<ini>` 起動、HDD ブートはすべて受入 (§3 F1〜F6) と `--windows-parser` での確認が要る。
