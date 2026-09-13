@@ -356,7 +356,7 @@ class RealDefaults(unittest.TestCase):
             conn.close()
         self.assertEqual(ver, 1)
         self.assertEqual(rows, [
-            ('gshell', 'desktop/color', 0, 1, None),
+            ('gshell', 'desktop/color', 0, 12, None),
             ('gshell', 'desktop/wallpaper', 1, None, ''),
             ('gshell', 'taskbar/clock_24h', 0, 1, None),
         ])
