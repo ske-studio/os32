@@ -5,7 +5,7 @@
 # FDD最小ブートイメージ (images/os32_boot.d88)
 # HDDインストール用ブートFD。必須コマンドのみ含む。
 FDD_MIN_CMDS = more less grep find sort head tail wc tee touch hexdump sleep diff du cal man sndctl
-images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
+images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin $(BUILD_OUT)/settings.db
 	@mkdir -p images
 	@echo "=== Building OS32 minimal FDD image (images/os32_boot.d88) ==="
 	@args="--tree"; \
@@ -25,12 +25,17 @@ images/os32_boot.d88: boot $(BUILD_OUT)/vmkernel.lz4 programs unicode_bin
 	args="$$args /sbin/install.bin=userland/system/install.bin"; \
 	args="$$args /sbin/cdinst.bin=userland/system/cdinst.bin"; \
 	if [ -f assets/profile_fdd ]; then args="$$args /etc/profile=assets/profile_fdd"; fi; \
+	args="$$args /etc/settings.db=$(BUILD_OUT)/settings.db"; \
 	python3 tools/mkfat12.py -o images/os32_boot.img -b boot/boot_fat.bin -d images/os32_boot.d88 $$args
 	@echo "Copying os32_boot.d88 to NP21/W directory..."
 	@cp images/os32_boot.d88 '$(NP21W_DIR)/os32_boot.d88' 2>/dev/null || echo "Warning: Failed to copy os32_boot.d88 to np21w directory."
 
 # パッケージ / ISO生成
-packages: programs
+# mkpkg は登録ファイルの欠損をエラーにするので、core / userland のパッケージ定義が
+# 要求する入力をすべて依存に結ぶ (clean 後の単独 `make iso` や `make -j` でも
+# 欠損で落ちないように)。assets/fep.db は userland 層の NORMAL が要求する。
+packages: programs boot $(BUILD_OUT)/vmkernel.lz4 unicode_bin \
+          $(BUILD_OUT)/settings.db assets/fep.db
 	python3 tools/mkpkg.py --defs build/core_packages.yaml \
 	                     --defs userland/package_defs.yaml \
 	                     --output packages/ --base .

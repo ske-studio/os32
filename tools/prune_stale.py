@@ -18,7 +18,9 @@
 一覧の最後に必ず 1 行 `RESULT: ...` を出す (os32-cycle / emu_agent が拾う)。
 """
 
+import errno
 import os
+import stat
 import sys
 import glob
 import time
@@ -29,6 +31,8 @@ PROJ_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 import deploy_manifests  # noqa: E402
+# 通常配備の settings 保護 (票 S0-D / D0)。掃除も「消す直前」に同じ判定を通す。
+import deploy_protect as protect  # noqa: E402
 
 # 掃除してよいゲスト側ディレクトリ (末尾スラッシュ無し、'' = ルート直下)
 PRUNE_DIRS = ('', 'bin', 'sbin', 'usr/bin', 'sys', 'debug')
@@ -53,17 +57,36 @@ def wanted_guest_paths():
 
 
 def find_stale(root, want):
-    """root 配下の PRUNE_DIRS 直下にある *.bin でマニフェストに無いもの"""
+    """root 配下の PRUNE_DIRS 直下にある *.bin でマニフェストに無いもの
+
+    候補の判定は `os.lstat` で行う。`os.path.isdir` / `isfile` は EACCES / EIO を
+    **False に丸める**ので、読めないディレクトリの中身が「候補 0 件」になって
+    「掃除済み」と報告されていた (往復 3 の D5)。ENOENT (競合で消えた) だけ
+    読み飛ばし、それ以外の OSError は上へ投げて非ゼロにする。
+    symlink はツリー全体の前提検査 (check_tree) が既に拒否している。
+    """
     stale = []
     for d in PRUNE_DIRS:
         dp = os.path.join(root, d) if d else root
-        if not os.path.isdir(dp):
+        try:
+            st = os.lstat(dp)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        if not stat.S_ISDIR(st.st_mode):
             continue
         for f in sorted(os.listdir(dp)):
             if not f.endswith(EXT):
                 continue
             p = os.path.join(dp, f)
-            if not os.path.isfile(p):
+            try:
+                st = os.lstat(p)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    continue
+                raise
+            if not stat.S_ISREG(st.st_mode):
                 continue
             gp = '/' + (d + '/' if d else '') + f
             if gp not in want:
@@ -95,18 +118,57 @@ def hostdrv_root():
     return '/mnt/c/os32'
 
 
+def is_protected(root, path):
+    """消す直前の保護判定。判定できなければ例外を上に投げて失敗にする。
+
+    自身だけでなく**祖先**も見る (`/etc/settings.db/` がディレクトリのとき
+    その中の残骸を消さない、往復 3 の D1 後半)。
+    """
+    anc = protect.protected_ancestor(root, path)
+    if anc is not None:
+        protect.protect_log(anc)
+        return True
+    if protect.is_protected(root, path):
+        protect.protect_log(protect.guest_path_of(root, path))
+        return True
+    return False
+
+
 def prune_hostdrv(want, delete):
     root = hostdrv_root()
     if not os.path.isdir(root):
         print("Error: HOSTDRV_DIR {} が無い".format(root), file=sys.stderr)
         return None
-    stale = find_stale(root, want)
+    # stale が 0 件でも <root>/etc の異常で止める (往復 2 の 8)
+    try:
+        protect.check_tree(root)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
+        return None
+    try:
+        stale = find_stale(root, want)
+    except OSError as exc:
+        print("Error: 候補を集められない: {}".format(exc), file=sys.stderr)
+        return None
     show('hostdrv ' + root, stale)
-    if delete:
-        for gp, p in stale:
+    if not delete:
+        return len(stale)
+    removed = 0
+    for gp, p in stale:
+        try:
+            if is_protected(root, p):
+                continue          # 除外は失敗ではない。件数にも数えない。
             os.remove(p)
-            print("  removed {}".format(gp))
-    return len(stale)
+        except protect.ProtectError as exc:
+            print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
+            return None
+        except OSError as exc:
+            print("Error: {} を消せなかった: {}".format(gp, exc),
+                  file=sys.stderr)
+            return None
+        print("  removed {}".format(gp))
+        removed += 1
+    return removed
 
 
 def prune_nhd(want, delete):
@@ -117,15 +179,42 @@ def prune_nhd(want, delete):
         print("Error: NHD をマウントできない", file=sys.stderr)
         return None
     root = nhd_deploy.MOUNT_POINT
-    stale = find_stale(root, want)
+    try:
+        protect.check_tree(root)
+    except protect.ProtectError as exc:
+        print("Error: 配備の前提検査に失敗: {}".format(exc), file=sys.stderr)
+        return None
+    try:
+        stale = find_stale(root, want)
+    except OSError as exc:
+        print("Error: 候補を集められない: {}".format(exc), file=sys.stderr)
+        return None
     show('nhd ' + nhd_deploy.NHD_LOCAL, stale)
-    if delete:
-        for gp, p in stale:
-            subprocess.run(['sudo', 'rm', '-f', p], capture_output=True)
-            print("  removed {}".format(gp))
-        subprocess.run(['sync'], capture_output=True)
-        print("  (Windows 側への反映は deploy-nhd の deploy 段。NP21/W 停止中に行うこと)")
-    return len(stale)
+    if not delete:
+        return len(stale)
+    removed = 0
+    for gp, p in stale:
+        try:
+            if is_protected(root, p):
+                continue          # 除外は失敗ではない。件数にも数えない。
+        except protect.ProtectError as exc:
+            print("Error: 保護判定に失敗: {}".format(exc), file=sys.stderr)
+            return None
+        result = subprocess.run(['sudo', 'rm', '-f', '--', p],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            print("Error: {} を消せなかった: {}".format(
+                gp, (result.stderr or '').strip()), file=sys.stderr)
+            return None
+        print("  removed {}".format(gp))
+        removed += 1
+    result = subprocess.run(['sync'], capture_output=True, text=True)
+    if result.returncode != 0:
+        print("Error: sync 失敗: {}".format((result.stderr or '').strip()),
+              file=sys.stderr)
+        return None
+    print("  (Windows 側への反映は deploy-nhd の deploy 段。NP21/W 停止中に行うこと)")
+    return removed
 
 
 def main():

@@ -456,7 +456,7 @@ static void ring3_gui_pump(void)
  * と NULL のみ許可。範囲外 (例: 0xDEADBEEF) は wrap に入る前に弾き、
  * カーネル状態不整合を避ける。
  * 可変長引数はここでは見えないのでフォールトガードが担保する。 */
-static int ring3_ptr_ok(u32 p)
+int ring3_ptr_ok(u32 p)
 {
     if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
     if (p >= MEM_SHLIB_BASE && p < RING3_HEAP_TOP) return 1;
@@ -471,6 +471,77 @@ static int ring3_ptr_ok(u32 p)
         p <  (u32)MEM_SHM_BASE + (u32)MEM_SHM_SIZE) return 1;  /* SHM */
     if (p >= 0xA0000UL && p < 0xC0000UL) return 1;/* VRAM (テキスト/グラフィック) */
     return 0;
+}
+
+/* ======================================================================== */
+/*  ring3_user_range_ok — 長さまで見るユーザポインタ検証 (票 S0-K §1a)       */
+/*                                                                          */
+/*  ディスパッチャの早期検証 (kapi_argptr + ring3_ptr_ok) は先頭番地しか見ず、*/
+/*  先頭が帯外なら wrap に入る前に kill する (既存挙動。ここでは変えない)。   */
+/*  先頭が通った後の「どこまで読んでよいか」はこの関数が決める:              */
+/*                                                                          */
+/*    - CPL=3 由来 (ring3_in_syscall) のときだけ帯と PTE を見る。常駐シェル / */
+/*      gshell の直呼び (CPL=0、ディスパッチャを通らない) は素通し。          */
+/*    - 見るのは **帯だけ**。許可帯の中の非 present なページ (guard / sbrk     */
+/*      上限〜guard) をカーネルが写すと #PF になるが、それは既存の            */
+/*      フォールトガード (ring3_in_syscall) が呼び手を kill する — kprintf の  */
+/*      可変長 %s など、他の KAPI と同じ既定の扱い。契約 (FOUNDATION §2-6 の   */
+/*      「untrusted pointer / 長さ / 境界を CPL3 経路で検証」) は帯 + 長さで    */
+/*      満たす。                                                              */
+/*                                                                            */
+/*    **PTE (present / USER) は見ない** (2026-09-13、実機 K2 で 2 回失敗):     */
+/*      カーネルはページテーブルを「物理番地 = 仮想番地」で読む。ところが      */
+/*      PD もアプリ PT も pgalloc から取られ (`PGALLOC_BASE` は 0x400000 で    */
+/*      **アプリ帯そのもの**)、アプリの PD では その仮想番地が per-app 物理へ  */
+/*      張り替わっている。つまり syscall 中 (CR3 = アプリ PD) に表を辿ると、    */
+/*      PT のつもりでアプリ自身のデータを読む — #PF も起きないまま「非 present」*/
+/*      と答える。`AppSlot.as` の控えから引いても、PDE から引いても同じ物理を  */
+/*      指すので結果は同じだった。表を正しく歩けるのは master CR3 の下だけで、  */
+/*      syscall の途中で CR3 を差し替えるのは割に合わない。                    */
+/* ======================================================================== */
+/* ---- 検証が断った理由の観測点 (実機 K2 の切り分け、2026-09-13) ----------
+ * KAPI にはしない。fault_kill_count と同じくカーネルシンボルとして公開し、
+ * `emu_read_mem` で読む。実機で `db_open_existing` が MISUSE を返したとき、
+ * 「どのサブ条件で断ったか」がここを読むだけで分かる。
+ *   count  : 断った回数
+ *   last   : 直前の理由 (RING3_RANGE_*)
+ *   addr   : 直前に断ったポインタ / ページ
+ *   flags  : そのとき ring3_ptr_ok が見た帯の上端 (RING3_HEAP_TOP)
+ * 正常系では 1 バイトも増えない (断ったときだけ書く)。 */
+volatile u32 ring3_range_reject_count = 0;
+volatile u32 ring3_range_reject_last = 0;
+volatile u32 ring3_range_reject_addr = 0;
+volatile u32 ring3_range_reject_page = 0;
+volatile u32 ring3_range_reject_heap_top = 0;
+
+static int ring3_range_refuse(u32 why, u32 p, u32 page)
+{
+    ring3_range_reject_count++;
+    ring3_range_reject_last = why;
+    ring3_range_reject_addr = p;
+    ring3_range_reject_page = page;
+    ring3_range_reject_heap_top = (u32)RING3_HEAP_TOP;
+    return 0;
+}
+
+int ring3_user_range_ok(u32 p, u32 len)
+{
+    u32 page, last_page;
+
+    if (!ring3_in_syscall) return 1;      /* CPL=0 の直呼び */
+    if (p == 0) return ring3_range_refuse(RING3_RANGE_NULL, p, 0);
+    if (len == 0) return 1;               /* 0 バイトは読まない */
+    if (p + len < p) return ring3_range_refuse(RING3_RANGE_OVERFLOW, p, 0);
+    if (!g_cur_app)
+        return ring3_range_refuse(RING3_RANGE_NO_APP, p, 0);
+
+    last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
+    for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
+        if (page == 0 || !ring3_ptr_ok(page))
+            return ring3_range_refuse(RING3_RANGE_BAND, p, page);
+        if (page >= last_page) break;
+    }
+    return 1;
 }
 
 #include "ksetjmp.h"
@@ -746,22 +817,27 @@ static void exec_restore_context(int id)
 /* ======================================================================== */
 static void exec_reclaim_owned(int id)
 {
-    /* (1) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ)。
+    /* (1) SQLite DB リソース (P5: cleanup_all → cleanup_owned)。
+     * **FD 回収より先** (票 S0-K §1c / F2 の順序修正)。close は未 commit の
+     * rollback で journal を読み書きするので、そのときまだ main / journal の
+     * FD が生きていなければならない。ここを (6) に置いていた間は、
+     * vfs_close_owned が先に FD を閉じ、SQLite が閉じた FD 番号へ遅延 close /
+     * rollback を投げる形になっていた。他の相対順は 1 つも動かさない。 */
+    db_cleanup_owned(id);
+    /* (2) 標準FDのリダイレクト解除 (ファイルFDも自動クローズ)。
      * 表は FD 0/1/2 の 3 本しかないので、2 本のアプリが同時に stdout を
      * リダイレクトすることはできない (D3 の限界。GUI アプリは使わない)。 */
     fd_redirect_reset_owned(id);
-    /* (2) FD自動クローズ (この ID が open した FD 3 以上)。
+    /* (3) FD自動クローズ (この ID が open した FD 3 以上)。
      * カーネル常駐FD (vfs_fd_set_protect で保護) は除外される。 */
     vfs_close_owned(id);
-    /* (3) パイプバッファ自動解放 */
+    /* (4) パイプバッファ自動解放 */
     pipe_free_owned(id);
-    /* (4) 共有メモリ (P3: 所有者付きになった) */
+    /* (5) 共有メモリ (P3: 所有者付きになった) */
     shm_free_owned(id);
-    /* (5) サウンド: この ID の退避済み音だけを捨てる (D9-4)。
+    /* (6) サウンド: この ID の退避済み音だけを捨てる (D9-4)。
      * 鳴っているのがこの ID なら止める。他のアプリの音は無事。 */
     snd_owner_exit(id);
-    /* (6) SQLite DB リソース (P5: cleanup_all → cleanup_owned) */
-    db_cleanup_owned(id);
     /* (7) GUI リソース回収 (契約 T4 / U8)。WM がこの owner のウィンドウ・
      * サーフェス・タイマ・スロットを回収する。畳む 3 経路すべてが
      * ここを通るので、WM は 1 か所で回収できる。 */

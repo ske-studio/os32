@@ -211,6 +211,36 @@ exec_heap のどれも減らさない。
 `exec.c` は静的領域を 1 バイトも増やさない (`ring3_abort_request` の 1 行と
 `appslot_mark_scheduled` の呼び出し 2 か所)。KAPI も増えていない (v49 のまま)。
 
+## S0-K (KAPI v50、2026-09-13)
+
+`i386-elf-gcc -O2 -c` + `i386-elf-size` を基準版 (feat/gui `4c7d9f9`) と並べたもの
+(カーネル全体のリンクは未測定 — `make` は未実施)。
+
+> **注記 (実装レビュー 往復 2 / 3、2026-09-13)**: 下の数値は往復 1 の修正までのもの。
+> **修正版の実数は K1 の clean build 後に再測する** (コーダーは `make` を行えないので
+> ここでは測れない)。往復 2 以降に増えた静的領域は次の 2 本だけで、どちらも
+> カーネル .bss。`kmalloc` / exec_heap / アプリ帯は 1 バイトも減らさない:
+>
+> | 増えたもの | 大きさ | 何 |
+> |---|---:|---|
+> | `abs_path_buf` (`kapi/kapi_db.c`) | 256 B | 解決後の絶対名。stat / journal 名 / open をこれで行う |
+> | `probe` (`db_v50_selftest` 内の static) | 264 B | ブート時の自己診断が journal 名の容量境界を踏むための作業域 |
+>
+> 逆に往復 2 で自前の末尾判定 (`sql_is_space` / `sql_tail_is_blank`) が消え、
+> `journal_buf` は `VFS_MAX_PATH` (256B) のままなので text は増減する。
+
+| 目的語 | text | .bss | 内訳 |
+|---|---:|---:|---|
+| `kapi_db.o` | 3309 → **7927** (+4618) | 3520 → **8256** (+4736) | 検証済みコピー先の静的スクラッチ (blob 4096 + text 256 + journal 256) と `DbSlot` の 3 欄 × 8 + owner 別 open 失敗欄 6 |
+| `exec.o` | 12321 → **12749** (+428) | 8708 → **8740** (+32) | `ring3_user_range_ok` (帯だけを見る形) と、実機 K2 の切り分け計器 `ring3_range_reject_*` 5 本 (.bss +32B)。回収順の入れ替えは 0 B。計器を外せば +150B 程度まで戻る |
+| `paging.o` | 5328 → **5328** (増減なし) | 49215 で不変 | 2026-09-13 に PTE 検査そのものを落としたので、v50 のための追加関数は残っていない (`paging_addrspace_pte_flags` → `paging_current_pte_flags` → 削除) |
+
+合計 +4898 B text / +4736 B .bss (≈ 9.4KB、すべてカーネル帯の静的領域)。
+実装レビュー 往復 1 の修正ぶんは text +280 B / .bss **-32 B** (journal スクラッチを
+下位層の容量 `VFS_MAX_PATH` = 256B に合わせたので 8 B 縮み、整列で 32 B)。
+`kmalloc` も exec_heap もアプリ帯も 1 バイトも減らさない。SHM の 16KB
+結果ブロックのレイアウトは不変 (境界検査を足しただけ)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

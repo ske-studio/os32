@@ -1,5 +1,5 @@
 {
-  "version": 49,
+  "version": 50,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1407,6 +1407,48 @@
       "ret": "i32",
       "args": [],
       "target": "exec_sys_yield"
+    },
+    {
+      "name": "db_open_existing",
+      "ret": "int",
+      "args": ["const char *path", "int writable"],
+      "target": "kapi_db_open_existing"
+    },
+    {
+      "name": "db_prepare_only",
+      "ret": "int",
+      "args": ["int handle", "const char *sql"],
+      "target": "kapi_db_prepare_only"
+    },
+    {
+      "name": "db_bind_int",
+      "ret": "int",
+      "args": ["int handle", "int index", "int value"],
+      "target": "kapi_db_bind_int"
+    },
+    {
+      "name": "db_bind_text",
+      "ret": "int",
+      "args": ["int handle", "int index", "const char *text", "int length"],
+      "target": "kapi_db_bind_text"
+    },
+    {
+      "name": "db_bind_blob",
+      "ret": "int",
+      "args": ["int handle", "int index", "const void *data", "int length"],
+      "target": "kapi_db_bind_blob"
+    },
+    {
+      "name": "db_bind_null",
+      "ret": "int",
+      "args": ["int handle", "int index"],
+      "target": "kapi_db_bind_null"
+    },
+    {
+      "name": "db_error_code",
+      "ret": "int",
+      "args": ["int handle"],
+      "target": "kapi_db_error_code"
     }
   ]
 }

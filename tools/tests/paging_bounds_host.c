@@ -180,6 +180,57 @@ void _start(void)
         paging_addrspace_destroy(&as);
         CHECK(live_addrspaces == 0 && used == before - 2);
     }
+    {
+        /* 票 S0-K / 実機 K2 (2026-09-13): **アプリの PD を、そのアプリの
+         * syscall 中に歩いてはならない** ことの番人。
+         *
+         * カーネルはページテーブルを「物理 = 仮想」で読む。ところが PD も
+         * アプリ PT も pgalloc から取られ、`PGALLOC_BASE` は 0x400000 =
+         * `MEM_APP_BAND_BASE` — **アプリ帯そのもの**。アプリの PD ではその
+         * 仮想番地が per-app 物理へ張り替わるので、CR3 = アプリ PD のまま
+         * 表を辿ると PT のつもりでアプリ自身のデータを読む。#PF も起きず、
+         * 健全な .rodata を「非 present」と答える (実機で 2 回これを踏んだ)。
+         *
+         * ここで固定するのは 2 つ:
+         *   1. PGALLOC_BASE がアプリ帯の中にある (= 前提が成り立っている)
+         *   2. exec と同じ順序で組んだ AS では、アプリ PT の物理番地が
+         *      アプリ PD の下で **別の物理** に解決される (= 歩けない) */
+        struct addrspace as;
+        u32 code = 0x500000, sbrk_end = 0x520000;
+        u32 pt_phys, pdi, pti;
+        u32 *app_pt;
+
+        CHECK(PGALLOC_BASE == MEM_APP_BAND_BASE);
+        CHECK(paging_addrspace_create_n(&as, 1) == 0);
+        CHECK(as.app_pde == APP_BAND_PDE && as.app_pde_count == 1);
+        pt_phys = as.app_pt_phys[0];
+        CHECK(paging_addrspace_clear_app_band(&as) == 0);
+        CHECK(paging_addrspace_map_user_range_phys(&as, code, sbrk_end,
+                                                   0x900000, PAGE_RW | PTE_USER) == 0);
+
+        /* アプリ PT の物理がアプリ帯に入っているなら、アプリ PD の下で
+         * その仮想番地は **PT ではないもの** を指す (or 非 present)。
+         * 入っていない構成でも「歩いてよい」ことにはならないので、
+         * 入っているときだけ強い主張をする。 */
+        if (pt_phys >= MEM_APP_BAND_BASE && pt_phys < MEM_APP_BAND_TOP) {
+            pdi = pt_phys >> 22;
+            pti = (pt_phys >> 12) & 0x3FF;
+            CHECK(pdi >= as.app_pde && pdi < as.app_pde + as.app_pde_count);
+            app_pt = (u32 *)as.app_pt_phys[pdi - as.app_pde];
+            /* clear_app_band の後に張ったのは [code, sbrk_end) だけなので、
+             * PT 自身の番地は非 present か、per-app 物理 (PT ではない) を指す。*/
+            if (app_pt[pti] & PTE_PRESENT) {
+                CHECK((app_pt[pti] & 0xFFFFF000UL) != pt_phys);
+            }
+        }
+
+        /* master の下では従来どおり identity で読める (create_n が書けたのも
+         * これのおかげ)。歩いてよいのは master CR3 の下だけ、という証拠。 */
+        CHECK(paging_current_cr3() == paging_kernel_pd_phys());
+        CHECK(paging_pte_flags(pt_phys) & PTE_PRESENT);
+
+        paging_addrspace_destroy(&as);
+    }
     SAY("PASS: one-shot init preserves dynamic PT, live AS, CR3, allocator");
     SAY("PASS: final-page, virtual/physical overflow, range preflight");
     SAY("PASS: sparse NP, attribute flags, USER/PCD, user-range preflight");

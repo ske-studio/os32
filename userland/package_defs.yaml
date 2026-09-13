@@ -108,12 +108,16 @@ append:
   # lzss: true
   lzss: false
   files:
-    - host: "assets/images/*.vbz"
-      guest: /data/images/
-    - host: "assets/images/*.vdp"
-      guest: /data/images/
-    - host: "assets/manga/*.mgx"
-      guest: /data/manga/
+    # mkpkg は glob の展開が 0 件でもエラーにする (S0-T: 「登録したのに入って
+    # いない .PKG」を黙って作らない)。assets/images/ は現在リポジトリに無く、
+    # assets/manga の実体は大文字の .MGX だけなので、下の 3 行は 0 件になる。
+    # 素材を戻すときに合わせて復活させること。
+    # - host: "assets/images/*.vbz"
+    #   guest: /data/images/
+    # - host: "assets/images/*.vdp"
+    #   guest: /data/images/
+    # - host: "assets/manga/*.mgx"
+    #   guest: /data/manga/
     - host: "assets/manga/*.MGX"
       guest: /data/manga/
 

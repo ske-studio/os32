@@ -42,13 +42,32 @@ assets/fep_l.db: $(IPADIC_DIR)/Noun.csv tools/fep_to_sqlite.py
 assets/fep.dic: $(IPADIC_DIR)/Noun.csv tools/fep_compiler.py
 	python3 tools/fep_compiler.py -o $@
 
+# --- 設定レジストリの初期値マスタ (settings.db) ---
+# 正典は assets/settings/defaults.tsv (人が読み書きする側)。生成した DB は
+# インストール媒体 (FDD / CD) だけが持ち、既存システムには tsv を通常配備して
+# `cfg init` (S2) が明示的に生成する (TASK_S0 §3)。
+# FORCE 依存 = ビルド毎に必ず作り直す (ユーザー決裁)。生成は決定的
+# (同じ tsv + 同じ epoch → 同じバイト列) なので、毎回作っても媒体の中身は動かない。
+SETTINGS_TSV = assets/settings/defaults.tsv
+SETTINGS_DB  = $(BUILD_OUT)/settings.db
+
+$(SETTINGS_DB): $(SETTINGS_TSV) tools/mk_settings_db.py FORCE
+	@mkdir -p $(dir $@)
+	python3 tools/mk_settings_db.py --tsv $(SETTINGS_TSV) --out $@
+
 # 配備に必要な最小限。make all はこれに依存する。
 ASSETS_DEPLOYED = $(FONT_DIR)/ipaexg16.kcgfont $(FONT_DIR)/ipaexg_subset.ttf \
                   assets/fep.db
 
 # 開発時に使うものも含めた全部。
+# settings.db は通常配備の対象ではない (媒体だけが持つ) ので ASSETS_DEPLOYED
+# には入れず、ここと `all` / 媒体ターゲットから引く。
 ASSETS_ALL = $(ASSETS_DEPLOYED) $(FONT_DIR)/ipaexm_subset.ttf \
-             assets/fep_s.db assets/fep_l.db assets/fep.dic
+             assets/fep_s.db assets/fep_l.db assets/fep.dic \
+             $(SETTINGS_DB)
+
+# `all` からも直接引く (媒体ターゲットの依存とは別に、単体で必ず出来ていること)。
+all: $(SETTINGS_DB)
 
 assets-deployed: $(ASSETS_DEPLOYED)
 	@echo "=== 配備用アセット $(words $(ASSETS_DEPLOYED)) 件 ==="

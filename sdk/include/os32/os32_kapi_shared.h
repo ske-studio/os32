@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      49   /* GUI v1.3 T9 shell script: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield (GUI 中は注入リングを 読まずに WAIT_POLL で譲る)。v48 = T8: gfx_screen_owner (画面の所有者)。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
+#define KAPI_VERSION      50   /* 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -60,6 +60,13 @@ typedef signed long    i32;
 
 /* IPC 共有メモリブロックサイズ (DB結果用) */
 #define DB_SHM_BLOCK_SIZE  (16 * 1024)
+
+/* v50 (票 S0-K §1a) — db_prepare_only / db_bind_* の上限。カーネル側
+ * (kapi/kapi_db.c) の検証用スクラッチもこの値で取るので、ここが唯一の
+ * 管理元 ([C4])。超過は**切り捨てず拒否**する。 */
+#define DB_SQL_MAX_BYTES   1024   /* SQL 文字列 (NUL 込み) */
+#define DB_BIND_TEXT_MAX   255    /* db_bind_text の length (NUL を含まない) */
+#define DB_BIND_BLOB_MAX   4096   /* db_bind_blob の length */
 
 /* DB_ResultHeader — db_exec/db_step 結果の先頭に配置 */
 typedef struct {

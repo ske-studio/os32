@@ -14,7 +14,17 @@ class DbOwnedTests(unittest.TestCase):
             (tmp / "memmap.h").write_text(
                 "extern unsigned char test_shm[];\n#define MEM_SHM_BASE test_shm\n")
             (tmp / "kstring.h").write_text(
-                "#include <string.h>\n#define kstrncpy(d,s,n) strncpy(d,s,n)\n")
+                "#include <string.h>\n#define kstrncpy(d,s,n) strncpy(d,s,n)\n"
+                "char *host_strlcat(char *d, const char *s, unsigned long n);\n"
+                "#define kstrncat(d,s,n) host_strlcat(d,s,n)\n"
+                "#define kstrlen(s) ((u32)strlen(s))\n"
+                "#define kstrcmp(a,b) strcmp(a,b)\n"
+                "#define kstrncmp(a,b,n) strncmp(a,b,n)\n"
+                "#define kmemcpy(d,s,n) memcpy(d,s,n)\n")
+            # v50: kapi_db.c は exec 側のポインタ検証と vfs_stat を使う。
+            # どちらもこの票 (F1) の範囲外なので最小の模型で置く。
+            (tmp / "exec.h").write_text(
+                "int ring3_user_range_ok(u32 p, u32 len);\n")
             (tmp / "kprintf.h").write_text("int kprintf(int color, const char *fmt, ...);\n")
             exe = tmp / "db-owned"
             subprocess.run([
