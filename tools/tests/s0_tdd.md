@@ -143,25 +143,11 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
 `tools/mkpkg.py` (登録ファイルの欠損をエラーに) だけ。生成 DB は媒体 (FDD / CD) だけが持ち、
 既存システムには tsv を通常配備する (TASK_S0 §3)。カーネル・KAPI・配備スクリプトは触らない。
 
-試験: `python3 -B tools/tests/test_mk_settings_db.py` (38 件)。ホストのみ。エミュレータ・配備・`make`
-試験: `python3 -B tools/tests/test_mk_settings_db.py` (43 件)。ホストのみ。エミュレータ・配備・`make`
+試験: `python3 -B tools/tests/test_mk_settings_db.py` (45 件)。ホストのみ。エミュレータ・配備・`make`
 (dry-run `-n` を除く) は実行していない。
 
 ### 実行済み RED → GREEN
 
-1. **RED (1 回目)** — tsv / 生成ツールを書いた直後に全 38 件を実行し、5 件が失敗:
-   - `BuildWiring.test_assets_mk_rule` / `test_image_mk_wiring` /
-     `test_core_packages_has_settings_db` — ビルド統合が未実装 (期待どおりの RED)。
-   - `MkpkgMissingFile.test_missing_file_is_error` — `exit 0` で
-     `MINIMAL.PKG: 0 files, 43 bytes`。欠損が warning で素通りしていた (期待どおりの RED)。
-   - `Rejects.test_text_255_boundary` — 試験側の欠陥。1 メソッド内で出力名 `out.db` を使い回し、
-     直前の成功ビルドの残骸を「失敗なのに DB を作っている」と誤判定していた。出力名を毎回変えて修正。
-   決定性・スキーマ・規則違反の拒否 (33 件) は 1 回目から通った。**tsv と生成ツールは試験より先に書いた**
-   ので、この 33 件については RED を経ていない (正直に記録する)。
-2. **GREEN** — `tools/mkpkg.py` を「全パッケージのファイルを先に解決し、欠損があれば 1 つも書かずに
-   非ゼロ終了」に変更、`build/assets.mk` に `$(BUILD_OUT)/settings.db` (FORCE 依存) を追加、
-   `build/image.mk` の FDD / `packages` に結線、`build/core_packages.yaml` の `minimal` に
-   `/etc/settings.db` を追加 → 38 件すべて PASS。
 **証拠を 2 つに分ける**: (a) 反例で落ちるところを実際に見た試験と、(b) 実装が先にあって
 「今 通っている」だけの回帰試験。どちらなのかを書き分ける。
 
@@ -177,6 +163,7 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
 | `Rejects.test_int32_overflow` | 範囲検査を外すと `2147483648` を**受理**する | int32 の範囲検査 |
 | `Rejects.test_duplicate_key` | 重複検査を外すと `sqlite3.IntegrityError: UNIQUE constraint failed` の Traceback (理由が `path:line:` の形で出ない) | 重複検査 |
 | `Rejects.test_cr_rejected` | CR 検査を外すと `text` 値の末尾 CR (`x\r`) がそのまま DB に入る。`int` 行は字句規則が拾ってしまうので、CR 規則だけが捕まえる反例 (text 行・コメント行) を試験に足した | CR 検査 |
+| `Rejects.test_leading_zeros_accepted` / `test_leading_zeros_beyond_int32_rejected` | 先頭ゼロ 4301 桁の `int` (契約上は有効) が Python 3.14 の桁数制限で `ValueError` の Traceback になり、受理も理由付き拒否もできない | 変換の**前**に符号の後の `0` を畳み、畳んだ桁数が 10 を超えたら範囲外として拒否 |
 
 - mkpkg の 4 件: 修正前の `tools/mkpkg.py` (feat/gui 6360618) に戻して `MkpkgMissingFile` を実行 →
   `Ran 7 tests, FAILED (failures=3)` と上表の症状を確認し、修正版へ戻した。
@@ -187,6 +174,9 @@ non-blocker も同時に直した: `FakeRun` の `cp` を実物どおり「宛�
   列挙して FAILED を確認し、コメント化した版へ戻した。
 - `Rejects.test_text_255_boundary` は 1 回目に試験側の欠陥で落ちた (1 メソッド内で出力名 `out.db` を
   使い回し、直前の成功ビルドの残骸を「失敗なのに DB を作っている」と誤判定)。出力名を毎回変えて修正。
+- 先頭ゼロの 2 件は試験を先に書き、着地版 (2adcb2e) の `tools/mk_settings_db.py` に対して
+  `Rejects` を実行 → `Ran 20 tests, FAILED (failures=2)`
+  (`ValueError: Exceeds the limit (4300 digits) ...`) を確認してから直した。
 
 #### (b) 回帰試験 (実装を先に書いたので反例 RED を経ていない)
 
@@ -196,7 +186,7 @@ type / int の字句 / text 255B / blob の hex) と境界値の受理、`RealDe
 
 #### GREEN
 
-`Ran 43 tests — OK`。
+`Ran 45 tests — OK`。
 
 ### 見たもの (合格の中身)
 
@@ -205,7 +195,7 @@ type / int の字句 / text 255B / blob の hex) と境界値の受理、`RealDe
 - **スキーマ**: `meta(schema_version=1, created)`、`settings(scope,key,type,ival,tval,bval)` +
   `PRIMARY KEY(scope,key)` + `WITHOUT ROWID`、`page_size=1024`、`user_version=1`、
   `journal_mode=delete`。`integrity_check=ok`、`freelist_count=0` (VACUUM 後)。実物は 3 KB / 3 行。
-- **規則**: int32 超過 / int の字句 / 不正 UTF-8 / NUL (scope・text) / key 規則と 63B / scope 規則と
+- **規則**: int32 超過 (先頭ゼロ 4301 桁を含む) / int の字句 / 不正 UTF-8 / NUL (scope・text) / key 規則と 63B / scope 規則と
   63B / type / 重複 / 列数 / CR / text 255B 境界 (3B 文字を含む) / blob の奇数桁・空白・非 hex・
   8192 文字超 — すべて非ゼロ終了 + 理由 (`path:line:`) で、DB を作らない。境界値 (int32 端、key 63B、
   blob 4096B) は受理。末尾の空欄は NULL ではなく空の text として入る。

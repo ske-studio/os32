@@ -40,6 +40,7 @@ MAX_BLOB_HEX = MAX_BLOB_BYTES * 2
 
 INT32_MIN = -2147483648
 INT32_MAX = 2147483647
+INT32_MAX_DIGITS = 10          # 先頭ゼロを畳んだ後の桁数の上限
 
 FIXED_SCOPES = ('system', 'gshell', 'user')
 
@@ -106,7 +107,15 @@ def _parse_value(path, lineno, type_name, value):
         if not RE_INT.match(value):
             raise TsvError(path, lineno,
                            'int の字句が -?[0-9]+ でない: %r' % value)
-        iv = int(value, 10)
+        # 先頭ゼロは字句規則上 有効。Python の既定の桁数制限 (4300 桁) で
+        # int() が ValueError を投げないよう、**変換の前に**桁を畳む。
+        # 畳んだ後が 11 桁以上なら int32 には入らない (上限は 10 桁)。
+        sign = '-' if value[0] == '-' else ''
+        digits = (value[1:] if sign else value).lstrip('0') or '0'
+        if len(digits) > INT32_MAX_DIGITS:
+            raise TsvError(path, lineno,
+                           'int が int32 の範囲外: %s' % value)
+        iv = int(sign + digits, 10)
         if iv < INT32_MIN or iv > INT32_MAX:
             raise TsvError(path, lineno,
                            'int が int32 の範囲外: %s' % value)

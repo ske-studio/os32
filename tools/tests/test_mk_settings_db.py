@@ -210,6 +210,45 @@ class Rejects(TempCase):
                              "gshell\tb\tint\t-2147483648\n")
         self.assertEqual(res.returncode, 0, res.stderr)
 
+    def _ival(self, db, key='a'):
+        conn = sqlite3.connect(str(db))
+        try:
+            return conn.execute(
+                'SELECT ival FROM settings WHERE key=?', (key,)).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_leading_zeros_accepted(self):
+        """先頭ゼロは字句規則 `-?[0-9]+` を満たす = 契約上有効。
+
+        Python の既定の桁数制限 (4300 桁) で `int()` が落ちないよう、
+        変換の前に桁を畳むこと。
+        """
+        z = '0' * 4301
+        res, db = self.build("gshell\ta\tint\t%s\n" % z, out='z.db')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._ival(db), 0)
+
+        res, db = self.build("gshell\ta\tint\t-%s\n" % z, out='negz.db')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._ival(db), 0)
+
+        res, db = self.build("gshell\ta\tint\t%s2147483647\n" % z,
+                             out='maxz.db')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._ival(db), 2147483647)
+
+        res, db = self.build("gshell\ta\tint\t-%s2147483648\n" % z,
+                             out='minz.db')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(self._ival(db), -2147483648)
+
+    def test_leading_zeros_beyond_int32_rejected(self):
+        """桁を畳んでも範囲外なら、理由付きで拒否する (Traceback にしない)。"""
+        z = '0' * 4301
+        self.assertRejected("gshell\ta\tint\t%s2147483648\n" % z, '範囲外')
+        self.assertRejected("gshell\ta\tint\t-%s2147483649\n" % z, '範囲外')
+
     def test_int_lexical(self):
         self.assertRejected("gshell\ta\tint\t0x10\n")
         self.assertRejected("gshell\ta\tint\t 1\n")
