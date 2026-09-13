@@ -125,7 +125,37 @@ SUMMARY 9/9 PASS
 （`decline` = 承認しないとき何も書かず **終了 0** は票に明示が無いので、回復モードの
 `case_approve` (承認しない = 0) に合わせた。利用者が断っただけで `[FAIL]` は出さない。）
 
-### I.5 まだ見ていないこと ([V4])
+### I.5 Codex 実装レビュー 往復 1 の反映 (2026-09-14)
+
+**B1 (blocker)**: 初期ディレクトリ作成 (`/hd0/sys` … `/hd0/tmp`) の `sys_mkdir` の
+戻り値を捨てていたので、`/hd0/tmp` だけ作れなくてもコピーと sync が通れば
+`Installation complete` + 終了 0 になっていた。
+
+RED (反例をホストで踏んだ):
+
+```
+FAIL case_mkdir_init: mkdir /hd0/sys failed but install returned 0
+EXIT mkdir_init=1
+SUMMARY 10/12 PASS
+```
+
+直し方: 作る 12 個を `init_dirs[]` (親が先) にまとめ、1 つでも失敗したら
+`Error: Failed to create <path>` + 終了 1。`/hd0/boot` の個別検査はこの表に統合した。
+`mkdir_init` は 12 個それぞれを個別に失敗させて 12 回とも終了 1 を確かめ、
+正常系では 12 個すべてが作られることも見る。
+
+non-blocker (3 件とも試験を追加、実装は変更なしで GREEN):
+
+| 追加 | 中身 |
+|---|---|
+| 列挙途中の失敗 | `sys_ls` の贋物に「**何件か callback を呼んでから** 負を返す」形 (`inj_ls_fail_after`) を足し、頭で負 / 2 件渡してから負 / 全件渡してから負 の 3 通りで終了 1。FAT 単体ではなく `install` との接続を見る |
+| 64 / 65 件、深さ 4 / 5 | `bounds`: `/bin` にちょうど 64 件 → 全部写って 0、65 件 → 取りこぼすので 1。`/etc` に 4 段ネスト → `d1/d2/d3/d4/deep.txt` まで写って 0、5 段 → 1 |
+| 正常 EOF の長さ不一致 / 綴り保持 | `srcname`: `stat` だけが 4096 B 大きい値を名乗る (read は正常に EOF) → 長さ一致の検査だけで終了 1。開いた名前が媒体の綴りのまま (`/VMKRNL.LZ4` `/sys/SHELL.BIN` `/etc/SETTINGS.DB`) で小文字版は開いておらず、宛先だけが `/hd0/sys/shell.bin` |
+
+往復 1 後: **12/12 PASS** (`--target` の表明 2 件込み、`--sanitize` でも 12/12)、
+回復モードの回帰は **14/14 PASS** で不変。
+
+### I.6 まだ見ていないこと ([V4])
 
 - 実機 (NP21/W) での FDD ブート → `install` → HDD ブートは **未実施**。票 §3 の F1〜F6 は
   PM / テスターの受入。コーダーはホスト TDD と単体コンパイルまで。

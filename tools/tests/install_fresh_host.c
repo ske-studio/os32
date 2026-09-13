@@ -43,7 +43,7 @@ static int  cap_len;
 /*  贋の媒体 (FAT) と贋の HDD (ext2) を 1 つの表で持つ                        */
 /* ========================================================================= */
 
-#define FX_MAX 96
+#define FX_MAX 160
 typedef struct {
     char           path[96];
     unsigned char *data;
@@ -152,7 +152,7 @@ static void fx_parent(const char *path, char *out)
 /*  記録と注入                                                               */
 /* ========================================================================= */
 
-#define REC_MAX 128
+#define REC_MAX 512
 static char rec_open[REC_MAX][96];
 static int  rec_open_n;
 static char rec_stat[REC_MAX][96];
@@ -167,10 +167,13 @@ static int  inj_format_fail;
 static int  inj_mount_fail;
 static const char *inj_mkdir_fail;
 static const char *inj_ls_fail;
+static int  inj_ls_fail_after;        /* 何件 callback を呼んでから負を返すか */
 static const char *inj_read_neg;      /* この名前の read を負で返す */
 static int  inj_read_neg_after;       /* 何回目の read から負にするか (0 = 最初) */
 static const char *inj_write_short;   /* この宛先の write を 1 バイト減らす */
 static int  inj_sync_fail;
+static const char *inj_stat_big;      /* stat だけが大きい長さを名乗る名前 */
+static int  inj_stat_big_extra;
 
 static const char *key_script;        /* confirm_install に食わせる鍵 */
 
@@ -183,9 +186,12 @@ static void rec_reset(void)
     inj_sync_fail = 0;
     inj_mkdir_fail = NULL;
     inj_ls_fail = NULL;
+    inj_ls_fail_after = 0;
     inj_read_neg = NULL;
     inj_write_short = NULL;
     inj_read_neg_after = 0;
+    inj_stat_big = NULL;
+    inj_stat_big_extra = 0;
     key_script = "y";
     cap_len = 0;
     cap_buf[0] = '\0';
@@ -195,6 +201,14 @@ static int rec_has(char list[][96], int n, const char *path)
 {
     int i;
     for (i = 0; i < n; i++) if (!strcasecmp(list[i], path)) return 1;
+    return 0;
+}
+
+/* 綴りまで一致するか (媒体側の名前をそのまま開いているかの確認) */
+static int rec_has_exact(char list[][96], int n, const char *path)
+{
+    int i;
+    for (i = 0; i < n; i++) if (!strcmp(list[i], path)) return 1;
     return 0;
 }
 
@@ -304,9 +318,13 @@ static int fake_sys_ls(const char *path, void *cb, void *ctx)
     DirEntry_Ext e;
     char parent[96];
     int i;
+    int sent = 0;
+    int failing = (inj_ls_fail && fx_same(inj_ls_fail, path));
     int d = fx_find(path);
 
-    if (inj_ls_fail && fx_same(inj_ls_fail, path)) return -5;
+    /* 列挙の途中で落ちる形 (S3I2-K 後の fatfs_vfs_list): 何件か callback を
+     * 呼んでから負を返す。呼び手が件数だけを見ていると気付けない。 */
+    if (failing && inj_ls_fail_after <= 0) return -5;
     if (d < 0 || !fx[d].is_dir) return -2;
 
     for (i = 0; i < FX_MAX; i++) {
@@ -314,13 +332,16 @@ static int fake_sys_ls(const char *path, void *cb, void *ctx)
         if (!fx[i].used || i == d) continue;
         fx_parent(fx[i].path, parent);
         if (!fx_same(parent, path)) continue;
+        if (failing && sent >= inj_ls_fail_after) return -5;
         name = strrchr(fx[i].path, '/') + 1;
         memset(&e, 0, sizeof(e));
         strncpy(e.name, name, sizeof(e.name) - 1);
         e.size = (u32)fx[i].size;
         e.type = (u8)(fx[i].is_dir ? OS32_FILE_TYPE_DIR : 1);
         fn(&e, ctx);
+        sent++;
     }
+    if (failing) return -5;
     return 0;
 }
 
@@ -395,6 +416,8 @@ static int fake_sys_stat(const char *path, OS32_Stat *st)
     if (i < 0) return -2;
     memset(st, 0, sizeof(*st));
     st->st_size = (u32)fx[i].size;
+    if (inj_stat_big && fx_same(fx[i].path, inj_stat_big))
+        st->st_size += (u32)inj_stat_big_extra;
     st->st_mode = (u16)(fx[i].is_dir ? OS_S_IFDIR : OS_S_IFREG);
     st->st_nlink = 1;
     return 0;
@@ -653,9 +676,126 @@ static void case_copy_fail(void)
     CHECK(run() == 1);
     CHECK_STR("[FAIL]");
 
-    /* sys_ls の負 (列挙途中の I/O 失敗、S3I2-K で FAT が返すようになる) */
+    /* sys_ls の負 (列挙の頭から失敗、S3I2-K で FAT が返すようになる) */
     setup();
     inj_ls_fail = "/bin";
+    CHECK(run() == 1);
+    CHECK_STR("[FAIL]");
+    CHECK_NOSTR("Installation complete");
+
+    /* sys_ls の負 (**途中**: 何件か callback を呼んでから負)。件数だけを
+     * 見ていると「1 件写せたから成功」に見えてしまう形。 */
+    setup();
+    fx_put("/SYS/SHLIB.BIN", 120);
+    inj_ls_fail = "/sys";
+    inj_ls_fail_after = 2;
+    CHECK(run() == 1);
+    CHECK_STR("[FAIL]");
+    CHECK_NOSTR("Installation complete");
+
+    /* 最後の 1 件を渡した後で負 (全件渡ってから落ちる形) */
+    setup();
+    inj_ls_fail = "/etc";
+    inj_ls_fail_after = 99;
+    CHECK(run() == 1);
+    CHECK_STR("[FAIL]");
+    CHECK_NOSTR("Installation complete");
+}
+
+/* B1 (往復 1): 初期ディレクトリ作成の失敗も終了 1 まで届く。
+ * どれか 1 つでも作れなければ、その先のコピーと sync が通っても未完成。 */
+static void case_mkdir_init(void)
+{
+    static const char *const dirs[12] = {
+        "/hd0/boot", "/hd0/sys", "/hd0/bin", "/hd0/sbin", "/hd0/etc",
+        "/hd0/usr", "/hd0/usr/bin", "/hd0/usr/man", "/hd0/data",
+        "/hd0/home", "/hd0/home/user", "/hd0/tmp"
+    };
+    int i;
+    for (i = 0; i < 12; i++) {
+        setup();
+        inj_mkdir_fail = dirs[i];
+        if (run() != 1) {
+            fprintf(stderr, "FAIL %s: mkdir %s failed but install returned 0\n"
+                    "--- output ---\n%s", __func__, dirs[i], cap_buf);
+            exit(1);
+        }
+        CHECK_STR("[FAIL]");
+        CHECK_NOSTR("Installation complete");
+    }
+    /* 全部作れる正常系では 12 個すべてを作る */
+    setup();
+    CHECK(run() == 0);
+    for (i = 0; i < 12; i++)
+        CHECK(rec_has(rec_mkdir, rec_mkdir_n, dirs[i]));
+}
+
+/* 列挙の境界 (MAX_FILES = 64) と再帰の深さ (4 まで) */
+static void case_bounds(void)
+{
+    char name[64];
+    int i;
+
+    /* ちょうど 64 件は取りこぼさない */
+    setup();
+    fx_rm("/BIN/LS.BIN");
+    for (i = 0; i < 64; i++) {
+        sprintf(name, "/BIN/F%02d.BIN", i);
+        fx_put(name, 8);
+    }
+    CHECK(run() == 0);
+    CHECK(fx_exists("/hd0/bin/f00.bin"));
+    CHECK(fx_exists("/hd0/bin/f63.bin"));
+
+    /* 65 件は取りこぼすので失敗 */
+    setup();
+    fx_rm("/BIN/LS.BIN");
+    for (i = 0; i < 65; i++) {
+        sprintf(name, "/BIN/F%02d.BIN", i);
+        fx_put(name, 8);
+    }
+    CHECK(run() == 1);
+    CHECK_STR("[FAIL]");
+    CHECK_NOSTR("Installation complete");
+
+    /* 深さ 4 (=/etc/d1/d2/d3/d4) までは写る */
+    setup();
+    fx_dir("/ETC/D1"); fx_dir("/ETC/D1/D2");
+    fx_dir("/ETC/D1/D2/D3"); fx_dir("/ETC/D1/D2/D3/D4");
+    fx_put("/ETC/D1/D2/D3/D4/DEEP.TXT", 5);
+    CHECK(run() == 0);
+    CHECK(fx_exists("/hd0/etc/d1/d2/d3/d4/deep.txt"));
+
+    /* 深さ 5 は黙って写し漏らさず失敗にする */
+    setup();
+    fx_dir("/ETC/D1"); fx_dir("/ETC/D1/D2");
+    fx_dir("/ETC/D1/D2/D3"); fx_dir("/ETC/D1/D2/D3/D4");
+    fx_dir("/ETC/D1/D2/D3/D4/D5");
+    fx_put("/ETC/D1/D2/D3/D4/D5/DEEP.TXT", 5);
+    CHECK(run() == 1);
+    CHECK_STR("[FAIL]");
+    CHECK_NOSTR("Installation complete");
+}
+
+/* 注入なしの長さ不一致 (stat だけが大きい = 正常 EOF で短く終わる) と、
+ * ソース名の綴りが媒体のまま保たれること */
+static void case_srcname(void)
+{
+    setup();
+    CHECK(run() == 0);
+    /* 開いたのは媒体の綴りそのもの。小文字版は開いていない。 */
+    CHECK(rec_has_exact(rec_open, rec_open_n, "/VMKRNL.LZ4"));
+    CHECK(rec_has_exact(rec_open, rec_open_n, "/sys/SHELL.BIN"));
+    CHECK(!rec_has_exact(rec_open, rec_open_n, "/sys/shell.bin"));
+    CHECK(rec_has_exact(rec_open, rec_open_n, "/etc/SETTINGS.DB"));
+    CHECK(!rec_has_exact(rec_open, rec_open_n, "/etc/settings.db"));
+    /* 宛先は小文字 */
+    CHECK(rec_has_exact(rec_open, rec_open_n, "/hd0/sys/shell.bin"));
+
+    /* 読みは正常に EOF で終わるのに長さが足りない (媒体の申告より短い) */
+    setup();
+    inj_stat_big = "/VMKRNL.LZ4";
+    inj_stat_big_extra = 4096;
     CHECK(run() == 1);
     CHECK_STR("[FAIL]");
     CHECK_NOSTR("Installation complete");
@@ -705,6 +845,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "decline")) case_decline();
     else if (!strcmp(argv[1], "boot_fail")) case_boot_fail();
     else if (!strcmp(argv[1], "copy_fail")) case_copy_fail();
+    else if (!strcmp(argv[1], "mkdir_init")) case_mkdir_init();
+    else if (!strcmp(argv[1], "bounds")) case_bounds();
+    else if (!strcmp(argv[1], "srcname")) case_srcname();
     else if (!strcmp(argv[1], "sync_fail")) case_sync_fail();
     else if (!strcmp(argv[1], "idetype")) case_idetype();
     else return 2;

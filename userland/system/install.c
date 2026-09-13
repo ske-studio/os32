@@ -413,6 +413,15 @@ static int precheck_media(u32 *lz4_size_out)
     return 0;
 }
 
+/* HDD に最初に作るディレクトリ (親が先)。1 つでも作れなければインストールは
+ * 未完成 (往復 1 の B1)。 */
+static const char *const init_dirs[] = {
+    DST_BOOT_DIR,
+    "/hd0/sys", "/hd0/bin", "/hd0/sbin", "/hd0/etc",
+    "/hd0/usr", "/hd0/usr/bin", "/hd0/usr/man",
+    "/hd0/data", "/hd0/home", "/hd0/home/user", "/hd0/tmp"
+};
+
 int __cdecl main(int argc, char **argv, KernelAPI *api)
 {
     static IdeInfo info;
@@ -531,23 +540,16 @@ int __cdecl main(int argc, char **argv, KernelAPI *api)
         goto end;
     }
 
-    /* HDD側ディレクトリ構造を作成 */
+    /* HDD側ディレクトリ構造を作成。1 つでも作れなければ未完成なので中止する
+     * (往復 1 の B1: 戻り値を捨てると /hd0/tmp だけ無い HDD で終了 0 になる)。
+     * 親は子より先に並べること。 */
     api->kprintf(0x0A, "%s", "  Creating directories...\n");
-    if (api->sys_mkdir(DST_BOOT_DIR) != 0) {
-        api->kprintf(0x4F, "%s", "Error: Failed to create /hd0/boot.\n");
-        goto end;
+    for (i = 0; i < (int)(sizeof(init_dirs) / sizeof(init_dirs[0])); i++) {
+        if (api->sys_mkdir(init_dirs[i]) != 0) {
+            api->kprintf(0x4F, "Error: Failed to create %s\n", init_dirs[i]);
+            goto end;
+        }
     }
-    api->sys_mkdir("/hd0/sys");
-    api->sys_mkdir("/hd0/bin");
-    api->sys_mkdir("/hd0/sbin");
-    api->sys_mkdir("/hd0/etc");
-    api->sys_mkdir("/hd0/usr");
-    api->sys_mkdir("/hd0/usr/bin");
-    api->sys_mkdir("/hd0/usr/man");
-    api->sys_mkdir("/hd0/data");
-    api->sys_mkdir("/hd0/home");
-    api->sys_mkdir("/hd0/home/user");
-    api->sys_mkdir("/hd0/tmp");
 
     /* 圧縮カーネル → /hd0/boot/vmkernel.lz4 (128KB バッファで反復コピー)。
      * ローダ v3 がここを読む。長さが合わなければ失敗。 */
