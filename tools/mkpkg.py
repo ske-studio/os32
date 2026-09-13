@@ -169,10 +169,17 @@ def build_pkg(name, version, files, use_lzss, kapi_ver):
         entries.append((d, 0, PKG_TYPE_DIR))
 
     # ファイルエントリ
+    # 登録したファイルの欠損は一律エラー。かつては warning で飛ばしていたが、
+    # それだと「入っているはずのものが入っていない .PKG」が黙って出来る
+    # (S0-T: /etc/settings.db がビルド順のずれで落ちても気付けない)。
+    missing = [h for _, h in files if not os.path.isfile(h)]
+    if missing:
+        for host_path in missing:
+            print(f"ERROR: {host_path} not found (package '{name}')",
+                  file=sys.stderr)
+        raise SystemExit(1)
+
     for guest_path, host_path in files:
-        if not os.path.isfile(host_path):
-            print(f"WARNING: {host_path} not found, skipping", file=sys.stderr)
-            continue
         with open(host_path, 'rb') as f:
             data = f.read()
         entries.append((guest_path, len(data), PKG_TYPE_FILE))
@@ -252,8 +259,10 @@ def build_from_yaml(yaml_paths, output_dir, base_dir):
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # 先に全パッケージのファイルを解決し、欠損があれば 1 つも書かずに落ちる
+    # (途中まで書いた .PKG を残さない)。
+    resolved = []
     for pkg_name, pkg_def in packages.items():
-        pkg_type = pkg_def.get('type', 'package')
         version = int(pkg_def.get('version', 1))
         use_lzss = pkg_def.get('lzss', True)
         files = []
@@ -279,7 +288,17 @@ def build_from_yaml(yaml_paths, output_dir, base_dir):
         if not files:
             print(f"  {pkg_name}: no files, skipping")
             continue
+        resolved.append((pkg_name, version, use_lzss, files))
 
+    missing = [(n, h) for n, _, _, fs in resolved for _, h in fs
+               if not os.path.isfile(h)]
+    if missing:
+        for pkg_name, host_path in missing:
+            print(f"ERROR: {host_path} not found (package '{pkg_name}')",
+                  file=sys.stderr)
+        raise SystemExit(1)
+
+    for pkg_name, version, use_lzss, files in resolved:
         out_name = pkg_name.upper() + '.PKG'
         out_path = os.path.join(output_dir, out_name)
 
