@@ -53,6 +53,43 @@ typedef struct {
 
 static KernelAPI *g_api;
 
+/* ======== 回復モードの KAPI 境界 (票 S3-I §1) ======== */
+/* `--recover-settings` / `--revert-settings` の本体は install_recover.inc に
+ * あり、KAPI へは RecoverOps (関数ポインタ表) 経由でしか触らない。ホスト
+ * TDD (tools/tests/install_recover_host.c) が同じ .inc を取り込めるように
+ * するため。通常インストール経路はこの表を使わない。 */
+
+static int rop_stat(const char *p, OS32_Stat *st)  { return g_api->sys_stat(p, st); }
+static int rop_open(const char *p, int mode)       { return g_api->sys_open(p, mode); }
+static int rop_read(int fd, void *b, u32 n)        { return g_api->sys_read(fd, b, n); }
+static int rop_write(int fd, const void *b, u32 n) { return g_api->sys_write(fd, b, n); }
+static void rop_close(int fd)                      { g_api->sys_close(fd); }
+static int rop_unlink(const char *p)               { return g_api->sys_unlink(p); }
+static int rop_rename(const char *o, const char *n){ return g_api->sys_rename(o, n); }
+static int rop_mount(const char *pre, const char *dev, const char *fs)
+{ return g_api->sys_mount(pre, dev, fs); }
+static int rop_is_mounted(const char *pre)         { return g_api->sys_is_mounted(pre); }
+static int rop_sync(void)                          { return g_api->vfs_sync(); }
+static int rop_db_open_existing(const char *p, int w)
+{ return g_api->db_open_existing(p, w); }
+static int rop_db_prepare_only(int h, const char *sql)
+{ return g_api->db_prepare_only(h, sql); }
+static int rop_db_step(int h)                      { return g_api->db_step(h); }
+static int rop_db_finalize(int h)                  { return g_api->db_finalize(h); }
+static int rop_db_close(int h)                     { return g_api->db_close(h); }
+static int rop_db_error_code(int h)                { return g_api->db_error_code(h); }
+static unsigned char *rop_shm(void)                { return (unsigned char *)g_api->shm_base; }
+
+static int rop_getkey(void)
+{
+    int key;
+    for (;;) {
+        key = g_api->kbd_trygetchar();
+        if (key <= 0) key = g_api->serial_trygetchar();
+        if (key > 0) return key;
+    }
+}
+
 /* ======== 文字列・パスユーティリティ ======== */
 
 static int str_len(const char *s) {
@@ -70,6 +107,11 @@ static void str_cat(char *dst, const char *src) {
 static void str_cpy(char *dst, const char *src) {
     while (*src) { *dst++ = *src++; }
     *dst = '\0';
+}
+
+static int str_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
 }
 
 static int str_endswith_ci(const char *s, const char *suffix) {
@@ -253,17 +295,40 @@ static int copy_directory(const char *src_dir, const char *dst_dir, int depth)
     return ok_count;
 }
 
+#include "install_recover.inc"
+
+static const RecoverOps recover_kapi_ops = {
+    rop_stat, rop_open, rop_read, rop_write, rop_close, rop_unlink,
+    rop_rename, rop_mount, rop_is_mounted, rop_sync,
+    rop_db_open_existing, rop_db_prepare_only, rop_db_step, rop_db_finalize,
+    rop_db_close, rop_db_error_code, rop_shm,
+    0,                    /* kprintf — main() で api から埋める */
+    rop_getkey
+};
+
 /* ======== メイン ======== */
 
-void __cdecl main(int argc, char **argv, KernelAPI *api)
+int __cdecl main(int argc, char **argv, KernelAPI *api)
 {
     static IdeInfoTemp info;
+    static RecoverOps rops;
     int ret, i;
     int loader_sects, kernel_sects;
 
+    g_api = api;
+
+    /* --- 回復モード (票 S3-I §1)。通常インストール経路には入らない --- */
+    if (argc >= 2 && argv && argv[1] &&
+        (str_eq(argv[1], "--recover-settings") ||
+         str_eq(argv[1], "--revert-settings"))) {
+        const char *drive = (argc >= 3 && argv[2]) ? argv[2] : "hd0";
+        rops = recover_kapi_ops;
+        rops.kprintf = api->kprintf;
+        return recover_settings_main(&rops, drive,
+                                     str_eq(argv[1], "--revert-settings"));
+    }
     (void)argc;
     (void)argv;
-    g_api = api;
 
     api->kprintf(ATTR_CYAN, "%s", "\n========================================\n");
     api->kprintf(ATTR_CYAN, "%s", "      OS32 HDD Installer v4.0        \n");
@@ -272,7 +337,7 @@ void __cdecl main(int argc, char **argv, KernelAPI *api)
     file_buf = (u8 *)api->mem_alloc(FILE_BUF_SIZE);
     if (!file_buf) {
         api->kprintf(0x4F, "%s", "Error: Out of memory\n");
-        return;
+        return 1;
     }
 
     /* IDEの初期化とディスク情報の取得 */
@@ -400,4 +465,5 @@ ioerr:
 
 end:
     api->mem_free(file_buf);
+    return 0;
 }
