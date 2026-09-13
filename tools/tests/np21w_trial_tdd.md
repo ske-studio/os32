@@ -191,3 +191,13 @@ RED→GREEN の実出力は [`s3i2_tdd.md`](s3i2_tdd.md) §T。実 ini・実プ�
 - `test_generated_ps_is_narrow_...` は **PowerShell のコード文字列の検査だけ**であり、
   `CheckFile` が Windows 上でディレクトリを実際に拒否することの実証ではない (未実施 [V4])。
 - ini CLI の絶対パス迂回の直し (名前だけ受ける) は [`s3i2_tdd.md`](s3i2_tdd.md) §T 往復 2。
+
+## 2026-09-14 追記 4 — 実走 (受入 F1) で判った start 段の過検査
+
+起動には成功していたのに `stage: start` で失敗していた。原因は 3 つ:
+exe の比較が start 段だけ大小文字を区別していた (CIM は実体の綴りを返す)、
+PowerShell が CIM の `CreationDate` (マイクロ秒) と `Process.StartTime` (100ns) の
+文字列一致を要求していた、そして失敗理由と起動した PID が結果に残らなかった。
+`identity_mismatch()` (Python) と `$mismatch` / `$code` / `$startedPid` (PowerShell) に直し、
+起動後の失敗では `process` か `started_pid` を結果 JSON に残す。停止・復旧はしない。
+詳細と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) の実走 F1 の節。PowerShell は未実行 [V4]。

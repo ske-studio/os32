@@ -347,6 +347,106 @@ class TrialTests(Images):
             if op == 'query':
                 self.assertNotIn('close', t.calls)
 
+
+    def test_launch_command_matches_the_observed_cim_command_line(self):
+        """受入 F1 で Win32_Process の CommandLine に実際に現れた形を固定する:
+        各引数が二重引用符、区切りは 1 個の空白、ini は `/i` の直後に連結。"""
+        p = plan()
+        self.assertEqual(trial.launch_command(p),
+                         '"' + EXE + '" "/i' + p['trial'] + '" "' + CWD + '\\' + D88 + '"')
+        bare = plan(fdd_arg=None)
+        self.assertEqual(trial.launch_command(bare), '"' + EXE + '" "/i' + bare['trial'] + '"')
+        for command, quotes in ((trial.launch_command(p), 6), (trial.launch_command(bare), 4)):
+            self.assertNotIn('  ', command)
+            self.assertNotIn('" "/i ', command)
+            self.assertEqual(command.count('"'), quotes)
+
+    def test_started_identity_tolerates_cim_precision_and_exe_case(self):
+        """CIM の CreationDate は 7 桁目が 0 のマイクロ秒 (`.7896090Z`)。
+        Python 側は created を「古い行と違うこと」だけで見る。exe は大小文字を
+        無視する (CIM は実体の綴りを返す)。"""
+        p = plan()
+        cim = '2026-09-14T09:15:42.7896090Z'
+        started = dict(pid=43, created=cim, exe=EXE.upper(),
+                       command=trial.launch_command(p))
+        old = dict(pid=42, created=CREATED, exe=EXE, command='"' + EXE + '"')
+        self.assertEqual(trial.identity_mismatch(started, old, p), [])
+        self.assertEqual(trial._identity(dict(started)), started)
+
+    def test_started_identity_names_what_disagrees(self):
+        p = plan()
+        old = dict(pid=42, created=CREATED, exe=EXE, command='"' + EXE + '"')
+        good = dict(pid=43, created='2026-09-14T09:15:42.7896090Z', exe=EXE,
+                    command=trial.launch_command(p))
+        cases = [(dict(good, command='"' + EXE + '" "' + p['trial'] + '"'), ['command']),
+                 (dict(good, command=trial.launch_command(p) + ' extra'), ['command']),
+                 (dict(good, exe=r'C:\Other\np21x64w.exe'), ['exe']),
+                 (dict(good, created=CREATED), ['created']),
+                 (dict(good, created=CREATED, exe=r'C:\Other\np21x64w.exe'), ['created', 'exe'])]
+        for started, expected in cases:
+            with self.subTest(started=started['command'][-24:]):
+                self.assertEqual(trial.identity_mismatch(started, old, p), expected)
+
+    def test_start_failure_keeps_the_started_process_in_the_result(self):
+        p, t, gate = self.run_bound()
+        exchange = t.exchange
+        def corrupt(request):
+            response = exchange(request)
+            if request['op'] == 'start':
+                response['value']['command'] = '"' + EXE + '" "' + p['trial'] + '"'
+            return response
+        t.exchange = corrupt
+        result = gate(json.dumps(p))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['stage'], 'start')
+        self.assertEqual(result['process']['pid'], 43)      # 起動した対象が残る
+        self.assertIn('identity mismatch: command', result['reason'])
+        self.assertIn('no automatic recovery', result['reason'])
+
+    def test_executor_rejection_reports_its_code_and_started_pid(self):
+        class Rejecting(Transport):
+            def exchange(self, request):
+                if request['op'] == 'start':
+                    self.calls.append('start')
+                    return {'ok': False, 'code': 'identity mismatch: created',
+                            'pid': 4321}
+                return Transport.exchange(self, request)
+        p = plan()
+        t = Rejecting(p)
+        gate = trial.bind_trial(p, lambda bound: trial.WindowsExecutor(bound, t),
+                                authorized=True, exclusive=True)
+        result = gate(json.dumps(p))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['stage'], 'start')
+        self.assertEqual(result['started_pid'], 4321)
+        self.assertIn('executor: identity mismatch: created', result['reason'])
+        self.assertNotIn('process', result)
+
+    def test_rejection_details_are_a_fixed_vocabulary(self):
+        """executor から届く自由文・巨大な値・偽の PID は理由に出さない。"""
+        for code, pid in [('C:\\secret\\path.ini', 7), ('x' * 200, 7), (None, 7),
+                          ('identity mismatch: command', 'many'),
+                          ('identity mismatch: command', True),
+                          ('identity mismatch: command', -1), (123, 0)]:
+            class Rejecting(Transport):
+                def exchange(self, request):
+                    if request['op'] == 'start':
+                        self.calls.append('start')
+                        return {'ok': False, 'code': code, 'pid': pid}
+                    return Transport.exchange(self, request)
+            p = plan()
+            t = Rejecting(p)
+            gate = trial.bind_trial(p, lambda bound: trial.WindowsExecutor(bound, t),
+                                    authorized=True, exclusive=True)
+            result = gate(json.dumps(p))
+            with self.subTest(code=code, pid=pid):
+                self.assertFalse(result['ok'])
+                text = json.dumps(result)
+                self.assertNotIn('secret', text)
+                self.assertNotIn('x' * 80, text)
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    self.assertNotIn('started_pid', result)
+
     def test_cli_execute_llm_gate_and_no_model_mutation(self):
         args = ['--exe', EXE, '--baseline', BASE, '--cwd', CWD, '--pid', '42', '--created', CREATED,
                 '--hdd', HDD, '--fdd-eject', '--execute', '--exclusive-operator']
@@ -378,6 +478,15 @@ class TrialTests(Images):
                          "CheckFile $plan.hdd_path",
                          "if ($plan.fdd_arg) {",
                          "CheckFile $plan.fdd_arg",
+                         # created は 2 秒の許容、exe は大小文字を無視、
+                         # command だけ -cne (自分が渡した文字列なので)。
+                         "$rowUtc = [DateTime]::Parse($rows[0].created",
+                         "TotalSeconds) -gt 2",
+                         "$rows[0].exe -ine $plan.exe",
+                         "$code = 'identity mismatch: ' + ($mismatch -join ',')",
+                         "$startedPid = $p.Id",
+                         "if ($code) { $failure.code = $code }",
+                         "if ($startedPid) { $failure.pid = $startedPid }",
                          "$arguments = $arguments + ' \"' + $plan.fdd_arg + '\"'",
                          "$rows[0].command -cne ('\"' + $plan.exe + '\" ' + $arguments)"]:
             self.assertIn(required, ps)

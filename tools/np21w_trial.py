@@ -55,6 +55,32 @@ def transform_trial(raw, changes):
     return candidate, diff
 
 
+# 失敗理由に出してよい語彙 (固定語・記号のみ)。生の例外文・パス・ini 本文は
+# 通さない。IniError の文言はこのモジュール内の固定リテラルだけ。
+REASON_CODE = re.compile(r'[a-z][a-z0-9 ,:_-]{0,63}')
+
+
+def _reason_detail(exc):
+    for value in (getattr(exc, 'code', None),
+                  str(exc) if isinstance(exc, IniError) else None):
+        if type(value) is str and REASON_CODE.fullmatch(value):
+            return value
+    return None
+
+
+def _rejected(response):
+    """executor の失敗応答から、固定語彙の理由と起動 PID **だけ**を取り出す。"""
+    error = IniError('trial executor rejected operation')
+    if type(response) is dict:
+        code = response.get('code')
+        if type(code) is str and REASON_CODE.fullmatch(code):
+            error.code = 'executor: ' + code
+        pid = response.get('pid')
+        if type(pid) is int and type(pid) is not bool and 0 < pid <= live.PROCESS_ID_MAX:
+            error.started_pid = pid
+    return error
+
+
 def _identity(row):
     if (type(row) is not dict or set(row) != {'pid', 'created', 'exe', 'command'} or
             type(row['pid']) is not int or not 0 < row['pid'] <= live.PROCESS_ID_MAX or
@@ -68,11 +94,37 @@ def _identity(row):
 
 def launch_command(plan):
     """`exe + /i<trial ini> [+ <d88>]`。np2arg.cpp Np2Arg::Parse は `/i` の直後を
-    ini 名として読み、拡張子で判る `.d88` はディスクとして装着する。"""
+    ini 名として読み、拡張子で判る `.d88` はディスクとして装着する。
+
+    Win32_Process の CommandLine と**バイト単位で**突き合わせる文字列。実走
+    (受入 F1) で観測した実物と同じ形: 各引数が二重引用符、区切りは 1 個の空白
+    (.NET の BuildCommandLine が `"<FileName>" ` + Arguments を組む)。
+    """
     command = '"' + plan['exe'] + '" "/i' + plan['trial'] + '"'
     if plan['fdd_arg']:
         command += ' "' + plan['fdd_arg'] + '"'
     return command
+
+
+def identity_mismatch(started, old, plan):
+    """起動した行が「承認した計画で起動した新しいプロセス」かを見る。
+
+    exe は Windows のパスなので **大小文字を無視** (`path_key`) して比べる。
+    CIM の `ExecutablePath` は実体の綴りで返り、操作者が渡した綴りと一致すると
+    は限らない (close 前の照合は最初から path_key を使っていた)。
+    `created` は「古い行と違うこと」だけを要求する — CIM の `CreationDate` は
+    マイクロ秒までしか持たず (`.7896090Z` のように 7 桁目が 0)、.NET の
+    `Process.StartTime` の 100ns 精度とは最後の桁が食い違うため、両者の
+    文字列一致は要求できない (実走 F1 の start 段の失敗)。
+    """
+    reasons = []
+    if started['created'] == old['created']:
+        reasons.append('created')
+    if live.path_key(started['exe']) != live.path_key(plan['exe']):
+        reasons.append('exe')
+    if started['command'] != launch_command(plan):
+        reasons.append('command')
+    return reasons
 
 
 PLAN_FIELDS = ('exe', 'baseline', 'cwd', 'pid', 'created', 'hdd', 'hdd_host',
@@ -223,17 +275,26 @@ def _run(plan, factory):
             absent()
             call('verify', expected=before, data=candidate)
             started = _identity(call('start', expected=before, data=candidate))
-            command = launch_command(plan)
-            if (started['created'] == old['created'] or started['exe'] != plan['exe'] or
-                    started['command'] != command):
-                raise IniError('new process identity mismatch')
+            # 起動してしまった以上、以後の失敗でもこの行を結果に残す (自動の
+            # 停止・復旧はしないので、操作者が対象を特定できる必要がある)。
+            result['process'] = started
+            mismatch = identity_mismatch(started, old, plan)
+            if mismatch:
+                raise IniError('identity mismatch: ' + ','.join(mismatch))
             if rows() != [started] or rows() != [started]:
                 raise IniError('new process identity unstable')
-            result.update(process=started, stage='dispose')
+            result['stage'] = 'dispose'
         result.update(ok=True, stage='verified')
-    except Exception:
+    except Exception as exc:
         # No raw transport/model/ini text; path and completed stages are evidence.
         result['reason'] = 'trial failed; inspect recorded stage and process state; no automatic recovery'
+        detail = _reason_detail(exc)
+        if detail:
+            result['reason'] += '; ' + detail
+        started_pid = getattr(exc, 'started_pid', None)
+        if type(started_pid) is int and 'process' not in result:
+            # executor 側で identity 検査に落ちたときも、起動した PID は残す。
+            result['started_pid'] = started_pid
     return result
 
 
@@ -252,6 +313,8 @@ function VerifyTrial($a) {
 try {
  while ($null -ne ($line = [Console]::ReadLine())) {
   try {
+   $code = $null
+   $startedPid = $null
    $request = $line | ConvertFrom-Json -ErrorAction Stop
    $serialized = $request.target | ConvertTo-Json -Depth 20 -Compress
    if (!$plan) {
@@ -316,12 +379,25 @@ try {
      $p = [Diagnostics.Process]::Start($si)
      try {
       $handle = $p.Handle
-      if ($p.WaitForExit(1000)) { throw 'started process exited' }
+      $startedPid = $p.Id
+      if ($p.WaitForExit(1000)) { $code = 'started process exited'; throw 'started process exited' }
       $rows = @(Query)
-      if ($rows.Count -ne 1 -or $rows[0].pid -ne $p.Id -or
-          $rows[0].created -cne $p.StartTime.ToUniversalTime().ToString('o') -or
-          $rows[0].exe -cne $plan.exe -or
-          $rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)) {
+      # PID はハンドルを握っている間は再利用されないので、これが同一性の要。
+      # created は CIM (マイクロ秒) と Process.StartTime (100ns) で最後の桁が
+      # 食い違うため、文字列一致ではなく 2 秒の許容で見る。exe は Windows の
+      # パスなので大小文字を無視する (CIM は実体の綴りを返す)。
+      $mismatch = @()
+      if ($rows.Count -ne 1) { $mismatch += 'rows' }
+      elseif ($rows[0].pid -ne $startedPid) { $mismatch += 'pid' }
+      else {
+       $rowUtc = [DateTime]::Parse($rows[0].created, [Globalization.CultureInfo]::InvariantCulture,
+                                   [Globalization.DateTimeStyles]::RoundtripKind)
+       if ([Math]::Abs(($rowUtc - $p.StartTime.ToUniversalTime()).TotalSeconds) -gt 2) { $mismatch += 'created' }
+       if ($rows[0].exe -ine $plan.exe) { $mismatch += 'exe' }
+       if ($rows[0].command -cne ('"' + $plan.exe + '" ' + $arguments)) { $mismatch += 'command' }
+      }
+      if ($mismatch.Count) {
+       $code = 'identity mismatch: ' + ($mismatch -join ',')
        throw 'new identity mismatch'
       }
       $value = $rows[0]
@@ -331,7 +407,11 @@ try {
    }
    @{ok=$true; value=$value} | ConvertTo-Json -Depth 24 -Compress | ForEach-Object { [Console]::WriteLine($_) }
   } catch {
-   [Console]::WriteLine('{"ok":false}')
+   # 生の例外文は返さない。固定語彙の $code と、起動してしまった PID だけ。
+   $failure = @{ok=$false}
+   if ($code) { $failure.code = $code }
+   if ($startedPid) { $failure.pid = $startedPid }
+   [Console]::WriteLine(($failure | ConvertTo-Json -Compress))
    break
   }
  }
@@ -375,8 +455,10 @@ class WindowsExecutor:
             raise IniError('unknown trial operation')
         try:
             response = self.transport.exchange(dict(op=op, target=self.plan, args=live.wire(args)))
-            if (type(response) is not dict or set(response) != {'ok', 'value'} or response['ok'] is not True):
-                raise IniError('trial executor rejected operation')
+            if type(response) is not dict or response.get('ok') is not True:
+                raise _rejected(response)
+            if set(response) != {'ok', 'value'}:
+                raise IniError('invalid trial executor response')
             value = live.wire(response['value'], decode=True)
             if op == 'snapshot':
                 live.checked_snapshot(value)
@@ -390,6 +472,9 @@ class WindowsExecutor:
             elif value is not True:
                 raise IniError('unconfirmed trial operation')
             return value
+        except IniError:
+            # 既に content-free な診断 (拒否理由 / 起動 PID を含む) なのでそのまま。
+            raise
         except (ValueError, TypeError, KeyError, AttributeError):
             raise IniError('invalid trial executor response') from None
 

@@ -326,3 +326,39 @@ dry-run では計画に `hdd_host` / `hdd_path` / `fdd_arg_host` が載り exit 
 - `_path_value()` の説明にも「ここは純粋な構文検査で、ホスト側の存在は resolve_image が見る」を追記。
 
 実 ini・実プロセス・実 NP21/W は引き続き未検証 ([V4])。
+
+## §T 実走 F1 の start 段失敗 (2026-09-14)
+
+受入 F1 (ユーザー承認済みの実走) で、trial は lock → preflight → query → close (通常終了) →
+snapshot → create → verify を終え、**NP21/W の起動にも成功した** (Win32_Process の CommandLine は
+`"…\np21x64w.exe" "/i…\np21w-trial-b659….ini" "…\os32_boot.d88"` = `launch_command()` と同形、
+ゲストは FDD ブートで `/hd0` 未マウント) のに、ツールは `{"ok": false, "stage": "start"}` を
+返した。start 段の identity 検査が厳しすぎた。
+
+| 原因 | 直し |
+|---|---|
+| **exe の大小文字**: CIM の `ExecutablePath` は実体の綴りで返るが、start 段だけ `!=` / `-cne` の**大小文字を区別する比較**だった (close 前の照合は最初から `path_key()` = 小文字化していたので、そこは通っていた) | Python は `live.path_key()` で比較、PowerShell は `-ine` |
+| **created の精度**: PowerShell 側は CIM の `CreationDate` (マイクロ秒まで。`.7896090Z` のように 7 桁目が 0) と `Process.StartTime` (100ns) の**文字列一致**を要求していた | `[DateTime]::Parse(..., RoundtripKind)` で解析し **2 秒の許容**で比較。同一性の要は握ったハンドルの PID (再利用され得ない)。Python 側は「古い行と違うこと」だけを見る |
+| **理由が判らない**: 失敗は常に同じ一文で、起動した PID も結果に残らなかった | Python は `identity_mismatch()` が食い違った項目名 (`created` / `exe` / `command`) を返し `reason` に付く。PowerShell は `rows` / `pid` / `created` / `exe` / `command` から `$code = 'identity mismatch: …'` を作り、`@{ok=$false; code=…; pid=$startedPid}` で返す (生の例外文は返さない)。Python 側は固定語彙 `REASON_CODE` に合う文字列と妥当な PID だけを受け取り、`result['process']` (起動した行) か `result['started_pid']` を残す |
+
+自動の停止・復旧・再試行は**入れていない** (no automatic recovery は維持)。
+
+### 反例 → 直し (ホストで踏んだ)
+
+`/tmp/.../scratchpad/start_counterexample.py` — 実走で観測した行 (CommandLine は一致、
+`created` は CIM の 7 桁、`exe` は綴り違い) を贋 transport で返す:
+
+| | 着地版 (`9de8f0f`) | 直し後 |
+|---|---|---|
+| exe が承認どおりの綴り | `ok=True stage=verified` | 同左 |
+| exe が CIM の綴り (大文字) | **`ok=False stage=start`**、理由は一般文、`process` 無し | `ok=True stage=verified process=43` |
+
+| 段階 | 実出力 | 内容 |
+|---|---|---|
+| RED | `test_np21w_trial.py`: `Ran 27 tests` / `FAILED (failures=1, errors=8, skipped=1)` | 着地版に新試験 (CIM の command 形、created 7 桁 + exe 綴り違いの許容、食い違い項目名、start 失敗時の `process` 保持、executor の `code` / `pid`、PS 文字列) |
+| GREEN | `discover -p 'test_np21w*.py'` → `Ran 131 tests` / `OK (skipped=2)` | trial 27 (+6)、ini 49、transport 8。`test_mk_blank_nhd.py` 13 OK |
+
+### 未実施 ([V4])
+
+PowerShell は**走らせていない**。`$rowUtc` の解析、`-ine`、`@{ok=$false; code; pid}` の実動作は
+**生成コード文字列の検査だけ**で、Windows 上での実証は次の実走 (受入 F1 の再実行) が要る。
