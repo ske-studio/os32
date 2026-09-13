@@ -1,6 +1,6 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import`
 
-状態: **設計 第 3 版 (往復 2 の 7 件を反映: 退避と復帰を rename ではなく「コピー + 検証」に組み替え、元の対は最後の切替まで触らない。往復 3/3 = 最終待ち)**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
+状態: **設計 第 4 版 (往復 3 の 5 件を反映。3 往復で Approve に至らず → ユーザー決裁: 追加 1 往復か第 4 版で実装か)**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
 正典: [DESIGN.md](DESIGN.md) §2 (初期値はインストーラだけが持つ、リカバリモード) / §6b (JSON バックアップと `cfg import`)、[S0_FOUNDATION.md](S0_FOUNDATION.md) §6 (**明示リカバリ契約**: 自動分岐なし、表示と承認、元 DB と journal を対で保存、別名へ完全コピー → 検証 → 切替、失敗で元を消さない、原子性は backend で確認できなければ名乗らない、system.cfg 等は触らない、復元後に schema / sync / reopen を記録)、[TASK_S2.md](TASK_S2.md) §1 (規則) / §2 (`cfg export` の JSON 形、import は S3)、[TASK_S0.md](TASK_S0.md) (配備保護: `settings.db*` を通常配備が触らない)。
 規約: [C1] C89、コーダーは worktree + ホスト TDD のみ、[D2] (使い捨てイメージ / ini) はユーザー承認。
 
@@ -10,6 +10,7 @@
 |---|---|---|---|
 | **S3-I** | `userland/system/install.c` に **`--recover-settings [drive]`** と **`--revert-settings [drive]`** (§1)。要求 KAPI 7 → **50** (db_* v50 を使う)。通常インストール経路は不変 — ただし TASK_S0 §3 が S3 に送った前提不整合 (`install` が `/kernel.bin` を必須とするが FDD は `/VMKRNL.LZ4` + `/boot` を収録 → FDD からの新規インストールが `/etc` コピーまで到達しない) を**別の残ゲート S3-I2 として §7 に明記** (本票では直さない、ユーザー決裁) | C (system) | `userland/system/install.c` (+ `install_recover.inc` に分ける)、`tools/tests/install_recover_host.c` / `test_install_recover.py` / `s3_tdd.md` |
 | **S3-C** | `cfg import <file> [--scope <scope>] [--merge]` (§2)。`libos32cfg` に最小 JSON reader (`cfg_json.c`) と `cfg_import_*` API、`cfg.c` のサブコマンド。`cfg export` は不変 | C | `userland/lib/cfg/{cfg_json.c, libos32cfg.h (追記のみ), cfg_import.c}`、`userland/cmds/cfg.c`、`tools/tests/cfg_host.c` / `test_cfg.py` / `s3_tdd.md` §C |
+| **S3-D** | 配備保護に回復ファイルの名前を追加 (往復 3 の B5): `tools/deploy_protect.py` の `PROTECTED_BASENAMES` と `userland/system/hsync_protect.inc` の名前規則に `settings.db.bak` / `.bak-journal` / `.failed` / `.failed-journal` / `.new` / `.new-journal` / `.recover-state` を足し、通常同期の前後で対と印が不変であることをホスト試験 (`test_deploy_protect.py` / `hsync_protect_host.c`) に追加 | ツール | `tools/deploy_protect.py`、`userland/system/hsync_protect.inc`、`tools/tests/` |
 | PM | `build/app.conf` (install 50)、`build/image.mk` (FDD に `install.bin` は既に載る。`cfg.bin` を **FDD_MIN_CMDS に足す**: リカバリ後の `cfg status` 確認用)、`userland/deploy.yaml` 確認、受入 (§4、FDD ブートは NP21/W の起動引数 = ini 変更なし) | PM / テスター | — |
 
 S3 に**含めない**: `--from <json|tar.lz4>` (**FDD の `cfg` は FDD 自身の `/etc/settings.db` を見るので HDD の復元には使えない**、往復 1 の B11。JSON からの復元の正式手順は「FDD で `--recover-settings` (マスタ復元) → HDD で再起動 → 通常の `cfg import`」= §2 の受入 C6)、S6 `tar`、F3a-c、自動バックアップ、通常インストールの `/kernel.bin` 不整合 (S3-I2、§7)。
@@ -25,10 +26,11 @@ S3 に**含めない**: `--from <json|tar.lz4>` (**FDD の `cfg` は FDD 自身�
 - DB の利用者: FDD ブートでは gshell も FEP も起動しておらず、`install` 以外に接続は無い (FOUNDATION §6-1 は起動媒体の規則で満たす)。
 
 ### 1b. 名前の集合と事前検査 (往復 1 の B2 / B3、往復 2 の R4)
-対象 `/hd0/etc/` の **10 名**: `settings.db`、`settings.db-journal`、`settings.db.bak`、`settings.db.bak-journal`、`settings.db.new`、`settings.db.new-journal`、`settings.db.failed`、`settings.db.failed-journal`、`settings.db.recover-state` (§1f の印)、`settings.db.recover-state.tmp`。承認前に**全部** `sys_stat` して三値 (PRESENT / ABSENT / UNKNOWN)。
+対象 `/hd0/etc/` の **9 名**: `settings.db`、`settings.db-journal`、`settings.db.bak`、`settings.db.bak-journal`、`settings.db.new`、`settings.db.new-journal`、`settings.db.failed`、`settings.db.failed-journal`、`settings.db.recover-state` (印、§1e。**rename を使わず直接書く**、往復 3 の B1)。承認前に**全部** `sys_stat` して三値 (PRESENT / ABSENT / UNKNOWN)。
 - UNKNOWN が 1 つでもあれば `stat failed (<name>)` で終了 1。
 - **同一性**: PRESENT 同士で `(st_dev, st_ino)` が一致する組があれば `ambiguous: <a> and <b> share an inode - needs manual recovery` で終了 1 (何も消さない・書かない)。`st_ino == 0` は判定不能で終了 1。
-- **`.new` / `.new-journal` / `.recover-state.tmp` が PRESENT** なら `stale <name> present - inspect and remove manually` で終了 1 (他人の生成物は消さない)。**例外**: `--revert-settings` は `.new*` が残っていても進む (§1g、往復 2 の R2 — `.new` は元の対とは別 inode なので触らずに復帰できる)。
+- **印の phase による門** (往復 3 の B2 / B4): 印が PRESENT なら読み、`phase=backup` (前回の回復が退避の後で止まった) か `phase=failed` (破壊段の後で自動復帰も失敗) なら **recover は進まない** (`previous recovery incomplete - run install --revert-settings hd0 first`)。`phase=done` (前回成功) か印無しなら通常 (1 世代置換)。印が読めない / 壊れている → `recover-state unreadable - needs manual recovery` で停止。
+- **`.new` / `.new-journal` が PRESENT** なら `stale <name> present - inspect and remove manually` で終了 1 (他人の生成物は消さない)。**例外**: `--revert-settings` は `.new*` が残っていても進む (§1g、往復 2 の R2 — `.new` は元の対とは別 inode なので触らずに復帰できる)。
 - 表示 (承認前): マスタの版と件数、本体 `present <size> B` / `missing`、journal (`hot journal present - will be backed up as .bak-journal and removed before switch`)、旧 `.bak*` / `.failed*` (`will replace`)、`.recover-state` の内容 (前回の記録があれば)。
 
 ### 1c. マスタの検査 (往復 1 の B5)
@@ -40,23 +42,24 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 ### 1e. 退避 (コピー、元は不変) (往復 1 の B4、往復 2 の R1 / R3)
 1. 旧 `.bak` / `.bak-journal` が PRESENT なら unlink (承認済み 1 世代。1b で他の名前と inode を共有しないことを確認済み)。失敗は `cannot remove old backup` で終了 1 (元は無傷)。
 2. 本体 PRESENT なら **コピー** `settings.db → settings.db.bak` (O_CREAT | O_TRUNC、16KB、read の負は失敗 (現行 `copy_file` は負を EOF 扱いにするので回復専用の `rcopy_file` を書く)、short write は失敗) → **バイト比較**で一致を確認。journal PRESENT なら同様に `-journal → .bak-journal`。失敗: 今回作った `.bak*` を unlink して終了 1 (**元の対は無傷**)。
-3. **印**: `settings.db.recover-state.tmp` に元の状態 (`orig=present|missing journal=present|absent size=<n>`) を書き、rename で `settings.db.recover-state` に (この印は §1g の復帰が「元は欠損だった」を知る根拠。往復 2 の R3)。rename 失敗は両名検査 → 両方あれば `.tmp` 側を unlink して続行 (印は本体の値だけあればよい)、無ければ終了 1。
+3. **印**: 旧 `settings.db.recover-state` が PRESENT なら unlink (1b の同一性検査済み、`phase=done` のものだけがここへ来る)。`settings.db.recover-state` を **直接** (O_CREAT | O_TRUNC、rename しない) 1 行 `phase=backup orig=present|missing journal=present|absent size=<n>` で書き、**読み戻して一致**を確認 (往復 3 の B1: rename の両名問題を持ち込まない)。書けない / 一致しない → 今回作った `.bak*` と印を unlink して終了 1 (元の対は無傷)。印の phase はこの後 `switched` (手順 6 の後) → `done` (手順 7 の後) と**同じ方法 (上書き + 読み戻し)** で更新する。更新に失敗したら終了 1 (状態は印の phase が示す = 次回は門で止まり revert へ)。
 
 ### 1f. コピー・検証・切替 (往復 1 の B3 / B5 / B6)
-4. マスタを `settings.db.new` へ `rcopy_file` → (i) 長さ一致、(ii) **バイト比較**、(iii) `db_open_existing(".new", 0)` → meta + 全行走査で 1c の件数・集計と一致 → close。失敗 (close 失敗以外): `.new` を unlink → 終了 1 (元の対は無傷、`.bak*` と印は残してよい = 次回は 1 世代置換)。**close の失敗**: `.new` を消さず `verify close failed (<code>) - settings.db.new kept; original untouched` で終了 1 (元の対は無傷なので**復帰は不要**。次回の recover は `.new` 残骸で停止するので、利用者が回復シェルで `rm` してから再実行。往復 2 の R2 はこれで解消 = revert を案内しない)。
-5. **journal の除去**: 元の journal が PRESENT なら (2 で `.bak-journal` にバイト一致の写しがある) `settings.db-journal` を unlink (切替後にマスタへ旧 journal が適用されるのを防ぐ)。失敗は `cannot remove hot journal` で終了 1 (`.new` を unlink、元の対は無傷)。
-6. **切替**: `sys_rename(.new → settings.db)`。両名検査: 両方 PRESENT → `needs manual recovery: settings.db and settings.db.new both present` (消さない、終了 1。**元の内容は `.bak` に**、journal は `.bak-journal` に、印にも状態がある)。`settings.db` だけ → 成功。`.new` だけ (rename が新名を作れなかった) → `.new` を unlink し、5 で journal を消していたら `.bak-journal → settings.db-journal` を**コピー**で戻す → 終了 1。stat UNKNOWN → 消さず `needs manual recovery`。**「原子的復元」とは名乗らない**。
-7. **記録**: `vfs_sync()` の戻り値、`db_open_existing("/hd0/etc/settings.db", 0)` で reopen → 1c と同じ検査 → close。`recovered: schema_version <n>, <k> keys, sync=<rc>, reopen=<ok|code>, close=<ok|code>` を表示。どれかが失敗なら終了 1 で自動では戻さず、`to revert: install --revert-settings hd0` を案内 (§1g)。
+4. マスタを `settings.db.new` へ `rcopy_file` → (i) 長さ一致、(ii) **バイト比較**、(iii) `db_open_existing(".new", 0)` → meta + 全行走査で 1c の件数・集計と一致 → close。失敗 (close 失敗以外): `.new` を unlink → 終了 1 (元の対は無傷、`.bak*` と印は残してよい = 次回は 1 世代置換)。**close の失敗** (接続が隔離され、owner 終了でも回収されない — `kapi_db.c:501`): `.new` を消さず `verify close failed (<code>) - settings.db.new kept; original untouched. REBOOT from the floppy, then rm /hd0/etc/settings.db.new and retry` で終了 1。**再起動を明示の前提**にする (往復 3 の B4: 同じ起動のまま `rm` すると隔離接続が掴む inode を消す。ユーザーランドから隔離接続の有無は検出できないので手順と試験 (文言) で担保し、票の限界として明記)。印は `phase=backup` のまま = 次回 recover は門で止まる → 再起動 → `--revert-settings` (元は無傷なので実質 no-op: `.bak` の内容を本体へ写すだけ) か、印を確認して `rm .new` → recover。
+5. **破壊段の開始 = journal の除去** (ここから先は「元の対は不変」ではなく「元の対は `.bak*` に写しがあり、印が phase を持つ」が保証): 元の journal が PRESENT なら (2 で `.bak-journal` にバイト一致の写しがある) `settings.db-journal` を unlink。失敗は `cannot remove hot journal` で終了 1 (`.new` を unlink、元の対は無傷、印は `phase=backup` のまま = 次回は門 → revert が journal を写しから戻す)。
+6. **切替**: 印を `phase=switching` に更新 → `sys_rename(.new → settings.db)`。両名検査: 両方 PRESENT → `needs manual recovery: settings.db and settings.db.new both present` (消さない、終了 1。**元の内容は `.bak` に**、journal は `.bak-journal` に、印にも状態がある)。`settings.db` だけ → 成功。`.new` だけ → **ext2 の rename は置換先の unlink の後で新名追加に失敗しうる** (往復 3 の B2) ので「旧本体が残っている」と仮定しない: 印の `orig=present` なら `.bak → settings.db` を**コピー + バイト比較**で戻し、`journal=present` なら `.bak-journal → settings.db-journal` も戻す (`.new` は unlink)。どちらかの復元に失敗したら印を `phase=failed` に更新して `restore failed - run install --revert-settings hd0 after reboot` で終了 1 (退避対は保護、次回 recover は門で止まる = 世代置換に流れない)。stat UNKNOWN → 消さず `needs manual recovery`。**「原子的復元」とは名乗らない**。
+7. **記録**: 印を `phase=switched` に更新 → `vfs_sync()` の戻り値、`db_open_existing("/hd0/etc/settings.db", 0)` で reopen → 1c と同じ検査 → close。`recovered: schema_version <n>, <k> keys, sync=<rc>, reopen=<ok|code>, close=<ok|code>` を表示。すべて成功なら印を `phase=done` に。どれかが失敗なら終了 1 で自動では戻さず、`REBOOT from the floppy, then: install --revert-settings hd0` を案内 (§1g。reopen の close 失敗は接続が隔離されるので再起動が前提、往復 3 の B4)。
 8. `system.cfg` / `profile` / boot 領域 / `.bak*` / 印 (成功後も残す。次回 recover で 1 世代置換) には触らない (FOUNDATION §6-4)。
 
 ### 1g. `install --revert-settings [drive]` (往復 1 の B6、往復 2 の R2 / R3 / R4 / R5)
 1a / 1b の検査 (`.new*` 残骸では**停止しない**、`.failed*` も同一性検査に含む) → 印 `settings.db.recover-state` を読む (無ければ `nothing to revert (no recover-state)` で終了 1) → 表示 (`current db(+journal) -> settings.db.failed(+.failed-journal), then restore: orig=<present|missing> journal=<present|absent>`) → 承認 → 
+0. **前提検査** (往復 3 の B3): 印を読み、`orig=present` なら `.bak` が PRESENT、`journal=present` なら `.bak-journal` が PRESENT であることを確認 (無ければ `backup missing (<name>) - needs manual recovery` で終了 1、何も触らない)。現在の本体・journal は PRESENT / ABSENT で分岐 (**欠損なら写す段を省く**)。
 1. 旧 `.failed*` が PRESENT なら unlink (承認済み 1 世代)。
-2. **現在の対を退避 (コピー)**: `settings.db → .failed`、`settings.db-journal` があれば `→ .failed-journal`、バイト比較。失敗は今回作った `.failed*` を unlink して終了 1 (現在の対は無傷)。
+2. **現在の対を退避 (コピー)**: 本体が PRESENT なら `settings.db → .failed`、journal が PRESENT なら `→ .failed-journal`、バイト比較。失敗は今回作った `.failed*` を unlink して終了 1 (現在の対は無傷)。
 3. 現在の journal が PRESENT なら unlink (2 で写しがある。旧 DB に新世代の journal を付けない、往復 2 の R5)。
 4. 印が `orig=present`: `.bak → settings.db` を**その場コピー** (O_TRUNC で上書き、rename しない) → バイト比較。`journal=present` なら `.bak-journal → settings.db-journal` をコピー → バイト比較。コピー失敗は `restore failed at <name> - current copy is in settings.db.failed` で終了 1 (両方の写しが残っているので手動復旧可能。**対を分離したままにしない**ため、journal のコピーに失敗したら `settings.db-journal` を unlink して「DB だけ・journal 無し」で止めず、`.bak-journal` の存在を表示して手動へ)。
 5. 印が `orig=missing`: `settings.db` を unlink (2 で `.failed` に写しがある)、`journal=present` (孤立 journal だった) なら `.bak-journal → settings.db-journal` をコピー。元の欠損状態に戻す (往復 2 の R3、FOUNDATION §6-2)。
-6. `vfs_sync` → 表示 `reverted: orig=<…>, sync=<rc>`。印は残す (再 revert は「現在 = 復帰済み」を再び `.failed` に写すだけで害はない)。
+6. `vfs_sync` → 印を `phase=done` に更新 (復帰済み = 次の recover は通常に進める) → 表示 `reverted: orig=<…>, sync=<rc>`。再 revert は 0 の分岐で「本体 ABSENT」も扱えるので害はない (往復 3 の B3)。close 失敗 (手順 4 のバイト比較で DB は開かないので、revert に SQLite の close は無い) は起きない。
 
 ### 1h. ホスト TDD (`install_recover_host.c`)
 `install_recover.inc` を `#include` し、KAPI 表を贋物 (RAM backend: stat 三値と UNKNOWN 注入、`st_ino` 共有の注入、`st_dev` の復号 (種別 / unit)、rename の「新名追加成功・旧名削除失敗」注入、open / read (負) / write (short) / unlink / sync 失敗、db close 失敗) に差し替え、1a〜1g の**各段の各失敗**で「元の対が 1 バイトも変わらない (切替前)」「欠損は欠損のまま」「自分が作ったファイルだけ消える」「両名残存で消さず停止」「journal が別世代と混ざらない」を固定。**連鎖**: 失敗 → 再実行 (1b の検査で停止 / 1 世代置換で進む) / recover 成功 → revert → 再 recover / revert 途中失敗 → 再 revert / `.new` close 失敗 → 次回 recover 停止 → `rm` 後に成功、を試験 (往復 2 の R1〜R5)。実 SQLite の検査部は実 kapi_db.c に通す。
@@ -90,7 +93,7 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | I3 | DB 欠損 (`rm`) → FDD ブート → recover | `missing` 表示 → `Y` → 復元。`.bak` は作られない。派生: 欠損 + 孤立 journal → journal が `.bak-journal` へ (対の一部)、欠損 + 旧 `.bak` → 旧 `.bak` は消える (承認済み)、欠損 + `.new` 残骸 → `stale settings.db.new present` で停止 |
 | I4 | 偽 journal あり (`cp` で `settings.db-journal`) → recover | 表示に `hot journal present` → `Y` → `.bak` と `.bak-journal` の**対**が残り、`settings.db-journal` は無い |
 | I5 | `N` で承認しない | 何も変わらない (hash 一致)、終了 0 |
-| I6 | 障害注入 (ホスト TDD のみ): 各コピー失敗 / バイト不一致 / 切替 rename の両名残存 / close 失敗 / 印の rename 失敗 と、**連鎖** (失敗 → 再実行、recover → revert → recover、revert 途中失敗 → 再 revert、`.new` close 失敗 → 次回停止 → `rm` → 成功) | 切替前の失敗では元の対が 1 バイトも変わらない、欠損は欠損のまま、自分が作ったものだけ消える、両名残存で消さず停止、journal が別世代と混ざらない |
+| I6 | 障害注入 (ホスト TDD のみ): 各コピー失敗 / バイト不一致 / 切替 rename の両名残存 / **置換先 unlink 後の新名追加失敗 (`.new` だけ → 写しから復元)** / close 失敗 (文言に REBOOT) / 印の書込み・読み戻し失敗 / 印の phase による門 / 本体欠損時の revert と、**連鎖** (失敗 → 再実行、recover → revert → recover、revert 途中失敗 → 再 revert、`.new` close 失敗 → 次回停止 → `rm` → 成功) | 切替前の失敗では元の対が 1 バイトも変わらない、欠損は欠損のまま、自分が作ったものだけ消える、両名残存で消さず停止、journal が別世代と混ざらない |
 | I7 | `--revert-settings` (I2 の後、および I3 の後) | I2: 現在の対が `.failed` に写され、`.bak` の内容が `settings.db` に戻る (`cfg status` = CORRUPT = 壊した元)。I3: 印 `orig=missing` により `settings.db` が消え、欠損に戻る (`cfg status` = MISSING) |
 | C1 | `cfg export /tmp/a.json` → `cfg set` で 2 件変更 → `cfg import /tmp/a.json` | `cfg list` が export 時点に戻る (置換)、`imported <n> records` |
 | C2 | `cfg import` で `--scope gshell` / `--merge` | scope 外が残る / 既存が消えない |
@@ -122,5 +125,6 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 
 | 版 | 判定 | 要旨 |
 |---|---|---|
+| 第 3 版 | Request changes | 5 件: B1 印の rename 失敗で確定印を壊す → 印は直接書いて読み戻す、B2 最終 rename の `.new` だけの枝で元 DB が消えている (置換先 unlink 後の新名追加失敗) → 写しから本体も復元、失敗は `phase=failed` で門、B3 現在の本体が欠損すると revert が止まる → PRESENT / ABSENT で分岐、B4 close 失敗後に同じ起動で rm / 上書きすると隔離接続の対象 → 再起動を明示の前提、B5 回復ファイルが通常配備から保護されない → S3-D で名前を追加。**3 往復で Approve に至らず → ユーザー決裁** |
 | 第 2 版 | Request changes | 7 件: R1 restore_pair の部分失敗後の再実行で元 journal を消す、R2 検証 close 失敗後の revert が入口で停止、R3 元欠損の切替後失敗を欠損に戻せない、R4 `.failed` が同一性検査から漏れる、R5 revert が現在の journal を旧 DB に付ける、R6 `/hd0` に別ドライブが刺さっていても対象にする、R7 2 巡の間に入力が差し替わると未検証の重複を書く。→ 第 3 版: 退避 / 復帰を rename ではなく「コピー + バイト比較」に組み替え (元の対は最終切替まで不変、両名 / 分離の状態が生まれない)、10 名の同一性検査、印 `recover-state` で元の欠損を記録、revert は現在の対を `.failed*` に写してから戻す、対象デバイスは st_dev で確認、import は 2 巡目も全検証 |
 | 第 1 版 | Request changes | 11 件: B1 `/hd0` マウント有無の判定が逆 → root の st_dev で FDD を判定し `/hd0` は別に mount、B2 両名残存の後の再実行で `.bak` unlink が本体を壊す → 事前に 6 名の同一性検査、B3 既存 `.new` を自分の生成物扱い + `.new-journal` で RO open が BUSY → 残骸があれば停止、B4 失敗時に DB と journal が分離 → 状態機械 + `restore_pair()`、B5 長さ + meta + 件数では内容一致を保証しない → バイト比較 + 全行走査 (integrity_check は OMIT)、B6 切替後失敗の復帰手順と close 失敗 → `--revert-settings` と close 記録、B7 reader が `\r` を拒否 → 許可、B8 4096 件上限 → 8192 + hash 重複検出、B9 NULL 行を捨てると list が一致しない → `cfg_set_null`、B10 `--scope` が削除だけ限定 → 抽出も限定、B11 FDD の cfg import は HDD 復元の代替にならない → 正式手順 C6。non-blocker: 最長行 5,629B、`cfg_delete_scope` の契約、2 巡の失敗保証の文言、三値 stat、容量の判定法、受入イメージの決裁、S3-I2 の残ゲート |
