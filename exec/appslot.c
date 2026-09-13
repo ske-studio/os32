@@ -227,7 +227,7 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
-    a->last_resume_tick = 0;
+    a->last_kernel_tick = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -249,7 +249,7 @@ void appslot_shell_commit(void)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
-    a->last_resume_tick = 0;
+    a->last_kernel_tick = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     /* シェル帯を載せ替えた (shell.bin ⇄ gshell.bin)。前の住人の枠は
@@ -535,7 +535,7 @@ void appslot_resume_commit(int id)
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
     a->parked_from_yield = 0;
-    a->last_resume_tick = 0;
+    a->last_kernel_tick = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -628,8 +628,11 @@ int appslot_abort_request(void)
  *
  * 残す例外は 1 つだけ: **暴走**。KAPI を呼ばない計算ループに入ったアプリは
  * WM へ戻らないので、WM は制御を取り戻せず CTRL+STOP も届かない。
- * 「最後に走り出してから APP_RUNAWAY_TICKS 以上 WM へ戻っていない」なら
- * 協調型が壊れているので、従来どおり IRQ1 が畳む。
+ * 「最後に **カーネルへ入って** から APP_RUNAWAY_TICKS 以上」なら協調型が
+ * 壊れているので、従来どおり IRQ1 が畳む。起点を start / resume ではなく
+ * syscall 入口にするのが要点 (§12 S6b): GetMessage 型のアプリは WM の
+ * op_wait の中で待つ間 resume を通らないので、resume 起点だと「2 秒待った
+ * だけ」で暴走に見え、D8 の宛先より先に畳まれてしまう。
  *
  * gfx 拒否 (appslot_gfx_claim) と V86 の脱出は appslot_abort_request() を
  * 直に呼ぶ — あちらは「WM / カーネルが宛先を決めた」kill なので、この関門は
@@ -644,7 +647,7 @@ int appslot_abort_admit(int gui_mode, u32 now_tick)
     if (!a || g_cur < APP_ID_MIN) return 0;          /* WM / シェル帯 */
     if (a->state != APP_STATE_RUNNING) return 0;
     /* u32 の引き算なので tick が一周しても正しい差が出る。 */
-    if ((u32)(now_tick - a->last_resume_tick) >= (u32)APP_RUNAWAY_TICKS) {
+    if ((u32)(now_tick - a->last_kernel_tick) >= (u32)APP_RUNAWAY_TICKS) {
         return 1;
     }
     return 0;
@@ -654,7 +657,7 @@ void appslot_mark_scheduled(int id, u32 now_tick)
 {
     AppSlot *a = appslot_get(id);
     if (!a) return;
-    a->last_resume_tick = now_tick;
+    a->last_kernel_tick = now_tick;
 }
 
 /* ======================================================================== */
@@ -918,7 +921,7 @@ u32 appslot_abort_admit_selftest(void)
     slot_zero(&g_slot[id]);
     g_slot[id].state = APP_STATE_RUNNING;
     g_slot[id].cpl3 = 1;
-    g_slot[id].last_resume_tick = 1000;
+    g_slot[id].last_kernel_tick = 1000;
     g_cur = id;
 
     /* (0) CUI 中は従来どおり立てる (K2 の逃げ道を 1 バイトも変えない) */
@@ -929,9 +932,11 @@ u32 appslot_abort_admit_selftest(void)
     if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 1;
     if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS - 1) != 0) bad |= 1u << 1;
 
-    /* (2) 暴走だけは GUI 中でも立てる (tick が一周しても差で見る) */
+    /* (2) 暴走だけは GUI 中でも立てる = 最後に **カーネルへ入って** から
+     * APP_RUNAWAY_TICKS 以上 (tick が一周しても差で見る)。op_wait で待って
+     * いるアプリは syscall の入口で控えが進むので、ここには掛からない。 */
     if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 2;
-    g_slot[id].last_resume_tick = 0xFFFFFF00UL;
+    g_slot[id].last_kernel_tick = 0xFFFFFF00UL;
     if (appslot_abort_admit(1, 0xFFFFFF00UL + APP_RUNAWAY_TICKS) != 1) {
         bad |= 1u << 2;
     }

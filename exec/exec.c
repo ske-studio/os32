@@ -952,6 +952,11 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
     u32 *prev_frame = g_cur_frame;
 
     g_cur_frame = frame;
+    /* 暴走判定の起点 (票 T9 §12 S6b)。**代入 1 つだけ** — ここは hot path。
+     * start / resume だけを起点にしていると、GetMessage 型の GUI アプリ
+     * (端末) が WM の op_wait の中で待っている間は更新されず、2 秒待った
+     * だけで「暴走」に見えた。KAPI を呼んでいる限りここを通る。 */
+    if (g_cur_app) g_cur_app->last_kernel_tick = tick_count;
 
     /* --- CTRL+STOP の要求があればここで畳む (契約 T6) --- */
     ring3_abort_check();        /* 要求があれば longjmp して戻らない */

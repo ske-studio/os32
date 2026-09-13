@@ -202,7 +202,7 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   D8 の「宛先は WM が決める」を、IRQ1 の側でも守らせる形にした。判定は純関数
   `appslot_abort_admit(gui_mode, now_tick)` (`exec/appslot.c`) に閉じ、`exec.c` は
   `con_sink_is_enabled()` と `tick_count` を渡すだけ。
-  **暴走の逃げ道は残す**: `AppSlot.last_resume_tick` (start / resume で `appslot_mark_scheduled`)
+  **暴走の逃げ道は残す**: `AppSlot.last_kernel_tick` (下の補正で syscall 入口も起点に)
   から `APP_RUNAWAY_TICKS` (200 = 2 秒) 以上 WM へ戻っていなければ GUI 中でも立てる —
   KAPI を呼ばない計算ループは協調型で WM が制御を取り戻せない唯一のケース。
   CUI (K2) は 1 バイトも変えていない。`ring3_abort_check()` と IRQ1 スタブは**触っていない** —
@@ -210,6 +210,17 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   「WM / カーネルが宛先を決めた」kill なので GUI 中も従来どおり効く必要があるため
   (PM 案の「`ring3_abort_check` も GUI 中は何もしない」は D1a を壊すので採らなかった)。
   試験は `test_multiapp_impl.py` ケース 25 (25 検査) と kselftest 1 項 (4 検査)。
+- **暴走判定の起点を syscall 入口へ** (2026-09-13、S6 合格後の補正): 上の初版は
+  `last_resume_tick` を start / resume でしか更新しなかったので、GetMessage 型の GUI アプリ
+  (端末) が WM の `op_wait` の**中**で待っている間は更新されず、**2 秒イベントを待っただけで
+  「暴走」に見えた**。その状態で IRQ1 が端末の CPL=3 実行中 (100ms タイマの描画など) に落ちると、
+  スタブの即 kill が **D8 の宛先 (連鎖の末尾) より先に端末を畳む** (`sh> ` で待っている状態の
+  CTRL+STOP 1 回で到達しうる)。→ 欄を `last_kernel_tick` に改め、`ring3_syscall_dispatch` の
+  入口でも更新する (`if (g_cur_app) g_cur_app->last_kernel_tick = tick_count;` の**代入 1 つ**、
+  hot path なので関数呼び出しは足さない)。start / resume の更新は残す。これで
+  「KAPI を呼ばない計算ループ」だけが `APP_RUNAWAY_TICKS` に掛かり、待っているアプリは
+  常に最近カーネルへ入っているので対象外になる。`appslot_abort_admit` の意味は不変。
+  試験は ケース 25 の (f) 6 検査 (`25z`〜`25F`)。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 
@@ -363,8 +374,3 @@ non-blocker: kill 連鎖の途中要素を飛ばす経路は正常系で到達�
 | **S6** | 端末 → sh → kbd_echo で CTRL+STOP ×3 → **何も畳まれない** (kbd_echo 生存、`ring3_abort_count` 0)。原因: sh が WAIT_POLL に居る間 WM はウィンドウモードの top-level で回り、そこに `abort_seen` を消費する経路が無い (handler.rs:388 は op_wait 内、lib.rs:205 は全画面のみ) → **W へ差し戻し** | **不合格 (修正中)** |
 | **S7** | Start → CUI mode: 端末 + sh + kbd_echo が生きた状態から `appslot_reclaim_count` 5 → 8 (`last_reclaim_id` 2 = 端末が最後 = 末尾から)、CUI シェル応答 (`ver` API v49)、regress 6 本 (テスター、obs は §17 の下)、常駐 `shell.bin` は継承修正 (R6/R7/I1〜I6/C-1) 以外の .o がバイト一致 (S の突合)、`SHELL_AS_APP` の `exec_run` 参照 0 件。regress 6 本 obs 全通過 (kselftest 76/0、klibc_test 49/0、alloc_demo all passed、ring3_fault → `ver` 応答、`echo abc \| wc -c` = 4、screenshot 128,118 B)、`v86 -t` OK | **合格** |
 | **S6 再試験** (W `dc2f78d` の gshell.bin 170,288 B を HostDrv → `hsync`) | 1 回目の CTRL+STOP で kbd_echo だけ畳まれ `sh> ` に復帰 (W の top-level abort は動作)。**2 回目で sh と端末が両方消える** (`ring3_abort_count` 0 → 1、`fault_kill_count` 0 → 2)。原因: IRQ1 の `ring3_abort_request()` が**その瞬間に走っている slot** (WAIT_POLL の sh か 100ms タイマの端末) に abort_req を立て、K2 の経路 (IRQ1 スタブ / syscall 出口) がカーネル側で畳む — GUI 配下では D8 の宛先 (WM が解決する末尾) と無関係なアプリを畳む。K5c の op_wait 内では WM が先に降ろせたが top-level では間に合わない → **K へ差し戻し** (GUI 中は IRQ1 由来の abort をカーネルが自動処理せず WM に委ねる。暴走の逃げ道は「N tick 以上 resume されていない文脈」に限定) | **不合格 (修正中)** |
-| **S6 再々試験** (K `2c74ffb` を NHD 配備、vmkernel 465,896 B、kselftest 80/0) | 端末 → sh → kbd_echo (`ab` を打って生存確認) で CTRL+STOP: 1 回目 kbd_echo だけ畳まれ `sh> `、2 回目 sh が畳まれ端末の `> `、3 回目 端末が閉じてデスクトップ。`appslot_reclaim_count` +3 (4 → 3 → 2 の順、`last_reclaim_id` 2)、`ring3_abort_count` +1 (3 回目 = 端末自身が宛先の K5c/T6 経路、正当)、`fault_kill_count` +1 (同じ事象) | **合格** |
-| **再確認** (同カーネル) | S2: `kbd_echo` → `ab` → `q` → `bye` → `sh> `。S5: `exit` → `> `、`sh` → ESC → `> `、再度 `sh` → `cat /etc/system.cfg` 動作。S7: Start → CUI mode (連鎖生存中) → CUI 応答、regress 6 本 obs 全通過 (kselftest 80/0、klibc 49/0、alloc_demo、ring3_fault → ver、`echo abc \| wc -c` 4、screenshot) | **合格** |
-
-**判定 (PM、2026-09-13)**: S1〜S7 合格。**T9 受入済み** (K の暴走判定の基準を「最後の syscall から 200 tick」に補正する小改修を続けて着地させる — op_wait 中の GUI アプリが暴走に見える穴の解消。補正後に S6 のみ再確認)。
-残件: `docs/tasks/shell/INHERITED_BUGS.md` (継承バグ台帳、カーネル側 3 件を含む)、`APP_RUNAWAY_TICKS` の実測調整、8MB (端末 + sh は入らない、D7)。

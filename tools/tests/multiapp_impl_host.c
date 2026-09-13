@@ -477,6 +477,18 @@ static int ma_abort_request(void)
  * GUI 判定 (con_sink_is_enabled) と tick (tick_count) は呼び出し側が渡す。
  * 上の ma_abort_request はこの関門を通らない直呼び = gfx 拒否 (T8 D1a) と
  * V86 の脱出の経路。 */
+/* exec/exec.c の ring3_syscall_dispatch の**入口の 1 行**を写した形
+ * (票 §12 S6b)。走っているアプリが KAPI を 1 本呼んだ = カーネルへ入った。
+ * 実物は g_cur_app (CPL=3 で走っているスロット) を見るので、ここも
+ * アプリ ID (2〜5) のときだけ控える。 */
+static void ma_syscall_enter(u32 now_tick)
+{
+    AppSlot *a;
+    if (appslot_cur() < APP_ID_MIN) return;
+    a = appslot_get(appslot_cur());
+    if (a) a->last_kernel_tick = now_tick;
+}
+
 static int ma_irq_abort_request(int gui_mode, u32 now_tick)
 {
     if (!appslot_abort_admit(gui_mode, now_tick)) return 0;
@@ -2121,6 +2133,35 @@ static void case_abort_admit(void)
     check(appslot_get(a2)->abort_req == 1, "25x 走っている子に載る");
     check(ma_abort_check() == 0 && appslot_get(a2) == 0,
           "25y 次の安全地点で畳まれる (K2 の逃げ道は健在)");
+
+    /* --- (f) 待っているアプリは暴走ではない (票 §12 S6b) ---------------
+     * GetMessage 型の GUI アプリ (端末) は、WM がその op_wait の**中**で
+     * 回っている間 resume を通らない。start / resume だけを起点にすると、
+     * 2 秒イベントを待っただけで「暴走」に見え、IRQ1 が CPL=3 の端末に
+     * 落ちたときに **D8 の宛先より先に端末が畳まれる**。起点を
+     * 「最後にカーネルへ入った tick」にすれば、KAPI を呼んでいる限り
+     * 対象外になる。 */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25z 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    {
+        u32 t;
+        /* 300 tick = 3 秒ぶん、10 tick ごとに KAPI を 1 本呼ぶ
+         * (描画 / キー取り / タイマ — op_wait の中で待っている形)。 */
+        for (t = 1000; t <= 1300; t += 10) ma_syscall_enter(t);
+    }
+    check(ma_irq_abort_request(1, 1300) == 0,
+          "25A 300 tick 待っても、その間 KAPI を呼んでいれば暴走ではない");
+    check(appslot_get(a2) != 0 && appslot_get(a2)->abort_req == 0,
+          "25B 端末に abort_req は立たない (D8 の宛先より先に畳まれない)");
+    check(ma_irq_abort_request(1, 1300 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25C 最後の KAPI から境界の 1 つ手前ではまだ立てない");
+    check(ma_irq_abort_request(1, 1300 + APP_RUNAWAY_TICKS) == 1,
+          "25D 最後の KAPI から 200 tick 以上なら暴走として立てる");
+    check(appslot_get(a2)->abort_req == 1, "25E 計算ループには載る");
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25F 畳まれる (KAPI を呼ばない計算ループの唯一の逃げ道)");
 }
 
 int main(void)

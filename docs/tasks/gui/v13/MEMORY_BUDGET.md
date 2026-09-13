@@ -196,7 +196,7 @@ park / resume ごとに 1 回。`exec.o` は 1 行も変わらない (呼ぶの�
 ## カーネル帯の静的計上 (T9 §12 S6、2026-09-13)
 
 GUI 中の CTRL+STOP を WM に任せる判定 (票 §12 S6) で `AppSlot` に増えた欄
-`last_resume_tick` (`u32`)。`kmalloc` せずカーネル .bss の静的領域で、シェル帯・アプリ帯・
+`last_kernel_tick` (`u32`)。`kmalloc` せずカーネル .bss の静的領域で、シェル帯・アプリ帯・
 exec_heap のどれも減らさない。
 
 測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を基準版
@@ -204,7 +204,7 @@ exec_heap のどれも減らさない。
 
 | 項目 | 値 | 出所 |
 |---|---:|---|
-| `last_resume_tick` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `g_slot` が `0x468` → **`0x480`** |
+| `last_kernel_tick` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `g_slot` が `0x468` → **`0x480`** |
 | `appslot.o` の .bss 合計 | **1720 B で不変** | 増えた 24 B は `g_slot` と `g_redir` の間の詰め物に収まった (`g_redir` は `0x4C0` のまま) |
 | 判定 `appslot_abort_admit` / `appslot_mark_scheduled` / 自己診断 | 0 B (静的領域なし) | text 4967 → **5087 B** (+120) |
 

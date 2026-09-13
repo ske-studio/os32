@@ -55,10 +55,12 @@
 #define APP_STATE_WAIT_POLL 4
 
 /* 暴走 (KAPI を呼ばない計算ループ) の逃げ道 (票 T9 §12 S6)。GUI 中の IRQ1 は
- * 「走っている ID が最後に走り出してからこの tick 数以上、WM へ戻っていない」
+ * 「走っている ID が最後に **カーネルへ入って** からこの tick 数以上経った」
  * ときだけ CTRL+STOP を立てる。PIT は 100Hz なので 200 = 2 秒。
- * 協調型では、生きているアプリは毎 tick 前後で WM へ戻る (OP_WAIT / kbd 待ち /
- * ポーリングの譲り / sys_yield のどれか) ので、2 秒戻らない = 戻れない。 */
+ * 生きているアプリは描画も入力もキーも KAPI 経由なので、2 秒 1 度も
+ * カーネルへ入らない = KAPI を呼ばない計算ループに入った、と読める。
+ * **待っているアプリは対象外** — op_wait / kbd 待ちは KAPI の中に居る
+ * (その syscall の入口で控えが更新されている)。 */
 #define APP_RUNAWAY_TICKS  200
 
 /* int80_stub が積むフレームの語数 ([0..7]=pushad, [8]=EIP [9]=CS
@@ -83,12 +85,19 @@ typedef struct {
      * 譲っている間に届いた「子宛の 1 バイト」を吸って捨ててしまう
      * (票 §6 blocker 1)。欄の追加なので exec_app_state の 0〜4 は動かない。 */
     int  parked_from_yield;
-    /* この ID を最後に走らせた PIT tick (票 T9 §12 S6)。exec.c が
-     * start / resume の直後に appslot_mark_scheduled で控える。GUI 中の
-     * CTRL+STOP は WM が宛先を決める (D8) ので、カーネルが IRQ1 で畳むのは
-     * 「ここから APP_RUNAWAY_TICKS 以上 WM へ戻っていない」= 協調型が
-     * 壊れている 1 例外だけ。 */
-    u32  last_resume_tick;
+    /* この ID が最後に **カーネルへ入った** PIT tick (票 T9 §12 S6)。
+     * 更新する 3 点: 起動 (start) / resume / **int 0x80 の入口**
+     * (ring3_syscall_dispatch。代入 1 つだけの hot path)。
+     *
+     * かつては start / resume だけだったが、GetMessage 型の GUI アプリ
+     * (端末) は WM が op_wait の中で回っている間 resume を通らないので、
+     * **2 秒イベントを待っただけで「暴走」に見えた** (§12 S6b)。KAPI を
+     * 呼んでいる限り最近カーネルへ入っているので、これを起点にすると
+     * 「KAPI を呼ばない計算ループ」だけが APP_RUNAWAY_TICKS に掛かる。
+     *
+     * GUI 中の CTRL+STOP の宛先は WM が決める (D8) ので、カーネルが IRQ1 で
+     * 畳むのはその暴走 1 例外だけ。 */
+    u32  last_kernel_tick;
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -331,12 +340,16 @@ int appslot_abort_request(void);
  * 「フォーカス窓の連鎖の末尾」(D8) で、それを知っているのは WM だけだから。
  * IRQ1 が「そのとき走っていた slot」に立てると、WAIT_POLL の sh や 100ms
  * タイマの端末が巻き込まれる (受入 S6 の 2 回目で端末まで消えた)。
- * 例外は暴走だけ: 最後に走り出してから APP_RUNAWAY_TICKS 以上 WM へ戻って
- * いなければ 1 (協調型で WM が制御を取り戻せない唯一のケース)。 */
+ * 例外は暴走だけ: 最後に**カーネルへ入ってから** APP_RUNAWAY_TICKS 以上
+ * 経っていれば 1 (KAPI を呼ばない計算ループ = 協調型で WM が制御を取り戻せ
+ * ない唯一のケース)。op_wait / kbd 待ちのアプリは KAPI の中に居るので、
+ * 何秒待っていても対象外。 */
 int appslot_abort_admit(int gui_mode, u32 now_tick);
 
-/* この ID を走らせた時刻を控える (暴走判定の起点)。exec.c が
+/* この ID がカーネルへ入った時刻を控える (暴走判定の起点)。exec.c が
  * appslot_start_commit / appslot_resume_commit の直後に tick_count を渡す。
+ * int 0x80 の入口は hot path なので、そちらは exec.c が
+ * g_cur_app->last_kernel_tick へ直に代入する (関数呼び出しを増やさない)。
  * tick は引数で受ける — この表はハードウェアを読まない (park_poll_check と
  * 同じ流儀)。 */
 void appslot_mark_scheduled(int id, u32 now_tick);
