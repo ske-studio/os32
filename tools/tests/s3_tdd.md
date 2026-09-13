@@ -336,7 +336,7 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
 先に立てると `cfg_open` の中の RO→RW 切り替えの close を巻き込み、open 自体が `CFG_ERROR` に
 なって狙った段に届かない (既存 `open_close_fail` が固定している挙動)。
 
-## C-1. ケース (8 本 / 269 CHECK)
+## C-1. ケース (8 本 / 294 CHECK)
 
 | ケース | CHECK | 見ているもの |
 |---|---|---|
@@ -416,8 +416,11 @@ SUMMARY 0/7 PASS
   本票で新しい実行ファイルは増えない (`cfg.bin` は登録済み、`cfg_import.o` / `cfg_json.o` は
   `DEFINE_LIB` の wildcard が拾う)。
 - `make all` / `make check` は未実行。
-- **8,192 件の書き込みは試していない**。`s3_gen` は DB が MISSING の状態で検証だけを通す。
-  8,192 行の transaction が SQLite の 384KB MEMSYS5 プールに収まるかは未確認。
+- **8,192 件の書き込みは `s3_bulk` で実測済み** (C-5、実 `os32_sqlite_vfs.c` の 384KiB
+  MEMSYS5 プールの上で 1 transaction が通った)。ただし条件は**単一 scope の短い
+  整数値**で、(a) 既に大量の行が入った DB を置換するときの DELETE journal の負荷、
+  (b) 32 scope x 256 key を埋めた状態の `cfg export` → `cfg import` の往復、
+  (c) ゲスト (ext2 + 実 `/etc` の空き容量) での同じ規模は**いずれも未確認**。
 - `cfg_import.c` の静的領域は約 **85KB** (重複表 64KB + 行バッファ 6KB×2 + `CfgJsonRow` 4.4KB×2)。
   `cfg_import.o` を引くのは `cfg.bin` だけなので `libos32gui.shlib` や読むだけのアプリには
   乗らない (アーカイブのメンバ単位のリンク) — ただし**リンク後の実測はしていない**。
@@ -518,3 +521,107 @@ SUMMARY 7/7 PASS
 - HostDrv (`fs/hostdrvfs.c`) と iso9660 の stat は見ていない。本件は FAT だけの写像。
 - `make all` / `make check` は未実行。`fs/fatfs_vfs.c` の単体クロスコンパイル
   (`i386-elf-gcc -Wall -Wextra -Werror`) だけ通した。
+
+## C-5. Codex 実装レビュー 往復 1 (C レーン) — 2026-09-14
+
+ケースは 7 本 → **8 本**、CHECK は 214 → **262**。`SUMMARY 53/53 PASS`
+(+ TSV parity 58/58、`--target` の i386-elf `-Werror`、`--sanitize` で s3_* 全通し)。
+
+### B3 — `--scope` 外の値の不正で対象 scope の import まで拒否した 〔P2〕
+
+反例 (ホストで再現 → `s3_scope` に固定): 正常な `gshell` 行と、**構文は正常だが
+text が 256B の `user` 行**を含むファイルに `--scope gshell` を指定すると、
+`cfg_json_record()` が値上限まで見て失敗し、scope 除外に到達しなかった。
+票 §2「他 scope は構文検証だけ」への違反。
+
+直し方は**構文と意味の分離**:
+
+- `cfg_json_record()` は**構文だけ** (骨組み・キーの順・エスケープ・base64 の形・
+  数字の並び)。上限 / 値域 / 名前の規則は `CfgJsonRow` の傷
+  (`scope_over` `scope_nul` `key_over` `key_nul` `val_over` `val_nul` `val_range`)
+  に控えるだけで拒否しない。`j_int` は範囲外でも数字を読み切り (溜めるのは止める)、
+  `j_b64` は上限超過でも形の検査を最後まで続ける。
+- `cfg_json_check(row)` が**対象行にだけ**かかる意味の検証。
+- `cfg_json_scope_usable(row)` — scope を丸ごと復号できたか。切り詰めた scope を
+  対象名と比べると、**63B の対象名に前半が一致する長い scope** を対象と
+  取り違える (この派生も `s3_scope` に入れた)。
+- `imp_pass` は両巡とも `record` → (対象外なら次の行へ) → `check` の順。
+  衝突時の読み直しも `scope_usable` を要求する。
+
+型 (`"type":0|1|2`) は**構文のまま**にした — 型が値の形を決めるので、0/1/2 以外は
+そもそも値が解けない。
+
+### B4 — commit 前の rollback / close 失敗が CLI から消えた 〔P2〕
+
+反例 (`s3_fail` に固定): 置換の削除後、2 巡目の read が失敗し、`cfg_close()` の中の
+`ROLLBACK` も I/O エラーになる (`inj_exec_match[0]="ROLLBACK"` を実在しない表へ
+差し替え)。旧版は `read failed` しか出さず、「1 行も残らない」保証が**成立して
+いない**ことを利用者が判別できなかった。
+
+- `CfgImportInfo` に `cleanup` を足し、`imp_close()` (失敗経路専用の close) が
+  **この呼び出しの中で** `cfg_close` が失敗したときだけ `cfg_last_close_error()` を
+  写す。検証だけで終わった場合は close していないので前回の診断を拾わない。
+- 適用先は status 拒否 / begin / delete_scope / 2 巡目 (read・parse・set) / commit の
+  **すべての失敗経路**。
+- `cfg.c` は原因の文言を出したあと、`cleanup != 0` なら同じ行の尾に
+  ` (rollback/close failed <code>)` を付けて改行する。
+  例: `read failed (rollback/close failed 10)` /
+  `cannot import: CORRUPT (rollback/close failed 10)`。
+  rollback が成功する通常経路では尾が付かないことも固定した。
+
+### non-blocker (両方とも直した)
+
+- **base64 の未使用ビット**: `AB==` / `AAB=` を拒否 (正準形)。詰めで捨てるバイトに
+  落ちるビットは 0 でなければならない — pad=1 なら最後の実文字の下位 2bit、
+  pad=2 なら下位 4bit。`AA==` / `AAA=` / `/w==` は従来どおり受理。
+  これは「writer が出す形」の規則なので**構文**側 (対象外の scope の行でも拒否)。
+- **8,192 件の実書込み**: `tools/tests/sqlite_groups_backend.h` の `FIXTURE_BYTES` を
+  128KiB → **1MiB** に広げ、ケース `s3_bulk` を足した。`cfg init` した DB に対して
+  生成入力 8,192 件を `--scope user` で置換 import し、`imported 8192 records
+  (user), replaced` と先頭 / 中間 / 末尾 / 範囲外の値、`gshell` の不変までを確認。
+  **実 `os32_sqlite_vfs.c` の 384KiB MEMSYS5 プールの上で通った** (静的推定ではなく
+  実測)。`FIXTURE_BYTES` を共有する `kapi_db_v50_host.c` (22/22) と
+  `install_recover_host.c` (14/14) も再実行して回帰なし。
+  ただし**ゲストでの 8,192 件は未実行** — ホストの VFS は RAM ファイルで、ext2 の
+  ブロック確保や `/etc` の空き容量は模型化していない ([V4])。
+
+### まだ踏めていないもの ([V4])
+
+- ゲスト受入 (C4 = GUI 端末、C5 = FDD の `cfg status`、C6 = JSON からの復元の正式手順)
+  は PM / テスターの担当で、本レーンでは未実行。
+- `s3_bulk` は 8,192 件の **import** を通しただけで、同じ規模の `cfg export` /
+  `cfg list` は通していない (export は出力バッファの再開経路が別)。
+
+## C-6. Codex 実装レビュー 往復 2 (C レーン) — 2026-09-14
+
+B1 / B2 / B4 / B5 は修正確認。**B3 が一部残っていた**。
+
+### B3 残存 — base64 の非正準形が対象外の scope の行でも import を落とす
+
+反例 (`s3_scope` に固定): `--scope gshell` で、対象外の `user` 行に `"AB=="`
+(詰めの未使用ビットが非ゼロ) があると `j_b64()` が即 `CFG_JSON_E_VALUE` を返し、
+scope 除外に到達せず `bad line 3: value` で終了 1 になっていた。往復 1 で
+「4096B 超過」は傷 (`val_over`) に回したが、**同じ往復 1 の non-blocker で足した
+未使用ビットの検査だけが即時 return のまま**残っていた。
+
+- `CfgJsonRow` に `val_b64` を足し、`j_b64()` は非正準形を**傷として控える**だけに
+  する。`cfg_json_check()` が `val_over || val_b64` を `CFG_JSON_E_VALUE` にする。
+- 構文として残すのは「引用符・エスケープを含まないこと・字種・4 文字単位・
+  詰めの位置と個数・詰めの後に本体が来ないこと」だけ。
+
+固定した契約 (同じ入力、両巡とも):
+
+| 入力の対象外の行 | 全 scope | `--scope user` | `--scope gshell` |
+|---|---|---|---|
+| `"AB=="` (非正準 base64) | `bad line 3: value` | `bad line 3: value` | **成功** (`imported 1 records`) |
+| 4096B 超の blob | `bad line 3: value` | — | **成功** |
+| `01` (先頭ゼロ = 構文) | `bad line 3: value` | — | **失敗** (構文は全行) |
+
+失敗側では `gshell` の値が 1 行も動いていないこと、成功側では `user` の既存値が
+動いていないことも見ている。`--merge` でも同じ。
+
+RED の確かめ: `j_b64()` の 2 行を `return CFG_JSON_E_VALUE;` に戻すと
+`s3_json` / `s3_scope` がともに落ちる (`jsyn(...AB==...) == CFG_JSON_OK &&
+jr.val_b64` と `ran("import", "/b64.json", "--scope", "gshell", NULL) == 0`)。
+
+`SUMMARY 53/53 PASS` (+ TSV parity 58/58、`--target`、`--sanitize` 8/8)。

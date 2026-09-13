@@ -191,13 +191,15 @@ static int b64_val(int c)
 /*  両端の " を含めて食い、復号したバイト列を out に置く。
  *  writer の fmt_b64 の出力だけを受ける: 4 文字単位、`=` は末尾の 1〜2 個
  *  だけ、英数字 + `+` `/` 以外は拒否 (`\` も来ない)。 */
-static int j_b64(JIn *in, unsigned char *out, int cap, int *len, int *over)
+static int j_b64(JIn *in, unsigned char *out, int cap, int *len, int *over,
+                 int *noncanon)
 {
     int c, v, pad = 0, quad = 0, n = 0;
     u32 acc = 0;
 
     *len = 0;
     *over = 0;
+    *noncanon = 0;
     if (j_take(in) != '"') return CFG_JSON_E_SYNTAX;
     for (;;) {
         c = j_take(in);
@@ -217,12 +219,13 @@ static int j_b64(JIn *in, unsigned char *out, int cap, int *len, int *over)
         quad++;
         if (quad == 4) {
             /* 捨てるバイトに落ちる**未使用ビットは 0** でなければならない。
-             * `AB==` / `AAB=` は writer が出さない非正準形 (往復 1 の
-             * non-blocker)。pad=1 は最後の実文字の下位 2bit、pad=2 は
-             * 下位 4bit が余る。 */
-            if (pad == 1 && ((acc >> 6) & 0x03UL) != 0) return CFG_JSON_E_VALUE;
-            if (pad == 2 && ((acc >> 12) & 0x0FUL) != 0) return CFG_JSON_E_VALUE;
-            /* 上限超過は**意味**の傷。形の検査は最後まで続ける。 */
+             * `AB==` / `AAB=` は writer が出さない非正準形。ただしこれは
+             * **意味**の傷で構文違反ではない — ここで返すと `--scope` の
+             * 対象外の行でも import が落ちる (往復 2 の B3 残存)。
+             * pad=1 は最後の実文字の下位 2bit、pad=2 は下位 4bit が余る。 */
+            if (pad == 1 && ((acc >> 6) & 0x03UL) != 0) *noncanon = 1;
+            if (pad == 2 && ((acc >> 12) & 0x0FUL) != 0) *noncanon = 1;
+            /* 上限超過も**意味**の傷。形の検査は最後まで続ける。 */
             if (n + 3 - pad > cap) {
                 *over = 1;
             } else {
@@ -304,6 +307,7 @@ int cfg_json_record(const char *line, int len, CfgJsonRow *row)
     row->val_over = 0;
     row->val_nul = 0;
     row->val_range = 0;
+    row->val_b64 = 0;
     in.p = line;
     in.n = len;
     in.i = 0;
@@ -339,7 +343,8 @@ int cfg_json_record(const char *line, int len, CfgJsonRow *row)
         if (rc != CFG_JSON_OK) return rc;
     } else {
         /* blob は生バイト列。UTF-8 / NUL の検査は**しない** (票 §2)。 */
-        rc = j_b64(&in, row->bval, CFG_BLOB_MAX, &row->blen, &row->val_over);
+        rc = j_b64(&in, row->bval, CFG_BLOB_MAX, &row->blen, &row->val_over,
+                   &row->val_b64);
         if (rc != CFG_JSON_OK) return rc;
     }
 
@@ -379,6 +384,7 @@ int cfg_json_check(const CfgJsonRow *row)
             return CFG_JSON_E_UTF8;
         return CFG_JSON_OK;
     }
-    if (row->val_over) return CFG_JSON_E_VALUE;      /* blob 4096B 超過 */
+    /* blob: 4096B 超過と base64 の非正準形 (`AB==` / `AAB=`) */
+    if (row->val_over || row->val_b64) return CFG_JSON_E_VALUE;
     return CFG_JSON_OK;
 }

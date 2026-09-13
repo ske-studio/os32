@@ -3140,8 +3140,21 @@ static void c_s3_json(void)
     /* 構文そのものの違反は「対象外」でも拒否される */
     CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":0,\"v\":01}")
           == CFG_JSON_E_VALUE);
+    /* base64 の非正準形は**意味**の傷。構文解析は通る (往復 2 の B3 残存) */
     CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AB==\"}")
+          == CFG_JSON_OK && jr.val_b64);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAB=\"}")
+          == CFG_JSON_OK && jr.val_b64);
+    /* 形そのもの (4 文字単位 / 詰めの位置 / 字種) は構文のまま */
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AAA\"}")
           == CFG_JSON_E_VALUE);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"A?==\"}")
+          == CFG_JSON_E_VALUE);
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AA==AA==\"}")
+          == CFG_JSON_E_VALUE);
+    /* 4096B 超過も意味の傷 */
+    CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":2,\"v\":\"AB==\"}")
+          == CFG_JSON_OK);
     CHECK(jsyn("{\"scope\":\"user\",\"key\":\"a\",\"type\":1,\"v\":\"\\b\"}")
           == CFG_JSON_E_SYNTAX);
     /* 切り詰めた scope は対象判定に使えない (63B の対象名と取り違えない) */
@@ -3336,6 +3349,53 @@ static void c_s3_scope(void)
     /* 同じファイルを全 scope で取り込もうとすると、その行で止まる */
     CHECK(ran("import", "/mix.json", NULL, NULL, NULL) == 1);
     CHECK(cap_has("bad line 3: range"));
+    /* 対象外の行の base64 が非正準形 (未使用ビット非ゼロ) — 往復 2 の B3 */
+    put_file("/b64.json",
+             "{\"schema_version\":1,\"exported\":\"0\"}\n"
+             "{\"scope\":\"gshell\",\"key\":\"desktop/color\","
+             "\"type\":0,\"v\":8}\n"
+             "{\"scope\":\"user\",\"key\":\"b\",\"type\":2,\"v\":\"AB==\"}\n");
+    CHECK(ran("import", "/b64.json", "--scope", "gshell", NULL) == 0);
+    CHECK(cap_has("imported 1 records (gshell), replaced\n"));
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("8\n"));
+    CHECK(ran("get", "user", "keep", NULL, NULL) == 0);
+    CHECK(cap_has("4\n"));                    /* scope 外は動かない */
+    /* 同じ入力を全 scope / その scope で取り込むと、その行で止まる */
+    CHECK(ran("import", "/b64.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("bad line 3: value"));
+    CHECK(ran("import", "/b64.json", "--scope", "user", NULL) == 1);
+    CHECK(cap_has("bad line 3: value"));
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("8\n"));                    /* 失敗側は 1 行も書いていない */
+    /* 2 巡目だけに現れても同じ (検証は両巡で同じ) — 1 巡目を通った入力の
+     * 対象外の行が 2 巡目で非正準形になっても gshell は書けるまま */
+    CHECK(ran("import", "/b64.json", "--scope", "gshell", "--merge") == 0);
+    CHECK(cap_has("imported 1 records (gshell), merged\n"));
+
+    /* 対象外の行の blob が 4096B を超えていても対象 scope は通る */
+    {
+        static char buf[16384];
+        static unsigned char raw[CFG_BLOB_MAX];
+        int i, n;
+        for (i = 0; i < CFG_BLOB_MAX; i++) raw[i] = (unsigned char)i;
+        strcpy(buf, "{\"schema_version\":1,\"exported\":\"0\"}\n"
+                    "{\"scope\":\"gshell\",\"key\":\"desktop/color\","
+                    "\"type\":0,\"v\":9}\n"
+                    "{\"scope\":\"user\",\"key\":\"b\",\"type\":2,\"v\":\"");
+        n = (int)strlen(buf);
+        fmt_b64(buf + n, (int)sizeof(buf) - n, raw, CFG_BLOB_MAX);
+        buf[strlen(buf) - 4] = '\0';              /* 末尾の 1 組を外す */
+        strcat(buf, "AAAAAAAA\"}\n");            /* 4096B を越える */
+        put_file("/big.json", buf);
+    }
+    CHECK(ran("import", "/big.json", "--scope", "gshell", NULL) == 0);
+    CHECK(cap_has("imported 1 records (gshell), replaced\n"));
+    CHECK(ran("get", "gshell", "desktop/color", NULL, NULL) == 0);
+    CHECK(cap_has("9\n"));
+    CHECK(ran("import", "/big.json", NULL, NULL, NULL) == 1);
+    CHECK(cap_has("bad line 3: value"));
+
     /* 構文そのものの違反なら対象外の scope でも止まる */
     put_file("/badsyn.json",
              "{\"schema_version\":1,\"exported\":\"0\"}\n"

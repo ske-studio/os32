@@ -185,6 +185,7 @@ typedef struct {
     int           val_over;                   /* text 255B / blob 4096B 超過 */
     int           val_nul;
     int           val_range;                  /* int32 の範囲外 */
+    int           val_b64;                    /* base64 の非正準形 (未使用ビット) */
 } CfgJsonRow;
 
 /* line は長さ付き (埋め込み NUL も行の一部として見る)。CFG_JSON_* を返す。
