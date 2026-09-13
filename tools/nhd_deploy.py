@@ -1048,7 +1048,7 @@ def do_sync_from_hostdrv():
     # 読めないまま「完了」と言わせない (往復 1 の B6)。
     walk_errors = []
 
-    for dirpath, dirnames, filenames in os.walk(
+    for dirpath, dirnames, filenames in protect.walk_root(
             hostdrv_dir, onerror=walk_errors.append):
         # HostDrvルートからの相対パス
         rel_dir = os.path.relpath(dirpath, hostdrv_dir)

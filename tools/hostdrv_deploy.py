@@ -314,7 +314,11 @@ def _clean_tree(path):
     抱えているから消せなかった」と混同しない (往復 1 の B6)。
     """
     keep = False
-    for name in sorted(os.listdir(path)):
+    names = sorted(os.listdir(path))
+    # ルート直下の `lost+found` (ext2 が作る root 所有) には降りない。
+    # check_tree と同じ規則を使う (HostDrv には普通は無いが揃えておく)。
+    protect.skip_root_entries(HOSTDRV_DIR, path, names)
+    for name in names:
         full = os.path.join(path, name)
         # 1) symlink は入口の check_tree で拒否済み。競合などで現れたら
         #    「未対応の配置」として中止する (中間リンクを無判定で外さない)。

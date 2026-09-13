@@ -1646,6 +1646,125 @@ class Review4SourceTreeCheck(Base):
 
 
 # ======================================================================
+#  実配備 1 回目の差し戻し: ext2 の lost+found
+#  (docs/tasks/settings/TASK_S0.md §8f / tools/tests/s0_tdd.md §D.11)
+# ======================================================================
+class Review5LostFound(Base):
+    """mkfs.ext2 が作る root 所有 mode 700 の `lost+found` で止まらない。
+
+    配備ツールは非 root の Python で走査する (実コピーだけ sudo cp) ので、
+    `lost+found` を `os.walk` すると EACCES になり「ツリーを辿れない = 失敗」
+    に当たっていた。配備対象でも保護対象でもないので走査から外す。
+    """
+
+    def _lost_found(self, root, mode=0o000, content=b'x'):
+        lf = root / 'lost+found'
+        lf.mkdir()
+        (lf / 'secret').write_bytes(content)
+        os.chmod(str(lf), mode)
+        return lf
+
+    def test_check_tree_passes_with_unreadable_lost_found(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        lf = self._lost_found(self.mount)
+        try:
+            protect.check_tree(str(self.mount))     # 例外を投げないこと
+        finally:
+            os.chmod(str(lf), 0o755)
+
+    def test_sync_passes_with_unreadable_lost_found(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        lf = self._lost_found(self.mount)
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/sh.bin', 'guest': '/bin/sh.bin',
+                        'tags': ['core']}])
+        self.pairs({'build/sh.bin': [(str(self.src_bin), '/bin/sh.bin')]})
+        try:
+            self.assertIs(nd.do_sync(), True)
+        finally:
+            os.chmod(str(lf), 0o755)
+        self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(),
+                         self.src_bin.read_bytes())
+
+    def test_sync_from_hostdrv_passes_with_unreadable_lost_found(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        lf_dst = self._lost_found(self.mount, content=b'NHD-SIDE')
+        lf_src = self._lost_found(self.hostdrv, content=b'HOSTDRV-SIDE')
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'NEWBIN')
+        try:
+            self.assertIs(nd.do_sync_from_hostdrv(), True)
+        finally:
+            os.chmod(str(lf_dst), 0o755)
+            os.chmod(str(lf_src), 0o755)
+        self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(), b'NEWBIN')
+        self.assertEqual((self.mount / 'lost+found' / 'secret').read_bytes(),
+                         b'NHD-SIDE', 'lost+found の中身を配備してしまった')
+
+    def test_prune_and_clean_pass_with_unreadable_lost_found(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        lf_nhd = self._lost_found(self.mount)
+        lf_hd = self._lost_found(self.hostdrv)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self._patch(ps, 'hostdrv_root', lambda: str(self.hostdrv))
+        try:
+            self.assertEqual(ps.prune_nhd(set(), True), 0)
+            self.assertEqual(ps.prune_hostdrv(set(), True), 0)
+            self.assertIs(hd.do_clean(), True)
+        finally:
+            os.chmod(str(lf_nhd), 0o755)
+            os.chmod(str(lf_hd), 0o755)
+        self.assertTrue((self.hostdrv / 'lost+found' / 'secret').exists(),
+                        'clean が lost+found の中へ降りた')
+
+    def test_lost_found_symlink_is_still_refused(self):
+        """symlink なら除外せず従来どおり拒否する。"""
+        other = self.root / 'elsewhere'
+        other.mkdir()
+        os.symlink(str(other), str(self.mount / 'lost+found'))
+        with self.assertRaises(protect.ProtectError):
+            protect.check_tree(str(self.mount))
+
+    def test_unreadable_dir_elsewhere_still_fails(self):
+        """ルート以外の読めないディレクトリは従来どおり失敗 (判定不能は失敗)。"""
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        deep = self.mount / 'bin' / 'lost+found'      # ルート直下ではない
+        deep.mkdir()
+        os.chmod(str(deep), 0o000)
+        try:
+            with self.assertRaises(protect.ProtectError):
+                protect.check_tree(str(self.mount))
+        finally:
+            os.chmod(str(deep), 0o755)
+
+    def test_other_unreadable_root_dir_still_fails(self):
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        other = self.mount / 'data'
+        other.mkdir()
+        os.chmod(str(other), 0o000)
+        try:
+            with self.assertRaises(protect.ProtectError):
+                protect.check_tree(str(self.mount))
+        finally:
+            os.chmod(str(other), 0o755)
+
+    def test_lost_found_as_regular_file_is_not_skipped(self):
+        """通常ファイルなら除外しない (ディレクトリ扱いしない)。"""
+        (self.mount / 'lost+found').write_bytes(b'x')
+        protect.check_tree(str(self.mount))         # 通る (symlink ではない)
+        names = ['lost+found']
+        protect.skip_root_entries(str(self.mount), str(self.mount), names)
+        self.assertEqual(names, ['lost+found'], 'ファイルを外してしまった')
+
+
+# ======================================================================
 #  (4) main の終了コード
 # ======================================================================
 class MainExit(Base):

@@ -52,6 +52,13 @@ PROTECTED_BASENAMES = frozenset([
 # 保護対象ディレクトリ (ゲストの絶対パス、小文字)
 PROTECTED_DIR = '/etc'
 
+# 走査から外す**ルート直下の既知ディレクトリ**。
+# ext2 を mkfs すると必ずルート直下に root 所有 mode 700 の `lost+found` が
+# できる。配備ツールは非 root の Python で走査する (実コピーだけ sudo cp) ので
+# 読めず、「ツリーを辿れない = 失敗」に当たっていた (実配備 1 回目、2026-09-13)。
+# 配備対象でも保護対象でもないので、ここだけ走査から外す。
+SKIP_ROOT_DIRS = frozenset(['lost+found'])
+
 
 class ProtectError(Exception):
     """保護の判定そのものができなかった / 迂回が見つかった。配備を失敗させる。"""
@@ -332,6 +339,48 @@ def protected_ancestor(root, dest):
     return None
 
 
+def skip_root_entries(root, dirpath, dirnames):
+    """`dirnames` から**ルート直下の既知ディレクトリ** (SKIP_ROOT_DIRS) を外す。
+
+    対象は「ルート直下」の「実ディレクトリ」だけ。symlink や通常ファイルなら
+    **外さない** — 従来どおり判定させる (symlink は check_tree が拒否する)。
+    それ以外の読めないディレクトリは契約どおり失敗のまま (判定不能は失敗)。
+
+    Returns: 外した名前のリスト (呼び手のログ用)。
+    """
+    if os.path.abspath(dirpath) != os.path.abspath(root):
+        return []
+    removed = []
+    for name in list(dirnames):
+        if name not in SKIP_ROOT_DIRS:
+            continue
+        full = os.path.join(dirpath, name)
+        if os.path.islink(full):
+            continue                    # symlink は除外しない (拒否させる)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue                    # 判定できないものは外さない
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        dirnames.remove(name)
+        removed.append(name)
+    return removed
+
+
+def walk_root(root, onerror=None):
+    """配備ツリーを走査する共通の入口 (`os.walk` の薄い包み)。
+
+    ルート直下の SKIP_ROOT_DIRS を降りる前に外すので、`lost+found` で
+    止まらない。走査する側は全部これを通すこと。
+    """
+    root_abs = os.path.abspath(root)
+    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False,
+                                                onerror=onerror):
+        skip_root_entries(root_abs, dirpath, dirnames)
+        yield dirpath, dirnames, filenames
+
+
 def check_tree(root):
     """配備ツリー全体に **symlink が 1 つも無い**ことを確かめる (前提検査)。
 
@@ -340,6 +389,11 @@ def check_tree(root):
     ほとんどがこの形だった。OS32 の ext2 に symlink を作る手段は無く、HostDrv は
     Windows のフォルダなので、**配備ツリーに symlink が現れること自体が
     「未対応の配置」**。見つけたら配備全体を拒否する (PM 方針、往復 3)。
+
+    走査から外すのは 2 つだけ: ルート直下の `lost+found` (ext2 が必ず作る
+    root 所有 mode 700。配備対象でも保護対象でもない) と、保護対象名の
+    ディレクトリの内部 (配備が 1 バイトも書かない場所)。それ以外の読めない
+    ディレクトリは契約どおり失敗にする (判定不能は失敗)。
 
     `<root>/etc` 単体の検査 (check_root_etc) より重いので、判定ごとではなく
     **サブコマンドの入口で 1 回**だけ呼ぶこと。
@@ -351,8 +405,8 @@ def check_tree(root):
             '配備先 {} 自体が symlink。配備を中止する'.format(root_abs))
 
     errors = []
-    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False,
-                                                onerror=errors.append):
+    for dirpath, dirnames, filenames in walk_root(root_abs,
+                                                  onerror=errors.append):
         if errors:
             break
         for name in list(dirnames) + list(filenames):

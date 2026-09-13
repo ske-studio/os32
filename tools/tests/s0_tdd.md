@@ -103,9 +103,10 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
   symlink / 別マウント / 通常ファイルだけを `check_root_etc` が止める)。
 - 往復 3 以降、配備ツリーに symlink があれば配備全体を拒否する (`check_tree`)。
   **symlink を含むツリーへ安全に配備できるとは言っていない** — 止めているだけ。
-  走査は**保護対象名のディレクトリの内部には入らない** (配備が中へ 1 バイトも
-  書かない場所なので、そこの symlink は最終パスの意味に効かない)。つまり
-  `/etc/settings.db/` の中に何があるかは検査していない。
+  走査は**保護対象名のディレクトリの内部**と**ルート直下の `lost+found`** には
+  入らない (どちらも配備が中へ 1 バイトも書かない場所なので、そこの symlink は
+  最終パスの意味に効かない)。つまり `/etc/settings.db/` と `/lost+found/` の中に
+  何があるかは検査していない (§D.11)。
 
 ### D.6 実装レビュー 往復 1 の blocker 9 件 (2026-09-13、着地 `2c35f7c` に対して)
 
@@ -224,6 +225,45 @@ RED  : hsync_protect_host.c がコンパイルできない (hsp_final_label が�
        着地版の hsync.c:544 は "\nDone: %d copied, ..." を無条件に出していた。
 GREEN: 57 checks / 0 failures、i386-elf-gcc も通過。
 ```
+
+### D.11 実配備 1 回目の差し戻し — ext2 の `lost+found` (2026-09-13)
+
+`make deploy-nhd` が実配備で止まった:
+
+```
+Error: 配備の前提検査に失敗: 配備ツリーを辿れない:
+       [Errno 13] Permission denied: '/tmp/os32/lost+found'
+```
+
+`mkfs.ext2` は必ずルート直下に root 所有 mode 700 の `lost+found` を作る。
+配備ツールは**非 root の Python** で走査する (実コピーだけ `sudo cp`) ので読めず、
+`check_tree` の「辿れない = 失敗」に当たっていた。配備対象でも保護対象でもない
+既知のディレクトリなので、走査から外す。
+
+| 変更 | 内容 |
+|---|---|
+| `protect.skip_root_entries(root, dirpath, dirnames)` | `SKIP_ROOT_DIRS` (= `lost+found`) を **ルート直下の実ディレクトリのときだけ** `dirnames` から in-place で外す。symlink / 通常ファイルなら外さない |
+| `protect.walk_root(root, onerror)` | `os.walk(followlinks=False)` の薄い包み。降りる前に上を適用する |
+| 適用点 | `check_tree`、`nhd_deploy.do_sync_from_hostdrv`、`hostdrv_deploy._clean_tree` (こちらは `os.listdir` 再帰なので `skip_root_entries` を直接) |
+
+```
+RED  : Ran 142 tests — FAILED (failures=3, errors=2)     137 passed
+GREEN: Ran 142 tests — OK
+```
+
+| 試験 | 見ていること |
+|---|---|
+| `test_check_tree_passes_with_unreadable_lost_found` | mode 000 の `lost+found` があっても `check_tree` が通る |
+| `test_sync_passes_with_unreadable_lost_found` | 同じ状態で `do_sync` が成功し、成果物が入る |
+| `test_sync_from_hostdrv_passes_with_unreadable_lost_found` | source / 宛先の両側にあっても成功し、**中身は配備しない** (宛先の `lost+found/secret` が元の内容のまま) |
+| `test_prune_and_clean_pass_with_unreadable_lost_found` | `prune_nhd` / `prune_hostdrv` / `do_clean` も通り、clean が中へ降りない |
+| `test_lost_found_symlink_is_still_refused` | `lost+found` が symlink なら**除外せず拒否** |
+| `test_unreadable_dir_elsewhere_still_fails` / `test_other_unreadable_root_dir_still_fails` | ルート以外の `lost+found`、ルート直下の別名 (`data`) は**従来どおり失敗** (判定不能は失敗) |
+| `test_lost_found_as_regular_file_is_not_skipped` | 通常ファイルなら外さない |
+
+**この除外の代償**: `lost+found` の中に symlink があっても検査していない。
+配備は中へ 1 バイトも書かないので最終パスの意味には効かないが、「ツリー全体に
+symlink が無い」とは言えなくなった (§D.5 に同じ注記)。
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
 
