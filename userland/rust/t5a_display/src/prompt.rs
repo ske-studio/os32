@@ -2,7 +2,7 @@
 //!
 //! `sink.rs` / `inject.rs` と同じ流儀で、ここは `no_std` の純関数だけ。KAPI も
 //! GUI も触らないので、ホスト試験が `host_tests/src/lib.rs` からそのまま
-//! 取り込める。存在確認 (`sys_open`) と `session_launch` の呼び出しは
+//! 取り込める。存在確認 (`sys_open`) と `launch_req` の呼び出しは
 //! `guest.rs` の担当で、こちらは「どのパスを、どの順に試すか」までを決める。
 //!
 //! ## 役割の分け方 (票 §2)
@@ -10,8 +10,13 @@
 //! - E2 プロンプト行: [`Line`] がローカル編集 (印字可能 ASCII / `GUI_EV_TEXT`
 //!   の UTF-8 / BS) を持つ。プロンプト表示中は 1 バイトも `kbd_inject` しない。
 //! - E3 起動: [`decide`] が行を解釈し、[`candidates`] が探す順の絶対パスを作る。
-//!   見つかったパスと残りの引数を [`command_line`] が `session_launch` の値へ。
+//!   見つかったパスと残りの引数を [`command_line`] が `launch_req` の値へ
+//!   (票 T9 D4 で行き先が `session_launch` から要求表に変わった。長さの上限は
+//!   どちらも 255B なので `PATH_MAX` はそのまま)。
 //! - E4 接続モード: [`step`] が `Mode` の遷移だけを決める (副作用は guest 側)。
+//!   票 T9 D4 で「戻る合図」は con_sink の `EXIT` から要求表の `launch_poll` に
+//!   移った ([`crate::launch`])。ここは結果 (`Done` / `Failed` / `Lost`) と
+//!   ESC (`CancelRequested`) を受けるだけ。
 //! - E5 空行 / `exit`: [`Decision::Empty`] / [`Decision::Exit`]。
 //! - T8 D7 入口: [`classify`] が OS32X ヘッダの宣言ビットを読み、`--cpl0` の
 //!   プログラム (v86 / VDM) は起動しない (`cui only: <名>`)。読み出しは `guest.rs`。
@@ -19,7 +24,8 @@
 /// 編集中の行が持てるバイト数。`command_line` が 255B に収まるよう
 /// `PATH_MAX` より小さく取る。
 pub const LINE_MAX: usize = 160;
-/// `session_launch` が受ける値の最大 (契約 S4: 1〜255B の絶対パス)。
+/// `launch_req` が受ける cmdline の最大 (NUL 込み 256B = `LAUNCH_CMDLINE_MAX`、
+/// 中身は 1〜255B)。`session_launch` の契約 S4 と同じ長さ。
 pub const PATH_MAX: usize = 255;
 /// 最下行 / ローカル出力 1 本が持てるバイト数。
 pub const MSG_MAX: usize = 128;
@@ -28,8 +34,14 @@ pub const MSG_MAX: usize = 128;
 pub const PREFIX: &[u8] = b"> ";
 /// 編集位置を示す 1 桁。
 pub const CARET: &[u8] = b"_";
-/// 接続モード中に最下行へ出す案内 (ESC でプロンプトへ戻れることを見せる)。
-pub const RUNNING: &[u8] = b"[running] ESC=prompt";
+/// 接続モード中に最下行へ出す案内の頭 (票 T9 D9: ESC は取消)。
+pub const RUNNING: &[u8] = b"[running";
+/// 取消を頼んだ後の頭 (ESC はもう効かない — `DONE` を待っている)。
+pub const CANCELLING: &[u8] = b"[cancelling";
+/// `[running …` の締めと案内。
+pub const RUNNING_HINT: &[u8] = b"] ESC=cancel";
+/// `[cancelling …` の締め。
+pub const CANCELLING_HINT: &[u8] = b"] wait";
 
 /// 名前だけで打たれたときに探す場所 (票 E3 の順)。
 pub const DIRS: [&[u8]; 2] = [b"/usr/bin/", b"/bin/"];
@@ -196,6 +208,16 @@ impl Msg {
     }
 }
 
+/// 数を混ぜた行を組むため (`launch failed (-13)` / `[running id=3]`)。
+/// 入り切らない分は [`Msg::push`] が黙って落とすので、書式の失敗では
+/// panic しない (状態行と同じ扱い)。
+impl core::fmt::Write for Msg {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.push(s.as_bytes());
+        Ok(())
+    }
+}
+
 /// ローカル出力 1 行 (`prefix` + `body` + 改行)。con_sink は通らない。
 pub fn message(prefix: &[u8], body: &[u8]) -> Msg {
     let mut out = Msg::new();
@@ -206,11 +228,43 @@ pub fn message(prefix: &[u8], body: &[u8]) -> Msg {
     out
 }
 
-/// 最下行に描く 1 行 (票 E2 / E4)。`cols` は桁数の上限。
-pub fn row(mode: Mode, line: &Line, cols: usize) -> Msg {
+/// ローカル出力 1 行に負の戻り値を添える (`launch failed (-13)`、票 T9 D4)。
+pub fn message_rc(prefix: &[u8], rc: i32) -> Msg {
+    use core::fmt::Write;
+    let mut out = Msg::new();
+    /* 改行の 1 バイトと `(-2147483648)` の 13 桁は必ず残す。 */
+    out.push(truncate_utf8(prefix, MSG_MAX.saturating_sub(14)));
+    let _ = write!(out, "({})", rc);
+    out.push(b"\n");
+    out
+}
+
+/// 接続モードの最下行に出す中身 (票 T9 D4 / D9)。`child` は `launch_poll` が
+/// `RUNNING` で教えた子 ID (0 = まだ分からない)。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Running {
+    pub child: i32,
+    /// `launch_cancel` を出した後 (ESC はもう受けない)。
+    pub cancelling: bool,
+}
+
+/// 最下行に描く 1 行 (票 E2 / E4、T9 D9)。`cols` は桁数の上限。
+pub fn row(mode: Mode, line: &Line, cols: usize, run: &Running) -> Msg {
+    use core::fmt::Write;
     let mut out = Msg::new();
     if mode == Mode::Attached {
-        out.push(truncate_utf8(RUNNING, cols));
+        /* 一度組んでから桁で切る — 途中で切ると案内が消えるだけで壊れない。 */
+        let mut all = Msg::new();
+        all.push(if run.cancelling { CANCELLING } else { RUNNING });
+        if run.child > 0 {
+            let _ = write!(all, " id={}", run.child);
+        }
+        all.push(if run.cancelling {
+            CANCELLING_HINT
+        } else {
+            RUNNING_HINT
+        });
+        out.push(truncate_utf8(all.bytes(), cols.min(MSG_MAX)));
         return out;
     }
     let cap = cols.min(MSG_MAX);
@@ -264,7 +318,7 @@ pub fn decide(line: &[u8]) -> Decision<'_> {
     while rest < line.len() && is_space(line[rest]) {
         rest += 1;
     }
-    /* 末尾の空白は落とす (`session_launch` の値に無駄を積まない)。 */
+    /* 末尾の空白は落とす (`launch_req` の値に無駄を積まない)。 */
     let mut tail = line.len();
     while tail > rest && is_space(line[tail - 1]) {
         tail -= 1;
@@ -305,7 +359,9 @@ impl Path {
         self.buf[self.len] = 0;
         true
     }
-    /// NUL を含まないバイト列 (`session_launch` 用)。
+    /// NUL を含まないバイト列。`launch_req` は NUL 終端 (`as_ptr`) を取るので、
+    /// guest では使わずホスト試験だけが読む。
+    #[allow(dead_code)]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
@@ -358,7 +414,7 @@ fn ends_with(bytes: &[u8], suffix: &[u8]) -> bool {
 /// - それ以外: `/usr/bin/<名>.bin` → `/bin/<名>.bin`。名前がすでに `.bin` で
 ///   終わっていれば重ねない (`kbd_echo.bin` と打っても同じ場所を探す)。
 ///
-/// 255B に収まらない候補は黙って落とす (`session_launch` が受けないため)。
+/// 255B に収まらない候補は黙って落とす (`launch_req` が受けないため)。
 pub fn candidates(name: &[u8]) -> Candidates {
     let mut out = Candidates {
         items: [Path::new(); DIRS.len()],
@@ -386,7 +442,7 @@ pub fn candidates(name: &[u8]) -> Candidates {
     out
 }
 
-/// 見つかった絶対パスと残りの引数を `session_launch` の値にする (票 E3)。
+/// 見つかった絶対パスと残りの引数を `launch_req` の値にする (票 E3 / T9 D4)。
 /// 255B に収まらなければ `None` — 黙って切ると別のコマンドを起動しかねない。
 pub fn command_line(path: &Path, args: &[u8]) -> Option<Path> {
     let mut out = *path;
@@ -414,41 +470,53 @@ pub enum Mode {
 }
 
 /// モードを動かしうる出来事。
+///
+/// 票 T9 D4 で `Exit` (con_sink の `EXIT` レコード) は**落とした** — `EXIT` は
+/// 表示だけに使い、モードは要求表 (`launch_poll`) の答えで動かす。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Event {
-    /// `session_launch` が受理された。
+    /// `launch_req` が token を返した。
     Launched,
-    /// con_sink の `EXIT` レコード (どの ID かは見ない、票 E4)。
-    Exit,
-    /// ESC 押下。
+    /// `launch_poll` が `DONE` を返した (取消で畳まれた場合も含む)。
+    Done,
+    /// `launch_poll` が `FAILED` / 負の戻り値だった。
+    Failed,
+    /// 接続モードで ESC を受けた = `launch_cancel` の要求 (票 D9)。
+    CancelRequested,
+    /// プロンプトで ESC を受けた (端末自身の終了)。
     Escape,
 }
 
-/// 遷移の答え。副作用 (行の消去・注入・終了) は呼ぶ側の仕事。
+/// 遷移の答え。副作用 (行の消去・注入・終了・`launch_cancel`) は呼ぶ側の仕事。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Next {
     /// 何も変えない。
     Stay,
     Prompt,
     Attached,
+    /// `launch_cancel(token)` を出す。**接続モードのまま**で、プロンプトへは
+    /// `DONE` を見てから戻る (票 T9 D9)。
+    Cancel,
     /// 端末自身の終了。
     Quit,
 }
 
-/// 票 E4 の遷移表。
+/// 票 E4 + T9 D4 / D9 の遷移表。
 ///
-/// - プロンプトの ESC は**自分の終了** (従来どおり)。
-/// - 接続モードの ESC は**プロンプトへ戻るだけ** — 子には注入せず、自分も
-///   終わらない。起動失敗 (gshell のモーダル) では `EXIT` が来ないため、
-///   これが唯一の戻り道になる。
-/// - プロンプトで受けた `EXIT` は捨てる (自分の子ではない / 取りこぼし)。
+/// - プロンプトの ESC は**自分の終了** (従来どおり)。子が生きていても取消は
+///   出さない — 要求者の退場はカーネルが孤児回収する (票 §10 non-blocker 1)。
+/// - 接続モードの ESC は `launch_cancel` (T9 D9)。子には注入しない。出した後も
+///   接続モードのままで、`DONE` を見てからプロンプトへ戻る。
+/// - プロンプトで受けた完了 (`Done` / `Failed`) は捨てる (取りこぼし)。
 pub fn step(mode: Mode, event: Event) -> Next {
     match (mode, event) {
         (Mode::Prompt, Event::Launched) => Next::Attached,
         (Mode::Prompt, Event::Escape) => Next::Quit,
-        (Mode::Prompt, Event::Exit) => Next::Stay,
-        (Mode::Attached, Event::Exit) => Next::Prompt,
-        (Mode::Attached, Event::Escape) => Next::Prompt,
+        (Mode::Prompt, _) => Next::Stay,
+        (Mode::Attached, Event::Escape) => Next::Cancel,
+        (Mode::Attached, Event::CancelRequested) => Next::Stay,
+        (Mode::Attached, Event::Done) => Next::Prompt,
+        (Mode::Attached, Event::Failed) => Next::Prompt,
         (Mode::Attached, Event::Launched) => Next::Stay,
     }
 }
@@ -502,8 +570,8 @@ fn le32(b: &[u8], off: usize) -> u32 {
 /// **純関数**: OS32X ヘッダの先頭 40B → 起動の可否。
 ///
 /// 読めなかった / OS32X でない / 短い ものは [`Kind::Plain`] に倒す —
-/// 立てない側へ倒せば既存の起動経路は 1 つも変わらない (`session_launch` の
-/// 失敗として従来どおり出る)。`FORCE_CPL0` / `CUI_ONLY` は `FLAG_GFX` より強い。
+/// 立てない側へ倒せば既存の起動経路は 1 つも変わらない (起動要求の
+/// `FAILED` として従来どおり出る)。`FORCE_CPL0` / `CUI_ONLY` は `FLAG_GFX` より強い。
 pub fn classify(hdr: &[u8]) -> Kind {
     if hdr.len() < OS32X_HDR_SIZE {
         return Kind::Plain;
@@ -653,16 +721,60 @@ mod tests {
     #[test]
     fn row_shows_the_prompt_or_the_running_marker() {
         let l = line_of("kbd_echo");
-        assert_eq!(row(Mode::Prompt, &l, 40).bytes(), b"> kbd_echo_");
-        assert_eq!(row(Mode::Attached, &l, 40).bytes(), RUNNING);
+        let idle = Running::default();
+        assert_eq!(row(Mode::Prompt, &l, 40, &idle).bytes(), b"> kbd_echo_");
         /* 空行でもプロンプトと編集位置は出る。 */
-        assert_eq!(row(Mode::Prompt, &Line::new(), 40).bytes(), b"> _");
+        assert_eq!(row(Mode::Prompt, &Line::new(), 40, &idle).bytes(), b"> _");
         /* 桁が足りなければ末尾を見せる (打っている場所が見えなくならない)。 */
-        assert_eq!(row(Mode::Prompt, &l, 8).bytes(), b"> _echo_");
-        assert_eq!(row(Mode::Prompt, &l, 3).bytes(), b"> _");
+        assert_eq!(row(Mode::Prompt, &l, 8, &idle).bytes(), b"> _echo_");
+        assert_eq!(row(Mode::Prompt, &l, 3, &idle).bytes(), b"> _");
         /* 桁がプロンプトにも足りない極端な窓でも壊れない。 */
-        assert_eq!(row(Mode::Prompt, &l, 1).bytes(), b">");
-        assert_eq!(row(Mode::Prompt, &l, 0).bytes(), b"");
+        assert_eq!(row(Mode::Prompt, &l, 1, &idle).bytes(), b">");
+        assert_eq!(row(Mode::Prompt, &l, 0, &idle).bytes(), b"");
+    }
+
+    /// 票 T9 D4 / D9: 接続モードの最下行は ESC = 取消を案内し、`launch_poll` が
+    /// 教えた子 ID を出す。
+    fn attached_row(child: i32, cancelling: bool, cols: usize) -> Msg {
+        row(
+            Mode::Attached,
+            &Line::new(),
+            cols,
+            &Running { child, cancelling },
+        )
+    }
+
+    #[test]
+    fn attached_row_names_the_child_and_offers_cancel() {
+        /* 子 ID がまだ分からない (PENDING / TAKEN) 間は id を出さない。 */
+        assert_eq!(attached_row(0, false, 40).bytes(), b"[running] ESC=cancel");
+        assert_eq!(
+            attached_row(3, false, 40).bytes(),
+            b"[running id=3] ESC=cancel"
+        );
+        /* 取消を出した後は ESC の案内を下げる (もう受けない)。 */
+        assert_eq!(attached_row(3, true, 40).bytes(), b"[cancelling id=3] wait");
+        assert_eq!(attached_row(0, true, 40).bytes(), b"[cancelling] wait");
+        /* 桁が足りなければ頭から入るだけ。壊れない。 */
+        assert_eq!(attached_row(3, false, 8).bytes(), b"[running");
+        assert_eq!(attached_row(3, false, 0).bytes(), b"");
+    }
+
+    #[test]
+    fn message_rc_prints_the_negative_return_value() {
+        assert_eq!(
+            message_rc(b"launch failed ", -13).bytes(),
+            b"launch failed (-13)\n"
+        );
+        assert_eq!(
+            message_rc(b"launch_req failed ", -9).bytes(),
+            b"launch_req failed (-9)\n"
+        );
+        /* 長すぎる前置きでも数と改行は残る。 */
+        let long = vec![b'x'; MSG_MAX];
+        let m = message_rc(&long, -2147483648);
+        assert!(m.len() <= MSG_MAX);
+        assert_eq!(&m.bytes()[m.len() - 14..], b"(-2147483648)\n");
     }
 
     #[test]
@@ -753,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_drop_what_session_launch_cannot_take() {
+    fn candidates_drop_what_launch_req_cannot_take() {
         let long = vec![b'a'; PATH_MAX];
         assert!(candidates(&long).is_empty());
         let mut absolute = vec![b'/'];
@@ -785,15 +897,20 @@ mod tests {
 
     #[test]
     fn mode_transitions_follow_the_ticket() {
-        /* prompt → launch → attached → EXIT → prompt。 */
+        /* 票 T9 D4: prompt → launch_req → attached → DONE → prompt。 */
         assert_eq!(step(Mode::Prompt, Event::Launched), Next::Attached);
-        assert_eq!(step(Mode::Attached, Event::Exit), Next::Prompt);
-        /* 接続モードの ESC はプロンプトへ戻るだけ (終了しない)。 */
-        assert_eq!(step(Mode::Attached, Event::Escape), Next::Prompt);
+        assert_eq!(step(Mode::Attached, Event::Done), Next::Prompt);
+        /* FAILED / poll の異常もプロンプトへ戻る (固まらない)。 */
+        assert_eq!(step(Mode::Attached, Event::Failed), Next::Prompt);
+        /* 票 T9 D9: 接続モードの ESC は取消。**まだ**プロンプトへは戻らない。 */
+        assert_eq!(step(Mode::Attached, Event::Escape), Next::Cancel);
+        assert_eq!(step(Mode::Attached, Event::CancelRequested), Next::Stay);
         /* プロンプトの ESC は従来どおり自分の終了。 */
         assert_eq!(step(Mode::Prompt, Event::Escape), Next::Quit);
-        /* 迷子の EXIT と二重の Launched は何も変えない。 */
-        assert_eq!(step(Mode::Prompt, Event::Exit), Next::Stay);
+        /* 迷子の完了と二重の Launched は何も変えない。 */
+        assert_eq!(step(Mode::Prompt, Event::Done), Next::Stay);
+        assert_eq!(step(Mode::Prompt, Event::Failed), Next::Stay);
+        assert_eq!(step(Mode::Prompt, Event::CancelRequested), Next::Stay);
         assert_eq!(step(Mode::Attached, Event::Launched), Next::Stay);
     }
 }

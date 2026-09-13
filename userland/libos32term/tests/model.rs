@@ -258,13 +258,85 @@ fn backspace_returns_to_character_start_without_erasing() {
 }
 
 #[test]
-fn backspace_at_new_line_does_not_enter_previous_row() {
+fn backspace_at_column_zero_erases_across_the_wrap() {
+    // A line longer than cols continues on the next row, so a caller erasing
+    // its own last character with BS, space, BS must reach the previous row's
+    // end without knowing the width.
+    let mut cells = [BLANK; 80];
+    let mut model = Model::new(&mut cells, 40, 2, width).unwrap();
+    for _ in 0..41 {
+        assert_eq!(model.write_char('A'), Ok(()));
+    }
+    assert_eq!(model.state().cursor, (1, 1));
+    // The wrapped character on the second row goes first.
+    for ch in "\x08 \x08".chars() {
+        assert_eq!(model.write_char(ch), Ok(()));
+    }
+    assert_eq!(model.state().cursor, (0, 1));
+    assert_eq!(model.cells()[40], BLANK);
+    // The next BS crosses the wrap to the last column of the first row, and
+    // the space erases the character standing there.
+    assert_eq!(model.write_char('\x08'), Ok(()));
+    assert_eq!(model.state().cursor, (39, 0));
+    assert_eq!(model.write_char(' '), Ok(()));
+    assert_eq!(model.cells()[39], BLANK);
+    // Writing the space consumed the row again (pending wrap), so BS returns
+    // to the same column and the following character replaces it.
+    assert_eq!(model.state().cursor, (40, 0));
+    assert_eq!(model.write_char('\x08'), Ok(()));
+    assert_eq!(model.state().cursor, (39, 0));
+    assert_eq!(model.write_char('x'), Ok(()));
+    assert_eq!(model.cells()[39], Cell::Single('x'));
+    assert_eq!(model.cells()[38], Cell::Single('A'));
+}
+
+#[test]
+fn backspace_across_the_wrap_skips_a_wide_half() {
+    // The previous row ends in a continuation, so the cursor lands on the wide
+    // character's own column; a space then clears both halves.
+    let mut cells = [BLANK; 80];
+    let mut model = Model::new(&mut cells, 40, 2, width).unwrap();
+    for _ in 0..38 {
+        assert_eq!(model.write_char('A'), Ok(()));
+    }
+    for ch in "漢B".chars() {
+        assert_eq!(model.write_char(ch), Ok(()));
+    }
+    assert_eq!(model.state().cursor, (1, 1));
+    for ch in "\x08 \x08\x08".chars() {
+        assert_eq!(model.write_char(ch), Ok(()));
+    }
+    assert_eq!(model.state().cursor, (38, 0));
+    assert_eq!(model.write_char(' '), Ok(()));
+    assert_eq!(model.cells()[38], BLANK);
+    assert_eq!(model.cells()[39], BLANK);
+}
+
+#[test]
+fn backspace_at_the_first_column_of_the_first_row_stays() {
+    let mut cells = [BLANK; 4];
+    let mut model = Model::new(&mut cells, 2, 2, width).unwrap();
+    for ch in "漢\x08\x08\x08".chars() {
+        assert_eq!(model.write_char(ch), Ok(()));
+    }
+    assert_eq!(model.state().cursor, (0, 0));
+    assert_eq!(
+        model.cells(),
+        &[Cell::Wide('漢'), Cell::Continuation, BLANK, BLANK]
+    );
+}
+
+#[test]
+fn backspace_after_a_newline_also_reaches_the_previous_row_end() {
+    // The model keeps no wrap flag, so column 0 reached by LF is not told apart
+    // from column 0 reached by a wrap. Landing on the previous row's end erases
+    // nothing by itself, and callers only backspace over what they just wrote.
     let mut cells = [BLANK; 4];
     let mut model = Model::new(&mut cells, 2, 2, width).unwrap();
     for ch in "漢\n\x08".chars() {
         assert_eq!(model.write_char(ch), Ok(()));
     }
-    assert_eq!(model.state().cursor, (0, 1));
+    assert_eq!(model.state().cursor, (0, 0));
     assert_eq!(
         model.cells(),
         &[Cell::Wide('漢'), Cell::Continuation, BLANK, BLANK]

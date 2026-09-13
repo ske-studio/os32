@@ -7,6 +7,48 @@
 
 #define HIST_SIZE    16
 
+/* ------------------------------------------------------------------------ */
+/*  行入力のキー源 (票 §10 non-blocker 3)                                    */
+/*                                                                          */
+/*  常駐は FEP を通す ime_getkey。sh.bin は端末の子なので FEP の確定は        */
+/*  gshell 側で済んでおり、二重に通すと確定済み UTF-8 をもう一度食う。        */
+/*  kbd_getkey は同じ u16 形式 (上位=スキャンコード / 下位=ASCII) を返し、    */
+/*  GUI 中は注入リングの 1 バイト (スキャンコード 0) を WAIT_KEY で park      */
+/*  しながら渡す — UTF-8 の後続バイトも同じ経路なので下の行編集はそのまま     */
+/*  動く (矢印などスキャンコードを要する枝は端末経由では最初から来ない)。     */
+/*  常駐側の展開は以前と同一トークン。                                        */
+/* ------------------------------------------------------------------------ */
+#ifdef SHELL_AS_APP
+#define sh_getkey() (g_api->kbd_getkey())
+#else
+#define sh_getkey() (g_api->ime_getkey())
+#endif
+
+/* 履歴ファイル名。常駐の ~/.history を sh.bin が壊さないよう別名 (D2(c))。
+ * HIST_FILE_ROOM は hist_build_path が HOME をコピーするときに残す余白
+ * ("/" + 名前 + NUL) で、名前を長くしたら必ず一緒に広げること。 */
+#ifdef SHELL_AS_APP
+#define HIST_FILE_NAME  ".sh_history"
+#define HIST_FILE_ROOM  16
+#else
+#define HIST_FILE_NAME  ".history"
+#define HIST_FILE_ROOM  12
+#endif
+
+/* 画面に出ている入力行の写しを更新する印 (実装レビュー blocker 1)。
+ * shell_run は 1 文字追加や BS を redraw_line を通さずに直接印字するので、
+ * その場でも写しを合わせないと「純粋な延長」の判定が狂う。
+ * sh_drop_drawn() は行の作り直しを強制する (候補一覧を挟んだ後など)。
+ * 常駐では両方とも消える — redraw_line も写しも常駐には無い。 */
+#ifdef SHELL_AS_APP
+/* 直接印字の後は画面カーソルも行末にある (追加・行末 BS しか通らない) */
+#define sh_mark_drawn(buf, len)  sh_set_drawn((buf), (len), (len))
+#define sh_drop_drawn()          sh_set_drawn((const char *)0, -1, -1)
+#else
+#define sh_mark_drawn(buf, len)  ((void)0)
+#define sh_drop_drawn()          ((void)0)
+#endif
+
 static char hist_buf[HIST_SIZE][HIST_LINE_MAX];
 static int  hist_count = 0;
 static int  hist_idx   = 0;
@@ -28,12 +70,22 @@ static void hist_add(const char *s) {
 }
 
 static void show_prompt(void) {
+#ifdef SHELL_AS_APP
+    /* D2(e): 常駐 (OS32:/path$) と見分けが付くように短い固定プロンプト */
+    g_api->kprintf(ATTR_WHITE, "%s", "sh> ");
+#else
     g_api->kprintf(ATTR_GREEN, "OS32");
     g_api->kprintf(ATTR_GREEN, ":");
     g_api->kprintf(ATTR_CYAN, "%s", g_api->sys_getcwd());
     g_api->kprintf(ATTR_WHITE, "$ ");
+#endif
 }
 
+#ifdef SHELL_AS_APP
+/* GUI 中はコンソール座標が使えない (理由と方針は sh_redraw.inc の頭)。
+ * ホスト TDD が同じソースを #include できるように別ファイルにしてある。 */
+#include "sh_redraw.inc"
+#else
 static void redraw_line(const char *buf, int len, int cursor) {
     int i, cl;
     char tmp_buf[CMD_BUF_SIZE];
@@ -51,6 +103,7 @@ static void redraw_line(const char *buf, int len, int cursor) {
     show_prompt();
     for (i = 0; i < cursor; i++) g_api->console_set_cursor(g_api->console_get_cursor_x() + 1, g_api->console_get_cursor_y());
 }
+#endif
 
 /* ======================================================================== */
 /*  タブ補完: コマンド名 (内部+PATH) + ファイル名                           */
@@ -307,6 +360,7 @@ static int tab_complete(char *buf, int pos, int show_candidates) {
                 for (i = 0; i < match_count; i++)
                     g_api->kprintf(ATTR_CYAN, "  %s", matches[i]);
                 g_api->kprintf(ATTR_WHITE, "%s", "\n");
+                sh_drop_drawn();   /* 行が流れた — 次は作り直す */
                 return -1;
             }
         }
@@ -338,6 +392,7 @@ static int tab_complete(char *buf, int pos, int show_candidates) {
         g_api->kprintf(ATTR_WHITE, "%s", "\n");
         for (i = 0; i < match_count; i++) g_api->kprintf(ATTR_CYAN, "  %s", matches[i]);
         g_api->kprintf(ATTR_WHITE, "%s", "\n");
+        sh_drop_drawn();   /* 行が流れた — 次は作り直す */
         return -1;
     }
     return pos;
@@ -355,9 +410,9 @@ static int hist_build_path(char *path, int max)
 
     if (!home) return -1;
     h = home;
-    while (*h && pi < max - 12) path[pi++] = *h++;
+    while (*h && pi < max - HIST_FILE_ROOM) path[pi++] = *h++;
     if (pi > 0 && path[pi - 1] != '/') path[pi++] = '/';
-    fn = ".history";
+    fn = HIST_FILE_NAME;
     while (*fn) path[pi++] = *fn++;
     path[pi] = '\0';
     return 0;
@@ -482,24 +537,44 @@ void shell_run(void) {
     /* 履歴ファイル読み込み */
     hist_load();
 
-    /* 初期化時に自動シリアル＆rshell開始 */
+#ifndef SHELL_AS_APP
+    /* 初期化時に自動シリアル＆rshell開始
+     * D2(a): sh.bin では呼ばない。シリアルを初期化すると rshell_active の
+     * タイムアウト (kbd_getchar が一定時間でスペースを返す) まで巻き込む。 */
     g_api->serial_init(SYS_SERIAL_BAUD);
     execute_command("rshell");
+#endif
 
     for (;;) {
+#ifdef SHELL_AS_APP
+        /* D2(d): `exit` の印はプロンプトを出す**前**に見る。/etc/profile や
+         * $HOME/.profile の中の `exit` でも、入力待ちに入らずここで終わる
+         * (前の行の実行が立てた印もここで拾うので、ループ末尾では見ない)。 */
+        if (sh_exit_flag) break;
+#endif
         show_prompt();
         cmd_pos = cmd_len = cmd_buf[0] = prev_draw_len = 0;
+        sh_mark_drawn(cmd_buf, 0);
         hist_idx = hist_count;
 
         for (;;) {
-            key = g_api->ime_getkey();
+            key = sh_getkey();
 
             if ((key & 0xFF) == 0x0D) { g_api->shell_putchar('\n', ATTR_WHITE); break; }
             if ((key & 0xFF) == 0x08) {
                 if (cmd_pos > 0) {
                     if (cmd_pos == cmd_len) {
+#ifdef SHELL_AS_APP
+                        /* 端末の BS はセルを消さないので BS + 空白 + BS。
+                         * 写しの確定も sh_backspace_tail の中で行う。 */
+                        cmd_pos--; cmd_len--;
+                        sh_backspace_tail(cmd_buf, cmd_len);
+                        prev_draw_len = cmd_len;
+#else
                         cmd_pos--; cmd_len--; cmd_buf[cmd_len] = 0;
                         g_api->shell_putchar(0x08, ATTR_WHITE); prev_draw_len = cmd_len;
+                        sh_mark_drawn(cmd_buf, cmd_len);
+#endif
                     } else {
                         int i; for (i = cmd_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i+1];
                         cmd_len--; cmd_pos--; cmd_buf[cmd_len] = 0; redraw_line(cmd_buf, cmd_len, cmd_pos);
@@ -525,14 +600,20 @@ void shell_run(void) {
                 }
                 continue;
             }
+            /* LEFT / RIGHT / HOME は内容を変えずに**画面カーソルだけ**動かす。
+             * 写しは内容しか見ていないので、そのままだと次の TAB 補完が
+             * 「行末への延長」と誤判定する (`hel` → LEFT → TAB で `hep `)。
+             * 追従させるより捨てて次回を行の作り直しに倒す方が安全 — 経路を
+             * 1 つ見落としても表示が壊れない。GUI 中はスキャンコードが来ない
+             * のでここは通らず、CUI 直起動のときだけ効く。 */
             if ((key >> 8) == 0x3B) { /* LEFT */
-                if (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } continue;
+                if (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); sh_drop_drawn(); } continue;
             }
             if ((key >> 8) == 0x3C) { /* RIGHT */
-                if (cmd_pos < cmd_len) { g_api->shell_putchar(cmd_buf[cmd_pos], ATTR_WHITE); cmd_pos++; } continue;
+                if (cmd_pos < cmd_len) { g_api->shell_putchar(cmd_buf[cmd_pos], ATTR_WHITE); cmd_pos++; sh_drop_drawn(); } continue;
             }
             if ((key >> 8) == 0x3E) { /* HOME */
-                while (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } continue;
+                while (cmd_pos > 0) { cmd_pos--; g_api->shell_putchar(0x08, ATTR_WHITE); } sh_drop_drawn(); continue;
             }
             if ((key >> 8) == 0x39) { /* DEL */
                 if (cmd_pos < cmd_len) {
@@ -543,7 +624,12 @@ void shell_run(void) {
             }
             if ((key >> 8) == 0x0F || (key & 0xFF) == 0x09) { /* TAB */
                 int npos = tab_complete(cmd_buf, cmd_len, last_tab);
-                if (npos == -1) { show_prompt(); redraw_line(cmd_buf, cmd_len, cmd_pos); }
+                if (npos == -1) {
+#ifndef SHELL_AS_APP
+                    show_prompt();
+#endif
+                    redraw_line(cmd_buf, cmd_len, cmd_pos);
+                }
                 else if (npos != cmd_len) { cmd_len = cmd_pos = npos; redraw_line(cmd_buf, cmd_len, cmd_pos); last_tab = 0; }
                 else last_tab = 1;
                 continue;
@@ -570,7 +656,7 @@ void shell_run(void) {
                         else expect = 1;
                         /* 後続バイトを読み取る */
                         while (utf8_len < expect) {
-                            int nk = g_api->ime_getkey();
+                            int nk = sh_getkey();
                             u8 nb = (u8)(nk & 0xFF);
                             if ((nb & 0xC0) != 0x80) break;
                             utf8_tmp[utf8_len++] = (char)nb;
@@ -587,6 +673,7 @@ void shell_run(void) {
                                 cmd_buf[cmd_len] = 0;
                                 g_api->shell_print_utf8(utf8_tmp, ATTR_WHITE);
                                 prev_draw_len = cmd_len;
+                                sh_mark_drawn(cmd_buf, cmd_len);
                             } else {
                                 int i;
                                 for (i = cmd_len - 1 + utf8_len; i >= cmd_pos + utf8_len; i--)
@@ -604,6 +691,7 @@ void shell_run(void) {
                         if (cmd_pos == cmd_len) {
                             cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
                             g_api->shell_putchar(ch, ATTR_WHITE); prev_draw_len = cmd_len;
+                            sh_mark_drawn(cmd_buf, cmd_len);
                         } else {
                             int i; for (i = cmd_len; i > cmd_pos; i--) cmd_buf[i] = cmd_buf[i-1];
                             cmd_buf[cmd_pos++] = ch; cmd_len++; cmd_buf[cmd_len] = 0;
@@ -617,5 +705,8 @@ void shell_run(void) {
         if (cmd_len > 0) hist_add(cmd_buf);
         execute_command(cmd_buf);
         if (hist_dirty) hist_save();
+        /* `exit` の印はループの入口で見る (起動時の profile も拾うため)。
+         * 抜けると main が 0 を返して sh.bin が終わり、端末は launch_poll の
+         * DONE でプロンプトへ戻る。常駐シェルには exit を登録していない。 */
     }
 }

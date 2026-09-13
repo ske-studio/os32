@@ -283,6 +283,123 @@ pub static KBD_PENDING: AtomicUsize = AtomicUsize::new(0);
 /// `exec_app_state(app_id)` が返す状態。添字 = app_id、既定は 2 (`PARKED`)。
 pub static APP_STATE: Mutex<Vec<i32>> = Mutex::new(Vec::new());
 
+/* ---- 起動要求表 (KAPI v49、票 T9 D3) ---------------------------------- */
+/// `launch_pending()` が返す本数。
+pub static LAUNCH_PENDING: AtomicUsize = AtomicUsize::new(0);
+/// `launch_take` が順に返す要求 (token, kind, arg, cmdline)。空なら 0 (無し)。
+pub static TAKE_SCRIPT: Mutex<Vec<(i32, i32, i32, Vec<u8>)>> = Mutex::new(Vec::new());
+/// `launch_take` が呼ばれた回数 (「STALE を再試行しない」の観測点)。
+pub static TAKES: AtomicUsize = AtomicUsize::new(0);
+/// `launch_report(token, rc)` の呼び出し列。
+pub static REPORTS: Mutex<Vec<(i32, i32)>> = Mutex::new(Vec::new());
+/// `launch_report` の戻り値 (既定 0。`OS32_ERR_STALE` = -11 を返させる試験がある)。
+pub static REPORT_RET: Mutex<i32> = Mutex::new(0);
+/// `launch_child(id)` の答え。添字 = id、既定 0 (連鎖の末尾)。
+pub static LAUNCH_CHILD: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `exec_kill(id)` で `FREE` (0) に落とす ID の列 (子孫ごと畳む K の振る舞い)。
+pub static KILL_FREES: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+/// `get_tick()` が返す tick (D5 の「同じ tick に 2 回起こさない」の観測点)。
+pub static TICK: AtomicUsize = AtomicUsize::new(0);
+/// `get_tick()` が呼び出しごとに返す列 (空なら `TICK` をそのまま返す)。
+pub static TICK_SCRIPT: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// 積まれている起動要求の本数を置く。
+pub fn set_launch_pending(n: usize) {
+    LAUNCH_PENDING.store(n, Ordering::SeqCst);
+}
+/// `launch_take` が返す要求を 1 本積む (取り出すと `launch_pending` が 1 減る)。
+pub fn push_take(token: i32, kind: i32, arg: i32, cmdline: &[u8]) {
+    lk(&TAKE_SCRIPT).push((token, kind, arg, cmdline.to_vec()));
+    LAUNCH_PENDING.fetch_add(1, Ordering::SeqCst);
+}
+/// `launch_take` が呼ばれた回数。
+pub fn take_calls() -> usize {
+    TAKES.load(Ordering::SeqCst)
+}
+/// `launch_report(token, rc)` の呼び出し列 (複製)。
+pub fn report_calls() -> Vec<(i32, i32)> {
+    lk(&REPORTS).clone()
+}
+/// `launch_report` の戻り値を置く (-11 = `OS32_ERR_STALE`)。
+pub fn set_report_ret(rc: i32) {
+    *lk(&REPORT_RET) = rc;
+}
+/// `launch_child(id)` の答えを置く (0 = 連鎖の末尾)。
+pub fn set_launch_child(id: i32, child: i32) {
+    let mut v = lk(&LAUNCH_CHILD);
+    if v.len() <= id as usize {
+        v.resize(id as usize + 1, 0);
+    }
+    v[id as usize] = child;
+}
+/// `exec_kill` が `FREE` に落とす ID を置く (既定は空 = 状態を動かさない)。
+pub fn set_kill_frees(ids: &[i32]) {
+    *lk(&KILL_FREES) = ids.to_vec();
+}
+/// `get_tick()` が返す値を置く。
+pub fn set_tick(t: u32) {
+    TICK.store(t as usize, Ordering::SeqCst);
+}
+/// `get_tick()` を**呼び出しごとに**この列で返す (尽きたら最後の値のまま)。
+/// 「選んでから再開するまでの間に PIT が進む」= tick 境界をまたぐ周を作る。
+pub fn set_tick_script(ticks: &[u32]) {
+    *lk(&TICK_SCRIPT) = ticks.to_vec();
+}
+
+unsafe extern "C" fn get_tick() -> u32 {
+    let mut q = lk(&TICK_SCRIPT);
+    if !q.is_empty() {
+        let t = q.remove(0);
+        /* 最後の 1 つはそのまま居座る (以後の呼び出しはこの値)。 */
+        TICK.store(t as usize, Ordering::SeqCst);
+        return t;
+    }
+    TICK.load(Ordering::SeqCst) as u32
+}
+unsafe extern "C" fn launch_pending() -> i32 {
+    LAUNCH_PENDING.load(Ordering::SeqCst) as i32
+}
+unsafe extern "C" fn launch_take(
+    buf: *mut u8,
+    cap: u32,
+    requester: *mut i32,
+    kind: *mut i32,
+    arg: *mut i32,
+) -> i32 {
+    TAKES.fetch_add(1, Ordering::SeqCst);
+    /* 実物と同じ門: cap < LAUNCH_CMDLINE_MAX は断る (§1a)。 */
+    if buf.is_null() || cap < 256 {
+        return -2; /* OS32_ERR_INVAL */
+    }
+    let mut q = lk(&TAKE_SCRIPT);
+    if q.is_empty() {
+        return 0;
+    }
+    let (token, k, a, cmd) = q.remove(0);
+    LAUNCH_PENDING.fetch_sub(1, Ordering::SeqCst);
+    let n = core::cmp::min(cmd.len(), cap as usize - 1);
+    std::ptr::copy_nonoverlapping(cmd.as_ptr(), buf, n);
+    *buf.add(n) = 0;
+    if !requester.is_null() {
+        /* KILL は孤児回収 (-1)、LAUNCH は要求者 2 を既定にする。 */
+        *requester = if k == 2 { -1 } else { 2 };
+    }
+    if !kind.is_null() {
+        *kind = k;
+    }
+    if !arg.is_null() {
+        *arg = a;
+    }
+    token
+}
+unsafe extern "C" fn launch_report(token: i32, rc: i32) -> i32 {
+    lk(&REPORTS).push((token, rc));
+    *lk(&REPORT_RET)
+}
+unsafe extern "C" fn launch_child(id: i32) -> i32 {
+    lk(&LAUNCH_CHILD).get(id as usize).copied().unwrap_or(0)
+}
+
 /// 中毒 (panic 中に掴んでいた) した Mutex でも読めるようにする。検査が
 /// `assert!(*X.lock().unwrap() == ..)` で落ちると次の試験まで巻き添えになる。
 fn lk<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -416,6 +533,12 @@ unsafe extern "C" fn exec_start(cmdline: *const u8) -> i32 {
 }
 unsafe extern "C" fn exec_kill(app_id: i32) -> i32 {
     lk(&KILLS).push(app_id);
+    /* 実物の `exec_kill` は連鎖の子孫ごと畳む (票 T9 D8)。畳んだ結果
+     * `exec_app_state` が `FREE` になる ID を試験が置く (既定は空)。 */
+    let freed = lk(&KILL_FREES).clone();
+    for id in freed {
+        set_app_state(id, 0);
+    }
     0
 }
 unsafe extern "C" fn snd_focus(app_id: i32) -> i32 {
@@ -454,7 +577,7 @@ pub fn set_app_state(app_id: i32, state: i32) {
 
 pub fn init() {
     let mut a = os32api::mock_api();
-    a.get_tick = zero;
+    a.get_tick = get_tick;
     a.sys_time = zero;
     a.kbd_dropped_count = zero;
     a.kbd_trygetrawkey = raw_key;
@@ -487,6 +610,12 @@ pub fn init() {
     a.snd_focus = snd_focus;
     a.kbd_inject_pending = kbd_inject_pending;
     a.exec_app_state = exec_app_state;
+    /* 票 T9 (KAPI v49): 起動要求表。表そのものの遷移は実物で検査済み
+     * (`tools/tests/launch_host.c`)。ここは WM が「いつ・何を渡したか」だけ見る。 */
+    a.launch_pending = launch_pending;
+    a.launch_take = launch_take;
+    a.launch_report = launch_report;
+    a.launch_child = launch_child;
     lk(&RAWKEYS).clear();
     lk(&IME_SCRIPT).clear();
     GFX_INITS.store(0, Ordering::SeqCst);
@@ -510,6 +639,15 @@ pub fn init() {
     ABORT_CLEARS.store(0, Ordering::SeqCst);
     KBD_PENDING.store(0, Ordering::SeqCst);
     lk(&APP_STATE).clear();
+    LAUNCH_PENDING.store(0, Ordering::SeqCst);
+    TAKES.store(0, Ordering::SeqCst);
+    TICK.store(0, Ordering::SeqCst);
+    lk(&TICK_SCRIPT).clear();
+    lk(&TAKE_SCRIPT).clear();
+    lk(&REPORTS).clear();
+    *lk(&REPORT_RET) = 0;
+    lk(&LAUNCH_CHILD).clear();
+    lk(&KILL_FREES).clear();
     crate::multiapp::reset();
     os32api::os32_init(Box::into_raw(Box::new(a)));
     clear(9);

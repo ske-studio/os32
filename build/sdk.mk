@@ -179,9 +179,37 @@ check-con-sink-host:
 check-kbd-inject-host:
 	python3 -B tools/tests/test_kbd_inject.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-multiapp-model-host
+# exec/launch.c の起動要求表 (票 T9 D3)。実物のソースを exec/appslot.c と同じ
+# 翻訳単位で走らせ (要求者・子の所有・token の照合は AppSlot を引く)、同じ
+# ソースが i386-elf-gcc -Werror でも通ることを見る。記録は tools/tests/t9_tdd.md。
+check-launch-host:
+	python3 -B tools/tests/test_launch.py
+
+# exec/ring3_str.c — KAPI が CPL=3 へ **返す** 文字列の置き場 (票 T9 §12 R1)。
+# カーネル帯には USER ビットが無いので、sys_getcwd がそのまま返すと CPL=3 の
+# 呼び手が #PF で畳まれる。写し先 (トランポリンページの空き) の番地の式と
+# 経路の分岐をホストで踏む。記録は tools/tests/t9_tdd.md。
+check-ring3-str-host:
+	python3 -B tools/tests/test_ring3_str.py
+
+# userland/shell/sh_launch.inc の起動待ち (票 T9 D3a)。実物のソースを
+# tools/tests/sh_launch_host.c がそのまま #include し、KernelAPI の
+# launch_req / launch_poll / sys_yield / kprintf を差し替えて DONE / FAILED /
+# STALE / FULL の 4 経路と「待ちの間 kbd_* / ime_* を呼ばない」を見る。
+# 同じソースが i386-elf-gcc -Werror でも通ることも別に見る。記録は t9_tdd.md。
+check-sh-launch-host:
+	python3 -B tools/tests/test_sh_launch.py
+
+# userland/shell/sh_redraw.inc の行再描画 (実装レビュー blocker 1 — GUI 中は
+# コンソール座標が動かない) と userland/shell/cmd_script.c の source 中 exit
+# (blocker 2 / D2(d))。どちらも実物のソースを tools/tests/sh_shell_host.c が
+# そのまま #include する。記録は tools/tests/t9_tdd.md。
+check-sh-shell-host:
+	python3 -B tools/tests/test_sh_shell.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-multiapp-model-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check

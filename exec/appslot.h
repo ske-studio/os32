@@ -54,6 +54,15 @@
  * 値の追加なので exec_app_state の既存の 0/1/2/3 は 1 つも動かない。 */
 #define APP_STATE_WAIT_POLL 4
 
+/* 暴走 (KAPI を呼ばない計算ループ) の逃げ道 (票 T9 §12 S6)。GUI 中の IRQ1 は
+ * 「走っている ID が最後に **カーネルへ入って** からこの tick 数以上経った」
+ * ときだけ CTRL+STOP を立てる。PIT は 100Hz なので 200 = 2 秒。
+ * 生きているアプリは描画も入力もキーも KAPI 経由なので、2 秒 1 度も
+ * カーネルへ入らない = KAPI を呼ばない計算ループに入った、と読める。
+ * **待っているアプリは対象外** — op_wait / kbd 待ちは KAPI の中に居る
+ * (その syscall の入口で控えが更新されている)。 */
+#define APP_RUNAWAY_TICKS  200
+
 /* int80_stub が積むフレームの語数 ([0..7]=pushad, [8]=EIP [9]=CS
  * [10]=EFLAGS [11]=userESP [12]=userSS)。ring3_entry.asm と同期。 */
 #define APP_FRAME_WORDS    13
@@ -71,6 +80,24 @@ typedef struct {
     int  parked_from_wait;    /* park したフレームの「OP_WAIT 由来」の印 (C5) */
     int  parked_from_kbd;     /* park したフレームの「kbd 待ち由来」の印 (K7 D1) */
     int  parked_from_poll;    /* park したフレームの「ポーリング由来」の印 (T8 D8) */
+    /* 明示的な譲り sys_yield 由来の印 (票 T9 D5)。状態は WAIT_POLL のままで、
+     * 違うのは resume のときに **注入リングを読まない** こと — 読むと、sh が
+     * 譲っている間に届いた「子宛の 1 バイト」を吸って捨ててしまう
+     * (票 §6 blocker 1)。欄の追加なので exec_app_state の 0〜4 は動かない。 */
+    int  parked_from_yield;
+    /* この ID が最後に **カーネルへ入った** PIT tick (票 T9 §12 S6)。
+     * 更新する 3 点: 起動 (start) / resume / **int 0x80 の入口**
+     * (ring3_syscall_dispatch。代入 1 つだけの hot path)。
+     *
+     * かつては start / resume だけだったが、GetMessage 型の GUI アプリ
+     * (端末) は WM が op_wait の中で回っている間 resume を通らないので、
+     * **2 秒イベントを待っただけで「暴走」に見えた** (§12 S6b)。KAPI を
+     * 呼んでいる限り最近カーネルへ入っているので、これを起点にすると
+     * 「KAPI を呼ばない計算ループ」だけが APP_RUNAWAY_TICKS に掛かる。
+     *
+     * GUI 中の CTRL+STOP の宛先は WM が決める (D8) ので、カーネルが IRQ1 で
+     * 畳むのはその暴走 1 例外だけ。 */
+    u32  last_kernel_tick;
 
     u32  jmpbuf[KSETJMP_BUF_LEN];   /* この ID の呼び出し元へ帰る点 */
     u32  frame[APP_FRAME_WORDS];    /* park した CPL=3 フレーム (D2 の (b)) */
@@ -111,6 +138,9 @@ extern volatile u32 ring3_kbd_park_count;
 /* GUI 中のポーリング型 yield で 1 周だけ譲った回数 (票 T8 §7 D8 の受入 F8:
  * 「FPS 段の秒数 × 100 以下」で増えるか = tick の間引きが効いているか)。 */
 extern volatile u32 ring3_poll_yield_count;
+/* GUI 中に sys_yield で明示的に譲った回数 (票 T9 D5 の観測点)。tick の
+ * 間引きが無い park 点なので、ポーリングの譲りとは別に数える。 */
+extern volatile u32 ring3_yield_count;
 /* 回収の回数と直前の対象 (試験と診断用。G2/G5 の「1 本分だけ」を数える) */
 extern volatile u32 appslot_reclaim_count;
 extern volatile int appslot_last_reclaim_id;
@@ -261,9 +291,26 @@ void appslot_park_poll_commit(void);
  * kbd_set_gui_mode から)。 */
 void appslot_poll_yield_reset(void);
 
+/* ---- 第 4 の park 点: 明示的な譲り sys_yield (票 T9 D5) --------------- */
+/* park_poll_check との違いは 2 つ: **PIT tick の間引きを掛けない** (明示的な
+ * 譲りは呼び手の意思で、描画ループの busy-wait とは違う) ことと、印が
+ * parked_from_yield になること。状態は WAIT_POLL のまま (WM から見れば
+ * 「常に ready、優先度は最下位」で、起こし方の規則を増やさない)。
+ * ダメなら ring3_park_reject_count++ して負を返す (呼び手は hlt 1 回へ)。 */
+int appslot_park_yield_check(void);
+void appslot_park_yield_commit(void);
+
+/* resume のとき EAX に何を入れるか。印から導くので、対応表は 1 か所
+ * (exec_resume が switch するだけ)。id が起こせない状態なら負。 */
+#define APP_RESUME_SRC_WAIT   0   /* WM が渡す wait_ret */
+#define APP_RESUME_SRC_KBD    1   /* 注入リングの 1 バイト。空なら起こさない */
+#define APP_RESUME_SRC_POLL   2   /* 注入リングの 1 バイト。空なら -1 で起こす */
+#define APP_RESUME_SRC_YIELD  3   /* 注入リングを**読まず** 0 (票 T9 D5) */
+int appslot_resume_source(int id);
+
 /* resume してよいか。WM top-level からだけ、印のあるフレームだけ。
  * PARKED は parked_from_wait、WAIT_KEY は parked_from_kbd、WAIT_POLL は
- * parked_from_poll を要求する。印が無ければ ring3_resume_bad_frame_count++
+ * parked_from_poll **または** parked_from_yield (票 T9 D5) を要求する。印が無ければ ring3_resume_bad_frame_count++
  * して OS32_ERR_STALE (拒否は 3 つの park 点すべてに効く)。 */
 int appslot_resume_check(int id);
 /* resume を成立させる (CR3 を載せる直前)。印 (3 つとも) を消し
@@ -284,6 +331,32 @@ int appslot_kill_check(int id);
 
 /* CTRL+STOP: 走っているアプリにだけ要求を立てる (D4)。1=立った。 */
 int appslot_abort_request(void);
+
+/* IRQ1 由来の CTRL+STOP を「いま走っているアプリ」に立ててよいか (**純関数**
+ * — 状態を 1 つも変えない)。票 T9 §12 S6。
+ *   gui_mode : con_sink_is_enabled() (1 = GUI 中 / 0 = CUI 中)
+ *   now_tick : tick_count
+ * CUI 中は常に 1 (K2 の逃げ道はそのまま)。GUI 中は 3 つに分かれる:
+ *
+ *   - top-level (シェル帯が走っている) → **0**。W の abort_at_top_level が
+ *     raw リングから拾い、D8 の宛先を解決して exec_kill する。
+ *   - アプリが gui_call(OP_WAIT) の中 (`in_op_wait`) → **1** (K5c)。割り込ま
+ *     れた文脈は CPL=0 (WM のコード) なのでスタブの即 kill は起きず、要求は
+ *     必ず WM のハンドラが先に見る — 本人宛なら break して syscall 出口で
+ *     畳み、別宛なら exec_abort_clear で降ろして exec_kill(宛先)。ここを
+ *     塞ぐと、連鎖の末尾が自分自身のとき誰も畳まなくなる (受入 S6 の 3 回目)。
+ *   - アプリのコードが CPL=3 で実際に走っている最中 → **0**、ただし暴走
+ *     (最後に**カーネルへ入ってから** APP_RUNAWAY_TICKS 以上) なら 1。
+ *     立てると IRQ1 スタブの即 kill が D8 の宛先より先に畳んでしまうため。 */
+int appslot_abort_admit(int gui_mode, u32 now_tick);
+
+/* この ID がカーネルへ入った時刻を控える (暴走判定の起点)。exec.c が
+ * appslot_start_commit / appslot_resume_commit の直後に tick_count を渡す。
+ * int 0x80 の入口は hot path なので、そちらは exec.c が
+ * g_cur_app->last_kernel_tick へ直に代入する (関数呼び出しを増やさない)。
+ * tick は引数で受ける — この表はハードウェアを読まない (park_poll_check と
+ * 同じ流儀)。 */
+void appslot_mark_scheduled(int id, u32 now_tick);
 
 /* CTRL+STOP の要求を降ろす (KAPI v45 exec_abort_clear の実体、決裁 A1)。
  * 呼べるのは owner 1 (シェル帯 = WM) だけ — それ以外は OS32_ERR_INVAL。
@@ -348,5 +421,10 @@ u32 appslot_resume_mark_selftest(void);
  * 「GUI 中の宣言なしは拒否」(D1a) をブート時に踏む。借りたスロット・
  * 所有者・カウンタは必ず元へ戻す。ビット 0..n が落ちた項目 (0 = 全通過)。 */
 u32 appslot_gfx_owner_selftest(void);
+
+/* 「GUI 中の CTRL+STOP はカーネルが宛先を決めない、ただし暴走は畳む」
+ * (票 T9 §12 S6) をブート時に踏む。借りたスロット・cur・owner は必ず元へ
+ * 戻す。ビット 0..n が落ちた項目 (0 = 全通過)。 */
+u32 appslot_abort_admit_selftest(void);
 
 #endif /* __APPSLOT_H */

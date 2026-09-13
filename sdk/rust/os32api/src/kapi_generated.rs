@@ -202,13 +202,21 @@ pub struct KernelAPI {
     /* idx 192 */ pub kbd_inject: unsafe extern "C" fn(utf8: *const u8, len: u32) -> i32,
     /* idx 193 */ pub kbd_inject_pending: unsafe extern "C" fn() -> u32,
     /* idx 194 */ pub gfx_screen_owner: unsafe extern "C" fn() -> i32,
+    /* idx 195 */ pub launch_req: unsafe extern "C" fn(cmdline: *const u8) -> i32,
+    /* idx 196 */ pub launch_pending: unsafe extern "C" fn() -> i32,
+    /* idx 197 */ pub launch_take: unsafe extern "C" fn(buf: *mut u8, cap: u32, requester: *mut i32, kind: *mut i32, arg: *mut i32) -> i32,
+    /* idx 198 */ pub launch_report: unsafe extern "C" fn(token: i32, rc: i32) -> i32,
+    /* idx 199 */ pub launch_poll: unsafe extern "C" fn(token: i32, status: *mut i32) -> i32,
+    /* idx 200 */ pub launch_cancel: unsafe extern "C" fn(token: i32) -> i32,
+    /* idx 201 */ pub launch_child: unsafe extern "C" fn(id: i32) -> i32,
+    /* idx 202 */ pub sys_yield: unsafe extern "C" fn() -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 48;
+pub const KAPI_VERSION: u32 = 49;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

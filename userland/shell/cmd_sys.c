@@ -5,6 +5,11 @@
 /*  システム操作モジュール (cmd_sys.c)                                      */
 /* ======================================================================== */
 
+/* I-1: drivers/ide.h の IdeInfo と**同じ並び**でなければならない。
+ * ide_identify はカーネル側の定義 (96B) で書くので、ここが 92B のままだと
+ * phys_sector_size の 2 バイトが呼び手のスタックを踏む (`ide 0` で発現)。
+ * drivers/ide.h はカーネル内部ヘッダで外部プログラムからは引けないため、
+ * 写しをここに置く — ide.h を変えたら必ず一緒に直すこと。 */
 typedef struct {
     u32 total_sectors;
     u16 cylinders;
@@ -15,6 +20,7 @@ typedef struct {
     char serial[21];
     char firmware[9];
     int  lba_supported;
+    u16  phys_sector_size;   /* 物理セクタサイズ (SASI=256, IDE=512) */
 } IdeInfo;
 
 

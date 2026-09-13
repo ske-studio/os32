@@ -513,6 +513,16 @@ int paging_is_present(u32 virt_addr)
     return (page_tables[pdi][pti] & PTE_PRESENT) ? 1 : 0;
 }
 
+u32 paging_pte_flags(u32 virt_addr)
+{
+    u32 pdi, pti;
+    if (!pg_enabled) return 0;
+    pdi = virt_addr >> 22;
+    if (!page_tables[pdi]) return 0;
+    pti = (virt_addr >> 12) & 0x3FF;
+    return page_tables[pdi][pti] & 0xFFFu;
+}
+
 /* ======================================================================== */
 /*  リング3 アドレス空間 (M1b: PD 複製)                                     */
 /*                                                                          */

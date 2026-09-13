@@ -30,11 +30,43 @@ userland/lib/rt/dbgserial.o: userland/lib/rt/dbgserial.c userland/lib/rt/dbgseri
 SHELL_SRC = $(wildcard userland/shell/*.c)
 SHELL_OBJ = $(SHELL_SRC:.c=.o)
 
-userland/shell/%.o: userland/shell/%.c
+# ヘッダと .inc の明示依存 (B7)。Makefile の DEPFILES は boot/kernel/... しか
+# 走査しないので userland の .d は読まれない。sh_launch.inc / sh_pipe.inc /
+# sh_redraw.inc を直しても .o が作り直されないと、直したつもりの sh.bin が
+# 出来上がる。常駐側にも同じ依存を足す (レシピは変えないので .o は不変)。
+SHELL_DEPS = userland/shell/shell.h $(wildcard userland/shell/*.inc)
+
+userland/shell/%.o: userland/shell/%.c $(SHELL_DEPS)
 	$(CC) $(PROGRAM_FLAGS) -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 
 userland/shell.elf: sdk/link/app_sys.ld $(CRT0_OBJ) $(SHELL_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/app_sys.ld -nostdlib --nmagic --gc-sections -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ $(CRT0_OBJ) $(SHELL_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+
+# === sh — 同じシェルのソースを CPL=3 の外部アプリとして (票 T9 D1) ===
+# 常駐 shell.bin (app_sys.ld = 0x300000) の規則は上のまま一切変えない。同じ
+# $(SHELL_SRC) を -DSHELL_AS_APP 付きで**専用の出力先** $(SH_OBJDIR) へ
+# コンパイルし、crt0 + sdk/link/app.ld (0x500000) でリンクして sh.bin にする。
+# .o を常駐の $(SHELL_OBJ) と混ぜないのが肝 — 混ぜると -DSHELL_AS_APP 付きの
+# .o が shell.bin に流れ込む。受入 S7 は「shell.bin の SHA-256 が変更前後で
+# 一致」なので、出力先もフラグも常駐側とは完全に分ける。
+# 追加 OBJ (FILER_DRAW_OBJ / -los32save) は常駐と同じものをリンクする。
+SH_OBJDIR = userland/shell/sh_obj
+SH_OBJ = $(patsubst userland/shell/%.c,$(SH_OBJDIR)/%.o,$(SHELL_SRC))
+
+$(SH_OBJDIR)/%.o: userland/shell/%.c $(SHELL_DEPS)
+	@mkdir -p $(SH_OBJDIR)
+	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Iuserland/shell $(INC_libos32filer) -c $< -o $@
+
+userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(FILER_DRAW_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
+
+sh: $(CRT0_OBJ) userland/sh.bin
+
+clean-sh:
+	rm -rf $(SH_OBJDIR)
+	rm -f userland/sh.elf userland/sh.raw userland/sh.bin
+
+.PHONY: sh clean-sh
 
 # === gshell — GUI シェル (Rust、票 W1) ===
 # shell.bin と同じシェル帯 (0x300000, app_sys.ld) に常駐する WM。userland/rust の
@@ -311,13 +343,16 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # build/app.conf のキーはリポジトリルートからの拡張子なしパス
 # (例: userland/cmds/wc)。キーが実在するターゲットと
 # 一致しているかは make check-app-conf で検査できる。
-# 列: 名前 APIバージョン ヒープサイズ [gfx|cui]
+# 列: 名前 APIバージョン ヒープサイズ [gfx|cui|launcher]
 #   4 列目 gfx = 全画面 GFX を使う宣言 (OS32X_FLAG_GFX、mkos32x --gfx)。
 #   省略 = 無し。gfx_init / gfx_init_200 を呼ぶプログラムに立てる (票 T8 D1a)。
 #   4 列目 cui = CUI 専用の宣言 (OS32X_FLAG_CUI_ONLY、mkos32x --cui-only)。
 #   KAPI の向こうで画面と BIOS を丸ごと持っていくもの (v86 / VDM) に立てる。
 #   GUI からの exec_start はこれを OS32_ERR_INVAL で断る (票 T8-2)。
-#   どちらも立て忘れは make check-manifests が検出する。
+#   4 列目 launcher = 起動要求者の宣言 (OS32X_FLAG_LAUNCHER、mkos32x --launcher)。
+#   launch_req (KAPI v49) を呼ぶもの (端末 / sh) に立てる。カーネルはこの
+#   宣言の無い CPL=3 からの launch_req を断る (票 T9 D3、D1a)。
+#   いずれも立て忘れは make check-manifests が検出する。
 userland/%.raw: userland/%.elf
 	$(OBJCOPY) -O binary $< $@
 
@@ -331,6 +366,7 @@ userland/%.bin: userland/%.raw userland/%.elf
 	if [ "$$_heap" != "0" ]; then _opts="$$_opts --heap $$_heap"; fi; \
 	if [ "$$_decl" = "gfx" ]; then _opts="$$_opts --gfx"; fi; \
 	if [ "$$_decl" = "cui" ]; then _opts="$$_opts --cui-only"; fi; \
+	if [ "$$_decl" = "launcher" ]; then _opts="$$_opts --launcher"; fi; \
 	python3 sdk/mkos32x.py $< $@ --elf userland/$*.elf --api $$_api $$_opts
 
 # === ヘルパーツール ===
@@ -437,7 +473,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
+programs: libs $(DBG_OBJ) programs_base sh bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
@@ -452,6 +488,8 @@ clean-programs: clean-rust
 	rm -f userland/system/*.o userland/system/*.elf userland/system/*.raw userland/system/*.bin
 	rm -f sdk/crt/*.o
 	rm -f userland/shell/*.o
+	rm -rf userland/shell/sh_obj
+	rm -f userland/sh.elf userland/sh.raw userland/sh.bin
 
 	rm -f userland/lib/rt/*.o
 	rm -f userland/tests/sqlite_standalone/*.o userland/tests/sqlite_standalone/*.elf userland/tests/sqlite_standalone/*.raw userland/tests/sqlite_standalone/*.bin
@@ -459,7 +497,7 @@ clean-programs: clean-rust
 	rm -f lib/zlib/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
-.PHONY: programs programs_base game lz4_cmd cdinst bench bench_scale2x faultprobe
+.PHONY: programs programs_base game sh lz4_cmd cdinst bench bench_scale2x faultprobe
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
 .PHONY: input_test kbd_echo

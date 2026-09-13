@@ -14,6 +14,7 @@
 
 #include "appslot.h"
 #include "os32_kapi_shared.h"   /* OS32_ERR_* / EXEC_ERR_* */
+#include "fd_redirect.h"       /* T9 §12 T1: リダイレクト表を ID の文脈にする */
 
 /* res_owner_set/get は fs/fd_redirect.c。exec/ は -Ifs を持たないので
  * kernel/gui.c と同じ流儀で extern 宣言する。 */
@@ -26,12 +27,42 @@ extern int  res_owner_get(void);
 STATIC_ASSERT(APP_ID_SHELL == 1, appslot_shell_id_is_gui_shell_owner);
 STATIC_ASSERT(APP_ID_MAX < APP_SLOT_COUNT, appslot_table_holds_id_max);
 
+/* 標準 FD のリダイレクト表 (fs/fd_redirect.c) の **ID ごとの枠** (票 T9 §12 T1)。
+ * 表は FD 0/1/2 の 3 本しかなく全アプリ共有だったので、park してある sh の
+ * `> /tmp/out` に別アプリの printf が入り、パイプ中なら sh の .bss (別 CR3 で
+ * 解決される仮想番地) を別アプリが書いていた。park で走っていた ID の枠へ
+ * 移し、resume で戻す。添字 = ID で、ID 1 (WM / 常駐シェル) の枠も同じ表に
+ * 置く — 走っているのは常に 1 本なので、生きている表は「いまの表」1 つだけ。
+ *
+ * 境界: ID 1 が stdio を張ったまま exec_start することは無い (gshell は
+ * stdio を張らず、常駐シェルは入れ子 exec_run で park しない)。もし張れば
+ * その枠は子の枠へ移り、子の回収で閉じられる — 表が FD ごとに 1 本しかない
+ * という元からの限界 (D3) と同じ性質の話。 */
+static FdRedirectState g_redir[APP_SLOT_COUNT];
+
+/* 走っている id が譲る: いまの表を id の枠へ移し、WM の枠を表へ戻す。 */
+static void redir_switch_out(int id)
+{
+    fd_redirect_save(&g_redir[id]);
+    fd_redirect_restore(&g_redir[APP_ID_SHELL]);
+    fd_redirect_clear_state(&g_redir[APP_ID_SHELL]);   /* 所有は表へ移った */
+}
+
+/* id を起こす: いまの表 (WM のもの) を WM の枠へ移し、id の枠を表へ戻す。 */
+static void redir_switch_in(int id)
+{
+    fd_redirect_save(&g_redir[APP_ID_SHELL]);
+    fd_redirect_restore(&g_redir[id]);
+    fd_redirect_clear_state(&g_redir[id]);             /* 所有は表へ移った */
+}
+
 volatile u32 ring3_switch_count = 0;
 volatile u32 ring3_transition_count = 0;
 volatile u32 ring3_park_reject_count = 0;
 volatile u32 ring3_resume_bad_frame_count = 0;
 volatile u32 ring3_kbd_park_count = 0;
 volatile u32 ring3_poll_yield_count = 0;
+volatile u32 ring3_yield_count = 0;
 volatile u32 appslot_reclaim_count = 0;
 volatile int appslot_last_reclaim_id = 0;
 volatile u32 gfx_init_reject_count = 0;
@@ -81,6 +112,9 @@ void appslot_init(void)
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
     g_gfx_owner = GFX_OWNER_WM;   /* 画面は WM のもの (票 T8 D1) */
+    /* リダイレクトの枠も空から (票 T9 §12 T1)。いまの表は fd_redirect_init
+     * が別に空にする — ここで閉じると、まだ生きている FD を横から閉じる。 */
+    for (i = 0; i < APP_SLOT_COUNT; i++) fd_redirect_clear_state(&g_redir[i]);
     res_owner_set(APP_ID_SHELL);
 }
 
@@ -192,6 +226,8 @@ void appslot_start_commit(int id, int gui, u32 pages)
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
+    a->last_kernel_tick = 0;
     g_cur = id;
     res_owner_set(id);
     /* 起動の iret は「生存アプリの集合が変わる瞬間」で、生存アプリ間の
@@ -212,8 +248,13 @@ void appslot_shell_commit(void)
     a->parked_from_wait = 0;
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
+    a->last_kernel_tick = 0;
     g_cur = APP_ID_SHELL;
     g_cur_op_is_wait = 0;
+    /* シェル帯を載せ替えた (shell.bin ⇄ gshell.bin)。前の住人の枠は
+     * その ID 1 の退場で回収済みなので、枠だけ空に戻す (票 T9 §12 T1)。 */
+    fd_redirect_clear_state(&g_redir[APP_ID_SHELL]);
     res_owner_set(APP_ID_SHELL);
 }
 
@@ -272,6 +313,8 @@ void appslot_park_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_wait = 1;      /* 「OP_WAIT 由来」の印 (C5) */
     a->in_op_wait = 0;
     a->state = APP_STATE_PARKED;
@@ -312,6 +355,8 @@ void appslot_park_kbd_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_kbd = 1;       /* 「kbd 待ち由来」の印 (K7 D1) */
     a->in_op_wait = 0;
     a->state = APP_STATE_WAIT_KEY;
@@ -363,6 +408,8 @@ void appslot_park_poll_commit(void)
 {
     AppSlot *a = appslot_get(g_cur);
     if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
     a->parked_from_poll = 1;      /* 「ポーリング由来」の印 (T8 D8) */
     a->in_op_wait = 0;
     a->state = APP_STATE_WAIT_POLL;
@@ -377,6 +424,48 @@ void appslot_park_poll_commit(void)
 void appslot_poll_yield_reset(void)
 {
     g_poll_last_tick = 0;
+}
+
+/* ---- 第 4 の park 点: 明示的な譲り sys_yield (票 T9 D5) --------------- */
+/* park_poll_check との違いは **間引きを掛けない** こと。sys_yield は
+ * 「いま譲る」と書いた呼び手の意思で、kbd_trygetchar の busy-wait とは
+ * 性質が違う (sh は launch_poll の合間に 1 回ずつしか呼ばない)。間引くと
+ * 同じ tick の中で sh が回り続け、譲りが成立しないまま CPU を食う。 */
+int appslot_park_yield_check(void)
+{
+    AppSlot *a;
+
+    if (g_cur < APP_ID_MIN || g_cur > APP_ID_MAX) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    a = appslot_get(g_cur);
+    if (!a || a->state != APP_STATE_RUNNING) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    /* CUI の入れ子 exec_run の子は譲れない (park_kbd_check と同じ理由:
+     * longjmp の行き先が親アプリの中の exec_run フレームになる)。 */
+    if (!a->gui) {
+        ring3_park_reject_count++;
+        return OS32_ERR_INVAL;
+    }
+    return 0;
+}
+
+void appslot_park_yield_commit(void)
+{
+    AppSlot *a = appslot_get(g_cur);
+    if (!a) return;
+    /* 票 T9 §12 T1: リダイレクト表を ID の文脈として持ち替える。 */
+    redir_switch_out(g_cur);
+    a->parked_from_yield = 1;     /* 「明示的な譲り由来」の印 (T9 D5) */
+    a->in_op_wait = 0;
+    a->state = APP_STATE_WAIT_POLL;
+    g_cur_op_is_wait = 0;
+    g_cur = APP_ID_SHELL;
+    res_owner_set(APP_ID_SHELL);
+    ring3_yield_count++;
 }
 
 int appslot_resume_check(int id)
@@ -402,7 +491,10 @@ int appslot_resume_check(int id)
      * 「注入リングに文字がある」ではない — WM は次の周に必ず起こし、
      * 空なら exec_resume が EAX に -1 を書く。ここで見るのは印だけ。 */
     if (a->state == APP_STATE_WAIT_POLL) {
-        if (!a->parked_from_poll) {
+        /* WAIT_POLL には 2 つの由来がある (票 T9 D5)。どちらの印も無ければ
+         * 起こさない — 規則は park 点が増えても 1 つ: 「その状態に対応する
+         * 印が立っているフレームだけ」。 */
+        if (!a->parked_from_poll && !a->parked_from_yield) {
             ring3_resume_bad_frame_count++;
             return OS32_ERR_STALE;
         }
@@ -416,13 +508,34 @@ int appslot_resume_check(int id)
     return 0;
 }
 
+/* resume のとき EAX に何を入れるかを印から導く (票 T9 D5)。印と「どこから
+ * 値を取るか」の対応表をここ 1 か所に閉じると、exec_resume 側は
+ * ハードウェア (注入リング / フレーム) の操作だけになる。 */
+int appslot_resume_source(int id)
+{
+    AppSlot *a = appslot_get(id);
+    if (!a) return OS32_ERR_INVAL;
+    if (a->state == APP_STATE_WAIT_KEY)  return APP_RESUME_SRC_KBD;
+    if (a->state == APP_STATE_WAIT_POLL) {
+        /* 明示的な譲りは注入リングを読まない — 読むと、譲っている sh が
+         * 子宛の 1 バイトを吸って捨てる (票 §6 blocker 1)。 */
+        if (a->parked_from_yield) return APP_RESUME_SRC_YIELD;
+        return APP_RESUME_SRC_POLL;
+    }
+    return APP_RESUME_SRC_WAIT;
+}
+
 void appslot_resume_commit(int id)
 {
     AppSlot *a = appslot_get(id);
     if (!a) return;
+    /* 票 T9 §12 T1: この ID が park 前に持っていた表へ戻す。 */
+    redir_switch_in(id);
     a->parked_from_wait = 0;      /* 印は 1 回きり (3 つの park 点すべてで) */
     a->parked_from_kbd = 0;
     a->parked_from_poll = 0;
+    a->parked_from_yield = 0;
+    a->last_kernel_tick = 0;
     a->in_op_wait = 0;
     a->state = APP_STATE_RUNNING;
     g_cur = id;
@@ -441,6 +554,13 @@ u32 appslot_reclaim(int id)
     u32 pages;
     if (!a || id == APP_ID_SHELL) return 0;
     pages = a->pages;
+    /* 票 T9 §12 T1: 枠は **閉じずに空にするだけ**。枠の中の file_fd は
+     * fd_redirect_to_file の vfs_open がこの ID の owner タグを付けて取った
+     * ものなので、park したまま畳まれても exec_reclaim_owned の
+     * vfs_close_owned(id) が閉じる (往復 9 の non-blocker: ここで閉じると
+     * その後 vfs_close_owned が同じ FD をもう一度閉じていた)。
+     * バッファ型の枠に FD は無く、バッファ自体は pipe_free_owned が返す。 */
+    fd_redirect_clear_state(&g_redir[id]);
     slot_zero(a);
     a->state = APP_STATE_FREE;
     appslot_reclaim_count++;
@@ -494,6 +614,69 @@ int appslot_abort_request(void)
     if (!a || g_cur < APP_ID_MIN || a->state != APP_STATE_RUNNING) return 0;
     a->abort_req = 1;
     return 1;
+}
+
+/* ---- IRQ1 由来の CTRL+STOP を立ててよいか (票 T9 §12 S6) --------------- */
+/* GUI 配下では宛先が「フォーカス窓の連鎖の末尾」(D8) に変わった。それを
+ * 解決できるのは窓の所有者を知っている WM だけ。**ただし WM がそのアプリの
+ * gui_call(OP_WAIT) の中で回っているとき (in_op_wait) は、要求を立てても
+ * 必ず WM のハンドラが先に見る**ので従来どおり通す (K5c)。問題になるのは
+ * 「CPL=3 のアプリのコードが実際に走っている最中」で、IRQ1 は「そのとき
+ * 走っていた slot」しか知らない。T9 で sh が WAIT_POLL で毎 tick 回り、端末も
+ * 100ms タイマで回るようになったので、IRQ1 が落ちた先はほぼ常に**宛先と
+ * 無関係なアプリ**になる (受入 S6: 2 回目の CTRL+STOP で端末まで畳まれ、
+ * ring3_abort_count が +1 した)。だから **GUI 中にアプリのコードを割り込んだ
+ * ときだけ**カーネルは立てない — 要求は raw リング経由で WM に届き、WM が
+ * exec_abort_clear → 末尾を exec_kill する (決裁 A1 / D8)。
+ *
+ * 残す例外は 1 つだけ: **暴走**。KAPI を呼ばない計算ループに入ったアプリは
+ * WM へ戻らないので、WM は制御を取り戻せず CTRL+STOP も届かない。
+ * 「最後に **カーネルへ入って** から APP_RUNAWAY_TICKS 以上」なら協調型が
+ * 壊れているので、従来どおり IRQ1 が畳む。起点を start / resume ではなく
+ * syscall 入口にするのが要点 (§12 S6b): GetMessage 型のアプリは WM の
+ * op_wait の中で待つ間 resume を通らないので、resume 起点だと「2 秒待った
+ * だけ」で暴走に見え、D8 の宛先より先に畳まれてしまう。
+ *
+ * gfx 拒否 (appslot_gfx_claim) と V86 の脱出は appslot_abort_request() を
+ * 直に呼ぶ — あちらは「WM / カーネルが宛先を決めた」kill なので、この関門は
+ * 通らない (GUI 中でも従来どおり効く)。 */
+int appslot_abort_admit(int gui_mode, u32 now_tick)
+{
+    AppSlot *a;
+
+    if (!gui_mode) return 1;              /* CUI は 1 バイトも変えない (K2) */
+
+    a = appslot_get(g_cur);
+    if (!a || g_cur < APP_ID_MIN) return 0;          /* WM / シェル帯 */
+    if (a->state != APP_STATE_RUNNING) return 0;
+
+    /* **K5c の経路はそのまま通す**: `in_op_wait` = WM がこのアプリの
+     * gui_call(OP_WAIT) の**中**で回っている (kernel/gui.c の gui_call が
+     * ハンドラを呼ぶ間だけ立つ)。このとき割り込まれた文脈は CPL=0 (WM の
+     * コード) なので IRQ1 スタブの即 kill は起きず、要求は必ず WM の
+     * ハンドラが見る — WM が宛先を解決し、本人なら break して syscall 出口の
+     * ring3_abort_check が畳み、別なら exec_abort_clear で降ろして
+     * exec_kill(宛先) する (決裁 A1 / D8)。つまり「カーネルが宛先を決めて
+     * しまう」害は無く、素の GUI アプリ (gui_demo 等) をフォーカスして
+     * CTRL+STOP で閉じる K5b/K5c の挙動もここで生きる。
+     * ここを塞いだ版では、連鎖の末尾が端末自身のとき (3 回目の CTRL+STOP)
+     * に誰も畳まなくなった (受入 S6 の再試験)。 */
+    if (a->in_op_wait) return 1;
+
+    /* ここから先は「CPL=3 のアプリのコードが実際に走っている最中」。
+     * 立てると IRQ1 スタブが D8 の宛先より先に畳むので、暴走のときだけ。
+     * u32 の引き算なので tick が一周しても正しい差が出る。 */
+    if ((u32)(now_tick - a->last_kernel_tick) >= (u32)APP_RUNAWAY_TICKS) {
+        return 1;
+    }
+    return 0;
+}
+
+void appslot_mark_scheduled(int id, u32 now_tick)
+{
+    AppSlot *a = appslot_get(id);
+    if (!a) return;
+    a->last_kernel_tick = now_tick;
 }
 
 /* ======================================================================== */
@@ -675,6 +858,25 @@ u32 appslot_resume_mark_selftest(void)
     if (appslot_resume_check(id) != 0) bad |= 1u << 6;
     if (appslot_kill_check(id) != 0) bad |= 1u << 6;
 
+    /* (8) 第 4 の park 点 (票 T9 D5): 明示的な譲り。状態は WAIT_POLL のまま
+     * だが、印が parked_from_yield なら resume は注入リングを読まない。
+     * 印が 1 つも無ければ起こせないのは他の park 点と同じ。 */
+    g_slot[id].state = APP_STATE_WAIT_POLL;
+    g_slot[id].parked_from_poll = 0;
+    g_slot[id].parked_from_yield = 0;
+    if (appslot_resume_check(id) != OS32_ERR_STALE) bad |= 1u << 8;
+    if (ring3_resume_bad_frame_count != saved_badframe + 4) bad |= 1u << 8;
+    g_slot[id].parked_from_yield = 1;
+    if (appslot_resume_check(id) != 0) bad |= 1u << 8;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_YIELD) bad |= 1u << 8;
+    g_slot[id].parked_from_poll = 1;
+    g_slot[id].parked_from_yield = 0;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_POLL) bad |= 1u << 8;
+    g_slot[id].state = APP_STATE_WAIT_KEY;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_KBD) bad |= 1u << 8;
+    g_slot[id].state = APP_STATE_PARKED;
+    if (appslot_resume_source(id) != APP_RESUME_SRC_WAIT) bad |= 1u << 8;
+
     /* (7) tick の間引き (D8): 同じ tick では 2 度譲らない。間引きは表の検査
      * より**先**に効くので、弾き数 ring3_park_reject_count に載らない。
      * tick が進めば間引きは通り、表 (cur = シェル帯) の側で弾かれる。 */
@@ -719,6 +921,67 @@ u32 appslot_resume_mark_selftest(void)
 /*  空きスロット (APP_ID_MAX) を一時的に借りる。借りた中身・cur・owner・      */
 /*  所有者・カウンタは丸ごと保存して戻す。                                   */
 /* ======================================================================== */
+/* ======================================================================== */
+/*  GUI 中の CTRL+STOP は WM が宛先を決める (票 T9 §12 S6)                   */
+/*                                                                          */
+/*  壊れたときに実機で見えるのは「CTRL+STOP で関係ないアプリ (端末) まで     */
+/*  消える」か「暴走したアプリを畳めない」だけで、原因が遠い。借りた         */
+/*  スロットと cur / owner は必ず元へ戻す。ビット 0..n が落ちた項目。        */
+/* ======================================================================== */
+u32 appslot_abort_admit_selftest(void)
+{
+    u32 bad = 0;
+    int id = APP_ID_MAX;
+    AppSlot saved;
+    int saved_cur = g_cur;
+    int saved_owner = res_owner_get();
+
+    saved = g_slot[id];
+    slot_zero(&g_slot[id]);
+    g_slot[id].state = APP_STATE_RUNNING;
+    g_slot[id].cpl3 = 1;
+    g_slot[id].last_kernel_tick = 1000;
+    g_cur = id;
+
+    /* (0) CUI 中は従来どおり立てる (K2 の逃げ道を 1 バイトも変えない) */
+    if (appslot_abort_admit(0, 1000) != 1) bad |= 1u << 0;
+    if (appslot_abort_admit(0, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 0;
+
+    /* (1) GUI 中にアプリのコードを割り込んだときは立てない
+     * — 宛先は WM が launch_child で解決する (D8) */
+    if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 1;
+    if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS - 1) != 0) bad |= 1u << 1;
+
+    /* (4) ただし gui_call(OP_WAIT) の中なら立てる (K5c の経路)。
+     * 割り込まれた文脈は CPL=0 (WM) なので、要求は必ず WM のハンドラが見る。 */
+    g_slot[id].in_op_wait = 1;
+    if (appslot_abort_admit(1, 1000) != 1) bad |= 1u << 4;
+    if (appslot_abort_admit(0, 1000) != 1) bad |= 1u << 4;   /* CUI も従来どおり */
+    g_slot[id].in_op_wait = 0;
+    if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 4;
+
+    /* (2) 暴走だけは GUI 中でも立てる = 最後に **カーネルへ入って** から
+     * APP_RUNAWAY_TICKS 以上 (tick が一周しても差で見る)。op_wait で待って
+     * いるアプリは syscall の入口で控えが進むので、ここには掛からない。 */
+    if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 2;
+    g_slot[id].last_kernel_tick = 0xFFFFFF00UL;
+    if (appslot_abort_admit(1, 0xFFFFFF00UL + APP_RUNAWAY_TICKS) != 1) {
+        bad |= 1u << 2;
+    }
+    if (appslot_abort_admit(1, 0xFFFFFF00UL + 1u) != 0) bad |= 1u << 2;
+
+    /* (3) WM (シェル帯) が走っているときは GUI 中も CUI 中も立てない
+     * — CUI では appslot_abort_request 側が弾く (従来どおり)。 */
+    g_cur = APP_ID_SHELL;
+    if (appslot_abort_admit(1, 0) != 0) bad |= 1u << 3;
+    if (appslot_abort_request() != 0) bad |= 1u << 3;
+
+    g_slot[id] = saved;
+    g_cur = saved_cur;
+    res_owner_set(saved_owner);
+    return bad;
+}
+
 u32 appslot_gfx_owner_selftest(void)
 {
     u32 bad = 0;

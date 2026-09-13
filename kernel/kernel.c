@@ -402,6 +402,9 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* プログラムローダー初期化 (KernelAPIテーブル構築) */
     tvram_print(48, 2, "EXEC...", TATTR_GREEN);
     exec_init();
+    /* トランポリンページができてからでないと踏めない自己診断 (票 T9 §12 R1)。
+     * kselftest_run() はここより前に走っている。 */
+    kselftest_run_post_exec();
     tvram_print(56, 2, "OK", TATTR_WHITE);
 
     /* Unicodeテーブルロード */

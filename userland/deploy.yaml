@@ -15,6 +15,10 @@ filesystem:
     - host: userland/shell.bin
       guest: /sys/shell.bin
       tags: [core]
+    # --- sh (常駐シェルと同じソースの CPL=3 版、端末から起動する。票 T9 D1) ---
+    - host: userland/sh.bin
+      guest: /bin/
+      tags: [programs]
     # --- GUI シェル (WM 常駐、config.h SYS_GSHELL_BIN、K4 の起動ループが読む) ---
     - host: userland/gshell.bin
       guest: /bin/gshell.bin
@@ -220,6 +224,9 @@ filesystem:
       tags: [test]
     - host: userland/tests/data/test_script.bat
       guest: /home/user/test_script.bat
+      tags: [test]
+    - host: userland/tests/data/hello.sh
+      guest: /test/hello.sh
       tags: [test]
     # --- MGX 漫画サンプルページ (tools/img2mgx.py で生成) ---
     - host: "assets/manga/*.MGX"

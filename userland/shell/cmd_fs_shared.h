@@ -23,6 +23,9 @@ int fs_path_kind(const char *path);
 /* 2 つのパスが同じファイルを指すか (文字列一致 or stat の dev/ino 一致) */
 int fs_same_file(const char *a, const char *b);
 
+/* I2: `.` / `..` / 連続 `/` を畳む (相対パスは cwd を前置)。0 = OK / -1 = 溢れ */
+int sh_path_normalize(const char *in, char *out, int max);
+
 /* OS32_ERR_* → 人間向けメッセージ */
 const char *fs_strerror(int rc);
 
@@ -36,7 +39,8 @@ const char *get_basename(const char *path);
 void fs_append_basename(char *dst_path, const char *src_path);
 
 /* dir_path と name を結合 */
-void fs_join_path(char *dst_path, const char *dir_path, const char *name);
+/* I-3: 0 = OK / -1 = PATH_MAX_LEN に収まらない (呼び手は中止すること) */
+int fs_join_path(char *dst_path, const char *dir_path, const char *name);
 
 /* コマンド文字列から2引数を取り出す */
 int fs_parse_two_args(const char *cmd, int skip, char *arg1, char *arg2);

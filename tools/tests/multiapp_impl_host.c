@@ -27,12 +27,80 @@
 #include "types.h"
 
 /* ---- 実物のカーネルコード (ハードウェアには一切触らない部分) ---------- */
-extern void res_owner_set(int owner);
-extern int  res_owner_get(void);
-static int host_owner = 1;
-static int host_owner_sets = 0;
-void res_owner_set(int owner) { host_owner = owner; host_owner_sets++; }
-int  res_owner_get(void)      { return host_owner; }
+/* T9 §12 T1: 標準 FD のリダイレクト表も **実物** (fs/fd_redirect.c) を
+ * そのまま取り込む。park / resume で ID ごとに持ち替わることを、模型では
+ * なく実物の表で見るため。res_owner_set/get の実体もこちらにあるので、
+ * ハーネス側の写しは持たない (所有者タグが本物になる)。
+ * VFS はこの票の対象外なので、ファイル FD だけ最小の偽物を置く —
+ * 見たいのは「どの表に書き込みが入ったか」と「閉じたか」だけ。 */
+#include "vfs.h"
+#include "fd_redirect.h"   /* res_owner_get (偽 vfs_open の owner タグ用) */
+
+#define HOST_VFS_MAX_FD 8
+static int  host_fd_open[HOST_VFS_MAX_FD];
+static int  host_fd_owner[HOST_VFS_MAX_FD];   /* vfs_fd.c の owner タグ相当 */
+static u32  host_fd_written[HOST_VFS_MAX_FD];
+static int  host_fd_closes;                   /* 実際に閉じた回数 */
+static int  host_fd_close_calls[HOST_VFS_MAX_FD];  /* FD ごとの vfs_close 呼び出し */
+static int  host_next_fd;
+
+int vfs_open(const char *path, int mode)
+{
+    (void)path; (void)mode;
+    if (host_next_fd >= HOST_VFS_MAX_FD) return -1;
+    host_fd_open[host_next_fd] = 1;
+    /* 実物の vfs_fd.c と同じく、開いた時点の所有者で FD をタグ付けする。
+     * リダイレクトの file_fd もこれで **その ID のもの**になるので、
+     * 回収は vfs_close_owned(id) が担う (票 §12 T1、往復 9 の指摘)。 */
+    host_fd_owner[host_next_fd] = res_owner_get();
+    host_fd_written[host_next_fd] = 0;
+    return host_next_fd++;
+}
+
+void vfs_close(int fd)
+{
+    if (fd < 0 || fd >= HOST_VFS_MAX_FD) return;
+    /* **呼ばれた回数**と**実際に閉じた回数**を別に数える。二重 close は
+     * 「閉じた回数」には出ない (2 回目は in_use が落ちている) ので、
+     * 呼び出し回数で見ないと往復 9 の指摘が捕まえられない。 */
+    host_fd_close_calls[fd]++;
+    if (host_fd_open[fd]) host_fd_closes++;
+    host_fd_open[fd] = 0;
+}
+
+/* fs/vfs_fd.c の vfs_close_owned の偽物 (exec_reclaim_owned の (2))。
+ * 実物と同じく「その owner が開いた、まだ開いている FD」を閉じる。 */
+static void host_vfs_close_owned(int owner)
+{
+    int fd;
+    for (fd = 0; fd < HOST_VFS_MAX_FD; fd++) {
+        if (!host_fd_open[fd]) continue;
+        if (host_fd_owner[fd] != owner) continue;
+        vfs_close(fd);
+    }
+}
+
+int vfs_seek(int fd, int offset, int whence)
+{
+    (void)fd; (void)offset; (void)whence;
+    return 0;
+}
+
+int vfs_read_fd(int fd, void *buf, u32 size)
+{
+    (void)fd; (void)buf; (void)size;
+    return 0;
+}
+
+int vfs_write_fd(int fd, const void *buf, u32 size)
+{
+    (void)buf;
+    if (fd < 0 || fd >= HOST_VFS_MAX_FD || !host_fd_open[fd]) return -1;
+    host_fd_written[fd] += size;
+    return (int)size;
+}
+
+#include "fd_redirect.c"
 
 #include "appslot.c"
 
@@ -43,6 +111,22 @@ int  res_owner_get(void)      { return host_owner; }
 static int host_reader = 2;
 int con_sink_reader_get(void) { return host_reader; }
 #include "kbd_inject.c"
+
+/* T9: 起動要求表も **実物** (exec/launch.c) をそのまま取り込む。要るのは
+ * GUI 判定と kstrncpy だけ (表そのものの検査は tools/tests/launch_host.c)。
+ * ここで見るのは exec_kill の連鎖 (D8) と sys_yield の resume (D5) — 表と
+ * AppSlot が噛み合う所。 */
+static int host_gui = 1;
+int con_sink_is_enabled(void) { return host_gui; }
+char *kstrncpy(char *dst, const char *src, u32 n)
+{
+    u32 i = 0;
+    if (n == 0) return dst;
+    while (i + 1 < n && src[i] != '\0') { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+    return dst;
+}
+#include "launch.c"
 
 /* ---- 試験ハーネス ----------------------------------------------------- */
 
@@ -306,12 +390,20 @@ static int ma_resume_poll(int id)
     int rc = appslot_resume_check(id);
     if (rc < 0) return rc;
     a = appslot_get(id);
-    if (a->parked_from_poll) {
+    /* exec/exec.c の exec_resume と同じく、EAX の出所は印から導く。
+     * 明示的な譲り (T9 D5) は注入リングを読まず 0 を入れる。 */
+    switch (appslot_resume_source(id)) {
+    case APP_RESUME_SRC_YIELD:
+        a->frame[APP_FRAME_EAX] = 0;
+        break;
+    case APP_RESUME_SRC_POLL:
         ch = 0;
         if (kbd_inject_take(&ch)) a->frame[APP_FRAME_EAX] = (u32)ch;
         else                      a->frame[APP_FRAME_EAX] = (u32)(i32)-1;
-    } else {
+        break;
+    default:
         a->frame[APP_FRAME_EAX] = 0;
+        break;
     }
     appslot_resume_commit(id);
     H.turn_used[id] = 1;
@@ -335,6 +427,15 @@ static int ma_res_add(int kind, int n)
 static void ma_reclaim_res(int id)
 {
     int k;
+    /* exec/exec.c の exec_reclaim_owned (1)。いまの表からその ID のものを外す。 */
+    fd_redirect_reset_owned(id);
+    /* exec/exec.c の exec_reclaim_owned (2) vfs_close_owned。park したまま
+     * 畳まれた ID のリダイレクトの file_fd は「いまの表」に無いが、FD 自体は
+     * その ID の owner タグを持っているのでここで閉じる (票 §12 T1)。
+     * appslot_reclaim は枠を **空にするだけ** — 閉じると二重 close になる。 */
+    host_vfs_close_owned(id);
+    /* exec/exec.c の exec_reclaim_owned (9b)。ID だけを使う (票 T9 D3)。 */
+    launch_owner_exit(id);
     appslot_gfx_owner_exit(id);
     for (k = 0; k < MA_RES_KINDS; k++) H.res[id][k] = 0;
     H.slot[id] = -1;
@@ -371,6 +472,29 @@ static int ma_abort_request(void)
     return appslot_abort_request() ? 0 : OS32_ERR_INVAL;
 }
 
+/* exec/exec.c の ring3_abort_request (IRQ1 の ISR から呼ばれる) を**そのまま
+ * 写した**形 (exec.c はカーネル一式を引くのでホストへ #include できない)。
+ * GUI 判定 (con_sink_is_enabled) と tick (tick_count) は呼び出し側が渡す。
+ * 上の ma_abort_request はこの関門を通らない直呼び = gfx 拒否 (T8 D1a) と
+ * V86 の脱出の経路。 */
+/* exec/exec.c の ring3_syscall_dispatch の**入口の 1 行**を写した形
+ * (票 §12 S6b)。走っているアプリが KAPI を 1 本呼んだ = カーネルへ入った。
+ * 実物は g_cur_app (CPL=3 で走っているスロット) を見るので、ここも
+ * アプリ ID (2〜5) のときだけ控える。 */
+static void ma_syscall_enter(u32 now_tick)
+{
+    AppSlot *a;
+    if (appslot_cur() < APP_ID_MIN) return;
+    a = appslot_get(appslot_cur());
+    if (a) a->last_kernel_tick = now_tick;
+}
+
+static int ma_irq_abort_request(int gui_mode, u32 now_tick)
+{
+    if (!appslot_abort_admit(gui_mode, now_tick)) return 0;
+    return appslot_abort_request();
+}
+
 /* KAPI v45 exec_abort_clear の実体 (決裁 A1)。owner は呼ぶ側の文脈のまま。 */
 static int ma_abort_clear(void)
 {
@@ -391,6 +515,45 @@ static int ma_kill(int id)
     if (rc < 0) return rc;
     ma_reclaim_res(id);
     H.free_pages += appslot_reclaim(id);
+    return 0;
+}
+
+/* 第 4 の park 点 (票 T9 D5)。exec/exec.c の exec_sys_yield の表の部分。 */
+static int ma_park_yield(void)
+{
+    int rc = appslot_park_yield_check();
+    if (rc < 0) return rc;
+    appslot_park_yield_commit();
+    return 0;
+}
+
+/* exec/exec.c の exec_kill (票 T9 D8) の**連鎖の部分をそのまま写した**形
+ * (exec.c はカーネル一式を引くのでホストへ #include できない)。畳む 1 本分は
+ * 既存の ma_kill と同じ手順 (回収 → スロット返却)。順番が効く: 末尾から
+ * 畳まないと、各段の回収通知が親の表を DONE にする前に親が消える。 */
+static int ma_kill_order[APP_SLOT_COUNT];
+static int ma_kill_order_n;
+
+static int ma_kill_chain(int head)
+{
+    int chain[APP_MAX_APPS];
+    int n, i;
+    int rc = appslot_kill_check(head);
+    if (rc < 0) return rc;
+    ma_kill_order_n = 0;
+    n = launch_chain(head, chain, APP_MAX_APPS);
+    if (n <= 0) {
+        ma_kill_order[ma_kill_order_n++] = head;
+        ma_reclaim_res(head);
+        H.free_pages += appslot_reclaim(head);
+        return 0;
+    }
+    for (i = n - 1; i >= 0; i--) {
+        if (chain[i] != head && appslot_kill_check(chain[i]) < 0) continue;
+        ma_kill_order[ma_kill_order_n++] = chain[i];
+        ma_reclaim_res(chain[i]);
+        H.free_pages += appslot_reclaim(chain[i]);
+    }
     return 0;
 }
 
@@ -1658,6 +1821,394 @@ static void case_poll_yield(void)
     kbd_inject_discard();
 }
 
+/* ========================================================================
+ *  23. 明示的な譲り sys_yield (票 T9 D5) と exec_kill の連鎖 (票 T9 D8)
+ *
+ *  ここで見るのは「表 (launch) と AppSlot が噛み合うところ」だけ:
+ *    - sys_yield の park は WAIT_POLL のまま印だけが違い、resume は
+ *      **注入リングを読まない** (sh が子宛の打鍵を吸って捨てない)。
+ *    - exec_kill は要求表の連鎖を末尾から畳み、各段の回収通知が親の表を
+ *      DONE + child = 0 にする。CTRL+STOP は末尾 1 本だけ。
+ *  表そのものの遷移は tools/tests/launch_host.c の担当。
+ * ======================================================================== */
+static void case_yield_and_kill_chain(void)
+{
+    int term, sh, child;
+    AppSlot *a;
+    u32 yield0, poll0;
+    i32 t_term, t_sh;
+    char buf[LAUNCH_CMDLINE_MAX];
+
+    ma_init(4096);
+    kbd_inject_discard();
+    appslot_poll_yield_reset();
+    launch_init();
+    host_gui = 1;
+
+    term = ma_start_gfx(100, 1, (u32)OS32X_FLAG_LAUNCHER);
+    check(term == APP_ID_MIN, "23a 端末 (宣言 LAUNCHER) が立つ");
+    host_reader = term;                      /* con_sink の読み手 = 端末 */
+    t_term = launch_req("sh");
+    check(t_term > 0, "23b 端末が sh の起動を要求できる");
+
+    yield0 = ring3_yield_count;
+    poll0 = ring3_poll_yield_count;
+    check(ma_park_yield() == 0, "23c sys_yield は tick の間引き無しで譲れる");
+    check(ring3_yield_count == yield0 + 1, "23d ring3_yield_count が増える");
+    check(ring3_poll_yield_count == poll0, "23e ポーリングの勘定とは別");
+    a = appslot_get(term);
+    check(a->state == APP_STATE_WAIT_POLL, "23f 状態は WAIT_POLL のまま");
+    check(a->parked_from_yield == 1 && a->parked_from_poll == 0,
+          "23g 印は parked_from_yield だけ");
+    check(a->parked_from_wait == 0 && a->parked_from_kbd == 0,
+          "23h 他の印は立たない");
+    check(appslot_state(term) == APP_STATE_WAIT_POLL,
+          "23i exec_app_state は 4 のまま (値を増やさない)");
+    check(appslot_cur() == APP_ID_SHELL && res_owner_get() == APP_ID_SHELL,
+          "23j WM top-level へ戻る");
+
+    /* 譲っている間に届いた打鍵は子のもの。resume で吸ってはいけない
+     * (票 §6 blocker 1 = parked_from_yield を足した理由そのもの)。 */
+    res_owner_set(term);
+    check(kbd_inject((const u8 *)"ab", 2) == 2, "23k 読み手が 2 バイト注ぐ");
+    res_owner_set(APP_ID_SHELL);
+    check(kbd_inject_pending() == 2, "23l 注入リングに 2 バイト");
+    check(ma_resume_poll(term) == 0, "23m 譲りからの resume は通る");
+    check(appslot_get(term)->frame[APP_FRAME_EAX] == 0,
+          "23n EAX は 0 (sys_yield が普通に戻ったように見える)");
+    check(kbd_inject_pending() == 2,
+          "23o 注入リングは不変 (子宛の打鍵を吸わない)");
+    check(appslot_get(term)->parked_from_yield == 0, "23p 印は 1 回きり");
+    kbd_inject_discard();
+
+    /* WM が要求を取り、sh を起動して結果を返す (端末 -> sh -> 子) */
+    check(ma_park_yield() == 0, "23q 端末はもう一度譲る");
+    check(launch_pending() == 1, "23r WM から見て要求が 1 本");
+    check(launch_take(buf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == t_term,
+          "23s WM が top-level で取る");
+    sh = ma_start_gfx(100, 1, (u32)OS32X_FLAG_LAUNCHER);
+    check(sh > 0, "23t sh が立つ");
+    t_sh = launch_req("kbd_echo");
+    check(t_sh > t_term, "23u sh も自分の表から要求できる");
+    check(ma_park_yield() == 0, "23v sh が譲る");
+    check(launch_report(t_term, sh) == 0, "23w WM が子 ID を表へ返す");
+    check(launch_take(buf, (u32)LAUNCH_CMDLINE_MAX, 0, 0, 0) == t_sh,
+          "23x 次は sh の要求");
+    child = ma_start_gfx(100, 1, 0);
+    check(child > 0, "23y 子が立つ");
+    check(ma_park_yield() == 0, "23z 子が譲る");
+    check(launch_report(t_sh, child) == 0, "23A 子の ID も表へ返る");
+
+    check(launch_child((i32)term) == (i32)sh, "23B 端末の子は sh");
+    check(launch_child((i32)sh) == (i32)child, "23C sh の子は 子");
+    check(launch_child((i32)child) == 0, "23D 子が連鎖の末尾");
+
+    /* CTRL+STOP: WM は launch_child で末尾を解決し、その 1 本だけ畳む */
+    check(ma_kill_chain(child) == 0, "23E 末尾を畳む");
+    check(ma_kill_order_n == 1 && ma_kill_order[0] == child,
+          "23F 末尾は子孫を持たないので 1 本だけ");
+    check(appslot_state(child) == 0, "23G 子は FREE");
+    check(launch_child((i32)sh) == 0, "23H 回収通知で sh の表は child = 0");
+    check(launch_child((i32)term) == (i32)sh, "23I 端末の表は sh のまま");
+
+    /* exec_kill(id) は id と子孫を **末尾から** 畳む (票 D8) */
+    check(ma_kill_chain(term) == 0, "23J 端末を畳むと子孫ごと");
+    check(ma_kill_order_n == 2, "23K 連鎖の 2 本を畳んだ");
+    check(ma_kill_order[0] == sh && ma_kill_order[1] == term,
+          "23L 末尾 (sh) から順に畳む");
+    check(appslot_state(sh) == 0 && appslot_state(term) == 0,
+          "23M どちらも FREE");
+    check(launch_pending() == 0, "23N 孤児回収は残らない");
+    check(launch_child((i32)term) == 0 && launch_child((i32)sh) == 0,
+          "23O 表は全部 IDLE (ERR_FULL で固着しない)");
+
+    /* 譲れない文脈: CUI の入れ子の子と WM top-level */
+    {
+        u32 rej0 = ring3_park_reject_count;
+        check(ma_park_yield() == OS32_ERR_INVAL,
+              "23P シェル帯 (WM top-level) からは譲れない");
+        check(ring3_park_reject_count == rej0 + 1, "23Q その拒否は弾き数に載る");
+        term = ma_start_gfx(10, 0, (u32)OS32X_FLAG_LAUNCHER);  /* 入れ子の子 */
+        check(term > 0, "23R CUI の入れ子の子が立つ");
+        check(launch_req("ls") == OS32_ERR_INVAL,
+              "23S 入れ子の子からの launch_req は断る");
+        check(ma_park_yield() == OS32_ERR_INVAL,
+              "23T 入れ子の子は sys_yield でも譲れない");
+        check(ring3_park_reject_count == rej0 + 2, "23U その拒否も弾き数に載る");
+        ma_exit(0);
+    }
+    host_reader = 2;
+    kbd_inject_discard();
+    launch_init();
+}
+
+/* ========================================================================
+ *  24. 標準 FD のリダイレクト表は ID の文脈 (票 T9 §12 T1)
+ *
+ *  表 (fs/fd_redirect.c) は FD 0/1/2 の 3 本しかなく全アプリ共有だった。
+ *  park してある sh のリダイレクトが生きたままなので:
+ *    反例 1: WM の Start → Run で起動した別アプリの printf が sh の
+ *            `> /tmp/out` に入る
+ *    反例 2: パイプ中は stdout が sh の .bss (sh の**仮想**番地) なので、
+ *            別アプリの sys_write(1) がその番地を別 CR3 で解決して書く
+ *  park で走っていた ID の枠へ移し、resume で戻す。
+ * ======================================================================== */
+static void host_reset_files(void)
+{
+    int i;
+    for (i = 0; i < HOST_VFS_MAX_FD; i++) {
+        host_fd_open[i] = 0;
+        host_fd_owner[i] = 0;
+        host_fd_written[i] = 0;
+        host_fd_close_calls[i] = 0;
+    }
+    host_fd_closes = 0;
+    host_next_fd = 0;
+}
+
+static void case_redirect_context(void)
+{
+    static u8 pipebuf[16];
+    int a2, a3;
+    int closes0;
+    u32 i;
+
+    report("24 リダイレクト表は ID の文脈 (park/resume で持ち替える)\n");
+
+    /* --- 反例 1: 別アプリの stdout が sh のファイルへ入らない ---------- */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+
+    a2 = ma_start_gfx(100, 1, 0);                  /* sh 相当 */
+    check(a2 == APP_ID_MIN, "24a sh が立つ");
+    check(fd_redirect_to_file(1, "/tmp/out", FD_REDIR_WRITE) == 0,
+          "24b sh が stdout をファイルへ張る");
+    check(fd_redirect_write(1, "hello", 5) == 5, "24c sh の printf がファイルへ");
+    check(host_fd_written[0] == 5, "24d ファイルに 5 バイト");
+
+    check(ma_park_yield() == 0, "24e sh が park する (ask の WAIT_KEY 相当)");
+    check(fd_is_redirected(1) == 0,
+          "24f park でいまの表はコンソールへ戻る (枠へ移した)");
+
+    a3 = ma_start_gfx(100, 1, 0);                  /* WM の Start -> Run */
+    check(a3 > 0 && a3 != a2, "24g WM が別アプリを起動する");
+    check(fd_redirect_write(1, "XXXX", 4) == -1,
+          "24h 別アプリの stdout はコンソール (リダイレクトされていない)");
+    check(host_fd_written[0] == 5,
+          "24i 別アプリの printf は sh の /tmp/out に入らない (反例 1)");
+
+    check(ma_park_yield() == 0, "24j 別アプリも譲る");
+    check(ma_resume_poll(a2) == 0, "24k sh を起こす");
+    check(fd_is_redirected(1) == 1, "24l resume で sh の表が戻る");
+    check(fd_redirect_write(1, "!", 1) == 1 && host_fd_written[0] == 6,
+          "24m 続きは同じファイルへ入る");
+
+    /* --- 反例 2: パイプ中のバッファ (sh の .bss) を他人が書かない ------ */
+    for (i = 0; i < 16; i++) pipebuf[i] = 0;
+    check(fd_redirect_to_buffer(1, pipebuf, 16u, 0) == 0,
+          "24n sh が stdout をパイプバッファへ張る");
+    check(fd_redirect_write(1, "ab", 2) == 2, "24o sh がバッファへ 2 バイト");
+    check(fd_redirect_get_buf_len(1) == 2, "24p sys_redirect_get_buf_len が 2");
+
+    check(ma_park_yield() == 0, "24q sh が park する");
+    check(fd_is_redirected(1) == 0, "24r バッファも枠へ移る");
+    check(ma_resume_poll(a3) == 0, "24s 別アプリを起こす");
+    check(fd_redirect_write(1, "ZZZZ", 4) == -1,
+          "24t 別アプリの stdout は sh のバッファを指さない");
+    check(pipebuf[2] == 0,
+          "24u sh の .bss は書かれない (別 CR3 の番地を書かない。反例 2)");
+    check(ma_park_yield() == 0, "24v 別アプリが譲る");
+    check(ma_resume_poll(a2) == 0, "24w sh を起こす");
+    check(fd_redirect_get_buf_len(1) == 2, "24x sh のバッファ長は 2 のまま");
+
+    /* --- 回収: park したまま畳まれた ID は枠の中を閉じる ---------------- */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+    a2 = ma_start_gfx(100, 1, 0);
+    check(fd_redirect_to_file(1, "/tmp/out", FD_REDIR_WRITE) == 0,
+          "24y 張ってから park する");
+    check(ma_park_yield() == 0, "24z park");
+    closes0 = host_fd_closes;
+    check(host_fd_owner[0] == a2, "24A0 file_fd はその ID の owner タグを持つ");
+    check(ma_kill(a2) == 0, "24A park 中のアプリを畳む");
+    check(host_fd_closes == closes0 + 1,
+          "24B 枠の中のファイルが閉じられる (vfs_close_owned が閉じる)");
+    check(host_fd_close_calls[0] == 1,
+          "24B2 vfs_close は 1 回しか呼ばれない (枠からは閉じない。往復 9)");
+    check(host_fd_open[0] == 0, "24C ファイルは開いたままにならない");
+    check(fd_is_redirected(1) == 0, "24D WM の表は触らない");
+    /* 枠は空に戻す。閉じるのは vfs_close_owned なので close 回数では
+     * 見えない — 「再利用 ID へ古い表を渡さない」を直に見る。 */
+    check(fd_redirect_state_active(&g_redir[a2], 1) == 0,
+          "24D2 畳んだ ID の枠は空に戻る (再利用 ID へ古い表を渡さない)");
+
+    /* --- 走ったまま終わった ID は二重 close にならない ------------------ */
+    ma_init(4096);
+    host_reset_files();
+    fd_redirect_init();
+    a2 = ma_start_gfx(100, 1, 0);
+    check(fd_redirect_to_file(1, "/tmp/o2", FD_REDIR_WRITE) == 0, "24E 張る");
+    check(ma_park_yield() == 0, "24F 一度譲る (枠へ移る)");
+    check(ma_resume_poll(a2) == 0, "24G 起こす (枠から戻る)");
+    closes0 = host_fd_closes;
+    check(ma_exit(0) == 0, "24H 走ったまま終わる");
+    check(host_fd_closes == closes0 + 1,
+          "24I 閉じるのは 1 回だけ (いまの表から外すときに閉じる)");
+    check(host_fd_close_calls[0] == 1,
+          "24J2 こちらも vfs_close は 1 回だけ (枠は resume で空)");
+    check(fd_is_redirected(1) == 0, "24J 表はコンソールへ戻る");
+}
+
+/* ========================================================================
+ *  25. GUI 中の CTRL+STOP は WM が宛先を決める (票 T9 §12 S6)
+ *
+ *  実機の反例 (feat/gui dc2f78d): 端末 (2) -> sh (3) -> kbd_echo (4) の連鎖で
+ *  端末にフォーカスを置いて CTRL+STOP を 2 回打つと、2 回目で **sh と端末が
+ *  両方消えた** (`ring3_abort_count` +1)。T9 で sh が WAIT_POLL で毎 tick
+ *  回り端末も 100ms タイマで回るので、IRQ1 が落ちた先は宛先 (連鎖の末尾、
+ *  D8) と無関係なアプリになる。GUI 中はカーネルが立てない。
+ * ======================================================================== */
+static void case_abort_admit(void)
+{
+    int a2, a3;
+
+    report("25 GUI 中の CTRL+STOP はカーネルが宛先を決めない\n");
+
+    /* 端末 (2) と sh (3) を立てて、sh が走っている状態にする */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25a 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    check(ma_park_yield() == 0, "25b 端末が譲る");
+    a3 = ma_start(100, 1);
+    check(a3 == APP_ID_MIN + 1, "25c sh が立つ");
+    appslot_mark_scheduled(a3, 1000);
+
+    /* (a) GUI 中: 走っている sh に IRQ1 の要求は載らない */
+    check(ma_irq_abort_request(1, 1000) == 0,
+          "25d GUI 中の IRQ1 は要求を立てない");
+    check(appslot_get(a3)->abort_req == 0, "25e sh に abort_req が立たない");
+    check(ma_abort_check() == 0 && appslot_get(a3) != 0,
+          "25f syscall 出口でも畳まれない");
+    check(appslot_live() == 2, "25g 生存アプリは減らない (端末も無事)");
+
+    /* (b) GUI 中でも暴走 (2 秒 WM へ戻らない) は畳む */
+    check(ma_irq_abort_request(1, 1000 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25h 境界の 1 つ手前ではまだ立てない");
+    check(ma_irq_abort_request(1, 1000 + APP_RUNAWAY_TICKS) == 1,
+          "25i APP_RUNAWAY_TICKS 以上 WM へ戻っていなければ立てる");
+    check(appslot_get(a3)->abort_req == 1, "25j 暴走したアプリに載る");
+    check(ma_abort_check() == 0, "25k 次の安全地点で畳まれる");
+    check(appslot_get(a3) == 0 && appslot_get(a2) != 0,
+          "25l 畳まれるのは暴走した 1 本だけ (端末は無事)");
+    check(appslot_cur() == APP_ID_SHELL, "25m 畳んだあと WM top-level へ戻る");
+
+    /* (c) resume で起点が更新される = 譲っている限り暴走にならない */
+    check(ma_resume_poll(a2) == 0, "25n 端末を起こす");
+    appslot_mark_scheduled(a2, 5000);          /* exec_resume の直後 */
+    check(ma_irq_abort_request(1, 5000 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25o 起点が進むので暴走にならない");
+    check(appslot_get(a2)->abort_req == 0, "25p 端末に abort_req は立たない");
+
+    /* (d) gfx 拒否 / V86 の直呼びは GUI 中でも立つ (関門を通らない) */
+    check(ma_abort_request() == 0, "25q 直呼び (gfx 拒否 / V86) は GUI 中も立つ");
+    check(appslot_get(a2)->abort_req == 1, "25r その要求は載る");
+    appslot_get(a2)->abort_req = 0;
+
+    /* (e) WM (シェル帯) が走っているときは立てない */
+    check(ma_park_yield() == 0, "25s 端末が譲る (cur = シェル帯)");
+    check(ma_irq_abort_request(1, 99999) == 0,
+          "25t WM top-level への IRQ1 は誰にも載せない");
+    check(ma_irq_abort_request(0, 99999) == 0, "25u CUI でも同じ");
+
+    /* --- CUI 中は 1 バイトも変えない (K2 の逃げ道) --------------------- */
+    ma_init(4096);
+    a2 = ma_start(100, 0);                     /* CUI の入れ子 exec_run の子 */
+    check(a2 == APP_ID_MIN, "25v CUI で子が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    check(ma_irq_abort_request(0, 1000) == 1,
+          "25w CUI 中は tick を問わず従来どおり立てる");
+    check(appslot_get(a2)->abort_req == 1, "25x 走っている子に載る");
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25y 次の安全地点で畳まれる (K2 の逃げ道は健在)");
+
+    /* --- (f) 待っているアプリは暴走ではない (票 §12 S6b) ---------------
+     * GetMessage 型の GUI アプリ (端末) は、WM がその op_wait の**中**で
+     * 回っている間 resume を通らない。start / resume だけを起点にすると、
+     * 2 秒イベントを待っただけで「暴走」に見え、IRQ1 が CPL=3 の端末に
+     * 落ちたときに **D8 の宛先より先に端末が畳まれる**。起点を
+     * 「最後にカーネルへ入った tick」にすれば、KAPI を呼んでいる限り
+     * 対象外になる。 */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25z 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    {
+        u32 t;
+        /* 300 tick = 3 秒ぶん、10 tick ごとに KAPI を 1 本呼ぶ
+         * (描画 / キー取り / タイマ — op_wait の中で待っている形)。 */
+        for (t = 1000; t <= 1300; t += 10) ma_syscall_enter(t);
+    }
+    check(ma_irq_abort_request(1, 1300) == 0,
+          "25A 300 tick 待っても、その間 KAPI を呼んでいれば暴走ではない");
+    check(appslot_get(a2) != 0 && appslot_get(a2)->abort_req == 0,
+          "25B 端末に abort_req は立たない (D8 の宛先より先に畳まれない)");
+    check(ma_irq_abort_request(1, 1300 + APP_RUNAWAY_TICKS - 1) == 0,
+          "25C 最後の KAPI から境界の 1 つ手前ではまだ立てない");
+    check(ma_irq_abort_request(1, 1300 + APP_RUNAWAY_TICKS) == 1,
+          "25D 最後の KAPI から 200 tick 以上なら暴走として立てる");
+    check(appslot_get(a2)->abort_req == 1, "25E 計算ループには載る");
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25F 畳まれる (KAPI を呼ばない計算ループの唯一の逃げ道)");
+
+    /* --- (g) K5c の経路は残す (票 §12 S6c) -----------------------------
+     * gui_call(OP_WAIT) の中 = WM がそのアプリの syscall の中で回っている。
+     * 割り込まれた文脈は CPL=0 (WM のコード) なので IRQ1 スタブの即 kill は
+     * 起きず、要求は必ず WM のハンドラが見る (本人宛なら break して syscall
+     * 出口で畳み、別宛なら exec_abort_clear + exec_kill)。ここを塞いだ版では
+     * 連鎖の末尾が端末自身のとき (3 回目の CTRL+STOP) 誰も畳まなかった。 */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25G 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    ma_syscall_enter(1000);
+
+    /* (g-1) OP_WAIT の外 (syscall から戻って CPL=3 で走っている) → 立てない */
+    check(appslot_get(a2)->in_op_wait == 0, "25H まだ OP_WAIT の中ではない");
+    check(ma_irq_abort_request(1, 1000) == 0,
+          "25I CPL=3 で走っている最中の IRQ1 は立てない (D8 の宛先を待つ)");
+    check(appslot_get(a2)->abort_req == 0, "25J abort_req は立たない");
+
+    /* (g-2) gui_call(OP_WAIT) の中 → 立てる (K5c) */
+    ma_gui_call(MA_OP_WAIT);                 /* appslot_gui_op_enter(1) */
+    check(appslot_get(a2)->in_op_wait == 1, "25K OP_WAIT の中に居る");
+    check(ma_irq_abort_request(1, 1000) == 1,
+          "25L OP_WAIT の中の IRQ1 は従来どおり立てる (K5c)");
+    check(appslot_get(a2)->abort_req == 1, "25M 走っているアプリに載る");
+    /* WM が宛先を解決する: 本人宛なら降ろさず syscall 出口で畳ませる */
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25N 本人宛ならそのまま畳まれる (連鎖の末尾 = 自分自身)");
+
+    /* (g-3) 別宛なら WM が exec_abort_clear で降ろせる (K5c の分岐) */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    appslot_mark_scheduled(a2, 1000);
+    ma_syscall_enter(1000);
+    ma_gui_call(MA_OP_WAIT);
+    check(ma_irq_abort_request(1, 1000) == 1, "25O OP_WAIT 中に立つ");
+    {
+        int owner0 = res_owner_get();
+        res_owner_set(APP_ID_SHELL);         /* WM のハンドラの文脈 */
+        check(ma_abort_clear() == 0, "25P WM が exec_abort_clear で降ろせる");
+        res_owner_set(owner0);
+    }
+    check(appslot_get(a2)->abort_req == 0, "25Q 要求は降りている");
+    check(ma_abort_check() == 0 && appslot_get(a2) != 0,
+          "25R 本人は畳まれない (WM が別の宛先を exec_kill する)");
+}
+
 int main(void)
 {
     failures = 0;
@@ -1687,6 +2238,9 @@ int main(void)
     case_gfx_screen_owner();
     case_cui_only_and_reject_kill();
     case_poll_yield();
+    case_yield_and_kill_chain();
+    case_redirect_context();
+    case_abort_admit();
     if (checks < 84) {
         report("TOO FEW CHECKS (K5a の 84 検査を下回った)\n");
         die(1);

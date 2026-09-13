@@ -222,3 +222,56 @@ u32 fd_redirect_get_buf_len(int fd)
     if (redir_table[fd].target_type != FD_TARGET_BUFFER) return 0;
     return redir_table[fd].buf_len;
 }
+
+/* ======================================================================== */
+/*  アプリ ID ごとの退避枠 (票 T9 §12 T1)                                    */
+/*                                                                          */
+/*  持ち替えは **移動** で行う (コピーではない)。同じ file_fd を「いまの表」  */
+/*  と「枠」の両方が持つと、回収のときに二重 close になり、その間に別の       */
+/*  open が同じ FD 番号を拾っていれば他人のファイルを閉じる。だから           */
+/*  save は「写して、いまの表をコンソールへ」、restore の後は呼び手が         */
+/*  clear_state で枠を空にする、という組で使う。                             */
+/* ======================================================================== */
+
+static void redir_entry_clear(FdRedirect *r)
+{
+    r->target_type = FD_TARGET_CONSOLE;
+    r->file_fd = -1;
+    r->buffer = (u8 *)0;
+    r->buf_capacity = 0;
+    r->buf_pos = 0;
+    r->buf_len = 0;
+    r->owner = 0;
+}
+
+void fd_redirect_save(FdRedirectState *out)
+{
+    int fd;
+    if (!out) return;
+    for (fd = 0; fd < FD_REDIRECT_SLOTS; fd++) {
+        out->fd[fd] = redir_table[fd];
+        redir_entry_clear(&redir_table[fd]);   /* 閉じない (所有は out へ) */
+    }
+}
+
+void fd_redirect_restore(const FdRedirectState *in)
+{
+    int fd;
+    if (!in) return;
+    for (fd = 0; fd < FD_REDIRECT_SLOTS; fd++) {
+        redir_table[fd] = in->fd[fd];
+    }
+}
+
+void fd_redirect_clear_state(FdRedirectState *st)
+{
+    int fd;
+    if (!st) return;
+    for (fd = 0; fd < FD_REDIRECT_SLOTS; fd++) redir_entry_clear(&st->fd[fd]);
+}
+
+int fd_redirect_state_active(const FdRedirectState *st, int fd)
+{
+    if (!st || fd < 0 || fd >= FD_REDIRECT_SLOTS) return 0;
+    return (st->fd[fd].target_type != FD_TARGET_CONSOLE);
+}

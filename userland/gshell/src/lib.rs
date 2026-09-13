@@ -71,15 +71,20 @@ mod wm;
 use os32api::gfx;
 use os32api::gui::proto::{
     GUI_MODAL_OK, GUI_SESSION_LAUNCH, GUI_SESSION_SHUTDOWN, GUI_SESSION_SWITCH_CUI, OS32_ERR_FULL,
+    OS32_ERR_INVAL,
 };
 use os32api::KernelAPI;
 
 /// 「CUI へ」で戻る先 (契約 T9)。
 static CUI_SHELL: &[u8] = b"/sys/shell.bin\0";
 
-/// [`run_program`] が入口 (票 T8 D4) で起動を断ったときの戻り値。
+/// [`run_program`] が入口 (票 T8 D4) で起動を断ったときの戻り値 —
+/// **[`LaunchVia::Wm`] の経路だけ**。
 /// `0` = 「起動しなかったがエラー表示は済んでいる」— `rc < 0` の一般エラー
 /// (`Launch failed ...`) を呼ぶ側に出させないため、`0` (park 前に終了) と同じ扱い。
+///
+/// 要求表経由 ([`LaunchVia::Table`]) はこれを使わない: `0` は表では `DONE`
+/// (= 正常終了) なので、断ったことが要求者に伝わらない (実装レビュー 1)。
 const RUN_REFUSED: i32 = 0;
 
 /// 起動設定 (`GUI=0/1`)。CUI へ戻すときにここを書き換える (契約 S6 の 4)。
@@ -192,15 +197,8 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8, api: *mut KernelAPI)
 fn standalone_loop(st: &mut wm::GuiState) -> bool {
     while !st.quit {
         wm::wm_cycle(st, input::Ctx::Standalone);
-        /* 全画面中の CTRL+STOP は**所有者宛** (票 T8 D4d)。全画面プログラムが
-         * `kbd_getchar` で park していると、待ちの中で畳む X3 の分岐
-         * (`handler.rs` の `abort_seen`) を誰も通らない — top-level に居る WM が
-         * ここで宛先 (`multiapp::abort_target` = 所有者) へ振り替える。
-         * 全画面でないときは従来どおり X3 の分岐に任せる (誤爆を足さない)。 */
-        if fullscreen::active() && st.abort_seen {
-            st.abort_seen = false;
-            multiapp::redirect_abort(st, 0);
-        }
+        /* top-level (owner 1) で受けた CTRL+STOP (票 T8 D4d / T9 受入 S6)。 */
+        top_level_abort(st);
         if st.launch_pending {
             st.launch_pending = false;
             launch_app(st);
@@ -216,6 +214,12 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
             /* SWITCH_CUI が成立した (shell 切替済み)。ここで gshell を抜ける。 */
             return false;
         }
+        /* 起動要求表 (KAPI v49、票 T9 D3 (3)(4))。`session_handoff` と**同じ
+         * 地点** = `exec_start` / `exec_resume` から戻った後、park 判定
+         * (`multiapp::resume_one`) の前で、WM が自分の文脈 (owner 1) で走って
+         * いる唯一の場所。`launch_take` / `launch_report` / `exec_kill` は
+         * どれもここでしか通らない。 */
+        drain_launch_requests(st);
         /* 全画面の後始末の保険 (票 T8-3、PM 実測 2026-09-12)。所有者が
          * `exec_kill` / fault で畳まれた経路は `exec_start` / `exec_resume` の
          * 復帰点を通らないので、所有者の問い合わせが 1 度も走らないことが
@@ -240,6 +244,42 @@ fn standalone_loop(st: &mut wm::GuiState) -> bool {
     true
 }
 
+/// top-level (owner 1) で受けた CTRL+STOP を処理する (票 T8 D4d / T9 受入 S6)。
+///
+/// `abort_seen` を消費する点は 3 つある:
+///
+/// | 点 | どんな周か |
+/// |---|---|
+/// | `handler.rs` の `op_wait` | アプリが待っていて WM がその中 (X3) で回っている |
+/// | ここ (全画面) | 全画面 GFX プログラムが park していて WM は描かない (票 T8 D4d) |
+/// | ここ (ウィンドウ) | **`WAIT_POLL` のアプリが居て WM が単独ループで回っている** |
+///
+/// 3 つ目が抜けていて実機の受入 S6 が落ちた (2026-09-13)。端末 → `sh` → 子の
+/// 連鎖では、`sh` の `sys_yield` が `should_park` に端末を譲らせるので WM は
+/// ずっと単独ループに居る。IRQ1 の `appslot_abort_request()` は「走っている
+/// **アプリ**」にしか要求を立てられず (`g_cur` がシェル帯なら何もしない =
+/// `ring3_abort_count` が増えない) 、raw リングから来る `abort_seen` だけが
+/// 手がかりなのに、それを見る経路がここに無かった。
+///
+/// 全画面の枝は実機で通っている形 (T8 F8) をそのまま残す — `redirect_abort`
+/// が予約を積み、同じ 1 周の `resume_one` → `drain_top_level` が実行する。
+/// ウィンドウモードの枝は [`multiapp::abort_at_top_level`] が直に実行する
+/// (予約は「表に載っている ID」にしか積めないが、連鎖の末尾が WM の表から
+/// 落ちていても CTRL+STOP は届かなければならない)。
+///
+/// 戻り値は畳んだ ID (0 = 何も畳まなかった)。
+fn top_level_abort(st: &mut wm::GuiState) -> i32 {
+    if !st.abort_seen {
+        return 0;
+    }
+    st.abort_seen = false;
+    if fullscreen::active() {
+        multiapp::redirect_abort(st, 0);
+        return 0;
+    }
+    multiapp::abort_at_top_level(st)
+}
+
 /// デバッグ用の F1〜F5 経路 ([`DEBUG_SHORTCUTS`])。製品では `launch_pending` が
 /// 立たないので呼ばれない (出荷形の起動は Start → Run... = `GUI_SESSION_LAUNCH`)。
 fn launch_app(st: &mut wm::GuiState) {
@@ -260,7 +300,19 @@ fn launch_app(st: &mut wm::GuiState) {
         }
     }
     st.launch_path_len = 0;
-    run_program(st, &path);
+    run_program(st, &path, LaunchVia::Wm);
+}
+
+/// 起動の依頼元 (票 T9 実装レビュー 1、2026-09-13)。**拒否と失敗の見せ方**が違う。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchVia {
+    /// WM 自身の経路 (Start → Run... / Programs、デバッグの F1〜F5)。
+    /// 断った理由は WM がモーダルで出し、戻りは [`RUN_REFUSED`] = `0`。
+    Wm,
+    /// 起動要求表 (KAPI v49、票 T9 D3)。**モーダルは出さない** — 要求者が
+    /// `launch_poll` で `FAILED(rc)` を受けて自分の画面に出す。だから断った
+    /// ときも `0` (= `DONE` = 正常終了) ではなく**負**を返さなければならない。
+    Table,
 }
 
 /// 外部プログラムを 1 本**増やす** (K5b-W、決裁 D9-5)。
@@ -282,7 +334,7 @@ fn launch_app(st: &mut wm::GuiState) {
 ///
 /// `path` は**この関数の呼び出し元が用意した NUL 終端の私有バッファ**
 /// (契約 §7.1 の 3)。
-fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
+fn run_program(st: &mut wm::GuiState, path: &[u8; 256], via: LaunchVia) -> i32 {
     cursor::hide(st);
     /* 前のアプリ宛の CTRL+STOP を持ち越さない (カーネル側 g_ring3_abort_req と同じ扱い)。 */
     st.abort_seen = false;
@@ -294,6 +346,14 @@ fn run_program(st: &mut wm::GuiState, path: &[u8; 256]) -> i32 {
      * WM が上書きしないため (所有者の問い合わせと二重)。 */
     match os32x::classify_path(path) {
         os32x::Kind::CuiOnly => {
+            /* 票 T9 実装レビュー 1 (blocker 1): 要求表経由では **負** を返す。
+             * `RUN_REFUSED` = 0 をそのまま `launch_report` へ渡すと表は `DONE`
+             * になり、要求者 (`sh`) は「起動して正常終了した」と読む — 実際は
+             * 1 バイトも走っていない。理由はモーダルではなく `FAILED(rc)` で
+             * 要求者へ渡し、要求者が自分の画面に出す。 */
+            if via == LaunchVia::Table {
+                return OS32_ERR_INVAL;
+            }
             notify_cui_only(st, path);
             return RUN_REFUSED;
         }
@@ -441,7 +501,7 @@ fn session_handoff(st: &mut wm::GuiState) -> bool {
             }
             /* K5b-W: 5 本目は `ERR_FULL` で起動されない (受入 G3)。既存の
              * 4 本は無事なので、そのことが分かる文言を出す。 */
-            let rc = run_program(st, &buf);
+            let rc = run_program(st, &buf, LaunchVia::Wm);
             if rc < 0 {
                 let msg: &[u8] = if rc == OS32_ERR_FULL {
                     b"Too many programs (4 max) - close one first\0"
@@ -459,6 +519,88 @@ fn session_handoff(st: &mut wm::GuiState) -> bool {
             true
         }
     }
+}
+
+/// 起動要求表 (KAPI v49) を 1 周ぶん捌く (票 T9 §1 D3 (3)(4)、§10 non-blocker 4)。
+///
+/// **呼べるのは単独ループ (top-level) だけ** — `launch_take` / `launch_report` /
+/// `exec_kill` はどれも owner 1 専用で (`res_owner_get()` が `op_wait` の中では
+/// アプリ ID になる)、`exec_start` に至っては WM top-level からしか通らない
+/// (契約 S2)。走っているアプリは [`multiapp::should_park`] の (a) が
+/// `launch_pending()` を見て譲るので、要求が積まれれば必ずここへ来る。
+///
+/// | `kind` | ここでやること |
+/// |---|---|
+/// | `LAUNCH` | [`run_program`] を [`LaunchVia::Table`] で通す (`begin_start` / `end_start`、全画面の判定と復帰)。戻り (子 ID / 0 / 負) を**そのまま** `launch_report` へ — 入口の拒否もここでは負になる |
+/// | `KILL` | [`multiapp::kill_for_request`] (`exec_kill` は子孫ごと末尾から畳む) → `launch_report(token, 0)` |
+///
+/// 2 つの約束:
+///
+/// - **失敗しても WM はモーダルを出さない**。要求者が `launch_poll` で
+///   `FAILED(rc)` を受けて自分の画面に出す (D3 (3))。WM が割り込むと、端末の
+///   プロンプトの前に WM のダイアログが乗る。Start → Run... の
+///   `GUI_SESSION_LAUNCH` は従来どおり ([`session_handoff`])。
+/// - **`launch_report` の `OS32_ERR_STALE` は正常** (§10 non-blocker 2)。KILL は
+///   「take → `exec_kill` → 子の回収通知で `DONE` → report」の順になるので、
+///   report が届くときには `TAKEN` ではない。再試行しない。
+///
+/// 戻り値 `true` = 1 件以上捌いた。
+fn drain_launch_requests(st: &mut wm::GuiState) -> bool {
+    let mut did = false;
+    let mut guard = 0;
+    /* 1 周で捌くのは要求表の本数ぶん (要求者 ID ごとに 1 本 = 4) まで。
+     * `launch_take` が 0 を返さない壊れ方をしても単独ループを止めない。 */
+    while guard < multiapp::MAX_APPS {
+        guard += 1;
+        /* SAFETY: KAPI の関数表は `os32_init` が入口で据えた有効なポインタ。
+         * `launch_pending` は引数なし・戻りは値で、誰でも呼べる。 */
+        if unsafe { (os32api::api().launch_pending)() } <= 0 {
+            break;
+        }
+        /* `cap` は `LAUNCH_CMDLINE_MAX` 以上でなければ `OS32_ERR_INVAL` (§1a)。
+         * カーネルは `kstrncpy` で NUL 終端して書くので、`run_program` の
+         * 「NUL 終端の私有バッファ」(契約 §7.1 の 3) をそのまま満たす。 */
+        let mut buf = [0u8; multiapp::LAUNCH_CMDLINE_MAX];
+        let mut requester: i32 = 0;
+        let mut kind: i32 = 0;
+        let mut arg: i32 = 0;
+        /* SAFETY: `buf` はこのスタックフレームの 256B で、`cap` にその実長を
+         * 渡す (`LAUNCH_CMDLINE_MAX` 未満なら `OS32_ERR_INVAL`)。出力 3 本も
+         * 同じフレームの `i32`。カーネルは `kstrncpy` で NUL 終端まで含めて
+         * `cap` に収めて書く。呼べるのは owner 1 = ここ (top-level) だけ。 */
+        let token = unsafe {
+            (os32api::api().launch_take)(
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut requester,
+                &mut kind,
+                &mut arg,
+            )
+        };
+        if token <= 0 {
+            break; /* 0 = 無し、負 = 取りに来られない文脈 (どちらも次の周へ) */
+        }
+        did = true;
+        /* 孤児回収 (要求者が退場済み) の表も `kind` は KILL だが、票 D3 (4) の
+         * 「`LAUNCH_REQ_ORPHAN` も KILL として同じに扱う」を明示で読めるように
+         * 印そのものも見る — 起動だけは要求者が生きている表に限る。 */
+        let orphan = requester == multiapp::LAUNCH_REQ_ORPHAN;
+        if kind == multiapp::LAUNCH_KIND_LAUNCH && !orphan {
+            let rc = run_program(st, &buf, LaunchVia::Table);
+            /* SAFETY: `launch_report` は値 2 つだけ。owner 1 から呼んでいる。 */
+            unsafe { (os32api::api().launch_report)(token, rc) };
+            continue;
+        }
+        if kind == multiapp::LAUNCH_KIND_KILL || orphan {
+            multiapp::kill_for_request(arg);
+        }
+        /* 知らない `kind` (表が壊れた) もここへ落として報告だけする — 表を
+         * `TAKEN` のまま残すと、その要求者は二度と `launch_req` できない。
+         * 回収通知で先に `DONE` になっていれば `OS32_ERR_STALE` で、正常。
+         * SAFETY: 値 2 つだけ。owner 1 から呼んでいる。 */
+        unsafe { (os32api::api().launch_report)(token, 0) };
+    }
+    did
 }
 
 /// CUI へ戻す (契約 S6 の 1〜6)。cfg 更新に失敗したら**切替を実行せず**

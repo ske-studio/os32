@@ -139,6 +139,78 @@ KAPI スロットが 1 本増えた分 `KernelAPI` 構造体が 4 B 伸びる (1
 あることと、控え・カウンタが既存の整列の隙間に収まったこと。KAPI は 1 本も増えていない
 (v48 のまま — `kbd_trygetchar` / `kbd_trygetkey` の中身だけが変わる)。
 
+## カーネル帯の静的計上 (T9-K、2026-09-12)
+
+`exec/launch.c` の起動要求表 (票 T9 D3) と、`AppSlot` に増えた印 `parked_from_yield` (D5)。
+どれも `kmalloc` せず **カーネルの .data / .bss の静的領域**なので、シェル帯・アプリ帯・
+exec_heap のどれも減らさない。測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を
+基準版 (feat/gui `d301324`) と並べたもの (カーネル全体のリンクとゲストの空き容量は未測定 —
+`make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| 要求表 `g_req[]` | 1704 B | 1 本 284 B (`requester` / `child` / `phase` / `kind` / `token` / `rc` / `arg` の `int` 7 個 + `cmdline[256]`) × `APP_SLOT_COUNT` (6) |
+| token の種 `g_next_token` | 4 B | `.data` (初期値 1) |
+| 診断カウンタ `launch_req_count` / `launch_orphan_count` | 8 B | KAPI にはしない (kernel.map から `emu_read_mem`) |
+| 整列込みの実測 `launch.o` | **.bss 1736 B / .data 4 B** | text 2900 B (KAPI 7 本 + 連鎖 + 回収通知 + 自己診断) |
+| 印 `parked_from_yield` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `appslot.o` の .bss 1168 → **1192 B** |
+| カウンタ `ring3_yield_count` | 0 B (実質) | 既存の整列の隙間に入る |
+| **合計 (静的)** | **1764 B** | 1736 + 4 + 24 |
+
+票 §1 メモリの見積り (「要求表 4 本 ≈ 1.1KB + 印 1 語 × 5」) との差は 2 つ:
+
+- 表は使う 4 本 (ID 2〜5) で 1136 B = 見積りどおり。実測の 1704 B との差 568 B は、
+  添字を **ID そのもの**にするために ID 0 と 1 の枠も持っているため (`parked_from_kbd` が
+  6 スロット分あるのと同じ理由)。ずらすと「表 = ID」が読めなくなり、回収通知と連鎖の
+  照合が 1 段増える。
+- `token` / `rc` / `arg` の 3 欄が見積りに無かった (12 B × 6)。`token` は §9 blocker 4 の
+  32bit 化、`rc` は FAILED の値、`arg` は KILL の宛先で、どれも落とせない。
+
+text の増分は `launch.o` 2900 B + `appslot.o` 4131 → **4579 B** (+448: `park_yield_check/commit` +
+`resume_source` + `resume_check` の枝 + 自己診断 1 項) + `exec.o` 11325 → **11765 B**
+(+440: `exec_sys_yield` + `exec_kill` の連鎖 + `exec_resume` の印分岐 + 回収通知 1 行)。
+`exec.o` の **.bss は 8708 B で不変**、`.data` も 12 B で不変。
+KAPI は 8 本増えて v49 (`KernelAPI` 構造体が 32 B 伸びる — 関数ポインタ 8 個)。
+
+## カーネル帯の静的計上 (T9 §12 T1、2026-09-13)
+
+標準 FD のリダイレクト表 (`fs/fd_redirect.c`) を **アプリ ID ごとの文脈** にしたぶん。
+枠は `exec/appslot.c` の `static FdRedirectState g_redir[APP_SLOT_COUNT]` (カーネル .bss、
+`kmalloc` しない)。測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を
+基準版 (feat/gui `9f1d77a`) と並べたもの (カーネル全体のリンクとゲストの空き容量は未測定 —
+`make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| `FdRedirect` 1 本 | 28 B | `target_type` / `file_fd` / `owner` の `int` 3 個 + `buffer` ポインタ + `buf_capacity` / `buf_pos` / `buf_len` の `u32` 3 個 |
+| `FdRedirectState` (FD 0/1/2) | 84 B | 28 × `FD_REDIRECT_SLOTS` (3) |
+| 枠 `g_redir[]` | **504 B** | 84 × `APP_SLOT_COUNT` (6)。`i386-elf-nm -S` の実測 `0x1F8` |
+| 整列込みの実測 `appslot.o` の .bss | 1192 → **1720 B** (+528) | 504 + `g_slot` の後ろの詰め物 24 B |
+| `fd_redirect.o` | .bss 116 B で**不変** | text 1289 → 1676 B (+387: save/restore/clear/close/state_active の 5 本) |
+| **合計 (静的)** | **528 B** | すべて `appslot.o` の .bss |
+
+`appslot.o` の text は 4579 → **4967 B** (+388: 持ち替え 2 本 + park 4 か所と resume / init /
+shell_commit / reclaim の呼び出し)。切替のコストは構造体コピー 84 B × 2 (退避 + 復元) で、
+park / resume ごとに 1 回。`exec.o` は 1 行も変わらない (呼ぶのは `appslot.c` の中だけ)。
+
+## カーネル帯の静的計上 (T9 §12 S6、2026-09-13)
+
+GUI 中の CTRL+STOP を WM に任せる判定 (票 §12 S6) で `AppSlot` に増えた欄
+`last_kernel_tick` (`u32`)。`kmalloc` せずカーネル .bss の静的領域で、シェル帯・アプリ帯・
+exec_heap のどれも減らさない。
+
+測定は `i386-elf-gcc -O2 -c` + `i386-elf-size` / `i386-elf-nm -S` を基準版
+(feat/gui `67b512e`) と並べたもの (カーネル全体のリンクは未測定 — `make` は未実施)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| `last_kernel_tick` (AppSlot 1 本 4 B × 6 スロット) | 24 B | `g_slot` が `0x468` → **`0x480`** |
+| `appslot.o` の .bss 合計 | **1720 B で不変** | 増えた 24 B は `g_slot` と `g_redir` の間の詰め物に収まった (`g_redir` は `0x4C0` のまま) |
+| 判定 `appslot_abort_admit` / `appslot_mark_scheduled` / 自己診断 | 0 B (静的領域なし) | text 4967 → **5087 B** (+120) |
+
+`exec.c` は静的領域を 1 バイトも増やさない (`ring3_abort_request` の 1 行と
+`appslot_mark_scheduled` の呼び出し 2 か所)。KAPI も増えていない (v49 のまま)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

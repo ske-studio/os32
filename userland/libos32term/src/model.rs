@@ -122,14 +122,25 @@ impl<'a> Model<'a> {
             return Ok(());
         }
         if ch == '\x08' {
-            let (mut x, y) = self.state.cursor;
+            let (mut x, mut y) = self.state.cursor;
             if x > 0 {
                 x -= 1;
-                if self.cells[y * self.cols + x] == Cell::Continuation {
-                    x -= 1;
-                }
+            } else if y > 0 {
+                // A line longer than cols continues on the next row (see put),
+                // so column 0 is only the start of an edit when y == 0. Going
+                // back to the previous row's last column lets a caller erase
+                // across the wrap with the usual BS, space, BS without knowing
+                // the width. The model keeps no wrap flag, so a BS at column 0
+                // after an explicit newline lands there too; that sequence
+                // erases nothing by itself and callers only backspace over what
+                // they just wrote.
+                y -= 1;
+                x = self.cols - 1;
             }
-            self.state.cursor.0 = x;
+            if x > 0 && self.cells[y * self.cols + x] == Cell::Continuation {
+                x -= 1;
+            }
+            self.state.cursor = (x, y);
             return Ok(());
         }
         if ch == '\r' {

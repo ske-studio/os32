@@ -1,5 +1,5 @@
 {
-  "version": 48,
+  "version": 49,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -47,7 +47,8 @@
     "gui.h",
     "con_sink.h",
     "kbd_inject.h",
-    "memory_boot.h"
+    "memory_boot.h",
+    "launch.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -263,7 +264,7 @@
       "name": "sys_getcwd",
       "ret": "const char *",
       "args": [],
-      "target": "vfs_cwd"
+      "target": "vfs_cwd_user"
     },
     {
       "name": "vfs_devname",
@@ -1365,6 +1366,47 @@
       "name": "gfx_screen_owner",
       "ret": "i32",
       "args": []
+    },
+    {
+      "name": "launch_req",
+      "ret": "i32",
+      "args": ["const char *cmdline"]
+    },
+    {
+      "name": "launch_pending",
+      "ret": "i32",
+      "args": []
+    },
+    {
+      "name": "launch_take",
+      "ret": "i32",
+      "args": ["char *buf", "u32 cap", "i32 *requester", "i32 *kind", "i32 *arg"]
+    },
+    {
+      "name": "launch_report",
+      "ret": "i32",
+      "args": ["i32 token", "i32 rc"]
+    },
+    {
+      "name": "launch_poll",
+      "ret": "i32",
+      "args": ["i32 token", "i32 *status"]
+    },
+    {
+      "name": "launch_cancel",
+      "ret": "i32",
+      "args": ["i32 token"]
+    },
+    {
+      "name": "launch_child",
+      "ret": "i32",
+      "args": ["i32 id"]
+    },
+    {
+      "name": "sys_yield",
+      "ret": "i32",
+      "args": [],
+      "target": "exec_sys_yield"
     }
   ]
 }

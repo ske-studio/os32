@@ -7,6 +7,7 @@
 use crate::{
     boundary, inject,
     input::{self, Action},
+    launch::{self, Attach, Outcome, Step},
     paint,
     prompt::{self, Decision, Event, Mode, Next},
     session::Session,
@@ -75,6 +76,7 @@ pub fn run(api: *mut KernelAPI) -> i32 {
         /* 端末はプロンプトから始まる (子はまだいない)。 */
         mode: Mode::Prompt,
         line: prompt::Line::new(),
+        attach: None,
     };
     /* 票 §5 R2: **イベントループ (とタイマ) に入る前に** con_sink_read を 1 回
      * 呼び、読み手権限を確立する。`kbd_inject` はこれを済ませた者しか受け付け
@@ -150,6 +152,9 @@ struct DisplayApp<'a> {
     mode: Mode,
     /// プロンプトで編集中の行 (票 T7 E2)。
     line: prompt::Line,
+    /// 要求表に積んだ 1 件 (票 T9 D4)。`Some` なら接続モード。子 ID と完了は
+    /// con_sink の `EXIT` ではなく `launch_poll` で問い合わせる。
+    attach: Option<Attach>,
 }
 
 impl DisplayApp<'_> {
@@ -256,7 +261,8 @@ impl DisplayApp<'_> {
         self.repaint(ui);
     }
 
-    /// 候補を順に探し、見つかった絶対パスで gshell に起動を頼む (票 E3 / E4)。
+    /// 候補を順に探し、見つかった絶対パスを**要求表**へ積む (票 E3 / T9 D4)。
+    /// 取りに来て `exec_start` するのは WM (owner 1)。
     fn launch(&mut self, echo: &prompt::Line, name: &[u8], args: &[u8]) {
         /* 打った行は出力領域に残す — 接続モードではプロンプトが消えるので、
          * 何を走らせたのか分からなくなる。 */
@@ -282,22 +288,139 @@ impl DisplayApp<'_> {
             self.line.clear();
             return;
         };
-        match libos32gui::session_launch(cmd.as_bytes()) {
-            Ok(()) => {
-                /* 受理された = 子が 1 本増える (K5b-W: 要求元は畳まれない)。
-                 * 打鍵の行き先を子へ移す。 */
-                if prompt::step(self.mode, Event::Launched) == Next::Attached {
-                    self.mode = Mode::Attached;
+        /* 票 T9 D4: `session_launch` ではなく要求表へ積む。戻り値の token で
+         * 子 ID と完了を問い合わせられる (`session_launch` は「1 本増やす」
+         * だけで、どれが自分の子かも終わったかも分からなかった)。
+         * SAFETY: libos32gui::init initialized os32api. cmd は NUL 終端の私有
+         * バッファ (prompt::Path は常に len の次へ 0 を置く) で、カーネルは
+         * 1〜255B を読むだけ (kapi_generated.rs: launch_req(*const u8) -> i32)。 */
+        let rc = unsafe { (os32api::api().launch_req)(cmd.as_ptr()) };
+        if rc > 0 {
+            /* 受理された = 要求表に 1 本積んだ。WM が取って `exec_start` する。
+             * token は**必ず**控える — 落とすと誰も poll せず、表が空かないまま
+             * 次の `launch_req` が `OS32_ERR_FULL` で固着する。 */
+            self.attach = Some(Attach::new(rc));
+            /* 打鍵の行き先を子へ移す (D4)。 */
+            if prompt::step(self.mode, Event::Launched) == Next::Attached {
+                self.mode = Mode::Attached;
+            }
+            self.line.clear();
+            return;
+        }
+        if rc == launch::ERR_FULL {
+            /* 前の要求がまだ表に残っている。行は残して打ち直せるようにする
+             * (票 E3 の `busy` と同じ扱い)。 */
+            self.echo(&prompt::message(b"busy", b""));
+            return;
+        }
+        /* それ以外は直らない要求 (宣言 LAUNCHER が無い / GUI 外 / 長すぎる)。
+         * 行は消し、プロンプトのまま理由を出す (票 T9 D4)。 */
+        self.echo(&prompt::message_rc(b"launch_req failed ", rc));
+        self.line.clear();
+    }
+
+    /// 要求表を 1 回読む (票 T9 D4)。戻り値は「描き直す必要があるか」。
+    fn poll_launch(&mut self) -> bool {
+        let Some(mut attach) = self.attach else {
+            return false;
+        };
+        let mut status: i32 = 0;
+        // SAFETY: libos32gui::init initialized os32api. status is a local i32 and
+        // the kernel only writes it on success (kapi_generated.rs:
+        // launch_poll(i32, *mut i32) -> i32).
+        let rc = unsafe { (os32api::api().launch_poll)(attach.token, &mut status) };
+        let mut step = attach.poll(rc, status);
+        /* 取消が `OS32_ERR_AGAIN` で止まっていたら、この周でもう一度出す
+         * (票 D9: WM がまだ取っていないだけなので待てば通る)。 */
+        if step == Step::Retry {
+            step = self.cancel(&mut attach);
+        }
+        self.attach = Some(attach);
+        match step {
+            Step::Idle => false,
+            Step::Redraw => true,
+            /* cancel() は Retry を返さない (AGAIN は Redraw のまま次の周へ)。 */
+            Step::Retry => true,
+            Step::Finish(outcome) => {
+                self.finish(outcome);
+                true
+            }
+        }
+    }
+
+    /// `launch_cancel(token)` を 1 回出す (票 T9 D9)。
+    fn cancel(&mut self, attach: &mut Attach) -> Step {
+        // SAFETY: libos32gui::init initialized os32api. token is a plain i32
+        // (kapi_generated.rs: launch_cancel(i32) -> i32).
+        let rc = unsafe { (os32api::api().launch_cancel)(attach.token) };
+        attach.cancelled(rc)
+    }
+
+    /// 接続モードを畳んでプロンプトへ戻す (票 T9 D4)。
+    fn finish(&mut self, outcome: Outcome) {
+        let event = match outcome {
+            /* 子が終わった (取消で畳まれた場合も含む)。静かに戻る。 */
+            Outcome::Done => Event::Done,
+            Outcome::Failed(rc) => {
+                self.echo(&prompt::message_rc(b"launch failed ", rc));
+                Event::Failed
+            }
+            /* poll 自体が負 / 意味不明な status。黙って戻らず理由を出す ([V4])。 */
+            Outcome::Lost(rc) => {
+                self.echo(&prompt::message_rc(b"launch lost ", rc));
+                Event::Failed
+            }
+        };
+        self.attach = None;
+        if prompt::step(self.mode, event) == Next::Prompt {
+            self.mode = Mode::Prompt;
+            self.line.clear();
+        }
+    }
+
+    /// 接続モードで ESC を受けた (票 T9 D9)。`launch_cancel` を 1 回だけ出し、
+    /// 接続モードのまま `DONE` を待つ (連打は `Attach` の印がまとめる)。
+    /// `OS32_ERR_STALE` (もう完了している) でも **token は捨てない** — 完了は
+    /// `launch_poll` が消費して初めて表が空く (`include/launch.h`)。
+    fn escape(&mut self, ui: &mut Ui) {
+        let Some(mut attach) = self.attach else {
+            /* 表を持っていないのに接続モードに居る = 取りこぼし。固まらない
+             * よう素直にプロンプトへ戻す。 */
+            self.finish(Outcome::Done);
+            self.repaint(ui);
+            return;
+        };
+        if !attach.escape() {
+            /* もう出してある。二重に出しても `AGAIN` / `STALE` が返るだけだが、
+             * 呼ぶ回数は 1 回にまとめる (票 D9)。 */
+            return;
+        }
+        let step = self.cancel(&mut attach);
+        self.attach = Some(attach);
+        match step {
+            /* `cancelled` はここへ来ない (`STALE` でも token を捨てず poll を
+             * 続ける)。来たとしても固まらないよう畳む。 */
+            Step::Finish(outcome) => self.finish(outcome),
+            /* 票 D9: 取消を出しても接続モードのまま (`Next::Stay`)。最下行が
+             * `[cancelling …]` に変わり、プロンプトへは `DONE` を見てから
+             * (`STALE` = もう完了している場合も、消費するのは `launch_poll`)。 */
+            _ => {
+                if prompt::step(self.mode, Event::CancelRequested) == Next::Prompt {
+                    self.finish(Outcome::Done);
                 }
-                self.line.clear();
             }
-            /* 別の LAUNCH が pending。行は残して打ち直せるようにする (票 E3)。 */
-            Err(e) if e.code() == GuiErr::FULL.code() => self.echo(&prompt::message(b"busy", b"")),
-            /* それ以外は直らない要求。行は消す (gshell はモーダルも出す)。 */
-            Err(e) => {
-                self.echo(&prompt::message(b"launch failed: ", e.name()));
-                self.line.clear();
-            }
+        }
+        self.repaint(ui);
+    }
+
+    /// 最下行に出す接続モードの情報 (票 T9 D9)。
+    fn running(&self) -> prompt::Running {
+        match self.attach {
+            Some(a) => prompt::Running {
+                child: a.child,
+                cancelling: a.cancelling(),
+            },
+            None => prompt::Running::default(),
         }
     }
 
@@ -358,16 +481,10 @@ impl DisplayApp<'_> {
              * 借りる先が別のフィールドなので同時に持てる。 */
             for record in it.by_ref() {
                 self.sink.records += 1;
-                if let Record::Exit(_) = record {
-                    /* 票 E1 / E4: 子が回収された。どの ID が自分の子かは
-                     * 持たないので、接続モードなら無条件でプロンプトへ戻る。
-                     * プロンプトで受けた EXIT は捨てる (step が Stay)。 */
-                    if prompt::step(self.mode, Event::Exit) == Next::Prompt {
-                        self.mode = Mode::Prompt;
-                        self.line.clear();
-                    }
-                    continue;
-                }
+                /* 票 T9 D4: `EXIT` レコード (`Record::Exit`) は**表示にとどめ**、
+                 * モード判定には使わない。子 ID と完了は要求表 (`launch_poll`)
+                 * が答える — リングは drop-oldest なので制御情報は載せない
+                 * (票 §7 blocker)。`session.apply` の `Exit` は何もしない。 */
                 match self.session.apply(record) {
                     Ok(a) => {
                         self.sink.wraps += a.wraps;
@@ -440,6 +557,9 @@ impl App for DisplayApp<'_> {
         let mut changed = self.pump();
         /* dropped が増えたら状態行に出す (票 §2-2)。増えた周は必ず描き直す。 */
         changed |= self.refresh_stat();
+        /* 票 T9 D4: 同じ 100ms の周で要求表も 1 回読む (子 ID / 完了 / 失敗)。
+         * 取消の再試行 (`OS32_ERR_AGAIN`) もここから出る (D9)。 */
+        changed |= self.poll_launch();
         if !changed {
             return;
         }
@@ -481,16 +601,13 @@ impl App for DisplayApp<'_> {
 
     fn on_key(&mut self, ui: &mut Ui, _window: u32, scan: u8, ch: u8, _mods: u8, down: bool) {
         if down && scan == libos32gui::widget::SCAN_ESC {
-            /* 票 E4: プロンプトの ESC は従来どおり自分の終了。接続モードの
-             * ESC は**プロンプトへ戻るだけ** — 子には注がず、自分も終わらない
-             * (起動失敗でモーダルが出たときの唯一の戻り道)。 */
+            /* 票 E4 / T9 D9: プロンプトの ESC は従来どおり自分の終了 (子が
+             * 生きていても取消は出さない — 要求者の退場はカーネルが孤児回収
+             * する)。接続モードの ESC は `launch_cancel` で、子には注がない。
+             * プロンプトへは取消の `DONE` を poll で見てから戻る。 */
             match prompt::step(self.mode, Event::Escape) {
                 Next::Quit => self.fail(ui),
-                Next::Prompt => {
-                    self.mode = Mode::Prompt;
-                    self.line.clear();
-                    self.repaint(ui);
-                }
+                Next::Cancel => self.escape(ui),
                 _ => {}
             }
             return;
@@ -612,7 +729,12 @@ impl App for DisplayApp<'_> {
                 }
                 /* 票 E2: 最下行は端末のもの。背景ごと描き直す — BS で縮んだ
                  * 残りが消えないと、消したはずの文字が見えたままになる。 */
-                let row = prompt::row(self.mode, &self.line, layout.prompt_cols());
+                let row = prompt::row(
+                    self.mode,
+                    &self.line,
+                    layout.prompt_cols(),
+                    &self.running(),
+                );
                 let y = layout.prompt_y() as i32;
                 gapi::fill_rect(
                     surface,

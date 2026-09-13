@@ -22,7 +22,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
          "-fno-stack-protector", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement"]
-INC = [str(ROOT / p) for p in ("include", "kernel", "lib", "exec",
+INC = [str(ROOT / p) for p in ("include", "kernel", "lib", "exec", "fs",
                                "sdk/include/os32")]
 SRC = ROOT / "tools/tests/sbrk_tier_host.c"
 

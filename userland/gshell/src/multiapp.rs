@@ -43,6 +43,17 @@
 //! 優先度は最下位** ([`poll_ready`] / [`pick_poll`] / 模型の `ma_pick_poll`)。
 //! 入力群も導出群も空の周にしか選ばないので、ここでも D11-3 の規則と
 //! 上界 (30) は動かない (最下位 = 他が ready な周は候補にならない)。
+//!
+//! 票 T9 D3 / D5 / D8 で 3 か所が変わった。どれも**この WM の領分**で、
+//! カーネル (KAPI v49 の要求表) は順を決めない:
+//!
+//! - [`should_park`] の (a) と [`pick_poll`] の門に `launch_pending()` を足した
+//!   (`launch_take` も owner 1 専用なので、譲らないと取りに行けない)。
+//! - `WAIT_POLL` 群は **巡回 + 同じ tick に 1 回** ([`pick_poll`])。模型
+//!   `ma_pick_poll` (`tools/tests/multiapp_model_host.c`) はまだ T8 の
+//!   「ID 昇順」のままで、この 1 点だけ 1 対 1 ではない — 巡回と tick の
+//!   検査は `userland/gshell/host/wm_tests.rs` の T9-W 検査 6 / 7 が持つ。
+//! - CTRL+STOP の宛先は要求表の連鎖の**末尾** ([`abort_target`] / [`chain_tail`])。
 
 use crate::wm::GuiState;
 use crate::{damage, ring, session, timer};
@@ -76,6 +87,23 @@ pub const APP_STATE_WAIT_KEY: i32 = 3;
 /// そこに入るまでヘッダに無いのでここはリテラル 4 を持つ (入った後も同値。
 /// 既存の 0〜3 の意味は動かないので値の追加は互換 — 票 K7 §5 指摘 C と同じ)。
 pub const APP_STATE_WAIT_POLL: i32 = 4;
+/// `exec_app_state` が返す「居ない」(`APP_STATE_FREE`)。`exec_kill` が連鎖の
+/// 子孫ごと畳んだ後、どの ID が空いたかを数えるのに使う (票 T9 D8)。
+pub const APP_STATE_FREE: i32 = 0;
+
+/* ---- 起動要求表 (KAPI v49、票 T9 D3) ---------------------------------- */
+/* ワイヤ側の正典は `sdk/include/os32/os32_kapi_shared.h` ([C4] の 3 層管理)。
+ * gshell は no_std の Rust なので、`os32x.rs` の `FLAG_CUI_ONLY` と同じく
+ * ここへ**同値で**写す (生成器の対象外)。 */
+/// `launch_take` の `kind` = 外部プログラムの起動 (`buf` に cmdline)。
+pub const LAUNCH_KIND_LAUNCH: i32 = 1;
+/// `launch_take` の `kind` = 畳む要求 (`arg` = 畳む ID)。
+pub const LAUNCH_KIND_KILL: i32 = 2;
+/// `launch_take` に渡すバッファの下限 (`cap < 256` は `OS32_ERR_INVAL`)。
+pub const LAUNCH_CMDLINE_MAX: usize = 256;
+/// 要求者が退場した後の印 (孤児回収)。`kind` は必ず KILL だが、票 D3 (4) の
+/// 「孤児回収も KILL として同じに扱う」を読めるようにここでも見る。
+pub const LAUNCH_REQ_ORPHAN: i32 = -1;
 
 /// 走っているアプリが「自分に入力がある」を理由に turn を据え置ける**連続**
 /// `OP_WAIT` 回数 (D11-3)。値を `MAX_APPS` に合わせたのは「アプリの数だけは
@@ -105,6 +133,14 @@ struct App {
     deadline: u32,
     /// top-level で `exec_kill` する予約 (止めてあるアプリを畳む、D4)。
     kill_req: bool,
+    /// **この 1 本を最後にポーリング群から起こした tick** (票 T9 D5、
+    /// 実装レビュー 1 の blocker 2)。`pick` の時刻ではなく
+    /// [`mark_resumed`] が `get_tick` を読んだ時刻 = **実際に再開した tick**
+    /// を持つ。選んでから再開するまでに PIT が進んでも、記録はその周に
+    /// 紐づくので、同じ tick の 2 回目が通らない。
+    poll_tick: u32,
+    /// [`App::poll_tick`] が有効か (tick 0 と「まだ起こしていない」を分ける)。
+    poll_tick_valid: bool,
 }
 
 impl App {
@@ -114,6 +150,8 @@ impl App {
         has_deadline: false,
         deadline: 0,
         kill_req: false,
+        poll_tick: 0,
+        poll_tick_valid: false,
     };
 }
 
@@ -137,6 +175,20 @@ pub struct Multi {
     /// フォーカス窓の**別の**アプリだったとき、走っている本人が負っている
     /// 要求を降ろす。KAPI は owner 1 からしか通らない (K5c) ので予約にする。
     abort_clear_req: bool,
+    /* ---- ポーリング群の公平性 (票 T9 D5) ---------------------------- *
+     * 票は「状態は `GuiState` に持つ」と書いているが、譲り合いの控え
+     * (`last_run` / `input_streak` / `turn_used`) は全部この私有の表にある。
+     * `GuiState` は窓とスロットの表で、`mocks::init` → `multiapp::reset()` で
+     * 一緒に洗われるのもこちら — 同じ種類の控えを 2 か所に散らさない。 */
+    /// ポーリング群の巡回の起点 = 前回 `pick_poll` で起こした ID (0 = 無し)。
+    /// `last_run` とは**別に持つ**: ポーリング群はラウンドの turn を数えない
+    /// (最下位なので他が ready な周は候補にならない) ので、入力群 / 導出群の
+    /// 巡回と起点を共有すると互いの順を乱す。
+    poll_last: i32,
+    /// 直前の [`pick`] が**ポーリング群から**選んだ ID (0 = それ以外)。
+    /// [`mark_resumed`] が「この起床を tick の数えに載せるか」を決める材料で、
+    /// [`pick`] の入口で必ず 0 に戻すので前の周の残骸は効かない。
+    poll_choice: i32,
 }
 
 impl Multi {
@@ -148,6 +200,8 @@ impl Multi {
         snd_owner: APP_ID_SHELL,
         pending_start: false,
         abort_clear_req: false,
+        poll_last: 0,
+        poll_choice: 0,
     };
 }
 
@@ -282,6 +336,16 @@ pub fn on_owner_exit(id: i32) {
          * 扱いになると 1 個ずれるので落とす。 */
         mm.last_run = 0;
     }
+    /* ポーリング群の控えも同じ理由で落とす (票 T9 D5)。「この tick で
+     * 起こし済み」を残すと、再利用された同じ ID が 1 tick 飛ばされる。 */
+    if mm.poll_last == id {
+        mm.poll_last = 0;
+    }
+    if mm.poll_choice == id {
+        mm.poll_choice = 0;
+    }
+    /* 「最後に起こした tick」は `App::NEW` で一緒に落ちている (上の 1 行)。
+     * 再利用された同じ ID が 1 tick 飛ばされないための後始末。 */
 }
 
 /// 止めてあるアプリを top-level で畳む予約 (D4 の「止めてあるアプリの Quit」)。
@@ -392,10 +456,76 @@ fn has_top_level_work(mm: &Multi) -> bool {
 /// (`exec_abort_clear`)、フォーカス窓の owner を畳む (`exec_kill`)。どちらも
 /// owner 1 からしか呼べないので、ここでは**予約するだけ**。
 /// [`should_park`] が予約を見て譲らせ、top-level の [`drain_top_level`] が実行する。
+/// top-level (owner 1) で受けた CTRL+STOP を**その場で実行する**
+/// (票 T9 D8、実機受入 S6 の修正 2026-09-13)。呼ぶのは単独ループの
+/// [`crate::top_level_abort`] だけ。戻り値は畳んだ ID (0 = 何も畳まなかった)。
+///
+/// `redirect_abort` (予約) ではなく直接実行にしてあるのは 2 つの理由:
+///
+/// - 予約 (`request_kill`) は **WM の表に載っている ID** にしか積めない。連鎖の
+///   末尾が何かの拍子に表から落ちていると、CTRL+STOP が黙って消える。
+/// - ここは既に owner 1 の文脈なので、`exec_abort_clear` も `exec_kill` も
+///   その場で通る (`drain_top_level` と同じ地点)。
+///
+/// `exec_abort_clear()` を**必ず先に**呼ぶ (決裁 A1 と同じ順序)。IRQ1 は宛先を
+/// 選べないので、走っていた別の 1 本に要求が載っていることがある — 降ろさずに
+/// 畳むと、その 1 本が次の syscall の出口で巻き添えで死ぬ。
+pub fn abort_at_top_level(st: &GuiState) -> i32 {
+    /* `op_wait` の中で見た周は `handler.rs` が [`redirect_abort`] で予約を
+     * 積んでいて、同じ 1 周の [`drain_top_level`] が実行する。ここで重ねると
+     * 連鎖の末尾を 2 本ぶん畳む。 */
+    if m().abort_clear_req {
+        return 0;
+    }
+    let target = abort_target(st);
+    /* SAFETY: KAPI の関数表は `os32_init` が据えた有効なポインタ。
+     * `exec_abort_clear` は引数なし・戻りは値で、owner 1 から呼んでいる。 */
+    unsafe {
+        (os32api::api().exec_abort_clear)();
+    }
+    if target == 0 || target == APP_ID_SHELL {
+        /* 宛先が居ない (窓もスロットも無い) / シェル帯。要求を降ろしただけ。 */
+        return 0;
+    }
+    kill_for_request(target);
+    target
+}
+
+/// CTRL+STOP の宛先が**走っている本人** (または宛先なし) だったときの予約
+/// (票 T9 受入 S6 の 3 回目、実機 2026-09-13)。
+///
+/// 以前は `handler.rs` がこの枝で `break` し、アプリを syscall の出口へ戻して
+/// カーネルの `abort_req` に畳ませていた。ところが IRQ1 の着地点で経路が
+/// 分かれる:
+///
+/// | IRQ1 が着地した時点 | カーネルの `abort_req` | 結果 |
+/// |---|---|---|
+/// | アプリが `op_wait` の中 | 立つ | 出口で畳まれる (成功) |
+/// | アプリが自分の処理を CPL=3 で走らせている最中 | **立たない** (暴走ではない) | 出口に要求が無く**消える** |
+///
+/// 実機は 3 回中 2 回が下の行に当たった。**カーネルの要求に頼らず**、
+/// 別アプリ宛て ([`redirect_abort`]) と同じ予約に統一して、top-level の
+/// [`drain_top_level`] が `exec_abort_clear` → `exec_kill` を行う。
+/// `exec_abort_clear` が先なので、上の行で立っていた要求も巻き添えにならない
+/// (決裁 A1 の順序)。`WAIT` で park した GUI アプリを `exec_kill` で畳めるのは
+/// Start → CUI の [`request_kill_all`] と同じ。
+///
+/// 宛先が無い周 (窓が 1 枚も無い = `abort_target` が 0) は**取り消しだけ**
+/// 予約する — 誰も死なないが、カーネルに載ったかもしれない要求は降ろす。
+pub fn reserve_abort_self(st: &GuiState, cur: i32) {
+    m().abort_clear_req = true;
+    if abort_target(st) == cur {
+        request_kill(cur);
+    }
+}
+
 pub fn redirect_abort(st: &GuiState, cur: i32) {
     let f = abort_target(st);
     if f == 0 || f == cur {
-        return; /* 呼ぶ側 (`abort_targets_current`) が弾いている経路 */
+        /* 呼ぶ側 (`abort_targets_current`) が [`reserve_abort_self`] へ
+         * 振り分けている経路。全画面の top-level (`cur` = 0) から来て
+         * `f == 0` のときだけここに落ちる = 宛先も本人も居ない。 */
+        return;
     }
     m().abort_clear_req = true;
     /* フォーカス窓の owner が WM の握るアプリでなければ (シェル帯の窓など)
@@ -417,6 +547,27 @@ fn kbd_pending() -> u32 {
 #[inline]
 fn app_state(id: i32) -> i32 {
     unsafe { (os32api::api().exec_app_state)(id) }
+}
+
+/// 起動要求表 (KAPI v49) に取りに来てほしい要求が積まれているか (票 T9 D3 (2))。
+///
+/// `launch_take` は **owner 1 (WM top-level) 専用**なので、走っているアプリが
+/// park しない限り取りに行く道が無い。`launch_pending` は誰でも呼べるので、
+/// [`should_park`] の (a) と [`pick_poll`] の門で直に見る。
+#[inline]
+fn launch_work_pending() -> bool {
+    /* SAFETY: KAPI の関数表は `os32_init` が入口で据えた有効なポインタ。
+     * 引数も戻りもポインタを持たず、`launch_pending` は誰でも呼べる。 */
+    unsafe { (os32api::api().launch_pending)() > 0 }
+}
+
+/// いまの tick (`get_tick`)。ポーリング群の「同じ tick に 2 回起こさない」
+/// (票 T9 D5) の基準にだけ使う — 待ちは従来どおり `sys_halt` で、
+/// ここで回して待つことはしない ([V3] の get_tick スピン禁止と同じ線)。
+#[inline]
+fn tick_now() -> u32 {
+    /* SAFETY: 同上。`get_tick` は引数なし・戻りは値。 */
+    unsafe { (os32api::api().get_tick)() }
 }
 
 /// 鍵待ち群: `kbd_getchar` で止まっていて (`WAIT_KEY`)、注入リングに
@@ -598,23 +749,56 @@ fn pick_group(st: &GuiState, want_input: bool) -> i32 {
 /// ポーリング群の 1 本 (0 = 無し、票 T8 §7 D8)。**最下位** — 呼ぶのは
 /// [`pick`] の中の 1 か所、入力群も導出群も空の周だけ。
 ///
-/// `last_run` の巡回には乗せず **ID 昇順**で選ぶ: ラウンドの turn を数えない
-/// (最下位なので他が ready な周は候補にすらならない) ので巡回の公平さは要らず、
-/// 決定的な順だけが要る。top-level にしか出来ない仕事 (`LAUNCH` 保留 /
-/// 実行できる `SessionAction` / `exec_kill` の予約) がある周は WM の番なので
-/// 譲らない — [`should_park`] の (a) と同じ 3 つ。
+/// top-level にしか出来ない仕事 (`LAUNCH` 保留 / 実行できる `SessionAction` /
+/// `exec_kill` の予約 / **積まれている起動要求**) がある周は WM の番なので
+/// 譲らない — [`should_park`] の (a) と同じ 4 つ。
+///
+/// **順は票 T9 D5 で 2 つ変わった** (ID 昇順の固定では、sh の `sys_yield` と
+/// 子の `kbd_trygetchar` が同時に `WAIT_POLL` のとき若い方だけが走り続ける):
+///
+/// 1. **巡回**: 前回起こした ID ([`Multi::poll_last`]) の次から探す。
+/// 2. **同じ tick に同じアプリを 2 回起こさない**: 1 本ごとに
+///    [`App::poll_tick`] (最後に起こした tick) を持ち、それが今の tick と
+///    同じ相手は飛ばす。起こせる相手が全員起こし済みなら 0 を返し、呼ぶ側
+///    (単独ループ) が `sys_halt` で次の tick を待つ。
+///
+/// 印を付けるのは [`mark_resumed`] (実際に `exec_resume` する直前) なので、
+/// `pick` を 2 度呼んでも答えは変わらず、**選んでから再開するまでに PIT が
+/// 進んでも**記録は実際に走った tick に付く (実装レビュー 1 の blocker 2)。
 fn pick_poll(st: &GuiState) -> i32 {
     let mm = m();
-    if session::ready_to_run(st) || st.launch_pending || has_top_level_work(mm) {
+    if session::ready_to_run(st)
+        || st.launch_pending
+        || has_top_level_work(mm)
+        || launch_work_pending()
+    {
         return 0;
     }
-    let mut i = 0;
-    while i < MAX_APPS {
+    /* 「この tick で起こし済み」は **1 本ごと**に持つ (実装レビュー 1 の
+     * blocker 2)。集合を一括で捨てる形だと、選んだ tick と実際に再開した
+     * tick がずれた周で消去が 1 回よけいに走り、同じ 1 本が同じ tick に
+     * 2 回走れてしまう。 */
+    let now = tick_now();
+    let start = if mm.poll_last >= APP_ID_MIN && mm.poll_last <= APP_ID_MAX {
+        (mm.poll_last - APP_ID_MIN + 1) as usize
+    } else {
+        0
+    };
+    let mut n = 0;
+    while n < MAX_APPS {
+        let i = (start + n) % MAX_APPS;
         let id = APP_ID_MIN + i as i32;
-        if mm.apps[i].alive && id != mm.running && poll_ready(id) {
+        n += 1;
+        if !mm.apps[i].alive || id == mm.running {
+            continue;
+        }
+        if mm.apps[i].poll_tick_valid && mm.apps[i].poll_tick == now {
+            continue; /* この tick では走り終えている */
+        }
+        if poll_ready(id) {
+            mm.poll_choice = id;
             return id;
         }
-        i += 1;
     }
     0
 }
@@ -628,6 +812,9 @@ fn pick_poll(st: &GuiState) -> i32 {
 /// 全画面モード中 (`fullscreen::active()`) も判断は 1 つも変わらない — 譲って
 /// くるのは所有者の全画面プログラム本人で、WM は描かないだけ (票 T8 D4)。
 pub fn pick(st: &GuiState) -> i32 {
+    /* この周の答えがポーリング群から出たかを [`mark_resumed`] へ渡す印
+     * (票 T9 D5)。入口で必ず落とすので前の周の残骸は効かない。 */
+    m().poll_choice = 0;
     if round_remaining(st) == 0 {
         let mm = m();
         let mut i = 0;
@@ -669,6 +856,16 @@ pub fn mark_resumed(id: i32) {
     mm.last_run = id;
     mm.input_streak = 0;
     mm.running = id;
+    /* ポーリング群から選ばれた 1 本だけを巡回と tick の数えに載せる
+     * (票 T9 D5)。入力群 / 導出群の起床は従来どおり `last_run` の巡回。 */
+    if mm.poll_choice == id {
+        mm.poll_choice = 0;
+        mm.poll_last = id;
+        /* **ここで** tick を読む (実装レビュー 1 の blocker 2)。`pick` の
+         * 時点ではなく、実際に `exec_resume` する直前の tick に紐づける。 */
+        mm.apps[i].poll_tick = tick_now();
+        mm.apps[i].poll_tick_valid = true;
+    }
 }
 
 /// [`resume_one`] が `OS32_ERR_AGAIN` で巻き戻すための控え
@@ -715,6 +912,10 @@ fn restore_turn(id: i32, saved: Option<(App, i32, u32)>) {
 /// 起こす**順** (D11-3 の (2)) は 1 つも動かない:
 /// [`poll_live`] (ポーリングで譲った 1 本を [`pick_poll`] に起こさせる) と
 /// [`fullscreen_restore_pending`] (全画面の復帰は top-level の仕事)。
+///
+/// 票 T9 D3 (2) で 3 つ目 ([`launch_work_pending`])。`launch_take` も owner 1
+/// 専用なので、これが無いと `sh` の起動要求は永久に取りに行かれない。
+/// 起動要求は有限個の事象なので D11-3a の上界は変わらない。
 pub fn should_park(st: &GuiState, cur: i32) -> bool {
     let i = match idx(cur) {
         Some(i) => i,
@@ -740,6 +941,7 @@ pub fn should_park(st: &GuiState, cur: i32) -> bool {
         || st.launch_pending
         || has_top_level_work(mm)
         || fullscreen_restore_pending()
+        || launch_work_pending()
     {
         return true;
     }
@@ -923,6 +1125,10 @@ fn drain_top_level() -> bool {
                 return true;
             }
             forget(id);
+            /* 票 T9 D8: `exec_kill` は要求表の連鎖の**子孫ごと**畳む。畳まれた
+             * 子孫まで表から落とさないと、その ID が再利用されたときに
+             * 「生きている別人」として起こしにいく。 */
+            forget_freed();
             return true;
         }
         i += 1;
@@ -933,6 +1139,36 @@ fn drain_top_level() -> bool {
 /// 表から 1 本落とす (`gui_owner_exit` が来なかった経路の保険)。
 fn forget(id: i32) {
     on_owner_exit(id);
+}
+
+/// `exec_app_state` が `FREE` を返す被追跡 ID を**全部**表から落とす (票 T9 D8)。
+///
+/// `exec_kill(id)` は要求表の連鎖 (`launch_child`) を末尾まで辿って子孫ごと
+/// 畳む (K の実装メモ)。畳まれるのは 1 本とは限らないので、`gui_owner_exit` が
+/// 届かなかったぶんをここで拾う。KAPI は生きている本数ぶん (最大 4 本) で、
+/// 呼ぶのは kill の直後だけ。
+pub fn forget_freed() {
+    let mut i = 0;
+    while i < MAX_APPS {
+        let id = APP_ID_MIN + i as i32;
+        if m().apps[i].alive && app_state(id) == APP_STATE_FREE {
+            forget(id);
+        }
+        i += 1;
+    }
+}
+
+/// 起動要求表の KILL を実行する (票 T9 D3 (4))。**top-level 専用** —
+/// `exec_kill` は owner 1 からしか通らない (K5c)。
+///
+/// 畳んだ後に `FREE` になった ID を全部表から落とす (D8)。戻り値は
+/// `exec_kill` の rc (KILL の `launch_report` は rc を見ないので参考値)。
+pub fn kill_for_request(id: i32) -> i32 {
+    /* SAFETY: 同上。`exec_kill` は ID (値) だけを取る。呼べるのは owner 1 =
+     * WM top-level で、そうでなければカーネルが `OS32_ERR_INVAL` で断る。 */
+    let rc = unsafe { (os32api::api().exec_kill)(id) };
+    forget_freed();
+    rc
 }
 
 /* ================================================================ */
@@ -973,20 +1209,59 @@ pub fn snd_owner() -> i32 {
 /// フォーカスが別のアプリなら WM は待ちを抜けない = 走っている側を畳ませない。
 pub fn abort_targets_current(st: &GuiState, cur: i32) -> bool {
     let f = abort_target(st);
+    /* 票 T9 D8: 宛先が**連鎖の末尾**になったので、端末 (cur) が子を持つなら
+     * ここは偽 — 端末自身の syscall 出口では畳まれず、`redirect_abort` が
+     * 末尾を予約して top-level の `exec_kill` が 1 本だけ畳む。
+     *
+     * `f == 0` (窓もスロットも全画面所有者も無い) だけは従来どおり真のまま:
+     * 宛先が 1 つも無い周で偽にすると `redirect_abort` も早々に戻るので、
+     * CTRL+STOP がどこにも届かなくなる (K5b 以来の保険)。 */
     f == 0 || f == cur
 }
 
 /// CTRL+STOP の宛先 (0 = 宛先なし)。
 ///
-/// ふだんは**フォーカス窓のアプリ** (契約 T6)。**全画面 GFX 中だけは画面の
+/// 頭は**フォーカス窓のアプリ** (契約 T6)。**全画面 GFX 中だけは画面の
 /// 所有者** (票 T8 D4d) — 画面を持っているプログラムは窓を持たないので、
 /// フォーカス窓 (端末) を畳んでしまうと「見えている方」が残ってしまう。
-fn abort_target(st: &GuiState) -> i32 {
+///
+/// 票 T9 D8 で、そこから **起動要求表の連鎖を末尾まで辿る**ようになった。
+/// 端末 → `sh` → 子 と積み上がっているとき、頭 (端末) を畳むと `sh` と子が
+/// 孤児になる。畳むのは末尾 1 本で、`sh` はその `DONE` を受けて `sh> ` に戻る。
+pub fn abort_target(st: &GuiState) -> i32 {
     let owner = crate::fullscreen::owner();
-    if owner != 0 {
-        return owner;
+    let head = if owner != 0 { owner } else { st.front_owner() };
+    if head == 0 {
+        return 0;
     }
-    st.front_owner()
+    chain_tail(head)
+}
+
+/// `launch_child` を末尾まで辿る (票 T9 D8)。**同じ ID が 2 度出たら止める** —
+/// 壊れた表が環を作っても戻ってくる (カーネルの `launch_chain` と同じ線)。
+fn chain_tail(head: i32) -> i32 {
+    let mut seen = [0i32; MAX_APPS];
+    let mut n = 0;
+    let mut cur = head;
+    while n < MAX_APPS {
+        let mut k = 0;
+        while k < n {
+            if seen[k] == cur {
+                return cur; /* 環 */
+            }
+            k += 1;
+        }
+        seen[n] = cur;
+        n += 1;
+        /* SAFETY: 同上。`launch_child` は ID (値) を取り ID を返すだけで、
+         * 不正な ID には 0 を返す (§1a)。 */
+        let next = unsafe { (os32api::api().launch_child)(cur) };
+        if next == 0 || next == cur {
+            return cur;
+        }
+        cur = next;
+    }
+    cur
 }
 
 /* ================================================================ */
