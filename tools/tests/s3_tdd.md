@@ -625,3 +625,127 @@ RED の確かめ: `j_b64()` の 2 行を `return CFG_JSON_E_VALUE;` に戻すと
 jr.val_b64` と `ran("import", "/b64.json", "--scope", "gshell", NULL) == 0`)。
 
 `SUMMARY 53/53 PASS` (+ TSV parity 58/58、`--target`、`--sanitize` 8/8)。
+
+## K-4. `fatfs_vfs_list` の列挙エラー伝播 (票 S3I2-K) — 2026-09-14
+
+> 票 (`docs/tasks/settings/TASK_S3I2.md` §0) が指した「§K-3」。この文書には S3-K の
+> `## K-3. この試験が言えないこと ([V4])` が既にあるので、既存節を消さずに番号をずらした。
+
+### K-4.0 何を直したか、なぜ要るか
+
+`fs/fatfs_vfs.c` の `fatfs_vfs_list()` は `f_readdir()` の戻りとファイル名の終端を
+同じ `if` で見て `break` し、**その後は必ず `VFS_OK`** を返していた。
+
+```c
+        fr = f_readdir(&dir, &fno);
+        if (fr != FR_OK || fno.fname[0] == '\0') break;   /* 直す前 */
+    ...
+    return VFS_OK;
+```
+
+FDD (root = FAT) の列挙中に I/O が落ちると、そこまでに callback へ渡した項目だけで
+打ち切られるのに、呼び手 (`vfs_ls` → `sys_ls` → `install` の `copy_directory`) には
+「成功」が届く。S3I2-I の `install` は `sys_ls` の負を失敗に数える作りにするので、
+FAT 側が負を返さない限り**欠けたファイルのまま `Installation complete` で終了 0** になる
+(TASK_S3I2 往復 2 の R2)。
+
+直したのは戻り値だけ。**部分列挙は取り消さない** (既に渡した項目を呼び戻す口が
+`vfs_dir_cb` に無く、呼び手は負を見て全体を捨てればよい)。
+
+```c
+    rc = VFS_OK;
+    for (;;) {
+        fr = f_readdir(&dir, &fno);
+        if (fr != FR_OK) { rc = ff_to_vfs(fr); break; }   /* 直した後 */
+        if (fno.fname[0] == '\0') break;
+        ...
+    }
+    f_closedir(&dir);
+    return rc;
+```
+
+`f_opendir` の失敗は元から `ff_to_vfs(fr)` の負を返しており**変更なし**。
+`f_closedir` は成功・打ち切りのどちらでも通る位置にあり、呼び忘れは無い
+(開けなかったときは `return` が先なので呼ばない = 正しい)。
+`vfs_ls` (`fs/vfs.c:344`) は `ops->list_dir()` の戻りをそのまま返すので**触っていない**。
+
+### K-4.1 試験の範囲と遮断
+
+K-1 と同じ作法 — `tools/tests/fatfs_stat_host.c` が実物の `fs/fatfs_vfs.c` を `#include` し、
+境界だけを贋物に差し替える。この票で足したのは列挙の 3 本:
+
+| 差し替えたもの | 何を貰うか |
+|---|---|
+| `f_readdir` | 「台本」(`stub_rd_script[]`) を 1 段ずつ返す。`rc != FR_OK` でその段は失敗、`FR_OK` で `name` が空なら終端。呼ばれた回数を数える |
+| `f_opendir` | 既存どおり `stub_open_rc` を返す + 回数を数える |
+| `f_closedir` | 回数を数える |
+
+実デバイス・実イメージ・実 FatFs には触らない。コンパイルは
+`gcc -std=gnu89 -Wall -Wextra -Werror -Wdeclaration-after-statement` ([C1])。
+実機カーネル側は `i386-elf-gcc -std=gnu89 -m32 -march=i386 -ffreestanding -O2 -Wall -Wextra -Werror`
+で `fs/fatfs_vfs.c` を単体コンパイルして通した ([C1] / [C2] — 使う文字列関数は `kstrncpy` のみ)。
+
+ケース (既存 7 本 + 4 本 = 11 本):
+
+| ケース | 見るもの |
+|---|---|
+| `list_ok_enumerates_all` | 台本 3 件 + 終端で、callback に 3 件 (名前 / `VFS_TYPE_DIR` と `VFS_TYPE_FILE` / `size`) が届き戻り値は `VFS_OK`。`f_opendir` / `f_closedir` が 1 回ずつ。組み立てたパスが `0:/` |
+| `list_readdir_error_propagates` | 2 段目が `FR_DISK_ERR` → callback は 1 件だけ、戻り値 `VFS_ERR_IO`、3 段目は読まない、`f_closedir` は 1 回。1 段目で `FR_NOT_READY` なら callback 0 件で `VFS_ERR_IO` |
+| `list_opendir_error_propagates` | `f_opendir` が `FR_NOT_READY` → `VFS_ERR_IO`、`FR_NO_PATH` → `VFS_ERR_NOTFOUND`。`f_readdir` / `f_closedir` は 0 回 (開けていないものを閉じない) |
+| `list_empty_is_ok` | 空ディレクトリは 0 件で `VFS_OK` — エラーと区別がつく |
+
+既存の `open_paths_keep_inval` も `fatfs_vfs_list` の `FR_INVALID_NAME` → `VFS_ERR_INVAL`
+(= `f_opendir` 失敗の据え置き) を見張り続ける。
+
+### K-4.2 RED → GREEN
+
+直す前 (`if (fr != FR_OK || fno.fname[0] == '\0') break;` + `return VFS_OK;`):
+
+```
+COMPILE GNU89 -Werror PASS
+EXIT stat_invalid_name_is_notfound=0
+EXIT stat_missing_is_notfound=0
+EXIT stat_disk_err_is_io=0
+EXIT stat_ok_fills_size_mode=0
+EXIT get_size_invalid_name_is_notfound=0
+EXIT open_paths_keep_inval=0
+EXIT v50_journal_probe_on_8_3=0
+EXIT list_ok_enumerates_all=0
+FAIL case_list_readdir_error_propagates:399: fatfs_vfs_list(&test_ctx, "/sys", collect_cb, (void *)0) == VFS_ERR_IO
+EXIT list_readdir_error_propagates=1
+EXIT list_opendir_error_propagates=0
+EXIT list_empty_is_ok=0
+SUMMARY 10/11 PASS
+```
+
+落ちたのは伝播を要求する 1 本だけ。他の 10 本は**壊していないこと**を見張る側
+(正常列挙の件数と値、空ディレクトリ、`f_opendir` 失敗、S3-K の stat 7 本)。
+`rc` を返すようにした後:
+
+```
+COMPILE GNU89 -Werror PASS
+SUMMARY 11/11 PASS
+```
+
+突然変異で範囲が留まることの確認:
+
+- `rc = ff_to_vfs(fr);` を消して `break;` だけに戻すと `list_readdir_error_propagates` が落ちる
+  (上の RED そのもの)。
+- `f_closedir(&dir);` を `if (rc == VFS_OK)` で囲むと `list_readdir_error_propagates` の
+  `stub_closedir_calls == 1` が落ちる (打ち切っても閉じる)。
+- 終端判定 (`fno.fname[0] == '\0'`) を失敗側に混ぜて `rc` を付けると `list_empty_is_ok` と
+  `list_ok_enumerates_all` が落ちる (正常終了をエラーに化けさせない)。
+- `f_opendir` 失敗の後に `f_closedir` を呼ぶ形にすると `list_opendir_error_propagates` の
+  `stub_closedir_calls == 0` が落ちる。
+
+実行: `python3 tools/tests/test_fatfs_stat.py` (11 本)。
+
+### K-4.3 この試験が言えないこと ([V4])
+
+- **実機では踏んでいない**。ビルド (`make all` / `make check`)・配備・エミュレータ操作は
+  コーダーの役割外で、一切行っていない。カーネル全体のリンクも未確認
+  (`fs/fatfs_vfs.c` の単体コンパイルまで)。
+- 実 FatFs (`fs/fatfs/ff.c`) が実際に列挙途中で `FR_DISK_ERR` / `FR_NOT_READY` を返す条件は
+  **贋物で仮定している**。FDD の I/O 失敗をこの試験の中では起こしていない。
+- 呼び手側 (`sys_ls` → `install` の `copy_directory`) が負を失敗に数えるかは **S3I2-I の範囲**で、
+  ここでは見ていない。`ls` / `cat` など他の `vfs_ls` 呼び手が負を受け取ったときの表示も未確認。

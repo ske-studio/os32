@@ -109,15 +109,26 @@ static int fatfs_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user
     FILINFO fno;
     FRESULT fr;
     VfsDirEntry ve;
+    int rc;
 
     ff_make_path(fc, path, fpath, sizeof(fpath));
 
     fr = f_opendir(&dir, fpath);
     if (fr != FR_OK) return ff_to_vfs(fr);
 
+    /* 列挙の途中で f_readdir が失敗したら、そこで打ち切って**負**を返す。
+     * それまでに callback へ渡した項目は取り消さない (部分列挙 + 負の戻り)。
+     * 以前は打ち切った後も VFS_OK を返していたので、FDD (FAT) の I/O 失敗が
+     * vfs_ls → sys_ls → install の copy_directory に届かず、欠けたファイルの
+     * まま「成功」になっていた (S3I2-K、2026-09-14)。 */
+    rc = VFS_OK;
     for (;;) {
         fr = f_readdir(&dir, &fno);
-        if (fr != FR_OK || fno.fname[0] == '\0') break;
+        if (fr != FR_OK) {
+            rc = ff_to_vfs(fr);
+            break;
+        }
+        if (fno.fname[0] == '\0') break;
 
         kstrncpy(ve.name, fno.fname, VFS_MAX_PATH);
         ve.type = (fno.fattrib & AM_DIR) ? VFS_TYPE_DIR : VFS_TYPE_FILE;
@@ -126,7 +137,7 @@ static int fatfs_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user
     }
 
     f_closedir(&dir);
-    return VFS_OK;
+    return rc;
 }
 
 

@@ -69,11 +69,61 @@ FRESULT f_unlink(const TCHAR *path) { stub_record(path); return stub_open_rc; }
 FRESULT f_mkdir(const TCHAR *path) { stub_record(path); return stub_open_rc; }
 FRESULT f_rename(const TCHAR *a, const TCHAR *b)
 { (void)b; stub_record(a); return stub_open_rc; }
+
+/* ---- S3I2-K: 列挙の境界 ----
+ * f_readdir は「台本」を 1 段ずつ返す。rc != FR_OK でその段は失敗、
+ * rc == FR_OK で name が空なら終端。opendir / closedir は回数を数える。 */
+#define STUB_RD_MAX 8
+struct stub_rd_step {
+    FRESULT rc;
+    const char *name;
+    BYTE  attrib;
+    DWORD fsize;
+};
+static struct stub_rd_step stub_rd_script[STUB_RD_MAX];
+static int stub_rd_len;
+static int stub_readdir_calls;
+static int stub_opendir_calls;
+static int stub_closedir_calls;
+
+/* 列挙の callback が受け取ったものを控える。 */
+#define SEEN_MAX 8
+static VfsDirEntry seen[SEEN_MAX];
+static int seen_count;
+
 FRESULT f_opendir(DIR *dp, const TCHAR *path)
-{ (void)dp; stub_record(path); return stub_open_rc; }
-FRESULT f_closedir(DIR *dp) { (void)dp; return FR_OK; }
+{
+    stub_opendir_calls++;
+    (void)dp;
+    stub_record(path);
+    return stub_open_rc;
+}
+
+FRESULT f_closedir(DIR *dp) { stub_closedir_calls++; (void)dp; return FR_OK; }
+
 FRESULT f_readdir(DIR *dp, FILINFO *fno)
-{ (void)dp; if (fno) fno->fname[0] = '\0'; return FR_OK; }
+{
+    const struct stub_rd_step *st;
+    size_t n;
+    (void)dp;
+    if (stub_readdir_calls >= stub_rd_len) {
+        /* 台本を使い切ったら終端 (fname 空) を返し続ける。 */
+        stub_readdir_calls++;
+        if (fno) fno->fname[0] = '\0';
+        return FR_OK;
+    }
+    st = &stub_rd_script[stub_readdir_calls++];
+    if (st->rc != FR_OK) return st->rc;
+    if (!fno) return FR_OK;
+    memset(fno, 0, sizeof(*fno));
+    n = st->name ? strlen(st->name) : 0;
+    if (n >= sizeof(fno->fname)) n = sizeof(fno->fname) - 1;
+    if (n) memcpy(fno->fname, st->name, n);
+    fno->fname[n] = '\0';
+    fno->fattrib = st->attrib;
+    fno->fsize = st->fsize;
+    return FR_OK;
+}
 FRESULT f_getfree(const TCHAR *path, DWORD *nclst, FATFS **fatfs)
 { (void)path; if (nclst) *nclst = 0; if (fatfs) *fatfs = 0; return FR_INT_ERR; }
 FRESULT f_mount(FATFS *fs, const TCHAR *path, BYTE opt)
@@ -138,6 +188,30 @@ static void reset(void)
     stub_open_rc = FR_OK;
     stub_stat_calls = 0;
     stub_last_path[0] = '\0';
+
+    memset(stub_rd_script, 0, sizeof(stub_rd_script));
+    stub_rd_len = 0;
+    stub_readdir_calls = 0;
+    stub_opendir_calls = 0;
+    stub_closedir_calls = 0;
+    memset(&seen, 0, sizeof(seen));
+    seen_count = 0;
+}
+
+static void collect_cb(const VfsDirEntry *e, void *ctx)
+{
+    (void)ctx;
+    if (seen_count < SEEN_MAX) seen[seen_count] = *e;
+    seen_count++;
+}
+
+static void script(int i, FRESULT rc, const char *name, BYTE attrib, DWORD sz)
+{
+    stub_rd_script[i].rc = rc;
+    stub_rd_script[i].name = name;
+    stub_rd_script[i].attrib = attrib;
+    stub_rd_script[i].fsize = sz;
+    if (i + 1 > stub_rd_len) stub_rd_len = i + 1;
 }
 
 /* ケース 1: 8.3 に収まらない名前の stat は「存在しない」。
@@ -284,6 +358,96 @@ static int case_v50_journal_probe_on_8_3(void)
     return 0;
 }
 
+/* ======== S3I2-K: fatfs_vfs_list の列挙エラー伝播 ======== */
+
+/* ケース 8: 正常列挙 — 台本の全項目が callback に届き、戻り値は VFS_OK。
+ * f_opendir / f_closedir は 1 回ずつ。 */
+static int case_list_ok_enumerates_all(void)
+{
+    reset();
+    script(0, FR_OK, "AUTOEXEC.BAT", 0, 512);
+    script(1, FR_OK, "SYS", AM_DIR, 0);
+    script(2, FR_OK, "VMKRNL.LZ4", 0, 481280u);
+    script(3, FR_OK, "", 0, 0);          /* 終端 */
+
+    CHECK(fatfs_vfs_list(&test_ctx, "/", collect_cb, (void *)0) == VFS_OK);
+    CHECK(strcmp(stub_last_path, "0:/") == 0);
+    CHECK(seen_count == 3);
+    CHECK(strcmp(seen[0].name, "AUTOEXEC.BAT") == 0);
+    CHECK(seen[0].type == VFS_TYPE_FILE);
+    CHECK(seen[0].size == 512);
+    CHECK(strcmp(seen[1].name, "SYS") == 0);
+    CHECK(seen[1].type == VFS_TYPE_DIR);
+    CHECK(strcmp(seen[2].name, "VMKRNL.LZ4") == 0);
+    CHECK(seen[2].size == 481280u);
+    CHECK(stub_opendir_calls == 1);
+    CHECK(stub_closedir_calls == 1);
+    return 0;
+}
+
+/* ケース 9: 2 件目の f_readdir が FR_DISK_ERR。
+ * それまでに渡した 1 件は取り消さない (部分列挙) が、戻り値は負 (VFS_ERR_IO)。
+ * 直す前はここで VFS_OK が返り、install の copy_directory が
+ * 「欠けたファイルのまま成功」になっていた。f_closedir は 1 回。 */
+static int case_list_readdir_error_propagates(void)
+{
+    reset();
+    script(0, FR_OK, "SHELL.BIN", 0, 4096);
+    script(1, FR_DISK_ERR, (const char *)0, 0, 0);
+    script(2, FR_OK, "NEVER.BIN", 0, 1);   /* 打ち切りで届かない */
+
+    CHECK(fatfs_vfs_list(&test_ctx, "/sys", collect_cb, (void *)0)
+          == VFS_ERR_IO);
+    CHECK(seen_count == 1);
+    CHECK(strcmp(seen[0].name, "SHELL.BIN") == 0);
+    CHECK(stub_readdir_calls == 2);        /* 3 段目は読まない */
+    CHECK(stub_closedir_calls == 1);       /* 打ち切っても閉じる */
+
+    /* 1 件目でいきなり失敗した場合は callback が 1 度も呼ばれない。 */
+    reset();
+    script(0, FR_NOT_READY, (const char *)0, 0, 0);
+    CHECK(fatfs_vfs_list(&test_ctx, "/sys", collect_cb, (void *)0)
+          == VFS_ERR_IO);
+    CHECK(seen_count == 0);
+    CHECK(stub_closedir_calls == 1);
+    return 0;
+}
+
+/* ケース 10: f_opendir の失敗はそのまま負で返る (既存の挙動を固定)。
+ * 開けていないので f_closedir は呼ばない — 二重解放にあたる呼びを
+ * 足していないことを見張る。 */
+static int case_list_opendir_error_propagates(void)
+{
+    reset();
+    stub_open_rc = FR_NOT_READY;
+    script(0, FR_OK, "SHELL.BIN", 0, 4096);
+
+    CHECK(fatfs_vfs_list(&test_ctx, "/sys", collect_cb, (void *)0)
+          == VFS_ERR_IO);
+    CHECK(seen_count == 0);
+    CHECK(stub_opendir_calls == 1);
+    CHECK(stub_readdir_calls == 0);
+    CHECK(stub_closedir_calls == 0);
+
+    reset();
+    stub_open_rc = FR_NO_PATH;
+    CHECK(fatfs_vfs_list(&test_ctx, "/nodir", collect_cb, (void *)0)
+          == VFS_ERR_NOTFOUND);
+    CHECK(stub_closedir_calls == 0);
+    return 0;
+}
+
+/* ケース 11: 空ディレクトリは 0 件で VFS_OK (エラーと区別する)。 */
+static int case_list_empty_is_ok(void)
+{
+    reset();
+    script(0, FR_OK, "", 0, 0);
+    CHECK(fatfs_vfs_list(&test_ctx, "/etc", collect_cb, (void *)0) == VFS_OK);
+    CHECK(seen_count == 0);
+    CHECK(stub_closedir_calls == 1);
+    return 0;
+}
+
 struct case_ent { const char *name; int (*fn)(void); };
 static const struct case_ent cases[] = {
     { "stat_invalid_name_is_notfound",   case_stat_invalid_name_is_notfound },
@@ -292,7 +456,11 @@ static const struct case_ent cases[] = {
     { "stat_ok_fills_size_mode",         case_stat_ok_fills_size_mode },
     { "get_size_invalid_name_is_notfound", case_get_size_invalid_name_is_notfound },
     { "open_paths_keep_inval",           case_open_paths_keep_inval },
-    { "v50_journal_probe_on_8_3",        case_v50_journal_probe_on_8_3 }
+    { "v50_journal_probe_on_8_3",        case_v50_journal_probe_on_8_3 },
+    { "list_ok_enumerates_all",          case_list_ok_enumerates_all },
+    { "list_readdir_error_propagates",   case_list_readdir_error_propagates },
+    { "list_opendir_error_propagates",   case_list_opendir_error_propagates },
+    { "list_empty_is_ok",                case_list_empty_is_ok }
 };
 
 int main(int argc, char **argv)
