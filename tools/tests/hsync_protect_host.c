@@ -147,6 +147,13 @@ int main(void)
         check(!hsp_name_fits(0, 64), "NULL");
     }
 
+    printf("== 最終行のラベル (最終往復) ==\n");
+    /* 失敗があるのに "Done:" と出すと、終了コードを見ない目には成功に読める
+     * (「失敗時に成功表示へ進めない」、FOUNDATION §5)。件数はそのまま。 */
+    check(strcmp(hsp_final_label(0), "Done:") == 0, "0 件なら Done:");
+    check(strcmp(hsp_final_label(1), "FAILED:") == 0, "1 件でも FAILED:");
+    check(strcmp(hsp_final_label(42), "FAILED:") == 0, "複数でも FAILED:");
+
     printf("== -f の subdir 連結 (hsync.c:254 相当) ==\n");
     /* `hsync -f etc` は dst = "/" + "etc"、その下に settings.db を作る */
     strcpy(joined, "/");

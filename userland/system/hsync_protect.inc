@@ -139,6 +139,14 @@ static int hsp_name_protected(const char *norm)
     return hsp_is_protected_basename(base);
 }
 
+/* 最終行のラベル。失敗があるのに "Done:" と出すと、終了コードを見ない目には
+ * 成功に読める ("失敗時に成功表示へ進めない"、FOUNDATION §5)。
+ * 件数はそのまま出すので、変えるのは頭の 1 語だけ。 */
+static const char *hsp_final_label(int errors)
+{
+    return errors ? "FAILED:" : "Done:";
+}
+
 /* 名前が cap バイト (NUL 込み) のバッファに収まるか。
  * 戻り値 1 = 収まる / 0 = 収まらない。
  * 切り詰めた名前で写すと**別のファイル**を作って「成功」と出るので、

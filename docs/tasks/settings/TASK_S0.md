@@ -127,7 +127,7 @@
 
 ### 8c. 実装レビュー 往復 3 の修正 (D、2026-09-13、symlink 拒否は**ユーザー決裁済み**)
 
-- **方針変更**: symlink の迷路を 1 件ずつ塞ぐのをやめ、新設 `check_tree(root)` が配備ツリー (HostDrv ルート / マウントした NHD ツリー) を `os.walk(followlinks=False)` で走査し、**symlink が 1 つでもあれば配備全体を拒否**する。各サブコマンドの入口 (`guard_root` / prune / clean) で 1 回だけ通す。`is_protected_symlink` (symlink の削除許可) は撤回し、`_clean_tree` は symlink を見たら中止。これで D1 (解決後の祖先) と D2 (中間 symlink の削除) が到達不能になる — **symlink 無しで成立する変種は無い** (symlink が無ければ realpath == 字句パスなので `protected_ancestor` が既に覆い、ディレクトリへの hardlink は作れない)。念のため prune の削除判定にも `protected_ancestor` を足した。
+- **方針変更**: symlink の迷路を 1 件ずつ塞ぐのをやめ、新設 `check_tree(root)` が配備ツリー (HostDrv ルート / マウントした NHD ツリー) を `os.walk(followlinks=False)` で走査し、**symlink が 1 つでもあれば配備全体を拒否**する (ただし**保護対象名のディレクトリの内部には入らない** — 配備が中へ書かない場所なので最終パスの意味に効かない、§8d)。各サブコマンドの入口 (`guard_root` / prune / clean) で 1 回だけ通す。`is_protected_symlink` (symlink の削除許可) は撤回し、`_clean_tree` は symlink を見たら中止。これで D1 (解決後の祖先) と D2 (中間 symlink の削除) が到達不能になる — **symlink 無しで成立する変種は無い** (symlink が無ければ realpath == 字句パスなので `protected_ancestor` が既に覆い、ディレクトリへの hardlink は作れない)。念のため prune の削除判定にも `protected_ancestor` を足した。
 - **個別** (D3〜D5): `cp` / `rm` / `mkdir` / `ls` の operand は必ず `--` の後に置き、source は `os.path.abspath` で絶対化 (`--target-directory=…` という名前のファイルをオプションに解釈させない)。補完後の宛先が**保護対象名のディレクトリ**なら再補完せず「成功除外」(保護対象でないディレクトリは従来どおり拒否)。prune の候補収集は `os.lstat` で行い、ENOENT 以外の `OSError` は非ゼロ (`isdir` / `isfile` が EACCES を False に丸めて「0 件で掃除済み」になっていた)。
 - **hsync** (D6): 名前が `NAME_CAP` (64) に収まらない項目は**切り詰めずに取り込まない**で件数を数え、`sync_directory` がエラーにする (別名のファイルを作って成功と出ていた)。判定は純関数 `hsp_name_fits` に切り出してホスト試験に載せた。静的配列の幅は変えていない。試験は `tools/tests/s0_tdd.md` §D.8 (121 件、RED 18 失敗 → GREEN 全通過)。**hsync 本体の回帰証拠は純関数までである** ([V4])。
 
@@ -135,6 +135,10 @@
 
 - 補完後の宛先がディレクトリのとき、**`protected_ancestor` を名前規則より先に**見て、どちらかで守られていれば成功除外にする (`<root>/etc/settings.db/settings.db/` のように親が `/etc` でない形でも守られている)。`do_clean` は root を `os.lstat` で見て ENOENT だけ「無い = 成功」、他の `OSError` と非ディレクトリは失敗 (`os.path.isdir` が親の EACCES を False に丸めて「存在しません」で成功していた)。
 - 進捗の件数と全体の成否を分けた: `do_copy` は失敗があれば `FAILED (n copied, m failed)` で非ゼロ、`do_pull` の「完了!」は mount と来歴まで通った最後にだけ出す。non-blocker で `sync-from-hostdrv` は source の HostDrv ツリーも `check_tree` に通し、`check_tree` は保護対象名のディレクトリに降りない (配備が中へ書かない場所の読めない残骸で全体を止めない)。試験は `tools/tests/s0_tdd.md` §D.9 (134 件、RED 8 失敗 → GREEN 全通過)。
+
+### 8e. 最終往復の修正 (D、2026-09-13)
+
+- `hsync` の最終行を `g_errors` で分け、失敗があれば `FAILED: n copied, ...` (赤) を出す (件数は不変)。ラベルは純関数 `hsp_final_label(errors)` に切り出し、`hsync_protect_host.c` で 2 値を固定した (57 checks)。終了コードは従来どおり `g_errors ? 1 : 0`。
 
 ## 7. 実装メモ (K、2026-09-13)
 

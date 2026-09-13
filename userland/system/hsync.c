@@ -539,9 +539,10 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         g_errors++;
     }
 
-    /* 結果表示 */
-    api->kprintf(ATTR_WHITE,
-                 "\nDone: %d copied, %d skipped, %d errors, %d protected\n",
+    /* 結果表示。失敗があれば頭を FAILED: にする (成功表示へ進めない) */
+    api->kprintf(g_errors ? ATTR_RED : ATTR_WHITE,
+                 "\n%s %d copied, %d skipped, %d errors, %d protected\n",
+                 hsp_final_label(g_errors),
                  g_copied, g_skipped, g_errors, g_protected);
 
     api->mem_free(file_buf);
