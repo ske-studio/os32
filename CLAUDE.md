@@ -101,7 +101,7 @@ Three facts that matter on almost every change:
 
 **External programs** — OS32X flat ELF binaries linked with `sdk/link/app.ld` and entered through
 `sdk/crt/crt0.asm`; `main()` must be the **first function** in the source file. In-tree sources are
-under `userland/`: `shell/` (resident at 0x300000), `cmds/` (18 commands), `system/`, `tests/`,
+under `userland/`: `shell/` (resident at 0x300000), `cmds/` (19 commands), `system/`, `tests/`,
 `rust/` (no_std Cargo workspace), `lib/` (`libos32*`, statically linked). Standard apps and the
 board-game RPG are submodules (`apps/`, `game/`) built by `make external` — rebuild them after any
 KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).

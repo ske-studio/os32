@@ -117,8 +117,8 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 - `*` や `?` などの簡単なワイルドカードもサポート
 
 **外部コマンド** (`/bin` に配置、`userland/cmds/`):
-`cal` `diff` `du` `find` `grep` `head` `hexdump` `ime` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `v86` `wc`
-(`ime` は FEP の有効化/辞書操作、`v86` は V86 モードでのゲスト起動)
+`cal` `cfg` `diff` `du` `find` `grep` `head` `hexdump` `ime` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `v86` `wc`
+(`ime` は FEP の有効化/辞書操作、`v86` は V86 モードでのゲスト起動、`cfg` は設定レジストリ `/etc/settings.db` の get / set / list / status / init / export — [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) §2)
 (その他 `/sbin` に `install` `cdinst`、`/usr/bin` にアプリ群。詳細は [09_exec.md](09_exec.md) 参照)
 
 ### §7-3 パイプ・リダイレクト
