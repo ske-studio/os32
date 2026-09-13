@@ -17,6 +17,7 @@
 #define CFG_SQLITE_BUSY           5
 #define CFG_SQLITE_CORRUPT       11
 #define CFG_SQLITE_CANTOPEN      14
+#define CFG_SQLITE_CONSTRAINT    19    /* PRIMARY KEY 重複など */
 #define CFG_SQLITE_NOTADB        26
 #define CFG_SQLITE_BUSY_RECOVERY (5 | (1 << 8))   /* hot journal */
 #define CFG_SQLITE_PRIMARY(c)    ((c) & 0xFF)
@@ -66,6 +67,8 @@ struct CfgDb {
     int last_sqlite;     /* 直前の SQLite 拡張コード */
     int txn;             /* 0 = 無し / 1 = 実行中 / 2 = failed */
     int in_enum;         /* 再入フラグ */
+    int orphan_close;    /* 内部で捨てた接続の close 失敗 (0 = 無し) */
+    int cleanup_sqlite;  /* 後片付け (ROLLBACK) の失敗。操作失敗とは別に持つ */
 };
 
 /* ---- 内部共有 (libos32cfg.c が実装) ------------------------------------ */
@@ -108,19 +111,13 @@ void cfg_i_set_close_error(int code);
 #define CFG_TSV_E_VALUE   7
 #define CFG_TSV_E_RANGE   8
 #define CFG_TSV_E_NUL     9
-#define CFG_TSV_E_DUP     10
-#define CFG_TSV_E_TOOMANY 11
 #define CFG_TSV_E_IO      12
 #define CFG_TSV_E_EMIT    13
 
-/* 重複 (scope, key) 検出のための控え。呼び手が静的に持つ。 */
-#define CFG_TSV_POOL_BYTES 6144
-typedef struct {
-    int   count;
-    int   used;
-    short off[CFG_ENUM_MAX];
-    char  pool[CFG_TSV_POOL_BYTES];
-} CfgTsvSeen;
+/* 重複 (scope, key) はここでは見ない。`cfg_init` が流し込む先の
+ * `settings` 表が PRIMARY KEY (scope, key) なので、素の INSERT が
+ * SQLITE_CONSTRAINT で弾く — 控えを持たないので行数にも名前の長さにも
+ * 上限が要らない (往復 1 の ⑯)。 */
 
 typedef struct {
     char          scope[CFG_SCOPE_MAX + 1];
@@ -137,10 +134,9 @@ typedef struct {
 typedef struct { int code; int lineno; } CfgTsvErr;
 
 /* get は 1 バイト (0..255) か EOF の -1、読み取り障害は -2 を返す。
- * row / seen は呼び手が用意する作業領域。emit が非 0 を返したら中断。
+ * row は呼び手が用意する作業領域。emit が非 0 を返したら中断。
  * 0 = 全行受理 / -1 = 規則違反 (err に理由と行番号)。 */
-int cfg_tsv_parse(int (*get)(void *ctx), void *gctx,
-                  CfgTsvRow *row, CfgTsvSeen *seen,
+int cfg_tsv_parse(int (*get)(void *ctx), void *gctx, CfgTsvRow *row,
                   int (*emit)(const CfgTsvRow *r, void *ctx), void *ectx,
                   CfgTsvErr *err);
 

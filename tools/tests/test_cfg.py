@@ -33,6 +33,22 @@ CASES = [
     "args",         # cfg.c の引数解釈・整形 (純関数)
     "cmd",          # (1)(23) と受入 C1〜C4 のホスト版
     "list_big",     # list が溜め場を越えたら閉じて吐いて続きから (票 §2)
+    # 実装レビュー 往復 1 の blocker (s2_tdd.md §C)
+    "stat_fail",       # ② stat の失敗を「不存在」に丸めない
+    "export_guard",    # ③ export の出力先に設定 DB 自身を指定できない
+    "txn_poison",      # ④ 検証で断られた set も txn を failed にする
+    "fetch_fail",      # ⑤ list / export の値取得の障害を成功にしない
+    "nullval",         # ⑥ NULL を空値 / 0 に化けさせない
+    "corrupt_schema",  # ⑦ schema 検査中の NOTADB / CORRUPT は CFG_CORRUPT
+    "commit_diag",     # ⑧ COMMIT の失敗を rollback の失敗で上書きしない
+    "open_close_fail", # ⑨ open 内部の close 失敗を公開 close へ伝える
+    "bind_fail",       # ⑩ get の bind 失敗も CFG_ERROR
+    "get_many",        # ⑪ 単一 key の get が列挙の上限に引きずられない
+    "enum_reenter_get",# ⑫ enum callback 内の get は INVAL
+    "out_fail",        # ⑬ 出力の溢れ / short write / 失敗を終了コードへ
+    "long_scope",      # ⑭ list の scope を切り詰めない
+    "intmin",          # ⑰ INT_MIN の解析で signed overflow を踏まない
+    "tsv_many",        # ⑯ 63B の名前が並んでも受理、重複は PRIMARY KEY
 ]
 
 INC = ["-I" + str(ROOT / p) for p in
@@ -46,9 +62,11 @@ SHIMS = {
 }
 
 # ---------------------------------------------------------------------------
-#  tsv fixture — C の reader と tools/mk_settings_db.py の **判定** を揃える。
-#  (票 §4 の (10)(21)。fixture は S0-T の test_mk_settings_db.py と同じ形。)
-#  各要素は (名前, bytes, 期待 = True なら受理)。
+#  tsv fixture — ゲスト側の `cfg init` と tools/mk_settings_db.py の **判定**
+#  を揃える。(票 §4 の (10)(21)。fixture は S0-T の test_mk_settings_db.py と
+#  同じ形。) 重複 (scope, key) の検出は控えを持たず `settings` の PRIMARY KEY
+#  に任せた (レビュー往復 1 の ⑯) ので、突き合わせる単位は reader 単体ではなく
+#  「その tsv で DB が作れるか」。各要素は (名前, bytes, 期待 = True なら受理)。
 # ---------------------------------------------------------------------------
 ZEROS = b"0" * 9000
 
@@ -160,7 +178,7 @@ def target_compile(tmp):
 
 
 def tsv_parity(exe):
-    """同じ fixture を C の reader と mk_settings_db.py に通し、判定を揃える。"""
+    """同じ fixture を `cfg init` と mk_settings_db.py に通し、判定を揃える。"""
     bad = 0
     with tempfile.TemporaryDirectory(prefix="os32-s2-tsv-") as td:
         td = pathlib.Path(td)
@@ -184,7 +202,7 @@ def tsv_parity(exe):
                       % (name, c_ok, py_ok, want_ok, c_out,
                          py.stderr.decode().strip()[:90]), flush=True)
                 bad += 1
-    print("TSV PARITY %d/%d PASS (C reader == mk_settings_db.py)"
+    print("TSV PARITY %d/%d PASS (cfg init == mk_settings_db.py)"
           % (len(TSV_FIXTURES) - bad, len(TSV_FIXTURES)), flush=True)
     return bad
 

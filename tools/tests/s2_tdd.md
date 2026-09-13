@@ -260,6 +260,8 @@ check-cfg-host:
 
 ---
 
+---
+
 ## §W — libos32gui の `os32gui_cfg_*` wrapper (S2-W)
 
 ### 対象と道具

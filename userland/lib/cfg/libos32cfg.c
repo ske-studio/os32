@@ -261,6 +261,23 @@ static int is_integer_typeof(int col)
            s[4] == 'g' && s[5] == 'e' && s[6] == 'r' && s[7] == '\0';
 }
 
+/* SQLite のコード → CFG_*。schema 検査の途中で出た失敗はここで写す。
+ * 「meta 表が無い」の SQLITE_ERROR、非 SQLite ファイルの NOTADB、
+ * ページの破損 CORRUPT はどれも CORRUPT。IOERR / NOMEM / 通常の BUSY は
+ * 「壊れている」とは違うので ERROR のまま (往復 1 の ⑦)。 */
+static int map_sql_failure(int code)
+{
+    if (code == CFG_SQLITE_BUSY_RECOVERY) return CFG_CORRUPT;
+    switch (CFG_SQLITE_PRIMARY(code)) {
+    case CFG_SQLITE_ERROR:
+    case CFG_SQLITE_NOTADB:
+    case CFG_SQLITE_CORRUPT:
+        return CFG_CORRUPT;
+    default:
+        return CFG_ERROR;
+    }
+}
+
 int cfg_i_schema_check(CfgDb *db, int *version_out)
 {
     const CfgBackend *b = cfg_backend();
@@ -270,17 +287,13 @@ int cfg_i_schema_check(CfgDb *db, int *version_out)
     if (db->handle < 0) return CFG_ERROR;
     if (b->db_prepare_only(db->handle, SQL_SCHEMA) != 0) {
         cfg_i_note(db);
-        /* 「meta 表が無い」だけが SQLITE_ERROR。IOERR / NOMEM / BUSY は
-         * 表の欠落と区別して ERROR にする (票 §1-1b、往復 3)。 */
-        if (CFG_SQLITE_PRIMARY(db->last_sqlite) == CFG_SQLITE_ERROR)
-            return CFG_CORRUPT;
-        return CFG_ERROR;
+        return map_sql_failure(db->last_sqlite);
     }
     rc = b->db_step(db->handle);
     if (rc != DB_STATUS_ROW) {
         cfg_i_note(db);
         b->db_finalize(db->handle);
-        return CFG_ERROR;
+        return map_sql_failure(db->last_sqlite);
     }
     count = (int)cfg_i_col_int(0);
     lo = (int)cfg_i_col_int(3);
@@ -324,6 +337,23 @@ static int map_open_failure(CfgDb *db)
     }
 }
 
+/* 内部で接続を捨てる。close が失敗した slot は F1 で隔離されているので
+ * **再 close しない**が、失敗したことは記録して公開 close へ伝える
+ * (往復 1 の ⑨: 隔離された接続が残ったのを呼び手が検出できるように)。 */
+static void drop_handle(CfgDb *db)
+{
+    const CfgBackend *b = cfg_backend();
+    int code;
+
+    if (db->handle < 0) return;
+    if (b->db_close(db->handle) != 0) {
+        code = b->db_error_code(db->handle);
+        if (!db->orphan_close) db->orphan_close = code ? code : -1;
+        db->last_sqlite = code ? code : db->last_sqlite;
+    }
+    db->handle = -1;
+}
+
 int cfg_open(CfgDb **out, int writable)
 {
     const CfgBackend *b;
@@ -345,6 +375,8 @@ int cfg_open(CfgDb **out, int writable)
     db->last_sqlite = 0;
     db->txn = 0;
     db->in_enum = 0;
+    db->orphan_close = 0;
+    db->cleanup_sqlite = 0;
 
     /* (a) 必ず RO で開いて検査する。 */
     db->handle = b->db_open_existing(CFG_DB_PATH, 0);
@@ -358,16 +390,14 @@ int cfg_open(CfgDb **out, int writable)
     db->status = st;
     db->schema_version = ver;
     if (st == CFG_CORRUPT || st == CFG_ERROR) {
-        b->db_close(db->handle);
-        db->handle = -1;
+        drop_handle(db);
         *out = db;
         return 0;
     }
     /* (c) RW へ切り替えるのは RO 検査が CFG_OK のときだけ。 */
     if (writable && st == CFG_OK) {
-        if (b->db_close(db->handle) != 0) {
-            cfg_i_note(db);
-            db->handle = -1;
+        drop_handle(db);
+        if (db->orphan_close) {
             db->status = CFG_ERROR;
             *out = db;
             return 0;
@@ -382,8 +412,7 @@ int cfg_open(CfgDb **out, int writable)
         }
         st = cfg_i_schema_check(db, &ver);
         if (st != CFG_OK || ver != db->schema_version) {
-            b->db_close(db->handle);
-            db->handle = -1;
+            drop_handle(db);
             db->status = (st == CFG_CORRUPT) ? CFG_CORRUPT : CFG_ERROR;
             db->schema_version = ver;
             *out = db;
@@ -399,17 +428,24 @@ int cfg_open(CfgDb **out, int writable)
 int cfg_close(CfgDb *db)
 {
     const CfgBackend *b = cfg_backend();
-    int first = 0, saved, code;
+    int first, saved, code;
 
     if (!db || !db->in_use) return OS32_ERR_INVAL;
     if (db->in_enum) return OS32_ERR_INVAL;
+    /* open の途中で捨てた接続の close 失敗もここで報告する。 */
+    first = db->orphan_close;
+    if (db->cleanup_sqlite && !first) first = db->cleanup_sqlite;
     if (db->handle >= 0) {
         if (db->txn != 0) {
             /* 成功した ROLLBACK は診断を 0 に戻す。先に保存する (票 §1-4)。*/
             saved = db->last_sqlite;
             if (b->db_exec(db->handle, "ROLLBACK") != 0) {
                 cfg_i_note(db);
-                first = db->last_sqlite ? db->last_sqlite : -1;
+                code = db->last_sqlite ? db->last_sqlite : -1;
+                if (!db->cleanup_sqlite) db->cleanup_sqlite = code;
+                if (!first) first = code;
+                /* 後片付けの失敗で**元の診断を消さない** (往復 1 の ⑧)。 */
+                if (saved) db->last_sqlite = saved;
             } else {
                 db->last_sqlite = saved;
             }
@@ -435,7 +471,14 @@ int cfg_close(CfgDb *db)
 static const char SQL_GET[] =
     "SELECT type, ival, tval, bval FROM settings WHERE scope=? AND key=?";
 
-/* 使える接続か (get 用): 状態 OK か VERSION なら読める。 */
+/* 使える接続か (get 用): 状態 OK か VERSION なら読める。
+ * **再入 (enum の callback の中) は「読めない」とは別物** なので分けて見る
+ * (往復 1 の ⑫)。 */
+static int reentered(const CfgDb *db)
+{
+    return db && db->in_enum;
+}
+
 static int readable(CfgDb *db)
 {
     if (!db || !db->in_use || db->in_enum) return 0;
@@ -460,8 +503,10 @@ static int get_row(CfgDb *db, const char *scope, const char *key)
     if (cfg_i_prepare(db, SQL_GET) != 0) { db->status = CFG_ERROR; return -1; }
     if (b->db_bind_text(db->handle, 1, scope, cfg_strlen(scope)) != 0 ||
         b->db_bind_text(db->handle, 2, key, cfg_strlen(key)) != 0) {
+        /* bind の失敗 (NOMEM 等) も障害。未設定と取り違えさせない (⑩)。 */
         cfg_i_note(db);
         b->db_finalize(db->handle);
+        db->status = CFG_ERROR;
         return -1;
     }
     rc = b->db_step(db->handle);
@@ -481,6 +526,43 @@ static int get_row(CfgDb *db, const char *scope, const char *key)
 static void get_finish(CfgDb *db)
 {
     cfg_backend()->db_finalize(db->handle);
+}
+
+/* 値の列 (ival / tval / bval) が SHM で NULL でないか。 */
+static int value_present(int declared)
+{
+    switch (declared) {
+    case CFG_TYPE_INT:  return cfg_i_col_type(1) == DB_TYPE_INT;
+    case CFG_TYPE_TEXT: return cfg_i_col_type(2) == DB_TYPE_TEXT;
+    case CFG_TYPE_BLOB: return cfg_i_col_type(3) == DB_TYPE_BLOB;
+    default:            return 0;
+    }
+}
+
+int cfg_get_type(CfgDb *db, const char *scope, const char *key)
+{
+    int declared, rc;
+
+    if (reentered(db)) return OS32_ERR_INVAL;
+    if (!names_ok(scope, key)) return OS32_ERR_INVAL;
+    if (!db || !db->in_use) return OS32_ERR_INVAL;
+    if (!readable(db)) {
+        /* 障害で読めないのと「無い」を混ぜない (⑤)。 */
+        return db->status == CFG_ERROR ? OS32_ERR_IO : OS32_ERR_NOTFOUND;
+    }
+    rc = get_row(db, scope, key);
+    if (rc < 0) return OS32_ERR_IO;                /* 障害 (status は ERROR) */
+    if (rc == 0) return OS32_ERR_NOTFOUND;
+    if (cfg_i_col_type(0) != DB_TYPE_INT) { get_finish(db); return OS32_ERR_NOSYS; }
+    declared = (int)cfg_i_col_int(0);
+    if (declared != CFG_TYPE_INT && declared != CFG_TYPE_TEXT &&
+        declared != CFG_TYPE_BLOB) {
+        get_finish(db);
+        return OS32_ERR_NOSYS;                     /* 認識できない type 列 */
+    }
+    if (!value_present(declared)) { get_finish(db); return CFG_TYPE_NULL; }
+    get_finish(db);
+    return declared;
 }
 
 int cfg_get_int(CfgDb *db, const char *scope, const char *key, int def)
@@ -509,10 +591,13 @@ static int get_value(CfgDb *db, const char *scope, const char *key,
     unsigned char *dst = (unsigned char *)out;
     int len, i, rc;
 
+    /* 再入は「未設定」ではなく引数不正 (⑫)。 */
+    if (reentered(db)) return OS32_ERR_INVAL;
     if (!names_ok(scope, key) || !out || cap < 0) return OS32_ERR_INVAL;
-    if (!readable(db)) return OS32_ERR_NOTFOUND;
+    if (!readable(db))
+        return (db && db->status == CFG_ERROR) ? OS32_ERR_IO : OS32_ERR_NOTFOUND;
     rc = get_row(db, scope, key);
-    if (rc < 0) return OS32_ERR_NOTFOUND;
+    if (rc < 0) return OS32_ERR_IO;         /* 障害を未設定と混ぜない (⑤) */
     if (rc == 0) return OS32_ERR_NOTFOUND;
     if (cfg_i_col_type(0) != DB_TYPE_INT ||
         (int)cfg_i_col_int(0) != want_type) {
@@ -577,28 +662,41 @@ int cfg_begin(CfgDb *db)
     return 0;
 }
 
+/* 後片付けの ROLLBACK。**元の診断 (`saved`) は必ず残す**: COMMIT が IOERR で
+ * 落ちたとき SQLite は自分で txn を巻き戻すので、続く明示 ROLLBACK は
+ * 「transaction がない」で失敗する。その失敗で原因が消えないように、
+ * 後片付けの失敗は `cleanup_sqlite` に別建てで持つ (往復 1 の ⑧)。 */
+static int cleanup_rollback(CfgDb *db, int saved)
+{
+    int rc = cfg_i_exec(db, "ROLLBACK");
+    if (rc != 0) {
+        if (!db->cleanup_sqlite)
+            db->cleanup_sqlite = db->last_sqlite ? db->last_sqlite : -1;
+    }
+    if (saved) db->last_sqlite = saved;
+    db->txn = 0;
+    return rc;
+}
+
 int cfg_rollback(CfgDb *db)
 {
-    int saved;
     if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
     if (db->txn == 0 || db->handle < 0) return OS32_ERR_INVAL;
-    saved = db->last_sqlite;
-    if (cfg_i_exec(db, "ROLLBACK") != 0) { db->txn = 0; return OS32_ERR_IO; }
-    db->last_sqlite = saved;
-    db->txn = 0;
-    return 0;
+    return cleanup_rollback(db, db->last_sqlite) != 0 ? OS32_ERR_IO : 0;
 }
 
 int cfg_commit(CfgDb *db)
 {
+    int saved;
     if (!db || !db->in_use || db->in_enum) return OS32_ERR_INVAL;
     if (db->txn == 0 || db->handle < 0) return OS32_ERR_INVAL;
     if (db->txn == 2) {                      /* failed — commit は拒否 */
-        cfg_rollback(db);
+        cleanup_rollback(db, db->last_sqlite);
         return OS32_ERR_IO;
     }
     if (cfg_i_exec(db, "COMMIT") != 0) {
-        cfg_rollback(db);
+        saved = db->last_sqlite;             /* COMMIT 自身の失敗コード */
+        cleanup_rollback(db, saved);
         return OS32_ERR_IO;
     }
     db->txn = 0;
@@ -611,14 +709,27 @@ static const char SQL_SET[] =
 static const char SQL_DEL[] =
     "DELETE FROM settings WHERE scope=? AND key=?";
 
+/* 実行中の txn の中で set / delete が**どんな理由で**断られても、その txn は
+ * failed にする。FOUNDATION §2-3 の「set 失敗で transaction を failed 状態に
+ * し、commit は拒否して rollback」は入力検証の失敗も含む — そうしないと
+ * 「A は通って B は弾かれた」半端な更新が commit されてしまう (往復 1 の ④)。*/
+static int reject_write(CfgDb *db, int rc)
+{
+    if (db && db->in_use && db->txn == 1) db->txn = 2;
+    return rc;
+}
+
 /* set / delete の共通前提。0 = 進んでよい。 */
 static int can_write(CfgDb *db, const char *scope, const char *key)
 {
     if (!writable_now(db)) return OS32_ERR_INVAL;
     if (db->txn != 1) return OS32_ERR_INVAL;         /* txn 外は拒否 */
-    if (!cfg_i_valid_scope(scope) || !cfg_i_valid_key(key)) return OS32_ERR_INVAL;
-    if (cfg_i_utf8_check(scope, cfg_strlen(scope)) != 0) return OS32_ERR_INVAL;
-    if (cfg_i_utf8_check(key, cfg_strlen(key)) != 0) return OS32_ERR_INVAL;
+    if (!cfg_i_valid_scope(scope) || !cfg_i_valid_key(key))
+        return reject_write(db, OS32_ERR_INVAL);
+    if (cfg_i_utf8_check(scope, cfg_strlen(scope)) != 0)
+        return reject_write(db, OS32_ERR_INVAL);
+    if (cfg_i_utf8_check(key, cfg_strlen(key)) != 0)
+        return reject_write(db, OS32_ERR_INVAL);
     return 0;
 }
 
@@ -685,12 +796,12 @@ int cfg_set_text(CfgDb *db, const char *scope, const char *key, const char *s)
     int rc = can_write(db, scope, key);
     int n;
     if (rc != 0) return rc;
-    if (!s) return OS32_ERR_INVAL;
+    if (!s) return reject_write(db, OS32_ERR_INVAL);
     /* 上限を超えるかどうかを数える段で打ち切る (長い文字列を走り切らない)。*/
     for (n = 0; s[n]; n++) {
-        if (n >= CFG_TEXT_MAX) return OS32_ERR_INVAL;
+        if (n >= CFG_TEXT_MAX) return reject_write(db, OS32_ERR_INVAL);
     }
-    if (cfg_i_utf8_check(s, n) != 0) return OS32_ERR_INVAL;
+    if (cfg_i_utf8_check(s, n) != 0) return reject_write(db, OS32_ERR_INVAL);
     return set_value(db, scope, key, CFG_TYPE_TEXT, 0, s, n, (const void *)0, 0);
 }
 
@@ -699,8 +810,8 @@ int cfg_set_blob(CfgDb *db, const char *scope, const char *key,
 {
     int rc = can_write(db, scope, key);
     if (rc != 0) return rc;
-    if (n < 0 || n > CFG_BLOB_MAX) return OS32_ERR_INVAL;
-    if (n > 0 && !p) return OS32_ERR_INVAL;
+    if (n < 0 || n > CFG_BLOB_MAX) return reject_write(db, OS32_ERR_INVAL);
+    if (n > 0 && !p) return reject_write(db, OS32_ERR_INVAL);
     return set_value(db, scope, key, CFG_TYPE_BLOB, 0, (const char *)0, 0, p, n);
 }
 

@@ -132,7 +132,8 @@ static int read_int_field(TsvIn *in, int *out, int *code)
         if (c == TSV_IOERR) return TSV_IOERR;
     }
     if (!seen) { *code = CFG_TSV_E_VALUE; return TSV_IOERR; }
-    *out = neg ? -(int)acc : (int)acc;
+    /* INT_MIN の単項マイナスは signed overflow (UB)。表現できる値だけで組む。*/
+    *out = neg ? -(int)(acc - 1UL) - 1 : (int)acc;
     return c;
 }
 
@@ -170,42 +171,6 @@ static int read_blob_field(TsvIn *in, unsigned char *out, int *outlen, int *code
 }
 
 /* ------------------------------------------------------------------ */
-/*  重複 (scope, key) の控え                                           */
-/* ------------------------------------------------------------------ */
-
-static int seen_add(CfgTsvSeen *s, const char *scope, const char *key)
-{
-    int i, j, need = 0;
-    const char *p;
-
-    if (!s) return 0;
-    for (p = scope; *p; p++) need++;
-    need++;                      /* 区切りの TAB */
-    for (p = key; *p; p++) need++;
-    need++;                      /* 終端 */
-
-    for (i = 0; i < s->count; i++) {
-        const char *q = s->pool + s->off[i];
-        j = 0;
-        while (scope[j] && q[j] == scope[j]) j++;
-        if (scope[j] != '\0' || q[j] != '\t') continue;
-        q += j + 1;
-        j = 0;
-        while (key[j] && q[j] == key[j]) j++;
-        if (key[j] == '\0' && q[j] == '\0') return CFG_TSV_E_DUP;
-    }
-    if (s->count >= CFG_ENUM_MAX || s->used + need > CFG_TSV_POOL_BYTES)
-        return CFG_TSV_E_TOOMANY;
-    s->off[s->count] = (short)s->used;
-    for (p = scope; *p; p++) s->pool[s->used++] = *p;
-    s->pool[s->used++] = '\t';
-    for (p = key; *p; p++) s->pool[s->used++] = *p;
-    s->pool[s->used++] = '\0';
-    s->count++;
-    return CFG_TSV_OK;
-}
-
-/* ------------------------------------------------------------------ */
 /*  本体                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -216,8 +181,7 @@ static int fail(CfgTsvErr *err, int code, int lineno)
     return -1;
 }
 
-int cfg_tsv_parse(int (*get)(void *ctx), void *gctx,
-                  CfgTsvRow *row, CfgTsvSeen *seen,
+int cfg_tsv_parse(int (*get)(void *ctx), void *gctx, CfgTsvRow *row,
                   int (*emit)(const CfgTsvRow *r, void *ctx), void *ectx,
                   CfgTsvErr *err)
 {
@@ -228,7 +192,6 @@ int cfg_tsv_parse(int (*get)(void *ctx), void *gctx,
     if (!get || !row || !err) return -1;
     err->code = CFG_TSV_OK;
     err->lineno = 0;
-    if (seen) { seen->count = 0; seen->used = 0; }
     in_init(&in, get, gctx);
 
     for (;;) {
@@ -309,8 +272,6 @@ int cfg_tsv_parse(int (*get)(void *ctx), void *gctx,
         if (c == '\t') return fail(err, CFG_TSV_E_COLS, line);   /* 5 列目 */
 
         row->lineno = line;
-        code = seen_add(seen, row->scope, row->key);
-        if (code != CFG_TSV_OK) return fail(err, code, line);
         if (emit && emit(row, ectx) != 0) return fail(err, CFG_TSV_E_EMIT, line);
 
         if (c == '\n') { in.lineno++; continue; }

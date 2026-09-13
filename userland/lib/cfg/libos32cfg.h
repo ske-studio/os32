@@ -40,6 +40,9 @@
 #define CFG_TYPE_INT   0
 #define CFG_TYPE_TEXT  1
 #define CFG_TYPE_BLOB  2
+/* DB に格納される型ではなく `cfg_get_type` の戻りだけに現れる印。
+ * 行はあるが値の列が NULL = 「未設定」と「空値」を呼び手が区別するため。 */
+#define CFG_TYPE_NULL  3
 
 /* ---- 場所と版 ([C4] 定数はここが管理元) -------------------------------- */
 #define CFG_DB_PATH             "/etc/settings.db"
@@ -86,6 +89,14 @@ int   cfg_status(const CfgDb *db);
 int   cfg_last_sqlite(const CfgDb *db);
 
 /* ---- 読み -------------------------------------------------------------- */
+/* 1 行の完全一致照会で「その key に何が入っているか」を返す。
+ * 戻り: CFG_TYPE_INT / TEXT / BLOB = 値がある (その型で get できる)
+ *       CFG_TYPE_NULL              = 行はあるが値の列が NULL (未設定扱い)
+ *       OS32_ERR_NOTFOUND          = 行が無い
+ *       OS32_ERR_NOSYS             = 行はあるが type 列が 0/1/2 でない
+ *       他の負 (IO / INVAL)        = 障害。cfg_status も CFG_ERROR になる
+ * 値の有無と障害を区別したい呼び手 (cfg コマンドの get / list / export) 用。*/
+int   cfg_get_type(CfgDb *db, const char *scope, const char *key);
 int   cfg_get_int (CfgDb *db, const char *scope, const char *key, int def);
 /* 戻り: 長さ (NUL 除く) / 負: OS32_ERR_NOTFOUND (無い) /
  *       OS32_ERR_NOSPC (cap 不足: out は書かない) / OS32_ERR_INVAL */

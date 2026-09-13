@@ -30,7 +30,8 @@
 #define CFG_CMD_EXPORT  7
 
 /* 出力の作業領域 ([C4]) */
-#define CFG_OUT_MAX     8192      /* コンソールへ溜める上限 */
+/* 4096B blob の hex は 8192 文字。その 1 行と案内文がまとめて収まる大きさ。 */
+#define CFG_OUT_MAX     9216      /* 溜める上限 (コンソール / export 共用) */
 #define CFG_OUT_CHUNK   1024      /* 1 回の sys_write */
 #define CFG_LINE_MAX    6400      /* export の 1 行 (base64 4096B = 5464 文字) */
 #define CFG_ROW_MAX     512       /* list の 1 行 */
@@ -47,6 +48,8 @@ typedef struct {
 } CfgArgs;
 
 static KernelAPI *api;
+/* 出力の取りこぼし (溜め場の溢れ / short write)。終了コードへ持ち上げる。 */
+static int out_err;
 
 /* --- 純関数 (ホスト TDD が直接呼ぶ) --- */
 static int cfg_cmd_parse(int argc, char **argv, CfgArgs *out);
@@ -63,7 +66,8 @@ static int parse_int(const char *s, int *out);
 static void out_reset(void);
 static int  out_put(const char *p, int n);
 static int  out_str(const char *s);
-static void out_flush_console(void);
+static int  out_flush_console(void);
+static int  norm_path(const char *in, char *out, int cap);
 
 /* --- 副指令の実装 --- */
 static int do_status(void);
@@ -96,7 +100,9 @@ int main(int argc, char **argv, KernelAPI *kapi_in)
     case CFG_CMD_EXPORT: rc = do_export(&a);    break;
     default:             usage(); rc = 1;       break;
     }
-    out_flush_console();
+    /* 出力の取りこぼし (溢れ / short write) は黙って捨てず終了コードへ。 */
+    if (out_flush_console() != 0) rc = 1;
+    if (out_err) rc = 1;
     return rc;
 }
 
@@ -131,6 +137,17 @@ static void s_cpy(char *dst, const char *src, int cap)
     int i = 0;
     while (src[i] && i < cap - 1) { dst[i] = src[i]; i++; }
     dst[i] = '\0';
+}
+
+/* 1..max バイトの C 文字列か。切り詰めてから使わないための門番。 */
+static int s_len_ok(const char *s, int max)
+{
+    int n;
+    if (!s) return 0;
+    for (n = 0; s[n]; n++) {
+        if (n >= max) return 0;
+    }
+    return n > 0;
 }
 
 /* ======================================================================== */
@@ -241,7 +258,8 @@ static int parse_int(const char *s, int *out)
         acc = acc * 10UL + (u32)(s[i] - '0');
     }
     if (!seen) return -1;
-    *out = neg ? -(int)acc : (int)acc;
+    /* INT_MIN の単項マイナスは signed overflow (UB)。表現できる値だけで組む。*/
+    *out = neg ? -(int)(acc - 1UL) - 1 : (int)acc;
     return 0;
 }
 
@@ -375,19 +393,23 @@ static const char *type_name(int t)
 
 static char out_buf[CFG_OUT_MAX];
 static int  out_len;
-static int  out_full;
 
 static void out_reset(void)
 {
     out_len = 0;
-    out_full = 0;
+    out_err = 0;
+}
+
+/* n バイト足せるか (溢れを「予定どおり」に扱う list / export 用)。 */
+static int out_room(int n)
+{
+    return n >= 0 && out_len + n <= CFG_OUT_MAX;
 }
 
 static int out_put(const char *p, int n)
 {
     int i;
-    if (n < 0) return -1;
-    if (out_len + n > CFG_OUT_MAX) { out_full = 1; return -1; }
+    if (n < 0 || out_len + n > CFG_OUT_MAX) { out_err = 1; return -1; }
     for (i = 0; i < n; i++) out_buf[out_len + i] = p[i];
     out_len += n;
     return 0;
@@ -402,22 +424,46 @@ static int out_num(int v)
 {
     char tmp[16];
     int n = fmt_int(tmp, (int)sizeof(tmp), v);
-    if (n < 0) return -1;
+    if (n < 0) { out_err = 1; return -1; }
     return out_put(tmp, n);
 }
 
-/* DB を閉じた後に呼ぶ。1KB ごとに sys_yield を挟み、端末に読み出す間を作る。*/
-static void out_flush_console(void)
+/* fd へ全部書き切る。short write を「書けた」ことにしない (往復 1 の ⑬)。 */
+static int write_all(int fd, const char *p, int n)
 {
-    int off = 0, n;
+    int done = 0, rc;
+    while (done < n) {
+        rc = api->sys_write(fd, p + done, (u32)(n - done));
+        if (rc <= 0) return -1;
+        done += rc;
+    }
+    return 0;
+}
+
+/* DB を閉じた後に呼ぶ。1KB ごとに sys_yield を挟み、端末に読み出す間を作る。
+ * 0 = 全部書けた / -1 = 途中で落ちた。 */
+static int out_flush_console(void)
+{
+    int off = 0, n, bad = 0;
     while (off < out_len) {
         n = out_len - off;
         if (n > CFG_OUT_CHUNK) n = CFG_OUT_CHUNK;
-        api->sys_write(1, out_buf + off, (u32)n);
+        if (write_all(1, out_buf + off, n) != 0) { bad = 1; break; }
         off += n;
         if (off < out_len) api->sys_yield();
     }
     out_len = 0;
+    if (bad) out_err = 1;
+    return bad ? -1 : 0;
+}
+
+/* 溜めた分をファイルへ流す (export)。コンソールではないので yield は要らない。*/
+static int out_flush_fd(int fd)
+{
+    int rc = (out_len > 0) ? write_all(fd, out_buf, out_len) : 0;
+    out_len = 0;
+    if (rc != 0) out_err = 1;
+    return rc;
 }
 
 static void usage(void)
@@ -447,6 +493,101 @@ static int close_note(CfgDb *db, int rc)
         return 1;
     }
     return rc;
+}
+
+/* ======================================================================== */
+/*  出力先の保護 (票 §2 / 往復 1 の ③)                                       */
+/*                                                                          */
+/*  `cfg export /etc/settings.db` は設定 DB 自身を O_TRUNC で潰す。          */
+/*  `-journal` に書けば次の open が hot journal = CORRUPT になる。           */
+/*  相対名や `..` も同じ場所を指せるので、**正規化してから**突き合わせる。    */
+/* ======================================================================== */
+
+static const char *const PROTECTED_PATHS[] = {
+    CFG_DB_PATH, CFG_DB_JOURNAL_PATH,
+    CFG_DB_NEW_PATH, CFG_DB_NEW_JOURNAL_PATH,
+    (const char *)0
+};
+
+/* 絶対名へ直し `.` / `..` / 連続 `/` を畳む。0 / -1 (長すぎ・空)。 */
+static int norm_path(const char *in, char *out, int cap)
+{
+    char tmp[OS32_MAX_PATH * 2];
+    const char *parts[OS32_MAX_PATH / 2];
+    int lens[OS32_MAX_PATH / 2];
+    int n = 0, np = 0, i, p, o;
+    const char *cwd;
+
+    if (!in || !in[0] || cap < 2) return -1;
+    if (in[0] != '/') {
+        cwd = api->sys_getcwd ? api->sys_getcwd() : (const char *)0;
+        if (!cwd || !cwd[0]) cwd = "/";
+        for (i = 0; cwd[i]; i++) {
+            if (n >= (int)sizeof(tmp) - 2) return -1;
+            tmp[n++] = cwd[i];
+        }
+        if (n == 0 || tmp[n - 1] != '/') tmp[n++] = '/';
+    }
+    for (i = 0; in[i]; i++) {
+        if (n >= (int)sizeof(tmp) - 1) return -1;
+        tmp[n++] = in[i];
+    }
+    tmp[n] = '\0';
+
+    p = 0;
+    while (tmp[p]) {
+        int start, len;
+        if (tmp[p] == '/') { p++; continue; }
+        start = p;
+        while (tmp[p] && tmp[p] != '/') p++;
+        len = p - start;
+        if (len == 1 && tmp[start] == '.') continue;
+        if (len == 2 && tmp[start] == '.' && tmp[start + 1] == '.') {
+            if (np > 0) np--;
+            continue;
+        }
+        if (np >= (int)(sizeof(parts) / sizeof(parts[0]))) return -1;
+        parts[np] = &tmp[start];
+        lens[np] = len;
+        np++;
+    }
+    o = 0;
+    out[o++] = '/';
+    for (i = 0; i < np; i++) {
+        int j;
+        if (i > 0) {
+            if (o >= cap - 1) return -1;
+            out[o++] = '/';
+        }
+        for (j = 0; j < lens[i]; j++) {
+            if (o >= cap - 1) return -1;
+            out[o++] = parts[i][j];
+        }
+    }
+    out[o] = '\0';
+    return 0;
+}
+
+/* 既に在るファイル同士の同一性 (ハードリンクや別名でも同じ inode を指す)。 */
+static int same_file(const char *a, const char *b)
+{
+    OS32_Stat sa, sb;
+    if (api->sys_stat(a, &sa) != 0) return 0;
+    if (api->sys_stat(b, &sb) != 0) return 0;
+    if (sa.st_ino == 0 && sb.st_ino == 0) return 0;   /* inode を持たない FS */
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+/* 0 = 書いてよい / -1 = 設定 DB 側のファイル */
+static int output_allowed(const char *path, char *norm, int cap)
+{
+    int i;
+    if (norm_path(path, norm, cap) != 0) return -1;
+    for (i = 0; PROTECTED_PATHS[i]; i++) {
+        if (s_eq(norm, PROTECTED_PATHS[i])) return -1;
+        if (same_file(norm, PROTECTED_PATHS[i])) return -1;
+    }
+    return 0;
 }
 
 /* ======================================================================== */
@@ -521,35 +662,36 @@ static char v_hex[CFG_BLOB_MAX * 2 + 1];
 static int do_get(const CfgArgs *a)
 {
     CfgDb *db;
-    int st, i, rc = 0, have = 0, iv = 0, blen = 0, tlen = 0, kind = -1;
+    int st, rc = 0, have = 0, bad = 0, iv = 0, blen = 0, tlen = 0, kind = -1;
 
     if (cfg_open(&db, 0) != 0) { out_str("cfg: cannot open\n"); return 1; }
     st = cfg_status(db);
     if (st == CFG_OK || st == CFG_VERSION) {
-        /* 型は enum (前方一致) で 1 度だけ引く。key を集めてから
-         * callback の外で値を取る (票 §1-5)。 */
-        l_nkeys = 0;
-        if (cfg_enum(db, a->scope, a->key, collect_key, (void *)0) >= 0) {
-            for (i = 0; i < l_nkeys; i++) {
-                if (s_eq(l_keys[i], a->key)) { kind = l_types[i]; break; }
-            }
-        }
+        /* 完全一致の 1 行照会で型を引く。前方一致の列挙だと同じ scope に
+         * 257 件あるだけで NOSPC になり、実値があるのに既定値を出す (⑪)。 */
+        kind = cfg_get_type(db, a->scope, a->key);
         if (kind == CFG_TYPE_INT) {
             iv = cfg_get_int(db, a->scope, a->key, 0);
             have = 1;
         } else if (kind == CFG_TYPE_TEXT) {
             tlen = cfg_get_text(db, a->scope, a->key, v_text, (int)sizeof(v_text));
-            if (tlen >= 0) have = 1;
+            if (tlen >= 0) have = 1; else bad = 1;
         } else if (kind == CFG_TYPE_BLOB) {
             blen = cfg_get_blob(db, a->scope, a->key, v_blob, (int)sizeof(v_blob));
-            if (blen >= 0) have = 1;
+            if (blen >= 0) have = 1; else bad = 1;
+        } else if (kind == CFG_TYPE_NULL || kind == OS32_ERR_NOTFOUND) {
+            /* 未設定 (値の列が NULL の行も「無い」扱い、⑥) */
+        } else {
+            bad = 1;                       /* 障害 / 認識できない type 列 */
         }
     }
-    if (cfg_status(db) == CFG_ERROR) rc = 1;
+    if (bad || cfg_status(db) == CFG_ERROR) rc = 1;
     note_status(db);
     rc = close_note(db, rc);
 
-    if (have && kind == CFG_TYPE_INT) {
+    if (bad) {
+        out_str("get failed\n");
+    } else if (have && kind == CFG_TYPE_INT) {
         out_num(iv);
         out_str("\n");
     } else if (have && kind == CFG_TYPE_TEXT) {
@@ -627,47 +769,66 @@ static int do_set(const CfgArgs *a, int del)
 /*  list                                                                     */
 /* ======================================================================== */
 
-/* 1 行 = "<scope>\t<key>\t<type>\t<value>"。blob は長さだけ (hex は get で)。*/
-static int emit_row(CfgDb *db, const char *scope, const char *key, int type)
+/* 1 行 = "<scope>\t<key>\t<type>\t<value>"。blob は長さだけ (hex は get で)。
+ * 戻り: 0 = 溜めた / 1 = 溜め場が足りない (閉じて吐いてから出し直す) /
+ *      -1 = 値の取得に失敗 (⑤: 0 や空値で埋めない)。 */
+static int emit_row(CfgDb *db, const char *scope, const char *key, int *kind_io)
 {
     char row[CFG_ROW_MAX];
-    int o = 0, n, i;
+    int o = 0, n, i, kind;
 
-    for (i = 0; scope[i] && o < CFG_ROW_MAX - 2; i++) row[o++] = scope[i];
+    kind = cfg_get_type(db, scope, key);
+    *kind_io = kind;
+    if (kind < 0) return -1;                 /* 障害 / 認識できない type */
+
+    for (i = 0; scope[i] && o < CFG_ROW_MAX - 8; i++) row[o++] = scope[i];
     row[o++] = '\t';
-    for (i = 0; key[i] && o < CFG_ROW_MAX - 2; i++) row[o++] = key[i];
+    for (i = 0; key[i] && o < CFG_ROW_MAX - 8; i++) row[o++] = key[i];
     row[o++] = '\t';
-    for (i = 0; type_name(type)[i] && o < CFG_ROW_MAX - 2; i++)
-        row[o++] = type_name(type)[i];
-    row[o++] = '\t';
-    if (type == CFG_TYPE_INT) {
-        n = fmt_int(row + o, CFG_ROW_MAX - o - 1, cfg_get_int(db, scope, key, 0));
-        if (n > 0) o += n;
-    } else if (type == CFG_TYPE_TEXT) {
-        n = cfg_get_text(db, scope, key, v_text, (int)sizeof(v_text));
-        if (n > 0) {
-            for (i = 0; i < n && o < CFG_ROW_MAX - 2; i++) row[o++] = v_text[i];
-        }
+    if (kind == CFG_TYPE_NULL) {
+        for (i = 0; "null\t(unset)"[i] && o < CFG_ROW_MAX - 2; i++)
+            row[o++] = "null\t(unset)"[i];
     } else {
-        n = cfg_get_blob(db, scope, key, v_blob, (int)sizeof(v_blob));
-        if (n < 0) n = 0;
-        row[o++] = 'b';
-        row[o++] = 'l';
-        row[o++] = 'o';
-        row[o++] = 'b';
-        row[o++] = ':';
-        n = fmt_int(row + o, CFG_ROW_MAX - o - 1, n);
-        if (n > 0) o += n;
+        for (i = 0; type_name(kind)[i] && o < CFG_ROW_MAX - 8; i++)
+            row[o++] = type_name(kind)[i];
+        row[o++] = '\t';
+        if (kind == CFG_TYPE_INT) {
+            /* 値の NULL は上で CFG_TYPE_NULL になっているので def は届かない。*/
+            n = fmt_int(row + o, CFG_ROW_MAX - o - 2, cfg_get_int(db, scope, key, 0));
+            if (n < 0) return -1;
+            o += n;
+        } else if (kind == CFG_TYPE_TEXT) {
+            n = cfg_get_text(db, scope, key, v_text, (int)sizeof(v_text));
+            if (n < 0) return -1;
+            for (i = 0; i < n && o < CFG_ROW_MAX - 2; i++) row[o++] = v_text[i];
+        } else {
+            n = cfg_get_blob(db, scope, key, v_blob, (int)sizeof(v_blob));
+            if (n < 0) return -1;
+            row[o++] = 'b';
+            row[o++] = 'l';
+            row[o++] = 'o';
+            row[o++] = 'b';
+            row[o++] = ':';
+            n = fmt_int(row + o, CFG_ROW_MAX - o - 2, n);
+            if (n < 0) return -1;
+            o += n;
+        }
     }
     row[o++] = '\n';
-    return out_put(row, o);
+    if (!out_room(o)) return 1;
+    return out_put(row, o) == 0 ? 0 : -1;
 }
 
 static int do_list(const CfgArgs *a)
 {
     CfgDb *db;
-    int st, si, ki, rc = 0, more = 1, n;
+    int st, si, ki, rc = 0, more = 1, n, kind, emitted;
 
+    if (a->scope && !s_len_ok(a->scope, CFG_SCOPE_MAX)) {
+        /* 切り詰めると **別の scope** の値を出してしまう (⑭)。 */
+        out_str("bad scope\n");
+        return 1;
+    }
     r_active = 0;
     while (more) {
         more = 0;
@@ -707,7 +868,16 @@ static int do_list(const CfgArgs *a)
             for (ki = 0; ki < l_nkeys; ki++) {
                 if (r_active && s_cmp(l_scopes[si], r_scope) == 0 &&
                     s_cmp(l_keys[ki], r_key) <= 0) continue;
-                if (emit_row(db, l_scopes[si], l_keys[ki], l_types[ki]) != 0) {
+                emitted = emit_row(db, l_scopes[si], l_keys[ki], &kind);
+                if (emitted < 0) {
+                    out_str("list failed (");
+                    out_str(l_scopes[si]);
+                    out_str(" ");
+                    out_str(l_keys[ki]);
+                    out_str(")\n");
+                    return close_note(db, 1);
+                }
+                if (emitted == 1) {
                     more = 1;              /* 溢れた — 閉じて吐いてから続き */
                     break;
                 }
@@ -718,7 +888,7 @@ static int do_list(const CfgArgs *a)
         }
         rc = close_note(db, rc);
         if (rc != 0) return rc;
-        if (more) out_flush_console();
+        if (more && out_flush_console() != 0) return 1;
     }
     return rc;
 }
@@ -757,19 +927,9 @@ static int do_init(const CfgArgs *a)
 /*  export — DESIGN §6b の JSON (1 行 1 レコード)                            */
 /* ======================================================================== */
 
+
 static char x_line[CFG_LINE_MAX];
 static int  x_fd;
-
-static int x_write(const char *p, int n)
-{
-    int done = 0, rc;
-    while (done < n) {
-        rc = api->sys_write(x_fd, p + done, (u32)(n - done));
-        if (rc <= 0) return -1;
-        done += rc;
-    }
-    return 0;
-}
 
 /* JSON の骨 (構造の文字) をそのまま足す。値は fmt_json_str / fmt_* を通す。*/
 static int x_lit(int *o, const char *s)
@@ -782,9 +942,14 @@ static int x_lit(int *o, const char *s)
     return 0;
 }
 
-static int export_row(CfgDb *db, const char *scope, const char *key, int type)
+/* 1 レコードを x_line に組む。
+ * 戻り: 長さ / -1 = 値の取得か整形に失敗 (⑤⑥: 0 や空値で埋めない)。 */
+static int export_row(CfgDb *db, const char *scope, const char *key)
 {
-    int o = 0, n, m;
+    int o = 0, n, m, kind;
+
+    kind = cfg_get_type(db, scope, key);
+    if (kind < 0) return -1;
 
     if (x_lit(&o, "{\"scope\":\"") != 0) return -1;
     n = fmt_json_str(x_line + o, CFG_LINE_MAX - o, scope, s_len(scope));
@@ -795,17 +960,20 @@ static int export_row(CfgDb *db, const char *scope, const char *key, int type)
     if (n < 0) return -1;
     o += n;
     if (x_lit(&o, "\",\"type\":") != 0) return -1;
-    n = fmt_int(x_line + o, CFG_LINE_MAX - o, type);
+    n = fmt_int(x_line + o, CFG_LINE_MAX - o, kind);
     if (n < 0) return -1;
     o += n;
     if (x_lit(&o, ",\"v\":") != 0) return -1;
-    if (type == CFG_TYPE_INT) {
+    if (kind == CFG_TYPE_NULL) {
+        /* 行はあるが値の列が NULL。空値と取り違えられない形で書く (⑥)。 */
+        if (x_lit(&o, "null") != 0) return -1;
+    } else if (kind == CFG_TYPE_INT) {
         n = fmt_int(x_line + o, CFG_LINE_MAX - o, cfg_get_int(db, scope, key, 0));
         if (n < 0) return -1;
         o += n;
-    } else if (type == CFG_TYPE_TEXT) {
+    } else if (kind == CFG_TYPE_TEXT) {
         m = cfg_get_text(db, scope, key, v_text, (int)sizeof(v_text));
-        if (m < 0) m = 0;
+        if (m < 0) return -1;
         if (x_lit(&o, "\"") != 0) return -1;
         n = fmt_json_str(x_line + o, CFG_LINE_MAX - o, v_text, m);
         if (n < 0) return -1;
@@ -813,7 +981,7 @@ static int export_row(CfgDb *db, const char *scope, const char *key, int type)
         if (x_lit(&o, "\"") != 0) return -1;
     } else {
         m = cfg_get_blob(db, scope, key, v_blob, (int)sizeof(v_blob));
-        if (m < 0) m = 0;
+        if (m < 0) return -1;
         if (x_lit(&o, "\"") != 0) return -1;
         n = fmt_b64(x_line + o, CFG_LINE_MAX - o, v_blob, m);
         if (n < 0) return -1;
@@ -821,75 +989,115 @@ static int export_row(CfgDb *db, const char *scope, const char *key, int type)
         if (x_lit(&o, "\"") != 0) return -1;
     }
     if (x_lit(&o, "}\n") != 0) return -1;
-    return x_write(x_line, o);
+    return o;
+}
+
+/* 途中で落ちたときは中途半端なバックアップを残さない。 */
+static int export_abort(CfgDb *db, const char *norm, const char *msg)
+{
+    if (x_fd >= 0) { api->sys_close(x_fd); x_fd = -1; }
+    if (norm) api->sys_unlink(norm);
+    out_str(msg);
+    out_str("\n");
+    return db ? close_note(db, 1) : 1;
 }
 
 static int do_export(const CfgArgs *a)
 {
+    static char norm[OS32_MAX_PATH];
     CfgDb *db;
-    int st, si, ki, n, o, rows = 0;
+    int st, si, ki, n, o, rows = 0, more = 1, first = 1;
 
-    if (cfg_open(&db, 0) != 0) { out_str("cfg: cannot open\n"); return 1; }
-    st = cfg_status(db);
-    if (st != CFG_OK && st != CFG_VERSION) {
-        out_str("cannot export: ");
-        out_str(status_name(st));
-        out_str("\n");
-        note_status(db);
-        return close_note(db, 1);
-    }
-    x_fd = api->sys_open(a->path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
-    if (x_fd < 0) {
-        out_str("cannot create the export file\n");
-        return close_note(db, 1);
-    }
-    /* ヘッダの版は **実値** (VERSION 状態なら認識版より大きい値がそのまま)。*/
-    o = 0;
-    x_lit(&o, "{\"schema_version\":");
-    n = fmt_int(x_line + o, CFG_LINE_MAX - o, cfg_schema_version(db));
-    o += n;
-    x_lit(&o, ",\"exported\":\"");
-    n = fmt_int(x_line + o, CFG_LINE_MAX - o, (int)api->get_tick());
-    o += n;
-    x_lit(&o, "\"}\n");
-    if (x_write(x_line, o) != 0) {
-        api->sys_close(x_fd);
-        out_str("write failed\n");
-        return close_note(db, 1);
+    x_fd = -1;
+    r_active = 0;               /* 再開位置は list と共有。必ず先頭から */
+    /* 出力先が設定 DB / journal / `.new*` なら拒否 (③)。DB を開く前に見る。*/
+    if (output_allowed(a->path, norm, (int)sizeof(norm)) != 0) {
+        out_str("refusing to write the settings database itself\n");
+        return 1;
     }
 
-    l_nscopes = 0;
-    n = cfg_enum_scopes(db, collect_scope, (void *)0);
-    if (n == OS32_ERR_NOSPC) {
-        api->sys_close(x_fd);
-        out_str("too many scopes\n");
-        return close_note(db, 1);
-    }
-    if (n < 0) {
-        api->sys_close(x_fd);
-        out_str("export failed\n");
-        return close_note(db, 1);
-    }
-    for (si = 0; si < l_nscopes; si++) {
-        l_nkeys = 0;
-        if (cfg_enum(db, l_scopes[si], (const char *)0,
-                     collect_key, (void *)0) < 0) {
-            api->sys_close(x_fd);
-            out_str("export failed\n");
+    while (more) {
+        more = 0;
+        if (cfg_open(&db, 0) != 0) {
+            return export_abort((CfgDb *)0, first ? (const char *)0 : norm,
+                                "cfg: cannot open");
+        }
+        st = cfg_status(db);
+        if (st != CFG_OK && st != CFG_VERSION) {
+            out_str("cannot export: ");
+            out_str(status_name(st));
+            out_str("\n");
+            note_status(db);
+            if (!first) { api->sys_unlink(norm); }
             return close_note(db, 1);
         }
-        for (ki = 0; ki < l_nkeys; ki++) {
-            if (export_row(db, l_scopes[si], l_keys[ki], l_types[ki]) != 0) {
-                api->sys_close(x_fd);
-                out_str("write failed\n");
+        if (first) {
+            x_fd = api->sys_open(norm, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+            if (x_fd < 0) {
+                out_str("cannot create the export file\n");
                 return close_note(db, 1);
             }
-            rows++;
+            /* ヘッダの版は **実値** (VERSION なら認識版より大きい値のまま)。*/
+            o = 0;
+            if (x_lit(&o, "{\"schema_version\":") != 0)
+                return export_abort(db, norm, "export failed");
+            n = fmt_int(x_line + o, CFG_LINE_MAX - o, cfg_schema_version(db));
+            if (n < 0) return export_abort(db, norm, "export failed");
+            o += n;
+            if (x_lit(&o, ",\"exported\":\"") != 0)
+                return export_abort(db, norm, "export failed");
+            n = fmt_int(x_line + o, CFG_LINE_MAX - o, (int)api->get_tick());
+            if (n < 0) return export_abort(db, norm, "export failed");
+            o += n;
+            if (x_lit(&o, "\"}\n") != 0)
+                return export_abort(db, norm, "export failed");
+            if (out_put(x_line, o) != 0)
+                return export_abort(db, norm, "export failed");
+            first = 0;
         }
+
+        l_nscopes = 0;
+        n = cfg_enum_scopes(db, collect_scope, (void *)0);
+        if (n == OS32_ERR_NOSPC) return export_abort(db, norm, "too many scopes");
+        if (n < 0) return export_abort(db, norm, "export failed");
+
+        for (si = 0; si < l_nscopes && !more; si++) {
+            if (r_active && s_cmp(l_scopes[si], r_scope) < 0) continue;
+            l_nkeys = 0;
+            if (cfg_enum(db, l_scopes[si], (const char *)0,
+                         collect_key, (void *)0) < 0)
+                return export_abort(db, norm, "export failed");
+            for (ki = 0; ki < l_nkeys; ki++) {
+                if (r_active && s_cmp(l_scopes[si], r_scope) == 0 &&
+                    s_cmp(l_keys[ki], r_key) <= 0) continue;
+                n = export_row(db, l_scopes[si], l_keys[ki]);
+                if (n < 0) return export_abort(db, norm, "export failed");
+                if (!out_room(n)) { more = 1; break; }   /* 閉じてから書く */
+                if (out_put(x_line, n) != 0)
+                    return export_abort(db, norm, "export failed");
+                rows++;
+                s_cpy(r_scope, l_scopes[si], CFG_SCOPE_MAX + 1);
+                s_cpy(r_key, l_keys[ki], CFG_KEY_MAX + 1);
+                r_active = 1;
+            }
+        }
+        /* 票 §2 の「出力は DB を閉じた後」をファイル側にも通す。溜め場が
+         * 一杯になったら閉じて書き、開き直して続きから (list と同じ再開)。 */
+        if (cfg_close(db) != 0) {
+            out_str("close failed (");
+            out_num(cfg_last_close_error());
+            out_str(")\n");
+            if (x_fd >= 0) { api->sys_close(x_fd); x_fd = -1; }
+            api->sys_unlink(norm);
+            return 1;
+        }
+        if (out_flush_fd(x_fd) != 0)
+            return export_abort((CfgDb *)0, norm, "write failed");
     }
     api->sys_close(x_fd);
+    x_fd = -1;
     out_str("cfg: exported ");
     out_num(rows);
     out_str(" records\n");
-    return close_note(db, 0);
+    return 0;
 }

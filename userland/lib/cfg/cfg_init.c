@@ -76,7 +76,6 @@ static const char SQL_ROW_INS[] =
     " VALUES (?, ?, ?, ?, ?, ?)";
 
 static CfgTsvRow g_row;
-static CfgTsvSeen g_seen;
 static CfgDb g_new;                  /* `.new` 用の使い捨て接続記述 */
 
 static int put_u32(char *buf, u32 v)
@@ -135,10 +134,21 @@ static int insert_row(const CfgTsvRow *r, void *ctx)
     return 0;
 }
 
-static int path_exists(const char *path)
+/* stat は三値で持つ: 1 = ある / 0 = **明示的に** 無い / -1 = 判定不能。
+ * I/O 障害を「無い」に丸めると、既存の `.new` を自分の生成物と思って消したり、
+ * rename が両名を残したのに本体を無いと判断して `.new` を unlink したりする
+ * (往復 1 の ②)。**変更・削除へ進むのは 0 のときだけ**。 */
+#define CFG_PATH_ABSENT   0
+#define CFG_PATH_PRESENT  1
+#define CFG_PATH_UNKNOWN (-1)
+
+static int path_state(const char *path)
 {
     OS32_Stat st;
-    return cfg_backend()->sys_stat(path, &st) == 0;
+    int rc = cfg_backend()->sys_stat(path, &st);
+    if (rc == 0) return CFG_PATH_PRESENT;
+    if (rc == OS32_ERR_NOTFOUND) return CFG_PATH_ABSENT;
+    return CFG_PATH_UNKNOWN;
 }
 
 /* `.new` を作って書き切る。0 / -1。close は呼び手が行う。 */
@@ -169,7 +179,7 @@ static int build_new(const char *tsv_path, CfgDb *db)
     b->db_finalize(db->handle);
 
     if (tsv_open(&f, tsv_path) < 0) return -1;
-    if (cfg_tsv_parse(tsv_getc, &f, &g_row, &g_seen, insert_row, db, &err) != 0) {
+    if (cfg_tsv_parse(tsv_getc, &f, &g_row, insert_row, db, &err) != 0) {
         tsv_shut(&f);
         return -1;
     }
@@ -200,26 +210,28 @@ int cfg_init(const char *tsv_path)
     const CfgBackend *b = cfg_backend();
     TsvFile f;
     CfgTsvErr err;
-    OS32_Stat st;
-    int rc, code;
+    int rc, code, st_db, st_new;
 
     g_init_reason = CFG_INIT_NONE;
     if (!tsv_path) tsv_path = CFG_TSV_PATH;
 
-    /* (a) 本体が無いことを確かめる。0 バイトでも「ある」= 拒否。 */
-    rc = b->sys_stat(CFG_DB_PATH, &st);
-    if (rc == 0) return init_done(CFG_INIT_EXISTS, OS32_ERR_EXIST);
-    if (rc != OS32_ERR_NOTFOUND) return init_done(CFG_INIT_STAT, OS32_ERR_IO);
+    /* (a) 本体が無いことを確かめる。0 バイトでも「ある」= 拒否。
+     * 判定不能 (I/O 障害) も拒否 — 「無い」に丸めない。 */
+    st_db = path_state(CFG_DB_PATH);
+    if (st_db == CFG_PATH_PRESENT) return init_done(CFG_INIT_EXISTS, OS32_ERR_EXIST);
+    if (st_db != CFG_PATH_ABSENT) return init_done(CFG_INIT_STAT, OS32_ERR_IO);
 
-    /* (b)(c) 残骸があれば拒否する。**消さない**。 */
-    if (path_exists(CFG_DB_JOURNAL_PATH))
+    /* (b)(c) 残骸があれば拒否する。**消さない**。判定不能も同じく進まない。 */
+    if (path_state(CFG_DB_JOURNAL_PATH) != CFG_PATH_ABSENT)
         return init_done(CFG_INIT_JOURNAL, OS32_ERR_NOTEMPTY);
-    if (path_exists(CFG_DB_NEW_PATH) || path_exists(CFG_DB_NEW_JOURNAL_PATH))
+    if (path_state(CFG_DB_NEW_PATH) != CFG_PATH_ABSENT ||
+        path_state(CFG_DB_NEW_JOURNAL_PATH) != CFG_PATH_ABSENT)
         return init_done(CFG_INIT_STALE_NEW, OS32_ERR_NOTEMPTY);
 
-    /* (d-1) 先に tsv を全行検証する。ここで落ちたら何も作らない。 */
+    /* (d-1) 先に tsv を全行検証する。ここで落ちたら何も作らない。
+     * 重複 (scope, key) だけは 2 巡目の PRIMARY KEY が弾く (控えを持たない)。*/
     if (tsv_open(&f, tsv_path) < 0) return init_done(CFG_INIT_TSV, OS32_ERR_NOTFOUND);
-    rc = cfg_tsv_parse(tsv_getc, &f, &g_row, &g_seen,
+    rc = cfg_tsv_parse(tsv_getc, &f, &g_row,
                        (int (*)(const CfgTsvRow *, void *))0, (void *)0, &err);
     tsv_shut(&f);
     if (rc != 0) return init_done(CFG_INIT_TSV, OS32_ERR_INVAL);
@@ -249,26 +261,33 @@ int cfg_init(const char *tsv_path)
     }
     g_new.handle = -1;
     if (rc != 0) {
-        /* close は成功している = この呼び出しの生成物を掴んでいる接続は無い。
-         * 自分が作った残骸だけを片付ける。 */
+        /* close は成功していて、入口 (c) で `.new*` が **明示的に無かった**
+         * ことも確かめてある = 消してよいのは自分が作ったものだけ。 */
+        int why = (CFG_SQLITE_PRIMARY(g_new.last_sqlite) == CFG_SQLITE_CONSTRAINT)
+                  ? CFG_INIT_TSV : CFG_INIT_BUILD;   /* 重複 key は tsv の違反 */
         b->sys_unlink(CFG_DB_NEW_PATH);
         b->sys_unlink(CFG_DB_NEW_JOURNAL_PATH);
-        return init_done(CFG_INIT_BUILD, OS32_ERR_IO);
+        return init_done(why, why == CFG_INIT_TSV ? OS32_ERR_INVAL : OS32_ERR_IO);
     }
 
     /* (f) rename は原子的と仮定しない。失敗したら両方を stat する。 */
     if (b->sys_rename(CFG_DB_NEW_PATH, CFG_DB_PATH) != 0) {
-        int has_db = path_exists(CFG_DB_PATH);
-        int has_new = path_exists(CFG_DB_NEW_PATH);
-        if (has_db && has_new) {
+        st_db = path_state(CFG_DB_PATH);
+        st_new = path_state(CFG_DB_NEW_PATH);
+        if (st_db == CFG_PATH_PRESENT && st_new == CFG_PATH_PRESENT) {
             /* 新名追加は成功し旧名削除と巻き戻しが失敗 = 同じ inode を 2 名が
              * 指している。`.new` を消すと本体まで壊れる (往復 2 の 1)。 */
             return init_done(CFG_INIT_AMBIGUOUS, OS32_ERR_NOTEMPTY);
         }
-        if (has_db) {
-            if (verify_installed()) return init_done(CFG_INIT_NONE, 0);
+        if (st_db == CFG_PATH_PRESENT) {
+            if (st_new == CFG_PATH_ABSENT && verify_installed())
+                return init_done(CFG_INIT_NONE, 0);
             return init_done(CFG_INIT_AMBIGUOUS, OS32_ERR_NOTEMPTY);
         }
+        /* 本体が **明示的に無い** ときだけ `.new*` を片付ける。判定不能なら
+         * どちらも触らず recovery へ回す (往復 1 の ②)。 */
+        if (st_db != CFG_PATH_ABSENT || st_new == CFG_PATH_UNKNOWN)
+            return init_done(CFG_INIT_AMBIGUOUS, OS32_ERR_NOTEMPTY);
         b->sys_unlink(CFG_DB_NEW_PATH);
         b->sys_unlink(CFG_DB_NEW_JOURNAL_PATH);
         return init_done(CFG_INIT_RENAME, OS32_ERR_IO);
