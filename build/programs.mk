@@ -460,7 +460,7 @@ userland/libos32gui.raw: userland/libos32gui.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/libos32gui.shlib: userland/libos32gui.raw userland/libos32gui.elf tools/mkshlib.py
-	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 42
+	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 50
 
 shlib: userland/libos32gui.shlib
 
