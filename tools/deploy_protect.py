@@ -147,10 +147,14 @@ def resolve_dest(root, guest_path, host_src=None):
             raise ProtectError(
                 '配備先 {!r} が root {!r} の外にある'.format(dest_abs, root_abs))
     # 補完は 1 回まで。補完した先がまだディレクトリだと cp / copy2 がもう一度
-    # basename を補う (往復 2 の 1)。ただし**保護対象名のディレクトリ**なら
-    # 名前規則だけで答えが出る — そこは「判定できない失敗」ではなく
-    # 「書かずに成功除外」にする (往復 3 の D4)。
+    # basename を補う (往復 2 の 1)。ただし**保護対象に守られている**なら
+    # (自身が保護対象名 / 祖先に保護対象が居る) 答えは出ている — そこは
+    # 「判定できない失敗」ではなく「書かずに成功除外」にする。
+    # 祖先を先に見る: `<root>/etc/settings.db/settings.db/` のように自身の親が
+    # `/etc` でない形でも、祖先の `/etc/settings.db` が守っている (追加往復 1)。
     if host_src is not None and os.path.isdir(dest_abs):
+        if protected_ancestor(root_abs, dest_abs) is not None:
+            return dest_abs             # check_dest が True を返す = 除外
         if name_is_protected(guest_path_of(root_abs, dest_abs)):
             return dest_abs             # is_protected が True を返す = 除外
         raise ProtectError(
@@ -357,6 +361,14 @@ def check_tree(root):
                 raise ProtectError(
                     '配備ツリーに symlink がある: {} '
                     '(未対応の配置。配備を中止する)'.format(full))
+        # 保護対象名のディレクトリには**降りない**。配備は中へ 1 バイトも
+        # 書かないので、中に何があろうと最終パスの意味には効かない。降りると
+        # 読めない残骸 (`etc/settings.db/` の chmod 000) だけで配備全体が
+        # 止まってしまう (往復 2 の 9 と噛み合わない)。
+        dirnames[:] = [
+            d for d in dirnames
+            if not name_is_protected(
+                guest_path_of(root_abs, os.path.join(dirpath, d)))]
     if errors:
         raise ProtectError(
             '配備ツリーを辿れない: {}'.format(errors[0]))

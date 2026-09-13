@@ -159,7 +159,8 @@ non-blocker も同時に: `hsync` の `MAX_FILES` (128) / `MAX_DEPTH` (8) の打
 
 **方針が変わった**: symlink の迷路を 1 件ずつ塞ぐのをやめ、**配備ツリー
 (HostDrv ルート / マウントした NHD ツリー) に symlink が 1 つでもあれば
-「未対応の配置」として配備全体を拒否する** (`check_tree`、PM 案・ユーザー未決裁)。
+「未対応の配置」として配備全体を拒否する** (`check_tree`、**ユーザー決裁済み
+2026-09-13**)。
 OS32 の ext2 に symlink を作る手段は無く、HostDrv は Windows のフォルダなので、
 運用上の制約として成り立つ。これで往復 1〜3 の blocker の大半 (補完後の再補完、
 解決後の祖先、中間リンクの削除、リンク越しの別名) が**到達不能**になる。
@@ -185,6 +186,29 @@ non-blocker: `hsync_protect_host.c` の長いパス試験が自分のバッフ�
 `scan_protected_entities` の分岐 (切り詰め・打ち切り・I/O 失敗・inode 比較) は
 ホストでは走らせていない — 見ているのは `hsp_*` の純関数と、同じソースが
 i386-elf-gcc + PROGRAM_FLAGS で通ることだけ ([V4])。
+
+### D.9 追加往復の 3 件 (P2、2026-09-13、着地 `da29800` に対して)
+
+symlink を必要としない残りの 3 件。RED は着地版の 3 ツールに新しい試験だけを
+当てて取った。
+
+```
+RED  : Ran 134 tests — FAILED (failures=6, errors=2)     126 passed
+GREEN: Ran 134 tests — OK
+```
+
+| # | 反例 (RED で通ってしまっていた道) | 試験 |
+|---|---|---|
+| 1 | `<root>/etc/settings.db/settings.db/` が既存ディレクトリのとき、`guest: /etc/` + source 名 `settings.db` の補完先の親が `/etc` でないので名前判定が偽 → `ProtectError` で**非ゼロ**。守られているのに失敗していた | `Review4AncestorCompletion` 4 件。補完後がディレクトリなら **`protected_ancestor` を先に**見て、名前規則かそのどちらかで守られていれば成功除外。どちらでもなければ従来どおり拒否 |
+| 2 | `os.path.isdir(HOSTDRV_DIR)` が親の EACCES を False に丸め、「HostDrvディレクトリが存在しません」と出して **成功で終了**していた | `Review4CleanRootStat` 3 件。`os.lstat` で ENOENT だけ「無い = 何もしない (成功)」、他の `OSError` と非ディレクトリは失敗 |
+| 3 | `copy` が 1 件成功・1 件失敗でも `Done! (1 files copied)` を出し、明示 `pull` は mount / stamp で落ちた後も「完了!」が残っていた | `Review4ProgressVsSuccess` 4 件。進捗と全体の成否を分け、失敗があれば `FAILED (n copied, m failed)`。`pull` の「完了!」は mount と stamp まで通った最後 |
+
+non-blocker: `sync-from-hostdrv` は宛先の NHD だけでなく **source の HostDrv
+ツリー**も `check_tree` に通す (`Review4SourceTreeCheck` 2 件)。
+併せて `check_tree` は**保護対象名のディレクトリには降りない** — 配備は中へ
+1 バイトも書かないので最終パスの意味に効かず、降りると読めない残骸
+(`etc/settings.db/` の chmod 000) だけで配備全体が止まってしまう
+(往復 2 の 9 と噛み合わない)。
 
 ## T. 初期値 tsv / 生成ツール / ビルド統合 (S0-T、2026-09-13)
 

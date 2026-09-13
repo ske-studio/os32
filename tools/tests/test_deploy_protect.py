@@ -1466,6 +1466,186 @@ class Review3PruneStat(Base):
 
 
 # ======================================================================
+#  Codex 追加往復の 3 件 (P2)
+#  (docs/tasks/settings/TASK_S0.md §6 / tools/tests/s0_tdd.md §D.9)
+# ======================================================================
+class Review4AncestorCompletion(Base):
+    """1: 保護祖先の配下へ補完したら「成功除外」(失敗にしない)。"""
+
+    def setUp(self):
+        super(Review4AncestorCompletion, self).setUp()
+        self.db.unlink()
+        self.journal.unlink()
+        # <root>/etc/settings.db/settings.db/ がどちらもディレクトリ
+        deep = self.mount / 'etc' / 'settings.db' / 'settings.db'
+        deep.mkdir(parents=True)
+        (deep / 'keep').write_bytes(b'KEEP')
+        self.deep = deep
+
+    def test_resolve_dest_returns_instead_of_raising(self):
+        dest = protect.resolve_dest(str(self.mount), '/etc/', str(self.src_db))
+        self.assertEqual(dest, str(self.deep))
+        self.assertIsNotNone(
+            protect.protected_ancestor(str(self.mount), dest))
+
+    def test_check_dest_reports_protected(self):
+        _dest, prot = protect.check_dest(str(self.mount), '/etc/',
+                                         str(self.src_db))
+        self.assertTrue(prot)
+
+    def test_manifest_is_skipped_not_failed(self):
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self.manifest([{'host': 'build/settings.db', 'guest': '/etc/',
+                        'tags': ['core']}])
+        self.pairs({'build/settings.db': [(str(self.src_db), '/etc/')]})
+        self.assertIs(nd.do_sync(), True)      # 除外は成功 (非ゼロにしない)
+        self.assertEqual((self.deep / 'keep').read_bytes(), b'KEEP')
+        self.assertNoProtectedWrites()
+
+    def test_unprotected_deep_dir_still_fails(self):
+        """保護に守られていないディレクトリへ落ちるのは従来どおり拒否。
+
+        補完 1 回で届く先もディレクトリ (= cp がもう一度補う) の形を作る。
+        """
+        (self.mount / 'bin' / 'sh.bin' / 'sh.bin').mkdir(parents=True)
+        with self.assertRaises(protect.ProtectError):
+            protect.resolve_dest(str(self.mount), '/bin/', str(self.src_bin))
+
+
+class Review4CleanRootStat(Base):
+    """2: HostDrv の root が読めないのを「存在しない」と混同しない。"""
+
+    def test_unreadable_root_is_a_failure(self):
+        """親が読めないと `os.path.isdir` が False = 「存在しません」で成功していた。"""
+        if os.geteuid() == 0:
+            self.skipTest('root では EACCES を作れない')
+        locked = self.root / 'locked'
+        inner = locked / 'hd'
+        (inner / 'etc').mkdir(parents=True)
+        (inner / 'etc' / 'settings.db').write_bytes(b'KEEP')
+        self._patch(hd, 'HOSTDRV_DIR', str(inner))
+        os.chmod(str(locked), 0o000)
+        try:
+            self.assertIs(hd.do_clean(), False)
+        finally:
+            os.chmod(str(locked), 0o755)
+        self.assertTrue((inner / 'etc' / 'settings.db').exists())
+
+    def test_missing_root_is_a_success(self):
+        shutil.rmtree(str(self.hostdrv))
+        self.assertIs(hd.do_clean(), True)
+
+    def test_root_as_regular_file_is_a_failure(self):
+        shutil.rmtree(str(self.hostdrv))
+        self.hostdrv.write_bytes(b'not a dir')
+        self.assertIs(hd.do_clean(), False)
+
+
+class Review4ProgressVsSuccess(Base):
+    """3: 進捗の件数と全体の成否を混ぜない。"""
+
+    def test_partial_copy_reports_failed(self):
+        import io
+        ok_src = self.root / 'ok.bin'
+        ok_src.write_bytes(b'OK')
+        real = self.fake.__call__
+        state = {'n': 0}
+
+        def flaky(cmd, *a, **kw):
+            argv = cmd[1:] if cmd and cmd[0] == 'sudo' else list(cmd)
+            if argv and argv[0] == 'cp':
+                state['n'] += 1
+                if state['n'] == 2:
+                    self.fake.fail_cp = True
+                    try:
+                        return real(cmd, *a, **kw)
+                    finally:
+                        self.fake.fail_cp = False
+            return real(cmd, *a, **kw)
+        self._patch(subprocess, 'run', flaky)
+
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            ok = nd.do_copy([str(ok_src), str(self.src_bin)], dest_dir='/bin')
+        finally:
+            sys.stdout = saved
+        self.assertIs(ok, False)
+        self.assertNotIn('Done!', buf.getvalue(),
+                         '1 件失敗しているのに成功表示が出ている')
+
+    def test_all_copies_ok_reports_done(self):
+        import io
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            ok = nd.do_copy([str(self.src_bin)], dest_dir='/bin')
+        finally:
+            sys.stdout = saved
+        self.assertIs(ok, True)
+        self.assertIn('Done!', buf.getvalue())
+
+    def test_pull_prints_done_only_after_mount_and_stamp(self):
+        import io
+        self.fake.mounted = False
+        remote = pathlib.Path(nd.NHD_REMOTE)
+        remote.parent.mkdir(parents=True, exist_ok=True)
+        remote.write_bytes(b'REMOTE' * 16)
+        self._patch(nd, 'do_mount', lambda: False)
+
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            ok = nd.do_pull()
+        finally:
+            sys.stdout = saved
+        self.assertIs(ok, False)
+        self.assertNotIn('完了!', buf.getvalue(),
+                         'mount 失敗なのに「完了!」が出ている')
+        self.assertFalse(os.path.isfile(nd.stamp_path()))
+
+    def test_pull_prints_done_on_success(self):
+        import io
+        self.fake.mounted = False
+        remote = pathlib.Path(nd.NHD_REMOTE)
+        remote.parent.mkdir(parents=True, exist_ok=True)
+        remote.write_bytes(b'REMOTE' * 16)
+        self._patch(nd, 'do_mount', lambda: True)
+
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            ok = nd.do_pull()
+        finally:
+            sys.stdout = saved
+        self.assertIs(ok, True)
+        self.assertIn('完了!', buf.getvalue())
+
+
+class Review4SourceTreeCheck(Base):
+    """non-blocker: sync-from-hostdrv は source の HostDrv ツリーも検査する。"""
+
+    def test_symlink_in_hostdrv_refuses_sync(self):
+        digest = sha256(self.db)
+        (self.hostdrv / 'bin').mkdir()
+        os.symlink(str(self.src_bin), str(self.hostdrv / 'bin' / 'l.bin'))
+        self.assertIs(nd.do_sync_from_hostdrv(), False)
+        self.assertDbIntact(digest)
+        self.assertFalse((self.mount / 'bin' / 'l.bin').exists())
+
+    def test_plain_hostdrv_still_syncs(self):
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'NEWBIN')
+        self.assertIs(nd.do_sync_from_hostdrv(), True)
+        self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(), b'NEWBIN')
+
+
+# ======================================================================
 #  (4) main の終了コード
 # ======================================================================
 class MainExit(Base):

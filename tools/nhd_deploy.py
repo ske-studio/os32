@@ -479,20 +479,24 @@ def do_copy(src_files, dest_dir='/', rename=None):
         print("  {}{} ({} bytes)".format(disp_dir, dest_name, size))
         copied += 1
 
+    # 進捗 (件数) と**全体の成否**を分ける。1 件成功・1 件失敗で
+    # `Done! (1 files copied)` と出していた (追加往復 3)。
+    tail = ", {} protected".format(skipped) if skipped else ""
+    if failed:
+        print("FAILED ({} copied, {} failed{})".format(copied, failed, tail),
+              file=sys.stderr)
+        return False
     if copied > 0:
         if not run_sync():
             return False
-        print("Done! ({} files copied{})".format(
-            copied, ", {} protected".format(skipped) if skipped else ""))
-    elif skipped and not failed:
+        print("Done! ({} files copied{})".format(copied, tail))
+        return True
+    if skipped:
         # 保護対象だけを指定された。除外は失敗ではない。
         print("Done! (0 files copied, {} protected)".format(skipped))
         return True
-    else:
-        print("Error: コピーするファイルがありません", file=sys.stderr)
-        return False
-    # コピーできなかったものがあれば成功と言わない (往復 2 の 9)
-    return failed == 0
+    print("Error: コピーするファイルがありません", file=sys.stderr)
+    return False
 
 
 def do_copy_all(src_dir, ext='.bin', dest_dir='/'):
@@ -751,11 +755,18 @@ def do_pull():
         print("  taskkill.exe /F /IM np21x64w.exe", file=sys.stderr)
         return False
 
-    print("完了! ({:.1f} MB)".format(os.path.getsize(NHD_LOCAL) / (1024 * 1024)))
+    size_mb = os.path.getsize(NHD_LOCAL) / (1024 * 1024)
+    print("  コピー済み ({:.1f} MB)".format(size_mb))
     if not do_mount():
         return False
-    # 全部成功した**最後**にだけ来歴を書く
-    write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
+    # 全部成功した**最後**にだけ来歴を書き、そこで初めて「完了」と言う
+    # (mount / stamp で落ちた後に「完了!」が残っていた、追加往復 3)。
+    try:
+        write_pull_stamp(NHD_LOCAL, NHD_REMOTE)
+    except OSError as exc:
+        print("Error: 来歴を書けません: {}".format(exc), file=sys.stderr)
+        return False
+    print("完了! ({:.1f} MB)".format(size_mb))
     return True
 
 
@@ -1018,7 +1029,9 @@ def do_sync_from_hostdrv():
 
     if not ensure_mounted():
         return False
-    if not guard_root():
+    # 宛先 (NHD) だけでなく **source の HostDrv ツリー**も検査する。
+    # symlink を辿った先から写せば宛先の判定を素通りできる。
+    if not guard_root() or not guard_root(hostdrv_dir):
         return False
 
     print("\n" + "=" * 55)

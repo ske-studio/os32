@@ -18,6 +18,8 @@ sudo 不要。NHDイメージ操作不要。プログラム変更時は NP21/W �
 
 import sys
 import os
+import errno
+import stat
 import shutil
 import glob as globmod
 import yaml
@@ -342,9 +344,22 @@ def do_clean():
     余地なく木を落とすので、settings.db の保護をどこに書いても効かない。
     エントリごとに消し、保護対象とその祖先ディレクトリだけ残す (往復 3 の 4)。
     """
-    if not os.path.isdir(HOSTDRV_DIR):
-        print("HostDrvディレクトリが存在しません: {}".format(HOSTDRV_DIR))
-        return True
+    # `os.path.isdir` は EACCES / EIO を False に丸めるので、読めないだけの
+    # HostDrv を「存在しません」と言って**成功で終えて**いた (追加往復 2)。
+    # ENOENT (確定した不存在) だけ「何もしない = 成功」。
+    try:
+        st = os.lstat(HOSTDRV_DIR)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            print("HostDrvディレクトリが存在しません: {}".format(HOSTDRV_DIR))
+            return True
+        print("Error: {} を stat できない: {}".format(HOSTDRV_DIR, exc),
+              file=sys.stderr)
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        print("Error: {} がディレクトリではない".format(HOSTDRV_DIR),
+              file=sys.stderr)
+        return False
 
     try:
         # <root>/etc がすり替わっている / ツリーに symlink があれば clean も
