@@ -1,6 +1,6 @@
 # S3-I2 — FDD からの新規インストールの修正 (lz4 カーネル + `/boot`) と使い捨て NHD の道具
 
-状態: **設計 第 4 版 = 実装へ (往復 3 で Approve、non-blocker 4 件を反映)**。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
+状態: **完了 (2026-09-14)** — 実装 I `49ee29c` + `44e7899`、T `cd1e136` + `a80f7b0` + `9de8f0f` + `b2416a5` + `862d291` + `2c5aeb3`、K `b30b3f5`。Codex 実装レビュー 2 往復 (5 件 → 1 件 → 解消。往復 3 は実走の欠陥 2 件を T で修正したのみで Codex には出していない)。受入 F1〜F6 合格 (使い捨て NHD、4 回の trial、作業 NHD 無傷)。設計: 第 4 版。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
 経緯: TASK_S0 §3 B10 → TASK_S3 §7 (残ゲート)。現行の `install` (無印) は `/kernel.bin` を必須とし LBA 6 へ生書きするが、FDD イメージは `/VMKRNL.LZ4` + ローダ v3 (`/sys/loader_h.bin` = `boot/loader_hdd.bin`、ext2 の `/boot/vmkernel.lz4` を読む) を収録するので、**FDD からの新規インストールは Phase 1 の `Missing /kernel.bin` で止まり `/etc` コピー (settings.db の seed) まで到達しない**。`cdinst` (CD) は lz4 / `/boot` 対応済み (`cdinst.c:240` の注、`:510` の `mkdir /hd0/boot`)。
 正典: [TASK_S0.md](TASK_S0.md) §3 B10、[TASK_S3.md](TASK_S3.md) §7、`docs/08_build.md` §8-4 (配備 3 経路)、`build/image.mk` (FDD の中身)、スキル `os32-emu-config` (ini は PM だけ、実装と適用の承認を分ける)、memory `os32-np21w-launch` (FDD は引数、HDD は ini のみ)。
 規約: [C1] C89、[D2] (NHD 上書き / ini 変更はユーザー承認、使い捨てだけを対象にする)、コーダーは worktree + ホスト TDD のみ。
@@ -101,4 +101,6 @@
 | F3 | **合格**: 2 つ目の trial (`hdd=os32_fresh.nhd, fdd_eject`、d88 なし) → 起動 (`"exe" "/i<trial ini>"`)。ゲストは **HDD ブート** (`ls -l /` が ext2 の boot / sys / bin / sbin / etc / usr / data / home / tmp、FDD の名前無し)、`ver` 応答、kselftest **87 / 0**、`/boot/vmkernel.lz4` = 470,687 B (当該ビルド)、`cfg status` = `OK schema_version 1` (**seed 済み**)、`cfg list` に tsv の 3 行、`/etc` は `settings.db` だけ (profile 無し)。`klibc_test` は FDD の最小コマンドに無いので入っていない (期待どおり)。ツールは start 段を通過 (`process` に起動行) したが **dispose 段で失敗を返した** → T へ |
 | F6 | **合格** (使い捨て NHD 上、F5 の前): `cp /sys/boot_hdd.bin /etc/settings.db` → `cfg status` = `CORRUPT sqlite=26`、`sync` → 3 つ目の trial (d88 付き) で FDD ブート → `/hd0/etc/settings.db` 512 B → `install --recover-settings hd0` → `Y` → `recovered: schema_version 1, 3 keys, sync=0, reopen=ok, close=ok` (`.bak` 512 B、印) → 4 つ目の trial (d88 なし) で HDD ブート → `cfg status` OK、`cfg list` に 3 行 |
 | trial ツール | 4 回とも起動は成功。ただし結果 JSON は `stage: dispose` で `ok: False` — 原因は起動した NP21/W が PowerShell の stdout パイプを継承し、reader が EOF に届かず cleanup timeout になること (T の解析)。ゲストの動作には影響しない。**PM 判断: ③ `UseShellExecute=$true` で継承を断つ** (実走で `ok: True` を確認してから F5) |
+| trial ③ | **合格**: `UseShellExecute=$true` (`2c5aeb3`) の後の trial (`hdd=os32_fresh.nhd, fdd_eject`) は `ok: True, stage: verified, started_pid` で完走、ゲストは HDD ブートで `cfg status` OK |
+| F5 | **合格**: trial セッションを止め (trial ini のセッションなので taskkill 可)、通常の ini で起動 (引数なし、`HDD1FILE` は作業 NHD)。作業 NHD は受入前と同じ: `cfg status` OK、`cfg list` の 3 行、`/etc` (settings.db 3072 / .bak 1406 / .failed 3072 / 印 / fixture / tsv)、`/boot/vmkernel.lz4` 470,761 B (受入前の配備のまま)、原本 ini の mtime は F1 の通常終了時 (07:46) から不変 |
 | 教訓 | install の確認は `[y/N]` (小文字 y)。受入の道具 (`fdd_run2.py`) は `[Y/N]` しか見ておらず 1 回目は `N` で中止した (DB / HDD への影響なし) |
