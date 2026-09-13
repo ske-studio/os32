@@ -108,6 +108,12 @@ static const char *const rc_phase_name[RC_PH_COUNT] = {
 #define RC_DEV_TYPE(x)     ((int)((((x) - 1u) >> 8) & 0xFFu))
 #define RC_DEV_UNIT(x)     ((int)(((x) - 1u) & 0xFFu))
 
+/* `.new` の検証 close が失敗したときの正式手順 (票 §1f 4、追加往復 non-blocker)。
+ * 同じ起動のまま rm すると隔離接続が掴む inode を消すので、再起動が前提。 */
+#define RC_NEW_CLOSE_STEPS \
+    "REBOOT from the floppy, then: install --revert-settings hd0," \
+    " rm /hd0/etc/settings.db.new, install --recover-settings hd0"
+
 /* 16KB のコピー / 比較バッファ (票 §1e) */
 #define RC_BUF 16384
 static u8 rc_buf_a[RC_BUF];
@@ -332,14 +338,19 @@ static int rc_mark_read(const RecoverOps *ops, RcMark *out)
 
     fd = ops->open(rc_path[RC_N_STATE], KAPI_O_RDONLY);
     if (fd < 0) return -1;
-    n = ops->read(fd, rc_mark_back, (u32)RC_MARK_MAX - 1);
+    n = ops->read(fd, rc_mark_back, (u32)RC_MARK_MAX);
     ops->close(fd);
-    if (n <= 0) return -1;
-    rc_mark_back[n] = '\0';
-    /* 改行より後ろは見ない (1 行の印) */
+    /* 印は「規定の 1 行 + LF」ちょうどでなければ壊れている (往復 1 の B5)。
+     * 最初の LF で打ち切ると `phase=done\ngarbage` や埋込み NUL の後ろに
+     * 別の内容を持つファイルを `done` として受理してしまう。
+     * n == RC_MARK_MAX は「これ以上あるかもしれない」= 1 行と示せない。 */
+    if (n <= 0 || n >= RC_MARK_MAX) return -1;
     for (i = 0; i < n; i++) {
-        if (rc_mark_back[i] == '\n') { rc_mark_back[i] = '\0'; break; }
+        if (rc_mark_back[i] == '\0') return -1;          /* 埋込み NUL */
+        if (rc_mark_back[i] == '\n' && i != n - 1) return -1;  /* 複数行 */
     }
+    if (rc_mark_back[n - 1] != '\n') return -1;          /* 末尾 LF が要る */
+    rc_mark_back[n - 1] = '\0';
 
     p = rc_mark_back;
     if (!rc_eat(&p, "phase=")) return -1;
@@ -365,7 +376,9 @@ static int rc_mark_read(const RecoverOps *ops, RcMark *out)
     if (*p < '0' || *p > '9') return -1;
     v = 0;
     while (*p >= '0' && *p <= '9') {
-        if (v > 429496729u) return -1;
+        /* 最終桁も見る: 429496729 * 10 + 6 は u32 を回り込む */
+        if (v > 429496729u ||
+            (v == 429496729u && (u32)(*p - '0') > 5u)) return -1;
         v = v * 10u + (u32)(*p - '0');
         p++;
     }
@@ -651,19 +664,25 @@ static void rc_show(const RecoverOps *ops, const RcDbInfo *master, int revert)
     } else {
         ops->kprintf(ATTR_WHITE, "%s\n", "settings.db: missing");
     }
-    if (rc_state[RC_N_JOURNAL] == RC_PRESENT) {
+    if (rc_state[RC_N_JOURNAL] == RC_PRESENT && !revert) {
         ops->kprintf(ATTR_YELLOW, "%s\n",
                      "hot journal present - will be backed up as"
                      " .bak-journal and removed before switch");
     }
-    if (rc_state[RC_N_BAK] == RC_PRESENT)
-        ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_BAK]);
-    if (rc_state[RC_N_BAKJ] == RC_PRESENT)
-        ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_BAKJ]);
-    if (rc_state[RC_N_FAILED] == RC_PRESENT)
-        ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_FAILED]);
-    if (rc_state[RC_N_FAILEDJ] == RC_PRESENT)
-        ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_FAILEDJ]);
+    /* 置換を予告するのは**この経路が実際に触る世代だけ**: recover は `.bak*`、
+     * revert は `.failed*` (実装レビュー往復 1 の non-blocker)。 */
+    if (!revert) {
+        if (rc_state[RC_N_BAK] == RC_PRESENT)
+            ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_BAK]);
+        if (rc_state[RC_N_BAKJ] == RC_PRESENT)
+            ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_BAKJ]);
+    } else {
+        if (rc_state[RC_N_FAILED] == RC_PRESENT)
+            ops->kprintf(ATTR_YELLOW, "%s: will replace\n", rc_name[RC_N_FAILED]);
+        if (rc_state[RC_N_FAILEDJ] == RC_PRESENT)
+            ops->kprintf(ATTR_YELLOW, "%s: will replace\n",
+                         rc_name[RC_N_FAILEDJ]);
+    }
     if (rc_mark.present) {
         ops->kprintf(ATTR_WHITE, "recover-state: phase=%s orig=%s journal=%s\n",
                      rc_phase_name[rc_mark.phase],
@@ -826,20 +845,25 @@ static int rc_recover(const RecoverOps *ops, const char *drive)
         return 1;
     }
     rc_db_check(ops, rc_path[RC_N_NEW], &probe);
+    /* **close の失敗が最優先** (実装レビュー往復 1 の B1)。検証も失敗していると
+     * 「壊れた .new を消す」枝に落ちるが、close に失敗した接続は隔離されていて
+     * (kapi_db.c の F1) その inode を掴んだままなので、消してはいけない。
+     * 再起動を明示の前提にする (設計レビュー往復 3 の B4)。 */
+    if (probe.close_err != 0) {
+        ops->kprintf(ATTR_RED,
+                     "verify close failed (%d) - settings.db.new kept;"
+                     " original untouched.\n", probe.close_err);
+        if (probe.err != 0 || probe.version != master.version ||
+            probe.rows != master.rows || probe.sum != master.sum)
+            ops->kprintf(ATTR_RED, "verify failed (%s) as well\n",
+                         rc_name[RC_N_NEW]);
+        ops->kprintf(ATTR_RED, "%s\n", RC_NEW_CLOSE_STEPS);
+        return 1;
+    }
     if (probe.err != 0 || probe.version != master.version ||
         probe.rows != master.rows || probe.sum != master.sum) {
         ops->kprintf(ATTR_RED, "verify failed (%s)\n", rc_name[RC_N_NEW]);
         ops->unlink(rc_path[RC_N_NEW]);
-        return 1;
-    }
-    if (probe.close_err != 0) {
-        /* 隔離された接続が .new の inode を掴んだままなので消せない
-         * (kapi_db.c の F1)。再起動を明示の前提にする (往復 3 の B4)。 */
-        ops->kprintf(ATTR_RED,
-                     "verify close failed (%d) - settings.db.new kept;"
-                     " original untouched. REBOOT from the floppy, then"
-                     " rm /hd0/etc/settings.db.new and retry\n",
-                     probe.close_err);
         return 1;
     }
 
@@ -907,22 +931,19 @@ static int rc_recover(const RecoverOps *ops, const char *drive)
     }
     sync_rc = ops->sync();
     rc_db_check(ops, rc_path[RC_N_DB], &probe);
-    if (probe.err == 0 && probe.close_err == 0) {
-        ops->kprintf(ATTR_GREEN,
-                     "recovered: schema_version %d, %d keys, sync=%d,"
-                     " reopen=ok, close=ok\n",
-                     probe.version, probe.rows, sync_rc);
-    } else if (probe.err != 0) {
-        ops->kprintf(ATTR_RED,
-                     "recovered: schema_version %d, %d keys, sync=%d,"
-                     " reopen=%d, close=%s\n",
-                     probe.version, probe.rows, sync_rc, probe.err,
-                     probe.close_err ? "failed" : "ok");
-    } else {
-        ops->kprintf(ATTR_RED,
-                     "recovered: schema_version %d, %d keys, sync=%d,"
-                     " reopen=ok, close=%d\n",
-                     probe.version, probe.rows, sync_rc, probe.close_err);
+    /* reopen と close は**どちらもコード**で出す。同時に失敗したときに
+     * close を `failed` に省略しない (実装レビュー往復 1 の non-blocker)。 */
+    {
+        u8 attr = (probe.err == 0 && probe.close_err == 0) ? ATTR_GREEN
+                                                           : ATTR_RED;
+        ops->kprintf(attr, "recovered: schema_version %d, %d keys, sync=%d,"
+                     " reopen=", probe.version, probe.rows, sync_rc);
+        if (probe.err != 0) ops->kprintf(attr, "%d", probe.err);
+        else                ops->kprintf(attr, "%s", "ok");
+        ops->kprintf(attr, "%s", ", close=");
+        if (probe.close_err != 0) ops->kprintf(attr, "%d", probe.close_err);
+        else                      ops->kprintf(attr, "%s", "ok");
+        ops->kprintf(attr, "%s", "\n");
     }
     if (sync_rc != 0 || probe.err != 0 || probe.close_err != 0) {
         ops->kprintf(ATTR_RED, "%s\n",
@@ -1057,12 +1078,15 @@ static int rc_revert(const RecoverOps *ops, const char *drive)
     }
     if (rc_mark.journal_present) {
         if (rc_clone(ops, rc_path[RC_N_BAKJ], rc_path[RC_N_JOURNAL]) != 0) {
-            /* 対を分離したままにしない */
-            ops->unlink(rc_path[RC_N_JOURNAL]);
+            /* **復元先を消さない** (実装レビュー往復 1 の B2)。ここで
+             * `settings.db-journal` を unlink すると「旧 DB だけ・journal 無し」
+             * という、票 §1g-4 が禁じている対の分離そのものになる。両世代の
+             * 写し (`.bak-journal` と `.failed-journal`) を残して手動へ。 */
             ops->kprintf(ATTR_RED,
                          "restore failed at %s - current copy is in"
                          " settings.db.failed\n", rc_name[RC_N_JOURNAL]);
-            ops->kprintf(ATTR_RED, "%s is still there - restore it by hand\n",
+            ops->kprintf(ATTR_RED,
+                         "%s is still there - restore the pair by hand\n",
                          rc_name[RC_N_BAKJ]);
             return rc_revert_fail(ops, rc_name[RC_N_JOURNAL]);
         }

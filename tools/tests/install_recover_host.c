@@ -154,12 +154,15 @@ static int inj_read_fail_after;
 static const char *inj_write_short;       /* short write する名前 */
 static int inj_write_short_after;
 static const char *inj_write_garble;      /* 書けるが中身が違う名前 */
+static int inj_write_garble_after;        /* 最初の N 回は素通しする */
 static const char *inj_unlink_fail;       /* unlink を失敗させる名前 */
-static int inj_rename;                    /* 0=普通 1=両名残る 2=.new だけ */
+static int inj_rename;                    /* 0=普通 1=両名残る 2=.new だけ
+                                             3=両名 ABSENT */
 static int inj_sync_rc;
 static int inj_db_close_fail;             /* != 0 = db_close が失敗 */
 static const char *inj_db_close_path;     /* その対象 (部分一致、NULL = 全部) */
 static const char *inj_db_open_fail;      /* db_open_existing を失敗させる名前 */
+static const char *inj_db_prepare_fail;   /* その path の handle の prepare を失敗させる */
 static int host_hd0_mounted = 1;
 static int host_mount_calls;
 static int host_mount_rc;
@@ -218,10 +221,14 @@ static int rop_write(int fd, const void *b, u32 n)
     }
     if (fd >= 0 && fd < HOST_FDS && inj_write_garble &&
         hit(inj_write_garble, fd_path[fd])) {
-        /* 長さは合うが中身が違う (バイト比較だけが気付ける形) */
-        static unsigned char junk[16384];
-        memset(junk, 0x5A, n > sizeof(junk) ? sizeof(junk) : n);
-        return vfs_write_fd(fd, junk, n);
+        if (inj_write_garble_after > 0) {
+            inj_write_garble_after--;
+        } else {
+            /* 長さは合うが中身が違う (バイト比較だけが気付ける形) */
+            static unsigned char junk[16384];
+            memset(junk, 0x5A, n > sizeof(junk) ? sizeof(junk) : n);
+            return vfs_write_fd(fd, junk, n);
+        }
     }
     return vfs_write_fd(fd, b, n);
 }
@@ -246,9 +253,11 @@ static int rop_rename(const char *o, const char *n)
     FixtureFile *src = fixture_find(host_resolve(o), 0);
     FixtureFile *dst;
     if (!src) return OS32_ERR_NOTFOUND;
-    if (inj_rename == 2) {
+    if (inj_rename == 2 || inj_rename == 3) {
         dst = fixture_find(host_resolve(n), 0);
         if (dst) dst->exists = 0;
+        /* 3 = 置換先も旧名も残らなかった (両名 ABSENT) */
+        if (inj_rename == 3) src->exists = 0;
         return OS32_ERR_IO;
     }
     dst = fixture_find(host_resolve(n), 1);
@@ -297,7 +306,14 @@ static int rop_db_open_existing(const char *p, int w)
     return h;
 }
 static int rop_db_prepare_only(int h, const char *s)
-{ return kapi_db_prepare_only(h, s); }
+{
+    if (inj_db_prepare_fail && h >= 0 && h < DB_MAX_CONNECTIONS &&
+        !strcmp(db_path_of[h], inj_db_prepare_fail)) {
+        /* 実在しない表を引かせて本物の SQLite の失敗と診断を作る */
+        return kapi_db_prepare_only(h, "SELECT 1 FROM no_such_table_for_tdd");
+    }
+    return kapi_db_prepare_only(h, s);
+}
 static int rop_db_step(int h)      { return kapi_db_step(h); }
 static int rop_db_finalize(int h)  { return kapi_db_finalize(h); }
 static int rop_db_close(int h)
@@ -448,12 +464,14 @@ static void reset_all(void)
     inj_write_short = NULL;
     inj_write_short_after = 0;
     inj_write_garble = NULL;
+    inj_write_garble_after = 0;
     inj_unlink_fail = NULL;
     inj_rename = 0;
     inj_sync_rc = 0;
     inj_db_close_fail = 0;
     inj_db_close_path = NULL;
     inj_db_open_fail = NULL;
+    inj_db_prepare_fail = NULL;
     inj_ino_share_a = NULL;
     inj_ino_share_b = NULL;
     inj_no_ino_path = NULL;
@@ -688,6 +706,79 @@ static void case_gate(void)
         CHECK(m.phase == RC_PH_DONE && m.orig_present == 1 &&
               m.journal_present == 0 && m.size == 0u);
     }
+
+    /* **B5**: 規定の 1 行 + LF ちょうどでなければ受理しない。
+     * `phase=done\ngarbage` を `done` として通すと門が開いてしまう。 */
+    reset_all();
+    put_broken_db();
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=done orig=present journal=absent size=1406\ngarbage\n");
+    snap_take(rc_path[RC_N_DB], &s);
+    CHECK(run_recover() == 1);
+    CHECK_STR("recover-state unreadable - needs manual recovery");
+    CHECK_SNAP(rc_path[RC_N_DB], s);
+    CHECK(!fx_exists(rc_path[RC_N_BAK]));
+
+    reset_all();
+    put_broken_db();
+    fx_put(rc_path[RC_N_STATE],
+           "phase=done orig=present journal=absent size=1406\n\0extra", 51);
+    CHECK(run_recover() == 1);
+    CHECK_STR("recover-state unreadable - needs manual recovery");
+
+    reset_all();
+    put_broken_db();
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=done orig=present journal=absent size=1406");  /* LF 無し */
+    CHECK(run_recover() == 1);
+    CHECK_STR("recover-state unreadable - needs manual recovery");
+
+    /* 各 phase 更新 (backup / switching / switched / done) の失敗。
+     * 印は O_TRUNC で直接書くので、更新に失敗すると前の phase も残らない
+     * ことがある = 次回は「門」か「unreadable」のどちらかで**必ず止まる**。
+     * 固定するのはその安全側の性質と「退避対は保護される」こと。 */
+    {
+        int k;
+        for (k = 0; k < 4; k++) {
+            reset_all();
+            put_broken_db();
+            snap_all();
+            inj_write_garble = rc_path[RC_N_STATE];
+            inj_write_garble_after = k;
+            clear_output();
+            CHECK(run_recover() == 1);
+            CHECK_STR("recover-state write failed");
+            CHECK(mark_phase() != RC_PH_DONE);   /* done に化けない */
+            if (k == 0) {
+                /* backup の印が書けない = まだ破壊段に入っていない */
+                CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+                CHECK(!fx_exists(rc_path[RC_N_BAK]));
+                CHECK(!fx_exists(rc_path[RC_N_NEW]));
+                CHECK(!fx_exists(rc_path[RC_N_STATE]));
+            } else {
+                /* 退避対は残り、次の recover は通常経路に進まない */
+                CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));
+                inj_write_garble = NULL;
+                clear_output();
+                CHECK(run_recover() == 1);
+                CHECK(strstr(cap_buf, "previous recovery incomplete") ||
+                      strstr(cap_buf, "recover-state unreadable"));
+                CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));
+            }
+        }
+    }
+
+    /* short write でも同じ (途中まで書けた印を「読めた」ことにしない) */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_write_short = rc_path[RC_N_STATE];
+    inj_write_short_after = 1;           /* backup は通し、switching で切る */
+    clear_output();
+    CHECK(run_recover() == 1);
+    CHECK_STR("recover-state write failed");
+    CHECK(mark_phase() != RC_PH_DONE);
+    CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));
 
     /* 印の書き込み / 読み戻しが失敗したら「書けた」ことにしない */
     reset_all();
@@ -925,6 +1016,24 @@ static void case_backup_fail(void)
     CHECK(!fx_exists(rc_path[RC_N_BAKJ]));
     CHECK(!fx_exists(rc_path[RC_N_STATE]));
 
+    /* 清掃の unlink 自体が失敗しても、元の対には手を出さない */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_write_garble = rc_path[RC_N_BAK];
+    inj_unlink_fail = rc_path[RC_N_BAK];
+    CHECK(run_recover() == 1);
+    CHECK_STR("backup failed (settings.db.bak)");
+    CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+    CHECK(fx_exists(rc_path[RC_N_BAK]));      /* 消せなかった残骸は残る */
+    CHECK(!fx_exists(rc_path[RC_N_STATE]));
+    /* 次回は同一性検査を通ったうえで 1 世代置換に進める (印が無い) */
+    inj_write_garble = NULL;
+    inj_unlink_fail = NULL;
+    clear_output();
+    CHECK(run_recover() == 0);
+    CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));
+
     /* 印が書けない → 作った .bak* と印を消して、元の対は無傷 */
     reset_all();
     put_broken_db();
@@ -991,8 +1100,8 @@ static void case_newfail(void)
     CHECK(run_recover() == 1);
     CHECK_STR("verify close failed");
     CHECK_STR("settings.db.new kept; original untouched.");
-    CHECK_STR("REBOOT from the floppy, then rm /hd0/etc/settings.db.new"
-              " and retry");
+    CHECK_STR("REBOOT from the floppy, then: install --revert-settings hd0,"
+              " rm /hd0/etc/settings.db.new, install --recover-settings hd0");
     CHECK(fx_exists(rc_path[RC_N_NEW]));
     CHECK_SNAP(rc_path[RC_N_DB], snap_db);
     mark_of(&m);
@@ -1005,6 +1114,57 @@ static void case_newfail(void)
     CHECK(run_recover() == 1);
     CHECK_STR("previous recovery incomplete (phase=backup)");
     CHECK(fx_exists(rc_path[RC_N_NEW]));
+
+    /* **実装レビュー往復 1 の B1**: `.new` の DB 検証と close が**同時に**
+     * 失敗しても `.new` を消さない (隔離接続が掴む inode)。 */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_db_close_fail = 1;
+    inj_db_close_path = rc_path[RC_N_NEW];
+    inj_db_prepare_fail = rc_path[RC_N_NEW];   /* DB 検査も落とす */
+    CHECK(run_recover() == 1);
+    CHECK_STR("verify close failed");
+    CHECK_STR("settings.db.new kept; original untouched.");
+    CHECK_STR("verify failed (settings.db.new) as well");
+    CHECK_STR("REBOOT from the floppy, then: install --revert-settings hd0,"
+              " rm /hd0/etc/settings.db.new, install --recover-settings hd0");
+    CHECK(fx_exists(rc_path[RC_N_NEW]));       /* 検証も失敗しているが消さない */
+    CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+    CHECK(mark_phase() == RC_PH_BACKUP);
+
+    /* 検査だけが失敗し close は通るなら `.new` は消してよい */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_db_prepare_fail = rc_path[RC_N_NEW];
+    clear_output();
+    CHECK(run_recover() == 1);
+    CHECK_STR("verify failed (settings.db.new)");
+    CHECK_NOSTR("verify close failed");
+    CHECK(!fx_exists(rc_path[RC_N_NEW]));
+    CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+
+    /* コピーの書き側が開けない (rc_copy_file の RC_CP_DST) */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_open_fail = rc_path[RC_N_NEW];
+    CHECK(run_recover() == 1);
+    CHECK_STR("copy failed (settings.db.new)");
+    CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+    CHECK(!fx_exists(rc_path[RC_N_NEW]));
+
+    /* コピーは通るが**比較のための read だけ**が失敗する */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    inj_read_fail = RC_MASTER;
+    inj_read_fail_after = 2;      /* コピーの read 2 回 (本体 + EOF) は通す */
+    CHECK(run_recover() == 1);
+    CHECK_STR("verify failed (settings.db.new)");
+    CHECK_SNAP(rc_path[RC_N_DB], snap_db);
+    CHECK(!fx_exists(rc_path[RC_N_NEW]));
 }
 
 /* ========================================================================= */
@@ -1068,6 +1228,32 @@ static void case_switch(void)
     CHECK_STR("restore failed - run install --revert-settings hd0 after reboot");
     CHECK(mark_phase() == RC_PH_FAILED);
     CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));    /* 退避対は保護される */
+
+    /* 両名 ABSENT (rename が置換先も新名も残さなかった) でも写しから対で戻す */
+    reset_all();
+    put_broken_db();
+    fx_put(rc_path[RC_N_JOURNAL], "hot", 3);
+    snap_all();
+    inj_rename = 3;               /* 置換先 unlink + 旧名も消える */
+    CHECK(run_recover() == 1);
+    CHECK_STR("restored from settings.db.bak");
+    CHECK(snap_same(rc_path[RC_N_DB], &snap_db));
+    CHECK(snap_same(rc_path[RC_N_JOURNAL], &snap_journal));
+    CHECK(!fx_exists(rc_path[RC_N_NEW]));
+    CHECK(mark_phase() == RC_PH_DONE);
+
+    /* 復元の journal 側だけが失敗しても phase=failed で止める */
+    reset_all();
+    put_broken_db();
+    fx_put(rc_path[RC_N_JOURNAL], "hot", 3);
+    snap_all();
+    inj_rename = 2;
+    inj_write_garble = rc_path[RC_N_JOURNAL];
+    CHECK(run_recover() == 1);
+    CHECK_STR("restore failed - run install --revert-settings hd0 after reboot");
+    CHECK(mark_phase() == RC_PH_FAILED);
+    CHECK(snap_same(rc_path[RC_N_BAK], &snap_db));
+    CHECK(snap_same(rc_path[RC_N_BAKJ], &snap_journal));
 
     /* rename 後の stat が UNKNOWN なら何も消さない */
     reset_all();
@@ -1293,6 +1479,72 @@ static void case_revert_fail(void)
     CHECK(mark_phase() == RC_PH_REVERTING);
     CHECK(snap_same(rc_path[RC_N_DB], &snap_db));    /* 復元自体は済んでいる */
 
+    /* 旧 .failed* が消せなければ、印もまだ reverting にしない */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    CHECK(run_recover() == 0);
+    fx_put(rc_path[RC_N_FAILED], "older", 5);
+    inj_unlink_fail = rc_path[RC_N_FAILED];
+    clear_output();
+    CHECK(run_revert() == 1);
+    CHECK_STR("cannot remove old failed copy");
+    CHECK(mark_phase() == RC_PH_DONE);
+    CHECK(fx_same(rc_path[RC_N_DB], RC_MASTER));
+
+    /* phase=reverting が書けなければ何も触らない */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    CHECK(run_recover() == 0);
+    inj_write_garble = rc_path[RC_N_STATE];
+    clear_output();
+    CHECK(run_revert() == 1);
+    CHECK_STR("recover-state write failed");
+    CHECK(!fx_exists(rc_path[RC_N_FAILED]));
+    CHECK(fx_same(rc_path[RC_N_DB], RC_MASTER));
+
+    /* 現在の journal が消せない */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    CHECK(run_recover() == 0);
+    fx_put(rc_path[RC_N_JOURNAL], "newgen", 6);
+    inj_unlink_fail = rc_path[RC_N_JOURNAL];
+    clear_output();
+    CHECK(run_revert() == 1);
+    CHECK_STR("cannot remove current journal");
+    CHECK_STR("revert failed at settings.db-journal (phase stays reverting)");
+    CHECK(mark_phase() == RC_PH_REVERTING);
+    CHECK(fx_exists(rc_path[RC_N_FAILEDJ]));     /* 写しは取れている */
+
+    /* orig=missing の revert で本体が消せない */
+    reset_all();
+    CHECK(run_recover() == 0);                   /* 本体欠損からの recover */
+    inj_unlink_fail = rc_path[RC_N_DB];
+    clear_output();
+    CHECK(run_revert() == 1);
+    CHECK_STR("restore failed at settings.db - current copy is in"
+              " settings.db.failed");
+    CHECK(mark_phase() == RC_PH_REVERTING);
+    CHECK(fx_same(rc_path[RC_N_FAILED], RC_MASTER));
+
+    /* 現在の本体が ABSENT + 孤立 journal からの revert (再 revert の形) */
+    reset_all();
+    put_broken_db();
+    snap_all();
+    CHECK(run_recover() == 0);
+    CHECK(vfs_rm(rc_path[RC_N_DB]) == VFS_OK);   /* 本体だけ消えた状態 */
+    fx_put(rc_path[RC_N_JOURNAL], "orphan", 6);
+    clear_output();
+    CHECK(run_revert() == 0);
+    CHECK_STR("settings.db: missing");
+    CHECK(snap_same(rc_path[RC_N_DB], &snap_db));
+    CHECK(!fx_exists(rc_path[RC_N_FAILED]));     /* 本体が無いので写しは無い */
+    CHECK(fx_exists(rc_path[RC_N_FAILEDJ]));     /* 孤立 journal は写す */
+    CHECK(!fx_exists(rc_path[RC_N_JOURNAL]));
+    CHECK(mark_phase() == RC_PH_DONE);
+
     /* journal の復元に失敗したら対を分離したままにしない */
     reset_all();
     put_broken_db();
@@ -1303,9 +1555,13 @@ static void case_revert_fail(void)
     clear_output();
     CHECK(run_revert() == 1);
     CHECK_STR("restore failed at settings.db-journal");
-    CHECK_STR("settings.db.bak-journal is still there");
-    CHECK(!fx_exists(rc_path[RC_N_JOURNAL]));
-    CHECK(fx_exists(rc_path[RC_N_BAKJ]));
+    CHECK_STR("settings.db.bak-journal is still there - restore the pair"
+              " by hand");
+    /* 往復 1 の B2: 復元先を消して「旧 DB だけ・journal 無し」で止めない。
+     * 両世代の写しが残っているので手動復旧できる。 */
+    CHECK(fx_exists(rc_path[RC_N_JOURNAL]));      /* 書きかけを消さない */
+    CHECK(fx_exists(rc_path[RC_N_BAKJ]));         /* 戻す元の写しは残る */
+    CHECK(fx_exists(rc_path[RC_N_FAILED]));       /* 直前の本体の写しも残る */
     CHECK(mark_phase() == RC_PH_REVERTING);
 }
 
@@ -1380,7 +1636,8 @@ static void case_chain(void)
     inj_db_close_fail = 1;
     inj_db_close_path = rc_path[RC_N_NEW];
     CHECK(run_recover() == 1);
-    CHECK_STR("REBOOT from the floppy, then rm /hd0/etc/settings.db.new");
+    CHECK_STR("REBOOT from the floppy, then: install --revert-settings hd0,"
+              " rm /hd0/etc/settings.db.new, install --recover-settings hd0");
     CHECK(fx_exists(rc_path[RC_N_NEW]));
     inj_db_close_fail = 0;
     inj_db_close_path = NULL;
@@ -1422,6 +1679,32 @@ static void case_pure(void)
     CHECK(rc_mark_read(&host_ops, &m) != 0);
     fx_puts(rc_path[RC_N_STATE], "phase=backup orig=present journal=absent size=x\n");
     CHECK(rc_mark_read(&host_ops, &m) != 0);
+    /* u32 の上限ちょうどは通り、1 つ上は回り込まずに拒否する */
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=backup orig=present journal=absent size=4294967295\n");
+    CHECK(rc_mark_read(&host_ops, &m) == 0 && m.size == 4294967295u);
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=backup orig=present journal=absent size=4294967296\n");
+    CHECK(rc_mark_read(&host_ops, &m) != 0);
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=backup orig=present journal=absent size=99999999999\n");
+    CHECK(rc_mark_read(&host_ops, &m) != 0);
+    /* 複数行 / 末尾 LF 無し / 埋込み NUL / 長すぎ (B5) */
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=done orig=present journal=absent size=7\ngarbage\n");
+    CHECK(rc_mark_read(&host_ops, &m) != 0);
+    fx_puts(rc_path[RC_N_STATE],
+            "phase=done orig=present journal=absent size=7");
+    CHECK(rc_mark_read(&host_ops, &m) != 0);
+    fx_put(rc_path[RC_N_STATE],
+           "phase=done orig=present journal=absent size=7\n\0x", 47);
+    CHECK(rc_mark_read(&host_ops, &m) != 0);
+    {
+        static char toolong[RC_MARK_MAX + 8];
+        memset(toolong, 'x', sizeof(toolong));
+        fx_put(rc_path[RC_N_STATE], toolong, (u32)sizeof(toolong));
+        CHECK(rc_mark_read(&host_ops, &m) != 0);
+    }
     fx_puts(rc_path[RC_N_STATE], "phase=backup orig=present journal=absent\n");
     CHECK(rc_mark_read(&host_ops, &m) != 0);
     fx_put(rc_path[RC_N_STATE], "", 0);

@@ -210,23 +210,23 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
 |---|---|---|
 | `media` | 1a | `drive` は `hd0` だけ / HDD ブートからの実行を拒否 (受入 I1、DB は不変) / `st_dev == 0` も拒否 / `/hd0` が hd1・FDD なら `target /hd0 is not hd0` / 未マウントなら回復専用に `sys_mount` / mount 失敗で何もしない |
 | `scan` | 1b | 9 名の三値。UNKNOWN を「無い」に丸めない (`stat failed (<name>)`) / `(st_dev, st_ino)` の共有で停止 (何も消さない) / `st_ino == 0` は判定不能で停止 / `.new` `.new-journal` の残骸で停止 (消さない) |
-| `gate` | 1b | 印の phase の白リスト。`backup` / `switching` / `switched` / `failed` / `reverting` は全部停止、`done` と印無しだけ通る / 壊れた印は `recover-state unreadable` で停止 (消さない) / 印の書式が往復する / 印の open・short write・読み戻し不一致はすべて失敗 |
+| `gate` | 1b | 印の phase の白リスト。`backup` / `switching` / `switched` / `failed` / `reverting` は全部停止、`done` と印無しだけ通る / 壊れた印は `recover-state unreadable` で停止 (消さない) / **`phase=done\ngarbage` / 埋込み NUL / 末尾 LF 無しも受理しない** (往復 1 の B5) / 印の書式が往復する / 印の open・short write・読み戻し不一致はすべて失敗 / **4 つの phase 更新 (backup / switching / switched / done) の失敗**はどれも `done` に化けず、次の recover が門か unreadable で必ず止まり退避対は不変 |
 | `master` | 1c | マスタ欠損・非 SQLite・`meta` 表欠落・`meta` 2 行はすべて `master unreadable` (HDD 側は不変) / 検査 close の失敗は `master close failed` / 保証の上限 (integrity_check は OMIT) を表示に出す |
 | `approve` | 1d | `N` / ESC で 9 名が 1 バイトも変わらず終了 0 (受入 I5)。承認文はマスタの版と件数を出す |
 | `happy` | 1e/1f | 受入 I2 / I3 / I4。本体 + hot journal → `.bak` と `.bak-journal` の**対**、元の journal は消える、本体はマスタと同一、マスタは不変、印は `phase=done orig=present journal=present size=1406` / 本体欠損なら `.bak` を作らない / 孤立 journal も対の一部として写す / 旧 `.bak*` は承認済み 1 世代として消える |
-| `backup_fail` | 1e | 旧 `.bak` が消せない / `read` の負 / short write / 長さは合うが中身が違う / journal の退避失敗 / 印が書けない — **どれでも元の対は 1 バイトも変わらず、今回作ったものだけが消える** |
-| `newfail` | 1f | `.new` の short write / 中身違い / DB として開けない → `.new` を消して元は無傷 (`.bak` と印は残る) / **検証 close の失敗は `.new` を消さず REBOOT を案内** / その次の recover は印の門で止まる |
-| `switch` | 1f | hot journal が消せなければ破壊段に入らない (写しは対で残る) / rename の**両名残存**は消さずに停止 (元の内容は `.bak` に、phase は `switching`) / **置換先 unlink 後の新名追加失敗**は「旧本体が残っている」と仮定せず写しから対で復元 / その復元が失敗したら `phase=failed` で停止し退避対を保護 / rename 後の stat が UNKNOWN なら何も消さない |
+| `backup_fail` | 1e | 旧 `.bak` が消せない / `read` の負 / short write / 長さは合うが中身が違う / journal の退避失敗 / 清掃の unlink 自体の失敗 / 印が書けない — **どれでも元の対は 1 バイトも変わらず、今回作ったものだけが消える** |
+| `newfail` | 1f | `.new` の short write / 中身違い / DB として開けない / 書き側が開けない / 比較の read だけ失敗 → `.new` を消して元は無傷 (`.bak` と印は残る) / **検証 close の失敗は `.new` を消さず正式手順を案内** / **検証も close も同時に失敗しても `.new` を消さない** (往復 1 の B1) / 検査だけ失敗し close が通れば `.new` は消してよい / その次の recover は印の門で止まる |
+| `switch` | 1f | hot journal が消せなければ破壊段に入らない (写しは対で残る) / rename の**両名残存**は消さずに停止 (元の内容は `.bak` に、phase は `switching`) / **置換先 unlink 後の新名追加失敗**は「旧本体が残っている」と仮定せず写しから対で復元 / **両名 ABSENT** も同じ復元経路 / その復元が DB 側でも journal 側でも失敗したら `phase=failed` で停止し退避対を保護 / rename 後の stat が UNKNOWN なら何も消さない |
 | `record` | 1f(7) | `sync` 失敗 / reopen 失敗 / reopen の close 失敗 — どれでも `phase=switched` のままで `REBOOT … install --revert-settings hd0` を案内し、勝手には戻さない |
 | `revert` | 1g | 印が無ければ `nothing to revert` / I2 の後は現在の対が `.failed*` へ、`.bak` が本体へ / I3 の後は `orig=missing` で本体を消して欠損に戻す / **切替後に生まれた新世代の journal を旧 DB に付けたまま戻さない** / `.new` 残骸があっても進む / `N` で何もしない / `.bak` が無ければ何も触らない / 旧 `.failed*` は 1 世代置換 |
-| `revert_fail` | 1g | 本体の復元失敗 → `phase=reverting` のまま・`.bak` は不変・次の recover は門で止まる・再 revert で復帰 / `.failed` への退避失敗は作ったものだけ消す / `sync` 失敗も `done` にしない / journal の復元失敗で**対を分離したままにしない** |
+| `revert_fail` | 1g | 本体の復元失敗 → `phase=reverting` のまま・`.bak` は不変・次の recover は門で止まる・再 revert で復帰 / `.failed` への退避失敗は作ったものだけ消す / 旧 `.failed` が消せなければまだ `reverting` にしない / `phase=reverting` が書けなければ何も触らない / 現在 journal の unlink 失敗 / `orig=missing` で本体が消せない / 本体 ABSENT + 孤立 journal からの revert / `sync` 失敗も `done` にしない / **journal の復元失敗で復元先を消さない** (往復 1 の B2、両世代の写しを残して手動へ) |
 | `chain` | 1h | (1) 失敗 → 再実行が門で止まる → revert → recover / (2) recover → revert → recover (1 世代前が `.bak` に) / (3) recover 成功 → revert 途中失敗 → recover が門で止まり `.bak` 不変 → 再 revert / (4) `.new` close 失敗 → 次回停止 → revert → `rm` → recover (票 §1f 4 の正式手順) |
-| `pure` | — | 印の書式の受理範囲 (phase 不正 / orig 不正 / size 非数字 / 欄欠落 / 空) / 16KB 境界をまたぐコピーとバイト比較 / 1 バイト違い・長さ違いを検出 / `read` の負は EOF ではなく失敗 / short write は失敗 |
+| `pure` | — | 印の書式の受理範囲 (phase 不正 / orig 不正 / size 非数字 / 欄欠落 / 空 / **複数行 / 末尾 LF 無し / 埋込み NUL / 128B 超**) / **size は `4294967295` まで通し `4294967296` で回り込まず拒否** / 16KB 境界をまたぐコピーとバイト比較 / 1 バイト違い・長さ違いを検出 / `read` の負は EOF ではなく失敗 / short write は失敗 |
 
 ## I-2. RED → GREEN の確かめ方 (突然変異)
 
 「全部 PASS」だけでは試験が何も掴んでいない可能性があるので、`install_recover.inc` に
-**17 種の意図的な後退**を 1 つずつ入れて、どのケースが落ちるかを確かめた (全部が少なくとも
+**22 種の意図的な後退**を 1 つずつ入れて、どのケースが落ちるかを確かめた (全部が少なくとも
 1 ケースで落ちる = MISSED 0)。
 
 | 入れた後退 | 落ちたケース |
@@ -247,7 +247,12 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
 | 退避失敗で元の対も消す | `backup_fail` |
 | `sync` / reopen の失敗でも `phase=done` にする | `record` |
 | `.new` の残骸でも進む | `scan` `chain` |
-| revert が現在の journal を消さない (別世代と混ざる) | `revert` |
+| revert が現在の journal を消さない (別世代と混ざる) | `revert` `revert_fail` |
+| **B1 回帰**: 検証失敗の枝を close 失敗より先に評価する | `newfail` |
+| **B2 回帰**: revert の journal 復元失敗で復元先を unlink する | `revert_fail` |
+| **B5 回帰**: 印を最初の LF で打ち切って受理する | `pure` `gate` |
+| size の最終桁を見ずに wrap させる | `pure` |
+| `rc_show` が触らない世代の置換も予告する | `revert` |
 
 ## I-3. 実装で票からずらした点 / 票が決めていなかった点
 
@@ -274,12 +279,27 @@ python3 -B tools/tests/test_install_recover.py happy chain # ケース指定
    存在するときだけ)。
 6. 票 §1g の 6 は失敗の文言を `revert failed at <段> (phase stays reverting)` と決めているので、
    段ごとの具体的な文言 (`restore failed at <name> - …` など) の**後に**この 1 行も出す。
+   票 §1g-4 の「journal のコピーに失敗したら `settings.db-journal` を unlink して『DB だけ・
+   journal 無し』で止めず」は **unlink しない**の意 (実装レビュー往復 1 の B2 で確定)。
+   復元先も両世代の写しも残して手動復旧へ案内する。
 7. `--revert-settings` を HDD ブートで実行したときの文言も
    `recover-settings must run from the install floppy` のまま (票 §1g が 1a の検査をそのまま
    使うと書いているため)。
 8. 印 (`settings.db.recover-state`) は 1 行 + LF。書式は
    `phase=<p> orig=<present|missing> journal=<present|absent> size=<n>\n` で、読み側は
-   **厳密** (欄の欠落・未知の phase・非数字の size はすべて「壊れている」)。
+   **厳密**: 欄の欠落・未知の phase・非数字/桁あふれの size に加え、**複数行・埋込み NUL・
+   末尾 LF 無し・`RC_MARK_MAX` (128B) 以上**もすべて「壊れている」(往復 1 の B5)。
+9. 印は O_TRUNC で直接書く (票 §1e 3 が rename を禁じている) ので、**phase の更新に失敗すると
+   前の phase も残らないことがある**。その場合の次回は「門」ではなく
+   `recover-state unreadable - needs manual recovery` で止まる。どちらでも通常経路には進まず
+   退避対は保護されるので、試験はその安全側の性質を固定している (票はこの分岐を決めていない)。
+10. `.new` の検証 close 失敗の案内は正式手順に統一 (追加往復 non-blocker):
+   `REBOOT from the floppy, then: install --revert-settings hd0, rm /hd0/etc/settings.db.new,
+   install --recover-settings hd0`。検証も同時に失敗していたら
+   `verify failed (settings.db.new) as well` を併記したうえで**消さない**。
+11. `recovered:` 行の `reopen=` と `close=` は**どちらも数値コード**で出す (同時失敗で close を
+   `failed` に省略しない)。承認前の「`: will replace`」は recover なら `.bak*`、revert なら
+   `.failed*` だけを予告する。
 
 ## I-4. 踏めなかったもの ([V4])
 
