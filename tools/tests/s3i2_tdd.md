@@ -362,3 +362,67 @@ snapshot → create → verify を終え、**NP21/W の起動にも成功した*
 
 PowerShell は**走らせていない**。`$rowUtc` の解析、`-ine`、`@{ok=$false; code; pid}` の実動作は
 **生成コード文字列の検査だけ**で、Windows 上での実証は次の実走 (受入 F1 の再実行) が要る。
+
+## §T 実走 F3 の dispose 段失敗 (2026-09-14)
+
+F3 (`--hdd os32_fresh.nhd --fdd-eject`、d88 なし) は通常終了 → 新 ini → 起動まで成功し、
+`result['process']` に起動した行 (`pid 131876`) も入った = **start 段は通過**。落ちたのは
+その後の `stage: 'dispose'`、つまり `with factory(...)` を抜けるときの
+`WindowsExecutor.__exit__` → `PowerShellTransport.close()`。
+
+**原因**: `close()` は `stdin.close()` → `wait(timeout=3)` → `_close_reader()` の 3 つしか
+しない。このうち `_close_reader()` は reader スレッドが EOF に届いていなければ
+`IniError('Windows executor cleanup timeout; …')` を投げる。**起動した NP21/W は
+PowerShell の stdout ハンドルを継承する**ので (`UseShellExecute=$false` の
+`Process.Start` は `bInheritHandles=true` で走る)、EOF はゲストが終了するまで来ない。
+PS 本体は終了しているので `wait` は成功し、reader だけが残る。
+既存の試験 `test_parent_exit_with_inherited_pipe_still_reports_failure` が示すとおり、
+これは「EOF 未到達は失敗」という**意図された不変条件**で、trial だけの逸脱ではない。
+
+`reason` が汎用文言のままだったのは、この例外の文言に `;` が含まれ `REASON_CODE`
+(`[a-z][a-z0-9 ,:_-]{0,63}`) に合わなかったため。`started_pid` が `None` だったのは、
+`process` を入れた経路では `started_pid` を埋めていなかったため。
+
+### 直し (dispose を成功に変える変更はしていない)
+
+- `PowerShellTransport.close()` は失敗に固定語彙の印を付ける:
+  `cleanup: executor exit timeout` (wait)、`cleanup: inherited pipe still open` (EOF 未到達)。
+  **例外そのものは差し替えない** (`wait` の `TimeoutExpired` を隠さない既存の約束を維持)。
+- 起動確認の 2 回の照会は `identity_unstable()` にまとめ、揺れた項目名
+  (`rows` / `pid` / `created` / `exe` / `command`) を `identity unstable: …` として理由に出す。
+  exe は大小文字を無視する (start 段の照合と同じ)。
+- **起動後の失敗では常に `started_pid` を残す** (`process` が入る経路でも同時に埋める)。
+
+### 反例 → 直し (ホストで踏んだ)
+
+`/tmp/.../scratchpad/dispose_counterexample.py` — 実パイプ + 贋 process で
+「PS は終了したが EOF は来ない」状態を作る (実プロセス・実 ini 無し):
+
+| | 着地版 (`94b1be9`) | 直し後 |
+|---|---|---|
+| dispose | `ok=False stage=dispose started_pid=None`、`reason` は汎用文言のみ | `ok=False stage=dispose started_pid=43 process=43`、`reason: …; cleanup: inherited pipe still open` |
+
+| 段階 | 実出力 | 内容 |
+|---|---|---|
+| RED | `test_np21w_trial.py`: `Ran 31 tests` / `FAILED (failures=6, errors=1, skipped=1)` | 着地版に新試験 (CIM 行の揺れ 3 種、exe の綴り違いは揺れでない、dispose の 2 種の理由、`close()` の印) |
+| GREEN | `discover -p 'test_np21w*.py'` → `Ran 135 tests` / `OK (skipped=2)` | trial 31 (+4)、ini 49、transport 8。`test_mk_blank_nhd.py` 13 OK |
+
+### PM への申し送り (仕様判断が要る)
+
+**継承パイプが開いたままである限り、trial は実走で `ok: True` を返せない。**
+起動した NP21/W を残すのが trial の目的なので、これは毎回起きる。選択肢:
+
+1. 現状維持 — 「起動は成功、後片付けは EOF 未到達」を `stage: dispose` +
+   `cleanup: inherited pipe still open` で読む (今回の直し。判定は操作者)。
+2. `_close_reader` の EOF 要求を trial だけ緩め、PS 本体の終了 (`wait` 成功) と
+   mutex 解放をもって成功とする → 既存の不変条件と
+   `test_parent_exit_with_inherited_pipe_still_reports_failure` の変更が要る。
+3. PowerShell 側で `UseShellExecute = $true` にしてハンドル継承を断つ →
+   起動経路そのものの変更で、実走での再確認が必要。
+
+コーダーの一存では選べないので 1 のまま置いた。2 / 3 は PM / レビュー判断。
+
+### 未実施 ([V4])
+
+PowerShell は走らせていない。`$mismatch` / `$code` / `$startedPid` と `CheckFile` の実動作、
+および上の 3 案の実挙動は次の実走でしか確かめられない。

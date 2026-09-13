@@ -201,3 +201,16 @@ PowerShell が CIM の `CreationDate` (マイクロ秒) と `Process.StartTime` 
 `identity_mismatch()` (Python) と `$mismatch` / `$code` / `$startedPid` (PowerShell) に直し、
 起動後の失敗では `process` か `started_pid` を結果 JSON に残す。停止・復旧はしない。
 詳細と RED→GREEN は [`s3i2_tdd.md`](s3i2_tdd.md) の実走 F1 の節。PowerShell は未実行 [V4]。
+
+## 2026-09-14 追記 5 — 実走 (受入 F3) の dispose 段
+
+start 段は通過し `result['process']` も入ったが `stage: dispose` で失敗した。原因は
+`PowerShellTransport.close()` の `_close_reader()`: **起動した NP21/W が PowerShell の
+stdout ハンドルを継承する**ため reader が EOF に届かない (PS 本体は終了 = `wait` は成功)。
+既存の `test_parent_exit_with_inherited_pipe_still_reports_failure` が示すとおり
+「EOF 未到達は失敗」は意図された不変条件なので、**成功には変えていない**。
+代わりに (1) `close()` の失敗へ固定語彙の印 (`cleanup: inherited pipe still open` /
+`cleanup: executor exit timeout`) を付け、(2) 起動確認の揺れを `identity_unstable()` で
+項目名つきに、(3) 起動後の失敗では常に `started_pid` を残すようにした。
+**継承パイプがある限り trial は実走で ok:True を返せない**ので、緩和するか
+`UseShellExecute=$true` にするかは PM / レビュー判断 ([`s3i2_tdd.md`](s3i2_tdd.md) の F3 の節)。

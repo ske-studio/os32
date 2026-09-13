@@ -447,6 +447,80 @@ class TrialTests(Images):
                 if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
                     self.assertNotIn('started_pid', result)
 
+
+    def test_cim_row_jitter_after_start_names_the_field(self):
+        """起動確認の 2 回の照会で CIM の行が揺れたとき (同じ PID で command の
+        綴りだけ違う等)、どの項目かを理由に出す。実走 F3 で dispose 段まで
+        進んだのでここは通ったが、揺れたときの診断を固定しておく。"""
+        for field, value in [('command', '"' + EXE + '" "/iC:\\other.ini"'),
+                             ('created', '2026-09-09T02:03:04.0000000Z'),
+                             ('pid', 44)]:
+            p, t, gate = self.run_bound()
+            exchange = t.exchange
+            def corrupt(request, field=field, value=value):
+                response = exchange(request)
+                if request['op'] == 'query' and t.calls.count('query') == 6:
+                    response['value'][0][field] = value
+                return response
+            t.exchange = corrupt
+            result = gate(json.dumps(p))
+            with self.subTest(field=field):
+                self.assertFalse(result['ok'])
+                self.assertIn('identity unstable: ' + field, result['reason'])
+                self.assertEqual(result['started_pid'], 43)
+                self.assertEqual(result['process']['pid'], 43)
+                self.assertEqual(result['stage'], 'query')
+
+    def test_exe_case_alone_is_not_instability(self):
+        p, t, gate = self.run_bound()
+        exchange = t.exchange
+        def recase(request):
+            response = exchange(request)
+            if request['op'] == 'query' and t.calls.count('query') >= 6:
+                response['value'][0]['exe'] = EXE.upper()
+            return response
+        t.exchange = recase
+        self.assertTrue(gate(json.dumps(p))['ok'])
+        self.assertEqual(trial.identity_unstable([], dict(pid=43)), ['rows'])
+
+    def test_dispose_failure_reports_its_cause_and_keeps_the_started_pid(self):
+        """起動した NP21/W は PowerShell の stdout ハンドルを継承するので、
+        reader は EOF に届かない。失敗を成功には変えない (既存の不変条件) が、
+        理由と起動済み PID は結果に残す。"""
+        for code, expected in [('cleanup: inherited pipe still open', 'inherited pipe'),
+                               ('cleanup: executor exit timeout', 'exit timeout')]:
+            p, t, gate = self.run_bound()
+            def fail_close(code=code):
+                raise trial._coded(IniError('Windows executor cleanup timeout'), code)
+            t.close = fail_close
+            result = gate(json.dumps(p))
+            with self.subTest(code=code):
+                self.assertFalse(result['ok'])
+                self.assertEqual(result['stage'], 'dispose')
+                self.assertIn(expected, result['reason'])
+                self.assertEqual(result['started_pid'], 43)
+                self.assertEqual(result['process']['command'], trial.launch_command(p))
+
+    def test_transport_close_marks_which_cleanup_failed(self):
+        """実パイプでの検査は test_np21w_transport.py。ここは印だけを見る。"""
+        import subprocess as sp
+
+        class Channel(trial.PowerShellTransport):
+            def __init__(self, wait):
+                self.process = types.SimpleNamespace(
+                    stdin=types.SimpleNamespace(close=lambda: None), wait=wait)
+                self.reader = types.SimpleNamespace(join=lambda timeout: None,
+                                                    is_alive=lambda: True)
+
+        def timeout(timeout):
+            raise sp.TimeoutExpired('powershell.exe', 3)
+        with self.assertRaises(sp.TimeoutExpired) as caught:
+            Channel(timeout).close()
+        self.assertEqual(caught.exception.code, 'cleanup: executor exit timeout')
+        with self.assertRaises(IniError) as caught:
+            Channel(lambda timeout: 0).close()
+        self.assertEqual(caught.exception.code, 'cleanup: inherited pipe still open')
+
     def test_cli_execute_llm_gate_and_no_model_mutation(self):
         args = ['--exe', EXE, '--baseline', BASE, '--cwd', CWD, '--pid', '42', '--created', CREATED,
                 '--hdd', HDD, '--fdd-eject', '--execute', '--exclusive-operator']

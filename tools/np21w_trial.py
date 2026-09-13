@@ -68,6 +68,12 @@ def _reason_detail(exc):
     return None
 
 
+def _coded(error, code):
+    """固定語彙の理由を例外に付ける (結果 JSON の reason に出る唯一の経路)。"""
+    error.code = code
+    return error
+
+
 def _rejected(response):
     """executor の失敗応答から、固定語彙の理由と起動 PID **だけ**を取り出す。"""
     error = IniError('trial executor rejected operation')
@@ -125,6 +131,21 @@ def identity_mismatch(started, old, plan):
     if started['command'] != launch_command(plan):
         reasons.append('command')
     return reasons
+
+
+def identity_unstable(current, started):
+    """起動確認の 2 回の照会で、同じ行が返り続けているかを見る。
+
+    CIM の行が揺れる (同じ PID で `command` の綴りだけ違う、`created` が
+    変わる…) ときに、どの項目が揺れたかを固定語彙で返す。exe だけは Windows の
+    パスとして大小文字を無視する (start 段の照合と同じ)。
+    """
+    if type(current) is not list or len(current) != 1:
+        return ['rows']
+    row = current[0]
+    return [key for key in ('pid', 'created', 'exe', 'command')
+            if (live.path_key(row[key]) != live.path_key(started[key]) if key == 'exe'
+                else row[key] != started[key])]
 
 
 PLAN_FIELDS = ('exe', 'baseline', 'cwd', 'pid', 'created', 'hdd', 'hdd_host',
@@ -278,11 +299,14 @@ def _run(plan, factory):
             # 起動してしまった以上、以後の失敗でもこの行を結果に残す (自動の
             # 停止・復旧はしないので、操作者が対象を特定できる必要がある)。
             result['process'] = started
+            result['started_pid'] = started['pid']
             mismatch = identity_mismatch(started, old, plan)
             if mismatch:
                 raise IniError('identity mismatch: ' + ','.join(mismatch))
-            if rows() != [started] or rows() != [started]:
-                raise IniError('new process identity unstable')
+            for _ in range(2):
+                unstable = identity_unstable(rows(), started)
+                if unstable:
+                    raise IniError('identity unstable: ' + ','.join(unstable))
             result['stage'] = 'dispose'
         result.update(ok=True, stage='verified')
     except Exception as exc:
@@ -292,8 +316,9 @@ def _run(plan, factory):
         if detail:
             result['reason'] += '; ' + detail
         started_pid = getattr(exc, 'started_pid', None)
-        if type(started_pid) is int and 'process' not in result:
-            # executor 側で identity 検査に落ちたときも、起動した PID は残す。
+        if type(started_pid) is int and 'started_pid' not in result:
+            # executor 側で identity 検査に落ちたときも、起動した PID は残す
+            # (起動後の失敗では常に PID が結果に載る)。
             result['started_pid'] = started_pid
     return result
 
@@ -430,11 +455,25 @@ class PowerShellTransport(live.PowerShellTransport):
     def close(self):
         # Even the transport has no kill fallback. Closing stdin lets its fixed
         # finally release the mutex. A timeout is reported, never retried.
+        #
+        # 失敗はそのまま上げる (dispose 段の失敗は成功に変えない) が、どちらの
+        # 失敗かが判るよう固定語彙の code を付ける。**起動した NP21/W は
+        # PowerShell の stdout ハンドルを継承する**ので、trial では EOF が
+        # ゲスト終了まで来ない = 'inherited pipe still open' が通常の帰結。
         self.process.stdin.close()
         try:
-            self.process.wait(timeout=3)
-        finally:
-            self._close_reader(failed=sys.exc_info()[0] is not None)
+            try:
+                self.process.wait(timeout=3)
+            except BaseException as exc:
+                # 例外そのもの (wait の TimeoutExpired) は隠さず、印だけ付ける。
+                _coded(exc, 'cleanup: executor exit timeout')
+                raise
+            finally:
+                self._close_reader(failed=sys.exc_info()[0] is not None)
+        except IniError as exc:
+            if getattr(exc, 'code', None) is None:
+                exc.code = 'cleanup: inherited pipe still open'
+            raise
 
 
 class WindowsExecutor:
