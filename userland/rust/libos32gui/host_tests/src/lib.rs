@@ -443,6 +443,137 @@ mod tests {
         );
     }
 
+    /* ================================================================ */
+    /*  生の ptr + len の検査 (レビュー往復 1 の ⑮)                      */
+    /* ================================================================ */
+
+    #[test]
+    fn w30_raw_span_ok_table() {
+        let p = b"abc".as_ptr();
+        assert!(raw_span_ok(p, 3, 63));
+        assert!(raw_span_ok(p, 0, 63), "非 NULL + len 0 は空");
+        assert!(!raw_span_ok(p, 64, 63), "上限超の len");
+        assert!(!raw_span_ok(p, u32::MAX, 63), "巨大 len は slice を作る前に落とす");
+        assert!(
+            raw_span_ok(core::ptr::null(), 0, 63),
+            "NULL + len 0 だけが空として通る"
+        );
+        assert!(
+            !raw_span_ok(core::ptr::null(), 1, 63),
+            "NULL + len != 0 を空スライスに化けさせない"
+        );
+        /* ptr + len が番地空間を折り返す (from_raw_parts の前提を破る)。 */
+        let top = (usize::MAX - 3) as *const u8;
+        assert!(!raw_span_ok(top, 8, 63));
+    }
+
+    #[test]
+    fn w31_raw_out_ok_table() {
+        let mut b = [0u8; 8];
+        let p = b.as_mut_ptr();
+        assert!(raw_out_ok(p, 8));
+        assert!(!raw_out_ok(core::ptr::null(), 8), "NULL の書き込み先");
+        assert!(!raw_out_ok(p, 0), "cap 0");
+        assert!(!raw_out_ok(p, i32::MAX as u32 + 1), "C へ int で渡せない cap");
+        assert!(!raw_out_ok((usize::MAX - 3) as *const u8, 8), "折り返し");
+    }
+
+    #[test]
+    fn w32_set_text_null_value_with_nonzero_len_is_rejected() {
+        /* 反例 (⑮): 有効な scope / key + `s = NULL, s_len = 1` が空スライスに
+         * 化けると、既存値を**空 text で上書きして成功**してしまう。 */
+        fake::reset();
+        assert_eq!(
+            os32gui_cfg_set_text(
+                b"app:filer".as_ptr(),
+                9,
+                b"k".as_ptr(),
+                1,
+                core::ptr::null(),
+                1
+            ),
+            ERR_INVAL
+        );
+        assert!(fake::log().is_empty(), "DB を開かない = 上書きしない");
+    }
+
+    #[test]
+    fn w33_set_text_null_value_with_zero_len_is_the_empty_value() {
+        fake::reset();
+        assert_eq!(
+            os32gui_cfg_set_text(
+                b"app:filer".as_ptr(),
+                9,
+                b"k".as_ptr(),
+                1,
+                core::ptr::null(),
+                0
+            ),
+            0,
+            "NULL + len 0 は空値として書ける"
+        );
+        assert_eq!(fake::last_text(), b"");
+    }
+
+    #[test]
+    fn w34_huge_len_is_rejected_before_slicing() {
+        /* 非 NULL + 巨大長。素朴な実装だと 63 / 255B の拒否より前に
+         * `from_raw_parts` の前提を破る。 */
+        fake::reset();
+        let sc = b"app:filer";
+        let k = b"k";
+        assert_eq!(
+            os32gui_cfg_set_text(sc.as_ptr(), 9, k.as_ptr(), 1, b"v".as_ptr(), u32::MAX),
+            ERR_INVAL,
+            "値の長さ"
+        );
+        assert_eq!(
+            os32gui_cfg_set_int(sc.as_ptr(), u32::MAX, k.as_ptr(), 1, 1),
+            ERR_INVAL,
+            "scope の長さ (scope_is_app より前)"
+        );
+        assert_eq!(
+            os32gui_cfg_set_int(sc.as_ptr(), 9, k.as_ptr(), u32::MAX, 1),
+            ERR_INVAL,
+            "key の長さ"
+        );
+        assert_eq!(
+            os32gui_cfg_get_int(sc.as_ptr(), u32::MAX, k.as_ptr(), 1, 7),
+            7,
+            "get_int は def"
+        );
+        let mut out = [0u8; 16];
+        assert_eq!(
+            os32gui_cfg_get_text(sc.as_ptr(), 9, k.as_ptr(), u32::MAX, out.as_mut_ptr(), 16),
+            ERR_INVAL,
+            "get_text は INVAL"
+        );
+        assert!(fake::log().is_empty());
+    }
+
+    #[test]
+    fn w35_null_name_with_nonzero_len_is_rejected() {
+        fake::reset();
+        let mut out = [0u8; 16];
+        let nul = core::ptr::null();
+        assert_eq!(os32gui_cfg_get_int(nul, 1, b"k".as_ptr(), 1, 7), 7);
+        assert_eq!(
+            os32gui_cfg_get_text(nul, 1, b"k".as_ptr(), 1, out.as_mut_ptr(), 16),
+            ERR_INVAL
+        );
+        assert_eq!(
+            os32gui_cfg_set_int(nul, 1, b"k".as_ptr(), 1, 1),
+            ERR_INVAL,
+            "NULL scope は PERM ではなく INVAL (空スライスに化けない)"
+        );
+        assert_eq!(
+            os32gui_cfg_set_int(b"app:filer".as_ptr(), 9, nul, 1, 1),
+            ERR_INVAL,
+            "NULL key"
+        );
+        assert!(fake::log().is_empty());
+    }
+
     #[test]
     fn w28_set_bad_key_never_opens() {
         fake::reset();

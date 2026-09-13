@@ -267,7 +267,7 @@ check-cfg-host:
 | | |
 |---|---|
 | 実装 | `userland/rust/libos32gui/src/cfgro.rs` (表 101..=104 の実体) |
-| 試験 | `userland/rust/libos32gui/host_tests/` (`src/lib.rs` = 28 本、`tests/init_gate.rs` = 1 本、`src/fake.rs` = C の贋物) |
+| 試験 | `userland/rust/libos32gui/host_tests/` (`src/lib.rs` = 34 本、`tests/init_gate.rs` = 1 本、`src/fake.rs` = C の贋物) |
 | 実行 | `cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline` |
 
 `src/lib.rs` が `#[path = "../../src/cfgro.rs"]` で**実装そのもの**を取り込み、
@@ -282,7 +282,7 @@ check-cfg-host:
 cargo が別バイナリ = 別プロセスにする `tests/init_gate.rs` に置いた
 (`src/lib.rs` 側は `fake::reset()` が毎回 init 済みにする)。
 
-### 固定した分岐 (29 本)
+### 固定した分岐 (35 本)
 
 | # | 試験 | 固定した振る舞い |
 |---|---|---|
@@ -315,6 +315,12 @@ cargo が別バイナリ = 別プロセスにする `tests/init_gate.rs` に置�
 | W27 | set + close 失敗 | set のコード (直前の失敗を優先) |
 | W28 | set key 不正 | 空 key / 64B key / 埋め込み NUL → `INVAL`。**DB を開かない** |
 | W29 | `shlib_init` 前の呼び出し (`tests/init_gate.rs`、別プロセス) | get_int = def / get_text・set_* = `ERR_INVAL`。**`cfg_open` を呼ばず `out` にも触らない**。`set_kapi` の後はふつうに読める |
+| W30 | `raw_span_ok` | `len > max` は不可 / 非 NULL + len 0 は空 / **NULL は len 0 のときだけ** / `ptr + len` の折り返しは不可 |
+| W31 | `raw_out_ok` | NULL・cap 0・`i32` に収まらない cap・折り返しは不可 |
+| W32 | set_text に `s = NULL, s_len = 1` | `ERR_INVAL`。**DB を開かない** (= 既存値を空 text で上書きしない) |
+| W33 | set_text に `s = NULL, s_len = 0` | 0。**空値として書ける** (NULL 終端の無い空) |
+| W34 | 4 本すべてに `len = u32::MAX` | scope / key / 値のどれでも、**スライスを作る前に** def / `ERR_INVAL`。DB を開かない |
+| W35 | scope / key が `NULL, len = 1` | 4 本とも def / `ERR_INVAL`。空スライスに化けない |
 
 ### 追記 (2026-09-13、着地後のリンク失敗の修正)
 
@@ -352,6 +358,51 @@ wrapper 4 本に門を足した (W29):
 | `os32gui_cfg_set_int` / `set_text` | `ERR_INVAL` (scope が正しくても通さない) |
 
 いずれも **`cfg_open` を呼ばない**。
+
+### 追記 (2026-09-13、Codex 実装レビュー 往復 1 の ⑮)
+
+**ptr + len の検証がスライス作成より後にあった。** `slice(ptr, len)` が
+`ptr.is_null() || len == 0` を空スライスに畳んでいたので:
+
+1. 有効な scope / key と **`s = NULL, s_len = 1`** を `os32gui_cfg_set_text` に
+   渡すと空スライスに化け、`copy_value` も通り、**既存値を空 text で上書きして
+   0 (成功) を返した**。
+2. 非 NULL + 巨大 `len` は、63 / 255B の拒否より**前**に
+   `core::slice::from_raw_parts` の前提を破っていた。
+
+直し: 生の引数の段階で検査してからスライスを作る。
+
+```rust
+pub fn raw_span_ok(ptr: *const u8, len: u32, max: u32) -> bool {
+    if len > max { return false; }          /* 上限は slice の前 */
+    if ptr.is_null() { return len == 0; }   /* NULL は「空」のときだけ */
+    (ptr as usize).checked_add(len as usize).is_some()   /* 折り返さない */
+}
+pub fn raw_out_ok(out: *const u8, cap: u32) -> bool { /* 書き込み先も同様 */ }
+unsafe fn checked_slice(ptr, len, max) -> Option<&[u8]>  /* 通らなければ None */
+```
+
+`os32gui_cfg_get_int` / `get_text` / `set_int` / `set_text` の **ptr + len 引数
+すべて** (scope / key / s / out) をこれに通した。`set_*` では
+`scope_is_app` の**前**に scope の span を見る (NULL + len != 0 の scope は
+`ERR_PERM` ではなく `ERR_INVAL`)。
+
+RED (検査を `checked_slice` の中からスライス作成の後へ戻した素朴版):
+
+```text
+test tests::w32_set_text_null_value_with_nonzero_len_is_rejected ... FAILED
+  assertion `left == right` failed
+  left: 0        ← 空 text で上書きして「成功」
+ right: -9
+test result: FAILED. 33 passed; 1 failed
+```
+
+GREEN: 35 本 (`src/lib.rs` 34 + `tests/init_gate.rs` 1) すべて通過。
+
+W30 / W31 / W34 / W35 は**戻り値だけでは素朴版と区別がつかない**ものを含む
+(巨大 `len` は素朴版でも `copy_cstr` の長さ判定で `ERR_INVAL` になり、
+`ERR_PERM` は `ERR_INVAL` と同じ -9)。これらは
+`from_raw_parts` の前提を破らせないための**番人**として置いている。
 
 ### RED
 

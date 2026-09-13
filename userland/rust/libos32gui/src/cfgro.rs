@@ -130,18 +130,60 @@ extern "C" {
 /*  純粋部 — 分岐表と検査 (ホスト TDD がここを直接叩く)               */
 /* ================================================================ */
 
-/// `ptr` + `len` を `&[u8]` に戻す (NULL / 0 は空スライス)。
+/// ptr + len が生の引数として整合しているか (**スライスを作る前**の検査)。
+///
+/// レビュー往復 1 の ⑮: 検査を `from_raw_parts` の後に置くと
+/// (a) `ptr = NULL, len = 1` が空スライスに化けて「空 text で既存値を上書き」
+/// まで通り、(b) 非 NULL + 巨大 `len` が 63 / 255B の拒否より前に
+/// `from_raw_parts` の前提を破る。だから生の段階で:
+///
+/// - `len` は `max` 以下 (scope / key は 63、text 値は 255)。
+/// - NULL は **`len == 0` のときだけ**許す (「空」の意味。NULL + `len != 0` は
+///   呼び手の誤りなので空スライスに化けさせない)。
+/// - `ptr + len` が番地空間を折り返さない (`from_raw_parts` の前提)。
+#[inline]
+pub fn raw_span_ok(ptr: *const u8, len: u32, max: u32) -> bool {
+    if len > max {
+        return false;
+    }
+    if ptr.is_null() {
+        return len == 0;
+    }
+    (ptr as usize).checked_add(len as usize).is_some()
+}
+
+/// 書き込み先 (`out` + `cap`) が生の引数として整合しているか。
+///
+/// `cap` は NUL 込みの大きさなので 1 以上。C へ `int` で渡すので `i32` に収まり、
+/// `out + cap` が折り返さないことまで見る。
+#[inline]
+pub fn raw_out_ok(out: *const u8, cap: u32) -> bool {
+    if out.is_null() || cap == 0 || cap > i32::MAX as u32 {
+        return false;
+    }
+    (out as usize).checked_add(cap as usize).is_some()
+}
+
+/// [`raw_span_ok`] を通してから `&[u8]` を作る。通らなければ `None`。
 ///
 /// # Safety
-/// `ptr` が非 NULL なら `len` バイト読めること。
+/// `ptr` が非 NULL なら `len` バイト読めること (長さと折り返しはここで見る)。
 #[inline]
-unsafe fn slice<'a>(ptr: *const u8, len: u32) -> &'a [u8] {
+unsafe fn checked_slice<'a>(ptr: *const u8, len: u32, max: u32) -> Option<&'a [u8]> {
+    if !raw_span_ok(ptr, len, max) {
+        return None;
+    }
     if ptr.is_null() || len == 0 {
-        &[]
+        Some(&[])
     } else {
-        core::slice::from_raw_parts(ptr, len as usize)
+        Some(core::slice::from_raw_parts(ptr, len as usize))
     }
 }
+
+/// scope / key の `max` (`raw_span_ok` へ渡す)。
+const NAME_SPAN: u32 = CFG_NAME_MAX as u32;
+/// text 値の `max`。
+const TEXT_SPAN: u32 = CFG_TEXT_MAX as u32;
 
 /// `src` を NUL 終端して `dst` へ写す。
 ///
@@ -292,11 +334,18 @@ pub extern "C" fn os32gui_cfg_get_int(
         /* `shlib_init` 前 — C の backend は NULL の kapi を辿ってしまう。 */
         return def;
     }
+    let (sc, k) = match unsafe {
+        (
+            checked_slice(scope, scope_len, NAME_SPAN),
+            checked_slice(key, key_len, NAME_SPAN),
+        )
+    } {
+        (Some(a), Some(b)) => (a, b),
+        _ => return def,
+    };
     let mut sbuf = [0u8; CFG_NAME_CAP];
     let mut kbuf = [0u8; CFG_NAME_CAP];
-    if !copy_cstr(unsafe { slice(scope, scope_len) }, &mut sbuf)
-        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
-    {
+    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(k, &mut kbuf) {
         return def;
     }
     let mut db: *mut CfgDb = core::ptr::null_mut();
@@ -321,14 +370,21 @@ pub extern "C" fn os32gui_cfg_get_text(
     out: *mut u8,
     cap: u32,
 ) -> i32 {
-    if !kapi_ready() || out.is_null() || cap == 0 || cap > i32::MAX as u32 {
+    if !kapi_ready() || !raw_out_ok(out, cap) {
         return ERR_INVAL;
     }
+    let (sc, k) = match unsafe {
+        (
+            checked_slice(scope, scope_len, NAME_SPAN),
+            checked_slice(key, key_len, NAME_SPAN),
+        )
+    } {
+        (Some(a), Some(b)) => (a, b),
+        _ => return ERR_INVAL,
+    };
     let mut sbuf = [0u8; CFG_NAME_CAP];
     let mut kbuf = [0u8; CFG_NAME_CAP];
-    if !copy_cstr(unsafe { slice(scope, scope_len) }, &mut sbuf)
-        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
-    {
+    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(k, &mut kbuf) {
         return ERR_INVAL;
     }
     let mut db: *mut CfgDb = core::ptr::null_mut();
@@ -384,13 +440,20 @@ pub extern "C" fn os32gui_cfg_set_int(
     if !kapi_ready() {
         return ERR_INVAL;
     }
-    let sc = unsafe { slice(scope, scope_len) };
+    let sc = match unsafe { checked_slice(scope, scope_len, NAME_SPAN) } {
+        Some(a) => a,
+        None => return ERR_INVAL,
+    };
     if !scope_is_app(sc) {
         return ERR_PERM;
     }
+    let k = match unsafe { checked_slice(key, key_len, NAME_SPAN) } {
+        Some(a) => a,
+        None => return ERR_INVAL,
+    };
     let mut sbuf = [0u8; CFG_NAME_CAP];
     let mut kbuf = [0u8; CFG_NAME_CAP];
-    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf) {
+    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(k, &mut kbuf) {
         return ERR_INVAL;
     }
     let mut db: *mut CfgDb = core::ptr::null_mut();
@@ -420,17 +483,28 @@ pub extern "C" fn os32gui_cfg_set_text(
     if !kapi_ready() {
         return ERR_INVAL;
     }
-    let sc = unsafe { slice(scope, scope_len) };
+    let sc = match unsafe { checked_slice(scope, scope_len, NAME_SPAN) } {
+        Some(a) => a,
+        None => return ERR_INVAL,
+    };
     if !scope_is_app(sc) {
         return ERR_PERM;
     }
+    /* 値は NULL + len 0 だけが「空値」。NULL + len != 0 はここで落とす
+     * (空スライスに化けると既存値を空 text で上書きしてしまう)。 */
+    let (k, val) = match unsafe {
+        (
+            checked_slice(key, key_len, NAME_SPAN),
+            checked_slice(s, s_len, TEXT_SPAN),
+        )
+    } {
+        (Some(a), Some(b)) => (a, b),
+        _ => return ERR_INVAL,
+    };
     let mut sbuf = [0u8; CFG_NAME_CAP];
     let mut kbuf = [0u8; CFG_NAME_CAP];
     let mut vbuf = [0u8; CFG_TEXT_CAP];
-    if !copy_cstr(sc, &mut sbuf)
-        || !copy_cstr(unsafe { slice(key, key_len) }, &mut kbuf)
-        || !copy_value(unsafe { slice(s, s_len) }, &mut vbuf)
-    {
+    if !copy_cstr(sc, &mut sbuf) || !copy_cstr(k, &mut kbuf) || !copy_value(val, &mut vbuf) {
         return ERR_INVAL;
     }
     let mut db: *mut CfgDb = core::ptr::null_mut();
