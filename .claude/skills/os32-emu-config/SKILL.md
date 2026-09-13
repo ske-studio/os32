@@ -70,6 +70,8 @@ exe 隣接 baseline をコピーし、**稼働中の NP21/W を trial 自身が�
 起動は `"<exe>" "/i<trial ini>" ["<d88>"]` (`--fdd-arg <name>` で `NP21W_DIR` 直下の `.d88` を FDD 引数に付ける)。
 **PM が先に NP21/W を終了しない** (稼働中プロセスの PID / 生成時刻を計画に束縛して trial に終了させる。
 taskkill は ini を書き戻さないので使わない)。使い捨て NHD は `tools/mk_blank_nhd.py --out <NP21W_DIR>/<name>.nhd` で作る。
+`--exe` / `--baseline` / `--cwd` は **Windows 表記** (`C:\...\np21x64w.ini`) で渡す (WSL パスは `path_key` が拒否し、CLI は理由を出さず `invalid setup` と言う)。
+`--llm-url` の既定は `127.0.0.1:1234` なので、FLM を使うなら `--llm-url http://127.0.0.1:52625/v1/chat/completions --model <ロード済みモデル>` を明示する。
 既存ライブツールの強制終了・原本置換・restore はこの承認に含めない。
 ホスト限定実装依頼では実プロセス・実 ini・ネットワークに触れない。
 試験・ソース根拠・実行例は [trial TDD 記録](../../../tools/tests/np21w_trial_tdd.md)。

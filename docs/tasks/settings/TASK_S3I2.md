@@ -87,3 +87,8 @@
 | 対象 | 判定 | 要旨 |
 |---|---|---|
 | 3 コミット (往復 1) | Request changes | 5 件: B1 install の初期ディレクトリ mkdir の失敗を無視して終了 0、B2 trial の計画に HDD の解決済み絶対パスが残らず `NP21W_DIR` の変更で別ディスクになる、B3 `wslpath` 出力の `.strip()` で末尾空白のディレクトリの存在確認と書込み先がずれる、B4 新しいパス値の `;` / `#` を許し再処理できない ini を生成、B5 `.nhd` / `.d88` 名のディレクトリを受理。non-blocker: install 試験の不足 (列挙途中失敗の接続、64/65、深さ 4/5、EOF 長さ不一致、綴り保持)、既存の IPL / ローダ検査の緩さ、スキル文書の旧記述 |
+| `44e7899` (I) + `a80f7b0` (T) (往復 2) | Request changes | B1〜B4 解消、B5 は名前入力と trial で解消。残 1 件: ini CLI の絶対パス入力 (`--set HDD1FILE=C:\…`) が `resolve_image()` を迂回し存在 / 通常ファイル / 配置先の検査なしで prepare が通る → CLI は名前だけを受ける。non-blocker: `_bound_image()` の説明、PowerShell 試験の位置づけ |
+
+### 7c. 受入の準備 (2026-09-14)
+- `mk_blank_nhd.py --out <NP21W_DIR>/os32_fresh.nhd --size-mb 200` → `C=3011 capacity=209661952` (ファイル 209,662,464 B = 作業 NHD と同じ大きさ)。
+- trial の dry-run: `--baseline` は **Windows 表記** (`<dir>\np21x64w.ini`) で渡す (WSL パスだと `path_key` が拒否し、CLI は理由を出さず `invalid setup` になる — 票 §2a の実装細部。スキル文書に追記)。稼働中 NP21/W の PID / 生成時刻を `Get-CimInstance Win32_Process` で取り、`hdd=os32_fresh.nhd, fdd_eject, fdd_arg=os32_boot.d88` の計画が束縛できることを確認。`--execute` はユーザーの [D2] 承認待ち。
