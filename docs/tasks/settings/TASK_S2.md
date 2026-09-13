@@ -123,7 +123,16 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 | C2 | **合格**: `cfg init` → `created /etc/settings.db` (3072 B)、`cfg status` → `OK schema_version 1`、`cfg list` に tsv の 3 行、再 `cfg init` → `already exists` |
 | C3 | **一部**: `cfg set gshell desktop/color int 5` → `get` = 5、無い key の default (42) が出る。**255 / 256B の境界はゲストでは未確認** — `/api/cmd` 経由の rshell 行が 255B を超える引数で崩れ (複数行に分割されて `command not found`、応答がずれる)、`user t255` / `t256` に 103B の断片が入った。境界はホスト TDD (`c_limits`) で担保、ゲストは端末 (C5) かファイル経由の手段が要る |
 | C4 | **合格**: `cfg export /tmp/s.json` → 3 records、`wc -l` = 4 (= 3 + ヘッダ)、ヘッダ `{"schema_version":1,"exported":"6650"}` |
-| C5 / C6 / C7 | 未実施 (Codex 往復 1 の修正を着地した配備 2 回目で行う) |
+| C5 / C6 / C7 | 配備 2 回目で実施 (下) |
+
+### 8d. ゲスト受入 (配備 2 回目、`a1889c0`: 往復 1 の ②〜⑭⑯⑰ + ⑮ + kapi、vmkernel 470,756 B、cfg.bin 28,604 B、kselftest 87 / 0、stamp 16:44)
+| ID | 結果 |
+|---|---|
+| C5 | **合格**: GUI (`os32gui`) → Start → Run... → `/usr/bin/t5a_display.bin` の端末で `cfg list` が全レコード (gshell 3 行、system、user の 2 行) を表示、`cfg set gshell desktop/color int 7` → `cfg get` = 7、`cfg status` = `OK schema_version 1` (画面 `c5_list.png` / `c5_set.png`)。端末を ESC で閉じ Start → CUI mode で戻った後、CUI の `cfg get` も 7 |
+| C6 | **合格**: 配備 2 回目 (`deploy-nhd` + `make deploy` + ゲストで `hsync` = 0 copied / 219 skipped / 0 protected) の後も `desktop/color` = 5 (当時の値)、`system x` = 1、`settings.db` 3072 B のまま |
+| C7 | **一部**: FEP 辞書常駐 (`ime on`) で `cfg get` 1 回 = 約 50 tick (0.5 秒、`/api/cmd` の往復と rshell の表示を含む)。50 回連続でも `cfg status` OK。**pool の戻り (`db_mem_used`) は未計測** — 唯一の表示手段 `db_test` (Test 9) が Test 5 で落ちる (`db_last_error` がカーネル帯のポインタを CPL=3 に返す、台帳 INHERITED_BUGS.md 記載の継承バグ、S2 とは無関係)。S5 で計測手段 (`cfg status` に `db_mem_used` を出す等) を用意する |
+
+受入中の教訓: (1) `/api/cmd` 経由の rshell 行は 255B 超の引数で崩れる (C3 の境界はゲストで踏めない)。(2) `ime on` のまま `/api/key` で打つと FEP がローマ字を変換する (`os32gui` → `お32ぐい`)。`SHIFT+SPACE` (urlencode) で切ってから台本を回す。
 
 ### 8c. Codex 実装レビュー
 | 対象 | 判定 | 要旨 |
