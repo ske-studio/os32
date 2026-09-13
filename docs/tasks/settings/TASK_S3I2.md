@@ -1,6 +1,6 @@
 # S3-I2 — FDD からの新規インストールの修正 (lz4 カーネル + `/boot`) と使い捨て NHD の道具
 
-状態: **設計 第 3 版 (往復 2 の 3 件 + non-blocker を反映、往復 3/3 = 最終待ち)**。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
+状態: **設計 第 4 版 = 実装へ (往復 3 で Approve、non-blocker 4 件を反映)**。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
 経緯: TASK_S0 §3 B10 → TASK_S3 §7 (残ゲート)。現行の `install` (無印) は `/kernel.bin` を必須とし LBA 6 へ生書きするが、FDD イメージは `/VMKRNL.LZ4` + ローダ v3 (`/sys/loader_h.bin` = `boot/loader_hdd.bin`、ext2 の `/boot/vmkernel.lz4` を読む) を収録するので、**FDD からの新規インストールは Phase 1 の `Missing /kernel.bin` で止まり `/etc` コピー (settings.db の seed) まで到達しない**。`cdinst` (CD) は lz4 / `/boot` 対応済み (`cdinst.c:240` の注、`:510` の `mkdir /hd0/boot`)。
 正典: [TASK_S0.md](TASK_S0.md) §3 B10、[TASK_S3.md](TASK_S3.md) §7、`docs/08_build.md` §8-4 (配備 3 経路)、`build/image.mk` (FDD の中身)、スキル `os32-emu-config` (ini は PM だけ、実装と適用の承認を分ける)、memory `os32-np21w-launch` (FDD は引数、HDD は ini のみ)。
 規約: [C1] C89、[D2] (NHD 上書き / ini 変更はユーザー承認、使い捨てだけを対象にする)、コーダーは worktree + ホスト TDD のみ。
@@ -22,7 +22,7 @@
 - **IDE 情報の型** (往復 1 の B2): 現行の `IdeInfoTemp` (92 B) は `ide_identify` の実型 `IdeInfo` (`drivers/ide.h:79`、96 B、末尾 `phys_sector_size`) より小さく、正常な認識で 2 B の領域外書込みになる既存欠陥。**SDK の生成ヘッダの `IdeInfo` (または同じレイアウトの型) を使う**。ホスト試験で `sizeof` と末尾書込みを固定。
 - Phase 0 (承認前の検査): **`/VMKRNL.LZ4` の存在と大きさ** (`sys_stat`、> 0。FAT の 8.3 名 `VMKRNL.LZ4` は大小文字を正規化して見つかる)、`/sys/boot_hdd.bin` / `/sys/loader_h.bin` の存在も同じくここで確認 (現行は書き込みの途中で `Missing …` になる)。無ければ中止 (**何も書かない**)。
 - Phase 1 (ブートセクタ): IPL → LBA 0、PT → LBA 1、ローダ → LBA 2+ は**そのまま**。**`/kernel.bin` の読込と LBA 6 への生書きを削除**。
-- Phase 2 (ext2 format): そのまま。format 失敗時は IPL / PT / ローダだけ書かれた起動不能の NHD が残る (使い捨て対象なので許容。表示 `format failed - the drive is not bootable; rerun install`)。
+- Phase 2 (ext2 format): そのまま。format 失敗時は IPL / PT / ローダに加えて部分的な ext2 メタデータを含む不完全な NHD が残る (使い捨て対象なので許容。表示 `format failed - the drive is not bootable; rerun install`)。
 - Phase 3 (コピー): `mkdir /hd0/boot` を追加し、**`/VMKRNL.LZ4` → `/hd0/boot/vmkernel.lz4`** をストリームコピー (現行 `copy_file` のバッファは **128KB**、470KB を反復で写す) → **長さ一致**を確認。続けて `/sys` `/bin` `/sbin` `/etc` を写す。
   - **宛先名の小文字化** (往復 1 の B1): FAT (`FF_USE_LFN 0`) の `sys_ls` は `SHELL.BIN` / `SETTINGS.DB` のように大文字を返し、ext2 は大小文字を区別するので、そのまま写すと `/hd0/etc/SETTINGS.DB` になり seed も `/sys/shell.bin` の起動も成立しない。**媒体 → HDD のコピーでは宛先の名前 (各成分) を ASCII 小文字に正規化する** (`copy_directory` の宛先パス組立と `mkdir`)。ソースは列挙で得た名前のまま開く。ホスト試験は大文字を返す `sys_ls` の贋物で最終パスを固定。
   - **`/etc/profile` は写さない** (FDD 用 `assets/profile_fdd` で PATH に `/usr/bin` が無い。HDD の profile は通常配備が置く。往復 1 non-blocker の矛盾を解消)。`/etc/settings.db` は写す (seed)。
@@ -36,7 +36,7 @@
 ### 2a. ini ツール: `HDD1FILE` と FDD の扱い (往復 1 の B5 / B6)
 - `tools/np21w_ini.py` の `ALLOWED` は「値の白リスト」。**パス値のキーを別表 `ALLOWED_PATHS`** に足す: `HDD1FILE` (値 = `NP21W_DIR` 直下の `[A-Za-z0-9_.-]+\.nhd`、`wslpath` でホスト側に存在すること、Windows 絶対パス `<NP21W_DIR の Windows 表記>\<name>` に展開)、`FDD1FILE` / `FDD2FILE` (**変更後の値**は空だけ = 装着解除。変更前の値は非空の CP932 パスでもよく、そのまま検査せず空へ差し替える。`SVFDFILE=true` の構成では FDD の装着が ini に保存され次回も再装着されるので、HDD ブートの trial では空にする)。既存の固定値キー (`USEGD5430` 等) の検査は不変で、**`transform()` の「変更キーが 1 つでもあれば全キーの存在を要求」は `ALLOWED` (固定値) と `ALLOWED_PATHS` を別々に適用** (live 操作が新しい必須キーに依存しないよう、`ALLOWED_PATHS` の存在要求は `ALLOWED_PATHS` のキーを変更するときだけ)。fail closed / CP932 保持 / 重複拒否 / バイト単位の差し替えは現行の作法。
 - **手順の前提** (往復 2 の R1): 現行 `np21w_trial.py` の `_run()` は「承認された PID / 生成時刻の稼働中プロセスが 1 件存在する」ことを最初に確認し、**trial 自身が通常終了 → 終了確認 → 新 ini 作成 → 起動**を行う。したがって受入では **PM が先に NP21/W を終了しない** (稼働中のプロセスを選んで計画を承認し、trial に終了させる)。停止済みからの開始経路は作らない。
-- `tools/np21w_trial.py`: 計画 (`make_plan()`) に **`hdd` (HDD1FILE の名前)、`fdd_eject` (FDD1/2FILE を空にする)、`fdd_arg` (起動引数に付ける `.d88` の絶対パス、`NP21W_DIR` 直下、任意)** を足し、`bind_trial()` の承認対象に含める。起動コマンドは `exe + /i<trial ini> [+ <d88>]` に拡張し、PowerShell 側と Python 側の照合も同じ形に。Cirrus 系のキーは**この票では触らない** (計画に含めない = 変更集合は明示したキーだけ)。
+- `tools/np21w_trial.py`: 計画 (`make_plan()`) に **`hdd` (HDD1FILE の名前)、`fdd_eject` (FDD1/2FILE を空にする)、`fdd_arg` (起動引数に付ける `.d88` の絶対パス、`NP21W_DIR` 直下、任意)** を足し、`bind_trial()` の承認対象に含める。起動コマンドは `exe + /i<trial ini> [+ <d88>]` に拡張し、PowerShell 側と Python 側の照合も同じ形に。Cirrus 系のキーは**この票では触らない** (計画に含めない = 変更集合は明示したキーだけ)。現行 trial が持つ `e_resume=false` の強制と、欠落 / 重複 / 未知値の拒否は**維持**し、承認計画に残す。
 - `np21w_ini_live.py` (ライブ変更) には足さない (作業 NHD を差し替える事故を作らない)。
 - 「復元」は無い: trial は原本 ini を書き換えず、通常の ini で起動し直すだけ (往復 1 non-blocker の文言)。
 - ホスト TDD: `transform()` の `ALLOWED_PATHS` (名前規則 / 存在 / 重複 / 別 section / CP932 保持 / 変更前の非空 FDD 値を空にできる / 新しい絶対パスの符号化 (ASCII) と長さ / 固定値キーの検査が変わらない)、`make_plan()` / `bind_trial()` の新フィールドと起動コマンドの照合 (d88 あり / なし)、`np21w_trial_tdd.md` に追記。実 ini・実プロセスには触れない。
@@ -64,7 +64,7 @@
 4. ini ツールの `ALLOWED_PATHS` (`HDD1FILE` / `FDD1FILE` / `FDD2FILE`) と trial の計画拡張 (`hdd` / `fdd_eject` / `fdd_arg`、起動コマンドの照合) がスキル §0 / §1 と矛盾しないか。CP932 パス (`NP21W_DIR` は ASCII のみでよいか)。固定値キーの live 操作が新しい必須キーに依存しないか。
 5. `mk_blank_nhd.py` のヘッダ (H=8、S=17、C は容量から、本体長 = C×H×S×512) と NP21/W の容量算出 (`sxsihdd.c:195`) の一致、`ide_identify` の total_sectors。
 6. 受入 F1〜F6 の順序 (F6 を F5 の前に) で作業 NHD を触らないこと (使い捨てイメージの同一性と IDE 第 1 スロットの対応を実受入で確認)、FDD の装着解除で HDD ブートが保証されること、trial 自身が通常終了する手順 (PM は先に終了しない、taskkill 不可)。
-7. S3I2-K (`fatfs_vfs_list` のエラー伝播) の範囲と、FAT を root にした FDD ブートの他の呼び手 (`ls`、`copy_directory`) への影響。
+7. S3I2-K (`fatfs_vfs_list` のエラー伝播) の範囲と、FAT を root にした FDD ブートの他の呼び手 (`ls`、`copy_directory`) への影響。シェルの `ls` (`cmd_dir.c:43`) は戻り値を見ないので途中失敗を表示できない — 本票の対象外 (台帳 INHERITED_BUGS.md へ)。
 
 ## 5. ユーザー判断が要る点
 - なし (使い捨て NHD の作成と trial ini の適用は受入時に [D2] で個別に承認を取る)。
@@ -73,5 +73,6 @@
 
 | 版 | 判定 | 要旨 |
 |---|---|---|
+| 第 3 版 | **Approve** | R1〜R3 解消、到達可能な反例なし。non-blocker 4 件 (中間状態の表現、終了コードの範囲、trial の e_resume 維持、`ls` の診断は台帳へ) を第 4 版に反映 |
 | 第 2 版 | Request changes | 3 件: R1 現行 trial は稼働中プロセスの選択が前提で、先に通常終了すると `selected identity mismatch` → trial 自身に終了させる手順に統一、R2 FAT の列挙途中の I/O エラーが `VFS_OK` で握りつぶされ欠けたファイルのまま終了 0 → S3I2-K で `fatfs_vfs_list` を直し `sys_ls` の負を失敗に数える、R3 F6 の破損元 `settings.tsv` が新規 HDD に無い → `/sys/boot_hdd.bin` で壊し CORRUPT を確認してから回復。non-blocker: C の受付範囲、FDD 値の変更前後、LBA 6 の検査表現、保護の表現 |
 | 第 1 版 | Request changes | 7 件: B1 FAT の列挙名が大文字で HDD に `SETTINGS.DB` ができる → 宛先を小文字に正規化、B2 `IdeInfoTemp` (92 B) が実型 96 B より小さく領域外書込み → 実型を使う、B3 コピー / sync の失敗が伝播しない → 件数と戻り値を main まで、B4 `--size-mb` とシリンダ数の丸写しが矛盾 → H/S 固定で C を算出し本体長を一致、B5 現行 trial は自動起動で d88 引数を渡せない → 計画に `fdd_arg` を足し照合も拡張、B6 `SVFDFILE=true` で FDD が再装着され HDD ブートにならない → `fdd_eject` (FDD1/2FILE を空に) と root の確認、B7 F6 が作業 NHD に戻った後 → F5 の前に。non-blocker: 中間状態の明記、バッファは 128KB、profile の矛盾、ini 境界、文言 (restore 無し、期待値は当該ビルド) |
