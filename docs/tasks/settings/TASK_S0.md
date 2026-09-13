@@ -203,3 +203,6 @@
 | **T1** | テスターで `make images/os32_boot.d88` → FAT12 を読み `/ETC/SETTINGS.DB` 3,072 B、sha256 がホストの `build/out/settings.db` と一致、`sqlite3` で 3 行 / schema_version 1。CD パッケージは `packages` 依存で同じ生成物 | **合格** (新規インストールでの seed は S3) |
 | **D1 (a)** | HostDrv `C:\os32\etc\settings.db` に偽の 25B ファイル、ゲストに試験用 `/etc/settings.db` (tsv の複製 1,405 B) を置き、`hsync -f etc` → `protected: /etc/settings.db (skipped)` で 1,405 B のまま (`filetypes` / `settings.tsv` は更新)。停止 → `pull` → `os32-cycle deploy` (sync-from-hostdrv が偽ファイルを見る) → 配備 OK、ゲストの `/etc/settings.db` は 1,405 B / 内容不変 (先頭行が tsv のコメント)、`settings.tsv` は配備される。後片付けで偽ファイルと試験 DB を削除 | **合格** |
 | **D1 (b)** | tsv だけの通常配備 (2 回目の配備): `protected:` は出ず `/etc/settings.tsv` 1,405 B が配備される、`/etc/settings.db` は作られない | **合格** |
+| **D1 (c1)** | stamp (`os32.nhd.pulled`) を退避して `os32-cycle deploy` → `NHD 全体の上書きを中止: 来歴 … が無い (pull していない / 消えた)` で `make deploy-nhd` が Error 1 (prune までは走り 0 件、NHD は書かれない)。案内どおり `pull` で取り直せる | **合格** |
+| **D1 (c2)** | local `os32.nhd` を退避して `os32-cycle deploy` → `ensure_local_nhd` の自動 pull が stamp (261 B) を書いて配備 OK (vmkernel 470,327 B 一致) | **合格** |
+| **K1 (続き)** | `make deploy` exit=0、`ver` API v50、regress 6 本 obs 全通過 (kselftest 87/0、klibc 49/0、alloc_demo、ring3_fault → ver、`echo abc \| wc -c` 4、screenshot) | **合格** |
