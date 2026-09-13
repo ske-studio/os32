@@ -136,3 +136,14 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 ### 9a. 着地
 - `b1ceac6` PM: install の要求 KAPI 50、FDD の最小コマンドに `cfg`。
 - `6332dac` S3-D: `PROTECTED_BASENAMES` / `hsp_protected_names` 5 → 11 名、`hsync.c` の `HS_MAX_PROT` 16 → 24 (票外の付随変更: リカバリ途中の `/etc` は 9 名 + wal/shm = 11 名になりうるので、実在名の収集上限 16 だと別名が 5 つで通常同期が止まる。表の件数 11 を Python / C の両試験で固定)。ホスト 164 / 114 (RED 21 / 39 → GREEN)。
+- `c2a1cdd` S3-I (install_recover.inc、host 14/14、後退 17 種を全検出、install.bin 18,320 B)、`e1f6791` S3-C (cfg_json.c / cfg_import.c、host 52/52 + 214 CHECK、cfg.bin 37,312 B、shlib は 105,544 B で不変 = cfg_import.o は shlib に乗らない)。`make all` / `check` exit 0。FDD イメージに INSTALL.BIN / CFG.BIN / SETTINGS.DB / VMKRNL.LZ4 を確認。
+- 配備 (S3 1 回目、`e1f6791`)、NHD バックアップ `os32.nhd.bak-s3-20260913-233601` (scratchpad)、kselftest 87 / 0。
+
+### 9b. ゲスト受入 (HDD ブート、`e1f6791`)
+| ID | 結果 |
+|---|---|
+| I1 | **合格**: `install --recover-settings` (HDD ブート) → `recover-settings must run from the install floppy`、DB 不変 |
+| C1 | **合格**: export (3 件) → set で 2 件変更 → `cfg import /tmp/b.json` → `imported 3 records (all scopes), replaced`、`cfg list` が export 時点に戻る (`user note` も消える) |
+| C2 | **合格**: `--scope gshell` で `user note` が残る、`--merge` で既存が消えない |
+| C3 | **合格**: 版 2 ヘッダ → `newer backup: schema_version 2`、不正 key → `bad line 3: key`、いずれも DB 不変 |
+| C7 | **合格**: `v:null` を含む JSON (HostDrv 経由 `/host/s3_null.json`) を import → `cfg list` に `app:demo title text (unset)`、blob `blob:4` → export → `"v":null` / `"AAECAw=="` → import で一致、`cfg get app:demo icon` = `00010203` |
