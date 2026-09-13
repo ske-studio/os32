@@ -10,7 +10,7 @@
 |---|---|---|---|
 | **S2-C** | `userland/lib/cfg/` = `libos32cfg` (静的、C89)、`userland/cmds/cfg.c`、ホスト TDD | C | `userland/lib/cfg/*`、`userland/cmds/cfg.c`、`tools/tests/` (libs.mk / programs.mk は PM) |
 | **S2-W** | libos32gui の末尾追記 (cfg get / set を **OS 側で完結する wrapper** として GUI アプリへ公開、次の空きエントリから) | W | `userland/rust/libos32gui/src/*` (ffi / lib の表)、`sdk/rust/os32api` の宣言、`tools/check_gui_proto.py` の期待値 |
-| 共有 (PM) | `userland/deploy.yaml` (`/usr/bin/cfg.bin`)、`build/app.conf` (`userland/cmds/cfg 50 0`)、`build/sdk.mk` (check 登録、SDK 配布ヘッダ一覧に `libos32cfg.h`)、**`build/programs.mk`** (`cfg.bin` のリンクに `-los32cfg`、shlib のリンクに `libos32cfg.a`)、**`build/libs.mk`** (`DEFINE_LIB,libos32cfg` + `INC_libos32cfg` + `ALL_LIB_ARCHIVES`)、`tools/emu_agent/agent.py` (B12) | PM (C / W が必要行を報告) | — |
+| 共有 (PM) | `userland/deploy.yaml` (`userland/cmds/*.bin` の glob で **`/bin/cfg.bin`**、追加行なし)、`build/app.conf` (`userland/cmds/cfg 50 0`)、`build/sdk.mk` (check 登録、SDK 配布ヘッダ一覧に `libos32cfg.h`)、**`build/programs.mk`** (`cfg.bin` のリンクに `-los32cfg`、shlib のリンクに `libos32cfg.a`)、**`build/libs.mk`** (`DEFINE_LIB,libos32cfg` + `INC_libos32cfg` + `ALL_LIB_ARCHIVES`)、`tools/emu_agent/agent.py` (B12) | PM (C / W が必要行を報告) | — |
 
 S2-C と S2-W は独立 (W は C の公開ヘッダに依存するので、C の `libos32cfg.h` を先に固定してから W を出す — ヘッダは本票 §1 で確定)。
 
@@ -109,3 +109,23 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 
 - **接続の直列化**: 「アプリが触ると同時接続になるのか」という問いに対する答えは「はい — 2 つのプロセスがそれぞれ接続を持った状態 (例: アプリの RW と gshell) が同時接続」。決裁は **設定の読み書きは OS 経由だけ** (1 回目「アプリは読みだけ」→ 2 回目「アプリの設定値の書き込みも OS 経由で出来るように」)。アプリは libos32gui の wrapper (§3、1 呼び出しで open → 操作 → close を OS 側コードが完結、`app:` scope だけ書ける) を使い、DB を直接開く API は公開しない。gshell の設定 UI / `cfg` コマンド / wrapper のどれも open〜close を yield なしで 1 回の実行に収めるので接続は構造的に同時 1 本 (§1-1 (c))。KAPI 側の門 (v51) は作らない。
 - **3 往復で未承認**: 第 4 版のまま実装に進み、往復 3 の 2 件 (B1 `.new` 残骸は消さない、B2 export の版は実値) は実装レビューで併せて確認する (選択 3.b)。
+
+## 8. 実装と受入の記録 (PM、2026-09-13)
+
+### 8a. 着地
+- `6aa8b7a` S2-C + S2-W + PM 登録。`799b05e` shlib 側で `kapi` を供給 (着地後の `make all` が `libos32gui.elf` のリンクで `kapi` 未定義 — crt0 の無い shlib に `cfg_backend.c` の extern が解決されなかった)。`26cda04` docs (07_shell.md / CLAUDE.md の件数)。`8d0247e` W の ⑮。
+- 配備 (S2 1 回目、`799b05e`、vmkernel 470,756 B): 停止 → `nhd-pull` (stamp 16:18) → `os32-cycle deploy` → `make deploy` → kselftest 87 / 0。
+
+### 8b. ゲスト受入 (配備 1 回目)
+| ID | 結果 |
+|---|---|
+| C1 | **合格**: `cfg status` → `MISSING`、`/etc` に settings.db は作られない |
+| C2 | **合格**: `cfg init` → `created /etc/settings.db` (3072 B)、`cfg status` → `OK schema_version 1`、`cfg list` に tsv の 3 行、再 `cfg init` → `already exists` |
+| C3 | **一部**: `cfg set gshell desktop/color int 5` → `get` = 5、無い key の default (42) が出る。**255 / 256B の境界はゲストでは未確認** — `/api/cmd` 経由の rshell 行が 255B を超える引数で崩れ (複数行に分割されて `command not found`、応答がずれる)、`user t255` / `t256` に 103B の断片が入った。境界はホスト TDD (`c_limits`) で担保、ゲストは端末 (C5) かファイル経由の手段が要る |
+| C4 | **合格**: `cfg export /tmp/s.json` → 3 records、`wc -l` = 4 (= 3 + ヘッダ)、ヘッダ `{"schema_version":1,"exported":"6650"}` |
+| C5 / C6 / C7 | 未実施 (Codex 往復 1 の修正を着地した配備 2 回目で行う) |
+
+### 8c. Codex 実装レビュー
+| 対象 | 判定 | 要旨 |
+|---|---|---|
+| `6aa8b7a` (往復 1) | Request changes | 17 件: ① shlib の `kapi` 未定義 (着地時に判明、`799b05e` で修正済み)、② init の stat 失敗を不存在扱い、③ export の出力先が DB 自身、④ 検証失敗の set で txn が failed にならない、⑤ list/export が取得障害を成功扱い、⑥ NULL を実値に変換、⑦ 破損 DB が ERROR、⑧ rollback 失敗で診断消失、⑨ open 内部 close の失敗が消える、⑩ get の bind 失敗、⑪ get が前方一致 enum で型を取る (257 件で既定値)、⑫ enum 再入の get_text が NOTFOUND、⑬ 出力の満杯 / short write、⑭ 64B scope の切り詰め、⑮ wrapper の ptr+len 検証順 (`8d0247e`)、⑯ tsv 重複控えの容量、⑰ INT_MIN の signed overflow。non-blocker: 配備先は `/bin/cfg.bin` (票の `/usr/bin` と差 → **票を `/bin` に改める**)、C 側 GUI wrapper 定義は無い (Rust 側の表が正典、票を改める)、export は DB を開いたまま書く |
