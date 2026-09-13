@@ -132,6 +132,17 @@ cfg export <file> / cfg import <file>  DESIGN §6b の JSON 1 行 1 レコード
 | C6 | **合格**: 配備 2 回目 (`deploy-nhd` + `make deploy` + ゲストで `hsync` = 0 copied / 219 skipped / 0 protected) の後も `desktop/color` = 5 (当時の値)、`system x` = 1、`settings.db` 3072 B のまま |
 | C7 | **一部**: FEP 辞書常駐 (`ime on`) で `cfg get` 1 回 = 約 50 tick (0.5 秒、`/api/cmd` の往復と rshell の表示を含む)。50 回連続でも `cfg status` OK。**pool の戻り (`db_mem_used`) は未計測** — 唯一の表示手段 `db_test` (Test 9) が Test 5 で落ちる (`db_last_error` がカーネル帯のポインタを CPL=3 に返す、台帳 INHERITED_BUGS.md 記載の継承バグ、S2 とは無関係)。S5 で計測手段 (`cfg status` に `db_mem_used` を出す等) を用意する |
 
+### 8e. ゲスト受入 (配備 3 回目、`21a6d19` = 往復 2 の 7 件、cfg.bin 29,500 B、kselftest 87 / 0、stamp 17:09)
+| ID | 結果 |
+|---|---|
+| C1 | **合格** (`rm /etc/settings.db` 後 `cfg status` = MISSING、作られない) |
+| C2 | **合格** (`cfg init` → OK schema_version 1、tsv の 3 行、再 init = already exists) |
+| C3 | set/get/default 合格 (7 / 42)。255/256B の境界はゲストでは踏めない (8b と同じ) |
+| C4 | **合格** (6 records → 7 行、ヘッダ実版、空 text は `"v":""`)。**export 先が DB 自身 / journal は `refusing to write the settings database itself` で拒否** (往復 1 の ③) |
+| C5 | **合格** (端末で list / set 7 / get 7 / status OK、CUI に戻って 7) |
+| C6 | **合格** (配備 3 回目の前後で値と settings.db を保持、hsync は 8d と同じ) |
+| C7 | FEP 常駐で `cfg get` 1 回 = 53 tick (API 往復込み)。pool は 8d のとおり未計測 |
+
 受入中の教訓: (1) `/api/cmd` 経由の rshell 行は 255B 超の引数で崩れる (C3 の境界はゲストで踏めない)。(2) `ime on` のまま `/api/key` で打つと FEP がローマ字を変換する (`os32gui` → `お32ぐい`)。`SHIFT+SPACE` (urlencode) で切ってから台本を回す。
 
 ### 8c. Codex 実装レビュー
