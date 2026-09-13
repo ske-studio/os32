@@ -1,6 +1,6 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import`
 
-状態: **設計 第 5 版 = 実装へ (ユーザー決裁 2026-09-13: 第 5 版で実装に進み実装レビューで併せて見る、受入は NHD をバックアップしてから作業 NHD で実走 (ini 不要)、S3-I2 は別票)**。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
+状態: **完了 (2026-09-14)** — 実装 `6332dac` (D) / `c2a1cdd` + `7b26058` (I) / `e1f6791` + `5f2ee25` + `cedfc6a` (C) / `b2a1580` (K: FAT stat)、Codex 実装レビュー 3 往復で Approve、ゲスト受入 I1〜I5 / I7、C1〜C7 (§9b / §9d / §9f)。残ゲート: S3-I2 (別票)、I6 の全失敗点網羅はホスト試験の範囲、8192 件は単一 scope の実書込みまで、電源断耐性は未保証。設計: 第 5 版 (Codex 3 往復 + 追加 1 往復)。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
 正典: [DESIGN.md](DESIGN.md) §2 (初期値はインストーラだけが持つ、リカバリモード) / §6b (JSON バックアップと `cfg import`)、[S0_FOUNDATION.md](S0_FOUNDATION.md) §6 (**明示リカバリ契約**: 自動分岐なし、表示と承認、元 DB と journal を対で保存、別名へ完全コピー → 検証 → 切替、失敗で元を消さない、原子性は backend で確認できなければ名乗らない、system.cfg 等は触らない、復元後に schema / sync / reopen を記録)、[TASK_S2.md](TASK_S2.md) §1 (規則) / §2 (`cfg export` の JSON 形、import は S3)、[TASK_S0.md](TASK_S0.md) (配備保護: `settings.db*` を通常配備が触らない)。
 規約: [C1] C89、コーダーは worktree + ホスト TDD のみ、[D2] (使い捨てイメージ / ini) はユーザー承認。
 
@@ -172,5 +172,13 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | 対象 | 判定 | 要旨 |
 |---|---|---|
 | `6332dac` + `c2a1cdd` + `e1f6791` (往復 1) | Request changes | 5 件: B1 `.new` の検証失敗と close 失敗の複合で `.new` を消す、B2 revert の journal 復元失敗で journal を消す、B3 `--scope` 外の値の不正で対象まで拒否、B4 commit 前の rollback/close 失敗が CLI に出ない、B5 複数行の壊れた印を `done` と受理。non-blocker: base64 の未使用ビット、印の size の wrap、案内の統一、8192 件の実書込み未検証、試験網羅。設計の残 1 件 (`phase=reverting`) は「防いでいる」と確認 |
+| `cedfc6a` (往復 3) | **Approve** | B3 解消 (非正準 base64 は傷として控え対象行だけ拒否)、修正による新規 blocker なし、B1 / B2 / B4 / B5 と S3-K の範囲、`phase=reverting` の保護を維持。non-blocker: 試験コメントの範囲、8192 件の限定 |
 | `7b26058` (I) + `5f2ee25` (C) + `b2a1580` (K) (往復 2) | Request changes | B1 / B2 / B4 / B5 修正確認、S3-K の写像範囲は妥当。**B3 が一部残存**: 対象外 scope の base64 未使用ビット (`AB==`) で `j_b64()` が即 E_VALUE を返し scope 除外に到達しない → 意味上の不正はフラグに控えて対象行だけ `cfg_json_check()` で拒否。non-blocker: 全失敗点の網羅 (一部未固定)、8192 件試験の意味の限定、C-4 の記録更新、`.new` だけの復元成功枝の done 更新の戻り値 |
 | 付随 (PM) | — | `285653e` / `a57eaf6`: `install_recover.inc` を直しても `install.bin` が再ビルドされない (userland の .d は Makefile の `-include` 対象外) → `install.elf` / `hsync.elf` に .inc の明示依存。**配備 2 回目の install.bin (18,320 B) は往復 1 の修正前の版だった** (I2〜I7 の合格は 1 回目の実装での結果。修正後の install.bin 18,512 B で I2 / I7 を再走する) |
+
+### 9f. 再検証 (修正後の install.bin 18,512 B、配備 3 回目 `a57eaf6`)
+| ID | 結果 |
+|---|---|
+| I2 | **合格** (壊した DB → recover → `recovered: schema_version 1, 3 keys, sync=0, reopen=ok, close=ok`、`.bak` 1406、DB 3072) |
+| I7 | **合格** (`reverted: orig=present, sync=0`、DB 1406 に戻る、`.failed` 3072) → 再 recover でマスタに戻し HDD ブート → `cfg status` OK |
+| B3 の入力 (`--scope gshell` + 対象外の非正準 base64) | 配備 4 回目 (`cedfc6a`) で確認 (次の追記) |
