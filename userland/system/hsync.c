@@ -168,12 +168,18 @@ static int copy_file(const char *src, const char *dst)
 /* 現に存在する /etc/settings.db* の実体。同期を始める前に 1 度だけ集める
  * (ファイルごとに何度も stat すると 16MHz の実機では効く)。
  *
- * 表の小文字 5 名を決め打ちで stat するだけでは足りない: ext2 は大文字小文字を
+ * 表の小文字名を決め打ちで stat するだけでは足りない: ext2 は大文字小文字を
  * 区別するので `/etc/SETTINGS.DB` が本体でも拾えず、そこへの hardlink を
  * `hsync -f bin` が上書きしてしまう (往復 1 の B5)。/etc を sys_ls で列挙し、
  * 大文字小文字を無視して一致する**実在名**を全部 stat する。
- * コールバックの中では FS に触らない (private バッファに写すだけ、§4-26)。 */
-#define HS_MAX_PROT 16
+ * コールバックの中では FS に触らない (private バッファに写すだけ、§4-26)。
+ *
+ * 上限は**表の名前数 + 大文字小文字違いの別名の余裕**。越えたら守れないので
+ * 同期を拒否する (往復 2 の 3) = 上限が表より詰まっていると、リカバリ途中の
+ * /etc (票 TASK_S3 §1b の 9 名 + wal/shm = 11 名) で通常同期が止まる。
+ * 表が 5 名 → 11 名になったので (S3-D)、余裕を同じだけ保つよう 16 → 24。
+ * `hsp_protected_names` に名前を足すときはここも見直すこと。 */
+#define HS_MAX_PROT 24
 static u32 g_prot_dev[HS_MAX_PROT];
 static u32 g_prot_ino[HS_MAX_PROT];
 static int g_prot_count;

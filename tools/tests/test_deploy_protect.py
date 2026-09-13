@@ -13,6 +13,7 @@ temp dir と mock だけで走る。sudo / mount / losetup / mkfs / 実配備は
 """
 import errno
 import hashlib
+import io
 import os
 import pathlib
 import shutil
@@ -1800,6 +1801,382 @@ class MainExit(Base):
     def test_successful_sync_returns_true(self):
         self._patch(nd, 'do_sync', lambda tag_filter=None: True)
         self.assertIs(self._main(['sync']), True)
+
+
+# ======================================================================
+#  S3-D: リカバリ (install --recover-settings / --revert-settings) が作る
+#        ファイル名も通常配備から守る
+#
+#  票: docs/tasks/settings/TASK_S3.md §0 の S3-D (往復 3 の B5)。名前の集合は
+#  §1b の 9 名 — 本体 `settings.db` と `settings.db-journal` は S0-D で既に
+#  入っているので、ここで足りないのは残り 7 名。
+#
+#  なぜ要るか: リカバリの途中状態 (`.bak` / `.bak-journal` = 元の対の唯一の
+#  写し、`.recover-state` = phase の印) を通常配備が 1 つでも掴むと、
+#  「元へ戻す」経路そのものが消える。`.new*` / `.failed*` も**他人の生成物**
+#  なので配備が触ってよいものではない。
+# ======================================================================
+RECOVERY_NAMES = (
+    'settings.db.bak',
+    'settings.db.bak-journal',
+    'settings.db.failed',
+    'settings.db.failed-journal',
+    'settings.db.new',
+    'settings.db.new-journal',
+    'settings.db.recover-state',
+)
+
+# ゲスト (配備の宛先) に居る「守るべき世代」
+GUEST_GEN = {
+    'settings.db.bak': b'GUEST-BAK-' * 16,
+    'settings.db.bak-journal': b'GUEST-BAK-JOURNAL',
+    'settings.db.failed': b'GUEST-FAILED-' * 8,
+    'settings.db.failed-journal': b'GUEST-FAILED-JOURNAL',
+    'settings.db.new': b'GUEST-NEW-' * 32,
+    'settings.db.new-journal': b'GUEST-NEW-JOURNAL',
+    'settings.db.recover-state':
+        b'phase=backup orig=present journal=present size=1088\n',
+}
+
+# HostDrv / ビルド成果物に残っている「別世代」(これで上書きさせない)
+OTHER_GEN = {
+    'settings.db.bak-journal': b'OTHER-GENERATION-BAK-JOURNAL',
+    'settings.db.recover-state':
+        b'phase=done orig=missing journal=absent size=0\n',
+    'settings.db.failed': b'OTHER-GENERATION-FAILED',
+}
+
+
+class RecoveryBase(Base):
+    """7 名の「配備前後で不変」を測るための土台。"""
+
+    def seed_recovery(self, root):
+        """root/etc にゲスト世代の 7 名を置く。"""
+        etc = pathlib.Path(root) / 'etc'
+        etc.mkdir(parents=True, exist_ok=True)
+        for name, data in GUEST_GEN.items():
+            (etc / name).write_bytes(data)
+
+    def seed_other_gen(self, root):
+        """root/etc に**別世代**の 3 名を置く (配備元として残っている想定)。"""
+        etc = pathlib.Path(root) / 'etc'
+        etc.mkdir(parents=True, exist_ok=True)
+        for name, data in OTHER_GEN.items():
+            (etc / name).write_bytes(data)
+
+    def recovery_state(self, root):
+        """7 名の「存在一覧 + hash」。配備の前後で比較する。"""
+        etc = pathlib.Path(root) / 'etc'
+        state = {}
+        for name in RECOVERY_NAMES:
+            p = etc / name
+            state[name] = sha256(str(p)) if p.is_file() else None
+        return state
+
+    def assertRecoveryIntact(self, root, before):
+        after = self.recovery_state(root)
+        self.assertEqual(
+            sorted(k for k, v in before.items() if v is not None),
+            sorted(k for k, v in after.items() if v is not None),
+            'リカバリ生成物の存在一覧が変わった')
+        self.assertEqual(before, after, 'リカバリ生成物の内容が変わった')
+
+    def capture(self, fn):
+        buf = io.StringIO()
+        saved = sys.stdout
+        sys.stdout = buf
+        try:
+            rc = fn()
+        finally:
+            sys.stdout = saved
+        return rc, buf.getvalue()
+
+
+class S3RecoveryJudgement(RecoveryBase):
+    """判定そのもの — 名前規則 / 大文字違い / 別名 / 実体検査の収集対象。"""
+
+    def test_table_has_all_recovery_names(self):
+        missing = [n for n in RECOVERY_NAMES
+                   if n not in protect.PROTECTED_BASENAMES]
+        self.assertEqual(missing, [],
+                         'PROTECTED_BASENAMES に足りない: %r' % (missing,))
+        # 本体 2 + wal/shm 2 + リカバリ 7。件数を足すときは hsync.c の
+        # HS_MAX_PROT (実在名の収集上限) の余裕も見直すこと。
+        self.assertEqual(len(protect.PROTECTED_BASENAMES), 11)
+
+    def test_name_rule_covers_each_recovery_name(self):
+        for name in RECOVERY_NAMES:
+            dest = protect.resolve_dest(str(self.mount), '/etc/' + name)
+            self.assertTrue(protect.is_protected(str(self.mount), dest), name)
+
+    def test_uppercase_and_mixed_case_recovery_names(self):
+        """ext2 は大文字小文字を区別する。表は小文字でも判定は区別しない。"""
+        for name in RECOVERY_NAMES:
+            for variant in (name.upper(), name.title(),
+                            name.replace('settings', 'Settings')):
+                dest = protect.resolve_dest(str(self.mount), '/etc/' + variant)
+                self.assertTrue(protect.is_protected(str(self.mount), dest),
+                                variant)
+
+    def test_missing_recovery_name_is_still_protected(self):
+        """欠損は欠損のまま — 通常配備が**作る**こともさせない。"""
+        for name in RECOVERY_NAMES:
+            dest = protect.resolve_dest(str(self.mount), '/etc/' + name)
+            self.assertFalse(os.path.exists(dest))
+            self.assertTrue(protect.is_protected(str(self.mount), dest), name)
+
+    def test_symlink_alias_to_recovery_file(self):
+        self.seed_recovery(str(self.mount))
+        for i, name in enumerate(RECOVERY_NAMES):
+            alias = self.mount / 'bin' / ('alias%d.bin' % i)
+            os.symlink(str(self.mount / 'etc' / name), str(alias))
+            self.assertTrue(protect.is_protected(str(self.mount), str(alias)),
+                            'symlink 別名を見逃した: ' + name)
+
+    def test_dangling_symlink_alias_to_recovery_file(self):
+        """実体が無くても、解決後のゲスト名に名前規則が当たる。"""
+        for i, name in enumerate(RECOVERY_NAMES):
+            alias = self.mount / 'bin' / ('dang%d.bin' % i)
+            os.symlink(str(self.mount / 'etc' / name), str(alias))
+            self.assertTrue(protect.is_protected(str(self.mount), str(alias)),
+                            'dangling 別名を見逃した: ' + name)
+
+    def test_hardlink_alias_to_recovery_file(self):
+        self.seed_recovery(str(self.mount))
+        for i, name in enumerate(RECOVERY_NAMES):
+            alias = self.mount / 'bin' / ('hard%d.bin' % i)
+            os.link(str(self.mount / 'etc' / name), str(alias))
+            self.assertTrue(protect.is_protected(str(self.mount), str(alias)),
+                            'hardlink 別名を実体規則が見逃した: ' + name)
+
+    def test_protected_identities_collects_recovery_files(self):
+        """実体検査 (inode 比較) の収集対象に 7 名が入っていること。"""
+        self.seed_recovery(str(self.mount))
+        ids = protect._protected_identities(str(self.mount))
+        for name in RECOVERY_NAMES:
+            st = os.stat(str(self.mount / 'etc' / name))
+            self.assertIn((st.st_dev, st.st_ino), ids, name)
+
+    def test_protected_identities_collects_uppercase_on_disk(self):
+        """実在名が大文字でも拾う (小文字の表を決め打ちで stat しない)。"""
+        etc = self.mount / 'etc'
+        for name in RECOVERY_NAMES:
+            (etc / name.upper()).write_bytes(b'UPPER-' + name.encode())
+        ids = protect._protected_identities(str(self.mount))
+        for name in RECOVERY_NAMES:
+            st = os.stat(str(etc / name.upper()))
+            self.assertIn((st.st_dev, st.st_ino), ids, name.upper())
+
+    def test_recovery_name_as_ancestor(self):
+        """`/etc/settings.db.bak/` が残骸ディレクトリでも中へ書かせない。"""
+        for name in RECOVERY_NAMES:
+            (self.mount / 'etc' / name).mkdir()
+            dest = str(self.mount / 'etc' / name / 'inner')
+            self.assertIsNotNone(
+                protect.protected_ancestor(str(self.mount), dest), name)
+            with self.assertRaises(protect.ProtectedPath):
+                protect.mkdir_chain(str(self.mount), '/etc/' + name + '/inner')
+
+    def test_near_miss_names_are_not_protected(self):
+        """似ているだけの名前は通常配備の対象のまま (接頭一致で拾わない)。"""
+        for guest in ('/etc/settings.db.bak2', '/etc/settings.db.new2',
+                      '/etc/settings.db.recover', '/etc/settings.db.recover-st',
+                      '/etc/settings.db.recover-state.old',
+                      '/etc/settings.db.failed.old', '/etc/settings.dbbak',
+                      '/etc/settings.db.bak-journal2',
+                      '/etc/sub/settings.db.bak', '/settings.db.bak'):
+            dest = protect.resolve_dest(str(self.mount), guest)
+            self.assertFalse(protect.is_protected(str(self.mount), dest), guest)
+
+
+class S3RecoveryDeployPaths(RecoveryBase):
+    """全経路 — nhd_deploy (manifest / HostDrv 丸写し / CLI) / hostdrv_deploy /
+    prune_stale が 7 名を 1 バイトも触らないこと。"""
+
+    def setUp(self):
+        super(S3RecoveryDeployPaths, self).setUp()
+        self._patch(nd, 'do_write_boot', lambda p: True)
+        self._patch(nd, 'ensure_local_nhd', lambda: True)
+        self._patch(ps, 'hostdrv_root', lambda: str(self.hostdrv))
+
+    def test_nhd_manifest_sync_keeps_recovery_generation(self):
+        """マニフェストに 7 名が (誤って) 載っていても宛先は不変。"""
+        self.seed_recovery(str(self.mount))
+        before = self.recovery_state(str(self.mount))
+        files, mapping = [], {}
+        for name in RECOVERY_NAMES:
+            src = self.build / name
+            src.write_bytes(b'HOST-BUILT-' + name.encode())
+            files.append({'host': 'build/' + name, 'guest': '/etc/' + name,
+                          'tags': ['core']})
+            mapping['build/' + name] = [(str(src), '/etc/' + name)]
+        files.append({'host': 'build/defaults.tsv', 'guest': '/etc/settings.tsv',
+                      'tags': ['core']})
+        mapping['build/defaults.tsv'] = [(str(self.src_tsv), '/etc/settings.tsv')]
+        self.manifest(files)
+        self.pairs(mapping)
+
+        ok, out = self.capture(nd.do_sync)
+        self.assertIs(ok, True)
+        self.assertRecoveryIntact(str(self.mount), before)
+        self.assertNoProtectedWrites()
+        self.assertIn('protected:', out)
+        self.assertEqual((self.mount / 'etc' / 'settings.tsv').read_bytes(),
+                         self.src_tsv.read_bytes())
+
+    def test_sync_from_hostdrv_keeps_recovery_generation(self):
+        """通常同期: HostDrv に**別世代**の 3 名が残っていても宛先は不変。"""
+        self.seed_recovery(str(self.mount))
+        self.seed_other_gen(str(self.hostdrv))
+        (self.hostdrv / 'etc' / 'settings.tsv').write_bytes(b'k\tv\n')
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'NEWBIN')
+        before = self.recovery_state(str(self.mount))
+
+        ok, out = self.capture(nd.do_sync_from_hostdrv)
+        self.assertIs(ok, True)
+        self.assertRecoveryIntact(str(self.mount), before)
+        self.assertNoProtectedWrites()
+        self.assertIn('protected:', out)
+        # 通常のものは従来どおり写る
+        self.assertEqual((self.mount / 'bin' / 'sh.bin').read_bytes(), b'NEWBIN')
+        self.assertEqual((self.mount / 'etc' / 'settings.tsv').read_bytes(),
+                         b'k\tv\n')
+
+    def test_sync_from_hostdrv_keeps_uppercase_recovery_names(self):
+        """宛先の実在名が大文字違いでも、HostDrv の小文字の別世代で潰さない。"""
+        etc = self.mount / 'etc'
+        want = {}
+        for name in RECOVERY_NAMES:
+            (etc / name.upper()).write_bytes(b'GUEST-UPPER-' + name.encode())
+            want[name.upper()] = sha256(str(etc / name.upper()))
+        self.seed_other_gen(str(self.hostdrv))
+        for name in RECOVERY_NAMES:
+            (self.hostdrv / 'etc' / name).write_bytes(b'OTHER-' + name.encode())
+
+        ok, out = self.capture(nd.do_sync_from_hostdrv)
+        self.assertIs(ok, True)
+        self.assertIn('protected:', out)
+        for upper, digest in want.items():
+            self.assertEqual(sha256(str(etc / upper)), digest,
+                             '大文字の実在名が上書きされた: ' + upper)
+        for name in RECOVERY_NAMES:
+            self.assertFalse((etc / name).exists(),
+                             '小文字の別名を新規に作った: ' + name)
+        self.assertNoProtectedWrites()
+
+    def test_sync_from_hostdrv_does_not_create_missing_recovery_files(self):
+        """宛先に無い 7 名を通常同期が**作らない** (欠損は欠損のまま)。"""
+        for name in RECOVERY_NAMES:
+            (self.hostdrv / 'etc' / name).write_bytes(b'HOST-' + name.encode())
+        ok, out = self.capture(nd.do_sync_from_hostdrv)
+        self.assertIs(ok, True)
+        self.assertIn('protected:', out)
+        for name in RECOVERY_NAMES:
+            self.assertFalse((self.mount / 'etc' / name).exists(), name)
+
+    def test_hostdrv_manifest_sync_keeps_recovery_generation(self):
+        """HostDrv 配備 (hostdrv_deploy.do_sync) も 7 名を掴まない。"""
+        self.seed_recovery(str(self.hostdrv))
+        before = self.recovery_state(str(self.hostdrv))
+        files, mapping = [], {}
+        for name in RECOVERY_NAMES:
+            src = self.build / name
+            src.write_bytes(b'HOST-BUILT-' + name.encode())
+            files.append({'host': 'build/' + name, 'guest': '/etc/' + name,
+                          'tags': ['core']})
+            mapping['build/' + name] = [(str(src), '/etc/' + name)]
+        self.manifest(files)
+        self.pairs(mapping)
+
+        ok, out = self.capture(hd.do_sync)
+        self.assertIs(ok, True)
+        self.assertRecoveryIntact(str(self.hostdrv), before)
+        self.assertIn('protected:', out)
+
+    def test_hostdrv_clean_keeps_recovery_names(self):
+        self.seed_recovery(str(self.hostdrv))
+        before = self.recovery_state(str(self.hostdrv))
+        (self.hostdrv / 'etc' / 'settings.tsv').write_bytes(b'drop')
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'sh.bin').write_bytes(b'drop')
+
+        ok, out = self.capture(hd.do_clean)
+        self.assertIs(ok, True)
+        self.assertRecoveryIntact(str(self.hostdrv), before)
+        self.assertIn('protected:', out)
+        self.assertFalse((self.hostdrv / 'etc' / 'settings.tsv').exists())
+        self.assertFalse((self.hostdrv / 'bin').exists())
+
+    def test_prune_nhd_keeps_recovery_names(self):
+        self.seed_recovery(str(self.mount))
+        before = self.recovery_state(str(self.mount))
+        names = [('/etc/' + n, 'etc/' + n) for n in RECOVERY_NAMES]
+        names.append(('/bin/old.bin', 'bin/old.bin'))
+        entries = []
+        for guest, rel in names:
+            p = os.path.join(str(self.mount), rel)
+            if not os.path.exists(p):
+                with open(p, 'wb') as f:
+                    f.write(b'stale')
+            entries.append((guest, p))
+        self._patch(ps, 'find_stale', lambda r, w: list(entries))
+
+        n, out = self.capture(lambda: ps.prune_nhd(set(), True))
+        self.assertEqual(n, 1, '実際に消した数は old.bin の 1 件だけ')
+        self.assertRecoveryIntact(str(self.mount), before)
+        self.assertIn('protected:', out)
+        self.assertFalse((self.mount / 'bin' / 'old.bin').exists())
+        self.assertNoProtectedWrites()
+
+    def test_prune_hostdrv_keeps_recovery_names(self):
+        self.seed_recovery(str(self.hostdrv))
+        before = self.recovery_state(str(self.hostdrv))
+        (self.hostdrv / 'bin').mkdir()
+        (self.hostdrv / 'bin' / 'old.bin').write_bytes(b'stale')
+        entries = [('/etc/' + n, str(self.hostdrv / 'etc' / n))
+                   for n in RECOVERY_NAMES]
+        entries.append(('/bin/old.bin', str(self.hostdrv / 'bin' / 'old.bin')))
+        self._patch(ps, 'find_stale', lambda r, w: list(entries))
+
+        n, out = self.capture(lambda: ps.prune_hostdrv(set(), True))
+        self.assertEqual(n, 1)
+        self.assertRecoveryIntact(str(self.hostdrv), before)
+        self.assertIn('protected:', out)
+        self.assertFalse((self.hostdrv / 'bin' / 'old.bin').exists())
+
+    def test_nhd_cli_copy_cannot_write_recovery_names(self):
+        self.seed_recovery(str(self.mount))
+        before = self.recovery_state(str(self.mount))
+        for name in RECOVERY_NAMES:
+            src = self.build / name
+            src.write_bytes(b'CLI-' + name.encode())
+            self.assertIs(nd.do_copy([str(src)], dest_dir='/etc'), True)
+            self.assertIs(nd.do_copy([str(self.src_bin)], dest_dir='/etc',
+                                     rename=name), True)
+        self.assertRecoveryIntact(str(self.mount), before)
+        self.assertNoProtectedWrites()
+
+    def test_nhd_cli_rm_cannot_remove_recovery_names(self):
+        self.seed_recovery(str(self.mount))
+        before = self.recovery_state(str(self.mount))
+        for name in RECOVERY_NAMES:
+            self.assertIs(nd.do_rm('/etc/' + name), True)
+        self.assertRecoveryIntact(str(self.mount), before)
+        self.assertNoProtectedWrites()
+
+    def test_recovery_directories_are_not_created(self):
+        """deploy.yaml の directories に紛れ込んでも作らない。"""
+        self.manifest([], directories=['/etc/' + n for n in RECOVERY_NAMES]
+                      + ['/opt'])
+        self.pairs({})
+        ok, out = self.capture(nd.do_sync)
+        self.assertIs(ok, True)
+        for name in RECOVERY_NAMES:
+            self.assertFalse((self.mount / 'etc' / name).exists(), name)
+        self.assertTrue((self.mount / 'opt').is_dir())
+        self.assertIn('protected:', out)
+        self.assertNoProtectedWrites()
 
 
 if __name__ == '__main__':
