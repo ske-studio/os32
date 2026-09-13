@@ -47,4 +47,6 @@ Codex (枯渇時は Fable 5.1 サブエージェント、ROLES §5) に S5-C (`c
 
 ## 6. 実測の記録 (追記)
 
-(未実施)
+- **M3 (静的、2026-09-13)**: `os32Sync` → `vfs_sync()` → `ext2_sync()` は superblock と group descriptor を書く (`fs/ext2_super.c:274`)。データ / inode / bitmap のブロックは `ext2_write_block` → `dev_blk_write_lba` で**書いた時点でデバイスへ出る** (write-through、`fs/ext2_super.c:43`。ext2 にダーティキャッシュは無い)。→ `cfg_commit` の後に別の sync は不要。動的確認 (2026-09-13): `cfg set gshell desktop/color int 9` → NP21/W を**ハードリセット** (MCP `emu_reset`、電源断相当) → 起動 18 秒後 `cfg get` = **9**。書いた時点で NHD に出ている。合格 (追加の sync は不要、`cfg_commit` は変更しない)。
+- **M2 (ゲスト、2026-09-13)**: `cp /etc/settings.tsv /etc/settings.db-journal` (1406 B の偽 journal) → `cfg status` = **`CORRUPT sqlite=261`** (BUSY_RECOVERY)、`cfg get … 99` = 99 (既定値)、`cfg init` = `already exists` (本体が存在するので (a) の判定が先に効く — S2 §1-7 の順どおり。journal の拒否文言は本体が無いときに出る)、`rm` 後 `cfg status` = OK、get = 12。合格。
+- **M5 (ホスト、2026-09-13)**: 合成 tsv 300 件 (int 100 / text 96B 100 / blob 64B 100、scope `app:bench`) → `mk_settings_db.py` → **29,696 B** (page 1KB)。64KB 以内で合格。
