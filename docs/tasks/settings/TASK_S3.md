@@ -153,3 +153,12 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 - `install --recover-settings hd0` → **`master unreadable`** で終了 1 (対象には触っていない = 契約どおり)。FDD の `cfg status` も `ERROR sqlite=10` (IOERR)。
 - 原因 (PM の切り分け): FDD は FAT で `FF_USE_LFN 0`。v50 の open 前検査が `settings.db-journal` を `vfs_stat` すると 8.3 に収まらない名前で `f_stat` が `FR_INVALID_NAME` → `VFS_ERR_INVAL` → 「NOTFOUND 以外は IOERR」。実機: `ls -l /etc/settings.db-journal` = `Invalid argument`、`ls -l /etc/nosuch` = `No such file`。**S0-K の設計時に FAT (FDD ブート) で v50 を通す検証が無かった** (S0-T の T1 は「媒体に入っている」まで)。
 - 直し (S3-K): `fatfs_vfs_stat` で `FR_INVALID_NAME` → `NOTFOUND` (そのボリュームに存在しえない名前は存在しない)。カーネル変更なので `deploy-nhd` + FDD イメージ再生成 (同じ vmkernel.lz4) が要る。
+
+### 9d. FDD ブートの受入 (2 回目、`b2a1580` = S3-K 反映、vmkernel 470,761 B、FDD イメージ再生成)
+- 手順: NHD に `deploy-nhd` (カーネル) → `make deploy` → NP21/W を `os32_boot.d88` 引数で起動 (ini 変更なし)。FDD の `cfg status` = `OK schema_version 1 pool 24768 B` (マスタが v50 で開ける)。対話は rshell を ESC で抜けて `/api/key` で打ち、`/api/tvram` で `[Y/N]` と結果行を読む (`/api/cmd` が保留中だと tvram が応答しないため)。
+| ID | 結果 |
+|---|---|
+| I2 | **合格**: 壊した DB (1406 B) → recover → 表示 (`master: schema_version 1, 3 keys` / `settings.db: present 1406 B` / 承認文) → `Y` → `recovered: schema_version 1, 3 keys, sync=0, reopen=ok, close=ok`。`settings.db` = 3072 B (マスタ)、`.bak` = 1406 B、印 `phase=done orig=present journal=absent size=1406` |
+| I4 | **合格**: 壊した DB + 偽 journal → 表示に `hot journal present - will be backed up as .bak-journal and removed before switch` → `Y` → `.bak` 1406 + `.bak-journal` 1406、`settings.db-journal` は無い、DB = マスタ、印 `journal=present` |
+| I7 | **合格**: I4 の後に `--revert-settings hd0` → 表示 (`settings.db: present 3072 B`、印 `orig=present journal=present`) → `Y` → `reverted: orig=present, sync=0`。`settings.db` = 1406 (元)、`settings.db-journal` = 1406 (元)、`.failed` = 3072 (マスタ)、`.bak*` は残る |
+| I5 / I3 | 実行中 (次の追記) |
