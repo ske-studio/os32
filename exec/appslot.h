@@ -336,14 +336,18 @@ int appslot_abort_request(void);
  * — 状態を 1 つも変えない)。票 T9 §12 S6。
  *   gui_mode : con_sink_is_enabled() (1 = GUI 中 / 0 = CUI 中)
  *   now_tick : tick_count
- * CUI 中は常に 1 (K2 の逃げ道はそのまま)。GUI 中は **0** — 宛先は
- * 「フォーカス窓の連鎖の末尾」(D8) で、それを知っているのは WM だけだから。
- * IRQ1 が「そのとき走っていた slot」に立てると、WAIT_POLL の sh や 100ms
- * タイマの端末が巻き込まれる (受入 S6 の 2 回目で端末まで消えた)。
- * 例外は暴走だけ: 最後に**カーネルへ入ってから** APP_RUNAWAY_TICKS 以上
- * 経っていれば 1 (KAPI を呼ばない計算ループ = 協調型で WM が制御を取り戻せ
- * ない唯一のケース)。op_wait / kbd 待ちのアプリは KAPI の中に居るので、
- * 何秒待っていても対象外。 */
+ * CUI 中は常に 1 (K2 の逃げ道はそのまま)。GUI 中は 3 つに分かれる:
+ *
+ *   - top-level (シェル帯が走っている) → **0**。W の abort_at_top_level が
+ *     raw リングから拾い、D8 の宛先を解決して exec_kill する。
+ *   - アプリが gui_call(OP_WAIT) の中 (`in_op_wait`) → **1** (K5c)。割り込ま
+ *     れた文脈は CPL=0 (WM のコード) なのでスタブの即 kill は起きず、要求は
+ *     必ず WM のハンドラが先に見る — 本人宛なら break して syscall 出口で
+ *     畳み、別宛なら exec_abort_clear で降ろして exec_kill(宛先)。ここを
+ *     塞ぐと、連鎖の末尾が自分自身のとき誰も畳まなくなる (受入 S6 の 3 回目)。
+ *   - アプリのコードが CPL=3 で実際に走っている最中 → **0**、ただし暴走
+ *     (最後に**カーネルへ入ってから** APP_RUNAWAY_TICKS 以上) なら 1。
+ *     立てると IRQ1 スタブの即 kill が D8 の宛先より先に畳んでしまうため。 */
 int appslot_abort_admit(int gui_mode, u32 now_tick);
 
 /* この ID がカーネルへ入った時刻を控える (暴走判定の起点)。exec.c が

@@ -221,6 +221,17 @@ blocker なし。non-blocker 4 件は実装要件として各票に入れる:
   「KAPI を呼ばない計算ループ」だけが `APP_RUNAWAY_TICKS` に掛かり、待っているアプリは
   常に最近カーネルへ入っているので対象外になる。`appslot_abort_admit` の意味は不変。
   試験は ケース 25 の (f) 6 検査 (`25z`〜`25F`)。
+- **K5c の経路を戻す** (2026-09-13、S6 再試験の 3 回目が畳まれなかった件): 上の「GUI 中は
+  IRQ1 由来を立てない」は広すぎた。`in_op_wait` (WM がそのアプリの `gui_call(OP_WAIT)` の
+  **中**で回っている) のときは、割り込まれた文脈が CPL=0 (WM のコード) なので IRQ1 スタブの
+  即 kill は起きず、要求は必ず WM のハンドラが見る — 本人宛なら break して syscall 出口の
+  `ring3_abort_check` が畳み、別宛なら `exec_abort_clear` で降ろして `exec_kill(宛先)`
+  (K5c / 決裁 A1)。塞ぐと連鎖の末尾が端末自身のとき誰も畳まず、素の GUI アプリを
+  フォーカスして CTRL+STOP で閉じる K5b/K5c の挙動 (G テスト) も壊れる。
+  → 許可条件を `!gui_mode || in_op_wait || 暴走` にした (`appslot_abort_admit` の 1 行)。
+  塞いだままなのは「**アプリのコードが CPL=3 で実際に走っている最中**」だけで、そこは
+  IRQ1 スタブが D8 の宛先より先に畳むので暴走のときしか立てない。試験は ケース 25 の (g)
+  12 検査 (`25G`〜`25R`) と kselftest の 5 項目め。
 - **未実施**: `make` (clean build / `check` 全体 / `external`)、配備、実機。`build/app.conf` は
   ビルド系レーンの担当なので触っていない (sh / 端末 / gshell の要求版 49 は未設定)。
 

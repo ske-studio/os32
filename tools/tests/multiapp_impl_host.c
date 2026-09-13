@@ -2162,6 +2162,51 @@ static void case_abort_admit(void)
     check(appslot_get(a2)->abort_req == 1, "25E 計算ループには載る");
     check(ma_abort_check() == 0 && appslot_get(a2) == 0,
           "25F 畳まれる (KAPI を呼ばない計算ループの唯一の逃げ道)");
+
+    /* --- (g) K5c の経路は残す (票 §12 S6c) -----------------------------
+     * gui_call(OP_WAIT) の中 = WM がそのアプリの syscall の中で回っている。
+     * 割り込まれた文脈は CPL=0 (WM のコード) なので IRQ1 スタブの即 kill は
+     * 起きず、要求は必ず WM のハンドラが見る (本人宛なら break して syscall
+     * 出口で畳み、別宛なら exec_abort_clear + exec_kill)。ここを塞いだ版では
+     * 連鎖の末尾が端末自身のとき (3 回目の CTRL+STOP) 誰も畳まなかった。 */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    check(a2 == APP_ID_MIN, "25G 端末が立つ");
+    appslot_mark_scheduled(a2, 1000);
+    ma_syscall_enter(1000);
+
+    /* (g-1) OP_WAIT の外 (syscall から戻って CPL=3 で走っている) → 立てない */
+    check(appslot_get(a2)->in_op_wait == 0, "25H まだ OP_WAIT の中ではない");
+    check(ma_irq_abort_request(1, 1000) == 0,
+          "25I CPL=3 で走っている最中の IRQ1 は立てない (D8 の宛先を待つ)");
+    check(appslot_get(a2)->abort_req == 0, "25J abort_req は立たない");
+
+    /* (g-2) gui_call(OP_WAIT) の中 → 立てる (K5c) */
+    ma_gui_call(MA_OP_WAIT);                 /* appslot_gui_op_enter(1) */
+    check(appslot_get(a2)->in_op_wait == 1, "25K OP_WAIT の中に居る");
+    check(ma_irq_abort_request(1, 1000) == 1,
+          "25L OP_WAIT の中の IRQ1 は従来どおり立てる (K5c)");
+    check(appslot_get(a2)->abort_req == 1, "25M 走っているアプリに載る");
+    /* WM が宛先を解決する: 本人宛なら降ろさず syscall 出口で畳ませる */
+    check(ma_abort_check() == 0 && appslot_get(a2) == 0,
+          "25N 本人宛ならそのまま畳まれる (連鎖の末尾 = 自分自身)");
+
+    /* (g-3) 別宛なら WM が exec_abort_clear で降ろせる (K5c の分岐) */
+    ma_init(4096);
+    a2 = ma_start(100, 1);
+    appslot_mark_scheduled(a2, 1000);
+    ma_syscall_enter(1000);
+    ma_gui_call(MA_OP_WAIT);
+    check(ma_irq_abort_request(1, 1000) == 1, "25O OP_WAIT 中に立つ");
+    {
+        int owner0 = res_owner_get();
+        res_owner_set(APP_ID_SHELL);         /* WM のハンドラの文脈 */
+        check(ma_abort_clear() == 0, "25P WM が exec_abort_clear で降ろせる");
+        res_owner_set(owner0);
+    }
+    check(appslot_get(a2)->abort_req == 0, "25Q 要求は降りている");
+    check(ma_abort_check() == 0 && appslot_get(a2) != 0,
+          "25R 本人は畳まれない (WM が別の宛先を exec_kill する)");
 }
 
 int main(void)

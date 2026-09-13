@@ -618,13 +618,16 @@ int appslot_abort_request(void)
 
 /* ---- IRQ1 由来の CTRL+STOP を立ててよいか (票 T9 §12 S6) --------------- */
 /* GUI 配下では宛先が「フォーカス窓の連鎖の末尾」(D8) に変わった。それを
- * 解決できるのは窓の所有者を知っている WM だけで、IRQ1 は「そのとき走って
- * いた slot」しか知らない。T9 で sh が WAIT_POLL で毎 tick 回り、端末も
+ * 解決できるのは窓の所有者を知っている WM だけ。**ただし WM がそのアプリの
+ * gui_call(OP_WAIT) の中で回っているとき (in_op_wait) は、要求を立てても
+ * 必ず WM のハンドラが先に見る**ので従来どおり通す (K5c)。問題になるのは
+ * 「CPL=3 のアプリのコードが実際に走っている最中」で、IRQ1 は「そのとき
+ * 走っていた slot」しか知らない。T9 で sh が WAIT_POLL で毎 tick 回り、端末も
  * 100ms タイマで回るようになったので、IRQ1 が落ちた先はほぼ常に**宛先と
  * 無関係なアプリ**になる (受入 S6: 2 回目の CTRL+STOP で端末まで畳まれ、
- * ring3_abort_count が +1 した)。だから GUI 中はカーネルが立てない —
- * 要求は raw リング経由で WM に届き、WM が exec_abort_clear → 末尾を
- * exec_kill する (決裁 A1 / D8)。
+ * ring3_abort_count が +1 した)。だから **GUI 中にアプリのコードを割り込んだ
+ * ときだけ**カーネルは立てない — 要求は raw リング経由で WM に届き、WM が
+ * exec_abort_clear → 末尾を exec_kill する (決裁 A1 / D8)。
  *
  * 残す例外は 1 つだけ: **暴走**。KAPI を呼ばない計算ループに入ったアプリは
  * WM へ戻らないので、WM は制御を取り戻せず CTRL+STOP も届かない。
@@ -646,7 +649,23 @@ int appslot_abort_admit(int gui_mode, u32 now_tick)
     a = appslot_get(g_cur);
     if (!a || g_cur < APP_ID_MIN) return 0;          /* WM / シェル帯 */
     if (a->state != APP_STATE_RUNNING) return 0;
-    /* u32 の引き算なので tick が一周しても正しい差が出る。 */
+
+    /* **K5c の経路はそのまま通す**: `in_op_wait` = WM がこのアプリの
+     * gui_call(OP_WAIT) の**中**で回っている (kernel/gui.c の gui_call が
+     * ハンドラを呼ぶ間だけ立つ)。このとき割り込まれた文脈は CPL=0 (WM の
+     * コード) なので IRQ1 スタブの即 kill は起きず、要求は必ず WM の
+     * ハンドラが見る — WM が宛先を解決し、本人なら break して syscall 出口の
+     * ring3_abort_check が畳み、別なら exec_abort_clear で降ろして
+     * exec_kill(宛先) する (決裁 A1 / D8)。つまり「カーネルが宛先を決めて
+     * しまう」害は無く、素の GUI アプリ (gui_demo 等) をフォーカスして
+     * CTRL+STOP で閉じる K5b/K5c の挙動もここで生きる。
+     * ここを塞いだ版では、連鎖の末尾が端末自身のとき (3 回目の CTRL+STOP)
+     * に誰も畳まなくなった (受入 S6 の再試験)。 */
+    if (a->in_op_wait) return 1;
+
+    /* ここから先は「CPL=3 のアプリのコードが実際に走っている最中」。
+     * 立てると IRQ1 スタブが D8 の宛先より先に畳むので、暴走のときだけ。
+     * u32 の引き算なので tick が一周しても正しい差が出る。 */
     if ((u32)(now_tick - a->last_kernel_tick) >= (u32)APP_RUNAWAY_TICKS) {
         return 1;
     }
@@ -928,9 +947,18 @@ u32 appslot_abort_admit_selftest(void)
     if (appslot_abort_admit(0, 1000) != 1) bad |= 1u << 0;
     if (appslot_abort_admit(0, 1000 + APP_RUNAWAY_TICKS) != 1) bad |= 1u << 0;
 
-    /* (1) GUI 中は立てない — 宛先は WM が launch_child で解決する (D8) */
+    /* (1) GUI 中にアプリのコードを割り込んだときは立てない
+     * — 宛先は WM が launch_child で解決する (D8) */
     if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 1;
     if (appslot_abort_admit(1, 1000 + APP_RUNAWAY_TICKS - 1) != 0) bad |= 1u << 1;
+
+    /* (4) ただし gui_call(OP_WAIT) の中なら立てる (K5c の経路)。
+     * 割り込まれた文脈は CPL=0 (WM) なので、要求は必ず WM のハンドラが見る。 */
+    g_slot[id].in_op_wait = 1;
+    if (appslot_abort_admit(1, 1000) != 1) bad |= 1u << 4;
+    if (appslot_abort_admit(0, 1000) != 1) bad |= 1u << 4;   /* CUI も従来どおり */
+    g_slot[id].in_op_wait = 0;
+    if (appslot_abort_admit(1, 1000) != 0) bad |= 1u << 4;
 
     /* (2) 暴走だけは GUI 中でも立てる = 最後に **カーネルへ入って** から
      * APP_RUNAWAY_TICKS 以上 (tick が一周しても差で見る)。op_wait で待って

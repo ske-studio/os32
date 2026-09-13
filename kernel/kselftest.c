@@ -484,9 +484,10 @@ static void test_abort_admit(void)
 {
     u32 bad = appslot_abort_admit_selftest();
     check((bad & (1u << 0)) == 0, "CUI keeps the CTRL+STOP escape hatch (K2)");
-    check((bad & (1u << 1)) == 0, "GUI leaves the CTRL+STOP target to the WM");
+    check((bad & (1u << 1)) == 0, "GUI running app: target is left to the WM");
     check((bad & (1u << 2)) == 0, "GUI still kills a runaway app (2s no syscall)");
     check((bad & (1u << 3)) == 0, "CTRL+STOP never lands on the shell band");
+    check((bad & (1u << 4)) == 0, "GUI keeps the K5c path (inside gui_call OP_WAIT)");
 }
 
 int kselftest_run(void)
