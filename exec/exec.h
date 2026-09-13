@@ -115,13 +115,18 @@ u32 exec_tramp_user_selftest(void);
  * NULL は 1 (wrap 側が意味を決める)。ディスパッチャの早期検証と同じ規則。 */
 int ring3_ptr_ok(u32 p);
 
-/* [p, p+len) のすべてのページが読めるか。**CPL=3 由来の呼び出し
- * (ring3_in_syscall) のときだけ**、各ページが ring3_ptr_ok の許可帯にあり、
- * かつ **呼び手の PD** で present + USER であることを確かめる (許可帯でも
- * guard や未マップは非 present なので、ここで弾かないとカーネル側のコピーが
- * #PF を起こし呼び手が kill される)。CPL=0 の直呼び (常駐シェル / gshell) は
- * 帯も PTE も見ない — 1 を返す。
- * 戻り値: 1 = 読んでよい / 0 = 拒否 (NULL・overflow・帯外・非 present・非 USER)。 */
+/* [p, p+len) のすべてのページが **許可帯** にあるか。**CPL=3 由来の呼び出し
+ * (ring3_in_syscall) のときだけ** 見る。CPL=0 の直呼び (常駐シェル / gshell)
+ * は素通しで 1。
+ *
+ * **PTE (present / USER) は見ない**。許可帯の中の非 present なページ
+ * (guard / sbrk 上限〜guard) をカーネルが写すと #PF になるが、それは既存の
+ * フォールトガードが呼び手を kill する扱いで、kprintf の可変長 %s など他の
+ * KAPI と同じ。表を歩こうとした実装は 2 度とも実機で誤判定した — PD と
+ * アプリ PT が pgalloc (PGALLOC_BASE = アプリ帯 0x400000) から取られるため、
+ * syscall 中 (CR3 = アプリ PD) に物理 = 仮想で表を読むと per-app 物理へ
+ * 張り替わった **アプリ自身のデータ** を読んでしまう。
+ * 戻り値: 1 = 帯の中 / 0 = 拒否 (NULL・overflow・帯外)。 */
 int ring3_user_range_ok(u32 p, u32 len);
 
 /* 断った理由 (ring3_range_reject_last)。実機で KAPI が MISUSE を返したときに
@@ -131,8 +136,10 @@ int ring3_user_range_ok(u32 p, u32 len);
 #define RING3_RANGE_OVERFLOW   2   /* p + len が折り返す */
 #define RING3_RANGE_NO_APP     3   /* ring3_in_syscall なのに g_cur_app が 0 */
 #define RING3_RANGE_BAND       4   /* ring3_ptr_ok の許可帯の外 */
-#define RING3_RANGE_NOPRESENT  5   /* 帯の中だが呼び手の PD で非 present */
-#define RING3_RANGE_NOUSER     6   /* present だが USER が立っていない */
+/* 5 / 6 は PTE 検査をしていた頃の理由。いまは使わない (番号は再利用しない —
+ * 実機のログと突き合わせるとき意味が変わると困る)。 */
+#define RING3_RANGE_NOPRESENT  5   /* (廃止) 帯の中だが非 present */
+#define RING3_RANGE_NOUSER     6   /* (廃止) present だが USER 無し */
 extern volatile u32 ring3_range_reject_count;
 extern volatile u32 ring3_range_reject_last;
 extern volatile u32 ring3_range_reject_addr;

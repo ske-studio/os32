@@ -181,88 +181,54 @@ void _start(void)
         CHECK(live_addrspaces == 0 && used == before - 2);
     }
     {
-        /* 票 S0-K / 実機 K2 (2026-09-13): KAPI のポインタ検証が見る 2 ビット。
-         * **exec が実機で作るのと同じ順序** で AS を組み、CR3 に載せてから
-         * `paging_current_pte_flags` で歩く:
-         *   create_n → clear_app_band → app_map_region 相当 (per-app 物理を
-         *   USER で 3 領域) → shlib_addrspace_attach 相当 (帯の下側を RO+USER)
-         * 以前ここは `paging_addrspace_pte_flags(&as, v)` を呼んでいて、
-         * **控え (as->app_pt_phys[]) から PT を選んでいた**。控えと実配置が
-         * ずれると健全なページを非 present と誤判定する — 実機はまさにそれで、
-         * .rodata の 0x501000 が「非 present」と出た。MMU と同じ辿り方
-         * (CR3 → PDE → PDE が指す PT) なら控えが何であれ答は一致する。 */
+        /* 票 S0-K / 実機 K2 (2026-09-13): **アプリの PD を、そのアプリの
+         * syscall 中に歩いてはならない** ことの番人。
+         *
+         * カーネルはページテーブルを「物理 = 仮想」で読む。ところが PD も
+         * アプリ PT も pgalloc から取られ、`PGALLOC_BASE` は 0x400000 =
+         * `MEM_APP_BAND_BASE` — **アプリ帯そのもの**。アプリの PD ではその
+         * 仮想番地が per-app 物理へ張り替わるので、CR3 = アプリ PD のまま
+         * 表を辿ると PT のつもりでアプリ自身のデータを読む。#PF も起きず、
+         * 健全な .rodata を「非 present」と答える (実機で 2 回これを踏んだ)。
+         *
+         * ここで固定するのは 2 つ:
+         *   1. PGALLOC_BASE がアプリ帯の中にある (= 前提が成り立っている)
+         *   2. exec と同じ順序で組んだ AS では、アプリ PT の物理番地が
+         *      アプリ PD の下で **別の物理** に解決される (= 歩けない) */
         struct addrspace as;
         u32 code = 0x500000, sbrk_end = 0x520000;
-        u32 heap = 0x600000, heap_end = 0x610000;
-        u32 stack = 0x7C0000, stack_top = 0x800000;
-        u32 saved_cr3 = host_cr3;
-        u32 flags, other_pt;
+        u32 pt_phys, pdi, pti;
+        u32 *app_pt;
 
+        CHECK(PGALLOC_BASE == MEM_APP_BAND_BASE);
         CHECK(paging_addrspace_create_n(&as, 1) == 0);
         CHECK(as.app_pde == APP_BAND_PDE && as.app_pde_count == 1);
+        pt_phys = as.app_pt_phys[0];
         CHECK(paging_addrspace_clear_app_band(&as) == 0);
         CHECK(paging_addrspace_map_user_range_phys(&as, code, sbrk_end,
                                                    0x900000, PAGE_RW | PTE_USER) == 0);
-        CHECK(paging_addrspace_map_user_range_phys(&as, heap, heap_end,
-                                                   0x980000, PAGE_RW | PTE_USER) == 0);
-        CHECK(paging_addrspace_map_user_range_phys(&as, stack, stack_top,
-                                                   0x9A0000, PAGE_RW | PTE_USER) == 0);
-        /* shlib 相当: 帯の下側 (0x400000-) を RO + USER で張り直す */
-        CHECK(paging_addrspace_map_user_range(&as, MEM_SHLIB_BASE,
-                                              MEM_SHLIB_BASE + 0x2000,
-                                              PAGE_RO | PTE_USER) == 0);
 
-        /* ---- ここから「いま効いている表」を歩く (syscall 中と同じ状態) ---- */
-        host_cr3 = as.pd_phys;
-        /* 実機で落ちた番地と同じ形 = ロード先の **次のページ** の .rodata */
-        flags = paging_current_pte_flags(code + 0x140E);
-        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        flags = paging_current_pte_flags(code);
-        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        flags = paging_current_pte_flags(sbrk_end - 1);
-        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        flags = paging_current_pte_flags(stack_top - 1);
-        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        flags = paging_current_pte_flags(MEM_SHLIB_BASE);
-        CHECK((flags & (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        CHECK(!(flags & PTE_RW));                 /* shlib text は RO */
-        /* 張っていない隙間 (sbrk 上限〜heap、= guard) は非 present */
-        CHECK(paging_current_pte_flags(sbrk_end) == 0);
-        CHECK(paging_current_pte_flags(heap_end) == 0);
+        /* アプリ PT の物理がアプリ帯に入っているなら、アプリ PD の下で
+         * その仮想番地は **PT ではないもの** を指す (or 非 present)。
+         * 入っていない構成でも「歩いてよい」ことにはならないので、
+         * 入っているときだけ強い主張をする。 */
+        if (pt_phys >= MEM_APP_BAND_BASE && pt_phys < MEM_APP_BAND_TOP) {
+            pdi = pt_phys >> 22;
+            pti = (pt_phys >> 12) & 0x3FF;
+            CHECK(pdi >= as.app_pde && pdi < as.app_pde + as.app_pde_count);
+            app_pt = (u32 *)as.app_pt_phys[pdi - as.app_pde];
+            /* clear_app_band の後に張ったのは [code, sbrk_end) だけなので、
+             * PT 自身の番地は非 present か、per-app 物理 (PT ではない) を指す。*/
+            if (app_pt[pti] & PTE_PRESENT) {
+                CHECK((app_pt[pti] & 0xFFFFF000UL) != pt_phys);
+            }
+        }
 
-        /* **控えではなく PDE を辿っている** ことの証拠: PDE の指す PT だけを
-         * 別の (全部 0 の) PT に差し替えると答が変わる。控えから選ぶ実装は
-         * ここで古い PT を読み続けてしまう (実機 K2 の壊れ方)。 */
-        other_pt = pgalloc_alloc_page();
-        CHECK(other_pt != 0);
-        {
-            u32 *zero = (u32 *)other_pt;
-            int z;
-            for (z = 0; z < PTE_COUNT; z++) zero[z] = 0;
-        }
-        {
-            u32 *pd = (u32 *)as.pd_phys;
-            u32 saved_pde = pd[APP_BAND_PDE];
-            pd[APP_BAND_PDE] = (other_pt & 0xFFFFF000UL) |
-                               (saved_pde & 0xFFFu);
-            CHECK(paging_current_pte_flags(code + 0x140E) == 0);
-            pd[APP_BAND_PDE] = saved_pde;
-            CHECK((paging_current_pte_flags(code + 0x140E) &
-                   (PTE_PRESENT | PTE_USER)) == (PTE_PRESENT | PTE_USER));
-        }
-        /* PDE.PS は明示的に拒否 (この OS は 4MB ページを張らない) */
-        {
-            u32 *pd = (u32 *)as.pd_phys;
-            u32 saved_pde = pd[APP_BAND_PDE];
-            pd[APP_BAND_PDE] = saved_pde | PTE_PS;
-            CHECK(paging_current_pte_flags(code) == 0);
-            pd[APP_BAND_PDE] = saved_pde;
-        }
-        pgalloc_free_page(other_pt);
+        /* master の下では従来どおり identity で読める (create_n が書けたのも
+         * これのおかげ)。歩いてよいのは master CR3 の下だけ、という証拠。 */
+        CHECK(paging_current_cr3() == paging_kernel_pd_phys());
+        CHECK(paging_pte_flags(pt_phys) & PTE_PRESENT);
 
-        host_cr3 = saved_cr3;
-        /* master に戻すと同じ番地はアプリ帯の USER 写像を持たない */
-        CHECK(!(paging_current_pte_flags(code + 0x140E) & PTE_USER));
         paging_addrspace_destroy(&as);
     }
     SAY("PASS: one-shot init preserves dynamic PT, live AS, CR3, allocator");

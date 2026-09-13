@@ -573,6 +573,63 @@ RO+USER) に置き換え、**`host_cr3 = as.pd_phys` にしてから** `paging_c
 `DB_ResultHeader.error_offset` の先にあるので、試験側を
 `shm_base` から読む `shm_error()` に直した。
 
+### 2h. 実機 K2 の決着 (2026-09-13、CR3 版 `d2322f0`) — 表は歩けない
+
+CR3 → PDE → PDE が指す PT に直した版を配備しても **結果は変わらなかった**:
+
+```
+  FAIL: RO open of an existing db   open_fail=21 shm_error=path pointer rejected by the range check
+ring3_range_reject_count = 4  _last = 5 (非 present)  _addr = 0x501427  _page = 0x501000
+fault_kill_count = 0   kselftest 87/0
+```
+
+**根拠のある結論** (コードで確定できた):
+
+- `paging_current_cr3()` は `mov %%cr3, %0` で**レジスタを直接読む**
+  (`kernel/paging.c`)。控えではないので疑い (1) は外れ。
+- 疑い (2) が当たり。カーネルはページテーブルを「**物理番地 = 仮想番地**」で
+  読む。ところが PD もアプリ PT も `pgalloc` から取られ、
+  **`PGALLOC_BASE` は 0x400000 = `MEM_APP_BAND_BASE`** (`kernel/pgalloc.h`)
+  — つまり **アプリ帯そのもの**。
+  `exec_run` は CPL=3 アプリでは `pgalloc_mark_used` で帯を押さえない
+  (`exec_cpl0_claim` は CPL=0 の子だけ) ので、PD / PT の物理はふつうに
+  0x4xxxxx〜0x7xxxxx から出る。
+  そして `paging_addrspace_clear_app_band()` + per-app 物理化の後、
+  **アプリの PD ではその仮想番地は per-app 物理へ張り替わっている**。
+  だから syscall 中 (CR3 = アプリ PD) に表を辿ると、PT のつもりで
+  **アプリ自身のデータ**を読む。中身のビット 0 はたいてい 0 なので
+  「非 present」と答え、ページ自体は present なので **#PF も起きない**
+  (`fault_kill_count = 0` と完全に整合)。
+- `AppSlot.as` の控えから引いても PDE から引いても**同じ物理**を指すので、
+  2 つの実装が同じ壊れ方をしたのは当然だった。表を歩けるのは master CR3 の
+  下だけで、syscall の途中で CR3 を差し替えるのは割に合わない。
+
+**採った方針 (B)**: PTE (present / USER) の検査を**外す**。範囲検査は
+NULL / `p + len` の overflow / **各ページが `ring3_ptr_ok` の許可帯**だけ。
+許可帯の中の非 present ページ (guard / 未マップ sbrk) をカーネルが写すと
+#PF になるが、それは既存のフォールトガード (`ring3_in_syscall`) が呼び手を
+kill する — `kprintf` の可変長 `%s` など他の KAPI と同じ既定の扱いで、
+カーネルの整合は保たれる。契約 (FOUNDATION §2-6 の「untrusted pointer /
+長さ / 境界を CPL3 経路で検証」) は帯 + 長さで満たす。
+票 §1a と K2 の「guard をまたぐ範囲が -1」は **「kill される」** に改めた
+(同じプロセスでは踏めないので K2 からは外した)。
+
+**前回の訂正 ([V4])**: 2f で「`paging_addrspace_pte_flags` はシロ」と書いたのは
+**誤り**だった。当時の host fixture は控えと実配置が一致する組み方しかして
+おらず、しかも**カーネルと同じ「物理 = 仮想」の罠を再現していなかった**
+(ホストでは `host_cr3` を差し替えても、テーブルはホストのアドレス空間に
+そのまま見えている)。2g で「控えから選んでいたのが原因」と書いたのも
+**半分だけ正しい** — 控えかどうかではなく、**アプリの PD の下で表を歩いたこと**
+が原因だった。
+
+**残した番人**: `tools/tests/paging_bounds_host.c` の項を
+「`PGALLOC_BASE == MEM_APP_BAND_BASE` であること」と「exec と同じ順序で組んだ
+AS では、アプリ PT の物理番地がアプリ PD の下で**別の物理**に解決される
+(= 歩けない)」を固定する形に置き換えた。`kernel/paging.h` にも
+「走っているアプリの PD を、そのアプリの syscall 中に歩いてはならない」を
+警告として書いた。計器 (`ring3_range_reject_*`) はそのまま残す
+(方針 B が効いていれば `count` は 0 のままになる)。
+
 ### 3. ケース一覧 (`test_kapi_db_v50.py`)
 
 | ケース | 見るもの |
@@ -582,7 +639,7 @@ RO+USER) に置き換え、**`host_cr3 = as.pd_phys` にしてから** `paging_c
 | `binds` | prepare 前 / step 後は不可、1-based と範囲外、負長、text 256B・blob 4097B の拒否、0B の text/blob が `typeof` で `text`/`blob` (NULL ではない)、**4096B blob の往復** |
 | `error_code` | 範囲外 / 未使用 slot = `MISUSE`、失敗の保持と取得で消えないこと、成功で 0 に戻ること、**finalize / close が上書きしない**こと、close 後も再利用まで残ること、owner 別の `-1` 欄が混ざらないこと |
 | `shm_bound` | 純関数 `shm_row_fits_n` のちょうど / 1 バイト超 / descriptor だけで溢れる列数、実接続で 20000B の行が `-1` + `SQLITE_TOOBIG` + 番兵無傷 |
-| `user_range` | CPL=0 は素通し、CPL=3 は帯外 / 帯末尾またぎ / **ガードまたぎ** / overflow を拒否、NUL 無し path の拒否、bind 後にユーザ側を書き換えても値が変わらない (スクラッチへ写っている) |
+| `user_range` | CPL=0 は素通し、CPL=3 は帯外 / 帯末尾またぎ / overflow を拒否。**帯の中は PTE を見ないので通る** (実機では写した瞬間に #PF → kill)。NUL 無し path の拒否、bind 後にユーザ側を書き換えても値が変わらない (スクラッチへ写っている) |
 | `owner_isolation` | 子 owner の回収で親の接続と実行中 stmt が無事 |
 | `order_new` / `order_old` | 上の RED → GREEN の 4 |
 

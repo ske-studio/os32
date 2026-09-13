@@ -533,48 +533,6 @@ u32 paging_pte_flags(u32 virt_addr)
 /*  載せた後もそれらのページは自分自身を identity で見られる。               */
 /* ======================================================================== */
 
-/* ======================================================================== */
-/*  paging_current_pte_flags — **いま CR3 に載っている表** で見た実効フラグ   */
-/*                                                                          */
-/*  票 S0-K §1a のポインタ検証用。syscall 中も CR3 はアプリの PD のままなので、*/
-/*  KAPI の wrap がユーザポインタを写す前に見るべきなのは master の           */
-/*  page_tables[] ではなく「いま効いている表」。                             */
-/*                                                                          */
-/*  **MMU と同じ辿り方をする** ことが肝 (2026-09-13 の実機 K2):              */
-/*  以前は `struct addrspace` の控え (`as->app_pt_phys[]` / `page_tables[]`)  */
-/*  から PT を選んでいたが、それは「exec がどの PT を使ったか」の**別勘定**で、*/
-/*  実配置とずれると健全なページを非 present と誤判定する。ここでは PDE が    */
-/*  指す PT の物理番地をそのまま辿る — 控えが何であれ MMU と同じ答になる。    */
-/*  (カーネルは全物理を恒等マップしているので PT の物理番地を直接読める。      */
-/*   PD/PT のバッキングもその前提で確保されている — create_n の注記参照。)    */
-/*                                                                          */
-/*  実効権限は PDE と PTE の論理積なので、両方を AND して返す。              */
-/* ======================================================================== */
-u32 paging_current_pte_flags(u32 virt)
-{
-    u32 pdi, pti, pde, pte;
-    u32 *pd;
-    u32 *pt;
-
-    if (!pg_enabled) return 0;
-    pd = (u32 *)paging_current_cr3();
-    if (!pd) return 0;
-    pdi = virt >> 22;
-    pde = pd[pdi];
-    if (!(pde & PTE_PRESENT)) return 0;
-    /* 4MB ページ (PDE.PS) はこの OS が一度も張らない。もし張られていたら
-     * PDE の下位ビットは PT の物理ではなくページそのものの属性なので、
-     * 下の PT 引きは別物を読む。**非 present 扱いで断る** (安全側)。 */
-    if (pde & PTE_PS) return 0;
-
-    pt = (u32 *)(pde & 0xFFFFF000UL);    /* MMU と同じく PDE から辿る */
-    if (!pt) return 0;
-    pti = (virt >> 12) & 0x3FF;
-    pte = pt[pti];
-    if (!(pte & PTE_PRESENT)) return 0;
-    return (pte & pde) & 0xFFFu;
-}
-
 u32 paging_kernel_pd_phys(void)
 {
     /* identity マッピングなので page_directory の仮想アドレス = 物理。 */

@@ -66,8 +66,11 @@ int vfs_stat(const char *path, OS32_Stat *st)
 
 /* ---- exec 側の模型 (kapi_db.c が唯一使う口) ---------------------------- */
 /* 0 = CPL=0 の直呼び (素通し) / 1 = CPL=3 由来 (帯と PTE を見る)。
- * 帯は [BAND_LO, BAND_HI) の 1 本にして、そのうち GUARD_PAGE だけを
- * 「許可帯の中だが非 present」= 実機のガード / 未マップに見立てる。 */
+ * 帯は [BAND_LO, BAND_HI) の 1 本。**PTE は見ない** (2026-09-13、実機 K2):
+ * 許可帯の中の非 present なページ (guard / 未マップ) はカーネルが写した
+ * ところで #PF になり、既存のフォールトガードが呼び手を kill する — 他の
+ * KAPI と同じ扱い。GUARD_PAGE は「帯の中でも検証は通る」ことの目印として
+ * 残す (実機ではそこを渡すと -1 ではなく kill)。 */
 #define HOST_PAGE      4096u
 #define BAND_LO        0x00400000u
 #define BAND_HI        0x00800000u
@@ -110,7 +113,6 @@ int ring3_user_range_ok(u32 p, u32 len)
     last = (p + len - 1u) & ~(HOST_PAGE - 1u);
     for (page = p & ~(HOST_PAGE - 1u); ; page += HOST_PAGE) {
         if (page < BAND_LO || page >= BAND_HI) return 0;
-        if (page == GUARD_PAGE) return 0;           /* 非 present */
         if (page >= last) break;
     }
     return 1;
@@ -468,8 +470,10 @@ static void user_range(void)
     CHECK(!db_user_range_ok((const void *)(BAND_LO - 1), 2));
     CHECK(!db_user_range_ok((const void *)(BAND_HI - 1), 2));
     CHECK(db_user_range_ok((const void *)(BAND_HI - 2), 2));
-    CHECK(!db_user_range_ok((const void *)(GUARD_PAGE - 1), 2));
-    CHECK(!db_user_range_ok((const void *)(GUARD_PAGE + 8), 2));
+    /* 帯の中は PTE を見ないので通る。実機ではここを写すと #PF → 呼び手を
+     * kill (票 §1a の改定、2026-09-13)。「-1 が返る」とは主張しない。 */
+    CHECK(db_user_range_ok((const void *)(GUARD_PAGE - 1), 2));
+    CHECK(db_user_range_ok((const void *)(GUARD_PAGE + 8), 2));
     CHECK(!db_user_range_ok((const void *)~(u32)0x0F, 0x20u));
     CHECK(!db_user_range_ok(NULL, 0));
     host_cpl3 = 0;

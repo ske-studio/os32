@@ -482,13 +482,22 @@ int ring3_ptr_ok(u32 p)
 /*                                                                          */
 /*    - CPL=3 由来 (ring3_in_syscall) のときだけ帯と PTE を見る。常駐シェル / */
 /*      gshell の直呼び (CPL=0、ディスパッチャを通らない) は素通し。          */
-/*    - 許可帯の中でも guard ページや未マップ (sbrk 上限〜guard) は非 present。*/
-/*      そこをカーネルが写すと #PF になり、CPL=3 由来なので呼び手が畳まれる。 */
-/*      だから帯だけでなく **いま効いている表の PTE** も見る (syscall 中も     */
-/*      CR3 はアプリの PD のまま)。master の page_tables[] はアプリ帯の USER   */
-/*      写像を持たないので paging_pte_flags() は使わない。**AppSlot.as の控え  */
-/*      からも辿らない** — 控えと実配置がずれて健全な .rodata を非 present と  */
-/*      誤判定した (実機 K2、2026-09-13)。MMU と同じく CR3 → PDE → PT を辿る。*/
+/*    - 見るのは **帯だけ**。許可帯の中の非 present なページ (guard / sbrk     */
+/*      上限〜guard) をカーネルが写すと #PF になるが、それは既存の            */
+/*      フォールトガード (ring3_in_syscall) が呼び手を kill する — kprintf の  */
+/*      可変長 %s など、他の KAPI と同じ既定の扱い。契約 (FOUNDATION §2-6 の   */
+/*      「untrusted pointer / 長さ / 境界を CPL3 経路で検証」) は帯 + 長さで    */
+/*      満たす。                                                              */
+/*                                                                            */
+/*    **PTE (present / USER) は見ない** (2026-09-13、実機 K2 で 2 回失敗):     */
+/*      カーネルはページテーブルを「物理番地 = 仮想番地」で読む。ところが      */
+/*      PD もアプリ PT も pgalloc から取られ (`PGALLOC_BASE` は 0x400000 で    */
+/*      **アプリ帯そのもの**)、アプリの PD では その仮想番地が per-app 物理へ  */
+/*      張り替わっている。つまり syscall 中 (CR3 = アプリ PD) に表を辿ると、    */
+/*      PT のつもりでアプリ自身のデータを読む — #PF も起きないまま「非 present」*/
+/*      と答える。`AppSlot.as` の控えから引いても、PDE から引いても同じ物理を  */
+/*      指すので結果は同じだった。表を正しく歩けるのは master CR3 の下だけで、  */
+/*      syscall の途中で CR3 を差し替えるのは割に合わない。                    */
 /* ======================================================================== */
 /* ---- 検証が断った理由の観測点 (実機 K2 の切り分け、2026-09-13) ----------
  * KAPI にはしない。fault_kill_count と同じくカーネルシンボルとして公開し、
@@ -528,15 +537,8 @@ int ring3_user_range_ok(u32 p, u32 len)
 
     last_page = (p + len - 1u) & ~(u32)(PAGE_SIZE - 1);
     for (page = p & ~(u32)(PAGE_SIZE - 1); ; page += PAGE_SIZE) {
-        u32 flags;
         if (page == 0 || !ring3_ptr_ok(page))
             return ring3_range_refuse(RING3_RANGE_BAND, p, page);
-        flags = paging_current_pte_flags(page);
-        if ((flags & (u32)(PTE_PRESENT | PTE_USER)) !=
-            (u32)(PTE_PRESENT | PTE_USER))
-            return ring3_range_refuse(
-                (flags & (u32)PTE_PRESENT) ? RING3_RANGE_NOUSER
-                                           : RING3_RANGE_NOPRESENT, p, page);
         if (page >= last_page) break;
     }
     return 1;

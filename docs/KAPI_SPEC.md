@@ -593,9 +593,13 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   区別しない)。範囲外 handle / 一度も開かれていない slot は `SQLITE_MISUSE`。
   `handle = -1` は呼び手 owner の直前 open 失敗。取得しても消えない。
 - CPL=3 の呼び手が渡すポインタは、ディスパッチャの早期検証 (先頭番地だけ) に加えて
-  wrap 側が**範囲まで**検査する: 各ページが許可帯にあり、かつ**呼び手の PD** で
-  present + USER であること (`ring3_user_range_ok` → `paging_current_pte_flags`:
-  CR3 → PDE → PDE が指す PT と **MMU と同じ順**で辿る)。CPL=0 の直呼び (常駐シェル /
+  wrap 側が**範囲まで**検査する: `[p, p+len)` の各ページが許可帯にあること
+  (`ring3_user_range_ok`)。**PTE (present / USER) は見ない** — 許可帯の中の
+  非 present なページをカーネルが写すと #PF になるが、それは既存のフォールト
+  ガードが呼び手を kill する扱いで、`kprintf` の可変長 `%s` など他の KAPI と
+  同じ。表を歩く実装は 2026-09-13 の実機で誤判定した (PD / アプリ PT が
+  pgalloc = アプリ帯から出るので、syscall 中に物理 = 仮想で辿ると
+  アプリ自身のデータを読む)。CPL=0 の直呼び (常駐シェル /
   gshell) は帯も PTE も見ない。`db_step` / `db_prepare` の 1 行が 16KB の結果ブロック
   (header + 全列 descriptor + payload) に収まらないときは、範囲外書き込みも部分 ROW も
   返さず `-1` で失敗し、`db_error_code` に `SQLITE_TOOBIG` が残る。列値の**実体化**が

@@ -26,10 +26,10 @@
 #define BAND_TOP        0x800000UL   /* MEM_APP_BAND_TOP (スタック帯の上端) */
 #define VRAM_END        0x0C0000UL   /* 許可帯 [0xA0000, 0xC0000) の末尾 */
 /* 「許可帯の中だが非 present」= sbrk 上限のすぐ上 (guard_a)。
- * ring3_ptr_ok の帯は [0x400000, ガード直下) なので **帯判定では通り**、
- * 呼び手の PD の PTE 検査でしか弾けない。ここを固定値で書くと帯の外に
- * なってしまうので、KAPI のデータフィールドから実行時に引く。 */
-#define UNMAPPED(api)   ((api)->sbrk_heap_limit)
+ * **ここは試験しない** (票 §1a の改定、2026-09-13): 検証は帯と長さだけを見る
+ * ので -1 では返らず、カーネルが写した瞬間に #PF → 呼び手が kill される
+ * (kprintf の %s など他の KAPI と同じ既定の扱い)。この試験プログラムは
+ * 「落ちないこと」を合格条件にしているので、同じプロセスでは踏めない。 */
 
 static int passed;
 static int failed;
@@ -157,14 +157,8 @@ int main(int argc, char **argv, KernelAPI *api)
        "text range crossing the end of a permitted band is refused");
     ok(api->db_bind_text(h, 1, (const char *)(BAND_TOP - 1), 2) < 0,
        "text range crossing the top of the app band is refused");
-    /* sbrk 上限の 1 バイト手前から 2 バイト = 最後の present なページから
-     * **未マップのページ (guard_a) へまたぐ**。帯の中なので ring3_ptr_ok では
-     * 落ちず、PTE 検査 (paging_addrspace_pte_flags) だけが弾ける。 */
-    ok(UNMAPPED(api) != 0, "sbrk_heap_limit is published to the app");
-    ok(api->db_bind_blob(h, 3, (const void *)(UNMAPPED(api) - 1), 2) < 0,
-       "blob range crossing into the unmapped page above sbrk is refused");
-    ok(api->db_bind_text(h, 1, (const char *)UNMAPPED(api), 1) < 0,
-       "the first unmapped page above sbrk is refused");
+    /* 帯の**外**へ出る範囲だけを見る。帯の中の未マップページ (sbrk 上限〜
+     * guard) は -1 ではなく kill なので、ここでは踏まない (上の注記)。 */
     ok(api->db_bind_text(h, 1, "x", -1) < 0, "a negative length is refused");
     ok(api->db_bind_text(h, 1, (const char *)0, 0) < 0,
        "a NULL text pointer is refused (db_bind_null is the way)");

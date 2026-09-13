@@ -280,15 +280,15 @@ u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
 int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
                                    u32 vend, u32 flags);
 
-/* **いま CR3 に載っている表**で virt を見たときの実効フラグ (票 S0-K §1a)。
- * master の page_tables[] を引く paging_pte_flags() と違い、アプリ固有 PDE
- * 配下の PT は走っているアプリの PD からしか見えないので、KAPI がユーザ
- * ポインタを写す前の present + USER 判定にはこちらを使う。
- * **MMU と同じく PDE が指す PT を辿る** — `struct addrspace` の控えから PT を
- * 選ぶ実装は実配置とずれて健全なページを非 present と誤判定した (実機 K2、
- * 2026-09-13)。戻り値は PDE と PTE の論理積の下位 12 ビット (実効権限)。
- * ページが無ければ 0。**読むだけ**で表は 1 ビットも動かさない。 */
-u32 paging_current_pte_flags(u32 virt);
+/* ⚠ **走っているアプリの PD を、そのアプリの syscall 中に歩いてはならない**
+ * (票 S0-K / 実機 K2、2026-09-13)。カーネルはページテーブルを「物理 = 仮想」で
+ * 読むが、PD もアプリ PT も pgalloc から取られ (`PGALLOC_BASE` は 0x400000 =
+ * **アプリ帯そのもの**)、アプリの PD ではその仮想番地が per-app 物理へ
+ * 張り替わっている。したがって CR3 = アプリ PD のまま表を辿ると、PT の
+ * つもりで **アプリ自身のデータ** を読む (#PF も起きないまま健全なページを
+ * 非 present と答える)。`struct addrspace` の控えから引いても PDE から引いても
+ * 同じ物理を指すので結果は同じ。表を歩けるのは master CR3 の下だけ。
+ * KAPI のポインタ検証は PTE を見ず、帯 (`ring3_ptr_ok`) と長さだけで判断する。 */
 
 /* PD 複製の自己診断 (V1)。CPL=0 のまま:
  *   1. アプリ AS を作る
