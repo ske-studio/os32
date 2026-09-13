@@ -46,7 +46,7 @@ extern int gfx_lease_palette(int first, int count, const u8 *rgb);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[201];
+volatile u32 kapi_hits[208];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -253,6 +253,13 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* launch_cancel */
     4,  /* launch_child */
     0,  /* sys_yield */
+    8,  /* db_open_existing */
+    8,  /* db_prepare_only */
+    12,  /* db_bind_int */
+    16,  /* db_bind_text */
+    16,  /* db_bind_blob */
+    8,  /* db_bind_null */
+    4,  /* db_error_code */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -459,6 +466,13 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* launch_cancel */
     0x0000,  /* launch_child */
     0x0000,  /* sys_yield */
+    0x0001,  /* db_open_existing: path */
+    0x0002,  /* db_prepare_only: sql */
+    0x0000,  /* db_bind_int */
+    0x0004,  /* db_bind_text: text */
+    0x0004,  /* db_bind_blob: data */
+    0x0000,  /* db_bind_null */
+    0x0000,  /* db_error_code */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1659,5 +1673,47 @@ i32 __cdecl wrap_sys_yield(void)
 {
     KAPI_HIT(200);
     return exec_sys_yield();
+}
+
+int __cdecl wrap_db_open_existing(const char *path, int writable)
+{
+    KAPI_HIT(201);
+    return kapi_db_open_existing(path, writable);
+}
+
+int __cdecl wrap_db_prepare_only(int handle, const char *sql)
+{
+    KAPI_HIT(202);
+    return kapi_db_prepare_only(handle, sql);
+}
+
+int __cdecl wrap_db_bind_int(int handle, int index, int value)
+{
+    KAPI_HIT(203);
+    return kapi_db_bind_int(handle, index, value);
+}
+
+int __cdecl wrap_db_bind_text(int handle, int index, const char *text, int length)
+{
+    KAPI_HIT(204);
+    return kapi_db_bind_text(handle, index, text, length);
+}
+
+int __cdecl wrap_db_bind_blob(int handle, int index, const void *data, int length)
+{
+    KAPI_HIT(205);
+    return kapi_db_bind_blob(handle, index, data, length);
+}
+
+int __cdecl wrap_db_bind_null(int handle, int index)
+{
+    KAPI_HIT(206);
+    return kapi_db_bind_null(handle, index);
+}
+
+int __cdecl wrap_db_error_code(int handle)
+{
+    KAPI_HIT(207);
+    return kapi_db_error_code(handle);
 }
 

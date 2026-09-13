@@ -112,3 +112,12 @@
 - 失敗伝播: `run_sync()` を通した `sync`、`cp` / `rm` の戻り値、`do_umount` の sync をすべて非ゼロにし、`main` は各サブコマンドの戻り値を終了コードにする (`sys.exit(0 if main() is not False else 1)`)。保護対象の除外は失敗ではない。
 - ゲスト側は `userland/system/hsync_protect.inc` (純関数: 字句正規化 + 名前規則) を `hsync.c` が include し、`dst_protected()` が名前規則 → `/etc/settings.db*` との inode 比較の順で見る。ディレクトリ作成経路と `-f` の subdir 連結も同じ判定を通る。併せて `dst_dir` が `""` のときに `dst_path[-1]` を読んでいた既存の境界バグを直した。
 - ホスト TDD: `tools/tests/test_deploy_protect.py` (53 件、RED 35 失敗 → GREEN 全通過)、`tools/tests/test_hsync_protect.py` + `hsync_protect_host.c` (28 checks)。記録は `tools/tests/s0_tdd.md` 節 D。配備・エミュレータ・`make` は未実行、D1 受入は未了 ([V4])。
+## 7. 実装メモ (K、2026-09-13)
+
+- v50 の 7 本は `sdk/kapi.json` 末尾に slot 201〜207 (0x32C〜0x344)、data_fields は 0x348 / 0x34C へ移動。生成物は generator 出力のまま (手編集なし)。
+- ポインタ検証は `exec/exec.c` に `ring3_user_range_ok` を新設し (`ring3_ptr_ok` を非 static 化、宣言は `exec.h`)、PTE は新設 `paging_addrspace_pte_flags(as, virt)` で **呼び手の PD** を引く。`kapi_db.c` は `db_user_range_ok` から 1 本だけ呼ぶ (帯判定を二重に書かない)。
+- 上限は `os32_kapi_shared.h` の `DB_SQL_MAX_BYTES` / `DB_BIND_TEXT_MAX` / `DB_BIND_BLOB_MAX` が管理元 ([C4])。スクラッチは sql 1024 / path 256 / text 256 / blob 4096 の静的 1 本ずつ。
+- 「close 後は slot **再利用まで**最後の失敗を返す」を実装。**再利用後は新しい接続の値** (成功 open 直後なら 0) になる — handle に世代が無いので「再利用後 MISUSE」は判別できない。一度も開いていない slot と範囲外 handle は `SQLITE_MISUSE`。
+- `exec_reclaim_owned` は DB を先頭へ (他の相対順は不変)。回収順の差はホストで観測済み: 後始末がバックエンドに届いた回数が 新 21 / 旧 2。戻り値はどちらも成功なので**回数で**見る (VFS の I/O 失敗握り潰しは票 F3a のまま)。
+- ホスト TDD は `tools/tests/kapi_db_v50_host.c` + `test_kapi_db_v50.py` (9 件、実 SQLite + 実 VFS + RAM backend)。RED→GREEN は `tools/tests/s0_tdd.md`。既存 5 本回帰済み。
+- **未実施**: `make` 全般・配備・エミュレータ・ゲスト試験 (K1 / K2)。`build/app.conf` / `userland/deploy.yaml` / `build/sdk.mk` は PM 登録待ち (登録行は報告に記載)。

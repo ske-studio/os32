@@ -55,6 +55,51 @@ const char * __cdecl kapi_db_last_error(int handle);
 /* 戻り値: sqlite3_memory_used() の値 (バイト単位) */
 u32 __cdecl kapi_db_mem_used(void);
 
+/* ======================================================================== */
+/*  v50 (票 S0-K §1a) — 設定レジストリの基盤 7 本                            */
+/*                                                                          */
+/*  既存 10 本の順序・型・挙動は 1 つも動かさない ([ABI2])。新 handle にも     */
+/*  db_step / db_finalize / db_close をそのまま使う (reset API は足さない)。  */
+/* ======================================================================== */
+
+/* 「直前の open 失敗」を呼び手 (owner) ごとに 1 欄だけ保持する。owner は
+ * exec/appslot.h の ID の池 (0 = カーネル / 1 = シェル帯 / 2..APP_ID_MAX = 5)。
+ * APP_SLOT_COUNT 以上であることは kernel/kselftest.c の v50 の項が見る。 */
+#define DB_OWNER_SLOTS    6
+
+/* 既存 DB を開く (CREATE / URI を付けない)。
+ *   writable: 0 = SQLITE_OPEN_READONLY / 1 = SQLITE_OPEN_READWRITE。他は拒否。
+ * open の **前**に本体の size > 0 と `<path>-journal` の不在を vfs_stat で
+ * 検査し、反すれば SQLite を呼ばずに失敗する (RO でも hot journal の
+ * 後始末を走らせないため)。失敗の拡張コードは owner 別の欄に残り
+ * db_error_code(-1) で読める。戻り値: handle >= 0 / -1 = 失敗。 */
+int __cdecl kapi_db_open_existing(const char *path, int writable);
+
+/* step しない prepare。SQL は NUL 込み DB_SQL_MAX_BYTES 以内 (超過は
+ * 切り捨てず拒否)、単一の非空 statement のみ (末尾の空白 / コメントは可)。
+ * 同じ handle の旧 stmt は finalize して置換する。0 = 成功 / -1 = 失敗。 */
+int __cdecl kapi_db_prepare_only(int handle, const char *sql);
+
+/* bind は prepare_only の後・最初の step の前だけ。index は 1-based。
+ * text / blob はカーネルへ検証付きコピーしてから SQLITE_TRANSIENT で渡す
+ * (SQLite に呼び手のポインタを保持させない)。0 = 成功 / -1 = 失敗。 */
+int __cdecl kapi_db_bind_int(int handle, int index, int value);
+int __cdecl kapi_db_bind_text(int handle, int index, const char *text, int length);
+int __cdecl kapi_db_bind_blob(int handle, int index, const void *data, int length);
+int __cdecl kapi_db_bind_null(int handle, int index);
+
+/* slot の「最後の失敗」コード (SQLite 拡張 result code) を返す診断専用の口。
+ * データ操作 (open_existing / prepare_only / bind_* / step / exec) は成功で 0 に、
+ * 失敗でそのコードに更新する。finalize / close は**失敗したときだけ**更新する
+ * (後片付けが原因診断を消さない)。close 後も slot が再利用されるまで同じ値を
+ * 返す。範囲外 handle / 一度も開かれていない slot は SQLITE_MISUSE。
+ * handle = -1 は呼び手 owner の「直前の open 失敗」。取得しても消えない。 */
+int __cdecl kapi_db_error_code(int handle);
+
+/* v50 の自己診断 (kernel/kselftest.c から。ホスト試験と同じ判定を踏む)。
+ * ビット 0..n が落ちた項目 (0 = 全部通った)。 */
+u32 db_v50_selftest(void);
+
 /* 既存 exec_exit 用の全 active slot 回収を F2 まで維持。隔離 slot は除外。 */
 void db_cleanup_all(void);
 

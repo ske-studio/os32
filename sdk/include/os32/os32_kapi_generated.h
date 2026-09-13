@@ -206,11 +206,18 @@ typedef struct {
     i32 (__cdecl *launch_cancel)(i32 token);
     i32 (__cdecl *launch_child)(i32 id);
     i32 (__cdecl *sys_yield)(void);
+    int (__cdecl *db_open_existing)(const char *path, int writable);
+    int (__cdecl *db_prepare_only)(int handle, const char *sql);
+    int (__cdecl *db_bind_int)(int handle, int index, int value);
+    int (__cdecl *db_bind_text)(int handle, int index, const char *text, int length);
+    int (__cdecl *db_bind_blob)(int handle, int index, const void *data, int length);
+    int (__cdecl *db_bind_null)(int handle, int index);
+    int (__cdecl *db_error_code)(int handle);
     u32 sbrk_heap_limit;  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     u32 shm_base;  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 } KernelAPI;
 
-#define KAPI_FUNC_COUNT 201
+#define KAPI_FUNC_COUNT 208
 extern const u16 kapi_argsize[KAPI_FUNC_COUNT];
 extern const u16 kapi_argptr[KAPI_FUNC_COUNT];
 

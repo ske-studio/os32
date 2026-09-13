@@ -130,6 +130,9 @@ filesystem:
     - host: userland/tests/kbd_echo.bin
       guest: /usr/bin/
       tags: [programs]
+    - host: userland/tests/db_v50_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/asset_test.bin
       guest: /usr/bin/
       tags: [programs]

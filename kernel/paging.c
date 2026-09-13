@@ -533,6 +533,39 @@ u32 paging_pte_flags(u32 virt_addr)
 /*  載せた後もそれらのページは自分自身を identity で見られる。               */
 /* ======================================================================== */
 
+/* ======================================================================== */
+/*  paging_addrspace_pte_flags — 呼び手の PD で見た実効フラグ (票 S0-K §1a)  */
+/*                                                                          */
+/*  syscall 中も CR3 はアプリの PD のままなので、KAPI の wrap がユーザ        */
+/*  ポインタを写す前に見るべきなのは master の page_tables[] ではなく         */
+/*  **この AS の PD/PT**。許可帯の中でも guard / 未マップ (sbrk 上限〜guard)  */
+/*  は非 present で、そこを写すとカーネル側で #PF → 呼び手が kill される。    */
+/*  実効権限は PDE と PTE の論理積なので、両方を AND して返す。              */
+/* ======================================================================== */
+u32 paging_addrspace_pte_flags(struct addrspace *as, u32 virt)
+{
+    u32 pdi, pti, pde;
+    u32 *pd;
+    u32 *pt;
+
+    if (!pg_enabled || !as || !as->pd_phys || !as->app_pde_count) return 0;
+    pdi = virt >> 22;
+    pd = (u32 *)as->pd_phys;
+    pde = pd[pdi];
+    if (!(pde & PTE_PRESENT)) return 0;
+
+    if (pdi >= as->app_pde && pdi < as->app_pde + as->app_pde_count) {
+        pt = (u32 *)as->app_pt_phys[pdi - as->app_pde];   /* アプリ固有 PT */
+    } else {
+        pt = page_tables[pdi];                            /* 共有 PT */
+    }
+    if (!pt) return 0;
+
+    pti = (virt >> 12) & 0x3FF;
+    if (!(pt[pti] & PTE_PRESENT)) return 0;
+    return (pt[pti] & pde) & 0xFFFu;
+}
+
 u32 paging_kernel_pd_phys(void)
 {
     /* identity マッピングなので page_directory の仮想アドレス = 物理。 */

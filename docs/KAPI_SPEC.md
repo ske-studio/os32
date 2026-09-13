@@ -1,4 +1,4 @@
-# KernelAPI v49 仕様書
+# KernelAPI v50 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -91,7 +91,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v47 | **実装済み (2026-09-12、K7-K)** | GUI v1.3 K7 入力統合: `kbd_inject` (con_sink の読み手専用、UTF-8 を 256B の注入リングへ) / `kbd_inject_pending` (未読バイト数、誰でも可)。GUI 中の `kbd_getchar` / `kbd_getkey` は第 2 の park 点 (`APP_STATE_WAIT_KEY`) になり、`exec_resume` が注入リングから 1 バイトを EAX に入れる。同じ追記でエラー番号 -14 `OS32_ERR_AGAIN` を取った | [tasks/gui/v13/TASK_K7_input.md](tasks/gui/v13/TASK_K7_input.md) |
 | v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
 | v49 | **実装済み (2026-09-12、T9-K)** | GUI v1.3 T9 shell script: 起動要求表 8 本 — `launch_req` / `launch_pending` / `launch_take` / `launch_report` / `launch_poll` / `launch_cancel` / `launch_child` と `sys_yield`。GUI 中の CPL=3 は入れ子 `exec_run` を使えないので、外部プログラムの起動と kill をカーネルの表に載せ owner 1 (WM) が仲介する。同じ追記で `exec_kill` を「id と子孫を末尾から回収」に固定した (D8) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
-| v50 | **予約 (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
+| v50 | **実装済み (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -533,6 +533,54 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 | 0x324 | launch_child | `i32(i32 id)` |
 | 0x328 | sys_yield | `i32(void)` |
 
+### 設定レジストリの基盤 (v50)
+
+既存 `db_*` 10 本 (0x238〜0x25C) は 1 つも動かない ([ABI2])。追加は末尾だけで、
+新しい handle にも既存の `db_step` / `db_finalize` / `db_close` をそのまま使う
+(反復は再 prepare。reset API は足さない)。票
+[tasks/settings/TASK_S0.md](tasks/settings/TASK_S0.md) §1a、実体は `kapi/kapi_db.c`。
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x32C | db_open_existing | `int(const char *path, int writable)` |
+| 0x330 | db_prepare_only | `int(int handle, const char *sql)` |
+| 0x334 | db_bind_int | `int(int handle, int index, int value)` |
+| 0x338 | db_bind_text | `int(int handle, int index, const char *text, int length)` |
+| 0x33C | db_bind_blob | `int(int handle, int index, const void *data, int length)` |
+| 0x340 | db_bind_null | `int(int handle, int index)` |
+| 0x344 | db_error_code | `int(int handle)` |
+
+- `db_open_existing`: `writable` は 0 = `SQLITE_OPEN_READONLY` / 1 = `SQLITE_OPEN_READWRITE`。
+  それ以外は拒否。**CREATE も URI も付けない** ので、無い DB は作られない。空 path /
+  `:memory:` / `file:` 接頭 / `OS32_MAX_PATH` 超も拒否。open の**前**に `vfs_stat` で
+  (1) 本体が存在し size > 0、(2) `<path>-journal` が**無い**ことを確かめ、反すれば
+  **SQLite を呼ばずに**失敗する (RO でも hot journal の後始末が走るのを防ぐ)。
+  診断は欠損 = `SQLITE_CANTOPEN`、0 バイト = `SQLITE_NOTADB`、journal あり =
+  `SQLITE_BUSY_RECOVERY`。RW は `PRAGMA journal_mode` が `delete` であることを
+  照会だけで確かめ、不成立なら close して失敗する。失敗コードは **owner 別**の
+  「直前 open 失敗」欄に残り `db_error_code(-1)` で読める。戻り値は handle / -1。
+- `db_prepare_only`: SQL は NUL 込み `DB_SQL_MAX_BYTES` (1024B) 以内。超過は
+  **切り捨てず拒否**する。単一の非空 statement のみ (末尾の空白 / コメント / `;` は可、
+  次の statement があれば `sqlite3_prepare_v2` の `pzTail` で見て拒否)。**step しない**ので、
+  SELECT の先頭行も DML も進まない。同じ handle の旧 stmt は finalize して置換する。
+- `db_bind_*`: prepare_only の後・**最初の step の前**だけ。`index` は 1-based。
+  `text` は 0〜`DB_BIND_TEXT_MAX` (255) B、`blob` は 0〜`DB_BIND_BLOB_MAX` (4096) B。
+  負・超過・NULL ポインタは拒否 (NULL 値は `db_bind_null`)。0B でも非 NULL の空値。
+  カーネル側のスクラッチへ**検証付きでコピー**してから `SQLITE_TRANSIENT` で渡すので、
+  SQLite が呼び手のポインタを保持することはない。
+- `db_error_code`: slot の「最後の失敗」(SQLite 拡張 result code)。データ操作
+  (`db_open_existing` / `db_prepare_only` / `db_bind_*` / `db_step` / `db_exec`) は
+  成功で 0 に、失敗でそのコードに更新する。**`db_finalize` / `db_close` は失敗した
+  ときだけ**更新する (後片付けが原因診断を消さない)。close 後も slot が再利用される
+  までは同じ値を返す。範囲外 handle / 一度も開かれていない slot は `SQLITE_MISUSE`。
+  `handle = -1` は呼び手 owner の直前 open 失敗。取得しても消えない。
+- CPL=3 の呼び手が渡すポインタは、ディスパッチャの早期検証 (先頭番地だけ) に加えて
+  wrap 側が**範囲まで**検査する: 各ページが許可帯にあり、かつ**呼び手の PD** で
+  present + USER であること (`ring3_user_range_ok`)。CPL=0 の直呼び (常駐シェル /
+  gshell) は帯も PTE も見ない。`db_step` / `db_prepare` の 1 行が 16KB の結果ブロック
+  (header + 全列 descriptor + payload) に収まらないときは、範囲外書き込みも部分 ROW も
+  返さず `-1` で失敗し、`db_error_code` に `SQLITE_TOOBIG` が残る。
+
 GUI 中の CPL=3 アプリは入れ子 `exec_run` を使えない (子が park できず、協調型の全体が止まる)。
 そこで「外部プログラムを起動したい」と「この子を畳みたい」を**カーネルの表**に載せ、
 owner 1 (WM) が top-level で取りに来て `exec_start` / `exec_kill` を実行し、結果を表へ返す。
@@ -575,8 +623,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x32C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x330 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x348 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x34C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

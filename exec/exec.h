@@ -103,6 +103,27 @@ const char *vfs_cwd_user(void);
  * kselftest_run_post_exec() から呼ぶ。0 = 全部通った。 */
 u32 exec_tramp_user_selftest(void);
 
+/* ======================================================================== */
+/*  ユーザポインタの検証 (票 S0-K §1a、KAPI v50)                             */
+/*                                                                          */
+/*  int 0x80 ディスパッチャの早期検証 (kapi_argptr) は **先頭番地だけ** を    */
+/*  見る。長さ付きのポインタ (db_bind_text / db_bind_blob) や NUL 探しが      */
+/*  要る文字列を写す wrap は、写す前に自分で範囲を確かめること。             */
+/* ======================================================================== */
+
+/* p が CPL=3 アプリへ USER で貸してある帯にあるか (先頭 1 番地だけ)。
+ * NULL は 1 (wrap 側が意味を決める)。ディスパッチャの早期検証と同じ規則。 */
+int ring3_ptr_ok(u32 p);
+
+/* [p, p+len) のすべてのページが読めるか。**CPL=3 由来の呼び出し
+ * (ring3_in_syscall) のときだけ**、各ページが ring3_ptr_ok の許可帯にあり、
+ * かつ **呼び手の PD** で present + USER であることを確かめる (許可帯でも
+ * guard や未マップは非 present なので、ここで弾かないとカーネル側のコピーが
+ * #PF を起こし呼び手が kill される)。CPL=0 の直呼び (常駐シェル / gshell) は
+ * 帯も PTE も見ない — 1 を返す。
+ * 戻り値: 1 = 読んでよい / 0 = 拒否 (NULL・overflow・帯外・非 present・非 USER)。 */
+int ring3_user_range_ok(u32 p, u32 len);
+
 /* 現在のネスト深度 (0=外部プログラム未実行) */
 extern volatile int exec_nest_level;
 

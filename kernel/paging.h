@@ -280,6 +280,14 @@ u32 paging_addrspace_free_user_range(struct addrspace *as, u32 vstart,
 int paging_addrspace_map_user_keep(struct addrspace *as, u32 vstart,
                                    u32 vend, u32 flags);
 
+/* その AS (= 呼び手のページディレクトリ) で virt を見たときの実効フラグ
+ * (票 S0-K §1a、Codex 往復 3 の 1)。master の page_tables[] を引く
+ * paging_pte_flags() と違い、アプリ固有 PDE 配下の PT は **その AS からしか
+ * 見えない** ので、KAPI がユーザポインタを写す前の present + USER 判定には
+ * こちらを使う。戻り値は PDE と PTE の論理積の下位 12 ビット (実効権限)。
+ * ページが無ければ 0。**読むだけ**で表は 1 ビットも動かさない。 */
+u32 paging_addrspace_pte_flags(struct addrspace *as, u32 virt);
+
 /* PD 複製の自己診断 (V1)。CPL=0 のまま:
  *   1. アプリ AS を作る
  *   2. CR3 を新 PD に載せてもカーネル (コード/スタック/データ) が生存する

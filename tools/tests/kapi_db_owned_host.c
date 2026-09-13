@@ -20,6 +20,26 @@ extern void db_cleanup_owned(int owner) __attribute__((weak));
 
 int res_owner_get(void) { return owner; }
 int kprintf(int color, const char *fmt, ...) { return 0; }
+/* v50 (票 S0-K): kapi_db.c が使う exec / VFS の口。この票 (F1) の対象では
+ * ないので素通しの模型にする。実物は tools/tests/kapi_db_v50_host.c が踏む。 */
+int ring3_user_range_ok(u32 p, u32 len) { return 1; }
+/* BSD strlcat 相当 (lib/kstring.h の kstrncat と同じく n はバッファ全体)。 */
+char *host_strlcat(char *dst, const char *src, unsigned long n)
+{
+    unsigned long used = strlen(dst);
+    unsigned long i = 0;
+    while (used + i + 1 < n && src[i]) { dst[used + i] = src[i]; i++; }
+    if (used + i < n) dst[used + i] = '\0';
+    return dst;
+}
+static int stat_size = 4096;
+int vfs_stat(const char *path, OS32_Stat *st)
+{
+    if (strstr(path, "-journal")) return OS32_ERR_NOTFOUND;   /* hot journal 無し */
+    if (stat_size < 0) return OS32_ERR_NOTFOUND;
+    if (st) { memset(st, 0, sizeof(*st)); st->st_size = (u32)stat_size; }
+    return 0;
+}
 static void event(sqlite3 *db, const char *text)
 {
     assert(!db->closed);
@@ -32,6 +52,24 @@ int sqlite3_open(const char *path, sqlite3 **out)
     *out = open_null ? 0 : db;
     return open_rc;
 }
+/* v50 で kapi_db.c が使う SQLite の口。この票 (F1) は既存 10 本の寿命だけを
+ * 見るので、ここは「呼べる」だけの最小実装。中身は kapi_db_v50_host.c が
+ * 本物の SQLite で踏む。 */
+int sqlite3_open_v2(const char *path, sqlite3 **out, int flags, const char *vfs)
+{
+    sqlite3 *db = &connections[next_db++];
+    db->error = "open first";
+    *out = open_null ? 0 : db;
+    return open_rc;
+}
+int sqlite3_extended_errcode(sqlite3 *db) { return 0; }
+int sqlite3_bind_parameter_count(sqlite3_stmt *s) { return 3; }
+int sqlite3_bind_int(sqlite3_stmt *s, int i, int v) { return SQLITE_OK; }
+int sqlite3_bind_null(sqlite3_stmt *s, int i) { return SQLITE_OK; }
+int sqlite3_bind_text(sqlite3_stmt *s, int i, const char *t, int n,
+                      void (*d)(void *)) { return SQLITE_OK; }
+int sqlite3_bind_blob(sqlite3_stmt *s, int i, const void *b, int n,
+                      void (*d)(void *)) { return SQLITE_OK; }
 const char *sqlite3_errmsg(sqlite3 *db) { return db->error; }
 const char *sqlite3_errstr(int rc) { return "out of memory"; }
 int sqlite3_close(sqlite3 *db)

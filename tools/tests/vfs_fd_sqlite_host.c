@@ -8,11 +8,15 @@
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); exit(1); \
 } } while (0)
 static int current_owner = 2, owner_sets, probes, size_rc, write_rc;
+/* vfs_resolve_path が呼ばれたときに立っているべき owner。F2a/F2b は 2 のまま
+ * (vfs_open_sqlite が広域 owner を動かさないことの確認)。S0-K の
+ * kapi_db_v50_host.c だけが owner を渡り歩くのでここも一緒に動かす。 */
+static int resolve_owner = 2;
 static VfsOps mock_ops;
 int res_owner_get(void) { return current_owner; }
 void res_owner_set(int owner) { owner_sets++; current_owner = owner; }
 void vfs_resolve_path(const char *in, char *out, int size)
-{ probes++; CHECK(current_owner == 2); str_cpy(out, in, size); }
+{ probes++; CHECK(current_owner == resolve_owner); str_cpy(out, in, size); }
 VfsOps *vfs_route(const char *path, char *out, int size, void **ctx)
 { probes++; str_cpy(out, path, size); *ctx = &mock_ops; return &mock_ops; }
 int vfs_path_kind(const char *path) { probes++; return VFS_KIND_FILE; }

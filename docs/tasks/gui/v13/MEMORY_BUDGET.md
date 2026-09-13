@@ -211,6 +211,21 @@ exec_heap のどれも減らさない。
 `exec.c` は静的領域を 1 バイトも増やさない (`ring3_abort_request` の 1 行と
 `appslot_mark_scheduled` の呼び出し 2 か所)。KAPI も増えていない (v49 のまま)。
 
+## S0-K (KAPI v50、2026-09-13)
+
+`i386-elf-gcc -O2 -c` + `i386-elf-size` を基準版 (feat/gui `4c7d9f9`) と並べたもの
+(カーネル全体のリンクは未測定 — `make` は未実施)。
+
+| 目的語 | text | .bss | 内訳 |
+|---|---:|---:|---|
+| `kapi_db.o` | 3309 → **7659** (+4350) | 3520 → **8288** (+4768) | 検証済みコピー先の静的スクラッチ (blob 4096 + text 256 + journal 264) と `DbSlot` の 3 欄 × 8 + owner 別 open 失敗欄 6 |
+| `exec.o` | 12321 → **12465** (+144) | 8708 で不変 | `ring3_user_range_ok` のみ (回収順の入れ替えは 0 B) |
+| `paging.o` | 5328 → **5452** (+124) | 49215 で不変 | `paging_addrspace_pte_flags` のみ |
+
+合計 +4618 B text / +4768 B .bss (≈ 9.2KB、すべてカーネル帯の静的領域)。
+`kmalloc` も exec_heap もアプリ帯も 1 バイトも減らさない。SHM の 16KB
+結果ブロックのレイアウトは不変 (境界検査を足しただけ)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

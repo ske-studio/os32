@@ -210,13 +210,20 @@ pub struct KernelAPI {
     /* idx 200 */ pub launch_cancel: unsafe extern "C" fn(token: i32) -> i32,
     /* idx 201 */ pub launch_child: unsafe extern "C" fn(id: i32) -> i32,
     /* idx 202 */ pub sys_yield: unsafe extern "C" fn() -> i32,
+    /* idx 203 */ pub db_open_existing: unsafe extern "C" fn(path: *const u8, writable: i32) -> i32,
+    /* idx 204 */ pub db_prepare_only: unsafe extern "C" fn(handle: i32, sql: *const u8) -> i32,
+    /* idx 205 */ pub db_bind_int: unsafe extern "C" fn(handle: i32, index: i32, value: i32) -> i32,
+    /* idx 206 */ pub db_bind_text: unsafe extern "C" fn(handle: i32, index: i32, text: *const u8, length: i32) -> i32,
+    /* idx 207 */ pub db_bind_blob: unsafe extern "C" fn(handle: i32, index: i32, data: *const u8, length: i32) -> i32,
+    /* idx 208 */ pub db_bind_null: unsafe extern "C" fn(handle: i32, index: i32) -> i32,
+    /* idx 209 */ pub db_error_code: unsafe extern "C" fn(handle: i32) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 49;
+pub const KAPI_VERSION: u32 = 50;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

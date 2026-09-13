@@ -156,3 +156,64 @@ subdir 連結の各形で `/etc/settings.db*` に届くことを確かめてあ�
   smoke ビルドで FAT12 に 3 KB / 3 クラスタとして載ることまで確認した。
 - 新規インストールでの seed (FDD の `install.bin` が `/kernel.bin` を要求する既存不整合、B10) は
   S3 の受入。本票では「媒体に入っている」までしか言えない。
+票 [docs/tasks/settings/TASK_S0.md](../../docs/tasks/settings/TASK_S0.md)。
+本書は **S0-K (KAPI v50 / `shm_write_row` の境界 / exec 回収順序)** 分。
+S0-D (配備保護) と S0-T (初期値 tsv) は別票が同じファイルに節を足す。
+
+走らせ方 (ホストのみ。`make`・配備・エミュレータ・ローカル AI は使っていない):
+
+```
+python3 -B tools/tests/test_kapi_db_v50.py            # 9 件 + 回収順の本文検査
+python3 -B tools/tests/test_kapi_db_v50.py --target   # 上に i386-elf 単体コンパイル
+python3 -B -m unittest discover -s tools/tests -p 'test_kapi_db_owned.py'
+python3 tools/tests/test_vfs_fd_sqlite.py
+python3 tools/tests/test_sqlite_groups.py
+```
+
+## 1. 何を実物で組んだか (S0-K)
+
+`tools/tests/kapi_db_v50_host.c` は **実 `kapi/kapi_db.c` + 実 `lib/sqlite3/sqlite3.c`
++ 実 `lib/sqlite3/os32_sqlite_vfs.c` + 実 `fs/vfs_fd.c` + RAM バックエンド**
+(`sqlite_groups_backend.h`) を組む。ホストのファイルシステムには触らない。
+模型にしたのは 2 つだけ:
+
+- `ring3_user_range_ok` — 許可帯と PTE はカーネルの番地とページテーブルに依存する。
+  ホストでは 1 本の帯 + 1 枚の「非 present なページ」に見立てた等価な判定を置く。
+  実物の帯判定は `exec/exec.c` にあり、CPL=3 の受入 (`userland/tests/db_v50_test.c`) が踏む。
+- `MEM_SHM_BASE` — 試験側の配列へ向け、16KB の **後ろに 256B の番兵**を置く。
+
+## 2. RED → GREEN
+
+| # | 対象 | RED (実際に落としたもの) | GREEN |
+|---|---|---|---|
+| 1 | v50 の 7 本そのもの | 実装前は `kapi_db_open_existing` 等が存在せず、`kapi_db_v50_host.c` は **リンクできない** (undefined reference) | 9 ケース全通過 |
+| 2 | `shm_write_row` の境界 (§1b) | 境界検査を `if (0 && ...)` で殺す → `FAIL shm_bound:359: kapi_db_step(h) == DB_STATUS_ERROR` (20000B の行が ROW を返す) | 検査を戻して `PASS shm_bound` + 番兵 256B が無傷 |
+| 3 | exec 回収順序 (§1c) | `db_cleanup_owned` を元の (6) の位置へ戻す → `AssertionError: exec_reclaim_owned: db_cleanup_owned は vfs_close_owned より先` | 先頭へ移して PASS |
+| 4 | 回収順序の**観測できる差** | `order_old` (FD を先に閉じる) で **後始末がバックエンドに届いた回数 = 2** | `order_new` (DB が先) で **21**。rollback の journal 読み戻しは生きた FD 越しにしか起きない |
+
+## 3. ケース一覧 (`test_kapi_db_v50.py`)
+
+| ケース | 見るもの |
+|---|---|
+| `open_existing` | RO / RW の欠損 DB が**作られない**、0 バイト = `NOTADB`、hot journal = `BUSY_RECOVERY` かつ **journal が消えない**、`:memory:` / `file:` / 空 / `writable=2` / NULL の拒否、RO 接続で書けない、成功で「直前 open 失敗」が 0 に戻る |
+| `prepare_only` | SELECT の先頭行が進まない / DML が実行されない、複数 statement の拒否、末尾の空白・`--`・`/* */`・`;` は可、NUL 込み 1024B ちょうどは可・1 バイト超は**切り捨てず**拒否 |
+| `binds` | prepare 前 / step 後は不可、1-based と範囲外、負長、text 256B・blob 4097B の拒否、0B の text/blob が `typeof` で `text`/`blob` (NULL ではない)、**4096B blob の往復** |
+| `error_code` | 範囲外 / 未使用 slot = `MISUSE`、失敗の保持と取得で消えないこと、成功で 0 に戻ること、**finalize / close が上書きしない**こと、close 後も再利用まで残ること、owner 別の `-1` 欄が混ざらないこと |
+| `shm_bound` | 純関数 `shm_row_fits_n` のちょうど / 1 バイト超 / descriptor だけで溢れる列数、実接続で 20000B の行が `-1` + `SQLITE_TOOBIG` + 番兵無傷 |
+| `user_range` | CPL=0 は素通し、CPL=3 は帯外 / 帯末尾またぎ / **ガードまたぎ** / overflow を拒否、NUL 無し path の拒否、bind 後にユーザ側を書き換えても値が変わらない (スクラッチへ写っている) |
+| `owner_isolation` | 子 owner の回収で親の接続と実行中 stmt が無事 |
+| `order_new` / `order_old` | 上の RED → GREEN の 4 |
+
+## 4. ホストでは踏めなかったもの ([V4])
+
+- **1364 列を超える行**での descriptor 領域のはみ出し。SQL は NUL 込み 1024B が上限なので
+  そこまで列を並べた statement を作れない。純関数 `shm_row_fits_n` の算術だけで覆ってある。
+- `p + len` の **32bit** overflow。`include/types.h` の `u32` はホストでは `unsigned long`
+  (64bit) なので、ホスト幅の端で同じ経路を踏むように書き換えてある。
+- **rollback が本体ファイルを縮めること**。`os32 SQLite VFS` の `xTruncate` はまだ
+  no-op 成功 (票 F3a が未実施) なので、どちらの回収順でもサイズは戻らない。
+  だから順序の判定は「戻り値が成功か」ではなく「後始末がバックエンドに届いたか」で行う。
+- 許可帯と PTE の**実物**の判定 (`ring3_ptr_ok` / `paging_addrspace_pte_flags`)。
+  ホストにページテーブルが無い。CPL=3 の受入 `userland/tests/db_v50_test.c` (K2) と
+  ブート時の `kselftest` が実機側の担当で、**どちらもまだ実行していない**
+  (コーダーは `make`・配備・エミュレータを行わない)。
