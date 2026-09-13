@@ -172,4 +172,5 @@ FDD の `/etc/settings.db` を `db_open_existing(path, 0)` → meta 検査 (S2 �
 | 対象 | 判定 | 要旨 |
 |---|---|---|
 | `6332dac` + `c2a1cdd` + `e1f6791` (往復 1) | Request changes | 5 件: B1 `.new` の検証失敗と close 失敗の複合で `.new` を消す、B2 revert の journal 復元失敗で journal を消す、B3 `--scope` 外の値の不正で対象まで拒否、B4 commit 前の rollback/close 失敗が CLI に出ない、B5 複数行の壊れた印を `done` と受理。non-blocker: base64 の未使用ビット、印の size の wrap、案内の統一、8192 件の実書込み未検証、試験網羅。設計の残 1 件 (`phase=reverting`) は「防いでいる」と確認 |
-| `7b26058` (I) + `5f2ee25` (C) + `b2a1580` (K) (往復 2) | (実施中) | |
+| `7b26058` (I) + `5f2ee25` (C) + `b2a1580` (K) (往復 2) | Request changes | B1 / B2 / B4 / B5 修正確認、S3-K の写像範囲は妥当。**B3 が一部残存**: 対象外 scope の base64 未使用ビット (`AB==`) で `j_b64()` が即 E_VALUE を返し scope 除外に到達しない → 意味上の不正はフラグに控えて対象行だけ `cfg_json_check()` で拒否。non-blocker: 全失敗点の網羅 (一部未固定)、8192 件試験の意味の限定、C-4 の記録更新、`.new` だけの復元成功枝の done 更新の戻り値 |
+| 付随 (PM) | — | `285653e` / `a57eaf6`: `install_recover.inc` を直しても `install.bin` が再ビルドされない (userland の .d は Makefile の `-include` 対象外) → `install.elf` / `hsync.elf` に .inc の明示依存。**配備 2 回目の install.bin (18,320 B) は往復 1 の修正前の版だった** (I2〜I7 の合格は 1 回目の実装での結果。修正後の install.bin 18,512 B で I2 / I7 を再走する) |
