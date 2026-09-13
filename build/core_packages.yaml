@@ -45,4 +45,8 @@ minimal:
       guest: /boot/vmkernel.lz4
     - host: build/out/unicode.bin
       guest: /sys/unicode.bin
+    # 設定レジストリの初期値マスタ。媒体 (CD / FDD) だけが持ち、通常配備は
+    # tsv (/etc/settings.tsv) を配る (TASK_S0 §3)。生成は build/assets.mk。
+    - host: build/out/settings.db
+      guest: /etc/settings.db
 

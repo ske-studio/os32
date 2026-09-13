@@ -208,6 +208,10 @@ filesystem:
     - host: assets/filetypes
       guest: /etc/filetypes
       tags: [core]
+    # --- 設定レジストリの初期値 (正典 tsv。DB は媒体だけが持つ、票 S0-T) ---
+    - host: assets/settings/defaults.tsv
+      guest: /etc/settings.tsv
+      tags: [core]
     # --- FEP辞書 (SQLite DB) ---
     - host: assets/fep.db
       guest: /db/fep.db

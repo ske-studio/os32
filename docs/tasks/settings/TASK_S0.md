@@ -103,3 +103,14 @@
 | 2 (`0212b9a`) | Request changes | 10 件: RO でも 0 ページ DB の journal を消す、許可帯内の非 present ページ、先頭が帯外は kill、CPL=0 の呼び手、診断の意味、欠損保護は名前規則を先に、hsync の正規化、stamp の来歴、CLI の失敗伝播、D1 と自動 pull |
 | 3 (`cffa137`) | Request changes | 5 件: PTE 検査は呼び手の PD、finalize / close は診断を消さない、stat の ENOENT は不存在、mkdir と rmtree、packages の既存入力依存 |
 | 4 版 | 決裁: 実装へ | 5 件を反映。ユーザー決裁 (2026-09-13) で設計の 4 往復目は回さず、K / D / T を同時発注 |
+
+## 9. 実装メモ (T、2026-09-13)
+
+- `assets/settings/defaults.tsv` (3 行 + 書式コメント)、`tools/mk_settings_db.py`、試験 `tools/tests/test_mk_settings_db.py` (38 件)、記録 `tools/tests/s0_tdd.md` §T。
+- 空行 / コメントの判定は **行頭だけ** (`line == ""` か `#` 始まり) で、行全体を strip しない。S2 の C 側 reader が同じ規則を素直に書けるようにした。
+- `meta.created` は epoch を UTC の ISO 8601 (`1970-01-01T00:00:00Z`) にした文字列。決定性は「内容 + epoch」だけで決まり、mtime は読まない。挿入は (scope, key) 順に固定し、最後に `VACUUM` + `PRAGMA user_version=1` で自由ページを落とす。実物は 3KB / freelist 0。
+- `build/assets.mk`: `SETTINGS_DB = $(BUILD_OUT)/settings.db` を FORCE 依存で生成。通常配備の対象ではないので `ASSETS_DEPLOYED` には入れず、`ASSETS_ALL` (→ `clean-assets` / `clean`) と `all:` への追加依存、媒体ターゲットから引く。`FORCE` は `build/programs.mk` の既存を使う。
+- `build/image.mk`: FDD に `/etc/settings.db=`、`packages` の依存を `programs boot $(BUILD_OUT)/vmkernel.lz4 unicode_bin $(BUILD_OUT)/settings.db assets/fep.db` に。`assets/fep.db` は userland 層の NORMAL が要求する既存入力で、mkpkg を厳格化した以上これも結ぶ必要がある。
+- `tools/mkpkg.py`: 欠損は一律エラー。全パッケージのファイルを**先に**解決して欠損を集め、1 つも `.PKG` を書かずに非ゼロ終了する (途中まで書いた媒体を残さない)。glob が 0 件なのは欠損としない (parser は不変)。
+- 副作用の注意: これまで欠損は warning だったので、`deploy.yaml` ではなく `package_defs.yaml` 側に「作られていない登録ファイル」があると `make iso` が**落ちるようになる**。現行の登録 38 件はすべて `programs` / `boot` / assets の成果物で、`make -n packages` で mkpkg より前に生成されることを確認済み。
+- 未実施: ゲスト受入 T1 (媒体を mount して一覧、`sqlite3` で読む)、`make` 実行。B10 の FDD インストーラ不整合は S3。
