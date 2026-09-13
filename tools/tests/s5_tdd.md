@@ -152,3 +152,78 @@ i386-elf-ld $(PROGRAM_LDFLAGS) -o /tmp/cfg_bench.elf $(CRT0_OBJ) /tmp/cfg_bench.
 
 `userland/tests/%.elf` の既定パターンはライブラリを引けないので、`cfg.elf` と同じ形の
 **明示規則**が要る (PM の範囲、票 §0)。
+
+---
+
+## 6. レビュー往復 1 の blocker 4 件 (2026-09-13)
+
+Codex の所見 (blocker 4 / non-blocker 2)。**反例をホストで踏んでから**直した。
+走らせ方は §0 と同じ。`--sanitize` に **符号付き桁あふれの検査**を足した:
+
+```python
+san = ["-fsanitize=address,signed-integer-overflow",
+       "-fno-sanitize-recover=signed-integer-overflow", "-fno-omit-frame-pointer"]
+```
+
+`undefined` を丸ごと付けると `kapi/kapi_db.c` の SHM レイアウト (ゲストでは詰めた
+バイト列) が alignment 検査に引っかかるので、この 1 種だけを有効にした。
+
+### 直した内容
+
+| # | 所見 | 直し方 |
+|---|---|---|
+| B1 | `bn_sink += iv` が `INT_MAX + INT_MAX` で signed overflow (`cfg set gshell desktop/color int 2147483647` 後の `cfg_bench`) | 捨て場を `static volatile u32 bn_sink;` にし、`bn_sink ^= (u32)iv;` の**符号なし XOR** で畳む |
+| B2 | 状態を open 直後に採るので get 中の `CFG_ERROR` 遷移を見落とし、最終行が `status 0 OK` | 読み / 書きとも **操作を終えて close する直前**に `cfg_status` を採り、状態による失敗加算もその値で行う |
+| B3 | `n ≤ 1,000,000 × m ≤ 10,000` を受けるのに `int failures` / `u32 total` が溢れる | 上限を**集計の幅から**決め直し (`BN_MAX_N 10000` / `BN_MAX_M 1000`、総失敗の上限 `n*(m+6) ≈ 1.0e7`)、集計を `u32` + **飽和加算** (`bn_add_sat`) に。飽和したら `saturated 1` を 1 行足して**失敗扱い** (`bn_bad`)。戻り値は `int` 0/1 なので数を縮めない。平均も `(t_sum + n/2)/n` をやめ、商と余りで丸める |
+| B4 | GUI 端末 (con_sink 8KB、満杯で古い行を捨てる) で iter 行が読み出される前に消える | `bn_emit` を 1KB ごとに刻み、その境で `sys_yield` (cfg の `out_flush_console` と同じ)。端数は `bn_drain` が最後に吐き切る。**呼ぶのは必ず close の後** |
+| nb1 | `pool peak` は 2 点観測の最大 | `bn_sample` のコメントに「prepare / step / commit 途中の一時確保を含む真の最大ではない」と明記 |
+| nb2 | `cfg status` の pool は FEP 等を含む全体値 | `do_status` のコメントを「プール全体。設定 DB 単体の取り分ではない」に直した |
+
+### 試験側の変更
+
+- `cap_yields == 0` → **`cap_yields_open == 0`**。`host_yield` が `g_db.in_use`
+  (libos32cfg が接続を掴んでいる印) を見て「**接続保持中の** yield」を別に数える。
+  出力は close の後なのでそこでの yield は契約に触れない。
+- 1KB の刻みそのものも固定した: 小さな走り (`cfg_bench 3 8`、出力 < 1KB) は
+  `cap_yields == 1` (最後の吐き切りだけ)、`cfg_bench 400 1` (出力 > 1KB) は
+  `cap_yields >= 2`。
+
+### RED → GREEN (往復 1)
+
+| # | 壊し方 | 落ちる CHECK |
+|---|---|---|
+| B1 | `static int bn_sink;` + `bn_sink += iv;` に戻す | `--sanitize` で `cfg_bench.c:515: runtime error: signed integer overflow: 2147483647 + 2147483647 cannot be represented in type 'int'` — レビューの反例そのもの (試験が DB に `2147483647` を入れてから走らせる) |
+| B2 | 状態を open 直後に採る | `FAIL c_s5_bench: cap_has("status 4 ERROR\n")` (`inj_prep_fail = "ival"` で get の prepare だけ落とす) |
+| B3a | 上限を `1000000 / 10000` に戻す | `FAIL c_s5_pure: bn_parse_u32("10001", 1, BN_MAX_N, &v) == -1` |
+| B3b | `t_sum += ticks` に戻す | `FAIL c_s5_pure: st.saturated && st.t_sum == 4294967295u` |
+| B4 | 1KB ごとの yield を止める | `FAIL c_s5_bench: cap_yields >= 2` |
+| B4b | 最後の吐き切りを止める | `FAIL c_s5_bench: cap_yields == 1` |
+
+**ホストで踏めなかった 1 件** ([V4]): B3 の「平均の丸めの桁あふれ」。`include/types.h`
+の `u32` は `unsigned long` で、**ホスト (LP64) では 64bit** になるため
+`(t_sum + n/2)` が巻き戻らない。i386 の 32bit でしか起きない。ホストでは
+「`t_sum = 4294967295, n = 2` → `avg 2147483648`」という**値**だけを固定し
+(新しい形は両方の幅で通る)、桁あふれを踏まないことはコード (商と余りで丸める)
+で保証した。`bn_add_sat` の飽和は値で書いてあるので幅に依存しない。
+
+### GREEN (往復 1 の後)
+
+```
+SUMMARY 45/45 PASS   (plain / --sanitize とも)
+TSV PARITY 58/58 PASS
+HOST GNU89 -Werror compile PASS
+TARGET i386-elf GNU89 -Werror compile PASS   (-Wall -Wextra -Werror 単体も PASS)
+```
+
+出力の書式で変わったのは 2 点だけ (§2 の他は不変):
+
+- `status` 行は**操作後**の状態を出す (ERROR 遷移が見える)。
+- 集計が飽和したときだけ `saturated 1` の 1 行が増え、終了コードが 1 になる。
+
+### 未実行 ([V4])
+
+票 §2 の実測 (M1 / M4 / M6 は PM が `5ccf6b8` の版で取得済み。**この往復の版では
+取り直しが要る** — 出力に `saturated` 行が増える可能性と、1KB ごとの `sys_yield`
+が**窓の外**とはいえ全体の所要時間に乗るため)、§3 の回帰 R1〜R4、`make all` /
+`make check` / 配備 / エミュレータ。上限を `n ≤ 10000` に下げたので、
+`cfg_bench 50 20` / `cfg_bench -w 20` という実測の指定はそのまま通る。

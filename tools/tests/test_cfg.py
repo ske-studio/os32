@@ -157,7 +157,14 @@ def build(tmp, sanitize):
         (tmp / name).write_text(text)
     obj = str(tmp / "sqlite.o")
     exe = str(tmp / "cfghost")
-    san = (["-fsanitize=address", "-fno-omit-frame-pointer"]
+    # 符号付き桁あふれの検査も付ける: S5 の cfg_bench は設定値 (INT_MAX まで
+    # 合法) を畳むので、`+=` の未定義動作は ASan では見えない (票 S5 レビュー
+    # 往復 1 の B1)。`undefined` を丸ごと付けると kapi_db.c の SHM レイアウト
+    # (ゲストでは詰めたバイト列) が alignment 検査に引っかかるので、この 1 種
+    # だけを有効にする。
+    san = (["-fsanitize=address,signed-integer-overflow",
+            "-fno-sanitize-recover=signed-integer-overflow",
+            "-fno-omit-frame-pointer"]
            if sanitize else [])
     subprocess.run(["gcc", "-std=gnu89", "-O0", *san, "-include", CONFIG,
                     "-c", str(ROOT / "lib/sqlite3/sqlite3.c"), "-o", obj],

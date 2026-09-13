@@ -12,12 +12,17 @@
 /*    iter <i> ticks <t> pool <n> B     10 回ごと (と最終回)                  */
 /*    ticks min <a> max <b> avg <c> total <s> n <k>                          */
 /*    pool start <a> peak <b> end <c> B                                      */
-/*    status <n> <名前>                 最後に見た cfg_status                 */
+/*    status <n> <名前>                 操作を終えて close する直前の状態      */
 /*    failures <n>                      0 なら終了コード 0                    */
+/*    saturated 1                       集計が u32 で飽和したときだけ出る      */
+/*                                      (数字は信用できない = 失敗扱い)       */
 /*                                                                          */
 /*  規約 (libos32cfg.h の契約): **open 〜 close の間に yield しない**。        */
 /*  計測の窓は cfg_open の直前から cfg_close の直後まで。コンソールへの出力は  */
 /*  すべて窓の外 (1 回分の iter 行も、その回の close が済んでから印字する)。   */
+/*  その窓の外では 1KB ごとに sys_yield を挟む — GUI 端末の con_sink は 8KB    */
+/*  の環で、満杯になると**古い行から捨てる**。yield を挟まないと端末アプリが   */
+/*  読み出す前に iter 行が消える (レビュー往復 1 の B4)。                     */
 /*                                                                          */
 /*  集計・引数解釈・整形は純関数に切り出してあり、tools/tests/cfg_host.c が    */
 /*  同じソースを載せて直接呼ぶ (RED→GREEN は tools/tests/s5_tdd.md)。         */
@@ -26,17 +31,23 @@
 #include "os32api.h"
 #include "cfg/libos32cfg.h"
 
-/* ---- 既定値 ([C4] 定数はここが管理元) --------------------------------- */
+/* ---- 既定値と上限 ([C4] 定数はここが管理元) ---------------------------- */
 #define BN_DEF_READ_N    50      /* 読みの既定 回数 */
 #define BN_DEF_READ_M    20      /* 読み 1 回あたりの get 件数 */
 #define BN_DEF_WRITE_N   20      /* 書きの既定 回数 */
-#define BN_MAX_N     1000000     /* 引数の上限 (桁あふれの門番) */
-#define BN_MAX_M         10000
+/* 上限は**集計の幅から決める** (レビュー往復 1 の B3)。1 回で数えうる失敗は
+ * open 1 + get m + 状態 1 + begin/set/commit 3 + close 1 <= m + 6 なので、
+ * 失敗の総数は n * (m + 6) <= 10000 * 1006 ~= 1.0e7 で u32 に十分収まる。
+ * それでも溢れは飽和加算で検出し、`saturated 1` を出して失敗にする。 */
+#define BN_MAX_N         10000
+#define BN_MAX_M          1000
+#define BN_U32_MAX  0xFFFFFFFFUL
 #define BN_LOG_EVERY        10   /* 何回ごとに 1 行出すか */
 #define BN_KEYS              3   /* 巡回する「存在するキー」の本数 */
 #define BN_MISS_EVERY        4   /* 何件に 1 件を「無いキー」にするか */
 #define BN_LINE_MAX        128   /* iter 行 1 本 */
-#define BN_SUM_MAX         256   /* まとめ 4 行 */
+#define BN_SUM_MAX         256   /* まとめ 4〜5 行 */
+#define BN_YIELD_CHUNK    1024   /* 何バイト書いたら yield するか (cfg と同じ) */
 #define BN_TEXT_MAX  (CFG_TEXT_MAX + 1)
 
 /* 実測に使う番地 (assets/settings/defaults.tsv の 3 本 + 必ず無い 1 本)。 */
@@ -61,10 +72,11 @@ typedef struct {
 } BnArgs;
 
 typedef struct {
-    int n;                       /* 取った標本の数 */
+    u32 n;                       /* 取った標本の数 (<= BN_MAX_N) */
     u32 t_min, t_max, t_sum;
     u32 pool_start, pool_peak, pool_end;
-    int failures;
+    u32 failures;
+    int saturated;               /* 1 = u32 で飽和した。数字は信用できない */
 } BnStats;
 
 /* 出力の組み立て。溢れたら err を立て、そこから先は 1 バイトも足さない。 */
@@ -81,9 +93,11 @@ static int  bn_args(int argc, char **argv, BnArgs *out);
 static int  bn_pick(int j);
 static int  bn_get_failed(int rc);
 static int  bn_should_log(int i, int n);
+static u32  bn_add_sat(u32 a, u32 b, int *sat);
 static void bn_reset(BnStats *s, u32 pool_start);
 static void bn_sample(BnStats *s, u32 ticks, u32 pool_open, u32 pool_closed);
 static u32  bn_avg(const BnStats *s);
+static int  bn_bad(const BnStats *s);
 static const char *bn_status_name(int st);
 static const char *bn_key_of(int which);
 static int  bn_iter_line(char *buf, int cap, int iter, u32 ticks, u32 pool);
@@ -96,6 +110,7 @@ static void bo_u32(BnOut *o, u32 v);
 static int  bo_end(BnOut *o);
 static int  bn_slen(const char *s);
 static int  bn_emit(const char *p, int n);
+static void bn_drain(void);
 static void bn_puts(const char *s);
 static void bn_usage(void);
 static void bn_log_iter(int iter, u32 ticks, u32 pool);
@@ -108,20 +123,26 @@ static int  bn_run_write(const BnArgs *a);
 
 static KernelAPI *bn_api;
 static int bn_out_err;              /* 出力の取りこぼし → 終了コード */
-static int bn_sink;                 /* 読んだ値の捨て場 (最適化除け) */
+static u32 bn_pending;              /* 直近の yield からの出力バイト数 */
+/* 読んだ値の捨て場。**符号なしの XOR** で畳む — `+=` だと 2147483647 が 2 つ
+ * 並んだだけで signed overflow (未定義動作) になる (レビュー往復 1 の B1)。
+ * volatile なので最適化で消えない。 */
+static volatile u32 bn_sink;
 
 int main(int argc, char **argv, KernelAPI *api)
 {
     BnArgs a;
-    int failures;
+    int rc;
 
     bn_api = api;
     bn_out_err = 0;
+    bn_pending = 0;
     bn_sink = 0;
 
-    if (bn_args(argc, argv, &a) != 0) { bn_usage(); return 1; }
+    if (bn_args(argc, argv, &a) != 0) { bn_usage(); bn_drain(); return 1; }
     if (api->version < 50) {
         bn_puts("cfg_bench: kernel is older than KAPI v50\n");
+        bn_drain();
         return 1;
     }
 
@@ -137,9 +158,10 @@ int main(int argc, char **argv, KernelAPI *api)
         else bn_emit(line, o.len);
     }
 
-    failures = a.write_mode ? bn_run_write(&a) : bn_run_read(&a);
+    rc = a.write_mode ? bn_run_write(&a) : bn_run_read(&a);
+    bn_drain();                     /* 端末が吐き切る機会を最後にもう一度 */
     if (bn_out_err) return 1;
-    return failures == 0 ? 0 : 1;
+    return rc;
 }
 
 /* ======================================================================== */
@@ -225,6 +247,17 @@ static int bn_should_log(int i, int n)
 /*  集計 (純関数)                                                            */
 /* ======================================================================== */
 
+/* 飽和加算。溢れたら *sat を立てて上限で止める — 巻き戻った数字を
+ * 「測れた値」として出さないため (レビュー往復 1 の B3)。 */
+static u32 bn_add_sat(u32 a, u32 b, int *sat)
+{
+    if (a > BN_U32_MAX - b) {
+        if (sat) *sat = 1;
+        return (u32)BN_U32_MAX;
+    }
+    return a + b;
+}
+
 static void bn_reset(BnStats *s, u32 pool_start)
 {
     s->n = 0;
@@ -235,10 +268,13 @@ static void bn_reset(BnStats *s, u32 pool_start)
     s->pool_peak = pool_start;
     s->pool_end = pool_start;
     s->failures = 0;
+    s->saturated = 0;
 }
 
 /* pool_open = close の直前 (接続を抱えている間) の値、
- * pool_closed = close の直後の値。ピークは両方を見る。 */
+ * pool_closed = close の直後の値。peak は**この 2 点の観測最大**であって、
+ * prepare / step / commit の途中で一時的に確保される分を含む真の最大では
+ * ない (レビュー往復 1 の non-blocker)。 */
 static void bn_sample(BnStats *s, u32 ticks, u32 pool_open, u32 pool_closed)
 {
     if (s->n == 0) {
@@ -248,18 +284,29 @@ static void bn_sample(BnStats *s, u32 ticks, u32 pool_open, u32 pool_closed)
         if (ticks < s->t_min) s->t_min = ticks;
         if (ticks > s->t_max) s->t_max = ticks;
     }
-    s->t_sum += ticks;
-    s->n++;
+    s->t_sum = bn_add_sat(s->t_sum, ticks, &s->saturated);
+    s->n = bn_add_sat(s->n, 1, &s->saturated);
     if (pool_open > s->pool_peak) s->pool_peak = pool_open;
     if (pool_closed > s->pool_peak) s->pool_peak = pool_closed;
     s->pool_end = pool_closed;
 }
 
-/* 四捨五入。標本が無ければ 0。 */
+/* 四捨五入。標本が無ければ 0。商と余りで丸めるので、`t_sum + n/2` のような
+ * 途中の桁あふれを踏まない (`r >= n - r` は `2r >= n` と同じ)。 */
 static u32 bn_avg(const BnStats *s)
 {
-    if (s->n <= 0) return 0;
-    return (s->t_sum + (u32)s->n / 2u) / (u32)s->n;
+    u32 q, r;
+    if (s->n == 0) return 0;
+    q = s->t_sum / s->n;
+    r = s->t_sum % s->n;
+    if (r != 0 && r >= s->n - r) q++;
+    return q;
+}
+
+/* 「測り切れなかった」= 失敗があったか、集計が飽和したか。 */
+static int bn_bad(const BnStats *s)
+{
+    return (s->failures != 0 || s->saturated) ? 1 : 0;
 }
 
 static const char *bn_status_name(int st)
@@ -356,7 +403,7 @@ static int bn_summary(char *buf, int cap, const BnStats *s, int status)
     bo_str(&o, " total ");
     bo_u32(&o, s->t_sum);
     bo_str(&o, " n ");
-    bo_u32(&o, (u32)s->n);
+    bo_u32(&o, s->n);
     bo_str(&o, "\npool start ");
     bo_u32(&o, s->pool_start);
     bo_str(&o, " peak ");
@@ -368,8 +415,10 @@ static int bn_summary(char *buf, int cap, const BnStats *s, int status)
     bo_str(&o, " ");
     bo_str(&o, bn_status_name(status));
     bo_str(&o, "\nfailures ");
-    bo_u32(&o, (u32)s->failures);
+    bo_u32(&o, s->failures);
     bo_str(&o, "\n");
+    /* 飽和したときだけ 1 行足す (普段の書式は変えない)。 */
+    if (s->saturated) bo_str(&o, "saturated 1\n");
     return bo_end(&o);
 }
 
@@ -384,17 +433,36 @@ static int bn_slen(const char *s)
     return n;
 }
 
-/* short write を「書けた」ことにしない。失敗は bn_out_err で終了コードへ。 */
+/* short write を「書けた」ことにしない。失敗は bn_out_err で終了コードへ。
+ * 1KB ごとに sys_yield を挟む — GUI 端末の con_sink は 8KB の環で満杯に
+ * なると古い行から捨てるので、端末アプリに読み出す機会を与える必要がある
+ * (レビュー往復 1 の B4)。**呼ぶのは必ず cfg_close の後**。 */
 static int bn_emit(const char *p, int n)
 {
-    int done = 0, rc;
+    int done = 0, rc, chunk;
     if (!bn_api || n < 0) { bn_out_err = 1; return -1; }
     while (done < n) {
-        rc = bn_api->sys_write(1, p + done, (u32)(n - done));
+        chunk = n - done;
+        if (chunk > BN_YIELD_CHUNK) chunk = BN_YIELD_CHUNK;
+        rc = bn_api->sys_write(1, p + done, (u32)chunk);
         if (rc <= 0) { bn_out_err = 1; return -1; }
         done += rc;
+        bn_pending += (u32)rc;
+        if (bn_pending >= BN_YIELD_CHUNK) {
+            bn_api->sys_yield();
+            bn_pending = 0;
+        }
     }
     return 0;
+}
+
+/* 端が 1KB に満たない分を吐き切らせる。 */
+static void bn_drain(void)
+{
+    if (bn_api && bn_pending > 0) {
+        bn_api->sys_yield();
+        bn_pending = 0;
+    }
 }
 
 static void bn_puts(const char *s)
@@ -444,7 +512,7 @@ static int bn_one_get(CfgDb *db, int which, char *tbuf, int tcap)
 
     rc = cfg_read_int(db, BN_SCOPE, bn_key_of(which), &iv);
     if (rc != 0) iv = 0;             /* cfg_get_int(..., 0) と同じ既定 */
-    bn_sink += iv;
+    bn_sink ^= (u32)iv;              /* 符号なしで畳む (B1) */
     return rc;
 }
 
@@ -458,20 +526,22 @@ static int bn_run_read(const BnArgs *a)
 
     for (i = 0; i < a->n; i++) {
         CfgDb *db = (CfgDb *)0;
-        u32 t0, t1, pool_open, pool_closed;
-        int fails = 0;
+        u32 t0, t1, pool_open, pool_closed, fails = 0;
 
-        /* ---- 計測の窓ここから (この中で yield しない) ---- */
+        /* ---- 計測の窓ここから (この中で yield / 出力をしない) ---- */
         t0 = bn_api->get_tick();
         if (cfg_open(&db, 0) != 0) {
             fails++;
             pool_open = bn_api->db_mem_used();
         } else {
+            for (j = 0; j < a->m; j++)
+                fails += (u32)bn_get_failed(bn_one_get(db, bn_pick(j), tbuf,
+                                                       (int)sizeof(tbuf)));
+            /* 状態は**操作を終えてから** close の前に採る。open 直後だと
+             * get の途中で CFG_ERROR へ遷移しても `status 0 OK` を出して
+             * しまう (レビュー往復 1 の B2)。 */
             status = cfg_status(db);
             if (status != CFG_OK) fails++;
-            for (j = 0; j < a->m; j++)
-                fails += bn_get_failed(bn_one_get(db, bn_pick(j), tbuf,
-                                                  (int)sizeof(tbuf)));
             pool_open = bn_api->db_mem_used();
             if (cfg_close(db) != 0) fails++;
         }
@@ -480,12 +550,12 @@ static int bn_run_read(const BnArgs *a)
         /* ---- 計測の窓ここまで。以降は接続を持っていない ---- */
 
         bn_sample(&st, t1 - t0, pool_open, pool_closed);
-        st.failures += fails;
+        st.failures = bn_add_sat(st.failures, fails, &st.saturated);
         if (bn_should_log(i, a->n)) bn_log_iter(i + 1, t1 - t0, pool_open);
     }
 
     bn_report(&st, status);
-    return st.failures;
+    return bn_bad(&st);
 }
 
 /* ======================================================================== */
@@ -501,23 +571,22 @@ static int bn_run_write(const BnArgs *a)
 
     for (i = 0; i < a->n; i++) {
         CfgDb *db = (CfgDb *)0;
-        u32 t0, t1, pool_open, pool_closed;
-        int fails = 0;
+        u32 t0, t1, pool_open, pool_closed, fails = 0;
 
-        /* ---- 計測の窓ここから (この中で yield しない) ---- */
+        /* ---- 計測の窓ここから (この中で yield / 出力をしない) ---- */
         t0 = bn_api->get_tick();
         if (cfg_open(&db, 1) != 0) {
             fails++;
             pool_open = bn_api->db_mem_used();
         } else {
-            status = cfg_status(db);
-            if (status != CFG_OK) fails++;
             if (cfg_begin(db) != 0) {
                 fails++;
             } else {
                 if (cfg_set_int(db, BN_WSCOPE, BN_WKEY, i) != 0) fails++;
                 if (cfg_commit(db) != 0) fails++;
             }
+            status = cfg_status(db);        /* 操作の後・close の前 (B2) */
+            if (status != CFG_OK) fails++;
             pool_open = bn_api->db_mem_used();
             if (cfg_close(db) != 0) fails++;
         }
@@ -526,10 +595,10 @@ static int bn_run_write(const BnArgs *a)
         /* ---- 計測の窓ここまで ---- */
 
         bn_sample(&st, t1 - t0, pool_open, pool_closed);
-        st.failures += fails;
+        st.failures = bn_add_sat(st.failures, fails, &st.saturated);
         if (bn_should_log(i, a->n)) bn_log_iter(i + 1, t1 - t0, pool_open);
     }
 
     bn_report(&st, status);
-    return st.failures;
+    return bn_bad(&st);
 }
