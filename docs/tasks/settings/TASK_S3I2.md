@@ -77,3 +77,13 @@
 | 第 3 版 | **Approve** | R1〜R3 解消、到達可能な反例なし。non-blocker 4 件 (中間状態の表現、終了コードの範囲、trial の e_resume 維持、`ls` の診断は台帳へ) を第 4 版に反映 |
 | 第 2 版 | Request changes | 3 件: R1 現行 trial は稼働中プロセスの選択が前提で、先に通常終了すると `selected identity mismatch` → trial 自身に終了させる手順に統一、R2 FAT の列挙途中の I/O エラーが `VFS_OK` で握りつぶされ欠けたファイルのまま終了 0 → S3I2-K で `fatfs_vfs_list` を直し `sys_ls` の負を失敗に数える、R3 F6 の破損元 `settings.tsv` が新規 HDD に無い → `/sys/boot_hdd.bin` で壊し CORRUPT を確認してから回復。non-blocker: C の受付範囲、FDD 値の変更前後、LBA 6 の検査表現、保護の表現 |
 | 第 1 版 | Request changes | 7 件: B1 FAT の列挙名が大文字で HDD に `SETTINGS.DB` ができる → 宛先を小文字に正規化、B2 `IdeInfoTemp` (92 B) が実型 96 B より小さく領域外書込み → 実型を使う、B3 コピー / sync の失敗が伝播しない → 件数と戻り値を main まで、B4 `--size-mb` とシリンダ数の丸写しが矛盾 → H/S 固定で C を算出し本体長を一致、B5 現行 trial は自動起動で d88 引数を渡せない → 計画に `fdd_arg` を足し照合も拡張、B6 `SVFDFILE=true` で FDD が再装着され HDD ブートにならない → `fdd_eject` (FDD1/2FILE を空に) と root の確認、B7 F6 が作業 NHD に戻った後 → F5 の前に。non-blocker: 中間状態の明記、バッファは 128KB、profile の矛盾、ini 境界、文言 (restore 無し、期待値は当該ビルド) |
+
+## 7. 実装と受入の記録 (PM、2026-09-14)
+
+### 7a. 着地
+- `b30b3f5` S3I2-K (fatfs_vfs_list、host 11/11、突然変異 4 種)、`49ee29c` S3I2-I (install v4.1、host 9/9 + `--target` の IdeInfo 96B 表明、回復 14/14 不変、install.bin 19,632 B)、`cd1e136` S3I2-T (ALLOWED_PATHS、trial の hdd / fdd_eject / fdd_arg、mk_blank_nhd.py、host 114 + 13)。`make all` / `check` exit 0 (vmkernel 470,687 B)。
+
+### 7b. Codex 実装レビュー
+| 対象 | 判定 | 要旨 |
+|---|---|---|
+| 3 コミット (往復 1) | Request changes | 5 件: B1 install の初期ディレクトリ mkdir の失敗を無視して終了 0、B2 trial の計画に HDD の解決済み絶対パスが残らず `NP21W_DIR` の変更で別ディスクになる、B3 `wslpath` 出力の `.strip()` で末尾空白のディレクトリの存在確認と書込み先がずれる、B4 新しいパス値の `;` / `#` を許し再処理できない ini を生成、B5 `.nhd` / `.d88` 名のディレクトリを受理。non-blocker: install 試験の不足 (列挙途中失敗の接続、64/65、深さ 4/5、EOF 長さ不一致、綴り保持)、既存の IPL / ローダ検査の緩さ、スキル文書の旧記述 |
