@@ -9,7 +9,7 @@
 |---|---|---|
 | v1.3 | 全項目受入済み、main にマージ済み (`fac0d89`)。残件の小物 4 件 (§3) は Claude Code が処理中 | `docs/ROADMAP.md` v1.3、`docs/tasks/gui/v13/PLAN.md` |
 | Host Services N0 (設計) | 完了 = `docs/tasks/network/TASK_N0.md` **第 5 版** (Codex 4 往復、最後は 4 件残したまま決裁 b で N1 へ。残った疑いは N1 のホスト TDD が踏む) | TASK_N0 §7 |
-| N1 (ワイヤ v2 / link.c / KAPI v51 / Agent v2) | **着地済み** (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。`make all` / `make check` / `make external` はテスター実行中 (結果は本書 §1 を更新)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
+| N1 (ワイヤ v2 / link.c / KAPI v51 / Agent v2) | **着地済み** (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。**テスターで `make clean` → `make all` (71s) → `make check` (53s) → `make external` (7s) すべて exit 0** (2026-09-14、session `n1-build` / `n1-build2`、`-Inet` の修正 `f5dca53` 後)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
 | v1.4 の範囲 | ROADMAP §1 v1.4 = N1〜N4、R2 (PEGC / Cirrus 8bpp)、About、GUI エディタ。アプリ群は v2.0 以降へ | `docs/ROADMAP.md` (`23a28be`) |
 
 ## 2. 次にやること (順)

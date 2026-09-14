@@ -83,3 +83,9 @@ includes に `kapi_host.h`)、`build/sdk.mk` (`check-host-agent` / `check-net-li
 §3-2 の v51 行・§4 の関数表 5 行 + data_fields を 0x35C / 0x360 へ)、`README.md` /
 `docs/INDEX.md` (版数)、`sdk/include/os32/os32_kapi_shared.h` (`KAPI_VERSION`)、
 `exec/exec.c` (`exec_reclaim_owned` の 1 行)、`kernel/isr_handlers.c` (`timer_handler`)。
+
+### PM 記録 (2026-09-14)
+
+- 着地 `995bb19` (基点 `af48990`、削除ファイル無し、conflict 無し) + `f5dca53` (`INC_KAPI` に `-Inet`: `kapi/kapi_host.c` の `link.h` が見つからず最初の `make all` が落ちた)。
+- テスター: `make clean` → `make all` exit 0 (71s) → `make check` exit 0 (53s、`check-host-agent` / `check-net-link-host` を含む) → `make external` exit 0 (7s)。合否は `tools/emu_agent/logs/n1-build2/steps.jsonl` の obs で判定 (モデルの最終出力は unparseable だったが obs は 3 本とも exit=0)。
+- 未実施: ゲスト受入 (§2)、Codex / 設計者の実装レビュー。v1.4 の体制 (ROLES §0) により、ゲスト受入は実装 PM の最初の仕事。
