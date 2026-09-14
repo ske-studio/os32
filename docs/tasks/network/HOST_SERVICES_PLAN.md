@@ -82,7 +82,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 | 利用者 | 内容 | レーン |
 |---|---|---|
 | `libos32host` (C、静的) | `host_get(url, sink)`, `host_print_text(name, text)`, `host_clip_get/put`, `host_time` — KAPI の AGAIN ループを隠す薄い層 | C |
-| `wget <url> [file]` | GET → ファイルへ (進捗はバイト数)。`/usr/bin` | C |
+| `wget <url> [file]` | GET → ファイルへ (進捗はバイト数)。`/bin` (cmds glob) | C |
 | `lpr <file>` / `lpr -` (stdin) | テキスト印刷 | C |
 | `hclip get` / `hclip put <file>` | クリップボード | C |
 | `hdate` | `TIME` でホスト時刻を表示 (`date -sync` は内部コマンド影 + `rtc_write` 不在で不可、TASK_N3 B3。RTC 設定は v52 以降) | C |
