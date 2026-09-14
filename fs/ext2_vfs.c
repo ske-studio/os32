@@ -26,16 +26,29 @@ static void ext2_split_path(const char *path, char *dir_path, const char **filen
     }
 }
 
-/* パス文字列からinode番号を解決 */
+/* パス文字列からinode番号を解決
+ *
+ * VFS の FD 層 (fs/vfs_fd.c) は read_stream / write_stream のたびに
+ * **パス文字列** を渡してくるので、ここを素通しにすると sys_write 1 回ごとに
+ * ext2_lookup がディレクトリを先頭から辿り直す。/tmp/e8.tar への 1 バイト
+ * 追記 26 セクタのうち 8 セクタがこの辿り直しだった (票 S6-P)。
+ * 名前空間が動けば ns_gen が進んで記憶は全部捨てられるので、当たった記憶は
+ * 必ず現物と一致する (ext2_path_memo_get / fs/ext2_ctx.h)。 */
 static int ext2_resolve_path(Ext2Ctx *ec, const char *path, u32 *out_ino)
 {
+    int rc;
+
     /* ルートまたは "/" */
     if (!path || !path[0] || (path[0] == '/' && !path[1])) {
         *out_ino = EXT2_ROOT_INO;
         return VFS_OK;
     }
 
-    return ext2_lookup(ec, path, out_ino);
+    if (ext2_path_memo_get(ec, path, out_ino) == EXT2_OK) return VFS_OK;
+
+    rc = ext2_lookup(ec, path, out_ino);
+    if (rc == EXT2_OK) ext2_path_memo_put(ec, path, *out_ino);
+    return rc;
 }
 
 /* ディレクトリ一覧のコールバック変換 */

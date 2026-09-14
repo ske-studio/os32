@@ -167,6 +167,7 @@ check-vfs-fd-sqlite-host:
 check-vfs-mount-dev-host:
 	python3 -B tools/tests/test_vfs_mount_dev.py
 	python3 -B tools/tests/test_ext2_read_bound.py
+	python3 -B tools/tests/test_ext2_write_io.py
 	python3 -B tools/tests/test_fatfs_stat.py
 
 check-sqlite-groups-host:
@@ -238,14 +239,12 @@ check-install-fresh-host:
 # フレームを直接組んで rid 台帳 / 3 way HELLO / 墓標 / 枯渇停止を踏む。
 check-host-agent:
 	python3 -B tools/tests/test_host_agent.py
-
 # net/link.c (ワイヤ v2) + kapi/kapi_host.c (KAPI v51) のホスト TDD (票 N1 段 4)。
 # 実物のソースを #include し、NIC / cli-sti / 100Hz タイマ / ディスパッチャだけを
 # 贋物にする。対向は **実 Agent** (host_agent.py を UNIX ソケットで子プロセス起動)
 # か台本。記録は tools/tests/n1_tdd.md。
 check-net-link-host:
 	python3 -B tools/tests/test_net_link.py --target
-
 # libos32gui の os32gui_cfg_* wrapper の分岐 (票 S2-W)。C の実体は贋物。
 check-gui-host:
 	cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline

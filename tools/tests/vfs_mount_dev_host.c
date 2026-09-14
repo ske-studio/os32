@@ -56,6 +56,12 @@ int ext2_lookup(Ext2Ctx *c, const char *p, u32 *i)
 }
 int ext2_mkdir(Ext2Ctx *c, u32 d, const char *n)
 { (void)c; (void)d; (void)n; return -1; }
+/* 解決済み経路の記憶 (票 S6-P)。この試験は毎回 ext2_lookup を通したいので、
+ * 記憶は常に外し、書き込みも捨てる。 */
+int ext2_path_memo_get(Ext2Ctx *c, const char *p, u32 *i)
+{ (void)c; (void)p; (void)i; return EXT2_ERR_NOTFOUND; }
+void ext2_path_memo_put(Ext2Ctx *c, const char *p, u32 i)
+{ (void)c; (void)p; (void)i; }
 int ext2_read_file(Ext2Ctx *c, u32 i, void *b, u32 m)
 { (void)c; (void)i; (void)b; (void)m; return -1; }
 int ext2_read_inode(Ext2Ctx *c, u32 i, Ext2Inode *o)

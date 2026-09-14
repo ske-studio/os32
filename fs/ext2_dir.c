@@ -151,6 +151,7 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
                 now = ext2_current_time();
                 dir_inode.mtime = now;
                 ext2_write_inode(ctx, dir_ino, &dir_inode);
+                ext2_ns_touch(ctx);
                 return EXT2_OK;
             }
             pos += de_reclen;
@@ -181,6 +182,7 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
         dir_inode.mtime = now;
         ext2_write_inode(ctx, dir_ino, &dir_inode);
     }
+    ext2_ns_touch(ctx);
     return EXT2_OK;
 }
 
@@ -223,6 +225,7 @@ int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name)
                     if (ret != 0) return EXT2_ERR_IO;
                     dir_inode.mtime = ext2_current_time();
                     ext2_write_inode(ctx, dir_ino, &dir_inode);
+                    ext2_ns_touch(ctx);
                     return EXT2_OK;
                 }
             }
@@ -286,8 +289,10 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 
     {
         u32 dir_group = ((u32)new_ino - 1) / ctx->sb_info.inodes_per_group;
-        if (dir_group < ctx->num_groups)
+        if (dir_group < ctx->num_groups) {
             ctx->gd_table[dir_group].used_dirs++;
+            ext2_meta_touch(ctx);
+        }
     }
     ext2_sync(ctx);
     return EXT2_OK;
@@ -361,8 +366,10 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 
     {
         u32 dir_group = (ino - 1) / ctx->sb_info.inodes_per_group;
-        if (dir_group < ctx->num_groups)
+        if (dir_group < ctx->num_groups) {
             ctx->gd_table[dir_group].used_dirs--;
+            ext2_meta_touch(ctx);
+        }
     }
     ext2_sync(ctx);
     return EXT2_OK;

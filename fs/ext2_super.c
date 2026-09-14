@@ -58,6 +58,72 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
  * ext2_priv.h のマクロで kstring 関数 (ASM最適化済み) に転送済み */
 
 /* ======================================================================== */
+/*  メタデータの汚れ / 解決済み経路の記憶                                    */
+/* ======================================================================== */
+
+/* スーパーブロックかグループ記述子を動かした側が呼ぶ。
+ * 次の ext2_sync() が実際にディスクへ書く。 */
+void ext2_meta_touch(Ext2Ctx *ctx)
+{
+    ctx->meta_dirty = 1;
+}
+
+/* 名前空間を動かした側が呼ぶ (ext2_add_entry / ext2_delete_entry)。
+ * 世代が進むと記憶は全部まとめて無効になる。 */
+void ext2_ns_touch(Ext2Ctx *ctx)
+{
+    ctx->ns_gen++;
+    if (ctx->ns_gen == 0) {
+        /* 一周した。同じ世代番号の古い記憶と衝突しないよう全部捨てる */
+        ext2_path_memo_reset(ctx);
+        ctx->ns_gen = 1;
+    }
+}
+
+void ext2_path_memo_reset(Ext2Ctx *ctx)
+{
+    int i;
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) ctx->memo[i].gen = 0;
+    ctx->memo_next = 0;
+}
+
+int ext2_path_memo_get(Ext2Ctx *ctx, const char *path, u32 *out_ino)
+{
+    int i;
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) {
+        if (ctx->memo[i].gen == ctx->ns_gen &&
+            kstrcmp(ctx->memo[i].path, path) == 0) {
+            *out_ino = ctx->memo[i].ino;
+            return EXT2_OK;
+        }
+    }
+    return EXT2_ERR_NOTFOUND;
+}
+
+void ext2_path_memo_put(Ext2Ctx *ctx, const char *path, u32 ino)
+{
+    int i;
+
+    /* 収まらない経路は覚えない。kstrncpy は黙って切り詰めるので、
+     * 覚えてしまうと別の経路に化けて当たる */
+    if (kstrlen(path) >= OS32_MAX_PATH) return;
+
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) {
+        if (ctx->memo[i].gen == ctx->ns_gen &&
+            kstrcmp(ctx->memo[i].path, path) == 0) {
+            ctx->memo[i].ino = ino;
+            return;
+        }
+    }
+
+    i = ctx->memo_next;
+    ctx->memo_next = (i + 1) % EXT2_PATH_MEMO_N;
+    kstrncpy(ctx->memo[i].path, path, OS32_MAX_PATH);
+    ctx->memo[i].ino = ino;
+    ctx->memo[i].gen = ctx->ns_gen;
+}
+
+/* ======================================================================== */
 /*  タイムスタンプ                                                           */
 /* ======================================================================== */
 
@@ -254,6 +320,11 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     }
 
     ctx->mounted = 1;
+    /* 読み込んだばかり = ディスクと一致。経路の記憶も持ち越さない
+     * (ctx は使い回されることがある) */
+    ctx->meta_dirty = 0;
+    ctx->ns_gen = 1;
+    ext2_path_memo_reset(ctx);
 
     return EXT2_OK;
 }
@@ -275,9 +346,20 @@ int ext2_sync(Ext2Ctx *ctx)
 {
     int ret;
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+
+    /* 空きブロック数・空き inode 数・グループ記述子が前回の書き戻しから
+     * 一つも動いていなければ、書き戻すものは無い。write-through の契約は
+     * 変わらない (戻った時点でディスクは正しい) — 同じ中身を read-modify-
+     * write し直す 4 ブロック (= 8 セクタ) を出さないだけ。票 S6-P: 追記
+     * 1 回あたり 26 セクタのうち 8 セクタがこれだった。 */
+    if (!ctx->meta_dirty) return EXT2_OK;
+
     ret = ext2_write_super_raw(ctx);
     if (ret != 0) return ret;
-    return ext2_write_gd_raw(ctx);
+    ret = ext2_write_gd_raw(ctx);
+    if (ret != 0) return ret;
+    ctx->meta_dirty = 0;
+    return EXT2_OK;
 }
 
 /* ======================================================================== */

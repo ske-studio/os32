@@ -56,7 +56,11 @@ int ext2_format(int ide_drive, u32 total_sectors)
     u32 g, i;
     int ret;
     GroupLayout gl;
-    Ext2Ctx fmt_ctx;  /* フォーマット用一時コンテキスト */
+    /* フォーマット用一時コンテキスト。
+     * static — Ext2Ctx は解決済み経路の記憶 (票 S6-P) で 1.7KB 余りあり、
+     * 16KB のカーネルスタックへ丸ごと積みたくない。シングルタスクなので
+     * フォーマットが同時に 2 本走ることはない。 */
+    static Ext2Ctx fmt_ctx;
 
     if (!ide_drive_present(ide_drive)) return EXT2_ERR_IO;
 

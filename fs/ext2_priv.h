@@ -34,6 +34,14 @@ u32 ext2_current_time(void);
  * ext2_priv.h 先頭のマクロで kstring 関数に転送済み */
 int ext2_write_super_raw(Ext2Ctx *ctx);
 int ext2_write_gd_raw(Ext2Ctx *ctx);
+/* SB / GD を動かしたら必ず呼ぶ。次の ext2_sync() が書き戻す。 */
+void ext2_meta_touch(Ext2Ctx *ctx);
+/* 名前空間 (ディレクトリエントリ) を動かしたら必ず呼ぶ。
+ * 解決済み経路の記憶が全部無効になる。 */
+void ext2_ns_touch(Ext2Ctx *ctx);
+void ext2_path_memo_reset(Ext2Ctx *ctx);
+int  ext2_path_memo_get(Ext2Ctx *ctx, const char *path, u32 *out_ino);
+void ext2_path_memo_put(Ext2Ctx *ctx, const char *path, u32 ino);
 u32 ext2_find_partition(int ide_drive);
 /* IDEドライブ番号から Device* を解決 ("hd0".."hd3")。
  * ide_drive は VFS から (dev_type<<8)|dev_id 形式で渡ることがあるため

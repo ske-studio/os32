@@ -130,6 +130,7 @@ int ext2_alloc_block(Ext2Ctx *ctx)
                     if (ret != 0) return -1;
                     ctx->gd_table[g].free_blocks--;
                     ctx->sb_info.free_blocks_count--;
+                    ext2_meta_touch(ctx);
                     return (int)block_num;
                 }
             }
@@ -159,6 +160,7 @@ void ext2_free_block(Ext2Ctx *ctx, u32 block_num)
     ext2_write_block(ctx, ctx->gd_table[group].block_bitmap, ext2_g_aux);
     ctx->gd_table[group].free_blocks++;
     ctx->sb_info.free_blocks_count++;
+    ext2_meta_touch(ctx);
 }
 
 int ext2_alloc_inode(Ext2Ctx *ctx)
@@ -190,6 +192,7 @@ int ext2_alloc_inode(Ext2Ctx *ctx)
                     if (ret != 0) return -1;
                     ctx->gd_table[g].free_inodes--;
                     ctx->sb_info.free_inodes_count--;
+                    ext2_meta_touch(ctx);
                     return (int)ino;
                 }
             }
@@ -219,6 +222,7 @@ void ext2_free_inode(Ext2Ctx *ctx, u32 ino)
     ext2_write_block(ctx, ctx->gd_table[group].inode_bitmap, ext2_g_aux);
     ctx->gd_table[group].free_inodes++;
     ctx->sb_info.free_inodes_count++;
+    ext2_meta_touch(ctx);
 }
 
 /* ======================================================================== */
