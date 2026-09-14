@@ -1,6 +1,6 @@
 # Host Services 詳細計画 — ネットワーク・印刷・時刻・クリップボードをホスト (Windows) に丸投げする
 
-発行: PM (2026-09-13) / 状態: **N0 完了 (TASK_N0 第 5 版、2026-09-14) → N1 着手 (2026-09-14、[TASK_N0.md](TASK_N0.md)。§9 は推奨案で進める = ユーザー「承認」の後に PM が既定を採用、異論があれば N1 前に)**。
+発行: PM (2026-09-13) / 状態: **N1 受入完了 (コア、2026-09-14。kselftest 87/0、L0/L3・host_test 26/26、KAPI v51、ext2 高速化)。F6 (64KB 超) は N3 wget で再確認。→ N2 着手**。
 上位: [LINK_PLAN.md](LINK_PLAN.md) (リンク層 L0〜L3 の正典、機構はエミュレータ合格済み)、[PLAN.md](PLAN.md) (LGY-98 ドライバ、M1〜M4 合格、M5 = 実カード)。
 本書は LINK_PLAN §5-1 の「残りは KAPI 公開だけ」を、**外部プログラムから使える形**まで分解し、印刷などネットワーク以外のサービスを同じ仕組みに載せる計画。契約の正典は LINK_PLAN のまま (フレーム形式・フロー制御は変えない)。
 
@@ -100,7 +100,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 | 票 | 内容 | 依存 | 受入 |
 |---|---|---|---|
 | **N0** | KAPI_SPEC §3-2 の予約を v43 → **v51** に改訂 (v43 は欠番のまま「使わない」と明記)、本書 §3 の ABI 表を §1a 形式で確定、Codex 設計レビュー | — | 表の照合 |
-| **N1 (K)** | v51 の 5 本、`net/link.c` の非ブロッキング化 (`link_request` の分割送信、状態機械)、`host_owner_exit`、ホスト TDD (`tools/tests/net_link_host.c` を L0〜L3 の試験から起こす)、`userland/tests/host_test.c` | N0、`kernel-lgy98-link` ビルド | `make check-net-l3` 相当を KAPI 経由で: GET /pattern/65536 の内容一致、404、TIME、AGAIN ループで WM が止まらない (GUI 配下で `gui_busy` と同時) |
+| **N1 (K)** ✅ | v51 の 5 本、`net/link.c` の非ブロッキング化 (`link_request` の分割送信、状態機械)、`host_owner_exit`、ホスト TDD (`tools/tests/net_link_host.c` を L0〜L3 の試験から起こす)、`userland/tests/host_test.c` | N0、`kernel-lgy98-link` ビルド | `make check-net-l3` 相当を KAPI 経由で: GET /pattern/65536 の内容一致、404、TIME、AGAIN ループで WM が止まらない (GUI 配下で `gui_busy` と同時) |
 | **N2 (ホスト)** | `host_agent.py` に `PRINT OPEN/DATA/CLOSE/STATUS`、`CLIP GET/PUT`、`PUT /file/`、`--root` / `--allow-put` / `--to-file`、pywin32 は任意依存 (無ければ to-file) | — | Python 単体試験 (スプール、宣言長と WDATA の照合、閉じたジョブへの DATA 409、許可リスト外 403) |
 | **N3 (C)** | `libos32host` + `wget` / `lpr` / `hclip` / `date -sync` | N1、N2 | 端末 (GUI) と CUI の両方で `wget http://example.com/ /tmp/x` が 559B、`lpr /etc/profile` がホストの `spool/` に落ちる (to-file)、`hclip` の往復 |
 | **N4 (W/apps)** | libos32gui 末尾追記、ファイラ「印刷」、端末のコピー / 貼り付け | N3 | GUI 受入 |
