@@ -75,3 +75,10 @@
 - 非同期化 (B-1): 常駐ループを `select(..., 0.05)` + 毎周 `tick`、子は `spawn`→`_RealProc` (Popen 薄包み)、`_start_async` で `pending[rid]` に積み `_serve` は resp=None (STATUS は PROCESSING)、`tick` が完了で `_answer` / 期限超過で kill+503 / RELEASE・epoch 切替で破棄。例外種は `SUBPROC_ERRORS`。試験は `spawn` を `FakeSpawn` に差し替え `FakeProc.step()` で子を進める。
 - **PM 判断が要った点 (受入)**: `win32print` / `win32clipboard` 経路は**同期のまま** (pywin32 は任意依存・WSL2 では import 不可・既定は to-file で RTO 懸念なし・`--printer` は既定オフ)。非同期機構は subprocess 前提で、win32print (Python API 直呼び) を載せるには別途スレッド化が要る。→ **WSL2 の CLIP (clip.exe/powershell) という B-1 の主対象は非同期化済み**なので受入可。**win32print の非同期化は N5 (実機 Windows ネイティブ) で判断** (そこで pywin32 が実在し `--printer` が実経路になる)。§1 の「win32print も同じ非同期に」はこの範囲で読み替える。
 - 未確認 (机上): 実 Windows の clip.exe/powershell (WSL 上は subprocess スタブで検証)。実クリップボードは N3/N5 の受入で。
+
+## 7. 実装レビュー (Fable、2026-09-14) → N2-fix
+判定 Request changes、blocker 1 件 (実測)。既存 57/57 + N1 ホスト TDD 35/35 は回帰なし。
+- **blocker B7 (実測)**: `_RealProc` が `stdout=PIPE` で `poll()` が非 None になるまで読まないため、**約 49KB 超のクリップボード** (base64 後 >64KB = Linux パイプ容量) で子がブロック → 4 秒で kill → 503。設計は「49〜64KB は 200、64KB 超は切って 200」。→ `stdout=tempfile.TemporaryFile()` にして `output()` で `seek(0);read()` (パイプ容量非依存)。受入: **実 `_RealProc`** (FakeProc でなく) で ≥100KB を吐く子が期限内に完了、Agent 経由で 60000B→(200,60000)、100KB→(200,≤65536,UTF-8 境界)。FakeProc はパイプ背圧を模さないのでこの 1 本は実子プロセスで。
+- **nb (直す)**: (a) `_finish_clip_get` が rc を見ず、powershell が rc≠0 + stdout 空だと 200+0 長に化ける (B5「黙って捨てない」に反する) → `poll()!=0 → 503`。(b) `--clip` の未知値が検証されず wsl 扱い → argparse 後に `{auto,win32,wsl,none}` か `file:` 接頭辞かを検査して exit。(c) `_ensure_jobs`/`alloc()` の `os.makedirs`/`write_int_atomic` が try 外で、spool/state が書けないと PRINT OPEN で Agent が落ちる → OSError を 500+`error` に。(d) `now=time.time` → `time.monotonic` (NTP ジャンプ耐性)。
+- **nb (試験を足す)**: epoch/sess 切替での pending 破棄、実 `_RealProc` を使う大容量 clip 1 本、powershell 引数本文 (base64 ラッパ) の照合。
+- **nb (残す・N5 申し送り)**: kill 後の未 wait (次 Popen まで 1 個ゾンビ、有界)。`_print_win32` は RAW datatype で UTF-8 を書く → 日本語が出ない (TEXT+CP932 か GDI 描画が要る)。`pywintypes.error` が except に掛からず落ちる。いずれも `--printer` 実経路 = 実機 Windows なので **N5** で直す (§6)。
