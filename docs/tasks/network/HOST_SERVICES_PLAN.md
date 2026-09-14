@@ -85,7 +85,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 | `wget <url> [file]` | GET → ファイルへ (進捗はバイト数)。`/usr/bin` | C |
 | `lpr <file>` / `lpr -` (stdin) | テキスト印刷 | C |
 | `hclip get` / `hclip put <file>` | クリップボード | C |
-| `date -sync` | `TIME` で RTC を合わせる (`rtc_write` が無ければ表示だけ) | C |
+| `hdate` | `TIME` でホスト時刻を表示 (`date -sync` は内部コマンド影 + `rtc_write` 不在で不可、TASK_N3 B3。RTC 設定は v52 以降) | C |
 | GUI: ファイラの「印刷」、端末の「コピー / 貼り付け」(CLIP)、edit の印刷 | libos32gui の末尾追記で `host_*` を公開 | W / apps |
 
 ## 6. セキュリティ・運用
