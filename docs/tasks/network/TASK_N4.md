@@ -1,6 +1,6 @@
 # TASK_N4 — GUI から Host Services を使う (libos32gui 末尾追記 + ファイラ印刷 + 端末コピペ)
 
-発行: PM (2026-09-14) / 状態: **設計 第 3 版 (往復 2 の blocker 1 件: clip_get は書いた長さを返し total を別に。non-blocker 8 件も反映。往復 3/3 = 最終待ち)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
+発行: PM (2026-09-14) / 状態: **実装へ (第 4 版で確定。Fable 設計レビュー 3 往復 Approve、blocker 0)。N4a = 基盤 (Claude Code PM)、N4b = アプリ層 (別エージェント)。実装中に §5 の残件を票へ反映**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
 **分担 (ROLES §0)**: §1 (N4a、基盤 = libos32gui shlib への host_* 末尾追記) = Claude Code PM。§2 (N4b、アプリ層 = ファイラ「印刷」・端末コピペ) = 別エージェント (Claude Code は設計 + レビュー)。
 
 ## 0. 前提
@@ -41,3 +41,14 @@ shlib のジャンプ表に host_* を末尾追記。**cfg は 101〜104 (4 本)
 5. B4 で v1 を「貼り付け + 画面コピー」に縮めた判断 (マウス範囲選択を別票に) の是非。
 6. 受入手順: Agent を `--clip auto|wsl|file:<path>` + `--spool-dir` で起動 (既定 none は 503)、配備は `make deploy` → `hsync sys`。
 7. clip_get の書いた長さ / total の契約 (新 1) と host_tests、drip の分割 (新 5/6)、park 中の WM 応答 (新 2)。
+
+## 5. 実装時に反映する残件 (最終レビュー Approve の non-blocker)
+**N4a (基盤)**:
+- clip_get の切り詰めは **NUL 以降も捨てる** (`written < total` は cap だけでなく NUL でも起きる、呼び手はそう理解する)。`utf8_truncate` は NUL で止まる既存挙動でよい。
+- `total` を数えるため、host_get/clip_get の sink は **cap 到達後も捨てながら受理し続けて実長を数える** (sink は 0 を返す、非 0 は EABORT)。
+- host_tests の `#[path]` 取り込みのため、UTF-8 の 2 関数を os32api 非依存の小モジュールへ出し client.rs / hostsvc.rs で共用、`checked_slice` を pub に。
+- **stub の 6 本のシグネチャ表**を §1 に置く (並走する N4b が実物を待たずに書ける): `host_get(url, out, http_status)->i32`、`print_text(name, buf, pages, svc)->i32`、`print_file(name, path, pages, svc)->i32`、`clip_get(out)->(written,total)`、`clip_put(buf, svc)->i32`、`host_time(out20)->i32` (Rust 形)。clip_get の out は **NUL 終端しない** (cfg_get_text と違う)。
+- **子終了時の注入リング残り**: GUI 子の `exec_exit` で `kbd_inject_discard()` を呼ぶ小改修 (KAPI 不変、K レーン) を N4a に含める。含めない場合は「貼り付けの余りが次の子へ渡る」を既知制限として票に残す (打鍵でも起きる既存挙動)。
+**N4b (アプリ層)**:
+- コピペのキー候補は **F6〜F10** (WM が横取りせず `from_key` も空)。**gshell が F キーを `GUI_EV_KEY` でアプリへ配るかを N4b で先に確認**してから確定。
+- Prompt 貼り付けの 1 行が `LINE_MAX` (160) 超は `Line::push` が丸ごと捨てる → 切るか通知。attach 貼り付けは TAB/LF 以外の制御バイト (ESC 等) を落とす (子の暴走防止)。コピーはセルの NUL / ESC を空白に置換してから `clip_put`。
