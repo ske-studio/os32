@@ -217,8 +217,13 @@ class RealB64Spawn:
         return proc
 
     def wait_all(self):
+        # nb3: timeout を付け、B7 再発 (パイプ詰まり) でスイートがハングしない。
         for p in self.procs:
-            p.p.wait()                       # 子の完了を待つ (期限内)
+            try:
+                p.p.wait(timeout=HA.SUBPROC_TIMEOUT * 2)
+            except subprocess.TimeoutExpired:
+                p.p.kill()
+                raise AssertionError("child did not finish within wait_all timeout")
 
 
 @contextlib.contextmanager
@@ -1142,8 +1147,11 @@ def n2fix_b7_real_large_clip_get():
     fs = RealB64Spawn(unit, count)
     with patched_spawn(fs):
         a, o = up(clip="wsl")
-        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
-        assert [p for p in o.pump() if p["op"] == HA.OP_RESPONSE] == []  # 子未完了
+        # nb4: REQUEST 自身は ACK のみで RESPONSE を出さない (これは時間非依存)。
+        # 実子の完了を pump で覗く時間依存の assert は外す (子が速いと偽陰性)。
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert [p for p in out if p["op"] == HA.OP_RESPONSE] == []
+        assert 1 in a.pending
         fs.wait_all()                                  # 実子の完了を待つ (期限 4s 内)
         out = o.pump()
         ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
@@ -1183,6 +1191,7 @@ def n2fix_b_clip_arg_validation():
     assert HA.valid_clip_arg("wsl") and HA.valid_clip_arg("win32")
     assert HA.valid_clip_arg("file:/tmp/x")
     assert not HA.valid_clip_arg("bogus") and not HA.valid_clip_arg("")
+    assert not HA.valid_clip_arg("file:"), "空パスの file: を受理した (nb2)"
     r = subprocess.run([sys.executable, str(ROOT / "tools" / "host_agent.py"),
                         "--clip", "bogus"], capture_output=True)
     assert r.returncode != 0, "不正な --clip を受理した"
@@ -1191,6 +1200,8 @@ def n2fix_b_clip_arg_validation():
 
 def n2fix_c_open_oserror_500():
     """nb(c): スプール/ state が書けないと PRINT OPEN で落ちず 500 + error。"""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return                                           # nb5: root は権限を無視する
     with tempfile.TemporaryDirectory() as d:
         blocked = os.path.join(d, "ro", "spool")        # 親が無い書けない場所
         a, o = up(state_dir=d, spool_dir=blocked)
@@ -1255,7 +1266,209 @@ def n2fix_sess_switch_discards_pending():
         assert a.pending == {} and proc.killed
 
 
+# =========================================================== N3 §7 (Agent, host Python)
+def n3_get_async_processing_then_200():
+    """B4: GET http は非同期。子未完了中は STATUS→PROCESSING、subproc_timeout を
+    1 秒に下げても GET は 25 秒期限で生き、完了で 200 + 本文 (4 秒で切れない)。"""
+    body = b"hello world"
+    with patched_spawn(FakeSpawn([FakeProc(out=b"200\n" + body)])) as fs:
+        a, o = up(allow_net=True)
+        a.subproc_timeout = 1.0                          # CLIP は 1 秒でも GET は別期限
+        base = 1000.0
+        a.now = lambda: base
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET http://h/f")
+        assert only(out, HA.OP_ACK)["ack"] == 0
+        assert [p for p in out if p["op"] == HA.OP_RESPONSE] == []    # 子未完了
+        assert fs.calls[0][0][0] == sys.executable                   # urllib の子
+        a.now = lambda: base + 5.0                       # subproc_timeout(1s) は超えるが
+        assert o.pump() == []                            # GET 期限(25s)内なので生きる
+        out = o.send(HA.OP_STATUS, rid=1)
+        assert resp(only(out, HA.OP_RESPONSE)) == (True, HA.CTL_PROCESSING, 0)
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 1) == body
+
+
+def n3_get_async_404_not_502():
+    """B4: 子が status 行 404 を出したら 404 (502 に化けさせない)。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=b"404\nnope")])) as fs:
+        a, o = up(allow_net=True)
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET http://h/missing")
+        fs.procs[0].step()
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 404), (ctl, st)
+        assert read_body(o, 1) == b"nope"
+
+
+def n3_get_async_child_rc_nonzero_502():
+    """B4: 子が rc≠0 なら status 行があっても 502 (途中断を 200 にしない)。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=b"200\npartial", rc=1)])) as fs:
+        a, o = up(allow_net=True)
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET http://h/f")
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 502, 0)
+
+
+def n3_get_offline_502_sync():
+    """B4: allow_net False (--offline) は子を起こさず即 502 (同期)。"""
+    a, o = up(allow_net=False)
+    out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET http://h/f")
+    assert resp(only(out, HA.OP_RESPONSE)) == (False, 502, 0)
+    assert 1 not in a.pending
+
+
+def n3_get_deadline_503_timeout():
+    """B4: GET 期限 (25s) 超過で kill + 503 error timeout。"""
+    base = 1000.0
+    with patched_spawn(FakeSpawn([FakeProc()])) as fs:       # 完了しない子
+        a, o = up(allow_net=True)
+        a.now = lambda: base
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET http://h/slow")
+        assert o.pump() == []                                # 期限内
+        a.now = lambda: base + HA.GET_TIMEOUT + 1.0
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 503) and ln > 0
+        assert read_body(o, 1) == b"error timeout"
+        assert fs.procs[0].killed
+
+
+def n3_file_no_root_403():
+    """§7: --file-root 未指定なら /file/ は 403 (任意ファイルを開かない)。"""
+    a, o = up()
+    out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/etc/hostname")
+    assert resp(only(out, HA.OP_RESPONSE)) == (False, 403, 0)
+
+
+def n3_file_in_root_200():
+    """§7: root 配下のファイルは 200 + 本文。"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "a.txt"), "wb") as f:
+            f.write(b"hi")
+        a, o = up(file_root=d)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/a.txt")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 2)
+        assert read_body(o, 1) == b"hi"
+
+
+def n3_file_dotdot_escape_403():
+    """§7: .. でルート外へ出る要求は 403。"""
+    with tempfile.TemporaryDirectory() as d:
+        root = os.path.join(d, "root")
+        os.makedirs(root)
+        with open(os.path.join(d, "secret.txt"), "wb") as f:
+            f.write(b"S")
+        a, o = up(file_root=root)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/../secret.txt")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 403, 0)
+
+
+def n3_file_symlink_escape_403():
+    """§7: root 内の symlink がルート外を指しても 403。"""
+    with tempfile.TemporaryDirectory() as d:
+        root = os.path.join(d, "root")
+        os.makedirs(root)
+        with open(os.path.join(d, "outside.txt"), "wb") as f:
+            f.write(b"O")
+        try:
+            os.symlink(os.path.join(d, "outside.txt"), os.path.join(root, "link.txt"))
+        except (OSError, NotImplementedError, AttributeError):
+            return                                           # symlink 不可の環境は skip
+        a, o = up(file_root=root)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/link.txt")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 403, 0)
+
+
+def n3_file_prefix_sibling_403():
+    """§7: 前方一致する兄弟 (root2) は root 配下でないので 403。"""
+    with tempfile.TemporaryDirectory() as d:
+        root = os.path.join(d, "root")
+        sib = os.path.join(d, "root2")
+        os.makedirs(root)
+        os.makedirs(sib)
+        with open(os.path.join(sib, "x.txt"), "wb") as f:
+            f.write(b"X")
+        a, o = up(file_root=root)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/../root2/x.txt")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 403, 0)
+
+
+def n3fix_realproc_close_frees_fds():
+    """nb1: 完了経路でも kill 経路でも _RealProc の一時ファイル fd を閉じる。"""
+    p = HA._RealProc([sys.executable, "-c", "import sys; sys.stdout.write('x')"])
+    p.p.wait()
+    assert p.output() == b"x"
+    p.close()
+    assert p._outfile.closed and p._errfile.closed
+    p.close()                                            # 冪等 (二度目でも壊れない)
+    p2 = HA._RealProc([sys.executable, "-c", "import time; time.sleep(30)"])
+    p2.kill()
+    assert p2._outfile.closed and p2._errfile.closed
+
+
+def n3fix_wait_all_timeout_raises():
+    """nb3: RealB64Spawn.wait_all は完了しない子を timeout で kill し AssertionError。"""
+    orig = HA.SUBPROC_TIMEOUT
+    HA.SUBPROC_TIMEOUT = 0.2                              # 0.4s で諦める
+    fs = RealB64Spawn(b"a", 1)
+    fs.procs.append(HA._RealProc([sys.executable, "-c", "import time; time.sleep(30)"]))
+    try:
+        raised = False
+        try:
+            fs.wait_all()
+        except AssertionError:
+            raised = True
+        assert raised, "完了しない子で wait_all がハング / 例外なし"
+    finally:
+        HA.SUBPROC_TIMEOUT = orig
+        for p in fs.procs:
+            p.kill()
+
+
+def n3fix_clip_get_stderr_in_503():
+    """nb6: rc≠0 の 503 本文に子の stderr を載せる (診断性)。"""
+    class _ErrSpawn:
+        def __init__(self):
+            self.calls = []
+            self.procs = []
+
+        def __call__(self, cmd, stdin_bytes=None):
+            self.calls.append((cmd, stdin_bytes))
+            p = HA._RealProc([sys.executable, "-c",
+                              "import sys; sys.stderr.write('boom detail'); "
+                              "sys.exit(3)"])
+            self.procs.append(p)
+            return p
+
+    fs = _ErrSpawn()
+    with patched_spawn(fs):
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        fs.procs[0].p.wait()
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 503) and ln > 0, (ctl, st, ln)
+        body = read_body(o, 1, credit=64)
+        assert b"exit 3" in body and b"boom detail" in body, body
+
+
 CASES = [
+    n3_get_async_processing_then_200,
+    n3_get_async_404_not_502,
+    n3_get_async_child_rc_nonzero_502,
+    n3_get_offline_502_sync,
+    n3_get_deadline_503_timeout,
+    n3_file_no_root_403,
+    n3_file_in_root_200,
+    n3_file_dotdot_escape_403,
+    n3_file_symlink_escape_403,
+    n3_file_prefix_sibling_403,
+    n3fix_realproc_close_frees_fds,
+    n3fix_wait_all_timeout_raises,
+    n3fix_clip_get_stderr_in_503,
     n2fix_b7_real_large_clip_get,
     n2fix_b7_real_clip_get_sizes,
     n2fix_a_clip_get_rc_nonzero_503,

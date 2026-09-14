@@ -35,7 +35,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 
 # ---------------------------------------------------------------- ワイヤ定数
 LINK_ETHERTYPE = 0x88B5
@@ -112,8 +111,31 @@ DEFAULT_LINES_PER_PAGE = 60
 FORMFEED = b"\f"
 UTF16_BOM = b"\xff\xfe"   # clip.exe へ渡す UTF-16LE のバイト順マーク
 SUBPROC_TIMEOUT = 4.0     # CLIP の子プロセスの期限 (秒)。超過で kill + 503
+GET_TIMEOUT = 25.0        # GET http(s) の子プロセスの期限 (秒、§7 B4)。
+                          # ライブラリの無進捗期限 30 秒より短くして、利用者が
+                          # ETIMEOUT でなく業務 503 (error timeout) を見るようにする。
 TICK_INTERVAL = 0.05      # 常駐ループの select タイムアウト (子の巡回間隔)
 DECL_RE = re.compile(r"^[0-9]+$")   # 宣言長は 10 進のみ (+5 / -5 / 5_0 を弾く)
+
+# GET http(s) を回す子プロセスの本体 (§7 B4)。urllib を主ループの外で回す。
+# r.read() で本文を読み切ってから status 行 + 本文を stdout へ書く (途中断を
+# 「200 + 短い本文」にしない)。urllib.error.HTTPError は e.code + e.read() を
+# 載せて **rc 0 で** 終える (404 を 502 にしない)。それ以外の例外 (URLError・
+# タイムアウト等) は捕まえず rc≠0 で死ぬ → Agent 側で 502。
+GET_CHILD = (
+    "import sys, urllib.request, urllib.error\n"
+    "u = sys.argv[1]\n"
+    "try:\n"
+    "    r = urllib.request.urlopen(u, timeout=%d)\n"
+    "    body = r.read()\n"
+    "    status = getattr(r, 'status', 200) or 200\n"
+    "    r.close()\n"
+    "except urllib.error.HTTPError as e:\n"
+    "    body = e.read()\n"
+    "    status = e.code\n"
+    "sys.stdout.buffer.write(('%%d\\n' %% status).encode())\n"
+    "sys.stdout.buffer.write(body)\n"
+) % int(GET_TIMEOUT)
 
 # 子プロセス経路で 503 + 本文に落とす例外種 (往復 3 B-1 / nb2)。
 SUBPROC_ERRORS = (OSError, subprocess.TimeoutExpired,
@@ -125,8 +147,10 @@ CLIP_BACKENDS = ("auto", "win32", "wsl", "none")   # file:<path> は接頭辞で
 
 
 def valid_clip_arg(value):
-    """--clip の値が既知の backend か file:<path> か (nb(b))。"""
-    return value in CLIP_BACKENDS or value.startswith("file:")
+    """--clip の値が既知の backend か file:<非空パス> か (nb(b))。"""
+    if value in CLIP_BACKENDS:
+        return True
+    return value.startswith("file:") and len(value) > len("file:")
 
 
 def write_int_atomic(path, value):
@@ -279,32 +303,53 @@ class _RealProc:
     def __init__(self, cmd, stdin_bytes=None):
         stdin = subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL
         self._outfile = tempfile.TemporaryFile()
+        self._errfile = tempfile.TemporaryFile()   # nb6: 失敗時に stderr を診断へ
         self.p = subprocess.Popen(cmd, stdin=stdin, stdout=self._outfile,
-                                  stderr=subprocess.DEVNULL)
+                                  stderr=self._errfile)
         if stdin_bytes is not None:
             try:
                 self.p.stdin.write(stdin_bytes)
             finally:
                 self.p.stdin.close()
         self._out = None
+        self._err = None
+        self._closed = False
 
     def poll(self):
         return self.p.poll()
 
     def output(self):
         # tick は poll() が非 None になってから呼ぶので、子は終了済み =
-        # stdout は一時ファイルに出揃っている。先頭から読み切る。
+        # stdout は一時ファイルに出揃っている。先頭から読み切る (close は
+        # 別建て — 完了経路が必ず close() する、nb1)。
         if self._out is None:
             self._outfile.seek(0)
             self._out = self._outfile.read()
-            self._outfile.close()
         return self._out
+
+    def stderr(self):
+        if self._err is None:
+            self._errfile.seek(0)
+            self._err = self._errfile.read()
+        return self._err
+
+    def close(self):
+        """一時ファイル (stdout/stderr) の fd を閉じる。冪等 (nb1)。"""
+        if self._closed:
+            return
+        self._closed = True
+        for f in (self._outfile, self._errfile):
+            try:
+                f.close()
+            except OSError:
+                pass
 
     def kill(self):
         try:
             self.p.kill()
         except OSError:
             pass
+        self.close()                                 # kill 経路でも fd を閉じる (nb1)
 
 
 def spawn(cmd, stdin_bytes=None):
@@ -772,29 +817,63 @@ class HostAgent:
                          (lambda off, ln: bytes((off + k) & 0xFF for k in range(ln))),
                          out, total=n)
         elif resource.startswith("http://") or resource.startswith("https://"):
-            status, body = 502, b""
-            if self.allow_net:
-                try:
-                    with urllib.request.urlopen(resource, timeout=10) as r:
-                        body = r.read()
-                        status = getattr(r, "status", 200) or 200
-                except Exception as e:                 # noqa: BLE001 (何であれ 502)
-                    self.log("GET %s failed: %s" % (resource, e))
-            self._answer(rid, ent, status, body, None, out)
+            self._service_get_http(rid, ent, resource, out)
         elif resource.startswith("/file/"):
-            path = resource[len("/file/"):]
-            if self.file_root:
-                path = os.path.join(self.file_root, path.lstrip("/"))
-            try:
-                with open(path, "rb") as fh:
-                    self._answer(rid, ent, 200, fh.read(), None, out)
-            except OSError:
-                self._answer(rid, ent, 404, b"", None, out)
+            self._service_get_file(rid, ent, resource[len("/file/"):], out)
         elif resource == "/status/503":
             self._answer(rid, ent, 503, b"", None, out)     # B7: 業務の 503
         elif resource == "/status/410":
             self._answer(rid, ent, 410, b"gone body", None, out)  # B7: 本文付き 410
         else:
+            self._answer(rid, ent, 404, b"", None, out)
+
+    def _service_get_http(self, rid, ent, resource, out):
+        """GET http(s): 主ループを塞がぬよう子プロセスで urllib を回す (§7 B4)。
+        --offline (allow_net False) は実 HTTP を出さず即 502。"""
+        if not self.allow_net:
+            self._answer(rid, ent, 502, b"", None, out)
+            return
+        try:
+            proc = spawn([sys.executable, "-c", GET_CHILD, resource])
+        except SUBPROC_ERRORS as e:
+            self.log("GET %s spawn failed: %s" % (resource, e))
+            self._answer(rid, ent, 502, b"", None, out)
+            return
+        self._start_async(rid, ent, proc, self._finish_get, timeout=GET_TIMEOUT)
+
+    def _finish_get(self, proc):
+        """子の stdout = "status\\n" + 本文。子 rc≠0 は status 行があっても 502。"""
+        if proc.poll():                                  # 途中断 → 502 (200 に化けさせない)
+            return (502, b"")
+        raw = proc.output()
+        nl = raw.find(b"\n")
+        if nl < 0:                                       # status 行が無い = 壊れた
+            return (502, b"")
+        try:
+            status = int(raw[:nl])
+        except ValueError:
+            return (502, b"")
+        return (status, raw[nl + 1:])
+
+    def _service_get_file(self, rid, ent, rel, out):
+        """GET /file/: --file-root 配下だけを読む (§7 パストラバーサル修正)。
+        ルート未指定は 403、.. / symlink 脱出・別ドライブは 403、前方一致も落とす。"""
+        if not self.file_root:
+            self._answer(rid, ent, 403, b"", None, out)  # ルート未指定なら開けない
+            return
+        root = os.path.realpath(self.file_root)
+        target = os.path.realpath(os.path.join(root, rel.lstrip("/")))
+        try:
+            inside = os.path.commonpath([root, target]) == root
+        except ValueError:                               # 別ドライブ (commonpath が投げる)
+            inside = False
+        if not inside:
+            self._answer(rid, ent, 403, b"", None, out)  # root2 のような前方一致も落ちる
+            return
+        try:
+            with open(target, "rb") as fh:
+                self._answer(rid, ent, 200, fh.read(), None, out)
+        except OSError:
             self._answer(rid, ent, 404, b"", None, out)
 
     def _finish_body(self, rid, ent, out):
@@ -858,21 +937,50 @@ class HostAgent:
                                  self._err_body("timeout"), None, out)
                 continue
             del self.pending[rid]                        # 完了 → finisher で判定
+            proc = job["proc"]
             try:
-                status, body = job["finish"](job["proc"])
+                status, body = job["finish"](proc)
             except SUBPROC_ERRORS as e:
-                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
-                continue
+                status, body = HTTP_UNAVAIL, self._err_body(self._exc_msg(e))
+            finally:
+                closer = getattr(proc, "close", None)
+                if closer is not None:
+                    closer()                             # nb1: 完了経路でも fd を閉じる
             self._answer(rid, ent, status, body, None, out)
 
-    def _start_async(self, rid, ent, proc, finish):
+    def _start_async(self, rid, ent, proc, finish, timeout=None):
+        # 期限は要求種別ごと (§7 B4): CLIP は subproc_timeout (4 秒)、GET は 25 秒。
+        deadline = self.now() + (self.subproc_timeout if timeout is None else timeout)
         self.pending[rid] = {"proc": proc, "ent": ent, "finish": finish,
-                             "deadline": self.now() + self.subproc_timeout,
+                             "deadline": deadline,
                              "sess": self.sess, "epoch": self.epoch}
 
     @staticmethod
     def _err_body(msg):
         return ("error %s" % msg).encode("utf-8", "replace")
+
+    @staticmethod
+    def _exc_msg(e):
+        """503 本文に載せる文言。子の stderr を含む診断があればそれを使う (nb6)。"""
+        return getattr(e, "os32_msg", None) or e
+
+    @staticmethod
+    def _subproc_failed(proc, name, rc):
+        """rc≠0 の子プロセスを CalledProcessError にする。stderr を診断へ (nb6)。"""
+        err = b""
+        get_err = getattr(proc, "stderr", None)
+        if get_err is not None:
+            try:
+                err = get_err() or b""
+            except OSError:
+                err = b""
+        msg = "%s exit %d" % (name, rc)
+        tail = err.decode("utf-8", "replace").strip()
+        if tail:
+            msg += ": " + tail
+        e = subprocess.CalledProcessError(rc, name)
+        e.os32_msg = msg
+        return e
 
     # ----------------------------------------------------- N2: PRINT
     def _ensure_jobs(self):
@@ -1102,7 +1210,7 @@ class HostAgent:
     def _finish_clip_get(self, proc):
         rc = proc.poll()
         if rc:                                           # powershell が失敗 → 503
-            raise subprocess.CalledProcessError(rc, "powershell.exe")
+            raise self._subproc_failed(proc, "powershell.exe", rc)
         raw = base64.b64decode(proc.output().strip(), validate=True)
         return (200, self._clip_trim_get(raw))
 
@@ -1152,7 +1260,7 @@ class HostAgent:
     def _finish_clip_put(self, proc):
         rc = proc.poll()
         if rc:                                           # clip.exe は 0 で成功
-            raise subprocess.CalledProcessError(rc, "clip.exe")
+            raise self._subproc_failed(proc, "clip.exe", rc)
         return (200, b"")
 
     def _clip_put_win32(self, norm):
