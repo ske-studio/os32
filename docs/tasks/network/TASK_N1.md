@@ -129,3 +129,33 @@ F1〜F5 は Codex の実装レビュー所見と合わせて N1 のコーダー�
 
 ### 良い点 (レビュー)
 3 way HELLO の req_sess/req_epoch 照合 (R2)・rid 台帳の規則 (1)〜(5)・HOLE・枯渇停止・flags bit0 の制御/業務分離・host_read の成功確定点・STALE close 無通知・B8 の 2 段検査は正しく実装。規約 [C1]〜[C4]/[ABI1〜3]/LE 直列化は問題無し。状態機械の反例 (B1〜B8/R1〜R4) はホスト TDD で個別に踏んでいる。
+
+### 5. N1-fix コーダー自己申告 (2026-09-14、worktree `agent-ac9806510d71b3f80`、基点 `d584419`)
+
+RED → GREEN の詳細・ケース名は [`tools/tests/n1_tdd.md`](../../../tools/tests/n1_tdd.md) §6。
+`make` / 配備 / エミュレータは未実行 ([V4]、票の禁止事項)。手元の直接実行のみ。
+
+| 項目 | 状態 | 変更 | RED → GREEN |
+|---|---|---|---|
+| **F1** | 済 | `kapi/kapi_db.c` `db_v50_selftest` (0): 数値直書きをヘッダ定数から導く形に (`KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1`、`DB_ERROR_CODE != 207`)、コメントも更新 | `test_kapi_db_v50.py v50_selftest` FAIL → PASS |
+| **F2** | 済 | `net/link.c`: `link_counters_reset()` が `link_rt_ok`/`_fail` も打ち直す + `link_selftest` 入口で呼ぶ、L0 結果を新設 `link_l0_ok`/`link_l0_fail` へスナップショット。`net_l0_test.py` は `link_l0_ok`/`link_l0_fail` を読む。`n1_tdd.md §4` の記述訂正 | `n2_rt_ok_resets_between_selftest_sections` FAIL → PASS |
+| **F4** | 済 | `net/link.c`: RTO 3 か所に `!rel_due`/`!req_due`/`!w_due` ガード、`host_open`/`host_write`/`link_free_handle` の `- LINK_RTO_TICKS` 前倒しを外す。**併せて `link_tx_round` の公平化バグ (NIC busy でも turn を進めていた) を修正** — F4 の parity 変化で `r2_R9` が露呈 | `n2_no_drop_roundtrip_has_zero_retransmits` FAIL → PASS、`r2_R9` 維持 |
+| **N2** | 済 | (a)(b) `net_link_host.c` に 2 ケース (計 31)、(c) `kapi_db_v50_host.c` に `v50_selftest` ケース (計 23、`check-db-v50-host` 経由で `make check` 対象) | 上記 3 件 |
+| **F3** | PM 再測 | 直接修正せず。F4 で改善見込み。ホスト試験で「未送信に RTO を課さない」を提示済み | — |
+| **N3** | 済 | `net_l1_test.py`/`net_l2_test.py` の `EOF received==1` を合否から外し情報行へ (契約 = `recv==COUNT`/`read==TOTAL`) | ゲスト試験 (PM 実行) |
+| **F5** | 確認済 | 欠陥不成立をコードで確認: `want_window` は `link_timers` (1 tick 1 回) だけが立て、WINDOW 送出で 0。同一 tick 内の再セット経路なし → rid ごと 1 tick 1 本。F4 の公平化でさらに厳密化 | — |
+| **N1'** | **見送り** | 既存コードは毎 tick WINDOW を現行 credit で送り backpressure は効く。回復の遅さは credit の実測調整が要り、ゲスト観測 (F3 と絡む) で PM/テスターの領分。贋 NIC は決定的で再現しない。候補は F4 再測後に PM 判断 | — |
+
+**F4 で追加した公平化修正の注意** (レビュー観点): `link_tx_round` は NIC が受けなかった (rc<0)
+周回では `link_tx_turn` を進めない (送れた / 空のときだけ進める)。N0 §2a「位置は tick を
+またいで保つ」に沿う。修正前は入り parity が偶然通常寄りで `r2_R9` が通っていただけ。
+
+**PM がゲスト再測で見るカウンタ** (`kernel.map` シンボル): `link_l0_ok`/`link_l0_fail` (L0、`net_l0_test.py`)、
+`link_rt_ok` (最終は L3 区間の値)、`link_retransmits` (無ドロップで 0 を期待、F4)、`link_l1_recv`/`link_l2_read` (F3)、
+`link_resyncs`/`link_rt_fail`/`link_tombstones`/`link_l2_overflow` (F3 の切り分け: resync 起因か overflow 起因か)。
+
+**着地時に注意する共有ファイル**: `net/link.c` (F2/F4 + 公平化、`link_l0_ok`/`link_l0_fail` 追加)、
+`net/link.h` (extern 2 本)、`kapi/kapi_db.c` (F1)、`tools/net_l0_test.py` (`link_l0_ok` を読む)、
+`tools/net_l1_test.py`/`net_l2_test.py` (N3)、`tools/tests/net_link_host.c` + `test_net_link.py` は
+変更なし側と衝突しやすい (N2 の 2 ケース追加)、`tools/tests/kapi_db_v50_host.c` + `test_kapi_db_v50.py` (v50_selftest 追加)、
+`tools/tests/n1_tdd.md` §4/§6。`sdk/kapi.json` は**触っていない** (v51 のまま、slot 追加なし)。

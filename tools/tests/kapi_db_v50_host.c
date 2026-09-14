@@ -412,6 +412,21 @@ static void error_code(void)
     resolve_owner = current_owner = 2;
 }
 
+/* ---- 4b. ブート自己診断 (N2 (c): make check で slot 番号の整合を踏む) ----
+ * db_v50_selftest() は KAPI_SLOT_* の位置と SHM 境界などを検査する骨。
+ * F1 で slot 件数を数値直書きしていたため v51 の末尾追記で bit0 が立ち、
+ * 実機の kselftest が 86/1 に落ちた。ここで 0 を確かめれば make check で
+ * 同じ崩れを踏む。*/
+static void v50_selftest(void)
+{
+    /* db_v50_selftest の (2) は 0xFFFFFF00 が帯外であることに依るので、
+     * ホストでは CPL=3 の帯検査を有効にする (32bit の overflow はホストの
+     * 64bit 幅では起きないため。user_range ケースと同じ帯 [BAND_LO,BAND_HI))。*/
+    host_cpl3 = 1;
+    CHECK(db_v50_selftest() == 0);
+    host_cpl3 = 0;
+}
+
 /* ---- 5. SHM の境界 (票 §1b) -------------------------------------------- */
 static void shm_bound(void)
 {
@@ -1261,6 +1276,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "prepare_only")) prepare_only();
     else if (!strcmp(argv[1], "binds")) binds();
     else if (!strcmp(argv[1], "error_code")) error_code();
+    else if (!strcmp(argv[1], "v50_selftest")) v50_selftest();
     else if (!strcmp(argv[1], "shm_bound")) shm_bound();
     else if (!strcmp(argv[1], "user_range")) user_range();
     else if (!strcmp(argv[1], "owner_isolation")) owner_isolation();

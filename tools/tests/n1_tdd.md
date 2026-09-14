@@ -47,7 +47,7 @@
 | `window_gates_delivery` | §1b WINDOW | WINDOW を受けた rid だけ流れ、credit を超えない |
 | `time_format_is_19_bytes` | HOST_SERVICES_PLAN §2 | TIME の標準形 `YYYY-MM-DD HH:MM:SS` |
 
-### 1b. OS32 側 (`tools/tests/net_link_host.c`、29 ケース)
+### 1b. OS32 側 (`tools/tests/net_link_host.c`、31 ケース。末尾 2 件は N1-fix N2、§6 参照)
 
 | ケース名 | N0 §3 の由来 | 見るもの |
 |---|---|---|
@@ -80,6 +80,8 @@
 | `open_error_codes` | §1a `host_open` | 未確立 STALE / 0 長・1400B 超 INVAL / 3 本目 FULL / NIC 無し NOSYS / RELEASE 未 ACK の枠は AGAIN |
 | `last_data_and_eof_loss` | §3 その他 | 最終 DATA 消失。**EOF だけでは完了にしない** (完了は `recv_bytes == length`) |
 | `data_gap_is_dropped_and_reacked` | §1b DATA | 先行 DATA を捨てて累積 ACK を止め、埋まると進む (Go-Back-N) |
+| `n2_no_drop_roundtrip_has_zero_retransmits` | N1-fix N2 (a) / F4 | 無ドロップ往復で `link_retransmits == 0` (未送信フレームに RTO を課さない) |
+| `n2_rt_ok_resets_between_selftest_sections` | N1-fix N2 (b) / F2 | `link_selftest` → `link_l1_bulk` で `link_rt_ok` が区間ごとに reset、`link_l0_ok` は保たれる |
 
 ソース本文で見張る 2 件 (`tools/tests/test_net_link.py` の冒頭):
 
@@ -195,8 +197,9 @@ GREEN: `SUMMARY 29/29 PASS` + `TARGET i386-elf GNU89 -Werror COMPILE PASS`。
 |---|---|
 | `link_hello_ok` | **セッション確立 (0/1)**。v1 は「HELLO を 1 通受けた」だったが、v2 は 3 way が ESTABLISHED まで通ったとき 1 |
 | `link_peer_mac` / `link_epoch` | 同じ (peer の MAC / 現在の再同期世代) |
-| `link_rt_ok` | **業務 RESPONSE を受けた要求の数**。v1 の「往復数」と同義 |
-| `link_rt_fail` | **STALE になったハンドルの数** (再同期 / TOMBSTONE / open 失敗)。v1 は「応答が来なかった往復数」 |
+| `link_rt_ok` | **現在の自己試験区間の成功往復数**。各自己試験 (L0〜L3) の入口で `link_counters_reset()` が 0 に打ち直すので、最終読み出しでは最後に走った L3 の値になる (N1-fix F2 で修正。v1 の「累積した往復数」とは違う) |
+| `link_rt_fail` | 現在の区間の失敗往復数 (区間ごとに reset) |
+| **新規** `link_l0_ok` / `link_l0_fail` | **L0 selftest 専用のスナップショット** (N1-fix F2)。`link_selftest` が区間末に `link_rt_ok` / `link_rt_fail` を写す。`net_l0_test.py` は `link_rt_ok` ではなく**これ**を最終読み出しで見る (L1〜L3 が `link_rt_ok` を打ち直すため) |
 | `link_retransmits` | REQUEST / WDATA / RELEASE / CONFIRM / SYN の再送回数 (v1 は REQUEST と HELLO だけ) |
 | `link_rx_frames` / `link_rx_dropped` | 同じ (受けた数 / 検査に落ちた数)。v2 は payload 長検査と sess/epoch 照合で落ちる分が増える |
 | `link_l1_recv` / `_bytes` / `_ooo` / `_windows` / `_max_credit` / `_min_credit` / `_meas_pages` | 同じ意味。`_recv` / `_bytes` は**リング所有ハンドルの DATA** を数える |
@@ -247,3 +250,87 @@ KAPI_SPEC.md の関数表: kapi.json と一致
 **やっていないこと** ([V4]): `make all` / `make check` / `make clean` / 配備 /
 エミュレータでの実行 / `check-net-l0`〜`l3` / `check-net-m2` / `host_test` の実機実行。
 どれも票で PM の担当。
+
+---
+
+## 6. N1-fix (実装レビュー + ゲスト受入の修正、2026-09-14、基点 `d584419`)
+
+TASK_N1 §4 の blocker F1 / F2 / F4 / N2 と non-blocker N3 / F5 を実装。RED → GREEN は
+すべてコーダーの手元で確認 (`make` / エミュレータ / 配備は未実行 = PM の担当)。
+
+### 6-1. F1 (kselftest 86/1 — v51 で v50 検査が崩れる)
+
+`kapi/kapi_db.c` の `db_v50_selftest()` (0) が slot 件数を数値直書きしていた:
+`KAPI_SLOT_COUNT != 208` と `KAPI_SLOT_DB_ERROR_CODE != KAPI_SLOT_COUNT - 1`。
+v51 で `KAPI_SLOT_COUNT` = 213・`DB_ERROR_CODE` = 207・末尾は `HOST_CLOSE` に変わり bit0 が立つ。
+→ ヘッダ定数から導く形に ([C4]): `KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1` と
+`KAPI_SLOT_DB_ERROR_CODE != 207` (db 帯の末尾)。コメントも db 帯 201..207 + host 帯 208..212 に更新。
+
+- **RED**: `python3 -B tools/tests/test_kapi_db_v50.py v50_selftest` → `FAIL v50_selftest: db_v50_selftest() == 0`
+- **GREEN**: 同上 → `PASS v50_selftest` (23/23)
+
+### 6-2. F2 (`check-net-l0` rt_ok=16 — L0〜L3 で累積)
+
+`link_rt_ok` は業務 RESPONSE ごとに増え、L0〜L3 の全部を通じて累積していた
+(`net_l0_test.py` は最終読み出しで `== 10` を期待するので恒常 FAIL)。
+→ `link_counters_reset()` に `link_rt_ok = link_rt_fail = 0` を足し、`link_selftest` (L0) の
+入口でも呼ぶ。L0 の結果は区間末に専用 `link_l0_ok` / `link_l0_fail` へスナップショット。
+`net_l0_test.py` は `link_rt_ok` ではなく `link_l0_ok` / `link_l0_fail` を読む。
+`n1_tdd.md §4` の「v1 の往復数と同義」も訂正済み。
+
+### 6-3. F4 (`link_retransmits=32` — 未送信フレームに RTO)
+
+`net/link.c` の RTO 判定 3 か所 (RELEASE / REQUEST / WDATA) にハンドシェイクと同じ
+`!e->rel_due` / `!e->req_due` / `!e->w_due` ガードを追加し、`host_open` / `host_write` /
+`link_free_handle` の `last_tx_tick` / `rel_tick = tick_count - LINK_RTO_TICKS` の前倒しを外した
+(初回送信は `due=1` が担保、RTO は NIC 受理 tick から)。
+
+- 併せて `link_tx_round` の公平化バグを修正 (F4 が露呈): NIC busy で送れなかった周回でも
+  `link_tx_turn` を進めていたため、制御 (WINDOW) が毎 tick 先着して通常 (WDATA) が飢える
+  (N0 §2a「位置は tick をまたいで保つ」に反する)。送れた / 空のときだけ進めるよう直した。
+  修正前は `link_tx_turn` の入り parity が偶然通常寄りで `r2_R9` が通っていた。
+
+### 6-4. N2 (ホスト TDD にカウンタ契約を追加)
+
+- `net_link_host.c` に 2 ケース追加 (`test_net_link.py`、計 31)。
+  - `n2_no_drop_roundtrip_has_zero_retransmits` — 実 Agent と無ドロップ往復で `link_retransmits == 0`。
+    **RED** (F4 revert): `FAIL: 無ドロップ往復で再送が計上された` / **GREEN**: `ok`。
+  - `n2_rt_ok_resets_between_selftest_sections` — `link_selftest(3)` → `link_l1_bulk(4,512)` で
+    `link_rt_ok` が区間ごとに打ち直され、`link_l0_ok` が保たれる。
+    **RED** (F2 revert): `FAIL: L1 区間で link_rt_ok が打ち直されず累積している` / **GREEN**: `ok`。
+- `kapi_db_v50_host.c` に `v50_selftest` ケース追加 (`test_kapi_db_v50.py`、計 23、`make check` の
+  `check-db-v50-host` 経由)。`db_v50_selftest() == 0` を踏む (F1 の回帰)。ホストは 64bit 幅なので
+  (2) の `0xFFFFFF00` overflow が起きない → `host_cpl3 = 1` (帯 [BAND_LO,BAND_HI)) で帯外判定にする。
+
+### 6-5. non-blocker
+
+- **N3** (完了判定と EOF の齟齬): `net_l1_test.py` / `net_l2_test.py` の `EOF received == 1` を
+  合否から外し情報行に格下げ (契約は `recv == COUNT` / `read == TOTAL` = `recv_bytes == length`)。
+- **F5** (WINDOW 2 通/tick): **欠陥として不成立をコードで確認**。`want_window` は
+  `link_timers` (1 tick 1 回) だけが立て、`link_tx_control` の WINDOW 送出で 0 に落ちる。
+  同一 tick 内に再セットする経路は無い (次 tick の `link_timers` まで 0 のまま) → rid ごと 1 tick 1 本。
+  F4 の公平化修正で 1 tick 1 フレームはさらに厳密化。PM の pcap 再確認 (隣接 tick のバッチ配送) と整合。
+- **N1'** (DATA overflow の無 ACK 破棄): **見送り**。既存コードは streaming 中 `link_timers` が
+  毎 tick WINDOW を現行 credit で送っており backpressure は効いている。回復の遅さ (ack_seq 停滞) の
+  改善は credit の実測調整が要り、ゲスト観測 (PM/テスター) の領分で F3 の再測と絡む。
+  ホスト TDD の贋 NIC は決定的で overflow 回復のタイミングを再現しないため、手元で合否を取れない。
+  候補 (overflow 時に want_ack/WINDOW を即再送、または credit をより保守的に) は F4 再測後に PM が判断。
+
+### 6-6. F3 (PM がゲストで再測)
+
+F4 修正で改善見込み。コーダーはホスト試験で「未送信フレームに RTO を課さない」ことを
+`n2_no_drop_roundtrip_has_zero_retransmits` で示した (贋 NIC の TX 受理 tick を明示し、
+受理前は再送しない)。実機の L1/L2 再測と `link_resyncs` / `link_rt_fail` / `link_tombstones` /
+`link_l2_overflow` の読み出しは PM。
+
+### 6-7. 手元の実行結果
+
+```
+$ python3 -B tools/tests/test_net_link.py --target
+... TARGET i386-elf GNU89 -Werror compile PASS
+SUMMARY 31/31 PASS      (F4 + N2 の 2 ケース追加)
+$ python3 -B tools/tests/test_host_agent.py
+SUMMARY 25/25 PASS      (変更なし)
+$ python3 -B tools/tests/test_kapi_db_v50.py
+SUMMARY 23/23 PASS      (F1 + N2c の v50_selftest 追加)
+```

@@ -13,7 +13,10 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CASES = ["open_existing", "prepare_only", "binds", "error_code", "shm_bound",
+CASES = ["open_existing", "prepare_only", "binds", "error_code",
+         # N2 (c): ブート自己診断 db_v50_selftest() を make check で踏む (F1 回帰)
+         "v50_selftest",
+         "shm_bound",
          "user_range", "owner_isolation", "order_new", "order_old",
          # 実装レビュー 往復 1 の blocker 6 件 + TRANSIENT (s0_tdd.md §K)
          "shm_exact", "stat_faults", "journal_mode", "step_no_stmt",

@@ -166,8 +166,10 @@ void link_l3_service(void);
 /*  既存の tools/net_l*_test.py が読む名前は v2 でも同じ意味を保つ。         */
 /* ======================================================================== */
 extern u32 link_hello_ok;       /* セッション確立 (0/1) */
-extern u32 link_rt_ok;          /* 成功した往復数 (RESPONSE を受けた要求) */
-extern u32 link_rt_fail;        /* 失敗した往復数 (STALE / タイムアウト) */
+extern u32 link_rt_ok;          /* 現在の自己試験区間の成功往復数 (区間ごとに reset) */
+extern u32 link_rt_fail;        /* 現在の区間の失敗往復数 */
+extern u32 link_l0_ok;          /* L0 selftest 専用の成功往復数 (最終読み出し用) */
+extern u32 link_l0_fail;        /* L0 selftest 専用の失敗往復数 */
 extern u32 link_retransmits;    /* 再送回数 (REQUEST / WDATA / RELEASE / CONFIRM) */
 extern u32 link_rx_frames;      /* 受け取ったリンクフレーム数 */
 extern u32 link_rx_dropped;     /* 検査に落ちて捨てた数 */

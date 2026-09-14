@@ -1145,10 +1145,12 @@ u32 db_v50_selftest(void)
     u32 hdr = (u32)sizeof(DB_ResultHeader);
     u32 desc = (u32)sizeof(DB_ColumnInfo);
 
-    /* (0) 表の件数と slot 番号 (末尾追記で 201..207、data_fields はその後ろ)。*/
-    if (KAPI_SLOT_COUNT != 208) bad |= 1u << 0;
+    /* (0) 表の件数と slot 番号 (db 帯は末尾追記で 201..207、v51 で host 帯
+     * 208..212 を追記、末尾は host_close)。件数は数値直書きせずヘッダ定数から
+     * 導く ([C4]): 末尾 slot は host_close で、全体件数はその +1。*/
+    if (KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1) bad |= 1u << 0;
     if (KAPI_SLOT_DB_OPEN_EXISTING != 201) bad |= 1u << 0;
-    if (KAPI_SLOT_DB_ERROR_CODE != KAPI_SLOT_COUNT - 1) bad |= 1u << 0;
+    if (KAPI_SLOT_DB_ERROR_CODE != 207) bad |= 1u << 0;   /* db 帯の末尾 */
     if (KAPI_SLOT_DB_ERROR_CODE - KAPI_SLOT_DB_OPEN_EXISTING != 6) bad |= 1u << 0;
     if (KAPI_SLOT_DB_OPEN != 140) bad |= 1u << 0;   /* 既存 10 本は動かない */
 

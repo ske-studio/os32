@@ -72,10 +72,13 @@ def main():
           % (recv, COUNT, ooo, done, win, cmin, cmax, meas // 100, meas % 100, nbytes))
     print("NIC rx_dropped=%d" % rxdrop)
 
+    # N3: 完了判定は recv == COUNT (= recv_bytes == length)。EOF は補助で、
+    # 消失しても全フレーム届いていれば合格 — 情報行に格下げ (契約は本文完了)。
+    print("info EOF (link_l1_done) = %d (補助。合否は recv==COUNT)" % done)
+
     checks = [
         ("%d/%d frames received in order" % (recv, COUNT), recv == COUNT),
         ("no out-of-order / gaps", ooo == 0),
-        ("EOF received", done == 1),
         ("NIC ring not overflowed (rx_dropped 0)", rxdrop == 0),
         ("credit was advertised and bounded (max < ring capacity ~119)", 0 < cmax < 119),
         ("page consumption measured (1.5..3.5 pages/frame for 512B)", 150 <= meas <= 350),

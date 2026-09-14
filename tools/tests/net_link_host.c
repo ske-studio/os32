@@ -1370,6 +1370,53 @@ static void data_gap_is_dropped_and_reacked(void)
     link_host_close(h, host_owner);
 }
 
+/* ---- N2: カウンタ契約 --------------------------------------------------- */
+
+/* (a) 無ドロップの open→REQUEST→RESPONSE→read→close で再送計上が無い (F4)。
+ * 修正前は open で 16・close で 16 の未送信フレームに RTO を課して
+ * link_retransmits=32 になっていた (前倒し last_tx_tick / rel_tick + !due 欠落)。*/
+static void n2_no_drop_roundtrip_has_zero_retransmits(void)
+{
+    u8 buf[4096];
+    u32 st = 0, ln = 0, got;
+    i32 h;
+
+    if (agent_start() != 0) { check(0, "実 Agent を起動できない"); return; }
+    check(agent_up(200), "HELLO が確立しない");
+    link_retransmits = 0;                 /* HELLO 分は除く。業務往復だけを見る */
+    h = link_host_open("GET /pattern/2048", 17, host_owner);
+    check(h >= 0, "open が失敗した");
+    if (h < 0) { agent_stop(); return; }
+    check(wait_status(h, &st, &ln, 300) == 0, "RESPONSE が届かない");
+    got = read_all(h, buf, sizeof(buf), 600);
+    check(got == 2048, "本文の長さが違う");
+    check(link_host_close(h, host_owner) == 0, "close が失敗した");
+    ticks(10);                            /* RELEASE 送出 + bit0 ACK (RTO 未満) */
+    check(link_retransmits == 0,
+          "無ドロップ往復で再送が計上された (F4: 未送信に RTO)");
+    agent_stop();
+}
+
+/* (b) L0 相当 → L1 相当を連続で回すと link_rt_ok が区間ごとに打ち直される (F2)。
+ * L0 の結果は link_l0_ok に隔離され、L1 実行後も保たれる。*/
+static void n2_rt_ok_resets_between_selftest_sections(void)
+{
+    if (agent_start() != 0) { check(0, "実 Agent を起動できない"); return; }
+    check(agent_up(200), "HELLO が確立しない");
+
+    link_selftest(3);                     /* L0 相当: PING ×3 */
+    check(link_rt_ok == 3, "L0 区間の link_rt_ok が 3 でない");
+    check(link_l0_ok == 3, "L0 の往復数が link_l0_ok に隔離されていない");
+    check(link_l0_fail == 0, "L0 で失敗往復が出た");
+
+    link_l1_bulk(4, 512);                 /* L1 相当: 入口で link_counters_reset */
+    check(link_rt_ok == 1,
+          "L1 区間で link_rt_ok が打ち直されず累積している (F2)");
+    check(link_l0_ok == 3, "L1 実行後も L0 スナップショットは保たれる");
+    check(link_l1_recv == 4, "L1 の受信フレーム数が違う");
+    agent_stop();
+}
+
 /* ======================================================================== */
 /*  実行                                                                    */
 /* ======================================================================== */
@@ -1405,7 +1452,9 @@ static struct testcase cases[] = {
     { "handles_are_owner_private",                  handles_are_owner_private },
     { "open_error_codes",                           open_error_codes },
     { "last_data_and_eof_loss",                     last_data_and_eof_loss },
-    { "data_gap_is_dropped_and_reacked",            data_gap_is_dropped_and_reacked }
+    { "data_gap_is_dropped_and_reacked",            data_gap_is_dropped_and_reacked },
+    { "n2_no_drop_roundtrip_has_zero_retransmits",  n2_no_drop_roundtrip_has_zero_retransmits },
+    { "n2_rt_ok_resets_between_selftest_sections",  n2_rt_ok_resets_between_selftest_sections }
 };
 
 int main(int argc, char **argv)

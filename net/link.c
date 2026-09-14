@@ -144,8 +144,10 @@ static int link_norm_next = 0;
 
 /* ---- 観測 ---- */
 u32 link_hello_ok = 0;
-u32 link_rt_ok = 0;
-u32 link_rt_fail = 0;
+u32 link_rt_ok = 0;              /* 現在の自己試験区間の成功往復数 (区間ごとに reset) */
+u32 link_rt_fail = 0;           /* 現在の区間の失敗往復数 */
+u32 link_l0_ok = 0;             /* L0 selftest 専用スナップショット (最終読み出し用) */
+u32 link_l0_fail = 0;
 u32 link_retransmits = 0;
 u32 link_rx_frames = 0;
 u32 link_rx_dropped = 0;
@@ -580,7 +582,7 @@ static void link_timers(void)
     for (i = 0; i < LINK_HANDLES; i++) {
         struct link_handle *e = &link_h[i];
 
-        if (e->rel_pending && since(e->rel_tick) >= LINK_RTO_TICKS) {
+        if (e->rel_pending && !e->rel_due && since(e->rel_tick) >= LINK_RTO_TICKS) {
             if (e->rel_tries >= LINK_TRIES) { link_resync(); return; }
             e->rel_due = 1;
             e->rel_tries++;
@@ -588,13 +590,13 @@ static void link_timers(void)
         }
         if (e->state == LINK_H_FREE || e->state == LINK_H_STALE) continue;
 
-        if (!e->req_acked && since(e->last_tx_tick) >= LINK_RTO_TICKS) {
+        if (!e->req_acked && !e->req_due && since(e->last_tx_tick) >= LINK_RTO_TICKS) {
             if (e->retries >= LINK_TRIES) { link_resync(); return; }
             e->req_due = 1;
             e->retries++;
             link_retransmits++;
         }
-        if (e->wlen && !e->wacked && since(e->last_tx_tick) >= LINK_RTO_TICKS) {
+        if (e->wlen && !e->wacked && !e->w_due && since(e->last_tx_tick) >= LINK_RTO_TICKS) {
             if (e->retries >= LINK_TRIES) { link_resync(); return; }
             e->w_due = 1;
             e->retries++;
@@ -715,8 +717,8 @@ static void link_tx_round(void)
     int budget = 2 * (LINK_HANDLES * 4 + 2);
     while (budget-- > 0 && idle < 2) {
         int rc = link_tx_turn ? link_tx_normal() : link_tx_control();
-        link_tx_turn ^= 1;                       /* 位置は tick をまたいで保つ */
-        if (rc < 0) { link_tx_deferred++; return; }   /* NIC busy → 次の周回へ */
+        if (rc < 0) { link_tx_deferred++; return; } /* NIC busy → 位置を進めず次の周回へ */
+        link_tx_turn ^= 1;                          /* 送れた / 空のときだけ次の種類へ */
         idle = rc ? 0 : idle + 1;
     }
 }
@@ -894,7 +896,7 @@ i32 link_host_open(const char *req, u32 len, int owner)
         e->w_due = 0;
         e->decl_len = link_decl_len((const char *)e->req_copy, len);
         e->wsent_total = 0;
-        e->last_tx_tick = tick_count - LINK_RTO_TICKS;
+        e->last_tx_tick = tick_count;   /* 未送信は RTO 対象外。req_due=1 が即送信を担保 */
         e->last_rx_tick = tick_count;
         e->retries = 0;
         e->probes = 0;
@@ -1006,7 +1008,7 @@ i32 link_host_write(i32 h, const void *buf, u32 len, int owner)
     e->w_due = 1;
     e->retries = 0;
     e->wsent_total += n;
-    e->last_tx_tick = tick_count - LINK_RTO_TICKS;
+    e->last_tx_tick = tick_count;   /* 未送信は RTO 対象外。w_due=1 が即送信を担保 */
     LINK_IRQ_RESTORE(f);
     return (i32)n;
 }
@@ -1019,7 +1021,7 @@ static void link_free_handle(struct link_handle *e, int idx)
         e->rel_due = 1;
         e->rel_rid = e->rid;
         e->rel_epoch = e->epoch;
-        e->rel_tick = tick_count - LINK_RTO_TICKS;
+        e->rel_tick = tick_count;   /* 未送信は RTO 対象外。rel_due=1 が即送信を担保 */
         e->rel_tries = 0;
     }
     if (e->ring_owner) {
@@ -1134,6 +1136,8 @@ static u32 link_wait_read_all(i32 h, u32 ticks, int verify)
 
 static void link_counters_reset(void)
 {
+    /* 往復計数は自己試験の区間ごとに打ち直す (F2: L0〜L3 で累積させない)。*/
+    link_rt_ok = link_rt_fail = 0;
     link_l1_recv = link_l1_bytes = link_l1_ooo = link_l1_windows = 0;
     link_l1_max_credit = link_l1_min_credit = link_l1_done = link_l1_meas_pages = 0;
     link_l2_bytes = link_l2_read = link_l2_gaps = link_l2_bad = 0;
@@ -1157,6 +1161,7 @@ void link_selftest(int rounds)
             link_peer_mac[0], link_peer_mac[1], link_peer_mac[2],
             link_peer_mac[3], link_peer_mac[4], link_peer_mac[5]);
 
+    link_counters_reset();              /* L0 区間を隔離 (F2) */
     n = cstr("PING", req, sizeof(req));
     for (i = 0; i < rounds; i++) {
         u32 st = 0, ln = 0;
@@ -1165,6 +1170,10 @@ void link_selftest(int rounds)
         (void)link_wait_status(h, &st, &ln, LINK_PROBE_TICKS * 5);
         link_host_close(h, LINK_SELF_OWNER);
     }
+    /* L0 の結果を専用スナップショットへ (後続の L1〜L3 が link_rt_ok を打ち直すので、
+     * net_l0_test.py の最終読み出しは link_l0_ok / link_l0_fail を見る)。*/
+    link_l0_ok = link_rt_ok;
+    link_l0_fail = link_rt_fail;
     kprintf(link_rt_fail ? 0xC1 : 0x07,
             "[link] L0 selftest: %d/%d round trips ok, %d retransmit\n",
             (int)link_rt_ok, rounds, (int)link_retransmits);
