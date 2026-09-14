@@ -53,7 +53,7 @@ $ python3 -B tools/tests/test_hsync_h1.py --target
 CONST COUPLING PASS (VFS_MAX_PATH_DEPTH=32 == HS_MAX_PATH_DEPTH, HSP_MAX_DEPTH=32)
 HOST GNU89 -Werror COMPILE PASS (real hsync.c)
 ...
-188 checks, 0 failures
+211 checks, 0 failures
 EXIT hsync_h1_host=0
 HOST GNU89 -Werror COMPILE PASS [CRC stub] (real hsync.c)
 ...
@@ -151,3 +151,75 @@ CRC の値照合・分岐・件数の検査には影響しないが、桁溢れ�
 型を試験に合わせて変えることはしていない (実機は ILP32 のまま)。
 実機幅での確認は `--target` の `i386-elf-gcc -Werror` コンパイルと、
 ゲスト上の受入 (A20) に委ねる。
+
+## 追記 2026-09-15 (2) — 往復 2 のレビュー: B3 の修正漏れ
+
+往復 1 で入れた `dst_dir_type_ok()` は**列挙ループの中だけ**で呼ばれていた。
+`main` は起点の型を見ずに `sync_directory(src, dst, 0)` を呼ぶので、
+**コピー元が空ディレクトリだと子項目用の検査が一度も走らない**。
+
+反例 (PM が到達可能性を確認済み): `/host/usr/empty` が空ディレクトリ、
+`/usr/empty` が通常ファイル (settings.db の保護対象とは別実体) の状態で
+`hsync usr/empty`。保護判定を通り、列挙項目が無く、型が食い違ったまま
+`errors=0` / 終了コード 0。`-n` でも `-f` でも同じだった。
+
+### 直した内容
+
+`start_point_ok(src, dst)` を足し、**明示 dir の同期を始める前に 1 度だけ**
+起点の型を確かめる。`main` は
+
+```
+if (!subdir || start_point_ok(src, dst) == 0) sync_directory(src, dst, 0);
+```
+
+とし、食い違っていたら同期を始めない。集計行と終了コードは既存の末尾を
+そのまま通るので、`FAILED:` / `errors=1` / 非ゼロ終了になる。
+語も集計も子項目側と同じ (`reason=type_conflict`、`fail_file()` 経由)。
+dry-run も force も同じ検査を通る (書き込みは一切しない)。
+
+全体同期 (`/host` -> `/`) の起点は検査しない。`sys_is_mounted("/host")` が
+先に通っている以上ディレクトリであり、宛先は `""` (root) だから。
+
+### コピー元が通常ファイルだった場合 (PM からの確認依頼)
+
+**検査は「あるにはあったが、当てにできない形だった」** ので、同じ起点で
+コピー元の型検査も足した。
+
+- 直す前の実際の動き: `sync_directory` が `sys_ls(src_dir)` を呼び、
+  `fs/hostdrvfs.c` の `hdrv_list_dir` は `NP2_FILE_DIRECTORY_FILE` で開くので
+  通常ファイルなら `hostdrv_create` が失敗し **`VFS_ERR_NOTFOUND`** を返す。
+  結果 `FAIL: ls /host/usr/file.txt (err=-2)` となり `errors=1` / 非ゼロ終了。
+  **落ちること自体は落ちていた。**
+- ただし (a) 実在するのに `-2` (= 不存在) と報告する、(b) 合意した
+  `reason=type_conflict` の語を使わない、(c) **FS が「通常ファイルに空の列挙を
+  成功として返す」実装なら素通りする** — B3 と同じ「他人の偶然のエラーに
+  頼っている」形だった。
+- そこで `start_point_ok()` でコピー元を `stat` し、ディレクトリでなければ
+  `reason=type_conflict`、種別が取れなければ `reason=type_unknown`、
+  stat 自体が失敗すれば `reason=io_error` で落とすようにした。
+
+**別件として PM へ**: `hdrv_list_dir` は列挙の途中で `hostdrv_query_dir` が
+負値を返しても `break` して **`VFS_OK` を返す** (`fs/hostdrvfs.c:525`)。
+途中で切れた列挙が「全部読めた」ことになるので、B3 と同じ形の穴が
+カーネル FS 側に残っている。この票の範囲外なので触っていない。
+
+### 追加した試験
+
+`case_b3_start` の **23 件** (`hsync_h1_host.c`、188 → **211 checks / 0 failures**)。
+内訳は宛先側 18 件 (通常 / dry-run / force の 3 通り + 子項目あり + 宛先が
+ディレクトリ / 宛先が無い / 空ディレクトリ同士の正常系) と、コピー元側 5 件
+(通常ファイル / 不存在 / 種別不明)。CRC 贋物ビルド 3 / 0 と
+`hsync_protect_host.c` 134 / 0 はそのまま。
+
+### RED (変異)
+
+| 変異 | 戻した内容 | 落ちた検査 |
+|---|---|---|
+| B3c | 起点の検査をせず `sync_directory` に入る (往復 2 の反例そのもの) | **211 中 15 失敗** — 通常 / dry-run / force の 3 通り全部 + 子項目あり + コピー元側 3 件 |
+| B3d | 起点の**コピー元**の型検査だけ外す (`sys_ls` 任せに戻す) | 2 失敗 — `コピー元が通常ファイル: reason=type_conflict` / `種別不明: reason=type_unknown` |
+| B3e | 起点の**宛先**の型検査だけ外す | 12 失敗 — 通常 / dry-run / force の 3 通り + 子項目あり |
+
+B3c で `コピー元が通常ファイル: 非ゼロ終了` **だけは通ってしまう**。贋 FS の
+`sys_ls` が実機と同じく通常ファイルにエラーを返すためで、まさに上で書いた
+「偶然のエラーに頼っている」状態が試験の上でも見えている。語を見る検査
+(`reason=type_conflict`) のほうは落ちる。

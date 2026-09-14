@@ -1468,6 +1468,159 @@ static void case_b3(void)
     check(rc == 0 && fs_find("/usr/d/inner.bin") >= 0,
           "宛先が無ければ作って進む");
 }
+
+/* ---- B3 残件 (往復 2): 明示 dir **自身**の起点で型を見ていなかった -------
+ * 列挙ループの型検査は子項目にしか掛からない。コピー元が空ディレクトリだと
+ * 子が 1 つも無いので一度も呼ばれず、`hsync usr/empty` は型が食い違ったまま
+ * errors=0 / 終了コード 0 で終わっていた (-n でも -f でも同じ)。 */
+
+/* /host/usr/empty = 空ディレクトリ、/usr/empty = 通常ファイル */
+static void setup_start_conflict(void)
+{
+    u8 *a;
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/empty");
+    fs_add_dir("/usr");
+    a = make_blob(16, 5);
+    fs_add_file("/usr/empty", a, 16);
+    free(a);
+}
+
+static void case_b3_start(void)
+{
+    int rc;
+    int n;
+    u8 keep[8];
+
+    printf("== B3 残件: 明示 dir の起点で宛先の型を見る ==\n");
+
+    /* 通常モード */
+    setup_start_conflict();
+    n = fs_find("/usr/empty");
+    memcpy(keep, fs_nodes[n].data, 8);
+    rc = run1("usr/empty");
+    check(rc != 0, "通常モード: 非ゼロ終了");
+    check(log_has("FAIL /usr/empty reason=type_conflict"),
+          "通常モード: 子項目と同じ reason=type_conflict");
+    check(log_has("errors=1"), "通常モード: errors=1 (同じ集計)");
+    check(!log_has("Done:"), "通常モード: Done: へ進まない");
+    n = fs_find("/usr/empty");
+    check(n >= 0 && fs_nodes[n].size == 16 &&
+              memcmp(fs_nodes[n].data, keep, 8) == 0,
+          "通常モード: 宛先の通常ファイルを消しも切り詰めもしない");
+
+    /* dry-run */
+    setup_start_conflict();
+    rc = run2("-n", "usr/empty");
+    check(rc != 0, "dry-run: 非ゼロ終了");
+    check(log_has("FAIL /usr/empty reason=type_conflict"),
+          "dry-run: reason=type_conflict");
+    check(log_has("errors=1"), "dry-run: errors=1");
+    check(fk_write_calls == 0 && fk_mkdir_calls == 0 && fk_sync_calls == 0,
+          "dry-run: 書き込み系を呼ばない");
+
+    /* force */
+    setup_start_conflict();
+    rc = run2("-f", "usr/empty");
+    check(rc != 0, "force: 非ゼロ終了");
+    check(log_has("FAIL /usr/empty reason=type_conflict"),
+          "force: reason=type_conflict (-f でも型検査は省かない)");
+    check(log_has("errors=1"), "force: errors=1");
+    check(fk_write_calls == 0, "force: 何も書かない");
+
+    /* 中身のあるディレクトリでも同じ (子項目の検査に頼らない) */
+    setup_start_conflict();
+    {
+        u8 *a = make_blob(16, 7);
+        fs_add_file("/host/usr/empty/inner.bin", a, 16);
+        free(a);
+    }
+    rc = run1("usr/empty");
+    check(rc != 0 && log_has("FAIL /usr/empty reason=type_conflict"),
+          "子項目があっても起点で止まる");
+    check(fs_find("/usr/empty/inner.bin") < 0, "衝突した先へ入らない");
+
+    /* 宛先がディレクトリなら従来どおり通る */
+    setup_start_conflict();
+    {
+        int f = fs_find("/usr/empty");
+        fs_nodes[f].is_dir = 1;                 /* 宛先をディレクトリに */
+        fs_nodes[f].size = 0;
+    }
+    {
+        u8 *a = make_blob(16, 7);
+        fs_add_file("/host/usr/empty/inner.bin", a, 16);
+        free(a);
+    }
+    rc = run1("usr/empty");
+    check(rc == 0 && fs_find("/usr/empty/inner.bin") >= 0,
+          "宛先がディレクトリなら同期する");
+
+    /* 宛先が無ければそのまま進む */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/empty");
+    {
+        u8 *a = make_blob(16, 7);
+        fs_add_file("/host/usr/empty/inner.bin", a, 16);
+        free(a);
+    }
+    rc = run1("usr/empty");
+    check(rc == 0 && fs_find("/usr/empty/inner.bin") >= 0,
+          "宛先が無ければ作って進む");
+
+    /* 空ディレクトリ同士 = 何もすることが無い。成功のまま */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/empty");
+    fs_add_dir("/usr");
+    fs_add_dir("/usr/empty");
+    rc = run1("usr/empty");
+    check(rc == 0 && log_has("errors=0"),
+          "空ディレクトリ同士は成功 (誤検出しない)");
+
+    printf("== B3 残件: 明示 dir の起点でコピー元の型も見る ==\n");
+
+    /* コピー元が通常ファイル。sys_ls 任せにしない */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/host/usr/file.txt", a, 16);
+        free(a);
+    }
+    rc = run1("usr/file.txt");
+    check(rc != 0, "コピー元が通常ファイル: 非ゼロ終了");
+    check(log_has("FAIL /host/usr/file.txt reason=type_conflict"),
+          "コピー元が通常ファイル: reason=type_conflict (ls の err 任せにしない)");
+    check(log_has("errors=1"), "コピー元が通常ファイル: errors=1");
+
+    /* コピー元が無い */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    rc = run1("usr/nope");
+    check(rc != 0 && log_has("reason=io_error"),
+          "コピー元が無い: reason=io_error で非ゼロ終了");
+
+    /* コピー元の種別が取れない */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/d");
+    {
+        int f = fs_find("/host/usr/d");
+        fs_nodes[f].mode_zero = 1;
+    }
+    rc = run1("usr/d");
+    check(rc != 0 && log_has("reason=type_unknown"),
+          "コピー元の種別不明: reason=type_unknown");
+}
 #endif /* !HSYNC_CRC_STUB */
 
 /* ========================================================================= */
@@ -1495,6 +1648,7 @@ int main(void)
     case_b1();
     case_b2();
     case_b3();
+    case_b3_start();
 #endif
 
     printf("\n%d checks, %d failures\n", checks, failures);

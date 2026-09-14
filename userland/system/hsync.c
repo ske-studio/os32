@@ -635,6 +635,40 @@ static int dst_dir_type_ok(const char *dst_path)
     return -1;
 }
 
+/* 明示 dir の同期を**始める前**に、起点の型を 1 度だけ確かめる
+ * (Codex 実装レビュー 往復 2 の B3 残件)。
+ *
+ * 列挙ループの中の型検査は**子項目**にしか掛からない。コピー元が空の
+ * ディレクトリだと子が 1 つも無いので一度も呼ばれず、`/host/usr/empty` が
+ * ディレクトリ・`/usr/empty` が通常ファイルのまま errors=0 / 終了コード 0 で
+ * 終わっていた。-n でも -f でも同じ。語と集計は子項目側とそろえる。
+ *
+ * 戻り値 0 = 始めてよい / -1 = 型衝突等 (errors に数え済み)。 */
+static int start_point_ok(const char *src_path, const char *dst_path)
+{
+    OS32_Stat ss;
+    int rc;
+
+    /* コピー元: dir として渡された以上ディレクトリであること。
+     * sys_ls 任せにしない — HostDrv の hdrv_list_dir は DIRECTORY_FILE で
+     * 開くので通常ファイルなら失敗するが、返るのは VFS_ERR_NOTFOUND で
+     * 「存在しない」と区別が付かないし、通常ファイルに空の列挙を成功として
+     * 返す FS が 1 つでもあれば同じ穴がそのまま開く。 */
+    rc = api->sys_stat(src_path, &ss);
+    if (rc != 0) { fail_file(src_path, HR_IO, rc); return -1; }
+    if ((ss.st_mode & OS_S_IFMT) == 0) {
+        fail_file(src_path, HR_TYPE_UNKNOWN, 0);
+        return -1;
+    }
+    if ((ss.st_mode & OS_S_IFMT) != OS_S_IFDIR) {
+        fail_file(src_path, HR_TYPE, 0);
+        return -1;
+    }
+
+    /* 宛先: 在るならディレクトリであること (子項目と同じ検査) */
+    return dst_dir_type_ok(dst_path);
+}
+
 /* ======== ディレクトリ再帰同期 ======== */
 
 static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
@@ -988,8 +1022,13 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                      "  (dry-run: 読み取りと比較だけ。mkdir・書き込み・sync はしない)\n");
     }
 
-    /* 同期実行 */
-    sync_directory(src, dst, 0);
+    /* 同期実行。明示 dir は**起点の型を先に確かめてから**始める (B3)。
+     * 全体同期の起点 (/host -> /) はマウントの前提としてディレクトリ。
+     * 始めなかった場合も下の集計行と終了コードはそのまま通る
+     * (errors に入っているので FAILED: / 非ゼロになる)。 */
+    if (!subdir || start_point_ok(src, dst) == 0) {
+        sync_directory(src, dst, 0);
+    }
 
     if (g_abort) {
         api->kprintf(ATTR_RED,
