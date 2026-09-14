@@ -1455,6 +1455,84 @@ def n3fix_clip_get_stderr_in_503():
         assert b"exit 3" in body and b"boom detail" in body, body
 
 
+def n3fix_get_child_real_http():
+    """N3-fix(2): GET_CHILD を実子プロセスで localhost fixture に当てる。
+    全 GET 試験は FakeProc で、host_agent.py の GET_CHILD (子の urllib スクリプト)
+    は従来一度も実行されない。壊れれば全 GET が 502。ここは実ネットワークを
+    叩かず localhost の http.server に対して sys.executable -c GET_CHILD を
+    実際に起動し、status 行 + 本文 / HTTPError 404 (rc0) / 切断 (rc≠0) を実測する。"""
+    import http.server
+    import threading
+    import time
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, body):
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/ok":
+                self._send(200, b"hello-from-fixture")
+            elif self.path == "/slow":
+                time.sleep(0.5)                          # 遅延応答でも子は読み切る
+                self._send(200, b"slow-body-0123456789")
+            elif self.path == "/nope":
+                self._send(404, b"no such thing")
+            elif self.path == "/drop":
+                self.close_connection = True             # 応答を書かずに切る
+                return
+            else:
+                self._send(404, b"")
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    port = srv.server_address[1]
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+
+    def run_child(path):
+        r = subprocess.run([sys.executable, "-c", HA.GET_CHILD,
+                            "http://127.0.0.1:%d%s" % (port, path)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        head, _, body = r.stdout.partition(b"\n")
+        return r.returncode, head, body, r.stderr
+
+    try:
+        rc, head, body, err = run_child("/ok")
+        assert rc == 0, err
+        assert head == b"200" and body == b"hello-from-fixture", (head, body)
+
+        rc, head, body, err = run_child("/slow")           # 遅延 200 でも本文完走
+        assert rc == 0 and head == b"200" and body == b"slow-body-0123456789", \
+            (rc, head, body)
+
+        rc, head, body, err = run_child("/nope")           # HTTPError -> rc0 + 404 本文
+        assert rc == 0, err
+        assert head == b"404" and body == b"no such thing", (head, body)
+
+        rc, head, body, err = run_child("/drop")           # 切断 (URLError) は捕まえず rc≠0
+        assert rc != 0, "切断でも rc 0 (Agent が 200 に化けさせてしまう)"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def n3fix_file_nul_byte_403():
+    """N3-fix(3): /file/ のパスに埋め込み NUL があっても Agent は落ちず 403。
+    _service_get_file の realpath が try の外だと GET /file/a\\0b の
+    ValueError(embedded null) が主ループへ抜けて (主ループは ConnectionError
+    しか受けない) Agent プロセスが落ちる。修正後は (ValueError, OSError) → 403。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(file_root=d)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"GET /file/a\x00b")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 403, 0)
+
+
 CASES = [
     n3_get_async_processing_then_200,
     n3_get_async_404_not_502,
@@ -1469,6 +1547,8 @@ CASES = [
     n3fix_realproc_close_frees_fds,
     n3fix_wait_all_timeout_raises,
     n3fix_clip_get_stderr_in_503,
+    n3fix_get_child_real_http,
+    n3fix_file_nul_byte_403,
     n2fix_b7_real_large_clip_get,
     n2fix_b7_real_clip_get_sizes,
     n2fix_a_clip_get_rc_nonzero_503,

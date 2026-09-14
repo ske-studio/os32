@@ -861,11 +861,11 @@ class HostAgent:
         if not self.file_root:
             self._answer(rid, ent, 403, b"", None, out)  # ルート未指定なら開けない
             return
-        root = os.path.realpath(self.file_root)
-        target = os.path.realpath(os.path.join(root, rel.lstrip("/")))
         try:
+            root = os.path.realpath(self.file_root)
+            target = os.path.realpath(os.path.join(root, rel.lstrip("/")))
             inside = os.path.commonpath([root, target]) == root
-        except ValueError:                               # 別ドライブ (commonpath が投げる)
+        except (ValueError, OSError):                    # 埋め込み NUL / 別ドライブ (commonpath) など
             inside = False
         if not inside:
             self._answer(rid, ent, 403, b"", None, out)  # root2 のような前方一致も落ちる

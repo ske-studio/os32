@@ -22,13 +22,15 @@ make check-host-lib-host        # 同じもの (--target 付き)
 ## GREEN (現状)
 
 ```
-host_lib_host: PASS 70/70
+host_lib_host: PASS 82/82        # N3-fix で 70 → 82 (§ N3-fix)
 host_cmd_host (wget):  PASS 16/16
 host_cmd_host (lpr):   PASS 10/10
 host_cmd_host (hclip): PASS 9/9
 host_cmd_host (hdate): PASS 5/5
 TARGET i386-elf -Werror compile PASS (libos32host.c, wget, lpr, hclip, hdate)
 SUMMARY 5/5 PASS
+
+python3 -B tools/tests/test_host_agent.py   → SUMMARY 81/81 PASS  # N3-fix で 79 → 81
 ```
 
 ## ライブラリ (host_lib_host.c) が踏むもの — 票 §4
@@ -48,6 +50,10 @@ SUMMARY 5/5 PASS
 | `noprogress_absolute_mutant` | **変異 (絶対期限)** にすると同じ 60 秒転送が 30 秒で `HOST_ETIMEOUT` (回帰の否定側) |
 | `nosys` | NOSYS → `HOST_ENODEV` |
 | `open_again_yield` | 両スロット rel_pending 相当: open が AGAIN → `sys_yield` → 成功 |
+| `open_full_yield` | **N3-fix(b)** open が FULL → `sys_yield` 待ち → 成功 (`open_full` 欄を初めて使う) |
+| `write_again_yield` | **N3-fix(a)** send_decl の write が AGAIN → `sys_yield` → 送り切る (REQUEST 転送 ACK まで必ず write AGAIN) |
+| `write_noprogress_positive` | **N3-fix(c)** write>0 が 20 秒間隔で進む 60 秒転送が成功 (write 経路の基準取り直し) |
+| `write_noprogress_absolute_mutant` | **N3-fix(c) 否定側** 絶対期限 (`host__np_absolute`) で同じ write 転送が 30 秒で `HOST_ETIMEOUT` |
 | `clip_put_ok` | `CLIP PUT 5` の宣言長、書き込み、status 200 |
 | `clip_put_empty` | 空 (0) と 4096 超は open せず `HOST_EINVAL` |
 | `clip_get_503` | 503 → `HOST_ESERVICE` + svc_status、閉じる |
@@ -82,8 +88,46 @@ SUMMARY 5/5 PASS
 3. 実装は先に書いたが、上記 2 つの変異を実際に注入して RED を確認 (1 は一時コピーで、
    2 は常時のテストケースで)。以降は GREEN。
 
+## N3-fix (2026-09-14) — 試験硬化と Agent `/file/` NUL (票 §8)
+
+実装 (`libos32host.c` / `host_agent.py` のサービス経路) は正しい。**試験だけ**を足して
+贋 KAPI が実カーネルの経路を踏むようにし、Agent は 1 関数の例外処理を直した。触ったのは
+`tools/tests/host_lib_host.c` (贋 `host_write` に AGAIN 欄・gap/chunk 欄、4 ケース追加)、
+`tools/tests/test_host_agent.py` (実子 GET と NUL の 2 ケース追加)、
+`tools/host_agent.py` (`_service_get_file` の 1 関数のみ)、この記録。
+
+各変異を `libos32host.c` へ**一時的に**入れて FAIL を実測 → 戻して GREEN。実測:
+
+1. **(a) write AGAIN を EIO 扱い**: `send_decl` の `if (n == OS32_ERR_AGAIN) { … sys_yield; continue; }`
+   を `return HOST_EIO;` に変異 → `host_lib_host: FAIL 75/82`。落ちたのは
+   `wagain: CLIP PUT succeeds after write AGAIN` / `… yielded` / `… 5B delivered`
+   (+ 巻き添えで `wnoprog+` 系。gap も write AGAIN 経由のため)。戻して 82/82。
+   → 実カーネルは REQUEST の転送 ACK まで必ず write AGAIN なので、この欠陥は
+   CLIP PUT / PRINT DATA が本番で全滅するのに従来 70/70 を通していた。
+2. **(b) open FULL を EIO 扱い**: `wait_open` の `case OS32_ERR_FULL:` を削除 (default→EIO) に変異
+   → `host_lib_host: FAIL 79/82`。落ちたのは `openfull:` の 3 チェック。戻して 82/82。
+   → `open_full` 欄は従来一度も使われず、FULL を EIO にする変異が素通りしていた。
+3. **(c) 無進捗を絶対期限へ**: `np_reset` を `{ (void)d; }` (基準取り直しをしない) に変異
+   → `host_lib_host: FAIL 65/82`。write 経路では `wnoprog+: 60s write with 20s gaps succeeds`
+   / `… full body` / `… ~60s` が落ちる (read 経路の `noprog+` も同様)。戻して 82/82。
+   常設の否定側ケース `write_noprogress_absolute_mutant` (`host__np_absolute` 版) も
+   write 経路の絶対期限化を常時捕える。
+
+Agent (`test_host_agent.py`、`python3 -B tools/tests/test_host_agent.py` → 81/81):
+
+- **(2) 実子 GET** (`n3fix_get_child_real_http`): `http.server` を 127.0.0.1 に立て、
+  `sys.executable -c GET_CHILD <url>` を**実子プロセス**で起動。`/ok`=200+本文、
+  `/slow`=0.5 秒遅延でも本文完走、`/nope`=HTTPError → **rc 0 + status 404 + 本文**、
+  `/drop`=応答を書かず切断 → URLError 未捕捉で **rc≠0** (Agent 側で 502)。実ネットワークは叩かない。
+  従来 GET 試験は全て FakeProc で、この `GET_CHILD` 文字列は一度も実行されていなかった。
+- **(3) `/file/` の NUL** (`n3fix_file_nul_byte_403`): `GET /file/a\0b` を Agent に送り、
+  落ちずに 403 を返すこと。修正前 (`realpath` が try の外) は
+  `ERROR n3fix_file_nul_byte_403: ValueError('lstat: embedded null character in path')`
+  で例外が主ループへ抜ける (主ループは `ConnectionError` しか受けず Agent が落ちる)。
+  修正: `realpath`/`commonpath` を try に入れ `(ValueError, OSError)` → 403。戻して ok。
+
 ## 範囲外 (別票 / 別コーダー)
 
-- Agent (`tools/host_agent.py`) の非同期 GET・`/file/` トラバーサル N-fix・N2 残 non-blocker
-  (票 §7) は**別コーダー**。ここでは触っていない。
+- Agent (`tools/host_agent.py`) の非同期 GET・N2 残 non-blocker (票 §7) 本体は**別コーダー**。
+  N3-fix では `_service_get_file` の NUL 例外処理 1 か所と、Agent 側試験の硬化のみ触った。
 - ゲスト受入 (kernel-lgy98-link + host_agent v2、F6 の 64KB 超 wget 実測、票 §6) は PM / テスター。

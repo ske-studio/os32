@@ -36,6 +36,9 @@ typedef struct {
     u32 read_chunk;      /* read 1 回の最大 (0 = 1400) */
     int write_inval;     /* host_write が即 INVAL を返す */
     int write_inval_mode;/* INVAL 後の status: 0=業務, 1=AGAIN, 2=STALE */
+    int write_again;     /* 最初のこの回数だけ host_write が AGAIN (減算) */
+    u32 write_gap;       /* write チャンク間に要する tick (0 = 即時) */
+    u32 write_chunk;     /* write 1 回の最大 (0 = 1400) */
 } HScript;
 
 #define MAXS 8
@@ -57,6 +60,7 @@ static int fk_close_count;
 static int fk_open_flag;
 static u32 rt_body_off;
 static u32 rt_read_last;
+static u32 rt_write_last;
 static u32 rt_write_got;
 static int rt_status_again;
 static int rt_write_inval_fired;
@@ -86,6 +90,7 @@ static i32 fk_open_fn(const char *req, u32 len)
     fk_open_flag = 1;
     rt_body_off = 0;
     rt_read_last = fk_now;
+    rt_write_last = fk_now;
     rt_write_got = 0;
     rt_status_again = s->status_again;
     rt_write_inval_fired = 0;
@@ -134,9 +139,13 @@ static i32 fk_write_fn(i32 h, const void *buf, u32 len)
     u32 n;
     (void)h; (void)buf;
     if (s->write_inval) { rt_write_inval_fired = 1; return OS32_ERR_INVAL; }
+    if (s->write_again > 0) { s->write_again--; return OS32_ERR_AGAIN; }
+    if (s->write_gap > 0 && (u32)(fk_now - rt_write_last) < s->write_gap) return OS32_ERR_AGAIN;
     n = len; if (n > 1400) n = 1400;
+    if (s->write_chunk && n > s->write_chunk) n = s->write_chunk;
     rt_write_got += n;
     fk_total_write += n;
+    rt_write_last = fk_now;
     return (i32)n;
 }
 
@@ -457,6 +466,79 @@ static void case_open_again_yield(void)
     check(fk_open_count == 3, "openagain: 2 AGAIN + 1 success");
 }
 
+static void case_open_full_yield(void)
+{
+    char out[HOST_TIME_BUF];
+    int rc;
+    /* N3-fix (b): host_open が FULL を 2 回 -> yield 待ち -> 成功。
+     * FULL を EIO 扱いにする変異はここで落ちる (open_full 欄は従来未使用)。 */
+    fk_reset();
+    nscripts = 1;
+    scripts[0].open_full = 2;
+    scripts[0].status = 200; scripts[0].body = (const u8 *)g_time; scripts[0].body_len = 19;
+    rc = host_time(out);
+    check(rc == 0, "openfull: succeeds after FULL (yield 待ち)");
+    check(strcmp(out, g_time) == 0, "openfull: body intact");
+    check(fk_now > 0, "openfull: yielded (clock advanced)");
+    check(fk_open_count == 3, "openfull: 2 FULL + 1 success");
+}
+
+static void case_write_again_yield(void)
+{
+    int rc;
+    u32 svc = 0;
+    /* N3-fix (a): send_decl の write が最初の 3 回 AGAIN -> yield -> 送り切る。
+     * 実カーネルは REQUEST 転送 ACK まで必ず write AGAIN。AGAIN を EIO 扱いに
+     * する変異はここで落ちる (従来は write AGAIN 経路が試験に無かった)。 */
+    fk_reset();
+    nscripts = 1;
+    scripts[0].status = 200;
+    scripts[0].write_again = 3;
+    rc = host_clip_put("hello", 5, &svc);
+    check(rc == 0, "wagain: CLIP PUT succeeds after write AGAIN");
+    check(reqlog_has_prefix("CLIP PUT 5"), "wagain: declared length 5");
+    check(fk_now > 0, "wagain: yielded on write AGAIN (clock advanced)");
+    check(fk_total_write == 5, "wagain: 5B delivered after retries");
+}
+
+static void case_write_noprogress_positive(void)
+{
+    static u8 big[3000];
+    int rc, i;
+    u32 svc = 0;
+    /* N3-fix (c) 肯定側: write>0 が 20 秒 (2000 tick) ごとに進む 60 秒転送。
+     * 無進捗基準の取り直しで成功する (write 経路の np_reset)。 */
+    for (i = 0; i < 3000; i++) big[i] = (u8)i;
+    fk_reset();
+    fk_yield_step = 250;             /* 8 yield = 2000 tick */
+    nscripts = 1;
+    scripts[0].status = 200;
+    scripts[0].write_gap = 2000; scripts[0].write_chunk = 1000;
+    rc = host_clip_put((const char *)big, 3000, &svc);
+    check(rc == 0, "wnoprog+: 60s write with 20s gaps succeeds");
+    check(fk_total_write == 3000, "wnoprog+: full body written");
+    check(fk_now >= 6000, "wnoprog+: really spanned ~60s");
+}
+
+static void case_write_noprogress_absolute_mutant(void)
+{
+    static u8 big[3000];
+    int rc, i;
+    u32 svc = 0;
+    /* N3-fix (c) 否定側: 無進捗を絶対期限に戻すと同じ 60s/20s の write 転送が
+     * 30s で ETIMEOUT に落ちる (回帰の否定側、read 経路の対応物)。 */
+    for (i = 0; i < 3000; i++) big[i] = (u8)i;
+    fk_reset();
+    fk_yield_step = 250;
+    nscripts = 1;
+    scripts[0].status = 200;
+    scripts[0].write_gap = 2000; scripts[0].write_chunk = 1000;
+    host__np_absolute = 1;
+    rc = host_clip_put((const char *)big, 3000, &svc);
+    check(rc == HOST_ETIMEOUT, "wnoprog-: absolute-deadline mutant times out on write");
+    host__np_absolute = 0;
+}
+
 static void case_clip_put_ok(void)
 {
     int rc;
@@ -681,6 +763,10 @@ int main(void)
     case_noprogress_absolute_mutant();
     case_nosys();
     case_open_again_yield();
+    case_open_full_yield();
+    case_write_again_yield();
+    case_write_noprogress_positive();
+    case_write_noprogress_absolute_mutant();
     case_clip_put_ok();
     case_clip_put_empty();
     case_clip_get_503();
