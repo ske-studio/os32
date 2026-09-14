@@ -1,6 +1,6 @@
 # Host Services 詳細計画 — ネットワーク・印刷・時刻・クリップボードをホスト (Windows) に丸投げする
 
-発行: PM (2026-09-13) / 状態: **N3 受入完了 + LGY-98 既定ビルド化 (ゲスト検証済み、2026-09-14)。→ N4 (GUI: libos32gui host_* = 基盤 / ファイラ印刷・端末コピペ = アプリ層)**。
+発行: PM (2026-09-13) / 状態: **N1〜N3 受入 + LGY-98 既定。N4 (a 基盤 / b ファイラ印刷・端末コピペ) 実装完了・Fable Approve・ビルド緑、ゲスト受入は [D1] 待ち (2026-09-14)。次: About / GUI エディタ**。
 上位: [LINK_PLAN.md](LINK_PLAN.md) (リンク層 L0〜L3 の正典、機構はエミュレータ合格済み)、[PLAN.md](PLAN.md) (LGY-98 ドライバ、M1〜M4 合格、M5 = 実カード)。
 本書は LINK_PLAN §5-1 の「残りは KAPI 公開だけ」を、**外部プログラムから使える形**まで分解し、印刷などネットワーク以外のサービスを同じ仕組みに載せる計画。契約の正典は LINK_PLAN のまま (フレーム形式・フロー制御は変えない)。
 
@@ -103,7 +103,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 | **N1 (K)** ✅ | v51 の 5 本、`net/link.c` の非ブロッキング化 (`link_request` の分割送信、状態機械)、`host_owner_exit`、ホスト TDD (`tools/tests/net_link_host.c` を L0〜L3 の試験から起こす)、`userland/tests/host_test.c` | N0、`kernel-lgy98-link` ビルド | `make check-net-l3` 相当を KAPI 経由で: GET /pattern/65536 の内容一致、404、TIME、AGAIN ループで WM が止まらない (GUI 配下で `gui_busy` と同時) |
 | **N2 (ホスト)** ✅ | `host_agent.py` に `PRINT OPEN/DATA/CLOSE/STATUS`、`CLIP GET/PUT` (WSL2 は clip.exe/powershell、無ければ 503)、`--spool-dir`/`--print-dir`/`--printer`/`--clip`、win32print/win32clipboard は任意依存。**`PUT /file/` は 501 で先送り (v1.4)** | — | Python 単体試験 (スプール、宣言長と WDATA の照合、閉じたジョブへの DATA 409、許可リスト外 403) |
 | **N3 (C)** ✅ | `libos32host` + `wget` / `lpr` / `hclip` / `date -sync` | N1、N2 | 端末 (GUI) と CUI の両方で `wget http://example.com/ /tmp/x` が 559B、`lpr /etc/profile` がホストの `spool/` に落ちる (to-file)、`hclip` の往復 |
-| **N4 (W/apps)** | libos32gui 末尾追記、ファイラ「印刷」、端末のコピー / 貼り付け | N3 | GUI 受入 |
+| **N4 (W/apps)** ✅(実装) | libos32gui 末尾追記、ファイラ「印刷」、端末のコピー / 貼り付け | N3 | GUI 受入 |
 | **N5** | 実カード (M5) — FCS の有無、16KB RAM、8bit 転送、IRQ。実機の Windows 側は **Npcap + scapy** (raw Ethernet) で `host_agent.py` を動かす | 実機 | 実 LAN で N3 の受入 |
 
 各票は T9 / S0 と同じ流儀 (設計 → Codex 網羅レビュー → worktree 実装 + ホスト TDD → Codex 実装レビュー → 配備 → 受入)。**LGY-98 有効カーネルは既定ビルドではない**ので、N1 以降の配備は `kernel-lgy98-link` を配備し、受入後に既定 (`LGY98=1` を常時) にするか決裁 §9-3。

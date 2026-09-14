@@ -1,6 +1,6 @@
 # TASK_N4 — GUI から Host Services を使う (libos32gui 末尾追記 + ファイラ印刷 + 端末コピペ)
 
-発行: PM (2026-09-14) / 状態: **実装へ (第 4 版で確定。Fable 設計レビュー 3 往復 Approve、blocker 0)。N4a = 基盤 (Claude Code PM)、N4b = アプリ層 (別エージェント)。実装中に §5 の残件を票へ反映**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
+発行: PM (2026-09-14) / 状態: **N4a / N4b 実装完了・Fable レビュー Approve・ビルド緑 (2026-09-14)。ゲスト受入 (shlib 配備 + kernel の exec.c 変更) は [D1] 承認待ち。§7 の non-blocker は追って**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
 **分担 (ROLES §0)**: §1 (N4a、基盤 = libos32gui shlib への host_* 末尾追記) = Claude Code PM。§2 (N4b、アプリ層 = ファイラ「印刷」・端末コピペ) = 別エージェント (Claude Code は設計 + レビュー)。
 
 ## 0. 前提
@@ -57,3 +57,10 @@ shlib のジャンプ表に host_* を末尾追記。**cfg は 101〜104 (4 本)
 判定 Request changes、blocker 1 件。6 ラッパー・kapi 配線・ジャンプ表・stub・utf8core は設計どおり。
 - **B1 (blocker)**: `exec/exec.c:865` の子終了注入破棄が「読み手以外の**あらゆる**アプリ退場」で発火し、無関係な GUI アプリが畳まれると貼り付け中のリングが空になり子が 256B 欠けた貼り付けを受ける (新規退行)。→ 条件を **`launch_child(con_sink_reader_get()) == id`** (退場したのが端末の子のときだけ破棄) に絞る (`launch_child` は不正 id で 0)。受入: `con_sink_host.c` の (9) 写しに (9a) を足し「無関係 ID で pending 減らない / 読み手の child で 0」。
 - nb: (1) host_fake の本文を可変チャンクにし out_sink の「cap 超過後も数える」を 2 チャンクで固定、(2) con_sink_host / multiapp_impl_host に破棄条件の試験、(3) `copy_name` の空名・制御文字のみは `HOST_EINVAL` か lpr の "file" 既定に揃える (空白は Agent が許すので落とさない)、(4) url 1396B 超 / name・path 256B 超 / NULL の反例を host_tests に、(6) `MEMORY_BUDGET.md` に per-app .bss 4→8 ページ (+16KB/GUI アプリ) を記録。
+
+## 7. N4b 実装レビュー (Fable、2026-09-14) — Approve
+判定 **Approve**、blocker 0。drip/コピー/F キー横取り/ファイラ印刷/境界すべて設計どおり。build all/external/check 緑、端末 host_tests 72・filer 4。
+non-blocker (polish、受入後に): N1 子が起動前に drip した分がリングに残り次の子が食う (打鍵でも起きる既存挙動、既知制限)、N2 行末の NUL/ESC を sanitize 前に trim 判定 (末尾空白が残る)、N3 注入中の再 F10 が無通知、N4 業務失敗 (409/500/503) と HOST_E* の文言化 + CRLF ちょうどの誤通知、N5 「Printing…」が park 前に描かれない (pending_print で 1 周後に呼ぶ)。純関数試験に N2/N4 の 2 反例を足すと良い。
+
+## 8. ゲスト受入の要件 ([D1])
+N4a で shlib が nfunc 111 になった (host_* 105〜110) ので、N4b のアプリは**新 shlib が要る** — `make deploy` → `hsync sys` (shlib は /sys/lib)。N4a-fix は `exec/exec.c` (カーネル) を変えたので**カーネル再配備** ([D1]、NP21/W 停止) が要る (子終了の注入破棄)。受入項目: ファイラで P → `Printed N page(s)` + ホスト spool、端末 F9 で可視画面をコピー → 別所で F10 貼り付け往復、走行中の子へ F10 で欠けず drip、Prompt で 1 行、busy 端末で捨てる。Agent は `--clip auto|wsl|file:` + `--spool-dir` で起動。
