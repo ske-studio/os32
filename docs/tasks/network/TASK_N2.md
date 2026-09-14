@@ -82,3 +82,9 @@
 - **nb (直す)**: (a) `_finish_clip_get` が rc を見ず、powershell が rc≠0 + stdout 空だと 200+0 長に化ける (B5「黙って捨てない」に反する) → `poll()!=0 → 503`。(b) `--clip` の未知値が検証されず wsl 扱い → argparse 後に `{auto,win32,wsl,none}` か `file:` 接頭辞かを検査して exit。(c) `_ensure_jobs`/`alloc()` の `os.makedirs`/`write_int_atomic` が try 外で、spool/state が書けないと PRINT OPEN で Agent が落ちる → OSError を 500+`error` に。(d) `now=time.time` → `time.monotonic` (NTP ジャンプ耐性)。
 - **nb (試験を足す)**: epoch/sess 切替での pending 破棄、実 `_RealProc` を使う大容量 clip 1 本、powershell 引数本文 (base64 ラッパ) の照合。
 - **nb (残す・N5 申し送り)**: kill 後の未 wait (次 Popen まで 1 個ゾンビ、有界)。`_print_win32` は RAW datatype で UTF-8 を書く → 日本語が出ない (TEXT+CP932 か GDI 描画が要る)。`pywintypes.error` が except に掛からず落ちる。いずれも `--printer` 実経路 = 実機 Windows なので **N5** で直す (§6)。
+
+## 8. N2-fix 実装記録 (2026-09-14)
+- blocker B7: `_RealProc` を `stdout=tempfile.TemporaryFile()` + `output()` で `seek(0);read()` (パイプ容量非依存)。nb: `_finish_clip_get` は rc≠0 → CalledProcessError → 503、`--clip` は `valid_clip_arg` で argparse 後に検証、`_ensure_jobs`/`alloc` の OSError → 500+error、期限時計 `time.monotonic`。試験: 実 `_RealProc` の大容量 (≥100KB / 60000B / UTF-8 境界)、epoch/sess 切替の pending 破棄、`--clip bogus`、powershell 引数照合。
+- `python3 -B tools/tests/test_host_agent.py` **66/66 PASS**、N1 ホスト TDD `test_net_link.py` 35/35 回帰なし。
+- PM 補足: コーダーが API timeout で中断し `n2fix_sess_switch_discards_pending` が未完 (clip=none で spawn せず IndexError) だったので、PM が 1 行 (`clip="wsl"`) を補って 66/66 に。エージェント落ちの後始末。
+- N5 申し送り (`--printer` 実経路): `_print_win32` の RAW datatype → 日本語不可、`pywintypes.error` の except 漏れ、kill 後の未 wait。§7 のとおり実機 Windows で。

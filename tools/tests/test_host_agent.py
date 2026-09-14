@@ -193,6 +193,34 @@ class FakeSpawn:
         return proc
 
 
+class RealB64Spawn:
+    """実 _RealProc を起こす spawn (blocker B7 の受入用、FakeProc は背圧を模さない)。
+
+    cmd は無視し、`unit * count` の base64 を stdout に吐く実子プロセスを起こす。
+    payload は子の中で生成する (argv 長制限 MAX_ARG_STRLEN を避ける)。stdout は
+    _RealProc の一時ファイルへ流れるので base64 が 64KB を超えても子は詰まらない。
+    """
+
+    def __init__(self, unit, count):
+        self.unit = unit
+        self.count = count
+        self.calls = []
+        self.procs = []
+
+    def __call__(self, cmd, stdin_bytes=None):
+        self.calls.append((cmd, stdin_bytes))
+        script = ("import sys,base64;"
+                  "sys.stdout.buffer.write(base64.b64encode(%r*%d))"
+                  % (self.unit, self.count))
+        proc = HA._RealProc([sys.executable, "-c", script])
+        self.procs.append(proc)
+        return proc
+
+    def wait_all(self):
+        for p in self.procs:
+            p.p.wait()                       # 子の完了を待つ (期限内)
+
+
 @contextlib.contextmanager
 def patched_spawn(fs):
     """HA.spawn を FakeSpawn に差し替える (試験の間だけ)。"""
@@ -1104,7 +1132,139 @@ def n2_two_jobs_interleaved():
             assert f.read() == b"B1"
 
 
+# =========================================================== N2-fix (§7)
+def n2fix_b7_real_large_clip_get():
+    """B7: 実 _RealProc で >64KB (base64 後 >パイプ容量) を吐く子が期限内に完了し、
+    全量読める (一時ファイル stdout でパイプ詰まりしない)。"""
+    unit = "あ".encode("utf-8")                        # 3 バイト
+    count = 40000                                      # payload 120000 バイト
+    payload = unit * count
+    fs = RealB64Spawn(unit, count)
+    with patched_spawn(fs):
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert [p for p in o.pump() if p["op"] == HA.OP_RESPONSE] == []  # 子未完了
+        fs.wait_all()                                  # 実子の完了を待つ (期限 4s 内)
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 200), (ctl, st)
+        assert ln <= HA.CLIP_GET_MAX and ln % 3 == 0, ln   # 64KB を UTF-8 境界で切る
+        assert read_body(o, 1, credit=2048) == payload[:ln]
+
+
+def n2fix_b7_real_clip_get_sizes():
+    """B7: Agent 経由で 60000B → (200, 60000)、100000B → (200, 65536) (境界切り)。"""
+    for raw_len, expect_ln in [(60000, 60000), (100000, HA.CLIP_GET_MAX)]:
+        payload = b"a" * raw_len                        # ascii なので境界は自明
+        fs = RealB64Spawn(b"a", raw_len)
+        with patched_spawn(fs):
+            a, o = up(clip="wsl")
+            o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+            fs.wait_all()
+            out = o.pump()
+            ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+            assert (ctl, st, ln) == (False, 200, expect_ln), (raw_len, ctl, st, ln)
+            assert read_body(o, 1, credit=2048) == payload[:ln]
+
+
+def n2fix_a_clip_get_rc_nonzero_503():
+    """nb(a): powershell が rc≠0 + stdout 空でも 200+0 長に化けず 503。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=b"", rc=1)])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 503)
+
+
+def n2fix_b_clip_arg_validation():
+    """nb(b): --clip の未知値を弾く (関数と CLI の両方)。"""
+    assert HA.valid_clip_arg("auto") and HA.valid_clip_arg("none")
+    assert HA.valid_clip_arg("wsl") and HA.valid_clip_arg("win32")
+    assert HA.valid_clip_arg("file:/tmp/x")
+    assert not HA.valid_clip_arg("bogus") and not HA.valid_clip_arg("")
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "host_agent.py"),
+                        "--clip", "bogus"], capture_output=True)
+    assert r.returncode != 0, "不正な --clip を受理した"
+    assert b"--clip" in r.stderr, r.stderr
+
+
+def n2fix_c_open_oserror_500():
+    """nb(c): スプール/ state が書けないと PRINT OPEN で落ちず 500 + error。"""
+    with tempfile.TemporaryDirectory() as d:
+        blocked = os.path.join(d, "ro", "spool")        # 親が無い書けない場所
+        a, o = up(state_dir=d, spool_dir=blocked)
+        os.makedirs(os.path.join(d, "ro"))
+        os.chmod(os.path.join(d, "ro"), 0o500)          # 書き込み不可
+        try:
+            out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"PRINT OPEN doc text")
+            ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+            assert (ctl, st) == (False, 500) and ln > 0, (ctl, st, ln)
+            assert read_body(o, 1).startswith(b"error")
+            # Agent は生きていて次の要求に答える
+            o.send(HA.OP_RELEASE, rid=1)
+            out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PING")
+            assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        finally:
+            os.chmod(os.path.join(d, "ro"), 0o700)      # cleanup 用に戻す
+
+
+def n2fix_d_now_is_monotonic():
+    """nb(d): 期限判定の時計は time.monotonic (NTP ジャンプ耐性)。"""
+    import time as _t
+    a, o = up()
+    assert a.now is _t.monotonic
+
+
+def n2fix_clip_wsl_powershell_cmd():
+    """nb: wsl GET の powershell コマンドが base64 ラッパ本文を持つことの照合。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(b"x"))])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        cmd = fs.calls[0][0]
+        assert cmd[0] == "powershell.exe" and "-NoProfile" in cmd
+        joined = " ".join(cmd)
+        assert "ToBase64String" in joined and "Get-Clipboard -Raw" in joined
+        fs.procs[0].step()
+        o.pump()
+
+
+def n2fix_epoch_switch_discards_pending():
+    """nb: epoch 切替で実行中の子が kill され pending が破棄される。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(b"hi"))])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert 1 in a.pending
+        o.hello(sess=o.sess, epoch=o.epoch + 1)          # 同 sess の epoch 更新
+        assert a.pending == {} and fs.procs[0].killed
+        fs.procs[0].step()
+        assert o.pump() == [], "破棄したはずの結果を返した"
+
+
+def n2fix_sess_switch_discards_pending():
+    """nb: 新セッションへの切替でも実行中の子が kill され pending が破棄される。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(b"hi"))])) as fs:
+        a = new_agent(clip="wsl")
+        o = FakeOS32(a)
+        o.hello(sess=0, epoch=1)
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        proc = fs.procs[0]
+        assert 1 in a.pending
+        o2 = FakeOS32(a, mac=bytes.fromhex("02005e0000aa"))
+        o2.hello(sess=0, epoch=1)                        # 別 OS32 の新セッション
+        assert a.pending == {} and proc.killed
+
+
 CASES = [
+    n2fix_b7_real_large_clip_get,
+    n2fix_b7_real_clip_get_sizes,
+    n2fix_a_clip_get_rc_nonzero_503,
+    n2fix_b_clip_arg_validation,
+    n2fix_c_open_oserror_500,
+    n2fix_d_now_is_monotonic,
+    n2fix_clip_wsl_powershell_cmd,
+    n2fix_epoch_switch_discards_pending,
+    n2fix_sess_switch_discards_pending,
     n2_print_roundtrip,
     n2_wdata_len_mismatch,
     n2_unknown_id_409,

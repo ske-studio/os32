@@ -121,6 +121,14 @@ SUBPROC_ERRORS = (OSError, subprocess.TimeoutExpired,
                   ValueError, binascii.Error)
 
 
+CLIP_BACKENDS = ("auto", "win32", "wsl", "none")   # file:<path> は接頭辞で別扱い
+
+
+def valid_clip_arg(value):
+    """--clip の値が既知の backend か file:<path> か (nb(b))。"""
+    return value in CLIP_BACKENDS or value.startswith("file:")
+
+
 def write_int_atomic(path, value):
     """tmp へ書いて fsync → os.replace で原子的に整数を書き出す (sess.txt / job.txt)。"""
     tmp = path + ".tmp"
@@ -262,11 +270,16 @@ class _RealProc:
 
     stdin_bytes があれば起動直後に書き込んで閉じる (CLIP は ≤4KB でパイプに収まる)。
     poll() は None で実行中。output() は完了後に stdout を返す。kill() は冪等。
+
+    stdout は **パイプでなく一時ファイル**にする (blocker B7): パイプだと Agent が
+    poll() 非 None まで読まないため、base64 後 >64KB (≒クリップボード 49KB 超) で
+    子が書き込みブロック → 4 秒で kill → 503 になる。一時ファイルなら容量非依存。
     """
 
     def __init__(self, cmd, stdin_bytes=None):
         stdin = subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL
-        self.p = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.PIPE,
+        self._outfile = tempfile.TemporaryFile()
+        self.p = subprocess.Popen(cmd, stdin=stdin, stdout=self._outfile,
                                   stderr=subprocess.DEVNULL)
         if stdin_bytes is not None:
             try:
@@ -279,8 +292,12 @@ class _RealProc:
         return self.p.poll()
 
     def output(self):
+        # tick は poll() が非 None になってから呼ぶので、子は終了済み =
+        # stdout は一時ファイルに出揃っている。先頭から読み切る。
         if self._out is None:
-            self._out, _ = self.p.communicate(timeout=1)
+            self._outfile.seek(0)
+            self._out = self._outfile.read()
+            self._outfile.close()
         return self._out
 
     def kill(self):
@@ -323,7 +340,7 @@ class HostAgent:
         self.jobs = {}              # job_id -> dict(kind, state, spool, pages, error)
         # ---- 非同期の子プロセス (CLIP wsl backend、往復 3 B-1) ----
         self.pending = {}           # rid -> dict(proc, ent, finish, deadline, sess, epoch)
-        self.now = time.time        # 期限判定の時計 (試験は差し替える)
+        self.now = time.monotonic   # 期限判定の時計 (NTP ジャンプ耐性。試験は差し替える)
         self.subproc_timeout = SUBPROC_TIMEOUT
         # ---- 現行セッション (CONFIRM で切り替わる) ----
         self.sess = 0
@@ -897,10 +914,13 @@ class HostAgent:
         if kind != "text":
             self._answer(rid, ent, HTTP_BAD, b"", None, out)       # 未知 kind
             return
-        self._ensure_jobs()
-        jid = self.jobs_counter.alloc()
-        spool = os.path.join(self.spool_dir, "%d-%d.txt" % (int(time.time()), jid))
+        # nb(c): ジョブ保存の用意 (makedirs) / id 採番 (job.txt 書き込み) /
+        # スプール作成のどれが失敗しても Agent は落とさず 500 + error で返す。
         try:
+            self._ensure_jobs()
+            jid = self.jobs_counter.alloc()
+            spool = os.path.join(self.spool_dir,
+                                 "%d-%d.txt" % (int(time.time()), jid))
             with open(spool, "wb"):                      # 空のスプールを作る
                 pass
         except OSError as e:
@@ -1080,6 +1100,9 @@ class HostAgent:
         self._start_async(rid, ent, proc, self._finish_clip_get)
 
     def _finish_clip_get(self, proc):
+        rc = proc.poll()
+        if rc:                                           # powershell が失敗 → 503
+            raise subprocess.CalledProcessError(rc, "powershell.exe")
         raw = base64.b64decode(proc.output().strip(), validate=True)
         return (200, self._clip_trim_get(raw))
 
@@ -1198,6 +1221,9 @@ def main():
                     metavar="{auto,win32,wsl,file:<path>,none}",
                     help="クリップボード backend (既定 auto)")
     args = ap.parse_args()
+    if not valid_clip_arg(args.clip):
+        ap.error("--clip は {auto,win32,wsl,none} か file:<path> "
+                 "(不正: %r)" % args.clip)
 
     if args.state_dir:
         os.makedirs(args.state_dir, exist_ok=True)
