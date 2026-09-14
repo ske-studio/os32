@@ -1,6 +1,6 @@
 # TASK_N4 — GUI から Host Services を使う (libos32gui 末尾追記 + ファイラ印刷 + 端末コピペ)
 
-発行: PM (2026-09-14) / 状態: **N4a / N4b 実装完了・Fable レビュー Approve・ビルド緑 (2026-09-14)。ゲスト受入 (shlib 配備 + kernel の exec.c 変更) は [D1] 承認待ち。§7 の non-blocker は追って**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
+発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-15)。ファイラ印刷・端末コピー/貼り付けをゲストで実証。退行の真因は shlib の .bss 未ゼロクリア (`30018f1` で修正、N4 は表面化させただけ)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
 **分担 (ROLES §0)**: §1 (N4a、基盤 = libos32gui shlib への host_* 末尾追記) = Claude Code PM。§2 (N4b、アプリ層 = ファイラ「印刷」・端末コピペ) = 別エージェント (Claude Code は設計 + レビュー)。
 
 ## 0. 前提
@@ -102,3 +102,21 @@ N4a で shlib が nfunc 111 になった (host_* 105〜110) ので、N4b のア�
 
 ### 残る手 — CPL=3 #PF のシリアル出力を捕らえる ([D2] ini 変更が要る)
 カーネルは CPL=3 の #PF を `serial_puts_polled` で**シリアルポート**へ出す (`kernel/isr_handlers.c:29`、内容は `addr=` / `EIP=` / `[shlib band, READ|WRITE]` の有無)。NP21/W の ini にシリアル出力をファイルへ落とす設定が無いため現在は捨てられている。**この 1 行を読めれば原因はほぼ確定する**ので、次はここを有効化したい。
+
+## 10. ゲスト受入 (2026-09-15) — 合格
+退行 (§9) の真因 = **shlib の `.bss` が一度もゼロクリアされていなかった** (`kernel/shlib.c`、2026-09-05 から。`memmove` の後にヘッダを読んでいた) を `30018f1` で修正した後、以下をゲストで実証した。カーネル計装で kill 種別を特定: **#PF / err=6 (user write to not-present) / addr=0x0041ece4 (shlib データ域) / EIP=0x00411cfc (shlib .text)** → 未初期化ポインタ経由の書き込みと確定。修正後は `fault_kill_count = 0`。
+
+| 受入項目 | 結果 |
+|---|---|
+| GUI アプリの起動 | File Manager がツリー + 一覧つきで正常起動、タスクバーにも出る |
+| **ファイラ「印刷」** | `/etc/settings.tsv` を選んで `P` → ステータス行 **`Printed 1 page(s)`**、ホストの spool に **1,406 B・バイト一致**の `<unixtime>-2.txt` が落ちた |
+| **端末 貼り付け (F10)** | ホストのクリップボード `echo N4-paste-ok` の**1 行目がプロンプトに入り**、Enter で実行された (Prompt モードの 1 行切り出しが仕様どおり) |
+| **端末 コピー (F9)** | 可視画面が**ホストのクリップボードへ**。貼り付けた行とその出力を含む画面テキストが取れた (Wide/継続セル・行末空白の処理込み) |
+
+**N4 受入完了**。Host Services は N1〜N4 すべて受入済みで、CUI (`wget`/`lpr`/`hclip`/`hdate`) と GUI (ファイラ印刷・端末コピペ) の両方から使える。
+
+### 受入で得た運用知見 (記録)
+- `hsync` は**サイズが同じファイルをスキップ**する → 中身だけ変えた shlib は届かない。ゲストで `rm` してから `hsync sys`、または `nhd-init` + `deploy --force`。
+- 設定が MISSING だと gshell は **640x480** で出る。`gui_gate` の座標は `status()["scrn_ymax"]` から導くこと (固定 400 でメニューを外した)。
+- **フォーカスのあるアプリにキーが届く**。Run… を使う前に前面のアプリを閉じること (ファイラに `d` が届き Delete 確認が出た — No で回避)。
+- GUI 中は kprintf / TVRAM 診断が gshell の再描画で消える。**カーネルのグローバルに残して `/api/mem` で読む**のが確実。
