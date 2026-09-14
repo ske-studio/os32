@@ -60,7 +60,24 @@ static void host_outp(unsigned int port, unsigned int value)
 static int g_v86;
 int v86_is_active(void) { return g_v86; }
 void serial_putchar(char c) { (void)c; }
-void kbd_inject_discard(void) { }
+
+/* --- 打鍵の注入リング (票 N4 の貼り付け) の代わり ------------------------
+ * exec_reclaim_owned (9a) は端末**配下の子**の退場で残りを捨てる。ホストで
+ * は「捨てたか」だけ分かればよいので、残バイト数を 1 個の変数で持つ。
+ * kbd_inject_discard は実物と同じく中身を空にする (0 にする)。 */
+static u32 g_inject_pending;
+void kbd_inject_discard(void) { g_inject_pending = 0; }
+
+/* --- launch_req 表の launch_child の代わり (exec/launch.c は引けない) -----
+ * 実物は「その ID の表が所有する子。不正 ID / 不在は 0」。ここでは読み手→子
+ * の対応を 1 本の配列で持ち、同じ約束 (範囲外は 0) を守る。 */
+#define HOST_LC_MAX 64
+static i32 g_child_of[HOST_LC_MAX];
+i32 launch_child(i32 id)
+{
+    if (id < 0 || id >= (i32)HOST_LC_MAX) return 0;   /* 不正 ID は 0 */
+    return g_child_of[(int)id];
+}
 
 u32 kstrlen(const char *s)
 {
@@ -172,6 +189,11 @@ static void reclaim_con_sink(int id)
     if (id != HOST_APP_ID_SHELL && con_sink_is_enabled() &&
         con_sink_reader_get() != id) {
         con_sink_push_exit(id);
+        /* (9a) 退場したのが読み手 (端末) の子のときだけ注入リングを捨てる
+         * (N4a 実装レビュー B1)。launch_child は不正 ID / 読み手不在で 0。 */
+        if (launch_child(con_sink_reader_get()) == id) {
+            kbd_inject_discard();
+        }
     }
     con_sink_owner_exit(id);
 }
@@ -187,6 +209,11 @@ static void reset_all(void)
     con_sink_owner_exit(3);
     con_sink_drop_count = 0;
     g_owner = 0;
+    g_inject_pending = 0;
+    {
+        int i;
+        for (i = 0; i < HOST_LC_MAX; i++) g_child_of[i] = 0;
+    }
 }
 
 /* ======================================================================== */
@@ -762,6 +789,54 @@ static void case_exit_record(void)
           "10w CUI モード中 (無効) は子の退場でも積まない");
 }
 
+/* ======================================================================== */
+/*  11. 注入リングの破棄条件 (票 N4a-fix B1) — 端末の子の退場でだけ捨てる   */
+/*                                                                          */
+/*  exec_reclaim_owned (9a) は貼り付け途中の注入リングを捨てる。無条件だと   */
+/*  無関係な GUI アプリが畳まれただけで貼り付けが 256B 欠ける退行になる      */
+/*  (N4a 実装レビュー B1)。捨てるのは **退場したのが読み手 (端末) の子の      */
+/*  ときだけ**。読み手→子の対応を launch_child の贋物で与えて確かめる。       */
+/* ======================================================================== */
+static void case_inject_discard_scope(void)
+{
+    reset_all();
+    report("11 inject discard scope (N4a-fix B1)\n");
+
+    con_sink_enable();
+    g_owner = 4;                       /* 端末アプリ (ID 4) が読み手 */
+    g_child_of[4] = 6;                 /* その端末が起動した子は ID 6 */
+    con_sink_read(out, (u32)CON_SINK_REC_MAX);   /* 読みで所有を確定する */
+    check(con_sink_reader_get() == 4, "11a 読み手は端末 ID 4");
+    check(launch_child(con_sink_reader_get()) == 6, "11b 端末の子は ID 6");
+
+    /* --- 無関係な GUI アプリの退場では捨てない ------------------------- */
+    g_inject_pending = 256;            /* 端末が子の stdin へ積んだ残り */
+    reclaim_con_sink(9);               /* ID 9 は読み手でも読み手の子でもない */
+    check(g_inject_pending == 256,
+          "11c 無関係 ID (9) の退場では注入リングは減らない");
+    check(pending_now() == (u32)CON_SINK_HDR_EXIT,
+          "11d それでも EXIT レコードは積まれる (端末は子の終了を知る)");
+    drain();
+
+    /* --- 読み手の子の退場では捨てる ------------------------------------ */
+    g_inject_pending = 256;
+    reclaim_con_sink(6);               /* 端末 (4) の子 = ID 6 */
+    check(g_inject_pending == 0,
+          "11e 読み手の子 (6) の退場で注入リングは 0 になる");
+    check(pending_now() == (u32)CON_SINK_HDR_EXIT,
+          "11f 子の退場でも EXIT は積まれる");
+    drain();
+
+    /* --- 読み手不在 (端末が居ない) のときは捨てない --------------------- */
+    reset_all();
+    con_sink_enable();                 /* GUI 中だが読み手はまだ居ない */
+    g_child_of[4] = 6;                 /* 表に残骸があっても照合は reader 起点 */
+    g_inject_pending = 128;
+    reclaim_con_sink(6);               /* launch_child(NO_READER) は 0 */
+    check(g_inject_pending == 128,
+          "11g 読み手不在なら子らしき ID の退場でも捨てない");
+}
+
 int main(void)
 {
     failures = 0;
@@ -776,6 +851,7 @@ int main(void)
     case_selftest_agrees();
     case_console_render_gate();
     case_exit_record();
+    case_inject_discard_scope();
     if (failures) {
         report("FAILURES\n");
         die(1);

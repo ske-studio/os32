@@ -100,7 +100,12 @@ extern "C" {
 
 /// `src` を NUL 終端して `dst` へ写す。**制御バイト (< 0x20 と 0x7F) は落とす**
 /// (票 §1: 印刷名の制御文字を落とす)。埋め込み NUL も飛ばす。入りきらなければ
-/// `false` (NUL の 1 バイトを含めて `dst` に収まること)。空名は許す。
+/// `false` (NUL の 1 バイトを含めて `dst` に収まること)。
+///
+/// **空名は `false`** (N4a 実装レビュー nb3): 空 basename・制御文字のみの name は
+/// 印刷ジョブ名にできないので `HOST_EINVAL` で呼び手へ返す (lpr は空を "file" に
+/// 既定するが、GUI は明快に弾く)。空白 (0x20) は制御文字ではないので残り、名前と
+/// して通る (Agent 側も空白名を許す)。
 pub fn copy_name(src: &[u8], dst: &mut [u8]) -> bool {
     if dst.is_empty() {
         return false;
@@ -118,6 +123,9 @@ pub fn copy_name(src: &[u8], dst: &mut [u8]) -> bool {
         }
         dst[j] = c;
         j += 1;
+    }
+    if j == 0 {
+        return false; /* 空名 / 制御文字のみ → EINVAL */
     }
     dst[j] = 0;
     true

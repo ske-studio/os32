@@ -19,12 +19,14 @@ struct State {
     get_rc: i32,
     get_body: Vec<u8>,
     get_http: i32,
+    get_chunks: Vec<u32>, /* 空 = 本文を 1 チャンクで。設定すると可変分割 */
     print_rc: i32,
     print_pages: u32,
     print_svc: u32,
     clip_get_rc: i32,
     clip_get_body: Vec<u8>,
     clip_get_svc: u32,
+    clip_get_chunks: Vec<u32>, /* 空 = 1 チャンク。設定すると可変分割 */
     clip_put_rc: i32,
     clip_put_svc: u32,
     time_rc: i32,
@@ -78,6 +80,18 @@ pub fn set_get(rc: i32, body: &[u8], http: i32) {
         s.get_rc = rc;
         s.get_body = body.to_vec();
         s.get_http = http;
+        s.get_chunks = Vec::new();
+    });
+}
+/// 本文を `chunks` の並び (バイト数) で sink へ小分けに渡す。実サービスは
+/// 到着ぶんを何回にも分けて sink する — cap 到達後も sink が受理し続ける
+/// (0 を返す) ことを確かめるため、cap をまたぐ分割を仕込めるようにする。
+pub fn set_get_chunked(rc: i32, body: &[u8], http: i32, chunks: &[u32]) {
+    with(|s| {
+        s.get_rc = rc;
+        s.get_body = body.to_vec();
+        s.get_http = http;
+        s.get_chunks = chunks.to_vec();
     });
 }
 pub fn set_print(rc: i32, pages: u32, svc: u32) {
@@ -92,6 +106,16 @@ pub fn set_clip_get(rc: i32, body: &[u8], svc: u32) {
         s.clip_get_rc = rc;
         s.clip_get_body = body.to_vec();
         s.clip_get_svc = svc;
+        s.clip_get_chunks = Vec::new();
+    });
+}
+/// クリップボード本文を `chunks` の並びで sink へ小分けに渡す (set_get_chunked と同旨)。
+pub fn set_clip_get_chunked(rc: i32, body: &[u8], svc: u32, chunks: &[u32]) {
+    with(|s| {
+        s.clip_get_rc = rc;
+        s.clip_get_body = body.to_vec();
+        s.clip_get_svc = svc;
+        s.clip_get_chunks = chunks.to_vec();
     });
 }
 pub fn set_clip_put(rc: i32, svc: u32) {
@@ -153,6 +177,48 @@ unsafe fn cstr(p: *const u8) -> Vec<u8> {
 type SinkFn = extern "C" fn(*mut c_void, *const u8, u32) -> i32;
 type SrcFn = extern "C" fn(*mut c_void, *mut u8, u32) -> i32;
 
+/// 本文を `chunks` (空なら全量 1 本) の並びで `sink` へ渡し、**受理できた実長**
+/// を返す。sink が非 0 を返したら中断で `None` (実サービスの EABORT に相当)。
+/// 実長は sink が cap を超えて捨てても数え続ける — その挙動を検査で踏むための
+/// 可変分割。
+unsafe fn deliver_chunked(
+    sink: SinkFn,
+    ud: *mut c_void,
+    body: &[u8],
+    chunks: &[u32],
+) -> Option<u32> {
+    let mut received: u32 = 0;
+    let mut off = 0usize;
+    let plan: Vec<usize> = if chunks.is_empty() {
+        vec![body.len()]
+    } else {
+        chunks.iter().map(|&c| c as usize).collect()
+    };
+    for csz in plan {
+        if off >= body.len() {
+            break;
+        }
+        let end = (off + csz).min(body.len());
+        if end > off {
+            let r = sink(ud, body[off..].as_ptr(), (end - off) as u32);
+            if r != 0 {
+                return None; /* sink が中断 → EABORT */
+            }
+            received += (end - off) as u32;
+        }
+        off = end;
+    }
+    /* チャンク表が本文を覆い切らなければ残りを最後に 1 本で流す */
+    if off < body.len() {
+        let r = sink(ud, body[off..].as_ptr(), (body.len() - off) as u32);
+        if r != 0 {
+            return None;
+        }
+        received += (body.len() - off) as u32;
+    }
+    Some(received)
+}
+
 /* ---------------- libos32host の贋物 ---------------- */
 
 #[no_mangle]
@@ -179,28 +245,25 @@ pub unsafe extern "C" fn host_get(
     nbytes: *mut u32,
 ) -> i32 {
     let u = cstr(url);
-    let (rc, body, http) = with(|s| {
+    let (rc, body, http, chunks) = with(|s| {
         s.log.push(Call::Get);
         s.last_url = u;
-        (s.get_rc, s.get_body.clone(), s.get_http)
+        (s.get_rc, s.get_body.clone(), s.get_http, s.get_chunks.clone())
     });
     /* http_status は read ループの前に書く (契約)。 */
     if !http_status.is_null() {
         *http_status = http;
     }
-    /* 本文を 1 チャンクで sink へ。sink が非 0 を返したら EABORT。 */
-    let mut delivered: u32 = 0;
-    if !body.is_empty() {
-        let r = sink(ud, body.as_ptr(), body.len() as u32);
-        if r != 0 {
-            return -106; /* HOST_EABORT */
+    /* 本文を (可変) チャンクで sink へ。sink が非 0 を返したら EABORT。 */
+    match deliver_chunked(sink, ud, &body, &chunks) {
+        None => -106, /* HOST_EABORT */
+        Some(delivered) => {
+            if !nbytes.is_null() {
+                *nbytes = delivered;
+            }
+            rc
         }
-        delivered = body.len() as u32;
     }
-    if !nbytes.is_null() {
-        *nbytes = delivered;
-    }
-    rc
 }
 
 #[no_mangle]
@@ -280,25 +343,22 @@ pub unsafe extern "C" fn host_clip_get(
     nbytes: *mut u32,
     svc_status: *mut u32,
 ) -> i32 {
-    let (rc, body, svc) = with(|s| {
+    let (rc, body, svc, chunks) = with(|s| {
         s.log.push(Call::ClipGet);
-        (s.clip_get_rc, s.clip_get_body.clone(), s.clip_get_svc)
+        (s.clip_get_rc, s.clip_get_body.clone(), s.clip_get_svc, s.clip_get_chunks.clone())
     });
     if !svc_status.is_null() {
         *svc_status = svc;
     }
-    let mut delivered: u32 = 0;
-    if !body.is_empty() {
-        let r = sink(ud, body.as_ptr(), body.len() as u32);
-        if r != 0 {
-            return -106;
+    match deliver_chunked(sink, ud, &body, &chunks) {
+        None => -106,
+        Some(delivered) => {
+            if !nbytes.is_null() {
+                *nbytes = delivered;
+            }
+            rc
         }
-        delivered = body.len() as u32;
     }
-    if !nbytes.is_null() {
-        *nbytes = delivered;
-    }
-    rc
 }
 
 #[no_mangle]
