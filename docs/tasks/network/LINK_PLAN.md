@@ -140,7 +140,7 @@ EOF stream_id  // ストリーム終端
   以後固定する。EtherType は 0x88B5 (experimental 帯)。
 - リンクヘッダ **20B、明示的に直列化 (LE アクセサ、C 構造体の padding に依存しない)**:
   `op(u8)` `flags(u8)` `epoch(u16)` `seq(u32)` `ack(u32)` `length(u16)` `rid(u32)` `sess(u16)`。
-  `sess` = セッション ID (**Agent が永続カウンタで採番**、全フレーム)、`epoch` = セッション内の
+  `sess` = セッション ID (**Agent が永続カウンタで採番、再使用せず枯渇で停止**、全フレーム)、`epoch` = セッション内の
   再同期世代 (OS32 が +1、周回は新セッション)、`rid` = 要求 ID (セッション内で単調増加、0 は
   使わない)。HELLO 以外は `sess` と `epoch` が控えと一致するフレームだけ受け付ける (両端とも)。
 - 制御フレーム (WINDOW / ACK / STATUS / RELEASE / HELLO) は小さく、60B へ padding して送る。
@@ -182,6 +182,8 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 | L3 Host Services | **機構はエミュレータ合格 (2026-09-05)**。外部プログラムから HTTP_GET → host_read が動く。回線速度に依らず OS32 側のメモリ上限が一定 |
 
 ## 5-1. 進捗 (ブランチ `feat/net-link`)
+
+> **履歴**: この節の v43 予約・KAPI 4 本案・呼び手側で `link_poll` を回す記述は v1 時点のもの。現行は KAPI v51 の 5 本と `link_tick` 駆動 (TASK_N0 §1a / §2a)。
 
 - **L0 実装・エミュレータ合格 (2026-09-05)**: `net/link.{c,h}` (独自 EtherType 0x88B5、
   16B リンクヘッダ op/epoch/seq/ack/length、EtherType はワイヤ big-endian・以降は LE)。
