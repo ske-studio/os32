@@ -72,6 +72,21 @@
 #define HR_TOO_LARGE    "size_unsupported"  /* 32bit / int で扱えない長さ */
 #define HR_DEFAULT_SYS  "default_sys_exclusion"
 #define HR_SETTINGS_DB  "settings_db"
+#define HR_TOO_DEEP     "path_too_deep"     /* VFS の要素数上限を越える */
+#define HR_BAD_NAME     "bad_name"          /* 名前に '\' が混じっている */
+#define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
+
+/* VFS が 1 パスで扱える要素数。**fs/vfs.h の VFS_MAX_PATH_DEPTH が正典**で、
+ * 外部プログラムからはそのヘッダを引けないので写しを置く。ずれの検出は
+ * tools/tests/test_hsync_h1.py が両方を読んで突き合わせる ([C4])。
+ *
+ * fs/vfs.c の正規化は上限を越えた要素を**黙って捨てる** (エラーを返さない)。
+ * `/host` を前置すると同期元は指定より 1 要素深くなるので、32 要素ちょうどの
+ * dir を渡すと 33 要素になり、VFS が末尾を落として**指定した親ディレクトリ**を
+ * 列挙してしまう。宛先側も同じ理由で別のパスに化ける。何も同期していないのに
+ * `errors=0` / 終了コード 0 になる経路だったので、越えたら明示エラーにする
+ * (Codex 実装レビュー B2)。 */
+#define HS_MAX_PATH_DEPTH 32
 
 static KernelAPI *api;
 static u8 *file_buf;                 /* 64KB。コピーと読戻しで使う */
@@ -162,6 +177,7 @@ typedef struct {
     int  count;
     int  dropped;      /* MAX_FILES を越えて捨てたエントリ数 */
     int  truncated;    /* NAME_CAP に収まらず取り込めなかったエントリ数 */
+    int  bad_name;     /* '\' を含むので取り込まなかったエントリ数 (B1) */
 } FileList;
 
 /* 列挙時のサイズは**持ち回さない**。同一判定に使うサイズは比較の直前に
@@ -177,6 +193,13 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
         /* 切り詰めた名前でコピーすると**別のファイル**を作って成功と出る
          * (往復 3 の D6)。取り込まずに数えて、呼び手がエラーにする。 */
         fl->truncated++;
+        return;
+    }
+    if (hsp_has_backslash(entry->name)) {
+        /* ホスト側のファイル名に '\' は入らないはずだが、そこを信用しない。
+         * '\' は OS32 では普通の 1 文字なのに HostDrv の先では区切りに化け、
+         * `..\other` のような名前が同期元の外を指す (B1)。組み立てる前に断る。 */
+        fl->bad_name++;
         return;
     }
     i = 0;
@@ -474,10 +497,19 @@ static int is_same_as_protected(const char *dst_path)
     return 0;
 }
 
-/* コピー / mkdir の**直前**に通す 1 か所の判定 */
+/* コピー / mkdir の**直前**に通す 1 か所の判定。
+ *    1 = 保護対象 (書かない。失敗ではない)
+ *    0 = 対象外 (進んでよい)
+ *   -1 = 判定できない (正規化に失敗。書かないが**エラーとして数える**)
+ *
+ * 判定できないものを「保護」に畳むと、`PROTECTED` が「守った」と「読めなかった」の
+ * 両方を指すことになり、何も同期していないのに errors=0 で終わる
+ * (Codex 実装レビュー B2)。語を分けるためにここで 3 値にする。 */
 static int dst_protected(const char *dst_path)
 {
-    if (hsp_path_protected(dst_path)) return 1;
+    int cls = hsp_path_classify(dst_path);
+
+    if (cls != 0) return cls;                  /* 1 = 保護 / -1 = 判定不能 */
     return is_same_as_protected(dst_path);
 }
 
@@ -580,6 +612,29 @@ static void sync_file(const char *src_path, const char *dst_path)
     note_target(dst_path);
 }
 
+/* 宛先をディレクトリとして使えるかを確かめる (Codex 実装レビュー B3)。
+ *   0 = ディレクトリ、または不存在 (進んでよい)
+ *  -1 = 通常ファイル等の型衝突 / stat 不能 (errors に数え済み)
+ *
+ * fs/ext2_dir.c の ext2_find_entry は**種別を問わず**名前があれば EXIST を
+ * 返すので、sys_mkdir の OS32_ERR_EXIST だけでは「同じ名前の通常ファイル」を
+ * 見分けられない。無条件に受理して再帰すると、`/host/usr/empty` が
+ * ディレクトリ・`/usr/empty` が通常ファイルのまま errors=0 / 終了コード 0 で
+ * 終わっていた。通常ファイル側には type_conflict を入れたのに、
+ * ディレクトリ側に無かった。 */
+static int dst_dir_type_ok(const char *dst_path)
+{
+    OS32_Stat ds;
+    int rc = api->sys_stat(dst_path, &ds);
+
+    if (rc == OS32_ERR_NOTFOUND) return 0;
+    if (rc != 0) { fail_file(dst_path, HR_IO, rc); return -1; }
+    if ((ds.st_mode & OS_S_IFMT) == OS_S_IFDIR) return 0;
+    /* 勝手に消さない。型が食い違ったまま「完了」と言わない。 */
+    fail_file(dst_path, HR_TYPE, 0);
+    return -1;
+}
+
 /* ======== ディレクトリ再帰同期 ======== */
 
 static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
@@ -598,6 +653,7 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
     fl.count = 0;
     fl.dropped = 0;
     fl.truncated = 0;
+    fl.bad_name = 0;
     rc = api->sys_ls(src_dir, ls_cb, &fl);
     if (rc != 0) {
         api->kprintf(ATTR_RED, "  FAIL: ls %s (err=%d)\n", src_dir, rc);
@@ -613,6 +669,14 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
         api->kprintf(ATTR_RED,
                      "  FAIL: %s に %d 文字を越える名前が %d 件 (コピーしない)\n",
                      src_dir, NAME_CAP - 1, fl.truncated);
+        g_errors++;
+    }
+    if (fl.bad_name) {
+        /* '\' を含む名前。OS32 側の '..' 検査を素通りしてホスト側で
+         * 同期元の外を指し得る (B1)。組み立てずに数えてエラーにする。 */
+        api->kprintf(ATTR_RED,
+                     "  FAIL: %s に '\\' を含む名前が %d 件 reason=%s\n",
+                     src_dir, fl.bad_name, HR_BAD_NAME);
         g_errors++;
     }
 
@@ -655,6 +719,19 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             continue;
         }
 
+        /* ---- 要素数の検査 (B2) ----
+         * fs/vfs.c は上限を越えた要素を黙って捨てるので、越えたパスは
+         * 「1 つ上のディレクトリ」を指す**別のパス**として成立してしまう。
+         * 内容を開く前に断ち切る。 */
+        if (hsp_depth(src_path) > HS_MAX_PATH_DEPTH ||
+            hsp_depth(dst_path) > HS_MAX_PATH_DEPTH) {
+            api->kprintf(ATTR_RED,
+                         "  FAIL %s reason=%s (VFS の上限 %d 要素)\n",
+                         dst_path, HR_TOO_DEEP, HS_MAX_PATH_DEPTH);
+            g_errors++;
+            continue;
+        }
+
         /* ---- 範囲判定 (内容を開く処理や mkdir より**先**、設計書 §3.1) ----
          * ルート直下の sys は既定で飛ばす (稼働中のシェル・共有ライブラリ)。
          * **全体同期のときだけ**。`hsync usr` の usr/sys は対象に含める。
@@ -670,11 +747,22 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
         /* ---- 保護判定 (同じく内容を開く前) ----
          * /etc/settings.db* は通常配備で作らない・上書きしない (票 S0-D)。
          * ディレクトリ経路も同じ規則で見る (etc/settings.db/ の残骸を作らない)。 */
-        if (dst_protected(dst_path)) {
-            api->kprintf(ATTR_YELLOW, "  PROTECTED %s reason=%s\n",
-                         dst_path, HR_SETTINGS_DB);
-            g_protected++;
-            continue;
+        {
+            int prot = dst_protected(dst_path);
+            if (prot < 0) {
+                /* 判定できないものを PROTECTED と呼ばない (B2)。
+                 * 書かないのは同じだが errors に数えて非ゼロ終了させる。 */
+                api->kprintf(ATTR_RED, "  FAIL %s reason=%s\n",
+                             dst_path, HR_PATH_REJECT);
+                g_errors++;
+                continue;
+            }
+            if (prot > 0) {
+                api->kprintf(ATTR_YELLOW, "  PROTECTED %s reason=%s\n",
+                             dst_path, HR_SETTINGS_DB);
+                g_protected++;
+                continue;
+            }
         }
         if (g_abort) return;
 
@@ -682,10 +770,17 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
             /* ディレクトリ: 作成して再帰。mkdir の失敗を無視すると
              * 中身のコピーが全部落ちて「完了」と出る (往復 2 の 4)。
              * dry-run では mkdir しない — 無い宛先の下は「全部新規」として
-             * 読み比べだけ続ける。 */
-            if (!g_dry_run) {
+             * 読み比べだけ続ける。ただし**型検査だけは dry-run でも行う**
+             * (書き込みはしない、B3)。 */
+            if (g_dry_run) {
+                if (dst_dir_type_ok(dst_path) != 0) continue;
+            } else {
                 int mrc = api->sys_mkdir(dst_path);
-                if (mrc != 0 && mrc != OS32_ERR_EXIST) {
+                if (mrc == OS32_ERR_EXIST) {
+                    /* EXIST は「同名の何か」がある印でしかない。
+                     * ディレクトリであることを確かめてから入る (B3)。 */
+                    if (dst_dir_type_ok(dst_path) != 0) continue;
+                } else if (mrc != 0) {
                     api->kprintf(ATTR_RED, "  FAIL: mkdir %s (err=%d)\n",
                                  dst_path, mrc);
                     g_errors++;
@@ -775,6 +870,15 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     /* 対象パスを**正規化してから** /host 配下と宛先を決める。
      * '..' による同期元脱出、切り詰め、自己コピーをここで断る。 */
     if (subdir) {
+        if (hsp_has_backslash(subdir)) {
+            /* '\' は OS32 の区切りではないので `..\other` が 1 要素として
+             * '..' 検査を素通りするが、HostDrv の先では区切りに化けて
+             * 同期元の外を指す (B1)。専用の文言で断る。 */
+            api->kprintf(ATTR_RED,
+                         "Error: dir に '\\' は使えない (reason=%s): %s\n",
+                         HR_BAD_NAME, subdir);
+            return 1;
+        }
         if (!hsp_normalize(subdir, norm, (int)sizeof(norm))) {
             api->kprintf(ATTR_RED,
                          "Error: dir が不正 (長すぎる / root の外へ出る): %s\n",
@@ -828,15 +932,37 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
             api->mem_free(file_buf);
             return 1;
         }
-        if (dst_protected(dst) || g_abort) {
+        /* **`/host` を前置したあとの**要素数で上限を見る (B2)。
+         * hsp_normalize は入力側にしか上限を掛けないので、32 要素ちょうどの
+         * dir はここまで通ってくる。宛先側も同じ理由で見る。 */
+        if (hsp_depth(src) > HS_MAX_PATH_DEPTH ||
+            hsp_depth(dst) > HS_MAX_PATH_DEPTH) {
+            api->kprintf(ATTR_RED,
+                         "Error: dir が深すぎる reason=%s (VFS の上限 %d 要素、"
+                         "/host を足すと %d 要素): %s\n",
+                         HR_TOO_DEEP, HS_MAX_PATH_DEPTH, hsp_depth(src), norm);
+            api->mem_free(file_buf);
+            return 1;
+        }
+        {
+            int prot = dst_protected(dst);
             if (g_abort) {
                 api->mem_free(file_buf);
                 return 1;
             }
-            api->kprintf(ATTR_YELLOW, "  PROTECTED %s reason=%s\n",
-                         dst, HR_SETTINGS_DB);
-            api->mem_free(file_buf);
-            return 0;                 /* 除外は失敗ではない */
+            if (prot < 0) {
+                /* 判定できないものを PROTECTED と呼ばない (B2) */
+                api->kprintf(ATTR_RED, "Error: %s reason=%s\n",
+                             dst, HR_PATH_REJECT);
+                api->mem_free(file_buf);
+                return 1;
+            }
+            if (prot > 0) {
+                api->kprintf(ATTR_YELLOW, "  PROTECTED %s reason=%s\n",
+                             dst, HR_SETTINGS_DB);
+                api->mem_free(file_buf);
+                return 0;             /* 除外は失敗ではない */
+            }
         }
         api->kprintf(ATTR_CYAN, "hsync: %s -> %s\n", src, dst);
     } else {

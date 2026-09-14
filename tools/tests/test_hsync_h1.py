@@ -22,6 +22,7 @@ hsync.c / lib/crc32.c / fs/hostdrvfs.c が -Werror で通ることを確かめ�
 """
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,34 @@ TARGET_KERNEL = TARGET_COMMON + [
     "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 
 
+def check_depth_constant():
+    """[C4]: hsync.c の HS_MAX_PATH_DEPTH は fs/vfs.h の VFS_MAX_PATH_DEPTH の写し。
+
+    外部プログラムからは fs/vfs.h を引けないので写しを置くしかない。fs/vfs.c は
+    上限を越えた要素を**黙って捨てる**ので、写しが本体より大きいと hsync は
+    「化けたパス」を通してしまう (Codex 実装レビュー B2)。ここでずれを止める。
+    """
+    def grab(path, name):
+        text = (ROOT / path).read_text()
+        m = re.search(r"^#define\s+%s\s+(\d+)" % name, text, re.M)
+        if not m:
+            raise SystemExit("%s に %s が見つからない" % (path, name))
+        return int(m.group(1))
+
+    vfs = grab("fs/vfs.h", "VFS_MAX_PATH_DEPTH")
+    hs = grab("userland/system/hsync.c", "HS_MAX_PATH_DEPTH")
+    hsp = grab("userland/system/hsync_protect.inc", "HSP_MAX_DEPTH")
+    if hs != vfs:
+        raise SystemExit(
+            "HS_MAX_PATH_DEPTH=%d が fs/vfs.h の VFS_MAX_PATH_DEPTH=%d と違う"
+            % (hs, vfs))
+    if hsp > vfs:
+        raise SystemExit(
+            "HSP_MAX_DEPTH=%d が VFS_MAX_PATH_DEPTH=%d より大きい" % (hsp, vfs))
+    print("CONST COUPLING PASS (VFS_MAX_PATH_DEPTH=%d == HS_MAX_PATH_DEPTH, "
+          "HSP_MAX_DEPTH=%d)" % (vfs, hsp), flush=True)
+
+
 def build_host(tmp, stub):
     exe = tmp / ("hsync-h1-stub" if stub else "hsync-h1")
     cmd = ["gcc", *HOST_FLAGS, *HOST_INC]
@@ -92,6 +121,8 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="os32-hsync-h1-") as tmp:
         tmp = pathlib.Path(tmp)
         failed = 0
+
+        check_depth_constant()
 
         for stub in (False, True):
             exe = build_host(tmp, stub)

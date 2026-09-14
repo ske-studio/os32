@@ -1170,6 +1170,307 @@ static void case_a13(void)
 #endif /* !HSYNC_CRC_STUB */
 
 /* ========================================================================= */
+/*  B1 / B2 / B3 — Codex 実装レビューの blocker 3 件                          */
+/* ========================================================================= */
+
+#ifndef HSYNC_CRC_STUB
+
+/* ---- B1: '\' を含む要素は '..' 脱出検査を素通りする ---------------------
+ * OS32 の区切りは '/' だけなので `..\os32-other` は seg_len 14 の**通常の
+ * 1 要素**として受理される。HostDrv の session_set_path は '/' を '\' に
+ * 直したうえで他の文字をそのまま通すので、ホスト側では区切りに化けて
+ * `C:\os32\..\os32-other` になり、NP21/W の境界無し前方一致を通過する。
+ * hsync 側で '\' を含むパスを断つ。argv の dir と**列挙で得た名前の両方**。 */
+static void case_b1(void)
+{
+    int rc;
+
+    printf("== B1: '\\' を含むパスを断つ ==\n");
+
+    /* argv の dir */
+    setup_tree();
+    rc = run1("..\\os32-other");
+    check(rc != 0, "'..\\os32-other' は非ゼロ終了で断る");
+    check(log_has("reason=bad_name"), "reason=bad_name を出す");
+    check(fk_write_calls == 0 && fk_mkdir_calls == 0, "何も書かない");
+
+    setup_tree();
+    rc = run1("bin\\..\\..\\other");
+    check(rc != 0 && log_has("reason=bad_name"),
+          "要素の途中の '\\' も断る");
+
+    setup_tree();
+    rc = run1("/host/..\\os32-other");
+    check(rc != 0, "'/host/..\\os32-other' も断る (自己コピー検査より前)");
+
+    /* 列挙で得た名前 — ホスト側にこんな名前は無いはずだが信用しない */
+    setup_tree();
+    {
+        u8 *a = make_blob(16, 3);
+        fs_add_file("/host/bin/..\\os32-other", a, 16);
+        free(a);
+    }
+    rc = run1("bin");
+    check(rc != 0, "列挙名に '\\' があれば非ゼロ終了");
+    check(log_has("reason=bad_name"), "列挙側も reason=bad_name");
+    check(fs_find("/bin/..\\os32-other") < 0, "その名前を作らない");
+    check(fs_find("/bin/b.bin") >= 0, "他の正常な名前は同期する");
+
+    /* 正常系が巻き込まれていないこと */
+    setup_tree();
+    rc = run1("bin");
+    check(rc == 0 && fs_find("/bin/b.bin") >= 0,
+          "'\\' が無ければ従来どおり");
+}
+
+/* ---- B2: '/host' の 1 要素分を上限に数えていない ------------------------
+ * hsp_normalize の上限 (32) は入力側にしか掛からない。32 要素の dir は
+ * 通るが `/host` を足すと 33 要素になり、fs/vfs.c が**黙って末尾を捨てて**
+ * 指定の親ディレクトリを列挙する。宛先側も化けるので、保護用の正規化失敗が
+ * PROTECTED に畳まれて「何も同期していないのに errors=0 / 終了コード 0」に
+ * なっていた。 */
+static void build_deep(char *out, int segs, const char *leaf)
+{
+    int i;
+    out[0] = '\0';
+    for (i = 0; i < segs; i++) strcat(out, leaf);
+}
+
+static void case_b2(void)
+{
+    char dir[512];
+    int rc;
+
+    printf("== B2: '/host' を足したあとの要素数で上限を見る ==\n");
+
+    /* 上限ちょうど: dir 30 要素 -> src ルートは /host 込み 31 要素、
+     * その中のファイルが 32 要素 (= HS_MAX_PATH_DEPTH)。同期できること。 */
+    fs_reset();
+    fs_add_dir("/host");
+    {
+        char cur[512];
+        int i;
+        strcpy(cur, "/host");
+        for (i = 0; i < 30; i++) { strcat(cur, "/a"); fs_add_dir(cur); }
+        {
+            u8 *a = make_blob(16, 2);
+            strcat(cur, "/leaf.bin");        /* /host + 32 要素 */
+            fs_add_file(cur, a, 16);
+            free(a);
+        }
+    }
+    build_deep(dir, 30, "/a");
+    rc = run1(dir);
+    check(!log_has("reason=path_too_deep"),
+          "32 要素ちょうどは深さで断らない");
+    check(rc == 0 && log_has("copied=1"), "上限ちょうどは同期できる");
+
+    /* その 1 つ先: dir 31 要素 -> 中のファイルが 33 要素になる */
+    fs_reset();
+    fs_add_dir("/host");
+    {
+        char cur[512];
+        int i;
+        strcpy(cur, "/host");
+        for (i = 0; i < 31; i++) { strcat(cur, "/a"); fs_add_dir(cur); }
+        {
+            u8 *a = make_blob(16, 2);
+            strcat(cur, "/leaf.bin");        /* /host + 33 要素 */
+            fs_add_file(cur, a, 16);
+            free(a);
+        }
+    }
+    build_deep(dir, 31, "/a");
+    rc = run1(dir);
+    check(rc != 0 && log_has("reason=path_too_deep"),
+          "1 要素越えた瞬間に path_too_deep (off-by-one の境界)");
+    check(fk_write_calls == 0, "越えた先へは書かない");
+
+    /* 32 要素 -> /host を足して 33。断る */
+    setup_tree();
+    build_deep(dir, 32, "/a");
+    rc = run1(dir);
+    check(rc != 0, "32 要素 (+/host = 33) は非ゼロ終了");
+    check(log_has("reason=path_too_deep"), "reason=path_too_deep を出す");
+    check(!log_has("PROTECTED"), "PROTECTED とは呼ばない");
+    check(fk_write_calls == 0 && fk_mkdir_calls == 0, "何も書かない");
+
+    /* 40 要素 */
+    setup_tree();
+    build_deep(dir, 40, "/a");
+    rc = run1(dir);
+    check(rc != 0, "40 要素も非ゼロ終了");
+
+    /* 再帰の途中で上限を越える場合も errors に数える。
+     * 再帰そのものは MAX_DEPTH (8) で先に止まるので、上限へ届くのは
+     * 「深い dir を明示してから 1〜2 段もぐる」経路だけ。30 要素の dir を
+     * 起点にすると、その中の 1 段目 (32 要素) は通り、2 段目 (33 要素) で
+     * 越える。 */
+    fs_reset();
+    fs_add_dir("/host");
+    {
+        char cur[512];
+        int i;
+        strcpy(cur, "/host");
+        for (i = 0; i < 30; i++) { strcat(cur, "/a"); fs_add_dir(cur); }
+        strcat(cur, "/b");                   /* /host + 31 要素 */
+        fs_add_dir(cur);
+        strcat(cur, "/c");                   /* /host + 32 要素 */
+        fs_add_dir(cur);
+        {
+            u8 *a = make_blob(16, 2);
+            strcat(cur, "/d.bin");           /* /host + 33 要素 -> 越える */
+            fs_add_file(cur, a, 16);
+            free(a);
+        }
+    }
+    build_deep(dir, 30, "/a");
+    rc = run1(dir);
+    check(log_has("reason=path_too_deep"),
+          "再帰の途中で上限を越えても path_too_deep で数える");
+    check(rc != 0, "その実行は非ゼロ終了");
+    check(fk_write_calls == 0, "越えた先へは書かない");
+
+    /* 判定できないものを PROTECTED と呼ばない (語の分離)。
+     * 経路としては深さ検査 / '\' 検査が先に効くので、分類そのものも直に
+     * 呼んで 3 値を固定する — ここが 1 に畳まれると PROTECTED が
+     * 「守った」と「読めなかった」の両方を指すことになる。 */
+    setup_tree();
+    rc = run1("bin\\x");
+    check(rc != 0 && !log_has("PROTECTED"),
+          "判定できないものを PROTECTED と呼ばない");
+    {
+        char deep[256];
+        build_deep(deep, 33, "/a");
+        check(hsp_path_classify(deep) == -1,
+              "33 要素は -1 (判定できない) であって 1 ではない");
+        check(hsp_path_classify("/bin/a\\b") == -1,
+              "'\\' 混じりも -1");
+        check(hsp_path_classify("/etc/settings.db") == 1, "保護は 1");
+        check(hsp_path_classify("/bin/sh.bin") == 0, "対象外は 0");
+    }
+
+    /* PROTECTED は保護に当たったときだけ */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/etc");
+    fs_add_dir("/etc");
+    {
+        u8 *a = make_blob(16, 1);
+        fs_add_file("/host/etc/settings.db", a, 16);
+        free(a);
+        a = make_blob(16, 2);
+        fs_add_file("/etc/settings.db", a, 16);
+        free(a);
+    }
+    rc = run1("etc");
+    check(rc == 0 && log_has("PROTECTED /etc/settings.db reason=settings_db"),
+          "本当の保護は PROTECTED のまま / 終了コード 0");
+}
+
+/* ---- B3: ディレクトリ経路の型衝突 --------------------------------------
+ * ext2_find_entry は種別を問わず EXIST を返すので、mkdir の EXIST を無条件に
+ * 受理して再帰すると、コピー元がディレクトリ・宛先が通常ファイルのまま
+ * errors=0 / 終了コード 0 で終わる。 */
+static void case_b3(void)
+{
+    int rc;
+    int n;
+    u8 keep[8];
+
+    printf("== B3: 宛先が通常ファイルなのにコピー元がディレクトリ ==\n");
+
+    /* 空のディレクトリ (コピー元に中身が無い = 以前は何も起きずに完了) */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/empty");
+    fs_add_dir("/usr");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/usr/empty", a, 16);          /* 通常ファイル */
+        free(a);
+    }
+    n = fs_find("/usr/empty");
+    memcpy(keep, fs_nodes[n].data, 8);
+    rc = run1("usr");
+    check(rc != 0, "非ゼロ終了");
+    check(log_has("FAIL /usr/empty reason=type_conflict"),
+          "reason=type_conflict を出す");
+    check(log_has("errors=1"), "errors に数える");
+    n = fs_find("/usr/empty");
+    check(n >= 0 && fs_nodes[n].size == 16 &&
+              memcmp(fs_nodes[n].data, keep, 8) == 0,
+          "宛先の通常ファイルを消しも切り詰めもしない");
+
+    /* 中身のあるディレクトリでも同じ (中へ入らない) */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/d");
+    fs_add_dir("/usr");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/host/usr/d/inner.bin", a, 16);
+        free(a);
+        a = make_blob(16, 6);
+        fs_add_file("/usr/d", a, 16);
+        free(a);
+    }
+    rc = run1("usr");
+    check(rc != 0 && log_has("reason=type_conflict"), "中身があっても衝突");
+    check(fs_find("/usr/d/inner.bin") < 0, "衝突した先へ書き込まない");
+
+    /* dry-run でも同じ衝突を報告する (mkdir は呼ばない) */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/empty");
+    fs_add_dir("/usr");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/usr/empty", a, 16);
+        free(a);
+    }
+    rc = run2("-n", "usr");
+    check(rc != 0, "dry-run でも非ゼロ終了");
+    check(log_has("reason=type_conflict"), "dry-run でも type_conflict");
+    check(fk_mkdir_calls == 0 && fk_write_calls == 0,
+          "dry-run は書き込み系を呼ばない");
+
+    /* 宛先がディレクトリなら従来どおり通る */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/d");
+    fs_add_dir("/usr");
+    fs_add_dir("/usr/d");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/host/usr/d/inner.bin", a, 16);
+        free(a);
+    }
+    rc = run1("usr");
+    check(rc == 0 && fs_find("/usr/d/inner.bin") >= 0,
+          "宛先がディレクトリなら同期する (EXIST を通す)");
+
+    /* 宛先が無ければ mkdir して進む */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/usr");
+    fs_add_dir("/host/usr/d");
+    {
+        u8 *a = make_blob(16, 5);
+        fs_add_file("/host/usr/d/inner.bin", a, 16);
+        free(a);
+    }
+    rc = run1("usr");
+    check(rc == 0 && fs_find("/usr/d/inner.bin") >= 0,
+          "宛先が無ければ作って進む");
+}
+#endif /* !HSYNC_CRC_STUB */
+
+/* ========================================================================= */
 
 int main(void)
 {
@@ -1191,6 +1492,9 @@ int main(void)
     case_a10();
     case_a12();
     case_a13();
+    case_b1();
+    case_b2();
+    case_b3();
 #endif
 
     printf("\n%d checks, %d failures\n", checks, failures);

@@ -17,6 +17,14 @@
 
 #include "hsync_protect.inc"
 
+/* 真偽だけを見る包み。実体は .inc の 3 値 hsp_path_classify で、
+ * 判定できないもの (正規化に失敗) は保護側に倒す (fail-closed)。
+ * 本体 (hsync.c) は「保護」と「判定できない」を数え分けるので 3 値のまま使う。 */
+static int hsp_path_protected(const char *path)
+{
+    return hsp_path_classify(path) != 0;
+}
+
 static int failures;
 
 static void check(int cond, const char *name)
@@ -271,6 +279,57 @@ int main(void)
         int n = 0;
         while (hsp_protected_names[n]) n++;
         check(n == 11, "保護対象は 11 名 (本体 2 + wal/shm 2 + リカバリ 7)");
+    }
+
+    printf("== B1 '\\' を含むパスは正規化の入口で断る ==\n");
+    check(hsp_has_backslash("..\\os32-other"), "'..\\os32-other' を見つける");
+    check(hsp_has_backslash("bin\\x"), "要素の途中の '\\'");
+    check(hsp_has_backslash("\\"), "'\\' 単独");
+    check(!hsp_has_backslash("bin/x"), "'/' だけなら通す");
+    check(!hsp_has_backslash(""), "空文字");
+    check(hsp_normalize("..\\os32-other", joined, (int)sizeof(joined)) == 0,
+          "'..\\os32-other' は正規化できない ('..' 検査を素通りさせない)");
+    check(hsp_normalize("/bin/a\\b", joined, (int)sizeof(joined)) == 0,
+          "要素名の '\\' も断る");
+    check(hsp_path_classify("/bin/a\\b") == -1,
+          "'\\' 混じりは「判定できない」(-1) であって保護 (1) ではない");
+    check(hsp_path_protected("/bin/a\\b"),
+          "真偽で見れば保護側に倒れる (fail-closed)");
+
+    printf("== B2 要素数と 3 値分類 ==\n");
+    check(hsp_depth("/") == 0, "'/' は 0 要素");
+    check(hsp_depth("") == 0, "空文字は 0 要素");
+    check(hsp_depth("/bin") == 1, "'/bin' は 1 要素");
+    check(hsp_depth("/host/bin") == 2, "'/host/bin' は 2 要素");
+    check(hsp_depth("/host/usr/sys") == 3, "'/host/usr/sys' は 3 要素");
+    check(hsp_path_classify("/etc/settings.db") == 1, "保護は 1");
+    check(hsp_path_classify("/bin/sh.bin") == 0, "対象外は 0");
+    {
+        /* 正規化できない長さ。保護 (1) と混ぜず -1 で返すこと */
+        char longp[HSP_MAX_PATH * 2];
+        int i;
+        for (i = 0; i < (int)sizeof(longp) - 1; i++)
+            longp[i] = (i % 8 == 0) ? '/' : 'a';
+        longp[sizeof(longp) - 1] = '\0';
+        check(hsp_path_classify(longp) == -1,
+              "正規化できない長さは -1 (PROTECTED と数えない)");
+    }
+    {
+        /* HSP_MAX_DEPTH ちょうど (32 要素) は正規化を通る。
+         * `/host` を足した 33 要素を止めるのは呼び手 (hsync.c の
+         * HS_MAX_PATH_DEPTH) の仕事で、ここではないことを固定する。 */
+        char deep[HSP_MAX_PATH];
+        char out[HSP_MAX_PATH];
+        int i;
+        deep[0] = '\0';
+        for (i = 0; i < HSP_MAX_DEPTH; i++) strcat(deep, "/a");
+        check(hsp_normalize(deep, out, (int)sizeof(out)) == 1,
+              "32 要素は正規化を通る");
+        check(hsp_depth(out) == HSP_MAX_DEPTH, "32 要素と数える");
+        strcpy(joined, "/host");
+        strcat(joined, out);
+        check(hsp_depth(joined) == HSP_MAX_DEPTH + 1,
+              "'/host' を足すと 33 要素 (呼び手が止める)");
     }
 
     printf("%s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
