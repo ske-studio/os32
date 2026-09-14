@@ -83,3 +83,12 @@ N4a で shlib が nfunc 111 になった (host_* 105〜110) ので、N4b のア�
 3. 退行の切り分けのため、必要なら配備前の NHD バックアップ `os32.nhd.bak-n4-20260914-223752` (LGY-98 既定カーネル + 旧 shlib/apps) に戻して A/B する。
 
 **現状のゲスト**: GUI からアプリを起動できない状態。CUI (`os32gui` を抜けた状態) と CUI コマンド (`wget`/`lpr`/`hclip`/`hdate` など) は正常。
+
+### §9 の続き — 切り分け 1 の結果 (2026-09-14)
+- **`HOST_STREAM_BUF` 16KB → 4KB で `data_pages` は 8 → 5 に戻ったが、退行は直らなかった** (GUI からの起動は依然 CPL=3 フォールトで即死、`fault_kill_count` が起動ごとに +1)。→ **shlib のサイズ増加は原因ではない** (仮説は否定)。
+- **`hsync` はサイズが同じファイルをスキップする** (ユーザー指摘で判明)。shlib は `.bss` が縮んでもファイルサイズが変わらない (113,752 B のまま) ため、`hsync sys` が `0 copied, 6 skipped` で**新しい shlib をゲストへ配れていなかった**。ゲスト側を `rm /sys/lib/libos32gui.shlib` してから `hsync sys` で `1 copied` になり反映。**同サイズの差し替えは hsync では届かない**という一般的な罠 (→ CLAUDE.md の gotcha に追記)。
+- CPL=3 の #PF はカーネルが**デバッグシリアル** (`sputs`) に `[ring3] #PF (CPL=3) addr=… EIP=… [shlib band, READ/WRITE]` を出す (`kernel/isr_handlers.c:325〜`) が、現在その出力は捕捉できていない (`/api/serial` は無く、`os32_serial_log.txt` も生成されていない)。**次はこれを捕まえるのが最短**。
+
+### 次の手 (どちらか)
+- **(A) フォールト番地を捕らえる**: NP21/W の ini でデバッグシリアルをファイルへ出す設定にして ([D2] ini 変更)、起動失敗時の `addr` / `EIP` / `[shlib band]` の有無を読む。原因が一発で分かる可能性が高い。
+- **(B) A/B で切り分ける**: 配備前バックアップ `os32.nhd.bak-n4-20260914-223752` (LGY-98 既定カーネル + N4 前の shlib/apps) に戻して GUI 起動を試す。起動できれば N4 が原因と確定、できなければ退行は N4 より前 (N1〜N3 期) に入っていたことになる。現 NHD は事前に退避する。

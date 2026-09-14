@@ -156,6 +156,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
 - `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
+- **`hsync` はサイズが同じファイルをスキップする** — `.bss` だけ変わった shlib のように**中身が違ってもサイズが同じ差し替えは届かない** (2026-09-14 に libos32gui.shlib で踏んだ)。確実に配るにはゲスト側で先に `rm` するか `os32-cycle deploy` を使う。
 - `hsync` は HostDrv (`C:\\os32`) の内容で NHD を上書きする。NHD 配備の後に `hsync` するときは**先に `make deploy`** で HostDrv を最新にする (古いカーネル / gshell に戻った前例)。 → §4-33
 - Device windows: never decide one from the RAM **ceiling** (`sys_get_mem_kb`) — since K6-RAM that is the
   top-of-RAM address, and a 15MB machine tops out at 17MB. Ask the physical map for that range
