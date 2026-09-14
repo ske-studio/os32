@@ -70,3 +70,21 @@ A20 (同サイズ shlib 差し替え → ディスク検証 → 再起動 → GU
 [C1] C89 (`//` 禁止、宣言はブロック先頭)、[C2] カーネル側は kstr*、[C4] 定数 3 層。
 `sdk/kapi.json` は**この票では**触らない (変更は H3 で行う)。共有ファイル (`build/sdk.mk` 等) は行を足すだけ。
 コーダーは git commit/push・配備・エミュレータ操作・`*.ini`/`.env`・`make all`/`check`/`deploy*` を行わない。
+
+## 7. 実装レビュー (Codex、2026-09-15、往復 1)
+
+対象 `e43fcb8`。判定 **Request changes**、blocker 3 件。**3 件とも PM が独立に到達可能性を確認済み**。
+
+| # | 指摘 | 確認した根拠 |
+|---|---|---|
+| B1 | バックスラッシュが `..` 脱出検査を通り抜ける | `hsp_normalize` は `/` だけを区切りとするので `..\other` は通常の 1 要素。`session_set_path` (`fs/hostdrvfs.c:150`) は `/`→`\` 変換のみで他は素通し。NP21/W の `hostdrvNT_getHostPath` (`hostdrvnt.c:368-390`) は `PathCanonicalizeW` の後 `wcsncmp` の**境界無し前方一致**なので `C:\os32-other` が `C:\os32` を前方一致して通る |
+| B2 | `/host` の 1 要素分を深さ上限に数えていない | `HSP_MAX_DEPTH` = `VFS_MAX_PATH_DEPTH` = 32。`fs/vfs.c:97-106` は上限超過の要素を**黙って捨てる**。32 要素の dir → 同期元 33 要素 → 親を列挙し、未同期のまま `errors=0` / 終了コード 0 |
+| B3 | ディレクトリ経路で既存宛先の型衝突を成功扱いにする | `ext2_find_entry` (`fs/ext2_dir.c:251`) は**型を問わず** `EXT2_ERR_EXIST`。`hsync.c:681` が無条件に受理して再帰。通常ファイル側の `type_conflict` 検査がディレクトリ側に無い |
+
+非 blocker: ホスト試験の `u32` が LP64 で 64bit になる (`-m32` 無し)。CRC の値照合には使えるが
+32bit の加算回り込みの根拠にはならない。
+
+**別課題として切り出し**: B1 の根本原因の半分は NP21/W 側にある。`hostdrvNT_getHostPath` の
+ルート検査が区切り境界を見ない前方一致なので、`C:\os32` をルートにすると `C:\os32-other` 以下が
+**hsync 以外の経路でも**見える。OS32 側の修正 (`\` を含む要素の拒否) とは独立に、
+エミュレータ側で `wcsncmp` の後に区切り文字の確認を足すべき。本票では扱わない。
