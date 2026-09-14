@@ -162,7 +162,9 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ---
 
-### v1.3 — 「ターミナル統合とCUI抽象化」
+### v1.3 — 「ターミナル統合とCUI抽象化」 ✅ 完了 (2026-09-14)
+
+全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。持ち越し: S6-P (ext2 の小書き込み性能、[tasks/settings/TASK_S6.md](tasks/settings/TASK_S6.md))、F3a〜c 等の保留 5 件 (ユーザーの再考待ち、[tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) §3)。
 
 着手計画: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)、監査と決裁: [AUDIT_2026-09-10](tasks/gui/v13/AUDIT_2026-09-10.md)。
 2026-09-10 決裁: **GUI アプリ 4 本の同時実行 (契約 T2a) を v1.3 の最初に置く** ([K5](tasks/gui/v13/TASK_K5_multiapp.md))。

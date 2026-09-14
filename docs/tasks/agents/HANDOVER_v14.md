@@ -9,7 +9,7 @@
 |---|---|---|
 | v1.3 | 全項目受入済み、main にマージ済み (`fac0d89`)。残件の小物 4 件 (§3) は Claude Code が処理中 | `docs/ROADMAP.md` v1.3、`docs/tasks/gui/v13/PLAN.md` |
 | Host Services N0 (設計) | 完了 = `docs/tasks/network/TASK_N0.md` **第 5 版** (Codex 4 往復、最後は 4 件残したまま決裁 b で N1 へ。残った疑いは N1 のホスト TDD が踏む) | TASK_N0 §7 |
-| N1 (ワイヤ v2 / link.c / KAPI v51 / Agent v2) | **着地済み** (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。**テスターで `make clean` → `make all` (71s) → `make check` (53s) → `make external` (7s) すべて exit 0** (2026-09-14、session `n1-build` / `n1-build2`、`-Inet` の修正 `f5dca53` 後)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
+| N1 (ワイヤ v2 / link.c / KAPI v51 / Agent v2) | **着地済み、ゲスト受入は一部合格** (host_test 26/26、L3 OK。kselftest 86/1・L0〜L2 の計数・再送計数・WINDOW 二重 = F1〜F5、TASK_N1 §3。Codex 実装レビューと合わせて修正票へ) (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。**テスターで `make clean` → `make all` (71s) → `make check` (53s) → `make external` (7s) すべて exit 0** (2026-09-14、session `n1-build` / `n1-build2`、`-Inet` の修正 `f5dca53` 後)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
 | v1.4 の範囲 | ROADMAP §1 v1.4 = N1〜N4、R2 (PEGC / Cirrus 8bpp)、About、GUI エディタ。アプリ群は v2.0 以降へ | `docs/ROADMAP.md` (`23a28be`) |
 
 ## 2. 次にやること (順)
@@ -26,10 +26,10 @@
 
 | 件 | 内容 | 状態 |
 |---|---|---|
-| タスクバー経路 | `button_up_on_taskbar_*` をパネル非依存に書き直し、T5b 撤去で消えた 4 本の被覆を戻す (gshell ホスト試験) | コーダー実行中 |
-| `stat` | `userland/cmds/stat.c` (st_dev の decode、st_ino) | コーダー実行中 |
-| S6 `tar` | microtar を vendor、`tar c|x|t` | コーダー実行中 |
-| 試験の棚卸し | `docs/tasks/TEST_INVENTORY_2026-09-14.md` (再考の材料、実装ではない) | 分析エージェント実行中 |
+| タスクバー経路 | 消えた被覆の反対側 4 本を追加 (製品コード変更なし、gshell 100 passed) | **着地 `1b56db3`** |
+| `stat` | `userland/cmds/stat.c` (st_dev の decode、st_ino)。ゲストで `/` = hd0 / ino=2、settings.db と .bak が別 inode を確認 | **着地 `996d21e`** |
+| S6 `tar` | microtar を vendor、`tar c|x|t`。HostDrv で往復 + Python tarfile 相互読み OK。**ext2 上は 2KB でも 15 秒超 → 別票 S6-P (ext2 の小書き込み性能)** | **着地 `2ad4203`** |
+| 試験の棚卸し | `docs/tasks/TEST_INVENTORY_2026-09-14.md` (76 行、推奨 R1〜R12、採否は未決) | **着地 `78e9f44`** |
 
 小物ではないので**保留** (ユーザーの再考待ち): F3a〜c (SQLite VFS の正直化 / lock 表 / open フラグ)、F2c、FEP_BOUNDARY、MEMORY_RAM_INTEGRATION、DEVICE_RESERVATION (`docs/tasks/settings/S0_PLAN_2026-09-13.md` の後回し欄)。
 

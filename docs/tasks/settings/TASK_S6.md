@@ -95,3 +95,10 @@ lz4 c /hd0/backup/etc.tar /hd0/backup/etc.tar.lz4
 - 所有者・パーミッション・時刻の復元。ヘッダには書くが展開では使わない。
 - シンボリックリンク・ハードリンク・デバイスファイル (OS32 に無い)。
 - 追記 (`tar r`) と個別取り出し (`tar x ARCHIVE MEMBER`)。
+
+## PM 受入記録 (2026-09-14)
+
+- 着地 `2ad4203`。`make check` (`test_tar_cmd.py` 8 件を含む) exit 0 (session `smalls-check`)。
+- ゲスト (HDD ブート、HostDrv 経由で `hsync`): `tar c /host/e3.tar /etc` → 9 エントリ (ディレクトリ 1 + ファイル 8)、`tar x -C /tmp/y` で全ファイルがサイズどおり復元、ホストの Python `tarfile` で同じ 9 エントリを読めた。`tar t /nope.tar` はエラー。**機能は合格**。
+- **未解決 (別票 S6-P)**: ext2 上 (`/tmp` = hd0) の `tar c` は 15B のファイル 1 本 (書庫 2KB) でも `/api/cmd` の 15 秒タイムアウトを超える。`/api/status` の EIP サンプリングは `ide_write_sector_chs` / `ide_read_sector_chs` に集中 (`kernel.map` で解決)。HostDrv では 0.3 秒。書庫自体は正しく作られる (`tar t /tmp/e6.tar` で確認)。tar の書き方 (512B 単位の書き込み + エントリごとの後方 `lseek`) が ext2 の書き込み経路 (`fs/ext2_file.c` の `ext2_write_stream` / `ext2_write`) で 1 回ごとに大量のセクタ I/O を起こしている疑い。**ext2 の小書き込みの性能は tar 固有ではない**ので、S6 の完了条件から外し、別票で ext2 側を見る (小物ではない)。
+- `lz4` との組合せ、FatFs (FDD) 上の往復は未実施 (S6-P の後)。
