@@ -108,3 +108,24 @@ includes に `kapi_host.h`)、`build/sdk.mk` (`check-host-agent` / `check-net-li
 | GUI 配下で `gui_busy` と同時の `host_test` | 未実施 (F1〜F4 の修正後に) | — |
 
 F1〜F5 は Codex の実装レビュー所見と合わせて N1 のコーダーへ戻す (修正票 = 本票 §4)。
+
+## 4. 修正 (N1-fix、実装レビュー + ゲスト受入の結果)
+
+レビュアー: Fable 5.1 サブエージェント (Codex が 2 回不安定 → ROLES §5 の代替、2026-09-14)。判定 Request changes、blocker 4 件。commit 範囲 `af48990..f5dca53` 対象。
+
+### blocker
+- **F1** (kselftest 86/1): `kapi/kapi_db.c:1149` `if (KAPI_SLOT_COUNT != 208)` と `:1151` `if (KAPI_SLOT_DB_ERROR_CODE != KAPI_SLOT_COUNT - 1)` が v51 で崩れる (`KAPI_SLOT_COUNT` = 213、`DB_ERROR_CODE` = 207)。→ `!= 213`、`DB_ERROR_CODE != 207` (または `KAPI_SLOT_HOST_CLOSE == KAPI_SLOT_COUNT-1`) に。コメントの「201..207 / 末尾」も更新。ネットワーク無関係に全ビルドで踏む。
+- **F2** (`check-net-l0` rt_ok=16): `net/link.c:408` `link_rt_ok++` が L0〜L3 を通じて累積し `net_l0_test.py:71` の `== 10` を恒常 FAIL。→ L0 専用カウンタを別に持つか、各自己試験入口で `link_rt_ok`/`link_rt_fail` を打ち直す。`n1_tdd.md §4` の「v1 の往復数と同義」は誤り。
+- **F4** (`link_retransmits=32`、再送は pcap 上ゼロ): `net/link.c:583`(RELEASE)/`:591`(REQUEST)/`:597`(WDATA) の RTO 判定に、ハンドシェイクにある `!due` ガードが無い。さらに `host_open:897`/`host_write:1009`/`link_free_handle:1022` が `last_tx_tick`/`rel_tick = tick_count - LINK_RTO_TICKS` で期限を前倒し。timers→tx の順なので open/close 直後の最初の tick で未送信フレームを再送計上 (open 16 + close 16 = 32、厳密一致)。契約「RTO は NIC 受理 tick から」に反し retry 予算を 1 消費。→ 3 か所に `!e->req_due`/`!e->w_due`/`!e->rel_due` を追加し、前倒しの `- LINK_RTO_TICKS` を外す (due=1 が即送信を担保)。
+- **N2** (ホスト TDD がカウンタ契約を検査せず F1/F2/F4 を素通り): (a) 無ドロップ往復で `link_retransmits==0` を assert、(b) L0→L1 連続で `link_rt_ok` の区間性を assert、(c) `db_v50_selftest()` を `make check` の対象に含める (または `check-kapi-version` に slot 数の整合を追加)。
+
+### 要実機再測 (F4 修正後)
+- **F3** (`l1_recv=131/200`、`l2_read=66114`): タイムアウトではなく**転送中の resync による中断**が症状の正体 (`link_wait_read_all` が STALE で打ち切る)。火種候補は F4 の retry 予算侵食と DATA overflow の回復遅延。ホスト TDD は贋 NIC が決定的なので再現しない。→ F4 修正後にゲストで `link_resyncs`/`link_rt_fail`/`link_tombstones`/`link_l2_overflow` を kernel.map 番地で読み、(a) resync か (b) overflow 起因かを切り分けて L1/L2 を再測。
+
+### non-blocker
+- **N1'** DATA overflow で in-order フレームを無 ACK 破棄 (`net/link.c:498`)。ack_seq が進まず Agent の再送が WINDOW 8 回停滞まで遅れる。→ credit をより保守的にするか overflow 時に WINDOW を credit 減で即再送。ゲストで `link_l2_overflow` を監視。
+- **N3** `link_l2_eof`/`link_l1_done` が代入フラグで、試験の合格条件 `done/eof==1` が契約 (完了 = `recv_bytes==length`) と食い違う (`net/link.c:514`)。→ 試験の EOF チェックを情報行に格下げ、または EOF 消失を別扱いに。
+- **F5** (WINDOW 2 通/tick): **欠陥として不成立**。PM が pcap をマイクロ秒で再確認: 対は 0.1ms 差・credit 14→20 で、隣接 tick のバッチ配送 (間に OS32 がリングを消費して空きが増えた) の可能性が高い。コード上 `want_window` は送出で 0 になり 1 tick 1 本。→ コーダーは `want_window` が 1 tick 内で再セットされないことだけ確認。
+
+### 良い点 (レビュー)
+3 way HELLO の req_sess/req_epoch 照合 (R2)・rid 台帳の規則 (1)〜(5)・HOLE・枯渇停止・flags bit0 の制御/業務分離・host_read の成功確定点・STALE close 無通知・B8 の 2 段検査は正しく実装。規約 [C1]〜[C4]/[ABI1〜3]/LE 直列化は問題無し。状態機械の反例 (B1〜B8/R1〜R4) はホスト TDD で個別に踏んでいる。
