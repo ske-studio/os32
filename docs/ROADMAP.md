@@ -208,12 +208,13 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 **目安: v1.3 から 3〜6ヶ月**
 
-| 作業 | カテゴリ | 備考 |
-|------|---------|------|
-| Host Services N1〜N4 | kernel / host / command / GUI | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、ファイラの印刷、端末のコピー / 貼り付け |
-| PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | S5 から先送り |
-| About dialog | GUI | OS32 About |
-| text editor GUI | app | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
+| 作業 | カテゴリ | 担当 (ROLES §0) | 備考 |
+|------|---------|------|------|
+| Host Services N1〜N3 + N4 の libos32gui 末尾追記 | kernel / host / command / shlib | 基盤 (Claude Code PM) | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、`host_*` ラッパー |
+| PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | 基盤 | S5 から先送り |
+| N4 のアプリ側 (ファイラの印刷、端末のコピー / 貼り付け) | app | アプリ層 (別エージェント) | libos32gui の `host_*` ラッパー経由 |
+| About dialog | app | アプリ層 | OS32 About |
+| text editor GUI | app | アプリ層 | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
 
 先送り (v2.0 以降、[§2](#2-長期ロードマップ-v20) の「GUI アプリケーション群」): 設定アプリの拡張項目、
 image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。

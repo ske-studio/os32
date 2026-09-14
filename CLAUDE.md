@@ -8,7 +8,7 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 
 PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
 レビュアー = Codex (`codex exec`、枯渇時は Fable サブエージェント)、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
-**v1.4 から**: 実装 PM は別エージェント、Claude Code は設計者 + レビュアー (ROLES §0、入口は `docs/tasks/agents/HANDOVER_v14.md`)。
+**v1.4 から**: アプリケーション層 (About / GUI エディタ / N4 のアプリ側) は別エージェントが実装 PM、Claude Code は設計者 + レビュアー。基盤 (Host Services、R2) は従来どおり (ROLES §0、入口は `docs/tasks/agents/HANDOVER_v14.md`)。
 役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
 承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大・
 **独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で報告して渡す。

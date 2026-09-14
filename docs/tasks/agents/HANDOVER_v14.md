@@ -1,7 +1,7 @@
-# v1.4 引き継ぎ — 実装 PM (別エージェント) への入口
+# v1.4 引き継ぎ — アプリケーション層の実装 PM (別エージェント) への入口
 
 発行: Claude Code (設計者 / レビュアー、2026-09-14)。状態: **執筆中 — 仕掛かりが緑になるたびに更新する**。
-体制の正典は [ROLES.md](ROLES.md) §0。この文書は「今どこにいて、次に何をするか、踏むと痛い所」だけを書く。
+体制の正典は [ROLES.md](ROLES.md) §0: **別エージェントが担うのはアプリケーション層だけ** (About / GUI エディタ / N4 のアプリ側)。基盤 (Host Services N1〜N3、libos32gui の `host_*`、R2) は Claude Code が従来どおり PM として進める。この文書は「今どこにいて、次に何をするか、踏むと痛い所」だけを書く。
 
 ## 1. 今どこにいるか
 
@@ -14,10 +14,13 @@
 
 ## 2. 次にやること (順)
 
-1. **N1 のゲスト受入** (TASK_N1 §2): `kernel-lgy98-link` を配備 ([D1] NP21/W 停止 → `nhd-pull` → `os32-cycle deploy` → `make deploy` → 起動)、WSL2 で `python3 tools/host_agent.py --state-dir <dir>` (v2、NP2NETSOCK の向きは `tools/host_agent.py` 冒頭)、ゲストで `host_test`、`check-net-l0`〜`l3` と `check-net-m2` の回帰、GUI 配下で `gui_busy` と同時に `host_test`。結果は TASK_N1 §3 に。
-2. **N1 の実装レビュー**: Claude Code (設計者 / レビュアー) に材料 (差分の commit 範囲、n1_tdd.md、受入の観測) を渡す。Codex が使えるなら併用 (ROLES §5 の網羅指示)。
-3. N2 (Agent の PRINT / CLIP / PUT)、N3 (`libos32host` + `wget` / `lpr` / `hclip` / `date -sync`)、N4 (GUI) — **票の設計は Claude Code が書く**。実装 PM は票が「設計レビュー通過」になってから発注する。
-4. R2、About、GUI エディタ — 同上。
+**基盤側 (Claude Code、参考)**: N1 のゲスト受入 → N1 実装レビュー → N2 / N3 の票 → libos32gui `host_*` 末尾追記 → R2。
+
+**アプリ層 (別エージェント)**:
+1. **About ダイアログ** — 票は Claude Code が書く (`docs/tasks/gui/v14/TASK_ABOUT.md`、予定)。依存無し、最初に着手できる。
+2. **GUI テキストエディタ** — 票 `docs/tasks/gui/v14/TASK_EDITOR.md` (予定)。設定は `os32gui_cfg_*` ラッパー経由 (`app:editor` scope)、保存 / 読込は libos32gui のファイル API。印刷とクリップボードは N3 / libos32gui `host_*` が揃ってから (票に「要求 API」として書く)。
+3. **N4 のアプリ側** (ファイラの「印刷」、端末のコピー / 貼り付け) — 基盤側の `host_*` ラッパーが着地してから。
+着手の条件: 票が「設計レビュー通過」になっていること。票が無い作業は始めない (要るなら Claude Code に票を依頼する)。
 
 ## 3. v1.3 残件の小物 (Claude Code が緑にしてから渡す)
 
