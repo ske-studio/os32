@@ -92,3 +92,13 @@ N4a で shlib が nfunc 111 になった (host_* 105〜110) ので、N4b のア�
 ### 次の手 (どちらか)
 - **(A) フォールト番地を捕らえる**: NP21/W の ini でデバッグシリアルをファイルへ出す設定にして ([D2] ini 変更)、起動失敗時の `addr` / `EIP` / `[shlib band]` の有無を読む。原因が一発で分かる可能性が高い。
 - **(B) A/B で切り分ける**: 配備前バックアップ `os32.nhd.bak-n4-20260914-223752` (LGY-98 既定カーネル + N4 前の shlib/apps) に戻して GUI 起動を試す。起動できれば N4 が原因と確定、できなければ退行は N4 より前 (N1〜N3 期) に入っていたことになる。現 NHD は事前に退避する。
+
+### §9 の続き — 切り分け 2: NHD イメージ完全再生成の結果 (2026-09-14)
+ユーザー指示で **`make clean` → `all` → `external` → `check` (全部緑) → `nhd-init` (ext2 を再フォーマット) → `deploy-nhd` + `deploy` → 起動** まで実施し、**ゲストのディスクとビルド成果物を完全に作り直した**。
+- 配備確認: `/boot/vmkernel.lz4` 475,992 B / `/sys/lib/libos32gui.shlib` 113,752 B / `/usr/bin/filer.bin` 45,496 B がゲストに存在。起動は正常、`cfg` 未初期化の通知 (S4 の MISSING モーダル) が出るのも期待どおり。
+- **それでも GUI からのアプリ起動は失敗** (`fault_kill_count` が 0 → 1)。→ **古いバイナリの残留 (hsync の同サイズスキップ) は原因ではない**。退行は現在のコードに実在する。
+- 補足: 設定が MISSING だと gshell の画面が **640x480** になる (従来の検証は 640x400)。`gui_gate` の座標は `status()` の `scrn_ymax` から取ること (固定 400 で計算して menu クリックを外した)。
+- `deploy-nhd` は来歴ガードで止まる (フォーマット後は pull 済みでないため)。意図的な再生成なので `python3 tools/nhd_deploy.py deploy --force` で通した。`nhd-init` / `deploy-nhd` はテスターの許可ターゲットに追加済み (`0b1141d`)。
+
+### 残る手 — CPL=3 #PF のシリアル出力を捕らえる ([D2] ini 変更が要る)
+カーネルは CPL=3 の #PF を `serial_puts_polled` で**シリアルポート**へ出す (`kernel/isr_handlers.c:29`、内容は `addr=` / `EIP=` / `[shlib band, READ|WRITE]` の有無)。NP21/W の ini にシリアル出力をファイルへ落とす設定が無いため現在は捨てられている。**この 1 行を読めれば原因はほぼ確定する**ので、次はここを有効化したい。
