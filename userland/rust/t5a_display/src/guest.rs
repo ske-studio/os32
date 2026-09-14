@@ -5,7 +5,7 @@
 //! 反復タイマの中だけで行う。ここに busy loop は無い — 協調型なので回し
 //! 続けると他のアプリが飢える。
 use crate::{
-    boundary, inject,
+    boundary, clipboard, inject,
     input::{self, Action},
     launch::{self, Attach, Outcome, Step},
     paint,
@@ -31,6 +31,15 @@ static STORAGE: Storage = Storage::new();
 /// 吸い出しタイマ。10ms 刻みなので 10 = 100ms (票 §1)。
 const TIMER_SINK: u8 = 1;
 const TIMER_TICKS: u16 = 10;
+
+/// コピー / 貼り付けのキー (票 N4b §2 / §5)。`drivers/kbd.h` の `KEY_F9` / `KEY_F10`。
+///
+/// F キーは `inject::from_key` が空を返す (注入しない) 上、gshell は F キーを
+/// `GUI_EV_KEY` でフォーカス窓へ配る (`gshell/src/input.rs::capture_keyboard` は
+/// 修飾キー・CTRL+STOP・SHIFT+SPACE・FEP 消費以外を素通しする)。だから WM とも
+/// 子とも取り合いにならない (F6〜F10 は接続中の子にも元から届かない)。
+const SCAN_COPY: u8 = 0x6A;
+const SCAN_PASTE: u8 = 0x6B;
 
 /// con_sink_read へ渡す私有バッファ。`cap >= CON_SINK_REC_MAX` (203) が
 /// KAPI の要求で、下回ると `OS32_ERR_INVAL`。1KB あれば 1 回で 5 本以上入る。
@@ -77,6 +86,7 @@ pub fn run(api: *mut KernelAPI) -> i32 {
         mode: Mode::Prompt,
         line: prompt::Line::new(),
         attach: None,
+        paste: Paste::new(),
     };
     /* 票 §5 R2: **イベントループ (とタイマ) に入る前に** con_sink_read を 1 回
      * 呼び、読み手権限を確立する。`kbd_inject` はこれを済ませた者しか受け付け
@@ -132,6 +142,32 @@ fn pixels(r: Rect) -> PixelRect {
     }
 }
 
+/// 接続モードの保留貼り付け (票 N4b §2)。`os32gui_clip_get` で取り、`attach_transform`
+/// で子へ注ぐ形に直した後のバイト列を、100ms タイマごとに注入リングへ小分けする。
+/// プロンプト貼り付けは行編集なので保留は持たない (この構造体は使わない)。
+struct Paste {
+    buf: [u8; clipboard::CLIP_MAX],
+    len: usize,
+    pos: usize,
+}
+
+impl Paste {
+    const fn new() -> Self {
+        Self {
+            buf: [0; clipboard::CLIP_MAX],
+            len: 0,
+            pos: 0,
+        }
+    }
+    fn clear(&mut self) {
+        self.len = 0;
+        self.pos = 0;
+    }
+    fn active(&self) -> bool {
+        self.pos < self.len
+    }
+}
+
 struct DisplayApp<'a> {
     window: Option<Window>,
     /// 持っているだけ。`Drop` が `kill_timer` を出す。
@@ -155,6 +191,8 @@ struct DisplayApp<'a> {
     /// 要求表に積んだ 1 件 (票 T9 D4)。`Some` なら接続モード。子 ID と完了は
     /// con_sink の `EXIT` ではなく `launch_poll` で問い合わせる。
     attach: Option<Attach>,
+    /// 接続モードの保留貼り付け (票 N4b §2)。
+    paste: Paste,
 }
 
 impl DisplayApp<'_> {
@@ -375,6 +413,9 @@ impl DisplayApp<'_> {
         if prompt::step(self.mode, event) == Next::Prompt {
             self.mode = Mode::Prompt;
             self.line.clear();
+            /* 票 N4b §2: 子がいなくなったら保留貼り付けを捨てる (次の子へ
+             * 余りが渡らないように)。 */
+            self.paste.clear();
         }
     }
 
@@ -531,6 +572,159 @@ impl DisplayApp<'_> {
         changed
     }
 
+    /// クリップボードの失敗を状態行へ (票 N4b、[V4]: 黙らせない)。成功で消す。
+    /// 戻り値は「描き直すか」。
+    fn set_clip_error(&mut self, err: Option<i32>) -> bool {
+        if self.sink.clip_error == err {
+            return false;
+        }
+        self.sink.clip_error = err;
+        true
+    }
+
+    /// 可視画面を丸ごとコピーしてホストのクリップボードへ (票 N4b §2、v1 は
+    /// 範囲選択なし)。`libos32term::Model::viewport` のセルを UTF-8 に戻し
+    /// (`clipboard::cells_to_text`)、4096B 上限で `os32gui_clip_put`。
+    fn copy_screen(&mut self, ui: &mut Ui) {
+        let mut buf = [0u8; clipboard::CLIP_MAX];
+        let n = {
+            let body = self
+                .layout()
+                .map(|l| l.body_rows())
+                .unwrap_or(crate::state::ROWS);
+            let display = self.session.display();
+            let model = display.terminal.model();
+            let retained = model.state().retained_rows.end;
+            let top = display.top.min(retained);
+            let height = body.min(retained - top);
+            let cells: &[libos32term::model::Cell] = match model.viewport(top, height) {
+                Ok(c) => c,
+                Err(_) => &[],
+            };
+            clipboard::cells_to_text(cells, crate::state::COLS, &mut buf)
+        };
+        if n == 0 {
+            /* 空画面をコピーしても何もしない (クリップボードは変えない)。 */
+            return;
+        }
+        let rc = libos32gui::host::clip_put(&buf[..n], None);
+        let changed = self.set_clip_error(if rc < 0 { Some(rc) } else { None });
+        if changed {
+            self.repaint(ui);
+        }
+    }
+
+    /// ホストのクリップボードを貼り付ける (票 N4b §2)。
+    ///
+    /// - プロンプト: 最初の 1 行だけ `line` へ (残りは捨てる、票 §5 新 6)。
+    /// - 接続モード (`reader`): 子へ注ぐ形に直して保留に取り、タイマで小分けする。
+    /// - 接続モードだが `reader` でない (busy 端末): 捨てる (票 §2)。
+    fn paste(&mut self, ui: &mut Ui) {
+        let mut raw = [0u8; clipboard::CLIP_MAX];
+        let (written, _total) = match libos32gui::host::clip_get(&mut raw) {
+            Ok(v) => v,
+            Err(e) => {
+                if self.set_clip_error(Some(e.code())) {
+                    self.repaint(ui);
+                }
+                return;
+            }
+        };
+        let mut changed = self.set_clip_error(None);
+        if written == 0 {
+            if changed {
+                self.repaint(ui);
+            }
+            return;
+        }
+        match self.mode {
+            Mode::Prompt => {
+                /* 最初の 1 行だけ。`Line::push` は入り切らないと 1 バイトも入れず
+                 * 全部落とすので、残り容量に **UTF-8 境界で** 収まるよう先に切る。
+                 * 切ったら状態行に印を出す (票 §5: 切るか通知)。 */
+                let line = clipboard::first_line(&raw[..written]);
+                let avail = prompt::LINE_MAX - self.line.len();
+                let cut = line.len() > avail;
+                let fit = prompt::truncate_utf8(line, avail);
+                let before = self.line.len();
+                let _ = self.line.push(fit);
+                if cut {
+                    /* 「入り切らなかった」= HOST_EINVAL 相当 (長すぎ)。 */
+                    changed |= self.set_clip_error(Some(os32api::host::HOST_EINVAL));
+                }
+                if self.line.len() != before {
+                    self.repaint_prompt(ui);
+                }
+                if changed {
+                    self.repaint(ui);
+                }
+            }
+            Mode::Attached => {
+                if !self.reader {
+                    /* busy 端末 (先客が読み手): 注入できないので捨てる。 */
+                    if changed {
+                        self.repaint(ui);
+                    }
+                    return;
+                }
+                if self.paste.active() {
+                    /* まだ前の貼り付けを小分け中。取りこぼしを避け、新しい分は
+                     * 無視する (上書きすると途中の貼り付けが消える)。 */
+                    if changed {
+                        self.repaint(ui);
+                    }
+                    return;
+                }
+                self.paste.len = clipboard::attach_transform(&raw[..written], &mut self.paste.buf);
+                self.paste.pos = 0;
+                if changed {
+                    self.repaint(ui);
+                }
+                /* 実際の注入は次の 100ms タイマ (`drip`) から。 */
+            }
+        }
+    }
+
+    /// 保留貼り付けを 1 周ぶん注入リングへ小分けする (票 N4b §2 / B2)。
+    /// `min(残り, 256 − kbd_inject_pending())` だけ `kbd_inject` し、**戻り値ぶん**
+    /// 進める (`rc < len` は次の周でやり直す)。**`rc < len` は `inject_short` に
+    /// 計上しない** — 専用経路 (票 §5 新 5)。戻り値は「描き直すか」。
+    fn drip(&mut self) -> bool {
+        if self.mode != Mode::Attached || !self.paste.active() {
+            return false;
+        }
+        if !self.reader {
+            /* 読み手を失った (子が終わった等)。残りは捨てる。 */
+            self.paste.clear();
+            return false;
+        }
+        // SAFETY: libos32gui::init initialized os32api. Reads a count only
+        // (kapi_generated.rs: kbd_inject_pending() -> u32).
+        let pending = unsafe { (os32api::api().kbd_inject_pending)() };
+        let remaining = self.paste.len - self.paste.pos;
+        let n = clipboard::drip_len(remaining, pending);
+        if n == 0 {
+            return false;
+        }
+        let start = self.paste.pos;
+        // SAFETY: libos32gui::init initialized os32api. The pointer is to a
+        // private buffer with exactly `n` readable bytes (start + n <= len <=
+        // buf.len()); the kernel only reads it.
+        let rc = unsafe { (os32api::api().kbd_inject)(self.paste.buf[start..].as_ptr(), n as u32) };
+        if rc < 0 {
+            /* 読み手拒否などの失敗。残りは捨て、理由を状態行に出す ([V4])。 */
+            self.paste.clear();
+            return self.set_clip_error(Some(rc));
+        }
+        /* 戻り値ぶんだけ進める (`rc < n` はリングが満ちた = 次の周でやり直す)。
+         * `inject_short` には**触らない** (専用経路、票 §5 新 5)。 */
+        self.paste.pos += rc as usize;
+        if !self.paste.active() {
+            self.paste.clear();
+        }
+        false
+    }
+
     /// 溜まり具合と取りこぼしを読む (所有権は要らない)。
     fn refresh_stat(&mut self) -> bool {
         let mut ring: u32 = 0;
@@ -560,6 +754,9 @@ impl App for DisplayApp<'_> {
         /* 票 T9 D4: 同じ 100ms の周で要求表も 1 回読む (子 ID / 完了 / 失敗)。
          * 取消の再試行 (`OS32_ERR_AGAIN`) もここから出る (D9)。 */
         changed |= self.poll_launch();
+        /* 票 N4b §2: 保留貼り付けを 1 周ぶん注入リングへ小分けする。子の出力は
+         * con_sink 経由で戻ってくるので、drip 自体は描き直しを迫らない (失敗時のみ)。 */
+        changed |= self.drip();
         if !changed {
             return;
         }
@@ -614,6 +811,22 @@ impl App for DisplayApp<'_> {
         }
         if ui.is_quitting() {
             return;
+        }
+        /* 票 N4b §2: コピー / 貼り付け。プロンプト・接続モードのどちらでも効く。
+         * F9 / F10 は `inject::from_key` が空を返し、`input::nav` も拾わないので、
+         * ここで横取りしても既存の打鍵挙動は変わらない。 */
+        if down {
+            match scan & 0x7F {
+                SCAN_COPY => {
+                    self.copy_screen(ui);
+                    return;
+                }
+                SCAN_PASTE => {
+                    self.paste(ui);
+                    return;
+                }
+                _ => {}
+            }
         }
         if self.mode == Mode::Prompt {
             /* 票 E2: プロンプト表示中は 1 バイトも注入しない。 */
