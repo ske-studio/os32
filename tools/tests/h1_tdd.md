@@ -453,3 +453,102 @@ B4a と B4b が互いの検査を落とさないことも、この 2 つが独�
    中止へ進む。「表示は変わらない」は誤りだった (挙動としては適切な
    エラー処理なので、直すのは記録のほう)。
 
+## 追記 2026-09-15 (5) — 往復 4 のレビュー: B6 の**受け手**が追従していなかった
+
+### B7 — 種別が不明なときに open を通してしまう
+
+`fs/vfs_fd.c:87` は `if (vfs_path_kind(resolved) == VFS_KIND_DIR) return
+VFS_ERR_ISDIR;` と、**DIR に一致したときだけ拒否**していた。B6 で
+「stat を持つドライバの失敗をそのまま返す」ようにしたので、**従来は列挙経由で
+DIR と判定されて拒否されていた経路が負値になり、拒否をすり抜ける**。その先の
+`get_file_size` はディレクトリでも成功するため FD が発行される。
+
+反例: 実在する `/host/d` に `sys_open("/host/d", O_RDONLY)` で、`hdrv_stat` の
+Basic 問い合わせだけが IO、Standard と列挙は成功する状況。ext2 でも、対象
+ディレクトリの stat 用 inode 読み出しだけが一時的に失敗して後続が成功すると
+同じで、**`cat /etc` がディレクトリの生データを読める**。
+
+`fs/vfs_fd.c:84-86` の註は、まさにこの不具合を過去に直したときの記録
+(`cat /etc` が生のディレクトリブロックを吐き、`mv dir x` が生データを書いた)。
+**B6 でその一部を開け直してしまった。**自分が入れた退行で、B5 とまったく
+同じ形の誤り — 「エラー」を「ディレクトリではない」と読み替えていた。
+
+**直した内容** (`fs/vfs_fd.c` の `vfs_open_internal`):
+
+```c
+    kind = vfs_path_kind(resolved);
+    if (kind == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+    if (kind < 0 && kind != VFS_ERR_NOTFOUND) return kind;
+```
+
+| `vfs_path_kind` の答え | 動作 |
+|---|---|
+| `VFS_KIND_DIR` | `VFS_ERR_ISDIR` (従来どおり) |
+| `VFS_KIND_FILE` | 続行 (従来どおり) |
+| `VFS_ERR_NOTFOUND` | 続行 — この下に `O_CREAT` の作成経路がある (従来どおり) |
+| **それ以外の負値** | **そのエラーを返して open しない** (B7 で追加) |
+
+### `vfs_path_kind` の消費者 — PM の理解は正しい
+
+リポジトリ全体を `vfs_path_kind` / `VFS_KIND_` で洗い出した結果、
+**カーネル内の消費者は 2 箇所だけ**で、PM の数えかたと一致する。
+
+| 場所 | 消費のしかた | 判定 |
+|---|---|---|
+| `fs/vfs_fd.c:87` (`vfs_open_internal`) | DIR なら `ISDIR`、負値は**今回**そのまま返す | **B7 で直した** |
+| `fs/vfs.c:38` (`vfs_chdir`) | `if (kind < 0) return kind;` → `if (kind != VFS_KIND_DIR) return VFS_ERR_NOTDIR;` | **正しい**。負値をそのまま返し cwd を更新しない |
+| `tools/tests/vfs_fd_sqlite_host.c:90` | 試験の贋物 (常に `VFS_KIND_FILE`) | 実装ではない |
+
+**他に種別の判定結果を消費する箇所は無い**ことも併せて確認した。
+
+- **open の入口は 1 本**。`vfs_open()` (KAPI `sys_open` = `kapi_generated.c:924`)
+  も `vfs_open_sqlite()` (SQLite VFS = `lib/sqlite3/os32_sqlite_vfs.c:359` は
+  `vfs_open` 経由) も、どちらも `vfs_open_internal()` を通る。したがって
+  今回の 1 か所の修正で**カーネル・KAPI・SQLite VFS の全経路**が塞がる。
+- `vfs_rm` / `vfs_rename` / `vfs_rmdir` / `vfs_read` / `vfs_write` は
+  `vfs_path_kind` を**呼んでいない**。ドライバの `unlink` / `rename` に委ね、
+  そちら側に独自の型検査がある (`fs/ext2_file.c:177` の `EXT2_ERR_ISDIR`、
+  `fs/ext2_dir.c:22` の `EXT2_ERR_NOTDIR`)。B6 / B7 の影響を受けない。
+- KAPI ラッパ (`kapi/kapi_generated.c`) は種別を自分で判定せず、
+  `vfs_ls` / `vfs_stat` / `vfs_open` をそのまま呼ぶだけ。
+- `kapi/kapi_db.c:916,935` は `vfs_stat` を直接使う (種別ではなくサイズの確認)。
+- ユーザーランド側の種別判定は `fs_path_kind` / `fs_is_dir` で、これは往復 3 の
+  B5 で直した別系統 (`sys_stat` が正)。
+
+### 検出漏れの原因と、試験の直し
+
+`tools/tests/vfs_kind_host.c` が **`vfs_path_kind` の戻り値までしか見て
+いなかった**のが原因。判定を**消費する側**を通していなければ、受け手が
+追従していないことは分からない。
+
+そこで同じ翻訳単位に**実物の `fs/vfs_fd.c` も取り込み**、`vfs_open()` まで
+通すようにした (境界はコンソール / リダイレクト / `res_owner_get` の 6 本だけ)。
+
+### 追加した試験
+
+`vfs_kind_host.c` に `== B7: open の受け手が種別の不明をどう扱うか ==` の
+**15 件** (20 → **35 checks / 0 failures**)。
+
+- HostDrv 相当 (stat が IO / 列挙は成功 / `get_file_size` はディレクトリでも
+  成功) → **FD を返さない**・そのエラーを返す・`get_file_size` まで進まない
+- ext2 相当 (stat が IO で後続は成功) → 同じ (`cat /etc` を通さない)
+- `O_CREAT` でも種別が不明なら開かない・作らない
+- 正常系の回帰: 通常ファイルは開ける / DIR は `ISDIR` / 不存在 + `O_CREAT` は
+  作れる (空ファイルを 1 度書く) / 不存在で `O_CREAT` 無しは `NOTFOUND`
+- stat を持たないドライバ経由でも受け手は同じ
+
+`test_vfs_kind.py` は `--target` で `fs/vfs.c` に加えて `fs/vfs_fd.c` の
+クロスコンパイルも見る (`vfs_fd.c` は元から `-Wextra` の 2 件が出るので
+そこだけ外す — `vfs_fstat` の `sizeof` 比較と `vfs_sys_compat_shell_print`
+の未使用 `attr`)。
+
+### RED (変異)
+
+| 変異 | 戻した内容 | 落ちた検査 |
+|---|---|---|
+| B7a | DIR に一致したときだけ拒否 (`229ee68` の形 = 反例そのもの) | **35 中 8 失敗** — HostDrv 相当 3 件 / ext2 相当 2 件 / `O_CREAT` 1 件 / stat 無しドライバ 2 件 |
+| B7b | `NOTFOUND` まで弾く (行き過ぎの否定側) | **2 失敗** — 不存在 + `O_CREAT` が作れない |
+| B7c | `ISDIR` の拒否そのものを外す (過去に直した不具合の再発) | **1 失敗** — DIR が `ISDIR` にならない |
+
+B7b と B7c があるので、この試験は「厳しくしすぎ」も「緩めすぎ」も捕まえる。
+

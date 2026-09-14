@@ -62,6 +62,7 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     u32 file_size = 0;
     int rc;
+    int kind;
     void *fs_ctx;
     VfsOps *ops;
 
@@ -83,8 +84,18 @@ static int vfs_open_internal(const char *path, int mode, int owner,
 
     /* ディレクトリは open できない。以前は get_file_size がディレクトリの
      * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
-     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた */
-    if (vfs_path_kind(resolved) == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた。
+     *
+     * **種別が確定しないときも open しない** (Codex 実装レビュー 往復 4 の B7)。
+     * 「DIR に一致したときだけ弾く」作りだと、stat が読めずに kind が負値へ
+     * なった経路が拒否をすり抜け、その先の get_file_size (ディレクトリでも
+     * 成功する) が FD を発行してしまう — 上の不具合が開き直る。
+     * 「エラー」を「ディレクトリではない」と読み替えない。
+     *
+     * NOTFOUND だけは続行する。下に O_CREAT の作成経路があるため。 */
+    kind = vfs_path_kind(resolved);
+    if (kind == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+    if (kind < 0 && kind != VFS_ERR_NOTFOUND) return kind;
 
     /* サイズ取得・存在確認 */
     rc = -1;

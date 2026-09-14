@@ -15,6 +15,10 @@ VfsOps で、stat / list_dir / get_file_size の戻り値を 1 つずつ指定�
 `stat` を持つドライバ (ext2 / FAT / ISO9660 / HostDrv の 4 つとも持つ) の
 判定が変わらないことも同じ合成ドライバで押さえる。
 
+**実物の fs/vfs_fd.c も同じ翻訳単位に取り込み、`vfs_open()` まで通す**
+(票 H1 / 往復 4 の B7)。`vfs_path_kind` の戻り値までしか見ていなかったことが
+B7 の検出漏れの原因だったので、種別の判定を**消費する側**まで試験する。
+
   python3 -B tools/tests/test_vfs_kind.py [--target]
 
 --target を付けると i386-elf クロスコンパイラでも fs/vfs.c が -Werror で
@@ -39,6 +43,9 @@ TARGET_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
                 "-mno-red-zone", "-fcommon", "-O2",
                 "-Wall", "-Wextra", "-Werror",
                 "-Wdeclaration-after-statement",
+                # fs/vfs_fd.c は元から出る 2 件 (vfs_fstat の sizeof 比較と
+                # vfs_sys_compat_shell_print の attr) なのでそこだけ外す
+                "-Wno-sign-compare", "-Wno-unused-parameter",
                 "-D__KERNEL_BUILD__", "-I.", "-Iinclude", "-Isdk/include",
                 "-Isdk/include/os32", "-Ikernel", "-Idrivers", "-Inet",
                 "-Ifs", "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
@@ -57,8 +64,11 @@ if __name__ == "__main__":
         print("EXIT vfs_kind_host=%d" % rc, flush=True)
 
         if "--target" in sys.argv:
-            subprocess.run(["i386-elf-gcc", *TARGET_FLAGS, "-c", "fs/vfs.c",
-                            "-o", str(tmp / "vfs.o")], cwd=ROOT, check=True)
-            print("TARGET i386-elf -Werror COMPILE PASS (fs/vfs.c)", flush=True)
+            for src in ("fs/vfs.c", "fs/vfs_fd.c"):
+                subprocess.run(["i386-elf-gcc", *TARGET_FLAGS, "-c", src,
+                                "-o", str(tmp / (pathlib.Path(src).stem + ".o"))],
+                               cwd=ROOT, check=True)
+                print("TARGET i386-elf -Werror COMPILE PASS (%s)" % src,
+                      flush=True)
 
         sys.exit(rc)
