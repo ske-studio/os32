@@ -159,3 +159,15 @@ RED → GREEN の詳細・ケース名は [`tools/tests/n1_tdd.md`](../../../too
 `tools/net_l1_test.py`/`net_l2_test.py` (N3)、`tools/tests/net_link_host.c` + `test_net_link.py` は
 変更なし側と衝突しやすい (N2 の 2 ケース追加)、`tools/tests/kapi_db_v50_host.c` + `test_kapi_db_v50.py` (v50_selftest 追加)、
 `tools/tests/n1_tdd.md` §4/§6。`sdk/kapi.json` は**触っていない** (v51 のまま、slot 追加なし)。
+
+### N1-fix レビュー (Fable、2026-09-14) — Approve
+判定 **Approve** (blocker 0、non-blocker 5)。契約 N0 §1a/§1b/§2a (RTO は NIC 受理 tick から、交互は tick をまたいで保持、カウンタは自己試験の区間値) を満たし、飢餓・デッドロック・再送漏れ無し。派生の公平化 (`link_tx_round` の turn 保持) も NE2000 の TX watchdog で busy が永続しないため飢餓なしと確認。
+
+**non-blocker (次の機会に。今すぐ直さない)**:
+1. **F1 の導出が次の slot 追記で崩れる** (`kapi/kapi_db.c:1152`): `COUNT != HOST_CLOSE + 1` は host_close が末尾を固定するので、v52 で 1 本足すと再び bit0 が立つ (make check の `v50_selftest` で先に見える)。→ `HOST_OPEN != DB_ERROR_CODE + 1` / `HOST_CLOSE - HOST_OPEN != 4` / `COUNT <= HOST_CLOSE` (末尾追記だけ許す下限) に。**次に KAPI slot を足す票 (今は N2/N3 に無い) と同時に直す**。
+2. F4 のガードが贋 NIC (1 tick 1 フレーム) では固定されない (`!due` を外しても 31/31 PASS)。→ ホスト試験に NIC TX の栓 (`nic_tx_block`) を足して未送信中の無再送を直接踏むケース。
+3. `n2_no_drop_roundtrip` の `ticks(10)` 固定 (`net_link_host.c:1393`) は実 Agent の応答が 0.5s を超えると偽 FAIL。→ `rel_pending==0` を有界待ちしてから assert。
+4. `net/link.h:169` のコメント: `link_rt_ok` は自己試験中は区間値、それ以外は累積 — 文言を直す。
+5. **既存 (退行ではない)** NO_SLOT 経路 (`net/link.c:387`) が `rel_tries` を増やさず RELEASE だけ落ち続けても再同期に至らない。ゲストで `link_no_slots` を監視。
+
+2〜4 は N2 の着手時に「試験の頑健化」としてまとめる。1 は次の KAPI 追記票に付ける。
