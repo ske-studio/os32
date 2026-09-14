@@ -228,6 +228,15 @@ v2.0 では timer interrupt を利用したプリエンプティブ寄りの mul
 - v1.x `gui_call` + SHM event ring を拡張した IPC
 - child program 実行中も desktop が独立して応答
 
+### 他アーキテクチャへの移植に備えた調査 (継続)
+
+移植 (例: ARM) は v1.x の範囲外だが、**新しい層を実装するたびに CPU 依存の調査を票に含める**
+(ユーザー指示 2026-09-14)。最初は Host Services N1 (ワイヤ v2 / `link.c` / KAPI v51) で
+`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/tasks/network/TASK_N1.md` §0 段 7)。
+以後の票も同じ観点で `docs/tasks/portability/` に追記し、移植の直前に `arch/` の分離へまとめる。
+習慣として今から守るもの: ワイヤ / ディスク上の構造は LE アクセサで読む、非アラインアクセスをしない、
+絶対番地は `memmap.h` 以外に書かない、割込み制御は既存ヘルパー経由。
+
 ### 16bit DOSプログラム移植スキーム
 
 ```text
