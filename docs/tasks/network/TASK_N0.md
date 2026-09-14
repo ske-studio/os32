@@ -1,6 +1,6 @@
 # N0 — Host Services の KAPI v51 (ABI 確定) と非ブロッキング化の設計
 
-状態: **設計 第 5 版 (往復 4 の 4 件を反映: rid 台帳に HOLE を置き未受理の穴を墓標にしない、SYN-ACK は要求の sess / epoch を写して照合、sess は枯渇で停止 (再使用しない)、host_read の成功確定点は cli 区間。往復 4 = ユーザー承認の追加往復も Request changes だったので再度ユーザー判断待ち)**。前提: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) (§2 サービス一覧、§3 KAPI 案、§7 票、§9 の決裁は**推奨案で進める**: 印刷 v1 は to-file 既定、Agent は WSL2、LGY-98 は N3 受入後に既定へ、KAPI は v51、CLIP は含め PUT は後回し、HTML は text)、[LINK_PLAN.md](LINK_PLAN.md) (L0〜L3 の契約: EtherType 0x88B5、16B ヘッダ、Stop-and-Wait の REQUEST/RESPONSE、L1 絶対値 WINDOW、L2 8KB ストリーム Go-Back-N)、`net/link.{c,h}` (現状は同期版 `link_request` / `link_service_get`、`link_stream_read`)、`docs/KAPI_SPEC.md` §3-1 (追加手順) / §3-2 (予約表)、T9 §1a (ABI 表の書式)、S0-K (v50: CPL=3 ポインタの範囲検証 `ring3_user_range_ok`、owner 回収の位置)。
+状態: **完了 — 第 5 版で N1 へ (ユーザー決裁 2026-09-14 「b」: 往復 3 + 追加 1 往復を使い切り、残る疑いは N1 の実装レビューとホスト TDD (§3 に往復 2〜4 の反例を全部載せた) で拾う)**。前提: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) (§2 サービス一覧、§3 KAPI 案、§7 票、§9 の決裁は**推奨案で進める**: 印刷 v1 は to-file 既定、Agent は WSL2、LGY-98 は N3 受入後に既定へ、KAPI は v51、CLIP は含め PUT は後回し、HTML は text)、[LINK_PLAN.md](LINK_PLAN.md) (L0〜L3 の契約: EtherType 0x88B5、16B ヘッダ、Stop-and-Wait の REQUEST/RESPONSE、L1 絶対値 WINDOW、L2 8KB ストリーム Go-Back-N)、`net/link.{c,h}` (現状は同期版 `link_request` / `link_service_get`、`link_stream_read`)、`docs/KAPI_SPEC.md` §3-1 (追加手順) / §3-2 (予約表)、T9 §1a (ABI 表の書式)、S0-K (v50: CPL=3 ポインタの範囲検証 `ring3_user_range_ok`、owner 回収の位置)。
 規約: [ABI1〜3] (kapi.json が正典、末尾追記、版を上げて `make clean`)、[C1] C89、[C2] kstr*、[C4]。
 
 ## 0. 範囲
@@ -131,12 +131,13 @@ PRINT:    h1 = open("PRINT OPEN rep text") → status/read "job 7" → close
 
 - HOST_SERVICES_PLAN §9 の 6 項目は推奨案で進める。
 - ワイヤ v2 で L0〜L3 の合格実績を取り直す (N1 の受入に含める)。
-- **往復 3/3 + 承認済みの追加 1 往復を使い切った** (§7)。第 5 版で R1〜R4 を反映済み。(a) さらに 1 往復 (Codex か Fable サブエージェント) / (b) 第 5 版で N1 へ進み実装レビューで見る、の判断。
+- **往復 3/3 + 承認済みの追加 1 往復を使い切った** (§7)。第 5 版で R1〜R4 を反映済み。→ ユーザー決裁 (b): 第 5 版で N1 へ進み、実装レビューで見る (2026-09-14)。
 
 ## 7. レビュー記録
 
 | 版 | 判定 | 要旨 |
 |---|---|---|
+| 第 5 版 | (レビュー無し、決裁 (b) で N1 へ) | R1〜R4 の反映のみ。N1 の実装レビューで第 5 版の HOLE / req_sess 照合 / 枯渇停止 / 成功確定点を見る |
 | 第 4 版 (追加往復、ユーザー承認) | Request changes | 4 件: R1 high_water 規則が未受理 (欠落) の REQUEST を墓標にする、R2 nonce だけの SYN-ACK 照合では再起動時に旧セッションへ戻れる、R3 16bit sess の周回は「再使用しない」と両立しない、R4 コピー後の STALE 返却が「失敗時は出力を書かない」に反する。non-blocker: RESP の probe、NO_SLOT 後の再送、owner の名称、同期ループの残存確認、非 present はフォールトガード。→ 第 5 版: HOLE、`req_sess` / `req_epoch` の写し、枯渇停止、cli 区間で成功確定 |
 | 第 3 版 | Request changes | 9 件: B1 RELEASE の ACK が REQUEST の ACK と識別不能、B2 RELEASE が直近 rid の重複排除情報を消す、B3 sess (時刻 + tick) では再起動を識別できない、B4 遅延した別 sess の HELLO が現行セッションを破棄、B5 epoch 周回で新 HELLO が拒否される、B6 同 sess の epoch 更新で Agent 資源が残る / STALE close の RELEASE が新 epoch と衝突、B7 制御用 503 / 410 が HTTP ステータスと衝突、B8 帯外ポインタはディスパッチャが kill (INVAL ではない)、B9 正典が未同期 (レビュー中に `76ea249` で同期済み)。→ 第 4 版: ACK flags bit0、RELEASED 墓標と台帳規則 (1)〜(5)、3 way HELLO と Agent 採番 sess、epoch 周回は新セッション、セッション内単調 rid + STALE close 無通知 + 専用スロット、RESPONSE flags bit0 で制御 / 業務を分離、2 段検査を ABI に明記 |
 | 第 2 版 | Request changes | 11 件: R1 通常フレームの agent が矛盾、R2 REQUEST と WDATA の ACK 空間衝突、R3 転送 ACK 後の RESPONSE 消失、R4 close 通知が無く Agent の受付 2 件を置換できない、R5 結果 8 件では重複排除を保証できない、R6 ACK 済み・読出し中の Agent 再起動を検出できない、R7 HELLO の鮮度と epoch 再使用、R8 同期自己試験の再入、R9 制御通知の無条件優先で飢餓、R10 反射モードの RX 争奪、R11 正典に旧契約が残る。→ 第 3 版: sess / nonce / agent、rid 内単一 seq、STATUS (102 / 410 / 503) と RELEASE と墓標、T_probe の生存確認、自己試験の非同期化、交互送信と NIC 受理からの RTO、反射モードの排他、正典同期を完了条件に |
