@@ -30,6 +30,8 @@ INC_libos32mgx      = -Iuserland/lib/mgx -Ilib/zlib
 INC_libos32rt       = -Iuserland/lib
 # 設定レジストリ (/etc/settings.db) のクライアント。KAPI の共有ヘッダだけで完結 (票 S2-C)
 INC_libos32cfg      = -Iuserland/lib/cfg
+# Host Services (host_* KAPI v51) の薄いクライアント。KAPI の共有ヘッダだけで完結 (票 N3)
+INC_libos32host     = -Iuserland/lib/host
 
 # 描画層
 INC_libos32gfx      = -Iuserland/lib/gfx $(INC_libos32math)
@@ -157,6 +159,11 @@ $(eval $(call DEFINE_LIB,libos32cfg,userland/lib/cfg,,))
 LIBCFG_OBJ = $(LIBDIR)/libos32cfg.a
 LIBECS_OBJ = $(LIBDIR)/libos32ecs.a
 
+# libos32host — Host Services (host_* KAPI v51) の薄いクライアント (票 N3)。
+# wget / lpr / hclip / hdate がリンクする。
+$(eval $(call DEFINE_LIB,libos32host,userland/lib/host,,))
+LIBHOST_OBJ = $(LIBDIR)/libos32host.a
+
 # libos32save — セーブデータ管理 (DB不要)
 $(eval $(call DEFINE_LIB,libos32save,userland/lib/save,,))
 LIBSAVE_OBJ = $(LIBDIR)/libos32save.a
@@ -272,7 +279,8 @@ ALL_LIB_ARCHIVES = $(LIBDIR)/libos32math.a \
                    $(LIBDIR)/libos32tilemap.a \
                    $(LIBDIR)/libos32input.a \
                    $(LIBDIR)/libos32ecs.a \
-                   $(LIBDIR)/libos32cfg.a
+                   $(LIBDIR)/libos32cfg.a \
+                   $(LIBDIR)/libos32host.a
 
 libs: $(ALL_LIB_ARCHIVES)
 
@@ -290,5 +298,6 @@ clean-libs:
 	rm -f userland/lib/save/*.o
 	rm -f userland/lib/mgx/*.o lib/zlib/*.o
 	rm -f userland/lib/cfg/*.o
+	rm -f userland/lib/host/*.o
 
 .PHONY: libs clean-libs

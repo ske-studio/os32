@@ -358,6 +358,32 @@ userland/cmds/tar.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/tar.o lib/micro
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/tar.o \
 	      lib/microtar/microtar_prog.o -lc -lgcc
 
+# Host Services のコマンド (票 N3) — libos32host を静的リンク。既定の
+# cmds/%.elf パターンはライブラリを引けないので明示規則 (cfg.elf と同じ形)。
+userland/cmds/wget.o: userland/cmds/wget.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/wget.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/wget.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/wget.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/lpr.o: userland/cmds/lpr.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/lpr.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/lpr.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/lpr.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/hclip.o: userland/cmds/hclip.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/hclip.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/hclip.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/hclip.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/hdate.o: userland/cmds/hdate.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/hdate.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/hdate.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/hdate.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
 userland/tests/%.elf: userland/tests/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/tests/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/$*.o -lc -lgcc
