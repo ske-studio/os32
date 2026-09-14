@@ -1,6 +1,6 @@
 # TASK_N3 — libos32host と wget / lpr / hclip / date -sync (OS32 側 C)
 
-発行: PM (2026-09-14) / 状態: **実装へ (第 4 版で確定。設計レビュー 3 往復 (Fable)、最終の唯一の blocker = 宣言長規則を §1 に決定として明記、を反映。実装レビューで確認する残件)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス) / §5 (利用者)、ワイヤ [TASK_N0.md](TASK_N0.md) 第 5 版 §1a (host_open/status/read/write/close の ABI)。依存: N1 (KAPI v51、受入済み)、N2 (Agent の PRINT/CLIP、受入済み)。**KAPI は変えない** (v51 のまま)。同梱: F6 の wget 再確認 (§6)、Agent の `/file/` トラバーサル N-fix + N2 残 non-blocker (§7)。
+発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)。ゲストで wget/lpr/hclip/hdate 実動、F6 解決 (実サービスの wget は >64KB 完走)。Fable 実装レビュー Approve。N3-fix (§8 の test 硬化と /file/ NUL) は残**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス) / §5 (利用者)、ワイヤ [TASK_N0.md](TASK_N0.md) 第 5 版 §1a (host_open/status/read/write/close の ABI)。依存: N1 (KAPI v51、受入済み)、N2 (Agent の PRINT/CLIP、受入済み)。**KAPI は変えない** (v51 のまま)。同梱: F6 の wget 再確認 (§6)、Agent の `/file/` トラバーサル N-fix + N2 残 non-blocker (§7)。
 
 ## 0. 範囲
 - **`libos32host`** (`userland/lib/host/`、C 静的、`build/libs.mk` の `DEFINE_LIB`): host_* KAPI の AGAIN ループ (`sys_yield`) と多段のサービス手順を隠す薄い層。GUI 配下 (park) でも CUI (sys_halt 相当) でも `sys_yield` で待つ (host_test.c と同じ作法、K7/T8 で確立)。
@@ -65,3 +65,12 @@ N3 の実装で Agent (`tools/host_agent.py`) を触るので、以下をまと�
 - (2、強く推奨) `GET_CHILD` が試験で一度も実行されない (全 GET が FakeProc)。`http.server` fixture で実子を 1 本。
 - (3、guest 到達の Agent クラッシュ) `_service_get_file` の `realpath` が try 外で、`GET /file/a\0b` (NUL) の `ValueError` 未捕捉 → 主ループは ConnectionError しか受けず Agent が落ちる。→ `realpath` を try に入れ `(ValueError, OSError)` → 403。
 - (4〜7、記録) `g_link_up` プロセス大域は W レーンで再検討 / wget の stdout モードは file 指定時のみ進捗 / 転送途中 ELINK で部分ファイル / hdate の ESERVICE 文言 / tick poll 例外の close / hclip get 試験の stdout 漏れ。
+
+## 9. ゲスト受入 (2026-09-14) — 合格
+kernel-lgy98-link + host_agent v2 (--file-root / --clip file: / net 可) で:
+- `hdate` → ホスト時刻 1 行。
+- **`wget /pattern/200000 /tmp/big` → 200000 B 完走**、先頭 `00 01 02 03 …` = 正しいパターン。**F6 解決**: 実サービスの host_read 経路は >64KB を完走する。F6 は L1/L2 自己試験 (`link_l1_bulk`/`link_l2_stream` の LINK_IDLE ループ) 固有の artifact で、製品経路の欠陥ではなかった。
+- `wget /pattern/65536 /tmp/mid` → 65536 B。`wget http://example.com/ /tmp/ex` → 559 B、実 Example Domain の HTML (Agent の非同期子経由)。
+- `lpr /etc/settings.tsv` → `printed, 1 pages`、ホスト spool に 1406 B・内容一致。
+- `hclip put /tmp/cb.txt` → 18 B、ホスト clip file に "clipboard-test-98"、`hclip get` で往復一致。`hclip put /etc/system.cfg` → 15 B。
+カーネルは N1-fix のまま (再配備不要)、新コマンドは HostDrv → `hsync` で /bin に配布。**N3 受入完了**。

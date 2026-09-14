@@ -9,7 +9,7 @@
 |---|---|---|
 | v1.3 | 全項目受入済み、main にマージ済み (`fac0d89`)。残件の小物 4 件 (§3) は Claude Code が処理中 | `docs/ROADMAP.md` v1.3、`docs/tasks/gui/v13/PLAN.md` |
 | Host Services N0 (設計) | 完了 = `docs/tasks/network/TASK_N0.md` **第 5 版** (Codex 4 往復、最後は 4 件残したまま決裁 b で N1 へ。残った疑いは N1 のホスト TDD が踏む) | TASK_N0 §7 |
-| N1 (ワイヤ v2 / link.c / KAPI v51 / Agent v2) | **受入完了 (コア、2026-09-14)。kselftest 87/0、L0/L3/host_test 26/26、F1/F2/F4 修正配備済み。F6 (64KB 超のストリーム) は N3 wget で再確認する保留 (コードは >64KB を扱える = ホスト TDD 35/35、ゲスト固有のタイミング)** (host_test 26/26、L3 OK。kselftest 86/1・L0〜L2 の計数・再送計数・WINDOW 二重 = F1〜F5、TASK_N1 §3。Codex 実装レビューと合わせて修正票へ) (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。**テスターで `make clean` → `make all` (71s) → `make check` (53s) → `make external` (7s) すべて exit 0** (2026-09-14、session `n1-build` / `n1-build2`、`-Inet` の修正 `f5dca53` 後)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
+| N1 / N2 / N3 (Host Services) | **すべて受入完了 (2026-09-14)**。N1 (KAPI v51、kselftest 87/0)、N2 (Agent PRINT/CLIP)、N3 (libos32host + wget/lpr/hclip/hdate 実動)。**F6 解決** (実 wget は >64KB 完走、自己試験固有の artifact)。残: N3-fix (TASK_N3 §8 の test 硬化 + /file/ NUL クラッシュ)、決裁 §9-3 (LGY-98 既定ビルド)、N4 (GUI: ファイラ印刷・端末コピペ) (host_test 26/26、L3 OK。kselftest 86/1・L0〜L2 の計数・再送計数・WINDOW 二重 = F1〜F5、TASK_N1 §3。Codex 実装レビューと合わせて修正票へ) (`995bb19` + `f5dca53`)、ホスト試験 54 ケースは worktree で緑。**テスターで `make clean` → `make all` (71s) → `make check` (53s) → `make external` (7s) すべて exit 0** (2026-09-14、session `n1-build` / `n1-build2`、`-Inet` の修正 `f5dca53` 後)。**ゲスト受入は未実施** | `docs/tasks/network/TASK_N1.md`、`tools/tests/n1_tdd.md` |
 | v1.4 の範囲 | ROADMAP §1 v1.4 = N1〜N4、R2 (PEGC / Cirrus 8bpp)、About、GUI エディタ。アプリ群は v2.0 以降へ | `docs/ROADMAP.md` (`23a28be`) |
 
 ## 2. 次にやること (順)
