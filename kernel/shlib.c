@@ -120,9 +120,21 @@ int shlib_init(void)
     }
 
     /* ヘッダ分だけ前方へ詰める (exec_run と同じ。オーバーラップするので
-     * kmemcpy ではなく memmove)。続けて .bss をゼロクリア。 */
-    memmove(buf, buf + oh->header_size, oh->text_size);
-    kmemset(buf + oh->text_size, 0, oh->bss_size);
+     * kmemcpy ではなく memmove)。続けて .bss をゼロクリア。
+     *   **`oh` は `buf` を指しているので、memmove の後にヘッダを読んではいけない**
+     * — 詰めた時点でヘッダは上書きされ、`oh->text_size` / `oh->bss_size` は
+     * ジャンプ表の別フィールド (text_pages / 予約 0) を読んでしまう。結果
+     * `kmemset(..., 0, 0)` になり **.bss が一度もゼロクリアされず**、未初期化の
+     * ままアプリへ複製されていた (2026-09-05 から存在、2026-09-14 に発見)。
+     * 必ず**コピー前にローカルへ退避**した値を使う。 */
+    {
+        u32 hdr_size  = oh->header_size;
+        u32 text_size = oh->text_size;
+        u32 bss_size  = oh->bss_size;
+
+        memmove(buf, buf + hdr_size, text_size);
+        kmemset(buf + text_size, 0, bss_size);
+    }
 
     /* ---- ジャンプ表 (OS32ShlibHeader) の検証 ---- */
     sh = (OS32ShlibHeader *)buf;
