@@ -199,20 +199,24 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ---
 
-### v1.4 — 「GUIアプリケーション群」
+### v1.4 — 「ホストサービスと最小のアプリ」
 
-**ゴール**: GUI専用 application が揃い、v2.0 に向けた基盤が完成。
+**ゴール**: Host Services (LGY-98 経由の GET / 印刷 / クリップボード、[tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md)) を
+コマンドと GUI から使えるようにし、GUI アプリは **About とテキストエディタの 2 本だけ**に絞る
+(ユーザー決裁 2026-09-14: アプリ群は葉なので後回し、エディタは libos32gui / 設定 / ホストサービスを
+通しで使う受入試験として 1 本残す)。
 
 **目安: v1.3 から 3〜6ヶ月**
 
 | 作業 | カテゴリ | 備考 |
 |------|---------|------|
-| 設定 application | app | wallpaper・color・mouse speed 等 |
-| text editor GUI | app | edit.bin GUI版 |
-| image viewer | app | VBZ/VDP/BMP |
-| music player | app | FM音源 BGM control |
+| Host Services N1〜N4 | kernel / host / command / GUI | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、ファイラの印刷、端末のコピー / 貼り付け |
+| PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | S5 から先送り |
 | About dialog | GUI | OS32 About |
-| `sed` / `awk` 等 | command | v1.0から先送り |
+| text editor GUI | app | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
+
+先送り (v2.0 以降、[§2](#2-長期ロードマップ-v20) の「GUI アプリケーション群」): 設定アプリの拡張項目、
+image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 
 ---
 
@@ -236,6 +240,13 @@ v2.0 では timer interrupt を利用したプリエンプティブ寄りの mul
 以後の票も同じ観点で `docs/tasks/portability/` に追記し、移植の直前に `arch/` の分離へまとめる。
 習慣として今から守るもの: ワイヤ / ディスク上の構造は LE アクセサで読む、非アラインアクセスをしない、
 絶対番地は `memmap.h` 以外に書かない、割込み制御は既存ヘルパー経由。
+
+### GUI アプリケーション群 (v1.4 から先送り、2026-09-14)
+
+v1.4 の「アプリ群」は基盤に依存される側ではないので、協調型マルチタスクの拡張の後に回す。
+設定アプリの拡張 (壁紙・色・マウス速度は設定レジストリに行を足すだけ、UI は gshell の設定ダイアログ)、
+image viewer (MGX は `mgxview` が既にある。VBZ / VDP / BMP を足す)、music player (FM 音源 BGM)、
+`sed` / `awk`。着手の順は、そのときに一番 API の穴を踏みそうなものから。
 
 ### 16bit DOSプログラム移植スキーム
 
