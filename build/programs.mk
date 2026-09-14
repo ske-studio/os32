@@ -401,6 +401,7 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # (userland の .d は Makefile 末尾の -include の対象外)。
 userland/system/install.elf: userland/system/install_recover.inc
 userland/system/hsync.elf: userland/system/hsync_protect.inc
+userland/system/hsync.elf: lib/crc32_core.inc
 
 # === ELF → RAW → OS32X BIN 変換 ===
 # ユーザーランドぶん。ゲームは game/Makefile が自前で持つ。

@@ -632,9 +632,21 @@ static int hdrv_read_stream(void *ctx, const char *path,
 }
 
 /* stat: ファイル情報取得 */
+/* 「成功と言ってよいか」の判定は純関数へ切り出してある (票 H1)。
+ * 失敗したまま VFS_OK を返してゼロサイズを「実在する空ファイル」に
+ * 化けさせない / 64bit EndOfFile を u32 へ黙って切り詰めない。
+ * ホスト試験は tools/tests/hsync_h1_host.c (A11)。 */
+#include "hostdrv_stat_rules.inc"
+STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
+              hdrv_stat_attr_dir);
+
 static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
     int rc;
+    int basic_rc;
+    int std_rc;
+    u32 attributes = 0;
+    u64 end_of_file = 0;
     Np2FileBasicInfo *basic;
     Np2FileStandardInfo *std_info;
     (void)ctx;
@@ -647,28 +659,32 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
                         NP2_FILE_READ_DATA);
     if (rc < 0) return VFS_ERR_NOTFOUND;
 
-    /* FileBasicInformation 取得 */
-    rc = hostdrv_query_info(NP2_FileBasicInformation,
-                            sizeof(Np2FileBasicInfo));
-    if (rc == 0) {
+    /* FileBasicInformation 取得 (種別)。g_databuf は次の問い合わせで
+     * 上書きされるので、その場で値へ退避する。 */
+    basic_rc = hostdrv_query_info(NP2_FileBasicInformation,
+                                  sizeof(Np2FileBasicInfo));
+    if (basic_rc == 0) {
         basic = (Np2FileBasicInfo *)g_databuf;
-        if (basic->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY) {
-            buf->st_mode = OS_S_IFDIR | 0755;
-        } else {
-            buf->st_mode = OS_S_IFREG | 0644;
-        }
+        attributes = basic->FileAttributes;
     }
 
-    /* FileStandardInformation 取得 */
-    rc = hostdrv_query_info(NP2_FileStandardInformation,
-                            sizeof(Np2FileStandardInfo));
-    if (rc == 0) {
+    /* FileStandardInformation 取得 (サイズ)。64bit のまま判定へ渡す */
+    std_rc = hostdrv_query_info(NP2_FileStandardInformation,
+                                sizeof(Np2FileStandardInfo));
+    if (std_rc == 0) {
         std_info = (Np2FileStandardInfo *)g_databuf;
-        buf->st_size = (u32)std_info->EndOfFile;
+        end_of_file = std_info->EndOfFile;
     }
 
     hostdrv_cleanup_close();
 
+    rc = hdrv_stat_fill(basic_rc, attributes, std_rc,
+                        (unsigned long long)end_of_file, buf);
+    if (rc != 0) {
+        /* 途中まで埋まった値を呼び手に読ませない */
+        kmemset(buf, 0, sizeof(OS32_Stat));
+        return VFS_ERR_IO;
+    }
     return VFS_OK;
 }
 
