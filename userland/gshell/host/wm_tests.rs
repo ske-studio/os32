@@ -460,6 +460,147 @@ fn fep_press_release_then_app_press_is_delivered() {
     upper_ui_press_release_then_app_press("fep");
 }
 
+/// 逆向きの被覆: **アプリが受けた押下**と対になる離しを上位 UI の上で行っても、
+/// 離しはその押下を受けたアプリへ届き、その直後のアプリ内の押下も飲まれない。
+///
+/// 上の 4 本は「上位 UI 自身が押下を取る」側 (押していないボタンの離しを
+/// アプリへ作らない)。こちらは捕捉 (`input.rs` の `CAPTURE`) の側で、契約 D1 の
+/// 「タスクバー領域の入力をアプリへ配送しない」を**対になる離しには掛けない**
+/// という規則を 4 経路すべてで確かめる。T5b 撤去まで残っていたのは
+/// `button_up_on_taskbar_still_reaches_the_app_that_got_the_press` の
+/// タスクバー経路だけで、ここでメニュー / モーダル / FEP へ広げ、
+/// 「次の押下を飲み込まない」も 4 経路で見る。
+fn app_press_then_release_over_upper_ui(kind: &str) {
+    use crate::{fep, input, mocks, modal, startmenu, taskbar};
+    use os32api::gui::proto::GUI_MODAL_OK;
+
+    mocks::init();
+    let shm = mocks::Shm::new();
+    let mut st = one_window_state(&shm);
+    let (ax, ay) = APP_PT;
+    assert!(
+        st.windows[0].client_rect_screen().contains(ax, ay),
+        "検査点がクライアント内でない"
+    );
+    assert!(
+        !startmenu::is_open() && !modal::is_open(),
+        "前の試験が上位 UI を開いたまま残した"
+    );
+
+    /* ---- 押下はアプリのクライアント内 = アプリの領分 (捕捉が立つ) ---- */
+    set_mouse(ax, ay, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    let evs = button_events(&st, 0);
+    assert_eq!(evs.len(), 1, "アプリの押下が届いていない: {evs:?}");
+    assert!(evs[0].0 && evs[0].1 == 1, "1 件目が左の押下でない: {evs:?}");
+
+    /* ---- 押したまま上位 UI が前に出る。離しはその上で行う ---- */
+    let release_pt = match kind {
+        "taskbar" => {
+            /* Start でも窓ボタンでもない帯 (`upper_ui_press_release_then_app_press`
+             * と同じ理由でここを選ぶ)。 */
+            let p = (500, st.screen_h - 1);
+            assert!(taskbar::hit(&st, p.0, p.1), "検査点がタスクバー上でない");
+            p
+        }
+        "menu" => {
+            startmenu::open_context(&mut st, 60, 60);
+            let r = startmenu::rect();
+            assert!(!r.is_empty(), "メニューが開いていない");
+            (r.x + r.w / 2, r.y + r.h / 2)
+        }
+        "modal" => {
+            /* アプリが押されたまま自分でダイアログを開く (OP_MODAL_OPEN)。 */
+            modal::open_wm_message(&mut st, GUI_MODAL_OK, b"Modal\0", modal::WM_PURPOSE_NOTIFY);
+            assert!(modal::is_open());
+            let r = modal::rect();
+            (r.x + 2, r.y + 2)
+        }
+        "fep" => {
+            st.windows[0].tc_visible = true;
+            st.windows[0].tc_x = 60;
+            st.windows[0].tc_y = 180;
+            unsafe {
+                (*os32api::api_ptr()).ime_is_active = ime_on;
+            }
+            fep::install();
+            fep::pre_cycle(&mut st);
+            fep::post_cycle(&mut st);
+            let r = fep::rect();
+            assert!(!r.is_empty(), "FEP の矩形が出ていない");
+            (r.x, r.y)
+        }
+        _ => unreachable!(),
+    };
+
+    set_mouse(release_pt.0, release_pt.1, 0);
+    input::capture(&mut st, input::Ctx::Wait);
+    let evs = button_events(&st, 0);
+    assert_eq!(
+        evs.len(),
+        2,
+        "上位 UI ({kind}) の上の離しが、押下を受けたアプリへ届かない: {evs:?}"
+    );
+    assert!(!evs[1].0 && evs[1].1 == 1, "2 件目が対の離しでない: {evs:?}");
+
+    /* ---- 上位 UI を片付ける (静的な状態を次の試験へ持ち越さない) ---- */
+    match kind {
+        "menu" => {
+            assert!(startmenu::is_open(), "対の離しでメニューが閉じた");
+            startmenu::close(&mut st);
+        }
+        "modal" => {
+            assert!(modal::is_open(), "対の離しでダイアログが閉じた");
+            modal::on_key(&mut st, 0, 0x1b, 0);
+            assert!(!modal::is_open());
+        }
+        "fep" => {
+            unsafe {
+                (*os32api::api_ptr()).ime_is_active = ime_off;
+            }
+            fep::install();
+            fep::pre_cycle(&mut st);
+            fep::post_cycle(&mut st);
+        }
+        _ => {}
+    }
+
+    /* ---- 直後のアプリ内の押下は届く (間に無操作の周を挟まない) ---- */
+    set_mouse(ax, ay, 1);
+    input::capture(&mut st, input::Ctx::Wait);
+    let evs = button_events(&st, 0);
+    assert_eq!(
+        evs.len(),
+        3,
+        "上位 UI ({kind}) の上の離しの直後、アプリの押下が飲まれた: {evs:?}"
+    );
+    assert!(evs[2].0 && evs[2].1 == 1, "3 件目が押下でない: {evs:?}");
+
+    /* 捕捉を残さない (CAPTURE は静的)。 */
+    set_mouse(ax, ay, 0);
+    input::capture(&mut st, input::Ctx::Wait);
+}
+
+#[test]
+fn app_release_over_taskbar_reaches_the_app_and_the_next_press_lands() {
+    app_press_then_release_over_upper_ui("taskbar");
+}
+
+#[test]
+fn app_release_over_menu_reaches_the_app_and_the_next_press_lands() {
+    app_press_then_release_over_upper_ui("menu");
+}
+
+#[test]
+fn app_release_over_modal_reaches_the_app_and_the_next_press_lands() {
+    app_press_then_release_over_upper_ui("modal");
+}
+
+#[test]
+fn app_release_over_fep_reaches_the_app_and_the_next_press_lands() {
+    app_press_then_release_over_upper_ui("fep");
+}
+
 /// アプリ内で押したまま、アプリ自身がダイアログを開き (OP_MODAL_OPEN)、
 /// それから離す。契約 U4「モーダル中は宛先をダイアログに限定」は**新しい
 /// 入力**の規則で、モーダル前の押下と対になる離しはその押下を受けたアプリの

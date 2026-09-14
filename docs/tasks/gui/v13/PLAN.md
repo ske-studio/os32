@@ -14,9 +14,16 @@ K6 の決裁事項 4 件は 2026-09-12 にユーザー決裁 (2.8GB 見送り / 
 
 T5b 撤去 (2026-09-10、`1c98613`) で消えた被覆: 「上位 UI (メニュー / モーダル / タスクバー / FEP)
 の上で離しても、アプリの次の押下を飲み込まない」ホスト試験 4 本は、パネルが最初の押下を食う
-仕掛けに依存していたため削除した。タスクバー経路だけ `button_up_on_taskbar_*` が残る。
-**残件**: パネルに依存しない形で書き直す (W レーン、小)。
-→ 2026-09-10 第 4 回レビュー後にコーダーへ発注 (モーダル中の捕捉済み離しの配送と合わせて)。
+仕掛けに依存していたため削除した。**完了 (2026-09-14)** — パネルに依存しない形で書き直し済み。
+上位 UI 自身が押下を取る側は `89ff220` の
+`upper_ui_press_release_then_app_press(kind)` → `taskbar` / `menu` / `modal` / `fep`
+の 4 本、モーダル中の捕捉済み離しは `captured_release_{,right_}is_delivered_while_modal_is_open` /
+`captured_release_survives_the_pump_while_modal_is_open` / 負例
+`new_press_during_modal_is_not_forwarded_to_the_app` (記録 `tools/tests/gui_review4_20260910_tdd.md`)。
+残っていた裏側 (**アプリが受けた押下の対になる離しを上位 UI の上で行う** + その直後の押下)
+は `app_release_over_{taskbar,menu,modal,fep}_reaches_the_app_and_the_next_press_lands` の 4 本で
+メニュー / FEP まで広げた (記録 `tools/tests/gshell_buttonup_tdd.md`、`check-gshell-host` 100 本)。
+製品コードの修正は無し (`release_capture()` 経路は 4 経路とも正しかった)。
 
 **CI の範囲 (独立レビュー 2026-09-10 の指摘)**: `.github/workflows/check.yml` は静的整合性
 (manifest / 制約 ID / KAPI 版数) と NE2000 試験が中心で、`check-gshell-host` や filer の
