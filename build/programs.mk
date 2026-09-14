@@ -344,6 +344,20 @@ userland/tests/cfg_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/cfg_ben
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/cfg_bench.o \
 	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
 
+# tar — ustar の作成 / 展開 / 一覧 (票 S6)。ustar の読み書きは vendor した
+# lib/microtar (rxi、MIT)。lib/lz4_prog.o と同じく、カーネル側とは別に
+# PROGRAM_FLAGS でビルドした _prog.o を明示規則でリンクする
+# (cmds/%.elf パターンはライブラリを引けない)。
+lib/microtar/microtar_prog.o: lib/microtar/microtar.c lib/microtar/microtar.h
+	$(CC) $(PROGRAM_FLAGS) -DMTAR_NO_STDIO -Ilib/microtar -c $< -o $@
+
+userland/cmds/tar.o: userland/cmds/tar.c lib/microtar/microtar.h
+	$(CC) $(PROGRAM_FLAGS) -DMTAR_NO_STDIO -Ilib/microtar -c $< -o $@
+
+userland/cmds/tar.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/tar.o lib/microtar/microtar_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/tar.o \
+	      lib/microtar/microtar_prog.o -lc -lgcc
+
 userland/tests/%.elf: userland/tests/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/tests/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/$*.o -lc -lgcc
@@ -519,6 +533,7 @@ clean-programs: clean-rust
 	rm -f userland/tests/sqlite_standalone/*.o userland/tests/sqlite_standalone/*.elf userland/tests/sqlite_standalone/*.raw userland/tests/sqlite_standalone/*.bin
 	rm -f lib/lz4_prog.o lib/utf8_prog.o
 	rm -f lib/zlib/*.o
+	rm -f lib/microtar/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
 .PHONY: programs programs_base game sh lz4_cmd cdinst bench bench_scale2x faultprobe

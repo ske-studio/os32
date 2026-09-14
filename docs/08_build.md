@@ -99,7 +99,7 @@ os32/
 ├── fs/             ファイルシステム (vfs, ext2, fatfs, iso9660, hostdrv 等)
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
-├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
+├── lib/            汎用ライブラリ (utf8, path, sqlite3, zlib, microtar 等。vendor したものは各ディレクトリの README.OS32 が出所とライセンスの正典)
 ├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)
 ├── userland/       ユーザー空間 (shell/, gshell/ (GUI シェル, Rust), cmds/, system/, tests/, rust/ (libos32gui 等), lib/)
 ├── .github/        GitHub Actions (workflows/check.yml: 静的ゲート)
