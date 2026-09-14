@@ -20,10 +20,13 @@ FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
          "-fno-stack-protector", "-nostdlib", "-static", "-O1",
          "-Wall", "-Wextra", "-Werror",
          "-Wno-unused-parameter", "-Wno-sign-compare",
-         "-Wdeclaration-after-statement", "-D__cdecl="]
+         "-Wdeclaration-after-statement", "-D__cdecl=", "-DMTAR_NO_STDIO"]
+# mtar_freestanding は必ず先頭 — 32bit の glibc ヘッダが無い環境で
+# lib/microtar/microtar.c の <stdio.h> / <stdlib.h> / <string.h> を埋める。
 INCLUDES = ["-I" + str(ROOT / p)
-            for p in ("include", "fs", "lib", "kernel", "drivers",
-                      "sdk/include/os32")]
+            for p in ("tools/tests/mtar_freestanding",
+                      "include", "fs", "lib", "kernel", "drivers",
+                      "lib/microtar", "sdk/include/os32")]
 SRC = ROOT / "tools/tests/ext2_write_io_host.c"
 TARGET_SRCS = ["fs/ext2_super.c", "fs/ext2_inode.c", "fs/ext2_dir.c",
                "fs/ext2_file.c", "fs/ext2_vfs.c"]

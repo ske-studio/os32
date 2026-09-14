@@ -108,14 +108,25 @@ static int twrite(mtar_t *tar, const void *data, unsigned size) {
 }
 
 
+/* 元は 1 バイトずつ twrite していた (`for (i=0;i<n;i++) twrite(tar,&nul,1)`)。
+ * OS32 の ext2 は sys_write 1 回につき 10 セクタ前後の固定費があるので
+ * (パス解決 + inode の read-modify-write + データブロックの read-modify-write)、
+ * 15 バイトのファイル 1 本を束ねるだけでも padding と終端で 1521 回の
+ * sys_write = 15000 セクタ以上になり、`tar c` が 15 秒を超えていた (票 S6-P、
+ * 診断は docs/tasks/settings/TASK_S6P.md)。ブロック単位で書けば呼び出しは
+ * 数回で済む。書く中身 (ゼロ) も位置の勘定 (twrite が tar->pos を進める) も
+ * 変わらない。
+ * nul[] は static — 外部プログラムのスタックは細いので自動変数にしない。 */
 static int write_null_bytes(mtar_t *tar, int n) {
-  int i, err;
-  char nul = '\0';
-  for (i = 0; i < n; i++) {
-    err = twrite(tar, &nul, 1);
+  static const char nul[512];       /* const = .rodata、全部 0 */
+  int err;
+  while (n > 0) {
+    int chunk = (n > (int)sizeof(nul)) ? (int)sizeof(nul) : n;
+    err = twrite(tar, nul, (unsigned)chunk);
     if (err) {
       return err;
     }
+    n -= chunk;
   }
   return MTAR_ESUCCESS;
 }

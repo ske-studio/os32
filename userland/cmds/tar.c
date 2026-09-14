@@ -391,9 +391,12 @@ static void collect_cb(
 #ifndef HOST_TEST
     const char *name = entry->name;
     int type = entry->type;
+#endif
+    int len;                 /* [C1] 宣言はブロック先頭にまとめる */
+
+#ifndef HOST_TEST
     (void)ctx;
 #endif
-    int len;
 
     if (name[0] == '.') {
         if (name[1] == '\0') return;

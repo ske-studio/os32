@@ -120,6 +120,46 @@ char *kstrncpy(char *dst, const char *src, u32 n)
 /* gcc が構造体コピー等で呼ぶことがある */
 void *memcpy(void *dst, const void *src, u32 n) { return kmemcpy(dst, src, n); }
 void *memset(void *dst, int val, u32 n) { return kmemset(dst, val, n); }
+u32 strlen(const char *s) { return h_strlen(s); }
+int strcmp(const char *a, const char *b) { return kstrcmp(a, b); }
+
+/* 実物の lib/microtar/microtar.c が使う分だけ (tools/tests/mtar_freestanding/) */
+char *strcpy(char *dst, const char *src)
+{
+    u32 i = 0;
+    while (src[i]) { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+    return dst;
+}
+
+/* microtar が使うのは "%o" と "%06o" だけ (header_to_raw)。それ以外は来ない。 */
+int sprintf(char *dst, const char *fmt, ...)
+{
+    char tmp[16];
+    unsigned int val;
+    int width = 0, i, n = 0;
+    const char *f = fmt;
+    __builtin_va_list ap;
+
+    /* 可変引数は 1 個だけ。stdarg.h は glibc ではなく gcc のものだが、
+     * -nostdlib のシムと混ざらないよう組み込みを直に使う。 */
+    __builtin_va_start(ap, fmt);
+    val = __builtin_va_arg(ap, unsigned int);
+    __builtin_va_end(ap);
+
+    CHECK(*f == '%');
+    f++;
+    while (*f >= '0' && *f <= '9') { width = width * 10 + (*f - '0'); f++; }
+    CHECK(*f == 'o' && f[1] == '\0');
+
+    i = 0;
+    if (val == 0) tmp[i++] = '0';
+    while (val > 0) { tmp[i++] = (char)('0' + (val & 7u)); val >>= 3; }
+    while (i < width) tmp[i++] = '0';        /* "%06o" のゼロ詰め */
+    while (i > 0) dst[n++] = tmp[--i];
+    dst[n] = '\0';
+    return n;
+}
 
 void kprintf(u8 attr, const char *fmt, ...) { (void)attr; (void)fmt; }
 
@@ -228,6 +268,9 @@ int ide_get_info(int drive, IdeInfo *info)
 #include "../../fs/ext2_file.c"
 #include "../../fs/ext2_fmt.c"
 #include "../../fs/ext2_vfs.c"
+
+/* 書庫を作る側も実物 (票 S6-P 段 A)。MTAR_NO_STDIO は試験側が -D で渡す。 */
+#include "../../lib/microtar/microtar.c"
 
 /* ======================================================================== */
 /*  足場                                                                    */
@@ -362,94 +405,140 @@ static void case_seek_back(void)
     disk_teardown();
 }
 
-/* P5: `tar c /tmp/e8.tar /etc/system.cfg` の呼び出し列をそのまま再生する。
+/* P5: `tar c /tmp/e8.tar /etc/system.cfg` を **実物の microtar で** 走らせる。
  *
  *   lib/microtar/microtar.c:
- *     mtar_write_file_header -> twrite(512)           … 1 回
- *     mtar_write_data(15)    -> twrite(15)            … 1 回
- *                            -> write_null_bytes(497) … **1 バイトずつ 497 回**
- *     mtar_finalize          -> write_null_bytes(1024)… **1 バイトずつ 1024 回**
- *   合計 1523 回の sys_write。 */
-#define TAR_HDR   512u
-#define TAR_DATA  15u
-#define TAR_PAD1  497u                 /* round_up(527,512) - 527 */
-#define TAR_PAD2  1024u                /* 終端の 2 レコード */
+ *     mtar_write_file_header -> twrite(512)
+ *     mtar_write_data(15)    -> twrite(15) のあと round_up(527,512)-527 = 497B の
+ *                               padding を write_null_bytes() が書く
+ *     mtar_finalize          -> 終端 2 レコード = 1024B を write_null_bytes()
+ *
+ *   write_null_bytes() が 1 バイトずつ書いていたときは合計 1523 回の
+ *   sys_write、ブロック単位になった今は数回 (票 S6-P 段 A)。
+ *   ここは模型ではなく実物を通すので、直し忘れ・戻りはこの回数で落ちる。
+ *
+ *   I/O コールバックは userland/cmds/tar.c の mt_read / mt_write / mt_seek と
+ *   同じ形 — ただし FD ではなく ext2_vfs_read_stream / ext2_vfs_write_stream を
+ *   直に叩く (fs/vfs_fd.c の vfs_seek は offset を動かすだけなので、オフセット
+ *   はここで持つ)。 */
 #define TAR_SIZE  2048u
 
-static void tar_header(u8 *out)
+static u32 g_mt_off;         /* fs/vfs_fd.c の VfsFile.offset に相当 */
+static u32 g_mt_writes;      /* tar->write が呼ばれた回数 = sys_write の回数 */
+static u32 g_mt_bytes;
+static u32 g_mt_min;         /* いちばん小さかった書き込み */
+
+static int mt_read(mtar_t *tar, void *data, unsigned size)
 {
-    kmemset(out, 0, TAR_HDR);
-    kmemcpy(out, "etc/system.cfg", 14);
+    int n;
+    (void)tar;
+    n = ext2_vfs_read_stream(g_ec, ARCHIVE, data, (u32)size, g_mt_off);
+    if (n < 0 || (unsigned)n != size) return MTAR_EREADFAIL;
+    g_mt_off += (u32)n;
+    return MTAR_ESUCCESS;
 }
 
-static u32 tar_replay_bytewise(void)
+static int mt_write(mtar_t *tar, const void *data, unsigned size)
 {
-    static u8 hdr[TAR_HDR];
-    u8 nul = 0;
-    u32 off = 0;
-    u32 i;
+    int n;
+    (void)tar;
+    g_mt_writes++;
+    g_mt_bytes += size;
+    if (size < g_mt_min) g_mt_min = size;
+    n = ext2_vfs_write_stream(g_ec, ARCHIVE, data, (u32)size, g_mt_off);
+    if (n < 0 || (unsigned)n != size) return MTAR_EWRITEFAIL;
+    g_mt_off += (u32)n;
+    return MTAR_ESUCCESS;
+}
 
-    tar_header(hdr);
+static int mt_seek(mtar_t *tar, unsigned pos)
+{
+    (void)tar;
+    g_mt_off = pos;        /* vfs_seek と同じ — FS は触らない */
+    return MTAR_ESUCCESS;
+}
+
+static int mt_close(mtar_t *tar) { (void)tar; return MTAR_ESUCCESS; }
+
+/* `tar c out.tar etc/system.cfg` 相当。userland/cmds/tar.c の add_file() と
+ * 同じ順に mtar_* を呼ぶ (ヘッダ → 本体 → finalize)。 */
+static u32 tar_create_real(void)
+{
+    mtar_t tar;
+    kmemset(&tar, 0, sizeof(tar));
+    tar.read = mt_read;
+    tar.write = mt_write;
+    tar.seek = mt_seek;
+    tar.close = mt_close;
+
+    g_mt_off = 0;
+    g_mt_writes = 0;
+    g_mt_bytes = 0;
+    g_mt_min = 0xFFFFFFFFu;
+
     io_reset();
-    CHECK(wr(ARCHIVE, hdr, TAR_HDR, off) == (int)TAR_HDR); off += TAR_HDR;
-    CHECK(wr(ARCHIVE, CFG_TEXT, TAR_DATA, off) == (int)TAR_DATA); off += TAR_DATA;
-    for (i = 0; i < TAR_PAD1; i++) { CHECK(wr(ARCHIVE, &nul, 1, off) == 1); off++; }
-    for (i = 0; i < TAR_PAD2; i++) { CHECK(wr(ARCHIVE, &nul, 1, off) == 1); off++; }
-    CHECK(off == TAR_SIZE);
+    CHECK(mtar_write_file_header(&tar, "etc/system.cfg", 15) == MTAR_ESUCCESS);
+    CHECK(mtar_write_data(&tar, CFG_TEXT, 15) == MTAR_ESUCCESS);
+    CHECK(mtar_finalize(&tar) == MTAR_ESUCCESS);
+    CHECK(tar.pos == TAR_SIZE);
     return io_total();
 }
 
-static u32 tar_replay_blockwise(void)
-{
-    static u8 blk[512];
-    u32 off = 0;
-
-    io_reset();
-    tar_header(blk);
-    CHECK(wr(ARCHIVE, blk, 512, off) == 512); off += 512;
-    kmemset(blk, 0, sizeof(blk));
-    kmemcpy(blk, CFG_TEXT, TAR_DATA);
-    CHECK(wr(ARCHIVE, blk, 512, off) == 512); off += 512;
-    kmemset(blk, 0, sizeof(blk));
-    CHECK(wr(ARCHIVE, blk, 512, off) == 512); off += 512;
-    CHECK(wr(ARCHIVE, blk, 512, off) == 512); off += 512;
-    CHECK(off == TAR_SIZE);
-    return io_total();
-}
-
+/* 書庫が ustar として正しいこと — ヘッダ欄を実物の mtar_read_header で読み直す。
+ * (回数を減らすために中身を落としていないことの確認。) */
 static void archive_verify(void)
 {
     static u8 got[TAR_SIZE];
+    mtar_t tar;
+    mtar_header_t h;
     u32 i;
 
     CHECK(ext2_vfs_read(g_ec, ARCHIVE, got, sizeof(got)) == (int)TAR_SIZE);
-    CHECK(kstrncmp((const char *)got, "etc/system.cfg", 14) == 0);
+
+    kmemset(&tar, 0, sizeof(tar));
+    tar.read = mt_read;
+    tar.write = mt_write;
+    tar.seek = mt_seek;
+    tar.close = mt_close;
+    g_mt_off = 0;
+
+    CHECK(mtar_read_header(&tar, &h) == MTAR_ESUCCESS);
+    CHECK(kstrcmp(h.name, "etc/system.cfg") == 0);
+    CHECK(h.size == 15);
+    CHECK(h.type == MTAR_TREG);
+
+    /* 本体 + padding + 終端が全部ディスクに出ている */
     CHECK(kstrncmp((const char *)got + 512, CFG_TEXT, 14) == 0);
     for (i = 527; i < TAR_SIZE; i++) CHECK(got[i] == 0);
 }
 
 static void case_tar_sequence(void)
 {
-    u32 bytewise, blockwise;
+    u32 sectors, writes, minsz;
 
     disk_setup(); tree_setup();
     create_empty(ARCHIVE);
-    bytewise = tar_replay_bytewise();
+    sectors = tar_create_real();
+    writes = g_mt_writes;
+    minsz = g_mt_min;
     archive_verify();
     disk_teardown();
 
-    disk_setup(); tree_setup();
-    create_empty(ARCHIVE);
-    blockwise = tar_replay_blockwise();
-    archive_verify();
-    disk_teardown();
+    report("  P5 tar c (real microtar): sys_write=");
+    report_u(writes);
+    report(" calls, smallest=");
+    report_u(minsz);
+    report("B, bytes=");
+    report_u(g_mt_bytes);
+    report(", total=");
+    report_u(sectors);
+    report(" sectors\n");
 
-    report("  P5 tar c via microtar (1523 writes): total=");
-    report_u(bytewise); report(" sectors\n");
-    report("  P5 tar c via 4 x 512B writes      : total=");
-    report_u(blockwise); report(" sectors\n");
-    report("  P5 caller-side multiplier         : x");
-    report_u(bytewise / blockwise); report("\n");
+    /* padding をブロック単位で書いていること。1 バイト書きに戻ったら
+     * ここで落ちる (直し前は 1523 回 / 最小 1B)。 */
+    CHECK(g_mt_bytes == TAR_SIZE);
+    CHECK(writes <= 8);
+    CHECK(minsz >= 15);
 }
 
 /* P6: 読み側 — 512B 読み 1 回 */

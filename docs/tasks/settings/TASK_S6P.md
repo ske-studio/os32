@@ -99,45 +99,60 @@ create 経路には backward seek 自体が出ない (`mtar_seek(last_header)` �
 
 ext2 だけで **2.6 倍**。15 秒 → 約 5.8 秒の見込み。
 
-## 3. A は PM へ — 残りの本丸 (推奨)
+## 3. A も直した (2 周目、PM が worktree に該当ファイルをコピーしたあと)
 
-`lib/microtar/` と `userland/cmds/tar.c` はこの worktree (基点 `4fd5fb4`) に
-まだ入っていない (PM の作業ツリーの未コミット分) ため、コーダー側では触っていない。
-
-### 直し方 (最小、microtar の外部仕様は変えない)
-
-`lib/microtar/microtar.c` の `write_null_bytes()` をブロック単位にする。
-OS32 版には既に「OS32 追加」の節があるので、そこと同じ体裁で:
+`lib/microtar/microtar.c` の `write_null_bytes()` を 512 バイト単位にした。
+上流の外部仕様 (書く中身・`tar->pos` の勘定・戻り値) は一切変えていない。
+`lib/microtar/README.OS32` の改変一覧に **4 点目**として記録済み。
 
 ```c
-/* OS32: 元は 1 バイトずつ twrite していた。ext2 は sys_write 1 回につき
- * 10 セクタ前後の固定費があるので、15B のファイル 1 本でも padding だけで
- * 1521 回 = 15000 セクタ以上になり、15 秒を超えていた (票 S6-P)。 */
 static int write_null_bytes(mtar_t *tar, int n) {
-  static const char nul[512];        /* .bss = 全部 0 */
+  static const char nul[512];       /* const = .rodata、全部 0 */
   int err;
   while (n > 0) {
     int chunk = (n > (int)sizeof(nul)) ? (int)sizeof(nul) : n;
     err = twrite(tar, nul, (unsigned)chunk);
-    if (err) return err;
+    if (err) {
+      return err;
+    }
     n -= chunk;
   }
   return MTAR_ESUCCESS;
 }
 ```
 
-- `twrite()` は `tar->pos += size` を自分でやるので、位置の勘定は変わらない。
-- `static const char nul[512]` は .bss (`const` なので .rodata) の 512B。
-  外部プログラムのスタックは細いので、自動変数にしないこと。
-- C89 ([C1]) — 宣言はブロック先頭、`//` を使わない。
+- `nul[]` は `static` — 外部プログラムのスタックは細いので自動変数にしない。
+- C89 ([C1])。`i386-elf-gcc -std=gnu89 -Wall -Wextra -Werror
+  -Wdeclaration-after-statement` で通ることを `test_tar_cmd.py` の
+  `build_target` が毎回見る。
 
-これで `tar c /tmp/e8.tar /etc/system.cfg` の `sys_write` は 1523 → 4 回、
-I/O は **68 セクタ ≈ 0.03 秒** になる。
+### 実測 (`tools/tests/ext2_write_io_host.c` の P5、実物の microtar を #include)
 
-### ついでに見ておく値
+`tar c /tmp/e8.tar /etc/system.cfg`:
 
-`userland/cmds/tar.c` の `TAR_CHUNK` (本体データの読み書き単位)。
-512B の倍数で、できれば 4KB 以上にしておくと展開側も同じ倍率で効く。
+| | RED (両方とも直す前) | 段 B だけ (ext2) | 段 A + B |
+|---|---|---|---|
+| `sys_write` 回数 | 1523 | 1523 | **5** |
+| いちばん小さい書き込み | 1B | 1B | **15B** |
+| セクタ I/O 合計 | 39602 | 15258 | **78** |
+| 0.38ms/セクタ での見込み | 15.0 秒 | 5.8 秒 | **0.03 秒** |
+
+5 回の内訳は `512 / 15 / 497 / 512 / 512` (ヘッダ / 本体 / padding / 終端 2 本)。
+書庫は `mtar_read_header()` で読み直して名前・サイズ・型・本体・終端のゼロまで
+確認している。P5 は `writes <= 8` / `minsz >= 15` を表明するので、1 バイト書きに
+戻ればこの試験が落ちる。
+
+### 併せて直したもの
+
+`userland/cmds/tar.c` の `collect_cb()` が `(void)ctx;` のあとに `int len;` を
+置いていて [C1] (宣言はブロック先頭) に反していた。実機のビルドフラグには
+`-Wdeclaration-after-statement` が無いので通っていたが、`test_tar_cmd.py` に
+足したクロスコンパイル段で落ちたので直した。
+
+### ついでに見ておく値 (未着手、PM 判断)
+
+`userland/cmds/tar.c` の `TAR_CHUNK` (本体データの読み書き単位、現在 8192B)。
+512B の倍数なのでこのままで問題ないが、大きくすると展開側も同じ倍率で効く。
 
 ## 4. 手を出さなかった案 (規模の見積り付き)
 
@@ -152,13 +167,15 @@ I/O は **68 セクタ ≈ 0.03 秒** になる。
 ## 5. 残り: ゲストでの確認 (PM)
 
 1. `make clean` は不要 (KAPI は触っていない)。`make kernel` → `make deploy-kernel`
-   ([D1] NP21/W 停止)。
-2. §3 の microtar 修正を入れたら `make external` (tar は userland/cmds)。
-3. 期待値:
-   - microtar 修正**なし**で `tar c /tmp/e8.tar /etc/system.cfg` → 15 秒超 → **約 6 秒**
-     (`/api/cmd` のタイムアウトは 15s なので通るはず、[V3] は守ること)
-   - microtar 修正**あり** → **1 秒未満**
-4. `tar t` / `tar x` で書庫の中身が今までどおりであること。
+   ([D1] NP21/W 停止) — 段 B (ext2) はカーネル側。
+2. `make programs` (または `make all`) → `make deploy` → ゲストで `hsync` —
+   段 A (microtar / tar) はユーザーランド側。`/bin/tar.bin` が新しくなったことを
+   `ls -l` のサイズで確かめる ([V1] / [V4]、文言で判断しない)。
+3. 期待値: `tar c /tmp/e8.tar /etc/system.cfg` が 15 秒超 → **1 秒未満**
+   (ホスト実測で 78 セクタ ≈ 0.03 秒 + シェルの往復)。
+   `/api/cmd` のタイムアウトは縮めないこと ([V3])。
+4. `tar t` / `tar x` で書庫の中身が今までどおりであること。少し大きいもの
+   (`tar c /tmp/bin.tar /bin` のような数百 KB) でも往復すること。
 5. 回帰の目: `cp` / `cat >` / SQLite (`cfg` コマンド) が壊れていないこと。
    ext2 の空き数がずれると `df` が合わなくなるので、書き込みのあと `df` と
    再起動後の `df` を突き合わせるのが早い。

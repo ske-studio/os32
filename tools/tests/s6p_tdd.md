@@ -2,9 +2,13 @@
 
 票: S6-P / 観測は [`docs/tasks/settings/TASK_S6.md`](../../docs/tasks/settings/TASK_S6.md) 「PM 受入記録」
 診断: [`docs/tasks/settings/TASK_S6P.md`](../../docs/tasks/settings/TASK_S6P.md)
-実装: `fs/ext2_ctx.h` / `fs/ext2_super.c` / `fs/ext2_inode.c` / `fs/ext2_dir.c` / `fs/ext2_vfs.c` / `fs/ext2_priv.h`
+実装 (段 B, ext2): `fs/ext2_ctx.h` / `fs/ext2_super.c` / `fs/ext2_inode.c` / `fs/ext2_dir.c` /
+      `fs/ext2_vfs.c` / `fs/ext2_priv.h` / `fs/ext2_fmt.c`
+実装 (段 A, 呼び出し側): `lib/microtar/microtar.c` の `write_null_bytes()`
+      (`lib/microtar/README.OS32` 改変点 4) / `userland/cmds/tar.c` ([C1] 修正)
 試験: `tools/tests/ext2_write_io_host.c` + `test_ext2_write_io.py`
       (`make check-vfs-mount-dev-host` に登録、`build/sdk.mk`)
+      / `tools/tests/test_tar_cmd.py` (`check-tools-host`)
 
 ## 様式
 
@@ -21,6 +25,15 @@
 4. 数えるのは **512B セクタ単位の I/O 回数** = `ide_read_sector_chs` /
    `ide_write_sector_chs` の呼び出し回数。ext2 の 1KB ブロック 1 本は
    `ext2_read_block` / `ext2_write_block` が必ずセクタ 2 本に割る。
+4b. 書庫を作る側 (段 A) も実物 — `lib/microtar/microtar.c` をそのまま
+   `#include` し、`mtar_t` の read/write/seek に `ext2_vfs_*_stream` を挿す
+   (`userland/cmds/tar.c` の `mt_read` / `mt_write` / `mt_seek` と同じ形)。
+   32bit の glibc ヘッダが無い環境なので、microtar が include する
+   `<stdio.h>` / `<stdlib.h>` / `<string.h>` は
+   `tools/tests/mtar_freestanding/` の最小シムで埋め、`sprintf` ("%o" /
+   "%06o" だけ) と `strcpy` / `strcmp` / `strlen` の実体は試験側が持つ。
+   **回数は模型ではなく実測**なので、padding が 1 バイト書きに戻れば
+   P5 が落ちる。
 5. `u32` は `unsigned long` なので、ホストも **ILP32 で組む**
    (`-m32`)。この環境には 32bit の glibc が無いので、`con_sink_host.c` と同じく
    `-nostdlib` + Linux の `int 0x80` で write/exit する。
@@ -31,13 +44,13 @@
 `tar c /tmp/e8.tar /etc/system.cfg` (15B のファイル 1 本 → 書庫 2048B) が
 `lib/microtar/microtar.c` 経由で出す `sys_write` をそのまま並べる:
 
-| microtar | 出る sys_write |
-|---|---|
-| `mtar_write_file_header` → `twrite(512)` | 512B × 1 |
-| `mtar_write_data(15)` → `twrite(15)` | 15B × 1 |
-| 同上 → `write_null_bytes(497)` | **1B × 497** |
-| `mtar_finalize` → `write_null_bytes(1024)` | **1B × 1024** |
-| 合計 | **1523 回** |
+| microtar | 直し前の sys_write | 直し後 (512B 単位) |
+|---|---|---|
+| `mtar_write_file_header` → `twrite(512)` | 512B × 1 | 512B × 1 |
+| `mtar_write_data(15)` → `twrite(15)` | 15B × 1 | 15B × 1 |
+| 同上 → `write_null_bytes(497)` | **1B × 497** | 497B × 1 |
+| `mtar_finalize` → `write_null_bytes(1024)` | **1B × 1024** | 512B × 2 |
+| 合計 | **1523 回** | **5 回** |
 
 `write_null_bytes()` (microtar.c:111) は `for (i = 0; i < n; i++) twrite(tar, &nul, 1);`
 — 1 バイトずつ書く。後方 `lseek` は create 経路には出ない (`mtar_seek(last_header)` は
@@ -52,7 +65,7 @@ read 側)。`lseek` 自体は `fs/vfs_fd.c` の `vfs_seek` が `VfsFile.offset` 
 | P2 | 既存ブロックへの 512B 書き込み 1 回 |
 | P3 | 1 バイト追記 1 回 (microtar の padding と同じ形) |
 | P4 | 後方 lseek は 0 セクタ / 戻った先への 512B 書き直し |
-| P5 | `tar c` の呼び出し列 1523 回ぶんの合計 と、512B 単位で書いた場合の合計 |
+| P5 | **実物の microtar** で `tar c` を走らせ、`sys_write` の回数・最小の書き込み・合計セクタを数える |
 | P6 | 読み側 (512B 読み 1 回) |
 | P7 | write-through の契約 — 別インスタンスでマウントし直して中身・サイズ・空き数が一致 |
 | P8 | 経路の記憶が名前空間に追従する (unlink → 再作成 / rename / rmdir → 同名ファイル / 2 インスタンス同時) |
@@ -67,9 +80,7 @@ read 側)。`lseek` 自体は `fs/vfs_fd.c` の `vfs_seek` が `VfsFile.offset` 
   P3 write(1B @527, existing) : rd=18 wr=8  total=26 sectors
   P4 lseek(back)              : rd=0  wr=0  total=0  sectors
   P4 rewrite header(512B @0)  : rd=18 wr=8  total=26 sectors
-  P5 tar c via microtar (1523 writes): total=39602 sectors
-  P5 tar c via 4 x 512B writes      : total=108 sectors
-  P5 caller-side multiplier         : x366
+  P5 tar c (real microtar): sys_write=1523 calls, smallest=1B, bytes=2048, total=39602 sectors
   P6 read(512B @512)          : rd=12 wr=0  total=12 sectors
   P9 alloc=28 vs no-alloc=26 sectors
 ```
@@ -91,7 +102,7 @@ read 側)。`lseek` 自体は `fs/vfs_fd.c` の `vfs_seek` が `VfsFile.offset` 
 9 + 4 = 13 ブロック × 2 セクタ = **26 セクタ**。実測と一致。
 15 秒 / 39602 セクタ ≈ 0.38ms/セクタ = NP21/W の PIO 1 セクタの実測値と整合する。
 
-## GREEN (修正後)
+## GREEN 1 (段 B — ext2 だけ直した時点)
 
 ```
   P1 write(512B @0, new block): rd=18 wr=10 total=28 sectors   (変化なし — 確保があるので sync が要る)
@@ -99,9 +110,7 @@ read 側)。`lseek` 自体は `fs/vfs_fd.c` の `vfs_seek` が `VfsFile.offset` 
   P3 write(1B @527, existing) : rd=6  wr=4  total=10 sectors   (26 → 10)
   P4 lseek(back)              : rd=0  wr=0  total=0  sectors
   P4 rewrite header(512B @0)  : rd=6  wr=4  total=10 sectors   (26 → 10)
-  P5 tar c via microtar (1523 writes): total=15258 sectors     (39602 → 15258、x2.60)
-  P5 tar c via 4 x 512B writes      : total=68 sectors         (108 → 68)
-  P5 caller-side multiplier         : x224
+  P5 tar c (real microtar): sys_write=1523 calls, smallest=1B, bytes=2048, total=15258 sectors
   P6 read(512B @512)          : rd=4  wr=0  total=4  sectors   (12 → 4)
   P9 alloc=28 vs no-alloc=10 sectors
   P10 metadata always reaches the disk
@@ -110,6 +119,33 @@ SUMMARY 10/10 PASS
 
 残る 10 セクタ (5 ブロック I/O) の内訳: inode 読み / データブロック読み /
 データブロック書き / inode 読み直し / inode 書き。
+
+ext2 だけで 2.6 倍。ただし **1523 回の 1 バイト書きは 1523 回のまま**なので、
+2KB の書庫に 15258 セクタ ≈ 5.8 秒。本丸は呼び出し側だった。
+
+## GREEN 2 (段 A — `write_null_bytes()` を 512B 単位にした後)
+
+`lib/microtar/microtar.c` の `write_null_bytes()` をブロック単位に
+(README.OS32 の改変点 4)。同じ P5 を実物の microtar で走らせた実測:
+
+```
+  P5 tar c (real microtar): sys_write=5 calls, smallest=15B, bytes=2048, total=78 sectors
+SUMMARY 10/10 PASS
+```
+
+| | RED | GREEN 1 (ext2) | GREEN 2 (+ microtar) |
+|---|---|---|---|
+| `tar c` の `sys_write` 回数 | 1523 | 1523 | **5** |
+| いちばん小さい書き込み | 1B | 1B | **15B** |
+| セクタ I/O 合計 | 39602 | 15258 | **78** |
+| 0.38ms/セクタ での見込み | 15.0 秒 | 5.8 秒 | **0.03 秒** |
+
+5 回の内訳は `512 / 15 / 497 / 512 / 512` (ヘッダ / 本体 / padding / 終端 2 本)。
+書庫の中身は `mtar_read_header()` で読み直して名前・サイズ・型・本体・終端の
+ゼロを確認している (P5 の `archive_verify`)。
+
+P5 は `writes <= 8` と `minsz >= 15` を表明するので、padding が 1 バイト書きに
+戻ったらこの試験が落ちる。
 
 ## 直した 2 点 (契約は変えていない)
 
@@ -162,10 +198,17 @@ rmdir) は必ずそのどちらかを通る。
 | inode が 1 バイトも変わっていなければ `ext2_write_inode` ごと省く | 上書き専用 | `ext2_current_time()` が定数なので、サイズが伸びない上書きなら効く。tar の create はサイズが毎回伸びるので効かない |
 | ブロックキャッシュ層の新設 | 大 | write-through の契約が変わる。票の範囲外 |
 
-## 本丸は呼び出し側
+## 併せて直したもの
 
-P5 の `x224` がそれ。ext2 を 2.6 倍速くしても 1523 回の 1 バイト書き込みは
-1523 回のままで、**2KB の書庫に 15258 セクタ**を使う (≈5.8 秒)。
-`write_null_bytes()` をブロック単位にすれば呼び出しは 1523 → 4〜6 回、
-I/O は 68 セクタ (≈0.03 秒) になる。直し方は
-[`docs/tasks/settings/TASK_S6P.md`](../../docs/tasks/settings/TASK_S6P.md) §3。
+`userland/cmds/tar.c` の `collect_cb()` が `(void)ctx;` のあとに `int len;` を
+置いていて [C1] (宣言はブロック先頭) に反していた。実機のビルドフラグには
+`-Wdeclaration-after-statement` が無いので通っていたが、`test_tar_cmd.py` に
+足したクロスコンパイル段 (`-Werror` 付き) で落ちたので直した。
+
+## 試験の登録
+
+- `build/sdk.mk` の `check-vfs-mount-dev-host` に
+  `python3 -B tools/tests/test_ext2_write_io.py` を 1 行足した (既存の ext2 試験群)。
+- `test_tar_cmd.py` は `check-tools-host` 側に PM が登録済み。ここには
+  `i386-elf-gcc -Werror` のクロスコンパイル段 (`build_target`) を足した —
+  vendor の `microtar.c` が実機フラグで 1 行も直さずに通ることの表明。

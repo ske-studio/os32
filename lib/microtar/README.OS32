@@ -20,7 +20,7 @@ I/O は `mtar_t` の関数ポインタ (read/write/seek/close) なので、OS32 
 を挿すだけでよい。挿す側は `userland/cmds/tar.c`。
 
 
-改変点 (3 つだけ。ここ以外は上流そのまま)
+改変点 (4 つだけ。ここ以外は上流そのまま)
 -----------------------------------------
 
 `microtar.h` は**無改変**。改変は `microtar.c` だけで、いずれも
@@ -44,6 +44,19 @@ I/O は `mtar_t` の関数ポインタ (read/write/seek/close) なので、OS32 
    宛先を溢れさせる (上流のバグ)。長さで止め、終端できないときは
    `MTAR_EFAILURE` を返す。`userland/cmds/tar.c` は作成時に 99 バイトを
    超える名前を拒否するので、作る側と読む側で対称になる。
+
+4. **`write_null_bytes()` を 512 バイト単位に** — 上流は
+   `for (i = 0; i < n; i++) twrite(tar, &nul, 1);` で **1 バイトずつ**
+   書いていた。OS32 の ext2 は `sys_write` 1 回につき 10 セクタ前後の固定費が
+   あるので (パス解決 + inode の read-modify-write + データブロックの
+   read-modify-write)、15 バイトのファイル 1 本を束ねるだけでも padding 497 回
+   + 終端 1024 回 = 1521 回の `sys_write` になり、`tar c` が 15 秒を超えていた
+   (票 S6-P)。`static const char nul[512]` (.rodata) を使ってブロック単位で
+   書く。呼び出しは 1523 回 → **5 回**、セクタ I/O は 15258 → **78**。
+   書く中身 (ゼロ) も位置の勘定 (`twrite` が `tar->pos` を進める) も
+   上流と同じ。実測は `tools/tests/s6p_tdd.md`、診断は
+   `docs/tasks/settings/TASK_S6P.md`。
+   `nul[]` を自動変数にしないこと — 外部プログラムのスタックは細い。
 
 
 形式について (ホストの Python `tarfile` との互換)

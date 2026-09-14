@@ -54,6 +54,29 @@ def build(tmp):
     return exe
 
 
+def build_target(tmp):
+    """実機と同じフラグでクロスコンパイルも通ること ([C1] C89/GNU89)。
+
+    vendor の microtar.c は i386-elf でも 1 行も直さずに通る必要がある
+    (README.OS32 の改変点はこの制約のためにある)。
+    """
+    flags = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
+             "-fno-stack-protector", "-nostdlib", "-mno-red-zone", "-fcommon",
+             "-O2", "-Wall", "-Wextra", "-Werror",
+             "-Wno-unused-parameter", "-Wno-sign-compare",
+             "-Wdeclaration-after-statement",
+             "-D__OS32_USERLAND__", "-DMTAR_NO_STDIO"]
+    includes = ["-I" + str(ROOT / p) for p in
+                (".", "include", "sdk/include", "sdk/include/os32",
+                 "userland/lib", "lib/microtar")]
+    includes.append("-I/usr/local/cross/i386-elf/include")
+    for src in (MICROTAR, SRC):
+        subprocess.run(["i386-elf-gcc", *flags, *includes, "-c", str(src),
+                        "-o", str(tmp / (src.stem + ".o"))],
+                       cwd=ROOT, check=True)
+    print("TARGET i386-elf GNU89 -Werror COMPILE PASS", flush=True)
+
+
 def run(exe, cwd, *args):
     p = subprocess.run([str(exe), *args], cwd=cwd,
                        capture_output=True, text=True)
@@ -309,6 +332,7 @@ if __name__ == "__main__":
             print(f"CASE {case}", flush=True)
             current_case[0] = case
             globals()["case_" + case](exe, tmp)
+        build_target(tmp)
     total = len(wanted)
     print(f"SUMMARY {total - len(failed_cases)}/{total} cases PASS, "
           f"{len(failures)} assertion failures", flush=True)
