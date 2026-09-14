@@ -64,3 +64,22 @@ non-blocker (polish、受入後に): N1 子が起動前に drip した分がリ�
 
 ## 8. ゲスト受入の要件 ([D1])
 N4a で shlib が nfunc 111 になった (host_* 105〜110) ので、N4b のアプリは**新 shlib が要る** — `make deploy` → `hsync sys` (shlib は /sys/lib)。N4a-fix は `exec/exec.c` (カーネル) を変えたので**カーネル再配備** ([D1]、NP21/W 停止) が要る (子終了の注入破棄)。受入項目: ファイラで P → `Printed N page(s)` + ホスト spool、端末 F9 で可視画面をコピー → 別所で F10 貼り付け往復、走行中の子へ F10 で欠けず drip、Prompt で 1 行、busy 端末で捨てる。Agent は `--clip auto|wsl|file:` + `--spool-dir` で起動。
+
+## 9. ゲスト受入で見つかった退行 (2026-09-14) — **N4 受入は保留**
+配備 (kernel + shlib + apps) 後のゲストで、**gshell から起動したアプリが必ず CPL=3 フォールトで即死する**。N4 の受入 (ファイラ印刷 / 端末コピペ) はこのため未実施。
+
+**観測 (すべて実測)**
+- `os32gui` で GUI は正常起動 (デスクトップ・Start メニュー・サブメニュー・モーダルはすべて応答)。
+- Start → File Manager / Programs → alloc_demo のどちらも**ウィンドウが出ずタスクバーにも出ない**。
+- `fault_kill_count` を起動前後で読むと **1 → 2**、つまり起動ごとに 1 回フォールトして kill されている (`fault_generation` は 0 のまま = エミュレータ側の別計数)。
+- ゲストのバイナリは最新: `/usr/bin/filer.bin` 45,496 B (ホストと一致)、`/sys/lib/libos32gui.shlib` 113,752 B (ホストと一致、ヘッダ `nfunc=111` / `text_pages=24` / `data_pages=8`)。カーネル kselftest 87/0。
+- **CUI モードから `filer` を直接起動すると load して走る** (GUI イベント待ちでハング = 正常)。**gshell が動いている状態で 2 本目として起動すると落ちる**、という差。
+
+**疑い (未確定)**: N4a で shlib の per-app `.data/.bss` が **4 → 8 ページ** に倍増した (libos32host の `g_stream_buf` = `HOST_STREAM_BUF` 16KB が shlib にリンクされたため。`text_pages` も 22 → 24)。gshell が 1 本目を掴んだ状態での **2 本目の `shlib_addrspace_attach`** が怪しい。ただし `EXEC_DYN_RESERVE` は 1MB (256 ページ) で 8 ページ × 数本は足り、`SHLIB_MAX_ATTACH` も 4 なので**単純な容量不足では説明がつかない**。帯域計算 (`data_vaddr=0x418000`、master=`0x4F8000`) も範囲内。
+
+**次の手 (要 [D1] 再配備)**
+1. `HOST_STREAM_BUF` を 16KB → 4KB に落として `data_pages` を戻し、再ビルド・再配備して切り分ける (これで直れば shlib のサイズ増加が原因と確定。print_stream の宣言長規則は「詰めた実長で宣言」なのでバッファ縮小でも正しさは保たれる)。
+2. 直らなければ 2 本目 attach の写像を計装 (`shlib_addrspace_attach` の kprintf、`/api/regs` でフォールト番地) して原因を特定。
+3. 退行の切り分けのため、必要なら配備前の NHD バックアップ `os32.nhd.bak-n4-20260914-223752` (LGY-98 既定カーネル + 旧 shlib/apps) に戻して A/B する。
+
+**現状のゲスト**: GUI からアプリを起動できない状態。CUI (`os32gui` を抜けた状態) と CUI コマンド (`wget`/`lpr`/`hclip`/`hdate` など) は正常。
