@@ -52,3 +52,8 @@ shlib のジャンプ表に host_* を末尾追記。**cfg は 101〜104 (4 本)
 **N4b (アプリ層)**:
 - コピペのキー候補は **F6〜F10** (WM が横取りせず `from_key` も空)。**gshell が F キーを `GUI_EV_KEY` でアプリへ配るかを N4b で先に確認**してから確定。
 - Prompt 貼り付けの 1 行が `LINE_MAX` (160) 超は `Line::push` が丸ごと捨てる → 切るか通知。attach 貼り付けは TAB/LF 以外の制御バイト (ESC 等) を落とす (子の暴走防止)。コピーはセルの NUL / ESC を空白に置換してから `clip_put`。
+
+## 6. N4a 実装レビュー (Fable、2026-09-14) → N4a-fix
+判定 Request changes、blocker 1 件。6 ラッパー・kapi 配線・ジャンプ表・stub・utf8core は設計どおり。
+- **B1 (blocker)**: `exec/exec.c:865` の子終了注入破棄が「読み手以外の**あらゆる**アプリ退場」で発火し、無関係な GUI アプリが畳まれると貼り付け中のリングが空になり子が 256B 欠けた貼り付けを受ける (新規退行)。→ 条件を **`launch_child(con_sink_reader_get()) == id`** (退場したのが端末の子のときだけ破棄) に絞る (`launch_child` は不正 id で 0)。受入: `con_sink_host.c` の (9) 写しに (9a) を足し「無関係 ID で pending 減らない / 読み手の child で 0」。
+- nb: (1) host_fake の本文を可変チャンクにし out_sink の「cap 超過後も数える」を 2 チャンクで固定、(2) con_sink_host / multiapp_impl_host に破棄条件の試験、(3) `copy_name` の空名・制御文字のみは `HOST_EINVAL` か lpr の "file" 既定に揃える (空白は Agent が許すので落とさない)、(4) url 1396B 超 / name・path 256B 超 / NULL の反例を host_tests に、(6) `MEMORY_BUDGET.md` に per-app .bss 4→8 ページ (+16KB/GUI アプリ) を記録。
