@@ -857,6 +857,12 @@ static void exec_reclaim_owned(int id)
     if (id != APP_ID_SHELL && con_sink_is_enabled() &&
         con_sink_reader_get() != id) {
         con_sink_push_exit(id);
+        /* (9a) 端末**配下の子**が畳まれたら、その子の stdin に宛てて端末が
+         * 注入リングへ積んだ打鍵 (票 N4 の貼り付け) の残りを捨てる。読み手
+         * (端末) の退場は (8) が扱うが、子の退場では (8) の照合が外れて残る
+         * ため、放っておくと次の子が食う (打鍵でも起きる既存挙動)。注ぎ手
+         * (端末) は生きているので con_sink の所有規則には触れず内容だけ捨てる。 */
+        kbd_inject_discard();
     }
     /* (9b) 起動要求表 (票 T9 D3)。**ID だけを使う** — 正常終了は AppSlot を
      * 解放した後、exec_kill は解放の前にここへ来るので、スロットの欄を読むと

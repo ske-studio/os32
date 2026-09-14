@@ -505,17 +505,23 @@ SHLIB_GUI_LIB = $(RUST_TARGET_DIR)/liblibos32gui.a
 $(SHLIB_GUI_LIB): FORCE $(RUST_KAPI_RS)
 	cd $(RUST_PROGRAMS_DIR) && cargo build --release -p libos32gui
 
-userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ) $(LIBCFG_OBJ)
+# libos32host.a (票 N4) も静的リンク: 表 105..=110 の host_* が呼ぶ。`kapi` は
+# libos32cfg (cfg_backend.c) と共用で SHLIB_GUI_LIB (cfgro.rs) が供給する
+# (--allow-multiple-definition 済み。nm で kapi 定義は 1 本を確認)。
+# メモリ: libos32host の bss 16KB (print_stream の g_stream_buf) で shlib の
+# per-app .data/.bss が 4 → 8 ページ (data_pages=8、K3 がアプリごとに複製)。
+# GUI アプリ 1 本あたり +16KB。共有 .text は host_* ぶんだけ増える。
+userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ) $(LIBCFG_OBJ) $(LIBHOST_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/shlib.ld -nostdlib --nmagic --gc-sections \
 		--allow-multiple-definition -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib \
 		-L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ \
-		$(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
+		$(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(LIBHOST_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
 
 userland/libos32gui.raw: userland/libos32gui.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/libos32gui.shlib: userland/libos32gui.raw userland/libos32gui.elf tools/mkshlib.py
-	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 50
+	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 51
 
 shlib: userland/libos32gui.shlib
 

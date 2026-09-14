@@ -232,8 +232,19 @@ pub const E_CFG_GET_TEXT: usize = 102;
 pub const E_CFG_SET_INT: usize = 103;
 pub const E_CFG_SET_TEXT: usize = 104;
 
+/* --- 105..=110: v1.4 Host Services (票 N4 §1) ---
+ *
+ * libos32host.a を呼ぶ薄い extern "C" ラッパー。open〜close の多段・AGAIN
+ * ループ・ストリーミングは C 側が隠す。エラーは `HOST_E*` をそのまま返す。 */
+pub const E_HOST_GET: usize = 105;
+pub const E_PRINT_TEXT: usize = 106;
+pub const E_PRINT_FILE: usize = 107;
+pub const E_CLIP_GET: usize = 108;
+pub const E_CLIP_PUT: usize = 109;
+pub const E_HOST_TIME: usize = 110;
+
 /// ジャンプ表の本数 (末尾追記のたびに増やす)。
-pub const SHLIB_NFUNC: usize = 105;
+pub const SHLIB_NFUNC: usize = 111;
 
 const _: () = assert!(SHLIB_NFUNC <= OS32_SHLIB_MAX_FUNC);
 
