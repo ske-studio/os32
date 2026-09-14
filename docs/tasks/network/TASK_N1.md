@@ -187,3 +187,33 @@ RED → GREEN の詳細・ケース名は [`tools/tests/n1_tdd.md`](../../../too
 - **66114 は要求した total に依存しない固定値** (102400 でも 131072 でも同じ) → 比例しない = どこかの固定境界 (≈ 64KB = 65536)。**L3 の 65536 ちょうどは通る**ので閾値は 65536 の直後。
 仮説 (コーダーが確定): (a) Agent の配送が WINDOW 停滞で ~64KB 送って EOF を早出しし、OS32 が EOF で `length = recv_bytes` に詰め直して完了扱い; (b) OS32 の WINDOW credit / recv_bytes / ack が 64KB 付近で頭打ち (`link_credit_pages`/`link_stream_free`、Agent の deliver の `sent`/`acked`/`credit`/`stall`)。**実害**: N3 の `wget` で 64KB 超のファイルが途中で切れる。小さい GET / PRINT / CLIP には影響しない。
 受入: 贋 NIC で >64KB のストリームを流すホスト TDD (OS32 側で再現するか) と、実 Agent の `BULK 200000` (Agent 側なら再現)。両方で完走を assert。`link_l2_eof` を完了判定に使わない契約 (N0 §2c) を破っていないか確認。
+
+#### F6 コーダー診断 (2026-09-14、N1-fix2) — 原因はコードではなく emulated NIC 経路
+ホスト TDD (`tools/tests/net_link_host.c`) に >64KB を流す 4 ケースを追加し、**両仮説を否定**した。
+記録は `tools/tests/n1_tdd.md` §7。要旨:
+
+- **仮説 (a)/(b) とも不成立 (GREEN)**: 実 Agent + 贋 NIC で `GET /pattern/200000` (host_read 経路)、
+  **ゲストと同じ関数** `link_l2_stream(200000,512,100)`・`link_l1_bulk(400,512)=204800B`、
+  さらに Agent もタイマも介さない台本の順序どおり >64KB (length=70000) が **全部完走** (35/35 PASS)。
+- **length は化けない**: RESPONSE `<HI` (u32) を `rd32(pl+2)` で読み、`link_host_status` が `ln==200000`
+  を返すことを assert 済み。**EOF は完了を短絡しない**: `LINK_OP_EOF` は `link_l2_eof/l1_done` を
+  立てるだけで `e->length` に触れず、完了は `read_bytes>=length` のみ (契約 N0 §2c を保持)。
+- **u16/64KB 境界は無い**: 転送量に効く量は全て `u32` (`length`/`recv_bytes`/`read_bytes`/
+  `link_l1_bytes`/`link_l2_read`/`stream_count/head`/`ack_seq`)。u16 は epoch/length/sess・credit・
+  plen (≤1400) だけ。**credit も常に小さい** (`stream_free/256 ≤ 32` が上限 → credit ≤ 20 ページ →
+  Agent inflight ≤ 3 フレーム)。ゲストと同じ credit regime を贋 NIC でも通す (L1 windows=134)。
+- **原因の所在**: link.c / host_agent.py は同一関数・同一 Agent・同一 credit で >64KB を通すので、
+  差分は **transport のみ** = NP21/W (ai-debug) の LGY-98 エミュレーション。`net_socket.c` の
+  `SOCK_RXMAX 65536` は 1 フレーム上限 (無関係)、emulated NE2000 リングは 48KB (`lgy98dev.h`
+  `NE2000_MEM_SIZE=0xC000`)。全カウンタ 0 + EOF 受信 + `recv=131` は「132+ の DATA が **OS32 の
+  dispatch へ届かない** (gap にならないのは EOF が別 op だから)」と整合。credit ≤3 inflight では
+  OS32 の 8 スロット rxq も 48KB リングも溢れないため、ドライバ取りこぼしではなく
+  **エミュレータ配送 (reader スレッド ↔ DMA 同期 / ai-debug fork の 64KB 付近挙動)** を疑う。
+- **コード修正なし** (契約を守り、再現しない現象に投機修正を当てない)。追加は回帰テスト 4 本のみ。
+- **PM/テスターへ**: `kernel-lgy98-link` + エミュレータ (テスターの領分) で確認 — Agent の `--pcap` で
+  132+ の DATA がワイヤに出ているか、np2netmon の RX drop、66114 到達後に時間を置いて
+  `link_l1_recv`/`ack_seq`/`nic.st.rx_dropped`/`resync` が動くか。詳細は n1_tdd.md §7-6。
+
+### F6 の PM 追加観測 (2026-09-14) — Agent の pcap で ack を確認
+N1-fix2 のコーダーは「原因は emulated NIC の取りこぼし (132 番以降が届かない)」と推定したが、**PM が同じ boot の Agent 受信 pcap (`n1fix_link.pcap`) を解析すると否定される**: OS32 が送った WINDOW/ACK の最大 ack は **rid 11 (L1 BULK 200) = 200、rid 12 (L2 STREAM 256) = 256、rid 13 (L3 65536 = 128) = 128**。ack = OS32 が順序どおり受けた最終 seq なので、**OS32 は全フレームを受信・ACK している** (emulator は落としていない)。にもかかわらず `link_l1_recv=131` / `link_l1_bytes=66114` / `link_l2_read=66114` で自己試験は 66114 B で完了扱い。
+→ **emulator drop ではなく、ゲストでのみ ack (受信) と recv/read カウンタ・消費が乖離する**。ホスト TDD (決定的に step) では再現せず (>64KB の 4 ケース 35/35 PASS)、コード経路は正しい。疑いは **`link_tick` (100Hz タイマ) と自己試験の `LINK_IDLE` (sti;hlt) ループの再入 / 競合** がゲストの実時間でのみ出るタイミング依存。深掘りにはゲスト計装 (MCP / トレース) が要る。**実害の範囲**: 自己試験 L1/L2 と N3 の 64KB 超 wget。GET ≤64KB / PRINT / CLIP / TIME は影響なし。**N1 のコア機能は受入可**。F6 は N3 の wget 受入で実サービス経路として再確認する (別途、深掘りはユーザー判断)。

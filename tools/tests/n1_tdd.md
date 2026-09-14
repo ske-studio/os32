@@ -334,3 +334,90 @@ SUMMARY 25/25 PASS      (変更なし)
 $ python3 -B tools/tests/test_kapi_db_v50.py
 SUMMARY 23/23 PASS      (F1 + N2c の v50_selftest 追加)
 ```
+
+## 7. F6 [N1-fix2] — 64KB を超えるストリームが 66114 B で止まる
+
+### 7-1. 症状 (PM がゲストで確定、TASK_N1 §4 F6)
+
+`check-net-l1` (`link_l1_bulk(200,512)` = 102400 B) と `check-net-l2`
+(`link_l2_stream(131072,512,100)`) が **どちらも 66114 B / 131 frame で停止**。要求 total に
+依存しない固定値・両 self-test の tick 予算が違う (1500 / 3000) のに同値 →
+レート/タイムアウトではなく 65536 直後の固定境界。`GET /pattern/65536` (ちょうど 64KB) は完走。
+ゲスト診断カウンタは全て 0 (resync/overflow/gaps/ooo/rt_fail/rx_dropped/retransmits)、
+`link_l1_done=1`/`link_l2_eof=1`。
+
+### 7-2. RED を狙ったホスト TDD (実 Agent + 台本、4 ケース)
+
+契約どおり >64KB を流し、OS32 が宣言 length ぶんを完走するかを見る。
+
+- `n1fix2_stream_over_64k_completes` — 実 Agent `GET /pattern/200000` を host_read 経路で全消費
+  (N3 wget と同じ L3 ストリーム)。
+- `n1fix2_l2_stream_over_64k_completes` — 実 Agent、**ゲストと同じ関数** `link_l2_stream(200000,512,100)`
+  (seq100 で 1 回欠落 → Go-Back-N 回復)。
+- `n1fix2_l1_bulk_over_64k_completes` — 実 Agent、`link_l1_bulk(400,512)` = 204800 B
+  (ゲスト `check-net-l1` の 2 倍)。
+- `n1fix2_scripted_inorder_over_64k` — **Agent もタイマも介さない台本**。length=70000 を宣言し、
+  512B DATA を seq 1..137 で順序どおり注ぎ、都度 host_read で消費。OS32 の受理 / length 保持 /
+  完了判定 (`read_bytes==length`) に 65536 の境界が無いことを決定的に確認。
+
+**結果: 4 ケースとも GREEN。F6 はホスト TDD で再現しない。**
+```
+n1fix2_stream_over_64k_completes        ok  (200000/200000)
+n1fix2_l2_stream_over_64k_completes     ok  (read=200000, bad=0, gaps=2 → 回復)
+n1fix2_l1_bulk_over_64k_completes       ok  (recv=400/400, 204800B)
+n1fix2_scripted_inorder_over_64k        ok  (got=70000, length 保持, EOF 非短絡)
+```
+
+### 7-3. 切り分け — Agent 側でも OS32 側 (コード) でもない
+
+- **length は化けない**: RESPONSE の `struct.pack("<HI", status, total)` (u32) を OS32 は
+  `rd32(pl+2)` で読む。`n1fix2_stream` は `link_host_status` が `ln==200000` を返すことを assert。
+- **EOF は完了を短絡しない**: 現行 `link_dispatch` の `LINK_OP_EOF` は `link_l2_eof/l1_done` を
+  立てるだけで `e->length` に触れない。完了は `link_host_read_stage` の `read_bytes>=length`
+  だけ (既存 `last_data_and_eof_loss` が「EOF だけでは完了にしない」を保証)。
+- **u16/符号の 64KB 境界は無い**: 転送量に効く量 (`e->length`/`recv_bytes`/`read_bytes`、
+  `link_l1_bytes`/`link_l2_read/bytes`、`link_stream_count/head`、`e->ack_seq/wseq`) は全て `u32`。
+  u16 は header の epoch/length/sess・credit・plen (≤1400) だけで、いずれも転送で 65535 を超えない。
+- **credit は常に小さく Agent は溢れさせない**: `link_credit_pages` は
+  `min(ring, qfree*6, stream_free/256) - 12`。`stream_free/256 ≤ 8192/256 = 32` が上限を握り、
+  credit ≤ 20 ページ → Agent の inflight ≤ 3 フレーム。ゲストと同じ regime を贋 NIC でも通し
+  (L1 は windows=134 で完走)、burst による emulated ring 溢れは起きえない。
+
+### 7-4. 原因の所在 (コードではなく emulated NIC 経路)
+
+link.c と host_agent.py は >64KB を正しく転送する (上記 4 ケース)。ゲスト self-test は同じ関数・
+同じ Agent・同じ credit regime。差分は **transport だけ** = NP21/W (ai-debug fork) の LGY-98
+エミュレーション。確認した点:
+
+- 台本経路: `net_socket.c` の `SOCK_RXMAX 65536` は **1 フレームの length 上限** (512B フレームには
+  無関係)。累積 64KB の上限は socket 層に無い。
+- emulated NE2000 リング (`lgy98dev.h`): `NE2000_PMEM_SIZE=32KB` / `NE2000_MEM_SIZE=48KB` (0xC000)。
+  64KB ではない。ソケット reader スレッド (`reader_thread` → `np2net_deliver` → `recieve_packet`
+  → `fd_read`) が非同期でリングへ書く。
+
+`link_l1_recv=131`/`link_l2_eof=1`/全カウンタ 0 は「OS32 が 131 DATA を順序どおり受けた後は EOF
+しか届かず (132+ が OS32 の dispatch へ届かない)、gap にならない (EOF は別 op)」と一致する。
+= 132 番以降の DATA が **emulated NIC 内で OS32 に見えず消える**。credit ≤3 inflight では OS32 の
+8 スロット rxq も 48KB リングも溢れないため、ドライバ層の取りこぼしではなく **エミュレータの
+配送 (reader スレッド ↔ ゲスト DMA の同期、または ai-debug fork 固有の 64KB 付近の挙動)** を疑う。
+
+### 7-5. 手元の実行結果 (GREEN)
+
+```
+$ python3 -B tools/tests/test_net_link.py --target
+... TARGET i386-elf GNU89 -Werror compile PASS
+SUMMARY 35/35 PASS      (F6 の >64KB 4 ケース追加、L3/L0/既存に回帰なし)
+$ python3 -B tools/tests/test_host_agent.py
+SUMMARY 25/25 PASS      (Agent 無変更)
+```
+
+### 7-6. PM / テスターへの引き継ぎ (ゲストで確認する点)
+
+コードは >64KB を通すので、次はゲストで transport を観測する:
+- Agent 側で配送数を数える (`--pcap` または log): `sent` が `nframes` に達するか、
+  132+ の DATA が **ワイヤに出ているか**。出ていれば emulated NIC 側の取りこぼし。
+- `/api/net` の np2netmon RX drop カウンタ (`NP2NETMON_RX`)。
+- ゲストの `link_l1_recv`/`ack_seq`/`nic.st.rx_dropped`/`nic.st.resync` を 66114 到達後も時間を置いて
+  複数回読み、止まっているか (Agent が resend していないか、emulated NIC が落とし続けているか)。
+- 64KB 直後で切れるなら ai-debug fork の socket/NIC 経路 (reader スレッドのバッファリング) を疑う。
+  これは `kernel-lgy98-link` ビルド + エミュレータ操作 (テスターの領分) が要る。

@@ -1417,6 +1417,114 @@ static void n2_rt_ok_resets_between_selftest_sections(void)
     agent_stop();
 }
 
+/* F6 [N1-fix2]: 64KB を超えるストリームを実 Agent から完走する。
+ * 修正前は要求 total によらず 65536 直後 (ゲストで 66114 B) で静かに停止した。
+ * GET /pattern は N3 wget と同じ L3 ストリーム経路 (host_read_stage) を通る。 */
+static void n1fix2_stream_over_64k_completes(void)
+{
+    static u8 buf[200000];
+    u32 st = 0, ln = 0, got;
+    i32 h;
+    u32 k;
+
+    if (agent_start() != 0) { check(0, "実 Agent を起動できない"); return; }
+    check(agent_up(200), "HELLO が確立しない");
+    h = link_host_open("GET /pattern/200000", 19, host_owner);
+    check(h >= 0, "host_open が失敗した");
+    if (h < 0) { agent_stop(); return; }
+    check(wait_status(h, &st, &ln, 500) == 0, "RESPONSE が届かない");
+    check(st == 200 && ln == 200000, "宣言 length が 200000 でない");
+    got = read_all(h, buf, sizeof(buf), 400000);
+    if (got != 200000) printf("    got=%u (expected 200000)\n", got);
+    check(got == 200000, "64KB 超の本文が完走しない (F6)");
+    for (k = 0; k < got; k++)
+        if (buf[k] != (u8)k) { check(0, "本文の内容が違う"); break; }
+    check(link_host_close(h, host_owner) == 0, "close が失敗した");
+    agent_stop();
+}
+
+/* F6 [N1-fix2]: 実 Agent で L2 STREAM を >64KB 流して完走する (ゲスト検査
+ * check-net-l2 = link_l2_stream(131072,512,100) と同じ経路、seq100 で 1 回欠落)。 */
+static void n1fix2_l2_stream_over_64k_completes(void)
+{
+    if (agent_start() != 0) { check(0, "実 Agent を起動できない"); return; }
+    check(agent_up(200), "HELLO が確立しない");
+    link_l2_stream(200000, 512, 100);
+    if (link_l2_read != 200000)
+        printf("    L2: read=%u/200000 gaps=%u bad=%u overflow=%u eof=%u recv=%u\n",
+               (unsigned)link_l2_read, (unsigned)link_l2_gaps,
+               (unsigned)link_l2_bad, (unsigned)link_l2_overflow,
+               (unsigned)link_l2_eof, (unsigned)link_l1_recv);
+    check(link_l2_read == 200000, "L2 >64KB が完走しない (F6)");
+    check(link_l2_bad == 0, "L2 >64KB の内容が壊れた");
+    agent_stop();
+}
+
+/* F6 [N1-fix2]: 実 Agent で L1 BULK を >64KB 流して完走する (ゲスト検査
+ * check-net-l1 = link_l1_bulk(200,512) の 2 倍 = 204800 B)。 */
+static void n1fix2_l1_bulk_over_64k_completes(void)
+{
+    if (agent_start() != 0) { check(0, "実 Agent を起動できない"); return; }
+    check(agent_up(200), "HELLO が確立しない");
+    link_l1_bulk(400, 512);
+    if (link_l1_recv != 400)
+        printf("    L1: recv=%u/400 bytes=%u ooo=%u windows=%u\n",
+               (unsigned)link_l1_recv, (unsigned)link_l1_bytes,
+               (unsigned)link_l1_ooo, (unsigned)link_l1_windows);
+    check(link_l1_recv == 400, "L1 >64KB が完走しない (F6)");
+    agent_stop();
+}
+
+/* F6 [N1-fix2]: 台本で >64KB の DATA を順序どおり注ぎ、OS32 の受理 / length /
+ * 完了判定に 65536 の境界が無いことを Agent もタイミングも介さず決定的に見る。
+ * length は RESPONSE の宣言値を保ち (u16 に化けない)、EOF ではなく
+ * read_bytes==length で完了する (N0 §2c)。 */
+static void n1fix2_scripted_inorder_over_64k(void)
+{
+    u8 pl[8];
+    static u8 body[512];
+    const u8 *src = 0;
+    i32 h;
+    u32 total = 70000, got = 0, off = 0;
+    unsigned int seq, nframes;
+    u32 st = 0, ln = 0;
+    int bad = 0;
+
+    script_handshake(SCRIPT_SESS, 0);
+    h = link_host_open("GET /big", 8, host_owner);
+    ticks(3);
+    inject(LINK_OP_ACK, 0, script_epoch, 0, 0, 1, SCRIPT_SESS, 0, 0);
+    resp_pl(pl, 200, total);
+    inject(LINK_OP_RESPONSE, 0, script_epoch, 0, 0, 1, SCRIPT_SESS, pl, LINK_RESP_LEN);
+    ticks(2);
+    check(link_host_status(h, &st, &ln, host_owner) == 0 && ln == total,
+          "宣言 length が >64KB のまま保たれない");
+    /* 最初の read で ring owner を確保する (DATA は ring_owner のハンドルにだけ届く) */
+    (void)link_host_read_stage(h, sizeof(body), &src, host_owner);
+
+    nframes = (total + 512 - 1) / 512;
+    for (seq = 1; seq <= nframes; seq++) {
+        unsigned int k, chunk = (total - off < 512) ? (total - off) : 512;
+        for (k = 0; k < chunk; k++) body[k] = (u8)(off + k);
+        inject(LINK_OP_DATA, 0, script_epoch, seq, 0, 1, SCRIPT_SESS, body, chunk);
+        ticks(1);
+        for (;;) {
+            i32 n = link_host_read_stage(h, sizeof(body), &src, host_owner);
+            u32 j;
+            if (n <= 0) break;
+            for (j = 0; j < (u32)n; j++) if (src[j] != (u8)(got + j)) bad = 1;
+            got += (u32)n;
+        }
+        off += chunk;
+    }
+    if (got != total) printf("    scripted: got=%u/%u\n", (unsigned)got, (unsigned)total);
+    check(got == total, "順序どおり >64KB を読み切れない (F6: 65536 境界)");
+    check(bad == 0, ">64KB の本文パターンが壊れた");
+    check(link_host_read_stage(h, 64, &src, host_owner) == 0,
+          "read_bytes==length で完了にならない");
+    link_host_close(h, host_owner);
+}
+
 /* ======================================================================== */
 /*  実行                                                                    */
 /* ======================================================================== */
@@ -1454,7 +1562,11 @@ static struct testcase cases[] = {
     { "last_data_and_eof_loss",                     last_data_and_eof_loss },
     { "data_gap_is_dropped_and_reacked",            data_gap_is_dropped_and_reacked },
     { "n2_no_drop_roundtrip_has_zero_retransmits",  n2_no_drop_roundtrip_has_zero_retransmits },
-    { "n2_rt_ok_resets_between_selftest_sections",  n2_rt_ok_resets_between_selftest_sections }
+    { "n2_rt_ok_resets_between_selftest_sections",  n2_rt_ok_resets_between_selftest_sections },
+    { "n1fix2_stream_over_64k_completes",           n1fix2_stream_over_64k_completes },
+    { "n1fix2_l2_stream_over_64k_completes",        n1fix2_l2_stream_over_64k_completes },
+    { "n1fix2_l1_bulk_over_64k_completes",          n1fix2_l1_bulk_over_64k_completes },
+    { "n1fix2_scripted_inorder_over_64k",           n1fix2_scripted_inorder_over_64k }
 };
 
 int main(int argc, char **argv)
