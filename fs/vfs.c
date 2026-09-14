@@ -557,20 +557,30 @@ int vfs_path_kind(const char *path)
     /* マウントルートは常にディレクトリ (FS ドライバに聞かない) */
     if (vfs_rel_is_root(rel_path)) return VFS_KIND_DIR;
 
+    /* stat を**持っている**ドライバの答えは最終判断。失敗してもプローブへ
+     * 落とさない (Codex 実装レビュー 往復 3 の B6)。
+     * 以前は NOTFOUND 以外の失敗を「stat 未対応」とみなして下へ落としていた
+     * ので、stat が一時的に読めなかっただけのディレクトリが
+     * get_file_size (ディレクトリでも成功する) でファイルに化け、
+     * `cd` が NOTDIR になり `sys_open` のディレクトリ拒否をすり抜けた。
+     * 「未対応」はドライバが stat を**持たない**ことで表す。 */
     if (ops->stat) {
         rc = ops->stat(fs_ctx, rel_path, &st);
         if (rc == VFS_OK) {
             return ((st.st_mode & OS_S_IFMT) == OS_S_IFDIR) ? VFS_KIND_DIR : VFS_KIND_FILE;
         }
-        if (rc == VFS_ERR_NOTFOUND) return VFS_ERR_NOTFOUND;
-        /* それ以外のエラーはドライバの stat 未対応とみなし下のプローブへ */
+        return rc;
     }
 
-    /* stat が無い/失敗した FS: list_dir が通ればディレクトリ、
-     * get_file_size が通ればファイル */
-    if (ops->list_dir &&
-        ops->list_dir(fs_ctx, rel_path, vfs_kind_probe_cb, (void *)0) == VFS_OK) {
-        return VFS_KIND_DIR;
+    /* stat を持たない FS だけのプローブ: list_dir が通ればディレクトリ、
+     * get_file_size が通ればファイル。
+     * **「読めなかった」エラーはそのまま伝える** — get_file_size は
+     * ディレクトリでも成功するので、ここで落とすとファイルに化ける。
+     * 次へ進むのは「ディレクトリではない」と分かったときだけ。 */
+    if (ops->list_dir) {
+        rc = ops->list_dir(fs_ctx, rel_path, vfs_kind_probe_cb, (void *)0);
+        if (rc == VFS_OK) return VFS_KIND_DIR;
+        if (rc != VFS_ERR_NOTDIR && rc != VFS_ERR_NOTFOUND) return rc;
     }
     if (ops->get_file_size) {
         u32 sz;

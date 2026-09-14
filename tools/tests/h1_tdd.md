@@ -290,7 +290,8 @@ ext2 と iso9660 は自前の `list_dir` を持つので影響を受けない
 | `userland/shell/sh_args.inc` (glob) | 見ていない | `SH_LS_MAX` 128 | 変化なし |
 | `userland/shell/ui.c` (tab 補完) | 見ていない | `TAB_MAX_MATCHES` 40 | 変化なし |
 | `userland/shell/cmd_file.c` (`cp -r`) | 見ていない | `MAX_COPY_ENTRIES` 64 (超過は既にエラー表示) | 変化なし |
-| `userland/shell/cmd_filer.c` / `userland/lib/filer/filer_core.c` / `userland/rust/filer` | 見ていない | `FILER_MAX_ENTRIES` 128 / `FL_MAX_ENTRIES` 256 | 表示は変わらない |
+| `userland/shell/cmd_filer.c` / `userland/lib/filer/filer_core.c` | 見ていない | `FILER_MAX_ENTRIES` 128 | 表示は変わらない |
+| `userland/rust/filer` | **戻り値を検査する** (`model.rs:765` の `if rc < 0`、`lib.rs:408` の `self.error(b"Read directory", rc)`) | `FL_MAX_ENTRIES` 256 | エラー表示に変わり、ツリー展開を中止する。**「表示は変わらない」は誤り** (2026-09-15 訂正) |
 | `userland/cmds/du.c` `find.c` `man.c` `tar.c` | 見ていない | なし | 変化なし (戻り値を捨てているため) |
 | `userland/system/install.c` | 負値を**失敗件数に数える** | `MAX_FILES` 相当 | FDD (ext2/FAT) が相手なので HostDrv の上限に当たらない |
 | `userland/shell/cmd_fs_shared.c` `fs_is_dir()` | **`rc == 0` ならディレクトリ**と判定 | なし | ★ 1000 件超の `/host/...` を「ディレクトリでない」と言う。`cp` / `mv` (`cmd_file.c` の 5 か所) が使う |
@@ -333,3 +334,122 @@ ext2 と iso9660 は自前の `list_dir` を持つので影響を受けない
 | B4c | 呼び手 (`hsync`) が `sys_ls` の戻り値を無視する | `test_hsync_h1.py` **219 中 7 失敗** — `case_b4` の全項目 |
 
 B4a と B4b が互いの検査を落とさないことも、この 2 つが独立して外せる根拠。
+
+## 追記 2026-09-15 (4) — 往復 3 のレビュー: `d574704` で入れた退行 2 件
+
+`hdrv_list_dir` を厳しくした結果、**列挙の戻り値を「種別」として使っていた
+2 か所**が壊れた。どちらも自分が入れた退行で、往復 3 の影響調査が甘かった
+(「戻り値を見ていないから影響なし」とだけ見て、**見ている** 2 か所を
+取りこぼした)。**修正 1 (途中失敗 → IO) だけでも同じ退行が起きる**ので、
+修正 2 を戻すだけでは足りない。
+
+### B5 — `cp -r` が宛先の階層を取り違えて上書きする
+
+`fs_is_dir()` が `sys_ls` の戻り値 0 だけを見ていた。`cmd_file.c:227` は
+その結果で分岐し、偽なら `do_copy_recursive(src, dst)` を呼ぶ。
+1001 件を持つ `/host/big` に `cp -r /src /host/big` すると、列挙が
+`OS32_ERR_FULL` → `fs_is_dir` 偽 → `/host/big/src/a.txt` ではなく
+**`/host/big/a.txt` を上書き**。`do_copy_recursive` は `sys_mkdir` の失敗を
+無視するので気づけない。列挙の途中 I/O エラーでも同じ。
+
+**直した内容** (`userland/shell/cmd_fs_shared.c`):
+
+- `fs_is_dir()` は `fs_path_kind(path) == FS_KIND_DIR` になった。
+  **型で判定する**。列挙の成否は使わない。
+- `fs_path_kind()` は従来どおり `sys_stat` が正。stat が使えない FS のための
+  代替だけを `fs_ls_says_dir()` に切り出し、**3 値**
+  (1 = ディレクトリ / 0 = ディレクトリでない / -1 = 読めなかった) にした。
+  `OS32_ERR_IO` や `OS32_ERR_FULL` を「ディレクトリでない」に畳まない。
+- `cmd_fs_shared.h` の「sys_ls が成功すればディレクトリ」という説明も直した。
+
+**呼び出し元の意味は変えていない** (`cmd_file.c` は 1 行も触っていない)。
+`fs_is_dir` は真偽のまま、種別が分からないときは 0 を返す — 従来と同じ形。
+
+| 呼び出し元 | 前 | 後 |
+|---|---|---|
+| `cmd_file.c:210` `cp` の宛先 | 列挙が通れば真 | **stat が DIR なら真** |
+| `cmd_file.c:221` `cp` のコピー元 | 同上 | 同上 |
+| `cmd_file.c:276` `mv` のコピー元 | 同上 | 同上 |
+| `cmd_file.c:302` `mv` の宛先 | 同上 | 同上 |
+| `cmd_file.c:334` `rm` の対象 | 同上 | 同上 |
+| `cmd_fs_shared.c:52` `fs_path_kind` の代替 | `fs_is_dir` を呼ぶ | `fs_ls_says_dir` を呼ぶ (再帰しない) |
+
+**残る穴 (直していない、PM 判断へ)**: stat も列挙も失敗した場合、
+`fs_is_dir` は 0 を返すので `cp -r` は「宛先はディレクトリでない」側へ行く。
+今回の反例 (HostDrv の 1000 件超) は `hdrv_stat` が答えるので**到達しない**が、
+「不明」を真偽 1 本で表す限りこの形は残る。塞ぐには `cp` / `mv` 側で
+`fs_path_kind()` の負値を見て**断る**のが本筋 (呼び出し元の変更になるので
+この票ではやっていない)。
+
+### B6 — HostDrv のディレクトリがファイルと判定される
+
+`vfs_path_kind()` は stat が `NOTFOUND` 以外で失敗すると「ドライバが stat
+未対応」とみなしてプローブへ落ちていた。`hdrv_get_file_size` は
+`NP2_FILE_DIRECTORY_FILE` も `NON_DIRECTORY_FILE` も指定せずに開くので
+**ディレクトリでも成功する**。結果、stat が一時的に読めなかっただけの
+1001 件のディレクトリが `VFS_KIND_FILE` になり、`cd` は NOTDIR、
+`sys_open(..., O_RDONLY)` はディレクトリ拒否 (`fs/vfs_fd.c:87`) をすり抜けた。
+
+**直した内容** (`fs/vfs.c`):
+
+- **`stat` を持つドライバの答えは最終判断**。失敗してもプローブへ落とさず、
+  そのエラーを返す。「未対応」はドライバが `stat` を**持たない**ことで表す
+  (`ops->stat == 0`)。
+- プローブ自体も直した: `list_dir` が `VFS_OK` ならディレクトリ、
+  **「ディレクトリではない」と分かるエラー (`NOTDIR` / `NOTFOUND`) のときだけ**
+  `get_file_size` へ進む。`OS32_ERR_IO` / `OS32_ERR_FULL` はそのまま伝える。
+
+**他の FS への影響**: ext2 / FAT / ISO9660 / HostDrv は **4 つとも `stat` を
+持つ**ので、プローブはもともと「どれかの stat が失敗したとき」しか動いて
+いなかった (`ops->stat == 0` のドライバは 1 つも無い)。
+
+| 場面 | 前 | 後 |
+|---|---|---|
+| stat が成功 | 種別を返す | 同じ |
+| stat が `NOTFOUND` | `NOTFOUND` | 同じ |
+| マウントルート | `VFS_KIND_DIR` (ドライバに聞かない) | 同じ |
+| stat がその他のエラー (ext2 の `read_inode` 失敗 = IO、`buf` が NULL = INVAL、ISO9660 の解決失敗、FAT の `ff_stat_to_vfs`) | プローブへ落ち、`list_dir` が通れば DIR / `get_file_size` が通れば FILE | **そのエラーを返す** |
+
+変わるのは最後の行だけで、**読めなかった inode を種別として答えていた**のを
+やめる方向。`vfs_chdir` は `kind < 0` をそのまま返す作りなので受け手側の
+変更は要らない。FAT の `f_stat` はボリュームルートで失敗するが、
+`vfs_path_kind` は**ドライバに聞く前に** `vfs_rel_is_root()` で DIR を返すので
+そこは影響しない (試験で押さえた)。
+
+### 追加した試験
+
+- `tools/tests/fs_kind_host.c` + `test_fs_kind.py` (新設、`build/sdk.mk` に
+  `check-fs-kind-host`)。実物の `cmd_fs_shared.c` と `cmd_file.c` を
+  `#include` し、KernelAPI と shell.c の 2 本だけを贋物に。贋 FS は
+  `sys_stat` を正しく答えさせたまま `sys_ls` だけを FULL / IO にできる。
+  **21 checks / 0 failures**。中心は **`cp -r` の宛先階層** —
+  `cp -r /src /big` が `/big/src/a.txt` へ入り `/big/a.txt` (内容 `KEEP`) を
+  上書きしないこと。単一ファイルの `cp`、複数入力の `cp` も見る。
+- `tools/tests/vfs_kind_host.c` + `test_vfs_kind.py` (新設、
+  `check-vfs-kind-host`)。実物の `fs/vfs.c` を `#include` し、境界
+  (kstring / kmalloc) だけ差し替え。合成 `VfsOps` で stat / list_dir /
+  get_file_size の戻り値を 1 つずつ指定する。**20 checks / 0 failures**。
+  `get_file_size` は HostDrv と同じく**ディレクトリでも成功する**贋物。
+
+### RED (変異)
+
+| 変異 | 戻した内容 | 落ちた検査 |
+|---|---|---|
+| B5a | `fs_is_dir` が `sys_ls` の戻り値を見る (`d574704` の形) | `test_fs_kind.py` **21 中 9 失敗** — 列挙 FULL / IO でディレクトリと答えない、`cp -r` が `/big/a.txt` を上書き、単一ファイル `cp`、複数入力 `cp` の誤拒否 |
+| B5b | 代替判定の 3 値を真偽に畳む (`IO`/`FULL` を「ディレクトリでない」に) | **0 失敗**。今日は観測差が出ない — 代替は stat が失敗したときしか走らず、0 でも -1 でも `fs_path_kind` は stat のエラーを返すため。3 値は「将来また畳まれない」ための記述で、**挙動を担っているのは B5a 側**。[V4] のため変異が落ちないことをそのまま記録する |
+| B6a | stat の失敗をプローブへ落とす (`d574704` の形) | `test_vfs_kind.py` **20 中 3 失敗** — stat のエラーを伝える / プローブへ落ちない / その他のエラーも伝える |
+| B6b | プローブが列挙のエラーを問わず `get_file_size` へ進む | **20 中 4 失敗** — 列挙が FULL / IO のときそのまま伝える、`get_file_size` を呼ばない |
+
+### 非 blocker 2 件
+
+1. `docs/manpages/hsync.1` の上限の書き方を実態に合わせた。上限は
+   **「1 ディレクトリにつき問い合わせ 1000 回」**で「1000 件までは成功」の
+   保証ではない (`.` / `..` と変換失敗で読み飛ばした項目も回数を消費する。
+   999 レコード + 終了応答なら成功、1000 レコードでは終了応答を確認する前に
+   FULL)。
+2. 上の呼び出し元表の `userland/rust/filer` の行を訂正した。**戻り値を
+   検査している** (`model.rs:765` の `if rc < 0 { return rc; }`、`lib.rs:408`
+   の `self.error(b"Read directory", rc)`) ので、エラー表示とツリー展開の
+   中止へ進む。「表示は変わらない」は誤りだった (挙動としては適切な
+   エラー処理なので、直すのは記録のほう)。
+
