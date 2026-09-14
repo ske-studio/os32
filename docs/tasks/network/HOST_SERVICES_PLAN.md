@@ -71,7 +71,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 
 ## 4. 印刷の設計 (Host Agent 側)
 
-- スプール: `<agent_dir>/spool/<job_id>.<kind>` に `PRINT DATA` を追記。`CLOSE` で確定。
+- スプール: `<spool_dir>/<epoch>-<job_id>.txt` に `PRINT DATA` を追記 (再起動をまたいで一意)。`CLOSE` で確定。
 - `text`: UTF-8 → ホスト側で描画。**v1 は Windows の既定プリンタへ `win32print` (pywin32) でテキスト印刷**、無ければ `--to-file` (`.txt` / `.pdf` へ) — 決裁 §9-1。日本語は Windows のフォントで出るので OS32 側にプリンタフォントは要らない。改ページは `\f`。
 - `raw`: v2。ESC/P (PC-PR201) のバイト列をそのまま `RAW` で送る。OS32 側に ESC/P 生成が要るので後回し。
 - 失敗 (プリンタ無し、スプール書けず) は `PRINT STATUS` の `error <msg>` と `CLOSE` の 5xx で返す。OS32 側は文言を表示するだけ。
@@ -101,7 +101,7 @@ Agent は宣言長ぶん受け切ったら RESPONSE を返す。要求ごとに 
 |---|---|---|---|
 | **N0** | KAPI_SPEC §3-2 の予約を v43 → **v51** に改訂 (v43 は欠番のまま「使わない」と明記)、本書 §3 の ABI 表を §1a 形式で確定、Codex 設計レビュー | — | 表の照合 |
 | **N1 (K)** ✅ | v51 の 5 本、`net/link.c` の非ブロッキング化 (`link_request` の分割送信、状態機械)、`host_owner_exit`、ホスト TDD (`tools/tests/net_link_host.c` を L0〜L3 の試験から起こす)、`userland/tests/host_test.c` | N0、`kernel-lgy98-link` ビルド | `make check-net-l3` 相当を KAPI 経由で: GET /pattern/65536 の内容一致、404、TIME、AGAIN ループで WM が止まらない (GUI 配下で `gui_busy` と同時) |
-| **N2 (ホスト)** | `host_agent.py` に `PRINT OPEN/DATA/CLOSE/STATUS`、`CLIP GET/PUT`、`PUT /file/`、`--root` / `--allow-put` / `--to-file`、pywin32 は任意依存 (無ければ to-file) | — | Python 単体試験 (スプール、宣言長と WDATA の照合、閉じたジョブへの DATA 409、許可リスト外 403) |
+| **N2 (ホスト)** | `host_agent.py` に `PRINT OPEN/DATA/CLOSE/STATUS`、`CLIP GET/PUT` (WSL2 は clip.exe/powershell、無ければ 503)、`--spool-dir`/`--print-dir`/`--printer`/`--clip`、win32print/win32clipboard は任意依存。**`PUT /file/` は 501 で先送り (v1.4)** | — | Python 単体試験 (スプール、宣言長と WDATA の照合、閉じたジョブへの DATA 409、許可リスト外 403) |
 | **N3 (C)** | `libos32host` + `wget` / `lpr` / `hclip` / `date -sync` | N1、N2 | 端末 (GUI) と CUI の両方で `wget http://example.com/ /tmp/x` が 559B、`lpr /etc/profile` がホストの `spool/` に落ちる (to-file)、`hclip` の往復 |
 | **N4 (W/apps)** | libos32gui 末尾追記、ファイラ「印刷」、端末のコピー / 貼り付け | N3 | GUI 受入 |
 | **N5** | 実カード (M5) — FCS の有無、16KB RAM、8bit 転送、IRQ。実機の Windows 側は **Npcap + scapy** (raw Ethernet) で `host_agent.py` を動かす | 実機 | 実 LAN で N3 の受入 |
