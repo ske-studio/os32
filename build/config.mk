@@ -86,22 +86,30 @@ KERNEL_CFLAGS = $(CFLAGS_COMMON) -O2 -Wall -D__KERNEL_BUILD__
 #   例: make kernel KERNEL_CFLAGS_EXTRA=-DKAPI_PROFILE
 KERNEL_CFLAGS += $(KERNEL_CFLAGS_EXTRA)
 
-# LAN (LGY-98) を有効にしたカーネル: make kernel-lgy98 (反射, M2/M3/M4 試験) /
-#   kernel-lgy98-link (リンク層 L0 試験) / kernel-nolgy98 (無効に戻す)。
-#   選択は $(LGY98_STAMP) にフラグ値ごと残るので、以後の make kernel / deploy-nhd も
-#   同じ設定でビルドする (deploy がカーネルを作り直しても設定が戻らない)。
+# LAN (LGY-98)。**既定で有効** (Host Services を製品機能に、ユーザー決裁 2026-09-14)。
+#   既定 (stamp 無し) = 有効・FLAGS 0 (driver + リンク層のみ、DIAG/REFLECT/LINKTEST 無し)。
+#   カード未装着なら lgy98_init が何もせず起動を続ける (kernel.c、CONFIG_LGY98_BASE 判定)。
+#   試験カーネル: make kernel-lgy98 (反射 5, M2/M3/M4) / kernel-lgy98-link (リンク層 L0 試験 9)。
+#   無効化: make kernel-nolgy98 (stamp に off = LAN を全く積まない、8MB 機や非対応環境用)。
+#   選択は $(LGY98_STAMP) に残るので以後の make kernel / deploy-nhd も同じ設定でビルドする。
 #   BASE / IRQ / FLAGS は LGY98_BASE / LGY98_IRQ / LGY98_FLAGS で上書きできる
-#   (既定は NP21/W の値。FLAGS = LGY98_FLAG_* の和。DIAG 1 / LOOPBACK 2 / REFLECT 4 /
-#   LINKTEST 8。kernel-lgy98 = 5 (DIAG+REFLECT)、kernel-lgy98-link = 9 (DIAG+LINKTEST))。
+#   (既定は NP21/W の値。FLAGS = LGY98_FLAG_* の和。DIAG 1 / LOOPBACK 2 / REFLECT 4 / LINKTEST 8)。
 #   読むのは drivers/lgy98.c だけで、その .o は毎回コンパイルされる (build/kernel.mk)。
 LGY98_STAMP = $(BUILD_OUT)/lgy98.flags
 LGY98_BASE  ?= 0x10D0
 LGY98_IRQ   ?= 5
-ifneq ($(wildcard $(LGY98_STAMP)),)
+ifeq ($(wildcard $(LGY98_STAMP)),)
+# stamp 無し = 製品既定: LAN 有効・FLAGS 0
 LGY98       ?= 1
-LGY98_FLAGS ?= $(shell cat $(LGY98_STAMP))
+LGY98_FLAGS ?= 0
+else ifeq ($(strip $(shell cat $(LGY98_STAMP))),off)
+# kernel-nolgy98: LAN を積まない (LGY98 未定義のまま)
+else
+# 試験カーネル: stamp のフラグ値 (reflect 5 / linktest 9)
+LGY98       ?= 1
+LGY98_FLAGS ?= $(strip $(shell cat $(LGY98_STAMP)))
 endif
-LGY98_FLAGS ?= 5
+LGY98_FLAGS ?= 0
 ifdef LGY98
 KERNEL_CFLAGS += -DCONFIG_LGY98_BASE=$(LGY98_BASE) -DCONFIG_LGY98_IRQ=$(LGY98_IRQ) -DCONFIG_LGY98_FLAGS=$(LGY98_FLAGS)
 endif

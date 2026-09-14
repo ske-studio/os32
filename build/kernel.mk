@@ -178,7 +178,8 @@ kernel-lgy98-link:
 	$(MAKE) kernel
 
 kernel-nolgy98:
-	@rm -f $(LGY98_STAMP)
+	@mkdir -p $(BUILD_OUT)
+	@echo off > $(LGY98_STAMP)
 	$(MAKE) kernel
 
 .PHONY: kernel-lgy98 kernel-lgy98-link kernel-nolgy98
