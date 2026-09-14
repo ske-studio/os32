@@ -1,6 +1,6 @@
 # TASK_N2 — Host Agent の PRINT / CLIP サービス (ホスト側 Python)
 
-発行: PM (2026-09-14) / 状態: **設計 第 4 版 (往復 3 の 2 件を反映: B-2 同一ジョブ 409 は `resp is None` の DATA に限定、B-1 CLIP subprocess を非同期化 (Popen + select、実行中は PROCESSING)。non-blocker も反映。3 往復を使い切り実装可の判定 — ユーザーに B-1 の採否を確認中)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
+発行: PM (2026-09-14) / 状態: **実装へ (第 4 版で確定。3 往復 + ユーザー決裁 2026-09-14 a = B-1 は非同期化。Fable レビュー往復 1〜3 の B1〜B6 / 新1〜4 / B-1・B-2 反映済み)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
 
 ## 0. 範囲
 `tools/host_agent.py` に**要求サービスを 6 本足す**だけ (ワイヤ・状態機械・rid 台帳・HELLO は N1 のまま不変)。CLIP は含める、**PUT は v1.4 へ先送り** (§9-5)。印刷は **to-file 既定、pywin32 は任意依存** (§9-1)。置き場は WSL2 のみ (§9-2、実機 Windows は N5)。
