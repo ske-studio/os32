@@ -21,6 +21,7 @@
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
+#include "kapi_host.h"   /* N1: Host Services のハンドル回収 (host_owner_exit) */
 #include "ring3_str.h"   /* T9 §12 R1: KAPI が CPL=3 へ返す文字列の置き場 */
 #include "kapi_db.h"
 #include "gdt.h"
@@ -865,6 +866,11 @@ static void exec_reclaim_owned(int id)
      *     (KILL の PENDING) として WM の top-level に渡す — カーネルはここから
      *     kill しない (回収文脈では CR3 も段も動かせない)。 */
     launch_owner_exit(id);
+    /* (9c) Host Services のハンドル (票 N1 / TASK_N0 §1a)。owner が握ったまま
+     * 畳まれたハンドルを内部解放する — RELEASE も送るので、Agent 側の受付枠
+     * (ACTIVE は rid ごと 2 件) が埋まったままにならない。公開 API を通さず
+     * ID を指定して解放する。 */
+    host_owner_exit(id);
     /* (10) console シンクの読み手 (票 K6C)。読み手は 1 本だけなので、畳んだ
      * のがその 1 本なら所有を返す — 返さないと次の端末アプリが永久に
      * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、

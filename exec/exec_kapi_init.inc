@@ -206,9 +206,14 @@ extern int __cdecl wrap_db_bind_text(int handle, int index, const char *text, in
 extern int __cdecl wrap_db_bind_blob(int handle, int index, const void *data, int length);
 extern int __cdecl wrap_db_bind_null(int handle, int index);
 extern int __cdecl wrap_db_error_code(int handle);
+extern i32 __cdecl wrap_host_open(const char *req, u32 len);
+extern i32 __cdecl wrap_host_status(i32 h, u32 *status, u32 *length);
+extern i32 __cdecl wrap_host_read(i32 h, void *buf, u32 cap);
+extern i32 __cdecl wrap_host_write(i32 h, const void *buf, u32 len);
+extern i32 __cdecl wrap_host_close(i32 h);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 50;
+kapi->version = 51;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -418,5 +423,10 @@ kapi->version = 50;
     kapi->db_bind_blob = wrap_db_bind_blob;
     kapi->db_bind_null = wrap_db_bind_null;
     kapi->db_error_code = wrap_db_error_code;
+    kapi->host_open = wrap_host_open;
+    kapi->host_status = wrap_host_status;
+    kapi->host_read = wrap_host_read;
+    kapi->host_write = wrap_host_write;
+    kapi->host_close = wrap_host_close;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

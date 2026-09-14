@@ -1,5 +1,5 @@
 {
-  "version": 50,
+  "version": 51,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -48,7 +48,8 @@
     "con_sink.h",
     "kbd_inject.h",
     "memory_boot.h",
-    "launch.h"
+    "launch.h",
+    "kapi_host.h"
   ],
   "externs": [
     "extern volatile u32 tick_count;",
@@ -1449,6 +1450,36 @@
       "ret": "int",
       "args": ["int handle"],
       "target": "kapi_db_error_code"
+    },
+    {
+      "name": "host_open",
+      "ret": "i32",
+      "args": ["const char *req", "u32 len"],
+      "target": "kapi_host_open"
+    },
+    {
+      "name": "host_status",
+      "ret": "i32",
+      "args": ["i32 h", "u32 *status", "u32 *length"],
+      "target": "kapi_host_status"
+    },
+    {
+      "name": "host_read",
+      "ret": "i32",
+      "args": ["i32 h", "void *buf", "u32 cap"],
+      "target": "kapi_host_read"
+    },
+    {
+      "name": "host_write",
+      "ret": "i32",
+      "args": ["i32 h", "const void *buf", "u32 len"],
+      "target": "kapi_host_write"
+    },
+    {
+      "name": "host_close",
+      "ret": "i32",
+      "args": ["i32 h"],
+      "target": "kapi_host_close"
     }
   ]
 }

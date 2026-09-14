@@ -214,7 +214,26 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   OS32 は TCP/IP も HTTP も持たず、要求を出して結果だけ受け取る (方針どおり)。
   `link_stream_read` がアプリ側の消費入口。Host Agent (`tools/host_agent.py`) は /pattern を
   生成配送、http(s):// を urllib で実取得、/file/ をホストファイル読み、TIME を時刻応答。
-- **残りは KAPI 公開だけ (KAPI v43、GUI の v42 の次に確定)**: Host Services を外部プログラムへ
+- **N1 実装完了 (2026-09-14、コーダー worktree。ホスト TDD のみ — ゲスト受入は PM)**:
+  ワイヤ v2 (20B ヘッダ・3 way HELLO・rid 台帳・RELEASE/STATUS) と
+  `net/link.c` の非ブロッキング化、**KAPI v51** (`host_open` / `host_status` /
+  `host_read` / `host_write` / `host_close`、slot 208〜212 = 0x348〜0x358)、
+  `tools/host_agent.py` v2 を実装。プロトコルを進めるのは 100Hz の `link_tick()`
+  だけ (`kernel/isr_handlers.c` の `ne2k_timer_tick()` の直後。反射モードでは
+  `link_init` を呼ばないので起動しない)。同期版 `link_hello` / `link_request` /
+  `link_service_get` / `link_stream_read` / `link_poll` は**廃止**し、自己試験
+  (L0〜L3) を非同期 API + IF=1 の hlt 待ちの上に書き直した。
+  ホスト TDD 2 本が GREEN: `make check-host-agent` (25/25、Agent 側の反例) と
+  `make check-net-link-host` (29/29、実 `net/link.c` + 実 `kapi/kapi_host.c` +
+  実 Agent をサブプロセス)。ケース名と TASK_N0 §3 の指摘番号の対応表・決めたこと・
+  既存 `check-net-l0`〜`l3` が読むシンボルの v2 での意味は
+  [`tools/tests/n1_tdd.md`](../../../tools/tests/n1_tdd.md)。
+  移植性調査は [`docs/tasks/portability/SURVEY_N1.md`](../portability/SURVEY_N1.md)。
+  **未実施** (PM / テスターの受入): `make clean` → `make all` → `make check`、
+  `kernel-lgy98-link` の配備、`userland/tests/host_test.c` の実機実行、
+  `check-net-l0`〜`l3` と `check-net-m2` の回帰。
+- **(履歴) 残りは KAPI 公開だけ (KAPI v43 案)**: 以下は v1 時点の案で、確定した ABI は
+  **KAPI v51** (TASK_N0 §1a、上の N1 の行)。当時の記録として残す。Host Services を外部プログラムへ
   出す。版番号は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) で **v43** に調停済み
   (GUI が v42、その次。2026-09-06 に v41/v42 → v42/v43 へ改訂)。追加する KAPI (案、末尾追記):
 

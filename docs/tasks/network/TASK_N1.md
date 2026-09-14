@@ -26,4 +26,60 @@
 
 ## 3. 記録
 
-(コーダーの自己申告と PM の受入をここに)
+### 3-1. コーダーの自己申告 (2026-09-14、worktree `agent-ad14aebaf0154a34d`、基点 `af48990`)
+
+段 1〜7 を実装した。TDD の記録 (RED → GREEN、ケース名 ↔ TASK_N0 §3 の指摘番号の対応表、
+決めたこと、既存 `check-net-l0`〜`l3` が読むシンボルの v2 での意味) は
+[`tools/tests/n1_tdd.md`](../../../tools/tests/n1_tdd.md)、移植性調査 (段 7) は
+[`docs/tasks/portability/SURVEY_N1.md`](../portability/SURVEY_N1.md)。
+
+**試験で確認したこと** (全部コーダーの手元で実行、出力は n1_tdd.md §5):
+
+- `make check-host-agent` (`python3 -B tools/tests/test_host_agent.py`) — **25/25 PASS**。
+  実 `host_agent.py` に、フレームを直接組む贋 OS32 をぶつけた。往復 2 の R1〜R5 / R7、
+  往復 3 の B1〜B7、往復 4 の R1〜R3 と HELLO 各段の消失、payload 長検査、
+  WDATA 重複排除、WINDOW の配送許可、TIME の標準形。
+- `make check-net-link-host` (`python3 -B tools/tests/test_net_link.py --target`) —
+  **29/29 PASS** + ホスト GNU89 `-Werror` + `i386-elf-gcc -Werror` の両コンパイル。
+  実 `net/link.c` + 実 `kapi/kapi_host.c` を `#include` し、NIC (RX キュー・
+  **1 tick 1 フレーム**の TX 受理・tick)、`cli`/`sti` (IF=0 中のタイマ延期と復元直後の
+  tick、リング更新 / TX 構築の途中の贋 IRQ5)、ディスパッチャの早期検査
+  (`kapi_argptr` は**生成物から読んで** `-D` で渡す) を贋物にし、対向は
+  **実 Agent をサブプロセス**か台本。往復 2 の R1 / R3 / R4 / R6 / R8 / R9 / R10、
+  往復 3 の B1 / B6 / B7 / B8 と TOMBSTONE / NO_SLOT、往復 4 の R4 と HELLO 各段、
+  CPL=0 経路、owner 回収、`host_read` の「最後の 1 回は正の長さ・次が 0」、
+  `host_write` の宣言長契約、リングの排他、EOF だけでは完了にしない、Go-Back-N。
+- ソース本文の番人 2 件: `exec_reclaim_owned` の `host_owner_exit` の位置、
+  `timer_handler` が `ne2k_timer_tick()` の直後に `link_tick()` を呼び、
+  KAPI / `net/link.c` の中からは呼ばず、反射モードで `link_init` を止めていること。
+- `python3 tools/check_kapi_version.py` — v51 で 4 か所一致、`KAPI_SPEC.md` の関数表も一致。
+- 個別コンパイル (`i386-elf-gcc -Wall -Wextra -Werror`): `net/link.c`、`kapi/kapi_host.c`、
+  `exec/exec.c`、`kernel/isr_handlers.c`、`drivers/lgy98.c`、`kapi/kapi_generated.c`。
+  `userland/tests/host_test.c` はユーザランドのフラグで警告 0。
+
+**確認していないこと** ([V4] — 実行していないので合否を主張しない):
+
+- `make all` / `make clean` / `make check` / `make external` を**一度も走らせていない**
+  (票の禁止事項)。KAPI 構造体が変わるので [ABI3] の clean rebuild は PM の担当。
+- 配備 (`make deploy*`) とエミュレータ (NP21/W、`/api/*`、MCP) は**一切触っていない**。
+- `userland/tests/host_test.c` は**コンパイルしか確かめていない**。実機で 1 度も
+  走らせていないので、ゲスト項目 (`GET /pattern/65536` の AGAIN ループ、404、TIME、
+  `ECHO 5` + write、Agent 再起動 → STALE → close → open) は**未検証**。
+  Agent 再起動のケースは運用者が Agent を落とす必要があるので `host_test stale` で分けた。
+- `check-net-l0`〜`l3` と `check-net-m2` は**実行していない** (ゲスト観測)。
+  読むシンボルの意味は保つよう作ったが、実測での回帰は取っていない。
+  v1 で合格していた L0〜L3 の実績は、ワイヤが変わったので**取り直しが要る**。
+- 実 NIC / 実エミュレータ上でのタイミング (100Hz で RTO 200ms・T_probe 1 秒が
+  足りるか、1 tick 1 フレームで L1 の 200 フレームが時間内に流れるか) は**未測定**。
+  ホスト試験の贋 NIC は「1 tick 1 フレーム」を再現しているが、実機の遅延は入っていない。
+- GUI 配下 (`gui_busy` と同時) は未検証。
+- `host_agent.py` の実 HTTP 経路 (`GET http://...`) はホスト試験では `--offline` で
+  止めているので、**実際にネットワークへ出る経路は 1 度も動かしていない**。
+
+**PM が着地時に注意すべき共有ファイル**: `sdk/kapi.json` (末尾 5 本 + version 51 +
+includes に `kapi_host.h`)、`build/sdk.mk` (`check-host-agent` / `check-net-link-host` を
+`check` の列と `.PHONY` に追加)、`build/kernel.mk` (`kapi/kapi_host.c` を KERNEL_SRC へ)、
+`build/app.conf` / `userland/deploy.yaml` (`host_test`)、`docs/KAPI_SPEC.md` (題名 v51・
+§3-2 の v51 行・§4 の関数表 5 行 + data_fields を 0x35C / 0x360 へ)、`README.md` /
+`docs/INDEX.md` (版数)、`sdk/include/os32/os32_kapi_shared.h` (`KAPI_VERSION`)、
+`exec/exec.c` (`exec_reclaim_owned` の 1 行)、`kernel/isr_handlers.c` (`timer_handler`)。

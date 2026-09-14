@@ -1,12 +1,19 @@
 /* ======================================================================== */
-/*  LINK.H — OS32 リンクプロトコル (LGY-98 の上の独自 raw Ethernet)          */
+/*  LINK.H — OS32 リンクプロトコル v2 (LGY-98 の上の独自 raw Ethernet)        */
 /*                                                                          */
-/*  計画: docs/tasks/network/LINK_PLAN.md。ドライバ (drivers/ne2000.c) の上に  */
-/*  載る「確実に届ける・溢れさせない」層。TCP/IP は載せず、Host Agent との    */
-/*  P2P で REQUEST/RESPONSE と DATA ストリームをやり取りする。               */
+/*  契約の正典: docs/tasks/network/TASK_N0.md §1b (ワイヤ v2) / §2 (駆動・    */
+/*  排他・状態機械)。要約は docs/tasks/network/LINK_PLAN.md §4。             */
 /*                                                                          */
-/*  この段階は L0 (Stop-and-Wait): HELLO 交換 → 1 要求 1 応答の往復 → ACK。  */
-/*  WINDOW/Credit (L1) と DATA ストリーミング (L2) は後続。                  */
+/*  v1 (16B ヘッダ・同期 Stop-and-Wait) との違い:                            */
+/*    - ヘッダ 20B、**LE アクセサで明示的に直列化** (構造体キャストをしない)  */
+/*    - セッション (`sess`、Agent が採番) と再同期世代 (`epoch`) と           */
+/*      要求 ID (`rid`) を全フレームに載せる                                  */
+/*    - 3 way HELLO (SYN / SYN-ACK / CONFIRM / ESTABLISHED)                  */
+/*    - プロトコルを進めるのは 100Hz の `link_tick()` **だけ**。KAPI は状態を  */
+/*      読み書きするだけで待たない (非ブロッキング)                           */
+/*                                                                          */
+/*  ここは [C4] の「ワイヤ定数の正典」。KAPI 側と共有する値 (エラー番号) は    */
+/*  sdk/include/os32/os32_kapi_shared.h が正典で、ここには置かない。          */
 /* ======================================================================== */
 
 #ifndef OS32_NET_LINK_H
@@ -19,118 +26,189 @@
 #define LINK_ETH_ADDR_LEN   6
 #define LINK_ETH_HDR_LEN    14      /* dst(6) + src(6) + type(2) */
 
-/* opcode (link_hdr.op) */
-#define LINK_OP_HELLO       1       /* MAC / epoch / 初期 window 交換、再同期 */
-#define LINK_OP_REQUEST     2       /* OS32 → Host: 要求 (request_id) */
-#define LINK_OP_RESPONSE    3       /* Host → OS32: 要求の結果 */
-#define LINK_OP_DATA        4       /* ストリームのペイロード (L2) */
-#define LINK_OP_EOF         5       /* ストリーム終端 (L2) */
-#define LINK_OP_ACK         6       /* ack_seq まで受信・処理済み */
-#define LINK_OP_WINDOW      7       /* 絶対値 credit の広告 (L1) */
+/* ---- opcode (ヘッダ @0) ------------------------------------------------ */
+#define LINK_OP_HELLO       1       /* 3 way handshake / 再同期 */
+#define LINK_OP_REQUEST     2       /* OS32 → Host: 要求行 (rid, seq = 0) */
+#define LINK_OP_RESPONSE    3       /* Host → OS32: status u16 + length u32 */
+#define LINK_OP_DATA        4       /* Host → OS32: 本文ストリーム (rid, seq 1〜) */
+#define LINK_OP_EOF         5       /* Host → OS32: ストリーム終端 (補助) */
+#define LINK_OP_ACK         6       /* 双方: rid + 累積 ack */
+#define LINK_OP_WINDOW      7       /* OS32 → Host: 絶対値 credit + 配送許可 */
+#define LINK_OP_WDATA       8       /* OS32 → Host: 要求本文 (rid, seq 1〜) */
+#define LINK_OP_STATUS      9       /* OS32 → Host: 結果の再提示 / 生存確認 */
+#define LINK_OP_RELEASE     10      /* OS32 → Host: ハンドルを閉じた通知 */
 
-/* リンクヘッダ (Ethernet ペイロード先頭)。x86 なのでそのまま little-endian で
- * 送受信し、Host Agent 側も LE で読む。16 バイト。 */
-struct link_hdr {
-    u8  op;
-    u8  flags;
-    u16 epoch;
-    u32 seq;        /* 送信側のフレーム連番 */
-    u32 ack;        /* 受信済みの最終 in-order seq (累積 ACK) */
-    u16 length;     /* このヘッダに続くペイロードのバイト数 */
-    u16 rsvd;
-};
+/* ---- ヘッダ (20B)。**構造体にしない** ---------------------------------- */
+/*  op u8 @0, flags u8 @1, epoch u16 @2, seq u32 @4, ack u32 @8,             */
+/*  length u16 @12, rid u32 @14, sess u16 @18                               */
+/*  rid が 4 バイト境界に載らないのは意図どおりで、だからこそ読み書きは       */
+/*  バイト単位の LE アクセサで行う (構造体の詰め物に依存しない = 移植性)。    */
+#define LINK_HDR_LEN        20
+#define LINK_OFF_OP         0
+#define LINK_OFF_FLAGS      1
+#define LINK_OFF_EPOCH      2
+#define LINK_OFF_SEQ        4
+#define LINK_OFF_ACK        8
+#define LINK_OFF_LENGTH     12
+#define LINK_OFF_RID        14
+#define LINK_OFF_SESS       18
 
-#define LINK_HDR_LEN        16
-#define LINK_MAX_PAYLOAD    (1514 - LINK_ETH_HDR_LEN - LINK_HDR_LEN)  /* 1484 */
+/* 1 フレームに載せる payload の上限 (契約値。物理上限 1480 より小さく取る)。 */
+#define LINK_MAX_PAYLOAD    1400
+#define LINK_MIN_FRAME      60      /* 60B 未満はドライバがゼロ padding する */
 
-/* 結果コード */
+/* ---- HELLO の段階 (flags) ---------------------------------------------- */
+#define LINK_HS_SYN         0       /* OS32→Host  payload 0 */
+#define LINK_HS_SYNACK      1       /* Host→OS32  payload 6 (agent/req_sess/req_epoch) */
+#define LINK_HS_CONFIRM     2       /* OS32→Host  payload 0 */
+#define LINK_HS_ESTAB       3       /* Host→OS32  payload 2 (agent) */
+#define LINK_HELLO_SA_LEN   6
+#define LINK_HELLO_ES_LEN   2
+
+/* ---- flags bit0 -------------------------------------------------------- */
+#define LINK_F_CTRL         0x01    /* RESPONSE: 制御結果 (業務結果ではない) */
+#define LINK_F_RELACK       0x01    /* ACK: RELEASE への ACK */
+
+/* ---- 制御 RESPONSE の status (リンク符号。HTTP とは別空間) -------------- */
+#define LINK_CTL_PROCESSING 1
+#define LINK_CTL_TOMBSTONE  2
+#define LINK_CTL_NO_SLOT    3
+
+/* RESPONSE の payload は status u16 + length u32 の 6B 固定 */
+#define LINK_RESP_LEN       6
+#define LINK_WINDOW_LEN     2
+
+/* ---- タイマ定数 (100Hz tick 基準) -------------------------------------- */
+#define LINK_RTO_TICKS      20      /* 再送間隔 (200ms)。NIC 受理 tick から */
+#define LINK_TRIES          5       /* 再送上限。超えたら再同期 */
+#define LINK_PROBE_TICKS    100     /* T_probe = 1 秒 */
+#define LINK_PROBE_MAX      5       /* STATUS が k 回無応答 → 再同期 */
+#define LINK_RX_BUDGET      16      /* 1 tick で dispatch する上限フレーム数 */
+
+/* ---- 容量 -------------------------------------------------------------- */
+#define LINK_HANDLES        2       /* 同時ハンドル */
+#define LINK_STREAM_BUF     8192    /* 本文リング 1 本 */
+#define LINK_DECL_MAX       65536   /* 宣言長の上限 (wseq が枯渇しない) */
+
+/* L1 の credit 計算パラメータ (LINK_PLAN.md §2-2) */
+#define LINK_MAXFRAME_PAGES 6
+#define LINK_CREDIT_MARGIN  12
+#define LINK_PAGE_BYTES     256     /* NIC リングの 1 ページ */
+
+/* ---- ハンドルの状態 (TASK_N0 §2c) -------------------------------------- */
+#define LINK_H_FREE         0
+#define LINK_H_SENT         1
+#define LINK_H_RESP         2
+#define LINK_H_DONE         3
+#define LINK_H_STALE        4
+
+/* ---- セッションの状態 -------------------------------------------------- */
+#define LINK_S_DOWN         0       /* 未確立 (SYN を出す) */
+#define LINK_S_SYN          1       /* SYN 送信済み、SYN-ACK 待ち */
+#define LINK_S_CONFIRM      2       /* CONFIRM 送信済み、ESTABLISHED 待ち */
+#define LINK_S_UP           3
+
+/* ---- 旧 L0 の結果コード (自己試験が使う) -------------------------------- */
 #define LINK_OK             0
-#define LINK_ERR            -1      /* ドライバ / 送信エラー */
-#define LINK_ERR_TIMEOUT    -2      /* 応答が来ない (再送しても) */
-#define LINK_ERR_NOPEER     -3      /* HELLO 未完了 (peer MAC 不明) */
-#define LINK_ERR_TOOBIG     -4      /* ペイロードが LINK_MAX_PAYLOAD 超過 */
+#define LINK_ERR            -1
+#define LINK_ERR_TIMEOUT    -2
+#define LINK_ERR_NOPEER     -3
+#define LINK_ERR_TOOBIG     -4
 
-/* リンク層を初期化する (ドライバ attach 後に呼ぶ)。my_mac は NIC の MAC。 */
+/* ======================================================================== */
+/*  API                                                                     */
+/* ======================================================================== */
+
+/* リンク層を初期化する (ドライバ attach 後に呼ぶ)。my_mac は NIC の MAC。
+ * 反射モードでは呼ばない (link_tick も起動しない)。 */
 void link_init(const u8 my_mac[6]);
 
-/* HELLO を送って Host Agent と peer MAC / epoch を確立する。
- * 応答が来るまで tries 回まで再送する。成功で LINK_OK。 */
-int  link_hello(int tries);
+/* 100Hz タイマ (kernel/isr_handlers.c の `ne2k_timer_tick()` の直後)。
+ * **プロトコルを進めるのはここだけ** — 受信 dispatch、再送、制御の送出、
+ * HELLO / 再同期。KAPI からは呼ばない。反射モードでは呼ばれない。 */
+void link_tick(void);
 
-/* Stop-and-Wait の 1 往復: REQUEST を送り、対応する RESPONSE を待つ。
- * 応答本文を resp に最大 resp_cap バイトコピーし、*resp_len に実長を入れる。
- * 応答が来るまで tries 回まで再送する。ACK が返るまで次を送らない設計なので、
- * この関数が戻るまで呼び出し側は次の要求を出さない。 */
-int  link_request(const void *req, unsigned int req_len,
-                  void *resp, unsigned int resp_cap, unsigned int *resp_len);
+/* ---- KAPI v51 の実体 (ラッパーは kapi/kapi_host.c) ----------------------
+ * どれも待たない。ポインタはすべて**カーネル領域**で、CPL=3 のポインタ検証と
+ * ユーザー領域への写しはラッパー側が行う。 */
 
-/* 受信フレームを 1 つ処理する (L0 では link_request 内で使う)。呼び出し側の
- * ループから使えるよう公開。データが無ければ何もしない。 */
-void link_poll(void);
+/* 要求行 (カーネル領域、1〜1400B) を写して REQUEST をキューへ。h (0/1) / 負。 */
+i32 link_host_open(const char *req, u32 len, int owner);
 
-/* L0 自己試験 (LGY98_FLAG_LINKTEST): HELLO のあと rounds 回 PING/PONG を往復し、
- * 成否をログと下のカウンタに残す。Host Agent が起動している前提。 */
+/* 業務 RESPONSE の status / length。出力先はカーネルの変数 (NULL 可)。 */
+i32 link_host_status(i32 h, u32 *status, u32 *length, int owner);
+
+/* 本文を 1 回ぶん**カーネルの中継バッファへ**取り出す (成功確定点)。
+ * 戻り値 > 0 なら *out に中継バッファの先頭が入る。0 = 完了、AGAIN、負 = 失敗。
+ * 呼び出し側 (ラッパー) は戻った後 IF=1 でユーザー領域へ写す。 */
+i32 link_host_read_stage(i32 h, u32 cap, const u8 **out, int owner);
+
+/* 要求本文 (カーネル領域) を WDATA としてキューへ。受け付けた長さ / 負。 */
+i32 link_host_write(i32 h, const void *buf, u32 len, int owner);
+
+/* ハンドルを閉じる (RELEASE を専用スロットへ)。0 / 負。 */
+i32 link_host_close(i32 h, int owner);
+
+/* owner 回収 (exec_reclaim_owned から、kapi/kapi_host.c 経由)。 */
+void link_host_owner_exit(int owner);
+
+/* 要求行から宣言長を読む (ECHO / CLIP PUT / PRINT DATA / PUT)。0 = 本文無し。 */
+u32 link_decl_len(const char *req, u32 len);
+
+/* ---- 自己試験 (LGY98_FLAG_LINKTEST。非同期 API + IF=1 の hlt 待ちで書く) -- */
 void link_selftest(int rounds);
-
-/* L1 自己試験: ホストに DATA を count フレーム (各 payload バイト) 流させ、
- * 絶対値 WINDOW でフロー制御する。溢れさせずに全フレームを順序どおり受ける
- * ことと、ページ消費の実測 (§2-3) を確認する。link_hello 済みが前提。 */
 void link_l1_bulk(unsigned int count, unsigned int payload);
-
-/* L2 自己試験: ホストに total バイトのストリーム (各 plen バイトの DATA) を流させ、
- * 再結合バッファを持たず順次消費して内容を検証する。dropseq>0 なら、その seq を
- * ホストに 1 回だけ落とさせて Go-Back-N の欠落回復も確認する。link_hello 済みが前提。 */
 void link_l2_stream(unsigned int total, unsigned int plen, unsigned int dropseq);
-
-/* ストリームから最大 n バイト読み出す (Host Services / アプリが順次消費する入口)。 */
-unsigned int link_stream_read(void *buf, unsigned int n);
-
-/* L3 Host Services: サービス要求を出し、RESPONSE の status/length を得て、本文があれば
- * ストリーム消費する (verify なら pattern 検査)。req は "GET <資源>" 等。KAPI 公開は
- * 版番号調整後 (LINK_PLAN §5-1 の調整メモ)。 */
-int link_service_get(const char *req, unsigned int req_len,
-                     u32 *status, u32 *len, int verify);
-
-/* L3 自己試験: GET /pattern (検証)、GET /notfound (404)、GET http:// (実 HTTP, 付録)、
- * TIME (要求応答のみ) を順に行い、下のカウンタに残す。 */
 void link_l3_service(void);
 
-/* ホストから kernel.map 経由で観測するカウンタ (static にしない)。 */
-extern u32 link_hello_ok;       /* HELLO 確立 (0/1) */
-extern u32 link_rt_ok;          /* 成功した往復数 */
-extern u32 link_rt_fail;        /* 応答が来なかった往復数 */
-extern u32 link_retransmits;    /* 再送回数 */
+/* ======================================================================== */
+/*  ホストから kernel.map 経由で観測するカウンタ (static にしない)           */
+/*  既存の tools/net_l*_test.py が読む名前は v2 でも同じ意味を保つ。         */
+/* ======================================================================== */
+extern u32 link_hello_ok;       /* セッション確立 (0/1) */
+extern u32 link_rt_ok;          /* 成功した往復数 (RESPONSE を受けた要求) */
+extern u32 link_rt_fail;        /* 失敗した往復数 (STALE / タイムアウト) */
+extern u32 link_retransmits;    /* 再送回数 (REQUEST / WDATA / RELEASE / CONFIRM) */
 extern u32 link_rx_frames;      /* 受け取ったリンクフレーム数 */
-extern u32 link_rx_dropped;     /* 自分宛でない / 壊れた等で捨てた数 */
+extern u32 link_rx_dropped;     /* 検査に落ちて捨てた数 */
 extern u8  link_peer_mac[6];    /* 確立した Host Agent の MAC */
-extern u16 link_epoch;
+extern u16 link_epoch;          /* 現在の再同期世代 */
+
+/* v2 で増えた観測点 */
+extern u16 link_sess;           /* 現在のセッション ID (Agent 採番) */
+extern u16 link_agent_gen;      /* Agent の起動世代 */
+extern u32 link_resyncs;        /* 再同期した回数 */
+extern u32 link_tombstones;     /* 制御 TOMBSTONE を受けた回数 */
+extern u32 link_no_slots;       /* 制御 NO_SLOT を受けた回数 */
+extern u32 link_processing;     /* 制御 PROCESSING を受けた回数 */
+extern u32 link_tx_deferred;    /* NIC が受けず次の周回へ持ち越した回数 */
 
 /* L1 (WINDOW/Credit の bulk 受信) 観測用 */
-extern u32 link_l1_recv;        /* 順序どおり受けた DATA フレーム数 */
-extern u32 link_l1_bytes;       /* 受けた DATA の総ペイロードバイト数 */
-extern u32 link_l1_ooo;         /* 順序外 / 欠落 (期待 seq と不一致) の回数 */
-extern u32 link_l1_windows;     /* 送った WINDOW 数 */
-extern u32 link_l1_max_credit;  /* 広告した credit_pages の最大値 */
-extern u32 link_l1_min_credit;  /* 広告した credit_pages の最小値 (0 除く) */
-extern u32 link_l1_done;        /* EOF を受けた (0/1) */
-extern u32 link_l1_meas_pages;  /* 実測: DATA 1 フレームあたりの平均消費ページ ×100 */
+extern u32 link_l1_recv;
+extern u32 link_l1_bytes;
+extern u32 link_l1_ooo;
+extern u32 link_l1_windows;
+extern u32 link_l1_max_credit;
+extern u32 link_l1_min_credit;
+extern u32 link_l1_done;
+extern u32 link_l1_meas_pages;
 
 /* L2 (ストリーミング) 観測用 */
-extern u32 link_l2_bytes;       /* ストリームに溜めた総バイト数 */
-extern u32 link_l2_read;        /* 消費側が読んだ総バイト数 */
-extern u32 link_l2_gaps;        /* 先行 DATA を捨てた回数 (Go-Back-N で回復) */
-extern u32 link_l2_bad;         /* 内容不一致バイト数 */
-extern u32 link_l2_eof;         /* EOF を受けた (0/1) */
-extern u32 link_l2_overflow;    /* バッファ満杯で受けられなかった回数 (credit が正しければ 0) */
+extern u32 link_l2_bytes;
+extern u32 link_l2_read;
+extern u32 link_l2_gaps;
+extern u32 link_l2_bad;
+extern u32 link_l2_eof;
+extern u32 link_l2_overflow;
 
 /* L3 (Host Services) 観測用 */
-extern u32 link_l3_get_status;  /* GET /pattern の status (200) */
-extern u32 link_l3_get_len;     /* RESPONSE が告げた本文長 */
-extern u32 link_l3_get_read;    /* 実際にストリーム消費したバイト数 */
-extern u32 link_l3_get_bad;     /* 内容不一致バイト数 */
-extern u32 link_l3_404;         /* GET /notfound の status (404) */
-extern u32 link_l3_http_status; /* 実 HTTP GET の status (200 ならオンライン) */
-extern u32 link_l3_http_read;   /* 実 HTTP 本文の受信バイト数 */
-extern u32 link_l3_time_len;    /* TIME RPC の応答長 */
+extern u32 link_l3_get_status;
+extern u32 link_l3_get_len;
+extern u32 link_l3_get_read;
+extern u32 link_l3_get_bad;
+extern u32 link_l3_404;
+extern u32 link_l3_http_status;
+extern u32 link_l3_http_read;
+extern u32 link_l3_time_len;
 
 #endif /* OS32_NET_LINK_H */

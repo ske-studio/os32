@@ -1,4 +1,4 @@
-# KernelAPI v50 仕様書
+# KernelAPI v51 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -92,7 +92,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
 | v49 | **実装済み (2026-09-12、T9-K)** | GUI v1.3 T9 shell script: 起動要求表 8 本 — `launch_req` / `launch_pending` / `launch_take` / `launch_report` / `launch_poll` / `launch_cancel` / `launch_child` と `sys_yield`。GUI 中の CPL=3 は入れ子 `exec_run` を使えないので、外部プログラムの起動と kill をカーネルの表に載せ owner 1 (WM) が仲介する。同じ追記で `exec_kill` を「id と子孫を末尾から回収」に固定した (D8) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
 | v50 | **実装済み (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
-| v51 | 予約 (N1 で実装、2026-09-14) | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212、data_fields は 0x35C / 0x360 へ)。非ブロッキング、同時 2 ハンドル、ストリーム 1 本 | [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a |
+| v51 | **実装済み (2026-09-14、N1)** | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212 = 0x348〜0x358、data_fields は 0x35C / 0x360 へ)。非ブロッキング (プロトコルを進めるのは 100Hz の `link_tick` だけ)、同時 2 ハンドル、ストリーム 1 本。実体は `kapi/kapi_host.c` + `net/link.c` | [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -551,6 +551,37 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 | 0x340 | db_bind_null | `int(int handle, int index)` |
 | 0x344 | db_error_code | `int(int handle)` |
 
+### Host Services (v51)
+
+要求 1 本 = ハンドル 1 本。**どれも待たない** (呼び手は `OS32_ERR_AGAIN` を見て
+`sys_yield` / `sys_halt` で再試行する)。プロトコルを進めるのは 100Hz の
+`link_tick()` だけで、KAPI は状態を読み書きするだけ。契約の正典は票
+[tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a、実体は
+`kapi/kapi_host.c` (検証と写し) + `net/link.c` (状態機械)。
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x348 | host_open | `i32(const char *req, u32 len)` |
+| 0x34C | host_status | `i32(i32 h, u32 *status, u32 *length)` |
+| 0x350 | host_read | `i32(i32 h, void *buf, u32 cap)` |
+| 0x354 | host_write | `i32(i32 h, const void *buf, u32 len)` |
+| 0x358 | host_close | `i32(i32 h)` |
+
+- `host_open`: 要求行 1〜1400B (超過 / 0 → `INVAL`) をカーネル領域へ写し REQUEST を
+  積む。HELLO 未確立 / 再同期中 → `STALE`、空き無し → `FULL`、直前のハンドルの
+  RELEASE が未 ACK → `AGAIN`、NIC 無し / 未初期化 → `NOSYS`。戻り値は h (0 / 1)。
+- `host_status`: 業務 RESPONSE 未着 → `AGAIN`。Agent が墓標を返したハンドル → `STALE`。
+  出力ポインタは NULL 可で、**全部を先に検証してから書く** (失敗時は書かない)。
+- `host_read`: 1 回に写す量は min(cap, リングの連続可用, 1400)。最後のバイトを写した
+  呼び出しは正の長さを返し、**その次**の呼び出しが 0。リングの所有者は最初に読んだ
+  ハンドルで、他方は `AGAIN`。
+- `host_write`: 宣言長のある要求だけ (`ECHO <len>` / `CLIP PUT <len>` /
+  `PRINT DATA <id> <len>` / `PUT ... <len>`)。`len > 残り宣言長` → `INVAL`
+  (部分受付はしない)。REQUEST の転送 ACK 前と未 ACK の WDATA がある間は `AGAIN`。
+- `host_close`: 任意の状態から解放し RELEASE を送る (bit0 の ACK まで再送)。
+  **STALE のハンドルからは送らない**。二重 close → `INVAL`。回収は
+  `exec_reclaim_owned` の `host_owner_exit`。
+
 - `db_open_existing`: `writable` は 0 = `SQLITE_OPEN_READONLY` / 1 = `SQLITE_OPEN_READWRITE`。
   それ以外は拒否。**CREATE も URI も付けない** ので、無い DB は作られない。空 path /
   `:memory:` / `file:` 接頭 / `OS32_MAX_PATH` 超も拒否。open の**前**に `vfs_stat` で
@@ -649,8 +680,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x348 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x34C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x35C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x360 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

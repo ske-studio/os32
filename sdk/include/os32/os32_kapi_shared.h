@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      50   /* 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
+#define KAPI_VERSION      51   /* Host Services の基盤 (票 N1): host_open / host_status / host_read / host_write / host_close の 5 本 (非ブロッキング、同時 2 ハンドル、プロトコルを進めるのは 100Hz の link_tick だけ)。v50 = 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */

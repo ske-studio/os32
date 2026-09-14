@@ -118,7 +118,10 @@ int lgy98_attach(unsigned int base, unsigned int irq, unsigned int flags)
         lgy98_reflect_on = 1;
         kprintf(0x07, "[lgy98] reflect mode (M2 test): rx frames are sent back with MACs swapped\n");
     }
-    link_init(mac);
+    /* 反射モードではリンク層を起こさない — RX キューの消費者は反射か
+     * リンク層のどちらか 1 つ (TASK_N0 §2a、往復 2 の R10)。link_init を
+     * 呼ばなければ link_tick は何もせず戻る。 */
+    if (!(flags & LGY98_FLAG_REFLECT)) link_init(mac);
     /* IRQ 駆動へ: IDT 登録 → IMR 有効化 → PIC 有効化 (この順序、§4) */
     {
         void (*stub)(void) = (irq == LGY98_INT0_IRQ) ? irq_stub_nic_3
