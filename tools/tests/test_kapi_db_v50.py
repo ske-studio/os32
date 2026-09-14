@@ -16,6 +16,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CASES = ["open_existing", "prepare_only", "binds", "error_code",
          # N2 (c): ブート自己診断 db_v50_selftest() を make check で踏む (F1 回帰)
          "v50_selftest",
+         # 票 H3 の是正 (2026-09-15): slot 配置の検査が **末尾追記で落ちない**
+         # こと。KAPI をもう 1 本足した場合を引数で模して踏む
+         "slot_layout_append",
          "shm_bound",
          "user_range", "owner_isolation", "order_new", "order_old",
          # 実装レビュー 往復 1 の blocker 6 件 + TRANSIENT (s0_tdd.md §K)

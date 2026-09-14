@@ -12,15 +12,33 @@
 /*    hsync -n            — dry-run (読んで比べるだけ、1 バイトも書かない)  */
 /*    hsync -v            — 判定理由まで出す                               */
 /*    hsync -f            — 同一判定を省いて全上書き (sys は除く)           */
+/*    hsync --verify      — 日時を見ず、全件の内容を必ず比較する            */
 /*    hsync sys           — /sys を明示指定したときだけ同期する             */
 /*    hsync -f sys        — /host/sys/ を強制同期                          */
 /*                                                                          */
-/*  **既定の同一判定は「サイズ + 内容のバイト比較」** (票 H1、設計書        */
+/*  **同一判定は「サイズ + 内容のバイト比較」** (票 H1、設計書              */
 /*  docs/tasks/shell/HSYNC_IMPROVEMENT_PLAN.md §1 / §3.1)。                 */
 /*  以前はサイズが同じなら中身を見ずにスキップしていたので、長さを変えずに   */
 /*  ヘッダだけ変わった shlib (2026-09-14 の libos32gui.shlib) が更新されず、 */
-/*  「配備したのに古いまま」が起きた。mtime は**同一の根拠に使わない** —     */
-/*  同じ秒の再ビルド・touch・過去コミットへの checkout で簡単に嘘になる。    */
+/*  「配備したのに古いまま」が起きた。                                      */
+/*                                                                          */
+/*  **日時は「前置フィルタ」** (票 H3 §8、ユーザー決裁 2026-09-15)。        */
+/*  H1 の全件バイト比較は変更 0 件でも `hsync sys` に 25.8 秒 / 全体同期に   */
+/*  135.4 秒かかった (両側を読むので実 I/O は対象の 2 倍)。日時で候補を絞り、*/
+/*  **候補だけをバイト比較**することで読む量を数十分の 1 にする。           */
+/*                                                                          */
+/*    | サイズか日時が違う   | **内容を比較**して、違えばコピー            | */
+/*    | サイズも日時も同じ   | スキップ (unchanged)                       | */
+/*    | 日時が不明 / 0       | **内容を比較する**                         | */
+/*                                                                          */
+/*  **証拠が無いことを同一の根拠にしない** — 日時が取れないときに黙って     */
+/*  スキップしない。日時の一致だけでコピーも決めない (決めるのは内容比較)。  */
+/*  失うのは「サイズが同じ、かつ日時も同じ、かつ中身が違う」場合だけで、     */
+/*  そこが要るときは `--verify` で全件の内容を比較する (= H1 の挙動)。       */
+/*                                                                          */
+/*  **保存側 (sys_set_mtime、KAPI v52) が無いと成立しない**: 宛先の日時は    */
+/*  「hsync がコピーした時刻」なので、コピー元の時刻を宛先へ書かない限り     */
+/*  全ファイルが永遠に「変更あり」に見えて 1 件もスキップされない。          */
 /*                                                                          */
 /*  **既定で sys を外す理由**: /sys には稼働中の常駐シェル (shell.bin)、     */
 /*  共有ライブラリ (lib/)、unicode.bin、フォントが入っている。走っている     */
@@ -70,6 +88,13 @@
 #define HR_TYPE_UNKNOWN "type_unknown"      /* 種別が取れない */
 #define HR_IO           "io_error"          /* stat / read / write の失敗 */
 #define HR_TOO_LARGE    "size_unsupported"  /* 32bit / int で扱えない長さ */
+/* ---- 票 H3 (日時) ---- */
+#define HR_MTIME_ONLY   "mtime_only"        /* 内容同じ・日時だけ違う */
+#define HR_SAME_MTIME   "size_mtime_same"   /* サイズも日時も同じ = 読まずに省略 */
+#define HR_SAME_CONTENT "content_same"      /* 読み比べて全内容一致 */
+#define HR_META_FAILED  "metadata_failed"   /* 有効な時刻の保存に失敗した */
+#define HR_MTIME_UNKNOWN "mtime_unknown"    /* 元の mtime が 0 / 不明 */
+#define HR_MTIME_NOSYS  "mtime_unsupported" /* 宛先 FS が set_mtime を持たない */
 #define HR_DEFAULT_SYS  "default_sys_exclusion"
 #define HR_SETTINGS_DB  "settings_db"
 #define HR_TOO_DEEP     "path_too_deep"     /* VFS の要素数上限を越える */
@@ -93,17 +118,23 @@ static u8 *file_buf;                 /* 64KB。コピーと読戻しで使う */
 static u8 *cmp_a;                    /* file_buf[0 .. 32KB) */
 static u8 *cmp_b;                    /* file_buf[32KB .. 64KB) */
 
-/* 統計 (設計書 §7.2 の 5 本) */
+/* 統計 (設計書 §7.2 の 6 区分) */
 static int g_copied;                 /* dry-run では「予定件数」 */
 static int g_unchanged;
 static int g_excluded;
 static int g_protected;
+static int g_metadata_updated;       /* 内容は同じで mtime だけ直したもの */
 static int g_errors;
+
+/* 集計には出さないが、**省略したことを必ず見せる**ための数 (票 H3) */
+static int g_mtime_unknown;          /* 元の mtime が 0 = 保存を省略した */
+static int g_mtime_nosys;            /* 宛先 FS が set_mtime を持たない */
 
 /* オプション */
 static int g_force;
 static int g_dry_run;
 static int g_verbose;
+static int g_verify;                 /* 全件の内容を必ず比較する (票 H3 §8) */
 
 /* 既定の /sys 除外は「全体同期のルート直下」だけに効かせる。
  * `hsync usr` の usr/sys を巻き添えにしない (設計書 §3.2)。 */
@@ -527,6 +558,50 @@ static void fail_file(const char *dst, const char *reason, int err)
     g_errors++;
 }
 
+/* ======== コピー元 mtime を宛先へ (票 H3 / 設計書 §5.2) ======== */
+
+/* **データを書き終えてから**呼ぶこと。通常の書き込みは mtime を
+ * ゲストの現在時刻で上書きするので、先に設定すると消える。
+ * 宛先の ctime はゲスト側の変更時刻でよい (カーネルがそうする)。
+ *
+ *   戻り値  1 … 設定した
+ *           0 … 設定しなかったが**失敗ではない**
+ *                (src_mtime が 0 = 不明 / 宛先 FS が持っていない = NOSYS)
+ *          -1 … 有効な時刻の保存を試みて失敗した
+ *                (呼び手が metadata_failed + errors に数える)
+ *
+ * dry-run では 1 バイトも書かないので呼ばない (呼び手側で分岐する)。 */
+static int apply_mtime(const char *dst_path, u32 src_mtime)
+{
+    int rc;
+
+    if (src_mtime == 0) {
+        /* 証拠が無いものを書かない。**省略したことは必ず見せる** */
+        g_mtime_unknown++;
+        if (g_verbose)
+            api->kprintf(ATTR_YELLOW, "  NOTIME %s reason=%s\n",
+                         dst_path, HR_MTIME_UNKNOWN);
+        return 0;
+    }
+
+    rc = api->sys_set_mtime(dst_path, src_mtime);
+    if (rc == 0) return 1;
+
+    if (rc == OS32_ERR_NOSYS) {
+        /* 「できなかった」ではなく「この FS には無い」。内容の同期は続ける */
+        g_mtime_nosys++;
+        if (g_verbose)
+            api->kprintf(ATTR_YELLOW, "  NOTIME %s reason=%s\n",
+                         dst_path, HR_MTIME_NOSYS);
+        return 0;
+    }
+
+    /* 有効な時刻を書こうとして落ちた。内容コピーの成功だけで
+     * 全成功と表示しない (設計書 §5.2)。 */
+    fail_file(dst_path, HR_META_FAILED, rc);
+    return -1;
+}
+
 static void sync_file(const char *src_path, const char *dst_path)
 {
     OS32_Stat ss;
@@ -535,7 +610,10 @@ static void sync_file(const char *src_path, const char *dst_path)
     const char *vreason = HR_IO;
     u32 size;
     int rc;
+    int cmp;
+    int mrc;
     int need = 1;
+    int meta_only = 0;       /* 内容は同じで mtime だけ違う (票 H3) */
 
     /* コピー元: 列挙結果を信用せず**直前に取り直す** (設計書 §3.1)。
      * 列挙とコピーの間にホスト側が差し替えているかもしれない。 */
@@ -571,27 +649,82 @@ static void sync_file(const char *src_path, const char *dst_path)
         /* 比較だけ省く。保護・型検査・コピー後検証は省略しない */
         reason = HR_FORCED;
     } else if (ds.st_size != size) {
+        /* サイズが違う = 内容も必ず違う。読み比べる意味が無い */
         reason = HR_SIZE;
     } else {
-        int cmp = compare_files(src_path, dst_path, size);
+        /* ---- ここからが票 H3 §8 の判定順 ----------------------------
+         *
+         * サイズは同じ。**日時を前置フィルタに使う**が、「証拠が無い」
+         * ことを同一の根拠にはしない:
+         *
+         *   - どちらかの mtime が 0 (不明)        → 内容を比較する
+         *   - mtime が違う                        → 内容を比較する
+         *   - `--verify`                          → 内容を比較する
+         *   - どちらも有効で一致                  → 読まずにスキップ
+         *
+         * **日時の一致だけでコピーを決めない。**候補に挙がったものは
+         * 必ずバイト比較を通し、コピーするかは内容が決める (H1 の A08 の
+         * 精神 — CRC が同値を返しても既定のバイト比較が違いを見つける)。 */
+        int mtime_known = (ss.st_mtime != 0 && ds.st_mtime != 0);
+        int mtime_same  = mtime_known && (ss.st_mtime == ds.st_mtime);
+
+        if (!g_verify && mtime_same) {
+            /* サイズも日時も同じ。**1 バイトも読まない** — ここが速さの源 */
+            g_unchanged++;
+            if (g_verbose)
+                api->kprintf(ATTR_WHITE, "  SAME %s size=%d reason=%s\n",
+                             dst_path, (int)size, HR_SAME_MTIME);
+            return;
+        }
+
+        cmp = compare_files(src_path, dst_path, size);
         if (cmp < 0) { fail_file(dst_path, HR_IO, 0); return; }
         if (cmp > 0) {
             reason = HR_CONTENT;
         } else {
             need = 0;
+            /* 内容は同じ。日時だけ違うなら**本体を書き直さず mtime だけ
+             * 更新する** (設計書 §5.2)。
+             *
+             * 条件は「宛先の mtime がコピー元と**一致していると言えない**」。
+             * コピー元が不明 (0) のときもここに入るが、apply_mtime が
+             * 0 を書きに行かず「省略した」と数える — **省略したことを
+             * 黙らせない**のが要点 (票 H3)。 */
+            meta_only = !(ss.st_mtime != 0 && ss.st_mtime == ds.st_mtime);
         }
     }
 
     if (!need) {
+        if (meta_only) {
+            if (g_dry_run) {
+                /* dry-run は mtime も書かない (設計書 §3.2) */
+                g_metadata_updated++;
+                api->kprintf(ATTR_CYAN, "  PLAN %s reason=%s size=%d\n",
+                             dst_path, HR_MTIME_ONLY, (int)size);
+                return;
+            }
+            mrc = apply_mtime(dst_path, ss.st_mtime);
+            if (mrc < 0) return;            /* metadata_failed (errors 済み) */
+            if (mrc > 0) {
+                /* **内容は同じ** = 稼働中の版とディスクの食い違いは
+                 * 生まれない。note_target は呼ばない (再起動の案内を
+                 * 出すと「入れ替わった」と読めてしまう)。 */
+                api->kprintf(ATTR_GREEN, "  MTIME %s reason=%s size=%d\n",
+                             dst_path, HR_MTIME_ONLY, (int)size);
+                g_metadata_updated++;
+                return;
+            }
+            /* 設定を省略した (NOSYS / 不明)。内容は同じなので unchanged */
+        }
         g_unchanged++;
         if (g_verbose)
-            api->kprintf(ATTR_WHITE, "  SAME %s size=%d\n",
-                         dst_path, (int)size);
+            api->kprintf(ATTR_WHITE, "  SAME %s size=%d reason=%s\n",
+                         dst_path, (int)size, HR_SAME_CONTENT);
         return;
     }
 
     if (g_dry_run) {
-        /* 読んで比べるだけ。mkdir・一時ファイル・明示 sync はしない */
+        /* 読んで比べるだけ。mkdir・一時ファイル・明示 sync・mtime はしない */
         g_copied++;
         api->kprintf(ATTR_CYAN, "  PLAN %s reason=%s size=%d\n",
                      dst_path, reason, (int)size);
@@ -610,6 +743,11 @@ static void sync_file(const char *src_path, const char *dst_path)
                  dst_path, reason, (int)size);
     g_copied++;
     note_target(dst_path);
+
+    /* **データを書き終えてから**コピー元の mtime を宛先へ (設計書 §5.2)。
+     * ここで落ちてもコピー自体は成功しているので copied は戻さないが、
+     * metadata_failed は errors に入る = 終了コードは非ゼロになる。 */
+    (void)apply_mtime(dst_path, ss.st_mtime);
 }
 
 /* 宛先をディレクトリとして使えるかを確かめる (Codex 実装レビュー B3)。
@@ -833,13 +971,16 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
 static void usage(void)
 {
     api->kprintf(ATTR_WHITE, "hsync — HostDrv sync (/host -> /)\n");
-    api->kprintf(ATTR_WHITE, "Usage: hsync [-f] [-n] [-v] [dir]\n");
+    api->kprintf(ATTR_WHITE, "Usage: hsync [-f] [-n] [-v] [--verify] [dir]\n");
     api->kprintf(ATTR_WHITE, "  -f, --force     同一判定を省いて上書き (保護・検証は省かない)\n");
-    api->kprintf(ATTR_WHITE, "  -n, --dry-run   読んで比べるだけ。1 バイトも書かない\n");
+    api->kprintf(ATTR_WHITE, "      --verify    日時を見ず、全件の内容を必ず比較する (遅い)\n");
+    api->kprintf(ATTR_WHITE, "  -n, --dry-run   読んで比べるだけ。1 バイトも書かない (mtime も)\n");
     api->kprintf(ATTR_WHITE, "  -v, --verbose   スキップ理由と比較結果も出す\n");
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
-    api->kprintf(ATTR_WHITE, "  既定の同一判定は「サイズ + 内容のバイト比較」。mtime は見ない\n");
+    api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
+    api->kprintf(ATTR_WHITE, "        日時が不明 (0) なら必ず内容を比較する\n");
+    api->kprintf(ATTR_WHITE, "        見逃すのは「サイズも日時も同じで中身が違う」場合だけ\n");
     api->kprintf(ATTR_WHITE, "  全体同期ではルート直下の sys を除外する (-f でも解除しない)\n");
 }
 
@@ -858,10 +999,14 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_unchanged = 0;
     g_excluded = 0;
     g_protected = 0;
+    g_metadata_updated = 0;
     g_errors = 0;
+    g_mtime_unknown = 0;
+    g_mtime_nosys = 0;
     g_force = 0;
     g_dry_run = 0;
     g_verbose = 0;
+    g_verify = 0;
     g_root_sync = 1;
     g_touched_sys = 0;
     g_touched_boot = 0;
@@ -877,6 +1022,11 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         if (a[0] == '-') {
             if (str_cmp(a, "-f") == 0 || str_cmp(a, "--force") == 0) {
                 g_force = 1;
+            } else if (str_cmp(a, "--verify") == 0) {
+                /* 票 H3 §8: 日時によるスキップをしない = H1 の現挙動。
+                 * 確実さが要るときだけ払う費用 (短い別名は付けない — 誤って
+                 * -v と打ち間違えたときに黙って遅くなるのを避ける)。 */
+                g_verify = 1;
             } else if (str_cmp(a, "-n") == 0 ||
                        str_cmp(a, "--dry-run") == 0) {
                 g_dry_run = 1;
@@ -1017,9 +1167,13 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
         api->kprintf(ATTR_YELLOW,
                      "  (force mode: 同一判定のみ省略。保護と読戻し検証は行う)\n");
     }
+    if (g_verify) {
+        api->kprintf(ATTR_YELLOW,
+                     "  (verify mode: 日時で省略せず、全件の内容を比較する)\n");
+    }
     if (g_dry_run) {
         api->kprintf(ATTR_YELLOW,
-                     "  (dry-run: 読み取りと比較だけ。mkdir・書き込み・sync はしない)\n");
+                     "  (dry-run: 読み取りと比較だけ。mkdir・書き込み・sync・mtime はしない)\n");
     }
 
     /* 同期実行。明示 dir は**起点の型を先に確かめてから**始める (B3)。
@@ -1049,10 +1203,29 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     /* 結果表示。失敗があれば頭を FAILED: にする (成功表示へ進めない) */
     api->kprintf(g_errors ? ATTR_RED : ATTR_WHITE,
-                 "\n%s copied=%d unchanged=%d excluded=%d protected=%d errors=%d%s\n",
+                 "\n%s copied=%d unchanged=%d excluded=%d protected=%d "
+                 "metadata_updated=%d errors=%d%s\n",
                  hsp_final_label(g_errors),
-                 g_copied, g_unchanged, g_excluded, g_protected, g_errors,
+                 g_copied, g_unchanged, g_excluded, g_protected,
+                 g_metadata_updated, g_errors,
                  g_dry_run ? " (dry-run: copied は予定件数)" : "");
+    if (g_dry_run && g_metadata_updated)
+        api->kprintf(ATTR_CYAN,
+                     "  (dry-run: metadata_updated も予定件数。"
+                     "mtime は 1 件も書いていない)\n");
+
+    /* **省略したことを必ず見せる** (票 H3)。集計の 6 区分とは別に数える —
+     * 失敗ではないが、「時刻を保存したつもり」で終わらせない。 */
+    if (g_mtime_unknown)
+        api->kprintf(ATTR_YELLOW,
+                     "NOTE: 元の mtime が不明 (0) で時刻の保存を省略: %d 件 "
+                     "reason=%s (内容の同期は行った)\n",
+                     g_mtime_unknown, HR_MTIME_UNKNOWN);
+    if (g_mtime_nosys)
+        api->kprintf(ATTR_YELLOW,
+                     "NOTE: 宛先 FS が mtime の設定に対応していない: %d 件 "
+                     "reason=%s (内容の同期は行った)\n",
+                     g_mtime_nosys, HR_MTIME_NOSYS);
 
     /* 「ディスクへ同期した」と「稼働中の版が入れ替わった」は別のこと
      * (設計書 §7.2)。再起動はここでは行わない。 */

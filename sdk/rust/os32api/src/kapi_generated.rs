@@ -222,13 +222,14 @@ pub struct KernelAPI {
     /* idx 212 */ pub host_read: unsafe extern "C" fn(h: i32, buf: *mut u8, cap: u32) -> i32,
     /* idx 213 */ pub host_write: unsafe extern "C" fn(h: i32, buf: *const u8, len: u32) -> i32,
     /* idx 214 */ pub host_close: unsafe extern "C" fn(h: i32) -> i32,
+    /* idx 215 */ pub sys_set_mtime: unsafe extern "C" fn(path: *const u8, mtime: u32) -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 51;
+pub const KAPI_VERSION: u32 = 52;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;

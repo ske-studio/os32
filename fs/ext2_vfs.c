@@ -280,6 +280,47 @@ static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
     return VFS_OK;
 }
 
+/* ---- 更新日時の設定 (票 H3 / 設計書 §5.2) ----
+ *
+ * ext2 は inode に mtime を持ち、書き込みのたびに現在時刻で更新している
+ * (fs/ext2_file.c)。値は元から持っていて、外から与える口が無かっただけ。
+ *
+ * **ctime はゲスト側の現在時刻にする** — ctime は「作成時刻」ではなく
+ * inode の状態変更時刻で、いま状態を変えたのはこのゲストだから。
+ * atime は触らない (同一判定に使わないし、読んだ覚えも無い)。
+ *
+ * mtime == 0 は「不明」の印なので受け付けない (VFS 側でも断るが、
+ * FS ドライバを直接呼ぶ経路が増えても崩れないようここでも見る)。 */
+static int ext2_vfs_set_mtime(void *ctx, const char *path, os_time_t mtime)
+{
+    Ext2Ctx *ec = (Ext2Ctx *)ctx;
+    Ext2Inode inode;
+    u32 ino;
+    int rc;
+
+    if (!ec) return VFS_ERR_NOMOUNT;
+    if (!ext2_is_mounted_ctx(ec)) return VFS_ERR_NOMOUNT;
+    if (!path) return VFS_ERR_INVAL;
+    if (mtime == 0) return VFS_ERR_INVAL;
+
+    rc = ext2_resolve_path(ec, path, &ino);
+    if (rc != 0) return VFS_ERR_NOTFOUND;
+
+    rc = ext2_read_inode(ec, ino, &inode);
+    if (rc != 0) return ext2_to_vfs_err(rc);
+
+    inode.mtime = (u32)mtime;
+    inode.ctime = ext2_current_time();
+
+    rc = ext2_write_inode(ec, ino, &inode);
+    if (rc != 0) return ext2_to_vfs_err(rc);
+
+    /* inode だけの変更でも媒体まで出す。ここで落ちたら「届いていない」 */
+    rc = ext2_sync(ec);
+    if (rc != 0) return ext2_to_vfs_err(rc);
+    return VFS_OK;
+}
+
 /* ---- マウント/アンマウント (kmalloc/kfree) ---- */
 
 static void *ext2_vfs_mount(int dev_id)
@@ -342,7 +383,8 @@ static VfsOps ext2_ops = {
     ext2_vfs_get_size, ext2_vfs_read_stream, ext2_vfs_write_stream,
     ext2_vfs_sync,
     ext2_vfs_total_blocks, ext2_vfs_free_blocks, ext2_vfs_block_size,
-    ext2_vfs_stat
+    ext2_vfs_stat,
+    ext2_vfs_set_mtime          /* 票 H3。他の FS は埋めない = NOSYS */
 };
 
 

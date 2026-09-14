@@ -61,6 +61,7 @@ typedef struct {
     u32  cap;
     u32  dev;
     u32  ino;
+    u32  mtime;          /* 票 H3。既定 0 = 不明 (この贋 FS は時刻を持たない) */
 
     /* --- 注入 --- */
     int  stat_err;       /* != 0 … sys_stat がこの値を返す */
@@ -286,10 +287,14 @@ static int fk_sys_stat(const char *path, OS32_Stat *buf)
     }
     buf->st_size = fs_nodes[n].stat_size ? fs_nodes[n].stat_size
                                          : fs_nodes[n].size;
-    /* A02: mtime は両側で同じにしておく。hsync は根拠に使ってはいけない */
-    buf->st_mtime = 1000;
-    buf->st_atime = 1000;
-    buf->st_ctime = 1000;
+    /* 票 H3: この贋 FS は時刻を持たないので **0 = 不明** を返す
+     * (以前は両側 1000 の決め打ちだった)。hsync は「証拠が無い」ことを
+     * 同一の根拠にしてはいけないので、0 同士でも必ず内容を比較する —
+     * A01 / A02 の期待はそのまま通る。時刻を使う試験は H3 側
+     * (tools/tests/hsync_h3_host.c) が node ごとに値を入れて回す。 */
+    buf->st_mtime = fs_nodes[n].mtime;
+    buf->st_atime = 0;
+    buf->st_ctime = 0;
     return 0;
 }
 

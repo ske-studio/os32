@@ -518,5 +518,9 @@ VfsOps iso9660_ops = {
     iso9660_get_file_size, iso9660_read_stream, iso9660_write_stream,
     iso9660_sync,
     iso9660_total_blocks, iso9660_free_blocks, iso9660_block_size_fn,
-    iso9660_stat
+    iso9660_stat,
+    /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
+     * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
+     * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0
 };

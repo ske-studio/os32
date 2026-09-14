@@ -1137,6 +1137,48 @@ int __cdecl kapi_db_error_code(int handle)
 }
 
 /* ======================================================================== */
+/*  db_slot_layout_ok — KAPI 表の slot 配置が v50 / v51 の形を保っているか    */
+/*                                                                          */
+/*  見るのは **既存スロットの位置**であって、表の長さではない。              */
+/*                                                                          */
+/*  ここは以前 `KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1` と書いていた。   */
+/*  それは「host_close の後ろに 1 本も足されていないこと」を要求するので、    */
+/*  **[ABI2] が正当と定めた末尾追記のたびに必ず落ちる**。実際 2026-09-15 に   */
+/*  票 H3 の `sys_set_mtime` (slot 213) で `make check` が落ちた。           */
+/*  この項の意図は「追記した 7 本が 201..207 に居て、既存の `db_*` が        */
+/*  動いていない」であって、表がそこで終わっていることではない。             */
+/*                                                                          */
+/*  だから長さは **下限だけ** 見る。slot_count を引数で受けるのは、          */
+/*  「KAPI をもう 1 本足したら」をホスト試験から直に試せるようにするため      */
+/*  (tools/tests/kapi_db_v50_host.c の slot_layout_append)。                 */
+/*                                                                          */
+/*  数値の直書きはしない ([C4]) — 位置は全部 os32_kapi_slots.h の定数から     */
+/*  導く。合っていなければ外部プログラムは「別の関数を呼ぶ」という最も静かな  */
+/*  壊れ方をする。                                                          */
+/* ======================================================================== */
+int db_slot_layout_ok(int slot_count)
+{
+    /* 表は少なくとも既知の末尾 slot を含む長さがある (**上限は見ない**) */
+    if (slot_count <= KAPI_SLOT_HOST_CLOSE) return 0;
+
+    /* v50 で追記した 7 本が 201..207 に居る */
+    if (KAPI_SLOT_DB_OPEN_EXISTING != 201) return 0;
+    if (KAPI_SLOT_DB_ERROR_CODE != 207) return 0;          /* db 帯の末尾 */
+    if (KAPI_SLOT_DB_ERROR_CODE - KAPI_SLOT_DB_OPEN_EXISTING != 6) return 0;
+
+    /* 既存 10 本は動いていない */
+    if (KAPI_SLOT_DB_OPEN != 140) return 0;
+
+    /* v51 の host 帯 5 本が 208..212 に居る。以前は「件数 == host_close + 1」
+     * が間接的に押さえていただけだったので、**位置を明示して**見る。 */
+    if (KAPI_SLOT_HOST_OPEN != 208) return 0;
+    if (KAPI_SLOT_HOST_CLOSE != 212) return 0;
+    if (KAPI_SLOT_HOST_CLOSE - KAPI_SLOT_HOST_OPEN != 4) return 0;
+
+    return 1;
+}
+
+/* ======================================================================== */
 /*  db_v50_selftest — ブート時に踏む v50 の骨 (kernel/kselftest.c から)      */
 /* ======================================================================== */
 u32 db_v50_selftest(void)
@@ -1145,14 +1187,8 @@ u32 db_v50_selftest(void)
     u32 hdr = (u32)sizeof(DB_ResultHeader);
     u32 desc = (u32)sizeof(DB_ColumnInfo);
 
-    /* (0) 表の件数と slot 番号 (db 帯は末尾追記で 201..207、v51 で host 帯
-     * 208..212 を追記、末尾は host_close)。件数は数値直書きせずヘッダ定数から
-     * 導く ([C4]): 末尾 slot は host_close で、全体件数はその +1。*/
-    if (KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1) bad |= 1u << 0;
-    if (KAPI_SLOT_DB_OPEN_EXISTING != 201) bad |= 1u << 0;
-    if (KAPI_SLOT_DB_ERROR_CODE != 207) bad |= 1u << 0;   /* db 帯の末尾 */
-    if (KAPI_SLOT_DB_ERROR_CODE - KAPI_SLOT_DB_OPEN_EXISTING != 6) bad |= 1u << 0;
-    if (KAPI_SLOT_DB_OPEN != 140) bad |= 1u << 0;   /* 既存 10 本は動かない */
+    /* (0) slot 配置。判定は db_slot_layout_ok() (下) が持つ。 */
+    if (!db_slot_layout_ok(KAPI_SLOT_COUNT)) bad |= 1u << 0;
 
     /* (1) SHM の境界: ちょうど収まる / 1 バイト超過 / descriptor だけで溢れる */
     if (!shm_row_fits_n(1, (u32)DB_SHM_BLOCK_SIZE - hdr - desc)) bad |= 1u << 1;

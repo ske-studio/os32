@@ -89,6 +89,16 @@ int ext2_write_stream(Ext2Ctx *c, u32 i, const void *b, u32 s, u32 o)
 int ext2_rename(Ext2Ctx *c, u32 od, const char *on, u32 nd, const char *nn)
 { (void)c; (void)od; (void)on; (void)nd; (void)nn; return -1; }
 
+/* ---- 票 H3 で ext2_vfs.c が使うようになった 2 本 ----
+ * ext2_vfs_set_mtime() が read_inode -> write_inode -> sync と進むので、
+ * 書き戻し先と時刻の出どころが要る。この試験の対象は**デバイス番号の
+ * エンコード**なので、中身は他の境界と同じく成功を返すだけにする。
+ * set_mtime そのものの規則は tools/tests/vfs_set_mtime_host.c が見る。 */
+int ext2_write_inode(Ext2Ctx *c, u32 i, const Ext2Inode *o)
+{ (void)c; (void)i; (void)o; return EXT2_OK; }
+/* 本物 (fs/ext2_super.c) と同じく定数を返す。ゲスト側の「いま」の代わり。 */
+u32 ext2_current_time(void) { return 0x67E8E800UL; }
+
 void *kzalloc(u32 size) { return calloc(1, size); }
 void kfree(void *p) { free(p); }
 

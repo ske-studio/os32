@@ -650,7 +650,11 @@ static int hdrv_read_stream(void *ctx, const char *path,
 /* 「成功と言ってよいか」の判定は純関数へ切り出してある (票 H1)。
  * 失敗したまま VFS_OK を返してゼロサイズを「実在する空ファイル」に
  * 化けさせない / 64bit EndOfFile を u32 へ黙って切り詰めない。
- * ホスト試験は tools/tests/hsync_h1_host.c (A11)。 */
+ * ホスト試験は tools/tests/hsync_h1_host.c (A11)。
+ *
+ * 票 H3 で LastWriteTime -> st_mtime を足した。FILETIME (1601 起点・100ns)
+ * から Unix 秒への変換も同じ .inc の純関数 (hdrv_filetime_to_unix) が持つ。
+ * ホスト試験は tools/tests/hsync_h3_host.c (A16)。 */
 #include "hostdrv_stat_rules.inc"
 STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
               hdrv_stat_attr_dir);
@@ -661,6 +665,7 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
     int basic_rc;
     int std_rc;
     u32 attributes = 0;
+    u64 last_write = 0;
     u64 end_of_file = 0;
     Np2FileBasicInfo *basic;
     Np2FileStandardInfo *std_info;
@@ -681,6 +686,9 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
     if (basic_rc == 0) {
         basic = (Np2FileBasicInfo *)g_databuf;
         attributes = basic->FileAttributes;
+        /* **ここで値として退避する** — 次の FileStandardInformation で
+         * g_databuf が丸ごと上書きされる (票 H1 と同じ作法、票 H3)。 */
+        last_write = basic->LastWriteTime;
     }
 
     /* FileStandardInformation 取得 (サイズ)。64bit のまま判定へ渡す */
@@ -700,6 +708,10 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
         kmemset(buf, 0, sizeof(OS32_Stat));
         return VFS_ERR_IO;
     }
+    /* 更新日時 (票 H3)。判定できない値は 0 = 不明のまま返す。
+     * atime / ctime は埋めない (同一判定に使わない。Windows の CreationTime を
+     * ctime へ入れない、設計書 §5.1)。 */
+    buf->st_mtime = hdrv_stat_mtime(basic_rc, (unsigned long long)last_write);
     return VFS_OK;
 }
 
@@ -874,7 +886,11 @@ static VfsOps g_hostdrvfs_ops = {
     hdrv_total_blocks,
     hdrv_free_blocks,
     hdrv_block_size,
-    hdrv_stat
+    hdrv_stat,
+    /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
+     * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
+     * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0
 };
 
 VfsOps *hostdrvfs_get_ops(void)

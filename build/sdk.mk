@@ -227,6 +227,16 @@ check-settings-protect-host:
 check-hsync-h1-host:
 	python3 -B tools/tests/test_hsync_h1.py --target
 
+# hsync の mtime 取得・保存と日時の前置判定 (票 H3、docs/tasks/shell/TASK_H3.md
+# §6 / §8)。H1 と同じく実物の userland/system/hsync.c を #include し、贋 FS に
+# **ノードごとの mtime** と sys_set_mtime (成功 / NOSYS / I/O 失敗) を持たせて回す。
+# FILETIME (1601 起点・100ns) -> Unix 秒の境界 (A16) は fs/hostdrv_stat_rules.inc の
+# 純関数を直接叩き、vfs_set_mtime の NOSYS 振り分けは実物の fs/vfs.c で見る。
+# --mutate は否定側 (日時が不明なのに省略する版などで落ちることの確認)。
+# 記録は tools/tests/h3_tdd.md。
+check-hsync-h3-host:
+	python3 -B tools/tests/test_hsync_h3.py --target --mutate
+
 # hdrv_list_dir の列挙ループ (票 H1 の「I/O 失敗を成功にしない」/ 対象
 # 「HostDrv のエラー処理」)。実物の fs/hostdrv_list_rules.inc を #include し、
 # hostdrv_query_dir に当たる 1 件取得だけを贋物にして、(a) 途中で負値 /
@@ -280,9 +290,9 @@ check-gui-host:
 check-host-lib-host:
 	python3 -B tools/tests/test_host_lib.py --target
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check

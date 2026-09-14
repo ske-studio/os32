@@ -1,4 +1,4 @@
-# KernelAPI v51 仕様書
+# KernelAPI v52 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **50** |
-| 合計エントリ数 | **212** (ヘッダ2 + 関数ポインタ208 + データフィールド2) |
+| 現在のバージョン | **52** |
+| 合計エントリ数 | **218** (ヘッダ2 + 関数ポインタ214 + データフィールド2) |
 
 ---
 
@@ -93,6 +93,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v49 | **実装済み (2026-09-12、T9-K)** | GUI v1.3 T9 shell script: 起動要求表 8 本 — `launch_req` / `launch_pending` / `launch_take` / `launch_report` / `launch_poll` / `launch_cancel` / `launch_child` と `sys_yield`。GUI 中の CPL=3 は入れ子 `exec_run` を使えないので、外部プログラムの起動と kill をカーネルの表に載せ owner 1 (WM) が仲介する。同じ追記で `exec_kill` を「id と子孫を末尾から回収」に固定した (D8) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
 | v50 | **実装済み (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
 | v51 | **実装済み (2026-09-14、N1)** | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212 = 0x348〜0x358、data_fields は 0x35C / 0x360 へ)。非ブロッキング (プロトコルを進めるのは 100Hz の `link_tick` だけ)、同時 2 ハンドル、ストリーム 1 本。実体は `kapi/kapi_host.c` + `net/link.c` | [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a |
+| v52 | **実装済み (2026-09-15、H3)** | 更新日時の保存 `sys_set_mtime` 1 本 (slot 213 = 0x35C、data_fields は 0x360 / 0x364 へ)。`VfsOps` の**任意実装フック** `set_mtime` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS` (失敗ではなく「持っていない」)。実体は `kapi/kapi_sys.c` + `fs/vfs.c` + `fs/ext2_vfs.c` | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -567,6 +568,26 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 | 0x354 | host_write | `i32(i32 h, const void *buf, u32 len)` |
 | 0x358 | host_close | `i32(i32 h)` |
 
+### 更新日時の保存 (v52)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x35C | sys_set_mtime | `int(const char *path, u32 mtime)` |
+
+- `mtime` は **UNIX Epoch 秒 (UTC)**。`0` は現行 ABI の「不明」の印なので `INVAL` で断る
+  (`OS32_Stat` に時刻の有効性ビットが無いため。不明を書けると次の同期で「証拠が無い」状態を
+  自分で作ることになる)。`path` は NUL 終端で `OS32_MAX_PATH` 未満 — 溢れたら**切り詰めずに**
+  `INVAL` (切り詰めた別のパスの時刻を動かさない)。CPL=3 からは 1 バイトずつ範囲を確かめながら
+  カーネル側へ写す (`kapi/kapi_sys.c`)。
+- `VfsOps.set_mtime` は**任意実装**。埋めていない FS ドライバでは `OS32_ERR_NOSYS` が返る。
+  これは失敗ではなく「この FS には無い」という答えで、呼び手は内容の同期を続けたまま
+  「時刻の保存を省略した」と表示する。**実装済みは ext2 だけ** (FAT / HostDrv / iso9660 は NOSYS)。
+- ext2 は inode の `mtime` を与えられた値に、`ctime` を**ゲスト側の現在時刻**にする
+  (`ctime` は作成時刻ではなく inode の状態変更時刻)。`atime` は触らない。
+  inode を書いたあと `ext2_sync()` まで通すので、成功は「媒体へ出した」を意味する。
+- **データを書き終えてから呼ぶこと。** 通常の書き込みは `mtime` を現在時刻で上書きするので、
+  先に設定すると消える (設計書 [HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) §5.2)。
+
 - `host_open`: 要求行 1〜1400B (超過 / 0 → `INVAL`) をカーネル領域へ写し REQUEST を
   積む。HELLO 未確立 / 再同期中 → `STALE`、空き無し → `FULL`、直前のハンドルの
   RELEASE が未 ACK → `AGAIN`、NIC 無し / 未初期化 → `NOSYS`。戻り値は h (0 / 1)。
@@ -680,8 +701,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x35C | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x360 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x360 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x364 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

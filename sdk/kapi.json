@@ -1,5 +1,5 @@
 {
-  "version": 51,
+  "version": 52,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -56,7 +56,8 @@
     "extern void kapi_sys_exit(int status);",
     "extern void kapi_sys_get_build_info(char *buf, int size);",
     "extern int gfx_stats(void *out);",
-    "extern int gfx_lease_palette(int first, int count, const u8 *rgb);"
+    "extern int gfx_lease_palette(int first, int count, const u8 *rgb);",
+    "extern int kapi_sys_set_mtime(const char *path, u32 mtime);"
   ],
   "api": [
     {
@@ -1480,6 +1481,12 @@
       "ret": "i32",
       "args": ["i32 h"],
       "target": "kapi_host_close"
+    },
+    {
+      "name": "sys_set_mtime",
+      "ret": "int",
+      "args": ["const char *path", "u32 mtime"],
+      "target": "kapi_sys_set_mtime"
     }
   ]
 }

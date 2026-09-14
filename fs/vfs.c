@@ -536,6 +536,33 @@ int vfs_stat(const char *path, OS32_Stat *buf)
     return rc;
 }
 
+/* ======================================================================== */
+/*  vfs_set_mtime — 更新日時の設定 (票 H3 / 設計書 §5.2)                     */
+/*                                                                          */
+/*  VfsOps の set_mtime は**任意実装**。持たない FS は VFS_ERR_NOSYS を返す  */
+/*  — これは失敗ではなく「この FS には無い」という答えで、呼び手 (hsync) は  */
+/*  内容の同期を続けたまま「時刻の保存を省略した」と表示する。              */
+/*                                                                          */
+/*  mtime == 0 は現行 ABI で「不明」の印 (OS32_Stat に有効性ビットが無い)。  */
+/*  不明を書き込めてしまうと、次の同期で「証拠が無い」状態を自分で作る       */
+/*  ことになるので、ここで断る。                                            */
+/* ======================================================================== */
+int vfs_set_mtime(const char *path, os_time_t mtime)
+{
+    char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
+    VfsOps *ops;
+
+    if (!path || !path[0]) return VFS_ERR_INVAL;
+    if (mtime == 0) return VFS_ERR_INVAL;      /* 0 = 不明。書かせない */
+
+    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
+    if (!ops) return VFS_ERR_NOMOUNT;
+    if (!ops->set_mtime) return VFS_ERR_NOSYS;
+    return ops->set_mtime(fs_ctx, rel_path, mtime);
+}
+
 /* vfs_path_kind の list_dir プローブ用 (何もしない) */
 static void vfs_kind_probe_cb(const VfsDirEntry *entry, void *ctx)
 {
