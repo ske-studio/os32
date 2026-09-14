@@ -22,11 +22,18 @@ v1 (16B ヘッダ・Stop-and-Wait・セッション無し) を置き換える。
   python3 tools/host_agent.py --unix /tmp/os32.sock --state-dir /tmp/st --quiet
 """
 import argparse
+import base64
+import binascii
 import os
 import random
+import re
+import select
+import shutil
 import socket
 import struct
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -88,6 +95,40 @@ PAYLEN = {
 }
 # HELLO は段階ごとに長さが違う
 HELLO_PAYLEN = {HS_SYN: 0, HS_SYNACK: 6, HS_CONFIRM: 0, HS_ESTAB: 2}
+
+# ------------------------------------------------- N2 サービス定数 (PRINT / CLIP)
+# 業務結果の HTTP 風ステータス (RESPONSE flags 0)。制御符号 (CTL_*) とは別空間。
+HTTP_OK = 200
+HTTP_BAD = 400            # 要求行が不正 (宣言長の範囲外、未知 kind 等)
+HTTP_CONFLICT = 409       # 未知 / 閉じ済み job、同一 job の並行本文
+HTTP_ISE = 500            # スプール追記・出力の失敗
+HTTP_NOT_IMPL = 501       # 先送りの要求 (raw kind、PUT /file/)
+HTTP_UNAVAIL = 503        # クリップボード backend 無し / 子プロセス失敗・期限超過
+
+DECL_MAX_BYTES = 65536    # ECHO / PRINT DATA の 1 要求あたり宣言長上限
+CLIP_PUT_MAX = 4096       # CLIP PUT の宣言長上限
+CLIP_GET_MAX = 65536      # CLIP GET は 64KB を UTF-8 境界で切って返す
+DEFAULT_LINES_PER_PAGE = 60
+FORMFEED = b"\f"
+UTF16_BOM = b"\xff\xfe"   # clip.exe へ渡す UTF-16LE のバイト順マーク
+SUBPROC_TIMEOUT = 4.0     # CLIP の子プロセスの期限 (秒)。超過で kill + 503
+TICK_INTERVAL = 0.05      # 常駐ループの select タイムアウト (子の巡回間隔)
+DECL_RE = re.compile(r"^[0-9]+$")   # 宣言長は 10 進のみ (+5 / -5 / 5_0 を弾く)
+
+# 子プロセス経路で 503 + 本文に落とす例外種 (往復 3 B-1 / nb2)。
+SUBPROC_ERRORS = (OSError, subprocess.TimeoutExpired,
+                  subprocess.CalledProcessError, UnicodeDecodeError,
+                  ValueError, binascii.Error)
+
+
+def write_int_atomic(path, value):
+    """tmp へ書いて fsync → os.replace で原子的に整数を書き出す (sess.txt / job.txt)。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("%d\n" % value)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def hdr_pack(op, flags, epoch, seq, ack, length, rid, sess):
@@ -186,19 +227,80 @@ class SessCounter:
             return None
         self.value += 1
         if self.path:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                f.write("%d\n" % self.value)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            write_int_atomic(self.path, self.value)
         return self.value
+
+
+# ---------------------------------------------------------------- job 採番
+class MonotonicCounter:
+    """job.txt に永続する単調カウンタ (sess.txt と同じ原子的書き込み)。
+
+    枯渇の概念は無い (印刷ジョブ id は使い回さないだけでよい)。path が None の
+    ときはメモリ内 (試験の既定)。Agent 再起動をまたいで最後の値から続ける。
+    """
+
+    def __init__(self, path=None, start=0):
+        self.path = path
+        self.value = start
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    self.value = int(f.read().strip() or "0")
+            except (OSError, ValueError):
+                self.value = start
+
+    def alloc(self):
+        self.value += 1
+        if self.path:
+            write_int_atomic(self.path, self.value)
+        return self.value
+
+
+# --------------------------------------------------------- 非同期子プロセス
+class _RealProc:
+    """subprocess.Popen を Agent の巡回に載せる薄い包み。
+
+    stdin_bytes があれば起動直後に書き込んで閉じる (CLIP は ≤4KB でパイプに収まる)。
+    poll() は None で実行中。output() は完了後に stdout を返す。kill() は冪等。
+    """
+
+    def __init__(self, cmd, stdin_bytes=None):
+        stdin = subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL
+        self.p = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL)
+        if stdin_bytes is not None:
+            try:
+                self.p.stdin.write(stdin_bytes)
+            finally:
+                self.p.stdin.close()
+        self._out = None
+
+    def poll(self):
+        return self.p.poll()
+
+    def output(self):
+        if self._out is None:
+            self._out, _ = self.p.communicate(timeout=1)
+        return self._out
+
+    def kill(self):
+        try:
+            self.p.kill()
+        except OSError:
+            pass
+
+
+def spawn(cmd, stdin_bytes=None):
+    """子プロセスを起こす唯一の口 (試験はこの名前を差し替えてスタブにする)。"""
+    return _RealProc(cmd, stdin_bytes)
 
 
 # -------------------------------------------------------------------- Agent
 class HostAgent:
     def __init__(self, mac, state_dir=None, agent_gen=None, quiet=False,
-                 rng=None, sess_start=0, allow_net=True, file_root=None):
+                 rng=None, sess_start=0, allow_net=True, file_root=None,
+                 spool_dir=None, print_dir=None, clip="none", printer=False,
+                 lines_per_page=DEFAULT_LINES_PER_PAGE):
         self.mac = mac
         self.quiet = quiet
         self.rng = rng or random.Random()
@@ -206,6 +308,23 @@ class HostAgent:
         self.sessions = SessCounter(state_dir, sess_start)
         self.allow_net = allow_net
         self.file_root = file_root
+        # ---- N2: PRINT / CLIP サービスの設定 ----
+        # ジョブ保存 (job.txt + スプール) は最初の PRINT OPEN で用意する (印刷を
+        # 使わない試験に空の一時ディレクトリを撒かない)。clip の既定は none で、
+        # auto は解決する (win32 が import できれば win32、WSL 道具があれば wsl)。
+        self._cfg_state_dir = state_dir
+        self._cfg_spool_dir = spool_dir
+        self.print_dir = print_dir
+        self.printer = printer
+        self.lines_per_page = lines_per_page or DEFAULT_LINES_PER_PAGE
+        self.clip = self._resolve_auto_clip() if clip == "auto" else clip
+        self.spool_dir = None
+        self.jobs_counter = None
+        self.jobs = {}              # job_id -> dict(kind, state, spool, pages, error)
+        # ---- 非同期の子プロセス (CLIP wsl backend、往復 3 B-1) ----
+        self.pending = {}           # rid -> dict(proc, ent, finish, deadline, sess, epoch)
+        self.now = time.time        # 期限判定の時計 (試験は差し替える)
+        self.subproc_timeout = SUBPROC_TIMEOUT
         # ---- 現行セッション (CONFIRM で切り替わる) ----
         self.sess = 0
         self.epoch = 0
@@ -350,6 +469,11 @@ class HostAgent:
         self.log("CONFIRM ok -> ESTABLISHED sess %d epoch %d" % (self.sess, self.epoch))
 
     def _switch_to(self, c):
+        # セッション / epoch が動く = 旧 rid は失効する。実行中の子プロセスも
+        # 捨てる (結果を旧セッションへ返さない。往復 3 B-1)。
+        for job in self.pending.values():
+            job["proc"].kill()
+        self.pending = {}
         new_sess = c["sess"] != self.sess
         self.sess, self.epoch, self.peer = c["sess"], c["epoch"], c["mac"]
         self.established = True
@@ -428,7 +552,8 @@ class HostAgent:
             return
         ent = {"st": "ACTIVE", "req": payload, "last_seq": 0, "decl": 0,
                "got": b"", "resp": None, "body": None, "gen": None,
-               "deliver": None}
+               "deliver": None, "job": None, "is_data": False,
+               "body_done": False}
         self.ledger[rid] = ent
         self._ack(rid, 0, out)
         self._reap_tombstones()
@@ -442,15 +567,19 @@ class HostAgent:
             if ent is not None and ent["st"] == "RELEASED":
                 self._ctl(rid, CTL_TOMBSTONE, out)
             return
-        if ent["decl"] == 0 or ent["resp"] is not None:
-            return                                     # 宣言長の無い要求 / 完了済み
+        # B1 (往復 2 新 1): ACTIVE な rid の WDATA は decl / resp に依らず必ず
+        # 累積 ACK する。本文を got に足すのは resp 未定・宣言長ありのときだけ
+        # (要求行で 400 した rid = decl 0 でも WDATA は ACK し本文は捨てる)。
         if seq == ent["last_seq"] + 1:
-            room = ent["decl"] - len(ent["got"])
-            ent["got"] += payload[:room]
             ent["last_seq"] = seq
-        # 重複 / 先行は捨てて累積 ACK を返す (Go-Back-N)
+            if ent["resp"] is None and ent["decl"] > 0:
+                room = ent["decl"] - len(ent["got"])
+                ent["got"] += payload[:room]
+        # 重複 / 先行は本文を触らず累積 ACK だけ返す (Go-Back-N)
         self._ack(rid, ent["last_seq"], out)
-        if len(ent["got"]) >= ent["decl"]:
+        if (ent["resp"] is None and ent["decl"] > 0
+                and not ent["body_done"] and len(ent["got"]) >= ent["decl"]):
+            ent["body_done"] = True
             self._finish_body(rid, ent, out)
 
     # --------------------------------------------------------- STATUS
@@ -470,6 +599,9 @@ class HostAgent:
     # -------------------------------------------------------- RELEASE
     def _on_release(self, rid, out):
         self.note_rid(rid)
+        job = self.pending.pop(rid, None)              # 実行中の子は結果ごと捨てる
+        if job is not None:
+            job["proc"].kill()
         self.ledger[rid] = {"st": "RELEASED"}          # (4) 先着でも墓標を作る
         self._reap_tombstones()
         self._ack(rid, 0, out, flags=F_RELACK)
@@ -516,32 +648,84 @@ class HostAgent:
             d["eof"] = True
 
     # -------------------------------------------------------- サービス
+    def _decl(self, s, hi):
+        """宣言長を 10 進のみで読み 1〜hi に収める。範囲外 / 非数は None。"""
+        if not DECL_RE.match(s or ""):
+            return None
+        v = int(s)
+        return v if 1 <= v <= hi else None
+
     def _serve(self, rid, ent, out):
         """要求行を読む。宣言長のある要求は本文を待ち、無い要求はすぐ答える。"""
         line = ent["req"].decode("latin1").strip()
         parts = line.split()
         verb = parts[0].upper() if parts else ""
-        try:
-            if verb == "ECHO":
-                ent["decl"] = int(parts[1])
-                return                                  # WDATA を待つ
-            if verb == "CLIP" and len(parts) >= 3 and parts[1].upper() == "PUT":
-                ent["decl"] = int(parts[2])
+        # --- 宣言長 (WDATA) のある要求。範囲は要求行の時点で検査 (B2) ---
+        if verb == "ECHO":
+            decl = self._decl(parts[1] if len(parts) > 1 else "", DECL_MAX_BYTES)
+            if decl is None:
+                self._answer(rid, ent, HTTP_BAD, b"", None, out)
                 return
-            if verb == "PRINT" and len(parts) >= 4 and parts[1].upper() == "DATA":
-                ent["decl"] = int(parts[3])
+            ent["decl"] = decl
+            return                                       # WDATA を待つ
+        if verb == "CLIP" and len(parts) >= 3 and parts[1].upper() == "PUT":
+            decl = self._decl(parts[2], CLIP_PUT_MAX)
+            if decl is None:
+                self._answer(rid, ent, HTTP_BAD, b"", None, out)
                 return
-            if verb == "PUT":
-                ent["decl"] = int(parts[-1])
+            ent["decl"] = decl
+            return
+        if verb == "PRINT" and len(parts) >= 2 and parts[1].upper() == "DATA":
+            self._serve_print_data(rid, ent, parts, out)
+            return
+        if verb == "PUT":
+            decl = self._decl(parts[-1] if len(parts) > 1 else "", DECL_MAX_BYTES)
+            if decl is None:
+                self._answer(rid, ent, HTTP_BAD, b"", None, out)
                 return
-        except (IndexError, ValueError):
-            self._answer(rid, ent, 400, b"", None, out)
+            ent["decl"] = decl                           # 本文を受け切って 501 (B6)
             return
         self._service_now(rid, ent, verb, parts, line, out)
+
+    def _serve_print_data(self, rid, ent, parts, out):
+        """PRINT DATA <id> <len>: 本文を待つ前に id / 状態 / 並行を検査 (B-2)。"""
+        job_id = None
+        if len(parts) >= 3 and DECL_RE.match(parts[2]):
+            job_id = int(parts[2])
+        job = self.jobs.get(job_id) if job_id is not None else None
+        if job is None:                                  # 未知 id → 409
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        if job["state"] != "open":                       # done / error への DATA → 409
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        if self._job_pending_data(job_id, rid):          # 本文未完了の DATA が別に居る
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        decl = self._decl(parts[3] if len(parts) >= 4 else "", DECL_MAX_BYTES)
+        if decl is None:                                 # 0 / 非数 / 超過 → 400
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)
+            return
+        ent["decl"] = decl
+        ent["job"] = job_id
+        ent["is_data"] = True
+        # WDATA を待つ
+
+    def _job_pending_data(self, job_id, skip_rid):
+        """同一 job に本文未完了 (resp is None) の DATA rid が居るか (自 rid 除外)。"""
+        for r, e in self.ledger.items():
+            if (r != skip_rid and e.get("st") == "ACTIVE" and e.get("is_data")
+                    and e.get("job") == job_id and e.get("resp") is None):
+                return True
+        return False
 
     def _service_now(self, rid, ent, verb, parts, line, out):
         if verb == "PING":
             self._answer(rid, ent, 200, b"", None, out)
+        elif verb == "PRINT":
+            self._service_print(rid, ent, parts, out)
+        elif verb == "CLIP":
+            self._service_clip(rid, ent, parts, out)
         elif verb == "TIME":
             body = time.strftime("%Y-%m-%d %H:%M:%S").encode()
             self._answer(rid, ent, 200, body, None, out)
@@ -597,13 +781,18 @@ class HostAgent:
             self._answer(rid, ent, 404, b"", None, out)
 
     def _finish_body(self, rid, ent, out):
-        """宣言長ぶんの WDATA を受け切った要求に答える。"""
-        line = ent["req"].decode("latin1").strip()
-        verb = line.split()[0].upper()
+        """宣言長ぶんの WDATA を受け切った要求に答える (verb で分岐)。"""
+        parts = ent["req"].decode("latin1").strip().split()
+        verb = parts[0].upper() if parts else ""
+        sub = parts[1].upper() if len(parts) > 1 else ""
         if verb == "ECHO":
             self._answer(rid, ent, 200, ent["got"], None, out)   # 折り返し
+        elif verb == "PRINT" and sub == "DATA":
+            self._print_data_finish(rid, ent, out)
+        elif verb == "CLIP" and sub == "PUT":
+            self._clip_put_finish(rid, ent, out)
         else:
-            self._answer(rid, ent, 200, b"", None, out)
+            self._answer(rid, ent, HTTP_NOT_IMPL, b"", None, out)  # PUT ほか (B6)
 
     def _answer(self, rid, ent, status, body, gen, out,
                 total=None, plen=STREAM_PLEN, dropseq=0):
@@ -612,7 +801,8 @@ class HostAgent:
         ent["body"] = body
         ent["gen"] = gen
         ent["resp"] = (status, total)
-        if status == 200 and total > 0:
+        # B3: 200 に限らず total>0 なら本文を配送できる (409 / 500 / 503 も本文可)。
+        if total > 0:
             nframes = (total + plen - 1) // plen
             ent["deliver"] = {"total": total, "plen": plen, "nframes": nframes,
                               "sent": 0, "acked": 0, "credit": 0, "eof": False,
@@ -620,6 +810,337 @@ class HostAgent:
                               "retx": 0, "max_inflight": 0}
         self._biz(rid, status, total, out)
         self.log("rid %d -> %d, %d bytes" % (rid, status, total))
+
+    # ----------------------------------------------------- N2: 非同期の巡回
+    def tick(self, out):
+        """常駐ループが毎周呼ぶ。子プロセスの完了 / 期限を拾って応答する。"""
+        if not self.pending:
+            return
+        now = self.now()
+        for rid in list(self.pending):
+            job = self.pending[rid]
+            ent = job["ent"]
+            cur = self.ledger.get(rid)
+            # RELEASE / epoch 切替でこの rid が失効していたら結果を捨てる
+            if (cur is not ent or cur.get("st") != "ACTIVE" or not self.established
+                    or self.sess != job["sess"] or self.epoch != job["epoch"]):
+                job["proc"].kill()
+                del self.pending[rid]
+                continue
+            try:
+                rc = job["proc"].poll()
+            except SUBPROC_ERRORS as e:
+                del self.pending[rid]
+                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+                continue
+            if rc is None:
+                if now >= job["deadline"]:               # 期限超過 → kill + 503
+                    job["proc"].kill()
+                    del self.pending[rid]
+                    self._answer(rid, ent, HTTP_UNAVAIL,
+                                 self._err_body("timeout"), None, out)
+                continue
+            del self.pending[rid]                        # 完了 → finisher で判定
+            try:
+                status, body = job["finish"](job["proc"])
+            except SUBPROC_ERRORS as e:
+                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+                continue
+            self._answer(rid, ent, status, body, None, out)
+
+    def _start_async(self, rid, ent, proc, finish):
+        self.pending[rid] = {"proc": proc, "ent": ent, "finish": finish,
+                             "deadline": self.now() + self.subproc_timeout,
+                             "sess": self.sess, "epoch": self.epoch}
+
+    @staticmethod
+    def _err_body(msg):
+        return ("error %s" % msg).encode("utf-8", "replace")
+
+    # ----------------------------------------------------- N2: PRINT
+    def _ensure_jobs(self):
+        """最初の PRINT OPEN でジョブ保存 (job.txt + スプール) を用意する。"""
+        if self.jobs_counter is not None:
+            return
+        base = self._cfg_state_dir or tempfile.mkdtemp(prefix="os32-jobstate-")
+        self.spool_dir = self._cfg_spool_dir or os.path.join(base, "spool")
+        os.makedirs(self.spool_dir, exist_ok=True)
+        if self.print_dir:
+            os.makedirs(self.print_dir, exist_ok=True)
+        self.jobs_counter = MonotonicCounter(os.path.join(base, "job.txt"))
+
+    def _service_print(self, rid, ent, parts, out):
+        """PRINT OPEN / CLOSE / STATUS (DATA は _serve で本文を待つ)。"""
+        sub = parts[1].upper() if len(parts) > 1 else ""
+        if sub == "OPEN":
+            self._print_open(rid, ent, parts, out)
+        elif sub == "CLOSE":
+            self._print_close(rid, ent, parts, out)
+        elif sub == "STATUS":
+            self._print_status(rid, ent, parts, out)
+        else:
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)
+
+    def _print_open(self, rid, ent, parts, out):
+        # PRINT OPEN <name...> <kind>。name は空白を許す (nb7)、パスには使わない。
+        if len(parts) < 4:
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)     # name が空
+            return
+        kind = parts[-1].lower()
+        name = " ".join(parts[2:-1]).strip()
+        if not name:
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)
+            return
+        if kind == "raw":
+            self._answer(rid, ent, HTTP_NOT_IMPL, b"", None, out)  # raw は v2
+            return
+        if kind != "text":
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)       # 未知 kind
+            return
+        self._ensure_jobs()
+        jid = self.jobs_counter.alloc()
+        spool = os.path.join(self.spool_dir, "%d-%d.txt" % (int(time.time()), jid))
+        try:
+            with open(spool, "wb"):                      # 空のスプールを作る
+                pass
+        except OSError as e:
+            self._answer(rid, ent, HTTP_ISE, self._err_body(e), None, out)
+            return
+        self.jobs[jid] = {"kind": kind, "state": "open", "spool": spool,
+                          "pages": 0, "error": None}
+        self._answer(rid, ent, 200, ("job %d" % jid).encode(), None, out)
+
+    def _print_data_finish(self, rid, ent, out):
+        """PRINT DATA の本文をスプールに追記する (追記失敗 → 500、state=error)。"""
+        job = self.jobs.get(ent["job"])
+        if job is None or job["state"] != "open":
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        try:
+            with open(job["spool"], "ab") as f:
+                f.write(ent["got"])
+        except OSError as e:                             # 満杯 / 権限 (nb5)
+            job["state"] = "error"
+            job["error"] = str(e)
+            self._answer(rid, ent, HTTP_ISE, self._err_body(e), None, out)
+            return
+        self._answer(rid, ent, 200, b"", None, out)
+
+    def _print_status(self, rid, ent, parts, out):
+        job = self._lookup_job(parts, 2)
+        if job is None:
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        st = job["state"]
+        if st == "open":
+            body = b"queued"
+        elif st == "done":
+            body = b"done"
+        else:
+            body = self._err_body(job["error"] or "print failed")
+        self._answer(rid, ent, 200, body, None, out)
+
+    def _print_close(self, rid, ent, parts, out):
+        job_id = self._parse_job_id(parts, 2)
+        job = self.jobs.get(job_id) if job_id is not None else None
+        if job is None:                                  # 未知 id → 409
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        if self._job_pending_data(job_id, rid):          # 本文未完了の DATA → 409
+            self._answer(rid, ent, HTTP_CONFLICT, b"", None, out)
+            return
+        if job["state"] == "done":                       # 再 CLOSE は冪等 200
+            self._answer(rid, ent, 200, b"pages %d" % job["pages"], None, out)
+            return
+        status, body = self._print_output(job)           # open / error を出力
+        self._answer(rid, ent, status, body, None, out)
+
+    def _lookup_job(self, parts, idx):
+        job_id = self._parse_job_id(parts, idx)
+        return self.jobs.get(job_id) if job_id is not None else None
+
+    @staticmethod
+    def _parse_job_id(parts, idx):
+        if len(parts) > idx and DECL_RE.match(parts[idx]):
+            return int(parts[idx])
+        return None
+
+    def _print_output(self, job):
+        """スプールを確定して出力する。成功 (200 pages n) / 失敗 (500 error)。"""
+        try:
+            with open(job["spool"], "rb") as f:
+                data = f.read()
+        except OSError as e:
+            job["state"] = "error"
+            job["error"] = str(e)
+            return (HTTP_ISE, self._err_body(e))
+        pages = self._count_pages(data)
+        try:
+            if self.printer:
+                self._print_win32(data)                  # 既定プリンタ (任意依存)
+            elif self.print_dir:
+                dest = os.path.join(self.print_dir, os.path.basename(job["spool"]))
+                shutil.move(job["spool"], dest)          # EXDEV 耐性 (nb3)
+                job["spool"] = dest
+            # --to-file 既定 (--print-dir 無し) はスプールに残すだけ
+        except (OSError, ImportError) as e:
+            job["state"] = "error"
+            job["error"] = str(e)
+            return (HTTP_ISE, self._err_body(e))
+        job["state"] = "done"
+        job["pages"] = pages
+        return (200, b"pages %d" % pages)
+
+    def _count_pages(self, data):
+        # ページ数 = \f の数 + 1、無ければ ceil(行数 / lines_per_page)、空は 0。
+        if not data:
+            return 0
+        ff = data.count(FORMFEED)
+        if ff:
+            return ff + 1
+        lines = data.count(b"\n")
+        if not data.endswith(b"\n"):
+            lines += 1
+        return max(1, (lines + self.lines_per_page - 1) // self.lines_per_page)
+
+    def _print_win32(self, data):
+        import win32print                                # 任意依存 (pywin32)
+        name = win32print.GetDefaultPrinter()
+        h = win32print.OpenPrinter(name)
+        try:
+            win32print.StartDocPrinter(h, 1, ("os32", None, "RAW"))
+            win32print.StartPagePrinter(h)
+            win32print.WritePrinter(h, data)
+            win32print.EndPagePrinter(h)
+            win32print.EndDocPrinter(h)
+        finally:
+            win32print.ClosePrinter(h)
+
+    # ----------------------------------------------------- N2: CLIP
+    def _service_clip(self, rid, ent, parts, out):
+        """CLIP GET (PUT は _serve で本文を待つ)。"""
+        sub = parts[1].upper() if len(parts) > 1 else ""
+        if sub == "GET":
+            self._clip_get(rid, ent, out)
+        else:
+            self._answer(rid, ent, HTTP_BAD, b"", None, out)
+
+    def _resolve_auto_clip(self):
+        try:
+            import win32clipboard                         # noqa: F401
+            return "win32"
+        except ImportError:
+            pass
+        if shutil.which("clip.exe") or shutil.which("powershell.exe"):
+            return "wsl"
+        return "none"
+
+    @staticmethod
+    def _clip_trim_get(data):
+        # CRLF→LF、64KB 超は UTF-8 境界で切る (CLAUDE.md §4-27)。
+        data = data.replace(b"\r\n", b"\n")
+        if len(data) > CLIP_GET_MAX:
+            cut = CLIP_GET_MAX
+            while cut > 0 and (data[cut] & 0xC0) == 0x80:
+                cut -= 1                                  # 継続バイトの上へ戻す
+            data = data[:cut]
+        return data
+
+    def _clip_get(self, rid, ent, out):
+        b = self.clip
+        if b == "none":
+            self._answer(rid, ent, HTTP_UNAVAIL,
+                         self._err_body("no clipboard backend"), None, out)
+            return
+        if b.startswith("file:"):
+            try:
+                with open(b[len("file:"):], "rb") as f:
+                    data = f.read()
+            except OSError:
+                data = b""                               # 空クリップ相当
+            self._answer(rid, ent, 200, self._clip_trim_get(data), None, out)
+            return
+        if b == "win32":
+            try:
+                data = self._clip_get_win32()
+            except SUBPROC_ERRORS + (ImportError,) as e:
+                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+                return
+            self._answer(rid, ent, 200, self._clip_trim_get(data), None, out)
+            return
+        # wsl: powershell が base64(UTF-8) を吐く → 非同期に受けてデコード (B-1)
+        cmd = ["powershell.exe", "-NoProfile", "-Command",
+               "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("
+               "[string](Get-Clipboard -Raw)))"]
+        try:
+            proc = spawn(cmd)
+        except SUBPROC_ERRORS as e:
+            self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+            return
+        self._start_async(rid, ent, proc, self._finish_clip_get)
+
+    def _finish_clip_get(self, proc):
+        raw = base64.b64decode(proc.output().strip(), validate=True)
+        return (200, self._clip_trim_get(raw))
+
+    def _clip_get_win32(self):
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+        return (text or "").encode("utf-8")
+
+    def _clip_put_finish(self, rid, ent, out):
+        # PUT: CRLF→LF に正規化してから LF→CRLF。
+        norm = ent["got"].replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        b = self.clip
+        if b == "none":
+            self._answer(rid, ent, HTTP_UNAVAIL,
+                         self._err_body("no clipboard backend"), None, out)
+            return
+        if b.startswith("file:"):
+            try:
+                with open(b[len("file:"):], "wb") as f:
+                    f.write(norm)
+            except OSError as e:
+                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+                return
+            self._answer(rid, ent, 200, b"", None, out)
+            return
+        if b == "win32":
+            try:
+                self._clip_put_win32(norm)
+            except SUBPROC_ERRORS + (ImportError,) as e:
+                self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+                return
+            self._answer(rid, ent, 200, b"", None, out)
+            return
+        # wsl: clip.exe に UTF-16LE + BOM を stdin (非同期)
+        try:
+            payload16 = UTF16_BOM + norm.decode("utf-8").encode("utf-16-le")
+            proc = spawn(["clip.exe"], stdin_bytes=payload16)
+        except SUBPROC_ERRORS as e:
+            self._answer(rid, ent, HTTP_UNAVAIL, self._err_body(e), None, out)
+            return
+        self._start_async(rid, ent, proc, self._finish_clip_put)
+
+    def _finish_clip_put(self, proc):
+        rc = proc.poll()
+        if rc:                                           # clip.exe は 0 で成功
+            raise subprocess.CalledProcessError(rc, "clip.exe")
+        return (200, b"")
+
+    def _clip_put_win32(self, norm):
+        import win32clipboard
+        text = norm.decode("utf-8")
+        win32clipboard.OpenClipboard()
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32clipboard.CF_UNICODETEXT, text)
+        finally:
+            win32clipboard.CloseClipboard()
 
 
 # --------------------------------------------------------------- 常駐ループ
@@ -664,13 +1185,28 @@ def main():
     ap.add_argument("--offline", action="store_true", help="実 HTTP を出さない (常に 502)")
     ap.add_argument("--file-root", metavar="DIR", help="GET /file/ の許可ルート")
     ap.add_argument("--once", action="store_true", help="exit after the peer disconnects")
+    # ---- N2: PRINT / CLIP ----
+    ap.add_argument("--spool-dir", metavar="DIR",
+                    help="印刷スプールの置き場 (既定 <state-dir>/spool)")
+    ap.add_argument("--print-dir", metavar="DIR",
+                    help="to-file 印刷の出力先 (指定でスプールを一意名で移す)")
+    ap.add_argument("--printer", action="store_true",
+                    help="CLOSE で win32print により既定プリンタへ送る (任意依存)")
+    ap.add_argument("--lines-per-page", type=int, default=DEFAULT_LINES_PER_PAGE,
+                    metavar="N", help="\\f が無いときのページ換算行数 (既定 60)")
+    ap.add_argument("--clip", default="auto",
+                    metavar="{auto,win32,wsl,file:<path>,none}",
+                    help="クリップボード backend (既定 auto)")
     args = ap.parse_args()
 
     if args.state_dir:
         os.makedirs(args.state_dir, exist_ok=True)
     agent = HostAgent(parse_mac(args.mac), state_dir=args.state_dir,
                       agent_gen=args.agent_gen, quiet=args.quiet,
-                      allow_net=not args.offline, file_root=args.file_root)
+                      allow_net=not args.offline, file_root=args.file_root,
+                      spool_dir=args.spool_dir, print_dir=args.print_dir,
+                      clip=args.clip, printer=args.printer,
+                      lines_per_page=args.lines_per_page)
     pcap = Pcap(args.pcap) if args.pcap else None
     print("host_agent v2 mac %s agent-gen %d (wire v2, 3-way HELLO, rid ledger)"
           % (args.mac, agent.agent_gen), flush=True)
@@ -686,8 +1222,16 @@ def main():
             return 1
         try:
             while True:
-                for frame in stream.recv_frames():
-                    agent.handle(frame, stream, pcap)
+                # select で待つことで子プロセス (CLIP wsl) の完了 / 期限を巡回で
+                # 拾える (往復 3 B-1)。読めるものが無ければ tick だけ回す。
+                try:
+                    ready, _, _ = select.select([stream.sock], [], [], TICK_INTERVAL)
+                except OSError as e:
+                    raise ConnectionError(str(e))
+                if ready:
+                    for frame in stream.recv_frames():
+                        agent.handle(frame, stream, pcap)
+                agent.tick(stream)
         except ConnectionError as e:
             print("disconnected: %s (%s)" % (e, agent.counts), flush=True)
             if args.once:

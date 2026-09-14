@@ -11,10 +11,13 @@ ListSink に差し替える。ネットワークにもエミュレータにも�
 ケース名は TASK_N0 §3 の指摘番号 (往復 2 = r2_*, 往復 3 = r3_*, 往復 4 = r4_*)
 を頭に付ける。対応表は tools/tests/n1_tdd.md。
 """
+import base64
+import contextlib
 import os
 import pathlib
 import random
 import struct
+import subprocess
 import sys
 import tempfile
 
@@ -62,6 +65,12 @@ class FakeOS32:
         """1 フレーム渡して、その結果 Agent が出したフレームを返す。"""
         self.sink.frames = []
         self.agent.handle(self.frame(*a, **kw), self.sink)
+        return [parse(f) for f in self.sink.frames]
+
+    def pump(self):
+        """常駐ループの 1 周相当: agent.tick を回して出たフレームを返す。"""
+        self.sink.frames = []
+        self.agent.tick(self.sink)
         return [parse(f) for f in self.sink.frames]
 
     # ---- 3 way HELLO ----
@@ -114,6 +123,94 @@ def only(out, op):
     assert len(got) == 1, "op %d が %d 本 (全部: %s)" % (op, len(got),
                                                         [p["op"] for p in out])
     return got[0]
+
+
+def read_body(o, rid, credit=64):
+    """WINDOW を送って DATA ストリームを読み切り、本文バイト列を返す。"""
+    got = b""
+    seq = 0
+    for _ in range(200):
+        out = o.send(HA.OP_WINDOW, rid=rid, ack=seq, payload=struct.pack("<H", credit))
+        data = [p for p in out if p["op"] == HA.OP_DATA]
+        eof = [p for p in out if p["op"] == HA.OP_EOF]
+        for d in data:
+            assert d["seq"] == seq + 1, (d["seq"], seq)
+            seq = d["seq"]
+            got += d["pl"]
+        if eof:
+            break
+        if not data:
+            break
+    return got
+
+
+# ---- CLIP wsl backend を叩く subprocess のスタブ -------------------------
+class FakeProc:
+    """spawn() が返す贋の子プロセス。running=True の間 poll() は None。
+
+    step() で「子を進める」= 完了させる。out は完了後に output() が返す stdout。
+    raise_on_output を渡すと output() でその例外を投げる (TimeoutExpired 等)。
+    """
+
+    def __init__(self, out=b"", rc=0, raise_on_output=None):
+        self.out = out
+        self.rc = rc
+        self.raise_on_output = raise_on_output
+        self.running = True
+        self.killed = False
+        self.stdin = None
+
+    def step(self):
+        self.running = False
+
+    def poll(self):
+        return None if self.running else self.rc
+
+    def output(self):
+        if self.raise_on_output is not None:
+            raise self.raise_on_output
+        return self.out
+
+    def kill(self):
+        self.killed = True
+        self.running = False
+
+
+class FakeSpawn:
+    """HA.spawn の差し替え。起動された子と stdin を記録する。"""
+
+    def __init__(self, script):
+        # script: 呼ばれるたびに返す FakeProc のリスト (順に消費)。
+        self.script = list(script)
+        self.calls = []           # (cmd, stdin_bytes) の記録
+        self.procs = []
+
+    def __call__(self, cmd, stdin_bytes=None):
+        self.calls.append((cmd, stdin_bytes))
+        proc = self.script.pop(0)
+        proc.stdin = stdin_bytes
+        self.procs.append(proc)
+        return proc
+
+
+@contextlib.contextmanager
+def patched_spawn(fs):
+    """HA.spawn を FakeSpawn に差し替える (試験の間だけ)。"""
+    orig = HA.spawn
+    HA.spawn = fs
+    try:
+        yield fs
+    finally:
+        HA.spawn = orig
+
+
+def open_job(o, rid, name=b"doc", kind=b"text"):
+    """PRINT OPEN を送り、job 応答本文を読んで rid を RELEASE する。"""
+    out = o.send(HA.OP_REQUEST, rid=rid, seq=0,
+                 payload=b"PRINT OPEN " + name + b" " + kind)
+    body = read_body(o, rid)
+    o.send(HA.OP_RELEASE, rid=rid)
+    return body
 
 
 # =========================================================== ケース (往復 2)
@@ -526,7 +623,520 @@ def time_format_is_19_bytes():
     assert (ctl, st, ln) == (False, 200, 19), (ctl, st, ln)
 
 
+# =========================================================== N2: PRINT / CLIP
+def n2_print_roundtrip():
+    """PRINT OPEN → DATA×2 → CLOSE。pages と スプール内容が一致 (票 §2)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        assert open_job(o, 1) == b"job 1"
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 6")
+        out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"hello\n")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT DATA 1 6")
+        out = o.send(HA.OP_WDATA, rid=3, seq=1, payload=b"world\n")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        o.send(HA.OP_RELEASE, rid=3)
+        out = o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 4) == b"pages 1"
+        with open(a.jobs[1]["spool"], "rb") as f:
+            assert f.read() == b"hello\nworld\n"
+
+
+def n2_wdata_len_mismatch():
+    """宣言長 < 実 WDATA は宣言長で切る (N1 の WDATA 契約を壊さない、票 §2)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 6")
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abcd")
+        out = o.send(HA.OP_WDATA, rid=2, seq=2, payload=b"efgh")   # 実 8 > 宣言 6
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 3) == b"pages 1"
+        with open(a.jobs[1]["spool"], "rb") as f:
+            assert f.read() == b"abcdef", "宣言長で切っていない"
+
+
+def n2_unknown_id_409():
+    """未知 id への DATA / CLOSE / STATUS は要求行で 409 (nb)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        for rid, pl in [(1, b"PRINT DATA 99 3"), (2, b"PRINT CLOSE 99"),
+                        (3, b"PRINT STATUS 99")]:
+            out = o.send(HA.OP_REQUEST, rid=rid, seq=0, payload=pl)
+            assert resp(only(out, HA.OP_RESPONSE)) == (False, 409, 0), pl
+            o.send(HA.OP_RELEASE, rid=rid)
+
+
+def n2_status_and_reclose():
+    """STATUS = queued/done、done への再 CLOSE は冪等 200 pages n (票 §0)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT STATUS 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 2) == b"queued"
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT DATA 1 4")
+        o.send(HA.OP_WDATA, rid=3, seq=1, payload=b"abc\n")
+        o.send(HA.OP_RELEASE, rid=3)
+        o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 4) == b"pages 1"
+        o.send(HA.OP_RELEASE, rid=4)
+        out = o.send(HA.OP_REQUEST, rid=5, seq=0, payload=b"PRINT STATUS 1")
+        assert read_body(o, 5) == b"done"
+        o.send(HA.OP_RELEASE, rid=5)
+        out = o.send(HA.OP_REQUEST, rid=6, seq=0, payload=b"PRINT CLOSE 1")   # 再 CLOSE
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 6) == b"pages 1"
+
+
+def n2_open_kind_and_name():
+    """raw → 501、未知 kind → 400、name 空白 → 400、name に空白は許す (nb7)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"PRINT OPEN doc raw")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 501, 0)
+        o.send(HA.OP_RELEASE, rid=1)
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT OPEN doc pdf")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 400, 0)   # 未知 kind
+        o.send(HA.OP_RELEASE, rid=2)
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT OPEN text")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 400, 0)   # name 空白
+        o.send(HA.OP_RELEASE, rid=3)
+        out = o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT OPEN my file text")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 4) == b"job 1"        # 最初に成功したジョブが 1
+
+
+def n2_empty_job_pages_zero():
+    """空ジョブの CLOSE は pages 0 (票 §0)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 2) == b"pages 0"
+
+
+def n2_pages_formfeed():
+    """pages = \\f の数 + 1 (票 §0)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 6")
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"a\fb\fc\n")     # \f×2 → 3 ページ
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 3) == b"pages 3"
+
+
+def n2_b2_decl_range():
+    """B2: 0 / 非数 (+5) / 超過は宣言長 verb 一律で要求行 400 (WDATA 無し)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        cases = [(2, b"PRINT DATA 1 0"), (3, b"PRINT DATA 1 65537"),
+                 (4, b"PRINT DATA 1 +5"), (5, b"CLIP PUT 0"),
+                 (6, b"CLIP PUT 4097"), (7, b"ECHO 0")]
+        for rid, pl in cases:
+            out = o.send(HA.OP_REQUEST, rid=rid, seq=0, payload=pl)
+            assert resp(only(out, HA.OP_RESPONSE)) == (False, 400, 0), pl
+            assert [p for p in out if p["op"] == HA.OP_ACK], "REQUEST の ACK が無い"
+            o.send(HA.OP_RELEASE, rid=rid)
+
+
+def n2_new1_wdata_after_400_acks_only():
+    """新1: 400 した rid の WDATA は ACK だけ返り、書かず RESPONSE も再送しない。"""
+    a, o = up(clip="none")
+    out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP PUT 4097")
+    assert resp(only(out, HA.OP_RESPONSE)) == (False, 400, 0)
+    out = o.send(HA.OP_WDATA, rid=1, seq=1, payload=b"x")
+    assert only(out, HA.OP_ACK)["ack"] == 1
+    assert [p for p in out if p["op"] == HA.OP_RESPONSE] == [], "RESPONSE を再送した"
+
+
+def n2_b1_wdata_after_done_acks_no_dup():
+    """B1: 完了後の最終 WDATA 再送は ACK のみ、スプール不変・RESPONSE 再送なし。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 3")
+        out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        spool = a.jobs[1]["spool"]
+        with open(spool, "rb") as f:
+            assert f.read() == b"abc"
+        out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc")       # 再送
+        assert only(out, HA.OP_ACK)["ack"] == 1
+        assert [p for p in out if p["op"] == HA.OP_RESPONSE] == []
+        with open(spool, "rb") as f:
+            assert f.read() == b"abc", "スプールが二重に伸びた"
+
+
+def n2_b2_close_after_data_complete_no_release():
+    """B-2: DATA 完了 (200) だが RELEASE 未着 → 同 job の CLOSE は 200 (409 でない)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 4")
+        out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc\n")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)     # rid2 は未 RELEASE
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 3) == b"pages 1"
+
+
+def n2_b2_close_while_data_incomplete_409():
+    """B-2: DATA 本文未完了 → CLOSE は 409、RELEASE 後の再 CLOSE は 200。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 6")   # 本文未完了
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 409, 0)
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"hello\n")            # 本文を完了
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_RELEASE, rid=3)
+        out = o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+
+
+def n2_b2_second_data_409():
+    """B-2: 本文未完了の DATA が居る間の 2 本目 DATA → 409。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 6")   # 未完了
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT DATA 1 3")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 409, 0)
+
+
+def n2_data_to_done_job_409():
+    """done ジョブへの DATA → 409 (票 §0)。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT CLOSE 1")     # done に
+        o.send(HA.OP_RELEASE, rid=2)
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT DATA 1 3")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 409, 0)
+
+
+def n2_b3_body_on_non_200():
+    """B3: 503 に本文を付けて FakeOS32 が読み切る。既存 GET /status/410 も読める。"""
+    a, o = up(clip="none")
+    out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+    ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+    assert (ctl, st) == (False, 503) and ln > 0
+    assert read_body(o, 1).startswith(b"error")
+    o.send(HA.OP_RELEASE, rid=1)
+    out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"GET /status/410")
+    ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+    assert (ctl, st, ln) == (False, 410, len(b"gone body"))
+    assert read_body(o, 2) == b"gone body"
+
+
+def n2_nb5_append_failure_500():
+    """nb5: スプール追記失敗 → 500 + 本文、state=error、STATUS が error。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        a.jobs[1]["spool"] = os.path.join(d, "no", "such", "dir", "x.txt")
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 3")
+        out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc")
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 500) and ln > 0
+        assert a.jobs[1]["state"] == "error"
+        o.send(HA.OP_RELEASE, rid=2)
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT STATUS 1")
+        assert read_body(o, 3).startswith(b"error")
+
+
+def n2_nb4_error_reclose_retries():
+    """nb4: error ジョブへの再 CLOSE は出力を再試行し、成功で done/pages n。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 4")
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc\n")
+        o.send(HA.OP_RELEASE, rid=2)
+        good = a.jobs[1]["spool"]
+        a.jobs[1]["spool"] = os.path.join(d, "gone.txt")             # 出力を失敗させる
+        out = o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 500)
+        assert a.jobs[1]["state"] == "error"
+        o.send(HA.OP_RELEASE, rid=3)
+        a.jobs[1]["spool"] = good                                    # 戻して再試行
+        out = o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT CLOSE 1")
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 4) == b"pages 1"
+        assert a.jobs[1]["state"] == "done"
+
+
+def n2_b4_two_agents_unique_files():
+    """B4: state_dir 共有で 2 回起動 → 各 1 ジョブ、2 台目が job 2、出力 2 つ。"""
+    with tempfile.TemporaryDirectory() as d:
+        pdir = os.path.join(d, "out")
+        for expect_job, payload in [(1, b"aaa\n"), (2, b"bbb\n")]:
+            a = new_agent(state_dir=d, print_dir=pdir)
+            o = FakeOS32(a)
+            o.hello()
+            out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"PRINT OPEN doc text")
+            assert read_body(o, 1) == b"job %d" % expect_job
+            o.send(HA.OP_RELEASE, rid=1)
+            o.send(HA.OP_REQUEST, rid=2, seq=0,
+                   payload=b"PRINT DATA %d 4" % expect_job)
+            o.send(HA.OP_WDATA, rid=2, seq=1, payload=payload)
+            o.send(HA.OP_RELEASE, rid=2)
+            o.send(HA.OP_REQUEST, rid=3, seq=0,
+                   payload=b"PRINT CLOSE %d" % expect_job)
+            assert read_body(o, 3) == b"pages 1"
+        files = sorted(os.listdir(pdir))
+        assert len(files) == 2, files                                # 一意名で 2 つ残る
+
+
+def n2_to_file_default_keeps_spool():
+    """--to-file 既定はスプールを残す。--print-dir は一意名で移す。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)                                       # print_dir 無し
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 4")
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc\n")
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 3) == b"pages 1"
+        assert os.path.exists(a.jobs[1]["spool"])
+        assert os.path.dirname(a.jobs[1]["spool"]) == a.spool_dir
+    with tempfile.TemporaryDirectory() as d:
+        pdir = os.path.join(d, "out")
+        a, o = up(state_dir=d, print_dir=pdir)
+        open_job(o, 1)
+        o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PRINT DATA 1 4")
+        o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc\n")
+        o.send(HA.OP_RELEASE, rid=2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT CLOSE 1")
+        assert read_body(o, 3) == b"pages 1"
+        assert os.path.dirname(a.jobs[1]["spool"]) == pdir           # 移された
+        with open(a.jobs[1]["spool"], "rb") as f:
+            assert f.read() == b"abc\n"
+
+
+def n2_b5_clip_none_503():
+    """B5: --clip none で GET / PUT が 503 (黙って捨てない)。"""
+    a, o = up(clip="none")
+    out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+    assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 503)
+    o.send(HA.OP_RELEASE, rid=1)
+    o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"CLIP PUT 3")
+    out = o.send(HA.OP_WDATA, rid=2, seq=1, payload=b"abc")
+    assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 503)
+
+
+def n2_b5_clip_file_roundtrip():
+    """B5: --clip file:<p> で PUT (CRLF 化) → GET (CRLF→LF) が往復一致。"""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "clip.txt")
+        a, o = up(clip="file:" + p)
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP PUT 6")
+        out = o.send(HA.OP_WDATA, rid=1, seq=1, payload=b"hello\n")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        with open(p, "rb") as f:
+            assert f.read() == b"hello\r\n", "PUT が LF→CRLF にしていない"
+        o.send(HA.OP_RELEASE, rid=1)
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"CLIP GET")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 6)
+        assert read_body(o, 2) == b"hello\n", "GET が CRLF→LF にしていない"
+
+
+def n2_clip_get_trim_utf8_boundary():
+    """B5 / 切り詰め: CLIP GET は 64KB を UTF-8 境界で切って返す。"""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "clip.txt")
+        big = "あ".encode("utf-8") * 21846                            # 65538 バイト
+        with open(p, "wb") as f:
+            f.write(big)
+        a, o = up(clip="file:" + p)
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 200)
+        assert ln <= HA.CLIP_GET_MAX and ln % 3 == 0, ln
+        body = read_body(o, 1, credit=512)
+        assert body == big[:ln] and body.decode("utf-8")
+
+
+def n2_b5_clip_wsl_get_base64():
+    """B5 (新2/新3): --clip wsl の GET は base64(UTF-8) を非同期に受けてデコード。"""
+    text = "日本語".encode("utf-8")
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(text))])) as fs:
+        a, o = up(clip="wsl")
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert [p for p in out if p["op"] == HA.OP_RESPONSE] == []    # 子未完了
+        assert fs.calls[0][0][0] == "powershell.exe"
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 1) == text
+        assert o.pump() == [], "完了後に再送した"
+
+
+def n2_b5_clip_wsl_put_utf16le():
+    """B5 (新2): --clip wsl の PUT は clip.exe に UTF-16LE + BOM を stdin で渡す。"""
+    with patched_spawn(FakeSpawn([FakeProc(rc=0)])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP PUT 4")
+        o.send(HA.OP_WDATA, rid=1, seq=1, payload=b"abc\n")
+        assert fs.calls[0][0] == ["clip.exe"]
+        want = b"\xff\xfe" + "abc\r\n".encode("utf-16-le")
+        assert fs.procs[0].stdin == want, fs.procs[0].stdin
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+
+
+def n2_b5_clip_wsl_empty_200():
+    """新2: 空クリップは powershell が空 → base64 空 → 200 + 0 長 (503 でない)。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=b"\r\n")])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+
+
+def n2_b5_clip_wsl_non_base64_503():
+    """nb2: GET の stdout が base64 でなければ 503 (binascii.Error)。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=b"not@@base64!!")])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 503)
+
+
+def n2_b5_clip_wsl_timeout_exception_503():
+    """新3: 子の output() が TimeoutExpired → 503 + 本文、Agent は次に答える。"""
+    err = subprocess.TimeoutExpired("clip.exe", 4)
+    with patched_spawn(FakeSpawn([FakeProc(raise_on_output=err)])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        fs.procs[0].step()
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 503) and ln > 0
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PING")
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+
+
+def n2_b1_async_processing_and_other_rid():
+    """B-1: 子未完了中に別 rid が即答、同 rid の STATUS は PROCESSING、完了で 1 応答。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(b"hi"))])) as fs:
+        a, o = up(clip="wsl")
+        out = o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert only(out, HA.OP_ACK)["ack"] == 0
+        assert [p for p in out if p["op"] == HA.OP_RESPONSE] == []
+        out = o.send(HA.OP_REQUEST, rid=2, seq=0, payload=b"PING")     # 別 rid 即答
+        assert resp(only(out, HA.OP_RESPONSE)) == (False, 200, 0)
+        out = o.send(HA.OP_STATUS, rid=1)                              # PROCESSING
+        assert resp(only(out, HA.OP_RESPONSE)) == (True, HA.CTL_PROCESSING, 0)
+        assert o.pump() == []                                         # まだ未完了
+        fs.procs[0].step()
+        out = o.pump()
+        assert resp(only(out, HA.OP_RESPONSE))[:2] == (False, 200)
+        assert read_body(o, 1) == b"hi"
+
+
+def n2_b1_release_discards_child():
+    """B-1: 完了前の RELEASE で子を kill し結果を捨てる (応答は出ない)。"""
+    with patched_spawn(FakeSpawn([FakeProc(out=base64.b64encode(b"hi"))])) as fs:
+        a, o = up(clip="wsl")
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert 1 in a.pending
+        o.send(HA.OP_RELEASE, rid=1)
+        assert 1 not in a.pending and fs.procs[0].killed
+        fs.procs[0].step()
+        assert o.pump() == [], "破棄したはずの結果を返した"
+
+
+def n2_b1_deadline_503():
+    """B-1: 期限超過で kill + 503 + 本文。"""
+    base = 1000.0
+    with patched_spawn(FakeSpawn([FakeProc()])) as fs:          # 完了しない子
+        a, o = up(clip="wsl")
+        a.now = lambda: base
+        o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"CLIP GET")
+        assert o.pump() == []                                  # 期限内
+        a.now = lambda: base + HA.SUBPROC_TIMEOUT + 1.0         # 期限超過
+        out = o.pump()
+        ctl, st, ln = resp(only(out, HA.OP_RESPONSE))
+        assert (ctl, st) == (False, 503) and ln > 0
+        assert fs.procs[0].killed
+
+
+def n2_b6_put_501():
+    """B6: PUT /file/ は本文を受理しつつ 501 (何も書かない)。"""
+    a, o = up()
+    o.send(HA.OP_REQUEST, rid=1, seq=0, payload=b"PUT /file/x 3")
+    out = o.send(HA.OP_WDATA, rid=1, seq=1, payload=b"abc")
+    assert resp(only(out, HA.OP_RESPONSE)) == (False, 501, 0)
+
+
+def n2_two_jobs_interleaved():
+    """並行: 2 ジョブ同時 open で交互 DATA が正しいスプールへ入る。"""
+    with tempfile.TemporaryDirectory() as d:
+        a, o = up(state_dir=d)
+        open_job(o, 1)
+        open_job(o, 2)
+        o.send(HA.OP_REQUEST, rid=3, seq=0, payload=b"PRINT DATA 1 2")
+        o.send(HA.OP_WDATA, rid=3, seq=1, payload=b"A1")
+        o.send(HA.OP_RELEASE, rid=3)
+        o.send(HA.OP_REQUEST, rid=4, seq=0, payload=b"PRINT DATA 2 2")
+        o.send(HA.OP_WDATA, rid=4, seq=1, payload=b"B1")
+        o.send(HA.OP_RELEASE, rid=4)
+        o.send(HA.OP_REQUEST, rid=5, seq=0, payload=b"PRINT DATA 1 2")
+        o.send(HA.OP_WDATA, rid=5, seq=1, payload=b"A2")
+        o.send(HA.OP_RELEASE, rid=5)
+        with open(a.jobs[1]["spool"], "rb") as f:
+            assert f.read() == b"A1A2"
+        with open(a.jobs[2]["spool"], "rb") as f:
+            assert f.read() == b"B1"
+
+
 CASES = [
+    n2_print_roundtrip,
+    n2_wdata_len_mismatch,
+    n2_unknown_id_409,
+    n2_status_and_reclose,
+    n2_open_kind_and_name,
+    n2_empty_job_pages_zero,
+    n2_pages_formfeed,
+    n2_b2_decl_range,
+    n2_new1_wdata_after_400_acks_only,
+    n2_b1_wdata_after_done_acks_no_dup,
+    n2_b2_close_after_data_complete_no_release,
+    n2_b2_close_while_data_incomplete_409,
+    n2_b2_second_data_409,
+    n2_data_to_done_job_409,
+    n2_b3_body_on_non_200,
+    n2_nb5_append_failure_500,
+    n2_nb4_error_reclose_retries,
+    n2_b4_two_agents_unique_files,
+    n2_to_file_default_keeps_spool,
+    n2_b5_clip_none_503,
+    n2_b5_clip_file_roundtrip,
+    n2_clip_get_trim_utf8_boundary,
+    n2_b5_clip_wsl_get_base64,
+    n2_b5_clip_wsl_put_utf16le,
+    n2_b5_clip_wsl_empty_200,
+    n2_b5_clip_wsl_non_base64_503,
+    n2_b5_clip_wsl_timeout_exception_503,
+    n2_b1_async_processing_and_other_rid,
+    n2_b1_release_discards_child,
+    n2_b1_deadline_503,
+    n2_b6_put_501,
+    n2_two_jobs_interleaved,
     r2_R1_hello_and_roundtrip,
     r2_R2_request_ack_dup_and_wdata_loss,
     r2_R3_status_repeats_response_zero_len,

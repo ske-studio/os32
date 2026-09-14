@@ -69,3 +69,9 @@
 - **(a、優先度高) `GET /file/` のパストラバーサル**: Agent の `_service_get` は `os.path.join(root, path.lstrip("/"))` で `..` を通し、`--file-root` 未指定だと**ホストの任意ファイルが読める** (HOST_SERVICES_PLAN §6 の「許可リスト外は読まない」に反する)。N2 で `/file/` を触らないが、**別の小 N-fix で `--file-root` 必須化 + `..` 正規化拒否**をする (優先度高)。本票の実装コーダーは触らない。
 - **(b) `link_on_response` が保留 WDATA を無効化しない**: 最終 WDATA の ACK が落ちると RESPONSE 受信後もカーネルが WDATA を RTO 再送し続ける。B1 で Agent が完了後も累積 ACK を返すことで実害 (再同期) は消えるが、根治は「RESPONSE 着後は同 rid の WDATA 再送を止める」カーネル側の 1 行。N3 着手時にホスト TDD で踏んで判断。
 - **(c) `GET http(s)://` の `urlopen(timeout=10)`** が他ハンドル在庫時の RTO 予算 (~1.2s) を超え再同期を起こす。N3 の wget 実装時に **B-1 と同じ非同期機構に載せる** (timeout だけでは不足)。
+
+## 6. 実装記録 (2026-09-14)
+- 着地: `host_agent.py` + `test_host_agent.py` の 2 本のみ (OS32 側不変)。`python3 -B tools/tests/test_host_agent.py` **57/57 PASS** (N2 新規 32 + 既存 25 回帰なし)。
+- 非同期化 (B-1): 常駐ループを `select(..., 0.05)` + 毎周 `tick`、子は `spawn`→`_RealProc` (Popen 薄包み)、`_start_async` で `pending[rid]` に積み `_serve` は resp=None (STATUS は PROCESSING)、`tick` が完了で `_answer` / 期限超過で kill+503 / RELEASE・epoch 切替で破棄。例外種は `SUBPROC_ERRORS`。試験は `spawn` を `FakeSpawn` に差し替え `FakeProc.step()` で子を進める。
+- **PM 判断が要った点 (受入)**: `win32print` / `win32clipboard` 経路は**同期のまま** (pywin32 は任意依存・WSL2 では import 不可・既定は to-file で RTO 懸念なし・`--printer` は既定オフ)。非同期機構は subprocess 前提で、win32print (Python API 直呼び) を載せるには別途スレッド化が要る。→ **WSL2 の CLIP (clip.exe/powershell) という B-1 の主対象は非同期化済み**なので受入可。**win32print の非同期化は N5 (実機 Windows ネイティブ) で判断** (そこで pywin32 が実在し `--printer` が実経路になる)。§1 の「win32print も同じ非同期に」はこの範囲で読み替える。
+- 未確認 (机上): 実 Windows の clip.exe/powershell (WSL 上は subprocess スタブで検証)。実クリップボードは N3/N5 の受入で。
