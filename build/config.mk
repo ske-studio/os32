@@ -60,7 +60,7 @@ INC_FATFS = -Ifs/fatfs $(INC_COMMON) -Ifs -Idrivers -Ikernel -Ilib
 INC_EXEC = $(INC_COMMON) -Iexec -Ikapi -Ifs -Igfx -Idrivers -Ilib -Ikernel
 
 # KAPI: 全モジュール (全APIラッパーのため)
-INC_KAPI = $(INC_COMMON) -Ikapi -Ikernel -Idrivers -Ifs -Iexec -Igfx -Ilib -Ilib/sqlite3
+INC_KAPI = $(INC_COMMON) -Ikapi -Ikernel -Idrivers -Inet -Ifs -Iexec -Igfx -Ilib -Ilib/sqlite3
 
 # lib: 共通 + 自身 (汎用ライブラリ: カーネル依存なし)
 INC_LIB = $(INC_COMMON) -Ilib
