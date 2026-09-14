@@ -1,13 +1,13 @@
 # TASK_N2 — Host Agent の PRINT / CLIP サービス (ホスト側 Python)
 
-発行: PM (2026-09-14) / 状態: **設計 第 3 版 (往復 2 の blocker 4 件を反映: ACTIVE rid への WDATA は decl/resp に依らず累積 ACK、CLIP は powershell の base64/UTF-8 と clip.exe の UTF-16LE BOM、subprocess に timeout 4s + 例外 → 503、§1/§2 の旧記述を §0 に一致。往復 3/3 = 最終待ち)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
+発行: PM (2026-09-14) / 状態: **設計 第 4 版 (往復 3 の 2 件を反映: B-2 同一ジョブ 409 は `resp is None` の DATA に限定、B-1 CLIP subprocess を非同期化 (Popen + select、実行中は PROCESSING)。non-blocker も反映。3 往復を使い切り実装可の判定 — ユーザーに B-1 の採否を確認中)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
 
 ## 0. 範囲
 `tools/host_agent.py` に**要求サービスを 6 本足す**だけ (ワイヤ・状態機械・rid 台帳・HELLO は N1 のまま不変)。CLIP は含める、**PUT は v1.4 へ先送り** (§9-5)。印刷は **to-file 既定、pywin32 は任意依存** (§9-1)。置き場は WSL2 のみ (§9-2、実機 Windows は N5)。
 
 | 要求 | 引数 | 本文 | 応答本文 | 実装 |
 |---|---|---|---|---|
-| `PRINT OPEN <name> <kind>` | kind=`text` (v1) / `raw` → 501 | 無 | `job <id>` | ジョブ表に 1 本足しスプール **`<spool>/<epoch>-<job>.txt`** (再起動をまたいで一意、B4) を作る。id は `state_dir/job.txt` に永続する単調カウンタ。未知 kind → 400。`<name>` はパスに使わない (ログ用) |
+| `PRINT OPEN <name> <kind>` | kind=`text` (v1) / `raw` → 501 | 無 | `job <id>` | ジョブ表に 1 本足しスプール **`<spool>/<epoch>-<job>.txt`** (再起動をまたいで一意、B4) を作る。id は `state_dir/job.txt` に永続する単調カウンタ。未知 kind → 400。`kind = parts[-1]` / `name = " ".join(parts[2:-1])` (name の空白を許す、nb7)。`<name>` はパスに使わない (ログ用) |
 | `PRINT DATA <id> <len>` | **1 ≤ len ≤ 65536** | WDATA (宣言長) | 200 / 400 / 409 | `len` を `^[0-9]+$` で読み範囲外 (0 / 非数 / 超過) → **要求行の時点で 400** (WDATA 無し、B2)。宣言長ぶんを `_finish_body` で受け、ジョブが open ならスプールに追記 → 200。未知 / close 済み id → 409。**完了後・応答後も WDATA seq は必ず累積 ACK する** (本文は捨てる、B1) |
 | `PRINT CLOSE <id>` | — | 無 | `pages <n>` / 500 (本文 `error <msg>`) | スプールを確定し**出力**: 既定 `--to-file` (`--print-dir` があれば一意名で移す、既定はスプールに残す)、`--printer` かつ win32print があれば既定プリンタへ。**ページ数 = `\f` の数 + 1、`\f` が無ければ `ceil(行数 / --lines-per-page(既定 60))`、空ジョブは 0**。失敗 → **500 + 本文 `error <msg>`** (B3)、job.state=error。未知 id → 409、`done` への再 CLOSE → 冪等 200 `pages n` |
 | `PRINT STATUS <id>` | — | 無 | `queued` / `done` / `error <msg>` | 状態 (単一スレッドなので `printing` は観測されない)。open→`queued`、close 成功→`done`、失敗→`error <msg>` (200 の本文)。未知 id → 409 |
@@ -18,13 +18,13 @@
 
 ## 1. Agent の実装 (`tools/host_agent.py`)
 - **ジョブ表** `self.jobs = {id: {"kind","state","spool","pages","error"}}`、`self.next_job` は job.txt 永続。`state` = `open`/`done`/`error` (単一スレッド同期なので `closing`/`printing` は観測されない)。OPEN で作り、DATA で追記、CLOSE で確定。
-- **要求行での 409 / 冪等** (往復 2 nb1/nb2/nb7): `PRINT DATA` / `PRINT CLOSE` / `PRINT STATUS` は**要求行 (本文を待つ前) に id を検査** — 未知 id → 409。`done`/`error` のジョブへの DATA → 409。**同一ジョブに未完了 (ACTIVE 台帳にある) の DATA rid がある間の 2 本目の DATA / CLOSE → 409** (順序入れ替わり・CLOSE 先行を防ぐ。N3 の libos32host は直列なので通常起きない)。**`done` のジョブへの再 CLOSE は冪等に 200 `pages <n>`** (STALE 後の N3 の再試行を楽にする。未知 id の 409 と区別)。
+- **要求行での 409 / 冪等** (往復 2 nb1/nb2/nb7): `PRINT DATA` / `PRINT CLOSE` / `PRINT STATUS` は**要求行 (本文を待つ前) に id を検査** — 未知 id → 409。`done`/`error` のジョブへの DATA → 409。**同一ジョブに本文未完了 (`resp is None` = RESPONSE 前) の DATA rid がある間の 2 本目の DATA / CLOSE → 409** (往復 3 B-2: 判定は「ACTIVE」ではなく「`resp is None` かつ同一 job」に限定する — 完了済み・未 RELEASE の DATA rid で CLOSE を 409 にしない。DATA ent に `job` を持たせ自 rid は除外)。中断経路 (RESPONSE 前に close) では RELEASE 着まで CLOSE が 409 になりうる (N3 は再試行で通る)。**`done` のジョブへの再 CLOSE は冪等に 200 `pages <n>`** (STALE 後の N3 の再試行を楽にする。未知 id の 409 と区別)。
 - **要求の振り分け**: `_service_now` に OPEN/CLOSE/STATUS/CLIP GET を足す (小さい応答、即答)。`PRINT DATA` と `CLIP PUT` は**宣言長 + WDATA** なので `_service_now` では応答せず、既存の本文収集 (`_finish_body`) に載せて、受け切ってから追記 / クリップボード書き込み → 200 (N1 の ECHO と同じ経路)。要求行のパースは既存 `parts` を使う。
-- **スプール**: `<spool-dir>/<unixtime>-<job>.txt` に追記 (再起動をまたいで一意、B4)。CLOSE で出力。`--to-file` (既定) はスプールを残す (`--print-dir` があれば同じ一意名で移す)、`--printer` で win32print。改ページ `\f`。
+- **スプール**: `<spool-dir>/<unixtime>-<job>.txt` に追記 (一意、B4)。**追記失敗 (満杯・権限) → 500 + 本文 `error <msg>`、state=error** (nb5)。CLOSE で出力。`--to-file` (既定) はスプールを残す (`--print-dir` があれば `shutil.move` で一意名で移す — 別 FS の `EXDEV` に耐える、nb3)、`--printer` で win32print。改ページ `\f`。`--spool-dir` 既定は `<state-dir>/spool`、`--state-dir` 無し (試験) は `tempfile.mkdtemp` (nb6)。`error` ジョブへの再 CLOSE は**出力を再試行** (一時失敗の救済)、成功で `done`/`pages n`、失敗で再び 500 (nb4)。
 - **クリップボード**: バックエンドは上の `--clip {auto,win32,wsl,file:<path>,none}` で選ぶ (`--clip-file` は廃止、`file:<path>` に統合)。改行は GET で CRLF→LF、PUT で (まず CRLF→LF に正規化してから) LF→CRLF。64KB 超の GET は **UTF-8 境界で**切って 200 (CLAUDE.md §4-27)。
 - **境界**: 宣言長を取る全 verb (ECHO / PRINT DATA / CLIP PUT。PUT も) に一律で範囲検査 — PRINT DATA / ECHO は 1〜65536、CLIP PUT は 1〜4096。**0 / 非数 (`+5` `-5` `5_0` を含む — `int()` でなく `^[0-9]+$` で読む) / 上限超は要求行の時点で 400** (WDATA を待たない、B2。`ECHO 0` の永久 PROCESSING もこれで消える)。1 ジョブに上限は設けず 1 要求 ≤ 64KB を繰り返す。`_finish_body` は verb で分岐 (ECHO / PRINT DATA / CLIP PUT / それ以外 = 本文付き未知 verb は 501)。
 - **引数**: `--spool-dir` (既定 `<state>/spool`)、`--print-dir` (to-file の出力先、既定 = spool のまま。移す名前は `<epoch>-<job>.txt` で一意)、`--printer` (フラグ、win32print で既定プリンタへ)、`--clip {auto,win32,wsl,file:<path>,none}` (既定 `auto` = win32 が import できれば win32、駄目なら WSL2 の `clip.exe`/`powershell` が居れば wsl、どちらも無ければ none=503)。既存の `--root`/`--file-root` は流用。`HostAgent.__init__` は `spool_dir`/`print_dir`/`clip`/`printer` を受ける (試験は CLI を通さない)。
-- **CLIP バックエンド** (B5、往復 2 新 2 / 新 3): `win32` = `win32clipboard`。`wsl` = GET は `powershell.exe -NoProfile -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Clipboard -Raw)))"` の出力を base64 デコード (符号化 = PowerShell の OEM CP932 問題と末尾 CRLF の両方を回避)、PUT は `clip.exe` に **UTF-16LE + BOM** (`"\ufeff".encode("utf-16-le")` 前置、または `text.encode("utf-16")`) を stdin。`file:<path>` = 読み書き (試験・pywin32 無し運用)。`none` = 503。**全 subprocess は `subprocess.run(..., timeout=4)`** (T_probe 予算 6s より短く) で囲み、`(OSError, TimeoutExpired, CalledProcessError, UnicodeDecodeError)` → 503 + 本文 `error <msg>`。`win32print` 経路も同じ。
+- **CLIP バックエンド** (B5、往復 2 新 2 / 新 3): `win32` = `win32clipboard`。`wsl` = GET は `powershell.exe -NoProfile -Command "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string](Get-Clipboard -Raw)))"` (空 / 非テキストは `[string]` cast で `""` → 200 + 0 長、503 にしない、nb1) の出力を base64 デコード (符号化 = PowerShell の OEM CP932 問題と末尾 CRLF の両方を回避)、PUT は `clip.exe` に **UTF-16LE + BOM** (`"\ufeff".encode("utf-16-le")` 前置、または `text.encode("utf-16")`) を stdin。`file:<path>` = 読み書き (試験・pywin32 無し運用)。`none` = 503。**subprocess は非同期** (往復 3 B-1): Agent は単一スレッドなので同期 `run` は他ハンドルの RTO 予算 (未 ACK の REQUEST/WDATA があると `LINK_RTO_TICKS 20 × LINK_TRIES 5 ≈ 1.2 秒`) を越えて再同期・スプール二重追記を起こす。→ `wsl` の powershell/clip.exe (と将来の `GET http` の urlopen) は **`Popen` で起動して `_serve` は `resp=None` のまま返す** (STATUS には既存の PROCESSING)。常駐ループを `select([sock], timeout≈0.05)` にして子の完了 / 4 秒期限を巡回で見る → 完了で `_answer`、期限超過は kill + 503、実行中に同 rid の RELEASE / epoch 切替が来たら結果を捨てる。例外種は `(OSError, TimeoutExpired, CalledProcessError, UnicodeDecodeError, ValueError, binascii.Error)` → 503 + 本文 (base64 復号の `binascii.Error` を含む、nb2)。試験は「子を進める」フックを 1 本足す。`win32print` 経路も同じ非同期に載せる。
 - **B1 の ACK 規則 (往復 2 新 1)**: **ACTIVE な rid への WDATA は `decl` / `resp` に依らず ACK する** — `seq == last_seq + 1` なら `last_seq` を進めて累積 ACK、重複 (`seq ≤ last_seq`) も ACK。本文を `got` に足すのは **`resp is None and decl > 0`** のときだけ (要求行で 400 した rid = `decl == 0` でも WDATA は ACK し、本文は捨てる)。`_on_wdata` の早期 return は `decl == 0` を条件にしない (これが往復 1 の B1 が塞ぐはずの故障。例: `CLIP PUT 4097` → 400 → WDATA seq1 が届く → `ack=1` を返す、書かない)。これで「宣言 < 実」= 超過分は捨てて ACK・応答は 1 回、「宣言 > 実 (RELEASE で打ち切り)」= スプールは伸びず応答無し、が定まる。
 - **B3 の配送規則**: `_answer` は `total > 0` なら status に依らず `deliver` を作る (200 限定をやめる)。409 / 500 / 503 に本文を付けても OS32 が WINDOW→DATA で読み切れる。既存 `GET /status/410` の本文もこれで読める (N1 の潜在バグ)。
 - **B6 の既定**: `_finish_body` の既定 (未知 verb の本文) は **501** (200 をやめる)。先送りの `PUT /file/` は `_serve` で宣言長を受理しつつ即 501 (何も書かない)。
@@ -33,8 +33,8 @@
 既存の贋 OS32 (フレームを直接組む) で:
 - PRINT OPEN → `job 1`、DATA (宣言長 = WDATA 長) を 2 回追記 → スプールに連結、CLOSE → `pages n` + スプール内容一致。
 - **宣言長と WDATA 長の不一致** (宣言 > 実 WDATA、宣言 < 実) の扱い (N1 の WDATA 契約に従う = Agent は宣言長ぶん受けてから応答)。
-- 未知 id / CLOSE 済み id への DATA = 409、STATUS の各状態遷移 (open→closing→done、error)。
-- CLIP PUT (宣言長 + WDATA) → `--clip-file` に書かれる、CLIP GET → `--clip-file` の内容を返す (往復)。4KB 超の CLIP PUT = 400。
+- 未知 id / CLOSE 済み id への DATA = 409、STATUS の状態 (queued/done/error)。
+- CLIP PUT (宣言長 + WDATA) → `file:<path>` に書かれる、CLIP GET → `file:<path>` の内容を返す (往復)。4KB 超の CLIP PUT = 400。
 - `--to-file` の CLOSE がスプールを残す / `--print-dir` へ移す。pywin32 が無い環境で全部通る (win32 系は import 失敗を許容)。
 - **B1**: 完了後 / 400 後の WDATA seq を再送 → ACK(`ack=N`) が返り、スプールが二重に伸びず RESPONSE も再送されない (冪等)。最終 WDATA 再送でスプール不変。
 - **B2**: `PRINT DATA 1 0` / `CLIP PUT 0` / `PRINT DATA 1 65537` / `CLIP PUT 4097` / `PRINT DATA 1 +5` → 業務 400 が WDATA 無しで即返る。
@@ -48,6 +48,9 @@
 - **nb1/nb2/nb7**: 同一ジョブに DATA (未完了) と CLOSE を同時 → CLOSE が 409。`done` への再 CLOSE → 200 `pages n` (冪等)。未知 id の DATA/CLOSE/STATUS → 要求行で 409。
 - **B4**: state_dir 共有で Agent 2 回起動 → 各 1 ジョブ、2 台目が `job 2`、出力ファイル 2 つ両方一意名で残る。
 - **切り詰め / 改行**: CLIP GET の CRLF→LF・64KB を UTF-8 境界で切る、CLIP PUT の CRLF 正規化。`PRINT OPEN x raw` → 501、未知 kind → 400、空ジョブ CLOSE の `pages`。
+- **B-1 (非同期)**: 子プロセスが未完了の間に別 rid の REQUEST/WDATA を送って ACK と応答が即返る、同 rid の STATUS が PROCESSING、子の完了で RESPONSE が 1 回、完了前の RELEASE で結果を捨てる、期限超過で 503 + 本文。
+- **B-2**: DATA 完了 (200 応答済み) だが RELEASE 未着 → 同ジョブの CLOSE が 200 `pages n`。DATA 本文未完了 (WDATA 途中) → CLOSE が 409、RELEASE 後の再 CLOSE が 200。
+- **nb1/nb2**: CLIP GET の stdout 空 → 200 + 0 長 (503 でない)、非 base64 → 503。`error` ジョブへの再 CLOSE (nb4)、追記失敗 → 500 (nb5)。
 - 既存 25 ケース (HELLO / 台帳 / 墓標 / 枯渇) に回帰なし。`HostAgent.__init__` の試験用引数 (`spool_dir`/`print_dir`/`clip`/`printer`)、**`clip` の既定は `none`** (試験・CI が実クリップボードに触れない。`auto` は CLI 既定だけ)。
 
 ## 3. 受入 (PM)
@@ -65,4 +68,4 @@
 往復 2 のレビューが既存 `tools/host_agent.py` / `net/link.c` に見つけたもの。N2 の範囲外だが記録する:
 - **(a、優先度高) `GET /file/` のパストラバーサル**: Agent の `_service_get` は `os.path.join(root, path.lstrip("/"))` で `..` を通し、`--file-root` 未指定だと**ホストの任意ファイルが読める** (HOST_SERVICES_PLAN §6 の「許可リスト外は読まない」に反する)。N2 で `/file/` を触らないが、**別の小 N-fix で `--file-root` 必須化 + `..` 正規化拒否**をする (優先度高)。本票の実装コーダーは触らない。
 - **(b) `link_on_response` が保留 WDATA を無効化しない**: 最終 WDATA の ACK が落ちると RESPONSE 受信後もカーネルが WDATA を RTO 再送し続ける。B1 で Agent が完了後も累積 ACK を返すことで実害 (再同期) は消えるが、根治は「RESPONSE 着後は同 rid の WDATA 再送を止める」カーネル側の 1 行。N3 着手時にホスト TDD で踏んで判断。
-- **(c) `GET http(s)://` の `urlopen(timeout=10)`** が T_probe 予算 (~6s) を超え、遅いサーバで再同期が起きる。N3 の wget 実装時に timeout を 4s 前後へ。
+- **(c) `GET http(s)://` の `urlopen(timeout=10)`** が他ハンドル在庫時の RTO 予算 (~1.2s) を超え再同期を起こす。N3 の wget 実装時に **B-1 と同じ非同期機構に載せる** (timeout だけでは不足)。
