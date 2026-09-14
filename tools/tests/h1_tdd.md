@@ -53,7 +53,7 @@ $ python3 -B tools/tests/test_hsync_h1.py --target
 CONST COUPLING PASS (VFS_MAX_PATH_DEPTH=32 == HS_MAX_PATH_DEPTH, HSP_MAX_DEPTH=32)
 HOST GNU89 -Werror COMPILE PASS (real hsync.c)
 ...
-211 checks, 0 failures
+219 checks, 0 failures
 EXIT hsync_h1_host=0
 HOST GNU89 -Werror COMPILE PASS [CRC stub] (real hsync.c)
 ...
@@ -223,3 +223,113 @@ B3c で `コピー元が通常ファイル: 非ゼロ終了` **だけは通っ�
 `sys_ls` が実機と同じく通常ファイルにエラーを返すためで、まさに上で書いた
 「偶然のエラーに頼っている」状態が試験の上でも見えている。語を見る検査
 (`reason=type_conflict`) のほうは落ちる。
+
+## 追記 2026-09-15 (3) — `hdrv_list_dir` が途中で切れた列挙を成功で返す
+
+往復 2 の報告で「別件」として挙げたものを PM が確認し、**実在・hsync から
+到達可能**と判定。H1 の完了条件「I/O 失敗を成功にしない」と対象「HostDrv の
+エラー処理」に入るのでこの票で直した。
+
+`fs/hostdrvfs.c` の `hdrv_list_dir` は列挙ループを 2 通りで抜け、どちらも
+末尾で無条件に `return VFS_OK` していた。
+
+- `if (rc < 0) break;` — `hostdrv_query_dir` の失敗。200 件のうち 50 件目で
+  失敗すると **「50 件だけの成功した列挙」**。hsync は `rc == 0` を見るので
+  50 件を同期して `errors=0` / 終了コード 0 で終わる。
+- `if (count++ >= HOSTDRV_MAX_DIR_ENTRIES) break;` (上限 1000) — 件数上限での
+  打ち切りも成功として返る。
+
+### 直した内容
+
+列挙ループを `fs/hostdrv_list_rules.inc` の純関数 `hdrv_list_run()` に切り出し、
+1 件取得 (`hostdrv_query_dir`) と 1 件の組み立てを関数ポインタで受ける形にした
+(`fs/hostdrv_stat_rules.inc` と同じ作法)。`hdrv_list_dir` は step / emit を渡して
+呼ぶだけになり、判定の写しはどこにも無い。`hostdrv_cleanup_close()` は
+**戻り値にかかわらず必ず通す**。
+
+| 抜けかた | 直す前 | 直したあと |
+|---|---|---|
+| 最後まで届いた | `VFS_OK` | `0` (変更なし) |
+| `query_dir` が負値 | `VFS_OK` | **`OS32_ERR_IO`** (修正 1) |
+| 件数上限で打ち切り | `VFS_OK` | **`OS32_ERR_FULL`** (修正 2) |
+
+2 つを別の値にしてあるので、呼び手は「読めなかった」と「多すぎる」を
+区別できる。名前が化けた / `.` / `..` を流さないことと、それでも繰り返しを
+1 回消費することは**従来どおり**。
+
+### 修正 2 は挙動の変更 — 切り離せる形
+
+`fs/hostdrv_list_rules.inc` の `hdrv_list_run()` にある
+
+```c
+        if (count++ >= max_entries) {
+            /* [H1-CAP] 修正 2。ここを `return 0;` に戻すと修正 1 だけが残る */
+            return HDRV_LIST_ERR_CAPPED;
+        }
+```
+
+の 1 行を `return 0;` にすれば修正 1 だけが残る。試験側も
+`hostdrv_list_host.c` の `== (b) 件数上限での打ち切り ==` の節 (5 件) と
+`hsync.1` の該当行を落とすだけで、他の検査には触らない。
+
+### `list_dir` / `sys_ls` の呼び出し元と、件数上限をエラーにした影響
+
+まず範囲: `HOSTDRV_MAX_DIR_ENTRIES` は **HostDrv (`/host`) だけ**の上限。
+ext2 と iso9660 は自前の `list_dir` を持つので影響を受けない
+(`kernel/kernel.c:320` で `vfs_mount("/host", "hostdrv", "hostdrv")`、
+マウント点は 1 つ)。
+
+カーネル側の `vfs_ls` 呼び出しは `kapi/kapi_generated.c` の `wrap_sys_ls` の
+1 本だけ。`ops->list_dir` を直接呼ぶのは `fs/vfs.c` の `vfs_ls` と
+`vfs_path_kind` のプローブ。
+
+| 呼び出し元 | 戻り値の扱い | 自前の件数上限 | 上限エラー化の影響 |
+|---|---|---|---|
+| `userland/system/hsync.c` (2 か所) | `rc != 0` を `FAIL: ls` で `errors` に数える | `MAX_FILES` 128 | **狙いどおり厳しくなる**。128 件超はもともと明示エラー |
+| `userland/shell/cmd_dir.c` (`ls`) | **見ていない** | `SH_LS_MAX` 128 | 表示は変わらない (128 件で先に頭打ち) |
+| `userland/shell/sh_args.inc` (glob) | 見ていない | `SH_LS_MAX` 128 | 変化なし |
+| `userland/shell/ui.c` (tab 補完) | 見ていない | `TAB_MAX_MATCHES` 40 | 変化なし |
+| `userland/shell/cmd_file.c` (`cp -r`) | 見ていない | `MAX_COPY_ENTRIES` 64 (超過は既にエラー表示) | 変化なし |
+| `userland/shell/cmd_filer.c` / `userland/lib/filer/filer_core.c` / `userland/rust/filer` | 見ていない | `FILER_MAX_ENTRIES` 128 / `FL_MAX_ENTRIES` 256 | 表示は変わらない |
+| `userland/cmds/du.c` `find.c` `man.c` `tar.c` | 見ていない | なし | 変化なし (戻り値を捨てているため) |
+| `userland/system/install.c` | 負値を**失敗件数に数える** | `MAX_FILES` 相当 | FDD (ext2/FAT) が相手なので HostDrv の上限に当たらない |
+| `userland/shell/cmd_fs_shared.c` `fs_is_dir()` | **`rc == 0` ならディレクトリ**と判定 | なし | ★ 1000 件超の `/host/...` を「ディレクトリでない」と言う。`cp` / `mv` (`cmd_file.c` の 5 か所) が使う |
+| `fs/vfs.c` `vfs_path_kind()` のプローブ | `== VFS_OK` ならディレクトリ | なし | HostDrv には `stat` があり**先に成功する**ので、このプローブには落ちてこない (票 H1 で `hdrv_stat` を直したあとは特に) |
+| `userland/tests/test4.c` | 見ていない | — | 試験用 |
+
+**意見**: 入れてよいと考える。理由は 3 つ。
+
+1. 上限 1000 に当たるのは `/host` 配下だけで、`/host` は `make deploy` が作る
+   配備ツリー (`C:\os32`)。`userland/deploy.yaml` の登録は 92 件、いちばん多い
+   `man` ページでも 64 件で、**1 ディレクトリ 1000 件に届く現実的な経路が無い**。
+2. ほぼ全ての呼び出し元が `sys_ls` の戻り値を**見ていない**うえ、自前の上限
+   (40〜256) が先に効く。エラーにしても表示・動作は変わらない。
+3. 唯一意味が変わるのは `fs_is_dir()` 経由の `cp` / `mv` で、1000 件超の
+   `/host` ディレクトリを「ディレクトリでない」と判定する。ただし
+   (a) その条件自体が上記 1 で現実的でなく、(b) 仮に起きたら今は
+   **黙って 1000 件だけコピーする**ので、断るほうが安全。
+
+気になるなら `fs_is_dir()` を `sys_stat` 優先に直すのが本筋 (`fs_path_kind()` は
+既にそうなっている) が、**呼び出し元は指示どおり 1 行も変えていない**。判断は PM へ。
+
+### 追加した試験
+
+- `tools/tests/hostdrv_list_host.c` + `tools/tests/test_hostdrv_list.py` (新設、
+  `build/sdk.mk` に `check-hostdrv-list-host` を登録し `check:` の列に追加)。
+  **23 件 / 0 failures**。正常系 7 / (a) 途中で負値 5 / (b) 件数上限 5 /
+  引数の防御 3 / 2 つのエラーが別物 2。`--target` で `fs/hostdrvfs.c` の
+  クロスコンパイルも見る。上限定数が 1 か所にしか無いことの検査つき ([C4])。
+- `hsync_h1_host.c` に `case_b4` **8 件** (211 → **219 checks / 0 failures**)。
+  贋 `sys_ls` に「N 件流してから I/O エラー」を注入し、**呼び手側の意味** —
+  部分同期を成功と呼ばない・`copied=0`・`Done:` へ進まない・dry-run でも
+  `errors` に数える — を固定する。
+
+### RED (変異)
+
+| 変異 | 戻した内容 | 落ちた検査 |
+|---|---|---|
+| B4a | `rc < 0` で `return 0` (修正 1 を戻す) | `test_hostdrv_list.py` **23 中 4 失敗** — VFS_OK を返さない / OS32_ERR_IO / 1 件目で失敗 / 最後の 1 件で失敗 |
+| B4b | 件数上限で `return 0` (修正 2 を戻す) | **23 中 3 失敗** — VFS_OK を返さない / OS32_ERR_FULL / 上限ちょうど |
+| B4c | 呼び手 (`hsync`) が `sys_ls` の戻り値を無視する | `test_hsync_h1.py` **219 中 7 失敗** — `case_b4` の全項目 |
+
+B4a と B4b が互いの検査を落とさないことも、この 2 つが独立して外せる根拠。

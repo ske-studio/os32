@@ -489,12 +489,65 @@ static int hdrv_is_mounted(void *ctx)
     return g_mounted;
 }
 
+/* 列挙ループと「成功と言ってよいか」は純関数へ切り出してある (票 H1)。
+ * 途中で切れた列挙 / 件数上限での打ち切りを VFS_OK で返さない。
+ * ホスト試験は tools/tests/hostdrv_list_host.c。 */
+#include "hostdrv_list_rules.inc"
+
+/* hdrv_list_run に渡す入れ物。ハイパーコール側の状態は g_databuf なので、
+ * ここにはコールバックと、1 件ぶんの組み立てに要るものだけを置く。 */
+typedef struct {
+    vfs_dir_cb cb;
+    void      *user_ctx;
+} HdrvListCtx;
+
+/* 1 件進める (IRP_MN_QUERY_DIRECTORY) */
+static int hdrv_list_step(void *ctx, int first)
+{
+    (void)ctx;
+    return hostdrv_query_dir(first);
+}
+
+/* 取れた 1 件を VfsDirEntry にして流す。名前が化けたもの / "." / ".." は
+ * 流さないが、繰り返しは 1 回ぶん消費する (従来どおり)。 */
+static void hdrv_list_emit(void *ctx)
+{
+    HdrvListCtx *lc = (HdrvListCtx *)ctx;
+    Np2FileBothDirInfo *info;
+    VfsDirEntry entry;
+    char namebuf[260];
+    int namelen;
+
+    info = (Np2FileBothDirInfo *)g_databuf;
+
+    /* ファイル名をUTF-8に変換 */
+    namelen = kutf16le_to_utf8((const u16 *)info->FileName,
+                               info->FileNameLength,
+                               namebuf, sizeof(namebuf));
+    if (namelen <= 0) return;
+
+    /* "." と ".." はスキップ */
+    if (namebuf[0] == '.' &&
+        (namebuf[1] == '\0' ||
+         (namebuf[1] == '.' && namebuf[2] == '\0'))) {
+        return;
+    }
+
+    /* VfsDirEntryに変換 */
+    kstrncpy(entry.name, namebuf, VFS_MAX_PATH);
+    entry.size = (u32)info->EndOfFile;  /* 下位32bitのみ */
+    entry.type = (info->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY)
+                 ? VFS_TYPE_DIR : VFS_TYPE_FILE;
+
+    lc->cb(&entry, lc->user_ctx);
+}
+
 /* list_dir: ディレクトリ列挙 */
 static int hdrv_list_dir(void *ctx, const char *path,
                          vfs_dir_cb cb, void *user_ctx)
 {
     int rc;
-    int first = 1;
+    HdrvListCtx lc;
     (void)ctx;
 
     /* セッション開始 + ディレクトリを開く */
@@ -507,54 +560,16 @@ static int hdrv_list_dir(void *ctx, const char *path,
         return VFS_ERR_NOTFOUND;
     }
 
-    /* エントリを1つずつ列挙 (上限付き) */
-    {
-        int count = 0;
-        for (;;) {
-            Np2FileBothDirInfo *info;
-            VfsDirEntry entry;
-            char namebuf[260];
-            int namelen;
+    lc.cb = cb;
+    lc.user_ctx = user_ctx;
+    rc = hdrv_list_run(&lc, hdrv_list_step, hdrv_list_emit,
+                       HOSTDRV_MAX_DIR_ENTRIES);
 
-            if (count++ >= HOSTDRV_MAX_DIR_ENTRIES) break;
-
-            rc = hostdrv_query_dir(first);
-            first = 0;
-
-            if (rc > 0) break;       /* 列挙終了 */
-            if (rc < 0) break;       /* エラー */
-
-            info = (Np2FileBothDirInfo *)g_databuf;
-
-            /* ファイル名をUTF-8に変換 */
-            {
-                namelen = kutf16le_to_utf8((const u16 *)info->FileName,
-                                           info->FileNameLength,
-                                           namebuf, sizeof(namebuf));
-            }
-            if (namelen <= 0) continue;
-
-            /* "." と ".." はスキップ */
-            if (namebuf[0] == '.' &&
-                (namebuf[1] == '\0' ||
-                 (namebuf[1] == '.' && namebuf[2] == '\0'))) {
-                continue;
-            }
-
-            /* VfsDirEntryに変換 */
-            kstrncpy(entry.name, namebuf, VFS_MAX_PATH);
-            entry.size = (u32)info->EndOfFile;  /* 下位32bitのみ */
-            entry.type = (info->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY)
-                         ? VFS_TYPE_DIR : VFS_TYPE_FILE;
-
-            cb(&entry, user_ctx);
-        }
-    }
-
-    /* ディレクトリを閉じる */
+    /* ディレクトリを閉じる。**失敗しても必ず通す** */
     hostdrv_cleanup_close();
 
-    return VFS_OK;
+    /* 途中で切れた列挙を「全部読めた」と言わない (票 H1) */
+    return rc;
 }
 
 /* read_file: 一括ファイル読み込み */

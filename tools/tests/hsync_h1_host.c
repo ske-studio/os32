@@ -89,6 +89,9 @@ static int   fk_write_calls;
 static int   fk_mkdir_calls;
 static int   fk_sync_calls;
 static int   fk_create_calls;   /* O_CREAT で新規に作った回数 */
+/* > 0 … sys_ls がこの件数だけ流してから I/O エラーを返す。HostDrv の
+ * hdrv_list_dir が「途中で切れた列挙」を返す状況の再現 (票 H1 / 往復 3)。 */
+static int   fk_ls_fail_after;
 
 static char  fk_log[65536];
 static u32   fk_log_len;
@@ -107,6 +110,7 @@ static void fs_reset(void)
     fk_mkdir_calls = 0;
     fk_sync_calls = 0;
     fk_create_calls = 0;
+    fk_ls_fail_after = 0;
     fk_log_len = 0;
     fk_log[0] = '\0';
 }
@@ -241,15 +245,24 @@ static int fk_sys_ls(const char *path, void *cb, void *ctx)
         if (!fs_nodes[i].is_dir) return OS32_ERR_NOTDIR;
     }
 
-    for (i = 0; i < FS_MAX_NODES; i++) {
-        if (!fs_nodes[i].used) continue;
-        fs_parent(fs_nodes[i].path, parent);
-        if (strcmp(parent, dir) != 0) continue;
-        memset(&e, 0, sizeof(e));
-        strncpy(e.name, fs_base(fs_nodes[i].path), OS32_MAX_PATH - 1);
-        e.size = fs_nodes[i].size;
-        e.type = fs_nodes[i].is_dir ? OS32_FILE_TYPE_DIR : OS32_FILE_TYPE_FILE;
-        fn(&e, ctx);
+    {
+        int sent = 0;
+        for (i = 0; i < FS_MAX_NODES; i++) {
+            if (!fs_nodes[i].used) continue;
+            fs_parent(fs_nodes[i].path, parent);
+            if (strcmp(parent, dir) != 0) continue;
+            if (fk_ls_fail_after > 0 && sent >= fk_ls_fail_after) {
+                /* 途中で切れた列挙。**成功として返さない** (票 H1) */
+                return OS32_ERR_IO;
+            }
+            memset(&e, 0, sizeof(e));
+            strncpy(e.name, fs_base(fs_nodes[i].path), OS32_MAX_PATH - 1);
+            e.size = fs_nodes[i].size;
+            e.type = fs_nodes[i].is_dir ? OS32_FILE_TYPE_DIR
+                                        : OS32_FILE_TYPE_FILE;
+            fn(&e, ctx);
+            sent++;
+        }
     }
     return 0;
 }
@@ -1621,6 +1634,89 @@ static void case_b3_start(void)
     check(rc != 0 && log_has("reason=type_unknown"),
           "コピー元の種別不明: reason=type_unknown");
 }
+
+/* ---- B4 (往復 3): 途中で切れた列挙を hsync が成功にしない ----------------
+ * fs/hostdrvfs.c の hdrv_list_dir は、`hostdrv_query_dir` が途中で失敗しても
+ * 末尾で無条件に VFS_OK を返していた。200 件のうち 50 件目で失敗すると
+ * 「50 件だけの成功した列挙」になり、hsync は rc == 0 を見て 50 件を同期し
+ * errors=0 / 終了コード 0 で終わる。件数上限 (1000) での打ち切りも同じ。
+ *
+ * ループ側の修正は tools/tests/hostdrv_list_host.c が持つ。ここでは
+ * **呼び手の意味** — 列挙が非ゼロを返したら hsync が部分同期を成功と
+ * 呼ばないこと — を固定する。 */
+static void case_b4(void)
+{
+    int rc;
+
+    printf("== B4: 途中で切れた列挙を成功にしない (呼び手側) ==\n");
+
+    /* 5 件のうち 2 件流したところで列挙が失敗する */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    {
+        u8 *a = make_blob(16, 1);
+        fs_add_file("/host/bin/a1.bin", a, 16);
+        fs_add_file("/host/bin/a2.bin", a, 16);
+        fs_add_file("/host/bin/a3.bin", a, 16);
+        fs_add_file("/host/bin/a4.bin", a, 16);
+        fs_add_file("/host/bin/a5.bin", a, 16);
+        free(a);
+    }
+    fk_ls_fail_after = 2;
+    rc = run1("bin");
+    check(rc != 0, "非ゼロ終了 (部分的な列挙を成功にしない)");
+    check(log_has("FAIL: ls /host/bin"), "ls の失敗を報告する");
+    check(log_has("errors=1"), "errors に数える");
+    check(!log_has("Done:"), "Done: へ進まない");
+    check(log_has("copied=0"),
+          "1 件も同期しない (途中まで写して「完了」と言わない)");
+
+    /* 列挙が成功する側 — 誤検出していないこと */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    {
+        u8 *a = make_blob(16, 1);
+        fs_add_file("/host/bin/a1.bin", a, 16);
+        fs_add_file("/host/bin/a2.bin", a, 16);
+        free(a);
+    }
+    rc = run1("bin");
+    check(rc == 0 && log_has("copied=2") && log_has("errors=0"),
+          "列挙が最後まで届けば従来どおり同期する");
+
+    /* dry-run でも同じ — 「変更なし」と報告しない */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    {
+        u8 *a = make_blob(16, 1);
+        fs_add_file("/host/bin/a1.bin", a, 16);
+        fs_add_file("/host/bin/a2.bin", a, 16);
+        fs_add_file("/host/bin/a3.bin", a, 16);
+        free(a);
+    }
+    fk_ls_fail_after = 1;
+    rc = run2("-n", "bin");
+    check(rc != 0 && log_has("errors=1"),
+          "dry-run でも列挙の失敗を errors に数える");
+
+    /* 全体同期の途中でサブディレクトリの列挙が切れた場合 */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    {
+        u8 *a = make_blob(16, 1);
+        fs_add_file("/host/bin/a1.bin", a, 16);
+        fs_add_file("/host/bin/a2.bin", a, 16);
+        free(a);
+    }
+    fk_ls_fail_after = 1;             /* ルートの列挙自体が 1 件で切れる */
+    rc = run1(0);
+    check(rc != 0 && log_has("errors=1"),
+          "全体同期でも列挙の失敗で非ゼロ終了");
+}
 #endif /* !HSYNC_CRC_STUB */
 
 /* ========================================================================= */
@@ -1649,6 +1745,7 @@ int main(void)
     case_b2();
     case_b3();
     case_b3_start();
+    case_b4();
 #endif
 
     printf("\n%d checks, %d failures\n", checks, failures);
