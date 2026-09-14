@@ -57,3 +57,11 @@ N3 の実装で Agent (`tools/host_agent.py`) を触るので、以下をまと�
 - **`GET http(s)://` の非同期化 (B4、優先度高)**: 現状 `urlopen(timeout=10)` が主ループを塞ぎ、~6 秒超で `link_resync` → wget が「host link down」になり F6 の再確認も偽陰性になる。→ N2 の B-1 と同じ子プロセス/非同期経路に載せるが、**期限は要求種別ごと** (N-2: `_start_async(..., timeout=...)`、CLIP は 4 秒のまま、**GET は 25 秒** = ライブラリの無進捗期限 30 秒より短くして利用者が ETIMEOUT でなく業務 **503** (Agent の期限超過は `error timeout`) を見る)。子の形: `sys.executable -c` で urllib を回し、**`r.read()` で読み切ってから** status 行 + 本文を `_RealProc` の TemporaryFile へ (B7 と同じ。途中断を「200 + 短い本文」にしない — 子が rc≠0 なら Agent は status 行があっても 502)。**`urllib.error.HTTPError` は `e.code` + `e.read()` を status 行 + 本文にする** (404 を 502 にしない)、`allow_net`/`--offline` の 502 は維持。Python 試験: **5 秒遅延**の HTTP fixture で STATUS→PROCESSING を挟んで 200 (4 秒で切れないこと)、`subproc_timeout` を 1 秒に下げても GET は切れず CLIP は切れる。
 - **`GET /file/` のパストラバーサル (優先度高)**: `--file-root` 未指定なら `/file/` は 403、指定時も `os.path.realpath(join)` が `os.path.commonpath([realpath(root), realpath(join)])` == `realpath(root)` に収まることを確認 (`..`・symlink 脱出を落とす、前方一致 `/root2` を通さない)。ホスト Python 試験。
 - N2 の残 non-blocker 6 件 (TASK_N2 §9): `_outfile` の明示 close、`--clip file:` 空パス拒否、`RealB64Spawn.wait_all()` timeout、B7 試験の「子未完了」assert 時間依存、root 実行時の OSError 試験 skip、rc≠0 の 503 本文に stderr。
+
+## 8. 実装レビュー (Fable、2026-09-14) — Approve
+判定 **Approve**、blocker 0。レビュアーは GET_CHILD を実サーバで実行 (200 で 200000B 読み切り / 404 本文 rc0 / 接続不能 rc1)、lib 変異 3 本で試験の抜け道を確認。ビルド all/external/check 緑、lib 70/70・コマンド 40・test_host_agent 79/79。
+**N3-fix (受入と並行、次の Agent 触りでまとめる)**:
+- (1、強く推奨) lib ホスト TDD の抜け道: 贋 `host_write` に「最初の k 回 AGAIN」欄・`open_full` ケース・write 経路の無進捗変異を足す (実カーネルは REQUEST ACK まで必ず write AGAIN なので、この欠陥は本番で全滅するのに 70/70 が通る)。
+- (2、強く推奨) `GET_CHILD` が試験で一度も実行されない (全 GET が FakeProc)。`http.server` fixture で実子を 1 本。
+- (3、guest 到達の Agent クラッシュ) `_service_get_file` の `realpath` が try 外で、`GET /file/a\0b` (NUL) の `ValueError` 未捕捉 → 主ループは ConnectionError しか受けず Agent が落ちる。→ `realpath` を try に入れ `(ValueError, OSError)` → 403。
+- (4〜7、記録) `g_link_up` プロセス大域は W レーンで再検討 / wget の stdout モードは file 指定時のみ進捗 / 転送途中 ELINK で部分ファイル / hdate の ESERVICE 文言 / tick poll 例外の close / hclip get 試験の stdout 漏れ。
