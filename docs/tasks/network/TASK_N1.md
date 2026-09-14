@@ -171,3 +171,19 @@ RED → GREEN の詳細・ケース名は [`tools/tests/n1_tdd.md`](../../../too
 5. **既存 (退行ではない)** NO_SLOT 経路 (`net/link.c:387`) が `rel_tries` を増やさず RELEASE だけ落ち続けても再同期に至らない。ゲストで `link_no_slots` を監視。
 
 2〜4 は N2 の着手時に「試験の頑健化」としてまとめる。1 は次の KAPI 追記票に付ける。
+
+### N1-fix 配備後の受入 (2026-09-14、kernel-lgy98-link + ext2 段 B、kselftest 87/0)
+- **F1 解決**: kselftest **87/0** (配備後・再起動後とも)。
+- **F2 解決**: `check-net-l0` OK (`rt_ok=10`、L0 専用カウンタ)。
+- **F4 解決**: `link_retransmits=0` (無ドロップ)。`resyncs=0`/`rt_fail=0`。
+- **L3 OK**: GET /pattern/65536 完走・404・TIME・実 HTTP 559B。**host_test 26/26**。
+- **ext2 (段 B)**: `tar c` 実用速度 (§S6P)。
+
+### F6 [blocker、N1-fix2] 64KB を超えるストリームが 66114 B で早期 EOF
+`check-net-l1` (BULK 102400) と `check-net-l2` (STREAM 131072) が**どちらも 66114 B / 131 frame で停止**。診断:
+- Agent は RESPONSE の length を正しく宣言 (`host_agent.py:597` `<HI` で 102400 / 131072、`_answer` の `total`)。
+- OS32 側は `link_resyncs=0` / `link_tombstones=0` / `link_l2_overflow=0` / `l1_ooo=0` / `l2_gaps=0` / `rx_dropped=0` / `retransmits=0`。**壊れずに止まる**。
+- `link_l1_done=1` / `link_l2_eof=1` = **EOF を受けている**。`link_host_read_stage` は `read_bytes >= length` で 0 (完了) を返すので、**e->length が 66114 に化けている** か、**EOF が完了を短絡している**。
+- **66114 は要求した total に依存しない固定値** (102400 でも 131072 でも同じ) → 比例しない = どこかの固定境界 (≈ 64KB = 65536)。**L3 の 65536 ちょうどは通る**ので閾値は 65536 の直後。
+仮説 (コーダーが確定): (a) Agent の配送が WINDOW 停滞で ~64KB 送って EOF を早出しし、OS32 が EOF で `length = recv_bytes` に詰め直して完了扱い; (b) OS32 の WINDOW credit / recv_bytes / ack が 64KB 付近で頭打ち (`link_credit_pages`/`link_stream_free`、Agent の deliver の `sent`/`acked`/`credit`/`stall`)。**実害**: N3 の `wget` で 64KB 超のファイルが途中で切れる。小さい GET / PRINT / CLIP には影響しない。
+受入: 贋 NIC で >64KB のストリームを流すホスト TDD (OS32 側で再現するか) と、実 Agent の `BULK 200000` (Agent 側なら再現)。両方で完走を assert。`link_l2_eof` を完了判定に使わない契約 (N0 §2c) を破っていないか確認。
