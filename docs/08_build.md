@@ -266,6 +266,18 @@ python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base 
 `apps/` `game/` は staged SDK 側でそれぞれの `Makefile` が `mkos32x` を呼ぶので、
 そちらの GFX プログラムには各リポジトリで `--gfx` を付ける。
 
+#### `tools/audit_cast_align.sh`
+非整列アクセス候補の洗い出し (他アーキテクチャ移植の事前監査)。ホストの `gcc -m32` と
+`-Wcast-align=strict` で「アラインメント要件を上げるポインタキャスト」を列挙する。
+i386-elf クロスコンパイラは不要、`-fsyntax-only` なので成果物も作らない。`make check` には組み込んでいない。
+
+```bash
+tools/audit_cast_align.sh kernel   # kernel/ drivers/ gfx/ fs/ exec/ kapi/ lib/
+tools/audit_cast_align.sh user     # userland/ (newlib ヘッダが要るため網羅率は低い)
+```
+警告が出た = 必ず壊れる、ではない。仕分けの手順と結果は
+[tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md)。
+
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 
 OS32 の外部プログラムをビルドするためには、標準Cライブラリ (`newlib` - `libc.a`) と GCCライブラリ (`libgcc.a`) を含んだ `i386-elf` クロスコンパイラ環境が必要です。

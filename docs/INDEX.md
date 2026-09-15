@@ -137,6 +137,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
 | [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 | `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
+| [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | **他アーキテクチャ移植調査** の索引 — 対象一覧、共通の調査軸 (ISA/番地/表示/入力/記憶/起動/検証環境/棚卸し/未確認)、移植先を問わず先にやれる作業。調査記録の置き場であり計画ではない |
+| [tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md) | **M0 移植性監査** (2026-09-08、実機不要) — `-Wcast-align=strict` による非整列アクセス 202 件の仕分け (確定不具合 2 + 潜在 1)、i386/ARM の構造体レイアウト実測 (完全一致)、キャッシュ/TLB 前提の棚卸し。走査は `tools/audit_cast_align.sh` |
+| [tasks/arch_port/BRAIN_MX28_HARDWARE.md](tasks/arch_port/BRAIN_MX28_HARDWARE.md) | SHARP Brain (i.MX28 世代) ハードウェア調査 (2026-09-08) — **主対象 PW-SH4 (実機保有)**。ARM926EJ-S の構成、LCDIF+ILI9805・GPIO キーマトリクス・LRADC タッチ・eMMC/SD/USB ガジェット、SH1〜SH7 の機種差分、**CE を通さない起動経路** (USB recovery boot / Program Image 自作)、OS32 の x86 依存の棚卸し |
 | [tasks/cross_compiler_rebuild.md](tasks/cross_compiler_rebuild.md) / [tasks/ext2_dind_debug.md](tasks/ext2_dind_debug.md) | 単発タスク記録 |
 
 ## man ページ
