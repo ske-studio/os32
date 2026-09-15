@@ -214,13 +214,47 @@ def expand_var(varmap, name, depth=0):
     return re.sub(r"\$\(([^()]*)\)", sub, value)
 
 
-def parse_c_kernel(text):
-    """build/kernel.mk の C_KERNEL (カーネルにリンクされる C ソースの正典)。"""
+def parse_kernel_vars(text):
+    """build/kernel.mk の変数。ARCH の分岐で 2 回代入されるものは
+    **空でない方**を採る。
+
+    順序 4-b で `KSTRING_C_SRC` が入った — ARCH が x86 なら空 (kstring は
+    lib/kstring_asm.asm のアセンブリ)、それ以外なら lib/kstring_c.c。この
+    計測器が測るのは **ARM のビルド**なので、x86 側の空の代入ではなく
+    非 x86 側を採るのが正しい。ifeq を本気で評価するのは大げさなので、
+    「同じ名前に空と非空があったら非空」という単純な規則で足りる。
+    """
     text = re.sub(r"\\\n", " ", text)
-    m = re.search(r"^\s*C_KERNEL\s*:?=\s*(.*)$", text, re.M)
+    out = {}
+    for line in text.split("\n"):
+        line = line.split("#", 1)[0]
+        m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\?)?=\s*(.*)$", line)
+        if not m:
+            continue
+        name, value = m.group(1), m.group(2).strip()
+        if name not in out or (value and not out[name]):
+            out[name] = value
+    return out
+
+
+def parse_c_kernel(text):
+    """build/kernel.mk の C_KERNEL (カーネルにリンクされる C ソースの正典)。
+
+    `$(VAR)` の形で入っているものは build/kernel.mk 自身の代入から解決する
+    (順序 4-b の `$(KSTRING_C_SRC)`)。"""
+    varmap = parse_kernel_vars(text)
+    joined = re.sub(r"\\\n", " ", text)
+    m = re.search(r"^\s*C_KERNEL\s*:?=\s*(.*)$", joined, re.M)
     if not m:
         return []
-    return sorted(set(m.group(1).split()))
+    files = []
+    for tok in m.group(1).split():
+        ref = re.match(r"^\$\(([A-Za-z_][A-Za-z0-9_]*)\)$", tok)
+        if ref:
+            files.extend(varmap.get(ref.group(1), "").split())
+        else:
+            files.append(tok)
+    return sorted(set(files))
 
 
 def scan_glob():
