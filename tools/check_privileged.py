@@ -3,7 +3,7 @@
 """
 check_privileged.py — ユーザランドの特権命令検査 (リング3 準備)
 
-v2 でユーザプログラムは CPL=3 で走る (docs/tasks/v2/M1_RING3.md)。CPL=3 では
+v2 でユーザプログラムは CPL=3 で走る (docs/archive/kernel_v2/M1_RING3.md)。CPL=3 では
 特権命令・IOPL 依存命令は #GP になる。ビルド済みの userland/*.o を逆アセンブル
 (既存の i386-elf-objdump) して、そういう命令が残っていないか検査する。
 

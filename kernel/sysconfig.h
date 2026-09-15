@@ -3,7 +3,7 @@
 /*                                                                          */
 /*  /etc/system.cfg のような行指向 KEY=VALUE 設定を読む。カーネルのシェル    */
 /*  起動ループ (kernel.c) が GUI=0/1 を判定するために使う。                  */
-/*  書式・値の意味は docs/tasks/gui/TASK_K4_gui_boot.md、契約 T9。           */
+/*  書式・値の意味は docs/archive/gui_v11/TASK_K4_gui_boot.md、契約 T9。           */
 /* ======================================================================== */
 
 #ifndef __SYSCONFIG_H

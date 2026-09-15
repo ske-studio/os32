@@ -1,5 +1,5 @@
 /* ========================================================================= */
-/*  INSTALL_FRESH_HOST.C — 票 S3I2-I (docs/tasks/settings/TASK_S3I2.md §1)   */
+/*  INSTALL_FRESH_HOST.C — 票 S3I2-I (docs/archive/settings/TASK_S3I2.md §1)   */
 /*                        のホスト TDD                                       */
 /*                                                                           */
 /*  実物は `userland/system/install.c` の **通常インストール経路** そのもの   */

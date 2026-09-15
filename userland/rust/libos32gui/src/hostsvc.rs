@@ -1,6 +1,6 @@
 //! hostsvc.rs — Host Services (`libos32host`) を GUI アプリへ薄く公開する窓口。
 //!
-//! 票 `docs/tasks/network/TASK_N4.md` §1 (N4a、基盤)。
+//! 票 `docs/archive/network/TASK_N4.md` §1 (N4a、基盤)。
 //!
 //! ```text
 //!   アプリ ──(ジャンプ表 105..=110)──> ここ ──(extern "C")──> libos32host.a (C)

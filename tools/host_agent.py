@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OS32 Host Agent v2 — ワイヤ v2 (docs/tasks/network/TASK_N0.md §1b / §2d)。
+"""OS32 Host Agent v2 — ワイヤ v2 (docs/archive/network/TASK_N0.md §1b / §2d)。
 
 OS32 リンクプロトコル (raw Ethernet, EtherType 0x88B5) を話すホスト側常駐。
 v1 (16B ヘッダ・Stop-and-Wait・セッション無し) を置き換える。

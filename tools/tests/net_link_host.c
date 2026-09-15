@@ -1,7 +1,7 @@
 /* =========================================================================
  *  NET_LINK_HOST.C — リンク層 v2 と KAPI v51 を **実物のソースで** 確かめる
  *
- *  対象票: docs/tasks/network/TASK_N1.md 段 4 / 契約は TASK_N0.md §1a・§1b・§2
+ *  対象票: docs/archive/network/TASK_N1.md 段 4 / 契約は TASK_N0.md §1a・§1b・§2
  *  実行:   python3 -B tools/tests/test_net_link.py [ケース名 ...]
  *  記録:   tools/tests/n1_tdd.md
  *

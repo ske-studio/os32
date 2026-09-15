@@ -19,7 +19,7 @@ import subprocess
 import sys
 import uuid
 
-# Proven by docs/tasks/gui/TASK_H3_cirrus.md §0 and TASKS.md 2026-09-06
+# Proven by docs/archive/gui_v11/TASK_H3_cirrus.md §0 and TASKS.md 2026-09-06
 # (WAB OFF recheck). Other WAB fields/board IDs have no approved values here.
 #
 # USEPEGCP is the PEGC gate, proven by np21w-src src/win9x/ini.cpp:687

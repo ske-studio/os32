@@ -1,5 +1,5 @@
 /* ======================================================================== */
-/*  CFG_BENCH.C — 設定レジストリの実測 (票 docs/tasks/settings/TASK_S5.md    */
+/*  CFG_BENCH.C — 設定レジストリの実測 (票 docs/archive/settings/TASK_S5.md    */
 /*                §0 の S5-C(1)、DESIGN §6 の M1 / M4 / M6)                  */
 /*                                                                          */
 /*    cfg_bench [n] [m]     読み: n 回 (既定 50) の                          */

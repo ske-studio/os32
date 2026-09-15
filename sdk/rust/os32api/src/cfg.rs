@@ -1,5 +1,5 @@
 //! cfg.rs — 設定レジストリ (`/etc/settings.db`) の C ライブラリ `libos32cfg` への
-//! **ABI 宣言の 1 か所** (票 `docs/tasks/settings/TASK_S4.md` §4)。
+//! **ABI 宣言の 1 か所** (票 `docs/archive/settings/TASK_S4.md` §4)。
 //!
 //! シグネチャと定数の**正典は `userland/lib/cfg/libos32cfg.h`** (S2)。ここは
 //! その Rust 写しで、値を勝手に決めない。

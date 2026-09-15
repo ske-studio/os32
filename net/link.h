@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  LINK.H — OS32 リンクプロトコル v2 (LGY-98 の上の独自 raw Ethernet)        */
 /*                                                                          */
-/*  契約の正典: docs/tasks/network/TASK_N0.md §1b (ワイヤ v2) / §2 (駆動・    */
+/*  契約の正典: docs/archive/network/TASK_N0.md §1b (ワイヤ v2) / §2 (駆動・    */
 /*  排他・状態機械)。要約は docs/tasks/network/LINK_PLAN.md §4。             */
 /*                                                                          */
 /*  v1 (16B ヘッダ・同期 Stop-and-Wait) との違い:                            */

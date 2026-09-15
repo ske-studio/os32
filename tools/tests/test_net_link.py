@@ -1,6 +1,6 @@
 """N1 段 4: net/link.c (ワイヤ v2) と kapi/kapi_host.c (KAPI v51) のホスト TDD。
 
-票:   docs/tasks/network/TASK_N1.md 段 4 / 契約は TASK_N0.md §1a・§1b・§2
+票:   docs/archive/network/TASK_N1.md 段 4 / 契約は TASK_N0.md §1a・§1b・§2
 記録: tools/tests/n1_tdd.md
 
 tools/tests/kapi_db_v50_host.c と同じ様式 — 実物のソースを 1 行も写さずに

@@ -1,6 +1,6 @@
 //! cfgro.rs — 設定レジストリ (`/etc/settings.db`) への **OS 側で完結する** 窓口。
 //!
-//! 票 `docs/tasks/settings/TASK_S2.md` §3 (ユーザー決裁 2026-09-13、2 回目)。
+//! 票 `docs/archive/settings/TASK_S2.md` §3 (ユーザー決裁 2026-09-13、2 回目)。
 //!
 //! ```text
 //!   アプリ ──(ジャンプ表 101..=104)──> ここ ──(extern "C")──> libos32cfg.a (C)
