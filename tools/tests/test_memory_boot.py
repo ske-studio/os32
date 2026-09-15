@@ -22,7 +22,9 @@ class MemoryBoot(unittest.TestCase):
             kernel = (ROOT / 'kernel/kernel.c').read_text()
             start = kernel.index('    if (!memory_boot_init(mem_kb))')
             end = kernel.index('    shm_init();', start) + len('    shm_init();')
-            gate = kernel[start:end].replace('for (;;) { __asm__ volatile("cli; hlt"); }', 'host_failstop();')
+            # 失敗時の行き止まりは io.h の _stop() (= cli; hlt)。ホストでは
+            # 実行できないので観測用の host_failstop() に差し替える。
+            gate = kernel[start:end].replace('for (;;) { _stop(); }', 'host_failstop();')
             (d / 'kernel_boot_gate.c').write_text(
                 'static void __attribute__((unused)) host_kernel_boot(u32 mem_kb) {\n'
                 '#define kprintf(...) ((void)0)\n#define shm_init() die(7)\n' + gate +
@@ -61,7 +63,9 @@ class MemoryBoot(unittest.TestCase):
         self.assertLess(s.index('paging_init(mem_kb);'), start)
         self.assertLess(start, downstream)
         self.assertNotIn('pgalloc_init(mem_kb)', s)
-        self.assertIn('for (;;) { __asm__ volatile("cli; hlt"); }', s[start:downstream])
+        # 割り込みを禁じたまま止まること (io.h の _stop() = cli; hlt)。
+        # 眠って起きる _halt() ではいけない — 先へ進んでしまう。
+        self.assertIn('for (;;) { _stop(); }', s[start:downstream])
         self.assertIn('kernel/memory_boot.c', (ROOT / 'build/kernel.mk').read_text())
 
     def test_table_sizing_has_no_artificial_ceiling(self):

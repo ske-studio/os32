@@ -36,12 +36,14 @@ void link_test_idle(void);
 #define LINK_IDLE()          link_test_idle()
 #else
 #include "idt.h"            /* tick_count */
-#include "io.h"             /* irq_save / irq_restore */
+#include "io.h"             /* irq_save / irq_restore / _idle */
 #define LINK_IRQ_SAVE()      irq_save()
 #define LINK_IRQ_RESTORE(f)  irq_restore(f)
-/* IF=1 で次の割り込みまで寝る。`sti` と `hlt` は 1 命令対で並べる
- * (間に割り込みを入れない = POLICY_DEBUG §4-19 と同じ作法)。 */
-#define LINK_IDLE()          __asm__ volatile("sti\n\thlt" : : : "memory")
+/* IF=1 で次の割り込みまで寝る。「許可する」と「眠る」は io.h の _idle() が
+ * 1 つの不可分な原始命令として持つ (間に割り込みを入れない =
+ * POLICY_DEBUG §4-19 と同じ作法)。_enable(); _halt(); に分けてはいけない
+ * 理由は io.h の _idle() の註。順序 3 ではここが HAL の待ち 1 関数になる。 */
+#define LINK_IDLE()          _idle()
 #endif
 
 /* ======================================================================== */

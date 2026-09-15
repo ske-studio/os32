@@ -179,7 +179,7 @@ int serial_getchar(void)
 {
     int ch;
     while (ser_count == 0) {
-        __asm__ volatile("hlt");
+        _halt();
     }
 
     RING_DEQUEUE(ch, ser_buf, ser_head, ser_count, SER_BUF_SIZE);
@@ -204,7 +204,7 @@ void serial_putchar(char c)
             }
         }
         /* TxRDYでないなら hlt で1割り込み分待つ */
-        __asm__ volatile("hlt");
+        _halt();
     }
     /* タイムアウト: 送信を諦める */
 }

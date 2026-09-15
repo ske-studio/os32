@@ -100,21 +100,21 @@ alignment は**たまたま**合っていることが多い (inode は 128B 単�
 - `kernel/kernel.c:271, 384, 597, 608, 617` / `kernel/sys.c:40, 45` /
   `drivers/kbd.c:423, 457, 478` / `drivers/serial.c:182, 207` — `hlt` の直書き
   (アイドル待ち)。`_halt()` を使っていない。
-- `exec/exec.c:1717` — CPL=3 へ iret する直前のインライン asm の中の `cli`
+- `exec/exec.c:1736 (`086bda5` 時点。調査時は 1717)` — CPL=3 へ iret する直前のインライン asm の中の `cli`
   (セグメント復元と iret の間に IRQ を入れないため。x86 の特権復帰そのもの)。
 - `kernel/ring3_entry.asm:47` (`sti`) / `:60-` (出口は IF=0 のまま iretd) —
   POLICY_DEBUG §4-19 の「CPL=3 KAPI は IF=1、出口は IF=0」がここ。
 
 ### 移植時にやること
 
-1. `hlt` の直書き 11 か所を `_halt()` (= HAL の 1 関数) に寄せる。ARM では `wfi`、
+1. `hlt` の直書き 12 か所 (`kernel.c:384` は `cli; hlt`)を `_halt()` (= HAL の 1 関数) に寄せる。ARM では `wfi`、
    RISC-V では `wfi` になる。
 2. `net/link.c:44` の `LINK_IDLE()` は HAL の `hal_wait_irq()` に差し替える (1 行)。
    リンク層の他の行は触らなくてよい。
 3. `irq_save` / `irq_restore` は HAL に移す。AArch64 なら `mrs x,daif` / `msr daif,x`。
    **意味 (ネストしても内側の restore が外側の禁止を壊さない) は同じにする** —
    `net/link.c` の cli 区間の正しさはこの性質に依存している。
-4. 特権復帰 (`exec/exec.c:1717`、`kernel/ring3_entry.asm`) は移植ではなく書き直し。
+4. 特権復帰 (`exec/exec.c:1736 (`086bda5` 時点。調査時は 1717)`、`kernel/ring3_entry.asm`) は移植ではなく書き直し。
 
 ---
 
@@ -358,3 +358,11 @@ wrap を引く)。番地の固定自体は (f) の話。
 `drivers/ne2000.h` の 6 本の API に閉じたことで実際に確かめられている ―
 ホスト試験 `tools/tests/net_link_host.c` が、その 6 本を贋物に差し替えるだけで
 `net/link.c` を **1 行も変えずに** x86-64 Linux 上で走らせている。
+
+## (b) 追記 — 順序 2 で実施 (2026-09-15)
+
+上記「移植時にやること」の 1 と 2 は移植準備の順序 2 として実施した。`hlt` 12 か所を `_halt()` /
+`_stop()` へ、`net/link.c` の `sti;hlt` を **不可分の `_idle()`** へ寄せ、`include/io.h` に各原始命令の
+契約を書いた。`exec/exec.c` の CPL=3 へ降りる asm ブロック内の `cli` は切り出せないので
+`ARCH-ASM-OK` の印を付けて残した (順序 3 で `arch/x86/` へ丸ごと移す)。番人 `tools/check_arch_asm.py`
+(`make check` の `check-arch-asm`) が対象ディレクトリの C ソースに直書きが無いことを検査する。

@@ -1724,7 +1724,14 @@ static int exec_launch(const char *cmdline, int gui_arg)
              * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)。
              * TSS.ESP0 を現在の ESP に設定: CPL=3 実行中の割り込み / int 0x80 の
              * フレームがこの直下に積まれ、setjmp フレームを踏まない。
-             * ここから通常 return しない — 終了は int 0x80 → longjmp。 */
+             * ここから通常 return しない — 終了は int 0x80 → longjmp。
+             *
+             * ARCH-ASM-OK: この cli は io.h の _disable() に分けられない。
+             * cli 〜 iret は「カーネル ESP の記録 → CR3 切替 → セグメント →
+             * フレーム積み → 特権降格」を **一続きに** 行う必要があり、
+             * 途中に割り込みが入ると TSS.ESP0 と実際の CR3 が食い違う。
+             * ブロックごと x86 固有 (iret / USER_CS / EFLAGS 直値) なので、
+             * 順序 3 では arch/x86 側へそのまま移す。 */
             __asm__ volatile(
                 "cli\n\t"
                 "movl %%esp, %[e0]\n\t"     /* TSS.ESP0 = 現在のカーネル ESP */
