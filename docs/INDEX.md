@@ -127,6 +127,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | hsync 改善案 (ユーザー起草、2026-09-14) — H1 / H3 は受入完了、H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
 | [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | H1 **受入完了 (2026-09-15)** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run、理由表示、HostDrv stat の是正。Codex 往復 5 の記録 |
 | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | H3 **受入完了 (2026-09-15)** — HostDrv の FILETIME→mtime、`sys_set_mtime` (KAPI v52)、日時を前置フィルタに (決裁)。`hsync sys` 25.8 s → 0.26 s |
+| [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) | H2 **設計中 (2026-09-16)** — hsync の置換安全化。`O_EXCL` (KAPI v53)、ext2 のファイル置き換えを宛先エントリの inode 書き換えに、一時ファイル `.hs~` → 検証 → rename。決裁 D1〜D3 |
 | [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | B8 **受入完了 (2026-09-15、6 往復)** — 読み取り失敗を不存在・未割当・別の型と読み替えていた ext2/VFS/HostDrv の経路。remount-ro 相当、e2fsck を正解に。残る制限は §2-6 / §2-7 |
 | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
 
