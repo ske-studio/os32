@@ -93,19 +93,32 @@ int ext2_write_inode(Ext2Ctx *ctx, u32 ino, const Ext2Inode *inode)
 /*  ビットマップ管理 — g_aux使用                                            */
 /* ======================================================================== */
 
+/* 戻り値: 正 = 割り当てたブロック番号 / EXT2_ERR_NOSPC = 空きが無い /
+ *         EXT2_ERR_IO = **ビットマップを読めなかった・書けなかった** /
+ *         EXT2_ERR_NOMOUNT (票 B8 往復 6、レビュー非 blocker 2)。
+ *
+ * 以前は失敗をすべて -1 (= EXT2_ERR_IO と同じ値) で返し、呼び手はそれを NOSPC に
+ * 読み替えていた。さらに**ビットマップの読み取り失敗で次のグループへ進んで**
+ * いたので、エラー状態を立てたあと別のグループに割り当てて操作が最後まで走り、
+ * 最後の ext2_sync が IO を返す = **完了しているのに IO** になっていた
+ * (媒体は整合するが、実機の `cp` が失敗と言いつつファイルができている)。
+ * 1 グループの試験ディスクでは見えず、実 NHD (25 グループ) で起きる。
+ *
+ * **読めない / 書けないなら次のグループへ進まず、その場で IO を返す。**
+ * メタデータの I/O エラーでエラー状態に入った以上、操作は完了させない。 */
 int ext2_alloc_block(Ext2Ctx *ctx)
 {
     int ret, byte_idx, bit_idx;
     u32 g, block_num, max_bits;
 
-    if (!ctx->mounted) return -1;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
     /* 全グループを走査して空きブロックを探す */
     for (g = 0; g < ctx->num_groups; g++) {
         if (ctx->gd_table[g].free_blocks == 0) continue;
 
         ret = ext2_read_block(ctx, ctx->gd_table[g].block_bitmap, ext2_g_aux);
-        if (ret != 0) continue;
+        if (ret != 0) return EXT2_ERR_IO;   /* 次のグループへ進まない */
 
         /* 最終グループはブロック数が端数になる場合がある */
         max_bits = ctx->sb_info.blocks_per_group;
@@ -124,10 +137,10 @@ int ext2_alloc_block(Ext2Ctx *ctx)
                     block_num = ctx->sb_info.first_data_block
                                 + g * ctx->sb_info.blocks_per_group
                                 + (u32)(byte_idx * 8 + bit_idx);
-                    if (block_num >= ctx->sb_info.total_blocks) return -1;
+                    if (block_num >= ctx->sb_info.total_blocks) return EXT2_ERR_NOSPC;
                     ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
                     ret = ext2_write_block(ctx, ctx->gd_table[g].block_bitmap, ext2_g_aux);
-                    if (ret != 0) return -1;
+                    if (ret != 0) return EXT2_ERR_IO;
                     ctx->gd_table[g].free_blocks--;
                     ctx->sb_info.free_blocks_count--;
                     ext2_meta_touch(ctx);
@@ -136,7 +149,7 @@ int ext2_alloc_block(Ext2Ctx *ctx)
             }
         }
     }
-    return -1;
+    return EXT2_ERR_NOSPC;
 }
 
 /* 戻り値 EXT2_OK = 返した / 負値 = **返せなかった** (票 B8 往復 3、Codex P1-B)。
@@ -186,19 +199,21 @@ int ext2_free_block(Ext2Ctx *ctx, u32 block_num)
     return EXT2_OK;
 }
 
+/* 戻り値は ext2_alloc_block と同じ約束 (正 = inode 番号 / NOSPC / IO / NOMOUNT)。
+ * ビットマップを読めなければ次のグループへ進まない (票 B8 往復 6)。 */
 int ext2_alloc_inode(Ext2Ctx *ctx)
 {
     int ret, byte_idx, bit_idx;
     u32 g, ino, max_bits;
 
-    if (!ctx->mounted) return -1;
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
     /* 全グループを走査して空きinodeを探す */
     for (g = 0; g < ctx->num_groups; g++) {
         if (ctx->gd_table[g].free_inodes == 0) continue;
 
         ret = ext2_read_block(ctx, ctx->gd_table[g].inode_bitmap, ext2_g_aux);
-        if (ret != 0) continue;
+        if (ret != 0) return EXT2_ERR_IO;   /* 次のグループへ進まない */
 
         max_bits = ctx->sb_info.inodes_per_group;
 
@@ -209,10 +224,10 @@ int ext2_alloc_inode(Ext2Ctx *ctx)
                 if (!(ext2_g_aux[byte_idx] & (1 << bit_idx))) {
                     ino = g * ctx->sb_info.inodes_per_group
                           + (u32)(byte_idx * 8 + bit_idx) + 1;
-                    if (ino > ctx->sb_info.total_inodes) return -1;
+                    if (ino > ctx->sb_info.total_inodes) return EXT2_ERR_NOSPC;
                     ext2_g_aux[byte_idx] |= (u8)(1 << bit_idx);
                     ret = ext2_write_block(ctx, ctx->gd_table[g].inode_bitmap, ext2_g_aux);
-                    if (ret != 0) return -1;
+                    if (ret != 0) return EXT2_ERR_IO;
                     ctx->gd_table[g].free_inodes--;
                     ctx->sb_info.free_inodes_count--;
                     ext2_meta_touch(ctx);
@@ -221,7 +236,7 @@ int ext2_alloc_inode(Ext2Ctx *ctx)
             }
         }
     }
-    return -1;
+    return EXT2_ERR_NOSPC;
 }
 
 /* ext2_free_block と同じ形 (票 B8 往復 3): 戻り値で返せたかを伝え、
@@ -309,6 +324,9 @@ int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
  *                    その表が媒体上の inode から辿れる (既存ファイル) なら
  *                    **返してはいけない** — 返すと、辿れる表が解放済みの
  *                    ブロックを指す。辿れない (作成中・切り詰め直後) なら返してよい。
+ *                    表を割り当てるビットマップの I/O が落ちた場合もここに入る
+ *                    (往復 6)。実際は何も載っていないが、呼び手は漏れ側に倒れる
+ *                    だけなので区別しない (エラー状態に入っていて e2fsck が回収する)。
  *
  * **新しく割り当てた表は、中身を書き終えてから指させる。**以前は先に
  * inode (メモリ) や二重間接表 (媒体) へポインタを入れてから表を書いており、
@@ -329,7 +347,7 @@ int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block
     if (file_block < EXT2_ADDR_PER_BLOCK) {
         if (inode->block[EXT2_IND_BLOCK] == 0) {
             int ind_blk = ext2_alloc_block(ctx);
-            if (ind_blk < 0) return EXT2_ERR_NOSPC;
+            if (ind_blk < 0) return ind_blk;   /* NOSPC / IO をそのまま (往復 6) */
             /* alloc_block は g_aux を使うので、表はその後で組む */
             ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
             *(u32 *)&ext2_g_aux[file_block * 4] = phys_block;
@@ -358,7 +376,7 @@ int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block
 
         if (inode->block[EXT2_DIND_BLOCK] == 0) {
             int dind_blk = ext2_alloc_block(ctx);
-            if (dind_blk < 0) return EXT2_ERR_NOSPC;
+            if (dind_blk < 0) return dind_blk; /* NOSPC / IO をそのまま (往復 6) */
             ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
             ret = ext2_write_block(ctx, (u32)dind_blk, ext2_g_aux);
             if (ret != 0) {
@@ -376,7 +394,7 @@ int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block
         ind1_block = *(u32 *)&ext2_g_aux[ind1_idx * 4];
         if (ind1_block == 0) {
             int ind_blk = ext2_alloc_block(ctx);      /* g_aux を上書きする */
-            if (ind_blk < 0) return EXT2_ERR_NOSPC;
+            if (ind_blk < 0) return ind_blk;   /* NOSPC / IO をそのまま (往復 6) */
 
             /* 1) 中身を書く (まだ誰も指していない) */
             ext2_mem_zero(ext2_g_blk, EXT2_BLOCK_SIZE);

@@ -34,10 +34,13 @@ e2fsck を当てて出力を「許容 (漏れ側)」「不整合」に分類し 
 import collections
 import os
 import pathlib
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import b8_e2fsck  # noqa: E402
@@ -77,23 +80,99 @@ def find_e2fsck():
     return shutil.which("e2fsck")
 
 
+# ---- 見張り (票 B8 往復 6、レビュー非 blocker 6) --------------------------
+# PM の `make check` で、この試験が 2400 秒の打ち切りまで止まった (原因不明)。
+# 以前は proc.wait() にも `for raw in proc.stdout` にも時間の上限が無かったので、
+# 子 (試験バイナリ) がどこかで止まると make の打ち切りまで誰も気づかなかった。
+# 実測では全体 約 11 秒、子の出力行の間隔は最大でも 1 秒未満 (e2fsck の実行を除く)。
+# 閾値は十分に大きく取り、止まったら**どの像の後で止まったか**を出して失敗させる。
+# 環境変数で縮められる (変異で見張りそのものを試すため)。
+STALL_SEC = float(os.environ.get("B8_STALL_SEC", "180"))      # 子が 1 行も出さない最長
+IMAGE_SEC = float(os.environ.get("B8_IMAGE_SEC", "600"))      # 次の像が来ない最長
+TOTAL_SEC = float(os.environ.get("B8_TOTAL_SEC", "1500"))     # 全体 (make の 2400 秒より前)
+E2FSCK_SEC = float(os.environ.get("B8_E2FSCK_SEC", "120"))    # e2fsck 1 回
+EXIT_SEC = float(os.environ.get("B8_EXIT_SEC", "60"))         # 出力が閉じてから終了まで
+MARKER = "@@E2FSCK "
+
+
+def _pump(stream, q):
+    """子の出力を 1 行ずつ queue へ (主のスレッドが時間の上限つきで待てるように)。"""
+    try:
+        for raw in iter(stream.readline, b""):
+            q.put(raw)
+    finally:
+        q.put(None)
+
+
 def run_with_e2fsck(exe, imgdir, e2fsck):
     """試験バイナリを動かし、@@E2FSCK の行ごとに e2fsck を当てる。"""
-    stats = {"samples": 0, "clean": 0, "allowed": 0, "bad": 0, "mismatch": 0}
+    stats = {"samples": 0, "clean": 0, "allowed": 0, "bad": 0, "mismatch": 0,
+             "stall": 0}
     cats_allowed = collections.OrderedDict()
     cats_bad = collections.OrderedDict()
     mismatches = []
     proc = subprocess.Popen([str(exe), str(imgdir)], cwd=ROOT,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT)
-    for raw in proc.stdout:
+    q = queue.Queue()
+    threading.Thread(target=_pump, args=(proc.stdout, q), daemon=True).start()
+    start = last_image = time.monotonic()
+    last_label = "(まだ像を 1 枚も受け取っていない)"
+    tail = collections.deque(maxlen=15)
+    stalled = None
+    while True:
+        now = time.monotonic()
+        budget = min(STALL_SEC, TOTAL_SEC - (now - start), IMAGE_SEC - (now - last_image))
+        if budget <= 0:
+            stalled = ("全体の上限 %.0f 秒" % TOTAL_SEC if TOTAL_SEC - (now - start) <= 0
+                       else "次の像が %.0f 秒来ない" % IMAGE_SEC)
+            break
+        try:
+            raw = q.get(timeout=budget)
+        except queue.Empty:
+            now = time.monotonic()
+            if TOTAL_SEC - (now - start) <= 0:
+                stalled = "全体の上限 %.0f 秒" % TOTAL_SEC
+            elif IMAGE_SEC - (now - last_image) <= 0:
+                stalled = "次の像が %.0f 秒来ない" % IMAGE_SEC
+            else:
+                stalled = "子が %.0f 秒間 1 行も出力しない" % STALL_SEC
+            break
+        if raw is None:
+            break
         line = raw.decode("utf-8", "replace")
-        if not line.startswith("@@E2FSCK "):
+        # 目印は行頭とは限らない: 手前に改行の無い出力が付くと行頭から外れ、以前は
+        # 目印と気づかずに表示だけして**応答を返さず**、子は stdin で、こちらは
+        # stdout で待ち合って止まる形になり得た。行のどこにあっても拾う。
+        idx = line.find(MARKER)
+        if idx < 0:
             sys.stdout.write(line)
+            tail.append(line)
             continue
-        _, path, media_ok, label = line.rstrip("\n").split(" ", 3)
-        res = subprocess.run([e2fsck, "-fn", path], stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, timeout=120)
+        if idx > 0:
+            sys.stdout.write(line[:idx] + "\n")
+            tail.append(line[:idx] + "\n")
+        parts = line[idx:].rstrip("\n").split(" ", 3)
+        if len(parts) < 3:
+            mismatches.append((line.strip(), "malformed @@E2FSCK line", ""))
+            stats["mismatch"] += 1
+            proc.stdin.write(b"ok\n")
+            proc.stdin.flush()
+            continue
+        path, media_ok = parts[1], parts[2]
+        label = parts[3] if len(parts) > 3 else "(no label)"
+        try:
+            # stdin は必ず /dev/null: 端末を継いだ e2fsck が背景のジョブとして
+            # 読み取りで止まる (SIGTTIN) 余地を残さない
+            res = subprocess.run([e2fsck, "-fn", path], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 timeout=E2FSCK_SEC)
+        except subprocess.TimeoutExpired:
+            stalled = "e2fsck が %.0f 秒で終わらない (像: %s)" % (E2FSCK_SEC, label)
+            last_label = label
+            break
+        last_label = label
+        last_image = time.monotonic()
         out = res.stdout.decode("utf-8", "replace")
         stats["samples"] += 1
         allowed, bad = b8_e2fsck.classify(out, path)
@@ -119,10 +198,40 @@ def run_with_e2fsck(exe, imgdir, e2fsck):
                 stats["mismatch"] += 1
                 mismatches.append((label, "media_ok=%s e2fsck=%s" % (
                     media_ok, "ok" if e2f_ok else "inconsistent"), out))
-        proc.stdin.write(b"ok\n")
-        proc.stdin.flush()
-    proc.stdin.close()
-    rc = proc.wait()
+        try:
+            proc.stdin.write(b"ok\n")
+            proc.stdin.flush()
+        except BrokenPipeError:
+            pass
+
+    if stalled:
+        proc.kill()
+        try:
+            proc.wait(timeout=EXIT_SEC)
+        except subprocess.TimeoutExpired:
+            pass
+        stats["stall"] = 1
+        rc = 1
+        print("E2FSCK STALL: %s — 最後に e2fsck へ渡した像: %s (経過 %.0f 秒、像 %d 枚)"
+              % (stalled, last_label, time.monotonic() - start, stats["samples"]),
+              flush=True)
+        print("E2FSCK STALL: 止まる直前の子の出力:")
+        for l in tail:
+            sys.stdout.write("  | " + l)
+        sys.stdout.flush()
+    else:
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        try:
+            rc = proc.wait(timeout=EXIT_SEC)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stats["stall"] = 1
+            rc = 1
+            print("E2FSCK STALL: 出力が閉じたのに子が %.0f 秒で終わらない — 最後の像: %s"
+                  % (EXIT_SEC, last_label), flush=True)
 
     print("E2FSCK samples=%d clean=%d allowed-only=%d inconsistent=%d mismatch=%d"
           % (stats["samples"], stats["clean"], stats["allowed"], stats["bad"],
@@ -152,7 +261,7 @@ if __name__ == "__main__":
         mismatch = 0
         if e2fsck:
             rc, stats = run_with_e2fsck(exe, tmp, e2fsck)
-            mismatch = stats["mismatch"]
+            mismatch = stats["mismatch"] + stats["stall"]
             if stats["samples"] == 0:
                 print("E2FSCK FAIL: no samples were produced", flush=True)
                 mismatch = 1

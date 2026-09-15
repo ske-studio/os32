@@ -156,6 +156,7 @@ void *memset(void *dst, int val, u32 n) { return kmemset(dst, val, n); }
 /* 票 B8 往復 5: マウント時の警告 / エラー状態の通知が出たかを数える */
 static int g_kp_mount_warn;
 static int g_kp_fs_error;
+static int g_kp_rmdir_refused;     /* 往復 6: 空なのに links > 2 の rmdir を断った */
 static int kp_has(const char *hay, const char *needle)
 {
     u32 i, j;
@@ -171,6 +172,7 @@ void kprintf(u8 attr, const char *fmt, ...)
     if (!fmt) return;
     if (kp_has(fmt, "mounting fs with errors")) g_kp_mount_warn++;
     if (kp_has(fmt, "writes disabled until remount")) g_kp_fs_error++;
+    if (kp_has(fmt, "rmdir refused")) g_kp_rmdir_refused++;
 }
 
 /* ---- kzalloc / kfree: 固定スロットの贋物 (Ext2Ctx 専用) ---- */
@@ -204,12 +206,22 @@ void kfree(void *p)
 /* ======================================================================== */
 
 /* 8MB の ext2。base_lba はパーティションテーブルが空なので
- * ext2_find_partition() のフォールバック (1088) になる。 */
-#define DISK_FS_SECTORS   16384u
-#define DISK_BASE_LBA     1088u
-#define DISK_SECTORS      (DISK_BASE_LBA + DISK_FS_SECTORS)
+ * ext2_find_partition() のフォールバック (1088) になる。
+ *
+ * 票 B8 往復 6: 8MB (8192 ブロック) は **1 グループ**に収まるので、グループを
+ * またぐ割り当て (ext2_alloc_block が次のグループへ進む) が試験から見えなかった。
+ * 実 NHD は 25 グループ。ext2_format はグループの大きさを選べない
+ * (EXT2_BLOCKS_PER_GROUP_MAX = 8192 固定) ので、**ディスクを大きくして**
+ * 複数グループを作る。既定の 8MB はそのまま (既存の掃引の回数・配置を変えない)、
+ * 複数グループの case だけが g_fs_sectors を DISK_GROUPS_FS_SECTORS にする。 */
+#define DISK_FS_SECTORS        16384u
+#define DISK_GROUPS_FS_SECTORS 36000u   /* 18000 ブロック = 3 グループ (8192 / 8192 / 1615) */
+#define DISK_BASE_LBA          1088u
+#define DISK_MAX_SECTORS       (DISK_BASE_LBA + DISK_GROUPS_FS_SECTORS)
+static u32 g_fs_sectors = DISK_FS_SECTORS;
+#define DISK_SECTORS           (DISK_BASE_LBA + g_fs_sectors)
 
-static u8 g_disk[DISK_SECTORS * 512u];
+static u8 g_disk[DISK_MAX_SECTORS * 512u];
 static u32 g_rd_sect;
 static u32 g_wr_sect;
 /* 票 B8 往復 5: スーパーブロックの先頭セクタ (s_state が居る) への書き込み。
@@ -289,7 +301,7 @@ static int sw_hit(int kind)
 #define UNDO_MAX  8192
 static u32 g_undo_lba[UNDO_MAX];
 static u8  g_undo_data[UNDO_MAX * 512u];
-static u8  g_undo_mark[(DISK_SECTORS + 7) / 8];
+static u8  g_undo_mark[(DISK_MAX_SECTORS + 7) / 8];
 static int g_undo_n, g_undo_on, g_undo_overflow;
 
 /* ---- 往復 3: 書き込み先の記録 (空打ちで配置を知る) ---- */
@@ -535,7 +547,7 @@ static void disk_setup(void)
     g_hd0.spt = 17;
     fail_disarm();
 
-    CHECK(ext2_format(0, DISK_FS_SECTORS) == EXT2_OK);
+    CHECK(ext2_format(0, g_fs_sectors) == EXT2_OK);
 
     vfs_tables_reset();
     ext2_init();                               /* 実物の登録 */
@@ -1273,7 +1285,7 @@ static u32 g_dotdot[MR_MAX_INODES + 1];
 static u32 g_mr_owner;           /* 走査中のディレクトリの inode 番号 */
 static u32 g_mr_top;             /* 走査中のディレクトリの「繋がった最後の位置 + 1」 */
 
-static u8 g_refmap[(DISK_FS_SECTORS / 2 + 7) / 8];
+static u8 g_refmap[(DISK_GROUPS_FS_SECTORS / 2 + 7) / 8];
 static MediaReport *g_mr;
 
 static u8 *raw_blk(u32 b) { return g_disk + (g_ec->base_lba + b * 2) * 512u; }
@@ -1473,6 +1485,75 @@ static int media_ok(const MediaReport *r)
            r->dir_multi == 0 && r->dotdot_bad == 0 && r->dir_loop == 0 && r->bad_dir == 0;
 }
 
+/* 票 B8 往復 6: **media_check の直後に呼ぶ**。名前を持たない (孤児の) 生きた
+ * ディレクトリのうち、".." が parent を指すものの数。rmdir のガード
+ * (空なのに links_count > 2 なら断る) が「本当に孤児がいるときだけ」断り、
+ * 「孤児がいるなら必ず断る」ことを、媒体から独立に確かめるために使う。 */
+static int orphan_dotdot_refs(u32 parent)
+{
+    u32 ino;
+    int n = 0;
+    for (ino = 1; ino <= g_ec->sb_info.total_inodes && ino <= MR_MAX_INODES; ino++) {
+        if (ino == EXT2_ROOT_INO) continue;
+        if (!raw_inode_used(ino) || !raw_inode_is_dir(ino)) continue;
+        if (*(const u16 *)(raw_inode(ino) + 26) == 0) continue;   /* links 0 = 手放し済み */
+        if (g_dnames[ino] != 0) continue;                         /* 名前がある */
+        if (g_dotdot[ino] == parent) n++;
+    }
+    return n;
+}
+
+/* ガードの判定を 1 回ぶん記録する。rmdir の直前に media_check 済みであること。
+ *   refused  : この rmdir でガードが断った (kprintf の通知が 1 増えた)
+ *   orphans  : parent を ".." で指す孤児の数
+ *   surplus  : parent の links_count が、媒体上で parent を指す名前 ("." ".." を
+ *              含む) の数より多い (= 多い側に振れている。mkdir が親の links を
+ *              先に上げたところで落ちた、など。e2fsck の「ref count が多い」)
+ * 整合の条件は 2 つ:
+ *   (i)  **健全な** (孤児なし・links が名前の数と一致する) ディレクトリは断らない
+ *   (ii) parent を指す孤児がいるなら、rmdir は成功していない (孤児を置き去りにしない)
+ * 多い側に振れているだけのとき断るのは決裁どおり (安全側) なので、別に数える。 */
+typedef struct {
+    int refused, removed, wrong_refuse, orphan_left;
+    int refused_orphan, refused_surplus_only, healthy_removed;
+} GuardTally;
+
+static void guard_note(GuardTally *g, int rc, int refused, int orphans, int surplus)
+{
+    if (refused) {
+        g->refused++;
+        if (orphans > 0) g->refused_orphan++;
+        else if (surplus) g->refused_surplus_only++;
+        else g->wrong_refuse++;
+    }
+    if (rc == EXT2_OK) {
+        g->removed++;
+        if (orphans == 0 && !surplus) g->healthy_removed++;
+    }
+    if (orphans > 0 && rc == EXT2_OK) g->orphan_left++;
+}
+
+/* 親 top の中の name (空であることが期待される親) を rmdir し、同じ名前で
+ * mkdir し直す。レビュアーの反例 (往復 6) の後続操作そのもの: 返した inode 番号を
+ * mkdir が受け取ると、孤児の ".." が無関係な生きたディレクトリを指す。 */
+static void followup_rmdir_mkdir(GuardTally *g, u32 top, const char *name)
+{
+    MediaReport pre;
+    u32 par = 0;
+    u8 t = 0;
+    int k0, rc, orphans = 0, surplus = 0;
+
+    if (ext2_find_entry(g_ec, top, name, &par, &t) == EXT2_OK && par <= MR_MAX_INODES) {
+        media_check(&pre);
+        orphans = orphan_dotdot_refs(par);
+        surplus = (*(const u16 *)(raw_inode(par) + 26) > g_names[par]);
+    }
+    k0 = g_kp_rmdir_refused;
+    rc = ext2_rmdir(g_ec, top, name);
+    guard_note(g, rc, g_kp_rmdir_refused != k0, orphans, surplus);
+    (void)ext2_mkdir(g_ec, top, name);
+}
+
 static int leak_delta(const MediaReport *after, const MediaReport *before)
 {
     return (int)after->unref_inuse - (int)before->unref_inuse;
@@ -1569,7 +1650,7 @@ static void e2f_sample(const char *label, const MediaReport *r)
     static char path[512];
     static char ack[8];
     const u8 *src = g_disk + DISK_BASE_LBA * 512u;
-    u32 left = DISK_FS_SECTORS * 512u, i, j;
+    u32 left = g_fs_sectors * 512u, i, j;
     int fd, n;
 
     if (!g_dump_dir) return;
@@ -2171,6 +2252,11 @@ static int op_mkdir(void)
 typedef int (*SweepOp)(void);
 static const char *g_sw_pattern_name = "";
 
+/* 票 B8 往復 6: 失敗の後に**再起動 (再マウント)** して実行する後続操作。
+ * NULL なら従来の掃引。後続操作のガードの判定は g_sw_gt に貯まる。 */
+static SweepOp g_sw_follow;
+static GuardTally g_sw_gt;
+
 /* op を「at 回目のセクタ I/O が落ちる」形で at = 1, 2, ... と全位置で動かす。
  * sticky = 0 (その 1 回だけ) と 1 (そこから先すべて) の両方。1 回ごとに
  *   - 媒体を検査し (相互リンクの前段が 0 か)、漏れを数え、
@@ -2180,15 +2266,18 @@ static int g_sw_pattern_idx;       /* 0 = 番号の模様 (抜き取りを多め
 
 static void sweep(const char *label, SweepOp op, int must_report_leak)
 {
-    MediaReport base, r, first_bad;
-    int sticky, at, rc, fired;
+    MediaReport base, r, first_bad, first_bad_after;
+    int sticky, at, rc, fired, pick;
     int s_leak, s_orphan, s_hole, s_bad;
+    int bad_after = 0, first_bad_after_at = 0, first_bad_after_sticky = 0;
     int runs = 0, bad = 0, first_bad_at = 0, first_bad_sticky = 0;
     int unreported = 0, first_unrep_at = 0, first_unrep_sticky = 0;
     int leak_runs = 0, err_runs = 0, orphan_runs = 0, hole_runs = 0;
     u32 leak_max = 0;
 
     kmemset(&first_bad, 0, sizeof(first_bad));
+    kmemset(&first_bad_after, 0, sizeof(first_bad_after));
+    kmemset(&g_sw_gt, 0, sizeof(g_sw_gt));
     remount_cold();
     media_check(&base);
     CHECK_MEDIA(&base);
@@ -2219,18 +2308,16 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
 
             /* 票 B8 往復 5: e2fsck の抜き取り。番号の模様ではフィボナッチ位置、
              * 両模様で「最初の漏れ / 孤児 / 穴 / 不整合」の回 */
-            {
-                int pick = (g_sw_pattern_idx == 0 && e2f_pick(at));
-                if (!s_leak && r.unref_inuse > base.unref_inuse) { s_leak = 1; pick = 1; }
-                if (!s_orphan && r.links_surplus > base.links_surplus) { s_orphan = 1; pick = 1; }
-                if (!s_hole && r.dir_hole > base.dir_hole) { s_hole = 1; pick = 1; }
-                if (!s_bad && !media_ok(&r)) { s_bad = 1; pick = 1; }
-                if (pick) {
-                    lbl_reset(); lbl_s("SWEEP "); lbl_s(label); lbl_s(" / ");
-                    lbl_s(g_sw_pattern_name); lbl_s(" at="); lbl_i(at);
-                    lbl_s(sticky ? " sticky" : " once");
-                    e2f_sample(g_lbl, &r);
-                }
+            pick = (g_sw_pattern_idx == 0 && e2f_pick(at));
+            if (!s_leak && r.unref_inuse > base.unref_inuse) { s_leak = 1; pick = 1; }
+            if (!s_orphan && r.links_surplus > base.links_surplus) { s_orphan = 1; pick = 1; }
+            if (!s_hole && r.dir_hole > base.dir_hole) { s_hole = 1; pick = 1; }
+            if (!s_bad && !media_ok(&r)) { s_bad = 1; pick = 1; }
+            if (pick) {
+                lbl_reset(); lbl_s("SWEEP "); lbl_s(label); lbl_s(" / ");
+                lbl_s(g_sw_pattern_name); lbl_s(" at="); lbl_i(at);
+                lbl_s(sticky ? " sticky" : " once");
+                e2f_sample(g_lbl, &r);
             }
             if (r.unref_inuse > base.unref_inuse) {
                 u32 d = r.unref_inuse - base.unref_inuse;
@@ -2239,6 +2326,27 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
                 if (must_report_leak && rc >= 0) {
                     if (!unreported) { first_unrep_at = at; first_unrep_sticky = sticky; }
                     unreported++;
+                }
+            }
+
+            /* 票 B8 往復 6: 再起動して後続操作 -> もう一度検査 (+ 同じ回で e2fsck) */
+            if (g_sw_follow) {
+                MediaReport r2;
+                remount_cold();              /* エラー状態はメモリ上だけ = 再起動で解ける */
+                (void)g_sw_follow();
+                media_check(&r2);
+                if (!media_ok(&r2)) {
+                    if (!bad_after) {
+                        first_bad_after = r2; first_bad_after_at = at;
+                        first_bad_after_sticky = sticky;
+                    }
+                    bad_after++;
+                }
+                if (pick || !media_ok(&r2)) {
+                    lbl_reset(); lbl_s("SWEEP "); lbl_s(label); lbl_s(" / ");
+                    lbl_s(g_sw_pattern_name); lbl_s(" after follow-ups at="); lbl_i(at);
+                    lbl_s(sticky ? " sticky" : " once");
+                    e2f_sample(g_lbl, &r2);
                 }
             }
             undo_rollback();
@@ -2274,6 +2382,31 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
     if (unreported) {
         report("      first at="); report_i(first_unrep_at);
         report(first_unrep_sticky ? " (sticky)\n" : " (once)\n");
+    }
+
+    if (g_sw_follow) {
+        report("          follow-ups: inconsistent-after="); report_i(bad_after);
+        report(" parent-removed="); report_i(g_sw_gt.removed);
+        report(" (healthy="); report_i(g_sw_gt.healthy_removed);
+        report(") guard-refused="); report_i(g_sw_gt.refused);
+        report(" (orphan="); report_i(g_sw_gt.refused_orphan);
+        report(" links-surplus-only="); report_i(g_sw_gt.refused_surplus_only);
+        report(") refused-healthy="); report_i(g_sw_gt.wrong_refuse);
+        report(" removed-with-orphan="); report_i(g_sw_gt.orphan_left);
+        report("\n");
+        check_at(bad_after == 0, "sweep: media consistent after reboot + follow-ups", __LINE__);
+        if (bad_after) {
+            report("      first at="); report_i(first_bad_after_at);
+            report(first_bad_after_sticky ? " (sticky) " : " (once) ");
+            report_media(&first_bad_after); report("\n");
+        }
+        check_at(g_sw_gt.wrong_refuse == 0, "sweep: rmdir guard never refuses a healthy directory",
+                 __LINE__);
+        check_at(g_sw_gt.orphan_left == 0, "sweep: rmdir never frees the parent of an orphan",
+                 __LINE__);
+        check_at(orphan_runs == 0 || g_sw_gt.refused_orphan > 0,
+                 "sweep: the rmdir guard is actually exercised by an orphan", __LINE__);
+        check_at(g_sw_gt.healthy_removed > 0, "sweep: a healthy parent is still removed", __LINE__);
     }
 }
 
@@ -2476,6 +2609,66 @@ static void stage_c_sweeps(void)
     g_sw_pattern_name = "ディレクトリ風の模様";
     g_sw_pattern_idx = 1;
     run_all_sweeps();
+
+    disk_teardown();
+}
+
+/* ======================================================================== */
+/*  段 C2 (往復 6): 往復 3/4 の mkdir / rmdir の孤児 -> 再起動 -> 親を rmdir     */
+/*  -> 同じ名前で mkdir                                                     */
+/* ======================================================================== */
+
+/* 段 C の /sw には他の試験用のファイルが並んでいて空にならないので、孤児の親が
+ * **それ以外に何も持たない**木を別に作る (段 C の配置と回数を変えないよう、
+ * ディスクも別)。
+ *   /iso1/par            … mkdir の掃引 (op: mkdir /iso1/par/newdir)
+ *   /iso2/par/rmd        … rmdir の掃引 (op: rmdir /iso2/par/rmd、間接つきの空)
+ * 後続操作 (再起動後): 親 par を rmdir -> 同じ名前で mkdir。 */
+static u32 g_iso1_top, g_iso1_par, g_iso2_top, g_iso2_par;
+
+static int op_mkdir_iso(void) { return ext2_mkdir(g_ec, g_iso1_par, "newdir"); }
+static int op_rmdir_iso(void) { return ext2_rmdir(g_ec, g_iso2_par, "rmd"); }
+static int follow_iso1(void) { followup_rmdir_mkdir(&g_sw_gt, g_iso1_top, "par"); return 0; }
+static int follow_iso2(void) { followup_rmdir_mkdir(&g_sw_gt, g_iso2_top, "par"); return 0; }
+
+static void stage_c2_orphan_parent_sweeps(void)
+{
+    u32 rmd = 0;
+    int f0 = g_failures;
+
+    report("== 段 C2: mkdir / rmdir の孤児 -> 再起動 -> 孤児の親を rmdir -> 同じ名前で mkdir ==\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_vfs_mkdir(g_ec, "/iso1") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/iso1/par") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/iso2") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/iso2/par") == VFS_OK);
+    CHECK(make_empty_ind_dir("/iso2/par/rmd", &rmd));
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/iso1", &g_iso1_top) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/iso1/par", &g_iso1_par) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/iso2", &g_iso2_top) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/iso2/par", &g_iso2_par) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    scribble_free_blocks();
+    g_sw_pattern_name = "番号の模様";
+    g_sw_pattern_idx = 0;
+    g_sw_follow = follow_iso1;
+    sweep("ext2_mkdir -> 再起動 -> 親を rmdir / mkdir", op_mkdir_iso, 1);
+    g_sw_follow = follow_iso2;
+    sweep("ext2_rmdir (間接つき) -> 再起動 -> 親を rmdir / mkdir", op_rmdir_iso, 1);
+
+    scribble_free_blocks_dirlike(g_ec->sb_info.total_inodes);
+    g_sw_pattern_name = "ディレクトリ風の模様";
+    g_sw_pattern_idx = 1;
+    g_sw_follow = follow_iso1;
+    sweep("ext2_mkdir -> 再起動 -> 親を rmdir / mkdir", op_mkdir_iso, 1);
+    g_sw_follow = follow_iso2;
+    sweep("ext2_rmdir (間接つき) -> 再起動 -> 親を rmdir / mkdir", op_rmdir_iso, 1);
+    g_sw_follow = (SweepOp)0;
 
     disk_teardown();
 }
@@ -3230,8 +3423,10 @@ static void case_r5_dir_rename_followups(int cross)
     int runs = 0, two_names = 0, orphan = 0, done_new = 0, kept_old = 0;
     int bad = 0, bad_after = 0, loop_made = 0, no_err_state = 0, not_refused = 0;
     int refused_after_remount = 0, first_bad_at = 0;
+    GuardTally gt;
     u8 t;
 
+    kmemset(&gt, 0, sizeof(gt));
     report(cross ? "  [R5-1] ディレクトリを別の親へ rename -> 全位置で落とす -> 再マウント -> 後続操作\n"
                  : "  [R5-1s] ディレクトリを同じ親の中で rename -> 全位置で落とす -> 再マウント -> 後続操作\n");
     fault_done();
@@ -3318,6 +3513,14 @@ static void case_r5_dir_rename_followups(int cross)
             if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
             rc2 = ext2_unlink(g_ec, sw, "f");
             if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            /* (5) 往復 6 (レビュアーの反例、ユーザー決裁): 後続で新しい親に作った
+             * ものを片付けてから**旧親を rmdir -> 同じ名前で mkdir**。孤児 D の ".."
+             * がまだ旧親を指していれば、旧親を返してその番号を mkdir が受け取った
+             * 時点で ".." が無関係な生きたディレクトリを指す (links 不足)。
+             * 別の親: 旧親 /sw は (2)(4) で空になっている。同じ親: 片付けで空になる。 */
+            (void)ext2_rmdir(g_ec, dst, "fresh");
+            (void)ext2_rmdir(g_ec, dst, "rmd2");
+            followup_rmdir_mkdir(&gt, root, "sw");
 
             media_check(&r2);
             if (!media_ok(&r2)) { bad_after++; if (!first_bad_at) first_bad_at = at; }
@@ -3343,7 +3546,19 @@ static void case_r5_dir_rename_followups(int cross)
     report(" write-not-refused="); report_i(not_refused);
     report(" refused-after-remount="); report_i(refused_after_remount);
     if (first_bad_at) { report(" first-bad-at="); report_i(first_bad_at); }
+    report("\n      old-parent rmdir: removed="); report_i(gt.removed);
+    report(" (healthy="); report_i(gt.healthy_removed);
+    report(") guard-refused="); report_i(gt.refused);
+    report(" (orphan="); report_i(gt.refused_orphan);
+    report(" links-surplus-only="); report_i(gt.refused_surplus_only);
+    report(") refused-healthy="); report_i(gt.wrong_refuse);
+    report(" removed-with-orphan="); report_i(gt.orphan_left);
     report("\n");
+    /* 往復 6: 旧親の rmdir は、孤児がいるときは必ず断り、健全なら必ず通す */
+    CHECK(gt.refused_orphan > 0);       /* 決裁のガードが孤児に対して実際に働いている */
+    CHECK(gt.healthy_removed > 0);      /* 健全な旧親は従来どおり消せる */
+    CHECK(gt.wrong_refuse == 0);        /* 健全なディレクトリを断っていない */
+    CHECK(gt.orphan_left == 0);         /* 孤児の親を返していない */
     CHECK(two_names == 0);
     CHECK(orphan > 0);                  /* 決裁 1 の代償 (孤児) が実際に起きている */
     CHECK(bad == 0);
@@ -3696,6 +3911,405 @@ static void stage_f_round5(void)
     case_r5_bad_rec_len();
 }
 
+/* ======================================================================== */
+/*  段 G: 往復 6 (Fable 5.1 の往復 6 レビュー、Approve + 非 blocker 8 件)     */
+/* ======================================================================== */
+
+/* [R6-GUARD] ユーザー決裁: 空なのに links_count > 2 のディレクトリの rmdir を断る。
+ * 健全なディレクトリ (links == 2) を誤って断らないことを、作り方を変えて押さえる。 */
+static void case_r6_rmdir_guard(void)
+{
+    MediaReport r;
+    Ext2Inode di;
+    u32 root = 0, h = 0, o = 0, x = 0, sdir = 0;
+    int f0 = g_failures, k0, rc;
+
+    report("  [R6-GUARD] 空なのに links_count > 2 の rmdir は断る / 健全なものは通す\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    k0 = g_kp_rmdir_refused;
+
+    /* (a) 健全: 作ってすぐ消す */
+    CHECK(vfs_mkdir("/h") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/h", &h) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, h, &di) == EXT2_OK);
+    CHECK(di.links_count == EXT2_EMPTY_DIR_LINKS);
+    CHECK(vfs_rmdir("/h") == VFS_OK);
+
+    /* (b) 健全: 子を作ってから全部消す (links は 4 -> 2 に戻る) */
+    CHECK(vfs_mkdir("/g") == VFS_OK);
+    CHECK(vfs_mkdir("/g/a") == VFS_OK);
+    CHECK(vfs_mkdir("/g/b") == VFS_OK);
+    CHECK(vfs_rmdir("/g") == VFS_ERR_NOTEMPTY);   /* 名前のある子 = 普通の NOTEMPTY */
+    CHECK(vfs_rmdir("/g/a") == VFS_OK);
+    CHECK(vfs_rmdir("/g/b") == VFS_OK);
+    CHECK(vfs_rmdir("/g") == VFS_OK);
+
+    /* (c) 健全: 子ディレクトリを別の親へ rename で移し終えた旧親 */
+    CHECK(vfs_mkdir("/m") == VFS_OK);
+    CHECK(vfs_mkdir("/m/c") == VFS_OK);
+    CHECK(vfs_rename("/m/c", "/etc/c") == VFS_OK);
+    CHECK(vfs_rmdir("/m") == VFS_OK);
+
+    /* ここまで (健全なディレクトリ 3 通り) でガードは 1 度も働いていない */
+    CHECK(g_kp_rmdir_refused == k0);
+
+    /* (d) 本物の孤児: /o/x を作り、/o の中の名前 "x" だけを消す
+     *     (往復 3/4/5 のどの孤児とも同じ形: x の ".." は /o を指したまま、/o の links は 3) */
+    CHECK(vfs_mkdir("/o") == VFS_OK);
+    CHECK(vfs_mkdir("/o/x") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/o", &o) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/o/x", &x) == EXT2_OK);
+    CHECK(ext2_delete_entry(g_ec, o, "x") == EXT2_OK);
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    CHECK(orphan_dotdot_refs(o) == 1);
+    CHECK(ext2_read_inode(g_ec, o, &di) == EXT2_OK);
+    CHECK(di.links_count == 3);
+    e2f_sample("G R6-GUARD orphan's .. still counted in parent", &r);
+
+    io_reset();
+    rc = ext2_rmdir(g_ec, root, "o");
+    CHECK(rc == EXT2_ERR_NOTEMPTY);
+    CHECK(g_kp_rmdir_refused == k0 + 1);     /* 通知 1 行 */
+    CHECK(g_wr_sect == 0);                   /* 何も書かない */
+    CHECK(!g_ec->fs_error);                  /* エラー状態に入れない */
+    CHECK(raw_inode_used(o) == 1);           /* inode を返していない */
+    memo_cold();
+    CHECK(vfs_rmdir("/o") == VFS_ERR_NOTEMPTY);   /* VFS からも同じ番号 */
+    /* 書き込みは止まっていない (エラー状態ではない) */
+    CHECK(vfs_mkdir("/after") == VFS_OK);
+    /* レビュアーの後続: ここで mkdir しても孤児の ".." は生きた別のディレクトリを指さない */
+    CHECK(ext2_mkdir(g_ec, root, "reuse") == EXT2_OK);
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("G R6-GUARD after refused rmdir + mkdir", &r);
+
+    /* (e) 多い側に振れているだけ (孤児なし、links 3) も断る。決裁どおり安全側 */
+    CHECK(vfs_mkdir("/s") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/s", &sdir) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, sdir, &di) == EXT2_OK);
+    di.links_count = 3;
+    CHECK(ext2_write_inode(g_ec, sdir, &di) == EXT2_OK);
+    k0 = g_kp_rmdir_refused;
+    CHECK(ext2_rmdir(g_ec, root, "s") == EXT2_ERR_NOTEMPTY);
+    CHECK(g_kp_rmdir_refused == k0 + 1);
+    di.links_count = EXT2_EMPTY_DIR_LINKS;
+    CHECK(ext2_write_inode(g_ec, sdir, &di) == EXT2_OK);
+    CHECK(ext2_rmdir(g_ec, root, "s") == EXT2_OK);
+    CHECK(g_kp_rmdir_refused == k0 + 1);
+
+    disk_teardown();
+}
+
+/* [R6-STAGE6] ディレクトリ rename の段 6 (D の ctime) だけが書けなかったとき、
+ * **常に IO** を返す (往復 5 は段 5 の中身次第で OK / IO に分かれていた)。
+ * grow = 1: 段 5 が新しいディレクトリブロックを割り当てる (満杯の親へ移す) */
+static void case_r6_rename_stage6(int grow)
+{
+    static char next_name[256];
+    MediaReport r;
+    Ext2Inode dsti;
+    u32 sw = 0, d = 0, dst = 0, lba, x = 0, size_before = 0;
+    int count, rc, f0 = g_failures;
+    const char *nn;
+    u8 t;
+
+    report(grow ? "  [R6-STAGE6g] rename_dir の段 6 だけが落ちる (段 5 がブロックを割り当てる回) -> IO\n"
+                : "  [R6-STAGE6] rename_dir の段 6 だけが落ちる (段 5 が割り当てない回) -> IO\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+    /* grow: 満杯のディレクトリへ、既存ブロックのスラック (最大 244B) に入らない
+     * 250 文字の名前で移す = 段 5 が必ず新しいブロックを割り当てる */
+    if (grow) {
+        CHECK(make_full_dir("/full", DENT_FULL_IND, &dst, next_name));
+        nn = next_name;
+    } else {
+        CHECK(ext2_lookup(g_ec, "/etc", &dst) == EXT2_OK);
+        nn = "rmd2";
+    }
+    CHECK(ext2_read_inode(g_ec, dst, &dsti) == EXT2_OK);
+    size_before = dsti.size;
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    if (g_failures != f0) { disk_teardown(); return; }
+    lba = lba_of_inode(d);
+
+    /* 空打ち: D の inode ブロックへの書き込み回数を数える。最後の 1 回が段 6 */
+    undo_begin();
+    remount_cold();
+    wfail_arm(lba, 0x7fffffff);
+    rc = ext2_rename(g_ec, sw, "rmd", dst, nn);
+    count = g_wfail_seen;
+    wfail_disarm();
+    CHECK(rc == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, dst, &dsti) == EXT2_OK);
+    if (grow) CHECK(dsti.size > size_before);    /* 段 5 が本当に割り当てた */
+    else CHECK(dsti.size == size_before);         /* 段 5 は割り当てていない */
+    undo_rollback();
+    remount_cold();
+    CHECK(count >= 1);
+
+    wfail_arm(lba, count);
+    rc = ext2_rename(g_ec, sw, "rmd", dst, nn);
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);                    /* 段 5 の中身に関わらず IO */
+    CHECK(g_ec->fs_error);
+    CHECK(ext2_rename(g_ec, sw, "rmd", dst, nn) == EXT2_ERR_ROFS);
+
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    x = 0;
+    CHECK(ext2_find_entry(g_ec, sw, "rmd", &x, &t) == EXT2_ERR_NOTFOUND);
+    x = 0;
+    CHECK(ext2_find_entry(g_ec, dst, nn, &x, &t) == EXT2_OK && x == d);
+    e2f_sample(grow ? "G R6-STAGE6 grow ctime write failed" : "G R6-STAGE6 ctime write failed", &r);
+    /* 再マウント後のやり直しは二重に作らない (旧名が無いので NOTFOUND) */
+    CHECK(ext2_rename(g_ec, sw, "rmd", dst, nn) == EXT2_ERR_NOTFOUND);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+}
+
+/* [R6-USEDDIRS] rmdir が inode を残した (孤児) ときはディレクトリ数を減らさない */
+static void case_r6_rmdir_used_dirs(void)
+{
+    MediaReport r;
+    u32 root = 0, v = 0, grp;
+    u16 before;
+    int rc, f0 = g_failures;
+
+    report("  [R6-USEDDIRS] rmdir が孤児を残したらディレクトリ数を減らさない / 消せたら 1 減らす\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/ud") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/ud", &v) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    CHECK(lba_of_inode(v) != lba_of_inode(root));
+    grp = (v - 1) / g_ec->sb_info.inodes_per_group;
+    before = g_ec->gd_table[grp].used_dirs;
+
+    wfail_arm_always(lba_of_inode(v));           /* links 0 を書けない = 孤児で残す */
+    rc = ext2_rmdir(g_ec, root, "ud");
+    wfail_disarm();
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc < 0);
+    CHECK(g_ec->gd_table[grp].used_dirs == before);
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    CHECK(raw_inode_used(v) == 1);
+    CHECK(g_ec->gd_table[grp].used_dirs == before);
+    e2f_sample("G R6-USEDDIRS orphan kept by rmdir", &r);
+
+    /* 対照: 消せた rmdir は 1 減らし、媒体にも載る */
+    CHECK(vfs_mkdir("/ud2") == VFS_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    before = g_ec->gd_table[grp].used_dirs;
+    CHECK(vfs_rmdir("/ud2") == VFS_OK);
+    CHECK(g_ec->gd_table[grp].used_dirs == (u16)(before - 1));
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(g_ec->gd_table[grp].used_dirs == (u16)(before - 1));
+    disk_teardown();
+}
+
+/* [R6-GROUPS] 複数グループのディスク: ビットマップが読めなければ**次のグループへ
+ * 進まず IO**。以前は別のグループへ割り当てて操作が最後まで走り、最後の sync が
+ * IO を返していた = 完了しているのに IO。 */
+static u8 g_grp_snap[8u * EXT2_BLOCK_SIZE];
+static void grp_snapshot(void)
+{
+    u32 g, n = 0;
+    for (g = 1; g < g_ec->num_groups && g < 4; g++) {
+        kmemcpy(g_grp_snap + n, raw_blk(g_ec->gd_table[g].block_bitmap), EXT2_BLOCK_SIZE);
+        n += EXT2_BLOCK_SIZE;
+        kmemcpy(g_grp_snap + n, raw_blk(g_ec->gd_table[g].inode_bitmap), EXT2_BLOCK_SIZE);
+        n += EXT2_BLOCK_SIZE;
+    }
+}
+static int grp_unchanged(void)
+{
+    u32 g, n = 0, i;
+    for (g = 1; g < g_ec->num_groups && g < 4; g++) {
+        const u8 *bb = raw_blk(g_ec->gd_table[g].block_bitmap);
+        const u8 *ib = raw_blk(g_ec->gd_table[g].inode_bitmap);
+        for (i = 0; i < EXT2_BLOCK_SIZE; i++) if (bb[i] != g_grp_snap[n + i]) return 0;
+        n += EXT2_BLOCK_SIZE;
+        for (i = 0; i < EXT2_BLOCK_SIZE; i++) if (ib[i] != g_grp_snap[n + i]) return 0;
+        n += EXT2_BLOCK_SIZE;
+    }
+    return 1;
+}
+
+static void case_r6_alloc_groups(void)
+{
+    static u8 pat[EXT2_BLOCK_SIZE];
+    MediaReport r;
+    u32 etc = 0, x = 0, bb0, ib0, ng = 0, i, sz = 0, g1_first_blk;
+    int rc, b, ino, f0 = g_failures;
+    u8 t;
+
+    report("  [R6-GROUPS] 複数グループ: ビットマップが読めなければ次のグループへ進まず IO\n");
+    fault_done();
+    disk_teardown();
+    g_fs_sectors = DISK_GROUPS_FS_SECTORS;
+    disk_setup();
+    if (g_failures != f0) goto out;
+    ng = g_ec->num_groups;
+    report("      groups="); report_i((int)ng); report("\n");
+    CHECK(ng >= 3);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    for (i = 0; i < sizeof(pat); i++) pat[i] = (u8)(i * 13 + 5);
+    CHECK(ext2_vfs_write(g_ec, "/etc/app", pat, EXT2_BLOCK_SIZE) == VFS_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    CHECK(g_ec->gd_table[0].free_blocks > 0 && g_ec->gd_table[0].free_inodes > 0);
+    CHECK(g_ec->gd_table[1].free_blocks > 0 && g_ec->gd_table[1].free_inodes > 0);
+    bb0 = g_ec->base_lba + g_ec->gd_table[0].block_bitmap * 2;
+    ib0 = g_ec->base_lba + g_ec->gd_table[0].inode_bitmap * 2;
+    g1_first_blk = g_ec->sb_info.first_data_block + g_ec->sb_info.blocks_per_group;
+    if (g_failures != f0) goto out;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("G R6-GROUPS fresh multi-group format", &r);
+
+    /* (1) グループ 0 のブロックビットマップが読めない: create */
+    remount_cold();
+    grp_snapshot();
+    fail_arm_always(bb0);
+    rc = ext2_create(g_ec, etc, "g1", "x", 1);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(g_ec->fs_error);
+    CHECK(grp_unchanged());                      /* 別のグループに割り当てていない */
+    remount_fresh();
+    if (!g_ec) goto out;
+    CHECK(ext2_find_entry(g_ec, etc, "g1", &x, &t) == EXT2_ERR_NOTFOUND);   /* 完了していない */
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("G R6-GROUPS create, group 0 block bitmap unreadable", &r);
+
+    /* (2) グループ 0 の inode ビットマップが読めない: create */
+    remount_cold();
+    grp_snapshot();
+    fail_arm_always(ib0);
+    rc = ext2_create(g_ec, etc, "g2", "x", 1);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(grp_unchanged());
+    remount_fresh();
+    if (!g_ec) goto out;
+    CHECK(ext2_find_entry(g_ec, etc, "g2", &x, &t) == EXT2_ERR_NOTFOUND);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+
+    /* (3) mkdir (inode ビットマップ) */
+    remount_cold();
+    grp_snapshot();
+    fail_arm_always(ib0);
+    rc = ext2_mkdir(g_ec, etc, "g3");
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(grp_unchanged());
+    remount_fresh();
+    if (!g_ec) goto out;
+    CHECK(ext2_find_entry(g_ec, etc, "g3", &x, &t) == EXT2_ERR_NOTFOUND);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("G R6-GROUPS mkdir, group 0 inode bitmap unreadable", &r);
+
+    /* (4) 追記に新しいブロックが要る (ブロックビットマップ) -> 0 ではなく IO */
+    remount_cold();
+    grp_snapshot();
+    fail_arm_always(bb0);
+    rc = ext2_vfs_write_stream(g_ec, "/etc/app", pat, 10, EXT2_BLOCK_SIZE);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == VFS_ERR_IO);
+    CHECK(grp_unchanged());
+    remount_fresh();
+    if (!g_ec) goto out;
+    CHECK(ext2_vfs_get_size(g_ec, "/etc/app", &sz) == VFS_OK);
+    CHECK(sz == EXT2_BLOCK_SIZE);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+
+    /* (5) 対照: グループ 0 が**満杯**なら従来どおり次のグループへ進む */
+    remount_cold();
+    g_ec->gd_table[0].free_blocks = 0;
+    b = ext2_alloc_block(g_ec);
+    CHECK(b > 0 && (u32)b >= g1_first_blk);
+    if (b > 0) CHECK(ext2_free_block(g_ec, (u32)b) == EXT2_OK);
+    remount_cold();
+    g_ec->gd_table[0].free_inodes = 0;
+    ino = ext2_alloc_inode(g_ec);
+    CHECK(ino > 0 && (u32)ino > g_ec->sb_info.inodes_per_group);
+    if (ino > 0) CHECK(ext2_free_inode(g_ec, (u32)ino) == EXT2_OK);
+    CHECK(!g_ec->fs_error);
+
+    /* (6) NOSPC と IO を区別して返す */
+    remount_cold();
+    for (i = 0; i < ng; i++) { g_ec->gd_table[i].free_blocks = 0; g_ec->gd_table[i].free_inodes = 0; }
+    CHECK(ext2_alloc_block(g_ec) == EXT2_ERR_NOSPC);
+    CHECK(ext2_alloc_inode(g_ec) == EXT2_ERR_NOSPC);
+    CHECK(!g_ec->fs_error);
+    remount_cold();
+    fail_arm_always(bb0);
+    CHECK(ext2_alloc_block(g_ec) == EXT2_ERR_IO);
+    fail_disarm();
+    remount_cold();
+    fail_arm_always(ib0);
+    CHECK(ext2_alloc_inode(g_ec) == EXT2_ERR_IO);
+    fail_disarm();
+    remount_fresh();
+    if (!g_ec) goto out;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("G R6-GROUPS after all scenarios", &r);
+
+out:
+    fail_disarm();
+    disk_teardown();
+    g_fs_sectors = DISK_FS_SECTORS;
+}
+
+static void stage_g_round6(void)
+{
+    report("== 段 G: 往復 6 (rmdir のガード / 複数グループの割り当て / rename 段 6 / used_dirs) ==\n");
+    case_r6_rmdir_guard();
+    case_r6_rename_stage6(0);
+    case_r6_rename_stage6(1);
+    case_r6_rmdir_used_dirs();
+    case_r6_alloc_groups();
+    stage_c2_orphan_parent_sweeps();
+}
+
 static void stage_a(void)
 {
     report("== 段 A: 実物の ext2 (RAM ディスク) + 実物の vfs_open ==\n");
@@ -3752,6 +4366,9 @@ static void stage_a(void)
 
     /* 段 F: 往復 5 */
     stage_f_round5();
+
+    /* 段 G: 往復 6 */
+    stage_g_round6();
 }
 
 /* ======================================================================== */

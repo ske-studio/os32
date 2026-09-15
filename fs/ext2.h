@@ -152,6 +152,11 @@ typedef struct {
  * なら断る (票 B8 往復 5、レビュー非 blocker)。 */
 #define EXT2_LINK_MAX         32000
 
+/* 空のディレクトリの links_count ("." と、親の中の名前の 2 本)。
+ * 空なのにこれより多いなら、名前を持たない子 (孤児) の ".." がまだ数えられて
+ * いる — rmdir はその inode を返さない (票 B8 往復 6、ユーザー決裁)。 */
+#define EXT2_EMPTY_DIR_LINKS  2
+
 /* rename の循環検査で ".." を辿る上限 (壊れた FS でのループ防止) */
 #define EXT2_RENAME_MAX_DEPTH 64
 

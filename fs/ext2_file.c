@@ -151,7 +151,7 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
     }
 
     new_ino = ext2_alloc_inode(ctx);
-    if (new_ino < 0) return EXT2_ERR_NOSPC;
+    if (new_ino < 0) return new_ino;       /* NOSPC / IO をそのまま (往復 6) */
 
     now = ext2_current_time();
     ext2_mem_zero(&inode, sizeof(inode));
@@ -168,7 +168,7 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
         int blk = ext2_alloc_block(ctx);
         if (blk < 0) {
             if (ext2_create_abort_unwritten(ctx, (u32)new_ino, &inode) != 0) { /* 漏れ */ }
-            return EXT2_ERR_NOSPC;
+            return blk;                    /* NOSPC / IO をそのまま (往復 6) */
         }
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
@@ -267,7 +267,7 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
      * 新しいブロックと表はメモリ上の inode からしか辿れないので返してよい。 */
     for (bi = 0; bi < blocks_needed; bi++) {
         int blk = ext2_alloc_block(ctx);
-        if (blk < 0) { ret = EXT2_ERR_NOSPC; goto fail; }
+        if (blk < 0) { ret = blk; goto fail; }   /* NOSPC / IO をそのまま (往復 6) */
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
         if (ret != 0) {
@@ -347,6 +347,9 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
             if (new_blk < 0) {
                 kprintf(0x0C, "[E2W] alloc FAIL bi=%d rem=%d\n",
                         (int)bi, (int)remaining);
+                /* 満杯なら従来どおり短い書き込み。ビットマップの I/O エラーは
+                 * 1 バイトも書けていなければ 0 ではなく IO にする (往復 6) */
+                if (new_blk != EXT2_ERR_NOSPC) io_err = 1;
                 break;
             }
             ret = ext2_bmap_set(ctx, &inode, bi, (u32)new_blk);

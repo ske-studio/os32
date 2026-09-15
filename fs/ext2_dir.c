@@ -1,4 +1,5 @@
 #include "ext2_priv.h"
+#include "kprintf.h"
 
 /*  ディレクトリ操作 — g_aux使用                                            */
 /* ======================================================================== */
@@ -239,7 +240,7 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
     {
         int new_blk = ext2_alloc_block(ctx);
         u32 new_size;
-        if (new_blk < 0) return EXT2_ERR_NOSPC;
+        if (new_blk < 0) return new_blk;   /* NOSPC / IO をそのまま (往復 6) */
 
         /* alloc_block が g_aux を使った後で組む。bmap_set も g_aux を潰すので
          * 中身はその前に書き終える (gotcha §4-24) */
@@ -378,11 +379,11 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     if (parent_inode.links_count >= EXT2_LINK_MAX) return EXT2_ERR_MLINK;
 
     new_ino = ext2_alloc_inode(ctx);
-    if (new_ino < 0) return EXT2_ERR_NOSPC;
+    if (new_ino < 0) return new_ino;       /* NOSPC / IO をそのまま (往復 6) */
     new_blk = ext2_alloc_block(ctx);
     if (new_blk < 0) {
         if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
-        return EXT2_ERR_NOSPC;
+        return new_blk;
     }
 
     /* 親の links_count を**先に**上げる (票 B8 往復 4)。新しいディレクトリの
@@ -516,6 +517,7 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     Ext2Inode inode, parent_inode;
     int ret;
     int free_ret = EXT2_OK;
+    int dropped = 0;                  /* inode を手放せた (links 0 を書けた) */
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
@@ -530,6 +532,27 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
+
+    /* **空なのに links_count > 2 なら返さない** (票 B8 往復 6、ユーザー決裁)。
+     *
+     * 空のディレクトリの links は "." と親の中の名前の 2 本。それより多いのは、
+     * 名前を持たない子 (孤児) の ".." がまだこの inode を指して数えられている
+     * ときだけ — 孤児は決裁 1 のディレクトリ rename の途中や、往復 3/4 の
+     * mkdir / rmdir の途中で落ちるとできる。ここで inode を返すと、孤児の ".."
+     * が解放済み inode を指し、次の mkdir がその番号を受け取った時点で孤児の
+     * ".." が無関係な生きたディレクトリを指す (links 不足 / dangling)。
+     *
+     * 整合した媒体では「空なのに links > 2」は起きないので、健全なディレクトリを
+     * 断ることは無い。**エラー状態には入れない** — I/O エラーではなく、漏れ側の
+     * 無害な不整合 (孤児が 1 本残っている) で、全書き込みを止めるほどではない。
+     * 返すのは NOTEMPTY: 名前では見えないが、まだ子 (孤児) がこのディレクトリを
+     * 親として参照している、という意味で最も近い。 */
+    if (inode.links_count > EXT2_EMPTY_DIR_LINKS) {
+        kprintf(0x0E, "[EXT2] rmdir refused: empty directory inode %d still has "
+                      "links_count %d (orphaned subdirectory), run e2fsck\n",
+                (int)ino, (int)inode.links_count);
+        return EXT2_ERR_NOTEMPTY;
+    }
 
     ret = ext2_delete_entry(ctx, parent_ino, name);
     if (ret != 0) return ret;
@@ -551,6 +574,7 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
         if (ret != 0) {
             free_ret = ret;
         } else {
+            dropped = 1;
             free_ret = ext2_free_inode(ctx, ino);
             if (leaked) free_ret = EXT2_ERR_IO;
 
@@ -565,7 +589,10 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
         }
     }
 
-    {
+    /* ディレクトリ数を減らすのは **inode を手放したとき (links 0 を書けた) だけ**
+     * (票 B8 往復 6、レビュー非 blocker 4)。書けずに孤児として残したディレクトリは
+     * まだディレクトリとして在るので数えたままにする。 */
+    if (dropped) {
         u32 dir_group = (ino - 1) / ctx->sb_info.inodes_per_group;
         if (dir_group < ctx->num_groups) {
             ctx->gd_table[dir_group].used_dirs--;
@@ -693,7 +720,11 @@ static int ext2_is_self_or_descendant(Ext2Ctx *ctx, u32 ino, u32 new_dir)
  *    (b) ディレクトリ inode を指す "." ".." 以外の名前は 1 つ以下
  *    (c) ".." を新しい親へ向ける前に新しい親の links を上げ、
  *        旧親の links は ".." が離れた後で下げる
- *    (孤児の ".." が旧親を指したまま残るのは許容 — e2fsck が直す)
+ *    (a)-(c) は **rename の各段が書き終えた媒体について**成り立つ。
+ *    孤児の ".." は旧親 (または新親) の links に数えられたまま残り、それ自体は
+ *    漏れ側 (e2fsck が直す) だが、**その親が rmdir で解放され番号が再利用される
+ *    と** ".." が dangling / 無関係な生きたディレクトリを指す。これは ext2_rmdir の
+ *    ガード (空なのに links_count > 2 なら inode を返さない、票 B8 往復 6) が防ぐ。
  *
  *  段と、その段で落ちたときの媒体 (別の親へ移すとき。同じ親なら 2〜4 が無い):
  *    0. 新しい親の links が上限でないか読む        … 何も書いていない
@@ -705,8 +736,8 @@ static int ext2_is_self_or_descendant(Ext2Ctx *ctx, u32 ino, u32 new_dir)
  *    4. 旧親の links -1                              … 孤児。旧親の links は元か -1
  *    5. 新名を載せる (ext2_add_entry)                … 名前 0 (孤児) か 1 (完了)。
  *                                                     NOSPC なら巻き戻す (下)
- *    6. D の ctime                                  … 完了済み。失敗はエラー状態
- *                                                     を立てるが OK を返す
+ *    6. D の ctime                                  … 名前は完成。失敗はエラー状態
+ *                                                     を立てて **IO を返す** (下)
  *  D 自身の links_count は動かさない (名前は 1 -> 0 -> 1 で、多い側にしか振れない)。
  *
  *  NOSPC の巻き戻し (新名はどこにも載っていない): 旧親の links +1 -> ".." を
@@ -774,12 +805,21 @@ static int ext2_rename_dir(Ext2Ctx *ctx, u32 ino, u32 old_dir, const char *old_n
     }
     if (ret != 0) return ret;
 
-    /* 6 — 名前は完成している。失敗は ext2_write_block がエラー状態にするが、
-     * 「rename できなかった」とは言わない (言うと呼び手はやり直そうとする) */
-    if (ext2_read_inode(ctx, ino, &dinode) == 0) {
+    /* 6 — 名前は完成している。**ctime を書けなければ IO を返す**
+     * (票 B8 往復 6、レビュー非 blocker 3)。
+     *
+     * 往復 5 は「完了しているので OK」としていたが、段 5 で新しいディレクトリ
+     * ブロックを割り当てた回は、エラー状態の ext2_sync が `meta_dirty` を見て
+     * IO を返すので、実際には OK / IO が段 5 の中身次第で分かれていた。
+     * 往復 3 で決めた「漏れや未永続を成功と言わない」契約に揃えて**常に IO**。
+     * 呼び手がやり直しても二重には作れない: このセッションはエラー状態が
+     * 入口で ROFS を返し、再マウント後は旧名がもう無いので NOTFOUND になる。 */
+    ret = ext2_read_inode(ctx, ino, &dinode);
+    if (ret == 0) {
         dinode.ctime = ext2_current_time();
-        if (ext2_write_inode(ctx, ino, &dinode) != 0) { /* ctime だけ古い */ }
+        ret = ext2_write_inode(ctx, ino, &dinode);
     }
+    if (ret != 0) return EXT2_ERR_IO;
 
     return ext2_sync(ctx);
 }
