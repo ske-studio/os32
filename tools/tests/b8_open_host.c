@@ -1158,14 +1158,33 @@ static int block_in_use(u32 blk)
  *   unref_inuse … ビットマップ上は使用中だが誰も指さないブロック
  *                 (メタデータ + **漏れ**。操作前との差を漏れとして数える)
  *
- * 前の 4 つが 0 であることを「整合している」と言う。**漏れは許容して数える。** */
+ * 往復 4 で足した (レビューの盲点 (a)(b)):
+ *   links_short   … その inode を指す名前の数 > links_count
+ *                   = **片方の unlink で残りの名前が解放済み inode を指す** (不整合)
+ *   links_surplus … 名前の数 < links_count (孤児側。許容して数える)
+ *   dir_overrun   … ディレクトリの size より先のブロックが繋がっている (不整合。
+ *                   bmap で走査する find_entry / list_dir には見え、size で見る
+ *                   道具には見えない — X1 では size=13312 のまま 14 本繋がった)
+ *   dir_hole      … size の内側の末尾が繋がっていない (許容して数える。
+ *                   ext2_add_entry が size を先に伸ばしてから繋ぐため)
+ *
+ * freed_ref / dup_ref / bad_ref / dangling / links_short / dir_overrun が 0 で
+ * あることを「整合している」と言う。**漏れと孤児は許容して数える。** */
 typedef struct {
     u32 freed_ref;
     u32 dup_ref;
     u32 bad_ref;
     u32 dangling;
     u32 unref_inuse;
+    u32 links_short;
+    u32 links_surplus;
+    u32 dir_overrun;
+    u32 dir_hole;
 } MediaReport;
+
+#define MR_MAX_INODES  8192
+static u16 g_names[MR_MAX_INODES + 1];
+static u32 g_mr_top;             /* 走査中のディレクトリの「繋がった最後の位置 + 1」 */
 
 static u8 g_refmap[(DISK_FS_SECTORS / 2 + 7) / 8];
 static MediaReport *g_mr;
@@ -1223,13 +1242,16 @@ static void mr_dir_block(u32 b)
         if (rl < 8 || pos + rl > EXT2_BLOCK_SIZE) break;
         if (ino != 0 && (ino > g_ec->sb_info.total_inodes || !raw_inode_used(ino)))
             g_mr->dangling++;
+        if (ino != 0 && ino <= g_ec->sb_info.total_inodes && ino <= MR_MAX_INODES)
+            g_names[ino]++;
         pos += rl;
     }
 }
 
-static void mr_leaf(u32 b, int is_dir)
+static void mr_leaf(u32 b, int is_dir, u32 fidx)
 {
     if (mr_ref(b) && is_dir) mr_dir_block(b);
+    if (fidx + 1 > g_mr_top) g_mr_top = fidx + 1;
 }
 
 static void mr_walk_inode(u32 ino)
@@ -1241,14 +1263,15 @@ static void mr_walk_inode(u32 ino)
     u32 j, k;
     int i;
 
+    g_mr_top = 0;
     for (i = 0; i < EXT2_N_BLOCKS; i++) blk[i] = *(const u32 *)(in + 40 + i * 4);
-    for (i = 0; i < EXT2_NDIR_BLOCKS; i++) if (blk[i]) mr_leaf(blk[i], is_dir);
+    for (i = 0; i < EXT2_NDIR_BLOCKS; i++) if (blk[i]) mr_leaf(blk[i], is_dir, (u32)i);
 
     if (blk[EXT2_IND_BLOCK] && mr_ref(blk[EXT2_IND_BLOCK])) {
         const u8 *t = raw_blk(blk[EXT2_IND_BLOCK]);
         for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
             u32 e = *(const u32 *)(t + j * 4);
-            if (e) mr_leaf(e, is_dir);
+            if (e) mr_leaf(e, is_dir, EXT2_NDIR_BLOCKS + j);
         }
     }
     if (blk[EXT2_DIND_BLOCK] && mr_ref(blk[EXT2_DIND_BLOCK])) {
@@ -1259,12 +1282,20 @@ static void mr_walk_inode(u32 ino)
                 const u8 *t2 = raw_blk(ind1);
                 for (k = 0; k < EXT2_ADDR_PER_BLOCK; k++) {
                     u32 e = *(const u32 *)(t2 + k * 4);
-                    if (e) mr_leaf(e, is_dir);
+                    if (e) mr_leaf(e, is_dir,
+                                   EXT2_NDIR_BLOCKS + EXT2_ADDR_PER_BLOCK
+                                   + j * EXT2_ADDR_PER_BLOCK + k);
                 }
             }
         }
     }
     if (blk[EXT2_TIND_BLOCK]) (void)mr_ref(blk[EXT2_TIND_BLOCK]);
+
+    if (is_dir) {
+        u32 size_blocks = *(const u32 *)(in + 4) / EXT2_BLOCK_SIZE;
+        if (g_mr_top > size_blocks) g_mr->dir_overrun++;
+        else if (g_mr_top < size_blocks) g_mr->dir_hole++;
+    }
 }
 
 static void media_check(MediaReport *r)
@@ -1272,9 +1303,23 @@ static void media_check(MediaReport *r)
     u32 ino, b;
     kmemset(r, 0, sizeof(*r));
     kmemset(g_refmap, 0, sizeof(g_refmap));
+    kmemset(g_names, 0, sizeof(g_names));
     g_mr = r;
+    if (g_ec->sb_info.total_inodes > MR_MAX_INODES) {
+        report("  (harness) too many inodes for media_check\n");
+        g_failures++;
+        return;
+    }
     for (ino = 1; ino <= g_ec->sb_info.total_inodes; ino++) {
         if (raw_inode_used(ino)) mr_walk_inode(ino);
+    }
+    /* (a) 名前の数と links_count */
+    for (ino = 1; ino <= g_ec->sb_info.total_inodes; ino++) {
+        u16 links;
+        if (!raw_inode_used(ino)) continue;
+        links = *(const u16 *)(raw_inode(ino) + 26);
+        if (g_names[ino] > links) r->links_short++;
+        else if (g_names[ino] < links) r->links_surplus++;
     }
     for (b = g_ec->sb_info.first_data_block; b < g_ec->sb_info.total_blocks; b++) {
         if (raw_block_used(b) && !(g_refmap[b / 8] & (1 << (b % 8)))) r->unref_inuse++;
@@ -1283,7 +1328,8 @@ static void media_check(MediaReport *r)
 
 static int media_ok(const MediaReport *r)
 {
-    return r->freed_ref == 0 && r->dup_ref == 0 && r->bad_ref == 0 && r->dangling == 0;
+    return r->freed_ref == 0 && r->dup_ref == 0 && r->bad_ref == 0 && r->dangling == 0 &&
+           r->links_short == 0 && r->dir_overrun == 0;
 }
 
 static int leak_delta(const MediaReport *after, const MediaReport *before)
@@ -1298,11 +1344,15 @@ static void report_media(const MediaReport *r)
     report(" bad_ref="); report_i((int)r->bad_ref);
     report(" dangling="); report_i((int)r->dangling);
     report(" unref_inuse="); report_i((int)r->unref_inuse);
+    report(" links_short="); report_i((int)r->links_short);
+    report(" links_surplus="); report_i((int)r->links_surplus);
+    report(" dir_overrun="); report_i((int)r->dir_overrun);
+    report(" dir_hole="); report_i((int)r->dir_hole);
 }
 
 static void check_media_at(const MediaReport *r, int line)
 {
-    check_at(media_ok(r), "media consistent (freed_ref / dup_ref / bad_ref / dangling == 0)",
+    check_at(media_ok(r), "media consistent (freed/dup/bad/dangling/links_short/dir_overrun == 0)",
              line);
     if (!media_ok(r)) { report("      "); report_media(r); report("\n"); }
 }
@@ -1845,6 +1895,7 @@ static int op_mkdir(void)
 { return ext2_mkdir(g_ec, g_sw_dir, "newdir"); }
 
 typedef int (*SweepOp)(void);
+static const char *g_sw_pattern_name = "";
 
 /* op を「at 回目のセクタ I/O が落ちる」形で at = 1, 2, ... と全位置で動かす。
  * sticky = 0 (その 1 回だけ) と 1 (そこから先すべて) の両方。1 回ごとに
@@ -1857,7 +1908,7 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
     int sticky, at, rc, fired;
     int runs = 0, bad = 0, first_bad_at = 0, first_bad_sticky = 0;
     int unreported = 0, first_unrep_at = 0, first_unrep_sticky = 0;
-    int leak_runs = 0, err_runs = 0;
+    int leak_runs = 0, err_runs = 0, orphan_runs = 0, hole_runs = 0;
     u32 leak_max = 0;
 
     kmemset(&first_bad, 0, sizeof(first_bad));
@@ -1885,6 +1936,8 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
                 bad++;
             }
             if (rc < 0) err_runs++;
+            if (r.links_surplus > base.links_surplus) orphan_runs++;
+            if (r.dir_hole > base.dir_hole) hole_runs++;
             if (r.unref_inuse > base.unref_inuse) {
                 u32 d = r.unref_inuse - base.unref_inuse;
                 leak_runs++;
@@ -1906,11 +1959,13 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
     }
     remount_cold();
 
-    report("  [SWEEP] "); report(label);
+    report("  [SWEEP] "); report(label); report(" / "); report(g_sw_pattern_name);
     report("\n          runs="); report_i(runs);
     report(" error-runs="); report_i(err_runs);
     report(" leak-runs="); report_i(leak_runs);
     report(" max-leak="); report_i((int)leak_max);
+    report(" orphan-runs="); report_i(orphan_runs);
+    report(" hole-runs="); report_i(hole_runs);
     report(" inconsistent="); report_i(bad);
     report(" unreported-leak="); report_i(unreported);
     report("\n");
@@ -1982,6 +2037,114 @@ static void scribble_free_blocks(void)
     }
 }
 
+/* (c) ディレクトリ風のゴミ (レビューの盲点)。空きブロックを「削除済み
+ * ディレクトリのブロック」に見える中身で埋める: 先頭に**未使用の inode 番号**を
+ * 持つ有効なエントリ "q"、残りは空エントリ。番号の模様はディレクトリとして読むと
+ * 使用中の inode 番号に当たって dangling にならず、中身を書く前に繋ぐ誤り (X1)
+ * を見逃した。 */
+static void scribble_free_blocks_dirlike(u32 phantom)
+{
+    u32 b;
+    CHECK(raw_inode_used(phantom) == 0);
+    for (b = g_ec->sb_info.first_data_block; b < g_ec->sb_info.total_blocks; b++) {
+        u8 *d;
+        if (raw_block_used(b)) continue;
+        d = raw_blk(b);
+        kmemset(d, 0, EXT2_BLOCK_SIZE);
+        *(u32 *)(d + 0) = phantom;
+        *(u16 *)(d + 4) = 12;
+        d[6] = 1; d[7] = EXT2_FT_REG_FILE; d[8] = 'q';
+        *(u32 *)(d + 12) = 0;
+        *(u16 *)(d + 16) = (u16)(EXT2_BLOCK_SIZE - 12);
+    }
+}
+
+/* ---- 配置 (X2): スラックに消したエントリがある状態で、2 セクタ目に載る追加 ----
+ * ".", ".." (24B) の後に 244 文字の A, B, C (rec 252) を並べると C は 528 =
+ * 2 セクタ目の先頭に載る。C を消し、その inode 番号を別のファイル F が再利用
+ * する。次に同じ長さの D を足すと、B の rec_len (1 セクタ目) を縮める書き込みと
+ * D の中身 (2 セクタ目) が別セクタに載る。
+ * legacy = 1: 往復 4 より前のコードで消した状態 (**スラックに C の inode 番号が
+ * 残っている**) を媒体へ直に書いて作る。既存の NHD にはこの状態が残っている。 */
+#define ST_NAME_LEN  244
+static char g_st_name_d[ST_NAME_LEN + 1];
+
+static void st_name(char *dst, char ch)
+{
+    int i;
+    for (i = 0; i < ST_NAME_LEN; i++) dst[i] = ch;
+    dst[ST_NAME_LEN] = '\0';
+}
+
+static int make_slack_dir(const char *path, const char *fpath, int legacy,
+                          u32 *dino, u32 *c_ino_out)
+{
+    static char n[ST_NAME_LEN + 1];
+    Ext2Inode di;
+    u32 c_ino = 0, f_ino = 0, parent = 0;
+    int k;
+    u8 t = 0;
+
+    if (ext2_vfs_mkdir(g_ec, path) != VFS_OK) return 0;
+    memo_cold();
+    if (ext2_lookup(g_ec, path, dino) != EXT2_OK) return 0;
+    for (k = 0; k < 3; k++) {
+        st_name(n, (char)('A' + k));
+        if (ext2_create(g_ec, *dino, n, "", 0) != EXT2_OK) return 0;
+    }
+    st_name(n, 'C');
+    if (ext2_find_entry(g_ec, *dino, n, &c_ino, &t) != EXT2_OK) return 0;
+    if (ext2_unlink(g_ec, *dino, n) != EXT2_OK) return 0;
+    if (ext2_read_inode(g_ec, *dino, &di) != EXT2_OK) return 0;
+    {
+        u8 *d = raw_blk(di.block[0]);
+        if (*(u16 *)(d + 532) == 0) return 0;          /* C の跡がある */
+        if (legacy) *(u32 *)(d + 528) = c_ino;          /* 旧コードの削除 */
+        /* legacy = 0 のときの「0 になっているか」は呼び手が CHECK で見る
+         * (ここで断ると、0 書きを外した変異が媒体検査の前に止まる) */
+    }
+    if (ext2_vfs_write(g_ec, fpath, "FFFF", 4) != VFS_OK) return 0;
+    memo_cold();
+    if (ext2_lookup(g_ec, fpath, &f_ino) != EXT2_OK) return 0;
+    if (f_ino != c_ino) return 0;                       /* F が C の番号を再利用 */
+    (void)parent;
+    if (c_ino_out) *c_ino_out = c_ino;
+    st_name(g_st_name_d, 'D');
+    return 1;
+}
+
+static u32 g_st_dir, g_st2_dir, g_etc_dir;
+static int op_create_st(void)  { return ext2_create(g_ec, g_st_dir, g_st_name_d, "", 0); }
+static int op_create_st2(void) { return ext2_create(g_ec, g_st2_dir, g_st_name_d, "", 0); }
+static int op_rename_same(void)
+{ return ext2_rename(g_ec, g_sw_dir, "small", g_sw_dir, "moved"); }
+static int op_rename_cross(void)
+{ return ext2_rename(g_ec, g_sw_dir, "small", g_etc_dir, "moved"); }
+static int op_rename_replace(void)
+{ return ext2_rename(g_ec, g_sw_dir, "small", g_sw_dir, "app1"); }
+static int op_rename_dir(void)
+{ return ext2_rename(g_ec, g_sw_dir, "rmd", g_etc_dir, "rmd2"); }
+
+static void run_all_sweeps(void)
+{
+    sweep("ext2_write 上書き (二重間接 -> 単一間接)", op_overwrite_big, 1);
+    sweep("ext2_write 伸長 (4B -> 二重間接)", op_grow, 1);
+    sweep("ext2_create (二重間接まで)", op_create_big, 1);
+    sweep("ext2_unlink (二重間接つき)", op_unlink_big, 1);
+    sweep("ext2_rmdir (間接つきの空ディレクトリ)", op_rmdir, 1);
+    sweep("write_stream 追記 (直接 -> 単一間接)", op_append_ind, 0);
+    sweep("write_stream 追記 (単一間接 -> 二重間接)", op_append_dind, 0);
+    sweep("ext2_create (ディレクトリが単一間接へ伸びる)", op_create_dent, 1);
+    sweep("ext2_create (ディレクトリの既存の単一間接に 1 ブロック足す)", op_create_dent2, 1);
+    sweep("ext2_mkdir", op_mkdir, 1);
+    sweep("ext2_create (スラックに消した跡 / 2 セクタ目に載る)", op_create_st, 1);
+    sweep("ext2_create (旧コードの跡 = inode 番号が残る / 2 セクタ目)", op_create_st2, 1);
+    sweep("ext2_rename (同じディレクトリ)", op_rename_same, 1);
+    sweep("ext2_rename (別のディレクトリへ)", op_rename_cross, 1);
+    sweep("ext2_rename (既存ファイルを置き換える)", op_rename_replace, 1);
+    sweep("ext2_rename (ディレクトリを別の親へ)", op_rename_dir, 1);
+}
+
 static void stage_c_sweeps(void)
 {
     u32 i, rmd = 0;
@@ -2003,22 +2166,266 @@ static void stage_c_sweeps(void)
     CHECK(make_empty_ind_dir("/sw/rmd", &rmd));
     CHECK(make_full_dir("/sw/dent", DENT_FULL, &g_dent_dir, g_dent_name));
     CHECK(make_full_dir("/sw/dent2", DENT_FULL_IND, &g_dent_dir2, g_dent_name2));
+    CHECK(make_slack_dir("/sw/st", "/sw/F", 0, &g_st_dir, (u32 *)0));
+    CHECK(make_slack_dir("/sw/st2", "/sw/F2", 1, &g_st2_dir, (u32 *)0));
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &g_etc_dir) == EXT2_OK);
     if (g_failures != f0) { disk_teardown(); return; }
 
+    /* 同じ操作を 2 種類のゴミの模様で回す (盲点 (c)) */
     scribble_free_blocks();
+    g_sw_pattern_name = "番号の模様";
+    run_all_sweeps();
 
-    sweep("ext2_write 上書き (二重間接 -> 単一間接)", op_overwrite_big, 1);
-    sweep("ext2_write 伸長 (4B -> 二重間接)", op_grow, 1);
-    sweep("ext2_create (二重間接まで)", op_create_big, 1);
-    sweep("ext2_unlink (二重間接つき)", op_unlink_big, 1);
-    sweep("ext2_rmdir (間接つきの空ディレクトリ)", op_rmdir, 1);
-    sweep("write_stream 追記 (直接 -> 単一間接)", op_append_ind, 0);
-    sweep("write_stream 追記 (単一間接 -> 二重間接)", op_append_dind, 0);
-    sweep("ext2_create (ディレクトリが単一間接へ伸びる)", op_create_dent, 1);
-    sweep("ext2_create (ディレクトリの既存の単一間接に 1 ブロック足す)", op_create_dent2, 1);
-    sweep("ext2_mkdir", op_mkdir, 1);
+    scribble_free_blocks_dirlike(g_ec->sb_info.total_inodes);   /* 末尾 = 未使用 */
+    g_sw_pattern_name = "ディレクトリ風の模様";
+    run_all_sweeps();
 
     disk_teardown();
+}
+
+/* ======================================================================== */
+/*  段 E: 往復 3 レビューの反例 (X1 / X2 / X3 / X4) — 往復 4                  */
+/* ======================================================================== */
+
+/* レビュアーが rv_host.c (本ファイルの写し) で実行した反例を、期待値つきで
+ * 本試験へ取り込んだもの。いずれも「解放済み inode を指す名前」が起きること
+ * を**媒体の状態**で見る。1 件ごとに新しいディスクを作る。 */
+
+static int g_q_hits;
+static void q_cb(const Ext2DirEntry *e, void *ctx)
+{
+    (void)ctx;
+    if (e->name_len == 1 && e->name[0] == 'q') g_q_hits++;
+}
+
+/* X1: add_entry が既存の単一間接表へ新ブロックを**中身を書く前に**繋いでいた。
+ * 新ブロックの中身の書き込みが 1 回落ちると、前の持ち主のバイト列 (未使用 inode
+ * を指す "q") がディレクトリとして見え、次に作ったファイルがその inode を受け
+ * 取って q と別名になり、unlink(q) がそのファイルを壊した。 */
+static void case_x1_add_entry_content_before_link(void)
+{
+    MediaReport before, after;
+    Ext2Inode di, di2;
+    u32 d2 = 0, phantom, tmp = 0, b1, b2;
+    int rc, p, q, variant;
+    u8 ftype = 0;
+
+    for (variant = 0; variant < 2; variant++) {
+        int f0 = g_failures;
+        report(variant == 0
+               ? "  [X1] add_entry: 新ブロックの中身の書き込みが落ちる (既存の単一間接へ足す)\n"
+               : "  [X1-link] add_entry: 既存の単一間接表へ繋ぐ書き込みが落ちる\n");
+        disk_setup();
+        if (g_failures != f0) { disk_teardown(); return; }
+        CHECK(make_full_dir("/dent2", DENT_FULL_IND, &d2, g_dent_name2));
+        CHECK(ext2_read_inode(g_ec, d2, &di) == EXT2_OK);
+        CHECK(di.block[EXT2_IND_BLOCK] != 0);
+
+        /* 次に配られる inode: create が 1 つ使うので、その次を phantom にする */
+        p = ext2_alloc_inode(g_ec);
+        q = ext2_alloc_inode(g_ec);
+        CHECK(p > 0 && q > 0);
+        CHECK(ext2_free_inode(g_ec, (u32)q) == EXT2_OK);
+        CHECK(ext2_free_inode(g_ec, (u32)p) == EXT2_OK);
+        phantom = (u32)q;
+
+        /* 次に配られる 2 ブロック: 1 本目はデータ、2 本目がディレクトリの新ブロック */
+        b1 = (u32)ext2_alloc_block(g_ec);
+        b2 = (u32)ext2_alloc_block(g_ec);
+        CHECK(ext2_free_block(g_ec, b2) == EXT2_OK);
+        CHECK(ext2_free_block(g_ec, b1) == EXT2_OK);
+        CHECK(ext2_sync(g_ec) == EXT2_OK);
+        scribble_free_blocks_dirlike(phantom);
+
+        media_check(&before);
+        CHECK_MEDIA(&before);
+
+        if (variant == 0) wfail_arm(g_ec->base_lba + b2 * 2, 1);
+        else              wfail_arm(g_ec->base_lba + di.block[EXT2_IND_BLOCK] * 2 + 1, 1);
+        rc = ext2_create(g_ec, d2, g_dent_name2, "x", 1);
+        wfail_disarm();
+        media_check(&after);
+
+        CHECK(g_wfail_fired == 1);
+        CHECK(rc == EXT2_ERR_IO);
+        CHECK_MEDIA(&after);                         /* 判定の中心 */
+        CHECK(ext2_find_entry(g_ec, d2, "q", &tmp, &ftype) == EXT2_ERR_NOTFOUND);
+        g_q_hits = 0;
+        CHECK(ext2_list_dir(g_ec, d2, q_cb, 0) == EXT2_OK);
+        CHECK(g_q_hits == 0);
+        CHECK(ext2_read_inode(g_ec, d2, &di2) == EXT2_OK);
+        if (variant == 0) {
+            /* 繋いでいない。size も伸ばす前か、伸びても末尾の穴 */
+            CHECK(block_in_use(b2) == 0);            /* 中身が書けなかったので返した */
+        }
+
+        /* 追い打ち (直す前はここで victim が q と別名になった) */
+        CHECK(ext2_create(g_ec, d2, "victim", "V", 1) == EXT2_OK);
+        CHECK(ext2_find_entry(g_ec, d2, "victim", &tmp, &ftype) == EXT2_OK);
+        CHECK(ext2_unlink(g_ec, d2, "q") == EXT2_ERR_NOTFOUND);
+        CHECK(ext2_find_entry(g_ec, d2, "victim", &tmp, &ftype) == EXT2_OK);
+        CHECK(raw_inode_used(tmp) == 1);
+        media_check(&after);
+        CHECK_MEDIA(&after);
+        disk_teardown();
+    }
+}
+
+/* X2: delete_entry の併合が消したエントリの inode 番号をスラックに残し、後の
+ * 追加の部分書き込み (2 セクタ目だけ落ちる) で**消した名前が復活**した。
+ * 復活した名前は、その inode 番号を再利用した別のファイル F を指し、unlink が
+ * F の inode とブロックを返した (F の名前は残る)。
+ *   variant 0: 往復 4 の削除 (スラックの inode 番号は 0) / 2 セクタ目が落ちる
+ *   variant 1: 同上 / 見せる書き込み (rec_len、1 セクタ目) が落ちる
+ *   variant 2: **旧コードの削除の跡** (スラックに inode 番号が残る) / 2 セクタ目
+ *              — 既存の NHD に残っている状態。0 書きに頼らず、追加の順序だけで
+ *              防げていることを見る */
+static void case_x2_slack_resurrection(void)
+{
+    static char nC[ST_NAME_LEN + 1];
+    MediaReport before, after;
+    Ext2Inode di;
+    u32 st = 0, c_ino = 0, f_ino = 0, tmp = 0, lba;
+    int rc, variant;
+    u8 ftype = 0;
+
+    st_name(nC, 'C');
+    for (variant = 0; variant < 3; variant++) {
+        int f0 = g_failures;
+        report(variant == 0 ? "  [X2] スラックに消した跡 / 追加の 2 セクタ目だけ落ちる\n" :
+               variant == 1 ? "  [X2-commit] スラックに消した跡 / 見せる書き込みが落ちる\n" :
+                              "  [X2-legacy] 旧コードの跡 (inode 番号が残る) / 2 セクタ目だけ落ちる\n");
+        disk_setup();
+        if (g_failures != f0) { disk_teardown(); return; }
+        if (!make_slack_dir("/st", "/etc/F", variant == 2, &st, &c_ino)) {
+            report("  (harness) slack dir setup failed\n");
+            g_failures++;
+            disk_teardown();
+            return;
+        }
+        memo_cold();
+        CHECK(ext2_lookup(g_ec, "/etc/F", &f_ino) == EXT2_OK);
+        CHECK(f_ino == c_ino);
+        CHECK(ext2_read_inode(g_ec, st, &di) == EXT2_OK);
+        lba = g_ec->base_lba + di.block[0] * 2;
+        CHECK(*(const u32 *)(raw_blk(di.block[0]) + 528) == (variant == 2 ? c_ino : 0));
+
+        media_check(&before);
+        CHECK_MEDIA(&before);
+        if (variant == 1) wfail_arm(lba, 2);         /* 1 回目 = 中身、2 回目 = rec_len */
+        else              wfail_arm(lba + 1, 1);
+        rc = ext2_create(g_ec, st, g_st_name_d, "", 0);
+        wfail_disarm();
+        media_check(&after);
+
+        CHECK(g_wfail_fired == 1);
+        CHECK(rc == EXT2_ERR_IO);
+        CHECK_MEDIA(&after);                         /* 判定の中心 */
+        CHECK(ext2_find_entry(g_ec, st, nC, &tmp, &ftype) == EXT2_ERR_NOTFOUND);
+
+        /* 追い打ち (直す前はここで F の inode が返された) */
+        CHECK(ext2_unlink(g_ec, st, nC) == EXT2_ERR_NOTFOUND);
+        CHECK(raw_inode_used(f_ino) == 1);
+        memo_cold();
+        CHECK(ext2_lookup(g_ec, "/etc/F", &tmp) == EXT2_OK);
+        /* やり直せば足せる */
+        CHECK(ext2_create(g_ec, st, g_st_name_d, "", 0) == EXT2_OK);
+        media_check(&after);
+        CHECK_MEDIA(&after);
+        disk_teardown();
+    }
+}
+
+/* X3: rename の途中から装置が消える (sticky) と、2 つの名前が links 1 の inode を
+ * 指したまま失敗を返した。復旧後に片方を unlink すると、もう片方が解放済み inode
+ * を指した (レビュー実測: 35 位置中 10 位置、10/10 で dangling)。
+ * 往復 4 は遷移中 links_count を上げるので、2 つの名前が残っても links は 2。 */
+static void case_x3_rename_two_names(void)
+{
+    MediaReport r;
+    u32 sw = 0, i_old, i_new;
+    int at, rc, fired, both = 0, bad = 0, bad_after_unlink = 0;
+    int f0 = g_failures;
+    u8 t;
+
+    report("  [X3] rename sticky -> 2 つの名前 -> 復旧後に片方を unlink\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_vfs_mkdir(g_ec, "/sw") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_vfs_write(g_ec, "/sw/big", "hello", 5) == VFS_OK);
+
+    for (at = 1; at < SWEEP_MAX; at++) {
+        undo_begin();
+        remount_cold();
+        sw_arm(at, 1, SW_KIND_ANY);
+        rc = ext2_rename(g_ec, sw, "big", sw, "moved");
+        (void)rc;
+        fired = g_sw_fired;
+        sw_disarm();
+        media_check(&r);
+        if (!media_ok(&r)) bad++;
+        i_old = 0; i_new = 0;
+        remount_cold();
+        if (ext2_find_entry(g_ec, sw, "big", &i_old, &t) == EXT2_OK &&
+            ext2_find_entry(g_ec, sw, "moved", &i_new, &t) == EXT2_OK && i_old == i_new) {
+            both++;
+            CHECK(ext2_unlink(g_ec, sw, "big") == EXT2_OK);
+            media_check(&r);
+            if (!media_ok(&r)) bad_after_unlink++;
+            CHECK(raw_inode_used(i_new) == 1);       /* moved はまだ生きている */
+        }
+        undo_rollback();
+        if (!fired) break;
+    }
+    report("      at-runs="); report_i(at); report(" two-names-runs="); report_i(both);
+    report(" inconsistent="); report_i(bad);
+    report(" inconsistent-after-unlink="); report_i(bad_after_unlink); report("\n");
+    CHECK(bad == 0);
+    CHECK(bad_after_unlink == 0);
+    remount_cold();
+    disk_teardown();
+}
+
+/* X4: mkdir で add_entry が I/O で落ちる。名前が載ったか区別できないので
+ * 何も触らない (孤児で残す) — 媒体は整合し、親の links は名前の数以上。
+ * NOSPC のときに返すのは段 D の [X4'] で見る。 */
+static void case_x4_mkdir_add_entry_io(void)
+{
+    MediaReport before, after;
+    Ext2Inode ri;
+    u32 root = 0, tmp = 0;
+    int rc, f0 = g_failures;
+    u8 t = 0;
+
+    report("  [X4] mkdir: add_entry が I/O で落ちる -> 何も触らず孤児で残す\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, root, &ri) == EXT2_OK);
+    media_check(&before);
+    fail_arm(g_ec->base_lba + ri.block[0] * 2, 2);   /* 1 回目 = 存在確認、2 回目 = add_entry */
+    rc = ext2_mkdir(g_ec, root, "nd");
+    fail_disarm();
+    media_check(&after);
+    CHECK(g_fail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK_MEDIA(&after);
+    CHECK(leak_delta(&after, &before) == 0);          /* 孤児から辿れる */
+    CHECK(after.links_surplus > before.links_surplus); /* 孤児 (名前 < links) */
+    CHECK(ext2_find_entry(g_ec, root, "nd", &tmp, &t) == EXT2_ERR_NOTFOUND);
+    disk_teardown();
+}
+
+static void stage_e_review_cases(void)
+{
+    report("== 段 E: 往復 3 レビューの反例 ==\n");
+    case_x1_add_entry_content_before_link();
+    case_x2_slack_resurrection();
+    case_x3_rename_two_names();
+    case_x4_mkdir_add_entry_io();
 }
 
 /* ======================================================================== */
@@ -2030,7 +2437,7 @@ static void case_create_add_entry_nospc(void)
 {
     MediaReport before, after;
     u32 dent = 0, tmp = 0, fi_before, bm_lba, guess;
-    int rc, blk, last = -1;
+    int rc, blk, last = -1, prev = -1;
     int f0 = g_failures;
     u8 ftype;
 
@@ -2046,6 +2453,7 @@ static void case_create_add_entry_nospc(void)
     while (g_ec->sb_info.free_blocks_count > 1) {
         blk = ext2_alloc_block(g_ec);
         if (blk < 0) break;
+        prev = last;
         last = blk;
     }
     CHECK(g_ec->sb_info.free_blocks_count == 1);
@@ -2098,6 +2506,26 @@ static void case_create_add_entry_nospc(void)
     CHECK(raw_inode_ptr(guess, 0) != 0);
     CHECK(block_in_use(raw_inode_ptr(guess, 0)) == 1);
     CHECK(leak_delta(&after, &before) == 0);          /* 孤児から辿れる */
+
+    /* (4) mkdir の add_entry が NOSPC (レビュー非 blocker: create と揃えた)。
+     *     参照を外して inode とブロックを返し、親の links_count も戻す */
+    report("  [X4'] mkdir: add_entry が NOSPC -> 参照を外して返し、親の links も戻す\n");
+    CHECK(prev > 0);
+    CHECK(ext2_free_block(g_ec, (u32)prev) == EXT2_OK);   /* 空き 1 = mkdir 自身の分 */
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    fi_before = g_ec->sb_info.free_inodes_count;
+    {
+        u16 links_before = *(const u16 *)(raw_inode(dent) + 26);
+        media_check(&before);
+        rc = ext2_mkdir(g_ec, dent, g_dent_name);
+        media_check(&after);
+        CHECK(rc == EXT2_ERR_NOSPC);
+        CHECK_MEDIA(&after);
+        CHECK(leak_delta(&after, &before) == 0);
+        CHECK(g_ec->sb_info.free_inodes_count == fi_before);
+        CHECK(*(const u16 *)(raw_inode(dent) + 26) == links_before);
+        CHECK(ext2_find_entry(g_ec, dent, g_dent_name, &tmp, &ftype) == EXT2_ERR_NOTFOUND);
+    }
 
     disk_teardown();
 }
@@ -2334,6 +2762,9 @@ static void stage_a(void)
 
     /* 空きを使い切った状態が要るので、別の新しいディスクで */
     case_create_add_entry_nospc();
+
+    /* 段 E: レビュー (往復 3) の反例を本試験に取り込む */
+    stage_e_review_cases();
 }
 
 /* ======================================================================== */

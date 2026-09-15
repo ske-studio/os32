@@ -102,6 +102,31 @@ int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u
     return EXT2_ERR_NOTFOUND;
 }
 
+/* [a, b) のバイト列が 1 セクタに収まるか (= 1 回の書き込みで原子的に届くか) */
+static int ext2_same_sector(u32 a, u32 b)
+{
+    return (a / EXT2_SECTOR_SIZE) == ((b - 1) / EXT2_SECTOR_SIZE);
+}
+
+/* ---- ディレクトリエントリの追加 (票 B8 往復 4) ----------------------------
+ *
+ * 守る不変条件は往復 3 と同じものの inode 側:
+ *
+ *     **媒体上のどの名前も、解放済みの inode や、中身の無いブロックを指さない。**
+ *
+ * 見える状態を変える書き込み (名前が現れる瞬間) を**最後の 1 か所**に寄せ、
+ * その 1 か所が 1 セクタに収まるようにする。それより前の書き込みは、途中で
+ * 落ちても名前として見えない場所 (前のエントリの rec_len の内側 = スラック、
+ * まだ繋いでいないブロック) にだけ書く。
+ *
+ * 直す前:
+ *   X1 新ブロックを既存の単一間接表へ**繋いでから**中身を書いていた。中身の
+ *      書き込みが落ちると、前の持ち主のバイト列がディレクトリとして見える。
+ *   X2 既存ブロックへ足すとき、前のエントリの rec_len を縮める書き込みと
+ *      新しいエントリの書き込みが**別セクタ**に載り得た。後半だけ落ちると
+ *      rec_len は縮んだまま、新エントリの位置にはスラックの古いバイト列
+ *      (以前消したエントリ) が残り、**消した名前が復活**する。
+ * ------------------------------------------------------------------------ */
 int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file_type)
 {
     Ext2Inode dir_inode;
@@ -140,22 +165,53 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
             de_actual = (de_inode != 0) ? (u16)((8 + de_namelen + 3) & ~3) : 0;
 
             if (de_reclen - de_actual >= new_rec_len) {
+                /* 見える状態を変えるフィールド (commit_off, 幅 commit_len) と、
+                 * その前に書いておく新エントリの中身 [body_start, body_end) */
+                u32 npos = pos + de_actual;
+                u32 body_start = npos;
+                u32 body_end = npos + 8 + (u32)name_len;
+                u32 commit_off, commit_len;
+
+                if (de_inode != 0) {
+                    /* 分割: 前のエントリの rec_len を縮めた瞬間に新エントリが見える */
+                    commit_off = pos + 4;
+                    commit_len = 2;
+                } else {
+                    /* 空きエントリの再利用: inode 番号を入れた瞬間に見える */
+                    commit_off = npos;
+                    commit_len = 4;
+                    body_start = npos + 4;
+                }
+
+                /* 1. 中身 (まだ見えない場所) */
+                if (de_inode != 0) {
+                    *(u32 *)&ext2_g_aux[npos]     = ino;
+                    *(u16 *)&ext2_g_aux[npos + 4] = de_reclen - de_actual;
+                } else {
+                    *(u32 *)&ext2_g_aux[npos]     = 0;   /* まだ見せない */
+                }
+                ext2_g_aux[npos + 6] = (u8)name_len;
+                ext2_g_aux[npos + 7] = file_type;
+                ext2_mem_copy(&ext2_g_aux[npos + 8], name, (u32)name_len);
+
+                if (!ext2_same_sector(commit_off < body_start ? commit_off : body_start,
+                                      body_end > commit_off + commit_len
+                                          ? body_end : commit_off + commit_len)) {
+                    /* 中身と見せる瞬間が別セクタに載る: 中身だけ先に書く。
+                     * 落ちても見えない (スラック / inode 0 のまま) */
+                    ret = ext2_write_block(ctx, phys, ext2_g_aux);
+                    if (ret != 0) return EXT2_ERR_IO;
+                }
+
+                /* 2. 見せる (1 セクタに収まるフィールド 1 つ) */
                 if (de_inode != 0) {
                     *(u16 *)&ext2_g_aux[pos + 4] = de_actual;
-                    pos += de_actual;
-                    *(u32 *)&ext2_g_aux[pos]     = ino;
-                    *(u16 *)&ext2_g_aux[pos + 4] = de_reclen - de_actual;
-                    ext2_g_aux[pos + 6] = (u8)name_len;
-                    ext2_g_aux[pos + 7] = file_type;
-                    ext2_mem_copy(&ext2_g_aux[pos + 8], name, (u32)name_len);
                 } else {
-                    *(u32 *)&ext2_g_aux[pos]     = ino;
-                    ext2_g_aux[pos + 6] = (u8)name_len;
-                    ext2_g_aux[pos + 7] = file_type;
-                    ext2_mem_copy(&ext2_g_aux[pos + 8], name, (u32)name_len);
+                    *(u32 *)&ext2_g_aux[npos] = ino;
                 }
                 ret = ext2_write_block(ctx, phys, ext2_g_aux);
                 if (ret != 0) return EXT2_ERR_IO;
+
                 now = ext2_current_time();
                 dir_inode.mtime = now;
                 ext2_write_inode(ctx, dir_ino, &dir_inode);
@@ -166,10 +222,45 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
         }
     }
 
-    /* 新ブロック割り当て */
+    /* 新ブロック割り当て (票 B8 往復 4 で順序を変えた)
+     *   1. 新ブロックの中身を書く     … まだどこからも辿れない。落ちたら返す
+     *   2. ディレクトリの size を伸ばして inode を書く
+     *                                  … まだ繋いでいないので、落ちたら返す。
+     *                                    届いていれば size だけ先に伸びる (末尾の
+     *                                    穴。次の追加がその位置を埋める)
+     *   3. 繋ぐ (ext2_bmap_set)        … 既存の間接表ならここで媒体に載る
+     *   4. inode を書く                … 直接ポインタ / 新しい単一間接表への
+     *                                    ポインタはここで媒体に載る
+     * どの段で落ちても、繋がったブロックは中身が書けていて、size の内側にある。 */
     {
         int new_blk = ext2_alloc_block(ctx);
+        u32 new_size;
         if (new_blk < 0) return EXT2_ERR_NOSPC;
+
+        /* alloc_block が g_aux を使った後で組む。bmap_set も g_aux を潰すので
+         * 中身はその前に書き終える (gotcha §4-24) */
+        ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
+        *(u32 *)&ext2_g_aux[0]     = ino;
+        *(u16 *)&ext2_g_aux[4]     = (u16)EXT2_BLOCK_SIZE;
+        ext2_g_aux[6] = (u8)name_len;
+        ext2_g_aux[7] = file_type;
+        ext2_mem_copy(&ext2_g_aux[8], name, (u32)name_len);
+
+        ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
+        if (ret != 0) {
+            if (ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+            return EXT2_ERR_IO;
+        }
+
+        now = ext2_current_time();
+        new_size = (bi + 1) * EXT2_BLOCK_SIZE;
+        if (dir_inode.size < new_size) dir_inode.size = new_size;
+        dir_inode.mtime = now;
+        ret = ext2_write_inode(ctx, dir_ino, &dir_inode);
+        if (ret != 0) {
+            if (ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+            return EXT2_ERR_IO;
+        }
 
         ret = ext2_bmap_set(ctx, &dir_inode, bi, (u32)new_blk);
         if (ret != 0) {
@@ -181,26 +272,10 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
             return ret;
         }
 
-        ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
-        *(u32 *)&ext2_g_aux[0]     = ino;
-        *(u16 *)&ext2_g_aux[4]     = (u16)EXT2_BLOCK_SIZE;
-        ext2_g_aux[6] = (u8)name_len;
-        ext2_g_aux[7] = file_type;
-        ext2_mem_copy(&ext2_g_aux[8], name, (u32)name_len);
-
-        ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
-        if (ret != 0) return EXT2_ERR_IO;
-
-        now = ext2_current_time();
-        dir_inode.size += EXT2_BLOCK_SIZE;
         dir_inode.blocks += 2;
-        dir_inode.mtime = now;
-        /* 既存ブロックへ足す上の経路 (mtime だけ) と違い、ここは**新しい
-         * ブロックへの参照そのもの** (直接ポインタ、または新しい単一間接表への
-         * ポインタ) をこの inode が運ぶ。書けなければ名前は辿れず、成功と言うと
-         * **ファイルを作ったと答えて名前を失う** (票 B8 往復 3、段 C の掃引で
-         * 発見: create が成功を返し、表と新ブロックが漏れて名前が消えた)。
-         * 書けたか区別できないので、ブロックは返さない (漏れで止める)。 */
+        /* ここは**新しいブロックへの参照そのもの**を運ぶことがある (往復 3、
+         * 段 C の掃引で発見)。書けなければ名前は辿れないかもしれないので
+         * 成功と言わない。書けたか区別できないので、ブロックは返さない。 */
         ret = ext2_write_inode(ctx, dir_ino, &dir_inode);
         if (ret != 0) return EXT2_ERR_IO;
     }
@@ -238,12 +313,19 @@ int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name)
 
             if (de_inode != 0 && de_namelen == (u8)name_len) {
                 if (ext2_str_ncmp(name, (const char *)&ext2_g_aux[pos + 8], name_len) == 0) {
-                    if (pos == prev_pos) {
-                        *(u32 *)&ext2_g_aux[pos] = 0;
-                    } else {
+                    if (pos != prev_pos) {
                         u16 prev_reclen = *(u16 *)&ext2_g_aux[prev_pos + 4];
                         *(u16 *)&ext2_g_aux[prev_pos + 4] = prev_reclen + de_reclen;
                     }
+                    /* 前のエントリへ併合する場合も**消したエントリの inode 番号を
+                     * 0 にする** (票 B8 往復 4 / X2)。以前は rec_len を伸ばすだけで
+                     * バイト列をスラックに残したので、後の追加が部分書き込みで
+                     * 落ちると、そのバイト列が「生きた名前」として復活した
+                     * (その inode 番号が別ファイルに再利用されていれば、そのファイル
+                     * を別名で指し、unlink でファイルを壊す)。
+                     * rec_len と inode 番号が別セクタに載っても、どちらか一方が
+                     * 届けばエントリは見えなくなる。 */
+                    *(u32 *)&ext2_g_aux[pos] = 0;
                     ret = ext2_write_block(ctx, phys, ext2_g_aux);
                     if (ret != 0) return EXT2_ERR_IO;
                     dir_inode.mtime = ext2_current_time();
@@ -291,6 +373,21 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
         return EXT2_ERR_NOSPC;
     }
 
+    /* 親の links_count を**先に**上げる (票 B8 往復 4)。新しいディレクトリの
+     * ".." が媒体に載った時点で親を指す名前が 1 つ増えるので、それより前に
+     * 数を上げておけば、どこで落ちても「名前の数 <= links_count」が保てる
+     * (多い側は孤児・漏れで、e2fsck が直す)。 */
+    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
+    if (ret == 0) {
+        parent_inode.links_count++;
+        ret = ext2_write_inode(ctx, parent_ino, &parent_inode);
+    }
+    if (ret != 0) {
+        if (ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+        if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
+        return EXT2_ERR_IO;
+    }
+
     now = ext2_current_time();
     ext2_mem_zero(&inode, sizeof(inode));
     inode.mode = (u16)(EXT2_S_IFDIR | 0755);
@@ -315,7 +412,8 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 
     ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
     if (ret != 0) {
-        /* inode はまだ書いていないので、new_blk を指すものは媒体に無い */
+        /* inode はまだ書いていないので、new_blk を指すものは媒体に無い。
+         * 親の links は上げたまま (多い側 = 安全側) */
         if (ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
         if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
         return EXT2_ERR_IO;
@@ -326,11 +424,30 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
      * **何も返さない** (書けていれば new_blk を指している。票 B8 往復 3)。 */
     ret = ext2_write_inode(ctx, (u32)new_ino, &inode);
     if (ret != 0) return EXT2_ERR_IO;
-    ret = ext2_add_entry(ctx, parent_ino, name, (u32)new_ino, EXT2_FT_DIR);
-    if (ret != 0) return ret;
 
-    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
-    if (ret == 0) { parent_inode.links_count++; ext2_write_inode(ctx, parent_ino, &parent_inode); }
+    ret = ext2_add_entry(ctx, parent_ino, name, (u32)new_ino, EXT2_FT_DIR);
+    if (ret != 0) {
+        /* ext2_create と揃える (票 B8 往復 4、レビュー非 blocker):
+         * NOSPC なら名前は載っていないので、参照を外してから inode を返す。
+         * それ以外は名前が載ったか区別できないので何も触らない。 */
+        if (ret == EXT2_ERR_NOSPC) {
+            int leaked = 0;
+            inode.links_count = 0;
+            inode.dtime = ext2_current_time();
+            if (ext2_truncate_blocks(ctx, (u32)new_ino, &inode, &leaked) == EXT2_OK) {
+                if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
+                /* ".." はもう辿れないので、親の links を戻してよい */
+                if (ext2_read_inode(ctx, parent_ino, &parent_inode) == 0 &&
+                    parent_inode.links_count > 0) {
+                    parent_inode.links_count--;
+                    if (ext2_write_inode(ctx, parent_ino, &parent_inode) != 0) {
+                        /* 多いまま (安全側) */
+                    }
+                }
+            }
+        }
+        return ret;
+    }
 
     {
         u32 dir_group = ((u32)new_ino - 1) / ctx->sb_info.inodes_per_group;
@@ -409,8 +526,9 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
      *      -> 書けなければ**何も返さない** (孤児として残す)
      *   2. ブロックを返す -> 返しきれなくても漏れで済む
      *   3. inode を返す (もう何も指していない)
-     * 親の links と used_dirs は名前が消えた時点で正しくするので、1 の
-     * 失敗でも下へ進む。 */
+     *   4. 親の links_count を下げる — **1 が成功したときだけ** (票 B8 往復 4)。
+     *      1 が落ちると孤児のディレクトリブロックの ".." が親を指したまま
+     *      なので、先に下げると「親を指す名前の数 > links_count」になる。 */
     {
         int leaked = 0;
         inode.links_count = 0;
@@ -421,14 +539,16 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
         } else {
             free_ret = ext2_free_inode(ctx, ino);
             if (leaked) free_ret = EXT2_ERR_IO;
-        }
-    }
 
-    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
-    if (ret == 0) {
-        if (parent_inode.links_count > 0) parent_inode.links_count--;
-        parent_inode.mtime = ext2_current_time();
-        ext2_write_inode(ctx, parent_ino, &parent_inode);
+            ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
+            if (ret == 0) {
+                if (parent_inode.links_count > 0) parent_inode.links_count--;
+                parent_inode.mtime = ext2_current_time();
+                if (ext2_write_inode(ctx, parent_ino, &parent_inode) != 0) {
+                    /* 多いまま (安全側) */
+                }
+            }
+        }
     }
 
     {
@@ -585,33 +705,98 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
         if (desc) return EXT2_ERR_INVAL;
     }
 
-    ret = ext2_add_entry(ctx, new_dir, new_name, ino, ftype);
-    if (ret != 0) return ret;
-
-    ret = ext2_delete_entry(ctx, old_dir, old_name);
-    if (ret != 0) {
-        /* 巻き戻し: 追加した方を消す (失敗しても元の名前は残っている) */
-        ext2_delete_entry(ctx, new_dir, new_name);
-        return ret;
-    }
-
-    if (ftype == EXT2_FT_DIR && old_dir != new_dir) {
+    /* ---- 名前の付け替え (票 B8 往復 4 / X3) ----
+     *
+     * 不変条件: **どの inode も、それを指す名前の数 <= links_count**。
+     * 名前の数が links_count を上回ると、片方の名前の unlink が links_count を
+     * 0 にして inode とブロックを返し、**残った名前が解放済み inode を指す**。
+     *
+     * 直す前は「新しい名前を載せる -> 古い名前を消す」の間 links_count を
+     * 上げていなかったので、その間で装置が消えると 2 つの名前が links 1 の
+     * inode を指したまま失敗を返した (レビュー実測: sticky 故障 35 位置中 10)。
+     * また「古い名前を消せなければ新しい名前を消して巻き戻す」は、古い名前の
+     * 削除が実は届いていた場合に**名前を 0 にする**ので外した。
+     *
+     * 順序と、各段で落ちたときの媒体:
+     *   1. 移す inode の links_count を +1 して書く
+     *        落ちた: 名前 1、links は元か +1 (多い側 = 安全)。何も付け替えていない
+     *   2. (ディレクトリを別の親へ移すとき) 新しい親の links_count を +1
+     *        落ちた: 同上。新しい親は links が多いかもしれない (安全)
+     *   3. 新しい名前を載せる (ext2_add_entry)
+     *        落ちた: 名前 1 か 2、links は +1 済み。NOSPC なら名前は載って
+     *        いないので 1・2 を戻す (戻せなくても多い側)
+     *   4. 古い名前を消す (ext2_delete_entry)
+     *        落ちた: 名前 2 か 1、links は +1 済み = 整合。**巻き戻さない**
+     *   5. (ディレクトリを別の親へ移すとき) ".." を新しい親へ書き換え、
+     *      古い親の links_count を -1
+     *        落ちた: ".." が古い親を指したままなら古い親の links は下げない
+     *   6. 移す inode の links_count を -1 して書く (ctime も)
+     *        落ちた: links が 1 多い (孤児側。e2fsck が直す)
+     */
+    {
         Ext2Inode pinode;
-        ret = ext2_set_dotdot(ctx, ino, new_dir);
-        if (ret != 0) return ret;
-        if (ext2_read_inode(ctx, old_dir, &pinode) == 0) {
-            if (pinode.links_count > 0) pinode.links_count--;
-            ext2_write_inode(ctx, old_dir, &pinode);
-        }
-        if (ext2_read_inode(ctx, new_dir, &pinode) == 0) {
-            pinode.links_count++;
-            ext2_write_inode(ctx, new_dir, &pinode);
-        }
-    }
+        int cross_dir = (ftype == EXT2_FT_DIR && old_dir != new_dir);
 
-    if (ext2_read_inode(ctx, ino, &inode) == 0) {
+        /* 1 */
+        ret = ext2_read_inode(ctx, ino, &inode);
+        if (ret != 0) return ret;
+        inode.links_count++;
         inode.ctime = ext2_current_time();
-        ext2_write_inode(ctx, ino, &inode);
+        ret = ext2_write_inode(ctx, ino, &inode);
+        if (ret != 0) return EXT2_ERR_IO;
+
+        /* 2 */
+        if (cross_dir) {
+            ret = ext2_read_inode(ctx, new_dir, &pinode);
+            if (ret == 0) {
+                pinode.links_count++;
+                ret = ext2_write_inode(ctx, new_dir, &pinode);
+            }
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+
+        /* 3 */
+        ret = ext2_add_entry(ctx, new_dir, new_name, ino, ftype);
+        if (ret != 0) {
+            if (ret == EXT2_ERR_NOSPC) {
+                /* 名前は載っていない。上げた数を戻す (落ちても多い側) */
+                if (cross_dir && ext2_read_inode(ctx, new_dir, &pinode) == 0 &&
+                    pinode.links_count > 0) {
+                    pinode.links_count--;
+                    if (ext2_write_inode(ctx, new_dir, &pinode) != 0) { /* 多いまま */ }
+                }
+                if (ext2_read_inode(ctx, ino, &inode) == 0 && inode.links_count > 0) {
+                    inode.links_count--;
+                    if (ext2_write_inode(ctx, ino, &inode) != 0) { /* 多いまま */ }
+                }
+            }
+            return ret;
+        }
+
+        /* 4 */
+        ret = ext2_delete_entry(ctx, old_dir, old_name);
+        if (ret != 0) return ret;
+
+        /* 5 */
+        if (cross_dir) {
+            ret = ext2_set_dotdot(ctx, ino, new_dir);
+            if (ret != 0) return ret;
+            ret = ext2_read_inode(ctx, old_dir, &pinode);
+            if (ret == 0) {
+                if (pinode.links_count > 0) pinode.links_count--;
+                ret = ext2_write_inode(ctx, old_dir, &pinode);
+            }
+            if (ret != 0) return EXT2_ERR_IO;
+        }
+
+        /* 6 */
+        ret = ext2_read_inode(ctx, ino, &inode);
+        if (ret == 0) {
+            if (inode.links_count > 0) inode.links_count--;
+            inode.ctime = ext2_current_time();
+            ret = ext2_write_inode(ctx, ino, &inode);
+        }
+        if (ret != 0) return EXT2_ERR_IO;
     }
 
     /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
