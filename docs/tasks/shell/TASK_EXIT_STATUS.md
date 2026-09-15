@@ -1,97 +1,159 @@
 # TASK_EXIT_STATUS — 終了コードの配線と `$?` (ゲスト試験ランナーの 1 段目)
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **設計中 (2026-09-16)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **設計中 (2026-09-16、設計レビュー往復 1 を反映)**
 
-基点: `feat/gui` = `34cfc3f`。
+基点: `feat/gui` = `15c5edf`。
 引き継ぎ: [`../agents/HANDOVER_2026-09-16.md`](../agents/HANDOVER_2026-09-16.md) §7。
 後続: 結果チャネル (TASK_TEST_RESULT、未起票)、ランナー (TASK_TEST_RUNNER、未起票)。
+決裁済み: **E1** = `exec_last_result` を KAPI に足す / **E2** = 組み込み handler を `int` にする (ユーザー、2026-09-16)。
 
 ## 0. 目的
 
 ゲストで試験を一括実行し、合否を機械が読める形で返すための 1 段目。
 **外部プログラムと組み込みコマンドの終了コードをシェルまで正しく届け、`$?` とスクリプトの失敗停止で使えるようにする。**
 
-## 1. 確認した事実 (2026-09-16、`34cfc3f`)
+## 1. 確認した事実 (2026-09-16、`15c5edf`。行番号は確認時のもの)
 
-1. **終了コードと起動エラーが同じ値の空間に混ざっている**。常駐シェルの外部起動は
-   `sh_launch(cmdline)` = `g_api->exec_run(cmdline)` (`userland/shell/shell.h:114`)。
-   `exec_run` は正常終了で `exec_exit_status` (子が `exit(N)` に渡した値そのもの) を返し
-   (`exec/exec.c:1552`)、起動失敗では `EXEC_ERR_*` (`-1`〜`-5`、`os32_kapi_shared.h:100`) を返し、
-   park では **app_id `2`〜`5`** を返す (`exec/exec.c:1550`)。
-   - **実害 1 (到達可能)**: 子が `exit(-1)` か `exit(-3)` で終わると、`try_exec_from_path`
-     (`userland/shell/main.c:231`) はそれを「このディレクトリには無い」(`GENERAL` / `NOT_FOUND`) と読み、
-     **PATH の次の候補で同じ名前のプログラムをもう一度実行する**。`/usr/bin` と `/host/bin` に同名がある
-     普通の配置で起きる。
-   - **実害 2**: `exit(2)`〜`exit(5)` は park と区別できない。
-   - `exit(-2)` は `[Process crashed]` と表示される。
-2. **組み込みコマンドの結果は捨てられている**。`execute_command` は `void` (`userland/shell/main.c:637`)、
-   組み込みの表 `g_cmds[j].handler(argc, argv)` も戻り値を持たない (`main.c:291`)。
-3. **`$?` が無い**。`env_expand` (`userland/shell/cmd_env.c:97`) は環境変数の展開だけ。
-4. GUI の端末 (`SHELL_AS_APP` の `sh.bin`) は要求表経由で起動する。`launch_poll` の状態語は DONE に
-   終了コードを載せず (`exec/launch.c:266`)、`sh_launch.inc:126` は DONE を無条件に `EXEC_SUCCESS` にする。
-   要求表を処理する側 (`launch_report(token, rc)`) は `rc > 0` を「子の app_id」、`0` を DONE、負を FAILED と読む
-   (`exec/launch.c:233-247`) ので、ここも終了コードと id が同じ引数に乗っている。
-5. スクリプト (`userland/shell/cmd_script.c`) は行を順に `execute_command` するだけで、失敗で止まる手段が無い
-   (`script_abort_flag` は既にある)。
-6. 試験ランナーが最初に使うのは **CUI の常駐シェル** (`/api/cmd` → rshell → `execute_command`)。GUI 端末は後回しでよい。
+1. **終了コードと起動エラーが同じ値の空間に混ざっている**。`sh_launch(cmdline)` = `g_api->exec_run(cmdline)`
+   (`userland/shell/shell.h:114`)。`exec_run` は正常終了で `exec_exit_status` をそのまま返し (`exec/exec.c:1552`)、
+   起動失敗では `EXEC_ERR_*` (`-1`〜`-5`) を返す。
+2. **実害 1 — 1 コピーでも 2 回実行される** (レビュー往復 1 所見 1、経路を確認済み)。
+   カーネルの `exec_launch` はパスに `/` が無いと `/bin/` `/sbin/` `/usr/bin/` を自分で順に探す
+   (`exec/exec.c:1249-1265`。`SYS_DEFAULT_PATH` = `include/config.h:36` と同じ並び)。
+   シェルも 2c で同じ PATH を走査する (`userland/shell/main.c:334`)。
+   子が `return -1` (または `-3`) で終わると `try_exec` の戻り値が `EXEC_ERR_GENERAL` / `NOT_FOUND` と同じ値になり、
+   `main.c:323` が「このディレクトリには無い」と読んで 2c へ進み、**同じ `/usr/bin/xxx.bin` をもう一度実行**して
+   最後に `command not found` と表示する。同名を 2 か所に置く必要は無い。
+3. **`exit(-2)` と fault を区別できない**。`exec_fault_recover()` は `exec_exit(EXEC_ERR_FAULT)` を呼ぶだけで
+   (`exec/exec.c:1001-1003`)、`kapi_sys_exit(status)` も同じ `exec_exit(status)` に入る (`:1005-1013`)。
+   書き手は `exec_exit` ただ 1 つ (`:950` で `exec_exit_status = status`)。
+   **値からは種別を作れない**。CTRL+STOP も同じ経路 (`:1056`)。
+4. **起動失敗は `exec_exit` を通らない**。`exec_launch` には早期 return が 13 か所あり (`:1191` `:1269` `:1277`
+   `:1286` `:1295` `:1365` …)、`exec_exit_status` は前回の値のまま。`exec_run` は `exec_launch` を呼ぶだけ (`:1779`)。
+5. **`try_exec` は常駐シェルと `sh.bin` の共通コード** (`main.c:140-188`)。`sh_launch` は常駐ではマクロで `exec_run`、
+   `sh.bin` では要求表経路 (`sh_launch.inc`)。`sh.bin` 側でカーネルの静的な記録を読むと、**自分の子とは限らない**。
+6. **`exit` は既に 2 か所にある**。`sh.bin` の組み込み (`cmd_base.c:168`、端末を閉じる)、スクリプト内の打ち切り
+   (`cmd_script.c:173-181`)、`rshell` は行がちょうど `exit` なら自分の経路を閉じる (`rshell.c:143`、`execute_command` に渡さない)。
+   組み込み表は**先勝ち** (`main.c:290-294`、`cmd_base` の初期化が `cmd_script` より先)。
+7. **`set -e` は既存の `set` に食われる**。`cmd_set` は `argc == 2` で `=` が無ければ「値の表示」に落ち、
+   `-e: not set` と出す (`cmd_env.c:211-219`)。`set` の登録も先勝ちで `cmd_env` が取る。
+8. **組み込みコマンドの結果は捨てられている**。`execute_command` は `void` (`main.c:637`)、handler も戻り値を持たない。
+9. **`$?` が無い**。`env_expand` (`cmd_env.c:97`) は環境変数の展開だけ。
+10. **park は `exec_run` の子には起こらない**。`appslot_park_check` は `a->gui`
+    (= `exec_start` で立てたアプリ) 以外を弾く (`exec/appslot.c:295-302`)。`exec.c:1550` の app_id 返却は
+    `exec_start` 経路だけ。**実害 2 (`exit(2)`〜`exit(5)` と park の混同) は `exec_run` では起きない**。
+11. **handler に届かない行がある**: リダイレクト失敗 (`main.c:361-463` → `:583` で実行しない)、行が長すぎる
+    (`:536`、`:647-650`)、引数・glob 過多 (`:544-563`)、パイプの確保失敗 (`:675-678`)、`command not found` (`:345`)。
+12. GUI 端末の要求表は DONE に終了コードを載せない (`exec/launch.c:266`)。`launch_report(token, rc)` は
+    `rc > 0` を app_id と読む (`:233-247`)。
+13. `sdk/kapi.json` は v52。**H2 が v53 を取る**ので、本票は着地順に応じて v53 か v54。
 
 ## 2. 設計
 
-### 2-1. カーネル: 起動の結果を「種別 + 値」で取れるようにする — 決裁 E1
+### 2-1. カーネル: 結果を「種別 + 値」で記録する
 
-**推奨 (a)**: KAPI を 1 本足す。`int exec_last_result(int *kind, int *code)`。
-直前の `exec_run` の結果を `kind` = `EXITED / FAULT / PARKED / NOT_FOUND / NOMEM / INVALID / GENERAL`、
-`code` = 終了コード (EXITED) / app_id (PARKED) / 0 で返す。`exec_run` の戻り値は**今のまま変えない** ([ABI2]、
-既存の外部利用者 — `apps/` `game/` と Rust の bindings — の意味を変えない)。
-シェルは `exec_run` の戻り値を見た直後にこれを呼び、**以後は `kind` だけで分岐する**。
+新しい KAPI `int exec_last_result(int *kind, int *code)` (決裁 E1)。`exec_run` の戻り値の意味は変えない ([ABI2])。
 
-(b) 案: `exec_run` の終了コードを `0x1000 + code` のように別帯へずらす。既存スロットの意味を変えるので不可 ([ABI2])。
+- **種別は呼び手が決める** (事実 3)。`exec_exit` は内部関数なので引数を 1 つ増やし、
+  `kapi_sys_exit` → `EXEC_KIND_EXITED`、`exec_fault_recover` → `EXEC_KIND_FAULT`、
+  CTRL+STOP の経路 → `EXEC_KIND_ABORTED` を渡す。**値から種別を推測しない**。
+  (ランナーは「時間切れで畳んだ」と「落ちた」を分けたい。定数は `os32_kapi_shared.h` に置く [C4]。)
+- **`exec_run` のすべての return 点で書く** (事実 4)。形は
+  `{ g_last_kind = EXEC_KIND_NONE; rc = exec_launch(cmdline, 0); if (g_last_kind == EXEC_KIND_NONE) { g_last_kind = map(rc); g_last_code = 0; } return rc; }`。
+  `map()` は `NOT_FOUND` / `INVALID` / `NOMEM` / `GENERAL` と、`appslot_start_admit` が返す
+  `OS32_ERR_FULL` / `OS32_ERR_INVAL` (`exec.c:1191`) を **`EXEC_KIND_NOMEM` 相当 (= 次の候補へ進まない)** に写す。
+- `exec_start` / `exec_resume` (GUI 経路) は**この記録を書かない**。`sh.bin` がカーネルの記録を読まないので
+  (§2-2)、書くと紛れるだけ。
+- `exec_last_result` は記録が無い (`NONE`) なら `OS32_ERR_INVAL`。
 
-(c) 案: カーネルは変えず、シェルが `exec_run` の戻り値で推測する。§1 の衝突は解けない。不可。
+### 2-2. 起動の口を 1 つにする
 
-版数: 着地した時点で空いている次の版 (H2 が先に着地すれば v54)。手順はスキル `os32-kapi-add`。
+事実 5 の穴を塞ぐため、`try_exec` からは**結果つきの起動口**だけを呼ぶ:
 
-### 2-2. シェル: 終了コードを持ち回る
+```c
+/* shell.h。常駐と sh.bin で実装が違う */
+int sh_exec_result(const char *cmdline, int *kind, int *code);
+```
 
-- `execute_command` を `int` にし、最後に実行したコマンドの終了コードを返す。常駐シェルの静的変数
-  `g_last_status` に入れる。
-- 外部: `kind == EXITED` なら `code`、`FAULT` は `128 + 11` 相当の固定値 (`SH_STATUS_FAULT`、定数で)、
-  `NOT_FOUND` は `127`、その他の起動失敗は `126`、`PARKED` は `0` (GUI アプリが生きたまま戻った = 起動成功)。
-  値は POSIX シェルの慣習に合わせるが、**定数で定義して表を 1 か所に置く** ([C4])。
-- **PATH 走査は `kind` で止める**: `NOT_FOUND` (と、候補の読み込みそのものが失敗した `INVALID` / `GENERAL`) の
-  ときだけ次の候補へ進み、`EXITED` / `FAULT` / `PARKED` では**どんな値でも止まる** (§1 実害 1 の修正)。
-- 組み込み: 表の handler を `int (*)(int, char **)` にする — 決裁 E2。
-- `$?` を `env_expand` で展開する (10 進)。`$?` は環境変数表に書かない (子へ継承させない)。
+- 常駐 (`#ifndef SHELL_AS_APP`): `exec_run` → **直後に** `exec_last_result`。
+- `sh.bin` (`SHELL_AS_APP`): `sh_launch.inc` の中で写像する。`LAUNCH_ST_DONE` → `(EXITED, 0)`、
+  `LAUNCH_ST_FAILED` → `(起動失敗の種別, 0)`。**カーネルの記録は読まない**。
+  要求表に終了コードを載せるのは別票 (§5)。
+- `try_exec` / `try_exec_from_path` は `kind` だけで分岐する。
+- 常駐シェルの SHA-256 一致 (`shell.h:89` の注記) はこの票で変わる。**注記を書き換える**。
 
-### 2-3. 組み込みコマンドの戻り値 — 決裁 E2
+### 2-3. シェル: 終了コードを持ち回る
 
-**推奨 (a)**: この票で handler の型を `int` に変え、全組み込みが 0 / 非 0 を返す。型を変えるので
-戻り値を忘れた組み込みはコンパイルが警告を出す (`-Wall` の `-Wreturn-type`)。機械的だが範囲は
-`userland/shell/cmd_*.c` の全組み込み。「失敗」の基準は各コマンドが既に赤字のエラーを出している分岐。
+- `execute_command` を `int` にし、`g_last_status` に入れる。呼び出し元 6 か所
+  (`cmd_base.c:135`、`cmd_script.c:200,429`、`ui.c:545,706`、`rshell.c:149`) を更新する。
+- 外部の写像 (定数で 1 か所にまとめる [C4]):
 
-(b) 案: handler は `void` のまま、失敗分岐だけ `sh_set_status(1)` を呼ぶ。差分は小さいが、呼び忘れた失敗は
-**成功 (0) に見える** = ランナーが偽の合格を出す。[V4] に反するので推奨しない。
+  | kind | `$?` |
+  |---|---|
+  | `EXITED` | 子の値 (0〜255 に丸める。負値もそのまま識別できるよう下位 8 ビットを使う) |
+  | `FAULT` | `SH_STATUS_FAULT` (139 = 128+11) |
+  | `ABORTED` (CTRL+STOP) | `SH_STATUS_ABORTED` (130) |
+  | `NOT_FOUND` | 127 |
+  | `NOMEM` / `FULL` / その他の起動失敗 | 126 |
+  | `INVALID` (OS32X ヘッダが不正) | 126。**走査は次の候補へ進む** (事実 11 と別。今は止まる = 意図した変更、試験を足す) |
 
-### 2-4. スクリプト
+- **PATH 走査は `kind` で止める**: `NOT_FOUND` と `INVALID` のときだけ次の候補へ。
+  `EXITED` / `FAULT` / `ABORTED` / `NOMEM` では**どんな値でも止まる** (事実 2 の修正)。
+- **handler に届かない行の `$?`** (事実 11、レビュー所見 7):
 
-- `exit [N]`: スクリプトの実行を止め、`N` (省略時は `$?`) を `source` の終了コードにする。
-- `set -e` / `set +e`: 立っている間、0 以外で終わった行でスクリプトを止める (`script_abort_flag`)。
-  止めたときに `script: line N: status S` を 1 行出す。
-- `source` 自身の終了コードは最後に実行した行のもの。
+  | 事象 | `$?` |
+  |---|---|
+  | 構文・リダイレクト失敗・展開で溢れた・引数/glob 過多・パイプの確保失敗 | `SH_STATUS_USAGE` (2) |
+  | `command not found` (`main.c:345`) | 127 |
+  | `sh.bin` が起動を断った (GUI 外など) | 126 |
+  | 空行・コメントだけの行 | **変えない** |
 
-### 2-5. GUI 端末 (`SHELL_AS_APP`)
+- 組み込み: 表の handler を `int (*)(int, char **)` に (決裁 E2)。「赤字のエラーを出す分岐 = 非 0」。
+  - 戻らないもの (`reboot`、引数なしの `os32gui` = `sys_exit(0)`) はそのままでよい。
+  - `rshell` / `filer` はループを抜けた後に 0。
+  - `source` は最後に実行した行の値 (`script_source_file` の戻り値)。`time` と `if` は内側の値
+    (`if` は条件が偽なら 0)。`goto` のラベル無し (`cmd_script.c:476`) と ESC 中断 (`:193-195`) は非 0。
+  - **パイプラインは最後の段の値** (この票で既定にする。`execute_command` が `int` になる以上、決めないと未定義になる)。
+  - `exec` 組み込み (`cmd_mnt.c:60-64`) は戻り値で印字を分けているので、`kind` 分岐に直す。
+  - 取りこぼしを捕まえるのは**表の初期化子の型不一致** (関数ポインタ)。シェルのビルドに `-Werror` は無い
+    (`build/programs.mk`) ので `-Wreturn-type` には頼らない。必要なら `-Werror=return-type` を足す。
 
-この票では**直さない**が、壊さない。`sh_launch.inc` の DONE は今どおり `EXEC_SUCCESS` → `$?` は 0。
-要求表に終了コードを載せるのは試験ランナーに要らないので別票 (記録だけ §5)。
+### 2-4. `$?` の展開
+
+- `env_expand` の名前走査の**手前**、`$` の直後・`{` 判定の前で `?` を特別扱いする (`cmd_env.c:123-135`)。
+  `$?x` は `0x` のように展開する。**`${?}` は対応しない** (文書に書く)。
+- `$?` は環境変数表に書かない (子に継承させない)。`set ?=5` で作った変数があっても、特別扱いが先なので隠れる。
+- パイプ行の `$?` は段を回す前に 1 回だけ展開される (`main.c:647`)。文書に明記する。
+- 最大 11 文字。既存の溢れ検査 (`:158`) に乗る。
+
+### 2-5. スクリプト
+
+- **`exit [N]`**:
+  - 常駐シェル (`#ifndef SHELL_AS_APP`) では `cmd_script.c` に登録する。スクリプトの中なら打ち切り、
+    `g_script_depth == 0` (対話) では**シェルを終わらせず** `$?` を `N` にするだけ。
+  - `sh.bin` では `cmd_base.c` の既存の `exit` を残し (端末を閉じる = 決裁 D2(d))、`N` を受け取ったら
+    `sh_exit_flag` と `main` の戻り値に載せる。**表は先勝ちなので、登録を `#ifdef` で分ける**。
+  - `rshell` 経由では裸の `exit` を送らない (送ると `rshell.c:143` が自分の経路を閉じる)。ランナーの規約に書く。
+- **`set -e` / `set +e`**: `cmd_set` (`cmd_env.c`) の**先頭**で `-e` / `+e` を拾い、`cmd_script.c` の
+  `script_errexit` を関数経由で立てる (事実 7)。`set` を二重登録しない。
+  入れ子の `source` を抜けるときは `script_abort_flag` と同じく save / restore する。
+- 止めたときは `script: line N: status S` を 1 行。**N は「N 番目の実行行」** (コメントと空行は
+  `cmd_script.c:132-143` で詰められるのでファイルの行番号と一致しない)。文書にそう書く。
+
+### 2-6. GUI 端末 (`SHELL_AS_APP`)
+
+要求表に終了コードを載せるのは**別票**。この票では `sh.bin` の `$?` は「起動できたか」までしか分からない
+(DONE → 0)。そう文書に書く。
 
 ## 3. 範囲
 
 | 層 | ファイル |
 |---|---|
-| KAPI | `sdk/kapi.json` (末尾に 1 本)、`exec/exec.c` (結果の記録)、`sdk/include/os32/os32_kapi_shared.h` (kind の定数)、`docs/KAPI_SPEC.md` |
-| シェル | `userland/shell/main.c` (`execute_command`、`try_exec*`)、`userland/shell/cmd_*.c` (handler の型)、`userland/shell/cmd_env.c` (`$?`)、`userland/shell/cmd_script.c` (`exit` / `set -e`)、`userland/shell/shell.h` |
-| 文書 | `docs/manpages/` のシェルの頁 (`$?`、`exit`、`set -e`)、`docs/POLICY_DEBUG.md` §4 (実害 1 の記録) |
-| 試験 | `tools/tests/sh_status_host.c` + `sh_status_tdd.md` (名前は任意)。`tools/tests/sh_launch_host.c` の枠を読む |
+| KAPI | `sdk/kapi.json` (末尾に 1 本)、`sdk/include/os32/os32_kapi_shared.h` (`EXEC_KIND_*`)、`docs/KAPI_SPEC.md` |
+| カーネル | `exec/exec.c` (`exec_exit` の引数、`exec_fault_recover`、`kapi_sys_exit`、CTRL+STOP、`exec_run` の記録)、`exec/exec.h`、`kapi/` の `__cdecl` ラッパ [C3] |
+| シェル | `userland/shell/shell.h` (`sh_exec_result`、SHA-256 の注記)、`main.c` (`try_exec*`、`execute_command`、届かない行の状態)、`sh_launch.inc` (写像)、`cmd_env.c` (`$?`、`set -e`)、`cmd_script.c` (`exit`、`errexit`、行番号)、`cmd_base.c` (`sh.bin` の `exit`)、`cmd_mnt.c` (`exec` 組み込み)、`cmd_*.c` 全部 (handler の型)、`rshell.c` / `ui.c` (呼び出し元) |
+| 試験 | `tools/tests/sh_status_host.c` + `sh_status_tdd.md`。**`try_exec` / `try_exec_from_path` は `main.c` の static なので `sh_exec.inc` に切り出す** (`sh_shell_host.c` は `main.c` を include していない)。`sh_shell_host.c:442,463` のスタブを型に合わせる |
+| 文書 | `docs/manpages/` のシェルの頁 (`$?`、`exit`、`set -e`、`${?}` 非対応、行番号の意味)、`docs/POLICY_DEBUG.md` §4 (事実 2 の記録) |
 
 ## 4. 受入
 
@@ -99,27 +161,56 @@
 
 | ID | 反例 | 期待 |
 |---|---|---|
-| S1 | 子が `exit(0)` / `exit(1)` / `exit(-1)` / `exit(-3)` / `exit(2)` / `exit(255)` | `$?` = 0 / 1 / 子の値 (表の規則どおり) / … / 2 / 255。**`-1` と `-3` で PATH の次の候補を実行しない** |
-| S2 | 候補 1 が `NOT_FOUND`、候補 2 が存在 | 候補 2 を実行 |
-| S3 | 子が fault | `$?` = `SH_STATUS_FAULT`、`[Process crashed]` 表示は今どおり |
-| S4 | GUI アプリが park で戻る | `$?` = 0 |
-| S5 | 組み込みの成功 / 失敗 (`cd /nonexistent`、`cat` の無いファイル、`mkdir` の既存) | 0 / 非 0 |
-| S6 | `set -e` のスクリプトで 2 行目が失敗 | 3 行目を実行しない、`source` の終了コードは非 0 |
-| S7 | `exit 3` | 以降の行を実行しない、`$?` = 3 |
-| S8 | `$?` を含む引数、`$?x`、`$` 単独、`$$` | 展開の規則が文書どおり、既存の `$VAR` 展開を壊さない |
+| S1 | 子が `exit(0)` / `exit(1)` / `exit(-1)` / `exit(-2)` / `exit(-3)` / `exit(-4)` / `exit(-5)` / `exit(2)` / `exit(255)` | `$?` は表のとおり。**`-2` が `FAULT` にならない** (fault は別経路で起こす) |
+| S1b | fault で落ちる子、CTRL+STOP で畳んだ子 | `SH_STATUS_FAULT` / `SH_STATUS_ABORTED`。`[Process crashed]` の表示は今どおり |
+| S2 | 候補 1 が `NOT_FOUND`、候補 2 が存在 | 候補 2 を実行。**成功の直後に未知コマンドを打っても前回の記録を読まない** (事実 4) |
+| S2b | `exit(-1)` の子を `/usr/bin` に**1 本だけ**置く | 実行回数は **1 回**。`command not found` を出さない (事実 2) |
+| S2c | OS32X ヘッダが不正な `foo.bin` が cwd にあり、PATH にも同名の正しいものがある | PATH の方を実行する (意図した変更) |
+| S2d | `appslot_start_admit` が `OS32_ERR_FULL` | 126 で**止まる** (PATH の数だけ繰り返さない) |
+| S3 | 組み込みの成功 / 失敗 (`cd /nonexistent`、無いファイルの `cat`、既存への `mkdir`) | 0 / 非 0 |
+| S3b | `source` / `time` / `if` (真・偽) / パイプライン / `goto` のラベル無し / ESC 中断 | §2-3 の規則どおり |
+| S4 | リダイレクト失敗、行が長すぎる、引数過多、パイプの確保失敗、`command not found`、空行 | 2 / 2 / 2 / 2 / 127 / 変わらない |
+| S5 | `set -e` のスクリプトで 2 行目が失敗 (外部・組み込み・リダイレクト失敗・未知コマンドの 4 通り) | 3 行目を実行しない。`source` の終了コードは非 0 |
+| S5b | `set +e` で戻す、入れ子の `source` を抜けたとき | 旗が正しく戻る |
+| S6 | 常駐で `exit 3` (対話) / スクリプト内の `exit 3` | シェルは終わらず `$?`=3 / 打ち切って `source` が 3 |
+| S6b | `sh.bin` の `exit` / `exit 3` | 端末が閉じる (既存の挙動、`test_sh_shell.py` が緑のまま) |
+| S7 | `$?`、`$?x`、`$` 単独、`${?}`、`$VAR` との併用、パイプ行の `$?` | §2-4 の規則。既存の展開を壊さない |
+| R1 | `test_sh_shell.py` / `test_sh_launch.py` / `test_fs_kind_callers.py` | 退行なし |
+
+park (事実 10) は `exec_run` では起こらないので**表の項目としてだけ**置き、実行試験は作らない。
 
 ### 4-2. ゲスト受入
 
-`/api/cmd` で `false_test; echo $?` 相当 (終了コードを返す小さな試験バイナリを `userland/tests/` に置き、
-`deploy.yaml` に登録 [V2]) → 画面の `lines` で値を確認。PATH に同名を 2 つ置いて `exit(-1)` が 1 回しか
-走らないこと (実行回数をファイルに追記して数える)。
+終了コードを返す小さな試験バイナリを `userland/tests/` に置き `deploy.yaml` に登録 ([V2])。
+`/api/cmd` (POST の生ボディ) で `t_exit1; echo $?` 相当を送り、`/api/tvram` の `lines` で読む。
+**S2b は 1 コピーで実行回数 1 を確かめる** (実行のたびにファイルへ 1 行追記して数える)。
 
 ## 5. 決裁と、この票でしないこと
 
-| ID | 問い | 推奨 | 決裁 |
-|---|---|---|---|
-| E1 | 起動結果の取り方 | (a) `exec_last_result` を KAPI に足す | **(a) ユーザー決裁 2026-09-16** |
-| E2 | 組み込みの戻り値 | (a) handler を `int` に変える | **(a) ユーザー決裁 2026-09-16** |
+| ID | 問い | 決裁 |
+|---|---|---|
+| E1 | 起動結果の取り方 | **(a) `exec_last_result` を KAPI に足す** (ユーザー、2026-09-16) |
+| E2 | 組み込みの戻り値 | **(a) handler を `int` に変える** (ユーザー、2026-09-16) |
 
-しないこと: GUI 端末の要求表に終了コードを載せる (別票)、`if` / `&&` / `||` の構文 (試験ランナーには要らない)、
-パイプラインの終了コード (最後の段にするか) — 触る場合は「最後の段」を既定として票に追記してから。
+しないこと: GUI 端末の要求表に終了コードを載せる (別票)、`if` / `&&` / `||` の**構文**の追加、
+`${?}` の対応、`$!` `$$` などの他の特殊変数。
+
+## 6. 往復記録
+
+### 往復 1 — 設計レビュー (Fable 5.1 サブエージェント、`c8364e1` 対象、2026-09-16) — Request changes
+
+blocker 7 件・非blocker 8 件。**7 件とも PM がコードで到達可能性を確認**した (行番号は §1 に転記)。
+
+| # | 所見 | 確認 | 対応 |
+|---|---|---|---|
+| 1 | 実害 1 は同名 2 つを必要としない。カーネルが `/bin` `/sbin` `/usr/bin` を自分で探すので、1 コピーでも 2 回走る | `exec/exec.c:1249-1265` と `include/config.h:36` で確認 | §1 事実 2 に書き直し、受入 S2b を「1 コピーで回数 1」に |
+| 2 | `exit(-2)` と fault は `exec_exit` の中で区別できない | `exec/exec.c:1001-1013` で確認 | 種別は**呼び手**が渡す (§2-1)。`ABORTED` も分ける。S1 / S1b |
+| 3 | 起動失敗の早期 return は `exec_exit` を通らず、前回の記録が残る | `exec_launch` の早期 return 13 か所を確認 | `exec_run` の全 return 点で書く (§2-1)。S2 |
+| 4 | `try_exec` は両ビルド共通。`sh.bin` がカーネルの記録を読むと他人の子の結果を拾う | `shell.h:114` と `sh_launch.inc` で確認 | 起動口を `sh_exec_result` に統一 (§2-2)。SHA-256 の注記も書き換え |
+| 5 | `exit [N]` が既存の `exit` 2 つ (と rshell) と衝突する。表は先勝ち | `cmd_base.c:168`、`cmd_script.c:173`、`rshell.c:143`、`main.c:290` で確認 | 登録を `#ifdef` で分ける (§2-5)。S6 / S6b |
+| 6 | `set -e` は `cmd_set` の「値の表示」分岐に食われる | `cmd_env.c:211-219` で確認 | `cmd_set` の先頭で拾う (§2-5)。S5 |
+| 7 | handler に届かない行の `$?` が未定義で `set -e` がすり抜ける | `main.c` の 6 経路を確認 | 表を追加 (§2-3)。S4 / S5 |
+| 8 | 実害 2 (`exit(2..5)` と park) は `exec_run` では到達不能 | `exec/appslot.c:295-302` で確認 | §1 事実 10 に訂正。S4 (旧) を削除し表の項目だけに |
+| 9〜15 | `OS32_ERR_FULL` の写像、`INVALID` の扱いの変更、`exec` 組み込み、`time`/`if`/パイプの戻り値、`$?` の展開位置、行番号の意味、試験基盤 (`sh_exec.inc` への切り出し、スタブ、`-Werror=return-type`) | 妥当 | §2-1 / §2-3 / §2-4 / §2-5 / §3 / §4 に反映 |
+
+**次**: この版で往復 2 (レビュアーは Codex か Fable)。Approve が出てから実装へ。
