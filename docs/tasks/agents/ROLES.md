@@ -32,6 +32,16 @@
 # コーダー — Claude Code の Agent tool
 #   subagent_type: 任意, model: "opus", isolation: "worktree"
 #   worktree は .gitignore 済みの .claude/worktrees/ に作られる
+#
+#   **基点の確認 (2026-09-15 追加、2 度踏んだ)**: worktree は作られた時点の HEAD から始まり、
+#   `main` 側の古いマージ (`fac0d89` 等) になっていることがある。B8 と順序 2 のコーダーが
+#   これを踏み、後者は「HEAD は 086bda5」と**確かめずに**報告した。規則:
+#     - PM は依頼文に**期待する基点の SHA** を書く。
+#     - コーダーは最初に `git log --oneline -1` を実行し、**その出力を報告の先頭に書く**。
+#       期待と違えば `git checkout <SHA>` で合わせる (`--hard` は使わない)。git が
+#       ガードで弾かれて確かめられないなら**その旨を報告し、推測で書かない**。
+#     - PM は着地前に worktree の `git log -1` を自分で確認する。
+#     - 参照すべき文書やファイルが「無い」と報告されたら、PM はまず基点を疑う。
 #   CLI から直接叩く場合: claude -p --model claude-opus-5 "<指示>"
 
 # レビュアー — 起動コマンドは無い。PM がレビュー依頼をまとめてユーザーに報告し、
