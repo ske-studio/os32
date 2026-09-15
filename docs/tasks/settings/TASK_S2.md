@@ -1,6 +1,8 @@
 # S2 — `libos32cfg` (設定レジストリのクライアント)、`cfg` コマンド、`cfg init`
 
-状態: **完了 (2026-09-13)** — 実装 `6aa8b7a`〜`e325fe4`、Codex 実装レビュー 3 往復 + 追加 1 往復で Approve、ゲスト受入 C1〜C7 (配備 4 回目 `e325fe4`、§8f)。残: C3 の 255/256B 境界と C7 の pool 復帰はゲストで踏めず (ホスト試験 / S5)。設計: 第 5 版 (ユーザー決裁 2026-09-13: 設定の読み書きはアプリも OS 経由 (libos32gui の 1 呼び出し完結 wrapper) で行い、アプリが DB を直接開く経路は無い)。前提: S0-K (KAPI v50、`8bfe...`〜`a70df4f`)、S0-T (`/etc/settings.tsv` を通常配備、生成 DB は媒体だけ)、S0-D (通常配備は `/etc/settings.db*` を触らない)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3 (2 = 明示 `cfg init`、4 = S4 の最初の消費者は数キー)。
+> 発行: PM (2026-09-13) / 状態: **受入完了 (2026-09-13)**
+
+実装 `6aa8b7a`〜`e325fe4`、Codex 実装レビュー 3 往復 + 追加 1 往復で Approve、ゲスト受入 C1〜C7 (配備 4 回目 `e325fe4`、§8f)。残: C3 の 255/256B 境界と C7 の pool 復帰はゲストで踏めず (ホスト試験 / S5)。設計: 第 5 版 (ユーザー決裁 2026-09-13: 設定の読み書きはアプリも OS 経由 (libos32gui の 1 呼び出し完結 wrapper) で行い、アプリが DB を直接開く経路は無い)。前提: S0-K (KAPI v50、`8bfe...`〜`a70df4f`)、S0-T (`/etc/settings.tsv` を通常配備、生成 DB は媒体だけ)、S0-D (通常配備は `/etc/settings.db*` を触らない)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3 (2 = 明示 `cfg init`、4 = S4 の最初の消費者は数キー)。
 契約の正典: [S0_FOUNDATION.md](S0_FOUNDATION.md) §2 (非破壊 / transaction / 値の上限)、[DESIGN.md](DESIGN.md) §3 (スキーマ) / §4 (API) / §5 (起動時の振る舞い)。本票はそれを実装単位に切る。
 規約: [C1] C89、外部プログラムは newlib 可、[V2] deploy.yaml、コーダーは worktree + ホスト TDD のみ。
 

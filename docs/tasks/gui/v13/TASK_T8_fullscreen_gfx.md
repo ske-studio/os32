@@ -1,6 +1,8 @@
 # T8 — full-screen GFX 復帰: 端末から起動した GFX プログラムが全画面を使い、終了で GUI に戻る
 
-状態: **受入済み (2026-09-12、F1〜F8)**。残は PEGC / Cirrus 構成の確認のみ。
+> 発行: PM (2026-09-12) / 状態: **受入完了 (2026-09-12)**
+
+受入済み (2026-09-12、F1〜F8)。残は PEGC / Cirrus 構成の確認のみ。
 親: [PLAN.md](PLAN.md) §1 (決裁 B: … → K7 → T7 → **full-screen GFX 復帰** → shell script → 設定 S0〜)。
 前提: K5b (協調型 4 本)、K6C / K7 (端末、con_sink、kbd 待ちの park)、T7 (端末からの起動)。すべて main `3b7677b`。
 

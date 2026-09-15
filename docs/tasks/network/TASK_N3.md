@@ -1,6 +1,8 @@
 # TASK_N3 — libos32host と wget / lpr / hclip / date -sync (OS32 側 C)
 
-発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)。ゲストで wget/lpr/hclip/hdate 実動、F6 解決 (実サービスの wget は >64KB 完走)。Fable 実装レビュー Approve。N3-fix 着地済み (test 硬化 + /file/ NUL 修正、host_lib 82/82 host_agent 81/81)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス) / §5 (利用者)、ワイヤ [TASK_N0.md](TASK_N0.md) 第 5 版 §1a (host_open/status/read/write/close の ABI)。依存: N1 (KAPI v51、受入済み)、N2 (Agent の PRINT/CLIP、受入済み)。**KAPI は変えない** (v51 のまま)。同梱: F6 の wget 再確認 (§6)、Agent の `/file/` トラバーサル N-fix + N2 残 non-blocker (§7)。
+> 発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)**
+
+ゲストで wget/lpr/hclip/hdate 実動、F6 解決 (実サービスの wget は >64KB 完走)。Fable 実装レビュー Approve。N3-fix 着地済み (test 硬化 + /file/ NUL 修正、host_lib 82/82 host_agent 81/81)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス) / §5 (利用者)、ワイヤ [TASK_N0.md](TASK_N0.md) 第 5 版 §1a (host_open/status/read/write/close の ABI)。依存: N1 (KAPI v51、受入済み)、N2 (Agent の PRINT/CLIP、受入済み)。**KAPI は変えない** (v51 のまま)。同梱: F6 の wget 再確認 (§6)、Agent の `/file/` トラバーサル N-fix + N2 残 non-blocker (§7)。
 
 ## 0. 範囲
 - **`libos32host`** (`userland/lib/host/`、C 静的、`build/libs.mk` の `DEFINE_LIB`): host_* KAPI の AGAIN ループ (`sys_yield`) と多段のサービス手順を隠す薄い層。GUI 配下 (park) でも CUI (sys_halt 相当) でも `sys_yield` で待つ (host_test.c と同じ作法、K7/T8 で確立)。

@@ -1,6 +1,8 @@
 # N0 — Host Services の KAPI v51 (ABI 確定) と非ブロッキング化の設計
 
-状態: **完了 — 第 5 版で N1 へ (ユーザー決裁 2026-09-14 「b」: 往復 3 + 追加 1 往復を使い切り、残る疑いは N1 の実装レビューとホスト TDD (§3 に往復 2〜4 の反例を全部載せた) で拾う)**。前提: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) (§2 サービス一覧、§3 KAPI 案、§7 票、§9 の決裁は**推奨案で進める**: 印刷 v1 は to-file 既定、Agent は WSL2、LGY-98 は N3 受入後に既定へ、KAPI は v51、CLIP は含め PUT は後回し、HTML は text)、[LINK_PLAN.md](LINK_PLAN.md) (L0〜L3 の契約: EtherType 0x88B5、16B ヘッダ、Stop-and-Wait の REQUEST/RESPONSE、L1 絶対値 WINDOW、L2 8KB ストリーム Go-Back-N)、`net/link.{c,h}` (現状は同期版 `link_request` / `link_service_get`、`link_stream_read`)、`docs/KAPI_SPEC.md` §3-1 (追加手順) / §3-2 (予約表)、T9 §1a (ABI 表の書式)、S0-K (v50: CPL=3 ポインタの範囲検証 `ring3_user_range_ok`、owner 回収の位置)。
+> 発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)**
+
+完了 — 第 5 版で N1 へ (ユーザー決裁 2026-09-14 「b」: 往復 3 + 追加 1 往復を使い切り、残る疑いは N1 の実装レビューとホスト TDD (§3 に往復 2〜4 の反例を全部載せた) で拾う)**。前提: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) (§2 サービス一覧、§3 KAPI 案、§7 票、§9 の決裁は**推奨案で進める**: 印刷 v1 は to-file 既定、Agent は WSL2、LGY-98 は N3 受入後に既定へ、KAPI は v51、CLIP は含め PUT は後回し、HTML は text)、[LINK_PLAN.md](LINK_PLAN.md) (L0〜L3 の契約: EtherType 0x88B5、16B ヘッダ、Stop-and-Wait の REQUEST/RESPONSE、L1 絶対値 WINDOW、L2 8KB ストリーム Go-Back-N)、`net/link.{c,h}` (現状は同期版 `link_request` / `link_service_get`、`link_stream_read`)、`docs/KAPI_SPEC.md` §3-1 (追加手順) / §3-2 (予約表)、T9 §1a (ABI 表の書式)、S0-K (v50: CPL=3 ポインタの範囲検証 `ring3_user_range_ok`、owner 回収の位置)。
 規約: [ABI1〜3] (kapi.json が正典、末尾追記、版を上げて `make clean`)、[C1] C89、[C2] kstr*、[C4]。
 
 ## 0. 範囲

@@ -1,6 +1,7 @@
 # K3: 共有ライブラリ帯域 (0x400000〜0x4FFFFF) とロードアドレス移動
 
-> 発行: PM (2026-09-05) / レーン: K / 前提: **他レーン全部の完了後** (W2, C2 まで)。C3 と同時
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> レーン: K / 前提: **他レーン全部の完了後** (W2, C2 まで)。C3 と同時
 > 親: [TASKS.md](TASKS.md) / 設計: [DESIGN.md](DESIGN.md) §9.3 (案 A、ユーザ決定 2026-09-04)
 > 排他: `exec/**` `kernel/paging.c` `include/memmap.h` `sdk/link/app.ld`、`build/app.conf`
 

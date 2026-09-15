@@ -1,9 +1,10 @@
 # 05. INT 1Bh ディスク BIOS の実装計画 (Phase 3-3b)
 
+> 発行: PM (2026-08-08) / 状態: **受入完了 (2026-08-09)**
 > 作成: 2026-08-08
 > 前提: [04_implementation_status.md](04_implementation_status.md) の Phase 3-3a まで完了
 > 目的: **ディスクイメージからゲストをブートする**
-> 状態: **完了** (§3.5 / §4)。次の作業は [06_pic_plan.md](06_pic_plan.md)
+> 完了 (§3.5 / §4)。次の作業は [06_pic_plan.md](06_pic_plan.md)
 
 ---
 

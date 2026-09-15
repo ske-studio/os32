@@ -1,6 +1,7 @@
 # K4: シェル切替 (`sys_switch_shell`)、`/etc/system.cfg`、テキスト GDC 制御、`os32gui` コマンド
 
-> 発行: PM (2026-09-05、同日改訂: 契約 T9 のシェル切替を追加) / レーン: K / 前提: なし (今すぐ着手可)。gshell の実体は W1。**W1 は本票の 0 に依存する**
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> (同日改訂: 契約 T9 のシェル切替を追加) / レーン: K / 前提: なし (今すぐ着手可)。gshell の実体は W1。**W1 は本票の 0 に依存する**
 > 親: [TASKS.md](TASKS.md) / ロードマップ: `docs/ROADMAP.md` v1.1「CUI → GUI 切替フロー」
 > 排他: `kernel/kernel.c` (シェル起動ループ)、`kernel/console.c`、`userland/shell/**`
 

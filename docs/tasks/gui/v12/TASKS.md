@@ -1,6 +1,6 @@
 # GUI シェル v1.2 — 作業分担票
 
-> 発行: PM (2026-09-06)  
+> 発行: PM (2026-09-06) / 状態: **受入完了 (2026-09-07)**  
 > 親: [../DESIGN.md](../DESIGN.md)  
 > 基底契約: [../API_CONTRACTS.md](../API_CONTRACTS.md)  
 > v1.2 追加契約: [CONTRACTS.md](CONTRACTS.md)  

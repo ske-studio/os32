@@ -1,6 +1,7 @@
 # K5: v1.2 GUI プロトコル完成
 
-> 発行: PM (2026-09-06) / レーン: K / 前提: v1.1 G1〜G5 完了  
+> 発行: PM (2026-09-06) / 状態: **受入完了 (2026-09-07)**
+> レーン: K / 前提: v1.1 G1〜G5 完了  
 > 親: [TASKS.md](TASKS.md) / 追加契約: [CONTRACTS.md](CONTRACTS.md)  
 > 排他: `sdk/include/os32/os32_gui_shared.h`、`sdk/rust/os32api/src/gui/proto.rs`  
 > **KAPI v42 は変更しない。v43 は Host Services / network 用の予約なので GUI は使わない。**

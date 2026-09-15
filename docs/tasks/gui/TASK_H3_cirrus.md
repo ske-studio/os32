@@ -1,6 +1,7 @@
 # H3: Cirrus GD54xx チップドライバ + Xe10 グルー
 
-> 発行: PM (2026-09-05) / レーン: H / 前提: H2 完了 + ai-debug screenshot 拡張 (本票 §0)
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> レーン: H / 前提: H2 完了 + ai-debug screenshot 拡張 (本票 §0)
 > 親: [TASKS.md](TASKS.md) / 設計: [DESIGN.md](DESIGN.md) §3.2, §4, §6, §7, §8 (Cirrus), §10-3
 > 排他: `drivers/wab_cirrus.{c,h}` `drivers/wab_glue_xe10.{c,h}` (新規)、`gfx/backend_cirrus.c` (新規)
 > 位置づけ: v1.2。ゲート G5 の後半。**着手は PM の指示を待つ** (screenshot 拡張と ini 承認が先)

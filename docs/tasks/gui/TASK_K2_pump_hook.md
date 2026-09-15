@@ -1,6 +1,7 @@
 # K2: syscall 境界の入力ポンプ (契約 T6)
 
-> 発行: PM (2026-09-05) / レーン: K / 前提: K1 完了 + W1 の `gui_pump()` が存在
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> レーン: K / 前提: K1 完了 + W1 の `gui_pump()` が存在
 > 親: [TASKS.md](TASKS.md) / 契約: T6 / 設計: [DESIGN.md](DESIGN.md) §9.4 (syscall 境界ポンプ)
 > 排他: `kernel/**` `exec/**`
 

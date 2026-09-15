@@ -1,6 +1,8 @@
 # T5a — 独立ゲスト表示試験アプリ実装
 
-状態: **実装発注・ゲスト受入未実施**。担当Codex、PM Hermes、独立レビューclaude-opus-5。
+> 発行: PM (2026-09-09) / 状態: **受入完了 (2026-09-12)**
+
+担当Codex、PM Hermes、独立レビューclaude-opus-5。
 親: [TASK_T5_DISPLAY.md](TASK_T5_DISPLAY.md)、[REVIEW_T5_GATES.md](REVIEW_T5_GATES.md)。
 
 ## 範囲

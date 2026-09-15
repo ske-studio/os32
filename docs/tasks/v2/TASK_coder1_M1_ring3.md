@@ -1,6 +1,7 @@
 # コーダー1 タスク: M1 リング3 土台の実装
 
-> 発行: PM (2026-09-03) / 担当: コーダー1 (Opus 5)
+> 発行: PM (2026-09-03) / 状態: **完了記録 (2026-09-03)**
+> 担当: コーダー1 (Opus 5)
 > 前提: M0b ([TASK_coder1_M0b_privileged.md](TASK_coder1_M0b_privileged.md)) 完了
 >       = `check_privileged.py --strict` が exit 0
 > 設計: [M1_RING3.md](M1_RING3.md) (これが正典。本書は進め方と gate)

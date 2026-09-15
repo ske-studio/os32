@@ -1,6 +1,7 @@
 # W4: 標準ダイアログ完成
 
-> 発行: PM (2026-09-06) / レーン: W / 前提: K5、W2  
+> 発行: PM (2026-09-06) / 状態: **受入完了 (2026-09-07)**
+> レーン: W / 前提: K5、W2  
 > 親: [TASKS.md](TASKS.md) / 契約: [CONTRACTS.md](CONTRACTS.md) V12-M  
 > 排他: `userland/gshell/**`
 

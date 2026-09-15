@@ -1,6 +1,7 @@
 # GUI シェル v1.1 — 作業分担票 (全体)
 
-> 発行: PM (2026-09-05) / 親: [DESIGN.md](DESIGN.md) / 契約: [API_CONTRACTS.md](API_CONTRACTS.md) (2026-09-04 凍結)
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> 親: [DESIGN.md](DESIGN.md) / 契約: [API_CONTRACTS.md](API_CONTRACTS.md) (2026-09-04 凍結)
 > 書式は v2 の [PLAN.md](../v2/PLAN.md) / [CONTRACTS.md](../v2/CONTRACTS.md) に倣う。
 > ロードマップ: `docs/ROADMAP.md` v1.1
 

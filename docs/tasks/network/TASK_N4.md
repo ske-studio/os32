@@ -1,6 +1,8 @@
 # TASK_N4 — GUI から Host Services を使う (libos32gui 末尾追記 + ファイラ印刷 + 端末コピペ)
 
-発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-15)。ファイラ印刷・端末コピー/貼り付けをゲストで実証。退行の真因は shlib の .bss 未ゼロクリア (`30018f1` で修正、N4 は表面化させただけ)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
+> 発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-15)**
+
+ファイラ印刷・端末コピー/貼り付けをゲストで実証。退行の真因は shlib の .bss 未ゼロクリア (`30018f1` で修正、N4 は表面化させただけ)**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §5、libos32host は [TASK_N3.md](TASK_N3.md) (受入済み)。KAPI 不変 (v51)。
 **分担 (ROLES §0)**: §1 (N4a、基盤 = libos32gui shlib への host_* 末尾追記) = Claude Code PM。§2 (N4b、アプリ層 = ファイラ「印刷」・端末コピペ) = 別エージェント (Claude Code は設計 + レビュー)。
 
 ## 0. 前提

@@ -1,6 +1,8 @@
 # S4 — gshell が設定レジストリを読む最初の消費者 + 設定ダイアログ
 
-状態: **完了 (2026-09-13)** — 実装 `261b59e` + `35644b5`、Codex 実装レビュー 2 往復で Approve、ゲスト受入 G1〜G7 (配備 1 回目) + 版面変更後の G2 / G4 / G5 とリース中の Settings を配備 2 回目で再確認 (§10d)。残件 (non-blocker、S5 か次の gshell 票で): S20(c) の 2 本目 set 失敗、S18 の mock を get で ERROR 遷移に、S09b/S14 のコメント限定、TAB で Cancel に焦点表示しても RETURN が OK になる表示の不一致。設計: 第 4 版 (往復 3 で Approve)。前提: S2 完了 (`libos32cfg` = `userland/lib/cfg/libos32cfg.h`、KAPI v50、`cfg` コマンド、libos32gui の `os32gui_cfg_*` 4 本、main `e09c458`)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3-4 (最初の消費者は数キー)、§4 (設定の読み書きは OS 経由だけ、接続は同時 1 本、open〜close の間に yield しない)。
+> 発行: PM (2026-09-13) / 状態: **受入完了 (2026-09-13)**
+
+実装 `261b59e` + `35644b5`、Codex 実装レビュー 2 往復で Approve、ゲスト受入 G1〜G7 (配備 1 回目) + 版面変更後の G2 / G4 / G5 とリース中の Settings を配備 2 回目で再確認 (§10d)。残件 (non-blocker、S5 か次の gshell 票で): S20(c) の 2 本目 set 失敗、S18 の mock を get で ERROR 遷移に、S09b/S14 のコメント限定、TAB で Cancel に焦点表示しても RETURN が OK になる表示の不一致。設計: 第 4 版 (往復 3 で Approve)。前提: S2 完了 (`libos32cfg` = `userland/lib/cfg/libos32cfg.h`、KAPI v50、`cfg` コマンド、libos32gui の `os32gui_cfg_*` 4 本、main `e09c458`)。決裁: [S0_PLAN_2026-09-13.md](S0_PLAN_2026-09-13.md) §3-4 (最初の消費者は数キー)、§4 (設定の読み書きは OS 経由だけ、接続は同時 1 本、open〜close の間に yield しない)。
 契約の正典: [S0_FOUNDATION.md](S0_FOUNDATION.md) §2、[DESIGN.md](DESIGN.md) §3〜§5、[TASK_S2.md](TASK_S2.md) §1 (API と規則 1〜8)。gshell の契約は docs/tasks/gui/ (S6 = CUI 復帰、S8 = handler の禁止事項、X4 = 描画 callback)。
 規約: gshell は Rust (no_std、`os32api` のみ依存)、[C1] は C 側に、[V2] deploy.yaml、コーダーは worktree + ホスト TDD のみ。
 

@@ -1,6 +1,7 @@
 # K1: `gui_call` / `gui_register` KAPI と SHM 予約、共有ヘッダ (KAPI v41)
 
-> 発行: PM (2026-09-05) / レーン: K (C, カーネル背骨) / 前提: なし (今すぐ着手可)
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> レーン: K (C, カーネル背骨) / 前提: なし (今すぐ着手可)
 > 親: [TASKS.md](TASKS.md) §4 / 契約: T1, T2, T2a, T4, T5, T7 / 設計: [DESIGN.md](DESIGN.md) §9.2
 > 排他: `kernel/**` `exec/**` `include/memmap.h` `sdk/kapi.json` + 生成物、`os32_kapi_shared.h`、`os32_gui_shared.h` (新規)
 

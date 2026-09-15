@@ -1,6 +1,7 @@
 # C1: G 描画 (GDI 相当) を libos32gfx の上に
 
-> 発行: PM (2026-09-05) / レーン: C (Rust, `userland/rust/libos32gui/`) / 前提: なし (今すぐ着手可)
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> レーン: C (Rust, `userland/rust/libos32gui/`) / 前提: なし (今すぐ着手可)
 > 親: [TASKS.md](TASKS.md) / 契約: G1〜G7 / 設計: [DESIGN.md](DESIGN.md) §2, §8, §9.4
 > 排他: `userland/rust/libos32gui/**`、`userland/rust/gui_demo/**`、`sdk/rust/os32api/src/gui/**` (新規)
 

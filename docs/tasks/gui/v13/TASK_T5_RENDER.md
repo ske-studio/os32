@@ -1,6 +1,8 @@
 # T5R — 純粋描画アダプタ
 
-状態: **実装発注**。担当Codex、独立レビューclaude-opus-5、PM Hermes。
+> 発行: PM (2026-09-09) / 状態: **受入完了 (2026-09-09)**
+
+担当Codex、独立レビューclaude-opus-5、PM Hermes。
 親: [TASK_T5_DISPLAY.md](TASK_T5_DISPLAY.md)、[ゲート判定](REVIEW_T5_GATES.md)。
 本票はホストアダプタのみ。ゲストアプリ・CUI・gshell・配備を含めない。
 

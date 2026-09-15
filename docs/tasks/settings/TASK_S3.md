@@ -1,6 +1,8 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import`
 
-状態: **完了 (2026-09-14)** — 実装 `6332dac` (D) / `c2a1cdd` + `7b26058` (I) / `e1f6791` + `5f2ee25` + `cedfc6a` (C) / `b2a1580` (K: FAT stat)、Codex 実装レビュー 3 往復で Approve、ゲスト受入 I1〜I5 / I7、C1〜C7 (§9b / §9d / §9f)。残ゲート: S3-I2 (別票)、I6 の全失敗点網羅はホスト試験の範囲、8192 件は単一 scope の実書込みまで、電源断耐性は未保証。設計: 第 5 版 (Codex 3 往復 + 追加 1 往復)。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
+> 発行: PM (2026-09-13) / 状態: **受入完了 (2026-09-14)**
+
+実装 `6332dac` (D) / `c2a1cdd` + `7b26058` (I) / `e1f6791` + `5f2ee25` + `cedfc6a` (C) / `b2a1580` (K: FAT stat)、Codex 実装レビュー 3 往復で Approve、ゲスト受入 I1〜I5 / I7、C1〜C7 (§9b / §9d / §9f)。残ゲート: S3-I2 (別票)、I6 の全失敗点網羅はホスト試験の範囲、8192 件は単一 scope の実書込みまで、電源断耐性は未保証。設計: 第 5 版 (Codex 3 往復 + 追加 1 往復)。ユーザー決裁 2026-09-13「3. リカバリ」。前提: S0 / S2 / S4 / S5 完了 (main `02cefcc`)。
 正典: [DESIGN.md](DESIGN.md) §2 (初期値はインストーラだけが持つ、リカバリモード) / §6b (JSON バックアップと `cfg import`)、[S0_FOUNDATION.md](S0_FOUNDATION.md) §6 (**明示リカバリ契約**: 自動分岐なし、表示と承認、元 DB と journal を対で保存、別名へ完全コピー → 検証 → 切替、失敗で元を消さない、原子性は backend で確認できなければ名乗らない、system.cfg 等は触らない、復元後に schema / sync / reopen を記録)、[TASK_S2.md](TASK_S2.md) §1 (規則) / §2 (`cfg export` の JSON 形、import は S3)、[TASK_S0.md](TASK_S0.md) (配備保護: `settings.db*` を通常配備が触らない)。
 規約: [C1] C89、コーダーは worktree + ホスト TDD のみ、[D2] (使い捨てイメージ / ini) はユーザー承認。
 

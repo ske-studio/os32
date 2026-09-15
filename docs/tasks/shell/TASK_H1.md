@@ -1,9 +1,9 @@
 # TASK_H1 — hsync: 同サイズ更新の検出 (内容比較 + CRC 検証)
 
-- 発行: PM (Claude Code / Fable 5.1) 2026-09-15
+> 発行: PM (Claude Code / Fable 5.1) (2026-09-15) / 状態: **受入完了 (2026-09-15)**
+
 - 正典: [`HSYNC_IMPROVEMENT_PLAN.md`](HSYNC_IMPROVEMENT_PLAN.md) — ユーザー起草。**設計判断はこの文書に従う**
 - 段階: 計画 §8 の **H1**。H2 (一時ファイル・置換の安全化) / H3 (mtime) / H4 (manifest・世代) は別票
-- 状態: 実装中 (Opus 5 サブエージェント、worktree 隔離)
 
 ## 1. 背景
 

@@ -1,6 +1,8 @@
 # TASK_N2 — Host Agent の PRINT / CLIP サービス (ホスト側 Python)
 
-発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)。実装 e40a0a3、Fable 実装レビュー Approve (差分 blocker 0)。test 66/66、N1 TDD 35/35 回帰なし。ゲスト実サービス検証は N3 で**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
+> 発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)**
+
+実装 e40a0a3、Fable 実装レビュー Approve (差分 blocker 0)。test 66/66、N1 TDD 35/35 回帰なし。ゲスト実サービス検証は N3 で**。正典: [HOST_SERVICES_PLAN.md](HOST_SERVICES_PLAN.md) §2 (サービス表) / §4 (印刷) / §6 (運用) / §9 (決裁)、ワイヤは [TASK_N0.md](TASK_N0.md) 第 5 版 §1b (v2、宣言長 + WDATA)。**OS32 側 (KAPI・カーネル) は変えない** — N1 の `host_open`/`host_write`/`host_read`/`host_status`/`host_close` (v51) と宣言長 WDATA でそのまま話す。利用する OS32 コマンド (`lpr`/`hclip`) は N3。
 
 ## 0. 範囲
 `tools/host_agent.py` に**要求サービスを 6 本足す**だけ (ワイヤ・状態機械・rid 台帳・HELLO は N1 のまま不変)。CLIP は含める、**PUT は v1.4 へ先送り** (§9-5)。印刷は **to-file 既定、pywin32 は任意依存** (§9-1)。置き場は WSL2 のみ (§9-2、実機 Windows は N5)。

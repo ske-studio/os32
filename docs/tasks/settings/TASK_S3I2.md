@@ -1,6 +1,8 @@
 # S3-I2 — FDD からの新規インストールの修正 (lz4 カーネル + `/boot`) と使い捨て NHD の道具
 
-状態: **完了 (2026-09-14)** — 実装 I `49ee29c` + `44e7899`、T `cd1e136` + `a80f7b0` + `9de8f0f` + `b2416a5` + `862d291` + `2c5aeb3`、K `b30b3f5`。Codex 実装レビュー 2 往復 (5 件 → 1 件 → 解消。往復 3 は実走の欠陥 2 件を T で修正したのみで Codex には出していない)。受入 F1〜F6 合格 (使い捨て NHD、4 回の trial、作業 NHD 無傷)。設計: 第 4 版。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
+> 発行: PM (2026-09-14) / 状態: **受入完了 (2026-09-14)**
+
+実装 I `49ee29c` + `44e7899`、T `cd1e136` + `a80f7b0` + `9de8f0f` + `b2416a5` + `862d291` + `2c5aeb3`、K `b30b3f5`。Codex 実装レビュー 2 往復 (5 件 → 1 件 → 解消。往復 3 は実走の欠陥 2 件を T で修正したのみで Codex には出していない)。受入 F1〜F6 合格 (使い捨て NHD、4 回の trial、作業 NHD 無傷)。設計: 第 4 版。ユーザー決裁 2026-09-14「a から」。前提: S3 完了 (main `24cfcf7`)。
 経緯: TASK_S0 §3 B10 → TASK_S3 §7 (残ゲート)。現行の `install` (無印) は `/kernel.bin` を必須とし LBA 6 へ生書きするが、FDD イメージは `/VMKRNL.LZ4` + ローダ v3 (`/sys/loader_h.bin` = `boot/loader_hdd.bin`、ext2 の `/boot/vmkernel.lz4` を読む) を収録するので、**FDD からの新規インストールは Phase 1 の `Missing /kernel.bin` で止まり `/etc` コピー (settings.db の seed) まで到達しない**。`cdinst` (CD) は lz4 / `/boot` 対応済み (`cdinst.c:240` の注、`:510` の `mkdir /hd0/boot`)。
 正典: [TASK_S0.md](TASK_S0.md) §3 B10、[TASK_S3.md](TASK_S3.md) §7、`docs/08_build.md` §8-4 (配備 3 経路)、`build/image.mk` (FDD の中身)、スキル `os32-emu-config` (ini は PM だけ、実装と適用の承認を分ける)、memory `os32-np21w-launch` (FDD は引数、HDD は ini のみ)。
 規約: [C1] C89、[D2] (NHD 上書き / ini 変更はユーザー承認、使い捨てだけを対象にする)、コーダーは worktree + ホスト TDD のみ。

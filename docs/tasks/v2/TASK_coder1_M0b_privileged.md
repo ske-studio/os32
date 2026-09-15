@@ -1,6 +1,7 @@
 # コーダー1 タスク: ユーザランドの特権命令を除去 (M1 前提)
 
-> 発行: PM (2026-09-01) / 担当: コーダー1 (Opus 5) / 前提: なし (今すぐ着手可)
+> 発行: PM (2026-09-01) / 状態: **完了記録 (2026-09-03)**
+> 担当: コーダー1 (Opus 5) / 前提: なし (今すぐ着手可)
 > 親: [PLAN.md](PLAN.md) / 契約: [CONTRACTS.md](CONTRACTS.md)
 > 検査: `python3 tools/check_privileged.py --strict` が exit 0 になれば完了
 
