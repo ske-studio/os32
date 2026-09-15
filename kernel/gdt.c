@@ -1,6 +1,7 @@
 #include "types.h"
 #include "kstring.h"
 #include "gdt.h"
+#include "x86_desc.h"   /* x86_load_gdt (arch/x86/、契約なし) */
 
 /* GDTエントリ構造体 */
 struct gdt_entry {
@@ -33,23 +34,6 @@ struct gdt_ptr {
 
 struct gdt_entry gdt[GDT_ENTRIES];
 struct gdt_ptr gp;
-
-/* アセンブラの lgdt ラッパー (kentry.asmなどに置くかインラインで) */
-static void gdt_flush(u32 pointer)
-{
-    __asm__ volatile (
-        "lgdt (%0)\n\t"
-        "ljmp $0x08, $1f\n\t"
-        "1:\n\t"
-        "mov $0x10, %%ax\n\t"
-        "mov %%ax, %%ds\n\t"
-        "mov %%ax, %%es\n\t"
-        "mov %%ax, %%fs\n\t"
-        "mov %%ax, %%gs\n\t"
-        "mov %%ax, %%ss\n\t"
-        : : "r"(pointer) : "memory", "eax"
-    );
-}
 
 /* GDTエントリ設定 */
 static void gdt_set_gate(int num, u32 base, u32 limit, u8 access, u8 gran)
@@ -108,5 +92,5 @@ void gdt_init(void)
                  GDT_ACCESS_UDATA, GDT_GRAN_FLAT);
 
     /* GDTのロードとセグメントレジスタの再設定 */
-    gdt_flush((u32)&gp);
+    x86_load_gdt((u32)&gp);
 }

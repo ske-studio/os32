@@ -100,8 +100,8 @@ os32/
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
 ├── lib/            汎用ライブラリ (utf8, path, sqlite3, zlib, microtar 等。vendor したものは各ディレクトリの README.OS32 が出所とライセンスの正典)
-├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)。io.h は原始命令の**契約**だけ
-├── arch/           CPU 依存の実装 (x86/arch_io.h — 割り込み制御・CPU 停止・IDT ロード)。`ARCH ?= x86` で選ぶ。足し方は arch/README.md
+├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)。io.h / cpu.h は原始命令の**契約**だけ
+├── arch/           CPU 依存の実装 (x86/arch_io.h — 割り込み制御・CPU 停止・IDT ロード、x86/arch_cpu.h — CR3/CR0・リング降下、x86/x86_desc.h — GDT/TSS ロード)。`ARCH ?= x86` で選ぶ。足し方は arch/README.md
 ├── platform/       機種依存の実装 (pc98/platform_io.h — ポート I/O・I/O ウェイト)。`PLATFORM ?= pc98` で選ぶ
 ├── userland/       ユーザー空間 (shell/, gshell/ (GUI シェル, Rust), cmds/, system/, tests/, rust/ (libos32gui 等), lib/)
 ├── .github/        GitHub Actions (workflows/check.yml: 静的ゲート)

@@ -40,7 +40,7 @@
 #include "paging.h"
 
 #include "io.h"
-#include "pc98.h"
+#include "cpu.h"      /* arch_mmu_* (実装は arch/$(ARCH)/arch_cpu.h) */
 #include "memmap.h"
 #include "pgalloc.h"
 
@@ -122,15 +122,6 @@ static u32 *align4096(void *p)
     u32 addr = (u32)p;
     addr = (addr + 4095) & ~4095UL;
     return (u32 *)addr;
-}
-
-/* TLBフラッシュ (i386互換: CR3リロード方式)
- * invlpgはi486+なので使えない */
-static void tlb_flush_all(void)
-{
-    u32 cr3_val;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
-    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3_val) : "memory");
 }
 
 /* ======================================================================== */
@@ -234,16 +225,11 @@ void paging_init(u32 mem_kb)
     paging_set_readonly(MEM_BIOS_ROM_START, MEM_BIOS_ROM_END);
 
     /* ========================================================
-     *  CR3にページディレクトリをセット → CR0.PGビットを立てる
+     *  変換表の根 (CR3) にページディレクトリをセット → 変換を有効化 (CR0.PG)
      * ======================================================== */
     pd_phys = (u32)page_directory;
-    __asm__ volatile("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
-    {
-        u32 cr0_val;
-        __asm__ volatile("mov %%cr0, %0" : "=r"(cr0_val));
-        cr0_val |= CR0_PG;
-        __asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");
-    }
+    arch_mmu_load_root(pd_phys);
+    arch_mmu_enable();
 
     pg_enabled = 1;
 }
@@ -400,7 +386,7 @@ int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
 {
     int rc = prepare_tables(virt_addr >> PAGE_SHIFT, 1);
     if (rc == 0) rc = set_page_noflush(virt_addr, phys_addr, flags);
-    if (rc == 0 && pg_enabled) tlb_flush_all();
+    if (rc == 0 && pg_enabled) arch_mmu_flush_tlb();
     return rc;
 }
 
@@ -438,7 +424,7 @@ int paging_map_phys(u32 virt_addr, u32 phys_addr, u32 npages, u32 flags)
     if (prepare_tables(v, npages) != 0) return -1;
     for (i = 0; i < npages; i++)
         set_page_noflush((v + i) << PAGE_SHIFT, (p + i) << PAGE_SHIFT, flags);
-    if (npages && pg_enabled) tlb_flush_all();
+    if (npages && pg_enabled) arch_mmu_flush_tlb();
     return 0;
 }
 
@@ -457,7 +443,7 @@ int paging_pde_clear_user(u32 start, u32 end)
         page_directory[pdi] &= ~(u32)PTE_USER;
     }
 
-    if (pg_enabled) tlb_flush_all();
+    if (pg_enabled) arch_mmu_flush_tlb();
     return 0;
 }
 
@@ -473,7 +459,7 @@ int paging_set_readonly(u32 start, u32 end)
         if (page_tables[pfn / PTE_COUNT])
             page_tables[pfn / PTE_COUNT][pfn % PTE_COUNT] &= ~(u32)PTE_RW;
     }
-    if (pg_enabled) tlb_flush_all();
+    if (pg_enabled) arch_mmu_flush_tlb();
     return 0;
 }
 
@@ -489,7 +475,7 @@ int paging_set_not_present(u32 start, u32 end)
         if (page_tables[pfn / PTE_COUNT])
             page_tables[pfn / PTE_COUNT][pfn % PTE_COUNT] &= ~(u32)PTE_PRESENT;
     }
-    if (pg_enabled) tlb_flush_all();
+    if (pg_enabled) arch_mmu_flush_tlb();
     return 0;
 }
 
@@ -541,14 +527,12 @@ u32 paging_kernel_pd_phys(void)
 
 u32 paging_current_cr3(void)
 {
-    u32 cr3_val;
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
-    return cr3_val;
+    return arch_mmu_current_root();
 }
 
 void paging_load_cr3(u32 pd_phys)
 {
-    __asm__ volatile("mov %0, %%cr3" : : "r"(pd_phys) : "memory");
+    arch_mmu_load_root(pd_phys);
 }
 
 /* アプリ帯に必要な PDE 枚数 (票 §4-1)。純粋な算術なのでホスト試験から
@@ -931,7 +915,7 @@ int paging_map_user_keep_selftest(void)
         page_tables[pdi][pti_c] = saved_c;
         page_tables[pdi][pti_v] = saved_v;
         page_directory[pdi] = saved_pde;
-        tlb_flush_all();
+        arch_mmu_flush_tlb();
         return 2;
     }
     app_pd = (u32 *)as.pd_phys;
@@ -955,7 +939,7 @@ int paging_map_user_keep_selftest(void)
     page_tables[pdi][pti_c] = saved_c;
     page_tables[pdi][pti_v] = saved_v;
     page_directory[pdi] = saved_pde;
-    tlb_flush_all();
+    arch_mmu_flush_tlb();
     return rc;
 }
 

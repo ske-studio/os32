@@ -14,15 +14,13 @@ class Stage(unittest.TestCase):
             for unit in ('paging', 'pgalloc', 'sys'):
                 s = (ROOT / f'kernel/{unit}.c').read_text()
                 s = s.replace('irq_save()', 'host_irq_save()').replace('irq_restore(flags)', 'host_irq_restore(flags)')
-                s = s.replace('__asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));', 'cr3_val = host_cr3;')
-                for name in ('cr3_val', 'pd_phys'):
-                    s = s.replace(f'__asm__ volatile("mov %0, %%cr3" : : "r"({name}) : "memory");', f'host_cr3 = {name};')
-                s = s.replace('__asm__ volatile("mov %%cr0, %0" : "=r"(cr0_val));', 'cr0_val = 0;')
-                s = s.replace('__asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");', '(void)cr0_val;')
                 (d / f'{unit}_host_source.c').write_text(s)
             cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', '-DPHYSMEM_HOST_TEST=1', f'-DTEST_{case.upper()}', f'-DTEST_END={end}']
-            # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
-            # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+            # arch/x86 + platform/pc98: include/io.h / include/cpu.h は契約
+            # だけで、実装は固定名 arch_io.h / arch_cpu.h / platform_io.h を
+            # 引く (順序 3・5)。CR0 / CR3 を触る arch_cpu.h だけは、ホストでは
+            # tools/tests/host_arch/ の実装が先に見つかるようにする。
+            cmd += ['-I' + str(ROOT / 'tools/tests/host_arch')]
             cmd += ['-I' + str(ROOT / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
             subprocess.run(cmd + [str(ROOT / 'tools/tests/highram_stage_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
             subprocess.run([str(d / 'test')], check=True, timeout=20)

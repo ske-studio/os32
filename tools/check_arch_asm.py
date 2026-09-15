@@ -5,16 +5,19 @@ check_arch_asm.py — CPU 原始命令の直書き検査 (移植性の準備、�
 
 カーネル側の C ソースが `hlt` / `cli` / `sti` をインライン asm で直接書くと、
 別アーキテクチャへ移すときに「どこを差し替えればよいか」がソース全体に
-散らばってしまう。これらは include/io.h の原始命令
-(`_halt` / `_idle` / `_stop` / `_enable` / `_disable` / `irq_save` /
-`irq_restore`) 経由で使い、arch/<arch>/arch_io.h だけを差し替えの境界にする。
+散らばってしまう。これらは契約ヘッダの原始命令 (include/io.h の
+`_halt` / `_idle` / `_stop` / `_enable` / `_disable` / `irq_save` /
+`irq_restore`、include/cpu.h の `arch_enter_user` など) 経由で使い、
+arch/<arch>/arch_*.h だけを差し替えの境界にする。
 
 検査するもの:
   対象ディレクトリの *.c / *.h にあるインライン asm 文の **文字列リテラル**
   に `hlt` / `cli` / `sti` がニーモニックとして現れないこと。
 
 許可するもの:
-  1. arch/<arch>/arch_io.h   — 原始命令の実装 (差し替えの境界そのもの)
+  1. arch/<arch>/arch_*.h    — 契約の実装 (差し替えの境界そのもの)
+     arch_io.h (include/io.h の実装) と arch_cpu.h (include/cpu.h の実装)。
+     命名の約束は arch/README.md: 契約の実装だけが arch_ で始まる。
   2. ARCH-ASM-OK の印が付いた asm 文
      asm の直前 (ALLOW_LOOKBACK 行以内) に `ARCH-ASM-OK` と書いてあれば
      見逃す。命令列の一部としてしか意味を持たず、原始命令に切り出すと
@@ -23,7 +26,8 @@ check_arch_asm.py — CPU 原始命令の直書き検査 (移植性の準備、�
 
 順序 3 で io.h を契約 (include/io.h) と実装 (arch/<arch>/arch_io.h,
 platform/<platform>/platform_io.h) に分けたので、**include/io.h はもう許可
-しない**。契約側に asm が現れたらそれは実装の混入で、ここで止める。
+しない**。契約側に asm が現れたらそれは実装の混入で、ここで止める
+(include/cpu.h も同じ)。
 `platform/` 側は許可一覧に入れていないが、機種側に置いてよいのはポート I/O
 だけで hlt/cli/sti は CPU の持ち物なので、そのまま検査対象でよい。
 新しい arch を足すときに**この番人を編集しなくて済む**よう、許可は
@@ -51,10 +55,12 @@ SKIP_PREFIXES = [
     os.path.join("lib", "sqlite3"),   # 第三者コード
 ]
 
-# 原始命令の実装。ここだけは直書きしてよい。arch を足すときにこの番人を
+# 契約の実装。ここだけは直書きしてよい。arch や契約を足すときにこの番人を
 # 編集しなくて済むようパターンで持つ (判定はスラッシュ区切りの相対パス)。
-# **include/io.h は入っていない** — 契約側に asm が現れたら実装の混入。
-ALLOW_RE = re.compile(r"^arch/[^/]+/arch_io\.h$")
+# **include/io.h / include/cpu.h は入っていない** — 契約側に asm が現れたら
+# 実装の混入。arch_ で始まらない arch/<arch>/*.h (x86_desc.h のような
+# arch 専用の小物) は許可しない — 直書きが散らばる先になるため。
+ALLOW_RE = re.compile(r"^arch/[^/]+/arch_[A-Za-z0-9_]+\.h$")
 
 ALLOW_MARK = "ARCH-ASM-OK"
 ALLOW_LOOKBACK = 16       # 印を探す行数 (asm 文の直前のコメント)
@@ -164,8 +170,9 @@ def main():
         print("  命令列の一部としてしか意味を持たない箇所は、asm の直前の")
         print("  コメントに ARCH-ASM-OK と、切り出せない理由を書く。")
         print("")
-        print("  実装を置いてよいのは arch/<arch>/arch_io.h だけ。")
-        print("  include/io.h は契約 (宣言と註) のみで、asm は置かない。")
+        print("  実装を置いてよいのは arch/<arch>/arch_*.h だけ。")
+        print("  include/io.h / include/cpu.h は契約 (宣言と註) のみで、")
+        print("  asm は置かない。")
         return 1
 
     print("=== 原始命令の直書き検査: OK (%d ファイル、直書きなし) ===" % scanned)

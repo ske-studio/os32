@@ -123,7 +123,14 @@ INC_RULES = [
 # platform/<platform>/platform_io.h) に分かれた。エラーが出るのは実装側の
 # 2 ファイルなので、両方をこの分類に含める。含めないと 33 本がまるごと
 # (a) へ移ってしまい、順序 1 の基準値と比べられなくなる。
+#
+# 順序 5 で cr3 / CR0 / GDT / TSS / リング降下の asm も arch/x86/ へ移した。
+# 分類 (a) の意味は「差し替え先がまだ決まっていない、その場の x86 asm」で、
+# arch/ や platform/ の下に入ったものはもう差し替えの境界に載っている。
+# だから **arch/ か platform/ のファイルを指すエラーは全部この分類**に入れる
+# (基底名の一覧では arch_cpu.h / x86_desc.h を取りこぼす)。
 IO_BASENAMES = ("io.h", "arch_io.h", "platform_io.h")
+IMPL_DIRS = ("arch/", "platform/")
 
 CAT_IO = "io"
 CAT_ASM = "asm"
@@ -131,7 +138,7 @@ CAT_X86HDR = "x86hdr"
 CAT_OTHER = "other"
 
 CAT_LABEL = {
-    CAT_IO: "(b) io.h 経由 (arch_io / platform_io)",
+    CAT_IO: "(b) arch/ platform/ の実装経由",
     CAT_ASM: "(a) インライン asm (x86 命令・レジスタ)",
     CAT_X86HDR: "(c) x86 固有ヘッダ・型",
     CAT_OTHER: "(d) その他",
@@ -312,7 +319,8 @@ def first_error(output):
 def classify(err_line):
     m = ERROR_LINE_RE.match(err_line)
     path = m.group("path") if m else ""
-    if os.path.basename(path) in IO_BASENAMES:
+    norm = path.replace(os.sep, "/")
+    if os.path.basename(path) in IO_BASENAMES or norm.startswith(IMPL_DIRS):
         return CAT_IO
     if ASM_RE.search(err_line):
         return CAT_ASM

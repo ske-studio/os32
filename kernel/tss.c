@@ -4,6 +4,7 @@
 
 #include "tss.h"
 #include "kstring.h"
+#include "x86_desc.h"   /* x86_load_tr (arch/x86/、契約なし) */
 
 /* I/O 許可ビットマップは全 65536 ポートを覆う必要がある (1 ポート 1 bit)。
  * 足りないとリミット外のポートが CPL/IOPL 次第で素通りする。 */
@@ -50,7 +51,7 @@ void tss_init(u32 kernel_esp0)
     limit = sizeof(kernel_tss) - 1;
     gdt_set_tss(base, limit);
 
-    __asm__ volatile ("ltr %%ax" : : "a"(TSS_SELECTOR));
+    x86_load_tr(TSS_SELECTOR);
 }
 
 void tss_set_esp0(u32 esp0)
