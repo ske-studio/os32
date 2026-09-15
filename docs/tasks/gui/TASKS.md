@@ -1,7 +1,8 @@
 # GUI シェル v1.1 — 作業分担票 (全体)
 
-> 発行: PM (2026-09-05) / 親: [DESIGN.md](DESIGN.md) / 契約: [API_CONTRACTS.md](API_CONTRACTS.md) (2026-09-04 凍結)
-> 書式は v2 の [PLAN.md](../v2/PLAN.md) / [CONTRACTS.md](../v2/CONTRACTS.md) に倣う。
+> 発行: PM (2026-09-05) / 状態: **受入完了 (2026-09-06)**
+> 親: [DESIGN.md](DESIGN.md) / 契約: [API_CONTRACTS.md](API_CONTRACTS.md) (2026-09-04 凍結)
+> 書式は v2 の [PLAN.md](../../archive/kernel_v2/PLAN.md) / [CONTRACTS.md](../../archive/kernel_v2/CONTRACTS.md) に倣う。
 > ロードマップ: `docs/ROADMAP.md` v1.1
 
 体制は v2 と同じ 3 層 (設計 = PM、コーディング = コーダー、ビルド検証 = `os32-cycle` を回す
@@ -14,18 +15,18 @@
 
 | レーン | 言語 / 場所 | 票 | 内容 |
 |---|---|---|---|
-| **H** HAL | C, `gfx/` `drivers/` | [TASK_H1_hal_backend.md](TASK_H1_hal_backend.md) | バックエンド表 + 9801 プレーン実装 + カウンタ |
-| | | [TASK_H2_pegc.md](TASK_H2_pegc.md) | PEGC 256 色バックエンド (v1.1 後半) |
-| | | [TASK_H3_cirrus.md](TASK_H3_cirrus.md) | Cirrus GD54xx チップドライバ + Xe10 グルー + ai-debug screenshot 拡張 (v1.2) |
-| **K** カーネル背骨 | C, `kernel/` `exec/` `sdk/kapi.json` | [TASK_K1_gui_call.md](TASK_K1_gui_call.md) | `gui_call` / `gui_register` KAPI、SHM ブロック 12〜15 予約、共有ヘッダ、エラー番号 |
-| | | [TASK_K2_pump_hook.md](TASK_K2_pump_hook.md) | syscall 境界の入力ポンプ (T6) |
-| | | [TASK_K3_shared_lib_band.md](TASK_K3_shared_lib_band.md) | 共有ライブラリ帯域 0x400000〜0x4FFFFF とロードアドレス移動 (最後) |
-| | | [TASK_K4_gui_boot.md](TASK_K4_gui_boot.md) | `/etc/system.cfg`、テキスト GDC 制御、`os32gui` コマンド |
-| **W** WM (gshell) | Rust, `userland/gshell/` (新規) | [TASK_W1_wm_core.md](TASK_W1_wm_core.md) | gshell 本体: ウィンドウ管理、スロット、イベントリング、損傷/commit、クローム、カーソル、タイマ |
-| | | [TASK_W2_fep_lease_modal.md](TASK_W2_fep_lease_modal.md) | FEP を WM で持つ、14 色リースと 2 色クローム、モーダル、標準ダイアログ |
-| **C** クライアント | Rust, `userland/rust/libos32gui/` | [TASK_C1_drawing.md](TASK_C1_drawing.md) | G 描画 (Rect / Style / Surface / クリップ / 文字) を libos32gfx の上に |
-| | | [TASK_C2_client_loop_widgets.md](TASK_C2_client_loop_widgets.md) | `gui_call` スタブ、U3 ループ、ウィジェット木、箱レイアウト、gui_demo 書き換え |
-| | | [TASK_C3_shared_lib.md](TASK_C3_shared_lib.md) | 固定アドレス・ジャンプ表・バージョン照合の共有ライブラリ化 (K3 と同時) |
+| **H** HAL | C, `gfx/` `drivers/` | [TASK_H1_hal_backend.md](../../archive/gui_v11/TASK_H1_hal_backend.md) | バックエンド表 + 9801 プレーン実装 + カウンタ |
+| | | [TASK_H2_pegc.md](../../archive/gui_v11/TASK_H2_pegc.md) | PEGC 256 色バックエンド (v1.1 後半) |
+| | | [TASK_H3_cirrus.md](../../archive/gui_v11/TASK_H3_cirrus.md) | Cirrus GD54xx チップドライバ + Xe10 グルー + ai-debug screenshot 拡張 (v1.2) |
+| **K** カーネル背骨 | C, `kernel/` `exec/` `sdk/kapi.json` | [TASK_K1_gui_call.md](../../archive/gui_v11/TASK_K1_gui_call.md) | `gui_call` / `gui_register` KAPI、SHM ブロック 12〜15 予約、共有ヘッダ、エラー番号 |
+| | | [TASK_K2_pump_hook.md](../../archive/gui_v11/TASK_K2_pump_hook.md) | syscall 境界の入力ポンプ (T6) |
+| | | [TASK_K3_shared_lib_band.md](../../archive/gui_v11/TASK_K3_shared_lib_band.md) | 共有ライブラリ帯域 0x400000〜0x4FFFFF とロードアドレス移動 (最後) |
+| | | [TASK_K4_gui_boot.md](../../archive/gui_v11/TASK_K4_gui_boot.md) | `/etc/system.cfg`、テキスト GDC 制御、`os32gui` コマンド |
+| **W** WM (gshell) | Rust, `userland/gshell/` (新規) | [TASK_W1_wm_core.md](../../archive/gui_v11/TASK_W1_wm_core.md) | gshell 本体: ウィンドウ管理、スロット、イベントリング、損傷/commit、クローム、カーソル、タイマ |
+| | | [TASK_W2_fep_lease_modal.md](../../archive/gui_v11/TASK_W2_fep_lease_modal.md) | FEP を WM で持つ、14 色リースと 2 色クローム、モーダル、標準ダイアログ |
+| **C** クライアント | Rust, `userland/rust/libos32gui/` | [TASK_C1_drawing.md](../../archive/gui_v11/TASK_C1_drawing.md) | G 描画 (Rect / Style / Surface / クリップ / 文字) を libos32gfx の上に |
+| | | [TASK_C2_client_loop_widgets.md](../../archive/gui_v11/TASK_C2_client_loop_widgets.md) | `gui_call` スタブ、U3 ループ、ウィジェット木、箱レイアウト、gui_demo 書き換え |
+| | | [TASK_C3_shared_lib.md](../../archive/gui_v11/TASK_C3_shared_lib.md) | 固定アドレス・ジャンプ表・バージョン照合の共有ライブラリ化 (K3 と同時) |
 | **PM** | Python, `tools/` | (票なし、本書 §5) | 共有定数の照合スクリプト、ゲート検証、`os32-cycle` の GUI 用サブコマンド |
 
 ## 2. 依存と順序

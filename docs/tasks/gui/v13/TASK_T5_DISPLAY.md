@@ -1,6 +1,8 @@
 # T5 — 固定テキスト表示の段階分離
 
-状態: **設計受領・方向性採用・実装未発注**。
+> 発行: PM (2026-09-09) / 状態: **完了記録 (2026-09-10)**
+
+設計受領・方向性採用・実装未発注。
 PM: Hermes。設計: Codex。親: [PLAN.md](PLAN.md)。
 原報告: `/tmp/os32-v13-t5-design.txt`（一時ファイル）。
 
@@ -35,7 +37,7 @@ T5aは独立GUI表示試験アプリで固定fixtureを表示する。T5bの常�
 - fixture切替時は旧Terminalを破棄し、同じ所有領域からModel/Terminalを新規初期化。
   top、prefix、pending、limit、消費位置を持ち越さない。
 - 初期保存容量案は40列×64行。大配列をスタックへ置かない。
-  [限定クロスリンク](CROSS_LINK_T4.md)でCellのターゲットsize8B/align4Bは確認済みだが、
+  [限定クロスリンク](../../../archive/gui_v13_reviews/CROSS_LINK_T4.md)でCellのターゲットsize8B/align4Bは確認済みだが、
   アプリ全体の最終リンク・BSS/ヒープ/スタック配置は未検証。
 
 ## 実装発注前のゲート

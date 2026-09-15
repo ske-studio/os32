@@ -1,6 +1,8 @@
 # K7 — 入力統合: GUI 中の `kbd_getchar` を端末アプリの打鍵で満たす (設計草案)
 
-状態: **受入済み (2026-09-12)** — K `c6a775d` / A `c37d6e3` / W `df1df96` + W2 `ffed0e5`。I1 / I2 (ASCII) / I3 / I4 (15MB) / I5 合格。未実施: I2 の FEP 経由の日本語、I4 の 8MB。
+> 発行: PM (2026-09-12) / 状態: **受入完了 (2026-09-12)**
+
+受入済み (2026-09-12) — K `c6a775d` / A `c37d6e3` / W `df1df96` + W2 `ffed0e5`。I1 / I2 (ASCII) / I3 / I4 (15MB) / I5 合格。未実施: I2 の FEP 経由の日本語、I4 の 8MB。
 親: [PLAN.md](PLAN.md) §1 (決裁 B: K5 → K6 console → 端末アプリ → **K7 入力統合** → 既存 CUI コマンドを端末で流す)。
 前提: K5b (協調型 4 本、`exec_park` / `exec_resume`)、K6C (con_sink、端末アプリ `t5a_display`)。
 

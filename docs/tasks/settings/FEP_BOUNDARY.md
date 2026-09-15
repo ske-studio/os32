@@ -1,6 +1,8 @@
 # FEP_BOUNDARY — FEP user 境界と SQLite 中断禁止の最小実装契約
 
-状態: **設計提案・独立レビュー R0 待ち／実装未承認**。
+> 発行: PM (2026-09-09) / 状態: **設計中 (2026-09-13)**
+
+設計提案・独立レビュー R0 待ち／実装未承認。
 本票は現行仕様や試験合格の宣言ではない。作成時の `feat/gui` HEAD は
 `8b5642f`。既存 dirty の F1 DB 所有管理・F2a FD lease を含む作業ツリーを静的に照合した。
 参照: [S0_FOUNDATION.md](S0_FOUNDATION.md)、[F2_OWNERSHIP.md](F2_OWNERSHIP.md) §6。

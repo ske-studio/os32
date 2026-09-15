@@ -1,6 +1,7 @@
 # K5: GUI アプリ 4 本の同時実行 (契約 T2a) — v1.3 の最初の票
 
-> 発行: PM (2026-09-10) / レーン: K (C、カーネル背骨) / 前提: ユーザー決裁 B ([AUDIT §6](AUDIT_2026-09-10.md))
+> 発行: PM (2026-09-10) / 状態: **受入完了 (2026-09-12)**
+> レーン: K (C、カーネル背骨) / 前提: ユーザー決裁 B ([AUDIT §6](AUDIT_2026-09-10.md))
 > 親: [PLAN.md](PLAN.md) / 契約: T2, T2a, T3, T4, U8 ([API_CONTRACTS](../API_CONTRACTS.md))、
 > v1.2 S1 (暫定「1 本」を撤廃)、S2〜S8 ([v12 CONTRACTS](../v12/CONTRACTS.md))
 > 排他: `kernel/**` `exec/**` `kapi/**` `include/memmap.h` `sdk/kapi.json` + 生成物。

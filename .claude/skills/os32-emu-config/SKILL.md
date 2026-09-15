@@ -138,7 +138,7 @@ taskkill は ini を書き戻さないので使わない)。使い捨て NHD は
 
 ## 範囲と根拠
 
-[TASK_H3_cirrus.md §0](../../../docs/tasks/gui/TASK_H3_cirrus.md) と
+[TASK_H3_cirrus.md §0](../../../docs/archive/gui_v11/TASK_H3_cirrus.md) と
 [GUI TASKS.md の 2026-09-06 WAB OFF 記録](../../../docs/tasks/gui/TASKS.md) に従い、
 `[NekoProject21]` の `USEGD5430=true/false`、`GD5430TYPE=91` のみ扱う。
 91 は十進 Xe10 固定。欠落・重複・未知の既存値は追記や推測をせず拒否する。

@@ -1,6 +1,17 @@
 # OS32 リリースロードマップ
 
-*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-07 の v1.2 main マージを反映 (v1.1・v1.2 完了)*
+*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-15 更新 (v1.3 完了、Host Services N1〜N4 受入完了、移植準備 1〜4 着地)*
+
+## 0. 版数の対応表 (正典はここだけ)
+
+版数の線は **2 本**あり、番号が重なるので混同しない。
+
+| 線 | 現在 | 意味 | 記録 |
+|---|---|---|---|
+| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
+| **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
+| 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
+| ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 
@@ -212,24 +223,27 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 | 作業 | カテゴリ | 担当 (ROLES §0) | 備考 |
 |------|---------|------|------|
-| Host Services N1〜N3 + N4 の libos32gui 末尾追記 | kernel / host / command / shlib | 基盤 (Claude Code PM) | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、`host_*` ラッパー |
+| Host Services N1〜N4 (**受入完了 2026-09-15**) | kernel / host / command / shlib | Claude Code PM + Opus 5 コーダー | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、`host_*` ラッパー |
 | PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | 基盤 | S5 から先送り |
-| N4 のアプリ側 (ファイラの印刷、端末のコピー / 貼り付け) | app | アプリ層 (別エージェント) | libos32gui の `host_*` ラッパー経由 |
+| N4 のアプリ側 (ファイラの印刷、端末のコピー / 貼り付け) (**受入完了 2026-09-15**) | app | Claude Code PM + Opus 5 コーダー (別エージェント案は 2026-09-14 に撤回) | libos32gui の `host_*` ラッパー経由 |
 | About dialog | app | アプリ層 | OS32 About |
-| text editor GUI | app | アプリ層 | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
+| text editor GUI | app | Claude Code PM + Opus 5 コーダー | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
+| Host Services N5 (実機 LAN、Npcap + scapy) | host / driver | — | **保留** (エミュレータで N1〜N4 完了、実機は未着手) |
+| hsync H1 / H3 (同サイズ差し替えの検出、日時前置判定、KAPI v52) | system / fs | Claude Code PM + Opus 5 コーダー | **受入完了 2026-09-15**。H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
+| ext2 の B8 (読み取り失敗の読み替えを塞ぐ、remount-ro 相当) | fs / vfs | 同上 | **受入完了 2026-09-15** ([tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md)) |
 
-先送り (v2.0 以降、[§2](#2-長期ロードマップ-v20) の「GUI アプリケーション群」): 設定アプリの拡張項目、
+先送り (v3 以降、[§2](#2-長期ロードマップ-次期カーネル-v3-以降) の「GUI アプリケーション群」): 設定アプリの拡張項目、
 image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 
 ---
 
-## 2. 長期ロードマップ (v2.0+)
+## 2. 長期ロードマップ (次期カーネル v3 以降)
 
 ### 協調型マルチタスク
 
 **協調型の複数アプリ (最大 4 本、PD 切替、譲り合いは `OP_WAIT` だけ) は契約 T2a のとおり v1.3 で実装する**
 (2026-09-10 決裁。以前ここに「v1.x は single foreground app」とあったのは v1.2 の暫定を指していた)。
-v2.0 では timer interrupt を利用したプリエンプティブ寄りの multi-task を検討する。
+v3 では timer interrupt を利用したプリエンプティブ寄りの multi-task を検討する。
 
 - window / process の独立実行
 - v1.x `gui_call` + SHM event ring を拡張した IPC
@@ -239,8 +253,11 @@ v2.0 では timer interrupt を利用したプリエンプティブ寄りの mul
 
 移植 (例: ARM) は v1.x の範囲外だが、**新しい層を実装するたびに CPU 依存の調査を票に含める**
 (ユーザー指示 2026-09-14)。最初は Host Services N1 (ワイヤ v2 / `link.c` / KAPI v51) で
-`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/tasks/network/TASK_N1.md` §0 段 7)。
-以後の票も同じ観点で `docs/tasks/portability/` に追記し、移植の直前に `arch/` の分離へまとめる。
+`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/archive/network/TASK_N1.md` §0 段 7)。
+以後の票も同じ観点で `docs/tasks/portability/` に追記する。**移植準備の 4 段は 2026-09-15 に着地した**
+(ARM コンパイル計測 `make check-arm-compile` 55/93、`hlt`/`cli`/`sti` を `io.h` 経由に、`arch/x86` + `platform/pc98`
+の骨格、kstring の C 版、LE アクセサ `include/endian_le.h`。基準値と経過は [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md))。
+残りは `gdt`/`tss`/`cr3` と CPL=3 降下 asm の `arch/x86/` への移設、ARM 実装、KAPI 生成器の arch 対応 (**v3 まで保留**、ユーザー決裁)。
 習慣として今から守るもの: ワイヤ / ディスク上の構造は LE アクセサで読む、非アラインアクセスをしない、
 絶対番地は `memmap.h` 以外に書かない、割込み制御は既存ヘルパー経由。
 

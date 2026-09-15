@@ -1,6 +1,7 @@
 # K5b-K: アプリ 4 本の同時実行 — カーネル側の実装 (KAPI v44)
 
-> 発行: PM (2026-09-11) / レーン: K (C89、カーネル背骨) / 前提: [K5 決裁](TASK_K5_multiapp.md#決裁-2026-09-11ユーザーレビュアー枯渇のため-pm-の材料提示に基づく) 済み、設計は [K5a §設計 D0〜D11](TASK_K5_multiapp.md)
+> 発行: PM (2026-09-11) / 状態: **受入完了 (2026-09-12)**
+> レーン: K (C89、カーネル背骨) / 前提: [K5 決裁](TASK_K5_multiapp.md#決裁-2026-09-11ユーザーレビュアー枯渇のため-pm-の材料提示に基づく) 済み、設計は [K5a §設計 D0〜D11](TASK_K5_multiapp.md)
 > 契約: T2, T2a, T3, T4, U8 / 版数: **v44** ([KAPI_SPEC §3-2](../../../KAPI_SPEC.md) に予約済み)
 > 排他: `kernel/**` `exec/**` `kapi/**` `fs/fd_redirect.c` (所有者 ID) `include/memmap.h` `sdk/kapi.json` + 生成物、`tools/tests/` の新規。
 > **触らない**: `userland/gshell/**` (W レーン、K5b-W)、`drivers/**` の I/O 手順、`v86`、`shell.bin`。

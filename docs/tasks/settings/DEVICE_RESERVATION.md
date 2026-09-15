@@ -1,6 +1,8 @@
 # 任意デバイス予約 broker — 次の実装票
 
-**状態: 計画・未実装。現在の dirty/untracked 作業ツリーを読んだ設計であり、ゲスト検証結果ではない。** 本票だけを追加する。[MEMORY_RAM_INTEGRATION.md](MEMORY_RAM_INTEGRATION.md) の旧 API 案・起動時 GFX 予約案ではなく、以下の現行コードと GUI activation 時の契約を実装基準にする。
+> 発行: PM (2026-09-09) / 状態: **計画 (2026-09-13)**
+
+計画・未実装。現在の dirty/untracked 作業ツリーを読んだ設計であり、ゲスト検証結果ではない。本票だけを追加する。[MEMORY_RAM_INTEGRATION.md](MEMORY_RAM_INTEGRATION.md) の旧 API 案・起動時 GFX 予約案ではなく、以下の現行コードと GUI activation 時の契約を実装基準にする。
 
 ## 1. 範囲と既定動作
 

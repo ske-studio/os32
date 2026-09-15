@@ -37,7 +37,7 @@ dry-run 無書き込み、実適用拒否時の入力未読、秘密フィール
 
 ## 根拠と残課題
 
-- 許可キー/値: `docs/tasks/gui/TASK_H3_cirrus.md` §0 と
+- 許可キー/値: `docs/archive/gui_v11/TASK_H3_cirrus.md` §0 と
   `docs/tasks/gui/TASKS.md` 2026-09-06 WAB OFF 再確認。
   `[NekoProject21] USEGD5430=true/false`, `GD5430TYPE=91` のみ。
   外部 NP21/W ソースの最初に試した `windows/ini.cpp`, `windows/ini.c`,

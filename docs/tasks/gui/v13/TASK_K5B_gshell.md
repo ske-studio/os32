@@ -1,6 +1,7 @@
 # K5b-W: アプリ 4 本の同時実行 — gshell (WM) 側の実装
 
-> 発行: PM (2026-09-11。K5b-K の最終署名で**確定**) / レーン: W (Rust、gshell)
+> 発行: PM (2026-09-11) / 状態: **受入完了 (2026-09-12)**
+> (K5b-K の最終署名で**確定**) / レーン: W (Rust、gshell)
 >
 > **K5b-K が足した KAPI v44 (スロット 180〜185、`sdk/rust/os32api/src/kapi_generated.rs` に生成済み)**:
 > `exec_start(cmdline) -> i32` (>0 = app_id で最初の OP_WAIT まで進んで park 済み / 0 = park 前に終了・回収済み / <0)、
