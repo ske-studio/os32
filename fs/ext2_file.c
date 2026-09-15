@@ -112,6 +112,21 @@ int ext2_read_stream(Ext2Ctx *ctx, u32 ino, void *buf, u32 size, u32 offset)
 /*  ファイル作成 / 書き込み / 削除                                          */
 /* ======================================================================== */
 
+/* ext2_create の途中失敗の後始末 (票 B8 往復 3 / Codex P1-C)。
+ *
+ * **inode をまだ媒体に書いていない**段階専用。新しいブロックと表は
+ * メモリ上の inode からしか辿れないので、返す順序に縛りは無い。
+ * 媒体上の inode (ビットを立てただけの領域) は新しいブロックを指していない。
+ *
+ * 戻り値 EXT2_OK = 全部返した / 負値 = 何かを返せなかった (漏れ)。
+ * 呼び手はもう失敗を返す途中なので、元の失敗を優先して返す。 */
+static int ext2_create_abort_unwritten(Ext2Ctx *ctx, u32 ino, const Ext2Inode *inode)
+{
+    int r1 = ext2_release_blocks(ctx, inode->block);
+    int r2 = ext2_free_inode(ctx, ino);
+    return (r1 != 0) ? r1 : r2;
+}
+
 int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u32 size)
 {
     int new_ino;
@@ -149,10 +164,18 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
 
     for (bi = 0; bi < blocks_needed; bi++) {
         int blk = ext2_alloc_block(ctx);
-        if (blk < 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
+        if (blk < 0) {
+            if (ext2_create_abort_unwritten(ctx, (u32)new_ino, &inode) != 0) { /* 漏れ */ }
+            return EXT2_ERR_NOSPC;
+        }
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
-        if (ret != 0) { ext2_free_block(ctx, (u32)blk); (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
+        if (ret != 0) {
+            /* 表はまだ媒体上の inode から辿れないので、blk は返してよい */
+            if (ext2_free_block(ctx, (u32)blk) != 0) { /* 漏れ */ }
+            if (ext2_create_abort_unwritten(ctx, (u32)new_ino, &inode) != 0) { /* 漏れ */ }
+            return ret;
+        }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         to_write = remaining;
@@ -160,17 +183,43 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
         ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
-        if (ret != 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
+        if (ret != 0) {
+            if (ext2_create_abort_unwritten(ctx, (u32)new_ino, &inode) != 0) { /* 漏れ */ }
+            return EXT2_ERR_IO;
+        }
 
         inode.blocks += 2;
         remaining -= to_write;
     }
 
+    /* ここで失敗すると、媒体上の inode に新しい内容が載ったかどうか区別
+     * できない (載っていればブロックを指している)。**何も返さない** —
+     * inode もブロックも使用中のまま残す (漏れ。相互リンクにはならない)。 */
     ret = ext2_write_inode(ctx, (u32)new_ino, &inode);
     if (ret != 0) return ret;
 
     ret = ext2_add_entry(ctx, dir_ino, name, (u32)new_ino, EXT2_FT_REG_FILE);
-    if (ret != 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
+    if (ret != 0) {
+        /* add_entry の失敗が NOSPC 以外なら、名前が媒体に載ったかどうか区別
+         * できない (ディレクトリブロックの書き込みが途中で失敗し得る)。
+         * 載っていれば、ここで inode を返すと**名前が解放済みの inode を指す**。
+         * そのときは何も触らない — ファイルとして完成しているか、孤児として
+         * 漏れるかのどちらかで、どちらも整合している。 */
+        if (ret == EXT2_ERR_NOSPC) {
+            /* 名前は載っていない。inode は媒体上でブロックを指しているので
+             * **参照を先に外してから**返す (ext2_truncate_blocks)。外せなければ
+             * 何も返さない (inode を返すと、ブロックを指す inode が再利用される)。 */
+            int leaked = 0;
+            inode.links_count = 0;
+            inode.dtime = ext2_current_time();
+            if (ext2_truncate_blocks(ctx, (u32)new_ino, &inode, &leaked) == EXT2_OK) {
+                if (ext2_free_inode(ctx, (u32)new_ino) != 0) {
+                    /* inode が漏れる。もう何も指していないので整合はしている */
+                }
+            }
+        }
+        return ret;
+    }
 
     /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
     return ext2_sync(ctx);
@@ -182,6 +231,7 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
     u32 blocks_needed, bi, remaining, to_write, now;
     const u8 *src;
     int ret;
+    int leaked = 0;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
@@ -189,26 +239,37 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
     if (ret != 0) return ret;
     if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) return EXT2_ERR_ISDIR;
 
-    /* 切り詰めは**全部返せたときだけ**進む (票 B8)。間接表が読めないまま
-     * 先へ進むと、下の bmap_set が表へのポインタを書き換えて配下の
-     * データブロックが使用中のまま行方不明になる。 */
-    ret = ext2_free_all_blocks(ctx, &inode);
-    if (ret != 0) return ret;
-
     now = ext2_current_time();
-    inode.size = size;
     inode.mtime = now; inode.ctime = now;
 
+    /* 切り詰め (票 B8 往復 3 / Codex P1-A)。**媒体上の inode から参照を外して
+     * 書いてから**旧ブロックを返す。以前は返してから最後に inode を書いて
+     * いたので、その間 (旧ブロックの再読・新ブロックの割り当てと書き込み・
+     * inode の書き込み) のどこで失敗しても、媒体上の inode が解放済みの
+     * 旧ブロックを指したまま残り、次の割り当てで別ファイルと共有された。
+     *
+     * 代わりに、ここから先で失敗すると**ファイルは 0 バイトになる**
+     * (旧内容は戻らない)。このファイルの書き込みは「全体の置き換え」なので、
+     * 失敗を返して呼び手にやり直させる。 */
+    ret = ext2_truncate_blocks(ctx, ino, &inode, &leaked);
+    if (ret != 0) return ret;                  /* 何も返していない。旧内容のまま */
+
+    inode.size = size;
     blocks_needed = (size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
     src = (const u8 *)data;
     remaining = size;
 
+    /* ここから先の失敗では、媒体上の inode は 0 本を指している (上で書いた)。
+     * 新しいブロックと表はメモリ上の inode からしか辿れないので返してよい。 */
     for (bi = 0; bi < blocks_needed; bi++) {
         int blk = ext2_alloc_block(ctx);
-        if (blk < 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_write_inode(ctx, ino, &inode); return EXT2_ERR_NOSPC; }
+        if (blk < 0) { ret = EXT2_ERR_NOSPC; goto fail; }
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
-        if (ret != 0) { ext2_free_block(ctx, (u32)blk); return ret; }
+        if (ret != 0) {
+            if (ext2_free_block(ctx, (u32)blk) != 0) { /* 漏れ */ }
+            goto fail;
+        }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         to_write = remaining;
@@ -216,15 +277,27 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
         ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
-        if (ret != 0) return EXT2_ERR_IO;
+        if (ret != 0) { ret = EXT2_ERR_IO; goto fail; }
 
         inode.blocks += 2;
         remaining -= to_write;
     }
 
+    /* 失敗すると新しい内容が媒体に載ったか区別できない (載っていれば新しい
+     * ブロックを指している)。**何も返さない** (漏れで止める)。 */
     ret = ext2_write_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
-    return ext2_sync(ctx);
+    ret = ext2_sync(ctx);
+    if (ret != 0) return ret;
+    /* 旧ブロックを返しきれなかった。中身は正しく書けているが、漏れを
+     * 「成功」とは言わない */
+    return leaked ? EXT2_ERR_IO : EXT2_OK;
+
+fail:
+    if (ext2_release_blocks(ctx, inode.block) != 0) {
+        /* 漏れ。元の失敗を優先して返す */
+    }
+    return ret;
 }
 
 int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offset)
@@ -274,7 +347,12 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
             if (ret != 0) {
                 kprintf(0x0C, "[E2W] bmap_set FAIL bi=%d ret=%d\n",
                         (int)bi, ret);
-                ext2_free_block(ctx, (u32)new_blk);
+                /* 既存ファイルの表は媒体上の inode から辿れる。IO なら
+                 * new_blk が表に載ったかもしれないので**返さない** (漏れで
+                 * 止める)。NOSPC ならどこにも載っていない (票 B8 往復 3)。 */
+                if (ret == EXT2_ERR_NOSPC &&
+                    ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+                io_err = 1;
                 break;
             }
             inode.blocks += 2;
@@ -392,18 +470,27 @@ int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
          * 「消えていない」とは言えない。**返しきれなかったことだけを
          * 最後に報告する** (票 B8)。
          *
-         * 返しきれなかったときは **inode を解放しない**。ext2_free_all_blocks
-         * は失敗時に 1 ブロックも解放せずブロックの指し先を inode に残すので、
-         * ここで inode のビットまで空きに戻すと、次に ext2_alloc_inode が
-         * その番号を配った時点で ext2_create が inode を丸ごと上書きし、
-         * 残したブロックを指すものが誰も居なくなる (= 本当の漏れ)。
-         * inode を「links 0・dtime 付き・使用中」で残せば、ブロックは
-         * その inode から辿れる孤児として残り、e2fsck が回収できる。 */
-        int free_ret = ext2_free_all_blocks(ctx, &inode);
+         * 順序 (往復 3): links 0・dtime 付き・ポインタ 0 の inode を**先に
+         * 書き**、その後でブロックを返し、最後に inode を返す。
+         *
+         * inode を残すかどうか:
+         *   - inode を書けなかった -> **何も返さない** (ブロックも inode も)。
+         *     媒体上の inode はまだブロックを指しているかもしれないので、
+         *     ブロックを返すと相互リンクに、inode を返すと指したままの inode
+         *     の再利用になる。孤児として残り、e2fsck が回収する。
+         *   - inode を書けた -> ブロックを返しきれなくても **inode は返す**。
+         *     inode はもう何も指していないので、残しても漏れたブロックへは
+         *     辿れない (往復 2 で「残す」にしたのは、返しきれなかったブロック
+         *     を inode が指したままだったから。順序を変えてその理由は消えた)。 */
+        int leaked = 0;
+        int r;
         inode.dtime = ext2_current_time();
-        ext2_write_inode(ctx, ino, &inode);
-        if (free_ret != 0) { ext2_sync(ctx); return free_ret; }
-        ext2_free_inode(ctx, ino);
+        ret = ext2_truncate_blocks(ctx, ino, &inode, &leaked);
+        if (ret != 0) { ext2_sync(ctx); return ret; }
+        r = ext2_free_inode(ctx, ino);
+        ext2_sync(ctx);
+        if (leaked) return EXT2_ERR_IO;
+        return r;
     } else {
         inode.ctime = ext2_current_time();
         ext2_write_inode(ctx, ino, &inode);

@@ -172,7 +172,14 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
         if (new_blk < 0) return EXT2_ERR_NOSPC;
 
         ret = ext2_bmap_set(ctx, &dir_inode, bi, (u32)new_blk);
-        if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); return ret; }
+        if (ret != 0) {
+            /* ディレクトリの表は媒体上の inode から辿れる。IO なら new_blk が
+             * 表に載ったかもしれないので**返さない** (漏れで止める)。
+             * NOSPC ならどこにも載っていない (票 B8 往復 3)。 */
+            if (ret == EXT2_ERR_NOSPC &&
+                ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+            return ret;
+        }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         *(u32 *)&ext2_g_aux[0]     = ino;
@@ -188,7 +195,14 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
         dir_inode.size += EXT2_BLOCK_SIZE;
         dir_inode.blocks += 2;
         dir_inode.mtime = now;
-        ext2_write_inode(ctx, dir_ino, &dir_inode);
+        /* 既存ブロックへ足す上の経路 (mtime だけ) と違い、ここは**新しい
+         * ブロックへの参照そのもの** (直接ポインタ、または新しい単一間接表への
+         * ポインタ) をこの inode が運ぶ。書けなければ名前は辿れず、成功と言うと
+         * **ファイルを作ったと答えて名前を失う** (票 B8 往復 3、段 C の掃引で
+         * 発見: create が成功を返し、表と新ブロックが漏れて名前が消えた)。
+         * 書けたか区別できないので、ブロックは返さない (漏れで止める)。 */
+        ret = ext2_write_inode(ctx, dir_ino, &dir_inode);
+        if (ret != 0) return EXT2_ERR_IO;
     }
     ext2_ns_touch(ctx);
     return EXT2_OK;
@@ -272,7 +286,10 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
     new_blk = ext2_alloc_block(ctx);
-    if (new_blk < 0) { ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
+    if (new_blk < 0) {
+        if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
+        return EXT2_ERR_NOSPC;
+    }
 
     now = ext2_current_time();
     ext2_mem_zero(&inode, sizeof(inode));
@@ -297,9 +314,18 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     ext2_g_aux[pos + 8] = '.'; ext2_g_aux[pos + 9] = '.';
 
     ret = ext2_write_block(ctx, (u32)new_blk, ext2_g_aux);
-    if (ret != 0) { ext2_free_block(ctx, (u32)new_blk); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
+    if (ret != 0) {
+        /* inode はまだ書いていないので、new_blk を指すものは媒体に無い */
+        if (ext2_free_block(ctx, (u32)new_blk) != 0) { /* 漏れ */ }
+        if (ext2_free_inode(ctx, (u32)new_ino) != 0) { /* 漏れ */ }
+        return EXT2_ERR_IO;
+    }
 
-    ext2_write_inode(ctx, (u32)new_ino, &inode);
+    /* 以前は失敗を捨てて名前を付けていた — 名前が**書けていない inode**
+     * (前の持ち主の内容) を指すことになる。書けたか区別できないので
+     * **何も返さない** (書けていれば new_blk を指している。票 B8 往復 3)。 */
+    ret = ext2_write_inode(ctx, (u32)new_ino, &inode);
+    if (ret != 0) return EXT2_ERR_IO;
     ret = ext2_add_entry(ctx, parent_ino, name, (u32)new_ino, EXT2_FT_DIR);
     if (ret != 0) return ret;
 
@@ -377,18 +403,26 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     ret = ext2_delete_entry(ctx, parent_ino, name);
     if (ret != 0) return ret;
 
-    /* ext2_unlink と同じ扱い (票 B8): ここでは名前が既に消えているので
-     * 「消えていない」とは言えない。返しきれなかったことだけを最後に
-     * 報告する。
-     *
-     * 返しきれなかったときは **inode を解放しない** (理由は ext2_unlink の
-     * 同じ箇所)。inode のビットを空きに戻すと、残したブロックの唯一の
-     * 指し先が次の割り当てで上書きされて本当に漏れる。 */
-    free_ret = ext2_free_all_blocks(ctx, &inode);
-    inode.links_count = 0;
-    inode.dtime = ext2_current_time();
-    ext2_write_inode(ctx, ino, &inode);
-    if (free_ret == EXT2_OK) ext2_free_inode(ctx, ino);
+    /* ext2_unlink と同じ扱い (票 B8 往復 3、理由は ext2_unlink の同じ箇所):
+     * 名前は既に消えているので「消えていない」とは言えない。
+     *   1. links 0・dtime 付き・ポインタ 0 の inode を**先に書く**
+     *      -> 書けなければ**何も返さない** (孤児として残す)
+     *   2. ブロックを返す -> 返しきれなくても漏れで済む
+     *   3. inode を返す (もう何も指していない)
+     * 親の links と used_dirs は名前が消えた時点で正しくするので、1 の
+     * 失敗でも下へ進む。 */
+    {
+        int leaked = 0;
+        inode.links_count = 0;
+        inode.dtime = ext2_current_time();
+        ret = ext2_truncate_blocks(ctx, ino, &inode, &leaked);
+        if (ret != 0) {
+            free_ret = ret;
+        } else {
+            free_ret = ext2_free_inode(ctx, ino);
+            if (leaked) free_ret = EXT2_ERR_IO;
+        }
+    }
 
     ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
     if (ret == 0) {

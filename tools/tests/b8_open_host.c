@@ -99,8 +99,10 @@ static void check_at(int cond, const char *what, int line)
 
 void *kmemcpy(void *dst, const void *src, u32 n)
 {
-    u8 *d = (u8 *)dst; const u8 *s = (const u8 *)src; u32 i;
-    for (i = 0; i < n; i++) d[i] = s[i];
+    u8 *d = (u8 *)dst; const u8 *s = (const u8 *)src; u32 i = 0;
+    /* 掃引 (段 C) は何千回も操作をやり直すので、4 バイトずつ写す */
+    for (; i + 4 <= n; i += 4) *(u32 *)(d + i) = *(const u32 *)(s + i);
+    for (; i < n; i++) d[i] = s[i];
     return dst;
 }
 
@@ -213,6 +215,87 @@ static void fail_disarm(void) { g_fail_armed = 0; }
 
 static void io_reset(void) { g_rd_sect = 0; g_wr_sect = 0; }
 
+/* ---- 往復 3: **書き込み**の失敗注入 (読み出し側と同じ作法) ---- */
+static u32 g_wfail_lba;
+static int g_wfail_armed;
+static int g_wfail_nth;       /* 0 = armed のあいだずっと */
+static int g_wfail_seen;
+static int g_wfail_fired;
+
+static void wfail_arm(u32 lba, int nth)
+{
+    g_wfail_lba = lba; g_wfail_armed = 1; g_wfail_nth = nth;
+    g_wfail_seen = 0; g_wfail_fired = 0;
+}
+static void wfail_arm_always(u32 lba) { wfail_arm(lba, 0); }
+static void wfail_disarm(void) { g_wfail_armed = 0; }
+
+/* ---- 往復 3: 掃引用の注入 ----
+ * 仕掛けてから at 回目の**セクタ I/O** (読み書き問わず、kind で絞れる) を落とす。
+ * sticky = 1 なら at 回目**以降すべて**を落とす (装置が途中で消えた)。
+ * 1KB ブロック = 2 セクタなので、書き込みの 2 セクタ目だけが落ちる
+ * (= ブロックの前半だけ新しくなる) 場合も自然に作られる。 */
+#define SW_KIND_ANY    0
+#define SW_KIND_READ   1
+#define SW_KIND_WRITE  2
+static int g_sw_armed, g_sw_at, g_sw_sticky, g_sw_kind, g_sw_seen, g_sw_fired;
+
+static void sw_arm(int at, int sticky, int kind)
+{
+    g_sw_armed = 1; g_sw_at = at; g_sw_sticky = sticky; g_sw_kind = kind;
+    g_sw_seen = 0; g_sw_fired = 0;
+}
+static void sw_disarm(void) { g_sw_armed = 0; }
+
+static int sw_hit(int kind)
+{
+    if (!g_sw_armed) return 0;
+    if (g_sw_kind != SW_KIND_ANY && g_sw_kind != kind) return 0;
+    g_sw_seen++;
+    if (g_sw_seen == g_sw_at || (g_sw_sticky && g_sw_seen > g_sw_at)) {
+        g_sw_fired++;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- 往復 3: 書き込みの取り消し記録 (掃引の 1 回ごとにディスクを戻す) ---- */
+#define UNDO_MAX  8192
+static u32 g_undo_lba[UNDO_MAX];
+static u8  g_undo_data[UNDO_MAX * 512u];
+static u8  g_undo_mark[(DISK_SECTORS + 7) / 8];
+static int g_undo_n, g_undo_on, g_undo_overflow;
+
+/* ---- 往復 3: 書き込み先の記録 (空打ちで配置を知る) ---- */
+#define WLOG_MAX  8192
+static u32 g_wlog_lba[WLOG_MAX];
+static int g_wlog_n, g_wlog_on;
+
+static void undo_record(u32 lba)
+{
+    if (!g_undo_on) return;
+    if (g_undo_mark[lba / 8] & (1 << (lba % 8))) return;
+    if (g_undo_n >= UNDO_MAX) { g_undo_overflow = 1; return; }
+    g_undo_mark[lba / 8] |= (u8)(1 << (lba % 8));
+    g_undo_lba[g_undo_n] = lba;
+    kmemcpy(g_undo_data + (u32)g_undo_n * 512u, g_disk + lba * 512u, 512);
+    g_undo_n++;
+}
+
+static void undo_begin(void) { g_undo_n = 0; g_undo_on = 1; }
+
+static void undo_rollback(void)
+{
+    int i;
+    for (i = g_undo_n - 1; i >= 0; i--) {
+        u32 lba = g_undo_lba[i];
+        kmemcpy(g_disk + lba * 512u, g_undo_data + (u32)i * 512u, 512);
+        g_undo_mark[lba / 8] &= (u8)~(1 << (lba % 8));
+    }
+    g_undo_n = 0;
+    g_undo_on = 0;
+}
+
 static Device g_hd0;
 
 Device *dev_find(const char *name)
@@ -229,6 +312,7 @@ int dev_blk_read_lba(Device *dev, u32 lba, int count, void *buf)
     for (i = 0; i < count; i++) {
         u32 cur = lba + (u32)i;
         if (cur >= DISK_SECTORS) return -1;
+        if (sw_hit(SW_KIND_READ)) return -1;
         if (g_fail_armed && cur == g_fail_lba) {
             g_fail_seen++;
             /* nth == 0 は「armed のあいだずっと落とす」(本当の不良セクタ) */
@@ -248,8 +332,19 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
     int i;
     if (!dev) return -1;
     for (i = 0; i < count; i++) {
-        if (lba + (u32)i >= DISK_SECTORS) return -1;
-        kmemcpy(g_disk + (lba + (u32)i) * 512u, (const u8 *)buf + i * 512, 512);
+        u32 cur = lba + (u32)i;
+        if (cur >= DISK_SECTORS) return -1;
+        if (sw_hit(SW_KIND_WRITE)) return -1;
+        if (g_wfail_armed && cur == g_wfail_lba) {
+            g_wfail_seen++;
+            if (g_wfail_nth == 0 || g_wfail_seen == g_wfail_nth) {
+                g_wfail_fired++;
+                return -1;
+            }
+        }
+        undo_record(cur);
+        if (g_wlog_on && g_wlog_n < WLOG_MAX) g_wlog_lba[g_wlog_n++] = cur;
+        kmemcpy(g_disk + cur * 512u, (const u8 *)buf + i * 512, 512);
         g_wr_sect++;
     }
     return 0;
@@ -443,6 +538,8 @@ static void disk_setup(void)
 static void disk_teardown(void)
 {
     fail_disarm();
+    wfail_disarm();
+    sw_disarm();
     if (g_ec) { vfs_umount("/"); g_ec = (Ext2Ctx *)0; }
 }
 
@@ -1044,189 +1141,611 @@ static int block_in_use(u32 blk)
     return (bm[byte_idx] & (1 << bit_idx)) ? 1 : 0;
 }
 
-/* 別票候補 -> 本票で対応: ext2_free_all_blocks が間接表を読めないとき、
- * **何も解放しない** (以前は表だけ解放して配下を行方不明にしていた)。 */
-static void case_free_all_blocks_failure(void)
-{
-    static u8 pattern[16 * 1024];
-    static u8 got[16 * 1024];
-    Ext2Inode fi;
-    u32 ino = 0, lba, i;
-    u32 ind_before, dir0_before, child_before;
-    int rc;
+/* ======================================================================== */
+/*  往復 3: **媒体の状態で**判定する — 相互リンク検査                        */
+/* ======================================================================== */
 
-    report("  [BONUS] free_all_blocks: 表が読めなければ何も解放しない\n");
-
-    for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 11 + 3);
-    CHECK(ext2_vfs_write(g_ec, "/etc/leak", pattern, sizeof(pattern)) == VFS_OK);
-
-    memo_cold();
-    CHECK(ext2_lookup(g_ec, "/etc/leak", &ino) == EXT2_OK);
-    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
-    CHECK(fi.block[EXT2_IND_BLOCK] != 0);
-    ind_before = fi.block[EXT2_IND_BLOCK];
-    dir0_before = fi.block[0];
-    /* 間接表の 1 本目が指す実データブロック (表ごと消えると行方不明になる) */
-    CHECK(ext2_bmap(g_ec, &fi, EXT2_NDIR_BLOCKS, &child_before) == EXT2_OK);
-    CHECK(child_before != 0);
-    lba = g_ec->base_lba + ind_before * 2;
-
-    /* 上書き (= 切り詰めてから書き直す) の途中で間接表が読めなくなる */
-    {
-        OS32_Stat st;
-        CHECK(ext2_vfs_stat(g_ec, "/etc/leak", &st) == VFS_OK);
-    }
-    io_reset();
-    fail_arm_always(lba);
-    rc = ext2_vfs_write(g_ec, "/etc/leak", "small", 5);
-    fail_disarm();
-
-    CHECK(g_fail_fired > 0);
-    CHECK(rc < 0);                       /* 上書きは通らない */
-
-    /* **何も解放していない**。媒体上の inode は書き戻されていないので
-     * inode を見ても分からない — **ビットマップを直に見る**。
-     * 直す前はここで直接ブロックが「空き」に戻り (下見が無いので先に解放
-     * してしまう)、さらに間接表も解放されて配下が行方不明になっていた。 */
-    CHECK(block_in_use(dir0_before) == 1);
-    CHECK(block_in_use(ind_before) == 1);
-    CHECK(block_in_use(child_before) == 1);   /* 間接表の先の実データ */
-
-    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
-    CHECK(fi.block[EXT2_IND_BLOCK] == ind_before);
-    CHECK(fi.block[0] == dir0_before);
-    CHECK(fi.size == 16 * 1024);
-
-    /* 解放されていたら、次の割り当てが同じブロックを別ファイルへ配る
-     * (2026-09-06 の相互リンクと同じ壊れ方)。そうならないことを見る。 */
-    {
-        Ext2Inode ni;
-        u32 nino = 0;
-        int k;
-        CHECK(ext2_vfs_write(g_ec, "/etc/after", pattern, 4096) == VFS_OK);
-        memo_cold();
-        CHECK(ext2_lookup(g_ec, "/etc/after", &nino) == EXT2_OK);
-        CHECK(ext2_read_inode(g_ec, nino, &ni) == EXT2_OK);
-        for (k = 0; k < EXT2_NDIR_BLOCKS; k++) {
-            CHECK(ni.block[k] != dir0_before);
-            CHECK(ni.block[k] != ind_before);
-            CHECK(ni.block[k] != child_before);
-        }
-    }
-
-    /* 中身も無事 */
-    kmemset(got, 0, sizeof(got));
-    CHECK(ext2_read_file(g_ec, ino, got, sizeof(got)) == 16 * 1024);
-    {
-        int same = 1;
-        for (i = 0; i < sizeof(pattern); i++) {
-            if (got[i] != pattern[i]) { same = 0; break; }
-        }
-        CHECK(same);
-    }
-
-    /* 回帰: 読めるなら従来どおり上書きできて、表が解放される */
-    memo_cold();
-    CHECK(ext2_vfs_write(g_ec, "/etc/leak", "small", 5) == VFS_OK);
-    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
-    CHECK(fi.block[EXT2_IND_BLOCK] == 0);
-    CHECK(fi.size == 5);
-}
-
-/* inode がまだ「使用中」かを inode ビットマップで直に見る
- * (fs/ext2_inode.c の ext2_free_inode と同じ式)。 */
-static int inode_in_use(u32 ino)
-{
-    static u8 bm[EXT2_BLOCK_SIZE];
-    u32 g, rel;
-    g = (ino - 1) / g_ec->sb_info.inodes_per_group;
-    rel = (ino - 1) % g_ec->sb_info.inodes_per_group;
-    if (g >= g_ec->num_groups) return 1;
-    if (ext2_read_block(g_ec, g_ec->gd_table[g].inode_bitmap, bm) != 0) return 1;
-    return (bm[rel / 8] & (1 << (rel % 8))) ? 1 : 0;
-}
-
-/* 削除系: ブロックを返しきれなかったとき **inode まで空きに戻さない**。
+/* 戻り値ではなく媒体の状態を見る検査。**ext2 のコードを通さず RAM ディスク
+ * (g_disk) を直に読む** — 検査対象と同じ読み方をすると同じ誤りを共有して
+ * 見逃すため。形 (グループ記述子の位置など) だけ g_ec から借りる (操作では
+ * 変わらない)。
  *
- * ext2_free_all_blocks は失敗時に 1 ブロックも解放せず指し先を inode に
- * 残す。そこで inode のビットだけ空きに戻すと、次の ext2_alloc_inode が
- * 同じ番号を配って ext2_create が inode を上書きし、残したブロックを
- * 指すものが誰も居なくなる (本当の漏れ)。再開時の読み直しで見つけた。 */
-static void case_unlink_keeps_inode(void)
+ *   freed_ref   … 使用中の inode から辿れるのに、ビットマップ上は空きのブロック
+ *                 = **次の割り当てで別ファイルと共有される** (相互リンクの前段)
+ *   dup_ref     … 2 か所から指されるブロック (相互リンクそのもの)
+ *   bad_ref     … 範囲外のブロック番号 (ゴミの表を指している)
+ *   dangling    … 空きの inode を指す名前 (inode 版の相互リンクの前段)
+ *   unref_inuse … ビットマップ上は使用中だが誰も指さないブロック
+ *                 (メタデータ + **漏れ**。操作前との差を漏れとして数える)
+ *
+ * 前の 4 つが 0 であることを「整合している」と言う。**漏れは許容して数える。** */
+typedef struct {
+    u32 freed_ref;
+    u32 dup_ref;
+    u32 bad_ref;
+    u32 dangling;
+    u32 unref_inuse;
+} MediaReport;
+
+static u8 g_refmap[(DISK_FS_SECTORS / 2 + 7) / 8];
+static MediaReport *g_mr;
+
+static u8 *raw_blk(u32 b) { return g_disk + (g_ec->base_lba + b * 2) * 512u; }
+
+static int raw_block_used(u32 b)
+{
+    u32 rel = b - g_ec->sb_info.first_data_block;
+    u32 g = rel / g_ec->sb_info.blocks_per_group;
+    u32 bit = rel % g_ec->sb_info.blocks_per_group;
+    const u8 *bm = raw_blk(g_ec->gd_table[g].block_bitmap);
+    return (bm[bit / 8] >> (bit % 8)) & 1;
+}
+
+static int raw_inode_used(u32 ino)
+{
+    u32 g = (ino - 1) / g_ec->sb_info.inodes_per_group;
+    u32 rel = (ino - 1) % g_ec->sb_info.inodes_per_group;
+    const u8 *bm = raw_blk(g_ec->gd_table[g].inode_bitmap);
+    return (bm[rel / 8] >> (rel % 8)) & 1;
+}
+
+static const u8 *raw_inode(u32 ino)
+{
+    u32 g = (ino - 1) / g_ec->sb_info.inodes_per_group;
+    u32 idx = (ino - 1) % g_ec->sb_info.inodes_per_group;
+    u32 blk = g_ec->gd_table[g].inode_table
+              + (idx * g_ec->sb_info.inode_size) / EXT2_BLOCK_SIZE;
+    u32 off = (idx * g_ec->sb_info.inode_size) % EXT2_BLOCK_SIZE;
+    return raw_blk(blk) + off;
+}
+
+static u32 raw_inode_ptr(u32 ino, int i) { return *(const u32 *)(raw_inode(ino) + 40 + i * 4); }
+
+static int mr_ref(u32 b)
+{
+    if (b < g_ec->sb_info.first_data_block || b >= g_ec->sb_info.total_blocks) {
+        g_mr->bad_ref++;
+        return 0;
+    }
+    if (!raw_block_used(b)) g_mr->freed_ref++;
+    if (g_refmap[b / 8] & (1 << (b % 8))) g_mr->dup_ref++;
+    g_refmap[b / 8] |= (u8)(1 << (b % 8));
+    return 1;
+}
+
+static void mr_dir_block(u32 b)
+{
+    const u8 *d = raw_blk(b);
+    u32 pos = 0;
+    while (pos + 8 <= EXT2_BLOCK_SIZE) {
+        u32 ino = *(const u32 *)(d + pos);
+        u16 rl = *(const u16 *)(d + pos + 4);
+        if (rl < 8 || pos + rl > EXT2_BLOCK_SIZE) break;
+        if (ino != 0 && (ino > g_ec->sb_info.total_inodes || !raw_inode_used(ino)))
+            g_mr->dangling++;
+        pos += rl;
+    }
+}
+
+static void mr_leaf(u32 b, int is_dir)
+{
+    if (mr_ref(b) && is_dir) mr_dir_block(b);
+}
+
+static void mr_walk_inode(u32 ino)
+{
+    const u8 *in = raw_inode(ino);
+    u16 mode = *(const u16 *)in;
+    int is_dir = ((mode & EXT2_S_IFMT) == EXT2_S_IFDIR);
+    u32 blk[EXT2_N_BLOCKS];
+    u32 j, k;
+    int i;
+
+    for (i = 0; i < EXT2_N_BLOCKS; i++) blk[i] = *(const u32 *)(in + 40 + i * 4);
+    for (i = 0; i < EXT2_NDIR_BLOCKS; i++) if (blk[i]) mr_leaf(blk[i], is_dir);
+
+    if (blk[EXT2_IND_BLOCK] && mr_ref(blk[EXT2_IND_BLOCK])) {
+        const u8 *t = raw_blk(blk[EXT2_IND_BLOCK]);
+        for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
+            u32 e = *(const u32 *)(t + j * 4);
+            if (e) mr_leaf(e, is_dir);
+        }
+    }
+    if (blk[EXT2_DIND_BLOCK] && mr_ref(blk[EXT2_DIND_BLOCK])) {
+        const u8 *t = raw_blk(blk[EXT2_DIND_BLOCK]);
+        for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
+            u32 ind1 = *(const u32 *)(t + j * 4);
+            if (ind1 && mr_ref(ind1)) {
+                const u8 *t2 = raw_blk(ind1);
+                for (k = 0; k < EXT2_ADDR_PER_BLOCK; k++) {
+                    u32 e = *(const u32 *)(t2 + k * 4);
+                    if (e) mr_leaf(e, is_dir);
+                }
+            }
+        }
+    }
+    if (blk[EXT2_TIND_BLOCK]) (void)mr_ref(blk[EXT2_TIND_BLOCK]);
+}
+
+static void media_check(MediaReport *r)
+{
+    u32 ino, b;
+    kmemset(r, 0, sizeof(*r));
+    kmemset(g_refmap, 0, sizeof(g_refmap));
+    g_mr = r;
+    for (ino = 1; ino <= g_ec->sb_info.total_inodes; ino++) {
+        if (raw_inode_used(ino)) mr_walk_inode(ino);
+    }
+    for (b = g_ec->sb_info.first_data_block; b < g_ec->sb_info.total_blocks; b++) {
+        if (raw_block_used(b) && !(g_refmap[b / 8] & (1 << (b % 8)))) r->unref_inuse++;
+    }
+}
+
+static int media_ok(const MediaReport *r)
+{
+    return r->freed_ref == 0 && r->dup_ref == 0 && r->bad_ref == 0 && r->dangling == 0;
+}
+
+static int leak_delta(const MediaReport *after, const MediaReport *before)
+{
+    return (int)after->unref_inuse - (int)before->unref_inuse;
+}
+
+static void report_media(const MediaReport *r)
+{
+    report("freed_ref="); report_i((int)r->freed_ref);
+    report(" dup_ref="); report_i((int)r->dup_ref);
+    report(" bad_ref="); report_i((int)r->bad_ref);
+    report(" dangling="); report_i((int)r->dangling);
+    report(" unref_inuse="); report_i((int)r->unref_inuse);
+}
+
+static void check_media_at(const MediaReport *r, int line)
+{
+    check_at(media_ok(r), "media consistent (freed_ref / dup_ref / bad_ref / dangling == 0)",
+             line);
+    if (!media_ok(r)) { report("      "); report_media(r); report("\n"); }
+}
+
+#define CHECK_MEDIA(r) check_media_at((r), __LINE__)
+
+/* メモリ上の状態 (空き数・経路の記憶) を捨てて媒体から読み直す。
+ * ext2_unmount は sync する (= 書く) ので、mounted を落としてから mount する。 */
+static void remount_cold(void)
+{
+    int drv = g_ec->drive_num;
+    g_ec->mounted = 0;
+    if (ext2_mount(g_ec, drv) != EXT2_OK) {
+        report("  (harness) remount failed\n");
+        g_failures++;
+    }
+}
+
+static int file_layout(const char *path, u32 *ino, Ext2Inode *fi)
+{
+    memo_cold();
+    if (ext2_lookup(g_ec, path, ino) != EXT2_OK) return 0;
+    return ext2_read_inode(g_ec, *ino, fi) == EXT2_OK;
+}
+
+/* ======================================================================== */
+/*  往復 3: 狙いを定めた回帰試験                                              */
+/* ======================================================================== */
+
+/* Codex P1-A の反例そのもの: 下見 (往復 2) の後で間接表の**再読だけ**が落ちる。
+ * 往復 2 は「下見 = 1 回目、再読 = 2 回目」で、2 回目を落とすと直接ブロックを
+ * 返したあと inode を書かずに戻った (Codex 実測: rc=-1, direct=0, indirect=1)。
+ * 往復 3 は下見を持たないので、1 回目と 2 回目の両方を落として見る。
+ * どちらでも媒体が整合していること、落ちたなら漏れを報告すること。 */
+static void case_reread_after_probe(void)
 {
     static u8 pattern[16 * 1024];
+    static u8 got[64];
+    MediaReport before, after;
     Ext2Inode fi;
-    u32 ino = 0, etc_ino = 0, lba, ind, child, tmp = 0, i;
-    int rc;
+    u32 ino = 0, ind, child = 0, i, lba;
+    int nth, rc;
 
-    report("  [BONUS-3] unlink: 返しきれなければ inode を解放しない\n");
+    report("  [P1-A] 上書き中に間接表の読み出し (1 回目 / 2 回目) が落ちる\n");
+    for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 11 + 3);
 
+    for (nth = 1; nth <= 2; nth++) {
+        CHECK(ext2_vfs_write(g_ec, "/etc/leak", pattern, sizeof(pattern)) == VFS_OK);
+        CHECK(file_layout("/etc/leak", &ino, &fi));
+        ind = fi.block[EXT2_IND_BLOCK];
+        CHECK(ind != 0);
+        CHECK(ext2_bmap(g_ec, &fi, EXT2_NDIR_BLOCKS, &child) == EXT2_OK);
+        lba = g_ec->base_lba + ind * 2;
+        media_check(&before);
+        CHECK_MEDIA(&before);
+
+        memo_cold();
+        fail_arm(lba, nth);
+        rc = ext2_vfs_write(g_ec, "/etc/leak", "small", 5);
+        fail_disarm();
+
+        media_check(&after);
+        CHECK_MEDIA(&after);                     /* 判定の中心 */
+
+        CHECK(file_layout("/etc/leak", &ino, &fi));
+        if (g_fail_fired) {
+            CHECK(rc == VFS_ERR_IO);             /* 漏れを「成功」と言わない */
+            CHECK(fi.size == 5);                 /* 新しい中身は書けている */
+            CHECK(fi.block[EXT2_IND_BLOCK] == 0);
+            /* 読めなかった表は配下ごと漏らす (使用中のまま = 配られない) */
+            CHECK(block_in_use(ind) == 1);
+            CHECK(block_in_use(child) == 1);
+            /* 表 1 + 配下 4 (16KB = 直接 12 + 間接 4) */
+            CHECK(leak_delta(&after, &before) == 5);
+        } else {
+            CHECK(rc == VFS_OK);
+            CHECK(leak_delta(&after, &before) == 0);
+        }
+        kmemset(got, 0, sizeof(got));
+        CHECK(ext2_read_file(g_ec, ino, got, sizeof(got)) == 5);
+        CHECK(kstrncmp((const char *)got, "small", 5) == 0);
+    }
+}
+
+/* Codex P1-B: ext2_free_block がビットマップの I/O エラーを捨てていた。
+ * 直す前: 読み出し失敗は黙って戻り、**書き込み失敗は空き数だけ増やして rc=0**
+ * (Codex 実測: rc=0, old block still allocated)。 */
+static void case_free_block_bitmap_failure(void)
+{
+    static u8 pattern[16 * 1024];
+    MediaReport before, after;
+    Ext2Inode fi;
+    u32 bm_lba, fb, fbc, etc_ino = 0, ino = 0, tmp = 0, i;
+    int blk, rc;
+
+    report("  [P1-B] ext2_free_block: ビットマップの読み出し失敗・書き込み失敗\n");
+    bm_lba = g_ec->base_lba + g_ec->gd_table[0].block_bitmap * 2;
+
+    blk = ext2_alloc_block(g_ec);
+    CHECK(blk > 0);
+    /* 前半セクタにビットがあること (下の「後半だけ落ちる」の前提) */
+    CHECK((u32)blk - g_ec->sb_info.first_data_block < 512u * 8u);
+    fb = g_ec->gd_table[0].free_blocks;
+    fbc = g_ec->sb_info.free_blocks_count;
+
+    /* 読み出し失敗: 返せなかったと言い、空き数を動かさない */
+    fail_arm_always(bm_lba);
+    rc = ext2_free_block(g_ec, (u32)blk);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(block_in_use((u32)blk) == 1);
+    CHECK(g_ec->gd_table[0].free_blocks == fb);
+    CHECK(g_ec->sb_info.free_blocks_count == fbc);
+
+    /* 書き込み失敗 */
+    wfail_arm_always(bm_lba);
+    rc = ext2_free_block(g_ec, (u32)blk);
+    wfail_disarm();
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(block_in_use((u32)blk) == 1);
+    CHECK(g_ec->gd_table[0].free_blocks == fb);
+    CHECK(g_ec->sb_info.free_blocks_count == fbc);
+
+    /* 後半セクタだけ書けない: ビットは前半にあるので媒体上は消えるが、
+     * 成功とは言わず空き数も動かさない (実際より少なく見える = 安全側) */
+    wfail_arm_always(bm_lba + 1);
+    rc = ext2_free_block(g_ec, (u32)blk);
+    wfail_disarm();
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(block_in_use((u32)blk) == 0);
+    CHECK(g_ec->gd_table[0].free_blocks == fb);
+    /* 返し直しても空き数を二重に増やさない */
+    CHECK(ext2_free_block(g_ec, (u32)blk) == EXT2_OK);
+    CHECK(g_ec->gd_table[0].free_blocks == fb);
+
+    /* 正常系 */
+    blk = ext2_alloc_block(g_ec);
+    CHECK(blk > 0);
+    fb = g_ec->gd_table[0].free_blocks;
+    CHECK(ext2_free_block(g_ec, (u32)blk) == EXT2_OK);
+    CHECK(g_ec->gd_table[0].free_blocks == fb + 1);
+    CHECK(block_in_use((u32)blk) == 0);
+
+    /* FS 経由: 削除中にブロックビットマップへ 1 本も書けない */
+    for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 3 + 9);
+    CHECK(ext2_vfs_write(g_ec, "/etc/bmw", pattern, sizeof(pattern)) == VFS_OK);
+    CHECK(file_layout("/etc/bmw", &ino, &fi));
+    CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
+    media_check(&before);
+    wfail_arm_always(bm_lba);
+    rc = ext2_unlink(g_ec, etc_ino, "bmw");
+    wfail_disarm();
+    media_check(&after);
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);                    /* 漏れを報告する */
+    CHECK_MEDIA(&after);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/bmw", &tmp) == EXT2_ERR_NOTFOUND);
+    CHECK(raw_inode_used(ino) == 0);             /* inode はもう何も指さない */
+    CHECK(leak_delta(&after, &before) == 17);    /* データ 16 + 間接表 1 */
+}
+
+/* 空打ち: 書き込みを取り消し記録つきで一度通し、書いた後の配置を読んでから
+ * ディスクとメモリ上の状態を元に戻す。 */
+static int dry_write_layout(const char *path, const void *data, u32 size, Ext2Inode *out)
+{
+    u32 ino = 0;
+    int ok;
+    remount_cold();
+    undo_begin();
+    memo_cold();
+    ok = (ext2_vfs_write(g_ec, path, data, size) == VFS_OK);
+    if (ok) ok = file_layout(path, &ino, out);
+    undo_rollback();
+    remount_cold();
+    return ok;
+}
+
+/* PM の分析 ②③: 切り詰めの**後で**新しいブロックの書き込みが落ちる。
+ * 往復 2 までは旧ブロックを返してから inode を書かずに戻ったので、媒体上の
+ * inode が解放済みの旧ブロックを指したまま残った。 */
+static void case_rewrite_new_block_failure(void)
+{
+    static u8 old_pat[16 * 1024];
+    static u8 new_pat[20 * 1024];
+    MediaReport before, after;
+    Ext2Inode fi, lay;
+    u32 ino = 0, i, target;
+    int which, rc, k;
+
+    report("  [PM 2/3] 切り詰めた後の新しい表 / データの書き込みが落ちる上書き\n");
+    for (i = 0; i < sizeof(old_pat); i++) old_pat[i] = (u8)(i * 7 + 1);
+    for (i = 0; i < sizeof(new_pat); i++) new_pat[i] = (u8)(i * 13 + 5);
+
+    for (which = 0; which < 2; which++) {
+        CHECK(ext2_vfs_write(g_ec, "/etc/rw", old_pat, sizeof(old_pat)) == VFS_OK);
+        CHECK(dry_write_layout("/etc/rw", new_pat, sizeof(new_pat), &lay));
+        /* ③ = 最初のデータブロック / ② = ext2_bmap_set が作る新しい間接表 */
+        target = (which == 0) ? lay.block[0] : lay.block[EXT2_IND_BLOCK];
+        CHECK(target != 0);
+        media_check(&before);
+        CHECK_MEDIA(&before);
+
+        memo_cold();
+        wfail_arm_always(g_ec->base_lba + target * 2);
+        rc = ext2_vfs_write(g_ec, "/etc/rw", new_pat, sizeof(new_pat));
+        wfail_disarm();
+        media_check(&after);
+
+        CHECK(g_wfail_fired > 0);
+        CHECK(rc == VFS_ERR_IO);
+        CHECK_MEDIA(&after);                     /* 判定の中心 */
+        CHECK(file_layout("/etc/rw", &ino, &fi));
+        CHECK(fi.size == 0);                     /* 旧内容は戻らない (0 バイト) */
+        for (k = 0; k < EXT2_N_BLOCKS; k++) CHECK(fi.block[k] == 0);
+        CHECK(leak_delta(&after, &before) == 0); /* 旧も新も全部返せた */
+    }
+    /* 回帰: 書けるなら書ける */
+    CHECK(ext2_vfs_write(g_ec, "/etc/rw", new_pat, sizeof(new_pat)) == VFS_OK);
+}
+
+/* Codex P1-C: ext2_create の失敗後始末が解放の失敗を捨てていた。
+ * データの書き込みが落ち、**続く後始末の書き込みも全部落ちる** (装置が途中で
+ * 消えた) 場合を作る。空打ちで書き込み先の順序を記録し、新しいファイルの
+ * 最初のデータブロックへの書き込みから先を全部落とす。 */
+static void case_create_cleanup_failure(void)
+{
+    static u8 pat[20 * 1024];
+    MediaReport before, after;
+    Ext2Inode lay;
+    u32 etc_ino = 0, tmp = 0, new_ino = 0, i, target;
+    int rc, k, first_data_write = -1;
+
+    report("  [P1-C] ext2_create: データ書き込みが落ち、後始末の解放も落ちる\n");
+    for (i = 0; i < sizeof(pat); i++) pat[i] = (u8)(i * 17 + 2);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
+
+    remount_cold();
+    undo_begin();
+    g_wlog_n = 0;
+    g_wlog_on = 1;
+    rc = ext2_create(g_ec, etc_ino, "cc", pat, sizeof(pat));
+    g_wlog_on = 0;
+    CHECK(rc == EXT2_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/cc", &new_ino) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, new_ino, &lay) == EXT2_OK);
+    undo_rollback();
+    remount_cold();
+
+    target = g_ec->base_lba + lay.block[0] * 2;
+    for (k = 0; k < g_wlog_n; k++) {
+        if (g_wlog_lba[k] == target) { first_data_write = k + 1; break; }
+    }
+    CHECK(first_data_write > 0);
+
+    /* (a) データの書き込みだけが一度落ちる: 後始末は通るので漏れ 0、inode も返す */
+    media_check(&before);
+    sw_arm(first_data_write, 0, SW_KIND_WRITE);
+    rc = ext2_create(g_ec, etc_ino, "cc", pat, sizeof(pat));
+    sw_disarm();
+    media_check(&after);
+    CHECK(g_sw_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK_MEDIA(&after);
+    CHECK(leak_delta(&after, &before) == 0);
+    CHECK(raw_inode_used(new_ino) == 0);
+    CHECK(block_in_use(lay.block[0]) == 0);
+    remount_cold();
+
+    /* (b) 続く後始末の書き込みも全部落ちる */
+    media_check(&before);
+    sw_arm(first_data_write, 1, SW_KIND_WRITE);
+    rc = ext2_create(g_ec, etc_ino, "cc", pat, sizeof(pat));
+    sw_disarm();
+    media_check(&after);
+
+    CHECK(g_sw_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK_MEDIA(&after);                         /* 判定の中心 */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/cc", &tmp) == EXT2_ERR_NOTFOUND);
+    /* 後始末の書き込みも全部落ちたので、ブロック 0 と inode は漏れる。
+     * 媒体上の inode は一度も書いていないので、そのブロックを指していない */
+    CHECK(block_in_use(lay.block[0]) == 1);
+    CHECK(raw_inode_used(new_ino) == 1);
+    CHECK(raw_inode_ptr(new_ino, 0) != lay.block[0]);
+    CHECK(leak_delta(&after, &before) == 1);
+}
+
+/* create の inode 書き込みが**後半セクタだけ**落ちる (inode は前半に載る = 実は
+ * 書けている) うえに、後始末の inode 解放 (ビットマップの読み出し) も落ちる。
+ * create は「書けたか区別できない」ので何も返さない。ここでブロックを返すと、
+ * inode のビットを戻せなかったとき**ビットの立った inode が解放済みブロックを
+ * 指す**。掃引は「1 回だけ」か「そこから全部」しか作らないので、離れた 2 か所の
+ * 失敗の組み合わせは掃引に出ない — ここで別に押さえる。 */
+static void case_create_inode_write_ambiguous(void)
+{
+    static u8 pat[4 * 1024];
+    MediaReport before, after;
+    u32 etc_ino = 0, tmp = 0, ino, idx, grp, i;
+    int probe, rc;
+
+    report("  [P1-C''] create: inode が載ったか区別できず、inode の解放も落ちる\n");
+    for (i = 0; i < sizeof(pat); i++) pat[i] = (u8)(i * 19 + 4);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
+
+    /* 次に配られる inode が 1KB ブロックの**前半セクタ**に載るまで番号を進める
+     * (後半に載る番号は割り当てたまま飛ばす = 足場の漏れ) */
+    for (;;) {
+        probe = ext2_alloc_inode(g_ec);
+        if (probe <= 0) { CHECK(probe > 0); return; }
+        idx = ((u32)probe - 1) % g_ec->sb_info.inodes_per_group;
+        if ((idx * g_ec->sb_info.inode_size) % EXT2_BLOCK_SIZE < 512u) {
+            CHECK(ext2_free_inode(g_ec, (u32)probe) == EXT2_OK);
+            break;
+        }
+    }
+    ino = (u32)probe;
+    grp = (ino - 1) / g_ec->sb_info.inodes_per_group;
+
+    media_check(&before);
+    wfail_arm_always(lba_of_inode(ino) + 1);               /* ブロックの後半だけ落ちる */
+    fail_arm(g_ec->base_lba + g_ec->gd_table[grp].inode_bitmap * 2, 2);
+                                         /* 1 回目 = alloc_inode / 2 回目 = 後始末 */
+    rc = ext2_create(g_ec, etc_ino, "amb", pat, sizeof(pat));
+    wfail_disarm();
+    fail_disarm();
+    media_check(&after);
+
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK_MEDIA(&after);                         /* 判定の中心 */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/amb", &tmp) == EXT2_ERR_NOTFOUND);
+    CHECK(raw_inode_used(ino) == 1);
+    CHECK(raw_inode_ptr(ino, 0) != 0);           /* 前半は書けていた */
+    CHECK(block_in_use(raw_inode_ptr(ino, 0)) == 1);
+}
+
+/* 削除でブロックを返しきれない (往復 2 の「inode を残す」を往復 3 で見直した)。 */
+static void case_unlink_release_failure(void)
+{
+    static u8 pattern[16 * 1024];
+    MediaReport before, after;
+    Ext2Inode fi;
+    u32 ino = 0, etc_ino = 0, ind, child = 0, tmp = 0, i;
+    int rc, k;
+
+    report("  [BONUS-3] unlink: 間接表が読めない -> 参照を外して漏らし、inode は返す\n");
     for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 5 + 7);
     CHECK(ext2_vfs_write(g_ec, "/etc/orphan", pattern, sizeof(pattern)) == VFS_OK);
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
-    CHECK(ext2_lookup(g_ec, "/etc/orphan", &ino) == EXT2_OK);
-    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    CHECK(file_layout("/etc/orphan", &ino, &fi));
     ind = fi.block[EXT2_IND_BLOCK];
     CHECK(ind != 0);
     CHECK(ext2_bmap(g_ec, &fi, EXT2_NDIR_BLOCKS, &child) == EXT2_OK);
-    lba = g_ec->base_lba + ind * 2;
+    media_check(&before);
 
-    fail_arm_always(lba);
+    fail_arm_always(g_ec->base_lba + ind * 2);
     rc = ext2_unlink(g_ec, etc_ino, "orphan");
     fail_disarm();
+    media_check(&after);
 
     CHECK(g_fail_fired > 0);
-    CHECK(rc == EXT2_ERR_IO);                 /* 返しきれなかったと報告 */
+    CHECK(rc == EXT2_ERR_IO);                    /* 返しきれなかったと報告 */
+    CHECK_MEDIA(&after);
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/etc/orphan", &tmp) == EXT2_ERR_NOTFOUND);
-    /* **inode もブロックも使用中のまま** = 孤児として辿れる */
-    CHECK(inode_in_use(ino) == 1);
-    CHECK(block_in_use(ind) == 1);
+    /* 媒体上の inode はもう何も指していないので、inode は返す */
+    for (k = 0; k < EXT2_N_BLOCKS; k++) CHECK(raw_inode_ptr(ino, k) == 0);
+    CHECK(raw_inode_used(ino) == 0);
+    CHECK(block_in_use(fi.block[0]) == 0);       /* 直接ブロックは返せた */
+    CHECK(block_in_use(ind) == 1);               /* 読めない表は配下ごと漏らす */
     CHECK(block_in_use(child) == 1);
+    CHECK(leak_delta(&after, &before) == 5);
+
+    /* inode の書き戻し (参照を外す書き込み) 自体が落ちる -> 何も返さない */
+    report("  [BONUS-3b] unlink: 参照を外す書き込みが落ちる -> 何も返さず孤児で残す\n");
+    CHECK(ext2_vfs_write(g_ec, "/etc/orphan2", pattern, sizeof(pattern)) == VFS_OK);
+    CHECK(file_layout("/etc/orphan2", &ino, &fi));
+    media_check(&before);
+    wfail_arm_always(lba_of_inode(ino));
+    rc = ext2_unlink(g_ec, etc_ino, "orphan2");
+    wfail_disarm();
+    media_check(&after);
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc < 0);
+    CHECK_MEDIA(&after);
+    CHECK(raw_inode_used(ino) == 1);             /* 孤児として残す */
+    CHECK(raw_inode_ptr(ino, EXT2_IND_BLOCK) == fi.block[EXT2_IND_BLOCK]);
     CHECK(block_in_use(fi.block[0]) == 1);
-    /* 次に作るファイルが同じ inode 番号を受け取らない */
-    CHECK(ext2_vfs_write(g_ec, "/etc/next", "N", 1) == VFS_OK);
-    memo_cold();
-    CHECK(ext2_lookup(g_ec, "/etc/next", &tmp) == EXT2_OK);
-    CHECK(tmp != ino);
-    /* 残した inode は依然としてブロックを指している */
-    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
-    CHECK(fi.block[EXT2_IND_BLOCK] == ind);
-    CHECK(fi.links_count == 0);
-    CHECK(fi.dtime != 0);
+    CHECK(block_in_use(fi.block[EXT2_IND_BLOCK]) == 1);
 }
 
-static void case_rmdir_keeps_inode(void)
+static void rm_long_name(char *dst, int i, int len)
+{
+    int k;
+    for (k = 0; k < len; k++) dst[k] = 'n';
+    dst[len] = '\0';
+    dst[0] = (char)('A' + i / 26);
+    dst[1] = (char)('a' + i % 26);
+}
+
+/* 間接ブロックを持つ**空の**ディレクトリを作る: 長い名前でブロックを埋めて
+ * から全部消す (ext2 はディレクトリを縮めない)。
+ * 名前 240 文字 -> rec_len 248 -> 1 ブロック 4 件 -> 60 件で 15 ブロック。 */
+static int make_empty_ind_dir(const char *path, u32 *dino)
 {
     static char name[256];
-    Ext2Inode di;
-    u32 root = 0, dino = 0, ind, lba, nblocks, tmp = 0;
-    int i, rc, nth;
-
-    report("  [BONUS-4] rmdir: 返しきれなければ inode を解放しない\n");
-
-    /* 間接ブロックを持つ**空の**ディレクトリを作る: 長い名前で
-     * ブロックを埋めてから全部消す (ext2 はディレクトリを縮めない)。
-     * 名前 240 文字 -> rec_len 248 -> 1 ブロック 4 件 -> 60 件で 15 ブロック。 */
-    CHECK(ext2_vfs_mkdir(g_ec, "/rmbig") == VFS_OK);
+    int i;
+    if (ext2_vfs_mkdir(g_ec, path) != VFS_OK) return 0;
     memo_cold();
-    CHECK(ext2_lookup(g_ec, "/rmbig", &dino) == EXT2_OK);
-    for (i = 0; i < 240; i++) name[i] = 'n';
-    name[240] = '\0';
+    if (ext2_lookup(g_ec, path, dino) != EXT2_OK) return 0;
     for (i = 0; i < 60; i++) {
-        name[0] = (char)('A' + i / 26);
-        name[1] = (char)('a' + i % 26);
-        if (ext2_create(g_ec, dino, name, "", 0) != EXT2_OK) {
-            report("  (harness) rmbig create failed\n");
-            g_failures++;
-            return;
-        }
+        rm_long_name(name, i, 240);
+        if (ext2_create(g_ec, *dino, name, "", 0) != EXT2_OK) return 0;
     }
     for (i = 0; i < 60; i++) {
-        name[0] = (char)('A' + i / 26);
-        name[1] = (char)('a' + i % 26);
-        CHECK(ext2_unlink(g_ec, dino, name) == EXT2_OK);
+        rm_long_name(name, i, 240);
+        if (ext2_unlink(g_ec, *dino, name) != EXT2_OK) return 0;
+    }
+    return 1;
+}
+
+static void case_rmdir_release_failure(void)
+{
+    MediaReport before, after;
+    Ext2Inode di;
+    u32 root = 0, dino = 0, ind, lba, nblocks, tmp = 0;
+    int rc, nth;
+
+    report("  [BONUS-4] rmdir: 間接表が読めない -> 参照を外して漏らし、inode は返す\n");
+    if (!make_empty_ind_dir("/rmbig", &dino)) {
+        report("  (harness) rmbig setup failed\n");
+        g_failures++;
+        return;
     }
     CHECK(ext2_read_inode(g_ec, dino, &di) == EXT2_OK);
     ind = di.block[EXT2_IND_BLOCK];
@@ -1235,22 +1754,352 @@ static void case_rmdir_keeps_inode(void)
     CHECK(nblocks > EXT2_NDIR_BLOCKS);
     lba = g_ec->base_lba + ind * 2;
     CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    media_check(&before);
 
-    /* 空判定 (ext2_is_dir_empty) は bi = 12 .. nblocks の各回で間接表を
-     * 読む (最後の 1 回は「未割当 = 終わり」を知るため)。その次の 1 回が
-     * ext2_free_all_blocks の下見。**下見だけ**を落とす。 */
+    /* 空判定 (ext2_is_dir_empty) は bi = 12 .. nblocks の各回で間接表を読む
+     * (最後の 1 回は「未割当 = 終わり」を知るため)。その次の 1 回が解放時の
+     * 読み出し。**解放時だけ**を落とす。 */
     nth = (int)(nblocks - EXT2_NDIR_BLOCKS) + 2;
     fail_arm(lba, nth);
     rc = ext2_rmdir(g_ec, root, "rmbig");
     fail_disarm();
+    media_check(&after);
 
-    CHECK(g_fail_fired == 1);                 /* 狙った 1 回に当たった */
+    CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);
+    CHECK_MEDIA(&after);
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/rmbig", &tmp) == EXT2_ERR_NOTFOUND);
-    CHECK(inode_in_use(dino) == 1);
+    CHECK(raw_inode_used(dino) == 0);
+    CHECK(block_in_use(di.block[0]) == 0);
     CHECK(block_in_use(ind) == 1);
-    CHECK(block_in_use(di.block[0]) == 1);
+    /* 表 1 + 配下 (nblocks - 12) */
+    CHECK(leak_delta(&after, &before) == (int)(1 + nblocks - EXT2_NDIR_BLOCKS));
+
+    report("  [BONUS-4b] rmdir: 参照を外す書き込みが落ちる -> 何も返さず孤児で残す\n");
+    if (!make_empty_ind_dir("/rmbig2", &dino)) {
+        report("  (harness) rmbig2 setup failed\n");
+        g_failures++;
+        return;
+    }
+    CHECK(ext2_read_inode(g_ec, dino, &di) == EXT2_OK);
+    CHECK(lba_of_inode(dino) != lba_of_inode(root));  /* 親の inode 更新は巻き込まない */
+    media_check(&before);
+    wfail_arm_always(lba_of_inode(dino));
+    rc = ext2_rmdir(g_ec, root, "rmbig2");
+    wfail_disarm();
+    media_check(&after);
+    CHECK(g_wfail_fired > 0);
+    CHECK(rc < 0);
+    CHECK_MEDIA(&after);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/rmbig2", &tmp) == EXT2_ERR_NOTFOUND);
+    CHECK(raw_inode_used(dino) == 1);            /* 孤児として残す */
+    CHECK(raw_inode_ptr(dino, EXT2_IND_BLOCK) == di.block[EXT2_IND_BLOCK]);
+    CHECK(block_in_use(di.block[EXT2_IND_BLOCK]) == 1);
+    CHECK(leak_delta(&after, &before) == 0);     /* 孤児から辿れる */
+}
+
+/* ======================================================================== */
+/*  段 C: 失敗の位置の総当たり                                               */
+/* ======================================================================== */
+
+/* 二重間接まで届く大きさ (直接 12 + 単一間接 256 + 二重間接 3) */
+#define SW_BIG_BLOCKS   (EXT2_NDIR_BLOCKS + EXT2_ADDR_PER_BLOCK + 3)
+#define SW_BIG_BYTES    (SW_BIG_BLOCKS * EXT2_BLOCK_SIZE - 524u)
+/* 追記の起点: 直接ブロックの最後 / 単一間接の最後の端数 */
+#define SW_APP1_BYTES   (EXT2_NDIR_BLOCKS * EXT2_BLOCK_SIZE - 24u)
+#define SW_APP2_BYTES   ((EXT2_NDIR_BLOCKS + EXT2_ADDR_PER_BLOCK) * EXT2_BLOCK_SIZE - 200u)
+#define SW_APPEND_BYTES (3u * EXT2_BLOCK_SIZE)
+#define SWEEP_MAX       20000
+#define DENT_NAME_LEN   250           /* rec_len 260 -> 1 ブロック 3 件 */
+#define DENT_FULL       36            /* 直接 12 ブロックがちょうど埋まる件数 */
+#define DENT_FULL_IND   39            /* 13 ブロック (単一間接 1 本目まで) がちょうど埋まる件数 */
+
+static u8 g_sw_pat[SW_BIG_BYTES];
+static u32 g_sw_dir;
+static u32 g_dent_dir;
+static char g_dent_name[256];
+static u32 g_dent_dir2;
+static char g_dent_name2[256];
+
+static int op_overwrite_big(void)
+{ return ext2_vfs_write(g_ec, "/sw/big", g_sw_pat, 20u * EXT2_BLOCK_SIZE); }
+static int op_grow(void)
+{ return ext2_vfs_write(g_ec, "/sw/small", g_sw_pat, SW_BIG_BYTES); }
+static int op_create_big(void)
+{ return ext2_create(g_ec, g_sw_dir, "newbig", g_sw_pat, SW_BIG_BYTES); }
+static int op_unlink_big(void)
+{ return ext2_unlink(g_ec, g_sw_dir, "big"); }
+static int op_rmdir(void)
+{ return ext2_rmdir(g_ec, g_sw_dir, "rmd"); }
+static int op_append_ind(void)
+{ return ext2_vfs_write_stream(g_ec, "/sw/app1", g_sw_pat, SW_APPEND_BYTES, SW_APP1_BYTES); }
+static int op_append_dind(void)
+{ return ext2_vfs_write_stream(g_ec, "/sw/app2", g_sw_pat, SW_APPEND_BYTES, SW_APP2_BYTES); }
+static int op_create_dent(void)
+{ return ext2_create(g_ec, g_dent_dir, g_dent_name, "x", 1); }
+static int op_create_dent2(void)
+{ return ext2_create(g_ec, g_dent_dir2, g_dent_name2, "x", 1); }
+static int op_mkdir(void)
+{ return ext2_mkdir(g_ec, g_sw_dir, "newdir"); }
+
+typedef int (*SweepOp)(void);
+
+/* op を「at 回目のセクタ I/O が落ちる」形で at = 1, 2, ... と全位置で動かす。
+ * sticky = 0 (その 1 回だけ) と 1 (そこから先すべて) の両方。1 回ごとに
+ *   - 媒体を検査し (相互リンクの前段が 0 か)、漏れを数え、
+ *   - 取り消し記録でディスクを戻し、メモリ上の状態も読み直す。
+ * must_report_leak: 漏れたのに成功 (rc >= 0) を返したら失敗とする。 */
+static void sweep(const char *label, SweepOp op, int must_report_leak)
+{
+    MediaReport base, r, first_bad;
+    int sticky, at, rc, fired;
+    int runs = 0, bad = 0, first_bad_at = 0, first_bad_sticky = 0;
+    int unreported = 0, first_unrep_at = 0, first_unrep_sticky = 0;
+    int leak_runs = 0, err_runs = 0;
+    u32 leak_max = 0;
+
+    kmemset(&first_bad, 0, sizeof(first_bad));
+    remount_cold();
+    media_check(&base);
+    CHECK_MEDIA(&base);
+
+    for (sticky = 0; sticky < 2; sticky++) {
+        for (at = 1; ; at++) {
+            if (at > SWEEP_MAX) {
+                report("  (harness) sweep too long\n");
+                g_failures++;
+                break;
+            }
+            undo_begin();
+            remount_cold();
+            sw_arm(at, sticky, SW_KIND_ANY);
+            rc = op();
+            fired = g_sw_fired;
+            sw_disarm();
+
+            media_check(&r);
+            if (!media_ok(&r)) {
+                if (!bad) { first_bad = r; first_bad_at = at; first_bad_sticky = sticky; }
+                bad++;
+            }
+            if (rc < 0) err_runs++;
+            if (r.unref_inuse > base.unref_inuse) {
+                u32 d = r.unref_inuse - base.unref_inuse;
+                leak_runs++;
+                if (d > leak_max) leak_max = d;
+                if (must_report_leak && rc >= 0) {
+                    if (!unreported) { first_unrep_at = at; first_unrep_sticky = sticky; }
+                    unreported++;
+                }
+            }
+            undo_rollback();
+            if (g_undo_overflow) {
+                report("  (harness) undo log overflow\n");
+                g_failures++;
+                break;
+            }
+            runs++;
+            if (!fired) break;               /* 最後まで落ちずに通った = 位置を使い切った */
+        }
+    }
+    remount_cold();
+
+    report("  [SWEEP] "); report(label);
+    report("\n          runs="); report_i(runs);
+    report(" error-runs="); report_i(err_runs);
+    report(" leak-runs="); report_i(leak_runs);
+    report(" max-leak="); report_i((int)leak_max);
+    report(" inconsistent="); report_i(bad);
+    report(" unreported-leak="); report_i(unreported);
+    report("\n");
+
+    check_at(bad == 0, "sweep: media consistent after every injected failure", __LINE__);
+    if (bad) {
+        report("      first at="); report_i(first_bad_at);
+        report(first_bad_sticky ? " (sticky) " : " (once) ");
+        report_media(&first_bad); report("\n");
+    }
+    check_at(unreported == 0, "sweep: a leak is never reported as success", __LINE__);
+    if (unreported) {
+        report("      first at="); report_i(first_unrep_at);
+        report(first_unrep_sticky ? " (sticky)\n" : " (once)\n");
+    }
+}
+
+static void dent_name(char *dst, int k)
+{
+    int i;
+    for (i = 0; i < DENT_NAME_LEN; i++) dst[i] = 'L';
+    dst[DENT_NAME_LEN] = '\0';
+    dst[0] = (char)('a' + k / 26);
+    dst[1] = (char)('a' + k % 26);
+}
+
+/* 最後のブロックまでちょうど埋まったディレクトリ。count = DENT_FULL なら
+ * 次の 1 件で単一間接表が**新しく**でき、DENT_FULL_IND なら**既にある**
+ * 単一間接表へ項目が足される。next_name に次の名前を入れて返す。 */
+static int make_full_dir(const char *path, int count, u32 *dino, char *next_name)
+{
+    Ext2Inode di;
+    u32 blocks = (count == DENT_FULL) ? EXT2_NDIR_BLOCKS : EXT2_NDIR_BLOCKS + 1;
+    int k;
+    if (ext2_vfs_mkdir(g_ec, path) != VFS_OK) return 0;
+    memo_cold();
+    if (ext2_lookup(g_ec, path, dino) != EXT2_OK) return 0;
+    for (k = 0; k < count; k++) {
+        dent_name(next_name, k);
+        if (ext2_create(g_ec, *dino, next_name, "", 0) != EXT2_OK) return 0;
+    }
+    if (ext2_read_inode(g_ec, *dino, &di) != EXT2_OK) return 0;
+    if (di.size != blocks * EXT2_BLOCK_SIZE) return 0;
+    if ((di.block[EXT2_IND_BLOCK] != 0) != (count != DENT_FULL)) return 0;
+    dent_name(next_name, count);
+    return 1;
+}
+
+/* 空きブロックを「もっともらしいブロック番号」で埋める。
+ * ext2_format 直後の空きは 0 なので、**書けなかった表を信用する誤り**
+ * (ゴミの表を読んで返す・指す) があっても 0 を読んで無害に見えてしまう。
+ * 実機の空きには前の持ち主の中身が残っている。ここでは生きているファイル
+ * (/big/keepme と /etc/plain) のデータブロックの番号を並べておき、ゴミの表を
+ * 信用すると**生きているファイルのブロックを返す**ようにする。 */
+static void scribble_free_blocks(void)
+{
+    Ext2Inode fi;
+    u32 ino = 0, victim[2], b, j;
+
+    victim[0] = 0; victim[1] = 0;
+    if (file_layout("/big/keepme", &ino, &fi)) victim[0] = fi.block[0];
+    if (file_layout("/etc/plain", &ino, &fi)) victim[1] = fi.block[0];
+    CHECK(victim[0] != 0 && victim[1] != 0);
+    for (b = g_ec->sb_info.first_data_block; b < g_ec->sb_info.total_blocks; b++) {
+        u8 *d;
+        if (raw_block_used(b)) continue;
+        d = raw_blk(b);
+        for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) *(u32 *)(d + j * 4) = victim[j & 1];
+    }
+}
+
+static void stage_c_sweeps(void)
+{
+    u32 i, rmd = 0;
+    int f0 = g_failures;
+
+    report("== 段 C: 失敗の位置を総当たりで動かし、毎回媒体を検査する ==\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    for (i = 0; i < sizeof(g_sw_pat); i++) g_sw_pat[i] = (u8)(i * 29 + 17);
+
+    CHECK(ext2_vfs_mkdir(g_ec, "/sw") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw", &g_sw_dir) == EXT2_OK);
+    CHECK(ext2_vfs_write(g_ec, "/sw/big", g_sw_pat, SW_BIG_BYTES) == VFS_OK);
+    CHECK(ext2_vfs_write(g_ec, "/sw/small", "tiny", 4) == VFS_OK);
+    CHECK(ext2_vfs_write(g_ec, "/sw/app1", g_sw_pat, SW_APP1_BYTES) == VFS_OK);
+    CHECK(ext2_vfs_write(g_ec, "/sw/app2", g_sw_pat, SW_APP2_BYTES) == VFS_OK);
+    CHECK(make_empty_ind_dir("/sw/rmd", &rmd));
+    CHECK(make_full_dir("/sw/dent", DENT_FULL, &g_dent_dir, g_dent_name));
+    CHECK(make_full_dir("/sw/dent2", DENT_FULL_IND, &g_dent_dir2, g_dent_name2));
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    scribble_free_blocks();
+
+    sweep("ext2_write 上書き (二重間接 -> 単一間接)", op_overwrite_big, 1);
+    sweep("ext2_write 伸長 (4B -> 二重間接)", op_grow, 1);
+    sweep("ext2_create (二重間接まで)", op_create_big, 1);
+    sweep("ext2_unlink (二重間接つき)", op_unlink_big, 1);
+    sweep("ext2_rmdir (間接つきの空ディレクトリ)", op_rmdir, 1);
+    sweep("write_stream 追記 (直接 -> 単一間接)", op_append_ind, 0);
+    sweep("write_stream 追記 (単一間接 -> 二重間接)", op_append_dind, 0);
+    sweep("ext2_create (ディレクトリが単一間接へ伸びる)", op_create_dent, 1);
+    sweep("ext2_create (ディレクトリの既存の単一間接に 1 ブロック足す)", op_create_dent2, 1);
+    sweep("ext2_mkdir", op_mkdir, 1);
+
+    disk_teardown();
+}
+
+/* ======================================================================== */
+/*  段 D: 空きを使い切った状態 (create の add_entry が NOSPC)                 */
+/* ======================================================================== */
+
+/* inode は媒体に書いた後なので、**参照を先に外してから** inode とブロックを返す。 */
+static void case_create_add_entry_nospc(void)
+{
+    MediaReport before, after;
+    u32 dent = 0, tmp = 0, fi_before, bm_lba, guess;
+    int rc, blk, last = -1;
+    int f0 = g_failures;
+    u8 ftype;
+
+    report("== 段 D: 空きを使い切った状態 ==\n");
+    report("  [P1-C'] create: add_entry が NOSPC -> 参照を外してから返す\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    CHECK(make_full_dir("/dent", DENT_FULL, &dent, g_dent_name));
+    bm_lba = g_ec->base_lba + g_ec->gd_table[0].block_bitmap * 2;
+
+    /* 空きを 1 ブロックだけ残す (割り当てたまま誰も指さない = 足場の漏れ) */
+    while (g_ec->sb_info.free_blocks_count > 1) {
+        blk = ext2_alloc_block(g_ec);
+        if (blk < 0) break;
+        last = blk;
+    }
+    CHECK(g_ec->sb_info.free_blocks_count == 1);
+    CHECK(last > 0);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+
+    /* (1) 素直に落ちる: 1 ブロックと inode を返せる */
+    fi_before = g_ec->sb_info.free_inodes_count;
+    media_check(&before);
+    rc = ext2_create(g_ec, dent, g_dent_name, "Z", 1);
+    media_check(&after);
+    CHECK(rc == EXT2_ERR_NOSPC);
+    CHECK_MEDIA(&after);
+    CHECK(leak_delta(&after, &before) == 0);
+    CHECK(g_ec->sb_info.free_blocks_count == 1);
+    CHECK(g_ec->sb_info.free_inodes_count == fi_before);
+    CHECK(ext2_find_entry(g_ec, dent, g_dent_name, &tmp, &ftype) == EXT2_ERR_NOTFOUND);
+
+    /* (2) 後始末の解放が落ちる: ブロックビットマップの 2 回目の書き込み
+     *     (1 回目は create の割り当て)。ブロックだけ漏れ、inode は返す */
+    media_check(&before);
+    wfail_arm(bm_lba, 2);
+    rc = ext2_create(g_ec, dent, g_dent_name, "Z", 1);
+    wfail_disarm();
+    media_check(&after);
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_NOSPC);
+    CHECK_MEDIA(&after);
+    CHECK(leak_delta(&after, &before) == 1);
+    CHECK(g_ec->sb_info.free_inodes_count == fi_before);
+
+    /* (3) 参照を外す書き込み (inode の 2 回目の書き込み) が落ちる:
+     *     **何も返さない** — inode もブロックも孤児として残す */
+    CHECK(ext2_free_block(g_ec, (u32)last) == EXT2_OK);   /* 空きを 1 に戻す */
+    {
+        int probe = ext2_alloc_inode(g_ec);           /* 次に配られる inode 番号 */
+        CHECK(probe > 0);
+        guess = (u32)probe;
+        CHECK(ext2_free_inode(g_ec, guess) == EXT2_OK);
+    }
+    media_check(&before);
+    wfail_arm(lba_of_inode(guess), 2);
+    rc = ext2_create(g_ec, dent, g_dent_name, "Z", 1);
+    wfail_disarm();
+    media_check(&after);
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_NOSPC);
+    CHECK_MEDIA(&after);
+    CHECK(raw_inode_used(guess) == 1);
+    CHECK(raw_inode_ptr(guess, 0) != 0);
+    CHECK(block_in_use(raw_inode_ptr(guess, 0)) == 1);
+    CHECK(leak_delta(&after, &before) == 0);          /* 孤児から辿れる */
+
+    disk_teardown();
 }
 
 /* 書き込み系の最後の ext2_sync の失敗を捨てない (P1-5 と同じ形の洗い出し)。
@@ -1468,13 +2317,23 @@ static void stage_a(void)
     case_create_existence_failure();
     case_rename_dest_failure();
     case_write_stream_inode_failure();
-    case_free_all_blocks_failure();
-    case_unlink_keeps_inode();
-    case_rmdir_keeps_inode();
+    case_reread_after_probe();
+    case_free_block_bitmap_failure();
+    case_rewrite_new_block_failure();
+    case_create_cleanup_failure();
+    case_create_inode_write_ambiguous();
+    case_unlink_release_failure();
+    case_rmdir_release_failure();
     case_trailing_sync_failure();
     case_normal_paths();
 
     disk_teardown();
+
+    /* 段 C: 失敗の位置を総当たりで動かし、毎回媒体を検査する */
+    stage_c_sweeps();
+
+    /* 空きを使い切った状態が要るので、別の新しいディスクで */
+    case_create_add_entry_nospc();
 }
 
 /* ======================================================================== */
