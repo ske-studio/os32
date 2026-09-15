@@ -134,24 +134,19 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - The text GDC cursor is controlled only by CSRFORM's DC bit (`console_hw_cursor_enable()` / `_sync()`). → §4-18
 - CPL=3 KAPI calls run with IF=1; a `hlt`-waiting wrap hanging with `tick_count` frozen means the
   `sti`/`cli` pair in `int80_stub` broke — the exit must stay IF=0. → §4-19
-- GUI internals: apps under gshell call `libos32gfx_attach()` (never `gfx_init` — attach owns the PACKED8
-  detection), the Cirrus linear window is mapped once and kept across shutdown (re-init resets the relay
-  flag), and gshell X4 must not consume WM-owned button edges (`wm_owns_edge`). → §4-20〜§4-22
+- GUI internals: `libos32gfx_attach()` (never `gfx_init`), the Cirrus window is mapped once, gshell X4 leaves WM-owned button edges alone. → §4-20〜§4-22
 - GUI verification on NP21/W: `--data-urlencode` for `SHIFT+SPACE`, `/api/mouse` uses `ax/ay`, deploy
   rewrites `system.cfg`. → §4-23
 - `ext2_g_aux` is the bitmap scratch buffer — never keep an indirect table or data there across a free/alloc
   (files >12KB got cross-linked on overwrite until 2026-09-06). → §4-24
-- A filesystem driver's `mount(dev_id)` gets `(dev_type << 8) | unit` — check the type before
-  building a device name, or `fd0` opens `hd0` and the same partition gets mounted twice. → §4-30
+- `mount(dev_id)` gets `(dev_type << 8) | unit` — check the type, or `fd0` opens `hd0`. → §4-30
 - "GUI feels slow" → measure first: read `gfx_counters` around the keystroke to see whether a present
   happened at all, then sample `/api/status` `eip` to find where the CPU is. → §4-25
 - Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26
 - Japanese text is 3 bytes per char and 2 columns wide; `char buf[64]` overflows easily, and truncation
   must land on a UTF-8 boundary. → §4-27
-- Boot loaders: the PM transition stays inlined in `boot/loader_fat.asm`, `boot_fat.asm` is `.8086` (no
-  immediate shifts), the IPL may call INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
-- Physical 0x90000 is the auto-play mailbox: a layout change means updating `game/tools/autoplay/driver.py`
-  `read_mailbox()` and `EXPORT_VERSION` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
+- Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
+- Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成で `v86 -t` が `#PF addr=0 EIP=0` で死ぬ (8MB / 15MB は無事、未解決)。 → §4-28
 - 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
   突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
@@ -159,14 +154,11 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
 - `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
-- `hsync` は**サイズか日時が違うファイルだけ内容を比較し、両方同じならスキップ**する (票 H1+H3、2026-09-15)。同サイズの差し替えが届かない問題 (2026-09-14) は解消し、`hsync sys` は 0.3 秒。**サイズも日時も同じで中身が違う**ものだけ見逃す (`--verify` で全件比較)。直接上書きなので失敗時に旧内容は残らない (解消は H2)。 → [`docs/tasks/shell/TASK_H3.md`](docs/tasks/shell/TASK_H3.md) §8
-- `hsync` は HostDrv (`C:\\os32`) の内容で NHD を上書きする。NHD 配備の後に `hsync` するときは**先に `make deploy`** で HostDrv を最新にする (古いカーネル / gshell に戻った前例)。 → §4-33
-- Device windows: never decide one from the RAM **ceiling** (`sys_get_mem_kb`) — since K6-RAM that is the
-  top-of-RAM address, and a 15MB machine tops out at 17MB. Ask the physical map for that range
-  (`pgalloc_range_has_ram`). → §4-34
-- VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
-  directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
-- ext2 はメタデータの I/O エラーを 1 回でも踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15、Linux の `errors=remount-ro` 相当、票 B8)。読み取りは通る。superblock にエラーの印が残り、再起動すると警告付きで読み書きに戻る。書き込みが急に全部 -15 になったら故障を疑い、NHD をホストの `e2fsck` にかける。 → [`docs/tasks/shell/TASK_FS_TYPE.md`](docs/tasks/shell/TASK_FS_TYPE.md) §2-7
+- `hsync` はサイズか日時が違うものだけ内容比較する。同サイズ・同日時で中身が違う差し替えだけ見逃す (`--verify` で全件比較)。直接上書きなので失敗時に旧内容は残らない (H2)。 → §4-36
+- `hsync` は HostDrv の内容で NHD を上書きする。NHD 配備の後は**先に `make deploy`**。 → §4-33
+- Device windows: decide from the physical map (`pgalloc_range_has_ram`), never from the RAM ceiling (`sys_get_mem_kb`). → §4-34
+- VFS errors are `OS32_ERR_*`, translated at the FS boundary; `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
+- ext2 はメタデータの I/O エラーを 1 回踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15)。読み取りは通り、再起動で警告付きで戻る。書き込みが全部 -15 になったらホストの `e2fsck` へ。 → §4-35
 
 ## Documentation
 
