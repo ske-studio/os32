@@ -127,6 +127,30 @@ typedef struct {
 #define EXT2_ERR_NOTEMPTY -8
 #define EXT2_ERR_ISDIR   -9
 #define EXT2_ERR_INVAL   -10  /* 不正操作 (ディレクトリを自身の配下へ rename 等) */
+/* このマウントはエラー状態で、書き込み系操作を受け付けない (票 B8 往復 5 /
+ * ユーザー決裁 2: Linux ext2 の errors=remount-ro 相当)。VFS へは
+ * OS32_ERR_ROFS に写す。 */
+#define EXT2_ERR_ROFS    -11
+/* links_count が EXT2_LINK_MAX に達していて増やせない (Linux の EMLINK)。
+ * VFS へは OS32_ERR_FULL (資源が満杯) に写す。 */
+#define EXT2_ERR_MLINK   -12
+
+/* スーパーブロックの s_state / s_errors (ext2 の仕様どおり、offset 58 / 60)。
+ *   s_state  … EXT2_VALID_FS (1) / EXT2_ERROR_FS (2) のビット
+ *   s_errors … エラー検出時の既定動作。OS32 は値に関わらず常に「以後の書き込みを
+ *              止める」(RO 相当) ので、フォーマット時は RO を書く (ext2_fmt.c)。 */
+#define EXT2_SB_STATE_OFF     58
+#define EXT2_SB_ERRORS_OFF    60
+#define EXT2_VALID_FS         0x0001
+#define EXT2_ERROR_FS         0x0002
+#define EXT2_ERRORS_CONTINUE  1
+#define EXT2_ERRORS_RO        2
+#define EXT2_ERRORS_PANIC     3
+
+/* links_count (u16) の上限。Linux ext2 の EXT2_LINK_MAX と同じ値。
+ * ディレクトリの子を増やす操作 (mkdir / 別の親への rename) がこれを越える
+ * なら断る (票 B8 往復 5、レビュー非 blocker)。 */
+#define EXT2_LINK_MAX         32000
 
 /* rename の循環検査で ".." を辿る上限 (壊れた FS でのループ防止) */
 #define EXT2_RENAME_MAX_DEPTH 64

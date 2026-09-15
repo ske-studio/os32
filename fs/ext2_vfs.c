@@ -107,6 +107,8 @@ static int ext2_to_vfs_err(int rc)
     case EXT2_ERR_NOTEMPTY: return VFS_ERR_NOTEMPTY;
     case EXT2_ERR_ISDIR:    return VFS_ERR_ISDIR;
     case EXT2_ERR_INVAL:    return VFS_ERR_INVAL;
+    case EXT2_ERR_ROFS:     return VFS_ERR_ROFS;   /* 票 B8 往復 5 */
+    case EXT2_ERR_MLINK:    return VFS_ERR_FULL;   /* 票 B8 往復 5 */
     default:                return VFS_ERR_IO;
     }
 }
@@ -314,6 +316,9 @@ static int ext2_vfs_set_mtime(void *ctx, const char *path, os_time_t mtime)
     if (!ext2_is_mounted_ctx(ec)) return VFS_ERR_NOMOUNT;
     if (!path) return VFS_ERR_INVAL;
     if (mtime == 0) return VFS_ERR_INVAL;
+    /* 書き込み系。エラー状態なら断る (票 B8 往復 5 / 決裁 2) */
+    rc = ext2_check_writable(ec);
+    if (rc != 0) return ext2_to_vfs_err(rc);
 
     rc = ext2_resolve_path(ec, path, &ino);
     if (rc != VFS_OK) return rc;

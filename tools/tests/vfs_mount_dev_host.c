@@ -98,6 +98,9 @@ int ext2_write_inode(Ext2Ctx *c, u32 i, const Ext2Inode *o)
 { (void)c; (void)i; (void)o; return EXT2_OK; }
 /* 本物 (fs/ext2_super.c) と同じく定数を返す。ゲスト側の「いま」の代わり。 */
 u32 ext2_current_time(void) { return 0x67E8E800UL; }
+/* 票 B8 往復 5: 書き込み系の入口の拒否 (エラー状態、fs/ext2_super.c)。
+ * この試験は mount 経路だけを見るので、エラー状態には入らない贋物 */
+int ext2_check_writable(Ext2Ctx *c) { (void)c; return EXT2_OK; }
 
 void *kzalloc(u32 size) { return calloc(1, size); }
 void kfree(void *p) { free(p); }

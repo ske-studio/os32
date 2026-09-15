@@ -47,6 +47,7 @@
 /* ======================================================================== */
 
 static int g_exit_code;
+static const char *g_dump_dir;   /* 票 B8 往復 5: e2fsck 用の像の置き場 (argv[1]) */
 
 static void die(int code)
 {
@@ -152,7 +153,25 @@ char *kstrncat(char *dst, const char *src, u32 n)
 void *memcpy(void *dst, const void *src, u32 n) { return kmemcpy(dst, src, n); }
 void *memset(void *dst, int val, u32 n) { return kmemset(dst, val, n); }
 
-void kprintf(u8 attr, const char *fmt, ...) { (void)attr; (void)fmt; }
+/* 票 B8 往復 5: マウント時の警告 / エラー状態の通知が出たかを数える */
+static int g_kp_mount_warn;
+static int g_kp_fs_error;
+static int kp_has(const char *hay, const char *needle)
+{
+    u32 i, j;
+    for (i = 0; hay[i]; i++) {
+        for (j = 0; needle[j] && hay[i + j] == needle[j]; j++) { }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+void kprintf(u8 attr, const char *fmt, ...)
+{
+    (void)attr;
+    if (!fmt) return;
+    if (kp_has(fmt, "mounting fs with errors")) g_kp_mount_warn++;
+    if (kp_has(fmt, "writes disabled until remount")) g_kp_fs_error++;
+}
 
 /* ---- kzalloc / kfree: 固定スロットの贋物 (Ext2Ctx 専用) ---- */
 #define HEAP_SLOTS  4
@@ -193,6 +212,11 @@ void kfree(void *p)
 static u8 g_disk[DISK_SECTORS * 512u];
 static u32 g_rd_sect;
 static u32 g_wr_sect;
+/* 票 B8 往復 5: スーパーブロックの先頭セクタ (s_state が居る) への書き込み。
+ * メタデータの I/O が落ちると ext2_fs_error がここへ EXT2_ERROR_FS を書くので、
+ * 「失敗した操作は何も書かない」を見る試験はこれを除いて数える。 */
+static u32 g_wr_sb;
+#define SB_STATE_LBA  (DISK_BASE_LBA + 2u)
 
 /* 失敗の注入: 「この LBA の n 回目の読み出しを**一度だけ**失敗させる」。
  * 一度だけにするのが肝 — 恒久的な故障なら誰が見ても異常だが、B8 が起きるのは
@@ -213,7 +237,9 @@ static void fail_arm_always(u32 lba) { fail_arm(lba, 0); }
 
 static void fail_disarm(void) { g_fail_armed = 0; }
 
-static void io_reset(void) { g_rd_sect = 0; g_wr_sect = 0; }
+static void io_reset(void) { g_rd_sect = 0; g_wr_sect = 0; g_wr_sb = 0; }
+/* s_state のセクタ以外への書き込み回数 */
+static u32 wr_non_state(void) { return g_wr_sect - g_wr_sb; }
 
 /* ---- 往復 3: **書き込み**の失敗注入 (読み出し側と同じ作法) ---- */
 static u32 g_wfail_lba;
@@ -346,6 +372,7 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
         if (g_wlog_on && g_wlog_n < WLOG_MAX) g_wlog_lba[g_wlog_n++] = cur;
         kmemcpy(g_disk + cur * 512u, (const u8 *)buf + i * 512, 512);
         g_wr_sect++;
+        if (cur == SB_STATE_LBA) g_wr_sb++;
     }
     return 0;
 }
@@ -401,6 +428,13 @@ int res_owner_get(void) { return 0; }
 /* ======================================================================== */
 
 static Ext2Ctx *g_ec;
+static void remount_cold(void);
+
+/* 票 B8 往復 5: 失敗注入の後始末。メタデータの I/O が落ちるとマウントが
+ * エラー状態になり、以後の書き込み系操作を断る (ユーザー決裁 2)。同じディスクで
+ * 続きを試すには**再マウントする** — 電源を入れ直したのと同じで sync はしない
+ * (エラー状態はメモリ上だけなので、再マウントで解ける)。 */
+static void fault_done(void) { if (g_ec) remount_cold(); }
 
 /* /big/keepme の中身。**open が失敗したあともここがそのまま残ること**が、
  * 段 A の一番大事な確認。 */
@@ -568,6 +602,7 @@ static void case_indirect_read_failure(int mode, const char *label)
     u32 lba;
 
     report("  [A1] "); report(label); report("\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     memo_cold();
     lba = lba_of_big_indirect();
@@ -575,12 +610,13 @@ static void case_indirect_read_failure(int mode, const char *label)
     fail_arm(lba, 1);
     fd = vfs_open("/big/keepme", mode);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);            /* 仕掛けが本当に効いたか */
     CHECK(fd < 0);                        /* FD を発行しない */
     CHECK(fd != VFS_ERR_NOTFOUND);        /* 「無い」と言わない */
     CHECK(any_fd_open() == 0);
-    CHECK(g_wr_sect == 0);                /* 媒体に 1 セクタも書いていない */
+    CHECK(wr_non_state() == 0);                /* 媒体に 1 セクタも書いていない */
     CHECK(keep_intact());                 /* 中身がそのまま残っている */
 }
 
@@ -600,6 +636,7 @@ static void case_size_failure(int mode, const char *label)
     u32 lba;
 
     report("  [A2] "); report(label); report("\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     /* 記憶を温めて、パス解決が inode 表を読み直さない状態にする */
     memo_cold();
@@ -610,12 +647,13 @@ static void case_size_failure(int mode, const char *label)
     fail_arm(lba, 2);
     fd = vfs_open("/big/keepme", mode);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(fd < 0);
     CHECK(fd != VFS_ERR_NOTFOUND);
     CHECK(any_fd_open() == 0);
-    CHECK(g_wr_sect == 0);
+    CHECK(wr_non_state() == 0);
     CHECK(keep_intact());
 }
 
@@ -627,6 +665,7 @@ static void case_sqlite_size_failure(void)
     u32 lba;
 
     report("  [A3] vfs_open_sqlite も同じ (サイズ取得の一度の失敗)\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     ck.group_index = 0;
     ck.generation = 1;
@@ -640,12 +679,13 @@ static void case_sqlite_size_failure(void)
     fail_arm(lba, 2);
     rc = vfs_open_sqlite("/big/keepme", O_RDWR | O_CREAT, 0, &ck, 0, &lease);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc < 0);
     CHECK(rc != VFS_ERR_NOTFOUND);
     CHECK(any_fd_open() == 0);
-    CHECK(g_wr_sect == 0);
+    CHECK(wr_non_state() == 0);
     CHECK(keep_intact());
 }
 
@@ -676,6 +716,7 @@ static void case_write_file_failure(void)
     u32 lba;
 
     report("  [A6] 一括書き込み: 既存判定が読めなければ作成しない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     /* 親 "/big" だけ記憶を温める — パス解決は通り、find_entry が失敗する */
     memo_cold();
@@ -690,6 +731,7 @@ static void case_write_file_failure(void)
     fail_arm(lba, 1);
     rc = ext2_vfs_write(g_ec, "/big/keepme", "XX", 2);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     /* **読めなかったことを読めなかったと言う**。ここを「無い」と読み替えると
@@ -710,6 +752,7 @@ static void case_write_file_failure(void)
     fail_arm_always(lba);
     rc = ext2_vfs_write(g_ec, "/big/keepme", "YY", 2);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired > 0);
     CHECK(rc == VFS_ERR_IO);
     CHECK(keep_entry_count() == 1);
@@ -727,6 +770,7 @@ static void case_write_stream_failure(void)
     int rc;
 
     report("  [A7] 追記書き込み: 読めない間接ブロックを割り当て直さない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 7 + 1);
     /* 16KB = 16 ブロック -> 直接 12 本を越えて間接ブロックを使う */
@@ -747,6 +791,7 @@ static void case_write_stream_failure(void)
     fail_arm(lba, 1);
     rc = ext2_vfs_write_stream(g_ec, "/big/wide", "ZZZZ", 4, 13 * 1024 + 100);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc < 0);                       /* 「0 バイト書けた」で済ませない */
@@ -809,6 +854,7 @@ static void case_other_bmap_callers(void)
     int n, rc;
 
     report("  [A8] ext2_bmap の残りの呼び手\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/big", &big_ino) == EXT2_OK);
@@ -821,6 +867,7 @@ static void case_other_bmap_callers(void)
     g_entry_total = 0;
     rc = ext2_list_dir(g_ec, big_ino, total_cb, (void *)0);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);                 /* 途中までを成功と言わない */
 
@@ -834,6 +881,7 @@ static void case_other_bmap_callers(void)
     g_vfs_entries = 0;
     rc = ext2_vfs_list(g_ec, "/big", vfs_total_cb, (void *)0);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired == 1);
     CHECK(rc == VFS_ERR_IO);
 
@@ -844,6 +892,7 @@ static void case_other_bmap_callers(void)
     fail_arm(ind_lba, 1);
     rc = ext2_add_entry(g_ec, big_ino, "zzz", 2, EXT2_FT_REG_FILE);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);
     CHECK(dir_entry_total("/big") == n);      /* 1 件も失っていない */
@@ -853,6 +902,7 @@ static void case_other_bmap_callers(void)
     fail_arm(ind_lba, 1);
     rc = ext2_delete_entry(g_ec, big_ino, "keepme");
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);                 /* NOTFOUND と言わない */
     CHECK(keep_intact());
@@ -874,12 +924,14 @@ static void case_other_bmap_callers(void)
         fail_arm(wide_ind, 1);
         rc = ext2_read_file(g_ec, wide_ino, got, sizeof(got));
         fail_disarm();
+        fault_done();
         CHECK(g_fail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);             /* 12KB の「成功」にしない */
 
         fail_arm(wide_ind, 1);
         rc = ext2_read_stream(g_ec, wide_ino, got, 16 * 1024, 0);
         fail_disarm();
+        fault_done();
         CHECK(g_fail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);
     }
@@ -896,6 +948,7 @@ static void case_other_bmap_callers(void)
         fail_arm(blk0_lba, 1);
         rc = ext2_rmdir(g_ec, parent, "rmtest");
         fail_disarm();
+        fault_done();
         CHECK(g_fail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);
         CHECK(rc != EXT2_ERR_NOTEMPTY);
@@ -929,6 +982,7 @@ static void case_other_bmap_callers(void)
         fail_arm(blk0_lba, 2);
         rc = ext2_rename(g_ec, root, "d1", d2, "moved");
         fail_disarm();
+        fault_done();
         CHECK(g_fail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);
         CHECK(rc != EXT2_OK);
@@ -968,6 +1022,7 @@ static void case_mkdir_existence_failure(void)
     u32 lba;
 
     report("  [P1-1] mkdir: 存在確認が読めなければ作らない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     warm_big();
     n = keep_entry_count();
@@ -977,12 +1032,13 @@ static void case_mkdir_existence_failure(void)
     fail_arm(lba, 1);
     rc = vfs_mkdir("/big/keepme");
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc < 0);
     CHECK(rc != VFS_OK);
     CHECK(rc != VFS_ERR_EXIST);         /* 「既にある」とも言わない */
-    CHECK(g_wr_sect == 0);              /* **1 セクタも書いていない** */
+    CHECK(wr_non_state() == 0);              /* **1 セクタも書いていない** */
     CHECK(keep_entry_count() == 1);     /* 同名エントリが増えていない */
     CHECK(keep_intact());
 
@@ -1003,6 +1059,7 @@ static void case_create_existence_failure(void)
     u32 big_ino = 0, lba;
 
     report("  [P1-2] ext2_create: 存在確認が読めなければ作らない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     warm_big();
     CHECK(ext2_lookup(g_ec, "/big", &big_ino) == EXT2_OK);
@@ -1011,12 +1068,13 @@ static void case_create_existence_failure(void)
     fail_arm(lba, 1);
     rc = ext2_create(g_ec, big_ino, "keepme", "XX", 2);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);
     CHECK(rc != EXT2_OK);
     CHECK(rc != EXT2_ERR_EXIST);
-    CHECK(g_wr_sect == 0);
+    CHECK(wr_non_state() == 0);
     CHECK(keep_entry_count() == 1);
     CHECK(keep_intact());
 
@@ -1036,6 +1094,7 @@ static void case_rename_dest_failure(void)
     u32 lba, tmp = 0;
 
     report("  [P1-3] rename: 宛先の確認が読めなければ何もしない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     memo_cold();
     CHECK(vfs_path_kind("/etc/plain") == VFS_KIND_FILE);
@@ -1047,11 +1106,12 @@ static void case_rename_dest_failure(void)
     fail_arm(lba, 1);
     rc = vfs_rename("/etc/plain", "/big/keepme");
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc < 0);
     CHECK(rc != VFS_OK);
-    CHECK(g_wr_sect == 0);                       /* 何も書いていない */
+    CHECK(wr_non_state() == 0);                       /* 何も書いていない */
     CHECK(keep_entry_count() == 1);              /* 宛先が二重になっていない */
     CHECK(keep_intact());                        /* 宛先の中身もそのまま */
     /* **移動元の名前が残っている** */
@@ -1083,6 +1143,7 @@ static void case_write_stream_inode_failure(void)
     int rc;
 
     report("  [P1-5] 追記: inode を書けなければ成功と言わない\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     CHECK(ext2_vfs_write(g_ec, "/etc/small", "01234", 5) == VFS_OK);
     memo_cold();
@@ -1098,6 +1159,7 @@ static void case_write_stream_inode_failure(void)
     fail_arm(lba, 2);
     rc = ext2_vfs_write_stream(g_ec, "/etc/small", "ABCD", 4, 5);
     fail_disarm();
+    fault_done();
 
     CHECK(g_fail_fired == 1);
     CHECK(rc < 0);                       /* 4 (成功) と言わない */
@@ -1168,8 +1230,24 @@ static int block_in_use(u32 blk)
  *   dir_hole      … size の内側の末尾が繋がっていない (許容して数える。
  *                   ext2_add_entry が size を先に伸ばしてから繋ぐため)
  *
- * freed_ref / dup_ref / bad_ref / dangling / links_short / dir_overrun が 0 で
- * あることを「整合している」と言う。**漏れと孤児は許容して数える。** */
+ *
+ * 往復 5 で足した (レビューの盲点: 02_two_names と 04_loop を整合と判定していた):
+ *   dir_multi   … ディレクトリ inode を指す "." ".." 以外の名前が 2 つ以上
+ *                 (links は合っていても OS32 の rmdir は links を見ないので、
+ *                  片方の rmdir で残りの名前が解放済み inode を指す)
+ *   dotdot_bad  … 名前で辿れる (= 根から名前の鎖が届く) ディレクトリの ".." が、
+ *                 そのディレクトリを名前で持つ親を指していない (孤児は対象外)
+ *   dir_loop    … 名前の親を辿ると輪に入るディレクトリの数
+ *   bad_dir     … 壊れた rec_len (8 未満、4 の倍数でない、ブロックを越える、
+ *                 名前が入らない、鎖がブロック末尾でちょうど閉じない)。
+ *                 以前は黙って break していた
+ *
+ * freed_ref / dup_ref / bad_ref / dangling / links_short / dir_overrun /
+ * dir_multi / dotdot_bad / dir_loop / bad_dir が 0 であることを
+ * 「整合している」と言う。**漏れと孤児は許容して数える。**
+ *
+ * **この判定は本物の e2fsck -fn と突き合わせる** (test_b8_open.py、抜き取り)。
+ * 食い違ったら試験の失敗にする — 自前の検査の盲点を後追いで埋めるのをやめるため。 */
 typedef struct {
     u32 freed_ref;
     u32 dup_ref;
@@ -1180,10 +1258,19 @@ typedef struct {
     u32 links_surplus;
     u32 dir_overrun;
     u32 dir_hole;
+    u32 dir_multi;
+    u32 dotdot_bad;
+    u32 dir_loop;
+    u32 bad_dir;
 } MediaReport;
 
 #define MR_MAX_INODES  8192
 static u16 g_names[MR_MAX_INODES + 1];
+/* 往復 5: "." ".." 以外の名前の数 / その名前を持つ親 / 自分の ".." */
+static u16 g_dnames[MR_MAX_INODES + 1];
+static u32 g_name_parent[MR_MAX_INODES + 1];
+static u32 g_dotdot[MR_MAX_INODES + 1];
+static u32 g_mr_owner;           /* 走査中のディレクトリの inode 番号 */
 static u32 g_mr_top;             /* 走査中のディレクトリの「繋がった最後の位置 + 1」 */
 
 static u8 g_refmap[(DISK_FS_SECTORS / 2 + 7) / 8];
@@ -1232,6 +1319,8 @@ static int mr_ref(u32 b)
     return 1;
 }
 
+static int raw_inode_is_dir(u32 ino);
+
 static void mr_dir_block(u32 b)
 {
     const u8 *d = raw_blk(b);
@@ -1239,19 +1328,43 @@ static void mr_dir_block(u32 b)
     while (pos + 8 <= EXT2_BLOCK_SIZE) {
         u32 ino = *(const u32 *)(d + pos);
         u16 rl = *(const u16 *)(d + pos + 4);
-        if (rl < 8 || pos + rl > EXT2_BLOCK_SIZE) break;
+        u8 nl = d[pos + 6];
+        int dot, dotdot;
+        /* 往復 5: 壊れた rec_len を黙って打ち切らず、不整合として数える */
+        if (rl < 8 || (rl % 4) != 0 || pos + rl > EXT2_BLOCK_SIZE ||
+            (ino != 0 && (u32)nl + 8u > rl)) {
+            g_mr->bad_dir++;
+            return;
+        }
+        dot = (nl == 1 && d[pos + 8] == '.');
+        dotdot = (nl == 2 && d[pos + 8] == '.' && d[pos + 9] == '.');
         if (ino != 0 && (ino > g_ec->sb_info.total_inodes || !raw_inode_used(ino)))
             g_mr->dangling++;
-        if (ino != 0 && ino <= g_ec->sb_info.total_inodes && ino <= MR_MAX_INODES)
+        if (ino != 0 && ino <= g_ec->sb_info.total_inodes && ino <= MR_MAX_INODES) {
             g_names[ino]++;
+            if (dotdot) {
+                if (g_mr_owner <= MR_MAX_INODES) g_dotdot[g_mr_owner] = ino;
+            } else if (!dot && raw_inode_used(ino) && raw_inode_is_dir(ino)) {
+                g_dnames[ino]++;
+                g_name_parent[ino] = g_mr_owner;
+            }
+        }
         pos += rl;
     }
+    /* 鎖がブロック末尾でちょうど閉じない */
+    if (pos != EXT2_BLOCK_SIZE) g_mr->bad_dir++;
 }
 
 static void mr_leaf(u32 b, int is_dir, u32 fidx)
 {
     if (mr_ref(b) && is_dir) mr_dir_block(b);
     if (fidx + 1 > g_mr_top) g_mr_top = fidx + 1;
+}
+
+static int raw_inode_is_dir(u32 ino)
+{
+    u16 mode = *(const u16 *)raw_inode(ino);
+    return (mode & EXT2_S_IFMT) == EXT2_S_IFDIR;
 }
 
 static void mr_walk_inode(u32 ino)
@@ -1263,6 +1376,7 @@ static void mr_walk_inode(u32 ino)
     u32 j, k;
     int i;
 
+    g_mr_owner = ino;
     g_mr_top = 0;
     for (i = 0; i < EXT2_N_BLOCKS; i++) blk[i] = *(const u32 *)(in + 40 + i * 4);
     for (i = 0; i < EXT2_NDIR_BLOCKS; i++) if (blk[i]) mr_leaf(blk[i], is_dir, (u32)i);
@@ -1304,6 +1418,9 @@ static void media_check(MediaReport *r)
     kmemset(r, 0, sizeof(*r));
     kmemset(g_refmap, 0, sizeof(g_refmap));
     kmemset(g_names, 0, sizeof(g_names));
+    kmemset(g_dnames, 0, sizeof(g_dnames));
+    kmemset(g_name_parent, 0, sizeof(g_name_parent));
+    kmemset(g_dotdot, 0, sizeof(g_dotdot));
     g_mr = r;
     if (g_ec->sb_info.total_inodes > MR_MAX_INODES) {
         report("  (harness) too many inodes for media_check\n");
@@ -1324,12 +1441,36 @@ static void media_check(MediaReport *r)
     for (b = g_ec->sb_info.first_data_block; b < g_ec->sb_info.total_blocks; b++) {
         if (raw_block_used(b) && !(g_refmap[b / 8] & (1 << (b % 8)))) r->unref_inuse++;
     }
+
+    /* 往復 5: ディレクトリの名前・".."・輪 */
+    for (ino = 1; ino <= g_ec->sb_info.total_inodes; ino++) {
+        u32 cur, steps;
+        int reach_root = 0;
+        if (!raw_inode_used(ino) || !raw_inode_is_dir(ino)) continue;
+        if (g_dnames[ino] > 1) r->dir_multi++;
+        if (ino == EXT2_ROOT_INO) {
+            if (g_dotdot[ino] != EXT2_ROOT_INO) r->dotdot_bad++;
+            continue;
+        }
+        /* 名前の親を根まで辿る。根に届けば「名前で辿れる」、親の無い
+         * ディレクトリで止まれば孤児の枝 (対象外)、回数を使い切れば輪 */
+        cur = ino;
+        for (steps = 0; steps <= g_ec->sb_info.total_inodes; steps++) {
+            u32 par = g_name_parent[cur];
+            if (cur == EXT2_ROOT_INO) { reach_root = 1; break; }
+            if (par == 0) break;                    /* 孤児の枝 */
+            cur = par;
+        }
+        if (steps > g_ec->sb_info.total_inodes) { r->dir_loop++; continue; }
+        if (reach_root && g_dotdot[ino] != g_name_parent[ino]) r->dotdot_bad++;
+    }
 }
 
 static int media_ok(const MediaReport *r)
 {
     return r->freed_ref == 0 && r->dup_ref == 0 && r->bad_ref == 0 && r->dangling == 0 &&
-           r->links_short == 0 && r->dir_overrun == 0;
+           r->links_short == 0 && r->dir_overrun == 0 &&
+           r->dir_multi == 0 && r->dotdot_bad == 0 && r->dir_loop == 0 && r->bad_dir == 0;
 }
 
 static int leak_delta(const MediaReport *after, const MediaReport *before)
@@ -1348,16 +1489,129 @@ static void report_media(const MediaReport *r)
     report(" links_surplus="); report_i((int)r->links_surplus);
     report(" dir_overrun="); report_i((int)r->dir_overrun);
     report(" dir_hole="); report_i((int)r->dir_hole);
+    report(" dir_multi="); report_i((int)r->dir_multi);
+    report(" dotdot_bad="); report_i((int)r->dotdot_bad);
+    report(" dir_loop="); report_i((int)r->dir_loop);
+    report(" bad_dir="); report_i((int)r->bad_dir);
 }
 
 static void check_media_at(const MediaReport *r, int line)
 {
-    check_at(media_ok(r), "media consistent (freed/dup/bad/dangling/links_short/dir_overrun == 0)",
-             line);
+    check_at(media_ok(r), "media consistent (freed/dup/bad/dangling/links_short/dir_overrun/"
+                          "dir_multi/dotdot_bad/dir_loop/bad_dir == 0)", line);
     if (!media_ok(r)) { report("      "); report_media(r); report("\n"); }
 }
 
 #define CHECK_MEDIA(r) check_media_at((r), __LINE__)
+
+/* ======================================================================== */
+/*  票 B8 往復 5: 本物の e2fsck -fn との突き合わせ (抜き取り)                 */
+/*                                                                          */
+/*  RAM ディスクの ext2 部分をファイルへ書き、標準出力に                     */
+/*    @@E2FSCK <path> <media_ok 0|1> <label>                                */
+/*  を出して**標準入力の 1 行を待つ**。test_b8_open.py がその行を見て         */
+/*  /usr/sbin/e2fsck -fn を当て、出力を「許容 (漏れ側)」「不整合」に分類し、  */
+/*  media_ok と食い違えば失敗として数えてから 1 行返す。像は毎回同じパスへ   */
+/*  上書きするので、ディスクには常に 1 枚しか残らない。                      */
+/*  argv[1] が無いとき (e2fsck が無い環境) は何もしない — Python 側が SKIP と */
+/*  明示する ([V4])。                                                        */
+/* ======================================================================== */
+
+/* "memory" を必ず付ける — read は引数のバッファを書き換える。付けないと GCC は
+ * 呼び出しの前後でバッファが変わらないと見なし、下の応答待ちが古いバイトを見続けて
+ * 永久に読み続けた (往復 5 の初回、試験全体が止まった)。 */
+static int h_sys3(int nr, long a, long b, long c)
+{
+    int r;
+    __asm__ volatile("int $0x80" : "=a"(r) : "a"(nr), "b"(a), "c"(b), "d"(c)
+                     : "memory");
+    return r;
+}
+
+static int g_e2f_samples;
+
+/* ラベル組み立て (libc が無いので自前) */
+static char g_lbl[600];
+static u32 g_lbl_n;
+static void lbl_reset(void) { g_lbl_n = 0; g_lbl[0] = '\0'; }
+static void lbl_s(const char *t)
+{
+    while (*t && g_lbl_n + 1 < sizeof(g_lbl)) g_lbl[g_lbl_n++] = *t++;
+    g_lbl[g_lbl_n] = '\0';
+}
+static void lbl_i(int v)
+{
+    char b[16];
+    int i = 15;
+    u32 u = (u32)(v < 0 ? -v : v);
+    b[i] = '\0';
+    if (u == 0) b[--i] = '0';
+    while (u > 0) { b[--i] = (char)('0' + u % 10); u /= 10; }
+    if (v < 0) b[--i] = '-';
+    lbl_s(&b[i]);
+}
+
+/* 掃引の抜き取り位置 (フィボナッチ: 前の方ほど密に、後ろほど疎に) */
+static int e2f_pick(int at)
+{
+    int a = 1, b = 2;
+    if (at == 1) return 1;
+    while (b <= at) {
+        int c = a + b;
+        if (b == at) return 1;
+        a = b; b = c;
+    }
+    return 0;
+}
+
+static void e2f_sample(const char *label, const MediaReport *r)
+{
+    static char path[512];
+    static char ack[8];
+    const u8 *src = g_disk + DISK_BASE_LBA * 512u;
+    u32 left = DISK_FS_SECTORS * 512u, i, j;
+    int fd, n;
+
+    if (!g_dump_dir) return;
+    for (i = 0; g_dump_dir[i] && i < 400; i++) path[i] = g_dump_dir[i];
+    for (j = 0; "/b8.img"[j]; j++) path[i++] = "/b8.img"[j];
+    path[i] = '\0';
+
+    fd = h_sys3(5, (long)path, 01 | 0100 | 01000, 0644);   /* open O_WRONLY|O_CREAT|O_TRUNC */
+    if (fd < 0) { report("  (harness) e2fsck image open failed\n"); g_failures++; return; }
+    while (left > 0) {
+        n = h_sys3(4, fd, (long)src, (long)left);
+        if (n <= 0) { report("  (harness) e2fsck image write failed\n"); g_failures++; break; }
+        src += n; left -= (u32)n;
+    }
+    (void)h_sys3(6, fd, 0, 0);
+
+    report("@@E2FSCK "); report(path); report(media_ok(r) ? " 1 " : " 0 ");
+    report(label); report("\n");
+    /* 相手が 1 行返すまで待つ */
+    n = h_sys3(3, 0, (long)ack, 1);
+    while (n == 1 && ack[0] != '\n') n = h_sys3(3, 0, (long)ack, 1);
+    g_e2f_samples++;
+}
+
+/* 電源断と同じ再マウント: **新しい ctx** を作り、古い ctx は sync せずに捨てる。
+ * エラー状態 (メモリ上) はここで消える — 媒体に残ったものだけが後続に効く。 */
+static void remount_fresh(void)
+{
+    Ext2Ctx *nc;
+    if (!g_ec) return;
+    g_ec->mounted = 0;
+    kfree(g_ec);
+    nc = (Ext2Ctx *)ext2_vfs_mount(VFS_MOUNT_DEV_ENCODE(VFS_DEV_HD, 0));
+    if (!nc) {
+        report("  (harness) remount_fresh failed\n");
+        g_failures++;
+        g_ec = (Ext2Ctx *)0;
+        return;
+    }
+    g_ec = nc;
+    mounts[0].fs_ctx = nc;
+}
 
 /* メモリ上の状態 (空き数・経路の記憶) を捨てて媒体から読み直す。
  * ext2_unmount は sync する (= 書く) ので、mounted を落としてから mount する。 */
@@ -1397,6 +1651,7 @@ static void case_reread_after_probe(void)
     int nth, rc;
 
     report("  [P1-A] 上書き中に間接表の読み出し (1 回目 / 2 回目) が落ちる\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 11 + 3);
 
     for (nth = 1; nth <= 2; nth++) {
@@ -1413,6 +1668,7 @@ static void case_reread_after_probe(void)
         fail_arm(lba, nth);
         rc = ext2_vfs_write(g_ec, "/etc/leak", "small", 5);
         fail_disarm();
+        fault_done();
 
         media_check(&after);
         CHECK_MEDIA(&after);                     /* 判定の中心 */
@@ -1449,6 +1705,7 @@ static void case_free_block_bitmap_failure(void)
     int blk, rc;
 
     report("  [P1-B] ext2_free_block: ビットマップの読み出し失敗・書き込み失敗\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     bm_lba = g_ec->base_lba + g_ec->gd_table[0].block_bitmap * 2;
 
     blk = ext2_alloc_block(g_ec);
@@ -1499,6 +1756,10 @@ static void case_free_block_bitmap_failure(void)
     CHECK(g_ec->gd_table[0].free_blocks == fb + 1);
     CHECK(block_in_use((u32)blk) == 0);
 
+    /* ここまでは入口の拒否を持たない内部関数 (free_block / alloc_block) なので
+     * エラー状態のまま続けた。FS 経由の操作の前に再マウントする (票 B8 往復 5) */
+    fault_done();
+
     /* FS 経由: 削除中にブロックビットマップへ 1 本も書けない */
     for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 3 + 9);
     CHECK(ext2_vfs_write(g_ec, "/etc/bmw", pattern, sizeof(pattern)) == VFS_OK);
@@ -1508,6 +1769,7 @@ static void case_free_block_bitmap_failure(void)
     wfail_arm_always(bm_lba);
     rc = ext2_unlink(g_ec, etc_ino, "bmw");
     wfail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_wfail_fired > 0);
     CHECK(rc == EXT2_ERR_IO);                    /* 漏れを報告する */
@@ -1547,6 +1809,7 @@ static void case_rewrite_new_block_failure(void)
     int which, rc, k;
 
     report("  [PM 2/3] 切り詰めた後の新しい表 / データの書き込みが落ちる上書き\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     for (i = 0; i < sizeof(old_pat); i++) old_pat[i] = (u8)(i * 7 + 1);
     for (i = 0; i < sizeof(new_pat); i++) new_pat[i] = (u8)(i * 13 + 5);
 
@@ -1563,6 +1826,7 @@ static void case_rewrite_new_block_failure(void)
         wfail_arm_always(g_ec->base_lba + target * 2);
         rc = ext2_vfs_write(g_ec, "/etc/rw", new_pat, sizeof(new_pat));
         wfail_disarm();
+        fault_done();
         media_check(&after);
 
         CHECK(g_wfail_fired > 0);
@@ -1590,6 +1854,7 @@ static void case_create_cleanup_failure(void)
     int rc, k, first_data_write = -1;
 
     report("  [P1-C] ext2_create: データ書き込みが落ち、後始末の解放も落ちる\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     for (i = 0; i < sizeof(pat); i++) pat[i] = (u8)(i * 17 + 2);
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
@@ -1661,6 +1926,7 @@ static void case_create_inode_write_ambiguous(void)
     int probe, rc;
 
     report("  [P1-C''] create: inode が載ったか区別できず、inode の解放も落ちる\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     for (i = 0; i < sizeof(pat); i++) pat[i] = (u8)(i * 19 + 4);
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
@@ -1685,7 +1951,9 @@ static void case_create_inode_write_ambiguous(void)
                                          /* 1 回目 = alloc_inode / 2 回目 = 後始末 */
     rc = ext2_create(g_ec, etc_ino, "amb", pat, sizeof(pat));
     wfail_disarm();
+    fault_done();
     fail_disarm();
+    fault_done();
     media_check(&after);
 
     CHECK(g_wfail_fired > 0);
@@ -1708,6 +1976,7 @@ static void case_unlink_release_failure(void)
     int rc, k;
 
     report("  [BONUS-3] unlink: 間接表が読めない -> 参照を外して漏らし、inode は返す\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 5 + 7);
     CHECK(ext2_vfs_write(g_ec, "/etc/orphan", pattern, sizeof(pattern)) == VFS_OK);
     memo_cold();
@@ -1721,6 +1990,7 @@ static void case_unlink_release_failure(void)
     fail_arm_always(g_ec->base_lba + ind * 2);
     rc = ext2_unlink(g_ec, etc_ino, "orphan");
     fail_disarm();
+    fault_done();
     media_check(&after);
 
     CHECK(g_fail_fired > 0);
@@ -1744,6 +2014,7 @@ static void case_unlink_release_failure(void)
     wfail_arm_always(lba_of_inode(ino));
     rc = ext2_unlink(g_ec, etc_ino, "orphan2");
     wfail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_wfail_fired > 0);
     CHECK(rc < 0);
@@ -1792,6 +2063,7 @@ static void case_rmdir_release_failure(void)
     int rc, nth;
 
     report("  [BONUS-4] rmdir: 間接表が読めない -> 参照を外して漏らし、inode は返す\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     if (!make_empty_ind_dir("/rmbig", &dino)) {
         report("  (harness) rmbig setup failed\n");
         g_failures++;
@@ -1813,6 +2085,7 @@ static void case_rmdir_release_failure(void)
     fail_arm(lba, nth);
     rc = ext2_rmdir(g_ec, root, "rmbig");
     fail_disarm();
+    fault_done();
     media_check(&after);
 
     CHECK(g_fail_fired == 1);
@@ -1838,6 +2111,7 @@ static void case_rmdir_release_failure(void)
     wfail_arm_always(lba_of_inode(dino));
     rc = ext2_rmdir(g_ec, root, "rmbig2");
     wfail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_wfail_fired > 0);
     CHECK(rc < 0);
@@ -1902,10 +2176,13 @@ static const char *g_sw_pattern_name = "";
  *   - 媒体を検査し (相互リンクの前段が 0 か)、漏れを数え、
  *   - 取り消し記録でディスクを戻し、メモリ上の状態も読み直す。
  * must_report_leak: 漏れたのに成功 (rc >= 0) を返したら失敗とする。 */
+static int g_sw_pattern_idx;       /* 0 = 番号の模様 (抜き取りを多めに), 1 = ディレクトリ風 */
+
 static void sweep(const char *label, SweepOp op, int must_report_leak)
 {
     MediaReport base, r, first_bad;
     int sticky, at, rc, fired;
+    int s_leak, s_orphan, s_hole, s_bad;
     int runs = 0, bad = 0, first_bad_at = 0, first_bad_sticky = 0;
     int unreported = 0, first_unrep_at = 0, first_unrep_sticky = 0;
     int leak_runs = 0, err_runs = 0, orphan_runs = 0, hole_runs = 0;
@@ -1917,6 +2194,7 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
     CHECK_MEDIA(&base);
 
     for (sticky = 0; sticky < 2; sticky++) {
+        s_leak = s_orphan = s_hole = s_bad = 0;
         for (at = 1; ; at++) {
             if (at > SWEEP_MAX) {
                 report("  (harness) sweep too long\n");
@@ -1938,6 +2216,22 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
             if (rc < 0) err_runs++;
             if (r.links_surplus > base.links_surplus) orphan_runs++;
             if (r.dir_hole > base.dir_hole) hole_runs++;
+
+            /* 票 B8 往復 5: e2fsck の抜き取り。番号の模様ではフィボナッチ位置、
+             * 両模様で「最初の漏れ / 孤児 / 穴 / 不整合」の回 */
+            {
+                int pick = (g_sw_pattern_idx == 0 && e2f_pick(at));
+                if (!s_leak && r.unref_inuse > base.unref_inuse) { s_leak = 1; pick = 1; }
+                if (!s_orphan && r.links_surplus > base.links_surplus) { s_orphan = 1; pick = 1; }
+                if (!s_hole && r.dir_hole > base.dir_hole) { s_hole = 1; pick = 1; }
+                if (!s_bad && !media_ok(&r)) { s_bad = 1; pick = 1; }
+                if (pick) {
+                    lbl_reset(); lbl_s("SWEEP "); lbl_s(label); lbl_s(" / ");
+                    lbl_s(g_sw_pattern_name); lbl_s(" at="); lbl_i(at);
+                    lbl_s(sticky ? " sticky" : " once");
+                    e2f_sample(g_lbl, &r);
+                }
+            }
             if (r.unref_inuse > base.unref_inuse) {
                 u32 d = r.unref_inuse - base.unref_inuse;
                 leak_runs++;
@@ -2175,10 +2469,12 @@ static void stage_c_sweeps(void)
     /* 同じ操作を 2 種類のゴミの模様で回す (盲点 (c)) */
     scribble_free_blocks();
     g_sw_pattern_name = "番号の模様";
+    g_sw_pattern_idx = 0;
     run_all_sweeps();
 
     scribble_free_blocks_dirlike(g_ec->sb_info.total_inodes);   /* 末尾 = 未使用 */
     g_sw_pattern_name = "ディレクトリ風の模様";
+    g_sw_pattern_idx = 1;
     run_all_sweeps();
 
     disk_teardown();
@@ -2245,11 +2541,13 @@ static void case_x1_add_entry_content_before_link(void)
         else              wfail_arm(g_ec->base_lba + di.block[EXT2_IND_BLOCK] * 2 + 1, 1);
         rc = ext2_create(g_ec, d2, g_dent_name2, "x", 1);
         wfail_disarm();
+        fault_done();
         media_check(&after);
 
         CHECK(g_wfail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);
         CHECK_MEDIA(&after);                         /* 判定の中心 */
+        e2f_sample(variant == 0 ? "E X1 after fault" : "E X1-link after fault", &after);
         CHECK(ext2_find_entry(g_ec, d2, "q", &tmp, &ftype) == EXT2_ERR_NOTFOUND);
         g_q_hits = 0;
         CHECK(ext2_list_dir(g_ec, d2, q_cb, 0) == EXT2_OK);
@@ -2268,6 +2566,7 @@ static void case_x1_add_entry_content_before_link(void)
         CHECK(raw_inode_used(tmp) == 1);
         media_check(&after);
         CHECK_MEDIA(&after);
+        e2f_sample(variant == 0 ? "E X1 after follow-ups" : "E X1-link after follow-ups", &after);
         disk_teardown();
     }
 }
@@ -2317,11 +2616,14 @@ static void case_x2_slack_resurrection(void)
         else              wfail_arm(lba + 1, 1);
         rc = ext2_create(g_ec, st, g_st_name_d, "", 0);
         wfail_disarm();
+        fault_done();
         media_check(&after);
 
         CHECK(g_wfail_fired == 1);
         CHECK(rc == EXT2_ERR_IO);
         CHECK_MEDIA(&after);                         /* 判定の中心 */
+        e2f_sample(variant == 0 ? "E X2 after fault" : variant == 1 ? "E X2-commit after fault"
+                                                                      : "E X2-legacy after fault", &after);
         CHECK(ext2_find_entry(g_ec, st, nC, &tmp, &ftype) == EXT2_ERR_NOTFOUND);
 
         /* 追い打ち (直す前はここで F の inode が返された) */
@@ -2333,6 +2635,8 @@ static void case_x2_slack_resurrection(void)
         CHECK(ext2_create(g_ec, st, g_st_name_d, "", 0) == EXT2_OK);
         media_check(&after);
         CHECK_MEDIA(&after);
+        e2f_sample(variant == 0 ? "E X2 after follow-ups" : variant == 1 ? "E X2-commit after follow-ups"
+                                                                           : "E X2-legacy after follow-ups", &after);
         disk_teardown();
     }
 }
@@ -2350,6 +2654,7 @@ static void case_x3_rename_two_names(void)
     u8 t;
 
     report("  [X3] rename sticky -> 2 つの名前 -> 復旧後に片方を unlink\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     disk_setup();
     if (g_failures != f0) { disk_teardown(); return; }
     CHECK(ext2_vfs_mkdir(g_ec, "/sw") == VFS_OK);
@@ -2367,6 +2672,10 @@ static void case_x3_rename_two_names(void)
         sw_disarm();
         media_check(&r);
         if (!media_ok(&r)) bad++;
+        if (e2f_pick(at)) {
+            lbl_reset(); lbl_s("E X3 rename sticky at="); lbl_i(at);
+            e2f_sample(g_lbl, &r);
+        }
         i_old = 0; i_new = 0;
         remount_cold();
         if (ext2_find_entry(g_ec, sw, "big", &i_old, &t) == EXT2_OK &&
@@ -2375,6 +2684,10 @@ static void case_x3_rename_two_names(void)
             CHECK(ext2_unlink(g_ec, sw, "big") == EXT2_OK);
             media_check(&r);
             if (!media_ok(&r)) bad_after_unlink++;
+            if (both <= 3) {
+                lbl_reset(); lbl_s("E X3 two names then unlink at="); lbl_i(at);
+                e2f_sample(g_lbl, &r);
+            }
             CHECK(raw_inode_used(i_new) == 1);       /* moved はまだ生きている */
         }
         undo_rollback();
@@ -2401,6 +2714,7 @@ static void case_x4_mkdir_add_entry_io(void)
     u8 t = 0;
 
     report("  [X4] mkdir: add_entry が I/O で落ちる -> 何も触らず孤児で残す\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     disk_setup();
     if (g_failures != f0) { disk_teardown(); return; }
     CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
@@ -2409,12 +2723,14 @@ static void case_x4_mkdir_add_entry_io(void)
     fail_arm(g_ec->base_lba + ri.block[0] * 2, 2);   /* 1 回目 = 存在確認、2 回目 = add_entry */
     rc = ext2_mkdir(g_ec, root, "nd");
     fail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_fail_fired == 1);
     CHECK(rc == EXT2_ERR_IO);
     CHECK_MEDIA(&after);
     CHECK(leak_delta(&after, &before) == 0);          /* 孤児から辿れる */
     CHECK(after.links_surplus > before.links_surplus); /* 孤児 (名前 < links) */
+    e2f_sample("E X4 mkdir add_entry io", &after);
     CHECK(ext2_find_entry(g_ec, root, "nd", &tmp, &t) == EXT2_ERR_NOTFOUND);
     disk_teardown();
 }
@@ -2443,6 +2759,7 @@ static void case_create_add_entry_nospc(void)
 
     report("== 段 D: 空きを使い切った状態 ==\n");
     report("  [P1-C'] create: add_entry が NOSPC -> 参照を外してから返す\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
     disk_setup();
     if (g_failures != f0) { disk_teardown(); return; }
 
@@ -2478,6 +2795,7 @@ static void case_create_add_entry_nospc(void)
     wfail_arm(bm_lba, 2);
     rc = ext2_create(g_ec, dent, g_dent_name, "Z", 1);
     wfail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_wfail_fired == 1);
     CHECK(rc == EXT2_ERR_NOSPC);
@@ -2498,6 +2816,7 @@ static void case_create_add_entry_nospc(void)
     wfail_arm(lba_of_inode(guess), 2);
     rc = ext2_create(g_ec, dent, g_dent_name, "Z", 1);
     wfail_disarm();
+    fault_done();
     media_check(&after);
     CHECK(g_wfail_fired == 1);
     CHECK(rc == EXT2_ERR_NOSPC);
@@ -2544,6 +2863,7 @@ static void case_trailing_sync_failure(void)
     int rc;
 
     report("  [SYNC] create / write / mkdir / rename / 追記 が sync 失敗を返す\n");
+    fault_done();   /* 前の case のエラー状態を持ち越さない (票 B8 往復 5) */
 
     sb_lba = g_ec->base_lba + 1 * 2;
     memo_cold();
@@ -2553,6 +2873,7 @@ static void case_trailing_sync_failure(void)
     fail_arm_always(sb_lba);
     rc = ext2_create(g_ec, etc_ino, "sync1", "abc", 3);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired > 0);
     CHECK(rc == EXT2_ERR_IO);
 
@@ -2560,6 +2881,7 @@ static void case_trailing_sync_failure(void)
     fail_arm_always(sb_lba);
     rc = ext2_vfs_write(g_ec, "/etc/sync1", "defgh", 5);
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired > 0);
     CHECK(rc == VFS_ERR_IO);
 
@@ -2567,6 +2889,7 @@ static void case_trailing_sync_failure(void)
     fail_arm_always(sb_lba);
     rc = ext2_mkdir(g_ec, etc_ino, "syncdir");
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired > 0);
     CHECK(rc == EXT2_ERR_IO);
 
@@ -2577,6 +2900,7 @@ static void case_trailing_sync_failure(void)
         fail_arm_always(sb_lba);
         rc = ext2_vfs_write_stream(g_ec, "/etc/sync1", blk, sizeof(blk), 5);
         fail_disarm();
+        fault_done();
         CHECK(g_fail_fired > 0);
         CHECK(rc == VFS_ERR_IO);
     }
@@ -2587,6 +2911,7 @@ static void case_trailing_sync_failure(void)
     fail_arm_always(sb_lba);
     rc = ext2_rename(g_ec, etc_ino, "sync1", etc_ino, "sync2");
     fail_disarm();
+    fault_done();
     CHECK(g_fail_fired > 0);
     CHECK(rc == EXT2_ERR_IO);
 
@@ -2712,6 +3037,665 @@ static void case_bmap_contract(void)
     }
 }
 
+/* ======================================================================== */
+/*  段 F: 往復 5 — ディレクトリ rename の順序 (決裁 1) とエラー状態 (決裁 2)    */
+/*                                                                          */
+/*  **試験の組み方** (PM 指示): エラー状態は**そのセッションの間だけ**書き込み  */
+/*  を止める。再起動後は読み書きでマウントされるので、1 回目の失敗で媒体に    */
+/*  残った状態は、再マウント後のあらゆる後続操作に対して安全でなければならない */
+/*  そこで「失敗を注入 -> 以後の書き込みが断られることを確認 -> **新しい ctx で */
+/*  同じ RAM ディスクを再マウント** (remount_fresh) -> 後続操作 -> 媒体検査と   */
+/*  e2fsck」の形にする。エラー状態が後続操作を止めることで blocker が試験から  */
+/*  見えなくなる、ということが無いように。                                   */
+/* ======================================================================== */
+
+static u16 sb_state_raw(void)
+{
+    return *(const u16 *)(g_disk + SB_STATE_LBA * 512u + EXT2_SB_STATE_OFF);
+}
+static u16 sb_errors_raw(void)
+{
+    return *(const u16 *)(g_disk + SB_STATE_LBA * 512u + EXT2_SB_ERRORS_OFF);
+}
+
+static int g_ls_n;
+static void ls_count_cb(const VfsDirEntry *e, void *ctx) { (void)e; (void)ctx; g_ls_n++; }
+
+/* [R5-ES] エラー状態の振る舞いそのもの */
+static void case_r5_error_state(void)
+{
+    MediaReport r;
+    Ext2Inode fi, ei;
+    u32 etc = 0, plain = 0, tmp = 0;
+    static u8 buf[64];
+    int rc, fd, f0 = g_failures;
+
+    report("  [R5-ES] エラー状態: メタデータの I/O エラーで以後の書き込みを断る\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    /* フォーマットが書く値 */
+    CHECK((sb_state_raw() & EXT2_VALID_FS) != 0);
+    CHECK((sb_state_raw() & EXT2_ERROR_FS) == 0);
+    CHECK(sb_errors_raw() == EXT2_ERRORS_RO);
+    CHECK(g_ec->fs_error == 0);
+    CHECK(g_ec->mounted_with_errors == 0);
+    CHECK(VFS_ERR_ROFS == -15);
+
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc/plain", &plain) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, plain, &fi) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, etc, &ei) == EXT2_OK);
+
+    /* (a) データブロックの読み取り失敗はエラー状態にしない (Linux と同じ) */
+    fail_arm(g_ec->base_lba + fi.block[0] * 2, 1);
+    rc = ext2_read_file(g_ec, plain, buf, sizeof(buf));
+    fail_disarm();
+    CHECK(g_fail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(g_ec->fs_error == 0);
+    CHECK((sb_state_raw() & EXT2_ERROR_FS) == 0);
+
+    /* (b) データブロックの書き込み失敗もしない */
+    wfail_arm(g_ec->base_lba + fi.block[0] * 2, 1);
+    rc = ext2_vfs_write_stream(g_ec, "/etc/plain", "Q", 1, 0);
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc < 0);
+    CHECK(g_ec->fs_error == 0);
+    CHECK(vfs_mkdir("/okdir") == VFS_OK);          /* 書き込みは通る */
+
+    /* (c) メタデータ (ディレクトリブロック) の読み取り失敗 -> エラー状態 */
+    g_kp_fs_error = 0;
+    memo_cold();
+    io_reset();
+    fail_arm(g_ec->base_lba + ei.block[0] * 2, 1);
+    rc = vfs_path_kind("/etc/plain");
+    fail_disarm();
+    CHECK(g_fail_fired == 1);
+    CHECK(rc == VFS_ERR_IO);
+    CHECK(g_ec->fs_error == 1);
+    CHECK(g_kp_fs_error == 1);                      /* 1 度だけ知らせる */
+    CHECK((sb_state_raw() & EXT2_ERROR_FS) != 0);   /* 媒体に印 */
+    CHECK(g_wr_sb == 1);                            /* 印を書いた 1 セクタだけ */
+    CHECK(wr_non_state() == 0);
+
+    /* 読み取り系は通る */
+    memo_cold();
+    CHECK(vfs_path_kind("/etc/plain") == VFS_KIND_FILE);
+    CHECK(ext2_read_file(g_ec, plain, buf, sizeof(buf)) == 5);
+    g_ls_n = 0;
+    CHECK(vfs_ls("/etc", ls_count_cb, (void *)0) == VFS_OK);
+    CHECK(g_ls_n > 0);
+    fd = vfs_open("/etc/plain", O_RDONLY);
+    CHECK(fd >= 3);
+    if (fd >= 0) vfs_close(fd);
+
+    /* 書き込み系はすべて ROFS で、1 セクタも書かない */
+    io_reset();
+    CHECK(vfs_write("/etc/plain", "x", 1) == VFS_ERR_ROFS);
+    CHECK(ext2_vfs_write_stream(g_ec, "/etc/plain", "x", 1, 0) == VFS_ERR_ROFS);
+    CHECK(ext2_create(g_ec, etc, "newf", "x", 1) == EXT2_ERR_ROFS);
+    CHECK(vfs_mkdir("/etc/nd") == VFS_ERR_ROFS);
+    CHECK(vfs_rmdir("/okdir") == VFS_ERR_ROFS);
+    CHECK(vfs_rm("/etc/plain") == VFS_ERR_ROFS);
+    CHECK(vfs_rename("/etc/plain", "/etc/p2") == VFS_ERR_ROFS);
+    CHECK(vfs_set_mtime("/etc/plain", (os_time_t)12345) == VFS_ERR_ROFS);
+    CHECK(vfs_open("/etc/brandnew", O_WRONLY | O_CREAT) == VFS_ERR_ROFS);
+    CHECK(vfs_open("/etc/plain", O_WRONLY | O_TRUNC) == VFS_ERR_ROFS);
+    CHECK(any_fd_open() == 0);
+    CHECK(g_wr_sect == 0);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/plain", &tmp) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/okdir", &tmp) == EXT2_OK);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("F R5-ES error state set", &r);
+
+    /* (d) 再マウント (新しい ctx): 警告を出して**読み書きで**マウントする */
+    g_kp_mount_warn = 0;
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(g_kp_mount_warn == 1);
+    CHECK(g_ec->mounted_with_errors == 1);
+    CHECK(g_ec->fs_error == 0);
+    CHECK(vfs_mkdir("/etc/after") == VFS_OK);
+    CHECK((sb_state_raw() & EXT2_ERROR_FS) != 0);   /* 印は e2fsck だけが消す */
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("F R5-ES remounted rw with errors flag", &r);
+
+    /* (e) メタデータ (inode 表) の書き込み失敗でもエラー状態 */
+    memo_cold();
+    wfail_arm(lba_of_inode(plain), 1);
+    rc = vfs_set_mtime("/etc/plain", (os_time_t)777);
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == VFS_ERR_IO);
+    CHECK(g_ec->fs_error == 1);
+    CHECK(vfs_mkdir("/etc/more") == VFS_ERR_ROFS);
+    /* エラー状態の sync は書かない */
+    io_reset();
+    (void)ext2_sync(g_ec);
+    CHECK(g_wr_sect == 0);
+    disk_teardown();
+}
+
+/* [R5-LINK] links_count の上限 (u16 の回り込みを作らない) */
+static void case_r5_link_max(void)
+{
+    Ext2Inode ei;
+    u32 etc = 0, tmp = 0;
+    u16 saved;
+    int f0 = g_failures;
+
+    report("  [R5-LINK] 親の links_count が EXT2_LINK_MAX なら mkdir / rename を断る\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/d") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, etc, &ei) == EXT2_OK);
+    saved = ei.links_count;
+    ei.links_count = EXT2_LINK_MAX;
+    CHECK(ext2_write_inode(g_ec, etc, &ei) == EXT2_OK);
+
+    io_reset();
+    CHECK(vfs_mkdir("/etc/toomany") == VFS_ERR_FULL);
+    CHECK(vfs_rename("/sw/d", "/etc/d") == VFS_ERR_FULL);
+    CHECK(g_wr_sect == 0);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw/d", &tmp) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc/d", &tmp) == EXT2_ERR_NOTFOUND);
+
+    ei.links_count = saved;
+    CHECK(ext2_write_inode(g_ec, etc, &ei) == EXT2_OK);
+    CHECK(vfs_rename("/sw/d", "/etc/d") == VFS_OK);
+    disk_teardown();
+}
+
+/* [R5-1] ディレクトリ rename を全位置で落とし、**新しい ctx で再マウントしてから**
+ * 後続操作 (輪を作る rename / rmdir / mkdir / create / unlink) を実行する。
+ * レビューの R5-1 (2 名 -> rmdir で dangling) を、決裁 1 の順序で塞いだことを
+ * 再マウント後の操作込みで見る。 */
+static void case_r5_dir_rename_followups(int cross)
+{
+    MediaReport r, r2;
+    u32 sw = 0, etc = 0, root = 0, d = 0, dst, x = 0;
+    int sticky, at, rc, fired, f0 = g_failures;
+    int runs = 0, two_names = 0, orphan = 0, done_new = 0, kept_old = 0;
+    int bad = 0, bad_after = 0, loop_made = 0, no_err_state = 0, not_refused = 0;
+    int refused_after_remount = 0, first_bad_at = 0;
+    u8 t;
+
+    report(cross ? "  [R5-1] ディレクトリを別の親へ rename -> 全位置で落とす -> 再マウント -> 後続操作\n"
+                 : "  [R5-1s] ディレクトリを同じ親の中で rename -> 全位置で落とす -> 再マウント -> 後続操作\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd/kid") == VFS_OK);     /* D を指す ".." を持つ子 */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    dst = cross ? etc : sw;
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    for (sticky = 0; sticky < 2; sticky++) {
+        for (at = 1; at < SWEEP_MAX; at++) {
+            int has_old, has_new, rc2;
+            undo_begin();
+            remount_cold();
+            sw_arm(at, sticky, SW_KIND_ANY);
+            rc = ext2_rename(g_ec, sw, "rmd", dst, "rmd2");
+            fired = g_sw_fired;
+            sw_disarm();
+            (void)rc;
+
+            /* このセッション: rename の I/O はすべてメタデータなので、落ちたら
+             * エラー状態になり、以後の書き込みは断られる */
+            if (fired) {
+                if (!g_ec->fs_error) no_err_state++;
+                else if (ext2_mkdir(g_ec, sw, "probe") != EXT2_ERR_ROFS) not_refused++;
+            }
+
+            /* 電源断 -> 新しい ctx (エラー状態は消え、媒体だけが残る) */
+            remount_fresh();
+            if (!g_ec) return;
+            media_check(&r);
+            if (!media_ok(&r)) { bad++; if (!first_bad_at) first_bad_at = at; }
+            x = 0;
+            has_old = (ext2_find_entry(g_ec, sw, "rmd", &x, &t) == EXT2_OK && x == d);
+            x = 0;
+            has_new = (ext2_find_entry(g_ec, dst, "rmd2", &x, &t) == EXT2_OK && x == d);
+            if (has_old && has_new) two_names++;
+            else if (!has_old && !has_new) orphan++;
+            else if (has_new) done_new++;
+            else kept_old++;
+            if (e2f_pick(at) || (!has_old && !has_new && orphan == 1)) {
+                lbl_reset(); lbl_s(cross ? "F R5-1 cross" : "F R5-1s same");
+                lbl_s(" after fault at="); lbl_i(at); lbl_s(sticky ? " sticky" : " once");
+                e2f_sample(g_lbl, &r);
+            }
+
+            /* ---- 後続操作 (新しい ctx = エラー状態ではない) ---- */
+            /* (1) 輪を作ろうとする: D の祖先を D の配下へ */
+            if (has_new) {
+                rc2 = ext2_rename(g_ec, root, cross ? "etc" : "sw", d, "anc");
+                if (rc2 == EXT2_OK) loop_made++;
+                if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            } else if (has_old) {
+                rc2 = ext2_rename(g_ec, root, "sw", d, "anc");
+                if (rc2 == EXT2_OK) loop_made++;
+                if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            }
+            /* (2) 子と D を消す (D を指す名前すべてについて) */
+            rc2 = ext2_rmdir(g_ec, d, "kid");
+            if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            if (has_old) {
+                rc2 = ext2_rmdir(g_ec, sw, "rmd");
+                if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            }
+            if (has_new) {
+                rc2 = ext2_rmdir(g_ec, dst, "rmd2");
+                if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            }
+            /* (3) mkdir (返した inode 番号を受け取り得る) と、同じ名前での作り直し */
+            rc2 = ext2_mkdir(g_ec, dst, "fresh");
+            if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            rc2 = ext2_mkdir(g_ec, dst, "rmd2");
+            if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            /* (4) create / unlink */
+            rc2 = ext2_create(g_ec, sw, "f", "x", 1);
+            if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+            rc2 = ext2_unlink(g_ec, sw, "f");
+            if (rc2 == EXT2_ERR_ROFS) refused_after_remount++;
+
+            media_check(&r2);
+            if (!media_ok(&r2)) { bad_after++; if (!first_bad_at) first_bad_at = at; }
+            if (e2f_pick(at)) {
+                lbl_reset(); lbl_s(cross ? "F R5-1 cross" : "F R5-1s same");
+                lbl_s(" after follow-ups at="); lbl_i(at); lbl_s(sticky ? " sticky" : " once");
+                e2f_sample(g_lbl, &r2);
+            }
+            undo_rollback();
+            runs++;
+            if (!fired) break;
+        }
+    }
+    report("      runs="); report_i(runs);
+    report(" two-names="); report_i(two_names);
+    report(" orphan="); report_i(orphan);
+    report(" moved="); report_i(done_new);
+    report(" unmoved="); report_i(kept_old);
+    report(" inconsistent-after-fault="); report_i(bad);
+    report(" inconsistent-after-follow-ups="); report_i(bad_after);
+    report(" loop-made="); report_i(loop_made);
+    report(" no-error-state="); report_i(no_err_state);
+    report(" write-not-refused="); report_i(not_refused);
+    report(" refused-after-remount="); report_i(refused_after_remount);
+    if (first_bad_at) { report(" first-bad-at="); report_i(first_bad_at); }
+    report("\n");
+    CHECK(two_names == 0);
+    CHECK(orphan > 0);                  /* 決裁 1 の代償 (孤児) が実際に起きている */
+    CHECK(bad == 0);
+    CHECK(bad_after == 0);
+    CHECK(loop_made == 0);
+    CHECK(no_err_state == 0);
+    CHECK(not_refused == 0);
+    CHECK(refused_after_remount == 0);
+    remount_cold();
+    disk_teardown();
+}
+
+/* [R5-1b] レビューの輪の反例: 旧名の削除の書き込みを 1 回落とす。往復 4 では
+ * ここで 2 名になり、片方の親を D の配下へ動かすと輪ができた。 */
+static void case_r5_loop_attempt(void)
+{
+    MediaReport r;
+    Ext2Inode swi;
+    u32 sw = 0, etc = 0, root = 0, d = 0, x = 0;
+    int rc, f0 = g_failures;
+    u8 t;
+
+    report("  [R5-1b] 旧名の削除が落ちる -> (このセッションは断る) -> 再マウント -> 輪を作ろうとする\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, sw, &swi) == EXT2_OK);
+
+    wfail_arm(g_ec->base_lba + swi.block[0] * 2, 1);
+    rc = ext2_rename(g_ec, sw, "rmd", etc, "rmd2");
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(g_ec->fs_error == 1);
+    CHECK(ext2_rename(g_ec, root, "etc", d, "etc2") == EXT2_ERR_ROFS);
+
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(ext2_find_entry(g_ec, sw, "rmd", &x, &t) == EXT2_OK);      /* 旧名は残った */
+    CHECK(ext2_find_entry(g_ec, etc, "rmd2", &x, &t) == EXT2_ERR_NOTFOUND);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    e2f_sample("F R5-1b after fault", &r);
+
+    /* D の名前は 1 つなので、/etc を D の配下へ移すのは正当 (輪にならない) */
+    CHECK(ext2_rename(g_ec, root, "etc", d, "etc2") == EXT2_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw/rmd/etc2/plain", &x) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd/etc2/rmd2", &x) == EXT2_ERR_NOTFOUND);
+    /* 逆向き (祖先を子孫の配下へ) は断る */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw/rmd/etc2", &etc) == EXT2_OK);
+    CHECK(ext2_rename(g_ec, root, "sw", etc, "sw2") == EXT2_ERR_INVAL);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    CHECK(r.dir_loop == 0);
+    e2f_sample("F R5-1b after rename of /etc under D", &r);
+    disk_teardown();
+}
+
+/* [R5-6] e2fsck に見せる像 (レビューの 00〜04 を往復 5 のコードで作り直す) */
+static void case_r5_e2fsck_images(void)
+{
+    MediaReport r;
+    Ext2Inode di, swi, ei;
+    u32 sw = 0, etc = 0, root = 0, d2 = 0, d = 0, x = 0;
+    int rc, f0 = g_failures;
+    u8 t;
+
+    report("  [R5-6] e2fsck に見せる像 (00 / 01 穴 / 02 旧名削除の失敗 / 02b 孤児 / 03 rmdir / 04 輪の試み)\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    media_check(&r); CHECK_MEDIA(&r);
+    e2f_sample("F R5-6 00_base", &r);
+
+    /* 01: 末尾の穴 (繋ぐ書き込みを落とす) -> 短い名前を足しても穴は残る (非 blocker) */
+    CHECK(make_full_dir("/dent2", DENT_FULL_IND, &d2, g_dent_name2));
+    CHECK(ext2_read_inode(g_ec, d2, &di) == EXT2_OK);
+    wfail_arm(g_ec->base_lba + di.block[EXT2_IND_BLOCK] * 2, 1);
+    rc = ext2_create(g_ec, d2, g_dent_name2, "x", 1);
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(ext2_create(g_ec, d2, "after", "y", 1) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    media_check(&r); CHECK_MEDIA(&r);
+    report("      01 hole: dir_hole="); report_i((int)r.dir_hole); report("\n");
+    CHECK(r.dir_hole == 1);            /* 「次の追加が埋める」は誤りだった (記録) */
+    e2f_sample("F R5-6 01_hole", &r);
+    disk_teardown();
+
+    /* 02: 旧名の削除の書き込みを落とす (往復 4 ではここで 2 名になった) */
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, sw, &swi) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, etc, &ei) == EXT2_OK);
+    wfail_arm(g_ec->base_lba + swi.block[0] * 2, 1);
+    rc = ext2_rename(g_ec, sw, "rmd", etc, "rmd2");
+    wfail_disarm();
+    CHECK(rc == EXT2_ERR_IO);
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(ext2_find_entry(g_ec, etc, "rmd2", &x, &t) == EXT2_ERR_NOTFOUND);
+    media_check(&r); CHECK_MEDIA(&r); CHECK(r.dir_multi == 0);
+    e2f_sample("F R5-6 02_old_name_delete_failed", &r);
+
+    /* 02b: 新名を載せる書き込み (/etc のブロック 0) を落とす -> 孤児のディレクトリ */
+    wfail_arm(g_ec->base_lba + ei.block[0] * 2, 1);
+    rc = ext2_rename(g_ec, sw, "rmd", etc, "rmd2");
+    wfail_disarm();
+    CHECK(g_wfail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    remount_fresh();
+    if (!g_ec) return;
+    CHECK(ext2_find_entry(g_ec, sw, "rmd", &x, &t) == EXT2_ERR_NOTFOUND);
+    CHECK(ext2_find_entry(g_ec, etc, "rmd2", &x, &t) == EXT2_ERR_NOTFOUND);
+    CHECK(raw_inode_used(d) == 1);
+    media_check(&r); CHECK_MEDIA(&r);
+    CHECK(r.links_surplus > 0);
+    e2f_sample("F R5-6 02b_orphan_dir", &r);
+
+    /* 03: 名前は残っていない (孤児) ので rmdir は何も消さない -> mkdir */
+    CHECK(ext2_rmdir(g_ec, etc, "rmd2") == EXT2_ERR_NOTFOUND);
+    CHECK(ext2_rmdir(g_ec, sw, "rmd") == EXT2_ERR_NOTFOUND);
+    CHECK(vfs_mkdir("/etc/newdir") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/newdir", &x) == EXT2_OK);
+    CHECK(x != d);                     /* 孤児の inode は配られない */
+    media_check(&r); CHECK_MEDIA(&r);
+    e2f_sample("F R5-6 03_rmdir_then_mkdir", &r);
+
+    /* 04: 輪の試み — /etc を /etc/newdir の配下へ */
+    CHECK(ext2_rename(g_ec, root, "etc", x, "etc2") == EXT2_ERR_INVAL);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    media_check(&r); CHECK_MEDIA(&r); CHECK(r.dir_loop == 0);
+    e2f_sample("F R5-6 04_loop_attempt", &r);
+    disk_teardown();
+}
+
+/* [R5-LEGACY] 往復 4 以前のコードが媒体に残した「2 名のディレクトリ」。
+ * 決裁 1 はこの状態を**作らない**が、既に媒体にあると OS32 の rmdir はやはり
+ * dangling を作る。このセッションでメタデータの I/O エラーが出ていれば、
+ * エラー状態がそれを止める (決裁 2)。rename のやり直し経路 (dst_ino == ino) は
+ * 2 名を残さず、エラー状態にして断る。 */
+static void case_r5_legacy_two_names(void)
+{
+    MediaReport r;
+    Ext2Inode di, ei;
+    u32 sw = 0, etc = 0, d = 0;
+    int rc, f0 = g_failures;
+
+    report("  [R5-LEGACY] 旧コードの 2 名のディレクトリ: エラー状態が rmdir を止める / やり直し rename は断る\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc", &etc) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+
+    /* 往復 4 の段 1〜3 だけが届いた状態 (レビューの 02_two_names と同じ) */
+    CHECK(ext2_read_inode(g_ec, d, &di) == EXT2_OK);
+    di.links_count++;
+    CHECK(ext2_write_inode(g_ec, d, &di) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, etc, &ei) == EXT2_OK);
+    ei.links_count++;
+    CHECK(ext2_write_inode(g_ec, etc, &ei) == EXT2_OK);
+    CHECK(ext2_add_entry(g_ec, etc, "rmd2", d, EXT2_FT_DIR) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK(r.dir_multi == 1);           /* 往復 5 の検査が見つける (dotdot_bad は
+                                        * どちらの親を先に数えるかで 0/1 になる) */
+    CHECK(!media_ok(&r));
+    e2f_sample("F R5-LEGACY two names (expected inconsistent)", &r);
+
+    /* このセッションでメタデータの I/O エラー -> rmdir はエラー状態が止める */
+    CHECK(ext2_read_inode(g_ec, etc, &ei) == EXT2_OK);
+    memo_cold();
+    fail_arm(g_ec->base_lba + ei.block[0] * 2, 1);
+    (void)vfs_path_kind("/etc/plain");
+    fail_disarm();
+    CHECK(g_fail_fired == 1);
+    CHECK(g_ec->fs_error == 1);
+    io_reset();
+    rc = ext2_rmdir(g_ec, etc, "rmd2");
+    CHECK(rc == EXT2_ERR_ROFS);
+    CHECK(g_wr_sect == 0);
+    media_check(&r);
+    CHECK(r.dangling == 0);            /* **媒体で見る**: 解放済み inode を指す名前が無い */
+    CHECK(raw_inode_used(d) == 1);
+
+    /* rename のやり直し (dst_ino == ino): 2 名を残して OK、とは言わない */
+    remount_fresh();
+    if (!g_ec) return;
+    io_reset();
+    rc = ext2_rename(g_ec, sw, "rmd", etc, "rmd2");
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(g_ec->fs_error == 1);
+    CHECK(wr_non_state() == 0);
+    rc = ext2_rmdir(g_ec, etc, "rmd2");
+    CHECK(rc == EXT2_ERR_ROFS);
+    media_check(&r);
+    CHECK(r.dangling == 0);
+    CHECK(raw_inode_used(d) == 1);
+
+    /* 記録のみ ([V4]): エラー状態が無い新しいマウントで旧媒体の 2 名に rmdir を
+     * 当てると、往復 4 以前と同じく dangling になる。決裁 1 は OS32 が新たに
+     * この状態を作らないことを保証するが、既存の媒体の 2 名は e2fsck が要る。 */
+    remount_fresh();
+    if (!g_ec) return;
+    undo_begin();
+    rc = ext2_rmdir(g_ec, etc, "rmd2");
+    media_check(&r);
+    report("      (record) legacy two names + fresh mount + rmdir: rc="); report_i(rc);
+    report(" dangling="); report_i((int)r.dangling); report("\n");
+    undo_rollback();
+    remount_cold();
+    disk_teardown();
+}
+
+/* [R5-NOSPC] ディレクトリ rename の新名が NOSPC: 旧名を消した後なので、
+ * 旧名・".."・両方の親の links を**元に戻してから** NOSPC を返す
+ * (決裁 1 の孤児は I/O 失敗の代償であって、「満杯」で孤児を作ってはいけない)。 */
+static void case_r5_dir_rename_nospc(void)
+{
+    MediaReport before, after;
+    u32 sw = 0, full = 0, d = 0, x = 0;
+    u16 sw_links, full_links;
+    int rc, f0 = g_failures;
+    u8 t;
+
+    report("  [R5-NOSPC] ディレクトリ rename: 新名が NOSPC -> 旧名 / '..' / links を戻す\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/sw") == VFS_OK);
+    CHECK(vfs_mkdir("/sw/rmd") == VFS_OK);
+    CHECK(make_full_dir("/full", DENT_FULL, &full, g_dent_name));   /* 次の名前は新ブロック */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/sw", &sw) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/rmd", &d) == EXT2_OK);
+    while (ext2_alloc_block(g_ec) >= 0) { }                         /* 空きを使い切る */
+    CHECK(g_ec->sb_info.free_blocks_count == 0);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    sw_links = *(const u16 *)(raw_inode(sw) + 26);
+    full_links = *(const u16 *)(raw_inode(full) + 26);
+    media_check(&before);
+    CHECK_MEDIA(&before);
+
+    rc = ext2_rename(g_ec, sw, "rmd", full, g_dent_name);
+    media_check(&after);
+    CHECK(rc == EXT2_ERR_NOSPC);
+    CHECK(g_ec->fs_error == 0);                    /* NOSPC は I/O エラーではない */
+    CHECK_MEDIA(&after);
+    CHECK(ext2_find_entry(g_ec, sw, "rmd", &x, &t) == EXT2_OK);     /* 旧名は戻った */
+    CHECK(x == d);
+    CHECK(ext2_find_entry(g_ec, full, g_dent_name, &x, &t) == EXT2_ERR_NOTFOUND);
+    CHECK(*(const u16 *)(raw_inode(sw) + 26) == sw_links);
+    CHECK(*(const u16 *)(raw_inode(full) + 26) == full_links);
+    CHECK(after.links_surplus == before.links_surplus);             /* 孤児を作っていない */
+    {
+        u32 par = 0;
+        memo_cold();
+        CHECK(ext2_lookup(g_ec, "/sw/rmd/..", &par) == EXT2_OK);
+        CHECK(par == sw);                          /* ".." も戻った */
+    }
+    e2f_sample("F R5-NOSPC dir rename rolled back", &after);
+    disk_teardown();
+}
+
+/* [R5-BADDIR] 壊れた rec_len を media_check が黙って打ち切らず不整合に数えること、
+ * そして e2fsck の判定と一致すること。往復 5 のコードはこの状態を作らないので、
+ * 媒体を直に壊して作る (検査の側を試す)。 */
+static void case_r5_bad_rec_len(void)
+{
+    MediaReport r;
+    Ext2Inode di;
+    u32 dno = 0;
+    u8 *blk;
+    u16 saved;
+    int f0 = g_failures;
+
+    report("  [R5-BADDIR] 壊れた rec_len (\".\" を 14 に) -> media_check も e2fsck も不整合\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(vfs_mkdir("/bd") == VFS_OK);
+    CHECK(vfs_write("/bd/a", "A", 1) == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/bd", &dno) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, dno, &di) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    CHECK(r.bad_dir == 0);
+
+    blk = raw_blk(di.block[0]);
+    saved = *(u16 *)(blk + 4);
+    CHECK(saved == 12);
+    *(u16 *)(blk + 4) = 14;            /* 4 の倍数でない。鎖が ".." の途中へずれる */
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK(r.bad_dir >= 1);
+    CHECK(!media_ok(&r));
+    e2f_sample("F R5-BADDIR corrupted rec_len (expected inconsistent)", &r);
+
+    *(u16 *)(blk + 4) = saved;
+    remount_fresh();
+    if (!g_ec) return;
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+}
+
+static void stage_f_round5(void)
+{
+    report("== 段 F: 往復 5 (ディレクトリ rename は旧名を先に消す / エラー状態) ==\n");
+    case_r5_error_state();
+    case_r5_link_max();
+    case_r5_dir_rename_followups(1);
+    case_r5_dir_rename_followups(0);
+    case_r5_loop_attempt();
+    case_r5_dir_rename_nospc();
+    case_r5_e2fsck_images();
+    case_r5_legacy_two_names();
+    case_r5_bad_rec_len();
+}
+
 static void stage_a(void)
 {
     report("== 段 A: 実物の ext2 (RAM ディスク) + 実物の vfs_open ==\n");
@@ -2765,6 +3749,9 @@ static void stage_a(void)
 
     /* 段 E: レビュー (往復 3) の反例を本試験に取り込む */
     stage_e_review_cases();
+
+    /* 段 F: 往復 5 */
+    stage_f_round5();
 }
 
 /* ======================================================================== */
@@ -3041,18 +4028,24 @@ static void run(void)
     g_exit_code = g_failures ? 1 : 0;
 }
 
-/* -nostdlib の入口。ext2_write_io_host.c と同じ様式 (スタックを整えて run へ) */
-__asm__(
-    ".globl _start\n"
-    "_start:\n"
-    "    xor %ebp, %ebp\n"
-    "    and $-16, %esp\n"
-    "    call b8_main\n"
-    "    hlt\n");
+/* -nostdlib の入口。プロセス開始時の esp は [argc][argv0][argv1]... を指すので
+ * そのまま C へ渡す (ext2_write_io_host.c と同じ様式)。
+ * argv[1] があれば、そのディレクトリへ RAM ディスクの像を書いて e2fsck と
+ * 突き合わせる (票 B8 往復 5。test_b8_open.py が標準入出力で相手をする)。 */
+void b8_start_c(long *sp);
+__asm__(".text\n"
+        ".globl _start\n"
+        "_start:\n"
+        "  movl %esp, %eax\n"
+        "  andl $-16, %esp\n"
+        "  pushl %eax\n"
+        "  call b8_start_c\n"
+        "  hlt\n");
 
-void b8_main(void);
-void b8_main(void)
+void b8_start_c(long *sp)
 {
+    long argc = sp[0];
+    if (argc >= 2) g_dump_dir = (const char *)sp[2];
     run();
     die(g_exit_code);
 }

@@ -51,6 +51,15 @@ typedef struct Ext2Ctx_tag {
      * 0 なら ext2_sync() は書くものが無いので I/O を出さない。 */
     int meta_dirty;
 
+    /* **エラー状態** (票 B8 往復 5 / ユーザー決裁 2)。メタデータの読み書きで
+     * I/O エラーが出たら 1 にし、以後の書き込み系操作を EXT2_ERR_ROFS で断る。
+     * **このマウントの間だけ**。再マウント (新しい ctx、または ext2_mount) で 0 に
+     * 戻る — 媒体の s_state には EXT2_ERROR_FS を残すが、Linux と同じく
+     * 警告を出して読み書きでマウントする。 */
+    int fs_error;
+    /* マウント時に媒体の s_state が EXT2_ERROR_FS を持っていたか (情報用) */
+    int mounted_with_errors;
+
     /* 名前空間の世代と解決済み経路の記憶 */
     u32 ns_gen;
     int memo_next;           /* 次に潰す記憶 (単純な巡回) */

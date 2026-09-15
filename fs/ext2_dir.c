@@ -227,7 +227,11 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
      *   2. ディレクトリの size を伸ばして inode を書く
      *                                  … まだ繋いでいないので、落ちたら返す。
      *                                    届いていれば size だけ先に伸びる (末尾の
-     *                                    穴。次の追加がその位置を埋める)
+     *                                    穴)。**穴は次の追加で埋まるとは限らない** —
+     *                                    次の名前が既存ブロックのスラックに収まれば
+     *                                    穴は残る (往復 5 レビュー)。穴は i_size が
+     *                                    大きいだけで参照を持たないので、e2fsck の
+     *                                    i_size 修正で済む (漏れ側)
      *   3. 繋ぐ (ext2_bmap_set)        … 既存の間接表ならここで媒体に載る
      *   4. inode を書く                … 直接ポインタ / 新しい単一間接表への
      *                                    ポインタはここで媒体に載る
@@ -353,6 +357,8 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     /* 存在確認は **3 値で受ける** (票 B8 / Codex 実装レビュー P1-1)。
      * 「EXT2_OK のときだけ拒否」だと I/O エラーでも下の割当・作成へ進み、
@@ -364,6 +370,12 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
         if (ret == EXT2_OK) return EXT2_ERR_EXIST;
         if (ret != EXT2_ERR_NOTFOUND) return ret;
     }
+
+    /* 親の links_count は u16。上限を越えて回り込むと「名前の数 > links」に
+     * なるので、何も書く前に断る (票 B8 往復 5、レビュー非 blocker) */
+    ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
+    if (ret != 0) return ret;
+    if (parent_inode.links_count >= EXT2_LINK_MAX) return EXT2_ERR_MLINK;
 
     new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
@@ -506,6 +518,8 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     int free_ret = EXT2_OK;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     ret = ext2_find_entry(ctx, parent_ino, name, &ino, &ftype);
     if (ret != 0) return ret;
@@ -660,6 +674,116 @@ static int ext2_is_self_or_descendant(Ext2Ctx *ctx, u32 ino, u32 new_dir)
     return 0;
 }
 
+/* ------------------------------------------------------------------------
+ *  ディレクトリの rename — **旧名を先に消す** (票 B8 往復 5 / ユーザー決裁 1)
+ *
+ *  往復 4 まではファイルと同じ「新名を載せてから旧名を消す」だったので、
+ *  旧名の削除 (6 セクタの I/O) のどれか 1 回の失敗で**1 つのディレクトリに
+ *  名前が 2 つ**残った。links は合っていても OS32 の rmdir は links を見ずに
+ *  inode を返すので、残った名前が解放済み inode を指し (dangling)、2 名からは
+ *  ".." しか辿らない循環検査をすり抜けてディレクトリの輪も作れた。
+ *
+ *  ディレクトリは「先に旧名を消し、最後に新名を載せる」。途中で落ちると
+ *  **名前 0 個の孤児**になる。孤児は OS32 のどの操作からも辿れないので、後続の
+ *  rmdir / mkdir / rename に化けない (ホストの e2fsck が lost+found へ回収する)。
+ *  往復 3 の「破壊より漏れ」と同じ方針。
+ *
+ *  守る不変条件:
+ *    (a) どの inode も、それを指す名前 ("." ".." を含む) の数 <= links_count
+ *    (b) ディレクトリ inode を指す "." ".." 以外の名前は 1 つ以下
+ *    (c) ".." を新しい親へ向ける前に新しい親の links を上げ、
+ *        旧親の links は ".." が離れた後で下げる
+ *    (孤児の ".." が旧親を指したまま残るのは許容 — e2fsck が直す)
+ *
+ *  段と、その段で落ちたときの媒体 (別の親へ移すとき。同じ親なら 2〜4 が無い):
+ *    0. 新しい親の links が上限でないか読む        … 何も書いていない
+ *    1. 旧名を消す (ext2_delete_entry)              … 名前 1 (届かなかった) か
+ *                                                     0 (孤児)。links・".." は元
+ *    2. 新しい親の links +1                          … 孤児。新親の links は元か +1
+ *    3. D の ".." を新しい親へ (1 セクタの 4B = 二値) … 孤児。".." は旧親か新親、
+ *                                                     どちらも数えられている
+ *    4. 旧親の links -1                              … 孤児。旧親の links は元か -1
+ *    5. 新名を載せる (ext2_add_entry)                … 名前 0 (孤児) か 1 (完了)。
+ *                                                     NOSPC なら巻き戻す (下)
+ *    6. D の ctime                                  … 完了済み。失敗はエラー状態
+ *                                                     を立てるが OK を返す
+ *  D 自身の links_count は動かさない (名前は 1 -> 0 -> 1 で、多い側にしか振れない)。
+ *
+ *  NOSPC の巻き戻し (新名はどこにも載っていない): 旧親の links +1 -> ".." を
+ *  旧親へ -> 新親の links -1 -> 旧名を載せ直す。どこで落ちても孤児で止まり、
+ *  (a)(b)(c) は保たれる。旧名を消した隙間は同じ長さの名前がちょうど入るので、
+ *  載せ直しは NOSPC にならない。
+ * ------------------------------------------------------------------------ */
+static int ext2_rename_dir(Ext2Ctx *ctx, u32 ino, u32 old_dir, const char *old_name,
+                           u32 new_dir, const char *new_name)
+{
+    Ext2Inode pinode, dinode;
+    int ret;
+    int cross = (old_dir != new_dir);
+
+    /* 0 */
+    if (cross) {
+        ret = ext2_read_inode(ctx, new_dir, &pinode);
+        if (ret != 0) return ret;
+        if (pinode.links_count >= EXT2_LINK_MAX) return EXT2_ERR_MLINK;
+    }
+
+    /* 1 */
+    ret = ext2_delete_entry(ctx, old_dir, old_name);
+    if (ret != 0) return ret;
+
+    if (cross) {
+        /* 2 */
+        ret = ext2_read_inode(ctx, new_dir, &pinode);
+        if (ret == 0) {
+            pinode.links_count++;
+            ret = ext2_write_inode(ctx, new_dir, &pinode);
+        }
+        if (ret != 0) return EXT2_ERR_IO;
+
+        /* 3 */
+        ret = ext2_set_dotdot(ctx, ino, new_dir);
+        if (ret != 0) return ret;
+
+        /* 4 */
+        ret = ext2_read_inode(ctx, old_dir, &pinode);
+        if (ret == 0) {
+            if (pinode.links_count > 0) pinode.links_count--;
+            ret = ext2_write_inode(ctx, old_dir, &pinode);
+        }
+        if (ret != 0) return EXT2_ERR_IO;
+    }
+
+    /* 5 */
+    ret = ext2_add_entry(ctx, new_dir, new_name, ino, EXT2_FT_DIR);
+    if (ret == EXT2_ERR_NOSPC) {
+        /* 新名は載っていない。旧名へ戻す (落ちたら孤児で止まる) */
+        if (cross) {
+            if (ext2_read_inode(ctx, old_dir, &pinode) != 0) return ret;
+            pinode.links_count++;
+            if (ext2_write_inode(ctx, old_dir, &pinode) != 0) return ret;
+            if (ext2_set_dotdot(ctx, ino, old_dir) != 0) return ret;
+            if (ext2_read_inode(ctx, new_dir, &pinode) != 0) return ret;
+            if (pinode.links_count > 0) pinode.links_count--;
+            if (ext2_write_inode(ctx, new_dir, &pinode) != 0) return ret;
+        }
+        if (ext2_add_entry(ctx, old_dir, old_name, ino, EXT2_FT_DIR) != 0) {
+            /* 孤児で止まる */
+        }
+        return ret;
+    }
+    if (ret != 0) return ret;
+
+    /* 6 — 名前は完成している。失敗は ext2_write_block がエラー状態にするが、
+     * 「rename できなかった」とは言わない (言うと呼び手はやり直そうとする) */
+    if (ext2_read_inode(ctx, ino, &dinode) == 0) {
+        dinode.ctime = ext2_current_time();
+        if (ext2_write_inode(ctx, ino, &dinode) != 0) { /* ctime だけ古い */ }
+    }
+
+    return ext2_sync(ctx);
+}
+
 int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
                 u32 new_dir, const char *new_name)
 {
@@ -669,6 +793,8 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
     if (!old_name[0] || !new_name[0]) return EXT2_ERR_INVAL;
 
     ret = ext2_find_entry(ctx, old_dir, old_name, &ino, &ftype);
@@ -690,7 +816,20 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
      * 判定できないなら何も書かずに中断する。 */
     ret = ext2_find_entry(ctx, new_dir, new_name, &dst_ino, &dst_type);
     if (ret == EXT2_OK) {
-        if (dst_ino == ino) return EXT2_OK;   /* ハードリンク同士 */
+        if (dst_ino == ino) {
+            if (ftype == EXT2_FT_DIR) {
+                /* **1 つのディレクトリに名前が 2 つ** = 媒体が壊れている
+                 * (票 B8 往復 5)。往復 5 以降の rename はこの状態を作らない
+                 * (旧名を先に消す) ので、ここに来るのは往復 4 以前のコードが
+                 * 書いた媒体か、別の破損だけ。以前は「ハードリンク同士」として
+                 * OK を返し 2 名を残していた。完了させようとはせず (".." や
+                 * 親の links がどこまで進んでいたか分からない)、メタデータの
+                 * 不整合としてエラー状態にして断る。 */
+                ext2_fs_error(ctx);
+                return EXT2_ERR_IO;
+            }
+            return EXT2_OK;   /* ファイルのハードリンク同士 (POSIX どおり何もしない) */
+        }
         if (dst_type == EXT2_FT_DIR) return EXT2_ERR_EXIST;
         if (ftype == EXT2_FT_DIR) return EXT2_ERR_NOTDIR;
         ret = ext2_unlink(ctx, new_dir, new_name);
@@ -699,105 +838,67 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
         return ret;
     }
 
-    if (ftype == EXT2_FT_DIR && old_dir != new_dir) {
-        int desc = ext2_is_self_or_descendant(ctx, ino, new_dir);
-        if (desc < 0) return desc;      /* 判定できなかった。INVAL と偽らない */
-        if (desc) return EXT2_ERR_INVAL;
+    if (ftype == EXT2_FT_DIR) {
+        if (old_dir != new_dir) {
+            int desc = ext2_is_self_or_descendant(ctx, ino, new_dir);
+            if (desc < 0) return desc;      /* 判定できなかった。INVAL と偽らない */
+            if (desc) return EXT2_ERR_INVAL;
+        }
+        return ext2_rename_dir(ctx, ino, old_dir, old_name, new_dir, new_name);
     }
 
-    /* ---- 名前の付け替え (票 B8 往復 4 / X3) ----
+    /* ---- ファイルの名前の付け替え (票 B8 往復 4 / X3、往復 5 もこのまま) ----
      *
      * 不変条件: **どの inode も、それを指す名前の数 <= links_count**。
-     * 名前の数が links_count を上回ると、片方の名前の unlink が links_count を
-     * 0 にして inode とブロックを返し、**残った名前が解放済み inode を指す**。
-     *
-     * 直す前は「新しい名前を載せる -> 古い名前を消す」の間 links_count を
-     * 上げていなかったので、その間で装置が消えると 2 つの名前が links 1 の
-     * inode を指したまま失敗を返した (レビュー実測: sticky 故障 35 位置中 10)。
-     * また「古い名前を消せなければ新しい名前を消して巻き戻す」は、古い名前の
-     * 削除が実は届いていた場合に**名前を 0 にする**ので外した。
+     * ファイルのハードリンクは正当なので、失敗して名前が 2 つ残っても整合する。
      *
      * 順序と、各段で落ちたときの媒体:
      *   1. 移す inode の links_count を +1 して書く
      *        落ちた: 名前 1、links は元か +1 (多い側 = 安全)。何も付け替えていない
-     *   2. (ディレクトリを別の親へ移すとき) 新しい親の links_count を +1
-     *        落ちた: 同上。新しい親は links が多いかもしれない (安全)
      *   3. 新しい名前を載せる (ext2_add_entry)
      *        落ちた: 名前 1 か 2、links は +1 済み。NOSPC なら名前は載って
-     *        いないので 1・2 を戻す (戻せなくても多い側)
+     *        いないので 1 を戻す (戻せなくても多い側)
      *   4. 古い名前を消す (ext2_delete_entry)
      *        落ちた: 名前 2 か 1、links は +1 済み = 整合。**巻き戻さない**
-     *   5. (ディレクトリを別の親へ移すとき) ".." を新しい親へ書き換え、
-     *      古い親の links_count を -1
-     *        落ちた: ".." が古い親を指したままなら古い親の links は下げない
      *   6. 移す inode の links_count を -1 して書く (ctime も)
      *        落ちた: links が 1 多い (孤児側。e2fsck が直す)
+     * (段 2 / 5 は別の親へ移すディレクトリの段だったので、往復 5 で
+     *  ext2_rename_dir へ移した。番号は往復 4 の記録と揃えて残している。)
      */
-    {
-        Ext2Inode pinode;
-        int cross_dir = (ftype == EXT2_FT_DIR && old_dir != new_dir);
+    /* 1 */
+    ret = ext2_read_inode(ctx, ino, &inode);
+    if (ret != 0) return ret;
+    if (inode.links_count >= EXT2_LINK_MAX) return EXT2_ERR_MLINK;
+    inode.links_count++;
+    inode.ctime = ext2_current_time();
+    ret = ext2_write_inode(ctx, ino, &inode);
+    if (ret != 0) return EXT2_ERR_IO;
 
-        /* 1 */
-        ret = ext2_read_inode(ctx, ino, &inode);
-        if (ret != 0) return ret;
-        inode.links_count++;
+    /* 3 */
+    ret = ext2_add_entry(ctx, new_dir, new_name, ino, ftype);
+    if (ret != 0) {
+        if (ret == EXT2_ERR_NOSPC) {
+            /* 名前は載っていない。上げた数を戻す (落ちても多い側) */
+            if (ext2_read_inode(ctx, ino, &inode) == 0 && inode.links_count > 0) {
+                inode.links_count--;
+                if (ext2_write_inode(ctx, ino, &inode) != 0) { /* 多いまま */ }
+            }
+        }
+        return ret;
+    }
+
+    /* 4 */
+    ret = ext2_delete_entry(ctx, old_dir, old_name);
+    if (ret != 0) return ret;
+
+    /* 6 */
+    ret = ext2_read_inode(ctx, ino, &inode);
+    if (ret == 0) {
+        if (inode.links_count > 0) inode.links_count--;
         inode.ctime = ext2_current_time();
         ret = ext2_write_inode(ctx, ino, &inode);
-        if (ret != 0) return EXT2_ERR_IO;
-
-        /* 2 */
-        if (cross_dir) {
-            ret = ext2_read_inode(ctx, new_dir, &pinode);
-            if (ret == 0) {
-                pinode.links_count++;
-                ret = ext2_write_inode(ctx, new_dir, &pinode);
-            }
-            if (ret != 0) return EXT2_ERR_IO;
-        }
-
-        /* 3 */
-        ret = ext2_add_entry(ctx, new_dir, new_name, ino, ftype);
-        if (ret != 0) {
-            if (ret == EXT2_ERR_NOSPC) {
-                /* 名前は載っていない。上げた数を戻す (落ちても多い側) */
-                if (cross_dir && ext2_read_inode(ctx, new_dir, &pinode) == 0 &&
-                    pinode.links_count > 0) {
-                    pinode.links_count--;
-                    if (ext2_write_inode(ctx, new_dir, &pinode) != 0) { /* 多いまま */ }
-                }
-                if (ext2_read_inode(ctx, ino, &inode) == 0 && inode.links_count > 0) {
-                    inode.links_count--;
-                    if (ext2_write_inode(ctx, ino, &inode) != 0) { /* 多いまま */ }
-                }
-            }
-            return ret;
-        }
-
-        /* 4 */
-        ret = ext2_delete_entry(ctx, old_dir, old_name);
-        if (ret != 0) return ret;
-
-        /* 5 */
-        if (cross_dir) {
-            ret = ext2_set_dotdot(ctx, ino, new_dir);
-            if (ret != 0) return ret;
-            ret = ext2_read_inode(ctx, old_dir, &pinode);
-            if (ret == 0) {
-                if (pinode.links_count > 0) pinode.links_count--;
-                ret = ext2_write_inode(ctx, old_dir, &pinode);
-            }
-            if (ret != 0) return EXT2_ERR_IO;
-        }
-
-        /* 6 */
-        ret = ext2_read_inode(ctx, ino, &inode);
-        if (ret == 0) {
-            if (inode.links_count > 0) inode.links_count--;
-            inode.ctime = ext2_current_time();
-            ret = ext2_write_inode(ctx, ino, &inode);
-        }
-        if (ret != 0) return EXT2_ERR_IO;
     }
+    if (ret != 0) return EXT2_ERR_IO;
 
     /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
     return ext2_sync(ctx);

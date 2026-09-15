@@ -120,8 +120,11 @@ int ext2_format(int ide_drive, u32 total_sectors)
     *(u16 *)&ext2_g_blk[52] = 0;                     /* s_mnt_count */
     *(u16 *)&ext2_g_blk[54] = (u16)0xFFFF;           /* s_max_mnt_count */
     *(u16 *)&ext2_g_blk[56] = EXT2_SUPER_MAGIC;      /* s_magic */
-    *(u16 *)&ext2_g_blk[58] = 1;                     /* s_state = VALID_FS */
-    *(u16 *)&ext2_g_blk[60] = 1;                     /* s_errors = CONTINUE */
+    *(u16 *)&ext2_g_blk[EXT2_SB_STATE_OFF] = EXT2_VALID_FS;  /* s_state */
+    /* s_errors = RO (票 B8 往復 5)。OS32 自身は値に関わらずメタデータの I/O エラーで
+     * 以後の書き込みを止める (ext2_fs_error)。以前の CONTINUE はその振る舞いと
+     * 食い違い、ホストの Linux がこの像をマウントしたときにもエラー後に書き続けた。 */
+    *(u16 *)&ext2_g_blk[EXT2_SB_ERRORS_OFF] = EXT2_ERRORS_RO;
     *(u16 *)&ext2_g_blk[62] = 0;                     /* s_minor_rev_level */
     *(u32 *)&ext2_g_blk[64] = 0;                     /* s_lastcheck */
     *(u32 *)&ext2_g_blk[68] = 0;                     /* s_checkinterval */

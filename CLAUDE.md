@@ -166,6 +166,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   (`pgalloc_range_has_ram`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
+- ext2 はメタデータの I/O エラーを 1 回でも踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15、Linux の `errors=remount-ro` 相当、票 B8)。読み取りは通る。superblock にエラーの印が残り、再起動すると警告付きで読み書きに戻る。書き込みが急に全部 -15 になったら故障を疑い、NHD をホストの `e2fsck` にかける。 → [`docs/tasks/shell/TASK_FS_TYPE.md`](docs/tasks/shell/TASK_FS_TYPE.md) §2-7
 
 ## Documentation
 

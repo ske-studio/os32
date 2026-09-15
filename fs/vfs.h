@@ -53,6 +53,10 @@
 #define VFS_ERR_NOTDIR   OS32_ERR_NOTDIR
 #define VFS_ERR_NOTEMPTY OS32_ERR_NOTEMPTY
 #define VFS_ERR_ISDIR    OS32_ERR_ISDIR
+/* 書き込みを受け付けない状態 (ext2 のエラー状態、票 B8 往復 5) */
+#define VFS_ERR_ROFS     OS32_ERR_ROFS
+/* 資源が満杯 (ext2 の links_count 上限など) */
+#define VFS_ERR_FULL     OS32_ERR_FULL
 #define VFS_ERR_INVAL    OS32_ERR_INVAL
 /* このバックエンドが実装していない操作 (票 H3 の set_mtime 等)。
  * 「できなかった」ではなく「持っていない」— 呼び手はエラーにせず

@@ -35,7 +35,7 @@ int ext2_read_file(Ext2Ctx *ctx, u32 ino, void *buf, u32 max_size)
             /* 宛先バッファに直接読み込み — ext2_g_auxを経由しない。
              * ext2_bmapが間接ブロック参照でext2_g_auxを使うため、
              * ここでext2_g_auxに読むとバッファ競合が発生する。 */
-            ret = ext2_read_block(ctx, phys, &dst[total_read]);
+            ret = ext2_read_data_block(ctx, phys, &dst[total_read]);
             if (ret != 0) return EXT2_ERR_IO;
         } else {
             /* 端数ブロック。ext2_read_block は to_copy に関係なく **必ず
@@ -46,7 +46,7 @@ int ext2_read_file(Ext2Ctx *ctx, u32 ino, void *buf, u32 max_size)
              * 潰し、shell.bin の読み込みが NOT_FOUND になった)。
              * 中間バッファは ext2_g_blk — ext2_g_aux は上の ext2_bmap が
              * 使うので不可 (ext2_read_stream と同じ約束、gotcha §4-24)。 */
-            ret = ext2_read_block(ctx, phys, ext2_g_blk);
+            ret = ext2_read_data_block(ctx, phys, ext2_g_blk);
             if (ret != 0) return EXT2_ERR_IO;
             kmemcpy(&dst[total_read], ext2_g_blk, to_copy);
         }
@@ -90,11 +90,11 @@ int ext2_read_stream(Ext2Ctx *ctx, u32 ino, void *buf, u32 size, u32 offset)
 
         if (byte_in_blk == 0 && to_copy == EXT2_BLOCK_SIZE) {
             /* ブロック全体: 直接宛先に読み込み */
-            ret = ext2_read_block(ctx, phys, &dst[total_read]);
+            ret = ext2_read_data_block(ctx, phys, &dst[total_read]);
         } else {
             /* 部分ブロック: ext2_g_blkを中間バッファとして使用
              * (ext2_g_auxはext2_bmapと競合するため使えない) */
-            ret = ext2_read_block(ctx, phys, ext2_g_blk);
+            ret = ext2_read_data_block(ctx, phys, ext2_g_blk);
             if (ret == 0) {
                 ext2_mem_copy(&dst[total_read], &ext2_g_blk[byte_in_blk], to_copy);
             }
@@ -136,6 +136,8 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     /* 存在確認は **3 値で受ける** (票 B8 / Codex 実装レビュー P1-2)。
      * 「EXT2_OK のときだけ拒否」だと I/O エラーでも下の割当・作成へ進み、
@@ -182,7 +184,7 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
         if (to_write > EXT2_BLOCK_SIZE) to_write = EXT2_BLOCK_SIZE;
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
-        ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
+        ret = ext2_write_data_block(ctx, (u32)blk, ext2_g_aux);
         if (ret != 0) {
             if (ext2_create_abort_unwritten(ctx, (u32)new_ino, &inode) != 0) { /* 漏れ */ }
             return EXT2_ERR_IO;
@@ -234,6 +236,8 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
     int leaked = 0;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
@@ -276,7 +280,7 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
         if (to_write > EXT2_BLOCK_SIZE) to_write = EXT2_BLOCK_SIZE;
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
-        ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
+        ret = ext2_write_data_block(ctx, (u32)blk, ext2_g_aux);
         if (ret != 0) { ret = EXT2_ERR_IO; goto fail; }
 
         inode.blocks += 2;
@@ -310,6 +314,8 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
     const u8 *src;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
@@ -364,10 +370,11 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
         } else {
             /* 既存ブロックの部分書き込み: 既存データを読み込み保持 */
             if (byte_in_blk > 0 || remaining < EXT2_BLOCK_SIZE) {
-                ret = ext2_read_block(ctx, phys, ext2_g_dat);
+                ret = ext2_read_data_block(ctx, phys, ext2_g_dat);
                 if (ret != 0) {
                     kprintf(0x0C, "[E2W] rblk FAIL bi=%d phys=%d\n",
                             (int)bi, (int)phys);
+                    io_err = 1;          /* 1 バイトも書けていなければ IO (往復 5) */
                     break;
                 }
             }
@@ -378,10 +385,11 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
 
         ext2_mem_copy(&ext2_g_dat[byte_in_blk], &src[size - remaining], to_write);
 
-        ret = ext2_write_block(ctx, phys, ext2_g_dat);
+        ret = ext2_write_data_block(ctx, phys, ext2_g_dat);
         if (ret != 0) {
             kprintf(0x0C, "[E2W] wblk FAIL bi=%d phys=%d\n",
                     (int)bi, (int)phys);
+            io_err = 1;                  /* 1 バイトも書けていなければ IO (往復 5) */
             break;
         }
 
@@ -453,6 +461,8 @@ int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    ret = ext2_check_writable(ctx);   /* エラー状態なら断る (票 B8 往復 5) */
+    if (ret != 0) return ret;
 
     ret = ext2_find_entry(ctx, dir_ino, name, &ino, &ftype);
     if (ret != 0) return ret;

@@ -27,8 +27,22 @@ extern u8 ext2_g_dat[EXT2_BLOCK_SIZE]; /* ext2_write_stream データ読み書�
 /* ======================================================================== */
 
 /* -- ext2_super.c -- */
+/* **メタデータ**のブロック I/O (superblock / group descriptor / ビットマップ /
+ * inode 表 / ディレクトリブロック / 間接表)。失敗すると**マウントをエラー状態に
+ * する** (ext2_fs_error)。票 B8 往復 5 / ユーザー決裁 2。
+ * ファイルの中身 (データブロック) は下の _data 版を使うこと。 */
 int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf);
 int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf);
+/* **データブロック**の I/O。失敗しても I/O エラーを返すだけで、エラー状態には
+ * しない (Linux ext2 と同じ。FS の構造は壊れていないので、以後の操作を止める
+ * 理由が無い)。 */
+int ext2_read_data_block(Ext2Ctx *ctx, u32 block_num, void *buf);
+int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf);
+/* マウントをエラー状態にする。媒体の s_state に EXT2_ERROR_FS を立てる書き込みを
+ * **1 度だけ**試みる (失敗してもメモリ上の状態は立てる)。何度呼んでもよい。 */
+void ext2_fs_error(Ext2Ctx *ctx);
+/* 書き込み系操作の入口で呼ぶ。エラー状態なら EXT2_ERR_ROFS、そうでなければ EXT2_OK */
+int ext2_check_writable(Ext2Ctx *ctx);
 u32 ext2_current_time(void);
 /* ext2_mem_copy/ext2_mem_zero/ext2_str_len/ext2_str_ncmp は
  * ext2_priv.h 先頭のマクロで kstring 関数に転送済み */

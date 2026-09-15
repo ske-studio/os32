@@ -11,6 +11,7 @@
 
 #include "ext2_priv.h"
 #include "ide.h"    /* ide_drive_present, ide_get_info — ジオメトリ情報取得のみ */
+#include "kprintf.h"
 
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * シングルタスクOSのため全インスタンスで共有可能。
@@ -25,7 +26,8 @@ u8 ext2_g_dat[EXT2_BLOCK_SIZE];
 /*  ブロック読み書き基盤                                                     */
 /* ======================================================================== */
 
-int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+/* ---- 生の 1KB ブロック I/O (エラー状態に触らない) ---- */
+static int ext2_raw_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
 {
     u32 sector = ctx->base_lba + block_num * 2;
     u8 *dst = (u8 *)buf;
@@ -40,7 +42,7 @@ int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
     return ret;
 }
 
-int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+static int ext2_raw_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 {
     u32 sector = ctx->base_lba + block_num * 2;
     int ret;
@@ -48,6 +50,84 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
     if (ret != 0) return ret;
     ret = dev_blk_write_lba(ctx->dev, sector + 1, 1, (const u8 *)buf + 512);
     return ret;
+}
+
+/* **メタデータ**の I/O。失敗したらエラー状態にする (票 B8 往復 5 / 決裁 2)。
+ *
+ * 既定をメタデータ側に置いた — データブロックの I/O は ext2_file.c の数か所
+ * だけで、そこは明示的に _data 版を呼ぶ。逆 (既定をデータ側) にすると、
+ * メタデータの呼び手を 1 か所見落としただけでエラー状態が立たなくなる。 */
+int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+{
+    int ret = ext2_raw_read_block(ctx, block_num, buf);
+    if (ret != 0) ext2_fs_error(ctx);
+    return ret;
+}
+
+int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+{
+    int ret = ext2_raw_write_block(ctx, block_num, buf);
+    if (ret != 0) ext2_fs_error(ctx);
+    return ret;
+}
+
+/* **データブロック**の I/O。失敗しても I/O エラーを返すだけ (Linux ext2 と同じ)。
+ *   読み取り: 構造には何も起きていない。
+ *   書き込み: ブロックの中身が古いか半分だけ新しいだけで、どの参照も正しい
+ *             ブロックを指している (参照を書くのはメタデータ側の段)。
+ * どちらも「以後の書き込みが構造を壊す」原因にならないので止めない。 */
+int ext2_read_data_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+{
+    return ext2_raw_read_block(ctx, block_num, buf);
+}
+
+int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+{
+    return ext2_raw_write_block(ctx, block_num, buf);
+}
+
+/* ======================================================================== */
+/*  エラー状態 (票 B8 往復 5 / ユーザー決裁 2)                               */
+/* ======================================================================== */
+
+/* s_state を書くための専用バッファ。**共有バッファ (g_blk / g_aux / g_dat) を
+ * 使ってはいけない** — ext2_fs_error は操作の途中 (例えば二重間接表を g_blk に
+ * 載せたまま内側の表の読み取りが落ちた瞬間) に呼ばれるので、共有バッファを
+ * 潰すと呼び手が走査中の表が化ける (gotcha §4-24 と同じ壊れ方)。 */
+static u8 ext2_g_err_sect[512];
+
+void ext2_fs_error(Ext2Ctx *ctx)
+{
+    u32 sector;
+    u16 state;
+
+    if (!ctx) return;
+    if (ctx->fs_error) return;          /* 2 回目以降は何もしない */
+    ctx->fs_error = 1;                  /* **先に**立てる (下の I/O の失敗で再入しない) */
+
+    /* フォーマット中の一時 ctx など、マウントしていない ctx は媒体に書かない */
+    if (!ctx->mounted) return;
+
+    kprintf(0x0C, "[EXT2] I/O error on metadata: writes disabled until remount "
+                  "(run e2fsck)\n");
+
+    /* スーパーブロック = ブロック 1 = セクタ base+2 の先頭 512B に s_state が居る。
+     * **そのセクタだけ**を読み直して 1 フィールドだけ変えて書く。空き数などの
+     * メモリ上の値は書かない (操作の途中で、ビットマップと合っている保証が無い)。
+     * 失敗しても何もしない — メモリ上のエラー状態は立っている。 */
+    sector = ctx->base_lba + 2;
+    if (dev_blk_read_lba(ctx->dev, sector, 1, ext2_g_err_sect) != 0) return;
+    state = *(u16 *)&ext2_g_err_sect[EXT2_SB_STATE_OFF];
+    if (state & EXT2_ERROR_FS) return;  /* 既に立っている */
+    *(u16 *)&ext2_g_err_sect[EXT2_SB_STATE_OFF] = (u16)(state | EXT2_ERROR_FS);
+    (void)dev_blk_write_lba(ctx->dev, sector, 1, ext2_g_err_sect);
+}
+
+int ext2_check_writable(Ext2Ctx *ctx)
+{
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    if (ctx->fs_error) return EXT2_ERR_ROFS;
+    return EXT2_OK;
 }
 
 /* ======================================================================== */
@@ -282,6 +362,15 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     ctx->sb_info.inodes_per_group = *(u32 *)&ext2_g_blk[40];
     ctx->sb_info.magic            = *(u16 *)&ext2_g_blk[56];
     ctx->sb_info.first_ino        = *(u32 *)&ext2_g_blk[84];
+    /* 媒体にエラーの印が残っていても**読み書きでマウントする** (Linux と同じ、
+     * ユーザー決裁 2 の条件)。警告だけ出す。印は e2fsck だけが消す。 */
+    ctx->fs_error = 0;
+    ctx->mounted_with_errors =
+        ((*(u16 *)&ext2_g_blk[EXT2_SB_STATE_OFF]) & EXT2_ERROR_FS) ? 1 : 0;
+    if (ctx->mounted_with_errors) {
+        kprintf(0x0E, "[EXT2] warning: mounting fs with errors, "
+                      "running e2fsck is recommended\n");
+    }
     ctx->sb_info.inode_size       = *(u16 *)&ext2_g_blk[88];
     if (ctx->sb_info.inode_size == 0) ctx->sb_info.inode_size = 128;
 
@@ -346,6 +435,18 @@ int ext2_sync(Ext2Ctx *ctx)
 {
     int ret;
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+
+    /* エラー状態では空き数も書き戻さない (票 B8 往復 5 / 決裁 2)。メモリ上の
+     * 数は成功したビットマップの書き込みだけを数えているが、エラーの後の媒体を
+     * これ以上動かさない方針を優先する (数のずれは e2fsck が直す)。
+     * 書き戻すべきものが残っていたなら「戻った時点でディスクが正しい」とは
+     * 言えないので失敗を返す。
+     *
+     * **返すのは ROFS ではなく IO**。ROFS は「操作の入口で断った = 何もしていない」
+     * (ext2_check_writable) にだけ使う。ここへ来るのは操作が走った後で、
+     * 原因はその操作の途中の I/O エラーなので IO が正しい (呼び手の操作が
+     * 自分の IO / 漏れを返す前に sync の ROFS で上書きしないため)。 */
+    if (ctx->fs_error) return ctx->meta_dirty ? EXT2_ERR_IO : EXT2_OK;
 
     /* 空きブロック数・空き inode 数・グループ記述子が前回の書き戻しから
      * 一つも動いていなければ、書き戻すものは無い。write-through の契約は
