@@ -25,6 +25,9 @@ check_docs_orphans.py — どこからも辿れない文書 (孤児) の検出
 **(2) TDD 記録の孤児** — `tools/tests/*_tdd.md` は票の根拠なので、
 `docs/` の索引から辿れる必要はなく、**どれかの票から参照されていれば
 よい**。そこでこちらは起点集合に `docs/tasks/**` の票をすべて含める。
+受入完了して `docs/archive/**` へ落ちた票も起点に含める — 票が
+アーカイブへ動いただけで根拠の記録が孤児になるのはおかしい
+(移し方は `tools/move_docs.py`、運用は `docs/archive/README.md`)。
 加えて、票は TDD 記録を Markdown リンクではなく
 「記録は tools/tests/s0_tdd.md」のように**素のパスで**書くのが慣例なので、
 本文中にパスがそのまま現れていれば参照とみなす。
@@ -127,9 +130,13 @@ def docs_md():
 
 
 def tickets():
-    pat = os.path.join(PROJ_DIR, "docs", "tasks", "**", "*.md")
-    return sorted(os.path.relpath(p, PROJ_DIR).replace(os.sep, "/")
-                  for p in glob.glob(pat, recursive=True))
+    """票。`docs/archive/` に落ちた票も含む (受入完了しただけで票は票)。"""
+    out = []
+    for sub in ("tasks", "archive"):
+        pat = os.path.join(PROJ_DIR, "docs", sub, "**", "*.md")
+        out += [os.path.relpath(p, PROJ_DIR).replace(os.sep, "/")
+                for p in glob.glob(pat, recursive=True)]
+    return sorted(out)
 
 
 def tdd_records():

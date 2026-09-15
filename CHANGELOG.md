@@ -6,7 +6,7 @@ OS32 の変更履歴。版数は 2 本の線 (カーネル / GUI シェル) が�
 
 外部プログラムは CPL=3 で自分のページディレクトリの上で走り、不正なポインタはアプリだけを殺す
 (`fault_kill_count`)。KernelAPI はトランポリン (`int 0x80`) 経由。M1 (リング 3 の土台) / M2 (KAPI トランポリン) /
-M3 (検証) の完了記録は [docs/tasks/v2/PLAN.md](docs/tasks/v2/PLAN.md)。GUI シェルの版 (v1.1〜) はこの上で進む。
+M3 (検証) の完了記録は [docs/archive/kernel_v2/PLAN.md](docs/archive/kernel_v2/PLAN.md)。GUI シェルの版 (v1.1〜) はこの上で進む。
 
 
 ## v1.1 — ツリー再編、V86 で MS-DOS、ホストからの直接ファイル配置

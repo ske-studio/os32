@@ -1,6 +1,6 @@
 # S3 — リカバリ (`install --recover-settings`) と `cfg import` のホスト TDD 記録
 
-票: [`docs/tasks/settings/TASK_S3.md`](../../docs/tasks/settings/TASK_S3.md)、
+票: [`docs/archive/settings/TASK_S3.md`](../../docs/archive/settings/TASK_S3.md)、
 契約の正典は [`docs/tasks/settings/S0_FOUNDATION.md`](../../docs/tasks/settings/S0_FOUNDATION.md) §6
 (明示リカバリ契約) と [`docs/tasks/settings/TASK_S0.md`](../../docs/tasks/settings/TASK_S0.md) §D (配備保護)。
 
@@ -157,9 +157,9 @@ symlink / hardlink の別名は `S3RecoveryJudgement` の 3 件が判定その�
 
 # S3 — リカバリのホスト TDD 記録
 
-票: [`docs/tasks/settings/TASK_S3.md`](../../docs/tasks/settings/TASK_S3.md) 第 5 版。
+票: [`docs/archive/settings/TASK_S3.md`](../../docs/archive/settings/TASK_S3.md) 第 5 版。
 契約の正典は [`S0_FOUNDATION.md`](../../docs/tasks/settings/S0_FOUNDATION.md) §6
-(明示リカバリ契約)、[`TASK_S2.md`](../../docs/tasks/settings/TASK_S2.md) §1-1 (b) の meta 検査 SQL と
+(明示リカバリ契約)、[`TASK_S2.md`](../../docs/archive/settings/TASK_S2.md) §1-1 (b) の meta 検査 SQL と
 §1-7 (f) の rename 両名検査、[`TASK_S0.md`](../../docs/tasks/settings/TASK_S0.md) (配備保護)。
 
 ---
@@ -628,7 +628,7 @@ jr.val_b64` と `ran("import", "/b64.json", "--scope", "gshell", NULL) == 0`)。
 
 ## K-4. `fatfs_vfs_list` の列挙エラー伝播 (票 S3I2-K) — 2026-09-14
 
-> 票 (`docs/tasks/settings/TASK_S3I2.md` §0) が指した「§K-3」。この文書には S3-K の
+> 票 (`docs/archive/settings/TASK_S3I2.md` §0) が指した「§K-3」。この文書には S3-K の
 > `## K-3. この試験が言えないこと ([V4])` が既にあるので、既存節を消さずに番号をずらした。
 
 ### K-4.0 何を直したか、なぜ要るか

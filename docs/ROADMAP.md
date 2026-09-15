@@ -8,7 +8,7 @@
 
 | 線 | 現在 | 意味 | 記録 |
 |---|---|---|---|
-| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [tasks/v2/PLAN.md](tasks/v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
+| **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
 | **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
 | 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
@@ -253,7 +253,7 @@ v3 では timer interrupt を利用したプリエンプティブ寄りの multi
 
 移植 (例: ARM) は v1.x の範囲外だが、**新しい層を実装するたびに CPU 依存の調査を票に含める**
 (ユーザー指示 2026-09-14)。最初は Host Services N1 (ワイヤ v2 / `link.c` / KAPI v51) で
-`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/tasks/network/TASK_N1.md` §0 段 7)。
+`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/archive/network/TASK_N1.md` §0 段 7)。
 以後の票も同じ観点で `docs/tasks/portability/` に追記する。**移植準備の 4 段は 2026-09-15 に着地した**
 (ARM コンパイル計測 `make check-arm-compile` 55/93、`hlt`/`cli`/`sti` を `io.h` 経由に、`arch/x86` + `platform/pc98`
 の骨格、kstring の C 版、LE アクセサ `include/endian_le.h`。基準値と経過は [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md))。

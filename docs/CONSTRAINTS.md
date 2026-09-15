@@ -112,7 +112,7 @@ libc の同等品を呼ばない。
 > かつて「KAPI にポインタ検証はない/呼ぶ側が防衛的に」という制約だったが、
 > アーキテクチャで解決したため規則から外した。例外は shell (常駐・信頼) と
 > `OS32X_FLAG_FORCE_CPL0` の CPL=0 プログラムのみ。詳細は
-> `docs/tasks/v2/PLAN.md` と `CLAUDE.md` Known Gotchas。
+> `docs/archive/kernel_v2/PLAN.md` と `CLAUDE.md` Known Gotchas。
 
 ---
 

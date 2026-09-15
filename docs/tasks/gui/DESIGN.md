@@ -5,7 +5,7 @@
 > 位置づけ: libos32gui の API を切る**前に**固定する再描画モデルとバックエンド抽象。
 > ここに書いた決定は後付けすると全アプリの描画コードに波及するため、変更には
 > ユーザ承認を要する。libos32gui 本体は Rust で新規開発する
-> ([v2 PLAN](../v2/PLAN.md) D3)。
+> ([v2 PLAN](../../archive/kernel_v2/PLAN.md) D3)。
 
 > **現行メモリ方針への読替え**: [02_memory.md](../../02_memory.md) が正典。
 > 以下の性能上限・固定帯域・9.6MB 下限は策定当時の判断／実装制約の記録であり、
@@ -275,7 +275,7 @@ Cirrus:
 ### 9.1 既にあるもの
 
 - `userland/rust/libos32gui/` (Rust, no_std, staticlib、約 1.4K 行、コーダー2 タスク
-  `docs/tasks/v2/TASK_coder2_libos32gui.md`): ウィンドウ管理 (固定配列、Z 順、フォーカス)、
+  `docs/archive/kernel_v2/TASK_coder2_libos32gui.md`): ウィンドウ管理 (固定配列、Z 順、フォーカス)、
   枠描画、ボタン / ラベル / チェックボックス / テキストボックス / リストボックス、
   `gui_pump` / `gui_poll_event` によるイベント配送。描画は libos32gfx を FFI で呼ぶ。
   デモは `gui_demo`。**すべてがアプリ 1 本の中で動く構成**で、gshell とアプリの分離は無い。

@@ -8,7 +8,7 @@
 
 背景: S3 (設定のリカバリ) は root の `st_dev` を `(dev_type << 8 | unit) + 1` で
 復号して FDD ブートを判定し、`st_ino` で同一性を見る
-(`docs/tasks/settings/TASK_S3.md` §1a / §1b)。ゲスト上でその 2 つを観測する
+(`docs/archive/settings/TASK_S3.md` §1a / §1b)。ゲスト上でその 2 つを観測する
 手段が無かったので、実機観測の根拠を作るために足した道具。
 
 ## 事実関係 (RED の出し方)

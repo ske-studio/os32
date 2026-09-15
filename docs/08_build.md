@@ -310,17 +310,37 @@ ARM では落ち、BE では値が化ける。クロスコンパイラが無い�
 孤児文書の検出 — リンク切れの裏返しで、「**どこからも指されていない**」文書を挙げる
 (lychee の守備範囲外なので自前、Python 標準ライブラリのみ)。`docs/INDEX.md` を唯一の起点として
 相対リンクを推移的に辿り、到達できない `docs/**/*.md` を列挙する。`tools/tests/*_tdd.md` は票の
-根拠なので索引から辿れる必要はなく、起点集合に `docs/tasks/**` の票を含め、票が慣例どおり
-素のパスで書いた言及も参照とみなす。索引に載せないと決めた例外は `docs/.orphans-allow`
-(1 行 1 パス、`#` コメント可) に理由つきで書く。
+根拠なので索引から辿れる必要はなく、起点集合に `docs/tasks/**` と `docs/archive/**` の票を含め
+(受入完了して archive へ落ちた票も票)、票が慣例どおり素のパスで書いた言及も参照とみなす。
+索引に載せないと決めた例外は `docs/.orphans-allow` (1 行 1 パス、`#` コメント可) に理由つきで書く。
 
 ```bash
-make check-docs-orphans        # 単体。check の列にはまだ入っていない
+make check-docs-orphans        # 単体
 ```
-**`make check` の列には入れていない。** 2026-09-15 の棚卸し時点で docs 31 本 + TDD 記録 20 本が
-未参照で、これは検査の不備ではなく索引の取りこぼし (票を書いて `INDEX.md` に載せ忘れたもの) の
-実数。今これを門にすると通すために例外表へ全部書き写すことになり、`.orphans-allow` が
-「黙らせる表」に化けて二度と減らない。索引を直して 0 になった時点で `check` の列へ移す。
+2026-09-15 の棚卸し時点では docs 31 本 + TDD 記録 20 本が未参照だった (検査の不備ではなく、
+票を書いて `INDEX.md` に載せ忘れた取りこぼしの実数)。そのあいだは門にすると通すために例外表へ
+全部書き写すことになり `.orphans-allow` が「黙らせる表」に化けるので単体運用にしていたが、
+索引を直して 0 になったので `make check` の列へ入れてある。
+
+#### `tools/move_docs.py`
+
+**文書を動かし、リポジトリ中の `.md` の参照を追従させる** (検査ではなく、手で回す道具)。
+受入完了した票を `docs/archive/<領域>/` へ落とすときに使う。`git mv` だけでは指していた側の
+相対リンクが黙って壊れ、`check-docs-links` が次に回るまで気づけない。
+
+```bash
+python3 tools/move_docs.py --into docs/archive/network docs/tasks/network/TASK_N0.md --dry-run
+python3 tools/move_docs.py --map moves.tsv          # 1 行 "移動元<TAB>移動先"
+python3 tools/move_docs.py SRC DST [SRC DST ...]
+```
+
+動かす一覧は道具の中に持たず、引数か TSV で外から与える。書き換えるのは 3 つの形だけで本文には
+触らない — (1) `](相対パス#見出し)` と参照定義、(2) 地の文のルート相対パス言及 (票と
+`tools/tests/*_tdd.md` が互いを指す慣例の書き方)、(3) 表示文字がパスそのもののリンクのラベル。
+動いた文書自身の中のリンクは深さが変わるので全部引き直す。`--dry-run` で一覧だけ出せる。
+運用 (何を落として何を残すか、落としたあとに守ること) は
+[archive/README.md](archive/README.md)。実行後は `check-docs-links` / `check-docs-orphans` /
+`gen_tests_inventory.py --write` の 3 つを回す。
 
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 

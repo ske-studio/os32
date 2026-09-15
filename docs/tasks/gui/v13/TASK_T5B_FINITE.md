@@ -9,7 +9,7 @@
 
 (旧) 状態: T5b display-only は下記PM決裁で実装発注。T6aは設計案。独立レビュー・受入・ゲスト検証は別ゲート。
 PM: Hermes。実装担当予定: Codex。独立レビュー: 実装担当とは別の担当者。
-親: [PLAN.md](PLAN.md)、[T5表示分離](TASK_T5_DISPLAY.md)、[T0/T1判定](REVIEW_T0_T1.md)。
+親: [PLAN.md](PLAN.md)、[T5表示分離](TASK_T5_DISPLAY.md)、[T0/T1判定](../../../archive/gui_v13_reviews/REVIEW_T0_T1.md)。
 ファイル名の `T5B_FINITE` は指定された格納名であり、有限実行をT5bへ改称するものではない。
 
 ## 1. 到達点と依存関係
@@ -19,7 +19,7 @@ PM: Hermes。実装担当予定: Codex。独立レビュー: 実装担当とは�
 - T4モデルとT5R描画アダプタは受入済み。T5aの残受入は未完了。
   最新の依頼者報告ではCirrus `hal_test` が実backend `cirrus` / `packed8` / `640x480`、
   `hw_fill_rect/blit0` を確認済み。これは本票作成者の新規実測ではなく、T5a表示・再露出・復帰の合格でもない。
-  [途中保存](VERIFICATION_PROGRESS.md)のPC98設定記述は過去のスナップショットとして扱う。
+  [途中保存](../../../archive/gui_v13_reviews/VERIFICATION_PROGRESS.md)のPC98設定記述は過去のスナップショットとして扱う。
 - PM決裁: T5bの実装はT5a残検証と並行可能。**受入順序はT5a → T5b → T6a**。
   T6aは対象BIN監査・同一性/所有権ゲートを経る。並行実装をT5aの受入扱いにしない。
 - **完全なv1.3目標は縮小しない**。既存CUI互換、terminal windowとlconsole接続方針、
@@ -131,7 +131,7 @@ PM: Hermes。実装担当予定: Codex。独立レビュー: 実装担当とは�
 | stdin (空入力もbufferへ) | 256 B、実長0〜256 |
 | stdout / stderr捕捉 | 各4096 B、初期長0 |
 | stdout / stderrモデル | 各40列×64行 |
-| Cellの限定リンク実寸 | 8 B、align 4 B ([CROSS_LINK_T4](CROSS_LINK_T4.md)) |
+| Cellの限定リンク実寸 | 8 B、align 4 B ([CROSS_LINK_T4](../../../archive/gui_v13_reviews/CROSS_LINK_T4.md)) |
 | セル2面 | 40960 B |
 | 入出力とセルだけの合計 | 49408 B |
 

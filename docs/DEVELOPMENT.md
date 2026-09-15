@@ -33,14 +33,14 @@
 | ファイル | 役割 | 仕様 |
 |---|---|---|
 | `kernel.c` `kentry.asm` | 起動、シェル起動ループ (CUI `/sys/shell.bin` ⇄ GUI `/bin/gshell.bin` を `gui_take_next_shell()` で往復)、`/etc/system.cfg` の反映 | [01 §1-2](01_system.md) |
-| `sysconfig.c` | `/etc/system.cfg` の解析 (`GUI=0/1`、`GFX=pc98\|pegc\|cirrus\|auto`) | [01 §1-2](01_system.md)、[tasks/gui/TASK_K4](tasks/gui/TASK_K4_gui_boot.md) |
+| `sysconfig.c` | `/etc/system.cfg` の解析 (`GUI=0/1`、`GFX=pc98\|pegc\|cirrus\|auto`) | [01 §1-2](01_system.md)、[archive/gui_v11/TASK_K4](archive/gui_v11/TASK_K4_gui_boot.md) |
 | `gui.c` | GUI の背骨: `gui_call` (アプリ → WM の唯一の入口)、`gui_register`、所有者回収 `gui_owner_exit`、次シェル要求 | [tasks/gui/API_CONTRACTS.md T1〜T9](tasks/gui/API_CONTRACTS.md) |
-| `shlib.c` | 共有ライブラリ帯 0x400000〜 のロード (`OS32ShlibHeader`) と、アプリ PD ごとの .data/.bss 複製 (`shlib_addrspace_attach`) | [02 §2-1](02_memory.md)、[09](09_exec.md)、[tasks/gui/TASK_K3](tasks/gui/TASK_K3_shared_lib_band.md) |
-| `paging.c` `pgalloc.c` | ページテーブル (現行実装: 守備範囲 32MB、実 RAM 管理は 16MB。設計上限ではない)、ガードページ、物理ページ確保。PD はプログラムごと (v2 M1)。デバイス窓は `paging_map_phys` (supervisor+PCD)、クライアント面の USER 昇格は `paging_addrspace_map_user_keep` | [02](02_memory.md)、[tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) |
+| `shlib.c` | 共有ライブラリ帯 0x400000〜 のロード (`OS32ShlibHeader`) と、アプリ PD ごとの .data/.bss 複製 (`shlib_addrspace_attach`) | [02 §2-1](02_memory.md)、[09](09_exec.md)、[archive/gui_v11/TASK_K3](archive/gui_v11/TASK_K3_shared_lib_band.md) |
+| `paging.c` `pgalloc.c` | ページテーブル (現行実装: 守備範囲 32MB、実 RAM 管理は 16MB。設計上限ではない)、ガードページ、物理ページ確保。PD はプログラムごと (v2 M1)。デバイス窓は `paging_map_phys` (supervisor+PCD)、クライアント面の USER 昇格は `paging_addrspace_map_user_keep` | [02](02_memory.md)、[archive/kernel_v2/M1_RING3.md](archive/kernel_v2/M1_RING3.md) |
 | `kmalloc.c` | カーネルヒープ (320KB) | [02 §2-1](02_memory.md) |
 | `shm.c` | 共有メモリ 16 ブロック × 16KB。ブロック 0 = DB 結果、12〜15 = GUI (K1 票) | [02](02_memory.md)、[tasks/gui/API_CONTRACTS.md T2](tasks/gui/API_CONTRACTS.md) |
-| `idt.c` `isr_*.c` | 割り込み、`int 0x80` KAPI トランポリン着地点 | [04](04_interrupts.md)、[tasks/v2/M2](tasks/v2/M2_KAPI_TRAMPOLINE.md) |
-| `ime.c` `ime_romkana.c` `ime_dict.c` `ime_render*.c` | FEP。描画は関数表 (`ime_render.h`) 越し。GUI は `ime_feed_key` / `ime_set_render` (KAPI v42) で WM が FEP を持つ | [tasks/fep/](tasks/fep/00_INDEX.md)、[tasks/gui/TASK_W2](tasks/gui/TASK_W2_fep_lease_modal.md) |
+| `idt.c` `isr_*.c` | 割り込み、`int 0x80` KAPI トランポリン着地点 | [04](04_interrupts.md)、[archive/kernel_v2/M2](archive/kernel_v2/M2_KAPI_TRAMPOLINE.md) |
+| `ime.c` `ime_romkana.c` `ime_dict.c` `ime_render*.c` | FEP。描画は関数表 (`ime_render.h`) 越し。GUI は `ime_feed_key` / `ime_set_render` (KAPI v42) で WM が FEP を持つ | [tasks/fep/](tasks/fep/00_INDEX.md)、[archive/gui_v11/TASK_W2](archive/gui_v11/TASK_W2_fep_lease_modal.md) |
 | `ring3_entry.asm` | `int 0x80` の入口 (`int80_stub`: セグメント復元後 `sti`、出口 `cli`)、`kapi_invoke` | [09](09_exec.md)、[POLICY_DEBUG §4-19](POLICY_DEBUG.md) |
 | `console.c` | TVRAM 出力、スクロール予約 (`tvram_set_scroll_reserve`)、GDC カーソル | [05 §5-9](05_drivers.md) 周辺、[POLICY_DEBUG §4-18](POLICY_DEBUG.md) |
 | `con_sink.c` | console シンク — GUI モード中のカーネル出力を 8KB のリングに溜め、端末アプリが `con_sink_read` (KAPI v46) で吸う | [KAPI_SPEC v46 節](KAPI_SPEC.md)、[tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md) |
@@ -72,7 +72,7 @@
 | `kbd.c` | PC-98 キーボード、修飾キー、V86 への注入。GUI 中は cooked に積まず raw リング (`kbd_trygetrawkey`、`keycode\|down<<8\|mods<<9`)、CTRL+STOP → `ring3_abort_request` | [05 §5-1](05_drivers.md) |
 | `serial.c` | RS-232C (rshell / ai-debug の経路) | [05 §5-4](05_drivers.md) |
 | `mouse*.c` | バスマウス + NP21/W シームレスマウス (座標は移動範囲へ比例配分、480 ライン可) | [05 §5-7](05_drivers.md) |
-| `wab_glue.h` `wab_glue_xe10.c` `wab_cirrus.c` | ウィンドウアクセラレータ: ボードグルー契約 / Xe10 内蔵 (ID 5Bh、0FAAh/0FABh) / CL-GD5430 チップ (BLT は I/O 経由、8bpp、DAC)。定数は `include/wab_xe10.h` | [tasks/gui/DESIGN.md §6〜§8](tasks/gui/DESIGN.md)、[tasks/gui/TASK_H3](tasks/gui/TASK_H3_cirrus.md) |
+| `wab_glue.h` `wab_glue_xe10.c` `wab_cirrus.c` | ウィンドウアクセラレータ: ボードグルー契約 / Xe10 内蔵 (ID 5Bh、0FAAh/0FABh) / CL-GD5430 チップ (BLT は I/O 経由、8bpp、DAC)。定数は `include/wab_xe10.h` | [tasks/gui/DESIGN.md §6〜§8](tasks/gui/DESIGN.md)、[archive/gui_v11/TASK_H3](archive/gui_v11/TASK_H3_cirrus.md) |
 | `fm.c` | OPN/OPM | [05 §5-3](05_drivers.md) |
 | `kcg.c` | 漢字 ROM / ビットマップフォント | [05 §5-9](05_drivers.md) |
 | `np2sysp.c` | NP21/W ハイパーコール | [05 §5-10](05_drivers.md) |
@@ -103,8 +103,8 @@
 | 場所 | 役割 | 仕様 |
 |---|---|---|
 | `shell/main.c` `ui.c` `cmd_*.c` `cmd_script.c` `rshell.c` | 常駐 CUI シェル (0x300000, CPL=0)。コマンド登録 (`ShellCmd`, 最大 128)、行編集・補完・履歴、スクリプト、シリアル rshell、`os32gui` / `gfxmode` | [07](07_shell.md) |
-| `gshell/` (Rust) | GUI シェル = WM (シェル帯 0x300000 に CUI と入れ替わりで常駐、`/bin/gshell.bin`)。`wm.rs` 窓 / Z 順 / 所有者、`handler.rs` op 表、`input.rs` X3/X4 の入力取り込み (raw キー・FEP 退避・ボタンエッジの領分)、`visible.rs` 可視領域、`fep.rs` (カーネル FEP を `ime_feed_key` で駆動)、`lease.rs` `modal.rs` `timer.rs` `chrome.rs` `cursor.rs` | [tasks/gui/TASK_W1](tasks/gui/TASK_W1_wm_core.md)、[TASK_W2](tasks/gui/TASK_W2_fep_lease_modal.md)、[API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) |
-| `rust/libos32gui/` `libos32gui_stub/` | GUI クライアント (G 描画 / `gui_call` / U3 ループ / ウィジェット木 / 箱レイアウト)。`.shlib` として 0x400000 に常駐、アプリは stub (ジャンプ表) をリンク | [tasks/gui/TASK_C1〜C3](tasks/gui/TASK_C3_shared_lib.md) |
+| `gshell/` (Rust) | GUI シェル = WM (シェル帯 0x300000 に CUI と入れ替わりで常駐、`/bin/gshell.bin`)。`wm.rs` 窓 / Z 順 / 所有者、`handler.rs` op 表、`input.rs` X3/X4 の入力取り込み (raw キー・FEP 退避・ボタンエッジの領分)、`visible.rs` 可視領域、`fep.rs` (カーネル FEP を `ime_feed_key` で駆動)、`lease.rs` `modal.rs` `timer.rs` `chrome.rs` `cursor.rs` | [archive/gui_v11/TASK_W1](archive/gui_v11/TASK_W1_wm_core.md)、[TASK_W2](archive/gui_v11/TASK_W2_fep_lease_modal.md)、[API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) |
+| `rust/libos32gui/` `libos32gui_stub/` | GUI クライアント (G 描画 / `gui_call` / U3 ループ / ウィジェット木 / 箱レイアウト)。`.shlib` として 0x400000 に常駐、アプリは stub (ジャンプ表) をリンク | [archive/gui_v11/TASK_C1〜C3](archive/gui_v11/TASK_C3_shared_lib.md) |
 | `cmds/` `system/` `tests/` `rust/` | コマンド、システムユーティリティ、テスト (`hal_test` `gdi_test` `ring3_guard` `gui_busy` `lease_test` `gui_bench` …)、Rust (Cargo ワークスペース、`os32api` クレート) | 一覧は各 `deploy.yaml` と [07 §7-1](07_shell.md) |
 | `lib/os32` `math` `input` `gfx` `snd` `db` | 基盤ライブラリ (デバッグ出力 / 整数数学 / 入力抽象 / 描画 (4 プレーンと PACKED8 の両経路、`libos32gfx_attach`) / FM・SSG / SQLite ラッパ) | `tasks/lib*/`、[05 §5-5](05_drivers.md) |
 | `lib/tilemap` `ui` `filer` `md` `asset` `ecs` `save` | 描画・UI 系 (タイルマップ / microUI (テスト導入) / ファイラ / Markdown / アセット / ECS / セーブ) | 同上 |

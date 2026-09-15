@@ -134,7 +134,7 @@ EOF stream_id  // ストリーム終端
 
 ## 4. フレーム形式 (raw Ethernet, 独自 EtherType)
 
-**正典は `docs/tasks/network/TASK_N0.md` §1b (ワイヤ v2、2026-09-14)**。ここは要約で、
+**正典は `docs/archive/network/TASK_N0.md` §1b (ワイヤ v2、2026-09-14)**。ここは要約で、
 食い違ったら N0 が勝つ。v1 (12B ヘッダ、`stream_id` 無し、L0〜L3 で合格) は N1 で v2 に
 置き換え、合格実績は v2 で取り直す。
 

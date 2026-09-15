@@ -1,7 +1,7 @@
 # v1.3 メモリ予算 — ホスト側測定
 
 状態: ホストビルドの静的測定。ゲスト空き容量・ピーク使用量・断片化は未測定。
-親: [PLAN.md](PLAN.md)、判定条件: [REVIEW_T0_T1.md](REVIEW_T0_T1.md) R3。
+親: [PLAN.md](PLAN.md)、判定条件: [REVIEW_T0_T1.md](../../../archive/gui_v13_reviews/REVIEW_T0_T1.md) R3。
 
 ## 測定対象
 

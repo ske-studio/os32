@@ -4,7 +4,7 @@
 gen_tests_inventory.py — 試験一覧 docs/TESTS.md の生成と鮮度検査
 
 試験の一覧を人が手で書くと、ターゲットを足した日から腐りはじめる。実際
-docs/tasks/TEST_INVENTORY_2026-09-14.md は「`make check` は 31 ターゲット」と
+docs/archive/TEST_INVENTORY_2026-09-14.md は「`make check` は 31 ターゲット」と
 書いた 1 日後に 43 ターゲットになった。そこで**機械で読める事実は機械に書かせ、
 人にしか書けない判断だけを手で持つ**という分け方にする。
 
@@ -484,7 +484,7 @@ make check-tests-inventory                      # 表が古くないか検査す
 ```
 
 判断 (重複・弱さ・穴・改善案) は生成できないので `<!-- manual:… -->` の区間に手で書く。
-2026-09-14 の快照 [`docs/tasks/TEST_INVENTORY_2026-09-14.md`](tasks/TEST_INVENTORY_2026-09-14.md)
+2026-09-14 の快照 [`docs/archive/TEST_INVENTORY_2026-09-14.md`](archive/TEST_INVENTORY_2026-09-14.md)
 の調査結果のうち、生成できない部分はこの文書の manual 区間へ移してある。
 
 ## 0. 読み方

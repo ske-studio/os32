@@ -107,7 +107,7 @@ ROADMAPの「terminal app」との差異は未決であり、外部terminalか�
 
 T0 (claude-opus-5) とT1 (Codex) の読み取り専用設計を受領済み。
 PMレビューのR1〜R5をT0修正版が反映。統合の安全条件が未解決のため契約凍結は保留。S0は未発注。
-判定と次のゲートは [REVIEW_T0_T1.md](REVIEW_T0_T1.md) を参照。
+判定と次のゲートは [REVIEW_T0_T1.md](../../../archive/gui_v13_reviews/REVIEW_T0_T1.md) を参照。
 メモリのホスト測定は [MEMORY_BUDGET.md](MEMORY_BUDGET.md)。ゲスト実行時の空きは未測定。
 T0とS0を同一エージェントへ同時発注しない。共有ファイルの編集はPMが直列化する。
 
@@ -164,22 +164,22 @@ T0とS0を同一エージェントへ同時発注しない。共有ファイル�
 - T0修正版を受領 (exit 0、`/tmp/os32-v13-t0-revised.txt`)。R1〜R5の誤記・断定は撤回済みと確認。
   バッファ方式/実行時容量、監査対象の同一性、対話待機の安全条件は未解決。
 - 統合から独立した [T4 セル/UTF-8/clipモデル](TASK_T4_MODEL.md) の作業票を発行。
-  T4は `userland/libos32term/` に実装し受入済み。[PM判定](REVIEW_T4.md)を参照。
+  T4は `userland/libos32term/` に実装し受入済み。[PM判定](../../../archive/gui_v13_reviews/REVIEW_T4.md)を参照。
   gshell+CUI統合は未着手。
 - CodexのTAB修正・L1明記・Cellホスト実寸確認を受領し、独立再レビューで受入可。
   PMが `build/sdk.mk` に `check-term-model` を追加し `check` の依存へ登録。
   修正後、新ターゲットを含む `make check` 全体（モデル44試験）、fmt、差分チェックが成功。
   manifest検査はCargo incrementalの `.bin` も未配備一覧へ列挙する(非エラー)。
-- PMが[guestターゲットの限定リンク検査](CROSS_LINK_T4.md)を実施し成功。
+- PMが[guestターゲットの限定リンク検査](../../../archive/gui_v13_reviews/CROSS_LINK_T4.md)を実施し成功。
   Grid::clipのi64除算ヘルパ解決とCellのターゲット実寸8B/align4Bを確認。ゲスト実行はなし。
 - CodexのT5表示設計を受領。[T5表示票](TASK_T5_DISPLAY.md)に方向性と実装前ゲートを記録。
   独立表示アプリT5aを先行し、常駐接続T5bは後段へ分離する。実装未発注、CUI起動を含めない。
-- T5aゲートの独立調査を受領し、[PM照合](REVIEW_T5_GATES.md)を記録。
+- T5aゲートの独立調査を受領し、[PM照合](../../../archive/gui_v13_reviews/REVIEW_T5_GATES.md)を記録。
   glyphビット順・JIS各バイト検査・utf8_prog.oの接続を確認。
   純粋描画アダプタを `userland/libos32term_render/` に先行実装する配置を決定。
 - [T5R作業票](TASK_T5_RENDER.md)で文字分類・clip・失敗時副作用・人工glyph試験を確定し、Codexへ実装発注。
   T5Rは対象再実装後の独立レビューとPM再実行を通過し受入済み。
-  check-term-renderをmake checkへ登録し全体成功。[受入記録](REVIEW_T5_RENDER.md)。
+  check-term-renderをmake checkへ登録し全体成功。[受入記録](../../../archive/gui_v13_reviews/REVIEW_T5_RENDER.md)。
 - [T5aアプリ票](TASK_T5A_APP.md)を発行しCodexへ新規アプリ内限定で実装発注。
   既存モデル/rendererの事前ハッシュは `/tmp/os32-t5a-source-baseline.json`。
   workspace/build/deploy登録とゲスト最終リンクは提出後PMが実施。配備・ゲスト操作は未承認。
