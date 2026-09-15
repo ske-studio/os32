@@ -37,6 +37,14 @@ EtherType だけはワイヤ上 big-endian で、`net/link.c:227` が明示的�
 
 ### 残っている (場所と理由)
 
+> **2026-09-15 追記 (順序 4-a で解消)。** 下の一覧と「移植時にやること」の 1. / 2. は
+> **済み**。`fs/ext2_*.c` / `drivers/kcg.c` / `lib/utf8.c` の直アクセス 163 か所は
+> `include/endian_le.h` の `le16_rd` / `le16_wr` / `le32_rd` / `le32_wr` に置き換え、
+> `fs/iso9660.c` の `iso_read_le16` / `iso_read_le32` もそこへ寄せた。4. の番人は
+> `tools/check_le_access.py` (`make check`) — 文字列検査と `-Wcast-align=strict` の
+> 2 段。以下は N1 時点 (基点 `af48990`) の記録としてそのまま残す。
+> `fs/hostdrvfs_proto.h` の packed 構造体は経路ごと x86 前提なので**対象外のまま**。
+
 **ext2 ドライバはディスク上の構造を `*(u16 *)&buf[off]` で読み書きしている。**
 非アラインアクセスと LE の両方に依存する。実数で 80 行以上:
 

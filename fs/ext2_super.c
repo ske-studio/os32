@@ -117,9 +117,9 @@ void ext2_fs_error(Ext2Ctx *ctx)
      * 失敗しても何もしない — メモリ上のエラー状態は立っている。 */
     sector = ctx->base_lba + 2;
     if (dev_blk_read_lba(ctx->dev, sector, 1, ext2_g_err_sect) != 0) return;
-    state = *(u16 *)&ext2_g_err_sect[EXT2_SB_STATE_OFF];
+    state = le16_rd(&ext2_g_err_sect[EXT2_SB_STATE_OFF]);
     if (state & EXT2_ERROR_FS) return;  /* 既に立っている */
-    *(u16 *)&ext2_g_err_sect[EXT2_SB_STATE_OFF] = (u16)(state | EXT2_ERROR_FS);
+    le16_wr(&ext2_g_err_sect[EXT2_SB_STATE_OFF], (u16)(state | EXT2_ERROR_FS));
     (void)dev_blk_write_lba(ctx->dev, sector, 1, ext2_g_err_sect);
 }
 
@@ -221,8 +221,8 @@ int ext2_write_super_raw(Ext2Ctx *ctx)
     int ret;
     ret = ext2_read_block(ctx, 1, ext2_g_blk);
     if (ret != 0) return EXT2_ERR_IO;
-    *(u32 *)&ext2_g_blk[12] = ctx->sb_info.free_blocks_count;
-    *(u32 *)&ext2_g_blk[16] = ctx->sb_info.free_inodes_count;
+    le32_wr(&ext2_g_blk[12], ctx->sb_info.free_blocks_count);
+    le32_wr(&ext2_g_blk[16], ctx->sb_info.free_inodes_count);
     return ext2_write_block(ctx, 1, ext2_g_blk);
 }
 
@@ -244,12 +244,12 @@ int ext2_write_gd_raw(Ext2Ctx *ctx)
             if (ret != 0) return EXT2_ERR_IO;
         }
 
-        *(u32 *)&ext2_g_blk[offset + 0]  = ctx->gd_table[g].block_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 4]  = ctx->gd_table[g].inode_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 8]  = ctx->gd_table[g].inode_table;
-        *(u16 *)&ext2_g_blk[offset + 12] = ctx->gd_table[g].free_blocks;
-        *(u16 *)&ext2_g_blk[offset + 14] = ctx->gd_table[g].free_inodes;
-        *(u16 *)&ext2_g_blk[offset + 16] = ctx->gd_table[g].used_dirs;
+        le32_wr(&ext2_g_blk[offset + 0], ctx->gd_table[g].block_bitmap);
+        le32_wr(&ext2_g_blk[offset + 4], ctx->gd_table[g].inode_bitmap);
+        le32_wr(&ext2_g_blk[offset + 8], ctx->gd_table[g].inode_table);
+        le16_wr(&ext2_g_blk[offset + 12], ctx->gd_table[g].free_blocks);
+        le16_wr(&ext2_g_blk[offset + 14], ctx->gd_table[g].free_inodes);
+        le16_wr(&ext2_g_blk[offset + 16], ctx->gd_table[g].used_dirs);
 
         /* ブロック末尾のエントリ or 最後のグループの場合に書き込み */
         if (offset + 32 >= EXT2_BLOCK_SIZE || g == ctx->num_groups - 1) {
@@ -302,7 +302,7 @@ u32 ext2_find_partition(int ide_drive)
         /* アクティブなパーティションエントリから開始LBAを計算 */
         /* bootable = bit7 (0x80 または 0xA0 等) */
         if (bootable & 0x80) {
-            u16 start_c = (u16)ent[8] | ((u16)ent[9] << 8);
+            u16 start_c = le16_rd(&ent[8]);
             u8  start_h = ent[7];
             u8  start_s = ent[6];
             /* HDD BIOSのセクタ番号は0開始 (FDDの1開始とは異なる) */
@@ -348,30 +348,30 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     }
 
     {
-        u16 magic = (u16)ext2_g_blk[56] | ((u16)ext2_g_blk[57] << 8);
+        u16 magic = le16_rd(&ext2_g_blk[56]);
         if (magic != EXT2_SUPER_MAGIC) return EXT2_ERR_MAGIC;
     }
 
-    ctx->sb_info.total_inodes     = *(u32 *)&ext2_g_blk[0];
-    ctx->sb_info.total_blocks     = *(u32 *)&ext2_g_blk[4];
-    ctx->sb_info.free_blocks_count = *(u32 *)&ext2_g_blk[12];
-    ctx->sb_info.free_inodes_count = *(u32 *)&ext2_g_blk[16];
-    ctx->sb_info.first_data_block = *(u32 *)&ext2_g_blk[20];
-    ctx->sb_info.block_size       = 1024U << (*(u32 *)&ext2_g_blk[24]);
-    ctx->sb_info.blocks_per_group = *(u32 *)&ext2_g_blk[32];
-    ctx->sb_info.inodes_per_group = *(u32 *)&ext2_g_blk[40];
-    ctx->sb_info.magic            = *(u16 *)&ext2_g_blk[56];
-    ctx->sb_info.first_ino        = *(u32 *)&ext2_g_blk[84];
+    ctx->sb_info.total_inodes     = le32_rd(&ext2_g_blk[0]);
+    ctx->sb_info.total_blocks     = le32_rd(&ext2_g_blk[4]);
+    ctx->sb_info.free_blocks_count = le32_rd(&ext2_g_blk[12]);
+    ctx->sb_info.free_inodes_count = le32_rd(&ext2_g_blk[16]);
+    ctx->sb_info.first_data_block = le32_rd(&ext2_g_blk[20]);
+    ctx->sb_info.block_size       = 1024U << le32_rd(&ext2_g_blk[24]);
+    ctx->sb_info.blocks_per_group = le32_rd(&ext2_g_blk[32]);
+    ctx->sb_info.inodes_per_group = le32_rd(&ext2_g_blk[40]);
+    ctx->sb_info.magic            = le16_rd(&ext2_g_blk[56]);
+    ctx->sb_info.first_ino        = le32_rd(&ext2_g_blk[84]);
     /* 媒体にエラーの印が残っていても**読み書きでマウントする** (Linux と同じ、
      * ユーザー決裁 2 の条件)。警告だけ出す。印は e2fsck だけが消す。 */
     ctx->fs_error = 0;
     ctx->mounted_with_errors =
-        ((*(u16 *)&ext2_g_blk[EXT2_SB_STATE_OFF]) & EXT2_ERROR_FS) ? 1 : 0;
+        (le16_rd(&ext2_g_blk[EXT2_SB_STATE_OFF]) & EXT2_ERROR_FS) ? 1 : 0;
     if (ctx->mounted_with_errors) {
         kprintf(0x0E, "[EXT2] warning: mounting fs with errors, "
                       "running e2fsck is recommended\n");
     }
-    ctx->sb_info.inode_size       = *(u16 *)&ext2_g_blk[88];
+    ctx->sb_info.inode_size       = le16_rd(&ext2_g_blk[88]);
     if (ctx->sb_info.inode_size == 0) ctx->sb_info.inode_size = 128;
 
     for (i = 0; i < 16; i++) {
@@ -399,12 +399,12 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
                 if (ret != 0) return EXT2_ERR_IO;
             }
 
-            ctx->gd_table[g].block_bitmap = *(u32 *)&ext2_g_blk[offset + 0];
-            ctx->gd_table[g].inode_bitmap = *(u32 *)&ext2_g_blk[offset + 4];
-            ctx->gd_table[g].inode_table  = *(u32 *)&ext2_g_blk[offset + 8];
-            ctx->gd_table[g].free_blocks  = *(u16 *)&ext2_g_blk[offset + 12];
-            ctx->gd_table[g].free_inodes  = *(u16 *)&ext2_g_blk[offset + 14];
-            ctx->gd_table[g].used_dirs    = *(u16 *)&ext2_g_blk[offset + 16];
+            ctx->gd_table[g].block_bitmap = le32_rd(&ext2_g_blk[offset + 0]);
+            ctx->gd_table[g].inode_bitmap = le32_rd(&ext2_g_blk[offset + 4]);
+            ctx->gd_table[g].inode_table  = le32_rd(&ext2_g_blk[offset + 8]);
+            ctx->gd_table[g].free_blocks  = le16_rd(&ext2_g_blk[offset + 12]);
+            ctx->gd_table[g].free_inodes  = le16_rd(&ext2_g_blk[offset + 14]);
+            ctx->gd_table[g].used_dirs    = le16_rd(&ext2_g_blk[offset + 16]);
         }
     }
 
