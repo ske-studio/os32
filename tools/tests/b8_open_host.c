@@ -845,6 +845,483 @@ static void case_other_bmap_callers(void)
     }
 }
 
+/* ======================================================================== */
+/*  段 A2: Codex 実装レビュー P1-1 / P1-2 / P1-3 / P1-5 の反例              */
+/*                                                                          */
+/*  どれも「検索や更新の**失敗を二値に潰した**次の段」で、前回の修正が       */
+/*  届いていなかったところ。Codex は 32bit バイナリを Unicorn で実行して     */
+/*  実際に再現している。同じ形をここに入れる。                              */
+/* ======================================================================== */
+
+/* "/big" だけ記憶を温める — パス解決は通り、その先の検索が失敗する状態 */
+static void warm_big(void)
+{
+    OS32_Stat st;
+    memo_cold();
+    CHECK(ext2_vfs_stat(g_ec, "/big", &st) == VFS_OK);
+}
+
+/* P1-1: mkdir が「存在確認が読めなかった」まま作らない。
+ * 直す前: `if (find_entry(...) == EXT2_OK) return EXIST;` なので I/O エラーは
+ * すり抜け、既にある /big/keepme と**同名のディレクトリを作っていた**
+ * (Codex 実測: 成功を返し 18 セクタ書き込み、同名エントリ 2 件)。 */
+static void case_mkdir_existence_failure(void)
+{
+    int rc, n;
+    u32 lba;
+
+    report("  [P1-1] mkdir: 存在確認が読めなければ作らない\n");
+
+    warm_big();
+    n = keep_entry_count();
+    CHECK(n == 1);
+    lba = lba_of_big_indirect();
+    io_reset();
+    fail_arm(lba, 1);
+    rc = vfs_mkdir("/big/keepme");
+    fail_disarm();
+
+    CHECK(g_fail_fired == 1);
+    CHECK(rc < 0);
+    CHECK(rc != VFS_OK);
+    CHECK(rc != VFS_ERR_EXIST);         /* 「既にある」とも言わない */
+    CHECK(g_wr_sect == 0);              /* **1 セクタも書いていない** */
+    CHECK(keep_entry_count() == 1);     /* 同名エントリが増えていない */
+    CHECK(keep_intact());
+
+    /* 回帰: 読めるなら従来どおり EXIST / 作成ができる */
+    memo_cold();
+    CHECK(vfs_mkdir("/big/keepme") == VFS_ERR_EXIST);
+    memo_cold();
+    CHECK(vfs_mkdir("/big/newdir") == VFS_OK);
+    CHECK(vfs_path_kind("/big/newdir") == VFS_KIND_DIR);
+}
+
+/* P1-2: ext2_create が同じ形。
+ * (VFS 経由の ext2_vfs_write は前回直したので、ここは関数の契約そのものを
+ *  直接叩く。Codex 実測: 成功を返して同名ファイルを二重作成、16 セクタ。) */
+static void case_create_existence_failure(void)
+{
+    int rc;
+    u32 big_ino = 0, lba;
+
+    report("  [P1-2] ext2_create: 存在確認が読めなければ作らない\n");
+
+    warm_big();
+    CHECK(ext2_lookup(g_ec, "/big", &big_ino) == EXT2_OK);
+    lba = lba_of_big_indirect();
+    io_reset();
+    fail_arm(lba, 1);
+    rc = ext2_create(g_ec, big_ino, "keepme", "XX", 2);
+    fail_disarm();
+
+    CHECK(g_fail_fired == 1);
+    CHECK(rc == EXT2_ERR_IO);
+    CHECK(rc != EXT2_OK);
+    CHECK(rc != EXT2_ERR_EXIST);
+    CHECK(g_wr_sect == 0);
+    CHECK(keep_entry_count() == 1);
+    CHECK(keep_intact());
+
+    /* 回帰 */
+    CHECK(ext2_create(g_ec, big_ino, "keepme", "XX", 2) == EXT2_ERR_EXIST);
+    CHECK(keep_intact());
+    CHECK(ext2_create(g_ec, big_ino, "fresh1", "YY", 2) == EXT2_OK);
+}
+
+/* P1-3: rename の**宛先**存在確認。
+ * 直す前: 置き換えの分岐を丸ごと飛ばし、add_entry が宛先に同名エントリを
+ * 二重に作ったうえで delete_entry が移動元の名前を消していた
+ * (Codex 実測: 成功を返し 10 セクタ書き込み、**名前が片方だけ消えて二重**)。 */
+static void case_rename_dest_failure(void)
+{
+    int rc;
+    u32 lba, tmp = 0;
+
+    report("  [P1-3] rename: 宛先の確認が読めなければ何もしない\n");
+
+    memo_cold();
+    CHECK(vfs_path_kind("/etc/plain") == VFS_KIND_FILE);
+    warm_big();
+
+    CHECK(keep_entry_count() == 1);
+    lba = lba_of_big_indirect();
+    io_reset();
+    fail_arm(lba, 1);
+    rc = vfs_rename("/etc/plain", "/big/keepme");
+    fail_disarm();
+
+    CHECK(g_fail_fired == 1);
+    CHECK(rc < 0);
+    CHECK(rc != VFS_OK);
+    CHECK(g_wr_sect == 0);                       /* 何も書いていない */
+    CHECK(keep_entry_count() == 1);              /* 宛先が二重になっていない */
+    CHECK(keep_intact());                        /* 宛先の中身もそのまま */
+    /* **移動元の名前が残っている** */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/plain", &tmp) == EXT2_OK);
+    CHECK(vfs_path_kind("/etc/plain") == VFS_KIND_FILE);
+
+    /* 回帰: 読めるなら従来どおり (ファイル同士は置き換え) */
+    memo_cold();
+    CHECK(vfs_rename("/etc/plain", "/etc/plain2") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/plain", &tmp) == EXT2_ERR_NOTFOUND);
+    CHECK(vfs_path_kind("/etc/plain2") == VFS_KIND_FILE);
+    memo_cold();
+    CHECK(vfs_rename("/etc/plain2", "/etc/plain") == VFS_OK);
+}
+
+/* P1-5: 追記の inode 更新が失敗したのに成功 (バイト数) を返していた。
+ * Codex 実測: 5 バイトのファイルに 4 バイト追記 -> 戻り値 4、
+ * 媒体上のサイズは 5 のまま = 追記が見えない。
+ *
+ * 1 回の ext2_write_stream で、目当ての inode が載るブロックは
+ *   1 回目 = 先頭の ext2_read_inode
+ *   2 回目 = 最後の ext2_write_inode の read-modify-write
+ * と読まれる。その **2 回目だけ**を落とす。 */
+static void case_write_stream_inode_failure(void)
+{
+    u32 ino = 0, lba, sz = 0;
+    int rc;
+
+    report("  [P1-5] 追記: inode を書けなければ成功と言わない\n");
+
+    CHECK(ext2_vfs_write(g_ec, "/etc/small", "01234", 5) == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/small", &ino) == EXT2_OK);
+    /* 記憶を温めてパス解決が inode 表を読み直さないようにする */
+    {
+        OS32_Stat st;
+        CHECK(ext2_vfs_stat(g_ec, "/etc/small", &st) == VFS_OK);
+    }
+
+    lba = lba_of_inode(ino);
+    io_reset();
+    fail_arm(lba, 2);
+    rc = ext2_vfs_write_stream(g_ec, "/etc/small", "ABCD", 4, 5);
+    fail_disarm();
+
+    CHECK(g_fail_fired == 1);
+    CHECK(rc < 0);                       /* 4 (成功) と言わない */
+    CHECK(rc != 4);
+    /* **戻り値が成功でないなら、媒体上のサイズと食い違っていてよい**。
+     * 逆に「成功なら一致する」ことを次で押さえる。 */
+    CHECK(ext2_vfs_get_size(g_ec, "/etc/small", &sz) == VFS_OK);
+    CHECK(sz == 5);
+
+    /* 回帰: 同じ追記をやり直すと通り、**戻り値と媒体上のサイズが一致する** */
+    rc = ext2_vfs_write_stream(g_ec, "/etc/small", "ABCD", 4, 5);
+    CHECK(rc == 4);
+    CHECK(ext2_vfs_get_size(g_ec, "/etc/small", &sz) == VFS_OK);
+    CHECK(sz == 9);
+    {
+        static u8 got[32];
+        kmemset(got, 0, sizeof(got));
+        CHECK(ext2_read_file(g_ec, ino, got, sizeof(got)) == 9);
+        CHECK(kstrncmp((const char *)got, "01234ABCD", 9) == 0);
+    }
+}
+
+/* ブロックがまだ「使用中」かをビットマップで直に見る
+ * (fs/ext2_inode.c の ext2_alloc_block と同じ式)。
+ * **解放したかどうかは inode を見ても分からない** — 呼び手が失敗して
+ * inode を書き戻さなければ媒体上の inode は元のままだからである。
+ * 漏れ (解放したのに誰も指していない) を捕まえるにはここを見るしかない。 */
+static int block_in_use(u32 blk)
+{
+    static u8 bm[EXT2_BLOCK_SIZE];
+    u32 rel, g, bit, byte_idx, bit_idx;
+
+    if (blk < g_ec->sb_info.first_data_block) return 1;
+    rel = blk - g_ec->sb_info.first_data_block;
+    g = rel / g_ec->sb_info.blocks_per_group;
+    bit = rel % g_ec->sb_info.blocks_per_group;
+    if (g >= g_ec->num_groups) return 1;
+    if (ext2_read_block(g_ec, g_ec->gd_table[g].block_bitmap, bm) != 0) return 1;
+    byte_idx = bit / 8;
+    bit_idx = bit % 8;
+    return (bm[byte_idx] & (1 << bit_idx)) ? 1 : 0;
+}
+
+/* 別票候補 -> 本票で対応: ext2_free_all_blocks が間接表を読めないとき、
+ * **何も解放しない** (以前は表だけ解放して配下を行方不明にしていた)。 */
+static void case_free_all_blocks_failure(void)
+{
+    static u8 pattern[16 * 1024];
+    static u8 got[16 * 1024];
+    Ext2Inode fi;
+    u32 ino = 0, lba, i;
+    u32 ind_before, dir0_before, child_before;
+    int rc;
+
+    report("  [BONUS] free_all_blocks: 表が読めなければ何も解放しない\n");
+
+    for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 11 + 3);
+    CHECK(ext2_vfs_write(g_ec, "/etc/leak", pattern, sizeof(pattern)) == VFS_OK);
+
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/leak", &ino) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    CHECK(fi.block[EXT2_IND_BLOCK] != 0);
+    ind_before = fi.block[EXT2_IND_BLOCK];
+    dir0_before = fi.block[0];
+    /* 間接表の 1 本目が指す実データブロック (表ごと消えると行方不明になる) */
+    CHECK(ext2_bmap(g_ec, &fi, EXT2_NDIR_BLOCKS, &child_before) == EXT2_OK);
+    CHECK(child_before != 0);
+    lba = g_ec->base_lba + ind_before * 2;
+
+    /* 上書き (= 切り詰めてから書き直す) の途中で間接表が読めなくなる */
+    {
+        OS32_Stat st;
+        CHECK(ext2_vfs_stat(g_ec, "/etc/leak", &st) == VFS_OK);
+    }
+    io_reset();
+    fail_arm_always(lba);
+    rc = ext2_vfs_write(g_ec, "/etc/leak", "small", 5);
+    fail_disarm();
+
+    CHECK(g_fail_fired > 0);
+    CHECK(rc < 0);                       /* 上書きは通らない */
+
+    /* **何も解放していない**。媒体上の inode は書き戻されていないので
+     * inode を見ても分からない — **ビットマップを直に見る**。
+     * 直す前はここで直接ブロックが「空き」に戻り (下見が無いので先に解放
+     * してしまう)、さらに間接表も解放されて配下が行方不明になっていた。 */
+    CHECK(block_in_use(dir0_before) == 1);
+    CHECK(block_in_use(ind_before) == 1);
+    CHECK(block_in_use(child_before) == 1);   /* 間接表の先の実データ */
+
+    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    CHECK(fi.block[EXT2_IND_BLOCK] == ind_before);
+    CHECK(fi.block[0] == dir0_before);
+    CHECK(fi.size == 16 * 1024);
+
+    /* 解放されていたら、次の割り当てが同じブロックを別ファイルへ配る
+     * (2026-09-06 の相互リンクと同じ壊れ方)。そうならないことを見る。 */
+    {
+        Ext2Inode ni;
+        u32 nino = 0;
+        int k;
+        CHECK(ext2_vfs_write(g_ec, "/etc/after", pattern, 4096) == VFS_OK);
+        memo_cold();
+        CHECK(ext2_lookup(g_ec, "/etc/after", &nino) == EXT2_OK);
+        CHECK(ext2_read_inode(g_ec, nino, &ni) == EXT2_OK);
+        for (k = 0; k < EXT2_NDIR_BLOCKS; k++) {
+            CHECK(ni.block[k] != dir0_before);
+            CHECK(ni.block[k] != ind_before);
+            CHECK(ni.block[k] != child_before);
+        }
+    }
+
+    /* 中身も無事 */
+    kmemset(got, 0, sizeof(got));
+    CHECK(ext2_read_file(g_ec, ino, got, sizeof(got)) == 16 * 1024);
+    {
+        int same = 1;
+        for (i = 0; i < sizeof(pattern); i++) {
+            if (got[i] != pattern[i]) { same = 0; break; }
+        }
+        CHECK(same);
+    }
+
+    /* 回帰: 読めるなら従来どおり上書きできて、表が解放される */
+    memo_cold();
+    CHECK(ext2_vfs_write(g_ec, "/etc/leak", "small", 5) == VFS_OK);
+    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    CHECK(fi.block[EXT2_IND_BLOCK] == 0);
+    CHECK(fi.size == 5);
+}
+
+/* inode がまだ「使用中」かを inode ビットマップで直に見る
+ * (fs/ext2_inode.c の ext2_free_inode と同じ式)。 */
+static int inode_in_use(u32 ino)
+{
+    static u8 bm[EXT2_BLOCK_SIZE];
+    u32 g, rel;
+    g = (ino - 1) / g_ec->sb_info.inodes_per_group;
+    rel = (ino - 1) % g_ec->sb_info.inodes_per_group;
+    if (g >= g_ec->num_groups) return 1;
+    if (ext2_read_block(g_ec, g_ec->gd_table[g].inode_bitmap, bm) != 0) return 1;
+    return (bm[rel / 8] & (1 << (rel % 8))) ? 1 : 0;
+}
+
+/* 削除系: ブロックを返しきれなかったとき **inode まで空きに戻さない**。
+ *
+ * ext2_free_all_blocks は失敗時に 1 ブロックも解放せず指し先を inode に
+ * 残す。そこで inode のビットだけ空きに戻すと、次の ext2_alloc_inode が
+ * 同じ番号を配って ext2_create が inode を上書きし、残したブロックを
+ * 指すものが誰も居なくなる (本当の漏れ)。再開時の読み直しで見つけた。 */
+static void case_unlink_keeps_inode(void)
+{
+    static u8 pattern[16 * 1024];
+    Ext2Inode fi;
+    u32 ino = 0, etc_ino = 0, lba, ind, child, tmp = 0, i;
+    int rc;
+
+    report("  [BONUS-3] unlink: 返しきれなければ inode を解放しない\n");
+
+    for (i = 0; i < sizeof(pattern); i++) pattern[i] = (u8)(i * 5 + 7);
+    CHECK(ext2_vfs_write(g_ec, "/etc/orphan", pattern, sizeof(pattern)) == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/etc/orphan", &ino) == EXT2_OK);
+    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    ind = fi.block[EXT2_IND_BLOCK];
+    CHECK(ind != 0);
+    CHECK(ext2_bmap(g_ec, &fi, EXT2_NDIR_BLOCKS, &child) == EXT2_OK);
+    lba = g_ec->base_lba + ind * 2;
+
+    fail_arm_always(lba);
+    rc = ext2_unlink(g_ec, etc_ino, "orphan");
+    fail_disarm();
+
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);                 /* 返しきれなかったと報告 */
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/orphan", &tmp) == EXT2_ERR_NOTFOUND);
+    /* **inode もブロックも使用中のまま** = 孤児として辿れる */
+    CHECK(inode_in_use(ino) == 1);
+    CHECK(block_in_use(ind) == 1);
+    CHECK(block_in_use(child) == 1);
+    CHECK(block_in_use(fi.block[0]) == 1);
+    /* 次に作るファイルが同じ inode 番号を受け取らない */
+    CHECK(ext2_vfs_write(g_ec, "/etc/next", "N", 1) == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/next", &tmp) == EXT2_OK);
+    CHECK(tmp != ino);
+    /* 残した inode は依然としてブロックを指している */
+    CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+    CHECK(fi.block[EXT2_IND_BLOCK] == ind);
+    CHECK(fi.links_count == 0);
+    CHECK(fi.dtime != 0);
+}
+
+static void case_rmdir_keeps_inode(void)
+{
+    static char name[256];
+    Ext2Inode di;
+    u32 root = 0, dino = 0, ind, lba, nblocks, tmp = 0;
+    int i, rc, nth;
+
+    report("  [BONUS-4] rmdir: 返しきれなければ inode を解放しない\n");
+
+    /* 間接ブロックを持つ**空の**ディレクトリを作る: 長い名前で
+     * ブロックを埋めてから全部消す (ext2 はディレクトリを縮めない)。
+     * 名前 240 文字 -> rec_len 248 -> 1 ブロック 4 件 -> 60 件で 15 ブロック。 */
+    CHECK(ext2_vfs_mkdir(g_ec, "/rmbig") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/rmbig", &dino) == EXT2_OK);
+    for (i = 0; i < 240; i++) name[i] = 'n';
+    name[240] = '\0';
+    for (i = 0; i < 60; i++) {
+        name[0] = (char)('A' + i / 26);
+        name[1] = (char)('a' + i % 26);
+        if (ext2_create(g_ec, dino, name, "", 0) != EXT2_OK) {
+            report("  (harness) rmbig create failed\n");
+            g_failures++;
+            return;
+        }
+    }
+    for (i = 0; i < 60; i++) {
+        name[0] = (char)('A' + i / 26);
+        name[1] = (char)('a' + i % 26);
+        CHECK(ext2_unlink(g_ec, dino, name) == EXT2_OK);
+    }
+    CHECK(ext2_read_inode(g_ec, dino, &di) == EXT2_OK);
+    ind = di.block[EXT2_IND_BLOCK];
+    CHECK(ind != 0);
+    nblocks = di.size / EXT2_BLOCK_SIZE;
+    CHECK(nblocks > EXT2_NDIR_BLOCKS);
+    lba = g_ec->base_lba + ind * 2;
+    CHECK(ext2_lookup(g_ec, "/", &root) == EXT2_OK);
+
+    /* 空判定 (ext2_is_dir_empty) は bi = 12 .. nblocks の各回で間接表を
+     * 読む (最後の 1 回は「未割当 = 終わり」を知るため)。その次の 1 回が
+     * ext2_free_all_blocks の下見。**下見だけ**を落とす。 */
+    nth = (int)(nblocks - EXT2_NDIR_BLOCKS) + 2;
+    fail_arm(lba, nth);
+    rc = ext2_rmdir(g_ec, root, "rmbig");
+    fail_disarm();
+
+    CHECK(g_fail_fired == 1);                 /* 狙った 1 回に当たった */
+    CHECK(rc == EXT2_ERR_IO);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/rmbig", &tmp) == EXT2_ERR_NOTFOUND);
+    CHECK(inode_in_use(dino) == 1);
+    CHECK(block_in_use(ind) == 1);
+    CHECK(block_in_use(di.block[0]) == 1);
+}
+
+/* 書き込み系の最後の ext2_sync の失敗を捨てない (P1-5 と同じ形の洗い出し)。
+ *
+ * ext2_sync は空き数・グループ記述子を書き戻す。この FS の約束は
+ * **「戻った時点でディスクが正しい」(write-through)** なので、書き戻せ
+ * なかったのに成功と言うのはその約束の嘘になる。
+ *
+ * ext2_write_super_raw はスーパーブロック (ブロック 1) を read-modify-write
+ * するので、その**読み出し**を落とせば sync を失敗させられる。 */
+static void case_trailing_sync_failure(void)
+{
+    u32 sb_lba, etc_ino = 0, tmp = 0;
+    int rc;
+
+    report("  [SYNC] create / write / mkdir / rename / 追記 が sync 失敗を返す\n");
+
+    sb_lba = g_ec->base_lba + 1 * 2;
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc", &etc_ino) == EXT2_OK);
+
+    /* create (新しい inode とブロックを割り当てる = 書き戻すものがある) */
+    fail_arm_always(sb_lba);
+    rc = ext2_create(g_ec, etc_ino, "sync1", "abc", 3);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+
+    /* write (切り詰めて書き直す = 解放と割り当て) */
+    fail_arm_always(sb_lba);
+    rc = ext2_vfs_write(g_ec, "/etc/sync1", "defgh", 5);
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == VFS_ERR_IO);
+
+    /* mkdir */
+    fail_arm_always(sb_lba);
+    rc = ext2_mkdir(g_ec, etc_ino, "syncdir");
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+
+    /* 追記でブロックを新しく割り当てる (P1-5 の sync 側) */
+    {
+        static u8 blk[1024];
+        kmemset(blk, 'Z', sizeof(blk));
+        fail_arm_always(sb_lba);
+        rc = ext2_vfs_write_stream(g_ec, "/etc/sync1", blk, sizeof(blk), 5);
+        fail_disarm();
+        CHECK(g_fail_fired > 0);
+        CHECK(rc == VFS_ERR_IO);
+    }
+
+    /* rename はそれ自体では空き数を動かさないので、書き戻し待ちが
+     * 残っている状態 (前の操作の書き戻しが失敗した直後と同じ) を作る */
+    ext2_meta_touch(g_ec);
+    fail_arm_always(sb_lba);
+    rc = ext2_rename(g_ec, etc_ino, "sync1", etc_ino, "sync2");
+    fail_disarm();
+    CHECK(g_fail_fired > 0);
+    CHECK(rc == EXT2_ERR_IO);
+
+    /* 回帰: 読めるなら全部通る */
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/etc/sync2", &tmp) == EXT2_OK);
+    CHECK(ext2_create(g_ec, etc_ino, "sync3", "x", 1) == EXT2_OK);
+    CHECK(ext2_mkdir(g_ec, etc_ino, "syncdir2") == EXT2_OK);
+    CHECK(ext2_rename(g_ec, etc_ino, "sync3", etc_ino, "sync4") == EXT2_OK);
+}
+
 /* 正常系の回帰 — 直した結果ふつうの使い方が壊れていないこと */
 static void case_normal_paths(void)
 {
@@ -987,6 +1464,14 @@ static void stage_a(void)
     case_write_file_failure();
     case_write_stream_failure();
     case_other_bmap_callers();
+    case_mkdir_existence_failure();
+    case_create_existence_failure();
+    case_rename_dest_failure();
+    case_write_stream_inode_failure();
+    case_free_all_blocks_failure();
+    case_unlink_keeps_inode();
+    case_rmdir_keeps_inode();
+    case_trailing_sync_failure();
     case_normal_paths();
 
     disk_teardown();

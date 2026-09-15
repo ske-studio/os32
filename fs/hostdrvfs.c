@@ -25,6 +25,15 @@
 #include "kutf16.h"
 #include "kprintf.h"
 
+/* 純規則 (ハイパーコールを叩かないので**ホストでそのまま試験できる**)。
+ *   hdrv_stat_fill / hdrv_stat_mtime  … stat の成否判定 (票 H1 / H3)
+ *   hdrv_size_result                  … get_file_size の成否判定 (票 B8 ③)
+ *   hdrv_create_status_to_vfs         … CREATE の NTSTATUS 変換 (票 B8 P1-4)
+ * hostdrv_create() が使うので、**この位置で**取り込む。 */
+#include "hostdrv_stat_rules.inc"
+STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
+              hdrv_stat_attr_dir);
+
 /* ===================================================================== */
 /*  内部定数                                                              */
 /* ===================================================================== */
@@ -301,6 +310,15 @@ static void setup_close(void)
  *
  * 注意: session_begin() を呼んだ後に使用すること。
  */
+/* 戻り値: 0 = 成功 / 負値 = **その失敗に対応する VFS_ERR_***。
+ *
+ * 以前は失敗を一律 -1 にし、呼び手がそれを VFS_ERR_NOTFOUND に畳んでいた
+ * (票 B8 / Codex 実装レビュー P1-4)。そのため「実在する通常ファイルだが
+ * OPEN だけが一度失敗した」場合に open の O_CREAT 経路が走り、
+ * hdrv_write_file の NP2_FILE_OVERWRITE_IF が**既存ファイルを切り詰めて**
+ * いた。**「無い」と言ってよいのは NT が「無い」と言ったときだけ。**
+ * 対応表と根拠 (NP21/W のどの状態がいつ返るか) は
+ * fs/hostdrv_stat_rules.inc の hdrv_create_status_to_vfs にある。 */
 static int hostdrv_create(const char *path, u32 disposition,
                           u32 options_flags, u32 desired_access)
 {
@@ -308,12 +326,9 @@ static int hostdrv_create(const char *path, u32 disposition,
     hostdrv_hypercall();
 
     if (g_iostatus.Status == NP2_STATUS_SENTINEL) {
-        return -1;
+        return VFS_ERR_IO;          /* エミュレータが応答しなかった */
     }
-    if (g_iostatus.Status != NP2_STATUS_SUCCESS) {
-        return -1;
-    }
-    return 0;
+    return hdrv_create_status_to_vfs((unsigned long)g_iostatus.Status);
 }
 
 /* IRP_MJ_READ: ファイル読み込み (チャンク分割)
@@ -557,7 +572,7 @@ static int hdrv_list_dir(void *ctx, const char *path,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
     lc.cb = cb;
@@ -585,7 +600,7 @@ static int hdrv_read_file(void *ctx, const char *path,
                         NP2_FILE_NON_DIRECTORY_FILE |
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_read(buf, max_size, 0);
 
@@ -593,10 +608,6 @@ static int hdrv_read_file(void *ctx, const char *path,
 
     return bytes;
 }
-
-#include "hostdrv_stat_rules.inc"
-STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
-              hdrv_stat_attr_dir);
 
 /* get_file_size
  *
@@ -623,7 +634,7 @@ static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
     rc = hostdrv_query_info(NP2_FileStandardInformation,
@@ -657,7 +668,7 @@ static int hdrv_read_stream(void *ctx, const char *path,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
     bytes = hostdrv_read(buf, size, (u64)offset);
@@ -694,7 +705,7 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     /* FileBasicInformation 取得 (種別)。g_databuf は次の問い合わせで
      * 上書きされるので、その場で値へ退避する。 */
@@ -747,7 +758,7 @@ static int hdrv_write_file(void *ctx, const char *path,
     rc = hostdrv_create(path, NP2_FILE_OVERWRITE_IF,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_write(data, size, 0);
 
@@ -769,7 +780,7 @@ static int hdrv_mkdir(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_CREATE,
                         NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     hostdrv_cleanup_close();
 
@@ -786,7 +797,7 @@ static int hdrv_rmdir(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     disp.DeleteFileOnClose = 1;
     rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
@@ -806,7 +817,7 @@ static int hdrv_unlink(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     disp.DeleteFileOnClose = 1;
     rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
@@ -828,7 +839,7 @@ static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
     rc = hostdrv_create(old_path, NP2_FILE_OPEN,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     kstrncpy(ntpath, new_path, sizeof(ntpath));
     for (i = 0; ntpath[i]; i++) {
@@ -860,7 +871,7 @@ static int hdrv_write_stream(void *ctx, const char *path,
     rc = hostdrv_create(path, NP2_FILE_OPEN_IF,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_write(buf, size, (u64)offset);
 

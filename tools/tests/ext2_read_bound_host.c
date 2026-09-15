@@ -90,7 +90,10 @@ int ext2_alloc_block(Ext2Ctx *c) { (void)c; return 0; }
 void ext2_free_block(Ext2Ctx *c, u32 b) { (void)c; (void)b; }
 int ext2_alloc_inode(Ext2Ctx *c) { (void)c; return 0; }
 void ext2_free_inode(Ext2Ctx *c, u32 i) { (void)c; (void)i; }
-void ext2_free_all_blocks(Ext2Ctx *c, Ext2Inode *n) { (void)c; (void)n; }
+/* 票 B8: 返しきれたかを返す形になった (fs/ext2_priv.h)。この試験は
+ * 解放経路を動かさないので常に成功。 */
+int ext2_free_all_blocks(Ext2Ctx *c, Ext2Inode *n)
+{ (void)c; (void)n; return EXT2_OK; }
 int ext2_bmap_set(Ext2Ctx *c, Ext2Inode *n, u32 f, u32 p)
 { (void)c; (void)n; (void)f; (void)p; return 0; }
 int ext2_add_entry(Ext2Ctx *c, u32 d, const char *n, u32 i, u8 t)

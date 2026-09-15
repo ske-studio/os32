@@ -349,9 +349,55 @@ int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block
 /*  ブロック解放 (内部)                                                      */
 /* ======================================================================== */
 
-void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
+/* 戻り値 EXT2_OK = 全部返した / EXT2_ERR_IO = **返しきれなかった** (票 B8)。
+ *
+ * 直す前: 間接表の読み取りに失敗すると、内側のループを飛ばしたまま**表ブロック
+ * 自体は解放してポインタを 0 にしていた**。表が消えると配下のデータブロックを
+ * 指すものが誰も居なくなり、使用中のまま永久に回収できない (領域の漏れ)。
+ *
+ * **「全部返せると分かってから返す」** — 先に全部の間接表を読んで確かめ
+ * (下見)、1 本でも読めなければ**何ひとつ解放せずに**中断する。
+ *
+ * 途中まで解放して中断してはいけない理由: 呼び手 (ext2_write) は失敗すると
+ * **inode を書かずに戻る**ので、媒体上の inode は解放済みブロックを指したまま
+ * になる。そのブロックは次の割り当てで別のファイルへ渡され、2 つの inode が
+ * 同じブロックを指す (2026-09-06 に踏んだ相互リンクと同じ壊れ方)。
+ * 「解放しすぎない」より「解放しかけない」ほうが大事。
+ *
+ * 代償は、間接ブロックを持つファイルの切り詰めで**表の読み出しが 2 倍**に
+ * なること。直接ブロックだけ (12KB 以下) のファイルは下見を一切しないので
+ * 従来どおり。 */
+static int ext2_free_probe(Ext2Ctx *ctx, const Ext2Inode *inode)
+{
+    u32 j;
+
+    if (inode->block[EXT2_IND_BLOCK] != 0) {
+        if (ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_blk) != 0)
+            return EXT2_ERR_IO;
+    }
+
+    if (inode->block[EXT2_DIND_BLOCK] != 0) {
+        if (ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_blk) != 0)
+            return EXT2_ERR_IO;
+        /* dind 表は g_blk に載ったまま。内側は g_dat へ読む
+         * (ext2_read_block は g_aux を触らないので両方生き残る)。 */
+        for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
+            u32 ind1 = *(u32 *)&ext2_g_blk[j * 4];
+            if (ind1 == 0) continue;
+            if (ext2_read_block(ctx, ind1, ext2_g_dat) != 0) return EXT2_ERR_IO;
+        }
+    }
+    return EXT2_OK;
+}
+
+int ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
 {
     int i;
+    int ret;
+
+    /* 下見。ここで駄目なら**まだ 1 ブロックも解放していない** */
+    ret = ext2_free_probe(ctx, inode);
+    if (ret != 0) return ret;
 
     for (i = 0; i < EXT2_NDIR_BLOCKS; i++) {
         if (inode->block[i] != 0) {
@@ -377,7 +423,10 @@ void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
      * (単一間接) と ext2_g_dat (二重間接の内側) に置く。ext2_g_dat は
      * ext2_write_stream 専用だが、そこから ext2_free_all_blocks は呼ばれない。 */
     if (inode->block[EXT2_IND_BLOCK] != 0) {
-        if (ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_blk) == 0) {
+        /* 下見を通っているので読めるはず。それでも読めなければ**表を残す** */
+        if (ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_blk) != 0)
+            return EXT2_ERR_IO;
+        {
             u32 j;
             for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
                 u32 blk = *(u32 *)&ext2_g_blk[j * 4];
@@ -392,12 +441,16 @@ void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
         /* dind テーブルを g_blk、その先の ind テーブルを g_dat に読む。
          * どちらも ext2_free_block が触らないバッファでなければならない
          * (同じバッファの再利用でも上の表が壊れる)。 */
-        if (ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_blk) == 0) {
+        if (ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_blk) != 0)
+            return EXT2_ERR_IO;
+        {
             u32 j;
             for (j = 0; j < EXT2_ADDR_PER_BLOCK; j++) {
                 u32 ind1 = *(u32 *)&ext2_g_blk[j * 4];
                 if (ind1 != 0) {
-                    if (ext2_read_block(ctx, ind1, ext2_g_dat) == 0) {
+                    if (ext2_read_block(ctx, ind1, ext2_g_dat) != 0)
+                        return EXT2_ERR_IO;
+                    {
                         u32 k;
                         for (k = 0; k < EXT2_ADDR_PER_BLOCK; k++) {
                             u32 blk = *(u32 *)&ext2_g_dat[k * 4];
@@ -414,6 +467,7 @@ void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode)
 
     inode->blocks = 0;
     inode->size = 0;
+    return EXT2_OK;
 }
 
 /* ======================================================================== */

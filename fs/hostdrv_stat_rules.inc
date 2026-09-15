@@ -157,6 +157,60 @@ hdrv_size_result(int std_rc, int is_directory)
     return 0;
 }
 
+/* ---- IRP_MJ_CREATE の NTSTATUS -> VFS エラー (票 B8 / P1-4) -------------
+ *
+ * 以前は hostdrv_create() の失敗を呼び手が**全部 VFS_ERR_NOTFOUND に畳んで**
+ * いた。そのため「実在する通常ファイルだが、サイズ取得のための OPEN だけが
+ * 一度失敗した」場合に open の O_CREAT 経路が走り、hdrv_write_file の
+ * NP2_FILE_OVERWRITE_IF が**既存ファイルを切り詰めていた**。
+ *
+ * NP21/W の IRP_MJ_CREATE が返し得る状態は
+ * `np21w-src/src/generic/hostdrvnt.c` の hostdrvNT_IRP_MJ_CREATE にある。
+ * **「無い」を意味するのは 2 つだけ**:
+ *   STATUS_OBJECT_NAME_NOT_FOUND … 名前が無い
+ *   STATUS_OBJECT_PATH_NOT_FOUND … 途中のディレクトリが無い
+ * 同じ関数はほかに OBJECT_NAME_INVALID (無効な文字。NOT_FOUND を返すと
+ * ワイルドカード copy が壊れるので別にしてある、と NP21/W 側にコメントあり) /
+ * OBJECT_NAME_COLLISION / FILE_IS_A_DIRECTORY / NOT_A_DIRECTORY /
+ * SHARING_VIOLATION / ACCESS_DENIED / MEDIA_WRITE_PROTECTED /
+ * TOO_MANY_OPENED_FILES / CANNOT_DELETE / DIRECTORY_NOT_EMPTY /
+ * INVALID_PARAMETER を返す。**これらは「無い」ではない。**
+ *
+ * エミュレータが応答しなかったとき (番兵 0xDEADBEEF) も既定の IO に落ちる。
+ * **既定が OS32_ERR_IO であること**が安全性の要 — 知らない状態を
+ * 「無い」と言わない。 */
+#ifndef HDRV_NT_SUCCESS
+#define HDRV_NT_SUCCESS                 0x00000000UL
+#define HDRV_NT_OBJECT_NAME_INVALID     0xC0000033UL
+#define HDRV_NT_OBJECT_NAME_NOT_FOUND   0xC0000034UL
+#define HDRV_NT_OBJECT_NAME_COLLISION   0xC0000035UL
+#define HDRV_NT_OBJECT_PATH_NOT_FOUND   0xC000003AUL
+#define HDRV_NT_FILE_IS_A_DIRECTORY     0xC00000BAUL
+#define HDRV_NT_NOT_A_DIRECTORY         0xC0000103UL
+#define HDRV_NT_DIRECTORY_NOT_EMPTY     0xC0000101UL
+#endif
+
+static HDRV_STAT_MAYBE_UNUSED int
+hdrv_create_status_to_vfs(unsigned long status)
+{
+    if (status == HDRV_NT_SUCCESS) return 0;
+
+    /* **ここだけが「無い」** */
+    if (status == HDRV_NT_OBJECT_NAME_NOT_FOUND ||
+        status == HDRV_NT_OBJECT_PATH_NOT_FOUND) return OS32_ERR_NOTFOUND;
+
+    /* 意味がはっきりしているものはその意味で返す */
+    if (status == HDRV_NT_OBJECT_NAME_COLLISION) return OS32_ERR_EXIST;
+    if (status == HDRV_NT_FILE_IS_A_DIRECTORY)   return OS32_ERR_ISDIR;
+    if (status == HDRV_NT_NOT_A_DIRECTORY)       return OS32_ERR_NOTDIR;
+    if (status == HDRV_NT_DIRECTORY_NOT_EMPTY)   return OS32_ERR_NOTEMPTY;
+    if (status == HDRV_NT_OBJECT_NAME_INVALID)   return OS32_ERR_INVAL;
+
+    /* 知らない失敗は**必ず I/O エラー**。「無い」に落とさない。
+     * 応答が無かったとき (番兵) もここに来る。 */
+    return OS32_ERR_IO;
+}
+
 /* Basic 情報から st_mtime を決める (票 H3)。
  * Basic が取れていなければ 0 = 不明。`atime` / `ctime` はここでは埋めない —
  * 同一判定に使わないし、Windows の `CreationTime` は inode の状態変更時刻

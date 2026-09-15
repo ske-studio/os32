@@ -66,7 +66,10 @@ void ext2_free_inode(Ext2Ctx *ctx, u32 ino);
 int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
               u32 *out_phys);
 int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block);
-void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode);
+/* 戻り値 EXT2_OK / EXT2_ERR_IO = 返しきれなかった (票 B8)。
+ * 間接表が読めなかったときは**その表とポインタを残す** — 消すと配下が
+ * 永久に行方不明になるため。呼び手はエラーなら中断すること。 */
+int ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode);
 
 /* -- ext2_dir.c -- */
 int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ctx);

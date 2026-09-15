@@ -122,7 +122,16 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
-    { u32 tmp; if (ext2_find_entry(ctx, dir_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
+    /* 存在確認は **3 値で受ける** (票 B8 / Codex 実装レビュー P1-2)。
+     * 「EXT2_OK のときだけ拒否」だと I/O エラーでも下の割当・作成へ進み、
+     * 同名ファイルを二重に作る (実測: 16 セクタ書き込み)。
+     * 判定できないときは**何も書かずに中断する**。 */
+    {
+        u32 tmp;
+        ret = ext2_find_entry(ctx, dir_ino, name, &tmp, (u8 *)0);
+        if (ret == EXT2_OK) return EXT2_ERR_EXIST;
+        if (ret != EXT2_ERR_NOTFOUND) return ret;
+    }
 
     new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
@@ -140,10 +149,10 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
 
     for (bi = 0; bi < blocks_needed; bi++) {
         int blk = ext2_alloc_block(ctx);
-        if (blk < 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
+        if (blk < 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_NOSPC; }
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
-        if (ret != 0) { ext2_free_block(ctx, (u32)blk); ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
+        if (ret != 0) { ext2_free_block(ctx, (u32)blk); (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
 
         ext2_mem_zero(ext2_g_aux, EXT2_BLOCK_SIZE);
         to_write = remaining;
@@ -151,7 +160,7 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
         ext2_mem_copy(ext2_g_aux, &src[bi * EXT2_BLOCK_SIZE], to_write);
 
         ret = ext2_write_block(ctx, (u32)blk, ext2_g_aux);
-        if (ret != 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
+        if (ret != 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return EXT2_ERR_IO; }
 
         inode.blocks += 2;
         remaining -= to_write;
@@ -161,10 +170,10 @@ int ext2_create(Ext2Ctx *ctx, u32 dir_ino, const char *name, const void *data, u
     if (ret != 0) return ret;
 
     ret = ext2_add_entry(ctx, dir_ino, name, (u32)new_ino, EXT2_FT_REG_FILE);
-    if (ret != 0) { ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
+    if (ret != 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_free_inode(ctx, (u32)new_ino); return ret; }
 
-    ext2_sync(ctx);
-    return EXT2_OK;
+    /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
+    return ext2_sync(ctx);
 }
 
 int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
@@ -180,7 +189,11 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
     if (ret != 0) return ret;
     if ((inode.mode & EXT2_S_IFMT) != EXT2_S_IFREG) return EXT2_ERR_ISDIR;
 
-    ext2_free_all_blocks(ctx, &inode);
+    /* 切り詰めは**全部返せたときだけ**進む (票 B8)。間接表が読めないまま
+     * 先へ進むと、下の bmap_set が表へのポインタを書き換えて配下の
+     * データブロックが使用中のまま行方不明になる。 */
+    ret = ext2_free_all_blocks(ctx, &inode);
+    if (ret != 0) return ret;
 
     now = ext2_current_time();
     inode.size = size;
@@ -192,7 +205,7 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
 
     for (bi = 0; bi < blocks_needed; bi++) {
         int blk = ext2_alloc_block(ctx);
-        if (blk < 0) { ext2_free_all_blocks(ctx, &inode); ext2_write_inode(ctx, ino, &inode); return EXT2_ERR_NOSPC; }
+        if (blk < 0) { (void)ext2_free_all_blocks(ctx, &inode); ext2_write_inode(ctx, ino, &inode); return EXT2_ERR_NOSPC; }
 
         ret = ext2_bmap_set(ctx, &inode, bi, (u32)blk);
         if (ret != 0) { ext2_free_block(ctx, (u32)blk); return ret; }
@@ -211,8 +224,7 @@ int ext2_write(Ext2Ctx *ctx, u32 ino, const void *data, u32 size)
 
     ret = ext2_write_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
-    ext2_sync(ctx);
-    return EXT2_OK;
+    return ext2_sync(ctx);
 }
 
 int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offset)
@@ -309,8 +321,30 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
                 (int)ino, (int)remaining, (int)size, (int)offset);
     }
 
-    ext2_write_inode(ctx, ino, &inode);
-    ext2_sync(ctx);
+    /* **inode の更新と sync の失敗を捨てない** (票 B8 / Codex P1-5)。
+     *
+     * この関数が正の値を返すことの意味は「そのバイト数がファイルの中身として
+     * 読み戻せる」である。**長さは inode にしかない**ので、inode を書けな
+     * かったらその約束は成り立たない (実測: 5 バイトのファイルに 4 バイト
+     * 追記 -> 戻り値 4、媒体上のサイズは 5 のまま = 追記が見えない)。
+     * ext2_sync も同じ — この FS の write-through の約束は「戻った時点で
+     * ディスクが正しい」ことなので、書き戻せていないなら成功と言わない。
+     *
+     * **部分成功を表す値は用意しない。**データブロックは既に媒体に載って
+     * いるかもしれないが、それは (a) 旧サイズの内側なら中身の更新として
+     * 正しく、(b) 外側なら inode から参照されない = 見えない、のどちらか。
+     * 呼び手には「確認できなかった」とだけ伝え、同じ書き込みをやり直せる
+     * ようにする (同じ offset へ同じ内容なので再実行は安全)。 */
+    ret = ext2_write_inode(ctx, ino, &inode);
+    if (ret != 0) {
+        kprintf(0x0C, "[E2W] inode FAIL ino=%d\n", (int)ino);
+        return EXT2_ERR_IO;
+    }
+    ret = ext2_sync(ctx);
+    if (ret != 0) {
+        kprintf(0x0C, "[E2W] sync FAIL ino=%d\n", (int)ino);
+        return EXT2_ERR_IO;
+    }
     /* 1 バイトも書けていないなら、0 (「書けた」) ではなくエラーを返す。
      * 途中まで書けた場合はこれまでどおり実バイト数を返す (票 B8)。 */
     if (io_err && remaining == size) return EXT2_ERR_IO;
@@ -354,9 +388,21 @@ int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
 
     inode.links_count--;
     if (inode.links_count == 0) {
-        ext2_free_all_blocks(ctx, &inode);
+        /* ここまで来ると名前は既に消えている (delete_entry 済み) ので、
+         * 「消えていない」とは言えない。**返しきれなかったことだけを
+         * 最後に報告する** (票 B8)。
+         *
+         * 返しきれなかったときは **inode を解放しない**。ext2_free_all_blocks
+         * は失敗時に 1 ブロックも解放せずブロックの指し先を inode に残すので、
+         * ここで inode のビットまで空きに戻すと、次に ext2_alloc_inode が
+         * その番号を配った時点で ext2_create が inode を丸ごと上書きし、
+         * 残したブロックを指すものが誰も居なくなる (= 本当の漏れ)。
+         * inode を「links 0・dtime 付き・使用中」で残せば、ブロックは
+         * その inode から辿れる孤児として残り、e2fsck が回収できる。 */
+        int free_ret = ext2_free_all_blocks(ctx, &inode);
         inode.dtime = ext2_current_time();
         ext2_write_inode(ctx, ino, &inode);
+        if (free_ret != 0) { ext2_sync(ctx); return free_ret; }
         ext2_free_inode(ctx, ino);
     } else {
         inode.ctime = ext2_current_time();

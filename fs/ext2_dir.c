@@ -257,7 +257,17 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     int ret;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
-    { u32 tmp; if (ext2_find_entry(ctx, parent_ino, name, &tmp, (u8 *)0) == EXT2_OK) return EXT2_ERR_EXIST; }
+
+    /* 存在確認は **3 値で受ける** (票 B8 / Codex 実装レビュー P1-1)。
+     * 「EXT2_OK のときだけ拒否」だと I/O エラーでも下の割当・作成へ進み、
+     * 既にある名前と同名のディレクトリを二重に作ってしまう (実測: 18 セクタ
+     * 書き込み、同名エントリ 2 件)。**何も書かずに中断する**のが正解。 */
+    {
+        u32 tmp;
+        ret = ext2_find_entry(ctx, parent_ino, name, &tmp, (u8 *)0);
+        if (ret == EXT2_OK) return EXT2_ERR_EXIST;
+        if (ret != EXT2_ERR_NOTFOUND) return ret;
+    }
 
     new_ino = ext2_alloc_inode(ctx);
     if (new_ino < 0) return EXT2_ERR_NOSPC;
@@ -303,8 +313,8 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
             ext2_meta_touch(ctx);
         }
     }
-    ext2_sync(ctx);
-    return EXT2_OK;
+    /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
+    return ext2_sync(ctx);
 }
 
 /* 1 = 空、0 = 空ではない、負値 = **判定できなかった** (票 B8)。
@@ -350,6 +360,7 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     u8 ftype;
     Ext2Inode inode, parent_inode;
     int ret;
+    int free_ret = EXT2_OK;
 
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
 
@@ -366,11 +377,18 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     ret = ext2_delete_entry(ctx, parent_ino, name);
     if (ret != 0) return ret;
 
-    ext2_free_all_blocks(ctx, &inode);
+    /* ext2_unlink と同じ扱い (票 B8): ここでは名前が既に消えているので
+     * 「消えていない」とは言えない。返しきれなかったことだけを最後に
+     * 報告する。
+     *
+     * 返しきれなかったときは **inode を解放しない** (理由は ext2_unlink の
+     * 同じ箇所)。inode のビットを空きに戻すと、残したブロックの唯一の
+     * 指し先が次の割り当てで上書きされて本当に漏れる。 */
+    free_ret = ext2_free_all_blocks(ctx, &inode);
     inode.links_count = 0;
     inode.dtime = ext2_current_time();
     ext2_write_inode(ctx, ino, &inode);
-    ext2_free_inode(ctx, ino);
+    if (free_ret == EXT2_OK) ext2_free_inode(ctx, ino);
 
     ret = ext2_read_inode(ctx, parent_ino, &parent_inode);
     if (ret == 0) {
@@ -386,8 +404,9 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
             ext2_meta_touch(ctx);
         }
     }
-    ext2_sync(ctx);
-    return EXT2_OK;
+    ret = ext2_sync(ctx);
+    if (ret != 0) return ret;
+    return free_ret;
 }
 
 /* ======================================================================== */
@@ -508,13 +527,22 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
     }
 
     /* 移動先に同名がある場合: ディレクトリは上書きしない。
-     * ファイル同士なら POSIX と同じく置き換える */
-    if (ext2_find_entry(ctx, new_dir, new_name, &dst_ino, &dst_type) == EXT2_OK) {
+     * ファイル同士なら POSIX と同じく置き換える。
+     *
+     * **3 値で受ける** (票 B8 / Codex 実装レビュー P1-3)。読めなかったのを
+     * 「無い」と読み替えると置き換えの分岐を丸ごと飛ばし、下の add_entry が
+     * 宛先に同名エントリを二重に作ったうえで delete_entry が移動元の名前を
+     * 消す — **名前が片方だけ消えて二重になる**(実測: 10 セクタ書き込み)。
+     * 判定できないなら何も書かずに中断する。 */
+    ret = ext2_find_entry(ctx, new_dir, new_name, &dst_ino, &dst_type);
+    if (ret == EXT2_OK) {
         if (dst_ino == ino) return EXT2_OK;   /* ハードリンク同士 */
         if (dst_type == EXT2_FT_DIR) return EXT2_ERR_EXIST;
         if (ftype == EXT2_FT_DIR) return EXT2_ERR_NOTDIR;
         ret = ext2_unlink(ctx, new_dir, new_name);
         if (ret != 0) return ret;
+    } else if (ret != EXT2_ERR_NOTFOUND) {
+        return ret;
     }
 
     if (ftype == EXT2_FT_DIR && old_dir != new_dir) {
@@ -552,8 +580,8 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
         ext2_write_inode(ctx, ino, &inode);
     }
 
-    ext2_sync(ctx);
-    return EXT2_OK;
+    /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す */
+    return ext2_sync(ctx);
 }
 
 /* ======================================================================== */
