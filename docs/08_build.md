@@ -278,6 +278,50 @@ tools/audit_cast_align.sh user     # userland/ (newlib ヘッダが要るため�
 警告が出た = 必ず壊れる、ではない。仕分けの手順と結果は
 [tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md)。
 
+#### `tools/check_le_access.py`
+外部形式 (媒体・書庫の上に並ぶバイト列) への直アクセスの番人 (移植準備の順序 4-a、
+`make check` の `check-le-access`)。対象は ext2 / ISO9660 / KCG フォント書庫を読み書きする
+9 ファイルで、`*(u32 *)&buf[off]` の形が無いことを見る**文字列検査**と、実ビルドと同じ
+`i386-elf-gcc` に `-Wcast-align=strict` を足して単体コンパイル (`-fsyntax-only`) し警告 0 で
+あることを見る**コンパイル検査**の 2 段。文字列検査をすり抜ける書き方
+(`u32 *p = (u32 *)buf;` と 2 行に分ける等) は後段が捕まえる。外部形式は
+`include/endian_le.h` の `le16_rd` / `le16_wr` / `le32_rd` / `le32_wr` を通すこと —
+直アクセスは「x86 は LE」「x86 は非アラインを許す」の 2 つに同時に寄りかかる書き方で、
+ARM では落ち、BE では値が化ける。クロスコンパイラが無い環境では後段だけ SKIP する。
+
+`audit_cast_align.sh` と `check_le_access.py` は目的が違う — 前者は**ホストの gcc で
+リポジトリ全域の候補を列挙する監査** (`make check` の外、人が仕分ける)、後者は**実ビルドの
+コンパイラで対象 9 ファイルだけを検査する番人** (`make check` の中、落ちたら直す)。
+対象の選び方と経緯は [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) §9 と
+[tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (a)。
+
+#### `tools/check_docs_links.py`
+文書のリンク切れ検査 (`make check` の `check-docs-links`)。`lychee` (Rust 製のリンク検査器) を
+`--offline --include-fragments` で呼ぶ薄い包みで、**相対パスの実在**と**見出しアンカーの実在**の
+両方を見る。日本語の見出し (`08_build.md#配備3経路`) も GitHub と同じ規則で判定できる。
+対象は `docs/**/*.md` (gitignore されたミラーの `docs/hw/` だけ除く) と `CLAUDE.md` /
+`README.md` / `arch/README.md` / `platform/README.md` / `tools/tests/*_tdd.md`。
+**`docs/archive/` は除外しない** — 完了した票を archive へ移したあとも相対パスが生きていることを
+見るのが目的の 1 つで、移動で 1 段ずれるのはいちばん起きやすい壊し方だから。外部 URL は
+見ない (`--offline`)。900 リンクで 0.03 秒。`lychee` が無い環境では `SKIP` と出して終了コード 0
+(`cargo install lychee` で `~/.cargo/bin` に入り、包みが PATH に無くても探す)。
+
+#### `tools/check_docs_orphans.py`
+孤児文書の検出 — リンク切れの裏返しで、「**どこからも指されていない**」文書を挙げる
+(lychee の守備範囲外なので自前、Python 標準ライブラリのみ)。`docs/INDEX.md` を唯一の起点として
+相対リンクを推移的に辿り、到達できない `docs/**/*.md` を列挙する。`tools/tests/*_tdd.md` は票の
+根拠なので索引から辿れる必要はなく、起点集合に `docs/tasks/**` の票を含め、票が慣例どおり
+素のパスで書いた言及も参照とみなす。索引に載せないと決めた例外は `docs/.orphans-allow`
+(1 行 1 パス、`#` コメント可) に理由つきで書く。
+
+```bash
+make check-docs-orphans        # 単体。check の列にはまだ入っていない
+```
+**`make check` の列には入れていない。** 2026-09-15 の棚卸し時点で docs 31 本 + TDD 記録 20 本が
+未参照で、これは検査の不備ではなく索引の取りこぼし (票を書いて `INDEX.md` に載せ忘れたもの) の
+実数。今これを門にすると通すために例外表へ全部書き写すことになり、`.orphans-allow` が
+「黙らせる表」に化けて二度と減らない。索引を直して 0 になった時点で `check` の列へ移す。
+
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 
 OS32 の外部プログラムをビルドするためには、標準Cライブラリ (`newlib` - `libc.a`) と GCCライブラリ (`libgcc.a`) を含んだ `i386-elf` クロスコンパイラ環境が必要です。
