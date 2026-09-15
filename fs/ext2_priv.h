@@ -55,7 +55,16 @@ int ext2_alloc_block(Ext2Ctx *ctx);
 void ext2_free_block(Ext2Ctx *ctx, u32 block_num);
 int ext2_alloc_inode(Ext2Ctx *ctx);
 void ext2_free_inode(Ext2Ctx *ctx, u32 ino);
-u32 ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block);
+/* 論理ブロック -> 物理ブロック。**「未割当」と「読めなかった」を戻り値で
+ * 分ける** (票 B8)。以前は u32 を返し、間接ブロックの読み取り失敗を 0 =
+ * 「未割当」と同じ値に潰していたので、呼び手 (ext2_find_entry 等) がそれを
+ * 「ここで終わり」と読んで NOTFOUND を返していた。
+ *   戻り値 EXT2_OK      … *out_phys に物理ブロック (0 = **未割当**)
+ *   戻り値 EXT2_ERR_IO  … 間接ブロックが読めなかった (*out_phys = 0)
+ * 番兵値ではなく引数の形を変えてある — そうすればコンパイラが全呼び出し元に
+ * 判断を強制でき、「見落とした呼び手が黙って誤動作する」余地が無い。 */
+int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
+              u32 *out_phys);
 int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block);
 void ext2_free_all_blocks(Ext2Ctx *ctx, Ext2Inode *inode);
 

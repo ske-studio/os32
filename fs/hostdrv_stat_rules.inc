@@ -105,9 +105,10 @@ hdrv_filetime_to_unix(unsigned long long ft, u32 *out)
  *
  * 戻り値 0 = 成功 (buf を埋めた) / OS32_ERR_IO = 成功と言えない。
  * buf のゼロ初期化は呼び手の責任 (失敗時は buf を信用しないこと)。 */
-static int hdrv_stat_fill(int basic_rc, u32 attributes,
-                          int std_rc, unsigned long long end_of_file,
-                          OS32_Stat *buf)
+static HDRV_STAT_MAYBE_UNUSED int
+hdrv_stat_fill(int basic_rc, u32 attributes,
+               int std_rc, unsigned long long end_of_file,
+               OS32_Stat *buf)
 {
     if (!buf) return OS32_ERR_IO;
 
@@ -124,6 +125,35 @@ static int hdrv_stat_fill(int basic_rc, u32 attributes,
         buf->st_mode = (u16)(OS_S_IFREG | 0644);
     }
     buf->st_size = (u32)end_of_file;
+    return 0;
+}
+
+/* hdrv_get_file_size() の「サイズと名乗ってよいか」の純規則 (票 B8 の ③)。
+ *
+ *   std_rc       … FileStandardInformation の hostdrv_query_info() の戻り値
+ *                  (0 = 成功)
+ *   is_directory … Np2FileStandardInfo.Directory (0 / 非 0)
+ *
+ * 戻り値 0 = サイズを返してよい / OS32_ERR_ISDIR = ディレクトリ /
+ *        OS32_ERR_IO = 成功と言えない。
+ *
+ * **ディレクトリに答えない**のが肝。hdrv_get_file_size は
+ * NON_DIRECTORY_FILE を付けずに開くのでディレクトリでも成功し、NT は
+ * ディレクトリにもサイズを返す。以前はそれを VFS_OK で返していたので、
+ * 種別が分からなくなった経路で「サイズが取れた = 通常ファイル」の根拠に
+ * 使われ、`cat <ディレクトリ>` が通っていた。
+ *
+ * 種別は **FileStandardInformation の Directory** で見る。hdrv_stat と違って
+ * FileBasicInformation を引かないのは、**問い合わせを増やさない**ため —
+ * get_file_size は open のたびに走り、hsync は何千回も呼ぶ。NP21/W 側は
+ * どちらも同じ GetFileAttributesEx から埋めており、失敗したときは
+ * 結果そのものがエラーになる (std_rc != 0) ので取りこぼさない
+ * (np21w-src/src/generic/hostdrvnt.c の IRP_MJ_QUERY_INFORMATION)。 */
+static HDRV_STAT_MAYBE_UNUSED int
+hdrv_size_result(int std_rc, int is_directory)
+{
+    if (std_rc != 0) return OS32_ERR_IO;        /* 種別もサイズも分からない */
+    if (is_directory) return OS32_ERR_ISDIR;
     return 0;
 }
 

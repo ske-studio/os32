@@ -34,6 +34,14 @@ static void ext2_split_path(const char *path, char *dir_path, const char **filen
  * 追記 26 セクタのうち 8 セクタがこの辿り直しだった (票 S6-P)。
  * 名前空間が動けば ns_gen が進んで記憶は全部捨てられるので、当たった記憶は
  * 必ず現物と一致する (ext2_path_memo_get / fs/ext2_ctx.h)。 */
+/* 下で定義する変換。resolve_path が **VFS 番号体系で**返すために前方宣言する */
+static int ext2_to_vfs_err(int rc);
+
+/* 戻り値は **VFS 番号体系 (VFS_OK / VFS_ERR_...)**。
+ * 呼び手 (13 か所) はこれをそのまま返すこと。**一律 NOTFOUND に畳まない**
+ * (票 B8) — 「読めなかった」が「無い」として上がると、open の O_CREAT 経路が
+ * 既存ファイルを空で作り直し、write が別ファイルを作り、mkdir/rmdir/rename が
+ * 存在しないものとして振る舞う。 */
 static int ext2_resolve_path(Ext2Ctx *ec, const char *path, u32 *out_ino)
 {
     int rc;
@@ -47,8 +55,8 @@ static int ext2_resolve_path(Ext2Ctx *ec, const char *path, u32 *out_ino)
     if (ext2_path_memo_get(ec, path, out_ino) == EXT2_OK) return VFS_OK;
 
     rc = ext2_lookup(ec, path, out_ino);
-    if (rc == EXT2_OK) ext2_path_memo_put(ec, path, *out_ino);
-    return rc;
+    if (rc == EXT2_OK) { ext2_path_memo_put(ec, path, *out_ino); return VFS_OK; }
+    return ext2_to_vfs_err(rc);
 }
 
 /* ディレクトリ一覧のコールバック変換 */
@@ -111,7 +119,7 @@ static int ext2_vfs_list(void *ctx, const char *path, vfs_dir_cb cb, void *user_
     Ext2ListCtx lc;
 
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
 
     lc.user_cb = cb;
     lc.user_ctx = user_ctx;
@@ -125,7 +133,7 @@ static int ext2_vfs_read(void *ctx, const char *path, void *buf, u32 max_size)
     u32 ino;
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_read_file(ec, ino, buf, max_size));
 }
 
@@ -142,17 +150,21 @@ static int ext2_vfs_write(void *ctx, const char *path, const void *data, u32 siz
     ext2_split_path(path, dir_path, &fname);
 
     rc = ext2_resolve_path(ec, dir_path, &dir_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
 
-    /* ファイルが既存なら上書き、なければ作成 */
+    /* ファイルが既存なら上書き、なければ作成。
+     * **新規作成へ進むのは「本当に無い」ときだけ** (票 B8)。読めなかったのを
+     * 「無い」と読み替えると、既にある名前に対して ext2_create が走り、
+     * 同じ名前の二重エントリで元の inode が辿れなくなる。 */
     rc = ext2_find_entry(ec, dir_ino, fname, &file_ino, &ftype);
-    if (rc == 0) {
+    if (rc == EXT2_OK) {
         /* 既存ファイル → 上書き */
         return ext2_to_vfs_err(ext2_write(ec, file_ino, data, size));
-    } else {
+    } else if (rc == EXT2_ERR_NOTFOUND) {
         /* 新規作成 */
         return ext2_to_vfs_err(ext2_create(ec, dir_ino, fname, data, size));
     }
+    return ext2_to_vfs_err(rc);
 }
 
 static int ext2_vfs_unlink(void *ctx, const char *path)
@@ -166,7 +178,7 @@ static int ext2_vfs_unlink(void *ctx, const char *path)
     ext2_split_path(path, dir_path, &fname);
 
     rc = ext2_resolve_path(ec, dir_path, &dir_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_unlink(ec, dir_ino, fname));
 }
 
@@ -182,9 +194,9 @@ static int ext2_vfs_rename(void *ctx, const char *oldpath, const char *newpath)
     ext2_split_path(newpath, new_dir, &new_name);
 
     rc = ext2_resolve_path(ec, old_dir, &old_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     rc = ext2_resolve_path(ec, new_dir, &new_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_rename(ec, old_ino, old_name, new_ino, new_name));
 }
 
@@ -199,7 +211,7 @@ static int ext2_vfs_mkdir(void *ctx, const char *path)
     ext2_split_path(path, dir_path, &dname);
 
     rc = ext2_resolve_path(ec, dir_path, &parent_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_mkdir(ec, parent_ino, dname));
 }
 
@@ -214,7 +226,7 @@ static int ext2_vfs_rmdir(void *ctx, const char *path)
     ext2_split_path(path, dir_path, &dname);
 
     rc = ext2_resolve_path(ec, dir_path, &parent_ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_rmdir(ec, parent_ino, dname));
 }
 
@@ -224,7 +236,7 @@ static int ext2_vfs_read_stream(void *ctx, const char *path, void *buf, u32 size
     u32 ino;
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_read_stream(ec, ino, buf, size, offset));
 }
 
@@ -234,7 +246,7 @@ static int ext2_vfs_write_stream(void *ctx, const char *path, const void *data, 
     u32 ino;
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_write_stream(ec, ino, data, size, offset));
 }
 
@@ -244,7 +256,7 @@ static int ext2_vfs_get_size(void *ctx, const char *path, u32 *size)
     u32 ino;
     int rc;
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
     return ext2_to_vfs_err(ext2_get_size_ino(ec, ino, size));
 }
 
@@ -258,7 +270,7 @@ static int ext2_vfs_stat(void *ctx, const char *path, OS32_Stat *buf)
     if (!buf) return VFS_ERR_INVAL;
 
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
 
     rc = ext2_read_inode(ec, ino, &inode);
     if (rc != 0) return VFS_ERR_IO;
@@ -304,7 +316,7 @@ static int ext2_vfs_set_mtime(void *ctx, const char *path, os_time_t mtime)
     if (mtime == 0) return VFS_ERR_INVAL;
 
     rc = ext2_resolve_path(ec, path, &ino);
-    if (rc != 0) return VFS_ERR_NOTFOUND;
+    if (rc != VFS_OK) return rc;
 
     rc = ext2_read_inode(ec, ino, &inode);
     if (rc != 0) return ext2_to_vfs_err(rc);

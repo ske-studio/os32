@@ -70,12 +70,15 @@ int ext2_read_inode(Ext2Ctx *ctx, u32 ino, Ext2Inode *inode)
     return 0;
 }
 
-u32 ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block)
+/* 票 B8 で「未割当」と「読めなかった」を分ける形になった (fs/ext2_priv.h)。
+ * この試験は I/O 失敗を注入しないので、常に EXT2_OK を返す。 */
+int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
+              u32 *out_phys)
 {
     u32 blocks = (inode->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
     (void)ctx;
-    if (file_block >= blocks) return 0;
-    return 100 + file_block;          /* 物理ブロック番号 (0 は「穴」) */
+    *out_phys = (file_block >= blocks) ? 0 : (100 + file_block);
+    return EXT2_OK;                   /* 物理ブロック 0 は「穴」 */
 }
 
 /* ---- ext2_file.c が呼ぶ書き込み側 (この試験では使わない) ---- */

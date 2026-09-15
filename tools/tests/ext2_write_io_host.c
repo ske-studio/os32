@@ -636,9 +636,14 @@ static void case_ns_invalidation(void)
     CHECK(ext2_vfs_get_size(g_ec, "/tmp/a", &sz) == VFS_OK);
     CHECK(sz == 8);
 
-    /* ディレクトリを消して同名のファイルにする */
+    /* ディレクトリを消して同名のファイルにする。
+     * **サイズ取得はディレクトリに答えない** (票 B8 の ③、2026-09-15)。
+     * ここは元々「記憶が名前空間に追従するか」を見るだけの行で、
+     * `== VFS_OK` は当時の ext2_get_size_ino がディレクトリの inode サイズを
+     * そのまま返していた挙動をそのまま写していた。その成功が open の受け手で
+     * 「通常ファイルである」根拠に使われ、`cat /etc` を通していた。 */
     CHECK(ext2_vfs_mkdir(g_ec, "/tmp/d") == VFS_OK);
-    CHECK(ext2_vfs_get_size(g_ec, "/tmp/d", &sz) == VFS_OK);
+    CHECK(ext2_vfs_get_size(g_ec, "/tmp/d", &sz) == VFS_ERR_ISDIR);
     CHECK(ext2_vfs_rmdir(g_ec, "/tmp/d") == VFS_OK);
     CHECK(ext2_vfs_write(g_ec, "/tmp/d", "DD", 2) == VFS_OK);
     CHECK(ext2_vfs_read(g_ec, "/tmp/d", got, sizeof(got)) == 2);

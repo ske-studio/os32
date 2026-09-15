@@ -22,7 +22,10 @@ int ext2_read_file(Ext2Ctx *ctx, u32 ino, void *buf, u32 max_size)
     dst = (u8 *)buf;
 
     for (bi = 0; remaining > 0; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        /* 読めなかったのを「穴 = ファイルの終わり」にしない (票 B8)。
+         * 途中までのバイト数を返すと、呼び手には短いファイルに見える。 */
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         to_copy = remaining;
@@ -78,7 +81,8 @@ int ext2_read_stream(Ext2Ctx *ctx, u32 ino, void *buf, u32 size, u32 offset)
     byte_in_blk = offset % EXT2_BLOCK_SIZE;
 
     for (; remaining > 0; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         to_copy = EXT2_BLOCK_SIZE - byte_in_blk;
@@ -215,6 +219,7 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
 {
     Ext2Inode inode;
     int ret;
+    int io_err = 0;
     u32 bi, remaining, to_write, phys;
     u32 byte_in_blk, now;
     const u8 *src;
@@ -238,7 +243,14 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
      * 間接ブロックテーブルやビットマップの読み書きに使うため、
      * 同じバッファをデータに使うとバッファ競合が発生する。 */
     for (; remaining > 0; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        /* **読めなかったまま「未割当」と見なして新ブロックを割り当てると、
+         * 既にあった割り当てを捨てて中身を失う** (票 B8)。書き込みを止める。 */
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) {
+            kprintf(0x0C, "[E2W] bmap FAIL bi=%d\n", (int)bi);
+            io_err = 1;
+            break;
+        }
         if (phys == 0) {
             int new_blk = ext2_alloc_block(ctx);
             if (new_blk < 0) {
@@ -299,9 +311,16 @@ int ext2_write_stream(Ext2Ctx *ctx, u32 ino, const void *buf, u32 size, u32 offs
 
     ext2_write_inode(ctx, ino, &inode);
     ext2_sync(ctx);
+    /* 1 バイトも書けていないなら、0 (「書けた」) ではなくエラーを返す。
+     * 途中まで書けた場合はこれまでどおり実バイト数を返す (票 B8)。 */
+    if (io_err && remaining == size) return EXT2_ERR_IO;
     return (int)(size - remaining);
 }
 
+/* **ディレクトリには答えない** (票 B8 の ③)。ディレクトリの inode にも
+ * size はあるので、以前はここが成功し、open の受け手がそれを「通常ファイル」
+ * の根拠にできてしまった (`cat /etc` がディレクトリの生データを吐く)。
+ * サイズ取得は「ファイルであること」も含めて答える。 */
 int ext2_get_size_ino(Ext2Ctx *ctx, u32 ino, u32 *size)
 {
     Ext2Inode inode;
@@ -309,6 +328,7 @@ int ext2_get_size_ino(Ext2Ctx *ctx, u32 ino, u32 *size)
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
+    if ((inode.mode & EXT2_S_IFMT) == EXT2_S_IFDIR) return EXT2_ERR_ISDIR;
     if (size) *size = inode.size;
     return EXT2_OK;
 }

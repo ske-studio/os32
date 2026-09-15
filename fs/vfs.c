@@ -611,7 +611,13 @@ int vfs_path_kind(const char *path)
     }
     if (ops->get_file_size) {
         u32 sz;
-        if (ops->get_file_size(fs_ctx, rel_path, &sz) == VFS_OK) return VFS_KIND_FILE;
+        rc = ops->get_file_size(fs_ctx, rel_path, &sz);
+        if (rc == VFS_OK) return VFS_KIND_FILE;
+        /* サイズ取得がディレクトリを断ったなら、それは種別が**分かった**と
+         * いうこと (票 B8 の ③ で ext2 / HostDrv の両方が断るようにした)。 */
+        if (rc == VFS_ERR_ISDIR) return VFS_KIND_DIR;
+        /* 「読めなかった」を「無い」と読み替えない (票 B8) */
+        if (rc != VFS_ERR_NOTFOUND) return rc;
     }
     return VFS_ERR_NOTFOUND;
 }

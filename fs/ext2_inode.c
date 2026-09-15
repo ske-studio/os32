@@ -229,20 +229,28 @@ void ext2_free_inode(Ext2Ctx *ctx, u32 ino)
 /*  間接ブロック: bmap — g_aux使用                                          */
 /* ======================================================================== */
 
-u32 ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block)
+/* 「未割当 (0)」と「読めなかった (EXT2_ERR_IO)」を分けて返す。
+ * 宣言の上のコメント (fs/ext2_priv.h) が決め方の理由を持つ (票 B8)。 */
+int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
+              u32 *out_phys)
 {
     int ret;
 
+    if (!out_phys) return EXT2_ERR_INVAL;
+    *out_phys = 0;
+
     if (file_block < EXT2_NDIR_BLOCKS) {
-        return inode->block[file_block];
+        *out_phys = inode->block[file_block];
+        return EXT2_OK;
     }
 
     file_block -= EXT2_NDIR_BLOCKS;
     if (file_block < EXT2_ADDR_PER_BLOCK) {
-        if (inode->block[EXT2_IND_BLOCK] == 0) return 0;
+        if (inode->block[EXT2_IND_BLOCK] == 0) return EXT2_OK;
         ret = ext2_read_block(ctx, inode->block[EXT2_IND_BLOCK], ext2_g_aux);
-        if (ret != 0) return 0;
-        return *(u32 *)&ext2_g_aux[file_block * 4];
+        if (ret != 0) return EXT2_ERR_IO;
+        *out_phys = *(u32 *)&ext2_g_aux[file_block * 4];
+        return EXT2_OK;
     }
 
     file_block -= EXT2_ADDR_PER_BLOCK;
@@ -251,16 +259,18 @@ u32 ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block)
         u32 ind2_idx = file_block % EXT2_ADDR_PER_BLOCK;
         u32 ind1_block;
 
-        if (inode->block[EXT2_DIND_BLOCK] == 0) return 0;
+        if (inode->block[EXT2_DIND_BLOCK] == 0) return EXT2_OK;
         ret = ext2_read_block(ctx, inode->block[EXT2_DIND_BLOCK], ext2_g_aux);
-        if (ret != 0) return 0;
+        if (ret != 0) return EXT2_ERR_IO;
         ind1_block = *(u32 *)&ext2_g_aux[ind1_idx * 4];
-        if (ind1_block == 0) return 0;
+        if (ind1_block == 0) return EXT2_OK;
         ret = ext2_read_block(ctx, ind1_block, ext2_g_aux);
-        if (ret != 0) return 0;
-        return *(u32 *)&ext2_g_aux[ind2_idx * 4];
+        if (ret != 0) return EXT2_ERR_IO;
+        *out_phys = *(u32 *)&ext2_g_aux[ind2_idx * 4];
+        return EXT2_OK;
     }
-    return 0;
+    /* 三重間接は未対応。範囲外は「未割当」= ファイルの終わり */
+    return EXT2_OK;
 }
 
 int ext2_bmap_set(Ext2Ctx *ctx, Ext2Inode *inode, u32 file_block, u32 phys_block)

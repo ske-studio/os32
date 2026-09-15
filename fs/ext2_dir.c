@@ -22,7 +22,9 @@ int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ct
     if (!(inode.mode & EXT2_S_IFDIR)) return EXT2_ERR_NOTDIR;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        /* 「読めなかった」を「ここで終わり」と読み替えない (票 B8) */
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         ret = ext2_read_block(ctx, phys, blk);
@@ -69,7 +71,10 @@ int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        /* **ここが B8 の入口**。間接ブロックが読めなかったのを「未割当 =
+         * 検索終了」と混同すると、実在する名前に NOTFOUND を返す。 */
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         ret = ext2_read_block(ctx, phys, ext2_g_aux);
@@ -114,7 +119,10 @@ int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(ctx, &dir_inode, bi);
+        /* 読めなかったまま抜けると下の「新ブロック割り当て」へ落ちて、
+         * まだ空きのあるブロックを見落としたままディレクトリを伸ばす。 */
+        ret = ext2_bmap(ctx, &dir_inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         ret = ext2_read_block(ctx, phys, ext2_g_aux);
@@ -199,7 +207,8 @@ int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name)
     if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(ctx, &dir_inode, bi);
+        ret = ext2_bmap(ctx, &dir_inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
 
         ret = ext2_read_block(ctx, phys, ext2_g_aux);
@@ -298,6 +307,9 @@ int ext2_mkdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     return EXT2_OK;
 }
 
+/* 1 = 空、0 = 空ではない、負値 = **判定できなかった** (票 B8)。
+ * 以前は読めなかったときも 0 を返していたので、rmdir が I/O エラーを
+ * NOTEMPTY と名乗っていた (拒否自体は安全側だが、理由が偽になる)。 */
 static int ext2_is_dir_empty(Ext2Ctx *ctx, u32 dir_ino)
 {
     Ext2Inode inode;
@@ -305,13 +317,14 @@ static int ext2_is_dir_empty(Ext2Ctx *ctx, u32 dir_ino)
     u32 bi, pos, phys;
 
     ret = ext2_read_inode(ctx, dir_ino, &inode);
-    if (ret != 0) return 0;
+    if (ret != 0) return ret;
 
     for (bi = 0; ; bi++) {
-        phys = ext2_bmap(ctx, &inode, bi);
+        ret = ext2_bmap(ctx, &inode, bi, &phys);
+        if (ret != 0) return EXT2_ERR_IO;
         if (phys == 0) break;
         ret = ext2_read_block(ctx, phys, ext2_g_aux);
-        if (ret != 0) return 0;
+        if (ret != 0) return EXT2_ERR_IO;
 
         pos = 0;
         while (pos < EXT2_BLOCK_SIZE) {
@@ -343,7 +356,9 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
     ret = ext2_find_entry(ctx, parent_ino, name, &ino, &ftype);
     if (ret != 0) return ret;
     if (ftype != EXT2_FT_DIR) return EXT2_ERR_NOTDIR;
-    if (!ext2_is_dir_empty(ctx, ino)) return EXT2_ERR_NOTEMPTY;
+    ret = ext2_is_dir_empty(ctx, ino);
+    if (ret < 0) return ret;          /* 判定できなかった。NOTEMPTY と偽らない */
+    if (!ret) return EXT2_ERR_NOTEMPTY;
 
     ret = ext2_read_inode(ctx, ino, &inode);
     if (ret != 0) return ret;
@@ -379,16 +394,23 @@ int ext2_rmdir(Ext2Ctx *ctx, u32 parent_ino, const char *name)
 /*  rename                                                                  */
 /* ======================================================================== */
 
-/* ディレクトリ dir_ino の ".." が指す inode を返す (失敗時 0) */
-static u32 ext2_parent_of(Ext2Ctx *ctx, u32 dir_ino)
+/* ディレクトリ dir_ino の ".." が指す inode を *out へ。
+ * 戻り値 EXT2_OK = 引けた / 負値 = 引けなかった (票 B8)。
+ * 以前は u32 の 0 で「無い」と「読めなかった」を兼ねていたので、
+ * 呼び手の循環検査が I/O エラーを「祖先ではない」と読んでいた。 */
+static int ext2_parent_of(Ext2Ctx *ctx, u32 dir_ino, u32 *out)
 {
     Ext2Inode inode;
     u32 phys, pos;
+    int ret;
 
-    if (ext2_read_inode(ctx, dir_ino, &inode) != 0) return 0;
-    phys = ext2_bmap(ctx, &inode, 0);
-    if (phys == 0) return 0;
-    if (ext2_read_block(ctx, phys, ext2_g_aux) != 0) return 0;
+    *out = 0;
+    ret = ext2_read_inode(ctx, dir_ino, &inode);
+    if (ret != 0) return ret;
+    ret = ext2_bmap(ctx, &inode, 0, &phys);
+    if (ret != 0) return EXT2_ERR_IO;
+    if (phys == 0) return EXT2_ERR_IO;   /* ディレクトリに先頭ブロックが無い */
+    if (ext2_read_block(ctx, phys, ext2_g_aux) != 0) return EXT2_ERR_IO;
 
     pos = 0;
     while (pos < EXT2_BLOCK_SIZE) {
@@ -398,11 +420,14 @@ static u32 ext2_parent_of(Ext2Ctx *ctx, u32 dir_ino)
         if (de_reclen == 0) break;
         if (de_inode != 0 && de_namelen == 2 &&
             ext2_g_aux[pos + 8] == '.' && ext2_g_aux[pos + 9] == '.') {
-            return de_inode;
+            *out = de_inode;
+            return EXT2_OK;
         }
         pos += de_reclen;
     }
-    return 0;
+    /* ".." が無いディレクトリは壊れている。NOTFOUND は呼び手 (rename) から
+     * 見ると「元の名前が無い」と読めてしまうので使わない。 */
+    return EXT2_ERR_IO;
 }
 
 /* ディレクトリ dir_ino の ".." を new_parent に書き換える */
@@ -414,7 +439,8 @@ static int ext2_set_dotdot(Ext2Ctx *ctx, u32 dir_ino, u32 new_parent)
 
     ret = ext2_read_inode(ctx, dir_ino, &inode);
     if (ret != 0) return ret;
-    phys = ext2_bmap(ctx, &inode, 0);
+    ret = ext2_bmap(ctx, &inode, 0, &phys);
+    if (ret != 0) return EXT2_ERR_IO;
     if (phys == 0) return EXT2_ERR_IO;
     ret = ext2_read_block(ctx, phys, ext2_g_aux);
     if (ret != 0) return EXT2_ERR_IO;
@@ -437,7 +463,11 @@ static int ext2_set_dotdot(Ext2Ctx *ctx, u32 dir_ino, u32 new_parent)
 }
 
 /* new_dir が ino 自身、または ino の子孫か (ディレクトリを自分の中へ移す
- * 循環を防ぐ)。".." を root まで辿る。 */
+ * 循環を防ぐ)。".." を root まで辿る。
+ *
+ * 1 = 自身か子孫、0 = 違う、負値 = **判定できなかった** (票 B8)。
+ * 読めなかったのを 0 (「違う」) と言うと、ディレクトリを自分の配下へ
+ * 移す rename が通って木が輪になる。 */
 static int ext2_is_self_or_descendant(Ext2Ctx *ctx, u32 ino, u32 new_dir)
 {
     u32 cur = new_dir;
@@ -446,7 +476,9 @@ static int ext2_is_self_or_descendant(Ext2Ctx *ctx, u32 ino, u32 new_dir)
         if (cur == ino) return 1;
         if (cur == EXT2_ROOT_INO) return 0;
         {
-            u32 parent = ext2_parent_of(ctx, cur);
+            u32 parent = 0;
+            int ret = ext2_parent_of(ctx, cur, &parent);
+            if (ret != 0) return ret;
             if (parent == 0 || parent == cur) return 0;
             cur = parent;
         }
@@ -486,7 +518,9 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
     }
 
     if (ftype == EXT2_FT_DIR && old_dir != new_dir) {
-        if (ext2_is_self_or_descendant(ctx, ino, new_dir)) return EXT2_ERR_INVAL;
+        int desc = ext2_is_self_or_descendant(ctx, ino, new_dir);
+        if (desc < 0) return desc;      /* 判定できなかった。INVAL と偽らない */
+        if (desc) return EXT2_ERR_INVAL;
     }
 
     ret = ext2_add_entry(ctx, new_dir, new_name, ino, ftype);
@@ -549,8 +583,11 @@ int ext2_lookup(Ext2Ctx *ctx, const char *path, u32 *out_ino)
         component[ci] = '\0';
         if (ci == 0) { if (path[i] == '/') { i++; continue; } break; }
 
+        /* **畳まない** (票 B8)。以前は I/O エラーもここで NOTFOUND に
+         * なっていたので、「読めなかった」が「無い」として上へ伝わり、
+         * open の O_CREAT 経路が既存ファイルを空で作り直していた。 */
         ret = ext2_find_entry(ctx, current_ino, component, &found_ino, &found_type);
-        if (ret != 0) return EXT2_ERR_NOTFOUND;
+        if (ret != 0) return ret;
         current_ino = found_ino;
         if (path[i] == '/') i++;
     }

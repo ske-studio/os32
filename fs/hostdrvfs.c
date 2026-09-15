@@ -594,10 +594,27 @@ static int hdrv_read_file(void *ctx, const char *path,
     return bytes;
 }
 
-/* get_file_size */
+#include "hostdrv_stat_rules.inc"
+STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
+              hdrv_stat_attr_dir);
+
+/* get_file_size
+ *
+ * **ディレクトリには答えない** (票 B8 の ③)。ここは NON_DIRECTORY_FILE を
+ * 付けずに開くのでディレクトリでも成功し、NT はディレクトリにもサイズを
+ * 返す。以前はそれを VFS_OK で返していたので、種別が分からなくなった経路で
+ * 「サイズが取れた = 通常ファイル」の根拠に使われていた。
+ *
+ * 種別は **今までも引いていた FileStandardInformation の Directory** で見る。
+ * hdrv_stat のように FileBasicInformation を追加で引かないのは、
+ * **問い合わせを増やさない**ため — get_file_size は open のたびに走り、
+ * hsync は何千回も呼ぶ。NP21/W 側はどちらも同じ GetFileAttributesEx から
+ * 埋めている (np21w-src/src/generic/hostdrvnt.c)。
+ * 判定そのものは fs/hostdrv_stat_rules.inc の純関数 hdrv_size_result。 */
 static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
 {
     int rc;
+    int is_dir = 0;
     Np2FileStandardInfo *info;
     (void)ctx;
 
@@ -615,11 +632,15 @@ static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
     if (rc == 0) {
         info = (Np2FileStandardInfo *)g_databuf;
         *size = (u32)info->EndOfFile;
+        is_dir = info->Directory ? 1 : 0;
     }
 
     hostdrv_cleanup_close();
 
-    return (rc == 0) ? VFS_OK : VFS_ERR_IO;
+    /* 判定は純関数へ (fs/hostdrv_stat_rules.inc)。ホストで直接叩ける
+     * = 変異で落ちる試験が書ける (tools/tests/b8_open_host.c の 段 C)。
+     * **問い合わせは 1 回のまま** — 種別は同じ応答の Directory で分かる。 */
+    return hdrv_size_result(rc, is_dir);
 }
 
 /* read_stream: シーク対応読み込み */
@@ -655,10 +676,6 @@ static int hdrv_read_stream(void *ctx, const char *path,
  * 票 H3 で LastWriteTime -> st_mtime を足した。FILETIME (1601 起点・100ns)
  * から Unix 秒への変換も同じ .inc の純関数 (hdrv_filetime_to_unix) が持つ。
  * ホスト試験は tools/tests/hsync_h3_host.c (A16)。 */
-#include "hostdrv_stat_rules.inc"
-STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
-              hdrv_stat_attr_dir);
-
 static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
     int rc;

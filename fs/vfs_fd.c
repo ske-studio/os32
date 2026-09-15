@@ -107,12 +107,20 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     }
 
     if (rc != VFS_OK) {
-        /* ファイルが存在しない場合 */
+        /* **作成へ進めるのは「本当に無い」と分かったときだけ** (票 B8 の ②)。
+         * 以前はサイズ取得の**あらゆる失敗**でここへ来て空ファイルを書いて
+         * いたので、「通常ファイルと確認済み → サイズ取得だけ一度 I/O 失敗
+         * → 書き込みは成功」で、**O_TRUNC を付けていなくても既存の中身が
+         * 黙って消えた**。O_CREAT あり・O_TRUNC なしは「無ければ作る、
+         * あれば開く」という最も普通の書き込み用途なので被害が大きい。
+         * 「読めなかった」を「無い」と読み替えない。 */
+        if (rc != VFS_ERR_NOTFOUND) return rc;
         if (mode & O_CREAT) {
             /* 作成処理 (サイズ0の空ファイルを作成してからサイズ取得等) */
             /* 今回は簡易的に0バイトでwriteして作らせる */
+            if (!ops->write_file) return VFS_ERR_INVAL;
             rc = ops->write_file(fs_ctx, rel_path, "", 0);
-            if (rc != VFS_OK) return rc;
+            if (rc < 0) return rc;
             file_size = 0;
         } else {
             return VFS_ERR_NOTFOUND;
@@ -120,8 +128,13 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     } else {
         if (mode & O_TRUNC) {
             if (mode & O_WRONLY || mode & O_RDWR) {
-                /* 切り詰め：空ファイルで上書き */
-                ops->write_file(fs_ctx, rel_path, "", 0);
+                /* 切り詰め：空ファイルで上書き。
+                 * **戻り値を見る** — 以前は捨てていたので、ext2 の一括書き込みが
+                 * 持つディレクトリ拒否 (fs/ext2_file.c) のような失敗も消え、
+                 * 「切り詰まった」ことになっているサイズ 0 の FD が出ていた。 */
+                if (!ops->write_file) return VFS_ERR_INVAL;
+                rc = ops->write_file(fs_ctx, rel_path, "", 0);
+                if (rc < 0) return rc;
                 file_size = 0;
             }
         }
