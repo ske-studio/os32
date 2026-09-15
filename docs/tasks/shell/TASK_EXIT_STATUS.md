@@ -47,6 +47,18 @@
 12. GUI 端末の要求表は DONE に終了コードを載せない (`exec/launch.c:266`)。`launch_report(token, rc)` は
     `rc > 0` を app_id と読む (`:233-247`)。
 13. `sdk/kapi.json` は v52。**H2 が v53 を取る**ので、本票は着地順に応じて v53 か v54。
+14. **入力を黙って捨てる経路が 4 つある** (往復 2 で確認):
+    - `script_load` は 255 文字を超える行を切り詰め (`cmd_script.c` の `li >= SCRIPT_MAX_LINE`)、
+      128 行を超えたら残りを捨てて `break` する (`SCRIPT_MAX_LINES`、`shell.h:25-26`)。どちらも読み込みは成功扱い。
+    - `try_exec` はコマンド行を `TRY_EXEC_BUF_SIZE` に再構築し、**溢れた引数を落としたまま起動する**
+      (`main.c:140-170`)。`exec` 組み込みと `time` も同じ形。
+    - `split_pipeline` は `count < max_stages` で走査を打ち切るので、**9 段目以降は実行されない**
+      (`main.c:606` の `MAX_PIPE_STAGES` = 8)。空の段も捨てられる。
+    - 常駐シェルのパイプ段ループには打ち切りが無い (`main.c:724-733` の `sh_exit_flag` 検査は `SHELL_AS_APP` だけ)。
+15. `exec_exit` の直接の呼び手は 3 つ (`exec_fault_recover` / `kapi_sys_exit` / CPL=0 実行から戻った後の
+    `exec_exit(EXEC_SUCCESS)`)。`exec_kill_one` は `exec_exit` を通らず自分で回収する。
+    CTRL+STOP は `ring3_abort_check` → `ring3_fault_kill` → `exec_fault_recover` と流れるので、
+    **`ABORTED` を作るにはこの途中で種別を渡す配線が要る**。
 
 ## 2. 設計
 
@@ -99,6 +111,20 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
 
 - **PATH 走査は `kind` で止める**: `NOT_FOUND` と `INVALID` のときだけ次の候補へ。
   `EXITED` / `FAULT` / `ABORTED` / `NOMEM` では**どんな値でも止まる** (事実 2 の修正)。
+- **走査を尽くしたときの値** (往復 2 所見 1): 途中で `INVALID` を 1 度でも見たかを cwd と PATH をまたいで覚え、
+  見たなら **126**、全部 `NOT_FOUND` なら **127**。`INVALID` を見たのに 127 (見つからない) と言わない。
+- **入力を捨てたら失敗にする** (事実 14、往復 2 所見 3〜5)。「切り詰めたが動いた」を成功にしない:
+
+  | 経路 | 変更 |
+  |---|---|
+  | `script_load` の行が長すぎる / 行数超過 / ファイルが読み込み上限を超える | **スクリプトを実行しない**。`source` は 2 |
+  | `try_exec` / `exec` 組み込み / `time` の再構築が溢れた | **起動する前に** 2。クォートの再付与で伸びる場合も検査する |
+  | パイプの段数超過 (9 段以上)、空の段 (`echo ok |`、先頭の `|`、`||`) | 行全体を実行せず 2 |
+  | `stdin/stdout buffer lost` で段ループを抜けた | 2 |
+
+  `sh_exec_result` とは別に、**シェル側の組み立て失敗**を呼び手へ返せるようにする
+  (起動の失敗と混ぜない)。
+
 - **handler に届かない行の `$?`** (事実 11、レビュー所見 7):
 
   | 事象 | `$?` |
@@ -113,7 +139,10 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
   - `rshell` / `filer` はループを抜けた後に 0。
   - `source` は最後に実行した行の値 (`script_source_file` の戻り値)。`time` と `if` は内側の値
     (`if` は条件が偽なら 0)。`goto` のラベル無し (`cmd_script.c:476`) と ESC 中断 (`:193-195`) は非 0。
-  - **パイプラインは最後の段の値** (この票で既定にする。`execute_command` が `int` になる以上、決めないと未定義になる)。
+  - **パイプラインは最後の段の値**。ただし**明示の `exit` が優先**する (往復 2 所見 2)。
+    `exit 3 | echo tail` のように途中の段で `exit` が立ったら、**常駐側でも**段ループを抜ける
+    (今の打ち切りは `SHELL_AS_APP` だけ、事実 14)。「終了要求が立ったか」と「終了値」は**別の変数**にする
+    — 真偽値に値を入れる作りだと `exit 0` で終われない。
   - `exec` 組み込み (`cmd_mnt.c:60-64`) は戻り値で印字を分けているので、`kind` 分岐に直す。
   - 取りこぼしを捕まえるのは**表の初期化子の型不一致** (関数ポインタ)。シェルのビルドに `-Werror` は無い
     (`build/programs.mk`) ので `-Wreturn-type` には頼らない。必要なら `-Werror=return-type` を足す。
@@ -137,8 +166,9 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
 - **`set -e` / `set +e`**: `cmd_set` (`cmd_env.c`) の**先頭**で `-e` / `+e` を拾い、`cmd_script.c` の
   `script_errexit` を関数経由で立てる (事実 7)。`set` を二重登録しない。
   入れ子の `source` を抜けるときは `script_abort_flag` と同じく save / restore する。
-- 止めたときは `script: line N: status S` を 1 行。**N は「N 番目の実行行」** (コメントと空行は
-  `cmd_script.c:132-143` で詰められるのでファイルの行番号と一致しない)。文書にそう書く。
+- 止めたときは `script: line N: status S` を 1 行。**N は「保持された行の位置」** — コメントと空行は
+  `cmd_script.c:132-143` で詰められ、ラベル行 (`:label`) は保持されるので、ファイルの行番号とも
+  実行したコマンドの本数とも一致しない (往復 2 所見 7)。文書にそう書く。
 
 ### 2-6. GUI 端末 (`SHELL_AS_APP`)
 
@@ -175,7 +205,16 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
 | S6 | 常駐で `exit 3` (対話) / スクリプト内の `exit 3` | シェルは終わらず `$?`=3 / 打ち切って `source` が 3 |
 | S6b | `sh.bin` の `exit` / `exit 3` | 端末が閉じる (既存の挙動、`test_sh_shell.py` が緑のまま) |
 | S7 | `$?`、`$?x`、`$` 単独、`${?}`、`$VAR` との併用、パイプ行の `$?` | §2-4 の規則。既存の展開を壊さない |
+| S8 | cwd に不正な `foo.bin`、PATH には同名が**無い** | `$?` = 126 (127 ではない、往復 2 所見 1) |
+| S9 | `exit 3 | echo tail` (常駐 / `sh.bin`、`if` / `time` 経由、入れ子 `source`)、`exit 0` | 後段を実行せず 3 / 0。`exit 0` でも終了要求が立つ |
+| S10 | 255 文字を超える行、129 行以上、読み込み上限を超えるファイル | スクリプトを実行せず `source` は 2 |
+| S11 | 再構築が溢れる長さの外部コマンド / `exec` / `time` | 起動する前に 2 (子を起こさない) |
+| S12 | 9 段のパイプ、`echo ok |`、`| echo`、`a || b` | 行全体を実行せず 2 |
+| S13 | リダイレクトだけの行 (`argc == 0`)、help の短絡、実行行が 1 つも無い `source` | 票の表どおりの値 (0 / 0 / 0) を決めて固定する |
+| S14 | 入れ子 `exec` (子が非 0 → 親が別の値 → その後に起動失敗) | それぞれ正しい値。前の記録を読まない |
+| S15 | GUI の `exec_start` / `exec_resume` / kill が走っている間に常駐の同期起動 | 記録が混ざらない |
 | R1 | `test_sh_shell.py` / `test_sh_launch.py` / `test_fs_kind_callers.py` | 退行なし |
+| R2 | 新しい試験は**実物の登録表**を通す (`sh_shell_host.c:442,463` のスタブは `exit` を直接認識していて、本物の登録・伝播が壊れていても緑になる、往復 2 所見 6) | `execute_command` / `execute_single` / ルーターを実物で通す |
 
 park (事実 10) は `exec_run` では起こらないので**表の項目としてだけ**置き、実行試験は作らない。
 
@@ -213,4 +252,22 @@ blocker 7 件・非blocker 8 件。**7 件とも PM がコードで到達可能�
 | 8 | 実害 2 (`exit(2..5)` と park) は `exec_run` では到達不能 | `exec/appslot.c:295-302` で確認 | §1 事実 10 に訂正。S4 (旧) を削除し表の項目だけに |
 | 9〜15 | `OS32_ERR_FULL` の写像、`INVALID` の扱いの変更、`exec` 組み込み、`time`/`if`/パイプの戻り値、`$?` の展開位置、行番号の意味、試験基盤 (`sh_exec.inc` への切り出し、スタブ、`-Werror=return-type`) | 妥当 | §2-1 / §2-3 / §2-4 / §2-5 / §3 / §4 に反映 |
 
-**次**: この版で往復 2 (レビュアーは Codex か Fable)。Approve が出てから実装へ。
+### 往復 2 — 設計レビュー (Codex、`7a47486` 対象、2026-09-16) — Request changes
+
+往復 1 の 7 件は「1 件を除いて閉じた」と確認された (残りは所見 2 のパイプ内 `exit`)。
+新しい blocker 5 件はすべて**入力を黙って捨てる経路**で、PM がコードで確認した (§1 事実 14):
+
+| # | 所見 | 対応 |
+|---|---|---|
+| 1 | `INVALID` を見た後に候補が尽きると 127 になる (126 であるべき) | 走査中に `INVALID` を見たかを覚える (§2-3)。S8 |
+| 2 | 常駐側のパイプ段ループには `exit` の打ち切りが無い (`sh_exit_flag` は `SHELL_AS_APP` だけ) | 終了要求と終了値を別変数にし、常駐でも段の間で見る。明示の `exit` が「最後の段」より優先 (§2-3)。S9 |
+| 3 | `script_load` が 255 文字超の行を切り詰め、128 行超を捨てて成功を返す | 捨てたらスクリプトを実行しない (§2-3)。S10 |
+| 4 | `try_exec` / `exec` / `time` がコマンド行を切り詰めたまま起動する | 起動する前に 2 (§2-3)。S11 |
+| 5 | `split_pipeline` が 9 段目以降と空の段を捨てる | 行全体を 2 で拒否 (§2-3)。S12 |
+| 6 | 既存のホスト試験はスタブが `exit` を直接認識していて、本物の登録・伝播が壊れていても緑 | 実物の登録表を通す (§4 R2) |
+| 7 | 行番号の定義がラベル・`goto` と合わない | 「保持された行の位置」と定義 (§2-5) |
+
+観点の確認で分かった配線: `exec_exit` の直接の呼び手は 3 つで CPL=0 復帰も `EXITED`、`exec_kill_one` は
+`exec_exit` を通らない、CTRL+STOP は `ring3_fault_kill` 経由なので `ABORTED` の配線が要る (§1 事実 15)。
+
+**次**: この版で往復 3 (最後)。Approve が出てから実装へ。
