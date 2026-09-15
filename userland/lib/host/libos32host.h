@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  LIBOS32HOST.H — Host Services (KAPI v51) の薄いクライアント層            */
 /*                                                                          */
-/*  票 docs/tasks/network/TASK_N3.md §1。契約の正典は TASK_N0.md 第 5 版     */
+/*  票 docs/archive/network/TASK_N3.md §1。契約の正典は TASK_N0.md 第 5 版     */
 /*  §1a (host_open / host_status / host_read / host_write / host_close) と   */
 /*  §5 (呼び出し列)。C89 [C1]、静的リンク。KAPI ポインタ `kapi` は crt0 が    */
 /*  設定する大域を使う (libos32cfg / cfg_backend.c と同じ作法)。             */

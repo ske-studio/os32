@@ -342,6 +342,26 @@ python3 tools/move_docs.py SRC DST [SRC DST ...]
 [archive/README.md](archive/README.md)。実行後は `check-docs-links` / `check-docs-orphans` /
 `gen_tests_inventory.py --write` の 3 つを回す。
 
+**`--ext` / `--rewrite-only`** — 追従させるのは `.md` だけではない。票の番号や設計の正典は
+ヘッダやモジュールの先頭コメントに「仕様: `docs/tasks/…`」と書く慣例があり、文書だけ動かすと
+そこが古いまま残る (2026-09-16 のアーカイブで 27 ファイル取り残した)。
+
+```bash
+python3 tools/move_docs.py --map moves.tsv --rewrite-only \
+    --ext .c,.h,.inc,.asm,.py,.rs,.mk,.toml,.yaml,.json,.sh,.1 \
+    --exclude docs/hw,lib/sqlite3,lib/microtar,lib/zlib --dry-run
+```
+
+`--ext` は書き換え対象の拡張子 (既定 `.md`)。並べた拡張子**だけ**が対象になるので、`.md` も
+一緒に書き換えるなら明示して並べる。`--exclude` はリポジトリ相対の接頭辞で、取り込んだ第三者の
+ソースを外す。`--rewrite-only` は `git mv` を行わず**参照の書き換えだけ**を行う (移動が済んだ
+後に取りこぼした種類のファイルを追従させるとき。移動元が無く移動先があることを確かめてから
+当てる)。`.md` 以外では (2) 素のパス言及だけを当て、Markdown のリンク規則 (1)(3) は当てない
+(C の `tbl[i](x)` に化けて当たる余地を残さないため)。**文字列リテラルの中も区別せずに当たる**
+ので、ヘルプ文に文書パスを埋めている場合は `--dry-run` の一覧で確かめてから走らせる。
+コメントだけの書き換えなら `.o` は変わらないはずで、疑わしければ `git archive HEAD` で展開した
+無垢な木と同じフラグでコンパイルして md5 を突き合わせる。
+
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 
 OS32 の外部プログラムをビルドするためには、標準Cライブラリ (`newlib` - `libc.a`) と GCCライブラリ (`libgcc.a`) を含んだ `i386-elf` クロスコンパイラ環境が必要です。

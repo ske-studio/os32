@@ -1,5 +1,5 @@
 //! host.rs — Host Services の C ライブラリ `libos32host` への **ABI 宣言の
-//! 1 か所** (票 `docs/tasks/network/TASK_N4.md` §1)。
+//! 1 か所** (票 `docs/archive/network/TASK_N4.md` §1)。
 //!
 //! シグネチャと定数の**正典は `userland/lib/host/libos32host.h`** (N3)。ここは
 //! その Rust 写しで、値を勝手に決めない。

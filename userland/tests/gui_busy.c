@@ -14,7 +14,7 @@
 /*  ポンプが回らないのでカーソルも止まり、CTRL+STOP で kill してシェルに      */
 /*  戻るしかない。これが仕様どおりの限界 (契約 T6 / T8 の帰結)。             */
 /*                                                                          */
-/*  親: docs/tasks/gui/TASK_K2_pump_hook.md (完了条件)、API_CONTRACTS T3/T6/T8 */
+/*  親: docs/archive/gui_v11/TASK_K2_pump_hook.md (完了条件)、API_CONTRACTS T3/T6/T8 */
 /* ======================================================================== */
 
 #include "os32api.h"

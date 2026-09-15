@@ -24,7 +24,7 @@
 /* 保護対象のベース名。末尾は番兵。
  *
  * `.bak` 以降はリカバリ (`install --recover-settings` / `--revert-settings`)
- * が /etc に作る 7 名 (票 docs/tasks/settings/TASK_S3.md §1b の 9 名から本体
+ * が /etc に作る 7 名 (票 docs/archive/settings/TASK_S3.md §1b の 9 名から本体
  * `settings.db` と `settings.db-journal` を除いたもの、S3-D / 往復 3 の B5)。
  * `.bak` + `.bak-journal` は切替前の元の対の**唯一の写し**、`.recover-state`
  * は phase の印なので、通常同期が 1 つでも掴むと「元へ戻す」経路そのものが

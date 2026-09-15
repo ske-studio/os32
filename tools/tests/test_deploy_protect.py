@@ -1807,7 +1807,7 @@ class MainExit(Base):
 #  S3-D: リカバリ (install --recover-settings / --revert-settings) が作る
 #        ファイル名も通常配備から守る
 #
-#  票: docs/tasks/settings/TASK_S3.md §0 の S3-D (往復 3 の B5)。名前の集合は
+#  票: docs/archive/settings/TASK_S3.md §0 の S3-D (往復 3 の B5)。名前の集合は
 #  §1b の 9 名 — 本体 `settings.db` と `settings.db-journal` は S0-D で既に
 #  入っているので、ここで足りないのは残り 7 名。
 #

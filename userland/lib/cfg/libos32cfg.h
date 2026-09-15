@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  LIBOS32CFG.H — 設定レジストリ (/etc/settings.db) のクライアント          */
 /*                                                                          */
-/*  票 docs/tasks/settings/TASK_S2.md §1 / 契約の正典は S0_FOUNDATION.md §2  */
+/*  票 docs/archive/settings/TASK_S2.md §1 / 契約の正典は S0_FOUNDATION.md §2  */
 /*  と DESIGN.md §3〜§5。C89 [C1]、静的リンク、KAPI v50 の                    */
 /*  db_open_existing / db_prepare_only / db_bind_* / db_error_code を使う。  */
 /*                                                                          */
