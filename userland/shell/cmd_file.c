@@ -69,6 +69,27 @@ static int do_copy_file(const char *cmd_name, const char *src, const char *dst) 
     return rc;
 }
 
+/* 種別を問う。**分からなければ断る** (TASK_FS_TYPE §3、POLICY_DEBUG §4-35)。
+ *
+ * fs_is_dir() は stat と列挙の両方が失敗すると 0 を返すので、それを「ファイル」
+ * と読むと cp -r が宛先直下へ展開して既存ファイルを上書きし、rm が読めない
+ * ディレクトリを unlink へ渡していた。ここでは「読めなかった」を「ファイル」
+ * にも「無い」にも読み替えない。
+ *
+ * 戻り値: FS_KIND_DIR / FS_KIND_FILE / OS32_ERR_NOTFOUND (無いと分かった)。
+ *         それ以外の負値は判定できなかったことを表し、断りを表示済み。 */
+static int file_kind_or_refuse(const char *cmd_name, const char *path)
+{
+    int kind = fs_path_kind(path);
+
+    if (kind >= 0 || kind == OS32_ERR_NOTFOUND) return kind;
+    g_api->kprintf(ATTR_RED, "%s: cannot determine the type of '%s': %s\n",
+                   cmd_name, path, fs_strerror(kind));
+    return kind;
+}
+
+#define FILE_KIND_UNKNOWN(k) ((k) < 0 && (k) != OS32_ERR_NOTFOUND)
+
 /* 再帰コピー: エントリ収集方式 */
 #define MAX_COPY_ENTRIES 64
 #define MAX_COPY_DEPTH   8
@@ -177,7 +198,7 @@ static void do_copy_recursive(const char *src, const char *dst)
 
 static void cmd_cp(int argc, char **argv)
 {
-    int i, is_dest_dir;
+    int i, is_dest_dir, kind;
     int opt_recursive = 0;
     int file_start = 1;
     const char *dst;
@@ -207,7 +228,9 @@ static void cmd_cp(int argc, char **argv)
     }
     
     dst = argv[argc - 1];
-    is_dest_dir = fs_is_dir(dst);
+    kind = file_kind_or_refuse("cp", dst);
+    if (FILE_KIND_UNKNOWN(kind)) return;
+    is_dest_dir = (kind == FS_KIND_DIR);
     
     if (argc - file_start > 2 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "cp: multiple files must be copied into a directory\n");
@@ -218,7 +241,11 @@ static void cmd_cp(int argc, char **argv)
         const char *src = argv[i];
         if (argv[i][0] == '-') continue; /* オプションをスキップ */
         
-        if (fs_is_dir(src)) {
+        /* 分からない入力はその 1 件だけ断る (不存在は do_copy_file が報告) */
+        kind = file_kind_or_refuse("cp", src);
+        if (FILE_KIND_UNKNOWN(kind)) continue;
+
+        if (kind == FS_KIND_DIR) {
             if (!opt_recursive) {
                 g_api->kprintf(ATTR_RED, "cp: -r not specified; omitting directory '%s'\n", src);
                 continue;
@@ -253,7 +280,7 @@ static void cmd_cp(int argc, char **argv)
 /* 1 件の移動: 同一 FS なら rename、FS をまたぐときだけコピー+削除 */
 static void do_move_one(const char *src, const char *dpath)
 {
-    int rc;
+    int rc, kind;
 
     if (fs_same_file(src, dpath)) {
         g_api->kprintf(ATTR_RED, "mv: '%s' and '%s' are the same file\n", src, dpath);
@@ -272,8 +299,16 @@ static void do_move_one(const char *src, const char *dpath)
     /* OS32_ERR_INVAL = FS をまたぐ (または rename 非対応 FS)。
      * ディレクトリはコピーできないので拒否する。以前は無条件にコピー+削除で、
      * ディレクトリを渡すとディレクトリの生ブロックを新ファイルへ書き、
-     * 元は消えないという壊れ方をしていた */
-    if (fs_is_dir(src)) {
+     * 元は消えないという壊れ方をしていた。種別が分からないときも断る
+     * (ファイルと読んでコピー + unlink へ進まない) */
+    kind = file_kind_or_refuse("mv", src);
+    if (kind < 0) {
+        if (kind == OS32_ERR_NOTFOUND)
+            g_api->kprintf(ATTR_RED, "mv: cannot move '%s': %s\n",
+                           src, fs_strerror(kind));
+        return;
+    }
+    if (kind == FS_KIND_DIR) {
         g_api->kprintf(ATTR_RED,
             "mv: cannot move directory '%s' to '%s' (across filesystems or into itself)\n",
             src, dpath);
@@ -290,7 +325,7 @@ static void do_move_one(const char *src, const char *dpath)
 
 static void cmd_mv(int argc, char **argv)
 {
-    int i, is_dest_dir;
+    int i, is_dest_dir, kind;
     const char *dst;
 
     if (argc < 3) {
@@ -299,7 +334,9 @@ static void cmd_mv(int argc, char **argv)
     }
 
     dst = argv[argc - 1];
-    is_dest_dir = fs_is_dir(dst);
+    kind = file_kind_or_refuse("mv", dst);
+    if (FILE_KIND_UNKNOWN(kind)) return;
+    is_dest_dir = (kind == FS_KIND_DIR);
 
     if (argc > 3 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "mv: multiple files must be moved into a directory\n");
@@ -331,7 +368,9 @@ static void cmd_rm(int argc, char **argv)
         return;
     }
     for (i = 1; i < argc; i++) {
-        if (fs_is_dir(argv[i])) {
+        int kind = file_kind_or_refuse("rm", argv[i]);
+        if (FILE_KIND_UNKNOWN(kind)) continue;
+        if (kind == FS_KIND_DIR) {
             g_api->kprintf(ATTR_RED, "rm: cannot remove '%s': Is a directory (use rmdir)\n", argv[i]);
         } else {
             int ret = g_api->sys_unlink(argv[i]);

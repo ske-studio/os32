@@ -277,11 +277,23 @@ static void wfail_disarm(void) { g_wfail_armed = 0; }
 #define SW_KIND_READ   1
 #define SW_KIND_WRITE  2
 static int g_sw_armed, g_sw_at, g_sw_sticky, g_sw_kind, g_sw_seen, g_sw_fired;
+/* 段 H (二重故障): 2 つ目の位置。0 なら従来どおり 1 か所だけ。 */
+static int g_sw_at2, g_sw_fired1, g_sw_fired2;
 
 static void sw_arm(int at, int sticky, int kind)
 {
     g_sw_armed = 1; g_sw_at = at; g_sw_sticky = sticky; g_sw_kind = kind;
     g_sw_seen = 0; g_sw_fired = 0;
+    g_sw_at2 = 0; g_sw_fired1 = 0; g_sw_fired2 = 0;
+}
+
+/* 「i 番目と j 番目の I/O だけが落ちる」(i < j)。sticky は使わない。
+ * 位置は**実際に走った I/O の順番**なので、1 つ目で経路が変わった後の j も
+ * その走行の中での j 番目になる。 */
+static void sw_arm_pair(int at, int at2)
+{
+    sw_arm(at, 0, SW_KIND_ANY);
+    g_sw_at2 = at2;
 }
 static void sw_disarm(void) { g_sw_armed = 0; }
 
@@ -291,7 +303,11 @@ static int sw_hit(int kind)
     if (g_sw_kind != SW_KIND_ANY && g_sw_kind != kind) return 0;
     g_sw_seen++;
     if (g_sw_seen == g_sw_at || (g_sw_sticky && g_sw_seen > g_sw_at)) {
-        g_sw_fired++;
+        g_sw_fired++; g_sw_fired1++;
+        return 1;
+    }
+    if (g_sw_at2 && g_sw_seen == g_sw_at2) {
+        g_sw_fired++; g_sw_fired2++;
         return 1;
     }
     return 0;
@@ -2674,6 +2690,221 @@ static void stage_c2_orphan_parent_sweeps(void)
 }
 
 /* ======================================================================== */
+/*  段 H: **独立した 2 か所**の失敗の組み合わせ (二重故障)                    */
+/*                                                                          */
+/*  段 C の掃引は「N 番目を 1 回だけ (once)」「N 番目以降を全部 (sticky)」の  */
+/*  2 形式しか作らない。TASK_FS_TYPE §2-6 が残していた「独立した 2 か所の     */
+/*  失敗」を、代表的な書き込み経路について i < j の全組み合わせで掃く。       */
+/*                                                                          */
+/*  組み合わせは N^2/2 で増えるので、経路ごとに**空打ちで I/O 数 N を数え**、 */
+/*  N が上限を越える経路は理由つきで飛ばす。上限は既定 PAIR_MAXN_DEFAULT で、 */
+/*  環境変数 B8_PAIR_MAXN で上げられる (広い掃引はこれで切り替える)。        */
+/*                                                                          */
+/*  判定は段 C と同じ media_check + 本物の e2fsck -fn の抜き取り。許してよい  */
+/*  のは §2-6 の「漏れ」(使用中だが未参照) と孤児・末尾の穴だけ。            */
+/* ======================================================================== */
+
+#define PAIR_MAXN_DEFAULT 200
+static int g_pair_maxn = PAIR_MAXN_DEFAULT;
+
+/* 13 ブロック = 直接 12 + 単一間接 1 (間接表を 1 本使う「大きいファイル」) */
+#define PAIR_BIG_BYTES  ((EXT2_NDIR_BLOCKS + 1u) * EXT2_BLOCK_SIZE - 100u)
+
+static u32 g_p_dir, g_q_dir;
+
+static int op_p_create(void)     { return ext2_create(g_ec, g_p_dir, "new", "x", 1); }
+static int op_p_create_big(void) { return ext2_create(g_ec, g_p_dir, "nb", g_sw_pat, PAIR_BIG_BYTES); }
+static int op_p_write_big(void)  { return ext2_vfs_write(g_ec, "/p/w", g_sw_pat, PAIR_BIG_BYTES); }
+static int op_p_truncate(void)   { return ext2_vfs_write(g_ec, "/p/t", "tiny", 4); }
+static int op_p_unlink(void)     { return ext2_unlink(g_ec, g_p_dir, "c1"); }
+static int op_p_unlink_big(void) { return ext2_unlink(g_ec, g_p_dir, "big13"); }
+static int op_p_rename_same(void)  { return ext2_rename(g_ec, g_p_dir, "mv", g_p_dir, "mv2"); }
+static int op_p_rename_cross(void) { return ext2_rename(g_ec, g_p_dir, "mv", g_q_dir, "mv2"); }
+static int op_p_rename_dir(void)   { return ext2_rename(g_ec, g_p_dir, "dm", g_q_dir, "dm2"); }
+static int op_p_mkdir(void)      { return ext2_mkdir(g_ec, g_p_dir, "nd"); }
+static int op_p_rmdir(void)      { return ext2_rmdir(g_ec, g_p_dir, "d"); }
+
+/* 空打ち: 1 つも落とさずに走らせて I/O の回数を数える */
+static int pair_count_io(SweepOp op)
+{
+    int n;
+    undo_begin();
+    remount_cold();
+    sw_arm(SWEEP_MAX + 1, 0, SW_KIND_ANY);
+    (void)op();
+    n = g_sw_seen;
+    sw_disarm();
+    undo_rollback();
+    remount_cold();
+    return n;
+}
+
+static void pair_sweep(const char *label, SweepOp op, int must_report_leak)
+{
+    MediaReport base, r, first_bad;
+    int n, i, j, rc, f1, f2, pick;
+    int runs = 0, both = 0, bad = 0, first_bad_i = 0, first_bad_j = 0;
+    int err_runs = 0, leak_runs = 0, orphan_runs = 0, hole_runs = 0;
+    int unreported = 0, first_unrep_i = 0, first_unrep_j = 0;
+    int s_leak = 0, s_orphan = 0, s_hole = 0, s_bad = 0;
+    u32 leak_max = 0;
+
+    kmemset(&first_bad, 0, sizeof(first_bad));
+    remount_cold();
+    media_check(&base);
+    CHECK_MEDIA(&base);
+
+    n = pair_count_io(op);
+    if (n > g_pair_maxn) {
+        report("  [PAIR] "); report(label); report(" / "); report(g_sw_pattern_name);
+        report("\n         SKIP: I/O 数 N="); report_i(n);
+        report(" が上限 "); report_i(g_pair_maxn);
+        report(" を越える (B8_PAIR_MAXN で上げられる)\n");
+        return;
+    }
+
+    for (i = 1; i < n; i++) {
+        for (j = i + 1; ; j++) {
+            if (j > SWEEP_MAX) {
+                report("  (harness) pair sweep too long\n");
+                g_failures++;
+                break;
+            }
+            undo_begin();
+            remount_cold();
+            sw_arm_pair(i, j);
+            rc = op();
+            f1 = g_sw_fired1;
+            f2 = g_sw_fired2;
+            sw_disarm();
+
+            media_check(&r);
+            runs++;
+            if (f1 && f2) both++;
+            if (rc < 0) err_runs++;
+            if (!media_ok(&r)) {
+                if (!bad) { first_bad = r; first_bad_i = i; first_bad_j = j; }
+                bad++;
+            }
+            if (r.links_surplus > base.links_surplus) orphan_runs++;
+            if (r.dir_hole > base.dir_hole) hole_runs++;
+
+            pick = (g_sw_pattern_idx == 0 && e2f_pick(i) && e2f_pick(j));
+            if (!s_leak && r.unref_inuse > base.unref_inuse) { s_leak = 1; pick = 1; }
+            if (!s_orphan && r.links_surplus > base.links_surplus) { s_orphan = 1; pick = 1; }
+            if (!s_hole && r.dir_hole > base.dir_hole) { s_hole = 1; pick = 1; }
+            if (!s_bad && !media_ok(&r)) { s_bad = 1; pick = 1; }
+            if (pick && f1 && f2) {
+                lbl_reset(); lbl_s("PAIR "); lbl_s(label); lbl_s(" / ");
+                lbl_s(g_sw_pattern_name); lbl_s(" i="); lbl_i(i);
+                lbl_s(" j="); lbl_i(j);
+                e2f_sample(g_lbl, &r);
+            }
+            if (r.unref_inuse > base.unref_inuse) {
+                u32 d = r.unref_inuse - base.unref_inuse;
+                leak_runs++;
+                if (d > leak_max) leak_max = d;
+                if (must_report_leak && rc >= 0) {
+                    if (!unreported) { first_unrep_i = i; first_unrep_j = j; }
+                    unreported++;
+                }
+            }
+
+            undo_rollback();
+            if (g_undo_overflow) {
+                report("  (harness) undo log overflow\n");
+                g_failures++;
+                break;
+            }
+            if (!f2) break;          /* j がこの走行の I/O 数を越えた */
+        }
+    }
+    remount_cold();
+
+    report("  [PAIR] "); report(label); report(" / "); report(g_sw_pattern_name);
+    report("\n         N="); report_i(n);
+    report(" runs="); report_i(runs);
+    report(" both-fired="); report_i(both);
+    report(" error-runs="); report_i(err_runs);
+    report(" leak-runs="); report_i(leak_runs);
+    report(" max-leak="); report_i((int)leak_max);
+    report(" orphan-runs="); report_i(orphan_runs);
+    report(" hole-runs="); report_i(hole_runs);
+    report(" inconsistent="); report_i(bad);
+    report(" unreported-leak="); report_i(unreported);
+    report("\n");
+
+    check_at(bad == 0, "pair sweep: media consistent after every pair of failures", __LINE__);
+    if (bad) {
+        report("      first i="); report_i(first_bad_i);
+        report(" j="); report_i(first_bad_j); report(" ");
+        report_media(&first_bad); report("\n");
+    }
+    check_at(unreported == 0, "pair sweep: a leak is never reported as success", __LINE__);
+    if (unreported) {
+        report("      first i="); report_i(first_unrep_i);
+        report(" j="); report_i(first_unrep_j); report("\n");
+    }
+}
+
+static void run_all_pair_sweeps(void)
+{
+    pair_sweep("ext2_create (1 ブロック)", op_p_create, 1);
+    pair_sweep("ext2_create (13 ブロック = 単一間接)", op_p_create_big, 1);
+    pair_sweep("ext2_write 伸長 (4B -> 13 ブロック)", op_p_write_big, 1);
+    pair_sweep("ext2_write 縮小 (13 ブロック -> 4B = truncate)", op_p_truncate, 1);
+    pair_sweep("ext2_unlink (1 ブロック)", op_p_unlink, 1);
+    pair_sweep("ext2_unlink (13 ブロック = 単一間接)", op_p_unlink_big, 1);
+    pair_sweep("ext2_rename (ファイル / 同じディレクトリ)", op_p_rename_same, 1);
+    pair_sweep("ext2_rename (ファイル / 別のディレクトリへ)", op_p_rename_cross, 1);
+    pair_sweep("ext2_rename (ディレクトリ / 別の親へ)", op_p_rename_dir, 1);
+    pair_sweep("ext2_mkdir", op_p_mkdir, 1);
+    pair_sweep("ext2_rmdir (空のディレクトリ)", op_p_rmdir, 1);
+}
+
+static void stage_h_pair_sweeps(void)
+{
+    u32 i;
+    int f0 = g_failures;
+
+    report("== 段 H: 独立した 2 か所の失敗 (i 番目と j 番目の I/O だけが落ちる) ==\n");
+    report("        上限 N<="); report_i(g_pair_maxn);
+    report(" (B8_PAIR_MAXN)\n");
+    fault_done();
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    for (i = 0; i < sizeof(g_sw_pat); i++) g_sw_pat[i] = (u8)(i * 31 + 7);
+
+    CHECK(ext2_vfs_mkdir(g_ec, "/p") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/q") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/p", &g_p_dir) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/q", &g_q_dir) == EXT2_OK);
+    CHECK(ext2_create(g_ec, g_p_dir, "c1", "x", 1) == EXT2_OK);
+    CHECK(ext2_create(g_ec, g_p_dir, "mv", "x", 1) == EXT2_OK);
+    CHECK(ext2_vfs_write(g_ec, "/p/big13", g_sw_pat, PAIR_BIG_BYTES) == VFS_OK);
+    CHECK(ext2_vfs_write(g_ec, "/p/t", g_sw_pat, PAIR_BIG_BYTES) == VFS_OK);
+    CHECK(ext2_vfs_write(g_ec, "/p/w", "tiny", 4) == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/p/d") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/p/dm") == VFS_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    scribble_free_blocks();
+    g_sw_pattern_name = "番号の模様";
+    g_sw_pattern_idx = 0;
+    run_all_pair_sweeps();
+
+    scribble_free_blocks_dirlike(g_ec->sb_info.total_inodes);
+    g_sw_pattern_name = "ディレクトリ風の模様";
+    g_sw_pattern_idx = 1;
+    run_all_pair_sweeps();
+
+    disk_teardown();
+}
+
+/* ======================================================================== */
 /*  段 E: 往復 3 レビューの反例 (X1 / X2 / X3 / X4) — 往復 4                  */
 /* ======================================================================== */
 
@@ -4369,6 +4600,9 @@ static void stage_a(void)
 
     /* 段 G: 往復 6 */
     stage_g_round6();
+
+    /* 段 H: 独立した 2 か所の失敗 (TASK_FS_TYPE §2-6 の「二重故障」) */
+    stage_h_pair_sweeps();
 }
 
 /* ======================================================================== */
@@ -4659,10 +4893,27 @@ __asm__(".text\n"
         "  call b8_start_c\n"
         "  hlt\n");
 
+/* "B8_PAIR_MAXN=<数>" を環境から拾う (libc が無いので envp を自前で歩く) */
+static int env_int(const char **envp, const char *key, int dflt)
+{
+    int i, k, v;
+    for (i = 0; envp[i]; i++) {
+        const char *e = envp[i];
+        for (k = 0; key[k] && e[k] == key[k]; k++) { }
+        if (key[k] || e[k] != '=') continue;
+        v = 0;
+        for (k = k + 1; e[k] >= '0' && e[k] <= '9'; k++) v = v * 10 + (e[k] - '0');
+        return v > 0 ? v : dflt;
+    }
+    return dflt;
+}
+
 void b8_start_c(long *sp)
 {
     long argc = sp[0];
+    const char **envp = (const char **)&sp[argc + 2];
     if (argc >= 2) g_dump_dir = (const char *)sp[2];
+    g_pair_maxn = env_int(envp, "B8_PAIR_MAXN", PAIR_MAXN_DEFAULT);
     run();
     die(g_exit_code);
 }

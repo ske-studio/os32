@@ -1346,3 +1346,87 @@ rename_dir 段 6 とそのコメント、不変条件のコメントの訂正、
 試験: `tools/tests/b8_open_host.c` (段 G・段 C2・`[R5-1]` の拡張・`sweep()` の後続操作の口・
 複数グループのディスク・ガードの突き合わせ)、`tools/tests/test_b8_open.py` (見張り)、`tools/tests/b8_tdd.md`
 (§10-1 の訂正と本節)。`build/sdk.mk` は変えていない
+
+## 12. 段 H — 独立した 2 か所の失敗 (二重故障、2026-09-16)
+
+[`docs/tasks/shell/TASK_FS_TYPE.md`](../../docs/tasks/shell/TASK_FS_TYPE.md) §2-6 が
+「範囲外の未解消」として残していた 3 つのうちの最後の 1 つ。失敗注入の網羅は
+「N 番目を 1 回だけ (once)」「N 番目以降を全部 (sticky)」の 2 形式で、独立した
+2 か所の失敗の組み合わせは専用試験 1 件 (`[P1-C'']` `case_create_inode_write_ambiguous`) だけだった。
+
+### 12-1. 何を足したか
+
+- 注入に `sw_arm_pair(i, j)` を足した。「**i 番目と j 番目の I/O だけ**が落ちる」(i < j、sticky なし)。
+  位置は実際に走った I/O の順番なので、1 つ目で経路が変わった後の j もその走行の中の j 番目になる。
+  既存の `sw_arm` は `at2 = 0` のままなので、once / sticky の掃引の挙動は 1 ビットも変わらない。
+- 段 H (`stage_h_pair_sweeps`) を足した。自前のディスクに `/p` `/q` を作り、代表的な書き込み経路を
+  i < j の全組み合わせで掃く。判定は段 C と同じ `media_check` と本物の `e2fsck -fn` の抜き取り
+  (両方が落ちた回のうち、i と j がどちらもフィボナッチ位置のもの + 各分類の初回)。
+- 経路ごとに**空打ちで I/O 数 N を数え**、`N > B8_PAIR_MAXN` (既定 200) の経路は理由つきで飛ばす。
+  組み合わせは N^2/2 で増えるので、二重間接まで届く段 C の経路 (N は数千) は既定では入らない。
+  広く掃くときは `B8_PAIR_MAXN=3000 python3 -B tools/tests/test_b8_open.py` のように上げる
+  (数分〜かかる)。上限は実行時に段 H の見出しへ出る。
+
+対象の 11 経路 (それぞれ「番号の模様」と「ディレクトリ風の模様」の 2 回):
+`ext2_create` (1 ブロック / 13 ブロック = 単一間接)、`ext2_write` 伸長 (4B → 13 ブロック)、
+`ext2_write` 縮小 (13 ブロック → 4B = truncate)、`ext2_unlink` (1 ブロック / 13 ブロック)、
+`ext2_rename` (ファイル 同一ディレクトリ / 別ディレクトリ / **ディレクトリ**を別の親へ)、
+`ext2_mkdir`、`ext2_rmdir`。
+
+### 12-2. 結果 (2026-09-16、`d191fd5` + 段 H)
+
+```
+== 段 H: 独立した 2 か所の失敗 (i 番目と j 番目の I/O だけが落ちる) ==
+        上限 N<=200 (B8_PAIR_MAXN)
+  [PAIR] ext2_create (1 ブロック) / 番号の模様
+         N=36 runs=133 both-fired=98 error-runs=133 leak-runs=22 max-leak=1 orphan-runs=18 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_create (13 ブロック = 単一間接) / 番号の模様
+         N=114 runs=2931 both-fired=2818 error-runs=2931 leak-runs=1930 max-leak=14 orphan-runs=18 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_write 伸長 (4B -> 13 ブロック) / 番号の模様
+         N=114 runs=2947 both-fired=2834 error-runs=2947 leak-runs=2167 max-leak=15 orphan-runs=0 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_write 縮小 (13 ブロック -> 4B = truncate) / 番号の模様
+         N=90 runs=2403 both-fired=2314 error-runs=2403 leak-runs=2124 max-leak=3 orphan-runs=0 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_unlink (1 ブロック) / 番号の模様
+         N=36 runs=169 both-fired=134 error-runs=136 leak-runs=33 max-leak=1 orphan-runs=31 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_unlink (13 ブロック = 単一間接) / 番号の模様
+         N=90 runs=2315 both-fired=2226 error-runs=2282 leak-runs=1945 max-leak=3 orphan-runs=31 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ファイル / 同じディレクトリ) / 番号の模様
+         N=40 runs=205 both-fired=166 error-runs=165 leak-runs=0 max-leak=0 orphan-runs=85 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ファイル / 別のディレクトリへ) / 番号の模様
+         N=40 runs=205 both-fired=166 error-runs=165 leak-runs=0 max-leak=0 orphan-runs=85 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ディレクトリ / 別の親へ) / 番号の模様
+         N=58 runs=331 both-fired=274 error-runs=291 leak-runs=0 max-leak=0 orphan-runs=164 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_mkdir / 番号の模様
+         N=44 runs=209 both-fired=166 error-runs=209 leak-runs=40 max-leak=1 orphan-runs=60 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rmdir (空のディレクトリ) / 番号の模様
+         N=46 runs=271 both-fired=226 error-runs=271 leak-runs=58 max-leak=1 orphan-runs=106 hole-runs=0 inconsistent=0 unreported-leak=0
+```
+
+ディレクトリ風の模様も同じ数字 (11 経路 × 2 模様 = 22 掃引)。合計
+
+| | |
+|---|---|
+| 走行 | 24,238 (両方が落ちた回 22,844) |
+| **不整合 (`media_check`)** | **0** (22 掃引すべて) |
+| 報告されない漏れ | **0** (漏れたのに成功を返した回は無い) |
+| 漏れた回 / 最大の漏れ | 16,638 回 / 15 ブロック (§2-6 の「意図した交換」) |
+| 孤児の出た回 / 末尾の穴 | 1,196 / 0 |
+| `e2fsck -fn` の抜き取り | 段 H で 98 枚増えて全体 752 枚、**食い違い 0**、不整合 2 枚 (どちらも従来からの「期待して作った不整合」の像) |
+| 検査数 | 1461 → 1551 checks, 0 failures |
+| 実行時間 | 11.0 秒 → **13.7 秒** (段 H が +2.7 秒。`make check` 全体 約 90 秒に対する増分) |
+
+**不整合は 1 件も見つからなかった。** 許容したのは §2-6 の「漏れ」(使用中だが未参照のブロック /
+inode) と孤児・末尾の穴だけで、これは `e2fsck` 側でも「Block bitmap differences」「Unattached inode」
+「ref count が多い」の分類に入り、`media_check` と食い違わなかった。
+
+走行数が N^2/2 より少ないのは、1 つ目の失敗でメタデータの I/O エラー状態に入ると以後の書き込みが
+断られて走行が短くなり、j 番目の I/O がそもそも存在しない組み合わせが多いため (j は「その走行で
+実際に届いた位置」までしか掃かない)。`both-fired` がその内訳。
+
+### 12-3. この節が言わないこと ([V4])
+
+- **変異試験をしていない。** 段 H が実際に二重故障だけの不整合を捕まえられるかは、
+  意図的に壊した ext2 で確かめていない (票の指示で FS のコードには触らないため)。
+  段 H の生きていることは `both-fired` の回数と e2fsck の抜き取り枚数 (+98) でしか示していない。
+- 既定の上限 N ≤ 200 なので、**二重間接まで届く経路の二重故障は掃いていない** (段 C の once / sticky は掃いている)。
+- 3 か所以上の同時故障は対象外。

@@ -1,6 +1,6 @@
 /* ======================================================================== */
 /*  INSTALL_RECOVER.INC — `install --recover-settings` / `--revert-settings` */
-/*                        (票 docs/archive/settings/TASK_S3.md §1)            */
+/*                        (票 docs/archive/settings/TASK_S3.md §1)          */
 /*                                                                          */
 /*  install.c から #include される本体。KAPI を直接呼ばず、すべての口を        */
 /*  `RecoverOps` (関数ポインタ表) 経由にしてあるので、ホスト TDD              */

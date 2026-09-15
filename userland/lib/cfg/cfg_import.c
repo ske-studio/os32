@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  CFG_IMPORT.C — `cfg import <file> [--scope <s>] [--merge]` の実体        */
 /*                                                                          */
-/*  票 docs/archive/settings/TASK_S3.md §2。C89 [C1]。malloc しない。          */
+/*  票 docs/archive/settings/TASK_S3.md §2。C89 [C1]。malloc しない。        */
 /*                                                                          */
 /*  **2 巡する**。1 巡目は検証だけ (DB を開かない): 対象行を全部読み、tsv    */
 /*  reader と同じ規則 (scope / key / type / 値の上限・UTF-8・NUL) に加えて   */
