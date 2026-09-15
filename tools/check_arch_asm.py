@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-check_arch_asm.py — CPU 原始命令の直書き検査 (移植性の準備、順序 2)
+check_arch_asm.py — CPU 原始命令の直書き検査 (移植性の準備、順序 2 / 3)
 
 カーネル側の C ソースが `hlt` / `cli` / `sti` をインライン asm で直接書くと、
 別アーキテクチャへ移すときに「どこを差し替えればよいか」がソース全体に
 散らばってしまう。これらは include/io.h の原始命令
 (`_halt` / `_idle` / `_stop` / `_enable` / `_disable` / `irq_save` /
-`irq_restore`) 経由で使い、io.h だけを arch 差し替えの境界にする。
+`irq_restore`) 経由で使い、arch/<arch>/arch_io.h だけを差し替えの境界にする。
 
 検査するもの:
   対象ディレクトリの *.c / *.h にあるインライン asm 文の **文字列リテラル**
   に `hlt` / `cli` / `sti` がニーモニックとして現れないこと。
 
 許可するもの:
-  1. include/io.h            — 原始命令の定義元 (差し替えの境界そのもの)
+  1. arch/<arch>/arch_io.h   — 原始命令の実装 (差し替えの境界そのもの)
   2. ARCH-ASM-OK の印が付いた asm 文
      asm の直前 (ALLOW_LOOKBACK 行以内) に `ARCH-ASM-OK` と書いてあれば
      見逃す。命令列の一部としてしか意味を持たず、原始命令に切り出すと
      壊れる箇所のための逃げ道。印を付けるときは **なぜ切り出せないか** を
      同じコメントに書くこと。
+
+順序 3 で io.h を契約 (include/io.h) と実装 (arch/<arch>/arch_io.h,
+platform/<platform>/platform_io.h) に分けたので、**include/io.h はもう許可
+しない**。契約側に asm が現れたらそれは実装の混入で、ここで止める。
+`platform/` 側は許可一覧に入れていないが、機種側に置いてよいのはポート I/O
+だけで hlt/cli/sti は CPU の持ち物なので、そのまま検査対象でよい。
+新しい arch を足すときに**この番人を編集しなくて済む**よう、許可は
+`arch/*/arch_io.h` のパターンで判定する (ディレクトリを 1 つ足すだけ、が
+arch/README.md の約束)。
 
 *.asm (NASM) は元から arch 固有なので対象外。userland は CPL=3 でこれらの
 命令自体が使えないので tools/check_privileged.py の担当。
@@ -32,16 +41,20 @@ import sys
 PROJ_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 検査対象ディレクトリ (カーネル空間で走る C ソースと、それが引くヘッダ)
+# arch / platform も入れる — 実装側の 1 本だけを許可し、それ以外の
+# arch 固有ヘッダに直書きが散らばるのを防ぐ。
 SCAN_DIRS = ["kernel", "drivers", "exec", "fs", "kapi", "lib", "net", "gfx",
-             "include"]
+             "include", "arch", "platform"]
 
 # 検査から外すパス (PROJ_DIR からの相対、前方一致)
 SKIP_PREFIXES = [
     os.path.join("lib", "sqlite3"),   # 第三者コード
 ]
 
-# 原始命令の定義元。ここだけは直書きしてよい。
-ALLOW_FILES = [os.path.join("include", "io.h")]
+# 原始命令の実装。ここだけは直書きしてよい。arch を足すときにこの番人を
+# 編集しなくて済むようパターンで持つ (判定はスラッシュ区切りの相対パス)。
+# **include/io.h は入っていない** — 契約側に asm が現れたら実装の混入。
+ALLOW_RE = re.compile(r"^arch/[^/]+/arch_io\.h$")
 
 ALLOW_MARK = "ARCH-ASM-OK"
 ALLOW_LOOKBACK = 16       # 印を探す行数 (asm 文の直前のコメント)
@@ -130,7 +143,7 @@ def main():
                 rel = os.path.relpath(path, PROJ_DIR)
                 if any(rel.startswith(p) for p in SKIP_PREFIXES):
                     continue
-                if rel in ALLOW_FILES:
+                if ALLOW_RE.match(rel.replace(os.sep, "/")):
                     continue
                 scanned += 1
                 for (ln, mn, line) in scan_file(path):
@@ -150,6 +163,9 @@ def main():
         print("")
         print("  命令列の一部としてしか意味を持たない箇所は、asm の直前の")
         print("  コメントに ARCH-ASM-OK と、切り出せない理由を書く。")
+        print("")
+        print("  実装を置いてよいのは arch/<arch>/arch_io.h だけ。")
+        print("  include/io.h は契約 (宣言と註) のみで、asm は置かない。")
         return 1
 
     print("=== 原始命令の直書き検査: OK (%d ファイル、直書きなし) ===" % scanned)

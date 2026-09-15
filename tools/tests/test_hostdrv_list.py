@@ -46,7 +46,10 @@ TARGET_KERNEL = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
                  "-Wdeclaration-after-statement",
                  # hostdrvfs.c は元から出る警告なのでここだけ外す
                  "-Wno-address-of-packed-member",
-                 "-D__KERNEL_BUILD__", "-I.", "-Iinclude", "-Isdk/include",
+                 # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
+                 # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+                 "-D__KERNEL_BUILD__", "-I.", "-Iinclude",
+                 "-Iarch/x86", "-Iplatform/pc98", "-Isdk/include",
                  "-Isdk/include/os32", "-Ikernel", "-Idrivers", "-Inet",
                  "-Ifs", "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 

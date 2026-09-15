@@ -99,6 +99,10 @@ if __name__ == "__main__":
                                 "-nostdlib", "-msoft-float", "-Os", "-Wall",
                                 "-Wdeclaration-after-statement", "-D__KERNEL_BUILD__",
                                 "-I" + str(ROOT), "-I" + str(ROOT / "include"),
+                                # include/io.h は契約だけで、実装は固定名
+                                # arch_io.h / platform_io.h を引く (順序 3)。
+                                "-I" + str(ROOT / "arch/x86"),
+                                "-I" + str(ROOT / "platform/pc98"),
                                 "-I" + str(ROOT / "sdk/include"),
                                 "-I" + str(ROOT / "sdk/include/os32"),
                                 "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "fs"),

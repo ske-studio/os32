@@ -118,13 +118,20 @@ INC_RULES = [
 # 最初のエラー 1 行だけを見て機械的に決める。**上から順に当てて最初の一致を
 # 採る**。io.h は asm エラーでもあるので、asm より先に見ないと全部 (a) に
 # 吸われて「io.h を分離すれば何本通るか」が見えなくなる。
+#
+# 順序 3 で io.h は契約 (include/io.h) と実装 (arch/<arch>/arch_io.h,
+# platform/<platform>/platform_io.h) に分かれた。エラーが出るのは実装側の
+# 2 ファイルなので、両方をこの分類に含める。含めないと 33 本がまるごと
+# (a) へ移ってしまい、順序 1 の基準値と比べられなくなる。
+IO_BASENAMES = ("io.h", "arch_io.h", "platform_io.h")
+
 CAT_IO = "io"
 CAT_ASM = "asm"
 CAT_X86HDR = "x86hdr"
 CAT_OTHER = "other"
 
 CAT_LABEL = {
-    CAT_IO: "(b) io.h 経由のポート I/O",
+    CAT_IO: "(b) io.h 経由 (arch_io / platform_io)",
     CAT_ASM: "(a) インライン asm (x86 命令・レジスタ)",
     CAT_X86HDR: "(c) x86 固有ヘッダ・型",
     CAT_OTHER: "(d) その他",
@@ -166,17 +173,25 @@ def read(path):
 
 
 def parse_make_vars(text):
-    """`NAME = value` / `NAME := value` を拾う。行末 `\\` の継続をつなぐ。
+    """`NAME = value` / `NAME := value` / `NAME ?= value` を拾う。
+    行末 `\\` の継続をつなぐ。
 
-    展開はしない (expand_var が必要になった時点で再帰的に行う)。条件付き
-    代入や `+=` は無視する — この計測器が読むのは INC_* と CFLAGS_COMMON
-    だけで、どちらも素の `=` で 1 回だけ定義されている。
+    展開はしない (expand_var が必要になった時点で再帰的に行う)。`+=` は
+    無視する — 追記の意味を持つので「最初の 1 回だけ採る」この読み方と
+    合わない。
+
+    `?=` を `=` と同じに扱うのは、この計測器が config.mk を**単独で**
+    読むから。make なら「まだ定義されていなければ」の条件が付くが、ここでは
+    先に定義するものが無いので必ず既定値が採られる。順序 3 の
+    `ARCH ?= x86` / `PLATFORM ?= pc98` はこれで読める (読めないと
+    `-Iarch/$(ARCH)` が `-Iarch/` に潰れ、io.h が実装を見つけられずに
+    33 本が「ヘッダが無い」で落ちて計測が無意味になる)。
     """
     text = re.sub(r"\\\n", " ", text)
     out = {}
     for line in text.split("\n"):
         line = line.split("#", 1)[0]
-        m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*(.*)$", line)
+        m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\?)?=\s*(.*)$", line)
         if m:
             name, value = m.group(1), m.group(2).strip()
             if name not in out:
@@ -263,7 +278,7 @@ def first_error(output):
 def classify(err_line):
     m = ERROR_LINE_RE.match(err_line)
     path = m.group("path") if m else ""
-    if os.path.basename(path) == "io.h":
+    if os.path.basename(path) in IO_BASENAMES:
         return CAT_IO
     if ASM_RE.search(err_line):
         return CAT_ASM
@@ -387,6 +402,24 @@ def main():
     if missing_inc:
         print("Error: build/config.mk から読めなかったインクルード変数: %s"
               % ", ".join(missing_inc), file=sys.stderr)
+        return 1
+
+    # 展開できなかった変数は空文字に落ちるので、INC は空にならず
+    # `-Iarch/$(ARCH)` が `-Iarch/` のような**存在しないディレクトリ**に
+    # 潰れる。それだけでは上の検査に掛からず、計測は「ヘッダが見つからない」
+    # を測るだけになってしまう (順序 3 で実際に踏んだ)。実在を確かめる。
+    bad_dirs = set()
+    for var in sorted(incmap):
+        for tok in incmap[var].split():
+            if tok.startswith("-I") and not os.path.isdir(
+                    os.path.join(PROJ_DIR, tok[2:])):
+                bad_dirs.add("%s: %s" % (var, tok))
+    if bad_dirs:
+        print("Error: 実在しないインクルードディレクトリ "
+              "(build/config.mk の変数が展開できていない可能性):",
+              file=sys.stderr)
+        for b in sorted(bad_dirs):
+            print("  %s" % b, file=sys.stderr)
         return 1
 
     # DRIFT: glob には出るが C_KERNEL にも既知の除外にも無い *.c

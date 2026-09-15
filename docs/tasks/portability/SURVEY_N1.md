@@ -366,3 +366,21 @@ wrap を引く)。番地の固定自体は (f) の話。
 契約を書いた。`exec/exec.c` の CPL=3 へ降りる asm ブロック内の `cli` は切り出せないので
 `ARCH-ASM-OK` の印を付けて残した (順序 3 で `arch/x86/` へ丸ごと移す)。番人 `tools/check_arch_asm.py`
 (`make check` の `check-arch-asm`) が対象ディレクトリの C ソースに直書きが無いことを検査する。
+
+## (c) 追記 — 順序 3 で実施 (2026-09-15)
+
+`include/io.h` を **契約** (宣言と註だけ) と **実装** に割り、実装を軸ごとの
+ディレクトリへ移した。CPU に属するもの (割り込み制御・CPU 停止・`_lidt`) は
+`arch/x86/arch_io.h`、機種に属するもの (ポート I/O・`io_wait`) は
+`platform/pc98/platform_io.h`。契約側は末尾で固定名 `arch_io.h` /
+`platform_io.h` を引き、どの実装が来るかは `build/config.mk` の
+`ARCH ?= x86` / `PLATFORM ?= pc98` と `INC_COMMON` の 2 本の `-I` だけが決める。
+足し方は [`arch/README.md`](../../../arch/README.md)。x86 の実装本体は 1 文字も
+変えていない (`C_KERNEL` 92 本の `.o` が基点と一致)。
+
+**上の「順序 3 で `arch/x86/` へ丸ごと移す」は、まだ行っていない。**順序 3 の
+範囲は `io.h` の分割と受け皿の導入まで。`exec/exec.c` の `ARCH-ASM-OK` ブロック、
+`kernel/gdt.c` / `kernel/tss.c` / `kernel/paging.c` の `cr0`/`cr3`、
+`gfx/gfx_internal.h:52` の移設は、移設の単位 (関数かファイルか) と移設先の
+判断が要るので次の票へ送った。ARM 計測で (a) に残っている 5 本がそれ
+([`ARM_GAUGE.md`](ARM_GAUGE.md) §9)。

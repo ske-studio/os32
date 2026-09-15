@@ -58,7 +58,10 @@ TARGET_USER = TARGET_COMMON + [
     "-Isdk/include/os32", "-Iuserland/lib",
     "-I" + str(CROSS_DIR / "i386-elf/include")]
 TARGET_KERNEL = TARGET_COMMON + [
-    "-D__KERNEL_BUILD__", "-I.", "-Iinclude", "-Isdk/include",
+    # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+    # arch_io.h / platform_io.h を引く (順序 3)。
+    "-D__KERNEL_BUILD__", "-I.", "-Iinclude",
+    "-Iarch/x86", "-Iplatform/pc98", "-Isdk/include",
     "-Isdk/include/os32", "-Ikernel", "-Idrivers", "-Inet", "-Ifs",
     "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 

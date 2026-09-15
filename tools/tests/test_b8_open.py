@@ -68,7 +68,10 @@ TARGET_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding",
                 "-Wall", "-Wextra", "-Werror",
                 "-Wdeclaration-after-statement",
                 "-Wno-sign-compare", "-Wno-unused-parameter",
-                "-D__KERNEL_BUILD__", "-I.", "-Iinclude", "-Isdk/include",
+                # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
+                # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+                "-D__KERNEL_BUILD__", "-I.", "-Iinclude",
+                "-Iarch/x86", "-Iplatform/pc98", "-Isdk/include",
                 "-Isdk/include/os32", "-Ikernel", "-Idrivers", "-Inet",
                 "-Ifs", "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 

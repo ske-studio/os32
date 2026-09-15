@@ -55,7 +55,10 @@ TARGET_USER = TARGET_COMMON + [
 # カーネル (build/config.mk の KERNEL_CFLAGS + INC_KERNEL)。hostdrvfs.c は
 # 元から -Waddress-of-packed-member が出るので、そこだけ外して見る。
 TARGET_KERNEL = TARGET_COMMON + [
-    "-D__KERNEL_BUILD__", "-I.", "-Iinclude", "-Isdk/include",
+    # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+    # arch_io.h / platform_io.h を引く (順序 3)。
+    "-D__KERNEL_BUILD__", "-I.", "-Iinclude",
+    "-Iarch/x86", "-Iplatform/pc98", "-Isdk/include",
     "-Isdk/include/os32", "-Ikernel", "-Idrivers", "-Inet", "-Ifs",
     "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 

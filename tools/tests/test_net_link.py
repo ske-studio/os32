@@ -36,8 +36,13 @@ TARGET_FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie
                 "-fno-stack-protector", "-nostdlib", "-mno-red-zone", "-fcommon",
                 "-O2", "-Wall", "-Wextra", "-Werror",
                 "-Wdeclaration-after-statement", "-D__KERNEL_BUILD__"]
+# arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+# arch_io.h / platform_io.h を引く (順序 3)。build/config.mk の INC_KERNEL と
+# 同じものをここでも渡す (ホスト側は LINK_HOST_TEST で io.h を外すので不要
+# だが、--target はカーネルと同じ素性で組むので要る)。
 TARGET_INC = ["-I" + str(ROOT / p) for p in
-              (".", "include", "sdk/include", "sdk/include/os32", "kernel",
+              (".", "include", "arch/x86", "platform/pc98",
+               "sdk/include", "sdk/include/os32", "kernel",
                "drivers", "net", "fs", "exec", "gfx", "lib", "kapi", "lib/sqlite3")]
 
 

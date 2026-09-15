@@ -22,6 +22,17 @@ CROSS_DIR ?= /usr/local/cross
 # Directories
 PROJDIR = .
 
+# === 移植の 2 本の軸 (CPU と機種) ===
+# include/io.h は原始命令の **契約** だけを持ち、実装は固定名
+# "arch_io.h" / "platform_io.h" を引く。どの実装が来るかは下の 2 つが
+# 決める INC_COMMON の -I だけで決まるので、アーキテクチャや機種を足す作業は
+# ディレクトリを 1 つ足すことに閉じ、既存ファイルに #ifdef が増えない。
+# 手順は arch/README.md。
+#   ARCH     = CPU に属するもの   割り込み制御・CPU 停止・記述子表 (arch/x86/)
+#   PLATFORM = 機種に属するもの   ポート I/O・I/O ウェイト (platform/pc98/)
+ARCH     ?= x86
+PLATFORM ?= pc98
+
 # Tools
 CC = i386-elf-gcc
 AR = i386-elf-ar
@@ -37,7 +48,9 @@ SDK_INC    = -Isdk/include -Isdk/include/os32
 
 # SDK の契約ヘッダ。KernelAPI 構造体の唯一の定義元 (sdk/kapi.json から生成)。
 SDK_KAPI_HDR = sdk/include/os32/os32_kapi_shared.h
-INC_COMMON = -I. -Iinclude $(SDK_INC)
+# -Iarch/$(ARCH) -Iplatform/$(PLATFORM): include/io.h が末尾で引く固定名
+# "arch_io.h" / "platform_io.h" をここで解決する。
+INC_COMMON = -I. -Iinclude -Iarch/$(ARCH) -Iplatform/$(PLATFORM) $(SDK_INC)
 
 # カーネルコア: 自身 + ドライバ + fs + exec + shell + gfx + lib + kapi
 # (kernel.c は全サブシステムの初期化を行うため全モジュールを参照)
@@ -153,6 +166,13 @@ LDFLAGS = -m elf_i386 -T build/os32.ld -Map=$(BUILD_OUT)/kernel.map -nostdlib --
 #   -Iinclude        include/os32_kapi_shared.h ほか
 # ライブラリ固有の -I はここには置かない。build/libs.mk の INC_<lib> を
 # 必要なターゲットだけに渡すこと (一括で並べると層の逆流が隠れる)。
+#
+# -Iarch/$(ARCH) -Iplatform/$(PLATFORM) は **足さない**。外部プログラムは
+# CPL=3 で走り、in/out も cli/sti も #GP になるので include/io.h を引く
+# ソースが 1 本も無い (2026-09-15 に全ツリーを grep して確認。番人は
+# tools/check_privileged.py)。もし将来ユーザーランドが io.h を引くように
+# なったら、それは特権命令を呼ぼうとしている印なので、-I を足す前に
+# 「なぜ CPL=3 のコードが原始命令を要るのか」を先に疑うこと。
 PROGRAM_FLAGS = $(USER_CFLAGS) -I. -Iinclude $(SDK_INC) -Iuserland/lib -I$(CROSS_DIR)/i386-elf/include
 PROGRAM_LDFLAGS = -m elf_i386 -T sdk/link/app.ld -nostdlib --nmagic --gc-sections \
 	-L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib -L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0

@@ -21,7 +21,9 @@ class Stage(unittest.TestCase):
                 s = s.replace('__asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");', '(void)cr0_val;')
                 (d / f'{unit}_host_source.c').write_text(s)
             cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', '-DPHYSMEM_HOST_TEST=1', f'-DTEST_{case.upper()}', f'-DTEST_END={end}']
-            cmd += ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
+            # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
+            # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+            cmd += ['-I' + str(ROOT / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
             subprocess.run(cmd + [str(ROOT / 'tools/tests/highram_stage_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
             subprocess.run([str(d / 'test')], check=True, timeout=20)
 

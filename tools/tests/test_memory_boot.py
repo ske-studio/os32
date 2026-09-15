@@ -32,7 +32,9 @@ class MemoryBoot(unittest.TestCase):
             adapter = ROOT / 'kernel/memory_boot.c'
             (d / 'memory_boot_host_source.c').write_text(adapter.read_text() if adapter.exists() else '')
             cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', f'-DTEST_{case.upper()}', f'-DTEST_KB={kb}UL'] + list(defines)
-            cmd += ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
+            # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
+            # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+            cmd += ['-I' + str(ROOT / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(d)]
             subprocess.run(cmd + [str(ROOT / 'tools/tests/memory_boot_host.c'), str(ROOT / 'kernel/physmem.c'), '-o', str(d / 'test')], check=True)
             subprocess.run([str(d / 'test')], check=True, timeout=20)
 
