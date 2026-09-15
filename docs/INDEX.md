@@ -32,7 +32,10 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | プログラムの一覧 | 各層の `deploy.yaml` (機械可読の正典)、コマンドは [07_shell.md §7-1](07_shell.md) | 09_exec / INDEX に表を持たない |
 | LAN の設計・進捗 | ドライバ = [tasks/network/PLAN.md](tasks/network/PLAN.md)、リンク層と Host Services = [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | 05_drivers / DEVELOPMENT は要約 + リンク |
 | 設定の置き場 (system.cfg の残すキー、settings.db のスキーマ / API / リカバリ) | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) (計画、v1.3) | ROADMAP は 1 行 |
-| アプリ帯の広さ (1 アプリに渡せる量) | [tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md) (実装票。実装済み・ゲスト検証は未) | 02_memory.md は方針と帯の表 |
+| アプリ帯の広さ (1 アプリに渡せる量) | [tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md) (実装済み `b8dab24`、kselftest で毎起動検証、K5b が依存。**票 §5 の受入項目は未消化** = 受入待ち) | 02_memory.md は方針と帯の表 |
+| 試験の一覧 (`make check` のターゲット、`_tdd.md` と票の対応) | [TESTS.md](TESTS.md) (`tools/gen_tests_inventory.py` で生成、`make check-tests-inventory` が鮮度を照合) | 各票は自分の `_tdd.md` を指すだけ |
+| 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜4 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリの調査の快照** (正典は本リポジトリに無い) |
+| 版数 (カーネル 2.0 / GUI 1.x / 次期 v3 / v4 草案) | [ROADMAP.md §0](ROADMAP.md) | CHANGELOG.md、`ver` の文字列、タグ |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
 ## カーネル技術仕様書 (§1-§10)
@@ -94,53 +97,96 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |-------------|------|
 | [PM_PIO_TEST.md](logs/PM_PIO_TEST.md) | プロテクトモード IDE PIO 読み込み実証実験記録 |
 | [HDD_BIOS_DEBUG.md](logs/HDD_BIOS_DEBUG.md) | HDD ブート開発・デバッグログ（INT 1Bh / ディスクレイアウト） |
+| [archive/REFACTORING_PLAN.md](archive/REFACTORING_PLAN.md) / [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) | アーカイブ — 初期のリファクタ計画 / v1.0 到達までのロードマップ |
 
 ## タスク
 
+領域ごとに、**計画 → 票 → 記録**の順。票の冒頭の `状態:` 行が正典 (語彙: 計画 / 設計中 / 実装中 / 受入待ち / 受入完了 / 撤回 / 完了記録)。
+完了した票は残す (アーカイブ運用は [archive/](archive/) 参照)。
+
+### シェル・配備 (hsync)
+
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | **hsync改善案（計画・未実装）** — 同サイズ内容比較、CRC検証、mtime取得・保存、安全な置換、配備世代、段階別受入 |
-| [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | **H1 票（実装中）** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run と理由表示、HostDrv stat 失敗の是正 |
-| [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | **H3 票（未着手、H1 の直後）** — HostDrv の FILETIME→st_mtime 変換、`sys_set_mtime` と VfsOps フック（ext2 先行、他は NOSYS）、時刻のみの同期 |
-| [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | **型判定の整理（未着手）** — 「読めなかった」を「その型ではない」と読み替えている箇所。B8 (I/O 失敗が不存在に畳まれディレクトリを open できる)、fs_is_dir の「不明」欠落、NP21/W のルート検査 |
-| [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) | 移植性調査 (N1 起点) — 直列化とアライメント、`cli`/`sti`/`hlt` の直書き一覧、他アーキ移行時の注意 |
-| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値** — `make check-arm-compile` (合否ではなく計測)。2026-09-15 時点 54/92、失敗はインライン asm 5 と io.h 経由 33、ヘッダ・型の食い違いは 0。順序ごとの再計測は §9 |
-| [../arch/README.md](../arch/README.md) | **`arch/` と `platform/` の正典** — 移植の 2 軸 (CPU / 機種)、`ARCH` `PLATFORM` の選び方、新しいアーキテクチャの足し方、番人 `check_arch_asm.py`。契約は `include/io.h` |
-| [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
-| [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) | S2 (設計) — `libos32cfg` の API と契約の実装写し、`cfg` コマンド、明示 `cfg init` (tsv → DB、欠損時だけ)、libos32gui 末尾追記、受入 C1〜C7 |
-| [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 設定レジストリの**着手計画** (PM 縮約案、決裁待ち) — 現状表、S0-K / S0-D / S0-T → S2 → S4 → S5 の順、後回しの一覧 |
-| [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ** (計画、v1.3) — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite) の 2 層、初期値はインストール媒体だけが持ちリカバリモードで復元、`libos32cfg` API、SQLite プールとの共存の実測項目 |
-| [tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md) | **Host Services 詳細計画** (2026-09-13、計画) — ネットワーク・印刷・時刻・クリップボードをホストに丸投げ: サービス一覧、KAPI v51 (5 本、非ブロッキング)、印刷のスプール設計、票 N0〜N5、決裁 5 点 |
-| [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | OS32 **リンクプロトコル / Host Services** 計画 — 独自 raw Ethernet、絶対値 WINDOW フロー制御、DATA ストリーミング、HTTP/File/RPC を KAPI で公開（未実装） |
-| [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2ローダー) — 設計 (全8部) |
-| [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **v2 カーネルアーキテクチャ計画** — リング3 / Rust 適用範囲 / KAPI 呼び出し実測 / get_tick 根絶。GUI は別トラック |
-| [tasks/v2/CONTRACTS.md](tasks/v2/CONTRACTS.md) | v2 実装の凍結インターフェース契約 (2 コーダー体制、C1-C7) |
-| [tasks/v2/TASK_coder1_M0b_privileged.md](tasks/v2/TASK_coder1_M0b_privileged.md) | コーダー1 タスク — ユーザランドの特権命令除去 (M1 前提) |
-| [tasks/v2/TASK_coder1_M1_ring3.md](tasks/v2/TASK_coder1_M1_ring3.md) | コーダー1 タスク — M1 リング3 土台の実装 (M1a-M1e) |
-| [tasks/v2/TASK_coder2_libos32gui.md](tasks/v2/TASK_coder2_libos32gui.md) | コーダー2 タスク — libos32gui (Rust GUI) 新規開発 (試作。v1.1 では tasks/gui/ の票で WM と共有ライブラリに分割) |
-| [tasks/gui/DESIGN.md](tasks/gui/DESIGN.md) | **GUI シェル v1.x 設計記録** (2026-09-04) — 再描画モデル、HAL/バックエンド表、9821 PEGC / Cirrus、ボトルネック、API 様式、共有ライブラリ帯域 |
-| [tasks/gui/API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) | libos32gui 凍結インターフェース契約 (2026-09-04 凍結) — G 描画 / T 経路 / U 窓とイベント / P 性能規約 |
-| [tasks/gui/TASKS.md](tasks/gui/TASKS.md) | GUI v1.1 作業分担票 (2026-09-05) — レーン H/K/W/C、依存順、排他、共有定数、ゲート G1〜G5。各票 `TASK_{H1..H3,K1..K4,W1..W2,C1..C3}.md` |
-| [tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) | v2 M1 設計 — リング3 土台 (GDT/PD 切替/CPL=3 遷移/検証項目) |
-| [tasks/v2/M2_KAPI_TRAMPOLINE.md](tasks/v2/M2_KAPI_TRAMPOLINE.md) | v2 M2 設計 — KAPI トランポリン (CPL=3 から int 0x80 経由、アプリ無変更) |
-| [tasks/v2/M3_VERIFY.md](tasks/v2/M3_VERIFY.md) | v2 M3 設計 — 検証 (フォールト注入/特権命令の静的検査/性能再測) |
+| [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | hsync 改善案 (ユーザー起草、2026-09-14) — H1 / H3 は受入完了、H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
+| [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | H1 **受入完了 (2026-09-15)** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run、理由表示、HostDrv stat の是正。Codex 往復 5 の記録 |
+| [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | H3 **受入完了 (2026-09-15)** — HostDrv の FILETIME→mtime、`sys_set_mtime` (KAPI v52)、日時を前置フィルタに (決裁)。`hsync sys` 25.8 s → 0.26 s |
+| [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | B8 **受入完了 (2026-09-15、6 往復)** — 読み取り失敗を不存在・未割当・別の型と読み替えていた ext2/VFS/HostDrv の経路。remount-ro 相当、e2fsck を正解に。残る制限は §2-6 / §2-7 |
+| [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
+
+### 設定レジストリ (settings、v1.3 で完了)
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) | **設定レジストリ**の設計 — `system.cfg` (起動キー) + `/etc/settings.db` (SQLite)。置き場の正典 |
+| [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 着手計画 (PM 縮約案、2026-09-13 決裁) |
+| [tasks/settings/S0_FOUNDATION.md](tasks/settings/S0_FOUNDATION.md) | S0 の基盤設計 (配備の保護、所有権) |
+| [tasks/settings/TASK_S0.md](tasks/settings/TASK_S0.md) / [TASK_S2.md](tasks/settings/TASK_S2.md) / [TASK_S3.md](tasks/settings/TASK_S3.md) / [TASK_S3I2.md](tasks/settings/TASK_S3I2.md) / [TASK_S4.md](tasks/settings/TASK_S4.md) / [TASK_S5.md](tasks/settings/TASK_S5.md) / [TASK_S6.md](tasks/settings/TASK_S6.md) / [TASK_S6P.md](tasks/settings/TASK_S6P.md) | 票 S0〜S6P (いずれも受入完了、2026-09-13〜14) — KAPI v50 db_*、libos32cfg と `cfg`、install の回復、gshell の消費者、実測、tar |
+| [tasks/settings/F2_OWNERSHIP.md](tasks/settings/F2_OWNERSHIP.md) / [FEP_BOUNDARY.md](tasks/settings/FEP_BOUNDARY.md) / [DEVICE_RESERVATION.md](tasks/settings/DEVICE_RESERVATION.md) / [MEMORY_RAM_INTEGRATION.md](tasks/settings/MEMORY_RAM_INTEGRATION.md) | 設計提案 (F2 の scoped 実装以外は未着手) |
+
+### ネットワーク・Host Services (v1.4)
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — M1〜M3 エミュレータ合格、既定で有効 (2026-09-14 決裁) |
+| [tasks/network/LINK_PLAN.md](tasks/network/LINK_PLAN.md) | リンクプロトコル (ワイヤ v2) / Host Services 計画 |
+| [tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md) | Host Services 詳細計画 — N1〜N4 受入完了、N5 (実機) は保留 |
+| [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) / [TASK_N1.md](tasks/network/TASK_N1.md) / [TASK_N2.md](tasks/network/TASK_N2.md) / [TASK_N3.md](tasks/network/TASK_N3.md) / [TASK_N4.md](tasks/network/TASK_N4.md) | 票 N0〜N4 (受入完了、2026-09-14〜15) — 設計 v5、KAPI v51 + libos32host、PRINT/CLIP、wget/lpr、ファイラ印刷と端末の貼り付け |
+
+### 移植性
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値と経過** — `make check-arm-compile` (計測、合否ではない)。順序 1〜4 の前後表 (§9)。2026-09-15 時点 55/93 |
+| [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) | 移植性調査 (N1 起点) — 直列化とアライメント、`cli`/`sti`/`hlt` の一覧、順序 2 / 4-a の実施記録 |
+| [../arch/README.md](../arch/README.md) | **`arch/` と `platform/` の正典** — 移植の 2 軸 (CPU / 機種)、`ARCH` `PLATFORM` の選び方、新アーキテクチャの足し方 |
+| [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | 他アーキテクチャ移植調査の索引 — **別リポジトリで進む調査の快照 (2026-09-08〜09、本リポジトリでは更新しない)**。M0 監査 (`tools/audit_cast_align.sh`)、SHARP Brain (i.MX28) のハード調査 |
+
+### GUI シェル (v1.1〜v1.4)
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/gui/DESIGN.md](tasks/gui/DESIGN.md) | **GUI シェル v1.x 設計記録** (2026-09-04) — 再描画モデル、HAL/バックエンド表 |
+| [tasks/gui/API_CONTRACTS.md](tasks/gui/API_CONTRACTS.md) | libos32gui 凍結インターフェース契約 (2026-09-04 凍結) |
+| [tasks/gui/TASKS.md](tasks/gui/TASKS.md) | v1.1 作業分担票とゲート表 — v1.1 の票 (`tasks/gui/TASK_*.md` 12 本) の索引 |
+| `tasks/gui/v12/` | v1.2 の票 5 本 (受入完了 2026-09-07 `d739494`)。索引は [tasks/gui/v12/TASKS.md](tasks/gui/v12/TASKS.md) |
+| [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md) | **v1.3 計画と票の索引** (受入完了 2026-09-14) — K5b / K6 / K7 / T7〜T9、監査 (`AUDIT_2026-09-10.md`)、レビュー記録 (`REVIEW_*.md`、完了記録) |
+| [tasks/gui/v13/TASK_K6C_A_terminal.md](tasks/gui/v13/TASK_K6C_A_terminal.md) / [TASK_T7_terminal_cmd.md](tasks/gui/v13/TASK_T7_terminal_cmd.md) / [REVIEW_T5A_APP.md](tasks/gui/v13/REVIEW_T5A_APP.md) | v1.3 の票のうち `PLAN.md` から直接辿れない 3 本 (端末アプリ、端末からの CUI 起動、T5a アプリのレビュー記録) |
+| [tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) | v1.4 の引き継ぎ — **撤回 (2026-09-14)**。アプリ層を別エージェントへ渡す案は取りやめ、実装は基盤・アプリ層とも Opus 5 コーダー |
+| [tasks/hotdeploy/DESIGN.md](tasks/hotdeploy/DESIGN.md) | ホットデプロイ (再起動なしの配備) の設計 |
+
+### カーネル 2.0 (完了記録) と次期カーネル
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [tasks/v2/PLAN.md](tasks/v2/PLAN.md) | **カーネル 2.0 の計画 (完了記録)** — リング 3 / Rust の適用範囲 / KAPI 呼び出し実測。M1〜M3 は 2026-09-03 完了、タグ `v2.0`。版数の対応は [ROADMAP.md §0](ROADMAP.md) |
+| [tasks/v2/M1_RING3.md](tasks/v2/M1_RING3.md) / [M2_KAPI_TRAMPOLINE.md](tasks/v2/M2_KAPI_TRAMPOLINE.md) / [M3_VERIFY.md](tasks/v2/M3_VERIFY.md) / [CONTRACTS.md](tasks/v2/CONTRACTS.md) | 2.0 の設計 (リング 3 土台、KAPI トランポリン、検証、凍結契約)。完了記録 |
+| [tasks/v2/TASK_coder1_M0b_privileged.md](tasks/v2/TASK_coder1_M0b_privileged.md) / [TASK_coder1_M1_ring3.md](tasks/v2/TASK_coder1_M1_ring3.md) / [TASK_coder2_libos32gui.md](tasks/v2/TASK_coder2_libos32gui.md) | 2.0 のコーダー票。完了記録 |
+| [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md) / [tasks/v4/README.md](tasks/v4/README.md) | ゲーム基盤 v4 の草案 (2026-09-07)。v3 (次期カーネル、未定義) の後 |
+| [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2 ローダー) — 設計 (全 8 部) |
+
+### FEP・V86・SQLite・ライブラリ
+
+| ドキュメント | 内容 |
+|-------------|------|
 | [tasks/fep/00_INDEX.md](tasks/fep/00_INDEX.md) | FEP (日本語入力) 拡張 — 詳細設計 P1〜P7 の索引 (実装状況付き) |
-| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) | FEP — アーキテクチャ説明 (2026-04-27 時点のスナップショット。進捗は 00_INDEX の表) |
-| [tasks/fep/FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP — 今後の改善・拡張タスク |
-| `os32-game:docs/game/GAME_PORT_PLAN.md` | 対戦スゴロクRPG 移植計画 (別リポジトリ ske-studio/os32-game) |
-| `os32-game:docs/game/ENGINE_EXTENSION_PLAN.md` | エンジン拡張計画 (別リポジトリ)。userland/lib/save は本体に残る |
+| [tasks/fep/FEP_STATUS.md](tasks/fep/FEP_STATUS.md) / [FEP_FUTURE.md](tasks/fep/FEP_FUTURE.md) | FEP のアーキテクチャ説明 (2026-04-27 の快照) / 今後の拡張 |
+| [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。進捗の正典は `04_implementation_status.md` |
 | [tasks/wintree_port/PORT_PLAN.md](tasks/wintree_port/PORT_PLAN.md) | feat/vdm 系作業ツリーの移植計画と実施結果 |
-| [tasks/v86v2/README.md](tasks/v86v2/README.md) | **V86 サブシステム (再挑戦)** — 16bit ゲスト実行。方式決定・実測・実装状況の索引 |
-| [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装ドキュメント (全7部) |
-| [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) | libos32math — 整数数学ライブラリ設計書 |
-| `os32-game:docs/libchem/LIBCHEM_DESIGN.md` | 化学エンジンライブラリ設計 (別リポジトリ) |
-| [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
-| [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
-| `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
-| [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | **他アーキテクチャ移植調査** の索引 — 対象一覧、共通の調査軸 (ISA/番地/表示/入力/記憶/起動/検証環境/棚卸し/未確認)、移植先を問わず先にやれる作業。調査記録の置き場であり計画ではない |
-| [tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md) | **M0 移植性監査** (2026-09-08、実機不要) — `-Wcast-align=strict` による非整列アクセス 202 件の仕分け (確定不具合 2 + 潜在 1)、i386/ARM の構造体レイアウト実測 (完全一致)、キャッシュ/TLB 前提の棚卸し。走査は `tools/audit_cast_align.sh` |
-| [tasks/arch_port/BRAIN_MX28_HARDWARE.md](tasks/arch_port/BRAIN_MX28_HARDWARE.md) | SHARP Brain (i.MX28 世代) ハードウェア調査 (2026-09-08) — **主対象 PW-SH4 (実機保有)**。ARM926EJ-S の構成、LCDIF+ILI9805・GPIO キーマトリクス・LRADC タッチ・eMMC/SD/USB ガジェット、SH1〜SH7 の機種差分、**CE を通さない起動経路** (USB recovery boot / Program Image 自作)、OS32 の x86 依存の棚卸し |
-| [tasks/cross_compiler_rebuild.md](tasks/cross_compiler_rebuild.md) / [tasks/ext2_dind_debug.md](tasks/ext2_dind_debug.md) | 単発タスク記録 |
+| [tasks/sqlite/00_INDEX.md](tasks/sqlite/00_INDEX.md) | SQLite カーネル統合 — 設計・実装 (全 7 部) |
+| [tasks/tilemap/00_INDEX.md](tasks/tilemap/00_INDEX.md) | タイルマップ / ブリット最適化 — 設計・最適化・TODO の索引 (全 8 部) |
+| [tasks/libmath/LIBMATH_DESIGN.md](tasks/libmath/LIBMATH_DESIGN.md) / [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) / [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) / [tasks/libecs/LIBECS_DESIGN.md](tasks/libecs/LIBECS_DESIGN.md) / [tasks/libtext/LIBTEXT_DESIGN.md](tasks/libtext/LIBTEXT_DESIGN.md) | ライブラリ設計書 (math / input / asset / ecs / text) |
+| `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libevent/` `libinv/` `tilemap/` | 各ゲームライブラリの設計書群 (別リポジトリ `os32-game` に移った分は `os32-game:docs/...`) |
+| `os32-game:docs/game/GAME_PORT_PLAN.md` / `os32-game:docs/game/ENGINE_EXTENSION_PLAN.md` / `os32-game:docs/libchem/LIBCHEM_DESIGN.md` | 対戦スゴロク RPG の移植・エンジン拡張・化学エンジン (別リポジトリ ske-studio/os32-game) |
+
+### 単発の記録
+
+| ドキュメント | 内容 |
+|-------------|------|
+| [TESTS.md](TESTS.md) | **試験の一覧** (正典、生成) — `make check` の全ターゲット、`_tdd.md` と票の対応、改善提言 |
+| [tasks/TEST_INVENTORY_2026-09-14.md](tasks/TEST_INVENTORY_2026-09-14.md) | 試験の棚卸し (2026-09-14 の快照)。正典は `TESTS.md` へ移行 |
+| [debug.md](debug.md) | `kcg_load_font` クラッシュの仮説計画 (単発の障害記録) |
+| [tasks/cross_compiler_rebuild.md](tasks/cross_compiler_rebuild.md) / [tasks/ext2_dind_debug.md](tasks/ext2_dind_debug.md) | クロスコンパイラ再構築 / ext2 二重間接の障害記録 |
 
 ## man ページ
 
