@@ -338,9 +338,35 @@ check-kstring-c-host:
 check-arm-compile:
 	@python3 tools/check_arm_compile.py
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+# 文書のリンク切れ検査 (lychee の薄い包み)。相対パスの実在と見出しアンカーの
+# 実在を見る。900 リンクで 0.03 秒なので `check` の列に入れてある。
+# lychee (cargo install lychee) が無い環境では SKIP して終了コード 0。
+check-docs-links:
+	@python3 tools/check_docs_links.py
+
+# 孤児文書の検出 — docs/INDEX.md から辿れない docs/*.md と、どの票からも
+# 参照されていない tools/tests/*_tdd.md。lychee の守備範囲外なので自前。
+#
+# **`check` の列にはまだ入れていない。** 2026-09-15 の棚卸し時点で 31 本 +
+# 20 本が未参照で、これは検査の不備ではなく索引の取りこぼし (票を書いて
+# INDEX.md に載せ忘れたもの) の実数。今これを門にすると、通すために
+# `docs/.orphans-allow` へ全部書き写すことになり、例外表が「黙らせる表」に
+# 化けて二度と減らない。**PM が文書整理の段階 F で索引を直し (載せるか
+# archive へ移すか)、0 になった時点で `check` の列へ移すこと。**
+check-docs-orphans:
+	@python3 tools/check_docs_orphans.py
+
+# 試験一覧 docs/TESTS.md の鮮度検査 (文書整理 段階 E)。表は build/*.mk と試験
+# スクリプトから tools/gen_tests_inventory.py が生成するので、ターゲットを足した
+# のに一覧が古いままという状態を止める。check_kapi_version.py と同じ「生成物と
+# 正典の照合」の作法で、ずれたら --write を促して落ちる。手書きの節は
+# docs/TESTS.md の `<!-- manual:… -->` 区間だけで、生成器はそこを読み戻して保つ。
+check-tests-inventory:
+	@python3 tools/gen_tests_inventory.py --check
+
+check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-arm-compile check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
