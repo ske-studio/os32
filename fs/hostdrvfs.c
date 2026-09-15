@@ -25,6 +25,15 @@
 #include "kutf16.h"
 #include "kprintf.h"
 
+/* 純規則 (ハイパーコールを叩かないので**ホストでそのまま試験できる**)。
+ *   hdrv_stat_fill / hdrv_stat_mtime  … stat の成否判定 (票 H1 / H3)
+ *   hdrv_size_result                  … get_file_size の成否判定 (票 B8 ③)
+ *   hdrv_create_status_to_vfs         … CREATE の NTSTATUS 変換 (票 B8 P1-4)
+ * hostdrv_create() が使うので、**この位置で**取り込む。 */
+#include "hostdrv_stat_rules.inc"
+STATIC_ASSERT(HDRV_STAT_ATTR_DIRECTORY == NP2_FILE_ATTRIBUTE_DIRECTORY,
+              hdrv_stat_attr_dir);
+
 /* ===================================================================== */
 /*  内部定数                                                              */
 /* ===================================================================== */
@@ -301,6 +310,15 @@ static void setup_close(void)
  *
  * 注意: session_begin() を呼んだ後に使用すること。
  */
+/* 戻り値: 0 = 成功 / 負値 = **その失敗に対応する VFS_ERR_***。
+ *
+ * 以前は失敗を一律 -1 にし、呼び手がそれを VFS_ERR_NOTFOUND に畳んでいた
+ * (票 B8 / Codex 実装レビュー P1-4)。そのため「実在する通常ファイルだが
+ * OPEN だけが一度失敗した」場合に open の O_CREAT 経路が走り、
+ * hdrv_write_file の NP2_FILE_OVERWRITE_IF が**既存ファイルを切り詰めて**
+ * いた。**「無い」と言ってよいのは NT が「無い」と言ったときだけ。**
+ * 対応表と根拠 (NP21/W のどの状態がいつ返るか) は
+ * fs/hostdrv_stat_rules.inc の hdrv_create_status_to_vfs にある。 */
 static int hostdrv_create(const char *path, u32 disposition,
                           u32 options_flags, u32 desired_access)
 {
@@ -308,12 +326,9 @@ static int hostdrv_create(const char *path, u32 disposition,
     hostdrv_hypercall();
 
     if (g_iostatus.Status == NP2_STATUS_SENTINEL) {
-        return -1;
+        return VFS_ERR_IO;          /* エミュレータが応答しなかった */
     }
-    if (g_iostatus.Status != NP2_STATUS_SUCCESS) {
-        return -1;
-    }
-    return 0;
+    return hdrv_create_status_to_vfs((unsigned long)g_iostatus.Status);
 }
 
 /* IRP_MJ_READ: ファイル読み込み (チャンク分割)
@@ -489,12 +504,65 @@ static int hdrv_is_mounted(void *ctx)
     return g_mounted;
 }
 
+/* 列挙ループと「成功と言ってよいか」は純関数へ切り出してある (票 H1)。
+ * 途中で切れた列挙 / 件数上限での打ち切りを VFS_OK で返さない。
+ * ホスト試験は tools/tests/hostdrv_list_host.c。 */
+#include "hostdrv_list_rules.inc"
+
+/* hdrv_list_run に渡す入れ物。ハイパーコール側の状態は g_databuf なので、
+ * ここにはコールバックと、1 件ぶんの組み立てに要るものだけを置く。 */
+typedef struct {
+    vfs_dir_cb cb;
+    void      *user_ctx;
+} HdrvListCtx;
+
+/* 1 件進める (IRP_MN_QUERY_DIRECTORY) */
+static int hdrv_list_step(void *ctx, int first)
+{
+    (void)ctx;
+    return hostdrv_query_dir(first);
+}
+
+/* 取れた 1 件を VfsDirEntry にして流す。名前が化けたもの / "." / ".." は
+ * 流さないが、繰り返しは 1 回ぶん消費する (従来どおり)。 */
+static void hdrv_list_emit(void *ctx)
+{
+    HdrvListCtx *lc = (HdrvListCtx *)ctx;
+    Np2FileBothDirInfo *info;
+    VfsDirEntry entry;
+    char namebuf[260];
+    int namelen;
+
+    info = (Np2FileBothDirInfo *)g_databuf;
+
+    /* ファイル名をUTF-8に変換 */
+    namelen = kutf16le_to_utf8((const u16 *)info->FileName,
+                               info->FileNameLength,
+                               namebuf, sizeof(namebuf));
+    if (namelen <= 0) return;
+
+    /* "." と ".." はスキップ */
+    if (namebuf[0] == '.' &&
+        (namebuf[1] == '\0' ||
+         (namebuf[1] == '.' && namebuf[2] == '\0'))) {
+        return;
+    }
+
+    /* VfsDirEntryに変換 */
+    kstrncpy(entry.name, namebuf, VFS_MAX_PATH);
+    entry.size = (u32)info->EndOfFile;  /* 下位32bitのみ */
+    entry.type = (info->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY)
+                 ? VFS_TYPE_DIR : VFS_TYPE_FILE;
+
+    lc->cb(&entry, lc->user_ctx);
+}
+
 /* list_dir: ディレクトリ列挙 */
 static int hdrv_list_dir(void *ctx, const char *path,
                          vfs_dir_cb cb, void *user_ctx)
 {
     int rc;
-    int first = 1;
+    HdrvListCtx lc;
     (void)ctx;
 
     /* セッション開始 + ディレクトリを開く */
@@ -504,57 +572,19 @@ static int hdrv_list_dir(void *ctx, const char *path,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
-    /* エントリを1つずつ列挙 (上限付き) */
-    {
-        int count = 0;
-        for (;;) {
-            Np2FileBothDirInfo *info;
-            VfsDirEntry entry;
-            char namebuf[260];
-            int namelen;
+    lc.cb = cb;
+    lc.user_ctx = user_ctx;
+    rc = hdrv_list_run(&lc, hdrv_list_step, hdrv_list_emit,
+                       HOSTDRV_MAX_DIR_ENTRIES);
 
-            if (count++ >= HOSTDRV_MAX_DIR_ENTRIES) break;
-
-            rc = hostdrv_query_dir(first);
-            first = 0;
-
-            if (rc > 0) break;       /* 列挙終了 */
-            if (rc < 0) break;       /* エラー */
-
-            info = (Np2FileBothDirInfo *)g_databuf;
-
-            /* ファイル名をUTF-8に変換 */
-            {
-                namelen = kutf16le_to_utf8((const u16 *)info->FileName,
-                                           info->FileNameLength,
-                                           namebuf, sizeof(namebuf));
-            }
-            if (namelen <= 0) continue;
-
-            /* "." と ".." はスキップ */
-            if (namebuf[0] == '.' &&
-                (namebuf[1] == '\0' ||
-                 (namebuf[1] == '.' && namebuf[2] == '\0'))) {
-                continue;
-            }
-
-            /* VfsDirEntryに変換 */
-            kstrncpy(entry.name, namebuf, VFS_MAX_PATH);
-            entry.size = (u32)info->EndOfFile;  /* 下位32bitのみ */
-            entry.type = (info->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY)
-                         ? VFS_TYPE_DIR : VFS_TYPE_FILE;
-
-            cb(&entry, user_ctx);
-        }
-    }
-
-    /* ディレクトリを閉じる */
+    /* ディレクトリを閉じる。**失敗しても必ず通す** */
     hostdrv_cleanup_close();
 
-    return VFS_OK;
+    /* 途中で切れた列挙を「全部読めた」と言わない (票 H1) */
+    return rc;
 }
 
 /* read_file: 一括ファイル読み込み */
@@ -570,7 +600,7 @@ static int hdrv_read_file(void *ctx, const char *path,
                         NP2_FILE_NON_DIRECTORY_FILE |
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_read(buf, max_size, 0);
 
@@ -579,10 +609,23 @@ static int hdrv_read_file(void *ctx, const char *path,
     return bytes;
 }
 
-/* get_file_size */
+/* get_file_size
+ *
+ * **ディレクトリには答えない** (票 B8 の ③)。ここは NON_DIRECTORY_FILE を
+ * 付けずに開くのでディレクトリでも成功し、NT はディレクトリにもサイズを
+ * 返す。以前はそれを VFS_OK で返していたので、種別が分からなくなった経路で
+ * 「サイズが取れた = 通常ファイル」の根拠に使われていた。
+ *
+ * 種別は **今までも引いていた FileStandardInformation の Directory** で見る。
+ * hdrv_stat のように FileBasicInformation を追加で引かないのは、
+ * **問い合わせを増やさない**ため — get_file_size は open のたびに走り、
+ * hsync は何千回も呼ぶ。NP21/W 側はどちらも同じ GetFileAttributesEx から
+ * 埋めている (np21w-src/src/generic/hostdrvnt.c)。
+ * 判定そのものは fs/hostdrv_stat_rules.inc の純関数 hdrv_size_result。 */
 static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
 {
     int rc;
+    int is_dir = 0;
     Np2FileStandardInfo *info;
     (void)ctx;
 
@@ -591,7 +634,7 @@ static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
     rc = hostdrv_query_info(NP2_FileStandardInformation,
@@ -600,11 +643,15 @@ static int hdrv_get_file_size(void *ctx, const char *path, u32 *size)
     if (rc == 0) {
         info = (Np2FileStandardInfo *)g_databuf;
         *size = (u32)info->EndOfFile;
+        is_dir = info->Directory ? 1 : 0;
     }
 
     hostdrv_cleanup_close();
 
-    return (rc == 0) ? VFS_OK : VFS_ERR_IO;
+    /* 判定は純関数へ (fs/hostdrv_stat_rules.inc)。ホストで直接叩ける
+     * = 変異で落ちる試験が書ける (tools/tests/b8_open_host.c の 段 C)。
+     * **問い合わせは 1 回のまま** — 種別は同じ応答の Directory で分かる。 */
+    return hdrv_size_result(rc, is_dir);
 }
 
 /* read_stream: シーク対応読み込み */
@@ -621,7 +668,7 @@ static int hdrv_read_stream(void *ctx, const char *path,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
     if (rc < 0) {
-        return VFS_ERR_NOTFOUND;
+        return rc;              /* **畳まない** (票 B8 / P1-4) */
     }
 
     bytes = hostdrv_read(buf, size, (u64)offset);
@@ -632,9 +679,22 @@ static int hdrv_read_stream(void *ctx, const char *path,
 }
 
 /* stat: ファイル情報取得 */
+/* 「成功と言ってよいか」の判定は純関数へ切り出してある (票 H1)。
+ * 失敗したまま VFS_OK を返してゼロサイズを「実在する空ファイル」に
+ * 化けさせない / 64bit EndOfFile を u32 へ黙って切り詰めない。
+ * ホスト試験は tools/tests/hsync_h1_host.c (A11)。
+ *
+ * 票 H3 で LastWriteTime -> st_mtime を足した。FILETIME (1601 起点・100ns)
+ * から Unix 秒への変換も同じ .inc の純関数 (hdrv_filetime_to_unix) が持つ。
+ * ホスト試験は tools/tests/hsync_h3_host.c (A16)。 */
 static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
 {
     int rc;
+    int basic_rc;
+    int std_rc;
+    u32 attributes = 0;
+    u64 last_write = 0;
+    u64 end_of_file = 0;
     Np2FileBasicInfo *basic;
     Np2FileStandardInfo *std_info;
     (void)ctx;
@@ -645,30 +705,41 @@ static int hdrv_stat(void *ctx, const char *path, OS32_Stat *buf)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
-    /* FileBasicInformation 取得 */
-    rc = hostdrv_query_info(NP2_FileBasicInformation,
-                            sizeof(Np2FileBasicInfo));
-    if (rc == 0) {
+    /* FileBasicInformation 取得 (種別)。g_databuf は次の問い合わせで
+     * 上書きされるので、その場で値へ退避する。 */
+    basic_rc = hostdrv_query_info(NP2_FileBasicInformation,
+                                  sizeof(Np2FileBasicInfo));
+    if (basic_rc == 0) {
         basic = (Np2FileBasicInfo *)g_databuf;
-        if (basic->FileAttributes & NP2_FILE_ATTRIBUTE_DIRECTORY) {
-            buf->st_mode = OS_S_IFDIR | 0755;
-        } else {
-            buf->st_mode = OS_S_IFREG | 0644;
-        }
+        attributes = basic->FileAttributes;
+        /* **ここで値として退避する** — 次の FileStandardInformation で
+         * g_databuf が丸ごと上書きされる (票 H1 と同じ作法、票 H3)。 */
+        last_write = basic->LastWriteTime;
     }
 
-    /* FileStandardInformation 取得 */
-    rc = hostdrv_query_info(NP2_FileStandardInformation,
-                            sizeof(Np2FileStandardInfo));
-    if (rc == 0) {
+    /* FileStandardInformation 取得 (サイズ)。64bit のまま判定へ渡す */
+    std_rc = hostdrv_query_info(NP2_FileStandardInformation,
+                                sizeof(Np2FileStandardInfo));
+    if (std_rc == 0) {
         std_info = (Np2FileStandardInfo *)g_databuf;
-        buf->st_size = (u32)std_info->EndOfFile;
+        end_of_file = std_info->EndOfFile;
     }
 
     hostdrv_cleanup_close();
 
+    rc = hdrv_stat_fill(basic_rc, attributes, std_rc,
+                        (unsigned long long)end_of_file, buf);
+    if (rc != 0) {
+        /* 途中まで埋まった値を呼び手に読ませない */
+        kmemset(buf, 0, sizeof(OS32_Stat));
+        return VFS_ERR_IO;
+    }
+    /* 更新日時 (票 H3)。判定できない値は 0 = 不明のまま返す。
+     * atime / ctime は埋めない (同一判定に使わない。Windows の CreationTime を
+     * ctime へ入れない、設計書 §5.1)。 */
+    buf->st_mtime = hdrv_stat_mtime(basic_rc, (unsigned long long)last_write);
     return VFS_OK;
 }
 
@@ -687,7 +758,7 @@ static int hdrv_write_file(void *ctx, const char *path,
     rc = hostdrv_create(path, NP2_FILE_OVERWRITE_IF,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_write(data, size, 0);
 
@@ -709,7 +780,7 @@ static int hdrv_mkdir(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_CREATE,
                         NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     hostdrv_cleanup_close();
 
@@ -726,7 +797,7 @@ static int hdrv_rmdir(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     disp.DeleteFileOnClose = 1;
     rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
@@ -746,7 +817,7 @@ static int hdrv_unlink(void *ctx, const char *path)
     rc = hostdrv_create(path, NP2_FILE_OPEN,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     disp.DeleteFileOnClose = 1;
     rc = hostdrv_set_info(NP2_FileDispositionInformation, &disp, sizeof(disp));
@@ -768,7 +839,7 @@ static int hdrv_rename(void *ctx, const char *old_path, const char *new_path)
     rc = hostdrv_create(old_path, NP2_FILE_OPEN,
                         NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_DELETE);
-    if (rc < 0) return VFS_ERR_NOTFOUND;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     kstrncpy(ntpath, new_path, sizeof(ntpath));
     for (i = 0; ntpath[i]; i++) {
@@ -800,7 +871,7 @@ static int hdrv_write_stream(void *ctx, const char *path,
     rc = hostdrv_create(path, NP2_FILE_OPEN_IF,
                         NP2_FILE_NON_DIRECTORY_FILE | NP2_FILE_SYNCHRONOUS_IO_NONALERT,
                         NP2_FILE_READ_DATA | NP2_FILE_WRITE_DATA);
-    if (rc < 0) return VFS_ERR_IO;
+    if (rc < 0) return rc;   /* **畳まない** (票 B8 / P1-4) */
 
     bytes = hostdrv_write(buf, size, (u64)offset);
 
@@ -843,7 +914,11 @@ static VfsOps g_hostdrvfs_ops = {
     hdrv_total_blocks,
     hdrv_free_blocks,
     hdrv_block_size,
-    hdrv_stat
+    hdrv_stat,
+    /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
+     * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
+     * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0
 };
 
 VfsOps *hostdrvfs_get_ops(void)

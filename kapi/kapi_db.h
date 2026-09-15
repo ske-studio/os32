@@ -96,6 +96,16 @@ int __cdecl kapi_db_bind_null(int handle, int index);
  * handle = -1 は呼び手 owner の「直前の open 失敗」。取得しても消えない。 */
 int __cdecl kapi_db_error_code(int handle);
 
+/* KAPI 表の slot 配置が v50 / v51 の形を保っているか。
+ *   slot_count … KAPI 表の要素数 (実運用では KAPI_SLOT_COUNT)
+ *   戻り値 1 = 正しい / 0 = 崩れている
+ *
+ * **末尾に何本足されても真**であること ([ABI2] は末尾追記を正当と定めている)。
+ * 引数で受けるのは、ホスト試験から「KAPI をもう 1 本足したら」を直に
+ * 試せるようにするため — 以前ここが `KAPI_SLOT_COUNT != <末尾> + 1` の
+ * 決め打ちで、KAPI を足すたびに必ず落ちていた (2026-09-15、票 H3)。 */
+int db_slot_layout_ok(int slot_count);
+
 /* v50 の自己診断 (kernel/kselftest.c から。ホスト試験と同じ判定を踏む)。
  * ビット 0..n が落ちた項目 (0 = 全部通った)。 */
 u32 db_v50_selftest(void);

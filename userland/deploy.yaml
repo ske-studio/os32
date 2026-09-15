@@ -136,6 +136,10 @@ filesystem:
     - host: userland/tests/db_v50_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- host_test (票 N1: KAPI v51 の CPL=3 受入。host_agent.py v2 が対向) ---
+    - host: userland/tests/host_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/asset_test.bin
       guest: /usr/bin/
       tags: [programs]

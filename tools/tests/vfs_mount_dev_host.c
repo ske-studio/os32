@@ -56,6 +56,12 @@ int ext2_lookup(Ext2Ctx *c, const char *p, u32 *i)
 }
 int ext2_mkdir(Ext2Ctx *c, u32 d, const char *n)
 { (void)c; (void)d; (void)n; return -1; }
+/* 解決済み経路の記憶 (票 S6-P)。この試験は毎回 ext2_lookup を通したいので、
+ * 記憶は常に外し、書き込みも捨てる。 */
+int ext2_path_memo_get(Ext2Ctx *c, const char *p, u32 *i)
+{ (void)c; (void)p; (void)i; return EXT2_ERR_NOTFOUND; }
+void ext2_path_memo_put(Ext2Ctx *c, const char *p, u32 i)
+{ (void)c; (void)p; (void)i; }
 int ext2_read_file(Ext2Ctx *c, u32 i, void *b, u32 m)
 { (void)c; (void)i; (void)b; (void)m; return -1; }
 int ext2_read_inode(Ext2Ctx *c, u32 i, Ext2Inode *o)
@@ -82,6 +88,19 @@ int ext2_write_stream(Ext2Ctx *c, u32 i, const void *b, u32 s, u32 o)
 
 int ext2_rename(Ext2Ctx *c, u32 od, const char *on, u32 nd, const char *nn)
 { (void)c; (void)od; (void)on; (void)nd; (void)nn; return -1; }
+
+/* ---- 票 H3 で ext2_vfs.c が使うようになった 2 本 ----
+ * ext2_vfs_set_mtime() が read_inode -> write_inode -> sync と進むので、
+ * 書き戻し先と時刻の出どころが要る。この試験の対象は**デバイス番号の
+ * エンコード**なので、中身は他の境界と同じく成功を返すだけにする。
+ * set_mtime そのものの規則は tools/tests/vfs_set_mtime_host.c が見る。 */
+int ext2_write_inode(Ext2Ctx *c, u32 i, const Ext2Inode *o)
+{ (void)c; (void)i; (void)o; return EXT2_OK; }
+/* 本物 (fs/ext2_super.c) と同じく定数を返す。ゲスト側の「いま」の代わり。 */
+u32 ext2_current_time(void) { return 0x67E8E800UL; }
+/* 票 B8 往復 5: 書き込み系の入口の拒否 (エラー状態、fs/ext2_super.c)。
+ * この試験は mount 経路だけを見るので、エラー状態には入らない贋物 */
+int ext2_check_writable(Ext2Ctx *c) { (void)c; return EXT2_OK; }
 
 void *kzalloc(u32 size) { return calloc(1, size); }
 void kfree(void *p) { free(p); }

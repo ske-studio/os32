@@ -21,6 +21,7 @@
 #include "con_sink.h"
 #include "kbd_inject.h"   /* K7: GUI 中の kbd 待ちを満たす注入リング */
 #include "launch.h"      /* T9: 起動要求表 (GUI 中の起動を WM が仲介する) */
+#include "kapi_host.h"   /* N1: Host Services のハンドル回収 (host_owner_exit) */
 #include "ring3_str.h"   /* T9 §12 R1: KAPI が CPL=3 へ返す文字列の置き場 */
 #include "kapi_db.h"
 #include "gdt.h"
@@ -856,6 +857,18 @@ static void exec_reclaim_owned(int id)
     if (id != APP_ID_SHELL && con_sink_is_enabled() &&
         con_sink_reader_get() != id) {
         con_sink_push_exit(id);
+        /* (9a) 端末**配下の子**が畳まれたら、その子の stdin に宛てて端末が
+         * 注入リングへ積んだ打鍵 (票 N4 の貼り付け) の残りを捨てる。読み手
+         * (端末) の退場は (8) が扱うが、子の退場では (8) の照合が外れて残る
+         * ため、放っておくと次の子が食う (打鍵でも起きる既存挙動)。注ぎ手
+         * (端末) は生きているので con_sink の所有規則には触れず内容だけ捨てる。
+         *   捨てるのは **退場したのが読み手 (端末) の子のときだけ** — 無関係な
+         * GUI アプリが畳まれても発火させない (N4a 実装レビュー B1 の退行修正)。
+         * launch_child は不正 ID / 読み手不在 (CON_SINK_NO_READER) で 0 を返す
+         * ので、読み手が居なくても id と一致せず安全。 */
+        if (launch_child(con_sink_reader_get()) == id) {
+            kbd_inject_discard();
+        }
     }
     /* (9b) 起動要求表 (票 T9 D3)。**ID だけを使う** — 正常終了は AppSlot を
      * 解放した後、exec_kill は解放の前にここへ来るので、スロットの欄を読むと
@@ -865,6 +878,11 @@ static void exec_reclaim_owned(int id)
      *     (KILL の PENDING) として WM の top-level に渡す — カーネルはここから
      *     kill しない (回収文脈では CR3 も段も動かせない)。 */
     launch_owner_exit(id);
+    /* (9c) Host Services のハンドル (票 N1 / TASK_N0 §1a)。owner が握ったまま
+     * 畳まれたハンドルを内部解放する — RELEASE も送るので、Agent 側の受付枠
+     * (ACTIVE は rid ごと 2 件) が埋まったままにならない。公開 API を通さず
+     * ID を指定して解放する。 */
+    host_owner_exit(id);
     /* (10) console シンクの読み手 (票 K6C)。読み手は 1 本だけなので、畳んだ
      * のがその 1 本なら所有を返す — 返さないと次の端末アプリが永久に
      * OS32_ERR_EXIST を食う。リングの中身は捨てない (GUI は続いており、
@@ -1706,7 +1724,14 @@ static int exec_launch(const char *cmdline, int gui_arg)
              * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)。
              * TSS.ESP0 を現在の ESP に設定: CPL=3 実行中の割り込み / int 0x80 の
              * フレームがこの直下に積まれ、setjmp フレームを踏まない。
-             * ここから通常 return しない — 終了は int 0x80 → longjmp。 */
+             * ここから通常 return しない — 終了は int 0x80 → longjmp。
+             *
+             * ARCH-ASM-OK: この cli は io.h の _disable() に分けられない。
+             * cli 〜 iret は「カーネル ESP の記録 → CR3 切替 → セグメント →
+             * フレーム積み → 特権降格」を **一続きに** 行う必要があり、
+             * 途中に割り込みが入ると TSS.ESP0 と実際の CR3 が食い違う。
+             * ブロックごと x86 固有 (iret / USER_CS / EFLAGS 直値) なので、
+             * 順序 3 では arch/x86 側へそのまま移す。 */
             __asm__ volatile(
                 "cli\n\t"
                 "movl %%esp, %[e0]\n\t"     /* TSS.ESP0 = 現在のカーネル ESP */

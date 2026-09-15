@@ -70,24 +70,42 @@ int ext2_read_inode(Ext2Ctx *ctx, u32 ino, Ext2Inode *inode)
     return 0;
 }
 
-u32 ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block)
+/* 票 B8 で「未割当」と「読めなかった」を分ける形になった (fs/ext2_priv.h)。
+ * この試験は I/O 失敗を注入しないので、常に EXT2_OK を返す。 */
+int ext2_bmap(Ext2Ctx *ctx, const Ext2Inode *inode, u32 file_block,
+              u32 *out_phys)
 {
     u32 blocks = (inode->size + EXT2_BLOCK_SIZE - 1) / EXT2_BLOCK_SIZE;
     (void)ctx;
-    if (file_block >= blocks) return 0;
-    return 100 + file_block;          /* 物理ブロック番号 (0 は「穴」) */
+    *out_phys = (file_block >= blocks) ? 0 : (100 + file_block);
+    return EXT2_OK;                   /* 物理ブロック 0 は「穴」 */
 }
+
+/* 票 B8 往復 5: ファイルの中身の I/O はデータ用の関数を通るようになった
+ * (fs/ext2_priv.h)。読み取りは上と同じ「必ず 1KB 書く」贋物へ回す —
+ * この試験が見ているのはまさに端数ブロックのデータ読み取りなので。 */
+int ext2_read_data_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+{ return ext2_read_block(ctx, block_num, buf); }
 
 /* ---- ext2_file.c が呼ぶ書き込み側 (この試験では使わない) ---- */
 int ext2_write_block(Ext2Ctx *c, u32 b, const void *p)
 { (void)c; (void)b; (void)p; return 0; }
+int ext2_write_data_block(Ext2Ctx *c, u32 b, const void *p)
+{ (void)c; (void)b; (void)p; return 0; }
+/* 票 B8 往復 5: 書き込み系の入口の拒否 (エラー状態)。この試験では常に書ける */
+int ext2_check_writable(Ext2Ctx *c) { (void)c; return EXT2_OK; }
 int ext2_write_inode(Ext2Ctx *c, u32 i, const Ext2Inode *n)
 { (void)c; (void)i; (void)n; return 0; }
 int ext2_alloc_block(Ext2Ctx *c) { (void)c; return 0; }
-void ext2_free_block(Ext2Ctx *c, u32 b) { (void)c; (void)b; }
+/* 票 B8 往復 3: 解放は戻り値を持ち、順序付きの 2 関数になった
+ * (fs/ext2_priv.h)。この試験は解放経路を動かさないので常に成功。 */
+int ext2_free_block(Ext2Ctx *c, u32 b) { (void)c; (void)b; return EXT2_OK; }
 int ext2_alloc_inode(Ext2Ctx *c) { (void)c; return 0; }
-void ext2_free_inode(Ext2Ctx *c, u32 i) { (void)c; (void)i; }
-void ext2_free_all_blocks(Ext2Ctx *c, Ext2Inode *n) { (void)c; (void)n; }
+int ext2_free_inode(Ext2Ctx *c, u32 i) { (void)c; (void)i; return EXT2_OK; }
+int ext2_truncate_blocks(Ext2Ctx *c, u32 i, Ext2Inode *n, int *leaked)
+{ (void)c; (void)i; (void)n; if (leaked) *leaked = 0; return EXT2_OK; }
+int ext2_release_blocks(Ext2Ctx *c, const u32 *b)
+{ (void)c; (void)b; return EXT2_OK; }
 int ext2_bmap_set(Ext2Ctx *c, Ext2Inode *n, u32 f, u32 p)
 { (void)c; (void)n; (void)f; (void)p; return 0; }
 int ext2_add_entry(Ext2Ctx *c, u32 d, const char *n, u32 i, u8 t)

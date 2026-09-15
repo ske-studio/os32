@@ -138,6 +138,8 @@ const MI_RENAME: u8 = 5;
 const MI_DELETE: u8 = 6;
 const MI_NEWFOLDER: u8 = 7;
 const MI_REFRESH: u8 = 8;
+/// 印刷 (票 N4b §2)。選択中ファイルを `os32gui_print_file` でホストへ。
+const MI_PRINT: u8 = 9;
 
 /* --- 保留中の操作 (モーダルの結果をどう読むか) --- */
 const PEND_NONE: u8 = 0;
@@ -735,6 +737,11 @@ impl Filer {
                 n += 1;
                 items[n] = MI_DELETE;
                 n += 1;
+                /* 票 N4b §2: ファイルだけ「印刷」を出す (ディレクトリ / `..` は
+                 * 対象外)。bin でも 6 項目 (RUN/COPY/MOVE/RENAME/DELETE/PRINT) で
+                 * MENU_MAX に収まる。 */
+                items[n] = MI_PRINT;
+                n += 1;
             }
         } else {
             items[n] = MI_NEWFOLDER;
@@ -799,6 +806,7 @@ impl Filer {
             MI_DELETE => self.op_delete(),
             MI_COPY => self.op_copy(),
             MI_MOVE => self.op_move(),
+            MI_PRINT => self.op_print(),
             _ => {}
         }
     }
@@ -907,6 +915,58 @@ impl Filer {
         let mut buf = [0u8; 96];
         let n = self.confirm_msg(&mut buf, b"Move ");
         self.ask(GUI_MODAL_YES_NO, &buf[..n], PEND_MOVE_CONFIRM);
+    }
+
+    /// 選択中ファイルを印刷する (票 N4b §2)。`os32gui_print_file` はストリーミング
+    /// (メモリ一定) なので大きいファイルでも溢れない。GUI 配下では待ちが park に
+    /// なり WM は回るが、**このアプリの UI は印刷が終わるまで固まる** ので、先に
+    /// 「Printing...」を出しておく (park 前に描けるかは WM 次第。現状は戻ってから
+    /// 反映されるが、意図として先に置く)。
+    fn op_print(&mut self) {
+        if self.busy() || !self.take_target() {
+            return;
+        }
+        if self.target_dir {
+            /* ディレクトリは印刷対象外 (メニューにも出さないが念のため)。 */
+            self.error(b"Print", OS32_ERR_ISDIR);
+            return;
+        }
+        self.status_msg(b"Printing...");
+        self.repaint_path();
+
+        let off = basename_off(&self.target[..self.target_len]);
+        let mut pages: u32 = 0;
+        let mut svc: u32 = 0;
+        let rc = libos32gui::host::print_file(
+            &self.target[off..self.target_len],
+            &self.target[..self.target_len],
+            Some(&mut pages),
+            Some(&mut svc),
+        );
+        if rc >= 0 {
+            let mut buf = [0u8; 64];
+            let mut n = fmt::put(&mut buf, 0, b"Printed ");
+            n = fmt::put_u32(&mut buf, n, pages);
+            n = fmt::put(&mut buf, n, b" page(s)");
+            self.status_msg(&buf[..n]);
+            self.repaint_path();
+        } else if rc == os32api::host::HOST_ESERVICE {
+            /* 業務失敗: svc に 409 / 500 / 503 (票 §1)。数値で区別する。 */
+            let mut buf = [0u8; 96];
+            let mut n = fmt::put(&mut buf, 0, b"Print service ");
+            n = fmt::put_u32(&mut buf, n, svc);
+            self.status_msg(&buf[..n]);
+            self.repaint_path();
+            if self.pending == PEND_NONE {
+                if let Ok(id) = modal::modal_open(self.win_id(), GUI_MODAL_OK, &buf[..n]) {
+                    self.pending = PEND_ERROR;
+                    self.dialog = id;
+                }
+            }
+        } else {
+            /* リンク未確立 / NIC 無し / タイムアウト / 引数不正 / IO / 中断 (HOST_E*)。 */
+            self.error(b"Print", rc);
+        }
     }
 
     /// 入力された名前を現在地に足して `sys_mkdir`。
@@ -1380,6 +1440,7 @@ impl App for Filer {
             b'c' | b'C' => self.op_copy(),
             b'm' | b'M' => self.op_move(),
             b'd' | b'D' => self.op_delete(),
+            b'p' | b'P' => self.op_print(),
             _ => {}
         }
     }
@@ -1722,6 +1783,7 @@ fn item_label(item: u8) -> &'static [u8] {
         MI_DELETE => b"Delete",
         MI_NEWFOLDER => b"New Folder",
         MI_REFRESH => b"Refresh",
+        MI_PRINT => b"Print",
         _ => b"",
     }
 }

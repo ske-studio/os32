@@ -268,7 +268,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         rc = vfs_mount("/", root_dev, root_fs);
         if (rc != VFS_OK) {
             tvram_print(23, 3, "root panic", TATTR_RED);
-            for (;;) asm volatile("hlt");
+            for (;;) _halt();
         }
         tvram_print(23, 3, "root OK", TATTR_WHITE);
 
@@ -381,7 +381,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* 物理ページフレームアロケータ初期化 (paging_initの後) */
     if (!memory_boot_init(mem_kb)) {
         kprintf(0x07, "[MEM] bootstrap/stage failed; boot halted\n");
-        for (;;) { __asm__ volatile("cli; hlt"); }
+        for (;;) { _stop(); }
     }
 
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
@@ -594,7 +594,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
                 if (rc < 0 && rc != EXEC_ERR_FAULT) {
                     /* シェルバイナリのロード自体が失敗 — 致命的エラー */
                     tvram_print(0, 0, "FATAL: shell.bin load failed", TATTR_RED);
-                    for (;;) asm volatile("hlt");
+                    for (;;) _halt();
                 }
             }
 
@@ -605,7 +605,7 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             {
                 u32 start = tick_count;
                 while ((i32)(tick_count - start) < (i32)SHELL_RELOAD_DELAY) {
-                    asm volatile("hlt");
+                    _halt();
                 }
             }
             tvram_clear();
@@ -614,6 +614,6 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
 
     /* 失敗時フォールバック */
     for (;;) {
-        __asm__ volatile("hlt");
+        _halt();
     }
 }

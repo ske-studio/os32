@@ -23,6 +23,22 @@ pub mod cfgro;
 
 pub mod fake;
 
+/* ---- Host Services (票 N4 §1) の分岐を固定する道具 ----
+ * `hostsvc.rs` は os32api を名指しせず `crate::hostabi` (= os32api::host の
+ * ABI 宣言) 経由で libos32host を呼び、`crate::cfgro` / `crate::utf8core` の
+ * 検査・境界計算を共用する。ここでは実ファイルを直に取り込み、host_* と
+ * ファイル継ぎ目 hostsvc_file_* を `host_fake` の贋物で閉じる。 */
+#[path = "../../../../../sdk/rust/os32api/src/host.rs"]
+pub mod hostabi;
+
+#[path = "../../src/utf8core.rs"]
+pub mod utf8core;
+
+#[path = "../../src/hostsvc.rs"]
+pub mod hostsvc;
+
+pub mod host_fake;
+
 #[cfg(test)]
 mod tests {
     use super::cfgro::*;
@@ -587,5 +603,531 @@ mod tests {
         assert_eq!(set_int(b"app:filer", &[b'x'; 64], 1), ERR_INVAL, "64B の key");
         assert_eq!(set_int(b"app:filer", b"a\0b", 1), ERR_INVAL, "埋め込み NUL");
         assert!(fake::log().is_empty());
+    }
+}
+
+/* ================================================================ */
+/*  Host Services (票 N4 §1) の wrapper の分岐                        */
+/* ================================================================ */
+#[cfg(test)]
+mod host_svc_tests {
+    use super::host_fake::{self, Call};
+    use super::hostsvc::*;
+
+    /* --- HOST_E* (libos32host.h の写し、透過を確かめる) --- */
+    const HOST_ELINK: i32 = -100;
+    const HOST_ESERVICE: i32 = -103;
+    const HOST_EINVAL: i32 = -104;
+    const HOST_EIO: i32 = -105;
+    const HOST_EABORT: i32 = -106;
+    /* OS32_ERR_* (open 失敗の仕込み) */
+    const ERR_NOTFOUND: i32 = -2;
+    const ERR_ISDIR: i32 = -8;
+    const ERR_INVAL: i32 = -9;
+
+    fn get(url: &[u8], out: &mut [u8], http: Option<&mut u32>) -> i32 {
+        let hp = match http {
+            Some(r) => r as *mut u32,
+            None => core::ptr::null_mut(),
+        };
+        os32gui_host_get(url.as_ptr(), url.len() as u32, out.as_mut_ptr(), out.len() as u32, hp)
+    }
+    fn clip_get(out: &mut [u8], total: Option<&mut u32>, svc: Option<&mut u32>) -> i32 {
+        let tp = match total {
+            Some(r) => r as *mut u32,
+            None => core::ptr::null_mut(),
+        };
+        let sp = match svc {
+            Some(r) => r as *mut u32,
+            None => core::ptr::null_mut(),
+        };
+        os32gui_clip_get(out.as_mut_ptr(), out.len() as u32, tp, sp)
+    }
+
+    /* ---------------- 純粋部 ---------------- */
+
+    #[test]
+    fn h00_fold_open_err_table() {
+        assert_eq!(fold_open_err(ERR_INVAL), HOST_EINVAL, "引数不正");
+        assert_eq!(fold_open_err(ERR_ISDIR), HOST_EINVAL, "ディレクトリ");
+        assert_eq!(fold_open_err(ERR_NOTFOUND), HOST_EIO, "その他 → EIO");
+        assert_eq!(fold_open_err(-1), HOST_EIO);
+    }
+
+    #[test]
+    fn h01_copy_name_drops_control_bytes() {
+        let mut b = [0u8; 16];
+        assert!(copy_name(b"a\tb\nc", &mut b), "制御バイト混じり");
+        assert_eq!(&b[..4], b"abc\0", "TAB/LF は落ちる");
+        let mut small = [0u8; 3];
+        assert!(!copy_name(b"abcd", &mut small), "NUL の余地なし");
+    }
+
+    #[test]
+    fn h01b_copy_name_empty_or_control_only_is_rejected() {
+        /* 空 basename・制御文字のみは印刷ジョブ名にできない → false (EINVAL)。
+         * 空白は制御文字ではないので残り、名前として通る (N4a nb3)。 */
+        let mut b = [0u8; 16];
+        assert!(!copy_name(b"", &mut b), "空名は false");
+        let mut b2 = [0u8; 16];
+        assert!(!copy_name(b"\t\n\x7f\x01", &mut b2), "制御文字のみは false");
+        let mut b3 = [0u8; 16];
+        assert!(copy_name(b"  ", &mut b3), "空白のみは通す (Agent が許す)");
+        assert_eq!(&b3[..3], b"  \0", "空白はそのまま NUL 終端");
+    }
+
+    /* ---------------- host_get ---------------- */
+
+    #[test]
+    fn h02_host_get_pointer_validation() {
+        host_fake::reset();
+        host_fake::set_get(0, b"body", 200);
+        let mut out = [0u8; 8];
+        assert_eq!(get(b"", &mut out, None), HOST_EINVAL, "空 url");
+        assert_eq!(
+            os32gui_host_get(core::ptr::null(), 1, out.as_mut_ptr(), 8, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "NULL url + len!=0"
+        );
+        assert_eq!(
+            os32gui_host_get(b"http://x".as_ptr(), 8, core::ptr::null_mut(), 8, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "NULL out"
+        );
+        assert_eq!(
+            os32gui_host_get(b"http://x".as_ptr(), 8, out.as_mut_ptr(), 0, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "cap 0"
+        );
+        assert!(host_fake::log().is_empty(), "検査で落ちたら host を呼ばない");
+    }
+
+    #[test]
+    fn h03_host_get_cap_exceeded_returns_real_length() {
+        host_fake::reset();
+        host_fake::set_get(0, b"ABCDEF", 200); /* 6 バイト */
+        let mut out = [0u8; 4];
+        let mut http = 0u32;
+        let ret = get(b"http://h/x", &mut out, Some(&mut http));
+        assert_eq!(ret, 6, "戻り = 受信実長 (snprintf 流)");
+        assert_eq!(&out, b"ABCD", "out には min(実長, cap)");
+        assert_eq!(http, 200, "http_status 透過");
+        assert_eq!(host_fake::log(), vec![Call::Get]);
+        assert_eq!(host_fake::last_url(), b"http://h/x");
+    }
+
+    #[test]
+    fn h04_host_get_error_passthrough_and_http_null() {
+        host_fake::reset();
+        host_fake::set_get(HOST_ELINK, b"", 0);
+        let mut out = [0u8; 8];
+        assert_eq!(get(b"http://h", &mut out, None), HOST_ELINK, "エラー透過、http NULL 可");
+    }
+
+    #[test]
+    fn h05_host_get_404_is_business_status_not_error() {
+        host_fake::reset();
+        host_fake::set_get(0, b"nope", 404);
+        let mut out = [0u8; 16];
+        let mut http = 0u32;
+        let ret = get(b"http://h/missing", &mut out, Some(&mut http));
+        assert_eq!(ret, 4, "本文は届く (404 でもエラーにしない)");
+        assert_eq!(http, 404);
+    }
+
+    /* ---------------- clip_get ---------------- */
+
+    #[test]
+    fn h06_clip_get_cap_exceeded_written_lt_total() {
+        host_fake::reset();
+        host_fake::set_clip_get(0, b"hello", 0); /* 5 バイト */
+        let mut out = [0u8; 3];
+        let mut total = 0u32;
+        let w = clip_get(&mut out, Some(&mut total), None);
+        assert_eq!(w, 3, "written = out に書いた長さ");
+        assert_eq!(total, 5, "total = 受信実長");
+        assert_eq!(&out, b"hel", "out は NUL 終端しない");
+    }
+
+    #[test]
+    fn h07_clip_get_stops_at_nul() {
+        host_fake::reset();
+        host_fake::set_clip_get(0, b"ab\0cd", 0); /* 実長 5、NUL は index 2 */
+        let mut out = [0u8; 16];
+        let mut total = 0u32;
+        let w = clip_get(&mut out, Some(&mut total), None);
+        assert_eq!(w, 2, "NUL 以降も捨てる");
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn h08_clip_get_utf8_boundary() {
+        host_fake::reset();
+        /* "あい" = E3 81 82 E3 81 84 (6 バイト)。cap 4 → 途中で切らず "あ" だけ。 */
+        host_fake::set_clip_get(0, "あい".as_bytes(), 0);
+        let mut out = [0u8; 4];
+        let mut total = 0u32;
+        let w = clip_get(&mut out, Some(&mut total), None);
+        assert_eq!(w, 3, "UTF-8 境界まで戻す (written 3)");
+        assert_eq!(total, 6, "total 6");
+        assert_eq!(&out[..3], "あ".as_bytes());
+    }
+
+    #[test]
+    fn h09_clip_get_cap0_or_null_is_einval() {
+        host_fake::reset();
+        host_fake::set_clip_get(0, b"x", 0);
+        let mut out = [0u8; 8];
+        assert_eq!(
+            os32gui_clip_get(out.as_mut_ptr(), 0, core::ptr::null_mut(), core::ptr::null_mut()),
+            HOST_EINVAL,
+            "cap 0"
+        );
+        assert_eq!(
+            os32gui_clip_get(core::ptr::null_mut(), 8, core::ptr::null_mut(), core::ptr::null_mut()),
+            HOST_EINVAL,
+            "out NULL"
+        );
+        assert!(host_fake::log().is_empty());
+    }
+
+    #[test]
+    fn h10_clip_get_svc_passthrough_and_error() {
+        host_fake::reset();
+        host_fake::set_clip_get(HOST_ESERVICE, b"", 503);
+        let mut out = [0u8; 8];
+        let mut svc = 0u32;
+        let r = clip_get(&mut out, None, Some(&mut svc));
+        assert_eq!(r, HOST_ESERVICE, "業務失敗は HOST_ESERVICE");
+        assert_eq!(svc, 503, "svc_status 透過");
+    }
+
+    /* ---------------- print_text ---------------- */
+
+    #[test]
+    fn h11_print_text_passes_body_pages_svc_and_strips_name() {
+        host_fake::reset();
+        host_fake::set_print(0, 3, 0);
+        let mut pages = 0u32;
+        let mut svc = 0u32;
+        let name = b"re\tport"; /* TAB は落ちる */
+        let body = b"hello world";
+        let r = os32gui_print_text(
+            name.as_ptr(),
+            name.len() as u32,
+            body.as_ptr(),
+            body.len() as u32,
+            &mut pages as *mut u32,
+            &mut svc as *mut u32,
+        );
+        assert_eq!(r, 0);
+        assert_eq!(pages, 3, "pages 透過");
+        assert_eq!(host_fake::last_name(), b"report", "制御文字を落とす");
+        assert_eq!(host_fake::last_print_body(), body);
+        assert_eq!(host_fake::log(), vec![Call::PrintText]);
+    }
+
+    #[test]
+    fn h12_print_text_service_error_passthrough() {
+        host_fake::reset();
+        host_fake::set_print(HOST_ESERVICE, 0, 500);
+        let mut svc = 0u32;
+        let name = b"j";
+        let body = b"x";
+        let r = os32gui_print_text(
+            name.as_ptr(),
+            1,
+            body.as_ptr(),
+            1,
+            core::ptr::null_mut(),
+            &mut svc as *mut u32,
+        );
+        assert_eq!(r, HOST_ESERVICE);
+        assert_eq!(svc, 500, "svc_status に業務値");
+    }
+
+    /* ---------------- print_file ---------------- */
+
+    #[test]
+    fn h13_print_file_open_invalid_and_dir_is_einval() {
+        for rc in [ERR_INVAL, ERR_ISDIR] {
+            host_fake::reset();
+            host_fake::set_file(rc, b"", None);
+            let name = b"f";
+            let path = b"/etc/x";
+            let r = os32gui_print_file(
+                name.as_ptr(),
+                1,
+                path.as_ptr(),
+                path.len() as u32,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            );
+            assert_eq!(r, HOST_EINVAL, "open rc {} → EINVAL", rc);
+            assert_eq!(host_fake::log(), vec![Call::FileOpen], "open だけ (stream/close なし)");
+        }
+    }
+
+    #[test]
+    fn h14_print_file_open_other_is_eio() {
+        host_fake::reset();
+        host_fake::set_file(ERR_NOTFOUND, b"", None);
+        let name = b"f";
+        let path = b"/etc/x";
+        let r = os32gui_print_file(
+            name.as_ptr(),
+            1,
+            path.as_ptr(),
+            path.len() as u32,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(r, HOST_EIO, "その他の open 失敗 → EIO");
+    }
+
+    #[test]
+    fn h15_print_file_streams_and_closes() {
+        host_fake::reset();
+        host_fake::set_file(3, b"file body 123", None); /* fd 3 */
+        host_fake::set_print(0, 2, 0);
+        let mut pages = 0u32;
+        let name = b"doc.txt";
+        let path = b"/home/doc.txt";
+        let r = os32gui_print_file(
+            name.as_ptr(),
+            name.len() as u32,
+            path.as_ptr(),
+            path.len() as u32,
+            &mut pages as *mut u32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(r, 0);
+        assert_eq!(pages, 2);
+        assert_eq!(host_fake::last_name(), b"doc.txt");
+        assert_eq!(host_fake::last_path(), b"/home/doc.txt");
+        assert_eq!(host_fake::last_print_body(), b"file body 123", "src で全量を引く");
+        let log = host_fake::log();
+        assert_eq!(log[0], Call::FileOpen);
+        assert_eq!(*log.last().unwrap(), Call::FileClose, "全経路で close");
+        assert!(log.contains(&Call::PrintStream));
+    }
+
+    #[test]
+    fn h16_print_file_read_error_aborts_but_still_closes() {
+        host_fake::reset();
+        host_fake::set_file(3, b"", Some(-1)); /* read が失敗 */
+        host_fake::set_print(0, 9, 0);
+        let name = b"f";
+        let path = b"/x";
+        let r = os32gui_print_file(
+            name.as_ptr(),
+            1,
+            path.as_ptr(),
+            2,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(r, HOST_EABORT, "src < 0 → EABORT");
+        assert_eq!(*host_fake::log().last().unwrap(), Call::FileClose, "失敗経路でも close");
+    }
+
+    /* ---------------- clip_put ---------------- */
+
+    #[test]
+    fn h17_clip_put_length_limits() {
+        host_fake::reset();
+        host_fake::set_clip_put(0, 0);
+        assert_eq!(
+            os32gui_clip_put(b"x".as_ptr(), 0, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "空 (len 0)"
+        );
+        let big = vec![b'x'; 4097];
+        assert_eq!(
+            os32gui_clip_put(big.as_ptr(), 4097, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "4096 超"
+        );
+        assert!(host_fake::log().is_empty(), "検査で落ちたら host を呼ばない");
+    }
+
+    #[test]
+    fn h18_clip_put_passthrough_and_svc() {
+        host_fake::reset();
+        host_fake::set_clip_put(0, 200);
+        let mut svc = 0u32;
+        let r = os32gui_clip_put(b"clip me".as_ptr(), 7, &mut svc as *mut u32);
+        assert_eq!(r, 0);
+        assert_eq!(host_fake::last_clip_put(), b"clip me");
+        assert_eq!(svc, 200, "svc_status 透過");
+
+        host_fake::reset();
+        let ok = vec![b'y'; 4096];
+        host_fake::set_clip_put(0, 0);
+        assert_eq!(os32gui_clip_put(ok.as_ptr(), 4096, core::ptr::null_mut()), 0, "4096 ちょうどは通る");
+    }
+
+    /* ---------------- host_time ---------------- */
+
+    #[test]
+    fn h19_host_time_writes_and_null_is_einval() {
+        host_fake::reset();
+        host_fake::set_time(0, b"2026-09-14 12:34:56");
+        let mut out = [0xAAu8; 20];
+        assert_eq!(os32gui_host_time(out.as_mut_ptr()), 0);
+        assert_eq!(&out[..19], b"2026-09-14 12:34:56");
+        assert_eq!(out[19], 0, "NUL 終端");
+        assert_eq!(os32gui_host_time(core::ptr::null_mut()), HOST_EINVAL, "NULL out");
+    }
+
+    /* ---------------- out_sink の cap 超過後も数える (硬化) ---------------- */
+
+    /* 実サービスは本文を複数回に分けて sink する。out_sink は cap 到達後の
+     * チャンクを捨てつつ 0 を返し続け (受理)、実長は host_* の nbytes が数える。
+     * この可変分割を仕込むと、`out_sink` 入口に `if written >= cap { return 1 }`
+     * を混ぜたとき (cap 超過で中断) chunk2 で EABORT になり戻りが 6 でなく
+     * -106 に化けて FAIL する — 変異を殺す検査になる。 */
+    #[test]
+    fn h20_host_get_counts_past_cap_across_chunks() {
+        host_fake::reset();
+        /* 6 バイトを cap=4 をまたいで 4+2 で届ける。 */
+        host_fake::set_get_chunked(0, b"ABCDEF", 200, &[4, 2]);
+        let mut out = [0u8; 4];
+        let mut http = 0u32;
+        let ret = get(b"http://h/x", &mut out, Some(&mut http));
+        assert_eq!(ret, 6, "cap 超過後も数え続けて実長 6 (2 チャンク目も受理)");
+        assert_eq!(&out, b"ABCD", "out には先頭 cap ぶんだけ");
+        assert_eq!(http, 200);
+    }
+
+    #[test]
+    fn h20b_clip_get_counts_past_cap_across_chunks() {
+        host_fake::reset();
+        /* clip_get も同じ out_sink を通る。cap=4 に "ABCDEF" を 4+2 で届け、
+         * 2 チャンク目が cap 境界をまたぐようにする (変異を殺せる分割)。 */
+        host_fake::set_clip_get_chunked(0, b"ABCDEF", 0, &[4, 2]);
+        let mut out = [0u8; 4];
+        let mut total = 0u32;
+        let w = clip_get(&mut out, Some(&mut total), None);
+        assert_eq!(total, 6, "total = 受信実長 6 (cap 超過後も数える)");
+        assert_eq!(w, 4, "out に書いたのは cap ぶん (ASCII なので境界戻し無し)");
+        assert_eq!(&out, b"ABCD");
+    }
+
+    /* ---------------- 空名は EINVAL (wrapper 経由) ---------------- */
+
+    #[test]
+    fn h21_print_empty_or_control_name_is_einval() {
+        /* print_text: 制御文字のみの name は copy_name が空にして EINVAL。 */
+        host_fake::reset();
+        host_fake::set_print(0, 1, 0);
+        let name = b"\t\n";
+        let body = b"x";
+        assert_eq!(
+            os32gui_print_text(
+                name.as_ptr(),
+                name.len() as u32,
+                body.as_ptr(),
+                1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            HOST_EINVAL,
+            "制御文字のみの印刷名"
+        );
+        assert!(host_fake::log().is_empty(), "検査で落ちたら host を呼ばない");
+
+        /* print_file: 空名 (len 0) も EINVAL。open すら呼ばない。 */
+        host_fake::reset();
+        host_fake::set_file(3, b"body", None);
+        let path = b"/x";
+        assert_eq!(
+            os32gui_print_file(
+                core::ptr::null(),
+                0,
+                path.as_ptr(),
+                path.len() as u32,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            HOST_EINVAL,
+            "空名の print_file"
+        );
+        assert!(host_fake::log().is_empty(), "名前検査で落ちたら open もしない");
+    }
+
+    /* ---------------- 番地・長さの反例 ---------------- */
+
+    #[test]
+    fn h22_oversized_and_null_args_are_einval() {
+        host_fake::reset();
+        host_fake::set_get(0, b"ok", 200);
+        host_fake::set_print(0, 1, 0);
+        host_fake::set_file(3, b"body", None);
+        host_fake::set_clip_put(0, 0);
+
+        /* url 1396B 超 (URL_CAP-1 = 1395 が上限)。 */
+        let big_url = vec![b'u'; 1396];
+        let mut out = [0u8; 8];
+        assert_eq!(
+            os32gui_host_get(big_url.as_ptr(), 1396, out.as_mut_ptr(), 8, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "url 1396B は上限超"
+        );
+
+        /* name 256B 超 (NAME_MAX = 255 が上限)。 */
+        let big_name = vec![b'n'; 256];
+        let body = b"x";
+        assert_eq!(
+            os32gui_print_text(
+                big_name.as_ptr(),
+                256,
+                body.as_ptr(),
+                1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            HOST_EINVAL,
+            "印刷名 256B は上限超"
+        );
+
+        /* path 256B 超 (PATH_MAX = 255 が上限)。name は正当に。 */
+        let big_path = vec![b'/'; 256];
+        let ok_name = b"f";
+        assert_eq!(
+            os32gui_print_file(
+                ok_name.as_ptr(),
+                1,
+                big_path.as_ptr(),
+                256,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            HOST_EINVAL,
+            "パス 256B は上限超"
+        );
+
+        /* print_text(buf=NULL, len=3) — 本文 NULL + len!=0。 */
+        assert_eq!(
+            os32gui_print_text(
+                ok_name.as_ptr(),
+                1,
+                core::ptr::null(),
+                3,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            ),
+            HOST_EINVAL,
+            "本文 NULL + len!=0"
+        );
+
+        /* clip_put(NULL, 5) — buf NULL + len!=0。 */
+        assert_eq!(
+            os32gui_clip_put(core::ptr::null(), 5, core::ptr::null_mut()),
+            HOST_EINVAL,
+            "clip_put NULL + len!=0"
+        );
+
+        assert!(host_fake::log().is_empty(), "すべて検査で落ち、host を 1 本も呼ばない");
     }
 }

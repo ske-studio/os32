@@ -28,6 +28,7 @@
 #include "utf8.h"
 #include "pc98.h"
 #include "kstring.h"
+#include "endian_le.h"   /* フォント書庫ヘッダは LE の外部形式 */
 
 /* スケール係数 (デフォルト=1, 最大4) */
 int kcg_scale = 1;
@@ -257,15 +258,15 @@ int kcg_load_font(const char *path)
         return -1;
     }
 
-    magic = *(u32 *)&hdr[0];
+    magic = le32_rd(&hdr[0]);
     if (magic != KCG_FONT_MAGIC) {
         vfs_close(fd);
         kprintf(0x07, "[KCG] invalid magic\n");
         return -2;
     }
 
-    payload_size = *(u32 *)&hdr[4];
-    flags = *(u32 *)&hdr[8];
+    payload_size = le32_rd(&hdr[4]);
+    flags = le32_rd(&hdr[8]);
 
     if (payload_size != KCG_PAYLOAD_SIZE) {
         vfs_close(fd);

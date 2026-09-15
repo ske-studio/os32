@@ -50,6 +50,9 @@ pub struct SinkStatus {
     /// 注入リングがあふれて積めなかったバイト数 (`rc < len` の差)。
     /// 打鍵が消えたことを黙らせない (票 K6C-A §2-2 と同じ理由)。
     pub inject_short: u32,
+    /// クリップボード (コピー / 貼り付け) の最後の失敗 (票 N4b)。`os32gui_clip_*`
+    /// の負の戻り値 (`HOST_E*`)。成功で `None` に戻す。黙らせない ([V4])。
+    pub clip_error: Option<i32>,
 }
 
 /// Live (con_sink) 用の状態行。fixture 用とは別物なので分けてある。
@@ -78,6 +81,9 @@ fn live_lines(s: &Display<'_>, runs: u64, paint_error: bool, k: &SinkStatus) -> 
     }
     if k.inject_short != 0 {
         let _ = write!(out[0], " injdrop={}", k.inject_short);
+    }
+    if let Some(rc) = k.clip_error {
+        let _ = write!(out[0], " clip rc={}", rc);
     }
     write!(out[1], "in={}B rec={}", k.bytes, k.records).unwrap();
     write!(out[2], "dropped={} ring={}B", k.dropped, k.ring).unwrap();
@@ -189,6 +195,7 @@ mod tests {
             stopped: false,
             inject_error: None,
             inject_short: 0,
+            clip_error: None,
         };
         let l = lines(&s, 9, false, &k);
         assert_eq!(l[0].bytes(), b"LIVE reading");
@@ -235,6 +242,12 @@ mod tests {
         assert_eq!(
             lines(&s, 0, false, &k)[0].bytes(),
             b"LIVE busy rc=-5 inject rc=-5 injdrop=12"
+        );
+        /* クリップボードの失敗も同じ行に足す (票 N4b、[V4])。 */
+        k.clip_error = Some(-103);
+        assert_eq!(
+            lines(&s, 0, false, &k)[0].bytes(),
+            b"LIVE busy rc=-5 inject rc=-5 injdrop=12 clip rc=-103"
         );
     }
 }

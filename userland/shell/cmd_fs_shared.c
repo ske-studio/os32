@@ -27,19 +27,31 @@ void fs_dummy_ls_cb(const DirEntry_Ext *entry, void *ctx)
 }
 
 /* ======================================================================== */
-/*  fs_is_dir — 指定パスがディレクトリかどうかを判定                         */
+/*  fs_ls_says_dir — 列挙による種別の**代替**判定 (stat が使えない FS 用)     */
 /*                                                                          */
-/*  sys_ls が成功 (0) を返せばディレクトリとみなす。                          */
+/*  戻り値  1 = ディレクトリだと分かった                                     */
+/*          0 = ディレクトリではないと分かった                               */
+/*         -1 = **判定できない** (列挙が読めなかった)                        */
+/*                                                                          */
+/*  列挙は「読めたか」しか答えない。`OS32_ERR_IO` (途中で切れた) や          */
+/*  `OS32_ERR_FULL` (件数上限) を「ディレクトリではない」に畳むと、          */
+/*  `cp -r src dir` が `dir/src/` ではなく `dir/` 直下へ展開して既存の       */
+/*  ファイルを上書きする (Codex 実装レビュー 往復 3 の B5)。読めなかったのか  */
+/*  ディレクトリでないのかを必ず区別する。                                   */
 /* ======================================================================== */
-int fs_is_dir(const char *path)
+static int fs_ls_says_dir(const char *path)
 {
     int found = 0;
     int rc = g_api->sys_ls(path, (void *)fs_dummy_ls_cb, &found);
-    return (rc == 0);
+
+    if (rc == 0) return 1;
+    if (rc == OS32_ERR_NOTDIR) return 0;
+    if (rc == OS32_ERR_NOTFOUND) return 0;
+    return -1;                      /* IO / FULL など = 読めなかった */
 }
 
 /* ======================================================================== */
-/*  fs_path_kind — stat でパス種別を判定 (stat 非対応 FS は sys_ls で代替)    */
+/*  fs_path_kind — パス種別を判定 (stat が正。列挙は代替にしか使わない)       */
 /* ======================================================================== */
 int fs_path_kind(const char *path)
 {
@@ -49,8 +61,25 @@ int fs_path_kind(const char *path)
         return ((st.st_mode & OS_S_IFMT) == OS_S_IFDIR) ? FS_KIND_DIR : FS_KIND_FILE;
     }
     if (rc == OS32_ERR_NOTFOUND) return rc;
-    if (fs_is_dir(path)) return FS_KIND_DIR;
+    /* stat が使えない FS のためだけの代替。判定できなければ stat の
+     * エラーをそのまま返す (「ディレクトリではない」と言い切らない)。 */
+    if (fs_ls_says_dir(path) > 0) return FS_KIND_DIR;
     return rc;
+}
+
+/* ======================================================================== */
+/*  fs_is_dir — 指定パスがディレクトリか                                     */
+/*                                                                          */
+/*  **型で判定する** (fs_path_kind 経由)。以前は `sys_ls` が 0 を返すことを   */
+/*  条件にしていたので、1000 件を越える / 途中で I/O が切れるディレクトリを   */
+/*  「ディレクトリではない」と答えていた (B5)。                              */
+/*                                                                          */
+/*  種別が分からないときは 0 を返す (従来と同じ真偽の形)。呼び手が            */
+/*  「不明」を扱いたい場合は fs_path_kind() の負の戻り値を見ること。          */
+/* ======================================================================== */
+int fs_is_dir(const char *path)
+{
+    return fs_path_kind(path) == FS_KIND_DIR;
 }
 
 /* ======================================================================== */

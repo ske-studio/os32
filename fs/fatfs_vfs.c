@@ -655,7 +655,11 @@ static VfsOps fatfs_ops = {
     fatfs_vfs_get_size,    fatfs_vfs_read_stream,  fatfs_vfs_write_stream,
     fatfs_vfs_sync,
     fatfs_vfs_total_blocks, fatfs_vfs_free_blocks, fatfs_vfs_block_size,
-    fatfs_vfs_stat
+    fatfs_vfs_stat,
+    /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
+     * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
+     * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0
 };
 
 

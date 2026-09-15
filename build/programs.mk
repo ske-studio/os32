@@ -106,7 +106,7 @@ clean-gshell:
 # そのオブジェクトを外部プログラムにリンクすると 1 つの .o が 2 つの
 # リンクドメインに跨ることになる。ユーザー空間用は _prog.o として
 # PROGRAM_FLAGS で別途ビルドする。
-lib/utf8_prog.o: lib/utf8.c lib/utf8.h include/memmap.h
+lib/utf8_prog.o: lib/utf8.c lib/utf8.h include/memmap.h include/endian_le.h
 	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o $@
 
 # === LZ4 Command ===
@@ -344,6 +344,46 @@ userland/tests/cfg_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/cfg_ben
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/cfg_bench.o \
 	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
 
+# tar — ustar の作成 / 展開 / 一覧 (票 S6)。ustar の読み書きは vendor した
+# lib/microtar (rxi、MIT)。lib/lz4_prog.o と同じく、カーネル側とは別に
+# PROGRAM_FLAGS でビルドした _prog.o を明示規則でリンクする
+# (cmds/%.elf パターンはライブラリを引けない)。
+lib/microtar/microtar_prog.o: lib/microtar/microtar.c lib/microtar/microtar.h
+	$(CC) $(PROGRAM_FLAGS) -DMTAR_NO_STDIO -Ilib/microtar -c $< -o $@
+
+userland/cmds/tar.o: userland/cmds/tar.c lib/microtar/microtar.h
+	$(CC) $(PROGRAM_FLAGS) -DMTAR_NO_STDIO -Ilib/microtar -c $< -o $@
+
+userland/cmds/tar.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/tar.o lib/microtar/microtar_prog.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/tar.o \
+	      lib/microtar/microtar_prog.o -lc -lgcc
+
+# Host Services のコマンド (票 N3) — libos32host を静的リンク。既定の
+# cmds/%.elf パターンはライブラリを引けないので明示規則 (cfg.elf と同じ形)。
+userland/cmds/wget.o: userland/cmds/wget.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/wget.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/wget.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/wget.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/lpr.o: userland/cmds/lpr.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/lpr.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/lpr.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/lpr.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/hclip.o: userland/cmds/hclip.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/hclip.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/hclip.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/hclip.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
+userland/cmds/hdate.o: userland/cmds/hdate.c userland/lib/host/libos32host.h
+	$(CC) $(PROGRAM_FLAGS) $(INC_libos32host) -c $< -o $@
+userland/cmds/hdate.elf: sdk/link/app.ld $(CRT0_OBJ) userland/cmds/hdate.o $(LIBHOST_OBJ)
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/cmds/hdate.o \
+	      $(LGRP_BEG) $(LIBHOST_OBJ) $(LGRP_END) -lc -lgcc
+
 userland/tests/%.elf: userland/tests/%.c sdk/link/app.ld $(CRT0_OBJ)
 	$(CC) $(PROGRAM_FLAGS) -c $< -o userland/tests/$*.o
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/$*.o -lc -lgcc
@@ -361,6 +401,7 @@ userland/system/%.elf: userland/system/%.c sdk/link/app.ld $(CRT0_OBJ)
 # (userland の .d は Makefile 末尾の -include の対象外)。
 userland/system/install.elf: userland/system/install_recover.inc
 userland/system/hsync.elf: userland/system/hsync_protect.inc
+userland/system/hsync.elf: lib/crc32_core.inc
 
 # === ELF → RAW → OS32X BIN 変換 ===
 # ユーザーランドぶん。ゲームは game/Makefile が自前で持つ。
@@ -465,17 +506,23 @@ SHLIB_GUI_LIB = $(RUST_TARGET_DIR)/liblibos32gui.a
 $(SHLIB_GUI_LIB): FORCE $(RUST_KAPI_RS)
 	cd $(RUST_PROGRAMS_DIR) && cargo build --release -p libos32gui
 
-userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ) $(LIBCFG_OBJ)
+# libos32host.a (票 N4) も静的リンク: 表 105..=110 の host_* が呼ぶ。`kapi` は
+# libos32cfg (cfg_backend.c) と共用で SHLIB_GUI_LIB (cfgro.rs) が供給する
+# (--allow-multiple-definition 済み。nm で kapi 定義は 1 本を確認)。
+# メモリ: libos32host の bss 16KB (print_stream の g_stream_buf) で shlib の
+# per-app .data/.bss が 4 → 8 ページ (data_pages=8、K3 がアプリごとに複製)。
+# GUI アプリ 1 本あたり +16KB。共有 .text は host_* ぶんだけ増える。
+userland/libos32gui.elf: sdk/link/shlib.ld $(SHLIB_GUI_LIB) $(GFX_OBJ) $(LIBCFG_OBJ) $(LIBHOST_OBJ)
 	$(LD) -m elf_i386 -T sdk/link/shlib.ld -nostdlib --nmagic --gc-sections \
 		--allow-multiple-definition -L$(LIBDIR) -L$(CROSS_DIR)/i386-elf/lib \
 		-L$(CROSS_DIR)/lib/gcc/i386-elf/13.2.0 -o $@ \
-		$(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
+		$(LGRP_BEG) $(GFX_OBJ) $(LIBCFG_OBJ) $(LIBHOST_OBJ) $(SHLIB_GUI_LIB) $(LGRP_END) -lc -lgcc
 
 userland/libos32gui.raw: userland/libos32gui.elf
 	$(OBJCOPY) -O binary $< $@
 
 userland/libos32gui.shlib: userland/libos32gui.raw userland/libos32gui.elf tools/mkshlib.py
-	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 50
+	python3 tools/mkshlib.py $< $@ --elf userland/libos32gui.elf --api 51
 
 shlib: userland/libos32gui.shlib
 
@@ -519,6 +566,7 @@ clean-programs: clean-rust
 	rm -f userland/tests/sqlite_standalone/*.o userland/tests/sqlite_standalone/*.elf userland/tests/sqlite_standalone/*.raw userland/tests/sqlite_standalone/*.bin
 	rm -f lib/lz4_prog.o lib/utf8_prog.o
 	rm -f lib/zlib/*.o
+	rm -f lib/microtar/*.o
 	rm -f $(BUILD_OUT)/unicode.bin tools/gen_unicode
 
 .PHONY: programs programs_base game sh lz4_cmd cdinst bench bench_scale2x faultprobe

@@ -13,7 +13,13 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CASES = ["open_existing", "prepare_only", "binds", "error_code", "shm_bound",
+CASES = ["open_existing", "prepare_only", "binds", "error_code",
+         # N2 (c): ブート自己診断 db_v50_selftest() を make check で踏む (F1 回帰)
+         "v50_selftest",
+         # 票 H3 の是正 (2026-09-15): slot 配置の検査が **末尾追記で落ちない**
+         # こと。KAPI をもう 1 本足した場合を引数で模して踏む
+         "slot_layout_append",
+         "shm_bound",
          "user_range", "owner_isolation", "order_new", "order_old",
          # 実装レビュー 往復 1 の blocker 6 件 + TRANSIENT (s0_tdd.md §K)
          "shm_exact", "stat_faults", "journal_mode", "step_no_stmt",
@@ -93,6 +99,10 @@ if __name__ == "__main__":
                                 "-nostdlib", "-msoft-float", "-Os", "-Wall",
                                 "-Wdeclaration-after-statement", "-D__KERNEL_BUILD__",
                                 "-I" + str(ROOT), "-I" + str(ROOT / "include"),
+                                # include/io.h は契約だけで、実装は固定名
+                                # arch_io.h / platform_io.h を引く (順序 3)。
+                                "-I" + str(ROOT / "arch/x86"),
+                                "-I" + str(ROOT / "platform/pc98"),
                                 "-I" + str(ROOT / "sdk/include"),
                                 "-I" + str(ROOT / "sdk/include/os32"),
                                 "-I" + str(ROOT / "drivers"), "-I" + str(ROOT / "fs"),

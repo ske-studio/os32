@@ -241,6 +241,30 @@ exec_heap のどれも減らさない。
 `kmalloc` も exec_heap もアプリ帯も 1 バイトも減らさない。SHM の 16KB
 結果ブロックのレイアウトは不変 (境界検査を足しただけ)。
 
+## N4a (Host Services 基盤、v1.4、2026-09-14)
+
+`libos32gui.shlib` に Host Services の窓口 (`os32gui_host_*` 6 本) と、その実体
+`libos32host` を積んだ。`libos32host.c` の `g_stream_buf`
+(`HOST_STREAM_BUF` = **16384 B**、`userland/lib/host/libos32host.h:59` /
+`libos32host.c:339`、`print_stream` の詰めバッファ) が shlib の per-app
+`.data`/`.bss` 帯に入る。
+
+shlib の `.data`/`.bss` は **アプリごとに別の物理ページ**に複製される
+(`sdk/link/shlib.ld:9`、ページ数は `__shlib_data_pages =
+(__shlib_data_end − __shlib_data_start) / 4096`、同 :65)。この 16KB ぶんで
+per-app の data ページが **4 → 8 ページ** に増える (+16KB / GUI アプリ)。
+
+| 項目 | 値 | 出所 |
+|---|---:|---|
+| `g_stream_buf` | 16384 B (= 4 ページ) | `HOST_STREAM_BUF` (`libos32host.h:59`) |
+| per-app shlib data ページ | 4 → **8** ページ | `__shlib_data_pages` (`sdk/link/shlib.ld:65`)、`shlib_data_pages()` (`kernel/shlib.c:200`) |
+| GUI アプリ 1 本あたりの増分 | **+16KB** | 上記は PD ごとに複製される (`shlib.ld:9`、`shlib_addrspace_detach` :255) |
+
+text 側の窓口 (`os32gui_host_*` と検査・写し) は全 PD で共有する 1 枚の
+`.text` に入るのでアプリ本数に比例しない。カーネル帯・exec_heap・アプリ帯
+(0x500000〜) は 1 バイトも減らさない。数値は静的な帯定義とヘッダ定数からの
+算術で、カーネル全体のリンクとゲストの空き容量は未測定 (`make` は未実施)。
+
 ## PM判断
 
 - pipe案は使用時にkernel kmallocを消費する (`fs/pipe_buffer.c:30-46`) ため、無償の予約領域として採らない。

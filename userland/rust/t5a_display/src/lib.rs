@@ -2,6 +2,7 @@
 #![no_main]
 
 mod boundary;
+mod clipboard;
 mod guest;
 mod inject;
 mod input;

@@ -7,8 +7,12 @@ AI コーディングアシスタント共通の入口。**置くのは指示と
 ## 体制
 
 PM = Claude Code (`claude-fable-5-1`)、コーダー = サブエージェント (`claude-opus-5`, worktree 隔離)、
-レビュアー = **ユーザー経由**、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
+レビュアー = **Codex** (`codex exec -s read-only`。2026-09-14 に Fable 枯渇で復帰、範囲を絞って依頼)、テスター = ローカル AI (`tools/emu_agent/`、スキル `os32-local-ai`)。
+実装は基盤・アプリ層とも Claude Code (PM) が Opus 5 サブエージェントで行う (2026-09-14 更新、別エージェント案は撤回。ROLES §0)。
 役割の境界・起動コマンド・規約の正典は [`docs/tasks/agents/ROLES.md`](docs/tasks/agents/ROLES.md)。
+**カーネル層 (カーネル本体・VFS/FS・exec/ページング・KAPI・shlib 読み込み) に分かっている不具合が
+あるあいだは、新機能より先に直す** — 理由と適用の仕方は
+[`docs/POLICY_DEV.md`](docs/POLICY_DEV.md) §1。
 承認済みスコープの中では止まらずに進め、止まるのは [D1]〜[D3] の承認・仕様の分岐・スコープ拡大・
 **独立レビューが要る地点** の 4 つだけ。レビューは PM が代行せず、ROLES §5 の書式で報告して渡す。
 
@@ -101,7 +105,7 @@ Three facts that matter on almost every change:
 
 **External programs** — OS32X flat ELF binaries linked with `sdk/link/app.ld` and entered through
 `sdk/crt/crt0.asm`; `main()` must be the **first function** in the source file. In-tree sources are
-under `userland/`: `shell/` (resident at 0x300000), `cmds/` (19 commands), `system/`, `tests/`,
+under `userland/`: `shell/` (resident at 0x300000), `cmds/` (25 commands), `system/`, `tests/`,
 `rust/` (no_std Cargo workspace), `lib/` (`libos32*`, statically linked). Standard apps and the
 board-game RPG are submodules (`apps/`, `game/`) built by `make external` — rebuild them after any
 KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
@@ -155,12 +159,14 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
 - `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
+- `hsync` は**サイズか日時が違うファイルだけ内容を比較し、両方同じならスキップ**する (票 H1+H3、2026-09-15)。同サイズの差し替えが届かない問題 (2026-09-14) は解消し、`hsync sys` は 0.3 秒。**サイズも日時も同じで中身が違う**ものだけ見逃す (`--verify` で全件比較)。直接上書きなので失敗時に旧内容は残らない (解消は H2)。 → [`docs/tasks/shell/TASK_H3.md`](docs/tasks/shell/TASK_H3.md) §8
 - `hsync` は HostDrv (`C:\\os32`) の内容で NHD を上書きする。NHD 配備の後に `hsync` するときは**先に `make deploy`** で HostDrv を最新にする (古いカーネル / gshell に戻った前例)。 → §4-33
 - Device windows: never decide one from the RAM **ceiling** (`sys_get_mem_kb`) — since K6-RAM that is the
   top-of-RAM address, and a 15MB machine tops out at 17MB. Ask the physical map for that range
   (`pgalloc_range_has_ram`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary (`ext2_to_vfs_err`); `vfs_open` refuses
   directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
+- ext2 はメタデータの I/O エラーを 1 回でも踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15、Linux の `errors=remount-ro` 相当、票 B8)。読み取りは通る。superblock にエラーの印が残り、再起動すると警告付きで読み書きに戻る。書き込みが急に全部 -15 になったら故障を疑い、NHD をホストの `e2fsck` にかける。 → [`docs/tasks/shell/TASK_FS_TYPE.md`](docs/tasks/shell/TASK_FS_TYPE.md) §2-7
 
 ## Documentation
 

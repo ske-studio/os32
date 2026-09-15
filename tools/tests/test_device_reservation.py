@@ -34,7 +34,9 @@ class Broker(unittest.TestCase):
                 source = source.replace('__asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");', '(void)cr0_val;')
                 (tmp / f'{unit}_host_source.c').write_text(source)
             cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', '-DPHYSMEM_HOST_TEST=1']
-            cmd += ['-I' + str(root / p) for p in ('include', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(tmp)]
+            # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
+            # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+            cmd += ['-I' + str(root / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(tmp)]
             subprocess.run(cmd + [str(root / 'tools/tests/device_reservation_stage_host.c'), str(root / 'kernel/physmem.c'), '-o', str(tmp / 'test')], check=True)
             subprocess.run([str(tmp / 'test')], check=True, timeout=20)
 

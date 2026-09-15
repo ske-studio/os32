@@ -3,7 +3,25 @@
 # ============================================================================
 
 # === カーネル ASM ソース ===
-ASM_KERNEL = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm lib/kstring_asm.asm lib/sqlite3/sqlite_stack.asm drivers/ne2000_io.asm
+ASM_KERNEL_PRE  = kernel/kentry.asm kernel/isr_stub.asm kernel/v86_entry.asm kernel/ring3_entry.asm kernel/setjmp.asm
+ASM_KERNEL_POST = lib/sqlite3/sqlite_stack.asm drivers/ne2000_io.asm
+
+# kstring の 13 本 (kmemcpy / memcpy / kmemset / memset / kstrlen / strlen /
+# kstrcmp / strcmp / kstrncmp / strncmp / kstrcpy / kstrncpy / memcmp) は
+# x86 では lib/kstring_asm.asm、それ以外の ARCH では同じ契約の C 版
+# lib/kstring_c.c を積む (移植準備 順序 4-b)。
+#
+# **x86 の既定はアセンブリのまま。** C 版に切り替えるかどうかは速度の実測が
+# いる別の判断で、ここではまだ変えない。両版が同じ結果を返すことは
+# tools/tests/test_kstring_c.py が両方を同じ実行ファイルにリンクして照合する。
+ifeq ($(ARCH),x86)
+ASM_KERNEL    = $(ASM_KERNEL_PRE) lib/kstring_asm.asm $(ASM_KERNEL_POST)
+KSTRING_C_SRC =
+else
+ASM_KERNEL    = $(ASM_KERNEL_PRE) $(ASM_KERNEL_POST)
+KSTRING_C_SRC = lib/kstring_c.c
+endif
+
 ASM_KERNEL_OBJ = $(ASM_KERNEL:.asm=.o)
 
 # === カーネル C ソース ===
@@ -21,8 +39,9 @@ C_KERNEL = \
     fs/fatfs/ff.c fs/fatfs/diskio.c fs/fatfs_vfs.c \
     fs/ext2_super.c fs/ext2_inode.c fs/ext2_dir.c fs/ext2_file.c fs/ext2_fmt.c fs/ext2_vfs.c fs/vfs.c fs/vfs_fd.c fs/fd_redirect.c fs/pipe_buffer.c fs/iso9660.c fs/hostdrvfs.c \
     exec/exec.c exec/exec_heap.c exec/appslot.c exec/launch.c exec/ring3_str.c \
-    kapi/kapi_generated.c kapi/kapi_db.c kapi/kapi_sys.c \
-    lib/path.c lib/utf8.c lib/kprintf.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c lib/crc32.c
+    kapi/kapi_generated.c kapi/kapi_db.c kapi/kapi_sys.c kapi/kapi_host.c \
+    lib/path.c lib/utf8.c lib/kprintf.c lib/os_time.c lib/kstring.c lib/kutf16.c lib/kmath.c lib/crc32.c \
+    $(KSTRING_C_SRC)
 
 C_KERNEL_OBJ = $(C_KERNEL:.c=.o)
 
@@ -178,7 +197,8 @@ kernel-lgy98-link:
 	$(MAKE) kernel
 
 kernel-nolgy98:
-	@rm -f $(LGY98_STAMP)
+	@mkdir -p $(BUILD_OUT)
+	@echo off > $(LGY98_STAMP)
 	$(MAKE) kernel
 
 .PHONY: kernel-lgy98 kernel-lgy98-link kernel-nolgy98

@@ -62,6 +62,7 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     u32 file_size = 0;
     int rc;
+    int kind;
     void *fs_ctx;
     VfsOps *ops;
 
@@ -83,8 +84,18 @@ static int vfs_open_internal(const char *path, int mode, int owner,
 
     /* ディレクトリは open できない。以前は get_file_size がディレクトリの
      * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
-     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた */
-    if (vfs_path_kind(resolved) == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた。
+     *
+     * **種別が確定しないときも open しない** (Codex 実装レビュー 往復 4 の B7)。
+     * 「DIR に一致したときだけ弾く」作りだと、stat が読めずに kind が負値へ
+     * なった経路が拒否をすり抜け、その先の get_file_size (ディレクトリでも
+     * 成功する) が FD を発行してしまう — 上の不具合が開き直る。
+     * 「エラー」を「ディレクトリではない」と読み替えない。
+     *
+     * NOTFOUND だけは続行する。下に O_CREAT の作成経路があるため。 */
+    kind = vfs_path_kind(resolved);
+    if (kind == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+    if (kind < 0 && kind != VFS_ERR_NOTFOUND) return kind;
 
     /* サイズ取得・存在確認 */
     rc = -1;
@@ -96,12 +107,20 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     }
 
     if (rc != VFS_OK) {
-        /* ファイルが存在しない場合 */
+        /* **作成へ進めるのは「本当に無い」と分かったときだけ** (票 B8 の ②)。
+         * 以前はサイズ取得の**あらゆる失敗**でここへ来て空ファイルを書いて
+         * いたので、「通常ファイルと確認済み → サイズ取得だけ一度 I/O 失敗
+         * → 書き込みは成功」で、**O_TRUNC を付けていなくても既存の中身が
+         * 黙って消えた**。O_CREAT あり・O_TRUNC なしは「無ければ作る、
+         * あれば開く」という最も普通の書き込み用途なので被害が大きい。
+         * 「読めなかった」を「無い」と読み替えない。 */
+        if (rc != VFS_ERR_NOTFOUND) return rc;
         if (mode & O_CREAT) {
             /* 作成処理 (サイズ0の空ファイルを作成してからサイズ取得等) */
             /* 今回は簡易的に0バイトでwriteして作らせる */
+            if (!ops->write_file) return VFS_ERR_INVAL;
             rc = ops->write_file(fs_ctx, rel_path, "", 0);
-            if (rc != VFS_OK) return rc;
+            if (rc < 0) return rc;
             file_size = 0;
         } else {
             return VFS_ERR_NOTFOUND;
@@ -109,8 +128,13 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     } else {
         if (mode & O_TRUNC) {
             if (mode & O_WRONLY || mode & O_RDWR) {
-                /* 切り詰め：空ファイルで上書き */
-                ops->write_file(fs_ctx, rel_path, "", 0);
+                /* 切り詰め：空ファイルで上書き。
+                 * **戻り値を見る** — 以前は捨てていたので、ext2 の一括書き込みが
+                 * 持つディレクトリ拒否 (fs/ext2_file.c) のような失敗も消え、
+                 * 「切り詰まった」ことになっているサイズ 0 の FD が出ていた。 */
+                if (!ops->write_file) return VFS_ERR_INVAL;
+                rc = ops->write_file(fs_ctx, rel_path, "", 0);
+                if (rc < 0) return rc;
                 file_size = 0;
             }
         }

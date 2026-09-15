@@ -54,6 +54,21 @@ pub mod session;
 pub use os32api::cfg as cfgabi;
 pub mod cfgro;
 
+/* ---- UTF-8 境界計算 (票 N4 §5 で client.rs から切り出し) ----
+ * os32api にもクレートの他の部分にも依存しない。client.rs と hostsvc.rs が
+ * 共用し、host_tests が `#[path]` で直に取り込む。 */
+pub mod utf8core;
+
+/* ---- v1.4 Host Services (票 N4 §1) ----
+ * 表 105..=110。libos32host.a を呼ぶ薄い extern "C" ラッパー。`kapi` は
+ * cfgro.rs の static を共用する (ここで再定義しない)。 */
+/// `libos32host` の ABI 宣言 (票 N4 §1 で `os32api::host` へ集約)。
+/// `hostsvc.rs` はこの**別名**だけを見る (os32api を名指ししない)。
+pub use os32api::host as hostabi;
+pub mod hostsvc;
+/// print_file のファイル I/O 継ぎ目の本体 (os32api の sys_open/read/close)。
+mod hostsvc_file;
+
 /* ---- 共有ライブラリの先頭ページ (票 C3) ----
  * `.shlib_hdr` に 32B ヘッダ + ジャンプ表を置き、公開関数を `extern "C"` で
  * 出す。アプリはこの表を通してだけライブラリに入る (`libos32gui_stub`)。 */

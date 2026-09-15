@@ -132,24 +132,33 @@ EOF stream_id  // ストリーム終端
 
 ## 4. フレーム形式 (raw Ethernet, 独自 EtherType)
 
+**正典は `docs/tasks/network/TASK_N0.md` §1b (ワイヤ v2、2026-09-14)**。ここは要約で、
+食い違ったら N0 が勝つ。v1 (12B ヘッダ、`stream_id` 無し、L0〜L3 で合格) は N1 で v2 に
+置き換え、合格実績は v2 で取り直す。
+
 - P2P なので ARP は不要。OS32 の MAC と Host Agent の MAC は HELLO で交換して
-  以後固定する。EtherType は未使用値を 1 つ選ぶ (実装時に確定、experimental 帯)。
-- リンクヘッダ (Ethernet ペイロード先頭): `type(u8)` opcode、`flags(u8)`、
-  `epoch(u16)`、`seq(u32)`、`ack_seq(u32)`、`length(u16)` … 詳細は着手時に凍結。
-- 制御フレーム (WINDOW / ACK / HELLO) は小さく、60B へ padding して送る。
+  以後固定する。EtherType は 0x88B5 (experimental 帯)。
+- リンクヘッダ **20B、明示的に直列化 (LE アクセサ、C 構造体の padding に依存しない)**:
+  `op(u8)` `flags(u8)` `epoch(u16)` `seq(u32)` `ack(u32)` `length(u16)` `rid(u32)` `sess(u16)`。
+  `sess` = セッション ID (**Agent が永続カウンタで採番、再使用せず枯渇で停止**、全フレーム)、`epoch` = セッション内の
+  再同期世代 (OS32 が +1、周回は新セッション)、`rid` = 要求 ID (セッション内で単調増加、0 は
+  使わない)。HELLO 以外は `sess` と `epoch` が控えと一致するフレームだけ受け付ける (両端とも)。
+- 制御フレーム (WINDOW / ACK / STATUS / RELEASE / HELLO) は小さく、60B へ padding して送る。
 
-| opcode | 向き | 用途 |
+| op | 向き | 用途 |
 |---|---|---|
-| HELLO | 双方向 | MAC / epoch / 初期 WINDOW / 能力交換、再同期 |
-| REQUEST | OS32 → Host | HTTP_GET / OPEN / CONNECT など (request_id) |
-| RESPONSE | Host → OS32 | 要求の結果ヘッダ (status, stream_id) |
-| DATA | 主に Host → OS32 | ストリームのペイロード (stream_id, seq) |
-| EOF | Host → OS32 | ストリーム終端 |
-| ACK | OS32 → Host | ack_seq まで受信・処理済み |
-| WINDOW | OS32 → Host | 絶対値 credit の広告 (§2-1) |
+| HELLO (1) | 双方向 | **3 way** (flags: SYN / SYN-ACK / CONFIRM / ESTABLISHED)。`seq` = OS32 の nonce、`ack` = Agent の nonce、payload = Agent 世代 (`agent u16`)。MAC / epoch / sess の交換、再同期。遅延した HELLO 1 通では切替が起きない |
+| REQUEST (2) | OS32 → Host | 要求行 (`rid`、`seq` = 0)。本文が要る要求は要求行に宣言長 |
+| WDATA (8) | OS32 → Host | 要求本文 (`rid`、`seq` = 1〜、REQUEST と同じ seq 空間) |
+| RESPONSE (3) | Host → OS32 | 要求の結果 (`rid`、本文 6B 固定 = `status u16` + `length u32`)。flags bit0 = 制御結果 (PROCESSING / TOMBSTONE / NO_SLOT)、flags 0 = 業務結果 (HTTP ステータスはそのまま) |
+| STATUS (9) | OS32 → Host | `rid` の結果の再提示 / 生存確認の要求 |
+| RELEASE (10) | OS32 → Host | ハンドルを閉じた通知 (Agent はその `rid` を捨てて墓標を残し、flags bit0 の ACK を返す) |
+| DATA (4) / EOF (5) | Host → OS32 | 応答本文のストリーム (`rid`、`seq` = 1〜)。WINDOW を受けた `rid` だけ |
+| ACK (6) | 双方向 | `rid` + `ack` = 順序どおり受けた最終 seq (累積)。flags bit0 = RELEASE への ACK |
+| WINDOW (7) | OS32 → Host | 絶対値 credit の広告 (§2-1) と配送開始の許可 |
 
-OS32 → Host のデータ (REQUEST 本文など) はホストに余裕があるのでフロー制御を
-簡略化してよい (非対称、§2)。
+OS32 → Host のデータ (WDATA) は 1 本ずつ ACK を待って送る (ホストに余裕があるので
+credit は無いが、stop-and-wait で順序と重複排除を単純にする — 非対称、§2)。
 
 ## 5. 開発順序
 
@@ -173,6 +182,8 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
 | L3 Host Services | **機構はエミュレータ合格 (2026-09-05)**。外部プログラムから HTTP_GET → host_read が動く。回線速度に依らず OS32 側のメモリ上限が一定 |
 
 ## 5-1. 進捗 (ブランチ `feat/net-link`)
+
+> **履歴**: この節の v43 予約・KAPI 4 本案・呼び手側で `link_poll` を回す記述は v1 時点のもの。現行は KAPI v51 の 5 本と `link_tick` 駆動 (TASK_N0 §1a / §2a)。
 
 - **L0 実装・エミュレータ合格 (2026-09-05)**: `net/link.{c,h}` (独自 EtherType 0x88B5、
   16B リンクヘッダ op/epoch/seq/ack/length、EtherType はワイヤ big-endian・以降は LE)。
@@ -203,7 +214,26 @@ Host Services    HTTP / File / RPC を KAPI 末尾追加。Host Agent を実装
   OS32 は TCP/IP も HTTP も持たず、要求を出して結果だけ受け取る (方針どおり)。
   `link_stream_read` がアプリ側の消費入口。Host Agent (`tools/host_agent.py`) は /pattern を
   生成配送、http(s):// を urllib で実取得、/file/ をホストファイル読み、TIME を時刻応答。
-- **残りは KAPI 公開だけ (KAPI v43、GUI の v42 の次に確定)**: Host Services を外部プログラムへ
+- **N1 実装完了 (2026-09-14、コーダー worktree。ホスト TDD のみ — ゲスト受入は PM)**:
+  ワイヤ v2 (20B ヘッダ・3 way HELLO・rid 台帳・RELEASE/STATUS) と
+  `net/link.c` の非ブロッキング化、**KAPI v51** (`host_open` / `host_status` /
+  `host_read` / `host_write` / `host_close`、slot 208〜212 = 0x348〜0x358)、
+  `tools/host_agent.py` v2 を実装。プロトコルを進めるのは 100Hz の `link_tick()`
+  だけ (`kernel/isr_handlers.c` の `ne2k_timer_tick()` の直後。反射モードでは
+  `link_init` を呼ばないので起動しない)。同期版 `link_hello` / `link_request` /
+  `link_service_get` / `link_stream_read` / `link_poll` は**廃止**し、自己試験
+  (L0〜L3) を非同期 API + IF=1 の hlt 待ちの上に書き直した。
+  ホスト TDD 2 本が GREEN: `make check-host-agent` (25/25、Agent 側の反例) と
+  `make check-net-link-host` (29/29、実 `net/link.c` + 実 `kapi/kapi_host.c` +
+  実 Agent をサブプロセス)。ケース名と TASK_N0 §3 の指摘番号の対応表・決めたこと・
+  既存 `check-net-l0`〜`l3` が読むシンボルの v2 での意味は
+  [`tools/tests/n1_tdd.md`](../../../tools/tests/n1_tdd.md)。
+  移植性調査は [`docs/tasks/portability/SURVEY_N1.md`](../portability/SURVEY_N1.md)。
+  **未実施** (PM / テスターの受入): `make clean` → `make all` → `make check`、
+  `kernel-lgy98-link` の配備、`userland/tests/host_test.c` の実機実行、
+  `check-net-l0`〜`l3` と `check-net-m2` の回帰。
+- **(履歴) 残りは KAPI 公開だけ (KAPI v43 案)**: 以下は v1 時点の案で、確定した ABI は
+  **KAPI v51** (TASK_N0 §1a、上の N1 の行)。当時の記録として残す。Host Services を外部プログラムへ
   出す。版番号は [KAPI_SPEC §3-2 の予約表](../../KAPI_SPEC.md) で **v43** に調停済み
   (GUI が v42、その次。2026-09-06 に v41/v42 → v42/v43 へ改訂)。追加する KAPI (案、末尾追記):
 

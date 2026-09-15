@@ -20,7 +20,12 @@ with tempfile.TemporaryDirectory(prefix='os32-paging-') as tmp:
     allocator = (ROOT / 'kernel/pgalloc.c').read_text()
     allocator = allocator.replace('irq_save()', '0').replace('irq_restore(flags)', '(void)flags')
     (tmp / 'pgalloc_host_source.c').write_text(allocator)
-    includes = ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib')] + ['-I' + str(tmp)]
+    # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+    # arch_io.h / platform_io.h を引く (順序 3)。build/config.mk の
+    # INC_COMMON と同じものをここでも渡す。
+    includes = ['-I' + str(ROOT / p)
+                for p in ('include', 'arch/x86', 'platform/pc98',
+                          'kernel', 'lib')] + ['-I' + str(tmp)]
     exe = tmp / 'paging'
     harness = 'paging_rebuild_host.c' if args.rebuild else 'paging_bounds_host.c'
     defines = ['-DPHYSMEM_HOST_TEST=1']

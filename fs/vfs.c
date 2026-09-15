@@ -536,6 +536,33 @@ int vfs_stat(const char *path, OS32_Stat *buf)
     return rc;
 }
 
+/* ======================================================================== */
+/*  vfs_set_mtime — 更新日時の設定 (票 H3 / 設計書 §5.2)                     */
+/*                                                                          */
+/*  VfsOps の set_mtime は**任意実装**。持たない FS は VFS_ERR_NOSYS を返す  */
+/*  — これは失敗ではなく「この FS には無い」という答えで、呼び手 (hsync) は  */
+/*  内容の同期を続けたまま「時刻の保存を省略した」と表示する。              */
+/*                                                                          */
+/*  mtime == 0 は現行 ABI で「不明」の印 (OS32_Stat に有効性ビットが無い)。  */
+/*  不明を書き込めてしまうと、次の同期で「証拠が無い」状態を自分で作る       */
+/*  ことになるので、ここで断る。                                            */
+/* ======================================================================== */
+int vfs_set_mtime(const char *path, os_time_t mtime)
+{
+    char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
+    void *fs_ctx;
+    VfsOps *ops;
+
+    if (!path || !path[0]) return VFS_ERR_INVAL;
+    if (mtime == 0) return VFS_ERR_INVAL;      /* 0 = 不明。書かせない */
+
+    vfs_resolve_path(path, resolved, VFS_MAX_PATH);
+    ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
+    if (!ops) return VFS_ERR_NOMOUNT;
+    if (!ops->set_mtime) return VFS_ERR_NOSYS;
+    return ops->set_mtime(fs_ctx, rel_path, mtime);
+}
+
 /* vfs_path_kind の list_dir プローブ用 (何もしない) */
 static void vfs_kind_probe_cb(const VfsDirEntry *entry, void *ctx)
 {
@@ -557,24 +584,40 @@ int vfs_path_kind(const char *path)
     /* マウントルートは常にディレクトリ (FS ドライバに聞かない) */
     if (vfs_rel_is_root(rel_path)) return VFS_KIND_DIR;
 
+    /* stat を**持っている**ドライバの答えは最終判断。失敗してもプローブへ
+     * 落とさない (Codex 実装レビュー 往復 3 の B6)。
+     * 以前は NOTFOUND 以外の失敗を「stat 未対応」とみなして下へ落としていた
+     * ので、stat が一時的に読めなかっただけのディレクトリが
+     * get_file_size (ディレクトリでも成功する) でファイルに化け、
+     * `cd` が NOTDIR になり `sys_open` のディレクトリ拒否をすり抜けた。
+     * 「未対応」はドライバが stat を**持たない**ことで表す。 */
     if (ops->stat) {
         rc = ops->stat(fs_ctx, rel_path, &st);
         if (rc == VFS_OK) {
             return ((st.st_mode & OS_S_IFMT) == OS_S_IFDIR) ? VFS_KIND_DIR : VFS_KIND_FILE;
         }
-        if (rc == VFS_ERR_NOTFOUND) return VFS_ERR_NOTFOUND;
-        /* それ以外のエラーはドライバの stat 未対応とみなし下のプローブへ */
+        return rc;
     }
 
-    /* stat が無い/失敗した FS: list_dir が通ればディレクトリ、
-     * get_file_size が通ればファイル */
-    if (ops->list_dir &&
-        ops->list_dir(fs_ctx, rel_path, vfs_kind_probe_cb, (void *)0) == VFS_OK) {
-        return VFS_KIND_DIR;
+    /* stat を持たない FS だけのプローブ: list_dir が通ればディレクトリ、
+     * get_file_size が通ればファイル。
+     * **「読めなかった」エラーはそのまま伝える** — get_file_size は
+     * ディレクトリでも成功するので、ここで落とすとファイルに化ける。
+     * 次へ進むのは「ディレクトリではない」と分かったときだけ。 */
+    if (ops->list_dir) {
+        rc = ops->list_dir(fs_ctx, rel_path, vfs_kind_probe_cb, (void *)0);
+        if (rc == VFS_OK) return VFS_KIND_DIR;
+        if (rc != VFS_ERR_NOTDIR && rc != VFS_ERR_NOTFOUND) return rc;
     }
     if (ops->get_file_size) {
         u32 sz;
-        if (ops->get_file_size(fs_ctx, rel_path, &sz) == VFS_OK) return VFS_KIND_FILE;
+        rc = ops->get_file_size(fs_ctx, rel_path, &sz);
+        if (rc == VFS_OK) return VFS_KIND_FILE;
+        /* サイズ取得がディレクトリを断ったなら、それは種別が**分かった**と
+         * いうこと (票 B8 の ③ で ext2 / HostDrv の両方が断るようにした)。 */
+        if (rc == VFS_ERR_ISDIR) return VFS_KIND_DIR;
+        /* 「読めなかった」を「無い」と読み替えない (票 B8) */
+        if (rc != VFS_ERR_NOTFOUND) return rc;
     }
     return VFS_ERR_NOTFOUND;
 }

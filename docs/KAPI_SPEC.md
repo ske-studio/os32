@@ -1,4 +1,4 @@
-# KernelAPI v50 仕様書
+# KernelAPI v52 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -16,8 +16,8 @@
 | 最大プログラムサイズ | 1MB |
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
-| 現在のバージョン | **50** |
-| 合計エントリ数 | **212** (ヘッダ2 + 関数ポインタ208 + データフィールド2) |
+| 現在のバージョン | **52** |
+| 合計エントリ数 | **218** (ヘッダ2 + 関数ポインタ214 + データフィールド2) |
 
 ---
 
@@ -84,7 +84,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 |---|---|---|---|
 | v40 | **実装済み** | GUI HAL 枠 `gfx_screen_info` / `gfx_hw_fill_rect` / `gfx_hw_blit` ほか | 本書 §4 |
 | v42 | **実装済み (2026-09-06)** | GUI v1.1: `gui_call` / `gui_register` / `gfx_stats` / `gfx_lease_palette` / `sys_switch_shell` / `kbd_dropped_count` / `kbd_trygetrawkey` (レビュー ⑥) / `ime_feed_key` / `ime_set_render` (W2)。開発中は v41 と呼んでいたが、ime_* の追記を機に main マージ前に **v42 として確定** (2026-09-06 ユーザー承諾)。v41 の成果物は存在しない (main 未リリース) | [tasks/gui/TASK_K1](tasks/gui/TASK_K1_gui_call.md) |
-| v43 | 予約 (未実装のまま据え置き) | ネットワーク Host Services `host_open` / `host_read` / `host_status` / `host_close` | [tasks/network/LINK_PLAN §5-1](tasks/network/LINK_PLAN.md) |
+| v43 | **欠番** (Host Services に予約していたが v44〜v50 が先に実装された。使わない) | — | [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1 |
 | v44 | **実装済み (2026-09-11、K5b-K)** | GUI v1.3 K5: アプリ 4 本の同時実行 (契約 T2a、GetMessage 方式) `exec_start` / `exec_resume` / `exec_park` / `exec_kill` / `exec_app_state` と、フォーカス追従の音の排他 `snd_focus`。owner 1 (シェル帯) 専用。カウンタはカーネルシンボル (KAPI にしない)。v43 はネットワークに予約済みなので**飛ばした** | [tasks/gui/v13/TASK_K5_multiapp.md §D8](tasks/gui/v13/TASK_K5_multiapp.md)、[TASK_K5B_kernel](tasks/gui/v13/TASK_K5B_kernel.md) |
 | v45 | **実装済み (2026-09-11、K5c)** | GUI v1.3 K5: `exec_abort_clear` — CTRL+STOP の宛先を**フォーカス窓のアプリ**にする (契約 T6、決裁 A1)。IRQ1 は走っているアプリにしか要求を立てられないので、WM が本人の要求を降ろしてからフォーカス窓の ID を `exec_kill` する。owner 1 (シェル帯) 専用 | [tasks/gui/v13/TASK_K5B_gshell.md §決裁](tasks/gui/v13/TASK_K5B_gshell.md) |
 | v46 | **実装済み (2026-09-12、K6C)** | GUI v1.3 K6C: console シンク `con_sink_read` / `con_sink_stat` — GUI モード中のカーネル出力をリングに溜め、端末アプリ (外部) が吸う。読み手は 1 本 (owner 回収)。同じ追記で `sys_ram_kb` (K6-RAM 決裁 (2): 起動時に登録した実 RAM の合計 KB) も足した | [tasks/gui/v13/TASK_K6C_console.md](tasks/gui/v13/TASK_K6C_console.md)、[TASK_K6_ram_ceiling.md](tasks/gui/v13/TASK_K6_ram_ceiling.md) |
@@ -92,6 +92,8 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v48 | **実装済み (2026-09-12、T8-K)** | GUI v1.3 T8 full-screen GFX 復帰: `gfx_screen_owner` (画面の所有者 = `gfx_init` / `gfx_init_200` を呼んだ CPL=3 アプリ、回収で WM へ戻る)。同じ追記で「GUI 中に `OS32X_FLAG_GFX` の無い CPL=3 の `gfx_init` を断る」(D1a) と「`--cpl0` は GUI から起動させない」(D1) を入れた。WM の present を捨てる D2 は**落とした** (2026-09-12 ユーザー決裁) | [tasks/gui/v13/TASK_T8_fullscreen_gfx.md](tasks/gui/v13/TASK_T8_fullscreen_gfx.md) |
 | v49 | **実装済み (2026-09-12、T9-K)** | GUI v1.3 T9 shell script: 起動要求表 8 本 — `launch_req` / `launch_pending` / `launch_take` / `launch_report` / `launch_poll` / `launch_cancel` / `launch_child` と `sys_yield`。GUI 中の CPL=3 は入れ子 `exec_run` を使えないので、外部プログラムの起動と kill をカーネルの表に載せ owner 1 (WM) が仲介する。同じ追記で `exec_kill` を「id と子孫を末尾から回収」に固定した (D8) | [tasks/gui/v13/TASK_T9_sh.md](tasks/gui/v13/TASK_T9_sh.md) |
 | v50 | **実装済み (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
+| v51 | **実装済み (2026-09-14、N1)** | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212 = 0x348〜0x358、data_fields は 0x35C / 0x360 へ)。非ブロッキング (プロトコルを進めるのは 100Hz の `link_tick` だけ)、同時 2 ハンドル、ストリーム 1 本。実体は `kapi/kapi_host.c` + `net/link.c` | [tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a |
+| v52 | **実装済み (2026-09-15、H3)** | 更新日時の保存 `sys_set_mtime` 1 本 (slot 213 = 0x35C、data_fields は 0x360 / 0x364 へ)。`VfsOps` の**任意実装フック** `set_mtime` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS` (失敗ではなく「持っていない」)。実体は `kapi/kapi_sys.c` + `fs/vfs.c` + `fs/ext2_vfs.c` | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -101,9 +103,11 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 -12 `VERSION` / -13 `FULL`**、GUI v1.3 K7 (v47) が **-14 `AGAIN`** (「いまは無い / 後で
 もう一度」— 注入リングが空のときの `exec_resume`) を取る。ネットワーク Host Services は
 既存の -1〜-10 に写像し (送信失敗→`IO` -1、引数不正→`INVAL` -9、未対応→`NOSYS` -10 等)、
-固有の番号が要るときだけ **-15 以降**を使う (GUI の -11〜-14 を避ける)。
+固有の番号が要るときだけ **-16 以降**を使う (GUI の -11〜-14 と FS の -15 を避ける)。
 ネットワーク側はまだ 1 つも番号を使っていないので、K7 が -14 を取り開始点を 1 つ下げた
-(2026-09-12)。
+(2026-09-12)。票 B8 往復 5 (2026-09-15、ユーザー決裁 2) が **-15 `ROFS`** (「書き込みを
+受け付けない」— ext2 がメタデータの I/O エラーでエラー状態に入った後の書き込み系操作) を取り、
+開始点をさらに 1 つ下げた。**番号の追加だけで構造体・スロットは変えないので KAPI 版数は据え置き。**
 
 ---
 
@@ -550,6 +554,57 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 | 0x340 | db_bind_null | `int(int handle, int index)` |
 | 0x344 | db_error_code | `int(int handle)` |
 
+### Host Services (v51)
+
+要求 1 本 = ハンドル 1 本。**どれも待たない** (呼び手は `OS32_ERR_AGAIN` を見て
+`sys_yield` / `sys_halt` で再試行する)。プロトコルを進めるのは 100Hz の
+`link_tick()` だけで、KAPI は状態を読み書きするだけ。契約の正典は票
+[tasks/network/TASK_N0.md](tasks/network/TASK_N0.md) §1a、実体は
+`kapi/kapi_host.c` (検証と写し) + `net/link.c` (状態機械)。
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x348 | host_open | `i32(const char *req, u32 len)` |
+| 0x34C | host_status | `i32(i32 h, u32 *status, u32 *length)` |
+| 0x350 | host_read | `i32(i32 h, void *buf, u32 cap)` |
+| 0x354 | host_write | `i32(i32 h, const void *buf, u32 len)` |
+| 0x358 | host_close | `i32(i32 h)` |
+
+### 更新日時の保存 (v52)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x35C | sys_set_mtime | `int(const char *path, u32 mtime)` |
+
+- `mtime` は **UNIX Epoch 秒 (UTC)**。`0` は現行 ABI の「不明」の印なので `INVAL` で断る
+  (`OS32_Stat` に時刻の有効性ビットが無いため。不明を書けると次の同期で「証拠が無い」状態を
+  自分で作ることになる)。`path` は NUL 終端で `OS32_MAX_PATH` 未満 — 溢れたら**切り詰めずに**
+  `INVAL` (切り詰めた別のパスの時刻を動かさない)。CPL=3 からは 1 バイトずつ範囲を確かめながら
+  カーネル側へ写す (`kapi/kapi_sys.c`)。
+- `VfsOps.set_mtime` は**任意実装**。埋めていない FS ドライバでは `OS32_ERR_NOSYS` が返る。
+  これは失敗ではなく「この FS には無い」という答えで、呼び手は内容の同期を続けたまま
+  「時刻の保存を省略した」と表示する。**実装済みは ext2 だけ** (FAT / HostDrv / iso9660 は NOSYS)。
+- ext2 は inode の `mtime` を与えられた値に、`ctime` を**ゲスト側の現在時刻**にする
+  (`ctime` は作成時刻ではなく inode の状態変更時刻)。`atime` は触らない。
+  inode を書いたあと `ext2_sync()` まで通すので、成功は「媒体へ出した」を意味する。
+- **データを書き終えてから呼ぶこと。** 通常の書き込みは `mtime` を現在時刻で上書きするので、
+  先に設定すると消える (設計書 [HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) §5.2)。
+
+- `host_open`: 要求行 1〜1400B (超過 / 0 → `INVAL`) をカーネル領域へ写し REQUEST を
+  積む。HELLO 未確立 / 再同期中 → `STALE`、空き無し → `FULL`、直前のハンドルの
+  RELEASE が未 ACK → `AGAIN`、NIC 無し / 未初期化 → `NOSYS`。戻り値は h (0 / 1)。
+- `host_status`: 業務 RESPONSE 未着 → `AGAIN`。Agent が墓標を返したハンドル → `STALE`。
+  出力ポインタは NULL 可で、**全部を先に検証してから書く** (失敗時は書かない)。
+- `host_read`: 1 回に写す量は min(cap, リングの連続可用, 1400)。最後のバイトを写した
+  呼び出しは正の長さを返し、**その次**の呼び出しが 0。リングの所有者は最初に読んだ
+  ハンドルで、他方は `AGAIN`。
+- `host_write`: 宣言長のある要求だけ (`ECHO <len>` / `CLIP PUT <len>` /
+  `PRINT DATA <id> <len>` / `PUT ... <len>`)。`len > 残り宣言長` → `INVAL`
+  (部分受付はしない)。REQUEST の転送 ACK 前と未 ACK の WDATA がある間は `AGAIN`。
+- `host_close`: 任意の状態から解放し RELEASE を送る (bit0 の ACK まで再送)。
+  **STALE のハンドルからは送らない**。二重 close → `INVAL`。回収は
+  `exec_reclaim_owned` の `host_owner_exit`。
+
 - `db_open_existing`: `writable` は 0 = `SQLITE_OPEN_READONLY` / 1 = `SQLITE_OPEN_READWRITE`。
   それ以外は拒否。**CREATE も URI も付けない** ので、無い DB は作られない。空 path /
   `:memory:` / `file:` 接頭 / `OS32_MAX_PATH` 超も拒否。open の**前**に `vfs_stat` で
@@ -648,8 +703,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x348 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x34C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x360 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x364 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

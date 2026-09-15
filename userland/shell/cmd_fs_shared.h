@@ -12,7 +12,10 @@
 /* 空白スキップ */
 const char *fs_skip_space(const char *s);
 
-/* ディレクトリ判定 (sys_ls が成功すればディレクトリ) */
+/* ディレクトリ判定。**型で見る** (fs_path_kind 経由)。
+ * 列挙の成否は使わない — 1000 件超や途中の I/O 失敗を「ディレクトリでない」と
+ * 答えると cp -r が宛先の階層を取り違える (票 H1 / 往復 3 の B5)。
+ * 種別が分からないときは 0。不明を扱いたい呼び手は fs_path_kind の負値を見る。 */
 int fs_is_dir(const char *path);
 
 /* パス種別: FS_KIND_DIR / FS_KIND_FILE、負値は OS32_ERR_* (存在しない等) */

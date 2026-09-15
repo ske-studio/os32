@@ -34,6 +34,11 @@ static unsigned int irq_save(void) NOINST;
 static void irq_restore(unsigned int f) NOINST;
 static unsigned int irq_save(void) { unsigned int f = host_if; host_if &= ~0x200U; saves++; return f; }
 static void irq_restore(unsigned int f) { host_verify_commit(); restores++; host_if = f; }
+/* io.h を外しているので CPU 停止の原始命令も贋物にする。sys.c の
+ * sys_halt() / sys_reboot() が呼ぶだけで、この試験では到達しない
+ * (本物は hlt。ホストで実行すると CPL=3 で #GP になる)。 */
+static void _halt(void) NOINST;
+static void _halt(void) { }
 void kprintf(unsigned char a, const char *f, ...) { (void)a; (void)f; }
 '''
             (tmp / 'test.c').write_text(pre + source + '''

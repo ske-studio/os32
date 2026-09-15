@@ -13,15 +13,28 @@
 /*    - テーブル検索はKCG I/Oアクセス(500μs)の2.6%以下                       */
 /*                                                                          */
 /*  u32最適化:                                                               */
-/*    - マルチバイト文字の読み出しを *(u32*)src 一括読み出しに最適化          */
+/*    - マルチバイト文字の読み出しを le32_rd(src) 一括読み出しに最適化        */
 /*    - i386のアンアラインドu32読み出しペナルティは小さい                      */
 /*    - 日本語3バイト文字で3回のバイト読み→1回のu32読みに削減                  */
+/*    - パックの並び (先頭バイトが最下位) は CPU のバイト順ではなく           */
+/*      utf8_pack32 / utf8_cmp32 の約束。だから le32_rd() を通す              */
 /* ======================================================================== */
 
 #include "utf8.h"
 #include "memmap.h"
+#include "endian_le.h"
 
-static const u16 *unicode_jis_table = (const u16 *)MEM_UNICODE_TABLE_BASE;
+/* Unicode→JIS 変換表 (/sys/unicode.bin) は **媒体の上の外部形式** —
+ * u16 (LE) が 0x10000 語並んだものを、0x4A000 へ生のまま読み込んでいる
+ * (kernel/kernel.c の vfs_read)。表の番地は 2 バイト整列なのでアラインの
+ * 心配は無いが、`u16 *` で引くと BE の CPU で値が入れ替わる。だから
+ * バイト列として持ち、引くときに le16_rd() でバイト順を当てる。 */
+static const u8 *unicode_jis_table = (const u8 *)MEM_UNICODE_TABLE_BASE;
+
+static u16 jis_table_lookup(u32 cp)
+{
+    return le16_rd(unicode_jis_table + cp * 2);
+}
 
 /* Unicode→JIS 変換表 (/sys/unicode.bin) が使える状態か。
  *   -1 未判定 (初回参照時に自己診断する)
@@ -56,7 +69,7 @@ static int jis_table_probe(void)
     int i;
 
     for (i = 0; i < 4; i++) {
-        if (unicode_jis_table[probe_cp[i]] != probe_jis[i]) return 0;
+        if (jis_table_lookup(probe_cp[i]) != probe_jis[i]) return 0;
     }
     return 1;
 }
@@ -86,15 +99,21 @@ int utf8_char_bytes(const u8 *p)
 /*
  * UTF-8の先頭1文字をu32にパック (リトルエンディアン、ゼロパディング)
  *
- *   1B文字: *(u32*)p & 0x000000FF
- *   2B文字: *(u32*)p & 0x0000FFFF
- *   3B文字: *(u32*)p & 0x00FFFFFF  (日本語のホットパス)
- *   4B文字: *(u32*)p              (マスク不要)
+ *   1B文字: le32_rd(p) & 0x000000FF
+ *   2B文字: le32_rd(p) & 0x0000FFFF
+ *   3B文字: le32_rd(p) & 0x00FFFFFF  (日本語のホットパス)
+ *   4B文字: le32_rd(p)              (マスク不要)
  *
  * 例: 「か」(U+304B) = E3 81 8B
- *   → *(u32*)ptr & 0x00FFFFFF = 0x008B81E3
+ *   → le32_rd(ptr) & 0x00FFFFFF = 0x008B81E3
  *
- * 注意: 呼び出し側でバッファ末尾の4B読み出し境界をチェックすること。
+ * **並びは CPU のバイト順ではなく、この関数が決めている** —
+ * 先頭バイトが最下位、という約束は utf8_cmp32 の bswap32 と対になっていて、
+ * 比較の正しさがそこに乗っている。だから素の `*(const u32 *)p` ではなく
+ * le32_rd() を通す (include/endian_le.h)。x86 では同じ 1 命令に畳まれる。
+ *
+ * 注意: 呼び出し側でバッファ末尾の4B読み出し境界をチェックすること
+ *       (le32_rd も 4 バイトを読む。ここは以前と同じ約束)。
  */
 u32 utf8_pack32(const u8 *p)
 {
@@ -104,13 +123,13 @@ u32 utf8_pack32(const u8 *p)
         return (u32)b0;
     }
     if ((b0 & 0xE0) == 0xC0) {
-        return *(const u32 *)p & 0x0000FFFFu;
+        return le32_rd(p) & 0x0000FFFFu;
     }
     if ((b0 & 0xF0) == 0xE0) {
-        return *(const u32 *)p & 0x00FFFFFFu;
+        return le32_rd(p) & 0x00FFFFFFu;
     }
     /* 4バイトシーケンス */
-    return *(const u32 *)p;
+    return le32_rd(p);
 }
 
 /*
@@ -263,7 +282,7 @@ u16 unicode_to_jis(u32 cp)
     if (!jis_table_usable()) return 0;
 
     /* O(1) でテーブルから直接引く */
-    return unicode_jis_table[cp];
+    return jis_table_lookup(cp);
 }
 
 /* ======================================================================== */

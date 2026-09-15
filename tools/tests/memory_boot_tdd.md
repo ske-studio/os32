@@ -28,7 +28,7 @@ make check-memory-host                        # 上記を含む登録済みタ�
 | `test_huge_hint_no_promotion` | `mem_kb = 0xffffffff` を渡しても実在しない RAM へ昇格しない |
 | `test_no_fallback_after_bootstrap_or_stage_failure` | bootstrap / stage のどちらが失敗しても**旧アロケータへ黙って戻らない**。実際の `kernel.c` のゲートを切り出して実行し、下流 (`shm_init`) に到達したら失敗とする |
 | `test_actual_pte_verification_before_write` | metadata / workspace / hotdeploy の PTE を壊した状態では書き込む前に失敗し、既存メモリの内容が保たれる |
-| `test_kernel_boot_order_and_failstop` | `paging_init` → `memory_boot_init` → 下流の順序、`pgalloc_init(mem_kb)` が `kernel.c` から消えていること、失敗時に `cli; hlt` で止まること、`build/kernel.mk` に登録されていることを静的に照合 |
+| `test_kernel_boot_order_and_failstop` | `paging_init` → `memory_boot_init` → 下流の順序、`pgalloc_init(mem_kb)` が `kernel.c` から消えていること、失敗時に `for (;;) { _stop(); }` (io.h の原始命令 = `cli; hlt`) で止まること、`build/kernel.mk` に登録されていることを静的に照合 |
 
 ## 未検証
 

@@ -55,8 +55,10 @@ def main():
         return 1
 
     hello = u32("link_hello_ok")
-    rt_ok = u32("link_rt_ok")
-    rt_fail = u32("link_rt_fail")
+    # L0 専用のスナップショットを読む。link_rt_ok は自己試験の区間ごとに打ち直され、
+    # 最終読み出し時には最後に走った L3 の値になっているため使えない (F2)。
+    rt_ok = u32("link_l0_ok")
+    rt_fail = u32("link_l0_fail")
     retx = u32("link_retransmits")
     rxf = u32("link_rx_frames")
     rxd = u32("link_rx_dropped")

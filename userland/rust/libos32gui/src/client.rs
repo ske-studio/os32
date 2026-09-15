@@ -540,38 +540,9 @@ pub fn timer_kill(window: u32, timer_id: u8) -> GuiResult<()> {
 
 /* ================================================================ */
 /*  文字列 (契約 U9) — 切り詰めは UTF-8 の境界で                      */
+/*                                                                  */
+/*  実体は `crate::utf8core` へ移した (票 N4 §5: clip_get の境界を    */
+/*  host_tests から踏むため os32api 非依存の小モジュールへ出した)。    */
+/*  `client::utf8_seq_len` / `client::utf8_truncate` の名前は据置き。  */
 /* ================================================================ */
-
-/// UTF-8 の先頭バイトから符号単位のバイト長を得る (不正バイトは 1)。
-#[inline]
-pub fn utf8_seq_len(b: u8) -> usize {
-    if b < 0x80 {
-        1
-    } else if b & 0xE0 == 0xC0 {
-        2
-    } else if b & 0xF0 == 0xE0 {
-        3
-    } else if b & 0xF8 == 0xF0 {
-        4
-    } else {
-        1
-    }
-}
-
-/// `max` バイト以内に収まる UTF-8 の切れ目を返す (NUL 終端も尊重)。
-/// 途中の符号単位で切らない (CLAUDE.md の注意事項 / 契約 U9)。
-pub fn utf8_truncate(s: &[u8], max: usize) -> usize {
-    let lim = if s.len() < max { s.len() } else { max };
-    let mut i = 0usize;
-    while i < lim {
-        if s[i] == 0 {
-            break;
-        }
-        let need = utf8_seq_len(s[i]);
-        if i + need > lim {
-            break;
-        }
-        i += need;
-    }
-    i
-}
+pub use crate::utf8core::{utf8_seq_len, utf8_truncate};

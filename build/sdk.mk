@@ -100,6 +100,22 @@ check-constraints:
 check-privileged:
 	@python3 tools/check_privileged.py
 
+# カーネル側 C ソースの hlt / cli / sti 直書き検査 (移植性の準備、順序 2)。
+# これらは include/io.h の原始命令 (_halt / _idle / _stop / _enable /
+# _disable / irq_save / irq_restore) 経由で使い、arch 差し替えの境界を
+# io.h 1 枚に閉じ込める。切り出せない箇所は asm の直前に ARCH-ASM-OK と
+# 理由を書く。
+check-arch-asm:
+	@python3 tools/check_arch_asm.py
+
+# 外部形式 (LE) の直アクセス検査 (移植性の準備、順序 4-a)。媒体・書庫の上の
+# バイト列は include/endian_le.h の le16_rd / le16_wr / le32_rd / le32_wr を
+# 通す。`*(u32 *)&buf[off]` は「x86 は LE」「x86 は非アラインを許す」の 2 つに
+# 同時に寄りかかる書き方で、ARM では落ち、BE では値が化ける。
+# 文字列検査 (コンパイラ不要) と -Wcast-align=strict の 2 段で見る。
+check-le-access:
+	@python3 tools/check_le_access.py
+
 # GUI 共有プロトコル (os32_gui_shared.h ⇄ proto.rs) の定数・構造体の照合。
 # GUI v1.2 の G0 (契約凍結) のゲート。PM 所有 (docs/tasks/gui/v12/TASKS.md §5)。
 check-gui-proto:
@@ -150,6 +166,8 @@ check-tools-host:
 	PYTHONPATH=. python3 -B tools/tests/test_emu_playbook.py
 	python3 -B tools/tests/test_mk_settings_db.py
 	python3 -B tools/tests/test_mk_blank_nhd.py
+	python3 -B tools/tests/test_stat_cmd.py
+	python3 -B tools/tests/test_tar_cmd.py
 
 check-gshell-host:
 	python3 userland/gshell/host/integration.py
@@ -165,6 +183,7 @@ check-vfs-fd-sqlite-host:
 check-vfs-mount-dev-host:
 	python3 -B tools/tests/test_vfs_mount_dev.py
 	python3 -B tools/tests/test_ext2_read_bound.py
+	python3 -B tools/tests/test_ext2_write_io.py
 	python3 -B tools/tests/test_fatfs_stat.py
 
 check-sqlite-groups-host:
@@ -216,6 +235,53 @@ check-settings-protect-host:
 	python3 -B tools/tests/test_deploy_protect.py
 	python3 -B tools/tests/test_hsync_protect.py
 
+# hsync の同サイズ更新の検出 (票 H1、docs/tasks/shell/HSYNC_IMPROVEMENT_PLAN.md
+# §9 の A01〜A13)。実物の userland/system/hsync.c を #include し、KernelAPI だけを
+# オンメモリの贋 FS に差し替えて回す。fs/hostdrv_stat_rules.inc (HostDrv の stat
+# 失敗の是正) と CRC ストリーム核の既知ベクトルも同じ翻訳単位で見る。
+# 記録は tools/tests/h1_tdd.md。
+check-hsync-h1-host:
+	python3 -B tools/tests/test_hsync_h1.py --target
+
+# hsync の mtime 取得・保存と日時の前置判定 (票 H3、docs/tasks/shell/TASK_H3.md
+# §6 / §8)。H1 と同じく実物の userland/system/hsync.c を #include し、贋 FS に
+# **ノードごとの mtime** と sys_set_mtime (成功 / NOSYS / I/O 失敗) を持たせて回す。
+# FILETIME (1601 起点・100ns) -> Unix 秒の境界 (A16) は fs/hostdrv_stat_rules.inc の
+# 純関数を直接叩き、vfs_set_mtime の NOSYS 振り分けは実物の fs/vfs.c で見る。
+# --mutate は否定側 (日時が不明なのに省略する版などで落ちることの確認)。
+# 記録は tools/tests/h3_tdd.md。
+check-hsync-h3-host:
+	python3 -B tools/tests/test_hsync_h3.py --target --mutate
+
+# hdrv_list_dir の列挙ループ (票 H1 の「I/O 失敗を成功にしない」/ 対象
+# 「HostDrv のエラー処理」)。実物の fs/hostdrv_list_rules.inc を #include し、
+# hostdrv_query_dir に当たる 1 件取得だけを贋物にして、(a) 途中で負値 /
+# (b) 件数上限での打ち切り が VFS_OK で返らないことを見る。
+# 記録は tools/tests/h1_tdd.md。
+check-hostdrv-list-host:
+	python3 -B tools/tests/test_hostdrv_list.py --target
+
+# シェルの種別判定と cp -r の宛先階層 (票 H1 / 往復 3 の B5)。実物の
+# cmd_fs_shared.c + cmd_file.c を #include し、sys_stat は正しいまま sys_ls だけを
+# FULL / IO にして、列挙のエラーが「ディレクトリでない」に化けないことを見る。
+check-fs-kind-host:
+	python3 -B tools/tests/test_fs_kind.py --target
+
+# vfs_path_kind のプローブ (票 H1 / 往復 3 の B6)。実物の fs/vfs.c を #include し、
+# 「読めなかったディレクトリ」が get_file_size 経由でファイルに化けないことを見る。
+check-vfs-kind-host:
+	python3 -B tools/tests/test_vfs_kind.py --target
+
+# 読み取り失敗を「不存在」にしない (票 B8)。実物の ext2 を RAM ディスクへ載せ、
+# **間接ブロックを使う大きなディレクトリ**の読み出しを一度だけ落として、
+# 実物の vfs_open / vfs_open_sqlite まで通す。O_CREAT が既存ファイルを空に
+# しないことを、FD・write_file の呼び出し回数・読み直した中身で押さえる。
+# 2 巡目 (Codex 実装レビュー P1-4): 実物の fs/hostdrvfs.c を io.h の差し替えと
+# 贋の NP21/W で動かし、OPEN の失敗が NOTFOUND に畳まれないことを見る。
+check-b8-open-host:
+	python3 -B tools/tests/test_b8_open.py --target
+	python3 -B tools/tests/test_b8_hostdrv.py --target
+
 # KAPI v50 (db_open_existing / prepare_only / bind_* / error_code、票 S0-K)。実 SQLite + 実 VFS + RAM backend。
 check-db-v50-host:
 	python3 -B tools/tests/test_kapi_db_v50.py
@@ -232,13 +298,49 @@ check-install-recover-host:
 check-install-fresh-host:
 	python3 -B tools/tests/test_install_fresh.py --target
 
+# tools/host_agent.py v2 (ワイヤ v2 の Agent 側、票 N1 段 1)。贋 OS32 が
+# フレームを直接組んで rid 台帳 / 3 way HELLO / 墓標 / 枯渇停止を踏む。
+check-host-agent:
+	python3 -B tools/tests/test_host_agent.py
+# net/link.c (ワイヤ v2) + kapi/kapi_host.c (KAPI v51) のホスト TDD (票 N1 段 4)。
+# 実物のソースを #include し、NIC / cli-sti / 100Hz タイマ / ディスパッチャだけを
+# 贋物にする。対向は **実 Agent** (host_agent.py を UNIX ソケットで子プロセス起動)
+# か台本。記録は tools/tests/n1_tdd.md。
+check-net-link-host:
+	python3 -B tools/tests/test_net_link.py --target
 # libos32gui の os32gui_cfg_* wrapper の分岐 (票 S2-W)。C の実体は贋物。
 check-gui-host:
 	cargo test --manifest-path userland/rust/libos32gui/host_tests/Cargo.toml --target x86_64-unknown-linux-gnu --offline
+# libos32host + wget/lpr/hclip/hdate のホスト TDD (票 N3)。実物のソースを #include し、
+# KAPI / libos32host の関数だけを贋物に。記録は tools/tests/n3_tdd.md。
+check-host-lib-host:
+	python3 -B tools/tests/test_host_lib.py --target
 
-check: check-kapi-version check-manifests check-constraints check-privileged check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host
+# kstring の C 版 (移植性準備の順序 4-b)。実物の lib/kstring_asm.asm (nasm) と
+# 実物の lib/kstring_c.c を **同じ実行ファイルにリンク**し、13 本すべてを同じ
+# 入力で突き合わせる (戻り値とバッファの全内容が一致すること)。x86 の既定
+# ビルドはアセンブリのままなので、これは切り替えの門ではなく答え合わせ。
+# --mutate は否定側 (kstrcmp を符号付きにすると日本語ファイル名の並び順が
+# アセンブリ版と食い違って落ちる、など)。記録は tools/tests/kstring_c_host.c。
+check-kstring-c-host:
+	python3 -B tools/tests/test_kstring_c.py --mutate
+
+# ARM コンパイル計測 (移植性準備の順序 1)。カーネル側の C ソースを 1 本ずつ
+# arm-none-eabi-gcc に通し、通った本数と失敗の分類を出す。
+#
+# **`check` の列にはわざと入れていない。** これは合否の門ではなく計測器で、
+# 今 ARM で通らないのは当たり前 (x86 前提でよい、と決めて書いてある)。
+# 門にすると「直さないと緑にならない」圧力がかかり、まだ設計の決まっていない
+# arch/ の分離を急がせてしまう。io.h 経由への統一 (順序 2) や arch/ 導入
+# (順序 3) の効果を同じ物差しで見るために、独立したターゲットとして呼ぶ。
+#
+# arm-none-eabi-gcc が無い環境では SKIP して終了コード 0。
+check-arm-compile:
+	@python3 tools/check_arm_compile.py
+
+check: check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check
+.PHONY: sdk sdk-dist clean-sdk check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-arm-compile check

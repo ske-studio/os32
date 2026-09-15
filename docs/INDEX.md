@@ -57,7 +57,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [CONSTRAINTS.md](CONSTRAINTS.md) | **プロジェクト制約の正典** — C/ABI・ハードウェア・KernelAPI・検証・破壊的操作。CLAUDE.md と SOUL.md は ここの規則行を ID で参照する (`make check` が照合) |
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v50 仕様書 — 212エントリテーブル (ヘッダ2 + 関数208 + データフィールド2) + API追加手順 |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v52 仕様書 — 218エントリテーブル (ヘッダ2 + 関数214 + データフィールド2) + API追加手順 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | **開発案内** — 作業別の参照先 (読む / 触る / 検証) と、ファイル → 役割 → 仕様のファイル地図。仕様本文は持たない |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [archive/](archive/) | 完了済みの計画書 (ROADMAP_v1.0, REFACTORING_PLAN) — 当時の記録 |
@@ -99,6 +99,13 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ドキュメント | 内容 |
 |-------------|------|
+| [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | **hsync改善案（計画・未実装）** — 同サイズ内容比較、CRC検証、mtime取得・保存、安全な置換、配備世代、段階別受入 |
+| [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | **H1 票（実装中）** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run と理由表示、HostDrv stat 失敗の是正 |
+| [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | **H3 票（未着手、H1 の直後）** — HostDrv の FILETIME→st_mtime 変換、`sys_set_mtime` と VfsOps フック（ext2 先行、他は NOSYS）、時刻のみの同期 |
+| [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | **型判定の整理（未着手）** — 「読めなかった」を「その型ではない」と読み替えている箇所。B8 (I/O 失敗が不存在に畳まれディレクトリを open できる)、fs_is_dir の「不明」欠落、NP21/W のルート検査 |
+| [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) | 移植性調査 (N1 起点) — 直列化とアライメント、`cli`/`sti`/`hlt` の直書き一覧、他アーキ移行時の注意 |
+| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値** — `make check-arm-compile` (合否ではなく計測)。2026-09-15 時点 54/92、失敗はインライン asm 5 と io.h 経由 33、ヘッダ・型の食い違いは 0。順序ごとの再計測は §9 |
+| [../arch/README.md](../arch/README.md) | **`arch/` と `platform/` の正典** — 移植の 2 軸 (CPU / 機種)、`ARCH` `PLATFORM` の選び方、新しいアーキテクチャの足し方、番人 `check_arch_asm.py`。契約は `include/io.h` |
 | [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
 | [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) | S2 (設計) — `libos32cfg` の API と契約の実装写し、`cfg` コマンド、明示 `cfg init` (tsv → DB、欠損時だけ)、libos32gui 末尾追記、受入 C1〜C7 |
 | [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 設定レジストリの**着手計画** (PM 縮約案、決裁待ち) — 現状表、S0-K / S0-D / S0-T → S2 → S4 → S5 の順、後回しの一覧 |
@@ -130,6 +137,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/libinput/LIBINPUT_DESIGN.md](tasks/libinput/LIBINPUT_DESIGN.md) | libos32input — 入力抽象化ライブラリ設計書 |
 | [tasks/libasset/LIBASSET_DESIGN.md](tasks/libasset/LIBASSET_DESIGN.md) | libos32asset — アセット・リソース管理ライブラリ設計書 |
 | `tasks/libai/` `libbattle/` `libboard/` `libecon/` `libecs/` `libevent/` `libinv/` `libtext/` `tilemap/` | 各ゲームライブラリの設計書群 |
+| [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | **他アーキテクチャ移植調査** の索引 — 対象一覧、共通の調査軸 (ISA/番地/表示/入力/記憶/起動/検証環境/棚卸し/未確認)、移植先を問わず先にやれる作業。調査記録の置き場であり計画ではない |
+| [tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md) | **M0 移植性監査** (2026-09-08、実機不要) — `-Wcast-align=strict` による非整列アクセス 202 件の仕分け (確定不具合 2 + 潜在 1)、i386/ARM の構造体レイアウト実測 (完全一致)、キャッシュ/TLB 前提の棚卸し。走査は `tools/audit_cast_align.sh` |
+| [tasks/arch_port/BRAIN_MX28_HARDWARE.md](tasks/arch_port/BRAIN_MX28_HARDWARE.md) | SHARP Brain (i.MX28 世代) ハードウェア調査 (2026-09-08) — **主対象 PW-SH4 (実機保有)**。ARM926EJ-S の構成、LCDIF+ILI9805・GPIO キーマトリクス・LRADC タッチ・eMMC/SD/USB ガジェット、SH1〜SH7 の機種差分、**CE を通さない起動経路** (USB recovery boot / Program Image 自作)、OS32 の x86 依存の棚卸し |
 | [tasks/cross_compiler_rebuild.md](tasks/cross_compiler_rebuild.md) / [tasks/ext2_dind_debug.md](tasks/ext2_dind_debug.md) | 単発タスク記録 |
 
 ## man ページ

@@ -99,8 +99,10 @@ os32/
 ├── fs/             ファイルシステム (vfs, ext2, fatfs, iso9660, hostdrv 等)
 ├── exec/           OS32X(外部プログラム) のロードと環境設定
 ├── kapi/           外部プログラム向け KernelAPI リダイレクタ
-├── lib/            汎用ライブラリ (utf8, path, sqlite3 等)
-├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)
+├── lib/            汎用ライブラリ (utf8, path, sqlite3, zlib, microtar 等。vendor したものは各ディレクトリの README.OS32 が出所とライセンスの正典)
+├── include/        システム統合用共通ヘッダ群 (memmap.h, gfx_hal.h, wab_xe10.h 等)。io.h は原始命令の**契約**だけ
+├── arch/           CPU 依存の実装 (x86/arch_io.h — 割り込み制御・CPU 停止・IDT ロード)。`ARCH ?= x86` で選ぶ。足し方は arch/README.md
+├── platform/       機種依存の実装 (pc98/platform_io.h — ポート I/O・I/O ウェイト)。`PLATFORM ?= pc98` で選ぶ
 ├── userland/       ユーザー空間 (shell/, gshell/ (GUI シェル, Rust), cmds/, system/, tests/, rust/ (libos32gui 等), lib/)
 ├── .github/        GitHub Actions (workflows/check.yml: 静的ゲート)
 ├── apps/           git submodule (ske-studio/os32-apps) — 標準アプリ。make external / make apps
@@ -263,6 +265,18 @@ python3 tools/mkpkg.py --defs tools/package_defs.yaml --output packages/ --base 
 `launcher` は同じ §2b が書式 (4 列目に置けるのは 3 つの印か省略) だけを見る。
 `apps/` `game/` は staged SDK 側でそれぞれの `Makefile` が `mkos32x` を呼ぶので、
 そちらの GFX プログラムには各リポジトリで `--gfx` を付ける。
+
+#### `tools/audit_cast_align.sh`
+非整列アクセス候補の洗い出し (他アーキテクチャ移植の事前監査)。ホストの `gcc -m32` と
+`-Wcast-align=strict` で「アラインメント要件を上げるポインタキャスト」を列挙する。
+i386-elf クロスコンパイラは不要、`-fsyntax-only` なので成果物も作らない。`make check` には組み込んでいない。
+
+```bash
+tools/audit_cast_align.sh kernel   # kernel/ drivers/ gfx/ fs/ exec/ kapi/ lib/
+tools/audit_cast_align.sh user     # userland/ (newlib ヘッダが要るため網羅率は低い)
+```
+警告が出た = 必ず壊れる、ではない。仕分けの手順と結果は
+[tasks/arch_port/M0_PORTABILITY_AUDIT.md](tasks/arch_port/M0_PORTABILITY_AUDIT.md)。
 
 ### §8-5 開発環境の構築 (クロスコンパイラ)
 

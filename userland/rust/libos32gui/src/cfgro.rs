@@ -158,10 +158,13 @@ pub fn raw_out_ok(out: *const u8, cap: u32) -> bool {
 
 /// [`raw_span_ok`] を通してから `&[u8]` を作る。通らなければ `None`。
 ///
+/// `hostsvc.rs` も同じ検査を使うので `pub` (票 N4 §5、host_tests の `#[path]`
+/// 取り込みのため)。
+///
 /// # Safety
 /// `ptr` が非 NULL なら `len` バイト読めること (長さと折り返しはここで見る)。
 #[inline]
-unsafe fn checked_slice<'a>(ptr: *const u8, len: u32, max: u32) -> Option<&'a [u8]> {
+pub unsafe fn checked_slice<'a>(ptr: *const u8, len: u32, max: u32) -> Option<&'a [u8]> {
     if !raw_span_ok(ptr, len, max) {
         return None;
     }

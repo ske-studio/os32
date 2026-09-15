@@ -420,7 +420,7 @@ static int kbd_gui_getbyte(void)
         if (ch >= 0) return ch;
         /* 成立すれば戻らない。戻ってきたのは止められなかったときだけ。 */
         (void)exec_park_kbd();
-        __asm__ volatile("hlt");
+        _halt();
     }
 }
 
@@ -454,7 +454,7 @@ int kbd_getchar(void)
                 if (sch >= 0) return sch;
             }
 
-            __asm__ volatile("hlt");
+            _halt();
 
             /* rshellタイムアウト: スペースキーを自動返却 */
             if (timeout_ticks > 0) {
@@ -475,7 +475,7 @@ int kbd_getkey(void)
     if (kbd_gui_mode) return kbd_gui_getbyte();
 
     while (kbd_count == 0) {
-        __asm__ volatile("hlt");
+        _halt();
     }
 
     RING_DEQUEUE(entry, kbd_buf, kbd_head, kbd_count, KBD_BUF_SIZE);

@@ -13,6 +13,7 @@
 #include "atapi.h"
 #include "kmalloc.h"
 #include "lib/kstring.h"
+#include "endian_le.h"   /* LE アクセサの正典 (ここの 2 つはその別名) */
 
 /* ======================================================================== */
 /*  内部ヘルパー                                                             */
@@ -51,13 +52,13 @@ static int iso_strcasecmp(const char *a, const char *b)
 /* PVD/ディレクトリレコードからリトルエンディアンu32読み出し (both-endian) */
 static u32 iso_read_le32(const u8 *p)
 {
-    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+    return le32_rd(p);
 }
 
 /* PVD/ディレクトリレコードからリトルエンディアンu16読み出し */
 static u16 iso_read_le16(const u8 *p)
 {
-    return (u16)p[0] | ((u16)p[1] << 8);
+    return le16_rd(p);
 }
 
 /* ファイル名からバージョン番号 ";1" を除去し、末尾の "." も除去
@@ -518,5 +519,9 @@ VfsOps iso9660_ops = {
     iso9660_get_file_size, iso9660_read_stream, iso9660_write_stream,
     iso9660_sync,
     iso9660_total_blocks, iso9660_free_blocks, iso9660_block_size_fn,
-    iso9660_stat
+    iso9660_stat,
+    /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
+     * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
+     * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0
 };

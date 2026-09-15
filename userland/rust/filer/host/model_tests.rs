@@ -87,6 +87,23 @@ fn abort_deletes_the_partial_output_it_created() {
     assert_eq!(job.dst_fd, -1);
 }
 
+/// 印刷 (票 N4b §2) はファイラの選択 (cwd + 選択名) から `os32gui_print_file`
+/// に渡す **絶対パス** と **basename** を組む。どちらも `model` の純関数
+/// (`path_join` / `basename_off`) なので KAPI 無しで確かめられる。
+#[test]
+fn print_target_path_and_basename() {
+    use crate::model::{basename_off, path_join};
+    let mut p = [0u8; PATH_CAP];
+    let n = path_join(b"/usr/docs", b"readme.txt", &mut p).unwrap();
+    assert_eq!(&p[..n], b"/usr/docs/readme.txt");
+    assert_eq!(&p[basename_off(&p[..n])..n], b"readme.txt");
+
+    /* ルート直下は区切りを重ねない。 */
+    let n = path_join(b"/", b"a.txt", &mut p).unwrap();
+    assert_eq!(&p[..n], b"/a.txt");
+    assert_eq!(&p[basename_off(&p[..n])..n], b"a.txt");
+}
+
 /// 上書きコピー (created == false) は中断しても消さない。既存ファイルを
 /// 消してしまうほうが害が大きい。
 #[test]

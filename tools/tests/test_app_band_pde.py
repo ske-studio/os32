@@ -23,7 +23,12 @@ with tempfile.TemporaryDirectory(prefix='os32-appband-') as tmp:
     allocator = (ROOT / 'kernel/pgalloc.c').read_text()
     allocator = allocator.replace('irq_save()', '0').replace('irq_restore(flags)', '(void)flags')
     (tmp / 'pgalloc_host_source.c').write_text(allocator)
-    includes = ['-I' + str(ROOT / p) for p in ('include', 'kernel', 'lib')] + ['-I' + str(tmp)]
+    # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+    # arch_io.h / platform_io.h を引く (順序 3)。build/config.mk の
+    # INC_COMMON と同じものをここでも渡す。
+    includes = ['-I' + str(ROOT / p)
+                for p in ('include', 'arch/x86', 'platform/pc98',
+                          'kernel', 'lib')] + ['-I' + str(tmp)]
     exe = tmp / 'app_band_pde'
     subprocess.run(['gcc', *FLAGS, '-DPHYSMEM_HOST_TEST=1', '-nostdlib', '-static', '-no-pie',
                     *includes, str(ROOT / 'tools/tests/app_band_pde_host.c'),

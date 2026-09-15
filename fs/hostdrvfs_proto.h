@@ -58,6 +58,15 @@ typedef signed short       s16;
 #define NP2_STATUS_NOT_A_DIRECTORY          0xC0000103UL
 #define NP2_STATUS_FILE_IS_A_DIRECTORY      0xC00000BAUL
 #define NP2_STATUS_INVALID_PARAMETER        0xC000000DUL
+/* 票 B8 / Codex 実装レビュー P1-4 で足した分。IRP_MJ_CREATE が返す種類を
+ * 「不存在」と「それ以外の失敗」に分けるために要る。値は NP21/W の
+ * src/generic/hostdrvntdef.h と同じ (NT の NTSTATUS)。 */
+#define NP2_STATUS_OBJECT_NAME_INVALID      0xC0000033UL
+#define NP2_STATUS_SHARING_VIOLATION        0xC0000043UL
+#define NP2_STATUS_MEDIA_WRITE_PROTECTED    0xC00000A2UL
+#define NP2_STATUS_DIRECTORY_NOT_EMPTY      0xC0000101UL
+#define NP2_STATUS_TOO_MANY_OPENED_FILES    0xC000011FUL
+#define NP2_STATUS_CANNOT_DELETE            0xC0000121UL
 
 /* ===================================================================== */
 /*  アクセス権 (DesiredAccess)                                            */

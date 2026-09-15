@@ -23,8 +23,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FLAGS = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
          "-fno-stack-protector", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement"]
+# arch/x86 + platform/pc98: include/io.h は契約だけで、実装は固定名
+# arch_io.h / platform_io.h を引く (順序 3)。build/config.mk の INC_COMMON と
+# 同じものをここでも渡す。
 INCLUDES = ["-I" + str(ROOT / p)
-            for p in ("include", "kernel", "lib", "sdk/include/os32")]
+            for p in ("include", "arch/x86", "platform/pc98",
+                      "kernel", "lib", "sdk/include/os32")]
 HOST_SRC = ROOT / "tools/tests/kbd_inject_host.c"
 KERNEL_SRC = ROOT / "kernel/kbd_inject.c"
 

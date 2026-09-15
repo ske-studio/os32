@@ -117,8 +117,11 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 - `*` や `?` などの簡単なワイルドカードもサポート
 
 **外部コマンド** (`/bin` に配置、`userland/cmds/`):
-`cal` `cfg` `diff` `du` `find` `grep` `head` `hexdump` `ime` `less` `man` `more` `sleep` `sort` `tail` `tee` `touch` `v86` `wc`
+`cal` `cfg` `diff` `du` `find` `grep` `hclip` `hdate` `head` `hexdump` `ime` `less` `lpr` `man` `more` `sleep` `sort` `stat` `tail` `tar` `tee` `touch` `v86` `wget` `wc`
 (`ime` は FEP の有効化/辞書操作、`v86` は V86 モードでのゲスト起動、`cfg` は設定レジストリ `/etc/settings.db` の get / set / list / status / init / export — [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) §2)
+(Host Services (KAPI v51 の host_*、WSL2 の `host_agent.py` が要る、[tasks/network/TASK_N3.md](tasks/network/TASK_N3.md)): `wget <url> [file]` は URL 取得 (http_status 確定後にファイル作成、非 200 は捨てて終了 1)、`lpr <file>|-` は本文をホストのプリンタへ (basename の空白・制御文字を `_` に、`-` は stdin)、`hclip get|put <file>` はホストのクリップボード読み書き (1〜4096B)、`hdate` はホスト時刻を 1 行表示 (RTC は設定しない)。終了コード: 0 成功 / 1 業務失敗 / 2 リンク / 3 usage / 4 ローカル I/O)
+(`stat PATH...` は `sys_stat` の結果を 1 パス 1 行で出す — 種別 / サイズ / `st_dev` (生値と `(dev_type << 8 | unit) + 1` の復号、[06_filesystem.md](06_filesystem.md) §6-1) / `st_ino` / mode / 時刻。存在しないパスは `stat: <path>: <理由>` で終了 1)
+(`tar c|x|t` は ustar サブセットの束ね道具 — 通常ファイルとディレクトリだけ、100B 名、圧縮なし。圧縮は `lz4` を外で掛ける (`etc.tar.lz4`)。ホストの Python `tarfile` で読める — [tasks/settings/TASK_S6.md](tasks/settings/TASK_S6.md))
 (その他 `/sbin` に `install` `cdinst`、`/usr/bin` にアプリ群。詳細は [09_exec.md](09_exec.md) 参照)
 
 ### §7-3 パイプ・リダイレクト

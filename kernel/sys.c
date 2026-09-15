@@ -37,12 +37,12 @@ void sys_reboot(void)
     outp(SYSPORT_C_BSR, BSR_SHUT1_SET);  /* SHUT1 = 1 */
     outp(CPU_RESET_PORT, 0x00);           /* CPUリセット */
     /* ここには来ない */
-    for (;;) { __asm__ volatile("hlt"); }
+    for (;;) { _halt(); }
 }
 
 void sys_halt(void)
 {
-    __asm__ volatile("hlt");
+    _halt();
 }
 
 void buz_on(void)

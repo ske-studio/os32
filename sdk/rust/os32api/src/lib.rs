@@ -23,6 +23,10 @@ pub mod gui;
  * シグネチャの正典は userland/lib/cfg/libos32cfg.h。`#[link]` は付けない。 */
 pub mod cfg;
 
+/* Host Services (libos32host) の ABI 宣言 (票 N4 §1)。
+ * シグネチャの正典は userland/lib/host/libos32host.h。`#[link]` は付けない。 */
+pub mod host;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::panic::PanicInfo;

@@ -36,17 +36,19 @@
 #include "kbd_inject.h"
 #include "memory_boot.h"
 #include "launch.h"
+#include "kapi_host.h"
 
 extern volatile u32 tick_count;
 extern void kapi_sys_exit(int status);
 extern void kapi_sys_get_build_info(char *buf, int size);
 extern int gfx_stats(void *out);
 extern int gfx_lease_palette(int first, int count, const u8 *rgb);
+extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[208];
+volatile u32 kapi_hits[214];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -260,6 +262,12 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     16,  /* db_bind_blob */
     8,  /* db_bind_null */
     4,  /* db_error_code */
+    8,  /* host_open */
+    12,  /* host_status */
+    12,  /* host_read */
+    12,  /* host_write */
+    4,  /* host_close */
+    8,  /* sys_set_mtime */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -473,6 +481,12 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0004,  /* db_bind_blob: data */
     0x0000,  /* db_bind_null */
     0x0000,  /* db_error_code */
+    0x0001,  /* host_open: req */
+    0x0006,  /* host_status: status,length */
+    0x0002,  /* host_read: buf */
+    0x0002,  /* host_write: buf */
+    0x0000,  /* host_close */
+    0x0001,  /* sys_set_mtime: path */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1715,5 +1729,41 @@ int __cdecl wrap_db_error_code(int handle)
 {
     KAPI_HIT(207);
     return kapi_db_error_code(handle);
+}
+
+i32 __cdecl wrap_host_open(const char *req, u32 len)
+{
+    KAPI_HIT(208);
+    return kapi_host_open(req, len);
+}
+
+i32 __cdecl wrap_host_status(i32 h, u32 *status, u32 *length)
+{
+    KAPI_HIT(209);
+    return kapi_host_status(h, status, length);
+}
+
+i32 __cdecl wrap_host_read(i32 h, void *buf, u32 cap)
+{
+    KAPI_HIT(210);
+    return kapi_host_read(h, buf, cap);
+}
+
+i32 __cdecl wrap_host_write(i32 h, const void *buf, u32 len)
+{
+    KAPI_HIT(211);
+    return kapi_host_write(h, buf, len);
+}
+
+i32 __cdecl wrap_host_close(i32 h)
+{
+    KAPI_HIT(212);
+    return kapi_host_close(h);
+}
+
+int __cdecl wrap_sys_set_mtime(const char *path, u32 mtime)
+{
+    KAPI_HIT(213);
+    return kapi_sys_set_mtime(path, mtime);
 }
 

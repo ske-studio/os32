@@ -412,6 +412,51 @@ static void error_code(void)
     resolve_owner = current_owner = 2;
 }
 
+/* ---- 4b. ブート自己診断 (N2 (c): make check で slot 番号の整合を踏む) ----
+ * db_v50_selftest() は KAPI_SLOT_* の位置と SHM 境界などを検査する骨。
+ * F1 で slot 件数を数値直書きしていたため v51 の末尾追記で bit0 が立ち、
+ * 実機の kselftest が 86/1 に落ちた。ここで 0 を確かめれば make check で
+ * 同じ崩れを踏む。*/
+static void v50_selftest(void)
+{
+    /* db_v50_selftest の (2) は 0xFFFFFF00 が帯外であることに依るので、
+     * ホストでは CPL=3 の帯検査を有効にする (32bit の overflow はホストの
+     * 64bit 幅では起きないため。user_range ケースと同じ帯 [BAND_LO,BAND_HI))。*/
+    host_cpl3 = 1;
+    CHECK(db_v50_selftest() == 0);
+    host_cpl3 = 0;
+}
+
+/* ---- 4c. **KAPI をもう 1 本足しても落ちないこと** (票 H3 の是正、2026-09-15)
+ *
+ * 以前 db_v50_selftest() の (0) は
+ *     KAPI_SLOT_COUNT != KAPI_SLOT_HOST_CLOSE + 1
+ * と書いてあり、「host_close の後ろに 1 本も足されていないこと」を要求して
+ * いた。[ABI2] は末尾追記を正当な操作と定めているので、これは **KAPI を
+ * 1 本足すたびに必ず落ちる**。実際 v52 の `sys_set_mtime` (slot 213) で
+ * make check が落ちた。
+ *
+ * この項の意図は「追記した 7 本が 201..207 に居て既存の db_* が動いて
+ * いない」であって、表がそこで終わっていることではない。判定を
+ * db_slot_layout_ok(slot_count) に切り出してあるので、**未来の追記を
+ * 引数で模して**ここで踏める。次の KAPI 追加で同じ罠を踏まないための項。 */
+static void slot_layout_append(void)
+{
+    /* いまの表 */
+    CHECK(db_slot_layout_ok(KAPI_SLOT_COUNT));
+    /* 末尾に 1 本 / 10 本 / 100 本足した「未来の KAPI」 */
+    CHECK(db_slot_layout_ok(KAPI_SLOT_COUNT + 1));
+    CHECK(db_slot_layout_ok(KAPI_SLOT_COUNT + 10));
+    CHECK(db_slot_layout_ok(KAPI_SLOT_COUNT + 100));
+    /* 既知の末尾 slot を含む長さは最低限必要 (下限は見る) */
+    CHECK(db_slot_layout_ok(KAPI_SLOT_HOST_CLOSE + 1));
+    CHECK(!db_slot_layout_ok(KAPI_SLOT_HOST_CLOSE));
+    CHECK(!db_slot_layout_ok(0));
+    CHECK(!db_slot_layout_ok(-1));
+    /* 表そのものが実際に host_close より長いこと (生成物との突き合わせ) */
+    CHECK(KAPI_SLOT_COUNT > KAPI_SLOT_HOST_CLOSE);
+}
+
 /* ---- 5. SHM の境界 (票 §1b) -------------------------------------------- */
 static void shm_bound(void)
 {
@@ -1261,6 +1306,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "prepare_only")) prepare_only();
     else if (!strcmp(argv[1], "binds")) binds();
     else if (!strcmp(argv[1], "error_code")) error_code();
+    else if (!strcmp(argv[1], "v50_selftest")) v50_selftest();
+    else if (!strcmp(argv[1], "slot_layout_append")) slot_layout_append();
     else if (!strcmp(argv[1], "shm_bound")) shm_bound();
     else if (!strcmp(argv[1], "user_range")) user_range();
     else if (!strcmp(argv[1], "owner_isolation")) owner_isolation();

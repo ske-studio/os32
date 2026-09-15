@@ -11,6 +11,7 @@
 
 #include "ext2_priv.h"
 #include "ide.h"    /* ide_drive_present, ide_get_info — ジオメトリ情報取得のみ */
+#include "kprintf.h"
 
 /* 共有静的バッファ (スタックオーバーフロー防止)
  * シングルタスクOSのため全インスタンスで共有可能。
@@ -25,7 +26,8 @@ u8 ext2_g_dat[EXT2_BLOCK_SIZE];
 /*  ブロック読み書き基盤                                                     */
 /* ======================================================================== */
 
-int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+/* ---- 生の 1KB ブロック I/O (エラー状態に触らない) ---- */
+static int ext2_raw_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
 {
     u32 sector = ctx->base_lba + block_num * 2;
     u8 *dst = (u8 *)buf;
@@ -40,7 +42,7 @@ int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
     return ret;
 }
 
-int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+static int ext2_raw_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
 {
     u32 sector = ctx->base_lba + block_num * 2;
     int ret;
@@ -50,12 +52,156 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
     return ret;
 }
 
+/* **メタデータ**の I/O。失敗したらエラー状態にする (票 B8 往復 5 / 決裁 2)。
+ *
+ * 既定をメタデータ側に置いた — データブロックの I/O は ext2_file.c の数か所
+ * だけで、そこは明示的に _data 版を呼ぶ。逆 (既定をデータ側) にすると、
+ * メタデータの呼び手を 1 か所見落としただけでエラー状態が立たなくなる。 */
+int ext2_read_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+{
+    int ret = ext2_raw_read_block(ctx, block_num, buf);
+    if (ret != 0) ext2_fs_error(ctx);
+    return ret;
+}
+
+int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+{
+    int ret = ext2_raw_write_block(ctx, block_num, buf);
+    if (ret != 0) ext2_fs_error(ctx);
+    return ret;
+}
+
+/* **データブロック**の I/O。失敗しても I/O エラーを返すだけ (Linux ext2 と同じ)。
+ *   読み取り: 構造には何も起きていない。
+ *   書き込み: ブロックの中身が古いか半分だけ新しいだけで、どの参照も正しい
+ *             ブロックを指している (参照を書くのはメタデータ側の段)。
+ * どちらも「以後の書き込みが構造を壊す」原因にならないので止めない。 */
+int ext2_read_data_block(Ext2Ctx *ctx, u32 block_num, void *buf)
+{
+    return ext2_raw_read_block(ctx, block_num, buf);
+}
+
+int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
+{
+    return ext2_raw_write_block(ctx, block_num, buf);
+}
+
+/* ======================================================================== */
+/*  エラー状態 (票 B8 往復 5 / ユーザー決裁 2)                               */
+/* ======================================================================== */
+
+/* s_state を書くための専用バッファ。**共有バッファ (g_blk / g_aux / g_dat) を
+ * 使ってはいけない** — ext2_fs_error は操作の途中 (例えば二重間接表を g_blk に
+ * 載せたまま内側の表の読み取りが落ちた瞬間) に呼ばれるので、共有バッファを
+ * 潰すと呼び手が走査中の表が化ける (gotcha §4-24 と同じ壊れ方)。 */
+static u8 ext2_g_err_sect[512];
+
+void ext2_fs_error(Ext2Ctx *ctx)
+{
+    u32 sector;
+    u16 state;
+
+    if (!ctx) return;
+    if (ctx->fs_error) return;          /* 2 回目以降は何もしない */
+    ctx->fs_error = 1;                  /* **先に**立てる (下の I/O の失敗で再入しない) */
+
+    /* フォーマット中の一時 ctx など、マウントしていない ctx は媒体に書かない */
+    if (!ctx->mounted) return;
+
+    kprintf(0x0C, "[EXT2] I/O error on metadata: writes disabled until remount "
+                  "(run e2fsck)\n");
+
+    /* スーパーブロック = ブロック 1 = セクタ base+2 の先頭 512B に s_state が居る。
+     * **そのセクタだけ**を読み直して 1 フィールドだけ変えて書く。空き数などの
+     * メモリ上の値は書かない (操作の途中で、ビットマップと合っている保証が無い)。
+     * 失敗しても何もしない — メモリ上のエラー状態は立っている。 */
+    sector = ctx->base_lba + 2;
+    if (dev_blk_read_lba(ctx->dev, sector, 1, ext2_g_err_sect) != 0) return;
+    state = le16_rd(&ext2_g_err_sect[EXT2_SB_STATE_OFF]);
+    if (state & EXT2_ERROR_FS) return;  /* 既に立っている */
+    le16_wr(&ext2_g_err_sect[EXT2_SB_STATE_OFF], (u16)(state | EXT2_ERROR_FS));
+    (void)dev_blk_write_lba(ctx->dev, sector, 1, ext2_g_err_sect);
+}
+
+int ext2_check_writable(Ext2Ctx *ctx)
+{
+    if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+    if (ctx->fs_error) return EXT2_ERR_ROFS;
+    return EXT2_OK;
+}
+
 /* ======================================================================== */
 /*  ヘルパー                                                                */
 /* ======================================================================== */
 
 /* ext2_mem_copy / ext2_mem_zero / ext2_str_len / ext2_str_ncmp は
  * ext2_priv.h のマクロで kstring 関数 (ASM最適化済み) に転送済み */
+
+/* ======================================================================== */
+/*  メタデータの汚れ / 解決済み経路の記憶                                    */
+/* ======================================================================== */
+
+/* スーパーブロックかグループ記述子を動かした側が呼ぶ。
+ * 次の ext2_sync() が実際にディスクへ書く。 */
+void ext2_meta_touch(Ext2Ctx *ctx)
+{
+    ctx->meta_dirty = 1;
+}
+
+/* 名前空間を動かした側が呼ぶ (ext2_add_entry / ext2_delete_entry)。
+ * 世代が進むと記憶は全部まとめて無効になる。 */
+void ext2_ns_touch(Ext2Ctx *ctx)
+{
+    ctx->ns_gen++;
+    if (ctx->ns_gen == 0) {
+        /* 一周した。同じ世代番号の古い記憶と衝突しないよう全部捨てる */
+        ext2_path_memo_reset(ctx);
+        ctx->ns_gen = 1;
+    }
+}
+
+void ext2_path_memo_reset(Ext2Ctx *ctx)
+{
+    int i;
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) ctx->memo[i].gen = 0;
+    ctx->memo_next = 0;
+}
+
+int ext2_path_memo_get(Ext2Ctx *ctx, const char *path, u32 *out_ino)
+{
+    int i;
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) {
+        if (ctx->memo[i].gen == ctx->ns_gen &&
+            kstrcmp(ctx->memo[i].path, path) == 0) {
+            *out_ino = ctx->memo[i].ino;
+            return EXT2_OK;
+        }
+    }
+    return EXT2_ERR_NOTFOUND;
+}
+
+void ext2_path_memo_put(Ext2Ctx *ctx, const char *path, u32 ino)
+{
+    int i;
+
+    /* 収まらない経路は覚えない。kstrncpy は黙って切り詰めるので、
+     * 覚えてしまうと別の経路に化けて当たる */
+    if (kstrlen(path) >= OS32_MAX_PATH) return;
+
+    for (i = 0; i < EXT2_PATH_MEMO_N; i++) {
+        if (ctx->memo[i].gen == ctx->ns_gen &&
+            kstrcmp(ctx->memo[i].path, path) == 0) {
+            ctx->memo[i].ino = ino;
+            return;
+        }
+    }
+
+    i = ctx->memo_next;
+    ctx->memo_next = (i + 1) % EXT2_PATH_MEMO_N;
+    kstrncpy(ctx->memo[i].path, path, OS32_MAX_PATH);
+    ctx->memo[i].ino = ino;
+    ctx->memo[i].gen = ctx->ns_gen;
+}
 
 /* ======================================================================== */
 /*  タイムスタンプ                                                           */
@@ -75,8 +221,8 @@ int ext2_write_super_raw(Ext2Ctx *ctx)
     int ret;
     ret = ext2_read_block(ctx, 1, ext2_g_blk);
     if (ret != 0) return EXT2_ERR_IO;
-    *(u32 *)&ext2_g_blk[12] = ctx->sb_info.free_blocks_count;
-    *(u32 *)&ext2_g_blk[16] = ctx->sb_info.free_inodes_count;
+    le32_wr(&ext2_g_blk[12], ctx->sb_info.free_blocks_count);
+    le32_wr(&ext2_g_blk[16], ctx->sb_info.free_inodes_count);
     return ext2_write_block(ctx, 1, ext2_g_blk);
 }
 
@@ -98,12 +244,12 @@ int ext2_write_gd_raw(Ext2Ctx *ctx)
             if (ret != 0) return EXT2_ERR_IO;
         }
 
-        *(u32 *)&ext2_g_blk[offset + 0]  = ctx->gd_table[g].block_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 4]  = ctx->gd_table[g].inode_bitmap;
-        *(u32 *)&ext2_g_blk[offset + 8]  = ctx->gd_table[g].inode_table;
-        *(u16 *)&ext2_g_blk[offset + 12] = ctx->gd_table[g].free_blocks;
-        *(u16 *)&ext2_g_blk[offset + 14] = ctx->gd_table[g].free_inodes;
-        *(u16 *)&ext2_g_blk[offset + 16] = ctx->gd_table[g].used_dirs;
+        le32_wr(&ext2_g_blk[offset + 0], ctx->gd_table[g].block_bitmap);
+        le32_wr(&ext2_g_blk[offset + 4], ctx->gd_table[g].inode_bitmap);
+        le32_wr(&ext2_g_blk[offset + 8], ctx->gd_table[g].inode_table);
+        le16_wr(&ext2_g_blk[offset + 12], ctx->gd_table[g].free_blocks);
+        le16_wr(&ext2_g_blk[offset + 14], ctx->gd_table[g].free_inodes);
+        le16_wr(&ext2_g_blk[offset + 16], ctx->gd_table[g].used_dirs);
 
         /* ブロック末尾のエントリ or 最後のグループの場合に書き込み */
         if (offset + 32 >= EXT2_BLOCK_SIZE || g == ctx->num_groups - 1) {
@@ -156,7 +302,7 @@ u32 ext2_find_partition(int ide_drive)
         /* アクティブなパーティションエントリから開始LBAを計算 */
         /* bootable = bit7 (0x80 または 0xA0 等) */
         if (bootable & 0x80) {
-            u16 start_c = (u16)ent[8] | ((u16)ent[9] << 8);
+            u16 start_c = le16_rd(&ent[8]);
             u8  start_h = ent[7];
             u8  start_s = ent[6];
             /* HDD BIOSのセクタ番号は0開始 (FDDの1開始とは異なる) */
@@ -202,21 +348,30 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
     }
 
     {
-        u16 magic = (u16)ext2_g_blk[56] | ((u16)ext2_g_blk[57] << 8);
+        u16 magic = le16_rd(&ext2_g_blk[56]);
         if (magic != EXT2_SUPER_MAGIC) return EXT2_ERR_MAGIC;
     }
 
-    ctx->sb_info.total_inodes     = *(u32 *)&ext2_g_blk[0];
-    ctx->sb_info.total_blocks     = *(u32 *)&ext2_g_blk[4];
-    ctx->sb_info.free_blocks_count = *(u32 *)&ext2_g_blk[12];
-    ctx->sb_info.free_inodes_count = *(u32 *)&ext2_g_blk[16];
-    ctx->sb_info.first_data_block = *(u32 *)&ext2_g_blk[20];
-    ctx->sb_info.block_size       = 1024U << (*(u32 *)&ext2_g_blk[24]);
-    ctx->sb_info.blocks_per_group = *(u32 *)&ext2_g_blk[32];
-    ctx->sb_info.inodes_per_group = *(u32 *)&ext2_g_blk[40];
-    ctx->sb_info.magic            = *(u16 *)&ext2_g_blk[56];
-    ctx->sb_info.first_ino        = *(u32 *)&ext2_g_blk[84];
-    ctx->sb_info.inode_size       = *(u16 *)&ext2_g_blk[88];
+    ctx->sb_info.total_inodes     = le32_rd(&ext2_g_blk[0]);
+    ctx->sb_info.total_blocks     = le32_rd(&ext2_g_blk[4]);
+    ctx->sb_info.free_blocks_count = le32_rd(&ext2_g_blk[12]);
+    ctx->sb_info.free_inodes_count = le32_rd(&ext2_g_blk[16]);
+    ctx->sb_info.first_data_block = le32_rd(&ext2_g_blk[20]);
+    ctx->sb_info.block_size       = 1024U << le32_rd(&ext2_g_blk[24]);
+    ctx->sb_info.blocks_per_group = le32_rd(&ext2_g_blk[32]);
+    ctx->sb_info.inodes_per_group = le32_rd(&ext2_g_blk[40]);
+    ctx->sb_info.magic            = le16_rd(&ext2_g_blk[56]);
+    ctx->sb_info.first_ino        = le32_rd(&ext2_g_blk[84]);
+    /* 媒体にエラーの印が残っていても**読み書きでマウントする** (Linux と同じ、
+     * ユーザー決裁 2 の条件)。警告だけ出す。印は e2fsck だけが消す。 */
+    ctx->fs_error = 0;
+    ctx->mounted_with_errors =
+        (le16_rd(&ext2_g_blk[EXT2_SB_STATE_OFF]) & EXT2_ERROR_FS) ? 1 : 0;
+    if (ctx->mounted_with_errors) {
+        kprintf(0x0E, "[EXT2] warning: mounting fs with errors, "
+                      "running e2fsck is recommended\n");
+    }
+    ctx->sb_info.inode_size       = le16_rd(&ext2_g_blk[88]);
     if (ctx->sb_info.inode_size == 0) ctx->sb_info.inode_size = 128;
 
     for (i = 0; i < 16; i++) {
@@ -244,16 +399,21 @@ int ext2_mount(Ext2Ctx *ctx, int ide_drive)
                 if (ret != 0) return EXT2_ERR_IO;
             }
 
-            ctx->gd_table[g].block_bitmap = *(u32 *)&ext2_g_blk[offset + 0];
-            ctx->gd_table[g].inode_bitmap = *(u32 *)&ext2_g_blk[offset + 4];
-            ctx->gd_table[g].inode_table  = *(u32 *)&ext2_g_blk[offset + 8];
-            ctx->gd_table[g].free_blocks  = *(u16 *)&ext2_g_blk[offset + 12];
-            ctx->gd_table[g].free_inodes  = *(u16 *)&ext2_g_blk[offset + 14];
-            ctx->gd_table[g].used_dirs    = *(u16 *)&ext2_g_blk[offset + 16];
+            ctx->gd_table[g].block_bitmap = le32_rd(&ext2_g_blk[offset + 0]);
+            ctx->gd_table[g].inode_bitmap = le32_rd(&ext2_g_blk[offset + 4]);
+            ctx->gd_table[g].inode_table  = le32_rd(&ext2_g_blk[offset + 8]);
+            ctx->gd_table[g].free_blocks  = le16_rd(&ext2_g_blk[offset + 12]);
+            ctx->gd_table[g].free_inodes  = le16_rd(&ext2_g_blk[offset + 14]);
+            ctx->gd_table[g].used_dirs    = le16_rd(&ext2_g_blk[offset + 16]);
         }
     }
 
     ctx->mounted = 1;
+    /* 読み込んだばかり = ディスクと一致。経路の記憶も持ち越さない
+     * (ctx は使い回されることがある) */
+    ctx->meta_dirty = 0;
+    ctx->ns_gen = 1;
+    ext2_path_memo_reset(ctx);
 
     return EXT2_OK;
 }
@@ -275,9 +435,32 @@ int ext2_sync(Ext2Ctx *ctx)
 {
     int ret;
     if (!ctx->mounted) return EXT2_ERR_NOMOUNT;
+
+    /* エラー状態では空き数も書き戻さない (票 B8 往復 5 / 決裁 2)。メモリ上の
+     * 数は成功したビットマップの書き込みだけを数えているが、エラーの後の媒体を
+     * これ以上動かさない方針を優先する (数のずれは e2fsck が直す)。
+     * 書き戻すべきものが残っていたなら「戻った時点でディスクが正しい」とは
+     * 言えないので失敗を返す。
+     *
+     * **返すのは ROFS ではなく IO**。ROFS は「操作の入口で断った = 何もしていない」
+     * (ext2_check_writable) にだけ使う。ここへ来るのは操作が走った後で、
+     * 原因はその操作の途中の I/O エラーなので IO が正しい (呼び手の操作が
+     * 自分の IO / 漏れを返す前に sync の ROFS で上書きしないため)。 */
+    if (ctx->fs_error) return ctx->meta_dirty ? EXT2_ERR_IO : EXT2_OK;
+
+    /* 空きブロック数・空き inode 数・グループ記述子が前回の書き戻しから
+     * 一つも動いていなければ、書き戻すものは無い。write-through の契約は
+     * 変わらない (戻った時点でディスクは正しい) — 同じ中身を read-modify-
+     * write し直す 4 ブロック (= 8 セクタ) を出さないだけ。票 S6-P: 追記
+     * 1 回あたり 26 セクタのうち 8 セクタがこれだった。 */
+    if (!ctx->meta_dirty) return EXT2_OK;
+
     ret = ext2_write_super_raw(ctx);
     if (ret != 0) return ret;
-    return ext2_write_gd_raw(ctx);
+    ret = ext2_write_gd_raw(ctx);
+    if (ret != 0) return ret;
+    ctx->meta_dirty = 0;
+    return EXT2_OK;
 }
 
 /* ======================================================================== */

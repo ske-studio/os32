@@ -162,7 +162,9 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ---
 
-### v1.3 — 「ターミナル統合とCUI抽象化」
+### v1.3 — 「ターミナル統合とCUI抽象化」 ✅ 完了 (2026-09-14)
+
+全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。持ち越し: S6-P (ext2 の小書き込み性能、[tasks/settings/TASK_S6.md](tasks/settings/TASK_S6.md))、F3a〜c 等の保留 5 件 (ユーザーの再考待ち、[tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) §3)。
 
 着手計画: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)、監査と決裁: [AUDIT_2026-09-10](tasks/gui/v13/AUDIT_2026-09-10.md)。
 2026-09-10 決裁: **GUI アプリ 4 本の同時実行 (契約 T2a) を v1.3 の最初に置く** ([K5](tasks/gui/v13/TASK_K5_multiapp.md))。
@@ -199,20 +201,25 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ---
 
-### v1.4 — 「GUIアプリケーション群」
+### v1.4 — 「ホストサービスと最小のアプリ」
 
-**ゴール**: GUI専用 application が揃い、v2.0 に向けた基盤が完成。
+**ゴール**: Host Services (LGY-98 経由の GET / 印刷 / クリップボード、[tasks/network/HOST_SERVICES_PLAN.md](tasks/network/HOST_SERVICES_PLAN.md)) を
+コマンドと GUI から使えるようにし、GUI アプリは **About とテキストエディタの 2 本だけ**に絞る
+(ユーザー決裁 2026-09-14: アプリ群は葉なので後回し、エディタは libos32gui / 設定 / ホストサービスを
+通しで使う受入試験として 1 本残す)。
 
 **目安: v1.3 から 3〜6ヶ月**
 
-| 作業 | カテゴリ | 備考 |
-|------|---------|------|
-| 設定 application | app | wallpaper・color・mouse speed 等 |
-| text editor GUI | app | edit.bin GUI版 |
-| image viewer | app | VBZ/VDP/BMP |
-| music player | app | FM音源 BGM control |
-| About dialog | GUI | OS32 About |
-| `sed` / `awk` 等 | command | v1.0から先送り |
+| 作業 | カテゴリ | 担当 (ROLES §0) | 備考 |
+|------|---------|------|------|
+| Host Services N1〜N3 + N4 の libos32gui 末尾追記 | kernel / host / command / shlib | 基盤 (Claude Code PM) | ワイヤ v2、KAPI v51、`host_agent.py` v2、`wget` / `lpr` / `hclip` / `date -sync`、`host_*` ラッパー |
+| PEGC / Cirrus の 8bpp バックエンド (R2) | GUI | 基盤 | S5 から先送り |
+| N4 のアプリ側 (ファイラの印刷、端末のコピー / 貼り付け) | app | アプリ層 (別エージェント) | libos32gui の `host_*` ラッパー経由 |
+| About dialog | app | アプリ層 | OS32 About |
+| text editor GUI | app | アプリ層 | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
+
+先送り (v2.0 以降、[§2](#2-長期ロードマップ-v20) の「GUI アプリケーション群」): 設定アプリの拡張項目、
+image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 
 ---
 
@@ -227,6 +234,22 @@ v2.0 では timer interrupt を利用したプリエンプティブ寄りの mul
 - window / process の独立実行
 - v1.x `gui_call` + SHM event ring を拡張した IPC
 - child program 実行中も desktop が独立して応答
+
+### 他アーキテクチャへの移植に備えた調査 (継続)
+
+移植 (例: ARM) は v1.x の範囲外だが、**新しい層を実装するたびに CPU 依存の調査を票に含める**
+(ユーザー指示 2026-09-14)。最初は Host Services N1 (ワイヤ v2 / `link.c` / KAPI v51) で
+`docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/tasks/network/TASK_N1.md` §0 段 7)。
+以後の票も同じ観点で `docs/tasks/portability/` に追記し、移植の直前に `arch/` の分離へまとめる。
+習慣として今から守るもの: ワイヤ / ディスク上の構造は LE アクセサで読む、非アラインアクセスをしない、
+絶対番地は `memmap.h` 以外に書かない、割込み制御は既存ヘルパー経由。
+
+### GUI アプリケーション群 (v1.4 から先送り、2026-09-14)
+
+v1.4 の「アプリ群」は基盤に依存される側ではないので、協調型マルチタスクの拡張の後に回す。
+設定アプリの拡張 (壁紙・色・マウス速度は設定レジストリに行を足すだけ、UI は gshell の設定ダイアログ)、
+image viewer (MGX は `mgxview` が既にある。VBZ / VDP / BMP を足す)、music player (FM 音源 BGM)、
+`sed` / `awk`。着手の順は、そのときに一番 API の穴を踏みそうなものから。
 
 ### 16bit DOSプログラム移植スキーム
 

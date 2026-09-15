@@ -53,7 +53,15 @@
 #define VFS_ERR_NOTDIR   OS32_ERR_NOTDIR
 #define VFS_ERR_NOTEMPTY OS32_ERR_NOTEMPTY
 #define VFS_ERR_ISDIR    OS32_ERR_ISDIR
+/* 書き込みを受け付けない状態 (ext2 のエラー状態、票 B8 往復 5) */
+#define VFS_ERR_ROFS     OS32_ERR_ROFS
+/* 資源が満杯 (ext2 の links_count 上限など) */
+#define VFS_ERR_FULL     OS32_ERR_FULL
 #define VFS_ERR_INVAL    OS32_ERR_INVAL
+/* このバックエンドが実装していない操作 (票 H3 の set_mtime 等)。
+ * 「できなかった」ではなく「持っていない」— 呼び手はエラーにせず
+ * 省略したことを表示して続ける。 */
+#define VFS_ERR_NOSYS    OS32_ERR_NOSYS
 
 /* ディレクトリエントリ (FS共通) */
 typedef struct {
@@ -106,6 +114,12 @@ typedef struct {
 
     /* 追加: ファイル属性・状態 */
     int  (*stat)(void *ctx, const char *path, OS32_Stat *buf);
+
+    /* 更新日時の設定 (票 H3)。**任意実装** — 埋めない FS ドライバは
+     * ここが NULL のままになり (C89 の集成体初期化で残りはゼロ)、
+     * vfs_set_mtime が VFS_ERR_NOSYS を返す。実装済みは ext2 だけ。
+     * mtime は UNIX Epoch 秒 (UTC)。0 は「不明」の印なので受け付けない。 */
+    int  (*set_mtime)(void *ctx, const char *path, os_time_t mtime);
 } VfsOps;
 
 /* ---- VFS API ---- */
@@ -190,6 +204,15 @@ int vfs_quarantine_sqlite(const VfsSqliteCookie *cookie);
 u32  vfs_path_dev(const char *path);
 int  vfs_stat(const char *path, OS32_Stat *buf);
 int  vfs_fstat(int fd, OS32_Stat *buf);
+/* 更新日時の設定 (票 H3)。KAPI スロット sys_set_mtime の実体。
+ *   VFS_OK          … 設定した
+ *   VFS_ERR_NOSYS   … その FS は set_mtime を持たない (エラーにしない)
+ *   VFS_ERR_INVAL   … path が NULL / mtime == 0 (不明の印)
+ *   VFS_ERR_NOMOUNT … 該当マウントなし
+ *   VFS_ERR_NOTFOUND / VFS_ERR_IO … FS 側の失敗
+ * **データを書き終えてから**呼ぶこと (書き込みは mtime を現在時刻で
+ * 上書きするので、先に設定すると消える、設計書 §5.2)。 */
+int  vfs_set_mtime(const char *path, os_time_t mtime);
 /* メタデータ */
 int  vfs_sync(void);
 

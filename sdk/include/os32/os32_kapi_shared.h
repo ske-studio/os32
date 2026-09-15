@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      50   /* 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
+#define KAPI_VERSION      52   /* mtime の保存 (票 H3): sys_set_mtime (VfsOps の任意実装フック。ext2 のみ実装、他の FS は OS32_ERR_NOSYS)。v51 = Host Services の基盤 (票 N1): host_open / host_status / host_read / host_write / host_close の 5 本 (非ブロッキング、同時 2 ハンドル、プロトコルを進めるのは 100Hz の link_tick だけ)。v50 = 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -331,6 +331,10 @@ typedef struct {
 /* GUI v1.3 K7 (KAPI v47)。KAPI_SPEC §3-2 の予約を 1 つ進め、ネットワークは
  * -15 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
 #define OS32_ERR_AGAIN     -14  /* いまは無い / 後でもう一度 (kbd 待ちの resume) */
+/* 票 B8 往復 5 (ユーザー決裁 2、2026-09-15)。**番号の追加だけで構造体・スロットは
+ * 変えない**ので KAPI 版数は据え置き。KAPI_SPEC §3-2 の予約を 1 つ進め、
+ * ネットワークは -16 以降へずらした (ネットワーク側は番号を 1 つも使っていない)。 */
+#define OS32_ERR_ROFS      -15  /* 書き込みを受け付けない (FS がエラー状態、再マウントまで) */
 
 /* ファイル種別 (OS32_FILE_TYPE_*) */
 #define OS32_FILE_TYPE_FILE 1

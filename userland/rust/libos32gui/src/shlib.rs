@@ -188,7 +188,7 @@ core::arch::global_asm!(
 __os32_shlib_header:
     .long   0x42494C53                  /* 0x00 magic  'SLIB'            */
     .long   1                           /* 0x04 version = GUI_PROTO_VERSION */
-    .long   105                         /* 0x08 nfunc                    */
+    .long   111                         /* 0x08 nfunc                    */
     .long   __shlib_data_start          /* 0x0C data_vaddr               */
     .long   __shlib_data_pages          /* 0x10 data_pages               */
     .long   __shlib_text_pages          /* 0x14 text_pages               */
@@ -300,6 +300,12 @@ __os32_shlib_header:
     .long   os32gui_cfg_get_text                /* 102 */
     .long   os32gui_cfg_set_int                 /* 103 */
     .long   os32gui_cfg_set_text                /* 104 */
+    .long   os32gui_host_get                    /* 105 */
+    .long   os32gui_print_text                  /* 106 */
+    .long   os32gui_print_file                  /* 107 */
+    .long   os32gui_clip_get                    /* 108 */
+    .long   os32gui_clip_put                    /* 109 */
+    .long   os32gui_host_time                   /* 110 */
     .text
 "#
 );
@@ -317,6 +323,21 @@ __os32_shlib_header:
 const _: () = assert!(crate::cfgro::ERR_INVAL == os32api::gui::proto::OS32_ERR_INVAL);
 const _: () = assert!(crate::cfgro::ERR_IO == os32api::gui::proto::OS32_ERR_IO);
 const _: () = assert!(crate::cfgro::ERR_NOTFOUND == os32api::gui::proto::OS32_ERR_NOTFOUND);
+
+/* ================================================================ */
+/*  105..=110: Host Services (票 N4 §1)                              */
+/*                                                                  */
+/*  実体は `crate::hostsvc` (`#[no_mangle] extern "C"`) で、そこから  */
+/*  libos32host.a を呼ぶ。cfg と同じく、`hostsvc` の HOST_E* 写しが    */
+/*  `os32api::host` とずれていないことをビルド時に見る。              */
+/* ================================================================ */
+const _: () = assert!(crate::hostsvc::HOST_ELINK == os32api::host::HOST_ELINK);
+const _: () = assert!(crate::hostsvc::HOST_ENODEV == os32api::host::HOST_ENODEV);
+const _: () = assert!(crate::hostsvc::HOST_ETIMEOUT == os32api::host::HOST_ETIMEOUT);
+const _: () = assert!(crate::hostsvc::HOST_ESERVICE == os32api::host::HOST_ESERVICE);
+const _: () = assert!(crate::hostsvc::HOST_EINVAL == os32api::host::HOST_EINVAL);
+const _: () = assert!(crate::hostsvc::HOST_EIO == os32api::host::HOST_EIO);
+const _: () = assert!(crate::hostsvc::HOST_EABORT == os32api::host::HOST_EABORT);
 
 /* ================================================================ */
 /*  小道具                                                           */
