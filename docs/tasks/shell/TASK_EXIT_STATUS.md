@@ -55,6 +55,15 @@
     - `split_pipeline` は `count < max_stages` で走査を打ち切るので、**9 段目以降は実行されない**
       (`main.c:606` の `MAX_PIPE_STAGES` = 8)。空の段も捨てられる。
     - 常駐シェルのパイプ段ループには打ち切りが無い (`main.c:724-733` の `sh_exit_flag` 検査は `SHELL_AS_APP` だけ)。
+    - `run_cmd_internal` は**コマンド名を `PATH_MAX_LEN - 5` で切って** `.bin` を付ける (`main.c:299-305`)。
+      251 バイトの接頭辞 `P` が実在すると、`Pextra` と打っても `P.bin` が起動する。
+      `try_exec_from_path` のパス連結も同じ (`main.c:222`)。**`try_exec` の溢れ検査より前**に起きる。
+    - `glob_cb` は `mem_alloc` の失敗で**印を立てずに戻る** (`sh_args.inc:84`)。`rm /tmp/item*` が 2 件に
+      一致して 1 件目だけ確保できると、**1 件だけ消して成功**になる。
+    - `rshell` は 126 文字で読み取りを止め、その接頭辞を実行する (`rshell.c:120-124`)。
+    - `sh.bin` の要求表は NUL 込み **256 バイト** (`exec/launch.c:138-146` の `LAUNCH_CMDLINE_MAX`)。
+      256〜511 バイトの行は再構築に成功して `launch_req` が `OS32_ERR_INVAL` を返し、
+      今の `sh_launch.inc` はこれを「GUI 外」と読む。
 15. `exec_exit` の直接の呼び手は 3 つ (`exec_fault_recover` / `kapi_sys_exit` / CPL=0 実行から戻った後の
     `exec_exit(EXEC_SUCCESS)`)。`exec_kill_one` は `exec_exit` を通らず自分で回収する。
     CTRL+STOP は `ring3_abort_check` → `ring3_fault_kill` → `exec_fault_recover` と流れるので、
@@ -121,9 +130,19 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
   | `try_exec` / `exec` 組み込み / `time` の再構築が溢れた | **起動する前に** 2。クォートの再付与で伸びる場合も検査する |
   | パイプの段数超過 (9 段以上)、空の段 (`echo ok |`、先頭の `|`、`||`) | 行全体を実行せず 2 |
   | `stdin/stdout buffer lost` で段ループを抜けた | 2 |
+  | `run_cmd_internal` のコマンド名の切り詰め、`try_exec_from_path` のパス連結の切り詰め (往復 3 B2) | **別のファイルを起動せず** 2 |
+  | `glob_cb` の `mem_alloc` 失敗 (往復 3 B3) | 行全体を 2 で拒否し、handler を呼ばない。確保済みの文字列は解放する |
+  | `rshell` の 126 文字超の入力 (往復 3 B4) | 行末まで読み捨て、**その行を実行せず** 2。次の行から正常に戻る |
+  | `sh.bin` の要求表の上限 (256 バイト) 超過 (往復 3 B1) | **送信する前に** 2。`launch_req` を呼ばない (「GUI 外」と読まない) |
 
   `sh_exec_result` とは別に、**シェル側の組み立て失敗**を呼び手へ返せるようにする
   (起動の失敗と混ぜない)。
+
+  **網羅の要求**: 上の表は反例から積み上げたもので、同じ形の穴が他にもあり得る。実装の前に
+  **入力経路の固定長バッファを 1 度全部洗う** — `userland/shell/` の `char buf[N]` / `strncpy` /
+  `PATH_MAX_LEN` / `CMD_BUF_SIZE` / `SCRIPT_MAX_*` / `TRY_EXEC_BUF_SIZE` / `LAUNCH_CMDLINE_MAX` の各所で
+  「入力が上限を超えたら何が起きるか」を表にし、**切り詰めて進むものはすべて 2 で断る**に直す。
+  洗った結果 (場所・上限・変更の有無) を `tools/tests/sh_status_tdd.md` に残す。
 
 - **handler に届かない行の `$?`** (事実 11、レビュー所見 7):
 
@@ -170,6 +189,20 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
   `cmd_script.c:132-143` で詰められ、ラベル行 (`:label`) は保持されるので、ファイルの行番号とも
   実行したコマンドの本数とも一致しない (往復 2 所見 7)。文書にそう書く。
 
+### 2-5-1. 実装前に固める契約 (往復 3 の非 blocker)
+
+- `script_source_file` の戻り値は今「0 / -1」。open / read / 確保 / 深度超過 / 切り詰めの値を決める。
+  呼び手は `source` のほかに**暗黙の `.sh` / `.bat` 実行**と**起動時の profile 読み込み** (`ui.c:505`) がある。
+  profile の失敗が `$?` に残らないよう、profile 実行の後に `$?` を 0 に戻す。
+- `$?` の初期値は 0。引数なしの `exit` は直前の値。`exit` の引数が非数値・範囲外・2 つ以上なら 2 (実行はしない)。
+- 空のスクリプト (`sys_read()` が 0) は今「失敗」。S13 で 0 を期待するなら、この扱いも変える。
+- パイプを 2 で断ったときの副作用: `echo x > /tmp/out |` が**ファイルを作らない・切り詰めない**こと、
+  拒否の後にパイプ深度とリダイレクトが残らないこと。
+- `rshell` 経由の観測: `;` を区切りとして解釈しないので、ゲスト受入は「試験コマンド → 完了待ち → `echo $?` を別送信」
+  かスクリプトで行う。`rshell` を抜けるとその handler の 0 で上書きされる。
+- `exec_last_result` / `sh_exec_result` の戻り値 (成功 0 / 記録なし `OS32_ERR_INVAL`)、失敗時の出力引数の値、
+  シェル側の組み立て失敗の返し方を固定する。
+
 ### 2-6. GUI 端末 (`SHELL_AS_APP`)
 
 要求表に終了コードを載せるのは**別票**。この票では `sh.bin` の `$?` は「起動できたか」までしか分からない
@@ -214,6 +247,8 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
 | S14 | 入れ子 `exec` (子が非 0 → 親が別の値 → その後に起動失敗) | それぞれ正しい値。前の記録を読まない |
 | S15 | GUI の `exec_start` / `exec_resume` / kill が走っている間に常駐の同期起動 | 記録が混ざらない |
 | R1 | `test_sh_shell.py` / `test_sh_launch.py` / `test_fs_kind_callers.py` | 退行なし |
+| R1b | `test_sh_launch.py` の `case_req_nogui` は `EXEC_ERR_NOT_FOUND` と次候補への継続を期待する (`sh_launch_host.c:338`)。新設計の「GUI 外 = 126・走査停止」と食い違う | 試験を新しい結果 API へ移す (旧 `sh_launch` の契約は残さない)。**票のこの変更を明記** |
+| R1c | `test_fs_kind_callers.py` の `run` は `void` handler を受ける (`fs_kind_callers_host.c:37`、`-Werror`) | E2 の型変更に合わせる |
 | R2 | 新しい試験は**実物の登録表**を通す (`sh_shell_host.c:442,463` のスタブは `exit` を直接認識していて、本物の登録・伝播が壊れていても緑になる、往復 2 所見 6) | `execute_command` / `execute_single` / ルーターを実物で通す |
 
 park (事実 10) は `exec_run` では起こらないので**表の項目としてだけ**置き、実行試験は作らない。
@@ -270,4 +305,21 @@ blocker 7 件・非blocker 8 件。**7 件とも PM がコードで到達可能�
 観点の確認で分かった配線: `exec_exit` の直接の呼び手は 3 つで CPL=0 復帰も `EXITED`、`exec_kill_one` は
 `exec_exit` を通らない、CTRL+STOP は `ring3_fault_kill` 経由なので `ABORTED` の配線が要る (§1 事実 15)。
 
-**次**: この版で往復 3 (最後)。Approve が出てから実装へ。
+### 往復 3 — 設計レビュー (Codex、`6f3ea0c` 対象、2026-09-16) — Request changes
+
+往復 2 の 7 件は「設計上閉じた」。新しい blocker 4 件はすべて**同じ系統 (入力の欠落)** で、
+PM がコードで確認した (§1 事実 14 に追記):
+
+| # | 所見 | 対応 |
+|---|---|---|
+| B1 | `sh.bin` の要求表は 256 バイト。256〜511 バイトの行は `launch_req` が `INVAL` を返し、今は「GUI 外」と読む | 送信前に上限を検査して 2 (§2-3) |
+| B2 | `run_cmd_internal` がコマンド名を 251 バイトで切るので、**別のファイルが起動し得る**。`try_exec` の検査より前 | 名前・拡張子付加・PATH 連結まで検査対象に (§2-3) |
+| B3 | `glob_cb` の `mem_alloc` 失敗が印を残さず、**一致の一部だけ**を渡して成功する | 行全体を 2 で拒否 (§2-3) |
+| B4 | `rshell` が 126 文字で切って接頭辞を実行する | 行末まで捨てて実行しない (§2-3) |
+
+3 往復とも新しい経路が出続けたので (ROLES §5 の「往復数は指摘の集合で数える」)、**個別対応に加えて
+入力経路の固定長バッファを 1 度全部洗う**要求を §2-3 に入れた。加えて、契約の未確定点を §2-5-1 に、
+既存試験への影響を §4 の R1b / R1c に書いた。
+
+**次**: 追加の 1 往復 (ROLES §5 の「3 + 1」)。それでも新しい系統が出るなら、票を
+「シェルの入力切り詰めを全部断つ」と「終了コードの配線」に分けてユーザーに諮る。
