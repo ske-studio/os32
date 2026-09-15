@@ -76,8 +76,28 @@ DEPFLAGS = -MMD -MP
 
 # カーネル空間とユーザー空間で共通の素性 (フリースタンディング i386 コード)。
 # ここには「どちらの空間か」を示すマクロを入れないこと。
+#
+# -fsigned-char / -fno-short-enums は **ABI の前提を明示に固定する** ためのもの。
+# どちらも i386 GCC では既定と同じなので、付けても生成物は 1 バイトも変わらない
+# (i386-elf-gcc でカーネル C 92 本を新旧フラグでコンパイルし、.o の md5 が
+#  全本一致することを確認済み)。目的は今の挙動を変えることではなく、
+# **暗黙の既定に頼っている箇所を将来 ARM で黙って壊させない** ことにある。
+#
+#   -fsigned-char    ARM EABI は `char` が **unsigned** が既定。今のコードが
+#                    符号に依存している箇所は見つかっていない (utf8.c は
+#                    `& 0x80`、iso9660.c は `(unsigned char)` に明示キャスト) が、
+#                    `kstrcmp` はまだ lib/kstring_asm.asm の x86 アセンブリで、
+#                    これを C 版に起こす (順序 4) と `*a - *b` の符号で
+#                    0x80 以上のバイト = 日本語ファイル名の**並び順が変わる**。
+#                    移植の最中に既定が裏返らないよう、今のうちに固定しておく。
+#   -fno-short-enums ARM EABI は `-fshort-enums` が既定 (enum を収まる最小の
+#                    サイズに縮める)。`sdk/include/os32/os32_kapi_shared.h` の
+#                    `exec_status_t` のように **カーネルと外部プログラムで
+#                    共有する ABI ヘッダ**に enum があるため、enum の幅が
+#                    両側で食い違うと構造体のレイアウトごとずれる ([ABI1])。
+#                    int 幅に固定する。
 CFLAGS_COMMON = -std=gnu89 -m32 -march=i386 -ffreestanding -fno-pie -fno-stack-protector \
-                -nostdlib -mno-red-zone -fcommon $(DEPFLAGS)
+                -nostdlib -mno-red-zone -fcommon -fsigned-char -fno-short-enums $(DEPFLAGS)
 
 # カーネル空間。__KERNEL_BUILD__ は include/os32_kapi_shared.h が
 # memmap.h と KAPI_ADDR を出すかどうかの判定に使う。

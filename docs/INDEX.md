@@ -103,6 +103,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | **H1 票（実装中）** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run と理由表示、HostDrv stat 失敗の是正 |
 | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | **H3 票（未着手、H1 の直後）** — HostDrv の FILETIME→st_mtime 変換、`sys_set_mtime` と VfsOps フック（ext2 先行、他は NOSYS）、時刻のみの同期 |
 | [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | **型判定の整理（未着手）** — 「読めなかった」を「その型ではない」と読み替えている箇所。B8 (I/O 失敗が不存在に畳まれディレクトリを open できる)、fs_is_dir の「不明」欠落、NP21/W のルート検査 |
+| [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) | 移植性調査 (N1 起点) — 直列化とアライメント、`cli`/`sti`/`hlt` の直書き一覧、他アーキ移行時の注意 |
+| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値** — `make check-arm-compile` (合否ではなく計測)。2026-09-15 時点 54/92、失敗はインライン asm 5 と io.h 経由 33、ヘッダ・型の食い違いは 0 |
 | [tasks/network/PLAN.md](tasks/network/PLAN.md) | LGY-98 / NE2000 **ドライバ**計画 — NASM PIO、OS32 IRQ 統合、リング管理・復旧、段階別検証（M1〜M3 はエミュレータ合格、進捗 §9） |
 | [tasks/settings/TASK_S2.md](tasks/settings/TASK_S2.md) | S2 (設計) — `libos32cfg` の API と契約の実装写し、`cfg` コマンド、明示 `cfg init` (tsv → DB、欠損時だけ)、libos32gui 末尾追記、受入 C1〜C7 |
 | [tasks/settings/S0_PLAN_2026-09-13.md](tasks/settings/S0_PLAN_2026-09-13.md) | 設定レジストリの**着手計画** (PM 縮約案、決裁待ち) — 現状表、S0-K / S0-D / S0-T → S2 → S4 → S5 の順、後回しの一覧 |
