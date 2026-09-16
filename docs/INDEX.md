@@ -34,8 +34,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 設定の置き場 (system.cfg の残すキー、settings.db のスキーマ / API / リカバリ) | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) (計画、v1.3) | ROADMAP は 1 行 |
 | アプリ帯の広さ (1 アプリに渡せる量) | [tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md) (実装済み `b8dab24`、kselftest で毎起動検証、K5b が依存。**票 §5 の受入項目は未消化** = 受入待ち) | 02_memory.md は方針と帯の表 |
 | 試験の一覧 (`make check` のターゲット、`_tdd.md` と票の対応) | [TESTS.md](TESTS.md) (`tools/gen_tests_inventory.py` で生成、`make check-tests-inventory` が鮮度を照合) | 各票は自分の `_tdd.md` を指すだけ |
-| 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜4 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリ `pw-sh4-research` の調査の快照** (正典はそちら。本リポジトリでは更新しない) |
-| [tasks/portability/TASK_KSTRING_BENCH.md](tasks/portability/TASK_KSTRING_BENCH.md) | kstring の速度実測 **計画 (2026-09-16)** — x86 で C 版 (`lib/kstring_c.c`) に一本化するかを 2 条件で測って決める。切り替えの可否はユーザー判断 |
+| 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜4 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリ `pw-sh4-research` の調査の快照** (正典はそちら。本リポジトリでは更新しない)、[tasks/portability/TASK_KSTRING_BENCH.md](tasks/portability/TASK_KSTRING_BENCH.md) (kstring の速度実測 **完了 2026-09-17** — x86 は asm 維持、C 版は他 32 ビットアーキ向け。数字は ARM_GAUGE §9、語長の前提は §10) |
 | 版数 (カーネル 2.0 / GUI 1.x / 次期 v3 / v4 草案) | [ROADMAP.md §0](ROADMAP.md) | CHANGELOG.md、`ver` の文字列、タグ |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
