@@ -55,6 +55,68 @@ typedef struct {
 
 static VfsFile open_files[VFS_MAX_OPEN_FILES];
 
+/* 従来の「種別を確かめ、サイズを取り、必要なら作る / 切り詰める」経路。
+ * O_EXCL が付いていない open はここを通る。*out_size に開いた時点の長さ。
+ * 戻り値 VFS_OK / 負値 = VFS_ERR_*。 */
+static int vfs_open_probe(VfsOps *ops, void *fs_ctx, const char *resolved,
+                          const char *rel_path, int mode, u32 *out_size)
+{
+    int rc, kind;
+
+    /* ディレクトリは open できない。以前は get_file_size がディレクトリの
+     * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
+     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた。
+     *
+     * **種別が確定しないときも open しない** (Codex 実装レビュー 往復 4 の B7)。
+     * 「DIR に一致したときだけ弾く」作りだと、stat が読めずに kind が負値へ
+     * なった経路が拒否をすり抜け、その先の get_file_size (ディレクトリでも
+     * 成功する) が FD を発行してしまう — 上の不具合が開き直る。
+     * 「エラー」を「ディレクトリではない」と読み替えない。
+     *
+     * NOTFOUND だけは続行する。下に O_CREAT の作成経路があるため。 */
+    kind = vfs_path_kind(resolved);
+    if (kind == VFS_KIND_DIR) return VFS_ERR_ISDIR;
+    if (kind < 0 && kind != VFS_ERR_NOTFOUND) return kind;
+
+    /* サイズ取得・存在確認 */
+    if (!ops->get_file_size) {
+        /* get_file_size非対応の場合、安全のためエラー */
+        return VFS_ERR_INVAL;
+    }
+    rc = ops->get_file_size(fs_ctx, rel_path, out_size);
+
+    if (rc != VFS_OK) {
+        /* **作成へ進めるのは「本当に無い」と分かったときだけ** (票 B8 の ②)。
+         * 以前はサイズ取得の**あらゆる失敗**でここへ来て空ファイルを書いて
+         * いたので、「通常ファイルと確認済み → サイズ取得だけ一度 I/O 失敗
+         * → 書き込みは成功」で、**O_TRUNC を付けていなくても既存の中身が
+         * 黙って消えた**。O_CREAT あり・O_TRUNC なしは「無ければ作る、
+         * あれば開く」という最も普通の書き込み用途なので被害が大きい。
+         * 「読めなかった」を「無い」と読み替えない。 */
+        if (rc != VFS_ERR_NOTFOUND) return rc;
+        if (!(mode & O_CREAT)) return VFS_ERR_NOTFOUND;
+        /* 作成処理 (サイズ0の空ファイルを作成してからサイズ取得等) */
+        /* 今回は簡易的に0バイトでwriteして作らせる */
+        if (!ops->write_file) return VFS_ERR_INVAL;
+        rc = ops->write_file(fs_ctx, rel_path, "", 0);
+        if (rc < 0) return rc;
+        *out_size = 0;
+        return VFS_OK;
+    }
+
+    if ((mode & O_TRUNC) && (mode & (O_WRONLY | O_RDWR))) {
+        /* 切り詰め：空ファイルで上書き。
+         * **戻り値を見る** — 以前は捨てていたので、ext2 の一括書き込みが
+         * 持つディレクトリ拒否 (fs/ext2_file.c) のような失敗も消え、
+         * 「切り詰まった」ことになっているサイズ 0 の FD が出ていた。 */
+        if (!ops->write_file) return VFS_ERR_INVAL;
+        rc = ops->write_file(fs_ctx, rel_path, "", 0);
+        if (rc < 0) return rc;
+        *out_size = 0;
+    }
+    return VFS_OK;
+}
+
 static int vfs_open_internal(const char *path, int mode, int owner,
                              const VfsSqliteCookie *cookie, int sqlite_flags)
 {
@@ -62,7 +124,6 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     char resolved[VFS_MAX_PATH], rel_path[VFS_MAX_PATH];
     u32 file_size = 0;
     int rc;
-    int kind;
     void *fs_ctx;
     VfsOps *ops;
 
@@ -82,62 +143,34 @@ static int vfs_open_internal(const char *path, int mode, int owner,
     ops = vfs_route(resolved, rel_path, VFS_MAX_PATH, &fs_ctx);
     if (!ops) return VFS_ERR_NOMOUNT;
 
-    /* ディレクトリは open できない。以前は get_file_size がディレクトリの
-     * inode サイズを返すため open が通り、`cat /etc` が生のディレクトリ
-     * ブロックを吐き、`mv dir x` が dir の生データを x に書いていた。
+    /* ---- 排他的作成 O_EXCL (票 H2 §2-1、KAPI v53) ----
      *
-     * **種別が確定しないときも open しない** (Codex 実装レビュー 往復 4 の B7)。
-     * 「DIR に一致したときだけ弾く」作りだと、stat が読めずに kind が負値へ
-     * なった経路が拒否をすり抜け、その先の get_file_size (ディレクトリでも
-     * 成功する) が FD を発行してしまう — 上の不具合が開き直る。
-     * 「エラー」を「ディレクトリではない」と読み替えない。
+     * **非対応 FS の判定を、種別検査 (vfs_path_kind) と作成処理より先に置く**
+     * (票 H2 §6 往復 2)。後ろに置くと create_excl を持たない FS でも先に
+     * 存在を調べてしまい、EXIST / ISDIR / I/O エラーが NOSYS より先に返る。
+     * 呼び手 (hsync) は NOSYS を「一時ファイル方式が使えない」の印として
+     * 直接上書きへ落ちない判断に使うので、ここで語が入れ替わると誤る。
      *
-     * NOTFOUND だけは続行する。下に O_CREAT の作成経路があるため。 */
-    kind = vfs_path_kind(resolved);
-    if (kind == VFS_KIND_DIR) return VFS_ERR_ISDIR;
-    if (kind < 0 && kind != VFS_ERR_NOTFOUND) return kind;
+     *   O_EXCL 単独 (O_CREAT なし)  … VFS_ERR_INVAL
+     *   create_excl を持たない FS   … VFS_ERR_NOSYS */
+    if (mode & O_EXCL) {
+        if (!(mode & O_CREAT)) return VFS_ERR_INVAL;
+        if (!ops->create_excl) return VFS_ERR_NOSYS;
 
-    /* サイズ取得・存在確認 */
-    rc = -1;
-    if (ops->get_file_size) {
-        rc = ops->get_file_size(fs_ctx, rel_path, &file_size);
+        /* 「無いことの確認 → 作成」は FS 側の 1 回の呼び出しの中で行う。
+         * ここで先に存在確認をしてから作ると、確認と作成の間に別の経路が
+         * 割り込める作りになり O_EXCL の意味が無くなる。
+         *
+         * 戻り値は 3 値: OK = 作った / EXIST = 既に在る (**種別を問わない** —
+         * ディレクトリでも ISDIR ではなく EXIST) / その他の負値 = 判定
+         * できなかった (そのまま返す、票 B8)。
+         * O_TRUNC は見ない — いま作った長さ 0 のファイルに切り詰める物は無い。 */
+        rc = ops->create_excl(fs_ctx, rel_path);
+        if (rc != VFS_OK) return rc;
+        file_size = 0;
     } else {
-        /* get_file_size非対応の場合、安全のためエラー */
-        return VFS_ERR_INVAL;
-    }
-
-    if (rc != VFS_OK) {
-        /* **作成へ進めるのは「本当に無い」と分かったときだけ** (票 B8 の ②)。
-         * 以前はサイズ取得の**あらゆる失敗**でここへ来て空ファイルを書いて
-         * いたので、「通常ファイルと確認済み → サイズ取得だけ一度 I/O 失敗
-         * → 書き込みは成功」で、**O_TRUNC を付けていなくても既存の中身が
-         * 黙って消えた**。O_CREAT あり・O_TRUNC なしは「無ければ作る、
-         * あれば開く」という最も普通の書き込み用途なので被害が大きい。
-         * 「読めなかった」を「無い」と読み替えない。 */
-        if (rc != VFS_ERR_NOTFOUND) return rc;
-        if (mode & O_CREAT) {
-            /* 作成処理 (サイズ0の空ファイルを作成してからサイズ取得等) */
-            /* 今回は簡易的に0バイトでwriteして作らせる */
-            if (!ops->write_file) return VFS_ERR_INVAL;
-            rc = ops->write_file(fs_ctx, rel_path, "", 0);
-            if (rc < 0) return rc;
-            file_size = 0;
-        } else {
-            return VFS_ERR_NOTFOUND;
-        }
-    } else {
-        if (mode & O_TRUNC) {
-            if (mode & O_WRONLY || mode & O_RDWR) {
-                /* 切り詰め：空ファイルで上書き。
-                 * **戻り値を見る** — 以前は捨てていたので、ext2 の一括書き込みが
-                 * 持つディレクトリ拒否 (fs/ext2_file.c) のような失敗も消え、
-                 * 「切り詰まった」ことになっているサイズ 0 の FD が出ていた。 */
-                if (!ops->write_file) return VFS_ERR_INVAL;
-                rc = ops->write_file(fs_ctx, rel_path, "", 0);
-                if (rc < 0) return rc;
-                file_size = 0;
-            }
-        }
+        rc = vfs_open_probe(ops, fs_ctx, resolved, rel_path, mode, &file_size);
+        if (rc != VFS_OK) return rc;
     }
 
     open_files[fd].generation++;

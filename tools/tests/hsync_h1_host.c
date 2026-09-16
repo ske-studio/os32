@@ -93,6 +93,12 @@ static int   fk_create_calls;   /* O_CREAT で新規に作った回数 */
 /* > 0 … sys_ls がこの件数だけ流してから I/O エラーを返す。HostDrv の
  * hdrv_list_dir が「途中で切れた列挙」を返す状況の再現 (票 H1 / 往復 3)。 */
 static int   fk_ls_fail_after;
+/* 票 H2: hsync は**一時ファイル** (.hs~<名前>) へ書くようになったので、
+ * 「宛先ノードに仕掛ける」注入 (write_zero / corrupt_write) は当たらない。
+ * 書き先を問わない大域の旗を足す。見ている規則 (0 進捗を失敗にする /
+ * 読戻しで破損を捕まえる) は何も変えていない。 */
+static int   fk_write_zero_all;
+static int   fk_corrupt_write_all;
 
 static char  fk_log[65536];
 static u32   fk_log_len;
@@ -111,6 +117,8 @@ static void fs_reset(void)
     fk_mkdir_calls = 0;
     fk_sync_calls = 0;
     fk_create_calls = 0;
+    fk_write_zero_all = 0;
+    fk_corrupt_write_all = 0;
     fk_ls_fail_after = 0;
     fk_log_len = 0;
     fk_log[0] = '\0';
@@ -303,6 +311,12 @@ static int fk_sys_open(const char *path, int mode)
     int n = fs_find(path);
     int f;
 
+    if (mode & KAPI_O_EXCL) {
+        /* 票 H2 §2-1: O_CREAT と組でだけ有効、名前が在れば種別を
+         * 問わず EXIST。ext2 と同じ契約。 */
+        if (!(mode & KAPI_O_CREAT)) return OS32_ERR_INVAL;
+        if (n >= 0) return OS32_ERR_EXIST;
+    }
     if (n < 0) {
         if (!(mode & KAPI_O_CREAT)) return OS32_ERR_NOTFOUND;
         n = fs_add_file(path, 0, 0);
@@ -368,7 +382,9 @@ static int fk_sys_write(int fd, const void *buf, u32 size)
         return OS32_ERR_IO;
     h = &fs_fds[fd - 3];
     nd = &fs_nodes[h->node];
-    if (nd->write_zero) return 0;
+    /* 大域の旗は**書き先を問わない** — 票 H2 で hsync が一時ファイルへ
+     * 書くようになり、宛先ノードに仕掛ける注入が当たらなくなったため。 */
+    if (nd->write_zero || fk_write_zero_all) return 0;
 
     take = size;
     if (nd->write_chunk > 0 && take > (u32)nd->write_chunk)
@@ -382,13 +398,48 @@ static int fk_sys_write(int fd, const void *buf, u32 size)
         nd->cap = newcap;
     }
     memcpy(nd->data + h->pos, buf, take);
-    if (nd->corrupt_write && take > 0) nd->data[h->pos] ^= 0xFF;
+    if ((nd->corrupt_write || fk_corrupt_write_all) && take > 0)
+        nd->data[h->pos] ^= 0xFF;
     h->pos += take;
     if (h->pos > nd->size) nd->size = h->pos;
     return (int)take;
 }
 
 static KernelAPI g_fake;
+
+
+/* ---- 票 H2: 一時ファイル方式に必要な口 -------------------------------
+ *
+ * hsync は KAPI v53 以降で宛先を **一時ファイル `.hs~<名前>` へ書いてから
+ * rename で置き換える**。H1 / H3 が見ている判定 (サイズ・日時・内容比較・
+ * mtime の保存) は何も変わらないが、**書く先が変わる**ので、贋 FS 側に
+ * 排他的作成 (O_EXCL)・unlink・rename の 3 つを足す。
+ * 故障は注入しない (それは tools/tests/hsync_h2_host.c の担当)。 */
+static int fk_sys_unlink(const char *path)
+{
+    int n = fs_find(path);
+    if (n < 0) return OS32_ERR_NOTFOUND;
+    if (fs_nodes[n].is_dir) return OS32_ERR_ISDIR;
+    if (fs_nodes[n].data) free(fs_nodes[n].data);
+    memset(&fs_nodes[n], 0, sizeof(FNode));
+    return 0;
+}
+
+static int fk_sys_rename(const char *oldpath, const char *newpath)
+{
+    int src_n = fs_find(oldpath);
+    int dst_n;
+
+    if (src_n < 0) return OS32_ERR_NOTFOUND;
+    dst_n = fs_find(newpath);
+    if (dst_n >= 0) {
+        if (fs_nodes[dst_n].data) free(fs_nodes[dst_n].data);
+        memset(&fs_nodes[dst_n], 0, sizeof(FNode));
+    }
+    strncpy(fs_nodes[src_n].path, newpath, FS_PATH_CAP - 1);
+    fs_nodes[src_n].path[FS_PATH_CAP - 1] = '\0';
+    return 0;
+}
 
 static void fake_api_init(void)
 {
@@ -405,6 +456,11 @@ static void fake_api_init(void)
     g_fake.sys_read = fk_sys_read;
     g_fake.sys_write = fk_sys_write;
     g_fake.sys_stat = fk_sys_stat;
+    g_fake.sys_unlink = fk_sys_unlink;
+    g_fake.sys_rename = fk_sys_rename;
+    /* 動いているカーネルの KAPI 版。票 H2 の hsync は
+     * v53 未満を kernel_too_old で断るので、**必ず立てる**。 */
+    g_fake.version = KAPI_VERSION;
 }
 
 /* ========================================================================= */
@@ -852,9 +908,9 @@ static void case_a06(void)
     rc = run1("bin");           /* いったん作らせる */
     check(rc == 0 && log_has("copied=1"), "前提: 新規コピーは成功する");
     setup_pair(5000, 4, 1, 5000, 5);
-    nd = fs_find("/bin/a.bin");
-    fs_nodes[nd].write_zero = 1;
+    fk_write_zero_all = 1;
     rc = run1("bin");
+    fk_write_zero_all = 0;
     check(rc != 0 && log_has("copied=0") && log_has("errors=1"),
           "0 進捗 write -> 非ゼロ終了、copied に入れない");
 
@@ -915,21 +971,27 @@ static void case_a08(void)
 static void case_a09(void)
 {
     int rc;
-    int nd;
 
     printf("== A09: 読戻し検証 ==\n");
 
     /* 書き込みが化ける -> 読戻しの CRC が合わない */
     setup_pair(70000, 1, 1, 70000, 2);
-    nd = fs_find("/bin/a.bin");
-    fs_nodes[nd].corrupt_write = 1;
+    fk_corrupt_write_all = 1;
     rc = run1("bin");
+    fk_corrupt_write_all = 0;
     check(rc != 0, "書き込み破損 -> 非ゼロ終了");
     check(log_has("reason=verify_failed"), "reason=verify_failed を出す");
     check(log_has("copied=0") && log_has("errors=1"),
           "成功件数に入れない");
-    check(log_has("旧内容は残らない"),
-          "H1 の限界 (直接上書き) を失敗行で告げる");
+    /* **票 H2 でここが変わった**。H1 は「直接上書きなので旧内容は残らない」と
+     * 告げるのが正しかったが、H2 は一時ファイルへ書いて検証してから置換する
+     * ので、読戻しの失敗は**公開の前**の失敗になり旧宛先はそのまま残る。
+     * 見ている規則 (読戻しの失敗を成功にしない・限界を失敗行で告げる) は
+     * 変わっていない。 */
+    check(log_has("公開の前なので旧宛先はそのまま"),
+          "H2: 公開の前の失敗であることを失敗行で告げる");
+    check(fs_nodes[fs_find("/bin/a.bin")].size == 70000,
+          "H2: 旧宛先が残っている (切り詰められていない)");
 
     /* vfs_sync が落ちる -> verify_failed */
     setup_pair(5000, 1, 1, 5000, 2);

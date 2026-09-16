@@ -264,6 +264,12 @@ static int fk_sys_open(const char *path, int mode)
     int n = fs_find(path);
     int f;
 
+    if (mode & KAPI_O_EXCL) {
+        /* 票 H2 §2-1: O_CREAT と組でだけ有効、名前が在れば種別を
+         * 問わず EXIST。ext2 と同じ契約。 */
+        if (!(mode & KAPI_O_CREAT)) return OS32_ERR_INVAL;
+        if (n >= 0) return OS32_ERR_EXIST;
+    }
     if (n < 0) {
         if (!(mode & KAPI_O_CREAT)) return OS32_ERR_NOTFOUND;
         n = fs_add_file(path, 0, 0);
@@ -353,6 +359,40 @@ static int fk_sys_set_mtime(const char *path, u32 mtime)
 
 static KernelAPI g_fake;
 
+
+/* ---- 票 H2: 一時ファイル方式に必要な口 -------------------------------
+ *
+ * hsync は KAPI v53 以降で宛先を **一時ファイル `.hs~<名前>` へ書いてから
+ * rename で置き換える**。H1 / H3 が見ている判定 (サイズ・日時・内容比較・
+ * mtime の保存) は何も変わらないが、**書く先が変わる**ので、贋 FS 側に
+ * 排他的作成 (O_EXCL)・unlink・rename の 3 つを足す。
+ * 故障は注入しない (それは tools/tests/hsync_h2_host.c の担当)。 */
+static int fk_sys_unlink(const char *path)
+{
+    int n = fs_find(path);
+    if (n < 0) return OS32_ERR_NOTFOUND;
+    if (fs_nodes[n].is_dir) return OS32_ERR_ISDIR;
+    if (fs_nodes[n].data) free(fs_nodes[n].data);
+    memset(&fs_nodes[n], 0, sizeof(FNode));
+    return 0;
+}
+
+static int fk_sys_rename(const char *oldpath, const char *newpath)
+{
+    int src_n = fs_find(oldpath);
+    int dst_n;
+
+    if (src_n < 0) return OS32_ERR_NOTFOUND;
+    dst_n = fs_find(newpath);
+    if (dst_n >= 0) {
+        if (fs_nodes[dst_n].data) free(fs_nodes[dst_n].data);
+        memset(&fs_nodes[dst_n], 0, sizeof(FNode));
+    }
+    strncpy(fs_nodes[src_n].path, newpath, FS_PATH_CAP - 1);
+    fs_nodes[src_n].path[FS_PATH_CAP - 1] = '\0';
+    return 0;
+}
+
 static void fake_api_init(void)
 {
     memset(&g_fake, 0, sizeof(g_fake));
@@ -368,6 +408,11 @@ static void fake_api_init(void)
     g_fake.sys_read = fk_sys_read;
     g_fake.sys_write = fk_sys_write;
     g_fake.sys_stat = fk_sys_stat;
+    g_fake.sys_unlink = fk_sys_unlink;
+    g_fake.sys_rename = fk_sys_rename;
+    /* 動いているカーネルの KAPI 版。票 H2 の hsync は
+     * v53 未満を kernel_too_old で断るので、**必ず立てる**。 */
+    g_fake.version = KAPI_VERSION;
     g_fake.sys_set_mtime = fk_sys_set_mtime;
 }
 
@@ -771,7 +816,16 @@ static void case_nosys_and_failure(void)
     rc = run1("bin");
     check(rc != 0, "**非ゼロ終了** (コピー成功だけで全成功と言わない)");
     check(log_has("reason=metadata_failed"), "metadata_failed を出す");
-    check(log_has("copied=1"), "内容のコピー自体は成功している");
+    /* **票 H2 §2-3 手順 7 でここが変わった** (Codex 往復 1 所見 4)。
+     * mtime は**一時ファイル**に設定するので、その失敗は「公開の前の失敗」に
+     * なる。ext2 はメタデータの I/O 失敗でマウントを書き込み禁止にするため、
+     * 続く rename は必ず ROFS になり宛先は旧内容のまま — だから copied に
+     * 数えない。H3 の時点では本名へ書いた後に mtime を付けていたので
+     * copied=1 が正しかった。見ている規則 (設定失敗を握り潰さない・
+     * 非ゼロ終了する) は変わっていない。 */
+    check(log_has("copied=0"),
+          "**copied に数えない** (公開の前の失敗、票 H2 §2-3 手順 7)");
+    check(!log_has("UPDATE "), "UPDATE とは言わない");
     check(log_has("errors=1"), "errors=1");
     check(log_has("FAILED"), "頭が FAILED になる");
     fk_set_mtime_all_rc = 0;
@@ -834,8 +888,9 @@ static void case_tally(void)
           log_has("excluded=") && log_has("protected=") &&
           log_has("metadata_updated=") && log_has("errors="),
           "6 区分が全部出ている");
-    check(log_has("protected=0 metadata_updated=1 errors=0"),
-          "並び順が protected -> metadata_updated -> errors");
+    /* 票 H2 §2-4 で `cleaned` が metadata_updated と errors の間に入った */
+    check(log_has("protected=0 metadata_updated=1 cleaned=0 errors=0"),
+          "並び順が protected -> metadata_updated -> cleaned -> errors");
 }
 
 /* ========================================================================= */

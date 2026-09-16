@@ -154,7 +154,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   `start_row()` (項目数から導く) を使う — 固定値は 1 行ずれて Shut Down に当たった。 → §4-31
 - `ext2_read_file` は端数ブロックを `to_copy` だけ写す (2026-09-11 まで 1KB 溢れていた)。FS の read が
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
-- `hsync` はサイズか日時が違うものだけ内容比較する。同サイズ・同日時で中身が違う差し替えだけ見逃す (`--verify` で全件比較)。直接上書きなので失敗時に旧内容は残らない (H2)。 → §4-36
+- `hsync` はサイズか日時が違うものだけ内容比較する。同サイズ・同日時で中身が違う差し替えだけ見逃す (`--verify` で全件比較)。置き換えは予約名 `.hs~<名前>` へ書いて検証してから `rename` する — **公開の前**に落ちれば旧内容が残り、**公開の後**に落ちれば新内容が現れて `replace_partial` になる (成功に数えない)。KAPI v53 未満のカーネルでは既定で断る (`--unsafe-overwrite` のときだけ直接上書き)。 → §4-36
 - `hsync` は HostDrv の内容で NHD を上書きする。NHD 配備の後は**先に `make deploy`**。 → §4-33
 - Device windows: decide from the physical map (`pgalloc_range_has_ram`), never from the RAM ceiling (`sys_get_mem_kb`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary; `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1

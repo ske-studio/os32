@@ -184,6 +184,32 @@ static int ext2_vfs_unlink(void *ctx, const char *path)
     return ext2_to_vfs_err(ext2_unlink(ec, dir_ino, fname));
 }
 
+/* ---- 排他的作成 (票 H2 §2-1、KAPI v53 の O_EXCL) ----
+ *
+ * 「無いことの確認 → 作成」を **1 回の呼び出しの中で**行う。ext2_create が
+ * 既に 3 値の存在確認を持っている (EXT2_OK なら EXIST、NOTFOUND のときだけ
+ * 作る、それ以外はそのまま返す) ので、そこへ長さ 0 で入るだけでよい。
+ * ディレクトリでも「名前が在る」= EXIST になる (find_entry は種別を見ない) —
+ * O_EXCL の契約どおり ISDIR ではなく EXIST を返す。 */
+static int ext2_vfs_create_excl(void *ctx, const char *path)
+{
+    Ext2Ctx *ec = (Ext2Ctx *)ctx;
+    char dir_path[VFS_MAX_PATH];
+    const char *fname;
+    u32 dir_ino;
+    int rc;
+
+    if (!ec) return VFS_ERR_NOMOUNT;
+    if (!path || !path[0]) return VFS_ERR_INVAL;
+
+    ext2_split_path(path, dir_path, &fname);
+    if (!fname[0]) return VFS_ERR_INVAL;
+
+    rc = ext2_resolve_path(ec, dir_path, &dir_ino);
+    if (rc != VFS_OK) return rc;
+    return ext2_to_vfs_err(ext2_create(ec, dir_ino, fname, "", 0));
+}
+
 static int ext2_vfs_rename(void *ctx, const char *oldpath, const char *newpath)
 {
     Ext2Ctx *ec = (Ext2Ctx *)ctx;
@@ -401,7 +427,8 @@ static VfsOps ext2_ops = {
     ext2_vfs_sync,
     ext2_vfs_total_blocks, ext2_vfs_free_blocks, ext2_vfs_block_size,
     ext2_vfs_stat,
-    ext2_vfs_set_mtime          /* 票 H3。他の FS は埋めない = NOSYS */
+    ext2_vfs_set_mtime,         /* 票 H3。他の FS は埋めない = NOSYS */
+    ext2_vfs_create_excl        /* 票 H2。他の FS は埋めない = NOSYS */
 };
 
 

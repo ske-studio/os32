@@ -214,7 +214,7 @@ extern i32 __cdecl wrap_host_close(i32 h);
 extern int __cdecl wrap_sys_set_mtime(const char *path, u32 mtime);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 52;
+kapi->version = 53;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;

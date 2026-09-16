@@ -92,17 +92,29 @@ def check_kapi_slot():
         raise SystemExit("生成ヘッダの KAPI_FUNC_COUNT が kapi.json と違う "
                          "(再生成していない / 手編集した)")
 
-    # hsync は新 API を呼ぶので app.conf の要求版を上げてあること
+    # hsync は sys_set_mtime (v52) を呼ぶので、要求版はそれ以上であること。
+    #
+    # **「最新の KAPI と同じ版」ではない** (票 H2 §1 の 7 / §2-3 末尾で変更)。
+    # 票 H2 の hsync は v53 の O_EXCL を使うが、カーネルを入れ替える途中で
+    # **v52 のカーネルの上で動かす場面が現に起こる**。要求版を 53 にすると
+    # exec/exec.c の `min_api_ver > KAPI_VERSION` が「invalid OS32X binary」と
+    # して起動そのものを拒否し、hsync 自身の kernel_too_old も
+    # --unsafe-overwrite も届かない。版の判定は hsync が api->version で行う。
+    # 上限 (kapi.json の version 以下) は据え置き — 存在しない版を要求しない。
+    HSYNC_MIN_API = 52          # sys_set_mtime が入った版 (票 H3)
     conf = (ROOT / "build/app.conf").read_text(encoding="utf-8")
     m = re.search(r"^userland/system/hsync\s+(\d+)", conf, re.M)
     if not m:
         raise SystemExit("build/app.conf に userland/system/hsync が無い")
-    if int(m.group(1)) < int(kapi["version"]):
-        raise SystemExit("build/app.conf の hsync の要求 API 版が v%s 未満"
-                         % kapi["version"])
+    if int(m.group(1)) < HSYNC_MIN_API:
+        raise SystemExit("build/app.conf の hsync の要求 API 版が v%d 未満 "
+                         "(sys_set_mtime が無い)" % HSYNC_MIN_API)
+    if int(m.group(1)) > int(kapi["version"]):
+        raise SystemExit("build/app.conf の hsync の要求 API 版が kapi.json の "
+                         "v%s を越えている" % kapi["version"])
 
     print("KAPI SLOT PASS (sys_set_mtime = slot %d, v%s, "
-          "app.conf hsync>=%s)" % (len(api) - 1, kapi["version"], m.group(1)),
+          "app.conf hsync=%s)" % (len(api) - 1, kapi["version"], m.group(1)),
           flush=True)
 
 
@@ -165,12 +177,14 @@ MUTATIONS = [
      "        if (!g_verify && mtime_same) {",
      "        if (mtime_same) {"),
     # 変異 7: 設定失敗を握り潰して成功と言う版 (metadata_failed の否定側)。
+    # 目印は票 H2 で apply_mtime が (target, label) の 2 経路になったのに
+    # 合わせた。見るもの (設定失敗を握り潰さない) は変えていない。
     ("swallow_set_failure",
-     "    fail_file(dst_path, HR_META_FAILED, rc);\n    return -1;",
+     "    fail_file(label, HR_META_FAILED, rc);\n    return -1;",
      "    return 0;"),
     # 変異 3: 時刻の保存を省く版。A03 / A04 が落ちなければ保存を見ていない。
     ("no_set_mtime",
-     "    rc = api->sys_set_mtime(dst_path, src_mtime);",
+     "    rc = api->sys_set_mtime(target, src_mtime);",
      "    rc = 0;"),
     # 変異 4: FILETIME の起点差を足し忘れる (1601 起点のまま返す) 版。
     ("filetime_no_epoch_shift",

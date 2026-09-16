@@ -259,11 +259,29 @@ static int g_wfail_armed;
 static int g_wfail_nth;       /* 0 = armed のあいだずっと */
 static int g_wfail_seen;
 static int g_wfail_fired;
+/* 票 H2 X3b (ii) / 往復 3 所見 2: **媒体へ写した後で失敗を返す**模様。
+ * drivers/ide.c は状態レジスタをデータ転送の**後**に見るので、
+ * 「書き込みが失敗した = 媒体は未変更」は成り立たない。従来の注入は写す前に
+ * 返していたので、この形は 1 度も作れていなかった。 */
+static int g_wfail_land;
+static int g_sw_land;         /* 掃引側の同じ模様 */
+/* 票 H2 X3b (iii): 書き込みが落ちた**後の読み直しも落とす**。
+ * 公開の 3 値のうち「不明」を作れる唯一の形で、ここでは D を解放しては
+ * いけない (生きている内容の解放は戻せない)。 */
+static int g_wfail_then_rfail;
 
 static void wfail_arm(u32 lba, int nth)
 {
     g_wfail_lba = lba; g_wfail_armed = 1; g_wfail_nth = nth;
-    g_wfail_seen = 0; g_wfail_fired = 0;
+    g_wfail_seen = 0; g_wfail_fired = 0; g_wfail_land = 0;
+    g_wfail_then_rfail = 0;
+}
+
+/* 媒体へ写してから失敗を返す版 */
+static void wfail_arm_landed(u32 lba, int nth)
+{
+    wfail_arm(lba, nth);
+    g_wfail_land = 1;
 }
 static void wfail_arm_always(u32 lba) { wfail_arm(lba, 0); }
 static void wfail_disarm(void) { g_wfail_armed = 0; }
@@ -285,6 +303,7 @@ static void sw_arm(int at, int sticky, int kind)
     g_sw_armed = 1; g_sw_at = at; g_sw_sticky = sticky; g_sw_kind = kind;
     g_sw_seen = 0; g_sw_fired = 0;
     g_sw_at2 = 0; g_sw_fired1 = 0; g_sw_fired2 = 0;
+    g_sw_land = 0;
 }
 
 /* 「i 番目と j 番目の I/O だけが落ちる」(i < j)。sticky は使わない。
@@ -387,13 +406,22 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
     if (!dev) return -1;
     for (i = 0; i < count; i++) {
         u32 cur = lba + (u32)i;
+        int land = 0;
         if (cur >= DISK_SECTORS) return -1;
-        if (sw_hit(SW_KIND_WRITE)) return -1;
-        if (g_wfail_armed && cur == g_wfail_lba) {
+        if (sw_hit(SW_KIND_WRITE)) {
+            if (!g_sw_land) return -1;
+            land = 1;                         /* 届いてから失敗する */
+        }
+        if (!land && g_wfail_armed && cur == g_wfail_lba) {
             g_wfail_seen++;
             if (g_wfail_nth == 0 || g_wfail_seen == g_wfail_nth) {
                 g_wfail_fired++;
-                return -1;
+                if (g_wfail_then_rfail) {
+                    g_fail_lba = cur; g_fail_armed = 1; g_fail_nth = 0;
+                    g_fail_seen = 0;
+                }
+                if (!g_wfail_land) return -1;
+                land = 1;
             }
         }
         undo_record(cur);
@@ -401,6 +429,7 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
         kmemcpy(g_disk + cur * 512u, (const u8 *)buf + i * 512, 512);
         g_wr_sect++;
         if (cur == SB_STATE_LBA) g_wr_sb++;
+        if (land) return -1;                  /* 媒体には届いたが失敗を返す */
     }
     return 0;
 }
@@ -1334,6 +1363,39 @@ static const u8 *raw_inode(u32 ino)
 }
 
 static u32 raw_inode_ptr(u32 ino, int i) { return *(const u32 *)(raw_inode(ino) + 40 + i * 4); }
+static u32 raw_links(u32 ino) { return *(const u16 *)(raw_inode(ino) + 26); }
+
+/* 媒体を直に読んで dir_ino の中の name を探す (票 H2 X3)。**ext2 のコードを
+ * 通さない** — 検査対象と同じ読み方をすると同じ誤りを共有して見逃す。
+ * 直接ブロックだけ見る (この試験のディレクトリは 12 ブロックに収まる)。
+ * 戻り値 1 = 見つけた (*out_ino) / 0 = 無い。 */
+static int raw_find_name(u32 dir_ino, const char *name, u32 *out_ino)
+{
+    u32 bi, pos, nlen = h_strlen(name);
+
+    for (bi = 0; bi < EXT2_NDIR_BLOCKS; bi++) {
+        u32 phys = raw_inode_ptr(dir_ino, (int)bi);
+        u8 *d;
+        if (phys == 0) continue;
+        if (phys < g_ec->sb_info.first_data_block ||
+            phys >= g_ec->sb_info.total_blocks) continue;
+        d = raw_blk(phys);
+        pos = 0;
+        while (pos + 8 <= EXT2_BLOCK_SIZE) {
+            u32 ino = *(u32 *)(d + pos);
+            u16 rl = *(u16 *)(d + pos + 4);
+            u8  nl = d[pos + 6];
+            if (rl < 8 || (u32)rl % 4 != 0 || pos + rl > EXT2_BLOCK_SIZE) break;
+            if (ino != 0 && nl == (u8)nlen && pos + 8 + nlen <= EXT2_BLOCK_SIZE &&
+                kstrncmp(name, (const char *)(d + pos + 8), nlen) == 0) {
+                if (out_ino) *out_ino = ino;
+                return 1;
+            }
+            pos += rl;
+        }
+    }
+    return 0;
+}
 
 static int mr_ref(u32 b)
 {
@@ -2273,6 +2335,11 @@ static const char *g_sw_pattern_name = "";
 static SweepOp g_sw_follow;
 static GuardTally g_sw_gt;
 
+/* 票 H2 X3: 掃引の 1 回ごとに見る**追加の**不変条件。NULL なら見ない。
+ * 置き換え rename では「宛先の名前がどの試行でも存在し、旧 inode か
+ * 新 inode を指す」を媒体から直に確かめる。 */
+static void (*g_sw_extra)(void);
+
 /* op を「at 回目のセクタ I/O が落ちる」形で at = 1, 2, ... と全位置で動かす。
  * sticky = 0 (その 1 回だけ) と 1 (そこから先すべて) の両方。1 回ごとに
  *   - 媒体を検査し (相互リンクの前段が 0 か)、漏れを数え、
@@ -2314,6 +2381,7 @@ static void sweep(const char *label, SweepOp op, int must_report_leak)
             sw_disarm();
 
             media_check(&r);
+            if (g_sw_extra) g_sw_extra();
             if (!media_ok(&r)) {
                 if (!bad) { first_bad = r; first_bad_at = at; first_bad_sticky = sticky; }
                 bad++;
@@ -2563,10 +2631,60 @@ static int op_rename_same(void)
 { return ext2_rename(g_ec, g_sw_dir, "small", g_sw_dir, "moved"); }
 static int op_rename_cross(void)
 { return ext2_rename(g_ec, g_sw_dir, "small", g_etc_dir, "moved"); }
+/* 置き換えの旧 inode (app1) と新 inode (small)。掃引の不変条件で使う */
+static u32 g_x3_replace_old, g_x3_replace_new;
 static int op_rename_replace(void)
 { return ext2_rename(g_ec, g_sw_dir, "small", g_sw_dir, "app1"); }
 static int op_rename_dir(void)
 { return ext2_rename(g_ec, g_sw_dir, "rmd", g_etc_dir, "rmd2"); }
+
+/* 票 H2 X3: 置き換え rename の掃引に掛ける不変条件。
+ * **宛先の名前がどの試行でも存在し、旧 inode D か新 inode S を指す。** */
+static u32 g_x3_dir_ino, g_x3_old_ino, g_x3_new_ino;
+static const char *g_x3_dst_name;
+static int g_x3_runs, g_x3_missing, g_x3_alien, g_x3_new, g_x3_old;
+
+static void x3_check_dst(void)
+{
+    u32 ino = 0;
+    g_x3_runs++;
+    if (!raw_find_name(g_x3_dir_ino, g_x3_dst_name, &ino)) {
+        g_x3_missing++;
+        return;
+    }
+    if (ino == g_x3_new_ino) g_x3_new++;
+    else if (ino == g_x3_old_ino) g_x3_old++;
+    else g_x3_alien++;
+}
+
+static void x3_begin(u32 dir_ino, const char *dst_name, u32 old_ino, u32 new_ino)
+{
+    g_x3_dir_ino = dir_ino; g_x3_dst_name = dst_name;
+    g_x3_old_ino = old_ino; g_x3_new_ino = new_ino;
+    g_x3_runs = g_x3_missing = g_x3_alien = g_x3_new = g_x3_old = 0;
+    g_sw_extra = x3_check_dst;
+}
+
+static void x3_end(const char *label)
+{
+    g_sw_extra = (void (*)(void))0;
+    report("          [X3] "); report(label);
+    report(" runs="); report_i(g_x3_runs);
+    report(" dst->new="); report_i(g_x3_new);
+    report(" dst->old="); report_i(g_x3_old);
+    report(" dst-missing="); report_i(g_x3_missing);
+    report(" dst-alien="); report_i(g_x3_alien);
+    report("\n");
+    check_at(g_x3_missing == 0,
+             "X3: the destination name exists after every injected failure",
+             __LINE__);
+    check_at(g_x3_alien == 0,
+             "X3: the destination name points to the old or the new inode",
+             __LINE__);
+    check_at(g_x3_new > 0 && g_x3_old > 0,
+             "X3: both outcomes (old / new) actually occur in the sweep",
+             __LINE__);
+}
 
 static void run_all_sweeps(void)
 {
@@ -2584,7 +2702,9 @@ static void run_all_sweeps(void)
     sweep("ext2_create (旧コードの跡 = inode 番号が残る / 2 セクタ目)", op_create_st2, 1);
     sweep("ext2_rename (同じディレクトリ)", op_rename_same, 1);
     sweep("ext2_rename (別のディレクトリへ)", op_rename_cross, 1);
+    x3_begin(g_sw_dir, "app1", g_x3_replace_old, g_x3_replace_new);
     sweep("ext2_rename (既存ファイルを置き換える)", op_rename_replace, 1);
+    x3_end("ext2_rename (既存ファイルを置き換える)");
     sweep("ext2_rename (ディレクトリを別の親へ)", op_rename_dir, 1);
 }
 
@@ -2613,6 +2733,8 @@ static void stage_c_sweeps(void)
     CHECK(make_slack_dir("/sw/st2", "/sw/F2", 1, &g_st2_dir, (u32 *)0));
     memo_cold();
     CHECK(ext2_lookup(g_ec, "/etc", &g_etc_dir) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/app1", &g_x3_replace_old) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/sw/small", &g_x3_replace_new) == EXT2_OK);
     if (g_failures != f0) { disk_teardown(); return; }
 
     /* 同じ操作を 2 種類のゴミの模様で回す (盲点 (c)) */
@@ -2721,6 +2843,10 @@ static int op_p_unlink_big(void) { return ext2_unlink(g_ec, g_p_dir, "big13"); }
 static int op_p_rename_same(void)  { return ext2_rename(g_ec, g_p_dir, "mv", g_p_dir, "mv2"); }
 static int op_p_rename_cross(void) { return ext2_rename(g_ec, g_p_dir, "mv", g_q_dir, "mv2"); }
 static int op_p_rename_dir(void)   { return ext2_rename(g_ec, g_p_dir, "dm", g_q_dir, "dm2"); }
+/* 票 H2 X3: 二重故障でも宛先の名前を消さないこと (mv -> c1 を置き換える) */
+static u32 g_x3_pair_old, g_x3_pair_new;
+static int op_p_rename_replace(void)
+{ return ext2_rename(g_ec, g_p_dir, "mv", g_p_dir, "c1"); }
 static int op_p_mkdir(void)      { return ext2_mkdir(g_ec, g_p_dir, "nd"); }
 static int op_p_rmdir(void)      { return ext2_rmdir(g_ec, g_p_dir, "d"); }
 
@@ -2779,6 +2905,7 @@ static void pair_sweep(const char *label, SweepOp op, int must_report_leak)
             sw_disarm();
 
             media_check(&r);
+            if (g_sw_extra) g_sw_extra();
             runs++;
             if (f1 && f2) both++;
             if (rc < 0) err_runs++;
@@ -2858,6 +2985,9 @@ static void run_all_pair_sweeps(void)
     pair_sweep("ext2_rename (ファイル / 同じディレクトリ)", op_p_rename_same, 1);
     pair_sweep("ext2_rename (ファイル / 別のディレクトリへ)", op_p_rename_cross, 1);
     pair_sweep("ext2_rename (ディレクトリ / 別の親へ)", op_p_rename_dir, 1);
+    x3_begin(g_p_dir, "c1", g_x3_pair_old, g_x3_pair_new);
+    pair_sweep("ext2_rename (既存ファイルを置き換える)", op_p_rename_replace, 1);
+    x3_end("ext2_rename (既存ファイルを置き換える / 二重故障)");
     pair_sweep("ext2_mkdir", op_p_mkdir, 1);
     pair_sweep("ext2_rmdir (空のディレクトリ)", op_p_rmdir, 1);
 }
@@ -2883,6 +3013,8 @@ static void stage_h_pair_sweeps(void)
     CHECK(ext2_lookup(g_ec, "/q", &g_q_dir) == EXT2_OK);
     CHECK(ext2_create(g_ec, g_p_dir, "c1", "x", 1) == EXT2_OK);
     CHECK(ext2_create(g_ec, g_p_dir, "mv", "x", 1) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, g_p_dir, "c1", &g_x3_pair_old, (u8 *)0) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, g_p_dir, "mv", &g_x3_pair_new, (u8 *)0) == EXT2_OK);
     CHECK(ext2_vfs_write(g_ec, "/p/big13", g_sw_pat, PAIR_BIG_BYTES) == VFS_OK);
     CHECK(ext2_vfs_write(g_ec, "/p/t", g_sw_pat, PAIR_BIG_BYTES) == VFS_OK);
     CHECK(ext2_vfs_write(g_ec, "/p/w", "tiny", 4) == VFS_OK);
@@ -4541,6 +4673,9 @@ static void stage_g_round6(void)
     stage_c2_orphan_parent_sweeps();
 }
 
+/* 定義は下の「段 X3」節 (票 H2 §2-2 の置き換え rename)。 */
+static void stage_x3_replace(void);
+
 static void stage_a(void)
 {
     report("== 段 A: 実物の ext2 (RAM ディスク) + 実物の vfs_open ==\n");
@@ -4603,6 +4738,9 @@ static void stage_a(void)
 
     /* 段 H: 独立した 2 か所の失敗 (TASK_FS_TYPE §2-6 の「二重故障」) */
     stage_h_pair_sweeps();
+
+    /* 段 X3: 置き換え rename の公開処理 (票 H2 §2-2 / X3b X3c X3d) */
+    stage_x3_replace();
 }
 
 /* ======================================================================== */
@@ -4858,6 +4996,347 @@ static void stage_b(void)
     synth_trunc_write_failure();
     synth_sqlite();
     synth_normal();
+}
+
+/* ======================================================================== */
+/*  段 X3: 通常ファイル同士の置き換え rename (票 H2 §2-2)                     */
+/*                                                                          */
+/*  X3b  公開処理 (段 2) の 3 値を、**フィールドが前半 / 後半セクタ**の配置 x  */
+/*       3 つの落ち方で確かめる:                                             */
+/*         (i)   媒体に届く前に失敗   -> **未公開**。D を解放しない           */
+/*         (ii)  媒体に届いた後に失敗 -> 読み直して **公開済み**、段 3〜6 へ   */
+/*         (iii) 書き込み失敗 + 読み直しも失敗 -> **不明**。書き込み禁止にし、 */
+/*               段 3〜5 を一切実行しない (D を解放しない)                    */
+/*  X3c  段 2 の後に ext2_resolve_path を通す経路が古い D を返さない          */
+/*  X3d  掃除の ext2_unlink で links_count の書き込みだけ失敗 -> OK を返さない */
+/* ======================================================================== */
+
+#define X3_PAD_LEN 244          /* rec_len 252。2 件で 528 = 2 セクタ目の頭 */
+#define X3_OLD     "OLDOLDOLD"
+#define X3_OLD_LEN 9
+#define X3_NEW     "NEWNEWNEWNEW"
+#define X3_NEW_LEN 12
+
+/* /x に "dst" (置き換えられる側 D) と "src" (置き換える側 S) を作る。
+ * second = 1 なら先に 244 文字の詰め物を 2 件入れて、dst のエントリが
+ * **ブロックの後半セクタ**に載るようにする。 */
+static int x3_make(int second, u32 *dir_ino, u32 *d_ino, u32 *s_ino,
+                   u32 *phys, u32 *pos)
+{
+    static char pad[X3_PAD_LEN + 1];
+    u8 ftype = 0;
+    int k, i;
+
+    if (ext2_vfs_mkdir(g_ec, "/x") != VFS_OK) return 0;
+    memo_cold();
+    if (ext2_lookup(g_ec, "/x", dir_ino) != EXT2_OK) return 0;
+
+    if (second) {
+        for (k = 0; k < 2; k++) {
+            for (i = 0; i < X3_PAD_LEN; i++) pad[i] = (char)('A' + k);
+            pad[X3_PAD_LEN] = '\0';
+            if (ext2_create(g_ec, *dir_ino, pad, "", 0) != EXT2_OK) return 0;
+        }
+    }
+    if (ext2_create(g_ec, *dir_ino, "dst", X3_OLD, X3_OLD_LEN) != EXT2_OK) return 0;
+    if (ext2_create(g_ec, *dir_ino, "src", X3_NEW, X3_NEW_LEN) != EXT2_OK) return 0;
+    if (ext2_find_entry_loc(g_ec, *dir_ino, "dst", d_ino, &ftype, phys, pos)
+        != EXT2_OK) return 0;
+    if (ext2_find_entry(g_ec, *dir_ino, "src", s_ino, (u8 *)0) != EXT2_OK) return 0;
+    if (ext2_sync(g_ec) != EXT2_OK) return 0;
+    /* 配置が狙いどおりか (前半 = 0 / 後半 = 1) */
+    return ((*pos / EXT2_SECTOR_SIZE) == (second ? 1u : 0u)) ? 1 : 0;
+}
+
+/* dst エントリの inode フィールドを含むセクタの LBA */
+static u32 x3_sector_lba(u32 phys, u32 pos)
+{
+    return g_ec->base_lba + phys * 2 + pos / EXT2_SECTOR_SIZE;
+}
+
+#define X3_MODE_BEFORE  0
+#define X3_MODE_LANDED  1
+#define X3_MODE_UNKNOWN 2
+
+static void case_x3b(int second, int mode, const char *label)
+{
+    MediaReport r;
+    u32 dir = 0, d_ino = 0, s_ino = 0, phys = 0, pos = 0, lba, seen = 0;
+    int rc;
+    int f0 = g_failures;
+
+    report("  [X3b] "); report(label); report("\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    if (!x3_make(second, &dir, &d_ino, &s_ino, &phys, &pos)) {
+        report("  (harness) x3_make failed\n");
+        g_failures++;
+        disk_teardown();
+        return;
+    }
+    lba = x3_sector_lba(phys, pos);
+
+    if (mode == X3_MODE_BEFORE) {
+        wfail_arm_always(lba);                  /* 届く前に失敗 */
+    } else if (mode == X3_MODE_LANDED) {
+        wfail_arm_landed(lba, 1);               /* 1 回目だけ届いてから失敗 */
+    } else {
+        wfail_arm_always(lba);
+        g_wfail_then_rfail = 1;                 /* 読み直しも落とす */
+    }
+
+    rc = ext2_rename(g_ec, dir, "src", dir, "dst");
+    wfail_disarm();
+    fail_disarm();
+
+    /* 宛先の名前は**どの落ち方でも**消えない */
+    CHECK(raw_find_name(dir, "dst", &seen) == 1);
+
+    if (mode == X3_MODE_LANDED) {
+        /* (ii) 読み直しで S を見て公開済みと判断し、段 3〜6 まで進む */
+        CHECK(rc == EXT2_OK);
+        CHECK(seen == s_ino);
+        CHECK(raw_find_name(dir, "src", (u32 *)0) == 0);   /* 段 3 が済んだ */
+        CHECK(raw_links(s_ino) == 1);                      /* 段 4 が済んだ */
+        CHECK(raw_inode_used(d_ino) == 0);                 /* 段 5: D は解放 */
+    } else {
+        /* (i) 未公開 / (iii) 不明。どちらも **D を解放しない** */
+        CHECK(rc != EXT2_OK);
+        CHECK(raw_inode_used(d_ino) == 1);
+        CHECK(raw_find_name(dir, "src", (u32 *)0) == 1);   /* 移動元も残る */
+        if (mode == X3_MODE_BEFORE) {
+            CHECK(seen == d_ino);               /* 旧 inode のまま */
+        } else {
+            CHECK(seen == d_ino || seen == s_ino);   /* どちらでも整合する */
+            CHECK(g_ec->fs_error == 1);         /* 不明 -> 書き込み禁止 */
+        }
+    }
+
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+}
+
+/* X3c: 段 2 の後に ext2_resolve_path を通す経路が古い D を返さない。
+ * 段 3 (移動元の名前を消す) を落とすと ext2_delete_entry の ns_touch が
+ * 走らないので、**段 0 の ext2_ns_touch だけ**が記憶を捨てる役になる。 */
+static void case_x3c(void)
+{
+    MediaReport r;
+    OS32_Stat st;
+    u32 a_dir = 0, b_dir = 0, d_ino = 0, s_ino = 0, phys = 0, pos = 0;
+    u8 ftype = 0;
+    int rc, fd;
+    int f0 = g_failures;
+
+    report("  [X3c] 段 2 の後に古い D を返さない (ext2_ns_touch)\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    CHECK(ext2_vfs_mkdir(g_ec, "/a") == VFS_OK);
+    CHECK(ext2_vfs_mkdir(g_ec, "/b") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/a", &a_dir) == EXT2_OK);
+    CHECK(ext2_lookup(g_ec, "/b", &b_dir) == EXT2_OK);
+    CHECK(ext2_create(g_ec, a_dir, "src", X3_NEW, X3_NEW_LEN) == EXT2_OK);
+    CHECK(ext2_create(g_ec, b_dir, "dst", X3_OLD, X3_OLD_LEN) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, a_dir, "src", &s_ino, (u8 *)0) == EXT2_OK);
+    CHECK(ext2_find_entry_loc(g_ec, b_dir, "dst", &d_ino, &ftype, &phys, &pos)
+          == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    /* 記憶を温める: これで memo["/b/dst"] = D になる */
+    CHECK(ext2_vfs_stat(g_ec, "/b/dst", &st) == VFS_OK);
+    CHECK(st.st_ino == d_ino);
+
+    /* 段 3 (= /a のブロックへの書き込み) だけを落とす */
+    {
+        Ext2Inode ai;
+        CHECK(ext2_read_inode(g_ec, a_dir, &ai) == EXT2_OK);
+        wfail_arm_always(g_ec->base_lba + ai.block[0] * 2);
+    }
+    rc = ext2_rename(g_ec, a_dir, "src", b_dir, "dst");
+    wfail_disarm();
+    CHECK(rc != EXT2_OK);                       /* 後始末が落ちた */
+
+    /* **記憶が残っていると D (解放済み) を返す** */
+    CHECK(ext2_vfs_stat(g_ec, "/b/dst", &st) == VFS_OK);
+    CHECK(st.st_ino == s_ino);
+    CHECK(st.st_size == X3_NEW_LEN);
+
+    fd = vfs_open("/b/dst", O_RDONLY);
+    CHECK(fd >= 3);
+    if (fd >= 3) {
+        CHECK(vfs_get_size(fd) == X3_NEW_LEN);
+        vfs_close(fd);
+    }
+    {
+        u32 sz = 0;
+        CHECK(ext2_vfs_get_size(g_ec, "/b/dst", &sz) == VFS_OK);
+        CHECK(sz == X3_NEW_LEN);
+    }
+
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+}
+
+/* X3d: 掃除の ext2_unlink で links_count の書き込みだけ失敗する。
+ * 名前が消えたのに links が減っていない回に **EXT2_OK を返してはいけない**
+ * (往復 2 所見 5)。書き込みの位置を総当たりして、その形が起きた回を見る。 */
+static void case_x3d(void)
+{
+    u32 dir = 0, ino = 0;
+    int at, rc, hits = 0, wrong = 0, runs = 0;
+    int f0 = g_failures;
+
+    report("  [X3d] ext2_unlink: links の書き込みだけ失敗 -> OK を返さない\n");
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    CHECK(ext2_vfs_mkdir(g_ec, "/d") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/d", &dir) == EXT2_OK);
+    CHECK(ext2_create(g_ec, dir, "f", X3_OLD, X3_OLD_LEN) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, dir, "f", &ino, (u8 *)0) == EXT2_OK);
+    /* 2 つ目の名前を足して links_count = 2 にする (段 3 で止まった媒体の形) */
+    {
+        Ext2Inode fi;
+        CHECK(ext2_read_inode(g_ec, ino, &fi) == EXT2_OK);
+        fi.links_count = 2;
+        CHECK(ext2_write_inode(g_ec, ino, &fi) == EXT2_OK);
+    }
+    CHECK(ext2_add_entry(g_ec, dir, "g", ino, EXT2_FT_REG_FILE) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+    if (g_failures != f0) { disk_teardown(); return; }
+
+    for (at = 1; ; at++) {
+        int fired;
+        if (at > SWEEP_MAX) {
+            report("  (harness) x3d too long\n");
+            g_failures++;
+            break;
+        }
+        undo_begin();
+        remount_cold();
+        sw_arm(at, 0, SW_KIND_WRITE);
+        rc = ext2_unlink(g_ec, dir, "g");
+        fired = g_sw_fired;
+        sw_disarm();
+        runs++;
+
+        /* 名前は消えたのに links が 2 のまま = 直せていない */
+        if (raw_find_name(dir, "g", (u32 *)0) == 0 && raw_inode_used(ino) &&
+            raw_links(ino) == 2) {
+            hits++;
+            if (rc == EXT2_OK) wrong++;
+        }
+        undo_rollback();
+        if (!fired) break;
+    }
+    remount_cold();
+
+    report("          runs="); report_i(runs);
+    report(" links-not-fixed="); report_i(hits);
+    report(" wrongly-ok="); report_i(wrong);
+    report("\n");
+    check_at(hits > 0,
+             "X3d: the 'name gone but links unchanged' case actually occurs",
+             __LINE__);
+    check_at(wrong == 0,
+             "X3d: ext2_unlink never reports OK when links stay behind",
+             __LINE__);
+    disk_teardown();
+}
+
+/* X4 (票 H2 §4-1): 置き換えたあとの旧 inode D の始末。
+ *   links 1 -> 0 … **解放される** (X3b の LANDED でも見ている)
+ *   links 2 -> 1 … **残る**。もう一つの名前がまだ D を指しているので、
+ *                  解放したら生きている名前が解放済み inode を指す。
+ * どちらも交差リンク (media_check の freed_ref / dup_ref / dangling) が無いこと。 */
+static void case_x3_links2(void)
+{
+    MediaReport r;
+    u32 dir = 0, d_ino = 0, s_ino = 0, seen = 0, other = 0;
+    int f0 = g_failures;
+
+    report("  [X4] 置き換え: 旧 inode の links 1 -> 0 は解放、2 -> 1 は残す\n");
+
+    /* --- links 1 -> 0 (解放される) --- */
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_vfs_mkdir(g_ec, "/k") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/k", &dir) == EXT2_OK);
+    CHECK(ext2_create(g_ec, dir, "dst", X3_OLD, X3_OLD_LEN) == EXT2_OK);
+    CHECK(ext2_create(g_ec, dir, "src", X3_NEW, X3_NEW_LEN) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, dir, "dst", &d_ino, (u8 *)0) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, dir, "src", &s_ino, (u8 *)0) == EXT2_OK);
+    CHECK(ext2_rename(g_ec, dir, "src", dir, "dst") == EXT2_OK);
+    CHECK(raw_find_name(dir, "dst", &seen) == 1);
+    CHECK(seen == s_ino);
+    CHECK(raw_find_name(dir, "src", (u32 *)0) == 0);
+    CHECK(raw_links(s_ino) == 1);
+    CHECK(raw_inode_used(d_ino) == 0);          /* links 1 -> 0 なので解放 */
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+
+    /* --- links 2 -> 1 (残す) --- */
+    f0 = g_failures;
+    disk_setup();
+    if (g_failures != f0) { disk_teardown(); return; }
+    CHECK(ext2_vfs_mkdir(g_ec, "/k") == VFS_OK);
+    memo_cold();
+    CHECK(ext2_lookup(g_ec, "/k", &dir) == EXT2_OK);
+    CHECK(ext2_create(g_ec, dir, "dst", X3_OLD, X3_OLD_LEN) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, dir, "dst", &d_ino, (u8 *)0) == EXT2_OK);
+    {
+        Ext2Inode di;
+        CHECK(ext2_read_inode(g_ec, d_ino, &di) == EXT2_OK);
+        di.links_count = 2;
+        CHECK(ext2_write_inode(g_ec, d_ino, &di) == EXT2_OK);
+    }
+    CHECK(ext2_add_entry(g_ec, dir, "keep", d_ino, EXT2_FT_REG_FILE) == EXT2_OK);
+    CHECK(ext2_create(g_ec, dir, "src", X3_NEW, X3_NEW_LEN) == EXT2_OK);
+    CHECK(ext2_find_entry(g_ec, dir, "src", &s_ino, (u8 *)0) == EXT2_OK);
+    CHECK(ext2_sync(g_ec) == EXT2_OK);
+
+    CHECK(ext2_rename(g_ec, dir, "src", dir, "dst") == EXT2_OK);
+    CHECK(raw_find_name(dir, "dst", &seen) == 1);
+    CHECK(seen == s_ino);
+    CHECK(raw_find_name(dir, "keep", &other) == 1);
+    CHECK(other == d_ino);                      /* もう一つの名前はそのまま */
+    CHECK(raw_inode_used(d_ino) == 1);          /* **解放しない** */
+    CHECK(raw_links(d_ino) == 1);               /* 2 -> 1 に減った */
+    CHECK(raw_links(s_ino) == 1);
+    /* 旧内容がその名前から読めること (解放されて再利用されていない) */
+    {
+        u8 buf[32];
+        int n = ext2_read_file(g_ec, d_ino, buf, sizeof(buf));
+        CHECK(n == (int)X3_OLD_LEN);
+        CHECK(n == (int)X3_OLD_LEN && kstrncmp((const char *)buf, X3_OLD,
+                                               X3_OLD_LEN) == 0);
+    }
+    media_check(&r);
+    CHECK_MEDIA(&r);
+    disk_teardown();
+}
+
+static void stage_x3_replace(void)
+{
+    report("== 段 X3: 通常ファイル同士の置き換え rename (票 H2 §2-2) ==\n");
+    fault_done();
+    case_x3b(0, X3_MODE_BEFORE,  "前半セクタ / 媒体に届く前に失敗 -> 未公開");
+    case_x3b(1, X3_MODE_BEFORE,  "後半セクタ / 媒体に届く前に失敗 -> 未公開");
+    case_x3b(0, X3_MODE_LANDED,  "前半セクタ / 媒体に届いた後に失敗 -> 公開済み");
+    case_x3b(1, X3_MODE_LANDED,  "後半セクタ / 媒体に届いた後に失敗 -> 公開済み");
+    case_x3b(0, X3_MODE_UNKNOWN, "前半セクタ / 書き込みも読み直しも失敗 -> 不明");
+    case_x3b(1, X3_MODE_UNKNOWN, "後半セクタ / 書き込みも読み直しも失敗 -> 不明");
+    case_x3c();
+    case_x3d();
+    case_x3_links2();
 }
 
 /* ======================================================================== */

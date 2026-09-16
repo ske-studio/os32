@@ -1,4 +1,4 @@
-# KernelAPI v52 仕様書
+# KernelAPI v53 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -94,6 +94,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v50 | **実装済み (2026-09-13、S0-K)** | 設定レジストリ: `db_open_existing` (RO / RW、CREATE 無し) / `db_prepare_only` / `db_bind_int` / `db_bind_text` / `db_bind_blob` / `db_bind_null` / `db_error_code` の 7 本 (slot 201〜207、data_fields は 0x348 / 0x34C へ)。既存 `db_*` 10 本は不変 | [tasks/settings/TASK_S0.md §1a](tasks/settings/TASK_S0.md) |
 | v51 | **実装済み (2026-09-14、N1)** | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212 = 0x348〜0x358、data_fields は 0x35C / 0x360 へ)。非ブロッキング (プロトコルを進めるのは 100Hz の `link_tick` だけ)、同時 2 ハンドル、ストリーム 1 本。実体は `kapi/kapi_host.c` + `net/link.c` | [archive/network/TASK_N0.md](archive/network/TASK_N0.md) §1a |
 | v52 | **実装済み (2026-09-15、H3)** | 更新日時の保存 `sys_set_mtime` 1 本 (slot 213 = 0x35C、data_fields は 0x360 / 0x364 へ)。`VfsOps` の**任意実装フック** `set_mtime` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS` (失敗ではなく「持っていない」)。実体は `kapi/kapi_sys.c` + `fs/vfs.c` + `fs/ext2_vfs.c` | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) |
+| v53 | **実装済み (2026-09-16、H2)** | 排他的作成 `KAPI_O_EXCL` (`0x0400`)。**スロットは 1 本も増えていない** — `sys_open` のフラグが 1 つ増え、その**意味が広がった**ので版数を上げた ([ABI3])。`VfsOps` の**任意実装フック** `create_excl` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS`。実体は `fs/vfs_fd.c` + `fs/ext2_vfs.c`。同じ票で ext2 の置き換え rename の順序も変えた (宛先の名前を消さない) | [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -589,6 +590,32 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   inode を書いたあと `ext2_sync()` まで通すので、成功は「媒体へ出した」を意味する。
 - **データを書き終えてから呼ぶこと。** 通常の書き込みは `mtime` を現在時刻で上書きするので、
   先に設定すると消える (設計書 [HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) §5.2)。
+
+### 排他的作成 (v53)
+
+**スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
+広がっただけだが、**同じバイナリが古いカーネルで別の意味になる**ので版数を上げる
+([ABI3])。定数は `sdk/include/os32/os32_kapi_shared.h` の手書き側にある
+(`sdk/kapi.json` の構造体は変わらない)。
+
+| 定数 | 値 |
+|---|---|
+| `KAPI_O_EXCL` | `0x0400` (`O_RDONLY` 0x00 / `O_WRONLY` 0x01 / `O_RDWR` 0x02 / `O_CREAT` 0x0100 / `O_TRUNC` 0x0200 と重ならない) |
+
+- **`O_CREAT` と組でだけ有効。** 単独で渡すと `OS32_ERR_INVAL`。
+- 名前が既に在れば**種別を問わず** `OS32_ERR_EXIST` — ディレクトリでも `ISDIR` ではない。
+  呼び手は「予約名が在る」と「別の何かが在る」を区別する必要が無い。
+- 在るかどうかを**判定できなかった**ときは、`NOTFOUND` 以外の負値を**そのまま返す**
+  (票 B8 の「読めなかったを無いと読み替えない」)。
+- `VfsOps.create_excl` は**任意実装**。埋めていない FS では `OS32_ERR_NOSYS`。
+  「できなかった」ではなく「持っていない」という答えで、呼び手は**黙って通常の作成へ
+  落ちてはいけない**。**実装済みは ext2 だけ** (HostDrv / FAT / ISO9660 は NOSYS)。
+- **非対応 FS の判定は種別検査 (`vfs_path_kind`) と作成処理より先**に行う
+  (`fs/vfs_fd.c`)。後ろに置くと `EXIST` / `ISDIR` / I/O エラーが `NOSYS` より先に返る。
+- 排他性の根拠は **VFS が非再入で、ゲストが協調型**であること。
+  **ホスト側が同時に書ける FS では成り立たない**ので HostDrv には実装しない。
+- `O_TRUNC` を併せて渡しても何も起きない (作りたての長さ 0 に切り詰めるものが無い)。
+- 契約と rename の置き換えの詳細は [06_filesystem.md](06_filesystem.md) §6-1。
 
 - `host_open`: 要求行 1〜1400B (超過 / 0 → `INVAL`) をカーネル領域へ写し REQUEST を
   積む。HELLO 未確立 / 再同期中 → `STALE`、空き無し → `FULL`、直前のハンドルの
