@@ -275,7 +275,19 @@ unlink も失敗したら `STALE <tmp>` を表示して errors に数える。
 | R4 | 1 ディレクトリの `.hs~` が掃除の枠を越える、`.hs~` が 128 件の枠を食わないこと、名前が長くて一時名が `NAME_CAP` に収まらない | 掃除の完了を主張しない、通常ファイルが落ちない、`name_too_long` (往復 2 所見 7) |
 | R5 | 保護対象への `.hs~` hardlink | 消さない (`protected`) |
 
-### 4-2. ゲスト受入 (PM、[D1])
+### 4-2. ゲスト受入 (PM、[D1]) — **実施 2026-09-16 (`528c5cb`)**
+
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | `make clean` → `make all` → `make external` → `make check` | **通過** (47 目標、84 秒) |
+| 2 | NP21/W 停止 → `nhd-pull` → `os32-cycle deploy` → 起動 → `ver` / kselftest | **通過**。`ver` の `API: v53`、`Build: Sep 16 2026 09:32:32`、配備サイズ 480880 B 一致。kselftest は新しい `kernel.map` の番地で **pass=87 / fail=0** |
+| 3 | 変更の無い全体同期の所要時間 | **3.82 秒** (H3 の基準 2.9 秒 + 予約名の掃除の走査分)。初回は日時の更新 193 件で 79 秒 |
+| 4 | 同サイズ・別内容の差し替え | **通過**。`UPDATE reason=content_changed size=64`、**inode が 35 → 36 に替わった** (= 一時ファイル + 公開の経路を通った証拠)、内容も新しいもの、`nlink=1`、`errors=0` |
+| 5 | 予約名の残骸の掃除 | **通過**。ゲストで作った `/usr/bin/.hs~h2probe.txt` を `CLEAN` で消し `cleaned=1`。実行後に `.hs~` は 0 件 |
+| 6 | `cp` / `cp -r` / `mv` / `rm` の退行 (`5455843` の修正込み) | **通過**。`rm` はディレクトリを `Is a directory (use rmdir)` で断る |
+| — | 空き不足 (`no_space`)、旧カーネルでの `kernel_too_old`、強制終了からの復旧 | **未実施**。空き不足と旧カーネルはホスト試験で通している。強制終了は NHD の退避 ([D2]) が要るので別途 |
+
+### 4-2-0. 当初の手順 (参考)
 
 1. `make clean` → `make all` → `make external` → `make check`。
 2. NP21/W 停止 → `os32-cycle deploy` → 起動 → `ver` で API v53、kselftest を新しい `kernel.map` の番地で読む。
