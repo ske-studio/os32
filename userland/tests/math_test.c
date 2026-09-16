@@ -7,6 +7,7 @@
 
 #include "os32api.h"
 #include "libos32math.h"
+#include "rt/testresult.h"
 
 extern KernelAPI *kapi;
 #define api kapi
@@ -467,6 +468,9 @@ static void test_lerp(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     (void)argc; (void)argv; (void)k;
 
     api->kprintf(ATTR_CYAN, "math_test: libos32math test suite\n");
@@ -481,12 +485,7 @@ int main(int argc, char **argv, KernelAPI *k)
     test_lerp();
 
     /* サマリ */
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n",
-                 g_passed, g_total);
-    if (g_passed == g_total) {
-        api->kprintf(ATTR_GREEN, "All tests passed!\n");
-    } else {
-        api->kprintf(ATTR_RED, "%d test(s) failed.\n", g_total - g_passed);
-    }
-    return 0;
+    rc = os32_test_summary(line, sizeof(line), "math_test", g_passed, g_total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

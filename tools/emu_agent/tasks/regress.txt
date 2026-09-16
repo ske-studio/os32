@@ -3,10 +3,11 @@
 
 Read the kernel self-test counters with the selftest action and report both numbers verbatim.
 
-Run the shell command 'klibc_test' on OS32 and report the final summary line
-(the one that says how many tests passed out of how many).
+Run the shell command 'klibc_test' on OS32, then run 'echo $?'. Report the final
+summary line verbatim (it looks like 'klibc_test: PASS <n>/<m>') and the value of $?.
 
-Run the shell command 'alloc_demo' on OS32 and report its last three output lines verbatim.
+Run the shell command 'alloc_demo' on OS32, then run 'echo $?'. Report the final
+summary line verbatim (it looks like 'alloc_demo: PASS <n>/<m>') and the value of $?.
 
 Run the shell command 'ring3_fault' on OS32. It is expected to be killed by the kernel.
 Afterwards run 'ver' to confirm the shell is still alive. Report the last lines printed

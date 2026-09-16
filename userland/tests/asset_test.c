@@ -13,6 +13,7 @@
 #include <string.h>
 #include "os32api.h"
 #include "libos32asset.h"
+#include "rt/testresult.h"
 
 static KernelAPI *api;
 static int test_pass = 0;
@@ -44,10 +45,12 @@ static void on_async_done(asset_handle_t h, const void *data,
     async_size = size;
 }
 
-void main(int argc, char **argv, KernelAPI *sys_api)
+int main(int argc, char **argv, KernelAPI *sys_api)
 {
     asset_handle_t h1, h2, h3, h4;
+    char line[OS32_TEST_LINE_MAX];
     int i;
+    int rc;
 
     (void)argc;
     (void)argv;
@@ -141,6 +144,8 @@ void main(int argc, char **argv, KernelAPI *sys_api)
     /* ---- 終了 ---- */
     asset_shutdown();
 
-    api->kprintf(ATTR_CYAN, "\n=== Results: %d passed, %d failed ===\n",
-                 test_pass, test_fail);
+    rc = os32_test_summary(line, sizeof(line), "asset_test",
+                           test_pass, test_pass + test_fail);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

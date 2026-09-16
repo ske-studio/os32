@@ -12,6 +12,7 @@
 
 #include "os32api.h"
 #include "libos32input.h"
+#include "rt/testresult.h"
 
 /* アクションID */
 #define ACT_MOVE_UP     0
@@ -208,14 +209,7 @@ static void run_unit_tests(void)
 
     input_shutdown();
 
-    /* --- 結果サマリ --- */
     api->kprintf(ATTR_WHITE, "\n");
-    if (fail_count == 0) {
-        api->kprintf(ATTR_GREEN, "ALL %d tests PASSED\n", pass_count);
-    } else {
-        api->kprintf(ATTR_RED, "%d PASSED, %d FAILED (total %d)\n",
-                     pass_count, fail_count, pass_count + fail_count);
-    }
 }
 
 /* ====================================================================== */
@@ -224,6 +218,9 @@ static void run_unit_tests(void)
 
 int main(int argc, char **argv, KernelAPI *_api)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     api = _api;
     (void)argc; (void)argv;
 
@@ -234,5 +231,8 @@ int main(int argc, char **argv, KernelAPI *_api)
 
     run_unit_tests();
 
-    return fail_count > 0 ? 1 : 0;
+    rc = os32_test_summary(line, sizeof(line), "input_test",
+                           pass_count, pass_count + fail_count);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "%s", line);
+    return rc;
 }

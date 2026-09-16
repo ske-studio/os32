@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "os32api.h"
+#include "rt/testresult.h"
+
 /* 外部プログラムには libm がリンクされていないため、fabs を自前で定義 */
 static double my_fabs(double x) { return x < 0.0 ? -x : x; }
 
@@ -240,10 +243,18 @@ static void test_div64(void)
     check("-100 %% 7",          r == -2LL);
 }
 
-int main(int argc, char **argv)
+int main(int argc, char **argv, KernelAPI *api)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     (void)argc;
     (void)argv;
+    (void)api;
+
+    /* 何度呼ばれても同じ答えを出すように、集計は毎回ここで 0 に戻す。 */
+    pass_count = 0;
+    fail_count = 0;
 
     printf("=== klibc compatibility test ===\n\n");
 
@@ -257,8 +268,8 @@ int main(int argc, char **argv)
     test_fabs();
     test_div64();
 
-    printf("\n=== Result: %d passed, %d failed ===\n",
-           pass_count, fail_count);
-
-    return fail_count > 0 ? 1 : 0;
+    rc = os32_test_summary(line, sizeof(line), "klibc_test",
+                           pass_count, pass_count + fail_count);
+    printf("\n%s", line);
+    return rc;
 }

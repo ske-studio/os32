@@ -22,6 +22,8 @@
 /*  なる (M1e で kill されるが M1 の正常系では触らない)。                     */
 /* ========================================================================= */
 
+#include "os32_kapi_slots.h"
+
 /* app.ld の ENTRY(_start)。crt0 を link しないのでこれがエントリになる。 */
 void _start(void) __attribute__((section(".text.startup"), used, noreturn));
 
@@ -49,9 +51,14 @@ void _start(void)
     /* 4. 完了マーカー 0x454E4F44 = LE 44 4F 4E 45 = "DONE" */
     mark[1] = 0x454E4F44UL;
 
-    /* sys_exit (int 0x80)。M1 の呼出規約: eax=スロット(未使用), ebx=status。
-     * ゲート DPL=3 なので CPL=3 から呼べる (CONTRACTS C4)。戻ってこない。 */
-    __asm__ __volatile__("int $0x80" : : "a"(0), "b"(0) : "memory");
+    /* sys_exit(0) を KAPI トランポリンと同じ規約で呼ぶ: eax = スロット、
+     * 引数はユーザスタックの [esp+4] から (先頭 1 語はスタブの戻り番地ぶん)。
+     * スロット番号は生成ヘッダ os32_kapi_slots.h の KAPI_SLOT_SYS_EXIT (= 84、
+     * 末尾追記のみなので不変)。かつては eax=0 / ebx=status で呼んでいたが、
+     * それはスロット 0 = gfx_init であって終了しない (2026-09-06 に
+     * ring3_guard.c で実測・修正済み。この 2 本が修正から漏れていた)。 */
+    __asm__ __volatile__("pushl $0\n\tpushl $0\n\tint $0x80"
+                         : : "a"(KAPI_SLOT_SYS_EXIT) : "memory");
 
     for (;;) {
         __asm__ __volatile__("" ::: "memory");

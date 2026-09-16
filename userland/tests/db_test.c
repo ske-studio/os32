@@ -8,6 +8,7 @@
 
 #include "os32api.h"
 #include "libos32db.h"
+#include "rt/testresult.h"
 /* crt0_c.c で定義される KernelAPI ポインタ */
 extern KernelAPI *kapi;
 #define api kapi
@@ -628,8 +629,10 @@ static int test_mem_usage(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
+    char line[OS32_TEST_LINE_MAX];
     int total = 0;
     int passed = 0;
+    int rc;
 
     (void)argc; (void)argv;
     (void)k;
@@ -649,12 +652,8 @@ int main(int argc, char **argv, KernelAPI *k)
     total++; if (test_mem_usage()) passed++;
 
     /* サマリ */
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n", passed, total);
-    if (passed == total) {
-        api->kprintf(ATTR_GREEN, "All tests passed!\n");
-    } else {
-        api->kprintf(ATTR_RED, "Some tests failed.\n");
-    }
-    return 0;
+    rc = os32_test_summary(line, sizeof(line), "db_test", passed, total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }
 

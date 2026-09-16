@@ -11,6 +11,7 @@
 
 #include "os32api.h"
 #include "libos32mgx.h"
+#include "rt/testresult.h"
 #include <string.h>
 
 extern KernelAPI *kapi;
@@ -693,6 +694,9 @@ static void bench_deflate(const char *path)
 /* ====================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     (void)argc; (void)argv; (void)k;
 
     g_total = 0; g_passed = 0;
@@ -703,17 +707,15 @@ int main(int argc, char **argv, KernelAPI *k)
     test_malformed();
     test_blit();
 
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n", g_passed, g_total);
-    if (g_passed == g_total)
-        api->kprintf(ATTR_GREEN, "%s", "All mgx_test tests passed!\n");
-    else
-        api->kprintf(ATTR_RED, "%d test(s) failed.\n", g_total - g_passed);
-
-    /* 同一画像を bpp 1..4 で用意したもの。プレーン数と時間の関係を見る。 */
+    /* 同一画像を bpp 1..4 で用意したもの。プレーン数と時間の関係を見る。
+     * 計測なので合否には数えない (票 §8)。集計行より**先**に出す — 集計行は
+     * 最終行でなければランナーが拾えない。 */
     bench_deflate("/data/manga/bench/B1.MGX");
     bench_deflate("/data/manga/bench/B2.MGX");
     bench_deflate("/data/manga/bench/B3.MGX");
     bench_deflate("/data/manga/bench/B4.MGX");
 
-    return 0;
+    rc = os32_test_summary(line, sizeof(line), "mgx_test", g_passed, g_total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

@@ -13,10 +13,27 @@
 /* ======================================================================== */
 
 #include "os32api.h"
+#include "rt/testresult.h"
 #include <stdio.h>
 #include <string.h>
 
 static KernelAPI *api;
+
+/* 合否の出し方は票 docs/tasks/test/TASK_TEST_RESULT.md §2。以前は結果を
+ * 画面に書くだけで、何が起きても終了コードは 0 だった。 */
+static int g_total;
+static int g_passed;
+
+static void check(int cond, const char *label)
+{
+    g_total++;
+    if (cond) {
+        g_passed++;
+        printf("  PASS: %s\n", label);
+    } else {
+        printf("  FAIL: %s\n", label);
+    }
+}
 
 /* 文字列比較 (libc不要) */
 static int str_eq(const char *a, const char *b)
@@ -45,11 +62,7 @@ static void test_fd_leak(void)
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 
-    if (fd1 >= 0 && fd2 >= 0 && fd3 >= 0) {
-        printf("  OK: 3 FDs opened successfully.\n");
-    } else {
-        printf("  WARN: Some FDs failed to open.\n");
-    }
+    check(fd1 >= 0 && fd2 >= 0 && fd3 >= 0, "3 FDs opened");
 
     printf("  Exiting WITHOUT closing FDs...\n");
     printf("  After return, run 'restest verify_fd' to check.\n");
@@ -70,13 +83,10 @@ static void test_redirect_leak(void)
 
     rc = api->sys_redirect_fd(1, "/tmp_redir.txt", 1); /* FD_REDIR_WRITE */
 
+    check(rc == 0, "stdout redirected to /tmp_redir.txt");
     if (rc == 0) {
         /* この出力はファイルに行く */
         printf("This text should go to file, not screen.\n");
-    } else {
-        /* リダイレクト失敗時はそのまま画面に出る */
-        printf("  WARN: redirect failed (rc=%d)\n", rc);
-        return;
     }
 
     /* ここで意図的にリセットしない。exec_exit() がリセットしてくれるか? */
@@ -99,9 +109,12 @@ static void test_pipe_leak(void)
 
     printf("  pipe1=%d, pipe2=%d\n", id1, id2);
 
+    check(id1 >= 0 && id2 >= 0, "2 pipe buffers allocated");
+
     /* 3つ目 — 上限2個なので失敗するはず */
     id3 = api->sys_pipe_alloc();
     printf("  pipe3=%d (should be -1: limit is 2)\n", id3);
+    check(id3 < 0, "the 3rd pipe is refused (limit is 2)");
 
     printf("  Exiting WITHOUT freeing pipes...\n");
     printf("  After return, run 'restest verify_pipe' to check.\n");
@@ -124,11 +137,8 @@ static void verify_fd(void)
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 
-    if (fd1 >= 0 && fd2 >= 0 && fd3 >= 0) {
-        printf("  PASS: FD cleanup worked! All FDs opened.\n");
-    } else {
-        printf("  FAIL: FD leak detected. Cleanup did not work.\n");
-    }
+    check(fd1 >= 0 && fd2 >= 0 && fd3 >= 0,
+          "FD cleanup worked (all 3 FDs opened again)");
 
     /* 後始末 */
     if (fd1 >= 0) api->sys_close(fd1);
@@ -151,11 +161,8 @@ static void verify_pipe(void)
 
     printf("  pipe1=%d, pipe2=%d\n", id1, id2);
 
-    if (id1 >= 0 && id2 >= 0) {
-        printf("  PASS: Pipe cleanup worked! Both pipes allocated.\n");
-    } else {
-        printf("  FAIL: Pipe leak detected. Cleanup did not work.\n");
-    }
+    check(id1 >= 0 && id2 >= 0,
+          "pipe cleanup worked (both pipes allocated again)");
 
     /* 後始末 */
     if (id1 >= 0) api->sys_pipe_free(id1);
@@ -171,6 +178,9 @@ static void verify_redirect(void)
     printf("=== Verify: Redirect Cleanup ===\n");
     printf("If you can see this message, redirect cleanup PASSED!\n");
     printf("(stdout is correctly pointing to console)\n");
+    /* 「画面に出たか」は人にしか見えない。機械が読めるのは FD 1 の行き先で、
+     * リダイレクトが残っていればファイルなので端末ではない。 */
+    check(api->sys_isatty(1) == 1, "stdout points at the console again");
 }
 
 /* ======================================================================== */
@@ -235,11 +245,19 @@ static void usage(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *kapi_arg)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     api = kapi_arg;
+    g_total = 0;
+    g_passed = 0;
 
     if (argc < 2) {
         usage();
-        return 0;
+        rc = os32_test_summary_skip(line, sizeof(line), "restest",
+                                    "no subcommand given");
+        api->kprintf(ATTR_RED, "%s", line);
+        return rc;
     }
 
     if (str_eq(argv[1], "all"))           test_all();
@@ -253,7 +271,15 @@ int main(int argc, char **argv, KernelAPI *kapi_arg)
     else {
         printf("Unknown command: %s\n", argv[1]);
         usage();
+        rc = os32_test_summary_skip(line, sizeof(line), "restest",
+                                    "unknown subcommand");
+        api->kprintf(ATTR_RED, "%s", line);
+        return rc;
     }
 
-    return 0;
+    /* 集計行は **kprintf** で出す。`restest redirect` は FD 1 をファイルへ
+     * 向けたまま終わるのが試験の中身なので、printf では画面に出ない。 */
+    rc = os32_test_summary(line, sizeof(line), "restest", g_passed, g_total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "%s", line);
+    return rc;
 }

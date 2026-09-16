@@ -95,6 +95,14 @@ filesystem:
     - host: userland/tests/dbq.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- stat_t / test2 (第 1 陣の試験。ビルドはされていたが [V2] の登録が
+    #     漏れていて、ゲストで走らせられなかった。TASK_TEST_RESULT §4) ---
+    - host: userland/tests/stat_t.bin
+      guest: /usr/bin/
+      tags: [programs]
+    - host: userland/tests/test2.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/faultprobe.bin
       guest: /usr/bin/
       tags: [programs]

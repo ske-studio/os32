@@ -18,6 +18,7 @@
 /* ======================================================================== */
 
 #include "os32api.h"
+#include "rt/testresult.h"
 
 /* CPL=3 アプリの許可帯 (exec/exec.c の ring3_ptr_ok)。番地は
  * userland/tests/ring3_guard.c と同じ **アプリ固有 PDE 1 枚** の既定配置を
@@ -93,6 +94,7 @@ int main(int argc, char **argv, KernelAPI *api)
     static char no_nul[OS32_MAX_PATH + 64];
     const char *work = "/tmp/db_v50.db";
     const char *missing = "/tmp/db_v50_nosuch.db";
+    char line[OS32_TEST_LINE_MAX];
     int h, rc, i, code;
 
     g = api;
@@ -102,8 +104,10 @@ int main(int argc, char **argv, KernelAPI *api)
 
     api->kprintf(0xE1, "db_v50_test: KAPI v%d\n", (int)api->version);
     if (api->version < 50) {
-        api->kprintf(0x41, "db_v50_test: kernel is older than v50\n");
-        return 1;
+        rc = os32_test_summary_skip(line, sizeof(line), "db_v50_test",
+                                    "kernel is older than KAPI v50");
+        api->kprintf(0x41, "%s", line);
+        return rc;
     }
 
     /* ---- (1) RO で欠損 DB を開いても作られない ------------------------- */
@@ -124,8 +128,13 @@ int main(int argc, char **argv, KernelAPI *api)
 
     /* ---- 作業 DB を用意して RW で開く ---------------------------------- */
     if (make_fixture(work) != 0) {
+        /* 作業 DB が作れない = 前提が無い (既定の /tmp は新規インストール直後に
+         * 無いことがある)。不合格ではなく SKIP。別の場所は argv[1] で渡す。 */
         api->kprintf(0x41, "db_v50_test: cannot create %s\n", work);
-        return 1;
+        rc = os32_test_summary_skip(line, sizeof(line), "db_v50_test",
+                                    "cannot create the work db (pass a path as argv[1])");
+        api->kprintf(0x41, "%s", line);
+        return rc;
     }
     /* 土台が本当に「中身のある既存 DB」か。0 バイトだと db_open_existing は
      * 契約どおり NOTADB で断るので、それを RW open の失敗と読み違えない。 */
@@ -144,9 +153,11 @@ int main(int argc, char **argv, KernelAPI *api)
     h = api->db_open_existing(work, 1);
     ok(h >= 0, "RW open of an existing db");
     if (h < 0) {
-        api->kprintf(0x41, "db_v50_test: %d/%d passed, aborted\n",
-                     passed, passed + failed);
-        return 1;
+        api->kprintf(0x41, "db_v50_test: aborted\n");
+        rc = os32_test_summary(line, sizeof(line), "db_v50_test",
+                               passed, passed + failed);
+        api->kprintf(0x41, "%s", line);
+        return rc;
     }
     ok(api->db_error_code(h) == 0, "a fresh handle has no failure");
 
@@ -235,7 +246,8 @@ int main(int argc, char **argv, KernelAPI *api)
     api->db_close(h);
     ok(api->db_error_code(h) == code, "close does not clear the diagnosis");
 
-    api->kprintf(failed ? 0x41 : 0xA1, "db_v50_test: %s %d/%d\n",
-                 failed ? "FAIL" : "PASS", passed, passed + failed);
-    return failed ? 1 : 0;
+    rc = os32_test_summary(line, sizeof(line), "db_v50_test",
+                           passed, passed + failed);
+    api->kprintf(rc ? 0x41 : 0xA1, "%s", line);
+    return rc;
 }

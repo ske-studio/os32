@@ -394,6 +394,20 @@ check-gui-host:
 check-host-lib-host:
 	python3 -B tools/tests/test_host_lib.py --target
 
+# 試験プログラムの合否を機械が読める形にする約束事 (票 docs/tasks/test/
+# TASK_TEST_RESULT.md §2)。終了コード (0 / 1 / 2、予約値 126/127/130/139 は
+# 返さない) と最終行の集計行 `<名前>: PASS <n>/<m>` が**必ず一致する**ことを
+# 固定する。実物の userland/lib/rt/testresult.h と、userland/tests/ の実物の
+# プログラム 5 本 (stat_t / restest / test2 / klibc_test / font_load_test) を
+# 贋物の KernelAPI で**実際に走らせ**、出力と main の返り値の両方を観測する
+# — grep では一致は確かめられない。静的側は第 1 陣 (票 §4) 16 本の
+# `void main` / 名前が argv[0] 由来 / main の return が集計の答えでない、を見る。
+# Rust の alloc_demo は書式と終了コードを testresult.h と突き合わせる。
+# --mutate は否定側 (どれもコンパイルは通る変異)。
+# 記録は tools/tests/result_conv_tdd.md。
+check-result-conv-host:
+	python3 -B tools/tests/test_result_conv.py --target --mutate
+
 # kstring の C 版 (移植性準備の順序 4-b)。実物の lib/kstring_asm.asm (nasm) と
 # 実物の lib/kstring_c.c を **同じ実行ファイルにリンク**し、13 本すべてを同じ
 # 入力で突き合わせる (戻り値とバッファの全内容が一致すること)。x86 の既定
@@ -456,9 +470,9 @@ check-docs-orphans:
 check-tests-inventory:
 	@python3 tools/gen_tests_inventory.py --check
 
-check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-kstr-bench-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-kstr-bench-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-result-conv-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
+.PHONY: sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check

@@ -25,8 +25,15 @@
  * カーネル側のラッパーが cdecl で定義されているため。 */
 #include "os32api.h"
 
+#include "rt/testresult.h"
+
 /* ヘルパー関数の前方宣言 (mainをバイナリ先頭に配置するため) */
 static int my_memcmp(const void *a, const void *b, u32 n);
+static void check(int cond, const char *label);
+
+static KernelAPI *g_api;
+static int g_total;
+static int g_passed;
 
 #define GREEN  0xA2
 #define RED    0x42
@@ -34,9 +41,17 @@ static int my_memcmp(const void *a, const void *b, u32 n);
 #define WHITE  0xE1
 
 /* main はバイナリの先頭に配置される必要がある */
-void main(int argc, char **argv, KernelAPI *api)
+int main(int argc, char **argv, KernelAPI *api)
 {
-    int ok = 1;
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
+    (void)argc;
+    (void)argv;
+
+    g_api = api;
+    g_total = 0;
+    g_passed = 0;
 
     api->kprintf(CYAN, "%s", "=== KernelAPI v2 Test ===\n");
 
@@ -45,8 +60,10 @@ void main(int argc, char **argv, KernelAPI *api)
     api->kprintf(WHITE, "%d", api->version);
     api->kprintf(WHITE, "%s", "\n");
     if (api->version < 2) {
-        api->kprintf(RED, "%s", "  ERROR: v2 required!\n");
-        return;
+        rc = os32_test_summary_skip(line, sizeof(line), "test2",
+                                    "kernel is older than KAPI v2");
+        api->kprintf(RED, "%s", line);
+        return rc;
     }
 
     /* --- タイマテスト --- */
@@ -60,32 +77,25 @@ void main(int argc, char **argv, KernelAPI *api)
         t2 = api->get_tick();
         api->kprintf(WHITE, "%s", " -> ");
         api->kprintf(GREEN, "%d", t2);
-        if (t2 >= t1) {
-            api->kprintf(GREEN, "%s", " OK\n");
-        } else {
-            api->kprintf(RED, "%s", " FAIL\n");
-            ok = 0;
-        }
+        api->kprintf(WHITE, "%s", "\n");
+        check(t2 >= t1, "get_tick does not go backwards");
     }
 
     /* --- メモリテスト --- */
     {
         char *buf = (char *)api->mem_alloc(256);
         api->kprintf(WHITE, "%s", "  mem_alloc(256): ");
+        api->kprintf(WHITE, "%d", (u32)buf);
+        api->kprintf(WHITE, "%s", "\n");
+        check(buf != (char *)0, "mem_alloc(256)");
         if (buf) {
-            api->kprintf(GREEN, "%s", "OK @");
-            api->kprintf(GREEN, "%d", (u32)buf);
-            api->kprintf(WHITE, "%s", "\n");
             /* 書き込みテスト */
             buf[0] = 'H'; buf[1] = 'i'; buf[2] = 0;
-            api->kprintf(WHITE, "%s", "  mem write: ");
-            api->kprintf(GREEN, "%s", buf);
-            api->kprintf(WHITE, "%s", "\n");
+            check(buf[0] == 'H' && buf[1] == 'i' && buf[2] == 0,
+                  "the allocated block keeps what was written");
             api->mem_free(buf);
-            api->kprintf(GREEN, "%s", "  mem_free: OK\n");
         } else {
-            api->kprintf(RED, "%s", "FAIL\n");
-            ok = 0;
+            check(0, "the allocated block keeps what was written");
         }
     }
 
@@ -93,38 +103,52 @@ void main(int argc, char **argv, KernelAPI *api)
     {
         const char *test_data = "API-TEST-OK";
         char read_buf[64];
-        int wr, rd;
+        int wr, rd, t_fd, r_fd;
 
         api->kprintf(WHITE, "%s", "  file_write: ");
-        int t_fd=api->sys_open("/api_test.txt", KAPI_O_WRONLY|KAPI_O_CREAT|KAPI_O_TRUNC); if(t_fd>=0){ wr=api->sys_write(t_fd, test_data, 11); api->sys_close(t_fd); } else wr=-1;
-        if (wr == 0) {
-            api->kprintf(GREEN, "%s", "OK\n");
+        t_fd = api->sys_open("/api_test.txt",
+                             KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+        if (t_fd >= 0) {
+            wr = api->sys_write(t_fd, test_data, 11);
+            api->sys_close(t_fd);
         } else {
-            api->kprintf(RED, "%s", "FAIL rc=");
-            api->kprintf(RED, "%d", (u32)(wr < 0 ? -wr : wr));
-            api->kprintf(RED, "%s", "\n");
-            ok = 0;
+            wr = -1;
         }
+        api->kprintf(WHITE, "%d", (u32)(wr < 0 ? -wr : wr));
+        api->kprintf(WHITE, "%s", "\n");
+        /* sys_write は**書けたバイト数**を返す (fs/vfs_fd.c: vfs_write_fd)。
+         * 2026-09-17 まで `wr == 0` を成功と読んでいたので、11 バイト書けた
+         * ときでも FAIL を出していた。短く書けたのも成功に数えない。 */
+        check(wr == 11, "sys_write wrote all 11 bytes");
 
         api->kprintf(WHITE, "%s", "  file_read:  ");
-        int r_fd=api->sys_open("/api_test.txt", KAPI_O_RDONLY); if(r_fd>=0){ rd=api->sys_read(r_fd, read_buf, 63); api->sys_close(r_fd); } else rd=-1;
-        if (rd == 11 && my_memcmp(read_buf, test_data, 11) == 0) {
-            read_buf[rd] = 0;
-            api->kprintf(GREEN, "%s", read_buf);
-            api->kprintf(GREEN, "%s", " OK\n");
+        r_fd = api->sys_open("/api_test.txt", KAPI_O_RDONLY);
+        if (r_fd >= 0) {
+            rd = api->sys_read(r_fd, read_buf, 63);
+            api->sys_close(r_fd);
         } else {
-            api->kprintf(RED, "%s", "FAIL rd=");
-            api->kprintf(RED, "%d", (u32)(rd < 0 ? -rd : rd));
-            api->kprintf(RED, "%s", "\n");
-            ok = 0;
+            rd = -1;
         }
+        api->kprintf(WHITE, "%d", (u32)(rd < 0 ? -rd : rd));
+        api->kprintf(WHITE, "%s", "\n");
+        check(rd == 11 && my_memcmp(read_buf, test_data, 11) == 0,
+              "sys_read reads back the same 11 bytes");
     }
 
     /* --- 結果 --- */
-    if (ok) {
-        api->kprintf(GREEN, "%s", "=== ALL TESTS PASSED ===\n");
+    rc = os32_test_summary(line, sizeof(line), "test2", g_passed, g_total);
+    api->kprintf(rc ? RED : GREEN, "%s", line);
+    return rc;
+}
+
+static void check(int cond, const char *label)
+{
+    g_total++;
+    if (cond) {
+        g_passed++;
+        g_api->kprintf(GREEN, "  [OK] %s\n", label);
     } else {
-        api->kprintf(RED, "%s", "=== SOME TESTS FAILED ===\n");
+        g_api->kprintf(RED, "  [NG] %s\n", label);
     }
 }
 

@@ -11,6 +11,7 @@
 /* ======================================================================== */
 
 #include "os32api.h"
+#include "rt/testresult.h"
 #include <string.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -307,6 +308,8 @@ int main(int argc, char **argv, KernelAPI *k)
 {
     unsigned char *wbuf;
     unsigned char *rbuf;
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
 
     (void)argc; (void)argv; (void)k;
 
@@ -322,7 +325,11 @@ int main(int argc, char **argv, KernelAPI *k)
                      SIZE_372K / 1024);
         if (wbuf) free(wbuf);
         if (rbuf) free(rbuf);
-        return 1;
+        /* 372KB x 2 が取れない = 前提が無い。不合格ではなく SKIP。 */
+        rc = os32_test_summary_skip(line, sizeof(line), "e2test",
+                                    "cannot allocate the 372KB buffers");
+        api->kprintf(ATTR_RED, "%s", line);
+        return rc;
     }
 
     api->kprintf(ATTR_WHITE, "Buffers allocated: wbuf=0x%X rbuf=0x%X\n",
@@ -340,15 +347,8 @@ int main(int argc, char **argv, KernelAPI *k)
     free(rbuf);
 
     /* サマリ */
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n",
-                 passed_tests, total_tests);
-
-    if (passed_tests == total_tests) {
-        api->kprintf(ATTR_GREEN, "All tests passed!\n");
-    } else {
-        api->kprintf(ATTR_RED, "%d test(s) failed.\n",
-                     total_tests - passed_tests);
-    }
-
-    return (passed_tests == total_tests) ? 0 : 1;
+    rc = os32_test_summary(line, sizeof(line), "e2test",
+                           passed_tests, total_tests);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

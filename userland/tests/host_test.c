@@ -14,11 +14,14 @@
 /*    6. `host_test stale` — Agent を再起動した後に走らせると                 */
 /*       STALE → close → open が通る (運用者が Agent を落として使う)         */
 /*                                                                          */
-/*  使い方: `host_test [stale]`。合格は最後の "host_test: PASS n/n"。         */
+/*  使い方: `host_test [stale]`。合否は最後の集計行と終了コードで読む         */
+/*  (票 docs/tasks/test/TASK_TEST_RESULT.md §2)。Agent が居ない・カーネルが   */
+/*  古いのは「不合格」ではなく「実行しなかった」なので SKIP (終了コード 2)。  */
 /*  WSL2 側で `python3 tools/host_agent.py` が動いていることが前提。          */
 /* ======================================================================== */
 
 #include "os32api.h"
+#include "rt/testresult.h"
 
 static int passed;
 static int failed;
@@ -33,6 +36,7 @@ int main(int argc, char **argv, KernelAPI *api)
 {
     static u8 body[1400];
     u32 status = 0, len = 0, got = 0;
+    char line[OS32_TEST_LINE_MAX];
     i32 h;
     int rc, i;
     int stale_mode = 0;
@@ -46,14 +50,18 @@ int main(int argc, char **argv, KernelAPI *api)
 
     api->kprintf(0xE1, "host_test: KAPI v%d\n", (int)api->version);
     if (api->version < 51) {
-        api->kprintf(0x41, "host_test: kernel is older than v51\n");
-        return 1;
+        rc = os32_test_summary_skip(line, sizeof(line), "host_test",
+                                    "kernel is older than KAPI v51");
+        api->kprintf(0x41, "%s", line);
+        return rc;
     }
 
     /* ---- (0) リンクが立つまで待つ (link_tick が HELLO を通す) ---------- */
     if (!wait_up(600)) {
-        api->kprintf(0x41, "host_test: no host agent (host_open keeps returning STALE)\n");
-        return 1;
+        rc = os32_test_summary_skip(line, sizeof(line), "host_test",
+                                    "no host agent (host_open keeps returning STALE)");
+        api->kprintf(0x41, "%s", line);
+        return rc;
     }
 
     /* ---- (1) GET /pattern/65536 — AGAIN ループと内容一致 --------------- */
@@ -172,9 +180,10 @@ int main(int argc, char **argv, KernelAPI *api)
         api->kprintf(0x06, "  (skipped: agent-restart case — run `host_test stale`)\n");
     }
 
-    api->kprintf(failed ? 0x41 : 0x21, "host_test: %s %d/%d\n",
-                 failed ? "FAIL" : "PASS", passed, passed + failed);
-    return failed ? 1 : 0;
+    rc = os32_test_summary(line, sizeof(line), "host_test",
+                           passed, passed + failed);
+    api->kprintf(rc ? 0x41 : 0x21, "%s", line);
+    return rc;
 }
 
 static void ok(int cond, const char *name)

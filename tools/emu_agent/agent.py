@@ -83,6 +83,8 @@ MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98",
                 "check-h4-manifest-host",
                 # 票 TASK_KSTRING_BENCH (kstring の実測プログラムの枠組み)
                 "check-kstr-bench-host", "kstr_bench",
+                # 票 TASK_TEST_RESULT (試験の合否を機械が読める形にする約束事)
+                "check-result-conv-host",
                 "check-hsync-h1-host", "check-hsync-h3-host", "check-b8-open-host",
                 "check-ring3-str-host", "nhd-pull", "nhd-umount", "nhd-init", "deploy-nhd", "deploy-kernel", "images/os32_boot.d88", "iso", "check-settings-protect-host", "check-db-v50-host", "check-cfg-host", "check-gui-host", "check-install-recover-host", "check-install-fresh-host", "clean-external")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))

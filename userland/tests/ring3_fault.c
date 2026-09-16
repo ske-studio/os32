@@ -22,6 +22,8 @@
 /*    - カーネル生存 (ver 応答) + シェル復帰                                  */
 /* ========================================================================= */
 
+#include "os32_kapi_slots.h"
+
 /* app.ld の ENTRY(_start)。crt0 を link しないのでこれがエントリになる。 */
 void _start(void) __attribute__((section(".text.startup"), used, noreturn));
 
@@ -47,8 +49,15 @@ void _start(void)
      *    0x56525553 = LE 53 55 52 56 = "SURV" */
     mark[1] = 0x56525553UL;
 
-    /* int 0x80 (sys_exit)。status=1 で「生き残ってしまった」を示す。 */
-    __asm__ __volatile__("int $0x80" : : "a"(0), "b"(1) : "memory");
+    /* sys_exit(1) を KAPI トランポリンと同じ規約で呼ぶ: eax = スロット、
+     * 引数はユーザスタックの [esp+4] から (先頭 1 語はスタブの戻り番地ぶん)。
+     * スロット番号は生成ヘッダ os32_kapi_slots.h の KAPI_SLOT_SYS_EXIT (= 84、
+     * 末尾追記のみなので不変)。かつては eax=0 / ebx=status で呼んでいたが、
+     * それはスロット 0 = gfx_init であって終了しない (2026-09-06 に
+     * ring3_guard.c で実測・修正済み。この 2 本が修正から漏れていた)。
+     * 先に積んだ 1 語が [esp+4] = 引数。status=1 で「生き残ってしまった」。 */
+    __asm__ __volatile__("pushl $1\n\tpushl $0\n\tint $0x80"
+                         : : "a"(KAPI_SLOT_SYS_EXIT) : "memory");
 
     for (;;) {
         __asm__ __volatile__("" ::: "memory");

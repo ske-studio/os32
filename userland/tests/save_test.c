@@ -4,6 +4,7 @@
 
 #include "os32api.h"
 #include "libos32save.h"
+#include "rt/testresult.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -12,6 +13,15 @@
 
 extern KernelAPI *kapi;
 #define api kapi
+
+/* 保存先は HostDrv (票 docs/tasks/test/TASK_TEST_RESULT.md §3)。**帯域は 1 か所**
+ * — 以前は "/host/..." を 9 か所に直接書いていたので、HostDrv の無い構成では
+ * 全項目が落ちて「不合格」に見えていた。今は SAVE_TEST_DIR が載っていなければ
+ * 走らせずに SKIP (終了コード 2) を返す。 */
+#define SAVE_TEST_DIR    "/host"
+#define SAVE_TEST_FILE   SAVE_TEST_DIR "/save_test.dat"
+#define SAVE_PEEK_FILE   SAVE_TEST_DIR "/save_peek.dat"
+#define SAVE_MIGR_FILE   SAVE_TEST_DIR "/save_migrate.dat"
 
 static int g_total;
 static int g_passed;
@@ -101,7 +111,7 @@ static void test_roundtrip(void)
     check_eq("save_add_region", rc, 0);
 
     /* 書き込み */
-    rc = save_write(&sc, "/host/save_test.dat", 42); /* user_meta = 42 */
+    rc = save_write(&sc, SAVE_TEST_FILE, 42); /* user_meta = 42 */
     check_eq("save_write", rc, 0);
 
     /* ロード側コンテキスト設定 */
@@ -109,7 +119,7 @@ static void test_roundtrip(void)
     save_add_region(&sc, &l_data, sizeof(l_data), 101);
 
     /* 読み込みと検証 */
-    rc = save_read(&sc, "/host/save_test.dat");
+    rc = save_read(&sc, SAVE_TEST_FILE);
     check_eq("save_read", rc, 0);
 
     /* データの往復一致確認 */
@@ -132,14 +142,14 @@ static void test_errors(void)
     /* 1. マジックコード不一致 */
     save_begin(&sc, "BADM", 1); /* 期待値を "BADM" に設定 */
     save_add_region(&sc, &l_data, sizeof(l_data), 101);
-    rc = save_read(&sc, "/host/save_test.dat");
+    rc = save_read(&sc, SAVE_TEST_FILE);
     check_eq("magic mismatch returns -2", rc, -2);
 
     /* 2. CRC破損検出 (ファイルを1バイト壊す) */
-    corrupt_file("/host/save_test.dat", 10); /* ヘッダ内のどこかを破壊 */
+    corrupt_file(SAVE_TEST_FILE, 10); /* ヘッダ内のどこかを破壊 */
     save_begin(&sc, "TEST", 1);
     save_add_region(&sc, &l_data, sizeof(l_data), 101);
-    rc = save_read(&sc, "/host/save_test.dat");
+    rc = save_read(&sc, SAVE_TEST_FILE);
     check_eq("corrupted data returns -3", rc, -3);
 }
 
@@ -151,21 +161,22 @@ static void test_peek(void)
     SaveMeta sm;
     int rc;
 
+    TestSaveData s_data;
+    SaveContext sc;
+
     header("Test 3: Metadata Peek");
 
     /* 再度正常なファイルを作成 */
-    TestSaveData s_data;
-    SaveContext sc;
     s_data.val1 = 999;
     strcpy(s_data.text, "PeekTest");
     s_data.val2 = 0x777;
 
     save_begin(&sc, "PEEK", 2);
     save_add_region(&sc, &s_data, sizeof(s_data), 102);
-    save_write(&sc, "/host/save_peek.dat", 9999);
+    save_write(&sc, SAVE_PEEK_FILE, 9999);
 
     /* ロードせずにヘッダを覗き見る */
-    rc = save_peek("/host/save_peek.dat", &sm);
+    rc = save_peek(SAVE_PEEK_FILE, &sm);
     check_eq("save_peek rc=0", rc, 0);
     check("magic is PEEK", memcmp(sm.magic, "PEEK", 4) == 0);
     check_eq("version = 2", (int)sm.version, 2);
@@ -217,7 +228,7 @@ static void test_migration(void)
     /* 1. バージョン 1 で書き込み */
     save_begin(&sc, "MIGR", 1);
     save_add_region(&sc, &s_data, sizeof(s_data), 202);
-    save_write(&sc, "/host/save_migrate.dat", 1);
+    save_write(&sc, SAVE_MIGR_FILE, 1);
 
     /* 2. 移行コールバックの設定 */
     save_set_migrate_cb(test_migrate_cb);
@@ -227,7 +238,7 @@ static void test_migration(void)
     save_begin(&sc, "MIGR", 2);
     save_add_region(&sc, &l_data, sizeof(l_data), 202);
 
-    rc = save_read(&sc, "/host/save_migrate.dat");
+    rc = save_read(&sc, SAVE_MIGR_FILE);
     check_eq("save_read with migration success", rc, 0);
     check_eq("migrated field (45 * 10) = 450", (int)l_data.new_field, 450);
 
@@ -240,6 +251,9 @@ static void test_migration(void)
 /* ====================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
+
     (void)argc; (void)argv; (void)k;
 
     g_total = 0;
@@ -247,17 +261,19 @@ int main(int argc, char **argv, KernelAPI *k)
 
     api->kprintf(ATTR_CYAN, "save_test: libos32save test suite\n");
 
+    if (!api->sys_is_mounted(SAVE_TEST_DIR)) {
+        rc = os32_test_summary_skip(line, sizeof(line), "save_test",
+                                    SAVE_TEST_DIR " is not mounted");
+        api->kprintf(ATTR_RED, "%s", line);
+        return rc;
+    }
+
     test_roundtrip();
     test_errors();
     test_peek();
     test_migration();
 
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n", g_passed, g_total);
-    if (g_passed == g_total) {
-        api->kprintf(ATTR_GREEN, "All save_test tests passed!\n");
-    } else {
-        api->kprintf(ATTR_RED, "%d test(s) failed.\n", g_total - g_passed);
-    }
-
-    return 0;
+    rc = os32_test_summary(line, sizeof(line), "save_test", g_passed, g_total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

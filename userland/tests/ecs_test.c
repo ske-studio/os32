@@ -6,6 +6,7 @@
 
 #include "os32api.h"
 #include "libos32ecs.h"
+#include "rt/testresult.h"
 
 extern KernelAPI *kapi;
 #define api kapi
@@ -67,6 +68,8 @@ int main(int argc, char **argv, KernelAPI *k)
     CompHealth *hp;
     CompTag *tag;
     CompTimer *tmr;
+    char line[OS32_TEST_LINE_MAX];
+    int  rc;
 
     (void)argc; (void)argv; (void)k;
     g_total = 0;
@@ -230,12 +233,7 @@ int main(int argc, char **argv, KernelAPI *k)
     /* ---- 結果 ---- */
     ecs_shutdown();
 
-    api->kprintf(ATTR_CYAN, "\n=== Result: %d/%d passed ===\n",
-                 g_passed, g_total);
-    if (g_passed == g_total) {
-        api->kprintf(ATTR_GREEN, "All tests passed!\n");
-    } else {
-        api->kprintf(ATTR_RED, "%d test(s) failed.\n", g_total - g_passed);
-    }
-    return (g_passed == g_total) ? 0 : 1;
+    rc = os32_test_summary(line, sizeof(line), "ecs_test", g_passed, g_total);
+    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
+    return rc;
 }

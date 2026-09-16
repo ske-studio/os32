@@ -14,15 +14,18 @@
 
 #include "os32api.h"
 #include "os32_gui_shared.h"
+#include "rt/testresult.h"
 
 /* main() は必ず先頭。ヘルパは後ろに前方宣言 (SDK 規約)。 */
 static i32 dummy_handler(u32 op, u32 arg, int owner);
 
-void main(int argc, char **argv, KernelAPI *api)
+int main(int argc, char **argv, KernelAPI *api)
 {
+    char line[OS32_TEST_LINE_MAX];
     i32 r;
     int pass = 0;
     int fail = 0;
+    int rc;
 
     (void)argc;
     (void)argv;
@@ -52,11 +55,10 @@ void main(int argc, char **argv, KernelAPI *api)
                      (int)r, OS32_ERR_INVAL);
     }
 
-    if (fail == 0) {
-        api->kprintf(0x0A, "gui_call_test: ALL PASS (%d)\n", pass);
-    } else {
-        api->kprintf(0x4F, "gui_call_test: %d passed, %d FAILED\n", pass, fail);
-    }
+    rc = os32_test_summary(line, sizeof(line), "gui_call_test",
+                           pass, pass + fail);
+    api->kprintf(rc ? 0x4F : 0x0A, "%s", line);
+    return rc;
 }
 
 /* op をそのまま返すダミー WM ハンドラ (契約 T4 の C 署名)。 */
