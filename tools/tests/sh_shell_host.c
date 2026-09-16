@@ -367,6 +367,11 @@ static i32 __cdecl h_launch_poll(i32 token, i32 *status)
     return 0;
 }
 static i32 __cdecl h_sys_yield(void) { return 0; }
+/* script_exec の行ごとの譲り (cmd_script.c) が間引きに引く tick。呼ぶたびに
+ * 進める — 止まったままだと「同じ tick では譲らない」で 1 回しか出ない。
+ * ここに譲りの窓は置かない (回数の試験は sh_truncation_host.c 側の 30)。 */
+static u32 g_tick;
+static u32 __cdecl h_get_tick(void) { return g_tick++; }
 static int __cdecl h_kbd_trygetkey(void) { return -1; }
 /* 覗くだけ (KAPI v54)。script_exec の毎行の ESC 監視がこれを引く。
  * ここに打鍵の模型は要らない (打ち切りの試験は sh_truncation_host.c 側)。 */
@@ -410,6 +415,7 @@ static void build_api(void)
     g_fake.launch_req = h_launch_req;
     g_fake.launch_poll = h_launch_poll;
     g_fake.sys_yield = h_sys_yield;
+    g_fake.get_tick = h_get_tick;
     g_fake.kbd_trygetkey = h_kbd_trygetkey;
     g_fake.kbd_peekkey = h_kbd_peekkey;
     g_fake.kbd_getchar = h_kbd_getchar;

@@ -20,6 +20,43 @@ static int  script_abort_flag;
 static int g_script_depth = 0;
 
 /* ======================================================================== */
+/*  行ごとの譲り (GUI 端末だけ)                                              */
+/*                                                                          */
+/*  sh.bin (SHELL_AS_APP) は協調型 GUI の中を走る CPL=3 アプリなので、譲ら   */
+/*  ないかぎり WM は 1 度も回らない — スクリプトが長いあいだ画面も打鍵も     */
+/*  止まる。2026-09-16 まで、この譲りは **行ごとの ESC 監視の副作用** で     */
+/*  出ていた: kbd_trygetkey が空振りすると drivers/kbd.c が exec_park_poll  */
+/*  を呼び、PIT tick 1 回に 1 度だけ WM へ park していた。監視を覗くだけの   */
+/*  kbd_peekkey に替えたときその副作用ごと消えたので、ここで明示的に譲り     */
+/*  直す (KAPI v49 sys_yield = 票 T9 D5 の第 4 の park 点)。                 */
+/*                                                                          */
+/*  間引きは消えた側と同じ **PIT tick 1 回に 1 度**。sys_yield はカーネルで  */
+/*  間引かない (明示的な譲りなので) から、間引くならここで間引く — 譲りは    */
+/*  park / resume の往復なので、`goto` で回る軽い行のループでは往復のほうが  */
+/*  行そのものより重くなる。exec_park_poll の g_poll_last_tick と同じ考え方。*/
+/*                                                                          */
+/*  常駐シェル (CUI) には譲る相手が居ない。exec_sys_yield は CUI では        */
+/*  `hlt` 1 回で戻る = PIT 1 tick (10ms) 待つので、行ごとに呼ぶと 128 行の    */
+/*  スクリプトに 1 秒以上足すことになる。だから **CUI では呼び出しごと       */
+/*  消す** — sh_gfx_restore / sh_erase_cells と同じ形で、常駐のコード生成は  */
+/*  1 バイトも変わらない。                                                   */
+/* ======================================================================== */
+#ifdef SHELL_AS_APP
+static u32 g_script_yield_tick = 0;
+
+static void script_yield_gui(void)
+{
+    u32 now = g_api->get_tick();
+
+    if (now == g_script_yield_tick) return;   /* 同じ tick の中では譲らない */
+    g_script_yield_tick = now;
+    g_api->sys_yield();
+}
+#else
+#define script_yield_gui() ((void)0)
+#endif
+
+/* ======================================================================== */
 /*  内部ヘルパー: 行の先頭空白をスキップ                                     */
 /* ======================================================================== */
 static const char *skip_spaces(const char *s)
@@ -232,6 +269,12 @@ static int script_exec(void)
             script_current_line++;
             continue;
         }
+
+        /* GUI 端末では**行を実行する前に** WM へ譲る (間引きつき)。ESC の
+         * 監視より前に置くのは、GUI 中の打鍵が「WM が動いて注入リングへ
+         * 入れる」ことでしか届かないため — 先に譲れば、この行の手前に
+         * 打たれた ESC がその場で見える。常駐 (CUI) では消える。 */
+        script_yield_gui();
 
         /* ESC キーブレーク: **覗くだけ** でキューを確認する (KAPI v54)。
          *

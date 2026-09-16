@@ -25,14 +25,16 @@ libc は使わない (-nostdlib) ので、shell.h が引く <string.h> と
 <stdio.h> / <stdlib.h> だけ一時ディレクトリに薄いシムを置く。
 """
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-BASE = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
-        "-fno-stack-protector", "-Wall", "-Wdeclaration-after-statement",
-        "-D__OS32_USERLAND__", "-DSHELL_AS_APP"]
+BASE_NOAPP = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
+              "-fno-stack-protector", "-Wall", "-Wdeclaration-after-statement",
+              "-D__OS32_USERLAND__"]
+BASE = BASE_NOAPP + ["-DSHELL_AS_APP"]
 INCLUDES = ["-I" + str(ROOT / "sdk/include"), "-I" + str(ROOT / "sdk/include/os32"),
             "-I" + str(ROOT / "include"), "-I" + str(ROOT / "userland/shell"),
             # 段 4 で ui.c / rshell.c / cmd_filer.c を取り込んだぶん
@@ -573,6 +575,20 @@ MUTATIONS = [
      "            int k = g_api->kbd_peekkey();\n"
      "            if (0) {"),
 
+    # ---- 行ごとの譲り (GUI 端末) の否定側 -------------------------------
+
+    # 変異 D: 譲りを外した版 = 2026-09-16 の退行そのもの。ESC 監視を
+    #         kbd_peekkey に替えたとき、kbd_trygetkey の副作用で出ていた
+    #         exec_park_poll ごと消えた姿 (GUI で WM が 1 度も回らない)。
+    ("script_no_yield", "userland/shell/cmd_script.c",
+     "        script_yield_gui();",
+     "        ((void)0);"),
+    # 変異 E: 間引きを外した版。行ごとに必ず park / resume の往復が出るので、
+    #         `goto` で回る軽い行のループが往復ぶんだけ遅くなる。
+    ("script_yield_no_throttle", "userland/shell/cmd_script.c",
+     "    if (now == g_script_yield_tick) return;   /* 同じ tick の中では譲らない */",
+     "    if (0) return;"),
+
     # T24: push が sys_read を 1 回しか呼ばない (先頭 4KB だけ送る)
     ("t24_push_single_read", "userland/shell/rshell.c",
      "    total = 0;\n"
@@ -582,6 +598,41 @@ MUTATIONS = [
      "    while (total == 0) {\n"
      "        n = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));"),
 ]
+
+
+def cui_has_no_yield(tmp, shim):
+    """CUI (常駐シェル = SHELL_AS_APP 無し) には譲る呼び出しが 1 つも残らない。
+
+    ホストの枠 (sh_truncation_host.c) は -DSHELL_AS_APP でしか組めないので、
+    常駐側は贋 KAPI の呼び出し回数では見られない。代わりに cmd_script.c を
+    2 通り前処理し、**cmd_script.c 由来の行** (行標識で切り分ける) に
+    sys_yield が何回出るかを数える。ヘッダの KernelAPI 宣言は数に入らない。
+
+    合格は「GUI で 1 回以上 / CUI で 0 回」。GUI 側を一緒に見るのは窓の較正
+    — 0 と 0 を見て「CUI では出ない」と安心しないため。
+
+    常駐シェルで譲ると exec_sys_yield は `hlt` 1 回 (PIT 1 tick = 10ms) で
+    戻るだけなので、行ごとに呼ぶと 128 行のスクリプトに 1 秒以上足す。
+    """
+    counts = {}
+    for name, extra in (("GUI", ["-DSHELL_AS_APP"]), ("CUI", [])):
+        proc = subprocess.run(["gcc", "-E", *BASE_NOAPP, *extra, *shim, *INCLUDES,
+                               str(ROOT / "userland/shell/cmd_script.c")],
+                              cwd=ROOT, check=True, capture_output=True, text=True)
+        cur = None
+        n = 0
+        for line in proc.stdout.splitlines():
+            m = re.match(r'#\s+\d+\s+"([^"]*)"', line)
+            if m:
+                cur = m.group(1)
+                continue
+            if cur and cur.endswith("cmd_script.c") and "sys_yield" in line:
+                n += 1
+        counts[name] = n
+    ok = counts["GUI"] >= 1 and counts["CUI"] == 0
+    print("CUI YIELD PROBE gui=%d cui=%d %s"
+          % (counts["GUI"], counts["CUI"], "PASS" if ok else "**FAIL**"), flush=True)
+    return 0 if ok else 1
 
 
 def run_mutations(tmp, shim):
@@ -631,6 +682,8 @@ if __name__ == "__main__":
         print("TARGET i386-elf GNU89 COMPILE PASS", flush=True)
         print("EXIT sh_truncation_host=%d" % rc, flush=True)
         failed += rc != 0
+
+        failed += cui_has_no_yield(tmp, shim)
 
         if "--mutate" in sys.argv:
             failed += run_mutations(tmp, shim)

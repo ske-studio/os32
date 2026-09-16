@@ -616,9 +616,19 @@ static int __cdecl h_sys_redirect_fd_buf(int fd, u8 *b, u32 cap, u32 len)
 static u32 __cdecl h_sys_redirect_get_buf_len(int fd) { (void)fd; return 0; }
 static void __cdecl h_sys_reset_redirect(int fd) { (void)fd; }
 /* 1 呼び出しごとに 1 tick 進む。止まったままだと rshell / filer の
- * 「次の tick まで待つ」ループが抜けない (試験がハングする)。 */
+ * 「次の tick まで待つ」ループが抜けない (試験がハングする)。
+ *
+ * tick_freeze(1) の間だけ **止める**。script_exec の譲りは「同じ tick の
+ * 中では 1 回だけ」なので、止めた tick でないとその間引きを見られない
+ * (窓 30h)。止めるのはその場の試験だけ — fresh() が必ず戻す。 */
 static u32 g_tick;
-static u32 __cdecl h_get_tick(void) { return g_tick++; }
+static int g_tick_frozen;
+static u32 __cdecl h_get_tick(void)
+{
+    if (g_tick_frozen) return g_tick;
+    return g_tick++;
+}
+static void tick_freeze(int on) { g_tick_frozen = on; }
 
 /* 起動の記録。切り詰めた行で子が起きたかどうかを見る唯一の窓。 */
 #define LAUNCH_LOG_CAP 512
@@ -646,7 +656,11 @@ static i32 __cdecl h_launch_poll(i32 token, i32 *status)
     if (status) *status = LAUNCH_ST_DONE;
     return 0;
 }
-static i32 __cdecl h_sys_yield(void) { return 0; }
+/* 譲り (KAPI v49) の回数。script_exec が行ごとに WM へ譲っているかを見る
+ * 唯一の窓 — 本物では park / resume の往復になる。 */
+static int g_yield_count;
+static i32 __cdecl h_sys_yield(void) { g_yield_count++; return 0; }
+static int yield_count(void) { return g_yield_count; }
 
 /* --- 監視キュー (script_exec の ESC 監視が引く口) ------------------------
  *
@@ -980,6 +994,8 @@ static void fresh(void)
     g_glob_alloc_budget = -1;
     g_glob_allocs = 0;
     g_frees = 0;
+    g_yield_count = 0;
+    g_tick_frozen = 0;
 }
 
 /* 同じ文字列を n 回続けて足す (クォート再付与ぶんの反例を組むのに使う) */
@@ -3293,6 +3309,83 @@ static void case_script_esc_watch(void)
           "29r 打鍵が無ければ何も起きない");
 }
 
+/* ========================================================================
+ *  30. GUI 端末: スクリプトの行ごとに WM へ譲る (cmd_script.c)
+ *
+ *  sh.bin は協調型 GUI の中の CPL=3 アプリなので、譲らないかぎり WM は
+ *  1 度も回らない。2026-09-16 まで、この譲りは行ごとの ESC 監視の副作用で
+ *  出ていた (kbd_trygetkey の空振り → drivers/kbd.c の exec_park_poll)。
+ *  監視を kbd_peekkey へ替えたときに副作用ごと消えたので、script_exec が
+ *  KAPI v49 の sys_yield で明示的に譲り直す。
+ *
+ *  窓は贋 KAPI の呼び出し回数 (yield_count)。間引き (同じ tick では 1 回)
+ *  は tick を止めて見る。**常駐 (CUI) 側は呼び出しごと消える** —
+ *  script_yield_gui は #ifdef SHELL_AS_APP の外で ((void)0) なので、この
+ *  試験の枠 (-DSHELL_AS_APP) では見られない。CUI 側は
+ *  test_sh_truncation.py の cui_has_no_yield() が前処理で見る。
+ * ======================================================================== */
+static void case_script_yield(void)
+{
+    report("30 GUI 端末: スクリプトの行ごとに WM へ譲る\n");
+
+    /* --- 30a〜b: 行ごとに 1 回 (贋 tick は呼ぶたびに進む = 間引かれない) -- */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    s_add("mk3\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2") && ran("mk3"), "30a 3 行とも走る");
+    check(yield_count() == 3, "30b 行ごとに 1 回ずつ WM へ譲る");
+
+    /* --- 30c: ラベル行では譲らない (実行する行だけ) -------------------- */
+    fresh();
+    s_begin(0);
+    s_add(":L\n");
+    s_add("mk1\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && yield_count() == 1, "30c ラベル行では譲らない");
+
+    /* --- 30d: スクリプト以外 (対話の 1 行) では譲らない ---------------- */
+    fresh();
+    execute_command("mk1");
+    check(ran("mk1") && yield_count() == 0, "30d 対話の 1 行では譲らない");
+
+    /* --- 30e〜f: 入れ子 source でも内側の行ごとに譲る ------------------ */
+    fresh();
+    s_begin(1);
+    s_add("mk2\n");
+    s_add("mk3\n");
+    file_add("/inner.sh", s_body(1));
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("source /inner.sh\n");
+    s_add("mk4\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2") && ran("mk3") && ran("mk4"),
+          "30e 入れ子 source: 内外とも最後まで走る");
+    check(yield_count() == 5, "30f 入れ子でも行ごと (外 3 行 + 内 2 行)");
+
+    /* --- 30g〜h: 同じ tick の中では 1 回だけ (間引き) ------------------
+     *  譲りは park / resume の往復なので、`goto` で回る軽い行のループでは
+     *  往復のほうが行より重い。消えた側 (exec_park_poll) と同じ間引き。 */
+    fresh();
+    tick_freeze(1);
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    s_add("mk3\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    tick_freeze(0);
+    check(ran("mk1") && ran("mk2") && ran("mk3"),
+          "30g 間引いても行は全部走る");
+    check(yield_count() == 1, "30h 同じ tick の中では 1 回だけ譲る");
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -3331,6 +3424,7 @@ void _start(void)
     case_tab_completion();
     case_rshell_nested_refuse_flag();
     case_script_esc_watch();
+    case_script_yield();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }
