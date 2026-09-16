@@ -71,6 +71,17 @@ static void ft_load(void)
     if (!ft_buf) { g_api->sys_close(fd); return; }
 
     sz = g_api->sys_read(fd, ft_buf, FL_FILETYPES_MAXSZ - 1);
+    /* T16: 読み切れなければ**関連付け表を使わない**。末尾の行が途中で切れると
+     * `.txt=ed` が `.txt=e` になり、別のコマンドに関連付いて起動する。 */
+    if (sz == FL_FILETYPES_MAXSZ - 1) {
+        char probe;
+        if (g_api->sys_read(fd, &probe, 1) > 0) {
+            g_api->sys_close(fd);
+            g_api->mem_free(ft_buf);
+            ft_buf = NULL;
+            return;
+        }
+    }
     g_api->sys_close(fd);
     if (sz <= 0) { g_api->mem_free(ft_buf); ft_buf = NULL; return; }
     ft_buf[sz] = '\0';
@@ -141,15 +152,25 @@ static const char *ft_find(const char *filename)
 /*  パスユーティリティ                                                      */
 /* ======================================================================== */
 
-static void fl_path_join(char *out, int out_sz,
-                         const char *dir, const char *name)
+/* 戻り値: 連結後の長さ / out に収まらなければ -1 (票 T16)。
+ * 以前は戻り値が無く、溢れても切った綴りで**別のファイルを起動**し、
+ * **別のディレクトリへ移動**していた。 */
+static int fl_path_join(char *out, int out_sz,
+                        const char *dir, const char *name)
 {
     int i = 0, j = 0;
-    while (dir[j] && i < out_sz - 2) out[i++] = dir[j++];
+    while (dir[j]) {
+        if (i >= out_sz - 2) return -1;
+        out[i++] = dir[j++];
+    }
     if (i > 0 && out[i - 1] != '/') out[i++] = '/';
     j = 0;
-    while (name[j] && i < out_sz - 1) out[i++] = name[j++];
+    while (name[j]) {
+        if (i >= out_sz - 1) return -1;
+        out[i++] = name[j++];
+    }
     out[i] = '\0';
+    return i;
 }
 
 static void fl_path_parent(char *path)
@@ -201,8 +222,6 @@ static void fl_ls_callback(const void *entry_raw, void *ctx)
 
     (void)ctx;
 
-    if (fl_state.count >= FL_MAX_ENTRIES) return;
-
     size = *(const u32 *)(base + 256);
     type = base[260];
 
@@ -211,9 +230,16 @@ static void fl_ls_callback(const void *entry_raw, void *ctx)
         if (name[1] == '.' && name[2] == '\0') return;
     }
 
+    /* T16: 63 バイトで切った名前を表に載せると、Enter で**別のファイル**を
+     * 起動し、**別のディレクトリ**へ入る。載せずに件数だけ数える
+     * (sh_ls.inc の「溢れた分は数だけ」と同じ作法)。 */
+    for (i = 0; name[i]; i++) {}
+    if (i > FL_MAX_NAME_LEN - 1) { fl_state.dropped++; return; }
+
+    if (fl_state.count >= FL_MAX_ENTRIES) { fl_state.dropped++; return; }
+
     e = &fl_state.entries[fl_state.count];
-    for (i = 0; name[i] && i < FL_MAX_NAME_LEN - 1; i++)
-        e->name[i] = name[i];
+    for (i = 0; name[i]; i++) e->name[i] = name[i];
     e->name[i] = '\0';
     e->size = size;
     e->is_dir = (type == OS32_FILE_TYPE_DIR) ? 1 : 0;
@@ -263,6 +289,7 @@ static void fl_scan_dir(void)
     fl_state.count = 0;
     fl_state.cursor = 0;
     fl_state.page_top = 0;
+    fl_state.dropped = 0;
 
     if (!(fl_state.cwd[0] == '/' && fl_state.cwd[1] == '\0')) {
         FL_Entry *e = &fl_state.entries[0];
@@ -328,14 +355,22 @@ static void fl_action_enter(void)
             fl_action_parent();
         } else {
             char new_cwd[FL_MAX_PATH_LEN];
-            fl_path_join(new_cwd, FL_MAX_PATH_LEN, fl_state.cwd, e->name);
+            if (fl_path_join(new_cwd, FL_MAX_PATH_LEN,
+                             fl_state.cwd, e->name) < 0) {
+                fldraw_popup_message("Path too long", 0x41);
+                return;
+            }
             strncpy(fl_state.cwd, new_cwd, FL_MAX_PATH_LEN - 1);
             fl_state.cwd[FL_MAX_PATH_LEN - 1] = '\0';
             fl_scan_dir();
         }
     } else if (e->is_exe) {
         char fullpath[FL_MAX_PATH_LEN];
-        fl_path_join(fullpath, FL_MAX_PATH_LEN, fl_state.cwd, e->name);
+        if (fl_path_join(fullpath, FL_MAX_PATH_LEN,
+                         fl_state.cwd, e->name) < 0) {
+            fldraw_popup_message("Path too long", 0x41);
+            return;
+        }
         fl_exec_program(fullpath);
     } else {
         const char *prog = ft_find(e->name);
@@ -345,13 +380,30 @@ static void fl_action_enter(void)
             int ci = 0;
             const char *s;
 
-            fl_path_join(fullpath, FL_MAX_PATH_LEN, fl_state.cwd, e->name);
+            if (fl_path_join(fullpath, FL_MAX_PATH_LEN,
+                             fl_state.cwd, e->name) < 0) {
+                fldraw_popup_message("Path too long", 0x41);
+                return;
+            }
 
+            /* 関連付けコマンド + ' ' + パス。切れた行で起動しない (T16)。 */
             s = prog;
-            while (*s && ci < (int)sizeof(cmdline) - 2) cmdline[ci++] = *s++;
+            while (*s) {
+                if (ci >= (int)sizeof(cmdline) - 2) {
+                    fldraw_popup_message("Command line too long", 0x41);
+                    return;
+                }
+                cmdline[ci++] = *s++;
+            }
             cmdline[ci++] = ' ';
             s = fullpath;
-            while (*s && ci < (int)sizeof(cmdline) - 1) cmdline[ci++] = *s++;
+            while (*s) {
+                if (ci >= (int)sizeof(cmdline) - 1) {
+                    fldraw_popup_message("Command line too long", 0x41);
+                    return;
+                }
+                cmdline[ci++] = *s++;
+            }
             cmdline[ci] = '\0';
 
             fl_exec_program(cmdline);

@@ -39,6 +39,25 @@
 #define EXEC_CMDLINE_MAX  256
 #define GLOB_PATTERN_MAX  256
 
+/* 環境変数の幅 (cmd_env.c)。実効は名前 31 / 値 255。cmd_script.c の `ask` と
+ * main.c の展開エラーの文言もここから上限を出す ([C4]、票 §5 の段 4)。 */
+#define ENV_NAME_MAX      32
+#define ENV_VALUE_MAX     256
+
+/* `ask` のプロンプト / 入力の幅 (cmd_script.c)。実効はどちらも MAX - 2。 */
+#define ASK_PROMPT_MAX    256
+#define ASK_INPUT_MAX     256
+
+/* rshell (rshell.c)。1 行の受信バッファ幅 (実効 RSHELL_LINE_MAX - 2) と、
+ * `host:` を /host/ へ直したパスの幅 (実効 - 1)。 */
+#define RSHELL_LINE_MAX       128
+#define RSHELL_HOST_PATH_MAX  256
+
+/* env_expand の戻り値。負はすべて「展開できなかった」で、-2 は
+ * **変数名が ENV_NAME_MAX に収まらなかった**ことを表す (T9)。
+ * -1 は行が dst に収まらなかった (I-2 の従来の意味)。 */
+#define ENV_EXPAND_ERR_NAME (-2)
+
 /* script_source_file の戻り値。0 = 成功 / -1 = 読めない・深すぎる /
  * SCRIPT_ERR_REFUSED = 行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1) */
 #define SCRIPT_ERR_REFUSED (-2)

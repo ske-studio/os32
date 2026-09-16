@@ -498,12 +498,22 @@ static void execute_command_line(const char *cmd)
     }
 
     /* $VAR / ~ 展開 */
-    /* I-2: 展開しきれない行は**切れたまま実行しない** */
-    if (env_expand(cmd, expanded_buf, CMD_BUF_SIZE) < 0) {
-        g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
-        /* §2-1: これも「断った行」— スクリプト中なら後続行へ落とさない */
-        sh_refuse_mark();
-        return;
+    /* I-2: 展開しきれない行は**切れたまま実行しない**
+     * T9: 変数名が ENV_NAME_MAX に収まらない行も同じ扱い。以前は 31 文字で
+     *     打ち切って残り (と `}`) をリテラルとして素通しし、展開されない
+     *     文字列がコマンド行に混ざっていた。理由が分かるよう文言を分ける。 */
+    {
+        int er = env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
+        if (er == ENV_EXPAND_ERR_NAME) {
+            sh_refuse("sh: variable name", ENV_NAME_MAX - 1);
+            return;
+        }
+        if (er < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
+            /* §2-1: これも「断った行」— スクリプト中なら後続行へ落とさない */
+            sh_refuse_mark();
+            return;
+        }
     }
     src = expanded_buf;
 

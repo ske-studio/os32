@@ -1,7 +1,7 @@
 # sh_truncation TDD — シェルが入力を黙って切り詰める経路
 
 票: [`docs/tasks/shell/TASK_SH_TRUNCATION.md`](../../docs/tasks/shell/TASK_SH_TRUNCATION.md)
-基点: `feat/gui` = `a4f5429`
+基点: `feat/gui` = `a4f5429` (段 1) / 段 4 は `3fd4da5`
 試験: `make check-sh-truncation-host` (= `python3 -B tools/tests/test_sh_truncation.py`)
     否定側もまとめて: `python3 -B tools/tests/test_sh_truncation.py --mutate`
 
@@ -413,6 +413,210 @@ RED で落ちた 50 件の内訳:
   試験で踏んだ反例は無い。
 - 段 4 の範囲 (T2 / T8 / T9 / T10 / T12 / T14〜T16 / T18〜T26) は手つかず。
 
+## 0-5. 段 4 (§5 の段 4「内蔵と入口」) — RED → GREEN
+
+基点: `feat/gui` = `3fd4da5` (段 3)。範囲は票 §1 の **T2 / T8 / T9 / T10 / T12 / T14 / T15 /
+T16 / T18 / T19 / T20 / T21 / T22 / T23 / T24**。T25 / T26 は「将来の地雷」のまま手を付けていない。
+
+### 何を変えたか
+
+| 経路 | ファイル:行 | 断る条件 (数え方) |
+|---|---|---|
+| T2 | `cmd_script.c:70-73` (`more` / `refused`)、`:97-121` (読み切り確認)、`:141-146` (行)、`:160-170` (行数)、`:198-206` (実行しない) | 読み切れない (`sys_read` がバッファを埋め、**閉じる前の 1 バイト追い読みで続きがある**) / 行が `SCRIPT_MAX_LINE - 1` (255) に収まらない / 行数が `SCRIPT_MAX_LINES` (128) を超える、のいずれかで `script_load` が `-1`。**1 行も実行しない** |
+| T2 (起動) | `cmd_script.c:322-333` `script_source_profile` | 断りの印を**先に**下ろしてからメッセージを出す。`script_load` で断ると `script_exec` を通らないため、下ろさないと起動後の 1 行目が巻き添えになる (R2) |
+| T8 | `cmd_env.c:70-81` `env_set`、`:200-210` `cmd_set` | 登録口は `env_set` 1 本。名前が `ENV_NAME_MAX - 1` (31) / 値が `ENV_VALUE_MAX - 1` (255) を超えたら**登録しない**。`cmd_set` は `=` の手前が 31 に収まらなければ登録も表示もしない。値は写さず `val_start` をそのまま渡す (途中で切らない) |
+| T9 | `cmd_env.c:130-150` `env_expand` | 名前の**終端 (`}` / 区切り / 行末) を幅の検査より先に**見る。`vi` が 31 に達してもまだ名前が続くなら `ENV_EXPAND_ERR_NAME` (-2)。`main.c:502-516` が `sh_refuse("sh: variable name", 31)` にして行を断る。`${` + 31 文字 + `}` の `}` 食べ残しも同時に直る |
+| T10 | `rshell.c:78-89` `rshell_end_reply` (新規)、`:129-135`、`:143-150` | 上限を超えても**読み取りを止めず行末まで読み捨て**、`rpos >= RSHELL_LINE_MAX - 2` (126) なら `sh_refuse` + **EOT (0x04)** + 次の行へ。成功時の EOT も同じ `rshell_end_reply()` を通る (§2-2) |
+| T12 | `cmd_script.c:434-455` `join_args`、`:520-524` `cmd_if` | `join_args` は `CMD_BUF_SIZE - 1` (4095) に収まらなければ `-1`。呼び手は `sh_refuse("if: command line", 4095)` で実行しない。到達するのは**glob で argv が伸びたとき**だけ |
+| T14 | `ui.c:63-67` `hist_add`、`:475-483` / `:497-506` `hist_load` | `HIST_LINE_MAX - 1` (511) を超える行は**履歴に入れない / 読み込まない**。`.history` を読み切れなかったとき (追い読みで続きがある) は改行で終わっていない末尾行も入れない。**実行は断らない** — 行そのものは `CMD_BUF_SIZE` まで正当 (票 §2 の 4) |
+| T15 | `ui.c:501` `cmd_dropped`、`:648-652`、`:668-670`、`:700-707` | 打鍵を捨てたら印を立て、ENTER で `sh_refuse("sh: line", CMD_BUF_SIZE - 4)` (4092)。**実行も履歴登録もしない**。ESC で行を捨てたら印も下ろす |
+| T16 | `cmd_filer.c:74-85` `ft_load`、`:150-170` `fl_path_join`、`:225-232` `fl_ls_callback`、`:352-402` `fl_action_enter` | 名前が `FL_MAX_NAME_LEN - 1` (63) に収まらなければ**表に載せず `fl_state.dropped` に数える** (`sh_ls.inc` の作法。ヘッダに `(hidden N)` を出す)。`fl_path_join` は溢れたら `-1` で、呼び手は起動も移動もせず popup。`/etc/filetypes` を読み切れなければ関連付け表を作らない |
+| T18 | `cmd_script.c:335-360` (prompt)、`:389-398` / `:406-409` (input) | プロンプトが `ASK_PROMPT_MAX - 2` (254) に収まらなければ**訊かずに断る**。入力は 255 文字目の打鍵で印を立て、ENTER で断って**登録しない** |
+| T19 | `rshell.c:258-283` `resolve_host_path`、`:296-305` (recv)、`:396-406` (push) | 収まらなければ `-1`。呼び手は `sh_refuse("recv/push: host path", 255)` で**開きにいかない** (`O_TRUNC` で別のパスを作らない) |
+| T20 | `ui.c:417-429` `hist_build_path`、`:462-469` `hist_load`、`:540-556` (profile) | `HOME` が `PATH_MAX_LEN - HIST_FILE_ROOM` (常駐 244 / `sh.bin` 240) に収まらなければ履歴を使わない。`.profile` は `PATH_MAX_LEN - PROFILE_PATH_ROOM` (244)。**起動は止めない** |
+| T21 | `ui.c:143-147` `path_comp_cb`、`:213-222` `file_comp_cb` | 収まらない候補は**補完しない** (切ると別の名前になり、ENTER で別のファイルに作用する) |
+| T22 | `cmd_sys.c:165-186`、`:196-203`、`:208-221` `cfg_set_key` | 読み切れなければ (追い読みで続きがある) **書き戻さずに `-1`**。行が `out` に収まらない / 新しい `KEY=VALUE` が入らない場合も同じ |
+| T23 | `filer_core.c:82-107` `dir_callback`、`:124-145` `build_full_path`、`:338-341`、`:349-357` | T16 と同型。収まらない名前は載せず `dropped_count` に数え、`build_full_path` は `-1` で移動も確定もしない |
+| T24 | `rshell.c:432-452` `cmd_push` | `xfer_buf` 単位で**読み切るまで回す** (`cmd_recv` と同じ形)。以前は `sys_read` が 1 回だけで、4KB を超えるファイルは先頭 4KB だけ送って `Sent` と報告していた |
+
+上限の定数は [C4] にしたがい `shell.h` に置いた (`ENV_NAME_MAX` / `ENV_VALUE_MAX` は
+`cmd_env.c` から移設、`ASK_PROMPT_MAX` / `ASK_INPUT_MAX` / `RSHELL_LINE_MAX` /
+`RSHELL_HOST_PATH_MAX` / `ENV_EXPAND_ERR_NAME` は新規)。`cmd_sys.c` の生の
+`1024` / `1152` は `CFG_READ_MAX` / `CFG_OUT_MAX` に、`ui.c` の生の `12` は
+`PROFILE_PATH_ROOM` にした。
+
+### `ui.c` / `rshell.c` は印ではなく**その場で断る**
+
+どちらも `execute_command` の外側なので、印を立てて誰かに読ませる相手がいない。
+`sh_refuse()` で赤字 1 行 (上限の書式は [C4] のまま) を出した直後に
+`sh_refused_take()` で下ろす。下ろさないと次に走る行 (対話の次の入力、
+rshell の次のコマンド) が巻き添えで捨てられる。
+
+`rshell` の断りは**必ず `rshell_end_reply()` を通す** — `buz_off` → 1 tick 待ち →
+`serial_putchar(0x04)`。返さないと `/api/cmd` が timeout まで待ち、以後のコマンドが
+全滅する (票 §2-2、`POLICY_DEBUG.md` §4-7 と同じ壊れ方)。変異 `t10_no_eot` が証人。
+
+### 試験の足場: `ui.c` / `rshell.c` / `cmd_filer.c` を取り込んだ
+
+段 3 までは「この 3 本はホスト試験に取り込んでいない」と記録していた。段 4 の
+T10 / T14 / T15 / T16 / T19 / T20 / T21 はこの 3 本の中にしか無いので、
+**実物をそのまま `#include`** するようにした。**ソースは 1 行も写していない**。
+差し替えたのは端末と GFX を握る部分だけ:
+
+| 差し替え | 何にしたか |
+|---|---|
+| キー入力 (`kbd_getkey` / `kbd_getchar` / `kbd_trygetchar` / `ime_getkey`) | 台本 (`key_push*`) を 1 つずつ返す。使い切ったら既定で ESC (`ask` だけ ENTER)。**読みすぎたら試験を落とす** (ハングさせない) |
+| シリアル (`serial_*`) | 送信バイトを記録する。`ser_count(0x04)` が EOT の窓 |
+| `fldraw_*` (14 本) | 空実装。`filer_draw.c` は TVRAM を直に叩くので取り込まない。`fldraw_popup_message` だけは呼ばれた回数と文言を記録する |
+| `save_crc32` / `strtoul` | `rshell.c` の `hotdeploy` が引くだけ。最小実装 |
+
+`shell_run()` は `exit` の印で抜けるので、台本の末尾に `exit` + ENTER を積む。
+`cmd_rshell` は ESC、`filer` は `fl_init` / `fl_action_enter` を直に呼ぶ
+(`cmd_filer` の全体ループは `kbd_getchar` 台本で抜けられるが、この段で見たいのは
+一覧と Enter の判断なので直に呼んでいる)。
+
+**贋 FS を 3 か所直した** (直さないと偽の結果になる):
+
+| 直したもの | 直さないとどうなるか |
+|---|---|
+| 読み位置を **fd ごと**にした | `push` / `recv` は読み口と書き口を同時に開く。1 本だと書き口を開いた拍子に読み位置が 0 へ戻り、T24 の「読み切るまで回す」が無限ループになる |
+| 贋 fd を **10 番から**配るようにした | 1 から配ると `fd_out` が 2 になり、**ファイルへの書き込みが stderr 扱い**になって T24 の窓 (`g_data_written`) が動かない |
+| `get_tick` を 1 呼び出しごとに進めるようにした | 止まったままだと rshell / filer の「次の tick まで待つ」ループが抜けない |
+
+### 「その経路が本当に走ったか」の窓 (偽の緑を 2 回捕まえた)
+
+| 窓 | 何を見るか |
+|---|---|
+| `out_count()` を**エコーと実行で数え分ける** | 行編集の試験は打鍵がそのまま画面へ返るので、`out_has("MK20OUT")` は「打った」だけで真になる。**2 回目**が「`echo` が実際に走った」証拠。`OUT_CAP` も 2KB → 96KB に広げた (4092 バイト注入で肝心の行が押し出されて偽の緑になっていた) |
+| `ser_count(0x04)` | rshell が EOT を返したか。断りの経路でも返すこと |
+| `g_open_calls` / `opened_path()` | 切れた別の綴りで `sys_open` しにいっていないか (T19 / T20) |
+| `g_data_written` / `g_data_writes` | 何バイト書いたか / 1 度でも書き戻したか (T24 / T22) |
+| `hist_count` / `hist_buf` | 履歴に**入ったか** (T14 / T15)。`ui.c` の file-scope static を同じ翻訳単位から直に見る |
+| `fl_state.count` / `fl_state.dropped` / `g_launch_count` | 一覧に載ったか / 数えたか / 子を起こしにいったか (T16) |
+| `g_popup_count` | filer が断りを画面に出したか |
+
+**捕まえた偽の緑 2 件**:
+
+1. `27e` で置いた「スクリプトがそもそも走ったか」の窓 (`echo MK32PRE`) が、
+   **case 24 の `shell_run` が立てた `sh_exit_flag` が残っていて、以降の
+   `script_exec` が 1 行目で `break` していた**ことを暴いた。窓が無ければ
+   `!out_has("MK32OUT")` も `!ran("mknext")` も真で通っていた。`fresh()` で
+   `sh_exit_flag` / `sh_refused_flag` を下ろすようにして直した。
+2. `24a` / `24h` / `24k` / `24m` は当初「外部コマンド名 + 長い引数」で
+   「実行されたか」を見ようとしていたが、**T3 (`try_exec` の 510 バイト上限、段 3)
+   が先に断つ**ので、直っていなくても `ran()` が偽になる = 常に緑だった。
+   内蔵の `echo` に変えて「エコー 1 回 / 実行で 2 回」を数える形に直した。
+
+### RED → GREEN
+
+RED は**段 4 で触った `.c` 8 本だけを `3fd4da5` の姿に戻して**取った
+(`shell.h` の定数と `FL_State` / `FilerState` の `dropped` は残す — 戻すと
+新しい試験がコンパイルできない)。
+
+| | 件数 |
+|---|---|
+| 段 3 (`3fd4da5`) の `.c` + 新しい検査 = **RED** | GREEN 237 / **FAIL 65** |
+| 直した後 = **GREEN** | **302 検査 / 0 FAIL** (`EXIT sh_truncation_host=0`) |
+
+RED で落ちた 65 件:
+
+| 経路 | 落ちた検査 |
+|---|---|
+| T2 (`script_load` / profile) | 20a 20b 20c 20f 20g 20k 20l 20p 20q 20s |
+| T8 (`set` / `export` / `ask` の登録) | 21a 21e 21f 21i 21j 21k 21l 21m 21n 21q 21r 21s |
+| T9 (`env_expand` の名前) | 22a 22b 22c 22d 22e 22g3 22h 22i |
+| T10 / T19 / T24 (`rshell`) | 23a 23b 23g 23j 23k 23l 23m 23p |
+| T14 / T15 / T20 (`ui.c`) | 24b 24e 24f 24g 24h 24i 24j 24p 24q 24t 24u |
+| T16 (`filer`) | 25a 25b 25c 25g 25h 25k 25k2 |
+| T22 (`cfg_set_key`) | 26a 26b 26c |
+| T12 (`if` の組み立て) | 27a 27b 27f 27g |
+| T21 (タブ補完) | 28a 28d |
+
+誤発火の裏 (RED でも GREEN でも通る = 挙動を変えていないこと): `20d` `20e` `20i`
+`20j` `20n` `20o` `20r` `20t` `21b` `21c` `21d` `21g` `21h` `21o` `21p` `21t` `22f`
+`22g` `22g2` `22j` `23c`〜`23f` `23h` `23i` `23n` `23o` `23q` `24a` `24c` `24d` `24k`
+`24l` `24m` `24n` `24r` `24s` `25d` `25e` `25f` `25i` `25j` `25l` `25m` `26d` `26e`
+`26f` `27c` `27d` `27e` `28b` `28c` `28e` `28f` `28g`。
+どれも「上限ちょうどは通る」「断っていない行は今までどおり」を見る。
+
+### 変異 (否定側) — 54 本すべて RED
+
+段 3 までの 27 本に、段 4 の経路ごとに 27 本足した:
+
+`t2_line_truncates` `t2_lines_continue` `t2_read_no_probe` `t2_profile_keeps_mark`
+`t8_env_set_no_check` `t8_set_name_truncates` `t9_name_no_check`
+`t10_stop_reading` `t10_no_eot` `t12_join_truncates`
+`t14_hist_add_truncates` `t14_hist_load_truncates` `t14_hist_no_probe`
+`t15_drop_silent` `t15_esc_keeps_mark`
+`t16_name_truncates` `t16_join_truncates` `t16_ft_no_probe`
+`t18_ask_input_silent` `t18_ask_prompt_truncates` `t19_host_path_truncates`
+`t20_hist_path_truncates` `t20_profile_truncates`
+`t21_cmd_comp_truncates` `t21_file_comp_truncates` `t22_cfg_no_probe`
+`t24_push_single_read`
+
+**GREEN のまま通った変異は 1 本も無い。SKIP (目印が 1 か所でない) も無い。**
+`t10_no_eot` が §2-2 (断っても EOT を返す) の唯一の証人。
+
+### コンパイル
+
+`i386-elf-gcc` で `main.c` / `cmd_env.c` / `cmd_script.c` / `cmd_sys.c` / `cmd_filer.c` /
+`rshell.c` / `ui.c` / `cmd_base.c` / `cmd_mnt.c` / `cmd_dir.c` / `cmd_file.c` /
+`cmd_fs_shared.c` を**常駐版と `-DSHELL_AS_APP` 版の両方**、`userland/lib/filer/` の
+`filer_core.c` / `filer_draw.c` を、Makefile と同じフラグ (`-O2 -Wall
+-Wdeclaration-after-statement`) で **警告 0**。ホスト側も **警告 0** ([C1] GNU89)。
+
+### 隣の試験
+
+| 試験 | 結果 |
+|---|---|
+| `python3 -B tools/tests/test_sh_shell.py` | ALL PASS (`EXIT sh_shell_host=0`) |
+| `python3 -B tools/tests/test_sh_launch.py` | ALL PASS (`EXIT sh_launch_host=0`) |
+| `python3 -B tools/tests/test_fs_kind_callers.py` | 40 checks, 0 failures |
+
+### 判断に迷ったところ (PM の確認が要る)
+
+1. **`FilerState` に `dropped_count` を、`FL_State` に `dropped` を足した** (構造体が
+   1 int 大きくなる)。どちらも `userland/lib/filer/` と `userland/shell/cmd_filer.c`
+   の中でしか使われていない (`apps/` `game/` はこの worktree で未チェックアウトのため
+   未確認)。静的リンクなので `make external` で一緒に建て直せば問題ないが、
+   **建て直しは PM の担当**。
+2. **`T17` の `ui.c` 側は今は到達不能**。`ui.c` の取り込みは `PATH_MAX_LEN - 1` (255)
+   なので区切りを見失うには 1 項目が 256 バイト以上要るが、`PATH` は環境変数で
+   値の上限が `ENV_VALUE_MAX - 1` = 255。守り (走査ごと止める) は入れたが**反例は
+   作れない**ので、T25 / T26 と同じ「将来の地雷」に分類した。検査 `28f` `28g` は
+   「普通の PATH は今までどおり」だけを見ている。
+3. **`hist_save` は断りを出さない**。`hist_build_path` が `-1` を返したら黙って戻る
+   (毎行通るので、出すとプロンプトが赤字で埋まる)。理由は起動時に 1 度だけ通る
+   `hist_load` が 1 行出す。
+4. **`ask` の入力の印はバックスペースで下りない**。捨てた後に消しても ENTER で断る。
+   `ask` には ESC の枝が無く、下ろす契機を新設すると挙動の追加になるため
+   「捨てたら断る」に倒した (T15 の ESC は既存の枝に足しただけ)。
+5. **`set <32 文字以上の名前>` は argc に関係なく断る**ようにした。直す前は引数 2 個
+   なら「値の表示」に落ちて `not set` を出していた。どちらでも登録はされないが、
+   31 文字に切った名前で表示していたので断りに寄せた。
+
+### この段で確かめていないこと
+
+- **実機 (NP21/W) では 1 度も動かしていない** ([V4])。票 §4 末尾のゲスト受入
+  (U1 / U5 を `/api/key text=` 注入か `set` + 展開で再現) は**未実施**。
+  とくに T10 (rshell の EOT) は `/api/cmd` の実物では踏んでいない。
+- **リンクしていない**: `make all` / `make check` / `make external` は PM 指示で禁止。
+  `shell.bin` / `sh.bin` / `libos32filer.a` は作れていないので、常駐シェルの
+  SHA-256 比較もしていない (挙動を変える段なので、そもそも一致しない)。
+- **常駐 `shell.bin` の経路は試験していない**。ホスト試験は `-DSHELL_AS_APP` の 1 本だけ。
+  `rshell` は常駐側でしか登録されない (`main.c:48` が `#ifndef SHELL_AS_APP`) ので、
+  この試験は `cmd_rshell` / `cmd_push` / `cmd_recv` を**直に呼んで**いる
+  (`execute_command("rshell")` 経由ではない)。
+- **`cmd_filer` の全体ループ (`fl_loop`) は踏んでいない**。`fl_init` / `fl_action_enter`
+  を直に呼んでいる。キーリピートと描画の経路は実機でしか踏めない。
+- **`filer_core.c` (T23) は 1 件も試験していない**。`libos32gfx` を丸ごと引くので
+  ホスト試験に入れていない。票 §4 にも T23 の受入 (U) が無い。直しは
+  `cmd_filer.c` (T16) と同型で、そちらは試験で押さえてある。
+- **`cmd_recv` の本体 (ダウンロード) は踏んでいない**。試験したのは `resolve_host_path`
+  の断り (T19) までで、読み書きのループは段 3 以前から変えていない。
+- `docs/POLICY_DEBUG.md` §4 への記録と `docs/manpages/` の更新は**まだ**。
+- `hotdeploy` / `tvdump` / `terminal` / `send` (rshell.c の残り) は触っていない。
+
 ## 1. 洗い出しの範囲と方法
 
 対象: `userland/shell/` の全ファイルと `userland/lib/filer/`。
@@ -435,8 +639,8 @@ RED で落ちた 50 件の内訳:
 | # | 場所 (ファイル:行) | 上限 (定数名と値) | 今の挙動 | 段 2〜4 で変えるか | 備考 |
 |---|---|---|---|---|---|
 | T1 | `cmd_script.c:349` `strip_quotes` / `:407` `cmd_if` の `v1[256]` `v2[256]` | 255 (`max - 1`) | 255 文字で切って比較。**条件が逆になる** | **段 2 — 済み** (`b3954f1` の次) | 票どおり。長さはクォート除去後 (`sh_args.inc:168,183` が既に落としている) |
-| T2 | `cmd_script.c:150` (`li < SCRIPT_MAX_LINE - 1`)、`:121`、`:134-138` | `SCRIPT_MAX_LINE` 256 (実効 255) / `SCRIPT_MAX_LINES` 128 | 256 文字目以降を切る。129 行目以降は赤字を出して `break` し、`return 0` で先頭 128 行を実行 | **段 4** | 票どおり |
-| T2' | `cmd_script.c:97` `sys_read(fd, raw_buf, raw_buf_size - 1)` | `SCRIPT_MAX_LINES * SCRIPT_MAX_LINE - 1` = 32767 | 32KB 超のスクリプトを**黙って**途中で切り、途中の行から先が無かったことになる | **段 4** | 票 U3 の「読み込み上限超のファイル」に対応。票の表には行が無いので分けて書いた |
+| T2 | `cmd_script.c:150` (`li < SCRIPT_MAX_LINE - 1`)、`:121`、`:134-138` | `SCRIPT_MAX_LINE` 256 (実効 255) / `SCRIPT_MAX_LINES` 128 | 256 文字目以降を切る。129 行目以降は赤字を出して `break` し、`return 0` で先頭 128 行を実行 | **段 4 — 済み** (`3fd4da5` の次) | 票どおり |
+| T2' | `cmd_script.c:97` `sys_read(fd, raw_buf, raw_buf_size - 1)` | `SCRIPT_MAX_LINES * SCRIPT_MAX_LINE - 1` = 32767 | 32KB 超のスクリプトを**黙って**途中で切り、途中の行から先が無かったことになる | **段 4 — 済み** (`3fd4da5` の次) | 票 U3 の「読み込み上限超のファイル」に対応。票の表には行が無いので分けて書いた |
 | T3a | `sh_exec.inc:54,70,85,91` `try_exec` | `TRY_EXEC_BUF_SIZE` 512、実効 510 (`limit_args`) | 溢れた引数を落として**起動する**。クォート再付与で `"` `\` は 2 倍 | **段 3 — 済み** (`11705db` の次) | 票どおり (票の `main.c:140-170` は切り出し前の番号) |
 | T3b | `cmd_mnt.c:41,51-65` `exec` | `EXEC_CMDLINE_MAX` 256、実効 255 | 同上 | **段 3 — 済み** (`11705db` の次) | 票どおり。PM 指示で T3 の 3 か所をまとめて段 3 で直した (票の表は段 4 に置いていた) |
 | T3c | `cmd_base.c:117,126-141` `time` | `TIME_CMD_MAX` 512、実効 510 | 同上 (組み立てた行を `execute_command` へ) | **段 3 — 済み** (`11705db` の次) | 同上 |
@@ -444,21 +648,21 @@ RED で落ちた 50 件の内訳:
 | T5 | `main.c:386` `MAX_PIPE_STAGES`、`:388-411` `split_pipeline` | 8 段 / 段ごと `CMD_BUF_SIZE` 4096 | 9 段目以降と空の段を捨てる | **段 3 — 済み** (`11705db` の次) | 票どおり。段バッファ側 (`pos < seg_size - 1`) は 4096 で実質届かない |
 | T6 | `sh_args.inc:84-85` `glob_cb` | — (`mem_alloc` 失敗) | 印を立てずに `return`。一致の**一部だけ**を渡す | **段 3 — 済み** (`11705db` の次) | 票どおり |
 | T7 | `sh_args.inc:222,230` (`patlen < 255`)、`:216` (`i < PATH_MAX_LEN - 1`) | 255 / 255 | パターンとディレクトリ部を切る → **別のファイルに一致する** | **段 3 — 済み** (`11705db` の次) | 票どおり |
-| T8 | `cmd_env.c:37-41` `str_copy` (`env_set` 経由)、`:193` (`ni < ENV_NAME_MAX - 1`)、`:227` (`vi < ENV_VALUE_MAX - 1`) | `ENV_NAME_MAX` 32 (実効 31) / `ENV_VALUE_MAX` 256 (実効 255) | 切った名前・値で**登録する** | **段 4** | 票の訂正どおり。**さらに 1 つ**: `set <32 文字以上の名前>=VALUE` は名前の途中で `=` を見失うが、**引数が 3 個以上あると** `argc >= 3` の fallback (`cmd_env.c:208-210`) に落ちて `argv[2]` を値として登録する (引数 2 個なら「値の表示」分岐) |
-| T9 | `cmd_env.c:126-136` `env_expand` | `ENV_NAME_MAX - 1` = 31 | `${NAME}` も裸の `$NAME` も 31 文字で打ち切り、残り (と `}`) が**リテラルとして素通りする** | **段 4** | 票どおり |
-| T10 | `rshell.c:123-124` (`rpos < 126`) | `rbuf[128]`、実効 126 | 126 文字で読み取りを止め、**その接頭辞を実行する**。残りは次の入力になる | **段 4** | 票どおり。断るときも EOT (0x04) を返すこと (票 §2-2) |
+| T8 | `cmd_env.c:37-41` `str_copy` (`env_set` 経由)、`:193` (`ni < ENV_NAME_MAX - 1`)、`:227` (`vi < ENV_VALUE_MAX - 1`) | `ENV_NAME_MAX` 32 (実効 31) / `ENV_VALUE_MAX` 256 (実効 255) | 切った名前・値で**登録する** | **段 4 — 済み** (`3fd4da5` の次) | 票の訂正どおり。**さらに 1 つ**: `set <32 文字以上の名前>=VALUE` は名前の途中で `=` を見失うが、**引数が 3 個以上あると** `argc >= 3` の fallback (`cmd_env.c:208-210`) に落ちて `argv[2]` を値として登録する (引数 2 個なら「値の表示」分岐) |
+| T9 | `cmd_env.c:126-136` `env_expand` | `ENV_NAME_MAX - 1` = 31 | `${NAME}` も裸の `$NAME` も 31 文字で打ち切り、残り (と `}`) が**リテラルとして素通りする** | **段 4 — 済み** (`3fd4da5` の次) | 票どおり |
+| T10 | `rshell.c:123-124` (`rpos < 126`) | `rbuf[128]`、実効 126 | 126 文字で読み取りを止め、**その接頭辞を実行する**。残りは次の入力になる | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。断るときも EOT (0x04) を返すこと (票 §2-2) |
 | T11 | `sh_launch.inc:63` `sh_launch` + `exec/launch.c` (`LAUNCH_CMDLINE_MAX` 256) | 256 | `launch_req` が `INVAL` を返し、`sh.bin` は「GUI 外」と読む (`sh_launch.inc:93-102`) | **段 3 — 済み** (`11705db` の次) | 票どおり。カーネルは変えない |
-| T12 | `cmd_script.c:427-429` `cmd_if` の `join_args` | `CMD_BUF_SIZE` 4096 | 切れたコマンド行を実行する。到達するのは glob 展開で argv が伸びたとき | **段 4** | 票どおり |
+| T12 | `cmd_script.c:427-429` `cmd_if` の `join_args` | `CMD_BUF_SIZE` 4096 | 切れたコマンド行を実行する。到達するのは glob 展開で argv が伸びたとき | **段 4 — 済み** (`3fd4da5` の次) | 票どおり |
 | T13 | `main.c:423` `execute_command` / `:316` `execute_single` | `CMD_BUF_SIZE` 4096 | 空行と長大行を**同じ扱い**で黙って `return` | **段 3 — 済み** (`11705db` の次) | 票どおり (両方とも `>= CMD_BUF_SIZE`) |
-| T14 | `ui.c:65` `hist_add` (`j < HIST_LINE_MAX - 1`)、`:480` `hist_load` (`li >= HIST_LINE_MAX` → 511) | `HIST_LINE_MAX` 512 (実効 511) | 512 バイト目以降を切って履歴に残す / 読み込む | **段 4** | 票どおり。`hist_load` は `:467` で `HIST_SIZE * HIST_LINE_MAX - 1` = 8191 バイトしか読まない (末尾の行も切れる) |
-| T15 | `ui.c:645` (`cmd_len < CMD_BUF_SIZE - 4`)、`:666` (`cmd_len + utf8_len < CMD_BUF_SIZE - 1`)、`:705-706` | 4092 / 4095 | 4092 バイトで打鍵を黙って捨て、ENTER でその接頭辞を実行し履歴にも入れる | **段 4** | 票どおり。`/api/key text=` の機械注入では気付けない |
-| T16 | `cmd_filer.c:215-217` (`i < FL_MAX_NAME_LEN - 1`)、`:144-153` `fl_path_join`、`:330-339`、`:73` `ft_load` | `FL_MAX_NAME_LEN` 64 (実効 63) / `FL_MAX_PATH_LEN` 256 / `FL_FILETYPES_MAXSZ` 8192 (実効 8191) | 63 バイトで切った名前で**別のファイルを起動する / 別のディレクトリへ入る**。`/etc/filetypes` の末尾行が切れて別コマンドに関連付く | **段 4** | 票どおり。`fl_path_join` は戻り値が無く、溢れても呼び手に伝わらない |
-| T17 | `sh_exec.inc:125` (`di < PATH_MAX_LEN - 2`)、`ui.c:264` (`di < PATH_MAX_LEN - 1`) | 254 / 255 | 長い PATH 項目で `:` の区切りを見失い、**残りが別のディレクトリとして扱われる** | **段 3 — 済み** (`sh_exec.inc`) / **段 4** (`ui.c`) | 票どおり |
-| T18 | `cmd_script.c:289` (`pi < 254`)、`:323` (`len < 254`) | `prompt[256]` / `input[256]`、実効 254 | 255 文字目以降の打鍵を捨てて変数に入れる | **段 4** | 票どおり。入れた値は `env_set` でさらに 255 で切られる (T8) |
-| T19 | `rshell.c:242-257` `resolve_host_path` | `host_path[256]`、実効 255 | `push` / `recv` で切れた別パスを `O_TRUNC` で作る | **段 4** | 票どおり。`host:` の 5 バイト (+ `/` 補完 1) を差し引くので、`host:` の後ろが 249〜250 文字で切れ始める |
-| T20 | `ui.c:404-418` `hist_build_path`、`:519-525` profile パス | `PATH_MAX_LEN - HIST_FILE_ROOM` = 244 (常駐) / 240 (`sh.bin`、`HIST_FILE_ROOM` 16)、profile は `PATH_MAX_LEN - 12` = 244 | 長い `HOME` を切って**別ディレクトリの `.history` / `.profile`** を読み書きする | **段 4** | 票の「244 文字以上」は常駐側の値。`sh.bin` は `.sh_history` を使うので 240 |
-| T21 | `ui.c:143,153-155` `name_store[40][64]`、`:210-215` `name_store[40][128]` | 63 / 126 (+ `/` 1) | 補完結果が切れて別の名前になり、`ui.c:327-335` / `:374-375` でバッファへ書き込まれる | **段 4** | 票どおり |
-| T22 | `cmd_sys.c:161-169` (`sizeof(buf) - 1`)、`:186` (`sizeof(out) - CFG_LINE_RESERVE`) | `buf[1024]` (実効 1023) / `out[1152] - 64` = 1088 | `/etc/system.cfg` を 1023 バイトで読み、**切れたまま書き戻す** (1KB 超の設定が消える) | **段 4** | 票どおり |
+| T14 | `ui.c:65` `hist_add` (`j < HIST_LINE_MAX - 1`)、`:480` `hist_load` (`li >= HIST_LINE_MAX` → 511) | `HIST_LINE_MAX` 512 (実効 511) | 512 バイト目以降を切って履歴に残す / 読み込む | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。`hist_load` は `:467` で `HIST_SIZE * HIST_LINE_MAX - 1` = 8191 バイトしか読まない (末尾の行も切れる) |
+| T15 | `ui.c:645` (`cmd_len < CMD_BUF_SIZE - 4`)、`:666` (`cmd_len + utf8_len < CMD_BUF_SIZE - 1`)、`:705-706` | 4092 / 4095 | 4092 バイトで打鍵を黙って捨て、ENTER でその接頭辞を実行し履歴にも入れる | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。`/api/key text=` の機械注入では気付けない |
+| T16 | `cmd_filer.c:215-217` (`i < FL_MAX_NAME_LEN - 1`)、`:144-153` `fl_path_join`、`:330-339`、`:73` `ft_load` | `FL_MAX_NAME_LEN` 64 (実効 63) / `FL_MAX_PATH_LEN` 256 / `FL_FILETYPES_MAXSZ` 8192 (実効 8191) | 63 バイトで切った名前で**別のファイルを起動する / 別のディレクトリへ入る**。`/etc/filetypes` の末尾行が切れて別コマンドに関連付く | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。`fl_path_join` は戻り値が無く、溢れても呼び手に伝わらない |
+| T17 | `sh_exec.inc:125` (`di < PATH_MAX_LEN - 2`)、`ui.c:264` (`di < PATH_MAX_LEN - 1`) | 254 / 255 | 長い PATH 項目で `:` の区切りを見失い、**残りが別のディレクトリとして扱われる** | **段 3 — 済み** (`sh_exec.inc`) / **段 4 — 済み** (`ui.c`、ただし PATH は `ENV_VALUE_MAX` 上限のため**今は到達不能**) | 票どおり |
+| T18 | `cmd_script.c:289` (`pi < 254`)、`:323` (`len < 254`) | `prompt[256]` / `input[256]`、実効 254 | 255 文字目以降の打鍵を捨てて変数に入れる | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。入れた値は `env_set` でさらに 255 で切られる (T8) |
+| T19 | `rshell.c:242-257` `resolve_host_path` | `host_path[256]`、実効 255 | `push` / `recv` で切れた別パスを `O_TRUNC` で作る | **段 4 — 済み** (`3fd4da5` の次) | 票どおり。`host:` の 5 バイト (+ `/` 補完 1) を差し引くので、`host:` の後ろが 249〜250 文字で切れ始める |
+| T20 | `ui.c:404-418` `hist_build_path`、`:519-525` profile パス | `PATH_MAX_LEN - HIST_FILE_ROOM` = 244 (常駐) / 240 (`sh.bin`、`HIST_FILE_ROOM` 16)、profile は `PATH_MAX_LEN - 12` = 244 | 長い `HOME` を切って**別ディレクトリの `.history` / `.profile`** を読み書きする | **段 4 — 済み** (`3fd4da5` の次) | 票の「244 文字以上」は常駐側の値。`sh.bin` は `.sh_history` を使うので 240 |
+| T21 | `ui.c:143,153-155` `name_store[40][64]`、`:210-215` `name_store[40][128]` | 63 / 126 (+ `/` 1) | 補完結果が切れて別の名前になり、`ui.c:327-335` / `:374-375` でバッファへ書き込まれる | **段 4 — 済み** (`3fd4da5` の次) | 票どおり |
+| T22 | `cmd_sys.c:161-169` (`sizeof(buf) - 1`)、`:186` (`sizeof(out) - CFG_LINE_RESERVE`) | `buf[1024]` (実効 1023) / `out[1152] - 64` = 1088 | `/etc/system.cfg` を 1023 バイトで読み、**切れたまま書き戻す** (1KB 超の設定が消える) | **段 4 — 済み** (`3fd4da5` の次) | 票どおり |
 
 ### 2-2. 票が「変更不要と確認された」と書いているもの — 再確認の結果
 
@@ -478,8 +682,8 @@ RED で落ちた 50 件の内訳:
 
 | # | 場所 (ファイル:行) | 上限 (定数名と値) | 今の挙動 | 段 2〜4 で変えるか | 備考 |
 |---|---|---|---|---|---|
-| T23 | `userland/lib/filer/filer_core.c:96-99` `dir_callback`、`:124-133` `build_full_path`、`:243`、`:320-325`、`:330` | `FILER_NAME_LEN` 64 (実効 63) / `FILER_MAX_PATH` 256 | T16 とまったく同じ穴が **`libos32filer` 側にもある**。63 バイトで切った名前で `filer_get_selected_path()` が**別のファイルのパス**を返し、ディレクトリ移動も別の場所へ行く。`build_full_path` は溢れても戻り値が無い | **段 4** (T16 と同じコミット) | 票 §3 は `userland/lib/filer/` を「名前の幅」として範囲に入れている。`cmd_filer.c` (TVRAM ファイラ) とは別のソースなので両方直す |
-| T24 | `rshell.c:366-378` `cmd_push` | `xfer_buf[4096]` | `sys_read` が 1 回だけなので、**4096 バイトを超えるファイルは先頭 4KB だけがホストへ書かれ**、`Uploaded` と報告される。`cmd_recv` は `:303-319` で読み切るまで回すので直っている (同じ欠陥が `recv` 側だけ直された) | **段 4** | 入力そのものではなくファイル内容の切り詰めだが、「切り詰めたまま成功を返す」という同じ型 |
+| T23 | `userland/lib/filer/filer_core.c:96-99` `dir_callback`、`:124-133` `build_full_path`、`:243`、`:320-325`、`:330` | `FILER_NAME_LEN` 64 (実効 63) / `FILER_MAX_PATH` 256 | T16 とまったく同じ穴が **`libos32filer` 側にもある**。63 バイトで切った名前で `filer_get_selected_path()` が**別のファイルのパス**を返し、ディレクトリ移動も別の場所へ行く。`build_full_path` は溢れても戻り値が無い | **段 4 — 済み** (`3fd4da5` の次) | 票 §3 は `userland/lib/filer/` を「名前の幅」として範囲に入れている。`cmd_filer.c` (TVRAM ファイラ) とは別のソースなので両方直す |
+| T24 | `rshell.c:366-378` `cmd_push` | `xfer_buf[4096]` | `sys_read` が 1 回だけなので、**4096 バイトを超えるファイルは先頭 4KB だけがホストへ書かれ**、`Uploaded` と報告される。`cmd_recv` は `:303-319` で読み切るまで回すので直っている (同じ欠陥が `recv` 側だけ直された) | **段 4 — 済み** (`3fd4da5` の次) | 入力そのものではなくファイル内容の切り詰めだが、「切り詰めたまま成功を返す」という同じ型 |
 | T25 | `cmd_dir.c:167,169` `env_set("OLDPWD", ...)` / `env_set("PWD", ...)` | `ENV_VALUE_MAX - 1` = 255 | cwd が 255 バイトちょうどまでは収まるので**今は届かない**。`PATH_MAX_LEN` (256) を上げたら T8 の切り詰めが先に当たる | **変えない** | T8 を直せば自動的に閉じる。上限を上げるときの注意として残す |
 | T26 | `ui.c:387-388` タブ補完の共通接頭辞 | `CMD_BUF_SIZE - 1` | 書き込みループは境界を見るが、直後の `buf[common_len] = 0;` は見ない。`common_len` は候補名の長さ (≤ 126) で抑えられているので**今は届かない** | **変えない** | T21 を直すときに一緒に見る |
 

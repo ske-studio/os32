@@ -95,6 +95,29 @@ char *strcat(char *d, const char *s)
     return d;
 }
 
+/* rshell.c の hotdeploy が引く (10 進 / 0x 16 進だけ見る最小実装) */
+unsigned long strtoul(const char *s, char **end, int base)
+{
+    unsigned long v = 0;
+    while (*s == ' ') s++;
+    if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2; base = 16;
+    }
+    if (base == 0) base = 10;
+    for (;;) {
+        int d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+        else break;
+        if (d >= base) break;
+        v = v * (unsigned long)base + (unsigned long)d;
+        s++;
+    }
+    if (end) *end = (char *)s;
+    return v;
+}
+
 int atoi(const char *s)
 {
     int v = 0, neg = 0;
@@ -132,7 +155,9 @@ static void check(int cond, const char *name)
 
 /* ---- 出力の捕獲 -------------------------------------------------------- */
 
-#define OUT_CAP  2048
+/* 行編集の試験は打鍵がそのまま画面へエコーされる (4092 バイト注入など) ので、
+ * 2KB のままだと肝心の "command not found" が押し出されて**偽の緑**になる。 */
+#define OUT_CAP  (96 * 1024)
 
 static char g_out[OUT_CAP];
 static int  g_out_len;
@@ -218,6 +243,78 @@ int   setvbuf(void *stream, char *buf, int mode, unsigned long sz)
 }
 void *stdout_impl;
 
+/* --- キーの台本 --------------------------------------------------------- */
+#define KEYS_CAP 8192
+
+static int g_keys[KEYS_CAP];
+static int g_keys_len;
+static int g_keys_pos;
+
+/* 台本を使い切ったあと返し続ける値。既定は 0x1B (ESC) — rshell も filer も
+ * shell_run も ESC/exit で抜ける。`ask` は ENTER (0x0D) でしか抜けないので、
+ * その試験だけ keys_set_eof(0x0D) にする (取り違えると試験がハングする)。 */
+static int g_keys_eof = 0x1B;
+
+/* 台本を使い切った後の読みすぎ。数え切れないほど読んだら**ハングではなく
+ * 落とす** — 端末ループの試験は台本を読み切ったら抜ける作りなので、
+ * ここに来続けるのは試験側の組み立てが壊れている印。 */
+static int g_key_overrun;
+
+static void keys_reset(void)
+{
+    g_keys_len = 0;
+    g_keys_pos = 0;
+    g_keys_eof = 0x1B;
+    g_key_overrun = 0;
+}
+
+static void keys_set_eof(int v) { g_keys_eof = v; }
+
+static void key_push(int k)
+{
+    if (g_keys_len < KEYS_CAP) g_keys[g_keys_len++] = k;
+}
+
+static void key_push_str(const char *s)
+{
+    while (*s) key_push((int)(unsigned char)*s++);
+}
+
+static void key_push_run(char c, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) key_push((int)(unsigned char)c);
+}
+
+/* 台本を使い切ったら 0x1B (ESC) を返し続ける — どのループも必ず抜ける。 */
+static int key_next(void)
+{
+    if (g_keys_pos < g_keys_len) { g_key_overrun = 0; return g_keys[g_keys_pos++]; }
+    if (++g_key_overrun > 1000) {
+        report("  FAIL キー台本の読みすぎ (端末ループが抜けていない)\n");
+        die(2);
+    }
+    return g_keys_eof;
+}
+
+static int keys_left(void) { return g_keys_len - g_keys_pos; }
+
+/* --- シリアル (rshell の EOT を見る窓) ---------------------------------- */
+#define SER_LOG_CAP 4096
+
+static u8  g_ser_log[SER_LOG_CAP];
+static int g_ser_len;
+static int g_ser_inited = 1;
+
+static void ser_reset(void) { g_ser_len = 0; }
+
+static int ser_count(u8 b)
+{
+    int i, n = 0;
+    for (i = 0; i < g_ser_len; i++) if (g_ser_log[i] == b) n++;
+    return n;
+}
+
 /* ---- ごく小さなヒープと疑似ファイル ------------------------------------ */
 
 #define POOL_SIZE  (256 * 1024)
@@ -225,22 +322,59 @@ void *stdout_impl;
 static char g_pool[POOL_SIZE];
 static unsigned long g_pool_used;
 
-#define FILE_MAX  8
+#define FILE_MAX  16
 
 static struct { const char *path; const char *body; } g_files[FILE_MAX];
 static int g_file_count;
 static int g_open_fd;
-static int g_read_pos;
+/* 読み位置は **fd ごと**。1 本しかないと push / recv のように読み口と書き口を
+ * 同時に開く経路で、書き口を開いた拍子に読み位置が 0 へ戻って読み直しになる
+ * (T24 の「読み切るまで回す」が無限ループに見える偽の赤になる)。 */
+static int g_read_pos[FILE_MAX + 1];
 static int g_open_leak;
+
+/* 「どの綴りで開きにいったか」の窓。切り詰めた別のパスを作っていないかを
+ * 見る (T19 / T20)。fd 1 / 2 以外への書き込み量は T24 の窓。 */
+#define OPEN_LOG_CAP 2048
+static char g_open_log[OPEN_LOG_CAP];
+static int  g_open_log_len;
+static int  g_open_calls;
+static u32  g_data_written;
+static int  g_data_writes;
 
 static void files_reset(void)
 {
+    int i;
     g_file_count = 0;
     g_open_fd = 0;
     g_open_leak = 0;
-    g_read_pos = 0;
+    for (i = 0; i <= FILE_MAX; i++) g_read_pos[i] = 0;
     g_pool_used = 0;
+    g_open_log_len = 0;
+    g_open_log[0] = '\0';
+    g_open_calls = 0;
+    g_data_written = 0;
+    g_data_writes = 0;
 }
+
+/* <want> という綴りで open されたか */
+static int opened_path(const char *want)
+{
+    int i, j;
+    int wl = 0;
+    while (want[wl]) wl++;
+    if (wl == 0) return 1;
+    for (i = 0; i + wl <= g_open_log_len; i++) {
+        for (j = 0; j < wl && g_open_log[i + j] == want[j]; j++) {}
+        if (j == wl) return 1;
+    }
+    return 0;
+}
+
+/* 贋 fd は 10 番から配る。1 から配ると、読み口と書き口を同時に開く経路
+ * (push / recv) で fd_out が 2 になり、**ファイルへの書き込みが stderr 扱い**
+ * になって T24 の窓 (g_data_written) が動かない。 */
+#define FD_BASE 10
 
 static void file_add(const char *path, const char *body)
 {
@@ -306,18 +440,24 @@ static void __cdecl h_mem_free(void *p) { (void)p; g_frees++; }
 static int __cdecl h_sys_open(const char *path, int flags)
 {
     int i;
-    if (g_open_fd) g_open_leak = 1;
-    g_read_pos = 0;
+    g_open_calls++;
+    for (i = 0; path[i] && g_open_log_len < OPEN_LOG_CAP - 2; i++)
+        g_open_log[g_open_log_len++] = path[i];
+    if (g_open_log_len < OPEN_LOG_CAP - 1) g_open_log[g_open_log_len++] = '\n';
+    g_open_log[g_open_log_len] = '\0';
+
     for (i = 0; i < g_file_count; i++) {
         if (strcmp(g_files[i].path, path) == 0) {
-            g_open_fd = i + 1;
-            return i + 1;
+            g_open_fd = i + FD_BASE;
+            g_read_pos[i] = 0;
+            return i + FD_BASE;
         }
     }
     if (flags != KAPI_O_RDONLY) {
         file_add(path, "");
-        g_open_fd = g_file_count;
-        return g_file_count;
+        g_open_fd = g_file_count - 1 + FD_BASE;
+        g_read_pos[g_file_count - 1] = 0;
+        return g_file_count - 1 + FD_BASE;
     }
     return -1;
 }
@@ -334,6 +474,11 @@ static int __cdecl h_sys_write(int fd, const void *buf, u32 size)
     u32 i;
     if (fd == 1 || fd == 2) {
         for (i = 0; i < size; i++) out_byte(b[i]);
+    } else {
+        /* ファイルへの書き込み量。「読み切ってから送ったか」(T24) と
+         * 「切れた設定を書き戻していないか」(T22) の窓。 */
+        g_data_written += size;
+        g_data_writes++;
     }
     return (int)size;
 }
@@ -343,14 +488,20 @@ static int __cdecl h_sys_read(int fd, void *buf, u32 size)
     const char *src;
     char *dst = (char *)buf;
     int n = 0;
-    if (fd <= 0 || fd > g_file_count) return -1;
-    src = g_files[fd - 1].body + g_read_pos;
+    int i = fd - FD_BASE;
+    if (i < 0 || i >= g_file_count) return -1;
+    src = g_files[i].body + g_read_pos[i];
     while (src[n] && (u32)n < size) { dst[n] = src[n]; n++; }
-    g_read_pos += n;
+    g_read_pos[i] += n;
     return n;
 }
 
-static void __cdecl h_sys_close(int fd) { (void)fd; g_open_fd = 0; }
+static void __cdecl h_sys_close(int fd)
+{
+    int i = fd - FD_BASE;
+    if (i >= 0 && i < FILE_MAX) g_read_pos[i] = 0;
+    g_open_fd = 0;
+}
 
 static int __cdecl h_sys_stat(const char *path, OS32_Stat *st)
 {
@@ -369,7 +520,7 @@ static int __cdecl h_sys_stat(const char *path, OS32_Stat *st)
 /* ---- 贋ディレクトリ (glob の T6 / T7 に要る) ---------------------------- */
 /*  g_ls_calls は「**照合を試みたか**」を見る唯一の窓。T7 (パターン /         */
 /*  ディレクトリ部が上限超過) は sys_ls を 1 度も呼ばないこと。               */
-#define DIRENT_MAX 8
+#define DIRENT_MAX 24
 
 static const char *g_dir_path;
 static const char *g_dir_names[DIRENT_MAX];
@@ -464,7 +615,10 @@ static int __cdecl h_sys_redirect_fd_buf(int fd, u8 *b, u32 cap, u32 len)
 }
 static u32 __cdecl h_sys_redirect_get_buf_len(int fd) { (void)fd; return 0; }
 static void __cdecl h_sys_reset_redirect(int fd) { (void)fd; }
-static u32 __cdecl h_get_tick(void) { return 0; }
+/* 1 呼び出しごとに 1 tick 進む。止まったままだと rshell / filer の
+ * 「次の tick まで待つ」ループが抜けない (試験がハングする)。 */
+static u32 g_tick;
+static u32 __cdecl h_get_tick(void) { return g_tick++; }
 
 /* 起動の記録。切り詰めた行で子が起きたかどうかを見る唯一の窓。 */
 #define LAUNCH_LOG_CAP 512
@@ -494,10 +648,39 @@ static i32 __cdecl h_launch_poll(i32 token, i32 *status)
 }
 static i32 __cdecl h_sys_yield(void) { return 0; }
 
-/* kbd_trygetkey は script_exec の ESC 判定が毎行引く。-1 = 何も来ていない。 */
+/* kbd_trygetkey は script_exec の ESC 判定が毎行引く。-1 = 何も来ていない。
+ * **台本があるときだけ** -1 以外を返すと script_exec が毎行 ESC で落ちるので、
+ * ここは常に -1 のまま (filer のキーリピート掃除もこれで空回りする)。 */
 static int __cdecl h_kbd_trygetkey(void) { return -1; }
-static int __cdecl h_kbd_getchar(void)   { return 0x0D; }
-static int __cdecl h_kbd_trygetchar(void) { return -1; }
+
+/* 行入力・rshell・filer が引くキー源。台本 (keys_*) を 1 つずつ返す。 */
+static int __cdecl h_kbd_getchar(void)    { return key_next(); }
+static int __cdecl h_kbd_getkey(void)     { return key_next(); }
+static int __cdecl h_ime_getkey(void)     { return key_next(); }
+/* rshell は「来ていない = -1」で待つ。台本が尽きたら ESC を返して抜けさせる。 */
+static int __cdecl h_kbd_trygetchar(void)
+{
+    if (keys_left() > 0) return key_next();
+    return 0x1B;
+}
+
+/* --- シリアル (rshell) -------------------------------------------------- */
+static void __cdecl h_serial_init(u32 baud) { (void)baud; g_ser_inited = 1; }
+static int  __cdecl h_serial_is_initialized(void) { return g_ser_inited; }
+static void __cdecl h_serial_putchar(u8 c)
+{
+    if (g_ser_len < SER_LOG_CAP) g_ser_log[g_ser_len++] = c;
+}
+static void __cdecl h_serial_puts(const char *s)
+{
+    while (*s) h_serial_putchar((u8)*s++);
+}
+static int  __cdecl h_serial_trygetchar(void) { return -1; }
+static void __cdecl h_rshell_set_active(int on) { (void)on; }
+static void __cdecl h_buz_off(void) {}
+static void __cdecl h_sys_halt(void) {}
+static int  __cdecl h_sys_mount(const char *mp, const char *dev, const char *fs)
+{ (void)mp; (void)dev; (void)fs; return 0; }
 
 static int  __cdecl h_console_get_cursor_x(void)   { return 0; }
 static int  __cdecl h_console_get_cursor_y(void)   { return 0; }
@@ -538,7 +721,18 @@ static void build_api(void)
     g_fake.sys_yield = h_sys_yield;
     g_fake.kbd_trygetkey = h_kbd_trygetkey;
     g_fake.kbd_getchar = h_kbd_getchar;
+    g_fake.kbd_getkey = h_kbd_getkey;
+    g_fake.ime_getkey = h_ime_getkey;
     g_fake.kbd_trygetchar = h_kbd_trygetchar;
+    g_fake.serial_init = h_serial_init;
+    g_fake.serial_is_initialized = h_serial_is_initialized;
+    g_fake.serial_putchar = h_serial_putchar;
+    g_fake.serial_puts = h_serial_puts;
+    g_fake.serial_trygetchar = h_serial_trygetchar;
+    g_fake.rshell_set_active = h_rshell_set_active;
+    g_fake.buz_off = h_buz_off;
+    g_fake.sys_halt = h_sys_halt;
+    g_fake.sys_mount = h_sys_mount;
     g_fake.console_get_cursor_x = h_console_get_cursor_x;
     g_fake.console_get_cursor_y = h_console_get_cursor_y;
     g_fake.console_set_cursor = h_console_set_cursor;
@@ -546,35 +740,64 @@ static void build_api(void)
     g_api = &g_fake;
 }
 
-/* ---- ui.c の代わり (sh_redraw.inc が引くもの) -------------------------- */
-
-static int prev_draw_len = 0;
-
-static void show_prompt(void) { out_str("sh> "); }
-
-#include "../../userland/shell/sh_redraw.inc"
-
-/* ui.c の公開分。行編集は段 4 の担当なのでここでは呼ばない。 */
-void shell_run(void) {}
-void hist_save(void) {}
-void hist_load(void) {}
-
-/* sdk/crt/help.c の代わり (man ページは読まない) */
+/* ---- sdk/crt/help.c の代わり (man ページは読まない) -------------------- */
 int os32_help_show(const char *name)   { (void)name; return -1; }
 int os32_help_exists(const char *name) { (void)name; return 0; }
 
-/* sh_redraw.inc のうちこの試験が直接は呼ばないもの (行編集は段 4)。
- * -Wall の unused-function を黙らせるためだけに参照を 1 本持つ —
- * 実物をそのまま取り込んでいることの証でもある。 */
-void (*const sh_redraw_keep[])() = {
-    (void (*)())redraw_line,
-    (void (*)())sh_backspace_tail
-};
+/* ---- 段 4 で取り込んだ入口 (ui.c / rshell.c / cmd_filer.c) -------------
+ *
+ *  段 3 まではこの 3 本を試験に入れておらず、「踏んでいない」と記録して
+ *  いた。段 4 の T10 / T14 / T15 / T16 / T19 / T20 / T21 はこの 3 本の
+ *  中にしか無いので、**実物をそのまま #include** して通す。
+ *
+ *  端末と GFX を握る部分だけ差し替える:
+ *    - キー入力  → 台本 (keys_set) を 1 つずつ返す贋 kbd_*
+ *    - シリアル  → 送信バイトを記録する贋 serial_* (EOT を見るため)
+ *    - fldraw_*  → TVRAM を直接叩くので、ここで空実装を置く
+ *                  (filer_draw.c は取り込まない)
+ *  ソースそのものは 1 行も写していない。
+ * ---------------------------------------------------------------------- */
 
-/* cmd_filer.c は filer_draw.c (GFX) を丸ごと引くので取り込まない。
- * SHELL_AS_APP では sh_is_cui_only が `filer` を先に断つので、
- * 切り詰めの経路としては段 4 で別に見る (§2-3 の表に載せてある)。 */
-void shell_cmd_filer_init(void) {}
+/* --- filer の描画 (TVRAM を直接叩くので取り込まない) -------------------- */
+#include "filer_draw.h"
+
+static char g_popup[128];
+static int  g_popup_count;
+
+void fldraw_init(KernelAPI *api) { (void)api; }
+void fldraw_clear_line(int y, u8 attr) { (void)y; (void)attr; }
+void fldraw_str(int x, int y, const char *s, int max_len, u8 attr)
+{ (void)x; (void)y; (void)s; (void)max_len; (void)attr; }
+void fldraw_number(int x, int y, u32 val, u8 attr)
+{ (void)x; (void)y; (void)val; (void)attr; }
+void fldraw_size_str(int x, int y, u32 size, u8 attr)
+{ (void)x; (void)y; (void)size; (void)attr; }
+void fldraw_header(const FL_State *st) { (void)st; }
+void fldraw_entry(int col_x, int y, const FL_Entry *e, int selected)
+{ (void)col_x; (void)y; (void)e; (void)selected; }
+void fldraw_entry_at(const FL_State *st, int idx, int selected)
+{ (void)st; (void)idx; (void)selected; }
+void fldraw_list(const FL_State *st) { (void)st; }
+void fldraw_footer(const FL_State *st) { (void)st; }
+void fldraw_help(const FL_State *st) { (void)st; }
+void fldraw_all(const FL_State *st) { (void)st; }
+void fldraw_cursor_update(const FL_State *st, int old_cursor)
+{ (void)st; (void)old_cursor; }
+void fldraw_popup_message(const char *msg, u8 attr)
+{
+    int i = 0;
+    (void)attr;
+    while (msg[i] && i < (int)sizeof(g_popup) - 1) { g_popup[i] = msg[i]; i++; }
+    g_popup[i] = '\0';
+    g_popup_count++;
+}
+
+/* --- libos32save の代わり (rshell.c の hotdeploy が引くだけ) ------------ */
+u32 save_crc32(const void *data, u32 len)
+{
+    (void)data;
+    return len;
+}
 
 /* ---- 実物のシェル ------------------------------------------------------ */
 
@@ -587,6 +810,9 @@ void shell_cmd_filer_init(void) {}
 #include "../../userland/shell/cmd_mnt.c"
 #include "../../userland/shell/cmd_script.c"
 #include "../../userland/shell/cmd_sys.c"
+#include "../../userland/shell/cmd_filer.c"
+#include "../../userland/shell/rshell.c"
+#include "../../userland/shell/ui.c"
 
 /* main.c の main() と同じ順で登録表を作る (表そのものは実物) */
 static void sh_boot(void)
@@ -600,6 +826,10 @@ static void sh_boot(void)
     shell_cmd_env_init();
     shell_cmd_script_init();
     shell_cmd_filer_init();
+    /* 常駐版だけが登録する rshell 系も、この試験では表に載せて
+     * execute_command 経由でも踏めるようにしておく (main.c の
+     * #ifndef SHELL_AS_APP と同じ並び)。 */
+    shell_rshell_init();
 }
 
 /* ---- 試験の道具 -------------------------------------------------------- */
@@ -684,6 +914,15 @@ static void fresh(void)
     launch_log_reset();
     redir_log_reset();
     dir_reset();
+    keys_reset();
+    ser_reset();
+    g_popup_count = 0;
+    g_popup[0] = '\0';
+    /* shell_run の試験が `exit` で抜けた後、この印が立ったままだと
+     * 以降の script_exec が 1 行目で break して**何も走らない**
+     * (窓 27e が実際にそれを捕まえた)。 */
+    sh_exit_flag = 0;
+    sh_refused_flag = 0;
     g_glob_alloc_budget = -1;
     g_glob_allocs = 0;
     g_frees = 0;
@@ -1835,6 +2074,943 @@ static void case_too_many_args_marks(void)
     check(!out_has("STAGE2RAN"), "19q 捨てた段の後続の段を実行しない");
 }
 
+
+/* ========================================================================
+ *  20. U3 — スクリプトの読み込み (T2 / T2')
+ *
+ *  「切り詰めたら実行しない」をロードの段で守る。切れた行・捨てた行・
+ *  読み切れなかったファイルのどれでも **1 行も実行しない**。
+ *  走ったかどうかの窓は ran() (run_cmd_internal の "command not found")。
+ * ======================================================================== */
+
+/* 32KB を超えるスクリプト本文 (SBUF_SIZE には入らないので別に持つ) */
+#define BIGSCRIPT_CAP 40000
+static char g_bigscript[BIGSCRIPT_CAP];
+
+/* head + unit を n 回。長さを返す */
+static int bigscript_build(const char *head, const char *unit, int n)
+{
+    int len = 0;
+    int i, j;
+
+    for (i = 0; head[i] && len < BIGSCRIPT_CAP - 1; i++) g_bigscript[len++] = head[i];
+    for (i = 0; i < n; i++)
+        for (j = 0; unit[j] && len < BIGSCRIPT_CAP - 1; j++)
+            g_bigscript[len++] = unit[j];
+    g_bigscript[len] = '\0';
+    return len;
+}
+
+static void case_script_load_refuses(void)
+{
+    int i;
+
+    report("20 U3: スクリプトの行 / 行数 / 読み込み上限 (T2)\n");
+
+    /* --- 256 文字以上の行 → スクリプトを 1 行も実行しない -------------- */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("echo ");  s_run(251);  s_add("\n");    /* 5 + 251 = 256 文字 */
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("mk1"), "20a 切れる行があればスクリプトを実行しない (前の行も)");
+    check(!ran("mk2"), "20b 同上: 後ろの行も実行しない");
+    check(refused_msg("source: script line"),
+          "20c 何が上限を超えたか + 上限を報告する");
+
+    /* 255 文字ちょうどは通る (誤発火の裏) */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("echo ");  s_run(250);  s_add("\n");    /* 5 + 250 = 255 文字 */
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1"), "20d 255 文字ちょうどの行は通る");
+    check(!out_has("too long"), "20e 同上: 断らない");
+
+    /* --- 129 行目 → 先頭 128 行も実行しない ---------------------------- */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    for (i = 0; i < 128; i++) s_add("z\n");       /* 合計 129 行 */
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("mk1"), "20f 129 行あれば先頭 128 行も実行しない");
+    check(!ran("z"),   "20g 同上: 捨てた行も当然実行しない");
+    check(out_has("too many lines"), "20h 行数超過を報せる");
+
+    /* 128 行ちょうどは通る (裏) */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    for (i = 0; i < 127; i++) s_add("z\n");       /* 合計 128 行 */
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1"), "20i 128 行ちょうどは通る");
+    check(!out_has("too many lines"), "20j 同上: 断らない");
+
+    /* --- 読み込み上限 (32767B) を超えるファイル ------------------------ */
+    /*  "mk1\n" (4) + "#\n" * 16384 (32768) = 32772 > 32767 */
+    fresh();
+    bigscript_build("mk1\n", "#\n", 16384);
+    file_add("/big.sh", g_bigscript);
+    execute_command("source /big.sh");
+    check(!ran("mk1"), "20k 読み切れないスクリプトは 1 行も実行しない");
+    check(out_has("too large"), "20l 読み切れなかったことを報せる");
+
+    /*  ちょうど 32767B は通る (裏)。"mk1\n" (4) + "#\n" * 16381 (32762)
+     *  + "#" (1) = 32767 */
+    fresh();
+    i = bigscript_build("mk1\n", "#\n", 16381);
+    g_bigscript[i++] = '#';
+    g_bigscript[i] = '\0';
+    check(i == 32767, "20m 反例は 32767 バイトちょうど");
+    file_add("/big.sh", g_bigscript);
+    execute_command("source /big.sh");
+    check(ran("mk1"), "20n 32767 バイトちょうどは通る");
+    check(!out_has("too large"), "20o 同上: 断らない");
+
+    /* --- 入れ子の source: 内側が断ったら外側も打ち切る ----------------- */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("echo ");  s_run(251);  s_add("\n");
+    s_begin(1);
+    s_add("source /bad.sh\n");
+    s_add("mk2\n");
+    file_add("/bad.sh", s_body(0));
+    file_add("/outer.sh", s_body(1));
+    execute_command("source /outer.sh");
+    check(!ran("mk1"), "20p 入れ子: 内側は 1 行も実行しない");
+    check(!ran("mk2"), "20q 入れ子: 外側の後続行も実行しない");
+
+    /* --- 対話では次の行が動く (誤発火の裏) ----------------------------- */
+    fresh();
+    s_begin(0);
+    s_add("echo ");  s_run(251);  s_add("\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    execute_command("mk3");
+    check(ran("mk3"), "20r 対話: 断った source の次の行は今までどおり");
+
+    /* --- 起動スクリプトで断っても起動を止めない (票 R2) --------------- */
+    /*  script_load で断ると script_exec を通らないので、印を下ろすのは
+     *  script_source_profile の仕事。残したままだと起動後の 1 行目が
+     *  巻き添えで捨てられる。 */
+    fresh();
+    s_begin(0);
+    s_add("mkprof1\n");
+    s_add("echo ");  s_run(251);  s_add("\n");
+    file_add("/etc/profile", s_body(0));
+    script_source_profile("/etc/profile");
+    check(!ran("mkprof1"), "20s 起動スクリプトも切れていれば実行しない");
+    check(sh_refused_flag == 0, "20t 起動スクリプトの断りは印を残さない (R2)");
+}
+
+/* ========================================================================
+ *  21. U9 — set / export / ask は切って登録しない (T8 / T18)
+ *
+ *  走った窓は「env の一覧にその名前が出るか」。切って登録していれば
+ *  先頭 31 文字の名前が現れる。
+ * ======================================================================== */
+static void case_env_set_refuses(void)
+{
+    report("21 U9: set / export / ask の名前 32 / 値 256 (T8)\n");
+
+    /* --- 名前が 32 文字 → 登録しない ---------------------------------- */
+    fresh();
+    line_reset();
+    line_add("set ");
+    line_add_run('n', 32);
+    line_add("=v");
+    execute_command(g_line);
+    check(refused_msg("set: variable name"), "21a 名前 32 文字を断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"),
+          "21b 切った名前で登録していない (31 文字の n が出ない)");
+
+    /* 31 文字ちょうどは通る (裏) */
+    fresh();
+    line_reset();
+    line_add("set ");
+    line_add_run('m', 31);
+    line_add("=v31");
+    execute_command(g_line);
+    check(!out_has("too long"), "21c 名前 31 文字は断らない");
+    fresh();
+    execute_command("env");
+    check(out_has("mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm=v31"),
+          "21d 名前 31 文字はそのまま登録される");
+
+    /* --- 値が 256 文字 → 登録しない ----------------------------------- */
+    fresh();
+    line_reset();
+    line_add("set V256=");
+    line_add_run('a', 256);
+    execute_command(g_line);
+    check(refused_msg("set: variable value"), "21e 値 256 文字を断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("V256="), "21f 切った値で登録していない");
+
+    /* 255 文字ちょうどは通る (裏) */
+    fresh();
+    line_reset();
+    line_add("set V255=");
+    line_add_run('a', 255);
+    execute_command(g_line);
+    check(!out_has("too long"), "21g 値 255 文字は断らない");
+    fresh();
+    execute_command("env");
+    check(out_has("V255="), "21h 値 255 文字は登録される");
+
+    /* --- `set NAME VALUE` 形 (スペース区切り) -------------------------- */
+    fresh();
+    line_reset();
+    line_add("set VSP ");
+    line_add_run('b', 256);
+    execute_command(g_line);
+    check(refused_msg("set: variable value"), "21i set NAME VALUE 形も断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("VSP="), "21j 同上: 登録していない");
+
+    /* --- export も同じ登録口を通る ------------------------------------ */
+    fresh();
+    line_reset();
+    line_add("export VEX ");
+    line_add_run('c', 256);
+    execute_command(g_line);
+    check(refused_msg("set: variable value"), "21k export も断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("VEX="), "21l 同上: 登録していない");
+
+    /* --- ask: 255 文字目以降を打鍵したら登録しない (T18) --------------- */
+    fresh();
+    keys_set_eof(0x0D);          /* ask は ENTER でしか抜けない */
+    key_push_run('x', 255);
+    key_push(0x0D);
+    execute_command("ask p ASKV");
+    check(refused_msg("ask: input"), "21m ask: 255 文字目の打鍵を断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("ASKV="), "21n ask: 切れた値を登録していない");
+
+    /* 254 文字ちょうどは通る (裏) */
+    fresh();
+    keys_set_eof(0x0D);
+    key_push_run('y', 254);
+    key_push(0x0D);
+    execute_command("ask p ASKW");
+    check(!out_has("too long"), "21o ask: 254 文字は断らない");
+    fresh();
+    execute_command("env");
+    check(out_has("ASKW=yyy"), "21p ask: 254 文字は登録される");
+
+    /* --- ask のプロンプトが 255 文字 → 訊かずに断る -------------------- */
+    fresh();
+    keys_set_eof(0x0D);
+    key_push(0x0D);
+    line_reset();
+    line_add("ask ");
+    line_add_run('p', 255);
+    line_add(" ASKP");
+    execute_command(g_line);
+    check(refused_msg("ask: prompt"), "21q ask: 255 文字のプロンプトを断る");
+    fresh();
+    execute_command("env");
+    check(!out_has("ASKP="), "21r ask: プロンプトを断ったら訊かない");
+
+    /* --- スクリプト中なら後続行も実行しない / 対話は続く --------------- */
+    {
+        int k;
+        fresh();
+        s_begin(0);
+        s_add("set ");
+        for (k = 0; k < 32; k++) s_add("n");
+        s_add("=v\n");
+        s_add("mknext\n");
+        file_add("/t.sh", s_body(0));
+        execute_command("source /t.sh");
+        check(!ran("mknext"), "21s スクリプト: 断ったら後続行を実行しない");
+    }
+
+    fresh();
+    line_reset();
+    line_add("set ");
+    line_add_run('n', 32);
+    line_add("=v");
+    execute_command(g_line);
+    execute_command("mkafter");
+    check(ran("mkafter"), "21t 対話: 断った次の行は今までどおり");
+}
+
+/* ========================================================================
+ *  22. U10 — ${NAME} / $NAME の名前が 32 文字以上 (T9)
+ *
+ *  以前は 31 文字で打ち切り、残り (と `}`) をリテラルとして素通しした。
+ *  「展開されない文字列がコマンド行に混ざる」= 切り詰め。
+ * ======================================================================== */
+static void case_env_expand_name(void)
+{
+    report("22 U10: ${32 文字以上} と $32 文字以上 (T9)\n");
+
+    /* --- ブレース付き --------------------------------------------------- */
+    fresh();
+    line_reset();
+    line_add("echo ${");
+    line_add_run('N', 32);
+    line_add("}TAIL");
+    execute_command(g_line);
+    check(refused_msg("sh: variable name"), "22a ${32 文字} を断る");
+    check(!out_has("TAIL"), "22b 素通りさせない (残りを実行しない)");
+
+    /* --- 非ブレース ----------------------------------------------------- */
+    fresh();
+    line_reset();
+    line_add("echo $");
+    line_add_run('N', 32);
+    line_add(" TAIL");
+    execute_command(g_line);
+    check(refused_msg("sh: variable name"), "22c 裸の $32 文字も断る");
+    check(!out_has("TAIL"), "22d 同上: 素通りさせない");
+
+    /* --- 31 文字ちょうどは展開でき、`}` も漏れない (裏) ---------------- */
+    fresh();
+    line_reset();
+    line_add("set ");
+    line_add_run('N', 31);
+    line_add("=ok31");
+    execute_command(g_line);
+    fresh();
+    line_reset();
+    line_add("echo [${");
+    line_add_run('N', 31);
+    line_add("}]");
+    execute_command(g_line);
+    check(out_has("[ok31]"),
+          "22e ${31 文字} は展開され、閉じ `}` も食べる (漏れない)");
+    check(!out_has("too long"), "22f 同上: 断らない");
+
+    /* 裸の $NAME は区切り (空白 / `/` / `.` / `:` / `$`) までが名前。
+     * `]` は区切りではないので `$<31 文字>]` は「32 文字目がある名前」と
+     * 見なされて断られる — これは切り詰めの拒否として**正しい**
+     * (以前は 31 文字で打ち切って `]` をリテラルに漏らしていた)。
+     * ここで見るのは区切りで終わる正しい形。 */
+    fresh();
+    line_reset();
+    line_add("echo ");
+    line_add_run('$', 1);
+    line_add_run('N', 31);
+    line_add(" tail31");
+    execute_command(g_line);
+    check(out_has("ok31") && out_has("tail31"),
+          "22g 裸の $31 文字も展開され、後ろの語は残る");
+    check(!out_has("too long"), "22g2 同上: 断らない");
+
+    fresh();
+    line_reset();
+    line_add("echo [$");
+    line_add_run('N', 31);
+    line_add("]");
+    execute_command(g_line);
+    check(refused_msg("sh: variable name"),
+          "22g3 裸の $31 文字 + 区切りでない文字は「32 文字目」なので断る");
+
+    /* --- 未定義の 31 文字は空に展開 (従来どおり) ----------------------- */
+    fresh();
+    line_reset();
+    line_add("echo [${");
+    line_add_run('U', 31);
+    line_add("}]");
+    execute_command(g_line);
+    check(out_has("[]"), "22h 未定義の 31 文字は空に展開 (従来どおり)");
+
+    /* --- スクリプト中なら後続行も実行しない / 対話は続く --------------- */
+    {
+        int k;
+        fresh();
+        s_begin(0);
+        s_add("echo ${");
+        for (k = 0; k < 32; k++) s_add("N");
+        s_add("}\n");
+        s_add("mknext\n");
+        file_add("/t.sh", s_body(0));
+        execute_command("source /t.sh");
+        check(!ran("mknext"), "22i スクリプト: 断ったら後続行を実行しない");
+    }
+
+    fresh();
+    line_reset();
+    line_add("echo ${");
+    line_add_run('N', 32);
+    line_add("}");
+    execute_command(g_line);
+    execute_command("mkafter");
+    check(ran("mkafter"), "22j 対話: 断った次の行は今までどおり");
+}
+
+
+/* ========================================================================
+ *  23. U11 / U18 — rshell (T10 / T19 / T24)
+ *
+ *  **rshell.c を実物のまま通す**。段 3 までは「rshell.c は取り込んでいない」
+ *  と記録していたので、EOT も読み捨ても試験で踏めていなかった。
+ *  窓は 3 つ:
+ *    - ran()              切れた接頭辞を実行していないか
+ *    - ser_count(0x04)    EOT を返したか (返さないと /api/cmd が全滅する)
+ *    - g_open_calls /
+ *      opened_path()      切れた別のパスを作りにいっていないか
+ * ======================================================================== */
+
+/* rshell へ「1 行 + 改行」を流す台本を積む */
+static void rs_line(const char *head, char pad, int pad_n)
+{
+    key_push_str(head);
+    key_push_run(pad, pad_n);
+    key_push('\n');
+}
+
+static void case_rshell_line(void)
+{
+    char *av[4];
+
+    report("23 U11: rshell の 1 行上限 126 と EOT (T10)\n");
+
+    /* --- 127 文字 → 実行しない。EOT は返す。 -------------------------- */
+    fresh();
+    rs_line("mk10 ", 'a', 122);          /* 5 + 122 = 127 文字 */
+    av[0] = "rshell";
+    cmd_rshell(1, av);
+    check(!ran("mk10"), "23a 127 文字の行は接頭辞も実行しない");
+    check(refused_msg("rshell: command line"), "23b 上限を報告する");
+    check(ser_count(0x04) == 2,
+          "23c 断った後も EOT を返す (起動時の 1 つ + 断りの 1 つ)");
+
+    /* 126 文字ちょうどは通る (誤発火の裏) */
+    fresh();
+    rs_line("mk11 ", 'a', 121);          /* 5 + 121 = 126 文字 */
+    cmd_rshell(1, av);
+    check(ran("mk11"), "23d 126 文字ちょうどは今までどおり実行する");
+    check(!out_has("too long"), "23e 同上: 断らない");
+    check(ser_count(0x04) == 2, "23f 同上: EOT も今までどおり 1 つ");
+
+    /* --- 断った行の**残り**が次の入力にならない ----------------------- */
+    /*  127 文字の行の 127 文字目以降を読み捨てていなければ、残りが次の
+     *  コマンドとして実行される。次に正しい行を流して両方を見る。 */
+    fresh();
+    rs_line("mk12 ", 'b', 122);          /* 127 文字 — 断られる */
+    rs_line("mk13", 'c', 0);             /* 次の行 — 通る */
+    cmd_rshell(1, av);
+    check(!ran("mk12"), "23g 断った行は実行しない");
+    check(ran("mk13"), "23h 次の行は正常に動く");
+    check(ser_count(0x04) == 3, "23i EOT は 起動 + 断り + 次の行 の 3 つ");
+
+    /* --- U18 / T19: push / recv の host: パス ------------------------- */
+    report("23 U18: push / recv の host: パス (T19)\n");
+
+    fresh();
+    line_reset();
+    line_add("host:");
+    line_add_run('p', 255);              /* /host + '/' + 255 = 261 > 255 */
+    av[0] = "push";
+    av[1] = "/local.txt";
+    av[2] = g_line;
+    cmd_push(3, av);
+    check(refused_msg("push: host path"), "23j push: 収まらない host: を断る");
+    check(g_open_calls == 0, "23k push: 切れた別のパスを開きにいかない");
+
+    fresh();
+    line_reset();
+    line_add("host:");
+    line_add_run('p', 255);
+    av[0] = "recv";
+    av[1] = g_line;
+    cmd_recv(2, av);
+    check(refused_msg("recv: host path"), "23l recv: 収まらない host: を断る");
+    check(g_open_calls == 0, "23m recv: 切れた別のパスを開きにいかない");
+
+    /* 収まる長さは今までどおり (裏)。/host + 250 = 255 */
+    fresh();
+    line_reset();
+    line_add("host:/");
+    line_add_run('p', 249);
+    av[0] = "push";
+    av[1] = "/nosuch.txt";
+    av[2] = g_line;
+    cmd_push(3, av);
+    check(!out_has("too long"), "23n 収まる host: は断らない");
+    check(g_open_calls == 1, "23o 同上: ローカル側を開きにいく");
+
+    /* --- T24: 4KB を超えるファイルも読み切ってから送る ---------------- */
+    fresh();
+    bigscript_build("", "a", 10000);
+    file_add("/local.big", g_bigscript);
+    av[0] = "push";
+    av[1] = "/local.big";
+    av[2] = "host:/up.big";
+    cmd_push(3, av);
+    check(g_data_written == 10000,
+          "23p push: 4KB を超えるファイルを全部送る (先頭 4KB だけにしない)");
+    check(out_has("Sent"), "23q push: 成功として報告する");
+}
+
+/* ========================================================================
+ *  24. U14 / U15 / U19 — ui.c の履歴・行編集・HOME (T14 / T15 / T20)
+ *
+ *  **ui.c を実物のまま通す**。shell_run は端末のキーを握るので、キー源
+ *  (kbd_getkey) を台本に差し替えて動かす。抜けるのは `exit` の印。
+ *  窓は hist_count / hist_buf (履歴に入ったか) と ran() (実行したか)。
+ * ======================================================================== */
+
+/* shell_run を 1 回動かす前の後始末 */
+static void ui_reset(void)
+{
+    hist_count = 0;
+    hist_idx = 0;
+    hist_dirty = 0;
+    sh_exit_flag = 0;
+}
+
+/* 台本の末尾に `exit` + ENTER を積む (これが無いと抜けない) */
+static void ui_exit(void)
+{
+    key_push_str("exit");
+    key_push(0x0D);
+}
+
+static void case_ui_history_and_line(void)
+{
+    report("24 U14: 切れた行を履歴に入れない (T14)\n");
+
+    /* --- 512 バイト以上の行は履歴に入らない (実行はする) -------------- */
+    fresh();
+    ui_reset();
+    key_push_str("echo MK20OUT ");
+    key_push_run('a', 600);              /* 613 バイト — 実行はされる */
+    key_push(0x0D);
+    ui_exit();
+    shell_run();
+    /* 打鍵はそのまま画面へエコーされるので、出力に 1 回は必ず出る。
+     * **2 回目**が「echo が実際に走った」証拠 (外部コマンド名では T3 の
+     * 510 バイト上限が先に断つので窓にならない)。 */
+    check(out_count("MK20OUT") == 2,
+          "24a 512 バイト超の行は今までどおり**実行される**");
+    check(hist_count == 1 && str_eq(hist_buf[0], "exit"),
+          "24b 512 バイト超の行は履歴に入らない (入るのは exit だけ)");
+
+    /* 511 バイトちょうどは入る (裏) */
+    fresh();
+    ui_reset();
+    key_push_str("echo ");
+    key_push_run('a', 506);              /* 511 バイトちょうど */
+    key_push(0x0D);
+    ui_exit();
+    shell_run();
+    check(hist_count == 2, "24c 511 バイトちょうどは履歴に入る");
+    check(str_eq(hist_buf[1], "exit"), "24d 同上: 2 件目は exit");
+
+    /* --- hist_load: 切れた行を読み込まない ---------------------------- */
+    fresh();
+    ui_reset();
+    env_set("HOME", "/h");
+    s_begin(0);
+    s_add("short1\n");
+    s_run(600);                          /* 600 バイトの行 */
+    s_add("\nshort2\n");
+    file_add("/h/.sh_history", s_body(0));
+    hist_load();
+    check(hist_count == 2, "24e 512 バイト超の行は読み込まない");
+    check(str_eq(hist_buf[0], "short1") && str_eq(hist_buf[1], "short2"),
+          "24f 同上: 前後の短い行はそのまま読む");
+
+    /* 読み切れなかったファイルの末尾行も入れない。
+     * "ab\n" * 2730 = 8190B + "LONGTAIL\n" → 8191B しか読めず末尾が切れる。 */
+    fresh();
+    ui_reset();
+    env_set("HOME", "/h");
+    bigscript_build("", "ab\n", 2730);
+    {
+        int n = 8190;
+        const char *t = "LONGTAIL\n";
+        int k;
+        for (k = 0; t[k]; k++) g_bigscript[n++] = t[k];
+        g_bigscript[n] = '\0';
+    }
+    file_add("/h/.sh_history", g_bigscript);
+    hist_load();
+    check(hist_count == 2730,
+          "24g 読み切れなかった末尾の行は履歴に入れない (2731 にならない)");
+
+    /* --- U15: 行編集が打鍵を捨てたら ENTER で断る (T15) ---------------- */
+    report("24 U15: 4092 バイトで捨てたら行ごと断る (T15)\n");
+
+    fresh();
+    ui_reset();
+    key_push_str("echo MK22OUT ");
+    key_push_run('a', 4090);             /* 4103 バイト — 4092 で捨てる */
+    key_push(0x0D);
+    ui_exit();
+    shell_run();
+    check(out_count("MK22OUT") == 1,
+          "24h 打鍵を捨てた行は**実行しない** (エコーの 1 回だけ)");
+    check(out_has("sh: line too long"), "24i 断りを 1 行出す");
+    check(hist_count == 1 && str_eq(hist_buf[0], "exit"),
+          "24j 打鍵を捨てた行は履歴にも入れない");
+
+    /* 4092 バイトちょうどは通る (裏) */
+    fresh();
+    ui_reset();
+    key_push_str("echo MK23OUT ");
+    key_push_run('a', 4079);             /* 4092 バイトちょうど */
+    key_push(0x0D);
+    ui_exit();
+    shell_run();
+    check(out_count("MK23OUT") == 2,
+          "24k 4092 バイトちょうどは今までどおり実行する");
+    check(!out_has("sh: line too long"), "24l 同上: 断らない");
+
+    /* ESC で印が消える */
+    fresh();
+    ui_reset();
+    key_push_str("echo MK24OUT ");
+    key_push_run('a', 4090);
+    key_push(0x1B);                      /* ESC — 行を捨てる */
+    key_push_str("mk25");
+    key_push(0x0D);
+    ui_exit();
+    shell_run();
+    check(out_count("MK24OUT") == 1, "24m ESC で捨てた行は実行されない");
+    check(ran("mk25"), "24n ESC の後の行は普通に実行する");
+    check(!out_has("sh: line too long"), "24o ESC で印が消えている");
+
+    /* --- U19: HOME が長いと履歴 / profile を使わない (T20) ------------ */
+    report("24 U19: HOME が長いときの履歴 / .profile (T20)\n");
+
+    fresh();
+    ui_reset();
+    line_reset();
+    line_add("/");
+    line_add_run('h', 240);              /* 241 バイト — 240 に収まらない */
+    env_set("HOME", g_line);
+    hist_load();
+    check(refused_msg("sh: $HOME for history path"),
+          "24p HOME が長いと履歴のパスを組み立てずに断る");
+    check(g_open_calls == 0, "24q 同上: 切れた別のパスを開かない");
+
+    /* 239 バイトは通る (裏) */
+    fresh();
+    ui_reset();
+    line_reset();
+    line_add("/");
+    line_add_run('h', 239);              /* 240 バイト = 上限ちょうど */
+    env_set("HOME", g_line);
+    hist_load();
+    check(!out_has("too long"), "24r HOME 240 バイトちょうどは断らない");
+    check(g_open_calls == 1, "24s 同上: 履歴ファイルを開きにいく");
+
+    /* .profile: 切れた別ディレクトリの .profile を読まない */
+    fresh();
+    ui_reset();
+    line_reset();
+    line_add("/");
+    line_add_run('h', 249);              /* 250 バイト */
+    env_set("HOME", g_line);
+    {
+        /* 直す前に読まれていた綴り = HOME の先頭 244 バイト + "/.profile" */
+        static char cut_path[PATH_MAX_LEN];
+        int k;
+        for (k = 0; k < 244; k++) cut_path[k] = g_line[k];
+        cut_path[k] = '\0';
+        strcat(cut_path, "/.profile");
+        file_add(cut_path, "mkprof\n");
+        key_push_str("exit");
+        key_push(0x0D);
+        shell_run();
+        check(!ran("mkprof"),
+              "24t HOME が長いとき切れた別ディレクトリの .profile を読まない");
+        check(!opened_path(cut_path), "24u 同上: そもそも開きにいかない");
+    }
+    env_set("HOME", SYS_DEFAULT_HOME);
+}
+
+/* ========================================================================
+ *  25. U16 — filer (T16)
+ *
+ *  **cmd_filer.c を実物のまま通す**。描画 (fldraw_*) は TVRAM を直に叩く
+ *  ので、この試験では空実装を置いてある (filer_draw.c は取り込まない)。
+ *  窓は fl_state.count / fl_state.dropped と g_launch_count (起動したか)。
+ * ======================================================================== */
+static void case_filer_names(void)
+{
+    static char long_name[80];
+    static char deep_dir[PATH_MAX_LEN];
+    int i;
+
+    report("25 U16: filer が切った名前で別のものを開かない (T16)\n");
+
+    /* --- 64 バイト以上の名前は表に載せず件数だけ ---------------------- */
+    for (i = 0; i < 70; i++) long_name[i] = 'L';
+    long_name[70] = '\0';
+
+    /* fl_scan_dir は先頭に `..` を足す (ルート以外)。以下の count は
+     * その 1 行を含む。 */
+    fresh();
+    dir_set("/d");
+    dir_add("short.bin");
+    dir_add(long_name);
+    fl_init("/d");
+    check(fl_state.count == 2, "25a 64 バイト以上の名前は表に載せない (.. + 1 件)");
+    check(fl_state.dropped == 1, "25b 載せなかった件数を数える");
+    check(str_eq(fl_state.entries[1].name, "short.bin"),
+          "25c 収まる名前はそのまま載る");
+
+    /* 63 バイトちょうどは載る (裏) */
+    long_name[63] = '\0';
+    fresh();
+    dir_set("/d");
+    dir_add(long_name);
+    fl_init("/d");
+    check(fl_state.count == 2 && fl_state.dropped == 0,
+          "25d 63 バイトちょうどは載る");
+    check(str_eq(fl_state.entries[1].name, long_name),
+          "25e 同上: 名前が切れていない");
+
+    /* --- fl_path_join が溢れたら起動しない ---------------------------- */
+    deep_dir[0] = '/';
+    for (i = 1; i < 250; i++) deep_dir[i] = 'd';
+    deep_dir[250] = '\0';
+
+    fresh();
+    dir_set(deep_dir);
+    dir_add("prog.bin");
+    fl_init(deep_dir);
+    check(fl_state.count == 2, "25f 深いディレクトリでも名前自体は載る");
+    fl_state.cursor = 1;                 /* 0 は `..` */
+    fl_action_enter();
+    check(g_launch_count == 0,
+          "25g 連結が溢れたら**切れた別のパスで起動しない**");
+    check(g_popup_count == 1, "25h 同上: 断りを画面に出す");
+
+    /* 収まるなら今までどおり起動する (裏) */
+    fresh();
+    dir_set("/d");
+    dir_add("prog.bin");
+    fl_init("/d");
+    fl_state.cursor = 1;                 /* 0 は `..` */
+    fl_action_enter();
+    check(g_launch_count == 1, "25i 収まるパスは今までどおり起動する");
+    check(str_eq(g_launch_last, "/d/prog.bin"), "25j 同上: 綴りも正しい");
+
+    /* --- ft_load: 読み切れない /etc/filetypes は使わない -------------- */
+    fresh();
+    dir_set("/d");
+    dir_add("a.txt");
+    /* "#pad\n" * 1637 = 8185B のあと ".txt=mkassoc\n" (13B) = 8198B。
+     * 8191B しか読めないので、直す前は最後の行が ".txt=m" に切れて
+     * **別のコマンド** (`m`) に関連付いていた。 */
+    bigscript_build("", "#pad\n", 1637);
+    {
+        int n = 8185;
+        const char *t = ".txt=mkassoc\n";
+        int k;
+        for (k = 0; t[k]; k++) g_bigscript[n++] = t[k];
+        g_bigscript[n] = '\0';
+    }
+    file_add("/etc/filetypes", g_bigscript);
+    fl_init("/d");
+    check(ft_count == 0, "25k 読み切れない filetypes は関連付け表を作らない");
+    fl_state.cursor = 1;                 /* 0 は `..` */
+    fl_action_enter();
+    check(g_launch_count == 0, "25k2 同上: 切れた関連付けで起動しない");
+    ft_free();
+
+    /* 収まる filetypes は今までどおり (裏) */
+    fresh();
+    dir_set("/d");
+    dir_add("a.txt");
+    file_add("/etc/filetypes", ".txt=mkassoc\n");
+    fl_init("/d");
+    check(ft_count == 1, "25l 収まる filetypes は今までどおり読む");
+    fl_state.cursor = 1;                 /* 0 は `..` */
+    fl_action_enter();
+    check(str_eq(g_launch_last, "mkassoc /d/a.txt"),
+          "25m 同上: 関連付けで起動する");
+    ft_free();
+}
+
+/* ========================================================================
+ *  26. U20 — cfg_set_key (T22)
+ *
+ *  /etc/system.cfg を 1023 バイトで読んで**切れたまま書き戻す**と、
+ *  1KB を超える設定が消える。窓は g_data_writes (書き戻したか)。
+ * ======================================================================== */
+static void case_cfg_set_key(void)
+{
+    report("26 U20: /etc/system.cfg を切れたまま書き戻さない (T22)\n");
+
+    /* --- 1023 バイトを超える system.cfg → 書き戻さない ---------------- */
+    /* `os32gui` は sh.bin では sh_is_cui_only が先に断つので、
+     * 書き戻しの本体 (cfg_set_key) を直に呼ぶ。 */
+    fresh();
+    bigscript_build("GUI=0\n", "K=v\n", 400);   /* 6 + 1600 = 1606B */
+    file_add("/etc/system.cfg", g_bigscript);
+    check(cfg_set_key("GUI", "1") == -1, "26a 読み切れない設定を断る");
+    check(refused_msg("system.cfg"), "26b 何が上限を超えたかを報告する");
+    check(g_data_writes == 0, "26c 切れたまま書き戻さない (1 度も書かない)");
+
+    /* --- 収まる system.cfg は今までどおり書き戻す (裏) ---------------- */
+    fresh();
+    file_add("/etc/system.cfg", "GUI=0\nGFXMODE=1\n");
+    check(cfg_set_key("GUI", "1") == 0, "26d 収まる設定は今までどおり書き戻す");
+    check(!out_has("too long"), "26e 同上: 断らない");
+    check(g_data_writes == 1, "26f 同上: 書き込みは 1 回");
+}
+
+/* ========================================================================
+ *  27. T12 — `if` が組み立てたコマンド行が溢れたら実行しない
+ *
+ *  到達するのは glob 展開で argv が伸びたとき。ここでは同じ経路
+ *  (join_args) を素の語で溢れさせて見る。
+ * ======================================================================== */
+/* glob で伸びる argv を作るための長い名前 (贋ディレクトリへ流す) */
+static char g_globnames[DIRENT_MAX][256];
+
+static void globnames_build(int n, int len)
+{
+    int i, k;
+    for (i = 0; i < n && i < DIRENT_MAX; i++) {
+        for (k = 0; k < len; k++) g_globnames[i][k] = 'L';
+        g_globnames[i][0] = 'L';
+        g_globnames[i][len - 2] = (char)('a' + (i / 10));
+        g_globnames[i][len - 1] = (char)('0' + (i % 10));
+        g_globnames[i][len] = '\0';
+        dir_add(g_globnames[i]);
+    }
+}
+
+static void case_if_join_refuses(void)
+{
+    report("27 T12: if の組み立てが溢れたら実行しない\n");
+
+    /* 票のとおり、この経路へ届くのは **glob で argv が伸びたとき** だけ。
+     * 打った行は 20 バイトほどでも、展開後の argv を繋ぎ直すと
+     * CMD_BUF_SIZE を超える。 */
+    fresh();
+    dir_set("/d/");
+    globnames_build(20, 250);        /* 20 件 × ("/d/" + 250) = 5060B */
+    execute_command("if a == a echo MK30OUT /d/L*");
+    check(!out_has("MK30OUT"), "27a 組み立てが溢れたらコマンドを実行しない");
+    check(refused_msg("if: command line"), "27b 断りを 1 行出す");
+
+    /* 収まるなら今までどおり実行する (裏) */
+    fresh();
+    dir_set("/d/");
+    globnames_build(10, 250);        /* 10 件 × 253 = 2530B — 収まる */
+    execute_command("if a == a echo MK31OUT /d/L*");
+    check(out_has("MK31OUT"), "27c 収まる組み立ては今までどおり実行する");
+    check(!out_has("too long"), "27d 同上: 断らない");
+
+    /* スクリプト中なら後続行も実行しない */
+    fresh();
+    dir_set("/d/");
+    globnames_build(20, 250);
+    s_begin(0);
+    s_add("echo MK32PRE\n");        /* この行が出ない = 台本が走っていない */
+    s_add("if a == a echo MK32OUT /d/L*\n");
+    s_add("mknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(out_has("MK32PRE"), "27e スクリプトが実際に走っている (窓)");
+    check(!out_has("MK32OUT"), "27f スクリプト: 断った行は実行しない");
+    check(!ran("mknext"), "27g スクリプト: 後続行も実行しない");
+}
+
+
+/* ========================================================================
+ *  28. T21 / T17 — タブ補完 (ui.c)
+ *
+ *  補完は画面に出るだけに見えるが、確定した綴りはそのまま行編集の
+ *  バッファへ書き込まれ、ENTER で**別のファイルに作用する**。
+ *  収まらない候補は補完しない。
+ * ======================================================================== */
+static void case_tab_completion(void)
+{
+    static char big_name[200];
+    char buf[CMD_BUF_SIZE];
+    int i, n;
+
+    report("28 T21: 収まらない補完候補は挿さない (ui.c)\n");
+
+    /* --- コマンド名補完 (.bin を外した名前が name_store[64] に入る) ---- */
+    for (i = 0; i < 70; i++) big_name[i] = 'C';
+    strncpy(big_name + 70, ".bin", 5);          /* base_len = 70 > 63 */
+
+    fresh();
+    env_set("PATH", "/p");
+    dir_set("/p");
+    dir_add(big_name);
+    buf[0] = 'C'; buf[1] = 'C'; buf[2] = '\0';
+    n = tab_complete(buf, 2, 0);
+    check(n == 2 && str_eq(buf, "CC"),
+          "28a 64 バイト以上の候補では補完しない (行は変わらない)");
+
+    /* 63 バイトちょうどの候補は補完する (裏) */
+    for (i = 0; i < 63; i++) big_name[i] = 'C';
+    strncpy(big_name + 63, ".bin", 5);
+    fresh();
+    env_set("PATH", "/p");
+    dir_set("/p");
+    dir_add(big_name);
+    buf[0] = 'C'; buf[1] = 'C'; buf[2] = '\0';
+    n = tab_complete(buf, 2, 0);
+    check(n == 64, "28b 63 バイトちょうどの候補は補完する (名前 63 + 空白)");
+    check(buf[62] == 'C' && buf[63] == ' ',
+          "28c 同上: 綴りが切れていない");
+
+    /* --- ファイル名補完 (name_store[128]) ------------------------------ */
+    for (i = 0; i < 130; i++) big_name[i] = 'F';
+    big_name[130] = '\0';
+
+    fresh();
+    dir_set(".");
+    dir_add(big_name);
+    strncpy(buf, "cat FF", 7);
+    n = tab_complete(buf, 6, 0);
+    check(n == 6 && str_eq(buf, "cat FF"),
+          "28d 127 バイト以上のファイル名では補完しない");
+
+    /* 126 バイトちょうどは補完する (裏) */
+    big_name[126] = '\0';
+    fresh();
+    dir_set(".");
+    dir_add(big_name);
+    strncpy(buf, "cat FF", 7);
+    n = tab_complete(buf, 6, 0);
+    check(n == 4 + 126 + 1, "28e 126 バイトちょうどは補完する");
+
+    /* --- T17 の ui.c 側: 区切りを見失ったら走査ごと止める --------------
+     *  ui.c の取り込みは PATH_MAX_LEN - 1 = 255 なので、区切りを見失うには
+     *  **1 項目が 256 バイト以上**要る。PATH は環境変数なので値の上限が
+     *  ENV_VALUE_MAX - 1 = 255 で、**今は到達できない** (T25 / T26 と同じ
+     *  「将来の地雷」)。守りは入れたが反例は作れないので、ここでは
+     *  「普通の PATH は今までどおり」だけを押さえる。 */
+    fresh();
+    env_set("PATH", "/p");
+    dir_set("/p");
+    dir_add("zzcmd.bin");
+    buf[0] = 'z'; buf[1] = 'z'; buf[2] = '\0';
+    n = tab_complete(buf, 2, 0);
+    check(n == 6 && str_eq(buf, "zzcmd "), "28f 普通の PATH は今までどおり補完する");
+    check(g_ls_calls == 1, "28g 同上: PATH の項目を 1 つ走査する");
+
+    env_set("PATH", SYS_DEFAULT_PATH);
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -1861,6 +3037,16 @@ void _start(void)
     case_long_line_refuses();
     case_path_entry_refuses();
     case_too_many_args_marks();
+    /* 段 4「内蔵と入口」 */
+    case_script_load_refuses();
+    case_env_set_refuses();
+    case_env_expand_name();
+    case_rshell_line();
+    case_ui_history_and_line();
+    case_filer_names();
+    case_cfg_set_key();
+    case_if_join_refuses();
+    case_tab_completion();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

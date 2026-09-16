@@ -9,8 +9,8 @@
 /* ======================================================================== */
 
 #define MAX_ENV_VARS 32
-#define ENV_NAME_MAX 32
-#define ENV_VALUE_MAX 256
+/* ENV_NAME_MAX / ENV_VALUE_MAX は shell.h ([C4])。`ask` と main.c の
+ * 展開エラーの文言も同じ定数から上限を出すので 1 か所に置いてある。 */
 
 typedef struct {
     char name[ENV_NAME_MAX];
@@ -64,7 +64,21 @@ const char *env_get(const char *name)
 
 void env_set(const char *name, const char *value)
 {
-    int idx = env_find(name);
+    int idx;
+
+    /* T8: 収まらない名前 / 値は**切って登録しない**。壊れた PATH が黙って
+     * 入ると、その後の起動が全部別のディレクトリを見る (票 §2 の 1)。
+     * 登録口はここ 1 本なので、set / export / ask / 直呼びの全部に効く。 */
+    if ((int)strlen(name) > ENV_NAME_MAX - 1) {
+        sh_refuse("set: variable name", ENV_NAME_MAX - 1);
+        return;
+    }
+    if ((int)strlen(value) > ENV_VALUE_MAX - 1) {
+        sh_refuse("set: variable value", ENV_VALUE_MAX - 1);
+        return;
+    }
+
+    idx = env_find(name);
     if (idx >= 0) {
         str_copy(env_vars[idx].value, value, ENV_VALUE_MAX);
         return;
@@ -123,7 +137,13 @@ int env_expand(const char *src, char *dst, int max)
             si++; /* '$' をスキップ */
             if (src[si] == '{') { braced = 1; si++; }
 
-            while (src[si] && vi < ENV_NAME_MAX - 1) {
+            /* T9: 名前の終端 (`}` / 区切り / 行末) を**幅の検査より先**に見る。
+             * 以前は `vi < ENV_NAME_MAX - 1` が先に効いたので
+             *   - `${` + 31 文字 + `}` は `}` を食べ残してリテラルに漏らし、
+             *   - 32 文字以上の名前は 31 文字で打ち切って残りを素通しした。
+             * どちらも「展開されない文字列がコマンド行に混ざる」= 切り詰め。 */
+            for (;;) {
+                if (!src[si]) break;              /* 行末 (`${FOO` も従来どおり) */
                 if (braced) {
                     if (src[si] == '}') { si++; break; }
                 } else {
@@ -131,6 +151,7 @@ int env_expand(const char *src, char *dst, int max)
                         src[si] == '.' || src[si] == ':' ||
                         src[si] == '$') break;
                 }
+                if (vi >= ENV_NAME_MAX - 1) return ENV_EXPAND_ERR_NAME;
                 var_name[vi++] = src[si++];
             }
             var_name[vi] = '\0';
@@ -190,8 +211,15 @@ static void cmd_set(int argc, char **argv)
     {
         const char *arg = argv[1];
         int ni = 0;
-        while (*arg && *arg != '=' && ni < ENV_NAME_MAX - 1)
+        /* T8: 名前を切ってから登録すると別の変数が書き換わる。
+         * `=` の手前が収まらなければ登録も表示もせずに断る。 */
+        while (*arg && *arg != '=') {
+            if (ni >= ENV_NAME_MAX - 1) {
+                sh_refuse("set: variable name", ENV_NAME_MAX - 1);
+                return;
+            }
             name[ni++] = *arg++;
+        }
         name[ni] = '\0';
 
         if (name[0] == '\0') {
@@ -219,18 +247,11 @@ static void cmd_set(int argc, char **argv)
             return;
         }
 
-        /* 残りの引数を値として結合 */
-        {
-            char value[ENV_VALUE_MAX];
-            int vi = 0;
-            const char *s = val_start;
-            while (*s && vi < ENV_VALUE_MAX - 1) value[vi++] = *s++;
-
-            /* argc>2 かつ '=' の後に追加引数がある場合 (set PATH=/bin:/sbin の場合は不要) */
-            /* この場合は val_start に全て含まれている */
-            value[vi] = '\0';
-            env_set(name, value);
-        }
+        /* T8: 値は写さずそのまま渡す。以前はここで ENV_VALUE_MAX - 1 に
+         * 切ってから env_set へ渡していたので、長い値が黙って短くなった。
+         * 長さの検査は登録口 (env_set) が 1 か所で行う。
+         * `=` の後ろは val_start に全部入っている (追加引数は使わない)。 */
+        env_set(name, val_start);
     }
 }
 

@@ -34,7 +34,10 @@ BASE = ["-std=gnu89", "-m32", "-march=i386", "-ffreestanding", "-fno-pie",
         "-fno-stack-protector", "-Wall", "-Wdeclaration-after-statement",
         "-D__OS32_USERLAND__", "-DSHELL_AS_APP"]
 INCLUDES = ["-I" + str(ROOT / "sdk/include"), "-I" + str(ROOT / "sdk/include/os32"),
-            "-I" + str(ROOT / "include"), "-I" + str(ROOT / "userland/shell")]
+            "-I" + str(ROOT / "include"), "-I" + str(ROOT / "userland/shell"),
+            # 段 4 で ui.c / rshell.c / cmd_filer.c を取り込んだぶん
+            "-I" + str(ROOT / "userland/lib"),
+            "-I" + str(ROOT / "userland/lib/filer")]
 HOST_SRC = ROOT / "tools/tests/sh_truncation_host.c"
 
 STRING_SHIM = """/* テスト用の薄い <string.h>。実体は sh_truncation_host.c にある。 */
@@ -64,10 +67,11 @@ int setvbuf(void *stream, char *buf, int mode, unsigned long sz);
 #endif
 """
 
-STDLIB_SHIM = """/* テスト用の薄い <stdlib.h>。cmd_mnt.c が使うのは atoi だけ。 */
+STDLIB_SHIM = """/* テスト用の薄い <stdlib.h>。cmd_mnt.c が atoi、rshell.c が strtoul。 */
 #ifndef OS32_TEST_STDLIB_H
 #define OS32_TEST_STDLIB_H
 int atoi(const char *s);
+unsigned long strtoul(const char *s, char **end, int base);
 #endif
 """
 
@@ -283,6 +287,263 @@ MUTATIONS = [
      "                sh_refuse_mark();",
      "            if (ctx.overflow) {\n"
      '                g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\\n");'),
+
+    # ---- 段 4 (内蔵と入口) の否定側 ------------------------------------
+    # 経路ごとに「検査を外した版 = 直す前の姿」。どれも RED になることが
+    # 「その規則を試験が見ている」証拠。
+
+    # T2-a: 長い行を黙って 255 文字へ切る (直す前の姿)
+    ("t2_line_truncates", "userland/shell/cmd_script.c",
+     "            if (li > SCRIPT_MAX_LINE - 1) {\n"
+     '                sh_refuse("source: script line", SCRIPT_MAX_LINE - 1);\n'
+     "                refused = 1;\n"
+     "                break;\n"
+     "            }",
+     "            if (li > SCRIPT_MAX_LINE - 1) li = SCRIPT_MAX_LINE - 1;"),
+    # T2-b: 129 行目を捨てて先頭 128 行を実行する (直す前の姿)
+    ("t2_lines_continue", "userland/shell/cmd_script.c",
+     "                    sh_refuse_mark();\n"
+     "                    refused = 1;\n"
+     "                    break;",
+     "                    break;"),
+    # T2-c: 読み切れたかを確かめない (32KB 超が黙って切れる)
+    ("t2_read_no_probe", "userland/shell/cmd_script.c",
+     "    if (sz == raw_buf_size - 1) {\n"
+     "        char probe;\n"
+     "        if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;\n"
+     "    }",
+     "    if (0) {\n"
+     "        more = 1;\n"
+     "    }"),
+    # T2-d: 起動スクリプトの断りで印を残す (起動後の 1 行目が巻き添え)
+    ("t2_profile_keeps_mark", "userland/shell/cmd_script.c",
+     "    if (r < 0) (void)sh_refused_take();",
+     "    if (0) (void)sh_refused_take();"),
+
+    # T8-a: 登録口 (env_set) が長さを見ない
+    ("t8_env_set_no_check", "userland/shell/cmd_env.c",
+     "    if ((int)strlen(name) > ENV_NAME_MAX - 1) {\n"
+     '        sh_refuse("set: variable name", ENV_NAME_MAX - 1);\n'
+     "        return;\n"
+     "    }\n"
+     "    if ((int)strlen(value) > ENV_VALUE_MAX - 1) {\n"
+     '        sh_refuse("set: variable value", ENV_VALUE_MAX - 1);\n'
+     "        return;\n"
+     "    }\n",
+     ""),
+    # T8-b: cmd_set が名前を 31 文字で切る
+    ("t8_set_name_truncates", "userland/shell/cmd_env.c",
+     "        while (*arg && *arg != '=') {\n"
+     "            if (ni >= ENV_NAME_MAX - 1) {\n"
+     '                sh_refuse("set: variable name", ENV_NAME_MAX - 1);\n'
+     "                return;\n"
+     "            }\n"
+     "            name[ni++] = *arg++;\n"
+     "        }",
+     "        while (*arg && *arg != '=' && ni < ENV_NAME_MAX - 1)\n"
+     "            name[ni++] = *arg++;"),
+
+    # T9: 変数名が 31 文字を超えても打ち切って素通しする (直す前の姿)
+    ("t9_name_no_check", "userland/shell/cmd_env.c",
+     "                if (vi >= ENV_NAME_MAX - 1) return ENV_EXPAND_ERR_NAME;",
+     "                if (vi >= ENV_NAME_MAX - 1) break;"),
+
+    # T10-a: 126 文字で読み取りを止める (残りが次の入力になる)
+    ("t10_stop_reading", "userland/shell/rshell.c",
+     "        while (ch >= 0 && ch != '\\n' && ch != '\\r') {\n"
+     "            if (rpos >= RSHELL_LINE_MAX - 2) overflow = 1;\n"
+     "            else rbuf[rpos++] = (char)ch;",
+     "        while (ch >= 0 && ch != '\\n' && ch != '\\r' &&\n"
+     "               rpos < RSHELL_LINE_MAX - 2) {\n"
+     "            rbuf[rpos++] = (char)ch;"),
+    # T10-b: 断ったときに EOT を返さない (票 §2-2 の blocker そのもの)
+    ("t10_no_eot", "userland/shell/rshell.c",
+     "            (void)sh_refused_take();   /* 対話と同じ — 次の行へ持ち越さない */\n"
+     "            rshell_end_reply();\n"
+     "            continue;",
+     "            (void)sh_refused_take();\n"
+     "            continue;"),
+
+    # T12: join_args が黙って切る (切れたコマンド行を実行する)
+    ("t12_join_truncates", "userland/shell/cmd_script.c",
+     "    for (i = start; i < argc; i++) {\n"
+     "        if (i > start) {\n"
+     "            if (bi >= max - 1) return -1;\n"
+     "            buf[bi++] = ' ';\n"
+     "        }\n"
+     "        for (j = 0; argv[i][j]; j++) {\n"
+     "            if (bi >= max - 1) return -1;\n"
+     "            buf[bi++] = argv[i][j];\n"
+     "        }\n"
+     "    }",
+     "    for (i = start; i < argc; i++) {\n"
+     "        if (i > start && bi < max - 1) buf[bi++] = ' ';\n"
+     "        for (j = 0; argv[i][j] && bi < max - 1; j++) {\n"
+     "            buf[bi++] = argv[i][j];\n"
+     "        }\n"
+     "    }"),
+
+    # T14-a: 切れた行を履歴に入れる
+    ("t14_hist_add_truncates", "userland/shell/ui.c",
+     "    if ((int)str_len(s) > HIST_LINE_MAX - 1) return;",
+     "    if (0) return;"),
+    # T14-b: .history の切れた行を読み込む
+    ("t14_hist_load_truncates", "userland/shell/ui.c",
+     "            int cut = (li > HIST_LINE_MAX - 1) || (bi == sz && more);",
+     "            int cut = 0;\n"
+     "            if (li > HIST_LINE_MAX - 1) li = HIST_LINE_MAX - 1;"),
+    # T14-c: .history を読み切れたか確かめない
+    ("t14_hist_no_probe", "userland/shell/ui.c",
+     "    if (sz == HIST_SIZE * HIST_LINE_MAX - 1) {\n"
+     "        char probe;\n"
+     "        if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;\n"
+     "    }",
+     "    if (0) {\n"
+     "        more = 1;\n"
+     "    }"),
+
+    # T15-a: 4092 バイトで打鍵を黙って捨てる (接頭辞が実行される)
+    ("t15_drop_silent", "userland/shell/ui.c",
+     "                    /* T15: ここで黙って捨てると接頭辞が実行される。\n"
+     "                     * 印を立てて ENTER のところで行ごと断る。 */\n"
+     "                    cmd_dropped = 1;",
+     "                    cmd_dropped = 0;"),
+    # T15-b: ESC で印を消さない (誤発火の側)
+    ("t15_esc_keeps_mark", "userland/shell/ui.c",
+     "cmd_len=cmd_pos=cmd_buf[0]=0; cmd_dropped=0; redraw_line",
+     "cmd_len=cmd_pos=cmd_buf[0]=0; redraw_line"),
+
+    # T16-a: 63 バイトで切った名前を一覧に載せる
+    ("t16_name_truncates", "userland/shell/cmd_filer.c",
+     "    for (i = 0; name[i]; i++) {}\n"
+     "    if (i > FL_MAX_NAME_LEN - 1) { fl_state.dropped++; return; }\n"
+     "\n"
+     "    if (fl_state.count >= FL_MAX_ENTRIES) { fl_state.dropped++; return; }\n"
+     "\n"
+     "    e = &fl_state.entries[fl_state.count];\n"
+     "    for (i = 0; name[i]; i++) e->name[i] = name[i];",
+     "    if (fl_state.count >= FL_MAX_ENTRIES) return;\n"
+     "\n"
+     "    e = &fl_state.entries[fl_state.count];\n"
+     "    for (i = 0; name[i] && i < FL_MAX_NAME_LEN - 1; i++)\n"
+     "        e->name[i] = name[i];"),
+    # T16-b: fl_path_join が黙って切る (別のファイルを起動する)
+    ("t16_join_truncates", "userland/shell/cmd_filer.c",
+     "    while (dir[j]) {\n"
+     "        if (i >= out_sz - 2) return -1;\n"
+     "        out[i++] = dir[j++];\n"
+     "    }\n"
+     "    if (i > 0 && out[i - 1] != '/') out[i++] = '/';\n"
+     "    j = 0;\n"
+     "    while (name[j]) {\n"
+     "        if (i >= out_sz - 1) return -1;\n"
+     "        out[i++] = name[j++];\n"
+     "    }",
+     "    while (dir[j] && i < out_sz - 2) out[i++] = dir[j++];\n"
+     "    if (i > 0 && out[i - 1] != '/') out[i++] = '/';\n"
+     "    j = 0;\n"
+     "    while (name[j] && i < out_sz - 1) out[i++] = name[j++];"),
+    # T16-c: /etc/filetypes を読み切れたか確かめない
+    ("t16_ft_no_probe", "userland/shell/cmd_filer.c",
+     "    if (sz == FL_FILETYPES_MAXSZ - 1) {\n"
+     "        char probe;\n"
+     "        if (g_api->sys_read(fd, &probe, 1) > 0) {\n"
+     "            g_api->sys_close(fd);\n"
+     "            g_api->mem_free(ft_buf);\n"
+     "            ft_buf = NULL;\n"
+     "            return;\n"
+     "        }\n"
+     "    }",
+     "    if (0) {\n"
+     "        return;\n"
+     "    }"),
+
+    # T18-a: ask が 255 文字目以降を黙って捨てる
+    ("t18_ask_input_silent", "userland/shell/cmd_script.c",
+     "            if (len >= ASK_INPUT_MAX - 2) {\n"
+     "                dropped = 1;\n"
+     "                continue;\n"
+     "            }",
+     "            if (len >= ASK_INPUT_MAX - 2) {\n"
+     "                continue;\n"
+     "            }"),
+    # T18-b: ask のプロンプトを黙って切る
+    ("t18_ask_prompt_truncates", "userland/shell/cmd_script.c",
+     "        for (j = 0; argv[i][j]; j++) {\n"
+     "            if (argv[i][j] == '\"') continue;\n"
+     "            if (pi >= ASK_PROMPT_MAX - 2) {\n"
+     '                sh_refuse("ask: prompt", ASK_PROMPT_MAX - 2);\n'
+     "                return;\n"
+     "            }\n"
+     "            prompt[pi++] = argv[i][j];\n"
+     "        }",
+     "        for (j = 0; argv[i][j] && pi < ASK_PROMPT_MAX - 2; j++) {\n"
+     "            if (argv[i][j] != '\"') prompt[pi++] = argv[i][j];\n"
+     "        }"),
+
+    # T19: resolve_host_path が黙って切る (別のパスを O_TRUNC で作る)
+    ("t19_host_path_truncates", "userland/shell/rshell.c",
+     "    while (*p) {\n"
+     "        if (i >= max - 1) return -1;\n"
+     "        out[i++] = *p++;\n"
+     "    }",
+     "    while (*p && i < max - 1) { out[i++] = *p++; }"),
+
+    # T20-a: 履歴のパスで HOME を切る (別ディレクトリの .history)
+    ("t20_hist_path_truncates", "userland/shell/ui.c",
+     "    while (*h) {\n"
+     "        if (pi >= max - HIST_FILE_ROOM) return -1;\n"
+     "        path[pi++] = *h++;\n"
+     "    }",
+     "    while (*h && pi < max - HIST_FILE_ROOM) path[pi++] = *h++;"),
+    # T20-b: .profile のパスで HOME を切る (別ディレクトリの .profile)
+    ("t20_profile_truncates", "userland/shell/ui.c",
+     "            while (*h) {\n"
+     "                if (pi >= PATH_MAX_LEN - PROFILE_PATH_ROOM) { too_long = 1; break; }\n"
+     "                profile_path[pi++] = *h++;\n"
+     "            }",
+     "            while (*h && pi < PATH_MAX_LEN - PROFILE_PATH_ROOM)\n"
+     "                profile_path[pi++] = *h++;"),
+
+    # T21-a: コマンド名補完が 63 バイトで切る
+    ("t21_cmd_comp_truncates", "userland/shell/ui.c",
+     "        if (base_len > (int)sizeof(ctx->name_store[0]) - 1) return;",
+     "        if (base_len >= 63) base_len = 63;"),
+    # T21-b: ファイル名補完が 126 バイトで切る
+    ("t21_file_comp_truncates", "userland/shell/ui.c",
+     "    {\n"
+     "        int need = nlen + ((entry->type == OS32_FILE_TYPE_DIR) ? 1 : 0);\n"
+     "        if (need > (int)sizeof(ctx->name_store[0]) - 1) return;\n"
+     "    }\n"
+     "    for (i = 0; i < nlen; i++)\n"
+     "        ctx->name_store[ctx->count][i] = name[i];\n"
+     "    if (entry->type == OS32_FILE_TYPE_DIR) {\n"
+     "        ctx->name_store[ctx->count][i++] = '/';\n"
+     "    }",
+     "    for (i = 0; i < nlen && i < 126; i++)\n"
+     "        ctx->name_store[ctx->count][i] = name[i];\n"
+     "    if (entry->type == OS32_FILE_TYPE_DIR && i < 127) {\n"
+     "        ctx->name_store[ctx->count][i++] = '/';\n"
+     "    }"),
+
+    # T22: system.cfg を読み切れたか確かめない (切れたまま書き戻す)
+    ("t22_cfg_no_probe", "userland/shell/cmd_sys.c",
+     "        if (r == (int)sizeof(buf) - 1) {\n"
+     "            char probe;\n"
+     "            if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;\n"
+     "        }",
+     "        if (0) {\n"
+     "            more = 1;\n"
+     "        }"),
+
+    # T24: push が sys_read を 1 回しか呼ばない (先頭 4KB だけ送る)
+    ("t24_push_single_read", "userland/shell/rshell.c",
+     "    total = 0;\n"
+     "    for (;;) {\n"
+     "        n = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));",
+     "    total = 0;\n"
+     "    while (total == 0) {\n"
+     "        n = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));"),
 ]
 
 

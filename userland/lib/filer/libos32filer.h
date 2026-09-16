@@ -32,6 +32,10 @@ typedef struct {
     int active;
     FilerEntry entries[FILER_MAX_ENTRIES];
     int entry_count;
+    /* 表に載せられなかった件数 (名前が FILER_NAME_LEN に収まらない /
+     * FILER_MAX_ENTRIES を超えた)。切った名前を載せると別のファイルの
+     * パスを返してしまうので、載せずに数だけ報せる (票 T23)。 */
+    int dropped_count;
     int cursor_idx;
     int scroll_top;
     char current_dir[FILER_MAX_PATH];

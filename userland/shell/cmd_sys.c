@@ -138,6 +138,9 @@ static void cmd_play(int argc, char **argv)
 /* system.cfg 書き換え時に KEY=VALUE 1 行分として確保しておく余白 (バイト)。
  * キーも値も 16 バイト未満の短い識別子しか使わない。 */
 #define CFG_LINE_RESERVE 64
+/* /etc/system.cfg の読み書きバッファ幅 ([C4])。読みは実効 CFG_READ_MAX - 1。 */
+#define CFG_READ_MAX     1024
+#define CFG_OUT_MAX      1152
 
 /* 行 [p, p+len) が "KEY=" (前後空白許容) の代入行か判定する。 */
 static int cfg_line_is_key(const char *p, int len, const char *key)
@@ -158,16 +161,27 @@ static int cfg_line_is_key(const char *p, int len, const char *key)
  * K4 の os32gui on/off と H2b の gfxmode が共用する。 */
 static int cfg_set_key(const char *key, const char *val)
 {
-    char buf[1024];
-    char out[1152];
+    char buf[CFG_READ_MAX];
+    char out[CFG_OUT_MAX];
     int fd, n, i, o;
 
-    /* 既存内容を読む (無ければ空から作る) */
+    /* 既存内容を読む (無ければ空から作る)。
+     * T22: **読み切れなければ書き戻さない**。以前は 1023 バイトで切って
+     * そのまま O_TRUNC で書き戻していたので、1KB を超える設定が消えた。 */
     n = 0;
     fd = g_api->sys_open(SYS_SYSTEM_CFG, KAPI_O_RDONLY);
     if (fd >= 0) {
         int r = g_api->sys_read(fd, buf, (int)sizeof(buf) - 1);
+        int more = 0;
+        if (r == (int)sizeof(buf) - 1) {
+            char probe;
+            if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;
+        }
         g_api->sys_close(fd);
+        if (more) {
+            sh_refuse("system.cfg", (int)sizeof(buf) - 1);
+            return -1;
+        }
         if (r > 0) n = r;
     }
 
@@ -183,8 +197,12 @@ static int cfg_set_key(const char *key, const char *val)
         if (cfg_line_is_key(&buf[ls], len, key)) continue;
         {
             int k;
-            for (k = 0; k < len && o < (int)sizeof(out) - CFG_LINE_RESERVE; k++)
-                out[o++] = buf[ls + k];
+            /* T22: 収まらない行を切って書き戻すと、その行の設定が変わる。 */
+            if (o + len >= (int)sizeof(out) - CFG_LINE_RESERVE) {
+                sh_refuse("system.cfg", (int)sizeof(out) - CFG_LINE_RESERVE);
+                return -1;
+            }
+            for (k = 0; k < len; k++) out[o++] = buf[ls + k];
             out[o++] = '\n';
         }
     }
@@ -192,9 +210,16 @@ static int cfg_set_key(const char *key, const char *val)
     /* 新しい KEY=VALUE 行を追記 */
     {
         int k;
-        for (k = 0; key[k] && o < (int)sizeof(out) - 2; k++) out[o++] = key[k];
-        if (o < (int)sizeof(out) - 2) out[o++] = '=';
-        for (k = 0; val[k] && o < (int)sizeof(out) - 2; k++) out[o++] = val[k];
+        int need = 2;                    /* '=' と '\n' */
+        for (k = 0; key[k]; k++) need++;
+        for (k = 0; val[k]; k++) need++;
+        if (o + need > (int)sizeof(out)) {
+            sh_refuse("system.cfg", (int)sizeof(out));
+            return -1;
+        }
+        for (k = 0; key[k]; k++) out[o++] = key[k];
+        out[o++] = '=';
+        for (k = 0; val[k]; k++) out[o++] = val[k];
         out[o++] = '\n';
     }
 

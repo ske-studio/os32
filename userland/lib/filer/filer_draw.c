@@ -113,9 +113,17 @@ void fldraw_header(const FL_State *st)
     count_buf[ci++] = ' ';
     count_buf[ci++] = 'i'; count_buf[ci++] = 't'; count_buf[ci++] = 'e';
     count_buf[ci++] = 'm'; count_buf[ci++] = 's';
+    if (st->dropped > 0) { count_buf[ci++] = '+'; }
     count_buf[ci] = '\0';
     x = FL_SCREEN_COLS - ci - 1;
     fldraw_str(x, FL_HEADER_Y, count_buf, ci, FL_ATTR_STATUS);
+
+    /* 載せられなかった件数は隠さずに出す (fl_ls_callback が名前を切らずに
+     * 捨てた分。切った名前を一覧に出すと別のファイルを起動できてしまう)。 */
+    if (st->dropped > 0) {
+        fldraw_str(x - 12, FL_HEADER_Y, "(hidden ", 8, FL_ATTR_STATUS);
+        fldraw_number(x - 4, FL_HEADER_Y, (u32)st->dropped, FL_ATTR_STATUS);
+    }
 }
 
 void fldraw_separator(void)
