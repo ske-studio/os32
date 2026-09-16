@@ -381,16 +381,22 @@ static void cmd_rm(int argc, char **argv)
         }
     }
 }
-/* バッファを行番号付きで出力 */
-static void cat_with_linenum(const u8 *data, int len, int *line_num)
+/* バッファを行番号付きで出力
+ *
+ * 行番号は**行の先頭で**出す。at_bol は「次に出す 1 バイトが行の先頭か」で、
+ * cmd_cat が読み取りをまたいで持ち回る。これが 2 つの欠陥の直し:
+ *   - 改行で終わるバッファの後ろで行番号を出さない (行がまだ始まっていない)
+ *   - sys_read の切れ目が行の途中でも、そこで 1 行終わったことにしない
+ * 改行で終わらないまま入力が尽きたときの行末の改行は cmd_cat が足す。 */
+static void cat_with_linenum(const u8 *data, int len, int *line_num, int *at_bol)
 {
     int i, start;
     char num_buf[12];
     int nlen, j;
 
-    start = 0;
-    for (i = 0; i <= len; i++) {
-        if (i == len || data[i] == '\n') {
+    i = 0;
+    while (i < len) {
+        if (*at_bol) {
             /* 行番号を出力 */
             nlen = 0;
             {
@@ -406,14 +412,19 @@ static void cat_with_linenum(const u8 *data, int len, int *line_num)
             num_buf[nlen++] = ' ';
             num_buf[nlen++] = ' ';
             g_api->sys_write(1, num_buf, nlen);
+            *at_bol = 0;
+        }
 
-            /* 行の内容を出力 */
-            if (i > start) {
-                g_api->sys_write(1, &data[start], i - start);
-            }
-            g_api->sys_write(1, "\n", 1);
-            start = i + 1;
+        /* 行の内容を出力 (改行があればそこまで、無ければバッファの終わりまで) */
+        start = i;
+        while (i < len && data[i] != '\n') i++;
+        if (i < len) {
+            i++;                    /* 改行も行の一部として出す */
+            *at_bol = 1;
             (*line_num)++;
+        }
+        if (i > start) {
+            g_api->sys_write(1, &data[start], i - start);
         }
     }
 }
@@ -452,16 +463,21 @@ static void cmd_cat(int argc, char **argv)
         
         {
             int line_num = 1;
+            /* 行頭かどうかは**読み取りをまたいで**持ち回る。IO_BUF_SIZE の
+             * 切れ目で行が終わったことにしないため。 */
+            int at_bol = 1;
             while (1) {
                 r = g_api->sys_read(fd, io_buf, IO_BUF_SIZE);
                 if (r <= 0) break;
-                
+
                 if (show_linenum) {
-                    cat_with_linenum(io_buf, r, &line_num);
+                    cat_with_linenum(io_buf, r, &line_num, &at_bol);
                 } else {
                     g_api->sys_write(1, io_buf, r);
                 }
             }
+            /* 最後が改行で終わらないファイルの行末 (従来どおり改行を足す) */
+            if (show_linenum && !at_bol) g_api->sys_write(1, "\n", 1);
         }
         g_api->sys_close(fd);
         release_io_buf();
