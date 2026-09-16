@@ -251,3 +251,20 @@ boot/vmkernel.lz4 481400 a41c0e55 1789520100
 
 §4-2 の**ゲスト受入 4 項目は動かしていない** (コーダーは配備・エミュレータ
 操作を行わない)。ホスト試験だけで「実機で動く」とは言えない。
+
+
+## 8. ゲスト受入 (PM、2026-09-16、`c9bec9c`)
+
+`make deploy` で名札が生成された (200 件、8,718 バイト、`build=c9bec9c`)。
+
+| 反例 | 結果 |
+|---|---|
+| `hsync -n usr` | 1 行目に **`DEPLOY build=c9bec9c count=200 generated=…`** |
+| `hsync --expect-build deadbeef` | **1 件も書かずに断る**。`reason=build_mismatch expect=deadbeef actual=c9bec9c` と対処を表示 |
+| 名札の `count` を壊す + `hsync -n usr` (絞り込み) | `DEPLOY manifest invalid: too many entries` を表示して**同期は続く** |
+| 同、`hsync --expect-build c9bec9c` (全体同期) | **断る**。`reason=manifest_invalid` |
+
+**hsync 自身の入れ替え**: 名札を読む新しい `hsync` はまず古い `hsync` で同期して入れ替えた
+(copied=89 / errors=0)。H2 の公開方式で置き換わり、走っている版に影響しない。
+
+未実施: `--no-manifest` で作った配備元での動作 (ホスト試験で通している)。
