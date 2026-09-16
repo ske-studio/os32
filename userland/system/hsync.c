@@ -328,6 +328,459 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
     fl->count++;
 }
 
+/* ======== 票 H4: 配備の名札 (manifest) ======== */
+
+/* 配備元に「この配備元がどの版か」を書いた名札を置き、`hsync` がそれを読む
+ * (票 H4、docs/tasks/shell/TASK_H4.md §2-1〜§2-3、ユーザー決裁 D1)。
+ * 防ぎたい事故は **「古い配備元から新しい成果物へ戻してしまう」**:
+ * `make deploy` を忘れたまま `hsync` を打つと、ゲストの新しいファイルが
+ * ホストの古いもので上書きされ、しかも「同期が成功した」ように見える。
+ * 内容の違いは H1 の内容比較で分かるが、**どちらが意図した版か**は分からない。
+ *
+ * 形式は**行指向の平文** (ゲストに JSON パーサが無い):
+ *
+ *     format=1
+ *     build=9742a6b+dirty
+ *     generated=2026-09-16T21:45:19Z
+ *     count=198
+ *     ---
+ *     bin/cat.bin 16428 3b7f2a10 1789520013
+ *
+ * ファイルの行は **パス / サイズ / CRC-32 (8 桁 16 進、小文字) / mtime**、
+ * 区切りは空白 1 つ。パスはルートからの相対で、絶対パスと `..` は読まない。
+ *
+ * **守らないこと** (§2-3-1): コピー群の配備と名札の更新は**原子的ではない**。
+ * 全件のコピーが成功した後・名札を書く前にホストが落ちると、配備元は新しい
+ * のに名札は古い (または無い) 状態になる。そこへ `--expect-build <新しい ID>`
+ * を打つと `build_mismatch` で断られる — ファイルは新しいのに同期できない。
+ * **安全側の壊れ方**だが、起こることとして書いておく。復旧は `make deploy`
+ * をもう一度打つだけ。
+ *
+ * **信じすぎないこと** (§2-3): 名札の CRC が宛先と一致していても、それは
+ * 宛先が同じである証明にはならない。**内容比較は絶対に省かない**。
+ * 永続 CRC キャッシュも作らない。 */
+
+/* `/host` を前置する前の相対パス。名札そのものの位置でもある ([C4]: 同じ
+ * 文字列を 2 か所に書かず、連結で導く)。 */
+#define HS_MANIFEST_REL  ".deploy/manifest.txt"
+#define HS_MANIFEST_PATH "/host/" HS_MANIFEST_REL
+#define HS_MAN_FORMAT    "1"
+#define HS_MAN_SEP       "---"
+
+/* 名札の表のメモリ上限。**越えたら名札ごと捨てる** (§2-3、受入 M9b)。
+ *
+ * 実測 (2026-09-16): 配備定義 (`build/core.yaml` + `userland/deploy.yaml` +
+ * `apps` / `game` の `deploy.yaml`) が展開するファイルは**約 200 件**。
+ * 320 はそこに 6 割の余裕を置いた値で、表は
+ * `320 x (64 + 4 + 4 + 4) = 24,320 バイト` の BSS に収まる — 既に確保して
+ * いるコピー用バッファ (FILE_BUF_SIZE = 64KB) より小さい。
+ *
+ * 越えたときに**同期そのものを止めない**のは、名札が事故防止の補助であって
+ * 本体の同期は名札なしでも正しく動くから。名札のためにメモリを食って本来の
+ * 列挙 (FileList) を妨げるほうが害が大きい (設計レビュー往復 3)。
+ *
+ * パスの上限は `NAME_CAP` に揃える (§2-3 が「長すぎるパス (NAME_CAP 超)」を
+ * 捨てる条件に挙げている)。実測の最長は `usr/bin/sqlite_standalone.bin` の
+ * 29 文字なので倍以上の余裕がある。 */
+#define HS_MAN_MAX      320
+#define HS_MAN_PATH_CAP NAME_CAP
+
+/* 名札の本文はコピー用バッファ (file_buf) を借りて読む。名札を読むのは同期を
+ * 始める**前の 1 回だけ**で、そのときコピー用バッファはまだ使っていない。
+ * 数十 KB を別取りしないための作法。入りきらなければ名札ごと捨てる。 */
+#define HS_MAN_TEXT_CAP (FILE_BUF_SIZE - 1)
+
+typedef struct {
+    char path[HS_MAN_PATH_CAP];   /* ルートからの相対 (先頭に '/' を付けない) */
+    u32  size;
+    u32  crc;                     /* 表示・検査用。**判定には使わない** */
+    u32  mtime;
+} ManEntry;
+
+static ManEntry g_man[HS_MAN_MAX];
+static int g_man_count;
+static int g_man_present;            /* 名札のファイルが在った (壊れていても 1) */
+static int g_man_valid;              /* 全件の検査を通り、表が使える */
+static const char *g_man_bad;        /* 捨てた理由。**固定文字列**で出す */
+static char g_man_build[HS_MAN_PATH_CAP];
+static char g_man_generated[HS_MAN_PATH_CAP];
+static const char *g_expect_build;   /* --expect-build の引数 */
+
+/* 集計 (§2-3)。**`manifest_missing` は実装しない** — `hsync` は配備元を正と
+ * して列挙するので、名札にあるのに配備元に無いファイルは列挙に現れず、
+ * そのままでは数えられない。名札を正とする走査が別に要るので**別票**。 */
+static int g_man_extra;
+/* 観測窓: 名札の表を実際に引いた回数。「その経路が走ったか」を数で見る。 */
+static int g_man_lookups;
+/* 観測窓: 内容比較 (compare_files) が走った回数。**名札を信じて省いていない**
+ * ことを、文言ではなくこの数で確かめる (受入 M10)。 */
+static int g_content_compares;
+
+#define HR_BUILD_MISMATCH   "build_mismatch"
+#define HR_MANIFEST_INVALID "manifest_invalid"
+#define HR_MANIFEST_ABSENT  "manifest_absent"
+#define HR_MAN_EXTRA        "not_in_manifest"
+
+/* 本文を行に割る。改行は '\0' に書き換える (その場で壊して読む)。
+ * 戻り値 0 = もう行が無い。末尾の '\r' は落とす (ホストが CRLF で書いた
+ * ときに名札ごと捨てるのは行き過ぎ — 形式の要は空白区切りと欄数)。 */
+static char *man_next_line(char **pp)
+{
+    char *s = *pp;
+    char *p;
+    int n;
+
+    if (!s || !*s) { *pp = 0; return 0; }
+    p = s;
+    while (*p && *p != '\n') p++;
+    if (*p == '\n') { *p = '\0'; *pp = p + 1; }
+    else             { *pp = p; }
+    n = str_len(s);
+    if (n > 0 && s[n - 1] == '\r') s[n - 1] = '\0';
+    return s;
+}
+
+/* 10 進の u32。**桁あふれを黙って丸めない**。戻り値 1 = 読めた */
+static int man_parse_u32(const char *s, u32 *out)
+{
+    u32 v = 0;
+    int i;
+
+    if (!s[0]) return 0;
+    for (i = 0; s[i]; i++) {
+        u32 d;
+        if (s[i] < '0' || s[i] > '9') return 0;
+        d = (u32)(s[i] - '0');
+        if (v > 429496729UL) return 0;
+        v = v * 10;
+        if (v > 0xFFFFFFFFUL - d) return 0;
+        v += d;
+    }
+    *out = v;
+    return 1;
+}
+
+/* **ちょうど 8 桁の小文字 16 進**。桁数も大小も緩めない (§2-1) */
+static int man_parse_crc(const char *s, u32 *out)
+{
+    u32 v = 0;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        int c = s[i];
+        int d;
+        if (c >= '0' && c <= '9')      d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else return 0;
+        v = (v << 4) | (u32)d;
+    }
+    if (s[8]) return 0;
+    *out = v;
+    return 1;
+}
+
+/* 名札に書けるパスか。**絶対パスと `..` は読まない** (§2-1)。
+ * '\' は OS32 では普通の 1 文字なのに HostDrv の先では区切りに化けるので、
+ * 列挙側 (B1) と同じ規則で弾く。 */
+static int man_path_ok(const char *p)
+{
+    int i = 0;
+    int s = 0;
+
+    if (!p[0] || p[0] == '/') return 0;
+    for (;;) {
+        char c = p[i];
+        if (c == '\0' || c == '/') {
+            int n = i - s;
+            if (n == 0) return 0;                            /* 空の要素 */
+            if (n == 1 && p[s] == '.') return 0;             /* '.' */
+            if (n == 2 && p[s] == '.' && p[s + 1] == '.') return 0;  /* '..' */
+            if (c == '\0') return 1;
+            s = i + 1;
+        } else if (c == '\\' || c == ' ' || c == '\t' ||
+                   (unsigned char)c < 0x20) {
+            return 0;
+        }
+        i++;
+    }
+}
+
+/* ファイルの行 1 本。**欄はちょうど 4 つ、区切りは空白 1 つ**。 */
+static int man_parse_entry(char *line)
+{
+    char *f[4];
+    int nf = 1;
+    char *q = line;
+    int i;
+    ManEntry *e;
+
+    f[0] = line;
+    while (*q) {
+        if (*q == ' ') {
+            if (nf >= 4) { g_man_bad = "extra field"; return 0; }
+            *q = '\0';
+            f[nf++] = q + 1;
+        }
+        q++;
+    }
+    if (nf != 4) { g_man_bad = "bad field count"; return 0; }
+
+    if (str_len(f[0]) >= HS_MAN_PATH_CAP) {
+        g_man_bad = "path too long";
+        return 0;
+    }
+    if (!man_path_ok(f[0])) { g_man_bad = "bad path"; return 0; }
+
+    for (i = 0; i < g_man_count; i++) {
+        if (str_cmp(g_man[i].path, f[0]) == 0) {
+            g_man_bad = "duplicate path";
+            return 0;
+        }
+    }
+    if (g_man_count >= HS_MAN_MAX) {
+        /* count の検査を通っていればここへは来ないが、上限は 2 重に守る */
+        g_man_bad = "too many entries";
+        return 0;
+    }
+
+    e = &g_man[g_man_count];
+    if (!str_ncpy(e->path, f[0], (int)sizeof(e->path))) {
+        g_man_bad = "path too long";
+        return 0;
+    }
+    if (!man_parse_u32(f[1], &e->size))  { g_man_bad = "bad size";  return 0; }
+    if (!man_parse_crc(f[2], &e->crc))   { g_man_bad = "bad crc";   return 0; }
+    if (!man_parse_u32(f[3], &e->mtime)) { g_man_bad = "bad mtime"; return 0; }
+    g_man_count++;
+    return 1;
+}
+
+/* 本文を解く。**全件を先に検査してから使う** — 1 件でも壊れていたら
+ * 名札ごと捨てる (§2-3)。戻り値 1 = 使える。 */
+static int man_parse(char *text)
+{
+    char *p = text;
+    char *line;
+    int have_format = 0;
+    int have_build = 0;
+    int have_gen = 0;
+    int have_count = 0;
+    u32 want = 0;
+    u32 n;
+
+    g_man_count = 0;
+    g_man_build[0] = '\0';
+    g_man_generated[0] = '\0';
+
+    for (;;) {
+        char *eq;
+        const char *key;
+        const char *val;
+
+        line = man_next_line(&p);
+        if (!line) { g_man_bad = "no separator"; return 0; }
+        if (str_cmp(line, HS_MAN_SEP) == 0) break;
+
+        eq = line;
+        while (*eq && *eq != '=') eq++;
+        if (*eq != '=') { g_man_bad = "bad header line"; return 0; }
+        *eq = '\0';
+        key = line;
+        val = eq + 1;
+
+        if (str_cmp(key, "format") == 0) {
+            if (have_format) { g_man_bad = "duplicate key"; return 0; }
+            have_format = 1;
+            if (str_cmp(val, HS_MAN_FORMAT) != 0) {
+                g_man_bad = "format version";
+                return 0;
+            }
+        } else if (str_cmp(key, "build") == 0) {
+            int i;
+            if (have_build) { g_man_bad = "duplicate key"; return 0; }
+            have_build = 1;
+            if (!val[0]) { g_man_bad = "empty build"; return 0; }
+            for (i = 0; val[i]; i++) {
+                if (val[i] == ' ' || val[i] == '\t') {
+                    g_man_bad = "build has space";
+                    return 0;
+                }
+            }
+            if (!str_ncpy(g_man_build, val, (int)sizeof(g_man_build))) {
+                g_man_bad = "build too long";
+                return 0;
+            }
+        } else if (str_cmp(key, "generated") == 0) {
+            if (have_gen) { g_man_bad = "duplicate key"; return 0; }
+            have_gen = 1;
+            if (!str_ncpy(g_man_generated, val,
+                          (int)sizeof(g_man_generated))) {
+                g_man_bad = "generated too long";
+                return 0;
+            }
+        } else if (str_cmp(key, "count") == 0) {
+            if (have_count) { g_man_bad = "duplicate key"; return 0; }
+            have_count = 1;
+            if (!man_parse_u32(val, &want)) { g_man_bad = "bad count"; return 0; }
+        } else {
+            /* format=1 が形式を固定しているので、知らない鍵は「別の形式」。
+             * 読めるふりをしない。 */
+            g_man_bad = "unknown key";
+            return 0;
+        }
+    }
+
+    if (!have_format || !have_build || !have_gen || !have_count) {
+        g_man_bad = "missing key";
+        return 0;
+    }
+    /* **表に収まらない名札は捨てる** (§2-3、受入 M9b)。切り詰めて使うと
+     * 「名札に無い」が嘘になり、manifest_extra が意味を失う。 */
+    if (want > (u32)HS_MAN_MAX) { g_man_bad = "too many entries"; return 0; }
+
+    for (n = 0; n < want; n++) {
+        line = man_next_line(&p);
+        if (!line) { g_man_bad = "count mismatch"; return 0; }
+        if (!man_parse_entry(line)) return 0;
+    }
+    /* count より行が多い = 数えたものと書いてあるものが違う */
+    if (man_next_line(&p)) { g_man_bad = "count mismatch"; return 0; }
+    return 1;
+}
+
+/* 名札を読む。**無ければ今までどおり動く** (後方互換、受入 M5)。 */
+static void man_load(void)
+{
+    int fd;
+    int total = 0;
+    char *text;
+
+    g_man_present = 0;
+    g_man_valid = 0;
+    g_man_count = 0;
+    g_man_bad = 0;
+
+    fd = api->sys_open(HS_MANIFEST_PATH, KAPI_O_RDONLY);
+    if (fd < 0) return;
+    g_man_present = 1;
+
+    text = (char *)file_buf;
+    for (;;) {
+        int n;
+        if (total >= HS_MAN_TEXT_CAP) {
+            /* 上限ちょうどで終わったのか、まだ続くのかを 1 バイトで見分ける */
+            char probe;
+            n = api->sys_read(fd, &probe, 1);
+            if (n < 0)      { g_man_bad = "read error"; break; }
+            if (n > 0)      { g_man_bad = "too large";  break; }
+            break;
+        }
+        n = api->sys_read(fd, text + total, (u32)(HS_MAN_TEXT_CAP - total));
+        if (n < 0) { g_man_bad = "read error"; break; }
+        if (n == 0) break;
+        total += n;
+    }
+    api->sys_close(fd);
+    if (g_man_bad) return;
+
+    text[total] = '\0';
+    g_man_valid = man_parse(text) ? 1 : 0;
+    if (!g_man_valid) g_man_count = 0;      /* 半端な表を残さない */
+}
+
+/* 起動時の表示と `--expect-build` の門。
+ * 戻り値 0 = 同期を続けてよい / 1 = **1 件も書かずに断る**。 */
+static int man_gate(void)
+{
+    if (g_man_present && g_man_valid) {
+        api->kprintf(ATTR_CYAN, "DEPLOY build=%s count=%d generated=%s\n",
+                     g_man_build, g_man_count, g_man_generated);
+    } else if (g_man_present) {
+        /* 名札の不備で作業が止まるのは本末転倒 — 既定は表示だけ (§2-3) */
+        api->kprintf(ATTR_YELLOW, "DEPLOY manifest invalid: %s\n",
+                     g_man_bad ? g_man_bad : "unknown");
+    }
+
+    if (!g_expect_build) return 0;      /* 既定は表示だけして同期を続ける */
+
+    if (g_man_present && g_man_valid) {
+        /* 判定は**文字列の完全一致**。大小を比べない、前方一致もしない
+         * (§2-3)。名札は順序を表さないので「新しい / 古い」も決めない。 */
+        if (str_cmp(g_man_build, g_expect_build) == 0) return 0;
+        api->kprintf(ATTR_RED,
+                     "Error: DEPLOY reason=%s expect=%s actual=%s\n",
+                     HR_BUILD_MISMATCH, g_expect_build, g_man_build);
+        api->kprintf(ATTR_RED,
+                     "  配備元の世代が指定と違う。**1 件も書かない**。\n"
+                     "  `make deploy` を打ち直すか、意図した巻き戻しなら\n"
+                     "  --expect-build を外すこと\n");
+        return 1;
+    }
+
+    /* ---- ここから先は「**確かめられない**」 --------------------------
+     * 名札が壊れている場合と**無い**場合を、ここでは同じに扱う (PM 決裁
+     * 2026-09-16)。**読めないことを「一致」と扱わない** (往復 1 所見 2) —
+     * 壊れた名札で保護が素通りすると、H4 が防ぐはずの事故がそのまま起きる。
+     *
+     * 上の `build_mismatch` と分かれているのが要点:
+     * **「確かめた結果おかしい」と「確かめられない」は別**。
+     * 前者は絞り込みでも断る (protection の本体)。後者はここで扱う。 */
+    if (!g_root_sync) {
+        /* **範囲を絞った同期では表示だけにして続ける** (往復 2 所見 1)。
+         * 名札はルートの世代を表すもので、**絞った範囲の正しさは保証しない**。
+         * この理屈は「壊れている」と「無い」の両方に等しく当たるので、
+         * 名札の有無で扱いを変えない。ここで止めると「名札の不備で作業が
+         * 止まる」形になり、本末転倒。 */
+        api->kprintf(ATTR_YELLOW,
+                     "NOTE: 配備元の世代を確かめられないが、範囲を絞った同期"
+                     "なので続ける (断るのは全体同期のときだけ)\n");
+        return 0;
+    }
+    api->kprintf(ATTR_RED, "Error: DEPLOY reason=%s (%s)\n",
+                 g_man_present ? HR_MANIFEST_INVALID : HR_MANIFEST_ABSENT,
+                 g_man_present ? (g_man_bad ? g_man_bad : "unknown")
+                               : "no manifest");
+    api->kprintf(ATTR_RED,
+                 "  --expect-build を指定した以上、世代を確かめられないなら\n"
+                 "  進まない。**1 件も書かない**\n");
+    return 1;
+}
+
+/* 宛先のパス (`/bin/a.bin`) が名札にあるか。無ければ -1。 */
+static int man_find(const char *dst_path)
+{
+    const char *rel = dst_path;
+    int i;
+
+    if (rel[0] == '/') rel++;
+    for (i = 0; i < g_man_count; i++)
+        if (str_cmp(g_man[i].path, rel) == 0) return i;
+    return -1;
+}
+
+/* 1 件写した。**名札に無いものを数える** (§2-3、受入 M9)。
+ * 数えるだけで拒否はしない — 名札は事故の手がかりであって関門ではない。 */
+static void man_note_copy(const char *dst_path)
+{
+    const char *rel;
+
+    if (!g_man_valid) return;           /* 名札が無ければ数えようがない */
+    g_man_lookups++;
+    if (man_find(dst_path) >= 0) return;
+
+    /* **名札は自分自身を載せられない** (中身が決まる前に自分の CRC は出せ
+     * ない)。名札の写しを「名札に無いもの」と数えると、まっさらなゲストでは
+     * 必ず manifest_extra=1 になり、本当の食い違いが埋もれる。 */
+    rel = dst_path;
+    if (rel[0] == '/') rel++;
+    if (str_cmp(rel, HS_MANIFEST_REL) == 0) return;
+
+    g_man_extra++;
+    if (g_verbose)
+        api->kprintf(ATTR_YELLOW, "  EXTRA %s reason=%s\n",
+                     dst_path, HR_MAN_EXTRA);
+}
+
 /* ======== 低レベル I/O (短い read / write を詰める) ======== */
 
 /* want バイト読めるまで sys_read を繰り返す。
@@ -388,6 +841,10 @@ static int compare_files(const char *pa, const char *pb, u32 size)
     int fa, fb;
     int result = 0;
     u32 remaining = size;
+
+    /* 観測窓 (票 H4 受入 M10)。名札の CRC を信じて比較を省いていないことを、
+     * 文言ではなく**この数**で確かめられるようにしておく。 */
+    g_content_compares++;
 
     fa = api->sys_open(pa, KAPI_O_RDONLY);
     if (fa < 0) return -1;
@@ -1130,6 +1587,7 @@ static void sync_file(const char *src_path, const char *dst_path)
     if (g_dry_run) {
         /* 読んで比べるだけ。mkdir・一時ファイル・明示 sync・mtime はしない */
         g_copied++;
+        man_note_copy(dst_path);            /* 票 H4: 予定も数える */
         api->kprintf(ATTR_CYAN, "  PLAN %s reason=%s size=%d\n",
                      dst_path, reason, (int)size);
         return;
@@ -1150,6 +1608,7 @@ static void sync_file(const char *src_path, const char *dst_path)
                      dst_path, reason, (int)size);
         g_copied++;
         g_direct_overwrite++;
+        man_note_copy(dst_path);            /* 票 H4 */
         note_target(dst_path);
         /* **データを書き終えてから**コピー元の mtime を宛先へ (設計書 §5.2)。
          * ここで落ちてもコピー自体は成功しているので copied は戻さないが、
@@ -1181,6 +1640,7 @@ static void sync_file(const char *src_path, const char *dst_path)
     api->kprintf(ATTR_GREEN, "  UPDATE %s reason=%s size=%d\n",
                  dst_path, reason, (int)size);
     g_copied++;
+    man_note_copy(dst_path);                /* 票 H4 */
     note_target(dst_path);
 }
 
@@ -1536,6 +1996,9 @@ static void usage(void)
     api->kprintf(ATTR_WHITE, "  -v, --verbose   スキップ理由と比較結果も出す\n");
     api->kprintf(ATTR_WHITE, "      --unsafe-overwrite  KAPI v53 未満のカーネルで**直接上書き**する\n");
     api->kprintf(ATTR_WHITE, "                  (旧内容は残らない。既定は kernel_too_old で断る)\n");
+    api->kprintf(ATTR_WHITE, "      --expect-build <ID>  配備元の世代が ID と違えば 1 件も書かずに断る\n");
+    api->kprintf(ATTR_WHITE, "                  (%s を読む。完全一致で見る)\n",
+                 HS_MANIFEST_PATH);
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
     api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
@@ -1578,6 +2041,15 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_touched_boot = 0;
     g_abort = 0;
     file_buf = 0;
+    /* 票 H4 */
+    g_expect_build = 0;
+    g_man_present = 0;
+    g_man_valid = 0;
+    g_man_count = 0;
+    g_man_bad = 0;
+    g_man_extra = 0;
+    g_man_lookups = 0;
+    g_content_compares = 0;
 
     /* 引数パース。未知オプションと複数 dir は**エラー**にする。
      * 以前は「最後の引数で上書き」だったので `hsync bin sys` が黙って
@@ -1598,6 +2070,17 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                  * **`-f` では解除されない** — 別の意味の旗なので短縮形も
                  * 用意しない。 */
                 g_unsafe = 1;
+            } else if (str_cmp(a, "--expect-build") == 0) {
+                /* 票 H4 §2-3: 配備元の世代を**文字列の完全一致**で確かめる。
+                 * 違えば 1 件も書かずに断る。名札が読めないときも
+                 * (全体同期なら) 断る — **読めないことを一致と扱わない**。 */
+                if (i + 1 >= argc || !argv[i + 1][0]) {
+                    api->kprintf(ATTR_RED,
+                                 "Error: --expect-build には配備元の世代 "
+                                 "(build) が要る\n");
+                    return 1;
+                }
+                g_expect_build = argv[++i];
             } else if (str_cmp(a, "-n") == 0 ||
                        str_cmp(a, "--dry-run") == 0) {
                 g_dry_run = 1;
@@ -1698,6 +2181,16 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     /* /host がマウントされているか確認 */
     if (!api->sys_is_mounted("/host")) {
         api->kprintf(ATTR_RED, "Error: /host is not mounted\n");
+        api->mem_free(file_buf);
+        return 1;
+    }
+
+    /* ---- 票 H4: 配備の名札 ------------------------------------------
+     * 読むのはここ 1 回だけ (file_buf を借りる)。表示は他のどの行よりも
+     * 先に出す = 受入 4-2 の「1 行目に DEPLOY build=… が出る」。
+     * 断るときは**保護対象の走査にも入らず**、1 件も書かずに戻る。 */
+    man_load();
+    if (man_gate() != 0) {
         api->mem_free(file_buf);
         return 1;
     }
@@ -1813,6 +2306,14 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                  g_copied, g_unchanged, g_excluded, g_protected,
                  g_metadata_updated, g_cleaned, g_errors,
                  g_dry_run ? " (dry-run: copied は予定件数)" : "");
+    /* 票 H4 §2-3: **`manifest_extra` だけ**を数える。`manifest_missing`
+     * (名札にあるのに配備元に無い) は名札を正とする走査が要るので別票。 */
+    if (g_man_valid)
+        api->kprintf(g_man_extra ? ATTR_YELLOW : ATTR_WHITE,
+                     "manifest_extra=%d%s\n", g_man_extra,
+                     g_dry_run ? " (dry-run: 予定件数)" : "");
+    if (g_verbose)
+        api->kprintf(ATTR_WHITE, "content_compares=%d\n", g_content_compares);
     if (g_direct_overwrite)
         api->kprintf(ATTR_YELLOW,
                      "direct_overwrite=%d "
