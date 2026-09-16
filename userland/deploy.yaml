@@ -40,6 +40,12 @@ filesystem:
     - host: userland/tests/restest.bin
       guest: /sbin/
       tags: [programs]
+    # 終了コードを返すだけの試験バイナリ (票 TASK_EXIT_STATUS §4-2)。
+    # **/usr/bin ではなく /sbin に 1 本だけ**置く — 受入 S2b が
+    # 「1 コピーで実行回数 1」を数えるので、2 か所に置かない。
+    - host: userland/tests/t_exit.bin
+      guest: /sbin/
+      tags: [programs]
     - host: userland/system/cdinst.bin
       guest: /sbin/
       tags: [programs]

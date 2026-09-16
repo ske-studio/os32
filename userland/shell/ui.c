@@ -605,7 +605,7 @@ void shell_run(void) {
      * D2(a): sh.bin では呼ばない。シリアルを初期化すると rshell_active の
      * タイムアウト (kbd_getchar が一定時間でスペースを返す) まで巻き込む。 */
     g_api->serial_init(SYS_SERIAL_BAUD);
-    execute_command("rshell");
+    (void)execute_command("rshell");
 #endif
 
     for (;;) {
@@ -777,10 +777,12 @@ void shell_run(void) {
              * ここは execute_command の外なので印は残さない (対話)。 */
             sh_refuse("sh: line", CMD_BUF_SIZE - 4);
             (void)sh_refused_take();
+            /* 票 §2-3 の表: 断った行の `$?` は 2。 */
+            sh_status_set(SH_STATUS_USAGE);
             continue;
         }
         if (cmd_len > 0) hist_add(cmd_buf);
-        execute_command(cmd_buf);
+        (void)execute_command(cmd_buf);   /* `$?` は execute_command が入れる */
         if (hist_dirty) hist_save();
         /* `exit` の印はループの入口で見る (起動時の profile も拾うため)。
          * 抜けると main が 0 を返して sh.bin が終わり、端末は launch_poll の

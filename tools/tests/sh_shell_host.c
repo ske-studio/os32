@@ -367,6 +367,11 @@ static i32 __cdecl h_launch_poll(i32 token, i32 *status)
     return 0;
 }
 static i32 __cdecl h_sys_yield(void) { return 0; }
+/* script_exec の行ごとの譲り (cmd_script.c) が間引きに引く tick。呼ぶたびに
+ * 進める — 止まったままだと「同じ tick では譲らない」で 1 回しか出ない。
+ * ここに譲りの窓は置かない (回数の試験は sh_truncation_host.c 側の 30)。 */
+static u32 g_tick;
+static u32 __cdecl h_get_tick(void) { return g_tick++; }
 static int __cdecl h_kbd_trygetkey(void) { return -1; }
 /* 覗くだけ (KAPI v54)。script_exec の毎行の ESC 監視がこれを引く。
  * ここに打鍵の模型は要らない (打ち切りの試験は sh_truncation_host.c 側)。 */
@@ -410,6 +415,7 @@ static void build_api(void)
     g_fake.launch_req = h_launch_req;
     g_fake.launch_poll = h_launch_poll;
     g_fake.sys_yield = h_sys_yield;
+    g_fake.get_tick = h_get_tick;
     g_fake.kbd_trygetkey = h_kbd_trygetkey;
     g_fake.kbd_peekkey = h_kbd_peekkey;
     g_fake.kbd_getchar = h_kbd_getchar;
@@ -422,6 +428,38 @@ static void build_api(void)
 /* ---- ui.c の周辺 (sh_redraw.inc が引くもの) ---------------------------- */
 
 int sh_exit_flag = 0;
+/* 票 TASK_EXIT_STATUS: 要求と値は別の変数。`$?` の実体もここに置く
+ * (main.c を取り込まない試験なので、実体だけ同じ形で用意する)。 */
+int sh_exit_code = 0;
+static int g_stub_status = 0;
+int sh_status_get(void) { return g_stub_status; }
+void sh_status_set(int status) { g_stub_status = status; }
+int sh_status_from_kind(int kind, int code)
+{
+    switch (kind) {
+    case EXEC_KIND_EXITED:    return code & 0xFF;
+    case EXEC_KIND_FAULT:     return SH_STATUS_FAULT;
+    case EXEC_KIND_ABORTED:   return SH_STATUS_ABORTED;
+    case EXEC_KIND_NOT_FOUND: return SH_STATUS_NOTFOUND;
+    default:                  return SH_STATUS_NOEXEC;
+    }
+}
+int sh_exit_arg(int argc, char **argv, int *code)
+{
+    const char *s;
+    int v = 0, digits = 0;
+    if (argc < 2) { *code = sh_status_get(); return 0; }
+    if (argc > 2) return -1;
+    for (s = argv[1]; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+        digits++;
+        if (v > 255) return -1;
+    }
+    if (digits == 0) return -1;
+    *code = v;
+    return 0;
+}
 static int prev_draw_len = 0;
 
 /* main.c の「断った印」(票 TASK_SH_TRUNCATION §2-1)。この試験は
@@ -482,22 +520,25 @@ static int word_is(const char *line, const char *word)
     return line[i] == '\0' || line[i] == ' ';
 }
 
-void execute_command(const char *cmd)
+int execute_command(const char *cmd)
 {
     int i;
 
-    if (g_trace_n >= TRACE_MAX) { g_trace_over = 1; return; }
+    if (g_trace_n >= TRACE_MAX) { g_trace_over = 1; return 0; }
     for (i = 0; cmd[i] && i < TRACE_LINE - 1; i++) g_trace[g_trace_n][i] = cmd[i];
     g_trace[g_trace_n][i] = '\0';
     g_trace_n++;
 
     if (word_is(cmd, "exit")) {
+        /* 票 TASK_EXIT_STATUS: 値を先に、要求をあとで。 */
+        sh_exit_code = 0;
+        sh_status_set(0);
         sh_exit_flag = 1;
-        return;
+        return 0;
     }
     if (word_is(cmd, "source")) {
-        script_source_file(cmd + 7);
-        return;
+        int r = script_source_file(cmd + 7);
+        return (r < 0) ? SH_STATUS_USAGE : r;
     }
     if (word_is(cmd, "goto")) {
         char label[TRACE_LINE];
@@ -511,9 +552,9 @@ void execute_command(const char *cmd)
         argv[0] = (char *)"goto";
         argv[1] = label;
         argv[2] = (char *)0;
-        cmd_goto(2, argv);
-        return;
+        return cmd_goto(2, argv);
     }
+    return 0;
 }
 
 static int trace_is(const char *joined)

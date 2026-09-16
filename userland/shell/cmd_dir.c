@@ -64,12 +64,13 @@ static void ls_run(const char *path, struct ls_opts *opts)
 #define ls_run(path, opts)  (g_api->sys_ls((path), vfs_ls_cb, (opts)))
 #endif
 
-static void cmd_ls(int argc, char **argv)
+static int cmd_ls(int argc, char **argv)
 {
     struct ls_opts opts;
     int i;
     int path_idx_start = 1;
     int is_tty = g_api->sys_isatty(1);
+    int status = 0;
 
     opts.format_long = 0;
     opts.show_all = 0;
@@ -124,14 +125,16 @@ static void cmd_ls(int argc, char **argv)
                 /* 以前は存在しないパスもファイル名として印字していた */
                 g_api->kprintf(ATTR_RED, "ls: cannot access '%s': %s\n",
                                argv[i], fs_strerror(kind));
+                status = SH_STATUS_ERROR;
             }
         }
     }
+    return status;
 }
 
 
 
-static void cmd_cd(int argc, char **argv)
+static int cmd_cd(int argc, char **argv)
 {
     int rc;
     const char *target;
@@ -148,7 +151,7 @@ static void cmd_cd(int argc, char **argv)
         target = env_get("OLDPWD");
         if (!target) {
             g_api->kprintf(ATTR_RED, "%s", "cd: OLDPWD not set\n");
-            return;
+            return SH_STATUS_ERROR;
         }
         print_after = 1;
     } else {
@@ -162,52 +165,60 @@ static void cmd_cd(int argc, char **argv)
     rc = g_api->sys_chdir(target);
     if (rc != 0) {
         g_api->kprintf(ATTR_RED, "cd: %s: %s\n", target, fs_strerror(rc));
-        return;
+        return SH_STATUS_ERROR;
     }
     env_set("OLDPWD", old_dir);
     cwd = g_api->sys_getcwd();
     env_set("PWD", cwd ? cwd : "/");
     if (print_after) printf("%s\n", cwd ? cwd : "/");
+    return 0;
 }
 
-static void cmd_pwd(int argc, char **argv)
+static int cmd_pwd(int argc, char **argv)
 {
     const char *cwd;
     (void)argc; (void)argv;
     cwd = g_api->sys_getcwd();
     printf("%s\n", cwd ? cwd : "/");
+    return 0;
 }
 
-static void cmd_mkdir(int argc, char **argv)
+static int cmd_mkdir(int argc, char **argv)
 {
     int i, rc;
+    int status = 0;
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     for (i = 1; i < argc; i++) {
         rc = g_api->sys_mkdir(argv[i]);
         if (rc != 0) {
             g_api->kprintf(ATTR_RED, "mkdir: cannot create directory '%s': %s\n",
                            argv[i], fs_strerror(rc));
+            status = SH_STATUS_ERROR;
         }
     }
+    return status;
 }
 
-static void cmd_rmdir(int argc, char **argv)
+static int cmd_rmdir(int argc, char **argv)
 {
     int i, rc;
+    int status = 0;
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     for (i = 1; i < argc; i++) {
         rc = g_api->sys_rmdir(argv[i]);
         if (rc != 0) {
             g_api->kprintf(ATTR_RED, "rmdir: failed to remove '%s': %s\n",
                            argv[i], fs_strerror(rc));
+            status = SH_STATUS_ERROR;
         }
     }
+    return status;
 }
 
 

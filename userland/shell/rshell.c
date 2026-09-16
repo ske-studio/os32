@@ -24,7 +24,7 @@ static u8 xfer_buf[4096];
 #define HD_BUF_SIZE (256u * 1024u)
 static u8 hd_buf[HD_BUF_SIZE];
 
-static void cmd_serial(int argc, char **argv)
+static int cmd_serial(int argc, char **argv)
 {
     int ret;
     (void)argc; (void)argv;
@@ -38,15 +38,16 @@ static void cmd_serial(int argc, char **argv)
     } else {
         g_api->kprintf(ATTR_YELLOW, "SerialFS mount skipped (%d)\n", ret);
     }
+    return 0;
 }
 
-static void cmd_terminal(int argc, char **argv)
+static int cmd_terminal(int argc, char **argv)
 {
     int kch, sch;
     (void)argc; (void)argv;
     if (!g_api->serial_is_initialized()) {
         g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial' first.\n");
-        return;
+        return SH_STATUS_ERROR;
     }
     g_api->kprintf(ATTR_CYAN, "%s", "Terminal mode (ESC to exit)\n");
     g_api->kprintf(ATTR_CYAN, "%s", "--------------------------------\n");
@@ -75,6 +76,7 @@ static void cmd_terminal(int argc, char **argv)
         }
     }
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Terminal closed]\n");
+    return 0;
 }
 
 /* 1 コマンド分の応答を閉じる。/api/cmd は EOT (0x04) を待っているので、
@@ -90,7 +92,7 @@ static void rshell_end_reply(void)
     g_api->serial_putchar(0x04);
 }
 
-static void cmd_rshell(int argc, char **argv)
+static int cmd_rshell(int argc, char **argv)
 {
     char rbuf[RSHELL_LINE_MAX];
     int rpos, ch, kch;
@@ -99,7 +101,7 @@ static void cmd_rshell(int argc, char **argv)
 
     if (!g_api->serial_is_initialized()) {
         g_api->kprintf(ATTR_RED, "%s", "Serial not initialized. Run 'serial' first.\n");
-        return;
+        return SH_STATUS_ERROR;
     }
 
     g_api->rshell_set_active(1);
@@ -162,6 +164,8 @@ static void cmd_rshell(int argc, char **argv)
             /* 赤字 1 行を出して**実行しない**。EOT は必ず返す (§2-2)。 */
             sh_refuse("rshell: command line", RSHELL_LINE_MAX - 2);
             (void)sh_refused_take();   /* 対話と同じ — 次の行へ持ち越さない */
+            /* 票 §2-3 の表: 断った行の `$?` は 2。 */
+            sh_status_set(SH_STATUS_USAGE);
             rshell_end_reply();
             continue;
         }
@@ -176,7 +180,10 @@ static void cmd_rshell(int argc, char **argv)
         g_api->kprintf(ATTR_WHITE, "%s", rbuf);
         g_api->kprintf(ATTR_WHITE, "%s", "\n");
 
-        execute_command(rbuf);
+        /* `$?` は execute_command が入れる。**rshell を抜けるとこの handler の
+         * 0 で上書きされる** ので、ホストから見るときは「試験コマンド →
+         * 完了待ち → `echo $?` を別送信」の順にすること (票 §2-5-1)。 */
+        (void)execute_command(rbuf);
 
         /* 印を **1 行ぶんで下ろす** (対話の ui.c と同じ扱い)。
          * rshell 自身が execute_command("rshell") の中で走っているので、
@@ -203,14 +210,15 @@ rshell_exit:
 
     g_api->rshell_set_active(0);
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Remote shell closed]\n");
+    return 0;
 }
 
-static void cmd_send(int argc, char **argv)
+static int cmd_send(int argc, char **argv)
 {
     int i;
     if (!g_api->serial_is_initialized()) {
         g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial' first.\n");
-        return;
+        return SH_STATUS_ERROR;
     }
     for (i = 1; i < argc; i++) {
         g_api->serial_puts(argv[i]);
@@ -219,6 +227,7 @@ static void cmd_send(int argc, char **argv)
     g_api->serial_putchar('\r');
     g_api->serial_putchar('\n');
     g_api->kprintf(ATTR_YELLOW, "%s", "Sent\n");
+    return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -230,7 +239,7 @@ static void cmd_send(int argc, char **argv)
 /*  出力はホスト側ラッパが読むので機械可読に保つこと                         */
 /*  (HOTDEPLOY base= / HOTDEPLOY OK / HOTDEPLOY ERR)。                       */
 /* ------------------------------------------------------------------------ */
-static void cmd_hotdeploy(int argc, char **argv)
+static int cmd_hotdeploy(int argc, char **argv)
 {
     const char *path;
     u32 len, want, got;
@@ -240,12 +249,12 @@ static void cmd_hotdeploy(int argc, char **argv)
     if (argc < 2) {
         g_api->kprintf(ATTR_CYAN, "HOTDEPLOY base=0x%08X size=%u\n",
                        (u32)(unsigned long)hd_buf, (u32)HD_BUF_SIZE);
-        return;
+        return 0;
     }
     if (argc < 4) {
         g_api->kprintf(ATTR_RED, "%s", "HOTDEPLOY ERR usage\n");
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     path = argv[1];
@@ -254,7 +263,7 @@ static void cmd_hotdeploy(int argc, char **argv)
 
     if (len == 0 || len > HD_BUF_SIZE) {
         g_api->kprintf(ATTR_RED, "HOTDEPLOY ERR bad-length %u\n", len);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     /* ホストが書き終える前に叩かれた場合や、前回の残骸を掴んだ場合を
@@ -263,22 +272,23 @@ static void cmd_hotdeploy(int argc, char **argv)
     if (got != want) {
         g_api->kprintf(ATTR_RED, "HOTDEPLOY ERR crc want=0x%08X got=0x%08X\n",
                        want, got);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     fd = g_api->sys_open(path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd < 0) {
         g_api->kprintf(ATTR_RED, "HOTDEPLOY ERR open %s\n", path);
-        return;
+        return SH_STATUS_ERROR;
     }
     if ((u32)g_api->sys_write(fd, hd_buf, len) != len) {
         g_api->kprintf(ATTR_RED, "%s", "HOTDEPLOY ERR write\n");
         g_api->sys_close(fd);
-        return;
+        return SH_STATUS_ERROR;
     }
     g_api->sys_close(fd);
 
     g_api->kprintf(ATTR_GREEN, "HOTDEPLOY OK %s %u\n", path, len);
+    return 0;
 }
 
 /* host: プレフィックスを /host/ パスに変換するヘルパ
@@ -307,7 +317,7 @@ static int resolve_host_path(const char *arg, char *out, int max)
     return 1;
 }
 
-static void cmd_recv(int argc, char **argv)
+static int cmd_recv(int argc, char **argv)
 {
 
     /* SerialFS モード: recv host:/path [localpath]
@@ -322,7 +332,7 @@ static void cmd_recv(int argc, char **argv)
                                          (int)sizeof(host_path)) : 0;
     if (hp < 0) {
         sh_refuse("recv: host path", (int)sizeof(host_path) - 1);
-        return;
+        return SH_STATUS_USAGE;
     }
     if (hp > 0) {
         const char *local_path;
@@ -347,13 +357,13 @@ static void cmd_recv(int argc, char **argv)
         fd_in = g_api->sys_open(host_path, KAPI_O_RDONLY);
         if (fd_in < 0) {
             g_api->kprintf(ATTR_RED, "recv: %s not found\n", host_path);
-            return;
+            return SH_STATUS_ERROR;
         }
         fd_out = g_api->sys_open(local_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
         if (fd_out < 0) {
             g_api->kprintf(ATTR_RED, "recv: cannot create %s\n", local_path);
             g_api->sys_close(fd_in);
-            return;
+            return SH_STATUS_ERROR;
         }
 
         /* xfer_buf 単位で読み切るまで回す。以前は sys_read が 1 回だけで、
@@ -365,14 +375,14 @@ static void cmd_recv(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "%s", "recv: read failed\n");
                 g_api->sys_close(fd_in);
                 g_api->sys_close(fd_out);
-                return;
+                return SH_STATUS_ERROR;
             }
             if (n == 0) break;
             if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)n) != n) {
                 g_api->kprintf(ATTR_RED, "%s", "recv: write failed\n");
                 g_api->sys_close(fd_in);
                 g_api->sys_close(fd_out);
-                return;
+                return SH_STATUS_ERROR;
             }
             total += (u32)n;
         }
@@ -387,14 +397,15 @@ static void cmd_recv(int argc, char **argv)
                        elapsed / 100, elapsed % 100);
         g_api->kprintf(ATTR_GREEN, "%u B/s)\n",
                        total * 100 / elapsed);
-        return;
+        return 0;
     }
 
     /* 引数なし or host: プレフィックスなし */
     shell_print_help(argv[0]);
+    return SH_STATUS_USAGE;
 }
 
-static void cmd_push(int argc, char **argv)
+static int cmd_push(int argc, char **argv)
 {
     char host_path[RSHELL_HOST_PATH_MAX];
     const char *local_path;
@@ -404,7 +415,7 @@ static void cmd_push(int argc, char **argv)
 
     if (argc < 3) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     local_path = argv[1];
@@ -413,11 +424,11 @@ static void cmd_push(int argc, char **argv)
     hp = resolve_host_path(argv[2], host_path, (int)sizeof(host_path));
     if (hp < 0) {
         sh_refuse("push: host path", (int)sizeof(host_path) - 1);
-        return;
+        return SH_STATUS_USAGE;
     }
     if (hp == 0) {
         g_api->kprintf(ATTR_RED, "%s", "push: destination must be host:path\n");
-        return;
+        return SH_STATUS_ERROR;
     }
 
     g_api->kprintf(ATTR_CYAN, "Uploading: %s -> %s\n", local_path, host_path);
@@ -426,14 +437,14 @@ static void cmd_push(int argc, char **argv)
     fd_in = g_api->sys_open(local_path, KAPI_O_RDONLY);
     if (fd_in < 0) {
         g_api->kprintf(ATTR_RED, "push: %s not found\n", local_path);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     fd_out = g_api->sys_open(host_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd_out < 0) {
         g_api->kprintf(ATTR_RED, "push: cannot create %s\n", host_path);
         g_api->sys_close(fd_in);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     /* T24: xfer_buf 単位で**読み切るまで回す** (cmd_recv と同じ形)。
@@ -446,14 +457,14 @@ static void cmd_push(int argc, char **argv)
             g_api->kprintf(ATTR_RED, "%s", "push: read failed\n");
             g_api->sys_close(fd_in);
             g_api->sys_close(fd_out);
-            return;
+            return SH_STATUS_ERROR;
         }
         if (n == 0) break;
         if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)n) != n) {
             g_api->kprintf(ATTR_RED, "%s", "push: write failed\n");
             g_api->sys_close(fd_in);
             g_api->sys_close(fd_out);
-            return;
+            return SH_STATUS_ERROR;
         }
         total += (u32)n;
     }
@@ -468,9 +479,10 @@ static void cmd_push(int argc, char **argv)
                    elapsed / 100, elapsed % 100);
     g_api->kprintf(ATTR_GREEN, "%u B/s)\n",
                    total * 100 / elapsed);
+    return 0;
 }
 
-static void cmd_tvdump(int argc, char **argv)
+static int cmd_tvdump(int argc, char **argv)
 {
     volatile u16 *text = (volatile u16 *)0xA0000UL;
     volatile u8  *attr_base = (volatile u8 *)0xA2000UL;
@@ -479,7 +491,7 @@ static void cmd_tvdump(int argc, char **argv)
 
     if (!g_api->serial_is_initialized()) {
         g_api->kprintf(ATTR_RED, "%s", "Serial not initialized.\n");
-        return;
+        return SH_STATUS_ERROR;
     }
 
     g_api->serial_putchar('T'); g_api->serial_putchar('V');
@@ -496,6 +508,7 @@ static void cmd_tvdump(int argc, char **argv)
         }
     }
     g_api->kprintf(ATTR_GREEN, "%s", "TVRAM dump sent\n");
+    return 0;
 }
 
 /* 登録用テーブル */

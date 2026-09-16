@@ -48,7 +48,7 @@ extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[215];
+volatile u32 kapi_hits[216];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -269,6 +269,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     4,  /* host_close */
     8,  /* sys_set_mtime */
     0,  /* kbd_peekkey */
+    8,  /* exec_last_result */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -489,6 +490,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0000,  /* host_close */
     0x0001,  /* sys_set_mtime: path */
     0x0000,  /* kbd_peekkey */
+    0x0003,  /* exec_last_result: kind,code */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -1773,5 +1775,11 @@ int __cdecl wrap_kbd_peekkey(void)
 {
     KAPI_HIT(214);
     return kbd_peekkey();
+}
+
+int __cdecl wrap_exec_last_result(int *kind, int *code)
+{
+    KAPI_HIT(215);
+    return exec_last_result(kind, code);
 }
 

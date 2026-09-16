@@ -616,9 +616,24 @@ static int __cdecl h_sys_redirect_fd_buf(int fd, u8 *b, u32 cap, u32 len)
 static u32 __cdecl h_sys_redirect_get_buf_len(int fd) { (void)fd; return 0; }
 static void __cdecl h_sys_reset_redirect(int fd) { (void)fd; }
 /* 1 呼び出しごとに 1 tick 進む。止まったままだと rshell / filer の
- * 「次の tick まで待つ」ループが抜けない (試験がハングする)。 */
+ * 「次の tick まで待つ」ループが抜けない (試験がハングする)。
+ *
+ * tick_freeze(1) の間だけ **止める**。script_exec の譲りは「同じ tick の
+ * 中では 1 回だけ」なので、止めた tick でないとその間引きを見られない
+ * (窓 30h)。止めるのはその場の試験だけ — fresh() が必ず戻す。 */
 static u32 g_tick;
-static u32 __cdecl h_get_tick(void) { return g_tick++; }
+static int g_tick_frozen;
+static u32 __cdecl h_get_tick(void)
+{
+    if (g_tick_frozen) return g_tick;
+    return g_tick++;
+}
+static void tick_freeze(int on) { g_tick_frozen = on; }
+/* 贋 tick を 1 つ進める。script_exec の譲りは「同じ tick では 1 回だけ」で、
+ * その記憶 (cmd_script.c の static) は fresh() では消せない。tick が動いて
+ * いない状態で測ると**正しく間引かれて** 0 回になるので、間引きを見たいとき
+ * 以外は測る前にここで 1 つ進める。 */
+static void tick_step(void) { g_tick++; }
 
 /* 起動の記録。切り詰めた行で子が起きたかどうかを見る唯一の窓。 */
 #define LAUNCH_LOG_CAP 512
@@ -631,6 +646,16 @@ static void launch_log_reset(void)
     g_launch_last[0] = '\0';
 }
 
+/*  この試験が見たいのは「**子が起きたか** (launch_req を呼んだか) と、
+ *  その綴り」で、起動の成否そのものではない。
+ *
+ *  2026-09-16 (票 TASK_EXIT_STATUS R1b) まではここで OS32_ERR_INVAL
+ *  (= GUI 外) を返していた。新しい契約では GUI 外は「起こせなかった」=
+ *  126 で **PATH 走査が止まる** ので、候補を全部試す形の反例 (18e) や
+ *  「解決しにいったか」を "command not found" で見る窓 (ran()) が
+ *  成り立たなくなる。そこで **要求は受け付けて、子が見つからなかった**
+ *  (LAUNCH_ST_FAILED + EXEC_ERR_NOT_FOUND) という返しに替える。
+ *  launch_req の呼び出し回数・綴りの窓は 1 バイトも変わらない。 */
 static i32 __cdecl h_launch_req(const char *cmdline)
 {
     int i;
@@ -638,15 +663,25 @@ static i32 __cdecl h_launch_req(const char *cmdline)
         g_launch_last[i] = cmdline[i];
     g_launch_last[i] = '\0';
     g_launch_count++;
-    return OS32_ERR_INVAL;      /* GUI 外 = 「起こさなかった」 */
+    return 1;                   /* token (受け付けた) */
 }
 static i32 __cdecl h_launch_poll(i32 token, i32 *status)
 {
     (void)token;
-    if (status) *status = LAUNCH_ST_DONE;
+    /* 子は見つからなかった = 次の候補へ進む側 (sh_launch は何も印字しない) */
+    if (status) *status = LAUNCH_ST_FAILED | (i32)(-EXEC_ERR_NOT_FOUND);
     return 0;
 }
-static i32 __cdecl h_sys_yield(void) { return 0; }
+/* 譲り (KAPI v49) の回数。script_exec が行ごとに WM へ譲っているかを見る
+ * 唯一の窓 — 本物では park / resume の往復になる。
+ *
+ * **sh_launch も譲る** ことに注意 (要求表の待ちループが sys_yield を回す)。
+ * だから外部コマンドを含む行では、この数に「起動の待ち」ぶんが混ざる。
+ * 窓 30 はそれを避けるために内蔵コマンドだけで組み、外部を含む形は
+ * 30i で **差分** (同じ行を対話で 1 回 / スクリプトで 1 回) で見る。 */
+static int g_yield_count;
+static i32 __cdecl h_sys_yield(void) { g_yield_count++; return 0; }
+static int yield_count(void) { return g_yield_count; }
 
 /* --- 監視キュー (script_exec の ESC 監視が引く口) ------------------------
  *
@@ -980,6 +1015,8 @@ static void fresh(void)
     g_glob_alloc_budget = -1;
     g_glob_allocs = 0;
     g_frees = 0;
+    g_yield_count = 0;
+    g_tick_frozen = 0;
 }
 
 /* 同じ文字列を n 回続けて足す (クォート再付与ぶんの反例を組むのに使う) */
@@ -1281,7 +1318,12 @@ static void case_nested_source(void)
     execute_command("source /parent.sh");
     check(ran("mk1") && ran("markparent"),
           "5e 通る子の後も親は続く (誤発火なし)");
-    check(script_source_file("/child.sh") == 0, "5f 通った source は 0 を返す");
+    /* 票 TASK_EXIT_STATUS §2-5-1 で契約が変わった (2026-09-16): 断らなかった
+     * source は **最後に実行した行の値** を返す (以前は一律 0)。この子の
+     * 最後の行は未知のコマンド `mk1` なので 127。断りの -2 ではないことが
+     * ここで見たいこと。 */
+    check(script_source_file("/child.sh") == SH_STATUS_NOTFOUND,
+          "5f 断らなかった source は最後の行の値 (SCRIPT_ERR_REFUSED ではない)");
 }
 
 /* ========================================================================
@@ -3293,6 +3335,117 @@ static void case_script_esc_watch(void)
           "29r 打鍵が無ければ何も起きない");
 }
 
+/* ========================================================================
+ *  30. GUI 端末: スクリプトの行ごとに WM へ譲る (cmd_script.c)
+ *
+ *  sh.bin は協調型 GUI の中の CPL=3 アプリなので、譲らないかぎり WM は
+ *  1 度も回らない。2026-09-16 まで、この譲りは行ごとの ESC 監視の副作用で
+ *  出ていた (kbd_trygetkey の空振り → drivers/kbd.c の exec_park_poll)。
+ *  監視を kbd_peekkey へ替えたときに副作用ごと消えたので、script_exec が
+ *  KAPI v49 の sys_yield で明示的に譲り直す。
+ *
+ *  窓は贋 KAPI の呼び出し回数 (yield_count)。間引き (同じ tick では 1 回)
+ *  は tick を止めて見る。**常駐 (CUI) 側は呼び出しごと消える** —
+ *  script_yield_gui は #ifdef SHELL_AS_APP の外で ((void)0) なので、この
+ *  試験の枠 (-DSHELL_AS_APP) では見られない。CUI 側は
+ *  test_sh_truncation.py の cui_has_no_yield() が前処理で見る。
+ *
+ *  **窓の較正 (2026-09-16、票 TASK_EXIT_STATUS の着地で調整)**:
+ *  sh_launch は要求表の待ちループで sys_yield を回すので、**外部コマンドを
+ *  含む行では起動の待ちぶんが同じ窓に混ざる**。以前の贋 launch_req は
+ *  「GUI 外 (OS32_ERR_INVAL)」を返して待ちループへ入らなかったため混ざって
+ *  いなかったが、いまは「要求を受け付けて子が見つからない」を返すので入る。
+ *  そこで 30a〜h は **内蔵コマンド (`echo`) だけ**で組み、script_exec の
+ *  譲りだけを数える。外部コマンドを含む形は 30i〜j で、同じ行を対話で 1 回 /
+ *  スクリプトで 1 回流した **差分がちょうど 1** であることで見る
+ *  (候補の数に依存しない)。走った行は `echo` の出力で確かめる。
+ * ======================================================================== */
+static void case_script_yield(void)
+{
+    report("30 GUI 端末: スクリプトの行ごとに WM へ譲る\n");
+
+    /* --- 30a〜b: 行ごとに 1 回 (贋 tick は呼ぶたびに進む = 間引かれない) -- */
+    fresh();
+    s_begin(0);
+    s_add("echo yA\n");
+    s_add("echo yB\n");
+    s_add("echo yC\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(out_has("yA") && out_has("yB") && out_has("yC"), "30a 3 行とも走る");
+    check(yield_count() == 3, "30b 行ごとに 1 回ずつ WM へ譲る");
+
+    /* --- 30c: ラベル行では譲らない (実行する行だけ) -------------------- */
+    fresh();
+    s_begin(0);
+    s_add(":L\n");
+    s_add("echo yA\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(out_has("yA") && yield_count() == 1, "30c ラベル行では譲らない");
+
+    /* --- 30d: スクリプト以外 (対話の 1 行) では譲らない ---------------- */
+    fresh();
+    execute_command("echo yA");
+    check(out_has("yA") && yield_count() == 0, "30d 対話の 1 行では譲らない");
+
+    /* --- 30e〜f: 入れ子 source でも内側の行ごとに譲る ------------------ */
+    fresh();
+    s_begin(1);
+    s_add("echo yB\n");
+    s_add("echo yC\n");
+    file_add("/inner.sh", s_body(1));
+    s_begin(0);
+    s_add("echo yA\n");
+    s_add("source /inner.sh\n");
+    s_add("echo yD\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(out_has("yA") && out_has("yB") && out_has("yC") && out_has("yD"),
+          "30e 入れ子 source: 内外とも最後まで走る");
+    check(yield_count() == 5, "30f 入れ子でも行ごと (外 3 行 + 内 2 行)");
+
+    /* --- 30g〜h: 同じ tick の中では 1 回だけ (間引き) ------------------
+     *  譲りは park / resume の往復なので、`goto` で回る軽い行のループでは
+     *  往復のほうが行より重い。消えた側 (exec_park_poll) と同じ間引き。 */
+    fresh();
+    tick_freeze(1);
+    s_begin(0);
+    s_add("echo yA\n");
+    s_add("echo yB\n");
+    s_add("echo yC\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    tick_freeze(0);
+    check(out_has("yA") && out_has("yB") && out_has("yC"),
+          "30g 間引いても行は全部走る");
+    check(yield_count() == 1, "30h 同じ tick の中では 1 回だけ譲る");
+
+    /* --- 30i〜j: 外部コマンドを含む行でも、行ごとの譲りが 1 回増える ----
+     *  sh_launch の待ちループが同じ窓を回すので、絶対値では見ない。
+     *  **同じ 1 行**を対話とスクリプトで流し、差がちょうど 1 であることで
+     *  「script_exec が足した 1 回」を取り出す (PATH 候補の数に依存しない)。*/
+    {
+        int base, in_script;
+
+        fresh();
+        tick_step();          /* 直前の 30h が tick を止めたままにしている */
+        execute_command("mk1");
+        base = yield_count();
+        check(ran("mk1"), "30i 対話: 外部コマンドを解決しにいった");
+
+        fresh();
+        tick_step();
+        s_begin(0);
+        s_add("mk1\n");
+        file_add("/t.sh", s_body(0));
+        execute_command("source /t.sh");
+        in_script = yield_count();
+        check(ran("mk1") && in_script == base + 1,
+              "30j 同じ行でもスクリプトなら譲りがちょうど 1 回増える");
+    }
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -3331,6 +3484,7 @@ void _start(void)
     case_tab_completion();
     case_rshell_nested_refuse_flag();
     case_script_esc_watch();
+    case_script_yield();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

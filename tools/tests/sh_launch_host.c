@@ -350,36 +350,53 @@ static void case_req_other(void)
                                                     "6c rc つきで報告する");
 }
 
-/* GUI 外 (CUI から直に起動) — PATH 候補の数だけ同じ行を出さない */
+/* GUI 外 (CUI から直に起動)。
+ *
+ *  **票 TASK_EXIT_STATUS R1b で契約が変わった** (2026-09-16)。以前は
+ *  EXEC_ERR_NOT_FOUND を返して「次の PATH 候補へ」と読ませていたので、
+ *  1 本しか無いコマンドでも候補の数だけ launch_req を呼び、最後に
+ *  "command not found" で閉じていた。新しい契約は
+ *    「起こせなかった」= EXEC_KIND_NOMEM → `$?` は 126 で **走査は止まる**。
+ *  理由の 1 行は今までどおり 1 回だけ出す (印 sh_launch_nogui)。
+ *  結果 API (sh_exec_result) で見るので、旧 sh_launch の戻り値の契約
+ *  (NOT_FOUND = 次の候補へ) は残さない。 */
 static void case_req_nogui(void)
 {
-    int rc;
+    int rc, kind, code;
 
     reset_harness();
     sh_launch_nogui = 0;
-    report("7 launch_req が INVAL — GUI 外は 1 行だけ、あとは黙る\n");
+    report("7 launch_req が INVAL — GUI 外は 126 で走査を止める (R1b)\n");
     g_script.req_rc = OS32_ERR_INVAL;
     script_poll(0, 0, LAUNCH_ST_DONE);
 
-    rc = sh_launch("/bin/kbd_echo.bin");
-    check(rc == EXEC_ERR_NOT_FOUND,                 "7a 次の候補へ回す値を返す");
+    kind = -1; code = -1;
+    rc = sh_exec_result("/bin/kbd_echo.bin", &kind, &code);
+    check(rc == EXEC_ERR_GENERAL,                   "7a 負を返す");
+    check(kind == EXEC_KIND_NOMEM,
+          "7a2 種別は「起こせなかった」(次の候補へ回さない)");
+    check(code == 0,                                "7a3 値は 0");
     check(str_eq(g_msg, "sh: external programs need the GUI terminal\n"),
                                                     "7b 理由を 1 行だけ出す");
     check(g_polls == 0,                             "7c poll しない");
 
-    /* 2 本目以降の PATH 候補 */
+    /* 2 本目 (呼び手が止めなかった場合でも) 同じ種別で、黙る */
     g_msg[0] = '\0';
     g_msg_len = 0;
-    rc = sh_launch("/usr/bin/kbd_echo.bin");
-    check(rc == EXEC_ERR_NOT_FOUND,                 "7d 2 本目も次の候補へ");
+    kind = -1;
+    rc = sh_exec_result("/usr/bin/kbd_echo.bin", &kind, &code);
+    check(kind == EXEC_KIND_NOMEM,                  "7d 2 本目も同じ種別");
     check(g_msg[0] == '\0',                         "7e 2 本目は黙る");
 
     /* 起動が通れば印は寝る (次に GUI 外へ落ちたらまた報せる) */
     reset_harness();
     g_script.req_rc = 5;
     script_poll(0, 0, LAUNCH_ST_DONE);
-    (void)sh_launch("ls");
+    kind = -1; code = -1;
+    rc = sh_exec_result("ls", &kind, &code);
     check(sh_launch_nogui == 0,                     "7f 通ったら印を寝かせる");
+    check(rc == EXEC_SUCCESS && kind == EXEC_KIND_EXITED && code == 0,
+          "7g DONE は (EXITED, 0) に写る (§2-6: 終了コードは別票)");
 }
 
 /* ========================================================================

@@ -1,5 +1,5 @@
 {
-  "version": 54,
+  "version": 55,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1492,6 +1492,11 @@
       "name": "kbd_peekkey",
       "ret": "int",
       "args": []
+    },
+    {
+      "name": "exec_last_result",
+      "ret": "int",
+      "args": ["int *kind", "int *code"]
     }
   ]
 }

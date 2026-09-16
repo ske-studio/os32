@@ -213,9 +213,10 @@ extern i32 __cdecl wrap_host_write(i32 h, const void *buf, u32 len);
 extern i32 __cdecl wrap_host_close(i32 h);
 extern int __cdecl wrap_sys_set_mtime(const char *path, u32 mtime);
 extern int __cdecl wrap_kbd_peekkey(void);
+extern int __cdecl wrap_exec_last_result(int *kind, int *code);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 54;
+kapi->version = 55;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -432,5 +433,6 @@ kapi->version = 54;
     kapi->host_close = wrap_host_close;
     kapi->sys_set_mtime = wrap_sys_set_mtime;
     kapi->kbd_peekkey = wrap_kbd_peekkey;
+    kapi->exec_last_result = wrap_exec_last_result;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;
