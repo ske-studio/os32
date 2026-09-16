@@ -139,6 +139,11 @@ filesystem:
     - host: userland/tests/cfg_bench.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- kstr_bench (票 TASK_KSTRING_BENCH: kstring の asm 版と C 版を実機で測る。
+    #     出力は `KSTR ...` の固定書式で、集計は tools/kstr_bench_report.py) ---
+    - host: userland/tests/kstr_bench.bin
+      guest: /usr/bin/
+      tags: [programs]
     - host: userland/tests/db_v50_test.bin
       guest: /usr/bin/
       tags: [programs]

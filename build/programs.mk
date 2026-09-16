@@ -4,7 +4,7 @@
 
 # === ベースプログラム (単体ソースファイル → 自動ビルド) ===
 C_CMDS = $(wildcard userland/cmds/*.c)
-C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/kbd_echo.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c, $(wildcard userland/tests/*.c))
+C_TESTS = $(filter-out userland/tests/gfx200_test.c userland/tests/gfx_demo200.c userland/tests/blit_test.c userland/tests/blit_test2.c userland/tests/demo_tile.c userland/tests/tile_bench.c userland/tests/rotate_test.c userland/tests/db_test.c userland/tests/dbq.c userland/tests/e2test.c userland/tests/math_test.c userland/tests/chem_test.c userland/tests/chem_demo.c userland/tests/map_test.c userland/tests/map_demo.c userland/tests/input_test.c userland/tests/asset_test.c userland/tests/asset_demo.c userland/tests/ecs_test.c userland/tests/ecs_demo.c userland/tests/text_test.c userland/tests/text_demo.c userland/tests/econ_test.c userland/tests/ai_test.c userland/tests/btl_test.c userland/tests/board_test.c userland/tests/evt_test.c userland/tests/inv_test.c userland/tests/turn_test.c userland/tests/rpg_test.c userland/tests/save_test.c userland/tests/mgx_test.c userland/tests/kbd_echo.c userland/tests/ring3_hello.c userland/tests/ring3_fault.c userland/tests/ring3_guard.c userland/tests/kstr_bench.c, $(wildcard userland/tests/*.c))
 C_SYSTEM = $(filter-out userland/system/lz4.c userland/system/cdinst.c, $(wildcard userland/system/*.c))
 
 C_BASE_PROGRAMS = $(C_CMDS) $(C_TESTS) $(C_SYSTEM)
@@ -352,6 +352,43 @@ userland/tests/cfg_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/cfg_ben
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/cfg_bench.o \
 	      $(LGRP_BEG) $(LIBCFG_OBJ) $(LGRP_END) -lc -lgcc
 
+# kstr_bench — kstring のアセンブリ版と C 版を実機で測る
+# (票 docs/tasks/portability/TASK_KSTRING_BENCH.md)。
+#
+# **出荷するソースそのもの**を測る。写しは作らない。lib/kstring_asm.asm と
+# lib/kstring_c.c は 13 本すべてが同名なので 1 つの実行ファイルに入らない。
+# tools/tests/test_kstring_c.py と同じ手で objcopy --redefine-syms に
+# 接頭辞を付けさせ、アセンブリ版を a_*、C 版を c_* にして同居させる
+# (libc の memcpy / strlen 等とも衝突しなくなる副産物つき)。
+#
+# 名前の表はここが管理元。lib/kstring_asm.asm の global が増減したら
+# ここと userland/tests/kstr_bench.c の kb_build_table を直す
+# (tools/tests/test_kstr_bench.py が 3 者のずれを検出する)。
+KSTR_BENCH_FUNCS = kmemcpy memcpy kmemset memset kstrlen strlen kstrcmp \
+                   strcmp kstrncmp strncmp kstrcpy kstrncpy memcmp
+
+userland/tests/kstr_asm_a.o: lib/kstring_asm.asm
+	$(AS) -f elf32 $< -o userland/tests/kstr_asm_raw.o
+	@for f in $(KSTR_BENCH_FUNCS); do echo "$$f a_$$f"; done > userland/tests/kstr_ren_a.txt
+	$(OBJCOPY) --redefine-syms=userland/tests/kstr_ren_a.txt userland/tests/kstr_asm_raw.o $@
+	@rm -f userland/tests/kstr_asm_raw.o userland/tests/kstr_ren_a.txt
+
+userland/tests/kstr_c_c.o: lib/kstring_c.c lib/kstring.h include/types.h
+	$(CC) $(PROGRAM_FLAGS) -Ilib -c $< -o userland/tests/kstr_c_raw.o
+	@for f in $(KSTR_BENCH_FUNCS); do echo "$$f c_$$f"; done > userland/tests/kstr_ren_c.txt
+	$(OBJCOPY) --redefine-syms=userland/tests/kstr_ren_c.txt userland/tests/kstr_c_raw.o $@
+	@rm -f userland/tests/kstr_asm_raw.o userland/tests/kstr_c_raw.o userland/tests/kstr_c_raw.d userland/tests/kstr_ren_c.txt
+
+userland/tests/kstr_bench.o: userland/tests/kstr_bench.c
+	$(CC) $(PROGRAM_FLAGS) -c $< -o $@
+
+userland/tests/kstr_bench.elf: sdk/link/app.ld $(CRT0_OBJ) userland/tests/kstr_bench.o \
+                               userland/tests/kstr_asm_a.o userland/tests/kstr_c_c.o
+	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) userland/tests/kstr_bench.o \
+	      userland/tests/kstr_asm_a.o userland/tests/kstr_c_c.o -lc -lgcc
+
+kstr_bench: $(CRT0_OBJ) userland/tests/kstr_bench.bin
+
 # tar — ustar の作成 / 展開 / 一覧 (票 S6)。ustar の読み書きは vendor した
 # lib/microtar (rxi、MIT)。lib/lz4_prog.o と同じく、カーネル側とは別に
 # PROGRAM_FLAGS でビルドした _prog.o を明示規則でリンクする
@@ -552,7 +589,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base sh bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
+programs: libs $(DBG_OBJ) programs_base sh bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test kstr_bench hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)
@@ -562,6 +599,7 @@ $(shell find userland -name '*.o' 2>/dev/null): $(SDK_KAPI_HDR)
 clean-programs: clean-rust
 	rm -f userland/cmds/*.o userland/cmds/*.elf userland/cmds/*.raw userland/cmds/*.bin
 	rm -f userland/tests/*.o userland/tests/*.elf userland/tests/*.raw userland/tests/*.bin
+	rm -f userland/tests/kstr_ren_a.txt userland/tests/kstr_ren_c.txt userland/tests/kstr_c_raw.d
 	rm -f userland/tests/bench/*.o userland/tests/bench/*.elf userland/tests/bench/*.raw userland/tests/bench/*.bin
 	rm -f userland/tests/bench_scale2x/*.o userland/tests/bench_scale2x/*.elf userland/tests/bench_scale2x/*.raw userland/tests/bench_scale2x/*.bin
 	rm -f userland/system/*.o userland/system/*.elf userland/system/*.raw userland/system/*.bin
@@ -580,7 +618,7 @@ clean-programs: clean-rust
 .PHONY: programs programs_base game sh lz4_cmd cdinst bench bench_scale2x faultprobe
 .PHONY: gfx200_test gfx_demo200 blit_test blit_test2 rotate_test
 .PHONY: demo_tile tile_bench db_test e2test sqlite_standalone math_test
-.PHONY: input_test kbd_echo
+.PHONY: input_test kbd_echo kstr_bench
 .PHONY: asset_test asset_demo ecs_test text_demo
 .PHONY: inv_test
 .PHONY: save_test
