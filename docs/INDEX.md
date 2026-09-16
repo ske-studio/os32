@@ -132,7 +132,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | B8 **受入完了 (2026-09-15、6 往復)** — 読み取り失敗を不存在・未割当・別の型と読み替えていた ext2/VFS/HostDrv の経路。remount-ro 相当、e2fsck を正解に。残る制限は §2-6 / §2-7 |
 | [tasks/shell/TASK_SH_TRUNCATION.md](tasks/shell/TASK_SH_TRUNCATION.md) | シェルの入力切り詰め **受入完了 (2026-09-16)** — 切り詰めたまま実行を続ける 26 経路。`if` の比較が 255 文字で切れて条件が逆転し破壊的なコマンドが走る欠陥を含む。`$?` の配線より先 |
 | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) | 終了コードの配線と `$?` **受入完了 (2026-09-16)** — ゲスト試験ランナーの 1 段目 (KAPI v55、`exec_last_result`)。終了コードが起動エラー・app_id と同じ空間に混ざっている (PATH の次の候補を二重実行する実害つき)。決裁 E1 / E2 |
-| [tasks/test/TASK_TEST_RESULT.md](tasks/test/TASK_TEST_RESULT.md) | 合否を機械が読める形にする **計画 (2026-09-17)** — ゲスト試験ランナーの 2 段目。終了コード 0/1/2 と集計行 `<名前>: PASS n/m` の制定、結果チャネルは HostDrv (決裁 R1)。`void main` 20 本と、回帰台本の偽合格 (`alloc_demo`)、`ring3_fault` / `ring3_hello` の古い `int 0x80` 規約も直す |
+| [tasks/test/TASK_TEST_RESULT.md](tasks/test/TASK_TEST_RESULT.md) | 合否を機械が読める形にする **受入完了 (2026-09-17)** — ゲスト試験ランナーの 2 段目。終了コード 0/1/2 と集計行 `<名前>: PASS n/m` の制定、結果チャネルは HostDrv (決裁 R1)。`void main` 20 本と、回帰台本の偽合格 (`alloc_demo`)、`ring3_fault` / `ring3_hello` の古い `int 0x80` 規約も直す |
 | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
 
 ### 設定レジストリ (settings、v1.3 で完了)

@@ -17,6 +17,12 @@
 #include <stdio.h>
 #include <string.h>
 
+/* FD を 3 本開くための的。**起動していれば必ず在るもの**を指す
+ * ([C4] ここが管理元)。2026-09-17 まで `/shell` を開いていたが、これは
+ * 古い配置の名残でルートには無く、3 本とも -2 (OS32_ERR_NOTFOUND) で
+ * 失敗していた。終了コードが常に 0 だったので誰も気づかなかった。 */
+#define RESTEST_OPENABLE  "/bin/sh.bin"
+
 static KernelAPI *api;
 
 /* 合否の出し方は票 docs/tasks/test/TASK_TEST_RESULT.md §2。以前は結果を
@@ -56,9 +62,9 @@ static void test_fd_leak(void)
     printf("=== Test 1: FD Leak ===\n");
     printf("Opening 3 files without closing...\n");
 
-    fd1 = api->sys_open("/shell", KAPI_O_RDONLY);  /* O_RDONLY */
-    fd2 = api->sys_open("/shell", KAPI_O_RDONLY);
-    fd3 = api->sys_open("/shell", KAPI_O_RDONLY);
+    fd1 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);  /* O_RDONLY */
+    fd2 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);
+    fd3 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 
@@ -131,9 +137,9 @@ static void verify_fd(void)
     printf("=== Verify: FD Cleanup ===\n");
     printf("Trying to open 3 files (should succeed if cleanup worked)...\n");
 
-    fd1 = api->sys_open("/shell", KAPI_O_RDONLY);
-    fd2 = api->sys_open("/shell", KAPI_O_RDONLY);
-    fd3 = api->sys_open("/shell", KAPI_O_RDONLY);
+    fd1 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);
+    fd2 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);
+    fd3 = api->sys_open(RESTEST_OPENABLE, KAPI_O_RDONLY);
 
     printf("  fd1=%d, fd2=%d, fd3=%d\n", fd1, fd2, fd3);
 

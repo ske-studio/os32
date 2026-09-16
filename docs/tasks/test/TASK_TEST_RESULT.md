@@ -1,6 +1,6 @@
 # TASK_TEST_RESULT — 合否を機械が読める形にする (ゲスト試験ランナーの 2 段目)
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **計画 (2026-09-17)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **受入完了 (2026-09-17)** — ゲスト受入は §9、見つけた不具合は §10
 
 基点: `feat/gui` = `8c87075`。
 引き継ぎ: [`../agents/HANDOVER_2026-09-16.md`](../agents/HANDOVER_2026-09-16.md) §7-2 の 2 段目。
@@ -175,3 +175,81 @@ T5 と T6 は実機 / エミュレータでの確認が要る (PM が行う。�
   約束事の対象外とする。ただし異常時の終了コードは 2-1 に従う。
 - ランナー本体 (`runtests` / `tools/guest_tests.py` / `make check-guest`) = 3 段目。
 - `hal_test` が合否を**色でしか区別しない**問題 (文字列は両方 `hal_test done`)。第 2 陣で扱う。
+
+---
+
+## 9. ゲスト受入 (PM、2026-09-17、`e420f37` + 本節の修正)
+
+NP21/W の既定構成、`make programs` → `make deploy` → ゲストの `hsync`。
+実行は `.claude/skills/run-os32/driver.py cmd --wait`。
+
+### T5 — `ring3_hello` が戻る
+
+**合格。** 約 5 秒で戻り `$?` = 0。修正前はスロット 0 (`gfx_init`) を呼んで
+無限ループに落ちる作りだったので、**戻ってくること自体が修正の証拠**。
+
+### T2 / T3 — 第 1 陣の `$?` と集計行
+
+| 試験 | 集計行 | `$?` |
+|---|---|---|
+| `klibc_test` | `klibc_test: PASS 49/49` | 0 |
+| `math_test` | `math_test: PASS 110/110` | 0 |
+| `mgx_test` | `mgx_test: PASS 76/76` | 0 |
+| `ecs_test` | `ecs_test: PASS 45/45` | 0 |
+| `asset_test` | `asset_test: PASS 23/23` | 0 |
+| `gui_call_test` | `gui_call_test: PASS 2/2` | 0 |
+| `input_test` | `input_test: PASS 29/29` | 0 |
+| `db_v50_test` | `db_v50_test: PASS 41/41` | 0 |
+| `save_test` | `save_test: PASS 15/15` | 0 |
+| `font_load_test` | `font_load_test: PASS 1/1` | 0 |
+| `test2` | `test2: PASS 5/5` | 0 |
+| `stat_t` | `stat_t: PASS 5/5` | 0 |
+| `restest all` | `restest: PASS 3/3` | 0 |
+| `e2test` | `e2test: SKIP cannot allocate the 372KB buffers` | 2 |
+| `host_test` | SKIP (ホスト側の Agent が走っていない) | 2 |
+| `db_test` | **出ない (落ちた)** | **139** |
+
+**集計行と `$?` は全件一致。** `139` は例外で畳んだときの予約値なので、
+`db_test` が落ちたことが**値だけで分かる** — 約束事が働いている証拠。
+
+### 約束事を入れた途端に露見した不具合 3 件
+
+いずれも**終了コードが常に 0 だったので誰も気づいていなかった**もの。
+
+1. **`stat_t` が `HELLO.BIN` を見ていた** — FAT 時代の名残で今のルートに無い。
+   FAIL 4/5。起動していれば必ず在る `/bin/sh.bin` に変えて PASS 5/5。
+   これが stat できないなら環境の破損なので、SKIP ではなく**不合格のまま**にした
+   (飛ばすと「ここでは関係ない」に見えて破損が隠れる)。
+2. **`restest` が `/shell` を開いていた** — 同じく古い配置の名残。3 本とも
+   `-2` (`OS32_ERR_NOTFOUND`) で失敗していた。FAIL 2/3 → PASS 3/3。
+3. **`db_test` が `db_last_error()` で落ちる** — 下の §10。
+
+### T6 — `/host` が無い構成
+
+**未実施。** HostDrv を持たない構成をこの環境で作れていない
+(`hostdrvfs_detect()` が真になる NP21/W でしか動かしていない)。
+第 1 陣は詳細ファイルを書かないので影響は無いが、**確かめていない** ([V4])。
+
+---
+
+## 10. 見つけたカーネル層の不具合 — `db_last_error()` は CPL=3 から使えない
+
+`kapi/kapi_db.c:727` の `kapi_db_last_error()` は `sqlite3_errmsg(slot->db)` を
+**そのまま返す**。SQLite はカーネル側 (0x200000〜0x2FFFFF) に居るので、
+返るのはカーネル番地のポインタで、**CPL=3 のアプリが読むと #PF で死ぬ**。
+
+実測 (2026-09-17、`db_test`):
+
+    [ring3] #PF (CPL=3 / syscall) addr=0x002B8DE0 EIP=0x005005C7 -> kill app
+
+`0x2B8DE0` は SQLite の帯の中。早期 return の `"invalid handle"` もカーネルの
+`.rodata` なので、**この関数の戻り値はどれも CPL=3 から読めない**。
+
+効き方が悪い。**`CLAUDE.md` は「枯渇の診断は `db_last_error()` を必ず出す」と
+書いており** (`docs/POLICY_DEBUG.md` §4-13 も同じ)、実機で DB を調べる唯一の道具
+`userland/tests/dbq.c:19` がエラー時にこれを呼ぶ。**いちばん必要なときに落ちる。**
+
+正しい口は SHM 経由の `db_errmsg()` (`userland/tests/db_v50_test.c:39` の注記)。
+
+**カーネル層なので POLICY_DEV §1 により新機能より先。別票を立てる。**
+本票では直さない (KAPI の戻り方を変える話で、[ABI2] と版数が絡む)。

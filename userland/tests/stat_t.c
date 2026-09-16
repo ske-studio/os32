@@ -8,6 +8,9 @@
 #include "os32api.h"
 #include "rt/testresult.h"
 
+/* 起動していれば必ず在るもの。常駐シェルの実体 ([C4] ここが管理元)。 */
+#define STAT_T_PRESENT  "/bin/sh.bin"
+
 static KernelAPI *g_api;
 static int g_total;
 static int g_passed;
@@ -38,8 +41,15 @@ int main(int argc, char **argv, KernelAPI *api)
 
     api->kprintf(0x07, "%s", "=== stat API test ===\r\n");
 
-    /* テスト1: 存在するファイル (例: HELLO.BIN) の sys_stat */
-    check(api->sys_stat("HELLO.BIN", &st) == 0, "stat HELLO.BIN success");
+    /* テスト1: 存在するファイルの sys_stat。
+     * 2026-09-17 まで `HELLO.BIN` を見ていたが、これは FAT 時代の名残で
+     * 今のルートには無い。終了コードが常に 0 だったので不合格が見えず、
+     * 約束事 (票 TASK_TEST_RESULT) を入れた途端に FAIL 4/5 で露見した。
+     * 起動しているシステムに必ず在るものを見る。これが stat できないなら
+     * **環境が壊れている**ので、SKIP ではなく不合格のままにする —
+     * 飛ばすと「ここでは関係ない」に見えて破損が隠れる。 */
+    check(api->sys_stat(STAT_T_PRESENT, &st) == 0,
+          "stat " STAT_T_PRESENT " success");
 
     /* テスト2: 標準出力の sys_fstat */
     rc = api->sys_fstat(1, &st);
