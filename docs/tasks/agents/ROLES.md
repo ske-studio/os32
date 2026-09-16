@@ -117,21 +117,19 @@ python3 tools/emu_agent/agent.py tail
 | 2 | Antigravity CLI (`agy`) | 下の節 | **クォータ切れ (72 時間)** |
 | 3 | Fable 5.1 サブエージェント | `Agent(model: "fable", isolation: "worktree")`、読むだけ | **上限に達した (429)** |
 | 4 | Opus 5 サブエージェント | 同上、`model: "opus"` | 使える。ただしコーダーと同じモデルなので盲点を共有する |
-| 5 | opencode + ローカル Qwen3.8 27B | `opencode run --agent plan "…"` (設定は `opencode.json`) | **未確認**。準備の要点は下の節 |
+| 5 | **ローカルモデル直接方式** (`tools/review_local.py`) | スキル **`os32-local-review`**。対象を行番号つきで埋め込み 1 回で返させる。**opencode は使わない** | **使える (2026-09-16 に実測)**。指摘 5 件すべて実在・作り話 0、既知 9 件中 5 件を検出、123 秒 |
 
 4 つとも尽きたら、レビューが要る地点で止まってユーザーに報告する (§3 の規約 4 番目)。
 
-**opencode + ローカル Qwen3.8 27B (2026-09-16 に試した記録)**
+**ローカルモデルによる補助レビュー (2026-09-16 に実測)**
 
-- 設定はリポジトリ直下の `opencode.json` (git 管理外)。`provider.ollama` に `baseURL` と
-  **モデル ID をサーバー上の実名で**書く (`aiconjured/…:latest` の接頭辞と `:latest` を省くと
-  「model not found」で無反応になる)。
-- **サーバー側の既定文脈長が効く**。opencode は OpenAI 互換の口を使うので `num_ctx` を送らない。
-  Ollama を `OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=1 ollama serve` で
-  起こしておく。`NUM_PARALLEL` を絞らないと同じモデルが二重に載って **CUDA OOM でサーバーが落ちる**
-  (`ubuntu-ai-server` で実際に落ちた)。
-- 速度は量子化に依存する。NVFP4 は L4 (Ada) に FP4 の演算器が無く、実測 **2 トークン/秒**。
-  レビュー 1 本に 10 分以上かかる。速度が要るなら Q4_K_M / Q8_0 を使う。
+手順と落とし穴の正典はスキル **`os32-local-review`**、道具は `tools/review_local.py`。要点だけ:
+
+- **opencode は使わない** (初期化後に固まる / 文脈溢れで同じ読み直しを 77 回繰り返した)。
+  対象ファイルを**行番号つきで依頼文に埋め込み、1 回の要求で返させる**。
+- 実力: 挙げた所見は信用できるが (作り話 0)、**挙げなかったことは「無い」の証拠にならない** (既知 9 件中 5 件)。
+  主レビュアーの代わりにはならない。所見は PM が反例の到達可能性を確かめてから採る。
+- 票の往復記録に**どのモデルが見たかを書く**。
 
 **Codex 枯渇時のレビュアー (ユーザー指示 2026-09-16、優先)**: **Antigravity CLI (`agy`)** に投げる。読み取り専用で回す形は
 2026-09-16 に実地で確認した:
