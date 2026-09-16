@@ -3,6 +3,7 @@
 票: [`docs/tasks/shell/TASK_SH_TRUNCATION.md`](../../docs/tasks/shell/TASK_SH_TRUNCATION.md)
 基点: `feat/gui` = `a4f5429`
 試験: `make check-sh-truncation-host` (= `python3 -B tools/tests/test_sh_truncation.py`)
+    否定側もまとめて: `python3 -B tools/tests/test_sh_truncation.py --mutate`
 
 ## 0. この段 (§5 の段 1「足場」) で何をしたか
 
@@ -49,6 +50,73 @@
 
 所要時間: 約 1.1 秒 (ホスト gcc ILP32 と i386-elf-gcc の 2 回のコンパイル込み)。
 
+## 0-2. 段 2 (§5 の段 2「T1 単独 + §2-1 の中断規則」) — RED → GREEN
+
+基点: `feat/gui` = `b3954f1`。
+
+### 何を変えたか
+
+| ファイル:行 | 変更 |
+|---|---|
+| `userland/shell/cmd_script.c` `strip_quotes` | 溢れたら**黙って切らずに `-1` を返す**。長さは**クォート除去後**で数える (`sh_args.inc` が既にクォートを落としているので、`strip_quotes` は取りこぼしの掃除役) |
+| `userland/shell/cmd_script.c` `cmd_if` | `v1` / `v2` の幅を `IF_VALUE_MAX` (shell.h、[C4]) に。どちらかが収まらなければ**比較せずに断る** — `sh_refuse("if: left value" / "if: right value", IF_VALUE_MAX - 1)` の赤字 1 行を出し、コマンドは実行しない |
+| `userland/shell/cmd_script.c` `script_exec` | `execute_command` の後に `sh_refused_take()` を見て、立っていたら `script_abort_flag` を立てて打ち切る (§2-1)。戻り値で「断って打ち切った」を親へ返す |
+| `userland/shell/cmd_script.c` `script_source_file` | 断って打ち切ったら `SCRIPT_ERR_REFUSED` (-2) を返す |
+| `userland/shell/cmd_script.c` `cmd_source` / `script_source_profile` (新規) | `source` は `-2` を受けたら印を立て直して親のスクリプトも打ち切る。起動スクリプトは**印を立て直さず**メッセージを出して続行する (R2) |
+| `userland/shell/main.c` | 印の実体 `sh_refused_flag` と `sh_refuse()` / `sh_refuse_mark()` / `sh_refused_take()`。`execute_command` は `execute_command_line` を包む形にして、**いちばん外側の呼び出しだけ**が入口で印を消す |
+| `userland/shell/main.c` `execute_command_line` | 既にあった `env_expand` 溢れの断りにも印を立てる (同じ §2-1 の規則) |
+| `userland/shell/sh_exec.inc` | `foo.sh` を直に打った経路 (`run_cmd_internal`) も `-2` を印に変換して親へ伝える |
+| `userland/shell/ui.c` | 起動スクリプト 2 本を `script_source_profile()` 経由に |
+| `userland/shell/shell.h` | `IF_VALUE_MAX` / `SCRIPT_ERR_REFUSED` / 印の宣言 (寿命の規則もここに書いた) |
+
+**印を消すのは 1 か所だけ** — いちばん外側の `execute_command` の入口。入れ子
+(`if` / `time` が組み立てた行) で消すと内側の断りが `script_exec` に届かず、
+段の後ろが `time …` のパイプで取りこぼす (変異 `nested_clear` が実際に落ちる)。
+`script_exec` は 1 行ごとに読んで消す。対話 / `rshell` は誰も読まないので、
+断った行の**次の**行は今までどおり動く。
+
+### 段 1 の `[EXPECTED_TO_CHANGE]` をどう反転させたか
+
+| 段 1 の検査 | 段 1 が記録した挙動 | 段 2 の検査 |
+|---|---|---|
+| `1c` | 条件が真になって右辺が走る | `1c` 右辺のコマンドを実行しない (`==`) |
+| `1d` | 走った証拠 (`command not found`) | `1d` 何が上限を超えたか + 上限を 1 行で報告する |
+| `1e` | `!=` が偽になって走らない | `1e` / `1f` 走らないのは同じだが、理由が赤字 1 行で分かる |
+| `2a`〜`2g` | 足場が実物であること | そのまま (`2f` に「断りも出さない」を足しただけ) |
+
+段 1 の記録は §0 に残してある (履歴)。
+
+### RED → GREEN
+
+段 2 の試験は 64 件。**GREEN 64 / FAIL 0** (`EXIT sh_truncation_host=0`)。
+
+RED の記録は「段 2 の前の姿」に戻した版で取った (`--mutate` の否定側がそのまま
+pre-fix の再現になっている。全ソースを段 1 の状態へ戻すと `SCRIPT_ERR_REFUSED`
+などが無くてコンパイルが通らないので、規則ごとに 1 つずつ壊す形にした):
+
+| 変異 (= 壊した規則) | 落ちた検査 |
+|---|---|
+| `compare_truncated` (段 2 の前の `strip_quotes`。黙って 255 で切る) | **24 件** 1c 1d 1f 1h 1i 1j 1k 3d 3g 4b 4c 4e 4f 5a 5b 5c 5d 6b 6c 6g 7b 8a 8b 8c |
+| `no_mark` (断っても印を立てない = §2-1 が無い) | **11 件** 1j 1k 4c 4f 5b 5c 5d 6c 6g 8b 8c |
+| `no_clear` (印を消し忘れる) | **8 件** 4b 4e 4h 4i 6d 6e 7d 7e |
+| `nested_clear` (入れ子でも消す) | **1 件** 6g |
+| `abort_interactive` (対話でも打ち切る) | **18 件** 1f 1h 1k 3a 3d 3e 3g 4b 4e 4g 4h 4i 6d 6e 7a 7c 7d 7e |
+| `source_not_propagated` (入れ子 source の断りを親へ伝えない) | **1 件** 5c |
+| `profile_aborts_boot` (起動スクリプトの断りで印を立て直す) | **1 件** 8d |
+
+7 変異すべて RED。GREEN のまま通ったものは無い。
+
+### 票 §2-1 が挙げた 6 経路の受け持ち
+
+| 経路 | 検査 | 取りこぼし / 誤発火の両方を見たか |
+|---|---|---|
+| `if` / `time` 経由の入れ子 `execute_command` | 4a〜4f (取りこぼし) / 4g〜4i (誤発火) | はい |
+| 入れ子の `source` (戻り値で親へ) | 5a〜5d / 5e・5f | はい |
+| パイプの段 | 6a〜6c・6f・6g / 6d・6e | はい |
+| `rshell` から呼ばれた `execute_command` | 7a〜7d | **rshell.c は取り込んでいない** (下の §4 を見よ) |
+| 対話 (スクリプト外) | 7a〜7e | はい |
+| 起動時の `/etc/profile` | 8a〜8e / 8f・8g | `ui.c` は取り込んでいない (下の §4) |
+
 ## 1. 洗い出しの範囲と方法
 
 対象: `userland/shell/` の全ファイルと `userland/lib/filer/`。
@@ -70,7 +138,7 @@
 
 | # | 場所 (ファイル:行) | 上限 (定数名と値) | 今の挙動 | 段 2〜4 で変えるか | 備考 |
 |---|---|---|---|---|---|
-| T1 | `cmd_script.c:349` `strip_quotes` / `:407` `cmd_if` の `v1[256]` `v2[256]` | 255 (`max - 1`) | 255 文字で切って比較。**条件が逆になる** | **段 2** | 票どおり。長さはクォート除去後 (`sh_args.inc:168,183` が既に落としている) |
+| T1 | `cmd_script.c:349` `strip_quotes` / `:407` `cmd_if` の `v1[256]` `v2[256]` | 255 (`max - 1`) | 255 文字で切って比較。**条件が逆になる** | **段 2 — 済み** (`b3954f1` の次) | 票どおり。長さはクォート除去後 (`sh_args.inc:168,183` が既に落としている) |
 | T2 | `cmd_script.c:150` (`li < SCRIPT_MAX_LINE - 1`)、`:121`、`:134-138` | `SCRIPT_MAX_LINE` 256 (実効 255) / `SCRIPT_MAX_LINES` 128 | 256 文字目以降を切る。129 行目以降は赤字を出して `break` し、`return 0` で先頭 128 行を実行 | **段 4** | 票どおり |
 | T2' | `cmd_script.c:97` `sys_read(fd, raw_buf, raw_buf_size - 1)` | `SCRIPT_MAX_LINES * SCRIPT_MAX_LINE - 1` = 32767 | 32KB 超のスクリプトを**黙って**途中で切り、途中の行から先が無かったことになる | **段 4** | 票 U3 の「読み込み上限超のファイル」に対応。票の表には行が無いので分けて書いた |
 | T3a | `sh_exec.inc:54,70,85,91` `try_exec` | `TRY_EXEC_BUF_SIZE` 512、実効 510 (`limit_args`) | 溢れた引数を落として**起動する**。クォート再付与で `"` `\` は 2 倍 | **段 3** | 票どおり (票の `main.c:140-170` は切り出し前の番号) |
@@ -151,6 +219,24 @@ T20 の `sh.bin` 側の値 (240 であって 244 ではない)。いずれも上
 (先に置くと `sh_launch` が `try_exec` へ展開され得て、コード生成が変わる)。
 
 ## 4. 確かめていないこと
+
+### 段 2 の時点
+
+- **実機 (NP21/W) では 1 度も動かしていない** ([V4])。票 §4 末尾のゲスト受入
+  (U1 を `/api/key text=` 注入か `set` + 展開で再現) は未実施。
+- **リンクは通していない**: この環境に `/usr/local/cross/i386-elf/lib` が無く、
+  `-lc` / `-lgcc` / `-los32save` が解決できないので `userland/shell.bin` /
+  `userland/sh.bin` は作れていない (この票の変更とは無関係の環境側の欠け)。
+  **コンパイルは常駐版・`-DSHELL_AS_APP` 版の両方で警告 0** を確認した。
+- `rshell.c` は serial を握るのでホスト試験に取り込んでいない。7a〜7d は
+  `rshell.c:149` と同じ「1 行ずつ `execute_command` を呼ぶ」形を並べて見ている
+  だけで、rshell そのものは通していない (EOT = 票 §2-2 は段 4 の担当)。
+- `ui.c` の `shell_run()` も取り込んでいない。8a〜8g は `shell_run` が呼ぶ
+  `script_source_profile()` を実物で通しているが、`shell_run` の中の呼び出し
+  そのもの (2 行) は試験で踏んでいない。
+- `docs/POLICY_DEBUG.md` §4 への T1 の記録は**まだ書いていない** (票 §3)。
+
+### 段 1 の時点
 
 - 実機 (NP21/W) では 1 度も動かしていない。段 1 は挙動を変えないのでゲスト受入は
   段 2 以降 (票 §4 末尾の経路: `/api/key text=` 注入か、スクリプトの `set` + 展開)。

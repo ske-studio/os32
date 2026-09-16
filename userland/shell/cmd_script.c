@@ -160,11 +160,21 @@ static int script_load(const char *path)
 
 /* ======================================================================== */
 /*  実行フェーズ: script_lines[] を順次実行                                  */
+/*                                                                          */
+/*  戻り値: 0 = 最後まで / ESC / return で終わった                           */
+/*          1 = 行を断ったので打ち切った (票 TASK_SH_TRUNCATION §2-1)        */
 /* ======================================================================== */
-static void script_exec(void)
+static int script_exec(void)
 {
+    int refused = 0;
+
     script_current_line = 0;
     script_abort_flag = 0;
+
+    /* 入口では印を触らない。印を消すのは「いちばん外側の execute_command の
+     * 入口」1 か所だけで、script_exec へ来る経路は必ずそこを通っている
+     * (source / .sh / if / time のどれでも)。印を立てる側は立てたらすぐ
+     * 戻るので、ここに古い印が残っていることはない。 */
 
     while (script_current_line < script_line_count && !script_abort_flag) {
         const char *line = script_lines[script_current_line];
@@ -199,14 +209,29 @@ static void script_exec(void)
         /* コマンド実行 */
         execute_command(line);
 
+        /* §2-1: 切り詰めで行を断ったら、そこでスクリプトを打ち切る。
+         * 断った行を捨てて次へ進むと、本来 goto で飛び越されるはずだった
+         * 後続行 (`rm -rf /data` など) へ落ちてしまう。goto のラベルが
+         * 見つからないときと同じ扱いにする。
+         * 印は 1 行ぶんの寿命なので、ここで読んで消す。 */
+        if (sh_refused_take()) {
+            g_api->kprintf(ATTR_RED, "%s", "script: aborted (line refused)\n");
+            script_abort_flag = 1;
+            refused = 1;
+            break;
+        }
+
         script_current_line++;
     }
+
+    return refused;
 }
 
 /* ======================================================================== */
 /*  公開API: script_source_file — ファイルを読み込んで実行                   */
 /*                                                                          */
-/*  戻り値: 0=成功, -1=エラー                                               */
+/*  戻り値: 0=成功, -1=エラー,                                              */
+/*          SCRIPT_ERR_REFUSED=行を断って打ち切った (票 §2-1)               */
 /* ======================================================================== */
 int script_source_file(const char *path)
 {
@@ -235,7 +260,11 @@ int script_source_file(const char *path)
     /* ロード→実行 */
     result = script_load(path);
     if (result == 0) {
-        script_exec();
+        /* 断って打ち切ったことは戻り値で親へ伝える。印そのものは
+         * script_exec が消しているので、ここで勝手に立て直さない —
+         * 立て直すかどうかは呼び手が決める (source は立て直し、
+         * 起動時の profile は立て直さずに続行する)。 */
+        if (script_exec()) result = SCRIPT_ERR_REFUSED;
     }
 
     /* 現在のスクリプト行を解放 */
@@ -262,7 +291,25 @@ static void cmd_source(int argc, char **argv)
         g_api->kprintf(ATTR_RED, "%s", "Usage: source <file>\n");
         return;
     }
-    script_source_file(argv[1]);
+    /* 入れ子の source: 内側が断って打ち切ったら、外側のスクリプトも
+     * 打ち切る (§2-1)。印を立て直して execute_command 経由で親の
+     * script_exec に見せる。 */
+    if (script_source_file(argv[1]) == SCRIPT_ERR_REFUSED) sh_refuse_mark();
+}
+
+/* ======================================================================== */
+/*  起動スクリプト (/etc/profile, $HOME/.profile) の入口                     */
+/*                                                                          */
+/*  断られても**起動は止めない** (票 §2-1 末尾 / 受入 R2)。メッセージを     */
+/*  出して既定値のまま続ける。印は立て直さないので、この後の 1 行目が        */
+/*  巻き添えで捨てられることもない。                                         */
+/* ======================================================================== */
+void script_source_profile(const char *path)
+{
+    if (script_source_file(path) == SCRIPT_ERR_REFUSED) {
+        g_api->kprintf(ATTR_RED,
+                       "sh: %s aborted; continuing with defaults\n", path);
+    }
 }
 
 /* ======================================================================== */
@@ -342,18 +389,30 @@ static void cmd_ask(int argc, char **argv)
 /*    if not exist PATH COMMAND...   ファイル非存在                          */
 /*                                                                          */
 /*  注意: $VAR 展開は execute_command() 到達前に env_expand() で処理済み。   */
-/*        引用符 " は parse_args_and_glob() で除去されないため残る。          */
+/*        引用符 " は parse_args_and_glob() が既に落としている (sh_args.inc  */
+/*        の「インプレースでクォート除去」)。argv に残るのはエスケープ等で    */
+/*        生き残った " だけなので、strip_quotes はその取りこぼしを掃除する    */
+/*        役目になっている。長さの上限は**クォート除去後**で数える。          */
 /* ======================================================================== */
 
-/* 内部ヘルパー: 引用符を除去して比較用文字列を取得 */
-static void strip_quotes(const char *src, char *dst, int max)
+/* 内部ヘルパー: 引用符を除去して比較用文字列を取得
+ *
+ * 戻り値: 除去後の長さ / dst に収まらなければ -1 (票 T1)。
+ * 以前はここで黙って max-1 文字に切っていたため、**先頭 255 文字が同じで
+ * 256 文字目以降が違う 2 つの値が「等しい」と判定され**、`==` では本来
+ * 実行されない枝が走り `!=` では逆に走らなかった。切り詰めた値では比べない。 */
+static int strip_quotes(const char *src, char *dst, int max)
 {
     int di = 0;
-    while (*src && di < max - 1) {
-        if (*src != '"') dst[di++] = *src;
+    while (*src) {
+        if (*src != '"') {
+            if (di >= max - 1) return -1;
+            dst[di++] = *src;
+        }
         src++;
     }
     dst[di] = '\0';
+    return di;
 }
 
 /* 内部ヘルパー: argv[start]..argv[argc-1] をスペース区切りで結合 */
@@ -404,9 +463,18 @@ static void cmd_if(int argc, char **argv)
     }
     /* "if VAL1 == VAL2 COMMAND..." / "if VAL1 != VAL2 COMMAND..." */
     else if (argc >= 5) {
-        char v1[256], v2[256];
-        strip_quotes(argv[1], v1, 256);
-        strip_quotes(argv[3], v2, 256);
+        char v1[IF_VALUE_MAX], v2[IF_VALUE_MAX];
+        int n1 = strip_quotes(argv[1], v1, IF_VALUE_MAX);
+        int n2 = strip_quotes(argv[3], v2, IF_VALUE_MAX);
+
+        /* 収まらない値は**比べない**。切り詰めて比べると条件が逆になり、
+         * 本来実行されない枝が走る (票 T1 / U1)。断った行はここで終わり、
+         * スクリプト中なら script_exec が後続行も実行しない (§2-1)。 */
+        if (n1 < 0 || n2 < 0) {
+            sh_refuse(n1 < 0 ? "if: left value" : "if: right value",
+                      IF_VALUE_MAX - 1);
+            return;
+        }
 
         if (str_eq(argv[2], "==")) {
             condition = str_eq(v1, v2);

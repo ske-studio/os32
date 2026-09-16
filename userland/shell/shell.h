@@ -26,6 +26,14 @@
 #define SCRIPT_MAX_LINE   256   /* 1行の最大長 */
 #define SCRIPT_MAX_DEPTH  4     /* source ネスト上限 */
 
+/* `if VAL1 == VAL2` の比較値の幅 (cmd_script.c)。実効は IF_VALUE_MAX - 1。
+ * [C4] 断りのメッセージにもこの定数から上限を出す。 */
+#define IF_VALUE_MAX      256
+
+/* script_source_file の戻り値。0 = 成功 / -1 = 読めない・深すぎる /
+ * SCRIPT_ERR_REFUSED = 行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1) */
+#define SCRIPT_ERR_REFUSED (-2)
+
 /* コマンドハンドラ関数の型 */
 typedef void (*CmdHandler)(int argc, char **argv);
 
@@ -51,6 +59,26 @@ void shell_register_cmds(const ShellCmd *cmds);
 
 /* コマンド実行エンジン (main.c) */
 void execute_command(const char *cmd);
+
+/* ------------------------------------------------------------------------ */
+/*  「切り詰めたので行を断った」印 (票 TASK_SH_TRUNCATION §2-1、main.c)      */
+/*                                                                          */
+/*  切り詰めを見つけた側は sh_refuse() で赤字 1 行を出し、同時に印を立てる。 */
+/*  組み込み handler は void のままなので (int 化は TASK_EXIT_STATUS の範囲)、*/
+/*  断ったことはこのグローバル 1 本だけで伝える。                            */
+/*                                                                          */
+/*  印の寿命は **1 行ぶん**:                                                 */
+/*    - いちばん外側の execute_command が入口で消す                          */
+/*      (入れ子 = if / time が組み立てた行、パイプの段 では消さない。         */
+/*       消すと内側の断りが外へ届かない)                                     */
+/*    - script_exec が 1 行ごとに sh_refused_take() で読んで消し、            */
+/*      立っていたらスクリプトを打ち切る (goto のラベル無しと同じ扱い)        */
+/*    - 対話 / rshell は誰も読まないので、断った行の次の行は今までどおり動く  */
+/* ------------------------------------------------------------------------ */
+extern int sh_refused_flag;
+void sh_refuse(const char *what, int limit);  /* 赤字 1 行 + 印 */
+void sh_refuse_mark(void);                    /* 印だけ (伝播用) */
+int  sh_refused_take(void);                   /* 読んで消す */
 extern const char *cmd_names[];  /* タブ補完用 */
 const ShellCmd *shell_get_cmds(int *count);
 void shell_print_help(const char *cmd_name);
@@ -180,5 +208,8 @@ void sh_pipe_free(int slot);
 
 /* スクリプトエンジン (cmd_script.c) */
 int script_source_file(const char *path);
+/* 起動スクリプト (/etc/profile, $HOME/.profile) 用。断られても起動は止めず、
+ * メッセージを出して既定値で続ける (票 TASK_SH_TRUNCATION §2-1 末尾 / R2)。 */
+void script_source_profile(const char *path);
 
 #endif /* SHELL_H */

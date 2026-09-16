@@ -508,7 +508,8 @@ void shell_run(void) {
         int sfd = g_api->sys_open("/etc/profile", KAPI_O_RDONLY);
         if (sfd >= 0) {
             g_api->sys_close(sfd);
-            script_source_file("/etc/profile");
+            /* 断られても起動は止めない (票 TASK_SH_TRUNCATION §2-1 / R2) */
+            script_source_profile("/etc/profile");
         }
     }
 
@@ -528,7 +529,7 @@ void shell_run(void) {
                 int ufd = g_api->sys_open(profile_path, KAPI_O_RDONLY);
                 if (ufd >= 0) {
                     g_api->sys_close(ufd);
-                    script_source_file(profile_path);
+                    script_source_profile(profile_path);
                 }
             }
         }

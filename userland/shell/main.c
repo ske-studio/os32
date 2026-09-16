@@ -412,9 +412,40 @@ static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_
 
 
 /* ======================================================================== */
+/*  「切り詰めたので行を断った」印 (票 TASK_SH_TRUNCATION §2-1)              */
+/*                                                                          */
+/*  規則と寿命は shell.h の宣言のところに書いてある。ここは実体だけ。        */
+/* ======================================================================== */
+int sh_refused_flag = 0;
+
+/* execute_command の入れ子の深さ。if / time が組み立てた行やパイプの段から      */
+/* 呼ばれた execute_command は印を消さない — 消すと内側の断りが外へ届かない。 */
+static int g_exec_depth = 0;
+
+void sh_refuse_mark(void)
+{
+    sh_refused_flag = 1;
+}
+
+void sh_refuse(const char *what, int limit)
+{
+    /* 「何が上限を超えたか」と「上限」を赤字 1 行で (票 §2 の 2)。
+     * 上限は呼び手が定数から渡す ([C4])。 */
+    g_api->kprintf(ATTR_RED, "%s too long (max %d)\n", what, limit);
+    sh_refused_flag = 1;
+}
+
+int sh_refused_take(void)
+{
+    int r = sh_refused_flag;
+    sh_refused_flag = 0;
+    return r;
+}
+
+/* ======================================================================== */
 /*  公開API: execute_command                                                 */
 /* ======================================================================== */
-void execute_command(const char *cmd)
+static void execute_command_line(const char *cmd)
 {
     static char expanded_buf[CMD_BUF_SIZE];
     const char *src;
@@ -426,6 +457,8 @@ void execute_command(const char *cmd)
     /* I-2: 展開しきれない行は**切れたまま実行しない** */
     if (env_expand(cmd, expanded_buf, CMD_BUF_SIZE) < 0) {
         g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
+        /* §2-1: これも「断った行」— スクリプト中なら後続行へ落とさない */
+        sh_refuse_mark();
         return;
     }
     src = expanded_buf;
@@ -563,4 +596,19 @@ void execute_command(const char *cmd)
         }
         g_api->mem_free(seg_buf);
     }
+}
+
+/* 実体は execute_command_line。ここは「断った印」の寿命を 1 行に閉じるための
+ * 薄い包み (票 TASK_SH_TRUNCATION §2-1)。
+ *
+ * 入口で消すのは **いちばん外側** の呼び出しだけ。`if` / `time` が組み立てた
+ * 行はこの関数を入れ子で呼ぶので、そこで消すと内側で断ったことが
+ * script_exec まで届かなくなる (取りこぼし)。パイプの段は execute_single を
+ * 直に呼ぶので入れ子にはならないが、段の中の `time ...` が入れ子になる。 */
+void execute_command(const char *cmd)
+{
+    if (g_exec_depth == 0) sh_refused_flag = 0;
+    g_exec_depth++;
+    execute_command_line(cmd);
+    g_exec_depth--;
 }

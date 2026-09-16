@@ -499,7 +499,7 @@ static void fill_run(char *dst, int n, char tail)
     dst[n] = '\0';
 }
 
-static char g_line[1024];
+static char g_line[CMD_BUF_SIZE];
 
 static void line_reset(void) { g_line[0] = '\0'; }
 
@@ -511,22 +511,78 @@ static void line_add(const char *s)
     g_line[n] = '\0';
 }
 
+/* スクリプト本文の組み立て (贋 FS は本文のポインタを持つだけなので静的領域) */
+#define SBUF_COUNT  3
+#define SBUF_SIZE   1024
+
+static char g_sbuf[SBUF_COUNT][SBUF_SIZE];
+static int  g_sn[SBUF_COUNT];
+static int  g_scur;
+
+static void s_begin(int i) { g_scur = i; g_sn[i] = 0; g_sbuf[i][0] = '\0'; }
+
+static void s_add(const char *t)
+{
+    int n = g_sn[g_scur];
+    while (*t && n < SBUF_SIZE - 1) g_sbuf[g_scur][n++] = *t++;
+    g_sbuf[g_scur][n] = '\0';
+    g_sn[g_scur] = n;
+}
+
+/* `a` を count 個 */
+static void s_run(int count)
+{
+    int n = g_sn[g_scur];
+    int i;
+    for (i = 0; i < count && n < SBUF_SIZE - 1; i++) g_sbuf[g_scur][n++] = 'a';
+    g_sbuf[g_scur][n] = '\0';
+    g_sn[g_scur] = n;
+}
+
+static const char *s_body(int i) { return g_sbuf[i]; }
+
+/* 未知のコマンド名 <name> が実際に解決されにいったか。
+ * run_cmd_internal は最後に "<name>: command not found" を出す。 */
+static int ran(const char *name)
+{
+    char needle[64];
+    int i = 0;
+    const char *t = ": command not found";
+    int j = 0;
+
+    while (name[i] && i < 40) { needle[i] = name[i]; i++; }
+    while (t[j]) needle[i++] = t[j++];
+    needle[i] = '\0';
+    return out_has(needle);
+}
+
+/* 断りの 1 行が出ているか (何が上限を超えたか + 上限) */
+static int refused_msg(const char *what)
+{
+    return out_has(what) && out_has("too long (max ");
+}
+
+static void fresh(void)
+{
+    files_reset();
+    out_reset();
+    launch_log_reset();
+}
+
 /* ========================================================================
- *  1. 現状の記録 — `if` の両辺が 256 文字以上で先頭 255 文字が同じとき、
- *     **今は**条件が真になって右辺のコマンドが走る (T1 / U1)
+ *  1. U1 — `if` の両辺がクォート除去後 256 文字以上で先頭 255 文字が同じ
  *
- *  EXPECTED_TO_CHANGE: 段 2 でここを反転させる。この段は「今どうなって
- *  いるか」を実物のソースで固定するだけなので、RED → GREEN ではない。
- *  段 2 で `if` が断るようになったら、この case は
- *   - launch を起こさない
- *   - 上限超過のメッセージを出す
- *  を見る形へ書き換わる (票 §4 U1)。
+ *  段 1 はここを「今は条件が真になって右辺が走る」と記録していた
+ *  ([EXPECTED_TO_CHANGE])。段 2 で票 §4 U1 の形へ反転させた:
+ *    - コマンドを実行しない (`==` も `!=` も)
+ *    - 上限超過を報告する
+ *    - スクリプト中なら後続行も実行しない (§2-1)
  * ======================================================================== */
-static void case_if_compare_truncates(void)
+static void case_if_compare_refuses(void)
 {
     char a[600], b[600];
 
-    report("1 [EXPECTED_TO_CHANGE] if: 256 文字以上の両辺は 255 で切って比べる\n");
+    report("1 U1: if の両辺が 256 文字以上・先頭 255 文字が同じ\n");
 
     /* 256 文字。先頭 255 文字は同じで 256 文字目だけ違う */
     fill_run(a, 256, 'x');
@@ -534,47 +590,50 @@ static void case_if_compare_truncates(void)
     check(strcmp(a, b) != 0, "1a 反例そのものは別の文字列 (256 文字目が違う)");
     check(strncmp(a, b, 255) == 0, "1b 先頭 255 文字は同じ");
 
-    files_reset();
-    out_reset();
-    launch_log_reset();
-
-    /* `if <A> == <B> nosuchprog` — 実物の execute_command を通す。
-     * 条件が偽なら run_cmd_internal に届かず、launch_req は呼ばれない。 */
+    /* `==` — 切り詰めて比べれば真になる反例。断って実行しない。 */
+    fresh();
     line_reset();
-    line_add("if ");
-    line_add(a);
-    line_add(" == ");
-    line_add(b);
-    line_add(" truncmark");
+    line_add("if "); line_add(a); line_add(" == "); line_add(b);
+    line_add(" markif");
     execute_command(g_line);
+    check(!ran("markif") && g_launch_count == 0,
+          "1c == : 右辺のコマンドを実行しない");
+    check(refused_msg("if: left value"),
+          "1d == : 何が上限を超えたか + 上限を 1 行で報告する");
 
-    /* 今の挙動: strip_quotes が両辺を 255 文字へ切るので条件が真になり、
-     * `truncmark` が外部コマンドとして解決されにいく (= 起動を試みる)。 */
-    check(g_launch_count > 0,
-          "1c [EXPECTED_TO_CHANGE] 今は条件が真になり右辺が実行される");
-    check(out_has("command not found"),
-          "1d [EXPECTED_TO_CHANGE] 実行された証拠 (未知のコマンドとして解決)");
-
-    /* `!=` は逆に倒れる — 違う文字列なのに偽 */
-    files_reset();
-    out_reset();
-    launch_log_reset();
+    /* `!=` — 走らない点は前と同じだが、理由がメッセージで分かること */
+    fresh();
     line_reset();
-    line_add("if ");
-    line_add(a);
-    line_add(" != ");
-    line_add(b);
-    line_add(" truncmark");
+    line_add("if "); line_add(a); line_add(" != "); line_add(b);
+    line_add(" markif");
     execute_command(g_line);
-    check(g_launch_count == 0 && !out_has("command not found"),
-          "1e [EXPECTED_TO_CHANGE] 今は != が偽になり右辺が実行されない");
+    check(!ran("markif") && g_launch_count == 0,
+          "1e != : 右辺のコマンドを実行しない");
+    check(refused_msg("if: left value"), "1f != : 同じく報告する");
+
+    /* 右辺だけが溢れる場合は「右辺」と言う */
+    fresh();
+    line_reset();
+    line_add("if short == "); line_add(b); line_add(" markif");
+    execute_command(g_line);
+    check(!ran("markif"), "1g 右辺だけ溢れても実行しない");
+    check(refused_msg("if: right value"), "1h 溢れた側を名指しする");
+
+    /* スクリプト中: 後続行も実行しない (§2-1 の反例そのもの) */
+    fresh();
+    s_begin(0);
+    s_add("set A=");  s_run(240);  s_add("\n");
+    s_add("if ${A}${A}x == ${A}${A}y markif\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("markif"), "1i スクリプト: if の右辺を実行しない");
+    check(!ran("marknext"), "1j スクリプト: 後続行も実行しない (§2-1)");
+    check(out_has("script: aborted"), "1k スクリプト: 打ち切ったことを言う");
 }
 
 /* ========================================================================
- *  2. 足場が本物であることの確認
- *
- *  登録表も execute_command も実物だという前提が崩れたら 1 の記録に意味が
- *  無くなるので、ここで押さえておく。
+ *  2. 足場が本物であることの確認 (段 1 から据え置き)
  * ======================================================================== */
 static void case_registry_is_real(void)
 {
@@ -597,20 +656,318 @@ static void case_registry_is_real(void)
     check(seen_source, "2d source が実物の表にある");
     check(seen_time,   "2e time が実物の表にある");
 
-    /* 短い比較は今も正しく効く (反例の作り方が悪いのではないことの確認) */
-    files_reset();
-    out_reset();
-    launch_log_reset();
-    execute_command("if abc == abd truncmark");
-    check(g_launch_count == 0 && !out_has("command not found"),
-          "2f 255 文字以下なら `==` は正しく偽になる");
+    fresh();
+    execute_command("if abc == abd markif");
+    check(!ran("markif") && !out_has("too long"),
+          "2f 255 文字以下なら `==` は正しく偽になる (断りも出さない)");
 
-    files_reset();
-    out_reset();
-    launch_log_reset();
-    execute_command("if abc == abc truncmark");
-    check(out_has("command not found"),
-          "2g 255 文字以下で一致すれば右辺が走る");
+    fresh();
+    execute_command("if abc == abc markif");
+    check(ran("markif"), "2g 255 文字以下で一致すれば右辺が走る");
+}
+
+/* ========================================================================
+ *  3. U2 — 境界。255 文字ちょうどは通る / 256 文字は断る。
+ *     長さは**クォート除去後**で数える (sh_args.inc が既に落としている)。
+ * ======================================================================== */
+static void case_boundary(void)
+{
+    char v255[600], v256[600], w255[600];
+
+    report("3 U2: 255 は通る / 256 は断る (クォート除去後で数える)\n");
+
+    fill_run(v255, 255, 'z');
+    fill_run(w255, 255, 'z');       /* v255 と同じ内容 */
+    fill_run(v256, 256, 'z');
+
+    fresh();
+    line_reset();
+    line_add("if "); line_add(v255); line_add(" == "); line_add(w255);
+    line_add(" markif");
+    execute_command(g_line);
+    check(ran("markif"), "3a 255 文字ちょうど同士は比較でき、真なら走る");
+    check(!out_has("too long"), "3b 255 文字では断らない");
+
+    fresh();
+    line_reset();
+    line_add("if "); line_add(v255); line_add(" != "); line_add(w255);
+    line_add(" markif");
+    execute_command(g_line);
+    check(!ran("markif") && !out_has("too long"),
+          "3c 255 文字ちょうどの != は正しく偽 (断りではない)");
+
+    fresh();
+    line_reset();
+    line_add("if "); line_add(v256); line_add(" == "); line_add(v256);
+    line_add(" markif");
+    execute_command(g_line);
+    check(!ran("markif") && refused_msg("if: left value"),
+          "3d 256 文字は**中身が同じでも**断る");
+
+    /* クォート付き: 生では 257 バイトだが、除去後は 255 なので通る。
+     * 長さを「除去前」で数えると、ここが誤って断られる。 */
+    fresh();
+    line_reset();
+    line_add("if \""); line_add(v255); line_add("\" == \""); line_add(w255);
+    line_add("\" markif");
+    execute_command(g_line);
+    check(ran("markif"), "3e クォート込み 257 バイトでも除去後 255 なら通る");
+    check(!out_has("too long"), "3f クォートの分を数に入れない");
+
+    /* 除去後 256: クォート込み 258 バイト */
+    fresh();
+    line_reset();
+    line_add("if \""); line_add(v256); line_add("\" == \""); line_add(v256);
+    line_add("\" markif");
+    execute_command(g_line);
+    check(!ran("markif") && out_has("too long"),
+          "3g 除去後 256 なら (クォートが付いていても) 断る");
+}
+
+/* ========================================================================
+ *  4. 経路 1 — `if` / `time` 経由の入れ子 execute_command
+ *
+ *  どちらも組み立てた行を execute_command へ渡す。内側で断ったことが
+ *  外の script_exec まで届くこと (取りこぼしが無いこと) を見る。
+ * ======================================================================== */
+static void case_nested_execute_command(void)
+{
+    report("4 経路 1: if / time 経由の入れ子 execute_command\n");
+
+    /* if の右辺がさらに if。内側の if が断る。
+     * 片側だけ 300 文字にして、外側の join_args (4096) には収める。 */
+    fresh();
+    s_begin(0);
+    s_add("set B=");  s_run(150);  s_add("\n");
+    s_add("if a == a if ${B}${B} == b markinner\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("markinner"), "4a if 入れ子: 内側の右辺を実行しない");
+    check(refused_msg("if: left value"), "4b if 入れ子: 断りが出る");
+    check(!ran("marknext"), "4c if 入れ子: 外のスクリプトも打ち切る");
+
+    /* time が組み立てた行。cmd_buf は 510 なので 300 文字なら溢れない。 */
+    fresh();
+    s_begin(0);
+    s_add("set B=");  s_run(150);  s_add("\n");
+    s_add("time if ${B}${B} == b markinner\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("markinner"), "4d time 経由: 内側の右辺を実行しない");
+    check(refused_msg("if: left value"), "4e time 経由: 断りが出る");
+    check(!ran("marknext"), "4f time 経由: 外のスクリプトも打ち切る");
+
+    /* 誤発火の裏: 入れ子が**通った**ら印は立たない */
+    fresh();
+    s_begin(0);
+    s_add("if a == a time mk1\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1"), "4g 通る入れ子は今までどおり走る");
+    check(ran("mk2"), "4h 通る入れ子の後も打ち切らない (誤発火なし)");
+    check(sh_refused_flag == 0, "4i 通った行は印を残さない");
+}
+
+/* ========================================================================
+ *  5. 経路 2 — 入れ子の source (script_source_file の戻り値で親に伝える)
+ * ======================================================================== */
+static void case_nested_source(void)
+{
+    report("5 経路 2: 入れ子の source\n");
+
+    fresh();
+    s_begin(1);                      /* 子 */
+    s_add("set A=");  s_run(240);  s_add("\n");
+    s_add("if ${A}${A}x == ${A}${A}y markif\n");
+    s_add("markchild\n");
+    s_begin(0);                      /* 親 */
+    s_add("source /child.sh\n");
+    s_add("markparent\n");
+    file_add("/parent.sh", s_body(0));
+    file_add("/child.sh", s_body(1));
+    execute_command("source /parent.sh");
+    check(!ran("markif"),     "5a 子: if の右辺を実行しない");
+    check(!ran("markchild"),  "5b 子: 後続行も実行しない");
+    check(!ran("markparent"), "5c 親: 子が断ったら親も打ち切る (戻り値で伝播)");
+
+    /* 直接 script_source_file を呼んだときの戻り値 */
+    fresh();
+    s_begin(1);
+    s_add("set A=");  s_run(240);  s_add("\n");
+    s_add("if ${A}${A}x == ${A}${A}y markif\n");
+    file_add("/child.sh", s_body(1));
+    check(script_source_file("/child.sh") == SCRIPT_ERR_REFUSED,
+          "5d script_source_file は断りを SCRIPT_ERR_REFUSED で返す");
+
+    /* 誤発火の裏: 通る子 source は親を止めない */
+    fresh();
+    s_begin(1);
+    s_add("mk1\n");
+    s_begin(0);
+    s_add("source /child.sh\n");
+    s_add("markparent\n");
+    file_add("/parent.sh", s_body(0));
+    file_add("/child.sh", s_body(1));
+    execute_command("source /parent.sh");
+    check(ran("mk1") && ran("markparent"),
+          "5e 通る子の後も親は続く (誤発火なし)");
+    check(script_source_file("/child.sh") == 0, "5f 通った source は 0 を返す");
+}
+
+/* ========================================================================
+ *  6. 経路 3 — パイプの段
+ *
+ *  段は execute_single を直に呼ぶので、段の中で断った印は execute_command
+ *  の入口の掃除に消されない。打ち切るのは**行**なので、後続の行が走らない
+ *  ことを見る (段そのものの続行はシェルの通常の意味論どおり)。
+ * ======================================================================== */
+static void case_pipe_stage(void)
+{
+    report("6 経路 3: パイプの段\n");
+
+    fresh();
+    s_begin(0);
+    s_add("set B=");  s_run(150);  s_add("\n");
+    s_add("if ${B}${B} == b markpipe | echo tail\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("markpipe"), "6a 段の中の if は右辺を実行しない");
+    check(refused_msg("if: left value"), "6b 段の中の断りも 1 行出る");
+    check(!ran("marknext"), "6c 段で断ったら後続行を実行しない (取りこぼしなし)");
+
+    /* 取りこぼしの罠: 断った段の**後ろ**の段が execute_command を入れ子で
+     * 呼ぶ (`time ...`)。入口の掃除を入れ子でも走らせると、ここで印が
+     * 消えて後続行へ落ちる。 */
+    fresh();
+    s_begin(0);
+    s_add("set B=");  s_run(150);  s_add("\n");
+    s_add("if ${B}${B} == b markpipe | time echo tail\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("markpipe"), "6f 後段が time でも右辺を実行しない");
+    check(!ran("marknext"),
+          "6g 後段の入れ子に印を消させない (取りこぼしなし)");
+
+    /* 誤発火の裏: 通るパイプは今までどおり */
+    fresh();
+    s_begin(0);
+    s_add("echo hello | echo tail\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk2"), "6d 通るパイプの後も打ち切らない");
+    check(sh_refused_flag == 0, "6e 通るパイプは印を残さない");
+}
+
+/* ========================================================================
+ *  7. 経路 4 / 5 — rshell と対話 (スクリプトではないので打ち切らない)
+ *
+ *  rshell.c は serial を握るのでこの試験には取り込んでいない。rshell が
+ *  やっているのは「1 行ずつ execute_command を呼ぶ」だけ (rshell.c:149)
+ *  なので、ここでは同じ呼び方を並べて「次の行が動くこと」を押さえる。
+ *  EOT (票 §2-2) は段 4 の担当。
+ * ======================================================================== */
+static void case_interactive_not_aborted(void)
+{
+    char a[600], b[600];
+
+    report("7 経路 4/5: rshell / 対話では打ち切らない\n");
+
+    fill_run(a, 256, 'x');
+    fill_run(b, 256, 'y');
+
+    fresh();
+    execute_command("mk1");
+    line_reset();
+    line_add("if "); line_add(a); line_add(" == "); line_add(b);
+    line_add(" markif");
+    execute_command(g_line);               /* ← 断られる行 */
+    execute_command("mk2");                /* ← 次の行 */
+    check(ran("mk1"), "7a 断る前の行は走る");
+    check(!ran("markif"), "7b 断った行は走らない");
+    check(ran("mk2"), "7c 断った**次の**行は今までどおり走る");
+    check(sh_refused_flag == 0, "7d 次の行の入口で印が消えている");
+
+    /* 対話で断った印が、その後のスクリプトを巻き添えにしないこと */
+    fresh();
+    line_reset();
+    line_add("if "); line_add(a); line_add(" == "); line_add(b);
+    line_add(" markif");
+    execute_command(g_line);               /* 印が立ったまま誰も読まない */
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2"),
+          "7e 直前に対話で断っても、次のスクリプトは最後まで走る");
+}
+
+/* ========================================================================
+ *  8. 経路 6 — 起動時の /etc/profile
+ *
+ *  断ったらメッセージを出して**既定値で続行する** (起動を止めない)。
+ *  ui.c の shell_run() は端末を握るので取り込めない。shell_run が呼ぶ
+ *  script_source_profile() を実物のまま通す。
+ * ======================================================================== */
+static void case_profile_continues(void)
+{
+    report("8 経路 6: /etc/profile は断っても起動を止めない\n");
+
+    fresh();
+    s_begin(0);
+    s_add("set A=");  s_run(240);  s_add("\n");
+    s_add("if ${A}${A}x == ${A}${A}y markif\n");
+    s_add("markprofile\n");
+    file_add("/etc/profile", s_body(0));
+
+    script_source_profile("/etc/profile");
+    check(!ran("markif"),      "8a profile: 断った行は実行しない");
+    check(!ran("markprofile"), "8b profile: その後の行も実行しない");
+    check(out_has("continuing with defaults"),
+          "8c profile: 既定値で続けると言う");
+    check(sh_refused_flag == 0,
+          "8d profile: 印を残さない (次の行を巻き添えにしない)");
+
+    /* 起動は続く — profile の後の行が動く */
+    execute_command("mk1");
+    check(ran("mk1"), "8e profile の後のコマンドは動く (起動を止めない)");
+
+    /* 誤発火の裏: 通る profile は何も言わない */
+    fresh();
+    s_begin(0);
+    s_add("mk2\n");
+    file_add("/etc/profile", s_body(0));
+    script_source_profile("/etc/profile");
+    check(ran("mk2"), "8f 通る profile は今までどおり走る");
+    check(!out_has("continuing with defaults"), "8g 通ったら黙っている");
+}
+
+/* ========================================================================
+ *  9. 誤発火の総まとめ — 断る理由が無いスクリプトは最後まで走る
+ * ======================================================================== */
+static void case_no_false_abort(void)
+{
+    report("9 誤発火なし: 断る理由が無ければ最後まで走る\n");
+
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("if abc == abc mk2\n");
+    s_add("if abc == abd mk3\n");        /* 偽 — 断りではない */
+    s_add("mk4\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1"), "9a 1 行目が走る");
+    check(ran("mk2"), "9b 真の if が走る");
+    check(!ran("mk3"), "9c 偽の if は走らない (が打ち切りではない)");
+    check(ran("mk4"), "9d 偽の if の後も走り続ける");
+    check(!out_has("script: aborted"), "9e 打ち切りの報告を出さない");
 }
 
 /* ---- entry ------------------------------------------------------------- */
@@ -620,7 +977,14 @@ void _start(void)
     build_api();
     sh_boot();
     case_registry_is_real();
-    case_if_compare_truncates();
+    case_if_compare_refuses();
+    case_boundary();
+    case_nested_execute_command();
+    case_nested_source();
+    case_pipe_stage();
+    case_interactive_not_aborted();
+    case_profile_continues();
+    case_no_false_abort();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

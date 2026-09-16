@@ -191,7 +191,9 @@ static void run_cmd_internal(int argc, char **argv) {
 
     /* 0. .bat/.sh 拡張子 → 暗黙的に source として実行 */
     if (has_ext(argv[0], ".bat") || has_ext(argv[0], ".sh")) {
-        script_source_file(argv[0]);
+        /* 内側が断って打ち切ったら、呼んだ側のスクリプトも打ち切る
+         * (cmd_source と同じ扱い。票 TASK_SH_TRUNCATION §2-1) */
+        if (script_source_file(argv[0]) == SCRIPT_ERR_REFUSED) sh_refuse_mark();
         return;
     }
 

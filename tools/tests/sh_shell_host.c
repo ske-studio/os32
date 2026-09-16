@@ -420,6 +420,23 @@ static void build_api(void)
 int sh_exit_flag = 0;
 static int prev_draw_len = 0;
 
+/* main.c の「断った印」(票 TASK_SH_TRUNCATION §2-1)。この試験は
+ * execute_command をスタブにしていて切り詰めの経路を通らないので、実体だけ
+ * 置く (中身は main.c と同じ)。印を読むのは cmd_script.c の script_exec。 */
+int sh_refused_flag = 0;
+void sh_refuse_mark(void) { sh_refused_flag = 1; }
+void sh_refuse(const char *what, int limit)
+{
+    g_api->kprintf(ATTR_RED, "%s too long (max %d)\n", what, limit);
+    sh_refused_flag = 1;
+}
+int sh_refused_take(void)
+{
+    int r = sh_refused_flag;
+    sh_refused_flag = 0;
+    return r;
+}
+
 static void show_prompt(void) { out_str("sh> "); }
 
 #include "../../userland/shell/sh_redraw.inc"
