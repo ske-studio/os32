@@ -300,16 +300,21 @@ check-fs-kind-host:
 # 種別が「分からない」とき cp / mv / rm が断る (TASK_FS_TYPE §3)。実物の
 # cmd_fs_shared.c + cmd_file.c を #include し、sys_stat と sys_ls の両方を IO にして、
 # 呼び出し元 5 箇所が「不明」をファイルと読まず、open / mkdir / rename / unlink を
-# 呼ばないことを受け手で見る。記録は tools/tests/fs_kind_callers_tdd.md。
+# 呼ばないことを受け手で見る。§6 は継承バグ台帳の `cp -r` — 失敗する経路で
+# 宛先に空のディレクトリを残さない (収集してから mkdir / mkdir の戻り値を見る /
+# 既に在るディレクトリへの上書きコピーだけは通す)。--mutate は否定側。
+# 記録は tools/tests/fs_kind_callers_tdd.md。
 check-fs-kind-callers-host:
-	python3 -B tools/tests/test_fs_kind_callers.py --target
+	python3 -B tools/tests/test_fs_kind_callers.py --target --mutate
 
 # `cat -n` の行番号は行の先頭でだけ出る。実物の cmd_fs_shared.c + cmd_file.c を
 # #include し、sys_write(1, ...) に出た全バイトを試験側の素朴な参照実装と 1 バイト
 # ずつ突き合わせる。(a) 改行で終わるファイルの後ろに空の行番号を出さない、
 # (b) IO_BUF_SIZE (65536) の切れ目で行が終わったことにしない (行頭の状態を
-# 読み取りをまたいで持つ) の 2 つ。--mutate は否定側で、(a) と (b) をそれぞれ
-# 元に戻した版が RED になることを見る。記録は tools/tests/cat_linenum_tdd.md。
+# 読み取りをまたいで持つ) の 2 つ。§6 は継承バグ台帳の「内蔵 cat が標準入力を
+# 読まない」— 引数が無ければ FD 0 を読み、FD 0 は閉じず、引数があれば読まない。
+# --mutate は否定側で、(a) (b) と §6 の 3 つを壊した版が RED になることを見る。
+# 記録は tools/tests/cat_linenum_tdd.md。
 check-cat-linenum-host:
 	python3 -B tools/tests/test_cat_linenum.py --target --mutate
 

@@ -31,6 +31,17 @@
  *    - catf_chunk … sys_read が要求より短く返す (実 FS と同じ) 小さい刻み
  *    - IO_BUF_SIZE ちょうど / その境界に行や改行を置いた大きいファイル
  *
+ *  6 章は別の欠陥 (継承バグ台帳): **内蔵 `cat` が標準入力を読まない**。
+ *  cmd_cat はファイル名の引数だけをループしていたので `echo a | cat` も
+ *  `cat < file` も空だった。直しは「引数が 1 つも無ければ FD 0 を読む」で、
+ *  ここでは次の 4 つを見る。
+ *    - 引数なしの cat が FD 0 の中身をそのまま出す
+ *    - 引数なしの cat -n が (5 章までと同じ規則で) 行番号を付ける
+ *    - **FD 0 を sys_close しない** (シェルの FD を閉じない)
+ *    - 引数があるときは FD 0 を読まない (誤発火の裏)
+ *  端末 (sys_isatty(0) == 1) のままのときは、vfs_read_fd の TTY 経路に
+ *  EOF が無いので読みに行かない — grep / hexdump と同じ断り方。
+ *
  *  エミュレータ・実配備・make には一切触れない。
  * ========================================================================= */
 
@@ -68,6 +79,15 @@ static u8  *catf_out;       /* sys_write(1, ...) に出たバイト列 */
 static int  catf_outlen;
 static int  catf_write_calls;
 
+/* 標準入力 (FD 0) の観測。中身は同じ catf_data を流す。
+ *   catf_tty0        … sys_isatty(0) がこれを返す (1 = 端末)
+ *   catf_read0_calls … sys_read(0, ...) が呼ばれた回数
+ *   catf_close0_calls… sys_close(0) が呼ばれた回数 (**0 でなければならない**) */
+static int  catf_tty0;
+static int  catf_read0_calls;
+static int  catf_close0_calls;
+static int  catf_close_calls;
+
 static char catf_log[4096];
 static u32  catf_log_len;
 
@@ -83,6 +103,10 @@ static void catf_set(const u8 *data, int len, int chunk)
     catf_chunk = chunk;
     catf_outlen = 0;
     catf_write_calls = 0;
+    catf_tty0 = 0;
+    catf_read0_calls = 0;
+    catf_close0_calls = 0;
+    catf_close_calls = 0;
     catf_log_len = 0;
     catf_log[0] = '\0';
 }
@@ -117,12 +141,20 @@ static int fk_sys_open(const char *path, int mode)
     return 3;
 }
 
-static void fk_sys_close(int fd) { if (fd == 3) catf_open = 0; }
+static void fk_sys_close(int fd)
+{
+    catf_close_calls++;
+    if (fd == 0) catf_close0_calls++;
+    if (fd == 3) catf_open = 0;
+}
 
 static int fk_sys_read(int fd, void *buf, u32 size)
 {
     int avail;
-    if (fd != 3 || !catf_open) return OS32_ERR_IO;
+    /* FD 0 は同じ中身を流す (パイプ / リダイレクト先の代わり)。
+     * シェルの fd_redirect が差し替えたところをそのまま読む形。 */
+    if (fd == 0) catf_read0_calls++;
+    else if (fd != 3 || !catf_open) return OS32_ERR_IO;
     avail = catf_size - catf_pos;
     if (avail <= 0) return 0;
     if ((u32)avail > size) avail = (int)size;
@@ -164,7 +196,7 @@ static int fk_sys_ls(const char *path, void *cb, void *ctx)
 }
 
 static const char *fk_sys_getcwd(void) { return "/"; }
-static int fk_sys_isatty(int fd) { (void)fd; return 0; }
+static int fk_sys_isatty(int fd) { return fd == 0 ? catf_tty0 : 0; }
 
 static KernelAPI g_fake;
 KernelAPI *g_api = &g_fake;
@@ -237,6 +269,17 @@ static void run_cat(int with_n)
     cmd_cat(n, av);
 }
 
+/* ファイル名を渡さない cat (= 標準入力) */
+static void run_cat_stdin(int with_n)
+{
+    char *av[3];
+    int n = 0;
+    av[n++] = (char *)"cat";
+    if (with_n) av[n++] = (char *)"-n";
+    av[n] = 0;
+    cmd_cat(n, av);
+}
+
 static int out_matches(const u8 *want, int wantlen)
 {
     return catf_outlen == wantlen &&
@@ -289,6 +332,19 @@ static void case_n(const char *name, const u8 *data, int len, int chunk)
     catf_set(data, len, chunk);
     wantlen = ref_cat_n(data, len, ref_buf);
     run_cat(1);
+    ok = out_matches(ref_buf, wantlen);
+    check(ok, name);
+    if (!ok) show_diff(ref_buf, wantlen);
+}
+
+/* 引数なし (標準入力) の cat -n を参照実装と突き合わせる */
+static void case_n_stdin(const char *name, const u8 *data, int len, int chunk)
+{
+    int wantlen;
+    int ok;
+    catf_set(data, len, chunk);
+    wantlen = ref_cat_n(data, len, ref_buf);
+    run_cat_stdin(1);
     ok = out_matches(ref_buf, wantlen);
     check(ok, name);
     if (!ok) show_diff(ref_buf, wantlen);
@@ -441,6 +497,98 @@ int main(void)
           "参照実装: 'a\\nb\\n' は 20 バイト (2 行)");
     check(ref_cat_n((const u8 *)"", 0, ref_buf) == 0,
           "参照実装: 空は 0 バイト");
+
+    /* ---- 6. 引数なしの cat は標準入力 (FD 0) を読む -------------------- */
+    printf("== 6. 引数なしの cat は FD 0 を読む ==\n");
+
+    /* (6-1) 素通し */
+    {
+        static const char *bodies[] = { "one\ntwo\nthree\n", "one\ntwo\nthree",
+                                        "\n", "abc", "" };
+        static const int chunks[] = { 0, 1, 3, 7 };
+        unsigned int b, c;
+        char name[128];
+        for (b = 0; b < sizeof(bodies) / sizeof(bodies[0]); b++) {
+            for (c = 0; c < sizeof(chunks) / sizeof(chunks[0]); c++) {
+                int len = (int)strlen(bodies[b]);
+                catf_set((const u8 *)bodies[b], len, chunks[c]);
+                run_cat_stdin(0);
+                sprintf(name, "引数なし: 本文 %u 番を %d バイト刻みで素通し",
+                        b + 1, chunks[c]);
+                check(catf_outlen == len &&
+                      (len == 0 || memcmp(catf_out, bodies[b], (size_t)len) == 0),
+                      name);
+            }
+        }
+    }
+
+    /* (6-2) -n の行番号は 5 章までと同じ規則 */
+    case_n_stdin("引数なし -n: 'a\\nb\\n' は行番号 2 つ",
+                 (const u8 *)"a\nb\n", 4, 0);
+    case_n_stdin("引数なし -n: 'a\\nb' は最後の行にも番号",
+                 (const u8 *)"a\nb", 3, 0);
+    case_n_stdin("引数なし -n: 空入力は 1 バイトも出さない",
+                 (const u8 *)"", 0, 0);
+    case_n_stdin("引数なし -n: 3 バイト刻みの読み取り",
+                 (const u8 *)"one\ntwo\nthree\n", 14, 3);
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    run_cat_stdin(1);
+    check(count_numbers(catf_out, catf_outlen) == 2,
+          "引数なし -n: 末尾の余分な行番号を出さない");
+    check(out_matches((const u8 *)"     1  a\n     2  b\n", 20),
+          "引数なし -n: 書式は 6 桁右寄せ + 空白 2 つのまま");
+    {
+        u8 *p = mk_fill(2 * IO_BUF_SIZE + 123, 0);   /* 改行なしで境界をまたぐ */
+        p[IO_BUF_SIZE] = '\n';
+        p[2 * IO_BUF_SIZE + 122] = '\n';
+        case_n_stdin("引数なし -n: IO_BUF_SIZE の切れ目をまたぐ",
+                     p, 2 * IO_BUF_SIZE + 123, 0);
+        free(p);
+    }
+
+    /* (6-3) FD 0 を閉じない */
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    run_cat_stdin(0);
+    check(catf_close0_calls == 0, "引数なし: **sys_close(0) を呼ばない**");
+    catf_set((const u8 *)"a\nb\n", 4, 3);
+    run_cat_stdin(1);
+    check(catf_close0_calls == 0, "引数なし -n: sys_close(0) を呼ばない");
+    catf_set((const u8 *)"", 0, 0);
+    run_cat_stdin(0);
+    check(catf_close0_calls == 0, "引数なし・空入力: sys_close(0) を呼ばない");
+
+    /* (6-4) 引数があるときは FD 0 を読まない (誤発火の裏) */
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    run_cat(0);
+    check(catf_read0_calls == 0, "ファイル指定: FD 0 を読まない");
+    check(catf_close_calls == 1 && catf_close0_calls == 0,
+          "ファイル指定: 閉じるのは開いた FD だけ");
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    run_cat(1);
+    check(catf_read0_calls == 0, "ファイル指定 -n: FD 0 を読まない");
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    {
+        char *av[3];
+        av[0] = (char *)"cat";
+        av[1] = (char *)"/nope";
+        av[2] = 0;
+        cmd_cat(2, av);
+    }
+    check(catf_read0_calls == 0 && catf_outlen == 0,
+          "無いファイルを指定: FD 0 へ落ちない (断って終わる)");
+
+    /* (6-5) 端末のままなら読みに行かない */
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    catf_tty0 = 1;
+    run_cat_stdin(0);
+    check(catf_read0_calls == 0 && catf_outlen == 0,
+          "FD 0 が端末: 読みに行かない (戻れなくなる経路へ入らない)");
+    catf_set((const u8 *)"a\nb\n", 4, 0);
+    catf_tty0 = 1;
+    run_cat_stdin(1);
+    check(catf_read0_calls == 0 && catf_outlen == 0,
+          "FD 0 が端末 -n: 読みに行かない");
+    catf_tty0 = 0;
 
     printf("\n=== %d 件中 %d 件 FAIL ===\n", checks, failures);
     return failures ? 1 : 0;

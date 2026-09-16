@@ -21,6 +21,16 @@
  *    - 副作用の呼び出し (open / mkdir / rename / unlink) が 0 回で、
  *      媒体 (贋 FS の中身) が変わっていない
  *
+ *  6 章は別の欠陥 (継承バグ台帳): `cp -r` が **失敗する経路で宛先に空の
+ *  ディレクトリを残す**。do_copy_recursive_impl は sys_mkdir(dst) を件数の
+ *  確認より前に呼び、しかも戻り値を見ていなかった。直しは
+ *    - 収集して件数を確かめてから mkdir する
+ *    - mkdir の戻り値を見て、作れなければ中へ進まない
+ *    - ただし既に在る**ディレクトリ**への上書きコピーは今までどおり通す
+ *      (OS32_ERR_EXIST + 型が DIR のときだけ。ファイルなら断る)
+ *  判定は sys_mkdir / sys_open / sys_write の**呼び出し回数**と、贋 FS に
+ *  宛先ノードが生えていないことで見る。
+ *
  *  エミュレータ・実配備・make には一切触れない。
  * ========================================================================= */
 
@@ -45,6 +55,7 @@ static void run(void (*fn)(int, char **), const char *name,
     fsk_mkdir_calls = 0;
     fsk_rename_calls = 0;
     fsk_unlink_calls = 0;
+    fsk_write_calls = 0;
     av[n++] = (char *)name;
     if (a) av[n++] = (char *)a;
     if (b) av[n++] = (char *)b;
@@ -251,6 +262,116 @@ int main(void)
     run(cmd_rm, "rm", "/nope", 0, 0, 0);
     check(!refused() && strstr(fsk_log, "cannot remove '/nope'") != 0,
           "rm 無いもの: 従来の cannot remove");
+
+    /* ---- 6. cp -r は失敗する経路で宛先に空のディレクトリを残さない ----- */
+    printf("== 6. cp -r: 作れなかった / 中止した宛先を残さない ==\n");
+
+    /* (6-1) 収集表の上限を超える -> **sys_mkdir を呼ばない** */
+    {
+        char name[64];
+        int k;
+        fsk_reset();
+        fsk_add("/many", 1, 0);
+        for (k = 0; k < MAX_COPY_ENTRIES + 6; k++) {
+            sprintf(name, "/many/f%02d", k);
+            fsk_add(name, 0, "x");
+        }
+        fsk_add("/dst", 1, 0);
+        run(cmd_cp, "cp", "-r", "/many", "/dst", 0);
+        check(strstr(fsk_log, "too many entries") != 0,
+              "上限超過: 断りを出す (従来どおり)");
+        check(fsk_mkdir_calls == 0,
+              "上限超過: **sys_mkdir を 1 回も呼ばない** (収集が先)");
+        check(fsk_find("/dst/many") < 0,
+              "上限超過: 宛先に空のディレクトリを残さない");
+        check(fsk_open_calls == 0 && fsk_write_calls == 0,
+              "上限超過: 中へコピーしない");
+    }
+
+    /* (6-2) 列挙そのものが失敗する -> 宛先を作らない */
+    fsk_reset();
+    {
+        int n2 = fsk_add("/src", 1, 0);
+        fsk[n2].ls_err = OS32_ERR_IO;       /* stat は通るので種別は DIR */
+    }
+    run(cmd_cp, "cp", "-r", "/src", "/new", 0);
+    check(strstr(fsk_log, "cannot read directory") != 0,
+          "列挙 IO: 断りを出す");
+    check(fsk_mkdir_calls == 0 && fsk_find("/new") < 0,
+          "列挙 IO: 宛先を作らない");
+
+    /* (6-3) sys_mkdir が失敗する -> 中へコピーしない */
+    fsk_reset();
+    fsk_add("/src", 1, 0);
+    fsk_add("/src/a.txt", 0, "A");
+    fsk_mkdir_err = OS32_ERR_IO;
+    run(cmd_cp, "cp", "-r", "/src", "/new", 0);
+    fsk_mkdir_err = 0;
+    check(strstr(fsk_log, "cannot create directory") != 0,
+          "mkdir 失敗: 断りを出す");
+    check(fsk_mkdir_calls == 1, "mkdir 失敗: mkdir は 1 回だけ");
+    check(fsk_open_calls == 0 && fsk_write_calls == 0,
+          "mkdir 失敗: **中へコピーしない** (open / write を呼ばない)");
+    check(fsk_find("/new/a.txt") < 0, "mkdir 失敗: /new/a.txt を作らない");
+
+    /* (6-4) 既に在る**ディレクトリ** (OS32_ERR_EXIST) -> 今までどおり通す。
+     * `cp -r /src /dst` を 2 回打つ使い方 (2 回目は /dst/src が既に在る)。 */
+    fsk_reset();
+    fsk_add("/src", 1, 0);
+    fsk_add("/src/a.txt", 0, "NEW");
+    fsk_add("/src/sub", 1, 0);
+    fsk_add("/src/sub/b.txt", 0, "NEWB");
+    fsk_add("/dst", 1, 0);
+    fsk_add("/dst/src", 1, 0);              /* 既に在る (1 回目の結果) */
+    fsk_add("/dst/src/a.txt", 0, "OLD");
+    fsk_add("/dst/src/sub", 1, 0);          /* 入れ子も既に在る */
+    fsk_add("/dst/src/sub/b.txt", 0, "OLDB");
+    run(cmd_cp, "cp", "-r", "/src", "/dst", 0);
+    check(strstr(fsk_log, "cannot create directory") == 0,
+          "既存ディレクトリ: 断らない");
+    check(data_is("/dst/src/a.txt", "NEW"),
+          "既存ディレクトリ: 中身を上書きコピーする (2 回目の cp -r が通る)");
+    check(data_is("/dst/src/sub/b.txt", "NEWB"),
+          "既存ディレクトリ: 入れ子の既存ディレクトリへも入る");
+
+    /* (6-5) 同名の**ファイル**が在る (EXIST だが型が違う) -> 中へ進まない */
+    fsk_reset();
+    fsk_add("/src", 1, 0);
+    fsk_add("/src/a.txt", 0, "A");
+    fsk_add("/f", 0, "KEEP");
+    run(cmd_cp, "cp", "-r", "/src", "/f", 0);
+    check(strstr(fsk_log, "cannot create directory") != 0,
+          "宛先が同名のファイル: 断りを出す");
+    check(data_is("/f", "KEEP"), "宛先が同名のファイル: 中身を壊さない");
+    check(fsk_open_calls == 0 && fsk_write_calls == 0 &&
+              fsk_find("/f/a.txt") < 0,
+          "宛先が同名のファイル: 中へコピーしない");
+
+    /* (6-6) 型が分からない宛先が既に在る -> 断る (B8 の原則) */
+    fsk_reset();
+    fsk_add("/src", 1, 0);
+    fsk_add("/src/a.txt", 0, "A");
+    fsk_add("/dst", 1, 0);
+    fsk_add("/dst/src", 1, 0);
+    mark_unknown("/dst/src");
+    run(cmd_cp, "cp", "-r", "/src", "/dst", 0);
+    check(strstr(fsk_log, "cannot create directory") != 0,
+          "宛先の型が分からない: 断る (EXIST を無条件に通さない)");
+    check(fsk_open_calls == 0 && fsk_write_calls == 0,
+          "宛先の型が分からない: 中へコピーしない");
+
+    /* (6-7) 正常系 — 誤発火していない裏 */
+    fsk_reset();
+    fsk_add("/src", 1, 0);
+    fsk_add("/src/a.txt", 0, "A");
+    fsk_add("/src/sub", 1, 0);
+    fsk_add("/src/sub/b.txt", 0, "B");
+    run(cmd_cp, "cp", "-r", "/src", "/new", 0);
+    check(!refused() && strstr(fsk_log, "cannot create directory") == 0,
+          "正常系: 何も断らない");
+    check(data_is("/new/a.txt", "A") && data_is("/new/sub/b.txt", "B"),
+          "正常系: 入れ子ごと写る");
+    check(fsk_mkdir_calls == 2, "正常系: mkdir は /new と /new/sub の 2 回");
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

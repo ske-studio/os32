@@ -1,7 +1,7 @@
 # `cat -n` の行番号は行の先頭でだけ出る (ホスト試験の記録)
 
 - 対象: [`userland/shell/cmd_file.c`](../../userland/shell/cmd_file.c) の
-  `cat_with_linenum` / `cmd_cat` (`cat` `cat2` の 2 名で同じ実装)
+  `cat_with_linenum` / `cat_stream` / `cmd_cat` (`cat` `cat2` の 2 名で同じ実装)
 - 実行: `python3 -B tools/tests/test_cat_linenum.py [--target] [--mutate]`
   (`make check-cat-linenum-host` が同じものを `--target --mutate` 付きで回す)
 - 試験: [`cat_linenum_host.c`](cat_linenum_host.c) — 実物の `cmd_fs_shared.c` と
@@ -114,8 +114,10 @@ POSIX の `cat -n` は足さないが、シェルのプロンプトが行頭か�
 
 | 変異 | 戻すもの | 落ちる件数 | 落ちる主な場 |
 |---|---|---|---|
-| `a_extra_number_at_end` | (a) バッファの終わりでも 1 行終わったことにする | 32 | `'a\nb\n'` `'\n'` `'\n\n\n'` / 境界が改行と重なる / 末尾が改行 |
-| `b_state_not_carried` | (b) 読み取りごとに行頭の状態を捨てる | 28 | 1〜7 バイト刻みの読み取り / 境界で行の途中が切れる / 3 回読む長さ |
+| `a_extra_number_at_end` | (a) バッファの終わりでも 1 行終わったことにする | 38 | `'a\nb\n'` `'\n'` `'\n\n\n'` / 境界が改行と重なる / 末尾が改行 |
+| `b_state_not_carried` | (b) 読み取りごとに行頭の状態を捨てる | 32 | 1〜7 バイト刻みの読み取り / 境界で行の途中が切れる / 3 回読む長さ |
+
+(件数は §7 の 36 件を足した後の値。§7 を入れる前は 32 / 28 だった。)
 
 2 つの変異が落とす場は重ならない側を持っている ((a) は改行で終わる場、(b) は
 行の途中で切れる場)。どちらか片方だけ直しても GREEN にならない。
@@ -127,3 +129,84 @@ POSIX の `cat -n` は足さないが、シェルのプロンプトが行頭か�
   今もファイルごとに 1 から数え直す (GNU の `cat -n` は通し番号)。この票の
   範囲外として残した。
 - `cat -n` のオプション解析 (`-n` 以外の文字や `-` 単独) も触っていない。
+
+## 7. 追補 — 引数なしの `cat` が標準入力を読む (2026-09-16)
+
+継承バグ台帳 ([`docs/tasks/shell/INHERITED_BUGS.md`](../../docs/tasks/shell/INHERITED_BUGS.md))
+の「内蔵 `cat` は stdin を読まない (`echo a | cat` / `cat < file` は空)」を同じ枠で直した。
+
+### 7-1 欠陥
+
+`cmd_cat` は `for (i = file_start; i < argc; i++)` でファイル名の引数だけを回す。
+引数が 1 つも無いと**ループが 1 回も回らず、何も出さずに戻る**。
+シェルは `fd_redirect` で FD 0 をパイプ用の buffer / リダイレクト先のファイルへ
+差し替えているので、読む先は用意されているのに誰も読んでいなかった。
+
+### 7-2 直し方
+
+読み取りループを `cat_stream(int fd, int show_linenum)` へ切り出し
+(`line_num` / `at_bol` の持ち回りと行末の改行は §4 の規則のまま、書式も不変)、
+`cmd_cat` は
+
+- ファイル名が 1 つも無い (`file_start >= argc`) → `cat_stream(0, show_linenum)`
+- ある → 従来どおり 1 本ずつ `sys_open` して `cat_stream(fd, ...)`
+
+と振り分ける。**リダイレクト表には触らない** — `sys_read(0, ...)` が
+`vfs_read_fd` → `fd_redirect_read(0, ...)` へ落ちる既存の仕組みにそのまま乗るので、
+パイプ (`echo a | cat`) でもリダイレクト (`cat < f`) でも同じ経路で効く。
+
+2 つの決まりごと:
+
+- **FD 0 を `sys_close` しない。** FD 0 はシェルの持ち物で、閉じると以降の
+  リダイレクトが壊れる。`cat_stream` は FD を閉じず、閉じるのは開いた側だけ。
+- **`sys_isatty(0)` が真なら読みに行かない。** `fs/vfs_fd.c` の `vfs_read_fd` は
+  リダイレクトされていない FD 0 を `kbd_getchar()` で読み、**EOF を返す手が無い**。
+  端末のまま読むと `cat` だけを打ったユーザーが戻れなくなるので、
+  `grep` / `hexdump` (`userland/cmds/`) と同じく使い方を出して止める。
+  `vfs_isatty` はリダイレクト中 (パイプを含む) は 0 を返すので、直したい経路は塞がない。
+
+引数に `-` を混ぜる形 (`cat a - b`) は**対象外**。今の解析は `argv[1]` が `-` で
+始まればオプションとして食べるので、`cat -` は引数なしと同じ扱い (= 標準入力) になる。
+
+### 7-3 RED → GREEN
+
+RED (直す前の `cmd_file.c`、試験だけ新しい):
+
+```
+=== 89 件中 22 件 FAIL ===
+EXIT cat_linenum_host=1
+```
+
+落ちた 22 件は §6 の新しい場だけ (1〜5 章の 53 件は `ok` のまま)。内訳は
+素通し 16 件 (本文 1〜4 番 × 4 刻み。空入力の本文 5 番は 0 バイトどうしで一致
+してしまうので `ok`) と `-n` の 6 件。
+
+「FD 0 を閉じない」「引数があるときは FD 0 を読まない」「FD 0 が端末なら
+読みに行かない」は RED でも `ok` — 直す前は**そもそも FD 0 を触らない**ので
+当然通る。これらは**直しが行き過ぎていないこと**を見る側で、変異
+`d_close_stdin` / `e_read_tty` がその目を確かめている。
+
+GREEN (直した後):
+
+```
+=== 89 件中 0 件 FAIL ===
+EXIT cat_linenum_host=0
+TARGET i386-elf -Werror COMPILE PASS (userland/shell/cmd_fs_shared.c)
+TARGET i386-elf -Werror COMPILE PASS (userland/shell/cmd_file.c)
+```
+
+### 7-4 否定側 (`--mutate`) の追加分
+
+| 変異 | 壊すもの | 落ちる件数 |
+|---|---|---|
+| `c_no_stdin` | 引数が無くても標準入力へ落ちない (欠陥そのもの) | 23 |
+| `d_close_stdin` | 読み終わりに `sys_close(0)` する | 4 |
+| `e_read_tty` | 端末でも読みに行く (`sys_isatty(0)` の断りを消す) | 3 |
+
+### 7-5 確かめていないこと ([V4])
+
+- **実機 (NP21/W) では回していない。** `echo a | cat` / `cat < file` を
+  ゲストで打っていない。贋 FS の FD 0 は実物の `fd_redirect` ではない。
+- 端末のときの断り方は `shell_print_help(argv[0])` (`cat` の Usage 行)。
+  実際の表示は実機で見ていない。
+- `cat` の複数ファイルと標準入力を混ぜる形 (`cat a - b`) は対象外のまま。

@@ -12,8 +12,10 @@
  *    ls_err   … sys_ls がこの値を返す (ディレクトリのときだけ)
  *  全体:
  *    fsk_rename_err … sys_rename がこの値を返す (FS をまたぐ = OS32_ERR_INVAL)
+ *    fsk_mkdir_err  … sys_mkdir がこの値を返す (作れない宛先の再現)
  *  呼び出し回数 (受け手が副作用を起こしたかを見る):
- *    fsk_mkdir_calls / fsk_open_calls / fsk_unlink_calls / fsk_rename_calls
+ *    fsk_mkdir_calls / fsk_open_calls / fsk_unlink_calls / fsk_rename_calls /
+ *    fsk_write_calls
  * ========================================================================= */
 #ifndef FS_KIND_FAKE_H
 #define FS_KIND_FAKE_H
@@ -39,7 +41,8 @@ static void check(int cond, const char *name)
 /*  贋ファイルシステム                                                        */
 /* ------------------------------------------------------------------------ */
 
-#define FSK_MAX_NODES 48
+/* MAX_COPY_ENTRIES (64) を超えるディレクトリを作れる大きさにしておく */
+#define FSK_MAX_NODES 96
 #define FSK_MAX_FDS   8
 #define FSK_PATH_CAP  256
 
@@ -61,7 +64,9 @@ static int     fsk_mkdir_calls;
 static int     fsk_open_calls;
 static int     fsk_unlink_calls;
 static int     fsk_rename_calls;
+static int     fsk_write_calls;
 static int     fsk_rename_err;   /* != 0 … sys_rename がこの値を返す */
+static int     fsk_mkdir_err;    /* != 0 … sys_mkdir がこの値を返す */
 static char    fsk_log[16384];
 static u32     fsk_log_len;
 
@@ -73,7 +78,9 @@ static void fsk_reset(void)
     fsk_open_calls = 0;
     fsk_unlink_calls = 0;
     fsk_rename_calls = 0;
+    fsk_write_calls = 0;
     fsk_rename_err = 0;
+    fsk_mkdir_err = 0;
     fsk_log_len = 0;
     fsk_log[0] = '\0';
 }
@@ -200,6 +207,7 @@ static int fk_sys_ls(const char *path, void *cb, void *ctx)
 static int fk_sys_mkdir(const char *path)
 {
     fsk_mkdir_calls++;
+    if (fsk_mkdir_err) return fsk_mkdir_err;
     if (fsk_find(path) >= 0) return OS32_ERR_EXIST;
     fsk_add(path, 1, 0);
     return 0;
@@ -261,6 +269,7 @@ static int fk_sys_write(int fd, const void *buf, u32 size)
 {
     FskFd *h;
     FskNode *nd;
+    fsk_write_calls++;
     if (fd < 3 || fd - 3 >= FSK_MAX_FDS || !fsk_fds[fd - 3].used)
         return OS32_ERR_IO;
     h = &fsk_fds[fd - 3];

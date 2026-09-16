@@ -22,8 +22,13 @@ shell.c 側の 2 本 (shell_print_help / shell_register_cmds) だけを贋物に
 
 --target を付けると、実機と同じ i386-elf クロスコンパイラでも
 cmd_fs_shared.c / cmd_file.c が -Werror で通ることを確かめる ([C1] C89/GNU89)。
---mutate は**否定側**。(a) と (b) をそれぞれ元に戻した版を作り、この試験が
-ちゃんと RED になることを見る。make・エミュレータ・実配備には一切触れない。
+6 章は別の欠陥 (継承バグ台帳): **内蔵 `cat` が標準入力を読まない**。
+引数が 1 つも無ければ FD 0 を読む / FD 0 は閉じない / 引数があるときは
+FD 0 を読まない / 端末のままなら読みに行かない、の 4 つを見る。
+
+--mutate は**否定側**。(a) (b) と 6 章の 3 つ (標準入力へ落ちない / FD 0 を
+閉じる / 端末でも読む) をそれぞれ壊した版を作り、この試験がちゃんと RED に
+なることを見る。make・エミュレータ・実配備には一切触れない。
 """
 import os
 import pathlib
@@ -99,11 +104,37 @@ MUTATIONS = [
     # 変異 2 = 欠陥 (b): 行頭の状態を読み取りごとに捨てる版に戻す。
     # IO_BUF_SIZE の切れ目ごとに行番号が 1 つ余分に増える。
     ("b_state_not_carried",
-     "            int at_bol = 1;\n"
-     "            while (1) {",
-     "            int at_bol = 1;\n"
-     "            while (1) {\n"
-     "                at_bol = 1;"),
+     "    int at_bol = 1;\n"
+     "    int r;\n"
+     "\n"
+     "    while (1) {",
+     "    int at_bol = 1;\n"
+     "    int r;\n"
+     "\n"
+     "    while (1) {\n"
+     "        at_bol = 1;"),
+    # 変異 3 = 欠陥 (c): 引数が無くても標準入力へ落ちない版 (継承バグの元の姿)。
+    # ファイル名の引数だけをループするので `echo a | cat` が空になる。
+    ("c_no_stdin",
+     "    if (file_start >= argc) {\n"
+     "        if (g_api->sys_isatty(0)) {",
+     "    if (0) {\n"
+     "        if (g_api->sys_isatty(0)) {"),
+    # 変異 4 = FD 0 を閉じてしまう版。シェルの標準入力を道連れにする。
+    ("d_close_stdin",
+     "        cat_stream(0, show_linenum);\n"
+     "        release_io_buf();",
+     "        cat_stream(0, show_linenum);\n"
+     "        g_api->sys_close(0);\n"
+     "        release_io_buf();"),
+    # 変異 5 = 端末でも読みに行く版。vfs_read_fd の TTY 経路は EOF を返さない
+    # ので、実機では `cat` だけを打つと戻れなくなる。
+    ("e_read_tty",
+     "        if (g_api->sys_isatty(0)) {\n"
+     "            shell_print_help(argv[0]);\n"
+     "            return;\n"
+     "        }\n",
+     ""),
 ]
 
 
