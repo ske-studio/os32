@@ -648,10 +648,62 @@ static i32 __cdecl h_launch_poll(i32 token, i32 *status)
 }
 static i32 __cdecl h_sys_yield(void) { return 0; }
 
-/* kbd_trygetkey は script_exec の ESC 判定が毎行引く。-1 = 何も来ていない。
- * **台本があるときだけ** -1 以外を返すと script_exec が毎行 ESC で落ちるので、
- * ここは常に -1 のまま (filer のキーリピート掃除もこれで空回りする)。 */
-static int __cdecl h_kbd_trygetkey(void) { return -1; }
+/* --- 監視キュー (script_exec の ESC 監視が引く口) ------------------------
+ *
+ *  行編集の台本 (keys_*) とは**別の窓**。keys_* は尽きたら ESC を返し続ける
+ *  ので、そこへ相乗りさせると script_exec が毎行 ESC で落ちる。
+ *
+ *  ここは本物のキューと同じに振る舞う: kbd_peekkey は**先頭を動かさず**返し、
+ *  kbd_trygetkey は**取り出す**。既定は空 (= 打鍵なし) なので、これを使わない
+ *  試験の見え方は今までと 1 行も変わらない (どちらも -1)。
+ *
+ *  「食った / 食わなかった」の窓は wq_len() / wq_at() / wq_takes()。 */
+#define WQ_CAP 16
+static int g_wq[WQ_CAP];
+static int g_wq_head;
+static int g_wq_len;
+static int g_wq_takes;          /* 取り出された回数 (食った数) */
+
+static void wq_reset(void)
+{
+    g_wq_head = 0;
+    g_wq_len = 0;
+    g_wq_takes = 0;
+}
+
+static void wq_push(int k)
+{
+    if (g_wq_len < WQ_CAP) g_wq[(g_wq_head + g_wq_len++) % WQ_CAP] = k;
+}
+
+static int wq_len(void)   { return g_wq_len; }
+static int wq_takes(void) { return g_wq_takes; }
+
+/* 先頭から i 番目。無ければ -1。 */
+static int wq_at(int i)
+{
+    if (i < 0 || i >= g_wq_len) return -1;
+    return g_wq[(g_wq_head + i) % WQ_CAP];
+}
+
+/* 覗くだけ — キューは 1 つも動かない (KAPI v54)。 */
+static int __cdecl h_kbd_peekkey(void)
+{
+    if (g_wq_len == 0) return -1;
+    return g_wq[g_wq_head];
+}
+
+/* 取り出す。filer のキーリピート掃除もこれを回すが、空なら -1 で空回りする。 */
+static int __cdecl h_kbd_trygetkey(void)
+{
+    int k;
+    if (g_wq_len == 0) return -1;
+    k = g_wq[g_wq_head];
+    g_wq_head = (g_wq_head + 1) % WQ_CAP;
+    g_wq_len--;
+    g_wq_takes++;
+    return k;
+}
 
 /* 行入力・rshell・filer が引くキー源。台本 (keys_*) を 1 つずつ返す。 */
 static int __cdecl h_kbd_getchar(void)    { return key_next(); }
@@ -720,6 +772,7 @@ static void build_api(void)
     g_fake.launch_poll = h_launch_poll;
     g_fake.sys_yield = h_sys_yield;
     g_fake.kbd_trygetkey = h_kbd_trygetkey;
+    g_fake.kbd_peekkey = h_kbd_peekkey;
     g_fake.kbd_getchar = h_kbd_getchar;
     g_fake.kbd_getkey = h_kbd_getkey;
     g_fake.ime_getkey = h_ime_getkey;
@@ -915,6 +968,7 @@ static void fresh(void)
     redir_log_reset();
     dir_reset();
     keys_reset();
+    wq_reset();
     ser_reset();
     g_popup_count = 0;
     g_popup[0] = '\0';
@@ -3132,6 +3186,113 @@ static void case_tab_completion(void)
     env_set("PATH", SYS_DEFAULT_PATH);
 }
 
+/* ========================================================================
+ *  29. 継承バグ「source が ESC 以外も食う」 — 行ごとの ESC 監視 (cmd_script.c)
+ *
+ *  script_exec は **1 行ごと**にキーを見て ESC なら打ち切る。以前はそれを
+ *  kbd_trygetkey で見ていたので、ESC 以外の打鍵も**取り出して捨てて**いた:
+ *  スクリプト実行中に打った文字が消え、終わった後の入力の先頭が欠ける。
+ *  KAPI v54 の kbd_peekkey (覗くだけ) に替え、取り除くのは ESC と分かって
+ *  からにした。
+ *
+ *  窓は監視キューの模型 (wq_*)。wq_takes() が「食った数」で、これが 0 の
+ *  ままなのが直った印。ESC の打ち切り (script_abort_flag) は据え置き。
+ * ======================================================================== */
+static void case_script_esc_watch(void)
+{
+    report("29 継承バグ: 行ごとの ESC 監視が ESC 以外を食わない\n");
+
+    /* --- 29a〜d: ESC 以外は 1 つも食わない (2 行以上で毎行回る) -------- */
+    fresh();
+    wq_push('a');
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    s_add("mk3\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2") && ran("mk3"),
+          "29a 3 行とも走る (打鍵は打ち切りにならない)");
+    check(!out_has("Script aborted"), "29b 打ち切っていない");
+    check(wq_takes() == 0, "29c 1 つも取り出していない (毎行の監視が食わない)");
+    check(wq_len() == 1 && wq_at(0) == 'a',
+          "29d 打った 'a' がスクリプトの後もキューに残っている");
+
+    /* --- 29e〜g: 複数の打鍵が順序どおり全部残る ----------------------- */
+    fresh();
+    wq_push('a');
+    wq_push('b');
+    wq_push('c');
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2"), "29e 2 行とも走る");
+    check(wq_len() == 3, "29f 3 打鍵とも残る (行数ぶん食わない)");
+    check(wq_at(0) == 'a' && wq_at(1) == 'b' && wq_at(2) == 'c',
+          "29g 順序が入れ替わっていない");
+
+    /* --- 29h〜k: ESC は今までどおり打ち切る (誤発火の裏) -------------- */
+    fresh();
+    wq_push(0x1B);
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!ran("mk1"), "29h ESC: 1 行目の前に打ち切る");
+    check(!ran("mk2"), "29i ESC: 後続行も走らない");
+    check(out_has("Script aborted"), "29j ESC: 打ち切りを報せる");
+    check(wq_takes() == 1 && wq_len() == 0,
+          "29k ESC 自身は取り除く (後の行編集へ ESC を残さない)");
+
+    /* --- 29l〜n: ESC の前に別のキーが積まれている場合の順序 -----------
+     *  先頭は 'a' なので打ち切らない。**覗くのは先頭だけ**なので、後ろに
+     *  ある ESC はこの行では見えない — その ESC は消えたのではなく、
+     *  'a' の次に読み手へ順序どおり届く。行ごとに取り出していた以前は
+     *  'a' を捨ててから ESC で打ち切っていた (打鍵が消える側)。 */
+    fresh();
+    wq_push('a');
+    wq_push(0x1B);
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("mk2\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2"), "29l 先頭が ESC でなければ打ち切らない");
+    check(wq_takes() == 0, "29m 同上: 1 つも食わない");
+    check(wq_len() == 2 && wq_at(0) == 'a' && wq_at(1) == 0x1B,
+          "29n 'a' → ESC の順序でそのまま残る");
+
+    /* --- 29o〜q: 入れ子 source でも食わない --------------------------- */
+    fresh();
+    wq_push('z');
+    s_begin(1);
+    s_add("mk2\n");
+    s_add("mk3\n");
+    file_add("/inner.sh", s_body(1));
+    s_begin(0);
+    s_add("mk1\n");
+    s_add("source /inner.sh\n");
+    s_add("mk4\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && ran("mk2") && ran("mk3") && ran("mk4"),
+          "29o 入れ子 source: 内外とも最後まで走る");
+    check(wq_takes() == 0, "29p 入れ子 source: 1 つも食わない");
+    check(wq_len() == 1 && wq_at(0) == 'z', "29q 入れ子 source: 打鍵が残る");
+
+    /* --- 29r: 打鍵が無いときは今までどおり (空回り) ------------------- */
+    fresh();
+    s_begin(0);
+    s_add("mk1\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(ran("mk1") && wq_takes() == 0 && wq_len() == 0,
+          "29r 打鍵が無ければ何も起きない");
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -3169,6 +3330,7 @@ void _start(void)
     case_if_join_refuses();
     case_tab_completion();
     case_rshell_nested_refuse_flag();
+    case_script_esc_watch();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

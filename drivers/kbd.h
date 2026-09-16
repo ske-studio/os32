@@ -88,6 +88,7 @@ int  kbd_getchar(void);     /* ブロッキング: ASCII部のみ返す */
 int  kbd_getkey(void);      /* ブロッキング: 上位=スキャンコード, 下位=ASCII */
 int  kbd_trygetchar(void);  /* ノンブロッキング: -1=なし, >=0 ASCII */
 int  kbd_trygetkey(void);   /* ノンブロッキング: -1=なし, >=0 キーコードデータ(u16) */
+int  kbd_peekkey(void);     /* 覗くだけ (取り出さない): -1=なし, >=0 キーコードデータ(u16) */
 int  kbd_has_key(void);     /* バッファにキーがあるか */
 u32  kbd_get_modifiers(void);/* 修飾キー状態取得 */
 int  kbd_is_pressed(int scancode); /* スキャンコード押下状態 (1=押下中) */

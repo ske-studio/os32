@@ -1,5 +1,5 @@
 {
-  "version": 53,
+  "version": 54,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1487,6 +1487,11 @@
       "ret": "int",
       "args": ["const char *path", "u32 mtime"],
       "target": "kapi_sys_set_mtime"
+    },
+    {
+      "name": "kbd_peekkey",
+      "ret": "int",
+      "args": []
     }
   ]
 }

@@ -84,6 +84,14 @@ static int inj_take(u8 *out)
     return 1;
 }
 
+/* 取り出さずに先頭だけ写す。空なら 0 (*out 不変)。 */
+static int inj_peek(u8 *out)
+{
+    if (g_inj_count == 0) return 0;
+    *out = g_inj_ring[g_inj_tail];
+    return 1;
+}
+
 static void inj_reset(void)
 {
     g_inj_head = 0;
@@ -137,6 +145,18 @@ int kbd_inject_take(u8 *out)
     if (!out) return 0;
     f = kbd_inject_lock();
     got = inj_take(out);
+    kbd_inject_unlock(f);
+    return got;
+}
+
+int kbd_inject_peek(u8 *out)
+{
+    unsigned int f;
+    int got;
+
+    if (!out) return 0;
+    f = kbd_inject_lock();
+    got = inj_peek(out);
     kbd_inject_unlock(f);
     return got;
 }
@@ -227,6 +247,21 @@ u32 kbd_inject_selftest(void)
     if (!kbd_inject_take(&b) || b != 'x') bad |= 1u << 4;
     b = 0;
     if (!kbd_inject_take(&b) || b != 'y') bad |= 1u << 4;
+
+    /* (5) 覗きは**取り出さない** (KAPI v54 の kbd_peekkey が立つ土台) */
+    kbd_inject_discard();
+    b = 0x5A;
+    if (kbd_inject_peek(&b) != 0 || b != 0x5A) bad |= 1u << 5;   /* 空は 0 */
+    if (inj_push((const u8 *)"pq", 2) != 2) bad |= 1u << 5;
+    b = 0;
+    if (!kbd_inject_peek(&b) || b != 'p') bad |= 1u << 5;
+    b = 0;
+    if (!kbd_inject_peek(&b) || b != 'p') bad |= 1u << 5;   /* 何度でも同じ */
+    if (kbd_inject_pending() != 2) bad |= 1u << 5;          /* 減っていない */
+    b = 0;
+    if (!kbd_inject_take(&b) || b != 'p') bad |= 1u << 5;   /* 取り出せば進む */
+    b = 0;
+    if (!kbd_inject_peek(&b) || b != 'q') bad |= 1u << 5;
 
     /* 後始末: ブートの続きに持ち越さない */
     kbd_inject_discard();

@@ -551,6 +551,28 @@ MUTATIONS = [
      "            more = 1;\n"
      "        }"),
 
+    # ---- 継承バグ「source が ESC 以外も食う」の否定側 -------------------
+
+    # 変異 A: 直す前の姿。行ごとの監視が kbd_trygetkey で**取り出して捨てる**。
+    #         ESC 以外の打鍵が消え、スクリプトの後の入力の先頭が欠ける。
+    ("esc_watch_eats_key", "userland/shell/cmd_script.c",
+     "            int k = g_api->kbd_peekkey();\n"
+     "            if (k >= 0 && (k & 0xFF) == 0x1B) {\n"
+     "                (void)g_api->kbd_trygetkey();   /* ESC 自身は取り除く */\n",
+     "            int k = g_api->kbd_trygetkey();\n"
+     "            if (k >= 0 && (k & 0xFF) == 0x1B) {\n"),
+    # 変異 B: 覗くだけで **ESC も取り除かない** 版。打ち切りは効くが、ESC が
+    #         キューに残ってスクリプトの後の行編集が即 ESC を食う。
+    ("esc_not_removed", "userland/shell/cmd_script.c",
+     "                (void)g_api->kbd_trygetkey();   /* ESC 自身は取り除く */\n",
+     ""),
+    # 変異 C: ESC の打ち切りそのものを外す版 (今の挙動を弱めていないかの裏)。
+    ("esc_no_abort", "userland/shell/cmd_script.c",
+     "            int k = g_api->kbd_peekkey();\n"
+     "            if (k >= 0 && (k & 0xFF) == 0x1B) {",
+     "            int k = g_api->kbd_peekkey();\n"
+     "            if (0) {"),
+
     # T24: push が sys_read を 1 回しか呼ばない (先頭 4KB だけ送る)
     ("t24_push_single_read", "userland/shell/rshell.c",
      "    total = 0;\n"

@@ -233,10 +233,18 @@ static int script_exec(void)
             continue;
         }
 
-        /* ESCキーブレーク: ノンブロッキングでキーバッファを確認 */
+        /* ESC キーブレーク: **覗くだけ** でキューを確認する (KAPI v54)。
+         *
+         * ここは 1 行ごとに回るので、kbd_trygetkey で「取り出して捨てる」と
+         * スクリプト中に打った ESC 以外のキーが全部消える (継承バグ台帳の
+         * 「source が ESC 以外も食う」)。kbd_peekkey はキューを 1 バイトも
+         * 動かさないので、ESC でなければその打鍵は次の読み手 — この行が
+         * 起こすコマンド、あるいはスクリプトが終わった後の行編集 — に
+         * そのまま届く。取り除くのは **ESC だと分かってから**、1 回だけ。 */
         {
-            int k = g_api->kbd_trygetkey();
+            int k = g_api->kbd_peekkey();
             if (k >= 0 && (k & 0xFF) == 0x1B) {
+                (void)g_api->kbd_trygetkey();   /* ESC 自身は取り除く */
                 g_api->kprintf(ATTR_RED, "%s", "^C Script aborted.\n");
                 script_abort_flag = 1;
                 break;

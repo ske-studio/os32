@@ -42,6 +42,10 @@ u32 kbd_inject_pending(void);
 /* --- カーネル内から (drivers/kbd.c, exec/exec.c) ------------------------- */
 /* 1 バイト取り出す。取れたら 1 を返して *out に書く。空なら 0 (*out 不変)。 */
 int kbd_inject_take(u8 *out);
+/* 1 バイト**覗く** (取り出さない)。覗けたら 1 を返して *out に書く。空なら 0。
+ * kbd_peekkey (drivers/kbd.c) 用 — GUI 中の「ESC か否かだけ見て、ESC でなければ
+ * 次の読み手に残す」を、リングを 1 バイトも動かさずに書くために要る。 */
+int kbd_inject_peek(u8 *out);
 /* 溜まっているものを捨てる。CUI 復帰 (console_text_gdc_start) から。 */
 void kbd_inject_discard(void);
 /* 読み手が退場したら捨てる (exec_reclaim_owned から、con_sink_owner_exit の
