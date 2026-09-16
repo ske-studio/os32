@@ -95,6 +95,10 @@ static int fk_read_calls;
 static int fk_unlink_rc;         /* != 0 … sys_unlink がこの値を返す */
 static int fk_set_mtime_rc;
 static int fk_set_mtime_rofs;    /* mtime の失敗で ROFS へ落ちる (ext2 と同じ) */
+/* **n 回目の vfs_sync だけ**を落とす (0 = しない)。手順 4 (書き込みの後) を
+ * 通して手順 9 (rename の後) だけ落とす細工に使う。 */
+static int fk_sync_fail_at;
+static int fk_sync_calls;
 static int fk_rename_calls;
 /* 指定したパスの sys_ls を n 回だけ落とす (掃除の列挙だけを止めるのに使う) */
 static char fk_ls_fail_path[FS_PATH_CAP];
@@ -151,6 +155,8 @@ static void fs_reset(void)
     fk_dst_mutate_at = 0;
     fk_ls_fail_path[0] = '\0';
     fk_ls_fail_n = 0;
+    fk_sync_fail_at = 0;
+    fk_sync_calls = 0;
     fk_version = 53;
     fk_log_len = 0;
     fk_log[0] = '\0';
@@ -256,7 +262,12 @@ static int fk_sys_is_mounted(const char *prefix)
     return strcmp(prefix, "/host") == 0;
 }
 
-static int fk_vfs_sync(void) { return fk_rofs ? OS32_ERR_ROFS : 0; }
+static int fk_vfs_sync(void)
+{
+    fk_sync_calls++;
+    if (fk_sync_fail_at && fk_sync_calls == fk_sync_fail_at) return OS32_ERR_IO;
+    return fk_rofs ? OS32_ERR_ROFS : 0;
+}
 
 static int fk_sys_mkdir(const char *path)
 {
@@ -591,6 +602,7 @@ static int run_hsync(int argc, char **argv)
     fk_write_calls = 0;
     fk_read_calls = 0;
     fk_rename_calls = 0;
+    fk_sync_calls = 0;
     g_fake.version = fk_version;
     return hsync_main(argc, argv, &g_fake);
 }
@@ -1301,6 +1313,150 @@ static void case_regression(void)
           "/sys は書き換えない");
 }
 
+/* =========================================================================
+ *  独立レビューの非 blocker 指摘 1 / 2 / 4 (2026-09-16)
+ *
+ *   1. 手順 8 の rename が通った後に手順 9 の vfs_sync が落ちると、呼び手が
+ *      note_target を呼ばず「/sys を更新した -> シェル再起動が必要」が
+ *      消えていた。**置換は媒体に載っているのに案内が消えるのは誤報**。
+ *   2. コピー元の `.hs~*` を黙って落としていた。`excluded` にも -v の行にも
+ *      出ないので、ホストの配備元に紛れても気づけない。
+ *   4. mtime の失敗 1 件が、続く drop_temp の STALE でもう 1 件数えられて
+ *      errors=2 になっていた。**1 つの失敗は 1 と数える**。
+ * ========================================================================= */
+
+#define SYS_SRC "/host/sys/libos32gui.shlib"
+#define SYS_DST "/sys/libos32gui.shlib"
+
+/* /host/sys/libos32gui.shlib (新 5000B) と /sys/libos32gui.shlib (旧 3000B) */
+static void setup_sys_pair(void)
+{
+    u8 *nw;
+    int n;
+
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/sys");
+    fs_add_dir("/sys");
+    nw = make_blob(5000, 9);
+    n = fs_add_file(SYS_SRC, nw, 5000);
+    fs_nodes[n].mtime = 777;
+    free(nw);
+    nw = make_blob(3000, 4);
+    n = fs_add_file(SYS_DST, nw, 3000);
+    fs_nodes[n].mtime = 222;
+    free(nw);
+}
+
+static void case_review_nb(void)
+{
+    printf("== 非 blocker 1: rename 成功 + sync 失敗 -> 再起動の案内は出す ==\n");
+    setup_sys_pair();
+    /* vfs_sync の順番: 1 = 手順 4 (書き込みの後) / 2 = 手順 9 (rename の後) /
+     * 3 = main の最後。2 だけ落とす。 */
+    fk_sync_fail_at = 2;
+    check(run1("sys") != 0, "非ゼロ終了 (errors に入る)");
+    check(log_has("reason=sync_failed"), "reason=sync_failed");
+    check(node_size(SYS_DST) == 5000,
+          "**置換は媒体に載っている** (宛先は新しい内容)");
+    check(log_has("copied=0"), "copied には数えない");
+    check(log_has("/sys を更新した"),
+          "**シェル再起動の案内が出る** (置換済みなので消してはいけない)");
+    check(log_has("errors=1"), "errors=1 (sync の失敗 1 件だけ)");
+
+    /* /boot でも同じ */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/boot");
+    fs_add_dir("/boot");
+    fs_add_file("/host/boot/vmkernel.lz4", (const u8 *)"NEWKERNEL", 9);
+    fs_add_file("/boot/vmkernel.lz4", (const u8 *)"old", 3);
+    fk_sync_fail_at = 2;
+    check(run1("boot") != 0, "非ゼロ終了");
+    check(log_has("/boot を更新した"), "**再起動の案内が出る**");
+
+    /* 置換の前に落ちた回は案内を出さない (媒体は旧内容のまま) */
+    setup_pair(5000, 1, 111, 3000, 2, 222);
+    fk_sync_fail_at = 1;          /* 手順 4 = 公開の前 */
+    check(run1("bin") != 0, "公開の前の sync 失敗で非ゼロ終了");
+    check(dst_unchanged(), "宛先は旧内容のまま");
+    check(!log_has("稼働中の版は切り替わっていない"),
+          "何も入れ替わっていない回に案内は出さない");
+
+    /* ---- PM 決裁 2026-09-16: 手順 8 の replace_partial へも広げる ----
+     * rename が非ゼロを返しても、宛先の st_ino が一時ファイルのものと一致
+     * すれば**媒体の上では入れ替わっている**。手順 9 と同じ理屈で案内を出す。 */
+    printf("== 非 blocker 1b: replace_partial でも再起動の案内は出す ==\n");
+    setup_sys_pair();
+    fk_rename_mode = RN_FAIL_AFTER;      /* 公開の後に失敗 (st_ino は新しい方) */
+    check(run1("sys") != 0, "非ゼロ終了");
+    check(log_has("reason=replace_partial"), "reason=replace_partial");
+    check(node_size(SYS_DST) == 5000,
+          "**置換は媒体に載っている** (宛先は検証済みの新しい内容)");
+    check(log_has("copied=0"), "copied には数えない");
+    check(!log_has("errors=0"), "errors に数える");
+    check(log_has("/sys を更新した"),
+          "**シェル再起動の案内が出る** (公開済みなので消してはいけない)");
+
+    /* replace_failed (旧内容のまま) では案内を出さない */
+    setup_sys_pair();
+    fk_rename_mode = RN_FAIL_BEFORE;
+    check(run1("sys") != 0, "非ゼロ終了");
+    check(log_has("reason=replace_failed"), "reason=replace_failed");
+    check(node_size(SYS_DST) == 3000, "宛先は旧内容のまま");
+    check(!log_has("/sys を更新した"),
+          "**未公開なら案内は出さない** (入れ替わっていない)");
+
+    /* replace_unknown (公開したか分からない) でも案内を出さない */
+    setup_sys_pair();
+    fk_rename_mode = RN_UNKNOWN;
+    check(run1("sys") != 0, "非ゼロ終了");
+    check(log_has("reason=replace_unknown"), "reason=replace_unknown");
+    check(!log_has("/sys を更新した"),
+          "**判定できないなら案内は出さない** (出す根拠がない)");
+
+    printf("== 非 blocker 2: コピー元の .hs~ を黙って落とさない ==\n");
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    fs_add_dir("/bin");
+    fs_add_file("/host/bin/real.bin", (const u8 *)"real", 4);
+    fs_add_file("/host/bin/.hs~x", (const u8 *)"junk", 4);
+    check(run2("-v", "bin") == 0, "同期は成功する");
+    check(log_has("excluded=1"), "**excluded が 1 増える**");
+    check(log_has("reason=reserved_name"), "reason=reserved_name");
+    check(log_has("EXCLUDE /host/bin/.hs~x"),
+          "-v で**コピー元**のパスを見せる (直すのはそちら)");
+    check(node_of("/bin/.hs~x") < 0, "宛先へは運ばない (R4 のまま)");
+    check(node_of("/bin/real.bin") >= 0, "通常ファイルは同期される");
+
+    /* -v 無しでも数だけは出る */
+    fs_reset();
+    fs_add_dir("/host");
+    fs_add_dir("/host/bin");
+    fs_add_dir("/bin");
+    fs_add_file("/host/bin/real.bin", (const u8 *)"real", 4);
+    fs_add_file("/host/bin/.hs~x", (const u8 *)"junk", 4);
+    check(run1("bin") == 0, "同期は成功する");
+    check(log_has("excluded=1"), "-v 無しでも excluded に数える");
+    check(!log_has("EXCLUDE "), "-v 無しなら行は出さない");
+
+    printf("== 非 blocker 4: 1 つの失敗を 2 と数えない ==\n");
+    setup_pair(5000, 1, 111, 3000, 2, 222);
+    fk_set_mtime_rc = OS32_ERR_IO;
+    /* ext2 は mtime の I/O 失敗でマウントを ROFS に落とすので、続く unlink も
+     * 通らない。ここでは最後の vfs_sync まで巻き込まないよう unlink だけに
+     * 効かせて、**mtime の失敗が何件に数えられるか**を見る。 */
+    fk_unlink_rc = OS32_ERR_ROFS;
+    check(run1("bin") != 0, "非ゼロ終了");
+    check(log_has("reason=metadata_failed"), "reason=metadata_failed");
+    check(log_has("STALE "), "STALE も表示する (表示は両方出してよい)");
+    check(log_has("errors=1"),
+          "**1 つの失敗は 1 件** (STALE で二重に数えない)");
+    check(dst_unchanged(), "宛先は旧内容のまま");
+    check(fk_rename_calls == 0, "rename まで進まない");
+}
+
 int main(void)
 {
     printf("=== 票 H2: hsync の置換安全化 (一時ファイル + 検証 + 置換) ===\n");
@@ -1318,6 +1474,7 @@ int main(void)
     case_r5();
     case_unsupported();
     case_regression();
+    case_review_nb();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

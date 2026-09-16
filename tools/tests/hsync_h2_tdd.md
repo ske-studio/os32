@@ -100,6 +100,96 @@ EXIT hsync_h2_host=0
 TARGET i386-elf -Werror COMPILE PASS (userland/system/hsync.c)
 ```
 
+## 追補 — 独立レビューの非 blocker 指摘 1 / 2 / 4 (2026-09-16、基点 `d99d9e1`)
+
+実装 (`528c5cb`) は独立レビューで Approve (blocker 0)。その非 blocker 指摘のうち
+3 件を反例つきで直した。試験は `case_review_nb`、対象は同じ `hsync_h2_host.c`。
+
+| 指摘 | 反例 |
+|---|---|
+| 1 | 手順 8 の `rename` が通った後に手順 9 の `vfs_sync` が落ちると、呼び手が `note_target` を呼ばず「/sys を更新した -> シェル再起動が必要」が消えていた。**置換は媒体に載っているのに案内が消えるのは誤報**。贋 FS に「n 回目の `vfs_sync` だけ落とす」注入を足し、手順 4 を通して手順 9 だけ落とす |
+| 2 | コピー元の `.hs~*` を黙って落としていた。`excluded` にも `-v` の行にも出ないので、ホストの配備元に紛れても気づけない |
+| 4 | mtime の失敗 1 件が、続く `drop_temp` の `STALE` でもう 1 件数えられ `errors=2` になっていた。**1 つの失敗は 1 と数える** |
+
+### RED (直す前 = `d99d9e1` の `userland/system/hsync.c`)
+
+試験だけ新しくして hsync を `d99d9e1` に戻した結果。
+
+```
+176 checks, 7 failures
+```
+
+落ちた 7 件 (既存の 150 件は全部 ok のまま):
+
+```
+== 非 blocker 1: rename 成功 + sync 失敗 -> 再起動の案内は出す ==
+  FAIL **シェル再起動の案内が出る** (置換済みなので消してはいけない)
+  FAIL **再起動の案内が出る**                       ← /boot 側
+== 非 blocker 2: コピー元の .hs~ を黙って落とさない ==
+  FAIL **excluded が 1 増える**
+  FAIL reason=reserved_name
+  FAIL -v で**コピー元**のパスを見せる (直すのはそちら)
+  FAIL -v 無しでも excluded に数える
+== 非 blocker 4: 1 つの失敗を 2 と数えない ==
+  FAIL **1 つの失敗は 1 件** (STALE で二重に数えない)
+```
+
+### GREEN (直した後)
+
+```
+176 checks, 0 failures
+EXIT hsync_h2_host=0
+TARGET i386-elf -Werror COMPILE PASS (userland/system/hsync.c)
+```
+
+指摘 1 は `note_target` だけでは足りなかった。案内の出力そのものが
+`g_copied > 0` で門を張っていたので、**`g_touched_sys` / `g_touched_boot` も
+条件に入れた** (`note_target` は媒体の上で内容が入れ替わったときだけ立つ)。
+
+指摘 3 (掃除の列挙で「名前が長い」を「掃除の枠を越えた」に畳んでいた) と
+指摘 5 (`HS_TEMP_PREFIX_LEN` の重複定義 [C4]) は表示の語と定数の導出だけで、
+**振る舞いが変わらないので反例は足していない** (票の指示どおり)。
+
+### 追補 2 — 手順 8 の `replace_partial` へも広げる (PM 決裁 2026-09-16)
+
+最初の実装では `*published` を「手順 8 の `rename` が 0 を返した後」にだけ立てていたので、
+`rename` が非ゼロを返しつつ宛先の `st_ino` が一時ファイルのものと一致する回
+(`replace_partial`) では案内が出なかった。**媒体の上では入れ替わっているので手順 9 と
+同じ理屈が当たる**、という PM 判断で広げた。
+
+- `replace_partial` … `*published = 1` (公開済み。案内を出す)
+- `replace_failed` … 0 のまま (宛先は旧内容。入れ替わっていない)
+- `replace_unknown` … 0 のまま (公開したか分からない = 案内を出す根拠がない)
+
+反例は `case_review_nb` の「非 blocker 1b」。`RN_FAIL_AFTER` / `RN_FAIL_BEFORE` /
+`RN_UNKNOWN` の 3 通りを `/sys` の対象に当てて、**出る回と出ない回の両方**を固定した。
+
+#### RED (広げる前)
+
+```
+189 checks, 1 failures
+```
+
+```
+== 非 blocker 1b: replace_partial でも再起動の案内は出す ==
+  ok   reason=replace_partial
+  ok   **置換は媒体に載っている** (宛先は検証済みの新しい内容)
+  ok   copied には数えない
+  ok   errors に数える
+  FAIL **シェル再起動の案内が出る** (公開済みなので消してはいけない)
+```
+
+`replace_failed` / `replace_unknown` 側の「案内を出さない」6 件は RED でも ok
+(元から出ていなかった) — **広げすぎていないこと**を GREEN 側で押さえるための表明。
+
+#### GREEN (広げた後)
+
+```
+189 checks, 0 failures
+EXIT hsync_h2_host=0
+TARGET i386-elf -Werror COMPILE PASS (userland/system/hsync.c)
+```
+
 ## 変異試験 (`--mutate`、否定側)
 
 ```
@@ -124,6 +214,14 @@ MUTATE temp_names_synced          RED (期待どおり落ちた)
 - `no_kernel_gate` … 古いカーネルの門を外した版 (R1 の否定側)。
 - `clean_ignores_protection` … 掃除が保護対象を無視する版 (R5 の否定側)。
 - `temp_names_synced` … コピー元の `.hs~` を同期対象にしてしまう版 (R4 の否定側)。
+- `temp_names_dropped_silently` … コピー元の `.hs~` を**黙って**落とす版
+  (非 blocker 2 の否定側。弾くこと自体は変えず、数えるのと `-v` の行だけを消す)。
+- `published_note_dropped` … 手順 9 の `sync_failed` で再起動の案内を消す版
+  (非 blocker 1 の否定側)。
+- `partial_note_dropped` … 手順 8 の `replace_partial` で `*published` を立てない版
+  (PM 決裁 2026-09-16 の否定側。公開済みなのに案内が消える)。
+- `stale_counted_twice` … 手順 7 の後始末の `STALE` を独立した 1 件として
+  数え直す版 (非 blocker 4 の否定側 = 1 つの失敗を 2 と数える)。
 
 ## 設計との違い (PM の確認が要る点)
 

@@ -144,8 +144,35 @@ MUTATIONS = [
      "                /* mutated: 保護を無視する */"),
     # 変異 7: 予約名をコピー元の列挙で弾かない版 (R4 の否定側)。
     ("temp_names_synced",
-     "    if (hs_is_temp_name(entry->name)) return;\n",
-     "    if (0) return;\n"),
+     "    if (hs_is_temp_name(entry->name)) {\n"
+     "        g_excluded++;\n",
+     "    if (0) {\n"
+     "        g_excluded++;\n"),
+    # 変異 8: コピー元の予約名を**黙って**落とす版 (非 blocker 2 の否定側)。
+    #         弾くこと自体は変えず、数えるのと -v の行だけを消す。
+    ("temp_names_dropped_silently",
+     "        g_excluded++;\n"
+     "        if (g_verbose) {\n"
+     "            const char *dir = fl->src_dir ? fl->src_dir : \"\";\n",
+     "        if (0) {\n"
+     "            const char *dir = fl->src_dir ? fl->src_dir : \"\";\n"),
+    # 変異 9: 手順 9 の sync 失敗で再起動の案内を消す版 (非 blocker 1 の否定側)。
+    ("published_note_dropped",
+     "        if (published) note_target(dst_path);\n",
+     "        if (0) note_target(dst_path);\n"),
+    # 変異 10: 手順 8 の replace_partial で案内を消す版
+    #          (PM 決裁 2026-09-16 の否定側。公開済みなのに案内が出ない)。
+    ("partial_note_dropped",
+     '                note = " (公開済み: 宛先は検証済みの新しい内容。'
+     '後始末が落ちた)";\n',
+     '                note = " (公開済み: 宛先は検証済みの新しい内容。'
+     '後始末が落ちた)";\n'
+     "                if (0)\n"),
+    # 変異 11: 後始末の STALE を独立した 1 件として数え直す版
+    #          (非 blocker 4 の否定側 = 1 つの失敗を 2 と数える)。
+    ("stale_counted_twice",
+     "        (void)drop_temp(tmp);\n",
+     "        if (drop_temp(tmp) != 0) g_errors++;\n"),
 ]
 
 

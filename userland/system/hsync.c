@@ -131,6 +131,7 @@
 #define HR_DEST_CHANGED    "dest_changed"     /* 判定後に宛先が変わった */
 #define HR_SYNC_FAILED     "sync_failed"      /* 置換後の vfs_sync が落ちた */
 #define HR_PROT_RESERVED   "protected"        /* 予約名だが保護対象の実体 */
+#define HR_RESERVED_NAME   "reserved_name"    /* コピー元に予約名 .hs~ が在る */
 
 /* hsync の**予約接頭辞** (票 H2 §2-4、決裁 D3 (a'))。この接頭辞で始まる名前は
  * hsync が作り、hsync が消す。所有の根拠は「作った印」ではなく**予約された
@@ -138,7 +139,9 @@
  * (Codex 往復 1 所見 2)、man ページ (docs/manpages/hsync.1) と
  * docs/06_filesystem.md に「利用者は使わない」と明記したうえで消す。 */
 #define HS_TEMP_PREFIX     ".hs~"
-#define HS_TEMP_PREFIX_LEN 4
+/* 長さは**接頭辞の文字列から導く** ([C4]: 同じ値を 2 か所に書かない)。
+ * sizeof は終端の '\0' を含むので 1 を引く。 */
+#define HS_TEMP_PREFIX_LEN ((int)(sizeof(HS_TEMP_PREFIX) - 1))
 
 /* 一時ファイル方式が成立する最小の KAPI 版 (票 H2 §2-1: O_EXCL)。
  * **build/app.conf の要求版は 52 のまま**なので、v52 のカーネルでも hsync は
@@ -261,6 +264,7 @@ static int hs_is_temp_name(const char *name)
 #define NAME_CAP 64
 
 typedef struct {
+    const char *src_dir;  /* 列挙中のコピー元ディレクトリ (表示用。FS には触らない) */
     char names[MAX_FILES][NAME_CAP];
     u8   types[MAX_FILES];
     int  count;
@@ -279,8 +283,25 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
 
     /* **予約名は同期対象にしない** (票 H2 §2-3 手順 1)。127 件の枠に入れる
      * より**前**に弾く — 途中で止まった実行が残した `.hs~` が 128 件の枠を
-     * 食って通常ファイルを落とすのを防ぐ。掃除は別の枠で行う (§2-4)。 */
-    if (hs_is_temp_name(entry->name)) return;
+     * 食って通常ファイルを落とすのを防ぐ。掃除は別の枠で行う (§2-4)。
+     *
+     * **黙って落とさない**。ホスト側の配備元に誤って `.hs~x` が紛れると、
+     * その 1 件は同期されないのに `excluded` にも `-v` の行にも出ず、
+     * 気づく手がかりが無かった。除外として数えて -v で見せる。
+     * 見せるのは**コピー元**の名前 — 直すのはそちらなので。
+     * コールバックの中なので FS には触らず、パスも組み立てずに書式で繋ぐ
+     * (POLICY_DEBUG §4-26)。 */
+    if (hs_is_temp_name(entry->name)) {
+        g_excluded++;
+        if (g_verbose) {
+            const char *dir = fl->src_dir ? fl->src_dir : "";
+            int n = str_len(dir);
+            api->kprintf(ATTR_YELLOW, "  EXCLUDE %s%s%s reason=%s\n",
+                         dir, (n > 0 && dir[n - 1] == '/') ? "" : "/",
+                         entry->name, HR_RESERVED_NAME);
+        }
+        return;
+    }
 
     if (fl->count >= MAX_FILES) { fl->dropped++; return; }
 
@@ -688,23 +709,33 @@ static int build_temp_path(const char *dst_path, char *out, int cap)
 }
 
 /* この実行が作った一時ファイルを片づける。
- * 消せなければ `STALE` を表示して errors に数える (票 H2 §2-3 末尾 / A14c)。
+ * 消せなければ `STALE` を表示する (票 H2 §2-3 末尾 / A14c)。
  * メタデータの失敗でマウントが書き込み禁止 (ROFS) に落ちた後は unlink も
- * 通らないので、「必ず消える」とは言わない — 次の実行が予約名として消す。 */
-static void drop_temp(const char *tmp)
+ * 通らないので、「必ず消える」とは言わない — 次の実行が予約名として消す。
+ *
+ * **errors に数えるかは呼び手が決める** — 1 つの失敗は 1 と数えるため:
+ *   - 手順 7 (一時ファイルへの mtime 設定が落ちた) は**数えない**。ext2 は
+ *     メタデータの I/O 失敗でマウントを ROFS に落とすので、続く unlink の
+ *     失敗は同じ 1 つの失敗の続きであって別件ではない。apply_mtime が
+ *     既に 1 件数えている。
+ *   - 公開の前の失敗と手順 8 の rename 失敗では**数える**。そちらは unlink が
+ *     落ちる理由が元の失敗と独立に在り得る (A14c は実際に別々の注入)。
+ *
+ * 戻り値 0 = 消えた / もう無い、-1 = 残った (STALE を表示済み)。 */
+static int drop_temp(const char *tmp)
 {
     OS32_Stat st;
     int rc = api->sys_stat(tmp, &st);
 
-    if (rc == OS32_ERR_NOTFOUND) return;      /* もう無い (置換で本名になった等) */
+    if (rc == OS32_ERR_NOTFOUND) return 0;    /* もう無い (置換で本名になった等) */
     if (rc == 0) {
         rc = api->sys_unlink(tmp);
-        if (rc == 0) return;
+        if (rc == 0) return 0;
     }
     api->kprintf(ATTR_RED,
                  "  STALE %s (一時ファイルを消せない err=%d。"
                  "次の実行が予約名として片づける)\n", tmp, rc);
-    g_errors++;
+    return -1;
 }
 
 /* **公開の前**の失敗。旧宛先は名前も内容もそのまま残っている。 */
@@ -715,7 +746,7 @@ static void fail_before_publish(const char *dst, const char *tmp,
                  "  FAIL %s reason=%s err=%d (公開の前なので旧宛先はそのまま)\n",
                  dst, reason, err);
     g_errors++;
-    drop_temp(tmp);
+    if (drop_temp(tmp) != 0) g_errors++;   /* 後始末の失敗は独立した 1 件 */
 }
 
 /* 手順 2 で予約名が既に在ったとき。**`st_nlink` は見ない** (途中で止まった
@@ -734,10 +765,20 @@ static int remove_stale_temp(const char *tmp)
 /* ---- 置き換え本体 (票 H2 §2-3 の手順 1〜9) -----------------------------
  *
  * 戻り値 0 = 置き換えた (呼び手が copied に数える) /
- *       -1 = 失敗 (表示と errors はこの中で済ませてある)。 */
+ *       -1 = 失敗 (表示と errors はこの中で済ませてある)。
+ *
+ * `*published` は**媒体の上で宛先が新しい内容に入れ替わったか**を返す。
+ * 手順 8 の rename が通った時点で 1 になり、手順 9 の `vfs_sync` が落ちて
+ * -1 を返すときも 1 のまま残る。rename が非ゼロを返した回でも、宛先の
+ * `st_ino` が一時ファイルのものと一致する (= `replace_partial`) なら 1。
+ * `replace_failed` と `replace_unknown` では 0 のまま — 前者は旧内容のまま、
+ * 後者は公開したか分からないので、案内を出す根拠がない。失敗なのに置換は済んでいる場面があるので、
+ * 呼び手はこれを見て**再起動の案内だけは出す** — 置換が媒体に載っているのに
+ * 「/sys を更新した -> シェル再起動が必要」が消えるのは誤報になる。
+ * copied に数えないのは今までどおり (errors にも入っている)。 */
 static int replace_file(const char *src_path, const char *dst_path, u32 size,
                         const OS32_Stat *ss0, const OS32_Stat *ds0,
-                        int dst_exists)
+                        int dst_exists, int *published)
 {
     char tmp[OS32_MAX_PATH];
     OS32_Stat ss1, ds1, ts;
@@ -745,6 +786,8 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
     u32 crc = 0, total = 0;
     u32 tmp_ino = 0, old_ino = 0;
     int fd, rc, mrc, prot;
+
+    *published = 0;
 
     /* 手順 1: 一時名 */
     if (!build_temp_path(dst_path, tmp, (int)sizeof(tmp))) {
@@ -853,7 +896,11 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
      * 必ず ROFS になり、宛先は旧内容のまま)。 */
     mrc = apply_mtime(tmp, dst_path, ss1.st_mtime);
     if (mrc < 0) {
-        drop_temp(tmp);          /* errors は apply_mtime が数えた */
+        /* **数え直さない**。ext2 は mtime の I/O 失敗でマウントを ROFS に
+         * 落とすので、ここで unlink が落ちるのは同じ 1 つの失敗の続きで、
+         * apply_mtime が既に 1 件数えている (1 failure = 1 error)。
+         * 表示 (metadata_failed と STALE) は両方出す。 */
+        (void)drop_temp(tmp);
         return -1;
     }
 
@@ -872,6 +919,12 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
             if (now.st_ino == tmp_ino) {
                 why = HR_REPLACE_PARTIAL;
                 note = " (公開済み: 宛先は検証済みの新しい内容。後始末が落ちた)";
+                /* **公開済みなので案内は出す** (PM 決裁 2026-09-16、手順 9 と
+                 * 同じ理屈)。媒体の上で内容は入れ替わっているのに
+                 * 「/sys を更新した -> シェル再起動が必要」が消えるのは誤報。
+                 * `replace_failed` (旧内容のまま) と `replace_unknown`
+                 * (どちらか分からない) では**立てない** — 案内を出す根拠がない。 */
+                *published = 1;
             } else if (dst_exists && now.st_ino == old_ino) {
                 why = HR_REPLACE_FAILED;
                 note = " (未公開: 宛先は旧内容のまま)";
@@ -883,9 +936,13 @@ static int replace_file(const char *src_path, const char *dst_path, u32 size,
         api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s\n",
                      dst_path, why, rc, note);
         g_errors++;
-        drop_temp(tmp);
+        if (drop_temp(tmp) != 0) g_errors++; /* 後始末の失敗は独立した 1 件 */
         return -1;
     }
+
+    /* ここから先、宛先の名前は**検証済みの新しい実体**を指している。
+     * 以降の失敗で旧内容へ戻そうとはしない (票 H2 の規則 2)。 */
+    *published = 1;
 
     /* 手順 9: 同期 */
     if (api->vfs_sync() != 0) {
@@ -959,6 +1016,7 @@ static void sync_file(const char *src_path, const char *dst_path)
     int need = 1;
     int meta_only = 0;       /* 内容は同じで mtime だけ違う (票 H3) */
     int dst_exists = 0;      /* 判定時に宛先が在ったか (票 H2 手順 5 / 8) */
+    int published = 0;       /* 置換が媒体に載ったか (票 H2 手順 8 / 9) */
 
     /* コピー元: 列挙結果を信用せず**直前に取り直す** (設計書 §3.1)。
      * 列挙とコピーの間にホスト側が差し替えているかもしれない。 */
@@ -1108,8 +1166,16 @@ static void sync_file(const char *src_path, const char *dst_path)
         return;
     }
 
-    if (replace_file(src_path, dst_path, size, &ss, &ds, dst_exists) != 0)
-        return;                  /* 表示と errors は replace_file の中で */
+    if (replace_file(src_path, dst_path, size, &ss, &ds, dst_exists,
+                     &published) != 0) {
+        /* 表示と errors は replace_file の中で済んでいる。ただし
+         * **置換だけは媒体に載っている**場合 (手順 9 の sync_failed と、
+         * 手順 8 の replace_partial) は再起動の案内を出す — 出さないと
+         * 「/sys は入れ替わっていない」と読める誤報になる。
+         * copied には数えない。 */
+        if (published) note_target(dst_path);
+        return;
+    }
 
     /* mtime は一時ファイルに設定済み (rename は inode の mtime を変えない) */
     api->kprintf(ATTR_GREEN, "  UPDATE %s reason=%s size=%d\n",
@@ -1128,7 +1194,8 @@ static void sync_file(const char *src_path, const char *dst_path)
 typedef struct {
     char names[MAX_TEMPS][NAME_CAP];
     int  count;
-    int  dropped;
+    int  dropped;      /* 掃除の枠 MAX_TEMPS を越えて見送った数 */
+    int  too_long;     /* NAME_CAP に収まらず拾えなかった数 (枠とは別の理由) */
 } TempList;
 
 static void temp_cb(const DirEntry_Ext *entry, void *ctx)
@@ -1139,7 +1206,10 @@ static void temp_cb(const DirEntry_Ext *entry, void *ctx)
     if (!hs_is_temp_name(entry->name)) return;
     /* ディレクトリは消さない (§2-4)。特殊ファイルは下の stat で弾く */
     if (entry->type == OS32_FILE_TYPE_DIR) return;
-    if (!hsp_name_fits(entry->name, NAME_CAP)) { tl->dropped++; return; }
+    /* **枠と長さは別の理由**。列挙幅に入らないだけのものを「掃除の枠を
+     * 越えた」と呼ぶと、MAX_TEMPS を広げれば直ると読めてしまう (直らない)。
+     * 結論の「全部は見ていない」はどちらも同じなので、そこは変えない。 */
+    if (!hsp_name_fits(entry->name, NAME_CAP)) { tl->too_long++; return; }
     if (tl->count >= MAX_TEMPS) { tl->dropped++; return; }
 
     i = 0;
@@ -1163,6 +1233,7 @@ static void clean_temps(const char *dst_dir)
 
     tl.count = 0;
     tl.dropped = 0;
+    tl.too_long = 0;
     rc = api->sys_ls(dir, temp_cb, &tl);
     if (rc != 0) {
         /* 宛先ディレクトリがまだ無いのは普通 (新規階層)。それ以外は
@@ -1177,6 +1248,11 @@ static void clean_temps(const char *dst_dir)
         api->kprintf(ATTR_YELLOW,
                      "  NOTE: %s の予約名が掃除の枠 %d を越えた (+%d)。"
                      "**全部は見ていない**\n", dir, MAX_TEMPS, tl.dropped);
+    if (tl.too_long)
+        api->kprintf(ATTR_YELLOW,
+                     "  NOTE: %s に %d 文字を越える予約名が %d 件 "
+                     "(掃除の枠ではなく名前の長さ)。**全部は見ていない**\n",
+                     dir, NAME_CAP - 1, tl.too_long);
 
     for (i = 0; i < tl.count; i++) {
         if (!str_ncpy(path, dir, (int)sizeof(path)) ||
@@ -1297,6 +1373,7 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
         return;
     }
 
+    fl.src_dir = src_dir;
     fl.count = 0;
     fl.dropped = 0;
     fl.truncated = 0;
@@ -1762,7 +1839,10 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     /* 「ディスクへ同期した」と「稼働中の版が入れ替わった」は別のこと
      * (設計書 §7.2)。再起動はここでは行わない。 */
-    if (!g_dry_run && g_copied > 0) {
+    /* `g_copied` だけを条件にすると、**置換は済んだのに sync が落ちた**回
+     * (票 H2 手順 9) で案内が丸ごと消える。note_target は媒体の上で内容が
+     * 入れ替わったときだけ立つので、そちらも条件に入れる。 */
+    if (!g_dry_run && (g_copied > 0 || g_touched_sys || g_touched_boot)) {
         api->kprintf(ATTR_YELLOW,
                      "NOTE: ディスク上を更新しただけ。稼働中の版は切り替わっていない\n");
         if (g_touched_sys)
