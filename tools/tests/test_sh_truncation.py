@@ -135,6 +135,154 @@ MUTATIONS = [
      '        g_api->kprintf(ATTR_RED,\n'
      '                       "sh: %s aborted; continuing with defaults\\n", path);\n'
      "        sh_refuse_mark();"),
+
+    # ---- 段 3 (ルーター) の否定側 --------------------------------------
+    # 経路ごとに「検査を外した版」と、印で伝える経路は「印を立てない版」。
+    # どれも **RED になること** が「その規則を試験が見ている」証拠。
+
+    # T3-a: try_exec の長さ検査そのものを外す (= 切り詰めて起動する昔の姿)
+    ("t3_no_check", "userland/shell/sh_exec.inc",
+     "        if (try_exec_len(bin_path, argc, argv) > TRY_EXEC_BUF_SIZE - 2) {\n"
+     '            sh_refuse("sh: argument list", TRY_EXEC_BUF_SIZE - 2);\n'
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }"),
+    # T3-b: クォートの再付与ぶん (+2) を数えない
+    ("t3_no_quote_pad", "userland/shell/sh_exec.inc",
+     '        if (need_quote) total += 2;          /* 前後の " */',
+     "        if (0) total += 2;"),
+    # T3-c: エスケープの \\ (2 倍) を数えない
+    ("t3_no_escape_count", "userland/shell/sh_exec.inc",
+     "            if (*s == '\"' || *s == '\\\\') body++;   /* エスケープの \\ */",
+     "            if (0) body++;"),
+    # T3-d: 内蔵 exec (255) の検査を外す
+    ("t3_exec_no_check", "userland/shell/cmd_mnt.c",
+     "        if (need > EXEC_CMDLINE_MAX - 1) {\n"
+     '            sh_refuse("exec: command line", EXEC_CMDLINE_MAX - 1);\n'
+     "            return;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return;\n"
+     "        }"),
+    # T3-e: 内蔵 time (510) の検査を外す
+    ("t3_time_no_check", "userland/shell/cmd_base.c",
+     "        if (need > TIME_CMD_MAX - 2) {\n"
+     '            sh_refuse("time: command line", TIME_CMD_MAX - 2);\n'
+     "            return;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return;\n"
+     "        }"),
+    # T4: コマンド名を切って .bin を付ける昔の姿へ戻す
+    ("t4_no_check", "userland/shell/sh_exec.inc",
+     "        if ((int)strlen(argv[0]) > PATH_MAX_LEN - 5) {\n"
+     '            sh_refuse("sh: command name", PATH_MAX_LEN - 5);\n'
+     "            return;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return;\n"
+     "        }"),
+    # T5-a: 9 段目以降を黙って捨てる
+    ("t5_drop_stages", "userland/shell/main.c",
+     "        if (count >= max_stages) {\n"
+     '            sh_refuse("sh: pipeline", max_stages);\n'
+     "            return -1;\n"
+     "        }",
+     "        if (count >= max_stages) {\n"
+     "            return count;\n"
+     "        }"),
+    # T5-b: 空の段を黙って捨てる (`echo ok |` が 1 段として走る昔の姿)
+    ("t5_empty_stage", "userland/shell/main.c",
+     '            g_api->kprintf(ATTR_RED, "%s", "sh: empty pipeline stage\\n");\n'
+     "            sh_refuse_mark();\n"
+     "            return -1;",
+     "            if (*p == '|') { p++; continue; }\n"
+     "            break;"),
+    # T5-c: 空の段は報せるが **印を立てない** (スクリプトが後続行へ落ちる)
+    ("t5_empty_no_mark", "userland/shell/main.c",
+     '            g_api->kprintf(ATTR_RED, "%s", "sh: empty pipeline stage\\n");\n'
+     "            sh_refuse_mark();\n",
+     '            g_api->kprintf(ATTR_RED, "%s", "sh: empty pipeline stage\\n");\n'),
+    # T6: glob の確保失敗で **印を立てず** に戻る (一部だけ渡す昔の姿)
+    ("t6_no_mark", "userland/shell/sh_args.inc",
+     "        if (!full) { ctx->alloc_failed = 1; return; }",
+     "        if (!full) { return; }"),
+    # T7-a: パターンを切って照合する昔の姿
+    ("t7_pattern_truncates", "userland/shell/sh_args.inc",
+     "        if (n >= GLOB_PATTERN_MAX - 1) {\n"
+     '            sh_refuse("sh: glob pattern", GLOB_PATTERN_MAX - 1);\n'
+     "            return -1;\n"
+     "        }",
+     "        if (n >= GLOB_PATTERN_MAX - 1) break;"),
+    # T7-b: ディレクトリ部を切って照合する昔の姿
+    ("t7_dir_truncates", "userland/shell/sh_args.inc",
+     "                if (dirlen > PATH_MAX_LEN - 1) {\n"
+     '                    sh_refuse("sh: glob directory", PATH_MAX_LEN - 1);\n'
+     "                    *argc_out = argc;\n"
+     "                    return -1;\n"
+     "                }\n"
+     "                for (i = 0; i < dirlen; i++) dir_path[i] = start[i];",
+     "                for (i = 0; i < dirlen && i < PATH_MAX_LEN - 1; i++)\n"
+     "                    dir_path[i] = start[i];"),
+    # T11: 送る前に測らない (launch_req の INVAL を「GUI 外」と読む昔の姿)
+    ("t11_no_check", "userland/shell/sh_launch.inc",
+     "        if (len >= LAUNCH_CMDLINE_MAX) {\n"
+     '            sh_refuse("sh: launch command line", LAUNCH_CMDLINE_MAX - 1);\n'
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }"),
+    # T13-a: execute_command が長大行を空行と同じ扱いで黙って捨てる
+    ("t13_line_silent", "userland/shell/main.c",
+     "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
+     '        sh_refuse("sh: command line", CMD_BUF_SIZE - 1);\n'
+     "        return;\n"
+     "    }",
+     "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
+     "        return;\n"
+     "    }"),
+    # T13-b: execute_single が同上
+    ("t13_single_silent", "userland/shell/main.c",
+     "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
+     '        sh_refuse("sh: command", CMD_BUF_SIZE - 1);\n'
+     "        return;\n"
+     "    }",
+     "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
+     "        return;\n"
+     "    }"),
+    # T17-a: PATH 項目の区切りを見失ったまま進む昔の姿
+    ("t17_entry_split", "userland/shell/sh_exec.inc",
+     "        if (*p && *p != ':') {\n"
+     '            sh_refuse("sh: PATH entry", PATH_MAX_LEN - 2);\n'
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }",
+     "        if (0) {\n"
+     "            return EXEC_ERR_GENERAL;\n"
+     "        }"),
+    # T17-b: dir + '/' + name の連結が入り切らなくても切って試す昔の姿
+    ("t17_join_truncates", "userland/shell/sh_exec.inc",
+     "            if (need > PATH_MAX_LEN - 1) {\n"
+     '                sh_refuse("sh: command path", PATH_MAX_LEN - 1);\n'
+     "                return EXEC_ERR_GENERAL;\n"
+     "            }",
+     "            if (0) {\n"
+     "                return EXEC_ERR_GENERAL;\n"
+     "            }"),
+    # 走査を止めない版: 断っても次の PATH 候補へ回してしまう
+    ("scan_not_stopped", "userland/shell/sh_exec.inc",
+     "        if (!was_refused && sh_refused_peek()) return EXEC_ERR_GENERAL;",
+     "        if (0) return EXEC_ERR_GENERAL;"),
+    # I1: 引数が多すぎて行を捨てるときに **印を立てない** 版 (PM 決裁の前の姿)。
+    #     赤字は出るので、スクリプトが後続行へ落ちるかどうかだけが変わる。
+    ("i1_no_mark", "userland/shell/sh_args.inc",
+     "            if (ctx.overflow) {\n"
+     '                g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\\n");\n'
+     "                sh_refuse_mark();",
+     "            if (ctx.overflow) {\n"
+     '                g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\\n");'),
 ]
 
 

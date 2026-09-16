@@ -313,7 +313,13 @@ static void execute_single(const char *cmd)
     char *p;
     const char *src;
 
-    if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
+    /* T13: 空行と長大行を同じ扱いにしない。空行は今までどおり黙って戻り、
+     * 収まらない行は **断る** (黙って消すと入力が無かったことになる)。 */
+    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) >= CMD_BUF_SIZE) {
+        sh_refuse("sh: command", CMD_BUF_SIZE - 1);
+        return;
+    }
 
     src = cmd;
     p = tmp_buf;
@@ -385,6 +391,18 @@ static void execute_single(const char *cmd)
 /* ======================================================================== */
 #define MAX_PIPE_STAGES 8
 
+/* T5: 段数 (> 0) / -1 = 行ごと断った。
+ *
+ *  以前は 9 段目以降と空の段を **黙って捨てて** いたので、実行されない段の
+ *  失敗が見えなかった。捨てずに断る:
+ *    - 段が max_stages を超える      (`a|b|c|d|e|f|g|h|i`)
+ *    - 空の段がある                  (`echo ok |` / `| echo` / `a || b`)
+ *    - 1 段が seg_size に収まらない  (行全体が CMD_BUF_SIZE 未満なので実際に
+ *                                     は届かないが、規則としては同じ)
+ *
+ *  クォートは **今までどおり見ない**。したがって `echo "a||b"` の中の `|` も
+ *  区切りのままで、空の段として断られる。クォートを見る分割は票 §6 で
+ *  範囲外と決めてあるので、ここでは分割の規則を変えない。 */
 static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_stages)
 {
     int count = 0;
@@ -392,20 +410,33 @@ static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_
     const char *p = cmd;
     char *seg;
 
-    while (*p && count < max_stages) {
+    for (;;) {
+        if (count >= max_stages) {
+            sh_refuse("sh: pipeline", max_stages);
+            return -1;
+        }
         seg = seg_buf + count * seg_size;
         while (*p == ' ') p++;
         pos = 0;
         while (*p && *p != '|') {
-            if (pos < seg_size - 1) {
-                seg[pos++] = *p;
+            if (pos >= seg_size - 1) {
+                sh_refuse("sh: pipeline stage", seg_size - 1);
+                return -1;
             }
-            p++;
+            seg[pos++] = *p++;
         }
         while (pos > 0 && seg[pos - 1] == ' ') pos--;
         seg[pos] = '\0';
-        if (pos > 0) count++;
-        if (*p == '|') p++;
+        if (pos == 0) {
+            /* 上限ではなく「段が空」なので sh_refuse の書式には乗らない。
+             * 赤字 1 行 + 印だけ立てる (env_expand の断りと同じ形)。 */
+            g_api->kprintf(ATTR_RED, "%s", "sh: empty pipeline stage\n");
+            sh_refuse_mark();
+            return -1;
+        }
+        count++;
+        if (*p != '|') break;
+        p++;
     }
     return count;
 }
@@ -459,7 +490,12 @@ static void execute_command_line(const char *cmd)
     const char *src;
     int has_pipe = 0;
 
-    if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
+    /* T13: 空行と長大行を同じ扱いにしない (execute_single と同じ規則)。 */
+    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) >= CMD_BUF_SIZE) {
+        sh_refuse("sh: command line", CMD_BUF_SIZE - 1);
+        return;
+    }
 
     /* $VAR / ~ 展開 */
     /* I-2: 展開しきれない行は**切れたまま実行しない** */
@@ -499,6 +535,12 @@ static void execute_command_line(const char *cmd)
         }
 
         stage_count = split_pipeline(src, seg_buf, CMD_BUF_SIZE, MAX_PIPE_STAGES);
+        /* T5: 分割の時点で断ったら段を 1 つも実行しない (印は split_pipeline
+         * が立てている)。パイプバッファはまだ 1 つも取っていない。 */
+        if (stage_count < 0) {
+            g_api->mem_free(seg_buf);
+            return;
+        }
         if (stage_count <= 1) {
             execute_single(seg_buf);
             reset_all_redirects();

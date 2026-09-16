@@ -69,6 +69,20 @@ int sh_launch(const char *cmdline)
 
     sh_launch_name(cmdline, name, SH_LAUNCH_NAME_MAX);
 
+    /* T11: カーネルの要求表が受け取るのは NUL 終端 1〜LAUNCH_CMDLINE_MAX-1
+     * バイトだけ (exec/launch.c の len 検査)。超えたまま launch_req を呼ぶと
+     * OS32_ERR_INVAL が返り、下の分岐がそれを「GUI 外」と読み違えて
+     * "external programs need the GUI terminal" を出す — 理由が入れ替わる。
+     * **送る前に**測って断る。カーネルの上限は変えない (票 §6)。 */
+    {
+        int len = 0;
+        while (cmdline[len]) len++;
+        if (len >= LAUNCH_CMDLINE_MAX) {
+            sh_refuse("sh: launch command line", LAUNCH_CMDLINE_MAX - 1);
+            return EXEC_ERR_GENERAL;
+        }
+    }
+
     /* B4: パイプの中から外部プログラムへは行けない。要求表経由で WM が
      * 起こすのは**別アプリ**で、sh の FD に掛けたパイプは届かないため、
      * 起動すると黙って出力が落ちる。先頭語の事前判定 (sh_stage_is_builtin)

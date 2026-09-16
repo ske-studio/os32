@@ -38,12 +38,28 @@ static void cmd_sync(int argc, char **argv)
 static void cmd_exec(int argc, char **argv)
 {
     int rc;
-    char cmdline[256];
+    char cmdline[EXEC_CMDLINE_MAX];
     int i, pos;
 
     if (argc < 2) {
         shell_print_help(argv[0]);
         return;
+    }
+
+    /* T3: 溢れた引数を落として起動すると、意図と違う引数でプログラムが走る。
+     * 結合する前に長さを数えて断る (区切りの空白も数に入れる)。`exec` は
+     * クォートを付け直さないので、数えるのは本体と空白だけ。 */
+    {
+        int need = 0;
+        for (i = 1; i < argc; i++) {
+            const char *s = argv[i];
+            if (i > 1) need++;                 /* 区切りの空白 */
+            while (*s++) need++;
+        }
+        if (need > EXEC_CMDLINE_MAX - 1) {
+            sh_refuse("exec: command line", EXEC_CMDLINE_MAX - 1);
+            return;
+        }
     }
 
     /* argv[1]以降を結合してcmdline全体を構築 */

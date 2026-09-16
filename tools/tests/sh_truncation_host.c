@@ -161,6 +161,21 @@ static int out_has(const char *want)
     return 0;
 }
 
+/* 出力に部分列が **何回** 現れるか。断りを PATH 候補の数だけ出していないか
+ * (= 断ったら走査ごと止めているか) を見るのに使う。 */
+static int out_count(const char *want)
+{
+    int i, j, n = 0;
+    int wl = 0;
+    while (want[wl]) wl++;
+    if (wl == 0) return 0;
+    for (i = 0; i + wl <= g_out_len; i++) {
+        for (j = 0; j < wl && g_out[i + j] == want[j]; j++) {}
+        if (j == wl) n++;
+    }
+    return n;
+}
+
 /* 書式を 1 つ読んで可変引数を必ず 1 つ消費する (sh_shell_host.c と同じ) */
 static void fmt_run(const char **pp, __builtin_va_list *ap)
 {
@@ -258,10 +273,26 @@ static void __cdecl h_shell_print_utf8(const char *s, u8 attr)
     out_str(s);
 }
 
+/* T6: glob が 1 件ごとに確保する文字列 (dir + name + 1 = たかだか数十
+ * バイト) **だけ** を N 回目で失敗させる窓。-1 = 無制限 (既定)。
+ * 大きな確保 (スクリプトの読み込みバッファ、パイプの段バッファ) を
+ * 区別しないと、行が glob に届く前に予算を使い切って別の理由で失敗し、
+ * 「glob の確保失敗を見た」つもりの偽の緑になる。 */
+#define GLOB_ALLOC_SIZE_MAX 64
+static int g_glob_alloc_budget = -1;
+static int g_glob_allocs;
+static int g_frees;
+
 static void *__cdecl h_mem_alloc(u32 size)
 {
     char *p;
     unsigned long n = (unsigned long)size;
+
+    if (size <= (u32)GLOB_ALLOC_SIZE_MAX) {
+        if (g_glob_alloc_budget == 0) return (void *)0;
+        if (g_glob_alloc_budget > 0) g_glob_alloc_budget--;
+        g_glob_allocs++;
+    }
 
     n = (n + 7UL) & ~7UL;
     if (g_pool_used + n > (unsigned long)POOL_SIZE) return (void *)0;
@@ -270,7 +301,7 @@ static void *__cdecl h_mem_alloc(u32 size)
     return (void *)p;
 }
 
-static void __cdecl h_mem_free(void *p) { (void)p; }
+static void __cdecl h_mem_free(void *p) { (void)p; g_frees++; }
 
 static int __cdecl h_sys_open(const char *path, int flags)
 {
@@ -335,11 +366,50 @@ static int __cdecl h_sys_stat(const char *path, OS32_Stat *st)
     return OS32_ERR_NOTFOUND;
 }
 
-/* sys_ls: 疑似 FS のうち dir で始まるものを 1 階層ぶん返す (glob 用) */
+/* ---- 贋ディレクトリ (glob の T6 / T7 に要る) ---------------------------- */
+/*  g_ls_calls は「**照合を試みたか**」を見る唯一の窓。T7 (パターン /         */
+/*  ディレクトリ部が上限超過) は sys_ls を 1 度も呼ばないこと。               */
+#define DIRENT_MAX 8
+
+static const char *g_dir_path;
+static const char *g_dir_names[DIRENT_MAX];
+static int g_dir_count;
+static int g_ls_calls;
+
+static void dir_reset(void)
+{
+    g_dir_path = (const char *)0;
+    g_dir_count = 0;
+    g_ls_calls = 0;
+}
+
+static void dir_set(const char *path) { g_dir_path = path; g_dir_count = 0; }
+
+static void dir_add(const char *name)
+{
+    if (g_dir_count < DIRENT_MAX) g_dir_names[g_dir_count++] = name;
+}
+
+/* sys_ls: 贋ディレクトリを 1 階層ぶんコールバックへ流す (glob 用) */
 static int __cdecl h_sys_ls(const char *path, void *cb, void *ctx)
 {
-    (void)path; (void)cb; (void)ctx;
-    return 0;
+    DirCallback f = (DirCallback)cb;
+    DirEntry_Ext e;
+    int i, k;
+
+    g_ls_calls++;
+    if (!g_dir_path || !f) return 0;
+    if (strcmp(g_dir_path, path) != 0) return 0;
+
+    for (i = 0; i < g_dir_count; i++) {
+        for (k = 0; k < (int)sizeof(e.name); k++) e.name[k] = '\0';
+        for (k = 0; g_dir_names[i][k] && k + 1 < (int)sizeof(e.name); k++)
+            e.name[k] = g_dir_names[i][k];
+        e.size = 1;
+        e.type = OS32_FILE_TYPE_FILE;
+        f(&e, ctx);
+    }
+    return g_dir_count;
 }
 
 static int __cdecl h_sys_isatty(int fd) { (void)fd; return 1; }
@@ -613,6 +683,43 @@ static void fresh(void)
     out_reset();
     launch_log_reset();
     redir_log_reset();
+    dir_reset();
+    g_glob_alloc_budget = -1;
+    g_glob_allocs = 0;
+    g_frees = 0;
+}
+
+/* 同じ文字列を n 回続けて足す (クォート再付与ぶんの反例を組むのに使う) */
+static void line_add_rep(const char *s, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) line_add(s);
+}
+
+/* 1 文字を n 個足す */
+static void line_add_run(char c, int n)
+{
+    char one[2];
+    int i;
+    one[0] = c;
+    one[1] = '\0';
+    for (i = 0; i < n; i++) line_add(one);
+}
+
+/* T13 用: CMD_BUF_SIZE を **超える** 行。g_line (= CMD_BUF_SIZE) には
+ * 4095 バイトまでしか入らないので別に持つ。 */
+static char g_big[CMD_BUF_SIZE + 64];
+
+/* prefix + 'a' * pad (合計の長さを返す) */
+static int big_line(const char *prefix, int pad)
+{
+    int n = 0;
+    int i;
+
+    while (prefix[n] && n < (int)sizeof(g_big) - 1) { g_big[n] = prefix[n]; n++; }
+    for (i = 0; i < pad && n < (int)sizeof(g_big) - 1; i++) g_big[n++] = 'a';
+    g_big[n] = '\0';
+    return n;
 }
 
 /* ========================================================================
@@ -1109,6 +1216,625 @@ static void case_no_false_abort(void)
     check(!out_has("script: aborted"), "9e 打ち切りの報告を出さない");
 }
 
+/* ========================================================================
+ *  10. U4 — try_exec の再構築が溢れたら **子を起こさない** (T3)
+ *
+ *  「子が起きたか」の窓は g_launch_count (= launch_req を呼んだ回数)。
+ *  段 2b の報告どおり、この窓が無いと「断りの行が出た」だけで偽の緑になる。
+ *  h_launch_req は OS32_ERR_INVAL を返す (= GUI 外 = 起こさなかった) が、
+ *  **呼ばれたこと自体**が「切り詰めた行で起動しにいった」証拠になる。
+ *
+ *  数え方はクォートの再付与ぶんを含める (票 §1 T3):
+ *    区切りの空白 1 + 本体 (" と \ は 2 倍) + クォートが要るなら +2
+ * ======================================================================== */
+static void case_try_exec_refuses(void)
+{
+    report("10 U4: try_exec の再構築が溢れたら子を起こさない (T3)\n");
+
+    /* 名前に `/` を入れて 2a (直接実行) の枝へ落とす — PATH 走査に入ると
+     * 候補ごとに接頭辞のぶん長さが変わり、境界の検査が読めなくなる。
+     * 以下 bin は "./mk1.bin" = 9 バイト。
+     *
+     * 境界の **裏側** (ちょうど 510) は、sh.bin では try_exec を通り抜けても
+     * 要求表の上限 (LAUNCH_CMDLINE_MAX - 1 = 255、T11) に当たって断られる。
+     * したがって裏側の証人は「launch_req を呼んだか」ではなく
+     * 「**この層** (sh: argument list) が断っていないこと」— 層が別なのは
+     * 断りの文言で見分ける。子が起きないことは両方で launch_count が示す。 */
+
+    /* --- (a) 素の長さで溢れる場合 ------------------------------------- */
+    /* 9 + 1 + 501 = 511 > 510 */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_run('a', 501);
+    execute_command(g_line);
+    check(g_launch_count == 0, "10a 511 バイト: 子を起こさない");
+    check(refused_msg("sh: argument list"), "10b 何が溢れたか + 上限を出す");
+
+    /* 誤発火の裏: ちょうど 510 ではこの層は断らない (境界は「以上」で数える) */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_run('a', 500);
+    execute_command(g_line);
+    check(!out_has("sh: argument list"), "10c 510 ちょうどはこの層で断らない");
+    check(out_has("sh: launch command line"),
+          "10d 510 は次の層 (要求表 255) が断る — 層が違うことを文言で見る");
+
+    /* --- (b) クォートの再付与で伸びる場合 ------------------------------ */
+    /*  引数 1 つが `"` 250 個。素直に数えると 9 + 1 + 250 = 260 で余裕だが、
+     *  try_exec は `"` を \" にして前後をクォートで包むので
+     *  9 + 1 + 2 + 250*2 = 512 > 510。**エスケープを数えない実装はここを
+     *  通してしまい、引数が途中で切れたまま子が起きる**。 */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_rep("\\\"", 250);
+    execute_command(g_line);
+    check(g_launch_count == 0, "10e \" の 2 倍を数える: 子を起こさない");
+    check(refused_msg("sh: argument list"), "10f 同上: 断りが出る");
+
+    /* 境界の裏: 249 個なら 9 + 1 + 2 + 498 = 510 でちょうど通る */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_rep("\\\"", 249);
+    execute_command(g_line);
+    check(!out_has("sh: argument list"), "10g \" 249 個 (= 510) はこの層を通る");
+
+    /* --- (c) 空白入りの引数は前後の `"` で +2 -------------------------- */
+    /*  84 個の `a b` = 84 * (1 + 3 + 2) = 504、+ 9 = 513 > 510。
+     *  クォートを数えないと 9 + 84*4 = 345 で通ってしまう。 */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin");
+    line_add_rep(" \"a b\"", 84);
+    execute_command(g_line);
+    check(g_launch_count == 0, "10i 空白入り引数の +2 を数える: 子を起こさない");
+    check(refused_msg("sh: argument list"), "10j 同上: 断りが出る");
+
+    fresh();
+    line_reset();
+    line_add("./mk1.bin");
+    line_add_rep(" \"a b\"", 83);       /* 9 + 498 = 507 */
+    execute_command(g_line);
+    check(!out_has("sh: argument list"), "10k 83 個 (= 507) はこの層を通る");
+
+    /* --- (d) スクリプト中なら打ち切る --------------------------------- */
+    /*  スクリプトの 1 行は 255 バイトまで (T2、段 4 の担当) なので、
+     *  511 バイトの行は変数展開で作る。${A} は 247 バイト。
+     *  9 + 3 * (1 + 247) = 753 > 510 */
+    fresh();
+    s_begin(0);
+    s_add("set A=");  s_run(247);  s_add("\n");
+    s_add("./mk1.bin ${A} ${A} ${A}\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(g_launch_count == 0, "10l スクリプト: 子を起こさない");
+    check(refused_msg("sh: argument list"), "10m スクリプト: 断りが出る");
+    check(!ran("marknext"),    "10n スクリプト: 後続行も実行しない");
+}
+
+/* ========================================================================
+ *  11. U4 — 内蔵 `exec` (255) と `time` (510) も起動前に断る (T3)
+ * ======================================================================== */
+static void case_exec_time_refuse(void)
+{
+    report("11 U4: 内蔵 exec (255) と time (510)\n");
+
+    /* exec: argv[1..] を空白で繋いだ長さが 256 以上なら断る。
+     * "mk1.bin" (7) + " " + 'a'*248 = 256 */
+    fresh();
+    line_reset();
+    line_add("exec mk1.bin ");
+    line_add_run('a', 248);
+    execute_command(g_line);
+    check(g_launch_count == 0, "11a exec 256 バイト: 子を起こさない");
+    check(refused_msg("exec: command line"), "11b exec: 断りが出る");
+
+    /* 誤発火の裏: 255 ちょうどは通る */
+    fresh();
+    line_reset();
+    line_add("exec mk1.bin ");
+    line_add_run('a', 247);
+    execute_command(g_line);
+    check(g_launch_count == 1, "11c exec 255 ちょうどは launch_req まで行く");
+    check(!out_has("too long"), "11d exec 255 では断らない");
+
+    /* time: 組み立てる行が 511 以上なら断る。
+     * "./mk1.bin" (9) + " " + 'a'*501 = 511 */
+    fresh();
+    line_reset();
+    line_add("time ./mk1.bin ");
+    line_add_run('a', 501);
+    execute_command(g_line);
+    check(g_launch_count == 0, "11e time 511 バイト: 内側を実行しない");
+    check(refused_msg("time: command line"), "11f time: 断りが出る");
+    check(!out_has("real  "), "11g time: 計測結果も出さない");
+    check(!out_has("sh: argument list"),
+          "11h time: 内側の try_exec まで行かせない (断るのは time の層)");
+
+    /* 誤発火の裏: 510 ちょうどは time を通り抜けて内側へ渡る。
+     * (内側は要求表の 255 に当たるので子は起きない — 層が違う) */
+    fresh();
+    line_reset();
+    line_add("time ./mk1.bin ");
+    line_add_run('a', 500);
+    execute_command(g_line);
+    check(!out_has("time: command line"), "11i time 510 では断らない");
+    check(out_has("sh: launch command line"),
+          "11j time 510 は内側へ渡る (次の層が断る)");
+}
+
+/* ========================================================================
+ *  12. U5 — 251 バイトで切った名前に .bin を付けて **別のファイル** を
+ *      起動しない (T4)
+ *
+ *  窓は g_launch_last: 切り詰める実装はここに「先頭 251 文字 + .bin」が
+ *  入る (= 実在する別のファイル)。直った実装は launch_req を呼ばない。
+ * ======================================================================== */
+static void case_cmd_name_refuses(void)
+{
+    report("12 U5: 251 で切った名前で別のファイルを起動しない (T4)\n");
+
+    fresh();
+    line_reset();
+    line_add_run('P', 252);              /* PATH_MAX_LEN - 5 = 251 を 1 超える */
+    execute_command(g_line);
+    check(g_launch_count == 0, "12a 252 文字の名前: 子を起こさない");
+    check(refused_msg("sh: command name"), "12b 断りが出る");
+    check(!out_has("command not found"),
+          "12c 断った行に \"command not found\" を足さない");
+
+    /* 誤発火の裏: 251 ちょうどは今までどおり解決を試みる */
+    fresh();
+    line_reset();
+    line_add_run('P', 251);
+    execute_command(g_line);
+    check(g_launch_count >= 1, "12d 251 ちょうどは起動しにいく");
+    check(!out_has("sh: command name"), "12e 251 では名前の断りを出さない");
+}
+
+/* ========================================================================
+ *  13. U6 — パイプの段を捨てない (T5)
+ *
+ *  窓は段が書く痕跡 (echo の出力)。以前は 9 段目と空の段を **黙って捨てて**
+ *  いたので、`echo ok |` が 1 段として実行されていた。
+ *
+ *  クォートは今までどおり見ない。したがって `echo "a||b"` の中の `|` も
+ *  区切りのままで、空の段として断られる (票 §6 で範囲外と決めた分割規則)。
+ * ======================================================================== */
+static void case_pipeline_stages(void)
+{
+    report("13 U6: 9 段 / 空の段 / a || b を捨てずに断る (T5)\n");
+
+    /* 9 段 — 1 段目も実行しない (行全体を断る) */
+    fresh();
+    execute_command("echo S1|echo S2|echo S3|echo S4|echo S5|echo S6|echo S7|"
+                    "echo S8|echo S9");
+    check(refused_msg("sh: pipeline"), "13a 9 段: 上限つきで断る");
+    check(!out_has("S1") && !out_has("S8") && !out_has("S9"),
+          "13b 9 段: どの段も実行しない");
+
+    /* 誤発火の裏: 8 段ちょうどは全段走る */
+    fresh();
+    execute_command("echo S1|echo S2|echo S3|echo S4|echo S5|echo S6|echo S7|"
+                    "echo S8");
+    check(out_has("S1") && out_has("S8"), "13c 8 段ちょうどは全段走る");
+    check(!out_has("too long"), "13d 8 段では断らない");
+
+    /* 末尾の空の段 — 以前は 1 段として **実行されていた** */
+    fresh();
+    execute_command("echo PIPEOK |");
+    check(out_has("empty pipeline stage"), "13e `cmd |`: 空の段を断る");
+    check(!out_has("PIPEOK"), "13f `cmd |`: 前の段も実行しない");
+    check(sh_refused_flag == 1, "13g 断りの印が立っている");
+
+    /* 先頭の空の段 */
+    fresh();
+    execute_command("| echo PIPEOK");
+    check(out_has("empty pipeline stage"), "13h `| cmd`: 空の段を断る");
+    check(!out_has("PIPEOK"), "13i `| cmd`: 後ろの段も実行しない");
+
+    /* `a || b` — 真ん中が空 */
+    fresh();
+    execute_command("echo PA || echo PB");
+    check(out_has("empty pipeline stage"), "13j `a || b`: 断る");
+    check(!out_has("PA") && !out_has("PB"), "13k `a || b`: どちらも実行しない");
+
+    /* クォートの中の `|` も今までどおり区切り = 同じ規則で断る (票 §6) */
+    fresh();
+    execute_command("echo \"a||b\"");
+    check(out_has("empty pipeline stage"),
+          "13l `echo \"a||b\"`: クォートは見ないので同じ規則で断る");
+
+    /* スクリプト中なら後続行も実行しない (印が立っていること) */
+    fresh();
+    s_begin(0);
+    s_add("echo PIPEOK |\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command("source /t.sh");
+    check(!out_has("PIPEOK"),  "13m スクリプト: 断った行は実行しない");
+    check(!ran("marknext"),    "13n スクリプト: 後続行も実行しない (印が立つ)");
+
+    /* 誤発火の裏: 素直な 2 段は今までどおり */
+    fresh();
+    execute_command("echo ONE | echo TWO");
+    check(out_has("ONE") && out_has("TWO"), "13o 通る 2 段は今までどおり");
+    check(sh_refused_flag == 0, "13p 通る 2 段は印を残さない");
+}
+
+/* ========================================================================
+ *  14. U7 — glob の mem_alloc が失敗したら行ごと断る (T6)
+ *
+ *  以前は黙って戻っていたので、一致の **一部だけ** が handler へ渡った
+ *  (`rm /tmp/item*` が 1 件だけ消えて成功に見える)。
+ * ======================================================================== */
+static void case_glob_alloc_fail(void)
+{
+    report("14 U7: glob の確保失敗は行ごと断る (T6)\n");
+
+    fresh();
+    dir_set("/d/");
+    dir_add("item1");
+    dir_add("item2");
+    dir_add("item3");
+    g_glob_alloc_budget = 1;            /* 2 件目の確保で失敗する */
+    execute_command("echo /d/item*");
+    check(!out_has("item1") && !out_has("item2"),
+          "14a 一致の一部だけを handler へ渡さない");
+    check(out_has("glob: out of memory"), "14b 理由を 1 行出す");
+    check(g_glob_allocs == 1 && g_frees >= 1,
+          "14c 確保済みの文字列を解放する");
+
+    /* 誤発火の裏: 確保が通れば今までどおり全件展開して handler を呼ぶ */
+    fresh();
+    dir_set("/d/");
+    dir_add("item1");
+    dir_add("item2");
+    execute_command("echo /d/item*");
+    check(out_has("item1") && out_has("item2"),
+          "14d 確保が通れば今までどおり全件渡す");
+    check(!out_has("out of memory"), "14e 誤発火なし");
+
+    /* スクリプト中なら打ち切る */
+    fresh();
+    dir_set("/d/");
+    dir_add("item1");
+    dir_add("item2");
+    s_begin(0);
+    s_add("echo /d/item*\n");
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    g_glob_alloc_budget = 1;
+    execute_command("source /t.sh");
+    check(out_has("glob: out of memory"),
+          "14f スクリプト: 断ったのは glob の確保失敗 (別の理由ではない)");
+    check(!ran("marknext"), "14g スクリプト: 後続行も実行しない");
+}
+
+/* ========================================================================
+ *  15. U8 — 上限を超える glob パターン / ディレクトリ部は **照合を試みない**
+ *      (T7)
+ *
+ *  窓は g_ls_calls (sys_ls を呼んだ回数)。切ったパターンで照合すると
+ *  別のファイルに当たるので、呼ぶ前に断ること。
+ * ======================================================================== */
+static void case_glob_pattern_refuses(void)
+{
+    report("15 U8: 長い glob パターン / ディレクトリ部は照合しない (T7)\n");
+
+    /* パターン 256 文字 ('a'*255 + '*') */
+    fresh();
+    dir_set(".");
+    dir_add("aaa");
+    line_reset();
+    line_add("echo ");
+    line_add_run('a', 255);
+    line_add("*");
+    execute_command(g_line);
+    check(g_ls_calls == 0, "15a 256 文字のパターン: 照合を試みない");
+    check(refused_msg("sh: glob pattern"), "15b 断りが出る");
+
+    /* 誤発火の裏: 255 文字ちょうど ('a'*254 + '*') は照合する */
+    fresh();
+    dir_set(".");
+    dir_add("aaa");
+    line_reset();
+    line_add("echo ");
+    line_add_run('a', 254);
+    line_add("*");
+    execute_command(g_line);
+    check(g_ls_calls == 1, "15c 255 文字ちょうどは照合する");
+    check(!out_has("too long"), "15d 255 文字では断らない");
+
+    /* ディレクトリ部 256 文字 ('/' + 'a'*254 + '/') */
+    fresh();
+    dir_set(".");
+    line_reset();
+    line_add("echo /");
+    line_add_run('a', 254);
+    line_add("/x*");
+    execute_command(g_line);
+    check(g_ls_calls == 0, "15e 256 文字のディレクトリ部: 照合を試みない");
+    check(refused_msg("sh: glob directory"), "15f 断りが出る");
+
+    /* 誤発火の裏: 255 文字ちょうど ('/' + 'a'*253 + '/') は照合する */
+    fresh();
+    dir_set(".");
+    line_reset();
+    line_add("echo /");
+    line_add_run('a', 253);
+    line_add("/x*");
+    execute_command(g_line);
+    check(g_ls_calls == 1, "15g 255 文字ちょうどのディレクトリ部は照合する");
+    check(!out_has("too long"), "15h 同上: 断らない");
+}
+
+/* ========================================================================
+ *  16. U12 — 256 バイト以上の行で launch_req を呼ばない (T11)
+ *
+ *  try_exec の上限 (510) は通るが要求表の上限 (256) は超える長さで、
+ *  「送る前に測って断る」が効いていることを見る。以前は launch_req が
+ *  OS32_ERR_INVAL を返し、sh.bin がそれを **GUI 外** と読み違えていた。
+ * ======================================================================== */
+static void case_launch_cmdline_refuses(void)
+{
+    report("16 U12: 256 バイト以上は launch_req を呼ばない (T11)\n");
+
+    /* "./mk1.bin" (9) + " " + 'a'*246 = 256。名前に `/` を入れて PATH 走査を
+     * 避ける (候補ごとに接頭辞のぶん長さが変わるため)。 */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_run('a', 246);
+    execute_command(g_line);
+    check(g_launch_count == 0, "16a 256 バイト: launch_req を呼ばない");
+    check(refused_msg("sh: launch command line"), "16b 断りが出る");
+    check(!out_has("need the GUI terminal"),
+          "16c 理由を「GUI 外」と取り違えない");
+
+    /* 誤発火の裏: 255 ちょうどは今までどおり送る */
+    fresh();
+    line_reset();
+    line_add("./mk1.bin ");
+    line_add_run('a', 245);
+    execute_command(g_line);
+    check(g_launch_count == 1, "16d 255 ちょうどは launch_req を呼ぶ");
+    check(!out_has("too long"), "16e 255 では断らない");
+
+    /* PATH 走査の途中で断ったら **そこで止める**。候補ごとに接頭辞のぶん
+     * 行が伸びるので、止めないと同じ赤字が候補の数だけ出る。
+     *   "mk1.bin" (7)            + 1 + 240 = 248  … 通る
+     *   "/bin/mk1.bin" (12)      + 1 + 240 = 253  … 通る
+     *   "/usr/bin/mk1.bin" (16)  + 1 + 240 = 257  … 断る (ここで止める)
+     *   "/usr/local/bin/…" (22)  + 1 + 240 = 263  … 止めていなければもう 1 行 */
+    fresh();
+    env_set("PATH", "/bin:/usr/bin:/usr/local/bin");
+    line_reset();
+    line_add("mk1.bin ");
+    line_add_run('a', 240);
+    execute_command(g_line);
+    check(out_count("sh: launch command line") == 1,
+          "16f 断りは 1 行だけ (PATH 走査を止める)");
+    check(g_launch_count == 2,
+          "16g 断った後の候補を試さない (カレント + /bin の 2 回だけ)");
+    check(!out_has("command not found"),
+          "16h 断った行に \"command not found\" を足さない");
+    env_set("PATH", SYS_DEFAULT_PATH);
+}
+
+/* ========================================================================
+ *  17. U13 — CMD_BUF_SIZE 以上の行は空行と区別して断る (T13)
+ * ======================================================================== */
+static void case_long_line_refuses(void)
+{
+    report("17 U13: 長すぎる行を空行と同じ扱いにしない (T13)\n");
+
+    /* execute_command: "echo " (5) + 'a'*4091 = 4096 */
+    fresh();
+    (void)big_line("echo ", CMD_BUF_SIZE - 5);
+    execute_command(g_big);
+    check(refused_msg("sh: command line"), "17a execute_command: 断る");
+
+    /* 誤発火の裏: 4095 ちょうどは今までどおり走る */
+    fresh();
+    (void)big_line("echo ", CMD_BUF_SIZE - 6);
+    execute_command(g_big);
+    check(out_has("aaaa"), "17b 4095 ちょうどは今までどおり走る");
+    check(!out_has("too long"), "17c 4095 では断らない");
+
+    /* 空行は今までどおり黙って戻る (断りではない) */
+    fresh();
+    execute_command("");
+    check(!out_has("too long"), "17d 空行は断らない (黙って戻る)");
+    check(sh_refused_flag == 0, "17e 空行は印を立てない");
+
+    /* execute_single も同じ規則 (パイプの段はここを直に通る) */
+    fresh();
+    (void)big_line("echo ", CMD_BUF_SIZE - 5);
+    execute_single(g_big);
+    check(refused_msg("sh: command"), "17f execute_single: 断る");
+
+    fresh();
+    execute_single("");
+    check(!out_has("too long"), "17g execute_single: 空行は断らない");
+
+    /* スクリプト中なら後続行も実行しない */
+    fresh();
+    (void)big_line("echo ", CMD_BUF_SIZE - 5);
+    s_begin(0);
+    s_add("marknext\n");
+    file_add("/t.sh", s_body(0));
+    execute_command(g_big);
+    execute_command("source /t.sh");
+    check(ran("marknext"),
+          "17h 対話では次の行を巻き添えにしない (印は入口で消える)");
+}
+
+/* ========================================================================
+ *  18. U17 — 254 文字を超える PATH 項目で区切りを見失わない (T17)
+ *
+ *  以前は `di < PATH_MAX_LEN - 2` で止まって残りが **次の項目** になり、
+ *  別のディレクトリの同名バイナリを試していた。窓は g_launch_count と
+ *  g_launch_last (どのパスを起こしにいったか)。
+ * ======================================================================== */
+static void case_path_entry_refuses(void)
+{
+    static char path_buf[ENV_VALUE_MAX];
+    int i;
+
+    report("18 U17: 長い PATH 項目で区切りを見失わない (T17)\n");
+
+    /* 項目 255 文字 ('/' + 'a'*254) — 254 バイトで切れて残り 1 文字が
+     * 次の項目になる */
+    path_buf[0] = '/';
+    for (i = 1; i < 255; i++) path_buf[i] = 'a';
+    path_buf[255] = '\0';
+
+    fresh();
+    env_set("PATH", path_buf);
+    execute_command("mk1");
+    check(g_launch_count == 1,
+          "18a 255 文字の項目: カレントの 1 回だけ (別のディレクトリを試さない)");
+    check(refused_msg("sh: PATH entry"), "18b 断りが出る");
+
+    /* 項目は収まるが dir + '/' + name が入り切らない場合も断る
+     * ('/' + 'a'*249 = 250、+ '/' + "mk1.bin" (7) = 258 > 255) */
+    path_buf[0] = '/';
+    for (i = 1; i < 250; i++) path_buf[i] = 'a';
+    path_buf[250] = '\0';
+
+    fresh();
+    env_set("PATH", path_buf);
+    execute_command("mk1");
+    check(g_launch_count == 1,
+          "18c 連結が入り切らない: カレントの 1 回だけ (切ったパスを試さない)");
+    check(refused_msg("sh: command path"), "18d 断りが出る");
+
+    /* 誤発火の裏: 普通の PATH は今までどおり全候補を試す */
+    fresh();
+    env_set("PATH", "/bin:/usr/bin");
+    execute_command("mk1");
+    check(g_launch_count >= 2, "18e 普通の PATH は候補ぶん試す");
+    check(!out_has("too long"), "18f 普通の PATH では断らない");
+    check(out_has("command not found"), "18g 見つからなければ今までどおり");
+
+    env_set("PATH", SYS_DEFAULT_PATH);   /* 後の試験のために戻す */
+}
+
+/* ========================================================================
+ *  19. I1 — 引数が多すぎて行を捨てるときも印を立てる (PM 決裁 2026-09-16)
+ *
+ *  T6 と同じ関数の中にある同じ型の欠陥。`sh: too many arguments` は赤字を
+ *  出すが印を立てていなかったので、**スクリプトが次の行へ落ちていた**。
+ *  文言は据え置きで印だけ足す。
+ *
+ *  MAX_ARGS は 256 で、argv[argc] へ NUL を置くぶん **格納は 255 個まで**。
+ *  つまり語が 255 個の行は通り、256 個目で断る。
+ *  断る場所は 3 か所あるので全部踏む:
+ *    (a) glob の展開中に溢れる  (ctx.overflow)
+ *    (b) 一致しない glob を足せない (!matched_any の側)
+ *    (c) 素の語を足せない       (else の側)
+ * ======================================================================== */
+static void case_too_many_args_marks(void)
+{
+    report("19 I1: 引数が多すぎて捨てるときも印を立てる\n");
+
+    /* --- (c) 素の語で溢れる: `echo` + 255 個 = 256 語 ------------------ */
+    /*  `echo` は内蔵なので try_exec を通らない (T3 の断りと混ざらない) */
+    fresh();
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 255);
+    execute_command(g_line);
+    check(out_has("too many arguments"), "19a 256 語: 行ごと捨てる");
+    check(sh_refused_flag == 1, "19b 256 語: 印を立てる");
+
+    /* 誤発火の裏: 255 語ちょうどは今までどおり通って echo が走る */
+    fresh();
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 254);
+    execute_command(g_line);
+    check(!out_has("too many arguments"), "19c 255 語ちょうどは通る");
+    check(sh_refused_flag == 0, "19d 255 語は印を残さない");
+
+    /* --- (a) glob の展開中に溢れる (ctx.overflow) --------------------- */
+    /*  echo (1) + 素の語 250 個 = argc 251。/d/ の 8 件のうち 4 件までは
+     *  入り (argc 255)、5 件目で ctx.overflow が立つ。 */
+    fresh();
+    dir_set("/d/");
+    dir_add("item1"); dir_add("item2"); dir_add("item3"); dir_add("item4");
+    dir_add("item5"); dir_add("item6"); dir_add("item7"); dir_add("item8");
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 250);
+    line_add(" /d/item*");
+    execute_command(g_line);
+    check(out_has("too many arguments"), "19e glob の展開で溢れたら捨てる");
+    check(sh_refused_flag == 1, "19f 同上: 印を立てる");
+    check(!out_has("item1"), "19g 同上: 一部だけ渡さない");
+
+    /* --- (b) 一致しない glob を足せない (!matched_any の側) ----------- */
+    /*  echo (1) + 素の語 254 個 = argc 255。一致しない glob はそのまま
+     *  1 語として足したいが、もう入らない。 */
+    fresh();
+    dir_set("/d/");
+    dir_add("item1");
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 254);
+    line_add(" /d/zzz*");
+    execute_command(g_line);
+    check(out_has("too many arguments"), "19h 一致しない glob も足せなければ捨てる");
+    check(sh_refused_flag == 1, "19i 同上: 印を立てる");
+
+    /* --- スクリプト中なら後続の行を実行しない ------------------------- */
+    /*  スクリプトの 1 行は 255 バイトまで (T2、段 4) なので、語は変数展開で
+     *  増やす。${A} は 60 語ぶんの並び (値はクォートで 1 語として渡す)。
+     *  展開後は 1 + 60*5 = 301 語で、上限 255 を超える。 */
+    {
+        int k;
+        fresh();
+        s_begin(0);
+        s_add("set A=\"a");
+        for (k = 1; k < 60; k++) s_add(" a");
+        s_add("\"\n");
+        s_add("echo ${A} ${A} ${A} ${A} ${A}\n");
+        s_add("marknext\n");
+        file_add("/t.sh", s_body(0));
+        execute_command("source /t.sh");
+        check(out_has("too many arguments"), "19j スクリプト: 301 語の行を捨てる");
+        check(!ran("marknext"),
+              "19k スクリプト: 後続の行を実行しない (印が立っている)");
+        check(out_has("script: aborted"), "19l スクリプト: 打ち切ったと言う");
+    }
+
+    /* --- 対話では打ち切らない ----------------------------------------- */
+    fresh();
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 255);
+    execute_command(g_line);         /* ← 捨てられる行 */
+    execute_command("mk1");          /* ← 次の行 */
+    check(out_has("too many arguments"), "19m 対話: 捨てた行は報せる");
+    check(ran("mk1"), "19n 対話: 次の行は今までどおり走る");
+    check(sh_refused_flag == 0, "19o 対話: 次の行の入口で印が消えている");
+
+    /* --- パイプの段で捨てたら後続の段も実行しない (段 2b の規則が効く) -- */
+    fresh();
+    line_reset();
+    line_add("echo");
+    line_add_rep(" a", 255);
+    line_add(" | echo STAGE2RAN");
+    execute_command(g_line);
+    check(out_has("too many arguments"), "19p 段の中で捨てる");
+    check(!out_has("STAGE2RAN"), "19q 捨てた段の後続の段を実行しない");
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -1124,6 +1850,17 @@ void _start(void)
     case_interactive_not_aborted();
     case_profile_continues();
     case_no_false_abort();
+    /* 段 3「ルーター」 — T3 / T4 / T5 / T6 / T7 / T11 / T13 / T17 */
+    case_try_exec_refuses();
+    case_exec_time_refuse();
+    case_cmd_name_refuses();
+    case_pipeline_stages();
+    case_glob_alloc_fail();
+    case_glob_pattern_refuses();
+    case_launch_cmdline_refuses();
+    case_long_line_refuses();
+    case_path_entry_refuses();
+    case_too_many_args_marks();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

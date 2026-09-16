@@ -114,7 +114,7 @@ static void cmd_np2(int argc, char **argv)
 static void cmd_time(int argc, char **argv)
 {
     u32 start, end, elapsed_ms;
-    char cmd_buf[512];
+    char cmd_buf[TIME_CMD_MAX];
     int i, bp;
 
     if (argc < 2) {
@@ -122,12 +122,28 @@ static void cmd_time(int argc, char **argv)
         return;
     }
 
+    /* T3: 溢れた引数を落として計測すると、意図と違う行が走る。組み立てる
+     * 前に数えて断る。`time` はクォートを付け直さないので、数えるのは本体と
+     * 区切りの空白だけ ([C4] 上限は TIME_CMD_MAX から出す)。 */
+    {
+        int need = 0;
+        for (i = 1; i < argc; i++) {
+            const char *s = argv[i];
+            if (i > 1) need++;                 /* 区切りの空白 */
+            while (*s++) need++;
+        }
+        if (need > TIME_CMD_MAX - 2) {
+            sh_refuse("time: command line", TIME_CMD_MAX - 2);
+            return;
+        }
+    }
+
     /* argv[1..] からコマンドライン文字列を再構築 */
     bp = 0;
-    for (i = 1; i < argc && bp < 510; i++) {
+    for (i = 1; i < argc && bp < TIME_CMD_MAX - 2; i++) {
         const char *s = argv[i];
-        if (i > 1 && bp < 510) cmd_buf[bp++] = ' ';
-        while (*s && bp < 510) cmd_buf[bp++] = *s++;
+        if (i > 1 && bp < TIME_CMD_MAX - 2) cmd_buf[bp++] = ' ';
+        while (*s && bp < TIME_CMD_MAX - 2) cmd_buf[bp++] = *s++;
     }
     cmd_buf[bp] = '\0';
 

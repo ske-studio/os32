@@ -30,6 +30,15 @@
  * [C4] 断りのメッセージにもこの定数から上限を出す。 */
 #define IF_VALUE_MAX      256
 
+/* 組み立てた行の幅。実効長はコードのループが見る値と同じにしてある —
+ * [C4] のとおり断りのメッセージにもここから上限を出す (票 §5 の段 3)。
+ *   TIME_CMD_MAX      cmd_base.c の `time` (cmd_buf[512]、実効 510)
+ *   EXEC_CMDLINE_MAX  cmd_mnt.c の `exec` (cmdline[256]、実効 255)
+ *   GLOB_PATTERN_MAX  sh_args.inc の glob パターン部 (実効 255) */
+#define TIME_CMD_MAX      512
+#define EXEC_CMDLINE_MAX  256
+#define GLOB_PATTERN_MAX  256
+
 /* script_source_file の戻り値。0 = 成功 / -1 = 読めない・深すぎる /
  * SCRIPT_ERR_REFUSED = 行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1) */
 #define SCRIPT_ERR_REFUSED (-2)

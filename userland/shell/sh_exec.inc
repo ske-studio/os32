@@ -46,6 +46,46 @@ static int has_slash(const char *s)
 #define TRY_EXEC_BUF_SIZE  512
 #define TRY_EXEC_MARGIN    12  /* パス末尾 + スペース + NUL の余裕 */
 
+/* ------------------------------------------------------------------------ */
+/*  T3: try_exec が組み立てる行の長さを **切り詰めずに** 数える               */
+/*                                                                          */
+/*  下の組み立てループとまったく同じ規則で数えること。とくにクォートの        */
+/*  再付与ぶんを落とさない:                                                  */
+/*    - 引数と引数のあいだの区切りの空白             … 1 バイト              */
+/*    - 空白 / " / ' / \ を含む引数と空の引数         … 前後の " で +2        */
+/*    - その本体に含まれる " と \                     … \ が付いて 2 倍       */
+/*  クォートが要らない引数には " も \ も含まれないので、エスケープの数え方を  */
+/*  分岐させる必要はない (need_quote の判定条件がその 4 文字そのもの)。       */
+/*                                                                          */
+/*  戻り値: 必要なバイト数 (終端の NUL は含まない)。                          */
+/* ------------------------------------------------------------------------ */
+static int try_exec_len(const char *bin_path, int argc, char **argv)
+{
+    int total = 0;
+    int i;
+    const char *s;
+
+    for (s = bin_path; *s; s++) total++;
+
+    for (i = 1; i < argc; i++) {
+        int need_quote = 0;
+        int body = 0;
+
+        s = argv[i];
+        if (*s == '\0') need_quote = 1;      /* 空引数もクォートで保存する */
+        for (; *s; s++) {
+            if (*s == ' ' || *s == '"' || *s == '\'' || *s == '\\')
+                need_quote = 1;
+            body++;
+            if (*s == '"' || *s == '\\') body++;   /* エスケープの \ */
+        }
+
+        total += 1 + body;                   /* 区切りの空白 + 本体 */
+        if (need_quote) total += 2;          /* 前後の " */
+    }
+    return total;
+}
+
 static int try_exec(const char *bin_path, int argc, char **argv)
 {
     char cmd_buf[TRY_EXEC_BUF_SIZE];
@@ -54,6 +94,27 @@ static int try_exec(const char *bin_path, int argc, char **argv)
     char *limit_args = cmd_buf + TRY_EXEC_BUF_SIZE - 2;
     int i;
     const char *s;
+
+    /* T3: 溢れる行は **組み立てる前に** 断る。切り詰めたまま起動すると
+     * 意図と違う引数でプログラムが走る (票 §1 T3)。上限は下のループが実際に
+     * 見る値そのもの — パスは limit_path (TRY_EXEC_BUF_SIZE - TRY_EXEC_MARGIN)、
+     * 行全体は limit_args (TRY_EXEC_BUF_SIZE - 2)。
+     *
+     * 断ったあとは run_cmd_internal / try_exec_from_path が
+     * sh_refused_peek() を見て **PATH 走査ごと止める** — 止めないと候補の数
+     * だけ同じ赤字が出て、最後に "command not found" で閉じてしまう。 */
+    {
+        int path_len = 0;
+        for (s = bin_path; *s; s++) path_len++;
+        if (path_len > TRY_EXEC_BUF_SIZE - TRY_EXEC_MARGIN) {
+            sh_refuse("sh: program path", TRY_EXEC_BUF_SIZE - TRY_EXEC_MARGIN);
+            return EXEC_ERR_GENERAL;
+        }
+        if (try_exec_len(bin_path, argc, argv) > TRY_EXEC_BUF_SIZE - 2) {
+            sh_refuse("sh: argument list", TRY_EXEC_BUF_SIZE - 2);
+            return EXEC_ERR_GENERAL;
+        }
+    }
 
     /* バイナリパスをコピー */
     s = bin_path;
@@ -114,6 +175,10 @@ static int try_exec_from_path(const char *name_buf, int argc, char **argv)
 {
     const char *path_str = shell_get_path();
     const char *p = path_str;
+    /* 「この走査が断ったか」は印の **差分** で見る。入ってきた時点で既に印が
+     * 立っていることがある (入れ子の execute_command は印を消さない) ので、
+     * peek の値そのものを見ると自分が断っていない行まで止めてしまう。 */
+    int was_refused = sh_refused_peek();
 
     while (*p) {
         char dir_buf[PATH_MAX_LEN];
@@ -125,8 +190,28 @@ static int try_exec_from_path(const char *name_buf, int argc, char **argv)
         while (*p && *p != ':' && di < PATH_MAX_LEN - 2)
             dir_buf[di++] = *p++;
         dir_buf[di] = '\0';
+
+        /* T17: 項目を入れ切れずに止まった = ':' の区切りを **見失っている**。
+         * このまま進むと残りが次の項目になり、**別のディレクトリ**の同名
+         * バイナリを試してしまう。切らずに行ごと断る。 */
+        if (*p && *p != ':') {
+            sh_refuse("sh: PATH entry", PATH_MAX_LEN - 2);
+            return EXEC_ERR_GENERAL;
+        }
+
         if (*p == ':') p++;
         if (di == 0) continue;
+
+        /* T17: dir + '/' + name_buf が入り切らないなら、strncat が切った
+         * **別のパス**を起動しにいく。連結する前に測って断る。 */
+        {
+            int need = di + (int)strlen(name_buf);
+            if (di > 0 && dir_buf[di - 1] != '/') need++;   /* 補う '/' */
+            if (need > PATH_MAX_LEN - 1) {
+                sh_refuse("sh: command path", PATH_MAX_LEN - 1);
+                return EXEC_ERR_GENERAL;
+            }
+        }
 
         /* フルパス構築: dir + '/' + name_buf */
         strncpy(full_path, dir_buf, PATH_MAX_LEN - 1);
@@ -137,6 +222,9 @@ static int try_exec_from_path(const char *name_buf, int argc, char **argv)
         strncat(full_path, name_buf, PATH_MAX_LEN - strlen(full_path) - 1);
 
         rc = try_exec(full_path, argc, argv);
+        /* try_exec / sh_launch が断ったら **次の候補へ回さない** (T3 / T11)。
+         * 回すと同じ赤字が候補の数だけ出たうえ "command not found" で閉じる。 */
+        if (!was_refused && sh_refused_peek()) return EXEC_ERR_GENERAL;
         if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
             return rc;
         }
@@ -175,6 +263,8 @@ static int sh_is_cui_only(int argc, char **argv)
 
 static void run_cmd_internal(int argc, char **argv) {
     int j, rc;
+    /* try_exec_from_path と同じ理由で、断りは印の **差分** で見る */
+    int was_refused;
     char name_buf[PATH_MAX_LEN];
 
 #ifdef SHELL_AS_APP
@@ -205,8 +295,18 @@ static void run_cmd_internal(int argc, char **argv) {
         }
     }
 
+    was_refused = sh_refused_peek();
+
     /* 2. 外部コマンドの検索・実行 */
     {
+        /* T4: 名前を PATH_MAX_LEN - 5 で切って ".bin" を付けると、251 バイトの
+         * 接頭辞が実在するときに **別のファイル** が起動する (`Pextra…` で
+         * `P.bin` が走る)。切らずに断る。 */
+        if ((int)strlen(argv[0]) > PATH_MAX_LEN - 5) {
+            sh_refuse("sh: command name", PATH_MAX_LEN - 5);
+            return;
+        }
+
         /* コマンド名に.bin拡張子を付加 (".bin\0" = 5文字分を予約) */
         strncpy(name_buf, argv[0], PATH_MAX_LEN - 5);
         name_buf[PATH_MAX_LEN - 5] = '\0';
@@ -218,6 +318,8 @@ static void run_cmd_internal(int argc, char **argv) {
     /* 2a. パスにスラッシュが含まれる場合 → 直接実行 */
     if (has_slash(argv[0])) {
         rc = try_exec(name_buf, argc, argv);
+        /* 断った行は "not found" でも "crashed" でもない — 何も言い足さない */
+        if (!was_refused && sh_refused_peek()) return;
         sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
             g_api->kprintf(ATTR_GREEN, "%s", "\n");
@@ -231,6 +333,7 @@ static void run_cmd_internal(int argc, char **argv) {
 
     /* 2b. カレントディレクトリで試行 */
     rc = try_exec(name_buf, argc, argv);
+    if (!was_refused && sh_refused_peek()) return;
     if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
         sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
@@ -243,6 +346,7 @@ static void run_cmd_internal(int argc, char **argv) {
 
     /* 2c. PATH内の各ディレクトリで試行 */
     rc = try_exec_from_path(name_buf, argc, argv);
+    if (!was_refused && sh_refused_peek()) return;
     if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
         sh_gfx_restore();
         if (rc == EXEC_SUCCESS) {
