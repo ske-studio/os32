@@ -192,6 +192,25 @@ KernelAPI の構造体を変えたときは `make clean` → `make all` が必�
   `apps/deploy.yaml`、`game/deploy.yaml`)。統合は `tools/deploy_manifests.py`。
   マニフェストに無いバイナリは配備先で stale 化するので、`make deploy*` が
   `tools/prune_stale.py` で刈る (`NO_PRUNE=1` で一覧のみ)。
+- **配備元には世代の名札が付く** (票 H4)。`make deploy` は全件成功の後にだけ
+  `C:\os32\.deploy\manifest.txt` を書き、1 件でも失敗したら既にある名札を消す。
+  中身は行指向の平文 (`format` / `build` / `generated` / `count` + `---` + 1 行 1 ファイル)。
+  `build` は `<短い SHA>`(+`dirty`) で、**「同じか違うか」を見るための名札。順序は表さない**。
+  ゲストの `hsync` は起動時にこれを読んで 1 行目に `DEPLOY build=… count=… generated=…` を出し、
+  `hsync --expect-build <ID>` は名札が違えば**1 件も書かずに**断る
+  (`reason=build_mismatch`)。名札が無い / 壊れているときも「一致」とは扱わず、
+  全体同期では断る (`manifest_absent` / `manifest_invalid`)。範囲を絞った同期
+  (`hsync usr`) では表示だけして続ける — 名札はルートの世代を表すもので、
+  絞った範囲の正しさは保証しないため。**読めて不一致と分かった場合は絞り込み
+  でも断る** (「確かめた結果おかしい」と「確かめられない」は別)。
+  防ぐのは **「`make deploy` を忘れたまま `hsync` して、ゲストの新しいファイルを
+  ホストの古いもので上書きする」** 事故 — 内容の違いは内容比較で分かるが、
+  どちらが意図した版かは分からないため。詳細は `docs/manpages/hsync.1`。
+  調査で名札を書かせたくないときは `hostdrv_deploy.py sync --no-manifest`
+  (このときと `--tag` の部分配備では、**古い名札も消す**)。
+  なお**コピーと名札の更新は原子的ではない**: 全件コピーの後・名札を書く前に
+  ホストが落ちると、配備元は新しいのに名札は古いままになる。`--expect-build` は
+  そこで断る (安全側)。復旧は `make deploy` をもう一度打つだけ。
 - 環境変数: `HOSTDRV_DIR` (既定 `/mnt/c/os32`)、`NP21W_DIR` (既定 `/tmp/np21w`)。
 - 判断と検証の進め方はスキル `os32-build-verify`、反映確認の手順は
   [POLICY_DEBUG.md §2](POLICY_DEBUG.md)。

@@ -170,6 +170,14 @@ class FakeRun(object):
             return R(0)
         if prog == 'ls':
             return R(0, stdout='')
+        if prog == 'git':
+            # 票 H4: 配備の名札の `build=` を作るために hostdrv_deploy.py が
+            # git へ版を尋ねる。**読み取りだけ**なので通すが、ここで扱うのは
+            # この 2 つだけ (書き込む git を黙って通さない)。
+            if argv[1:] in (['rev-parse', '--short', 'HEAD'],
+                            ['status', '--porcelain']):
+                return R(0, stdout='h4test\n' if argv[1] == 'rev-parse' else '')
+            raise AssertionError('想定外の git: %r' % (cmd,))
         raise AssertionError('想定外のコマンド: %r' % (cmd,))
 
 

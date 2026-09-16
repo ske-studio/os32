@@ -1,11 +1,12 @@
 # TASK_H4 — 配備マニフェストと世代の確認
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **実装中 (2026-09-16、設計レビュー 3 往復で Approve、設計凍結)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **実装済み・ゲスト未検証 (2026-09-16。設計レビュー 3 往復で Approve、ホスト試験 RED→GREEN 済み、§4-2 のゲスト受入は未実施)**
 
 基点: `feat/gui` = `9742a6b`。
 計画の正典: [`HSYNC_IMPROVEMENT_PLAN.md`](HSYNC_IMPROVEMENT_PLAN.md) §7-1 (本文)、§8 (H4 の行)、§9 の A18。
 前提の票: [`TASK_H1.md`](TASK_H1.md)、[`TASK_H2.md`](TASK_H2.md) (置換の安全化)、[`TASK_H3.md`](TASK_H3.md) (mtime)。
 引き継ぎ: [`../agents/HANDOVER_2026-09-16.md`](../agents/HANDOVER_2026-09-16.md) §4。
+RED→GREEN の記録: [`../../../tools/tests/h4_manifest_tdd.md`](../../../tools/tests/h4_manifest_tdd.md)。
 
 ## 0. 目的
 
@@ -201,3 +202,52 @@ boot/vmkernel.lz4 481400 a41c0e55 1789520100
 | ID | 問い | 推奨 | 決裁 |
 |---|---|---|---|
 | D1 | マニフェストの形式 | (a) 行指向の平文 (`.deploy/manifest.txt`) | **(a) ユーザー決裁 2026-09-16** |
+
+## 7. 実装 (2026-09-16、基点 `10a498a`)
+
+| 層 | 実体 |
+|---|---|
+| ホスト (書く) | `tools/hostdrv_deploy.py` — `write_manifest_file()` / `remove_manifest()` / `sync_failed()` / `build_id()` / `manifest_path_ok()`、`do_sync(tag_filter, write_manifest)`、`sync --no-manifest` |
+| ゲスト (読む) | `userland/system/hsync.c` — `man_load()` / `man_parse()` / `man_gate()` / `man_find()` / `man_note_copy()`、`--expect-build` |
+| 試験 | `tools/tests/h4_manifest_host.c` + `test_h4_manifest.py` (330 checks)、`tools/tests/test_hostdrv_manifest.py` (42 checks)。`make check-h4-manifest-host` |
+| 文書 | `docs/manpages/hsync.1` (「配備の世代の名札」節)、`docs/08_build.md` §8-4 |
+
+表の上限は **`HS_MAN_MAX 320` / `HS_MAN_PATH_CAP = NAME_CAP` (64)**。
+実測の配備は約 200 件 (HostDrv に 249 ファイル、`deploy.yaml` 展開で 79 件 —
+この worktree は `apps` / `game` の submodule が未取得) なので約 6 割の余裕。
+表は 24,320 バイトの BSS で、既存のコピー用バッファ (64KB) より小さい。
+名札の**本文**は `file_buf` を借りて読む (同期を始める前の 1 回だけ)。
+
+### 7-1. 票に書かれていない判断 (PM の確認が要る)
+
+1. **名札そのものが同期対象になる。** `/host/.deploy/manifest.txt` は列挙に
+   現れるので `/.deploy/manifest.txt` へ写る。除外の規則は足していない
+   (票が求めておらず、H1〜H3 の規則を変えない方針のため)。ただし
+   **名札自身の写しは `manifest_extra` に数えない** — 名札は自分の CRC を
+   自分に書けないので、数えるとまっさらなゲストで必ず 1 になり、本当の
+   食い違いが埋もれる。
+2. **`--no-manifest` と `--tag` の部分配備でも古い名札を消す。** 票は「1 件でも
+   失敗したら消す」しか書いていないが、新しいファイル + 古い名札が残ると
+   `--expect-build <古い ID>` が**一致**してしまい、この票が防ぐ事故が裏返る。
+3. **~~名札が無い + `--expect-build` は絞り込みでも断る~~ → PM 決裁で訂正
+   (2026-09-16)。** 初版は M12 の例外が「名札が壊れている」場合にだけ書かれて
+   いるのを字義どおりに取ったが、M6c との非対称が筋の通らないものだった。
+   **「確かめられない」ときの扱いは、名札が壊れていても無くても同じにする**:
+
+   | 状況 | 全体同期 | 絞り込み |
+   |---|---|---|
+   | 読めて**不一致** | 断る (`build_mismatch`) | **断る** (protection の本体) |
+   | **壊れている** | 断る (`manifest_invalid`) | 表示のみ・続行 |
+   | **無い** | 断る (`manifest_absent`) | 表示のみ・続行 |
+
+   根拠は往復 2 で確認した「名札はルートの世代を表すもので、絞った範囲の
+   正しさを保証しない」— この理屈は壊れている場合と無い場合に等しく当たる。
+   一方、読めて**不一致**と分かった場合は絞り込みでも断る:
+   **「確かめた結果おかしい」と「確かめられない」は別**だから。
+   語を分けたのは、`manifest_missing` (§2-4 の別票の集計名) と紛れないよう
+   `manifest_absent` にした。
+
+### 7-2. 未実施 ([V4])
+
+§4-2 の**ゲスト受入 4 項目は動かしていない** (コーダーは配備・エミュレータ
+操作を行わない)。ホスト試験だけで「実機で動く」とは言えない。

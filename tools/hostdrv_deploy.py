@@ -10,20 +10,29 @@ sudo 不要。NHDイメージ操作不要。プログラム変更時は NP21/W �
 カーネル変更時のみ nhd_deploy.py でブート領域書き込み + 再起動が必要。
 
 使い方:
-  python3 hostdrv_deploy.py sync [--tag TAG]   — deploy.yaml に基づくデプロイ
+  python3 hostdrv_deploy.py sync [--tag TAG] [--no-manifest]
+                                               — deploy.yaml に基づくデプロイ
   python3 hostdrv_deploy.py diff               — ビルド成果物との差分表示
   python3 hostdrv_deploy.py clean              — HostDrvディレクトリをクリア
   python3 hostdrv_deploy.py ls [path]          — HostDrvディレクトリ一覧
+
+配備の**世代の名札** (票 H4、docs/tasks/shell/TASK_H4.md §2-1 / §2-2):
+`.deploy/manifest.txt` に行指向の平文で「この配備元がどの版か」を書き残す。
+ゲストの `hsync` がこれを読み、`--expect-build` で食い違いを断る。
+**全件成功の後にだけ書き、1 件でも失敗したら既にある名札を消す。**
 """
 
+import subprocess
 import sys
 import os
+import datetime
 import errno
 import stat
 import shutil
 import glob as globmod
 import yaml
 import filecmp
+import zlib
 
 # 通常配備が /etc/settings.db* を作らない・上書きしない・消さないための共通判定
 # (票 S0-D / D0)。HostDrv は hsync でそのまま NHD へ流れるので、ここに古い
@@ -58,6 +67,201 @@ def _resolve_hostdrv_dir():
 
 
 HOSTDRV_DIR = _resolve_hostdrv_dir()
+
+
+# === 配備の名札 (票 H4 §2-1 / §2-2) ===
+#
+# 形式は**行指向の平文** (ユーザー決裁 D1 2026-09-16)。ゲストに JSON パーサが
+# 無いので、`key=value` の 4 行 + `---` + 1 行 1 ファイルにする。
+#
+#   format=1
+#   build=9742a6b+dirty
+#   generated=2026-09-16T21:45:19Z
+#   count=198
+#   ---
+#   bin/cat.bin 16428 3b7f2a10 1789520013
+#
+# ファイルの行は **パス / サイズ / CRC-32 (8 桁 16 進、小文字) / mtime (Unix 秒)**
+# で、区切りは空白 1 つ。パスは HOSTDRV_DIR からの相対で、絶対パスと `..` は
+# 書かない。CRC は lib/crc32_core.inc と同じ CRC-32 (= zlib.crc32)。
+MANIFEST_DIR = '.deploy'
+MANIFEST_NAME = 'manifest.txt'
+MANIFEST_FORMAT = '1'
+MANIFEST_SEP = '---'
+MANIFEST_HEAD_FMT = 'format=%s\nbuild=%s\ngenerated=%s\ncount=%d\n' \
+                    + MANIFEST_SEP + '\n'
+# `build` の値は読む側 (hsync の HS_MAN_PATH_CAP) に収まる必要がある。
+MANIFEST_BUILD_CAP = 63
+
+
+def manifest_path():
+    return os.path.join(HOSTDRV_DIR, MANIFEST_DIR, MANIFEST_NAME)
+
+
+def manifest_tmp_path():
+    return manifest_path() + '.tmp'
+
+
+def remove_manifest(why):
+    """既にある名札 (と書きかけの一時ファイル) を消す。
+
+    **古い名札が残ると「配備済み」と誤読される** (票 H4 §2-2)。消せなかった
+    ことは握り潰さず表示する。戻り値 True = 名札が残っていない。
+    """
+    ok = True
+    removed = False
+    for path in (manifest_path(), manifest_tmp_path()):
+        try:
+            os.remove(path)
+            removed = True
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                print("Error: 名札 {} を消せない: {}".format(path, exc),
+                      file=sys.stderr)
+                ok = False
+    if removed:
+        print("  名札を削除: {} ({})".format(
+            MANIFEST_DIR + '/' + MANIFEST_NAME, why))
+    return ok
+
+
+def sync_failed():
+    """配備が失敗したときの共通の後始末 (票 H4 §2-2)。
+
+    **1 件でも失敗したら既にある名札を消す。** 呼び手はこの戻り値をそのまま
+    返す (失敗は握り潰さない — 既存の `state == 'error'` の扱いは変えない)。
+    """
+    remove_manifest("配備が失敗した")
+    return False
+
+
+def _git(args):
+    """PROJ_DIR で git を回す。使えなければ None (配備は失敗させない)。"""
+    try:
+        out = subprocess.run(['git'] + args, cwd=PROJ_DIR,
+                             capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    data = out.stdout
+    if data is None:
+        return ''
+    if isinstance(data, bytes):
+        return data.decode('utf-8', 'replace')
+    return data
+
+
+def build_id():
+    """版の名札 `<短い SHA>` (+ 作業ツリーが汚れていれば `+dirty`)。
+
+    **これは「同じか違うか」を見るための名札で、順序を表さない** (票 H4 §2-1)。
+    日時や SHA の大小で新旧を決めないこと。git が無い / 使えないときは
+    `unknown` を返す — 名札が無いより「確かめられない版」と言うほうが正直。
+    """
+    sha = _git(['rev-parse', '--short', 'HEAD'])
+    if sha is None:
+        return 'unknown'
+    sha = sha.strip()
+    if not sha or len(sha) > MANIFEST_BUILD_CAP or any(c.isspace() for c in sha):
+        return 'unknown'
+    dirty = _git(['status', '--porcelain'])
+    if dirty is None:
+        return sha
+    if dirty.strip():
+        sha += '+dirty'
+    return sha if len(sha) <= MANIFEST_BUILD_CAP else 'unknown'
+
+
+def manifest_path_ok(rel):
+    """名札に書けるパスか (票 H4 §2-1)。
+
+    空白を含むパスは**配備対象に無い**ことをここで固定する: 区切りが空白 1 つ
+    なので、含まれると読む側が別の意味に取る。絶対パスと `..` も書かない。
+    """
+    if not rel or rel.startswith('/'):
+        return False
+    if '\\' in rel:
+        return False
+    if any(c.isspace() for c in rel):
+        return False
+    parts = rel.split('/')
+    if '' in parts or '.' in parts or '..' in parts:
+        return False
+    return True
+
+
+def manifest_line(rel, dest):
+    """1 ファイル分の行を作る。読めなければ OSError をそのまま投げる。"""
+    crc = 0
+    with open(dest, 'rb') as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            crc = zlib.crc32(chunk, crc)
+    st = os.stat(dest)
+    return "%s %d %08x %d" % (rel, st.st_size, crc & 0xFFFFFFFF,
+                              int(st.st_mtime))
+
+
+def write_manifest_file(deployed):
+    """名札を書く。**全件成功の後にだけ呼ぶこと** (票 H4 §2-2)。
+
+    deployed = [(guest_path, dest_abs)]。コピーしたものも「同一でスキップした」
+    ものも**配備元に在る**ので、どちらも載せる。
+
+    書き方は **一時ファイル + 置き換え**。中途半端な名札を読ませない。
+    ただし §2-3-1 のとおり、**コピー群と名札の更新は原子的ではない** —
+    守れるのは名札そのものの完全性だけ。
+    """
+    lines = []
+    seen = set()
+    try:
+        for guest_path, dest in deployed:
+            rel = guest_path.lstrip('/')
+            if not manifest_path_ok(rel):
+                print("Error: 名札に書けないパス (空白 / 絶対 / '..'): {}"
+                      .format(guest_path), file=sys.stderr)
+                return False
+            if rel in seen:
+                print("Error: 配備先が重複している: {}".format(guest_path),
+                      file=sys.stderr)
+                return False
+            seen.add(rel)
+            lines.append(manifest_line(rel, dest))
+    except OSError as exc:
+        print("Error: 名札の行を作れない: {}".format(exc), file=sys.stderr)
+        return False
+
+    # 並びを決めておく (同じ配備なら同じ名札になる = 差分が読める)
+    lines.sort()
+    build = build_id()
+    generated = datetime.datetime.now(
+        datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    head = MANIFEST_HEAD_FMT % (MANIFEST_FORMAT, build, generated,
+                                len(lines))
+    text = head + ''.join(line + '\n' for line in lines)
+
+    tmp = manifest_tmp_path()
+    try:
+        os.makedirs(os.path.dirname(manifest_path()), exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, manifest_path())
+    except OSError as exc:
+        print("Error: 名札を書けない: {}".format(exc), file=sys.stderr)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+    print("  名札: {}/{} build={} count={}".format(
+        MANIFEST_DIR, MANIFEST_NAME, build, len(lines)))
+    return True
 
 
 def guard_dest(guest_path, host_src=None):
@@ -165,8 +369,19 @@ def resolve_files_from_entry(entry):
     return results
 
 
-def do_sync(tag_filter=None):
-    """deploy.yaml に基づきファイルをHostDrvディレクトリにコピー"""
+def do_sync(tag_filter=None, write_manifest=True):
+    """deploy.yaml に基づきファイルをHostDrvディレクトリにコピー
+
+    write_manifest=False (`--no-manifest`) のときは名札を書かない。そのときも
+    **古い名札は消す** — 「新しいファイル + 古い名札」を残すと
+    `hsync --expect-build <古い ID>` が一致と判定し、H4 が防ぐはずの事故が
+    そのまま裏返って起きる。抑止するのは「書くこと」であって「嘘を残すこと」
+    ではない。
+
+    タグで絞った部分配備 (`--tag`) も同じ理由で名札を書かず、古い名札を消す。
+    名札は**配備元全体の世代**を表すもので、一部だけ入れ替えた配備元を
+    1 つの版として名乗らせない。
+    """
     cfg = load_deploy_yaml()
     if cfg is None:
         return False
@@ -176,7 +391,7 @@ def do_sync(tag_filter=None):
         os.makedirs(HOSTDRV_DIR, exist_ok=True)
 
     if not guard_root():
-        return False
+        return sync_failed()
 
     print("=" * 55)
     print("  OS32 HostDrv デプロイ")
@@ -193,7 +408,7 @@ def do_sync(tag_filter=None):
         for d in dirs:
             target, state = ensure_dir(d)
             if state == 'error':
-                return False
+                return sync_failed()
 
     # ファイルコピー
     files = fs.get('files', [])
@@ -201,6 +416,9 @@ def do_sync(tag_filter=None):
     total_skipped = 0
     total_protected = 0
     total_size = 0
+    # 名札に載せる配備先 (票 H4 §2-2)。コピーしたものと「同一でスキップした」
+    # ものの両方を集める — どちらも**配備元に在る**ので名札に載る。
+    deployed = []
 
     for entry in files:
         entry_tags = entry.get('tags', [])
@@ -219,7 +437,7 @@ def do_sync(tag_filter=None):
             # 保護対象は比較のためにすら開かない。
             dest_file, state = guard_dest(guest_path, host_src=host_abs)
             if state == 'error':
-                return False
+                return sync_failed()
             if state == 'protected':
                 total_protected += 1
                 continue
@@ -232,10 +450,10 @@ def do_sync(tag_filter=None):
             except protect.ProtectError as exc:
                 print("Error: 配備の保護判定に失敗: {}".format(exc),
                       file=sys.stderr)
-                return False
+                return sync_failed()
             dest_dir, dstate = ensure_dir(parent)
             if dstate == 'error':
-                return False
+                return sync_failed()
             if dstate == 'protected':
                 total_protected += 1
                 continue
@@ -244,6 +462,7 @@ def do_sync(tag_filter=None):
             if os.path.isfile(dest_file):
                 if filecmp.cmp(host_abs, dest_file, shallow=False):
                     total_skipped += 1
+                    deployed.append((guest_path, dest_file))
                     continue
 
             # コピー
@@ -251,6 +470,7 @@ def do_sync(tag_filter=None):
             size = os.path.getsize(host_abs)
             total_size += size
             total_copied += 1
+            deployed.append((guest_path, dest_file))
             print("  [{}] {} ({} bytes)".format(
                 tag_label, protect.guest_path_of(HOSTDRV_DIR, dest_file), size))
 
@@ -260,6 +480,18 @@ def do_sync(tag_filter=None):
         total_copied, total_size, total_skipped,
         "、{} 件は保護対象として除外".format(total_protected)
         if total_protected else ""))
+
+    # ---- 名札 (票 H4 §2-2) --------------------------------------------
+    # **ここまで来たのは全件成功したときだけ。** 途中の失敗は sync_failed()
+    # を通って戻っており、そこで既にある名札を消してある。
+    if not write_manifest:
+        remove_manifest("--no-manifest")
+    elif tag_filter:
+        remove_manifest("--tag の部分配備 (全体の世代を表せない)")
+    elif not write_manifest_file(deployed):
+        remove_manifest("名札を書けなかった")
+        print("=" * 55)
+        return False
     print("=" * 55)
     return True
 
@@ -412,7 +644,9 @@ def main():
         print("")
         print("使い方: {} <command>".format(sys.argv[0]))
         print("")
-        print("  sync [--tag TAG]  — 層別マニフェストに基づくデプロイ")
+        print("  sync [--tag TAG] [--no-manifest]")
+        print("                    — 層別マニフェストに基づくデプロイ")
+        print("                      (--no-manifest で .deploy/manifest.txt を書かない)")
         print("  diff [--tag TAG]  — ビルド成果物との差分表示")
         print("  clean             — HostDrvディレクトリをクリア")
         print("  ls [path]         — ファイル一覧")
@@ -427,14 +661,19 @@ def main():
 
     if cmd == 'sync':
         tag_filter = None
+        want_manifest = True
         i = 2
         while i < len(sys.argv):
             if sys.argv[i] == '--tag' and i + 1 < len(sys.argv):
                 tag_filter = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == '--no-manifest':
+                # 票 H4 §2-2: 調査時に名札を書かせない
+                want_manifest = False
+                i += 1
             else:
                 i += 1
-        if not do_sync(tag_filter=tag_filter):
+        if not do_sync(tag_filter=tag_filter, write_manifest=want_manifest):
             sys.exit(1)
 
     elif cmd == 'diff':

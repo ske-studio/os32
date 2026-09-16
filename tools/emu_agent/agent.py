@@ -79,6 +79,8 @@ MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98",
                 "check-fs-kind-callers-host", "check-cat-linenum-host",
                 # 票 H2 (一時ファイル + 検証 + 置換)
                 "check-vfs-excl-host", "check-hsync-h2-host",
+                # 票 H4 (配備マニフェストと世代の確認)
+                "check-h4-manifest-host",
                 "check-hsync-h1-host", "check-hsync-h3-host", "check-b8-open-host",
                 "check-ring3-str-host", "nhd-pull", "nhd-umount", "nhd-init", "deploy-nhd", "deploy-kernel", "images/os32_boot.d88", "iso", "check-settings-protect-host", "check-db-v50-host", "check-cfg-host", "check-gui-host", "check-install-recover-host", "check-install-fresh-host", "clean-external")
 MAP_PATH = os.environ.get("OS32_KERNEL_MAP", os.path.join(ROOT, "build", "out", "kernel.map"))
