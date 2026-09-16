@@ -107,13 +107,17 @@ static void cmd_rshell(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "Waiting for commands via serial...\n");
     g_api->serial_putchar(0x04);
 
+    rpos = 0;
     for (;;) {
-        kch = g_api->kbd_trygetchar();
-        if (kch == 0x1B) break;
-
+        /* **ESC を見るより先に** 1 行分の状態を畳む。rpos は抜け口で
+         * 「ホストへ EOT を返し損ねていないか」の判定に使うので、前の行の
+         * 長さが残っていると待っていないホストへ 2 つ目を返してしまう。 */
         rpos = 0;
         overflow = 0;
         rbuf[0] = '\0';
+
+        kch = g_api->kbd_trygetchar();
+        if (kch == 0x1B) break;
 
         if (kch >= 0x20 && kch < 0x7F) {
             ch = kch;
@@ -174,9 +178,29 @@ static void cmd_rshell(int argc, char **argv)
 
         execute_command(rbuf);
 
+        /* 印を **1 行ぶんで下ろす** (対話の ui.c と同じ扱い)。
+         * rshell 自身が execute_command("rshell") の中で走っているので、
+         * ここの execute_command は必ず入れ子 (g_exec_depth >= 1) になり、
+         * main.c の「いちばん外側だけ消す」が効かない。下ろさないと一度
+         * 断りが起きたきり印が立ちっぱなしになり、**以降どのスクリプトも
+         * 1 行目で打ち切られる** (2026-09-16 実機で退行として出た)。
+         * source の中の打ち切りは script_exec が自分で take して済ませた
+         * 後なので、ここで下ろしても壊れない。 */
+        (void)sh_refused_take();
+
         rshell_end_reply();
     }
 rshell_exit:
+    /* 抜ける口はここ 1 つ — ホストの `exit`、待ち中の ESC、行の途中の ESC。
+     * rpos > 0 は「この行のバイトを受け取ったのに、まだ EOT を返していない」
+     * ことと同値なので、そのときだけ閉じる。
+     *   - `exit`        : ホストは EOT を待っている → 返す (rpos == 4)
+     *   - 行の途中の ESC: 同じく待っている → 返す
+     *   - 待ち中の ESC  : 直前の行の EOT は返し終えている (rpos == 0) → **返さない**。
+     *                     返すと 1 コマンドに EOT が 2 つ出て、/api/cmd は
+     *                     次のコマンドの終端と取り違える (票 §2-2 の裏)。 */
+    if (rpos > 0) rshell_end_reply();
+
     g_api->rshell_set_active(0);
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Remote shell closed]\n");
 }

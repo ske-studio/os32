@@ -363,6 +363,21 @@ MUTATIONS = [
      "            continue;",
      "            (void)sh_refused_take();\n"
      "            continue;"),
+    # T10-c: 抜け口 (ホストの `exit` / 行の途中の ESC) で EOT を返さない。
+    #        直す前の姿そのもの — /api/cmd が 15 秒待ってタイムアウトする。
+    ("t10_exit_no_eot", "userland/shell/rshell.c",
+     "    if (rpos > 0) rshell_end_reply();\n"
+     "\n"
+     "    g_api->rshell_set_active(0);",
+     "    g_api->rshell_set_active(0);"),
+    # T10-d: rshell が断りの印を下ろさない。rshell は常に入れ子なので
+    #        main.c の「いちばん外側だけ消す」が効かず、一度断ると以降の
+    #        スクリプトが全部 1 行目で打ち切られる (2026-09-16 の退行)。
+    ("t10_flag_leaks_between_lines", "userland/shell/rshell.c",
+     "        (void)sh_refused_take();\n"
+     "\n"
+     "        rshell_end_reply();",
+     "        rshell_end_reply();"),
 
     # T12: join_args が黙って切る (切れたコマンド行を実行する)
     ("t12_join_truncates", "userland/shell/cmd_script.c",

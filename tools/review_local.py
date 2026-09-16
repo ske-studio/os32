@@ -13,7 +13,7 @@ Codex・Antigravity・Fable サブエージェントが枯渇したときの補�
     python3 tools/review_local.py prompt.txt fs/ext2_dir.c fs/ext2_file.c > out.md
 
 環境変数:
-    REVIEW_HOST    Ollama の口 (既定 http://google-colab-qwen38:11434)
+    REVIEW_HOST    Ollama の口 (既定 http://google-colab-a100:11434)
     REVIEW_MODEL   モデル名 (既定 gemma4:31b — 実測でいちばん見つける。SKILL.md の表)
     REVIEW_MAXTOK  生成の上限トークン (既定 8192)
     REVIEW_TIMEOUT 待ち時間の秒 (既定 1800)
@@ -28,7 +28,7 @@ import time
 import urllib.request
 import urllib.error
 
-HOST = os.environ.get("REVIEW_HOST", "http://google-colab-qwen38:11434")
+HOST = os.environ.get("REVIEW_HOST", "http://google-colab-a100:11434")
 MODEL = os.environ.get("REVIEW_MODEL", "gemma4:31b")
 MAXTOK = int(os.environ.get("REVIEW_MAXTOK", "8192"))
 TIMEOUT = int(os.environ.get("REVIEW_TIMEOUT", "1800"))

@@ -2557,6 +2557,127 @@ static void case_rshell_line(void)
     check(g_data_written == 10000,
           "23p push: 4KB を超えるファイルを全部送る (先頭 4KB だけにしない)");
     check(out_has("Sent"), "23q push: 成功として報告する");
+
+    /* --- 抜ける 3 経路の EOT (票 §2-2 の残り) -------------------------
+     *
+     *  rshell の抜け口は 3 つある。ホストが待っているのは「行のバイトを
+     *  渡したのに EOT が返っていない」ときだけなので、そこだけ閉じて
+     *  **待っていないところで足さない** (足すと 1 コマンドに EOT が 2 つ
+     *  出て、/api/cmd が次のコマンドの終端と取り違える)。
+     *    - ホストの `exit`   → 待っている  → 返す
+     *    - 行の途中の ESC    → 待っている  → 返す
+     *    - 待ち中の ESC      → 返し終えている → 返さない
+     */
+    report("23 U11: rshell を抜ける 3 経路の EOT (票 §2-2)\n");
+
+    /* ホストの `exit`: EOT はきっかり 1 つ (0 個だとホストが 15 秒待つ) */
+    fresh();
+    rs_line("exit", ' ', 0);
+    rs_line("mk14", ' ', 0);             /* exit の後ろ — 読まれてはいけない */
+    av[0] = "rshell";
+    cmd_rshell(1, av);
+    check(ser_count(0x04) == 2,
+          "23r exit にも EOT を返す (起動の 1 つ + exit の 1 つ)");
+    check(!ran("mk14"), "23s exit の後ろの行は実行しない");
+
+    /* 待ち中の ESC: 直前の行の EOT は返し終えている → 足さない */
+    fresh();
+    cmd_rshell(1, av);                   /* 台本なし = いきなり ESC */
+    check(ser_count(0x04) == 1,
+          "23t 待ち中の ESC では EOT を足さない (起動の 1 つだけ)");
+
+    fresh();
+    rs_line("mk15", ' ', 0);             /* 1 行実行してから台本切れ = ESC */
+    cmd_rshell(1, av);
+    check(ran("mk15"), "23u 普通の行は今までどおり実行する");
+    check(ser_count(0x04) == 2,
+          "23v 同上: EOT は 起動 + その行 の 2 つ (ESC で 3 つにしない)");
+
+    /* 行の途中の ESC: 改行を積まない = 受けかけのまま ESC が来る */
+    fresh();
+    key_push_str("mk16");
+    cmd_rshell(1, av);
+    check(!ran("mk16"), "23w 受けかけの行は実行しない");
+    check(ser_count(0x04) == 2,
+          "23x 受けかけで ESC なら EOT を返す (ホストを待たせない)");
+}
+
+/* ========================================================================
+ *  29. U11 — rshell は断りの印を行をまたいで持ち越さない
+ *
+ *  **execute_command("rshell") で回す**ところが肝。rshell はシェルの組み込み
+ *  コマンドなので、実機では rshell のループの中の execute_command は必ず
+ *  入れ子 (g_exec_depth >= 1) になり、main.c の「いちばん外側だけ印を消す」
+ *  が効かない。案内どおり cmd_rshell を直に呼ぶ case 23 は深さ 0 のままで、
+ *  2026-09-16 の退行 (一度断ると以降どのスクリプトも 1 行目で打ち切られる)
+ *  をすり抜けていた。深さを作らない検査はこの穴を見られない。
+ * ======================================================================== */
+/* 実機の rshell は execute_command("rshell") の中で走るので、そのループの
+ * 中の execute_command は **必ず入れ子** (g_exec_depth >= 1) になる。この
+ * 試験は -DSHELL_AS_APP で組むため sh_is_cui_only (sh_exec.inc) が `rshell`
+ * を表の手前で弾き、同じ姿を execute_command からは作れない。そこで
+ * **深さだけ**常駐版に合わせて cmd_rshell を回す。 */
+static void rshell_nested(void)
+{
+    char *av[2];
+    av[0] = "rshell";
+    av[1] = (char *)0;
+    g_exec_depth++;
+    cmd_rshell(1, av);
+    g_exec_depth--;
+}
+
+static void case_rshell_nested_refuse_flag(void)
+{
+    report("29 U11: rshell の断りの印は行をまたがない (入れ子の姿)\n");
+
+    /* 深さを作る理由を試験の中に残す — 表から踏めないことを先に確かめる */
+    fresh();
+    execute_command("rshell");
+    check(out_has("sh: cui only"),
+          "29a -DSHELL_AS_APP では表から rshell を踏めない (深さを作る理由)");
+
+    /* --- 行そのものが断られた次の行 ---------------------------------- */
+    fresh();
+    /* 2 行ある。印が持ち越されると **1 行目を出した直後に** 打ち切られ、
+     * TWOMARK が出ない (実機で見えた姿そのもの)。 */
+    file_add("/one.sh", "echo ONEMARK\necho TWOMARK\n");
+    key_push_str("set ");
+    key_push_run('n', 32);               /* 名前 32 文字 = 断る */
+    key_push_str("=v");
+    key_push('\n');
+    key_push_str("source /one.sh");      /* 1 行だけのスクリプト */
+    key_push('\n');
+    rshell_nested();
+    check(refused_msg("set: variable name"),
+          "29b 入れ子でも断りは今までどおり出る");
+    check(out_has("TWOMARK"),
+          "29c 断りの次の行のスクリプトは最後まで走る");
+    check(!out_has("script: aborted"),
+          "29d 印を持ち越さない (前の行の断りで打ち切らない)");
+
+    /* --- スクリプトの中の断りは打ち切る。ただし次の行へは残さない ---- */
+    fresh();
+    file_add("/one.sh", "echo ONEMARK\necho TWOMARK\n");
+    s_begin(0);
+    s_add("set B=");  s_run(150);  s_add("\n");
+    s_add("if ${B}${B} == b markinner\n");   /* 左辺 300 文字 > 255 */
+    s_add("markafter\n");
+    file_add("/bad.sh", s_body(0));
+    key_push_str("source /bad.sh");
+    key_push('\n');
+    key_push_str("source /one.sh");
+    key_push('\n');
+    key_push_str("mk17");
+    key_push('\n');
+    rshell_nested();
+    check(refused_msg("if: left value"), "29e スクリプト中の断りは今までどおり出る");
+    check(!ran("markafter"), "29f 断ったスクリプトはそこで打ち切る");
+    check(out_has("script: aborted"), "29g 打ち切りを報告する");
+    check(out_has("TWOMARK"), "29h 次の行のスクリプトは最後まで走る");
+    check(out_count("script: aborted") == 1,
+          "29i 打ち切りは断ったスクリプトの 1 回だけ (次の行に巻き添えを出さない)");
+    check(ran("mk17"), "29j その次の普通のコマンドも走る");
 }
 
 /* ========================================================================
@@ -3047,6 +3168,7 @@ void _start(void)
     case_cfg_set_key();
     case_if_join_refuses();
     case_tab_completion();
+    case_rshell_nested_refuse_flag();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }
