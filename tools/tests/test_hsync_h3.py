@@ -66,18 +66,92 @@ TARGET_KERNEL = TARGET_COMMON + [
     "-Iexec", "-Igfx", "-Ilib", "-Ikapi"]
 
 
-def check_kapi_slot():
-    """[ABI1]/[ABI2]: sys_set_mtime が kapi.json の**末尾**にあり、版が揃う。
+# ---------------------------------------------------------------------------
+#  [ABI2] の主張のしかた (2026-09-16 に直した)
+#
+#  ここは以前 `api[-1]["name"] != "sys_set_mtime"` — つまり「sys_set_mtime が
+#  **永遠に kapi.json の末尾**であること」を要求していた。それは [ABI2] の本旨
+#  ではない。[ABI2] が禁じるのは **既存スロットを動かす / 消す** ことであって、
+#  末尾への追記はむしろ [ABI2] が正当と定めた唯一の増やし方なので、この主張は
+#  **KAPI が 1 本増えるたびに必ず落ちる**。実際 2026-09-16 に kbd_peekkey (v54)
+#  の末尾追記で `make check` が落ちた。
+#
+#  `kapi/kapi_db.c` の `db_slot_layout_ok` が同じ形 (`KAPI_SLOT_COUNT ==
+#  KAPI_SLOT_HOST_CLOSE + 1` の等号) を踏んで**下限比較**に直した前例がある
+#  (同ファイルの見出しコメント)。ここも同じ考え方で **位置**だけを見る:
+#
+#    1. sys_set_mtime が**存在する** (消されていない)
+#    2. その slot 番号が票 H3 で決まった 213 から**動いていない**
+#    3. その**前**の並びが 1 つも変わっていない (名前列の SHA-256)
+#    4. 表の長さは**下限だけ** — 後ろに何本足されていてもよい
+#
+#  3 の digest は「213 番目までの名前」なので、末尾追記では値が動かない。
+#  KAPI を足すたびに更新する必要は無い (更新が要るなら、それは [ABI2] 違反)。
+# ---------------------------------------------------------------------------
+SYS_SET_MTIME_SLOT = 213        # 票 H3 (v52) で決まった位置
 
-    末尾追記でなくなった瞬間に配備済みバイナリの ABI が壊れる。生成物を
-    手で触っていないことも、生成ヘッダの KAPI_FUNC_COUNT で見る。
+#  api[0..213] の名前を "," で繋いだ文字列の SHA-256。
+SYS_SET_MTIME_PREFIX_SHA256 = (
+    "158a679886fb53f2b4824f69742f5378f03ee9a0d66ab9ae757657c8d40458b6")
+
+
+def check_sys_set_mtime_slot(api):
+    """sys_set_mtime が H3 で決まった位置から動いていないこと ([ABI2])。
+
+    末尾かどうかは**見ない**。見るのは位置と、その前の並び。
+    """
+    import hashlib
+
+    names = [e["name"] for e in api]
+    if "sys_set_mtime" not in names:
+        raise SystemExit("sys_set_mtime が kapi.json から消えている ([ABI2])")
+
+    slot = names.index("sys_set_mtime")
+    if slot != SYS_SET_MTIME_SLOT:
+        raise SystemExit(
+            "sys_set_mtime の slot が %d から %d へ動いた ([ABI2] — 既存スロットは"
+            " 並べ替えても消してもいけない)" % (SYS_SET_MTIME_SLOT, slot))
+
+    # 長さは下限だけ (末尾追記は正当なので上限は見ない)
+    if len(api) <= SYS_SET_MTIME_SLOT:
+        raise SystemExit("kapi.json の api が slot %d に届いていない ([ABI2])"
+                         % SYS_SET_MTIME_SLOT)
+
+    digest = hashlib.sha256(
+        ",".join(names[:SYS_SET_MTIME_SLOT + 1]).encode("utf-8")).hexdigest()
+    if digest != SYS_SET_MTIME_PREFIX_SHA256:
+        raise SystemExit(
+            "slot 0..%d の並びが変わった ([ABI2])。末尾追記なら digest は動かない"
+            " — 動いたということは既存スロットを並べ替えた / 消した / 改名した"
+            % SYS_SET_MTIME_SLOT)
+
+    # 生成物の slot 定数も同じ位置を指していること (再生成の取りこぼし検出)
+    slots_h = (ROOT / "sdk/include/os32/os32_kapi_slots.h").read_text(
+        encoding="utf-8")
+    m = re.search(r"#define\s+KAPI_SLOT_SYS_SET_MTIME\s+(\d+)", slots_h)
+    if not m or int(m.group(1)) != SYS_SET_MTIME_SLOT:
+        raise SystemExit("os32_kapi_slots.h の KAPI_SLOT_SYS_SET_MTIME が %d でない"
+                         " (再生成していない / 手編集した)" % SYS_SET_MTIME_SLOT)
+    m = re.search(r"#define\s+KAPI_SLOT_COUNT\s+(\d+)", slots_h)
+    if not m or int(m.group(1)) <= SYS_SET_MTIME_SLOT:
+        raise SystemExit("os32_kapi_slots.h の KAPI_SLOT_COUNT が slot %d に届かない"
+                         % SYS_SET_MTIME_SLOT)
+    return slot
+
+
+def check_kapi_slot():
+    """[ABI1]/[ABI2]: sys_set_mtime が H3 で決まった slot に居て、版が揃う。
+
+    **末尾かどうかは見ない** (理由は check_sys_set_mtime_slot の見出し)。
+    既存スロットが動いた瞬間に配備済みバイナリは「別の関数を呼ぶ」という
+    最も静かな壊れ方をする。生成物を手で触っていないことも、生成ヘッダの
+    KAPI_FUNC_COUNT と slot 定数で見る。
     """
     import json
 
     kapi = json.loads((ROOT / "sdk/kapi.json").read_text(encoding="utf-8"))
     api = kapi["api"]
-    if api[-1]["name"] != "sys_set_mtime":
-        raise SystemExit("sys_set_mtime が kapi.json の末尾に無い ([ABI2])")
+    slot = check_sys_set_mtime_slot(api)
 
     shared = (ROOT / "sdk/include/os32/os32_kapi_shared.h").read_text(
         encoding="utf-8")
@@ -113,9 +187,9 @@ def check_kapi_slot():
         raise SystemExit("build/app.conf の hsync の要求 API 版が kapi.json の "
                          "v%s を越えている" % kapi["version"])
 
-    print("KAPI SLOT PASS (sys_set_mtime = slot %d, v%s, "
-          "app.conf hsync=%s)" % (len(api) - 1, kapi["version"], m.group(1)),
-          flush=True)
+    print("KAPI SLOT PASS (sys_set_mtime = slot %d / 表は %d 本, v%s, "
+          "app.conf hsync=%s)" % (slot, len(api), kapi["version"],
+                                  m.group(1)), flush=True)
 
 
 def build_host(tmp, src, name, extra=()):

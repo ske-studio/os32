@@ -1,4 +1,4 @@
-# KernelAPI v53 仕様書
+# KernelAPI v55 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -17,7 +17,7 @@
 | プログラム専用ヒープ | 動的配置 (sbrk_heap_limit, exec_heap 管理下) |
 | プログラム専用スタック | 動的配置 (メモリ終端付近、下向き展開) |
 | 現在のバージョン | **52** |
-| 合計エントリ数 | **218** (ヘッダ2 + 関数ポインタ214 + データフィールド2) |
+| 合計エントリ数 | **219** (ヘッダ2 + 関数ポインタ215 + データフィールド2) |
 
 ---
 
@@ -95,6 +95,8 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v51 | **実装済み (2026-09-14、N1)** | ネットワーク Host Services `host_open` / `host_status` / `host_read` / `host_write` / `host_close` の 5 本 (slot 208〜212 = 0x348〜0x358、data_fields は 0x35C / 0x360 へ)。非ブロッキング (プロトコルを進めるのは 100Hz の `link_tick` だけ)、同時 2 ハンドル、ストリーム 1 本。実体は `kapi/kapi_host.c` + `net/link.c` | [archive/network/TASK_N0.md](archive/network/TASK_N0.md) §1a |
 | v52 | **実装済み (2026-09-15、H3)** | 更新日時の保存 `sys_set_mtime` 1 本 (slot 213 = 0x35C、data_fields は 0x360 / 0x364 へ)。`VfsOps` の**任意実装フック** `set_mtime` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS` (失敗ではなく「持っていない」)。実体は `kapi/kapi_sys.c` + `fs/vfs.c` + `fs/ext2_vfs.c` | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) |
 | v53 | **実装済み (2026-09-16、H2)** | 排他的作成 `KAPI_O_EXCL` (`0x0400`)。**スロットは 1 本も増えていない** — `sys_open` のフラグが 1 つ増え、その**意味が広がった**ので版数を上げた ([ABI3])。`VfsOps` の**任意実装フック** `create_excl` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS`。実体は `fs/vfs_fd.c` + `fs/ext2_vfs.c`。同じ票で ext2 の置き換え rename の順序も変えた (宛先の名前を消さない) | [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) |
+| v54 | **実装済み (2026-09-16、継承バグ)** | 覗くだけのキー取得 `kbd_peekkey` 1 本 (slot 214 = 0x360、data_fields は 0x364 / 0x368 へ)。キューを**1 バイトも動かさず**に 次のキーを返す (無ければ -1)。戻り値の形は `kbd_trygetkey` と同じ。`script_exec` の毎行の ESC 監視が `kbd_trygetkey` で打鍵を**取り出して捨てて**いたのを直す。実体は `drivers/kbd.c` (+ `drivers/serial.c` の `serial_peekchar` と `kernel/kbd_inject.c` の `kbd_inject_peek`) | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) |
+| v55 | **実装済み (2026-09-16、$?)** | 終了コードの配線 `exec_last_result` 1 本 (slot 215 = 0x364、data_fields は 0x368 / 0x36C へ)。直前の `exec_run` の結果を**種別 + 値**で返す。種別 (`EXEC_KIND_*`) は畳んだ側が渡すので `exit(-2)` / fault / CTRL+STOP を値ではなく種別で見分けられる。`exec_run` は**すべての return 点で**記録を書くので、起動しなかった場合に前回の記録が残らない。GUI 経路 (`exec_start` / `exec_resume`) の子は記録しない。実体は `exec/exec.c` | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -591,6 +593,44 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - **データを書き終えてから呼ぶこと。** 通常の書き込みは `mtime` を現在時刻で上書きするので、
   先に設定すると消える (設計書 [HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) §5.2)。
 
+### 覗くだけのキー取得 (v54)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x360 | kbd_peekkey | `int(void)` |
+| 0x364 | exec_last_result | `int(int *kind, int *code)` |
+
+- 戻り値は `kbd_trygetkey` と同じ形 (上位 = スキャンコード、下位 = ASCII。GUI 中は下位 8bit
+  だけで、スキャンコードは 0)。キューが空なら `-1`。
+- **キューを動かさない。** 同じキーを何度覗いても同じ値が返り、取り出すのは `kbd_trygetkey`
+  (または `kbd_getkey` / `kbd_getchar`) を呼んだときだけ。「ESC かどうかだけ見て、ESC でなければ
+  次の読み手に残す」という監視 (`source` 中の打ち切り) がこれで書ける。
+
+### 直前の同期起動の結果 (v55)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x364 | exec_last_result | `int(int *kind, int *code)` |
+
+- 直前の **`exec_run`** (塞ぐ同期起動) の結果を「種別 + 値」で返す。戻り値は
+  `0` = 記録あり / `OS32_ERR_INVAL` = 記録なし。記録が無いときは `*kind = EXEC_KIND_NONE`、
+  `*code = 0` に揃えるので、呼び手が前の値を読み続けることはない。
+- **種別は値から作れない** — `exit(-2)` と fault はどちらも `exec_exit_status = -2` になる。
+  だから種別は畳んだ側が渡す: `kapi_sys_exit` → `EXEC_KIND_EXITED`、`exec_fault_recover` →
+  `EXEC_KIND_FAULT`、CTRL+STOP (`ring3_abort_check`) → `EXEC_KIND_ABORTED`。
+- **`exec_run` はすべての return 点で記録を書く。** 起動そのものに失敗した経路
+  (`exec_launch` の早期 return) は `exec_exit` を通らないので、`exec_run` が戻り値を
+  `EXEC_KIND_NOT_FOUND` / `INVALID` / `NOMEM` / `GENERAL` へ写す。成功の直後に未知の
+  コマンドを起動しても前回の記録は返らない。
+- `appslot_start_admit` の `OS32_ERR_FULL` / `OS32_ERR_INVAL` は `EXEC_KIND_NOMEM` に寄せる
+  (= 呼び手が「次の候補へ進まない」と読める側)。
+- **GUI 経路 (`exec_start` / `exec_resume`) の子は記録しない** (`AppSlot.gui`)。
+  読み口である `sh.bin` はカーネルの記録を読まないので、書くと同期起動の結果と紛れるだけ。
+- 源の見る順番は `kbd_trygetkey` と同じ — GUI の注入リング → rshell のシリアル → cooked リング。
+- **`exec_park_poll` を呼ばない** (= WM へ譲らない)。park は成立すると戻らず、起こされるときに
+  `exec_resume` が注入リングの 1 バイトを取り出して EAX に入れてしまうため、「覗いただけ」に
+  ならない。譲りたい呼び手は従来どおり `kbd_trygetchar` / `kbd_trygetkey` を使う。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -730,8 +770,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x360 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x364 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x368 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x36C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

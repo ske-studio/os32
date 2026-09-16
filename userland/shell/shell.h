@@ -58,12 +58,32 @@
  * -1 は行が dst に収まらなかった (I-2 の従来の意味)。 */
 #define ENV_EXPAND_ERR_NAME (-2)
 
-/* script_source_file の戻り値。0 = 成功 / -1 = 読めない・深すぎる /
- * SCRIPT_ERR_REFUSED = 行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1) */
+/* script_source_file の戻り値 (票 TASK_EXIT_STATUS §2-5-1 で確定):
+ *   >= 0                最後に実行した行の状態 (= source の `$?`)。
+ *                       実行する行が 1 つも無ければ 0 (受入 S13)。
+ *   -1                  開けない / 読めない / 確保できない / 深すぎる
+ *   SCRIPT_ERR_REFUSED  行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1)
+ * 呼び手 (`source` / 暗黙の .sh / .bat) は負をまとめて SH_STATUS_USAGE に
+ * 写し、SCRIPT_ERR_REFUSED のときだけ印を立て直す。 */
 #define SCRIPT_ERR_REFUSED (-2)
 
-/* コマンドハンドラ関数の型 */
-typedef void (*CmdHandler)(int argc, char **argv);
+/* ------------------------------------------------------------------------ */
+/*  `$?` に入る値 (票 TASK_EXIT_STATUS §2-3 の写像表、[C4])                   */
+/*                                                                          */
+/*  数字は bash と同じ意味づけ。**印 (sh_refused_flag) とは役割が違う** —    */
+/*  印は「実行を拒否したかどうか」の制御信号、こちらはその結果の状態値。      */
+/* ------------------------------------------------------------------------ */
+#define SH_STATUS_OK        0     /* 成功 */
+#define SH_STATUS_ERROR     1     /* 実行はしたが失敗した (一般) */
+#define SH_STATUS_USAGE     2     /* 実行しなかった (構文 / 引数 / 断り) */
+#define SH_STATUS_NOEXEC    126   /* 見つかったが起こせなかった */
+#define SH_STATUS_NOTFOUND  127   /* 見つからなかった */
+#define SH_STATUS_ABORTED   130   /* CTRL+STOP / ESC で畳んだ (128 + 2) */
+#define SH_STATUS_FAULT     139   /* 例外で畳んだ (128 + 11) */
+
+/* コマンドハンドラ関数の型。**int** (決裁 E2) — 「赤字のエラーを出す分岐 =
+ * 非 0」。取りこぼしは登録表の初期化子の型不一致で捕まる。 */
+typedef int (*CmdHandler)(int argc, char **argv);
 
 /* コマンド登録用構造体 */
 typedef struct {
@@ -85,8 +105,36 @@ extern KernelAPI *g_api;
 /* コマンド登録機構 (main.c) */
 void shell_register_cmds(const ShellCmd *cmds);
 
-/* コマンド実行エンジン (main.c) */
-void execute_command(const char *cmd);
+/* コマンド実行エンジン (main.c)。戻り値は `$?` に入る値。
+ * 呼ぶたびに sh_status_set() も済ませてあるので、呼び手は戻り値を捨ててよい。 */
+int execute_command(const char *cmd);
+
+/* ------------------------------------------------------------------------ */
+/*  `$?` — 直前のコマンドの状態 (main.c)                                     */
+/*                                                                          */
+/*  初期値は 0。環境変数表には**書かない** (子に継承させない) ので、          */
+/*  `set ?=5` で作った変数があっても env_expand の特別扱いが先に効いて隠れる。*/
+/* ------------------------------------------------------------------------ */
+int  sh_status_get(void);
+void sh_status_set(int status);
+
+/* EXEC_KIND_* → `$?` の写像 (票 §2-3 の表)。1 か所にまとめてある [C4]。 */
+int  sh_status_from_kind(int kind, int code);
+
+/* ------------------------------------------------------------------------ */
+/*  `exit [N]` の終了要求 (票 §2-3 / §2-5)                                   */
+/*                                                                          */
+/*  **「要求が立ったか」と「終了値」は別の変数** — 真偽値に値を入れる作りだと */
+/*  `exit 0` で終われない。要求はパイプの段ループと script_exec が見る。      */
+/*  sh.bin では shell_run の外側ループも見て端末を閉じる (D2(d))。            */
+/*  常駐は終わらないので、いちばん外側の execute_command が 1 行ぶんで下ろす。*/
+/* ------------------------------------------------------------------------ */
+extern int sh_exit_flag;   /* 終了要求が立ったか */
+extern int sh_exit_code;   /* そのときの終了値 */
+
+/* `exit [N]` の引数を読む。0 = *code に値が入った / -1 = 不正 (実行しない)。
+ * 引数なしは直前の `$?`。非数値・255 超・2 つ以上は -1 (呼び手は 2 を返す)。 */
+int  sh_exit_arg(int argc, char **argv, int *code);
 
 /* ------------------------------------------------------------------------ */
 /*  「切り詰めたので行を断った」印 (票 TASK_SH_TRUNCATION §2-1、main.c)      */
@@ -152,7 +200,21 @@ const char *shell_get_path(void);
 /*  WM に起動してもらって sys_yield で譲りながら launch_poll で待つ。         */
 /*  実体は sh_launch.inc (main.c が #include)。exec_run への参照はこのヘッダ  */
 /*  の #else 側 1 か所だけ。                                                  */
+/*                                                                          */
+/*  **2026-09-16 (票 TASK_EXIT_STATUS §2-2)**: 起動口を sh_exec_result に     */
+/*  まとめた。常駐は exec_run の**直後**に exec_last_result を読み、sh.bin は */
+/*  要求表の状態を自分で写す (カーネルの記録は読まない — その子は自分の子とは */
+/*  限らない)。この票で常駐のコード生成が変わるので、以前あった「SHA-256 が   */
+/*  一致する」という注記は成り立たない。                                      */
 /* ------------------------------------------------------------------------ */
+
+/* 外部プログラムを起こし、結果を「種別 + 値」で返す (票 §2-2)。
+ * 戻り値は従来の EXEC_* (互換のため残す)。呼び手が分岐に使うのは *kind だけ。
+ *   常駐   : exec_run → 直後に exec_last_result (KAPI v55)
+ *   sh.bin : 要求表の DONE / FAILED を写す (LAUNCH_ST_DONE → EXITED 0)
+ * 起こさずに断った場合 (シェル側の組み立て失敗) は印 (sh_refused_flag) が
+ * 立つので、呼び手は印を先に見ること — 種別は EXEC_KIND_NONE のままになる。 */
+int sh_exec_result(const char *cmdline, int *kind, int *code);
 #ifdef SHELL_AS_APP
 int sh_launch(const char *cmdline);
 /* B4: パイプの段を回している間だけ立てる入れ子カウンタ。sh_launch の入口で
@@ -167,8 +229,6 @@ void sh_pipeline_leave(void);
  * 外部へ行けてしまい、事前判定 (execute_single) をすり抜けるため。 */
 void sh_redirect_mark(void);
 void sh_redirect_clear(void);
-/* exit コマンド (D2(d)) が立てる。shell_run() の外側ループが見て抜ける。 */
-extern int sh_exit_flag;
 #else
 #define sh_launch(cmdline)  (g_api->exec_run(cmdline))
 #define sh_pipeline_enter()  ((void)0)
@@ -239,6 +299,15 @@ void sh_pipe_free(int slot);
 
 /* スクリプトエンジン (cmd_script.c) */
 int script_source_file(const char *path);
+
+/* `set -e` / `set +e` (票 §2-5)。`set` は cmd_env.c に 1 本しか登録しない —
+ * cmd_set の**先頭**で -e / +e を拾ってここへ流す (二重登録しない)。
+ * 旗は入れ子の source を抜けるときに script_abort_flag と同じく save/restore。*/
+void script_errexit_set(int on);
+int  script_errexit_get(void);
+
+/* いまスクリプトを実行中か (`exit` が打ち切るかどうかの判定)。 */
+int  script_in_script(void);
 /* 起動スクリプト (/etc/profile, $HOME/.profile) 用。断られても起動は止めず、
  * メッセージを出して既定値で続ける (票 TASK_SH_TRUNCATION §2-1 末尾 / R2)。 */
 void script_source_profile(const char *path);

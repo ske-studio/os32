@@ -1,6 +1,6 @@
 # TASK_H2 — hsync の置換安全化 (一時ファイル + 検証 + 置換)
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **実装中 (2026-09-16、設計レビュー 3 往復で Approve)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **受入完了 (2026-09-16、設計 3 往復 + 実装レビュー Approve、実機受入済み)**
 
 基点: `feat/gui` = `d191fd5`。
 計画の正典: [`HSYNC_IMPROVEMENT_PLAN.md`](HSYNC_IMPROVEMENT_PLAN.md) §6 (手順と保証の限界)、§8 (H2 の行)、§9 (A14 / A15 / A17)。

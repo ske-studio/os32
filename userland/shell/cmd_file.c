@@ -130,24 +130,26 @@ static void collect_entries_cb(const DirEntry_Ext *entry, void *ctx)
     g_copy_count++;
 }
 
-/* ディレクトリの再帰コピー (collect-then-copy) */
-static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
+/* ディレクトリの再帰コピー (collect-then-copy)。
+ * 戻り値: 0 = 全部通った / 非 0 = 1 件でも失敗した (票 §2-3「赤字 = 非 0」)。*/
+static int do_copy_recursive_impl(const char *src, const char *dst, int depth)
 {
     /* 収集表の写し。再帰で g_copy_entries が上書きされるので 1 段ごとに
      * 自分のぶんを持つ。I-4 で 1 段 16.6KB になったのでヒープから取る。 */
     struct copy_entry *local_entries;
     int local_count, i, rc;
+    int status = 0;
 
     if (depth >= MAX_COPY_DEPTH) {
         g_api->kprintf(ATTR_RED, "cp: max depth exceeded: %s\n", src);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     local_entries = (struct copy_entry *)
         g_api->mem_alloc(sizeof(struct copy_entry) * MAX_COPY_ENTRIES);
     if (!local_entries) {
         g_api->kprintf(ATTR_RED, "%s", "cp: out of memory\n");
-        return;
+        return SH_STATUS_ERROR;
     }
 
     /* **収集が先、mkdir は後**。上限超過や列挙の失敗で引き返す経路が
@@ -159,13 +161,13 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
         g_api->kprintf(ATTR_RED, "cp -r: cannot read directory '%s': %s\n",
                        src, fs_strerror(rc));
         g_api->mem_free(local_entries);
-        return;
+        return SH_STATUS_ERROR;
     }
     if (g_copy_over) {
         g_api->kprintf(ATTR_RED, "cp -r: too many entries in '%s' (max %d)\n",
                        src, MAX_COPY_ENTRIES);
         g_api->mem_free(local_entries);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     local_count = g_copy_count;
@@ -184,7 +186,7 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
         g_api->kprintf(ATTR_RED, "cp -r: cannot create directory '%s': %s\n",
                        dst, fs_strerror(rc));
         g_api->mem_free(local_entries);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     /* 収集後にコピーを実行 */
@@ -197,33 +199,38 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
             fs_join_path(dst_path, dst, local_entries[i].name) < 0) {
             g_api->kprintf(ATTR_RED, "cp: path too long: %s\n",
                            local_entries[i].name);
+            status = SH_STATUS_ERROR;
             continue;
         }
 
         if (local_entries[i].is_dir) {
-            do_copy_recursive_impl(src_path, dst_path, depth + 1);
+            if (do_copy_recursive_impl(src_path, dst_path, depth + 1) != 0)
+                status = SH_STATUS_ERROR;
         } else {
-            do_copy_file("cp", src_path, dst_path);
+            if (do_copy_file("cp", src_path, dst_path) != 0)
+                status = SH_STATUS_ERROR;
         }
     }
     g_api->mem_free(local_entries);
+    return status;
 }
 
-static void do_copy_recursive(const char *src, const char *dst)
+static int do_copy_recursive(const char *src, const char *dst)
 {
-    do_copy_recursive_impl(src, dst, 0);
+    return do_copy_recursive_impl(src, dst, 0);
 }
 
-static void cmd_cp(int argc, char **argv)
+static int cmd_cp(int argc, char **argv)
 {
     int i, is_dest_dir, kind;
+    int status = 0;
     int opt_recursive = 0;
     int file_start = 1;
     const char *dst;
-    
+
     if (argc < 3) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     /* オプション解析 */
@@ -239,33 +246,34 @@ static void cmd_cp(int argc, char **argv)
             break;
         }
     }
-    
+
     if (argc - file_start < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
-    
+
     dst = argv[argc - 1];
     kind = file_kind_or_refuse("cp", dst);
-    if (FILE_KIND_UNKNOWN(kind)) return;
+    if (FILE_KIND_UNKNOWN(kind)) return SH_STATUS_ERROR;
     is_dest_dir = (kind == FS_KIND_DIR);
-    
+
     if (argc - file_start > 2 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "cp: multiple files must be copied into a directory\n");
-        return;
+        return SH_STATUS_USAGE;
     }
-    
+
     for (i = file_start; i < argc - 1; i++) {
         const char *src = argv[i];
         if (argv[i][0] == '-') continue; /* オプションをスキップ */
-        
+
         /* 分からない入力はその 1 件だけ断る (不存在は do_copy_file が報告) */
         kind = file_kind_or_refuse("cp", src);
-        if (FILE_KIND_UNKNOWN(kind)) continue;
+        if (FILE_KIND_UNKNOWN(kind)) { status = SH_STATUS_ERROR; continue; }
 
         if (kind == FS_KIND_DIR) {
             if (!opt_recursive) {
                 g_api->kprintf(ATTR_RED, "cp: -r not specified; omitting directory '%s'\n", src);
+                status = SH_STATUS_ERROR;
                 continue;
             }
             /* 再帰コピー */
@@ -273,45 +281,49 @@ static void cmd_cp(int argc, char **argv)
                 char dpath[PATH_MAX_LEN];
                 if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
                     g_api->kprintf(ATTR_RED, "cp: path too long: %s\n", src);
+                    status = SH_STATUS_ERROR;
                     continue;
                 }
-                do_copy_recursive(src, dpath);
+                if (do_copy_recursive(src, dpath) != 0) status = SH_STATUS_ERROR;
             } else {
-                do_copy_recursive(src, dst);
+                if (do_copy_recursive(src, dst) != 0) status = SH_STATUS_ERROR;
             }
         } else {
             if (is_dest_dir) {
                 char dpath[PATH_MAX_LEN];
                 if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
                     g_api->kprintf(ATTR_RED, "cp: path too long: %s\n", src);
+                    status = SH_STATUS_ERROR;
                     continue;
                 }
-                do_copy_file("cp", src, dpath);
+                if (do_copy_file("cp", src, dpath) != 0) status = SH_STATUS_ERROR;
             } else {
-                do_copy_file("cp", src, dst);
+                if (do_copy_file("cp", src, dst) != 0) status = SH_STATUS_ERROR;
             }
         }
     }
     release_io_buf();
+    return status;
 }
 
-/* 1 件の移動: 同一 FS なら rename、FS をまたぐときだけコピー+削除 */
-static void do_move_one(const char *src, const char *dpath)
+/* 1 件の移動: 同一 FS なら rename、FS をまたぐときだけコピー+削除。
+ * 戻り値: 0 = 通った / 非 0 = 失敗 (赤字を 1 行出している)。 */
+static int do_move_one(const char *src, const char *dpath)
 {
     int rc, kind;
 
     if (fs_same_file(src, dpath)) {
         g_api->kprintf(ATTR_RED, "mv: '%s' and '%s' are the same file\n", src, dpath);
-        return;
+        return SH_STATUS_ERROR;
     }
 
     rc = g_api->sys_rename(src, dpath);
-    if (rc == 0) return;
+    if (rc == 0) return 0;
 
     if (rc != OS32_ERR_INVAL) {
         g_api->kprintf(ATTR_RED, "mv: cannot move '%s' to '%s': %s\n",
                        src, dpath, fs_strerror(rc));
-        return;
+        return SH_STATUS_ERROR;
     }
 
     /* OS32_ERR_INVAL = FS をまたぐ (または rename 非対応 FS)。
@@ -324,41 +336,43 @@ static void do_move_one(const char *src, const char *dpath)
         if (kind == OS32_ERR_NOTFOUND)
             g_api->kprintf(ATTR_RED, "mv: cannot move '%s': %s\n",
                            src, fs_strerror(kind));
-        return;
+        return SH_STATUS_ERROR;
     }
     if (kind == FS_KIND_DIR) {
         g_api->kprintf(ATTR_RED,
             "mv: cannot move directory '%s' to '%s' (across filesystems or into itself)\n",
             src, dpath);
-        return;
+        return SH_STATUS_ERROR;
     }
-    if (do_copy_file("mv", src, dpath) == 0) {
-        rc = g_api->sys_unlink(src);
-        if (rc != 0) {
-            g_api->kprintf(ATTR_RED, "mv: copied but cannot remove '%s': %s\n",
-                           src, fs_strerror(rc));
-        }
+    if (do_copy_file("mv", src, dpath) != 0) return SH_STATUS_ERROR;
+    rc = g_api->sys_unlink(src);
+    if (rc != 0) {
+        g_api->kprintf(ATTR_RED, "mv: copied but cannot remove '%s': %s\n",
+                       src, fs_strerror(rc));
+        return SH_STATUS_ERROR;
     }
+    return 0;
 }
 
-static void cmd_mv(int argc, char **argv)
+static int cmd_mv(int argc, char **argv)
 {
     int i, is_dest_dir, kind;
+    int status = 0;
     const char *dst;
 
     if (argc < 3) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     dst = argv[argc - 1];
     kind = file_kind_or_refuse("mv", dst);
-    if (FILE_KIND_UNKNOWN(kind)) return;
+    if (FILE_KIND_UNKNOWN(kind)) return SH_STATUS_ERROR;
     is_dest_dir = (kind == FS_KIND_DIR);
 
     if (argc > 3 && !is_dest_dir) {
         g_api->kprintf(ATTR_RED, "%s", "mv: multiple files must be moved into a directory\n");
-        return;
+        return SH_STATUS_USAGE;
     }
 
     for (i = 1; i < argc - 1; i++) {
@@ -368,36 +382,42 @@ static void cmd_mv(int argc, char **argv)
             char dpath[PATH_MAX_LEN];
             if (fs_join_path(dpath, dst, get_basename(src)) < 0) {
                 g_api->kprintf(ATTR_RED, "mv: path too long: %s\n", src);
+                status = SH_STATUS_ERROR;
                 continue;
             }
-            do_move_one(src, dpath);
+            if (do_move_one(src, dpath) != 0) status = SH_STATUS_ERROR;
         } else {
-            do_move_one(src, dst);
+            if (do_move_one(src, dst) != 0) status = SH_STATUS_ERROR;
         }
     }
     release_io_buf();
+    return status;
 }
 
-static void cmd_rm(int argc, char **argv)
+static int cmd_rm(int argc, char **argv)
 {
     int i;
+    int status = 0;
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     for (i = 1; i < argc; i++) {
         int kind = file_kind_or_refuse("rm", argv[i]);
-        if (FILE_KIND_UNKNOWN(kind)) continue;
+        if (FILE_KIND_UNKNOWN(kind)) { status = SH_STATUS_ERROR; continue; }
         if (kind == FS_KIND_DIR) {
             g_api->kprintf(ATTR_RED, "rm: cannot remove '%s': Is a directory (use rmdir)\n", argv[i]);
+            status = SH_STATUS_ERROR;
         } else {
             int ret = g_api->sys_unlink(argv[i]);
             if (ret != 0) {
                 g_api->kprintf(ATTR_RED, "rm: cannot remove '%s': %s\n",
                                argv[i], fs_strerror(ret));
+                status = SH_STATUS_ERROR;
             }
         }
     }
+    return status;
 }
 /* バッファを行番号付きで出力
  *
@@ -471,9 +491,10 @@ static void cat_stream(int fd, int show_linenum)
     if (show_linenum && !at_bol) g_api->sys_write(1, "\n", 1);
 }
 
-static void cmd_cat(int argc, char **argv)
+static int cmd_cat(int argc, char **argv)
 {
     int i;
+    int status = 0;
     int show_linenum = 0;
     int file_start = 1;
 
@@ -495,15 +516,15 @@ static void cmd_cat(int argc, char **argv)
     if (file_start >= argc) {
         if (g_api->sys_isatty(0)) {
             shell_print_help(argv[0]);
-            return;
+            return SH_STATUS_USAGE;
         }
         if (ensure_io_buf() < 0) {
             g_api->kprintf(ATTR_RED, "%s", "cat: out of memory\n");
-            return;
+            return SH_STATUS_ERROR;
         }
         cat_stream(0, show_linenum);
         release_io_buf();
-        return;
+        return 0;
     }
 
     for (i = file_start; i < argc; i++) {
@@ -514,11 +535,13 @@ static void cmd_cat(int argc, char **argv)
             /* ディレクトリは open が OS32_ERR_ISDIR を返す (以前は生の
              * ディレクトリブロックを吐いていた) */
             g_api->kprintf(ATTR_RED, "cat: %s: %s\n", argv[i], fs_strerror(fd));
+            status = SH_STATUS_ERROR;
             continue;
         }
         if (ensure_io_buf() < 0) {
             g_api->kprintf(ATTR_RED, "%s", "cat: out of memory\n");
             g_api->sys_close(fd);
+            status = SH_STATUS_ERROR;
             continue;
         }
 
@@ -527,14 +550,15 @@ static void cmd_cat(int argc, char **argv)
         g_api->sys_close(fd);
         release_io_buf();
     }
+    return status;
 }
 
-static void cmd_cat2(int argc, char **argv)
+static int cmd_cat2(int argc, char **argv)
 {
-    cmd_cat(argc, argv);
+    return cmd_cat(argc, argv);
 }
 
-static void cmd_echo(int argc, char **argv)
+static int cmd_echo(int argc, char **argv)
 {
     int i;
     for (i = 1; i < argc; i++) {
@@ -545,6 +569,7 @@ static void cmd_echo(int argc, char **argv)
         if (i < argc - 1) g_api->sys_write(1, " ", 1);
     }
     g_api->sys_write(1, "\n", 1);
+    return 0;
 }
 
 static const ShellCmd file_cmds[] = {

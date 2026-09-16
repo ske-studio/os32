@@ -6,7 +6,7 @@
 /*  基本コマンドモジュール (cmd_base.c)                                     */
 /* ======================================================================== */
 
-static void cmd_help(int argc, char **argv)
+static int cmd_help(int argc, char **argv)
 {
     int count, i;
     const ShellCmd *cmds;
@@ -16,8 +16,9 @@ static void cmd_help(int argc, char **argv)
         if (os32_help_show(argv[1]) != 0) {
             g_api->kprintf(ATTR_RED, "No manual entry for %s\n", argv[1]);
             g_api->kprintf(ATTR_WHITE, "%s", "  Use 'help' to list available commands.\n");
+            return SH_STATUS_ERROR;
         }
-        return;
+        return 0;
     }
 
     g_api->kprintf(ATTR_CYAN, "%s", "OS32 Shell Commands:\n");
@@ -38,21 +39,24 @@ static void cmd_help(int argc, char **argv)
         }
     }
     g_api->kprintf(ATTR_WHITE, "%s", "\n  Use 'help <cmd>' or 'man <cmd>' for details.\n");
+    return 0;
 }
 
-static void cmd_clear(int argc, char **argv)
+static int cmd_clear(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->tvram_clear();
+    return 0;
 }
 
-static void cmd_tick(int argc, char **argv)
+static int cmd_tick(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->kprintf(ATTR_WHITE, "Timer ticks: %u (%u sec)\n", g_api->get_tick(), g_api->get_tick()/100);
+    return 0;
 }
 
-static void cmd_ver(int argc, char **argv)
+static int cmd_ver(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->kprintf(ATTR_GREEN, "PC-9801 OS32 v%s (Ring3 Native)\n",
@@ -66,13 +70,14 @@ static void cmd_ver(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "  GFX: 640x400x16 CPU direct\n");
     g_api->kprintf(ATTR_WHITE, "  API: v%u\n", g_api->version);
     g_api->kprintf(ATTR_WHITE, "  Build: %s %s\n", __DATE__, __TIME__);
+    return 0;
 }
 
 static const char *wday_names[] = {
     "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
 };
 
-static void cmd_date(int argc, char **argv)
+static int cmd_date(int argc, char **argv)
 {
     RTC_Time_Ext t;
     const char *w;
@@ -83,22 +88,25 @@ static void cmd_date(int argc, char **argv)
                    (u32)t.year, (u32)t.month, (u32)t.day,
                    (u32)t.hour, (u32)t.min, (u32)t.sec,
                    w);
+    return 0;
 }
 
-static void cmd_beep(int argc, char **argv)
+static int cmd_beep(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->fm_startup_sound();
+    return 0;
 }
 
-static void cmd_uptime(int argc, char **argv)
+static int cmd_uptime(int argc, char **argv)
 {
     u32 s = g_api->get_tick() / 100;
     (void)argc; (void)argv;
     g_api->kprintf(ATTR_WHITE, "up %u min %u sec\n", s / 60, s % 60);
+    return 0;
 }
 
-static void cmd_np2(int argc, char **argv)
+static int cmd_np2(int argc, char **argv)
 {
     (void)argc; (void)argv;
     if (g_api->np2_detect()) {
@@ -109,17 +117,19 @@ static void cmd_np2(int argc, char **argv)
     } else {
         g_api->kprintf(ATTR_RED, "%s", "Not NP21/W.\n");
     }
+    return 0;
 }
 
-static void cmd_time(int argc, char **argv)
+static int cmd_time(int argc, char **argv)
 {
     u32 start, end, elapsed_ms;
     char cmd_buf[TIME_CMD_MAX];
     int i, bp;
+    int inner;
 
     if (argc < 2) {
         g_api->kprintf(ATTR_RED, "%s", "Usage: time COMMAND [ARGS...]\n");
-        return;
+        return SH_STATUS_USAGE;
     }
 
     /* T3: 溢れた引数を落として計測すると、意図と違う行が走る。組み立てる
@@ -134,7 +144,7 @@ static void cmd_time(int argc, char **argv)
         }
         if (need > TIME_CMD_MAX - 2) {
             sh_refuse("time: command line", TIME_CMD_MAX - 2);
-            return;
+            return SH_STATUS_USAGE;
         }
     }
 
@@ -148,21 +158,35 @@ static void cmd_time(int argc, char **argv)
     cmd_buf[bp] = '\0';
 
     start = g_api->get_tick();
-    execute_command(cmd_buf);
+    /* 票 §2-3: `time` の値は **内側の値**。 */
+    inner = execute_command(cmd_buf);
     end = g_api->get_tick();
 
     elapsed_ms = (end - start) * 10; /* 1ティック = 10ms */
     g_api->kprintf(ATTR_CYAN, "\nreal  %u.%03us\n",
                    elapsed_ms / 1000, elapsed_ms % 1000);
+    return inner;
 }
 
 #ifdef SHELL_AS_APP
-/* exit — sh.bin (端末の子) を終わらせる (D2(d))。常駐シェルには登録しない:
- * 抜けてもカーネルの起動ループが同じものを載せ直すだけで意味が無い。 */
-static void cmd_exit(int argc, char **argv)
+/* exit [N] — sh.bin (端末の子) を終わらせる (D2(d))。常駐シェルには登録
+ * しない (表は先勝ちなので、常駐側は cmd_script.c が別の `exit` を登録する。
+ * 票 §2-5)。N は sh_exit_code と main の戻り値に載る。
+ *
+ * 往復 5 の注意 1: **値を書いてから要求を立てる**。`exit 3 | echo tail` で
+ * 段ループがこの要求を見て抜けたあとも、その値が行の `$?` として残る。 */
+static int cmd_exit(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    sh_exit_flag = 1;
+    int code = 0;
+
+    if (sh_exit_arg(argc, argv, &code) < 0) {
+        /* 不正な引数では **終わらせない** (票 §2-5-1)。 */
+        return SH_STATUS_USAGE;
+    }
+    sh_status_set(code);        /* 先に値 */
+    sh_exit_code = code;
+    sh_exit_flag = 1;           /* そのあと要求 */
+    return code;
 }
 #endif
 
@@ -181,7 +205,7 @@ static const ShellCmd base_cmds[] = {
     { "np2",    cmd_np2,    "",      "Detect NP21/W emulator" },
     { "time",   cmd_time,   "CMD",   "Measure command time" },
 #ifdef SHELL_AS_APP
-    { "exit",   cmd_exit,   "",      "Leave this shell" },
+    { "exit",   cmd_exit,   "[N]",   "Leave this shell" },
 #endif
     { (const char *)0, 0, 0, 0 }
 };

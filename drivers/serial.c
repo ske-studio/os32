@@ -174,6 +174,16 @@ int serial_trygetchar(void)
     return ch;
 }
 
+/* 取り出さずに先頭だけ覗く (継承バグ: script_exec の ESC 監視)。
+ * 無ければ -1。serial_trygetchar と違ってリングは 1 バイトも動かさないので、
+ * 「ESC かどうかだけ見て、ESC でなければ次の読み手へ残す」が書ける。
+ * IRQ4 は tail 側にしか触らないので、ser_count > 0 なら先頭は動かない。 */
+int serial_peekchar(void)
+{
+    if (ser_count == 0) return -1;
+    return (int)ser_buf[ser_head];
+}
+
 /* ブロッキング受信 */
 int serial_getchar(void)
 {

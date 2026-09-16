@@ -86,12 +86,31 @@ def check_flag_constant():
     m = re.search(r"#define\s+KAPI_FUNC_COUNT\s+(\d+)", gen)
     if not m or int(m.group(1)) != len(kapi["api"]):
         raise SystemExit("生成ヘッダの KAPI_FUNC_COUNT が kapi.json と違う")
-    if kapi["api"][-1]["name"] != "sys_set_mtime":
-        raise SystemExit("H2 でスロットを足してはいけない "
-                         "(末尾は v52 の sys_set_mtime のまま、[ABI2])")
+    # H2 (O_EXCL) は**フラグだけ**でスロットを 1 本も足していない。
+    #
+    # ここは以前 `api[-1]["name"] != "sys_set_mtime"` と書いていたが、それは
+    # 「sys_set_mtime が**永遠に末尾**であること」を要求してしまう。[ABI2] が
+    # 禁じるのは既存スロットを動かす / 消すことで、**末尾への追記は正当**なので、
+    # その形は KAPI が 1 本増えるたびに必ず落ちる (2026-09-16、kbd_peekkey で
+    # `make check` が実際に落ちた。`kapi/kapi_db.c` の `db_slot_layout_ok` が
+    # 同じ形を踏んで下限比較に直した前例がある)。
+    #
+    # H2 の意図は「v53 の時点でスロットが増えていない」= **sys_set_mtime (v52)
+    # が H3 で決まった 213 から動いていない**こと。後ろに v54 以降が何本
+    # 足されていてもこの主張は成り立つ。
+    SYS_SET_MTIME_SLOT = 213        # 票 H3 (v52) で決まった位置
+    names = [e["name"] for e in kapi["api"]]
+    if "sys_set_mtime" not in names:
+        raise SystemExit("sys_set_mtime が kapi.json から消えている ([ABI2])")
+    slot = names.index("sys_set_mtime")
+    if slot != SYS_SET_MTIME_SLOT:
+        raise SystemExit("H2 の前後でスロットが動いた "
+                         "(sys_set_mtime が slot %d → %d、[ABI2])"
+                         % (SYS_SET_MTIME_SLOT, slot))
 
-    print("KAPI FLAG PASS (KAPI_O_EXCL=0x400, v%s, スロット %d 本のまま)"
-          % (kapi["version"], len(kapi["api"])), flush=True)
+    print("KAPI FLAG PASS (KAPI_O_EXCL=0x400, v%s, sys_set_mtime = slot %d "
+          "のまま / 表は %d 本)"
+          % (kapi["version"], slot, len(kapi["api"])), flush=True)
 
 
 def build_host(tmp, name, src="tools/tests/vfs_excl_host.c"):

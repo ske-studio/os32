@@ -37,7 +37,7 @@ typedef signed long    i32;
 /*  KernelAPI バージョン                                                     */
 /* ======================================================================== */
 
-#define KAPI_VERSION      53   /* 排他的作成 (票 H2): sys_open の KAPI_O_EXCL (0x0400)。O_CREAT と組でだけ有効で、名前が何であれ既に あれば OS32_ERR_EXIST、判定できなければその負値。VfsOps.create_excl を 持つ FS (ext2) だけが受け、持たない FS は OS32_ERR_NOSYS。スロットは増えていない (フラグだけ) が sys_open の意味が広がるので 版数を上げる ([ABI3])。v52 = mtime の保存 (票 H3): sys_set_mtime (VfsOps の任意実装フック。ext2 のみ実装、他の FS は OS32_ERR_NOSYS)。v51 = Host Services の基盤 (票 N1): host_open / host_status / host_read / host_write / host_close の 5 本 (非ブロッキング、同時 2 ハンドル、プロトコルを進めるのは 100Hz の link_tick だけ)。v50 = 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
+#define KAPI_VERSION      55   /* 終了コードの配線 (票 TASK_EXIT_STATUS): exec_last_result — 直前の exec_run の結果を「種別 + 値」で返す。種別 (EXEC_KIND_*) は畳んだ側が渡すので、exit(-2) と fault と CTRL+STOP を値ではなく種別で見分けられる。起動しなかった場合 (exec_launch の早期 return) もexec_run のすべての return 点で書くので、前回の記録が残らない。記録が無ければ OS32_ERR_INVAL。v54 = 覗くだけのキー取得 (継承バグ「source が ESC 以外も食う」): kbd_peekkey — キューを 1 バイトも動かさずに次のキーを返す (無ければ -1)。script_exec の毎行の ESC 監視が kbd_trygetkey で打鍵を取り出して捨てていたのを直す。取り除くのは ESC と分かってからで、kbd_trygetkey を 1 回呼ぶ。v53 = 排他的作成 (票 H2): sys_open の KAPI_O_EXCL (0x0400)。O_CREAT と組でだけ有効で、名前が何であれ既に あれば OS32_ERR_EXIST、判定できなければその負値。VfsOps.create_excl を 持つ FS (ext2) だけが受け、持たない FS は OS32_ERR_NOSYS。スロットは増えていない (フラグだけ) が sys_open の意味が広がるので 版数を上げる ([ABI3])。v52 = mtime の保存 (票 H3): sys_set_mtime (VfsOps の任意実装フック。ext2 のみ実装、他の FS は OS32_ERR_NOSYS)。v51 = Host Services の基盤 (票 N1): host_open / host_status / host_read / host_write / host_close の 5 本 (非ブロッキング、同時 2 ハンドル、プロトコルを進めるのは 100Hz の link_tick だけ)。v50 = 設定レジストリの基盤 (票 S0-K): db_open_existing (RO / RW、CREATE 無し) / db_prepare_only / db_bind_int / db_bind_text / db_bind_blob / db_bind_null / db_error_code の 7 本。v49 = T9: 起動要求表 launch_req / launch_pending / launch_take / launch_report / launch_poll / launch_cancel / launch_child と sys_yield。v48 = T8: gfx_screen_owner。v47 = K7: kbd_inject / kbd_inject_pending。v46 = con_sink_read / con_sink_stat */
 
 /* ======================================================================== */
 /*  SQLite DB API 共有定数・構造体                                           */
@@ -104,6 +104,26 @@ typedef enum {
     EXEC_ERR_NOMEM = -4,     /* メモリ不足 */
     EXEC_ERR_INVALID = -5    /* OS32Xヘッダが不正 */
 } exec_status_t;
+
+/* ------------------------------------------------------------------------ */
+/*  exec_last_result の「種別」 (票 TASK_EXIT_STATUS §2-1、KAPI v55)          */
+/*                                                                          */
+/*  **値からは種別を作れない** — exit(-2) と fault はどちらも                */
+/*  exec_exit_status = -2 になる。だから種別は「畳んだ側」が渡す:            */
+/*    kapi_sys_exit       → EXEC_KIND_EXITED   (子が自分で終わった)          */
+/*    exec_fault_recover  → EXEC_KIND_FAULT    (#PF / #GP で畳んだ)          */
+/*    CTRL+STOP           → EXEC_KIND_ABORTED  (ring3_abort_check)           */
+/*  起動しなかった場合は exec_run が EXEC_ERR_* を写して入れる。             */
+/*  シェルはこの種別だけで PATH 走査を止めるかどうかを決める ([C4])。        */
+/* ------------------------------------------------------------------------ */
+#define EXEC_KIND_NONE       0   /* 記録なし (exec_last_result は INVAL) */
+#define EXEC_KIND_EXITED     1   /* 子が終了した。code = 終了コード */
+#define EXEC_KIND_FAULT      2   /* 例外で畳んだ */
+#define EXEC_KIND_ABORTED    3   /* CTRL+STOP で畳んだ */
+#define EXEC_KIND_NOT_FOUND  4   /* 起動しなかった: 実行ファイルが無い */
+#define EXEC_KIND_INVALID    5   /* 起動しなかった: OS32X ヘッダが不正 */
+#define EXEC_KIND_NOMEM      6   /* 起動しなかった: メモリ / スロット不足 */
+#define EXEC_KIND_GENERAL    7   /* 起動しなかった: その他 */
 
 /* ======================================================================== */
 /*  KernelAPI テーブルの配置アドレス                                          */

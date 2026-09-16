@@ -8,9 +8,75 @@
 
 KernelAPI *g_api;
 
-#ifdef SHELL_AS_APP
-/* D2(d): 内蔵 `exit` が立て、shell_run() の外側ループが見て抜ける */
+/* ------------------------------------------------------------------------ */
+/*  `exit [N]` の終了要求 (票 TASK_EXIT_STATUS §2-3 / §2-5)                  */
+/*                                                                          */
+/*  **両ビルドで持つ**。以前は sh.bin だけが持っていたので、常駐では          */
+/*  `exit 3 | echo tail` の後段が走っていた (往復 2 所見 2)。要求と値を       */
+/*  別の変数にしてあるので `exit 0` でも要求が立つ。                          */
+/*    sh.bin : shell_run の外側ループが見て端末を閉じる (D2(d))              */
+/*    常駐   : 終わらない。いちばん外側の execute_command が 1 行で下ろす    */
+/* ------------------------------------------------------------------------ */
 int sh_exit_flag = 0;
+int sh_exit_code = 0;
+
+/* `$?`。環境変数表には入れない (子に継承させない、票 §2-4)。 */
+static int g_last_status = SH_STATUS_OK;
+
+int sh_status_get(void) { return g_last_status; }
+void sh_status_set(int status) { g_last_status = status; }
+
+/* 票 §2-3 の写像表。**種別だけ**で決める — 値から種別を作らない。 */
+int sh_status_from_kind(int kind, int code)
+{
+    switch (kind) {
+    case EXEC_KIND_EXITED:
+        /* 0〜255 に丸める。負値 (exit(-1) = 255 など) も下位 8 ビットで
+         * そのまま識別できる。 */
+        return code & 0xFF;
+    case EXEC_KIND_FAULT:     return SH_STATUS_FAULT;
+    case EXEC_KIND_ABORTED:   return SH_STATUS_ABORTED;
+    case EXEC_KIND_NOT_FOUND: return SH_STATUS_NOTFOUND;
+    case EXEC_KIND_INVALID:   return SH_STATUS_NOEXEC;
+    default:                  return SH_STATUS_NOEXEC;   /* NOMEM / FULL / 他 */
+    }
+}
+
+/* `exit [N]` の引数。0 = 決まった / -1 = 不正 (呼び手は実行せずに 2)。 */
+int sh_exit_arg(int argc, char **argv, int *code)
+{
+    const char *s;
+    int v = 0;
+    int digits = 0;
+
+    if (argc < 2) { *code = sh_status_get(); return 0; }
+    if (argc > 2) {
+        g_api->kprintf(ATTR_RED, "%s", "exit: too many arguments\n");
+        return -1;
+    }
+    for (s = argv[1]; *s; s++) {
+        if (*s < '0' || *s > '9') {
+            g_api->kprintf(ATTR_RED, "exit: %s: numeric argument required\n",
+                           argv[1]);
+            return -1;
+        }
+        v = v * 10 + (*s - '0');
+        digits++;
+        if (v > 255) {
+            g_api->kprintf(ATTR_RED, "exit: %s: out of range (0-255)\n",
+                           argv[1]);
+            return -1;
+        }
+    }
+    if (digits == 0) {
+        g_api->kprintf(ATTR_RED, "%s", "exit: numeric argument required\n");
+        return -1;
+    }
+    *code = v;
+    return 0;
+}
+
+#ifdef SHELL_AS_APP
 /* B2: sys_ls の写し取り。glob (このファイル) と ls (cmd_dir.c) が使う。 */
 #include "sh_ls.inc"
 #endif
@@ -53,7 +119,10 @@ int main(int argc, char **argv, KernelAPI *api)
 
     /* メインループ開始 (ui.c) */
     shell_run();
-    return 0;
+    /* D2(d): `exit N` の N を端末へ返す (常駐では sh_exit_code は 0 のまま —
+     * いちばん外側の execute_command が 1 行ごとに要求を下ろすので、
+     * shell_run は `exit` では抜けない)。 */
+    return sh_exit_code;
 }
 
 /* ======================================================================== */
@@ -303,7 +372,7 @@ static int sh_has_redirect(int argc, char **argv)
 /* ======================================================================== */
 /*  コマンド実行エンジン (単一コマンド)                                       */
 /* ======================================================================== */
-static void execute_single(const char *cmd)
+static int execute_single(const char *cmd)
 {
     static char tmp_buf[CMD_BUF_SIZE];
     static char *argv[MAX_ARGS];
@@ -312,13 +381,16 @@ static void execute_single(const char *cmd)
     int argc = 0, j;
     char *p;
     const char *src;
+    /* 票 §2-3「空行・コメントだけの行は `$?` を **変えない**」。何も実行
+     * しなかった段はここで前の値を返すので、呼び手が上書きしても同じ値になる。*/
+    int status = sh_status_get();
 
     /* T13: 空行と長大行を同じ扱いにしない。空行は今までどおり黙って戻り、
      * 収まらない行は **断る** (黙って消すと入力が無かったことになる)。 */
-    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) == 0) return status;
     if (strlen(cmd) >= CMD_BUF_SIZE) {
         sh_refuse("sh: command", CMD_BUF_SIZE - 1);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     src = cmd;
@@ -335,7 +407,7 @@ static void execute_single(const char *cmd)
         for (j = 0; j < alloc_count; j++) {
             g_api->mem_free(allocated_strings[j]);
         }
-        return;
+        return SH_STATUS_USAGE;
     }
 
 #ifdef SHELL_AS_APP
@@ -345,7 +417,7 @@ static void execute_single(const char *cmd)
         for (j = 0; j < alloc_count; j++) {
             g_api->mem_free(allocated_strings[j]);
         }
-        return;
+        return SH_STATUS_USAGE;
     }
 #endif
 
@@ -361,13 +433,20 @@ static void execute_single(const char *cmd)
             for (j = 0; j < alloc_count; j++) {
                 g_api->mem_free(allocated_strings[j]);
             }
-            return;
+            return SH_STATUS_NOEXEC;
         }
 #endif
         /* リダイレクト演算子の解析・適用 */
         argc = apply_redirects(argc, argv);
-        if (argc > 0) {
-            run_cmd_internal(argc, argv);
+        if (argc < 0) {
+            /* 構文エラー / リダイレクト先が開けない — handler へ届かない
+             * (票 §2-3 の表)。 */
+            status = SH_STATUS_USAGE;
+        } else if (argc > 0) {
+            status = run_cmd_internal(argc, argv);
+        } else {
+            /* リダイレクトだけの行 (argc == 0)。開けたのだから 0 (受入 S13)。*/
+            status = SH_STATUS_OK;
         }
     }
 
@@ -379,6 +458,7 @@ static void execute_single(const char *cmd)
     for (j = 0; j < alloc_count; j++) {
         g_api->mem_free(allocated_strings[j]);
     }
+    return status;
 }
 
 /* ======================================================================== */
@@ -484,17 +564,19 @@ int sh_refused_peek(void)
 /* ======================================================================== */
 /*  公開API: execute_command                                                 */
 /* ======================================================================== */
-static void execute_command_line(const char *cmd)
+static int execute_command_line(const char *cmd)
 {
     static char expanded_buf[CMD_BUF_SIZE];
     const char *src;
     int has_pipe = 0;
+    /* 空行・コメントだけの行は `$?` を変えない (票 §2-3 の表)。 */
+    int status = sh_status_get();
 
     /* T13: 空行と長大行を同じ扱いにしない (execute_single と同じ規則)。 */
-    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) == 0) return status;
     if (strlen(cmd) >= CMD_BUF_SIZE) {
         sh_refuse("sh: command line", CMD_BUF_SIZE - 1);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     /* $VAR / ~ 展開 */
@@ -506,13 +588,13 @@ static void execute_command_line(const char *cmd)
         int er = env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
         if (er == ENV_EXPAND_ERR_NAME) {
             sh_refuse("sh: variable name", ENV_NAME_MAX - 1);
-            return;
+            return SH_STATUS_USAGE;
         }
         if (er < 0) {
             g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
             /* §2-1: これも「断った行」— スクリプト中なら後続行へ落とさない */
             sh_refuse_mark();
-            return;
+            return SH_STATUS_USAGE;
         }
     }
     src = expanded_buf;
@@ -525,9 +607,12 @@ static void execute_command_line(const char *cmd)
 
     if (!has_pipe) {
         /* パイプなし: 単一コマンド実行 */
-        execute_single(src);
+        status = execute_single(src);
         reset_all_redirects();
-        return;
+        /* 往復 5 の注意 1: `exit` の handler は値を書いてから要求を立てる。
+         * 要求が立っていたらその値が行の値 (`exit 0` でも 0 が入る)。 */
+        if (sh_exit_flag) status = sh_exit_code;
+        return status;
     }
 
     /* パイプあり: パイプライン実行 */
@@ -541,7 +626,7 @@ static void execute_command_line(const char *cmd)
         seg_buf = (char *)g_api->mem_alloc(MAX_PIPE_STAGES * CMD_BUF_SIZE);
         if (!seg_buf) {
             g_api->kprintf(ATTR_RED, "%s", "pipe: out of memory\n");
-            return;
+            return SH_STATUS_USAGE;
         }
 
         stage_count = split_pipeline(src, seg_buf, CMD_BUF_SIZE, MAX_PIPE_STAGES);
@@ -549,13 +634,14 @@ static void execute_command_line(const char *cmd)
          * が立てている)。パイプバッファはまだ 1 つも取っていない。 */
         if (stage_count < 0) {
             g_api->mem_free(seg_buf);
-            return;
+            return SH_STATUS_USAGE;
         }
         if (stage_count <= 1) {
-            execute_single(seg_buf);
+            status = execute_single(seg_buf);
             reset_all_redirects();
             g_api->mem_free(seg_buf);
-            return;
+            if (sh_exit_flag) status = sh_exit_code;
+            return status;
         }
 
 #ifdef SHELL_AS_APP
@@ -565,7 +651,7 @@ static void execute_command_line(const char *cmd)
                 g_api->kprintf(ATTR_RED, "%s",
                                "sh: pipe to external command is not supported\n");
                 g_api->mem_free(seg_buf);
-                return;
+                return SH_STATUS_NOEXEC;
             }
         }
 #endif
@@ -590,7 +676,7 @@ static void execute_command_line(const char *cmd)
                         }
                     }
                     g_api->mem_free(seg_buf);
-                    return;
+                    return SH_STATUS_USAGE;
                 }
             }
 
@@ -598,12 +684,6 @@ static void execute_command_line(const char *cmd)
             for (i = 0; i < stage_count; i++) {
                 int is_first = (i == 0);
                 int is_last = (i == stage_count - 1);
-
-#ifdef SHELL_AS_APP
-                /* B6: 段の途中で `exit` が立ったらそこで打ち切る
-                 * (`exit | ask "wait: " V` が入力待ちに入らないように) */
-                if (sh_exit_flag) break;
-#endif
 
                 /* stdin のリダイレクト (最初以外) */
                 if (!is_first && prev_buf >= 0) {
@@ -613,6 +693,7 @@ static void execute_command_line(const char *cmd)
                      * 次段が stdin をキーボードから読んでハングした */
                     if (!buf || g_api->sys_redirect_fd_buf(0, buf, PIPE_BUF_SIZE, saved_len) < 0) {
                         g_api->kprintf(ATTR_RED, "%s", "pipe: stdin buffer lost\n");
+                        status = SH_STATUS_USAGE;
                         break;
                     }
                 }
@@ -625,13 +706,15 @@ static void execute_command_line(const char *cmd)
                         if (!buf || g_api->sys_redirect_fd_buf(1, buf, PIPE_BUF_SIZE, 0) < 0) {
                             g_api->kprintf(ATTR_RED, "%s", "pipe: stdout buffer lost\n");
                             reset_all_redirects();
+                            status = SH_STATUS_USAGE;
                             break;
                         }
                     }
                 }
 
-                /* コマンド実行 */
-                execute_single(seg_buf + i * CMD_BUF_SIZE);
+                /* コマンド実行。パイプラインの値は **最後の段の値**
+                 * (明示の `exit` が立てばそちらが優先、往復 2 所見 2)。 */
+                status = execute_single(seg_buf + i * CMD_BUF_SIZE);
 
                 /* stdout バッファに書き込まれたデータ長を保存 (リセット前に取得) */
                 if (!is_last) {
@@ -660,7 +743,17 @@ static void execute_command_line(const char *cmd)
                  * 後で script_exec が打ち切る。抜けた後の後始末
                  * (reset_all_redirects / sh_pipe_free / mem_free) は
                  * ループの外と上でそのまま通る。 */
-                if (sh_refused_peek()) break;
+                /* B6 / 往復 2 所見 2: 段の途中で `exit` が立ったらそこで
+                 * 打ち切る。**両ビルドで見る** — 以前は sh.bin だけで、しかも
+                 * 段の**入口**で見ていたので、常駐では `exit 3 | echo tail` の
+                 * 後段が走っていた。見張りはこの 1 か所だけにしてある (入口にも
+                 * 置くと、片方を壊しても挙動が変わらず変異に歯が立たない)。
+                 *
+                 * 往復 5 の注意 1: 値を書いてから要求を立てる — ここで status を
+                 * 上書きしておけば、段ループを抜けた後もその値が残る。 */
+                if (sh_exit_flag) { status = sh_exit_code; break; }
+
+                if (sh_refused_peek()) { status = SH_STATUS_USAGE; break; }
             }
 
             sh_pipeline_leave();
@@ -672,6 +765,7 @@ static void execute_command_line(const char *cmd)
         }
         g_api->mem_free(seg_buf);
     }
+    return status;
 }
 
 /* 実体は execute_command_line。ここは「断った印」の寿命を 1 行に閉じるための
@@ -681,10 +775,22 @@ static void execute_command_line(const char *cmd)
  * 行はこの関数を入れ子で呼ぶので、そこで消すと内側で断ったことが
  * script_exec まで届かなくなる (取りこぼし)。パイプの段は execute_single を
  * 直に呼ぶので入れ子にはならないが、段の中の `time ...` が入れ子になる。 */
-void execute_command(const char *cmd)
+int execute_command(const char *cmd)
 {
+    int status;
+
     if (g_exec_depth == 0) sh_refused_flag = 0;
     g_exec_depth++;
-    execute_command_line(cmd);
+    status = execute_command_line(cmd);
     g_exec_depth--;
+
+#ifndef SHELL_AS_APP
+    /* 常駐シェルは `exit` で終わらない (票 §2-5)。要求は 1 行ぶんで下ろす —
+     * 値は下の sh_status_set で `$?` に入るので失われない。sh.bin では
+     * shell_run の外側ループが見るので下ろさない。 */
+    if (g_exec_depth == 0) sh_exit_flag = 0;
+#endif
+
+    sh_status_set(status);
+    return status;
 }

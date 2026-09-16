@@ -745,3 +745,96 @@ T20 の `sh.bin` 側の値 (240 であって 244 ではない)。いずれも上
 - 表の「今の挙動」はコードの読みと `sh_truncation_host.c` の 2 例で確かめたもので、
   T2〜T26 の各行を試験で 1 件ずつ踏んではいない。踏むのは段 2〜4 の担当 (票 §4 の
   U1〜U20)。
+
+---
+
+# 5. 継承バグ「`source` が ESC 以外も食う」 (2026-09-16)
+
+基点: `feat/gui` = `3e95ab1`
+試験: `python3 -B tools/tests/test_sh_truncation.py` (case 29) / `--mutate` で否定側
+
+## 5-1. 直したもの
+
+`script_exec` (`userland/shell/cmd_script.c`) は **1 行ごと**に ESC を見て打ち切る。
+その監視が `kbd_trygetkey()` — つまり**キューからキーを取り出す**口 — だったので、
+ESC 以外の打鍵は条件に合わず**そのまま捨てられて**いた。スクリプト実行中に打った
+文字が消え、終わった後の入力の先頭が欠ける。
+
+直し方は **(B) カーネルに覗く口を足す**:
+
+| 場所 | 足したもの |
+|---|---|
+| `drivers/kbd.c` | `kbd_peekkey()` — 取り出さずに次のキーを返す (無ければ -1)。戻り値の形は `kbd_trygetkey` と同じ。源の見る順番も同じ (GUI の注入リング → rshell のシリアル → cooked リング) |
+| `drivers/serial.c` | `serial_peekchar()` — `ser_buf[ser_head]` を読むだけ |
+| `kernel/kbd_inject.c` | `kbd_inject_peek()` — 注入リングの先頭を読むだけ。自己診断にビット 5 を追加 |
+| `sdk/kapi.json` | `kbd_peekkey` を**末尾に追加** ([ABI2])、版数 v53 → v54 ([ABI3])。slot 214 = 0x360 |
+| `userland/shell/cmd_script.c` | 監視を `kbd_peekkey()` に差し替え、**ESC と分かってから** `kbd_trygetkey()` を 1 回呼んで取り除く |
+| `build/app.conf` | 要求 KAPI を `userland/shell` 46 → 54、`userland/sh` (同じソースの CPL=3 版) 49 → 54 |
+
+### なぜ (A)「シェル側で押し戻す」を採らなかったか
+
+`kbd_inject` は使えない。理由は 4 つで、どれも単独で決定的:
+
+1. **CUI では誰も読まない。** 注入リングを見るのは `kbd_gui_mode` のときだけ
+   (`drivers/kbd.c` の `kbd_trygetchar` / `kbd_trygetkey` の GUI 分岐)。
+   `source` の普通の経路 (CUI / rshell) は cooked リングを読むので、
+   押し戻したバイトは**二度と読まれない** — バグは直らない。
+2. **所有権で断られる。** `kbd_inject` は `con_sink` の読み手からしか受けない
+   (`kernel/kbd_inject.c`、読み手が違えば `OS32_ERR_EXIST`)。GUI ではその読み手は
+   端末アプリで、シェルではない。
+3. **順序が壊れる。** `inj_push` は末尾に積むので、取り出したキーを戻すと
+   **既に並んでいるものの後ろ**に回る。
+4. **情報が落ちる。** `kbd_trygetkey` は u16 (上位 = スキャンコード)、`kbd_inject` は
+   UTF-8 バイト列。上位バイトが消えるので矢印・ファンクションキーが化ける。
+
+## 5-2. RED → GREEN
+
+RED は `cmd_script.c` の監視を元の `kbd_trygetkey()` の姿に戻して取った。
+
+| | 検査 | FAIL |
+|---|---|---|
+| 直す前 (= `kbd_trygetkey` で取り出す) | 337 | **9** (29c / 29d / 29f / 29g / 29l / 29m / 29n / 29p / 29q) |
+| 直した後 | **337** | **0** (`EXIT sh_truncation_host=0`) |
+
+変異 (否定側) は **59 本すべて RED**。今回足した 3 本:
+
+| 変異 | 壊すもの |
+|---|---|
+| `esc_watch_eats_key` | 直す前の姿 (`kbd_trygetkey` で取り出して捨てる) |
+| `esc_not_removed` | 覗くだけで **ESC も取り除かない** (後の行編集が ESC を食う) |
+| `esc_no_abort` | ESC の打ち切りそのものを外す (今の挙動を弱めていないかの裏) |
+
+隣の試験: `test_sh_shell.py` / `test_cat_linenum.py` / `test_fs_kind_callers.py` /
+`test_kbd_inject.py` すべて GREEN。`sh_shell_host.c` は贋 KAPI に `kbd_peekkey` が
+無いまま NULL を呼んで **SIGSEGV (-11)** を出したので、空実装を足した
+(= 新しいシェルを古いカーネルで動かすと同じことが起きる。`app.conf` の要求版数が
+それを止める)。
+
+## 5-3. 挙動が 1 つだけ変わる (PM 判断が要る)
+
+**ESC が**他の打鍵の**後ろに積まれている**とき、この監視は打ち切らなくなった。
+覗くのは**先頭だけ**なので、`['a', ESC]` の状態では `'a'` しか見えない。
+
+- 直す前: 行ごとに 1 つ取り出していたので、`'a'` を捨ててから次の行で ESC に届き、
+  打ち切っていた (打鍵が消える側のバグそのもの)。
+- 直した後: `'a'` も ESC も消えずに順序どおり残るが、その行では打ち切らない。
+
+これを両立させるには「キューの途中から ESC だけ抜く」口が要る (覗きに添字を付けるか、
+ESC 専用の検査を足すか)。今回は入れていない。逃げ道として **CTRL+STOP**
+(`ring3_abort_request`、キューを経由しない) は従来どおり効く。
+
+## 5-4. 確かめていないこと ([V4])
+
+- **実機 (NP21/W) では 1 度も動かしていない。** `make clean` → `make all` → `make check`
+  → `make external` も**未実施** (コーダーの禁止範囲)。[ABI3] の clean ビルドは PM 待ち。
+- 通したのはホスト試験と、`drivers/kbd.c` / `drivers/serial.c` / `kernel/kbd_inject.c` の
+  `i386-elf-gcc -Wall -Wextra -Werror` 単体コンパイルだけ。`kapi/kapi_generated.c` は
+  この場の `-I` では無関係な既存の implicit declaration が出るので `-Werror` 無しで通し、
+  `kbd_peekkey` に関する警告が 0 であることだけ見た。
+- **GUI (`SHELL_AS_APP`) で実際に動かしていない。** `kbd_peekkey` は `exec_park_poll` を
+  呼ばないので、GUI 中のスクリプト実行で**行ごとの WM への譲りが無くなる**。park は
+  成立すると戻らず、起こされるときに `exec_resume` が注入リングの 1 バイトを取り出して
+  EAX に入れてしまうため、覗きと両立しない。長いスクリプトで GUI の反応が鈍らないかは
+  未確認。
+- `apps/` `game/` の submodule は再ビルドしていない (この変更は KAPI の**末尾追加**だけで
+  既存スロットを動かさないが、[ABI3] の手順としては `make external` が要る)。

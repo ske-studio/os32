@@ -44,7 +44,9 @@ void shell_register_cmds(const ShellCmd *cmds) { (void)cmds; }
 
 #define REFUSAL "cannot determine the type of"
 
-static void run(void (*fn)(int, char **), const char *name,
+/* R1c: 組み込み handler は int になった (票 TASK_EXIT_STATUS 決裁 E2)。
+ * この試験が見るのは呼び出し回数と贋 FS の状態なので、戻り値は捨てる。 */
+static void run(int (*fn)(int, char **), const char *name,
                 const char *a, const char *b, const char *c, const char *d)
 {
     char *av[6];
@@ -62,7 +64,7 @@ static void run(void (*fn)(int, char **), const char *name,
     if (c) av[n++] = (char *)c;
     if (d) av[n++] = (char *)d;
     av[n] = 0;
-    fn(n, av);
+    (void)fn(n, av);
 }
 
 /* stat も列挙も読めない = 種別が分からない */

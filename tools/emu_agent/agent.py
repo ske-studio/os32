@@ -74,7 +74,7 @@ MAKE_TARGETS = ("kernel", "kernel-lgy98", "kernel-lgy98-link", "kernel-nolgy98",
                 "check-vfs-mount-dev-host", "check-multiapp-model-host",
                 "check-con-sink-host", "check-kbd-inject-host", "check-launch-host",
                 "check-sh-launch-host", "check-sh-shell-host",
-                "check-sh-truncation-host",
+                "check-sh-truncation-host", "check-sh-status-host",
                 "check-host-agent", "check-net-link-host",
                 "check-fs-kind-callers-host", "check-cat-linenum-host",
                 # 票 H2 (一時ファイル + 検証 + 置換)

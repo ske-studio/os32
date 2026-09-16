@@ -4,46 +4,55 @@
 #include <string.h>
 #include <stdlib.h>
 
-static void cmd_mount(int argc, char **argv)
+static int cmd_mount(int argc, char **argv)
 {
     int ret;
     if (argc < 4) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     ret = g_api->sys_mount(argv[1], argv[2], argv[3]);
-    if (ret != 0) g_api->kprintf(ATTR_RED, "mount: failed %d\n", ret);
+    if (ret != 0) {
+        g_api->kprintf(ATTR_RED, "mount: failed %d\n", ret);
+        return SH_STATUS_ERROR;
+    }
+    return 0;
 }
 
-static void cmd_umount(int argc, char **argv)
+static int cmd_umount(int argc, char **argv)
 {
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     /* sys_umount は void なので、未マウントは先に弾いて知らせる */
     if (!g_api->sys_is_mounted(argv[1])) {
         g_api->kprintf(ATTR_RED, "umount: %s: not mounted\n", argv[1]);
-        return;
+        return SH_STATUS_ERROR;
     }
     g_api->sys_umount(argv[1]);
+    return 0;
 }
 
-static void cmd_sync(int argc, char **argv)
+static int cmd_sync(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->vfs_sync();
+    return 0;
 }
 
-static void cmd_exec(int argc, char **argv)
+static int cmd_exec(int argc, char **argv)
 {
-    int rc;
     char cmdline[EXEC_CMDLINE_MAX];
     int i, pos;
+    /* 票 §2-3: 以前は **戻り値で印字を分けて** いたので、子の `exit(-3)` が
+     * 「file not found」になっていた。種別で分岐する。 */
+    int kind = EXEC_KIND_NONE;
+    int code = 0;
 
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     /* T3: 溢れた引数を落として起動すると、意図と違う引数でプログラムが走る。
@@ -58,7 +67,7 @@ static void cmd_exec(int argc, char **argv)
         }
         if (need > EXEC_CMDLINE_MAX - 1) {
             sh_refuse("exec: command line", EXEC_CMDLINE_MAX - 1);
-            return;
+            return SH_STATUS_USAGE;
         }
     }
 
@@ -73,11 +82,32 @@ static void cmd_exec(int argc, char **argv)
     }
     cmdline[pos] = '\0';
 
-    rc = sh_launch(cmdline);
-    if (rc == EXEC_ERR_GENERAL) g_api->kprintf(ATTR_RED, "%s", "exec: general error\n");
-    else if (rc == EXEC_ERR_FAULT) g_api->kprintf(ATTR_RED, "%s", "exec: invalid executable or crashed\n");
-    else if (rc == EXEC_ERR_NOT_FOUND) g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
-    else g_api->kprintf(ATTR_GREEN, "exec: exited with %d\n", rc);
+    (void)sh_exec_result(cmdline, &kind, &code);
+    /* 断った (パイプ / リダイレクト / 長さ) 場合は印が立っていて、種別は
+     * NONE のまま — もう赤字は出ているので何も言い足さない。 */
+    if (kind == EXEC_KIND_NONE) return SH_STATUS_USAGE;
+
+    switch (kind) {
+    case EXEC_KIND_EXITED:
+        g_api->kprintf(ATTR_GREEN, "exec: exited with %d\n", code);
+        break;
+    case EXEC_KIND_FAULT:
+        g_api->kprintf(ATTR_RED, "%s", "exec: crashed\n");
+        break;
+    case EXEC_KIND_ABORTED:
+        g_api->kprintf(ATTR_RED, "%s", "exec: aborted\n");
+        break;
+    case EXEC_KIND_NOT_FOUND:
+        g_api->kprintf(ATTR_RED, "%s", "exec: file not found\n");
+        break;
+    case EXEC_KIND_INVALID:
+        g_api->kprintf(ATTR_RED, "%s", "exec: invalid executable\n");
+        break;
+    default:
+        g_api->kprintf(ATTR_RED, "%s", "exec: general error\n");
+        break;
+    }
+    return sh_status_from_kind(kind, code);
 }
 
 /* ======================================================================== */
@@ -87,7 +117,7 @@ static void cmd_exec(int argc, char **argv)
 /*  losetup -d <slot>        デタッチ                                       */
 /*  losetup -l [slot]        ステータス表示                                 */
 /* ======================================================================== */
-static void cmd_losetup(int argc, char **argv)
+static int cmd_losetup(int argc, char **argv)
 {
     int slot, ret, in_use, bps;
     u32 total;
@@ -103,19 +133,19 @@ static void cmd_losetup(int argc, char **argv)
                 g_api->kprintf(ATTR_WHITE, "lo%d: (empty)\n", slot);
             }
         }
-        return;
+        return 0;
     }
 
     /* -d: デタッチ */
     if (argv[1][0] == '-' && argv[1][1] == 'd') {
         if (argc < 3) {
             g_api->kprintf(ATTR_WHITE, "Usage: losetup -d <slot(0-3)>\n");
-            return;
+            return SH_STATUS_USAGE;
         }
         slot = atoi(argv[2]);
         g_api->loop_detach(slot);
         g_api->kprintf(ATTR_GREEN, "losetup: lo%d detached\n", slot);
-        return;
+        return 0;
     }
 
     /* -l: ステータス表示 */
@@ -140,7 +170,7 @@ static void cmd_losetup(int argc, char **argv)
                 }
             }
         }
-        return;
+        return 0;
     }
 
     /* アタッチ: losetup <path> <slot> */
@@ -149,7 +179,7 @@ static void cmd_losetup(int argc, char **argv)
             "Usage: losetup <image_path> <slot(0-3)>\n"
             "       losetup -d <slot>          detach\n"
             "       losetup -l [slot]          status\n");
-        return;
+        return SH_STATUS_USAGE;
     }
     slot = atoi(argv[2]);
     ret  = g_api->loop_attach(argv[1], slot);
@@ -160,20 +190,21 @@ static void cmd_losetup(int argc, char **argv)
         break;
     case -1:
         g_api->kprintf(ATTR_RED, "losetup: invalid path or slot\n");
-        break;
+        return SH_STATUS_ERROR;
     case -2:
         g_api->kprintf(ATTR_RED, "losetup: unsupported format\n");
-        break;
+        return SH_STATUS_ERROR;
     case -3:
         g_api->kprintf(ATTR_RED, "losetup: slot %d already in use\n", slot);
-        break;
+        return SH_STATUS_ERROR;
     case -4:
         g_api->kprintf(ATTR_RED, "losetup: I/O error\n");
-        break;
+        return SH_STATUS_ERROR;
     default:
         g_api->kprintf(ATTR_RED, "losetup: error %d\n", ret);
-        break;
+        return SH_STATUS_ERROR;
     }
+    return 0;
 }
 
 /* ======================================================================== */
@@ -181,7 +212,7 @@ static void cmd_losetup(int argc, char **argv)
 /*  使い方: dd <devname> lba=<N> count=<M> [file=<vfs_path>] [noerr]       */
 /*           noerr: 読み取りエラーをゼロ埋めしてスキップ                    */
 /* ======================================================================== */
-static void cmd_dd(int argc, char **argv)
+static int cmd_dd(int argc, char **argv)
 {
     const char *dev_name;
     int lba, count, i;
@@ -201,7 +232,7 @@ static void cmd_dd(int argc, char **argv)
         g_api->kprintf(ATTR_WHITE,
             "Usage: dd <dev> lba=<N> count=<M> [file=<path>] [noerr]\n"
             "  noerr: skip read errors (zero-fill)\n");
-        return;
+        return SH_STATUS_USAGE;
     }
 
     dev_name  = argv[1];
@@ -233,7 +264,7 @@ static void cmd_dd(int argc, char **argv)
         if (slot >= 0) {
             if (!g_api->loop_status(slot, &dummy_total, &dummy_bps)) {
                 g_api->kprintf(ATTR_RED, "dd: lo%d not attached\n", slot);
-                return;
+                return SH_STATUS_ERROR;
             }
             bps = (u32)dummy_bps;
         } else {
@@ -253,18 +284,18 @@ static void cmd_dd(int argc, char **argv)
 
     if (count <= 0) {
         g_api->kprintf(ATTR_RED, "dd: count must be >= 1\n");
-        return;
+        return SH_STATUS_USAGE;
     }
     if (dummy_total > 0 && (u32)(lba + count) > dummy_total) {
         g_api->kprintf(ATTR_RED, "dd: lba+count exceeds total (%u)\n",
                        dummy_total);
-        return;
+        return SH_STATUS_USAGE;
     }
 
     buf = g_api->mem_alloc(bps);
     if (!buf) {
         g_api->kprintf(ATTR_RED, "dd: alloc failed\n");
-        return;
+        return SH_STATUS_ERROR;
     }
 
     if (out_path) {
@@ -274,7 +305,7 @@ static void cmd_dd(int argc, char **argv)
             g_api->kprintf(ATTR_RED, "dd: cannot create %s (err=%d)\n",
                            out_path, fd);
             g_api->mem_free(buf);
-            return;
+            return SH_STATUS_ERROR;
         }
         for (i = 0; i < count; i++) {
             if (g_api->dev_blk_read(dev_name, (u32)(lba + i), 1, buf) != 0) {
@@ -283,7 +314,7 @@ static void cmd_dd(int argc, char **argv)
                                    lba + i);
                     g_api->sys_close(fd);
                     g_api->mem_free(buf);
-                    return;
+                    return SH_STATUS_ERROR;
                 }
                 { u8 *z = (u8 *)buf; u32 k; for (k = 0; k < bps; k++) z[k] = 0; }
                 err_count++;
@@ -298,7 +329,7 @@ static void cmd_dd(int argc, char **argv)
                         lba + i, total_bytes);
                     g_api->sys_close(fd);
                     g_api->mem_free(buf);
-                    return;
+                    return SH_STATUS_ERROR;
                 }
                 total_bytes += (u32)w;
             }
@@ -321,7 +352,7 @@ static void cmd_dd(int argc, char **argv)
                     g_api->kprintf(ATTR_RED, "dd: read error at lba=%d\n",
                                    lba + i);
                     g_api->mem_free(buf);
-                    return;
+                    return SH_STATUS_ERROR;
                 }
                 { u8 *z = (u8 *)buf; u32 k; for (k = 0; k < bps; k++) z[k] = 0; }
                 err_count++;
@@ -357,6 +388,7 @@ static void cmd_dd(int argc, char **argv)
     }
 
     g_api->mem_free(buf);
+    return 0;
 }
 
 

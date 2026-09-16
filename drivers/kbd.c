@@ -513,6 +513,46 @@ int kbd_trygetkey(void)
     return (int)entry;  /* 上位=キーコード, 下位=ASCII */
 }
 
+/* 取り出さずに次のキーを覗く (継承バグ「source が ESC 以外も食う」)。
+ * 戻り値は kbd_trygetkey と同じ形 (上位=スキャンコード, 下位=ASCII。GUI 中は
+ * 下位 8bit だけ)。無ければ -1。**キューは 1 バイトも動かさない**ので、
+ * 「ESC なら打ち切る、ESC でなければ次の読み手に残す」が書ける。取り除きたい
+ * ときは覗いた後に kbd_trygetkey を 1 回呼ぶ (ESC のときだけ)。
+ *
+ * 源の見る順番は kbd_trygetkey と 1 行も違えない (GUI の注入リング →
+ * rshell のシリアル → cooked リング)。違えると「覗いたキー」と「次に
+ * 取り出されるキー」が別物になり、ESC の取り除きが別のキーを消す。
+ *
+ * D8 のポーリング型 yield (exec_park_poll) は**呼ばない**。park は成立すると
+ * 戻らず、WM が起こすときに exec_resume が注入リングの 1 バイトを取り出して
+ * EAX に入れてしまう — 覗いただけのはずのキーが消える。覗きは「今そこに
+ * あるか」を見るだけの口なので、譲りたい呼び手は kbd_trygetchar を使う。 */
+int kbd_peekkey(void)
+{
+    u16 entry;
+    unsigned int flags;
+
+    if (kbd_gui_mode) {
+        u8 b = 0;
+        if (!kbd_inject_peek(&b)) return -1;
+        return (int)b;
+    }
+
+    if (rshell_active) {
+        int sch;
+        sch = serial_peekchar();
+        if (sch >= 0) return sch;   /* シリアルは ASCII のみ (下位バイト) */
+    }
+
+    if (kbd_count == 0) return -1;
+
+    flags = irq_save();
+    entry = kbd_buf[kbd_head];
+    irq_restore(flags);
+
+    return (int)entry;
+}
+
 /* 修飾キー(Ctrl/Shift/Alt等)の押下状態を取得 */
 u32 kbd_get_modifiers(void)
 {

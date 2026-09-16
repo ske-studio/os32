@@ -65,7 +65,7 @@ MKDIR_BLOCK = r"""    rc = g_api->sys_mkdir(dst);
         g_api->kprintf(ATTR_RED, "cp -r: cannot create directory '%s': %s\n",
                        dst, fs_strerror(rc));
         g_api->mem_free(local_entries);
-        return;
+        return SH_STATUS_ERROR;
     }
 """
 
@@ -74,7 +74,7 @@ LS_BLOCK = r"""    rc = g_api->sys_ls(src, collect_entries_cb, (void *)0);
         g_api->kprintf(ATTR_RED, "cp -r: cannot read directory '%s': %s\n",
                        src, fs_strerror(rc));
         g_api->mem_free(local_entries);
-        return;
+        return SH_STATUS_ERROR;
     }
 """
 
@@ -85,7 +85,7 @@ MUTATIONS = [
      "    /* **\u53ce\u96c6\u304c\u5148\u3001mkdir \u306f\u5f8c**\u3002",
      "    g_api->sys_mkdir(dst);\n    /* **\u53ce\u96c6\u304c\u5148\u3001mkdir \u306f\u5f8c**\u3002"),
     # 変異 2 = mkdir の戻り値を見ない版 (作れていないのに中へ進む)。
-    ("mkdir_ret_ignored", MKDIR_BLOCK, "    g_api->sys_mkdir(dst);\n"),
+    ("mkdir_ret_ignored", MKDIR_BLOCK, "    (void)g_api->sys_mkdir(dst);\n"),
     # 変異 3 = EXIST を型を見ずに通す版 (同名のファイルへ展開する)。
     ("exist_type_not_checked", MKDIR_BLOCK,
      MKDIR_BLOCK.replace(
