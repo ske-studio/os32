@@ -1,6 +1,6 @@
 # TASK_H4 — 配備マニフェストと世代の確認
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **実装済み・ゲスト未検証 (2026-09-16。設計レビュー 3 往復で Approve、ホスト試験 RED→GREEN 済み、§4-2 のゲスト受入は未実施)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-16) / 状態: **受入完了 (2026-09-16、設計レビュー 3 往復で Approve、ホスト試験 RED→GREEN、ゲスト受入 4 項目は §8)**
 
 基点: `feat/gui` = `9742a6b`。
 計画の正典: [`HSYNC_IMPROVEMENT_PLAN.md`](HSYNC_IMPROVEMENT_PLAN.md) §7-1 (本文)、§8 (H4 の行)、§9 の A18。
