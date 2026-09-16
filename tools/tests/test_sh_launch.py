@@ -27,8 +27,11 @@ INC_SRC = ROOT / "userland/shell/sh_launch.inc"
 
 # .inc は単体ではコンパイルできないので、ターゲット側の -Werror 確認は
 # g_api だけを足した最小の翻訳単位で行う (libc は使わない)。
+# sh_refuse は main.c (shell.h) 側の口。票 TASK_SH_TRUNCATION §5 の段 3 で
+# sh_launch が T11 の断りに使うようになったので、宣言だけ足す。
 TARGET_STUB = """#include "os32api.h"
 KernelAPI *g_api;
+void sh_refuse(const char *what, int limit);
 #include "%s"
 """ % INC_SRC
 

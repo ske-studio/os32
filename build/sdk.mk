@@ -229,6 +229,16 @@ check-sh-launch-host:
 check-sh-shell-host:
 	python3 -B tools/tests/test_sh_shell.py
 
+# シェルが入力を黙って切り詰める経路 (票 docs/tasks/shell/TASK_SH_TRUNCATION.md)。
+# tools/tests/sh_truncation_host.c が userland/shell/main.c を丸ごと #include し、
+# **登録表も execute_command も実物のまま**回す (sh_shell_host.c は
+# execute_command をスタブにしているのでこの経路を試験できない)。
+# 段 2 の時点で T1 (`if` の比較) と §2-1 (スクリプト中で断ったら打ち切る) が
+# 入っている。否定側は `--mutate` (印を立てない / 消し忘れる / 対話でも
+# 打ち切る 版などが RED になる)。記録は tools/tests/sh_truncation_tdd.md。
+check-sh-truncation-host:
+	python3 -B tools/tests/test_sh_truncation.py
+
 # 通常配備が /etc/settings.db* を作らない・上書きしない・消さない (票 S0-D / D0)。
 # temp dir + mock だけで走り、sudo / mount / 実配備は試験側が遮断する。記録は tools/tests/s0_tdd.md 節 D。
 check-settings-protect-host:
@@ -391,9 +401,9 @@ check-docs-orphans:
 check-tests-inventory:
 	@python3 tools/gen_tests_inventory.py --check
 
-check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hsync-h2-host check-vfs-excl-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hsync-h2-host check-vfs-excl-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
+.PHONY: sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check

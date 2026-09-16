@@ -35,6 +35,10 @@
 #define HIST_FILE_ROOM  12
 #endif
 
+/* $HOME/.profile を組み立てるときに残す余白 ("/" + ".profile" + NUL = 10)。
+ * HIST_FILE_ROOM と同じ作法で、名前を変えたら一緒に広げること ([C4])。 */
+#define PROFILE_PATH_ROOM  12
+
 /* 画面に出ている入力行の写しを更新する印 (実装レビュー blocker 1)。
  * shell_run は 1 文字追加や BS を redraw_line を通さずに直接印字するので、
  * その場でも写しを合わせないと「純粋な延長」の判定が狂う。
@@ -58,6 +62,10 @@ static int  prev_draw_len = 0;
 static void hist_add(const char *s) {
     int i;
     if (str_len(s) == 0) return;
+    /* T14: 収まらない行は**履歴に入れない**。切って入れると、↑ キーで
+     * 呼び出した「切れた行」がそのまま実行される (行そのものは
+     * CMD_BUF_SIZE まで正当なので、実行は断らず履歴だけ見送る)。 */
+    if ((int)str_len(s) > HIST_LINE_MAX - 1) return;
     if (hist_count > 0 && str_eq(hist_buf[(hist_count - 1) % HIST_SIZE], s)) return;
     i = hist_count % HIST_SIZE;
     {
@@ -140,7 +148,9 @@ static void path_comp_cb(const DirEntry_Ext *entry, void *c)
     /* .bin を除去した名前を構築 */
     {
         int base_len = nlen - 4;
-        if (base_len >= 63) base_len = 63;
+        /* T21: 収まらない候補は**補完しない**。切った名前を挿すと
+         * ENTER で別のファイルに作用する。 */
+        if (base_len > (int)sizeof(ctx->name_store[0]) - 1) return;
 
         /* プレフィックスマッチ */
         ok = 1;
@@ -206,10 +216,16 @@ static void file_comp_cb(const DirEntry_Ext *entry, void *c)
     }
     if (!ok || ctx->prefix_len > nlen) return;
 
-    /* 名前を格納 (ディレクトリなら末尾に '/' 付加) */
-    for (i = 0; i < nlen && i < 126; i++)
+    /* 名前を格納 (ディレクトリなら末尾に '/' 付加)。
+     * T21: 収まらない候補は**補完しない** (切ると別の名前になる)。
+     * ディレクトリは付け足す '/' まで数える。 */
+    {
+        int need = nlen + ((entry->type == OS32_FILE_TYPE_DIR) ? 1 : 0);
+        if (need > (int)sizeof(ctx->name_store[0]) - 1) return;
+    }
+    for (i = 0; i < nlen; i++)
         ctx->name_store[ctx->count][i] = name[i];
-    if (entry->type == OS32_FILE_TYPE_DIR && i < 127) {
+    if (entry->type == OS32_FILE_TYPE_DIR) {
         ctx->name_store[ctx->count][i++] = '/';
     }
     ctx->name_store[ctx->count][i] = '\0';
@@ -261,9 +277,16 @@ static int tab_complete(char *buf, int pos, int show_candidates) {
             while (*pp) {
                 char dir[PATH_MAX_LEN];
                 int di = 0;
-                while (*pp && *pp != ':' && di < PATH_MAX_LEN - 1)
+                int lost = 0;
+                while (*pp && *pp != ':') {
+                    if (di >= PATH_MAX_LEN - 1) { lost = 1; break; }
                     dir[di++] = *pp++;
+                }
                 dir[di] = '\0';
+                /* T17: 項目が収まり切らなかったら `:` の区切りを見失っている。
+                 * 残りを別のディレクトリとして走査すると、実在しない場所の
+                 * 候補が出る。ここで走査ごと止める。 */
+                if (lost) break;
                 if (*pp == ':') pp++;
                 if (di > 0) {
                     g_api->sys_ls(dir, (void *)path_comp_cb, &pctx);
@@ -410,7 +433,12 @@ static int hist_build_path(char *path, int max)
 
     if (!home) return -1;
     h = home;
-    while (*h && pi < max - HIST_FILE_ROOM) path[pi++] = *h++;
+    /* T20: HOME を切って組み立てると**別のディレクトリの履歴**を読み書き
+     * する。収まらなければ履歴を使わない (呼び手は < 0 で黙って戻る)。 */
+    while (*h) {
+        if (pi >= max - HIST_FILE_ROOM) return -1;
+        path[pi++] = *h++;
+    }
     if (pi > 0 && path[pi - 1] != '/') path[pi++] = '/';
     fn = HIST_FILE_NAME;
     while (*fn) path[pi++] = *fn++;
@@ -455,8 +483,15 @@ void hist_load(void)
     char path[PATH_MAX_LEN];
     char *buf;
     int fd, sz, bi, li;
+    int more;
 
-    if (hist_build_path(path, PATH_MAX_LEN) < 0) return;
+    if (hist_build_path(path, PATH_MAX_LEN) < 0) {
+        /* 起動時に 1 度だけ理由を出す (hist_save は毎行通るので黙る)。
+         * ここは execute_command の外なので印は残さない。 */
+        sh_refuse("sh: $HOME for history path", PATH_MAX_LEN - HIST_FILE_ROOM);
+        (void)sh_refused_take();
+        return;
+    }
 
     fd = g_api->sys_open(path, KAPI_O_RDONLY);
     if (fd < 0) return;
@@ -465,6 +500,12 @@ void hist_load(void)
     if (!buf) { g_api->sys_close(fd); return; }
 
     sz = g_api->sys_read(fd, buf, HIST_SIZE * HIST_LINE_MAX - 1);
+    /* T14: 読み切れたか (末尾の行が途中で切れていないか) を閉じる前に見る。 */
+    more = 0;
+    if (sz == HIST_SIZE * HIST_LINE_MAX - 1) {
+        char probe;
+        if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;
+    }
     g_api->sys_close(fd);
     if (sz <= 0) { g_api->mem_free(buf); return; }
     buf[sz] = '\0';
@@ -473,11 +514,15 @@ void hist_load(void)
     li = 0;
     for (bi = 0; bi <= sz; bi++) {
         if (bi == sz || buf[bi] == '\n' || buf[bi] == '\r') {
-            if (li > 0) {
+            /* T14: 切れた行は**読み込まない** — 入れると ↑ キーで
+             * 「切れた行」が実行できてしまう。
+             *   - HIST_LINE_MAX に収まらない行
+             *   - 読み切れなかったファイルの、改行で終わっていない末尾行 */
+            int cut = (li > HIST_LINE_MAX - 1) || (bi == sz && more);
+            if (li > 0 && !cut) {
                 int idx = hist_count % HIST_SIZE;
                 int j;
                 int src_start = bi - li;
-                if (li >= HIST_LINE_MAX) li = HIST_LINE_MAX - 1;
                 for (j = 0; j < li; j++)
                     hist_buf[idx][j] = buf[src_start + j];
                 hist_buf[idx][li] = '\0';
@@ -497,6 +542,11 @@ void hist_load(void)
 void shell_run(void) {
     char cmd_buf[CMD_BUF_SIZE];
     int cmd_pos, cmd_len, key, last_tab = 0;
+    /* T15: 行編集が打鍵を捨てたことを覚えておく印。以前は 4092 バイトで
+     * 黙って捨て、ENTER でその**接頭辞**を実行していた (機械注入
+     * `/api/key text=` では気付けない = 本票の動機であるランナーが
+     * 偽の結果を得る)。ESC で行を捨てたときだけ下ろす。 */
+    int cmd_dropped = 0;
 
     g_api->kprintf(ATTR_CYAN, "%s", "================================\n");
     g_api->kprintf(ATTR_CYAN, "%s", " OS32 External Shell Started\n");
@@ -508,7 +558,8 @@ void shell_run(void) {
         int sfd = g_api->sys_open("/etc/profile", KAPI_O_RDONLY);
         if (sfd >= 0) {
             g_api->sys_close(sfd);
-            script_source_file("/etc/profile");
+            /* 断られても起動は止めない (票 TASK_SH_TRUNCATION §2-1 / R2) */
+            script_source_profile("/etc/profile");
         }
     }
 
@@ -518,17 +569,29 @@ void shell_run(void) {
         if (home) {
             char profile_path[PATH_MAX_LEN];
             int pi = 0;
+            int too_long = 0;
             const char *h = home;
-            while (*h && pi < PATH_MAX_LEN - 12) profile_path[pi++] = *h++;
+            /* T20: HOME を切ると**別のディレクトリの .profile** を読む。
+             * 収まらなければ読まない (起動は続ける。票 R2)。 */
+            while (*h) {
+                if (pi >= PATH_MAX_LEN - PROFILE_PATH_ROOM) { too_long = 1; break; }
+                profile_path[pi++] = *h++;
+            }
+            if (too_long) {
+                sh_refuse("sh: $HOME for .profile path",
+                          PATH_MAX_LEN - PROFILE_PATH_ROOM);
+                (void)sh_refused_take();      /* 起動は止めない */
+                pi = 0;
+            }
             if (pi > 0 && profile_path[pi - 1] != '/') profile_path[pi++] = '/';
             { const char *pn = ".profile"; while (*pn) profile_path[pi++] = *pn++; }
             profile_path[pi] = '\0';
 
-            {
+            if (!too_long) {
                 int ufd = g_api->sys_open(profile_path, KAPI_O_RDONLY);
                 if (ufd >= 0) {
                     g_api->sys_close(ufd);
-                    script_source_file(profile_path);
+                    script_source_profile(profile_path);
                 }
             }
         }
@@ -554,6 +617,7 @@ void shell_run(void) {
 #endif
         show_prompt();
         cmd_pos = cmd_len = cmd_buf[0] = prev_draw_len = 0;
+        cmd_dropped = 0;
         sh_mark_drawn(cmd_buf, 0);
         hist_idx = hist_count;
 
@@ -635,14 +699,18 @@ void shell_run(void) {
                 continue;
             }
             last_tab = 0;
-            if ((key & 0xFF) == 0x1B) { cmd_len=cmd_pos=cmd_buf[0]=0; redraw_line(cmd_buf, cmd_len, cmd_pos); continue; }
+            if ((key & 0xFF) == 0x1B) { cmd_len=cmd_pos=cmd_buf[0]=0; cmd_dropped=0; redraw_line(cmd_buf, cmd_len, cmd_pos); continue; }
             /* 印字可能文字: ASCII (0x20-0x7E) および IME確定UTF-8バイト (0x80+, scancode=0) */
             {
                 u8 ascii_byte = (u8)(key & 0xFF);
                 int scancode = (key >> 8) & 0x7F;
                 int is_printable = (ascii_byte >= 0x20 && ascii_byte < 0x7F);
                 int is_ime_byte  = (scancode == 0x00 && ascii_byte >= 0x80);
-                if ((is_printable || is_ime_byte) && cmd_len < CMD_BUF_SIZE - 4) {
+                if ((is_printable || is_ime_byte) && cmd_len >= CMD_BUF_SIZE - 4) {
+                    /* T15: ここで黙って捨てると接頭辞が実行される。
+                     * 印を立てて ENTER のところで行ごと断る。 */
+                    cmd_dropped = 1;
+                } else if (is_printable || is_ime_byte) {
                     if (is_ime_byte) {
                         /* UTF-8マルチバイト: 蓄積して一括表示 */
                         char utf8_tmp[5];
@@ -663,7 +731,9 @@ void shell_run(void) {
                         }
                         utf8_tmp[utf8_len] = '\0';
                         /* コマンドバッファに追加 */
-                        if (cmd_len + utf8_len < CMD_BUF_SIZE - 1) {
+                        if (cmd_len + utf8_len >= CMD_BUF_SIZE - 1) {
+                            cmd_dropped = 1;   /* T15: 同上 */
+                        } else {
                             int bi;
                             if (cmd_pos == cmd_len) {
                                 for (bi = 0; bi < utf8_len; bi++) {
@@ -702,6 +772,13 @@ void shell_run(void) {
             }
         }
         cmd_buf[cmd_len] = 0;
+        if (cmd_dropped) {
+            /* T15: 打鍵を捨てた行は**実行しない / 履歴にも入れない**。
+             * ここは execute_command の外なので印は残さない (対話)。 */
+            sh_refuse("sh: line", CMD_BUF_SIZE - 4);
+            (void)sh_refused_take();
+            continue;
+        }
         if (cmd_len > 0) hist_add(cmd_buf);
         execute_command(cmd_buf);
         if (hist_dirty) hist_save();

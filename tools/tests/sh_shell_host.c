@@ -420,6 +420,24 @@ static void build_api(void)
 int sh_exit_flag = 0;
 static int prev_draw_len = 0;
 
+/* main.c の「断った印」(票 TASK_SH_TRUNCATION §2-1)。この試験は
+ * execute_command をスタブにしていて切り詰めの経路を通らないので、実体だけ
+ * 置く (中身は main.c と同じ)。印を読むのは cmd_script.c の script_exec。 */
+int sh_refused_flag = 0;
+void sh_refuse_mark(void) { sh_refused_flag = 1; }
+void sh_refuse(const char *what, int limit)
+{
+    g_api->kprintf(ATTR_RED, "%s too long (max %d)\n", what, limit);
+    sh_refused_flag = 1;
+}
+int sh_refused_take(void)
+{
+    int r = sh_refused_flag;
+    sh_refused_flag = 0;
+    return r;
+}
+int sh_refused_peek(void) { return sh_refused_flag; }
+
 static void show_prompt(void) { out_str("sh> "); }
 
 #include "../../userland/shell/sh_redraw.inc"
@@ -948,6 +966,11 @@ static void case_argv_bound(void)
 
     check(rc < 0,                     "12a 多すぎる行は負を返す (I1)");
     check(out_is("sh: too many arguments\\n"), "12b 理由を出す");
+    /* 段 3 (PM 決裁 2026-09-16): 捨てるときは印も立てる。立てないと
+     * スクリプトが次の行へ落ちる。印の寿命は 1 行ぶんなので、この試験
+     * (execute_command がスタブで入口の掃除が無い) では明示的に下ろす。 */
+    check(sh_refused_flag == 1,       "12b2 捨てるときは印を立てる (I1)");
+    sh_refused_flag = 0;
     check(argc <= MAX_ARGS - 1,       "12c 格納は max_args - 1 個まで (R7)");
     check(argv[MAX_ARGS - 1] == (char *)0xDEADBEEF,
                                       "12d 最後の枠は NUL 終端用に空いている");
@@ -977,7 +1000,9 @@ static void case_argv_bound(void)
     out_reset();
     rc = parse_args_and_glob(line, argv, &argc, MAX_ARGS, alloc, &nalloc);
     check(rc < 0,                     "12g glob の合計超過も行ごと捨てる");
+    check(sh_refused_flag == 1,       "12h 合計超過でも印を立てる (I1)");
     for (i = 0; i < nalloc; i++) g_api->mem_free(alloc[i]);
+    sh_refused_flag = 0;
     sh_glob_failed = 0;
     g_dir_n = 0;
     g_dir_match_tail = 0;

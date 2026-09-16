@@ -85,15 +85,21 @@ static void dir_callback(const DirEntry_Ext *entry, void *ctx)
     int i;
     (void)ctx;
 
-    if (filer.entry_count >= FILER_MAX_ENTRIES) return;
-
     /* フィルタチェック (ディレクトリは常に表示) */
     if (filer.filter_ext && entry->type != OS32_FILE_TYPE_DIR) {
         if (!str_ends_with(entry->name, filer.filter_ext)) return;
     }
 
+    /* T23: 63 バイトで切った名前を載せると filer_get_selected_path() が
+     * **別のファイルのパス**を返し、ディレクトリ移動も別の場所へ行く。
+     * 載せずに件数だけ数える (cmd_filer.c の fl_ls_callback と同じ)。 */
+    for (i = 0; entry->name[i]; i++) {}
+    if (i > FILER_NAME_LEN - 1) { filer.dropped_count++; return; }
+
+    if (filer.entry_count >= FILER_MAX_ENTRIES) { filer.dropped_count++; return; }
+
     e = &filer.entries[filer.entry_count];
-    for (i = 0; entry->name[i] && i < FILER_NAME_LEN - 1; i++) {
+    for (i = 0; entry->name[i]; i++) {
         e->name[i] = entry->name[i];
     }
     e->name[i] = '\0';
@@ -107,6 +113,7 @@ static void scan_directory(const char *dir)
     filer.entry_count = 0;
     filer.cursor_idx = 0;
     filer.scroll_top = 0;
+    filer.dropped_count = 0;
 
     /* ".." エントリを手動追加 (ルートでなければ) */
     if (dir[0] != '\0' && !(dir[0] == '/' && dir[1] == '\0')) {
@@ -120,16 +127,24 @@ static void scan_directory(const char *dir)
     f_api->sys_ls(dir, (DirCallback)dir_callback, NULL);
 }
 
-/* パスを結合 */
-static void build_full_path(char *out, int out_sz,
-                            const char *dir, const char *name)
+/* パスを結合。戻り値: 長さ / out に収まらなければ -1 (票 T23)。
+ * 以前は戻り値が無く、溢れても切った綴りを返していた。 */
+static int build_full_path(char *out, int out_sz,
+                           const char *dir, const char *name)
 {
     int i = 0, j = 0;
-    while (dir[j] && i < out_sz - 2) out[i++] = dir[j++];
+    while (dir[j]) {
+        if (i >= out_sz - 2) return -1;
+        out[i++] = dir[j++];
+    }
     if (i > 0 && out[i - 1] != '/') out[i++] = '/';
     j = 0;
-    while (name[j] && i < out_sz - 1) out[i++] = name[j++];
+    while (name[j]) {
+        if (i >= out_sz - 1) return -1;
+        out[i++] = name[j++];
+    }
     out[i] = '\0';
+    return i;
 }
 
 /* ======================================================================== */
@@ -164,8 +179,12 @@ static void draw_filer_panel(void)
     sprintf(buf, " %s", filer.current_dir);
     kcg_draw_utf8(FP_X + FP_PAD, FP_Y + 4, buf, FC_TITLE, 0xFF);
 
-    /* エントリ件数 */
-    sprintf(buf, " %d items", filer.entry_count);
+    /* エントリ件数 (載せられなかった分は数だけ出す — 票 T23) */
+    if (filer.dropped_count > 0)
+        sprintf(buf, " %d items (+%d hidden)",
+                filer.entry_count, filer.dropped_count);
+    else
+        sprintf(buf, " %d items", filer.entry_count);
     kcg_draw_utf8(FP_X + FP_W - 100, FP_Y + 4, buf, FC_HINT, 0xFF);
 
     /* エントリ一覧 */
@@ -317,8 +336,10 @@ int filer_open(const char *dir, const char *filter)
                             new_dir[last_slash] = '\0';
                         }
                     } else {
-                        build_full_path(new_dir, FILER_MAX_PATH,
-                                        filer.current_dir, e->name);
+                        /* 収まらなければ移動しない (切れた別の場所へ行かない) */
+                        if (build_full_path(new_dir, FILER_MAX_PATH,
+                                            filer.current_dir, e->name) < 0)
+                            continue;
                     }
 
                     strncpy(filer.current_dir, new_dir, FILER_MAX_PATH - 1);
@@ -326,9 +347,13 @@ int filer_open(const char *dir, const char *filter)
                     scan_directory(filer.current_dir);
 
                 } else {
-                    /* ファイル選択 → 確定 */
-                    build_full_path(filer.selected_path, FILER_MAX_PATH,
-                                    filer.current_dir, e->name);
+                    /* ファイル選択 → 確定。収まらなければ**確定しない**
+                     * (切れた別のファイルのパスを返さない)。 */
+                    if (build_full_path(filer.selected_path, FILER_MAX_PATH,
+                                        filer.current_dir, e->name) < 0) {
+                        filer.selected_path[0] = '\0';
+                        continue;
+                    }
                     filer.active = 0;
                     return 1;
                 }

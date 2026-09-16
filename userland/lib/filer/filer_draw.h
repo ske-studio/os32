@@ -62,6 +62,10 @@ typedef struct {
     int count;
     int cursor;
     int page_top;
+    /* 表に載せられなかった件数 (名前が FL_MAX_NAME_LEN に収まらない /
+     * FL_MAX_ENTRIES を超えた)。切った名前で別のファイルを起動しないよう
+     * 載せずに数だけ報せる — sh_ls.inc の「(... N more)」と同じ作法。 */
+    int dropped;
     char cwd[FL_MAX_PATH_LEN];
 } FL_State;
 

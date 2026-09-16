@@ -77,10 +77,24 @@ static void cmd_terminal(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Terminal closed]\n");
 }
 
+/* 1 コマンド分の応答を閉じる。/api/cmd は EOT (0x04) を待っているので、
+ * **断ったときも必ずここを通す** — 返さないとホストは timeout まで待ち、
+ * 以後のコマンドが全滅する (票 §2-2)。 */
+static void rshell_end_reply(void)
+{
+    g_api->buz_off();
+    {
+        u32 wait_end = g_api->get_tick() + 1;
+        while (g_api->get_tick() < wait_end) g_api->sys_halt();
+    }
+    g_api->serial_putchar(0x04);
+}
+
 static void cmd_rshell(int argc, char **argv)
 {
-    char rbuf[128];
+    char rbuf[RSHELL_LINE_MAX];
     int rpos, ch, kch;
+    int overflow;
     (void)argc; (void)argv;
 
     if (!g_api->serial_is_initialized()) {
@@ -93,12 +107,17 @@ static void cmd_rshell(int argc, char **argv)
     g_api->kprintf(ATTR_CYAN, "%s", "Waiting for commands via serial...\n");
     g_api->serial_putchar(0x04);
 
+    rpos = 0;
     for (;;) {
+        /* **ESC を見るより先に** 1 行分の状態を畳む。rpos は抜け口で
+         * 「ホストへ EOT を返し損ねていないか」の判定に使うので、前の行の
+         * 長さが残っていると待っていないホストへ 2 つ目を返してしまう。 */
+        rpos = 0;
+        overflow = 0;
+        rbuf[0] = '\0';
+
         kch = g_api->kbd_trygetchar();
         if (kch == 0x1B) break;
-
-        rpos = 0;
-        rbuf[0] = '\0';
 
         if (kch >= 0x20 && kch < 0x7F) {
             ch = kch;
@@ -120,8 +139,11 @@ static void cmd_rshell(int argc, char **argv)
         }
 
     read_rest:
-        while (ch >= 0 && ch != '\n' && ch != '\r' && rpos < 126) {
-            rbuf[rpos++] = (char)ch;
+        /* T10: 上限を超えたら**そこで読み取りを止めない**。止めると残りが
+         * 次の入力になって勝手に実行される。行末まで読み捨てて印だけ立てる。 */
+        while (ch >= 0 && ch != '\n' && ch != '\r') {
+            if (rpos >= RSHELL_LINE_MAX - 2) overflow = 1;
+            else rbuf[rpos++] = (char)ch;
             {
                 int t = 0;
                 while (t < 50000) {
@@ -136,6 +158,14 @@ static void cmd_rshell(int argc, char **argv)
         }
         rbuf[rpos] = '\0';
 
+        if (overflow) {
+            /* 赤字 1 行を出して**実行しない**。EOT は必ず返す (§2-2)。 */
+            sh_refuse("rshell: command line", RSHELL_LINE_MAX - 2);
+            (void)sh_refused_take();   /* 対話と同じ — 次の行へ持ち越さない */
+            rshell_end_reply();
+            continue;
+        }
+
         if (rpos == 0) continue;
 
         g_api->buz_off();
@@ -148,16 +178,29 @@ static void cmd_rshell(int argc, char **argv)
 
         execute_command(rbuf);
 
-        g_api->buz_off();
+        /* 印を **1 行ぶんで下ろす** (対話の ui.c と同じ扱い)。
+         * rshell 自身が execute_command("rshell") の中で走っているので、
+         * ここの execute_command は必ず入れ子 (g_exec_depth >= 1) になり、
+         * main.c の「いちばん外側だけ消す」が効かない。下ろさないと一度
+         * 断りが起きたきり印が立ちっぱなしになり、**以降どのスクリプトも
+         * 1 行目で打ち切られる** (2026-09-16 実機で退行として出た)。
+         * source の中の打ち切りは script_exec が自分で take して済ませた
+         * 後なので、ここで下ろしても壊れない。 */
+        (void)sh_refused_take();
 
-        {
-            u32 wait_end = g_api->get_tick() + 1;
-            while (g_api->get_tick() < wait_end) g_api->sys_halt();
-        }
-
-        g_api->serial_putchar(0x04);
+        rshell_end_reply();
     }
 rshell_exit:
+    /* 抜ける口はここ 1 つ — ホストの `exit`、待ち中の ESC、行の途中の ESC。
+     * rpos > 0 は「この行のバイトを受け取ったのに、まだ EOT を返していない」
+     * ことと同値なので、そのときだけ閉じる。
+     *   - `exit`        : ホストは EOT を待っている → 返す (rpos == 4)
+     *   - 行の途中の ESC: 同じく待っている → 返す
+     *   - 待ち中の ESC  : 直前の行の EOT は返し終えている (rpos == 0) → **返さない**。
+     *                     返すと 1 コマンドに EOT が 2 つ出て、/api/cmd は
+     *                     次のコマンドの終端と取り違える (票 §2-2 の裏)。 */
+    if (rpos > 0) rshell_end_reply();
+
     g_api->rshell_set_active(0);
     g_api->kprintf(ATTR_CYAN, "%s", "\n[Remote shell closed]\n");
 }
@@ -238,7 +281,12 @@ static void cmd_hotdeploy(int argc, char **argv)
     g_api->kprintf(ATTR_GREEN, "HOTDEPLOY OK %s %u\n", path, len);
 }
 
-/* host: プレフィックスを /host/ パスに変換するヘルパ */
+/* host: プレフィックスを /host/ パスに変換するヘルパ
+ *
+ * 戻り値: 1 = 変換した / 0 = "host:" で始まっていない /
+ *         -1 = out に収まらない (票 T19)。
+ * 以前は max - 1 で黙って切っていたので、`push` / `recv` が
+ * **切れた別のパス**を O_TRUNC で作っていた。 */
 static int resolve_host_path(const char *arg, char *out, int max)
 {
     const char *p;
@@ -251,7 +299,10 @@ static int resolve_host_path(const char *arg, char *out, int max)
     out[0] = '/'; out[1] = 'h'; out[2] = 'o'; out[3] = 's'; out[4] = 't';
     i = 5;
     if (*p != '/') { out[i++] = '/'; }  /* / を補完 */
-    while (*p && i < max - 1) { out[i++] = *p++; }
+    while (*p) {
+        if (i >= max - 1) return -1;
+        out[i++] = *p++;
+    }
     out[i] = '\0';
     return 1;
 }
@@ -264,8 +315,16 @@ static void cmd_recv(int argc, char **argv)
      * パスは専用バッファに置く。以前は xfer_buf の先頭に置いたうえで
      * 同じ buf にデータを読み込んでおり、argc<3 のとき local_path が
      * xfer_buf の内部を指すという別名参照になっていた。 */
-    static char host_path[256];
-    if (argc >= 2 && resolve_host_path(argv[1], host_path, sizeof(host_path))) {
+    static char host_path[RSHELL_HOST_PATH_MAX];
+    int hp;
+
+    hp = (argc >= 2) ? resolve_host_path(argv[1], host_path,
+                                         (int)sizeof(host_path)) : 0;
+    if (hp < 0) {
+        sh_refuse("recv: host path", (int)sizeof(host_path) - 1);
+        return;
+    }
+    if (hp > 0) {
         const char *local_path;
         int fd_in, fd_out, n;
         u32 total;
@@ -337,9 +396,10 @@ static void cmd_recv(int argc, char **argv)
 
 static void cmd_push(int argc, char **argv)
 {
-    char host_path[256];
+    char host_path[RSHELL_HOST_PATH_MAX];
     const char *local_path;
-    int fd_in, fd_out, sz;
+    int fd_in, fd_out, n, hp;
+    u32 total;
     u32 t0, t1, elapsed;
 
     if (argc < 3) {
@@ -350,7 +410,12 @@ static void cmd_push(int argc, char **argv)
     local_path = argv[1];
 
     /* 宛先が host: プレフィックスか確認 */
-    if (!resolve_host_path(argv[2], host_path, 256)) {
+    hp = resolve_host_path(argv[2], host_path, (int)sizeof(host_path));
+    if (hp < 0) {
+        sh_refuse("push: host path", (int)sizeof(host_path) - 1);
+        return;
+    }
+    if (hp == 0) {
         g_api->kprintf(ATTR_RED, "%s", "push: destination must be host:path\n");
         return;
     }
@@ -363,33 +428,46 @@ static void cmd_push(int argc, char **argv)
         g_api->kprintf(ATTR_RED, "push: %s not found\n", local_path);
         return;
     }
-    sz = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));
-    g_api->sys_close(fd_in);
-    if (sz < 0) {
-        g_api->kprintf(ATTR_RED, "%s", "push: read failed\n");
-        return;
-    }
 
     fd_out = g_api->sys_open(host_path, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
     if (fd_out < 0) {
         g_api->kprintf(ATTR_RED, "push: cannot create %s\n", host_path);
+        g_api->sys_close(fd_in);
         return;
     }
-    if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)sz) != sz) {
-        g_api->kprintf(ATTR_RED, "%s", "push: write failed\n");
-        g_api->sys_close(fd_out);
-        return;
+
+    /* T24: xfer_buf 単位で**読み切るまで回す** (cmd_recv と同じ形)。
+     * 以前は sys_read が 1 回だけで、4KB を超えるファイルは先頭 4KB だけを
+     * 送って `Sent` と報告していた。 */
+    total = 0;
+    for (;;) {
+        n = g_api->sys_read(fd_in, xfer_buf, sizeof(xfer_buf));
+        if (n < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "push: read failed\n");
+            g_api->sys_close(fd_in);
+            g_api->sys_close(fd_out);
+            return;
+        }
+        if (n == 0) break;
+        if ((int)g_api->sys_write(fd_out, xfer_buf, (u32)n) != n) {
+            g_api->kprintf(ATTR_RED, "%s", "push: write failed\n");
+            g_api->sys_close(fd_in);
+            g_api->sys_close(fd_out);
+            return;
+        }
+        total += (u32)n;
     }
+    g_api->sys_close(fd_in);
     g_api->sys_close(fd_out);
 
     t1 = g_api->get_tick();
     elapsed = t1 - t0;
     if (elapsed == 0) elapsed = 1;
-    g_api->kprintf(ATTR_GREEN, "Sent %d bytes", sz);
+    g_api->kprintf(ATTR_GREEN, "Sent %u bytes", total);
     g_api->kprintf(ATTR_GREEN, " (%u.%02us, ",
                    elapsed / 100, elapsed % 100);
     g_api->kprintf(ATTR_GREEN, "%u B/s)\n",
-                   (u32)sz * 100 / elapsed);
+                   total * 100 / elapsed);
 }
 
 static void cmd_tvdump(int argc, char **argv)

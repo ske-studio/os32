@@ -95,6 +95,8 @@ typedef struct {
 static Script g_script;
 static char   g_req_cmdline[LAUNCH_CMDLINE_MAX];
 static i32    g_last_poll_token;
+static int    g_reqs;               /* launch_req を呼んだ回数 (票 T11 / U12) */
+static int    g_refused;            /* sh_refuse が呼ばれたら 1 (同) */
 static int    g_yields;
 static int    g_polls;
 static int    g_yield_before_poll;  /* poll の時点で yield が足りていれば 1 */
@@ -113,6 +115,8 @@ static void reset_harness(void)
     }
     g_req_cmdline[0] = '\0';
     g_last_poll_token = 0;
+    g_reqs = 0;
+    g_refused = 0;
     g_yields = 0;
     g_polls = 0;
     g_yield_before_poll = 1;
@@ -159,6 +163,7 @@ static void __cdecl h_kprintf(u8 attr, const char *fmt, ...)
 static i32 __cdecl h_launch_req(const char *cmdline)
 {
     u32 pos = 0;
+    g_reqs++;
     str_put(g_req_cmdline, (u32)LAUNCH_CMDLINE_MAX, &pos, cmdline);
     return g_script.req_rc;
 }
@@ -206,6 +211,17 @@ static void build_api(void)
 }
 
 /* ---- 実物のソース ------------------------------------------------------ */
+
+/* 票 TASK_SH_TRUNCATION §5 の段 3 (T11) で sh_launch が呼ぶようになった
+ * 「断り」の口。実体は main.c にあるが、この試験は sh_launch.inc だけを
+ * 取り込むので同じ契約の最小実装を置く — 赤字 1 行 (g_msg) + 印。 */
+void sh_refuse(const char *what, int limit);
+
+void sh_refuse(const char *what, int limit)
+{
+    g_refused = 1;
+    h_kprintf(ATTR_RED, "%s too long (max %d)\n", what, limit);
+}
 
 #include "../../userland/shell/sh_launch.inc"
 
@@ -366,6 +382,47 @@ static void case_req_nogui(void)
     check(sh_launch_nogui == 0,                     "7f 通ったら印を寝かせる");
 }
 
+/* ========================================================================
+ *  8. T11 / U12 — 256 バイト以上の行は **launch_req を呼ばずに** 断る
+ *
+ *  カーネル (exec/launch.c) は len >= LAUNCH_CMDLINE_MAX を OS32_ERR_INVAL
+ *  で返すが、sh.bin はその INVAL を「GUI 外」と読むので理由が入れ替わる。
+ *  送る前に測って断ること。上限ちょうど (255) は今までどおり通る。
+ * ======================================================================== */
+static void case_cmdline_too_long(void)
+{
+    static char line[LAUNCH_CMDLINE_MAX + 8];
+    int i, rc;
+
+    reset_harness();
+    report("8 T11 — 256 バイト以上は launch_req を呼ばずに断る\n");
+
+    for (i = 0; i < LAUNCH_CMDLINE_MAX; i++) line[i] = 'a';
+    line[LAUNCH_CMDLINE_MAX] = '\0';            /* ちょうど 256 バイト */
+
+    g_script.req_rc = 7;
+    script_poll(0, 0, LAUNCH_ST_DONE);
+
+    rc = sh_launch(line);
+    check(rc == EXEC_ERR_GENERAL,  "8a 負を返す (GUI 外の NOT_FOUND ではない)");
+    check(g_reqs == 0,             "8b launch_req を呼ばない");
+    check(g_polls == 0,            "8c poll しない");
+    check(g_refused == 1,          "8d 断りの印を立てる");
+    check(str_eq(g_msg, "sh: launch command line too long (max 255)\n"),
+                                   "8e 何が上限を超えたか + 上限を出す");
+
+    /* 誤発火の裏: 255 バイトちょうどは今までどおり通る (「以上」で数える) */
+    reset_harness();
+    line[LAUNCH_CMDLINE_MAX - 1] = '\0';        /* 255 バイト */
+    g_script.req_rc = 7;
+    script_poll(0, 0, LAUNCH_ST_DONE);
+
+    rc = sh_launch(line);
+    check(rc == EXEC_SUCCESS,      "8f 255 バイトちょうどは通る");
+    check(g_reqs == 1,             "8g 255 では launch_req を呼ぶ");
+    check(g_refused == 0,          "8h 255 では印を立てない");
+}
+
 /* ---- entry ------------------------------------------------------------- */
 
 void _start(void)
@@ -378,6 +435,7 @@ void _start(void)
     case_full();
     case_req_other();
     case_req_nogui();
+    case_cmdline_too_long();
     report(failures ? "SOME FAIL\n" : "ALL PASS\n");
     die(failures ? 1 : 0);
 }

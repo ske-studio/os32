@@ -69,6 +69,8 @@ static int script_load(const char *path)
     int bi, li;
     int in_block_comment = 0;
     int cls;
+    int more;
+    int refused = 0;
     char line_tmp[SCRIPT_MAX_LINE];
 
     /* raw_buf を動的確保 */
@@ -95,9 +97,26 @@ static int script_load(const char *path)
         return -1;
     }
     sz = g_api->sys_read(fd, raw_buf, raw_buf_size - 1);
+    /* T2': 読み切れたかを**閉じる前に**確かめる。raw_buf を埋め切ったときは
+     * 続きが残っているかもしれず、残っていればスクリプトの途中から先が
+     * 無かったことになる (32KB を超えるスクリプトが黙って切れていた)。 */
+    more = 0;
+    if (sz == raw_buf_size - 1) {
+        char probe;
+        if (g_api->sys_read(fd, &probe, 1) > 0) more = 1;
+    }
     g_api->sys_close(fd);
     if (sz <= 0) {
         g_api->kprintf(ATTR_RED, "source: cannot read %s\n", path);
+        g_api->mem_free(raw_buf);
+        g_api->mem_free(script_lines);
+        script_lines = NULL;
+        return -1;
+    }
+    if (more) {
+        /* 上限の書式には乗らない (読み切れなかった) ので印だけ立てる。 */
+        g_api->kprintf(ATTR_RED, "source: %s too large to read in full\n", path);
+        sh_refuse_mark();
         g_api->mem_free(raw_buf);
         g_api->mem_free(script_lines);
         script_lines = NULL;
@@ -117,8 +136,13 @@ static int script_load(const char *path)
                 bi++;
             }
 
-            /* 行を終端 */
-            if (li >= SCRIPT_MAX_LINE) li = SCRIPT_MAX_LINE - 1;
+            /* T2: 行が収まらなかったら**切り詰めた行を実行しない**。
+             * 以前はここで 255 バイトへ切って、切れた行がそのまま走った。 */
+            if (li > SCRIPT_MAX_LINE - 1) {
+                sh_refuse("source: script line", SCRIPT_MAX_LINE - 1);
+                refused = 1;
+                break;
+            }
             line_tmp[li] = '\0';
 
             /* 行を分類 */
@@ -132,8 +156,13 @@ static int script_load(const char *path)
             } else if (cls == 0) {
                 /* 通常行 — 配列に格納 */
                 if (script_line_count >= SCRIPT_MAX_LINES) {
+                    /* T2: 129 行目以降を捨てて先頭 128 行を実行すると、
+                     * 捨てた行 (後始末など) が無かったことになる。
+                     * 上限の書式には乗らないので印だけ立てる。 */
                     g_api->kprintf(ATTR_RED, "source: too many lines (max %d)\n",
                                    SCRIPT_MAX_LINES);
+                    sh_refuse_mark();
+                    refused = 1;
                     break;
                 }
                 for (i = 0; i < li && i < SCRIPT_MAX_LINE - 1; i++) {
@@ -155,16 +184,34 @@ static int script_load(const char *path)
     }
 
     g_api->mem_free(raw_buf);
+    if (refused) {
+        /* 1 行でも切り詰めたら**スクリプトを実行しない** (票 U3)。
+         * script_source_file はここで止まり、source は失敗する。 */
+        g_api->mem_free(script_lines);
+        script_lines = NULL;
+        script_line_count = 0;
+        return -1;
+    }
     return 0;
 }
 
 /* ======================================================================== */
 /*  実行フェーズ: script_lines[] を順次実行                                  */
+/*                                                                          */
+/*  戻り値: 0 = 最後まで / ESC / return で終わった                           */
+/*          1 = 行を断ったので打ち切った (票 TASK_SH_TRUNCATION §2-1)        */
 /* ======================================================================== */
-static void script_exec(void)
+static int script_exec(void)
 {
+    int refused = 0;
+
     script_current_line = 0;
     script_abort_flag = 0;
+
+    /* 入口では印を触らない。印を消すのは「いちばん外側の execute_command の
+     * 入口」1 か所だけで、script_exec へ来る経路は必ずそこを通っている
+     * (source / .sh / if / time のどれでも)。印を立てる側は立てたらすぐ
+     * 戻るので、ここに古い印が残っていることはない。 */
 
     while (script_current_line < script_line_count && !script_abort_flag) {
         const char *line = script_lines[script_current_line];
@@ -199,14 +246,29 @@ static void script_exec(void)
         /* コマンド実行 */
         execute_command(line);
 
+        /* §2-1: 切り詰めで行を断ったら、そこでスクリプトを打ち切る。
+         * 断った行を捨てて次へ進むと、本来 goto で飛び越されるはずだった
+         * 後続行 (`rm -rf /data` など) へ落ちてしまう。goto のラベルが
+         * 見つからないときと同じ扱いにする。
+         * 印は 1 行ぶんの寿命なので、ここで読んで消す。 */
+        if (sh_refused_take()) {
+            g_api->kprintf(ATTR_RED, "%s", "script: aborted (line refused)\n");
+            script_abort_flag = 1;
+            refused = 1;
+            break;
+        }
+
         script_current_line++;
     }
+
+    return refused;
 }
 
 /* ======================================================================== */
 /*  公開API: script_source_file — ファイルを読み込んで実行                   */
 /*                                                                          */
-/*  戻り値: 0=成功, -1=エラー                                               */
+/*  戻り値: 0=成功, -1=エラー,                                              */
+/*          SCRIPT_ERR_REFUSED=行を断って打ち切った (票 §2-1)               */
 /* ======================================================================== */
 int script_source_file(const char *path)
 {
@@ -235,7 +297,11 @@ int script_source_file(const char *path)
     /* ロード→実行 */
     result = script_load(path);
     if (result == 0) {
-        script_exec();
+        /* 断って打ち切ったことは戻り値で親へ伝える。印そのものは
+         * script_exec が消しているので、ここで勝手に立て直さない —
+         * 立て直すかどうかは呼び手が決める (source は立て直し、
+         * 起動時の profile は立て直さずに続行する)。 */
+        if (script_exec()) result = SCRIPT_ERR_REFUSED;
     }
 
     /* 現在のスクリプト行を解放 */
@@ -262,7 +328,32 @@ static void cmd_source(int argc, char **argv)
         g_api->kprintf(ATTR_RED, "%s", "Usage: source <file>\n");
         return;
     }
-    script_source_file(argv[1]);
+    /* 入れ子の source: 内側が断って打ち切ったら、外側のスクリプトも
+     * 打ち切る (§2-1)。印を立て直して execute_command 経由で親の
+     * script_exec に見せる。 */
+    if (script_source_file(argv[1]) == SCRIPT_ERR_REFUSED) sh_refuse_mark();
+}
+
+/* ======================================================================== */
+/*  起動スクリプト (/etc/profile, $HOME/.profile) の入口                     */
+/*                                                                          */
+/*  断られても**起動は止めない** (票 §2-1 末尾 / 受入 R2)。メッセージを     */
+/*  出して既定値のまま続ける。印は立て直さないので、この後の 1 行目が        */
+/*  巻き添えで捨てられることもない。                                         */
+/* ======================================================================== */
+void script_source_profile(const char *path)
+{
+    int r = script_source_file(path);
+
+    /* 起動は止めないので印は**先に**下ろす。script_load が断った (T2) 場合は
+     * script_exec を通らないため印が立ったままで、そのままだと起動後の
+     * 1 行目が巻き添えで捨てられる。 */
+    if (r < 0) (void)sh_refused_take();
+
+    if (r == SCRIPT_ERR_REFUSED) {
+        g_api->kprintf(ATTR_RED,
+                       "sh: %s aborted; continuing with defaults\n", path);
+    }
 }
 
 /* ======================================================================== */
@@ -274,24 +365,36 @@ static void cmd_source(int argc, char **argv)
 /* ======================================================================== */
 static void cmd_ask(int argc, char **argv)
 {
-    char prompt[256];
-    char input[256];
+    char prompt[ASK_PROMPT_MAX];
+    char input[ASK_INPUT_MAX];
     int pi = 0;
     int i, j, len, key;
+    int dropped = 0;
 
     if (argc < 3) {
         g_api->kprintf(ATTR_RED, "%s", "Usage: ask \"prompt\" VAR_NAME\n");
         return;
     }
 
-    /* argv[1]..argv[argc-2] をスペース区切りで結合 (引用符除去) */
+    /* argv[1]..argv[argc-2] をスペース区切りで結合 (引用符除去)。
+     * T18: 収まらないプロンプトは切って出さない — 何を訊かれているか
+     * 分からないまま答えを変数に入れることになる。 */
     for (i = 1; i < argc - 1; i++) {
-        for (j = 0; argv[i][j] && pi < 254; j++) {
-            if (argv[i][j] != '"') {
-                prompt[pi++] = argv[i][j];
+        for (j = 0; argv[i][j]; j++) {
+            if (argv[i][j] == '"') continue;
+            if (pi >= ASK_PROMPT_MAX - 2) {
+                sh_refuse("ask: prompt", ASK_PROMPT_MAX - 2);
+                return;
             }
+            prompt[pi++] = argv[i][j];
         }
-        if (i < argc - 2 && pi < 254) prompt[pi++] = ' ';
+        if (i < argc - 2) {
+            if (pi >= ASK_PROMPT_MAX - 2) {
+                sh_refuse("ask: prompt", ASK_PROMPT_MAX - 2);
+                return;
+            }
+            prompt[pi++] = ' ';
+        }
     }
     prompt[pi] = '\0';
 
@@ -320,7 +423,14 @@ static void cmd_ask(int argc, char **argv)
             }
             continue;
         }
-        if ((key & 0xFF) >= 0x20 && (key & 0xFF) < 0x7F && len < 254) {
+        if ((key & 0xFF) >= 0x20 && (key & 0xFF) < 0x7F) {
+            /* T18: 255 文字目以降を黙って捨てて変数へ入れると、
+             * 打ったものと違う値が登録される。捨てたら印を立てておき、
+             * ENTER のところで断る (ui.c の行編集と同じ形)。 */
+            if (len >= ASK_INPUT_MAX - 2) {
+                dropped = 1;
+                continue;
+            }
             input[len++] = (char)(key & 0xFF);
             g_api->shell_putchar((char)(key & 0xFF), ATTR_WHITE);
         }
@@ -328,7 +438,12 @@ static void cmd_ask(int argc, char **argv)
     input[len] = '\0';
     g_api->shell_putchar('\n', ATTR_WHITE);
 
-    /* 環境変数にセット */
+    if (dropped) {
+        sh_refuse("ask: input", ASK_INPUT_MAX - 2);
+        return;               /* 切れた値は登録しない */
+    }
+
+    /* 環境変数にセット (名前 / 値の長さは env_set が見る — 票 T8) */
     env_set(argv[argc - 1], input);
 }
 
@@ -342,32 +457,53 @@ static void cmd_ask(int argc, char **argv)
 /*    if not exist PATH COMMAND...   ファイル非存在                          */
 /*                                                                          */
 /*  注意: $VAR 展開は execute_command() 到達前に env_expand() で処理済み。   */
-/*        引用符 " は parse_args_and_glob() で除去されないため残る。          */
+/*        引用符 " は parse_args_and_glob() が既に落としている (sh_args.inc  */
+/*        の「インプレースでクォート除去」)。argv に残るのはエスケープ等で    */
+/*        生き残った " だけなので、strip_quotes はその取りこぼしを掃除する    */
+/*        役目になっている。長さの上限は**クォート除去後**で数える。          */
 /* ======================================================================== */
 
-/* 内部ヘルパー: 引用符を除去して比較用文字列を取得 */
-static void strip_quotes(const char *src, char *dst, int max)
+/* 内部ヘルパー: 引用符を除去して比較用文字列を取得
+ *
+ * 戻り値: 除去後の長さ / dst に収まらなければ -1 (票 T1)。
+ * 以前はここで黙って max-1 文字に切っていたため、**先頭 255 文字が同じで
+ * 256 文字目以降が違う 2 つの値が「等しい」と判定され**、`==` では本来
+ * 実行されない枝が走り `!=` では逆に走らなかった。切り詰めた値では比べない。 */
+static int strip_quotes(const char *src, char *dst, int max)
 {
     int di = 0;
-    while (*src && di < max - 1) {
-        if (*src != '"') dst[di++] = *src;
+    while (*src) {
+        if (*src != '"') {
+            if (di >= max - 1) return -1;
+            dst[di++] = *src;
+        }
         src++;
     }
     dst[di] = '\0';
+    return di;
 }
 
-/* 内部ヘルパー: argv[start]..argv[argc-1] をスペース区切りで結合 */
-static void join_args(int argc, char **argv, int start, char *buf, int max)
+/* 内部ヘルパー: argv[start]..argv[argc-1] をスペース区切りで結合
+ *
+ * 戻り値: 結合後の長さ / buf に収まらなければ -1 (票 T12)。
+ * 以前は max - 1 で黙って切っていたので、**切れたコマンド行がそのまま
+ * 実行された** (glob 展開で argv が伸びた行で届く)。 */
+static int join_args(int argc, char **argv, int start, char *buf, int max)
 {
     int bi = 0;
     int i, j;
     for (i = start; i < argc; i++) {
-        if (i > start && bi < max - 1) buf[bi++] = ' ';
-        for (j = 0; argv[i][j] && bi < max - 1; j++) {
+        if (i > start) {
+            if (bi >= max - 1) return -1;
+            buf[bi++] = ' ';
+        }
+        for (j = 0; argv[i][j]; j++) {
+            if (bi >= max - 1) return -1;
             buf[bi++] = argv[i][j];
         }
     }
     buf[bi] = '\0';
+    return bi;
 }
 
 static void cmd_if(int argc, char **argv)
@@ -404,9 +540,18 @@ static void cmd_if(int argc, char **argv)
     }
     /* "if VAL1 == VAL2 COMMAND..." / "if VAL1 != VAL2 COMMAND..." */
     else if (argc >= 5) {
-        char v1[256], v2[256];
-        strip_quotes(argv[1], v1, 256);
-        strip_quotes(argv[3], v2, 256);
+        char v1[IF_VALUE_MAX], v2[IF_VALUE_MAX];
+        int n1 = strip_quotes(argv[1], v1, IF_VALUE_MAX);
+        int n2 = strip_quotes(argv[3], v2, IF_VALUE_MAX);
+
+        /* 収まらない値は**比べない**。切り詰めて比べると条件が逆になり、
+         * 本来実行されない枝が走る (票 T1 / U1)。断った行はここで終わり、
+         * スクリプト中なら script_exec が後続行も実行しない (§2-1)。 */
+        if (n1 < 0 || n2 < 0) {
+            sh_refuse(n1 < 0 ? "if: left value" : "if: right value",
+                      IF_VALUE_MAX - 1);
+            return;
+        }
 
         if (str_eq(argv[2], "==")) {
             condition = str_eq(v1, v2);
@@ -425,7 +570,10 @@ static void cmd_if(int argc, char **argv)
     /* 条件が真のときのみコマンドを実行 */
     if (condition && cmd_start < argc) {
         static char cmd_buf[CMD_BUF_SIZE];
-        join_args(argc, argv, cmd_start, cmd_buf, CMD_BUF_SIZE);
+        if (join_args(argc, argv, cmd_start, cmd_buf, CMD_BUF_SIZE) < 0) {
+            sh_refuse("if: command line", CMD_BUF_SIZE - 1);
+            return;
+        }
         execute_command(cmd_buf);
     }
 }

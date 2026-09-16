@@ -58,6 +58,7 @@ struct GlobCtx {
     const char *dir_prefix;
     int matched_any;
     int overflow;              /* I1: 詰めきれなかった (行ごと捨てる) */
+    int alloc_failed;          /* T6: mem_alloc が失敗した (行ごと断る) */
     char **allocated_strings;
     int *alloc_count;
 };
@@ -82,7 +83,11 @@ static void glob_cb(const DirEntry_Ext *entry, void *c) {
         dirlen = strlen(ctx->dir_prefix);
         namelen = strlen(entry->name);
         full = (char *)g_api->mem_alloc(dirlen + namelen + 1);
-        if (!full) return;
+        /* T6: 確保に失敗したら **印を立てて** 戻る。以前は黙って戻っていたので
+         * 一致の一部だけが argv に入り、`rm /tmp/item*` が 1 件だけ消えて
+         * 成功に見えた。ここは CPL=0 のコールバックの中なので印だけ立て、
+         * 赤字と後始末は parse_args_and_glob が戻ってから行う。 */
+        if (!full) { ctx->alloc_failed = 1; return; }
 
         for (i = 0; i < dirlen; i++) full[i] = ctx->dir_prefix[i];
         for (i = 0; i < namelen; i++) full[dirlen + i] = entry->name[i];
@@ -142,9 +147,30 @@ static int sh_glob_run(const char *dir_path, struct GlobCtx *ctx)
 int sh_glob_failed = 0;
 #endif
 
+/* T7: glob のパターン部を **切らずに** 写す。入り切らないなら照合を試みずに
+ * 断る — 切ったパターンは別のファイルに当たる (`prefix…suffix1*` が
+ * `suffix2` まで巻き込む)。戻り値 0 = OK / -1 = 断った。 */
+static int glob_copy_pattern(char *dst, const char *src)
+{
+    int n = 0;
+
+    while (src[n]) {
+        if (n >= GLOB_PATTERN_MAX - 1) {
+            sh_refuse("sh: glob pattern", GLOB_PATTERN_MAX - 1);
+            return -1;
+        }
+        dst[n] = src[n];
+        n++;
+    }
+    dst[n] = '\0';
+    return 0;
+}
+
 /* I1: 戻り値 0 = OK / -1 = 引数が多すぎるので**行ごと捨てる**。以前は黙って
  * 切り捨てていて、`cp` + 253 個 + `/wrong` + `/intended` で最後の宛先が消え、
- * `/wrong/s` を上書きしていた (複数 glob の合計超過も同じ)。 */
+ * `/wrong/s` を上書きしていた (複数 glob の合計超過も同じ)。
+ * 捨てるときは **sh_refuse_mark() で印を立てる** — 立てないとスクリプトが
+ * 次の行へ落ちて、捨てたはずの行の後始末が走る (段 3 で T6 と一緒に直した)。 */
 int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args, char **allocated_strings, int *alloc_count) {
     int argc = 0;
     char *p = cmd_line;
@@ -202,7 +228,7 @@ int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args
             char *last_slash = (char *)0;
             char *q = start;
             char dir_path[PATH_MAX_LEN];
-            char pattern[256];
+            char pattern[GLOB_PATTERN_MAX];
             struct GlobCtx ctx;
 
             while (*q) {
@@ -213,22 +239,24 @@ int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args
             if (last_slash) {
                 int dirlen = last_slash - start + 1;
                 int i;
-                for (i = 0; i < dirlen && i < PATH_MAX_LEN - 1; i++) dir_path[i] = start[i];
+                /* T7: ディレクトリ部を切ると **別の場所** を照合しにいく */
+                if (dirlen > PATH_MAX_LEN - 1) {
+                    sh_refuse("sh: glob directory", PATH_MAX_LEN - 1);
+                    *argc_out = argc;
+                    return -1;
+                }
+                for (i = 0; i < dirlen; i++) dir_path[i] = start[i];
                 dir_path[i] = '\0';
-                
-                {
-                    int patlen = 0;
-                    char *pat_ptr = last_slash + 1;
-                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                    pattern[patlen] = '\0';
+
+                if (glob_copy_pattern(pattern, last_slash + 1) < 0) {
+                    *argc_out = argc;
+                    return -1;
                 }
             } else {
                 dir_path[0] = '.'; dir_path[1] = '\0';
-                {
-                    int patlen = 0;
-                    char *pat_ptr = start;
-                    while (*pat_ptr && patlen < 255) pattern[patlen++] = *pat_ptr++;
-                    pattern[patlen] = '\0';
+                if (glob_copy_pattern(pattern, start) < 0) {
+                    *argc_out = argc;
+                    return -1;
                 }
             }
 
@@ -239,6 +267,7 @@ int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args
             ctx.dir_prefix = last_slash ? dir_path : "";
             ctx.matched_any = 0;
             ctx.overflow = 0;
+            ctx.alloc_failed = 0;
             ctx.allocated_strings = allocated_strings;
             ctx.alloc_count = alloc_count;
 
@@ -252,14 +281,29 @@ int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args
             g_api->sys_ls(dir_path, glob_cb, &ctx);
 #endif
 
+            /* T6: 一致の **一部だけ** を渡さない。行ごと断って、確保済みの
+             * 文字列は呼び手 (execute_single) が allocated_strings から
+             * まとめて解放する。 */
+            if (ctx.alloc_failed) {
+                g_api->kprintf(ATTR_RED, "%s", "sh: glob: out of memory\n");
+                sh_refuse_mark();
+                *argc_out = argc;
+                return -1;
+            }
+            /* I1 も「入力を捨てたのに次の行が走る」同じ型 (PM 決裁
+             * 2026-09-16、段 3 で一緒に直す)。上限ではなく「入り切らない」
+             * ので sh_refuse の書式には乗らない — 文言は据え置きで印だけ
+             * 立てる (空の段 / glob の確保失敗と同じ扱い)。 */
             if (ctx.overflow) {
                 g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                sh_refuse_mark();
                 *argc_out = argc;
                 return -1;
             }
             if (!ctx.matched_any) {
                 if (argc >= max_args - 1) {
                     g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                    sh_refuse_mark();
                     *argc_out = argc;
                     return -1;
                 }
@@ -268,6 +312,7 @@ int parse_args_and_glob(char *cmd_line, char **argv, int *argc_out, int max_args
         } else {
             if (argc >= max_args - 1) {
                 g_api->kprintf(ATTR_RED, "%s", "sh: too many arguments\n");
+                sh_refuse_mark();
                 *argc_out = argc;
                 return -1;
             }

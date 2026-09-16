@@ -180,4 +180,5 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 
 スキル: **`os32-build-verify`** (ビルド・配備・検証の選択)、**`os32-emu-debug`** (エミュレータ上の障害調査)、
 **`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)、
-**`os32-local-ai`** (ビルド・試験・配備をローカル AI に実行させる)。
+**`os32-local-ai`** (ビルド・試験・配備をローカル AI に実行させる)、
+**`os32-local-review`** (主レビュアーが枯渇したときの補助レビュー — `tools/review_local.py`)。

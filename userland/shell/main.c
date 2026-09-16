@@ -117,233 +117,13 @@ const char *shell_get_path(void)
     return g_path; /* フォールバック */
 }
 
-/* 文字列の末尾が指定の拡張子と一致するかチェック */
-static int has_ext(const char *s, const char *ext)
-{
-    int slen = strlen(s);
-    int elen = strlen(ext);
-    if (slen < elen) return 0;
-    return strcmp(s + slen - elen, ext) == 0;
-}
-
-/* パスにスラッシュが含まれるかチェック */
-static int has_slash(const char *s)
-{
-    while (*s) { if (*s == '/') return 1; s++; }
-    return 0;
-}
-
-/* cmdline (コマンド名+引数) を構築して exec_run を試行 */
-#define TRY_EXEC_BUF_SIZE  512
-#define TRY_EXEC_MARGIN    12  /* パス末尾 + スペース + NUL の余裕 */
-
-static int try_exec(const char *bin_path, int argc, char **argv)
-{
-    char cmd_buf[TRY_EXEC_BUF_SIZE];
-    char *p = cmd_buf;
-    char *limit_path = cmd_buf + TRY_EXEC_BUF_SIZE - TRY_EXEC_MARGIN;
-    char *limit_args = cmd_buf + TRY_EXEC_BUF_SIZE - 2;
-    int i;
-    const char *s;
-
-    /* バイナリパスをコピー */
-    s = bin_path;
-    while (*s && p < limit_path) *p++ = *s++;
-
-    /* 引数を追加。
-     * parse_args_and_glob が剥がしたクォートをここで復元する。
-     * 復元せずに空白区切りで再結合すると、exec_run 側の再トークナイズで
-     * 空白入り引数 (例: sndctl play "T120 O4 ...") がばらばらに割れる。 */
-    for (i = 1; i < argc; i++) {
-        int need_quote = 0;
-        const char *q;
-
-        if (p >= limit_args) break;
-        *p++ = ' ';
-
-        s = argv[i];
-        for (q = s; *q; q++) {
-            if (*q == ' ' || *q == '"' || *q == '\'' || *q == '\\') {
-                need_quote = 1;
-                break;
-            }
-        }
-        if (*s == '\0') need_quote = 1;   /* 空引数もクォートで保存 */
-
-        if (need_quote) {
-            if (p < limit_args) *p++ = '"';
-            /* 閉じクォート分の余裕を残してコピー。" と \ はエスケープ */
-            while (*s && p + 2 < limit_args) {
-                if (*s == '"' || *s == '\\') *p++ = '\\';
-                *p++ = *s++;
-            }
-            if (p < limit_args) *p++ = '"';
-        } else {
-            while (*s && p < limit_args) *p++ = *s++;
-        }
-    }
-    *p = '\0';
-
-    return sh_launch(cmd_buf);
-}
-
-#ifdef SHELL_AS_APP
-/* sh_launch / パイプバッファの実体。ホスト TDD が同じソースを #include
- * できるように別ファイルにしてある (tools/tests/sh_launch_host.c,
- * tools/tests/sh_shell_host.c)。 */
-#include "sh_launch.inc"
-#include "sh_pipe.inc"
-#endif /* SHELL_AS_APP */
-
 /* ======================================================================== */
-/*  try_exec_from_path — PATH環境変数を走査してコマンドを検索・実行           */
-/*                                                                          */
-/*  shell_get_path() から取得したコロン区切りPATHの各ディレクトリについて     */
-/*  dir + "/" + name_buf のフルパスを構築し try_exec を試行する。             */
+/*  コマンドの起動経路 (has_ext / has_slash / try_exec /                     */
+/*  try_exec_from_path / sh_is_cui_only / run_cmd_internal) の実体。         */
+/*  ホスト試験がそのまま #include できるように別ファイルにしてある            */
+/*  (tools/tests/sh_truncation_host.c)。並びは切り出す前と同一。             */
 /* ======================================================================== */
-static int try_exec_from_path(const char *name_buf, int argc, char **argv)
-{
-    const char *path_str = shell_get_path();
-    const char *p = path_str;
-
-    while (*p) {
-        char dir_buf[PATH_MAX_LEN];
-        char full_path[PATH_MAX_LEN];
-        int di = 0;
-        int rc;
-
-        /* ':' で区切られたディレクトリを取得 */
-        while (*p && *p != ':' && di < PATH_MAX_LEN - 2)
-            dir_buf[di++] = *p++;
-        dir_buf[di] = '\0';
-        if (*p == ':') p++;
-        if (di == 0) continue;
-
-        /* フルパス構築: dir + '/' + name_buf */
-        strncpy(full_path, dir_buf, PATH_MAX_LEN - 1);
-        full_path[PATH_MAX_LEN - 1] = '\0';
-        if (di > 0 && dir_buf[di - 1] != '/') {
-            strncat(full_path, "/", PATH_MAX_LEN - strlen(full_path) - 1);
-        }
-        strncat(full_path, name_buf, PATH_MAX_LEN - strlen(full_path) - 1);
-
-        rc = try_exec(full_path, argc, argv);
-        if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-            return rc;
-        }
-    }
-    return EXEC_ERR_NOT_FOUND;
-}
-
-#ifdef SHELL_AS_APP
-/* D2(b): カーソル位置に依存する TUI / シリアル前提のコマンドは sh.bin では
- * 動かせない。内蔵コマンドの表を引く手前で弾く。`filer` の起動経路
- * (fl_exec_program) もここで到達しなくなる。 */
-static int sh_is_cui_only(int argc, char **argv)
-{
-    const char *name = argv[0];
-
-    if (str_eq(name, "os32gui") || str_eq(name, "rshell") ||
-        str_eq(name, "filer")) return 1;
-
-    /* R5: ループデバイスの枠 (drivers/loop_dev.c の loop_slots) は sh が
-     * 退場しても残り、backing FD だけが owner 回収で閉じる。その後 FD 番号が
-     * 再利用されると枠が別ファイルを向く。カーネル側の本修正は別票なので、
-     * sh.bin では枠を作る / 使う経路をまとめて断る。 */
-    if (str_eq(name, "losetup")) return 1;
-
-    /* T2: `play` は drivers/fm.c の io_wait で**同期に**鳴らし終わるまで
-     * CPL=0 で待つ。GUI 中は協調型全体が止まり、CTRL+STOP でも回収できない
-     * (`C` を 100 個で 22 秒)。`beep` は一瞬なので残す。 */
-    if (str_eq(name, "play")) return 1;
-    if (str_eq(name, "dd") && argc > 1) {
-        const char *d = argv[1];
-        if (d[0] == 'l' && d[1] == 'o' && d[2] >= '0' && d[2] <= '9') return 1;
-    }
-    return 0;
-}
-#endif
-
-static void run_cmd_internal(int argc, char **argv) {
-    int j, rc;
-    char name_buf[PATH_MAX_LEN];
-
-#ifdef SHELL_AS_APP
-    if (sh_is_cui_only(argc, argv)) {
-        g_api->kprintf(ATTR_RED, "%s", "sh: cui only\n");
-        return;
-    }
-#endif
-
-    if (argc > 1 && (str_eq(argv[1], "-h") || str_eq(argv[1], "--help") || str_eq(argv[1], "/?"))) {
-        shell_print_help(argv[0]);
-        return;
-    }
-
-    /* 0. .bat/.sh 拡張子 → 暗黙的に source として実行 */
-    if (has_ext(argv[0], ".bat") || has_ext(argv[0], ".sh")) {
-        script_source_file(argv[0]);
-        return;
-    }
-
-    /* 1. 内部コマンドの検索 */
-    for (j = 0; j < g_cmd_count; j++) {
-        if (str_eq(argv[0], g_cmds[j].name)) {
-            g_cmds[j].handler(argc, argv);
-            return;
-        }
-    }
-
-    /* 2. 外部コマンドの検索・実行 */
-    {
-        /* コマンド名に.bin拡張子を付加 (".bin\0" = 5文字分を予約) */
-        strncpy(name_buf, argv[0], PATH_MAX_LEN - 5);
-        name_buf[PATH_MAX_LEN - 5] = '\0';
-        if (!has_ext(name_buf, ".bin")) {
-            strcat(name_buf, ".bin");
-        }
-    }
-
-    /* 2a. パスにスラッシュが含まれる場合 → 直接実行 */
-    if (has_slash(argv[0])) {
-        rc = try_exec(name_buf, argc, argv);
-        sh_gfx_restore();
-        if (rc == EXEC_SUCCESS) {
-            g_api->kprintf(ATTR_GREEN, "%s", "\n");
-        } else if (rc == EXEC_ERR_FAULT) {
-            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-        } else if (rc == EXEC_ERR_NOT_FOUND) {
-            g_api->kprintf(ATTR_RED, "%s: not found\n", argv[0]);
-        }
-        return;
-    }
-
-    /* 2b. カレントディレクトリで試行 */
-    rc = try_exec(name_buf, argc, argv);
-    if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-        sh_gfx_restore();
-        if (rc == EXEC_SUCCESS) {
-            g_api->kprintf(ATTR_GREEN, "%s", "\n");
-        } else if (rc == EXEC_ERR_FAULT) {
-            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-        }
-        return;
-    }
-
-    /* 2c. PATH内の各ディレクトリで試行 */
-    rc = try_exec_from_path(name_buf, argc, argv);
-    if (rc != EXEC_ERR_NOT_FOUND && rc != EXEC_ERR_GENERAL) {
-        sh_gfx_restore();
-        if (rc == EXEC_SUCCESS) {
-            g_api->kprintf(ATTR_GREEN, "%s", "\n");
-        } else if (rc == EXEC_ERR_FAULT) {
-            g_api->kprintf(ATTR_RED, "%s", "\n[Process crashed]\n");
-        }
-        return;
-    }
-
-    g_api->kprintf(ATTR_RED, "%s: command not found\n", argv[0]);
-}
+#include "sh_exec.inc"
 
 /* ======================================================================== */
 /*  リダイレクト演算子の解析・適用                                           */
@@ -533,7 +313,13 @@ static void execute_single(const char *cmd)
     char *p;
     const char *src;
 
-    if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
+    /* T13: 空行と長大行を同じ扱いにしない。空行は今までどおり黙って戻り、
+     * 収まらない行は **断る** (黙って消すと入力が無かったことになる)。 */
+    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) >= CMD_BUF_SIZE) {
+        sh_refuse("sh: command", CMD_BUF_SIZE - 1);
+        return;
+    }
 
     src = cmd;
     p = tmp_buf;
@@ -605,6 +391,18 @@ static void execute_single(const char *cmd)
 /* ======================================================================== */
 #define MAX_PIPE_STAGES 8
 
+/* T5: 段数 (> 0) / -1 = 行ごと断った。
+ *
+ *  以前は 9 段目以降と空の段を **黙って捨てて** いたので、実行されない段の
+ *  失敗が見えなかった。捨てずに断る:
+ *    - 段が max_stages を超える      (`a|b|c|d|e|f|g|h|i`)
+ *    - 空の段がある                  (`echo ok |` / `| echo` / `a || b`)
+ *    - 1 段が seg_size に収まらない  (行全体が CMD_BUF_SIZE 未満なので実際に
+ *                                     は届かないが、規則としては同じ)
+ *
+ *  クォートは **今までどおり見ない**。したがって `echo "a||b"` の中の `|` も
+ *  区切りのままで、空の段として断られる。クォートを見る分割は票 §6 で
+ *  範囲外と決めてあるので、ここでは分割の規則を変えない。 */
 static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_stages)
 {
     int count = 0;
@@ -612,41 +410,110 @@ static int split_pipeline(const char *cmd, char *seg_buf, int seg_size, int max_
     const char *p = cmd;
     char *seg;
 
-    while (*p && count < max_stages) {
+    for (;;) {
+        if (count >= max_stages) {
+            sh_refuse("sh: pipeline", max_stages);
+            return -1;
+        }
         seg = seg_buf + count * seg_size;
         while (*p == ' ') p++;
         pos = 0;
         while (*p && *p != '|') {
-            if (pos < seg_size - 1) {
-                seg[pos++] = *p;
+            if (pos >= seg_size - 1) {
+                sh_refuse("sh: pipeline stage", seg_size - 1);
+                return -1;
             }
-            p++;
+            seg[pos++] = *p++;
         }
         while (pos > 0 && seg[pos - 1] == ' ') pos--;
         seg[pos] = '\0';
-        if (pos > 0) count++;
-        if (*p == '|') p++;
+        if (pos == 0) {
+            /* 上限ではなく「段が空」なので sh_refuse の書式には乗らない。
+             * 赤字 1 行 + 印だけ立てる (env_expand の断りと同じ形)。 */
+            g_api->kprintf(ATTR_RED, "%s", "sh: empty pipeline stage\n");
+            sh_refuse_mark();
+            return -1;
+        }
+        count++;
+        if (*p != '|') break;
+        p++;
     }
     return count;
 }
 
 
 /* ======================================================================== */
+/*  「切り詰めたので行を断った」印 (票 TASK_SH_TRUNCATION §2-1)              */
+/*                                                                          */
+/*  規則と寿命は shell.h の宣言のところに書いてある。ここは実体だけ。        */
+/* ======================================================================== */
+int sh_refused_flag = 0;
+
+/* execute_command の入れ子の深さ。if / time が組み立てた行やパイプの段から      */
+/* 呼ばれた execute_command は印を消さない — 消すと内側の断りが外へ届かない。 */
+static int g_exec_depth = 0;
+
+void sh_refuse_mark(void)
+{
+    sh_refused_flag = 1;
+}
+
+void sh_refuse(const char *what, int limit)
+{
+    /* 「何が上限を超えたか」と「上限」を赤字 1 行で (票 §2 の 2)。
+     * 上限は呼び手が定数から渡す ([C4])。 */
+    g_api->kprintf(ATTR_RED, "%s too long (max %d)\n", what, limit);
+    sh_refused_flag = 1;
+}
+
+int sh_refused_take(void)
+{
+    int r = sh_refused_flag;
+    sh_refused_flag = 0;
+    return r;
+}
+
+/* 読むだけ — **消さない**。パイプの段ループが「この段で断ったか」を見るのに
+ * 使う (票 §2 の「行全体を実行しない」)。ここで take してしまうと、断りが
+ * script_exec まで届かず後続の**行**が走る。 */
+int sh_refused_peek(void)
+{
+    return sh_refused_flag;
+}
+
+/* ======================================================================== */
 /*  公開API: execute_command                                                 */
 /* ======================================================================== */
-void execute_command(const char *cmd)
+static void execute_command_line(const char *cmd)
 {
     static char expanded_buf[CMD_BUF_SIZE];
     const char *src;
     int has_pipe = 0;
 
-    if (strlen(cmd) == 0 || strlen(cmd) >= CMD_BUF_SIZE) return;
+    /* T13: 空行と長大行を同じ扱いにしない (execute_single と同じ規則)。 */
+    if (strlen(cmd) == 0) return;
+    if (strlen(cmd) >= CMD_BUF_SIZE) {
+        sh_refuse("sh: command line", CMD_BUF_SIZE - 1);
+        return;
+    }
 
     /* $VAR / ~ 展開 */
-    /* I-2: 展開しきれない行は**切れたまま実行しない** */
-    if (env_expand(cmd, expanded_buf, CMD_BUF_SIZE) < 0) {
-        g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
-        return;
+    /* I-2: 展開しきれない行は**切れたまま実行しない**
+     * T9: 変数名が ENV_NAME_MAX に収まらない行も同じ扱い。以前は 31 文字で
+     *     打ち切って残り (と `}`) をリテラルとして素通しし、展開されない
+     *     文字列がコマンド行に混ざっていた。理由が分かるよう文言を分ける。 */
+    {
+        int er = env_expand(cmd, expanded_buf, CMD_BUF_SIZE);
+        if (er == ENV_EXPAND_ERR_NAME) {
+            sh_refuse("sh: variable name", ENV_NAME_MAX - 1);
+            return;
+        }
+        if (er < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "sh: line too long after expansion\n");
+            /* §2-1: これも「断った行」— スクリプト中なら後続行へ落とさない */
+            sh_refuse_mark();
+            return;
+        }
     }
     src = expanded_buf;
 
@@ -678,6 +545,12 @@ void execute_command(const char *cmd)
         }
 
         stage_count = split_pipeline(src, seg_buf, CMD_BUF_SIZE, MAX_PIPE_STAGES);
+        /* T5: 分割の時点で断ったら段を 1 つも実行しない (印は split_pipeline
+         * が立てている)。パイプバッファはまだ 1 つも取っていない。 */
+        if (stage_count < 0) {
+            g_api->mem_free(seg_buf);
+            return;
+        }
         if (stage_count <= 1) {
             execute_single(seg_buf);
             reset_all_redirects();
@@ -772,6 +645,22 @@ void execute_command(const char *cmd)
                 if (!is_last) {
                     prev_buf = cur_buf;
                 }
+
+                /* 票 §2「切り詰めたら行全体を実行しない」— 段で断りの印が
+                 * 立ったら、**後続の段を実行せずに行を終える**。
+                 *
+                 * bash の `false | cat` に寄せて段を続けると、
+                 * `<断られる段> | tee 重要ファイル` のように**断ったのに
+                 * 後段の書き込みが起きる**。後段の `> file` は
+                 * apply_redirects が O_TRUNC で開くので、リダイレクト先が
+                 * 空で上書きされる。
+                 *
+                 * 印は**消さない** (§2-1)。消すのはいちばん外側の
+                 * execute_command の入口だけで、スクリプト中ならこの行の
+                 * 後で script_exec が打ち切る。抜けた後の後始末
+                 * (reset_all_redirects / sh_pipe_free / mem_free) は
+                 * ループの外と上でそのまま通る。 */
+                if (sh_refused_peek()) break;
             }
 
             sh_pipeline_leave();
@@ -783,4 +672,19 @@ void execute_command(const char *cmd)
         }
         g_api->mem_free(seg_buf);
     }
+}
+
+/* 実体は execute_command_line。ここは「断った印」の寿命を 1 行に閉じるための
+ * 薄い包み (票 TASK_SH_TRUNCATION §2-1)。
+ *
+ * 入口で消すのは **いちばん外側** の呼び出しだけ。`if` / `time` が組み立てた
+ * 行はこの関数を入れ子で呼ぶので、そこで消すと内側で断ったことが
+ * script_exec まで届かなくなる (取りこぼし)。パイプの段は execute_single を
+ * 直に呼ぶので入れ子にはならないが、段の中の `time ...` が入れ子になる。 */
+void execute_command(const char *cmd)
+{
+    if (g_exec_depth == 0) sh_refused_flag = 0;
+    g_exec_depth++;
+    execute_command_line(cmd);
+    g_exec_depth--;
 }

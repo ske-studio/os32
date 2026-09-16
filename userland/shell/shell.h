@@ -26,6 +26,42 @@
 #define SCRIPT_MAX_LINE   256   /* 1行の最大長 */
 #define SCRIPT_MAX_DEPTH  4     /* source ネスト上限 */
 
+/* `if VAL1 == VAL2` の比較値の幅 (cmd_script.c)。実効は IF_VALUE_MAX - 1。
+ * [C4] 断りのメッセージにもこの定数から上限を出す。 */
+#define IF_VALUE_MAX      256
+
+/* 組み立てた行の幅。実効長はコードのループが見る値と同じにしてある —
+ * [C4] のとおり断りのメッセージにもここから上限を出す (票 §5 の段 3)。
+ *   TIME_CMD_MAX      cmd_base.c の `time` (cmd_buf[512]、実効 510)
+ *   EXEC_CMDLINE_MAX  cmd_mnt.c の `exec` (cmdline[256]、実効 255)
+ *   GLOB_PATTERN_MAX  sh_args.inc の glob パターン部 (実効 255) */
+#define TIME_CMD_MAX      512
+#define EXEC_CMDLINE_MAX  256
+#define GLOB_PATTERN_MAX  256
+
+/* 環境変数の幅 (cmd_env.c)。実効は名前 31 / 値 255。cmd_script.c の `ask` と
+ * main.c の展開エラーの文言もここから上限を出す ([C4]、票 §5 の段 4)。 */
+#define ENV_NAME_MAX      32
+#define ENV_VALUE_MAX     256
+
+/* `ask` のプロンプト / 入力の幅 (cmd_script.c)。実効はどちらも MAX - 2。 */
+#define ASK_PROMPT_MAX    256
+#define ASK_INPUT_MAX     256
+
+/* rshell (rshell.c)。1 行の受信バッファ幅 (実効 RSHELL_LINE_MAX - 2) と、
+ * `host:` を /host/ へ直したパスの幅 (実効 - 1)。 */
+#define RSHELL_LINE_MAX       128
+#define RSHELL_HOST_PATH_MAX  256
+
+/* env_expand の戻り値。負はすべて「展開できなかった」で、-2 は
+ * **変数名が ENV_NAME_MAX に収まらなかった**ことを表す (T9)。
+ * -1 は行が dst に収まらなかった (I-2 の従来の意味)。 */
+#define ENV_EXPAND_ERR_NAME (-2)
+
+/* script_source_file の戻り値。0 = 成功 / -1 = 読めない・深すぎる /
+ * SCRIPT_ERR_REFUSED = 行を断って打ち切った (票 TASK_SH_TRUNCATION §2-1) */
+#define SCRIPT_ERR_REFUSED (-2)
+
 /* コマンドハンドラ関数の型 */
 typedef void (*CmdHandler)(int argc, char **argv);
 
@@ -51,6 +87,29 @@ void shell_register_cmds(const ShellCmd *cmds);
 
 /* コマンド実行エンジン (main.c) */
 void execute_command(const char *cmd);
+
+/* ------------------------------------------------------------------------ */
+/*  「切り詰めたので行を断った」印 (票 TASK_SH_TRUNCATION §2-1、main.c)      */
+/*                                                                          */
+/*  切り詰めを見つけた側は sh_refuse() で赤字 1 行を出し、同時に印を立てる。 */
+/*  組み込み handler は void のままなので (int 化は TASK_EXIT_STATUS の範囲)、*/
+/*  断ったことはこのグローバル 1 本だけで伝える。                            */
+/*                                                                          */
+/*  印の寿命は **1 行ぶん**:                                                 */
+/*    - いちばん外側の execute_command が入口で消す                          */
+/*      (入れ子 = if / time が組み立てた行、パイプの段 では消さない。         */
+/*       消すと内側の断りが外へ届かない)                                     */
+/*    - script_exec が 1 行ごとに sh_refused_take() で読んで消し、            */
+/*      立っていたらスクリプトを打ち切る (goto のラベル無しと同じ扱い)        */
+/*    - 対話 / rshell は誰も読まないので、断った行の次の行は今までどおり動く  */
+/*    - パイプの段ループは sh_refused_peek() で **読むだけ**。印が立って  */
+/*      いたら後続の段を実行せずに行を終える (票 §2「行全体を実行しない」)  */
+/* ------------------------------------------------------------------------ */
+extern int sh_refused_flag;
+void sh_refuse(const char *what, int limit);  /* 赤字 1 行 + 印 */
+void sh_refuse_mark(void);                    /* 印だけ (伝播用) */
+int  sh_refused_take(void);                   /* 読んで消す */
+int  sh_refused_peek(void);                   /* 読むだけ (消さない) */
 extern const char *cmd_names[];  /* タブ補完用 */
 const ShellCmd *shell_get_cmds(int *count);
 void shell_print_help(const char *cmd_name);
@@ -180,5 +239,8 @@ void sh_pipe_free(int slot);
 
 /* スクリプトエンジン (cmd_script.c) */
 int script_source_file(const char *path);
+/* 起動スクリプト (/etc/profile, $HOME/.profile) 用。断られても起動は止めず、
+ * メッセージを出して既定値で続ける (票 TASK_SH_TRUNCATION §2-1 末尾 / R2)。 */
+void script_source_profile(const char *path);
 
 #endif /* SHELL_H */

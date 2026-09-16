@@ -57,6 +57,14 @@ $(SH_OBJDIR)/%.o: userland/shell/%.c $(SHELL_DEPS)
 	@mkdir -p $(SH_OBJDIR)
 	$(CC) $(PROGRAM_FLAGS) -DSHELL_AS_APP -Iuserland/shell $(INC_libos32filer) -c $< -o $@
 
+# main.c だけが #include する .inc の明示依存 (レシピ無し = 上のパターン規則に
+# 前提だけを足す)。$(SHELL_DEPS) の wildcard でも拾えるが、wildcard は
+# Makefile 読み込み時の 1 度しか評価されないので、新しく足した .inc が
+# 同じ make の中で見落とされない保証をここに置く (userland/system/*.elf の
+# install_recover.inc / hsync_protect.inc と同じ書き方)。
+userland/shell/main.o:    userland/shell/sh_exec.inc
+$(SH_OBJDIR)/main.o:      userland/shell/sh_exec.inc
+
 userland/sh.elf: sdk/link/app.ld $(CRT0_OBJ) $(SH_OBJ) $(FILER_DRAW_OBJ)
 	$(LD) $(PROGRAM_LDFLAGS) -o $@ $(CRT0_OBJ) $(SH_OBJ) $(LGRP_BEG) $(FILER_DRAW_OBJ) -los32save $(LGRP_END) -lc -lgcc
 
