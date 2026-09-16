@@ -24,7 +24,7 @@ typedef struct {
 } IdeInfo;
 
 
-static void cmd_mem(int argc, char **argv)
+static int cmd_mem(int argc, char **argv)
 {
     u32 pmem_kb;
     u32 ram_kb;
@@ -55,15 +55,17 @@ static void cmd_mem(int argc, char **argv)
     g_api->kprintf(ATTR_WHITE, "%s", "  0x300000-0x3FFFFF  Shell Band (1MB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x400000-0x4FFFFF  Shared Library Band (1MB)\n");
     g_api->kprintf(ATTR_WHITE, "%s", "  0x500000-          Program Space\n");
+    return 0;
 }
 
-static void cmd_reboot(int argc, char **argv)
+static int cmd_reboot(int argc, char **argv)
 {
     (void)argc; (void)argv;
     g_api->sys_reboot();
+    return 0;
 }
 
-static void cmd_dev(int argc, char **argv)
+static int cmd_dev(int argc, char **argv)
 {
     int i, n = g_api->dev_count();
     (void)argc; (void)argv;
@@ -75,9 +77,10 @@ static void cmd_dev(int argc, char **argv)
             else g_api->kprintf(ATTR_WHITE, "  %s: char\n", name);
         }
     }
+    return 0;
 }
 
-static void cmd_ide(int argc, char **argv)
+static int cmd_ide(int argc, char **argv)
 {
     int drv = 0, i;
     IdeInfo info;
@@ -86,7 +89,7 @@ static void cmd_ide(int argc, char **argv)
     }
     if (!g_api->ide_drive_present(drv)) {
         g_api->kprintf(ATTR_RED, "IDE drive %d not present.\n", drv);
-        return;
+        return SH_STATUS_ERROR;
     }
     if (g_api->ide_identify(drv, &info) == 0) {
         char model[41];
@@ -96,10 +99,12 @@ static void cmd_ide(int argc, char **argv)
                        drv, model, info.cylinders, info.heads, info.sectors, info.total_sectors);
     } else {
         g_api->kprintf(ATTR_RED, "IDE %d: Identify fail\n", drv);
+        return SH_STATUS_ERROR;
     }
+    return 0;
 }
 
-static void cmd_format(int argc, char **argv)
+static int cmd_format(int argc, char **argv)
 {
     int drv = 0;
     u32 sects = 2880;
@@ -108,7 +113,7 @@ static void cmd_format(int argc, char **argv)
 
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     drv = argv[1][0] - '0';
     if (argc > 2) {
@@ -118,17 +123,22 @@ static void cmd_format(int argc, char **argv)
     }
     g_api->kprintf(ATTR_YELLOW, "Formatting drive %d (%u sectors)...\n", drv, sects);
     ret = g_api->ext2_format(drv, sects);
-    if (ret == 0) g_api->kprintf(ATTR_GREEN, "%s", "Format complete.\n");
-    else g_api->kprintf(ATTR_RED, "Format failed: %d\n", ret);
+    if (ret != 0) {
+        g_api->kprintf(ATTR_RED, "Format failed: %d\n", ret);
+        return SH_STATUS_ERROR;
+    }
+    g_api->kprintf(ATTR_GREEN, "%s", "Format complete.\n");
+    return 0;
 }
 
-static void cmd_play(int argc, char **argv)
+static int cmd_play(int argc, char **argv)
 {
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     g_api->fm_play_mml(argv[1]);
+    return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -233,7 +243,7 @@ static int cfg_set_key(const char *key, const char *val)
     return 0;
 }
 
-static void cmd_os32gui(int argc, char **argv)
+static int cmd_os32gui(int argc, char **argv)
 {
     if (argc >= 2) {
         /* on|off: system.cfg の GUI= を書き換える (次回起動から有効) */
@@ -249,8 +259,9 @@ static void cmd_os32gui(int argc, char **argv)
                 g_api->kprintf(ATTR_RED, "%s", "os32gui: failed to write /etc/system.cfg\n");
         } else {
             shell_print_help(argv[0]);
+            return SH_STATUS_USAGE;
         }
-        return;
+        return 0;
     }
 
     /* 引数なし: 今すぐ gshell へ切替。カーネルに次シェルを記録して自分は
@@ -259,11 +270,12 @@ static void cmd_os32gui(int argc, char **argv)
         int rc = g_api->sys_switch_shell(SYS_GSHELL_BIN);
         if (rc < 0) {
             g_api->kprintf(ATTR_RED, "os32gui: switch not permitted (rc=%d)\n", rc);
-            return;
+            return SH_STATUS_ERROR;
         }
         g_api->kprintf(ATTR_CYAN, "%s", "Switching to GUI shell...\n");
         g_api->sys_exit(0);
     }
+    return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -278,23 +290,26 @@ static void cmd_os32gui(int argc, char **argv)
 /*           USEGD5430 / GD5430TYPE で有効化していないと probe が落ちる)     */
 /*    auto   既定。probe 順 (Cirrus → PEGC → 9801)                           */
 /* ------------------------------------------------------------------------ */
-static void cmd_gfxmode(int argc, char **argv)
+static int cmd_gfxmode(int argc, char **argv)
 {
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     if (!str_eq(argv[1], "pc98") && !str_eq(argv[1], "pegc") &&
         !str_eq(argv[1], "cirrus") && !str_eq(argv[1], "auto")) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     if (cfg_set_key("GFX", argv[1]) == 0)
         g_api->kprintf(ATTR_GREEN,
                        "Graphics backend = %s at next boot (system.cfg GFX=%s)\n",
                        argv[1], argv[1]);
-    else
+    else {
         g_api->kprintf(ATTR_RED, "%s", "gfxmode: failed to write /etc/system.cfg\n");
+        return SH_STATUS_ERROR;
+    }
+    return 0;
 }
 
 /* 登録用テーブル */

@@ -132,7 +132,7 @@ MUTATIONS = [
     ("e_read_tty",
      "        if (g_api->sys_isatty(0)) {\n"
      "            shell_print_help(argv[0]);\n"
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }\n",
      ""),
 ]

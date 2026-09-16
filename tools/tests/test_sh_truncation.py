@@ -126,13 +126,15 @@ MUTATIONS = [
      "    if (g_exec_depth == 0) sh_refused_flag = 0;"),
     # 変異 6: 入れ子 source の断りを親へ伝えない版 (§2-1 の否定側)。
     ("source_not_propagated", "userland/shell/cmd_script.c",
-     "    if (script_source_file(argv[1]) == SCRIPT_ERR_REFUSED) sh_refuse_mark();",
-     "    (void)script_source_file(argv[1]);"),
+     "    r = script_source_file(argv[1]);\n"
+     "    if (r == SCRIPT_ERR_REFUSED) { sh_refuse_mark(); return SH_STATUS_USAGE; }",
+     "    r = script_source_file(argv[1]);\n"
+     "    if (r == SCRIPT_ERR_REFUSED) { return SH_STATUS_USAGE; }"),
     # 変異 7: パイプの段ループが印を**見ない**版 (= PM 決裁の前の姿)。
     #         断った段の後続の段が走り、`> file` が O_TRUNC で開かれる。
     ("pipe_no_peek", "userland/shell/main.c",
-     "                if (sh_refused_peek()) break;",
-     "                if (0) break;"),
+     "                if (sh_refused_peek()) { status = SH_STATUS_USAGE; break; }",
+     "                if (0) { status = SH_STATUS_USAGE; break; }"),
     # 変異 8: 起動時の profile が印を立て直す版 (R2 の否定側)。
     #         profile の断りが起動後の 1 行目を巻き添えにする。
     ("profile_aborts_boot", "userland/shell/cmd_script.c",
@@ -150,6 +152,8 @@ MUTATIONS = [
     ("t3_no_check", "userland/shell/sh_exec.inc",
      "        if (try_exec_len(bin_path, argc, argv) > TRY_EXEC_BUF_SIZE - 2) {\n"
      '            sh_refuse("sh: argument list", TRY_EXEC_BUF_SIZE - 2);\n'
+     "            if (kind) *kind = k;\n"
+     "            if (code) *code = c;\n"
      "            return EXEC_ERR_GENERAL;\n"
      "        }",
      "        if (0) {\n"
@@ -167,28 +171,28 @@ MUTATIONS = [
     ("t3_exec_no_check", "userland/shell/cmd_mnt.c",
      "        if (need > EXEC_CMDLINE_MAX - 1) {\n"
      '            sh_refuse("exec: command line", EXEC_CMDLINE_MAX - 1);\n'
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }",
      "        if (0) {\n"
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }"),
     # T3-e: 内蔵 time (510) の検査を外す
     ("t3_time_no_check", "userland/shell/cmd_base.c",
      "        if (need > TIME_CMD_MAX - 2) {\n"
      '            sh_refuse("time: command line", TIME_CMD_MAX - 2);\n'
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }",
      "        if (0) {\n"
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }"),
     # T4: コマンド名を切って .bin を付ける昔の姿へ戻す
     ("t4_no_check", "userland/shell/sh_exec.inc",
      "        if ((int)strlen(argv[0]) > PATH_MAX_LEN - 5) {\n"
      '            sh_refuse("sh: command name", PATH_MAX_LEN - 5);\n'
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }",
      "        if (0) {\n"
-     "            return;\n"
+     "            return SH_STATUS_USAGE;\n"
      "        }"),
     # T5-a: 9 段目以降を黙って捨てる
     ("t5_drop_stages", "userland/shell/main.c",
@@ -236,6 +240,7 @@ MUTATIONS = [
     ("t11_no_check", "userland/shell/sh_launch.inc",
      "        if (len >= LAUNCH_CMDLINE_MAX) {\n"
      '            sh_refuse("sh: launch command line", LAUNCH_CMDLINE_MAX - 1);\n'
+     "            /* 印が立つので呼び手はそちらを先に見る。種別は NONE のまま。 */\n"
      "            return EXEC_ERR_GENERAL;\n"
      "        }",
      "        if (0) {\n"
@@ -245,24 +250,25 @@ MUTATIONS = [
     ("t13_line_silent", "userland/shell/main.c",
      "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
      '        sh_refuse("sh: command line", CMD_BUF_SIZE - 1);\n'
-     "        return;\n"
+     "        return SH_STATUS_USAGE;\n"
      "    }",
      "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
-     "        return;\n"
+     "        return status;\n"
      "    }"),
     # T13-b: execute_single が同上
     ("t13_single_silent", "userland/shell/main.c",
      "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
      '        sh_refuse("sh: command", CMD_BUF_SIZE - 1);\n'
-     "        return;\n"
+     "        return SH_STATUS_USAGE;\n"
      "    }",
      "    if (strlen(cmd) >= CMD_BUF_SIZE) {\n"
-     "        return;\n"
+     "        return status;\n"
      "    }"),
     # T17-a: PATH 項目の区切りを見失ったまま進む昔の姿
     ("t17_entry_split", "userland/shell/sh_exec.inc",
      "        if (*p && *p != ':') {\n"
      '            sh_refuse("sh: PATH entry", PATH_MAX_LEN - 2);\n'
+     "            *kind = EXEC_KIND_NONE;\n"
      "            return EXEC_ERR_GENERAL;\n"
      "        }",
      "        if (0) {\n"
@@ -272,15 +278,21 @@ MUTATIONS = [
     ("t17_join_truncates", "userland/shell/sh_exec.inc",
      "            if (need > PATH_MAX_LEN - 1) {\n"
      '                sh_refuse("sh: command path", PATH_MAX_LEN - 1);\n'
+     "                *kind = EXEC_KIND_NONE;\n"
      "                return EXEC_ERR_GENERAL;\n"
      "            }",
      "            if (0) {\n"
      "                return EXEC_ERR_GENERAL;\n"
      "            }"),
     # 走査を止めない版: 断っても次の PATH 候補へ回してしまう
+    # (2026-09-16 票 TASK_EXIT_STATUS) 断りの検査を外すだけでは、種別
+    # (EXEC_KIND_NONE) でも走査が止まるので歯が立たない。断りを「見つからない」
+    # に化けさせて **次の候補へ回す** 版にする (= 直す前の姿そのもの)。
     ("scan_not_stopped", "userland/shell/sh_exec.inc",
-     "        if (!was_refused && sh_refused_peek()) return EXEC_ERR_GENERAL;",
-     "        if (0) return EXEC_ERR_GENERAL;"),
+     "        if (!was_refused && sh_refused_peek()) return EXEC_ERR_GENERAL;\n"
+     "        if (*kind == EXEC_KIND_INVALID) {",
+     "        if (!was_refused && sh_refused_peek()) *kind = EXEC_KIND_NOT_FOUND;\n"
+     "        if (*kind == EXEC_KIND_INVALID) {"),
     # I1: 引数が多すぎて行を捨てるときに **印を立てない** 版 (PM 決裁の前の姿)。
     #     赤字は出るので、スクリプトが後続行へ落ちるかどうかだけが変わる。
     ("i1_no_mark", "userland/shell/sh_args.inc",
@@ -338,7 +350,7 @@ MUTATIONS = [
      "        while (*arg && *arg != '=') {\n"
      "            if (ni >= ENV_NAME_MAX - 1) {\n"
      '                sh_refuse("set: variable name", ENV_NAME_MAX - 1);\n'
-     "                return;\n"
+     "                return SH_STATUS_USAGE;\n"
      "            }\n"
      "            name[ni++] = *arg++;\n"
      "        }",
@@ -360,10 +372,10 @@ MUTATIONS = [
      "            rbuf[rpos++] = (char)ch;"),
     # T10-b: 断ったときに EOT を返さない (票 §2-2 の blocker そのもの)
     ("t10_no_eot", "userland/shell/rshell.c",
-     "            (void)sh_refused_take();   /* 対話と同じ — 次の行へ持ち越さない */\n"
+     "            sh_status_set(SH_STATUS_USAGE);\n"
      "            rshell_end_reply();\n"
      "            continue;",
-     "            (void)sh_refused_take();\n"
+     "            sh_status_set(SH_STATUS_USAGE);\n"
      "            continue;"),
     # T10-c: 抜け口 (ホストの `exit` / 行の途中の ESC) で EOT を返さない。
     #        直す前の姿そのもの — /api/cmd が 15 秒待ってタイムアウトする。
@@ -490,7 +502,7 @@ MUTATIONS = [
      "            if (argv[i][j] == '\"') continue;\n"
      "            if (pi >= ASK_PROMPT_MAX - 2) {\n"
      '                sh_refuse("ask: prompt", ASK_PROMPT_MAX - 2);\n'
-     "                return;\n"
+     "                return SH_STATUS_USAGE;\n"
      "            }\n"
      "            prompt[pi++] = argv[i][j];\n"
      "        }",

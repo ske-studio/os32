@@ -625,6 +625,45 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 - **試験**: `tools/tests/sh_truncation_host.c` (178 検査) + `test_sh_truncation.py --mutate` (変異 27 本)。
   経緯と RED → GREEN は [`../tools/tests/sh_truncation_tdd.md`](../tools/tests/sh_truncation_tdd.md) §0-4。
 
+### 4-39. 終了コードと起動エラーが同じ値の空間に混ざっていた — 1 コピーでも 2 回実行されていた (2026-09-16、修正済み)
+
+- **症状**: `/usr/bin/xxx.bin` を 1 本置いて `xxx` と打つと、`return -1` (または `-3`) で
+  終わる子が **2 回実行され**、最後に `xxx: command not found` と出る。
+  `exec_run` は正常終了で子の値 (`exec_exit_status`) を、起動失敗で `EXEC_ERR_*` (-1〜-5) を
+  返す — **同じ値の空間**なので、`try_exec` の戻り値 `-1` / `-3` を
+  `run_cmd_internal` が「このディレクトリには無い」と読み、次の候補へ進んでいた。
+  カーネルの `exec_launch` はパスに `/` が無いと自分で `/bin` `/sbin` `/usr/bin` を探すので、
+  シェルが 2c で同じ名前を渡すだけで**同じファイルがもう一度走る**。同名を 2 か所に置く必要は無い。
+- **なぜ値では直らないか**: `exit(-2)` と fault はどちらも `exec_exit_status = -2` になる。
+  `exec_exit` の中では区別できない (`exec_fault_recover` も `kapi_sys_exit` も同じ関数へ入る)。
+  **値から種別は作れない**。
+- **修正**: KAPI v55 で `exec_last_result(int *kind, int *code)` を足し、
+  **種別は畳んだ側が渡す**形にした (`exec_exit` の引数を 1 つ増やす):
+  `kapi_sys_exit` → `EXITED` / `exec_fault_recover` → `FAULT` /
+  CTRL+STOP (`ring3_abort_check` → `ring3_abort_kill`) → `ABORTED`。
+  シェルは **種別だけ**で PATH 走査を止めるか決める — `NOT_FOUND` と `INVALID` のときだけ次の候補へ。
+- **起動失敗は `exec_exit` を通らない**: `exec_launch` には早期 return が 13 か所あり、
+  そこを通ると記録が前回のまま残る。`exec_run` が **すべての return 点で** 記録を書く
+  (`NONE` のままなら戻り値から写す) 形にして塞いだ。成功の直後に未知のコマンドを打っても
+  前の子の終了コードは返らない。
+- **GUI の子は記録しない**: `exec_start` / `exec_resume` の子 (`AppSlot.gui`) は
+  同期起動の記録を書かない。読み口である `sh.bin` はカーネルの記録を読まず
+  (要求表の状態を自分で写す) ので、書くと紛れるだけ。
+- **起動の口を 1 つに**: `try_exec` からは `sh_exec_result(cmdline, &kind, &code)` だけを呼ぶ。
+  常駐は `exec_run` の**直後**に `exec_last_result` を読み、`sh.bin` は要求表の
+  `DONE` / `FAILED` を写す。**`sh.bin` がカーネルの静的な記録を読むと、自分の子とは限らない**。
+- **`$?` と「断りの印」は役割が違う**: 印 (`sh_refused_flag`) は「実行そのものを拒否したか」の
+  制御信号、`$?` はその結果の状態値。二重管理にしない — 断った行は印で止め、値としては 2 を入れる。
+- **`exit` は値を書いてから要求を立てる**: `exit 3 | echo tail` で要求を先に立てると、
+  段ループを抜けた後の `$?` が 0 になる。要求の有無と値は**別の変数** (`sh_exit_flag` /
+  `sh_exit_code`) — 真偽値に値を入れる作りだと `exit 0` で終われない。
+  段ループの見張りは**末尾の 1 か所だけ**にしてある (入口にも置くと片方を壊しても挙動が
+  変わらず、変異試験に歯が立たない)。
+- **試験**: `tools/tests/sh_status_host.c` (常駐 186 + `sh.bin` 128 = 314 検査) +
+  `test_sh_status.py --mutate` (変異 23 本)。**登録表も `execute_command` も実物**を通す
+  (`exit` を文字列で直接見るスタブを置くと、本物の登録・伝播が壊れていても緑になる)。
+  経緯と受入の対応は [`../tools/tests/sh_status_tdd.md`](../tools/tests/sh_status_tdd.md)。
+
 ## §5. デバッグ道具箱
 
 ### カーネル内デバッグ出力

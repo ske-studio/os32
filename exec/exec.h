@@ -35,6 +35,13 @@ void exec_init(void);
 /* 従来の起動。子が終わるまで呼び出し元を塞ぐ (CUI の入れ子はこれ)。 */
 int exec_run(const char *cmdline);
 
+/* 直前の exec_run の結果を「種別 + 値」で返す (KAPI v55、票 TASK_EXIT_STATUS)。
+ * *kind = EXEC_KIND_*、*code = 種別が EXITED なら子の終了コード。
+ * 戻り値 0 = 記録あり / OS32_ERR_INVAL = 記録なし (*kind = NONE, *code = 0)。
+ * **exec_run は全 return 点で記録を書く** ので、起動しなかった場合に前回の
+ * 記録を読むことはない。GUI 経路 (exec_start / exec_resume) の子は書かない。 */
+int exec_last_result(int *kind, int *code);
+
 /* ---- アプリ 4 本の同時実行 (KAPI v44、票 docs/tasks/gui/v13) ----
  * 詳細は TASK_K5_multiapp.md の D4 / D8。呼べるのは owner 1 (シェル帯) だけ。 */
 

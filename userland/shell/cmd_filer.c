@@ -500,7 +500,7 @@ static void fl_loop(void)
 /*  シェルコマンドハンドラ                                                  */
 /* ======================================================================== */
 
-static void cmd_filer(int argc, char **argv)
+static int cmd_filer(int argc, char **argv)
 {
     const char *start_dir;
 
@@ -514,6 +514,7 @@ static void cmd_filer(int argc, char **argv)
     fl_loop();
     ft_free();
     g_api->tvram_clear();
+    return 0;
 }
 
 /* 登録用テーブル */

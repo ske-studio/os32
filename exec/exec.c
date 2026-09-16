@@ -60,6 +60,10 @@ extern u32 kapi_invoke(void *wrapfn, const void *args_src, u32 nbytes);
 
 /* CPL=3 由来のフォールト/不正 slot でアプリを kill (定義は下方, v2 M1e/M2d) */
 void ring3_fault_kill(void);
+/* CTRL+STOP で畳む (後始末は fault と同じ、記録する種別だけが違う) */
+void ring3_abort_kill(void);
+/* 現在のプログラムを畳む。kind は EXEC_KIND_* (票 TASK_EXIT_STATUS §2-1)。 */
+void exec_exit(int status, int kind);
 
 void exec_init(void) {
     kapi = (KernelAPI *)KAPI_ADDR;
@@ -168,6 +172,20 @@ static void ring3_trampoline_init(void)
  * いる」としてしか見ないので意味は変わらない。 */
 volatile int exec_nest_level = 0;
 volatile int exec_exit_status = EXEC_SUCCESS;
+
+/* ------------------------------------------------------------------------ */
+/*  直前の同期起動 (exec_run) の結果 — 「種別 + 値」 (票 TASK_EXIT_STATUS)    */
+/*                                                                          */
+/*  exec_exit_status **だけでは足りない**: exit(-2) と fault はどちらも -2 で、*/
+/*  起動そのものに失敗した場合 (exec_launch の早期 return) は exec_exit を    */
+/*  通らないので前回の値が残る。だから                                       */
+/*    - 種別は畳んだ側が渡す (exec_exit の kind 引数)                         */
+/*    - exec_run が **すべての return 点で** 書く (NONE なら rc から写す)     */
+/*  の 2 つを守る。GUI 経路 (exec_start / exec_resume) の子は書かない —       */
+/*  その結果を読むのは WM で、読み口 (sh.bin) はカーネルの記録を見ない。      */
+/* ------------------------------------------------------------------------ */
+static volatile int g_last_kind = EXEC_KIND_NONE;
+static volatile int g_last_code = 0;
 
 /* longjmp の理由。exec_start / exec_resume の復帰点が park と終了を
  * 見分けるために使う (D4)。exec_run は終了しか受け取らない。 */
@@ -406,7 +424,7 @@ void ring3_abort_check(void)
     a->abort_req = 0;
     if (!g_cur_app) return;         /* CPL=3 アプリはもう居ない */
     ring3_abort_count++;
-    ring3_fault_kill();             /* 戻らない */
+    ring3_abort_kill();             /* 戻らない */
 }
 
 /* ======================================================================== */
@@ -940,7 +958,7 @@ static u32 g_exit_jmpbuf[KSETJMP_BUF_LEN];
 /*  畳むのは常に「いま走っている 1 本」だけ (D4)。正常終了・fault・          */
 /*  CTRL+STOP の 3 経路が全部ここを通る。 */
 /* ======================================================================== */
-void exec_exit(int status)
+void exec_exit(int status, int kind)
 {
     int id = appslot_cur();
     AppSlot *a = appslot_get(id);
@@ -949,6 +967,15 @@ void exec_exit(int status)
 
     if (!a) return;
     exec_exit_status = status;
+
+    /* 票 TASK_EXIT_STATUS §2-1: 種別は **呼び手** が決める。ここで status から
+     * 推測してはいけない (exit(-2) と fault が同じ値になる)。
+     * GUI 経路の子 (exec_start / exec_resume = a->gui) は記録しない — 同期
+     * 起動の結果と混ざる (受入 S15)。 */
+    if (!a->gui) {
+        g_last_kind = kind;
+        g_last_code = status;
+    }
 
     /* 後始末とシェル復帰は master PD 上で行う。 */
     if (g_cur_app) {
@@ -1001,7 +1028,7 @@ void exec_exit(int status)
 
 void exec_fault_recover(void)
 {
-    exec_exit(EXEC_ERR_FAULT);
+    exec_exit(EXEC_ERR_FAULT, EXEC_KIND_FAULT);
 }
 
 void __cdecl kapi_sys_exit(int status)
@@ -1010,7 +1037,7 @@ void __cdecl kapi_sys_exit(int status)
      * master CR3 復帰・AS 破棄・per-app 物理の返却は exec_exit が ID 単位で
      * 行う。CPL=0 プログラム (シェル等) は g_cur_app が 0 なので従来どおり。 */
     ring3_in_syscall = 0;   /* syscall(sys_exit) を抜ける — ガードを下ろす */
-    exec_exit(status);
+    exec_exit(status, EXEC_KIND_EXITED);
 }
 
 /* ======================================================================== */
@@ -1118,11 +1145,24 @@ void __cdecl ring3_syscall_dispatch(u32 *frame)
 /*  返却 → AS 破棄 → ID 別回収 → longjmp までを 1 か所で行う。               */
 /*  この関数は longjmp するので戻らない。                                    */
 /* ======================================================================== */
-void ring3_fault_kill(void)
+static void ring3_kill_kind(int kind)
 {
     fault_kill_count++;
     ring3_in_syscall = 0;   /* syscall 途中で畳む場合も必ずガードを下ろす */
-    exec_fault_recover();   /* longjmp するので戻らない */
+    exec_exit(EXEC_ERR_FAULT, kind);   /* longjmp するので戻らない */
+}
+
+void ring3_fault_kill(void)
+{
+    ring3_kill_kind(EXEC_KIND_FAULT);   /* 戻らない */
+}
+
+/* CTRL+STOP で畳む口 (票 §1 事実 15)。後始末は fault とまったく同じで、
+ * 違うのは記録する種別だけ — ランナーが「時間切れで畳んだ」と「落ちた」を
+ * 分けられるようにする。 */
+void ring3_abort_kill(void)
+{
+    ring3_kill_kind(EXEC_KIND_ABORTED);   /* 戻らない */
 }
 
 /* ======================================================================== */
@@ -1734,7 +1774,8 @@ static int exec_launch(const char *cmdline, int gui_arg)
         } else {
             arch_call_on_stack(saved_esp_stack[id], new_esp, entry);
         }
-        exec_exit(EXEC_SUCCESS);
+        /* CPL=0 プログラムから普通に戻ってきた = 正常終了 (§1 事実 15)。 */
+        exec_exit(EXEC_SUCCESS, EXEC_KIND_EXITED);
     }
 
     return EXEC_SUCCESS;
@@ -1743,9 +1784,62 @@ static int exec_launch(const char *cmdline, int gui_arg)
 /* ======================================================================== */
 /*  exec_run — 従来どおり「子が終わるまで塞ぐ」起動 (CUI の入れ子はこれ)     */
 /* ======================================================================== */
+/* 起動しなかったとき (exec_exit を通っていないとき) の種別。値から作れる
+ * のはここだけ — exec_launch の戻り値は EXEC_ERR_* / OS32_ERR_* で、
+ * 「子の終了コード」と混ざらない (子が終わっていれば exec_exit が先に
+ * 書いているので、この写像は走らない)。
+ * appslot_start_admit の OS32_ERR_FULL / OS32_ERR_INVAL も「起こせなかった」
+ * = 次の候補へ進まない側 (NOMEM 相当) に寄せる (票 §2-1)。 */
+static int exec_map_launch_err(int rc)
+{
+    switch (rc) {
+    case EXEC_ERR_NOT_FOUND: return EXEC_KIND_NOT_FOUND;
+    case EXEC_ERR_INVALID:   return EXEC_KIND_INVALID;
+    case EXEC_ERR_NOMEM:     return EXEC_KIND_NOMEM;
+    case OS32_ERR_FULL:      return EXEC_KIND_NOMEM;
+    case OS32_ERR_INVAL:     return EXEC_KIND_NOMEM;
+    default:                 return EXEC_KIND_GENERAL;
+    }
+}
+
 int exec_run(const char *cmdline)
 {
-    return exec_launch(cmdline, 0);
+    int rc;
+
+    /* 票 §2-1: **入る前に消す**。消さないと「起動しなかった」経路
+     * (exec_launch の早期 return 13 か所) で前回の記録が残り、
+     * 成功の直後に未知のコマンドを打つと前の子の終了コードが返る。 */
+    g_last_kind = EXEC_KIND_NONE;
+    g_last_code = 0;
+
+    rc = exec_launch(cmdline, 0);
+
+    if (g_last_kind == EXEC_KIND_NONE) {
+        g_last_kind = exec_map_launch_err(rc);
+        g_last_code = 0;
+    }
+    return rc;
+}
+
+/* ======================================================================== */
+/*  exec_last_result — 直前の exec_run の結果 (KAPI v55、決裁 E1)             */
+/*                                                                          */
+/*  戻り値: 0 = 記録あり / OS32_ERR_INVAL = 記録なし (このとき *kind は       */
+/*  EXEC_KIND_NONE、*code は 0 に揃える — 呼び手が前の値を読み続けない)。     */
+/* ======================================================================== */
+int exec_last_result(int *kind, int *code)
+{
+    int k = g_last_kind;
+    int c = g_last_code;
+
+    if (k == EXEC_KIND_NONE) {
+        if (kind) *kind = EXEC_KIND_NONE;
+        if (code) *code = 0;
+        return OS32_ERR_INVAL;
+    }
+    if (kind) *kind = k;
+    if (code) *code = c;
+    return 0;
 }
 
 /* ======================================================================== */

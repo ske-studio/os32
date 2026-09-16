@@ -26,8 +26,9 @@
 #define SH_LAUNCH_NAME_MAX 64
 
 /* GUI 外 (CUI から sh.bin を直に起動した等) を 1 度だけ報せるための印。
- * launch_req は GUI 外では毎回 OS32_ERR_INVAL を返すので、素直に報告すると
- * PATH 候補の数だけ同じ行が出る。起動が通ったら寝かせ直す。 */
+ * **票 TASK_EXIT_STATUS R1b で走査が止まる形になった** ので、同じ行が候補の
+ * 数だけ出ることはもう無い。それでも `exec` / `if` / スクリプトから何度も
+ * 来たときに同じ理由を並べないよう、印は残してある。 */
 static int sh_launch_nogui = 0;
 
 /* B4: パイプの段を回している間だけ立つ入れ子カウンタ。execute_command の
@@ -60,6 +61,19 @@ static void sh_launch_name(const char *cmdline, char *out, int max)
     out[i] = '\0';
 }
 
+/* ------------------------------------------------------------------------ */
+/*  sh_exec_result (sh.bin) — 票 TASK_EXIT_STATUS §2-2                       */
+/*                                                                          */
+/*  **カーネルの記録 (exec_last_result) は読まない**。要求表の子は WM が      */
+/*  起こす別アプリで、静的な記録を読むと自分の子とは限らないものを拾う       */
+/*  (往復 1 所見 4)。写像は要求表の状態そのもの:                             */
+/*    LAUNCH_ST_DONE   → (EXITED, 0)   … 終了コードは別票 (§2-6)             */
+/*    LAUNCH_ST_FAILED → 起動失敗の種別                                      */
+/*  起こす前に断った (パイプ / リダイレクト / 長さ / GUI 外) 場合は           */
+/*  「起こせなかった」= NOMEM 相当 で、**走査を止める** (R1b)。               */
+/* ------------------------------------------------------------------------ */
+static int sh_launch_kind = EXEC_KIND_NONE;
+
 int sh_launch(const char *cmdline)
 {
     char name[SH_LAUNCH_NAME_MAX];
@@ -79,6 +93,7 @@ int sh_launch(const char *cmdline)
         while (cmdline[len]) len++;
         if (len >= LAUNCH_CMDLINE_MAX) {
             sh_refuse("sh: launch command line", LAUNCH_CMDLINE_MAX - 1);
+            /* 印が立つので呼び手はそちらを先に見る。種別は NONE のまま。 */
             return EXEC_ERR_GENERAL;
         }
     }
@@ -90,6 +105,7 @@ int sh_launch(const char *cmdline)
     if (sh_pipeline_depth > 0) {
         g_api->kprintf(ATTR_RED, "%s",
                        "sh: pipe to external command is not supported\n");
+        sh_launch_kind = EXEC_KIND_NOMEM;   /* 起こせなかった = 走査を止める */
         return EXEC_ERR_GENERAL;
     }
 
@@ -99,6 +115,7 @@ int sh_launch(const char *cmdline)
     if (sh_redirect_active) {
         g_api->kprintf(ATTR_RED, "%s",
                        "sh: redirect to external command is not supported\n");
+        sh_launch_kind = EXEC_KIND_NOMEM;
         return EXEC_ERR_GENERAL;
     }
 
@@ -112,13 +129,17 @@ int sh_launch(const char *cmdline)
                 g_api->kprintf(ATTR_RED, "%s",
                                "sh: external programs need the GUI terminal\n");
             }
-            return EXEC_ERR_NOT_FOUND;
+            /* R1b: 「見つからない」ではなく「起こせなかった」。以前は
+             * NOT_FOUND を返して PATH の候補ぶん繰り返していた。 */
+            sh_launch_kind = EXEC_KIND_NOMEM;
+            return EXEC_ERR_GENERAL;
         }
         if (token == OS32_ERR_FULL)
             g_api->kprintf(ATTR_RED, "sh: %s: busy\n", name);
         else
             g_api->kprintf(ATTR_RED, "sh: %s: launch_req failed (%d)\n",
                            name, (int)token);
+        sh_launch_kind = EXEC_KIND_NOMEM;
         return EXEC_ERR_GENERAL;
     }
     sh_launch_nogui = 0;   /* 通った — 次に GUI 外へ落ちたらまた報せる */
@@ -134,10 +155,16 @@ int sh_launch(const char *cmdline)
             /* OS32_ERR_STALE 等。表が消えた以上これ以上の状態は来ない */
             g_api->kprintf(ATTR_RED, "sh: %s: launch_poll failed (%d)\n",
                            name, (int)rc);
+            sh_launch_kind = EXEC_KIND_NOMEM;
             return EXEC_ERR_GENERAL;
         }
 
-        if ((st & 0xF00) == LAUNCH_ST_DONE) return EXEC_SUCCESS;
+        if ((st & 0xF00) == LAUNCH_ST_DONE) {
+            /* §2-6: この票では終了コードが表に載らないので、DONE は
+             * 「起動できて終わった」までしか分からない (EXITED 0)。 */
+            sh_launch_kind = EXEC_KIND_EXITED;
+            return EXEC_SUCCESS;
+        }
 
         if ((st & 0xF00) == LAUNCH_ST_FAILED) {
             int frc = (int)-(st & 0xFF);
@@ -145,8 +172,28 @@ int sh_launch(const char *cmdline)
             if (frc != EXEC_ERR_NOT_FOUND && frc != EXEC_ERR_GENERAL)
                 g_api->kprintf(ATTR_RED, "sh: %s: launch failed (%d)\n",
                                name, frc);
+            switch (frc) {
+            case EXEC_ERR_NOT_FOUND: sh_launch_kind = EXEC_KIND_NOT_FOUND; break;
+            case EXEC_ERR_INVALID:   sh_launch_kind = EXEC_KIND_INVALID;   break;
+            case EXEC_ERR_NOMEM:     sh_launch_kind = EXEC_KIND_NOMEM;     break;
+            case EXEC_ERR_FAULT:     sh_launch_kind = EXEC_KIND_FAULT;     break;
+            default:                 sh_launch_kind = EXEC_KIND_NOMEM;     break;
+            }
             return frc;
         }
         /* PENDING / TAKEN / RUNNING: まだ終わっていない */
     }
+}
+
+/* sh_launch の**後ろ**に置く: tools/tests/sh_launch_host.c はこの .inc だけを
+ * #include する (shell.h を通さない) ので、前に置くと宣言が無い。 */
+int sh_exec_result(const char *cmdline, int *kind, int *code)
+{
+    int rc;
+
+    sh_launch_kind = EXEC_KIND_NONE;
+    rc = sh_launch(cmdline);
+    if (kind) *kind = sh_launch_kind;
+    if (code) *code = 0;
+    return rc;
 }

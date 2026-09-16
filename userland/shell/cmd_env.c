@@ -135,6 +135,29 @@ int env_expand(const char *src, char *dst, int max)
             int braced = 0;
 
             si++; /* '$' をスキップ */
+
+            /* 票 §2-4: `$?` は**名前の走査より手前**、`{` の判定より手前で
+             * 特別扱いする。だから `set ?=5` で作った変数があっても隠れるし、
+             * 環境変数表には 1 バイトも書かない (子に継承させない)。
+             * `${?}` は**対応しない** — 下の braced 経路へ落ちて空になる。
+             * `$?x` は `0x` のように展開される (現状のシェルでは無害)。 */
+            if (src[si] == '?') {
+                char num[12];
+                int n = 0;
+                int v = sh_status_get();
+                int neg = 0;
+
+                si++;                       /* '?' を消費 */
+                if (v < 0) { neg = 1; v = -v; }
+                if (v == 0) num[n++] = '0';
+                while (v > 0) { num[n++] = (char)('0' + (v % 10)); v /= 10; }
+                if (neg) num[n++] = '-';
+                while (n > 0 && di < max - 1) dst[di++] = num[--n];
+                if (n > 0) truncated = 1;   /* 最大 11 文字 — 既存の溢れ検査へ */
+                expanded = 1;
+                continue;
+            }
+
             if (src[si] == '{') { braced = 1; si++; }
 
             /* T9: 名前の終端 (`}` / 区切り / 行末) を**幅の検査より先**に見る。
@@ -184,7 +207,7 @@ int env_expand(const char *src, char *dst, int max)
 /*  シェルコマンド                                                           */
 /* ======================================================================== */
 
-static void cmd_env(int argc, char **argv)
+static int cmd_env(int argc, char **argv)
 {
     int i;
     (void)argc; (void)argv;
@@ -194,17 +217,26 @@ static void cmd_env(int argc, char **argv)
                            env_vars[i].name, env_vars[i].value);
         }
     }
+    return 0;
 }
 
-static void cmd_set(int argc, char **argv)
+static int cmd_set(int argc, char **argv)
 {
     char name[ENV_NAME_MAX];
     const char *val_start;
 
     if (argc < 2) {
         /* 引数なし → env と同じ */
-        cmd_env(argc, argv);
-        return;
+        return cmd_env(argc, argv);
+    }
+
+    /* 票 §2-5 (往復 1 所見 6): `set -e` / `set +e` は **ここで拾う**。
+     * 下の「値の表示」分岐 (argc == 2 で `=` が無い) に落ちると
+     * `-e: not set` を出して終わってしまう。`set` の登録は 1 本のまま
+     * (二重登録しない) — 旗の実体は cmd_script.c にある。 */
+    if (str_eq(argv[1], "-e") || str_eq(argv[1], "+e")) {
+        script_errexit_set(argv[1][0] == '-');
+        return 0;
     }
 
     /* "VAR=VALUE" 形式をパース */
@@ -216,7 +248,7 @@ static void cmd_set(int argc, char **argv)
         while (*arg && *arg != '=') {
             if (ni >= ENV_NAME_MAX - 1) {
                 sh_refuse("set: variable name", ENV_NAME_MAX - 1);
-                return;
+                return SH_STATUS_USAGE;
             }
             name[ni++] = *arg++;
         }
@@ -224,7 +256,7 @@ static void cmd_set(int argc, char **argv)
 
         if (name[0] == '\0') {
             g_api->kprintf(ATTR_RED, "%s: invalid variable name '%s'\n", argv[0], argv[1]);
-            return;
+            return SH_STATUS_USAGE;
         }
 
         if (*arg == '=') {
@@ -239,12 +271,12 @@ static void cmd_set(int argc, char **argv)
         } else {
             /* 値の表示 */
             const char *v = env_get(name);
-            if (v) {
-                g_api->kprintf(ATTR_WHITE, "%s=%s\n", name, v);
-            } else {
+            if (!v) {
                 g_api->kprintf(ATTR_RED, "%s: not set\n", name);
+                return SH_STATUS_ERROR;
             }
-            return;
+            g_api->kprintf(ATTR_WHITE, "%s=%s\n", name, v);
+            return 0;
         }
 
         /* T8: 値は写さずそのまま渡す。以前はここで ENV_VALUE_MAX - 1 に
@@ -253,24 +285,26 @@ static void cmd_set(int argc, char **argv)
          * `=` の後ろは val_start に全部入っている (追加引数は使わない)。 */
         env_set(name, val_start);
     }
+    return 0;
 }
 
-static void cmd_unset(int argc, char **argv)
+static int cmd_unset(int argc, char **argv)
 {
     int i;
     if (argc < 2) {
         shell_print_help(argv[0]);
-        return;
+        return SH_STATUS_USAGE;
     }
     for (i = 1; i < argc; i++) {
         env_unset(argv[i]);
     }
+    return 0;
 }
 
 /* 登録用テーブル */
 static const ShellCmd env_cmds[] = {
     { "env",    cmd_env,   "",            "Show all environment variables" },
-    { "set",    cmd_set,   "VAR=VALUE",   "Set environment variable" },
+    { "set",    cmd_set,   "VAR=VALUE | -e | +e", "Set variable / errexit" },
     { "export", cmd_set,   "VAR=VALUE",   "Set environment variable" },
     { "unset",  cmd_unset, "VAR...",      "Unset environment variables" },
     { (const char *)0, 0, 0, 0 }
