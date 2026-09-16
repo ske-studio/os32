@@ -4,8 +4,8 @@
   (`fs_is_dir` は「不明」を運べない)
 - 原則: [`docs/POLICY_DEBUG.md`](../../docs/POLICY_DEBUG.md) §4-35 —
   「読めなかった」を「無い / その型ではない」と読み替えない。判定関数ではなく**受け手**を試す
-- 実行: `python3 -B tools/tests/test_fs_kind_callers.py [--target]`
-  (`make check-fs-kind-callers-host` が同じものを `--target` 付きで回す)
+- 実行: `python3 -B tools/tests/test_fs_kind_callers.py [--target] [--mutate]`
+  (`make check-fs-kind-callers-host` が同じものを `--target --mutate` 付きで回す)
 - 対象: `userland/shell/cmd_file.c` の呼び出し元 5 箇所 (`cmd_fs_shared.c` と一緒に実物を `#include`)
 - 贋 FS: [`fs_kind_fake.h`](fs_kind_fake.h) — [`fs_kind_host.c`](fs_kind_host.c) から切り出して共有
   (切り出しの前後で `fs_kind_host` は 21 checks, 0 failures のまま)
@@ -138,4 +138,98 @@ TARGET i386-elf -Werror COMPILE PASS (userland/shell/cmd_file.c)
 
 - **実機の `cp` / `mv` / `rm` は見ていない。** 贋 FS はオンメモリで、実物の VFS も ext2 も通らない。
 - 「分からない」の作り方は `stat` + 列挙の `IO` だけ。`NOSYS` など他の負値は同じ分岐を通るが個別には試していない。
-- `cp -r` の再帰の内側 (`do_copy_recursive_impl`) は列挙の `type` を使うので `fs_path_kind` を呼ばず、この試験の対象外。
+- `cp -r` の再帰の内側 (`do_copy_recursive_impl`) は列挙の `type` を使うので、
+  子のエントリ 1 件ずつには `fs_path_kind` を呼ばない。宛先ディレクトリの型だけは
+  §6 で見るようになった。
+
+## 6. 追補 — `cp -r` が失敗時に空のディレクトリを残す (2026-09-16)
+
+継承バグ台帳 ([`docs/tasks/shell/INHERITED_BUGS.md`](../../docs/tasks/shell/INHERITED_BUGS.md))
+の「`cp -r` の収集表 64 件上限で無言に切る」に隣り合う欠陥。
+
+### 6-1 欠陥
+
+`do_copy_recursive_impl` は
+
+1. `mem_alloc`
+2. **`sys_mkdir(dst)`**
+3. 収集 (`sys_ls` + `collect_entries_cb`)
+4. `g_copy_over` (`MAX_COPY_ENTRIES` = 64 を超えた) なら断って戻る
+
+の順だった。4 で戻る経路は **2 で作った空のディレクトリを宛先に残す**。
+さらに 2 は `sys_mkdir` の**戻り値を見ていない**ので、作れていない宛先の中へ
+コピーを試み、ディレクトリと同名のファイルが在るときは親の下に中身が散った。
+
+### 6-2 直し方
+
+順序を「収集 → 件数の確認 → `mkdir`」に入れ替え、`mkdir` の戻り値を見る。
+
+- `sys_ls` が負 → `cp -r: cannot read directory '…'` を出して戻る (宛先を作らない)
+- 件数超過 → 従来どおり `too many entries` を出して戻る (**`sys_mkdir` を呼ばない**)
+- `sys_mkdir` が 0 以外 → `cp -r: cannot create directory '…'` を出して**中へ進まない**
+- ただし `OS32_ERR_EXIST` **かつ `fs_path_kind(dst) == FS_KIND_DIR`** なら通す
+
+最後の 1 行が要点で、`cp -r a b` を 2 回打つ使い方 (2 回目は `b/a` が既に在る) を
+壊さないためにある。`cmd_cp` 側の `file_kind_or_refuse` は**最上段の宛先しか
+見ていない**ので (`dst/basename(src)` も再帰の内側の `dst_path` も通らない)、
+`hsync.c` の `dst_dir_type_ok` に当たるものはシェル側に無い。そこで `EXIST` の
+ときだけここで型を引く。型が分からない (負値) ときも断る — §5 と同じ B8 の原則。
+
+### 6-3 RED → GREEN
+
+RED (直す前の `cmd_file.c`、試験だけ新しい):
+
+```
+61 checks, 10 failures
+EXIT fs_kind_callers_host=1
+```
+
+```
+  FAIL 上限超過: **sys_mkdir を 1 回も呼ばない** (収集が先)
+  FAIL 上限超過: 宛先に空のディレクトリを残さない
+  FAIL 列挙 IO: 断りを出す
+  FAIL 列挙 IO: 宛先を作らない
+  FAIL mkdir 失敗: 断りを出す
+  FAIL mkdir 失敗: **中へコピーしない** (open / write を呼ばない)
+  FAIL 宛先が同名のファイル: 断りを出す
+  FAIL 宛先が同名のファイル: 中へコピーしない
+  FAIL 宛先の型が分からない: 断る (EXIST を無条件に通さない)
+  FAIL 宛先の型が分からない: 中へコピーしない
+```
+
+このとき「既存ディレクトリ: 中身を上書きコピーする」と「正常系」は `ok` の
+まま落ちていない = **直しがそこを壊していないことの裏**になっている。
+
+GREEN (直した後):
+
+```
+61 checks, 0 failures
+EXIT fs_kind_callers_host=0
+TARGET i386-elf -Werror COMPILE PASS (userland/shell/cmd_fs_shared.c)
+TARGET i386-elf -Werror COMPILE PASS (userland/shell/cmd_file.c)
+```
+
+判定は文言ではなく**呼び出し回数**で見る (`fsk_mkdir_calls` / `fsk_open_calls` /
+新しく足した `fsk_write_calls`) ほか、贋 FS に宛先ノードが生えていないことも見る。
+贋 FS は `MAX_COPY_ENTRIES` (64) を超えるディレクトリを作れるよう
+`FSK_MAX_NODES` を 48 → 96 にし、`sys_mkdir` の失敗を注げる `fsk_mkdir_err` を足した。
+
+### 6-4 否定側 (`--mutate`)
+
+| 変異 | 壊すもの | 落ちる件数 |
+|---|---|---|
+| `mkdir_before_collect` | `mkdir` を収集の**前**へ戻す (欠陥そのもの) | 5 |
+| `mkdir_ret_ignored` | `sys_mkdir` の戻り値を見ない | 6 |
+| `exist_type_not_checked` | `EXIST` を型を見ずに通す | 4 |
+| `ls_err_ignored` | `sys_ls` の負値を無視する | 2 |
+
+### 6-5 確かめていないこと ([V4])
+
+- **実機 (NP21/W) では回していない。** 実物の ext2 / HostDrv の `mkdir` が
+  既存ディレクトリに対して本当に `OS32_ERR_EXIST` を返すかは、この試験では
+  贋 FS の約束ごと。`sdk/include/os32/os32_kapi_shared.h` の
+  「名前が既に在れば種別を問わず `OS32_ERR_EXIST`」に従っている。
+- 64 件上限で無言に切る件 (台帳の別項) は直していない。断りは出るが、
+  途中まで写した子は残る。
+- `sys_ls` の負値を失敗と読むのは `rc < 0` だけ。正の戻り値 (件数) を返す
+  FS があっても通す。

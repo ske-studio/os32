@@ -136,7 +136,7 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
     /* 収集表の写し。再帰で g_copy_entries が上書きされるので 1 段ごとに
      * 自分のぶんを持つ。I-4 で 1 段 16.6KB になったのでヒープから取る。 */
     struct copy_entry *local_entries;
-    int local_count, i;
+    int local_count, i, rc;
 
     if (depth >= MAX_COPY_DEPTH) {
         g_api->kprintf(ATTR_RED, "cp: max depth exceeded: %s\n", src);
@@ -150,13 +150,17 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
         return;
     }
 
-    /* 宛先ディレクトリを作成 */
-    g_api->sys_mkdir(dst);
-
-    /* エントリを全て収集 (static バッファに) */
+    /* **収集が先、mkdir は後**。上限超過や列挙の失敗で引き返す経路が
+     * mkdir の後ろにあったので、宛先に**空のディレクトリだけ**が残っていた。 */
     g_copy_count = 0;
     g_copy_over = 0;
-    g_api->sys_ls(src, collect_entries_cb, (void *)0);
+    rc = g_api->sys_ls(src, collect_entries_cb, (void *)0);
+    if (rc < 0) {
+        g_api->kprintf(ATTR_RED, "cp -r: cannot read directory '%s': %s\n",
+                       src, fs_strerror(rc));
+        g_api->mem_free(local_entries);
+        return;
+    }
     if (g_copy_over) {
         g_api->kprintf(ATTR_RED, "cp -r: too many entries in '%s' (max %d)\n",
                        src, MAX_COPY_ENTRIES);
@@ -167,6 +171,20 @@ static void do_copy_recursive_impl(const char *src, const char *dst, int depth)
     local_count = g_copy_count;
     for (i = 0; i < local_count; i++) {
         local_entries[i] = g_copy_entries[i];
+    }
+
+    /* 宛先ディレクトリを作成。**戻り値を見る** — 作れていないのに中へ進むと
+     * 親の下に中身が散る / 既存のファイルを潰す。
+     * 既に在る**ディレクトリ**への上書きコピー (`cp -r a b` を 2 回打つ
+     * 使い方) は今までどおり通す。呼び手 (cmd_cp) の file_kind_or_refuse は
+     * 最上段の宛先しか見ていないので、EXIST のときはここで型を確かめる
+     * (同名のファイルが在る / 型が分からない、なら中へ進まない)。 */
+    rc = g_api->sys_mkdir(dst);
+    if (rc != 0 && !(rc == OS32_ERR_EXIST && fs_path_kind(dst) == FS_KIND_DIR)) {
+        g_api->kprintf(ATTR_RED, "cp -r: cannot create directory '%s': %s\n",
+                       dst, fs_strerror(rc));
+        g_api->mem_free(local_entries);
+        return;
     }
 
     /* 収集後にコピーを実行 */
@@ -381,16 +399,22 @@ static void cmd_rm(int argc, char **argv)
         }
     }
 }
-/* バッファを行番号付きで出力 */
-static void cat_with_linenum(const u8 *data, int len, int *line_num)
+/* バッファを行番号付きで出力
+ *
+ * 行番号は**行の先頭で**出す。at_bol は「次に出す 1 バイトが行の先頭か」で、
+ * cmd_cat が読み取りをまたいで持ち回る。これが 2 つの欠陥の直し:
+ *   - 改行で終わるバッファの後ろで行番号を出さない (行がまだ始まっていない)
+ *   - sys_read の切れ目が行の途中でも、そこで 1 行終わったことにしない
+ * 改行で終わらないまま入力が尽きたときの行末の改行は cmd_cat が足す。 */
+static void cat_with_linenum(const u8 *data, int len, int *line_num, int *at_bol)
 {
     int i, start;
     char num_buf[12];
     int nlen, j;
 
-    start = 0;
-    for (i = 0; i <= len; i++) {
-        if (i == len || data[i] == '\n') {
+    i = 0;
+    while (i < len) {
+        if (*at_bol) {
             /* 行番号を出力 */
             nlen = 0;
             {
@@ -406,16 +430,45 @@ static void cat_with_linenum(const u8 *data, int len, int *line_num)
             num_buf[nlen++] = ' ';
             num_buf[nlen++] = ' ';
             g_api->sys_write(1, num_buf, nlen);
+            *at_bol = 0;
+        }
 
-            /* 行の内容を出力 */
-            if (i > start) {
-                g_api->sys_write(1, &data[start], i - start);
-            }
-            g_api->sys_write(1, "\n", 1);
-            start = i + 1;
+        /* 行の内容を出力 (改行があればそこまで、無ければバッファの終わりまで) */
+        start = i;
+        while (i < len && data[i] != '\n') i++;
+        if (i < len) {
+            i++;                    /* 改行も行の一部として出す */
+            *at_bol = 1;
             (*line_num)++;
         }
+        if (i > start) {
+            g_api->sys_write(1, &data[start], i - start);
+        }
     }
+}
+
+/* 開いた FD を 1 本ぶん流す。**FD は閉じない** — 持ち主 (呼び手) が閉じる。
+ * io_buf は呼び手が ensure_io_buf() で用意しておくこと。
+ * 行頭かどうかは**読み取りをまたいで**持ち回る (IO_BUF_SIZE の切れ目で
+ * 行が終わったことにしないため)。終わりは sys_read が 0 以下を返したところ。 */
+static void cat_stream(int fd, int show_linenum)
+{
+    int line_num = 1;
+    int at_bol = 1;
+    int r;
+
+    while (1) {
+        r = g_api->sys_read(fd, io_buf, IO_BUF_SIZE);
+        if (r <= 0) break;
+
+        if (show_linenum) {
+            cat_with_linenum(io_buf, r, &line_num, &at_bol);
+        } else {
+            g_api->sys_write(1, io_buf, r);
+        }
+    }
+    /* 最後が改行で終わらない入力の行末 (従来どおり改行を足す) */
+    if (show_linenum && !at_bol) g_api->sys_write(1, "\n", 1);
 }
 
 static void cmd_cat(int argc, char **argv)
@@ -433,9 +486,28 @@ static void cmd_cat(int argc, char **argv)
         file_start = 2;
     }
 
+    /* ファイル名が 1 つも無ければ**標準入力 (FD 0)** を読む。
+     * `echo a | cat` も `cat < f` も、シェルの fd_redirect が FD 0 を
+     * 差し替えたところをそのまま読むだけ — リダイレクト表には触らない。
+     *   - FD 0 はシェルの持ち物なので **sys_close しない**。
+     *   - 端末のままだと vfs_read_fd の TTY 経路に EOF が無く戻れないので、
+     *     grep / hexdump と同じく sys_isatty(0) で使い方を出して止める。 */
+    if (file_start >= argc) {
+        if (g_api->sys_isatty(0)) {
+            shell_print_help(argv[0]);
+            return;
+        }
+        if (ensure_io_buf() < 0) {
+            g_api->kprintf(ATTR_RED, "%s", "cat: out of memory\n");
+            return;
+        }
+        cat_stream(0, show_linenum);
+        release_io_buf();
+        return;
+    }
+
     for (i = file_start; i < argc; i++) {
         int fd;
-        int r;
 
         fd = g_api->sys_open(argv[i], KAPI_O_RDONLY);
         if (fd < 0) {
@@ -449,20 +521,9 @@ static void cmd_cat(int argc, char **argv)
             g_api->sys_close(fd);
             continue;
         }
-        
-        {
-            int line_num = 1;
-            while (1) {
-                r = g_api->sys_read(fd, io_buf, IO_BUF_SIZE);
-                if (r <= 0) break;
-                
-                if (show_linenum) {
-                    cat_with_linenum(io_buf, r, &line_num);
-                } else {
-                    g_api->sys_write(1, io_buf, r);
-                }
-            }
-        }
+
+        cat_stream(fd, show_linenum);
+
         g_api->sys_close(fd);
         release_io_buf();
     }
@@ -490,8 +551,8 @@ static const ShellCmd file_cmds[] = {
     { "cp",   cmd_cp,   "[-r] SRC DST / SRC... DIR", "Copy files" },
     { "mv",   cmd_mv,   "SRC DST / SRC... DIR", "Move files" },
     { "rm",   cmd_rm,   "FILE...",              "Remove files" },
-    { "cat",  cmd_cat,  "[-n] FILE...",         "Print file contents" },
-    { "cat2", cmd_cat2, "[-n] FILE...",         "Alias for cat" },
+    { "cat",  cmd_cat,  "[-n] [FILE...]",       "Print file contents (stdin if no FILE)" },
+    { "cat2", cmd_cat2, "[-n] [FILE...]",       "Alias for cat" },
     { "echo", cmd_echo, "[args...] [> FILE]",   "Print or redirect text" },
     { (const char *)0, 0, 0, 0 }
 };

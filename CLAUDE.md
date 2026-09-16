@@ -147,7 +147,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   must land on a UTF-8 boundary. → §4-27
 - Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
 - Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
-- 9MB 構成で `v86 -t` が `#PF addr=0 EIP=0` で死ぬ (8MB / 15MB は無事、未解決)。 → §4-28
+- 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28
 - 配備の成否は文言で判断しない。**ゲストの `ls -l /boot/vmkernel.lz4` と手元のサイズを
   突き合わせる** ([V4])。コピー失敗自体は 2026-09-10 に非ゼロ終了へ直した。 → §4-29
 - `gui_gate.py` で GUI を叩くときは rshell を ESC で抜けてから `/api/key`、Start メニューの行は
