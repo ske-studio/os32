@@ -659,6 +659,11 @@ static VfsOps fatfs_ops = {
     /* set_mtime は持たない (票 H3)。vfs_set_mtime が OS32_ERR_NOSYS を
      * 返す = 失敗ではなく「この FS には無い」。**明示的に 0 を置く** —
      * -Wmissing-field-initializers が「書き忘れ」と区別できないため。 */
+    0,
+    /* create_excl (O_EXCL) も持たない (票 H2 §2-1)。**ホスト側が同時に書ける
+     * FS では排他性が成り立たない**ので、持てないものは持たないと言う。
+     * vfs_open が O_EXCL に OS32_ERR_NOSYS を返し、呼び手 (hsync) は
+     * 直接上書きへ落ちずに replace_unsupported で断る。 */
     0
 };
 

@@ -505,12 +505,21 @@ int ext2_unlink(Ext2Ctx *ctx, u32 dir_ino, const char *name)
         if (leaked) return EXT2_ERR_IO;
         return r;
     } else {
+        /* **戻り値を捨てない** (票 H2 §2-2-3 / Codex 往復 2 所見 5)。
+         * 名前はもう消えているので「消えていない」とは言えないが、
+         * links_count を減らせなかったのを成功と言うと、復旧の掃除が
+         * 「名前は消えたが links は 2 のまま」を errors=0 で報告する。 */
         inode.ctime = ext2_current_time();
-        ext2_write_inode(ctx, ino, &inode);
+        ret = ext2_write_inode(ctx, ino, &inode);
+        if (ret != 0) {
+            (void)ext2_sync(ctx);
+            return EXT2_ERR_IO;
+        }
     }
 
-    ext2_sync(ctx);
-    return EXT2_OK;
+    /* write-through の約束 (戻った時点でディスクが正しい) を守れたかを返す。
+     * ここも以前は捨てていた (票 H2 §2-2-3)。 */
+    return ext2_sync(ctx);
 }
 
 /* ======================================================================== */

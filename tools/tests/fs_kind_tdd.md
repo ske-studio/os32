@@ -6,6 +6,9 @@
 - 実行: `python3 -B tools/tests/test_fs_kind.py [--target]`
   (`make check-fs-kind-host` が同じものを `--target` 付きで回す)
 - 対象: `userland/shell/cmd_fs_shared.c` / `userland/shell/cmd_file.c` (実物を `#include`)
+- 2026-09-16: 贋 FS を [`fs_kind_fake.h`](fs_kind_fake.h) へ切り出して
+  [`fs_kind_callers_tdd.md`](fs_kind_callers_tdd.md) の試験と共有した。検査の内容は変えていない
+  (切り出しの前後とも 21 checks, 0 failures)
 
 ## 0. 正直に書く ([V4])
 

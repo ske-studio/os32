@@ -27,15 +27,13 @@ class Broker(unittest.TestCase):
             for unit in ('paging', 'pgalloc', 'sys'):
                 source = (root / f'kernel/{unit}.c').read_text()
                 source = source.replace('irq_save()', 'host_irq_save()').replace('irq_restore(flags)', 'host_irq_restore(flags)')
-                source = source.replace('__asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));', 'cr3_val = host_cr3;')
-                for name in ('cr3_val', 'pd_phys'):
-                    source = source.replace(f'__asm__ volatile("mov %0, %%cr3" : : "r"({name}) : "memory");', f'host_cr3 = {name};')
-                source = source.replace('__asm__ volatile("mov %%cr0, %0" : "=r"(cr0_val));', 'cr0_val = 0;')
-                source = source.replace('__asm__ volatile("mov %0, %%cr0" : : "r"(cr0_val) : "memory");', '(void)cr0_val;')
                 (tmp / f'{unit}_host_source.c').write_text(source)
             cmd = ['gcc', '-m32', '-march=i386', '-std=gnu89', '-Wall', '-Wextra', '-Werror', '-Wdeclaration-after-statement', '-ffreestanding', '-fno-pie', '-fno-stack-protector', '-nostdlib', '-static', '-no-pie', '-ffunction-sections', '-Wl,--gc-sections', '-DPHYSMEM_HOST_TEST=1']
-            # arch/x86 + platform/pc98: include/io.h は契約だけで、実装は
-            # 固定名 arch_io.h / platform_io.h を引く (順序 3)。
+            # arch/x86 + platform/pc98: include/io.h / include/cpu.h は契約
+            # だけで、実装は固定名 arch_io.h / arch_cpu.h / platform_io.h を
+            # 引く (順序 3・5)。CR0 / CR3 を触る arch_cpu.h だけは、ホストでは
+            # tools/tests/host_arch/ の実装が先に見つかるようにする。
+            cmd += ['-I' + str(root / 'tools/tests/host_arch')]
             cmd += ['-I' + str(root / p) for p in ('include', 'arch/x86', 'platform/pc98', 'kernel', 'lib', 'drivers', 'sdk/include/os32')] + ['-I' + str(tmp)]
             subprocess.run(cmd + [str(root / 'tools/tests/device_reservation_stage_host.c'), str(root / 'kernel/physmem.c'), '-o', str(tmp / 'test')], check=True)
             subprocess.run([str(tmp / 'test')], check=True, timeout=20)

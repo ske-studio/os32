@@ -1,7 +1,7 @@
 /* ======================================================================== */
 /*  KAPI_HOST.C — Host Services KAPI v51 の __cdecl 側実体                    */
 /*                                                                          */
-/*  ABI の正典: docs/archive/network/TASK_N0.md §1a。                          */
+/*  ABI の正典: docs/archive/network/TASK_N0.md §1a。                        */
 /*                                                                          */
 /*  ここの仕事は 3 つだけで、プロトコルには一切触らない:                      */
 /*    (1) CPL=3 のポインタ / 長さの検証 (v50 と同じ 2 段の 2 段目。           */

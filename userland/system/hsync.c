@@ -46,10 +46,30 @@
 /*  ときは `hsync sys` と明示する (2026-09-09、ホットデプロイ撤去に伴い)。   */
 /*  除外は `-f` でも解除しない。                                            */
 /*                                                                          */
-/*  ★ H1 の限界 (解消は票 H2): 宛先を O_CREAT|O_TRUNC で**直接**開いて      */
-/*     上書きする。コピー途中の I/O 失敗や読戻し検証の失敗が起きたとき、     */
-/*     **旧宛先を復元する保証は無い** (切り詰め・書きかけのまま残り得る)。   */
-/*     一時ファイルへ書いて検証してから置換する方式は H2。                   */
+/*  **置き換えは一時ファイル経由** (票 H2、KAPI v53)。宛先と同じディレクトリ */
+/*  の予約名 `.hs~<名前>` へ O_EXCL で作り、書き込み・sync・読戻し検証・      */
+/*  mtime まで済ませてから sys_rename で本名に載せ替える。                    */
+/*                                                                          */
+/*    **公開の前** (書き込み・検証・mtime・置換の途中まで) の失敗            */
+/*        … 旧宛先の名前と内容が残る。一時ファイルは片づけられれば片づける。 */
+/*          メタデータの失敗でマウントが書き込み禁止 (ROFS) に落ちた後は      */
+/*          unlink も通らないので `STALE` と表示し、次の実行が片づける。      */
+/*    **公開の後** (宛先エントリの inode が新しい方を指した後) の失敗        */
+/*        … 宛先には検証済みの新しい内容が現れる。後始末が落ちたら漏れが      */
+/*          残り (e2fsck が回収)、`replace_partial` として報告する            */
+/*          (成功には数えない)。                                             */
+/*                                                                          */
+/*  公開の有無は**宛先の `st_ino`** で判定する。サイズと CRC は証拠にしない   */
+/*  (`-f` で新旧が同じ内容だと未公開を公開と誤る)。ジャーナルは無いので       */
+/*  「原子的」とは書かない — 電源断では一時ファイルが残り得る。               */
+/*                                                                          */
+/*  `.hs~` は **hsync の予約接頭辞**。この名前のファイルは hsync が作り、     */
+/*  訪れたディレクトリで消す。利用者はこの接頭辞を使わないこと。             */
+/*                                                                          */
+/*  **古いカーネル** (KAPI v53 未満) では一時ファイル方式が成立しない         */
+/*  (O_EXCL が黙って無視され、ext2 の置き換えも旧順序)。既定は 1 件も書かずに */
+/*  `kernel_too_old` で断る。`--unsafe-overwrite` を明示したときだけ、以前と  */
+/*  同じ直接上書きで進む (**失敗すると旧内容は残らない**)。                   */
 /* ======================================================================== */
 
 #include "os32api.h"
@@ -98,6 +118,35 @@
 #define HR_DEFAULT_SYS  "default_sys_exclusion"
 #define HR_SETTINGS_DB  "settings_db"
 #define HR_TOO_DEEP     "path_too_deep"     /* VFS の要素数上限を越える */
+/* ---- 票 H2 (一時ファイル + 検証 + 置換) ---- */
+#define HR_REPLACE_PARTIAL "replace_partial"  /* 公開済み・後始末が落ちた */
+#define HR_REPLACE_FAILED  "replace_failed"   /* 未公開・旧内容のまま */
+#define HR_REPLACE_UNKNOWN "replace_unknown"  /* 公開したか判定できない */
+#define HR_TEMP_EXISTS     "temp_exists"      /* 予約名が在って消せない */
+#define HR_NAME_TOO_LONG   "name_too_long"    /* 一時名が NAME_CAP に入らない */
+#define HR_NO_SPACE        "no_space"         /* 空き不足 */
+#define HR_HARDLINK        "hardlink"         /* 宛先の st_nlink > 1 */
+#define HR_KERNEL_TOO_OLD  "kernel_too_old"   /* KAPI が v53 未満 */
+#define HR_REPLACE_UNSUPPORTED "replace_unsupported" /* 宛先 FS に O_EXCL が無い */
+#define HR_DEST_CHANGED    "dest_changed"     /* 判定後に宛先が変わった */
+#define HR_SYNC_FAILED     "sync_failed"      /* 置換後の vfs_sync が落ちた */
+#define HR_PROT_RESERVED   "protected"        /* 予約名だが保護対象の実体 */
+#define HR_RESERVED_NAME   "reserved_name"    /* コピー元に予約名 .hs~ が在る */
+
+/* hsync の**予約接頭辞** (票 H2 §2-4、決裁 D3 (a'))。この接頭辞で始まる名前は
+ * hsync が作り、hsync が消す。所有の根拠は「作った印」ではなく**予約された
+ * 名前空間**に置いてある — `st_nlink` や作成時刻では所有を証明できないので
+ * (Codex 往復 1 所見 2)、man ページ (docs/manpages/hsync.1) と
+ * docs/06_filesystem.md に「利用者は使わない」と明記したうえで消す。 */
+#define HS_TEMP_PREFIX     ".hs~"
+/* 長さは**接頭辞の文字列から導く** ([C4]: 同じ値を 2 か所に書かない)。
+ * sizeof は終端の '\0' を含むので 1 を引く。 */
+#define HS_TEMP_PREFIX_LEN ((int)(sizeof(HS_TEMP_PREFIX) - 1))
+
+/* 一時ファイル方式が成立する最小の KAPI 版 (票 H2 §2-1: O_EXCL)。
+ * **build/app.conf の要求版は 52 のまま**なので、v52 のカーネルでも hsync は
+ * 起動でき、ここで自分から断れる (§2-3 末尾)。 */
+#define HS_MIN_KAPI_H2  53
 #define HR_BAD_NAME     "bad_name"          /* 名前に '\' が混じっている */
 #define HR_PATH_REJECT  "path_rejected"     /* 正規化できず判定もできない */
 
@@ -124,6 +173,7 @@ static int g_unchanged;
 static int g_excluded;
 static int g_protected;
 static int g_metadata_updated;       /* 内容は同じで mtime だけ直したもの */
+static int g_cleaned;                /* 片づけた予約名 (.hs~) の数 (票 H2 §2-4) */
 static int g_errors;
 
 /* 集計には出さないが、**省略したことを必ず見せる**ための数 (票 H3) */
@@ -135,6 +185,9 @@ static int g_force;
 static int g_dry_run;
 static int g_verbose;
 static int g_verify;                 /* 全件の内容を必ず比較する (票 H3 §8) */
+static int g_unsafe;                 /* --unsafe-overwrite が指定された */
+static int g_direct;                 /* 実際に直接上書きで進む (旧カーネル) */
+static int g_direct_overwrite;       /* 直接上書きで書いた件数 */
 
 /* 既定の /sys 除外は「全体同期のルート直下」だけに効かせる。
  * `hsync usr` の usr/sys を巻き添えにしない (設計書 §3.2)。 */
@@ -196,6 +249,14 @@ static int str_has_prefix(const char *s, const char *pre)
     return 1;
 }
 
+/* hsync の予約名か (票 H2 §2-4)。**`st_nlink` や作成時刻は見ない** —
+ * 途中で止まった媒体では nlink が 2 になり得るし、所有の根拠は名前空間の
+ * 予約だけに置いてある。 */
+static int hs_is_temp_name(const char *name)
+{
+    return str_has_prefix(name, HS_TEMP_PREFIX);
+}
+
 /* ======== ファイルリスト ======== */
 
 /* 名前の保持幅。FileList はスタックに載る (MAX_FILES x NAME_CAP x 深さ) ので
@@ -203,6 +264,7 @@ static int str_has_prefix(const char *s, const char *pre)
 #define NAME_CAP 64
 
 typedef struct {
+    const char *src_dir;  /* 列挙中のコピー元ディレクトリ (表示用。FS には触らない) */
     char names[MAX_FILES][NAME_CAP];
     u8   types[MAX_FILES];
     int  count;
@@ -218,6 +280,29 @@ static void ls_cb(const DirEntry_Ext *entry, void *ctx)
 {
     FileList *fl = (FileList *)ctx;
     int i;
+
+    /* **予約名は同期対象にしない** (票 H2 §2-3 手順 1)。127 件の枠に入れる
+     * より**前**に弾く — 途中で止まった実行が残した `.hs~` が 128 件の枠を
+     * 食って通常ファイルを落とすのを防ぐ。掃除は別の枠で行う (§2-4)。
+     *
+     * **黙って落とさない**。ホスト側の配備元に誤って `.hs~x` が紛れると、
+     * その 1 件は同期されないのに `excluded` にも `-v` の行にも出ず、
+     * 気づく手がかりが無かった。除外として数えて -v で見せる。
+     * 見せるのは**コピー元**の名前 — 直すのはそちらなので。
+     * コールバックの中なので FS には触らず、パスも組み立てずに書式で繋ぐ
+     * (POLICY_DEBUG §4-26)。 */
+    if (hs_is_temp_name(entry->name)) {
+        g_excluded++;
+        if (g_verbose) {
+            const char *dir = fl->src_dir ? fl->src_dir : "";
+            int n = str_len(dir);
+            api->kprintf(ATTR_YELLOW, "  EXCLUDE %s%s%s reason=%s\n",
+                         dir, (n > 0 && dir[n - 1] == '/') ? "" : "/",
+                         entry->name, HR_RESERVED_NAME);
+        }
+        return;
+    }
+
     if (fl->count >= MAX_FILES) { fl->dropped++; return; }
 
     if (!hsp_name_fits(entry->name, NAME_CAP)) {
@@ -266,15 +351,18 @@ static int read_fill(int fd, u8 *buf, int want)
 
 /* len バイト書けるまで sys_write を繰り返す。
  * 0 進捗・負値・要求超過は失敗 (設計書 §6 の規則を H1 でも守る)。
- * 戻り値 len = 成功 / -1 = 失敗。 */
+ * 戻り値 len = 成功 / 負値 = 失敗。**失敗は sys_write が返した番号をそのまま
+ * 返す** (票 H2 §2-3 手順 3: 空き不足を `no_space` と呼び分けるため。
+ * 0 進捗と契約違反は番号が無いので OS32_ERR_IO にする)。 */
 static int write_all(int fd, const u8 *buf, int len)
 {
     int done = 0;
 
     while (done < len) {
         int wr = api->sys_write(fd, buf + done, (u32)(len - done));
-        if (wr <= 0) return -1;             /* 0 進捗も失敗にする */
-        if (wr > len - done) return -1;     /* 契約違反 */
+        if (wr < 0) return wr;                  /* 番号を保つ */
+        if (wr == 0) return OS32_ERR_IO;        /* 0 進捗も失敗にする */
+        if (wr > len - done) return OS32_ERR_IO;/* 契約違反 */
         done += wr;
     }
     return done;
@@ -336,57 +424,57 @@ static int compare_files(const char *pa, const char *pb, u32 size)
 
 /* ======== コピー + 読戻し検証 ======== */
 
-/* コピー元を読みながら CRC-32 と総バイト数を作り、書き終えたら宛先を
- * **再オープンして読み**、バイト数と CRC の**両方**を照合する (設計書 §4.2)。
- * I/O 失敗・予定長不一致・CRC 不一致は成功件数に入れない。
- *
- * CRC は偶発的破損の検出用。衝突があるので同一内容の厳密な証明には使わない
- * (コピー前の同一判定はバイト比較のまま)。
- *
- * ★ H1 の限界: 宛先を O_TRUNC で直接開く。ここで落ちたとき**旧宛先を
- *    復元する保証は無い**。一時ファイル + 検証 + 置換は票 H2。
- *
- * 戻り値 0 = 成功 / -1 = 失敗 (*reason に固定文字列)。 */
-static int copy_verify(const char *src, const char *dst, u32 expect,
-                       const char **reason)
+/* コピー元を読みながら CRC-32 と総バイト数を作り、開いてある fd へ書く。
+ * 戻り値 0 = 成功 / -1 = 失敗 (*reason に固定文字列)。
+ * 空き不足は `no_space` と呼び分ける (票 H2 §2-3 手順 3)。 */
+static int copy_body(const char *src, int fd, u32 *out_crc, u32 *out_total,
+                     const char **reason)
 {
-    int fs, fd;
+    int fs;
     u32 crc = CRC32_INIT;
-    u32 crc2 = CRC32_INIT;
     u32 total = 0;
-    u32 total2 = 0;
     int failed = 0;
 
     *reason = HR_IO;
-
     fs = api->sys_open(src, KAPI_O_RDONLY);
     if (fs < 0) return -1;
-    fd = api->sys_open(dst, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
-    if (fd < 0) { api->sys_close(fs); return -1; }
 
     while (1) {
         int got = read_fill(fs, file_buf, FILE_BUF_SIZE);
+        int wr;
         if (got < 0) { failed = 1; break; }
         if (got == 0) break;                         /* EOF */
-        if (write_all(fd, file_buf, got) != got) { failed = 1; break; }
+        wr = write_all(fd, file_buf, got);
+        if (wr != got) {
+            if (wr == OS32_ERR_NOSPC || wr == OS32_ERR_FULL)
+                *reason = HR_NO_SPACE;
+            failed = 1;
+            break;
+        }
         crc = crc32_core_update(crc, file_buf, (u32)got);
         total += (u32)got;
         if (got < FILE_BUF_SIZE) break;              /* read_fill は EOF でのみ短い */
     }
 
     api->sys_close(fs);
-    api->sys_close(fd);
     if (failed) return -1;
+    *out_crc = crc;
+    *out_total = total;
+    return 0;
+}
 
-    if (total != expect) { *reason = HR_SOURCE; return -1; }
+/* 書いたファイルを開き直して長さと CRC を照合する (設計書 §4.2)。
+ * キャッシュを経由するので媒体からの物理再読の保証ではない
+ * (最終受入は再起動後の内容で見る)。戻り値 0 = 一致 / -1 = 不一致・失敗。 */
+static int verify_readback(const char *path, u32 crc, u32 total)
+{
+    int fd;
+    u32 crc2 = CRC32_INIT;
+    u32 total2 = 0;
+    int failed = 0;
 
-    /* 書いたものをディスクへ出す。ここが落ちたら「届いていない」 */
-    if (api->vfs_sync() != 0) { *reason = HR_VERIFY; return -1; }
-
-    /* 読戻し。キャッシュを経由するので媒体からの物理再読の保証ではない
-     * (最終受入は再起動後の内容で見る、設計書 §4.2)。 */
-    fd = api->sys_open(dst, KAPI_O_RDONLY);
-    if (fd < 0) { *reason = HR_VERIFY; return -1; }
+    fd = api->sys_open(path, KAPI_O_RDONLY);
+    if (fd < 0) return -1;
     while (1) {
         int got = read_fill(fd, file_buf, FILE_BUF_SIZE);
         if (got < 0) { failed = 1; break; }
@@ -397,14 +485,42 @@ static int copy_verify(const char *src, const char *dst, u32 expect,
         if (got < FILE_BUF_SIZE) break;
     }
     api->sys_close(fd);
-    if (failed) { *reason = HR_VERIFY; return -1; }
+    if (failed) return -1;
 
     /* 最後の XOR は 1 ストリームにつき 1 回だけ (チャンクごとに畳まない) */
-    if (total2 != total ||
-        crc32_core_final(crc2) != crc32_core_final(crc)) {
-        *reason = HR_VERIFY;
+    if (total2 != total || crc32_core_final(crc2) != crc32_core_final(crc))
+        return -1;
+    return 0;
+}
+
+/* ---- 直接上書き (**古いカーネル向けの退避経路だけ**) -------------------
+ *
+ * 宛先を O_TRUNC で直接開く。ここで落ちたとき**旧宛先を復元する保証は無い**。
+ * 票 H2 の既定は下の replace_file (一時ファイル + 検証 + 置換) で、この関数へ
+ * 来るのは KAPI v53 未満のカーネル上で `--unsafe-overwrite` を明示したときだけ。
+ *
+ * 戻り値 0 = 成功 / -1 = 失敗 (*reason に固定文字列)。 */
+static int copy_verify(const char *src, const char *dst, u32 expect,
+                       const char **reason)
+{
+    int fd;
+    u32 crc = 0;
+    u32 total = 0;
+
+    *reason = HR_IO;
+    fd = api->sys_open(dst, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_TRUNC);
+    if (fd < 0) return -1;
+    if (copy_body(src, fd, &crc, &total, reason) != 0) {
+        api->sys_close(fd);
         return -1;
     }
+    api->sys_close(fd);
+
+    if (total != expect) { *reason = HR_SOURCE; return -1; }
+
+    /* 書いたものをディスクへ出す。ここが落ちたら「届いていない」 */
+    if (api->vfs_sync() != 0) { *reason = HR_VERIFY; return -1; }
+    if (verify_readback(dst, crc, total) != 0) { *reason = HR_VERIFY; return -1; }
     return 0;
 }
 
@@ -558,6 +674,287 @@ static void fail_file(const char *dst, const char *reason, int err)
     g_errors++;
 }
 
+/* ======== 一時ファイル方式の道具 (票 H2 §2-3 / §2-4) ======== */
+
+/* 定義は下の「コピー元 mtime を宛先へ」節。置き換えは**一時ファイルへ**
+ * 設定してから rename するので、置換本体より前に名前だけ要る。 */
+static int apply_mtime(const char *target, const char *label, u32 src_mtime);
+
+/* 宛先と同じディレクトリの予約名 `.hs~<名前>` を組み立てる。
+ * 戻り値 1 = 組めた / 0 = 名前が長すぎる。
+ *
+ * 長さの上限は `EXT2_NAME_LEN` ではなく **hsync 自身の列挙幅 `NAME_CAP`**
+ * (票 H2 §2-3 手順 1 / Codex 往復 2 所見 7)。一時名が NAME_CAP に収まらないと
+ * §2-4 の掃除の列挙で拾えなくなり、消せない予約名が残り続ける。
+ * **直接上書きへは落とさない** — 落とすと H2 の保証がその 1 件だけ消える。 */
+static int build_temp_path(const char *dst_path, char *out, int cap)
+{
+    int i, last = -1;
+    const char *base;
+
+    for (i = 0; dst_path[i]; i++) if (dst_path[i] == '/') last = i;
+    base = (last >= 0) ? dst_path + last + 1 : dst_path;
+
+    if (str_len(base) + HS_TEMP_PREFIX_LEN >= NAME_CAP) return 0;
+
+    out[0] = '\0';
+    if (last >= 0) {
+        if (last + 2 > cap) return 0;
+        for (i = 0; i <= last; i++) out[i] = dst_path[i];
+        out[last + 1] = '\0';
+    }
+    if (!str_ncat(out, HS_TEMP_PREFIX, cap)) return 0;
+    if (!str_ncat(out, base, cap)) return 0;
+    return 1;
+}
+
+/* この実行が作った一時ファイルを片づける。
+ * 消せなければ `STALE` を表示する (票 H2 §2-3 末尾 / A14c)。
+ * メタデータの失敗でマウントが書き込み禁止 (ROFS) に落ちた後は unlink も
+ * 通らないので、「必ず消える」とは言わない — 次の実行が予約名として消す。
+ *
+ * **errors に数えるかは呼び手が決める** — 1 つの失敗は 1 と数えるため:
+ *   - 手順 7 (一時ファイルへの mtime 設定が落ちた) は**数えない**。ext2 は
+ *     メタデータの I/O 失敗でマウントを ROFS に落とすので、続く unlink の
+ *     失敗は同じ 1 つの失敗の続きであって別件ではない。apply_mtime が
+ *     既に 1 件数えている。
+ *   - 公開の前の失敗と手順 8 の rename 失敗では**数える**。そちらは unlink が
+ *     落ちる理由が元の失敗と独立に在り得る (A14c は実際に別々の注入)。
+ *
+ * 戻り値 0 = 消えた / もう無い、-1 = 残った (STALE を表示済み)。 */
+static int drop_temp(const char *tmp)
+{
+    OS32_Stat st;
+    int rc = api->sys_stat(tmp, &st);
+
+    if (rc == OS32_ERR_NOTFOUND) return 0;    /* もう無い (置換で本名になった等) */
+    if (rc == 0) {
+        rc = api->sys_unlink(tmp);
+        if (rc == 0) return 0;
+    }
+    api->kprintf(ATTR_RED,
+                 "  STALE %s (一時ファイルを消せない err=%d。"
+                 "次の実行が予約名として片づける)\n", tmp, rc);
+    return -1;
+}
+
+/* **公開の前**の失敗。旧宛先は名前も内容もそのまま残っている。 */
+static void fail_before_publish(const char *dst, const char *tmp,
+                                const char *reason, int err)
+{
+    api->kprintf(ATTR_RED,
+                 "  FAIL %s reason=%s err=%d (公開の前なので旧宛先はそのまま)\n",
+                 dst, reason, err);
+    g_errors++;
+    if (drop_temp(tmp) != 0) g_errors++;   /* 後始末の失敗は独立した 1 件 */
+}
+
+/* 手順 2 で予約名が既に在ったとき。**`st_nlink` は見ない** (途中で止まった
+ * 媒体では 2 になり得る、票 H2 §2-2-4)。通常ファイルで、保護対象の実体でない
+ * ものだけ消す。戻り値 0 = 消した / -1 = 消さなかった。 */
+static int remove_stale_temp(const char *tmp)
+{
+    OS32_Stat st;
+
+    if (api->sys_stat(tmp, &st) != 0) return -1;
+    if ((st.st_mode & OS_S_IFMT) != OS_S_IFREG) return -1;  /* ディレクトリ等 */
+    if (dst_protected(tmp) != 0) return -1;                 /* 保護 > 予約 (R5) */
+    return api->sys_unlink(tmp) == 0 ? 0 : -1;
+}
+
+/* ---- 置き換え本体 (票 H2 §2-3 の手順 1〜9) -----------------------------
+ *
+ * 戻り値 0 = 置き換えた (呼び手が copied に数える) /
+ *       -1 = 失敗 (表示と errors はこの中で済ませてある)。
+ *
+ * `*published` は**媒体の上で宛先が新しい内容に入れ替わったか**を返す。
+ * 手順 8 の rename が通った時点で 1 になり、手順 9 の `vfs_sync` が落ちて
+ * -1 を返すときも 1 のまま残る。rename が非ゼロを返した回でも、宛先の
+ * `st_ino` が一時ファイルのものと一致する (= `replace_partial`) なら 1。
+ * `replace_failed` と `replace_unknown` では 0 のまま — 前者は旧内容のまま、
+ * 後者は公開したか分からないので、案内を出す根拠がない。失敗なのに置換は済んでいる場面があるので、
+ * 呼び手はこれを見て**再起動の案内だけは出す** — 置換が媒体に載っているのに
+ * 「/sys を更新した -> シェル再起動が必要」が消えるのは誤報になる。
+ * copied に数えないのは今までどおり (errors にも入っている)。 */
+static int replace_file(const char *src_path, const char *dst_path, u32 size,
+                        const OS32_Stat *ss0, const OS32_Stat *ds0,
+                        int dst_exists, int *published)
+{
+    char tmp[OS32_MAX_PATH];
+    OS32_Stat ss1, ds1, ts;
+    const char *reason = HR_IO;
+    u32 crc = 0, total = 0;
+    u32 tmp_ino = 0, old_ino = 0;
+    int fd, rc, mrc, prot;
+
+    *published = 0;
+
+    /* 手順 1: 一時名 */
+    if (!build_temp_path(dst_path, tmp, (int)sizeof(tmp))) {
+        fail_file(dst_path, HR_NAME_TOO_LONG, 0);
+        return -1;
+    }
+
+    /* 手順 2: 排他的作成。EXIST は §2-4 の決裁どおり 1 回だけ作り直す */
+    fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
+    if (fd == OS32_ERR_EXIST) {
+        if (remove_stale_temp(tmp) != 0) {
+            fail_file(dst_path, HR_TEMP_EXISTS, 0);
+            return -1;
+        }
+        fd = api->sys_open(tmp, KAPI_O_WRONLY | KAPI_O_CREAT | KAPI_O_EXCL);
+    }
+    if (fd < 0) {
+        /* **NOSYS で直接上書きへ黙って落ちない** (票 H2 §2-3 手順 2)。
+         * 宛先 FS が排他的作成を持たないなら、この票の保証は出せない。 */
+        if (fd == OS32_ERR_NOSYS)
+            fail_file(dst_path, HR_REPLACE_UNSUPPORTED, fd);
+        else if (fd == OS32_ERR_EXIST)
+            fail_file(dst_path, HR_TEMP_EXISTS, fd);
+        else if (fd == OS32_ERR_NOSPC || fd == OS32_ERR_FULL)
+            fail_file(dst_path, HR_NO_SPACE, fd);
+        else
+            fail_file(dst_path, HR_IO, fd);
+        return -1;
+    }
+
+    /* 手順 3: 書き込み + CRC */
+    rc = copy_body(src_path, fd, &crc, &total, &reason);
+    api->sys_close(fd);
+    if (rc != 0) { fail_before_publish(dst_path, tmp, reason, 0); return -1; }
+    if (total != size) {
+        fail_before_publish(dst_path, tmp, HR_SOURCE, 0);
+        return -1;
+    }
+
+    /* 手順 4: 同期 → 読戻し検証 */
+    if (api->vfs_sync() != 0) {
+        fail_before_publish(dst_path, tmp, HR_VERIFY, 0);
+        return -1;
+    }
+    if (verify_readback(tmp, crc, total) != 0) {
+        fail_before_publish(dst_path, tmp, HR_VERIFY, 0);
+        return -1;
+    }
+
+    /* 手順 5: 再確認 (コピー元・宛先・保護判定) と ino の控え */
+    rc = api->sys_stat(src_path, &ss1);
+    if (rc != 0) { fail_before_publish(dst_path, tmp, HR_IO, rc); return -1; }
+    if (ss1.st_size != ss0->st_size || ss1.st_mtime != ss0->st_mtime) {
+        fail_before_publish(dst_path, tmp, HR_SOURCE, 0);
+        return -1;
+    }
+
+    rc = api->sys_stat(dst_path, &ds1);
+    if (dst_exists) {
+        if (rc != 0) {
+            fail_before_publish(dst_path, tmp, HR_DEST_CHANGED, rc);
+            return -1;
+        }
+        if ((ds1.st_mode & OS_S_IFMT) != OS_S_IFREG ||
+            ds1.st_size != ds0->st_size || ds1.st_mtime != ds0->st_mtime) {
+            fail_before_publish(dst_path, tmp, HR_DEST_CHANGED, 0);
+            return -1;
+        }
+        old_ino = ds1.st_ino;
+    } else if (rc != OS32_ERR_NOTFOUND) {
+        /* 判定時に無かったものが在る / 読めない。**置き換えない** */
+        fail_before_publish(dst_path, tmp, HR_DEST_CHANGED, rc);
+        return -1;
+    }
+
+    /* **保護対象の判定もここで取り直す** (票 H2 §2-3 手順 5 / A17b) */
+    prot = dst_protected(dst_path);
+    if (prot < 0) {
+        fail_before_publish(dst_path, tmp, HR_PATH_REJECT, 0);
+        return -1;
+    }
+    if (prot > 0) {
+        fail_before_publish(dst_path, tmp, HR_SETTINGS_DB, 0);
+        return -1;
+    }
+    /* `is_same_as_protected` は「不存在以外の stat 失敗」で g_abort を立てて
+     * **0 を返す**。守れないと分かった状態で置き換えへ進まない (往復 1 の B5)。 */
+    if (g_abort) {
+        fail_before_publish(dst_path, tmp, HR_IO, 0);
+        return -1;
+    }
+
+    rc = api->sys_stat(tmp, &ts);
+    if (rc != 0) { fail_before_publish(dst_path, tmp, HR_IO, rc); return -1; }
+    tmp_ino = ts.st_ino;
+
+    /* 手順 6: hardlink (呼び手が一時ファイルを作る前にも見ている) */
+    if (dst_exists && ds1.st_nlink > 1) {
+        fail_before_publish(dst_path, tmp, HR_HARDLINK, (int)ds1.st_nlink);
+        return -1;
+    }
+
+    /* 手順 7: mtime は**一時ファイルへ**。ここでの失敗は「公開の前の失敗」
+     * なので中断し、**copied に数えない** (Codex 往復 1 所見 4: ext2 は
+     * メタデータの I/O 失敗でマウントを書き込み禁止にするので、続く rename は
+     * 必ず ROFS になり、宛先は旧内容のまま)。 */
+    mrc = apply_mtime(tmp, dst_path, ss1.st_mtime);
+    if (mrc < 0) {
+        /* **数え直さない**。ext2 は mtime の I/O 失敗でマウントを ROFS に
+         * 落とすので、ここで unlink が落ちるのは同じ 1 つの失敗の続きで、
+         * apply_mtime が既に 1 件数えている (1 failure = 1 error)。
+         * 表示 (metadata_failed と STALE) は両方出す。 */
+        (void)drop_temp(tmp);
+        return -1;
+    }
+
+    /* 手順 8: 置換 */
+    rc = api->sys_rename(tmp, dst_path);
+    if (rc != 0) {
+        /* **公開の有無は宛先の st_ino で決める** (票 H2 §2-3 手順 8)。
+         * サイズと CRC は証拠にしない — `-f` で新旧が同じ内容のときに
+         * 未公開を公開と誤るし、CRC 不一致は「旧内容のまま」の証明にもならない。 */
+        const char *why = HR_REPLACE_UNKNOWN;
+        const char *note = " (公開したか判定できない)";
+        OS32_Stat now;
+        int srr = api->sys_stat(dst_path, &now);
+
+        if (srr == 0) {
+            if (now.st_ino == tmp_ino) {
+                why = HR_REPLACE_PARTIAL;
+                note = " (公開済み: 宛先は検証済みの新しい内容。後始末が落ちた)";
+                /* **公開済みなので案内は出す** (PM 決裁 2026-09-16、手順 9 と
+                 * 同じ理屈)。媒体の上で内容は入れ替わっているのに
+                 * 「/sys を更新した -> シェル再起動が必要」が消えるのは誤報。
+                 * `replace_failed` (旧内容のまま) と `replace_unknown`
+                 * (どちらか分からない) では**立てない** — 案内を出す根拠がない。 */
+                *published = 1;
+            } else if (dst_exists && now.st_ino == old_ino) {
+                why = HR_REPLACE_FAILED;
+                note = " (未公開: 宛先は旧内容のまま)";
+            }
+        } else if (!dst_exists && srr == OS32_ERR_NOTFOUND) {
+            why = HR_REPLACE_FAILED;
+            note = " (未公開: 宛先は作られていない)";
+        }
+        api->kprintf(ATTR_RED, "  FAIL %s reason=%s err=%d%s\n",
+                     dst_path, why, rc, note);
+        g_errors++;
+        if (drop_temp(tmp) != 0) g_errors++; /* 後始末の失敗は独立した 1 件 */
+        return -1;
+    }
+
+    /* ここから先、宛先の名前は**検証済みの新しい実体**を指している。
+     * 以降の失敗で旧内容へ戻そうとはしない (票 H2 の規則 2)。 */
+    *published = 1;
+
+    /* 手順 9: 同期 */
+    if (api->vfs_sync() != 0) {
+        api->kprintf(ATTR_RED,
+                     "  FAIL %s reason=%s (置換は済んでいる可能性がある)\n",
+                     dst_path, HR_SYNC_FAILED);
+        g_errors++;
+        return -1;
+    }
+    return 0;
+}
+
 /* ======== コピー元 mtime を宛先へ (票 H3 / 設計書 §5.2) ======== */
 
 /* **データを書き終えてから**呼ぶこと。通常の書き込みは mtime を
@@ -570,8 +967,12 @@ static void fail_file(const char *dst, const char *reason, int err)
  *          -1 … 有効な時刻の保存を試みて失敗した
  *                (呼び手が metadata_failed + errors に数える)
  *
- * dry-run では 1 バイトも書かないので呼ばない (呼び手側で分岐する)。 */
-static int apply_mtime(const char *dst_path, u32 src_mtime)
+ * dry-run では 1 バイトも書かないので呼ばない (呼び手側で分岐する)。
+ *
+ * 票 H2: 置き換え経路では**一時ファイル**に設定するので、設定先 (target) と
+ * 表示する名前 (label) を分ける。rename は inode の mtime を変えないので、
+ * 本名に現れた時点で日時が揃っている。 */
+static int apply_mtime(const char *target, const char *label, u32 src_mtime)
 {
     int rc;
 
@@ -580,11 +981,11 @@ static int apply_mtime(const char *dst_path, u32 src_mtime)
         g_mtime_unknown++;
         if (g_verbose)
             api->kprintf(ATTR_YELLOW, "  NOTIME %s reason=%s\n",
-                         dst_path, HR_MTIME_UNKNOWN);
+                         label, HR_MTIME_UNKNOWN);
         return 0;
     }
 
-    rc = api->sys_set_mtime(dst_path, src_mtime);
+    rc = api->sys_set_mtime(target, src_mtime);
     if (rc == 0) return 1;
 
     if (rc == OS32_ERR_NOSYS) {
@@ -592,13 +993,13 @@ static int apply_mtime(const char *dst_path, u32 src_mtime)
         g_mtime_nosys++;
         if (g_verbose)
             api->kprintf(ATTR_YELLOW, "  NOTIME %s reason=%s\n",
-                         dst_path, HR_MTIME_NOSYS);
+                         label, HR_MTIME_NOSYS);
         return 0;
     }
 
     /* 有効な時刻を書こうとして落ちた。内容コピーの成功だけで
      * 全成功と表示しない (設計書 §5.2)。 */
-    fail_file(dst_path, HR_META_FAILED, rc);
+    fail_file(label, HR_META_FAILED, rc);
     return -1;
 }
 
@@ -614,6 +1015,8 @@ static void sync_file(const char *src_path, const char *dst_path)
     int mrc;
     int need = 1;
     int meta_only = 0;       /* 内容は同じで mtime だけ違う (票 H3) */
+    int dst_exists = 0;      /* 判定時に宛先が在ったか (票 H2 手順 5 / 8) */
+    int published = 0;       /* 置換が媒体に載ったか (票 H2 手順 8 / 9) */
 
     /* コピー元: 列挙結果を信用せず**直前に取り直す** (設計書 §3.1)。
      * 列挙とコピーの間にホスト側が差し替えているかもしれない。 */
@@ -636,6 +1039,7 @@ static void sync_file(const char *src_path, const char *dst_path)
 
     /* 宛先 */
     rc = api->sys_stat(dst_path, &ds);
+    if (rc == 0) dst_exists = 1;
     if (rc == OS32_ERR_NOTFOUND) {
         reason = HR_NEW;
     } else if (rc != 0) {
@@ -703,7 +1107,7 @@ static void sync_file(const char *src_path, const char *dst_path)
                              dst_path, HR_MTIME_ONLY, (int)size);
                 return;
             }
-            mrc = apply_mtime(dst_path, ss.st_mtime);
+            mrc = apply_mtime(dst_path, dst_path, ss.st_mtime);
             if (mrc < 0) return;            /* metadata_failed (errors 済み) */
             if (mrc > 0) {
                 /* **内容は同じ** = 稼働中の版とディスクの食い違いは
@@ -731,23 +1135,170 @@ static void sync_file(const char *src_path, const char *dst_path)
         return;
     }
 
-    if (copy_verify(src_path, dst_path, size, &vreason) != 0) {
-        api->kprintf(ATTR_RED,
-                     "  FAIL %s reason=%s (直接上書きなので旧内容は残らない)\n",
-                     dst_path, vreason);
-        g_errors++;
+    if (g_direct) {
+        /* ---- 古いカーネル向けの直接上書き (票 H2 §2-3 末尾) ----
+         * `--unsafe-overwrite` を明示したときだけここへ来る。
+         * **失敗すると旧内容は残らない。** */
+        if (copy_verify(src_path, dst_path, size, &vreason) != 0) {
+            api->kprintf(ATTR_RED,
+                         "  FAIL %s reason=%s (直接上書きなので旧内容は残らない)\n",
+                         dst_path, vreason);
+            g_errors++;
+            return;
+        }
+        api->kprintf(ATTR_GREEN, "  UPDATE %s reason=%s size=%d\n",
+                     dst_path, reason, (int)size);
+        g_copied++;
+        g_direct_overwrite++;
+        note_target(dst_path);
+        /* **データを書き終えてから**コピー元の mtime を宛先へ (設計書 §5.2)。
+         * ここで落ちてもコピー自体は成功しているので copied は戻さないが、
+         * metadata_failed は errors に入る = 終了コードは非ゼロになる。 */
+        (void)apply_mtime(dst_path, dst_path, ss.st_mtime);
         return;
     }
 
+    /* ---- 票 H2 の既定: 一時ファイル + 検証 + 置換 ----
+     * 手順 6 の hardlink 判定は**一時ファイルを作る前にも**行う
+     * (無駄な書き込みを避ける)。別名まで更新する仕様は持ち込まない。 */
+    if (dst_exists && ds.st_nlink > 1) {
+        fail_file(dst_path, HR_HARDLINK, (int)ds.st_nlink);
+        return;
+    }
+
+    if (replace_file(src_path, dst_path, size, &ss, &ds, dst_exists,
+                     &published) != 0) {
+        /* 表示と errors は replace_file の中で済んでいる。ただし
+         * **置換だけは媒体に載っている**場合 (手順 9 の sync_failed と、
+         * 手順 8 の replace_partial) は再起動の案内を出す — 出さないと
+         * 「/sys は入れ替わっていない」と読める誤報になる。
+         * copied には数えない。 */
+        if (published) note_target(dst_path);
+        return;
+    }
+
+    /* mtime は一時ファイルに設定済み (rename は inode の mtime を変えない) */
     api->kprintf(ATTR_GREEN, "  UPDATE %s reason=%s size=%d\n",
                  dst_path, reason, (int)size);
     g_copied++;
     note_target(dst_path);
+}
 
-    /* **データを書き終えてから**コピー元の mtime を宛先へ (設計書 §5.2)。
-     * ここで落ちてもコピー自体は成功しているので copied は戻さないが、
-     * metadata_failed は errors に入る = 終了コードは非ゼロになる。 */
-    (void)apply_mtime(dst_path, ss.st_mtime);
+/* ======== 予約名 `.hs~` の掃除 (票 H2 §2-4、決裁 D3 (a')) ======== */
+
+/* 掃除の列挙は**同期の列挙と枠を分ける** (Codex 往復 2 所見 7)。候補は
+ * `.hs~` で始まる名前だけなので小さくてよい。越えたら `truncated` と同じ扱いで
+ * **「全部は見ていない」と表示する** — 掃除の完了を主張しない。 */
+#define MAX_TEMPS 32
+
+typedef struct {
+    char names[MAX_TEMPS][NAME_CAP];
+    int  count;
+    int  dropped;      /* 掃除の枠 MAX_TEMPS を越えて見送った数 */
+    int  too_long;     /* NAME_CAP に収まらず拾えなかった数 (枠とは別の理由) */
+} TempList;
+
+static void temp_cb(const DirEntry_Ext *entry, void *ctx)
+{
+    TempList *tl = (TempList *)ctx;
+    int i;
+
+    if (!hs_is_temp_name(entry->name)) return;
+    /* ディレクトリは消さない (§2-4)。特殊ファイルは下の stat で弾く */
+    if (entry->type == OS32_FILE_TYPE_DIR) return;
+    /* **枠と長さは別の理由**。列挙幅に入らないだけのものを「掃除の枠を
+     * 越えた」と呼ぶと、MAX_TEMPS を広げれば直ると読めてしまう (直らない)。
+     * 結論の「全部は見ていない」はどちらも同じなので、そこは変えない。 */
+    if (!hsp_name_fits(entry->name, NAME_CAP)) { tl->too_long++; return; }
+    if (tl->count >= MAX_TEMPS) { tl->dropped++; return; }
+
+    i = 0;
+    while (entry->name[i]) { tl->names[tl->count][i] = entry->name[i]; i++; }
+    tl->names[tl->count][i] = '\0';
+    tl->count++;
+}
+
+/* hsync が**実際に訪れた**ディレクトリの予約名を片づける。
+ * 既定除外の /sys へは再帰しないので触らない。保護対象の実体 (hardlink) は
+ * **予約より保護を優先して消さない** (R5)。`st_nlink` は見ない。 */
+static void clean_temps(const char *dst_dir)
+{
+    TempList tl;
+    char dir[OS32_MAX_PATH];
+    char path[OS32_MAX_PATH];
+    OS32_Stat st;
+    int i, rc;
+
+    if (!str_ncpy(dir, dst_dir[0] ? dst_dir : "/", (int)sizeof(dir))) return;
+
+    tl.count = 0;
+    tl.dropped = 0;
+    tl.too_long = 0;
+    rc = api->sys_ls(dir, temp_cb, &tl);
+    if (rc != 0) {
+        /* 宛先ディレクトリがまだ無いのは普通 (新規階層)。それ以外は
+         * 「掃除できなかった」ことだけ見せる — 同期は続ける。 */
+        if (rc != OS32_ERR_NOTFOUND)
+            api->kprintf(ATTR_YELLOW,
+                         "  NOTE: %s の予約名を列挙できない (err=%d)。"
+                         "掃除は行っていない\n", dir, rc);
+        return;
+    }
+    if (tl.dropped)
+        api->kprintf(ATTR_YELLOW,
+                     "  NOTE: %s の予約名が掃除の枠 %d を越えた (+%d)。"
+                     "**全部は見ていない**\n", dir, MAX_TEMPS, tl.dropped);
+    if (tl.too_long)
+        api->kprintf(ATTR_YELLOW,
+                     "  NOTE: %s に %d 文字を越える予約名が %d 件 "
+                     "(掃除の枠ではなく名前の長さ)。**全部は見ていない**\n",
+                     dir, NAME_CAP - 1, tl.too_long);
+
+    for (i = 0; i < tl.count; i++) {
+        if (!str_ncpy(path, dir, (int)sizeof(path)) ||
+            ((str_len(path) == 0 || path[str_len(path) - 1] != '/') &&
+             !str_ncat(path, "/", (int)sizeof(path))) ||
+            !str_ncat(path, tl.names[i], (int)sizeof(path))) {
+            api->kprintf(ATTR_RED, "  FAIL: path too long: %s/%s\n",
+                         dir, tl.names[i]);
+            g_errors++;
+            continue;
+        }
+
+        {
+            int prot = dst_protected(path);
+            if (prot < 0) {
+                api->kprintf(ATTR_RED, "  FAIL %s reason=%s\n",
+                             path, HR_PATH_REJECT);
+                g_errors++;
+                continue;
+            }
+            if (prot > 0) {
+                /* 予約名だが保護対象の実体を指している。**消さない** (R5) */
+                api->kprintf(ATTR_YELLOW, "  PROTECTED %s reason=%s\n",
+                             path, HR_PROT_RESERVED);
+                g_protected++;
+                continue;
+            }
+        }
+        if (g_abort) return;
+
+        rc = api->sys_stat(path, &st);
+        if (rc == OS32_ERR_NOTFOUND) continue;
+        if (rc != 0) { fail_file(path, HR_IO, rc); continue; }
+        /* 通常ファイルだけ。`st_nlink` は見ない (§2-2-4 の復旧表) */
+        if ((st.st_mode & OS_S_IFMT) != OS_S_IFREG) continue;
+
+        if (g_dry_run) {
+            api->kprintf(ATTR_CYAN, "  PLAN-CLEAN %s\n", path);
+            g_cleaned++;
+            continue;
+        }
+        rc = api->sys_unlink(path);
+        if (rc != 0) { fail_file(path, HR_IO, rc); continue; }
+        api->kprintf(ATTR_GREEN, "  CLEAN %s\n", path);
+        g_cleaned++;
+    }
 }
 
 /* 宛先をディレクトリとして使えるかを確かめる (Codex 実装レビュー B3)。
@@ -822,6 +1373,7 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
         return;
     }
 
+    fl.src_dir = src_dir;
     fl.count = 0;
     fl.dropped = 0;
     fl.truncated = 0;
@@ -851,6 +1403,12 @@ static void sync_directory(const char *src_dir, const char *dst_dir, int depth)
                      src_dir, fl.bad_name, HR_BAD_NAME);
         g_errors++;
     }
+
+    /* 予約名 `.hs~` の掃除は**この実行が一時ファイルを作る前**に行う
+     * (票 H2 §2-4)。前の実行が電源断などで残したものを片づけてから同期に
+     * 入るので、手順 2 の EXIST 経路に落ちる回数が減る。 */
+    if (!g_direct) clean_temps(dst_dir);
+    if (g_abort) return;
 
     for (i = 0; i < fl.count; i++) {
         char src_path[OS32_MAX_PATH];
@@ -976,12 +1534,16 @@ static void usage(void)
     api->kprintf(ATTR_WHITE, "      --verify    日時を見ず、全件の内容を必ず比較する (遅い)\n");
     api->kprintf(ATTR_WHITE, "  -n, --dry-run   読んで比べるだけ。1 バイトも書かない (mtime も)\n");
     api->kprintf(ATTR_WHITE, "  -v, --verbose   スキップ理由と比較結果も出す\n");
+    api->kprintf(ATTR_WHITE, "      --unsafe-overwrite  KAPI v53 未満のカーネルで**直接上書き**する\n");
+    api->kprintf(ATTR_WHITE, "                  (旧内容は残らない。既定は kernel_too_old で断る)\n");
     api->kprintf(ATTR_WHITE, "  -h, --help      この表示\n");
     api->kprintf(ATTR_WHITE, "  dir             同期対象は 1 つだけ (例: bin, sys, usr/bin)\n");
     api->kprintf(ATTR_WHITE, "  既定: サイズか日時が違うものだけ内容を比較し、違えばコピーする\n");
     api->kprintf(ATTR_WHITE, "        日時が不明 (0) なら必ず内容を比較する\n");
     api->kprintf(ATTR_WHITE, "        見逃すのは「サイズも日時も同じで中身が違う」場合だけ\n");
     api->kprintf(ATTR_WHITE, "  全体同期ではルート直下の sys を除外する (-f でも解除しない)\n");
+    api->kprintf(ATTR_WHITE, "  置き換えは一時ファイル `%s<名前>` 経由。この接頭辞は hsync の予約\n",
+                 HS_TEMP_PREFIX);
 }
 
 int __cdecl main(int argc, char **argv, KernelAPI *_api)
@@ -1000,6 +1562,7 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_excluded = 0;
     g_protected = 0;
     g_metadata_updated = 0;
+    g_cleaned = 0;
     g_errors = 0;
     g_mtime_unknown = 0;
     g_mtime_nosys = 0;
@@ -1007,6 +1570,9 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     g_dry_run = 0;
     g_verbose = 0;
     g_verify = 0;
+    g_unsafe = 0;
+    g_direct = 0;
+    g_direct_overwrite = 0;
     g_root_sync = 1;
     g_touched_sys = 0;
     g_touched_boot = 0;
@@ -1027,6 +1593,11 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
                  * 確実さが要るときだけ払う費用 (短い別名は付けない — 誤って
                  * -v と打ち間違えたときに黙って遅くなるのを避ける)。 */
                 g_verify = 1;
+            } else if (str_cmp(a, "--unsafe-overwrite") == 0) {
+                /* 票 H2 §2-3 末尾: 古いカーネルでの直接上書きを明示する。
+                 * **`-f` では解除されない** — 別の意味の旗なので短縮形も
+                 * 用意しない。 */
+                g_unsafe = 1;
             } else if (str_cmp(a, "-n") == 0 ||
                        str_cmp(a, "--dry-run") == 0) {
                 g_dry_run = 1;
@@ -1049,6 +1620,39 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
             }
             subdir = a;
         }
+    }
+
+    /* ---- カーネルの版の門 (票 H2 §2-3 末尾) ----------------------------
+     *
+     * 一時ファイル方式は v53 の O_EXCL と、ext2 の新しい置き換え順序が
+     * そろって初めて成立する。v53 未満では O_EXCL が**黙って無視され**、
+     * 置き換えも旧順序 (宛先を先に消す) なので、H2 の保証は何ひとつ出せない。
+     * **既定は 1 件も書かずに断る。** 直接上書きが要るなら明示させる —
+     * 「更新の道が無くなる」は成り立たない (カーネルは停止中の NHD 配備
+     * 経路で入れ替えられる、Codex 往復 1 所見 5)。`-f` では解除しない。
+     *
+     * 判定は dry-run でも同じにする: 断る条件を実行の種類で変えると、
+     * `-n` が通ったのに本番が止まる、という分かりにくい形になる。 */
+    if (api->version < HS_MIN_KAPI_H2) {
+        if (!g_unsafe) {
+            api->kprintf(ATTR_RED,
+                         "Error: kernel KAPI v%d < v%d reason=%s\n",
+                         (int)api->version, HS_MIN_KAPI_H2, HR_KERNEL_TOO_OLD);
+            api->kprintf(ATTR_RED,
+                         "  一時ファイル方式 (票 H2) が成立しないので 1 件も書かない。\n"
+                         "  新しいカーネルを配備するか、旧来の直接上書きでよければ\n"
+                         "  --unsafe-overwrite を明示すること (**失敗すると旧内容は残らない**)。\n");
+            return 1;
+        }
+        g_direct = 1;
+        api->kprintf(ATTR_YELLOW,
+                     "WARN kernel KAPI v%d < %d: direct overwrite (no H2)\n",
+                     (int)api->version, HS_MIN_KAPI_H2);
+    } else if (g_unsafe) {
+        api->kprintf(ATTR_YELLOW,
+                     "NOTE: kernel KAPI v%d >= %d なので --unsafe-overwrite は無視する "
+                     "(一時ファイル方式で進む)\n",
+                     (int)api->version, HS_MIN_KAPI_H2);
     }
 
     /* 対象パスを**正規化してから** /host 配下と宛先を決める。
@@ -1204,11 +1808,17 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
     /* 結果表示。失敗があれば頭を FAILED: にする (成功表示へ進めない) */
     api->kprintf(g_errors ? ATTR_RED : ATTR_WHITE,
                  "\n%s copied=%d unchanged=%d excluded=%d protected=%d "
-                 "metadata_updated=%d errors=%d%s\n",
+                 "metadata_updated=%d cleaned=%d errors=%d%s\n",
                  hsp_final_label(g_errors),
                  g_copied, g_unchanged, g_excluded, g_protected,
-                 g_metadata_updated, g_errors,
+                 g_metadata_updated, g_cleaned, g_errors,
                  g_dry_run ? " (dry-run: copied は予定件数)" : "");
+    if (g_direct_overwrite)
+        api->kprintf(ATTR_YELLOW,
+                     "direct_overwrite=%d "
+                     "(KAPI v%d < %d: 一時ファイル方式を使っていない。"
+                     "**失敗した回の旧内容は残らない**)\n",
+                     g_direct_overwrite, (int)api->version, HS_MIN_KAPI_H2);
     if (g_dry_run && g_metadata_updated)
         api->kprintf(ATTR_CYAN,
                      "  (dry-run: metadata_updated も予定件数。"
@@ -1229,7 +1839,10 @@ int __cdecl main(int argc, char **argv, KernelAPI *_api)
 
     /* 「ディスクへ同期した」と「稼働中の版が入れ替わった」は別のこと
      * (設計書 §7.2)。再起動はここでは行わない。 */
-    if (!g_dry_run && g_copied > 0) {
+    /* `g_copied` だけを条件にすると、**置換は済んだのに sync が落ちた**回
+     * (票 H2 手順 9) で案内が丸ごと消える。note_target は媒体の上で内容が
+     * 入れ替わったときだけ立つので、そちらも条件に入れる。 */
+    if (!g_dry_run && (g_copied > 0 || g_touched_sys || g_touched_boot)) {
         api->kprintf(ATTR_YELLOW,
                      "NOTE: ディスク上を更新しただけ。稼働中の版は切り替わっていない\n");
         if (g_touched_sys)

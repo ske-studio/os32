@@ -59,7 +59,8 @@ int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ct
     return EXT2_OK;
 }
 
-int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type)
+int ext2_find_entry_loc(Ext2Ctx *ctx, u32 dir_ino, const char *name,
+                        u32 *out_ino, u8 *out_type, u32 *out_phys, u32 *out_pos)
 {
     Ext2Inode inode;
     int ret, name_len;
@@ -94,6 +95,8 @@ int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u
                 if (ext2_str_ncmp(name, (const char *)&ext2_g_aux[pos + 8], name_len) == 0) {
                     if (out_ino) *out_ino = de_inode;
                     if (out_type) *out_type = de_type;
+                    if (out_phys) *out_phys = phys;
+                    if (out_pos) *out_pos = pos;
                     return EXT2_OK;
                 }
             }
@@ -101,6 +104,12 @@ int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u
         }
     }
     return EXT2_ERR_NOTFOUND;
+}
+
+int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type)
+{
+    return ext2_find_entry_loc(ctx, dir_ino, name, out_ino, out_type,
+                               (u32 *)0, (u32 *)0);
 }
 
 /* [a, b) のバイト列が 1 セクタに収まるか (= 1 回の書き込みで原子的に届くか) */
@@ -825,6 +834,167 @@ static int ext2_rename_dir(Ext2Ctx *ctx, u32 ino, u32 old_dir, const char *old_n
     return ext2_sync(ctx);
 }
 
+/* ======================================================================== */
+/*  通常ファイル同士の置き換え (票 H2 §2-2)                                  */
+/* ======================================================================== */
+
+/* 段 2 の公開は「フィールドを含むセクタ 1 本」だけを書く。**共有バッファ
+ * (g_blk / g_aux / g_dat) は使わない** — 失敗したときに同じセクタを読み直して
+ * 3 値を決めるので、途中で誰かに潰されると判定が壊れる。 */
+static u8 ext2_g_pub[EXT2_SECTOR_SIZE];
+
+/* 宛先エントリの inode フィールド (4 バイト、エントリ先頭) を old_ino から
+ * new_ino へ書き換える。**そのフィールドを含むセクタ 1 本だけ**を書く
+ * (票 H2 §2-2-1 / Codex 往復 2 所見 2)。
+ *
+ * エントリの位置は 4 バイト境界で、1 セクタは 512 バイトなので、この 4 バイトは
+ * 必ず 1 セクタに収まる (ext2_same_sector と同じ考え方)。
+ *
+ * 戻り値  1 … **公開済み** (媒体上の名前が new_ino を指している)
+ *         0 … **未公開** (old_ino のまま。何も壊れていない)
+ *        -1 … **不明**。呼び手は D を解放してはいけない
+ *
+ * 「書き込みが失敗した = 未変更」とは**言えない**。1KB を 512B ずつ書く経路
+ * なので、フィールドがブロックの後半にある配置では前半だけ届くこともある。
+ * だから失敗したら必ず読み直す。 */
+static int ext2_publish_entry(Ext2Ctx *ctx, u32 phys, u32 pos,
+                              u32 old_ino, u32 new_ino)
+{
+    u32 sect = pos / EXT2_SECTOR_SIZE;
+    u32 off  = pos % EXT2_SECTOR_SIZE;
+    u32 seen;
+
+    /* 読めなければ 1 バイトも書いていない = 未公開 */
+    if (ext2_read_sector(ctx, phys, sect, ext2_g_pub) != 0) return 0;
+    /* 走査した時と違うものが載っている。何も書かずに「不明」で止める */
+    if (le32_rd(&ext2_g_pub[off]) != old_ino) return -1;
+
+    le32_wr(&ext2_g_pub[off], new_ino);
+    if (ext2_write_sector(ctx, phys, sect, ext2_g_pub) == 0) return 1;
+
+    if (ext2_read_sector(ctx, phys, sect, ext2_g_pub) != 0) return -1;
+    seen = le32_rd(&ext2_g_pub[off]);
+    if (seen == new_ino) return 1;
+    if (seen == old_ino) return 0;
+    return -1;                       /* どちらでもない = 不明 */
+}
+
+/* 段 5: 置き換えられた旧 inode D の名前が 1 つ減ったことを媒体へ書く。
+ * links が 0 になるなら **参照を消してから解放する** (票 B8 往復 3、
+ * ext2_unlink の後半と同じ順序)。戻り値 0 = 書き切れた / -1 = 落ちた。 */
+static int ext2_drop_replaced(Ext2Ctx *ctx, u32 d_ino)
+{
+    Ext2Inode inode;
+    int ret, leaked = 0;
+
+    ret = ext2_read_inode(ctx, d_ino, &inode);
+    if (ret != 0) return -1;
+
+    if (inode.links_count > 1) {
+        inode.links_count--;
+        inode.ctime = ext2_current_time();
+        return ext2_write_inode(ctx, d_ino, &inode) == 0 ? 0 : -1;
+    }
+
+    inode.links_count = 0;
+    inode.dtime = ext2_current_time();
+    ret = ext2_truncate_blocks(ctx, d_ino, &inode, &leaked);
+    if (ret != 0) return -1;         /* 媒体上の inode はまだ指している。何も返さない */
+    if (ext2_free_inode(ctx, d_ino) != 0) return -1;
+    return leaked ? -1 : 0;
+}
+
+/* ---- 通常ファイル同士の置き換え (票 H2 §2-2、決裁 D2 (a)) ---------------
+ *
+ * 旧実装は `ext2_unlink(new)` で**宛先の名前を先に消して**いたので、その後で
+ * 落ちると「宛先の名前が無い」状態が残った。新しい順序は宛先エントリの
+ * **inode 番号をその場で書き換える**ので、宛先の名前はどの段でも消えない。
+ *
+ * 不変条件は 2 つ:
+ *   (i)  どの inode も「それを指す名前の数 <= links_count」
+ *   (ii) 宛先の名前は常に旧 inode D か新 inode S のどちらかを指す
+ *
+ *   段 0  名前解決メモの世代を進める (ext2_ns_touch)
+ *         — 段 2 は add/delete_entry を通らないので既存の無効化に相乗り
+ *           できない (往復 2 所見 4)。**試みる前に**捨てる。
+ *   段 1  S の links_count++            … 落ちても多い側
+ *   段 2  **公開**: 宛先エントリの inode を含むセクタ 1 本を書く
+ *   段 3  移動元の名前を消す            … 段 2 が**公開済みと確定**したときだけ
+ *   段 4  S の links_count--            … **段 3 の削除が確定したときだけ**
+ *         (往復 2 所見 1: 段 3 が失敗したのに減らすと「名前 2・links 1」に
+ *          なり、次の掃除が一時名を消した瞬間に**生きている新内容が解放される**)
+ *   段 5  D の links_count--、0 なら解放 … 段 2 が公開済みなら実行。
+ *         段 3 / 4 の成否には**依存しない**
+ *   段 6  ext2_sync                      … **この失敗も戻り値に含める** (往復 3 所見 5)
+ *
+ * 戻り値: 公開済みで段 3〜6 まで通れば EXT2_OK。公開済みだが後始末が落ちたら
+ * EXT2_ERR_IO (呼び手は宛先を読み直して公開の有無を確かめる)。未公開の失敗も
+ * EXT2_ERR_IO。不明は書き込み禁止にして EXT2_ERR_IO。 */
+static int ext2_rename_replace(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
+                               u32 new_dir, const char *new_name,
+                               u32 s_ino, u32 d_ino)
+{
+    Ext2Inode inode;
+    u32 phys = 0, pos = 0, cur_ino = 0;
+    u8 cur_type = 0;
+    int ret, pub;
+    int cleanup_failed = 0;
+
+    /* 段 0 */
+    ext2_ns_touch(ctx);
+
+    /* 宛先エントリの位置を取り直す (走査は g_aux を使うので段 1 より前に) */
+    ret = ext2_find_entry_loc(ctx, new_dir, new_name, &cur_ino, &cur_type,
+                              &phys, &pos);
+    if (ret != EXT2_OK) return ret;          /* 判定できないものは畳まない */
+    if (cur_ino != d_ino || cur_type != EXT2_FT_REG_FILE) return EXT2_ERR_IO;
+
+    /* 段 1 */
+    ret = ext2_read_inode(ctx, s_ino, &inode);
+    if (ret != 0) return ret;
+    if (inode.links_count >= EXT2_LINK_MAX) return EXT2_ERR_MLINK;
+    inode.links_count++;
+    inode.ctime = ext2_current_time();
+    ret = ext2_write_inode(ctx, s_ino, &inode);
+    if (ret != 0) return EXT2_ERR_IO;
+
+    /* 段 2 */
+    pub = ext2_publish_entry(ctx, phys, pos, d_ino, s_ino);
+    if (pub <= 0) {
+        /* 未公開 (0) も不明 (-1) も、**D を解放しない**で止める。
+         * メタデータの書き込みが落ちているので、これ以上媒体を動かさない
+         * (票 B8 往復 5 の決裁と同じ扱い)。S の links が 1 多いのは
+         * 多い側 = 整合する側で、e2fsck が回収する。 */
+        ext2_fs_error(ctx);
+        return EXT2_ERR_IO;
+    }
+
+    /* ---- ここから先は「公開の後」。宛先には検証済みの新しい内容が見えている ---- */
+
+    /* 段 3 */
+    if (ext2_delete_entry(ctx, old_dir, old_name) == EXT2_OK) {
+        /* 段 4 (段 3 の確定が条件) */
+        ret = ext2_read_inode(ctx, s_ino, &inode);
+        if (ret == 0) {
+            if (inode.links_count > 0) inode.links_count--;
+            inode.ctime = ext2_current_time();
+            ret = ext2_write_inode(ctx, s_ino, &inode);
+        }
+        if (ret != 0) cleanup_failed = 1;    /* 減らせない = 多い側に残す */
+    } else {
+        /* 段 4 へ進まない。名前 2・links 2 で整合している */
+        cleanup_failed = 1;
+    }
+
+    /* 段 5 (段 3 / 4 の成否に依存しない) */
+    if (ext2_drop_replaced(ctx, d_ino) != 0) cleanup_failed = 1;
+
+    /* 段 6 */
+    if (ext2_sync(ctx) != 0) cleanup_failed = 1;
+
+    return cleanup_failed ? EXT2_ERR_IO : EXT2_OK;
+}
+
 int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
                 u32 new_dir, const char *new_name)
 {
@@ -873,6 +1043,14 @@ int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
         }
         if (dst_type == EXT2_FT_DIR) return EXT2_ERR_EXIST;
         if (ftype == EXT2_FT_DIR) return EXT2_ERR_NOTDIR;
+        /* **通常ファイル同士だけ**が新しい置き換え経路 (票 H2 §2-2)。
+         * 種別が揃わない組み合わせ (特殊ファイル等) は従来の unlink + add の
+         * ままにする — 宛先エントリの file_type を書き換えずに inode だけ
+         * 差し替えると、名前の型と実体の型が食い違う。 */
+        if (ftype == EXT2_FT_REG_FILE && dst_type == EXT2_FT_REG_FILE) {
+            return ext2_rename_replace(ctx, old_dir, old_name,
+                                       new_dir, new_name, ino, dst_ino);
+        }
         ret = ext2_unlink(ctx, new_dir, new_name);
         if (ret != 0) return ret;
     } else if (ret != EXT2_ERR_NOTFOUND) {

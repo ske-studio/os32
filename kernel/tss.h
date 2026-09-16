@@ -45,6 +45,10 @@ struct tss_entry {
     u8  iomap[TSS_IOMAP_SIZE + 1];
 } __attribute__((packed));
 
+/* カーネルの TSS 本体 (定義は kernel/tss.c)。CPL=3 へ降りる arch/x86 の
+ * 原始命令 (arch_enter_user) が ESP0 を書くのでここで公開する。 */
+extern struct tss_entry kernel_tss;
+
 /* ======== API ======== */
 
 /* TSS を初期化して ltr でロードする。gdt_init() の後に呼ぶこと。

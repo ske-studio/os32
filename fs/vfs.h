@@ -120,6 +120,22 @@ typedef struct {
      * vfs_set_mtime が VFS_ERR_NOSYS を返す。実装済みは ext2 だけ。
      * mtime は UNIX Epoch 秒 (UTC)。0 は「不明」の印なので受け付けない。 */
     int  (*set_mtime)(void *ctx, const char *path, os_time_t mtime);
+
+    /* 排他的作成 (票 H2 §2-1、KAPI v53 の O_EXCL)。**任意実装** —
+     * 埋めない FS ドライバはここが NULL のままになり (C89 の集成体初期化で
+     * 残りはゼロ)、vfs_open が O_EXCL に VFS_ERR_NOSYS を返す。実装済みは
+     * ext2 だけ。
+     *
+     * 契約: 「無いことの確認 → 作成」を **1 回の呼び出しの中で** 行う。
+     *   VFS_OK          … 作った (長さ 0 の通常ファイル)
+     *   VFS_ERR_EXIST   … その名前が既に在る (**種別を問わない** —
+     *                     ディレクトリでも ISDIR ではなく EXIST)
+     *   その他の負値     … 在るかどうかを判定できなかった。**「無い」と
+     *                     読み替えず**その値をそのまま返す (票 B8)
+     * 排他性の根拠は VFS が非再入でゲストが協調型であること。**ホスト側が
+     * 同時に書ける FS では成り立たない**ので HostDrv / FAT / ISO9660 は
+     * 実装しない。 */
+    int  (*create_excl)(void *ctx, const char *path);
 } VfsOps;
 
 /* ---- VFS API ---- */

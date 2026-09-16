@@ -43,6 +43,10 @@ int ext2_write_block(Ext2Ctx *ctx, u32 block_num, const void *buf);
  * 理由が無い)。 */
 int ext2_read_data_block(Ext2Ctx *ctx, u32 block_num, void *buf);
 int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf);
+/* **セクタ 1 本だけ**の I/O (票 H2 §2-2-1)。sect は 0 か 1。エラー状態は
+ * 立てない — 呼び手が読み直して 3 値を決める。 */
+int ext2_read_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, void *buf);
+int ext2_write_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, const void *buf);
 /* マウントをエラー状態にする。媒体の s_state に EXT2_ERROR_FS を立てる書き込みを
  * **1 度だけ**試みる (失敗してもメモリ上の状態は立てる)。何度呼んでもよい。 */
 void ext2_fs_error(Ext2Ctx *ctx);
@@ -120,6 +124,11 @@ int ext2_list_dir(Ext2Ctx *ctx, u32 dir_ino, ext2_dir_callback cb, void *user_ct
 int ext2_find_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 *out_ino, u8 *out_type);
 int ext2_add_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name, u32 ino, u8 file_type);
 int ext2_delete_entry(Ext2Ctx *ctx, u32 dir_ino, const char *name);
+/* name が載っているディレクトリブロック (*out_phys) とブロック内の位置
+ * (*out_pos) も返す ext2_find_entry (票 H2 §2-2)。呼び手がエントリの
+ * inode フィールドだけを書き換えるために使う。 */
+int ext2_find_entry_loc(Ext2Ctx *ctx, u32 dir_ino, const char *name,
+                        u32 *out_ino, u8 *out_type, u32 *out_phys, u32 *out_pos);
 /* old_dir/old_name を new_dir/new_name へ付け替える (同一 FS 内、ファイル/ディレクトリ両対応) */
 int ext2_rename(Ext2Ctx *ctx, u32 old_dir, const char *old_name,
                 u32 new_dir, const char *new_name);

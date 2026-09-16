@@ -2,6 +2,7 @@
 #include "appslot.h"
 #include "exec_heap.h"
 #include "io.h"
+#include "cpu.h"      /* arch_enter_user / arch_call_on_stack (arch/$(ARCH)/arch_cpu.h) */
 #include "console.h"
 #include "kstring.h"
 #include "vfs.h"
@@ -1720,52 +1721,18 @@ static int exec_launch(const char *cmdline, int gui_arg)
         exec_nest_level = ctx->depth;
 
         if (want_ring3) {
-            /* --- M1d: iret で CPL=3 に降りる ---
-             * CS=USER_CS(0x23) / SS=USER_DS(0x2B)。EFLAGS=0x202 (IF=1, IOPL=0)。
-             * TSS.ESP0 を現在の ESP に設定: CPL=3 実行中の割り込み / int 0x80 の
-             * フレームがこの直下に積まれ、setjmp フレームを踏まない。
-             * ここから通常 return しない — 終了は int 0x80 → longjmp。
-             *
-             * ARCH-ASM-OK: この cli は io.h の _disable() に分けられない。
-             * cli 〜 iret は「カーネル ESP の記録 → CR3 切替 → セグメント →
-             * フレーム積み → 特権降格」を **一続きに** 行う必要があり、
-             * 途中に割り込みが入ると TSS.ESP0 と実際の CR3 が食い違う。
-             * ブロックごと x86 固有 (iret / USER_CS / EFLAGS 直値) なので、
-             * 順序 3 では arch/x86 側へそのまま移す。 */
-            __asm__ volatile(
-                "cli\n\t"
-                "movl %%esp, %[e0]\n\t"     /* TSS.ESP0 = 現在のカーネル ESP */
-                "movl %[pd], %%cr3\n\t"     /* アプリ PD へ切替 */
-                "movl %[uds], %%eax\n\t"
-                "movw %%ax, %%ds\n\t"
-                "movw %%ax, %%es\n\t"
-                "movw %%ax, %%fs\n\t"
-                "movw %%ax, %%gs\n\t"
-                "pushl %[uds]\n\t"          /* SS = USER_DS */
-                "pushl %[uesp]\n\t"         /* ESP = ユーザスタック */
-                "pushl $0x202\n\t"          /* EFLAGS: IF=1, IOPL=0 */
-                "pushl %[ucs]\n\t"          /* CS = USER_CS */
-                "pushl %[eip]\n\t"          /* EIP = エントリポイント */
-                "iret\n\t"
-                : [e0] "=m"(kernel_tss.esp0)
-                : [pd]  "r"(ctx->as.pd_phys),
-                  [uesp]"r"(u_esp),
-                  [eip] "r"((u32)entry),
-                  [uds] "i"(USER_DS),
-                  [ucs] "i"(USER_CS)
-                : "eax", "memory"
-            );
+            /* --- M1d: CPL=3 に降りる ---
+             * cli → TSS.ESP0 に現在のカーネル ESP → CR3 をアプリ PD へ →
+             * セグメント → iret (IF=1 はユーザモードに入ると同時)、を 1 つの
+             * 原始命令で行う。途中に割り込みが入ると TSS.ESP0 と CR3 が
+             * 食い違うので分けない (契約は include/cpu.h、x86 の命令列は
+             * arch/x86/arch_cpu.h)。CPL=3 実行中の割り込み / int 0x80 の
+             * フレームはこの直下に積まれ、setjmp フレームを踏まない。
+             * ここから通常 return しない — 終了は int 0x80 → longjmp。 */
+            arch_enter_user(ctx->as.pd_phys, u_esp, (u32)entry);
             /* iret 後はここへ戻らない */
         } else {
-            __asm__ volatile(
-                "movl %%esp, %0\n\t"
-                "movl %1, %%esp\n\t"
-                "call *%2\n\t"
-                "movl %0, %%esp"
-                : "=m"(saved_esp_stack[id])
-                : "r"(new_esp), "r"(entry)
-                : "eax", "ecx", "edx", "cc", "memory"
-            );
+            arch_call_on_stack(saved_esp_stack[id], new_esp, entry);
         }
         exec_exit(EXEC_SUCCESS);
     }

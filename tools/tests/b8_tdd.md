@@ -1346,3 +1346,228 @@ rename_dir 段 6 とそのコメント、不変条件のコメントの訂正、
 試験: `tools/tests/b8_open_host.c` (段 G・段 C2・`[R5-1]` の拡張・`sweep()` の後続操作の口・
 複数グループのディスク・ガードの突き合わせ)、`tools/tests/test_b8_open.py` (見張り)、`tools/tests/b8_tdd.md`
 (§10-1 の訂正と本節)。`build/sdk.mk` は変えていない
+
+## 12. 段 H — 独立した 2 か所の失敗 (二重故障、2026-09-16)
+
+[`docs/tasks/shell/TASK_FS_TYPE.md`](../../docs/tasks/shell/TASK_FS_TYPE.md) §2-6 が
+「範囲外の未解消」として残していた 3 つのうちの最後の 1 つ。失敗注入の網羅は
+「N 番目を 1 回だけ (once)」「N 番目以降を全部 (sticky)」の 2 形式で、独立した
+2 か所の失敗の組み合わせは専用試験 1 件 (`[P1-C'']` `case_create_inode_write_ambiguous`) だけだった。
+
+### 12-1. 何を足したか
+
+- 注入に `sw_arm_pair(i, j)` を足した。「**i 番目と j 番目の I/O だけ**が落ちる」(i < j、sticky なし)。
+  位置は実際に走った I/O の順番なので、1 つ目で経路が変わった後の j もその走行の中の j 番目になる。
+  既存の `sw_arm` は `at2 = 0` のままなので、once / sticky の掃引の挙動は 1 ビットも変わらない。
+- 段 H (`stage_h_pair_sweeps`) を足した。自前のディスクに `/p` `/q` を作り、代表的な書き込み経路を
+  i < j の全組み合わせで掃く。判定は段 C と同じ `media_check` と本物の `e2fsck -fn` の抜き取り
+  (両方が落ちた回のうち、i と j がどちらもフィボナッチ位置のもの + 各分類の初回)。
+- 経路ごとに**空打ちで I/O 数 N を数え**、`N > B8_PAIR_MAXN` (既定 200) の経路は理由つきで飛ばす。
+  組み合わせは N^2/2 で増えるので、二重間接まで届く段 C の経路 (N は数千) は既定では入らない。
+  広く掃くときは `B8_PAIR_MAXN=3000 python3 -B tools/tests/test_b8_open.py` のように上げる
+  (数分〜かかる)。上限は実行時に段 H の見出しへ出る。
+
+対象の 11 経路 (それぞれ「番号の模様」と「ディレクトリ風の模様」の 2 回):
+`ext2_create` (1 ブロック / 13 ブロック = 単一間接)、`ext2_write` 伸長 (4B → 13 ブロック)、
+`ext2_write` 縮小 (13 ブロック → 4B = truncate)、`ext2_unlink` (1 ブロック / 13 ブロック)、
+`ext2_rename` (ファイル 同一ディレクトリ / 別ディレクトリ / **ディレクトリ**を別の親へ)、
+`ext2_mkdir`、`ext2_rmdir`。
+
+### 12-2. 結果 (2026-09-16、`d191fd5` + 段 H)
+
+```
+== 段 H: 独立した 2 か所の失敗 (i 番目と j 番目の I/O だけが落ちる) ==
+        上限 N<=200 (B8_PAIR_MAXN)
+  [PAIR] ext2_create (1 ブロック) / 番号の模様
+         N=36 runs=133 both-fired=98 error-runs=133 leak-runs=22 max-leak=1 orphan-runs=18 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_create (13 ブロック = 単一間接) / 番号の模様
+         N=114 runs=2931 both-fired=2818 error-runs=2931 leak-runs=1930 max-leak=14 orphan-runs=18 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_write 伸長 (4B -> 13 ブロック) / 番号の模様
+         N=114 runs=2947 both-fired=2834 error-runs=2947 leak-runs=2167 max-leak=15 orphan-runs=0 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_write 縮小 (13 ブロック -> 4B = truncate) / 番号の模様
+         N=90 runs=2403 both-fired=2314 error-runs=2403 leak-runs=2124 max-leak=3 orphan-runs=0 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_unlink (1 ブロック) / 番号の模様
+         N=36 runs=169 both-fired=134 error-runs=136 leak-runs=33 max-leak=1 orphan-runs=31 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_unlink (13 ブロック = 単一間接) / 番号の模様
+         N=90 runs=2315 both-fired=2226 error-runs=2282 leak-runs=1945 max-leak=3 orphan-runs=31 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ファイル / 同じディレクトリ) / 番号の模様
+         N=40 runs=205 both-fired=166 error-runs=165 leak-runs=0 max-leak=0 orphan-runs=85 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ファイル / 別のディレクトリへ) / 番号の模様
+         N=40 runs=205 both-fired=166 error-runs=165 leak-runs=0 max-leak=0 orphan-runs=85 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rename (ディレクトリ / 別の親へ) / 番号の模様
+         N=58 runs=331 both-fired=274 error-runs=291 leak-runs=0 max-leak=0 orphan-runs=164 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_mkdir / 番号の模様
+         N=44 runs=209 both-fired=166 error-runs=209 leak-runs=40 max-leak=1 orphan-runs=60 hole-runs=0 inconsistent=0 unreported-leak=0
+  [PAIR] ext2_rmdir (空のディレクトリ) / 番号の模様
+         N=46 runs=271 both-fired=226 error-runs=271 leak-runs=58 max-leak=1 orphan-runs=106 hole-runs=0 inconsistent=0 unreported-leak=0
+```
+
+ディレクトリ風の模様も同じ数字 (11 経路 × 2 模様 = 22 掃引)。合計
+
+| | |
+|---|---|
+| 走行 | 24,238 (両方が落ちた回 22,844) |
+| **不整合 (`media_check`)** | **0** (22 掃引すべて) |
+| 報告されない漏れ | **0** (漏れたのに成功を返した回は無い) |
+| 漏れた回 / 最大の漏れ | 16,638 回 / 15 ブロック (§2-6 の「意図した交換」) |
+| 孤児の出た回 / 末尾の穴 | 1,196 / 0 |
+| `e2fsck -fn` の抜き取り | 段 H で 98 枚増えて全体 752 枚、**食い違い 0**、不整合 2 枚 (どちらも従来からの「期待して作った不整合」の像) |
+| 検査数 | 1461 → 1551 checks, 0 failures |
+| 実行時間 | 11.0 秒 → **13.7 秒** (段 H が +2.7 秒。`make check` 全体 約 90 秒に対する増分) |
+
+**不整合は 1 件も見つからなかった。** 許容したのは §2-6 の「漏れ」(使用中だが未参照のブロック /
+inode) と孤児・末尾の穴だけで、これは `e2fsck` 側でも「Block bitmap differences」「Unattached inode」
+「ref count が多い」の分類に入り、`media_check` と食い違わなかった。
+
+走行数が N^2/2 より少ないのは、1 つ目の失敗でメタデータの I/O エラー状態に入ると以後の書き込みが
+断られて走行が短くなり、j 番目の I/O がそもそも存在しない組み合わせが多いため (j は「その走行で
+実際に届いた位置」までしか掃かない)。`both-fired` がその内訳。
+
+### 12-3. この節が言わないこと ([V4])
+
+- **変異試験をしていない。** 段 H が実際に二重故障だけの不整合を捕まえられるかは、
+  意図的に壊した ext2 で確かめていない (票の指示で FS のコードには触らないため)。
+  段 H の生きていることは `both-fired` の回数と e2fsck の抜き取り枚数 (+98) でしか示していない。
+- 既定の上限 N ≤ 200 なので、**二重間接まで届く経路の二重故障は掃いていない** (段 C の once / sticky は掃いている)。
+- 3 か所以上の同時故障は対象外。
+
+## 13. 段 X3 — 通常ファイル同士の置き換え rename (票 H2 §2-2)
+
+対象票: [`../../docs/tasks/shell/TASK_H2.md`](../../docs/tasks/shell/TASK_H2.md) §2-2 / §2-2-1 /
+§2-2-2 / §2-2-3 と §4-1 の **X3 / X3b / X3c / X3d**。基点 `feat/gui` = `15c5edf`。
+
+### 13-1. 何を足したか
+
+1. **注入側に「媒体へ届いた後に失敗する」模様を足した** (往復 3 所見 2)。
+   これまでの注入はセクタを写す**前**に `-1` を返していたので、
+   `drivers/ide.c` が状態レジスタを転送の**後**に見る現実 —
+   「書き込みが失敗した = 媒体は未変更」が成り立たない —
+   を 1 度も作れていなかった。`wfail_arm_landed()` と `g_sw_land` がその模様。
+   さらに `g_wfail_then_rfail` で「書き込みが落ちた後の読み直しも落とす」= 公開の
+   3 値の「不明」を作れるようにした。
+2. **掃引に追加の不変条件を掛けられるようにした** (`g_sw_extra`)。
+   置き換え rename では
+   **「宛先の名前がどの試行でも存在し、旧 inode D か新 inode S を指す」**
+   を、ext2 のコードを通さず媒体から直に確かめる (`raw_find_name`)。
+   段 C の once / sticky と段 H の二重故障の両方に掛けてある。
+3. 段 H に `ext2_rename (既存ファイルを置き換える)` を足した (既存 11 経路の
+   数字は変えていない)。
+4. 新しい段 X3 で、公開処理の 3 値・名前解決メモ・`ext2_unlink` の戻り値を
+   狙って確かめる。
+5. **X4** (`case_x3_links2`): 置き換えた後の旧 inode D の始末を分けて見る。
+   `links 1 -> 0` は**解放される**、`links 2 -> 1` は**残す** (もう一つの名前が
+   まだ D を指しているので、解放したら生きている名前が解放済み inode を指す)。
+   残した側は旧内容がその名前から読めることまで確かめる。
+
+### 13-2. RED (置き換え経路と戻り値の伝播を外した版)
+
+`fs/ext2_dir.c` の分岐を `if (0)` にして**従来の unlink + add 経路**へ戻し、
+`fs/ext2_file.c` の `ext2_unlink` を「`ext2_write_inode` / `ext2_sync` の戻り値を
+捨てて `EXT2_OK`」に戻した状態。
+
+```
+          [X3] ext2_rename (既存ファイルを置き換える) runs=242 dst->new=56 dst->old=38 dst-missing=148 dst-alien=0
+  FAIL line 2680: X3: the destination name exists after every injected failure
+          [X3] ext2_rename (既存ファイルを置き換える / 二重故障) runs=761 dst->new=436 dst->old=57 dst-missing=268 dst-alien=0
+  FAIL line 2680: X3: the destination name exists after every injected failure
+== 段 X3: 通常ファイル同士の置き換え rename (票 H2 §2-2) ==
+  [X3b] 前半セクタ / 媒体に届く前に失敗 -> 未公開
+  FAIL line 5093: raw_find_name(dir, "dst", &seen) == 1
+  FAIL line 5108: seen == d_ino
+  [X3b] 後半セクタ / 媒体に届く前に失敗 -> 未公開
+  FAIL line 5093: raw_find_name(dir, "dst", &seen) == 1
+  [X3b] 前半セクタ / 媒体に届いた後に失敗 -> 公開済み
+  FAIL line 5097: rc == EXT2_OK
+  FAIL line 5098: seen == s_ino
+  FAIL line 5099: raw_find_name(dir, "src", (u32 *)0) == 0
+  FAIL line 5101: raw_inode_used(d_ino) == 0
+  (後半セクタも同じ 5 件)
+  [X3b] 前半セクタ / 書き込みも読み直しも失敗 -> 不明
+  FAIL line 5093: raw_find_name(dir, "dst", &seen) == 1
+  FAIL line 5110: seen == d_ino || seen == s_ino
+  [X3d] ext2_unlink: links の書き込みだけ失敗 -> OK を返さない
+  FAIL line 5249: X3d: ext2_unlink never reports OK when links stay behind
+
+1724 checks, 19 failures
+```
+
+**旧コードが何をしていたか**: `ext2_rename` は宛先が通常ファイルなら
+`ext2_unlink(new)` で**宛先の名前を先に消して**いた。掃引 242 回のうち
+**148 回で宛先の名前が消えたまま**残る (`dst-missing=148`、二重故障では 268)。
+これが H2 が塞ぎにいった穴そのもの。
+
+`ext2_unlink` は複数リンク分岐の `ext2_write_inode` と末尾の `ext2_sync` の
+戻り値を捨てて `EXT2_OK` を返していたので、「名前は消えたが `links_count` は
+2 のまま」でも成功に見えた (X3d)。
+
+### 13-3. RED (X3c の否定側 — 段 0 の `ext2_ns_touch` を外した版)
+
+```
+  [X3c] 段 2 の後に古い D を返さない (ext2_ns_touch)
+  FAIL line 5165: st.st_ino == s_ino
+  FAIL line 5166: st.st_size == X3_NEW_LEN
+  FAIL line 5171: vfs_get_size(fd) == X3_NEW_LEN
+  FAIL line 5177: sz == X3_NEW_LEN
+
+1724 checks, 4 failures
+```
+
+段 2 は `delete_entry` / `add_entry` を通らないので、既存の無効化に相乗りできない。
+段 3 が落ちた回 (この試験は `/a` のブロックへの書き込みを落として作る) は
+`ext2_delete_entry` の `ns_touch` も走らないため、**`ext2_resolve_path` の記憶が
+解放済みの D を返し続ける**。`stat` / `vfs_open` / `get_size` の 3 経路で見ている。
+
+### 13-4. GREEN
+
+```
+  [SWEEP] ext2_rename (既存ファイルを置き換える) / 番号の模様
+          runs=206 error-runs=204 leak-runs=83 max-leak=12 orphan-runs=39 hole-runs=0 inconsistent=0 unreported-leak=0
+          [X3] ext2_rename (既存ファイルを置き換える) runs=206 dst->new=166 dst->old=40 dst-missing=0 dst-alien=0
+  [SWEEP] ext2_rename (既存ファイルを置き換える) / ディレクトリ風の模様
+          runs=206 error-runs=204 leak-runs=83 max-leak=12 orphan-runs=39 hole-runs=0 inconsistent=0 unreported-leak=0
+          [X3] ext2_rename (既存ファイルを置き換える) runs=206 dst->new=166 dst->old=40 dst-missing=0 dst-alien=0
+  [PAIR] ext2_rename (既存ファイルを置き換える) / 番号の模様
+         N=58 runs=436 both-fired=379 error-runs=436 leak-runs=69 max-leak=1 orphan-runs=222 hole-runs=0 inconsistent=0 unreported-leak=0
+          [X3] ext2_rename (既存ファイルを置き換える / 二重故障) runs=436 dst->new=375 dst->old=61 dst-missing=0 dst-alien=0
+  (ディレクトリ風の模様も同じ数字)
+
+== 段 X3: 通常ファイル同士の置き換え rename (票 H2 §2-2) ==
+  [X3b] 前半セクタ / 媒体に届く前に失敗 -> 未公開
+  [X3b] 後半セクタ / 媒体に届く前に失敗 -> 未公開
+  [X3b] 前半セクタ / 媒体に届いた後に失敗 -> 公開済み
+  [X3b] 後半セクタ / 媒体に届いた後に失敗 -> 公開済み
+  [X3b] 前半セクタ / 書き込みも読み直しも失敗 -> 不明
+  [X3b] 後半セクタ / 書き込みも読み直しも失敗 -> 不明
+  [X3c] 段 2 の後に古い D を返さない (ext2_ns_touch)
+  [X3d] ext2_unlink: links の書き込みだけ失敗 -> OK を返さない
+          runs=7 links-not-fixed=2 wrongly-ok=0
+  [X4] 置き換え: 旧 inode の links 1 -> 0 は解放、2 -> 1 は残す
+
+1778 checks, 0 failures
+E2FSCK samples=761 clean=399 allowed-only=360 inconsistent=2 mismatch=0
+```
+
+| | |
+|---|---|
+| **宛先の名前が消えた回** | **0** (掃引 206 x 2 模様 + 二重故障 436 x 2 模様 = 1284 回) |
+| **宛先が旧でも新でもない inode を指した回** | **0** |
+| 旧 / 新のどちらにも実際に転ぶ | 掃引 166 / 40、二重故障 375 / 61 |
+| 不整合 (`media_check`) | **0** (全掃引) |
+| 報告されない漏れ | **0** |
+| `e2fsck -fn` の抜き取り | 761 枚、**食い違い 0**。不整合 2 枚はどちらも従来からの「期待して作った不整合」の像 |
+| 検査数 | 1551 → **1778 checks, 0 failures** |
+
+`e2fsck` の不整合 2 枚は `F R5-LEGACY two names` と `F R5-BADDIR corrupted rec_len`
+(どちらも意図して壊した像) のまま。置き換え rename が新しく作った不整合は無い。
+
+### 13-5. この節が言わないこと ([V4])
+
+- **ゲスト (NP21/W) でも実 NHD でも 1 度も動かしていない。** 装置と
+  エミュレータ内部のキャッシュ、電源断からの復旧 (票 §4-2 の 6) は未確認。
+- 段 X3 の X3b は**狙いを定めた 6 通り**で、公開セクタへの故障を全位置で
+  掃いてはいない (全位置の掃引は段 C / 段 H が `g_sw_extra` の不変条件つきで
+  受け持つ)。
+- X3d は「名前は消えたが `links_count` が 2 のまま」の形が起きた 2 回を見ている。
+  `links_count` を**直す**ことはしていない (推測で書き換えない、§2-2-4)。
+- 段 H の上限は既定 `N <= 200` のまま。**二重間接まで届く経路の二重故障は
+  掃いていない**。

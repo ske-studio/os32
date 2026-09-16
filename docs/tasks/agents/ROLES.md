@@ -109,4 +109,20 @@ python3 tools/emu_agent/agent.py tail
 対象の経路を列挙し (例: CPL=3 に持ち込んだコードが呼ぶ KAPI 全部、カーネル帯のポインタを渡す箇所全部、
 端末モデルに依存する出力全部)、経路ごとに見た / 見ていないを明記する。次の往復で新しい領域の指摘を出すなら、
 今回なぜ見えなかったかを書く」を入れる。往復数を数える単位は「指摘の集合」であって「1 件」ではない。
-**Codex 枯渇時のレビュアー (ユーザー決裁 2026-09-13)**: `Agent(subagent_type: general-purpose, model: "fable", isolation: "worktree")` に、Codex 向けと同じ依頼文 (対象・参照コード・網羅指示・判定基準・出力書式) + 「読むだけ。編集・ビルド・配備・コミット禁止」を渡す。worktree 隔離なので誤って編集しても本線に触れない。往復の規則 (3 往復 + 追加 1 往復) は同じ。候補の比較: Opus 5 はコーダーと同じモデルで盲点を共有しやすいので次点、Sonnet 5 は「直ったかの確認だけ」の往復に、ローカル AI は不可。
+**Codex 枯渇時のレビュアー (ユーザー指示 2026-09-16、優先)**: **Antigravity CLI (`agy`)** に投げる。読み取り専用で回す形は
+2026-09-16 に実地で確認した:
+
+```bash
+# レビュー依頼 (読むだけ。--dangerously-skip-permissions は使わない)
+cd /home/hight/os32 && timeout 1500 agy --mode plan --print-timeout 4m \
+    --print='<依頼文>' < /dev/null
+```
+
+- **プロンプトは `--print=` に貼り付ける** — `--print` を裸で置くと次のフラグをプロンプトとして飲み込む。
+- ヘッドレスは許可を聞けないので、`~/snap/antigravity-cli/common/.gemini/antigravity-cli/settings.json` の
+  `permissions.allow` に**読み取り系だけ**を入れてある (`read_file(*)` `list_directory(*)` `grep_search(*)`
+  `find_filepath(*)` `view_code_item(*)`)。**`--dangerously-skip-permissions` は使わない** (全ツールが通ってしまう)。
+  書き込み系を許可に足さない限り、`agy` はファイルを変更できない。
+- 依頼文の中身 (対象・参照コード・網羅指示・判定基準・出力書式) は Codex と同じものを使う。往復の規則も同じ。
+
+**Codex 枯渇時のレビュアー (ユーザー決裁 2026-09-13、次点)**: `Agent(subagent_type: general-purpose, model: "fable", isolation: "worktree")` に、Codex 向けと同じ依頼文 (対象・参照コード・網羅指示・判定基準・出力書式) + 「読むだけ。編集・ビルド・配備・コミット禁止」を渡す。worktree 隔離なので誤って編集しても本線に触れない。往復の規則 (3 往復 + 追加 1 往復) は同じ。候補の比較: Opus 5 はコーダーと同じモデルで盲点を共有しやすいので次点、Sonnet 5 は「直ったかの確認だけ」の往復に、ローカル AI は不可。

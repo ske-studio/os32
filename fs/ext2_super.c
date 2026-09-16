@@ -86,6 +86,29 @@ int ext2_write_data_block(Ext2Ctx *ctx, u32 block_num, const void *buf)
     return ext2_raw_write_block(ctx, block_num, buf);
 }
 
+/* ---- セクタ 1 本だけの I/O (票 H2 §2-2-1) ----
+ *
+ * ext2_read_block / ext2_write_block は 1KB ブロックを 512B x 2 回で読み書き
+ * するので、「1 回の書き込みが失敗した = ブロックは未変更」は成り立たない。
+ * 変更したフィールドを含む**セクタ 1 本だけ**を書きたい経路 (ext2_dir.c の
+ * 置き換え rename の公開処理) のために、ブロック内のセクタ番号を指定できる
+ * 口を出す。sect は 0 か 1。
+ *
+ * **エラー状態 (ext2_fs_error) は立てない。** 公開処理は失敗したセクタを
+ * 読み直して「公開済み / 未公開 / 不明」の 3 値を決めるので、どちらへ倒すか
+ * (そして書き込み禁止にするか) は呼び手が決める。 */
+int ext2_read_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, void *buf)
+{
+    return dev_blk_read_lba(ctx->dev, ctx->base_lba + block_num * 2 + sect,
+                            1, buf);
+}
+
+int ext2_write_sector(Ext2Ctx *ctx, u32 block_num, u32 sect, const void *buf)
+{
+    return dev_blk_write_lba(ctx->dev, ctx->base_lba + block_num * 2 + sect,
+                             1, buf);
+}
+
 /* ======================================================================== */
 /*  エラー状態 (票 B8 往復 5 / ユーザー決裁 2)                               */
 /* ======================================================================== */
