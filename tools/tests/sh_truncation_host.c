@@ -291,9 +291,19 @@ static int __cdecl h_sys_open(const char *path, int flags)
     return -1;
 }
 
+/* fd 1 / 2 への書き込みは出力に残す。`echo` は kprintf ではなく
+ * sys_write(1, ...) を使うので、ここを捨てると「その段が走ったか」の
+ * 痕跡が取れない (パイプの段の検査が偽の GREEN になる)。
+ * 本物はリダイレクト中ならファイルへ行くが、この試験が見るのは
+ * 「段が実行されたか」なので宛先は区別しない (リダイレクト先を
+ * 開いたかどうかは h_sys_redirect_fd の記録で別に見る)。 */
 static int __cdecl h_sys_write(int fd, const void *buf, u32 size)
 {
-    (void)fd; (void)buf;
+    const char *b = (const char *)buf;
+    u32 i;
+    if (fd == 1 || fd == 2) {
+        for (i = 0; i < size; i++) out_byte(b[i]);
+    }
     return (int)size;
 }
 
@@ -337,9 +347,44 @@ static const char *__cdecl h_sys_getcwd(void) { return "/cwd"; }
 static int __cdecl h_sys_chdir(const char *p) { (void)p; return 0; }
 static int __cdecl h_sys_mkdir(const char *p) { (void)p; return 0; }
 static int __cdecl h_sys_unlink(const char *p) { (void)p; return 0; }
+/* リダイレクトの記録。`> file` は本物では O_TRUNC で開くので、**この呼び出し
+ * が起きたこと自体**が「リダイレクト先が空で上書きされた」ことを意味する。
+ * 断った段の後ろの段が走らないことを、痕跡の側から見るための窓。 */
+#define REDIR_LOG_CAP 512
+static char g_redir_log[REDIR_LOG_CAP];
+static int  g_redir_log_len;
+static int  g_redir_count;
+
+static void redir_log_reset(void)
+{
+    g_redir_log_len = 0;
+    g_redir_log[0] = '\0';
+    g_redir_count = 0;
+}
+
+/* リダイレクト先として <want> が開かれたか */
+static int redir_opened(const char *want)
+{
+    int i, j;
+    int wl = 0;
+    while (want[wl]) wl++;
+    if (wl == 0) return 1;
+    for (i = 0; i + wl <= g_redir_log_len; i++) {
+        for (j = 0; j < wl && g_redir_log[i + j] == want[j]; j++) {}
+        if (j == wl) return 1;
+    }
+    return 0;
+}
+
 static int __cdecl h_sys_redirect_fd(int fd, const char *p, int mode)
 {
-    (void)fd; (void)p; (void)mode;
+    (void)fd; (void)mode;
+    g_redir_count++;
+    while (p && *p && g_redir_log_len < REDIR_LOG_CAP - 2) {
+        g_redir_log[g_redir_log_len++] = *p++;
+    }
+    if (g_redir_log_len < REDIR_LOG_CAP - 1) g_redir_log[g_redir_log_len++] = '\n';
+    g_redir_log[g_redir_log_len] = '\0';
     return 0;
 }
 static int __cdecl h_sys_redirect_fd_buf(int fd, u8 *b, u32 cap, u32 len)
@@ -567,6 +612,7 @@ static void fresh(void)
     files_reset();
     out_reset();
     launch_log_reset();
+    redir_log_reset();
 }
 
 /* ========================================================================
@@ -769,6 +815,27 @@ static void case_nested_execute_command(void)
     check(ran("mk1"), "4g 通る入れ子は今までどおり走る");
     check(ran("mk2"), "4h 通る入れ子の後も打ち切らない (誤発火なし)");
     check(sh_refused_flag == 0, "4i 通った行は印を残さない");
+
+    /* 入口の掃除は「いちばん外側だけ」を直に見る。
+     *
+     * 段 2 のときは「断った段の後ろの段が time なら取りこぼす」(6g) が
+     * この規則の唯一の証人だったが、PM 決裁で断った後の段を走らせなく
+     * なったので、その経路からは見えなくなった。規則自体は shell.h の
+     * 契約なので、入れ子の深さを直に作って押さえる
+     * (`if` / `time` が execute_command を呼ぶときと同じ状態)。 */
+    fresh();
+    g_exec_depth++;                 /* if / time の中にいるときと同じ */
+    sh_refuse_mark();
+    execute_command("mk1");
+    g_exec_depth--;
+    check(ran("mk1"), "4j 入れ子の execute_command は今までどおり走る");
+    check(sh_refused_flag == 1,
+          "4k 入れ子の入口では印を消さない (内側の断りを外へ届ける)");
+
+    /* いちばん外側 (深さ 0) の入口では消す */
+    execute_command("mk2");
+    check(sh_refused_flag == 0,
+          "4l いちばん外側の入口では印を消す");
 }
 
 /* ========================================================================
@@ -821,12 +888,24 @@ static void case_nested_source(void)
  *  6. 経路 3 — パイプの段
  *
  *  段は execute_single を直に呼ぶので、段の中で断った印は execute_command
- *  の入口の掃除に消されない。打ち切るのは**行**なので、後続の行が走らない
- *  ことを見る (段そのものの続行はシェルの通常の意味論どおり)。
+ *  の入口の掃除に消されない。
+ *
+ *  段 2 の時点では「行を打ち切るだけで、段の続行は bash の `false | cat`
+ *  どおり」にしていた。**PM 決裁 (独立レビューの指摘を受けて) で票
+ *  §2の「行全体を実行しない」に合わせた** — 断った段があったら
+ *  **後続の段も実行しない**。理由は `<断られる段> | tee 重要ファイル` —
+ *  続けると断ったのに書き込みが起き、`> file` は O_TRUNC なので
+ *  リダイレクト先が空で上書きされ得る。
  * ======================================================================== */
 static void case_pipe_stage(void)
 {
+    char a[600], b[600];
+
     report("6 経路 3: パイプの段\n");
+
+    /* 先頭 255 文字が同じ 256 文字の 2 本 (1c と同じ反例) */
+    fill_run(a, 256, 'x');
+    fill_run(b, 256, 'y');
 
     fresh();
     s_begin(0);
@@ -862,6 +941,66 @@ static void case_pipe_stage(void)
     execute_command("source /t.sh");
     check(ran("mk2"), "6d 通るパイプの後も打ち切らない");
     check(sh_refused_flag == 0, "6e 通るパイプは印を残さない");
+
+    /* ---- PM 決裁: 断った段があったら後続の段を実行しない ----------- */
+
+    /* 6h: 後続の段が走ったかは、その段が書く痕跡 (echo の出力) で見る。
+     * SHELL_AS_APP では外部段を含むパイプが丸ごと断られるので、
+     * 段は全部内蔵コマンドにする。 */
+    fresh();
+    line_reset();
+    line_add("if "); line_add(a); line_add(" == "); line_add(b);
+    line_add(" markpipe | echo STAGE2RAN");
+    execute_command(g_line);
+    check(refused_msg("if: left value"), "6h 段 1 で断る");
+    check(!ran("markpipe"),      "6i 断った段の右辺は実行しない");
+    check(!out_has("STAGE2RAN"),
+          "6j 断った段の**後続の段**を実行しない");
+
+    /* 6k: 後続の段の `> file` は O_TRUNC。走らせると断ったのに
+     * リダイレクト先が空で上書きされる (この決裁の根拠)。 */
+    fresh();
+    file_add("/keep.txt", "IMPORTANT");
+    line_reset();
+    line_add("if "); line_add(a); line_add(" == "); line_add(b);
+    line_add(" markpipe | echo tail > /keep.txt");
+    execute_command(g_line);
+    check(!redir_opened("/keep.txt"),
+          "6k 後続の段のリダイレクト先を開かない (空で上書きしない)");
+    check(g_redir_count == 0, "6l 断った行はリダイレクトを 1 つも張らない");
+
+    /* 6m: 3 段の真ん中で断ったときも 3 段目は走らない。
+     * 1 段目 (STAGE1RAN) は断る前なので今までどおり走る。 */
+    fresh();
+    line_reset();
+    line_add("echo STAGE1RAN | if ");
+    line_add(a); line_add(" == "); line_add(b);
+    line_add(" markpipe | echo STAGE3RAN");
+    execute_command(g_line);
+    check(out_has("STAGE1RAN"), "6m 断る前の段は走る");
+    check(!out_has("STAGE3RAN"), "6n 断った段の後ろの段は走らない (3 段)");
+
+    /* 誤発火の裏 1: 断っていないパイプは今までどおり全段走る */
+    fresh();
+    execute_command("echo ONE | echo TWO | echo THREE");
+    check(out_has("ONE") && out_has("TWO") && out_has("THREE"),
+          "6o 誤発火なし: 通る 3 段は全段走る");
+    check(sh_refused_flag == 0, "6p 通る 3 段は印を残さない");
+
+    /* 誤発火の裏 2: 通るパイプの最終段の `> file` は今までどおり張る */
+    fresh();
+    file_add("/keep.txt", "IMPORTANT");
+    execute_command("echo head | echo tail > /keep.txt");
+    check(redir_opened("/keep.txt"),
+          "6q 誤発火なし: 通るパイプのリダイレクトは今までどおり張る");
+
+    /* 誤発火の裏 3: `if` が**偽**で右辺を走らせないだけのときは
+     * 断りではないので、後続の段は今までどおり走る。 */
+    fresh();
+    execute_command("if abc == abd markpipe | echo STAGE2RAN");
+    check(!ran("markpipe"), "6r 偽の if は右辺を走らせない");
+    check(out_has("STAGE2RAN"),
+          "6s 誤発火なし: 偽の if は断りではないので後続の段は走る");
 }
 
 /* ========================================================================

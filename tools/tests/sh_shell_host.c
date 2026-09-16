@@ -436,6 +436,7 @@ int sh_refused_take(void)
     sh_refused_flag = 0;
     return r;
 }
+int sh_refused_peek(void) { return sh_refused_flag; }
 
 static void show_prompt(void) { out_str("sh> "); }
 

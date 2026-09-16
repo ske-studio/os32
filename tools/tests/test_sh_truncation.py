@@ -122,7 +122,12 @@ MUTATIONS = [
     ("source_not_propagated", "userland/shell/cmd_script.c",
      "    if (script_source_file(argv[1]) == SCRIPT_ERR_REFUSED) sh_refuse_mark();",
      "    (void)script_source_file(argv[1]);"),
-    # 変異 7: 起動時の profile が印を立て直す版 (R2 の否定側)。
+    # 変異 7: パイプの段ループが印を**見ない**版 (= PM 決裁の前の姿)。
+    #         断った段の後続の段が走り、`> file` が O_TRUNC で開かれる。
+    ("pipe_no_peek", "userland/shell/main.c",
+     "                if (sh_refused_peek()) break;",
+     "                if (0) break;"),
+    # 変異 8: 起動時の profile が印を立て直す版 (R2 の否定側)。
     #         profile の断りが起動後の 1 行目を巻き添えにする。
     ("profile_aborts_boot", "userland/shell/cmd_script.c",
      '        g_api->kprintf(ATTR_RED,\n'

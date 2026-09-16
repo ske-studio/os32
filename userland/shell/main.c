@@ -442,6 +442,14 @@ int sh_refused_take(void)
     return r;
 }
 
+/* 読むだけ — **消さない**。パイプの段ループが「この段で断ったか」を見るのに
+ * 使う (票 §2 の「行全体を実行しない」)。ここで take してしまうと、断りが
+ * script_exec まで届かず後続の**行**が走る。 */
+int sh_refused_peek(void)
+{
+    return sh_refused_flag;
+}
+
 /* ======================================================================== */
 /*  公開API: execute_command                                                 */
 /* ======================================================================== */
@@ -585,6 +593,22 @@ static void execute_command_line(const char *cmd)
                 if (!is_last) {
                     prev_buf = cur_buf;
                 }
+
+                /* 票 §2「切り詰めたら行全体を実行しない」— 段で断りの印が
+                 * 立ったら、**後続の段を実行せずに行を終える**。
+                 *
+                 * bash の `false | cat` に寄せて段を続けると、
+                 * `<断られる段> | tee 重要ファイル` のように**断ったのに
+                 * 後段の書き込みが起きる**。後段の `> file` は
+                 * apply_redirects が O_TRUNC で開くので、リダイレクト先が
+                 * 空で上書きされる。
+                 *
+                 * 印は**消さない** (§2-1)。消すのはいちばん外側の
+                 * execute_command の入口だけで、スクリプト中ならこの行の
+                 * 後で script_exec が打ち切る。抜けた後の後始末
+                 * (reset_all_redirects / sh_pipe_free / mem_free) は
+                 * ループの外と上でそのまま通る。 */
+                if (sh_refused_peek()) break;
             }
 
             sh_pipeline_leave();

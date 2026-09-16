@@ -74,11 +74,14 @@ void execute_command(const char *cmd);
 /*    - script_exec が 1 行ごとに sh_refused_take() で読んで消し、            */
 /*      立っていたらスクリプトを打ち切る (goto のラベル無しと同じ扱い)        */
 /*    - 対話 / rshell は誰も読まないので、断った行の次の行は今までどおり動く  */
+/*    - パイプの段ループは sh_refused_peek() で **読むだけ**。印が立って  */
+/*      いたら後続の段を実行せずに行を終える (票 §2「行全体を実行しない」)  */
 /* ------------------------------------------------------------------------ */
 extern int sh_refused_flag;
 void sh_refuse(const char *what, int limit);  /* 赤字 1 行 + 印 */
 void sh_refuse_mark(void);                    /* 印だけ (伝播用) */
 int  sh_refused_take(void);                   /* 読んで消す */
+int  sh_refused_peek(void);                   /* 読むだけ (消さない) */
 extern const char *cmd_names[];  /* タブ補完用 */
 const ShellCmd *shell_get_cmds(int *count);
 void shell_print_help(const char *cmd_name);
