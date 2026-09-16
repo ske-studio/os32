@@ -216,7 +216,7 @@ int sh_exec_result(const char *cmdline, int *kind, int *code);
 | KAPI | `sdk/kapi.json` (末尾に 1 本)、`sdk/include/os32/os32_kapi_shared.h` (`EXEC_KIND_*`)、`docs/KAPI_SPEC.md` |
 | カーネル | `exec/exec.c` (`exec_exit` の引数、`exec_fault_recover`、`kapi_sys_exit`、CTRL+STOP、`exec_run` の記録)、`exec/exec.h`、`kapi/` の `__cdecl` ラッパ [C3] |
 | シェル | `userland/shell/shell.h` (`sh_exec_result`、SHA-256 の注記)、`main.c` (`try_exec*`、`execute_command`、届かない行の状態)、`sh_launch.inc` (写像)、`cmd_env.c` (`$?`、`set -e`)、`cmd_script.c` (`exit`、`errexit`、行番号)、`cmd_base.c` (`sh.bin` の `exit`)、`cmd_mnt.c` (`exec` 組み込み)、`cmd_*.c` 全部 (handler の型)、`rshell.c` / `ui.c` (呼び出し元) |
-| 試験 | `tools/tests/sh_status_host.c` + `sh_status_tdd.md`。**`try_exec` / `try_exec_from_path` は `main.c` の static なので `sh_exec.inc` に切り出す** (`sh_shell_host.c` は `main.c` を include していない)。`sh_shell_host.c:442,463` のスタブを型に合わせる |
+| 試験 | [`tools/tests/sh_status_host.c`](../../../tools/tests/sh_status_host.c) + [`sh_status_tdd.md`](../../../tools/tests/sh_status_tdd.md)。**`try_exec` / `try_exec_from_path` は `main.c` の static なので `sh_exec.inc` に切り出す** (`sh_shell_host.c` は `main.c` を include していない)。`sh_shell_host.c:442,463` のスタブを型に合わせる |
 | 文書 | `docs/manpages/` のシェルの頁 (`$?`、`exit`、`set -e`、`${?}` 非対応、行番号の意味)、`docs/POLICY_DEBUG.md` §4 (事実 2 の記録) |
 
 ## 4. 受入
