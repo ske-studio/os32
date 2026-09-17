@@ -509,6 +509,9 @@ static void test_db_v50(void)
     check((bad & (1u << 2)) == 0, "db ptr: NULL and length overflow refused");
     check((bad & (1u << 3)) == 0, "db path: journal name fits the VFS capacity");
     check((bad & (1u << 4)) == 0, "db diag: one open-failure slot per owner ID");
+    /* 票 TASK_DB_ERRSTR: db_last_error() の返り先 (SHM 末尾の診断領域) が
+     * 結果データと重なっていないこと。重なると結果が診断文を踏み潰す。 */
+    check((bad & (1u << 5)) == 0, "db diag: error string area is outside the result area");
     /* owner 別の欄が ID の池を覆っているか (kapi_db.h の DB_OWNER_SLOTS)。 */
     check(DB_OWNER_SLOTS >= APP_SLOT_COUNT,
           "db diag: DB_OWNER_SLOTS covers the whole app ID pool");

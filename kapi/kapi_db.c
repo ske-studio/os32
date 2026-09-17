@@ -83,6 +83,57 @@ static int db_open_fail[DB_OWNER_SLOTS];
 #define DB_SHM_PTR   ((u8 *)MEM_SHM_BASE)
 
 /* ======================================================================== */
+/*  ヘルパー: CPL=3 から読める文字列 (票 TASK_DB_ERRSTR §4)                  */
+/*                                                                          */
+/*  共有メモリはアプリの PD に RW+USER で見えているが、カーネルの            */
+/*  .rodata / .data と SQLite の帯 (0x200000〜0x2FFFFF) は見えない。         */
+/*  だから `const char *` を返す KAPI は、返す前に共有メモリの**診断領域**   */
+/*  (ブロック 0 の末尾、os32_kapi_shared.h の DB_SHM_DIAG_* が唯一の管理元)  */
+/*  へ写す。結果データ側の上限は DB_SHM_RESULT_LIMIT なので、両者は重ならない。*/
+/* ======================================================================== */
+
+/* 切れたと分かる印。写せなかったぶんを「写せた」ことにしないため。 */
+#define DB_SHM_DIAG_ELLIPSIS "..."
+
+/* 常に NUL の 1 バイト。空文字列を返す経路はここを指す。SHM の初期化順に
+ * 依らないよう、返すたびに NUL を置く。 */
+static const char *db_shm_empty(void)
+{
+    char *p = (char *)(DB_SHM_PTR + DB_SHM_EMPTY_OFFSET);
+    *p = '\0';
+    return (const char *)p;
+}
+
+/* 診断文を診断領域へ写して、その先頭を返す。
+ *   - 上限で切り、**必ず NUL で終える**
+ *   - 切ったら印を付ける (切り詰めを成功に見せない)
+ *   - 切り口は UTF-8 の文字境界まで戻す (途中で切ると □ が出る)
+ * 写した後は SQLite 側が何をしても安全 = sqlite3_errmsg() の寿命に依存しない。 */
+static const char *db_shm_diag(const char *msg)
+{
+    char *dst = (char *)(DB_SHM_PTR + DB_SHM_DIAG_OFFSET);
+    u32 cap = (u32)DB_SHM_ERRSTR_MAX - 1u;      /* NUL を除いて書ける量 */
+    u32 mark = (u32)sizeof(DB_SHM_DIAG_ELLIPSIS) - 1u;
+    u32 len;
+
+    if (!msg) msg = "";
+    len = kstrlen(msg);
+    if (len <= cap) {
+        kmemcpy(dst, msg, len);
+        dst[len] = '\0';
+        return (const char *)dst;
+    }
+
+    /* 切る。印の分を空けてから、継続バイトの上で止まらないよう戻す。 */
+    len = cap - mark;
+    while (len > 0u && ((u8)msg[len] & 0xC0u) == 0x80u) len--;
+    kmemcpy(dst, msg, len);
+    kmemcpy(dst + len, DB_SHM_DIAG_ELLIPSIS, mark);
+    dst[len + mark] = '\0';
+    return (const char *)dst;
+}
+
+/* ======================================================================== */
 /*  ヘルパー: スロット検証                                                   */
 /* ======================================================================== */
 static DbSlot *slot_get(int handle)
@@ -215,7 +266,7 @@ static void shm_write_error_text(const char *errmsg)
     data_start = (i32)sizeof(DB_ResultHeader);
     hdr->error_offset = data_start;
 
-    max_len = DB_SHM_BLOCK_SIZE - data_start - 1;
+    max_len = DB_SHM_RESULT_LIMIT - data_start - 1;
     if (max_len > 0) {
         kstrncpy((char *)(DB_SHM_PTR + data_start), errmsg, (u32)max_len);
     }
@@ -249,10 +300,10 @@ static int shm_row_fits_n(int ncol, u32 payload)
     u32 need = (u32)sizeof(DB_ResultHeader);
 
     if (ncol < 0) return 0;
-    if ((u32)ncol > ((u32)DB_SHM_BLOCK_SIZE - need) / (u32)sizeof(DB_ColumnInfo))
+    if ((u32)ncol > ((u32)DB_SHM_RESULT_LIMIT - need) / (u32)sizeof(DB_ColumnInfo))
         return 0;
     need += (u32)ncol * (u32)sizeof(DB_ColumnInfo);
-    if (payload > (u32)DB_SHM_BLOCK_SIZE - need) return 0;
+    if (payload > (u32)DB_SHM_RESULT_LIMIT - need) return 0;
     return 1;
 }
 
@@ -313,7 +364,7 @@ static int shm_row_check(sqlite3 *db, sqlite3_stmt *stmt, int ncol)
             add = 0u;                      /* NULL は payload を持たない */
             break;
         }
-        if (add > (u32)DB_SHM_BLOCK_SIZE - payload) return SQLITE_TOOBIG;
+        if (add > (u32)DB_SHM_RESULT_LIMIT - payload) return SQLITE_TOOBIG;
         payload += add;
     }
     return shm_row_fits_n(ncol, payload) ? SQLITE_OK : SQLITE_TOOBIG;
@@ -363,7 +414,7 @@ static int shm_write_row(DbSlot *slot)
 
     for (i = 0; i < ncol; i++) {
         int col_type = sqlite3_column_type(slot->active_stmt, i);
-        i32 remaining = DB_SHM_BLOCK_SIZE - data_offset;
+        i32 remaining = DB_SHM_RESULT_LIMIT - data_offset;
 
         cols[i].data_offset = data_offset;
 
@@ -697,13 +748,15 @@ const char * __cdecl kapi_db_column_text(int handle, int col)
     DB_ResultHeader *hdr = (DB_ResultHeader *)DB_SHM_PTR;
     DB_ColumnInfo *info;
 
-    if (!slot || !slot->active_stmt) return "";
+    /* 空文字列も**共有メモリ上**を指す。カーネルの .rodata は CPL=3 から
+     * 読めないので、`return "";` は msg[0] を見るだけで #PF になる。 */
+    if (!slot || !slot->active_stmt) return db_shm_empty();
 
     /* 共有メモリ上のカラム情報からデータ位置を参照 */
-    if (col < 0 || col >= hdr->column_count) return "";
+    if (col < 0 || col >= hdr->column_count) return db_shm_empty();
     info = (DB_ColumnInfo *)(DB_SHM_PTR + sizeof(DB_ResultHeader)
                              + (u32)col * sizeof(DB_ColumnInfo));
-    if (info->data_offset == 0) return "";
+    if (info->data_offset == 0) return db_shm_empty();
     return (const char *)(DB_SHM_PTR + info->data_offset);
 }
 
@@ -724,14 +777,21 @@ int __cdecl kapi_db_finalize(int handle)
     return 0;
 }
 
+/* 返り値は CPL=3 のアプリが読む。**4 経路すべて**が元はカーネル番地だった
+ * (.rodata の定数 / slot の .bss / SQLite の帯) ので、返す前に共有メモリの
+ * 診断領域へ写す (票 TASK_DB_ERRSTR)。DB_ResultHeader.error_offset は
+ * 1 回の db_exec の結果に結びついた別の欄で、こちらは動かさない。 */
 const char * __cdecl kapi_db_last_error(int handle)
 {
     DbSlot *slot;
-    if (handle < 0 || handle >= DB_MAX_CONNECTIONS) return "invalid handle";
+    if (handle < 0 || handle >= DB_MAX_CONNECTIONS)
+        return db_shm_diag("invalid handle");
     slot = &db_slots[handle];
-    if (slot->cleanup_error != SQLITE_OK) return slot->cleanup_message;
-    if (!slot->in_use || !slot->db) return "invalid handle";
-    return sqlite3_errmsg(slot->db);
+    if (slot->cleanup_error != SQLITE_OK)
+        return db_shm_diag(slot->cleanup_message);
+    if (!slot->in_use || !slot->db)
+        return db_shm_diag("invalid handle");
+    return db_shm_diag(sqlite3_errmsg(slot->db));
 }
 
 u32 __cdecl kapi_db_mem_used(void)
@@ -1190,10 +1250,11 @@ u32 db_v50_selftest(void)
     /* (0) slot 配置。判定は db_slot_layout_ok() (下) が持つ。 */
     if (!db_slot_layout_ok(KAPI_SLOT_COUNT)) bad |= 1u << 0;
 
-    /* (1) SHM の境界: ちょうど収まる / 1 バイト超過 / descriptor だけで溢れる */
-    if (!shm_row_fits_n(1, (u32)DB_SHM_BLOCK_SIZE - hdr - desc)) bad |= 1u << 1;
-    if (shm_row_fits_n(1, (u32)DB_SHM_BLOCK_SIZE - hdr - desc + 1u)) bad |= 1u << 1;
-    if (shm_row_fits_n((int)(((u32)DB_SHM_BLOCK_SIZE - hdr) / desc) + 1, 0))
+    /* (1) SHM の境界: ちょうど収まる / 1 バイト超過 / descriptor だけで溢れる。
+     * 上限は**結果側の上限** (診断領域を除いた分)。 */
+    if (!shm_row_fits_n(1, (u32)DB_SHM_RESULT_LIMIT - hdr - desc)) bad |= 1u << 1;
+    if (shm_row_fits_n(1, (u32)DB_SHM_RESULT_LIMIT - hdr - desc + 1u)) bad |= 1u << 1;
+    if (shm_row_fits_n((int)(((u32)DB_SHM_RESULT_LIMIT - hdr) / desc) + 1, 0))
         bad |= 1u << 1;
     if (shm_row_fits_n(-1, 0)) bad |= 1u << 1;
 
@@ -1220,6 +1281,32 @@ u32 db_v50_selftest(void)
 
     /* (4) owner 別の欄が ID の池 (1 = シェル帯 .. 5) を覆っている */
     if (DB_OWNER_SLOTS < 6) bad |= 1u << 4;
+
+    /* (5) 診断領域と結果領域がブロック 0 を過不足なく分け合っている
+     * (票 TASK_DB_ERRSTR §4)。ここがずれると、結果データが
+     * db_last_error() の返り先を踏み潰す。 */
+    /* 結果の上限がそのまま診断領域の入口 = 隙間も重なりも無い */
+    if ((u32)DB_SHM_DIAG_OFFSET != (u32)DB_SHM_RESULT_LIMIT) bad |= 1u << 5;
+    /* 診断文のバッファと「常に NUL の 1 バイト」が重ならない */
+    if ((u32)DB_SHM_DIAG_OFFSET + (u32)DB_SHM_ERRSTR_MAX
+        > (u32)DB_SHM_EMPTY_OFFSET) bad |= 1u << 5;
+    /* その 1 バイトは診断領域の中 (= ブロック 0 の中) にある */
+    if ((u32)DB_SHM_EMPTY_OFFSET - (u32)DB_SHM_DIAG_OFFSET
+        >= (u32)DB_SHM_DIAG_SIZE) bad |= 1u << 5;
+    /* 空文字列は必ず NUL で読める (返す側が毎回置く) */
+    if (db_shm_empty()[0] != '\0') bad |= 1u << 5;
+    /* 上限を超える診断文は切られ、NUL で終わり、診断領域を出ない */
+    {
+        static char probe[DB_SHM_ERRSTR_MAX + 16];
+        const char *cut;
+        u32 k;
+        for (k = 0; k < (u32)sizeof(probe) - 1u; k++) probe[k] = 'x';
+        probe[sizeof(probe) - 1] = '\0';
+        cut = db_shm_diag(probe);
+        if (cut != (const char *)(DB_SHM_PTR + DB_SHM_DIAG_OFFSET))
+            bad |= 1u << 5;
+        if (kstrlen(cut) != (u32)DB_SHM_ERRSTR_MAX - 1u) bad |= 1u << 5;
+    }
 
     return bad;
 }

@@ -61,6 +61,24 @@ typedef signed long    i32;
 /* IPC 共有メモリブロックサイズ (DB結果用) */
 #define DB_SHM_BLOCK_SIZE  (16 * 1024)
 
+/* 票 TASK_DB_ERRSTR §4 — ブロック 0 の末尾を **診断領域** に切り出す。
+ *
+ *   [0]                                                        [16KB]
+ *   | DB_ResultHeader | 列情報 | 結果データ | 診断文 | 空文字列 |
+ *   0                                       ^DIAG_OFFSET       ^EMPTY_OFFSET
+ *
+ * 共有メモリはアプリの PD に見えているが、カーネルの .rodata / .data と
+ * SQLite の帯 (0x200000〜0x2FFFFF) は見えない。だから `const char *` を返す
+ * KAPI (`db_last_error` / `db_column_text`) は、返す前にここへ写す。
+ *
+ * **結果データの上限は必ず DB_SHM_RESULT_LIMIT から引く** ([C4])。
+ * DB_SHM_BLOCK_SIZE から直接引くと、結果データが診断文を踏み潰す。 */
+#define DB_SHM_DIAG_SIZE    256    /* 診断領域の総量 (診断文 + 空文字列) */
+#define DB_SHM_DIAG_OFFSET  (DB_SHM_BLOCK_SIZE - DB_SHM_DIAG_SIZE)
+#define DB_SHM_ERRSTR_MAX   (DB_SHM_DIAG_SIZE - 1)   /* 診断文のバッファ長 (NUL 込み) */
+#define DB_SHM_EMPTY_OFFSET (DB_SHM_BLOCK_SIZE - 1)  /* 常に NUL の 1 バイト */
+#define DB_SHM_RESULT_LIMIT DB_SHM_DIAG_OFFSET       /* 結果データが使える上限 */
+
 /* v50 (票 S0-K §1a) — db_prepare_only / db_bind_* の上限。カーネル側
  * (kapi/kapi_db.c) の検証用スクラッチもこの値で取るので、ここが唯一の
  * 管理元 ([C4])。超過は**切り捨てず拒否**する。 */

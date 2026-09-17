@@ -464,10 +464,11 @@ static void shm_bound(void)
     u32 desc = (u32)sizeof(DB_ColumnInfo);
     int h;
 
-    /* 純関数の側 */
-    CHECK(shm_row_fits_n(1, DB_SHM_BLOCK_SIZE - hdr - desc));
-    CHECK(!shm_row_fits_n(1, DB_SHM_BLOCK_SIZE - hdr - desc + 1));
-    CHECK(!shm_row_fits_n((int)((DB_SHM_BLOCK_SIZE - hdr) / desc) + 1, 0));
+    /* 純関数の側。上限は**結果側の上限** — ブロック 0 の末尾は
+     * db_last_error() の診断領域 (票 TASK_DB_ERRSTR)。 */
+    CHECK(shm_row_fits_n(1, DB_SHM_RESULT_LIMIT - hdr - desc));
+    CHECK(!shm_row_fits_n(1, DB_SHM_RESULT_LIMIT - hdr - desc + 1));
+    CHECK(!shm_row_fits_n((int)((DB_SHM_RESULT_LIMIT - hdr) / desc) + 1, 0));
     CHECK(!shm_row_fits_n(-1, 0));
 
     /* 実接続: 16KB に収まらない 1 行は -1、SHM の外へ 1 バイトも書かない */
@@ -658,7 +659,7 @@ static void owner_isolation(void)
  *  しかも診断は成功のまま = 欠落に気付けない。1 列の行で両端を踏む。      */
 static void shm_exact(void)
 {
-    int room = (int)DB_SHM_BLOCK_SIZE - (int)sizeof(DB_ResultHeader)
+    int room = (int)DB_SHM_RESULT_LIMIT - (int)sizeof(DB_ResultHeader)
                - (int)sizeof(DB_ColumnInfo);
     DB_ColumnInfo *info = (DB_ColumnInfo *)(test_shm + sizeof(DB_ResultHeader));
     char sql[128];
@@ -943,7 +944,7 @@ static void prepare_replaces(void)
  *  「成功した欠落 ROW」になる。hard heap limit で確保を失敗させて踏む。   */
 static void materialize_fail(void)
 {
-    int room = (int)DB_SHM_BLOCK_SIZE - (int)sizeof(DB_ResultHeader)
+    int room = (int)DB_SHM_RESULT_LIMIT - (int)sizeof(DB_ResultHeader)
                - (int)sizeof(DB_ColumnInfo);
     DB_ColumnInfo *info = (DB_ColumnInfo *)(test_shm + sizeof(DB_ResultHeader));
     char sql[128];
