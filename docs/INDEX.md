@@ -134,7 +134,8 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) | 終了コードの配線と `$?` **受入完了 (2026-09-16)** — ゲスト試験ランナーの 1 段目 (KAPI v55、`exec_last_result`)。終了コードが起動エラー・app_id と同じ空間に混ざっている (PATH の次の候補を二重実行する実害つき)。決裁 E1 / E2 |
 | [tasks/memory/TASK_KSTACK_USER.md](tasks/memory/TASK_KSTACK_USER.md) | **SHM 帯がカーネルスタックに食い込んでいる 受入完了 (2026-09-17)** — 番地が `__bss_end` から浮くため、カーネルが育って SHM の終端がスタックに達した。**スタックは設計の 16KB ではなく 4KB**。設計上のガードは存在せず `crash` が素通りする。重なりを誰も検査していない。**POLICY_DEV §1 で最優先** |
 | [tasks/sqlite/TASK_DB_ERRSTR.md](tasks/sqlite/TASK_DB_ERRSTR.md) | `db_last_error()` がカーネル番地を返す **受入完了 (2026-09-17)** — CPL=3 のアプリが戻り値を読むと #PF で死ぬ (実測 addr=0x002B8DE0、`$?`=139)。`db_column_text()` のエラー経路も同じ。共有メモリへ写して返す。**カーネル層なので POLICY_DEV §1 で優先** |
-| [tasks/test/TASK_TEST_RUNNER.md](tasks/test/TASK_TEST_RUNNER.md) | ゲストで一括実行してホストで集計する **計画 (2026-09-17)** — ランナー 3 段目。シェルに `;` もループも無いのでホストが平らな スクリプトを生成する。終了コードと集計行の**両方**を突き合わせ、食い違いを不合格にする。固まった試験を名指しする見張りつき。`make check-guest` として `make check` とは別 |
+| [tasks/test/TASK_FSTAT_REDIR.md](tasks/test/TASK_FSTAT_REDIR.md) | **`fstat` がリダイレクトを見ない 計画 (2026-09-17)** — fd 0/1/2 を無条件で キャラクタデバイスと答えるので `isatty` と食い違う。`stat_t` が単独では 5/5、リダイレクトすると 4/5。**POLICY_DEV §1 でカーネル層が先** |
+| [tasks/test/TASK_TEST_RUNNER.md](tasks/test/TASK_TEST_RUNNER.md) | ゲストで一括実行してホストで集計する **受入完了 (2026-09-17)** — ランナー 3 段目。シェルに `;` もループも無いのでホストが平らな スクリプトを生成する。終了コードと集計行の**両方**を突き合わせ、食い違いを不合格にする。固まった試験を名指しする見張りつき。`make check-guest` として `make check` とは別 |
 | [tasks/test/TASK_TEST_RESULT.md](tasks/test/TASK_TEST_RESULT.md) | 合否を機械が読める形にする **受入完了 (2026-09-17)** — ゲスト試験ランナーの 2 段目。終了コード 0/1/2 と集計行 `<名前>: PASS n/m` の制定、結果チャネルは HostDrv (決裁 R1)。`void main` 20 本と、回帰台本の偽合格 (`alloc_demo`)、`ring3_fault` / `ring3_hello` の古い `int 0x80` 規約も直す |
 | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
 

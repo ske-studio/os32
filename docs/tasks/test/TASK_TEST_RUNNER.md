@@ -1,6 +1,6 @@
 # TASK_TEST_RUNNER — ゲストで一括実行してホストで集計する (ランナー 3 段目)
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **計画 (2026-09-17)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **受入完了 (2026-09-17)** — ゲスト受入は §7 (R2/R3/R4 は未実施)
 
 基点: `feat/gui` = `d857dd7`。
 引き継ぎ: [`../agents/HANDOVER_2026-09-16.md`](../agents/HANDOVER_2026-09-16.md) §7-2 の 3 段目。
@@ -130,3 +130,57 @@ R7 が本体。**ゲストが要る部分と要らない部分を分ける** —
   既にあるので、**まず外部プログラムだけ**で成立させる。
 - 実機 (実 PC-98) での実行。`/host` が無いので別の結果チャネルが要る。
 - `make check` への統合。別のままにする。
+
+---
+
+## 7. ゲスト受入 (PM、2026-09-17)
+
+### 1 回目 — **ランナーが設計の穴を暴いた**
+
+    合計 16 件: PASS=2, MISMATCH=14
+
+14 件が「`$?`=0 なのに集計行が無い」。**ランナーは正しく動いていた** — 全件を走らせ、
+終了コードを拾い、食い違いを食い違いとして名指しした。原因は前段の書き漏らしで、
+集計行を `kprintf` (画面) に出していたのでリダイレクトを通らなかった。
+→ [`TASK_TEST_RESULT.md`](TASK_TEST_RESULT.md) §11 で直した。
+
+### 2 回目 — 食い違い 0 件
+
+    klibc_test      PASS    0   klibc_test: PASS 49/49
+    math_test       PASS    0   math_test: PASS 110/110
+    mgx_test        PASS    0   mgx_test: PASS 76/76
+    ecs_test        PASS    0   ecs_test: PASS 45/45
+    asset_test      PASS    0   asset_test: PASS 23/23
+    gui_call_test   PASS    0   gui_call_test: PASS 2/2
+    input_test      PASS    0   input_test: PASS 29/29
+    db_v50_test     PASS    0   db_v50_test: PASS 41/41
+    save_test       PASS    0   save_test: PASS 15/15
+    font_load_test  PASS    0   font_load_test: PASS 1/1
+    test2           PASS    0   test2: PASS 5/5
+    stat_t          FAIL    1   stat_t: FAIL 4/5
+    restest         PASS    0   restest: PASS 3/3
+    e2test          SKIP    2   e2test: SKIP cannot allocate the 372KB buffers
+    host_test       SKIP    2   host_test: SKIP no host agent ...
+    db_test         PASS    0   db_test: PASS 9/9
+    合計 16 件: PASS=13, SKIP=2, FAIL=1
+
+**食い違い 0 件。** 16 本すべてで終了コードと集計行が一致した。
+
+| ID | 結果 |
+|---|---|
+| R1 | **合格** (一覧の全件が走り、表になり、不合格ありで非ゼロ) |
+| R3 | **未実施** (`crash` は一覧に入れていない。分類 (d) は別方式) |
+| R5 | **合格** — 1 回目の 14 件がまさにこれ。食い違いをそれ自体として報告した |
+| R6 | ホスト試験で確認。ゲストでは `/host` を外す構成を作っていない |
+| R7 | **合格** (ホスト試験 17 場面、変異 10 本 RED) |
+| R8 | **合格** (2 回続けて回して同じ結果。合い言葉が変わっている) |
+| R2 / R4 | **未実施** — わざと壊す / 固まる試験をゲストに置いていない ([V4]) |
+
+### 残る不合格 1 件は**本物**
+
+`stat_t` が単独では 5/5、リダイレクトすると 4/5。
+**`fstat` がリダイレクトを見ておらず `isatty` と食い違う**というカーネル層の不具合。
+→ 票 [`TASK_FSTAT_REDIR.md`](TASK_FSTAT_REDIR.md) を起こした。
+
+**ランナーを作った目的が 2 回続けて果たされた。** 1 回目で約束事の穴、
+2 回目で VFS の不整合。どちらも**人が対話で叩く限り正しく見える**ものだった。
