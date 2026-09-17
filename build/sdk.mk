@@ -558,7 +558,15 @@ check:
 	@$(MAKE) -j1 check-mut
 	@python3 tools/check_tree_unchanged.py --verify mut
 
-check-par: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+# キー注入 (票 docs/tasks/tools/TASK_KEY_INJECT.md)。**np21w-src の
+# aidebug_keys.cpp を実物のまま g++ にリンクして**変換表を照合する
+# (エミュレータのソースはホストで試験できる)。np21w-src が無ければ SKIP。
+# 併せて tools/gui_gate.py の逃がし記法と、**既定で既存の送信バイト列が
+# 変わらないこと** (受入 K6) を送信の差し替えで見る。
+check-key-inject-host:
+	python3 -B tools/tests/test_key_inject.py
+
+check-par: check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
 check-mut: check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 

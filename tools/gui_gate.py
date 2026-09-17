@@ -44,17 +44,96 @@ def get(path, timeout=20):
         return r.read(), dict(r.headers)
 
 
-def key(seq=None, text=None):
+# 逃がし記法 (票 tools/TASK_KEY_INJECT.md §2-2)。展開はここ (台本の側) でやり、
+# `/api/key` の `text=` の意味は一切変えない。`text=` に `\` を載せると今までどおり
+# YEN キー (0x0d) が飛ぶ — 既存の台本と emu_agent はそのまま動く (受入 K2 / K6)。
+_ESC_CHR = {"e": 0x1b, "n": 0x0a, "r": 0x0d, "t": 0x09, "b": 0x08}
+# キー名で送るバイト。0x01〜0x1a の残りは CTRL+英字 で作る。
+_ESC_SEQ = {0x08: "BS", 0x09: "TAB", 0x0a: "RETURN", 0x0d: "RETURN",
+            0x1b: "ESC", 0x7f: "DEL"}
+_HEX = "0123456789abcdefABCDEF"
+
+
+def _byte_to_step(b):
+    """1 バイトを注入 1 手 ("text" か "seq") に落とす。
+
+    PC-98 のキーボードで作れないバイト (0x00、0x1c〜0x1f、0x80 以上) は
+    黙って捨てずに ValueError にする — 落ちたことに気付かないほうが困る ([V4])。"""
+    if b in _ESC_SEQ:
+        return ("seq", _ESC_SEQ[b])
+    if 0x01 <= b <= 0x1a:
+        return ("seq", "CTRL+" + chr(ord("A") + b - 1))   # 0x01=CTRL+A 〜 0x1a=CTRL+Z
+    if 0x20 <= b <= 0x7e:
+        return ("text", chr(b))
+    raise ValueError("0x%02x は PC-98 のキー注入では作れない "
+                     "(0x00 / 0x1c〜0x1f / 0x80 以上)。かなや漢字は FEP 経由で" % b)
+
+
+def expand_escapes(text):
+    """`\\xNN` `\\e` `\\n` `\\r` `\\t` `\\b` `\\\\` を注入の手順に展開する。
+
+    返り値は ("text", 文字列) / ("seq", コード) の列。隣り合う文字はまとめて返すので、
+    呼び手は text の塊だけを 4 文字ずつに切ればよい (**記法の途中では切れない**)。"""
+    steps = []
+    buf = []
+    i = 0
+
+    def flush():
+        if buf:
+            steps.append(("text", "".join(buf)))
+            del buf[:]
+
+    while i < len(text):
+        c = text[i]
+        if c != "\\":
+            buf.append(c)
+            i += 1
+            continue
+        if i + 1 >= len(text):
+            raise ValueError("末尾が単独の `\\`。`\\` 自身は `\\\\` と書く")
+        n = text[i + 1]
+        if n == "\\":
+            buf.append("\\")          # YEN キー = PC-98 の `\`
+            i += 2
+            continue
+        if n == "x":
+            hx = text[i + 2:i + 4]
+            if len(hx) != 2 or hx[0] not in _HEX or hx[1] not in _HEX:
+                raise ValueError("`\\x` は 16 進 2 桁: %r" % text[i:i + 4])
+            step, i = _byte_to_step(int(hx, 16)), i + 4
+        elif n in _ESC_CHR:
+            step, i = _byte_to_step(_ESC_CHR[n]), i + 2
+        else:
+            raise ValueError("未知の逃がし記法 `\\%s`" % n)
+        if step[0] == "text":
+            buf.append(step[1])
+        else:
+            flush()
+            steps.append(step)
+    flush()
+    return steps
+
+
+def key(seq=None, text=None, escapes=False):
     """文字列は 4 文字ずつ送る。raw リングは 32 エントリ (make+break で 1 文字 2 本) しか
     無く、長い text を一度に注入すると後ろが落ちる (2026-09-06: Run... のパスが
     `/usr/bin/gui_dem` で切れた)。8 文字 / 0.3 秒でも 9801 (planar) でアプリ実行中は
-    WM の drain が追いつかず 2 文字落ちた (2026-09-07: `v12_api_test.n`) ので 4 文字に。"""
+    WM の drain が追いつかず 2 文字落ちた (2026-09-07: `v12_api_test.n`) ので 4 文字に。
+
+    `escapes=True` のときだけ `\\xNN` などを解く (既定は off = 今までと完全に同じ経路)。
+    制御文字は `seq=` の和音に化けるので、**4 文字の分割が記法の途中で切れることは無い**。"""
     if text is not None:
-        i = 0
-        while i < len(text):
-            post("/api/key", {"text": text[i:i + 4]})
-            time.sleep(0.35)
-            i += 4
+        steps = expand_escapes(text) if escapes else [("text", text)]
+        for kind, payload in steps:
+            if kind == "seq":
+                post("/api/key", {"seq": payload})
+                time.sleep(0.35)
+                continue
+            i = 0
+            while i < len(payload):
+                post("/api/key", {"text": payload[i:i + 4]})
+                time.sleep(0.35)
+                i += 4
     if seq is not None:
         post("/api/key", {"seq": seq})   # urlencode が + を %2B にする
 
