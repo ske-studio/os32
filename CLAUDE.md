@@ -156,6 +156,8 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   要求長ちょうどしか書かないと仮定して小さな static バッファへ読まない。 → §4-32
 - `hsync` はサイズか日時が違うものだけ内容比較する。同サイズ・同日時で中身が違う差し替えだけ見逃す (`--verify` で全件比較)。置き換えは予約名 `.hs~<名前>` へ書いて検証してから `rename` する — **公開の前**に落ちれば旧内容が残り、**公開の後**に落ちれば新内容が現れて `replace_partial` になる (成功に数えない)。KAPI v53 未満のカーネルでは既定で断る (`--unsafe-overwrite` のときだけ直接上書き)。 → §4-36
 - `hsync` は HostDrv の内容で NHD を上書きする。NHD 配備の後は**先に `make deploy`**。 → §4-33
+- `make check` を途中で止めると**変異試験が当てた変更がソースに残る**。打ち切ったら
+  コミット前に必ず `git status` を見る (`git add -A` が壊れたコードを拾う)。全 55 本で 15 分以上。 → §4-40
 - Device windows: decide from the physical map (`pgalloc_range_has_ram`), never from the RAM ceiling (`sys_get_mem_kb`). → §4-34
 - VFS errors are `OS32_ERR_*`, translated at the FS boundary; `vfs_open` refuses directories, `vfs_chdir` refuses non-dirs. → [`docs/06_filesystem.md`](docs/06_filesystem.md) §6-1
 - ext2 はメタデータの I/O エラーを 1 回踏むと**そのマウントの間は書き込みを全部断る** (`OS32_ERR_ROFS` = -15)。読み取りは通り、再起動で警告付きで戻る。書き込みが全部 -15 になったらホストの `e2fsck` へ。 → §4-35

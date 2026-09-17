@@ -760,6 +760,29 @@ curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイ�
 
 *OS32 Debug Policy — Created: 2026-04-18*
 
+### 4-40. `make check` を途中で止めると**変異が当たったまま**ソースに残る (2026-09-17)
+
+- **現象**: `make check` を時間切れとメモリ不足で 2 度打ち切った後、次の実行が
+  `check-sh-status-host` で `MUTATE exit_arg_unchecked SKIP (目印が 0 か所)` を出して
+  非ゼロ終了した。他の変異はすべて RED、本体は `ALL PASS` なのにターゲットだけ落ちる。
+- **原因**: 変異試験は**実物のソースを書き換えて戻す**作りなので、書き換えと復元の
+  あいだで殺されると**変異が当たったまま残る**。`git status` に
+  `M userland/shell/main.c` が出ていた。残っていたのは `exit` の引数検査を
+  `break` に潰す変異で、`exit abc` を黙って受ける状態。次の実行はその変異の目印を
+  探して見つけられず、SKIP になって落ちた (**落ちたのは正しい** — 目印が無いのに
+  緑にすると変異が試験されていないことに気づけない)。
+- **本当に危ないのはここ**: 打ち切った直後に `git add -A` すると
+  **壊したコードがそのままコミットに入る**。今回は commit した回の `make check` が
+  別の地点 (`check-host-lib-host`) で死んでおり、`check-sh-status-host` は
+  完走して復元していたので無事だった (`git show <sha>:userland/shell/main.c` で確認)。
+  **運が良かっただけ。**
+- **対策**: `make check` を打ち切ったら、コミットの前に必ず `git status` と
+  `git diff --stat` を見る。追跡ファイルに身に覚えのない差分があれば
+  `git checkout -- <path>` で戻してから回し直す。
+  `git add -A` の前に状態を見るのはこれが理由。
+- **所要の目安**: `make check` は 55 ターゲットで **15 分以上**かかる。900 秒では足りない。
+  待ち時間を短く切らない ([V3] と同じ考え方をホスト側の試験にも当てる)。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
