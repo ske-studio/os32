@@ -446,13 +446,33 @@ loop {
 - ウィジェットは**共有ライブラリ内 (アプリの空間)** に置き、WM はウィンドウしか知らない。
   描画は in-process、syscall はゼロ。
 - `WidgetId` (generation 付き)。種別: v1 は既存の button / label / checkbox / textbox /
-  listbox + コンテナ `row` / `column` (U7)。
+  listbox + コンテナ `row` / `column` (U7)。**v1.4 で `textarea` を末尾に追記** (下記)。
 - **プロパティ変更 → 自分の矩形を invalidate**。全面再描画はしない。
 - ウィジェットのイベント (`Widget{kind: CLICK / TEXT_CHANGED / TOGGLED / SELECT / FOCUS}`) は
   `Pointer` / `Button` / `Key` からライブラリが合成し、同じリングの流儀でアプリに渡す
   (アプリから見て WM 由来か合成かは区別しない)。
 - ハンドラは種別ごと (`on_click(widget, fn)`)。巨大 switch は書かせない。
 - 固定配列: ウィジェット 64 / ウィンドウ合計、リスト項目プール 128 (既存値)。
+
+#### U6a. `textarea` — 複数行の編集面 (末尾追記、2026-09-17 / 票 TASK_EDIT_GUI 決裁 A1)
+
+`textbox` は 1 行のまま**触らない** (既存の利用者 = filer ほかに影響を出さないため)。
+複数行は**新しい種別**を末尾に足した。ジャンプ表も 111..=117 への末尾追記だけで、
+`GUI_PROTO_VERSION` は据え置き (古いアプリは新しい表でもそのまま動き、新しいアプリが
+古い表に当たれば `nfunc` の照合で `bind()` が断る)。
+
+- **部品は本文を持たない。** アプリが本文を持ち、`textarea_clear` +
+  `textarea_add_row` で**いま見えている行だけ**を写す。折り返し・縦スクロール・
+  選択範囲はアプリの領分。だから 1 画面に入らないファイルでも部品の側の
+  使用量は一定 (`GUI_MAX_TEXTAREA_ROWS` × `GUI_TEXTAREA_ROW_CAP`)。
+- 折り返しの幅と入る行数はアプリが `textarea_columns` / `textarea_visible_rows`
+  で**部品から聞く** ([C4]: 桁を決め打ちしない)。全角は 2 桁。
+- 確定文字列 (`Text`) は部品が**溜めるだけ**で、アプリが
+  `textarea_take_input` で引き取る。`TEXT_CHANGED` がその合図。
+  本文を持たない部品が `Text` を受ける唯一の筋道 (U2a の分離を壊さない)。
+- 桁の数え方と切れ目は `libos32gui::textcore` の 1 本に寄せ、`textbox` の
+  バイト操作もそこへ移した (見え方と振る舞いは変えていない。
+  記録: [`tools/tests/edit_gui_tdd.md`](../../../tools/tests/edit_gui_tdd.md))。
 
 ### U7. レイアウト (箱 1 種類)
 
@@ -553,6 +573,13 @@ UTF-8 入力、KCG の 8x16 / 16x16 セル、幅は半角セル数 × 8。プロ
 別配送、FEP は WM 持ち) をユーザ承認で確定。数値 (P 性能規約) も凍結。
 
 ## 改訂の記録
+
+2026-09-17 (票 TASK_EDIT_GUI 決裁 A1。**末尾追記のみ**で、既存の番号は動かしていない):
+1. U6a — ウィジェット種別に `textarea` (`WK_TEXTAREA` = 8) を追記。`WK_TEXTBOX` (4) は不変。
+2. ジャンプ表 111..=117 (`os32gui_w_textarea*`) を追記、`nfunc` 111 → 118。
+   `GUI_PROTO_VERSION` は据え置き (版の照合ではなく `nfunc` の照合で守られる)。
+3. 共有定数に `GUI_MAX_TEXTAREA_ROWS` / `GUI_TEXTAREA_ROW_CAP` /
+   `GUI_TEXTAREA_INPUT_CAP` を追記 (C / Rust 両方)。
 
 2026-09-05 (設計レビュー 7 件をユーザの指示で反映。凍結後の変更):
 1. U2 — `Text` が 16B に収まらなかった。全種別を共通ヘッダ 6B + ペイロード 10B に確定、

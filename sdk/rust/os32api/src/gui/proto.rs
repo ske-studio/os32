@@ -156,6 +156,15 @@ pub const GUI_MAX_CLIP_DEPTH: usize = 8;
 pub const GUI_MAX_DAMAGE: usize = 8;
 pub const GUI_MAX_STRING: usize = 256;
 
+/* 複数行編集ウィジェット WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1)。
+ * **部品は本文を持たない** — アプリが本文を持ち、見えている行だけを写す。 */
+/// 見える行のプール (全 textarea で共有)。
+pub const GUI_MAX_TEXTAREA_ROWS: usize = 32;
+/// 見える 1 行のバイト数 (80 桁 = 全角 40 字 * 3B + 余白)。
+pub const GUI_TEXTAREA_ROW_CAP: usize = 192;
+/// 溜めておける確定文字列 (`GuiEvtText.utf8` と同じ)。
+pub const GUI_TEXTAREA_INPUT_CAP: usize = 8;
+
 /* ======================================================================== */
 /*  ヘッダフラグ (GuiSlotHeader.flags)                                        */
 /* ======================================================================== */

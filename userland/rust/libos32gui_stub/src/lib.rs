@@ -28,6 +28,14 @@ pub mod timer;
 pub mod widget;
 pub mod window;
 
+/* ---- 桁と折り返し (票 TASK_EDIT_GUI §2 決裁 A1) ----
+ * ジャンプ表は通さない。**純粋な計算**なのでアプリに直接載せる。
+ * 実体は共有ライブラリ側の 1 ファイルで、`#[path]` で同じソースを読む —
+ * 写しを作ると「3 バイトで 2 桁」の数え方がずれ、日本語で必ず露見する
+ * (`docs/POLICY_DEBUG.md` §4-27)。 */
+#[path = "../../libos32gui/src/textcore.rs"]
+pub mod textcore;
+
 /* ---- v1.2 デスクトップ client API (票 C4、契約 V12-C / V12-I / V12-S) ---- */
 pub mod icon;
 pub mod modal;

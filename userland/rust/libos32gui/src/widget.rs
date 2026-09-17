@@ -12,15 +12,17 @@
 
 use crate::client::{self, utf8_seq_len, GuiErr, GuiResult};
 use crate::layout::SizeSpec;
+use crate::textcore;
 use crate::uistate::{
-    is_container, is_focusable, s, ListItem, GUI_NONE, ITEM_TEXT_CAP, TEXT_CAP, WFL_CHECKED,
-    WFL_DISABLED, WFL_HIDDEN, WFL_PRESSED, WK_BUTTON, WK_CHECKBOX, WK_COLUMN, WK_LABEL,
-    WK_LISTBOX, WK_ROW, WK_TEXTBOX,
+    is_container, is_focusable, s, ListItem, TextRow, GUI_NONE, ITEM_TEXT_CAP, TEXT_CAP,
+    WFL_CHECKED, WFL_DISABLED, WFL_HIDDEN, WFL_PRESSED, WK_BUTTON, WK_CHECKBOX, WK_COLUMN,
+    WK_LABEL, WK_LISTBOX, WK_ROW, WK_TEXTAREA, WK_TEXTBOX,
 };
 use os32api::gui::proto::{
     GUI_COLOR_DISABLED, GUI_COLOR_EDIT_BG, GUI_COLOR_FACE, GUI_COLOR_HIGHLIGHT, GUI_COLOR_LIGHT,
     GUI_COLOR_SEL_BG, GUI_COLOR_SEL_TEXT, GUI_COLOR_SHADOW, GUI_COLOR_TEXT, GUI_COLOR_WINDOW,
-    GUI_MAX_LIST_ITEMS, GUI_MAX_WIDGETS, GUI_STYLE_DOTTED,
+    GUI_MAX_LIST_ITEMS, GUI_MAX_TEXTAREA_ROWS, GUI_MAX_WIDGETS, GUI_STYLE_DOTTED,
+    GUI_TEXTAREA_INPUT_CAP, GUI_TEXTAREA_ROW_CAP,
 };
 use os32api::gui::types::{Rect, Style, SurfaceId};
 
@@ -47,6 +49,12 @@ pub const LIST_ROW_H: i16 = 18;
 const CHECK_BOX: i16 = 14;
 /// KCG セルの高さ (px、scale1)。
 const CELL_H: i16 = 16;
+/// KCG 半角 1 桁の幅 (px、scale1)。`draw.rs` の `ANK_W` と同じ。
+const ANK_W: i16 = 8;
+/// textarea の 1 行の高さ (px)。行間は入れない (エディタなので密に置く)。
+pub const TEXTAREA_ROW_H: i16 = CELL_H;
+/// 編集面の内側余白 (左右) — textbox と textarea で共通。
+const EDIT_PAD_X: i16 = 3;
 
 /* ================================================================ */
 /*  合成イベント (契約 U6 の `Widget{kind}`)                          */
@@ -192,6 +200,16 @@ pub fn textbox(text: &[u8]) -> GuiResult<WidgetId> {
     let i = resolve(id).unwrap();
     s().widgets[i].min_h = 20;
     s().widgets[i].caret = s().widgets[i].text_len as i16;
+    Ok(id)
+}
+
+/// 複数行の編集面 (決裁 A1: `WK_TEXTBOX` は 1 行のまま。これは**新しい種別**)。
+///
+/// **本文は持たない。** アプリが本文を持ち、[`textarea_set_rows`] で
+/// いま見えている行だけを写す。だから 1 画面に入らないファイルでも
+/// 部品の側の使用量は一定で、破綻しない (票 §2)。
+pub fn textarea() -> GuiResult<WidgetId> {
+    let id = make(WK_TEXTAREA, b"")?;
     Ok(id)
 }
 
@@ -524,6 +542,7 @@ fn draw_node(surface: SurfaceId, idx: usize, focus: u16, win_focused: bool, clip
         WK_BUTTON => draw_button(surface, idx, focused),
         WK_CHECKBOX => draw_checkbox(surface, idx, focused),
         WK_TEXTBOX => draw_textbox(surface, idx, focused),
+        WK_TEXTAREA => draw_textarea(surface, idx, focused),
         WK_LISTBOX => draw_listbox(surface, idx, focused),
         _ => {}
     }
@@ -1016,6 +1035,15 @@ pub fn on_text(win: usize, utf8: &[u8]) -> WidgetOut {
         return out;
     }
     let idx = f as usize - 1;
+    if s().widgets[idx].kind == WK_TEXTAREA {
+        /* textarea は**本文を持たない**ので自分では入れない。確定文字列を
+         * 溜めて TEXT_CHANGED を出し、アプリが `textarea_take_input` で
+         * 引き取って自分の本文へ入れる (票 §2 の「部品に持たせない」)。 */
+        if ta_stash_input(idx, utf8) {
+            out.push(WEV_TEXT_CHANGED, id_of(idx), 0);
+        }
+        return out;
+    }
     if s().widgets[idx].kind != WK_TEXTBOX {
         return out;
     }
@@ -1054,7 +1082,8 @@ fn set_focus_slot(win: usize, next: u16, out: &mut WidgetOut) {
         let idx = next as usize - 1;
         invalidate(idx);
         out.push(WEV_FOCUS, id_of(idx), 0);
-        if s().widgets[idx].kind == WK_TEXTBOX {
+        let k = s().widgets[idx].kind;
+        if k == WK_TEXTBOX || k == WK_TEXTAREA {
             send_text_cursor(idx);
         }
     }
@@ -1088,13 +1117,18 @@ pub(crate) fn report_text_cursor(win: usize) {
     let f = s().windows[win].focus;
     if f != GUI_NONE {
         let idx = f as usize - 1;
-        if s().widgets[idx].used && s().widgets[idx].kind == WK_TEXTBOX {
+        let k = s().widgets[idx].kind;
+        if s().widgets[idx].used && (k == WK_TEXTBOX || k == WK_TEXTAREA) {
             send_text_cursor(idx);
         }
     }
 }
 
 fn send_text_cursor(idx: usize) {
+    if s().widgets[idx].kind == WK_TEXTAREA {
+        ta_send_text_cursor(idx);
+        return;
+    }
     let (win_id, r, caret) = {
         let w = &s().widgets[idx];
         (w.window, w.rect, w.caret as usize)
@@ -1151,72 +1185,42 @@ fn key_textbox(idx: usize, scan: u8, out: &mut WidgetOut) {
     }
 }
 
+/* 境界とバイト移動の実体は `textcore` (決裁 A1 の「共通の下請け」)。
+ * ここを直に書き直すと textarea・エディタ本文と桁の数え方がずれるので、
+ * **必ず textcore を通す** (受入 E10 の変異はここで RED になる)。 */
+
 fn prev_boundary(idx: usize, caret: i16) -> i16 {
-    let mut p = caret as usize;
-    let t = &s().widgets[idx].text;
-    while p > 0 {
-        p -= 1;
-        if (t[p] & 0xC0) != 0x80 {
-            break;
-        }
-    }
-    p as i16
+    let n = s().widgets[idx].text_len as usize;
+    textcore::prev_boundary(&s().widgets[idx].text[..n], caret as usize) as i16
 }
 
 fn next_boundary(idx: usize, caret: i16) -> i16 {
     let n = s().widgets[idx].text_len as usize;
-    let t = &s().widgets[idx].text;
-    let p = caret as usize;
-    if p >= n {
-        return n as i16;
-    }
-    let step = utf8_seq_len(t[p]);
-    let q = p + step;
-    if q > n {
-        n as i16
-    } else {
-        q as i16
-    }
+    textcore::next_boundary(&s().widgets[idx].text[..n], caret as usize) as i16
 }
 
 fn tb_insert(idx: usize, seq: &[u8]) -> bool {
     let n = s().widgets[idx].text_len as usize;
-    if n + seq.len() > TEXT_CAP {
-        return false;
-    }
     let mut c = s().widgets[idx].caret as usize;
     if c > n {
         c = n;
     }
-    let k = seq.len();
-    let mut i = n;
-    while i > c {
-        s().widgets[idx].text[i + k - 1] = s().widgets[idx].text[i - 1];
-        i -= 1;
+    let buf = &mut s().widgets[idx].text[..TEXT_CAP];
+    match textcore::insert(buf, n, c, seq) {
+        Some(newlen) => {
+            s().widgets[idx].text_len = newlen as u8;
+            s().widgets[idx].caret = (c + seq.len()) as i16;
+            true
+        }
+        None => false,
     }
-    let mut j = 0;
-    while j < k {
-        s().widgets[idx].text[c + j] = seq[j];
-        j += 1;
-    }
-    s().widgets[idx].text_len = (n + k) as u8;
-    s().widgets[idx].caret = (c + k) as i16;
-    true
 }
 
 fn tb_remove(idx: usize, at: usize, len: usize) {
     let n = s().widgets[idx].text_len as usize;
-    if at >= n || len == 0 {
-        return;
-    }
-    let end = if at + len > n { n } else { at + len };
-    let k = end - at;
-    let mut i = at;
-    while i + k < n {
-        s().widgets[idx].text[i] = s().widgets[idx].text[i + k];
-        i += 1;
-    }
-    s().widgets[idx].text_len = (n - k) as u8;
+    let buf = &mut s().widgets[idx].text[..TEXT_CAP];
+    let newlen = textcore::remove(buf, n, at, len);
+    s().widgets[idx].text_len = newlen as u8;
 }
 
 fn tb_backspace(idx: usize) -> bool {
@@ -1264,6 +1268,259 @@ fn caret_from_x(idx: usize, rel: i32) -> i16 {
         p = q;
     }
     n as i16
+}
+
+/* ================================================================ */
+/*  WK_TEXTAREA — 複数行の編集面 (票 TASK_EDIT_GUI §2、決裁 A1)        */
+/*                                                                  */
+/*  **本文はここに無い。** アプリ (エディタ) が本文を持ち、いま見えて  */
+/*  いる行だけを `textarea_clear` + `textarea_add_row` で写す。        */
+/*  部品がするのは                                                    */
+/*    - 写された行を描く                                              */
+/*    - キャレットを描き、FEP へその位置を知らせる                     */
+/*    - 確定文字列を溜めてアプリへ渡す                                 */
+/*  の 3 つだけ。折り返し・縦スクロール・選択範囲はアプリの領分で、     */
+/*  そう切ったから 1 画面に入らないファイルでも部品の側は一定になる。   */
+/* ================================================================ */
+
+/// `widget_idx` が持つ相対 `index` 行のスロット。
+fn ta_row_slot(widget_idx: usize, index: i16) -> Option<usize> {
+    let st = s();
+    let mut k = 0;
+    while k < GUI_MAX_TEXTAREA_ROWS {
+        if st.rows[k].used
+            && st.rows[k].owner == (widget_idx as u16) + 1
+            && st.rows[k].index == index
+        {
+            return Some(k);
+        }
+        k += 1;
+    }
+    None
+}
+
+/// 矩形に入る行数 (`textarea_visible_rows` の実体)。
+fn ta_capacity(idx: usize) -> i16 {
+    let h = s().widgets[idx].rect.h;
+    let r = (h - 2) / TEXTAREA_ROW_H;
+    if r < 1 {
+        1
+    } else {
+        r
+    }
+}
+
+/// 矩形に入る半角の桁数 (`textarea_columns` の実体)。
+fn ta_cols(idx: usize) -> i16 {
+    let w = s().widgets[idx].rect.w;
+    let c = (w - 2 - EDIT_PAD_X * 2) / ANK_W;
+    if c < 1 {
+        1
+    } else {
+        c
+    }
+}
+
+/// 写してある行を全部捨てる。
+pub fn textarea_clear(id: WidgetId) -> GuiResult<()> {
+    let i = resolve(id).ok_or(GuiErr::STALE)?;
+    if s().widgets[i].kind != WK_TEXTAREA {
+        return Err(GuiErr::INVAL);
+    }
+    let mut k = 0;
+    while k < GUI_MAX_TEXTAREA_ROWS {
+        if s().rows[k].used && s().rows[k].owner == (i as u16) + 1 {
+            s().rows[k] = TextRow::EMPTY;
+        }
+        k += 1;
+    }
+    s().widgets[i].ta_rows = 0;
+    invalidate(i);
+    Ok(())
+}
+
+/// 見える行を 1 本足す (上から順に)。戻りはその相対行番号。
+///
+/// 入り切らない行は `GuiErr::FULL`。**黙って切り詰めない** — 呼び手が
+/// [`textarea_visible_rows`] を見て渡す本数を決める。
+pub fn textarea_add_row(id: WidgetId, text: &[u8]) -> GuiResult<i32> {
+    let i = resolve(id).ok_or(GuiErr::STALE)?;
+    if s().widgets[i].kind != WK_TEXTAREA {
+        return Err(GuiErr::INVAL);
+    }
+    let index = s().widgets[i].ta_rows;
+    let mut k = 0;
+    while k < GUI_MAX_TEXTAREA_ROWS {
+        if !s().rows[k].used {
+            break;
+        }
+        k += 1;
+    }
+    if k >= GUI_MAX_TEXTAREA_ROWS {
+        return Err(GuiErr::FULL);
+    }
+    /* 切るなら UTF-8 の境界で (`docs/POLICY_DEBUG.md` §4-27)。 */
+    let n = crate::utf8core::utf8_truncate(text, GUI_TEXTAREA_ROW_CAP);
+    s().rows[k] = TextRow::EMPTY;
+    s().rows[k].used = true;
+    s().rows[k].owner = (i as u16) + 1;
+    s().rows[k].index = index;
+    s().rows[k].len = n as u16;
+    let mut j = 0;
+    while j < n {
+        s().rows[k].text[j] = text[j];
+        j += 1;
+    }
+    s().widgets[i].ta_rows = index + 1;
+    invalidate(i);
+    Ok(index as i32)
+}
+
+/// キャレットを置く (`row` は見える範囲の先頭からの相対、`col` はその行の
+/// 先頭からの**バイト数**)。`row < 0` でキャレットを消す。
+pub fn textarea_set_caret(id: WidgetId, row: i32, col: i32) -> GuiResult<()> {
+    let i = resolve(id).ok_or(GuiErr::STALE)?;
+    if s().widgets[i].kind != WK_TEXTAREA {
+        return Err(GuiErr::INVAL);
+    }
+    s().widgets[i].ta_caret_row = row as i16;
+    s().widgets[i].ta_caret_col = if col < 0 { 0 } else { col as i16 };
+    invalidate(i);
+    send_text_cursor(i);
+    Ok(())
+}
+
+/// 矩形に入る行数。アプリはこれを見て「見える範囲」を切り出す ([C4])。
+pub fn textarea_visible_rows(id: WidgetId) -> i32 {
+    match resolve(id) {
+        Some(i) if s().widgets[i].kind == WK_TEXTAREA => ta_capacity(i) as i32,
+        _ => 0,
+    }
+}
+
+/// 矩形に入る半角の桁数。アプリはこれを折り返しの幅に使う ([C4])。
+/// 全角は 2 桁を占めるので、この値は**桁**であって文字数ではない。
+pub fn textarea_columns(id: WidgetId) -> i32 {
+    match resolve(id) {
+        Some(i) if s().widgets[i].kind == WK_TEXTAREA => ta_cols(i) as i32,
+        _ => 0,
+    }
+}
+
+/// 溜まった確定文字列を引き取る (引き取ったら空になる)。戻りは写したバイト数。
+///
+/// `out` が短ければ**何も渡さず 0**。半端に渡して UTF-8 を割るより、
+/// 呼び手に十分な `out` を用意させるほうが安全 (上限は共有定数)。
+pub fn textarea_take_input(id: WidgetId, out: &mut [u8]) -> usize {
+    let i = match resolve(id) {
+        Some(i) if s().widgets[i].kind == WK_TEXTAREA => i,
+        _ => return 0,
+    };
+    let n = s().widgets[i].ta_input_len as usize;
+    if n == 0 || out.len() < n {
+        return 0;
+    }
+    let mut j = 0;
+    while j < n {
+        out[j] = s().widgets[i].ta_input[j];
+        j += 1;
+    }
+    s().widgets[i].ta_input_len = 0;
+    n
+}
+
+/// 確定文字列を溜める。溢れる分は捨てるが、**符号単位の途中では切らない**。
+fn ta_stash_input(idx: usize, utf8: &[u8]) -> bool {
+    let mut len = s().widgets[idx].ta_input_len as usize;
+    let mut i = 0usize;
+    let mut any = false;
+    while i < utf8.len() {
+        if utf8[i] == 0 {
+            break;
+        }
+        let n = utf8_seq_len(utf8[i]);
+        if i + n > utf8.len() || len + n > GUI_TEXTAREA_INPUT_CAP {
+            break;
+        }
+        let mut j = 0;
+        while j < n {
+            s().widgets[idx].ta_input[len + j] = utf8[i + j];
+            j += 1;
+        }
+        len += n;
+        i += n;
+        any = true;
+    }
+    s().widgets[idx].ta_input_len = len as u8;
+    any
+}
+
+/// キャレット位置を WM へ (FEP の `[あ]` と候補窓の原点。契約 U2a)。
+fn ta_send_text_cursor(idx: usize) {
+    let (win_id, r, row, col) = {
+        let w = &s().widgets[idx];
+        (w.window, w.rect, w.ta_caret_row, w.ta_caret_col as usize)
+    };
+    if win_id == 0 || row < 0 {
+        return;
+    }
+    let cw = match ta_row_slot(idx, row) {
+        Some(k) => {
+            let n = s().rows[k].len as usize;
+            let c = if col > n { n } else { col };
+            crate::draw::measure_text(&s().rows[k].text[..c]).0
+        }
+        None => 0,
+    };
+    let x = r.x as i32 + EDIT_PAD_X as i32 + cw;
+    let y = r.y as i32 + 1 + row as i32 * TEXTAREA_ROW_H as i32;
+    let _ = client::win_set_text_cursor(win_id, x as i16, y as i16, true);
+}
+
+fn draw_textarea(surface: SurfaceId, idx: usize, focused: bool) {
+    let (r, nrows, crow, ccol) = {
+        let w = &s().widgets[idx];
+        (w.rect, w.ta_rows, w.ta_caret_row, w.ta_caret_col as usize)
+    };
+    crate::draw::fill_rect(surface, r, Style::new(GUI_COLOR_TEXT, GUI_COLOR_EDIT_BG));
+    bevel(surface, r, true);
+    let cap = ta_capacity(idx);
+    let vis = if nrows < cap { nrows } else { cap };
+    let mut row = 0i16;
+    while row < vis {
+        if let Some(k) = ta_row_slot(idx, row) {
+            let n = s().rows[k].len as usize;
+            let txt = s().rows[k].text;
+            crate::draw::text(
+                surface,
+                (r.x + EDIT_PAD_X) as i32,
+                (r.y + 1 + row * TEXTAREA_ROW_H) as i32,
+                &txt[..n],
+                Style::new(fg_of(idx), GUI_COLOR_EDIT_BG),
+            );
+        }
+        row += 1;
+    }
+    if focused && crow >= 0 && crow < vis {
+        let cw = match ta_row_slot(idx, crow) {
+            Some(k) => {
+                let n = s().rows[k].len as usize;
+                let c = if ccol > n { n } else { ccol };
+                crate::draw::measure_text(&s().rows[k].text[..c]).0
+            }
+            None => 0,
+        };
+        crate::draw::vline(
+            surface,
+            (r.x + EDIT_PAD_X) as i32 + cw,
+            (r.y + 1 + crow * TEXTAREA_ROW_H) as i32,
+            TEXTAREA_ROW_H as i32,
+            Style::pen(GUI_COLOR_HIGHLIGHT),
+        );
+    }
+    if focused {
+        focus_ring(surface, r);
+    }
 }
 
 /* ---- listbox のキー ---- */

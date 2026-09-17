@@ -560,9 +560,22 @@ check:
 
 check-par: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
-check-mut: check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
+check-mut: check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
+
+# エディタ GUI 版の本文と libos32gui の桁・折り返し (票 TASK_EDIT_GUI 受入 E8 / E10)。
+# 実物の userland/rust/edit_gui/src/doc.rs と
+# userland/rust/libos32gui/src/textcore.rs を `#[path]` でそのまま取り込み、
+# 保存の経路だけ KAPI を差し替えて回す (ゲストもエミュレータも要らない)。
+# 見るのは 3 つ: (a) 桁で折り返すときに UTF-8 の途中で切らない (§4-27)、
+# (b) 「見える範囲」が行を飛ばさない / 重ねない、(c) 書けなかったのに成功と
+# 答えない。加えて **WK_TEXTBOX の振る舞いが変わっていない** ことを、
+# textbox が通っている共通の下請け (textcore) の変異が RED になることで見る
+# (受入 E10。textbox が下請けを通っていること自体は静的に突き合わせる)。
+# --mutate は否定側。記録は tools/tests/edit_gui_tdd.md。
+check-edit-doc-host:
+	python3 -B tools/tests/test_edit_doc.py --mutate
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
+.PHONY: check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check

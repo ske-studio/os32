@@ -537,6 +537,9 @@ $(eval $(call DEFINE_RUST_PROGRAM,t5a_display,userland/tests,lib/utf8_prog.o))
 programs: t5a_display_rust
 # v1.2 File Manager (C5): Win3.1 風 2 ペイン、SESSION_REQUEST で起動依頼。stub のみ
 $(eval $(call DEFINE_RUST_PROGRAM,filer,userland/system,))
+# 票 TASK_EDIT_GUI: テキストエディタの GUI 版 (v1.4 の最後の受入試験)。
+# CUI 版 apps/edit とは別物なので名前を分ける (/usr/bin/edit_gui.bin)。
+$(eval $(call DEFINE_RUST_PROGRAM,edit_gui,userland/system,))
 $(eval $(call DEFINE_RUST_PROGRAM,gdi_test,userland/tests,$$(GFX_OBJ)))
 $(eval $(call DEFINE_RUST_PROGRAM,lease_test,userland/tests,))
 $(eval $(call DEFINE_RUST_PROGRAM,gui_bench,userland/tests,))
@@ -589,7 +592,7 @@ FORCE:
 # プログラムを追加したらこの一覧にも必ず足すこと。
 programs_base: $(CRT0_OBJ) $(BASE_PROGRAMS_BIN)
 
-programs: libs $(DBG_OBJ) programs_base sh bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test kstr_bench hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust gshell shlib
+programs: libs $(DBG_OBJ) programs_base sh bench cdinst lz4_cmd bench_scale2x faultprobe ring3_hello ring3_fault ring3_guard hello_r3 faultprobe_r3 gfx200_test gfx_demo200 blit_test blit_test2 demo_tile tile_bench rotate_test db_test dbq e2test sqlite_standalone math_test input_test kbd_echo asset_test asset_demo ecs_test save_test mgx_test kstr_bench hello_gfx_rust alloc_demo_rust math_test_rs_rust font_test_rust gui_demo_rust gdi_test_rust lease_test_rust gui_bench_rust v12_api_test_rust filer_rust edit_gui_rust gshell shlib
 
 # === KAPI ヘッダ依存 ===
 userland/%.o: $(SDK_KAPI_HDR)

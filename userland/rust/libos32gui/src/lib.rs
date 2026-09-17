@@ -59,6 +59,12 @@ pub mod cfgro;
  * 共用し、host_tests が `#[path]` で直に取り込む。 */
 pub mod utf8core;
 
+/* ---- 桁と折り返し (票 TASK_EDIT_GUI §2 決裁 A1) ----
+ * 「3 バイトで 2 桁」を扱う下請け。`WK_TEXTBOX` / `WK_TEXTAREA` / エディタ本文が
+ * **同じ実体**を使う (libos32gui_stub が `#[path]` でこのファイルを取り込む)。
+ * utf8core と同じく core だけに依存し、ホスト TDD が直に取り込める。 */
+pub mod textcore;
+
 /* ---- v1.4 Host Services (票 N4 §1) ----
  * 表 105..=110。libos32host.a を呼ぶ薄い extern "C" ラッパー。`kapi` は
  * cfgro.rs の static を共用する (ここで再定義しない)。 */
