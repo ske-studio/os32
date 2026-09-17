@@ -110,6 +110,11 @@ const char *vfs_cwd_user(void);
  * kselftest_run_post_exec() から呼ぶ。0 = 全部通った。 */
 u32 exec_tramp_user_selftest(void);
 
+/* KAPI 踏み台ページ (RO+USER、全 PD 共有) の番地。exec_init の前は 0。
+ * ページ表と memmap.h の照合 (paging_memmap_selftest) が期待値に使う —
+ * ここは .bss の中なのでビルドごとに動き、定数では書けない。 */
+u32 exec_tramp_page_addr(void);
+
 /* ======================================================================== */
 /*  ユーザポインタの検証 (票 S0-K §1a、KAPI v50)                             */
 /*                                                                          */

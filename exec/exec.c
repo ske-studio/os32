@@ -312,6 +312,11 @@ const char *vfs_cwd_user(void)
 /*  まだ無い。この項だけ kselftest_run_post_exec() から呼ぶ。                */
 /*  ビット 0..n が落ちた項目 (0 = 全部通った)。                              */
 /* ======================================================================== */
+u32 exec_tramp_page_addr(void)
+{
+    return ring3_tramp_page;
+}
+
 u32 exec_tramp_user_selftest(void)
 {
     u32 bad = 0;

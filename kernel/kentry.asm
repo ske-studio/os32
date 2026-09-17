@@ -11,6 +11,7 @@ extern __bss_start
 extern __bss_end
 extern __sqlite_data_end
 extern __sqlite_end
+extern MEM_KSTACK_TOP
 
 section .text
 
@@ -55,7 +56,7 @@ kentry:
         ;;
         ;; ここより上の BSS クリアは rep stosd だけで CALL を挟まないので、
         ;; 切り替え地点として安全。ページングはまだ有効でなく、
-        ;; 0x1FC000 は実 RAM (カーネル帯域内) なのでそのまま使える。
+        ;; 0x2FC000 は実 RAM (SQLite 帯域の末尾) なのでそのまま使える。
         ;;
         ;; **ローダーが積んだ引数を載せ替えること。**
         ;; kernel_main(u32 mem_kb, u32 boot_drive) は __cdecl で、
@@ -67,14 +68,18 @@ kentry:
         ;; ゴミになる。**症状はブート失敗ではなく `mem` の表示が
         ;; 3229946883 KB になるだけ**なので気づきにくい (実際これで一度踏んだ)。
         ;;
-        ;; **include/memmap.h の MEM_KSTACK_TOP と一致させること。**
+        ;; ESP は **build/os32.ld の絶対シンボル MEM_KSTACK_TOP** から引く。
+        ;; ASM から C のマクロは引けないので、番地の正典 include/memmap.h の
+        ;; 値をリンカスクリプトが写して持ち、ここは extern で参照する。
+        ;; 写しの一致は `python3 tools/gen_memmap.py --check` が照合する
+        ;; ([C4]。2026-09-17 まではここに 001FFFFCh と直書きしていた)。
         ;; EBP は 0 にしておく — 例外時のスタックトレースが
         ;; ここで止まれるようにするため。
         ;; ============================================================
         mov     eax, [esp + 4]          ;; mem_kb
         mov     edx, [esp + 8]          ;; boot_drive
 
-        mov     esp, 001FFFFCh          ;; = MEM_KSTACK_TOP
+        mov     esp, MEM_KSTACK_TOP     ;; build/os32.ld の絶対シンボル
         push    edx                     ;; 第2引数: boot_drive
         push    eax                     ;; 第1引数: mem_kb
         push    dword 0                 ;; ダミーリターンアドレス

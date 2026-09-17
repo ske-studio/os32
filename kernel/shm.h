@@ -15,8 +15,8 @@
 
 /* ブロック設定 */
 #define SHM_BLOCK_SIZE   (16 * 1024)   /* 16KB */
-#define SHM_BLOCK_COUNT  16            /* 16ブロック */
-#define SHM_TOTAL_SIZE   (SHM_BLOCK_SIZE * SHM_BLOCK_COUNT) /* 256KB */
+#define SHM_BLOCK_COUNT  14            /* 14ブロック (2026-09-17 決裁 D1: 16 → 14) */
+#define SHM_TOTAL_SIZE   (SHM_BLOCK_SIZE * SHM_BLOCK_COUNT) /* 224KB */
 
 /* ブロック状態 */
 #define SHM_FREE     0   /* 未使用 */

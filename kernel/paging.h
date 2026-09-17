@@ -319,4 +319,31 @@ int paging_map_user_keep_selftest(void);
  * 戻り値: 0=全通過。非0 はビットフラグで失敗内容を示す。 */
 int paging_app_band_selftest(void);
 
+/* ------------------------------------------------------------------------ */
+/*  地図 (memmap.h) と実物 (PDE 0 の PTE 1024 本) の照合                      */
+/*  (票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 3)                       */
+/* ------------------------------------------------------------------------ */
+
+/* 記録する食い違い区間の上限。ここを超えた分は数だけ数える。 */
+#define MM_BAD_MAX 8
+
+/* 食い違った区間を 3 ワードずつ: [start, end(inclusive), (期待<<4)|実物]。
+ * 期待 / 実物のコードは paging.c の MM_NP / MM_RW / MM_RO / MM_ROU。
+ * 件数は paging_memmap_bad_count (MM_BAD_MAX を超えても数え続ける)。
+ * static にしないのは kselftest_pass と同じ理由 — 画面が流れても
+ * kernel.map の番地から emu_read_mem で読めるようにするため。 */
+extern u32 paging_memmap_bad[MM_BAD_MAX * 3];
+extern u32 paging_memmap_bad_count;
+
+/* tramp_page には exec の KAPI 踏み台ページ (RO+USER) の番地を渡す。
+ * exec_init の前で不明なら 0。戻り値: 食い違い区間の本数 (0 = 一致)、
+ * -1 = ページング無効で検証対象外。
+ * **ブート直後に 1 回だけ呼ぶこと** — CPL=3 アプリを起動すると exec が
+ * SHM / VRAM / フォント表を USER へ昇格させ、期待値と合わなくなる。 */
+int paging_memmap_selftest(u32 tramp_page);
+
+/* 逆転した範囲 (start > end) を撥ねた回数。範囲 API は前から -1 を返して
+ * いたが呼び側が見ていないので、空振りが成功に見えていた (票 §4 の 2)。 */
+extern u32 paging_range_reject_count;
+
 #endif /* __PAGING_H */

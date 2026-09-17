@@ -137,12 +137,14 @@ static void exc_dump_stack_trace(int row, u32 *regs, int max_row, int serial)
     for (frame = 0; frame < 8 && tr < max_row; frame++) {
         u32 ret_addr;
         u32 prev_ebp;
-        /* 妥当なスタックの範囲か。下限はカーネルスタック
-         * (MEM_KSTACK_BASE)。シェルは 0x376000、プログラムは
-         * 0x400000 以降なので、どのスタックでもこれより上に居る。
-         * 低位 1MB は V86 ゲストに明け渡す領域なので、そこを指す EBP は
-         * フレームチェーンとしては信用しない。 */
-        if (ebp < MEM_KSTACK_BASE || ebp >= 0xF00000) break;
+        /* 妥当なスタックの範囲か。**下限は 1MB** — 低位 1MB は V86 ゲストに
+         * 明け渡す領域なので、そこを指す EBP はフレームチェーンとして
+         * 信用しない。というのが元々の判定理由で、値には MEM_KSTACK_BASE を
+         * 使っていた。2026-09-17 (決裁 D1) にカーネルスタックが 0x2FC000 へ
+         * 移ったので、そのまま使うと **SQLite の代替スタック
+         * (0x2BD000-0x2DCFFF) の上のフレームが辿れなくなる**。
+         * 理由どおりの定数 (MEM_1MB) に直した。 */
+        if (ebp < MEM_1MB || ebp >= 0xF00000) break;
         if (!paging_is_present(ebp) ||
             !paging_is_present(ebp + 4)) break;
         prev_ebp = *(u32 *)ebp;

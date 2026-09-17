@@ -4,54 +4,20 @@
 /*  カーネル・ページング・プログラムローダーが参照する物理/仮想アドレスを     */
 /*  一元管理する。変更時はpaging.c, kernel.c, exec.hとの整合性を確認。       */
 /*                                                                          */
-/*  メモリレイアウト概要 (2026-04 ブートアーキテクチャ改善):                  */
+/*  **地図はここに書かない。** 同じ表を 2 か所に書いた時点で片方が必ず古くなる  */
+/*  — 2026-09-17 まで、ここも docs/02_memory.md も CLAUDE.md も「カーネル本体   */
+/*  ~220KB」と書いていた (実測 432KB)。相対表記が共有メモリとカーネルスタックの */
+/*  重なりを隠していた (票 docs/tasks/memory/TASK_KSTACK_USER.md)。             */
 /*                                                                          */
-/*    [コンベンショナルメモリ 0x00000-0xFFFFF]                               */
-/*      0x00000-0x00FFF  NOT PRESENT (NULLポインタ検出)                      */
-/*      0x01000-0x49FFF  フォントキャッシュ (292KB) ※ブート後に配置          */
-/*      0x4A000-0x69FFF  Unicode-JIS変換テーブル (128KB) ※ブート後に配置     */
-/*      0x6A000-0x89FFF  GFXバックバッファ (128KB) ※ブート後に配置          */
-/*      0x8A000-0x9FFFF  空き (88KB, 将来用)                                 */
-/*      0xA0000-0xEFFFF  VRAM (テキスト+グラフィック)                         */
-/*      0xF0000-0xFFFFF  BIOS ROM (R/O)                                      */
+/*  実値の地図 (絶対番地) の正典は **docs/02_memory.md §2-1** で、             */
+/*  tools/gen_memmap.py がこのファイルの #define と build/out/kernel.map の    */
+/*  __bss_end から生成する。番地を動かしたら:                                 */
 /*                                                                          */
-/*      ※ 0x00000-0x9FFFF は V86 セッション中まるごとゲストに明け渡す。      */
-/*         V86 のリニアアドレスは CPU が (seg<<4)+off で作るので低位 1MB に   */
-/*         固定されており、この窓を空けられるかどうかがゲストに 640KB を      */
-/*         渡せるかどうかを決める (docs/tasks/v86v2/09_memmap.md)。           */
+/*      make kernel                          (kernel.map を作り直す)         */
+/*      python3 tools/gen_memmap.py --write  (地図を書き直す)                */
+/*      python3 tools/gen_memmap.py --check  (重なり・逆転を検査する)         */
 /*                                                                          */
-/*    [カーネル帯域 0x100000-0x1FFFFF, 1MB]                                  */
-/*      0x100000          カーネルバイナリ (.text+.data+.bss, ~220KB)         */
-/*      __bss_end (align) カーネルヒープ (320KB)                             */
-/*      +320KB            KAPIテーブル (4KB)                                  */
-/*      +4KB              SHM前方ガード (NP, 4KB)                            */
-/*      +4KB              共有メモリ本体 (256KB)                              */
-/*      +256KB            SHM後方ガード (NP, 4KB)                            */
-/*      〜0x1FAFFF        空き/予約 (NP)                                      */
-/*      0x1FB000-0x1FBFFF カーネルスタックガード (NOT PRESENT)                 */
-/*      0x1FC000-0x1FFFFF カーネルスタック (16KB)                             */
-/*                                                                          */
-/*    [SQLite帯域 0x200000-0x2FFFFF, 1MB]                                    */
-/*      0x200000          SQLite code+BSS (~579KB)                            */
-/*      +code末尾         SQLite代替スタック (128KB)                          */
-/*      残り              空き/予約                                           */
-/*                                                                          */
-/*    [シェル常駐 0x300000-0x3FFFFF, 1MB]                                    */
-/*      0x300000          シェル .text+.data+.bss (~113KB)                    */
-/*      ガード            スタックガード (NP)                                 */
-/*      ~0x3FFFFF         スタック (下向き成長)                               */
-/*                                                                          */
-/*    [共有ライブラリ帯域 0x400000-0x4FFFFF, 1MB]  (GUI v1.1 K3)             */
-/*      0x400000          libos32gui.shlib の先頭ページ = ジャンプ表          */
-/*      +text_pages       .text/.rodata (read-only + USER、全 PD 共有)        */
-/*      data_vaddr        .data/.bss (アプリごとの物理ページを同じ仮想番地に) */
-/*      帯域末尾          .data/.bss の原本 (ロード時に退避、複製元)          */
-/*                                                                          */
-/*    [プログラム空間 0x500000-メモリ上限]  ※2026-09-05 に 1MB 上へ移動      */
-/*      0x500000          外部プログラム code+bss → sbrk (固定上限なし)      */
-/*      ガード A          sbrk 上限ガード (exec_heap の直下、位置は動的)       */
-/*      ~ヒープ上端       exec_heap (KAPI mem_alloc、スタックガード直下)     */
-/*      ~mem_end          プログラムスタック (256KB)                          */
+/*  下の #define が番地の正典であることは変わらない。                         */
 /* ======================================================================== */
 
 #ifndef MEMMAP_H
@@ -63,6 +29,7 @@
 /*  カーネル配置                                                            */
 /* ====================================================================== */
 #define MEM_1MB               0x100000UL  /* 1MB */
+#define MEM_GUARD_SIZE        0x1000UL    /* ガードページ 1 枚 (= PAGE_SIZE) */
 #define KERNEL_LOAD_ADDR      0x100000UL  /* カーネルロードアドレス (1MB) */
 
 /* ====================================================================== */
@@ -89,7 +56,17 @@ extern u32 __bss_end;
 #define MEM_LOADER_END        0x08FFFUL
 
 /* ====================================================================== */
-/*  カーネルスタック (カーネル帯域の末尾, 下向き成長)                        */
+/*  カーネルスタック (SQLite 帯域の末尾, 下向き成長)                         */
+/*                                                                          */
+/*  2026-09-17 (決裁 D1、票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 4):  */
+/*  **カーネル帯域の末尾 0x1FC000 から SQLite 帯域の末尾 0x2FC000 へ移した。**  */
+/*  理由は「浮いた番地と固定番地を同じ帯で隣り合わせにしない」こと。         */
+/*  カーネル帯域は KHEAP_BASE 以降が __bss_end 由来で浮くので、カーネルが    */
+/*  育つと SHM が固定番地のスタックへ食い込む。実際 2026-09-17 には SHM の   */
+/*  後方ガードがスタックの真ん中に居座り、**あと 224 バイト育つと            */
+/*  実際に使っているスタックページが not-present になる**ところまで来ていた。 */
+/*  移設先はカーネル予約域 (0x2DD000-0x2FFFFF, 140KB, もともと NP) の末尾で、 */
+/*  ここは固定番地しか無いので浮動番地とぶつかりようがない。                 */
 /*                                                                          */
 /*  **低位に置いてはいけない。** V86 のゲストが見るリニアアドレスは CPU が   */
 /*  (seg<<4)+off で作るので 0x00000-0x10FFEF に固定されている。カーネル      */
@@ -108,10 +85,15 @@ extern u32 __bss_end;
 /*  measure し直すこと。**                                                  */
 /*  → docs/tasks/v86v2/09_memmap.md                                         */
 /* ====================================================================== */
-#define MEM_STACK_GUARD       0x1FB000UL
-#define MEM_STACK_GUARD_END   0x1FBFFFUL
-#define MEM_KSTACK_BASE       0x1FC000UL
-#define MEM_KSTACK_TOP        0x1FFFFCUL
+#define MEM_STACK_GUARD       0x2FB000UL
+#define MEM_STACK_GUARD_END   0x2FBFFFUL
+#define MEM_KSTACK_BASE       0x2FC000UL
+#define MEM_KSTACK_TOP        0x2FFFFCUL
+
+/* kernel/kentry.asm は ESP をここへ張り替える。ASM から C のマクロは引けない
+ * ので、値は build/os32.ld が同じ名前の絶対シンボルとして持ち、kentry.asm は
+ * それを extern で参照する。**二重定義の一致は
+ * `python3 tools/gen_memmap.py --check` が機械的に照合する** ([C4])。 */
 
 /* ブート時スタック (ローダー専用)。
  *
@@ -184,31 +166,81 @@ extern u32 __bss_end;
 #define MEM_KAPI_OFFSET       (KHEAP_SIZE)  /* ヒープ末尾からのオフセット */
 #define MEM_KAPI_SIZE         0x1000UL      /* 4KB */
 
-/* 共有メモリ: KAPIテーブルの直後 */
+/* 共有メモリ: KAPIテーブルの直後。
+ * 2026-09-17 (決裁 D1): 256KB (16 ブロック) → **224KB (14 ブロック)**。
+ * カーネル帯域 1MB が 17KB 超過していたので、いちばん大きい固定サイズの帯を
+ * 削った。予算の余りは MEM_KERNEL_IMAGE_MAX を参照。 */
 #define MEM_SHM_GUARD_LO      (KHEAP_BASE + KHEAP_SIZE + MEM_KAPI_SIZE)
-#define MEM_SHM_BASE          (MEM_SHM_GUARD_LO + 0x1000UL)
-#define MEM_SHM_SIZE          0x040000UL  /* 256KB */
+#define MEM_SHM_BASE          (MEM_SHM_GUARD_LO + MEM_GUARD_SIZE)
+#define MEM_SHM_SIZE          0x038000UL  /* 224KB = 16KB × 14 ブロック */
 #define MEM_SHM_END           (MEM_SHM_BASE + MEM_SHM_SIZE - 1)
 #define MEM_SHM_GUARD_HI      (MEM_SHM_BASE + MEM_SHM_SIZE)
 
 /* GUI 予約 SHM (契約 T2 / docs/tasks/gui/API_CONTRACTS.md)。
- * SHM 帯 (MEM_SHM_BASE, 16KB×16 ブロック) の末尾側ブロック 12〜15
- * (先頭 +192KB から 64KB) を GUI 用に固定予約する。kernel/shm.c の初期化で
- * この 4 ブロックを SHM_RESERVED にし、shm_alloc が配らないようにする。
+ * SHM 帯の **末尾 4 ブロック** を GUI 用に固定予約する。kernel/shm.c の
+ * 初期化でこの 4 ブロックを SHM_RESERVED にし、shm_alloc が配らないようにする。
  * 1 スロット (16KB) = アプリ 1 本、最大 4 アプリ (v1 はスロット 0 のみ)。
- * PTE は SHM 帯として既に RW+USER (v2 C2)。 */
-#define MEM_SHM_GUI_BASE      (MEM_SHM_BASE + 0x30000UL)  /* +192KB = ブロック 12 */
+ * PTE は SHM 帯として既に RW+USER (v2 C2)。
+ *
+ * 2026-09-17 (決裁 D1): 「先頭 +192KB」の決め打ちをやめ、**末尾から数える**
+ * 形にした。決め打ちだと SHM を縮めた瞬間に予約が帯の外へ出る (14 ブロックに
+ * するとブロック 12〜15 のうち 14・15 が存在しなくなる)。
+ * MEM_SHM_GUI_OFFSET は KHEAP_BASE を含まない **純粋な定数式** — だから
+ * kernel/shm.c の STATIC_ASSERT がこれを検査できる (それ以前は
+ * (u32)&__bss_end を含んでいて表明が黙って死んでいた)。
+ * SDK 側の写しは sdk/include/os32/os32_gui_shared.h の GUI_SHM_OFFSET と
+ * Rust の os32api::gui::proto::GUI_SHM_OFFSET。make check-gui-proto が照合する。 */
 #define MEM_SHM_GUI_SIZE      0x10000UL                    /* 64KB = 4 ブロック */
+#define MEM_SHM_GUI_OFFSET    (MEM_SHM_SIZE - MEM_SHM_GUI_SIZE)  /* 定数式 */
+#define MEM_SHM_GUI_BASE      (MEM_SHM_BASE + MEM_SHM_GUI_OFFSET)
 #define GUI_SLOT_SIZE         0x4000UL                     /* 16KB = 1 スロット */
 #define GUI_SLOT_MAX          4                            /* スロット 0〜3 */
 
 /* カーネル帯域終端 */
 #define MEM_KERNEL_BAND_END   0x1FFFFFUL
 
-/* SHM後方予約域 (NOT PRESENT): SHMガード後 〜 カーネルスタックガードの直前。
- * 末尾 20KB はカーネルスタックとそのガードが使う。 */
-#define MEM_SHM_RESV_START    (MEM_SHM_GUARD_HI + 0x1000UL)
-#define MEM_SHM_RESV_END      (MEM_STACK_GUARD - 1)
+/* SHM後方予約域 (NOT PRESENT): SHM 後方ガードの後 〜 カーネル帯域の終端。
+ * カーネルスタックは 2026-09-17 に SQLite 帯域の末尾へ出ていったので、
+ * ここはカーネル帯域の終わりまで丸ごと予約になる。
+ *
+ * **カーネルが予算いっぱいまで育つと、この帯は空になる** (START == END + 1)。
+ * 空は正しい状態で、逆転 (START > END + 1) は設計ミス。区別は
+ * kernel/paging.c の STATIC_ASSERT (最悪配置) が固定し、
+ * paging_init は空のときに範囲指定を呼ばない。 */
+#define MEM_SHM_RESV_START    (MEM_SHM_GUARD_HI + MEM_GUARD_SIZE)
+#define MEM_SHM_RESV_END      MEM_KERNEL_BAND_END
+
+/* ====================================================================== */
+/*  カーネル本体の予算と「最悪の配置」 (決裁 D2、2026-09-17)                */
+/*                                                                          */
+/*  KHEAP_BASE は __bss_end 由来で浮かせたまま。固定にしても使われない       */
+/*  バイト数は同じで、変わるのは余りがどこに溜まるかと尽きたときの挙動だけ   */
+/*  だから。代わりに **上限をリンク時に保証する**:                          */
+/*                                                                          */
+/*      build/os32.ld の                                                     */
+/*        ASSERT(__bss_end <= KERNEL_LOAD_ADDR + MEM_KERNEL_IMAGE_MAX, ...)  */
+/*                                                                          */
+/*  上限が保証されれば「予算いっぱいまで育った場合の配置」が **定数式** で   */
+/*  書ける。重なりの検査はその最悪配置に対して行う — 実値 (KHEAP_BASE) は    */
+/*  定数式ではないので STATIC_ASSERT では扱えない (条件が真でも              */
+/*  "variably modified at file scope" で落ちる)。                            */
+/*                                                                          */
+/*  予算を超えたら: (1) カーネルを削る、(2) MEM_SHM_SIZE を 16KB 単位で      */
+/*  減らす (kernel/shm.h の SHM_BLOCK_COUNT も同時)、(3) KHEAP_SIZE を       */
+/*  減らす。どれも票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 4 の続き。  */
+/* ====================================================================== */
+#define MEM_KERNEL_IMAGE_MAX  (MEM_KERNEL_BAND_END + 1 - KERNEL_LOAD_ADDR - \
+                               KHEAP_SIZE - MEM_KAPI_SIZE - \
+                               2UL * MEM_GUARD_SIZE - MEM_SHM_SIZE)
+
+/* 予算いっぱいまで育った場合の配置。全部が定数式であることが肝心で、
+ * ここに KHEAP_BASE (= (u32)&__bss_end 由来) を混ぜてはいけない。 */
+#define MEM_KHEAP_BASE_MAX     (KERNEL_LOAD_ADDR + MEM_KERNEL_IMAGE_MAX)
+#define MEM_SHM_GUARD_LO_MAX   (MEM_KHEAP_BASE_MAX + KHEAP_SIZE + MEM_KAPI_SIZE)
+#define MEM_SHM_BASE_MAX       (MEM_SHM_GUARD_LO_MAX + MEM_GUARD_SIZE)
+#define MEM_SHM_END_MAX        (MEM_SHM_BASE_MAX + MEM_SHM_SIZE - 1)
+#define MEM_SHM_GUARD_HI_MAX   (MEM_SHM_BASE_MAX + MEM_SHM_SIZE)
+#define MEM_SHM_RESV_START_MAX (MEM_SHM_GUARD_HI_MAX + MEM_GUARD_SIZE)
 
 /* ====================================================================== */
 /*  SQLite帯域 (0x200000-0x2FFFFF, 1MB)                                     */
@@ -221,7 +253,7 @@ extern u32 __sqlite_end;
 
 /* SQLite帯域後の予約: NOT PRESENT */
 #define MEM_KERNEL_RESV_START  ((MEM_SQLITE_STACK_BASE + MEM_SQLITE_STACK_SIZE + 0xFFF) & ~0xFFFUL)
-#define MEM_KERNEL_RESV_END    0x2FFFFFUL  /* シェル帯域の直前まで */
+#define MEM_KERNEL_RESV_END    (MEM_STACK_GUARD - 1)  /* カーネルスタックガードの直前まで */
 
 /* ====================================================================== */
 /*  シェル常駐帯域 (0x300000-0x3FFFFF, 1MB)                                 */
