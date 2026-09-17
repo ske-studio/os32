@@ -402,6 +402,10 @@ pub struct UiState {
     /// マウスの最新位置 (クライアントローカル、フォーカス窓基準)。
     pub ptr_x: i16,
     pub ptr_y: i16,
+    /// アプリが `widget::set_focus` で移したフォーカスの通知待ち
+    /// (生の `WidgetId`、0 = 無し)。入力から合成したぶんは `WidgetOut` で
+    /// 返るが、アプリ発は返す先が無いのでここに溜めてループが配る (穴 H13)。
+    pub pending_focus: u32,
 }
 
 impl UiState {
@@ -416,6 +420,7 @@ impl UiState {
         input_unknown: false,
         ptr_x: 0,
         ptr_y: 0,
+        pending_focus: 0,
     };
 
     /// WindowId から登録表の添字を引く (generation ごと一致。契約 U2)。

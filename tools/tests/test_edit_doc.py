@@ -37,6 +37,7 @@ TEXTCORE_TESTS = ROOT / "userland/rust/libos32gui/host/textcore_tests.rs"
 DOC = ROOT / "userland/rust/edit_gui/src/doc.rs"
 DOC_TESTS = ROOT / "userland/rust/edit_gui/host/doc_tests.rs"
 WIDGET = ROOT / "userland/rust/libos32gui/src/widget.rs"
+GUI_APP = ROOT / "userland/rust/libos32gui/src/app.rs"
 
 # ---------------------------------------------------------------- 変異
 # (名前, 当てるファイル, 元, 後) — すべて**コンパイルは通り、実行時に落ちる**もの。
@@ -198,6 +199,46 @@ def static_checks():
         ROOT / "userland/rust/libos32gui/src/uistate.rs"
     ).read_text(encoding="utf-8"):
         bad.append("WK_TEXTBOX の番号が動いた (決裁 A1: 末尾追記のみ)")
+    bad += focus_notify_checks(src)
+    return bad
+
+
+def focus_notify_checks(widget_src):
+    """アプリ発の `set_focus` が `on_widget_focus` として届くこと (穴 H13)。
+
+    入力から合成したフォーカス移動は `WidgetOut` でループへ返るが、アプリが
+    自分で呼んだぶんは返す先が無い。これを捨てると、**フォーカスを
+    `on_widget_focus` だけで追っているアプリは自分で移した後に編集面へ
+    戻ったと分からなくなる**。文字は `Text` 経由で入るので
+    **カーソルキーだけが死ぬ**という、目視では原因の分からない形で出た。
+
+    実行時には GUI サーバが要るのでホストでは踏めない。**配線の規則**として
+    見る (textbox が textcore を通っている検査と同じ形)。
+    """
+    bad = []
+    m = re.search(r"pub fn set_focus\(.*?\n\}", widget_src, re.S)
+    if not m:
+        bad.append("pub fn set_focus が widget.rs に無い")
+    elif "pending_focus" not in m.group(0):
+        bad.append(
+            "set_focus が通知を溜めていない — アプリ発のフォーカス移動が "
+            "on_widget_focus として届かない (穴 H13: カーソルキーだけが死ぬ)"
+        )
+    if "pub fn take_pending_focus" not in widget_src:
+        bad.append("take_pending_focus が無い (ループが通知を取り出せない)")
+
+    app_src = GUI_APP.read_text(encoding="utf-8")
+    if "fn drain_pending_focus" not in app_src:
+        bad.append("drain_pending_focus が app.rs に無い (穴 H13)")
+    else:
+        m = re.search(r"pub fn run_vt.*?\n\}", app_src, re.S)
+        if not m:
+            bad.append("run_vt がループの本体に無い")
+        elif m.group(0).count("drain_pending_focus") < 2:
+            bad.append(
+                "ループが通知を配っていない — 窓を組む間のぶんと、"
+                "ハンドラの中で移したぶんの 2 か所で配る (穴 H13)"
+            )
     return bad
 
 
@@ -239,8 +280,8 @@ def main():
         print("STATIC FAIL " + b, flush=True)
     if bad:
         return 1
-    print("STATIC PASS (textbox は textcore を通っている / WK_TEXTBOX は 4 のまま)",
-          flush=True)
+    print("STATIC PASS (textbox は textcore を通っている / WK_TEXTBOX は 4 のまま"
+          " / set_focus が on_widget_focus を配る)", flush=True)
 
     with tempfile.TemporaryDirectory(prefix="os32-edit-doc-") as tmp:
         rc, text = build_and_run(pathlib.Path(tmp), "base")

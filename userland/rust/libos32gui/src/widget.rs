@@ -1090,13 +1090,36 @@ fn set_focus_slot(win: usize, next: u16, out: &mut WidgetOut) {
 }
 
 /// フォーカスをウィジェットへ移す (アプリから)。
+///
+/// **`on_widget_focus` は必ず来る。** 入力から合成したフォーカス移動 (TAB /
+/// クリック) は `WidgetOut` でループへ返るが、ここはハンドラの外からも呼ばれる
+/// ので返す先が無い。溜めておき、ループが配る ([`take_pending_focus`])。
+///
+/// これを捨てていたのが穴 H13 — アプリが `on_widget_focus` だけで
+/// フォーカスを追うと、自分で移した後は**二度と編集面に戻ったと分からない**。
+/// 文字は `Text` 経由で入るので、**カーソルキーだけが死ぬ**という形で出た。
 pub fn set_focus(id: WidgetId) -> GuiResult<()> {
     let idx = resolve(id).ok_or(GuiErr::STALE)?;
     let win_id = s().widgets[idx].window;
     let win = s().win_slot(win_id).ok_or(GuiErr::STALE)?;
     let mut out = WidgetOut::EMPTY;
     set_focus_slot(win, (idx as u16) + 1, &mut out);
+    let mut i = 0;
+    while i < out.n {
+        if out.evs[i].kind == WEV_FOCUS {
+            s().pending_focus = out.evs[i].widget.raw();
+        }
+        i += 1;
+    }
     Ok(())
+}
+
+/// 溜めてあるアプリ発フォーカス通知を 1 件取り出す (無ければ `NULL`)。
+/// 配るのはループ ([`crate::app`]) の仕事。
+pub fn take_pending_focus() -> WidgetId {
+    let id = s().pending_focus;
+    s().pending_focus = 0;
+    WidgetId(id)
 }
 
 /// フォーカス中のウィジェット。

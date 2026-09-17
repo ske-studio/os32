@@ -31,6 +31,11 @@ use os32api::gui::types::{Rect, Style};
 /* drivers/mouse.h の MOUSE_BTN_*。`GuiEvtButton.button` に載る値 (契約 D4)。 */
 const MOUSE_BTN_LEFT: u8 = 0x01;
 
+/* アプリ発フォーカス通知を 1 か所で配る回数の上限 ([C4]: 数値を散らさない)。
+ * `on_widget_focus` の中で更に `set_focus` を呼ぶ作りを許すが、取り合いで
+ * 周回が止まらないように止める。 */
+const FOCUS_DRAIN_MAX: u32 = 4;
+
 /* ================================================================ */
 /*  Ui / App                                                        */
 /*                                                                  */
@@ -150,6 +155,11 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
     let zero = GuiEvent { kind: 0, sub: 0, serial: 0, window: 0, payload: [0; 8] };
     let mut buf = [zero; GUI_RING_CAPACITY];
 
+    /* 窓を組む間に `widget::set_focus` を呼んでいることがある (穴 H13)。 */
+    client::enter_handler();
+    drain_pending_focus(app, ui);
+    client::leave_handler();
+
     loop {
         let p = client::poll(&mut buf)?;
 
@@ -167,6 +177,10 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
         let mut i = 0;
         while i < p.count {
             dispatch(app, ui, &buf[i]);
+            /* ハンドラの中で `widget::set_focus` を呼んだぶんを、**次の 1 件を
+             * 配る前に**知らせる (穴 H13)。同じ周に打鍵が続くとき、古い
+             * フォーカスで判断させないため。 */
+            drain_pending_focus(app, ui);
             i += 1;
         }
         client::leave_handler();
@@ -197,6 +211,22 @@ pub fn run_vt(vt: *const AppVTable, this: *mut c_void, ui: &mut Ui) -> GuiResult
 /* ================================================================ */
 /*  1 件の配送 (契約 T3 / U2)                                        */
 /* ================================================================ */
+
+/// アプリが自分で移したフォーカスを `on_widget_focus` で配る (穴 H13)。
+///
+/// ハンドラの中で更に `set_focus` を呼べるので、**往復に上限を置く** —
+/// 2 つのウィジェットが互いにフォーカスを取り合っても周回が止まらない。
+fn drain_pending_focus(app: &VApp, ui: &mut Ui) {
+    let mut guard = 0;
+    while guard < FOCUS_DRAIN_MAX {
+        let w = widget::take_pending_focus();
+        if w == widget::WidgetId::NULL {
+            return;
+        }
+        app.on_widget_focus(ui, w);
+        guard += 1;
+    }
+}
 
 /// 溜まった損傷を `OP_INVALIDATE` で送る (窓あたり最大 8 本)。
 pub fn flush_damage() {
