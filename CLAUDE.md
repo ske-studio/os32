@@ -125,7 +125,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
   known Unicode→JIS pairs — otherwise every kanji renders as □. → §4-11
 - Binaries missing from `deploy.yaml` go stale on the NHD and can hang rshell ([V2]); `make deploy*` prunes
   them via `tools/prune_stale.py` (`NO_PRUNE=1` lists only). → §4-12
-- SQLite pool exhaustion shows up as `-2` from `db_query`; always print `db_last_error()`. → §4-13
+- SQLite pool exhaustion shows up as `-2` from `db_query`; always print `db_last_error()` (it returned a kernel pointer and killed CPL=3 apps until 2026-09-17). → §4-13
 - `mui_pump_input()` eats the keyboard queue; apps reading keys themselves pass the char via `mui_pump_input_ch()`. → §4-14
 - Resource ownership on exit: owner tags, protected FDs, `exec_heap_restore_state`. → §4-15, `docs/10_notes.md` §10-9
 - The shell has two heaps, so `kernel/paging.c` must keep 0x380000–0x3FFFFF present. → §4-16

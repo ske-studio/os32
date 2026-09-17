@@ -189,7 +189,7 @@ NP21/W 上でコード変更が反映されていないように見える場合�
 
 - **現象** (2026-08-18): game で econ 常時接続 + battle/items/rpg/events の順次ロードの最後の `db_query` が `out of memory`
 - **原因**: MEMSYS5 は固定プール (`lib/sqlite3/os32_sqlite_vfs.c`) で、カーネル側 FEP 辞書を含む全接続が共有する。当時 200KB
-- **対策**: 384KB に拡大 (SQLite 拡張域 0x200000〜0x2FFFFF 内、残り約 280KB)。エンジンライブラリは `*_init()` の末尾で接続を閉じる。**枯渇の診断は `db_last_error()` を必ず出す** — 戻り値だけでは「テーブルがない」と区別できない。実機で任意 DB を調べるには `dbq` (`userland/tests/dbq.c`)
+- **対策**: 384KB に拡大 (SQLite 拡張域 0x200000〜0x2FFFFF 内、残り約 280KB)。エンジンライブラリは `*_init()` の末尾で接続を閉じる。**枯渇の診断は `db_last_error()` を必ず出す** — 戻り値だけでは「テーブルがない」と区別できない。実機で任意 DB を調べるには `dbq` (`userland/tests/dbq.c`)。**2026-09-17 まで `db_last_error()` はカーネル番地を返しており、CPL=3 のアプリが読むと #PF で死んだ** (票 [`tasks/sqlite/TASK_DB_ERRSTR.md`](tasks/sqlite/TASK_DB_ERRSTR.md) で修正)。いまは共有メモリを指すので安全。直前の `db_exec` のエラーだけでよければ `db_errmsg()` (KAPI 呼び出し無しで共有メモリを直接読む) のほうが速い
 
 ### 4-14. `mui_pump_input()` がキー待ち行列を食う
 

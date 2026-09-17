@@ -247,6 +247,33 @@ static int test_error_handling(void)
         pass = 0;
     }
 
+    /* 票 TASK_DB_ERRSTR の受入 E2 — **戻り値を実際に読む**。
+     * 2026-09-17 まで db_last_error() はカーネル番地を返していたので、
+     * CPL=3 のここで読むと #PF で死んだ。読めること自体が確認事項。 */
+    {
+        const char *m = db_last_error(99);
+        if (m && m[0] != '\0') {
+            api->kprintf(ATTR_WHITE, "  bad-handle errmsg: %s\n", m);
+            print_ok("db_last_error(bad handle) is readable from CPL=3");
+        } else {
+            print_fail("db_last_error(bad handle)", "empty or NULL");
+            pass = 0;
+        }
+    }
+
+    /* 受入 E3 — 結果セットが無い状態の db_column_text()。
+     * 以前はカーネルの .rodata の "" を返していたので、m[0] を見るだけで死んだ。 */
+    {
+        const char *m = db_column_text(0);
+        if (m) {
+            api->kprintf(ATTR_WHITE, "  no-result coltext: \"%s\"\n", m);
+            print_ok("db_column_text(no result) is readable from CPL=3");
+        } else {
+            print_fail("db_column_text(no result)", "NULL");
+            pass = 0;
+        }
+    }
+
     db_close(db);
     return pass;
 }
