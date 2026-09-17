@@ -290,9 +290,9 @@ helper 対向で連続送受信を行う順にする。エミュレータで確�
 
 | 項目 | 内容 | この計画への影響 |
 |---|---|---|
-| オンボード LAN | **Intel 82557**、PCI、100BASE-TX / 10BASE-T | **使えない。** OS32 に PCI の列挙が無く (設定空間を読む仕組みごと未実装)、82557 は NE2000 と別系統 (制御構造体 + ディスクリプタ連結)。ドライバはほぼ書き直しになる |
+| オンボード LAN | **Intel 82557**、PCI、100BASE-TX / 10BASE-T | **v3 の実機 LAN はこれを狙う** (ユーザー決裁 2026-09-17)。PCI の列挙から作る。LGY-98 が高価・品薄なのに対し**機体に載っていてゼロ円**、そして **Intel の公開開発者マニュアルと Linux `e100` / FreeBSD `fxp` という参照実装がある** (LGY-98 は一次資料が無い)。詳細は [../realhw/PLAN.md](../realhw/PLAN.md) §5 |
 | 拡張スロット | **C バス 3 本** / PCI 2 本 | **C バスに LGY-98 を挿せば既存のドライバがそのまま使える。** M4 の残り (受信バッファ溢れからの復帰) を確かめるならこれが最短 |
-| 内蔵グラフィックス | Trident TGUI9682XGi (VRAM 2MB) | GUI の HAL に Trident は無い (9801 planar / PEGC / Cirrus GD54xx の 3 系統)。**PEGC は使えるとユーザーが確認済み**なので当面は困らない |
+| 内蔵グラフィックス | Trident TGUI9682XGi (VRAM 2MB) | GUI の HAL に無いが **PEGC は使えるとユーザーが確認済み**。NP21/W の Trident は結線されていないので**書いても検証できない** → 保留 ([../realhw/PLAN.md](../realhw/PLAN.md) §7) |
 
 出典: [PC-9821Ra266 データベース](https://www.pc-9800.net/db_98/data/pc-9821ra266.htm)、
 [PC-9821Ra ページ](https://takerun.my.coocan.jp/mypc/9821ra.htm)。
@@ -324,7 +324,7 @@ LAN の語があるだけ)。PC-98 固有部分の一次資料は §7 の simk98
 | M2 | **エミュレータで合格** (inject/capture 経路) | `make check-net-m2` (`tools/net_m2_test.py`): 14/60/61/100/255/256/257/1000/1513/1514B の反射が内容一致、連続 10 フレーム順序どおり、1000〜1514B × 60 逐次で PSTOP wrap を繰り返して 0 失敗、ドライバ計数 = 送った数、NP21/W 側 drop 0。**未実施**: 対向機との raw Ethernet (helper は ARP/ICMP/UDP しか返さず、IP 層が無いので保留)、内部 loopback (NP21/W が再現しない、実機項目) |
 | M3 | **エミュレータで合格** (2026-09-05) | IRQ 駆動: IRQ5 スタブ登録 + IMR。`make check-net-m2` を IRQ 駆動カーネルで実行し `irq +80`・0 drop・ACK 後の recheck が毎回機能。`make check-net-m2-cpl3` で CPL3 プログラム (`less`) 常駐中も `irq +80`・0 drop、`less` は正常終了しシェル復帰。kselftest 42/0、回帰 6/6 |
 | M4 | **エミュレータで合格** (2026-09-05) | 「溢れても・取りこぼしても壊れない」安全網。`ne2k_timer_tick` を 100Hz 受信ウォッチドッグ化 (RUNNING/OVW_WAIT かつ非 busy なら毎 tick 有界 poll、健全時は CURR 1 読みで戻る)。`make check-net-m4`: 200 フレーム一括 inject でも state RUNNING・drop 0・バースト後の単発受信 OK・wedge なし。リンク層向けに `ne2k_rx_ring_free_pages()` / `ne2k_rx_queue_free()` を公開。M3 で見つけた wedge (リングに残り二度と IRQ が来ない) の再発防止。**注記**: 本試験では IRQ が追いつき watchdog_frames は 0 (ウォッチドッグは安全網として実装・コードレビュー確認、強制 IRQ 喪失下の発火は未計測)。NP21/W は OVW を立てず黙って捨てるため OVW 復帰経路は実カード項目 |
-| M5 | 未着手 | 実機で性能・サイズ・現行仕様化 |
+| M5 | 未着手 | 実機で性能・サイズ・現行仕様化。**実カードは Intel 82557 になる** (2026-09-17 決裁)。82557 は受信の作りが NE2000 と別 (ディスクリプタ連結) なので、M4 の「溢れからの復帰」の宿題は**82557 の言葉で立て直す** |
 
 ### M0 で凍結した表
 
