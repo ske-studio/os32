@@ -344,6 +344,13 @@ MIRRORS = (
     ("sdk/rust/os32api/src/gui/proto.rs",
      r"^pub const GUI_SHM_OFFSET:\s*u32\s*=\s*(0x[0-9A-Fa-f]+)\s*;",
      "MEM_SHM_GUI_OFFSET"),
+    # ホスト試験が kernel/shm.c を組むための偽 memmap.h。実物は
+    # (u32)&__bss_end を含んでホストで使えないので写しを持つしかないが、
+    # **2026-09-17 に実際にずれた** — D1 で 16 → 14 ブロックにしたとき、
+    # ここだけ 16 のままで shm.c の表明が落ちた (make check が捕まえた)。
+    ("tools/tests/test_owner_reclaim.py",
+     r'"#define MEM_SHM_SIZE\s+(0x[0-9A-Fa-f]+)U',
+     "MEM_SHM_SIZE"),
 )
 
 # ASM は値ではなくシンボルで引くこと。数値直書きに戻したらここで気づく。

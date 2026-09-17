@@ -31,9 +31,12 @@ class OwnerReclaimTests(unittest.TestCase):
                 "#ifndef OS32_TEST_MEMMAP_H\n"
                 "#define OS32_TEST_MEMMAP_H\n"
                 "#define MEM_SHM_BASE       0x00180000U\n"
-                "#define MEM_SHM_SIZE       (16 * 16 * 1024)\n"
-                "#define MEM_SHM_GUI_BASE   (MEM_SHM_BASE + 0x30000U)\n"
+                # 2026-09-17 決裁 D1 で 16 → 14 ブロック、GUI 予約は末尾 4 個。
+                # 値の写しなので tools/gen_memmap.py --check が実物と照合する。
+                "#define MEM_SHM_SIZE       0x038000U\n"   # 224KB = 16KB x 14
                 "#define MEM_SHM_GUI_SIZE   0x10000U\n"
+                "#define MEM_SHM_GUI_OFFSET (MEM_SHM_SIZE - MEM_SHM_GUI_SIZE)\n"
+                "#define MEM_SHM_GUI_BASE   (MEM_SHM_BASE + MEM_SHM_GUI_OFFSET)\n"
                 "#define MEM_SHM_GUARD_LO   (MEM_SHM_BASE - 0x1000U)\n"
                 "#define MEM_SHM_GUARD_HI   (MEM_SHM_BASE + MEM_SHM_SIZE)\n"
                 "#define GUI_SLOT_SIZE      0x4000U\n"

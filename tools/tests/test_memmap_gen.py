@@ -65,7 +65,10 @@ def _unused_mirrors(root, m):"""),
 # memmap.h の値を写している場所 (gen_memmap.py の MIRRORS / ASM_SYMBOLIC と同じ顔ぶれ)
 MIRROR_FILES = ("build/os32.ld", "kernel/kentry.asm",
                 "sdk/include/os32/os32_gui_shared.h",
-                "sdk/rust/os32api/src/gui/proto.rs")
+                "sdk/rust/os32api/src/gui/proto.rs",
+                # ホスト試験が kernel/shm.c を組むための偽 memmap.h を持つ。
+                # 2026-09-17 に実際にずれたので写しの照合対象に入っている。
+                "tools/tests/test_owner_reclaim.py")
 
 
 def make_tree(tmp, bss_end):

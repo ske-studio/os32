@@ -493,7 +493,33 @@ check-docs-orphans:
 check-tests-inventory:
 	@python3 tools/gen_tests_inventory.py --check
 
-check: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-kstring-c-host check-kstr-bench-host check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-result-conv-host
+# check は**必ず逐次**で回す (2026-09-17)。変異試験は実物のソースを書き換えて
+# 戻す作りなので、同時に走ると互いのファイルを壊し合う。しかも壊れ方が
+# 再現しない (docs/POLICY_DEBUG.md §4-40)。Makefile が既定で -j を足すので、
+# ここで -j1 を明示して打ち消す。並列化するには各試験が写しの上で変異する
+# 作りに変える必要があり、それは別作業。
+# check は 2 段。**遅さの正体は逐次ではなく、変異試験が同じソースを奪い合う
+# ことだった** (2026-09-17)。変異試験は実物のソースを書き換えて戻す作りなので、
+# 同時に走ると互いのファイルを壊し合い、しかも壊れ方が再現しない
+# (docs/POLICY_DEBUG.md §4-40)。
+#
+#   1 段目 check-par  書き換えない 48 本 → **並列**
+#   2 段目 check-mut  --mutate を渡す 10 本 → **逐次 (-j1)**
+#
+# 各段の後で tools/check_tree_unchanged.py が「試験がソースを書き換えたまま
+# 戻していないか」を見る。1 段目で引っかかれば、その試験を 2 段目へ移すこと。
+# 全部を並列にするには各試験が写しの上で変異する作りに変える必要がある。
+check:
+	@python3 tools/check_tree_unchanged.py --save par
+	@$(MAKE) check-par
+	@python3 tools/check_tree_unchanged.py --verify par
+	@python3 tools/check_tree_unchanged.py --save mut
+	@$(MAKE) -j1 check-mut
+	@python3 tools/check_tree_unchanged.py --verify mut
+
+check-par: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
+
+check-mut: check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
