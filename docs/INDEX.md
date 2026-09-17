@@ -13,7 +13,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 |---|---|---|
 | 制約規則 [C/HW/ABI/V/D] | [CONSTRAINTS.md](CONSTRAINTS.md) | CLAUDE.md / SOUL.md (ID 参照、`make check` が照合) |
 | エージェント運用体制 (役割・起動・規約) | [tasks/agents/ROLES.md](tasks/agents/ROLES.md) (現行のみ) | CLAUDE.md (4 行 + リンク)。過去の経緯は [tasks/agents/RETROSPECTIVE_2026-09-09.md](tasks/agents/RETROSPECTIVE_2026-09-09.md) 側に置き、入口からは辿らせない |
-| 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) (説明) | CLAUDE.md「Memory Layout」(要約図) |
+| 番地・帯域 | `include/memmap.h` (定義) → [02_memory.md §2-1](02_memory.md) の**生成ブロック** (`tools/gen_memmap.py --write`、地図はここ 1 か所だけ) | CLAUDE.md は帯の粒度のみ。`memmap.h` の先頭は生成先への案内。重なり・逆転・写しのずれは `make check` の `gen_memmap.py --check` が見る |
 | KAPI の一覧・オフセット・版 | `sdk/kapi.json` → [KAPI_SPEC.md §4](KAPI_SPEC.md) | README.md / このファイル / KAPI_SPEC.md の版番号 (`tools/check_kapi_version.py` が照合。CLAUDE.md は版数を持たない) |
 | KAPI 追加手順 | [KAPI_SPEC.md §3-1](KAPI_SPEC.md) | スキル `.claude/skills/os32-kapi-add` と CLAUDE.md (どちらもポインタのみ) |
 | KAPI 版番号・エラー番号の予約 (未実装の先取り調停) | [KAPI_SPEC.md §3-2](KAPI_SPEC.md) | 各計画 (GUI TASK_K1、network LINK_PLAN) は参照 |
@@ -132,7 +132,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | B8 **受入完了 (2026-09-15、6 往復)** — 読み取り失敗を不存在・未割当・別の型と読み替えていた ext2/VFS/HostDrv の経路。remount-ro 相当、e2fsck を正解に。残る制限は §2-6 / §2-7 |
 | [tasks/shell/TASK_SH_TRUNCATION.md](tasks/shell/TASK_SH_TRUNCATION.md) | シェルの入力切り詰め **受入完了 (2026-09-16)** — 切り詰めたまま実行を続ける 26 経路。`if` の比較が 255 文字で切れて条件が逆転し破壊的なコマンドが走る欠陥を含む。`$?` の配線より先 |
 | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) | 終了コードの配線と `$?` **受入完了 (2026-09-16)** — ゲスト試験ランナーの 1 段目 (KAPI v55、`exec_last_result`)。終了コードが起動エラー・app_id と同じ空間に混ざっている (PATH の次の候補を二重実行する実害つき)。決裁 E1 / E2 |
-| [tasks/memory/TASK_KSTACK_USER.md](tasks/memory/TASK_KSTACK_USER.md) | **SHM 帯がカーネルスタックに食い込んでいる 計画 (2026-09-17)** — 番地が `__bss_end` から浮くため、カーネルが育って SHM の終端がスタックに達した。**スタックは設計の 16KB ではなく 4KB**。設計上のガードは存在せず `crash` が素通りする。重なりを誰も検査していない。**POLICY_DEV §1 で最優先** |
+| [tasks/memory/TASK_KSTACK_USER.md](tasks/memory/TASK_KSTACK_USER.md) | **SHM 帯がカーネルスタックに食い込んでいる 受入完了 (2026-09-17)** — 番地が `__bss_end` から浮くため、カーネルが育って SHM の終端がスタックに達した。**スタックは設計の 16KB ではなく 4KB**。設計上のガードは存在せず `crash` が素通りする。重なりを誰も検査していない。**POLICY_DEV §1 で最優先** |
 | [tasks/sqlite/TASK_DB_ERRSTR.md](tasks/sqlite/TASK_DB_ERRSTR.md) | `db_last_error()` がカーネル番地を返す **受入完了 (2026-09-17)** — CPL=3 のアプリが戻り値を読むと #PF で死ぬ (実測 addr=0x002B8DE0、`$?`=139)。`db_column_text()` のエラー経路も同じ。共有メモリへ写して返す。**カーネル層なので POLICY_DEV §1 で優先** |
 | [tasks/test/TASK_TEST_RESULT.md](tasks/test/TASK_TEST_RESULT.md) | 合否を機械が読める形にする **受入完了 (2026-09-17)** — ゲスト試験ランナーの 2 段目。終了コード 0/1/2 と集計行 `<名前>: PASS n/m` の制定、結果チャネルは HostDrv (決裁 R1)。`void main` 20 本と、回帰台本の偽合格 (`alloc_demo`)、`ring3_fault` / `ring3_hello` の古い `int 0x80` 規約も直す |
 | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
