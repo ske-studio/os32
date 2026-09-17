@@ -78,7 +78,8 @@ def check_gui_gate():
         else:
             raise AssertionError('%r が通ってしまった' % bad)
 
-    # K6: escapes=False (既定) は展開を一切しない。`\` は今までどおり素の text。
+    # K6: 逃がし記法は**既定で有効** (2026-09-18)。`\` 自身は `\\` と書く。
+    # ツリー内に `text=` で `\` を送る利用者は調査で 0 件だったので既定を変えた。
     posts = []
     real_post, real_sleep = gui_gate.post, gui_gate.time.sleep
     gui_gate.post = lambda path, data: posts.append((path, data))
@@ -88,15 +89,34 @@ def check_gui_gate():
         assert posts == [('/api/key', {'text': c}) for c in
                          ('/usr', '/bin', '/t5a', '_dis', 'play', '.bin')], posts
         posts[:] = []
-        gui_gate.key(text=r'C:\dir')          # `\` は展開されず YEN キーへ
+        gui_gate.key(text=r'C:\\dir')         # `\\` → YEN キー 1 個
         assert posts == [('/api/key', {'text': 'C:\\d'}),
                          ('/api/key', {'text': 'ir'})], posts
         posts[:] = []
+        gui_gate.key(text=r'C:\dir', escapes=False)   # 素通しも従来どおり使える
+        assert posts == [('/api/key', {'text': 'C:\\d'}),
+                         ('/api/key', {'text': 'ir'})], posts
+        # **肝**: `\\x41` は「`\` 1 個 + 文字列 x41」で、逃がした 0x41 ではない。
+        # `\\` を最優先で食わないとこの区別が壊れる。
+        posts[:] = []
+        gui_gate.key(text=r'a\\x41b')        # 5 文字なので 4 + 1 に割れる
+        assert posts == [('/api/key', {'text': 'a\\x4'}),
+                         ('/api/key', {'text': '1b'})], posts
+        posts[:] = []
+        gui_gate.key(text=r'a\x41b')          # こちらは文字 A
+        assert posts == [('/api/key', {'text': 'aAb'})], posts
+        # 末尾の単独 `\` は黙って捨てず断る
+        try:
+            gui_gate.key(text='oops\\')
+            raise AssertionError('末尾の単独 `\\` を断っていない')
+        except ValueError:
+            pass
+        posts[:] = []
         gui_gate.key(seq='SHIFT+SPACE')       # K5
         assert posts == [('/api/key', {'seq': 'SHIFT+SPACE'})], posts
-        # escapes=True でも 4 文字の分割は残り、記法の途中では切れない。
+        # 4 文字の分割は残り、記法の途中では切れない。
         posts[:] = []
-        gui_gate.key(text=r'abcdef\x1bghi', escapes=True)
+        gui_gate.key(text=r'abcdef\x1bghi')
         assert posts == [('/api/key', {'text': 'abcd'}),
                          ('/api/key', {'text': 'ef'}),
                          ('/api/key', {'seq': 'ESC'}),

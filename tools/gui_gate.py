@@ -25,6 +25,7 @@ CUI へ戻る経路について (G5 で ESC の即時切替と上部バーを撤
 import argparse
 import os
 import sys
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -69,58 +70,62 @@ def _byte_to_step(b):
                      "(0x00 / 0x1c〜0x1f / 0x80 以上)。かなや漢字は FEP 経由で" % b)
 
 
+_ESC_RE = re.compile(r"\\\\|\\x[0-9A-Fa-f]{2}|\\.", re.S)
+
+
 def expand_escapes(text):
     """`\\xNN` `\\e` `\\n` `\\r` `\\t` `\\b` `\\\\` を注入の手順に展開する。
 
     返り値は ("text", 文字列) / ("seq", コード) の列。隣り合う文字はまとめて返すので、
-    呼び手は text の塊だけを 4 文字ずつに切ればよい (**記法の途中では切れない**)。"""
+    呼び手は text の塊だけを 4 文字ずつに切ればよい (**記法の途中では切れない**)。
+
+    **`\\\\` を最優先で食う**のが肝 (`_ESC_RE` の並び)。`\\\\x41` は
+    「`\\` 1 個 + 文字列 `x41`」であって「逃がした 0x41」ではない。左から順に
+    食わないとこの区別が壊れる。"""
     steps = []
     buf = []
-    i = 0
+    pos = 0
 
     def flush():
         if buf:
             steps.append(("text", "".join(buf)))
             del buf[:]
 
-    while i < len(text):
-        c = text[i]
-        if c != "\\":
-            buf.append(c)
-            i += 1
+    for m in _ESC_RE.finditer(text):
+        buf.extend(text[pos:m.start()])
+        tok = m.group(0)
+        pos = m.end()
+        if tok == "\\\\":
+            buf.append("\\")            # YEN キー = PC-98 の `\`
             continue
-        if i + 1 >= len(text):
-            raise ValueError("末尾が単独の `\\`。`\\` 自身は `\\\\` と書く")
-        n = text[i + 1]
-        if n == "\\":
-            buf.append("\\")          # YEN キー = PC-98 の `\`
-            i += 2
-            continue
-        if n == "x":
-            hx = text[i + 2:i + 4]
-            if len(hx) != 2 or hx[0] not in _HEX or hx[1] not in _HEX:
-                raise ValueError("`\\x` は 16 進 2 桁: %r" % text[i:i + 4])
-            step, i = _byte_to_step(int(hx, 16)), i + 4
-        elif n in _ESC_CHR:
-            step, i = _byte_to_step(_ESC_CHR[n]), i + 2
+        if tok[1] == "x":
+            step = _byte_to_step(int(tok[2:], 16))
+        elif tok[1] in _ESC_CHR:
+            step = _byte_to_step(_ESC_CHR[tok[1]])
         else:
-            raise ValueError("未知の逃がし記法 `\\%s`" % n)
+            raise ValueError("未知の逃がし記法 `%s`" % tok)
         if step[0] == "text":
             buf.append(step[1])
         else:
             flush()
             steps.append(step)
+    tail = text[pos:]
+    if tail.endswith("\\"):
+        raise ValueError("末尾が単独の `\\`。`\\` 自身は `\\\\` と書く")
+    buf.extend(tail)
     flush()
     return steps
 
 
-def key(seq=None, text=None, escapes=False):
+def key(seq=None, text=None, escapes=True):
     """文字列は 4 文字ずつ送る。raw リングは 32 エントリ (make+break で 1 文字 2 本) しか
     無く、長い text を一度に注入すると後ろが落ちる (2026-09-06: Run... のパスが
     `/usr/bin/gui_dem` で切れた)。8 文字 / 0.3 秒でも 9801 (planar) でアプリ実行中は
     WM の drain が追いつかず 2 文字落ちた (2026-09-07: `v12_api_test.n`) ので 4 文字に。
 
-    `escapes=True` のときだけ `\\xNN` などを解く (既定は off = 今までと完全に同じ経路)。
+    `\\xNN` などの逃がし記法は**既定で有効** (2026-09-18)。`\\` 自身を送るなら `\\\\` と書く。
+    素通しにしたいときだけ `escapes=False`。ツリー内に `text=` で `\\` を送る利用者は
+    **調査の結果 1 件も無かった**ので、既定を有効にしても既存の台本は壊れない。
     制御文字は `seq=` の和音に化けるので、**4 文字の分割が記法の途中で切れることは無い**。"""
     if text is not None:
         steps = expand_escapes(text) if escapes else [("text", text)]
