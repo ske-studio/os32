@@ -6,6 +6,9 @@
 引き継ぎ: [`../agents/HANDOVER_2026-09-16.md`](../agents/HANDOVER_2026-09-16.md) §7-2 の 3 段目。
 前段: [`TASK_TEST_RESULT.md`](TASK_TEST_RESULT.md) (**受入完了**。終了コード 0/1/2 と
 集計行 `<名前>: PASS n/m` は landed)。
+実装: `tools/guest_tests.py` (ランナー) / `tools/tests/guest_tests.txt` (走らせる一覧) /
+`make check-guest` (本番) / `make check-guest-host` (受入 R7 のホスト試験)。
+記録は tools/tests/guest_tests_tdd.md。
 
 ## 0. 目的
 
