@@ -431,6 +431,32 @@ check-host-lib-host:
 check-result-conv-host:
 	python3 -B tools/tests/test_result_conv.py --target --mutate
 
+# ゲストで一括実行してホストで集計するランナー (票 docs/tasks/test/
+# TASK_TEST_RUNNER.md)。**2 つのターゲットは別物なので混ぜないこと。**
+#
+#   check-guest-host  ランナーの**ホスト試験** (受入 R7)。NP21/W に触らない。
+#                     生成 (一覧 → 平らなスクリプト) と集計 (出力 → 判定) は
+#                     エミュレータにも時計にも触らない純関数に切ってあるので、
+#                     贋物の入力だけで全部踏める。**そこが壊れていたらゲストで
+#                     回しても意味がない**ので、これは `check` の列に入れる
+#                     (実物の tools/guest_tests.py を書き換えて戻す変異試験を
+#                     持つので check-mut 側 = 逐次)。
+#                     --mutate の否定側: 食い違い (0 なのに FAIL) の見逃し /
+#                     見張りが発火しない / 固まった試験を名指ししない /
+#                     /host が無いのに合格にする / 落ちた試験 (139) で後続を
+#                     打ち切る / 前回の出力が混ざる (R8)。
+#                     記録は tools/tests/guest_tests_tdd.md。
+#
+#   check-guest       **本番。ゲストで実際に走らせる。**`make check` の列には
+#                     入れない — NP21/W が動いている必要があり ([D1] の領域)、
+#                     `make check` はホストだけで完結する約束だから (票 §4)。
+#                     走らせる一覧は tools/tests/guest_tests.txt。
+check-guest-host:
+	python3 -B tools/tests/test_guest_tests.py --mutate
+
+check-guest:
+	python3 tools/guest_tests.py
+
 # kstring の C 版 (移植性準備の順序 4-b)。実物の lib/kstring_asm.asm (nasm) と
 # 実物の lib/kstring_c.c を **同じ実行ファイルにリンク**し、13 本すべてを同じ
 # 入力で突き合わせる (戻り値とバッファの全内容が一致すること)。x86 の既定
@@ -519,9 +545,9 @@ check:
 
 check-par: check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host
 
-check-mut: check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host
+check-mut: check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-memmap check-memmap-host sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
+.PHONY: check-memmap check-memmap-host sdk sdk-dist clean-sdk check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check
