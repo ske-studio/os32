@@ -1,6 +1,6 @@
 # TASK_KEY_INJECT — キー注入で任意のバイトを送れるようにする
 
-> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **計画 (2026-09-17)**
+> 発行: PM (Claude Code `claude-opus-5`、2026-09-17) / 状態: **受入完了 (2026-09-18)** — K1〜K6 合格、K7 はエディタ側
 
 基点: `feat/gui` = `5459b20`。
 発見: [`../gui/TASK_EDIT_GUI.md`](../gui/TASK_EDIT_GUI.md) §7-2 (受入 E2〜E7 がこれで止まった)。
@@ -141,3 +141,38 @@ FEP は **SHIFT+SPACE** で起動する。`seq=SHIFT+SPACE` は既にあり、
 - OS32 本体の変更。**検証の側の穴**。
 - 実機のシリアル経由の入力 ([`../realhw/PLAN.md`](../realhw/PLAN.md) の段 3)。**別の話**。
 - マウスの注入。今は困っていない。
+
+---
+
+## 6. 受入 (PM、2026-09-18)
+
+`np21w-src` で `make build` → **NP21/W を停止** (`tools/np21w_restart.py` の
+`stop_np21w`、プロセス 0 を確認) → **`make deploy`** (exe を Windows へミラー、
+3,065,856 → 3,066,368 バイト) → 起動。
+
+| ID | 操作 | 結果 |
+|---|---|---|
+| K1 | `text=ABC` | **合格**。画面に `echo ABC_xyz` → `ABC_xyz`。修正前は `abc_xyz` |
+| K2 | `text=abc` | **合格** (同じ行の `_xyz` が小文字のまま) |
+| K3 | 記号 | **合格** (`_` が退行していない)。ホスト試験でも全記号を照合 |
+| K5 | `seq=` の名前解決 | ホスト試験で不変を確認 |
+| K6 | 既存の台本 | **合格**。`gui_gate.post` を差し替えて**送信バイト列が同一**であることを機械で照合。`escapes=False` が既定なので**構造的に**変わらない |
+| K4 | 逃がし記法 | ホスト試験で確認。**ゲストでの実地は未実施** ([V4]) |
+| K7 | エディタの E2〜E7 | **これから** ([`../gui/TASK_EDIT_GUI.md`](../gui/TASK_EDIT_GUI.md)) |
+
+起動後 `protected_mode=1` / `fault_generation=0`。
+
+### エミュレータの入れ替え手順 (既存の道具)
+
+    python3 -c "import sys;sys.path.insert(0,'tools');import np21w_restart as r;r.stop_np21w()"
+    # プロセスが 0 になったことを確かめる
+    cd /home/hight/np21w-src && make deploy
+    python3 -c "import sys;sys.path.insert(0,'tools');import np21w_restart as r;r.start_np21w()"
+
+**稼働中は exe が掴まれているので置き換えられない。** 必ず止めてから。
+
+### 共有リポジトリを汚していない
+
+`np21w-src` には他人の未コミット作業が 13 件ある。作業後も
+`aidebug_keys.cpp` が増えた **14 件のみ**で、`git` の変更操作は一切していない。
+**この修正もコミットしていない** — 他人の作業と混ざるため、コミットは持ち主に委ねる。
