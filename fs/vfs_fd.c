@@ -433,9 +433,10 @@ u32 vfs_get_size(int fd)
 int vfs_isatty(int fd)
 {
     if (fd == 0 || fd == 1 || fd == 2) {
-        /* リダイレクト中はTTYではない */
-        if (fd_is_redirected(fd)) return 0;
-        return 1;
+        /* 「端末か」は「種別がキャラクタデバイスか」と同じ問い。判定は
+         * fd_redirect_ifmt() 1 か所から引く — vfs_fstat も同じ関数を引くので、
+         * 2 つの API が食い違えない ([C4]、票 TASK_FSTAT_REDIR §3-1)。 */
+        return (fd_redirect_ifmt(fd, (int *)0) == OS_S_IFCHR) ? 1 : 0;
     }
     if (fd < 0 || fd >= VFS_MAX_OPEN_FILES) return VFS_ERR_INVAL;
     if (!open_files[fd].in_use) return VFS_ERR_INVAL;
@@ -448,17 +449,39 @@ int vfs_fstat(int fd, OS32_Stat *buf)
     if (!buf) return VFS_ERR_INVAL;
 
     if (fd == 0 || fd == 1 || fd == 2) {
-        /* Standard I/O / TTY */
+        /* 種別は vfs_isatty と**同じ 1 か所**から引く ([C4])。
+         * 2026-09-17 まで無条件で S_IFCHR と答えていたので、`prog > file` の
+         * 間だけ isatty と食い違っていた (票 TASK_FSTAT_REDIR §1)。 */
+        int file_fd = -1;
+        u16 ifmt = fd_redirect_ifmt(fd, &file_fd);
         int i;
-        u8 *p = (u8 *)buf;
-        for (i = 0; i < sizeof(OS32_Stat); i++) p[i] = 0;
-        
+        u8 *p;
+
+        /* ファイルへ向いているなら**その実体**を答える。大きさ・時刻・
+         * st_dev は開いている FD の経路をそのまま通るので、`stat <path>` と
+         * `fstat 1` が同じ値になる。 */
+        if (ifmt == OS_S_IFREG) {
+            if (file_fd < 3 || file_fd >= VFS_MAX_OPEN_FILES) {
+                /* fd_redirect_to_file は vfs_open に失敗したら
+                 * FD_TARGET_FILE にしないので、ここには来ないはず。
+                 * 来たら「答えられない」— 作り話をしない。 */
+                return VFS_ERR_INVAL;
+            }
+            return vfs_fstat(file_fd, buf);
+        }
+
+        /* コンソール (S_IFCHR) とパイプ (S_IFIFO)。どちらも実体を持たない */
+        p = (u8 *)buf;
+        for (i = 0; i < (int)sizeof(OS32_Stat); i++) p[i] = 0;
+
         buf->st_dev = 0;
-        buf->st_ino = fd + 1; /* Dummy inode */
-        buf->st_mode = OS_S_IFCHR | OS_S_IRUSR | OS_S_IWUSR | OS_S_IRGRP | OS_S_IWGRP | OS_S_IROTH | OS_S_IWOTH; /* 0666 */
+        buf->st_ino = (u32)(fd + 1); /* Dummy inode */
+        buf->st_mode = (u16)(ifmt | OS_S_IRUSR | OS_S_IWUSR | OS_S_IRGRP |
+                             OS_S_IWGRP | OS_S_IROTH | OS_S_IWOTH); /* 0666 */
         buf->st_nlink = 1;
-        
-        /* Times are 0 (Unix epoch start) for dummy TTY */
+
+        /* 時刻は 0 (Unix epoch)。パイプの st_size も 0 — POSIX でも未規定で、
+         * バッファの残量を返すと「これだけ読める」と誤解される。 */
         return VFS_OK;
     }
 

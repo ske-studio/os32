@@ -141,10 +141,31 @@ void fd_redirect_reset_owned(int owner)
 /*  状態問い合わせ                                                          */
 /* ======================================================================== */
 
+/* fd 0/1/2 の種別を答える**唯一の場所** ([C4]、票 TASK_FSTAT_REDIR §3-1)。
+ * 契約は fd_redirect.h のコメントにある。ここを変えれば isatty も fstat も
+ * fd_is_redirected も一緒に動く — 片方だけ直せない形にするための 1 本。 */
+u16 fd_redirect_ifmt(int fd, int *out_file_fd)
+{
+    if (out_file_fd) *out_file_fd = -1;
+    if (fd < 0 || fd > 2) return OS_S_IFCHR;
+
+    switch (redir_table[fd].target_type) {
+    case FD_TARGET_FILE:
+        if (out_file_fd) *out_file_fd = redir_table[fd].file_fd;
+        return OS_S_IFREG;
+    case FD_TARGET_BUFFER:
+        /* パイプは名前を持たない FIFO。**キャラクタデバイスではない** —
+         * S_IFCHR と答えると isatty() が 0 を返すのと食い違う。 */
+        return OS_S_IFIFO;
+    default:
+        return OS_S_IFCHR;
+    }
+}
+
 int fd_is_redirected(int fd)
 {
     if (fd < 0 || fd > 2) return 0;
-    return (redir_table[fd].target_type != FD_TARGET_CONSOLE);
+    return (fd_redirect_ifmt(fd, (int *)0) != OS_S_IFCHR);
 }
 
 /* ======================================================================== */

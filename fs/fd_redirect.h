@@ -10,6 +10,7 @@
 #define FD_REDIRECT_H
 
 #include "types.h"
+#include "os32_kapi_shared.h"   /* OS_S_IF* (fd_redirect_ifmt の戻り値) */
 
 /* リダイレクトターゲットの種類 */
 #define FD_TARGET_CONSOLE  0   /* デフォルト: コンソール (TTY) */
@@ -74,7 +75,26 @@ void fd_redirect_reset(int fd);
 /* 指定所有者が設定したリダイレクトだけを解除する (exec_exit の安全網用) */
 void fd_redirect_reset_owned(int owner);
 
-/* リダイレクト状態の問い合わせ
+/* ======== fd 0/1/2 の種別 ([C4] ここが唯一の管理元) ======== */
+/*
+ * 「その fd はいま**何に**繋がっているか」を答えるのはこの関数だけ。
+ * `vfs_isatty` / `vfs_fstat` / `fd_is_redirected` は 3 つともここから導く。
+ *
+ * 2026-09-17 まで `vfs_isatty` は fd_is_redirected() を見て、`vfs_fstat` は
+ * fd 0/1/2 を**無条件で S_IFCHR** と答えていた。対話で叩く限りどちらも
+ * 正しく見えるが、`stat_t > file` のように出力を向け直すと**同じ fd に
+ * ついて 2 つの API が食い違う** (票 docs/tasks/test/TASK_FSTAT_REDIR.md)。
+ * 判定が 2 か所にあると必ずまた割れるので、引ける場所を 1 つにする。
+ *
+ *   戻り値      OS_S_IFCHR  コンソール (端末)
+ *               OS_S_IFREG  ファイルへリダイレクト中
+ *               OS_S_IFIFO  メモリバッファ = パイプ
+ *   out_file_fd OS_S_IFREG のときだけ実ファイルの FD、他は -1。NULL 可。
+ *   fd が 0/1/2 でなければ OS_S_IFCHR / -1 (呼び手が別経路で扱う)。
+ */
+u16 fd_redirect_ifmt(int fd, int *out_file_fd);
+
+/* リダイレクト状態の問い合わせ (fd_redirect_ifmt から導く)
  * 戻り値: 1=リダイレクト中, 0=コンソールモード */
 int fd_is_redirected(int fd);
 

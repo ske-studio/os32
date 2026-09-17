@@ -472,8 +472,11 @@ typedef void (*DirCallback)(const DirEntry_Ext *entry, void *ctx);
 /* UNIX時間に準拠した 32-bit (符号なし) エポック秒 (1970年1月1日〜) */
 typedef u32 os_time_t;
 
-/* ファイル種別 (st_mode の S_IFMT ビットマスク) */
+/* ファイル種別 (st_mode の S_IFMT ビットマスク)。
+ * 値は POSIX の S_IF* と同じ。パス名で開けるのは DIR / REG / CHR の 3 つで、
+ * FIFO は `fstat` でしか出てこない (パイプ中の fd 0/1/2、票 TASK_FSTAT_REDIR)。*/
 #define OS_S_IFMT   0xF000
+#define OS_S_IFIFO  0x1000 /* パイプ (名前を持たない FIFO) */
 #define OS_S_IFCHR  0x2000 /* キャラクタデバイス */
 #define OS_S_IFDIR  0x4000 /* ディレクトリ */
 #define OS_S_IFREG  0x8000 /* 通常ファイル */

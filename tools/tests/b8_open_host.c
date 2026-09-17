@@ -457,6 +457,8 @@ int ide_get_info(int drive, IdeInfo *info)
 
 /* ---- fs/vfs_fd.c の境界 (コンソール / リダイレクト / 所有者タグ) ---- */
 int fd_is_redirected(int fd) { (void)fd; return 0; }
+u16 fd_redirect_ifmt(int fd, int *out_file_fd)
+{ (void)fd; if (out_file_fd) *out_file_fd = -1; return OS_S_IFCHR; }
 int fd_redirect_read(int fd, void *buf, u32 size)
 { (void)fd; (void)buf; (void)size; return VFS_ERR_INVAL; }
 int fd_redirect_write(int fd, const void *buf, u32 size)

@@ -341,6 +341,7 @@ int rconv_printf(const char *fmt, ...)
 
 static int fk_stat_ok;        /* sys_stat が 0 を返すか                    */
 static int fk_isatty_ok;      /* sys_isatty(1) が 1 を返すか               */
+static u16 fk_fstat_ifmt;     /* sys_fstat が返す種別 (S_IFCHR / S_IFREG)  */
 static int fk_font_rc;        /* kcg_load_font の返り値                    */
 static int fk_write_short;    /* fd 1 **以外**が要求より 1 バイト少なく返す */
 static int fk_res_ok;         /* FD / パイプ / リダイレクトが回収されたか  */
@@ -387,7 +388,7 @@ static int fk_sys_fstat(int fd, OS32_Stat *st)
     if (!fk_stat_ok) return -1;
     if (st) {
         memset(st, 0, sizeof(*st));
-        st->st_mode = OS_S_IFCHR;
+        st->st_mode = (u16)(fk_fstat_ifmt ? fk_fstat_ifmt : OS_S_IFCHR);
     }
     return 0;
 }
@@ -504,6 +505,7 @@ static void fake_api_init(u32 version)
     g_fake.sys_pipe_free = fk_sys_pipe_free;
     g_fake.sys_redirect_fd = fk_sys_redirect_fd;
     fk_pipes = 0;
+    fk_fstat_ifmt = OS_S_IFCHR;
     fk_fd1_chunk = 0;
     fk_fd1_rc = 0;
     fk_fd1_over = 0;
@@ -803,9 +805,20 @@ static void t_programs(void)
 
     /* --- stat_t: 4 項目。FS が応えるかどうかで合否が動く ----------------- */
     fake_api_init(60);
-    fk_stat_ok = 1; fk_isatty_ok = 1;
-    run_prog(stat_t_main, "stat_t", 'P', "stat/fstat/isatty が全部応える");
-    fk_stat_ok = 0; fk_isatty_ok = 0;
+    fk_stat_ok = 1; fk_isatty_ok = 1; fk_fstat_ifmt = OS_S_IFCHR;
+    run_prog(stat_t_main, "stat_t", 'P', "対話: stat/fstat/isatty が全部応える");
+    /* 票 TASK_FSTAT_REDIR の受入 F2 — `stat_t > file`。fd 1 はファイルなので
+     * **2 つの API が揃って「端末ではない」と言うなら合格**。2026-09-17 まで
+     * stat_t は「S_IFCHR である」「isatty が 1」を別々に主張していたので、
+     * ここは必ず FAIL 4/5 だった (ランナーが暴いた場面そのもの)。 */
+    fk_stat_ok = 1; fk_isatty_ok = 0; fk_fstat_ifmt = OS_S_IFREG;
+    run_prog(stat_t_main, "stat_t", 'P',
+             "> file: fstat も isatty も端末ではないと言う");
+    /* 食い違い — fstat は S_IFCHR と言うのに isatty は 0 (§1 の不具合)。
+     * **一致の主張にした後だけ**これを捕まえられる。 */
+    fk_stat_ok = 1; fk_isatty_ok = 0; fk_fstat_ifmt = OS_S_IFCHR;
+    run_prog(stat_t_main, "stat_t", 'F', "fstat と isatty が食い違う");
+    fk_stat_ok = 0; fk_isatty_ok = 0; fk_fstat_ifmt = OS_S_IFCHR;
     run_prog(stat_t_main, "stat_t", 'F', "FS が応えない");
 
     /* --- restest: 引数で場面が変わる。引数不正は SKIP (票 §2-1) ---------- */

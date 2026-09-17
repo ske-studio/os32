@@ -26,6 +26,28 @@ static void check(int cond, const char *label)
     }
 }
 
+/* fstat と isatty が**同じことを言っている**か (票 TASK_FSTAT_REDIR §3-2)。
+ *
+ *   fstat(fd) が S_IFCHR  <->  isatty(fd) == 1
+ *
+ * 「isatty(1) == 1」や「fd 1 はキャラクタデバイス」を単独で主張すると、
+ * **対話で叩いたときしか真にならない**。ランナーは `stat_t > file` で回すので
+ * fd 1 はファイルになり、必ず偽になる。一致だけを見れば対話でもリダイレクト
+ * でも成り立ち、2 つの API の**食い違いそのもの**を捕まえる。
+ * 2026-09-17 の不具合 (fstat がリダイレクトを見ず無条件で S_IFCHR) は、
+ * この形の主張なら最初から落ちていた。 */
+static int stat_t_agrees(KernelAPI *api, int fd)
+{
+    OS32_Stat st;
+    int chr;
+    int tty;
+
+    if (api->sys_fstat(fd, &st) != 0) return 0;
+    chr = ((st.st_mode & OS_S_IFMT) == OS_S_IFCHR) ? 1 : 0;
+    tty = (api->sys_isatty(fd) == 1) ? 1 : 0;
+    return chr == tty;
+}
+
 int main(int argc, char **argv, KernelAPI *api)
 {
     OS32_Stat st;
@@ -53,19 +75,21 @@ int main(int argc, char **argv, KernelAPI *api)
     /* テスト2: 標準出力の sys_fstat */
     rc = api->sys_fstat(1, &st);
     check(rc == 0, "fstat fd=1 (stdout) success");
-    if (rc == 0) {
-        /* 簡単なフラグ確認: S_IFCHRが含まれているか */
-        check((st.st_mode & OS_S_IFCHR) != 0, "fd=1 is a character device");
-    } else {
-        check(0, "fd=1 is a character device");
-    }
 
-    /* テスト3: 無効なファイルの sys_stat */
+    /* テスト3: fd 1 について fstat と isatty が一致する。
+     * 2026-09-17 まではここが「fd=1 is a character device」と
+     * 「isatty(1) == 1」の 2 本の**別々の**主張だった。どちらも対話でしか
+     * 真にならず、しかも fstat 側はリダイレクト中でも S_IFCHR と答えて
+     * いたので、ランナーが `stat_t > file` で回して初めて割れた。 */
+    check(stat_t_agrees(api, 1), "fstat(1) S_IFCHR <-> isatty(1)==1 (agree)");
+
+    /* テスト4: 無効なファイルの sys_stat */
     check(api->sys_stat("NONEXIST.TXT", &st) != 0,
           "stat NONEXIST.TXT correctly failed");
 
-    /* テスト4: 先ほど実装した sys_isatty の確認 */
-    check(api->sys_isatty(1) == 1, "isatty(1) == 1");
+    /* テスト5: fd 0 でも同じ。パイプ (`cmd | stat_t`) では fd 0 がバッファに
+     * なるので、fd 1 だけ見ていると同じ穴をもう一度踏む。 */
+    check(stat_t_agrees(api, 0), "fstat(0) S_IFCHR <-> isatty(0)==1 (agree)");
 
     return os32_test_summary(api, "stat_t", g_passed, g_total);
 }

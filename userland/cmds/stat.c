@@ -66,6 +66,7 @@ static const char *stat_type_name(u16 mode)
     case OS_S_IFREG: return "FILE";
     case OS_S_IFDIR: return "DIR";
     case OS_S_IFCHR: return "DEV";
+    case OS_S_IFIFO: return "FIFO";   /* パイプ。パス名では出てこない */
     default:         return "UNKNOWN";
     }
 }
