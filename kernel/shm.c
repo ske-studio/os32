@@ -22,16 +22,26 @@
  * 食い違うとガードページの位置やゼロクリア範囲が実帯域からずれる。 */
 STATIC_ASSERT(SHM_TOTAL_SIZE == MEM_SHM_SIZE, shm_size_matches_memmap);
 
-/* GUI 予約 (契約 T2): ブロック 12〜15 = MEM_SHM_GUI_BASE から 4 ブロック。
- * 先頭とサイズがブロック境界に乗っていること、SHM 帯に収まることを固定する。 */
-#define SHM_GUI_BLOCK_FIRST  ((int)((MEM_SHM_GUI_BASE - MEM_SHM_BASE) / SHM_BLOCK_SIZE))
+/* GUI 予約 (契約 T2): SHM 帯の **末尾 4 ブロック**。
+ * 先頭とサイズがブロック境界に乗っていること、SHM 帯に収まることを固定する。
+ *
+ * 2026-09-17 (決裁 D1): 下の 2 本は 2026-09-17 まで **黙って死んでいた**。
+ * 条件に MEM_SHM_GUI_BASE / MEM_SHM_BASE (= (u32)&__bss_end 由来) が入って
+ * いたため C の整数定数式にならず、GCC はファイルスコープの可変長配列として
+ * 警告だけ出して通していた (本番ビルドのログに毎回出ていた)。
+ * MEM_SHM_GUI_OFFSET (= MEM_SHM_SIZE - MEM_SHM_GUI_SIZE、純粋な定数式) で
+ * 書き直して生き返らせた。**条件に浮動番地を混ぜないこと。** */
+#define SHM_GUI_BLOCK_FIRST  ((int)(MEM_SHM_GUI_OFFSET / SHM_BLOCK_SIZE))
 #define SHM_GUI_BLOCK_COUNT  ((int)(MEM_SHM_GUI_SIZE / SHM_BLOCK_SIZE))
-STATIC_ASSERT((MEM_SHM_GUI_BASE - MEM_SHM_BASE) % SHM_BLOCK_SIZE == 0, shm_gui_base_aligned);
+STATIC_ASSERT(MEM_SHM_GUI_OFFSET % SHM_BLOCK_SIZE == 0, shm_gui_base_aligned);
 STATIC_ASSERT(MEM_SHM_GUI_SIZE % SHM_BLOCK_SIZE == 0, shm_gui_size_aligned);
 STATIC_ASSERT(GUI_SLOT_SIZE == SHM_BLOCK_SIZE, shm_gui_slot_is_block);
 STATIC_ASSERT(SHM_GUI_BLOCK_COUNT == GUI_SLOT_MAX, shm_gui_slot_count);
-STATIC_ASSERT((MEM_SHM_GUI_BASE + MEM_SHM_GUI_SIZE) <= (MEM_SHM_BASE + SHM_TOTAL_SIZE),
+STATIC_ASSERT(MEM_SHM_GUI_OFFSET + MEM_SHM_GUI_SIZE <= SHM_TOTAL_SIZE,
               shm_gui_within_band);
+/* 予約が帯の **末尾** にあること (先頭からの決め打ちに戻したら落ちる) */
+STATIC_ASSERT(MEM_SHM_GUI_OFFSET + MEM_SHM_GUI_SIZE == MEM_SHM_SIZE,
+              shm_gui_is_last_blocks);
 
 /* ブロック管理テーブル */
 static u8 shm_state[SHM_BLOCK_COUNT]; /* 各ブロックの状態 */

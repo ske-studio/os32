@@ -20,11 +20,14 @@
 /*    0xF0000 - 0xFFFFF : R/O  (BIOS ROM)                                   */
 /*                                                                          */
 /*  [拡張メモリ]                                                            */
-/*    0x100000 - 0x1FAFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM)       */
-/*    0x1FB000 - 0x1FBFFF : NP   (カーネルスタックガード)                    */
-/*    0x1FC000 - 0x1FFFFF : R/W  (カーネルスタック, 16KB)                    */
-/*    0x200000 - 0x23FFFF : R/W  (SQLite帯域: code+BSS+代替スタック)      */
-/*    0x240000 - 0x2FFFFF : NP   (カーネル予約)                              */
+/*    0x100000 - 0x1FFFFF : R/W  (カーネル帯域: code+heap+KAPI+SHM。末尾の  */
+/*                                SHM 後方予約だけ NP。番地は __bss_end 由来 */
+/*                                で浮くので、実値は docs/02_memory.md §2-1) */
+/*    0x200000 -          : R/W  (SQLite帯域: code+BSS+代替スタック)      */
+/*             - 0x2FAFFF : NP   (カーネル予約)                              */
+/*    0x2FB000 - 0x2FBFFF : NP   (カーネルスタックガード)                    */
+/*    0x2FC000 - 0x2FFFFF : R/W  (カーネルスタック, 16KB。2026-09-17 に      */
+/*                                0x1FC000 から移設 — 決裁 D1)               */
 /*    0x300000 - 0x3FFFFF : R/W  (シェル常駐帯域, ガード付き)             */
 /*    0x400000 - 0x4FFFFF : R/O+U(共有ライブラリ帯域: .text/.rodata。      */
 /*                                .data/.bss はアプリ PD ごとに差し替え)   */
@@ -45,14 +48,56 @@
 #include "pgalloc.h"
 
 /* カーネルスタック帯のレイアウト不変条件。
- * ガードページはスタック直下に隣接し、スタックは 2MB 境界 (SQLite 帯域)
- * の手前で終わる。ずれると paging_init の R/W 強制やガード設定が
- * 意図しないページに掛かる。 */
+ * ガードページはスタック直下に隣接する。ずれると paging_init の R/W 強制や
+ * ガード設定が意図しないページに掛かる。
+ * 2026-09-17 (決裁 D1): スタックはカーネル帯域の末尾から **SQLite 帯域の
+ * 末尾** へ移った。カーネル帯域は KHEAP_BASE 以降が浮くので、固定番地の
+ * スタックを同じ帯に置くと育ったぶんが必ずぶつかる。 */
 STATIC_ASSERT(MEM_STACK_GUARD_END + 1 == MEM_KSTACK_BASE,
               kstack_guard_adjacent);
-STATIC_ASSERT(MEM_KSTACK_TOP < 0x200000UL, kstack_below_sqlite_band);
 STATIC_ASSERT((MEM_STACK_GUARD & (PAGE_SIZE - 1)) == 0,
               kstack_guard_page_aligned);
+/* 浮動番地の帯 (カーネル帯域) の外に居ること = D1 の要点 */
+STATIC_ASSERT(MEM_STACK_GUARD > MEM_KERNEL_BAND_END, kstack_outside_kernel_band);
+/* シェル常駐帯域には食い込まない */
+STATIC_ASSERT(MEM_KSTACK_TOP < MEM_SHELL_LOAD_ADDR, kstack_below_shell_band);
+/* SQLite 帯域の予約域 (NP) はスタックガードの手前で終わる */
+STATIC_ASSERT(MEM_KERNEL_RESV_END < MEM_STACK_GUARD, kernel_resv_below_kstack);
+
+/* ------------------------------------------------------------------------ */
+/*  帯どうしの重なりと範囲の逆転 (票 TASK_KSTACK_USER §4 の 1、決裁 D2)      */
+/*                                                                          */
+/*  **実値 (KHEAP_BASE) では書けない。** KHEAP_BASE は `(u32)&__bss_end`     */
+/*  由来で C の整数定数式ではなく、GCC はファイルスコープの可変長配列と見て  */
+/*  "variably modified at file scope" で落とす — **条件が真でも落ちる**。    */
+/*  (同じ理由で 2026-09-17 まで kernel/shm.c:29,33 の表明 2 本が黙って       */
+/*   死んでいた。今は下の MEM_SHM_GUI_OFFSET で生き返っている。)             */
+/*                                                                          */
+/*  そこで **「予算いっぱいまで育った場合の配置」** を検査する。上限は       */
+/*  build/os32.ld の ASSERT がリンク時に保証するので、最悪配置で重ならない   */
+/*  なら実配置でも重ならない。最悪配置の番地は全部定数式なので表明できる。   */
+/*                                                                          */
+/*  実値のほうは 2 つで見る: tools/gen_memmap.py --check (make check) と、    */
+/*  ブート自己診断 paging_memmap_selftest (PDE 0 の PTE 1024 本)。           */
+/* ------------------------------------------------------------------------ */
+
+/* 予算そのものが正気か (帯のサイズを増やす変更がここを食い潰したら落ちる) */
+STATIC_ASSERT(MEM_KERNEL_IMAGE_MAX >= 0x40000UL, kernel_image_budget_sane);
+
+/* 最悪配置: SHM 帯 (前方ガード〜後方ガードの末尾) がカーネル帯域に収まる */
+STATIC_ASSERT(MEM_SHM_GUARD_HI_MAX + MEM_GUARD_SIZE - 1 <= MEM_KERNEL_BAND_END,
+              shm_band_within_kernel_band);
+/* 最悪配置: SHM 後方予約が逆転しない (空 = START == END + 1 は許す) */
+STATIC_ASSERT(MEM_SHM_RESV_START_MAX <= MEM_SHM_RESV_END + 1,
+              shm_resv_not_reversed);
+/* 最悪配置: SHM 帯はカーネルスタックガードより下で終わる */
+STATIC_ASSERT(MEM_SHM_GUARD_HI_MAX + MEM_GUARD_SIZE <= MEM_STACK_GUARD,
+              shm_band_below_kstack_guard);
+/* 最悪配置: カーネルスタックの全 16KB が SHM 帯の外 */
+STATIC_ASSERT(MEM_KSTACK_BASE > MEM_SHM_GUARD_HI_MAX + MEM_GUARD_SIZE - 1,
+              kstack_outside_shm_band);
+/* 最悪配置でもヒープと KAPI がカーネル帯域に収まる */
+STATIC_ASSERT(MEM_SHM_GUARD_LO_MAX < MEM_KERNEL_BAND_END, kheap_kapi_within_band);
 
 /* リング3 アプリ帯 PDE (M1b) はアプリ帯域を覆う PDE と一致し、かつ静的
  * page_tables[] の範囲内でなければならない。ここがずれるとアプリ PD が
@@ -113,6 +158,15 @@ static u32 *page_tables[PAGING_PT_COUNT];
 
 static int pg_enabled = 0;
 static u32 live_addrspaces;
+/* 逆転した範囲 (start > end) を渡されて撥ねた回数。
+ *
+ * 範囲 API は前から -1 を返していたが、**呼び側が戻り値を見ていない**ので
+ * 空振りが成功に見えていた (paging_init の
+ * paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END) がまさにそれ)。
+ * 静的な検査 (STATIC_ASSERT / gen_memmap.py) が届かない実行時の呼び出しを
+ * 拾うため、撥ねた回数をカーネルシンボルとして公開し、ブート自己診断で見る。
+ * static にしないのは kselftest_pass と同じ理由 (ホストから emu_read_mem する)。 */
+u32 paging_range_reject_count = 0;
 /* paging_init が実際に恒等マップした範囲の上端 PFN (exclusive)。 */
 static u32 boot_identity_end;
 
@@ -196,8 +250,14 @@ void paging_init(u32 mem_kb)
     /* スタックガードページ: Not-Present */
     paging_set_not_present(MEM_STACK_GUARD, MEM_STACK_GUARD_END);
 
-    /* カーネル帯域内SHM後方予約: Not-Present (スタックガードの手前まで) */
-    paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END);
+    /* カーネル帯域内 SHM 後方予約: Not-Present (カーネル帯域の終端まで)。
+     * カーネルが予算いっぱいまで育つとこの帯は **空** になる
+     * (START == END + 1)。空のときに呼ぶと逆転として撥ねられるので呼ばない。
+     * 逆転 (START > END + 1) は上の STATIC_ASSERT が最悪配置で禁じている。 */
+    if (MEM_SHM_RESV_START <= MEM_SHM_RESV_END)
+        paging_set_not_present(MEM_SHM_RESV_START, MEM_SHM_RESV_END);
+    else if (MEM_SHM_RESV_START > MEM_SHM_RESV_END + 1)
+        paging_range_reject_count++;   /* 逆転 = 設計が壊れている。空とは別 */
 
     /* カーネル予約域 (SQLite帯域後 〜 シェル帯域前): Not-Present */
     paging_set_not_present(MEM_KERNEL_RESV_START, MEM_KERNEL_RESV_END);
@@ -401,7 +461,7 @@ int paging_set_page(u32 virt_addr, u32 phys_addr, u32 flags)
 int paging_map_range(u32 virt_start, u32 virt_end, u32 phys_start, u32 flags)
 {
     u32 count;
-    if (virt_start > virt_end) return -1;
+    if (virt_start > virt_end) { paging_range_reject_count++; return -1; }
     if (virt_start == virt_end) return 0;
     count = ((virt_end - 1) >> PAGE_SHIFT) - (virt_start >> PAGE_SHIFT) + 1;
     return paging_map_phys(virt_start, phys_start, count, flags);
@@ -437,7 +497,7 @@ int paging_pde_clear_user(u32 start, u32 end)
     u32 first = start >> 22;
     u32 last  = end >> 22;
 
-    if (start > end) return -1;
+    if (start > end) { paging_range_reject_count++; return -1; }
 
     for (pdi = first; pdi <= last && pdi < PAGING_PT_COUNT; pdi++) {
         page_directory[pdi] &= ~(u32)PTE_USER;
@@ -453,7 +513,7 @@ int paging_pde_clear_user(u32 start, u32 end)
 int paging_set_readonly(u32 start, u32 end)
 {
     u32 pfn, last;
-    if (start > end) return -1;
+    if (start > end) { paging_range_reject_count++; return -1; }
     last = end >> PAGE_SHIFT;
     for (pfn = start >> PAGE_SHIFT; pfn <= last; pfn++) {
         if (page_tables[pfn / PTE_COUNT])
@@ -469,7 +529,7 @@ int paging_set_readonly(u32 start, u32 end)
 int paging_set_not_present(u32 start, u32 end)
 {
     u32 pfn, last;
-    if (start > end) return -1;
+    if (start > end) { paging_range_reject_count++; return -1; }
     last = end >> PAGE_SHIFT;
     for (pfn = start >> PAGE_SHIFT; pfn <= last; pfn++) {
         if (page_tables[pfn / PTE_COUNT])
@@ -1068,4 +1128,112 @@ int paging_app_band_selftest(void)
         if (pgalloc_free_pages() != base_free) rc |= 16384;
     }
     return rc;
+}
+
+/* ======================================================================== */
+/*  paging_memmap_selftest — 地図 (memmap.h) と実物 (PDE 0 の PTE) の照合     */
+/*  (票 docs/tasks/memory/TASK_KSTACK_USER.md §4 の 3)                       */
+/*                                                                          */
+/*  静的検査 (STATIC_ASSERT / tools/gen_memmap.py) が見るのは「設計が矛盾    */
+/*  していないか」で、ここが見るのは「実装が設計どおりか」。**別のこと**を   */
+/*  見ている。2026-09-17 の穴は前者が無かったので設計に矛盾が入り、後者が    */
+/*  無かったので実装のずれが残った。                                         */
+/*                                                                          */
+/*  期待値は全て memmap.h から引く ([C4])。番地は 1 つも直書きしない。        */
+/*                                                                          */
+/*  **呼ぶのはブート直後 (kselftest_run_post_exec) だけ。** CPL=3 アプリを    */
+/*  起動すると exec が SHM / VRAM / フォント表 / GFX BB を USER へ昇格させ   */
+/*  (PDE 0 は全 PD 共有なので master にも残る)、期待値と合わなくなる。       */
+/* ======================================================================== */
+
+#define MM_NP   0   /* not-present */
+#define MM_RW   1   /* present + RW, supervisor */
+#define MM_RO   2   /* present + RO, supervisor */
+#define MM_ROU  3   /* present + RO + USER (KAPI 踏み台だけ) */
+
+/* 期待値。**固定番地 (スタックとそのガード) を浮動番地 (SHM) より先に見る。**
+ * 逆にすると、SHM がスタックを飲んでいる今の状態を「期待どおり」と読んで
+ * しまい、この自己診断そのものが穴を隠す。 */
+static u8 memmap_want_at(u32 a, u32 tramp)
+{
+    if (tramp && a == tramp) return MM_ROU;     /* exec.c の KAPI 踏み台 */
+
+    /* コンベンショナルメモリ */
+    if (a <= MEM_NULL_GUARD_END) return MM_RO;  /* BDA 参照のため R/O */
+    if (a < MEM_CONV_END) return MM_RW;
+    if (a < MEM_BIOS_ROM_START) return MM_RW;   /* VRAM */
+    if (a <= MEM_BIOS_ROM_END) return MM_RO;
+
+    /* カーネル帯域 — ここは KHEAP_BASE 以降が全部浮動番地。
+     * **浮動番地の規則は帯の中にだけ適用する。** 帯の境界 MEM_KERNEL_BAND_END
+     * は固定番地なので、育ちすぎた SHM が境界を越えて「期待どおり」を
+     * 主張してはいけない。そうしないと、予算を超えた配置で SHM 後方ガードが
+     * SQLite 帯の先頭ページを not-present にしても、期待値が同じ壊れた定数から
+     * 作られているせいで一致してしまう (= 自己診断が穴を隠す)。 */
+    if (a >= KERNEL_LOAD_ADDR && a <= MEM_KERNEL_BAND_END) {
+        if (a >= MEM_SHM_GUARD_LO && a < MEM_SHM_BASE) return MM_NP;
+        if (a >= MEM_SHM_BASE && a <= MEM_SHM_END) return MM_RW;
+        if (a >= MEM_SHM_GUARD_HI && a < MEM_SHM_GUARD_HI + PAGE_SIZE)
+            return MM_NP;
+        if (a < MEM_SHM_GUARD_LO) return MM_RW; /* 本体 + ヒープ + KAPI */
+        return MM_NP;                           /* SHM 後方予約 */
+    }
+
+    /* SQLite 帯域 — 固定番地 (スタックとそのガード) を浮動番地 (SQLite の
+     * 代替スタック末尾から決まる予約域) より **先に** 見る。逆にすると、
+     * 予約域がスタックを飲んでいる状態を「期待どおり」と読んでしまう。 */
+    if (a >= MEM_STACK_GUARD && a <= MEM_STACK_GUARD_END) return MM_NP;
+    if (a >= MEM_KSTACK_BASE && a < MEM_SHELL_LOAD_ADDR) return MM_RW;
+    if (a >= MEM_KERNEL_RESV_START && a <= MEM_KERNEL_RESV_END) return MM_NP;
+    if (a < MEM_SHELL_LOAD_ADDR) return MM_RW;  /* SQLite code+BSS+代替スタック */
+
+    /* シェル常駐帯域 */
+    if (a < MEM_SHELL_GUARD) return MM_RW;
+    if (a < MEM_SHELL_GUARD + PAGE_SIZE) return MM_NP;
+    return MM_RW;                               /* スタック + exec_heap */
+}
+
+static u8 memmap_seen_at(u32 pte)
+{
+    if (!(pte & PTE_PRESENT)) return MM_NP;
+    if (pte & PTE_RW) return MM_RW;
+    return (pte & PTE_USER) ? MM_ROU : MM_RO;
+}
+
+/* 食い違った区間 (start, end, want<<4|seen) を先頭から最大 MM_BAD_MAX 本。
+ * static にしないのは kselftest_pass と同じ理由 (ホストから読む)。 */
+u32 paging_memmap_bad[MM_BAD_MAX * 3];
+u32 paging_memmap_bad_count;
+
+int paging_memmap_selftest(u32 tramp_page)
+{
+    u32 i, j, a;
+    u8 want, seen;
+    int runs = 0;
+
+    paging_memmap_bad_count = 0;
+    if (!pg_enabled || !page_tables[0]) return -1;
+
+    i = 0;
+    while (i < PTE_COUNT) {
+        a = i * PAGE_SIZE;
+        want = memmap_want_at(a, tramp_page);
+        seen = memmap_seen_at(page_tables[0][i]);
+        if (want == seen) { i++; continue; }
+        /* 同じ (期待, 実物) の組が続くあいだを 1 本の区間にまとめる */
+        for (j = i + 1; j < PTE_COUNT; j++) {
+            a = j * PAGE_SIZE;
+            if (memmap_want_at(a, tramp_page) != want) break;
+            if (memmap_seen_at(page_tables[0][j]) != seen) break;
+        }
+        if (runs < MM_BAD_MAX) {
+            paging_memmap_bad[runs * 3 + 0] = i * PAGE_SIZE;
+            paging_memmap_bad[runs * 3 + 1] = j * PAGE_SIZE - 1;
+            paging_memmap_bad[runs * 3 + 2] = ((u32)want << 4) | (u32)seen;
+        }
+        runs++;
+        i = j;
+    }
+    paging_memmap_bad_count = (u32)runs;
+    return runs;
 }
