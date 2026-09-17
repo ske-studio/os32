@@ -298,6 +298,97 @@ pub fn list_item_text(id: WidgetId, index: i32, out: &mut [u8]) -> usize {
 }
 
 /* ================================================================ */
+/*  複数行の編集面 WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1)         */
+/*                                                                  */
+/*  **本文は部品に無い。** アプリが本文を持ち、いま見えている行だけを  */
+/*  `textarea_clear` + `textarea_add_row` で写す。1 画面に入らない     */
+/*  ファイルでも部品の側の使用量は一定 (票 §2)。                       */
+/*                                                                  */
+/*  `textbox` (1 行) はそのまま。**触っていない** (受入 E10)。         */
+/* ================================================================ */
+
+/// 複数行の編集面を作る。
+pub fn textarea() -> GuiResult<WidgetId> {
+    let mut id = 0u32;
+    let r = shcall!(
+        sh::E_W_TEXTAREA,
+        extern "C" fn(*mut u32) -> i32,
+        &mut id as *mut u32
+    );
+    mk(r, id)
+}
+
+/// 写してある「見える行」を全部捨てる。
+pub fn textarea_clear(id: WidgetId) -> GuiResult<()> {
+    ok0(shcall!(
+        sh::E_W_TEXTAREA_CLEAR,
+        extern "C" fn(u32) -> i32,
+        id.raw()
+    ))
+}
+
+/// 見える行を 1 本足す (上から順に)。戻りはその相対行番号。
+/// 入り切らなければ `Err(FULL)` — **黙って切り詰めない**。
+pub fn textarea_add_row(id: WidgetId, text: &[u8]) -> GuiResult<i32> {
+    let mut index = 0i32;
+    let r = shcall!(
+        sh::E_W_TEXTAREA_ADD_ROW,
+        extern "C" fn(u32, *const u8, u32, *mut i32) -> i32,
+        id.raw(),
+        text.as_ptr(),
+        text.len() as u32,
+        &mut index as *mut i32
+    );
+    if r < 0 {
+        Err(GuiErr(r))
+    } else {
+        Ok(index)
+    }
+}
+
+/// キャレットを置く (`row` = 見える範囲の先頭からの相対行、`col` = その行の
+/// 先頭からの**バイト数**)。`row < 0` で消す。
+pub fn textarea_set_caret(id: WidgetId, row: i32, col: i32) -> GuiResult<()> {
+    ok0(shcall!(
+        sh::E_W_TEXTAREA_SET_CARET,
+        extern "C" fn(u32, i32, i32) -> i32,
+        id.raw(),
+        row,
+        col
+    ))
+}
+
+/// 矩形に入る行数。アプリはこれを見て見える範囲を切り出す ([C4])。
+pub fn textarea_visible_rows(id: WidgetId) -> i32 {
+    shcall!(
+        sh::E_W_TEXTAREA_VISIBLE_ROWS,
+        extern "C" fn(u32) -> i32,
+        id.raw()
+    )
+}
+
+/// 矩形に入る半角の**桁数** (全角は 2 桁)。折り返しの幅に使う ([C4])。
+pub fn textarea_columns(id: WidgetId) -> i32 {
+    shcall!(
+        sh::E_W_TEXTAREA_COLUMNS,
+        extern "C" fn(u32) -> i32,
+        id.raw()
+    )
+}
+
+/// 溜まった確定文字列を引き取る (引き取ったら空になる)。戻りは写したバイト数。
+/// `out` が短ければ何も渡さず 0 (UTF-8 を割らない)。
+pub fn textarea_take_input(id: WidgetId, out: &mut [u8]) -> usize {
+    shcall!(
+        sh::E_W_TEXTAREA_TAKE_INPUT,
+        extern "C" fn(u32, *mut u8, u32) -> u32,
+        id.raw(),
+        out.as_mut_ptr(),
+        out.len() as u32
+    ) as usize
+}
+
+/* ================================================================ */
 /*  フォーカスとハンドル                                              */
 /* ================================================================ */
 

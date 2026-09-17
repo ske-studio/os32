@@ -11,7 +11,10 @@
 use core::cell::UnsafeCell;
 
 use crate::layout::SizeSpec;
-use os32api::gui::proto::{GUI_MAX_LIST_ITEMS, GUI_MAX_WIDGETS, GUI_MAX_WINDOWS};
+use os32api::gui::proto::{
+    GUI_MAX_LIST_ITEMS, GUI_MAX_TEXTAREA_ROWS, GUI_MAX_WIDGETS, GUI_MAX_WINDOWS,
+    GUI_TEXTAREA_INPUT_CAP, GUI_TEXTAREA_ROW_CAP,
+};
 use os32api::gui::types::{Rect, SurfaceId};
 
 /// ウィジェット 1 個が持てるテキスト長 (UTF-8、NUL を含まない)。
@@ -34,6 +37,14 @@ pub const WK_TEXTBOX: u8 = 4;
 pub const WK_LISTBOX: u8 = 5;
 pub const WK_ROW: u8 = 6;
 pub const WK_COLUMN: u8 = 7;
+/// 複数行の編集面 (票 TASK_EDIT_GUI §2、決裁 A1: **末尾追記**)。
+///
+/// `WK_TEXTBOX` (4) は 1 行のまま**触らない**。既存の利用者 (filer ほか) の
+/// 見え方と振る舞いを変えないため (受入 E10)。
+///
+/// **本文は持たない**。アプリが本文を持ち、いま見えている行だけを
+/// [`TextRow`] プールへ写す。1 画面に入らないファイルでも部品の側は一定。
+pub const WK_TEXTAREA: u8 = 8;
 
 #[inline]
 pub fn is_container(kind: u8) -> bool {
@@ -42,7 +53,11 @@ pub fn is_container(kind: u8) -> bool {
 
 #[inline]
 pub fn is_focusable(kind: u8) -> bool {
-    kind == WK_BUTTON || kind == WK_CHECKBOX || kind == WK_TEXTBOX || kind == WK_LISTBOX
+    kind == WK_BUTTON
+        || kind == WK_CHECKBOX
+        || kind == WK_TEXTBOX
+        || kind == WK_LISTBOX
+        || kind == WK_TEXTAREA
 }
 
 /* ウィジェットの状態ビット */
@@ -85,6 +100,17 @@ pub struct WidgetEnt {
     pub sel: i16,
     pub top: i16,
     pub item_count: i16,
+    /* textarea (WK_TEXTAREA)。**本文は持たない** — 見えている行の本数と、
+     * その中でのキャレット位置だけ。行の実体は `UiState::rows`。 */
+    /// 写してある見える行の本数。
+    pub ta_rows: i16,
+    /// キャレットの行 (見える範囲の先頭からの相対。-1 = 出さない)。
+    pub ta_caret_row: i16,
+    /// キャレットの桁 (その行の先頭からのバイト数)。
+    pub ta_caret_col: i16,
+    /// 溜めておいた確定文字列 (アプリが `textarea_take_input` で引き取る)。
+    pub ta_input: [u8; GUI_TEXTAREA_INPUT_CAP],
+    pub ta_input_len: u8,
 }
 
 impl WidgetEnt {
@@ -110,6 +136,11 @@ impl WidgetEnt {
         sel: -1,
         top: 0,
         item_count: 0,
+        ta_rows: 0,
+        ta_caret_row: -1,
+        ta_caret_col: 0,
+        ta_input: [0; GUI_TEXTAREA_INPUT_CAP],
+        ta_input_len: 0,
     };
 
     #[inline]
@@ -143,6 +174,41 @@ impl ListItem {
         owner: 0,
         index: 0,
         text: [0; ITEM_TEXT_CAP],
+        len: 0,
+    };
+
+    #[inline]
+    pub fn text_slice(&self) -> &[u8] {
+        &self.text[..self.len as usize]
+    }
+}
+
+/* ================================================================ */
+/*  textarea の「見える行」プール (票 TASK_EDIT_GUI §2)               */
+/*                                                                  */
+/*  listbox の項目プールと同じ作り (owner タグ + index)。違うのは     */
+/*  **1 行が 192B** (80 桁 = 全角 40 字 * 3B) であることと、本数が     */
+/*  「1 画面に入る行数」で決まること。ファイルの大きさとは無関係で、  */
+/*  ここが一定だから大きなファイルでも破綻しない。                    */
+/* ================================================================ */
+
+#[derive(Clone, Copy)]
+pub struct TextRow {
+    pub used: bool,
+    /// 所属ウィジェットの index + 1 (0 = 未使用)。
+    pub owner: u16,
+    /// 見える範囲の先頭からの相対行番号。
+    pub index: i16,
+    pub text: [u8; GUI_TEXTAREA_ROW_CAP],
+    pub len: u16,
+}
+
+impl TextRow {
+    pub const EMPTY: TextRow = TextRow {
+        used: false,
+        owner: 0,
+        index: 0,
+        text: [0; GUI_TEXTAREA_ROW_CAP],
         len: 0,
     };
 
@@ -324,6 +390,8 @@ pub struct UiState {
     pub windows: [WinEnt; GUI_MAX_WINDOWS],
     pub widgets: [WidgetEnt; GUI_MAX_WIDGETS],
     pub items: [ListItem; GUI_MAX_LIST_ITEMS],
+    /// textarea の見える行 (全 textarea で共有。契約の上限は共有定数)。
+    pub rows: [TextRow; GUI_MAX_TEXTAREA_ROWS],
     pub paint: PaintQueue,
     /// 1 周分の損傷 (`flush_damage` で `OP_INVALIDATE` にまとめて送る)。
     pub damage: DamageBuf,
@@ -341,6 +409,7 @@ impl UiState {
         windows: [WinEnt::EMPTY; GUI_MAX_WINDOWS],
         widgets: [WidgetEnt::EMPTY; GUI_MAX_WIDGETS],
         items: [ListItem::EMPTY; GUI_MAX_LIST_ITEMS],
+        rows: [TextRow::EMPTY; GUI_MAX_TEXTAREA_ROWS],
         paint: PaintQueue::EMPTY,
         damage: DamageBuf::EMPTY,
         quit: false,
@@ -400,7 +469,7 @@ impl UiState {
         None
     }
 
-    /// ウィジェット 1 個を解放する (リスト項目も)。木からの切り離しは呼び出し側。
+    /// ウィジェット 1 個を解放する (リスト項目・見える行も)。木からの切り離しは呼び出し側。
     pub fn free_widget(&mut self, idx: usize) {
         let gen = self.widgets[idx].generation;
         self.widgets[idx] = WidgetEnt::EMPTY;
@@ -411,6 +480,13 @@ impl UiState {
                 self.items[k] = ListItem::EMPTY;
             }
             k += 1;
+        }
+        let mut r = 0;
+        while r < GUI_MAX_TEXTAREA_ROWS {
+            if self.rows[r].used && self.rows[r].owner == (idx as u16) + 1 {
+                self.rows[r] = TextRow::EMPTY;
+            }
+            r += 1;
         }
     }
 }

@@ -243,8 +243,24 @@ pub const E_CLIP_GET: usize = 108;
 pub const E_CLIP_PUT: usize = 109;
 pub const E_HOST_TIME: usize = 110;
 
+/* --- 111..=117: v1.4 複数行編集 WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1) ---
+ *
+ * `E_W_TEXTBOX` (59) は **1 行のまま**。複数行は新しい種別を末尾に足した
+ * (API_CONTRACTS.md の「末尾追記のみ」に収まる)。
+ *
+ * **部品は本文を持たない。** アプリが本文を持ち、`textarea_clear` +
+ * `textarea_add_row` で「いま見えている行」だけを写す。折り返しの桁は
+ * `textarea_columns`、入る行数は `textarea_visible_rows` から取る ([C4])。 */
+pub const E_W_TEXTAREA: usize = 111;
+pub const E_W_TEXTAREA_CLEAR: usize = 112;
+pub const E_W_TEXTAREA_ADD_ROW: usize = 113;
+pub const E_W_TEXTAREA_SET_CARET: usize = 114;
+pub const E_W_TEXTAREA_VISIBLE_ROWS: usize = 115;
+pub const E_W_TEXTAREA_COLUMNS: usize = 116;
+pub const E_W_TEXTAREA_TAKE_INPUT: usize = 117;
+
 /// ジャンプ表の本数 (末尾追記のたびに増やす)。
-pub const SHLIB_NFUNC: usize = 111;
+pub const SHLIB_NFUNC: usize = 118;
 
 const _: () = assert!(SHLIB_NFUNC <= OS32_SHLIB_MAX_FUNC);
 

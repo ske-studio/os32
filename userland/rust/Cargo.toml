@@ -24,6 +24,8 @@ members = [
     "t5a_display",
     # 票 C5: v1.2 ファイルマネージャ (/usr/bin/filer.bin、契約 V12-F)。
     "filer",
+    # 票 TASK_EDIT_GUI: v1.4 の最後の受入試験 (/usr/bin/edit_gui.bin)。
+    "edit_gui",
 ]
 resolver = "2"
 

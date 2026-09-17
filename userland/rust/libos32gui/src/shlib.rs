@@ -153,6 +153,26 @@
 //! 98  os32gui_input_open                GUI_MODAL_INPUT を開くだけ
 //! 99  os32gui_session_request           SESSION_REQUEST (LAUNCH/SWITCH_CUI/SHUTDOWN)
 //! 100 os32gui_draw_icon16               16x16 アイコン (mask 付き) を描く
+//!  ---- v1.3 設定レジストリ (票 S2 §3) ----
+//! 101 os32gui_cfg_get_int
+//! 102 os32gui_cfg_get_text
+//! 103 os32gui_cfg_set_int
+//! 104 os32gui_cfg_set_text
+//!  ---- v1.4 Host Services (票 N4 §1) ----
+//! 105 os32gui_host_get
+//! 106 os32gui_print_text
+//! 107 os32gui_print_file
+//! 108 os32gui_clip_get
+//! 109 os32gui_clip_put
+//! 110 os32gui_host_time
+//!  ---- v1.4 複数行編集 WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1) ----
+//! 111 os32gui_w_textarea              複数行の編集面を作る (textbox は 1 行のまま)
+//! 112 os32gui_w_textarea_clear        写してある「見える行」を捨てる
+//! 113 os32gui_w_textarea_add_row      見える行を 1 本足す
+//! 114 os32gui_w_textarea_set_caret    キャレット (相対行, バイト桁)
+//! 115 os32gui_w_textarea_visible_rows 矩形に入る行数
+//! 116 os32gui_w_textarea_columns      矩形に入る半角の桁数
+//! 117 os32gui_w_textarea_take_input   溜まった確定文字列を引き取る
 //! ```
 #![allow(clippy::missing_safety_doc)]
 
@@ -188,7 +208,7 @@ core::arch::global_asm!(
 __os32_shlib_header:
     .long   0x42494C53                  /* 0x00 magic  'SLIB'            */
     .long   1                           /* 0x04 version = GUI_PROTO_VERSION */
-    .long   111                         /* 0x08 nfunc                    */
+    .long   118                         /* 0x08 nfunc                    */
     .long   __shlib_data_start          /* 0x0C data_vaddr               */
     .long   __shlib_data_pages          /* 0x10 data_pages               */
     .long   __shlib_text_pages          /* 0x14 text_pages               */
@@ -306,6 +326,13 @@ __os32_shlib_header:
     .long   os32gui_clip_get                    /* 108 */
     .long   os32gui_clip_put                    /* 109 */
     .long   os32gui_host_time                   /* 110 */
+    .long   os32gui_w_textarea                  /* 111 */
+    .long   os32gui_w_textarea_clear            /* 112 */
+    .long   os32gui_w_textarea_add_row          /* 113 */
+    .long   os32gui_w_textarea_set_caret        /* 114 */
+    .long   os32gui_w_textarea_visible_rows     /* 115 */
+    .long   os32gui_w_textarea_columns          /* 116 */
+    .long   os32gui_w_textarea_take_input       /* 117 */
     .text
 "#
 );
@@ -853,6 +880,58 @@ pub extern "C" fn os32gui_w_textbox(p: *const u8, len: u32, out: *mut u32) -> i3
 #[no_mangle]
 pub extern "C" fn os32gui_w_listbox(out: *mut u32) -> i32 {
     wid(widget::listbox(), out)
+}
+
+/* ---- 111..=117: WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1) ----
+ * **末尾追記だけ**。`os32gui_w_textbox` (59) は 1 行のまま触らない。
+ * 本文は部品に無く、アプリが「見えている行」を写す (票 §2)。 */
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea(out: *mut u32) -> i32 {
+    wid(widget::textarea(), out)
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_clear(id: u32) -> i32 {
+    r0(widget::textarea_clear(WidgetId(id)))
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_add_row(
+    id: u32,
+    p: *const u8,
+    len: u32,
+    out: *mut i32,
+) -> i32 {
+    match widget::textarea_add_row(WidgetId(id), unsafe { slice(p, len) }) {
+        Ok(i) => {
+            if !out.is_null() {
+                unsafe { ptr::write_unaligned(out, i) }
+            }
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_set_caret(id: u32, row: i32, col: i32) -> i32 {
+    r0(widget::textarea_set_caret(WidgetId(id), row, col))
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_visible_rows(id: u32) -> i32 {
+    widget::textarea_visible_rows(WidgetId(id))
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_columns(id: u32) -> i32 {
+    widget::textarea_columns(WidgetId(id))
+}
+
+#[no_mangle]
+pub extern "C" fn os32gui_w_textarea_take_input(id: u32, out: *mut u8, cap: u32) -> u32 {
+    widget::textarea_take_input(WidgetId(id), unsafe { slice_mut(out, cap) }) as u32
 }
 
 /// `kind` は `SIZE_FIXED` / `SIZE_FLEX` / `SIZE_ABSOLUTE` (契約 U7)。

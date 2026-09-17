@@ -183,6 +183,14 @@ static const GuiRgb GUI_SYSTEM_PALETTE[16] __attribute__((unused)) = {
 #define GUI_MAX_DAMAGE       8    /* / ウィンドウ */
 #define GUI_MAX_STRING       256  /* バイト (長さ前置 u8 + 255) */
 
+/* 複数行編集ウィジェット WK_TEXTAREA (票 TASK_EDIT_GUI §2、決裁 A1)。
+ * **部品は本文を持たない**。アプリ (エディタ) が本文を持ち、いま見えている
+ * 行だけをここへ写す。だから上限は「1 画面に入る行数」と「1 行の見える幅」で
+ * 足り、ファイルの大きさとは無関係。 */
+#define GUI_MAX_TEXTAREA_ROWS  32   /* 見える行のプール (全 textarea で共有) */
+#define GUI_TEXTAREA_ROW_CAP   192  /* 見える 1 行のバイト数 (80 桁 = 全角 40 字 * 3B + 余白) */
+#define GUI_TEXTAREA_INPUT_CAP 8    /* 溜めておける確定文字列 (GuiEvtText.utf8 と同じ) */
+
 /* ======================================================================== */
 /*  ヘッダフラグ (GuiSlotHeader.flags)                                        */
 /* ======================================================================== */
