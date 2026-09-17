@@ -468,9 +468,6 @@ static void test_lerp(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     (void)argc; (void)argv; (void)k;
 
     api->kprintf(ATTR_CYAN, "math_test: libos32math test suite\n");
@@ -485,7 +482,5 @@ int main(int argc, char **argv, KernelAPI *k)
     test_lerp();
 
     /* サマリ */
-    rc = os32_test_summary(line, sizeof(line), "math_test", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "math_test", g_passed, g_total);
 }

@@ -245,12 +245,8 @@ static void test_div64(void)
 
 int main(int argc, char **argv, KernelAPI *api)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     (void)argc;
     (void)argv;
-    (void)api;
 
     /* 何度呼ばれても同じ答えを出すように、集計は毎回ここで 0 に戻す。 */
     pass_count = 0;
@@ -268,8 +264,6 @@ int main(int argc, char **argv, KernelAPI *api)
     test_fabs();
     test_div64();
 
-    rc = os32_test_summary(line, sizeof(line), "klibc_test",
-                           pass_count, pass_count + fail_count);
-    printf("\n%s", line);
-    return rc;
+    return os32_test_summary(api, "klibc_test",
+                             pass_count, pass_count + fail_count);
 }

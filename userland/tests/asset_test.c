@@ -48,9 +48,7 @@ static void on_async_done(asset_handle_t h, const void *data,
 int main(int argc, char **argv, KernelAPI *sys_api)
 {
     asset_handle_t h1, h2, h3, h4;
-    char line[OS32_TEST_LINE_MAX];
     int i;
-    int rc;
 
     (void)argc;
     (void)argv;
@@ -144,8 +142,6 @@ int main(int argc, char **argv, KernelAPI *sys_api)
     /* ---- 終了 ---- */
     asset_shutdown();
 
-    rc = os32_test_summary(line, sizeof(line), "asset_test",
-                           test_pass, test_pass + test_fail);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "asset_test",
+                             test_pass, test_pass + test_fail);
 }

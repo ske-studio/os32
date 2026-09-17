@@ -29,7 +29,6 @@ static void check(int cond, const char *label)
 int main(int argc, char **argv, KernelAPI *api)
 {
     OS32_Stat st;
-    char      line[OS32_TEST_LINE_MAX];
     int       rc;
 
     (void)argc;
@@ -68,7 +67,5 @@ int main(int argc, char **argv, KernelAPI *api)
     /* テスト4: 先ほど実装した sys_isatty の確認 */
     check(api->sys_isatty(1) == 1, "isatty(1) == 1");
 
-    rc = os32_test_summary(line, sizeof(line), "stat_t", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "%s", line);
-    return rc;
+    return os32_test_summary(api, "stat_t", g_passed, g_total);
 }

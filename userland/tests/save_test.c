@@ -251,9 +251,6 @@ static void test_migration(void)
 /* ====================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     (void)argc; (void)argv; (void)k;
 
     g_total = 0;
@@ -262,10 +259,8 @@ int main(int argc, char **argv, KernelAPI *k)
     api->kprintf(ATTR_CYAN, "save_test: libos32save test suite\n");
 
     if (!api->sys_is_mounted(SAVE_TEST_DIR)) {
-        rc = os32_test_summary_skip(line, sizeof(line), "save_test",
-                                    SAVE_TEST_DIR " is not mounted");
-        api->kprintf(ATTR_RED, "%s", line);
-        return rc;
+        return os32_test_summary_skip(api, "save_test",
+                                      SAVE_TEST_DIR " is not mounted");
     }
 
     test_roundtrip();
@@ -273,7 +268,5 @@ int main(int argc, char **argv, KernelAPI *k)
     test_peek();
     test_migration();
 
-    rc = os32_test_summary(line, sizeof(line), "save_test", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "save_test", g_passed, g_total);
 }

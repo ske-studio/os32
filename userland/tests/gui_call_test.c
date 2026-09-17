@@ -21,11 +21,9 @@ static i32 dummy_handler(u32 op, u32 arg, int owner);
 
 int main(int argc, char **argv, KernelAPI *api)
 {
-    char line[OS32_TEST_LINE_MAX];
     i32 r;
     int pass = 0;
     int fail = 0;
-    int rc;
 
     (void)argc;
     (void)argv;
@@ -55,10 +53,7 @@ int main(int argc, char **argv, KernelAPI *api)
                      (int)r, OS32_ERR_INVAL);
     }
 
-    rc = os32_test_summary(line, sizeof(line), "gui_call_test",
-                           pass, pass + fail);
-    api->kprintf(rc ? 0x4F : 0x0A, "%s", line);
-    return rc;
+    return os32_test_summary(api, "gui_call_test", pass, pass + fail);
 }
 
 /* op をそのまま返すダミー WM ハンドラ (契約 T4 の C 署名)。 */

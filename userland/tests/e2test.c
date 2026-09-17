@@ -308,8 +308,6 @@ int main(int argc, char **argv, KernelAPI *k)
 {
     unsigned char *wbuf;
     unsigned char *rbuf;
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
 
     (void)argc; (void)argv; (void)k;
 
@@ -326,10 +324,8 @@ int main(int argc, char **argv, KernelAPI *k)
         if (wbuf) free(wbuf);
         if (rbuf) free(rbuf);
         /* 372KB x 2 が取れない = 前提が無い。不合格ではなく SKIP。 */
-        rc = os32_test_summary_skip(line, sizeof(line), "e2test",
-                                    "cannot allocate the 372KB buffers");
-        api->kprintf(ATTR_RED, "%s", line);
-        return rc;
+        return os32_test_summary_skip(api, "e2test",
+                                      "cannot allocate the 372KB buffers");
     }
 
     api->kprintf(ATTR_WHITE, "Buffers allocated: wbuf=0x%X rbuf=0x%X\n",
@@ -347,8 +343,5 @@ int main(int argc, char **argv, KernelAPI *k)
     free(rbuf);
 
     /* サマリ */
-    rc = os32_test_summary(line, sizeof(line), "e2test",
-                           passed_tests, total_tests);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "e2test", passed_tests, total_tests);
 }

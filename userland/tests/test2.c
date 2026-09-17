@@ -43,9 +43,6 @@ static int g_passed;
 /* main はバイナリの先頭に配置される必要がある */
 int main(int argc, char **argv, KernelAPI *api)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     (void)argc;
     (void)argv;
 
@@ -60,10 +57,8 @@ int main(int argc, char **argv, KernelAPI *api)
     api->kprintf(WHITE, "%d", api->version);
     api->kprintf(WHITE, "%s", "\n");
     if (api->version < 2) {
-        rc = os32_test_summary_skip(line, sizeof(line), "test2",
-                                    "kernel is older than KAPI v2");
-        api->kprintf(RED, "%s", line);
-        return rc;
+        return os32_test_summary_skip(api, "test2",
+                                      "kernel is older than KAPI v2");
     }
 
     /* --- タイマテスト --- */
@@ -136,9 +131,7 @@ int main(int argc, char **argv, KernelAPI *api)
     }
 
     /* --- 結果 --- */
-    rc = os32_test_summary(line, sizeof(line), "test2", g_passed, g_total);
-    api->kprintf(rc ? RED : GREEN, "%s", line);
-    return rc;
+    return os32_test_summary(api, "test2", g_passed, g_total);
 }
 
 static void check(int cond, const char *label)

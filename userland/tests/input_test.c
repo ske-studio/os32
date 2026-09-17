@@ -218,9 +218,6 @@ static void run_unit_tests(void)
 
 int main(int argc, char **argv, KernelAPI *_api)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     api = _api;
     (void)argc; (void)argv;
 
@@ -231,8 +228,6 @@ int main(int argc, char **argv, KernelAPI *_api)
 
     run_unit_tests();
 
-    rc = os32_test_summary(line, sizeof(line), "input_test",
-                           pass_count, pass_count + fail_count);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "%s", line);
-    return rc;
+    return os32_test_summary(api, "input_test",
+                             pass_count, pass_count + fail_count);
 }

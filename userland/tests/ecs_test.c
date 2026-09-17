@@ -68,8 +68,6 @@ int main(int argc, char **argv, KernelAPI *k)
     CompHealth *hp;
     CompTag *tag;
     CompTimer *tmr;
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
 
     (void)argc; (void)argv; (void)k;
     g_total = 0;
@@ -233,7 +231,5 @@ int main(int argc, char **argv, KernelAPI *k)
     /* ---- 結果 ---- */
     ecs_shutdown();
 
-    rc = os32_test_summary(line, sizeof(line), "ecs_test", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "ecs_test", g_passed, g_total);
 }

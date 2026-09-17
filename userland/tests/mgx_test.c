@@ -694,9 +694,6 @@ static void bench_deflate(const char *path)
 /* ====================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     (void)argc; (void)argv; (void)k;
 
     g_total = 0; g_passed = 0;
@@ -715,7 +712,5 @@ int main(int argc, char **argv, KernelAPI *k)
     bench_deflate("/data/manga/bench/B3.MGX");
     bench_deflate("/data/manga/bench/B4.MGX");
 
-    rc = os32_test_summary(line, sizeof(line), "mgx_test", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "mgx_test", g_passed, g_total);
 }

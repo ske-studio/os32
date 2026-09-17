@@ -656,10 +656,8 @@ static int test_mem_usage(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *k)
 {
-    char line[OS32_TEST_LINE_MAX];
     int total = 0;
     int passed = 0;
-    int rc;
 
     (void)argc; (void)argv;
     (void)k;
@@ -679,8 +677,6 @@ int main(int argc, char **argv, KernelAPI *k)
     total++; if (test_mem_usage()) passed++;
 
     /* サマリ */
-    rc = os32_test_summary(line, sizeof(line), "db_test", passed, total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "\n%s", line);
-    return rc;
+    return os32_test_summary(api, "db_test", passed, total);
 }
 

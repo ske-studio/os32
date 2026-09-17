@@ -251,19 +251,13 @@ static void usage(void)
 /* ======================================================================== */
 int main(int argc, char **argv, KernelAPI *kapi_arg)
 {
-    char line[OS32_TEST_LINE_MAX];
-    int  rc;
-
     api = kapi_arg;
     g_total = 0;
     g_passed = 0;
 
     if (argc < 2) {
         usage();
-        rc = os32_test_summary_skip(line, sizeof(line), "restest",
-                                    "no subcommand given");
-        api->kprintf(ATTR_RED, "%s", line);
-        return rc;
+        return os32_test_summary_skip(api, "restest", "no subcommand given");
     }
 
     if (str_eq(argv[1], "all"))           test_all();
@@ -277,15 +271,14 @@ int main(int argc, char **argv, KernelAPI *kapi_arg)
     else {
         printf("Unknown command: %s\n", argv[1]);
         usage();
-        rc = os32_test_summary_skip(line, sizeof(line), "restest",
-                                    "unknown subcommand");
-        api->kprintf(ATTR_RED, "%s", line);
-        return rc;
+        return os32_test_summary_skip(api, "restest", "unknown subcommand");
     }
 
-    /* 集計行は **kprintf** で出す。`restest redirect` は FD 1 をファイルへ
-     * 向けたまま終わるのが試験の中身なので、printf では画面に出ない。 */
-    rc = os32_test_summary(line, sizeof(line), "restest", g_passed, g_total);
-    api->kprintf(rc ? ATTR_RED : ATTR_GREEN, "%s", line);
-    return rc;
+    /* 集計行は os32_test_summary が **fd 1** へ出す (票 §11)。
+     * `restest redirect` は FD 1 をファイルへ向けたまま終わるのが試験の
+     * 中身なので、その場合だけ集計行もそのファイルへ落ちる — これは
+     * 正しい。集計行はリダイレクトに従う行であって、画面に出す行では
+     * ない。自動回帰に載せているのは `restest all` (リダイレクト試験を
+     * 含まない) なので、ランナーはいつもどおり拾える。 */
+    return os32_test_summary(api, "restest", g_passed, g_total);
 }
