@@ -173,6 +173,8 @@
 //! 115 os32gui_w_textarea_visible_rows 矩形に入る行数
 //! 116 os32gui_w_textarea_columns      矩形に入る半角の桁数
 //! 117 os32gui_w_textarea_take_input   溜まった確定文字列を引き取る
+//!  ---- 窓 (WindowId) でフォーカス中のウィジェット (穴 H13 の後始末) ----
+//! 118 os32gui_w_focused_in          77 はスロット添字でアプリから使えない
 //! ```
 #![allow(clippy::missing_safety_doc)]
 
@@ -208,7 +210,7 @@ core::arch::global_asm!(
 __os32_shlib_header:
     .long   0x42494C53                  /* 0x00 magic  'SLIB'            */
     .long   1                           /* 0x04 version = GUI_PROTO_VERSION */
-    .long   118                         /* 0x08 nfunc                    */
+    .long   119                         /* 0x08 nfunc                    */
     .long   __shlib_data_start          /* 0x0C data_vaddr               */
     .long   __shlib_data_pages          /* 0x10 data_pages               */
     .long   __shlib_text_pages          /* 0x14 text_pages               */
@@ -333,6 +335,7 @@ __os32_shlib_header:
     .long   os32gui_w_textarea_visible_rows     /* 115 */
     .long   os32gui_w_textarea_columns          /* 116 */
     .long   os32gui_w_textarea_take_input       /* 117 */
+    .long   os32gui_w_focused_in                /* 118 */
     .text
 "#
 );
@@ -1042,6 +1045,16 @@ pub extern "C" fn os32gui_w_focused(win: u32) -> u32 {
         return 0;
     }
     widget::focused(i).raw()
+}
+
+/// 窓 `window` (**WindowId**) でフォーカス中のウィジェット。無効なら 0。
+///
+/// 77 (`os32gui_w_focused`) は引数が**窓スロットの添字**で、アプリが持つのは
+/// WindowId。添字を引く口が無いので**アプリからは使えなかった** (穴 H13 §9-6)。
+/// 77 の意味は変えずに末尾へ足した (決裁 A1)。
+#[no_mangle]
+pub extern "C" fn os32gui_w_focused_in(window: u32) -> u32 {
+    widget::focused_of(window).raw()
 }
 
 /// `WidgetId` → スロット添字 (無効なら -1)。

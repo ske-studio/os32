@@ -23,6 +23,8 @@
 //!   桁の数え方と切れ目は `libos32gui::textcore` (共通の下請け) を通す —
 //!   日本語は 3 バイト 2 桁で、自前で数えると必ずずれる (§4-27)。
 //! - **入れ子ループ禁止**。確認・入力は非同期モーダル + [`PEND_NONE`] の状態機械。
+//! - **フォーカスは持たずに聞く** (`widget::focused_in`、ジャンプ表 118)。
+//!   自分で追っていたころは穴 H13 を踏んだ (票 §9)。
 //! - 打鍵は `on_key` (編集キー) と `on_text_changed` (確定文字列) の 2 経路。
 //!   後者は `WK_TEXTAREA` が溜めたものを `textarea_take_input` で引き取る。
 //!
@@ -145,12 +147,6 @@ struct Editor {
     path: [u8; PATH_CAP],
     path_len: usize,
 
-    /// 編集面にフォーカスがあるか。
-    ///
-    /// `widget::focused(win)` は**窓スロットの添字**を取るが、アプリが持つのは
-    /// WindowId で、添字を引く口が無い。自分で追う (報告 2)。
-    focus_area: bool,
-
     pending: u8,
     dialog: u16,
     /// 閉じる確認で Yes だったら本当に終わる。
@@ -204,7 +200,6 @@ impl Editor {
             top: 0,
             path: [0; PATH_CAP],
             path_len: 0,
-            focus_area: true,
             pending: PEND_NONE,
             dialog: 0,
             closing: false,
@@ -679,13 +674,12 @@ impl App for Editor {
             self.request_close(ui);
             return;
         }
-        if self.focus_area && self.edit_key(scan) {
+        /* **フォーカスは持たずに聞く** (ジャンプ表 118)。自分で追っていたころは、
+         * ボタンを押した後に編集面へ戻したことを知る口が無く、**文字は入るのに
+         * カーソルキーだけが死んだ** (穴 H13)。持たなければずれない。 */
+        if widget::focused_in(self.win_id()) == self.area && self.edit_key(scan) {
             self.refresh();
         }
-    }
-
-    fn on_widget_focus(&mut self, _ui: &mut Ui, w: WidgetId) {
-        self.focus_area = w == self.area;
     }
 
     fn on_close(&mut self, ui: &mut Ui, _window: u32) {

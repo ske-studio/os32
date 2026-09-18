@@ -406,6 +406,18 @@ pub fn focused(win: usize) -> WidgetId {
     ))
 }
 
+/// 窓 (**WindowId**) でフォーカス中のウィジェット。無効な窓なら `NULL`。
+///
+/// [`focused`] は窓スロットの添字を取り、**アプリは添字を持っていない**。
+/// アプリはこちらを使う (穴 H13 の後始末、ジャンプ表 118)。
+pub fn focused_in(window: u32) -> WidgetId {
+    WidgetId(shcall!(
+        sh::E_W_FOCUSED_IN,
+        extern "C" fn(u32) -> u32,
+        window
+    ))
+}
+
 /// `WidgetId` からスロット添字を引く (generation 検査つき)。
 pub fn resolve(id: WidgetId) -> Option<usize> {
     let r = shcall!(sh::E_W_RESOLVE, extern "C" fn(u32) -> i32, id.raw());

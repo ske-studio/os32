@@ -1122,13 +1122,27 @@ pub fn take_pending_focus() -> WidgetId {
     WidgetId(id)
 }
 
-/// フォーカス中のウィジェット。
+/// フォーカス中のウィジェット (**窓スロットの添字**で引く)。
+///
+/// アプリが持つのは WindowId なので、アプリからは [`focused_of`] を使う。
 pub fn focused(win: usize) -> WidgetId {
     let f = s().windows[win].focus;
     if f == GUI_NONE {
         WidgetId::NULL
     } else {
         id_of(f as usize - 1)
+    }
+}
+
+/// 窓 (**WindowId**) でフォーカス中のウィジェット。無効な窓なら `NULL`。
+///
+/// [`focused`] は窓スロットの添字を取るが、**アプリが添字を引く口は無い**。
+/// そのためアプリはフォーカスを `on_widget_focus` で自分で追うしかなく、
+/// それが穴 H13 を踏む前提になっていた。**アプリはこちらを使う。**
+pub fn focused_of(window: u32) -> WidgetId {
+    match s().win_slot(window) {
+        Some(i) => focused(i),
+        None => WidgetId::NULL,
     }
 }
 

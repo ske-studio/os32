@@ -259,8 +259,19 @@ pub const E_W_TEXTAREA_VISIBLE_ROWS: usize = 115;
 pub const E_W_TEXTAREA_COLUMNS: usize = 116;
 pub const E_W_TEXTAREA_TAKE_INPUT: usize = 117;
 
+/* --- 118: 窓 (WindowId) でフォーカス中のウィジェット (穴 H13 の後始末) ---
+ *
+ * 既存の `E_W_FOCUSED` (77) は引数が**窓スロットの添字**で、アプリが持つのは
+ * WindowId。添字を引く口が公開されていないので、**アプリからは使えなかった**。
+ * そのためアプリはフォーカスを自分で追うしかなく、それが穴 H13 を踏む前提だった
+ * (`docs/tasks/gui/TASK_EDIT_GUI.md` §9-6)。
+ *
+ * **77 の意味は変えない** — スロット添字を渡している呼び手 (単一窓なら 0 が
+ * 偶然当たる) が黙って壊れる。末尾に足す (決裁 A1 の「末尾追記のみ」)。 */
+pub const E_W_FOCUSED_IN: usize = 118;
+
 /// ジャンプ表の本数 (末尾追記のたびに増やす)。
-pub const SHLIB_NFUNC: usize = 118;
+pub const SHLIB_NFUNC: usize = 119;
 
 const _: () = assert!(SHLIB_NFUNC <= OS32_SHLIB_MAX_FUNC);
 
