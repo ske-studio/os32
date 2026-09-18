@@ -27,9 +27,26 @@ static u8 hd_buf[HD_BUF_SIZE];
 static int cmd_serial(int argc, char **argv)
 {
     int ret;
-    (void)argc; (void)argv;
-    g_api->serial_init(SYS_SERIAL_BAUD);
-    g_api->kprintf(ATTR_GREEN, "RS-232C initialized (%ubps)\n", (u32)SYS_SERIAL_BAUD);
+    u32 baud = (u32)SYS_SERIAL_BAUD;
+
+    /* 速度を指定できる (`serial 38400`)。**ちょうど出るかはクロック次第**で、
+     * 割り切れない値はカーネルが `[ser] WARN ...` を出して実効値を知らせる
+     * (drivers/serial.h の表)。既定の 9600 は 1.9968MHz / 2.4576MHz の
+     * どちらでもちょうど出る唯一の標準速度。 */
+    if (argc >= 2) {
+        int v = atoi(argv[1]);
+        if (v <= 0) {
+            g_api->kprintf(ATTR_RED, "%s", "serial: bad baud\n");
+            return SH_STATUS_ERROR;
+        }
+        baud = (u32)v;
+    }
+    g_api->serial_init(baud);
+    /* **「初期化した」と言い切らない。** 分周比が割り切れないと実際の速度は
+     * ずれ、その事実はカーネルが直前に `[ser] ...` として出している。
+     * ここで要求値を成功として書くと、その行と矛盾する ([V4])。 */
+    g_api->kprintf(ATTR_GREEN, "RS-232C init: requested %ubps "
+                               "(actual rate is in the [ser] line above)\n", baud);
 
     /* serialfs 自動マウント (/host にマウント) */
     ret = g_api->sys_mount("/host", "COM1", "serialfs");
@@ -513,7 +530,7 @@ static int cmd_tvdump(int argc, char **argv)
 
 /* 登録用テーブル */
 static const ShellCmd rshell_cmds[] = {
-    { "serial",   cmd_serial,   "",              "Init RS-232C + mount SerialFS" },
+    { "serial",   cmd_serial,   "[baud]",        "Init RS-232C + mount SerialFS" },
     { "terminal", cmd_terminal, "",              "Enter serial terminal mode" },
     { "rshell",   cmd_rshell,   "",              "Start remote shell host" },
     { "send",     cmd_send,     "TEXT...",       "Send text via serial" },

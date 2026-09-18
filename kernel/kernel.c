@@ -182,6 +182,12 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     kbd_init();
     tvram_print(54, 1, "OK", TATTR_WHITE);
 
+    /* シリアルのタイマクロックを BIOS ワークエリア (0000:0501h bit7) から
+     * 判定してキャッシュする。**ここで読むのは CR3 が master のあいだだから** —
+     * `serial_init` は KAPI 経由 (CPL=3 のアプリ文脈) でしか呼ばれないので、
+     * そこから低位物理を読むのは安全でない (drivers/serial.h の注記)。 */
+    serial_detect_clock();
+
     /* マウスドライバ初期化 (NP21/W検出→モード自動選択) */
     mouse_init();
 

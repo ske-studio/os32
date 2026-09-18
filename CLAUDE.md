@@ -145,6 +145,10 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26
 - Japanese text is 3 bytes per char and 2 columns wide; `char buf[64]` overflows easily, and truncation
   must land on a UTF-8 boundary. → §4-27
+- シリアルの速度は 8253 の**整数分周**で決まる。既定 **9600** は 1.9968MHz / 2.4576MHz の
+  どちらでもちょうど出る唯一の標準速度。**38400 は 1.9968MHz で 41600bps に化ける** (+8.3%)。
+  クロックは `0000:0501h` bit7 で判定。`0434h` の 4 分周は**極性が未決着なので自動では触らない**。
+  **NP21/W は通信速度を模擬していない** — ここは「エミュレータで確認済み」が通用しない。 → §4-49、§4-50
 - フロッピーは 2 形式。既定は 2HD 1232KB、`make fd144` が 1.44MB の**生イメージ**を作る。
   **1.44MB の IPL は 512 バイトしか読まれない**、spt=18 はシフトで割れない、ルートDirが SP に当たる、
   FAT は 9 セクタ。D88 は `fd_type=0x21` + 全セクタ `rpm_flg=1` が要り未対応。 → §4-47、§4-48

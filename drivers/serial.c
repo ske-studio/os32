@@ -15,6 +15,13 @@
 #include "serial.h"
 #include "io.h"
 #include "pc98.h"
+#include "kprintf.h"
+
+/* drivers/ はカーネルヘッダ (kernel/paging.h) を見ないので extern で引く
+ * (kbd.c / ide.c / lgy98.c と同じ作法)。BIOS ワークエリアを読むのは
+ * master の番地空間にいるあいだだけにしたい。 */
+extern u32 paging_current_cr3(void);
+extern u32 paging_kernel_pd_phys(void);
 
 /* 外部: irq_enable (idt.c で定義) */
 extern void irq_enable(unsigned int irq);
@@ -41,10 +48,65 @@ static volatile int ser_count = 0;
 /*  FreeBSD pc98_i8251_reset() + pc98_set_baud_rate() 準拠                  */
 /*  デフォルト: 8N1 (8bit, パリティなし, ストップビット1)                     */
 /* ======================================================================== */
+/* ======================================================================== */
+/*  システムクロックの判定 (0000:0501h bit7)                                */
+/*                                                                          */
+/*  0 = まだ判定していない → serial_init は従来どおり 1.9968MHz を使う。     */
+/* ======================================================================== */
+static unsigned long s_timer_clk = 0;
+static u8 s_sysclk_8mhz = 0;
+static struct serial_setup s_setup = { 0, 0, 0, 0, 0, 0 };
+
+void serial_detect_clock(void)
+{
+    /* アドレスを volatile 経由にして定数畳み込みを止める (backend_pegc.c と
+     * 同じ理由。直に書くと GCC が -Warray-bounds で誤診断する)。 */
+    volatile u32 a = BIOS_WORK_SYSCLK;
+    u8 v;
+
+    /* master の番地空間でなければ読まない (BIOS ワークエリアは低位物理)。 */
+    if (paging_current_cr3() != paging_kernel_pd_phys()) {
+        return;
+    }
+    v = *(volatile u8 *)a;
+    s_sysclk_8mhz = (u8)((v & BIOS_SYSCLK_8MHZ) ? 1 : 0);
+    s_timer_clk = s_sysclk_8mhz ? TIMER_CLK_1997 : TIMER_CLK_2458;
+}
+
+const struct serial_setup *serial_get_setup(void)
+{
+    return &s_setup;
+}
+
+/* ======================================================================== */
+/*  I/O 0434h — 拡張RS-232C制御 (極性は機種依存。serial.h の注記を読むこと)  */
+/* ======================================================================== */
+int serial_get_ext_ctrl(void)
+{
+    return (int)(u8)inp(SER_EXT_CTRL);
+}
+
+int serial_set_div4(int bit_value)
+{
+    u8 v;
+
+    /* **bit0 (ポート切り離し) を保つ。** 読んでから bit6 だけ差し替える。 */
+    v = (u8)inp(SER_EXT_CTRL);
+    if (bit_value) {
+        v = (u8)(v | SER_EXT_DIV4);
+    } else {
+        v = (u8)(v & ~SER_EXT_DIV4);
+    }
+    outp(SER_EXT_CTRL, v);
+    io_wait();
+    return (int)(u8)inp(SER_EXT_CTRL);
+}
+
 void serial_init(unsigned long baud)
 {
     u16 count;
     u8  mode;
+    unsigned long clk;
 
     /* ---- 割り込み禁止 (初期化中) ---- */
     outp(SER_MASK, 0x00);   /* 全割り込みマスク */
@@ -59,10 +121,30 @@ void serial_init(unsigned long baud)
      * PC9800Bible: 0x06=OFF, 0x07=ON だが NP21/Wでは極性逆
      * NP21/W: BSR_BUZ_ON (0x07) = BUZ OFF */
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);
-    /* NP21/W動作確認済みクロック: 1996800Hz / 16 / baud */
+    /* クロックは 0000:0501h から判定したもの。まだ判定していなければ従来値。 */
+    clk = s_timer_clk ? s_timer_clk : TIMER_CLK_1997;
     if (baud == 0) baud = 9600;
-    count = (u16)(TIMER_CLK_1997 / 16UL / baud);
+    count = (u16)(clk / 16UL / baud);
     if (count == 0) count = 1;
+
+    /* **要求どおりに出るかを記録して報告する** ([V4]: 黙ってずれたまま進まない)。
+     * 分周比は整数しか設定できないので、割り切れない速度は必ずずれる。
+     * 例: 1.9968MHz で 38400 を頼むと count=3 になり実効 41600bps (+8.3%)。
+     * UART の許容 (±3% 程度) を超えるので実機では通らない。 */
+    s_setup.want = baud;
+    s_setup.clk = clk;
+    s_setup.count = count;
+    s_setup.actual = clk / 16UL / (unsigned long)count;
+    s_setup.sysclk_8mhz = s_sysclk_8mhz;
+    s_setup.exact = (u8)((s_setup.actual == baud) ? 1 : 0);
+    if (s_setup.exact) {
+        kprintf(0x0A, "[ser] %ubps (clk %uHz, count %u)\n",
+                (u32)baud, (u32)clk, (u32)count);
+    } else {
+        kprintf(0x0E,
+                "[ser] WARN %ubps は出せない: 実効 %ubps (clk %uHz, count %u)\n",
+                (u32)baud, (u32)s_setup.actual, (u32)clk, (u32)count);
+    }
 
     /* PIT モード設定: カウンタ#2, LSB+MSB, Mode 3(方形波) */
     /* FreeBSD: count==3 のときだけ Mode 2 */
