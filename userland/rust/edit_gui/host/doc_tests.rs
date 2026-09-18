@@ -347,9 +347,75 @@ fn save_writes_every_line_with_a_newline() {
     d.load("ab\nあ\n".as_bytes());
     let r = doc::save_file(&d, b"/tmp/x\0");
     assert!(r > 0, "成功しているのに負を返した: {}", r);
-    assert_eq!(&*lock(&WRITTEN), "ab\nあ\n\n".as_bytes());
+    /* 末尾の改行は最後の行の終端。空行を 1 本足さない (穴 H16)。 */
+    assert_eq!(&*lock(&WRITTEN), "ab\nあ\n".as_bytes());
     assert_eq!(r as usize, lock(&WRITTEN).len());
     assert_eq!(&*lock(&CLOSED), &[7], "fd を閉じていない");
+}
+
+/// 穴 H16 (2026-09-18 にゲストで実測): **開いて保存するだけでファイルが伸びた。**
+///
+/// `load` が末尾の改行を空行として数え、`save_file` がその空行にも改行を書くため、
+/// 1 往復ごとに 1 バイト増えていた (275 → 270 → 271…)。**編集していなくても増える。**
+/// 人が使う経路 (開く → 保存する) を通して初めて出た穴で、
+/// 行の内容だけを見ていた `load_file_round_trips` では捕まらなかった。
+#[test]
+fn load_then_save_is_byte_identical() {
+    for src in ["ab\nあ\n", "a\n\n", "x\n", "一\n二\n三\n"] {
+        setup();
+        let mut d = newdoc();
+        d.load(src.as_bytes());
+        let r = doc::save_file(&d, b"/tmp/x\0");
+        assert!(r > 0, "{:?}: 成功しているのに負を返した: {}", src, r);
+        assert_eq!(
+            &*lock(&WRITTEN),
+            src.as_bytes(),
+            "{:?}: 開いて保存しただけで中身が変わった (穴 H16)",
+            src
+        );
+    }
+}
+
+/// 何度往復しても伸びないこと (H16 の本体: 単調増加だった)。
+#[test]
+fn saving_over_and_over_does_not_grow_the_file() {
+    let mut cur = "ab\nあ\n".as_bytes().to_vec();
+    for round in 0..4 {
+        setup();
+        let mut d = newdoc();
+        d.load(&cur);
+        let r = doc::save_file(&d, b"/tmp/x\0");
+        assert!(r > 0);
+        let out = lock(&WRITTEN).clone();
+        assert_eq!(
+            out.len(),
+            cur.len(),
+            "{} 回目の往復で長さが変わった (穴 H16)",
+            round + 1
+        );
+        cur = out;
+    }
+}
+
+/// 末尾に改行の無いファイルは 1 本足して正規化する (これは仕様)。
+#[test]
+fn a_file_without_a_trailing_newline_gets_one() {
+    setup();
+    let mut d = newdoc();
+    d.load(b"ab");
+    let r = doc::save_file(&d, b"/tmp/x\0");
+    assert!(r > 0);
+    assert_eq!(&*lock(&WRITTEN), b"ab\n");
+}
+
+/// 末尾の空行が**本物**なら残る (H16 の修正が行を食っていないこと)。
+#[test]
+fn a_real_blank_last_line_survives() {
+    setup();
+    let mut d = newdoc();
+    d.load(b"a\n\n");
+    assert_eq!(d.nlines, 2, "本物の空行まで消した");
+    assert_eq!(d.line(1), b"");
 }
 
 #[test]

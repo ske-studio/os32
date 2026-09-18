@@ -104,6 +104,13 @@ MUTATIONS = [
         "        }",
         "",
     ),
+    # 5. 末尾の改行を空行として数える (穴 H16)。開いて保存するだけで 1 バイト伸びる。
+    (
+        "trailing_newline_grows_the_file",
+        DOC,
+        "        self.nlines = if len == 0 && li > 0 { li } else { li + 1 };",
+        "        self.nlines = li + 1;",
+    ),
     # 4b. open の失敗を成功にする。
     (
         "open_failure_swallowed",
