@@ -859,10 +859,22 @@ curl -X POST http://127.0.0.1:8025/api/cmd --data-binary "ver"   # Build タイ�
 - **現象**: `edit_gui` の Copy / Paste が状態行に `copy failed, error -100` と出る。
 - **-100 = `HOST_ELINK`** (`userland/lib/host/libos32host.h`) =「STALE / リンク未確立」。
 - **原因**: Host Services はホスト側の常駐 `tools/host_agent.py` (raw Ethernet、EtherType 0x88B5、
-  `NP2NETSOCK=127.0.0.1:8026`) と話す。**常駐が動いておらず、`np21x64w.ini` に LAN の設定も無い。**
-- **だから受入 E4 (クリップボード) / E5 (印刷) は今の環境では通せない。アプリの欠陥ではない。**
-  アプリは理由 (-100) を状態行に出しており、[V4] の求める振る舞いはできている。
-  通すには常駐の起動と ini の LAN 設定が要り、後者は [D2] の承認対象。
+  `NP2NETSOCK=127.0.0.1:8026`) と話す。**その常駐が動いていなかった。**
+- **対策**: 常駐を 1 本起こすだけ (**承認不要**)。起動した瞬間に 3-way HELLO が通り、
+  E4 / E5 がその場で合格した。
+
+  ```bash
+  python3 tools/host_agent.py --listen 127.0.0.1:8026 \
+    --state-dir <dir> --print-dir <dir> --spool-dir <dir> --clip file:<path>
+  ```
+- **やりかけた誤り (ここが本題)**: 最初「`np21x64w.ini` に LAN のキーが無いから
+  **[D2] の承認が要る**」と判断し、ユーザーに承認を求めかけた。**ini を読んで環境を判断したのが誤り。**
+  `/api/net` に聞いたら `enabled:true` `backend:"socket"` `spec:"connect 127.0.0.1:8026"` で、
+  **`tx_dropped` が 158,823**。ゲストはずっと送っていて、受け手が居なかっただけだった。
+  (`np21x64w.ini` には実際にキーが無い。設定はその ini 以外から来ている。)
+- **規則**: **設定は設定ファイルではなく、生きている口に聞く。** エミュレータの状態は
+  `/api/net` `/api/status` が正典で、ini は「そこに書いてあること」しか証明しない。
+  **承認 ([D2]) を求める前に、本当にその変更が要るかを実測で確かめる。**
 - **撮る間合いの罠**: 最初の `open` は**最大 3 秒**待つ (`HOST_OPEN_STALE_TICKS`)。その間 UI は止まる。
   クリックの 2 秒後に撮ったスクリーンショットには結果がまだ出ておらず、次のクリックの後に
   前回の結果が出る。**「状態行が 1 手遅れる不具合」と読み違えかけた。**
