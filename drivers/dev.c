@@ -63,6 +63,9 @@ static int fdd1_write_chs(Device *self, u16 cyl, u8 head, u8 sect,
     return fdc_write_sector(1, (int)cyl, (int)head, (int)sect, buf);
 }
 
+/* 下の 2 つは 2HD 1232KB の値で初期化してある。**dev_init() が
+ * fdc_get_geom() から書き直す** — 1.44MB で起動したときに 1024B/8セクタの
+ * ままだと、マウントはできても LBA が全部ずれる (票 FD144)。 */
 static Device fdd0_dev = {
     "fd0",
     DEV_BLOCK,
@@ -310,6 +313,18 @@ int dev_blk_write_lba(Device *dev, u32 lba, int count, const void *buf)
 /*  公開API                                                                 */
 /* ======================================================================== */
 
+/* FDD の記述子をそのドライブのいまのジオメトリに合わせる。
+ * fdc_set_media() の後、登録の前に呼ぶ。 */
+static void fdd_apply_geom(Device *d, int drv)
+{
+    const struct fdc_geom *g = fdc_get_geom(drv);
+    d->sect_size  = g->bps;
+    d->total_sects = (u32)g->cyls * (u32)g->heads * (u32)g->spt;
+    d->cyls  = g->cyls;
+    d->heads = g->heads;
+    d->spt   = g->spt;
+}
+
 void dev_init(void)
 {
     int i;
@@ -317,6 +332,10 @@ void dev_init(void)
         dev_table[i] = 0;
     }
     dev_num = 0;
+
+    /* 記述子の静的初期値は 2HD。**いまのメディアで上書きする** */
+    fdd_apply_geom(&fdd0_dev, 0);
+    fdd_apply_geom(&fdd1_dev, 1);
 
     /* 標準デバイス登録 */
     dev_register(&fdd0_dev);

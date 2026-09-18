@@ -145,6 +145,9 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - Never touch the FS from a `sys_ls` callback without a private buffer. → §4-26
 - Japanese text is 3 bytes per char and 2 columns wide; `char buf[64]` overflows easily, and truncation
   must land on a UTF-8 boundary. → §4-27
+- フロッピーは 2 形式。既定は 2HD 1232KB、`make fd144` が 1.44MB の**生イメージ**を作る。
+  **1.44MB の IPL は 512 バイトしか読まれない**、spt=18 はシフトで割れない、ルートDirが SP に当たる、
+  FAT は 9 セクタ。D88 は `fd_type=0x21` + 全セクタ `rpm_flg=1` が要り未対応。 → §4-47、§4-48
 - Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
 - Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28

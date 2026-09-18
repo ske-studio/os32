@@ -377,19 +377,19 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
 }
 
 /* ======================================================================== */
-/*  セクタ読み込み (2HD固定ラッパ — 既存API互換)                             */
+/*  セクタ読み込み (ドライブの現在ジオメトリを使う — 既存API互換)            */
 /* ======================================================================== */
 int fdc_read_sector(int drv, int cyl, int head, int sect, void *buf)
 {
-    return fdc_read_sector_geom(drv, cyl, head, sect, &fdc_geom_2hd, buf);
+    return fdc_read_sector_geom(drv, cyl, head, sect, fdc_get_geom(drv), buf);
 }
 
 /* ======================================================================== */
-/*  セクタ書き込み (2HD固定ラッパ — 既存API互換)                             */
+/*  セクタ書き込み (ドライブの現在ジオメトリを使う — 既存API互換)            */
 /* ======================================================================== */
 int fdc_write_sector(int drv, int cyl, int head, int sect, const void *buf)
 {
-    return fdc_write_sector_geom(drv, cyl, head, sect, &fdc_geom_2hd, buf);
+    return fdc_write_sector_geom(drv, cyl, head, sect, fdc_get_geom(drv), buf);
 }
 
 /* ======================================================================== */
@@ -439,4 +439,108 @@ const struct fdc_geom fdc_geom_2dd_720 = {
 const struct fdc_geom fdc_geom_2d_256 = {
     77, 2, 16, 1, 256, 0x0E, 0x90  /* GAP3=0x0E: MFM 256B/sec, DAUA=0x90 */
 };
+/* 1.44MB (PC/AT 標準の 2HD)。PC-98 では DA/UA 0x30 系の
+ * 「1.44MB 対応両用インタフェース」でアクセスする (PC9800Bible 表 2-34)。
+ * GAP3=0x1B は NP21/W の src/bios/fdfmt.h fdfmt144[] の MFM R/W GPL 値。 */
+const struct fdc_geom fdc_geom_144 = {
+    80, 2, 18, 2, 512, 0x1B, 0x30
+};
+
+/* ======================================================================== */
+/*  ドライブごとの現在ジオメトリ                                            */
+/*                                                                          */
+/*  既定は 2HD 1232KB — 既存構成 (1232KB の FD / NHD 起動) を変えない。      */
+/* ======================================================================== */
+static const struct fdc_geom *s_geom[2] = {
+    &fdc_geom_2hd, &fdc_geom_2hd
+};
+
+/* このドライバが 04BEh で 1.44MB モードへ切り替えたか (ドライブごと)。
+ * **触っていないポートを戻そうとしない**ため。2HD だけの機種で 04BEh を
+ * 書くと、00BEh のデコードイメージが出る機種では 1MB/640KB I/F の切替に
+ * 化ける恐れがある (io_fdd.md の注意)。 */
+static int s_3mode_on[2] = { 0, 0 };
+
+/* ======================================================================== */
+/*  3モードFD I/F (I/O 04BEh) — 1.44MB アクセスモードの切り替え             */
+/* ======================================================================== */
+int fdc_set_3mode(int drv, int on)
+{
+    u8 sel, v;
+
+    if (drv < 0 || drv > 1) {
+        return -1;
+    }
+    sel = (u8)((u8)drv << FDC_3M_DRV_SHIFT);
+
+    /* ドライブ指定 + モード指定を 1 回で書く (bit4=1 で bit0 が有効)。 */
+    outp(FDC_IO_3MODE,
+         (u8)(sel | FDC_3M_APPLY | (on ? FDC_3M_MODE_144 : 0)));
+
+    /* 読む前にドライブを指定し直す (bit4=0 = 無動作)。資料の指示どおり。 */
+    outp(FDC_IO_3MODE, sel);
+    v = (u8)inp(FDC_IO_3MODE);
+
+    /* **FFh 判定で搭載を見ない。** 要求した値になったかだけを見る。 */
+    if (on) {
+        if (!(v & FDC_3M_CUR_144)) {
+            return -1;
+        }
+    } else {
+        if (v & FDC_3M_CUR_144) {
+            return -1;
+        }
+    }
+    s_3mode_on[drv] = on ? 1 : 0;
+    return 0;
+}
+
+const struct fdc_geom *fdc_get_geom(int drv)
+{
+    if (drv < 0 || drv > 1) {
+        return &fdc_geom_2hd;
+    }
+    return s_geom[drv];
+}
+
+int fdc_set_media(int drv, fdc_media_t media)
+{
+    const struct fdc_geom *g;
+
+    if (drv < 0 || drv > 1) {
+        return -1;
+    }
+    switch (media) {
+    case FDC_MEDIA_2HD_1232: g = &fdc_geom_2hd;      break;
+    case FDC_MEDIA_2DD_640:  g = &fdc_geom_2dd_640;  break;
+    case FDC_MEDIA_2DD_720:  g = &fdc_geom_2dd_720;  break;
+    case FDC_MEDIA_2D_256:   g = &fdc_geom_2d_256;   break;
+    case FDC_MEDIA_2HD_1440: g = &fdc_geom_144;      break;
+    default:                 return -1;
+    }
+    s_geom[drv] = g;
+
+    /* アクセスモードをメディアに合わせる。**1.44MB に入るときと、自分で
+     * 入れたものを戻すときだけ** 04BEh に触る (上の s_3mode_on の注記)。 */
+    if (media == FDC_MEDIA_2HD_1440) {
+        fdc_set_3mode(drv, 1);
+    } else if (s_3mode_on[drv]) {
+        fdc_set_3mode(drv, 0);
+    }
+    return 0;
+}
+
+int fdc_set_media_by_daua(int drv, u32 daua)
+{
+    /* DA/UA の上位ニブルが装置種別。0x30 / 0xB0 系が 1.44MB
+     * (undocumented/memsys.md の 0000:0584h DISK_BOOT)。
+     * 知らない値では 2HD のままにする — 起動経路を勝手に変えない。 */
+    switch (daua & 0xF0) {
+    case 0x30:
+    case 0xB0:
+        return fdc_set_media(drv, FDC_MEDIA_2HD_1440);
+    default:
+        return 0;
+    }
+}
 

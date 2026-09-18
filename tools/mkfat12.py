@@ -31,7 +31,30 @@ import os
 import struct
 import argparse
 
-# PC-98 2HD FAT12パラメータ
+# ---------------------------------------------------------------- ジオメトリ
+#
+# **既定 (`2hd`) は動かさない。** 製品の `images/os32_boot.d88` はこれで作る。
+#
+# `144` は 1.44MB (PC/AT 標準の 2HD)。PC-98 でも DA/UA 0x30 台の
+# 「1.44MB 対応両用インタフェース」から起動できる (PC9800Bible 表 2-34、
+# undocumented/memsys.md の `0000:0584h DISK_BOOT`)。
+#
+# **`144` のルートエントリ数は標準の 224 ではなく 192。** IPL はルート
+# ディレクトリを 0x6000 へ**一括で**読むので、224 だと 14 セクタ × 512B =
+# 7168B で終端が 0x7C00 = SP にちょうど当たり、**スタックと衝突する**
+# (`boot/boot_fat.asm`)。192 なら 12 セクタ = 6144B で 2HD と同じ余裕が残る。
+# エントリ数は BPB で宣言するので、ホスト側のマウントには影響しない。
+GEOMETRIES = {
+    '2hd': dict(bps=1024, spc=1, root=192, total=1232, media=0xFE,
+                fat=2, spt=8, heads=2,
+                label='PC-98 2HD (1232KB)'),
+    '144': dict(bps=512, spc=1, root=192, total=2880, media=0xF0,
+                fat=9, spt=18, heads=2,
+                label='1.44MB (2HD 512B/sector)'),
+}
+GEOMETRY_NAME = '2hd'
+
+# PC-98 2HD FAT12パラメータ (既定。`select_geometry()` が差し替える)
 BYTES_PER_SECTOR = 1024
 SECTORS_PER_CLUSTER = 1
 RESERVED_SECTORS = 1        # ブートセクタ
@@ -55,6 +78,46 @@ TOTAL_DATA_CLUSTERS = TOTAL_SECTORS - DATA_START   # 1221
 FAT12_FREE = 0x000
 FAT12_EOC  = 0xFFF
 FAT12_MEDIA = 0xFF0 | MEDIA_TYPE  # メディアバイト
+
+
+def select_geometry(name):
+    """ジオメトリを選び、派生値まで作り直す。**他の関数より先に呼ぶこと。**
+
+    定数はすべて関数の中でしか読まれないので、ここで束ね直せば全体が追随する
+    (モジュール直下やデフォルト引数で使っている箇所は無い)。
+    """
+    global GEOMETRY_NAME, BYTES_PER_SECTOR, SECTORS_PER_CLUSTER, ROOT_ENTRY_COUNT
+    global TOTAL_SECTORS, MEDIA_TYPE, FAT_SIZE, SECTORS_PER_TRACK, NUM_HEADS
+    global FAT_START, ROOT_DIR_START, ROOT_DIR_SECTORS, DATA_START
+    global TOTAL_DATA_CLUSTERS, FAT12_MEDIA
+
+    g = GEOMETRIES[name]
+    GEOMETRY_NAME = name
+    BYTES_PER_SECTOR = g['bps']
+    SECTORS_PER_CLUSTER = g['spc']
+    ROOT_ENTRY_COUNT = g['root']
+    TOTAL_SECTORS = g['total']
+    MEDIA_TYPE = g['media']
+    FAT_SIZE = g['fat']
+    SECTORS_PER_TRACK = g['spt']
+    NUM_HEADS = g['heads']
+
+    FAT_START = RESERVED_SECTORS
+    ROOT_DIR_START = FAT_START + NUM_FATS * FAT_SIZE
+    ROOT_DIR_SECTORS = (ROOT_ENTRY_COUNT * 32 + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR
+    DATA_START = ROOT_DIR_START + ROOT_DIR_SECTORS
+    TOTAL_DATA_CLUSTERS = TOTAL_SECTORS - DATA_START
+    FAT12_MEDIA = 0xFF0 | MEDIA_TYPE
+
+    # FAT が全クラスタを表せること (FAT12 は 1 エントリ 1.5 バイト)。
+    need = (TOTAL_DATA_CLUSTERS + 2) * 3 // 2
+    have = FAT_SIZE * BYTES_PER_SECTOR
+    if need > have:
+        raise SystemExit(
+            "mkfat12: %s: FAT が足りない (必要 %d B / 確保 %d B)" % (name, need, have))
+    # ルートディレクトリがセクタ境界で割り切れること (IPL が一括で読むため)。
+    if (ROOT_ENTRY_COUNT * 32) % BYTES_PER_SECTOR:
+        raise SystemExit("mkfat12: %s: ルートDirがセクタ境界に揃っていない" % name)
 
 # ディレクトリエントリあたりのバイト数
 DIR_ENTRY_SIZE = 32
@@ -456,7 +519,8 @@ class Fat12Builder:
 
 def print_info():
     """FAT12パラメータ情報を表示"""
-    print("PC-98 2HD FAT12 パラメータ:")
+    print("FAT12 パラメータ (%s = %s):"
+          % (GEOMETRY_NAME, GEOMETRIES[GEOMETRY_NAME]['label']))
     print(f"  セクタサイズ:       {BYTES_PER_SECTOR} bytes")
     print(f"  セクタ/クラスタ:    {SECTORS_PER_CLUSTER}")
     print(f"  予約セクタ:         {RESERVED_SECTORS}")
@@ -467,6 +531,8 @@ def print_info():
     print(f"  総セクタ:           {TOTAL_SECTORS}")
     print(f"  データ開始セクタ:   {DATA_START}")
     print(f"  データクラスタ数:   {TOTAL_DATA_CLUSTERS}")
+    print(f"  セクタ/トラック:    {SECTORS_PER_TRACK}")
+    print(f"  ヘッド数:           {NUM_HEADS}")
     print(f"  イメージサイズ:     {TOTAL_SECTORS * BYTES_PER_SECTOR} bytes")
     cluster_bytes = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER
     print(f"  利用可能容量:       {TOTAL_DATA_CLUSTERS * cluster_bytes} bytes "
@@ -479,18 +545,21 @@ def main():
     parser.add_argument('-b', '--boot', help='ブートセクタバイナリ (省略時はBPBのみ)')
     parser.add_argument('-d', '--d88', help='D88出力ファイル (mkd88.py連携)')
     parser.add_argument('-i', '--info', action='store_true', help='FAT12パラメータ表示')
+    parser.add_argument('-g', '--geometry', choices=sorted(GEOMETRIES), default='2hd',
+                        help='ジオメトリ (既定 2hd = PC-98 1232KB / 144 = 1.44MB)')
     parser.add_argument('--tree', action='store_true',
                        help='ツリーモード: /guest/path=host_path 形式でサブディレクトリ対応')
     parser.add_argument('files', nargs='*',
                        help='追加ファイル (レガシー: FAT名=ローカルパス / ツリー: /guest/path=host_path)')
 
     args = parser.parse_args()
+    select_geometry(args.geometry)
 
     if args.info:
         print_info()
         return
 
-    print("=== PC-98 2HD FAT12イメージ作成 ===")
+    print("=== FAT12 イメージ作成 (%s) ===" % GEOMETRIES[args.geometry]['label'])
     print_info()
     print()
 
@@ -524,6 +593,13 @@ def main():
     print(f"\n出力: {args.output} ({len(image)} bytes)")
 
     # D88変換
+    if args.d88 and args.geometry != '2hd':
+        raise SystemExit(
+            "mkfat12: --geometry %s では D88 を作れない。\n"
+            "  1.44MB の D88 は fd_type=0x21 かつ**全セクタの rpm_flg=1** が要り、\n"
+            "  tools/mkd88.py はまだ 2HD (0x20 / rpm_flg=0) しか書かない。\n"
+            "  NP21/W は生イメージ (1,474,560 バイトちょうど) をサイズで 1.44MB と\n"
+            "  認識するので、当面は -o の生出力を使うこと。" % args.geometry)
     if args.d88:
         mkd88_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mkd88.py')
         if os.path.exists(mkd88_path):

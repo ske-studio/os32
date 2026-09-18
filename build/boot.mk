@@ -42,12 +42,25 @@ boot/loader_hdd.bin: boot/loader_hdd.elf
 		echo "loader_hdd.bin: $$SIZE / 8192 bytes"; \
 	fi
 
+# === 1.44MB (2HD 512B/sector) 版 ===
+# 同じソースを `-DFD144` で組み直す。**別ファイルに写さない** — 写すと
+# ジオメトリ定数が片方だけ直されて静かにずれる。
+# 値の正典は tools/mkfat12.py の GEOMETRIES。
+# boot_fat144.bin は 512B ちょうど (nasm の times が溢れを止める)。
+BIN_FD144 = boot/boot_fat144.bin boot/loader_fat144.bin
+
+boot/boot_fat144.bin: boot/boot_fat.asm
+	$(AS) -f bin -DFD144 $< -o $@
+
+boot/loader_fat144.bin: boot/loader_fat_new.asm
+	$(AS) -f bin -DFD144 $< -o $@
+
 # === 統合ターゲット ===
-boot: $(BIN_STANDALONE) boot/loader_hdd.bin
+boot: $(BIN_STANDALONE) $(BIN_FD144) boot/loader_hdd.bin
 
 # === クリーン ===
 clean-boot:
-	rm -f $(BIN_STANDALONE) $(BOOT_ALL_OBJ) boot/loader_hdd.elf boot/loader_hdd.bin
+	rm -f $(BIN_STANDALONE) $(BIN_FD144) $(BOOT_ALL_OBJ) boot/loader_hdd.elf boot/loader_hdd.bin
 
 # === デバッグ版HDDローダー (ext2読み出しステップ確認用) ===
 BOOT_DBG_C_SRC = boot/boot_debug.c

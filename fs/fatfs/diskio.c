@@ -116,15 +116,20 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: fdc_read_sector (CHS ネイティブ) を直接使用 */
-        for (i = 0; i < count; i++) {
-            int lba = (int)(sector + i);
-            int sect = (lba % FDC_SPT) + 1;
-            int head = (lba / FDC_SPT) % FDC_HEADS;
-            int cyl  = lba / (FDC_SPT * FDC_HEADS);
-            rc = fdc_read_sector(fdd_drive, cyl, head, sect,
-                                 buff + i * FDC_SECTOR_SIZE);
-            if (rc != 0) return RES_ERROR;
+        /* FDD: fdc_read_sector (CHS ネイティブ) を直接使用。
+         * **ジオメトリはドライブから聞く** — FDC_SPT などのマクロは
+         * 2HD 1232KB 固定で、1.44MB のディスクをゴミとして読む。 */
+        {
+            const struct fdc_geom *g = fdc_get_geom(fdd_drive);
+            for (i = 0; i < count; i++) {
+                int lba = (int)(sector + i);
+                int sect = (lba % g->spt) + 1;
+                int head = (lba / g->spt) % g->heads;
+                int cyl  = lba / ((int)g->spt * (int)g->heads);
+                rc = fdc_read_sector(fdd_drive, cyl, head, sect,
+                                     buff + i * g->bps);
+                if (rc != 0) return RES_ERROR;
+            }
         }
         return RES_OK;
 
@@ -173,15 +178,19 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
     switch (pdrv) {
     case DRV_FDD:
         if (fdd_status & STA_NOINIT) return RES_NOTRDY;
-        /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用 */
-        for (i = 0; i < count; i++) {
-            int lba = (int)(sector + i);
-            int sect = (lba % FDC_SPT) + 1;
-            int head = (lba / FDC_SPT) % FDC_HEADS;
-            int cyl  = lba / (FDC_SPT * FDC_HEADS);
-            rc = fdc_write_sector(fdd_drive, cyl, head, sect,
-                                  buff + i * FDC_SECTOR_SIZE);
-            if (rc != 0) return RES_ERROR;
+        /* FDD: fdc_write_sector (CHS ネイティブ) を直接使用。
+         * 読み側と同じくジオメトリはドライブから聞く。 */
+        {
+            const struct fdc_geom *g = fdc_get_geom(fdd_drive);
+            for (i = 0; i < count; i++) {
+                int lba = (int)(sector + i);
+                int sect = (lba % g->spt) + 1;
+                int head = (lba / g->spt) % g->heads;
+                int cyl  = lba / ((int)g->spt * (int)g->heads);
+                rc = fdc_write_sector(fdd_drive, cyl, head, sect,
+                                      buff + i * g->bps);
+                if (rc != 0) return RES_ERROR;
+            }
         }
         return RES_OK;
 
@@ -232,10 +241,14 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
             /* PIO転送: バッファなし → 即完了 */
             return RES_OK;
         case GET_SECTOR_COUNT:
-            *(LBA_t *)buff = (LBA_t)FDC_TOTAL_SECTORS;
+            {
+                const struct fdc_geom *g = fdc_get_geom(fdd_drive);
+                *(LBA_t *)buff =
+                    (LBA_t)((int)g->cyls * (int)g->heads * (int)g->spt);
+            }
             return RES_OK;
         case GET_SECTOR_SIZE:
-            *(WORD *)buff = (WORD)FDC_SECTOR_SIZE;
+            *(WORD *)buff = (WORD)fdc_get_geom(fdd_drive)->bps;
             return RES_OK;
         case GET_BLOCK_SIZE:
             *(DWORD *)buff = 1; /* 消去ブロック = 1セクタ */

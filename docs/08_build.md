@@ -154,6 +154,7 @@ Makefile ターゲットとの対応 (`build/deploy.mk`)。**このリポジト�
 
 | ターゲット | 動作 |
 |-----------|------|
+| `make fd144` | **1.44MB フロッピーイメージ** `images/os32_boot144.img` (生イメージ、1,474,560 バイト)。2HD の `images/os32_boot.d88` とは別物で、既定は 2HD のまま。票 [`tasks/realhw/TASK_FD144.md`](tasks/realhw/TASK_FD144.md) |
 | `make deploy` | HostDrv (`C:\os32`) への同期 — 再起動不要 |
 | `make deploy-kernel` | HostDrv同期 + HostDrv→ext2同期 + NHDコピー — **要NP21/W再起動** |
 | `make deploy-boot` | ブートローダー (loader_hdd.bin) をNHDブート領域へ書き込み |

@@ -23,13 +23,40 @@
 cpu 8086
 
 
+;; ============================================================
+;; ジオメトリ — `-DFD144` で 1.44MB 版になる (既定は PC-98 2HD 1232KB)
+;;
+;; 値の正典は tools/mkfat12.py の GEOMETRIES。**片方だけ直さないこと。**
+;;
+;; 1.44MB は DA/UA 0x30 台の「1.44MB 対応両用インタフェース」から起動する
+;; (PC9800Bible 表 2-34、undocumented/memsys.md の 0000:0584h DISK_BOOT)。
+;; NP21/W は rpm=1 のとき IPL を **512 バイトだけ** 1FE0:0000 へ読む
+;; (src/bios/bios1b.c boot_fd1)。だから 144 版は 512B に収めねばならない。
+;; ============================================================
+%ifdef FD144
+SECT_SZ     EQU     0200h       ;; セクタ長 512B
+SECT_N      EQU     02h         ;; INT 1Bh のセクタ長コード (2 = 512B)
+SPT         EQU     18          ;; セクタ/トラック
+DA_UA       EQU     030h        ;; DA/UA: 1.44MB 対応両用 I/F ユニット0
+ROOT_START  EQU     19          ;; ルートDir開始LBA (1 + 2*9)
+ROOT_SECTS  EQU     12          ;; ルートDirセクタ数 (192 エントリ)
+FAT_SECTS   EQU     9           ;; FAT1 本あたりのセクタ数
+DATA_START  EQU     31          ;; データ領域開始LBA
+%else
+SECT_SZ     EQU     0400h       ;; セクタ長 1024B
+SECT_N      EQU     03h         ;; INT 1Bh のセクタ長コード (3 = 1024B)
+SPT         EQU     8           ;; セクタ/トラック
 DA_UA       EQU     090h        ;; DA/UA: 1MB FDD ユニット0
-LOAD_DEST   EQU     8000h       ;; LOADER.BIN ロード先
-FAT_BUF     EQU     6000h       ;; FAT/RootDir一時バッファ
 ROOT_START  EQU     5           ;; ルートDir開始LBA
 ROOT_SECTS  EQU     6           ;; ルートDirセクタ数
-FAT_START   EQU     1           ;; FAT開始LBA
+FAT_SECTS   EQU     2           ;; FAT1 本あたりのセクタ数
 DATA_START  EQU     11          ;; データ領域開始LBA
+%endif
+
+ROOT_ENTS   EQU     192         ;; ルートDirエントリ数 (両ジオメトリ共通)
+LOAD_DEST   EQU     8000h       ;; LOADER.BIN ロード先
+FAT_BUF     EQU     6000h       ;; FAT/RootDir一時バッファ
+FAT_START   EQU     1           ;; FAT開始LBA
 
 section .text
         org 0x0
@@ -44,15 +71,20 @@ start:
 ;; mkfat12.py が正しい値で上書きする
 ;; ============================================================
 bpb_oem:        db 'OS32IPL '      ;; 0x03: OEM名
-bpb_bps:        dw 0400h           ;; 0x0B: bytes/sector = 1024
+bpb_bps:        dw SECT_SZ         ;; 0x0B: bytes/sector
 bpb_spc:        db 01h             ;; 0x0D: sectors/cluster = 1
 bpb_resv:       dw 0001h           ;; 0x0E: reserved = 1
 bpb_nfats:      db 02h             ;; 0x10: FAT数 = 2
-bpb_rootcnt:    dw 00C0h           ;; 0x11: root entries = 192
-bpb_totsect:    dw 04D0h           ;; 0x13: total sectors = 1232
+bpb_rootcnt:    dw ROOT_ENTS       ;; 0x11: root entries
+%ifdef FD144
+bpb_totsect:    dw 2880            ;; 0x13: total sectors
+bpb_media:      db 0F0h            ;; 0x15: media = 1.44MB
+%else
+bpb_totsect:    dw 1232            ;; 0x13: total sectors
 bpb_media:      db 0FEh            ;; 0x15: media = PC-98 2HD
-bpb_fatsz:      dw 0002h           ;; 0x16: FAT size = 2
-bpb_spt:        dw 0008h           ;; 0x18: sectors/track = 8
+%endif
+bpb_fatsz:      dw FAT_SECTS       ;; 0x16: FAT size
+bpb_spt:        dw SPT             ;; 0x18: sectors/track
 bpb_heads:      dw 0002h           ;; 0x1A: heads = 2
 bpb_hidden:     dd 0               ;; 0x1C: hidden sectors
 bpb_totsect32:  dd 0               ;; 0x20: total sectors 32bit
@@ -76,10 +108,12 @@ boot_main:
         call    show_boot_msg
 
         ;; ============================================================
-        ;; ルートディレクトリを0:6000にロード (6セクタ)
+        ;; ルートディレクトリを0:6000にロード
+        ;; 192 エントリ = 6144B。1.44MB でも 12 セクタ×512B = 6144B で
+        ;; 終端は 0x7800、SP=0x7C00 に当たらない (224 エントリだと当たる)。
         ;; ============================================================
         mov     cx, ROOT_SECTS
-        mov     ax, ROOT_START  ;; LBA = 5
+        mov     ax, ROOT_START
         mov     bp, FAT_BUF    ;; ES:BP = 0:6000
 .rd_loop:
         push    cx
@@ -88,14 +122,14 @@ boot_main:
         pop     ax
         pop     cx
         inc     ax
-        add     bp, 0400h       ;; +1024
+        add     bp, SECT_SZ
         loop    .rd_loop
 
         ;; ============================================================
         ;; ルートDirから "LOADER  BIN" を検索
         ;; ============================================================
         mov     di, FAT_BUF     ;; ES:DI = 0:6000
-        mov     cx, 192
+        mov     cx, ROOT_ENTS
 .scan_dir:
         ;; エントリ先頭バイト確認
         mov     al, es:[di]
@@ -130,15 +164,23 @@ boot_main:
         mov     word [var_cluster], ax
 
         ;; ============================================================
-        ;; FATテーブルを0:6000にロード (2セクタ = 2048B)
+        ;; FATテーブルを0:6000にロード (FAT_SECTS セクタ)
         ;; ルートDirバッファを上書き (もう不要)
+        ;; 1.44MB は FAT が 9 セクタ = 4608B ある。**2 セクタ決め打ちだと
+        ;; 後ろのクラスタを引いたときに黙って化ける。**
         ;; ============================================================
-        mov     ax, FAT_START   ;; LBA = 1
+        mov     cx, FAT_SECTS
+        mov     ax, FAT_START
         mov     bp, FAT_BUF    ;; 0:6000
+.fat_loop:
+        push    cx
+        push    ax
         call    read_sector
-        mov     ax, FAT_START + 1  ;; LBA = 2
-        mov     bp, FAT_BUF + 0400h ;; 0:6400
-        call    read_sector
+        pop     ax
+        pop     cx
+        inc     ax
+        add     bp, SECT_SZ
+        loop    .fat_loop
 
         ;; ============================================================
         ;; FATチェーンに沿ってLOADER.BINを0:8000にロード
@@ -155,7 +197,7 @@ boot_main:
         pop     ax
 
         ;; 次の宛先
-        add     bp, 0400h       ;; +1024
+        add     bp, SECT_SZ
 
         ;; FAT12で次のクラスタを取得
         call    fat12_next      ;; AX = next cluster
@@ -172,35 +214,36 @@ boot_main:
         dw      0000h           ;; segment = 0x0000
 
 ;; ============================================================
-;; read_sector — 1セクタ(1024B)をES:BPに読み込む
+;; read_sector — 1セクタ(SECT_SZ)をES:BPに読み込む
 ;; 入力: AX = LBA, ES:BP = 行き先
 ;; 破壊: AX, BX, CX, DX
+;;
+;; **SPT で実際に割る。** 以前は spt=8 を前提にシフトで済ませていたが、
+;; 1.44MB の spt=18 は 2 の冪ではない。2HD でも div は正しく、こちらは
+;; 余裕が 600 バイト以上あるので**両ジオメトリで同じ道を通す**
+;; (分岐を残すと片方だけ直して食い違う)。
+;;   sector   = LBA % SPT + 1
+;;   track    = LBA / SPT ;  head = track & 1 ;  cylinder = track >> 1
+;; LBA は最大 2879 なので 16 ビットの div で足りる。
 ;; ============================================================
 read_sector:
         push    ax
-        mov     bx, ax          ;; BX = LBA (保存)
 
-        ;; sector = (LBA % 8) + 1
-        and     al, 07h
-        inc     al
-        mov     dl, al          ;; DL = sector (1-based)
+        xor     dx, dx
+        mov     cx, SPT
+        div     cx              ;; AX = track, DX = LBA % SPT (< 18 なので DH = 0)
+        inc     dl              ;; DL = sector (1-based)
 
-        ;; head = (LBA / 8) & 1
-        mov     ax, bx
-        mov     cl, 3
-        shr     ax, cl          ;; AX = LBA / 8
         mov     dh, al
-        and     dh, 1           ;; DH = head
-
-        ;; cylinder = LBA / 16
-        shr     ax, 1           ;; AX = LBA / 16
+        and     dh, 1           ;; DH = head (track の bit0)
+        shr     ax, 1           ;; AX = cylinder
         mov     cl, al          ;; CL = cylinder
 
         ;; INT 1Bh: FDD読み込み
         mov     ah, 76h         ;; SEEK+RETRY+READ
-        mov     al, DA_UA       ;; 0x90
-        mov     bx, 0400h       ;; 1024 bytes
-        mov     ch, 03h         ;; sector size = 1024B
+        mov     al, DA_UA
+        mov     bx, SECT_SZ     ;; 転送バイト数
+        mov     ch, SECT_N      ;; セクタ長コード
         int     1Bh
 
         pop     ax
@@ -306,6 +349,9 @@ msg_derr:       db 'Disk Error!', 0
 
 var_cluster:    dw 0               ;; 一時変数: クラスタ番号
 
-        times 1022 - ($ - $$) db 0
+;; ブートセクタはちょうど 1 セクタ。**144 は 512B に収める**
+;; (NP21/W は rpm=1 のとき 512 バイトしか読まない)。
+;; 溢れたら nasm がここで止まる — 黙って切り詰めさせない。
+        times (SECT_SZ - 2) - ($ - $$) db 0
         db      055h, 0AAh
 

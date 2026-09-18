@@ -198,6 +198,23 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
             tvram_print(66, 1, "ER", TATTR_RED);
         }
     }
+    /* FD から起動したなら、その DA/UA でメディアを選ぶ。
+     * 1.44MB (DA/UA 0x30 系) は 512B×18セクタで、2HD のまま読むと
+     * ゴミを掴んで root マウントが落ちる (2026-09-18 に実測)。
+     * **dev_init() より前**でなければデバイス記述子が古い値で登録される。
+     *
+     * 1.44MB を選ぶと fdc_set_media が 04BEh でアクセスモードも切り替える。
+     * **失敗しても起動は止めない** — BIOS が起動時に既に正しいモードへ
+     * 入れている場合があり (エミュレータはそう)、しかも 04BEh の読みは
+     * 00BEh のデコードイメージで嘘をつく機種がある (io_fdd.md)。
+     * 表示だけ残して進む ([V4]: 黙って成功にしない)。 */
+    fdc_set_media_by_daua(0, boot_drive);
+    if ((boot_drive & 0xF0) == 0x30 || (boot_drive & 0xF0) == 0xB0) {
+        u8 m3 = (u8)inp(FDC_IO_3MODE);
+        tvram_print(69, 1, "144", TATTR_GREEN);
+        tvram_print(72, 1, (m3 & FDC_3M_CUR_144) ? "M" : "?",
+                    (m3 & FDC_3M_CUR_144) ? TATTR_WHITE : TATTR_RED);
+    }
 
     /* デバイス・パスシステム初期化 */
     tvram_print(58, 1, "DEV...", TATTR_GREEN);

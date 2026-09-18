@@ -25,12 +25,31 @@
 cpu 386
 
 
+;; ジオメトリ — `-DFD144` で 1.44MB 版。正典は tools/mkfat12.py の GEOMETRIES。
+;; **boot/boot_fat.asm と必ず同じ値にすること** (片方だけ直すと静かにずれる)。
+%ifdef FD144
+SECT_SZ     EQU     0200h
+SECT_N      EQU     02h
+SPT         EQU     18
+DA_UA       EQU     030h        ;; 1.44MB 対応両用 I/F ユニット0
+ROOT_START  EQU     19
+ROOT_SECTS  EQU     12
+FAT_SECTS   EQU     9
+DATA_START  EQU     31
+%else
+SECT_SZ     EQU     0400h
+SECT_N      EQU     03h
+SPT         EQU     8
 DA_UA       EQU     090h
-FAT_BUF     EQU     6000h
 ROOT_START  EQU     5
 ROOT_SECTS  EQU     6
-FAT_START   EQU     1
+FAT_SECTS   EQU     2
 DATA_START  EQU     11
+%endif
+
+ROOT_ENTS   EQU     192
+FAT_BUF     EQU     6000h
+FAT_START   EQU     1
 LOAD_SEG0   EQU     0000h       ;; Phase 1: セグメント0
 LOAD_OFF0   EQU     0C000h      ;; Phase 1: 0:C000h から (16KB利用可能)
 LOAD_SEG1   EQU     1000h       ;; Phase 2: セグメント0x1000 (物理0x10000)
@@ -74,14 +93,14 @@ loader_start:
         pop     ax
         pop     cx
         inc     ax
-        add     bp, 0400h
+        add     bp, SECT_SZ
         loop    .rd_loop
 
         ;; ============================================================
         ;; VMKRNL.LZ4を検索 (8.3形式: "VMKRNL  LZ4")
         ;; ============================================================
         mov     di, FAT_BUF
-        mov     cx, 192
+        mov     cx, ROOT_ENTS
 .scan_kern:
         mov     al, es:[di]
         cmp     al, 0
@@ -122,16 +141,23 @@ loader_start:
         mov     word [var_size_hi], ax
 
         ;; ============================================================
-        ;; FATテーブルを0:6000にロード (2セクタ)
+        ;; FATテーブルを0:6000にロード (FAT_SECTS セクタ)
+        ;; 1.44MB は 9 セクタある。2 セクタ決め打ちだと後ろのクラスタで化ける。
         ;; ============================================================
         xor     ax, ax
         mov     es, ax
+        mov     cx, FAT_SECTS
         mov     ax, FAT_START
         mov     bp, FAT_BUF
+.fat_loop:
+        push    cx
+        push    ax
         call    read_sect16
-        mov     ax, FAT_START + 1
-        mov     bp, FAT_BUF + 0400h
-        call    read_sect16
+        pop     ax
+        pop     cx
+        inc     ax
+        add     bp, SECT_SZ
+        loop    .fat_loop
 
         ;; ============================================================
         ;; VMKRNL.LZ4をメモリにロード
@@ -154,9 +180,10 @@ loader_start:
 
         pop     ax
 
-        add     bp, 0400h
+        add     bp, SECT_SZ
 
-        ;; 64KB境界チェック
+        ;; 64KB境界チェック (0x200 も 0x400 も 0x10000 を割り切るので
+        ;; bp が 0 に戻ったところがちょうど境界)
         or      bp, bp
         jnz     .seg_ok
 
@@ -478,23 +505,22 @@ bits 16
 ;; ============================================================
 ;; read_sect16 — 16ビットモード1セクタ読み込み
 ;; ============================================================
+;; **SPT で実際に割る** (1.44MB の spt=18 は 2 の冪でない)。
+;;   sector = LBA % SPT + 1 ; track = LBA / SPT ; head = track&1 ; cyl = track>>1
 read_sect16:
         push    ax
-        mov     bx, ax
-        and     al, 07h
-        inc     al
-        mov     dl, al
-        mov     ax, bx
-        mov     cl, 3
-        shr     ax, cl
+        xor     dx, dx
+        mov     cx, SPT
+        div     cx              ;; AX = track, DX = LBA % SPT
+        inc     dl              ;; DL = sector (1-based)
         mov     dh, al
-        and     dh, 1
-        shr     ax, 1
+        and     dh, 1           ;; DH = head
+        shr     ax, 1           ;; AX = cylinder
         mov     cl, al
         mov     ah, 76h
         mov     al, DA_UA
-        mov     bx, 0400h
-        mov     ch, 03h
+        mov     bx, SECT_SZ
+        mov     ch, SECT_N
         int     1Bh
         pop     ax
         jc      disk_err16
