@@ -172,6 +172,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 | [`docs/KAPI_SPEC.md`](docs/KAPI_SPEC.md) | KernelAPI 仕様と追加手順 (§3-1) |
 | [`docs/POLICY_DEV.md`](docs/POLICY_DEV.md) / [`POLICY_DEBUG.md`](docs/POLICY_DEBUG.md) | 開発規約 / デバッグ (反映確認 §2、教訓集 §4、道具箱 §5) |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | リリース計画 (v1.x GUI シェル〜) |
+| [`docs/tasks/v3/PLAN.md`](docs/tasks/v3/PLAN.md) | v3 の追記中の計画。移行課題・文書継承マップへの入口。計画追加だけでは現行の規約・最低動作条件を変更しない |
 | `docs/hw/` | PC-9800 ハード資料のミラー (`tools/sync_hwdocs.sh`)。**著作権物・gitignore・コミット禁止**。Bible と矛盾したら UNDOCUMENTED を採る |
 | `/home/hight/np21w-src/docs/` | NP21/W ai-debug フォーク。WSL 側が正で、`make build && make deploy` で Windows にミラーされる |
 
@@ -182,3 +183,4 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 **`os32-kapi-add`** (KernelAPI の追加・変更)、**`os32-emu-config`** (NP21/W ini の限定変更 — [D2] の承認対象)、
 **`os32-local-ai`** (ビルド・試験・配備をローカル AI に実行させる)、
 **`os32-local-review`** (主レビュアーが枯渇したときの補助レビュー — `tools/review_local.py`)。
+

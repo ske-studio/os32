@@ -1,6 +1,6 @@
 # OS32 リリースロードマップ
 
-*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-15 更新 (v1.3 完了、Host Services N1〜N4 受入完了、移植準備 1〜4 着地)*
+*策定: 2026-04-17 / v1.x GUIシェル計画 / 2026-09-19 文書整理 (v3 計画への入口追加、既存票の受入記録を反映)*
 
 ## 0. 版数の対応表 (正典はここだけ)
 
@@ -10,8 +10,10 @@
 |---|---|---|---|
 | **カーネル** | **2.0** (タグ `v2.0`、2026-09-03) | リング 3 (CPL=3) ネイティブ。`ver` が `OS32 v2.0` と名乗るのはこれ | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) (M1〜M3 の**完了記録**)、[CHANGELOG.md](../CHANGELOG.md) |
 | **GUI シェル** | **1.3 完了 → 1.4 進行中** | 本書 §1 の各節。カーネル 2.0 の上で動く | §1 |
-| 次期カーネル | **v3 (未着手、未定義)** | 本書 §2 の長期項目 (プリエンプティブ寄りのマルチタスクなど)。**2026-09-15 のユーザー決裁で「v2」ではなく v3 と呼ぶ** (出荷済み 2.0 と衝突するため) | §2 |
+| 次期カーネル | **v3 (計画・追記中、実装未着手)** | DX4 / 16MB、486 命令のカーネル、現行系との互換性、GUI の高位 CPU 対応を検討。v2 は出荷済み 2.0 と衝突するため使わない | [tasks/v3/PLAN.md](tasks/v3/PLAN.md) |
 | ゲーム基盤 | v4 (草案) | [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md)。v3 の後 | — |
+
+会話上の「v1.x 継続系」は、現行の最低動作条件を維持して CUI 基盤を改良する開発系統を指す。出荷済みカーネル 2.0 や GUI 1.x の版数を変更する意味ではない。v3 の採用方針・提案・未決事項は [計画書](tasks/v3/PLAN.md)、移行前の課題は [移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) に集約する。
 
 *v1.0 到達までの開発履歴は [archive/ROADMAP_v1.0.md](archive/ROADMAP_v1.0.md) を参照*
 
@@ -28,7 +30,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 | 項目 | 決定 |
 |------|------|
-| デザインモデル | **Win3.1 / 早期Win95 の外観** — 協調型シングルタスクGUIデスクトップ (WM は gshell 常駐) |
+| デザインモデル | **Win3.1 / 早期Win95 の外観** — 協調型GUIデスクトップ (WM は gshell 常駐、v1.3 で複数アプリに拡張) |
 | 描画方式 | **全面GFX描画**。9801 = 640×400×16色 planar、9821 = PEGC 640×480×256色 / Cirrus GD54xx を HAL で切替 |
 | 再描画モデル | InvalidateRect 方式 (damage + commit)、window move は XOR 枠、全画面 backbuffer + clip |
 | GUI API | **libos32gui** — 非同期・ID参照・型付き16B event + retained widget tree + stateless drawing + box layout |
@@ -38,7 +40,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 | CUI/GUI | `/etc/system.cfg` の GUI=0/1 は**次回 boot の既定値**。実行中 shell の切替は `sys_switch_shell` |
 | FEP | gshell が GFX renderer を保持。CUI へ戻る前に renderer callback を解除 |
 | 性能目標 | Pentium 100MHz / 32MB で「超快適」を目標とするが、32MB をメモリの設計上限にしない |
-| メモリ方針 | CUI 最低 8MB は GUI 要件・開発制約ではない。GUI 必要 RAM は実測で定義。32bit フラット空間の設計対象と現行実装上限は [02_memory.md](02_memory.md) を参照 |
+| メモリ方針 | CUI の現行最低動作条件を継続系で維持する。最低 RAM の文書間不一致は [移行課題 M04](tasks/v3/MIGRATION_AUDIT.md) で確認し、ここで数値を再定義しない。GUI 必要 RAM は実測で定義。32bit フラット空間の設計対象と現行実装上限は [02_memory.md](02_memory.md) を参照 |
 
 ### 技術基盤
 
@@ -175,7 +177,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 ### v1.3 — 「ターミナル統合とCUI抽象化」 ✅ 完了 (2026-09-14)
 
-全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。持ち越し: S6-P (ext2 の小書き込み性能、[tasks/settings/TASK_S6.md](tasks/settings/TASK_S6.md))、F3a〜c 等の保留 5 件 (ユーザーの再考待ち、[tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) §3)。
+全項目受入済み・main にマージ済み (`fac0d89`)。残件の小物 4 件 (タスクバー経路の試験、`stat`、S6 `tar`、試験の棚卸し文書) も 2026-09-14 に feat/gui へ着地。後続の S6-P は [受入記録](tasks/settings/TASK_S6P.md) あり (stage B の計測条件は [移行課題 M16](tasks/v3/MIGRATION_AUDIT.md) を参照)。F3a〜c 等の保留事項は [S0 計画](tasks/settings/S0_PLAN_2026-09-13.md) と [移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) で再評価し、撤回済みの引き継ぎ書を現行指示として使わない。
 
 着手計画: [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md)、監査と決裁: [AUDIT_2026-09-10](tasks/gui/v13/AUDIT_2026-09-10.md)。
 2026-09-10 決裁: **GUI アプリ 4 本の同時実行 (契約 T2a) を v1.3 の最初に置く** ([K5](tasks/gui/v13/TASK_K5_multiapp.md))。
@@ -187,7 +189,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 
 | 作業 | カテゴリ | 備考 |
 |------|---------|------|
-| **GUI アプリ 4 本の同時実行** | kernel / GUI | 契約 T2/T2a。PD 切替は `OP_WAIT` の中だけ、5 本目は `ERR_FULL`、資源回収はアプリ単位。[K5](tasks/gui/v13/TASK_K5_multiapp.md)。端末と CUI 子の同居の土台 |
+| **GUI アプリ 4 本の同時実行** | kernel / GUI | 契約 T2/T2a。5 本目は `ERR_FULL`、資源回収はアプリ単位。待機・切替点は後続実装との差があり、[移行課題 M12](tasks/v3/MIGRATION_AUDIT.md) で契約を整理する。[K5](tasks/gui/v13/TASK_K5_multiapp.md)。端末と CUI 子の同居の土台 |
 | ターミナルウィンドウ | app | **外部アプリ**。libos32term (セルモデル) + libos32term_render (厳密 clip) を Paint に接続 |
 | CUI program output redirect | kernel | console_write -> terminal window virtual console |
 | full-screen GFX program | GUI | exec_run後にGUI全体再描画 |
@@ -229,7 +231,7 @@ API は Win16 の再現ではなく、その欠点を 386 で払える範囲の�
 | About dialog | app | アプリ層 | OS32 About |
 | text editor GUI | app | Claude Code PM + Opus 5 コーダー | edit.bin GUI版。**API の退行検出を兼ねる** (N3 の後に着手) |
 | Host Services N5 (実機 LAN、Npcap + scapy) | host / driver | — | **保留** (エミュレータで N1〜N4 完了、実機は未着手) |
-| hsync H1 / H3 (同サイズ差し替えの検出、日時前置判定、KAPI v52) | system / fs | Claude Code PM + Opus 5 コーダー | **受入完了 2026-09-15**。H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
+| hsync H1〜H4 | system / fs / host | 既存票を参照 | **受入記録あり**。[改善計画](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) から各票へ。未検証経路・新たな配備課題は [移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) |
 | ext2 の B8 (読み取り失敗の読み替えを塞ぐ、remount-ro 相当) | fs / vfs | 同上 | **受入完了 2026-09-15** ([tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md)) |
 
 先送り (v3 以降、[§2](#2-長期ロードマップ-次期カーネル-v3-以降) の「GUI アプリケーション群」): 設定アプリの拡張項目、
@@ -241,9 +243,10 @@ image viewer (VBZ / VDP / BMP)、music player、`sed` / `awk`。
 
 ### 協調型マルチタスク
 
-**協調型の複数アプリ (最大 4 本、PD 切替、譲り合いは `OP_WAIT` だけ) は契約 T2a のとおり v1.3 で実装する**
-(2026-09-10 決裁。以前ここに「v1.x は single foreground app」とあったのは v1.2 の暫定を指していた)。
-v3 では timer interrupt を利用したプリエンプティブ寄りの multi-task を検討する。
+協調型の複数アプリは v1.3 で実装済み。v3 も現行の協調型を出発点にする。
+以前の本節にあった timer interrupt によるプリエンプティブ寄りの multi-task は旧検討案であり、v3 の採用要件ではない。デーモン常駐化も自動的に含めない。採否と互換性は [v3 計画書](tasks/v3/PLAN.md) で管理する。
+
+以下は将来の検討候補で、v3 の必須成果ではない。
 
 - window / process の独立実行
 - v1.x `gui_call` + SHM event ring を拡張した IPC
@@ -254,16 +257,16 @@ v3 では timer interrupt を利用したプリエンプティブ寄りの multi
 移植 (例: ARM) は v1.x の範囲外だが、**新しい層を実装するたびに CPU 依存の調査を票に含める**
 (ユーザー指示 2026-09-14)。最初は Host Services N1 (ワイヤ v2 / `link.c` / KAPI v51) で
 `docs/tasks/portability/SURVEY_N1.md` に記す (観点は `docs/archive/network/TASK_N1.md` §0 段 7)。
-以後の票も同じ観点で `docs/tasks/portability/` に追記する。**移植準備の 4 段は 2026-09-15 に着地した**
+以後の票も同じ観点で `docs/tasks/portability/` に追記する。**移植準備の順序 1〜5 は 2026-09-16 までに着地した**
 (ARM コンパイル計測 `make check-arm-compile` 55/93、`hlt`/`cli`/`sti` を `io.h` 経由に、`arch/x86` + `platform/pc98`
 の骨格、kstring の C 版、LE アクセサ `include/endian_le.h`。基準値と経過は [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md))。
-残りは `gdt`/`tss`/`cr3` と CPL=3 降下 asm の `arch/x86/` への移設、ARM 実装、KAPI 生成器の arch 対応 (**v3 まで保留**、ユーザー決裁)。
+`gdt`/`tss`/`cr3` と CPL=3 降下 asm の移設は順序 5 で実施済み。ARM 実装と KAPI 生成器の arch 対応は未実施で、v3 の必須範囲にはまだ含めない。55/93 はコンパイル計測であり、ARM 上での動作確認ではない。
 習慣として今から守るもの: ワイヤ / ディスク上の構造は LE アクセサで読む、非アラインアクセスをしない、
 絶対番地は `memmap.h` 以外に書かない、割込み制御は既存ヘルパー経由。
 
 ### GUI アプリケーション群 (v1.4 から先送り、2026-09-14)
 
-v1.4 の「アプリ群」は基盤に依存される側ではないので、協調型マルチタスクの拡張の後に回す。
+v1.4 からの先送り候補。v3 への採用と着手順は [計画書](tasks/v3/PLAN.md) で個別に決める。
 設定アプリの拡張 (壁紙・色・マウス速度は設定レジストリに行を足すだけ、UI は gshell の設定ダイアログ)、
 image viewer (MGX は `mgxview` が既にある。VBZ / VDP / BMP を足す)、music player (FM 音源 BGM)、
 `sed` / `awk`。着手の順は、そのときに一番 API の穴を踏みそうなものから。
@@ -291,3 +294,4 @@ image viewer (MGX は `mgxview` が既にある。VBZ / VDP / BMP を足す)、m
 ---
 
 *ホビープロジェクトとして品質優先で進行。タイムラインはデッドラインではなくペース感の目安。*
+
