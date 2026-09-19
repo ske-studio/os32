@@ -82,9 +82,9 @@ make check-tests-inventory                      # 表が古くないか検査す
 | # | ターゲット | コマンド | 対象ソース | 記録 (RED→GREEN) | 票 | CI |
 |---|---|---|---|---|---|---|
 | 1 | `check-kapi-version` | `python3 tools/check_kapi_version.py` | — | — | — | ○ |
-| 2 | `check-docs-links` | `python3 tools/check_docs_links.py` | — | — | — | × |
-| 3 | `check-docs-orphans` | `python3 tools/check_docs_orphans.py` | — | [`tools/tests/s0_tdd.md`](../tools/tests/s0_tdd.md) | [`docs/tasks/settings/TASK_S0.md`](tasks/settings/TASK_S0.md) | × |
-| 4 | `check-tests-inventory` | `python3 tools/gen_tests_inventory.py --check` | — | — | — | × |
+| 2 | `check-docs-links` | `python3 tools/check_docs_links.py` | — | — | — | ○ |
+| 3 | `check-docs-orphans` | `python3 tools/check_docs_orphans.py` | — | [`tools/tests/s0_tdd.md`](../tools/tests/s0_tdd.md) | [`docs/tasks/settings/TASK_S0.md`](tasks/settings/TASK_S0.md) | ○ |
+| 4 | `check-tests-inventory` | `python3 tools/gen_tests_inventory.py --check` | — | — | — | ○ |
 | 5 | `check-manifests` | `python3 tools/check_manifests.py` | — | — | — | × |
 | 6 | `check-constraints` | `python3 tools/check_constraints.py` | — | — | — | ○ |
 | 7 | `check-privileged` | `python3 tools/check_privileged.py` | — | — | — | × |
