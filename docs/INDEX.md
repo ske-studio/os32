@@ -4,6 +4,10 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 ---
 
+## v3 の計画と移行準備
+
+[v3 計画書](tasks/v3/PLAN.md) は追記中の草案。[機器の延命と移植負担の最小化](tasks/v3/PORTABILITY_PRINCIPLES.md) に根本目的と共通／対象別の設計方針を記す。[移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) は現行文書・実装の確認結果、[文書の継承・分離マップ](tasks/v3/DOCUMENT_MAP.md) は参照先の整理。[デバッグ環境・認可モジュール設計方針](tasks/v3/DEBUG_AND_MODULES.md) に、実機とエミュレータの分担、認可台帳、ロード・保持、USB着脱を記す。現行の C89 規約や最低動作条件は、この計画の追加だけでは変更しない。
+
 ## 情報単位ごとの正典 (更新先は 1 つ)
 
 同じ事実を 2 か所で独立に更新する構造は必ず食い違う (2026-09-05 の診断で 6 件)。
@@ -34,8 +38,9 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | 設定の置き場 (system.cfg の残すキー、settings.db のスキーマ / API / リカバリ) | [tasks/settings/DESIGN.md](tasks/settings/DESIGN.md) (計画、v1.3) | ROADMAP は 1 行 |
 | アプリ帯の広さ (1 アプリに渡せる量) | [tasks/memory/APP_BAND_PDE.md](tasks/memory/APP_BAND_PDE.md) (実装済み `b8dab24`、kselftest で毎起動検証、K5b が依存。**票 §5 の受入項目は未消化** = 受入待ち) | 02_memory.md は方針と帯の表 |
 | 試験の一覧 (`make check` のターゲット、`_tdd.md` と票の対応) | [TESTS.md](TESTS.md) (`tools/gen_tests_inventory.py` で生成、`make check-tests-inventory` が鮮度を照合) | 各票は自分の `_tdd.md` を指すだけ |
-| 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜4 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリ `pw-sh4-research` の調査の快照** (正典はそちら。本リポジトリでは更新しない) |
+| 移植性 (CPU / 機種の 2 軸、ARM 計測、順序 1〜5 の経過) | [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) (計測と経過)、[../arch/README.md](../arch/README.md) (足し方) | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) (調査)、`tasks/arch_port/` は**別リポジトリ `pw-sh4-research` の調査の快照** (正典はそちら。本リポジトリでは更新しない) |
 | [tasks/portability/TASK_KSTRING_BENCH.md](tasks/portability/TASK_KSTRING_BENCH.md) | kstring の速度実測 **計画 (2026-09-16)** — x86 で C 版 (`lib/kstring_c.c`) に一本化するかを 2 条件で測って決める。切り替えの可否はユーザー判断 |
+| v3 の方針・提案・未決事項 | [tasks/v3/PLAN.md](tasks/v3/PLAN.md) | ROADMAP は入口。移行課題の更新先は [MIGRATION_AUDIT.md](tasks/v3/MIGRATION_AUDIT.md)、文書の扱いは [DOCUMENT_MAP.md](tasks/v3/DOCUMENT_MAP.md) |
 | 版数 (カーネル 2.0 / GUI 1.x / 次期 v3 / v4 草案) | [ROADMAP.md §0](ROADMAP.md) | CHANGELOG.md、`ver` の文字列、タグ |
 | 現行 / 未実装 / 過去 の区別 | 各文書の冒頭に「現行仕様」「計画」「YYYY-MM-DD 時点のスナップショット」を明記 | — |
 
@@ -125,14 +130,14 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | hsync 改善案 (ユーザー起草、2026-09-14) — H1 / H3 は受入完了、H2 (置換の安全化) / H4 (配備マニフェスト) は未着手 |
+| [tasks/shell/HSYNC_IMPROVEMENT_PLAN.md](tasks/shell/HSYNC_IMPROVEMENT_PLAN.md) | hsync 改善の原案と後続 — H1〜H4 の受入記録は各票を参照。未検証経路・新たな課題は [移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) |
 | [tasks/shell/TASK_H1.md](tasks/shell/TASK_H1.md) | H1 **受入完了 (2026-09-15)** — 同サイズ内容比較、ストリーム CRC + 読戻し検証、dry-run、理由表示、HostDrv stat の是正。Codex 往復 5 の記録 |
 | [tasks/shell/TASK_H3.md](tasks/shell/TASK_H3.md) | H3 **受入完了 (2026-09-15)** — HostDrv の FILETIME→mtime、`sys_set_mtime` (KAPI v52)、日時を前置フィルタに (決裁)。`hsync sys` 25.8 s → 0.26 s |
-| [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) | H2 **設計中 (2026-09-16)** — hsync の置換安全化。`O_EXCL` (KAPI v53)、ext2 のファイル置き換えを宛先エントリの inode 書き換えに、一時ファイル `.hs~` → 検証 → rename。決裁 D1〜D3 |
-| [tasks/shell/TASK_H4.md](tasks/shell/TASK_H4.md) | H4 **設計中 (2026-09-16)** — 配備マニフェストと世代の確認。古い配備元で新しい成果物を上書きする事故を検出する。`--expect-build` と行指向の名札 |
+| [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) | H2 **受入完了 (記録: 2026-09-16)** — hsync の置換安全化。`O_EXCL` (KAPI v53)、ext2 のファイル置き換えを宛先エントリの inode 書き換えに、一時ファイル `.hs~` → 検証 → rename。決裁 D1〜D3 |
+| [tasks/shell/TASK_H4.md](tasks/shell/TASK_H4.md) | H4 **受入記録あり (2026-09-16、名札なしのゲスト経路は未実施)** — 配備マニフェストと世代の確認。古い配備元で新しい成果物を上書きする事故を検出する。`--expect-build` と行指向の名札 |
 | [tasks/shell/TASK_FS_TYPE.md](tasks/shell/TASK_FS_TYPE.md) | B8 **受入完了 (2026-09-15、6 往復)** — 読み取り失敗を不存在・未割当・別の型と読み替えていた ext2/VFS/HostDrv の経路。remount-ro 相当、e2fsck を正解に。残る制限は §2-6 / §2-7 |
-| [tasks/shell/TASK_SH_TRUNCATION.md](tasks/shell/TASK_SH_TRUNCATION.md) | シェルの入力切り詰め **設計中 (2026-09-16)** — 切り詰めたまま実行を続ける 22 経路。`if` の比較が 255 文字で切れて条件が逆転し破壊的なコマンドが走る欠陥を含む。`$?` の配線より先 |
-| [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) | 終了コードの配線と `$?` **設計中 (2026-09-16、切り詰めの票の後)** — ゲスト試験ランナーの 1 段目。終了コードが起動エラー・app_id と同じ空間に混ざっている (PATH の次の候補を二重実行する実害つき)。決裁 E1 / E2 |
+| [tasks/shell/TASK_SH_TRUNCATION.md](tasks/shell/TASK_SH_TRUNCATION.md) | シェルの入力切り詰め **受入完了 (記録: 2026-09-16)** — 26 経路の fail-closed 化。詳細と検証範囲は票を参照 |
+| [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) | 終了コードの配線と `$?` **受入記録あり (2026-09-16)** — 未実施のゲスト経路は票 §8。後続の一括試験ランナー・結果チャネルは未整備 ([移行課題 M06](tasks/v3/MIGRATION_AUDIT.md)) |
 | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) | 継承バグ台帳 (T9 で起こした、常駐シェルと sh.bin の共通) |
 
 ### 設定レジストリ (settings、v1.3 で完了)
@@ -162,7 +167,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 
 | ドキュメント | 内容 |
 |-------------|------|
-| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値と経過** — `make check-arm-compile` (計測、合否ではない)。順序 1〜4 の前後表 (§9)。2026-09-15 時点 55/93 |
+| [tasks/portability/ARM_GAUGE.md](tasks/portability/ARM_GAUGE.md) | **ARM コンパイル計測の基準値と経過** — `make check-arm-compile` (計測、合否ではない)。順序 1〜5 の前後表 (§9)。2026-09-16 時点 55/93。ARM 実行の確認を意味しない |
 | [tasks/portability/SURVEY_N1.md](tasks/portability/SURVEY_N1.md) | 移植性調査 (N1 起点) — 直列化とアライメント、`cli`/`sti`/`hlt` の一覧、順序 2 / 4-a の実施記録 |
 | [../arch/README.md](../arch/README.md) | **`arch/` と `platform/` の正典** — 移植の 2 軸 (CPU / 機種)、`ARCH` `PLATFORM` の選び方、新アーキテクチャの足し方 |
 | [tasks/arch_port/00_INDEX.md](tasks/arch_port/00_INDEX.md) | 他アーキテクチャ移植調査の索引 — **別リポジトリ `pw-sh4-research` で進む調査の快照 (2026-09-08〜09、本リポジトリでは更新しない)**。M0 監査 (`tools/audit_cast_align.sh`)、SHARP Brain (i.MX28) のハード調査 |
@@ -183,7 +188,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [tasks/gui/v13/PLAN.md](tasks/gui/v13/PLAN.md) | **v1.3 計画と票の索引** (受入完了 2026-09-14) — K5b / K6 / K7 / T7〜T9、監査 (`AUDIT_2026-09-10.md`)、レビュー記録 (`archive/gui_v13_reviews/REVIEW_*.md`、完了記録) |
 | [tasks/gui/v13/TASK_K6C_A_terminal.md](tasks/gui/v13/TASK_K6C_A_terminal.md) / [TASK_T7_terminal_cmd.md](tasks/gui/v13/TASK_T7_terminal_cmd.md) / [REVIEW_T5A_APP.md](archive/gui_v13_reviews/REVIEW_T5A_APP.md) | v1.3 の票のうち `PLAN.md` から直接辿れない 3 本 (端末アプリ、端末からの CUI 起動、T5a アプリのレビュー記録) |
 | [../tools/tests/gui_review_20260910_tdd.md](../tools/tests/gui_review_20260910_tdd.md) / [gui_review3_20260910_tdd.md](../tools/tests/gui_review3_20260910_tdd.md) | v1.3 レビュー往復 (2026-09-10) の試験記録 (完了記録) |
-| [tasks/agents/HANDOVER_2026-09-16.md](tasks/agents/HANDOVER_2026-09-16.md) | **残件の引き継ぎ (2026-09-16、計画)** — 別モデルが PM として進めるための文書。現在地、残件 (H2 / H4 / arch 移設 / kstring 判断 / ゲスト試験ランナー / ARM / LAN 実機 / 小物) の推奨順・決裁点・手順・受入、踏むと痛い所 |
+| [tasks/agents/HANDOVER_2026-09-16.md](tasks/agents/HANDOVER_2026-09-16.md) | **履歴: 2026-09-16 の途中時点の引き継ぎ** — 作業順・環境・未着手表示を現在の指示として使わない。最新の状態は各票、v3 へ持ち越す課題は [移行課題台帳](tasks/v3/MIGRATION_AUDIT.md) |
 | [tasks/agents/HANDOVER_v14.md](tasks/agents/HANDOVER_v14.md) | v1.4 の引き継ぎ — **撤回 (2026-09-14)**。アプリ層を別エージェントへ渡す案は取りやめ、実装は基盤・アプリ層とも Opus 5 コーダー |
 | [tasks/hotdeploy/DESIGN.md](tasks/hotdeploy/DESIGN.md) | ホットデプロイ (再起動なしの配備) の設計 |
 
@@ -196,7 +201,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [archive/kernel_v2/PLAN.md](archive/kernel_v2/PLAN.md) | **カーネル 2.0 の計画 (完了記録)** — リング 3 / Rust の適用範囲 / KAPI 呼び出し実測。M1〜M3 は 2026-09-03 完了、タグ `v2.0`。版数の対応は [ROADMAP.md §0](ROADMAP.md) |
 | [archive/kernel_v2/M1_RING3.md](archive/kernel_v2/M1_RING3.md) / [M2_KAPI_TRAMPOLINE.md](archive/kernel_v2/M2_KAPI_TRAMPOLINE.md) / [M3_VERIFY.md](archive/kernel_v2/M3_VERIFY.md) / [CONTRACTS.md](archive/kernel_v2/CONTRACTS.md) | 2.0 の設計 (リング 3 土台、KAPI トランポリン、検証、凍結契約)。完了記録 |
 | [archive/kernel_v2/TASK_coder1_M0b_privileged.md](archive/kernel_v2/TASK_coder1_M0b_privileged.md) / [TASK_coder1_M1_ring3.md](archive/kernel_v2/TASK_coder1_M1_ring3.md) / [TASK_coder2_libos32gui.md](archive/kernel_v2/TASK_coder2_libos32gui.md) | 2.0 のコーダー票。完了記録 |
-| [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md) / [tasks/v4/README.md](tasks/v4/README.md) | ゲーム基盤 v4 の草案 (2026-09-07)。v3 (次期カーネル、未定義) の後 |
+| [V4_GAME_PLATFORM_DRAFT.md](V4_GAME_PLATFORM_DRAFT.md) / [tasks/v4/README.md](tasks/v4/README.md) | ゲーム基盤 v4 の草案 (2026-09-07)。v3 ([計画・追記中](tasks/v3/PLAN.md)) の後 |
 | [tasks/boot_reform/00_OVERVIEW.md](tasks/boot_reform/00_OVERVIEW.md) | ブート刷新 (vmkernel.lz4 / ext2 ローダー) — 設計 (全 8 部) |
 
 ### FEP・V86・SQLite・ライブラリ
@@ -230,3 +235,4 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 ## ソースツリー概要
 
 [08_build.md §8-3](08_build.md) を参照 (複製しない。CLAUDE.md「Source Tree」も同じ表)。
+
