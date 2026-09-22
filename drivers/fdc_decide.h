@@ -44,10 +44,11 @@
 /* ======================================================================== */
 /*  fdc_classify_seek_end() の戻り値                                        */
 /* ======================================================================== */
-#define FDC_SEEK_OK       0   /* SE=1 / EC=0 / (照合するなら) PCN 一致 — 完了 */
-#define FDC_SEEK_RETRY_EC 1   /* SE=1 だが EC=1 — RECALIBRATE をもう一度出す */
-#define FDC_SEEK_PENDING  2   /* ST0=80h — まだ終わっていない (pending 無し) */
-#define FDC_SEEK_FAIL     3   /* それ以外 (NR / Ready 変化 / PCN 不一致 など) */
+#define FDC_SEEK_OK        0  /* SE=1 / EC=0 / (照合するなら) PCN 一致 — 完了 */
+#define FDC_SEEK_RETRY_EC  1  /* SE=1 だが EC=1 — RECALIBRATE をもう一度出す */
+#define FDC_SEEK_PENDING   2  /* ST0=80h — まだ終わっていない (pending 無し) */
+#define FDC_SEEK_FAIL      3  /* それ以外 (Ready 変化 / PCN 不一致 など) */
+#define FDC_SEEK_NOT_READY 4  /* NR=1 — 媒体もドライブも無い。**回復で直らない** */
 
 /* ======================================================================== */
 /*  判定                                                                    */
@@ -66,6 +67,13 @@
 int fdc_sis_result_bytes(u8 st0);
 
 /* シーク (SEEK / RECALIBRATE) の完了を ST0 と PCN から判定する。
+ *
+ * NR (Not Ready) は `FDC_SEEK_NOT_READY` として他の失敗と分ける。
+ * 媒体もドライブも無いのはリセットでも RECALIBRATE でも直らないので、
+ * 呼び出し側は **リトライも回復もせずに即座に最終失敗にする**。
+ * ここを一緒くたにしていたころは、HDD 起動時の /fd0 サブマウント試行が
+ * 空のドライブに対して毎回 fdc_recover (リセット待ち + recalibrate) を
+ * 3 回踏み、起動が数秒伸びていた。
  *
  *   want_cyl >= 0  … PCN が want_cyl と一致することまで求める (SEEK)
  *   want_cyl <  0  … PCN を照合しない (RECALIBRATE — 成功条件は

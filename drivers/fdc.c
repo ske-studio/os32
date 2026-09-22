@@ -23,6 +23,17 @@ extern volatile u32 tick_count;
 /* IRQ11完了フラグ */
 volatile u32 fdc_irq_fired = 0;
 
+/* 最後に SEEK / RECALIBRATE で見た ST0。診断行でしか使わない。
+ * R/W が seek フェーズで失敗したとき、READ/WRITE の results[] は空のままな
+ * ので、**こちらを出さないと「なぜシークが失敗したか」が出ない**
+ * (NR = 媒体無しなのか、本当に動かなかったのかが読めない)。 */
+static u8 s_last_seek_st0 = 0;
+
+/* fdc_seek / fdc_recalibrate_st0 の内部戻り値。
+ * NR (媒体もドライブも無い) だけは **リトライも回復もしない** ので
+ * 他の失敗と分ける。 */
+#define FDC_RC_NOT_READY  (-5)
+
 /* DMA バッファ。
  * 大きさは 1 セクタ分 (最大 1024B) で、**1024B 境界に揃える** ([HW2])。
  * 揃えておけば 64KB 境界をまたぎようがない。以前は揃え指定が無く、
@@ -74,10 +85,15 @@ static int fdc_read_byte(void)
     return -1; /* タイムアウト */
 }
 
-/* リザルトフェーズ: 最大10バイトのリザルトを読み出し */
+/* リザルトフェーズ: 最大10バイトのリザルトを読み出し。
+ * **1 バイトごとに空回りの上限を掛ける** — CB=1 のまま RQM/DIO が揃わない
+ * FDC に当たると、縛りが無ければ i-- のリトライで永久に回る。
+ * 戻り値は実際に読めたバイト数 (諦めた時点の i)。 */
 static int fdc_read_results(u8 *st, int max)
 {
-    int i;
+    int i, spin;
+
+    spin = 0;
     for (i = 0; i < max; i++) {
         u8 msr = (u8)inp(FDC_MSR);
         /* CMD BSY=0 なら終了 */
@@ -85,8 +101,10 @@ static int fdc_read_results(u8 *st, int max)
         /* RQM=1, DIO=1 なら読み出し */
         if ((msr & (MSR_RQM | MSR_DIO)) == (MSR_RQM | MSR_DIO)) {
             st[i] = (u8)inp(FDC_FIFO);
+            spin = 0;       /* 上限はバイトごとに数え直す */
         } else {
             fdc_delay();
+            if (++spin >= FDC_MSR_SETTLE_LOOP) break;  /* 出てこない */
             i--; /* リトライ */
         }
     }
@@ -253,35 +271,58 @@ static void fdc_motor_off(void)
 /* ======================================================================== */
 /*  シーク完了待ち (SEEK / RECALIBRATE 共通)                                */
 /*                                                                          */
-/*  IRQ フラグを待ち、来たら SIS で ST0 / PCN を読む。                      */
-/*  **タイムアウトしても SIS は 1 回出す** — 実機では遅れて上がった INT の   */
-/*  エッジを PIC が取りこぼすことがあり、そのとき ST0 の SE が立っていれば   */
-/*  シーク自体は終わっている。ST0 = 80h (pending 無し) なら本当に            */
-/*  終わっていないので、そこは FDC_SEEK_PENDING で区別する。                */
+/*  **期限 (start + FDC_SEEK_TIMEOUT_TICKS) までループする。**              */
+/*  IRQ 待ちをループの前に 1 回だけ置くと、別ドライブの通知 (例: drv1 の     */
+/*  Ready 変化) で IRQ が上がったときに、それを読み捨てた直後の SIS が       */
+/*  80h を返して **自ドライブの正常なシークを途中で失敗にする**。           */
+/*  なので:                                                                 */
+/*    - 別ドライブの通知なら捨てて待ちを続ける                              */
+/*    - 80h (pending 無し) も期限内なら待ちを続ける                         */
+/*    - 自ドライブの結果が出たらそれを返す                                  */
+/*  上限は**時間で**縛る (tick_count は単調に進むので無限ループにならない)。 */
 /*                                                                          */
-/*  別ドライブの遅れた完了通知は読み捨てて次を見る (fdc_init が未接続の      */
-/*  ドライブ 1 を recalibrate するため、これが混ざる)。                     */
+/*  期限を過ぎたら最後にもう一度 SIS を出す — 実機では遅れて上がった INT の  */
+/*  エッジを PIC が取りこぼすことがあり、そのとき ST0 の SE が立っていれば   */
+/*  シーク自体は終わっている。80h なら本当に終わっていないので              */
+/*  FDC_SEEK_PENDING を返す。                                               */
 /*                                                                          */
 /*  want_cyl >= 0 で PCN を照合する。RECALIBRATE は -1 を渡す。             */
 /*  戻り値は fdc_classify_seek_end() の FDC_SEEK_*。                        */
+/*  診断用に最後に見た ST0 を s_last_seek_st0 へ残す。                      */
 /* ======================================================================== */
 static int fdc_wait_seek_end(int drv, u8 *st0, u8 *cyl, int want_cyl)
 {
+    u32 start = tick_count;
+    u8 want_ds = (u8)(drv & FDC_ST0_DS_MASK);
     int i, rc;
 
     *st0 = 0;
     *cyl = 0;
 
-    /* タイムアウトしても続ける。戻り値は見ない — 判断は ST0 でする。 */
-    (void)fdc_wait_irq(FDC_SEEK_TIMEOUT_TICKS);
+    for (;;) {
+        u32 elapsed = tick_count - start;
 
+        if (elapsed >= FDC_SEEK_TIMEOUT_TICKS) break;   /* 期限切れ */
+        /* 残り時間だけ待つ。来なければ期限切れとして下の救済へ。 */
+        if (fdc_wait_irq(FDC_SEEK_TIMEOUT_TICKS - elapsed) != 0) break;
+
+        if (fdc_sense_interrupt(st0, cyl) != 0) return FDC_SEEK_FAIL;
+        s_last_seek_st0 = *st0;
+        rc = fdc_classify_seek_end(*st0, *cyl, want_cyl);
+
+        /* まだ何も出ていない / 別ドライブの通知 — どちらも待ちを続ける。 */
+        if (rc == FDC_SEEK_PENDING) continue;
+        if ((u8)(*st0 & FDC_ST0_DS_MASK) != want_ds) continue;
+        return rc;
+    }
+
+    /* 期限切れ。エッジの取りこぼしだけなら救う。 */
     for (i = 0; i < FDC_SIS_DRAIN_MAX; i++) {
         if (fdc_sense_interrupt(st0, cyl) != 0) return FDC_SEEK_FAIL;
+        s_last_seek_st0 = *st0;
         rc = fdc_classify_seek_end(*st0, *cyl, want_cyl);
         if (rc == FDC_SEEK_PENDING) return rc;
-        if ((u8)(*st0 & FDC_ST0_DS_MASK) != (u8)(drv & FDC_ST0_DS_MASK)) {
-            continue;   /* 別ドライブの完了通知 — 読み捨てる */
-        }
+        if ((u8)(*st0 & FDC_ST0_DS_MASK) != want_ds) continue;
         return rc;
     }
     return FDC_SEEK_FAIL;
@@ -310,16 +351,47 @@ static int fdc_reset(void)
     /* リセット後は 4 ドライブ分の完了通知が溜まる。ST0 = 80h で尽きる。 */
     (void)fdc_drain_interrupts();
 
-    /* Specifyコマンド: SRT=8ms, HLT=10ms, HUT=max, DMA有効 */
-    /* SRT_value = 16 - (8 * 500000 / 500000) = 8 */
-    /* HLT_value = 10 * 500000 / 1000000 = 5 */
-    /* HUT_value = 0 (最大) */
-    /* NDMA = 0 (DMAモード) */
+    /* Specifyコマンド: SRT=8ms, HLT=10ms, HUT=max, DMA有効 (値は fdc.h)。 */
     if (fdc_send_byte(FDC_CMD_SPECIFY) != 0) return -1;
-    if (fdc_send_byte(0x80) != 0) return -1;  /* SRT=8, HUT=0 */
-    if (fdc_send_byte(0x0A) != 0) return -1;  /* HLT=5, NDMA=0 */
+    if (fdc_send_byte(FDC_SPECIFY_SRT_HUT) != 0) return -1;
+    if (fdc_send_byte(FDC_SPECIFY_HLT_DMA) != 0) return -1;
 
     return 0;
+}
+
+/* ======================================================================== */
+/*  実行フェーズごと打ち切る (転送の後始末)                                 */
+/*                                                                          */
+/*  **DMA ch2 を先にマスクするのが肝**。READ が実行フェーズ中にタイム       */
+/*  アウトしたまま -1 を返すと、ch2 はアンマスクのまま残る。次に WRITE が    */
+/*  dma_buffer へ書くべき中身を写した後で、遅れて来た旧 READ の DMA が       */
+/*  **そこを上書きし得る**。WRITE は最初の SEEK が失敗しても fdc_recover で  */
+/*  先へ進むので、気づかないまま**旧データをディスクに書いて成功を返す**。  */
+/*                                                                          */
+/*  IRQ は待たない — 最短で戻す。積み残しは SIS の排水で回収する。          */
+/* ======================================================================== */
+static void fdc_abort_transfer(void)
+{
+    /* 1. まず DMA を止める。以後 dma_setup が「マスク→設定→アンマスク」
+     *    するので、ここではマスクしたままにしておいてよい。 */
+    outp(DMA_MASK_REG, DMA_MASK_CH2);
+
+    /* 2. FDC をリセットして実行フェーズを畳む。 */
+    outp(FDC_CTRL, CTRL_RST);
+    fdc_delay();
+    fdc_delay();
+    fdc_delay();
+    fdc_delay();
+    fdc_irq_fired = 0;
+    outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
+
+    /* 3. Specify はリセットで消えるので入れ直す。 */
+    (void)fdc_send_byte(FDC_CMD_SPECIFY);
+    (void)fdc_send_byte(FDC_SPECIFY_SRT_HUT);
+    (void)fdc_send_byte(FDC_SPECIFY_HLT_DMA);
+
+    /* 4. 積み残しの割り込みを回収する (IRQ 待ちはしない)。 */
+    (void)fdc_drain_interrupts();
 }
 
 /* ======================================================================== */
@@ -328,6 +400,7 @@ static int fdc_reset(void)
 /* 成功条件は「SE が立ち、EC が立っていない」こと。PCN は照合しない。
  * 戻り値: 0 = 成功 / -1 = コマンド送信失敗 / -2 = 未完了 (ST0 = 80h)
  *         -3 = EC が取れなかった / -4 = その他の失敗
+ *         FDC_RC_NOT_READY (-5) = NR (媒体もドライブも無い。回復しない)
  * 最後に見た ST0 を *out_st0 に返す (診断用。NULL 可)。 */
 static int fdc_recalibrate_st0(int drv, u8 *out_st0)
 {
@@ -362,6 +435,7 @@ static int fdc_recalibrate_st0(int drv, u8 *out_st0)
     }
 
     if (out_st0) *out_st0 = st0;
+    if (rc == FDC_SEEK_NOT_READY) return FDC_RC_NOT_READY;
     if (rc == FDC_SEEK_PENDING)  return -2;
     if (rc == FDC_SEEK_RETRY_EC) return -3;
     return -4;
@@ -375,14 +449,21 @@ static int fdc_recalibrate(int drv)
 /* ======================================================================== */
 /*  リトライのあいだの回復                                                  */
 /*                                                                          */
-/*  FDC リセット (0x94 bit7) → Specify → SIS 排水 → recalibrate。           */
-/*  排水と recalibrate は fdc_recalibrate_st0() の中で順に行う。            */
+/*  DMA マスク → FDC リセット (0x94 bit7) → Specify → SIS 排水 →           */
+/*  recalibrate。排水と recalibrate は fdc_recalibrate_st0() の中で行う。   */
 /*  1 回目の転送が失敗した時点で INT 線が上がりっぱなしになっている可能性   */
 /*  があり、そのまま 2 回目を出しても必ず同じ形で失敗する。                 */
+/*                                                                          */
+/*  **先頭で DMA ch2 をマスクする** — 直前の試行が実行フェーズで落ちて      */
+/*  いると ch2 がアンマスクのまま残っている。これで、最終失敗が seek        */
+/*  フェーズ (dma_setup を通らない) で起きた場合も ch2 は必ず閉じている。   */
 /* ======================================================================== */
 static int fdc_recover(int drv)
 {
-    int rc = fdc_reset();
+    int rc;
+
+    outp(DMA_MASK_REG, DMA_MASK_CH2);
+    rc = fdc_reset();
     if (rc != 0) return rc;
     return fdc_recalibrate(drv);
 }
@@ -405,6 +486,8 @@ static int fdc_seek(int drv, int cyl, int head)
 
     /* 完了待ち。PCN が要求シリンダと一致することまで見る。 */
     rc = fdc_wait_seek_end(drv, &st0, &result_cyl, cyl);
+    /* NR = 媒体もドライブも無い。**リトライも回復もしない** ので分けて返す。 */
+    if (rc == FDC_SEEK_NOT_READY) return FDC_RC_NOT_READY;
     if (rc == FDC_SEEK_PENDING) return -2;
     if (rc != FDC_SEEK_OK) return -4;
 
@@ -418,6 +501,38 @@ static int fdc_seek(int drv, int cyl, int head)
 }
 
 /* ======================================================================== */
+/*  最終失敗の 1 行 ([V4])                                                  */
+/*                                                                          */
+/*  リトライごとには出さない — 画面が流れて元の失敗が見えなくなる。        */
+/*  リザルトフェーズまで届いていない (seek / cmd で落ちた) ときは           */
+/*  results[] がまだ空なので、**最後の SEEK / RECALIBRATE の ST0** を出す。 */
+/*  NR (媒体もドライブも無い) なら印を付ける — いちばん多い失敗なので       */
+/*  「なぜ読めなかったか」が 1 行で分かるようにする。                      */
+/* ======================================================================== */
+static void fdc_report_fail(const char *op, int drv, int cyl, int head,
+                            int sect, const char *phase, int have_results,
+                            const u8 *results)
+{
+    u8 st0, st1, st2;
+    const char *mark;
+
+    if (!have_results) {
+        st0 = s_last_seek_st0;
+        st1 = 0;
+        st2 = 0;
+    } else {
+        st0 = results[0];
+        st1 = results[1];
+        st2 = results[2];
+    }
+    mark = (st0 & FDC_ST0_NR) ? " (NR)" : "";
+
+    kprintf(0x07,
+            "[fdc] %s fail drv=%d chs=%d/%d/%d phase=%s st0=%02x st1=%02x st2=%02x%s\n",
+            op, drv, cyl, head, sect, phase, st0, st1, st2, mark);
+}
+
+/* ======================================================================== */
 /*  セクタ読み込み (ジオメトリ指定版)                                        */
 /* ======================================================================== */
 int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
@@ -428,21 +543,41 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
     u32 phys = (u32)dma_buffer;
     u16 bps = g->bps;
     const char *phase = "seek";
+    int have_results = 0;   /* results[] が埋まったか (診断の出し分け) */
+    int dma_armed = 0;      /* DMA ch2 をアンマスクしたまま抜けていないか */
 
     kmemset(results, 0, sizeof(results));
 
     for (retry = 0; retry < FDC_RW_RETRIES; retry++) {
+        int seek_rc;
+
         /* 0. 前の試行が失敗している。**次を出す前に回復する** —
          *    リセットと recalibrate を挟まないと、上がりっぱなしの INT 線の
-         *    まま同じ形で失敗し続ける。最後の失敗の後には呼ばない。 */
-        if (retry > 0) (void)fdc_recover(drv);
+         *    まま同じ形で失敗し続ける。最後の失敗の後には呼ばない。
+         *    fdc_recover は先頭で ch2 をマスクするので dma_armed も下りる。
+         *    診断は**最後の試行だけ**を映すので results[] も消す。 */
+        if (retry > 0) {
+            (void)fdc_recover(drv);
+            dma_armed = 0;
+            have_results = 0;
+            kmemset(results, 0, sizeof(results));
+        }
 
         /* 1. シーク */
         phase = "seek";
-        if (fdc_seek(drv, cyl, head) != 0) continue;
+        seek_rc = fdc_seek(drv, cyl, head);
+        /* NR = 媒体もドライブも無い。**リトライも回復もしない** —
+         * 回復で直るものではないし、HDD 起動時の /fd0 サブマウント試行が
+         * 空のドライブに対して毎回 3 回踏むと起動が数秒伸びる。 */
+        if (seek_rc == FDC_RC_NOT_READY) break;
+        if (seek_rc != 0) continue;
 
-        /* 2. DMAセットアップ (FDC→メモリ = read) */
+        /* 2. DMAセットアップ (FDC→メモリ = read)。
+         *    ここで ch2 がアンマスクされる。以後どこで抜けても
+         *    **閉じてからでないと戻れない** (下の fdc_abort_transfer)。 */
         dma_setup(phys, bps, 0);
+        dma_armed = 1;
+        phase = "cmd";
 
         /* 3. Read Data コマンド送信 */
         fdc_irq_fired = 0;
@@ -463,6 +598,7 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
         /* 5. リザルト読み出し (7バイト) */
         phase = "result";
         n = fdc_read_results(results, 7);
+        have_results = (n > 0);
         if (n < 7) continue;
 
         /* 6. エラーチェック: ST0のbit6-7が00なら成功 */
@@ -473,11 +609,14 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
         }
     }
 
-    /* 最終失敗のときだけ 1 行出す ([V4]: 黙って失敗を返さない)。
-     * リトライごとには出さない — 画面が流れて元の失敗が見えなくなる。 */
-    kprintf(0x07,
-            "[fdc] read fail drv=%d chs=%d/%d/%d phase=%s st0=%02x st1=%02x st2=%02x\n",
-            drv, cyl, head, sect, phase, results[0], results[1], results[2]);
+    /* 実行フェーズで落ちたまま戻らない。**DMA ch2 を閉じる** —
+     * 開いたままだと、次の WRITE が dma_buffer を用意した後に遅れて来た
+     * 旧 READ の DMA がそれを上書きし、古い内容が書かれてしまう。
+     * 判断は phase の文字列ではなく dma_armed で行う — コマンド送信が
+     * 途中で失敗した場合も ch2 は既に開いている。 */
+    if (dma_armed) fdc_abort_transfer();
+
+    fdc_report_fail("read", drv, cyl, head, sect, phase, have_results, results);
     return -1;
 }
 
@@ -492,6 +631,8 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
     u32 phys = (u32)dma_buffer;
     u16 bps = g->bps;
     const char *phase = "seek";
+    int have_results = 0;   /* results[] が埋まったか (診断の出し分け) */
+    int dma_armed = 0;      /* DMA ch2 をアンマスクしたまま抜けていないか */
 
     kmemset(results, 0, sizeof(results));
 
@@ -499,15 +640,26 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
     kmemcpy(dma_buffer, (const u8 *)buf, (u32)bps);
 
     for (retry = 0; retry < FDC_RW_RETRIES; retry++) {
+        int seek_rc;
+
         /* 0. 前の試行が失敗している。次を出す前に回復する (read 側と同じ)。 */
-        if (retry > 0) (void)fdc_recover(drv);
+        if (retry > 0) {
+            (void)fdc_recover(drv);
+            dma_armed = 0;
+            have_results = 0;
+            kmemset(results, 0, sizeof(results));
+        }
 
         /* 1. シーク */
         phase = "seek";
-        if (fdc_seek(drv, cyl, head) != 0) continue;
+        seek_rc = fdc_seek(drv, cyl, head);
+        if (seek_rc == FDC_RC_NOT_READY) break;   /* read 側と同じ理由 */
+        if (seek_rc != 0) continue;
 
-        /* 2. DMAセットアップ (メモリ→FDC = write) */
+        /* 2. DMAセットアップ (メモリ→FDC = write)。read 側と同じ (ch2 が開く)。 */
         dma_setup(phys, bps, 1);
+        dma_armed = 1;
+        phase = "cmd";
 
         /* 3. Write Data コマンド送信 */
         fdc_irq_fired = 0;
@@ -528,6 +680,7 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         /* 5. リザルト読み出し */
         phase = "result";
         n = fdc_read_results(results, 7);
+        have_results = (n > 0);
         if (n < 7) continue;
 
         /* 6. エラーチェック */
@@ -536,9 +689,9 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         }
     }
 
-    kprintf(0x07,
-            "[fdc] write fail drv=%d chs=%d/%d/%d phase=%s st0=%02x st1=%02x st2=%02x\n",
-            drv, cyl, head, sect, phase, results[0], results[1], results[2]);
+    if (dma_armed) fdc_abort_transfer();
+
+    fdc_report_fail("write", drv, cyl, head, sect, phase, have_results, results);
     return -1;
 }
 
@@ -573,6 +726,28 @@ int fdc_init(void)
             > FDC_DMA_BANK_SIZE) {
         kprintf(0x07, "[fdc] dma buffer crosses 64KB boundary at %08x\n",
                 (u32)dma_buffer);
+    }
+
+    /* I/O 0439h bit2 = 「1MB 以上への DMA アクセス禁止」で、**ノーマル
+     * モードの起動時設定は 1**。dma_buffer はカーネル BSS (1MB 超) なので、
+     * 立ったままだと READ DATA が正常終了してもデータが届かない。
+     * 落とすのは dma_setup を通る前に 1 度でよい。
+     *
+     * bit7 (プリンタ I/F 選択) を壊さないよう **必ず RMW**。
+     * **読みが FFh でも書く** — 実機は未使用ビットが 1 で読めれば正当に
+     * FFh を返し得るので、そこを避けると DMA 禁止が残る (fdc.h の注記)。 */
+    {
+        u8 v = (u8)inp(SYSPORT_DMA_CTRL);
+
+        if (v & SYSPORT_DMA_MASK_1MB) {
+            u8 after;
+            outp(SYSPORT_DMA_CTRL, (u8)(v & ~SYSPORT_DMA_MASK_1MB));
+            after = (u8)inp(SYSPORT_DMA_CTRL);
+            /* 読み戻しで落ちない機種でも起動は止めない ([V4]: 印を残す)。
+             * NP21/W は 0439h に in ハンドラが無く常に FFh を返すので、
+             * ここは `ff -> ff` と出る (書き込み自体は無害)。 */
+            kprintf(0x07, "[fdc] dma>1MB: 0439h %02x -> %02x\n", v, after);
+        }
     }
 
     /* 前回の取りこぼし IRQ をクリア (冪等化対策) */

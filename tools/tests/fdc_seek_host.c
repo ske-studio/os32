@@ -92,13 +92,38 @@ static void seek_pending(void)
     CHECK(fdc_classify_seek_end(0x80, 0, -1) == FDC_SEEK_PENDING);
 }
 
+/* NR は他の失敗と分ける。**リトライも回復もしない**ので、呼び出し側が
+ * 即座に最終失敗へ落とせる (HDD 起動時の /fd0 サブマウント試行が空の
+ * ドライブで毎回 fdc_recover を 3 回踏んでいたのを止めるため)。 */
+static void seek_not_ready(void)
+{
+    /* SE は立つが媒体が無い (µPD765A / NP21/W とも RECALIBRATE でこの形)。 */
+    CHECK(fdc_classify_seek_end(0x28, 40, 40) == FDC_SEEK_NOT_READY);
+    CHECK(fdc_classify_seek_end(0x28, 0, -1) == FDC_SEEK_NOT_READY);
+    /* IC=01b 付き。NP21/W の FDC_Recalibrate はドライブ未装着で
+     * `us | SE | IC0 | NR` = 0x68 を積む。 */
+    CHECK(fdc_classify_seek_end(0x68, 0, -1) == FDC_SEEK_NOT_READY);
+    CHECK(fdc_classify_seek_end(0x69, 0, -1) == FDC_SEEK_NOT_READY);
+    /* NP21/W の FDC_Seek もディスク無しで `us | SE | IC0 | NR`。 */
+    CHECK(fdc_classify_seek_end(0x68, 40, 40) == FDC_SEEK_NOT_READY);
+
+    /* **NR は SE の有無より先**。SE が立たない NR も回復では直らない。 */
+    CHECK(fdc_classify_seek_end(0x48, 0, -1) == FDC_SEEK_NOT_READY);
+    CHECK(fdc_classify_seek_end(0x08, 0, -1) == FDC_SEEK_NOT_READY);
+    /* **NR は EC より先**。両方立っていたら再試行しても媒体は現れない。 */
+    CHECK(fdc_classify_seek_end(0x78, 0, -1) == FDC_SEEK_NOT_READY);
+
+    /* ただし 80h (pending 無し) は NR より先 — まだ何も起きていない。 */
+    CHECK(fdc_classify_seek_end(0x80, 0, -1) == FDC_SEEK_PENDING);
+    /* NR が立っていなければ NOT_READY にしない。 */
+    CHECK(fdc_classify_seek_end(0x20, 0, -1) == FDC_SEEK_OK);
+    CHECK(fdc_classify_seek_end(0x70, 0, -1) == FDC_SEEK_RETRY_EC);
+}
+
 static void seek_fail(void)
 {
     /* SE が立っていない異常終了。 */
     CHECK(fdc_classify_seek_end(0x40, 0, 40) == FDC_SEEK_FAIL);
-    /* Not Ready (ディスクが無い)。SE は立つが読めない。 */
-    CHECK(fdc_classify_seek_end(0x28, 40, 40) == FDC_SEEK_FAIL);
-    CHECK(fdc_classify_seek_end(0x68, 0, -1) == FDC_SEEK_FAIL);
     /* 理由の分からない異常終了 (IC=01b, SE=1, EC=0, NR=0)。
      * SE だけを見る判定ではこれが「完了」に化ける — 成功に倒さない。 */
     CHECK(fdc_classify_seek_end(0x60, 0, -1) == FDC_SEEK_FAIL);
@@ -134,6 +159,33 @@ static void real_hw_story(void)
     CHECK(fdc_classify_seek_end(0x80, 0, -1) == FDC_SEEK_PENDING);
 }
 
+/* 期限内に **別ドライブの通知が割り込む** 筋書き。
+ * drv0 のシークを待っているあいだに drv1 の Ready 変化で IRQ が上がると、
+ * それを読み捨てた直後の SIS は 80h (pending 無し) を返す。
+ * **ここで諦めると drv0 の正常なシークが失敗に化ける** ので、
+ * 呼び出し側は 80h を「期限までまだ待つ」と読まなければならない。
+ * 判定関数の側で要るのは「3 つが別々の値であること」。 */
+static void other_drive(void)
+{
+    /* 1. drv1 の Ready 変化 (IC=11b)。DS ビットが 1 = 自分宛てではない。 */
+    CHECK(fdc_classify_seek_end(0xC1, 0, 40) == FDC_SEEK_FAIL);
+    CHECK((0xC1 & FDC_ST0_DS_MASK) == 1);
+    /* 2. 読み捨てた直後の SIS は pending 無し = まだ待つ。
+     *    FDC_SEEK_FAIL と同じ値だったら、ここで打ち切るしかなくなる。 */
+    CHECK(fdc_classify_seek_end(0x80, 0, 40) == FDC_SEEK_PENDING);
+    CHECK(FDC_SEEK_PENDING != FDC_SEEK_FAIL);
+    /* 3. やがて drv0 の完了が来る。DS ビットは 0 = 自分宛て。 */
+    CHECK(fdc_classify_seek_end(0x20, 40, 40) == FDC_SEEK_OK);
+    CHECK((0x20 & FDC_ST0_DS_MASK) == 0);
+
+    /* drv1 が未接続で NR を返す場合も、DS ビットで自分宛てでないと分かる。 */
+    CHECK(fdc_classify_seek_end(0x69, 0, -1) == FDC_SEEK_NOT_READY);
+    CHECK((0x69 & FDC_ST0_DS_MASK) == 1);
+    /* NOT_READY は PENDING とも FAIL とも別の値 (即時最終失敗の合図)。 */
+    CHECK(FDC_SEEK_NOT_READY != FDC_SEEK_FAIL);
+    CHECK(FDC_SEEK_NOT_READY != FDC_SEEK_PENDING);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
@@ -143,7 +195,9 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "seek_ec")) seek_ec();
     else if (!strcmp(argv[1], "seek_pending")) seek_pending();
     else if (!strcmp(argv[1], "seek_fail")) seek_fail();
+    else if (!strcmp(argv[1], "seek_not_ready")) seek_not_ready();
     else if (!strcmp(argv[1], "real_hw_story")) real_hw_story();
+    else if (!strcmp(argv[1], "other_drive")) other_drive();
     else return 2;
     if (failed) return 1;
     printf("PASS %s\n", argv[1]);

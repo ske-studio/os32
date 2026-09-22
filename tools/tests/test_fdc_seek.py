@@ -29,7 +29,7 @@ TARGET_SRCS = [
 ]
 
 CASES = ["sis_len", "seek_ok", "seek_ec", "seek_pending", "seek_fail",
-         "real_hw_story"]
+         "seek_not_ready", "real_hw_story", "other_drive"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -44,8 +44,10 @@ MUTATIONS = [
      "EC を失敗として扱う (80 シリンダ媒体で RECALIBRATE が通らない)"),
     (r"return FDC_SEEK_PENDING;", "return FDC_SEEK_FAIL;",
      "未完了 (ST0=80h) を失敗と区別しない"),
-    (r"if \(\(st0 & FDC_ST0_NR\) != 0\) \{\n        return FDC_SEEK_FAIL;\n    \}", "",
+    (r"if \(\(st0 & FDC_ST0_NR\) != 0\) \{\n        return FDC_SEEK_NOT_READY;\n    \}", "",
      "Not Ready を見ない (ディスク無しを完了にする)"),
+    (r"return FDC_SEEK_NOT_READY;", "return FDC_SEEK_FAIL;",
+     "NR を普通の失敗と混ぜる (空ドライブで回復を 3 回踏む)"),
 ]
 
 

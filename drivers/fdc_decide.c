@@ -44,6 +44,13 @@ int fdc_classify_seek_end(u8 st0, u8 pcn, int want_cyl)
         return FDC_SEEK_PENDING;
     }
 
+    /* Not Ready = 媒体もドライブも無い。**いちばん先に見る** —
+     * リセットでも RECALIBRATE でも直らないので、呼び出し側が
+     * リトライと回復をまるごと飛ばせるように他の失敗と分ける。 */
+    if ((st0 & FDC_ST0_NR) != 0) {
+        return FDC_SEEK_NOT_READY;
+    }
+
     /* SE が立っていなければシーク系の完了通知ですらない。 */
     if ((st0 & FDC_ST0_SE) == 0) {
         return FDC_SEEK_FAIL;
@@ -51,16 +58,12 @@ int fdc_classify_seek_end(u8 st0, u8 pcn, int want_cyl)
 
     /* EC = 77 ステップ踏んでもトラック 0 のセンサが反応しなかった。
      * 80 シリンダ媒体でヘッドが 77 より奥に居ると **正常な機械でも立つ**
-     * ので、失敗ではなく「もう一度 RECALIBRATE を出す」合図にする。
-     * NR より先に見る — 媒体が入っていれば NR は立たない。 */
+     * ので、失敗ではなく「もう一度 RECALIBRATE を出す」合図にする。 */
     if ((st0 & FDC_ST0_EC) != 0) {
         return FDC_SEEK_RETRY_EC;
     }
 
-    /* ディスクが無い / Ready 線が変化した。やり直しても直らない。 */
-    if ((st0 & FDC_ST0_NR) != 0) {
-        return FDC_SEEK_FAIL;
-    }
+    /* Ready 線が変化した (ディスクが抜かれた)。やり直しても直らない。 */
     if (ic == FDC_ST0_IC_RDYCHG) {
         return FDC_SEEK_FAIL;
     }
