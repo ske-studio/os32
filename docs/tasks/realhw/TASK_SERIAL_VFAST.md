@@ -1,6 +1,6 @@
 # TASK_SERIAL_VFAST — 実機のシリアルを 115200bps まで上げる (V･FAST + FIFO)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装中** (コーダー Opus 5、worktree `fix/serial-vfast`、基点 efd472f)。ユーザー決裁「着手。ここの改善が開発のきも」
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s、9600 は回線上限 952 B/s)。Codex 往復 2 は結果待ち。残件は出力側の固定費
 
 正典: [`PLAN.md`](PLAN.md) §4 (ウェブ情報と資料の突き合わせ)、資料 `docs/hw/undocumented/io_rs.md`、
 実機の実測は [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) §9-1。
@@ -80,4 +80,22 @@
 旧コード (100 スピン → hlt) も同じ形。**校正が短すぎた影響は ne2000 のポーリング間隔と gfx の `RASTER_LINE_US` にも及ぶ**。
 対処: 校正は 5 tick 以上回して合算、送信の予算は `tick_count` の実時間で判定。
 
-(往復 3 の後に続きを書く)
+**往復 3 (a7cde1e)**: 校正を 5 tick 以上回して合算 (`kernel/cpu_calibrate_math.c`、打ち切り 200 周、ticks=0 で 1 で割らない)、
+送信の予算を `tick_count` の実時間で判定 (下限 3 tick = 20ms、FTDI の 16ms をまたぐ)、IF=0 では回数上限で諦める (`_irq_enabled()`)。
+ホスト試験 `check-cpu-calibrate-host` (4 ケース、変異 5 本) / `check-serial-vfast-host` 11 ケース・変異 11 本。
+NP21/W: kselftest 101/101、校正カウンタ ticks=5 / rounds=16 (**エミュレータでも旧式は 1 周 1 tick 未満で丸めていた**)、
+`serial 115200` → V-FAST → `ver` → `serial 9600`。`make check` exit 0 (ホスト・ハーネス 2 本に `serial_watchdog.c` を取り込む修正を含む)。
+
+**実機 (往復 3 のビルド 17:42、Ra266、2026-09-22)** — S5/S6:
+
+| 見たもの | 結果 |
+|---|---|
+| 9600 `ver` (296 バイト) | **952 B/s** (修正前 490、回線の上限 960) — 送信ループの固定費は消えた |
+| `serial 115200` → 115200 で `ver` | 返る (V･FAST div 1 が実機で効く) |
+| 115200 `hexdump /bin/sleep.bin` (69,473 バイト) | **21.5 秒 = 3,224 B/s** (修正前 9600 で 186 秒 = 373 B/s、**8.6 倍**)。回線の上限 11.5 KB/s には届かない — 残る固定費は約 0.3ms/バイト (hexdump 側の出力経路: 1 文字ごとの KAPI 呼び出し・画面描画・行送り) |
+| `serial 9600` で戻す | 戻って `ver` が返る |
+
+**判定**: S5 の目標 (9600 で 900 B/s 以上、115200 で 8 KB/s 以上) のうち **9600 は達成、115200 は 3.2 KB/s で未達**。
+残る壁はシリアルではなく出力側 (ユーザランドの 1 文字ずつの `sys_write` と console の描画)。次の票の候補:
+console の行バッファ化 / `rshell` 中の画面描画を間引く / `sys_write` のまとめ書き。
+状態行の `[ser]` は `[ser] 115200bps (V-FAST div 1, FIFO)`。
