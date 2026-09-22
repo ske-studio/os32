@@ -847,6 +847,7 @@ static void test_dma8237(void)
     check(dma_chan_state(3, &done, &tc) == 0, "dma: state readable");
     check(done == 0 && tc == 0, "dma: setup cleared TC");
     dma_chan_mask(3);   /* 念のため閉じたままにしておく */
+}
 
 /* ------------------------------------------------------------------------ */
 /*  W3: 動的 IRQ の登録・ディスパッチ (票 TASK_HAL_WIRING §1-1)             */
