@@ -13,6 +13,7 @@
 /* ======================================================================== */
 
 #include "serial.h"
+#include "serial_plan.h"   /* 速度と FIFO の純粋な判定 (ホストで試験する) */
 #include "io.h"
 #include "pc98.h"
 #include "kprintf.h"
@@ -25,6 +26,12 @@ extern u32 paging_kernel_pd_phys(void);
 
 /* 外部: irq_enable (idt.c で定義) */
 extern void irq_enable(unsigned int irq);
+
+/* 外部: 校正済みマイクロ秒ディレイ (kernel/cpu_calibrate.h)。
+ * drivers/ はカーネルヘッダを見ない作法なので extern で引く
+ * (paging_* と同じ理由。ne2000.c は kernel/ を -I しているが、ここは
+ * 宣言 1 行で足りる)。 */
+extern void cpu_delay_us(u32 us);
 
 /* ======== 初期化状態 ======== */
 static int ser_initialized = 0;
@@ -55,7 +62,27 @@ static volatile int ser_count = 0;
 /* ======================================================================== */
 static unsigned long s_timer_clk = 0;
 static u8 s_sysclk_8mhz = 0;
-static struct serial_setup s_setup = { 0, 0, 0, 0, 0, 0 };
+static struct serial_setup s_setup = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+/* ======================================================================== */
+/*  いま使っているポートとビットマスク                                      */
+/*                                                                          */
+/*  **互換 (0030h/0032h) と FIFO (0130h/0132h) はビット位置まで違う。**      */
+/*  取り違えを 1 か所に閉じ込めるために、serial_plan.c の選択子で引いた値を  */
+/*  ここに持ち、送受信はこれだけを見る。初期値は従来の互換モード。          */
+/* ======================================================================== */
+static unsigned int s_port_data  = SER_DATA;
+static unsigned int s_port_cmd   = SER_CMD;
+static u8 s_mask_txrdy = STS_TXRDY;
+static u8 s_mask_rxrdy = STS_RXRDY;
+static u8 s_mask_err   = (u8)(STS_PE | STS_OE | STS_FE);
+
+/* TxRDY を待つ予算 [µs]。serial_init で速度から決める (serial_plan.h の式)。
+ * 初期化前でも putchar が呼ばれうる (パニック経路) ので既定を入れておく。 */
+static u32 s_tx_budget_us = (u32)SER_TX_BUDGET_MAX_US;
+
+/* FIFO 搭載判定はリセットまで変わらないので 1 回だけ行う。 */
+static u8 s_fifo_probed = 0;
 
 void serial_detect_clock(void)
 {
@@ -102,67 +129,148 @@ int serial_set_div4(int bit_value)
     return (int)(u8)inp(SER_EXT_CTRL);
 }
 
-void serial_init(unsigned long baud)
+/* ======================================================================== */
+/*  FIFO 搭載判定 — 0136h を 2 回読んで bit6 の反転を見る                    */
+/*                                                                          */
+/*  資料 io_rs.md 304〜323 行。判定そのものは serial_plan.c にあり、ここは   */
+/*  読むだけ。**リセットまで変わらないので 1 回しか行わない** (0136h の      */
+/*  読みは NP21/W では pic_resetirq(4) の副作用を持つ)。                    */
+/* ======================================================================== */
+static void serial_probe_fifo(void)
 {
-    u16 count;
+    u8 a, b;
+
+    if (s_fifo_probed) {
+        return;
+    }
+    a = (u8)inp(SER_FIFO_IIR);
+    io_wait();
+    b = (u8)inp(SER_FIFO_IIR);
+    s_setup.has_fifo = (u8)(serial_fifo_detected(a, b) ? 1 : 0);
+    s_fifo_probed = 1;
+}
+
+/* ======================================================================== */
+/*  serial_init_ex — 初期化の本体 (互換 / V･FAST 共通)                      */
+/*                                                                          */
+/*  want_vfast が 0 なら従来とまったく同じ経路を通る。1 のときだけ          */
+/*  0138h / 013Ah を叩く。戻り 0 = V･FAST に入った / -1 = 互換。            */
+/* ======================================================================== */
+static int serial_init_ex(unsigned long baud, int want_vfast)
+{
+    struct serial_plan_out plan;
     u8  mode;
     unsigned long clk;
 
     /* ---- 割り込み禁止 (初期化中) ---- */
     outp(SER_MASK, 0x00);   /* 全割り込みマスク */
 
-    /* ---- 8251A リセット (FreeBSD pc98_i8251_reset() 準拠) ---- */
-    outp(SER_CMD, 0x00); io_wait();   /* ダミー ×3 */
-    outp(SER_CMD, 0x00); io_wait();
-    outp(SER_CMD, 0x00); io_wait();
-    outp(SER_CMD, CMD_RESET); io_wait();   /* 内部リセット (0x40) */
+    /* ---- FIFO 搭載判定 (1 回だけ) ---- */
+    serial_probe_fifo();
+
+    /* クロックは 0000:0501h から判定したもの。まだ判定していなければ従来値。 */
+    clk = s_timer_clk ? s_timer_clk : TIMER_CLK_1997;
+    if (baud == 0) baud = SER_BAUD_DEFAULT;
+    serial_plan(baud, (int)s_setup.has_fifo, clk, want_vfast, &plan);
+
+    /* ---- いまのモードから抜ける ----
+     * V･FAST / FIFO から互換へ戻すときは **8251 を触る前に** 013Ah bit7 と
+     * 0138h を落とす。落とさないと以後のコマンド書きが 0032h と 0132h の
+     * どちらに効くのか決まらない。
+     * FIFO 非搭載機では 0130h〜013Ah は存在しないので触らない。 */
+    if (s_setup.has_fifo && plan.mode != SER_MODE_VFAST) {
+        outp(SER_VFAST_REG, SER_VFAST_OFF); io_wait();
+        outp(SER_FIFO_FCR, SER_FCR_OFF);    io_wait();
+    }
+
+    /* ---- ポートとビットマスクを新しいモードに合わせる ---- */
+    s_port_data  = serial_data_port(plan.mode);
+    s_port_cmd   = serial_cmd_port(plan.mode);
+    s_mask_txrdy = serial_txrdy_mask(plan.mode);
+    s_mask_rxrdy = serial_rxrdy_mask(plan.mode);
+    s_mask_err   = serial_err_mask(plan.mode);
+
+    /* ---- V･FAST に入る ----
+     * 1. 0138h に FCR0|FCR1|FCR2 = FIFO モード + 送受信 FIFO リセット
+     * 2. 013Ah に bit7 | 分周
+     * 以後データは 0130h、ステータス/コマンドは 0132h。 */
+    if (plan.mode == SER_MODE_VFAST) {
+        outp(SER_FIFO_FCR,
+             SER_FCR_ENABLE | SER_FCR_RX_RST | SER_FCR_TX_RST); io_wait();
+        outp(SER_VFAST_REG,
+             (unsigned)(SER_VFAST_ENABLE | plan.div)); io_wait();
+    }
+
+    /* ---- 8251A リセット (FreeBSD pc98_i8251_reset() 準拠) ----
+     * FIFO は 8251 の**前段**に入るだけで 1st CCU は 8251 のまま (資料の
+     * 「RS-232C クロック」図) なので、手順は互換モードと同じ。違うのは
+     * 書き先が 0132h になることだけ。**資料は 0132h を [READ] としか
+     * 書いていない**が、NP21/W は 0132h の out を 0032h と同じハンドラ
+     * (rs232c_o32) に繋いでいる (rs232c_bind)。資料 0138h の関連欄も
+     * 0030h / 0032h を挙げているので、これに従う。 */
+    outp(s_port_cmd, 0x00); io_wait();   /* ダミー ×3 */
+    outp(s_port_cmd, 0x00); io_wait();
+    outp(s_port_cmd, 0x00); io_wait();
+    outp(s_port_cmd, CMD_RESET); io_wait();   /* 内部リセット (0x40) */
 
     /* PC-98: BUZ OFF (ポート0x37 BSRモード)
      * PC9800Bible: 0x06=OFF, 0x07=ON だが NP21/Wでは極性逆
      * NP21/W: BSR_BUZ_ON (0x07) = BUZ OFF */
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);
-    /* クロックは 0000:0501h から判定したもの。まだ判定していなければ従来値。 */
-    clk = s_timer_clk ? s_timer_clk : TIMER_CLK_1997;
-    if (baud == 0) baud = 9600;
-    count = (u16)(clk / 16UL / baud);
-    if (count == 0) count = 1;
 
     /* **要求どおりに出るかを記録して報告する** ([V4]: 黙ってずれたまま進まない)。
-     * 分周比は整数しか設定できないので、割り切れない速度は必ずずれる。
+     * 互換モードの分周比は整数しか設定できないので、割り切れない速度は必ずずれる。
      * 例: 1.9968MHz で 38400 を頼むと count=3 になり実効 41600bps (+8.3%)。
-     * UART の許容 (±3% 程度) を超えるので実機では通らない。 */
+     * UART の許容 (±3% 程度) を超えるので実機では通らない。
+     * V･FAST は 8253 と無関係なので、表にある速度はちょうど出る。 */
     s_setup.want = baud;
     s_setup.clk = clk;
-    s_setup.count = count;
-    s_setup.actual = clk / 16UL / (unsigned long)count;
+    s_setup.count = plan.count;
+    s_setup.actual = plan.actual;
     s_setup.sysclk_8mhz = s_sysclk_8mhz;
-    s_setup.exact = (u8)((s_setup.actual == baud) ? 1 : 0);
-    if (s_setup.exact) {
-        kprintf(0x0A, "[ser] %ubps (clk %uHz, count %u)\n",
-                (u32)baud, (u32)clk, (u32)count);
+    s_setup.exact = plan.exact;
+    s_setup.mode = (u8)plan.mode;
+    s_setup.vfast_div = plan.div;
+
+    /* TxRDY を待つ予算は **実効速度** から決める (要求値ではない)。 */
+    s_tx_budget_us = serial_tx_budget_us(s_setup.actual);
+
+    if (plan.mode == SER_MODE_VFAST) {
+        kprintf(0x0A, "[ser] %ubps (V-FAST div %u, FIFO)\n",
+                (u32)s_setup.actual, (u32)plan.div);
+    } else if (s_setup.exact) {
+        kprintf(0x0A, "[ser] %ubps (clk %uHz, count %u)%s\n",
+                (u32)baud, (u32)clk, (u32)plan.count,
+                s_setup.has_fifo ? " [FIFO available]" : "");
     } else {
         kprintf(0x0E,
                 "[ser] WARN %ubps は出せない: 実効 %ubps (clk %uHz, count %u)\n",
-                (u32)baud, (u32)s_setup.actual, (u32)clk, (u32)count);
+                (u32)baud, (u32)s_setup.actual, (u32)clk, (u32)plan.count);
     }
 
-    /* PIT モード設定: カウンタ#2, LSB+MSB, Mode 3(方形波) */
-    /* FreeBSD: count==3 のときだけ Mode 2 */
-    if (count != 3)
-        outp(SER_TIMER_MODE, PIT_SER_MODE3);
-    else
-        outp(SER_TIMER_MODE, PIT_SER_MODE2);
+    /* ---- 8253 カウンタ#2 (互換モードだけ) ----
+     * V･FAST 中は 013Ah bit7 がカウンタ#2 出力を無効にするので触らない
+     * (資料 013Ah の解説)。互換へ戻すときはこの経路が必ず通るので、
+     * 8253 は「互換に戻った時点で」正しい値に入る。 */
+    if (plan.mode == SER_MODE_COMPAT) {
+        /* PIT モード設定: カウンタ#2, LSB+MSB, Mode 3(方形波) */
+        /* FreeBSD: count==3 のときだけ Mode 2 */
+        if (plan.count != 3)
+            outp(SER_TIMER_MODE, PIT_SER_MODE3);
+        else
+            outp(SER_TIMER_MODE, PIT_SER_MODE2);
 
-    io_wait();
-    outp(SER_TIMER_CNT, count & 0xFF);
-    io_wait();
-    outp(SER_TIMER_CNT, (count >> 8) & 0xFF);
+        io_wait();
+        outp(SER_TIMER_CNT, plan.count & 0xFF);
+        io_wait();
+        outp(SER_TIMER_CNT, (plan.count >> 8) & 0xFF);
+    }
 
     /* ---- モードセット: 8N1, ×16分周 ---- */
     mode = MOD_CLKx16 | MOD_8BIT | MOD_STOP1;  /* 0x4E */
-    outp(SER_CMD, mode); io_wait();
+    outp(s_port_cmd, mode); io_wait();
 
-    outp(SER_CMD, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
+    outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
     /* = 0x01 | 0x02 | 0x04 | 0x20 | 0x10 = 0x37 */
 
     /* ---- バッファクリア ---- */
@@ -170,7 +278,10 @@ void serial_init(unsigned long baud)
     ser_tail = 0;
     ser_count = 0;
 
-    /* ---- 受信割り込みを有効化 ---- */
+    /* ---- 受信割り込みを有効化 ----
+     * **資料に FIFO モードでの割り込みマスクの記述は無い。** 0136h は
+     * 「割り込み参照」で、許可/禁止のレジスタではない。NP21/W も 0035h
+     * 以外でマスクしていないので、両モードとも従来どおり 0035h を使う。 */
     outp(SER_MASK, IEN_RX);
 
     /* ---- PIC IRQ4 有効化 ---- */
@@ -180,6 +291,29 @@ void serial_init(unsigned long baud)
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);  /* NP21/W: BSR_BUZ_ON = BUZ OFF */
 
     ser_initialized = 1;
+    return (plan.mode == SER_MODE_VFAST) ? 0 : -1;
+}
+
+void serial_init(unsigned long baud)
+{
+    /* **従来の経路のまま。** 票の決裁「起動時の既定 9600 は互換モード」。
+     * V･FAST 中に呼べば 013Ah bit7=0 / 0138h=0 を書いて互換へ戻る。 */
+    (void)serial_init_ex(baud, 0);
+}
+
+int serial_init_vfast(unsigned long baud)
+{
+    /* FIFO 非搭載 / 表に無い速度なら serial_plan が互換を返すので、
+     * ここは「頼んだ」ことを渡すだけ。戻り -1 = 互換に落ちた。 */
+    return serial_init_ex(baud, 1);
+}
+
+int serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
+{
+    if (mode) *mode = (u32)s_setup.mode;
+    if (baud) *baud = (u32)s_setup.actual;
+    if (fifo) *fifo = (u32)s_setup.has_fifo;
+    return ser_initialized ? 0 : -1;
 }
 
 /* ======================================================================== */
@@ -197,18 +331,26 @@ void serial_irq_handler(void)
     u8 sts;
     u8 data;
     int loop_count = 0; /* 無限ループ防止用のカウンタ */
+    /* FIFO モードでは 1 回の割り込みで FIFO 1 杯 (16 バイト) を汲む。
+     * 互換モードは従来どおり 128 バイトまで (1 バイトずつしか来ないので
+     * 実際には 1〜2 周で抜ける)。 */
+    int loop_max = (s_setup.mode == SER_MODE_VFAST)
+                 ? SER_FIFO_DEPTH : SER_IRQ_DRAIN_MAX;
 
     for (;;) {
-        sts = (u8)inp(SER_CMD);
-        
+        /* **ポートもビットも s_* 経由。** 互換 0032h は bit1 が RxRDY、
+         * FIFO 0132h は bit2 が RxRDY で、0x04 は互換では TxEMP にあたる。
+         * 直に書くと「送信が空くたびに受信データを読む」形で静かに壊れる。 */
+        sts = (u8)inp(s_port_cmd);
+
         /* エラーがあればリセット */
-        if (sts & (STS_PE | STS_OE | STS_FE)) {
-            outp(SER_CMD, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
+        if (sts & s_mask_err) {
+            outp(s_port_cmd, CMD_TXE | CMD_DTR | CMD_RXE | CMD_RTS | CMD_ER);
         }
 
-        if (!(sts & STS_RXRDY)) break;
+        if (!(sts & s_mask_rxrdy)) break;
 
-        data = (u8)inp(SER_DATA);
+        data = (u8)inp(s_port_data);
 
         /* バッファに格納。
          * 満杯なら捨てるしかないが、黙って捨てると「rshell の応答が
@@ -222,9 +364,18 @@ void serial_irq_handler(void)
             ser_overflow_n++;
         }
 
-        /* 異常な割り込み嵐を防ぐため、1回のIRQで最大128バイト読んだら一旦抜ける */
+        /* 異常な割り込み嵐を防ぐため、上限まで読んだら一旦抜ける
+         * (残っていれば次の割り込みで続きを汲む) */
         loop_count++;
-        if (loop_count > 128) break;
+        if (loop_count >= loop_max) break;
+    }
+
+    /* FIFO モードでは 0136h (割り込み参照) を読んで要因を落とす。
+     * **資料は「取得を行う」としか書いていない**が、NP21/W の rs232c_i136 は
+     * 読んだときに irqflag を畳んで pic_resetirq(4) を呼ぶ。読まないと同じ
+     * 要因で割り込みが上がり続ける。互換モードにこのレジスタは無い。 */
+    if (s_setup.mode == SER_MODE_VFAST) {
+        (void)inp(SER_FIFO_IIR);
     }
 
     outp(SER_MASK, 0x00);
@@ -279,31 +430,53 @@ int serial_getchar(void)
     return ch;
 }
 
-/* ポーリング送信 (TxRDY待ち + 割り込み待機)
- * TxRDYが即座にセットされない場合は hlt で待機して
- * CPU負荷を軽減する。NP21/Wのパイプバッファ溢れ対策。 */
+/* ======================================================================== */
+/*  serial_putchar — ポーリング送信 (予算つき)                              */
+/*                                                                          */
+/*  **直す前は 100 回スピンしてから `hlt` で次の 10ms tick まで寝ていた。**  */
+/*  1 文字ごとに最悪 10ms 寝るので、9600 で 490B/s、38400 では 233B/s と     */
+/*  回線より遅くなっていた (票 TASK_SERIAL_VFAST §0)。                      */
+/*                                                                          */
+/*  回線が 1 文字を押し出す時間は baud で決まるのだから、その時間だけ見て    */
+/*  から寝ればよい。予算 = 1 文字時間 × 2 (serial_plan.h)。予算のあいだは    */
+/*  `cpu_delay_us(SER_TX_POLL_US)` を挟んで TxRDY を見る。                  */
+/*                                                                          */
+/*  予算を超えたら従来どおり `hlt` で 1 割り込み分待つ (最大                 */
+/*  SER_TX_HLT_RETRY 回) — 相手がフロー制御で止めているときに CPU を         */
+/*  焼かないため。**ここは IF=1 でしか呼べない** (割り込み禁止区間からは     */
+/*  serial_puts_polled を使う)。                                            */
+/*                                                                          */
+/*  cpu_calibrate() の前は cpu_delay_us が即座に返る (s_loops_per_tick=0)。  */
+/*  そのときは予算 ÷ 刻み回だけ素のスピンになる — 従来の 100 回スピンと      */
+/*  同程度で、害は無い。                                                    */
+/* ======================================================================== */
 void serial_putchar(char c)
 {
-    int spin;
+    u32 waited;
     int retry;
 
-    for (retry = 0; retry < 5; retry++) {
-        /* まず短いスピン (高速パス) */
-        for (spin = 0; spin < 100; spin++) {
-            if (inp(SER_CMD) & STS_TXRDY) {
-                outp(SER_DATA, (unsigned)(u8)c);
+    for (retry = 0; retry < SER_TX_HLT_RETRY; retry++) {
+        waited = 0;
+        for (;;) {
+            if (inp(s_port_cmd) & s_mask_txrdy) {
+                outp(s_port_data, (unsigned)(u8)c);
                 return;
             }
+            if (waited >= s_tx_budget_us) break;
+            cpu_delay_us((u32)SER_TX_POLL_US);
+            waited += (u32)SER_TX_POLL_US;
         }
-        /* TxRDYでないなら hlt で1割り込み分待つ */
+        /* 予算を使い切った = 相手が読んでいない。次の割り込みまで寝る。 */
         _halt();
     }
     /* タイムアウト: 送信を諦める */
 }
 
-/* 文字列送信 (フロー制御付き)
- * 16バイトごとにio_waitを挿入し、
- * NP21/Wのパイプバッファが処理する時間を確保 */
+/* 文字列送信。
+ * 16 バイトごとの `io_wait` は **NP21/W のパイプバッファ対策**として
+ * 入ったもの (ホスト側の commng がデータを掃けるまでの間合い)。実機では
+ * 要らないが、1 バイトあたり 0.6µs 程度なので 115200 (1 文字 87µs) でも
+ * 影響は 1% 未満。残しておく。 */
 void serial_puts(const char *str)
 {
     int count = 0;
@@ -311,8 +484,7 @@ void serial_puts(const char *str)
         serial_putchar(*str);
         str++;
         count++;
-        if ((count & 0xF) == 0) {
-            /* 16バイトごとに短いウェイト */
+        if ((count & (SER_PUTS_WAIT_EVERY - 1)) == 0) {
             io_wait();
             io_wait();
         }
@@ -327,9 +499,11 @@ void serial_puts(const char *str)
 static void serial_putchar_polled(char c)
 {
     int spin;
-    for (spin = 0; spin < 50000; spin++) {
-        if (inp(SER_CMD) & STS_TXRDY) {
-            outp(SER_DATA, (unsigned)(u8)c);
+    for (spin = 0; spin < SER_POLLED_SPIN_MAX; spin++) {
+        /* 予算も cpu_delay_us も使わない (校正が壊れている可能性がある
+         * 状況で呼ばれる)。ポートとビットだけモードに合わせる。 */
+        if (inp(s_port_cmd) & s_mask_txrdy) {
+            outp(s_port_data, (unsigned)(u8)c);
             return;
         }
     }

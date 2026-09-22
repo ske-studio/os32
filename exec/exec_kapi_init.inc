@@ -214,9 +214,11 @@ extern i32 __cdecl wrap_host_close(i32 h);
 extern int __cdecl wrap_sys_set_mtime(const char *path, u32 mtime);
 extern int __cdecl wrap_kbd_peekkey(void);
 extern int __cdecl wrap_exec_last_result(int *kind, int *code);
+extern int __cdecl wrap_serial_init_vfast(u32 baud);
+extern int __cdecl wrap_serial_get_status(u32 *mode, u32 *baud, u32 *fifo);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 55;
+kapi->version = 56;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -434,5 +436,7 @@ kapi->version = 55;
     kapi->sys_set_mtime = wrap_sys_set_mtime;
     kapi->kbd_peekkey = wrap_kbd_peekkey;
     kapi->exec_last_result = wrap_exec_last_result;
+    kapi->serial_init_vfast = wrap_serial_init_vfast;
+    kapi->serial_get_status = wrap_serial_get_status;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

@@ -1,0 +1,324 @@
+/* ======================================================================== */
+/*  SERIAL_VFAST_HOST.C — drivers/serial_plan.c をそのままホストで回す      */
+/*                                                                          */
+/*  実物の判定を 1 行も写さずに #include する。serial_plan.c は I/O も      */
+/*  tick_count も触らないので、模型は 1 つも要らない。                      */
+/*                                                                          */
+/*  見るのは実機でしか踏めない 3 つ (記録: tools/tests/serial_vfast_tdd.md):*/
+/*    (a) V･FAST の速度→分周表 (013Ah bit3-0) — 表に無い速度は 0           */
+/*    (b) 8253 の整数分周: 1.9968MHz の 38400 は 41600 に化ける (+8.3%)、   */
+/*        2.4576MHz なら count 4 でちょうど出る                             */
+/*    (c) TxRDY を待つ予算 (µs) = 2 × 10 ビット ÷ baud                      */
+/*                                                                          */
+/*  NP21/W は通信速度を模擬しないので、ここはエミュレータでは踏めない。     */
+/* ======================================================================== */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "../../drivers/serial_plan.c"
+
+#define CHECK(x) do { if (!(x)) { \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); failed++; \
+} } while (0)
+
+static int failed;
+
+/* 実機 PC-9821Ra266 は 2.4576MHz 系 (TASK_FDC_REALHW §9-1)。 */
+#define CLK_2458    2457600UL
+#define CLK_1997    1996800UL
+
+/* ------------------------------------------------------------------ */
+/*  (a) V･FAST の速度→分周表 (io_rs.md 352〜380 行 / NP21/W speedtbl)   */
+/* ------------------------------------------------------------------ */
+static void vfast_table(void)
+{
+    /* 資料の表と NP21/W の rs232c_vfast_setrs232cspeed の speedtbl は
+     * **完全に一致する**。片方だけを写していないことを両方向で見る。 */
+    CHECK(serial_vfast_div(115200UL) == 0x1);
+    CHECK(serial_vfast_div(57600UL)  == 0x2);
+    CHECK(serial_vfast_div(38400UL)  == 0x3);
+    CHECK(serial_vfast_div(28800UL)  == 0x4);
+    CHECK(serial_vfast_div(19200UL)  == 0x6);
+    CHECK(serial_vfast_div(14400UL)  == 0x8);
+    CHECK(serial_vfast_div(9600UL)   == 0xC);
+
+    /* 名前つき定数と数値がずれていないこと ([C4])。 */
+    CHECK(SER_VFAST_DIV_115200 == 0x1);
+    CHECK(SER_VFAST_DIV_9600   == 0xC);
+
+    /* 表に無い速度は 0。**ここで適当な分周を返すと、実機は黙って
+     * 別の速度で喋りはじめる** (V･FAST は bit7 を立てた時点で 8253 と
+     * 無関係になるので、8253 側の設定では戻せない)。 */
+    CHECK(serial_vfast_div(4800UL)   == 0);
+    CHECK(serial_vfast_div(31250UL)  == 0);
+    CHECK(serial_vfast_div(230400UL) == 0);
+    CHECK(serial_vfast_div(0UL)      == 0);
+    CHECK(serial_vfast_div(1UL)      == 0);
+
+    /* 分周値は 4 ビットに収まる (013Ah bit6-4 は「常に 000b にする」)。 */
+    CHECK((serial_vfast_div(115200UL) & ~SER_VFAST_DIV_MASK) == 0);
+    CHECK((serial_vfast_div(9600UL)   & ~SER_VFAST_DIV_MASK) == 0);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (b) 互換モード: 8253 カウンタ#2 の整数分周                          */
+/* ------------------------------------------------------------------ */
+static void compat_exact(void)
+{
+    struct serial_plan_out p;
+
+    /* 9600 は 1.9968MHz / 2.4576MHz のどちらでもちょうど出る唯一の
+     * 標準速度 (drivers/serial.h の表)。 */
+    serial_plan(9600UL, 0, CLK_1997, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 13);          /* 1996800 / 16 / 9600 */
+    CHECK(p.actual == 9600UL);
+    CHECK(p.exact == 1);
+
+    serial_plan(9600UL, 0, CLK_2458, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 16);          /* 2457600 / 16 / 9600 */
+    CHECK(p.actual == 9600UL);
+    CHECK(p.exact == 1);
+
+    /* 実機 Ra266 (2.4576MHz) の 38400 は count 4 でちょうど。 */
+    serial_plan(38400UL, 0, CLK_2458, 0, &p);
+    CHECK(p.count == 4);
+    CHECK(p.actual == 38400UL);
+    CHECK(p.exact == 1);
+    /* 19200 も割り切れる。 */
+    serial_plan(19200UL, 0, CLK_2458, 0, &p);
+    CHECK(p.count == 8);
+    CHECK(p.exact == 1);
+}
+
+static void compat_inexact(void)
+{
+    struct serial_plan_out p;
+
+    /* **1.9968MHz の 38400 は 41600bps に化ける (+8.3%)。** UART の許容
+     * (±3% 程度) を超えるので実機では通らない。黙って進まないために
+     * exact を 0 にして実効値を返す ([V4])。 */
+    serial_plan(38400UL, 0, CLK_1997, 0, &p);
+    CHECK(p.count == 3);           /* 124800 / 38400 = 3.25 → 3 */
+    CHECK(p.actual == 41600UL);
+    CHECK(p.exact == 0);
+
+    /* 19200 も 1.9968MHz では割り切れない (124800 / 19200 = 6.5)。 */
+    serial_plan(19200UL, 0, CLK_1997, 0, &p);
+    CHECK(p.count == 6);
+    CHECK(p.actual == 20800UL);
+    CHECK(p.exact == 0);
+
+    /* 速すぎる要求は count 1 で頭打ち。実効値はクロックのまま出す。 */
+    serial_plan(921600UL, 0, CLK_2458, 0, &p);
+    CHECK(p.count == 1);
+    CHECK(p.actual == 153600UL);   /* 2457600 / 16 / 1 */
+    CHECK(p.exact == 0);
+
+    /* 遅すぎる要求は count が 16 ビットに収まらない → 頭打ち。 */
+    serial_plan(1UL, 0, CLK_2458, 0, &p);
+    CHECK(p.count == SER_COUNT_MAX);
+    CHECK(p.exact == 0);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (c) モードの選択 (FIFO 有無 × 速度 × 明示指定)                      */
+/* ------------------------------------------------------------------ */
+static void mode_choice(void)
+{
+    struct serial_plan_out p;
+
+    /* FIFO 搭載 + 表にある速度 + 明示指定 → V･FAST。 */
+    serial_plan(115200UL, 1, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_VFAST);
+    CHECK(p.div == SER_VFAST_DIV_115200);
+    CHECK(p.actual == 115200UL);
+    CHECK(p.exact == 1);
+    /* V･FAST では 8253 を触らない — count は 0 のまま。 */
+    CHECK(p.count == 0);
+
+    /* **FIFO が無ければ V･FAST に入らない** (013Ah は FIFO 搭載機の
+     * レジスタ。無い機種で bit7 を立てても速度は変わらず、こちらだけ
+     * 115200 のつもりで喋って会話が死ぬ)。 */
+    serial_plan(115200UL, 0, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.div == 0);
+    CHECK(p.exact == 0);           /* 153600 しか出ない */
+
+    /* **明示指定が無ければ V･FAST に入らない** (票の決裁: 起動時の
+     * 既定 9600 は実機で通った互換経路を守る)。 */
+    serial_plan(9600UL, 1, CLK_2458, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 16);
+    /* 明示すれば 9600 でも V･FAST に入れる (戻しの試験用)。 */
+    serial_plan(9600UL, 1, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_VFAST);
+    CHECK(p.div == SER_VFAST_DIV_9600);
+
+    /* 表に無い速度は FIFO 搭載機でも互換へ落とす。 */
+    serial_plan(4800UL, 1, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 32);
+    CHECK(p.exact == 1);
+
+    /* **V･FAST なら 1.9968MHz 機でも 38400 がちょうど出る。**
+     * 互換経路の 41600 問題 (compat_inexact) を回避できるのがここ。 */
+    serial_plan(38400UL, 1, CLK_1997, 1, &p);
+    CHECK(p.mode == SER_MODE_VFAST);
+    CHECK(p.actual == 38400UL);
+    CHECK(p.exact == 1);
+    serial_plan(38400UL, 1, CLK_1997, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.actual == 41600UL);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (d) TxRDY を待つ予算                                                */
+/* ------------------------------------------------------------------ */
+static void tx_budget(void)
+{
+    /* 8N1 は 1 文字 10 ビット。その 2 倍を予算にする。
+     *   9600   → 20 * 1e6 / 9600   = 2083µs                            */
+    CHECK(serial_tx_budget_us(9600UL) == 2083);
+    /*   38400  → 520µs                                                 */
+    CHECK(serial_tx_budget_us(38400UL) == 520);
+    /*   115200 → 173µs                                                 */
+    CHECK(serial_tx_budget_us(115200UL) == 173);
+
+    /* **予算は 0 になってはいけない。** 0 だと 1 回も見ないうちに
+     * hlt へ落ち、直した意味 (tick を待たない) が消える。 */
+    CHECK(serial_tx_budget_us(115200UL) > 0);
+    CHECK(serial_tx_budget_us(1000000UL) >= SER_TX_BUDGET_MIN_US);
+    CHECK(serial_tx_budget_us(0UL) > 0);
+
+    /* 異常に遅い速度でも上限で止める (1 文字 1 秒を待たない)。 */
+    CHECK(serial_tx_budget_us(1UL) == SER_TX_BUDGET_MAX_US);
+
+    /* 予算は刻み幅より必ず大きい (少なくとも数回は見る)。 */
+    CHECK(serial_tx_budget_us(115200UL) > SER_TX_POLL_US);
+    CHECK(SER_TX_BUDGET_MIN_US > SER_TX_POLL_US);
+
+    /* 速いほど予算は短い (単調)。 */
+    CHECK(serial_tx_budget_us(9600UL) > serial_tx_budget_us(38400UL));
+    CHECK(serial_tx_budget_us(38400UL) > serial_tx_budget_us(115200UL));
+}
+
+/* ------------------------------------------------------------------ */
+/*  (e) ステータスのビット位置 — 互換 (0032h) と FIFO (0132h) は別物    */
+/* ------------------------------------------------------------------ */
+static void status_bits(void)
+{
+    /* 互換 0032h (8251): bit0 TxRDY / bit1 RxRDY / bit2 TxEMP          */
+    CHECK(STS_TXRDY == 0x01);
+    CHECK(STS_RXRDY == 0x02);
+    CHECK(STS_TXE   == 0x04);
+    /* FIFO 0132h:      bit0 TxEMP / bit1 TxRDY / bit2 RxRDY            */
+    CHECK(SER_FSTS_TXEMP == 0x01);
+    CHECK(SER_FSTS_TXRDY == 0x02);
+    CHECK(SER_FSTS_RXRDY == 0x04);
+
+    /* **取り違えたら会話が死ぬ組み合わせ**を名指しで押さえる。
+     * FIFO の RxRDY (0x04) を互換の TxEMP (0x04) と同じ扱いにすると、
+     * 送信バッファが空になるたびに受信データを読みに行く。 */
+    CHECK(SER_FSTS_RXRDY != STS_RXRDY);
+    CHECK(SER_FSTS_TXRDY != STS_TXRDY);
+    CHECK(SER_FSTS_RXRDY == STS_TXE);   /* 同じ値 = 取り違えても落ちない */
+
+    /* 選択子は「モードに対応する組」を返す。 */
+    CHECK(serial_rxrdy_mask(SER_MODE_COMPAT) == STS_RXRDY);
+    CHECK(serial_rxrdy_mask(SER_MODE_VFAST)  == SER_FSTS_RXRDY);
+    CHECK(serial_txrdy_mask(SER_MODE_COMPAT) == STS_TXRDY);
+    CHECK(serial_txrdy_mask(SER_MODE_VFAST)  == SER_FSTS_TXRDY);
+
+    /* ポートも同じ組で切り替わる。 */
+    CHECK(serial_data_port(SER_MODE_COMPAT) == SER_DATA);
+    CHECK(serial_data_port(SER_MODE_VFAST)  == SER_FIFO_DATA);
+    CHECK(serial_cmd_port(SER_MODE_COMPAT)  == SER_CMD);
+    CHECK(serial_cmd_port(SER_MODE_VFAST)   == SER_FIFO_STS);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (f) FIFO 搭載判定 (0136h を 2 回読む)                               */
+/* ------------------------------------------------------------------ */
+static void fifo_detect(void)
+{
+    /* 資料 304〜323 行: bit6 は読むたびに 1→0→1 と反転、bit5 は常に 0。
+     * NP21/W の rs232c_i136 も `port136 ^= 0x40` で同じ。 */
+    CHECK(serial_fifo_detected(0x40, 0x00) == 1);
+    CHECK(serial_fifo_detected(0x00, 0x40) == 1);
+    /* 下位 (割り込み要因) は何であれ判定に関係しない。 */
+    CHECK(serial_fifo_detected(0x41, 0x01) == 1);
+    CHECK(serial_fifo_detected(0x46, 0x06) == 1);
+
+    /* **未実装ポートは 0xFF を返す** (io_fdd.md / io_rs.md の注意:
+     * FFh かどうかで搭載を判断してはいけないが、bit6 が反転しないので
+     * この判定なら安全に落ちる)。 */
+    CHECK(serial_fifo_detected(0xFF, 0xFF) == 0);
+    /* 0x00 固定 (デコードされていない) も非搭載。 */
+    CHECK(serial_fifo_detected(0x00, 0x00) == 0);
+
+    /* bit5 が立っていたら搭載ではない (識別ビット2 は常に 0)。 */
+    CHECK(serial_fifo_detected(0x60, 0x20) == 0);
+    CHECK(serial_fifo_detected(0x20, 0x60) == 0);
+
+    /* bit6 以外が動いても、bit6 が反転していなければ搭載ではない。 */
+    CHECK(serial_fifo_detected(0x41, 0x46) == 0);
+    CHECK(serial_fifo_detected(0x01, 0x06) == 0);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (g) 実機の筋書き: 9600 起動 → 115200 → 9600 へ戻す                  */
+/* ------------------------------------------------------------------ */
+static void real_hw_story(void)
+{
+    struct serial_plan_out p;
+
+    /* 1. 起動。ui.c が serial_init(9600) を呼ぶ = 明示指定なし。
+     *    FIFO 搭載機でも互換のまま (票の決裁)。 */
+    serial_plan(9600UL, 1, CLK_2458, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 16);
+    CHECK(p.exact == 1);
+    /* 送信の予算は 2083µs。従来は 10ms tick を待っていたので 490B/s。 */
+    CHECK(serial_tx_budget_us(p.actual) == 2083);
+
+    /* 2. `serial 115200` = 明示指定。FIFO があるので V･FAST。 */
+    serial_plan(115200UL, 1, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_VFAST);
+    CHECK(p.div == SER_VFAST_DIV_115200);
+    CHECK((SER_VFAST_ENABLE | p.div) == 0x81);   /* 013Ah へ書く値 */
+    CHECK(serial_tx_budget_us(p.actual) == 173);
+
+    /* 3. `serial 9600` = 互換へ戻す。013Ah bit7=0 / 0138h=0 を先に書く。 */
+    serial_plan(9600UL, 1, CLK_2458, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.count == 16);
+    CHECK(serial_tx_budget_us(p.actual) == 2083);
+
+    /* 4. FIFO の無い古い機種で `serial 115200` を打った場合。
+     *    V･FAST には入らず、互換で出せる最速 (153600) になる。
+     *    **exact が 0 なので呼び出し側は WARN を出せる。** */
+    serial_plan(115200UL, 0, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.exact == 0);
+    CHECK(p.actual != 115200UL);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) return 2;
+    failed = 0;
+    if (!strcmp(argv[1], "vfast_table")) vfast_table();
+    else if (!strcmp(argv[1], "compat_exact")) compat_exact();
+    else if (!strcmp(argv[1], "compat_inexact")) compat_inexact();
+    else if (!strcmp(argv[1], "mode_choice")) mode_choice();
+    else if (!strcmp(argv[1], "tx_budget")) tx_budget();
+    else if (!strcmp(argv[1], "status_bits")) status_bits();
+    else if (!strcmp(argv[1], "fifo_detect")) fifo_detect();
+    else if (!strcmp(argv[1], "real_hw_story")) real_hw_story();
+    else return 2;
+    if (failed) return 1;
+    printf("PASS %s\n", argv[1]);
+    return 0;
+}

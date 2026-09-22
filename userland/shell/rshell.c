@@ -24,16 +24,47 @@ static u8 xfer_buf[4096];
 #define HD_BUF_SIZE (256u * 1024u)
 static u8 hd_buf[HD_BUF_SIZE];
 
+/* 引数なしの `serial` が出す現在の設定。**初期化はしない。**
+ * 速度を変えるのは `serial <baud>` だけにして、「見るだけ」と「切り替える」を
+ * 分ける (V･FAST への切り替えは回線が化けるので、うっかり打てない方がよい)。 */
+static void serial_show_status(void)
+{
+    u32 mode = 0, baud = 0, fifo = 0;
+
+    if (!g_api->serial_is_initialized()) {
+        g_api->kprintf(ATTR_YELLOW, "%s",
+                       "RS-232C: not initialized ('serial 9600' to start)\n");
+        return;
+    }
+    (void)g_api->serial_get_status(&mode, &baud, &fifo);
+    g_api->kprintf(ATTR_CYAN, "RS-232C: mode=%s baud=%u FIFO=%s\n",
+                   mode ? "V-FAST" : "compat",
+                   baud, fifo ? "yes" : "no");
+    if (!fifo) {
+        g_api->kprintf(ATTR_YELLOW, "%s",
+                       "  (no FIFO: V-FAST unavailable, 8253 divisor only)\n");
+    }
+}
+
 static int cmd_serial(int argc, char **argv)
 {
     int ret;
-    u32 baud = (u32)SYS_SERIAL_BAUD;
+    int vfast;
+    u32 baud;
 
-    /* 速度を指定できる (`serial 38400`)。**ちょうど出るかはクロック次第**で、
-     * 割り切れない値はカーネルが `[ser] WARN ...` を出して実効値を知らせる
-     * (drivers/serial.h の表)。既定の 9600 は 1.9968MHz / 2.4576MHz の
-     * どちらでもちょうど出る唯一の標準速度。 */
-    if (argc >= 2) {
+    /* 引数なし = 状態表示。**初期化もマウントもしない。** */
+    if (argc < 2) {
+        serial_show_status();
+        return 0;
+    }
+
+    /* 速度を指定できる (`serial 38400` / `serial 115200`)。
+     * **9600 は互換モード** (8253 の整数分周)。1.9968MHz / 2.4576MHz の
+     * どちらでもちょうど出る唯一の標準速度で、実機の起動経路もこれ。
+     * **それ以外は V･FAST を試す** — FIFO 搭載機 (0136h で判定) で資料の
+     * 表にある速度なら 013Ah で 8253 と無関係に出る。入れなければカーネルが
+     * 互換モードへ落とし、割り切れなければ `[ser] WARN ...` を出す。 */
+    {
         int v = atoi(argv[1]);
         if (v <= 0) {
             g_api->kprintf(ATTR_RED, "%s", "serial: bad baud\n");
@@ -41,12 +72,26 @@ static int cmd_serial(int argc, char **argv)
         }
         baud = (u32)v;
     }
-    g_api->serial_init(baud);
+
+    if (baud == (u32)SYS_SERIAL_BAUD) {
+        /* 既定速度は従来経路 = 互換モードへ戻す口でもある。 */
+        g_api->serial_init(baud);
+        vfast = -1;
+    } else {
+        vfast = g_api->serial_init_vfast(baud);
+    }
+
     /* **「初期化した」と言い切らない。** 分周比が割り切れないと実際の速度は
      * ずれ、その事実はカーネルが直前に `[ser] ...` として出している。
      * ここで要求値を成功として書くと、その行と矛盾する ([V4])。 */
     g_api->kprintf(ATTR_GREEN, "RS-232C init: requested %ubps "
                                "(actual rate is in the [ser] line above)\n", baud);
+    if (vfast != 0 && baud != (u32)SYS_SERIAL_BAUD) {
+        /* 頼んだのに V･FAST へ入れなかった = FIFO 非搭載か表に無い速度。 */
+        g_api->kprintf(ATTR_YELLOW, "%s",
+                       "  (V-FAST not available: fell back to 8253 divisor)\n");
+    }
+    serial_show_status();
 
     /* serialfs 自動マウント (/host にマウント) */
     ret = g_api->sys_mount("/host", "COM1", "serialfs");
@@ -63,7 +108,7 @@ static int cmd_terminal(int argc, char **argv)
     int kch, sch;
     (void)argc; (void)argv;
     if (!g_api->serial_is_initialized()) {
-        g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial' first.\n");
+        g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial 9600' first.\n");
         return SH_STATUS_ERROR;
     }
     g_api->kprintf(ATTR_CYAN, "%s", "Terminal mode (ESC to exit)\n");
@@ -117,7 +162,7 @@ static int cmd_rshell(int argc, char **argv)
     (void)argc; (void)argv;
 
     if (!g_api->serial_is_initialized()) {
-        g_api->kprintf(ATTR_RED, "%s", "Serial not initialized. Run 'serial' first.\n");
+        g_api->kprintf(ATTR_RED, "%s", "Serial not initialized. Run 'serial 9600' first.\n");
         return SH_STATUS_ERROR;
     }
 
@@ -234,7 +279,7 @@ static int cmd_send(int argc, char **argv)
 {
     int i;
     if (!g_api->serial_is_initialized()) {
-        g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial' first.\n");
+        g_api->kprintf(ATTR_RED, "%s", "RS-232C not initialized. Run 'serial 9600' first.\n");
         return SH_STATUS_ERROR;
     }
     for (i = 1; i < argc; i++) {
@@ -530,7 +575,7 @@ static int cmd_tvdump(int argc, char **argv)
 
 /* 登録用テーブル */
 static const ShellCmd rshell_cmds[] = {
-    { "serial",   cmd_serial,   "[baud]",        "Init RS-232C + mount SerialFS" },
+    { "serial",   cmd_serial,   "[baud]",        "Show RS-232C status / init at baud (115200 = V-FAST)" },
     { "terminal", cmd_terminal, "",              "Enter serial terminal mode" },
     { "rshell",   cmd_rshell,   "",              "Start remote shell host" },
     { "send",     cmd_send,     "TEXT...",       "Send text via serial" },

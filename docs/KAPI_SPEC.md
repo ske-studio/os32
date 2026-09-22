@@ -1,4 +1,4 @@
-# KernelAPI v55 仕様書
+# KernelAPI v56 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -97,6 +97,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v53 | **実装済み (2026-09-16、H2)** | 排他的作成 `KAPI_O_EXCL` (`0x0400`)。**スロットは 1 本も増えていない** — `sys_open` のフラグが 1 つ増え、その**意味が広がった**ので版数を上げた ([ABI3])。`VfsOps` の**任意実装フック** `create_excl` を通し、**ext2 のみ実装**。持たない FS は `OS32_ERR_NOSYS`。実体は `fs/vfs_fd.c` + `fs/ext2_vfs.c`。同じ票で ext2 の置き換え rename の順序も変えた (宛先の名前を消さない) | [tasks/shell/TASK_H2.md](tasks/shell/TASK_H2.md) |
 | v54 | **実装済み (2026-09-16、継承バグ)** | 覗くだけのキー取得 `kbd_peekkey` 1 本 (slot 214 = 0x360、data_fields は 0x364 / 0x368 へ)。キューを**1 バイトも動かさず**に 次のキーを返す (無ければ -1)。戻り値の形は `kbd_trygetkey` と同じ。`script_exec` の毎行の ESC 監視が `kbd_trygetkey` で打鍵を**取り出して捨てて**いたのを直す。実体は `drivers/kbd.c` (+ `drivers/serial.c` の `serial_peekchar` と `kernel/kbd_inject.c` の `kbd_inject_peek`) | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) |
 | v55 | **実装済み (2026-09-16、$?)** | 終了コードの配線 `exec_last_result` 1 本 (slot 215 = 0x364、data_fields は 0x368 / 0x36C へ)。直前の `exec_run` の結果を**種別 + 値**で返す。種別 (`EXEC_KIND_*`) は畳んだ側が渡すので `exit(-2)` / fault / CTRL+STOP を値ではなく種別で見分けられる。`exec_run` は**すべての return 点で**記録を書くので、起動しなかった場合に前回の記録が残らない。GUI 経路 (`exec_start` / `exec_resume`) の子は記録しない。実体は `exec/exec.c` | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) |
+| v56 | **実装済み (2026-09-22、実機シリアル)** | V･FAST モード `serial_init_vfast` / `serial_get_status` の 2 本 (slot 216 = 0x368、217 = 0x36C、data_fields は 0x370 / 0x374 へ)。FIFO 搭載機 (`0136h` bit6 の反転で判定) で `013Ah` bit7 を立てて **8253 と無関係に** 115200bps まで出す。**起動時の既定 9600 は互換モードのまま** — V･FAST は `serial N` で明示的に入る。併せて `serial_putchar` の TxRDY 待ちを「10ms tick まで寝る」から「1 文字時間 × 2 の予算で `cpu_delay_us` を挟んで見る」へ。実体は `drivers/serial.c` / `drivers/serial_plan.c` | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -598,7 +599,6 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 | Offset | フィールド | プロトタイプ |
 |--------|-----------|------|
 | 0x360 | kbd_peekkey | `int(void)` |
-| 0x364 | exec_last_result | `int(int *kind, int *code)` |
 
 - 戻り値は `kbd_trygetkey` と同じ形 (上位 = スキャンコード、下位 = ASCII。GUI 中は下位 8bit
   だけで、スキャンコードは 0)。キューが空なら `-1`。
@@ -630,6 +630,34 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
 - **`exec_park_poll` を呼ばない** (= WM へ譲らない)。park は成立すると戻らず、起こされるときに
   `exec_resume` が注入リングの 1 バイトを取り出して EAX に入れてしまうため、「覗いただけ」に
   ならない。譲りたい呼び手は従来どおり `kbd_trygetchar` / `kbd_trygetkey` を使う。
+
+### 実機のシリアルを 115200bps へ (v56)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x368 | serial_init_vfast | `int(u32 baud)` |
+| 0x36C | serial_get_status | `int(u32 *mode, u32 *baud, u32 *fifo)` |
+
+- **既存の `serial_init` (0x0BC) は意味も引数も変えていない。** 従来どおり互換モード
+  (8251 + 8253 カウンタ#2) で初期化する。起動時の既定 9600 がこの経路を通る
+  (票 TASK_SERIAL_VFAST の決裁「実機で通った経路を守る」)。
+- `serial_init_vfast` は **V･FAST モード (`013Ah` bit7)** で初期化する。入れるのは
+  **FIFO 搭載機 (`0136h` bit6 の反転で判定) かつ資料の表にある速度**
+  (9600 / 14400 / 19200 / 28800 / 38400 / 57600 / 115200) のときだけ。
+  戻り値 `0` = V･FAST に入った / `-1` = 互換モードで初期化した (速度はずれている
+  かもしれないので `serial_get_status` の `baud` を見ること)。
+- V･FAST 中はデータが `0130h`、ステータス/コマンドが `0132h` になり、**ステータスの
+  ビット位置が互換と違う** (`0032h` は bit0 TxRDY / bit1 RxRDY、`0132h` は
+  bit1 TxRDY / bit2 RxRDY)。これはカーネル内で閉じているので、KAPI の呼び手からは
+  `serial_putchar` / `serial_trygetchar` が従来どおり使える。
+- 戻しは `serial_init(9600)`。`013Ah` bit7 = 0 と `0138h` = 0 を**8251 を触る前に**書く。
+- `serial_get_status` は `mode` = `0` 互換 / `1` V･FAST、`baud` = **実効値** (要求値では
+  ない)、`fifo` = `0136h` の判定を返す。`NULL` は飛ばす。戻り値 `0` = 初期化済み /
+  `-1` = まだ `serial_init` を呼んでいない。**カーネルのポインタは返さない**
+  (POLICY_DEBUG §4-13 の `db_last_error` と同じ事故を繰り返さないため)。
+- 資料は `docs/hw/undocumented/io_rs.md` (`0130h`〜`013Ah`)。**NP21/W は通信速度を
+  模擬しない**ので、分周が合っているかはエミュレータでは確かめられない
+  ([tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md))。
 
 ### 排他的作成 (v53)
 
@@ -770,8 +798,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x368 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x36C | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x370 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x374 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

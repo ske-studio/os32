@@ -70,6 +70,72 @@
 #define SIG_CI      0x80    /* D7: CI/RI (負論理) */
 
 /* ======================================================================== */
+/*  FIFO モード / V･FAST モード (I/O 0130h〜013Ah)                          */
+/*                                                                          */
+/*  資料: docs/hw/undocumented/io_rs.md 227〜380 行。**Undocumented**。      */
+/*  対象: FIFO は An 一部ロット・Np 以降、V･FAST は 115200bps 対応機         */
+/*        (95 年 5 月以降の機種は統合 I/O に 16550 相当を内蔵)。            */
+/*  搭載判定は 0136h (serial_fifo_detected)。**決め打ちで叩かない。**        */
+/*                                                                          */
+/*  ⚠ 1st CCU は 8251 のまま。FIFO は前段に入るので、モード/コマンドの      */
+/*    書き込み手順そのものは互換モードと同じ (書き先が 0132h になるだけ)。   */
+/* ======================================================================== */
+#define SER_FIFO_DATA   0x0130  /* 送受信データ (従来互換の 0030h にあたる) */
+#define SER_FIFO_STS    0x0132  /* [READ] ラインステータス                  */
+                                /* [WRITE] コマンド — 資料には記述が無いが、 */
+                                /*   NP21/W は 0032h と同じハンドラに繋ぐ    */
+                                /*   (rs232c_bind: 0x132 out → rs232c_o32)。 */
+#define SER_FIFO_MSR    0x0134  /* [READ] モデムステータス                  */
+#define SER_FIFO_IIR    0x0136  /* [READ] 割り込み参照 + FIFO 搭載識別       */
+#define SER_FIFO_FCR    0x0138  /* FIFO コントロール                        */
+#define SER_VFAST_REG   0x013A  /* V･FAST モードレジスタ                    */
+
+/* FIFO の深さ (資料 0130h の解説: 16 バイト)。 */
+#define SER_FIFO_DEPTH  16
+
+/* ---- 0132h ラインステータス ----
+ * **互換の 0032h とビット位置が違う。** 0032h は bit0 TxRDY / bit1 RxRDY /
+ * bit2 TxEMP、0132h は bit0 TxEMP / bit1 TxRDY / bit2 RxRDY。
+ * 0x04 が両方に (TxEMP / RxRDY として) 存在するので、取り違えても例外は
+ * 出ずに「送信が空くたびに受信データを読む」形で静かに壊れる。 */
+#define SER_FSTS_TXEMP  0x01    /* bit0: 送信 FIFO 全空 */
+#define SER_FSTS_TXRDY  0x02    /* bit1: 送信可 */
+#define SER_FSTS_RXRDY  0x04    /* bit2: 受信データあり */
+/* bit3〜7 は **資料と NP21/W が食い違う**。
+ *   資料 : bit5 パリティ / bit4 オーバーラン / bit7 ブレーク / bit3 不明
+ *   NP21/W: bit3 パリティ / bit4 オーバーラン / bit5 フレーミング /
+ *           bit6 ブレーク (rs232c_i132 のコメントに「資料 Vol.2 の
+ *           bit3〜7 の記載は誤り」と明記)。
+ * どちらの並びでも「エラーが 1 つでも立ったらコマンドを打ち直す」だけなので、
+ * 両方の解釈で共通して立ちうる bit3〜5 をエラーとして見る。 */
+#define SER_FSTS_ERR    0x38
+
+/* ---- 0136h 割り込み参照 / FIFO 搭載識別 ---- */
+#define SER_IIR_ID1     0x40    /* bit6: 読むたびに反転する = 搭載の印 */
+#define SER_IIR_ID2     0x20    /* bit5: 常に 0 */
+#define SER_IIR_NONE    0x01    /* bit0: 1 = 割り込み要因なし */
+
+/* ---- 0138h FIFO コントロール ---- */
+#define SER_FCR_ENABLE  0x01    /* FCR0: 1 = FIFO モード / 0 = 従来互換 */
+#define SER_FCR_RX_RST  0x02    /* FCR1: 受信 FIFO リセット */
+#define SER_FCR_TX_RST  0x04    /* FCR2: 送信 FIFO リセット */
+#define SER_FCR_OFF     0x00    /* 従来互換モードへ戻す */
+
+/* ---- 013Ah V･FAST モードレジスタ ----
+ * bit7 = 1 で 8253 カウンタ#2 と**無関係**に速度が決まる。bit6-4 は常に 000b。
+ * 分周値は資料 352〜380 行の表 (NP21/W の speedtbl と完全に一致)。 */
+#define SER_VFAST_ENABLE    0x80
+#define SER_VFAST_OFF       0x00
+#define SER_VFAST_DIV_MASK  0x0F
+#define SER_VFAST_DIV_9600    0x0C
+#define SER_VFAST_DIV_14400   0x08
+#define SER_VFAST_DIV_19200   0x06
+#define SER_VFAST_DIV_28800   0x04
+#define SER_VFAST_DIV_38400   0x03
+#define SER_VFAST_DIV_57600   0x02
+#define SER_VFAST_DIV_115200  0x01
+
+/* ======================================================================== */
 /*  システムクロック — 8251 の速度は 8253 TCU カウンタ#2 の分周で決まる      */
 /*                                                                          */
 /*  判定は BIOS ワークエリア **0000:0501h bit 7**:                          */
@@ -123,13 +189,28 @@ struct serial_setup {
     unsigned long want;     /* 要求した速度 */
     unsigned long actual;   /* 実際に出る速度 (clk / 16 / count) */
     unsigned long clk;      /* 使ったタイマクロック */
-    u16 count;              /* 8253 カウンタ#2 の分周比 */
+    u16 count;              /* 8253 カウンタ#2 の分周比 (互換モードのみ) */
     u8  sysclk_8mhz;        /* 0000:0501h bit7 の値 */
     u8  exact;              /* 1 = ちょうど出る / 0 = ずれている */
+    u8  has_fifo;           /* 0136h の判定 (1 = FIFO 搭載機) */
+    u8  mode;               /* SER_MODE_COMPAT / SER_MODE_VFAST */
+    u8  vfast_div;          /* 013Ah bit3-0 (V･FAST のときだけ) */
 };
 
 /* ======== 受信バッファ ======== */
 #define SER_BUF_SIZE    4096
+
+/* 1 回の IRQ4 で汲む上限 (互換モード)。割り込み嵐で ISR に居座らないため。
+ * FIFO モードは FIFO 1 杯 = SER_FIFO_DEPTH で抜ける。 */
+#define SER_IRQ_DRAIN_MAX   128
+
+/* serial_puts が io_wait を挟む間隔 (バイト)。**2 の冪であること**
+ * (`count & (N-1)` で判定している)。NP21/W のパイプ対策の名残。 */
+#define SER_PUTS_WAIT_EVERY 16
+
+/* パニック時のポーリング送信で TxRDY を待つ空回りの上限。
+ * 校正 (cpu_delay_us) が当てにならない状況で呼ばれるので回数で切る。 */
+#define SER_POLLED_SPIN_MAX 50000
 
 /* ======== 公開API ======== */
 
@@ -154,7 +235,29 @@ int serial_get_ext_ctrl(void);
  * **極性は機種依存で未決着** (上の注記)。自動では呼ばれない。 */
 int serial_set_div4(int bit_value);
 
+/* 従来どおりの初期化 (**互換モード固定**)。シグネチャも意味も変えていない。
+ * FIFO 搭載機でも V･FAST には入らない — 票の決裁「起動時の既定 9600 は
+ * 実機で通った互換経路を守る」。V･FAST 中にこれを呼ぶと 013Ah bit7=0 と
+ * 0138h=0 を先に書いて互換へ戻す。 */
 void serial_init(unsigned long baud);
+
+/* V･FAST (FIFO モード) で初期化する。**明示的に呼んだときだけ入る。**
+ *   0  = V･FAST に入った
+ *  -1  = FIFO 非搭載、または baud が資料の表に無い
+ *        → 互換モードで初期化してある (速度はずれているかもしれない。
+ *          `serial_get_setup()->exact` を見ること)
+ * 戻しは serial_init(9600)。 */
+int serial_init_vfast(unsigned long baud);
+
+/* 現在の設定を 3 つの数で返す (CPL=3 から KAPI 越しに読むための口。
+ * **カーネルのポインタは渡さない** — POLICY_DEBUG §4-13 の db_last_error と
+ * 同じ事故を繰り返さないため)。NULL は飛ばす。戻りは 0 = 初期化済み、
+ * -1 = まだ serial_init を呼んでいない (値は書くが当てにならない)。
+ *   mode: SER_MODE_COMPAT / SER_MODE_VFAST
+ *   baud: **実効値** (要求値ではない)
+ *   fifo: 0136h の判定 (1 = FIFO 搭載機) */
+int serial_get_status(u32 *mode, u32 *baud, u32 *fifo);
+
 void serial_putchar(char c);
 void serial_puts(const char *str);
 void serial_puts_polled(const char *str);

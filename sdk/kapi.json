@@ -1,5 +1,5 @@
 {
-  "version": 55,
+  "version": 56,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -1497,6 +1497,16 @@
       "name": "exec_last_result",
       "ret": "int",
       "args": ["int *kind", "int *code"]
+    },
+    {
+      "name": "serial_init_vfast",
+      "ret": "int",
+      "args": ["u32 baud"]
+    },
+    {
+      "name": "serial_get_status",
+      "ret": "int",
+      "args": ["u32 *mode", "u32 *baud", "u32 *fifo"]
     }
   ]
 }
