@@ -147,8 +147,9 @@
  *   SEEK は 80 シリンダ媒体で最大 79 トラック分踏む。
  *     8ms × 80 トラック = 640ms  + ヘッドセトリング (約 15ms) ≒ 655ms
  *   余裕 2 倍で 1.5 秒。
- *   ローダが VMKRNL.LZ4 を読んだ直後のヘッドはシリンダ 20〜40 付近に居るので、
- *   fdc_init() の RECALIBRATE はここが 200ms だと **必ず** タイムアウトした。 */
+ *   ローダが VMKRNL.LZ4 を読んだ直後のヘッドはシリンダ 20〜40 付近に居るので
+ *   (20 × 8ms = 160ms、40 × 8ms = 320ms)、fdc_init() の RECALIBRATE は
+ *   ここが 200ms だと頻繁にタイムアウトし、そのあと未回収の割り込みが残った。 */
 #define FDC_SEEK_TIMEOUT_TICKS    150
 
 /* READ DATA / WRITE DATA。

@@ -385,7 +385,8 @@ static void fdc_abort_transfer(void)
     fdc_irq_fired = 0;
     outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
 
-    /* 3. Specify はリセットで消えるので入れ直す。 */
+    /* 3. Specify を入れ直す。µPD765A の資料では SRT/HUT/HLT は RESET で
+     *    保持されるが、既知の値へ戻しておくほうが状態を追いやすい。 */
     (void)fdc_send_byte(FDC_CMD_SPECIFY);
     (void)fdc_send_byte(FDC_SPECIFY_SRT_HUT);
     (void)fdc_send_byte(FDC_SPECIFY_HLT_DMA);

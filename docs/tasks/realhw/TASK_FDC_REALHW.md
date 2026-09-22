@@ -1,6 +1,6 @@
 # TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ回帰 (2HD) 合格・Codex 往復 2 待ち**。実機は未検証 (R6)
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ回帰 (2HD) 合格・Codex 往復 2 で Approve**。実機は未検証 (R6)
 
 基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
 FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。
@@ -109,4 +109,22 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 | B2 (P2) | `fdc_wait_seek_end` の IRQ 待ちが 1 回だけなので、別ドライブの通知 (drv1 の Ready 変化) で自ドライブの正常なシークを PENDING で打ち切る | 稀だが到達可能。期限までループ |
 | B3 (P2) | 媒体無しの `/fd0` 試行で NR 即失敗のたびに reset (NP21/W はリセット IRQ を出さない → 0.5s × 2) | 到達可能。NR は再試行しない + リセット待ち 100ms |
 | 非 blocker | `fdc_read_results` の `i--` が無限になり得る / 診断の ST0 が SEEK のものでない / NP21/W の時間説明 (`FDC_INT_DELAY`=6 の後に 512 サイクル) | 全部直す |
-| **非 blocker → 実機の第 2 原因** | **`I/O 0439h bit2` = 1MB 以上への DMA 禁止、ノーマルモードの起動時設定は 1** (`io_dma.md` 428 行〜)。`dma_buffer` は 0x156000 で 1MB 超。NP21/W は `necio_o0439` が値を保存するだけで DMA が見ない (`src/io/necio.c`) ので**エミュレータでは再現しない** | **blocker 4 として採用**: `fdc_init` で RMW して bit2 を落とす (bit7 はプリンタ I/F 選択なので他ビットを保つ、FF なら書かない)、読み戻しを `[fdc] dma>1MB: 0439h xx -> xx` で報告 |
+| **非 blocker → 実機の第 2 原因** | **`I/O 0439h bit2` = 1MB 以上への DMA 禁止、ノーマルモードの起動時設定は 1** (`io_dma.md` 428 行〜)。`dma_buffer` は 0x156000 で 1MB 超。NP21/W は `necio_o0439` が値を保存するだけで DMA が見ない (`src/io/necio.c`) ので**エミュレータでは再現しない** | **blocker 4 として採用**: `fdc_init` で RMW して bit2 を落とす (bit7 はプリンタ I/F 選択なので他ビットを保つ)。**FFh でも書く** — 実機は bit7=1・bit2=1・未使用ビット 1 で FFh を返し得るので避けると直らない。読み戻しを `[fdc] dma>1MB: 0439h xx -> xx` で報告 (NP21/W は in ハンドラが無く `ff -> ff`) |
+
+**往復 2 (b299ea9)**: **Approve**。往復 1 の blocker 3 件 + 非 blocker 4 件を 1 件ずつ「閉じた」と確認。
+到達可能な反例を伴う blocker なし。非 blocker と PM の扱い:
+
+| # | 所見 | 扱い |
+|---|---|---|
+| 1 | SIS 失敗時に `s_last_seek_st0` が更新されず、診断が前回の値 (例: 古い NR) を出し得る。結果が 1〜2 バイトのときの ST1/ST2 は 0 で埋まる | **残件** (診断の精度。動作には影響しない) |
+| 2 | 「NR は再試行しない」が `fdc_init` の 100ms 待ち再 recalibrate と、`fdc_recover` 後の 1 回の SEEK には及んでいない | **残件** (空ドライブで数十 ms の余分。往復 1 の reset ×2 は復活しない) |
+| 3 | コメント: 「Specify はリセットで消える」は誤り (SRT/HUT/HLT は RESET で保持)。「20〜40 シリンダなら 200ms で必ず」は強すぎる (20 × 8ms = 160ms) | **直した** (コメントのみ) |
+| 4 | ホスト試験は判定関数だけで、待機ループ・abort の I/O 順序・NR 時の reset 回数は検査していない (記録は限界を明記済み) | **残件** (I/O を伴うので実機/エミュレータの領分) |
+
+## 7. 実機での確認 (R6) の手引き
+
+1. `make all` → `images/os32_boot.d88` (1.2MB、`images/os32_boot.img` が生イメージ) / `make fd144` → `images/os32_boot144.img` (1.44MB、生イメージ)。
+2. FD から起動し、**画面の次の行を写す**:
+   - `[fdc] dma>1MB: 0439h xx -> yy` — xx の bit2 が立っていて yy で落ちていれば 1MB 制限は解けた。`ff -> ff` のように落ちない機種なら別の手 (DMA バッファを 1MB 未満へ) が要る。
+   - `MOUNT... root OK` と `[fatfs] mounted: type=1 drv=0 pdrv=0 FAT12`。
+   - 失敗時: `[fdc] recalibrate drv=0 rc=.. st0=..` / `[fdc] read fail drv=0 chs=c/h/s phase=<seek|cmd|irq|result> st0=.. st1=.. st2=..` — phase と ST0 で原因が切り分けられる (seek + NR = Ready 不成立、irq = 転送が終わらない、result の ST1/ST2 = CRC/欠落など)。
