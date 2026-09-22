@@ -1,0 +1,54 @@
+# TASK_KAPI_OUTPUT_GUARD — 出力ポインタを受ける既存 KAPI 43 本が、読み取り専用ページに書ける
+
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 (着手は TASK_HAL_WIRING の実装 A の着地後)**。
+> 出所: Codex 設計レビュー往復 10 (TASK_HAL_WIRING R10-1)。**カーネル層の分かっている不具合**なので POLICY_DEV §1 により新機能より先。
+
+## 0. 症状と原因
+
+- OS32 は **`CR0.WP = 0`** で動いている (`arch/x86/arch_cpu.h` の MMU 有効化。`kernel/shlib.c` がカーネルからの
+  書き込みで共有ライブラリを張る前提)。CPL=0 (KAPI の wrapper) は PTE の RO 保護を**受けない**。
+- CPL=3 のアプリが KAPI の出力引数に **共有ライブラリの `.text` の番地** (RO、全アプリで共有) や `.rodata` を渡すと、
+  `exec/exec.c` の早期検査 (`kapi_argptr` → `ring3_ptr_ok`) は「帯の中か」しか見ないので通り、wrapper がそこへ書く。
+  #PF は起きず、アプリは kill されず、**共有コードが壊れる**。
+- `ring3_ptr_ok` の注釈「`.text` への書き込みは PTE が RO なので #PF で捕まる」は**誤り** (WP=0)。
+- 影響: `sdk/kapi.json` で **非 const のポインタ引数を持つ 43 本** (下の棚卸し)。
+
+## 1. 棚卸し (2026-09-23、kapi.json v58)
+
+| 種別 | 本数 | 例 | 検査 |
+|---|---|---|---|
+| A. 長さ引数つきの出力バッファ | 12 | `sys_read(fd, buf, size)`, `np2_get_*(buf, size)`, `sys_get_build_info`, `con_sink_read(buf, cap)`, `host_read(h, buf, cap)`, `launch_take(buf, cap, …)`, `ime_user_list(prefix, out, max)`, `dev_get_info(idx, name, nm, …)`, `sys_redirect_fd_buf(fd, buf, size, len)`, `dev_blk_read(dev, lba, count, buf)` (count × セクタ長) | `writable(buf, len)` |
+| B. 固定長の構造体 / スカラ出力 | 24 | `rtc_read`, `ide_identify` / `ide_get_info`, `path_parse`, `sys_stat` / `sys_fstat`, `mouse_poll`, `gfx_screen_info`, `gfx_stats`, `pci_get` (40B), `console_get_size(int*, int*)`, `gfx_get_palette(idx, u8*, u8*, u8*)`, `kcg_read_ank` / `kcg_read_kanji` (16B / 32B)、`tvram_readchar_at(x, y, u16*, u8*)`, `loop_status`, `con_sink_stat`, `launch_poll`, `host_status`, `exec_last_result`, `serial_get_status`, `ide_read_sector(drv, lba, buf)` (512B), `gfx_get_framebuffer(fb)` | `writable(p, sizeof)` — 1 本の KAPI に複数あるものは**全部検査してから 1 つも書かない** (TASK_HAL_WIRING 1-5 と同じ規則) |
+| C. 入力だけのポインタ (解放・ロック) | 3 | `mem_free(ptr)`, `sys_shm_lock(ptr)`, `sys_shm_free(ptr)` | 書かないので対象外 (既存の所有者検査のまま) |
+| D. 関数ポインタ / 表 | 4 | `sys_ls(path, cb, ctx)`, `gui_register(handler, pump)`, `gfx_present_raster(table)` (読むだけ), `ime_set_render(table)` (読むだけ) | 書かないので対象外。ただし **cb / handler はアプリのコード帯 (present + USER) であること**を確かめる (別の穴: 帯検査だけでは SHM や VRAM を関数として呼べる) |
+
+計: A 12 + B 24 + C 3 + D 4 = 43。**A と B の 36 本が対象**。
+
+## 2. 設計
+
+1. **helper は TASK_HAL_WIRING 1-5 の `ring3_user_range_writable(p, len)` をそのまま使う** (実装 A が新設。IF=0 で master CR3 に
+   切り替え、保存したアプリ PD の PDE/PTE が present + RW + USER であることを範囲の全ページで確かめ、CR3 → IF の順で復元。
+   CPL=0 の直呼びは対象外。1 回の呼び出しで複数の範囲をまとめて検査する形 `ring3_user_ranges_writable(n, ranges[])` を足す)。
+2. **検査の置き場は生成される wrapper** (`kapi/kapi_generated.c`)。`sdk/kapi.json` の各エントリに任意キー
+   `"out": [{"arg": "buf", "len": "size"}]` / `{"arg": "info", "size": 40}` / `{"arg": "buf", "len": "count", "unit": 512}` を足し、
+   `tools/gen_kapi.py` (名前は実装時に確認) が wrapper の先頭 (target を呼ぶ前) に検査を出す。**36 本すべてに `out` を書く**
+   (書いていない非 const ポインタ引数があれば `make check` (`check-kapi-out`) が落ちる — 種別 C/D は `"out": "none"` で明示)。
+3. 検査不合格は **`ring3_fault_kill()`** (TASK_HAL_WIRING 1-5 と同じ。NULL は wrapper の既存の扱い (負や無視) を保つ)。
+4. `ring3_ptr_ok` の誤った注釈を直し、WP=0 の事実を `docs/02_memory.md` の方針に 1 行足す。
+5. **KAPI の版は上げない** (署名は不変。検査は追加だけ)。`make clean` → `make all` → `make external` は生成物が変わるので必要。
+
+## 3. 受入
+
+| ID | 見るもの | 手段 |
+|---|---|---|
+| G1 | ホスト試験: `out` 記述の解釈 (len 引数 / 固定 size / unit) と生成コードの検査順 (全範囲を検査 → 書く)。`out` 無しの非 const ポインタで生成が落ちる | `check-par` + `check-kapi-out` |
+| G2 | NP21/W、CPL=3 の試験バイナリ: 36 本のうち代表 6 本 (A: `sys_read` / `np2_get_version`、B: `rtc_read` / `console_get_size` / `pci_get` / `ide_read_sector`) に **shlib の `.text` の番地** を渡す → kill、`.text` の内容が不変 (md5)。2 つ目の出力だけ RO → 1 つ目も不変。正常系 (heap / stack / shlib `.data`) は成功 | kselftest post-exec + 試験バイナリ |
+| G3 | 種別 D: `sys_ls` の cb に SHM の番地を渡す → kill (コード帯でない) | 同上 |
+| G4 | 既存アプリの回帰: `make external` の全アプリと gshell、shell の `ls` / `cat` / `stat` / `serial` / `lspci` が通る (出力バッファは heap / stack) | NP21/W |
+| G5 | コスト: CR3 の往復が 1 KAPI 1 回。`sys_read` 4KB × 1000 回の所要時間の前後差を kselftest で測って記録 | NP21/W |
+
+## 4. しないこと
+
+- `CR0.WP = 1` への切り替え (shlib のロードがカーネルからの書き込みに依存。対象 CPU (386 は WP 無し) の確認も要る)。
+- 可変長引数 (`kprintf` 系) の検査 (フォールトガードのまま)。
+- const ポインタ (入力) の present 検査 (読みの #PF はフォールトガードが拾う)。
