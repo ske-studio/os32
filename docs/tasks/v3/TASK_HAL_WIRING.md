@@ -1,8 +1,8 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v11 (Codex 10 往復。往復 10 の残 blocker は R10-1 の 1 件で、PM が出力保護の方式を決めて固定。ユーザー指示 2026-09-23「解決までレビュアーを使ってよい」により Approve まで往復を続ける)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v12 (Codex 往復 11 の R11-1 を反映: 出力保護の検査は master CR3 に切り替えてアプリの PD/PT を読む。ユーザー指示 2026-09-23「解決までレビュアーを使ってよい」により Approve まで往復を続ける)**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
-> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定、レビュー終了)。
+> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定) → Codex 往復 11 (R11-1 の 1 件。競合・shlib 属性・COW は新規無し) → v12。
 
 正典の関係: [`PLAN.md`](PLAN.md) §3-1 (HAL の棚卸し)、§3 (ドライバの動的読み込み — この票の「取り決め」を後で外部モジュールに開く)、
 [`../realhw/TASK_LAN_82557.md`](../realhw/TASK_LAN_82557.md) (L-B 82557 が最初の顧客)、§5-5 (PCM リングとタイマが 2 番目の顧客)。
@@ -81,7 +81,8 @@ u8 line_state; u8 pad; }` (8 バイト。`line_state` (LINE_OK = 0 / LINE_STORM_
 **getter が読む時点で `irq_line_quarantined` / `irq_storm_masked` から合成する** (irq = 0xFF や ≥ 16 はシフト・配列参照より前に除外して LINE_OK) (往復 9 R9-1: 先に BOUND した装置 X の線が後から別装置 Y で隔離されても X の `result` は BOUND のまま、
 `line_state` = QUARANTINED で「IRQ が来なくなった」を `lspci` が出す)。result = NONE / BOUND / DECLINED / QUARANTINED、reason = OK / IRQ_UNSUPPORTED / IRQ_QUARANTINED /
 RESET_FAILED / START_FAILED / NOISY / NOISY_UNMASKABLE / NO_DRIVER) に保存し、カーネル関数 `pci_bind_info_get(idx, *out)`
-(idx は `pci_get` と同じ列挙順) で読む。driver は `pci_bind_set_reason(dev, reason)` で理由を書く。上書き規則: 候補ごとに reason を OK に**初期化**してから probe を呼び、理由未設定で DECLINE なら `DECLINED_UNSPECIFIED`、
+(idx は `pci_get` と同じ列挙順) で読む。driver は `pci_bind_set_reason(dev, reason)` で理由を書く。上書き規則: reason (列挙: OK / IRQ_UNSUPPORTED / IRQ_QUARANTINED / RESET_FAILED / START_FAILED / NOISY / NOISY_UNMASKABLE /
+NO_DRIVER / DECLINED_UNSPECIFIED) は候補ごとに OK に**初期化**してから probe を呼び、理由未設定で DECLINE なら `DECLINED_UNSPECIFIED`、
 一致候補ゼロは `NONE / NO_DRIVER`。DECLINED の後に別 driver が BOUND になれば BOUND/OK で上書き、全 driver が DECLINE なら
 最後の DECLINED と理由、QUARANTINED は上書きされない。
 `lspci` へは**新しい KAPI `pci_bind_info(idx, void *out)` (8 バイト写し) を v60 として末尾追記** (v59 は 1-5 の
@@ -364,8 +365,17 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   `ring3_fault_kill()` するのは他の KAPI と同じ。**ただし読み取り専用ページは fault しない**: OS32 は `CR0.WP = 0`
   (`arch/x86/arch_cpu.h` の MMU 有効化、`kernel/shlib.c` がカーネルからの書き込みに依存) なので、CPL=0 の wrapper は
   共有ライブラリの `.text` (RO、全アプリで共有) にも書けてしまう。**出力引数を持つ新設 KAPI (`sys_time_now`、
-  `pci_bind_info`) は、書く前に `ring3_user_range_writable(ptr, len)` (新設、`exec/exec.c`: 範囲の全ページの PTE が
-  present + RW + USER であることを master / 現在の PD で確かめる) を通し、通らなければ `ring3_fault_kill()`**
+  `pci_bind_info`) は、書く前に `ring3_user_range_writable(ptr, len)` (新設、`exec/exec.c`) を通し、通らなければ
+  `ring3_fault_kill()`**。**検査の手順 (往復 11 R11-1: どの写像で表を読むかを固定)**: 検査対象は KAPI 入口で保存した
+  **アプリの CR3 の PD**。アプリ CR3 のまま PD/PT の物理番地を辿ると、アプリ帯が per-app 写像に置き換わっているので
+  表ではなく別データを読む (`exec/exec.c` 517 行付近の既存記録)。`paging_pte_flags()` は master の PT を読むので、
+  アプリでは RW+USER の shlib `.data/.bss` が master では USER 無しになり正常な出力を誤拒否する。したがって
+  helper は **短い IF=0 区間で master CR3 に切り替え** (master では低位物理が恒等写像なので PD/PT を物理番地で読める)、
+  保存したアプリ PD の PDE (present、PS 付きは拒否 — 現行に 4MB PDE の生成経路は無い) → PT の PTE (present + RW + USER、
+  範囲の全ページ) を確かめ、**元の CR3 と IF を復元してから**判定を返す。master 滞在中はユーザー出力へ書かない。
+  2 本とも検査が通ってから、元のアプリ写像で書く。検査と書き込みの間に GUI ポンプ・yield・park を挟まない。
+  検査は KAPI wrapper に置く (カーネル内部からの時計呼び出しはローカル変数を渡すので USER を要求しない)。
+  検査順: NULL・帯境界跨ぎ・交差の負返却 → 全出力の writable 検査 → 書き込み。
   (出力バッファにコード番地を渡すのはアプリのバグ。負を返して続行させない)。既存の出力 KAPI への適用は別票 (残件)。
   全体の WP 有効化は shlib の書き込み依存と対象 CPU の確認が要るので、この票では選ばない。
   wrapper が**負を返して出力不変**を保証するのは、早期検査を通った後に wrapper 自身が判定できる範囲だけ:
@@ -373,7 +383,8 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   この範囲内では 2 本とも検査してから、ローカルの 1 つのスナップショットを書く。受入 W4 は wrapper の直呼びではなく
   **CPL=3 のゲストから KAPI を呼ぶ試験** (`kselftest_run_post_exec` はカーネル関数なので、そこから CPL=3 の試験バイナリを
   起動する) で、負が返る 3 種と kill される 2 種 (帯の外、**共有ライブラリ `.text` の番地を出力に指定** → kill され、共有内容が
-  不変 (2 本目だけ RO の場合も)) を確かめる。`pci_bind_info` (v60) も同じ試験。
+  不変 (2 本目だけ RO の場合も))、**正常系の対照** (非恒等写像のアプリ heap / stack と shlib `.data/.bss` への出力は成功)、
+  不在 PTE、ページ跨ぎ、を確かめる。`pci_bind_info` (v60) も同じ試験。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
 
 ### 1-6. 実装の注意 (往復 5・6 の非 blocker)
