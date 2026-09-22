@@ -22,7 +22,12 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "tools/tests/serial_vfast_host.c"
-SRC = ROOT / "drivers/serial_plan.c"
+# 変異させる実ソース。どちらも純粋 (I/O も KAPI も触らない)。
+SRCS = {
+    "drivers/serial_plan.c": ROOT / "drivers/serial_plan.c",
+    "userland/shell/serial_watchdog.c":
+        ROOT / "userland/shell/serial_watchdog.c",
+}
 # カーネルと同じ i386-elf で通す実ソース。serial.c は判定を使う側。
 TARGET_SRCS = [
     ("drivers/serial_plan.c", []),
@@ -30,61 +35,98 @@ TARGET_SRCS = [
 ]
 
 CASES = ["vfast_table", "compat_exact", "compat_inexact", "mode_choice",
-         "tx_budget", "status_bits", "fifo_detect", "real_hw_story"]
+         "tx_budget", "status_bits", "fifo_detect", "refuse_inexact",
+         "watchdog", "real_hw_story"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
-INCLUDES = ["-I" + str(ROOT / p) for p in ("include", "drivers")]
+# serial_plan.h は共有の契約ヘッダ (os32_kapi_shared.h) から
+# SER_MODE_* / SER_INIT_* を引くので sdk/include/os32 も要る。
+INCLUDES = ["-I" + str(ROOT / p)
+            for p in ("include", "drivers", "sdk/include/os32")]
 
 # 否定側。実装を 1 か所だけ壊して RED になることを見る。
-# (パターン, 置換, 説明)
+# (ソース, パターン, 置換, 説明)
 MUTATIONS = [
-    (r"\{ 115200UL, SER_VFAST_DIV_115200 \},",
+    ("drivers/serial_plan.c",
+     r"\{ 115200UL, SER_VFAST_DIV_115200 \},",
      "{ 115200UL, SER_VFAST_DIV_57600  },",
      "V･FAST の表を 1 行ずらす (115200 のつもりで 57600 が出る)"),
-    (r"\{   9600UL, SER_VFAST_DIV_9600   \}",
+    ("drivers/serial_plan.c",
+     r"\{   9600UL, SER_VFAST_DIV_9600   \}",
      "{   4800UL, SER_VFAST_DIV_9600   }",
      "表に無い速度を足す (9600 の戻しが V･FAST に入らなくなる)"),
-    (r"return \(u8\)\(\(mode == SER_MODE_VFAST\) \? SER_FSTS_RXRDY : STS_RXRDY\);",
+    ("drivers/serial_plan.c",
+     r"return \(u8\)\(\(mode == SER_MODE_VFAST\) \? SER_FSTS_RXRDY : STS_RXRDY\);",
      "return (u8)((mode == SER_MODE_VFAST) ? STS_RXRDY : STS_RXRDY);",
      "FIFO の RxRDY を互換のビット位置 (bit1) で見る"),
-    (r"return \(u8\)\(\(mode == SER_MODE_VFAST\) \? SER_FSTS_TXRDY : STS_TXRDY\);",
+    ("drivers/serial_plan.c",
+     r"return \(u8\)\(\(mode == SER_MODE_VFAST\) \? SER_FSTS_TXRDY : STS_TXRDY\);",
      "return (u8)((mode == SER_MODE_VFAST) ? SER_FSTS_TXEMP : STS_TXRDY);",
      "FIFO の TxRDY を TxEMP (bit0) と取り違える"),
-    (r"if \(us < SER_TX_BUDGET_MIN_US\) \{\n        us = SER_TX_BUDGET_MIN_US;\n    \}",
+    ("drivers/serial_plan.c",
+     r"if \(us < SER_TX_BUDGET_MIN_US\) \{\n        us = SER_TX_BUDGET_MIN_US;\n    \}",
      "",
      "予算の下限を外す (速い速度で 0µs になり、直す前の hlt 待ちに戻る)"),
-    (r"if \(want_vfast && has_fifo\) \{", "if (want_vfast || has_fifo) {",
+    ("drivers/serial_plan.c",
+     r"if \(want_vfast && has_fifo\) \{",
+     "if (want_vfast || has_fifo) {",
      "FIFO があれば明示指定なしでも V･FAST に入る (起動時の既定 9600 が"
      "互換で上がらなくなる / FIFO 非搭載機でも 013Ah を叩く)"),
-    (r"out->exact = \(u8\)\(\(out->actual == baud\) \? 1 : 0\);",
+    ("drivers/serial_plan.c",
+     r"out->exact = \(u8\)\(\(out->actual == baud\) \? 1 : 0\);",
      "out->exact = 1;",
      "割り切れない分周を「ちょうど出る」と答える (38400 → 41600 を見逃す)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(bytes_seen > 0\) \{\n        return SER_WD_LINKED;\n    \}\n"
+     r"[\s\S]*?    if \(elapsed_ticks >= \(unsigned long\)"
+     r"SER_SWITCH_WATCHDOG_TICKS\) \{\n        return SER_WD_REVERT;\n    \}",
+     "    if (elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS) {\n"
+     "        return SER_WD_REVERT;\n    }\n"
+     "    if (bytes_seen > 0) {\n        return SER_WD_LINKED;\n    }",
+     "番犬が期限を受信より先に見る (期限ちょうどに届いた応答を無音と"
+     "読み替えて、揃った足並みを自分で壊す)"),
+    ("userland/shell/serial_watchdog.c",
+     r"elapsed_ticks >= \(unsigned long\)SER_SWITCH_WATCHDOG_TICKS\) \{",
+     "elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS * 1000) {",
+     "番犬の期限を 1000 倍にする (事実上いつまでも戻さない = 会話が死んだまま)"),
 ]
 
 
-def host_build(tmp, source_text=None):
-    """ハーネスをコンパイルして実行ファイルのパスを返す。"""
+def host_build(tmp, mutated=None):
+    """ハーネスをコンパイルして実行ファイルのパスを返す。
+
+    mutated = {相対パス: 中身} を渡すと、**実物のソースは 1 バイトも触らずに**
+    写しの上で変異させる (= make check-par で並列に回せる)。
+    """
     src_dir = pathlib.Path(tmp)
     exe = src_dir / "serial-vfast-host"
-    cmd = ["gcc", *FLAGS, *INCLUDES, str(HARNESS), "-o", str(exe)]
-    if source_text is not None:
-        # 変異させた serial_plan.c を一時の drivers/ に置いて、そちらを先に引かせる
-        # (実物のソースは書き換えない = make check-par で並列に回せる)。
-        mut = src_dir / "drivers"
-        mut.mkdir(exist_ok=True)
-        (mut / "serial_plan.c").write_text(source_text, encoding="utf-8")
-        for name in ("serial_plan.h", "serial.h"):
-            (mut / name).write_text(
-                (ROOT / "drivers" / name).read_text(encoding="utf-8"),
-                encoding="utf-8")
-        shim = src_dir / "harness.c"
-        shim.write_text(
-            HARNESS.read_text(encoding="utf-8").replace(
-                '"../../drivers/serial_plan.c"', '"drivers/serial_plan.c"'),
-            encoding="utf-8")
-        cmd = ["gcc", *FLAGS, "-I" + str(ROOT / "include"), "-I" + str(src_dir),
-               "-I" + str(mut), str(shim), "-o", str(exe)]
+    if mutated is None:
+        cmd = ["gcc", *FLAGS, *INCLUDES, str(HARNESS), "-o", str(exe)]
+        subprocess.run(cmd, cwd=ROOT, check=True)
+        return exe
+
+    # ハーネスが #include している 2 本と、その巻き込むヘッダを写す。
+    tree = src_dir / "tree"
+    for rel in ("drivers/serial_plan.c", "drivers/serial_plan.h",
+                "drivers/serial.h",
+                "userland/shell/serial_watchdog.c",
+                "userland/shell/serial_watchdog.h"):
+        dst = tree / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(mutated.get(rel,
+                                   (ROOT / rel).read_text(encoding="utf-8")),
+                       encoding="utf-8")
+    shim = src_dir / "harness.c"
+    shim.write_text(
+        HARNESS.read_text(encoding="utf-8")
+               .replace('"../../drivers/', '"drivers/')
+               .replace('"../../userland/', '"userland/'),
+        encoding="utf-8")
+    cmd = ["gcc", *FLAGS, "-I" + str(ROOT / "include"),
+           "-I" + str(ROOT / "sdk/include/os32"), "-I" + str(tree),
+           "-I" + str(tree / "drivers"), "-I" + str(tree / "userland/shell"),
+           str(shim), "-o", str(exe)]
     subprocess.run(cmd, cwd=ROOT, check=True)
     return exe
 
@@ -119,16 +161,16 @@ def build_target(tmp):
 
 def mutate(tmp):
     """実装を 1 か所ずつ壊して、どれも RED になることを見る。"""
-    original = SRC.read_text(encoding="utf-8")
     bad = 0
-    for i, (pattern, repl, why) in enumerate(MUTATIONS, 1):
-        mutated, n = re.subn(pattern, repl, original, count=1)
+    for i, (rel, pattern, repl, why) in enumerate(MUTATIONS, 1):
+        original = SRCS[rel].read_text(encoding="utf-8")
+        text, n = re.subn(pattern, repl, original, count=1)
         if n != 1:
             print(f"MUTATION {i} NOT APPLICABLE: {why}", flush=True)
             bad += 1
             continue
         try:
-            exe = host_build(tmp, mutated)
+            exe = host_build(tmp, {rel: text})
         except subprocess.CalledProcessError:
             # コンパイルが通らないのも RED (見逃しではない)。
             print(f"MUTATION {i} RED (compile): {why}", flush=True)

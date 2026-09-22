@@ -238,14 +238,19 @@ int serial_set_div4(int bit_value);
 /* 従来どおりの初期化 (**互換モード固定**)。シグネチャも意味も変えていない。
  * FIFO 搭載機でも V･FAST には入らない — 票の決裁「起動時の既定 9600 は
  * 実機で通った互換経路を守る」。V･FAST 中にこれを呼ぶと 013Ah bit7=0 と
- * 0138h=0 を先に書いて互換へ戻す。 */
+ * 0138h=0 を先に書いて互換へ戻す。
+ *
+ * **8253 でちょうど出せない速度は適用しない** (SER_INIT_REFUSED と同じ判断)。
+ * 戻り値が無いので結果は `serial_get_setup()->actual` を見ること。
+ * 既定の 9600 は両クロックで exact なので起動経路は変わらない。 */
 void serial_init(unsigned long baud);
 
 /* V･FAST (FIFO モード) で初期化する。**明示的に呼んだときだけ入る。**
- *   0  = V･FAST に入った
- *  -1  = FIFO 非搭載、または baud が資料の表に無い
- *        → 互換モードで初期化してある (速度はずれているかもしれない。
- *          `serial_get_setup()->exact` を見ること)
+ *   SER_INIT_VFAST   ( 0) = V･FAST に入った
+ *   SER_INIT_COMPAT  (-1) = FIFO 非搭載か表に無い速度 → 互換で初期化した
+ *                           (8253 でちょうど出る速度だった)
+ *   SER_INIT_REFUSED (-2) = 8253 でも出せない速度 → **何もしていない**。
+ *                           いまの設定がそのまま生きている
  * 戻しは serial_init(9600)。 */
 int serial_init_vfast(unsigned long baud);
 

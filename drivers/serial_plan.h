@@ -17,9 +17,23 @@
 
 #include "serial.h"   /* ポート番地とステータスビット (互換 / FIFO の両方) */
 
-/* ======== 通信モード ======== */
-#define SER_MODE_COMPAT  0  /* 8251 + 8253 カウンタ#2 (0030h/0032h)        */
-#define SER_MODE_VFAST   1  /* FIFO モード + V･FAST (0130h/0132h/013Ah)    */
+/* ======== 通信モードと初期化の結果 ========
+ * **値の正典は共有の契約ヘッダ** `sdk/include/os32/os32_kapi_shared.h`。
+ * カーネルとユーザランド (シェルの `serial` コマンド) の両方が同じ値を
+ * 見るので、片方に写さない ([C4])。ここは短い別名を作るだけ。
+ *
+ * **REFUSED は「何もしなかった」** — ハードウェアには 1 バイトも書いていない
+ * ので、いまの設定がそのまま生き残る。呼び手は速度を変えていない前提で
+ * 続けてよい (Codex レビュー blocker 2)。 */
+#include "os32_kapi_shared.h"
+
+#define SER_MODE_COMPAT  KAPI_SER_MODE_COMPAT
+#define SER_MODE_VFAST   KAPI_SER_MODE_VFAST
+
+#define SER_INIT_VFAST   KAPI_SER_INIT_VFAST
+#define SER_INIT_COMPAT  KAPI_SER_INIT_COMPAT
+#define SER_INIT_REFUSED KAPI_SER_INIT_REFUSED
+
 
 /* ======================================================================== */
 /*  TxRDY を待つ予算                                                        */

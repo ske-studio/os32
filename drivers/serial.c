@@ -24,8 +24,10 @@
 extern u32 paging_current_cr3(void);
 extern u32 paging_kernel_pd_phys(void);
 
-/* 外部: irq_enable (idt.c で定義) */
+/* 外部: irq_enable / irq_disable (idt.c で定義)。drivers/ は -Ikernel を
+ * 持たないので、kbd.c / ide.c と同じ扱いでここに宣言する。 */
 extern void irq_enable(unsigned int irq);
+extern void irq_disable(unsigned int irq);
 
 /* 外部: 校正済みマイクロ秒ディレイ (kernel/cpu_calibrate.h)。
  * drivers/ はカーネルヘッダを見ない作法なので extern で引く
@@ -76,6 +78,9 @@ static unsigned int s_port_cmd   = SER_CMD;
 static u8 s_mask_txrdy = STS_TXRDY;
 static u8 s_mask_rxrdy = STS_RXRDY;
 static u8 s_mask_err   = (u8)(STS_PE | STS_OE | STS_FE);
+/* `0035h` に書く割り込み許可。**ISR 末尾の再許可もこれを使う** — 直値だと
+ * 切替でマスクを変えた瞬間に ISR が踏み潰す (Codex レビュー blocker 1)。 */
+static u8 s_mask_ien   = IEN_RX;
 
 /* TxRDY を待つ予算 [µs]。serial_init で速度から決める (serial_plan.h の式)。
  * 初期化前でも putchar が呼ばれうる (パニック経路) ので既定を入れておく。 */
@@ -161,17 +166,73 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     struct serial_plan_out plan;
     u8  mode;
     unsigned long clk;
+    unsigned int irqf;
+    unsigned long keep;
+    int rc;
 
-    /* ---- 割り込み禁止 (初期化中) ---- */
-    outp(SER_MASK, 0x00);   /* 全割り込みマスク */
+    /* ==================================================================== */
+    /*  切替のあいだは IRQ4 を止める                                        */
+    /*                                                                      */
+    /*  **`0035h` に 0 を書くだけでは排他にならない。** NP21/W の            */
+    /*  `rs232c_callback` は `0035h` を見ずに `pic_setirq(4)` を上げるし、   */
+    /*  こちらの ISR 末尾も無条件で `0035h` を再許可する。止めないと:        */
+    /*    - `ser_head=0; ser_tail=0;` の直後に ISR が添字 0 へ書いて tail=1、 */
+    /*      そのあと初期化側が `ser_count=0` を書く → 読み手は head=0 から   */
+    /*      **古い値を 1 バイト返す**                                        */
+    /*    - `s_port_*` / `s_mask_*` を 1 本ずつ差し替えている最中に ISR が   */
+    /*      走ると、**新しいポートを古いビット位置で読む**                   */
+    /*  PIC のマスクと IF の両方を落とす。IF は元の状態へ戻す                */
+    /*  (`irq_save`/`irq_restore`) — 起動時は IF=0 で呼ばれることがある。    */
+    /*                                                                      */
+    /*  ⚠ **この区間で `kprintf` を呼んではいけない。** rshell 中の          */
+    /*  `console.c` は kprintf をシリアルへも流し、`serial_putchar` は予算を */
+    /*  使い切ると `_halt()` する。IF=0 の `hlt` は二度と起きない。          */
+    /*  報告は区間を出てから行う。                                          */
+    /* ==================================================================== */
+    irqf = irq_save();
+    irq_disable(4);
 
-    /* ---- FIFO 搭載判定 (1 回だけ) ---- */
+    /* ---- FIFO 搭載判定 (1 回だけ。0136h を読むだけで何も書かない) ---- */
     serial_probe_fifo();
 
     /* クロックは 0000:0501h から判定したもの。まだ判定していなければ従来値。 */
     clk = s_timer_clk ? s_timer_clk : TIMER_CLK_1997;
     if (baud == 0) baud = SER_BAUD_DEFAULT;
     serial_plan(baud, (int)s_setup.has_fifo, clk, want_vfast, &plan);
+
+    /* ==================================================================== */
+    /*  出せない速度は **適用しない** (現状維持)                             */
+    /*                                                                      */
+    /*  以前は「WARN を出して実効値を適用」だった。それだと FIFO 非搭載機で  */
+    /*  `serial 115200` を打ったとき、2.4576MHz 系では count=1 = 153600bps が */
+    /*  そのまま入る。ホストは 115200 へ移ってしまうので、**戻すための       */
+    /*  `serial 9600` すら届かなくなる** (Codex レビュー blocker 2)。        */
+    /*  ここまでハードウェアには 1 バイトも書いていないので、そのまま戻れば  */
+    /*  いまの設定が生き残る。                                              */
+    /*                                                                      */
+    /*  起動時の既定 (SYS_SERIAL_BAUD = 9600) は 1.9968MHz / 2.4576MHz の    */
+    /*  どちらでも exact なので、この分岐を通らない。                        */
+    /* ==================================================================== */
+    if (plan.mode == SER_MODE_COMPAT && !plan.exact) {
+        keep = s_setup.actual;
+        if (ser_initialized) {
+            irq_enable(4);   /* いまの設定を生かしたままにする */
+        }
+        irq_restore(irqf);
+        if (ser_initialized) {
+            kprintf(0x0E,
+                    "[ser] refuse %ubps: 8253 では %ubps になる (現状維持 %ubps)\n",
+                    (u32)baud, (u32)plan.actual, (u32)keep);
+        } else {
+            kprintf(0x0E,
+                    "[ser] refuse %ubps: 8253 では %ubps になる (未初期化のまま)\n",
+                    (u32)baud, (u32)plan.actual);
+        }
+        return SER_INIT_REFUSED;
+    }
+
+    /* ---- ここから実際に書く ---- */
+    outp(SER_MASK, 0x00);   /* 全割り込みマスク */
 
     /* ---- いまのモードから抜ける ----
      * V･FAST / FIFO から互換へ戻すときは **8251 を触る前に** 013Ah bit7 と
@@ -235,19 +296,6 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     /* TxRDY を待つ予算は **実効速度** から決める (要求値ではない)。 */
     s_tx_budget_us = serial_tx_budget_us(s_setup.actual);
 
-    if (plan.mode == SER_MODE_VFAST) {
-        kprintf(0x0A, "[ser] %ubps (V-FAST div %u, FIFO)\n",
-                (u32)s_setup.actual, (u32)plan.div);
-    } else if (s_setup.exact) {
-        kprintf(0x0A, "[ser] %ubps (clk %uHz, count %u)%s\n",
-                (u32)baud, (u32)clk, (u32)plan.count,
-                s_setup.has_fifo ? " [FIFO available]" : "");
-    } else {
-        kprintf(0x0E,
-                "[ser] WARN %ubps は出せない: 実効 %ubps (clk %uHz, count %u)\n",
-                (u32)baud, (u32)s_setup.actual, (u32)clk, (u32)plan.count);
-    }
-
     /* ---- 8253 カウンタ#2 (互換モードだけ) ----
      * V･FAST 中は 013Ah bit7 がカウンタ#2 出力を無効にするので触らない
      * (資料 013Ah の解説)。互換へ戻すときはこの経路が必ず通るので、
@@ -281,8 +329,12 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     /* ---- 受信割り込みを有効化 ----
      * **資料に FIFO モードでの割り込みマスクの記述は無い。** 0136h は
      * 「割り込み参照」で、許可/禁止のレジスタではない。NP21/W も 0035h
-     * 以外でマスクしていないので、両モードとも従来どおり 0035h を使う。 */
-    outp(SER_MASK, IEN_RX);
+     * 以外でマスクしていないので、両モードとも従来どおり 0035h を使う。
+     * ISR 末尾の再許可は s_mask_ien を書くので、ここで決めた値と食い違わない
+     * (直値を書いていたころは、モードごとにマスクを変えた瞬間に ISR が
+     * 1 回目の受信でそれを踏み潰す形になっていた)。 */
+    s_mask_ien = IEN_RX;
+    outp(SER_MASK, s_mask_ien);
 
     /* ---- PIC IRQ4 有効化 ---- */
     irq_enable(4);
@@ -291,7 +343,23 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     outp(SYSPORT_C_BSR, BSR_BUZ_ON);  /* NP21/W: BSR_BUZ_ON = BUZ OFF */
 
     ser_initialized = 1;
-    return (plan.mode == SER_MODE_VFAST) ? 0 : -1;
+    rc = (plan.mode == SER_MODE_VFAST) ? SER_INIT_VFAST : SER_INIT_COMPAT;
+
+    /* ---- 危険区間はここまで。IF を元へ戻す ---- */
+    irq_restore(irqf);
+
+    /* **報告は区間の外で。** rshell 中はこの kprintf がシリアルへも流れ、
+     * `serial_putchar` が予算を使い切ると `_halt()` する ([V4] の報告より
+     * 先に、IF=0 の hlt で止まらないことが要る)。 */
+    if (plan.mode == SER_MODE_VFAST) {
+        kprintf(0x0A, "[ser] %ubps (V-FAST div %u, FIFO)\n",
+                (u32)s_setup.actual, (u32)plan.div);
+    } else {
+        kprintf(0x0A, "[ser] %ubps (clk %uHz, count %u)%s\n",
+                (u32)baud, (u32)clk, (u32)plan.count,
+                s_setup.has_fifo ? " [FIFO available]" : "");
+    }
+    return rc;
 }
 
 void serial_init(unsigned long baud)
@@ -378,8 +446,10 @@ void serial_irq_handler(void)
         (void)inp(SER_FIFO_IIR);
     }
 
+    /* 再許可は **初期化が決めた値** を書く。直値 IEN_RX だと、将来モードごとに
+     * マスクを変えたときに ISR が 1 回目の受信でそれを踏み潰す。 */
     outp(SER_MASK, 0x00);
-    outp(SER_MASK, IEN_RX);
+    outp(SER_MASK, s_mask_ien);
 }
 
 /* ======================================================================== */

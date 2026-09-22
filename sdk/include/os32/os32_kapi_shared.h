@@ -538,6 +538,26 @@ typedef struct {
 #define O_EXCL      KAPI_O_EXCL
 #endif
 
+/* ======================================================================== */
+/*  シリアルの初期化とモード (KAPI v56)                                     */
+/*                                                                          */
+/*  `serial_init_vfast` の戻り値と `serial_get_status` の `mode`。          */
+/*  **カーネル (drivers/serial_plan.h) とユーザランド (userland/shell) の   */
+/*  両方が同じ値を見る必要がある** ので、共有の契約ヘッダに置く — 片方に    */
+/*  写すと、ずれた日に `serial 115200` の分岐がそっくり狂う ([C4])。        */
+/*                                                                          */
+/*  **SER_INIT_REFUSED は「何もしなかった」。** 8253 でちょうど出せない     */
+/*  速度は適用せず、いまの設定を維持する。ずれた実効値を黙って入れると、    */
+/*  FIFO 非搭載機で `serial 115200` を打ったときに 153600bps が入り、       */
+/*  ホストが 115200 へ移ったきり**戻すための `serial 9600` も届かなくなる**。 */
+/* ======================================================================== */
+#define KAPI_SER_MODE_COMPAT   0   /* 8251 + 8253 カウンタ#2 (0030h/0032h) */
+#define KAPI_SER_MODE_VFAST    1   /* FIFO + V･FAST (0130h/0132h/013Ah)    */
+
+#define KAPI_SER_INIT_VFAST    0   /* V･FAST に入った */
+#define KAPI_SER_INIT_COMPAT (-1)  /* 互換モードで初期化した */
+#define KAPI_SER_INIT_REFUSED (-2) /* 出せない速度 → 適用しなかった (現状維持) */
+
 /* シーク起点 */
 #define SEEK_SET    0
 #define SEEK_CUR    1

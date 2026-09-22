@@ -76,7 +76,7 @@ OS32カーネルは内蔵シェルを持たず、起動時に外部プログラ�
 
 | コマンド | 書式 | 説明 |
 |---------|------|------|
-| `serial` | `serial [baud]` | 引数なし = 現在の設定 (mode / 実効速度 / FIFO の有無) を表示。`serial 9600` = 互換モードで初期化 + SerialFS マウント、`serial 115200` = V･FAST (FIFO 搭載機のみ。票 TASK_SERIAL_VFAST) |
+| `serial` | `serial [baud]` | 引数なし = 現在の設定 (mode / 実効速度 / FIFO の有無) を表示。`serial 9600` = 互換モードで初期化 + SerialFS マウント、`serial 115200` = V･FAST (FIFO 搭載機のみ)。**出せない速度は適用せず拒否する**。rshell 中の切替は 5 秒無音で元の速度へ自動で戻る (票 TASK_SERIAL_VFAST) |
 | `terminal` | `terminal` | ターミナルモード (ESCで終了) |
 | `rshell` | `rshell` | リモートシェルモード開始 (ESCで終了) |
 | `send` | `send TEXT...` | RS-232C文字列送信 |

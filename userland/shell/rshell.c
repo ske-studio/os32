@@ -2,6 +2,7 @@
 #include "config.h"
 #include <stdlib.h>
 #include "save/libos32save.h"   /* save_crc32 — CRC32 は既存実装を使う */
+#include "serial_watchdog.h"    /* 切替後に会話が続いているかの判定 (純粋) */
 
 /* ======================================================================== */
 /*  シリアル・リモート連携モジュール (rshell.c)                             */
@@ -24,6 +25,69 @@ static u8 xfer_buf[4096];
 #define HD_BUF_SIZE (256u * 1024u)
 static u8 hd_buf[HD_BUF_SIZE];
 
+/* ------------------------------------------------------------------------ */
+/*  切替後の番犬 (Codex レビュー blocker 2b)                                 */
+/*                                                                           */
+/*  `serial N` で速度を上げても、**ホストが N で開き直せたかはゲストには     */
+/*  分からない**。013Ah が効かない機種、ケーブルが速度に耐えない、ホスト側の  */
+/*  開き直しが失敗した — どれでも「こちらは N、ホストは別の速度」になり、     */
+/*  戻すための `serial 9600` すら届かない。                                  */
+/*                                                                           */
+/*  そこで切替直後に番犬を仕掛け、**期限内に 1 バイトも受信しなければ         */
+/*  直前の設定へ自力で戻す**。判定そのものは serial_watchdog.c (純粋、        */
+/*  ホスト試験あり)。ここは tick と受信の数え方、戻し方だけを持つ。          */
+/* ------------------------------------------------------------------------ */
+static int  ser_wd_armed = 0;       /* 1 = 足並みの確認待ち */
+static u32  ser_wd_start = 0;       /* 切り替えた tick */
+static u32  ser_wd_seen  = 0;       /* 切替後に受け取ったバイト数 */
+static u32  ser_wd_prev_mode = 0;   /* 戻し先: SER 互換(0) / V-FAST(1) */
+static u32  ser_wd_prev_baud = 0;   /* 戻し先: 速度 */
+
+static void ser_wd_arm(u32 prev_mode, u32 prev_baud)
+{
+    ser_wd_armed = 1;
+    ser_wd_start = g_api->get_tick();
+    ser_wd_seen  = 0;
+    ser_wd_prev_mode = prev_mode;
+    ser_wd_prev_baud = prev_baud;
+}
+
+/* 受信を 1 バイト見た。**番犬が仕掛かっているときだけ数える。** */
+static void ser_wd_saw_byte(void)
+{
+    if (ser_wd_armed) ser_wd_seen++;
+}
+
+/* rshell の待ちループから毎周呼ぶ。戻り 1 = 速度を戻した。 */
+static int ser_wd_poll(void)
+{
+    int d;
+
+    if (!ser_wd_armed) return 0;
+    d = serial_watchdog_decide((unsigned long)(g_api->get_tick() - ser_wd_start),
+                               (unsigned long)ser_wd_seen);
+    if (d == SER_WD_WAIT) return 0;
+
+    ser_wd_armed = 0;
+    if (d == SER_WD_LINKED) return 0;
+
+    /* 無音のまま期限切れ → 元へ戻す。**戻したことを画面にも残す** ([V4])。
+     * 互換へ戻すのが普通 (起動時の 9600)。V･FAST から V･FAST へ戻すことは
+     * 今のところ無いが、記録した通りに戻す。 */
+    if (ser_wd_prev_mode == KAPI_SER_MODE_COMPAT) {
+        g_api->serial_init(ser_wd_prev_baud);
+    } else {
+        (void)g_api->serial_init_vfast(ser_wd_prev_baud);
+    }
+    g_api->kprintf(ATTR_YELLOW,
+                   "[ser] no traffic after switch: reverted to %ubps\n",
+                   ser_wd_prev_baud);
+    /* 戻した速度でホストへ EOT を 1 つ返す。ホストは切替に失敗したあと
+     * 元の速度へ開き直して待っているので、これが「戻したよ」の合図になる。 */
+    g_api->serial_putchar(0x04);
+    return 1;
+}
+
 /* 引数なしの `serial` が出す現在の設定。**初期化はしない。**
  * 速度を変えるのは `serial <baud>` だけにして、「見るだけ」と「切り替える」を
  * 分ける (V･FAST への切り替えは回線が化けるので、うっかり打てない方がよい)。 */
@@ -38,7 +102,7 @@ static void serial_show_status(void)
     }
     (void)g_api->serial_get_status(&mode, &baud, &fifo);
     g_api->kprintf(ATTR_CYAN, "RS-232C: mode=%s baud=%u FIFO=%s\n",
-                   mode ? "V-FAST" : "compat",
+                   mode == KAPI_SER_MODE_VFAST ? "V-FAST" : "compat",
                    baud, fifo ? "yes" : "no");
     if (!fifo) {
         g_api->kprintf(ATTR_YELLOW, "%s",
@@ -50,7 +114,10 @@ static int cmd_serial(int argc, char **argv)
 {
     int ret;
     int vfast;
+    int had;
     u32 baud;
+    u32 prev_mode = 0;
+    u32 prev_baud = 0;
 
     /* 引数なし = 状態表示。**初期化もマウントもしない。** */
     if (argc < 2) {
@@ -73,10 +140,14 @@ static int cmd_serial(int argc, char **argv)
         baud = (u32)v;
     }
 
+    /* 戻し先として **いまの設定** を控えてから切り替える。 */
+    (void)g_api->serial_get_status(&prev_mode, &prev_baud, (u32 *)0);
+    had = g_api->serial_is_initialized();
+
     if (baud == (u32)SYS_SERIAL_BAUD) {
         /* 既定速度は従来経路 = 互換モードへ戻す口でもある。 */
         g_api->serial_init(baud);
-        vfast = -1;
+        vfast = KAPI_SER_INIT_COMPAT;
     } else {
         vfast = g_api->serial_init_vfast(baud);
     }
@@ -84,14 +155,38 @@ static int cmd_serial(int argc, char **argv)
     /* **「初期化した」と言い切らない。** 分周比が割り切れないと実際の速度は
      * ずれ、その事実はカーネルが直前に `[ser] ...` として出している。
      * ここで要求値を成功として書くと、その行と矛盾する ([V4])。 */
+    if (vfast == KAPI_SER_INIT_REFUSED) {
+        /* カーネルが**適用しなかった**。速度は変わっていないので、
+         * ホストとの足並みも崩れていない = 番犬は要らない。 */
+        g_api->kprintf(ATTR_RED,
+                       "serial: %ubps は出せないので変更しませんでした "
+                       "(理由は上の [ser] refuse 行)\n", baud);
+        serial_show_status();
+        return SH_STATUS_ERROR;
+    }
+
     g_api->kprintf(ATTR_GREEN, "RS-232C init: requested %ubps "
                                "(actual rate is in the [ser] line above)\n", baud);
-    if (vfast != 0 && baud != (u32)SYS_SERIAL_BAUD) {
+    if (vfast != KAPI_SER_INIT_VFAST && baud != (u32)SYS_SERIAL_BAUD) {
         /* 頼んだのに V･FAST へ入れなかった = FIFO 非搭載か表に無い速度。 */
         g_api->kprintf(ATTR_YELLOW, "%s",
                        "  (V-FAST not available: fell back to 8253 divisor)\n");
     }
     serial_show_status();
+
+    /* **速度が実際に変わったときだけ番犬を仕掛ける。**
+     * 初期化前 (had == 0) は戻し先が無いので仕掛けない — 起動経路の
+     * `serial_init(9600)` でいきなり番犬が回ることを避ける。 */
+    if (had && prev_baud != 0) {
+        u32 now_baud = 0;
+        (void)g_api->serial_get_status((u32 *)0, &now_baud, (u32 *)0);
+        if (now_baud != prev_baud) {
+            ser_wd_arm(prev_mode, prev_baud);
+            g_api->kprintf(ATTR_CYAN,
+                           "  (watchdog: revert to %ubps if silent for %u ticks)\n",
+                           prev_baud, (u32)SER_SWITCH_WATCHDOG_TICKS);
+        }
+    }
 
     /* serialfs 自動マウント (/host にマウント) */
     ret = g_api->sys_mount("/host", "COM1", "serialfs");
@@ -191,9 +286,17 @@ static int cmd_rshell(int argc, char **argv)
         for (;;) {
             ch = g_api->kbd_trygetchar();
             if (ch >= 0) {
+                /* **1 バイトでも届いた = ホストと足並みが揃っている。**
+                 * 番犬を解除するのはここ (ESC で抜ける前に数える — ESC は
+                 * 手元のキーボードからも来るが、鳴っているなら会話は生きて
+                 * いるので、どちらでも解除してよい)。 */
+                ser_wd_saw_byte();
                 if (ch == 0x1B) goto rshell_exit;
                 break;
             }
+            /* **切替に失敗していないか見る。** 期限まで無音なら元の速度へ
+             * 戻して EOT を返す (ホストはそちらで待っている)。 */
+            (void)ser_wd_poll();
             {
                 /* rshell コマンド待ち。sys_halt でアイドル時の get_tick
                  * 連打 (実測 311k/s) を止める。SER 受信 IRQ でも起きる。 */

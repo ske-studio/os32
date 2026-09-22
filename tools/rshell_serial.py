@@ -17,10 +17,14 @@ Windows 側の Python (pyserial 入り) で動かす:
 ゲストは 9600 の互換モードで起動するので、
   1. --baud (既定 9600) で開いて `serial N` を送る
   2. **応答は待たない** — その行を書いている途中で速度が変わるので必ず化ける
-  3. ポートを閉じて N で開き直し、`sync` で EOT を待って足並みを揃える
-  4. 以後のコマンドは N で送る
-N が 9600 なら切り替えは行わない。戻すときはゲストに `serial 9600` を送る
-(--fast 9600 ではなく、N で開いた状態から普通に `cmd serial 9600`)。
+  3. ポートを閉じて N で開き直し、**`ver` を投げて EOT まで返るか見る** (5 秒)
+  4. 返れば `linked at N`、以後のコマンドは N で送る
+  5. 返らなければ **元の速度へ戻って `ver` で確かめ**、
+     `fast switch failed, back at 9600` と報告して終了コード 1
+ゲスト側にも番犬があり、**切替後 5 秒 (500 tick) 無音なら自力で元へ戻す**
+(userland/shell/serial_watchdog.c)。だから「FIFO 無し」「013Ah が効かない」
+「ケーブルが速度に耐えない」のどれでも会話は 9600 で生き残る。
+N が --baud と同じなら切り替えは行わない。
 """
 import argparse
 import sys
@@ -40,6 +44,14 @@ SPEED_SWITCH_SETTLE_S = 0.5
 # --fast が受ける速度 (drivers/serial_plan.c の表と同じ。V･FAST に入れるのは
 # FIFO 搭載機だけで、入れなければゲストは互換モードのまま = 速度が合わなくなる)。
 FAST_BAUDS = (9600, 14400, 19200, 28800, 38400, 57600, 115200)
+# 切替の確認に使う実コマンド。**副作用が無く、応答が短く、必ず EOT で閉じる**もの。
+PROBE_CMD = "ver"
+# 確認の往復に許す秒数。[V3] の 15 秒は「長いコマンド」の話で、ここは
+# 「速度が合っているか」の判定 — 合っていれば 1 秒で返り、合っていなければ
+# 何秒待っても返らない。5 秒はゲスト側の番犬 (500 tick) と同じ尺度。
+SWITCH_PROBE_TIMEOUT_S = 5.0
+# 失敗したあと、ゲストの番犬が元の速度へ戻すのを待つ秒数 (番犬は 5 秒 + 余裕)。
+WATCHDOG_WAIT_S = 6.0
 
 
 def open_port(name, baud):
@@ -70,12 +82,31 @@ def send_cmd(port, line, timeout_s):
     return body.decode("utf-8", errors="replace"), ok
 
 
-def switch_speed(port_name, open_baud, fast_baud, timeout_s):
-    """ゲストを fast_baud へ切り替えて、その速度で開いたポートを返す。
+def probe(port, timeout_s):
+    """実コマンド (`ver`) を投げて EOT まで返るか見る。
 
-    **応答は待たない。** ゲストは `serial N` の途中で 013Ah を書き換えるので、
-    そこから先のバイトは 9600 側では化ける。EOT も化けて届かないことがあるため、
-    書いて掃けるのを待ったらすぐ閉じ、N で開き直して `sync` で足並みを揃える。
+    **受動待ちでは判定にならない。** 切替の行の EOT は化けて消えることがあり、
+    「来ないこと」は失敗の証拠にも成功の証拠にもならない。こちらから 1 行
+    送って往復が成立するかを見れば、速度が合っているかがそのまま分かる
+    (Codex レビュー blocker 3: 成功時に 15 秒待たされるのもこれで消える)。
+    """
+    try:
+        text, ok = send_cmd(port, PROBE_CMD, timeout_s)
+    except Exception:            # pragma: no cover — 速度不一致で化けたとき
+        return "", False
+    return text, ok
+
+
+def switch_speed(port_name, open_baud, fast_baud, timeout_s):
+    """ゲストを fast_baud へ切り替える。戻り値 (port, baud, ok, note)。
+
+    **切替の応答は待たない。** ゲストは `serial N` の途中で 013Ah を書き換える
+    ので、そこから先のバイトは古い速度側では化ける。書いて掃けるのを待ったら
+    閉じ、N で開き直して **`ver` の往復**で足並みを確かめる。
+
+    往復しなければ元の速度へ開き直してもう一度 `ver` を投げる。ゲスト側の
+    番犬 (userland/shell/serial_watchdog.c) が 5 秒で元へ戻しているはずなので、
+    ここが通れば会話は生き残っている。
     """
     port = open_port(port_name, open_baud)
     try:
@@ -89,12 +120,21 @@ def switch_speed(port_name, open_baud, fast_baud, timeout_s):
         port.close()
 
     port = open_port(port_name, fast_baud)
-    # 切り替え中に化けたバイトを捨てて、rshell が返す EOT を 1 つ拾う。
-    # **EOT が来なくても致命ではない** (切り替えの行の EOT は化けて消えている
-    # ことがある)。呼び手が次のコマンドを送れば改めて EOT が来る。
     port.reset_input_buffer()
-    body, ok = read_until_eot(port, timeout_s)
-    return port, body.decode("utf-8", errors="replace"), ok
+    _, ok = probe(port, SWITCH_PROBE_TIMEOUT_S)
+    if ok:
+        return port, fast_baud, True, "linked at %d" % fast_baud
+
+    # 失敗。ゲストの番犬が元へ戻すのを待ってから、元の速度で確かめる。
+    port.close()
+    time.sleep(WATCHDOG_WAIT_S)
+    port = open_port(port_name, open_baud)
+    port.reset_input_buffer()
+    _, back = probe(port, SWITCH_PROBE_TIMEOUT_S)
+    note = ("fast switch failed, back at %d" % open_baud if back
+            else "fast switch failed AND %d does not answer either"
+                 % open_baud)
+    return port, open_baud, False, note
 
 
 def main():
@@ -130,15 +170,14 @@ def main():
         if args.mode == "sync":
             sys.stderr.write("--fast は cmd / repl で使う (sync は切り替えない)\n")
             return 2
-        port, body, ok = switch_speed(args.port, args.baud, args.fast,
-                                      args.timeout)
-        baud = args.fast
-        if body.strip():
-            sys.stdout.write(body)
-        # **「切り替わった」と言い切らない** ([V4])。EOT が来なくても次の
-        # コマンドで分かるので、ここでは見えた事実だけを書く。
-        print("[fast] %d -> %dbps, EOT %s"
-              % (args.baud, args.fast, "ok" if ok else "not seen"))
+        port, baud, ok, note = switch_speed(args.port, args.baud, args.fast,
+                                            args.timeout)
+        # **「切り替わった」と言い切らない** ([V4]) — `ver` が往復したかだけを
+        # 書く。失敗なら元の速度に戻っているので、そのまま終わる。
+        print("[rshell_serial] %s" % note)
+        if not ok:
+            port.close()
+            return 1
     else:
         port = open_port(args.port, baud)
     try:

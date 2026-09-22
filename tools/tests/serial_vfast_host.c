@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../drivers/serial_plan.c"
+/* 番犬はシェル側 (userland/shell) に住む — 戻す判断をするのは
+ * ゲストのシェルで、カーネルには周期フックが無いため。 */
+#include "../../userland/shell/serial_watchdog.c"
 
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "FAIL %s:%d: %s\n", __func__, __LINE__, #x); failed++; \
@@ -268,6 +271,98 @@ static void fifo_detect(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  (h) 出せない速度は適用しない (Codex レビュー blocker 2a)            */
+/*                                                                      */
+/*  以前は「WARN を出して実効値を適用」だった。それだと FIFO 非搭載機で  */
+/*  `serial 115200` を打つと 2.4576MHz 系では count=1 = 153600bps が     */
+/*  入ってしまい、ホストは 115200 へ移る。**戻すための `serial 9600`     */
+/*  すら届かなくなる。** 呼び出し側が「適用しない」を選べるように、      */
+/*  serial_plan は exact を必ず立てる/落とす。                           */
+/* ------------------------------------------------------------------ */
+static void refuse_inexact(void)
+{
+    struct serial_plan_out p;
+
+    /* 1.9968MHz の 38400 → 拒否の材料 (exact=0)。実効は 41600。 */
+    serial_plan(38400UL, 0, CLK_1997, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.exact == 0);
+    CHECK(p.actual == 41600UL);
+
+    /* 2.4576MHz の 38400 → そのまま適用してよい (count 4 ちょうど)。 */
+    serial_plan(38400UL, 0, CLK_2458, 0, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.exact == 1);
+    CHECK(p.count == 4);
+
+    /* **FIFO 無しの 115200 は 2.4576MHz でも拒否**。count=1 = 153600 で、
+     * これを黙って入れると会話が二度と戻らない。 */
+    serial_plan(115200UL, 0, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_COMPAT);
+    CHECK(p.exact == 0);
+    CHECK(p.actual == 153600UL);
+    CHECK(p.actual != 115200UL);
+
+    /* 1.9968MHz でも同じ (124800 / 115200 = 1.08 → count 1 → 124800)。 */
+    serial_plan(115200UL, 0, CLK_1997, 1, &p);
+    CHECK(p.exact == 0);
+    CHECK(p.actual == 124800UL);
+
+    /* **FIFO があれば 115200 は exact** = 拒否されない。 */
+    serial_plan(115200UL, 1, CLK_2458, 1, &p);
+    CHECK(p.mode == SER_MODE_VFAST);
+    CHECK(p.exact == 1);
+
+    /* 起動時の既定 9600 は**どちらのクロックでも exact** — 拒否の分岐を
+     * 通らない。ここが崩れると実機が起動時からシリアルを持たなくなる。 */
+    serial_plan(9600UL, 0, CLK_1997, 0, &p);
+    CHECK(p.exact == 1);
+    serial_plan(9600UL, 0, CLK_2458, 0, &p);
+    CHECK(p.exact == 1);
+    serial_plan(9600UL, 1, CLK_1997, 0, &p);
+    CHECK(p.exact == 1);
+    serial_plan(9600UL, 1, CLK_2458, 0, &p);
+    CHECK(p.exact == 1);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (i) 切替後の番犬 (Codex レビュー blocker 2b)                        */
+/* ------------------------------------------------------------------ */
+static void watchdog(void)
+{
+    /* 切替直後。まだ何も来ていないし期限内 → 待つ。 */
+    CHECK(serial_watchdog_decide(0, 0) == SER_WD_WAIT);
+    CHECK(serial_watchdog_decide(1, 0) == SER_WD_WAIT);
+    CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS - 1, 0)
+          == SER_WD_WAIT);
+
+    /* 1 バイトでも来れば足並みが揃った → 解除。 */
+    CHECK(serial_watchdog_decide(0, 1) == SER_WD_LINKED);
+    CHECK(serial_watchdog_decide(10, 1) == SER_WD_LINKED);
+
+    /* 期限まで無音 → 元の設定へ戻す。 */
+    CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 0)
+          == SER_WD_REVERT);
+    CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS + 100, 0)
+          == SER_WD_REVERT);
+
+    /* **受信は期限より先に見る。** 期限ちょうどに応答が届いた場合に
+     * 「無音だった」と読み替えて戻すと、揃った足並みを自分で壊す。 */
+    CHECK(serial_watchdog_decide(SER_SWITCH_WATCHDOG_TICKS, 1)
+          == SER_WD_LINKED);
+    CHECK(serial_watchdog_decide(0xFFFFFFFFUL, 1) == SER_WD_LINKED);
+
+    /* 期限は 5 秒 (PIT 100Hz)。短すぎるとホストが開き直す前に戻ってしまい、
+     * 長すぎると失敗したまま待たされる。 */
+    CHECK(SER_SWITCH_WATCHDOG_TICKS == 500);
+
+    /* 3 つの答えは別の値 (呼び手が待つ/解除/戻すを区別できること)。 */
+    CHECK(SER_WD_WAIT != SER_WD_LINKED);
+    CHECK(SER_WD_WAIT != SER_WD_REVERT);
+    CHECK(SER_WD_LINKED != SER_WD_REVERT);
+}
+
+/* ------------------------------------------------------------------ */
 /*  (g) 実機の筋書き: 9600 起動 → 115200 → 9600 へ戻す                  */
 /* ------------------------------------------------------------------ */
 static void real_hw_story(void)
@@ -316,6 +411,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "tx_budget")) tx_budget();
     else if (!strcmp(argv[1], "status_bits")) status_bits();
     else if (!strcmp(argv[1], "fifo_detect")) fifo_detect();
+    else if (!strcmp(argv[1], "refuse_inexact")) refuse_inexact();
+    else if (!strcmp(argv[1], "watchdog")) watchdog();
     else if (!strcmp(argv[1], "real_hw_story")) real_hw_story();
     else return 2;
     if (failed) return 1;
