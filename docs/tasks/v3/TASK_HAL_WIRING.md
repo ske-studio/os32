@@ -602,7 +602,7 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 | W0 | NP21/W: 合格 (tick 99.3Hz、kselftest)。**実機: 未** |
 | W1 | 合格: ホスト試験 9 本 (dma8237 8 / dma_pool 9 / pci_bind 10 / irq_math 8 / time_math 8 / pit_clock 5 / ring3_str の変異すべて RED)、`make check` 全通過 |
 | W2 | 合格: FD 起動、`[dma] 0439h ff -> ff state=UNREADABLE`、FD へ書いた 5,151B を読み戻して md5 一致。タイムアウト → abort → 再試行の経路は未観測 (NP21/W では起きない) |
-| W3 | 部分: kselftest の `int $0x23` で登録規則・2 巡・DEFERRED・登録数マスク・解除・ストーム 200/201・隔離 sticky を毎起動確認 (187/187)。**LGY-98 が IRQ5 に `irq_register` で結ばれた** (`[lgy98] base 0x10d0 irq 5`) が LAN の通信は未確認。実 IRQ の共有 (2 装置) と V86 中は未。`/api/pic` は読み取り専用 |
+| W3 | 部分: kselftest の `int $0x23` で登録規則・2 巡・DEFERRED・登録数マスク・解除・ストーム 200/201・隔離 sticky を毎起動確認 (187/187)。**実 IRQ (master 5、LGY-98) を確認**: `[lgy98] base 0x10d0 irq 5` で `irq_register` され、`POST /api/net/inject` で ARP を 1 フレーム入れると `irq_lines[5].tick_hits` = 1 / `tick_stamp` 更新、`irq_unexpected` 不変 (= アダプタが HANDLED)、PIC の ISR/IRR は空に戻り IMR 不変。実 IRQ の**共有 (2 装置)**、slave 側 (9)、V86 中は未 (`/api/pic` は読み取り専用で人工のエッジは作れない) |
 | W4 | 合格 (NP21/W): 1 万回で逆行 0 (クランプ 0 回)、CPL=3 の `time_test` で NULL / 範囲交差 (差 0〜3) が負 + 出力不変、差 4 は成功、heap / stack 出力は成功、2000 回で逆行なし。実 PIT の位相待ちは p1=1 の分岐だけ踏めた (0/0 と再試行は未検証)。**位相試験の直後にクランプが 1,002 回**入った = p1=1 (IRR 先) で 1 周期ぶん先に出た値を、続く 1,000 回の読みが追い越すまで押さえた (NP21/W の非原子性、実機での回数は要記録)。**実機の 2.4576MHz は未** |
 | W5 | 合格: カーネル 468KB 中 459.8KB (残り 8.2KB)。増分の内訳は A/B/修正の各報告 (製品コード ≒ 3.6KB + 4.5KB、kselftest は圧縮後 +2.6KB) |
 | W6 | 残件: 82557 の実 IRQ、W7 キャッシュ整合、NE2000 の ISR 内 reset (L-C)、既存出力 KAPI の RO 穴 (TASK_KAPI_OUTPUT_GUARD)、**io_wait() 連打で FD 読みが古くなる (POLICY_DEBUG §4-55、原因未特定)**、p1=1 で 1 周期先に出る値の扱い (クランプで単調だが 10ms 止まる。判定に count を併用する案) |
