@@ -1,6 +1,6 @@
 # TASK_LAN_82557 — 内蔵 LAN (Intel 82557、PCI) で Host Services を動かす
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **着手 (L-A / L-D 並行)**。決裁: §3 の 1 は (b) 推奨案、2 は Ubuntu ノート、3 はスイッチ直結 (ユーザー、2026-09-22)。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **L-A (PCI 列挙、KAPI v58) と L-D (Linux の橋) を着地 (2026-09-22)。次は実機で R1〜R4 を取る回**。決裁: §3 の 1 は (b) 推奨案、2 は Ubuntu ノート、3 はスイッチ直結 (ユーザー、2026-09-22)。
 > ユーザー指示 2026-09-22: 「シリアル転送が実用的な速度になったので、次は内蔵 LAN によるホストサービスの稼働を目指す」
 
 正典: [`PLAN.md`](PLAN.md) §5 (82557 を狙う理由)・§6 (PCI の土台)、[`../v3/PLAN.md`](../v3/PLAN.md) §1 (順序) ・§3 (ドライバの動的読み込み)、
@@ -129,3 +129,14 @@ AF_PACKET の bind と `sendto` は実機の回で確かめる (§5-2)。
 - Configure コマンドの 22 バイト (Linux e100 の既定値を写す) — **リンクが上がるかは実機の PHY 次第** (82557 は外付け PHY、MII 経由。PHY の ID も R2 相当で読む)。
 - 10/100 の自動判別 — 82557 自体は PHY 任せ。スイッチとのネゴシエーションは実機。
 - 実効速度 — L-E で `link_l2_stream` 相当を実機で測る。
+
+## 6. 進捗
+
+| 日付 | 段 | 内容 |
+|---|---|---|
+| 2026-09-22 | L-A | `drivers/pci.c` / `pci_decode.c` (メカニズム #1、bus 0 + ブリッジ配下、32 件の静的表)、`lspci` / `pcidump` (KAPI **v58**: `pci_count` / `pci_get` / `pci_cfg_read32`)、`inpd/outpd` は `platform/pc98/platform_io.h`。判定は 2 値 (`0x80000000` と `0x80FFFFFC` の読み戻し) — 実機で `absent` なら 1 値に緩める。ホスト試験 `check-pci-decode-host` (9 ケース、変異 7 本)。**カーネル 446.9KB / 468KB (残り 21.1KB)**。NP21/W: `[pci] 0 devices`、`lspci: no PCI (mechanism #1 not present)`、kselftest 104/104 |
+| 2026-09-22 | L-D | `tools/lan_bridge.py` (AF_PACKET ↔ FrameStream、標準ライブラリのみ、MAC は透過、`--agent-mac` 照合)。ホスト試験 `check-lan-bridge-host` (9 ケース、変異 5 本、実物の host_agent と L0 往復)。実 NIC は未確認 |
+| 2026-09-22 | 検証 | `make clean` → `make all` → `make external` → `make check` exit 0 (98a0785) |
+
+**次の実機の回 (R1〜R4)**: FD (17:xx 以降のビルド) で起動 → シリアル 115200 で `lspci` と `pcidump 0 <dev> 0` (82557 と C バスブリッヂ、PCMC) を取る。
+`[pci] mech#1 absent` が出たら §6 の 2 値判定を 1 値に緩めて再試行。
