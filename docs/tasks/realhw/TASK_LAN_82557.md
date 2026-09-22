@@ -39,7 +39,7 @@
 | **L-D2** | **Ubuntu 向けのホスト側バックエンド**: `host_agent.py` のクリップボード (`clip.exe`/PowerShell) と印刷 (win32print) は Windows 前提。Linux では `xclip`/`wl-copy` と `lp` (CUPS) に差し替える (無ければ 503、既存の方針どおり) | ホストのみ | Ubuntu 機で `hclip` / `lpr` |
 | **L-E** | **Host Services の疎通**: 実機で `link_selftest` (L0〜L3 相当) → クリップボード / 印刷 / `wget` / TIME | — | 実機 |
 
-L-A と L-D は独立 (並行できる)。L-B は L-A の上、L-C は L-B と同時、L-E は全部の上。
+L-A と L-D は独立 (並行できる)。**L-B の前に結線の土台** ([`../v3/TASK_HAL_WIRING.md`](../v3/TASK_HAL_WIRING.md): 共有 IRQ の動的登録、`dma_alloc`、PCI の結線表) を入れる。L-B は L-A の上、L-C は L-B と同時、L-E は全部の上。
 
 ### 2-1. L-D の使い方 (Ubuntu ノート)
 
