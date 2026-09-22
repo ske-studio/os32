@@ -110,3 +110,8 @@ console の行バッファ化 / `rshell` 中の画面描画を間引く / `sys_w
 | B4 (P2) | 校正が正しくなると `gfx_present_raster` の IF=0 区間が 12〜48ms に伸び、受信と tick を失う | 1 行ごとに IF を戻す |
 
 非 blocker: IF=0 経路のスピン上限のコメント / NP21/W の説明 (ticks=5, rounds=16) / kselftest の校正検査の穴 — 併せて直す。
+
+**往復 4 (47e9680)**: B1〜B4 と非 blocker 3 件を閉じた (コーダー報告)。NP21/W: `serial 115200` → V-FAST → `ver` → `serial 9600`、
+スプラッシュは緑の背景に OS32 ロゴ (ラスタの縞は screenshot では捉えられない)。コーダーの判断で PM が受けたもの:
+`serial_has_data` は KAPI に無いので `serial_trygetchar()` を先に見て由来を判定 / `_flush_dirty_line()` は IF=0 のまま (1 行で有界) /
+overflow で断った行も EOT を返しているので「往復」と数える。実機での再計測 (§3 S5/S6) と Codex 往復 3 は結果待ち。
