@@ -53,4 +53,23 @@ void time_us_from(unsigned int tick, unsigned int count, unsigned int reload,
 
 void time_branch_reset(void);
 
+/* ------------------------------------------------------------------------ */
+/*  単調性のクランプ (票 §1-5 追記)                                          */
+/*                                                                           */
+/*  p1/p2 の挟み込みは「8254 の再ロード」と「8259 の IRR bit0」が原子的に     */
+/*  動くことを前提にしている。**NP21/W はそこを模擬しない** — PIT の count は */
+/*  経過サイクルから計算され、IRQ0 は別立てのタイマ事象で上がるので、         */
+/*    (a) count は新周期に戻っているのに IRR がまだ立っていない → p1=p2=0 で  */
+/*        古い tick と小さな count が組み、**前回より小さい値**になる         */
+/*    (b) IRR が先に立って p1=1 (t+1) なのに count は旧周期の終わり →         */
+/*        いったん (t+2) 相当まで跳び、ISR が走った後の読みで戻る             */
+/*  の 2 つが p1/p2 の検査をすり抜ける。実機でも数百 ns の窓で同じ形になる。   */
+/*                                                                           */
+/*  そこで最後に**前回値でクランプ**する。us < last なら last を返す          */
+/*  (戻り 1 = クランプした。呼び手が回数を数える)。`us == last` は            */
+/*  **クランプではない** — 同じ µs を 2 回読むのは正常なので数えない。        */
+/*  `out` が NULL なら書かないだけ。                                          */
+int time_clamp(unsigned long long us, unsigned long long last,
+               unsigned long long *out);
+
 #endif /* TIME_MATH_H */

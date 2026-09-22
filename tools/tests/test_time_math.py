@@ -34,7 +34,8 @@ TARGET_SRCS = [
     ("kernel/ktime.c", []),
 ]
 
-CASES = ["decide_table", "us_math", "no_u32_overflow", "monotonic"]
+CASES = ["decide_table", "us_math", "no_u32_overflow", "monotonic",
+         "clamp"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -69,6 +70,14 @@ MUTATIONS = [
      "        frac = (unsigned int)(elapsed / (reload / period_us));",
      "端数の割り算を先に約分する (reload / period_us = 1 か 2 に潰れ、"
      "補間が µs ではなく 5〜10ms 刻みになる)"),
+    (r"    if \(us < last\) \{\n        if \(out\) \*out = last;",
+     "    if (us < last) {\n        if (out) *out = us;",
+     "巻き戻りを数えるだけで**押さえない** (NP21/W は 8254 の再ロードと 8259 の "
+     "IRR を原子的に模擬しないので、判定表を正しく通しても 1 万回読みが逆行する)"),
+    (r"    if \(us < last\) \{",
+     "    if (us <= last) {",
+     "同じ µs を 2 回読んだだけでクランプに数える (回数が「模擬の粗さ」の"
+     "指標にならなくなる)"),
 ]
 
 

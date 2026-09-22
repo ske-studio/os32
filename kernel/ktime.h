@@ -27,4 +27,13 @@ extern volatile int time_test_feed_n;
 
 void time_test_feed_clear(void);
 
+/* ------------------------------------------------------------------------ */
+/*  単調性クランプの回数 (**製品の観測点**。試験専用ではない)                */
+/*                                                                           */
+/*  `sys_time_now` が「前回より小さい値」を押さえた回数。0 でないのは         */
+/*  8254 の再ロードと 8259 の IRR が原子的でない機械 (NP21/W は模擬しない)。  */
+/*  kselftest が 1 万回読みの後に表示する。実機での回数は W4 の記録項目。     */
+/*  型は u32 (`unsigned long`) — カーネル内だけで読む。                       */
+extern u32 ktime_clamp_count;
+
 #endif /* __KTIME_H */

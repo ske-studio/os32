@@ -46,6 +46,20 @@ void time_test_feed_clear(void)
     time_test_feed_n = 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/*  単調性の最後の砦 (票 §1-5 追記)                                          */
+/*                                                                           */
+/*  p1/p2 の挟み込みは 8254 の再ロードと 8259 の IRR bit0 が原子的に動くこと  */
+/*  を前提にしている。NP21/W はそこを模擬せず (count は経過サイクルから計算、 */
+/*  IRQ0 は別立てのタイマ事象)、実機でも数百 ns の窓がある。すり抜ける形の    */
+/*  説明は kernel/time_math.h の time_clamp の注記。                         */
+/*                                                                           */
+/*  **書き手はここだけ** — 更新もクランプもスナップショットと同じ irq_save の */
+/*  中で行うので、読み出しの途中で s_last_us が動くことはない。              */
+/* ------------------------------------------------------------------------ */
+static unsigned long long s_last_us = 0;
+u32 ktime_clamp_count = 0;
+
 int sys_time_now(u32 *lo, u32 *hi)
 {
     const struct pit_setup *ps = pit_get_setup();
@@ -100,6 +114,19 @@ int sys_time_now(u32 *lo, u32 *hi)
             rc = 0;
             break;
         }
+    }
+
+    /* 6. 単調性のクランプ (**同じ IF=0 の中で**。単一の書き手)。
+     *    注入中 (time_test_feed_n > 0) は通さない — 境界の count を撃ち分ける
+     *    試験は「わざと前回より小さい値」を作るので、そこをクランプすると
+     *    補間そのものを観測できなくなる。製品経路 (n = 0) では必ず通る。 */
+    if (rc == 0 && time_test_feed_n == 0) {
+        unsigned long long us = ((unsigned long long)out_hi << 32) |
+                                (unsigned long long)out_lo;
+        if (time_clamp(us, s_last_us, &us)) ktime_clamp_count++;
+        s_last_us = us;
+        out_lo = (unsigned int)(us & 0xFFFFFFFFULL);
+        out_hi = (unsigned int)(us >> 32);
     }
     irq_restore(saved);
 
