@@ -485,6 +485,123 @@ static void watchdog(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  (i2) 「往復した 1 行」の資格 — 16 通りの真偽表 (往復 3 ②③)         */
+/*                                                                      */
+/*  4 つ**すべて**が要る。1 つでも欠けたら数えない:                     */
+/*    terminated 改行で終端 / all_serial 全バイトがシリアル由来 /        */
+/*    executed 実行した / eot_sent 応答の EOT を送り終えた               */
+/* ------------------------------------------------------------------ */
+static void line_qualifies(void)
+{
+    int t, a, e, o;
+    int n_true = 0;
+
+    /* 16 通りを総当たりして、**4 つ揃ったときだけ 1** を確かめる。 */
+    for (t = 0; t <= 1; t++) {
+        for (a = 0; a <= 1; a++) {
+            for (e = 0; e <= 1; e++) {
+                for (o = 0; o <= 1; o++) {
+                    int want = (t && a && e && o) ? 1 : 0;
+                    int got = serial_watchdog_line_qualifies(t, a, e, o);
+                    CHECK(got == want);
+                    n_true += got;
+                }
+            }
+        }
+    }
+    /* 16 通りのうち真は 1 つだけ。 */
+    CHECK(n_true == 1);
+
+    /* 名前を付けて、実際に起きる落とし穴を個別に押さえる。 */
+
+    /* ② 化けた 1 バイト + 読み取り空振り = 改行で終わっていない断片。
+     *    数えると、速度不一致で流れ込むゴミで番犬が解除される。 */
+    CHECK(serial_watchdog_line_qualifies(0, 1, 1, 1) == 0);
+    /* ② ESC 中断も同じ (改行を見ていない)。 */
+    CHECK(serial_watchdog_line_qualifies(0, 1, 0, 1) == 0);
+
+    /* ローカルキーが 1 バイトでも混じった行。手元で打っただけで
+     * 「ホストがこちらの声を聞ける」証拠にはならない。 */
+    CHECK(serial_watchdog_line_qualifies(1, 0, 1, 1) == 0);
+
+    /* overflow で断った行 (EOT は返すが実行していない)。 */
+    CHECK(serial_watchdog_line_qualifies(1, 1, 0, 1) == 0);
+
+    /* ③ EOT の送信に失敗した行。`serial_putchar` が TxRDY の予算を
+     *    使い切って諦めた = **相手は応答を受け取っていない**。
+     *    ここを数えると「応答したつもり」で番犬が解除される。 */
+    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 0) == 0);
+
+    /* 4 つ揃った行だけが数えられる。 */
+    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 1) == 1);
+
+    /* 送信結果の値そのもの (呼び手が == KAPI_SER_TX_OK で見る)。 */
+    CHECK(SER_TX_OK == 0);
+    CHECK(SER_TX_DROPPED == -1);
+    CHECK(SER_TX_OK != SER_TX_DROPPED);
+}
+
+/* ------------------------------------------------------------------ */
+/*  (i3) 番犬を仕掛ける位置 — 切替行そのものは数えない (往復 3 ①)      */
+/*                                                                      */
+/*  直す前は `cmd_serial` の中で arm していたので、**切替行の応答の EOT  */
+/*  を送り終えた時点で 1 行目が数えられ**、新速度で一度も通信しないまま  */
+/*  解除されていた = 保険がまったく効かない。                            */
+/*  いまは「切替行の EOT を送り終えた後」に arm するので、数え始めるのは  */
+/*  その次の行から。                                                    */
+/* ------------------------------------------------------------------ */
+static void arm_after_switch(void)
+{
+    struct serial_watchdog w;
+
+    /* 実物の rshell_end_reply と同じ順で回す:
+     *   1. EOT を送る
+     *   2. 資格があれば line_done()
+     *   3. 切替行だったら arm()
+     * 切替行のときは 2 で番犬がまだ下りているので数に入らない。 */
+
+    /* ---- 切替行 (`serial 115200`) ---- */
+    w.armed = 0;
+    w.lines = 0;
+    /* 2: 資格はある (改行終端・シリアル由来・実行した・EOT 成功) が…… */
+    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 1) == 1);
+    serial_watchdog_line_done(&w);
+    /* ……番犬が下りているので数えない。**ここが ① の核心。** */
+    CHECK(w.lines == 0);
+    /* 3: ここで初めて仕掛ける。 */
+    serial_watchdog_arm(&w, 1000UL, 0UL, 9600UL);
+    CHECK(w.armed == 1);
+    CHECK(w.lines == 0);
+    /* 切替直後は当然まだ往復していない。 */
+    CHECK(serial_watchdog_poll(&w, 1000UL) == SER_WD_WAIT);
+
+    /* ---- 次の行 (`ver`) が新速度で往復して初めて解除 ---- */
+    serial_watchdog_line_done(&w);
+    CHECK(w.lines == 1);
+    CHECK(serial_watchdog_poll(&w, 1100UL) == SER_WD_LINKED);
+
+    /* ---- 切替行の EOT が送れなかった場合でも仕掛ける ----
+     * ホストは切替の応答を受け取れていないかもしれず、**そういうときこそ
+     * 保険が要る**。資格が無いので数には入らない。 */
+    w.armed = 0;
+    w.lines = 0;
+    CHECK(serial_watchdog_line_qualifies(1, 1, 1, 0) == 0);
+    serial_watchdog_arm(&w, 2000UL, 0UL, 9600UL);
+    CHECK(w.armed == 1);
+    CHECK(w.lines == 0);
+    /* 新速度で誰も喋らなければ期限で戻る。 */
+    CHECK(serial_watchdog_poll(&w, 2000UL + SER_SWITCH_WATCHDOG_TICKS)
+          == SER_WD_REVERT);
+
+    /* ---- 切替の後に断片しか来なければ戻る (②と①の組み合わせ) ---- */
+    serial_watchdog_arm(&w, 3000UL, 0UL, 9600UL);
+    /* 化けた 1 バイトの断片: 資格が無いので line_done を呼ばない。 */
+    CHECK(serial_watchdog_line_qualifies(0, 1, 0, 1) == 0);
+    CHECK(serial_watchdog_poll(&w, 3000UL + SER_SWITCH_WATCHDOG_TICKS)
+          == SER_WD_REVERT);
+}
+
+/* ------------------------------------------------------------------ */
 /*  (g) 実機の筋書き: 9600 起動 → 115200 → 9600 へ戻す                  */
 /* ------------------------------------------------------------------ */
 static void real_hw_story(void)
@@ -536,6 +653,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "fifo_detect")) fifo_detect();
     else if (!strcmp(argv[1], "refuse_inexact")) refuse_inexact();
     else if (!strcmp(argv[1], "watchdog")) watchdog();
+    else if (!strcmp(argv[1], "line_qualifies")) line_qualifies();
+    else if (!strcmp(argv[1], "arm_after_switch")) arm_after_switch();
     else if (!strcmp(argv[1], "real_hw_story")) real_hw_story();
     else return 2;
     if (failed) return 1;

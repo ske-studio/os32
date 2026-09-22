@@ -26,7 +26,7 @@ static u8 xfer_buf[4096];
 static u8 hd_buf[HD_BUF_SIZE];
 
 /* ------------------------------------------------------------------------ */
-/*  切替後の番犬 (Codex レビュー往復 1 blocker 2b / 往復 2 B1・B2)           */
+/*  切替後の番犬 (Codex レビュー往復 1 2b / 往復 2 B1・B2 / 往復 3 ①〜④)     */
 /*                                                                           */
 /*  `serial N` で速度を上げても、**ホストが N で開き直せたかはゲストには     */
 /*  分からない**。013Ah が効かない機種、ケーブルが速度に耐えない、ホスト側の  */
@@ -36,51 +36,49 @@ static u8 hd_buf[HD_BUF_SIZE];
 /*  そこで切替直後に番犬を仕掛け、**期限内に往復が成立しなければ直前の設定へ  */
 /*  自力で戻す**。判定と状態は serial_watchdog.c (純粋、ホスト試験あり)。     */
 /*                                                                           */
-/*  ⚠ **解除は「1 バイト受信」ではなく「往復の成立」** (B2)。新速度で `ver`  */
-/*  は届いたのに応答の EOT が落ちた場合、受信で解除するとゲストは新速度の    */
-/*  まま・ホストは旧速度へ戻り、二度と合わなくなる。化けたバイトやローカルの  */
-/*  キー入力でも解除されてしまう。だから数えるのは                            */
-/*  **「シリアル由来の有効な 1 行を処理し、その EOT を送り終えた」** ときだけ。 */
+/*  ⚠ 数えるのは **「切替が完了した後に届いた、改行で終端された、全バイトが  */
+/*  シリアル由来の行を実行し、その応答の EOT の送信に成功した」** ときだけ。  */
+/*  1 つでも欠けると保険が効かない場面が残る:                                */
+/*    - 切替行そのものを数えると、新速度で一度も通信しないまま解除される (①) */
+/*    - 断片や ESC 中断を数えると、化けた 1 バイトで解除される (②)           */
+/*    - EOT の送信失敗を数えると、「応答したつもり」で解除される (③)         */
+/*    - ローカルキーを数えると、手元で打っただけで解除される                 */
 /* ------------------------------------------------------------------------ */
 static struct serial_watchdog ser_wd;
 
-/* **この行にシリアル由来のバイトがあったか。** ローカルのキーボードだけで
- * 打たれた行は「ホストがこちらの声を聞ける」証拠にならないので数えない。
- * 由来の判定は rsh_getch() が 1 か所で行う。 */
-static int rsh_line_from_serial;
+/* ---- いま読んでいる 1 行の素性 (rshell の 1 周ごとに畳む) ---- */
+static int rsh_line_all_serial;  /* 1 = ここまでの全バイトがシリアル由来 */
+static int rsh_line_terminated;  /* 1 = 改行で終端した (断片ではない) */
+static int rsh_line_executed;    /* 1 = 実行した (断った行ではない) */
+
+/* 切替行の後始末。`cmd_serial` が速度を変えたらここに積み、**その行の応答の
+ * EOT を送り終えてから**番犬を仕掛ける (①)。`cmd_serial` の中で仕掛けると
+ * 切替行そのものが 1 行目に数えられ、新速度で一度も通信しないまま解除される。 */
+static int rsh_switch_pending;
+static u32 rsh_switch_prev_mode;
+static u32 rsh_switch_prev_baud;
 
 /* ------------------------------------------------------------------------ */
-/*  rsh_getch — rshell の入力読み出しは **必ずここを通す** (B1)              */
+/*  rsh_getch — rshell の入力読み出しは **必ずここを通す** (往復 2 B1)       */
 /*                                                                           */
-/*  直す前は行頭の先読み・`read_rest`・内側の待ちループがそれぞれ直接        */
-/*  `kbd_trygetchar()` を呼んでいて、**先読み経路だけ数え損ねていた**。       */
-/*  ホストの `ver\n` が切替コマンドの終了処理中に届くと、`ver` は正常に返る   */
-/*  のに番犬は「無音」と見て 500 tick 後に旧速度へ戻していた。               */
-/*                                                                           */
-/*  由来の判定: **シリアルを自分で先に見る**。`kbd_trygetchar()` は rshell   */
-/*  中 (`rshell_active`) まったく同じ順で「シリアル → cooked リング」を見る  */
-/*  (drivers/kbd.c) ので、**読み出しの順番は変わらない**。違うのは「どちらから */
-/*  来たか」がここで分かることだけ。`serial_has_data()` を先に覗く手もあるが、 */
-/*  KAPI に無いうえ覗いてから取るまでに 1 バイト届くと取り違える。            */
-/*                                                                           */
-/*  ⚠ GUI モード中 (`kbd_gui_mode`) の `kbd_trygetchar()` は注入リングだけを */
-/*  見てシリアルを無視する。rshell は CUI の常駐シェルからしか起動しないので  */
-/*  ここには来ないが、GUI から rshell を動かすようになったら見直すこと。      */
+/*  **シリアルは 1 回しか読まない** (往復 3 ④)。以前は                       */
+/*  `serial_trygetchar()` → 空なら `kbd_trygetchar()` と 2 度読んでいたが、   */
+/*  `kbd_trygetchar()` は rshell 中シリアルも見るので、**2 回の読みのあいだに */
+/*  届いたバイトはローカル扱いになって由来の印を落としていた**。              */
+/*  いまはローカル側を `kbd_trygetchar_local()` (KAPI v57、cooked リングだけ) */
+/*  にしたので、どちらの口から来たかが 1 回の読みで確定する。                 */
+/* ------------------------------------------------------------------------ */
 static int rsh_getch(void)
 {
     int ch = g_api->serial_trygetchar();
 
-    if (ch >= 0) {
-        rsh_line_from_serial = 1;
-        return ch;
-    }
-    return g_api->kbd_trygetchar();
-}
+    if (ch >= 0) return ch;              /* シリアル由来 */
 
-static void ser_wd_arm(u32 prev_mode, u32 prev_baud)
-{
-    serial_watchdog_arm(&ser_wd, (unsigned long)g_api->get_tick(),
-                        (unsigned long)prev_mode, (unsigned long)prev_baud);
+    ch = g_api->kbd_trygetchar_local();  /* ローカルだけ — シリアルは見ない */
+    if (ch >= 0) {
+        rsh_line_all_serial = 0;
+    }
+    return ch;
 }
 
 /* rshell の待ちループから毎周呼ぶ。戻り 1 = 速度を戻した。 */
@@ -102,7 +100,7 @@ static int ser_wd_poll(void)
                    (u32)ser_wd.prev_baud);
     /* 戻した速度でホストへ EOT を 1 つ返す。ホストは切替に失敗したあと
      * 元の速度へ開き直して待っているので、これが「戻したよ」の合図になる。 */
-    g_api->serial_putchar(0x04);
+    (void)g_api->serial_putchar(0x04);
     return 1;
 }
 
@@ -192,14 +190,19 @@ static int cmd_serial(int argc, char **argv)
     }
     serial_show_status();
 
-    /* **速度が実際に変わったときだけ番犬を仕掛ける。**
+    /* **速度が実際に変わったときだけ番犬を仕掛ける** — ただし仕掛けるのは
+     * ここではなく **この行の応答の EOT を送り終えた後** (rshell_end_reply)。
+     * ここで仕掛けると **切替行そのものが 1 行目に数えられ**、新速度で
+     * 一度も通信しないまま解除されてしまう (Codex レビュー往復 3 ①)。
      * 初期化前 (had == 0) は戻し先が無いので仕掛けない — 起動経路の
      * `serial_init(9600)` でいきなり番犬が回ることを避ける。 */
     if (had && prev_baud != 0) {
         u32 now_baud = 0;
         (void)g_api->serial_get_status((u32 *)0, &now_baud, (u32 *)0);
         if (now_baud != prev_baud) {
-            ser_wd_arm(prev_mode, prev_baud);
+            rsh_switch_pending = 1;
+            rsh_switch_prev_mode = prev_mode;
+            rsh_switch_prev_baud = prev_baud;
             g_api->kprintf(ATTR_CYAN,
                            "  (watchdog: revert to %ubps unless a command "
                            "round-trips within %u ticks)\n",
@@ -260,27 +263,47 @@ static int cmd_terminal(int argc, char **argv)
  * 以後のコマンドが全滅する (票 §2-2)。 */
 static void rshell_end_reply(void)
 {
+    int eot_sent;
+
     g_api->buz_off();
     {
         u32 wait_end = g_api->get_tick() + 1;
         while (g_api->get_tick() < wait_end) g_api->sys_halt();
     }
-    g_api->serial_putchar(0x04);
+    /* **EOT の送信が成功したかを見る** (Codex レビュー往復 3 ③)。
+     * 予算切れで諦めていたら「応答したつもり」であって往復していない。 */
+    eot_sent = (g_api->serial_putchar(0x04) == KAPI_SER_TX_OK);
 
     /* ======================================================================
-     *  **番犬を解除する唯一の場所** (Codex レビュー B2)
+     *  **番犬を解除する唯一の場所** (往復 2 B2)
      *
-     *  ここへ来たということは「1 行受け取った → 実行した → EOT を送り終えた」
-     *  = 往復が成立した。受信だけで解除すると、新速度で `ver` は届いたのに
-     *  応答の EOT が落ちた場合にゲストは新速度のまま・ホストは旧速度へ戻り、
-     *  二度と合わなくなる。
-     *
-     *  **シリアル由来の行だけ**数える。ローカルのキーボードで打たれた行は
-     *  「ホストがこちらの声を聞ける」証拠にならない。由来は rsh_getch() が
-     *  1 か所で立てる (B1: 行頭の先読み経路だけ数え損ねていた)。
+     *  数えるのは 4 つ揃った行だけ (判定は serial_watchdog.c の純粋関数):
+     *    改行で終端 / 全バイトがシリアル由来 / 実行した / EOT を送り終えた
+     *  受信だけで解除すると、新速度で `ver` は届いたのに応答の EOT が落ちた
+     *  場合にゲストは新速度のまま・ホストは旧速度へ戻り、二度と合わなくなる。
      * ==================================================================== */
-    if (rsh_line_from_serial) {
+    if (serial_watchdog_line_qualifies(rsh_line_terminated,
+                                       rsh_line_all_serial,
+                                       rsh_line_executed,
+                                       eot_sent)) {
         serial_watchdog_line_done(&ser_wd);
+    }
+
+    /* ======================================================================
+     *  **番犬を仕掛ける唯一の場所** (往復 3 ①)
+     *
+     *  切替行の応答の EOT を送り終えた「後」。ここより前で仕掛けると
+     *  切替行そのものが 1 行目に数えられ、新速度で一度も通信しないまま
+     *  解除される。**切替行自身は数えない** — 上の line_done は arm より
+     *  先に走るが、そのとき番犬はまだ下りているので数に入らない。
+     *  EOT が送れなかったときも仕掛ける: ホストは切替の応答を受け取れて
+     *  いないかもしれず、**そういうときこそ保険が要る**。
+     * ==================================================================== */
+    if (rsh_switch_pending) {
+        rsh_switch_pending = 0;
+        serial_watchdog_arm(&ser_wd, (unsigned long)g_api->get_tick(),
+                            (unsigned long)rsh_switch_prev_mode,
+                            (unsigned long)rsh_switch_prev_baud);
     }
 }
 
@@ -309,7 +332,12 @@ static int cmd_rshell(int argc, char **argv)
         rpos = 0;
         overflow = 0;
         rbuf[0] = '\0';
-        rsh_line_from_serial = 0;
+        /* **行の素性を畳む。** all_serial は「まだローカルが混じっていない」
+         * から始める (1 バイトも読んでいない行は数えない — terminated が
+         * 立たないので資格判定で落ちる)。 */
+        rsh_line_all_serial = 1;
+        rsh_line_terminated = 0;
+        rsh_line_executed = 0;
 
         kch = rsh_getch();
         if (kch == 0x1B) break;
@@ -341,6 +369,9 @@ static int cmd_rshell(int argc, char **argv)
     read_rest:
         /* T10: 上限を超えたら**そこで読み取りを止めない**。止めると残りが
          * 次の入力になって勝手に実行される。行末まで読み捨てて印だけ立てる。 */
+        /* **改行で抜けたときだけ「行」**。読み取り空振り (ch < 0) で抜けた
+         * 断片や ESC 中断は数えない (Codex レビュー往復 3 ②) — 化けた
+         * 1 バイトで番犬が解除されるのを防ぐ。 */
         while (ch >= 0 && ch != '\n' && ch != '\r') {
             if (rpos >= RSHELL_LINE_MAX - 2) overflow = 1;
             else rbuf[rpos++] = (char)ch;
@@ -357,6 +388,7 @@ static int cmd_rshell(int argc, char **argv)
             }
         }
         rbuf[rpos] = '\0';
+        rsh_line_terminated = (ch == '\n' || ch == '\r') ? 1 : 0;
 
         if (overflow) {
             /* 赤字 1 行を出して**実行しない**。EOT は必ず返す (§2-2)。 */
@@ -381,6 +413,7 @@ static int cmd_rshell(int argc, char **argv)
         /* `$?` は execute_command が入れる。**rshell を抜けるとこの handler の
          * 0 で上書きされる** ので、ホストから見るときは「試験コマンド →
          * 完了待ち → `echo $?` を別送信」の順にすること (票 §2-5-1)。 */
+        rsh_line_executed = 1;
         (void)execute_command(rbuf);
 
         /* 印を **1 行ぶんで下ろす** (対話の ui.c と同じ扱い)。

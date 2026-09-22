@@ -61,7 +61,7 @@ PC-9801シリーズ向け 32ビット ベアメタルOS
 | [CONSTRAINTS.md](CONSTRAINTS.md) | **プロジェクト制約の正典** — C/ABI・ハードウェア・KernelAPI・検証・破壊的操作。CLAUDE.md と SOUL.md は ここの規則行を ID で参照する (`make check` が照合) |
 | [POLICY_DEV.md](POLICY_DEV.md) | **開発ポリシー** — コーディング規約、ビルド/デプロイ、Gitコミット、テスト、リリース |
 | [POLICY_DEBUG.md](POLICY_DEBUG.md) | **デバッグポリシー** — 仮説駆動デバッグ、バイナリ反映確認、教訓集、AI協調ルール |
-| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v56 仕様書 — 222エントリテーブル (ヘッダ2 + 関数218 + データフィールド2) + API追加手順 |
+| [KAPI_SPEC.md](KAPI_SPEC.md) | KernelAPI v57 仕様書 — 223エントリテーブル (ヘッダ2 + 関数219 + データフィールド2) + API追加手順 |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | **開発案内** — 作業別の参照先 (読む / 触る / 検証) と、ファイル → 役割 → 仕様のファイル地図。仕様本文は持たない |
 | [ROADMAP.md](ROADMAP.md) | リリースロードマップ (v1.0以降および履歴) |
 | [archive/README.md](archive/README.md) | **アーカイブの運用** — 受入完了した票をどこへどう移すか (`tools/move_docs.py`)、移したあとも守ること。籠の一覧は「ログ」節 |

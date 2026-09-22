@@ -1,4 +1,4 @@
-# KernelAPI v56 仕様書
+# KernelAPI v57 仕様書
 
 外部プログラム (OS32X) がカーネル機能を利用するためのAPIテーブル仕様。
 
@@ -98,6 +98,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | v54 | **実装済み (2026-09-16、継承バグ)** | 覗くだけのキー取得 `kbd_peekkey` 1 本 (slot 214 = 0x360、data_fields は 0x364 / 0x368 へ)。キューを**1 バイトも動かさず**に 次のキーを返す (無ければ -1)。戻り値の形は `kbd_trygetkey` と同じ。`script_exec` の毎行の ESC 監視が `kbd_trygetkey` で打鍵を**取り出して捨てて**いたのを直す。実体は `drivers/kbd.c` (+ `drivers/serial.c` の `serial_peekchar` と `kernel/kbd_inject.c` の `kbd_inject_peek`) | [tasks/shell/INHERITED_BUGS.md](tasks/shell/INHERITED_BUGS.md) |
 | v55 | **実装済み (2026-09-16、$?)** | 終了コードの配線 `exec_last_result` 1 本 (slot 215 = 0x364、data_fields は 0x368 / 0x36C へ)。直前の `exec_run` の結果を**種別 + 値**で返す。種別 (`EXEC_KIND_*`) は畳んだ側が渡すので `exit(-2)` / fault / CTRL+STOP を値ではなく種別で見分けられる。`exec_run` は**すべての return 点で**記録を書くので、起動しなかった場合に前回の記録が残らない。GUI 経路 (`exec_start` / `exec_resume`) の子は記録しない。実体は `exec/exec.c` | [tasks/shell/TASK_EXIT_STATUS.md](tasks/shell/TASK_EXIT_STATUS.md) |
 | v56 | **実装済み (2026-09-22、実機シリアル)** | V･FAST モード `serial_init_vfast` / `serial_get_status` の 2 本 (slot 216 = 0x368、217 = 0x36C、data_fields は 0x370 / 0x374 へ)。FIFO 搭載機 (`0136h` bit6 の反転で判定) で `013Ah` bit7 を立てて **8253 と無関係に** 115200bps まで出す。**起動時の既定 9600 は互換モードのまま** — V･FAST は `serial N` で明示的に入る。併せて `serial_putchar` の TxRDY 待ちを「10ms tick まで寝る」から「1 文字時間 × 2 の予算で `cpu_delay_us` を挟んで見る」へ。実体は `drivers/serial.c` / `drivers/serial_plan.c` | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
+| v57 | **実装済み (2026-09-22、実機シリアル往復 4)** | ローカル打鍵だけの読み口 `kbd_trygetchar_local` 1 本 (slot 218 = 0x370、data_fields は 0x374 / 0x378 へ)。cooked リングだけを見て**シリアルも注入リングも見ない**。rshell の速度切替の番犬が「この 1 バイトはシリアル由来か」を**1 回の読みで**確定できるようにする (2 度読みの窓を消す)。⚠ 番号は PM が着地時に振り直す (同日に L-A も v57 を取得) | [tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) |
 
 調停 (2026-09-06、同日改訂): GUI (K1〜W2) を先に実装するので **v42 = GUI、v43 = ネットワーク Host Services**
 に確定。実装順が入れ替わるときは、着手前にこの表を更新してから版番号を取ること。
@@ -173,7 +174,7 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 | 0x8C | serial_init | `void(u32 baud)` |
 | 0x90 | serial_puts | `void(const char *s)` |
 | 0x94 | serial_getchar | `int(void)` |
-| 0x98 | serial_putchar | `void(u8 ch)` |
+| 0x98 | serial_putchar | `int(u8 ch)` |
 | 0x9C | serial_trygetchar | `int(void)` |
 | 0xA0 | serial_is_initialized | `int(void)` |
 | 0xA4 | exec_run | `int(const char *path)` |
@@ -674,6 +675,42 @@ v46 はそれを**カーネル内の 8KB のリング (シンク)** に溜め、
   模擬しない**ので、分周が合っているかはエミュレータでは確かめられない
   ([tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md))。
 
+### ローカル打鍵だけの読み口 (v57)
+
+| Offset | フィールド | プロトタイプ |
+|--------|-----------|------|
+| 0x370 | kbd_trygetchar_local | `int(void)` |
+
+- **cooked リングだけを見る。** `rshell_active` でもシリアルを見ず、GUI 中の
+  注入リングも見ない (GUI 中の cooked リングは常に空なので `-1`)。
+  取れたら 0..255、無ければ `-1` — 戻り値の形は `kbd_trygetchar` と同じ。
+- **`exec_park_poll` を呼ばない** (WM へ譲らない)。由来を知るためだけの口で、
+  待つ意図は呼び手の側にある。
+- 何のためか: `kbd_trygetchar()` は rshell 中にシリアルも見るので、
+  呼び手は「この 1 バイトがどこから来たか」を知れない。rshell の速度切替の
+  番犬は**シリアル由来の行だけ**を往復の証拠に数えるので、
+  「シリアルを 1 回読む → 空ならローカルを 1 回読む」と書ける口が要る。
+  2 度読みのあいだに届いたバイトが由来の印を落とす窓が消える
+  ([tasks/realhw/TASK_SERIAL_VFAST.md](tasks/realhw/TASK_SERIAL_VFAST.md) 往復 3 ④)。
+- ⚠ **スロット番号と版数は PM が着地時に振り直す** — 同じ日に別レーン
+  (L-A の `pci_*`) も v57 を取っている。
+
+**併せて `serial_putchar` (slot 38 = 0x98) の戻り値を `void` → `int` に広げた。**
+
+| 値 | 意味 |
+|---|---|
+| `0` (`KAPI_SER_TX_OK`) | UART へ書けた |
+| `-1` (`KAPI_SER_TX_DROPPED`) | TxRDY の予算を使い切って諦めた (相手が読んでいない) |
+
+- **スロット番号も引数の並びも変えていない** ([ABI2])。cdecl では戻り値は
+  EAX で返り、呼び手が無視しても害が無いので、**古いバイナリを新しい
+  カーネルで動かしても壊れない** (EAX は呼び手の scratch)。逆向き
+  (新しいバイナリを古いカーネルで) は `build/app.conf` の要求版数が止める。
+- 何のためか: rshell の速度切替の番犬は「応答の EOT を**送り終えた**」ことを
+  往復の証拠にしている。送信を諦めたのに成功と数えると「応答したつもり」で
+  解除してしまう (往復 3 ③)。既存の呼び手 (`userland/lib/rt/dbgserial.c` など)
+  は戻り値を無視してよい。
+
 ### 排他的作成 (v53)
 
 **スロットは増えていない。** `sys_open` に渡せるフラグが 1 つ増え、その意味が
@@ -813,8 +850,8 @@ CPL=3 のポインタは既存のディスパッチャが範囲検証する。
 
 | Offset | フィールド | 型 | 説明 |
 |--------|-----------|------|------|
-| 0x370 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
-| 0x374 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
+| 0x374 | sbrk_heap_limit | `u32` | newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) |
+| 0x378 | shm_base | `u32` | 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット)。`MEM_SHM_BASE` は `__bss_end` 由来で可変なため、ユーザ空間はアドレスをハードコードしてはならない |
 
 ### §4-1 グラフィックスAPI に関する補足
 

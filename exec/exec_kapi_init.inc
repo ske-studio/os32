@@ -34,7 +34,7 @@ extern int __cdecl wrap_sys_rmdir(const char *path);
 extern void __cdecl wrap_serial_init(u32 baud);
 extern void __cdecl wrap_serial_puts(const char *s);
 extern int __cdecl wrap_serial_getchar(void);
-extern void __cdecl wrap_serial_putchar(u8 ch);
+extern int __cdecl wrap_serial_putchar(u8 ch);
 extern int __cdecl wrap_serial_trygetchar(void);
 extern int __cdecl wrap_serial_is_initialized(void);
 extern int __cdecl wrap_exec_run(const char *path);
@@ -216,9 +216,10 @@ extern int __cdecl wrap_kbd_peekkey(void);
 extern int __cdecl wrap_exec_last_result(int *kind, int *code);
 extern int __cdecl wrap_serial_init_vfast(u32 baud);
 extern int __cdecl wrap_serial_get_status(u32 *mode, u32 *baud, u32 *fifo);
+extern int __cdecl wrap_kbd_trygetchar_local(void);
 
 kapi->magic = 0x4B415049UL;
-kapi->version = 56;
+kapi->version = 57;
 
     kapi->gfx_init = wrap_gfx_init;
     kapi->gfx_init_200 = wrap_gfx_init_200;
@@ -438,5 +439,6 @@ kapi->version = 56;
     kapi->exec_last_result = wrap_exec_last_result;
     kapi->serial_init_vfast = wrap_serial_init_vfast;
     kapi->serial_get_status = wrap_serial_get_status;
+    kapi->kbd_trygetchar_local = wrap_kbd_trygetchar_local;
     kapi->sbrk_heap_limit = 0;
     kapi->shm_base = 0;

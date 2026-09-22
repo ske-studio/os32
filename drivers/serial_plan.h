@@ -17,6 +17,15 @@
 
 #include "serial.h"   /* ポート番地とステータスビット (互換 / FIFO の両方) */
 
+#include "os32_kapi_shared.h"
+
+/* ======== 送信 1 バイトの結果 ========
+ * **「送れなかった」を黙って捨てない** ([V4])。rshell の番犬は「応答の EOT を
+ * 送り終えた」ことを往復の証拠にしているので、捨てると「応答したつもり」で
+ * 解除してしまう (Codex レビュー往復 3 ③)。 */
+#define SER_TX_OK       KAPI_SER_TX_OK
+#define SER_TX_DROPPED  KAPI_SER_TX_DROPPED
+
 /* ======== 通信モードと初期化の結果 ========
  * **値の正典は共有の契約ヘッダ** `sdk/include/os32/os32_kapi_shared.h`。
  * カーネルとユーザランド (シェルの `serial` コマンド) の両方が同じ値を
@@ -25,8 +34,6 @@
  * **REFUSED は「何もしなかった」** — ハードウェアには 1 バイトも書いていない
  * ので、いまの設定がそのまま生き残る。呼び手は速度を変えていない前提で
  * 続けてよい (Codex レビュー blocker 2)。 */
-#include "os32_kapi_shared.h"
-
 #define SER_MODE_COMPAT  KAPI_SER_MODE_COMPAT
 #define SER_MODE_VFAST   KAPI_SER_MODE_VFAST
 

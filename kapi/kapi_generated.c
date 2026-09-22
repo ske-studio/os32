@@ -48,7 +48,7 @@ extern int kapi_sys_set_mtime(const char *path, u32 mtime);
 #include "kapi_profile.h"
 
 #ifdef KAPI_PROFILE
-volatile u32 kapi_hits[218];
+volatile u32 kapi_hits[219];
 #endif
 
 /* 各スロットの cdecl 引数バイト数 (固定分)。int 0x80 ディスパッチャが
@@ -272,6 +272,7 @@ const u16 kapi_argsize[KAPI_FUNC_COUNT] = {
     8,  /* exec_last_result */
     4,  /* serial_init_vfast */
     12,  /* serial_get_status */
+    0,  /* kbd_trygetchar_local */
 };
 
 /* 各スロットの固定引数のうちポインタ型のビットマスク (bit k = 引数 k)。
@@ -495,6 +496,7 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0003,  /* exec_last_result: kind,code */
     0x0000,  /* serial_init_vfast */
     0x0007,  /* serial_get_status: mode,baud,fifo */
+    0x0000,  /* kbd_trygetchar_local */
 };
 
 void __cdecl wrap_gfx_init(void)
@@ -707,10 +709,10 @@ int __cdecl wrap_serial_getchar(void)
     return serial_getchar();
 }
 
-void __cdecl wrap_serial_putchar(u8 ch)
+int __cdecl wrap_serial_putchar(u8 ch)
 {
     KAPI_HIT(36);
-    serial_putchar(ch);
+    return serial_putchar(ch);
 }
 
 int __cdecl wrap_serial_trygetchar(void)
@@ -1797,5 +1799,11 @@ int __cdecl wrap_serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
 {
     KAPI_HIT(217);
     return serial_get_status(mode, baud, fifo);
+}
+
+int __cdecl wrap_kbd_trygetchar_local(void)
+{
+    KAPI_HIT(218);
+    return kbd_trygetchar_local();
 }
 

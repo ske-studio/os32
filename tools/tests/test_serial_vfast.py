@@ -37,7 +37,7 @@ TARGET_SRCS = [
 CASES = ["vfast_table", "compat_exact", "compat_inexact", "mode_choice",
          "tx_budget", "tx_budget_ticks", "status_bits", "fifo_detect",
          "refuse_inexact",
-         "watchdog", "real_hw_story"]
+         "watchdog", "line_qualifies", "arm_after_switch", "real_hw_story"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
          "-Wdeclaration-after-statement", "-D__cdecl="]
@@ -101,6 +101,22 @@ MUTATIONS = [
      r"elapsed_ticks >= \(unsigned long\)SER_SWITCH_WATCHDOG_TICKS\) \{",
      "elapsed_ticks >= (unsigned long)SER_SWITCH_WATCHDOG_TICKS * 1000) {",
      "番犬の期限を 1000 倍にする (事実上いつまでも戻さない = 会話が死んだまま)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!terminated\) return 0;",
+     "    if (!terminated) return 1;",
+     "改行で終端していない断片も「行」と数える (化けた 1 バイトで解除される)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!all_serial\) return 0;",
+     "    if (!all_serial) return 1;",
+     "ローカルキーの混じった行も数える (手元で打っただけで解除される)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!executed\) return 0;",
+     "    if (!executed) return 1;",
+     "overflow で断った行も数える (実行していないのに往復したことにする)"),
+    ("userland/shell/serial_watchdog.c",
+     r"    if \(!eot_sent\) return 0;",
+     "    if (!eot_sent) return 1;",
+     "EOT の送信に失敗した行も数える (「応答したつもり」で解除される)"),
     ("userland/shell/serial_watchdog.c",
      r"    if \(!w \|\| !w->armed\) return;\n    w->lines\+\+;",
      "    if (!w) return;\n    w->lines++;",

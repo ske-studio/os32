@@ -86,7 +86,10 @@
 void kbd_init(void);
 int  kbd_getchar(void);     /* ブロッキング: ASCII部のみ返す */
 int  kbd_getkey(void);      /* ブロッキング: 上位=スキャンコード, 下位=ASCII */
-int  kbd_trygetchar(void);  /* ノンブロッキング: -1=なし, >=0 ASCII */
+int  kbd_trygetchar(void);
+/* ローカルの打鍵だけ (シリアルも注入リングも見ない)。無ければ -1。
+ * rshell が「この 1 バイトはシリアル由来か」を知るための口 (往復 3 ④)。 */
+int  kbd_trygetchar_local(void);  /* ノンブロッキング: -1=なし, >=0 ASCII */
 int  kbd_trygetkey(void);   /* ノンブロッキング: -1=なし, >=0 キーコードデータ(u16) */
 int  kbd_peekkey(void);     /* 覗くだけ (取り出さない): -1=なし, >=0 キーコードデータ(u16) */
 int  kbd_has_key(void);     /* バッファにキーがあるか */

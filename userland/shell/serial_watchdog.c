@@ -31,6 +31,25 @@ int serial_watchdog_decide(unsigned long elapsed_ticks,
     return SER_WD_WAIT;
 }
 
+/* ======================================================================== */
+/*  その行を「往復した 1 行」と数えてよいか                                 */
+/*                                                                          */
+/*  4 つ**すべて**が要る。1 つでも欠けたら、番犬にとっては「往復していない」。 */
+/*    terminated : 改行で終端している (断片・ESC 中断を数えない — 往復 3 ②)  */
+/*    all_serial : 全バイトがシリアル由来 (ローカルキーの混入を数えない)     */
+/*    executed   : 実行した (overflow で断った行を数えない)                  */
+/*    eot_sent   : 応答の EOT を送り終えた (諦めた送信を数えない — ③)        */
+/* ======================================================================== */
+int serial_watchdog_line_qualifies(int terminated, int all_serial,
+                                   int executed, int eot_sent)
+{
+    if (!terminated) return 0;
+    if (!all_serial) return 0;
+    if (!executed) return 0;
+    if (!eot_sent) return 0;
+    return 1;
+}
+
 void serial_watchdog_arm(struct serial_watchdog *w, unsigned long tick,
                          unsigned long prev_mode, unsigned long prev_baud)
 {

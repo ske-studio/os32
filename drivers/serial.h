@@ -263,7 +263,13 @@ int serial_init_vfast(unsigned long baud);
  *   fifo: 0136h の判定 (1 = FIFO 搭載機) */
 int serial_get_status(u32 *mode, u32 *baud, u32 *fifo);
 
-void serial_putchar(char c);
+/* 1 バイト送る。**戻り値で成否を返す** (Codex レビュー往復 3 ③)。
+ *   SER_TX_OK      (0) = UART へ書けた
+ *   SER_TX_DROPPED(-1) = TxRDY の予算を使い切って諦めた (相手が読んでいない)
+ * 既存の呼び手は戻り値を無視してよい。KAPI の `serial_putchar` は従来どおり
+ * void で受ける (`kapi/kapi_generated.c` の wrapper が捨てる) ので、
+ * 外部プログラムから見た ABI は変わっていない ([ABI2])。 */
+int serial_putchar(char c);
 void serial_puts(const char *str);
 void serial_puts_polled(const char *str);
 void serial_put_hex32_polled(u32 val);

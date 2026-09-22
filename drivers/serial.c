@@ -534,7 +534,7 @@ int serial_getchar(void)
 /*  そのときは予算の tick が尽きるまで素のスピンになるだけで、待ち時間       */
 /*  そのものは変わらない (これも tick で測る利点)。                          */
 /* ======================================================================== */
-void serial_putchar(char c)
+int serial_putchar(char c)
 {
     u32 start;
     u32 spin;
@@ -552,7 +552,7 @@ void serial_putchar(char c)
         for (;;) {
             if (inp(s_port_cmd) & s_mask_txrdy) {
                 outp(s_port_data, (unsigned)(u8)c);
-                return;
+                return SER_TX_OK;
             }
             if (can_halt) {
                 /* **実時間で測る。** tick_count は PIT の割り込みが進めるので、
@@ -560,7 +560,7 @@ void serial_putchar(char c)
                  * (往復 3: 校正が 1/10 で予算が 200µs に化けていた)。 */
                 if ((u32)(tick_count - start) >= s_tx_budget_ticks) break;
             } else {
-                if (spin >= (u32)SER_TX_SPIN_MAX) return;
+                if (spin >= (u32)SER_TX_SPIN_MAX) return SER_TX_DROPPED;
                 spin++;
             }
             /* ポートを読む間隔を空けるだけ。正確さは要らない。 */
@@ -569,7 +569,10 @@ void serial_putchar(char c)
         /* 予算を使い切った = 相手が読んでいない。次の割り込みまで寝る。 */
         _halt();
     }
-    /* タイムアウト: 送信を諦める */
+    /* タイムアウト: 送信を諦める。**呼び手に知らせる** — rshell の番犬は
+     * 「EOT を送り終えた」ことを往復の証拠にしているので、ここで黙って
+     * 捨てると「応答したつもり」で番犬を解除してしまう (Codex ③)。 */
+    return SER_TX_DROPPED;
 }
 
 /* 文字列送信。

@@ -68,6 +68,8 @@ MUTATION 1..9 すべて RED (どれも実行時。コンパイルエラーに逃
 | `real_hw_story` | 9600 起動 → `serial 115200` (`013Ah` に 0x81) → `serial 9600` で戻す | 票 §3 |
 | `refuse_inexact` | **出せない速度を適用しない**: 1.9968MHz の 38400 は拒否、2.4576MHz の 38400 は count 4 で適用、FIFO 無しの 115200 は**どちらのクロックでも**拒否。起動時の 9600 は両クロックで exact = 拒否の分岐を通らない | Codex レビュー blocker 2a |
 | `watchdog` | 切替後 500 tick **往復なし**なら REVERT、1 行往復すれば LINKED、**往復は期限より先に見る**。仕掛かっていないときは数えない / 答えは 2 度返らない / arm が数を 0 に戻す / NULL で落ちない / tick の巻き戻りで壊れない | 往復 1 blocker 2b + 往復 2 B1・B2 |
+| `line_qualifies` | **「往復した 1 行」の 16 通りの真偽表**。改行終端 / 全バイトがシリアル由来 / 実行した / EOT を送り終えた — 4 つ揃ったときだけ数える | 往復 3 ②③ |
+| `arm_after_switch` | **切替行そのものは数えない**。line_done → arm の順で回し、切替行のときは番犬が下りているので数に入らないこと。EOT が送れなかった切替でも仕掛けること | 往復 3 ① |
 
 ## 資料と NP21/W が食い違ったところ
 
@@ -95,6 +97,22 @@ MUTATION 1..9 すべて RED (どれも実行時。コンパイルエラーに逃
 (`SER_TX_SPIN_MAX` = 20 万) でスピンして諦める。`_halt()` は IF=0 では二度と
 起きないので踏まない。判定には `include/io.h` に足した `_irq_enabled()` を使う
 (`irq_save()` は cli する副作用があり、戻り値は不透明という契約なので使えない)。
+
+## Codex レビュー 往復 3 (47e9680、最終) の 6 件をどう閉じたか
+
+ROLES §5 の 3 往復に達したのでユーザー決裁「もう 1 往復で全部直す」。
+PM が設計を確定し、①〜⑥ を一度に閉じた。
+
+| # | 所見 | 閉じ方 | ホストで見ているか |
+|---|---|---|---|
+| ① (P1) | **切替行 `serial N` そのものが番犬の最初の 1 行に数えられ**、新速度で一度も通信しないまま解除される | arm を `cmd_serial` から **`rshell_end_reply()` の末尾** (切替行の EOT を送り終えた後) へ移した。`cmd_serial` は `rsh_switch_pending` を立てるだけ。line_done は arm より先に走るので**切替行自身は数に入らない** | `arm_after_switch` — 「切替行では数えない」を実物と同じ順で回して固定 |
+| ② (P1) | 改行無しの断片 (化けた 1 バイト + 読み取り空振り) や ESC 中断も「行」と数える | 「行」の条件に **改行終端** を入れた (`rsh_line_terminated` は `while` を抜けた `ch` が `\n`/`\r` のときだけ 1) | `line_qualifies` — 16 通りの真偽表 |
+| ③ (P1) | `serial_putchar()` に戻り値が無く、**EOT 送信失敗でも完了行に数える** | `serial_putchar` を `int` に (`SER_TX_OK` / `SER_TX_DROPPED`)。KAPI slot 38 の戻り値も `void` → `int` に広げた (**スロット番号も引数も不変** = ABI 互換。cdecl の EAX は呼び手の scratch)。`rshell_end_reply` は EOT の戻りが OK のときだけ数える | `line_qualifies` — `eot_sent = 0` で落ちること |
+| ④ (P2) | `rsh_getch()` の serial → kbd **2 度読み**で、間に届いたバイトはシリアル由来の印が付かない | KAPI v57 に **`kbd_trygetchar_local()`** を足した (cooked リングだけ。シリアルも注入リングも見ない)。`rsh_getch` はシリアルを **1 回だけ**読み、空ならローカル専用の口を読む — 窓が消える | いいえ (KAPI の分岐。実機・NP21/W で見る) |
+| ⑤ (P2) | 遅れた切替 EOT を新速度の `ver` の失敗と読んで正常な接続を放棄 | `serial N` の後、**旧速度でエコー行 `> serial N` と EOT を最大 5 秒待ってから**新速度へ移る。新速度の確認は `ver` の応答に `Build:` があり**かつ**エコー行が `> ver` であること | `test_rshell_serial.py` の `probe` / `switch` |
+| ⑥ (P2) | `exit` のエコー無しを desync と誤判定、`startswith` が行境界を見ない | `check_echo` は **行全体** (`"> " + cmd`) で比較。`exit` は `NO_ECHO_CMDS` で例外 | `test_rshell_serial.py` の `echo` |
+
+**非 blocker 3 件も直した**: 「1 周 0.31 tick なので旧コードでも `elapsed` ≥ 1」は**生値と補正後の取り違え**だったので書き直した (生値は NP21/W でも 0 で、`if (elapsed == 0) elapsed = 1;` が桁を決めていた) / kselftest の整合性検査の `|| rounds > 1` が素通りだったのを「**2 周以上回ったなら 5 tick 以上測れている**」と「1 周なら結果は loops/ticks そのもの」の 2 本に分けた / ラスタのコメントを実装 (VSYNC 待ち・VRAM 転送・パレット out は IF=0 のまま、**開けるのは待ちのぶんだけ**) に合わせた。
 
 ## Codex レビュー 往復 2 (07b256c、Request changes) の 4 件をどう閉じたか
 

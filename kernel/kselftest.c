@@ -600,10 +600,10 @@ static void test_db_v50(void)
  * 待てずに `_halt()` へ落ちて **1 バイト約 2ms の固定費**になる
  * (実機実測: 9600 で 389B/s、38400 でも 437B/s)。
  *
- * **NP21/W では症状が出ない** (実測 rounds = 16 / ticks = 5。1 周 ≒ 0.31
- * tick なので旧コードでも elapsed が 1 以上になり、ずれは高々 3 倍ほど)。
- * 実機 266MHz だけ 1 周が 0.1 tick 未満で 0 に落ちていた。だからここで
- * 実機の起動時に自分で見る。 */
+ * **NP21/W でも丸めは起きる** (実測 rounds = 16 / ticks = 5 = 1 周 ≒ 0.31
+ * tick。旧コードの生の elapsed はそこでも 0 で、補正が 200,000 を入れていた)。
+ * 実機 266MHz は 1 周 0.1 tick 未満でもっと深く落ちる。症状が出るかどうかの
+ * 境目は「予算が 1 文字時間を割り込むか」だけなので、ここで起動時に見る。 */
 static void test_cpu_calibrate(void)
 {
     u32 lpt = cpu_loops_per_tick();
@@ -622,12 +622,19 @@ static void test_cpu_calibrate(void)
     check(cpu_calib_rounds < CALIBRATE_MAX_ROUNDS,
           "cpu calib: did not hit the round cap");
 
-    /* 1 周で確定した (遅い機械) なら ticks はそのまま、
-     * 何周も回した (速い機械) なら合計が筋の通る値になっていること。
-     * loops_per_tick = 合計 / ticks なので、必ず 1 周ぶん以上ある。 */
-    check(lpt >= CALIBRATE_LOOPS / (cpu_calib_ticks ? cpu_calib_ticks : 1)
-          || cpu_calib_rounds > 1,
-          "cpu calib: result is consistent with the rounds it ran");
+    /* **周回と tick の辻褄。** 直す前のここは `|| cpu_calib_rounds > 1` が
+     * 付いていて、複数周回ったら **何であれ通る** ザルだった。
+     * 止め方 (cpu_calibrate_enough) は「5 tick に届いたか、周回の上限か」の
+     * 2 つだけなので、**2 周以上回ったなら必ず 5 tick 以上になっている**。
+     * それを言い直す — 上限に当たった場合は 1 つ上の check が落とす。 */
+    check(cpu_calib_rounds <= 1 || cpu_calib_ticks >= CALIBRATE_MIN_TICKS,
+          "cpu calib: more than one round implies MIN_TICKS were measured");
+
+    /* 1 周で確定した (遅い機械) なら、その 1 周ぶんが丸ごと結果になる。 */
+    check(cpu_calib_rounds != 1
+          || lpt == CALIBRATE_LOOPS / (cpu_calib_ticks ? cpu_calib_ticks : 1)
+          || lpt == CALIBRATE_FALLBACK_LPT,
+          "cpu calib: a single round yields loops/ticks");
 
     /* **打ち切りに当たったら測れていない** (PIT が止まっている疑い)。
      * 上の `< CALIBRATE_MAX_ROUNDS` と同じことを「失敗」として言い直す —

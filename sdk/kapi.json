@@ -1,5 +1,5 @@
 {
-  "version": 56,
+  "version": 57,
   "data_fields": [
     {
       "name": "sbrk_heap_limit",
@@ -309,7 +309,7 @@
     },
     {
       "name": "serial_putchar",
-      "ret": "void",
+      "ret": "int",
       "args": [
         "u8 ch"
       ]
@@ -1507,6 +1507,11 @@
       "name": "serial_get_status",
       "ret": "int",
       "args": ["u32 *mode", "u32 *baud", "u32 *fifo"]
+    },
+    {
+      "name": "kbd_trygetchar_local",
+      "ret": "int",
+      "args": []
     }
   ]
 }

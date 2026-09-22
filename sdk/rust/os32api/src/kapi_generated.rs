@@ -45,7 +45,7 @@ pub struct KernelAPI {
     /* idx  35 */ pub serial_init: unsafe extern "C" fn(baud: u32),
     /* idx  36 */ pub serial_puts: unsafe extern "C" fn(s: *const u8),
     /* idx  37 */ pub serial_getchar: unsafe extern "C" fn() -> i32,
-    /* idx  38 */ pub serial_putchar: unsafe extern "C" fn(ch: u8),
+    /* idx  38 */ pub serial_putchar: unsafe extern "C" fn(ch: u8) -> i32,
     /* idx  39 */ pub serial_trygetchar: unsafe extern "C" fn() -> i32,
     /* idx  40 */ pub serial_is_initialized: unsafe extern "C" fn() -> i32,
     /* idx  41 */ pub exec_run: unsafe extern "C" fn(path: *const u8) -> i32,
@@ -227,13 +227,14 @@ pub struct KernelAPI {
     /* idx 217 */ pub exec_last_result: unsafe extern "C" fn(kind: *mut i32, code: *mut i32) -> i32,
     /* idx 218 */ pub serial_init_vfast: unsafe extern "C" fn(baud: u32) -> i32,
     /* idx 219 */ pub serial_get_status: unsafe extern "C" fn(mode: *mut u32, baud: *mut u32, fifo: *mut u32) -> i32,
+    /* idx 220 */ pub kbd_trygetchar_local: unsafe extern "C" fn() -> i32,
     pub sbrk_heap_limit: u32,  /* newlib _sbrk用ヒープ上限アドレス (exec_runでセットされる) */
     pub shm_base: u32,  /* 共有メモリ (MEM_SHM_BASE) の先頭アドレス。DB結果受け渡しに使用 (exec_initでセット) */
 }
 
 /* KernelAPI マジックナンバー */
 pub const KAPI_MAGIC: u32 = 0x4B415049;  /* "KAPI" */
-pub const KAPI_VERSION: u32 = 56;
+pub const KAPI_VERSION: u32 = 57;
 
 /* テキスト属性 (kprintf用) */
 pub const ATTR_WHITE: u8  = 0xE1;
