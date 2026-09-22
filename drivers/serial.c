@@ -35,6 +35,10 @@ extern void irq_disable(unsigned int irq);
  * 宣言 1 行で足りる)。 */
 extern void cpu_delay_us(u32 us);
 
+/* 外部: PIT 100Hz が進める実時間 (kernel/idt.h)。送信の予算はこれで測る
+ * — cpu_delay_us の校正が何倍ずれても狂わないため (往復 3)。 */
+extern volatile u32 tick_count;
+
 /* ======== 初期化状態 ======== */
 static int ser_initialized = 0;
 
@@ -82,9 +86,12 @@ static u8 s_mask_err   = (u8)(STS_PE | STS_OE | STS_FE);
  * 切替でマスクを変えた瞬間に ISR が踏み潰す (Codex レビュー blocker 1)。 */
 static u8 s_mask_ien   = IEN_RX;
 
-/* TxRDY を待つ予算 [µs]。serial_init で速度から決める (serial_plan.h の式)。
- * 初期化前でも putchar が呼ばれうる (パニック経路) ので既定を入れておく。 */
-static u32 s_tx_budget_us = (u32)SER_TX_BUDGET_MAX_US;
+/* TxRDY を待つ予算 [tick]。serial_init で実効速度から決める。
+ * **µs の数え上げではなく tick** — cpu_delay_us の校正が丸めに負けていた
+ * 実機で、2083µs のつもりの予算が約 200µs で尽きていた (往復 3、
+ * serial_plan.h の注記)。初期化前でも putchar が呼ばれうる (パニック経路)
+ * ので既定を入れておく。 */
+static u32 s_tx_budget_ticks = (u32)SER_TX_BUDGET_TICKS_MIN;
 
 /* FIFO 搭載判定はリセットまで変わらないので 1 回だけ行う。 */
 static u8 s_fifo_probed = 0;
@@ -294,7 +301,7 @@ static int serial_init_ex(unsigned long baud, int want_vfast)
     s_setup.vfast_div = plan.div;
 
     /* TxRDY を待つ予算は **実効速度** から決める (要求値ではない)。 */
-    s_tx_budget_us = serial_tx_budget_us(s_setup.actual);
+    s_tx_budget_ticks = serial_tx_budget_ticks(s_setup.actual);
 
     /* ---- 8253 カウンタ#2 (互換モードだけ) ----
      * V･FAST 中は 013Ah bit7 がカウンタ#2 出力を無効にするので触らない
@@ -508,8 +515,15 @@ int serial_getchar(void)
 /*  回線より遅くなっていた (票 TASK_SERIAL_VFAST §0)。                      */
 /*                                                                          */
 /*  回線が 1 文字を押し出す時間は baud で決まるのだから、その時間だけ見て    */
-/*  から寝ればよい。予算 = 1 文字時間 × 2 (serial_plan.h)。予算のあいだは    */
+/*  から寝ればよい。予算 = 1 文字時間 × 2 を **tick に切り上げた値**        */
+/*  (serial_plan.h の `serial_tx_budget_ticks`)。予算のあいだは             */
 /*  `cpu_delay_us(SER_TX_POLL_US)` を挟んで TxRDY を見る。                  */
+/*                                                                          */
+/*  ⚠ **時間は `tick_count` で測る。** µs を数え上げる書き方は              */
+/*  「cpu_delay_us(5) が本当に 5µs 待つ」に寄りかかっており、実機で校正が    */
+/*  丸めに負けていたとき (往復 3) に予算が 1/10 になって、9600 の 1 文字     */
+/*  時間すら待てずに hlt へ落ちていた。tick は PIT が進める実時間なので、    */
+/*  校正が何倍ずれても予算は狂わない。                                      */
 /*                                                                          */
 /*  予算を超えたら従来どおり `hlt` で 1 割り込み分待つ (最大                 */
 /*  SER_TX_HLT_RETRY 回) — 相手がフロー制御で止めているときに CPU を         */
@@ -517,24 +531,40 @@ int serial_getchar(void)
 /*  serial_puts_polled を使う)。                                            */
 /*                                                                          */
 /*  cpu_calibrate() の前は cpu_delay_us が即座に返る (s_loops_per_tick=0)。  */
-/*  そのときは予算 ÷ 刻み回だけ素のスピンになる — 従来の 100 回スピンと      */
-/*  同程度で、害は無い。                                                    */
+/*  そのときは予算の tick が尽きるまで素のスピンになるだけで、待ち時間       */
+/*  そのものは変わらない (これも tick で測る利点)。                          */
 /* ======================================================================== */
 void serial_putchar(char c)
 {
-    u32 waited;
+    u32 start;
+    u32 spin;
     int retry;
+    int can_halt;
+
+    /* **IF=0 で呼ばれることがある** (パニック経路・割り込み禁止区間)。
+     * そこでは tick_count が進まないので時間で測れず、`_halt()` は
+     * 二度と起きない。回数上限のスピンだけで諦める。 */
+    can_halt = _irq_enabled();
 
     for (retry = 0; retry < SER_TX_HLT_RETRY; retry++) {
-        waited = 0;
+        start = tick_count;
+        spin = 0;
         for (;;) {
             if (inp(s_port_cmd) & s_mask_txrdy) {
                 outp(s_port_data, (unsigned)(u8)c);
                 return;
             }
-            if (waited >= s_tx_budget_us) break;
+            if (can_halt) {
+                /* **実時間で測る。** tick_count は PIT の割り込みが進めるので、
+                 * cpu_delay_us の校正が何倍ずれても予算は狂わない
+                 * (往復 3: 校正が 1/10 で予算が 200µs に化けていた)。 */
+                if ((u32)(tick_count - start) >= s_tx_budget_ticks) break;
+            } else {
+                if (spin >= (u32)SER_TX_SPIN_MAX) return;
+                spin++;
+            }
+            /* ポートを読む間隔を空けるだけ。正確さは要らない。 */
             cpu_delay_us((u32)SER_TX_POLL_US);
-            waited += (u32)SER_TX_POLL_US;
         }
         /* 予算を使い切った = 相手が読んでいない。次の割り込みまで寝る。 */
         _halt();

@@ -9,13 +9,26 @@
 /*                                                                          */
 /*  計測手順:                                                               */
 /*    1. tick_count の変化を待ち、tick 境界に同期                            */
-/*    2. 既知回数の nop_loop() を実行し、所要 tick 数を計測                  */
-/*    3. loops_per_tick = 既知回数 / 経過 tick で算出                        */
+/*    2. 既知回数の nop_loop() を **経過が CALIBRATE_MIN_TICKS に届くまで**  */
+/*       繰り返す (速い CPU では 1 周では 1 tick にも届かない)               */
+/*    3. loops_per_tick = 合計ループ数 / 合計 tick で算出                    */
+/*                                                                          */
+/*  ⚠ **2 の繰り返しが本題。** 直す前は 1 周だけ回して tick で割っていた。   */
+/*  コメントの想定は 8MHz (12.5 tick) / 33MHz (3 tick) だったが、実機の      */
+/*  PC-9821Ra266 (266MHz) では 1 周 ≒ 1ms で 1 tick にも届かず、            */
+/*  `elapsed = 0` が 1 に丸められて s_loops_per_tick が **実際の 1/7〜1/13** */
+/*  になっていた。その結果 cpu_delay_us(5) が実際には 0.5µs 程度しか待たず、 */
+/*  drivers/serial.c の送信ループが TxRDY を待てずに _halt() へ落ちて、      */
+/*  速度に依らない 1 バイト約 2ms の固定費になっていた                       */
+/*  (実機実測 2026-09-22: 9600 で 389B/s、38400 でも 437B/s)。              */
+/*  **NP21/W では踏めない** — 十分に遅いので 1 周で 5 tick を超える。        */
+/*  止め方と計算は kernel/cpu_calibrate_math.c (ホスト試験あり)。            */
 /*                                                                          */
 /*  注意: cpu_calibrate() は PIT 初期化後、_enable() 後に呼ぶこと。         */
 /* ======================================================================== */
 
 #include "cpu_calibrate.h"
+#include "cpu_calibrate_math.h"
 #include "io.h"
 
 /* タイマーティックカウンタ (isr_stub.asm でインクリメント) */
@@ -24,9 +37,13 @@ extern volatile u32 tick_count;
 /* キャリブレーション結果 (静的変数) */
 static u32 s_loops_per_tick = 0;
 
-/* キャリブレーションで使用する固定ループ回数
- * 8MHz: ~125ms (12.5 tick), 33MHz: ~30ms (3 tick) */
-#define CALIBRATE_LOOPS  200000UL
+/* 何周回ったか / 何 tick 測れたか。**kernel.map 越しに読めるよう意図的に
+ * グローバル** (実機で「本当に 5 tick 測れたか」を確かめる唯一の手段)。 */
+u32 cpu_calib_rounds = 0;
+u32 cpu_calib_ticks  = 0;
+
+/* CALIBRATE_LOOPS / CALIBRATE_MIN_TICKS / CALIBRATE_MAX_ROUNDS と
+ * フォールバック値は kernel/cpu_calibrate_math.h にある ([C4])。 */
 
 /* ======================================================================== */
 /*  nop_loop — キャリブレーションと遅延の共通ループ                         */
@@ -48,7 +65,9 @@ static void __attribute__((noinline)) nop_loop(u32 n)
 void cpu_calibrate(void)
 {
     u32 start;
-    u32 elapsed;
+    u32 ticks;
+    u32 rounds;
+    u32 total;
 
     /* tick 境界に同期: 次の tick 開始まで待つ */
     start = tick_count;
@@ -56,20 +75,25 @@ void cpu_calibrate(void)
         /* 何もしない */
     }
 
-    /* 既知回数の nop_loop を実行し、所要 tick 数を計測 */
+    /* **経過が CALIBRATE_MIN_TICKS に届くまで回す。**
+     * 速い CPU では 1 周が 1 tick に満たないので、1 周で打ち切ると
+     * 0 → 1 の丸めで実際の何分の 1 かの値が入る (ファイル冒頭の注記)。
+     * 打ち切り (CALIBRATE_MAX_ROUNDS) は PIT が死んだときの保険で、
+     * 通常の機械には掛からない (266MHz でも 50 周ほどで 5 tick)。 */
     start = tick_count;
-    nop_loop(CALIBRATE_LOOPS);
-    elapsed = tick_count - start;
+    total = 0;
+    ticks = 0;
+    rounds = 0;
+    do {
+        nop_loop(CALIBRATE_LOOPS);
+        total += CALIBRATE_LOOPS;
+        rounds++;
+        ticks = tick_count - start;
+    } while (!cpu_calibrate_enough(ticks, rounds));
 
-    /* ゼロ除算防止 (非常に高速なCPUでは 0 tick になりうる) */
-    if (elapsed == 0) elapsed = 1;
-
-    s_loops_per_tick = CALIBRATE_LOOPS / elapsed;
-
-    /* 安全装置: 極端に小さい場合はフォールバック (8MHz相当) */
-    if (s_loops_per_tick < 1000) {
-        s_loops_per_tick = 10000;
-    }
+    cpu_calib_rounds = rounds;
+    cpu_calib_ticks = ticks;
+    s_loops_per_tick = cpu_calibrate_compute(total, ticks);
 }
 
 /* ======================================================================== */

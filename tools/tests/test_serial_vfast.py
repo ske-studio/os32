@@ -35,7 +35,8 @@ TARGET_SRCS = [
 ]
 
 CASES = ["vfast_table", "compat_exact", "compat_inexact", "mode_choice",
-         "tx_budget", "status_bits", "fifo_detect", "refuse_inexact",
+         "tx_budget", "tx_budget_ticks", "status_bits", "fifo_detect",
+         "refuse_inexact",
          "watchdog", "real_hw_story"]
 
 FLAGS = ["-std=gnu89", "-Wall", "-Wextra", "-Werror",
@@ -77,6 +78,16 @@ MUTATIONS = [
      r"out->exact = \(u8\)\(\(out->actual == baud\) \? 1 : 0\);",
      "out->exact = 1;",
      "割り切れない分周を「ちょうど出る」と答える (38400 → 41600 を見逃す)"),
+    ("drivers/serial_plan.c",
+     r"    ticks \+= SER_TX_BUDGET_EDGE_TICKS;\n",
+     "",
+     "tick の境界ずれを足さない (1 tick の予算は実時間 0 になりうる)"),
+    ("drivers/serial_plan.c",
+     r"    if \(ticks < SER_TX_BUDGET_TICKS_MIN\) \{\n"
+     r"        ticks = SER_TX_BUDGET_TICKS_MIN;\n    \}\n",
+     "",
+     "予算の下限 3 tick を外す (保証 10ms では FTDI の遅延タイマ 16ms を"
+     "またげず、結局 hlt に落ちて 1 バイト 2ms に戻る)"),
     ("userland/shell/serial_watchdog.c",
      r"    if \(bytes_seen > 0\) \{\n        return SER_WD_LINKED;\n    \}\n"
      r"[\s\S]*?    if \(elapsed_ticks >= \(unsigned long\)"

@@ -208,6 +208,64 @@ static void tx_budget(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  (d2) 予算は tick で測る (往復 3)                                    */
+/*                                                                      */
+/*  µs の数え上げ (`waited += SER_TX_POLL_US`) は「cpu_delay_us(5) が    */
+/*  本当に 5µs 待つ」に寄りかかっていた。実機 PC-9821Ra266 では校正が     */
+/*  丸めに負けて 0.5µs しか待たず、2083µs のつもりの予算が実際には        */
+/*  約 200µs で尽きて、9600 の 1 文字時間 (1.04ms) すら待てずに hlt へ    */
+/*  落ちていた (1 バイト約 2ms の固定費)。tick は PIT が進める実時間なので */
+/*  校正が何倍ずれても狂わない。                                          */
+/* ------------------------------------------------------------------ */
+static void tx_budget_ticks(void)
+{
+    /* **1 でも 0 でもない。** tick は「境界を何回跨いだか」なので、
+     * 開始が tick の途中だと 1 tick の予算は実時間 0 になりうる。 */
+    CHECK(serial_tx_budget_ticks(9600UL) >= 2);
+    CHECK(serial_tx_budget_ticks(115200UL) >= 2);
+    CHECK(serial_tx_budget_ticks(0UL) >= 2);
+
+    /* 標準的な速度は下限の 3 tick (= 保証 20ms 以上)。2 文字時間そのものは
+     * 9600 でも 2083µs で 1 tick に収まるが、**待つ相手は回線だけではない**
+     * — ホスト側のフロー制御や FTDI の遅延タイマ (16ms) をまたげる長さが要る
+     * (実機のホスト観測: 16ms ごとに 4〜10 バイトの塊で届いていた)。 */
+    CHECK(serial_tx_budget_ticks(9600UL) == SER_TX_BUDGET_TICKS_MIN);
+    CHECK(serial_tx_budget_ticks(38400UL) == SER_TX_BUDGET_TICKS_MIN);
+    CHECK(serial_tx_budget_ticks(115200UL) == SER_TX_BUDGET_TICKS_MIN);
+    CHECK(SER_TX_BUDGET_TICKS_MIN == 3);
+
+    /* 保証される実時間は (N-1) tick ぶん。3 tick なら 20ms で、16ms の
+     * 遅延タイマをまたげる。ここが 2 になると 10ms でまたげない。 */
+    CHECK((SER_TX_BUDGET_TICKS_MIN - 1) * SER_TICK_US >= 16000UL);
+
+    /* **遅い速度では tick も伸びる。** 2 文字時間が 10ms を超えたら
+     * 切り上げ + 境界ずれのぶんだけ増える。上限 (50ms) で頭打ち。 */
+    CHECK(serial_tx_budget_ticks(1UL)
+          == (SER_TX_BUDGET_MAX_US + SER_TICK_US - 1) / SER_TICK_US
+             + SER_TX_BUDGET_EDGE_TICKS);
+    CHECK(serial_tx_budget_ticks(1UL) == 6);
+    CHECK(serial_tx_budget_ticks(1UL) > serial_tx_budget_ticks(9600UL));
+
+    /* 300bps (2 文字 = 66.6ms) も上限で頭打ちになる。 */
+    CHECK(serial_tx_budget_ticks(300UL) == 6);
+
+    /* 1200bps: 2 文字 = 16666µs → 切り上げ 2 tick + 境界 1 = 3。 */
+    CHECK(serial_tx_budget_us(1200UL) == 16666UL);
+    CHECK(serial_tx_budget_ticks(1200UL) == 3);
+    /* 600bps: 2 文字 = 33333µs → 切り上げ 4 tick + 境界 1 = 5。 */
+    CHECK(serial_tx_budget_us(600UL) == 33333UL);
+    CHECK(serial_tx_budget_ticks(600UL) == 5);
+
+    /* 単調性 (速いほうが短いか同じ)。 */
+    CHECK(serial_tx_budget_ticks(600UL) >= serial_tx_budget_ticks(1200UL));
+    CHECK(serial_tx_budget_ticks(1200UL) >= serial_tx_budget_ticks(9600UL));
+
+    /* IF=0 の回数上限は 0 でない (1 回も見ないうちに諦めない)。 */
+    CHECK(SER_TX_SPIN_MAX > 0);
+    CHECK(SER_TX_SPIN_MAX >= 1000UL);
+}
+
+/* ------------------------------------------------------------------ */
 /*  (e) ステータスのビット位置 — 互換 (0032h) と FIFO (0132h) は別物    */
 /* ------------------------------------------------------------------ */
 static void status_bits(void)
@@ -409,6 +467,7 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "compat_inexact")) compat_inexact();
     else if (!strcmp(argv[1], "mode_choice")) mode_choice();
     else if (!strcmp(argv[1], "tx_budget")) tx_budget();
+    else if (!strcmp(argv[1], "tx_budget_ticks")) tx_budget_ticks();
     else if (!strcmp(argv[1], "status_bits")) status_bits();
     else if (!strcmp(argv[1], "fifo_detect")) fifo_detect();
     else if (!strcmp(argv[1], "refuse_inexact")) refuse_inexact();

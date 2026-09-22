@@ -88,6 +88,14 @@ static inline void _disable(void);
 static inline unsigned int irq_save(void);
 static inline void irq_restore(unsigned int flags);
 
+/* いま割り込みが許可されているかを **何も変えずに** 答える。
+ * 契約: 戻り 1 = 許可、0 = 禁止。呼んでも割り込み状態は変わらない
+ *       (irq_save() は cli する副作用があるので、ただ知りたいだけの
+ *       場所で使ってはいけない — しかも戻り値は不透明という契約)。
+ * これが要るのは「IF=0 なら _halt() してはいけない」を自分で判断する
+ * コード (drivers/serial.c の送信ループ)。IF=0 の hlt は二度と起きない。 */
+static inline int _irq_enabled(void);
+
 /* 割り込み記述子表をロードする。
  * 契約: `ptr` はその CPU が期待する形の記述子表ポインタ。中身の形は
  *       arch 固有 (x86 なら limit+base の 6 バイト)。 */

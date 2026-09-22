@@ -69,6 +69,39 @@
 /* 予算を使い切ったあと `hlt` で待つ回数 (従来と同じ)。 */
 #define SER_TX_HLT_RETRY      5
 
+/* ======================================================================== */
+/*  予算は **µs の数え上げではなく tick で測る** (往復 3)                   */
+/*                                                                          */
+/*  `waited += SER_TX_POLL_US` は「cpu_delay_us(5) が本当に 5µs 待つ」に     */
+/*  寄りかかった数え方だった。実機 PC-9821Ra266 では校正が丸めに負けて       */
+/*  cpu_delay_us(5) が 0.5µs しか待たず、2083µs のつもりの予算が実際には     */
+/*  約 200µs で尽き、9600 の 1 文字時間 (1.04ms) すら待てずに `_halt()` へ   */
+/*  落ちていた。その hlt が実測 ≒2ms で、**速度に依らない 1 バイト 2ms の    */
+/*  固定費** (9600 で 389B/s、38400 でも 437B/s) の正体だった。             */
+/*                                                                          */
+/*  校正は往復 3 で直したが、**時間の判定を校正に依存させない**。            */
+/*  `tick_count` は PIT の割り込みが進める実時間なので、校正が何倍ずれても   */
+/*  予算は狂わない。cpu_delay_us を挟むのは「ポートを読む間隔」を空ける      */
+/*  ためだけで、正確さは要らない。                                          */
+/* ======================================================================== */
+#define SER_TICK_US       10000UL   /* PIT 100Hz = 1 tick 10ms */
+
+/* tick は「境界を何回跨いだか」なので、開始が tick の途中だと最初の 1 回は
+ * 0〜10ms のどこでも立つ。**保証される実時間は (N-1) tick 分**なので、
+ * 欲しい時間の切り上げに 1 を足す。 */
+#define SER_TX_BUDGET_EDGE_TICKS  1UL
+/* 下限 3 tick (= 保証 20ms 以上)。9600 の 1 文字は 1.04ms なので 2 文字ぶんの
+ * 予算 (2083µs) には 1 tick でも足りるが、**TxRDY が立つのを待つ相手は回線
+ * だけではない** (ホスト側のフロー制御・FTDI の遅延タイマ 16ms)。16ms を
+ * またげる長さにしておかないと、結局 hlt に落ちて元の木阿弥になる。 */
+#define SER_TX_BUDGET_TICKS_MIN   3UL
+
+/* **IF=0 で呼ばれたときの回数上限。** 割り込み禁止区間では tick_count が
+ * 進まないので時間で測れない。しかも `_halt()` は IF=0 では二度と起きない
+ * ので、スピンだけで諦めるしかない。20 万回は 266MHz で数十 ms、8MHz でも
+ * 数百 ms 程度で、パニック経路の serial_puts_polled と同じ桁。 */
+#define SER_TX_SPIN_MAX      200000UL
+
 /* 8253 カウンタ#2 は 16 ビット。 */
 #define SER_COUNT_MAX    0xFFFFU
 /* 8251 の ×16 モード (MOD_CLKx16) なので、ボーレートはクロック/16/count。 */
@@ -99,8 +132,13 @@ int serial_vfast_div(unsigned long baud);
 void serial_plan(unsigned long baud, int has_fifo, unsigned long clk,
                  int want_vfast, struct serial_plan_out *out);
 
-/* TxRDY を待つ予算 [µs]。上の式そのもの。 */
+/* TxRDY を待つ予算 [µs]。上の式そのもの (tick 版の材料)。 */
 u32 serial_tx_budget_us(unsigned long baud);
+
+/* TxRDY を待つ予算 [tick]。`serial_putchar` が実際に使うのはこちら。
+ *   ceil(2 文字時間 / 10ms) + 1 (境界ずれ)、下限 SER_TX_BUDGET_TICKS_MIN
+ * **0 にも 1 にもならない** — 1 tick では保証される実時間が 0 になりうる。 */
+u32 serial_tx_budget_ticks(unsigned long baud);
 
 /* 0136h を 2 回読んだ値から FIFO 搭載を判定する (資料 304〜323 行)。
  * bit6 が反転し、かつ bit5 がどちらも 0 なら搭載。

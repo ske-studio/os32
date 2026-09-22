@@ -16,6 +16,13 @@ void cpu_calibrate(void);
 /* キャリブレーション結果: 1 tick (10ms) あたりの NOP ループ回数 */
 u32 cpu_loops_per_tick(void);
 
+/* 校正が実際に何周回って何 tick 測れたか (診断用)。**kernel.map 越しに
+ * 読めるよう意図的にグローバル** — 実機で「丸めが起きていない」ことを
+ * 確かめる唯一の手段 (266MHz なら rounds ≒ 50 / ticks = 5、
+ * NP21/W なら rounds = 1 / ticks >= 5)。 */
+extern u32 cpu_calib_rounds;
+extern u32 cpu_calib_ticks;
+
 /* CPU速度適応型マイクロ秒ディレイ
  * キャリブレーション結果を基に、指定マイクロ秒だけ NOP ループで待つ。
  * 割り込み禁止区間でも使用可能 (PIT に依存しない)。

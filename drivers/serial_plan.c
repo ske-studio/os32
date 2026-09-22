@@ -136,6 +136,31 @@ u32 serial_tx_budget_us(unsigned long baud)
 }
 
 /* ======================================================================== */
+/*  TxRDY を待つ予算 [tick]                                                 */
+/*                                                                          */
+/*  **µs の数え上げをやめて tick で測る** 理由は serial_plan.h の注記。      */
+/*  tick は「境界を何回跨いだか」なので、開始が tick の途中だと最初の 1 回は */
+/*  0〜10ms のどこでも立つ。保証される実時間は (N-1) tick 分なので、欲しい   */
+/*  時間の切り上げに 1 を足す。                                             */
+/* ======================================================================== */
+u32 serial_tx_budget_ticks(unsigned long baud)
+{
+    unsigned long us;
+    unsigned long ticks;
+
+    us = (unsigned long)serial_tx_budget_us(baud);
+    /* 切り上げ。 */
+    ticks = (us + SER_TICK_US - 1UL) / SER_TICK_US;
+    /* 境界ずれのぶん。 */
+    ticks += SER_TX_BUDGET_EDGE_TICKS;
+    /* 下限。相手のフロー制御や FTDI の遅延タイマ (16ms) をまたげる長さ。 */
+    if (ticks < SER_TX_BUDGET_TICKS_MIN) {
+        ticks = SER_TX_BUDGET_TICKS_MIN;
+    }
+    return (u32)ticks;
+}
+
+/* ======================================================================== */
 /*  FIFO 搭載判定 (0136h を 2 回読む)                                       */
 /*                                                                          */
 /*  資料 304〜323 行: bit6 は「読み出すたびに 1→0→1→…と変化する」、        */
