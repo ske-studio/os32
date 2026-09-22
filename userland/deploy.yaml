@@ -153,6 +153,14 @@ filesystem:
     - host: userland/tests/time_test.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- kout_test (票 TASK_KAPI_OUTPUT_GUARD 受入 G2/G4: 出力ポインタの
+    #     書き込み可検査の CPL=3 受入。正常系 (スタック / ヒープ) が通ることと、
+    #     NULL の意味が変わっていないことを代表 6 本で見る。
+    #     **読み取り専用の shlib .text を渡す**試験はアプリ側から安全に作れない
+    #     ので含まない (PM が NP21/W で手で見る)) ---
+    - host: userland/tests/kout_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     # --- kstr_bench (票 TASK_KSTRING_BENCH: kstring の asm 版と C 版を実機で測る。
     #     出力は `KSTR ...` の固定書式で、集計は tools/kstr_bench_report.py) ---
     - host: userland/tests/kstr_bench.bin

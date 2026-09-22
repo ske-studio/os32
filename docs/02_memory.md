@@ -229,6 +229,14 @@ pgalloc_stage_online() が paging_map_phys() で張り、PT はブート workspa
 > ため。写していないとフォールバック直後の最初の描画で #PF になる (`ring3_guard bb` が
 > 「書けて生き残る」ことを確認する)。
 
+> **CR0.WP = 0 で走る** (`arch/x86/arch_cpu.h` の MMU 有効化)。`kernel/shlib.c` が
+> 「カーネルからは RO の USER ページにも書ける」前提で共有ライブラリを張るため。
+> 裏返しとして **CPL=0 (KAPI の wrapper) は PTE の RO 保護を受けない** ので、CPL=3 が
+> 出力引数に共有ライブラリの `.text`/`.rodata` を渡しても #PF は起きない。出力ポインタは
+> 書く前に `exec/exec.c` の `ring3_user_ranges_writable()` で present + RW + USER を
+> 確かめる (生成される wrapper の先頭。票
+> [tasks/memory/TASK_KAPI_OUTPUT_GUARD.md](tasks/memory/TASK_KAPI_OUTPUT_GUARD.md))。
+
 > **0x90000 の自動プレイ観測メールボックス**: ゲーム側が毎フレーム状態ブロックを書き、
 > ホストが `GET /api/mem?addr=0x90000&space=phys` で読む。**レイアウトを変えたら
 > `game/tools/autoplay/driver.py` の `read_mailbox()` と `EXPORT_VERSION` を同じコミットで直す**
