@@ -1,6 +1,6 @@
 # TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **往復 3 (FRY / kprintf 属性 / 状態行) 着地済み、エミュレータ回帰合格。実機 R6 の再試験待ち**
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で合格 (R6、2026-09-22、bee42cc)** — FD 起動 → シェル、シリアル経由で `ver` / `ls` が返る
 
 基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
 FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。
@@ -156,3 +156,16 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
 
 - 最下行の `FDC rc=<n> st0=<xx> 0439h=<xx>-><yy>`: rc=0 なら FDC 初期化は通った。st0 の bit3 (0x08) が立っていれば Not Ready (FRY でも直らない = ドライブ選択/モーターの問題)。0439h の yy で bit2 (0x04) が落ちていれば DMA の 1MB 制限は解けた。
 - `[fdc] …` の白い行、`MOUNT... root OK`、`[fatfs] mounted`。
+
+## 9. 実機 R6 — 合格 (2026-09-22、bee42cc、1.2MB)
+
+- ユーザー報告: **FD からブートした**。シェルは起動直後に rshell (シリアル待ち) に入るので、
+  シリアル未接続だと「ハング」に見える (ESC でローカルへ)。
+- USB シリアル (FTDI、Windows の COM3) + クロスケーブルで、`tools/rshell_serial.py` (新規、
+  Windows 側 Python + pyserial) から `ver` / `ls /` / `ls /bin` が返った。応答 296 バイト + EOT が 0.8 秒
+  (約 490 B/s、9600bps)。Build は `Sep 22 2026 16:19:26` (bee42cc のビルド)。
+- 原因は 3 つ重なっていた: §2 (シーク時間のタイムアウト) + §6 (`0439h` bit2 の DMA 1MB 制限) + §8 (FRY)。
+  どれもエミュレータでは再現しない。**`0439h` の読み戻しと `FDC rc=` の行 (最下行) の実機の値は未記録** —
+  次回の起動で写真を取る。
+- 残件: R4 (エミュレータの 1.44MB 回帰)、R5 (HDD 起動の回帰、NHD 配備)、実機の 1.44MB 起動、
+  Codex 往復 3 の非 blocker (§8-1)、`tools/rshell_serial.py` をテスターの「叩く側」に組み込む (PLAN §4 段 3)。
