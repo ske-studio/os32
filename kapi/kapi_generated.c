@@ -1593,7 +1593,7 @@ int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *bu
                                     (u32)0, 0u)) {
         ring3_fault_kill();   /* 戻らない */
     }
-    { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }
+    { Device *d = dev_find(dev_name); if (!d) return -1; if (count > 0 && buf && d->sect_size > 0) { if ((u32)count > 0xFFFFFFFFu / (u32)d->sect_size) return -1; if (!ring3_user_ranges_writable((u32)buf, (u32)count * (u32)d->sect_size, 0, 0)) ring3_fault_kill(); } return dev_blk_read_lba(d, lba, count, buf); }
 }
 
 int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)
