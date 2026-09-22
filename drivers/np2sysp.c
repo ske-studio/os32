@@ -33,6 +33,10 @@ int np2_recv_str(char *buf, int maxlen)
     int i = 0;
     u8 ch;
 
+    /* maxlen <= 0 では 1 バイトも書かない (終端の 1 バイトが出力保護の
+     * 「長さ 0 は見ない」規則の外に出ていた。実装レビュー 非 blocker)。 */
+    if (!buf || maxlen <= 0) return 0;
+
     while (i < maxlen - 1) {
         ch = (u8)inp(NP2PORT_STR);
         if (ch == 0) break;  /* \0終端 */

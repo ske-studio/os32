@@ -791,7 +791,7 @@ int __cdecl wrap_dev_get_info(int idx, char *name, int nm, int *type, u32 *sects
                                     (u32)0, 0u)) {
         ring3_fault_kill();   /* 戻らない */
     }
-    return dev_api_get_info(idx, name, nm, type, sects);
+    { if (!name || nm <= 0) return -1; return dev_api_get_info(idx, name, nm, type, sects); }
 }
 
 void __cdecl wrap_fm_startup_sound(void)
@@ -1317,7 +1317,7 @@ int __cdecl wrap_sys_redirect_fd_buf(int fd, u8 *buf, u32 size, u32 len)
                                     (u32)0, 0u)) {
         ring3_fault_kill();   /* 戻らない */
     }
-    return fd_redirect_to_buffer(fd, buf, size, len);
+    { if (len > size) return -1; return fd_redirect_to_buffer(fd, buf, size, len); }
 }
 
 u32 __cdecl wrap_sys_redirect_get_buf_len(int fd)
@@ -1588,12 +1588,7 @@ int __cdecl wrap_loop_status(int slot, u32 *total, int *bps)
 int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf)
 {
     KAPI_HIT(156);
-    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
-    if (!ring3_user_ranges_writable((u32)buf, kapi_out_mul(KAPI_OUT_LEN_S(buf, count), 512u),
-                                    (u32)0, 0u)) {
-        ring3_fault_kill();   /* 戻らない */
-    }
-    { Device *d = dev_find(dev_name); if (!d) return -1; if (count > 0 && buf && d->sect_size > 0) { if ((u32)count > 0xFFFFFFFFu / (u32)d->sect_size) return -1; if (!ring3_user_ranges_writable((u32)buf, (u32)count * (u32)d->sect_size, 0, 0)) ring3_fault_kill(); } return dev_blk_read_lba(d, lba, count, buf); }
+    { Device *d = dev_find(dev_name); if (!d) return -1; if (count < 0) return -1; if (count > 0 && buf && d->sect_size > 0) { if ((u32)count > 0xFFFFFFFFu / (u32)d->sect_size) return -1; if (!ring3_user_ranges_writable((u32)buf, (u32)count * (u32)d->sect_size, 0, 0)) ring3_fault_kill(); } return dev_blk_read_lba(d, lba, count, buf); }
 }
 
 int __cdecl wrap_dev_blk_write(const char *dev_name, u32 lba, int count, const void *buf)

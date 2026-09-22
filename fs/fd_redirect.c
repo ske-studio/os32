@@ -12,6 +12,11 @@
 #include "vfs.h"
 #include "os32_kapi_shared.h"
 
+/* exec/exec.c の出力保護 (fs/ はカーネルヘッダを見ない作法なので extern) */
+extern int ring3_ptr_ok(u32 p);
+extern int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb);
+extern void ring3_fault_kill(void);
+
 /* FD 0/1/2 のリダイレクト状態テーブル */
 static FdRedirect redir_table[3];
 
@@ -223,6 +228,14 @@ int fd_redirect_write(int fd, const void *buf, u32 size)
         const u8 *src = (const u8 *)buf;
 
         to_write = (size < space) ? size : space;
+        /* 登録時の検査の後でページ属性が変わり得る (sys_shm_lock で RO に
+         * なるなど。CR0.WP=0 なのでカーネルの書きは止まらない)。ユーザ帯の
+         * バッファなら書く前に毎回確かめる (票 TASK_KAPI_OUTPUT_GUARD、
+         * 実装レビュー 4)。カーネル帯・シェル帯のバッファは対象外。 */
+        if (to_write && ring3_ptr_ok((u32)(r->buffer + r->buf_len)) &&
+            !ring3_user_ranges_writable((u32)(r->buffer + r->buf_len), to_write, 0, 0)) {
+            ring3_fault_kill();   /* 戻らない */
+        }
         for (i = 0; i < to_write; i++) {
             r->buffer[r->buf_len + i] = src[i];
         }
