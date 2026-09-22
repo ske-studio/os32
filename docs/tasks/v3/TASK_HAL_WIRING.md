@@ -1,8 +1,8 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v5 (Codex 往復 4 の R1〜R6 を反映。往復 4 で指摘が全部「IRQ0 での汎用 tick 回収」に集中したので、その機構を**取り下げ**て driver 側の tick に戻した。追加往復は使い切ったので、着地はユーザー判断)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v6 (Codex 往復 5 の B1〜B4 を反映。ユーザー許可の追加 3 往復のうち 1 往復を消費、残り 2)**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
-> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5。
+> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6。
 
 正典の関係: [`PLAN.md`](PLAN.md) §3-1 (HAL の棚卸し)、§3 (ドライバの動的読み込み — この票の「取り決め」を後で外部モジュールに開く)、
 [`../realhw/TASK_LAN_82557.md`](../realhw/TASK_LAN_82557.md) (L-B 82557 が最初の顧客)、§5-5 (PCM リングとタイマが 2 番目の顧客)。
@@ -89,8 +89,12 @@ int  irq_unregister(unsigned int irq, irq_handler_fn fn, void *arg);
    - `IRQ_DEFERRED` を返す driver は、**自分で tick フック (`timer_handler` に登録済みの既存の口) を持ち、装置側の
      割り込みをマスクしたまま残件を自分の予算で回収し、回収し終えたら自分でマスクを外す**。この層は
      `irq_deferred_count[irq]` を数えるだけで、回収も再走査もしない。
-   - 共有線の反例 (A の新しい要因が B の保持中に来て線が下がらない): B が DEFERRED なら B は装置側で
-     マスクしているので線を保持しない (要因を落とすかマスクするかが契約)。A の要因は次のエッジで来る。
+   - **共有線のエッジ喪失は有限の走査では防げない (往復 5 B1)**: A と B が正常に HANDLED を返し続けても、走査の終了と
+     新しい要因の到着が重なると線が一度も下がらず、8259 (エッジ) は次の IRQ を出さない。したがって
+     **`IRQ_F_SHARED` で登録する driver は全員、IRQ が来なくても進む定期回収 (自分の tick フック) を持つ**ことを
+     登録の契約にする (DEFERRED の有無と無関係)。IRQ は加速器、tick が保証 — NE2000 の M4 (`ne2k_timer_tick` の
+     受信 watchdog) と同じ原則で、82557 も CS4231 も同じ形を持つ。回収周期は driver が決める (受信は 1 tick、
+     送信完了は数 tick など)。この層は `irq_deferred_count[irq]` と `irq_shared_dispatch[irq]` を数えるだけ。
      「要因を落とさず、マスクもしない」driver は契約違反で、W3 の偽装置で「線が上がったまま 2 巡で戻る」ことを
      確認するだけ (救済しない)。
    - 無進捗の検出はこの層では**しない** (戻り値からは「残件の有無」しか分からない。進捗は driver の処理カウンタと
@@ -124,8 +128,14 @@ int  irq_unregister(unsigned int irq, irq_handler_fn fn, void *arg);
 `rx_backlog` か **IMR に最後に書いた値 (`nic.imr_written`、新設。`imr_mask` は復帰時の設定値なので判定に使わない)**
 が 0 なら `IRQ_DEFERRED`、無ければ `IRQ_HANDLED`。`lgy98_init()` の `irq_is_free` (PIC のマスクで空きを見る) は
 **廃止**し、`irq_register` の戻りで判定する (共有登録に合わせる)。`ne2k_irq_shared` からも `service()` の失敗分岐で
-`hw_reset` に至る (既存)。この票では変えず、残件 (L-C) に記す。`ne2k_timer_tick` は残す (tick 回収と役割が重なるが、
-OVW 復旧と送信タイムアウトはそちらだけが持つ)。
+`hw_reset` に至る (既存)。この票では変えず、残件 (L-C) に記す。
+**busy とマスクの境界 (往復 5 B2)**: 現行の `ne2k_enter()` は `busy = 1` → IF 復元 → IMR = 0 の順、`ne2k_leave()` は
+IMR 復帰 → `busy = 0` の順で、どちらも**「busy だが装置は未マスク」の窓**があり、そこで IRQ が来るとアダプタは
+DEFERRED を返すのに装置側は保持したままになる。移行時に **`irq_save` の中で `busy = 1` と IMR = 0 を一体で**行い、
+`leave` も **`irq_save` の中で `irq_pending` の処理 → IMR 復帰 → `busy = 0` を一体で**行う (窓を消す)。busy 中の
+callback は NIC レジスタに触らない (foreground のページ切替・remote DMA と衝突する) — DEFERRED を返すだけ。
+W3 で**両方の窓に割り込みを注入** (NP21/W のブレークで enter/leave の途中で止めて `/api/pic` から IRQ を上げる) する。`ne2k_timer_tick` は残す (B1 の定期回収そのもの。
+OVW 復旧と送信タイムアウトもそちらが持つ)。
 
 **寿命と排他 (単一 CPU)**: 表の更新は `irq_save` で囲む。`{fn, arg, flags}` は**一括で有効化** (fn を最後に書く)。
 ISR の中からの登録・解除・自己解除は禁止 (契約、debug ビルドで検査)。解除の順序は **装置の要因を止める →
@@ -262,10 +272,19 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   確立できなかった場合は例外で QUARANTINE** (状態不明の装置を次の driver に渡さない)。
   **(6) 以降の失敗**は selective reset を打って停止の証拠 (1-3) を取り、取れれば逆順に戻して DECLINE、取れなければ
   **QUARANTINE**。
-  DECLINE の巻き戻しの列: selective reset → 10µs → CUS/RUS Idle 確認 → Bus Master Enable を落とす → `irq_unregister` →
-  `dma_pool_free` → I/O Space Enable を元に戻す。QUARANTINE では: Bus Master Enable を落とす (それ自体は書ける) →
-  span を `dma_pool_mark_leaked` → `irq_register` した callback は**解除せず「排出モード」に切り替える** (装置の
-  ステータスを読んで ack するだけで何も処理しない。callback が参照する状態と **I/O Space Enable は保つ**)。
+  DECLINE の巻き戻しの列 (往復 5 B3): **まず `irq_save` の中で driver の状態を `STOPPING` にする** (IRQ callback と
+  tick フックはこの状態を見て**装置に触らず** `IRQ_NONE` / 何もしない — reset 後の 10µs は SCB へのアクセス禁止
+  (SDM §6.3.3.3) なので、共有線の別装置の IRQ で callback が呼ばれても SCB を読まないため) → selective reset →
+  10µs → CUS/RUS Idle 確認 → Bus Master Enable を落とす → `irq_unregister` → `dma_pool_free` → I/O Space Enable を
+  元に戻す。「tick は unregister の前に止める」では遅い。QUARANTINE では: 状態を `QUARANTINED` に → **SCB command の M ビット (割り込みマスク、SDM §8.4) を立てて
+  装置の INTA# を止める** → Bus Master Enable を落とす (それ自体は書ける) → span を `dma_pool_mark_leaked` →
+  `irq_register` した callback は**解除せず「排出モード」に切り替える** (M ビットを立てた後にだけ SCB status を
+  読んで ack する。処理はしない。callback が参照する状態と **I/O Space Enable は保つ**)。
+  **登録前の QUARANTINE (probe (2) の reset 失敗、往復 5 B4)**: callback が無いので、M ビットを立てて INTA# を
+  止め、SCB status に pending が無いことを読んで確認してから I/O Space Enable と Bus Master を落とす。
+  M ビットの書き込みが確認できない (読み戻しが変わらない) 装置は `pci_quarantined_noisy` に記録して**報告**し、
+  その IRQ 線はストーム検出 (誰も受けない 200 回/tick) で PIC がマスクする — 同じ線の他装置は再起動まで失われる。
+  これは黙った代用ではなく報告つきの最後の手段で、`lspci` が `[quarantined noisy irq N]` を出す。
 - Command の更新は**下位 16 ビットだけ**書く (`pci_cfg_write16` を足す。上位の Status は W1C)。
 - 表は静的 (`kernel/kernel.c`、最初は 82557 の 1 行)。`pci_bind_all` は **pgalloc と DMA プールの初期化の後**。
   §3 の動的読み込みが来たら `size` で版を確かめる。
@@ -296,6 +315,20 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   CPL=3 のポインタ検査は既存の作法。同一スナップショットの上下を書く。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
 
+### 1-6. 実装の注意 (往復 5 の非 blocker)
+
+- `irq_register`: 未知の flags・NULL の fn・同じ {fn, arg} の重複登録は負。登録操作が失敗したときはストームのマスクを
+  解除しない (解除は成功した再計算のときだけ)。排他登録 (SHARED 無し) でも DEFERRED は返してよい。
+- `dma_chan_setup` の検査順: `ch` → (配列・ポート表を引く前に) `dir` / `mode` → `bytes` / `phys` → 終端の計算と 64KB /
+  16MB 判定 → **全部通ってから** ステータス採取と自チャネルの `done` / `tc_event` の初期化。失敗した setup は旧状態を
+  消さない (W2 に試験)。
+- `paging_init`: プールは NP 化から外すだけでなく**実際に写像する操作** (`paging_map_range` 相当、RW / supervisor) で張る。
+  W5 の USER 変異の復元では TLB を無効化する。
+- `pci_cfg_write16`: CF8 の DWORD 書きと CFC 側の WORD 書きを同じ `irq_save` の中に置く。32 ビットの RMW で代用しない。
+  PCI 不在時は既存関数と同じく何もしない。
+- `sys_time_now`: `irq_save` の最長区間の計測 (debug) からこの関数を再帰的に呼ばない。
+- W7 の `wbinvd` は解決策として確定していない。不一致が出たら対象 CPU と所有権移譲の手順を含めて再設計する。
+
 ## 2. 顧客と順序
 
 | 順 | 顧客 | 使う層 |
@@ -313,10 +346,10 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 | W0 | 1-0: NP21/W (1.9968MHz 設定) で reload = 19968 のまま、`kselftest` に `pit_setup` の検査を足す。**実機**: `sys_time_now` はまだ無いので、ホストの単調時計で **`tick_count` を 60 秒間隔で 2 回読む** (シリアル越し、往復遅延 < 50ms を差し引き、誤差 ±0.5% 以内。修正前は 23% ずれる)。回帰: `cpu_calibrate` の `loops_per_tick`、`cpu_delay_us(1000)` **× 1000 回の累積時間** (単発は往復遅延に埋もれる)、FD 起動、シリアル 115200 の ack | NP21/W + 実機 |
 | W1 | 純粋関数のホスト試験 (変異つき): 集約と 2 巡 (同時要因、2 巡目の回収、`handled_any` の保持、`irq_deferred_count`、ストーム閾値)、**TC → ack → remaining の遷移表**、`irq_finish` の **EOI 送信列** (master / slave / IRQ15 スプリアスの ISR 検査を handled と独立に)、登録の一括有効化と拒否規則 (非対応 IRQ、SHARED 不一致、5 件目)、`dma_split_addr` / `dma_crosses_64k` / `bytes` の範囲 / `dma_accept_pair` / **TC の read-clear の保存**、プールの最初適合と整列と 64KB 跨ぎ、**隣接 span の free と途中ポインタ・二重解放**、PCI の一致規則 (任意 / 完全 / DECLINE で次へ / QUARANTINE で打ち切り / 複数装置)、時計の整数式と **p1/p2 の判定表** (両クロック、周期境界) | `check-par` |
 | W2 | FDC が `dma8237` 経由でも **NP21/W の 2HD 起動と md5 一致**、**書き込み → 読み戻しの一致**、`dma_chan_setup` が負のとき FDC コマンドを発行しない、読み失敗のタイムアウト → `fdc_abort_transfer` → 再試行。**実機の FD 起動** と 0439h の 3 値の表示 | NP21/W + 実機 |
-| W3 | 共通スタブに `irq_register` した偽装置 (`kselftest` / 試験用 KAPI): NP21/W の `/api/pic` で IRR/ISR を見ながら、master (3) と slave (9) の両方、連続、共有 (2 登録の集約と**残件の tick 回収の完了**)、共有者の**片方解除**後にもう片方が動く、解除後に callback が走らない、CPL=3 のアプリ実行中と V86 中、**要因を落とさずマスクもしない偽装置で 2 巡で戻ること** (救済しない契約の確認) と、**誰も受けないエッジを 200 回/tick 打ってマスクが入る**ことを別の試験に、**`DEFERRED` を返した偽装置が自分の tick フックで残件を回収してマスクを外す**こと、**残った側が `DEFERRED`・装置マスク中のまま片方を解除しても残った側の tick フックが動き続ける**こと、IRQ0 の所要時間がこの票の前後で変わらないこと (`/api/prof`)、**LGY-98 をアダプタに移した後の rshell/LAN の通信** | NP21/W |
-| W4 | `sys_time_now`: 1 万回連続読みで逆行 0、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、IF=0 を 10.2ms 続けた後の読み (契約外の挙動を記録)、3 回失敗の返却、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
-| W5 | カーネル増分 ≤ 5KB、内訳: IRQ 表 8 × 4 × 12B = 384B、storm ビット + IRQ 別の tick 内発生数・deferred 回数 (8 × 2 × 4B = 64B)、pool ビットマップ + span 16 × 4B = 72B、DMA チャネル状態 4 × 16B、pit_setup 20B、コード (irq / dma8237 / dma_pool / pci_bind / sys_time ≒ 2.5KB、u64 の割り算は libgcc に既にある)、診断文字列 ≒ 0.5KB。`__bss_end` 差分と `docs/02_memory.md` の生成 (**新配置 0x2E8000〜0x2F7FFF が `MM_RW` で USER 無し、上下が NP**)、プールの枯渇 → 解放 → 再利用 | `docs/02_memory.md` + kselftest |
-| W6 | **土台完了**の受入はここまで。82557 での連続 TX/RX・共有・再開は **L-B の受入**。HAL 単体で未検証の実機条件を残件に明記: 82557 の実 IRQ 番号での共有、PCI バスマスタのキャッシュ整合 (W7)、CS4231 の DMA (§5-5)、**NE2000 の `wait_rdc` / `hw_reset` が ISR 文脈で回る既存の契約違反** (`ne2k_irq` と `ne2k_timer_tick` の両方から `service()` の失敗分岐 → `reinit_or_fail → bring_up → hw_reset` で到達。L-C で「要求の記録」と「foreground の実行」に分ける) | — |
+| W3 | 共通スタブに `irq_register` した偽装置 (`kselftest` / 試験用 KAPI): NP21/W の `/api/pic` で IRR/ISR を見ながら、master (3) と slave (9) の両方、連続、共有 (2 登録の集約と**残件の tick 回収の完了**)、共有者の**片方解除**後にもう片方が動く、解除後に callback が走らない、CPL=3 のアプリ実行中と V86 中、**要因を落とさずマスクもしない偽装置で 2 巡で戻ること** (救済しない契約の確認) と、**誰も受けないエッジを 201 回/tick 打ってマスクが入る (200 回では入らない)** ことを別の試験に、**正常に HANDLED を返す 2 つの偽装置で走査終了と新要因を重ねてエッジを失わせ、双方の tick フックが回収する** (B1 の反例)、**NE2000 の enter/leave の両方の窓への割り込み注入** (B2)、**82557 の巻き戻し中 (STOPPING) に共有線の別装置の IRQ を上げても SCB に触らない** (B3、偽装置で代替)、**`DEFERRED` を返した偽装置が自分の tick フックで残件を回収してマスクを外す**こと、**残った側が `DEFERRED`・装置マスク中のまま片方を解除しても残った側の tick フックが動き続ける**こと、IRQ0 の所要時間がこの票の前後で変わらないこと (`/api/prof`)、**LGY-98 をアダプタに移した後の rshell/LAN の通信** | NP21/W |
+| W4 | `sys_time_now`: 1 万回連続読みで逆行 0、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、**PIT の残りが 0.1ms の位相から** IF=0 を 10.2ms 続けた後の読み (必ず 2 境界を跨ぐ。契約外の挙動を記録)、3 回失敗の返却 (**注入試験**: p2 を強制的に 1 にする test hook で。通常実行では起きない)、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
+| W5 | カーネル増分 ≤ 5KB、内訳: IRQ 表 8 × 4 × 12B = 384B、storm ビット + IRQ 別の tick 内発生数・deferred 回数 (8 × 2 × 4B = 64B)、pool ビットマップ + span 16 × 4B = 72B、DMA チャネル状態 4 × 16B、pit_setup 20B、コード (irq / dma8237 / dma_pool / pci_bind / sys_time ≒ 2.5KB、u64 の割り算は libgcc に既にある)、診断文字列 ≒ 0.5KB。`__bss_end` 差分と `docs/02_memory.md` の生成 (**新配置 0x2E8000〜0x2F7FFF が `MM_RW` で USER 無し、上下が NP**)、プールの枯渇 → 解放 → 再利用、**プールの PTE に USER を立てる変異で検査が落ちる** | `docs/02_memory.md` + kselftest |
+| W6 | **土台完了**の受入はここまで。82557 での連続 TX/RX・共有・再開は **L-B の受入**。土台完了は**システム全体の IF=0 時間保証ではない** (NE2000 の残件がある)。HAL 単体で未検証の実機条件を残件に明記: 82557 の実 IRQ 番号での共有、PCI バスマスタのキャッシュ整合 (W7)、CS4231 の DMA (§5-5)、**NE2000 の `wait_rdc` / `hw_reset` が ISR 文脈で回る既存の契約違反** (`ne2k_irq` と `ne2k_timer_tick` の両方から `service()` の失敗分岐 → `reinit_or_fail → bring_up → hw_reset` で到達。L-C で「要求の記録」と「foreground の実行」に分ける) | — |
 | W7 | **キャッシュ整合 (実機)**: CPU がパターンを書いて**フラッシュせずに** DMA で読ませる (FDC 書き込み → 読み戻し、82557 は L-B のループバック)、DMA で受けた直後に CPU が読む、を双方向で 100 回。所有権の移譲は「CPU 書き → 装置へ渡す → 装置完了の証拠 → CPU 読み」の順で、明示のフラッシュ命令は使わない。不一致が出たら `wbinvd` (486+) を DMA 前に入れる方針に切り替える (票を更新) | 実機 |
 
 ## 4. しないこと
