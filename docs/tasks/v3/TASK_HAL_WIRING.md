@@ -50,6 +50,12 @@ BIOS ワークを読んで保存 (R3)、DMA プールは **SHM ではなく SQLi
   kselftest の `test_pit_setup()` を追加、経緯は `docs/POLICY_DEBUG.md` §4-54。
   `make kernel` は警告の増加なしで通る。**W0 (実機での tick 実時間の回帰) は PM の検証待ち**。
 
+- **W0 の NP21/W 側 (PM、2026-09-23)**: 着地 (7269639、`make check` 全通過)。`kselftest_fail` = 0 (`test_pit_setup` 込み)、
+  ホストの単調時計で 30 秒測って **3003 tick = 99.3Hz (10.07ms、HTTP の往復ぶんの誤差)** — 1.9968MHz 設定では不変。
+  **実機側は未検証** (ユーザーの次の実機回): FD を最新の `images/os32_boot.img` で書き直し → 起動画面 2 行目に
+  `PIT 2.4576M` が出ること → `rshell_serial.py cmd uptime` をホストの時計で 120 秒あけて 2 回 (直す前なら
+  ゲストは 148 秒進む、直っていれば 120±1 秒)。
+
 ### 1-1. 割り込みの動的登録 — `kernel/irq.c` / `kernel/irq.h`
 
 ```c
