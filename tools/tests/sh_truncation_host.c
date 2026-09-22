@@ -900,6 +900,7 @@ u32 save_crc32(const void *data, u32 len)
 #include "../../userland/shell/cmd_sys.c"
 #include "../../userland/shell/cmd_filer.c"
 #include "../../userland/shell/rshell.c"
+#include "../../userland/shell/serial_watchdog.c"   /* rshell.c の番犬 (往復 2) */
 #include "../../userland/shell/ui.c"
 
 /* main.c の main() と同じ順で登録表を作る (表そのものは実物) */
