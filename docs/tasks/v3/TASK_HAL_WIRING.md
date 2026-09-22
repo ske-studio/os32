@@ -44,6 +44,11 @@ BIOS ワークを読んで保存 (R3)、DMA プールは **SHM ではなく SQLi
 - 効果: NP21/W (1.9968MHz 設定) では reload = 19968 のまま**不変**。実機では tick が 10ms になり、
   `cpu_delay_us()` の実時間・FDC のタイムアウト (tick 単位)・シリアルの TX 予算 (tick 単位) が**全部変わる**ので、
   W0 に回帰を入れる。この票の**最初の着地単位** (決裁 2)。
+- **進捗 (2026-09-23、worktree `wt/pit-clock`)**: 実装済み。`kernel/sysclk.{c,h}` / `kernel/pit_math.{c,h}` を新設、
+  `pit_init` は `int` を返して `pit_get_setup()` で `struct pit_setup` を公開、`serial_detect_clock()` は廃止して
+  シリアルも保存値を見る。ホスト試験 `make check-pit-clock-host` (5 ケース / 変異 5 本すべて RED) と
+  kselftest の `test_pit_setup()` を追加、経緯は `docs/POLICY_DEBUG.md` §4-54。
+  `make kernel` は警告の増加なしで通る。**W0 (実機での tick 実時間の回帰) は PM の検証待ち**。
 
 ### 1-1. 割り込みの動的登録 — `kernel/irq.c` / `kernel/irq.h`
 

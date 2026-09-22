@@ -7,6 +7,8 @@
 
 #include "idt.h"
 #include "io.h"
+#include "sysclk.h"   /* 0000:0501h から判定したシステムクロック */
+#include "memmap.h"   /* PIT_HZ */
 
 /* ======================================================================== */
 /*  IDT テーブル (256エントリ, 各8バイト = 2048バイト)                      */
@@ -201,19 +203,43 @@ void pic_init(void)
 /*  pit_init — PIT (8254) インターバルタイマ設定                            */
 /*  カウンタ#0 をモード2(レートジェネレータ)で設定                          */
 /*                                                                          */
-/*  hz: 割り込み周波数 (推奨100Hz)                                          */
-/*  PC-9801FA 8MHz系: 1996800 / hz                                          */
+/*  **リロード値は判定したシステムクロックから出す** (kernel/sysclk.c)。    */
+/*  1.9968MHz → 19968 / 2.4576MHz → 24576。どちらもちょうど 10ms。          */
+/*  決め打ちだったころ、2.4576MHz 系 (実機 PC-9821Ra266) の tick は         */
+/*  8.125ms (123Hz) で、tick を数える待ち・番犬・CPU 校正が全部 23% 速く     */
+/*  なっていた。NP21/W は 1.9968MHz 設定なので**ここは踏めない**            */
+/*  (docs/POLICY_DEBUG.md §4-54)。                                          */
+/*                                                                          */
+/*  hz: 割り込み周波数。いまは PIT_HZ のみ。                                */
+/*  戻り: 0 = 頼まれたとおり / 負 = 出せないので既定 PIT_HZ を積んだ         */
 /* ======================================================================== */
-void pit_init(unsigned int hz)
+static struct pit_setup s_pit = { 0, 0, 0, 0, 0, 0 };
+
+const struct pit_setup *pit_get_setup(void)
 {
-    u16 divisor;
+    return &s_pit;
+}
 
-    if (hz == 0) hz = 100;
-    divisor = (u16)(PIT_CLOCK / hz);
+int pit_init(unsigned int hz)
+{
+    struct pit_setup s;
+    int rc;
 
-    outp(PIT_MODE, PIT_MODE_TIMER0);         /* モード設定 */
-    outp(PIT_CNTR0, divisor & 0xFF);         /* LSB */
-    outp(PIT_CNTR0, (divisor >> 8) & 0xFF);  /* MSB */
+    rc = pit_compute(sysclk_hz(), hz, &s);
+    if (rc != 0) {
+        /* 出せない頼みでも**タイマ無しでは起動を続けない**。既定の
+         * PIT_HZ を積んで、頼まれたとおりでないことは戻り値で伝える。 */
+        if (pit_compute(sysclk_hz(), (unsigned int)PIT_HZ, &s) != 0) {
+            return rc;
+        }
+    }
+    s.mode = (u8)PIT_MODE_TIMER0;
+    s_pit = s;
+
+    outp(PIT_MODE, PIT_MODE_TIMER0);              /* モード設定 */
+    outp(PIT_CNTR0, s.reload & 0xFF);             /* LSB */
+    outp(PIT_CNTR0, (s.reload >> 8) & 0xFF);      /* MSB */
+    return rc;
 }
 
 /* ======================================================================== */

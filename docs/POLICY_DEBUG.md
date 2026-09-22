@@ -1033,6 +1033,45 @@ read-modify-write で保つ。
   `fdd_diskready` で Ready 扱い。**FRY 無しでもエミュレータでは全部通る** — §4-49・§4-51 と同じ型。
 - **対策**: 0x94 の動作時の書き込みを `CTRL_FRY | CTRL_MTON | CTRL_DMAE` に。
 
+### 4-54. PIT の分周が**クロック決め打ち**で、2.4576MHz 系の tick は 8.125ms だった (2026-09-23)
+
+- **症状**: 見た目には何も起きない。実機 PC-9821Ra266 で `tick_count` を使う待ち・番犬
+  (FDC のタイムアウト、シリアルの TX 予算)・CPU 校正が**一律 23% 速い**。
+  100Hz を頼んだはずの tick が実際は **123Hz (8.125ms)**。
+- **原因**: `kernel/idt.c` の `pit_init()` が `PIT_CLOCK` = 1,996,800Hz **決め打ち**で
+  `divisor = PIT_CLOCK / hz` を計算していた。PC-98 の 8253 TCU に入るクロックは機種で
+  2 通り (`0000:0501h` bit7: 1 = 8MHz 系 → 1.9968MHz / 0 = 5･10MHz 系 → 2.4576MHz)。
+  Ra266 は後者 (`[ser] 9600bps (clk 2457600Hz, count 16)` と出る) なので、19968 を積むと
+  19968 / 2457600 = 8.125ms になる。正しくは 24576。
+- **なぜ気づかなかったか**: **NP21/W は 1.9968MHz 設定**なので、エミュレータでは
+  決め打ちの値がたまたま正解で、100Hz ちょうどが出ていた。§4-49 (シリアルの分周)・
+  §4-51 (FDC のシーク時間)・§4-53 (FRY) と同じ型 — **エミュレータが模擬しない機種差**。
+  クロックの判定自体は `drivers/serial.c` の `serial_detect_clock()` に既にあったが、
+  呼ばれるのは `kernel.c:228` = `pit_init` (194 行) の **34 行あと**で、しかも
+  CR3 が master と一致しないと何もしない作りだった (シリアルしか見ていなかった)。
+- **対策**: 判定を `kernel/sysclk.c` (`sysclk_detect()` / `sysclk_hz()` /
+  `sysclk_is_8mhz()`) に切り出し、**`pit_init` より前**に `kernel.c` から 1 回だけ呼ぶ
+  (`paging_init` より前なので PG=0、低位物理がそのまま見える → CR3 検査は不要)。
+  `pit_init()` は `reload = sysclk_hz() / hz` で割り、積んだ内容を
+  `struct pit_setup { clk_hz, hz, reload, period_us, mode, valid }` に残して
+  `pit_get_setup()` で読めるようにした。算数は `kernel/pit_math.c` に分けてホストで試験する。
+  `serial_detect_clock()` は廃止し、シリアルも保存値を見る。
+  起動画面の 2 行目に `PIT 1.9968M` / `PIT 2.4576M` を出す (実機で目視できる)。
+- **どう確かめるか**:
+  (1) `make check-pit-clock-host` — 両クロックのリロード値 (19968 / 24576) と周期
+      (どちらも 10000µs)、100Hz 以外と未知クロックの拒否。記録は
+      [`tools/tests/pit_clock_tdd.md`](../tools/tests/pit_clock_tdd.md)。
+  (2) 起動時の `kselftest` の `test_pit_setup()` — `valid` / `reload == sysclk_hz() / 100`
+      / `period_us == 10000` / `mode == PIT_MODE_TIMER0` / `sysclk_detected()`。
+      `kernel.map` の `kselftest_fail` を読む (§2)。
+  (3) **実機での実時間**: ホストの単調時計で 60 秒を測りながら `tick_count` の差を取る
+      (シリアル経由で前後に読む)。10ms ちょうどなら 6000±数十。直す前の機械では
+      約 7385 (123Hz) になる。**この照合だけは NP21/W では意味がない** (通信速度も
+      クロックも模擬していない)。
+- **教訓**: 「エミュレータで 100Hz が出ている」は**機種差を確かめたことにならない**。
+  機種で 2 通りある値を定数で持ったら、**判定する側と使う側の順序**まで見る
+  (判定器はあったのに、使う側より後に呼ばれていた)。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
