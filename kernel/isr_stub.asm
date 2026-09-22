@@ -92,7 +92,6 @@ extern v86_reflect_irq
 extern v86_tick_and_check_timeout
 extern v86_check_exit_request
 extern v86_exit_to_kernel
-extern ne2k_irq
 ;; CPL=3 アプリの強制脱出 (CTRL+STOP)。要求があれば longjmp して戻らない
 ;; (exec/exec.c、票 K2 作業 4)。
 extern ring3_abort_check
@@ -413,35 +412,45 @@ isr_stub_default:
         IRETD_USER
 
 ;; ============================================================
-;; 未登録ハード IRQ 用デフォルトスタブ
+;; 動的 IRQ の共通スタブ (票 TASK_HAL_WIRING §1-1)
 ;;
-;; 以前は isr_stub_default (EOI なし iretd) が全ベクタに入っていたため、
-;; 未登録の IRQ が一度でも上がると PIC の ISR ビットが立ったままになり、
-;; 同順位以下の IRQ が永久にブロックされていた (実際 IRQ9 で発生)。
-;; C 側 isr_unexpected_irq() が正しいマスタ/スレーブ EOI と診断表示を行う。
+;; 以前はここが IRQ_UNEXP (EOI + 診断だけ) だった。PCI の装置は BIOS が
+;; IRQ を割り当て、複数の装置が 1 本を共有し得るので、「起動時に読んだ番号で
+;; ハンドラを結ぶ口」が要る。C 側 irq_dispatch() が表の全登録者を 2 巡ぶん
+;; 呼び、**EOI は irq_finish() の 1 経路だけ**で送る (誰も受けなくても送る —
+;; 送らないと PIC の ISR ビットが立ったままになり、同順位以下が永久ブロック
+;; される。実際 IRQ9 で起きた)。
+;;
+;; **V86 ゲストへは反射しない** (V86_REFLECT を置かない)。動的登録の IRQ は
+;; ホスト (OS32) 所有の装置で、ゲストのものではない。V86 フレームからの復帰は
+;; IRETD_USER が面倒を見る。
+;;
+;; cld: 割り込みの入口は DF を自動で消さない。V86 ゲストが STD の直後に
+;; 割り込まれると、C 側から呼ばれる kstrcmp (lodsb) が逆向きに走る (往復 3 B3)。
 ;; ============================================================
-extern isr_unexpected_irq
+extern irq_dispatch
 
-%macro IRQ_UNEXP 1
-global irq_stub_unexp_%1
-irq_stub_unexp_%1:
+%macro IRQ_COMMON 1
+global irq_stub_common_%1
+irq_stub_common_%1:
         pushad
         RESTORE_KSEG
+        cld
         push    dword %1                ;; IRQ 番号 (ベクタではない)
-        call    isr_unexpected_irq
+        call    irq_dispatch
         add     esp, 4
         popad
         IRETD_USER
 %endmacro
 
-IRQ_UNEXP 3                     ;; INT 0x23
-IRQ_UNEXP 5                     ;; INT 0x25
-IRQ_UNEXP 6                     ;; INT 0x26
-IRQ_UNEXP 8                     ;; INT 0x28
-IRQ_UNEXP 9                     ;; INT 0x29
-IRQ_UNEXP 10                    ;; INT 0x2A
-IRQ_UNEXP 14                    ;; INT 0x2E
-IRQ_UNEXP 15                    ;; INT 0x2F
+IRQ_COMMON 3                    ;; INT 0x23
+IRQ_COMMON 5                    ;; INT 0x25
+IRQ_COMMON 6                    ;; INT 0x26
+IRQ_COMMON 8                    ;; INT 0x28
+IRQ_COMMON 9                    ;; INT 0x29
+IRQ_COMMON 10                   ;; INT 0x2A
+IRQ_COMMON 14                   ;; INT 0x2E
+IRQ_COMMON 15                   ;; INT 0x2F
 
 ;; ============================================================
 ;; IRQ0: タイマ割り込み (INT 0x20)
@@ -450,6 +459,7 @@ global irq_stub_0
 irq_stub_0:
         pushad
         RESTORE_KSEG
+        cld                     ;; 割り込みの入口は DF を消さない (往復 3 B3)
 
         ;; tick_count をインクリメント
         inc     dword [tick_count]
@@ -483,6 +493,7 @@ global irq_stub_1
 irq_stub_1:
         pushad
         RESTORE_KSEG
+        cld                     ;; 同上 (C 呼び出しの前に DF=0)
 
         ;; Cハンドラを呼び出し。V86 セッション中はここでスキャンコードが
         ;; ゲスト用 FIFO に積まれ、OS32 のリングバッファには入らない。
@@ -528,6 +539,7 @@ global irq_stub_4
 irq_stub_4:
         pushad
         RESTORE_KSEG
+        cld
 
         ;; Cハンドラを呼び出し
         call    serial_irq_handler
@@ -576,6 +588,7 @@ global irq_stub_11
 irq_stub_11:
         pushad
         RESTORE_KSEG
+        cld
 
         ;; Cハンドラを呼び出し
         call    fdc_irq_handler
@@ -618,6 +631,7 @@ global irq_stub_2
 irq_stub_2:
         pushad
         RESTORE_KSEG
+        cld                     ;; V86_REFLECT も C (v86_reflect_irq) を呼ぶ
 
         ;; マスタPICにEOI送出 (PC-98: ポート 0x00)
         mov     al, OCW2_EOI
@@ -632,6 +646,7 @@ global irq_stub_12
 irq_stub_12:
         pushad
         RESTORE_KSEG
+        cld                     ;; 同上
 
         ;; スレーブPICにEOI送出 → マスタPICにもEOI送出 (カスケード)
         mov     al, OCW2_EOI
@@ -650,6 +665,7 @@ global irq_stub_13
 irq_stub_13:
         pushad
         RESTORE_KSEG
+        cld
 
         ;; Cハンドラを呼び出し
         call    mouse_irq_handler
@@ -664,27 +680,9 @@ irq_stub_13:
         IRETD_USER
 
 ;; ============================================================
-;; LAN (LGY-98 / NE2000) の IRQ 入口 — マスタ PIC の IRQ3 / 5 / 6
-;;
-;; どの IRQ を使うかは起動設定で決まり、drivers/lgy98.c が
-;; idt_register_irq() で該当スタブを IDT に入れる (未使用の IRQ は
-;; irq_stub_unexp_* のまま)。NIC は OS32 が所有するので V86 ゲストへは
-;; 反射しない。C ハンドラ ne2k_irq() は処理した ISR ビットだけを ACK し、
-;; PIC の EOI はここで 1 回だけ送る。string 命令の前に cld で DF=0。
+;; LAN (LGY-98 / NE2000) の IRQ 入口は **共通スタブに移した**
+;; (票 TASK_HAL_WIRING §1-1)。drivers/lgy98.c が
+;;   irq_register(irq, ne2k_irq_shared, NULL, IRQ_F_SHARED)
+;; で結ぶので、専用の irq_stub_nic_3/5/6 も idt_register_irq() も要らない。
+;; EOI は irq_finish() が 1 回だけ送る。
 ;; ============================================================
-%macro IRQ_NIC 1
-global irq_stub_nic_%1
-irq_stub_nic_%1:
-        pushad
-        RESTORE_KSEG
-        cld
-        call    ne2k_irq
-        mov     al, OCW2_EOI
-        out     PIC1_CMD, al
-        popad
-        IRETD_USER
-%endmacro
-
-IRQ_NIC 3                       ;; INT 0x23
-IRQ_NIC 5                       ;; INT 0x25
-IRQ_NIC 6                       ;; INT 0x26

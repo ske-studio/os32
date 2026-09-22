@@ -67,15 +67,18 @@ extern void irq_stub_2(void);     /* IRQ2:  VSYNC (INT 0x22) — V86 ゲスト�
 extern void irq_stub_12(void);    /* IRQ12: サウンドボード (INT 0x2C) */
 extern void irq_stub_13(void);    /* IRQ13: マウス (INT 0x2D) */
 
-/* 未登録ハード IRQ 用スタブ (EOI + 診断表示のみ) */
-extern void irq_stub_unexp_3(void);
-extern void irq_stub_unexp_5(void);
-extern void irq_stub_unexp_6(void);
-extern void irq_stub_unexp_8(void);
-extern void irq_stub_unexp_9(void);
-extern void irq_stub_unexp_10(void);
-extern void irq_stub_unexp_14(void);
-extern void irq_stub_unexp_15(void);
+/* 動的 IRQ の共通スタブ (票 TASK_HAL_WIRING §1-1)。
+ * C 側 irq_dispatch() が kernel/irq.c の表を引いて登録者を呼び、
+ * EOI は irq_finish() の 1 経路だけが送る。登録が 0 件でも EOI は出る
+ * (送らないと PIC の ISR ビットが立ったままになり同順位以下が止まる)。 */
+extern void irq_stub_common_3(void);
+extern void irq_stub_common_5(void);
+extern void irq_stub_common_6(void);
+extern void irq_stub_common_8(void);
+extern void irq_stub_common_9(void);
+extern void irq_stub_common_10(void);
+extern void irq_stub_common_14(void);
+extern void irq_stub_common_15(void);
 
 /* デフォルトハンドラ (ベクタ 0x30 以降のみ) */
 extern void isr_stub_default(void);
@@ -137,17 +140,18 @@ void idt_init(void)
     idt_set_gate(0x2C, irq_stub_12, IDT_ATTR_INT_GATE32); /* IRQ12: サウンド (V86ゲスト用) */
     idt_set_gate(0x2D, irq_stub_13, IDT_ATTR_INT_GATE32); /* IRQ13: マウス */
 
-    /* 未登録のハード IRQ にも EOI 付きスタブを入れる。
-     * 素の iretd スタブだと PIC の ISR ビットが立ったままになり、
-     * 同順位以下の IRQ が永久にブロックされる。 */
-    idt_set_gate(0x23, irq_stub_unexp_3,  IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x25, irq_stub_unexp_5,  IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x26, irq_stub_unexp_6,  IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x28, irq_stub_unexp_8,  IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x29, irq_stub_unexp_9,  IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x2A, irq_stub_unexp_10, IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x2E, irq_stub_unexp_14, IDT_ATTR_INT_GATE32);
-    idt_set_gate(0x2F, irq_stub_unexp_15, IDT_ATTR_INT_GATE32);
+    /* 動的登録を受ける IRQ (3/5/6/8/9/10/14/15) は共通スタブで受ける。
+     * 登録が 0 件のあいだの挙動は従来の irq_stub_unexp_* と同じ
+     * (EOI + 初回だけ診断) で、違うのは irq_register した driver が
+     * 居れば呼ばれること。固定スタブの線はここに入れない。 */
+    idt_set_gate(0x23, irq_stub_common_3,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x25, irq_stub_common_5,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x26, irq_stub_common_6,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x28, irq_stub_common_8,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x29, irq_stub_common_9,  IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2A, irq_stub_common_10, IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2E, irq_stub_common_14, IDT_ATTR_INT_GATE32);
+    idt_set_gate(0x2F, irq_stub_common_15, IDT_ATTR_INT_GATE32);
 
     /* リング3 システムコール (int 0x80): ゲート DPL=3 で CPL=3 から呼べる。
      * 他の例外/IRQ ゲートは DPL=0 のまま (ユーザから直接呼べない, C4)。 */

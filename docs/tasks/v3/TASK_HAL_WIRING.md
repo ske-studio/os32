@@ -159,6 +159,28 @@ ISR の中からの登録・解除・自己解除は禁止 (契約、debug ビ�
 最初の登録で `irq_enable`、最後の解除で `irq_disable`。共有者が勝手に `irq_disable` を呼ばない (契約)。
 この層は遅延処理を持たない (driver 側の tick フックはこの層の外で、解除の前に driver が自分で止める)。
 
+- **進捗 (2026-09-23、worktree `wt/hal-a`、実装 A)**: 実装済み。`kernel/irq.{c,h}` (表・PIC のマスク・
+  EOI) と `kernel/irq_math.{c,h}` (判断だけ、I/O 無し) を新設、`kernel/isr_stub.asm` の `IRQ_UNEXP` を
+  共通スタブ `irq_stub_common_%1` (3/5/6/8/9/10/14/15) に置き換え、`IRQ_NIC` (LGY-98 専用) は廃止。
+  固定スタブ 0/1/2/4/11/12/13 の C 呼び出し前に `cld` を追加 (往復 3 B3。2 と 12 も `V86_REFLECT` 経由で
+  C を呼ぶので足した)。`isr_unexpected_irq` は **EOI を抜いた** `isr_unexpected_report` に分割し、
+  IRQ15 のスプリアス検査ごと `irq_finish` へ移した (動的経路で `pic_eoi` を呼ぶのはそこだけ)。
+  LGY-98 は `irq_is_free` を廃止して `irq_register(irq, ne2k_irq_shared, NULL, IRQ_F_SHARED)` に移行、
+  NE2000 は `nic.imr_written` shadow と **IMR を書く唯一の口** `ne2k_imr_sync()` を入れ、`enter`/`leave` を
+  それぞれ 1 つの `irq_save` にまとめ、`program_ring()` は IMR を書かなくした。
+  ホスト試験 `make check-irq-math-host` (4 ケース / 変異 8 本すべて RED)、kselftest の `test_irq_dynamic()`
+  (`int 0x23` で共通スタブを通し、拒否規則・2 巡・DEFERRED の計数・登録数での PIC マスク・解除後に
+  呼ばれないこと・200 と 201 の撃ち分け・隔離の sticky を毎起動で見る)。記録は `tools/tests/irq_math_tdd.md`。
+  `make kernel` は警告の増加なしで通る。
+  **PM の検証待ち (W3、NP21/W)**: 実 IRQ のエッジ (master 3 / slave 9) を `/api/pic` で IRR・ISR を見ながら、
+  共有 2 登録の集約と tick 回収、片方解除、CPL=3 アプリ実行中と V86 中、NE2000 の enter/leave と再初期化
+  直後の窓への注入、noisy 隔離、IRQ0 の所要時間 (`/api/prof`)、**LGY-98 をアダプタに移した後の rshell/LAN の通信**。
+  **票からの逸脱 1 件**: 登録を断られた LGY-98 は「利用不可」ではなく**ポーリング稼働のまま**にした
+  (PM の指示。`ne2k_timer_tick` が既に定期回収を持つので NIC を落とす必要がない)。票 §1-1 の
+  「登録を拒否された装置はこの票では利用不可」は PCI probe 経路の決定 (往復 7 B1) として読んだ。
+  **未実装**: debug ビルドのハンドラ時間計測 (1ms 超の 1 回報告) と `irq_off_max_us`。W1/W3 の受入項目に
+  無く、`sys_time_now` の再帰呼び出しを避ける設計 (1-6) が要るので別に起こす。
+
 ### 1-2. 8237 DMA の共通部 — `drivers/dma8237.c` / `dma8237.h`
 
 ```c
@@ -339,6 +361,29 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 - **KAPI**: 64 ビットの戻り値は使えない (往復 1 の B14) ので**出力引数 2 本**で末尾追記 (版数 58 → 59)。
   CPL=3 のポインタ検査は既存の作法。同一スナップショットの上下を書く。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
+
+- **進捗 (2026-09-23、worktree `wt/hal-a`、実装 A)**: 実装済み。`kernel/ktime.c` (スナップショット) /
+  `kernel/time_math.{c,h}` (判定と算数、I/O 無し) / `kernel/ktime.h` (試験専用の注入口) を新設、
+  KAPI を **v58 → v59** に上げて `sys_time_now` を末尾追記 (slot 222 = 0x380)。CPL=3 の検証は
+  `kapi/kapi_sys.c` の `kapi_sys_time_now`。`-EAGAIN` / `-ENODEV` は既存の ABI 空間に合わせて
+  `OS32_ERR_AGAIN` (-14) / `OS32_ERR_NOSYS` (-10) を使った (新しい番号は増やしていない)。
+  ホスト試験 `make check-time-math-host` (4 ケース / 変異 6 本すべて RED)、kselftest の `test_time_now()`
+  (1 万回連続読みで逆行 0、`cpu_delay_us(1000)` を挟んだ実測、注入で p1/p2 の 3 分岐と 3 回失敗、
+  境界の count、実 PIT の位相待ちは**踏めた分岐を記録して未検証を報告**、1 回あたりの µs を表示)。
+  記録は `tools/tests/time_math_tdd.md`。
+  **レビュー往復 10/11/12 の反映**: OS32 は CR0.WP = 0 なので、CPL=0 のラッパは読み取り専用の USER
+  ページ (共有ライブラリの `.text`) にも #PF なしで書けてしまう。`exec/exec.c` に
+  `ring3_user_ranges_writable()` を新設し、**master CR3 へ切り替えてからアプリ PD の物理を歩いて**
+  present + RW + USER を PDE と PTE の両方で確かめる (2 本を 1 回の往復で、CR3 → IF の順で復元)。
+  落ちたら `ring3_fault_kill`。ビットの判定表は `exec/ring3_str.c` の純粋関数にして
+  `make check-ring3-str-host` のケース 5 で網羅した。
+  **PM の検証待ち (W4)**: 両クロック (NP21/W 1.9968 / 実機 2.4576)、CPL=3 からの 64 ビット受け取りと
+  ポインタ契約 (`userland/tests/time_test.bin`、`time_test ro` は**わざとアプリを殺す**)、
+  非恒等写像の出力が物理側に反映されること、復帰後の CR3 が呼び出し時と一致すること、
+  IF=0 を 10.2ms 続けた後の読み (契約外の挙動の記録)。
+  **手元で通っていないもの**: `userland/tests/time_test.c` は**コンパイルは通るがリンクできない**
+  (この環境の newlib が `/usr/local/cross` に無い。既存の `hal_test` も同じで、私の変更とは無関係)。
+  `build/app.conf` と `userland/deploy.yaml` には登録済み ([V2])。
 
 ### 1-6. 実装の注意 (往復 5・6 の非 blocker)
 

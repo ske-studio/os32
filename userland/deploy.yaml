@@ -147,6 +147,12 @@ filesystem:
     - host: userland/tests/cfg_bench.bin
       guest: /usr/bin/
       tags: [programs]
+    # --- time_test (票 TASK_HAL_WIRING §1-5 / 受入 W4: µs 時計 sys_time_now の
+    #     CPL=3 受入。カーネル側 kselftest は CPL=0 なのでポインタ契約を踏めない。
+    #     `time_test ro` は**わざとアプリを殺す**ので既定では走らない) ---
+    - host: userland/tests/time_test.bin
+      guest: /usr/bin/
+      tags: [programs]
     # --- kstr_bench (票 TASK_KSTRING_BENCH: kstring の asm 版と C 版を実機で測る。
     #     出力は `KSTR ...` の固定書式で、集計は tools/kstr_bench_report.py) ---
     - host: userland/tests/kstr_bench.bin

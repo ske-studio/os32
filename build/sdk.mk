@@ -269,6 +269,27 @@ check-cpu-calibrate-host:
 check-pit-clock-host:
 	python3 -B tools/tests/test_pit_clock.py --target --mutate
 
+# 動的 IRQ の判断 (kernel/irq_math.c、票 TASK_HAL_WIRING §1-1)。
+# 見るのは **NP21/W でも実機でも狙って作れない**重なり: A と B が同時に要因を
+# 持つ (最初の HANDLED で打ち切らない)、1 巡目で受けて 2 巡目が空
+# (handled_any を 0 で上書きしない)、1 tick に 200 回と 201 回 (ストームの
+# 閾値)、IRQ15 のスレーブ ISR bit7 が落ちている (スプリアスにスレーブ EOI を
+# 送らない)、登録の拒否規則 (固定 IRQ / 範囲外 / 重複 / SHARED 不一致 /
+# 5 件目 / 隔離済み / ISR 文脈)。
+# --target はカーネルと同じ i386-elf で kernel/irq.c ごと通す。
+# 記録は tools/tests/irq_math_tdd.md。
+check-irq-math-host:
+	python3 -B tools/tests/test_irq_math.py --target --mutate
+
+# µs 時計の判定と算数 (kernel/time_math.c、票 TASK_HAL_WIRING §1-5)。
+# 見るのは p1/p2 の判定表 3 分岐 (実 PIT では呼び出しから p1 読みまでに境界を
+# 越える機械があり、位相待ちでは 0/0 と 0/1 を撃ち分けられない) と、
+# **71 分の桁あふれ** (tick との積を u32 で組むと 429496 tick で時刻が 0 に
+# 戻る。起動から 71 分はエミュレータでも実機でも 1 度も回していない)。
+# --target は kernel/ktime.c ごと通す。記録は tools/tests/time_math_tdd.md。
+check-time-math-host:
+	python3 -B tools/tests/test_time_math.py --target --mutate
+
 # ホスト道具 tools/rshell_serial.py の「応答の識別」。実機の rshell と
 # 話すときに **EOT の対応が 1 つずれる** 事故を止める (票 TASK_SERIAL_VFAST
 # の Codex レビュー往復 3 ⑤⑥)。見るのは 3 つ: エコー行を **行全体** で
@@ -678,7 +699,7 @@ check:
 check-key-inject-host:
 	python3 -B tools/tests/test_key_inject.py
 
-check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host
+check-par: check-kprintf-attr-host check-key-inject-host check-kapi-version check-docs-links check-docs-orphans check-tests-inventory check-manifests check-constraints check-privileged check-arch-asm check-le-access check-ne2000-ring check-shlib check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-irq-math-host check-time-math-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hostdrv-list-host check-fs-kind-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-lan-bridge-host check-pci-decode-host
 
 check-mut: check-edit-doc-host check-fstat-redir-host check-kstring-c-host check-kstr-bench-host check-sh-status-host check-hsync-h3-host check-hsync-h2-host check-h4-manifest-host check-vfs-excl-host check-fs-kind-callers-host check-cat-linenum-host check-result-conv-host check-guest-host
 
@@ -698,4 +719,4 @@ check-edit-doc-host:
 clean-sdk:
 	rm -rf $(SDK_OUT) $(SDK_DIST_DIR)
 
-.PHONY: check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host
+.PHONY: check-kprintf-attr-host check-edit-doc-host check-memmap check-memmap-host sdk sdk-dist clean-sdk check-fstat-redir-host check-vfs-excl-host check-hsync-h2-host check-h4-manifest-host check-kapi-version check-manifests check-constraints check-privileged check-arch-asm check-le-access check-gui-proto check-term-model check-term-render check-t5a-host check-memory-host check-memmap-host check-memmap check-boot-splash-host check-tools-host check-gshell-host check-db-owned-host check-vfs-fd-sqlite-host check-fdc-seek-host check-serial-vfast-host check-cpu-calibrate-host check-pit-clock-host check-irq-math-host check-time-math-host check-rshell-serial-host check-vfs-mount-dev-host check-sqlite-groups-host check-con-sink-host check-kbd-inject-host check-launch-host check-ring3-str-host check-sh-launch-host check-sh-shell-host check-sh-truncation-host check-sh-status-host check-multiapp-model-host check-settings-protect-host check-hsync-h1-host check-hsync-h3-host check-hostdrv-list-host check-fs-kind-host check-fs-kind-callers-host check-cat-linenum-host check-vfs-kind-host check-b8-open-host check-db-v50-host check-db-errstr-host check-cfg-host check-gui-host check-install-recover-host check-install-fresh-host check-host-agent check-net-link-host check-host-lib-host check-kstring-c-host check-kstr-bench-host check-result-conv-host check-guest-host check-guest check-arm-compile check-docs-links check-tests-inventory check-docs-orphans check check-lan-bridge-host check-pci-decode-host
