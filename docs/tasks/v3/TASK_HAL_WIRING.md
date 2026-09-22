@@ -1,6 +1,6 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v13 — Codex 往復 12 で Approve (2026-09-23)。以後は実装レビュー (実装 A/B が並行中)。往復 12 の注意 7 点は 1-6 に**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W 受入済み (2026-09-23、§3-1)。実機の W0/W4/W7 と 82557 の実 IRQ は次の実機回。実装レビュー (Codex) 待ち**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
 > 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定) → Codex 往復 11 (R11-1 の 1 件。競合・shlib 属性・COW は新規無し) → v12 → **Codex 往復 12: Approve** (新規 blocker 無し、注意 7 点) → v13。
 
@@ -594,6 +594,19 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 | W5 | カーネル増分 ≤ 5KB、内訳: IRQ 表 8 × 4 × 12B = 384B、storm ビット + IRQ 別の tick 内発生数・deferred 回数 (8 × 2 × 4B = 64B)、bind 情報 32 件 × 8B = 256B + getter/KAPI/診断コード、pool ビットマップ + span 16 × 4B = 72B、DMA チャネル状態 4 × 16B、pit_setup 20B、コード (irq / dma8237 / dma_pool / pci_bind / sys_time ≒ 2.5KB、u64 の割り算は libgcc に既にある)、診断文字列 ≒ 0.5KB。`__bss_end` 差分と `docs/02_memory.md` の生成 (**新配置 0x2E8000〜0x2F7FFF が `MM_RW` で USER 無し、上下が NP**)、プールの枯渇 → 解放 → 再利用、**プールの PTE に USER を立てる変異で検査が落ちる** | `docs/02_memory.md` + kselftest |
 | W6 | **土台完了**の受入はここまで。82557 での連続 TX/RX・共有・再開は **L-B の受入**。土台完了は**システム全体の IF=0 時間保証ではない** (NE2000 の残件: 既存 ISR 経路に加え、変更後は foreground の leave → `irq_pending` → `service()` の経路も IF=0)。土台の合格と実機条件の合格 (W0 実機、W7、82557 の実 IRQ での共有) は分けて記録する。HAL 単体で未検証の実機条件を残件に明記: 82557 の実 IRQ 番号での共有、PCI バスマスタのキャッシュ整合 (W7)、CS4231 の DMA (§5-5)、**NE2000 の `wait_rdc` / `hw_reset` が ISR 文脈で回る既存の契約違反** (`ne2k_irq` と `ne2k_timer_tick` の両方から `service()` の失敗分岐 → `reinit_or_fail → bring_up → hw_reset` で到達。L-C で「要求の記録」と「foreground の実行」に分ける) | — |
 | W7 | **キャッシュ整合 (実機)**: CPU がパターンを書いて**フラッシュせずに** DMA で読ませる (FDC 書き込み → 読み戻し、82557 は L-B のループバック)、DMA で受けた直後に CPU が読む、を双方向で 100 回。所有権の移譲は「CPU 書き → 装置へ渡す → 装置完了の証拠 → CPU 読み」の順で、明示のフラッシュ命令は使わない。不一致が出たら対象 CPU と所有権移譲の手順を含めて再設計する (1-6。`wbinvd` は候補であって確定ではない) | 実機 |
+
+### 3-1. 受入の記録 (PM、2026-09-23、NP21/W。実機は次回)
+
+| ID | 結果 |
+|---|---|
+| W0 | NP21/W: 合格 (tick 99.3Hz、kselftest)。**実機: 未** |
+| W1 | 合格: ホスト試験 9 本 (dma8237 8 / dma_pool 9 / pci_bind 10 / irq_math 8 / time_math 8 / pit_clock 5 / ring3_str の変異すべて RED)、`make check` 全通過 |
+| W2 | 合格: FD 起動、`[dma] 0439h ff -> ff state=UNREADABLE`、FD へ書いた 5,151B を読み戻して md5 一致。タイムアウト → abort → 再試行の経路は未観測 (NP21/W では起きない) |
+| W3 | 部分: kselftest の `int $0x23` で登録規則・2 巡・DEFERRED・登録数マスク・解除・ストーム 200/201・隔離 sticky を毎起動確認 (187/187)。**LGY-98 が IRQ5 に `irq_register` で結ばれた** (`[lgy98] base 0x10d0 irq 5`) が LAN の通信は未確認。実 IRQ の共有 (2 装置) と V86 中は未。`/api/pic` は読み取り専用 |
+| W4 | 合格 (NP21/W): 1 万回で逆行 0 (クランプ 0 回)、CPL=3 の `time_test` で NULL / 範囲交差 (差 0〜3) が負 + 出力不変、差 4 は成功、heap / stack 出力は成功、2000 回で逆行なし。実 PIT の位相待ちは p1=1 の分岐だけ踏めた (0/0 と再試行は未検証)。**位相試験の直後にクランプが 1,002 回**入った = p1=1 (IRR 先) で 1 周期ぶん先に出た値を、続く 1,000 回の読みが追い越すまで押さえた (NP21/W の非原子性、実機での回数は要記録)。**実機の 2.4576MHz は未** |
+| W5 | 合格: カーネル 468KB 中 459.8KB (残り 8.2KB)。増分の内訳は A/B/修正の各報告 (製品コード ≒ 3.6KB + 4.5KB、kselftest は圧縮後 +2.6KB) |
+| W6 | 残件: 82557 の実 IRQ、W7 キャッシュ整合、NE2000 の ISR 内 reset (L-C)、既存出力 KAPI の RO 穴 (TASK_KAPI_OUTPUT_GUARD)、**io_wait() 連打で FD 読みが古くなる (POLICY_DEBUG §4-55、原因未特定)**、p1=1 で 1 周期先に出る値の扱い (クランプで単調だが 10ms 止まる。判定に count を併用する案) |
+| W7 | 未 (実機) |
 
 ## 4. しないこと
 

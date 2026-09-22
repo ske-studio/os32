@@ -161,6 +161,7 @@ KAPI **or SDK library** change ([`docs/08_build.md`](docs/08_build.md) §8-4).
 - `kprintf` の属性は PC-98 流 (bit0 = 表示、bit5-7 = BRG) に**入口で変換**している。「画面に出ている」は
   `/api/tvram` の文字ではなく `/api/screenshot` の**見た目**で確かめる (0x07 の行は 2026-09-22 まで黒かった)。 → §4-52
 - FDC の 0x94 は **FRY (bit6) を立てる**。無いと READY 線の無いドライブで全コマンドが Not Ready (NP21/W は通る)。 → §4-53
+- `io_wait()` (0x5F 書き) を**万単位で連打**すると、以後の FD 読みが古いデータを返して `/sys` が NOTFOUND になる (NP21/W、原因未特定)。待ちは `nop`。 → §4-55
 - Boot loaders: PM transition inlined in `loader_fat.asm`, `boot_fat.asm` is `.8086`, IPL calls INT 1Bh at most 4 times. → [`docs/10_notes.md`](docs/10_notes.md) §10-2, §10-3
 - Physical 0x90000 is the auto-play mailbox: change the layout and `game/tools/autoplay/driver.py` in the same commit. → [`docs/02_memory.md`](docs/02_memory.md) §2-1
 - 9MB 構成の `v86 -t` は **2026-09-16 に再現しないことを確認** (原因は特定せず解消)。 → §4-28
