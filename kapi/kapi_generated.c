@@ -512,6 +512,30 @@ const u16 kapi_argptr[KAPI_FUNC_COUNT] = {
     0x0002,  /* pci_bind_info: out */
 };
 
+/* ---- 出力ポインタの書き込み可検査 (票 TASK_KAPI_OUTPUT_GUARD) --------
+ * OS32 は CR0.WP = 0 なので、CPL=0 の wrapper は CPL=3 が渡した
+ * 読み取り専用の USER ページ (共有ライブラリの .text/.rodata、全アプリで
+ * 同じ物理) にも #PF なしで書ける。ディスパッチャの早期検査
+ * (kapi_argptr → ring3_ptr_ok) は帯しか見ないので、**target を呼ぶ前**に
+ * ring3_user_ranges_writable で present + RW + USER を確かめる。
+ * 断ったら ring3_fault_kill() (戻らない)。CPL=0 の直呼びは素通し。
+ *
+ * 長さの決め方 (kapi.json の "out" から生成):
+ *   NULL          → その範囲は見ない (KAPI ごとの NULL の扱いを変えない)
+ *   長さ 0 / 負   → 見ない (target 側も書かないか、既存どおりの扱い)
+ *   個数 × 単位   → あふれたら 0xFFFFFFFF (= 必ず拒否) にする
+ * 1 回の呼び出しで 2 範囲まで見られるので、3 範囲以上は 2 本ずつに割る
+ * (**どれか 1 つでも不可なら 1 バイトも書かない**)。 */
+#define KAPI_OUT_LEN(p, n)    ((p) ? (u32)(n) : 0u)
+#define KAPI_OUT_LEN_S(p, n)  (((p) && (int)(n) > 0) ? (u32)(n) : 0u)
+
+static u32 kapi_out_mul(u32 n, u32 unit)
+{
+    if (unit == 0) return 0u;
+    if (n > (0xFFFFFFFFUL / unit)) return 0xFFFFFFFFUL;  /* あふれ → 拒否 */
+    return n * unit;
+}
+
 void __cdecl wrap_gfx_init(void)
 {
     KAPI_HIT(0);
@@ -611,6 +635,11 @@ int __cdecl wrap_paging_enabled(void)
 void __cdecl wrap_rtc_read(void *rtc_time)
 {
     KAPI_HIT(17);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)rtc_time, KAPI_OUT_LEN(rtc_time, sizeof(RTC_Time)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     rtc_read((RTC_Time *)rtc_time);
 }
 
@@ -755,6 +784,13 @@ int __cdecl wrap_dev_count(void)
 int __cdecl wrap_dev_get_info(int idx, char *name, int nm, int *type, u32 *sects)
 {
     KAPI_HIT(41);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)name, KAPI_OUT_LEN_S(name, nm),
+                                    (u32)type, KAPI_OUT_LEN(type, sizeof(int))) ||
+        !ring3_user_ranges_writable((u32)sects, KAPI_OUT_LEN(sects, sizeof(u32)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return dev_api_get_info(idx, name, nm, type, sects);
 }
 
@@ -779,24 +815,44 @@ int __cdecl wrap_np2_detect(void)
 void __cdecl wrap_np2_get_version(char *buf, int size)
 {
     KAPI_HIT(45);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN_S(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     np2_get_version(buf, size);
 }
 
 void __cdecl wrap_np2_get_cpu(char *buf, int size)
 {
     KAPI_HIT(46);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN_S(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     np2_get_cpu(buf, size);
 }
 
 void __cdecl wrap_np2_get_clock(char *buf, int size)
 {
     KAPI_HIT(47);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN_S(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     np2_get_clock(buf, size);
 }
 
 int __cdecl wrap_np2_check_hostdrv(char *buf, int size)
 {
     KAPI_HIT(48);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN_S(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return np2_check_hostdrv(buf, size);
 }
 
@@ -815,12 +871,22 @@ int __cdecl wrap_ide_drive_present(int drv)
 int __cdecl wrap_ide_identify(int drv, void *info)
 {
     KAPI_HIT(51);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)info, KAPI_OUT_LEN(info, sizeof(IdeInfo)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return ide_identify(drv, (IdeInfo *)info);
 }
 
 int __cdecl wrap_ide_read_sector(int drv, u32 lba, void *buf)
 {
     KAPI_HIT(52);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, 512u),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return ide_read_sector(drv, lba, buf);
 }
 
@@ -851,6 +917,11 @@ void __cdecl wrap_path_set_cwd(const char *p)
 void __cdecl wrap_path_parse(const char *input, void *result)
 {
     KAPI_HIT(57);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)result, KAPI_OUT_LEN(result, sizeof(ParsedPath)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     path_parse(input, (ParsedPath *)result);
 }
 
@@ -959,6 +1030,11 @@ void __cdecl wrap_sys_close(int fd)
 int __cdecl wrap_sys_read(int fd, void *buf, u32 size)
 {
     KAPI_HIT(75);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return vfs_read_fd(fd, buf, size);
 }
 
@@ -977,6 +1053,11 @@ int __cdecl wrap_sys_lseek(int fd, int offset, int whence)
 void __cdecl wrap_console_get_size(int *w, int *h)
 {
     KAPI_HIT(78);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)w, KAPI_OUT_LEN(w, sizeof(int)),
+                                    (u32)h, KAPI_OUT_LEN(h, sizeof(int)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     console_get_size(w, h);
 }
 
@@ -1025,12 +1106,22 @@ int __cdecl wrap_sys_isatty(int fd)
 int __cdecl wrap_sys_stat(const char *path, OS32_Stat *buf)
 {
     KAPI_HIT(86);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, sizeof(OS32_Stat)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return vfs_stat(path, buf);
 }
 
 int __cdecl wrap_sys_fstat(int fd, OS32_Stat *buf)
 {
     KAPI_HIT(87);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, sizeof(OS32_Stat)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return vfs_fstat(fd, buf);
 }
 
@@ -1043,12 +1134,24 @@ void __cdecl wrap_gfx_set_palette(int idx, u8 r, u8 g, u8 b)
 void __cdecl wrap_gfx_get_palette(int idx, u8 *r, u8 *g, u8 *b)
 {
     KAPI_HIT(89);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)r, KAPI_OUT_LEN(r, sizeof(u8)),
+                                    (u32)g, KAPI_OUT_LEN(g, sizeof(u8))) ||
+        !ring3_user_ranges_writable((u32)b, KAPI_OUT_LEN(b, sizeof(u8)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     palette_get(idx, r, g, b);
 }
 
 void __cdecl wrap_gfx_get_framebuffer(void *fb)
 {
     KAPI_HIT(90);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)fb, KAPI_OUT_LEN(fb, sizeof(GFX_Framebuffer)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     gfx_get_framebuffer(fb);
 }
 
@@ -1079,12 +1182,22 @@ void __cdecl wrap_gfx_present_raster(void *table)
 void __cdecl wrap_kcg_read_ank(u8 ch, u8 *buf)
 {
     KAPI_HIT(95);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, KCG_ANK_H),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     kcg_read_ank(ch, buf);
 }
 
 void __cdecl wrap_kcg_read_kanji(u16 jis_code, u8 *buf)
 {
     KAPI_HIT(96);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, (KCG_KANJI_H * 2)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     kcg_read_kanji(jis_code, buf);
 }
 
@@ -1199,6 +1312,11 @@ void __cdecl wrap_sys_pipe_clear(int id)
 int __cdecl wrap_sys_redirect_fd_buf(int fd, u8 *buf, u32 size, u32 len)
 {
     KAPI_HIT(115);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return fd_redirect_to_buffer(fd, buf, size, len);
 }
 
@@ -1301,6 +1419,11 @@ void __cdecl wrap_ssg_all_off(void)
 void __cdecl wrap_mouse_poll(void *info)
 {
     KAPI_HIT(132);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)info, KAPI_OUT_LEN(info, sizeof(MouseState)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     mouse_poll((MouseState *)info);
 }
 
@@ -1319,6 +1442,11 @@ void __cdecl wrap_mouse_set_bounds(i16 x_min, i16 y_min, i16 x_max, i16 y_max)
 void __cdecl wrap_tvram_readchar_at(int x, int y, u16 *code, u8 *attr)
 {
     KAPI_HIT(135);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)code, KAPI_OUT_LEN(code, sizeof(u16)),
+                                    (u32)attr, KAPI_OUT_LEN(attr, sizeof(u8)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     tvram_readchar_at(x, y, code, attr);
 }
 
@@ -1415,12 +1543,22 @@ int __cdecl wrap_kcg_load_font(const char *path)
 int __cdecl wrap_ide_get_info(int drv, void *info)
 {
     KAPI_HIT(151);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)info, KAPI_OUT_LEN(info, sizeof(IdeInfo)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return ide_get_info(drv, (IdeInfo *)info);
 }
 
 void __cdecl wrap_sys_get_build_info(char *buf, int size)
 {
     KAPI_HIT(152);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN_S(buf, size),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     kapi_sys_get_build_info(buf, size);
 }
 
@@ -1439,12 +1577,22 @@ void __cdecl wrap_loop_detach(int slot)
 int __cdecl wrap_loop_status(int slot, u32 *total, int *bps)
 {
     KAPI_HIT(155);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)total, KAPI_OUT_LEN(total, sizeof(u32)),
+                                    (u32)bps, KAPI_OUT_LEN(bps, sizeof(int)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return loop_dev_status(slot, total, bps);
 }
 
 int __cdecl wrap_dev_blk_read(const char *dev_name, u32 lba, int count, void *buf)
 {
     KAPI_HIT(156);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, kapi_out_mul(KAPI_OUT_LEN_S(buf, count), 512u),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     { Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }
 }
 
@@ -1463,6 +1611,12 @@ int __cdecl wrap_ime_switch_dict(int variant)
 int __cdecl wrap_ime_user_list(const char *yomi_prefix, void *out, int max)
 {
     KAPI_HIT(159);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable(
+            (u32)out, kapi_out_mul(KAPI_OUT_LEN_S(out, max), (u32)(sizeof(IME_UserEntry))),
+            (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return ime_user_list_facade(yomi_prefix, out, max);
 }
 
@@ -1517,6 +1671,11 @@ int __cdecl wrap_v86_boot2(const char *path, const char *second)
 void __cdecl wrap_gfx_screen_info(void *out)
 {
     KAPI_HIT(168);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(GFX_ScreenInfo)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     gfx_screen_info(out);
 }
 
@@ -1547,6 +1706,11 @@ int __cdecl wrap_gui_register(void *handler, void *pump)
 int __cdecl wrap_gfx_stats(void *out)
 {
     KAPI_HIT(173);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, sizeof(GFX_Stats)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return gfx_stats(out);
 }
 
@@ -1631,12 +1795,22 @@ i32 __cdecl wrap_exec_abort_clear(void)
 i32 __cdecl wrap_con_sink_read(void *buf, u32 cap)
 {
     KAPI_HIT(187);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, cap),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return con_sink_read(buf, cap);
 }
 
 i32 __cdecl wrap_con_sink_stat(u32 *pending, u32 *dropped)
 {
     KAPI_HIT(188);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)pending, KAPI_OUT_LEN(pending, sizeof(u32)),
+                                    (u32)dropped, KAPI_OUT_LEN(dropped, sizeof(u32)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return con_sink_stat(pending, dropped);
 }
 
@@ -1679,6 +1853,13 @@ i32 __cdecl wrap_launch_pending(void)
 i32 __cdecl wrap_launch_take(char *buf, u32 cap, i32 *requester, i32 *kind, i32 *arg)
 {
     KAPI_HIT(195);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, cap),
+                                    (u32)requester, KAPI_OUT_LEN(requester, sizeof(i32))) ||
+        !ring3_user_ranges_writable((u32)kind, KAPI_OUT_LEN(kind, sizeof(i32)),
+                                    (u32)arg, KAPI_OUT_LEN(arg, sizeof(i32)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return launch_take(buf, cap, requester, kind, arg);
 }
 
@@ -1691,6 +1872,11 @@ i32 __cdecl wrap_launch_report(i32 token, i32 rc)
 i32 __cdecl wrap_launch_poll(i32 token, i32 *status)
 {
     KAPI_HIT(197);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)status, KAPI_OUT_LEN(status, sizeof(i32)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return launch_poll(token, status);
 }
 
@@ -1763,12 +1949,22 @@ i32 __cdecl wrap_host_open(const char *req, u32 len)
 i32 __cdecl wrap_host_status(i32 h, u32 *status, u32 *length)
 {
     KAPI_HIT(209);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)status, KAPI_OUT_LEN(status, sizeof(u32)),
+                                    (u32)length, KAPI_OUT_LEN(length, sizeof(u32)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return kapi_host_status(h, status, length);
 }
 
 i32 __cdecl wrap_host_read(i32 h, void *buf, u32 cap)
 {
     KAPI_HIT(210);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)buf, KAPI_OUT_LEN(buf, cap),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return kapi_host_read(h, buf, cap);
 }
 
@@ -1799,6 +1995,11 @@ int __cdecl wrap_kbd_peekkey(void)
 int __cdecl wrap_exec_last_result(int *kind, int *code)
 {
     KAPI_HIT(215);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)kind, KAPI_OUT_LEN(kind, sizeof(int)),
+                                    (u32)code, KAPI_OUT_LEN(code, sizeof(int)))) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return exec_last_result(kind, code);
 }
 
@@ -1811,6 +2012,13 @@ int __cdecl wrap_serial_init_vfast(u32 baud)
 int __cdecl wrap_serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
 {
     KAPI_HIT(217);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)mode, KAPI_OUT_LEN(mode, sizeof(u32)),
+                                    (u32)baud, KAPI_OUT_LEN(baud, sizeof(u32))) ||
+        !ring3_user_ranges_writable((u32)fifo, KAPI_OUT_LEN(fifo, sizeof(u32)),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return serial_get_status(mode, baud, fifo);
 }
 
@@ -1829,6 +2037,11 @@ int __cdecl wrap_pci_count(void)
 int __cdecl wrap_pci_get(u32 idx, void *out)
 {
     KAPI_HIT(220);
+    /* 出力範囲が書けるか (票 TASK_KAPI_OUTPUT_GUARD) */
+    if (!ring3_user_ranges_writable((u32)out, KAPI_OUT_LEN(out, PCI_DEV_STRUCT_SIZE),
+                                    (u32)0, 0u)) {
+        ring3_fault_kill();   /* 戻らない */
+    }
     return pci_get(idx, out);
 }
 

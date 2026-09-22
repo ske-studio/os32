@@ -100,6 +100,7 @@
     },
     {
       "name": "mem_free",
+      "out": "none",
       "ret": "void",
       "args": [
         "void *ptr"
@@ -150,6 +151,7 @@
     },
     {
       "name": "sys_ls",
+      "out": "none",
       "ret": "int",
       "args": [
         "const char *path",
@@ -180,6 +182,7 @@
     },
     {
       "name": "rtc_read",
+      "out": [{"arg": "rtc_time", "size": "sizeof(RTC_Time)"}],
       "ret": "void",
       "args": [
         "void *rtc_time"
@@ -341,6 +344,7 @@
     },
     {
       "name": "dev_get_info",
+      "out": [{"arg": "name", "len": "nm"}, {"arg": "type", "size": "sizeof(int)"}, {"arg": "sects", "size": "sizeof(u32)"}],
       "ret": "int",
       "args": [
         "int idx",
@@ -370,6 +374,7 @@
     },
     {
       "name": "np2_get_version",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "void",
       "args": [
         "char *buf",
@@ -378,6 +383,7 @@
     },
     {
       "name": "np2_get_cpu",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "void",
       "args": [
         "char *buf",
@@ -386,6 +392,7 @@
     },
     {
       "name": "np2_get_clock",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "void",
       "args": [
         "char *buf",
@@ -394,6 +401,7 @@
     },
     {
       "name": "np2_check_hostdrv",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "int",
       "args": [
         "char *buf",
@@ -414,6 +422,7 @@
     },
     {
       "name": "ide_identify",
+      "out": [{"arg": "info", "size": "sizeof(IdeInfo)"}],
       "ret": "int",
       "args": [
         "int drv",
@@ -423,6 +432,7 @@
     },
     {
       "name": "ide_read_sector",
+      "out": [{"arg": "buf", "size": 512}],
       "ret": "int",
       "args": [
         "int drv",
@@ -456,6 +466,7 @@
     },
     {
       "name": "path_parse",
+      "out": [{"arg": "result", "size": "sizeof(ParsedPath)"}],
       "ret": "void",
       "args": [
         "const char *input",
@@ -583,6 +594,7 @@
     },
     {
       "name": "sys_read",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "int",
       "args": [
         "int fd",
@@ -613,6 +625,7 @@
     },
     {
       "name": "console_get_size",
+      "out": [{"arg": "w", "size": "sizeof(int)"}, {"arg": "h", "size": "sizeof(int)"}],
       "ret": "void",
       "args": [
         "int *w",
@@ -669,6 +682,7 @@
     },
     {
       "name": "sys_stat",
+      "out": [{"arg": "buf", "size": "sizeof(OS32_Stat)"}],
       "ret": "int",
       "args": [
         "const char *path",
@@ -678,6 +692,7 @@
     },
     {
       "name": "sys_fstat",
+      "out": [{"arg": "buf", "size": "sizeof(OS32_Stat)"}],
       "ret": "int",
       "args": [
         "int fd",
@@ -698,6 +713,7 @@
     },
     {
       "name": "gfx_get_palette",
+      "out": [{"arg": "r", "size": "sizeof(u8)"}, {"arg": "g", "size": "sizeof(u8)"}, {"arg": "b", "size": "sizeof(u8)"}],
       "ret": "void",
       "args": [
         "int idx",
@@ -710,6 +726,7 @@
     {
 
       "name": "gfx_get_framebuffer",
+      "out": [{"arg": "fb", "size": "sizeof(GFX_Framebuffer)"}],
       "ret": "void",
       "args": [
         "void *fb"
@@ -737,6 +754,7 @@
     },
     {
       "name": "gfx_present_raster",
+      "out": "none",
       "ret": "void",
       "args": [
         "void *table"
@@ -745,6 +763,7 @@
     },
     {
       "name": "kcg_read_ank",
+      "out": [{"arg": "buf", "size": "KCG_ANK_H"}],
       "ret": "void",
       "args": [
         "u8 ch",
@@ -753,6 +772,7 @@
     },
     {
       "name": "kcg_read_kanji",
+      "out": [{"arg": "buf", "size": "(KCG_KANJI_H * 2)"}],
       "ret": "void",
       "args": [
         "u16 jis_code",
@@ -769,6 +789,7 @@
     },
     {
       "name": "sys_shm_lock",
+      "out": "none",
       "ret": "int",
       "args": [
         "void *ptr"
@@ -777,6 +798,7 @@
     },
     {
       "name": "sys_shm_free",
+      "out": "none",
       "ret": "int",
       "args": [
         "void *ptr"
@@ -886,6 +908,7 @@
     },
     {
       "name": "sys_redirect_fd_buf",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "int",
       "args": [
         "int fd",
@@ -1011,6 +1034,7 @@
     },
     {
       "name": "mouse_poll",
+      "out": [{"arg": "info", "size": "sizeof(MouseState)"}],
       "ret": "void",
       "args": [
         "void *info"
@@ -1034,6 +1058,7 @@
     },
     {
       "name": "tvram_readchar_at",
+      "out": [{"arg": "code", "size": "sizeof(u16)"}, {"arg": "attr", "size": "sizeof(u8)"}],
       "ret": "void",
       "args": [
         "int x",
@@ -1134,12 +1159,14 @@
     },
     {
       "name": "ide_get_info",
+      "out": [{"arg": "info", "size": "sizeof(IdeInfo)"}],
       "ret": "int",
       "args": ["int drv", "void *info"],
       "body": "return ide_get_info(drv, (IdeInfo *)info);"
     },
     {
       "name": "sys_get_build_info",
+      "out": [{"arg": "buf", "len": "size"}],
       "ret": "void",
       "args": ["char *buf", "int size"],
       "target": "kapi_sys_get_build_info"
@@ -1158,12 +1185,14 @@
     },
     {
       "name": "loop_status",
+      "out": [{"arg": "total", "size": "sizeof(u32)"}, {"arg": "bps", "size": "sizeof(int)"}],
       "ret": "int",
       "args": ["int slot", "u32 *total", "int *bps"],
       "target": "loop_dev_status"
     },
     {
       "name": "dev_blk_read",
+      "out": [{"arg": "buf", "len": "count", "unit": 512}],
       "ret": "int",
       "args": ["const char *dev_name", "u32 lba", "int count", "void *buf"],
       "body": "{ Device *d = dev_find(dev_name); if (!d) return -1; return dev_blk_read_lba(d, lba, count, buf); }"
@@ -1181,6 +1210,7 @@
     },
     {
       "name": "ime_user_list",
+      "out": [{"arg": "out", "len": "max", "unit": "sizeof(IME_UserEntry)"}],
       "ret": "int",
       "args": ["const char *yomi_prefix", "void *out", "int max"],
       "target": "ime_user_list_facade"
@@ -1239,6 +1269,7 @@
     },
     {
       "name": "gfx_screen_info",
+      "out": [{"arg": "out", "size": "sizeof(GFX_ScreenInfo)"}],
       "ret": "void",
       "args": ["void *out"]
     },
@@ -1259,11 +1290,13 @@
     },
     {
       "name": "gui_register",
+      "out": "none",
       "ret": "int",
       "args": ["void *handler", "void *pump"]
     },
     {
       "name": "gfx_stats",
+      "out": [{"arg": "out", "size": "sizeof(GFX_Stats)"}],
       "ret": "int",
       "args": ["void *out"]
     },
@@ -1294,6 +1327,7 @@
     },
     {
       "name": "ime_set_render",
+      "out": "none",
       "ret": "void",
       "args": ["void *table"]
     },
@@ -1334,6 +1368,7 @@
     },
     {
       "name": "con_sink_read",
+      "out": [{"arg": "buf", "len": "cap"}],
       "ret": "i32",
       "args": [
         "void *buf",
@@ -1342,6 +1377,7 @@
     },
     {
       "name": "con_sink_stat",
+      "out": [{"arg": "pending", "size": "sizeof(u32)"}, {"arg": "dropped", "size": "sizeof(u32)"}],
       "ret": "i32",
       "args": [
         "u32 *pending",
@@ -1384,6 +1420,7 @@
     },
     {
       "name": "launch_take",
+      "out": [{"arg": "buf", "len": "cap"}, {"arg": "requester", "size": "sizeof(i32)"}, {"arg": "kind", "size": "sizeof(i32)"}, {"arg": "arg", "size": "sizeof(i32)"}],
       "ret": "i32",
       "args": ["char *buf", "u32 cap", "i32 *requester", "i32 *kind", "i32 *arg"]
     },
@@ -1394,6 +1431,7 @@
     },
     {
       "name": "launch_poll",
+      "out": [{"arg": "status", "size": "sizeof(i32)"}],
       "ret": "i32",
       "args": ["i32 token", "i32 *status"]
     },
@@ -1463,12 +1501,14 @@
     },
     {
       "name": "host_status",
+      "out": [{"arg": "status", "size": "sizeof(u32)"}, {"arg": "length", "size": "sizeof(u32)"}],
       "ret": "i32",
       "args": ["i32 h", "u32 *status", "u32 *length"],
       "target": "kapi_host_status"
     },
     {
       "name": "host_read",
+      "out": [{"arg": "buf", "len": "cap"}],
       "ret": "i32",
       "args": ["i32 h", "void *buf", "u32 cap"],
       "target": "kapi_host_read"
@@ -1498,6 +1538,7 @@
     },
     {
       "name": "exec_last_result",
+      "out": [{"arg": "kind", "size": "sizeof(int)"}, {"arg": "code", "size": "sizeof(int)"}],
       "ret": "int",
       "args": ["int *kind", "int *code"]
     },
@@ -1508,6 +1549,7 @@
     },
     {
       "name": "serial_get_status",
+      "out": [{"arg": "mode", "size": "sizeof(u32)"}, {"arg": "baud", "size": "sizeof(u32)"}, {"arg": "fifo", "size": "sizeof(u32)"}],
       "ret": "int",
       "args": ["u32 *mode", "u32 *baud", "u32 *fifo"]
     },
@@ -1523,6 +1565,7 @@
     },
     {
       "name": "pci_get",
+      "out": [{"arg": "out", "size": "PCI_DEV_STRUCT_SIZE"}],
       "ret": "int",
       "args": ["u32 idx", "void *out"]
     },
@@ -1533,12 +1576,14 @@
     },
     {
       "name": "sys_time_now",
+      "out": "target",
       "ret": "int",
       "args": ["u32 *lo", "u32 *hi"],
       "target": "kapi_sys_time_now"
     },
     {
       "name": "pci_bind_info",
+      "out": "target",
       "ret": "int",
       "args": ["u32 idx", "void *out"],
       "target": "kapi_pci_bind_info"

@@ -487,9 +487,13 @@ int ring3_ptr_ok(u32 p)
     if (p == 0) return 1;                         /* NULL は wrap 側が処理 */
     if (p >= MEM_SHLIB_BASE && p < RING3_HEAP_TOP) return 1;
         /* 共有ライブラリ帯 (K3: .rodata の文字列や .data の構造体を KAPI に
-         * 渡せる。.text への **書き込み** は PTE が RO なのでハードウェアの
-         * #PF で捕まる — ここは「番地として正しいか」だけを見る) +
-         * アプリの code/data/bss/heap (ガード直下まで) */
+         * 渡せる) + アプリの code/data/bss/heap (ガード直下まで)。
+         * **ここは「番地として正しいか」だけを見る。** かつて
+         * 「.text への書き込みは PTE が RO なので #PF で捕まる」と書いて
+         * あったが、それは誤り: OS32 は **CR0.WP = 0** で走るので CPL=0 の
+         * カーネル (= KAPI の wrapper) は RO の USER ページにも書ける。
+         * 出力引数が本当に書ける番地かは、wrapper 先頭の
+         * `ring3_user_ranges_writable` が見る (票 TASK_KAPI_OUTPUT_GUARD)。 */
     if (p >= RING3_STACK_BOTTOM && p < RING3_USTACK_TOP) return 1;
         /* ユーザスタック帯。ガードページ [RING3_GUARD_BASE, RING3_STACK_BOTTOM)
          * は不許可 (ここを指すポインタは早期検証で kill)。 */

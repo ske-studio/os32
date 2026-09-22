@@ -54,6 +54,8 @@ make programs
    必要なヘッダは同ファイルの `includes` に、プロトタイプは `externs` に追加する。
    - `target` — 実体の関数名がエントリ名と異なる場合に指定
    - `body` — ラッパー本体をインラインで書く場合に指定
+   - `out` — **非 const のポインタ引数があるときは必須** (書式は §3-3)。
+     書き忘れは `make check` の `check-kapi-out` が落とす
 2. `sdk/kapi.json` の `"version"` と `sdk/include/os32/os32_kapi_shared.h` の
    `KAPI_VERSION` を**両方**インクリメントする (一致必須)。
 3. 再生成して差分が意図した追加のみであることを確認する:
@@ -116,6 +118,40 @@ KAPI は append-only で版番号は単調増加。複数の計画が独立に�
 (2026-09-12)。票 B8 往復 5 (2026-09-15、ユーザー決裁 2) が **-15 `ROFS`** (「書き込みを
 受け付けない」— ext2 がメタデータの I/O エラーでエラー状態に入った後の書き込み系操作) を取り、
 開始点をさらに 1 つ下げた。**番号の追加だけで構造体・スロットは変えないので KAPI 版数は据え置き。**
+
+### §3-3 出力ポインタの宣言 `out` (票 TASK_KAPI_OUTPUT_GUARD)
+
+OS32 は **CR0.WP = 0** で走る (`kernel/shlib.c` がカーネルからの書き込みで共有ライブラリを
+張るため。[02_memory.md §2-1](02_memory.md) のページングの節)。そのため CPL=0 の KAPI ラッパは、
+CPL=3 が出力引数に渡した**読み取り専用の USER ページ** — 共有ライブラリの `.text` / `.rodata`、
+全アプリで同じ物理 — にも #PF を起こさずに書ける。ディスパッチャの早期検査
+(`kapi_argptr` → `ring3_ptr_ok`) は「帯の中か」しか見ないので素通りする。
+
+そこで **各エントリは出力ポインタを `out` で申告する**。`sdk/gen_kapi.py` が
+`kapi/kapi_generated.c` のラッパ先頭 (target を呼ぶ**前**) に検査を出す:
+
+| 書式 | 意味 |
+|---|---|
+| `"out": [{"arg": "buf", "len": "size"}]` | `size` バイトの出力バッファ |
+| `"out": [{"arg": "buf", "len": "count", "unit": 512}]` | `count` × `unit` バイト (`unit` は整数か C の式) |
+| `"out": [{"arg": "info", "size": "sizeof(IdeInfo)"}]` | 固定長 (整数か C の式。式は kapi.json の `includes` で見える型のみ) |
+| `"out": "none"` | 非 const のポインタが**入力**か関数ポインタ (`mem_free` / `sys_shm_lock` / `sys_shm_free` / `sys_ls` / `gui_register` / `gfx_present_raster` / `ime_set_render`) |
+| `"out": "target"` | target / body 自身が `ring3_user_ranges_writable` で検査している (`sys_time_now` / `pci_bind_info`)。ここで二重に見ると CR3 の往復が 2 倍になる |
+
+1 本の KAPI に出力が複数あるときは**全部を並べる**。生成されるコードは
+**全範囲を検査してから target を呼ぶ**ので、2 つ目が不可のときに 1 つ目だけ書かれることはない。
+
+検査の中身 (`exec/exec.c` の `ring3_user_ranges_writable`): IF=0 → master CR3 へ切り替え →
+アプリ PD の PDE/PTE が範囲の全ページで present + RW + USER か → CR3 復元 → IF 復元。
+**CPL=0 の直呼び (常駐シェル / gshell) は素通し** (`ring3_in_syscall` で判定)。
+不合格は `ring3_fault_kill()` = アプリの死 (戻らない)。長さの扱いは
+
+- **NULL はその範囲を見ない** — KAPI ごとの既存の NULL の扱い (無視 / 負を返す / 死ぬ) を変えない
+- **長さ 0 / 負 も見ない** (`int` の長さ引数は 0 に丸める)
+- 個数 × 単位があふれたら `0xFFFFFFFF` = 必ず拒否
+
+既知の穴: `dev_blk_read` の `unit` は**最小のセクタ長 512** で見る。1024 (FD) / 2048 (CD) の
+デバイスでは後ろ半分以上が未検査のまま (帯検査は効く)。`dev->sect_size` はラッパからは引けない。
 
 ---
 
