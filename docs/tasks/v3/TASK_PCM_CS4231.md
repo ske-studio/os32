@@ -1,6 +1,6 @@
 # TASK_PCM_CS4231 — CS4231 (MATE-X PCM) の PCM 再生ドライバ (§5-5 の P1)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v5 (Codex 往復 4 の 8 件を反映: 補充の余裕と連続性の判定、状態別 dispatch、drain の末尾世代と期限、循環境界、全状態の close/reclaim。往復 5 待ち)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v6 (Codex 往復 5 の 6 件を反映: 連続性は装置の証拠 (TC/PI と位置) で判定、drain は境界の段階で定義、自動開始は両半分がそろってから、advance の手順を表と一致、start の基準時刻、SPE は MCE 中に落とす。往復 6 待ち)**。
 > 正典の関係: [`PLAN.md`](PLAN.md) §5-5、土台は [`TASK_HAL_WIRING.md`](TASK_HAL_WIRING.md) (1-1 割り込み、1-2 8237、1-3 プール、1-5 時計)、
 > 出力保護は [`../memory/TASK_KAPI_OUTPUT_GUARD.md`](../memory/TASK_KAPI_OUTPUT_GUARD.md)。
 > 典拠: Crystal **CS4231A データシート DS139PP2** (`docs/hw/crystal/cs4231a.pdf`、gitignore のミラー、`pdftotext` 済み)、
@@ -57,9 +57,9 @@ RESYNC との競合を `gen` の検査では消せない (既に鳴ったデー�
 |---|---|---|---|
 | CLOSED | 何もしない | 拒否 | open → OPENING |
 | OPENING | 何もしない (IEN=0) | 拒否 | 検出 + 初期化列 (foreground、期限つき) → OPEN / 失敗 → 巻き戻し → CLOSED |
-| OPEN | 何もしない (PEN=0) | ステージングへ | ステージングが 2048 frame 以上、または close で未転送あり → `pcm_start` → RUNNING (close なら続けて DRAINING)。**close で未転送なし、または reclaim → 再生せず `irq_unregister` → `dma_pool_free` × 2 → CLOSED** (往復 4 R7) |
+| OPEN | 何もしない (PEN=0) | ステージングへ | **ステージングが 4096 frame (両半分ぶん) 以上**、または close で未転送あり → `pcm_start` → RUNNING (close なら続けて DRAINING)。半分 1 つで始めると次の write が間に合っても最初の切り替えで 2048 frame の無音が入る (往復 5 B3) ので両半分がそろうまで待つ (開始遅延 93ms @44.1k)。短いストリームは close で開始する。**close で未転送なし、または reclaim → 再生せず `irq_unregister` → `dma_pool_free` × 2 → CLOSED** (往復 4 R7) |
 | RUNNING | 観測・連続性の判定・補充・番犬 (`advance_run`) | ステージングへ | close → DRAINING / 番犬・連続性喪失 → RS_STOP / reclaim → 即時 abort (下) |
-| DRAINING | 同上 (`advance_run`、新規の write は拒否) | 拒否 | **最後に正の frame を写した補充の世代 `last_data_gen` から切り替えを 2 回観測** (そのデータの半分を通過 + さらに 0 の半分を通過) → STOP_REQ / 番犬・連続性喪失 → **drain 失敗を記録して STOP_REQ** (往復 3 B4) / reclaim → 即時 abort |
+| DRAINING | 同上 (`advance_run`、新規の write は拒否) | 拒否 | **drain の 3 段階** (`last_data_half` に入るのを待つ → 読んでいる → 無音の半分を読んでいる) を切り替えの観測で進め、無音の半分から出る切り替えで完了 → STOP_REQ (往復 5 B2)。番犬・連続性喪失 → **drain 失敗を記録して STOP_REQ** (往復 3 B4) / reclaim → 即時 abort |
 | RS_STOP | 入口 (1 回): IEN=0 → PEN=0 → ack、`deadline` = 今 + 3 tick を**入口でだけ**設定。以後の tick (`advance_stop`): R0 != 0x80 を確かめてから **I11 の DRS (D4、DRQ 動作中) = 0** を待つ → RS_RESTART。期限切れ → STOP_REQ (失敗)。**通常の補充はしない** (PI は ack だけ) | ステージングへ | close → `close_pending` を立てて RS_RESTART の後に DRAINING / reclaim → 即時 abort |
 | RS_RESTART | `dma_chan_mask` → リング 0 化 → `filled[] = 0` → `dma_chan_setup` → I15/I14 → ステージングから半分 0 (と 1) へ写す → half = 0、gen +1、番犬と連続性の基準時刻を今に → unmask → PEN=1 → IEN=1 → RUNNING (`close_pending` なら DRAINING)、`resyncs` +1。setup が失敗したら STOP_REQ (失敗) | ステージングへ | |
 | STOP_REQ | 入口 (1 回): IEN=0 → PEN=0 → R2 に書いて INT を消し、I24 に 0、`deadline` = 今 + 3 tick。以後の tick (`advance_stop`): R0 != 0x80 を確かめてから DRS=0 を待つ → `dma_chan_mask` → **証拠**: I9 の PEN=0、I24 の PI=0、R0 != 0x80 → STOP_DONE。期限内に証拠が読めない → FAULTED | 拒否 | reclaim → 残りを引き継ぐ (下) |
@@ -84,35 +84,49 @@ PEN=0/IEN=0 のまま `0F40h` は **0x1A のまま残す** (detach しない) �
 **初期化列** (§1 の典拠どおり。各 poll は IF=1・期限 5 tick、超えたら `OS32_ERR_IO` で巻き戻し。往復 3 B1: §1 と一致させた):
 R0 が 0x80 でなくなるまで poll (INIT) → I12 に MODE2=1 を書き、読み戻して MODE2 を確認 → **`cs_write_mce(8, 0x5B)`** (44.1k。
 22.05k は 0x57) → R0 が 0x80 でなくなるまで poll (クロックの再同期) → **`cs_write_mce(9, 0x08)`** (CAL 1、PPIO=0、SDC=0、PEN=0。
-MCE を保つ) → R0 = 9 (MCE を落とす) → **もう 1 度 R0 が 0x80 でなくなるまで poll** → I11 の ACI (D5) が落ちるまで poll (136 周期
-≒ 3.1ms) → I16 に DACZ=1 → I6/I7 = 0 (0dB、LDM/RDM = 0) → I24 に 0 (PI を消す) → I10 の IEN=1。
+MCE を保つ) → **`cs_write_mce(16, 0x01)`** (DACZ=1、**SPE=0** — SPE は MCE 中でしか変えられず、BIOS の旧設定で 1 なら DAC が
+シリアル入力を使って DMA のデータが出ない。往復 5 B6) → R0 = 9 (MCE を落とす) → **もう 1 度 R0 が 0x80 でなくなるまで poll** → I11 の ACI (D5) が落ちるまで poll (136 周期
+≒ 3.1ms) → I6/I7 = 0 (0dB、LDM/RDM = 0) → I24 に 0 (PI を消す) → I10 の IEN=1。
 
-**`pcm_start`** (OPEN → RUNNING、foreground、装置は停止中): ステージングから半分 0 へ min(2048, staged) frame を写し
-(`filled[0]`)、残りがあれば半分 1 へも (`filled[1]`)、残りは 0 のまま → `irq_save` の中で half = 0、gen = 1、状態 RUNNING を公開 →
-`dma_chan_unmask(1)` → I9 の PEN=1 (MCE 無しで書ける)。
+**`pcm_start`** (OPEN → RUNNING、foreground、装置は停止中。リングを書く例外の 1 つ): ステージングから半分 0 へ min(2048, staged)
+frame を写し (`filled[0]`)、残りがあれば半分 1 へも (`filled[1]`)、残りは 0 のまま。**最後に正の frame を置いた半分を `last_data_half`
+に、drain の段階を「その半分に入るのを待つ」に** (往復 5 B2)。→ `irq_save` の中で half = 0、pos = 0、gen = 1、**観測・番犬の基準時刻
+= 今、TC/PI の証拠を消し (`dma_chan_ack_tc`、I24 に 0)**、状態 RUNNING を公開 (往復 5 B5) → `dma_chan_unmask(1)` → I9 の PEN=1
+(MCE 無しで書ける)。RS_RESTART も同じ初期化を行う。
 
-**`pcm_advance()`** (IRQ handler と tick フックの両方がこれだけを呼ぶ。往復 3 B5/B7 を反映):
-1. I24 を読み、PI があれば I24 に 0 を書いて消す (handled = 1)。状態が RUNNING / DRAINING / RS_* でなければここで終わる。
-2. `dma_chan_remaining(1, &left, &tc)` (1-2)。**成功なら** `pos_bytes = (16384 − left) % 16384`、`new_half = pos_bytes / 8192`、
-   `now = sys_time_now` (負なら `tick_count × 10000` に落とす。単調性は前回値との max)。**`-EAGAIN` なら pos / half / filled は
-   更新せず**、5 へ進む (番犬は失敗時も評価する)。
-2'. **連続性の判定** (往復 4 R3、補充より先): 前回の有効観測から装置が進み得た frame 数 `adv = (now − last_ok) × rate / 1e6` が、
-   「前回の位置から前回の半分の末尾まで + 2048」を超えているなら、装置は**未補充の半分を通過した可能性がある** (IRQ 消失 +
-   tick 遅れ。同じ半分に見えても 1 周回っている) → `repeats` +1、**補充せず RS_STOP** へ (再同期で 0 から立て直す。反復した
-   古い音は取り消せない)。超えていなければ連続と見なして 3 へ。`last_ok = now`。
-3. **切り替え** (`new_half != half`): `old = half`、`half = new_half`、gen +1。**判定は消す前に**: RUNNING で `filled[new_half] < 2048`
-   なら `underruns` +1 (いま鳴り始めた半分が満ちていなかった)。DRAINING で `new_half` が「最後のデータの半分」より後なら
-   underrun に数えない (末尾の 0 埋め)。
-4. **補充** (切り替えを観測したときだけ): 装置の現在位置から `new_half` の末尾まで **`REFILL_MARGIN` (512 frame) 以上**あることを
-   確かめてから (往復 4 R2)、消費し終えた `old` へステージングから min(2048, staged) frame を写し (IF=0、≤ 8KB、ステージングの
-   物理末尾を跨ぐときは 2 回に分ける — 往復 4 R6)、残りを 0 で埋め、`filled[old]` = 写した数、`stg_r` を進め、`refill_gen` +1。
-   **正の frame 数を写したときだけ `last_data_gen = refill_gen`** (0 frame の補充は更新しない — 往復 4 R4)。余裕が無ければ写さずに
-   `repeats` +1 → RS_STOP (2' と同じ扱い)。RUNNING で写せたのが 2048 未満なら、その半分が鳴る番になったときに 3 で underrun に
-   数えられる。DRAINING の完了判定は「`last_data_gen` の補充から切り替えを 2 回観測」(表)。close の時点でステージングが空なら
-   `last_data_gen` は最後の RUNNING の補充のまま使う。
-5. **番犬** (`sys_time_now` の差、rate から計算した半周期の 2 倍): 有効な観測が無い期間、または同じ半分に留まった期間
-   (最後に半分が変わった時刻から) が 2 半周期を超えたのに PEN=1 なら → RUNNING では **RS_STOP**、DRAINING では **drain 失敗を
-   記録して STOP_REQ**。tick (10ms) は呼び出しの機会であって有効観測の保証ではない。
+**`pcm_advance()`** (IRQ handler と tick フックの両方がこれだけを呼ぶ。手順は**状態表と同じ規則**で、表が正 — 往復 5 B4):
+
+0. **共通**: I24 を読み、PI があれば I24 に 0 を書いて消し `pi_seen = 1` (handled = 1)。状態で分岐: RUNNING / DRAINING → 1〜5、
+   RS_STOP / STOP_REQ → `advance_stop` (表の後続 tick の確認だけ。**補充も観測の更新もしない**)、RS_RESTART → 再構成、
+   それ以外 → 終わり。
+1. `dma_chan_remaining(1, &left, &tc)` (1-2)。**成功なら** `pos_bytes = (16384 − left) % 16384`、`new_half = pos_bytes / 8192`、
+   `new_pos = pos_bytes / 4`。`tc` (前回の ack 以降にリングの末尾で再ロードした = 1 → 0 の境界を少なくとも 1 回通った) を取り
+   `dma_chan_ack_tc(1)`。`now = sys_time_now` (負なら `tick_count × 10000`。単調性は前回値との max)。**`-EAGAIN` なら
+   pos / half / filled は更新せず** `now` だけ取って 5 へ (番犬は失敗時も評価する)。
+2. **連続性の判定** (往復 5 B1: 時計は長い IF=0 で実時間を過小評価するので**上限に使わない**。判定は装置の証拠 = `tc`・`pi_seen`・
+   位置だけで行う)。前回 `(h0, p0)`、今回 `(h1, p1)`:
+   - `tc = 0` かつ `h0 == h1`: 境界を跨いでいない。`p1 >= p0` なら**連続**、`p1 < p0` は矛盾 (同じ半分で戻った) → 喪失。
+   - `tc = 0` かつ `h0 = 0, h1 = 1`: 0 → 1 の境界を 1 回 (PI が立っているはず) → **連続 (切り替え 1 回)**。
+   - `tc = 0` かつ `h0 = 1, h1 = 0`: 1 → 0 は TC を伴うはずなので矛盾 → 喪失。
+   - `tc = 1` かつ `h0 = 1, h1 = 0`: 1 → 0 の境界を 1 回 → **連続 (切り替え 1 回)**。ただし 1 → 0 → 1 → 0 (3 回) とは区別できない
+     (TC は回数を持たないフラグ)。**残る曖昧さは「観測の空白が 93ms 以上 (≥ 2 半周期) で、かつ位置がたまたま同じ半分」**の
+     ときだけで、これは HAL の IF=0 < 10ms の契約を大きく破った場合にしか起きない (受入 W6 の残件として記す)。
+   - `tc = 1` でそれ以外の組 (`h0 = h1`、または `h0 = 0, h1 = 1`): 境界を 2 回以上跨いだ = **未補充の半分を読んだ** → 喪失。
+   喪失は `repeats` +1 → RUNNING なら **RS_STOP**、DRAINING なら **drain 失敗を記録して STOP_REQ** (末尾を捨てて再始動しない —
+   往復 5 B4)。連続なら `(h0, p0) = (h1, p1)`、`last_ok = now`、切り替えがあれば 3 へ、無ければ 5 へ。
+3. **切り替え** (`h1 != h0`): `old = h0`、gen +1。**判定は消す前に**: RUNNING で `filled[h1] < 2048` なら `underruns` +1。DRAINING は
+   末尾の 0 埋めを数えない。**drain の段階** (往復 5 B2): 「`last_data_half` に入るのを待つ」で `h1 == last_data_half` → 「その半分を
+   読んでいる」に。「読んでいる」で `h1 != last_data_half` → 「最後のデータの DMA 転送が終わった。無音の半分を読んでいる」に。
+   「無音の半分」でさらに切り替え → **drain 完了 → STOP_REQ** (DMA 完了と DAC 出力は別なので無音の半分を丸ごと通す)。
+4. **補充** (切り替えを観測したときだけ、DRAINING で drain 完了していなければ): 装置の現在位置から `h1` の末尾まで
+   **`REFILL_MARGIN` (512 frame) 以上**あることを確かめてから (往復 4 R2)、消費し終えた `old` へステージングから
+   min(2048, staged) frame を写し (IF=0、≤ 8KB、ステージングの物理末尾を跨ぐときは 2 回に分ける — 往復 4 R6)、残りを 0 で埋め、
+   `filled[old]` = 写した数、`stg_r` を進める。**正の frame 数を写したときだけ `last_data_half = old` とし、drain の段階を「入るのを
+   待つ」に戻す** (0 frame の補充は更新しない — 往復 4 R4)。余裕が無ければ写さずに `repeats` +1 → 2 の喪失と同じ扱い。RUNNING で
+   写せたのが 2048 未満なら、その半分が鳴る番になったときに 3 で underrun に数えられる。
+5. **番犬** (`now − last_ok`、rate から計算した半周期の 2 倍): 有効な観測が無い期間が 2 半周期を超えたのに PEN=1 なら → RUNNING では
+   **RS_STOP**、DRAINING では **drain 失敗を記録して STOP_REQ**。tick (10ms) は呼び出しの機会であって有効観測の保証ではない。
+   時計が過小評価する側なので番犬は遅れて発火することはあっても早く発火することはない (安全側)。
 
 **`pcm_write`** (foreground、往復 3 B2/B3 で DMA メモリに触らない形に): 受け付けるのは **frame の倍数** (`bytes & 3` は切り捨て、
 0 なら 0)。入力の検査は `ring3_user_range_ok(buf, bytes)` (+ 加算あふれ) を **wrapper が先に**行う。`irq_save` の中で
@@ -142,7 +156,7 @@ p.16/19)。だから **PEN=0 の後、I11 の DRS (D4: PDRQ/CDRQ が動作中) �
 IEN=0 → PEN=0 → ack → `dma_chan_mask` (DRS は待たない。捨てるストリームなので境界は問わない) → 証拠の読み戻し 1 回 →
 `irq_unregister` → 証拠があれば `dma_pool_free` × 2、無ければ leaked/FAULTED。STOP_REQ / STOP_DONE の途中なら**残りの手順を
 引き継いで 1 度だけ**解放する (`finalized` フラグ。close 側の待ちは longjmp で戻らないので二重解放は起きないが、契約として
-1 度に固定する)。**全状態の表** (往復 4 R7): OPENING (foreground の途中なので reclaim は来ない) / OPEN → 再生せず解放 /
+1 度に固定する)。**reclaim は IF=0 (fault の回収) からも来る**ので tick 待ちを再開せず、その場で待たない abort と 1 度だけの後始末を行う。**全状態の表** (往復 4 R7): OPENING (foreground の途中なので reclaim は来ない) / OPEN → 再生せず解放 /
 RUNNING・DRAINING・RS_STOP・RS_RESTART → 即時 abort / STOP_REQ → 残りを引き継ぐ / STOP_DONE → 解放 / FAULTED → unregister + leaked /
 CLOSED → 何もしない。正常終了・fault・CTRL+STOP・park 中の kill で同じ経路。
 
@@ -161,10 +175,11 @@ int  pcm_set_volume(u32 percent);
 
 ### 2-3. 純粋関数 (ホスト試験)
 
-`pcm_advance` の判定 (left → pos → half、**連続性の判定 (adv と境界)**、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の** underrun
-判定、両半分満杯の正常切り替えで underrun 0、部分末尾の正常 drain と `last_data_gen` (0 frame の補充で動かない)、末尾後の無音、`-EAGAIN` でも
-番犬が動く、番犬の期間の計算、**遅れた観測 (1 周回) で repeats + RS_STOP**)、ステージングの予約 / 公開 / 消費 (frame 倍数、空き、**物理末尾の
-2 分割**、2047 + 2 + 消費後の 4096 の反例)、`pcm_start` の配り方 (2048 未満・2048〜4096)、レート → I8 の値と半周期、close の期限式
+`pcm_advance` の判定 (left → pos → half、**連続性の判定表 (tc × h0 × h1 × p の全組)**、**補充の余裕 (REFILL_MARGIN)**、切り替えの検出と **消す前の**
+underrun 判定、両半分満杯の正常切り替えで underrun 0、**drain の 3 段階** (start / restart / 補充で `last_data_half` を置いた各場合、0 frame の
+補充で動かない、`write(1 frame) → close`)、末尾後の無音、`-EAGAIN` でも番犬が動く、番犬の期間の計算、**遅れた観測 (TC + 同じ半分) で repeats +
+RS_STOP、DRAINING では STOP_REQ**)、ステージングの予約 / 公開 / 消費 (frame 倍数、空き、**物理末尾の
+2 分割**、2047 + 2 + 消費後の 4096 の反例)、`pcm_start` の配り方 (close 起動の 2048 未満・自動開始の 4096) と基準時刻・証拠の初期化、レート → I8 の値と半周期、close の期限式
 (staged と rate)、percent → 減衰とミュート、初期化列と停止列と RS_* の列を**ポート書きの列**として返して照合 (順序の変異: I14 → I15、
 MCE 無しの I9、MODE2 無しの I24、DRS を待たない mask、期限を毎 tick 初期化する)、状態機械の遷移表 (上の表の全部と不正遷移の拒否、
 close / reclaim が各状態から 1 度だけ解放すること)。
@@ -176,7 +191,7 @@ close / reclaim が各状態から 1 度だけ解放すること)。
 | E0 | **前提**: NP21/W の `/api/sound` に CS4231 を足す: PEN / IEN / MODE2 / I8 / Base / `bufdatas` / **PI の累積回数** (NP21/W の `totalsample` は周期内残量なので新設) / PU 回数 / DMA ch と IRQ / 0F40h の値、および **直近 1 秒の出力 PCM を base64 で返す `?pcm=1`**: 採取点は `cs4231g.c` の DMA 読み取りバッファ → ミックス前 (コーデックの rate、16 ビットステレオの生 frame、音量とホスト rate 変換の**前**、他音源が混ざる前)。**未 attach (`dmach = 0xff`) での `cs4231_control` の配列外アクセスの防御**も E0 で入れる。NP21/W は自前フォーク (`make build && make deploy` は NP21/W 停止が要る) | np21w-src |
 | E1 | ホスト試験 (変異つき): 2-3 の全部 | `check-par` |
 | E2 | NP21/W (**別 trial ini で `SNDboard=0x64` = [D2]**): 検出 (0F43h + I12 + I25) → 起動行 `[pcm] CS4231 v=100 irq 10 dma 1 fmt 0x5B` (NP21/W のこの構成は I25 = 0x80 → V = 100。CS4231A の V = 101 は実機 E6 で) | NP21/W |
-| E3 | CPL=3 の `pcm_test`: **左 = 1kHz 正弦、右 = frame 番号の下位 16 ビット** (左右取り違え・旧半分の反復・ミュートを見分ける) を 5 秒 → E0 の PCM (生 frame) を取って左右の内容を照合 (右の frame 番号は連続、左は 1kHz の周期 44.1 frame ± 1、許容: 欠落 0 frame)、PI 累積 ≒ 5 × 44100 / 2048、underruns 0、`pcm_status` の free (ステージングの空き) が書き込みで 4 バイト単位に減り**半分の補充で 8KB 戻る**。書き込みを 200ms 止めて無音 (underruns +、意図した停止区間は別に集計) → 再開後に右チャネルの番号が飛ばずに続く。ミュート (percent 0) は I6/I7 の D7 と音量適用後の出力で別に確認 | NP21/W |
+| E3 | CPL=3 の `pcm_test`: **左 = 1kHz 正弦、右 = frame 番号の下位 16 ビット** (左右取り違え・旧半分の反復・ミュートを見分ける) を 5 秒 → E0 の PCM (生 frame) を取って左右の内容を照合 (右の frame 番号は連続、左は 1kHz の周期 44.1 frame ± 1、許容: 欠落 0 frame)、PI 累積 ≒ 5 × 44100 / 2048、underruns 0、PCM の採取は**開始直後・途中・close 直前**の 3 区間 (直近 1 秒だけでは開始と末尾の欠陥を取り逃す)。`pcm_status` の free (ステージングの空き) が書き込みで 4 バイト単位に減り**半分の補充で 8KB 戻る**。書き込みを 200ms 止めて無音 (underruns +、意図した停止区間は別に集計) → 再開後に右チャネルの番号が飛ばずに続く。ミュート (percent 0) は I6/I7 の D7 と音量適用後の出力で別に確認 | NP21/W |
 | E4 | 共有 IRQ の実証 (証明範囲を明記): PCM だけ / 偽装置だけ / **同時 = 試験用 hook を実 PI の IRQ10 dispatch の入口 (PCM が I24 を ack する前) に置き、PI=1 を確認してから偽 pending を立て、同じ dispatch で両方の handler の結果を記録** / 2 巡目 = 偽 handler の初回走査の後に PCM handler が偽要因を立てる順序 / 偽装置の tick 回収 = IRQ を注入せず pending だけ立てる。偽装置は 2 つ目の物理要因ではない (電気的共有は実機の 82557 で) | NP21/W |
 | E5 | CPL=3・CUI の `pcm_test` を CTRL+STOP で殺す → `pcm_reclaim` で PEN=0・DMA マスク・次の open が通る。GUI の park 中の kill と CPL=0 は対象外と明記 | NP21/W |
 | E6 | 実機 (Ra266) — 独立した受入: MODE1 の初期状態、INIT 中の書き無視、MCE / 校正の待ち、Base 上位書きのロード、DAC の初期ミュート、**XTAL2 の有無** (44.1k が出るか)、BIOS の 0F40h 旧値、1MB 超 DMA、DRQ/FIFO の停止タイミング、auto-init ビット、実際の音 (耳) | 実機 |
