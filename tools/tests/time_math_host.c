@@ -182,6 +182,80 @@ static void monotonic(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  クランプ — p1/p2 をすり抜けた巻き戻りを押さえる                     */
+/*                                                                      */
+/*  NP21/W は 8254 の再ロードと 8259 の IRR を原子的に模擬しないので、  */
+/*  判定表を正しく通しても前回より小さい値が出る (両方の順序が出る)。   */
+/*  実機でも数百 ns の窓で同じ形になる。                                */
+/* ------------------------------------------------------------------ */
+static void clamp(void)
+{
+    unsigned long long out;
+
+    /* 進んでいる: そのまま通す。数えない。 */
+    out = 0xA5A5A5A5A5A5A5A5ULL;
+    CHECK(time_clamp(10000, 9999, &out) == 0);
+    CHECK(out == 10000);
+
+    /* **等しいのはクランプではない** — 同じ µs を 2 回読むのは正常。 */
+    out = 0xA5A5A5A5A5A5A5A5ULL;
+    CHECK(time_clamp(10000, 10000, &out) == 0);
+    CHECK(out == 10000);
+
+    /* 巻き戻り (a): count が先に再ロードされ IRR がまだ → t*10000 + 小さい端数。
+     * 旧周期の終わり 9999 より小さいので、前回値を返す。 */
+    out = 0xA5A5A5A5A5A5A5A5ULL;
+    CHECK(time_clamp(2, 9999, &out) == 1);
+    CHECK(out == 9999);
+
+    /* 巻き戻り (b): IRR が先に立って (t+2) 相当まで跳び、ISR の後で戻る。
+     * 跳んだ側は通り、戻った側が押さえられる。 */
+    {
+        unsigned long long last = 0, v;
+        int clamped = 0;
+        CHECK(time_clamp(30000, last, &v) == 0);  /* (t+2)*10000 まで跳ぶ */
+        last = v;
+        clamped += time_clamp(20001, last, &v);   /* (t+1)*10000 + 1 で戻る */
+        last = v;
+        CHECK(clamped == 1);
+        CHECK(last == 30000);
+    }
+
+    /* 1 万回の筋書き: 1 回おきに巻き戻る入力でも出力は単調、
+     * 数えた回数は巻き戻った回数ちょうど。 */
+    {
+        unsigned long long last = 0, prev = 0, v;
+        unsigned int i;
+        int count = 0, back = 0;
+        for (i = 0; i < 10000; i++) {
+            /* 1 周期 100 µs で進み、奇数回だけ 150 µs 戻る (= 前回より小さい) */
+            unsigned long long raw = 1000ULL + (unsigned long long)i * 100;
+            if (i & 1) raw -= 150;
+            count += time_clamp(raw, last, &v);
+            last = v;
+            if (v < prev) back++;
+            prev = v;
+        }
+        CHECK(back == 0);
+        CHECK(count == 5000);
+        CHECK(last == 1000ULL + 9998ULL * 100);   /* 最後の偶数回の値で止まる */
+    }
+
+    /* **64 ビットの桁を跨いでも単調** (71 分の境界。u32 に潰すと逆転する) */
+    {
+        unsigned long long v;
+        CHECK(time_clamp(4294970000ULL, 4294960000ULL, &v) == 0);
+        CHECK(v == 4294970000ULL);
+        CHECK(time_clamp(2704ULL, 4294970000ULL, &v) == 1);  /* 下位だけ見ると大きい */
+        CHECK(v == 4294970000ULL);
+    }
+
+    /* NULL は書かないだけ。判定は返る。 */
+    CHECK(time_clamp(1, 2, 0) == 1);
+    CHECK(time_clamp(2, 1, 0) == 0);
+}
+
+/* ------------------------------------------------------------------ */
 int main(int argc, char **argv)
 {
     const char *c = (argc > 1) ? argv[1] : "";
@@ -191,6 +265,7 @@ int main(int argc, char **argv)
     else if (!strcmp(c, "us_math")) us_math();
     else if (!strcmp(c, "no_u32_overflow")) no_u32_overflow();
     else if (!strcmp(c, "monotonic")) monotonic();
+    else if (!strcmp(c, "clamp")) clamp();
     else { fprintf(stderr, "unknown case: %s\n", c); return 2; }
     return failed ? 1 : 0;
 }

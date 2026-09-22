@@ -51,7 +51,12 @@ int kselftest_fail = 0;
 #define ksel_pass kselftest_pass
 #define ksel_fail kselftest_fail
 
-static void check(int cond, const char *name)
+/* **`noinline` はカーネルの予算のため** (票 TASK_HAL_WIRING、A+B 合流後に
+ * 残り 1.2KB まで詰まった)。-O2 はこの 6 行を呼び出し 194 か所すべてに
+ * 展開していて、それだけで 6KB を食っていた。自己診断は起動時に 1 回しか
+ * 走らないので速度は要らない。判定そのものは 1 バイトも変わらない。
+ * (同じ理由の先例: kernel/cpu_calibrate.c の nop_loop) */
+static void __attribute__((noinline)) check(int cond, const char *name)
 {
     if (cond) {
         ksel_pass++;
@@ -562,22 +567,22 @@ static void test_memmap_pool_user(void)
 
     /* 変異の前。ここが 0 でなければ test_memmap が既に報告している。 */
     clean = paging_memmap_selftest(tramp);
-    check(clean == 0, "pool: map ok before mutation");
+    check(clean == 0, "mmu:map ok b4");
     if (clean != 0) return;   /* 既に壊れている。変異しても意味が無い */
 
     if (paging_poke_user_bit(MEM_DMA_POOL_BASE, 1) != 0) {
-        check(0, "pool: PTE poke failed");
+        check(0, "mmu:PTE poke failed");
         return;
     }
     poked = paging_memmap_selftest(tramp);
     /* **必ず戻す** — 落ちたかどうかを見る前に戻しておく。 */
     (void)paging_poke_user_bit(MEM_DMA_POOL_BASE, 0);
 
-    check(poked > 0, "pool: USER bit fails the map check");
+    check(poked > 0, "mmu:USER bit caught");
 
     /* 戻したので、もう一度通ること。TLB は poke の中で無効化している。 */
     check(paging_memmap_selftest(tramp) == 0,
-          "pool: map ok after restore");
+          "mmu:map ok after");
 }
 
 int kselftest_run_post_exec(void)
@@ -710,27 +715,27 @@ static void test_pit_setup(void)
     const struct pit_setup *p = pit_get_setup();
 
     /* 積んでいない (= pit_init が値を記録していない) なら以後は無意味。 */
-    check(p->valid != 0, "pit: setup recorded by pit_init");
+    check(p->valid != 0, "pit:setup recorded");
 
     /* **クロックを読んでいること。** 未判定のまま既定値で走ると、
      * 2.4576MHz 機が直す前と同じ分周のままになる。 */
-    check(sysclk_detected() != 0, "sysclk: 0000:0501h read before pit_init");
+    check(sysclk_detected() != 0, "pit:sysclk detected");
 
     /* 分周に使ったのが判定値そのものか (既定へ倒れていないか)。 */
-    check(p->clk_hz == sysclk_hz(), "pit: divided the detected clock");
-    check(p->hz == (unsigned int)PIT_HZ, "pit: programmed PIT_HZ");
+    check(p->clk_hz == sysclk_hz(), "pit:clk=sysclk");
+    check(p->hz == (unsigned int)PIT_HZ, "pit:hz=PIT_HZ");
     check(p->reload == (unsigned int)(sysclk_hz() / (unsigned long)PIT_HZ),
-          "pit: reload == sysclk / PIT_HZ");
+          "pit:reload=clk/hz");
 
     /* **どちらのクロックでもちょうど 10ms。** ここが 8125 なら 19968 を
      * 2.4576MHz 機に積んでいる (直す前の姿)。 */
     check(p->period_us == (unsigned int)(1000000UL / (unsigned long)PIT_HZ),
-          "pit: tick period is exactly 1/PIT_HZ second");
+          "pit:period=1/hz");
 
     /* カウンタ#0 / LSB-MSB / モード2 (レートジェネレータ) / バイナリ。
      * モードが変わると周期そのものの意味が変わる。 */
     check(p->mode == (u8)PIT_MODE_TIMER0,
-          "pit: counter 0 in mode 2 (rate generator)");
+          "pit:ch0 mode2");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -751,43 +756,43 @@ static void test_dma_pool(void)
     u32 bad_before = dma_pool_bad_free();
     u32 leak_before = dma_pool_leaked();
 
-    check(free_before == DMA_POOL_PAGES, "pool: starts empty");
+    check(free_before == DMA_POOL_PAGES, "dmap:starts empty");
 
     a = dma_pool_alloc(16 * 1024, 0, &pa);
     b = dma_pool_alloc(16 * 1024, 0, &pb);
     c = dma_pool_alloc(16 * 1024, 0, &pc);
     check(a != (void *)0 && b != (void *)0 && c != (void *)0,
-          "pool: 3x16KB fit");
+          "dmap:3x16KB fit");
     /* 恒等写像。装置へ渡すのがどちらか迷わせないための約束。 */
     check(pa == (u32)a && pb == (u32)b && pc == (u32)c,
-          "pool: phys == virt");
-    check(pa == (u32)MEM_DMA_POOL_BASE, "pool: first span at base");
+          "dmap:phys=virt");
+    check(pa == (u32)MEM_DMA_POOL_BASE, "dmap:first at base");
     /* **64KB 境界をまたがない。** またぐ候補は飛ばしている。 */
     check(!dma_crosses_64k(pa, 16 * 1024) && !dma_crosses_64k(pb, 16 * 1024) &&
           !dma_crosses_64k(pc, 16 * 1024),
-          "pool: no 64KB straddle");
+          "dmap:no 64KB cross");
 
     /* 真ん中を返すと、そこに 8KB が入る。 */
-    check(dma_pool_free(b) == 0, "pool: free middle");
+    check(dma_pool_free(b) == 0, "dmap:free middle");
     d = dma_pool_alloc(8 * 1024, 0, (u32 *)0);
-    check(d == b, "pool: 8KB reuses it");
+    check(d == b, "dmap:8KB reuses");
 
     /* 途中ポインタの解放は数える (装置がまだ書いているかもしれない)。 */
     check(dma_pool_free((void *)((u32)a + 4096)) < 0,
-          "pool: mid pointer refused");
+          "dmap:mid ptr refused");
     check(dma_pool_bad_free() == bad_before + 1,
-          "pool: bad free counted");
+          "dmap:bad free cnt");
 
     /* LEAKED は二度と配らない。 */
-    check(dma_pool_mark_leaked(c) == 0, "pool: mark_leaked ok");
-    check(dma_pool_leaked() == leak_before + 1, "pool: leak counted");
-    check(dma_pool_free(c) < 0, "pool: leaked not freeable");
+    check(dma_pool_mark_leaked(c) == 0, "dmap:mark_leaked ok");
+    check(dma_pool_leaked() == leak_before + 1, "dmap:leak cnt");
+    check(dma_pool_free(c) < 0, "dmap:leaked no free");
 
     /* 枯渇。32KB より大きい要求は**空でも**通らない。 */
     check(dma_pool_alloc(33 * 1024, 0, (u32 *)0) == (void *)0,
-          "pool: 33KB refused");
+          "dmap:33KB refused");
     check(dma_pool_alloc(0, 0, (u32 *)0) == (void *)0,
-          "pool: 0 bytes refused");
+          "dmap:0 bytes refused");
 
     /* 後片付け。LEAKED の c は**戻せない**ので、その 16KB は使えないまま。
      * 起動ごとの自己診断で池を削るわけにはいかないので、
@@ -797,7 +802,7 @@ static void test_dma_pool(void)
     (void)dma_pool_free(d);
     dma_pool_init();
     check(dma_pool_free_pages() == DMA_POOL_PAGES,
-          "pool: empty again");
+          "dmap:empty again");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -811,41 +816,41 @@ static void test_dma8237(void)
 {
     int done = -1, tc = -1;
 
-    check(dma8237_ready() != 0, "dma: init before fdc");
+    check(dma8237_ready() != 0, "dma:init b4 fdc");
     check(dma_above_1mb_state() != DMA_A20_UNKNOWN,
-          "dma: 0439h recorded");
+          "dma:0439h recorded");
 
     /* ch は 0〜3。範囲外は表も引かない。 */
     check(dma_chan_setup(DMA_CHAN_COUNT, MEM_DMA_POOL_BASE, 512,
                          DMA_DIR_TO_MEM, DMA_MODE_SINGLE) < 0,
-          "dma: bad channel refused");
+          "dma:bad ch refused");
     /* 0 バイトは積めない (カウントに -1 を積むので 65536 になる)。 */
     check(dma_chan_setup(2, MEM_DMA_POOL_BASE, 0, DMA_DIR_TO_MEM,
                          DMA_MODE_SINGLE) < 0,
-          "dma: 0 bytes refused");
+          "dma:0 bytes refused");
     /* 64KB バンクまたぎ ([HW2])。プールの境界 0x2F0000 の手前から。 */
     check(dma_chan_setup(3, MEM_DMA_POOL_BASE + 0x7000UL, 0x4000UL,
                          DMA_DIR_TO_MEM, DMA_MODE_SINGLE) < 0,
-          "dma: 64KB straddle refused");
+          "dma:64KB cross refused");
     /* 16MB 以上 */
     check(dma_chan_setup(3, 0x1000000UL, 512, DMA_DIR_TO_MEM,
                          DMA_MODE_SINGLE) < 0,
-          "dma: >=16MB refused");
+          "dma:>=16MB refused");
 
     /* 引数が通っても **マスクしていなければ積まない**。ch3 は誰も使って
      * いないので、ここで触っても他の装置に当たらない。 */
     check(dma_chan_setup(3, MEM_DMA_POOL_BASE, 512, DMA_DIR_TO_MEM,
                          DMA_MODE_SINGLE) < 0,
-          "dma: unmasked setup refused");
+          "dma:unmasked refused");
 
     /* マスクしてから積むと通り、done / tc_event が落ちている。
      * **積んだだけでマスクは外れない**ので、ch3 は閉じたまま。 */
     dma_chan_mask(3);
     check(dma_chan_setup(3, MEM_DMA_POOL_BASE, 512, DMA_DIR_TO_MEM,
                          DMA_MODE_SINGLE) == 0,
-          "dma: masked setup ok");
-    check(dma_chan_state(3, &done, &tc) == 0, "dma: state readable");
-    check(done == 0 && tc == 0, "dma: setup cleared TC");
+          "dma:masked setup ok");
+    check(dma_chan_state(3, &done, &tc) == 0, "dma:state readable");
+    check(done == 0 && tc == 0, "dma:setup cleared TC");
     dma_chan_mask(3);   /* 念のため閉じたままにしておく */
 }
 
@@ -920,6 +925,16 @@ static void ksel_irq_reset_devs(void)
     ksel_irq_log_n = 0;
 }
 
+/* tick の変わり目まで **IF=1 で** 待つ。ストームの窓を「この tick の頭から」
+ * に揃えるためだけに在る (上の注記)。PIT が止まっていると戻らないので、
+ * 1 tick ぶんを大きく超える回数で打ち切る (そのときは窓が汚れるだけ)。 */
+static void ksel_storm_wait_tick(void)
+{
+    u32 t = tick_count;
+    long spin = 500000L;   /* 0.6µs x 50 万 = 約 0.3 秒。1 tick の 30 倍 */
+    while (tick_count == t && spin-- > 0) io_wait();
+}
+
 static void test_irq_dynamic(void)
 {
     u32 ctx_before = irq_ctx_violations;
@@ -930,34 +945,36 @@ static void test_irq_dynamic(void)
 
     /* --- 拒否規則 (配線の確認。網羅はホスト試験) --- */
     check(irq_register(0, ksel_fake_irq, &ksel_dev[0], 0) == IRQ_ERR_NOTSUP,
-          "irq: fixed IRQ0 (timer) refused");
+          "irq:reg0=NOTSUP");
     check(irq_register(11, ksel_fake_irq, &ksel_dev[0], 0) == IRQ_ERR_NOTSUP,
-          "irq: fixed IRQ11 (FDC) refused");
+          "irq:reg11=NOTSUP");
     check(irq_register(16, ksel_fake_irq, &ksel_dev[0], 0) == IRQ_ERR_INVAL,
-          "irq: out of range refused");
+          "irq:reg16=INVAL");
     check(irq_register(KSEL_IRQ_LINE, 0, &ksel_dev[0], 0) == IRQ_ERR_INVAL,
-          "irq: NULL handler refused");
+          "irq:regNULL=INVAL");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[0], 0x80)
-          == IRQ_ERR_INVAL, "irq: unknown flags refused");
+          == IRQ_ERR_INVAL, "irq:regflag=INVAL");
 
     /* --- 登録数で PIC のマスクを持つ --- */
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq: line masked before register");
+    check(ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq:masked b4 reg");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[0], IRQ_F_SHARED)
-          == 0, "irq: first register accepted");
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0, "irq: first register unmasks in PIC");
+          == 0, "irq:reg1 ok");
+    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0, "irq:reg1 unmasks");
 
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[0], IRQ_F_SHARED)
-          == IRQ_ERR_EXIST, "irq: duplicate {fn,arg} refused");
+          == IRQ_ERR_EXIST, "irq:dup=EXIST");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[1], 0)
-          == IRQ_ERR_SHARE, "irq: exclusive join onto a shared line refused");
+          == IRQ_ERR_SHARE, "irq:excl=SHARE");
+    /* 2〜4 本目は同じ「末尾に足す」1 つの振る舞い (深さの境目は次の
+     * reg5=FULL が見る)。個別に落ちる経路が無いので 1 本にまとめる。 */
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[1], IRQ_F_SHARED)
-          == 0, "irq: second shared register accepted");
-    check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[2], IRQ_F_SHARED)
-          == 0, "irq: third shared register accepted");
-    check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[3], IRQ_F_SHARED)
-          == 0, "irq: fourth shared register accepted");
+              == 0 &&
+          irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[2], IRQ_F_SHARED)
+              == 0 &&
+          irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[3], IRQ_F_SHARED)
+              == 0, "irq:reg2-4 ok");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[4], IRQ_F_SHARED)
-          == IRQ_ERR_FULL, "irq: fifth register refused (table is 4 deep)");
+          == IRQ_ERR_FULL, "irq:reg5=FULL");
 
     /* --- 走査の順と 2 巡 (`int 0x23` で共通スタブを通す) --- */
     ksel_irq_reset_devs();
@@ -966,15 +983,15 @@ static void test_irq_dynamic(void)
     ksel_raise_irq3();
     check(ksel_dev[0].calls == 2 && ksel_dev[1].calls == 2 &&
           ksel_dev[2].calls == 2 && ksel_dev[3].calls == 2,
-          "irq: all four registrants run in both passes");
+          "irq:4 devs x2 passes");
     check(ksel_irq_log_n == 8 && ksel_irq_log[0] == 0 && ksel_irq_log[1] == 1 &&
           ksel_irq_log[2] == 2 && ksel_irq_log[3] == 3 && ksel_irq_log[4] == 0,
-          "irq: dispatch order is registration order, twice");
-    check(irq_shared_dispatch(KSEL_IRQ_LINE) > 0, "irq: shared dispatch counted");
+          "irq:order 0123 x2");
+    check(irq_shared_dispatch(KSEL_IRQ_LINE) > 0, "irq:shared cnt");
     /* **ISR の中からの登録は断る** (契約、debug で数える) */
     check(ksel_dev[3].try_register_rc == IRQ_ERR_CTX,
-          "irq: register from ISR context refused");
-    check(irq_ctx_violations == ctx_before + 1, "irq: ISR-context refusal counted");
+          "irq:isr reg=CTX");
+    check(irq_ctx_violations == ctx_before + 1, "irq:ctx cnt");
 
     /* --- DEFERRED を数える --- */
     deferred_before = irq_deferred_count(KSEL_IRQ_LINE);
@@ -983,69 +1000,78 @@ static void test_irq_dynamic(void)
     ksel_dev[1].ret[1] = IRQ_DEFERRED;
     ksel_raise_irq3();
     check(irq_deferred_count(KSEL_IRQ_LINE) == deferred_before + 2,
-          "irq: IRQ_DEFERRED counted per return");
+          "irq:deferred cnt");
 
     /* --- 解除: 残った側は動き、抜けた側は呼ばれない --- */
     check(irq_unregister(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[1]) == 0,
-          "irq: unregister accepted");
+          "irq:unreg ok");
     check(irq_unregister(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[1])
-          == IRQ_ERR_NOENT, "irq: second unregister refused");
+          == IRQ_ERR_NOENT, "irq:unreg2=NOENT");
     ksel_irq_reset_devs();
     ksel_raise_irq3();
-    check(ksel_dev[1].calls == 0, "irq: no callback after unregister");
+    check(ksel_dev[1].calls == 0, "irq:unreg silent");
     check(ksel_dev[0].calls > 0 && ksel_dev[2].calls > 0,
-          "irq: the remaining registrants still run");
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0, "irq: line stays unmasked");
+          "irq:rest still run");
+    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0, "irq:still unmasked");
 
     /* --- ストーム: 1 tick の窓を作るため **IF=0 のまま**撃つ --- */
-    /* (tick_count が止まるので窓は 1 つ。`int 0x23` は IF に関係なく通る) */
+    /* (tick_count が止まるので窓は 1 つ。`int 0x23` は IF に関係なく通る)
+     *
+     * **tick の頭まで待ってから撃つこと。** `irq_storm_step` は tick ごとに
+     * 数え直すので、ここまでの解除の試験で撃った「誰も受けない `int 0x23`」が
+     * 同じ tick に入っていると、その数だけ下駄を履いて 200 本目で閾値を
+     * 越える (2026-09-23 に NP21/W で FAIL した形)。待つのは **IF=1 で** —
+     * IF=0 では IRQ0 が止まって tick_count が進まない。
+     * 待ってから撃ち終わるまでのあいだに、受け手のいない `int 0x23` を
+     * 他から挟んではいけない。 */
+    ksel_storm_wait_tick();
     {
         unsigned int saved = irq_save();
         ksel_irq_reset_devs();                  /* 全員 IRQ_NONE = 誰も受けない */
         for (i = 0; i < IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
         irq_restore(saved);
     }
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0,
-          "irq: 200 unclaimed edges in one tick do NOT mask");
-    check((irq_storm_masked & (1u << KSEL_IRQ_LINE)) == 0,
-          "irq: storm bit not set at 200");
+    check(ksel_irq_masked(KSEL_IRQ_LINE) == 0 &&
+          (irq_storm_masked & (1u << KSEL_IRQ_LINE)) == 0,
+          "irq:200/tick no mask");
     irq_test_reset_line(KSEL_IRQ_LINE);         /* 窓を作り直す (試験専用) */
+    ksel_storm_wait_tick();
     {
         unsigned int saved = irq_save();
         for (i = 0; i <= IRQ_STORM_LIMIT; i++) ksel_raise_irq3();
         irq_restore(saved);
     }
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 1,
-          "irq: 201 unclaimed edges in one tick mask the line");
-    check((irq_storm_masked & (1u << KSEL_IRQ_LINE)) != 0,
-          "irq: storm bit is sticky");
+    check(ksel_irq_masked(KSEL_IRQ_LINE) == 1 &&
+          (irq_storm_masked & (1u << KSEL_IRQ_LINE)) != 0,
+          "irq:201/tick masks+bit");
 
     /* --- 隔離: sticky で、登録の再計算では解けない --- */
     check(irq_quarantine_line(0xFF) == IRQ_ERR_INVAL,
-          "irq: quarantine range-checks before touching the PIC");
+          "irq:qFF=INVAL");
     check(irq_quarantine_line(0) == IRQ_ERR_INVAL,
-          "irq: quarantine refuses a fixed line");
-    check(irq_quarantine_line(KSEL_IRQ_LINE) == 0, "irq: quarantine accepted");
-    check((irq_line_quarantined & (1u << KSEL_IRQ_LINE)) != 0,
-          "irq: quarantine bit set");
-    check(ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq: quarantined line is masked");
+          "irq:q0=INVAL");
+    /* 返り値・診断ビット・PIC のマスクは irq_quarantine_line が**同じ
+     * irq_save の中でまとめて**書く。片方だけ落ちる経路は無いので 1 本で見る。 */
+    check(irq_quarantine_line(KSEL_IRQ_LINE) == 0 &&
+          (irq_line_quarantined & (1u << KSEL_IRQ_LINE)) != 0 &&
+          ksel_irq_masked(KSEL_IRQ_LINE) == 1, "irq:q ok+bit+masked");
     check(irq_register(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[4], IRQ_F_SHARED)
-          == IRQ_ERR_BUSY, "irq: register onto a quarantined line refused");
+          == IRQ_ERR_BUSY, "irq:q reg=BUSY");
 
     /* --- 後始末: 残りを外して線を素の状態へ戻す --- */
     (void)irq_unregister(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[0]);
     (void)irq_unregister(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[2]);
     (void)irq_unregister(KSEL_IRQ_LINE, ksel_fake_irq, &ksel_dev[3]);
     check((irq_line_quarantined & (1u << KSEL_IRQ_LINE)) != 0,
-          "irq: recount does NOT clear the quarantine");
+          "irq:q vs recount");
     /* **試験専用の戻し** (kernel/irq.h の注記)。これが無いと以後の起動で
      * IRQ3 が使えないままになる。 */
     irq_test_reset_line(KSEL_IRQ_LINE);
     check((irq_line_quarantined & (1u << KSEL_IRQ_LINE)) == 0,
-          "irq: test-only reset clears it again");
+          "irq:reset clears q");
     check(ksel_irq_masked(KSEL_IRQ_LINE) == 1,
-          "irq: line masked again with no registrants");
-    check(irq_lines[0].count == 0, "irq: table empty after the test");
+          "irq:masked at end");
+    check(irq_lines[0].count == 0, "irq:table empty");
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1076,67 +1102,89 @@ static void test_time_now(void)
     const struct pit_setup *ps = pit_get_setup();
     u32 lo = 0, hi = 0, plo = 0, phi = 0;
     u32 t0lo = 0, t0hi = 0, t1lo = 0, t1hi = 0;
+    u32 clamp0;
     unsigned int hit_t0, hit_t1, hit_retry;
     int back = 0;
     int rc, i;
 
     /* --- 素の読み --- */
     rc = sys_time_now(&lo, &hi);
-    check(rc == 0, "time: sys_time_now succeeds once the PIT is programmed");
-    check(hi == 0, "time: high word is 0 early in boot (< 71 min)");
-    check(lo > 0 || tick_count == 0, "time: microseconds advance from boot");
+    check(rc == 0, "time:first read ok");
+    check(hi == 0, "time:hi=0 at boot");
+    check(lo > 0 || tick_count == 0, "time:us advance");
 
-    /* --- **1 万回連続で逆行しない** --- */
+    /* --- **1 万回連続で逆行しない** ---
+     * 単調性を持たせているのは p1/p2 の判定**だけではない**。8254 の再ロードと
+     * 8259 の IRR が原子的でない機械 (NP21/W は模擬しない。実機も数百 ns の窓が
+     * ある) では判定表を正しく通しても前回より小さい値が出るので、
+     * `sys_time_now` が最後に前回値でクランプする。押さえた回数はその場で
+     * 表示する — 0 なら「この機械では p1/p2 だけで足りていた」の記録になる。 */
+    clamp0 = ktime_clamp_count;
     plo = lo; phi = hi;
     for (i = 0; i < KSEL_TIME_READS; i++) {
         if (sys_time_now(&lo, &hi) != 0) { back = -1; break; }
         if (hi < phi || (hi == phi && lo < plo)) { back++; break; }
         plo = lo; phi = hi;
     }
-    check(back == 0, "time: 10000 consecutive reads never go backwards");
+    check(back == 0, "time:10k reads monotonic");
+    clamp0 = ktime_clamp_count - clamp0;
+    kprintf(0x07, "[selftest] time: clamped %u of %d reads\n",
+            (unsigned int)clamp0, (int)KSEL_TIME_READS);
+    /* 全部がクランプなら時計が止まっている (補間が効いていない)。 */
+    check(clamp0 < (u32)KSEL_TIME_READS, "time:clamp count sane");
 
     /* --- 既知の待ちを挟む (校正済み delay と突き合わせる) --- */
-    check(sys_time_now(&t0lo, &t0hi) == 0, "time: bracket read before delay");
+    check(sys_time_now(&t0lo, &t0hi) == 0, "time:bracket b4");
     cpu_delay_us(1000);
-    check(sys_time_now(&t1lo, &t1hi) == 0, "time: bracket read after delay");
+    check(sys_time_now(&t1lo, &t1hi) == 0, "time:bracket after");
     /* 1ms の待ちが 0.2ms〜20ms に見えれば配線は正しい (校正の精度そのものは
      * cpu_calibrate の試験が持つ。ここは「時計が進むか」だけ)。 */
     check(t1hi == t0hi && t1lo > t0lo + 200 && t1lo < t0lo + 20000,
-          "time: 1ms delay shows up as a plausible number of microseconds");
+          "time:1ms delay plausible");
 
     /* --- 注入: p1/p2 の三分岐を全部踏む --- */
     time_branch_reset();
     ksel_time_feed(1, 0, 0, 0, 0);            /* 両方 0 → t をそのまま */
-    check(sys_time_now(&lo, &hi) == 0, "time: p1=0 p2=0 accepted");
+    check(sys_time_now(&lo, &hi) == 0, "time:p1=0 p2=0 ok");
     ksel_time_feed(1, 1, 0, 1, 0);            /* p1 = 1 → t + 1 */
-    check(sys_time_now(&lo, &hi) == 0, "time: p1=1 accepted (tick + 1)");
+    check(sys_time_now(&lo, &hi) == 0, "time:p1=1 -> t+1");
     ksel_time_feed(2, 0, 1, 0, 0);            /* 1 回やり直して成功 */
-    check(sys_time_now(&lo, &hi) == 0, "time: p1=0 p2=1 retries, then succeeds");
+    check(sys_time_now(&lo, &hi) == 0, "time:0/1 retry ok");
     /* **3 回とも 0/1 を作る** — p2 だけ強制すると境界後の p1=1 で成功し得る */
     ksel_time_feed(1, 0, 1, 0, 1);
-    check(sys_time_now(&lo, &hi) == OS32_ERR_AGAIN,
-          "time: three 0/1 attempts return -EAGAIN");
-    /* 負のときは出力を触らない */
+    check(sys_time_now(&lo, &hi) == OS32_ERR_AGAIN, "time:0/1 x3=EAGAIN");
+    /* 負のときは出力を触らない。2 回目の -EAGAIN は同じ入力列の同じ経路
+     * なので、返り値と「出力が不変」を 1 本で見る。 */
     lo = 0xDEADBEEFUL; hi = 0xFEEDFACEUL;
-    check(sys_time_now(&lo, &hi) == OS32_ERR_AGAIN, "time: still -EAGAIN");
-    check(lo == 0xDEADBEEFUL && hi == 0xFEEDFACEUL,
-          "time: a negative return leaves both outputs untouched");
+    check(sys_time_now(&lo, &hi) == OS32_ERR_AGAIN &&
+          lo == 0xDEADBEEFUL && hi == 0xFEEDFACEUL, "time:neg keeps out");
     time_test_feed_clear();
     check(time_branch_hits[TIME_BR_T0] >= 1 &&
           time_branch_hits[TIME_BR_T1] >= 1 &&
           time_branch_hits[TIME_BR_RETRY] >= 4,
-          "time: injected inputs cover all three p1/p2 branches");
+          "time:3 branches hit");
 
-    /* --- 注入: 周期の境界の count --- */
+    /* --- 注入: 周期の境界の count ---
+     * **2 本の読みは同じ irq_save の中で**。あいだに tick 境界が入ると
+     * 「はじめ」の側が 1 周期ぶん大きくなり、補間の比較が偶発的に落ちる
+     * (10ms に数 µs の窓。踏むまで気づけない形なので先に塞ぐ)。
+     * 2 本とも同じ注入経路なので、成功の判定は 1 本にまとめる。
+     * 注入中はクランプを通らない (kernel/ktime.c) ので、
+     * 「終わり」→「はじめ」の巻き戻りがそのまま観測できる。 */
     time_test_feed[0].p1 = 0; time_test_feed[0].p2 = 0;
     time_test_feed[0].count = 1;              /* 周期の終わり */
     time_test_feed_n = 1;
-    check(sys_time_now(&t0lo, &t0hi) == 0, "time: count = 1 accepted");
-    time_test_feed[0].count = (int)ps->reload;  /* 周期のはじめ */
-    check(sys_time_now(&t1lo, &t1hi) == 0, "time: count = reload accepted");
+    {
+        unsigned int saved = irq_save();
+        rc = sys_time_now(&t0lo, &t0hi);
+        time_test_feed[0].count = (int)ps->reload;  /* 周期のはじめ */
+        if (sys_time_now(&t1lo, &t1hi) != 0) rc = -1;
+        irq_restore(saved);
+    }
+    check(rc == 0, "time:count=1/reload ok");
     /* 同じ tick なら「終わり」のほうが大きい (補間が効いている) */
     check(t0lo > t1lo || t0hi > t1hi || tick_count == 0,
-          "time: the interpolated fraction actually moves with the count");
+          "time:frac moves");
     time_test_feed_clear();
 
     /* --- 実 PIT での位相待ち (**IF=1 で待つ**。IF=0 では IRQ0 が止まり
@@ -1167,23 +1215,23 @@ static void test_time_now(void)
     hit_retry = time_branch_hits[TIME_BR_RETRY];
     /* **踏めなかった分岐は失敗にしない** — 網羅は注入が持つ。 */
     if (hit_t0 == 0 || hit_t1 == 0 || hit_retry == 0) {
-        kprintf(0x07, "[selftest] time: real-PIT phase hit t0=%d t1=%d retry=%d"
-                      " (unhit branches are UNVERIFIED on hardware; the"
-                      " injected table covers them)\n",
+        /* 踏めなかった分岐は実機では UNVERIFIED。網羅は注入の表が持つ。 */
+        kprintf(0x07, "[selftest] time: real-PIT t0=%d t1=%d retry=%d"
+                      " (unhit = UNVERIFIED)\n",
                 (int)hit_t0, (int)hit_t1, (int)hit_retry);
     }
     check(hit_t0 + hit_t1 + hit_retry > 0,
-          "time: the real PIT was read at least once near a period boundary");
+          "time:real PIT read");
     time_branch_reset();
 
     /* --- CPL=0 の直呼びは書き込み検査の対象外 (Approve 後の注意 2) ---
      * 常駐シェル / gshell はカーネル帯のローカル変数を渡す。`ring3_in_syscall`
      * が 0 のあいだは素通しでなければ、それらが全部落ちる。 */
     check(ring3_user_range_writable((u32)&lo, sizeof(u32)) == 1,
-          "time: CPL=0 direct call is not subject to the writable check");
+          "time:CPL0 wr check off");
     check(ring3_user_ranges_writable((u32)&lo, sizeof(u32),
                                      (u32)&hi, sizeof(u32)) == 1,
-          "time: the two-range form agrees on the CPL=0 path");
+          "time:CPL0 2-range same");
 
     /* --- 呼び出しコストと IF=0 の最長区間 (Approve 後の注意 3) ---
      * この時計の IF=0 区間は sys_time_now 1 回ぶんそのもの。1000 回を
@@ -1192,8 +1240,8 @@ static void test_time_now(void)
     if (sys_time_now(&t0lo, &t0hi) == 0) {
         for (i = 0; i < 1000; i++) (void)sys_time_now(&lo, &hi);
         if (sys_time_now(&t1lo, &t1hi) == 0 && t1hi == t0hi && t1lo > t0lo) {
-            kprintf(0x07, "[selftest] time: 1000 reads took %u us"
-                          " (~%u us per call = the IF=0 window)\n",
+            /* 1 回あたりの µs = この時計の IF=0 区間そのもの。 */
+            kprintf(0x07, "[selftest] time: 1000 reads %u us (%u us/call)\n",
                     (unsigned int)(t1lo - t0lo),
                     (unsigned int)((t1lo - t0lo) / 1000u));
         }

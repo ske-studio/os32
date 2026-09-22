@@ -194,6 +194,15 @@ ISR の中からの登録・解除・自己解除は禁止 (契約、debug ビ�
   「登録を拒否された装置はこの票では利用不可」は PCI probe 経路の決定 (往復 7 B1) として読んだ。
   **未実装**: debug ビルドのハンドラ時間計測 (1ms 超の 1 回報告) と `irq_off_max_us`。W1/W3 の受入項目に
   無く、`sys_time_now` の再帰呼び出しを避ける設計 (1-6) が要るので別に起こす。
+- **修正 (2026-09-23、worktree `wt/hal-fix`)**: NP21/W の起動自己診断で「200 本でマスクしない」と
+  「200 本でストームビットが立たない」が FAIL した。**原因は試験の側** — `irq_storm_step` は tick ごとに
+  数え直すので、直前の解除の試験で撃った「受け手のいない `int 0x23`」が同じ tick に入っていると
+  その数だけ下駄を履き、200 本目で閾値を越えていた。`kernel/kselftest.c` に
+  `ksel_storm_wait_tick()` (**IF=1 で** tick の変わり目まで待つ。IF=0 では IRQ0 が止まって
+  `tick_count` が進まない) を入れ、200 の山と 201 の山の**両方**をその直後から撃つようにした。
+  `kernel/irq.c` / `kernel/irq_math.c` は 1 バイトも変えていない (閾値の字義はホスト試験
+  `make check-irq-math-host` の `storm` が「200 で 0、201 で 1、tick が変われば窓を作り直す」を
+  そのまま持っている)。
 
 ### 1-2. 8237 DMA の共通部 — `drivers/dma8237.c` / `dma8237.h`
 
@@ -481,6 +490,18 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   不変 (2 本目だけ RO の場合も))、**正常系の対照** (非恒等写像のアプリ heap / stack と shlib `.data/.bss` への出力は成功)、
   不在 PTE、ページ跨ぎ、を確かめる。`pci_bind_info` (v60) も同じ試験。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
+- **単調性のクランプ (2026-09-23 追記、NP21/W の実測で判明)**: 上の p1/p2 の挟み込みは
+  **8254 の再ロードと 8259 の IRR bit0 が原子的に動くこと**を前提にしている。
+  **NP21/W は 8254 の再ロードと 8259 の IRR を原子的に模擬しない** (`count` は経過サイクルから
+  計算され、IRQ0 は別立てのタイマ事象で上がるので、**count が先/IRR が先の両方が出る**)。
+  そのため (a) count は新周期・IRR はまだ → `p1=p2=0` で `t × 10000 + 小さい端数` = 直前の
+  `t × 10000 + 9999` より小さい、(b) IRR が先で `p1=1` → `(t+2) × 10000` 相当まで跳び、ISR の後の
+  読みで戻る、の 2 つが判定をすり抜ける (実機も数百 ns の窓で同じ形)。
+  **単調性は `s_last_us` へのクランプで保証し、回数を `ktime_clamp_count` に数える**
+  (`kernel/time_math.c` の `time_clamp` が純粋な判定、書き手は `kernel/ktime.c` の
+  `sys_time_now` だけで、スナップショットと同じ `irq_save` の中。`us == last` は数えない。
+  試験の注入中 (`time_test_feed_n > 0`) はクランプを通さない — 境界の count を撃ち分ける試験が
+  わざと小さい値を作るため)。**実機での回数は W4 の記録項目**。
 
 - **進捗 (2026-09-23、worktree `wt/hal-a`、実装 A)**: 実装済み。`kernel/ktime.c` (スナップショット) /
   `kernel/time_math.{c,h}` (判定と算数、I/O 無し) / `kernel/ktime.h` (試験専用の注入口) を新設、
@@ -504,6 +525,14 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   **手元で通っていないもの**: `userland/tests/time_test.c` は**コンパイルは通るがリンクできない**
   (この環境の newlib が `/usr/local/cross` に無い。既存の `hal_test` も同じで、私の変更とは無関係)。
   `build/app.conf` と `userland/deploy.yaml` には登録済み ([V2])。
+- **修正 (2026-09-23、worktree `wt/hal-fix`)**: NP21/W の起動自己診断で「1 万回連続読みで逆行しない」が
+  FAIL した。原因は上の「単調性のクランプ」の項 (8254 の再ロードと 8259 の IRR が原子的でない)。
+  `kernel/time_math.c` に純粋判定 `time_clamp()`、`kernel/ktime.c` に `s_last_us` と
+  `ktime_clamp_count` を入れた (クランプはスナップショットと同じ `irq_save` の中、書き手は 1 か所)。
+  ホスト試験にケース `clamp` と変異 2 本を追加 (`make check-time-math-host` = 5 ケース / 変異 8 本すべて RED)。
+  kselftest は 1 万回読みの後に `ktime_clamp_count` を表示し、「全部がクランプではない」ことも見る。
+  境界の count を撃ち分ける 2 本の読みは**同じ `irq_save` の中**に入れた (あいだに tick 境界が入ると
+  補間の比較が偶発的に落ちる、10ms に数 µs の窓)。
 
 ### 1-6. 実装の注意 (往復 5・6・12 の非 blocker)
 
@@ -561,7 +590,7 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
 | W1 | 純粋関数のホスト試験 (変異つき): 集約と 2 巡 (同時要因、2 巡目の回収、`handled_any` の保持、`irq_deferred_count`、ストーム閾値)、**TC → ack → remaining の遷移表**、失敗した setup が旧 `done` / `tc_event` を保つこと、`irq_finish` の **EOI 送信列** (master / slave / IRQ15 スプリアスの ISR 検査を handled と独立に)、登録の一括有効化と拒否規則 (非対応 IRQ、SHARED 不一致、5 件目)、`dma_split_addr` / `dma_crosses_64k` / `bytes` の範囲 / `dma_accept_pair` / **TC の read-clear の保存**、プールの最初適合と整列と 64KB 跨ぎ (**境界直前から跨ぐ候補を飛ばして後半に置く、32KB × 2 が空プールに入る、LEAKED を free しても空きに戻らない**)、**隣接 span の free と途中ポインタ・二重解放**、PCI の一致規則 (任意 / 完全 / DECLINE で次へ / QUARANTINE で打ち切り / 複数装置)、時計の整数式と **p1/p2 の判定表** (両クロック、周期境界) | `check-par` |
 | W2 | FDC が `dma8237` 経由でも **NP21/W の 2HD 起動と md5 一致**、**書き込み → 読み戻しの一致**、`dma_chan_setup` が負のとき FDC コマンドを発行しない、読み失敗のタイムアウト → `fdc_abort_transfer` → 再試行。**実機の FD 起動** と 0439h の 3 値の表示 | NP21/W + 実機 |
 | W3 | 共通スタブに `irq_register` した偽装置 (`kselftest` / 試験用 KAPI): NP21/W の `/api/pic` で IRR/ISR を見ながら、master (3) と slave (9) の両方、連続、共有 (2 登録の集約と**残件の tick 回収の完了**)、共有者の**片方解除**後にもう片方が動く、解除後に callback が走らない、CPL=3 のアプリ実行中と V86 中、**要因を落とさずマスクもしない偽装置で 2 巡で戻ること** (救済しない契約の確認) と、**誰も受けないエッジを 201 回/tick 打ってマスクが入る (200 回では入らない)** ことを別の試験に、**正常に HANDLED を返す 2 つの偽装置で走査終了と新要因を重ねてエッジを失わせ、双方の tick フックが回収する** (B1 の反例)、**NE2000 の enter/leave の両方の窓への割り込み注入** (B2)、**82557 の巻き戻し中 (STOPPING) に共有線の別装置の IRQ を上げても、tick からも SCB に触らない** (B3、偽装置で代替)、**STARTING の観測点: (4) 登録直後・(6) 開始中・(7) M 解除直後のそれぞれで共有線の IRQ を上げ、(7) より前は装置アクセス無し、(7) の後は通常処理** (往復 9)、**NE2000 の再初期化直後の窓への注入** (往復 6 R1)、**noisy 隔離: 線が上がったままエッジが来ない / 共有者が HANDLED を返し続ける、の両方で `irq_quarantine_line` が入り再計算で解除されない** (往復 6 R3)、**`DEFERRED` を返した偽装置が自分の tick フックで残件を回収してマスクを外す**こと、**残った側が `DEFERRED`・装置マスク中のまま片方を解除しても残った側の tick フックが動き続ける**こと、IRQ0 の所要時間がこの票の前後で変わらないこと (`/api/prof`)、**LGY-98 をアダプタに移した後の rshell/LAN の通信** | NP21/W |
-| W4 | `sys_time_now`: 1 万回連続読みで逆行 0、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、**三分岐の網羅は hook だけが必須** (往復 8 R8-3: 既定の入力列 `{p1, p2, count}` を与える test hook と分岐カウンタで 0/0・1/x・0/1→再試行→成功・0/1×3→`-EAGAIN` を全部踏む。実 PIT では呼び出しから p1 読みまでに境界を越える機械があり、位相待ちだけでは 0/0 と 0/1 を踏めない)、**実 PIT の試験は期限付きの位相待ち** (**位相待ちは IF=1 で**行い、残り 1〜2 count を観測した瞬間だけ短く IF=0 にして採取する。IF=0 で待つと IRQ0 が止まって tick の期限が進まない (往復 9 R9-3)。期限は 100 tick、さらに IF=0 区間の中の観測ループにも独立した有限回数 (1000 回) の上限。実際に通った分岐を記録し、踏めなかった分岐は「未検証」と報告する。**三分岐の網羅は hook の方だけが必須**)、**PIT の残りが 0.1ms の位相から** IF=0 を 10.2ms 続けた後の読み (契約外の挙動を記録)、**CPL=3 の KAPI 経由の試験は post-exec 側** (`kselftest_run_post_exec`、`exec_init` の後)、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
+| W4 | `sys_time_now`: 1 万回連続読みで逆行 0 (**クランプ込み**。`ktime_clamp_count` を kselftest が表示するので、NP21/W と実機のそれぞれで**押さえた回数を記録する** — 0 なら p1/p2 だけで足りていた機械)、両クロック (NP21/W 1.9968 / 実機 2.4576)、**境界注入**: IF=0 で PIT の残りが 1〜2 count の位相から読む試験 (`kselftest` が count を見て待ち合わせる) で p1/p2 の 3 分岐を全部踏む、**三分岐の網羅は hook だけが必須** (往復 8 R8-3: 既定の入力列 `{p1, p2, count}` を与える test hook と分岐カウンタで 0/0・1/x・0/1→再試行→成功・0/1×3→`-EAGAIN` を全部踏む。実 PIT では呼び出しから p1 読みまでに境界を越える機械があり、位相待ちだけでは 0/0 と 0/1 を踏めない)、**実 PIT の試験は期限付きの位相待ち** (**位相待ちは IF=1 で**行い、残り 1〜2 count を観測した瞬間だけ短く IF=0 にして採取する。IF=0 で待つと IRQ0 が止まって tick の期限が進まない (往復 9 R9-3)。期限は 100 tick、さらに IF=0 区間の中の観測ループにも独立した有限回数 (1000 回) の上限。実際に通った分岐を記録し、踏めなかった分岐は「未検証」と報告する。**三分岐の網羅は hook の方だけが必須**)、**PIT の残りが 0.1ms の位相から** IF=0 を 10.2ms 続けた後の読み (契約外の挙動を記録)、**CPL=3 の KAPI 経由の試験は post-exec 側** (`kselftest_run_post_exec`、`exec_init` の後)、CPL=3 から 64 ビットが揃って返る | NP21/W + 実機 |
 | W5 | カーネル増分 ≤ 5KB、内訳: IRQ 表 8 × 4 × 12B = 384B、storm ビット + IRQ 別の tick 内発生数・deferred 回数 (8 × 2 × 4B = 64B)、bind 情報 32 件 × 8B = 256B + getter/KAPI/診断コード、pool ビットマップ + span 16 × 4B = 72B、DMA チャネル状態 4 × 16B、pit_setup 20B、コード (irq / dma8237 / dma_pool / pci_bind / sys_time ≒ 2.5KB、u64 の割り算は libgcc に既にある)、診断文字列 ≒ 0.5KB。`__bss_end` 差分と `docs/02_memory.md` の生成 (**新配置 0x2E8000〜0x2F7FFF が `MM_RW` で USER 無し、上下が NP**)、プールの枯渇 → 解放 → 再利用、**プールの PTE に USER を立てる変異で検査が落ちる** | `docs/02_memory.md` + kselftest |
 | W6 | **土台完了**の受入はここまで。82557 での連続 TX/RX・共有・再開は **L-B の受入**。土台完了は**システム全体の IF=0 時間保証ではない** (NE2000 の残件: 既存 ISR 経路に加え、変更後は foreground の leave → `irq_pending` → `service()` の経路も IF=0)。土台の合格と実機条件の合格 (W0 実機、W7、82557 の実 IRQ での共有) は分けて記録する。HAL 単体で未検証の実機条件を残件に明記: 82557 の実 IRQ 番号での共有、PCI バスマスタのキャッシュ整合 (W7)、CS4231 の DMA (§5-5)、**NE2000 の `wait_rdc` / `hw_reset` が ISR 文脈で回る既存の契約違反** (`ne2k_irq` と `ne2k_timer_tick` の両方から `service()` の失敗分岐 → `reinit_or_fail → bring_up → hw_reset` で到達。L-C で「要求の記録」と「foreground の実行」に分ける) | — |
 | W7 | **キャッシュ整合 (実機)**: CPU がパターンを書いて**フラッシュせずに** DMA で読ませる (FDC 書き込み → 読み戻し、82557 は L-B のループバック)、DMA で受けた直後に CPU が読む、を双方向で 100 回。所有権の移譲は「CPU 書き → 装置へ渡す → 装置完了の証拠 → CPU 読み」の順で、明示のフラッシュ命令は使わない。不一致が出たら対象 CPU と所有権移譲の手順を含めて再設計する (1-6。`wbinvd` は候補であって確定ではない) | 実機 |
