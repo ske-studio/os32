@@ -59,7 +59,7 @@ static void host_outp(unsigned int port, unsigned int value)
 /* console.c が引く外部シンボル (カーネル側の本物の代わり) */
 static int g_v86;
 int v86_is_active(void) { return g_v86; }
-void serial_putchar(char c) { (void)c; }
+int serial_putchar(char c) { (void)c; return 0; }
 
 /* --- 打鍵の注入リング (票 N4 の貼り付け) の代わり ------------------------
  * exec_reclaim_owned (9a) は端末**配下の子**の退場で残りを捨てる。ホストで
