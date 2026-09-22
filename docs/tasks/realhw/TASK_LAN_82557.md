@@ -35,11 +35,43 @@
 | **L-A** | **PCI の列挙**: `drivers/pci.c` (メカニズム #1 の config r/w、bus 0 の全デバイスを走査、vendor/device/class/BAR/Interrupt Line)、シェル `lspci`、`pci_find(vendor, device)`。判定は純粋関数に切り出してホスト試験 | 2〜3KB | **実機**: `lspci` で 8086:1229 (82557) と BAR (I/O 窓)、IRQ が出る |
 | **L-B** | **82557 ドライバ (最小)**: PCI から I/O BAR と IRQ、SCB 経由で reset / EEPROM から MAC / Configure / IA setup / CU (TX: 1 コマンドずつ) / RU (RX: RFD 連結、簡略モード)、割り込みは RU の Frame Received + CU 完了。参照は Intel の SDM (§6 SCB、§7 RFD) と Linux e100 の作法 | 10〜15KB | **実機**: MAC が読める → 自己送信 (ループバック) → ホストへ HELLO |
 | **L-C** | **NIC 境界の一般化**: `lgy98.c` ↔ `net/link.c` の結びつきを関数表 (`net/nic.h`: tx / mac / irq / poll) にして 82557 を 2 つ目の NIC に。起動時は PCI に 82557 が居ればそれ、無ければ LGY-98 (設定は手動でよい、v3 §3) | 1〜2KB | NP21/W (LGY-98 の回帰 L0〜L3) + 実機 |
-| **L-D** | **ホストの橋** `tools/lan_bridge.py` (Windows 側 Python + scapy/Npcap): LAN アダプタで EtherType 0x88B5 を拾い、`host_agent.py --listen` の FrameStream へ流し、逆も返す | ホストのみ | 実機 ↔ ホスト |
+| **L-D** | **ホストの橋** `tools/lan_bridge.py` (**Ubuntu 側 Python、標準ライブラリのみ** — AF_PACKET。scapy も Npcap も要らない): NIC で EtherType 0x88B5 を拾い、`host_agent.py --listen` の FrameStream へ流し、逆も返す。**実装済み** (ホスト試験 `make check-lan-bridge-host`、記録 [`tools/tests/lan_bridge_tdd.md`](../../../tools/tests/lan_bridge_tdd.md)) | ホストのみ | 実機 ↔ ホスト |
 | **L-D2** | **Ubuntu 向けのホスト側バックエンド**: `host_agent.py` のクリップボード (`clip.exe`/PowerShell) と印刷 (win32print) は Windows 前提。Linux では `xclip`/`wl-copy` と `lp` (CUPS) に差し替える (無ければ 503、既存の方針どおり) | ホストのみ | Ubuntu 機で `hclip` / `lpr` |
 | **L-E** | **Host Services の疎通**: 実機で `link_selftest` (L0〜L3 相当) → クリップボード / 印刷 / `wget` / TIME | — | 実機 |
 
 L-A と L-D は独立 (並行できる)。L-B は L-A の上、L-C は L-B と同時、L-E は全部の上。
+
+### 2-1. L-D の使い方 (Ubuntu ノート)
+
+AF_PACKET の raw ソケットには **root か `CAP_NET_RAW`** が要る。どちらかを選ぶ:
+
+```sh
+sudo python3 tools/lan_bridge.py --iface enp3s0 ...
+sudo setcap cap_net_raw+ep "$(readlink -f "$(which python3)")"   # 1 回だけ
+```
+
+`setcap` は**その `python3` で動く全スクリプト**に権限を与えるので、共用機では
+root で回すか専用の `python3` を置く。
+
+起動順は **`host_agent.py` が先** (橋は Agent へ繋ぎに行く側が既定):
+
+```sh
+MAC=$(cat /sys/class/net/enp3s0/address)
+python3 tools/host_agent.py --listen 127.0.0.1:8026 --mac "$MAC"   # 1 枚目の端末
+sudo python3 tools/lan_bridge.py --iface enp3s0 --agent-mac "$MAC" # 2 枚目
+```
+
+**`--mac` と NIC の MAC は必ず揃える。** 橋は Ethernet ヘッダを書き換えない
+(透過) ので、ずれると実機からの返信が NIC の MAC 宛にならず、非 promiscuous の
+NIC に落とされて**片道だけ通る**。揃っていなければ橋が起動時に警告する
+(`--agent-mac` を渡したとき)。どうしても別 MAC で回すなら `--promisc`。
+
+記録は `--pcap FILE` (両方向、linktype 1)、統計は終了時と `kill -USR1 <pid>`。
+`--listen` を使えば橋が待つ側にもなれる (`host_agent.py --connect` と組む)。
+
+**実 NIC での確認はまだ取っていない** ([V4])。ホスト試験
+(`make check-lan-bridge-host`) が踏むのは中継・枠付け・フィルタまでで、
+AF_PACKET の bind と `sendto` は実機の回で確かめる (§5-2)。
 
 ## 3. ユーザー決裁が要る点
 
@@ -72,7 +104,7 @@ L-A と L-D は独立 (並行できる)。L-B は L-A の上、L-C は L-B と�
 | L-A PCI | `0CF8h` のアドレス語の組み立て (bus/dev/fn/reg、bit31)、BAR の種別と大きさの復号 (I/O / メモリ / 32-64 ビット、サイズ = `~(mask) + 1`)、クラス・ベンダ表の引き、列挙の走査順とマルチファンクション判定 (Header Type bit7)、`lspci` の整形 | **純粋関数に切り出してホスト試験** (変異つき)。NP21/W では `0CF8h` が無いので `lspci` は「PCI 無し」を正しく報告することだけ見る |
 | L-B 82557 | SCB コマンド語・CB/RFD の直列化 (LE、C 構造体の padding に依存しない)、EEPROM の読み出しビット列 (opcode 6、アドレス幅の自動判定)、RFD リングの前後処理 (EL/S ビット、RU の再開判定)、Configure の 22 バイト | 純粋関数 + ホスト試験。**動作はエミュレータで一切見られない** |
 | L-C NIC 境界 | `net/nic.h` の関数表に LGY-98 を載せ替えて **L0〜L3 の回帰が NP21/W で通る**こと | NP21/W (既存の `link_selftest` / L1〜L3) |
-| L-D 橋 | AF_PACKET ↔ FrameStream の中継 (フレームの往復、EtherType のフィルタ、MAC の学習)、FrameStream の枠付け | Linux の `veth` ペア (root) か、ソケットを差し替えたホスト試験。`host_agent.py` の既存ホスト試験 (`check-host-agent`) と組み合わせる |
+| L-D 橋 | AF_PACKET ↔ FrameStream の中継 (フレームの往復、EtherType のフィルタ、MAC の照合)、FrameStream の枠付け | **済 (2026-09-22)**: `make check-lan-bridge-host`。橋の `--fake-nic` (NIC の差し替え口) に贋 OS32 を繋ぎ、対向は **実物の `host_agent.py`** を `--unix` で子プロセス起動。root も `veth` も要らない。記録 [`tools/tests/lan_bridge_tdd.md`](../../../tools/tests/lan_bridge_tdd.md) |
 | L-E Host Services | プロトコルそのもの | 既に NP21/W で受入済み (LINK_PLAN §5-1)。実機では **経路が変わるだけ** |
 
 ### 5-2. 実機でしか分からないこと — 最初の 1 回で全部まとめて取る
