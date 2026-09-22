@@ -54,6 +54,11 @@ def send_cmd(port, line, timeout_s):
 
 
 def main():
+    # Windows のコンソール (cp932) でも化けた応答で落ちないようにする
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", required=True, help="COM3 など")
