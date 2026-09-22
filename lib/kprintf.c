@@ -130,6 +130,14 @@ void __cdecl kprintf(u8 attr, const char *fmt, ...)
     int ai = 0;
     const char *p = fmt;
 
+    /* 属性は **ここで 1 回だけ** PC-98 のテキスト属性へ直す。
+     * 呼び出し側の大半は PC/AT (CGA) 流の 0x07 などを渡しており、
+     * それを属性 VRAM へ直書きすると画面に何も出ない
+     * (lib/kprintf_attr.c の冒頭に経緯)。下流 (shell_print /
+     * shell_print_utf8 / console_write) は全部この attr を使うので、
+     * 変換を入口に置けば取りこぼしが無い。 */
+    attr = kprintf_attr_to_pc98(attr);
+
     while (*p) {
         if (*p == '%' && p[1]) {
             int width = 0;

@@ -48,6 +48,7 @@ extern void fatfs_init(void);
 #include "config.h"
 #include "sysconfig.h"
 #include "kstring.h"
+#include "kprintf.h"   /* kutoa_dec / kutoa_hex (状態行の数値) */
 #include "sys.h"
 #include "ime.h"
 #include "fd_redirect.h"
@@ -82,6 +83,43 @@ static void tvram_print(int x, int y, const char *str, u8 color)
         *(volatile u8 *)(TVRAM_ATTR + offset) = color;
         str++; x++;
     }
+}
+
+/* 文字列を連結して終端の次を返す (状態行を組み立てる小道具)。
+ * [C2] libc は使わない。kstrncat は毎回長さを数え直すので、
+ * 組み立てのあいだは末尾の位置を持ち回る。 */
+static char *tv_cat(char *dst, const char *src)
+{
+    while (*src) { *dst = *src; dst++; src++; }
+    *dst = '\0';
+    return dst;
+}
+
+/* 1 バイトを 2 桁の 16 進 (小文字) で連結する。kutoa_hex は桁を詰めるので
+ * (0x0F → "f")、足りない分だけ '0' を先に置く。 */
+static char *tv_cat_hex2(char *dst, u8 val)
+{
+    char tmp[8];
+    int len;
+
+    len = kutoa_hex((u32)val, tmp, (int)sizeof(tmp), 0);
+    if (len < 2) { *dst = '0'; dst++; *dst = '\0'; }
+    return tv_cat(dst, tmp);
+}
+
+/* 符号付き 10 進を連結する。 */
+static char *tv_cat_dec(char *dst, int val)
+{
+    char tmp[16];
+
+    if (val < 0) {
+        *dst = '-'; dst++; *dst = '\0';
+        /* 符号反転は u32 で行う — int で -INT_MIN を作ると未定義。 */
+        kutoa_dec(0u - (u32)val, tmp, (int)sizeof(tmp));
+    } else {
+        kutoa_dec((u32)val, tmp, (int)sizeof(tmp));
+    }
+    return tv_cat(dst, tmp);
 }
 
 /* dev_findをPathDeviceValidatorとして使用するラッパー */
@@ -203,6 +241,29 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         } else {
             tvram_print(66, 1, "ER", TATTR_RED);
         }
+    }
+    /* FDC の中身を状態行にも出す。**成功しても出す**。
+     * kprintf の [fdc] 行は属性が PC/AT 流のまま属性 VRAM へ書かれていて、
+     * 実機 PC-9821Ra266 では 1 行も読めなかった (2026-09-22、lib/kprintf_attr.c)。
+     * 変換を入れて直したが、ここは属性を直に指定する tvram_print なので
+     * 同じ穴に落ちない — 保険としてこの 1 行を残す ([V4])。
+     * 書式: FDC rc=<n> st0=<xx> 0439h=<xx>-><xx> */
+    {
+        char line[48];
+        char *q = line;
+        u8 st0 = 0, dma_before = 0, dma_after = 0;
+        int frc = fdc_get_last_init_status(&st0, &dma_before, &dma_after);
+
+        q = tv_cat(q, "FDC rc=");
+        q = tv_cat_dec(q, frc);
+        q = tv_cat(q, " st0=");
+        q = tv_cat_hex2(q, st0);
+        q = tv_cat(q, " 0439h=");
+        q = tv_cat_hex2(q, dma_before);
+        q = tv_cat(q, "->");
+        q = tv_cat_hex2(q, dma_after);
+        *q = '\0';   /* 念のための終端 (tv_cat も写す) */
+        tvram_print(0, 5, line, (frc == 0) ? TATTR_WHITE : TATTR_YELLOW);
     }
     /* FD から起動したなら、その DA/UA でメディアを選ぶ。
      * 1.44MB (DA/UA 0x30 系) は 512B×18セクタで、2HD のまま読むと

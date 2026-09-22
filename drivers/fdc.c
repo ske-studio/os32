@@ -29,6 +29,16 @@ volatile u32 fdc_irq_fired = 0;
  * (NR = 媒体無しなのか、本当に動かなかったのかが読めない)。 */
 static u8 s_last_seek_st0 = 0;
 
+/* 直近の fdc_init() が見たもの (fdc_get_last_init_status で取り出す)。
+ * 起動時の状態行に出すためだけの記録で、制御には使わない。
+ * kprintf の診断行が実機の画面に 1 行も出なかった (属性が PC/AT 流の
+ * まま属性 VRAM へ書かれていた) ので、**tvram_print で必ず出す**
+ * ための値をここに残す (2026-09-22)。 */
+static int s_init_rc = -1;
+static u8  s_init_st0 = 0;
+static u8  s_init_0439_before = 0;
+static u8  s_init_0439_after = 0;
+
 /* fdc_seek / fdc_recalibrate_st0 の内部戻り値。
  * NR (媒体もドライブも無い) だけは **リトライも回復もしない** ので
  * 他の失敗と分ける。 */
@@ -254,7 +264,9 @@ static void fdc_motor_on(void)
      * NP21/W の 0x94 リードはリードスイッチを返すため MTON 状態は判別不能。 */
     static int motor_running = 0;
 
-    outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
+    /* FRY (bit6) を必ず添える — 実機では RDY が上がっていないと µPD765A は
+     * コマンドを実行せず ST0 の NR を立てて返す (fdc.h の CTRL_FRY の注記)。 */
+    outp(FDC_CTRL, CTRL_FRY | CTRL_MTON | CTRL_DMAE);
     if (!motor_running) {
         /* 初回のみ 約300ms スピンアップ待ち (100Hzタイマで30tick) */
         u32 start = tick_count;
@@ -340,9 +352,11 @@ static int fdc_reset(void)
     fdc_delay();
     fdc_delay();
 
-    /* リセット解除 + DMA有効 + モーターON */
+    /* リセット解除 + Forced Ready + DMA有効 + モーターON。
+     * FRY はリセット解除と同時に立てる — RDY が下りたままだと、
+     * この直後の SPECIFY / RECALIBRATE が全部 NR で返る。 */
     fdc_irq_fired = 0;
-    outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
+    outp(FDC_CTRL, CTRL_FRY | CTRL_MTON | CTRL_DMAE);
 
     /* リセット完了IRQ待ち。来ない機種・エミュレータがあるので、
      * タイムアウトしても止めずに SIS の排水へ進む。 */
@@ -383,7 +397,7 @@ static void fdc_abort_transfer(void)
     fdc_delay();
     fdc_delay();
     fdc_irq_fired = 0;
-    outp(FDC_CTRL, CTRL_MTON | CTRL_DMAE);
+    outp(FDC_CTRL, CTRL_FRY | CTRL_MTON | CTRL_DMAE);
 
     /* 3. Specify を入れ直す。µPD765A の資料では SRT/HUT/HLT は RESET で
      *    保持されるが、既知の値へ戻しておくほうが状態を追いやすい。 */
@@ -739,9 +753,9 @@ int fdc_init(void)
      * FFh を返し得るので、そこを避けると DMA 禁止が残る (fdc.h の注記)。 */
     {
         u8 v = (u8)inp(SYSPORT_DMA_CTRL);
+        u8 after = v;
 
         if (v & SYSPORT_DMA_MASK_1MB) {
-            u8 after;
             outp(SYSPORT_DMA_CTRL, (u8)(v & ~SYSPORT_DMA_MASK_1MB));
             after = (u8)inp(SYSPORT_DMA_CTRL);
             /* 読み戻しで落ちない機種でも起動は止めない ([V4]: 印を残す)。
@@ -749,6 +763,10 @@ int fdc_init(void)
              * ここは `ff -> ff` と出る (書き込み自体は無害)。 */
             kprintf(0x07, "[fdc] dma>1MB: 0439h %02x -> %02x\n", v, after);
         }
+        /* 書かなかったときも記録する — 状態行は成功時にも出すので、
+         * 「bit2 が最初から落ちていた」ことも読めるようにする。 */
+        s_init_0439_before = v;
+        s_init_0439_after = after;
     }
 
     /* 前回の取りこぼし IRQ をクリア (冪等化対策) */
@@ -759,7 +777,11 @@ int fdc_init(void)
 
     /* FDCリセット + Specify */
     ret = fdc_reset();
-    if (ret != 0) return ret;
+    if (ret != 0) {
+        s_init_rc = ret;
+        s_init_st0 = st0;
+        return ret;
+    }
 
     /* Recalibrate (ヘッドをシリンダ0に移動)。
      * fdc_recalibrate_st0 は中で SIS 排水 → RECALIBRATE を
@@ -778,10 +800,27 @@ int fdc_init(void)
     }
 
     /* ドライブ1は未接続時にタイムアウトするためエラーは無視する。
-     * **黙って捨てない** — 失敗した完了通知は次の排水で回収される。 */
+     * **黙って捨てない** — 失敗した完了通知は次の排水で回収される。
+     * FRY を立てたので、未装着のドライブは NR ではなく EC を返すように
+     * なる (NP21/W の FDC_Recalibrate も実機も同じ形)。EC は再試行の
+     * 合図なので FDC_RECAL_ATTEMPTS 回ぶん出してから失敗になるが、
+     * どちらも IRQ は上がるので空待ちはしない。戻り値は元から捨てる。 */
     (void)fdc_recalibrate(1);
 
+    s_init_rc = ret;
+    s_init_st0 = st0;
     return ret;
+}
+
+/* ======================================================================== */
+/*  直近の fdc_init() の観測値 (起動時の状態行用。fdc.h に説明)             */
+/* ======================================================================== */
+int fdc_get_last_init_status(u8 *st0, u8 *p0439_before, u8 *p0439_after)
+{
+    if (st0) *st0 = s_init_st0;
+    if (p0439_before) *p0439_before = s_init_0439_before;
+    if (p0439_after) *p0439_after = s_init_0439_after;
+    return s_init_rc;
 }
 
 /* ======================================================================== */
