@@ -1,6 +1,6 @@
 # TASK_FDC_REALHW — 実機で FD から起動できない (root panic) を直す
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実装済み・エミュレータ回帰 (2HD) 合格・Codex 往復 2 で Approve**。実機は未検証 (R6)
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **往復 3 (FRY / kprintf 属性 / 状態行) 着地済み、エミュレータ回帰合格。実機 R6 の再試験待ち**
 
 基点: `feat/gui` `ec48c6b`。実機計画は [`PLAN.md`](PLAN.md)、1.44MB の経緯は [`TASK_FD144.md`](TASK_FD144.md)、
 FDC ドライバの仕様表は [`../../05_drivers.md`](../../05_drivers.md) §5-2。
@@ -128,3 +128,31 @@ NR 付きの割り込みが即座に来る (実機の µPD765A も NP21/W の `F
    - `[fdc] dma>1MB: 0439h xx -> yy` — xx の bit2 が立っていて yy で落ちていれば 1MB 制限は解けた。`ff -> ff` のように落ちない機種なら別の手 (DMA バッファを 1MB 未満へ) が要る。
    - `MOUNT... root OK` と `[fatfs] mounted: type=1 drv=0 pdrv=0 FAT12`。
    - 失敗時: `[fdc] recalibrate drv=0 rc=.. st0=..` / `[fdc] read fail drv=0 chs=c/h/s phase=<seek|cmd|irq|result> st0=.. st1=.. st2=..` — phase と ST0 で原因が切り分けられる (seek + NR = Ready 不成立、irq = 転送が終わらない、result の ST1/ST2 = CRC/欠落など)。
+
+## 8. 実機 R6 (2026-09-22、b299ea9 相当、1.2MB) — 不合格
+
+写真: `DEV...OK` の右に赤い **`ER`** (= `fdc_init()` の失敗)、`MOUNT... root panic`。**`kprintf` の行が 1 行も無い**。
+
+| 発見 | 内容 |
+|---|---|
+| ext2 は無関係 (ユーザーの再確認) | `root panic` はルート (fd0) の失敗でだけ出る。`/hd0` の ext2 を試すのは `root OK` の後 |
+| **kprintf が実機で見えない** | `kprintf(0x07, …)` などの属性は PC/AT 流で、`tvram_putchar_at` が PC-98 の属性 VRAM へ直書き。PC-98 は bit0 = 表示なので 0x0A/0x0C/0x0E は非表示、0x07 は黒の反転。呼び出しは 0x07 が 73 か所。**エミュレータでは `/api/tvram` が文字コードを返すので誰も気づかなかった**。`/api/screenshot` で裏取り: 同じ瞬間の tvram に `[fdc]`/`[ide]`/`[fatfs]` の行があるのに、画面には 0xC1 (黄) の `[selftest]` と状態行しか映らない — 実機の写真と同じ姿 |
+| **FRY (0x94 bit6) を立てていない** | `io_fdd.md` 191 行: RDY はドライブの RDY と FRY の OR。READY 線を出さないドライブでは FRY 無しだと µPD765A が全コマンドを NR で即終了。旧コードは `SE` だけ見て NR の recalibrate を成功扱い → READ で落ちて root panic。新コードは NR を即失敗 → `ER`。**両方の写真と整合**。NP21/W は `ctrlreg & 0x40` を見るが媒体入りは `fdd_diskready` で Ready → 露見しない |
+
+往復 3: kprintf の属性変換 (+ kselftest)、`CTRL_FRY`、状態行 5 に `FDC rc= st0= 0439h=` を `tvram_print` で出す (kprintf に依らない保険)。
+
+### 8-1. 往復 3 の結果 (6ee6fc0 + 状態行の移動)
+
+| 項目 | 内容 |
+|---|---|
+| kprintf 属性 | `lib/kprintf_attr.c` `kprintf_attr_to_pc98()` (0x07→0xE1、0x0A→0x81、0x0C→0x41、0x0E→0xC1、PC-98 流は素通し)。kselftest 10 件 (85→95)、`check-kprintf-attr-host` (256 通りの不変条件、変異 6 本 RED)。**エミュレータの `/api/screenshot` で `[fdc]` `[ide]` `[fatfs]` が白で見えることを確認** |
+| FRY | `CTRL_FRY` (0x40) を 0x94 の動作時の書き込み 3 か所に。NP21/W の副作用: 未搭載ドライブの RECALIBRATE が NR→EC (2 回出して失敗、`fdc_init` は無視)、搭載済み・媒体無しは NR→成功 (`FDC...ER` が `OK` に見える)。SEEK/READ の媒体検査は FRY を見ないので読み書きは従来どおり NR 即断 |
+| 状態行 | `FDC rc= st0= 0439h=xx->yy` を**最下行 (行 24)** に `tvram_print` + 同じ内容を `[fdc] …` で kprintf。行 5 は IDE のログに root panic の前に上書きされた (Codex 往復 3 の blocker、エミュレータでも `ff->ff` の尻尾だけ残った) |
+| 検証 | `make all` / `make fd144` / `make check` exit 0。NP21/W 2HD FD 起動: 行 24 に `FDC rc=0 st0=20 0439h=ff->ff`、`[fatfs] mounted FAT12`、シェル到達 |
+
+**Codex 往復 3 (6ee6fc0)**: Request changes — blocker は状態行の上書き 1 件 (上のとおり直した)。非 blocker: FRY で実機の空ドライブは NR 早期終了が使えず READ の IRQ タイムアウト (1s × 3) まで待ち得る (有限、DMA マスク/リセットは残る) / `tv_cat` は [C2] の kstring 方針からずれる (境界違反なし) / 属性変換は CGA の背景色・点滅を一般には識別しない (現在の呼び出しに反例なし)。3 往復で Approve に至っていないので、争点 (状態行の置き場) の決着はユーザー判断に委ねる (ROLES §5)。
+
+### 8-2. 実機で見てほしいもの (更新)
+
+- 最下行の `FDC rc=<n> st0=<xx> 0439h=<xx>-><yy>`: rc=0 なら FDC 初期化は通った。st0 の bit3 (0x08) が立っていれば Not Ready (FRY でも直らない = ドライブ選択/モーターの問題)。0439h の yy で bit2 (0x04) が落ちていれば DMA の 1MB 制限は解けた。
+- `[fdc] …` の白い行、`MOUNT... root OK`、`[fatfs] mounted`。

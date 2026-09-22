@@ -263,7 +263,13 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
         q = tv_cat(q, "->");
         q = tv_cat_hex2(q, dma_after);
         *q = '\0';   /* 念のための終端 (tv_cat も写す) */
-        tvram_print(0, 5, line, (frc == 0) ? TATTR_WHITE : TATTR_YELLOW);
+        /* 最下行に置く。console の通常出力は行 0 から進むので、行 5 だと IDE の
+         * probe ログに root panic の前に上書きされる (Codex 往復 3 の指摘)。
+         * 最下行は console が 19 行以上流れるまで無事で、root panic までに
+         * それだけ流れることはない。 */
+        tvram_print(0, TVRAM_ROWS - 1, line, (frc == 0) ? TATTR_WHITE : TATTR_YELLOW);
+        /* 流れる側 (kprintf) にも同じ内容を残す — 属性変換で実機でも読める。 */
+        kprintf(TATTR_WHITE, "[fdc] %s\n", line);
     }
     /* FD から起動したなら、その DA/UA でメディアを選ぶ。
      * 1.44MB (DA/UA 0x30 系) は 512B×18セクタで、2HD のまま読むと

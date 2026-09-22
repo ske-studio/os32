@@ -1008,6 +1008,31 @@ read-modify-write で保つ。
   1MB 制限) を「確認済み」に しない**。時間の上限は「エミュレータで困らない値」ではなく**機構の最悪値から導いてコメントに根拠を書く**。
   「NP21/W で〜を抑制」という理由の定数は、実機の前に必ず疑う (`grep -rn NP21 drivers/*.h`)。
 
+### 4-52. `kprintf` の行は**実機でもエミュレータでも最初から見えていなかった** — 属性の流儀違い (2026-09-22)
+
+- **症状**: 実機の写真に `[fdc] …` `[ide] …` の診断行が 1 行も無い。エミュレータの `/api/tvram` には載っている。
+- **原因**: `kprintf(0x07, …)` などの属性は PC/AT (CGA) 流で、`kernel/console.c` の `tvram_putchar_at` が
+  PC-98 の属性 VRAM へそのまま書く。PC-98 の属性は **bit0 = 表示** (`TATTR_VISIBLE`)、bit5/6/7 = B/R/G。
+  0x0A / 0x0C / 0x0E は bit0=0 で非表示、0x07 は黒の反転。0x07 の呼び出しは 73 か所。
+  黄色 (0xC1) の `[selftest]` だけが見えていたのは、そこだけ PC-98 流だったから。
+- **なぜ気づかなかったか**: `/api/tvram` は**文字コード**を返すので、テスターも PM も文字の存在で判定していた。
+  `/api/screenshot` で見た目を確かめると、エミュレータでも同じ行が黒かった。
+- **対策**: `lib/kprintf_attr.c` の `kprintf_attr_to_pc98()` を kprintf の入口で 1 回適用 (PC-98 流は素通し)。
+  kselftest とホスト試験 (`check-kprintf-attr-host`) で 256 通りの「必ず見える」を固定。
+- **教訓**: 「画面に出ている」は**文字コードではなく見た目**で確かめる。tvram を読む検証は属性を見ない。
+  実機に持ち込む前に 1 度は `/api/screenshot` を人が見る。
+
+### 4-53. FDC は **FRY (0x94 bit6) を立てないと実機で Not Ready** (2026-09-22)
+
+- `docs/hw/undocumented/io_fdd.md` 191 行: FRY は「RDY 信号を強制的にアクティブ。ドライブからの RDY 信号と
+  OR したあと FDC に入力される」。READY 線を出さないドライブでは、FRY 無しだと µPD765A が全コマンドを
+  ST0 の NR (bit3) で即終了する。
+- 旧コードは RECALIBRATE の結果を `SE` だけで見ていたので NR でも「成功」し、READ で落ちて root panic。
+  §4-51 の修正で NR を即失敗にしたら、今度は `fdc_init` の `ER` として同じ原因が正しく見えた。
+- NP21/W は `ctrlreg & 0x40` を RECALIBRATE と SENSE DEVICE STATUS でしか見ず、媒体入りのドライブは
+  `fdd_diskready` で Ready 扱い。**FRY 無しでもエミュレータでは全部通る** — §4-49・§4-51 と同じ型。
+- **対策**: 0x94 の動作時の書き込みを `CTRL_FRY | CTRL_MTON | CTRL_DMAE` に。
+
 ### 4-33. `hsync` は HostDrv の**古い**ファイルで NHD を上書きする (2026-09-12)
 
 - **症状**: NHD 配備 (`os32-cycle deploy`) 直後に、試験用ファイルを 1 本足す目的でゲストの `hsync` を実行したら、
