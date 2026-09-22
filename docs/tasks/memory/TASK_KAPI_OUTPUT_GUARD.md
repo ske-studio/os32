@@ -1,6 +1,6 @@
 # TASK_KAPI_OUTPUT_GUARD — 出力ポインタを受ける既存 KAPI 43 本が、読み取り専用ページに書ける
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 (着手は TASK_HAL_WIRING の実装 A の着地後)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **実装済み・NP21/W 受入済み (2026-09-23、§5)**。
 > 出所: Codex 設計レビュー往復 10 (TASK_HAL_WIRING R10-1)。**カーネル層の分かっている不具合**なので POLICY_DEV §1 により新機能より先。
 
 ## 0. 症状と原因
@@ -52,3 +52,17 @@
 - `CR0.WP = 1` への切り替え (shlib のロードがカーネルからの書き込みに依存。対象 CPU (386 は WP 無し) の確認も要る)。
 - 可変長引数 (`kprintf` 系) の検査 (フォールトガードのまま)。
 - const ポインタ (入力) の present 検査 (読みの #PF はフォールトガードが拾う)。
+
+## 5. 受入の記録 (PM、2026-09-23、NP21/W)
+
+| ID | 結果 |
+|---|---|
+| G1 | 合格: `check-kapi-out` (解釈 8 件の拒否、45 本すべてに `out`)、`make check` 全通過 |
+| G2 | 部分: `kout_test` (CPL=3) で 6 本の代表 (`sys_read` / `np2_get_version` / `rtc_read` / `console_get_size` / `pci_get` / `ide_read_sector`) の正常系と NULL の既存挙動を確認 (PASS、skip 2 = 従来から NULL で死ぬ 2 本)。**shlib `.text` を出力に渡して kill される経路はアプリから安全に作れないので未実施** (アプリ自身の `.text` は RW 帯) |
+| G3 | 未 (`sys_ls` の cb にコード帯以外を渡す検査は今回の対象外) |
+| G4 | 合格: 起動、kselftest 194/194、`ls` / `cat` / `serial` / `lspci`、`time_test`。gshell は FD 起動では出ない (NHD 環境で次回) |
+| G5 | 未 (CR3 往復のコストの実測) |
+
+実装で決めたこと: `"out": "target"` (自前で検査する `sys_time_now` / `pci_bind_info`) を第 3 の形として認め、二重の CR3 往復を避けた。
+対象は v58 の 43 本 + v59/v60 の 2 本 = 45 本。`dev_blk_read` は wrapper の 512 単位に加えて**本体で `sect_size` の実長を検査** (7ae93c7)。
+残る穴: `np2_recv_str` は `maxlen <= 0` でも 1 バイト書く (長さ 0 は検査しない規則の外。別途)。既知: NULL を渡すと死ぬ 4 本 (`np2_get_*` / `rtc_read` / `dev_get_info(name)` / `ide_read_sector`) は従来どおり。
