@@ -1,8 +1,8 @@
 # TASK_HAL_WIRING — 結線の土台 (割り込みの動的登録 / 8237 DMA の共通部 / DMA プール / PCI の結線表 / µs 時計)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v12 (Codex 往復 11 の R11-1 を反映: 出力保護の検査は master CR3 に切り替えてアプリの PD/PT を読む。ユーザー指示 2026-09-23「解決までレビュアーを使ってよい」により Approve まで往復を続ける)**。
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-23) / 状態: **設計 v13 — Codex 往復 12 で Approve (2026-09-23)。以後は実装レビュー (実装 A/B が並行中)。往復 12 の注意 7 点は 1-6 に**。
 > ユーザー指示 2026-09-23: 「結線の土台の票の設計を先に起こす」。
-> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定) → Codex 往復 11 (R11-1 の 1 件。競合・shlib 属性・COW は新規無し) → v12。
+> 往復記録: v1 → Codex 往復 1 (B1〜B14、Request changes) → v2 → Codex 往復 2 (R1〜R9、Request changes) → v3 → Codex 往復 3 (B1〜B7、Request changes。R2/R3/R4/R6 は閉、R1/R5/R7/R8/R9 は部分) → v4 → Codex 往復 4 (R1〜R6、Request changes。B3/B6/B7 は閉、B1/B4/B5 は部分、B2 は未閉) → v5 → Codex 往復 5 (B1〜B4、Request changes。R1〜R6 は閉、R4 は残件移管) → v6 → Codex 往復 6 (R1〜R3、Request changes。B1/B3 は閉、B2/B4 は部分) → v7 → Codex 往復 7 (B1〜B3。R2 は閉、R1/R3 は部分。B1/B2 = 実装前に決める設計判断、B3 = 実装レビューで可) → v8 (PM の決定を固定) → Codex 往復 8 (R8-1〜R8-3、Request changes。B1〜B3 は閉、1-2/1-3 に新規 blocker 無し) → v9 → Codex 往復 9 (R9-1〜R9-3、Request changes。R8-1 は閉、R8-2/R8-3 は部分。1-1 の dispatch/EOI/storm と 1-2/1-3 に新規 blocker 無し) → v10 → Codex 往復 10 (R10-1 の 1 件のみ、Request changes。R9-1/R9-3 は閉。L-B 持ち越し無し) → v11 (PM の決定で固定) → Codex 往復 11 (R11-1 の 1 件。競合・shlib 属性・COW は新規無し) → v12 → **Codex 往復 12: Approve** (新規 blocker 無し、注意 7 点) → v13。
 
 正典の関係: [`PLAN.md`](PLAN.md) §3-1 (HAL の棚卸し)、§3 (ドライバの動的読み込み — この票の「取り決め」を後で外部モジュールに開く)、
 [`../realhw/TASK_LAN_82557.md`](../realhw/TASK_LAN_82557.md) (L-B 82557 が最初の顧客)、§5-5 (PCM リングとタイマが 2 番目の顧客)。
@@ -79,8 +79,7 @@ PIRQ → 8259 の経路は BIOS が設定し、Interrupt Line レジスタを書
 **診断の取得口 (往復 8 R8-2)**: 結果は BDF ごとに `struct pci_bind_info { u8 bus, dev, fn, result; u8 irq; u8 reason;
 u8 line_state; u8 pad; }` (8 バイト。`line_state` (LINE_OK = 0 / LINE_STORM_MASKED = 1 / LINE_QUARANTINED = 2、両方立っていれば QUARANTINED。pad は 0) は
 **getter が読む時点で `irq_line_quarantined` / `irq_storm_masked` から合成する** (irq = 0xFF や ≥ 16 はシフト・配列参照より前に除外して LINE_OK) (往復 9 R9-1: 先に BOUND した装置 X の線が後から別装置 Y で隔離されても X の `result` は BOUND のまま、
-`line_state` = QUARANTINED で「IRQ が来なくなった」を `lspci` が出す)。result = NONE / BOUND / DECLINED / QUARANTINED、reason = OK / IRQ_UNSUPPORTED / IRQ_QUARANTINED /
-RESET_FAILED / START_FAILED / NOISY / NOISY_UNMASKABLE / NO_DRIVER) に保存し、カーネル関数 `pci_bind_info_get(idx, *out)`
+`line_state` = QUARANTINED で「IRQ が来なくなった」を `lspci` が出す)。result = NONE / BOUND / DECLINED / QUARANTINED。reason の列挙は下の「上書き規則」の 1 つだけが正) に保存し、カーネル関数 `pci_bind_info_get(idx, *out)`
 (idx は `pci_get` と同じ列挙順) で読む。driver は `pci_bind_set_reason(dev, reason)` で理由を書く。上書き規則: reason (列挙: OK / IRQ_UNSUPPORTED / IRQ_QUARANTINED / RESET_FAILED / START_FAILED / NOISY / NOISY_UNMASKABLE /
 NO_DRIVER / DECLINED_UNSPECIFIED) は候補ごとに OK に**初期化**してから probe を呼び、理由未設定で DECLINE なら `DECLINED_UNSPECIFIED`、
 一致候補ゼロは `NONE / NO_DRIVER`。DECLINED の後に別 driver が BOUND になれば BOUND/OK で上書き、全 driver が DECLINE なら
@@ -387,7 +386,19 @@ int pci_bind_all(const struct pci_driver *const *table, int n);   /* 1 件ずつ
   不在 PTE、ページ跨ぎ、を確かめる。`pci_bind_info` (v60) も同じ試験。
 - 単調性: u64 に組み立てるので 71 分の桁あふれは無い。`tick_count` の u32 周回 (497 日) は扱わない (契約)。
 
-### 1-6. 実装の注意 (往復 5・6 の非 blocker)
+### 1-6. 実装の注意 (往復 5・6・12 の非 blocker)
+
+- **出力保護 (`ring3_user_range_writable`、往復 12 の注意)**: (1) 「KAPI 入口でアプリ CR3 を保存する」機構は**既存に無い**
+  (`exec/exec.c` の dispatcher も `kernel/ring3_entry.asm` の int80 入口も CR3 を触らない。`g_cur_app->as.pd_phys` は入口で
+  採った CR3 とは別物)。helper が呼び出し時の CR3 を自分で読んで保持し (共有グローバル 1 つを無条件に上書きしない)、
+  復元は **CR3 → IF** の順。(2) CPL=0 の直呼び (常駐シェル / gshell のローカル出力) は既存の `ring3_user_range_ok` と同じく
+  **適用対象外**にする。「CR3 が master と同じか」だけで代用しない。直呼びの正常系も試験に。(3) 2 本の出力は**1 つの検査区間**
+  (master 往復 1 回) で扱う。出力ごとに往復すると時計 1 回で CR3 書き込みが 4 回になる。IF=0 の最長時間と呼び出しコストを
+  W4 で実測する。(4) PDE の RW / USER も検査する (実効権限は両段の AND。現行の写像では PDE は RW で USER も伝播するので
+  反例にはならないが、名前に合う実装にする)。(5) 例外 (#PF / NMI) は「復元して判定を返す」経路ではなく既存の例外処理から
+  終了し得る。検査不合格の明示 kill は復元後に行う。(6) W4 の観測: 成功値だけでなく、非恒等写像の出力が正しい物理側に
+  反映されること、2 本目の拒否時に 1 本目が不変であること、復帰後の CR3 が一致すること。V86 中の試験はホスト側の時計と
+  DOS 側の独自 `INT 80h` を区別する (後者の ABI はこの票の範囲外)。
 
 - **NE2000 の IMR と shadow の同期 (往復 7 B3、実装レビューの必須確認)**: 通常 IRQ の出口 (`ne2k_irq` は leave を
   通らず、OVW 検出で `ovw_begin()` が IMR = 0 にする) ・foreground の leave・tick の**全部の最終出口を 1 つの
