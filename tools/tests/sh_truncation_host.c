@@ -754,15 +754,21 @@ static int __cdecl h_kbd_trygetchar(void)
 /* --- シリアル (rshell) -------------------------------------------------- */
 static void __cdecl h_serial_init(u32 baud) { (void)baud; g_ser_inited = 1; }
 static int  __cdecl h_serial_is_initialized(void) { return g_ser_inited; }
-static void __cdecl h_serial_putchar(u8 c)
+static int __cdecl h_serial_putchar(u8 c)
 {
     if (g_ser_len < SER_LOG_CAP) g_ser_log[g_ser_len++] = c;
+    return 0;
 }
 static void __cdecl h_serial_puts(const char *s)
 {
     while (*s) h_serial_putchar((u8)*s++);
 }
 static int  __cdecl h_serial_trygetchar(void) { return -1; }
+/* KAPI v57: rshell のローカル読み口。ハーネスの台本は同じ列から取る。 */
+static int  __cdecl h_kbd_trygetchar_local(void) { return h_kbd_trygetchar(); }
+static int  __cdecl h_serial_init_vfast(u32 baud) { (void)baud; return -1; }
+static int  __cdecl h_serial_get_status(u32 *mode, u32 *baud, u32 *fifo)
+{ if (mode) *mode = 0; if (baud) *baud = 9600; if (fifo) *fifo = 0; return 0; }
 static void __cdecl h_rshell_set_active(int on) { (void)on; }
 static void __cdecl h_buz_off(void) {}
 static void __cdecl h_sys_halt(void) {}
@@ -817,6 +823,9 @@ static void build_api(void)
     g_fake.serial_putchar = h_serial_putchar;
     g_fake.serial_puts = h_serial_puts;
     g_fake.serial_trygetchar = h_serial_trygetchar;
+    g_fake.kbd_trygetchar_local = h_kbd_trygetchar_local;
+    g_fake.serial_init_vfast = h_serial_init_vfast;
+    g_fake.serial_get_status = h_serial_get_status;
     g_fake.rshell_set_active = h_rshell_set_active;
     g_fake.buz_off = h_buz_off;
     g_fake.sys_halt = h_sys_halt;
