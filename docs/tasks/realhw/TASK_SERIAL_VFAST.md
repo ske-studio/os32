@@ -1,6 +1,6 @@
 # TASK_SERIAL_VFAST — 実機のシリアルを 115200bps まで上げる (V･FAST + FIFO)
 
-> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s、9600 は回線上限 952 B/s)。Codex 往復 2 は結果待ち。残件は出力側の固定費
+> 発行: PM (Claude Code `claude-fable-5-1`、2026-09-22) / 状態: **実機で 115200 が通った** (2026-09-22、3.2 KB/s)。番犬は往復 6 で明示の `serial ack` に置換 (9625500、NP21/W で往復と戻りを確認)。実機での `--fast` は未確認。残件は出力側の固定費
 
 正典: [`PLAN.md`](PLAN.md) §4 (ウェブ情報と資料の突き合わせ)、資料 `docs/hw/undocumented/io_rs.md`、
 実機の実測は [`TASK_FDC_REALHW.md`](TASK_FDC_REALHW.md) §9-1。
@@ -141,3 +141,9 @@ ESC で rshell を抜けると poll されない。
 ゲストは切替直後に arm し、新速度で `serial ack` の行を受けたときだけ解除して `ACK <baud>` + EOT を返す。ホストは
 切替後すぐ新速度へ移り `serial ack` を 0.5 秒ごとに最大 4 秒繰り返し、応答本文に `ACK` が見えたら同期 (他の応答は読み飛ばす)。
 rshell を抜けるときに未確認なら即座に戻す。ローカル CUI の切替は arm しない (pending 廃止)。
+
+**往復 6 (9625500)**: 明示の `serial ack` に置換 (§4 の設計変更のとおり)。NP21/W: `serial 115200` → `serial ack` → `ACK 115200 V-FAST` で
+V-FAST が維持、ack を送らずに 5 秒放置 → `[ser] no ack after switch: reverted to 9600bps` で互換 9600 へ戻る。ホスト試験
+serial_vfast 12 ケース・変異 19 本、rshell_serial 6 ケース・変異 9 本。コーダーの注記: ack 窓の最後の試行 (切替から 5.5 秒) は
+番犬の 5 秒をはみ出すが、失敗時は 6 秒後に 9600 で拾い直すので取り残されない。**Codex の往復は 4 回で打ち止め** (ROLES §5)。
+実機での `--fast 115200` は次の実機の回で (TASK_LAN_82557 §6 の R1〜R4 と同じ回)。
