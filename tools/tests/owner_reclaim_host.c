@@ -57,6 +57,13 @@ void *kmalloc(u32 size)
 }
 void kfree(void *p) { if (p) g_live_allocs--; }
 
+/* fs/fd_redirect.c の書き込み時の再検査 (票 TASK_KAPI_OUTPUT_GUARD) が引く exec/exec.c
+ * の 3 本。ホストではユーザ帯の番地は無いので ring3_ptr_ok は常に 0 (= 再検査を通らない)。 */
+int ring3_ptr_ok(u32 p) { (void)p; return 0; }
+int ring3_user_ranges_writable(u32 pa, u32 la, u32 pb, u32 lb)
+{ (void)pa; (void)la; (void)pb; (void)lb; return 1; }
+void ring3_fault_kill(void) { for (;;) { } }
+
 /* fd_redirect.c が呼ぶ VFS。ここでは「開いた FD の台帳」だけ持つ。 */
 static int g_vfs_open_fds;
 int vfs_open(const char *path, int mode) { (void)path; (void)mode;
