@@ -48,9 +48,11 @@ L-A と L-D は独立 (並行できる)。L-B は L-A の上、L-C は L-B と�
    (b) **PM の推奨**: L-A を先に (小さく、実機でしか検証できない土台を早く通す)、L-B は予算を測りながら静的で入れ、
        SHM を 16KB 削って余裕を作る (`kernel/shm.h` の `SHM_BLOCK_COUNT` と同時)。動的読み込みは 82557 が動いてから
        「外に出す最初のドライバ」として v3 §3 に戻す。
-2. **ホスト側の橋の置き場**: Windows 側 (Npcap + scapy、venv に uv で導入) か、WSL2 側 (AF_PACKET、root が要る) か。
-   **PM の推奨は Windows 側** (Npcap が既に入っている。sudoers を広げない)。
-3. **配線**: 実機の LAN と Windows ホストが同じ L2 (同じスイッチ) に居ること。ルータ越しでは raw Ethernet は届かない。
+2. **ホスト側の橋の置き場** — **決まった (ユーザー、2026-09-22)**: 実機のホストは **Ubuntu ノート (Intel i3 3000 系)**。
+   この Windows/WSL 機は実機を手で操作する場面だけのホスト。→ 橋は **Linux の AF_PACKET** で書く (`tools/lan_bridge.py`、root か
+   `CAP_NET_RAW`)。`host_agent.py` (Python 標準ライブラリ) も同じ Ubuntu 機で動かす。`rshell_serial.py` は pyserial なので
+   Ubuntu でも `--port /dev/ttyUSB0` でそのまま。Windows/Npcap 版は作らない。
+3. **配線** — **決まった**: Ubuntu 機と実機はローカルのスイッチで直結 (同じ L2)。
 4. **82557 で確かめてから** コンボカード (1394US2G-PCI) を判断する (PLAN §6 のまま)。
 
 ## 4. 実機でしか分からないこと (最初に測る)
