@@ -91,6 +91,28 @@
 - どのドライバを外に出すか。**全部は出さない** — ブートに要るもの (IDE / コンソール) は
   静的のままでよい
 
+## 3-1. HAL の棚卸し (ユーザー問い 2026-09-23: PCI を載せる前にどの層が要るか)
+
+**層がある**: ポート I/O と CPU 原始命令 (`include/io.h` → `arch/x86/` + `platform/pc98/`、`check_arch_asm.py` が直書きを禁止) /
+ブロックデバイス (`Device` の `blk_read/write` + CHS 変換、FDD/IDE/ATAPI/loop が同じ表) / FS (`VfsOps` 22 本) /
+画面 (gfx バックエンド 3 本を probe 順に選ぶ) / コンソール出力 (`console` + `con_sink`) / マウス (バス / シームレス) /
+PCI バス (列挙まで、2026-09-22)。
+
+**予定がある**: NIC 境界 (`net/nic.h`、TASK_LAN_82557 L-C) / 音源バックエンド (§5-5 P3) / ドライバの動的読み込み (§3) /
+ISA 非依存化の仕分け (arch_port §3 の 3)。
+
+**無くて PCI の前に要る (提案、82557 = L-B の直前に 1 票、合計 3〜5KB)**:
+
+| 欠けている層 | いまの状態 | 要る理由 |
+|---|---|---|
+| 割り込みの動的登録 | `isr_stub.asm` が装置ごとに固定の C ハンドラを `extern` で結ぶ (`fdc_irq_handler`、`irq_stub_nic_3/5/6`…) | PCI は BIOS が IRQ を割り当て、共有し得る。`irq_register(irq, handler, arg)` と共有時のチェーン (各ハンドラが「自分の割り込みか」を答える) |
+| 8237 DMA の共通部 | `dma_setup` が `drivers/fdc.c` に閉じる (ch2 決め打ち) | CS4231 (#1/#3) が 2 つ目。チャネル・バンク・境界モード・`0439h` を 1 か所に |
+| DMA 可能メモリ | 静的配列 + 整列 | PCM リング 16KB、82557 の CB/RFD。`dma_alloc(size, align, limit)` = 物理連続・64KB を跨がない・16MB 以下・物理番地を返す |
+| PCI デバイスの結線 | 列挙表だけ | `pci_find` → BAR・IRQ を渡して `probe()` を呼ぶ最小の登録表。§3 の「内側向けの取り決め」と同じ形にしておき、後で外部モジュールにも開く |
+| 時計 | `tick_count` 100Hz のみ | `sys_time_us()` (PIT ラッチ) と 1kHz tick (§5-5) |
+
+シリアルは 2 系統目 (16550 の 2nd CCU / PCI シリアル) が要るまで層にしない — 要らない抽象は増やさない。
+
 ## 4. アプリへのメモリの払い出しを見直す (ユーザー指摘 2026-09-17)
 
 **既存票がある**: [`../memory/APP_BAND_PDE.md`](../memory/APP_BAND_PDE.md)
