@@ -92,49 +92,29 @@
 #define FDC_SPECIFY_HLT_DMA   0x0A
 
 /* ======================================================================== */
-/*  DMA (µPD8237A) チャネル2 I/Oポート (PC-98)                             */
+/*  DMA (µPD8237A) — FDC が使うチャネル                                    */
+/*                                                                          */
+/*  **ポート番号とモードバイトは drivers/dma8237.h が正典** ([C4])。        */
+/*  かつてここに ch2 決め打ちの 0009h/000Bh/0023h/0015h/0017h/0019h と      */
+/*  モード値 46h/4Ah を持っていたが、CS4231 が #1/#3 を使うので装置から     */
+/*  切り離した (票 docs/tasks/v3/TASK_HAL_WIRING.md §1-2)。fdc.c は         */
+/*  dma_chan_mask / dma_chan_setup / dma_chan_unmask しか呼ばない。         */
+/*                                                                          */
+/*  チャネルの選択は DIP SW 3-1/3-2 (1MB I/F モードなら ch2、640KB I/F      */
+/*  モードなら ch3。io_dma.md 35〜50 行)。OS32 は 1MB I/F 固定なので 2。    */
 /* ======================================================================== */
-#define DMA_CH2_ADDR   0x09    /* チャネル2 アドレス (Low/High) */
-#define DMA_CH2_COUNT  0x0B    /* チャネル2 ワードカウント (Low/High) */
-#define DMA_CH2_BANK   0x23    /* チャネル2 バンクレジスタ */
-#define DMA_MASK_REG   0x15    /* シングルマスクレジスタ */
-#define DMA_MODE_REG   0x17    /* モードレジスタ */
-#define DMA_FLIPFLOP   0x19    /* バイトポインタ・フリップフロップ・クリア */
-
-/* DMAモード値 */
-#define DMA_MODE_READ  0x46    /* ch2, single, addr++, read (FDC→メモリ) */
-#define DMA_MODE_WRITE 0x4A    /* ch2, single, addr++, write (メモリ→FDC) */
-#define DMA_MASK_CH2   0x06    /* ch2をマスク (無効化) */
-#define DMA_UNMASK_CH2 0x02    /* ch2をアンマスク (有効化) */
+#define FDC_DMA_CHANNEL  2
 
 /* ======================================================================== */
 /*  I/O 0439h — DMA アクセス制御 (Undocumented)                             */
 /*                                                                          */
-/*  正典: docs/hw/undocumented/io_dma.md の「I/O 0439h DMAアクセス制御等」。 */
-/*  対象は 80286 以上の機種 (PC-98XA を除く)。                              */
-/*                                                                          */
-/*    bit 2: DMA アドレスマスクレジスタ                                     */
-/*           1 = 1M バイト以上のアドレスへの DMA アクセス**禁止**           */
-/*           0 = 許可                                                       */
-/*           **ノーマルモードの起動時設定は 1**(ハイレゾは 0)。             */
-/*                                                                          */
-/*  OS32 の dma_buffer はカーネル BSS (1MB 超) に置かれるので、立ったまま    */
-/*  だと READ DATA が正常終了してもデータがバッファに届かない。             */
-/*                                                                          */
-/*  **必ず read-modify-write で他のビットを保つこと。** bit7 はプリンタ I/F  */
-/*  選択で、0 を書くと本体内蔵プリンタインタフェースが切り離される機種が    */
-/*  ある (PC-9821Ne/Bf/Bp/Bs/Be/Xt/Xa/Xn/Xp/Xs/Xe、PC-9801BA2/BS2/BX2 等)。 */
+/*  **扱いは drivers/dma8237.c の dma8237_init() へ移した** (票 §1-2)。     */
+/*  DMA プール (0x2E8000) もカーネル (0x100000〜) も 1MB 超にあるので、     */
+/*  これは FDC だけの都合ではない。定数 (SYSPORT_DMA_CTRL /                 */
+/*  SYSPORT_DMA_MASK_1MB) と経緯の註は drivers/dma8237.h にある。           */
+/*  fdc_get_last_init_status() が返す 0439h の前後は dma_above_1mb_raw()    */
+/*  の写し (起動時の状態行の書式を変えないため)。                           */
 /* ======================================================================== */
-#define SYSPORT_DMA_CTRL       0x0439
-#define SYSPORT_DMA_MASK_1MB   0x04   /* bit2: 1 = 1MB 超への DMA 禁止 */
-
-/*  **読みが FFh でも書く。** 一度は「ポートが浮いている印」として FFh を
- *  避ける案を採ったが、実機は bit7 = 1 (内蔵プリンタ)・bit2 = 1 (起動時
- *  設定)・「未使用(?)」の bit6/bit3 が 1 で読めれば **正当に FFh を返し得る**。
- *  そこで書かないと DMA 禁止が残ったままで、直したい root panic が直らない。
- *  RMW なら FFh → FBh で bit7 は 1 のまま保たれるので、プリンタ I/F を
- *  切り離す危険も無い。0439h を持たない機種 (8086/V30) は OS32 の対象外
- *  (386 以上が前提)。                                                      */
 
 /* ======================================================================== */
 /*  割り込み                                                                */

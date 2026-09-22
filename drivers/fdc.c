@@ -9,6 +9,7 @@
 /* ======================================================================== */
 
 #include "fdc.h"
+#include "dma8237.h"   /* 8237 の共通部 (票 TASK_HAL_WIRING §1-2) */
 #include "io.h"
 #include "kstring.h"
 #include "kprintf.h"
@@ -221,38 +222,24 @@ static int fdc_drain_interrupts(void)
 /* ======================================================================== */
 /*  DMAセットアップ (µPD8237A チャネル2)                                    */
 /* ======================================================================== */
-static void dma_setup(u32 phys_addr, u16 byte_count, int is_write)
+/*  ポートを直に叩くのはやめ、drivers/dma8237.c の共通部に渡す。           */
+/*  **3 段でなければならない** (票 §1-2): マスク → 積む → 成功したときだけ  */
+/*  アンマスク。setup だけに置き換えると、共通部が「積んだらマスクしたまま  */
+/*  返す」契約なので、マスクされたままコマンドを出してタイムアウトする。    */
+/*                                                                          */
+/*  戻り 0 = ch2 が開いた / 負 = 積めなかった (**ch2 は閉じたまま**)。      */
+/*  負のときは呼び手が FDC コマンドを出してはいけない。                     */
+static int dma_setup(u32 phys_addr, u16 byte_count, int is_write)
 {
-    u8 bank = (u8)((phys_addr >> 16) & 0xFF);
-    u16 addr = (u16)(phys_addr & 0xFFFF);
-    u16 count = byte_count - 1;  /* ワードカウント = バイト数 - 1 */
+    int rc;
 
-    /* チャネル2をマスク (転送停止) */
-    outp(DMA_MASK_REG, DMA_MASK_CH2);
-
-    /* バイトポインタ・フリップフロップをクリア */
-    outp(DMA_FLIPFLOP, 0);
-
-    /* モード設定 */
-    if (is_write) {
-        outp(DMA_MODE_REG, DMA_MODE_WRITE);  /* メモリ→FDC */
-    } else {
-        outp(DMA_MODE_REG, DMA_MODE_READ);   /* FDC→メモリ */
-    }
-
-    /* アドレス設定 (Low→High) */
-    outp(DMA_CH2_ADDR, addr & 0xFF);
-    outp(DMA_CH2_ADDR, (addr >> 8) & 0xFF);
-
-    /* バンク設定 */
-    outp(DMA_CH2_BANK, bank);
-
-    /* ワードカウント設定 (Low→High) */
-    outp(DMA_CH2_COUNT, count & 0xFF);
-    outp(DMA_CH2_COUNT, (count >> 8) & 0xFF);
-
-    /* チャネル2をアンマスク (転送許可) */
-    outp(DMA_MASK_REG, DMA_UNMASK_CH2);
+    dma_chan_mask(FDC_DMA_CHANNEL);
+    rc = dma_chan_setup(FDC_DMA_CHANNEL, phys_addr, (u32)byte_count,
+                        is_write ? DMA_DIR_FROM_MEM : DMA_DIR_TO_MEM,
+                        DMA_MODE_SINGLE);
+    if (rc != 0) return rc;
+    dma_chan_unmask(FDC_DMA_CHANNEL);
+    return 0;
 }
 
 /* ======================================================================== */
@@ -388,7 +375,7 @@ static void fdc_abort_transfer(void)
 {
     /* 1. まず DMA を止める。以後 dma_setup が「マスク→設定→アンマスク」
      *    するので、ここではマスクしたままにしておいてよい。 */
-    outp(DMA_MASK_REG, DMA_MASK_CH2);
+    dma_chan_mask(FDC_DMA_CHANNEL);
 
     /* 2. FDC をリセットして実行フェーズを畳む。 */
     outp(FDC_CTRL, CTRL_RST);
@@ -477,7 +464,7 @@ static int fdc_recover(int drv)
 {
     int rc;
 
-    outp(DMA_MASK_REG, DMA_MASK_CH2);
+    dma_chan_mask(FDC_DMA_CHANNEL);
     rc = fdc_reset();
     if (rc != 0) return rc;
     return fdc_recalibrate(drv);
@@ -589,8 +576,10 @@ int fdc_read_sector_geom(int drv, int cyl, int head, int sect,
 
         /* 2. DMAセットアップ (FDC→メモリ = read)。
          *    ここで ch2 がアンマスクされる。以後どこで抜けても
-         *    **閉じてからでないと戻れない** (下の fdc_abort_transfer)。 */
-        dma_setup(phys, bps, 0);
+         *    **閉じてからでないと戻れない** (下の fdc_abort_transfer)。
+         *    **負が返ったら ch2 は閉じたままなのでコマンドを出さない** —
+         *    出すと実行フェーズで固まってタイムアウトを待つだけになる。 */
+        if (dma_setup(phys, bps, 0) != 0) { phase = "dma"; break; }
         dma_armed = 1;
         phase = "cmd";
 
@@ -671,8 +660,9 @@ int fdc_write_sector_geom(int drv, int cyl, int head, int sect,
         if (seek_rc == FDC_RC_NOT_READY) break;   /* read 側と同じ理由 */
         if (seek_rc != 0) continue;
 
-        /* 2. DMAセットアップ (メモリ→FDC = write)。read 側と同じ (ch2 が開く)。 */
-        dma_setup(phys, bps, 1);
+        /* 2. DMAセットアップ (メモリ→FDC = write)。read 側と同じ (ch2 が開く)。
+         *    負なら ch2 は閉じたままなのでコマンドを出さない (read 側と同じ)。 */
+        if (dma_setup(phys, bps, 1) != 0) { phase = "dma"; break; }
         dma_armed = 1;
         phase = "cmd";
 
@@ -743,31 +733,10 @@ int fdc_init(void)
                 (u32)dma_buffer);
     }
 
-    /* I/O 0439h bit2 = 「1MB 以上への DMA アクセス禁止」で、**ノーマル
-     * モードの起動時設定は 1**。dma_buffer はカーネル BSS (1MB 超) なので、
-     * 立ったままだと READ DATA が正常終了してもデータが届かない。
-     * 落とすのは dma_setup を通る前に 1 度でよい。
-     *
-     * bit7 (プリンタ I/F 選択) を壊さないよう **必ず RMW**。
-     * **読みが FFh でも書く** — 実機は未使用ビットが 1 で読めれば正当に
-     * FFh を返し得るので、そこを避けると DMA 禁止が残る (fdc.h の注記)。 */
-    {
-        u8 v = (u8)inp(SYSPORT_DMA_CTRL);
-        u8 after = v;
-
-        if (v & SYSPORT_DMA_MASK_1MB) {
-            outp(SYSPORT_DMA_CTRL, (u8)(v & ~SYSPORT_DMA_MASK_1MB));
-            after = (u8)inp(SYSPORT_DMA_CTRL);
-            /* 読み戻しで落ちない機種でも起動は止めない ([V4]: 印を残す)。
-             * NP21/W は 0439h に in ハンドラが無く常に FFh を返すので、
-             * ここは `ff -> ff` と出る (書き込み自体は無害)。 */
-            kprintf(0x07, "[fdc] dma>1MB: 0439h %02x -> %02x\n", v, after);
-        }
-        /* 書かなかったときも記録する — 状態行は成功時にも出すので、
-         * 「bit2 が最初から落ちていた」ことも読めるようにする。 */
-        s_init_0439_before = v;
-        s_init_0439_after = after;
-    }
+    /* 0439h (1MB 超への DMA 禁止) は **dma8237_init() が起動の早い段階で
+     * 落としている** (票 §1-2)。FDC だけの都合ではなくなったので、ここは
+     * 起動時の状態行の書式を変えないための**写し**だけ。 */
+    dma_above_1mb_raw(&s_init_0439_before, &s_init_0439_after);
 
     /* 前回の取りこぼし IRQ をクリア (冪等化対策) */
     fdc_irq_fired = 0;

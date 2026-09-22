@@ -255,6 +255,26 @@ extern u32 __sqlite_end;
 #define MEM_KERNEL_RESV_START  ((MEM_SQLITE_STACK_BASE + MEM_SQLITE_STACK_SIZE + 0xFFF) & ~0xFFFUL)
 #define MEM_KERNEL_RESV_END    (MEM_STACK_GUARD - 1)  /* カーネルスタックガードの直前まで */
 
+/* ---------------------------------------------------------------------- */
+/*  DMA プール (票 docs/tasks/v3/TASK_HAL_WIRING.md §1-3、決裁 2026-09-23)  */
+/*                                                                          */
+/*  予約域の**中**に開ける 64KB の穴。上下は予約域のまま NP なので、        */
+/*  はみ出しはそこで止まる。割り込みは「そのときの CR3 (アプリの PD)」で    */
+/*  走るが、全 PD が共有するのは PDE 0 (0〜4MB) なのでここは全 PD で同じ    */
+/*  写像になる (kernel/paging.h の契約 C2)。                               */
+/*                                                                          */
+/*  **純粋な定数式**にしてあるのが肝心 — 浮動番地 (__bss_end / __sqlite_end */
+/*  由来) を混ぜると STATIC_ASSERT で固定できない。SQLite がここまで        */
+/*  育たないことは build/os32.ld の ASSERT がリンク時に止める。             */
+/*                                                                          */
+/*  0x2E8000-0x2F7FFF (64KB)。**0x2F0000 の 64KB バンク境界をまたぐ**ので、 */
+/*  dma_pool_alloc は候補ごとに dma_crosses_64k を見る ([HW2])。            */
+/*  暫定 (ユーザー決裁 2026-09-23): v3 のメモリマップ見直しで再配置し得る。 */
+/* ---------------------------------------------------------------------- */
+#define MEM_DMA_POOL_BASE      0x2E8000UL
+#define MEM_DMA_POOL_SIZE      0x010000UL   /* 64KB */
+#define MEM_DMA_POOL_END       (MEM_DMA_POOL_BASE + MEM_DMA_POOL_SIZE - 1)
+
 /* ====================================================================== */
 /*  シェル常駐帯域 (0x300000-0x3FFFFF, 1MB)                                 */
 /*  シェルはここに常駐し、子プロセスは一切触れない。PD切り替え不要。         */

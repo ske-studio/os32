@@ -342,6 +342,14 @@ extern u32 paging_memmap_bad_count;
  * SHM / VRAM / フォント表を USER へ昇格させ、期待値と合わなくなる。 */
 int paging_memmap_selftest(u32 tramp_page);
 
+/* **自己診断のための変異だけ**に使う。master の PTE 1 本の USER ビットを
+ * 立てる / 落として TLB を無効化する。`paging_set_page` を使わないのは、
+ * あちらが USER を **PDE にも伝播させる**から — 変異を戻しても PDE に
+ * USER が残り、ブートの状態が静かに変わってしまう。
+ * 戻り値 0 = 変えた / -1 = ページング無効か範囲外 (PDE 0 の中だけ)。
+ * 呼ぶのは kernel/kselftest.c の MM 検査だけで、**必ず戻すこと**。 */
+int paging_poke_user_bit(u32 virt, int set_user);
+
 /* 逆転した範囲 (start > end) を撥ねた回数。範囲 API は前から -1 を返して
  * いたが呼び側が見ていないので、空振りが成功に見えていた (票 §4 の 2)。 */
 extern u32 paging_range_reject_count;

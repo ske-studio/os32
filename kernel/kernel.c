@@ -33,6 +33,9 @@
 #include "kselftest.h"
 #include "exec.h"
 #include "pci.h"
+#include "pci_bind.h"   /* PCI の結線表 (票 TASK_HAL_WIRING §1-4) */
+#include "dma8237.h"    /* 8237 の共通部 + 0439h (同 §1-2) */
+#include "dma_pool.h"   /* DMA プール (同 §1-3) */
 #include "ide.h"
 #include "atapi.h"
 #include "vfs.h"
@@ -124,6 +127,22 @@ static char *tv_cat_dec(char *dst, int val)
     return tv_cat(dst, tmp);
 }
 
+/* ======================================================================== */
+/*  PCI の結線表 (票 docs/tasks/v3/TASK_HAL_WIRING.md §1-4)                 */
+/*                                                                          */
+/*  **いまは空**。82557 の driver は別票 (L-B) で、ここに 1 行足るだけ。    */
+/*  空でも pci_bind_all を毎回通すのは、「候補が 0 本」と「PCI が無い」を   */
+/*  同じ経路で扱うため — 実機で初めて動く経路を実機の日に初めて通す、を     */
+/*  避ける。                                                                */
+/*                                                                          */
+/*  1 件ずつのポインタ配列にしてあるのは、将来 §3 の動的読み込みが来た      */
+/*  ときに表を差し替えるのが 1 ポインタで済むから (`size` で版を確かめる)。 */
+/* ======================================================================== */
+static const struct pci_driver *const pci_drivers[] = {
+    (const struct pci_driver *)0   /* C89 は空の初期化子を許さない番兵 */
+};
+#define PCI_DRIVER_COUNT  0
+
 /* dev_findをPathDeviceValidatorとして使用するラッパー */
 static int dev_find_validator(const char *name)
 {
@@ -195,6 +214,11 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
      * **pit_init より前に 1 回だけ** 0000:0501h を読む。paging_init より
      * 前なので PG=0、低位物理がそのまま見える (票 §1-0、§4-54)。 */
     sysclk_detect();
+
+    /* 8237 の共通部。0439h bit2 (1MB 超への DMA 禁止) を落とすのはここ —
+     * **fdc_init より前**。プールもカーネルも 1MB 超にあるので、FDC だけの
+     * 都合ではない (票 §1-2)。起動行 `[dma] 0439h xx -> yy state=…` を出す。 */
+    dma8237_init();
 
     tvram_print(36, 1, "PIT...", TATTR_GREEN);
     pit_init(PIT_HZ);
@@ -489,11 +513,24 @@ void __cdecl kernel_main(u32 mem_kb, u32 boot_drive)
     /* 共有メモリ初期化 (ガードページ設定 + R/W設定) */
     shm_init();
 
+    /* DMA プール (票 §1-3)。paging_init が 0x2E8000-0x2F7FFF を present/RW で
+     * 張った後、**pci_bind_all より前**。probe が dma_pool_alloc を呼ぶ。 */
+    dma_pool_init();
+
+
     /* カーネル内プリミティブの自己診断。
      * 外部プログラムの klibc_test は newlib 側を試すだけで、カーネルが
      * 実際に使う kstring_asm / kmalloc / kprintf は一度も踏んでいない。
      * ここで境界ケースだけを実機で毎回確認する (全通過なら 1 行)。 */
     kselftest_run();
+
+    /* PCI の結線 (票 §1-4)。**pgalloc と DMA プールの初期化の後**で、
+     * pci_init() の直後ではない。**kselftest_run より後**なのは、
+     * プールの自己診断が最後に dma_pool_init() で池を作り直すから —
+     * 先に結線すると driver が取った span をそこで消してしまう。
+     * 表はいまのところ空 (82557 の driver は別票 L-B) で、ここは
+     * 「候補が 0 本でも安全に回る」ことを起動のたびに踏むための呼び出し。 */
+    pci_bind_all(pci_drivers, PCI_DRIVER_COUNT);
 
     /* FDリダイレクト初期化 (プログラムローダーより前に) */
     fd_redirect_init();
